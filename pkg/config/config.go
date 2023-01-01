@@ -101,7 +101,7 @@ var (
 		InternalConfig: PresetInternalConfig,
 	}
 	PresetInternalConfig = InternalConfig{
-		LogFile:     "/var/log/gop4d.log",
+		LogFile:     "/var/log/vinbero.log",
 		Development: false,
 	}
 )

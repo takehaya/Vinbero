@@ -25,3 +25,6 @@ autoreconf -fi
 make
 sudo make install
 sudo ldconfig
+
+# install dependenceis for bpf
+apt install -y gcc-multilib

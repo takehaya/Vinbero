@@ -18,10 +18,10 @@ It's easy to understand and easy to add functionality.It is also possible to inc
 Please raise issue with use case description if you want to any SRv6 functions not implemented yet or let's make a contribution!
 
 ## Required package
-* linux: 5.8<=x
-  * It means that the version you are testing is 5.8 or higher. Actually, if BTF supports it, I think there is no problem.
+* linux: 5.15.15<=x
+  * It means that the version you are testing is 5.15.15. Actually, if BTF supports it, I think there is no problem.
 * golang: 1.3<=x
-* clang: 9<=x
+* clang: 12
 
 ## Setup
 ```
