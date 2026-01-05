@@ -189,3 +189,5 @@ dmypy.json
 *.pcap
 objdump
 *.log
+
+out/bin
