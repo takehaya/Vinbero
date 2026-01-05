@@ -1,0 +1,38 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+version: 2
+env:
+  - CGO_ENABLED=0
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - id: vinbero
+    binary: vinbero
+    main: ./cmd/vinbero
+    goos: [ linux ]
+    goarch: [ amd64 ]
+archives:
+  - id: vinbero
+    formats:
+    - 'binary'
+    ids:
+    - vinbero
+checksum:
+  name_template: 'checksums.txt'
+snapshot:
+  version_template: "{{ incpatch .Version }}-{{ replace .Branch \"/\" \"-\" }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+release:
+  github:
+    owner: takehaya
+    name: vinbero
+  draft: false
+  disable: false
+  prerelease: auto
