@@ -59,7 +59,7 @@ test: ## Run the tests of the project
 bpf-gen: export BPF_CLANG := $(CLANG)
 bpf-gen: export BPF_CFLAGS := $(CFLAGS) $(CEXTRA_FLAGS)
 bpf-gen: ## generate ebpf code and object files
-	docker build --build-arg BPF_CLANG=${BPF_CLANG} --build-arg BPF_CFLAGS="${BPF_CFLAGS}" . --output ./pkg/coreelf -f Dockerfile.bpf
+	docker build --build-arg BPF_CLANG=${BPF_CLANG} --build-arg BPF_CFLAGS="${BPF_CFLAGS}" . --output ./pkg/bpf -f Dockerfile.bpf
 
 ## Lint:
 .PHONY: install-lint-tools
