@@ -2,7 +2,7 @@
 Vinbero is a very fast high-performance SRv6 implementation.
 
 <div style="text-align:center;">
-<img src="./design/prime.png" width="200">
+<img src="./design/logo-w.png" width="400">
 </div>
 
 The [previous implementation](
