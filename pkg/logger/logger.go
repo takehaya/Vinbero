@@ -3,8 +3,10 @@ package logger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,7 +27,7 @@ func NewLogger(cfg config.LoggerConfig) (*zap.Logger, func(context.Context) erro
 	}
 
 	var enc zapcore.Encoder
-	if cfg.JSON {
+	if strings.ToLower(cfg.Format) == "json" {
 		enc = zapcore.NewJSONEncoder(encCfg)
 	} else {
 		if cfg.NoColor || runtime.GOOS == "windows" {
@@ -36,17 +38,12 @@ func NewLogger(cfg config.LoggerConfig) (*zap.Logger, func(context.Context) erro
 		enc = zapcore.NewConsoleEncoder(encCfg)
 	}
 
-	// Output logs to stderr for CLI
+	level, err := parseLogLevel(cfg.Level)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	ws := zapcore.AddSync(os.Stderr)
-
-	level := zapcore.InfoLevel
-	if cfg.Quiet {
-		level = zapcore.WarnLevel
-	}
-	if cfg.Verbose > 0 && !cfg.Quiet {
-		level = zapcore.DebugLevel
-	}
-
 	core := zapcore.NewCore(enc, ws, level)
 
 	opts := []zap.Option{
@@ -61,7 +58,6 @@ func NewLogger(cfg config.LoggerConfig) (*zap.Logger, func(context.Context) erro
 
 	cleanup := func(_ context.Context) error {
 		if err := lg.Sync(); err != nil {
-			// Ignore Sync errors for stdout/stderr as they often result in EINVAL etc. in many environments
 			if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EBADF) {
 				return nil
 			}
@@ -70,4 +66,19 @@ func NewLogger(cfg config.LoggerConfig) (*zap.Logger, func(context.Context) erro
 		return nil
 	}
 	return lg, cleanup, nil
+}
+
+func parseLogLevel(level string) (zapcore.Level, error) {
+	switch strings.ToLower(level) {
+	case "debug":
+		return zapcore.DebugLevel, nil
+	case "info", "":
+		return zapcore.InfoLevel, nil
+	case "warn", "warning":
+		return zapcore.WarnLevel, nil
+	case "error":
+		return zapcore.ErrorLevel, nil
+	default:
+		return zapcore.InfoLevel, fmt.Errorf("invalid log level: %s", level)
+	}
 }

@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// Srv6LocalFlavor represents SRv6 local flavor types
+enum Srv6LocalFlavor {
+  SRV6_LOCAL_FLAVOR_UNSPECIFIED = 0;
+  SRV6_LOCAL_FLAVOR_NONE = 1;
+  SRV6_LOCAL_FLAVOR_PSP = 2; // Penultimate Segment Pop
+  SRV6_LOCAL_FLAVOR_USP = 3; // Ultimate Segment Pop
+  SRV6_LOCAL_FLAVOR_USD = 4; // Ultimate Segment Decapsulation
+}
+
+// Srv6LocalAction represents SRv6 Endpoint action types
+enum Srv6LocalAction {
+  SRV6_LOCAL_ACTION_UNSPECIFIED = 0;
+  SRV6_LOCAL_ACTION_END = 1; // End
+  SRV6_LOCAL_ACTION_END_X = 2; // End.X
+  SRV6_LOCAL_ACTION_END_T = 3; // End.T
+  SRV6_LOCAL_ACTION_END_DX2 = 4; // End.DX2
+  SRV6_LOCAL_ACTION_END_DX6 = 5; // End.DX6
+  SRV6_LOCAL_ACTION_END_DX4 = 6; // End.DX4
+  SRV6_LOCAL_ACTION_END_DT6 = 7; // End.DT6
+  SRV6_LOCAL_ACTION_END_DT4 = 8; // End.DT4
+  SRV6_LOCAL_ACTION_END_DT46 = 9; // End.DT46
+  SRV6_LOCAL_ACTION_END_B6 = 10; // End.B6
+  SRV6_LOCAL_ACTION_END_B6_ENCAPS = 11; // End.B6.Encaps
+  SRV6_LOCAL_ACTION_END_BM = 12; // End.BM
+  SRV6_LOCAL_ACTION_END_S = 13; // End.S
+  SRV6_LOCAL_ACTION_END_AS = 14; // End.AS
+  SRV6_LOCAL_ACTION_END_AM = 15; // End.AM
+  SRV6_LOCAL_ACTION_END_BPF = 16; // End.BPF
+}
+
+// Srv6EncapMode represents SRv6 encapsulation modes for Transit behavior
+enum Srv6EncapMode {
+  SRV6_ENCAP_MODE_UNSPECIFIED = 0;
+  SRV6_ENCAP_MODE_INLINE = 1; // T.Insert
+  SRV6_ENCAP_MODE_ENCAP = 2; // T.Encaps
+  SRV6_ENCAP_MODE_L2ENCAP = 3; // T.Encaps.L2
+  SRV6_ENCAP_MODE_ENCAP_T_M_GTP6_D = 4; // T.M.GTP6.D
+  SRV6_ENCAP_MODE_ENCAP_T_M_GTP6_D_DI = 5; // T.M.GTP6.D.Di
+  SRV6_ENCAP_MODE_ENCAP_H_M_GTP4_D = 6; // H.M.GTP4.D
+}
+
+// OperationError represents an error that occurred during a bulk operation
+message OperationError {
+  string trigger_prefix = 1; // The trigger prefix that failed
+  string reason = 2; // The reason for the failure
+}

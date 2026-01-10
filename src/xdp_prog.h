@@ -12,14 +12,43 @@
 #define DEBUG_PRINT(fmt, ...) (void)0
 #endif
 
+#define MAX_SEGMENTS 10
+#define IPV4_ADDR_LEN 4
+#define IPV6_ADDR_LEN 16
 
-// https://github.com/cloudflare/xdpcap
-// struct bpf_map_def SEC("maps") xdpcap_hook = XDPCAP_HOOK();
-struct xdpcap_hook {
-    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, sizeof(int));
-    __uint(max_entries, 5);
-} xdpcap_hook SEC(".maps");
+// LPM key for IPv4 prefix matching
+struct lpm_key_v4 {
+    __u32 prefixlen;              // Prefix length (0-32)
+    __u8 addr[IPV4_ADDR_LEN];     // IPv4 address (4 bytes)
+} __attribute__((packed));
+
+// LPM key for IPv6 prefix matching
+struct lpm_key_v6 {
+    __u32 prefixlen;              // Prefix length (0-128)
+    __u8 addr[IPV6_ADDR_LEN];     // IPv6 address (16 bytes)
+} __attribute__((packed));
+
+
+// SID Function entry (for SRv6 Endpoint functions)
+struct sid_function_entry {
+    __u8 action;                  // srv6_local_action enum
+    __u8 flavor;                  // srv6_local_flavor enum
+    __u8 src_addr[IPV6_ADDR_LEN]; // actionSrcAddr
+    __u8 dst_addr[IPV6_ADDR_LEN]; // actionDstAddr
+    __u8 nexthop[IPV6_ADDR_LEN];  // Next hop address
+    __u8 arg_src_offset;          // Bit offset for source in SID Args
+    __u8 arg_dst_offset;          // Bit offset for destination in SID Args
+    __u8 _pad[2];                 // Padding for alignment
+} __attribute__((packed));
+
+// Transit entry (for T.Encaps, T.Insert, etc.)
+struct transit_entry {
+    __u8 mode;                              // srv6_encap_mode enum
+    __u8 num_segments;                      // Number of segments (1-10)
+    __u8 _pad[2];                           // Padding for alignment
+    __u8 src_addr[IPV6_ADDR_LEN];           // Encapsulated source address
+    __u8 dst_addr[IPV6_ADDR_LEN];           // Encapsulated destination address
+    __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list (up to 10 segments)
+} __attribute__((packed));
 
 #endif // XDP_PROG_H

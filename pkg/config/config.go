@@ -16,36 +16,20 @@ type Config struct {
 }
 
 type SettingConfig struct {
-	Functions []FunctionsConfig `yaml:"functions,omitempty"`
-	Transitv4 []Transitv4Config `yaml:"transitv4,omitempty"`
-	Transitv6 []Transitv6Config `yaml:"transitv6,omitempty"`
+	Entries EntriesConfig `yaml:"entries,omitempty"`
 }
 
-type FunctionsConfig struct {
-	Action      string `yaml:"action,omitempty"`
-	TriggerAddr string `yaml:"triggerAddr,omitempty"`
-	SAddr       string `yaml:"actionSrcAddr,omitempty"`
-	DAddr       string `yaml:"actionDstAddr,omitempty"`
-	Nexthop     string `yaml:"nexthop,omitempty"`
-	Flaver      string `yaml:"flaver,omitempty"`
-	V4AddrSPos  string `yaml:"v4AddrSPos,omitempty"`
-	V4AddrDPos  string `yaml:"v4AddrDPos,omitempty"`
+// EntriesConfig holds the capacity settings for each entry type
+type EntriesConfig struct {
+	SidFunction EntryCapacityConfig `yaml:"sid_function,omitempty"`
+	Transitv4   EntryCapacityConfig `yaml:"transitv4,omitempty"`
+	Transitv6   EntryCapacityConfig `yaml:"transitv6,omitempty"`
+	MaxSegments int                 `yaml:"max_segments,omitempty" default:"10"`
 }
 
-type Transitv4Config struct {
-	Action      string   `yaml:"action,omitempty"`
-	TriggerAddr string   `yaml:"triggerAddr,omitempty"`
-	SAddr       string   `yaml:"actionSrcAddr,omitempty"`
-	DAddr       string   `yaml:"actionDstAddr,omitempty"`
-	Segments    []string `yaml:"segments,omitempty"`
-}
-
-type Transitv6Config struct {
-	Action      string   `yaml:"action,omitempty"`
-	TriggerAddr string   `yaml:"triggerAddr,omitempty"`
-	SAddr       string   `yaml:"actionSrcAddr,omitempty"`
-	DAddr       string   `yaml:"actionDstAddr,omitempty"`
-	Segments    []string `yaml:"segments,omitempty"`
+// EntryCapacityConfig holds capacity setting for a single entry type
+type EntryCapacityConfig struct {
+	Capacity int `yaml:"capacity,omitempty" default:"1024"`
 }
 
 // LoadFile parses the given YAML file into a Config.

@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+import "vinbero/v1/enums.proto";
+
+service SidFunctionService {
+  rpc SidFunctionCreate(SidFunctionCreateRequest) returns (SidFunctionCreateResponse);
+  rpc SidFunctionDelete(SidFunctionDeleteRequest) returns (SidFunctionDeleteResponse);
+  rpc SidFunctionList(SidFunctionListRequest) returns (SidFunctionListResponse);
+  rpc SidFunctionGet(SidFunctionGetRequest) returns (SidFunctionGetResponse);
+}
+
+// SidFunction represents SRv6 Endpoint functions (End, End.X, End.DX4, End.DX6, etc.)
+message SidFunction {
+  Srv6LocalAction action = 1;
+  string trigger_prefix = 2; // CIDR format (e.g., fd00::1/128)
+  string src_addr = 3; // actionSrcAddr
+  string dst_addr = 4; // actionDstAddr
+  string nexthop = 5;
+  Srv6LocalFlavor flavor = 6; // PSP, USP, USD, etc.
+  uint32 arg_src_offset = 7; // Bit offset for source in SID Args
+  uint32 arg_dst_offset = 8; // Bit offset for destination in SID Args
+}
+
+message SidFunctionCreateRequest {
+  repeated SidFunction sid_functions = 1;
+}
+message SidFunctionCreateResponse {
+  repeated SidFunction created = 1;
+  repeated OperationError errors = 2;
+}
+
+message SidFunctionDeleteRequest {
+  repeated string trigger_prefixes = 1;
+}
+message SidFunctionDeleteResponse {
+  repeated string deleted_trigger_prefixes = 1;
+  repeated OperationError errors = 2;
+}
+
+message SidFunctionListRequest {}
+message SidFunctionListResponse {
+  repeated SidFunction sid_functions = 1;
+}
+
+message SidFunctionGetRequest {
+  string trigger_prefix = 1;
+}
+message SidFunctionGetResponse {
+  SidFunction sid_function = 1;
+}
+
+
+service Transitv4Service {
+  rpc Transitv4Create(Transitv4CreateRequest) returns (Transitv4CreateResponse);
+  rpc Transitv4Delete(Transitv4DeleteRequest) returns (Transitv4DeleteResponse);
+  rpc Transitv4List(Transitv4ListRequest) returns (Transitv4ListResponse);
+  rpc Transitv4Get(Transitv4GetRequest) returns (Transitv4GetResponse);
+}
+// Transitv4 represents Transit behavior for IPv4 packets
+message Transitv4 {
+  Srv6EncapMode mode = 1;
+  string trigger_prefix = 2; // CIDR format (e.g., 10.0.0.0/24)
+  string src_addr = 3;
+  string dst_addr = 4;
+  repeated string segments = 5;
+}
+message Transitv4CreateRequest {
+  repeated Transitv4 transitv4s = 1;
+}
+message Transitv4CreateResponse {
+  repeated Transitv4 created = 1;
+  repeated OperationError errors = 2;
+}
+
+message Transitv4DeleteRequest {
+  repeated string trigger_prefixes = 1;
+}
+message Transitv4DeleteResponse {
+  repeated string deleted_trigger_prefixes = 1;
+  repeated OperationError errors = 2;
+}
+
+message Transitv4ListRequest {}
+message Transitv4ListResponse {
+  repeated Transitv4 transitv4s = 1;
+}
+
+message Transitv4GetRequest {
+  string trigger_prefix = 1;
+}
+message Transitv4GetResponse {
+  Transitv4 transitv4 = 1;
+}
+
+service Transitv6Service {
+  rpc Transitv6Create(Transitv6CreateRequest) returns (Transitv6CreateResponse);
+  rpc Transitv6Delete(Transitv6DeleteRequest) returns (Transitv6DeleteResponse);
+  rpc Transitv6List(Transitv6ListRequest) returns (Transitv6ListResponse);
+  rpc Transitv6Get(Transitv6GetRequest) returns (Transitv6GetResponse);
+}
+
+// Transitv6 represents Transit behavior for IPv6 packets
+message Transitv6 {
+  Srv6EncapMode mode = 1;
+  string trigger_prefix = 2; // CIDR format (e.g., 2001:db8::/32)
+  string src_addr = 3;
+  string dst_addr = 4;
+  repeated string segments = 5;
+}
+
+message Transitv6CreateRequest {
+  repeated Transitv6 transitv6s = 1;
+}
+message Transitv6CreateResponse {
+  repeated Transitv6 created = 1;
+  repeated OperationError errors = 2;
+}
+
+message Transitv6DeleteRequest {
+  repeated string trigger_prefixes = 1;
+}
+message Transitv6DeleteResponse {
+  repeated string deleted_trigger_prefixes = 1;
+  repeated OperationError errors = 2;
+}
+
+message Transitv6ListRequest {}
+message Transitv6ListResponse {
+  repeated Transitv6 transitv6s = 1;
+}
+
+message Transitv6GetRequest {
+  string trigger_prefix = 1;
+}
+message Transitv6GetResponse {
+  Transitv6 transitv6 = 1;
+}
