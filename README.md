@@ -2,14 +2,17 @@
 Vinbero is a very fast high-performance SRv6 implementation.
 
 <div style="text-align:center;">
-<img src="./design/prime.png" style="height:auto;width:60vw;">
+<img src="./design/prime.png" width="200">
 </div>
 
 The [previous implementation](
 https://github.com/takehaya/Vinbero-legacy/tree/master) has become outdated, so we decided to reimplement it with a new codebase.
 
 ## Build
-TBA
+```shell
+make bpf-gen
+make build
+```
 
 ## Run
 TBA
