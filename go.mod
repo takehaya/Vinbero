@@ -1,6 +1,6 @@
 module github.com/takehaya/vinbero
 
-go 1.25.2
+go 1.25.5
 
 require (
 	connectrpc.com/connect v1.18.1
