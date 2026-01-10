@@ -13,3 +13,12 @@ type XdpMd struct {
 	RxQueueIndex   uint32
 	EgressIfindex  uint32
 }
+
+const (
+	// XDP action codes
+	XDP_ABORTED  = 0
+	XDP_DROP     = 1
+	XDP_PASS     = 2
+	XDP_TX       = 3
+	XDP_REDIRECT = 4
+)

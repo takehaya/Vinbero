@@ -12,6 +12,22 @@
 #define DEBUG_PRINT(fmt, ...) (void)0
 #endif
 
+// AF_INET6 is not available in BPF programs, define it manually
+#ifndef AF_INET6
+#define AF_INET6 10
+#endif
+
+// Boundary check macro
+#define CHECK_BOUND(ptr, end, size) \
+    if ((void *)(ptr) + (size) > (void *)(end)) return XDP_PASS
+
+// Advance pointer with boundary check
+#define ADVANCE_PTR(ptr, end, size, ret) \
+    do { \
+        if ((void *)(ptr) + (size) > (void *)(end)) return ret; \
+        ptr = (void *)(ptr) + (size); \
+    } while (0)
+
 #define MAX_SEGMENTS 10
 #define IPV4_ADDR_LEN 4
 #define IPV6_ADDR_LEN 16
