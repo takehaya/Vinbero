@@ -86,7 +86,7 @@ func buildSRv6Packet(srcIP, dstIP net.IP, segments []net.IP, segmentsLeft uint8)
 		ComputeChecksums: true,
 	}
 
-	icmp.SetNetworkLayerForChecksum(ip6)
+	_ = icmp.SetNetworkLayerForChecksum(ip6)
 	if err := gopacket.SerializeLayers(buf, opts,
 		eth, ip6, srv6, icmp, icmpEcho, gopacket.Payload(payload)); err != nil {
 		return nil, err
@@ -116,7 +116,7 @@ func buildSimpleIPv6Packet(srcIP, dstIP net.IP) ([]byte, error) {
 		ComputeChecksums: true,
 	}
 
-	icmp.SetNetworkLayerForChecksum(ip6)
+	_ = icmp.SetNetworkLayerForChecksum(ip6)
 	if err := gopacket.SerializeLayers(buf, opts, eth, ip6, icmp, icmpEcho, gopacket.Payload(payload)); err != nil {
 		return nil, err
 	}
@@ -320,4 +320,3 @@ func TestXDPProgNoSIDEntry(t *testing.T) {
 		t.Errorf("Expected XDP_PASS for packet without SID entry, got %d", ret)
 	}
 }
-

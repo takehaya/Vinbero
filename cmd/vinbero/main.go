@@ -64,7 +64,11 @@ func run(cliCtx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize logger: %w", err)
 	}
-	defer cleanup(context.Background())
+	defer func() {
+		if err := cleanup(context.Background()); err != nil {
+			lg.Warn("failed to cleanup logger", zap.Error(err))
+		}
+	}()
 
 	vin, err := vinbero.NewVinbero(cfg, lg)
 	if err != nil {
