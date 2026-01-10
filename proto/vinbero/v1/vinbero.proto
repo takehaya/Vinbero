@@ -2,9 +2,9 @@ syntax = "proto3";
 
 package vinbero.v1;
 
-option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
-
 import "vinbero/v1/enums.proto";
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 
 service SidFunctionService {
   rpc SidFunctionCreate(SidFunctionCreateRequest) returns (SidFunctionCreateResponse);
@@ -53,13 +53,13 @@ message SidFunctionGetResponse {
   SidFunction sid_function = 1;
 }
 
-
 service Transitv4Service {
   rpc Transitv4Create(Transitv4CreateRequest) returns (Transitv4CreateResponse);
   rpc Transitv4Delete(Transitv4DeleteRequest) returns (Transitv4DeleteResponse);
   rpc Transitv4List(Transitv4ListRequest) returns (Transitv4ListResponse);
   rpc Transitv4Get(Transitv4GetRequest) returns (Transitv4GetResponse);
 }
+
 // Transitv4 represents Transit behavior for IPv4 packets
 message Transitv4 {
   Srv6EncapMode mode = 1;

@@ -75,12 +75,6 @@ func ParseIPv6(addr string) ([IPv6AddrLen]uint8, error) {
 	return result, nil
 }
 
-// ===== Generic LPM Key Interface =====
-
-type lpmKey interface {
-	LpmKeyV4 | LpmKeyV6
-}
-
 // ===== SID Function Map Operations =====
 
 // CreateSidFunction adds a SID function entry to the map
