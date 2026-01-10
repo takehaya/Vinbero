@@ -8,19 +8,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/takehaya/vinbero/pkg/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-type Config struct {
-	JSON      bool `default:"false"` // if true, use JSON format
-	NoColor   bool `default:"false"` // if true, disable color output
-	Verbose   int  `default:"0"`     // 0 is Info level, 1 or higher is Debug
-	Quiet     bool `default:"false"` // if true, raise to Warn level or higher
-	AddCaller bool `default:"false"` // if true, add caller information to logs
-}
-
-func NewLogger(cfg Config) (*zap.Logger, func(context.Context) error, error) {
+func NewLogger(cfg config.LoggerConfig) (*zap.Logger, func(context.Context) error, error) {
 	encCfg := zapcore.EncoderConfig{
 		TimeKey:        "ts",
 		LevelKey:       "level",

@@ -17,8 +17,8 @@
 
 char _license[] SEC("license") = "GPL";
 
-SEC("xdp")
-int xdp_pass_dummy(struct xdp_md *ctx)
+SEC("xdp_vinbero_main")
+int vinbero_main(struct xdp_md *ctx)
 {
     return XDP_PASS;
 };

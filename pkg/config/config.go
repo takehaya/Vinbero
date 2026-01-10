@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 
+	"github.com/mcuadros/go-defaults"
 	"gopkg.in/yaml.v3"
 )
 
@@ -12,12 +13,6 @@ type Config struct {
 	Setting        SettingConfig  `yaml:"settings,omitempty"`
 	Original       string
 	Configpath     string
-}
-
-type InternalConfig struct {
-	LogFile     string   `yaml:"logfile,omitempty"`
-	Development bool     `yaml:"development,omitempty"`
-	Devices     []string `yaml:"devices,omitempty"`
 }
 
 type SettingConfig struct {
@@ -69,13 +64,15 @@ func LoadFile(filename string) (*Config, error) {
 
 // Load parses the YAML input s into a Config.
 func Load(s string) (*Config, error) {
-	cfg := &Config{}
-	err := yaml.Unmarshal([]byte(s), cfg)
+	cfg := Config{}
+	defaults.SetDefaults(&cfg)
+
+	err := yaml.Unmarshal([]byte(s), &cfg)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Original = s
-	return cfg, nil
+	return &cfg, nil
 }
 func FileExists(filename string) bool {
 	_, err := os.Stat(filename)

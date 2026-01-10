@@ -6,18 +6,18 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/pkg/errors"
+	"github.com/takehaya/vinbero/pkg/config"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ./src -I /usr/include/x86_64-linux-gnu
 
-func ReadCollection(constants map[string]interface{}, mapSize uint32) (*BpfObjects, error) {
+func ReadCollection(constants map[string]interface{}, cfg *config.Config) (*BpfObjects, error) {
 	// Remove memory limit for BPF
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("failed to remove memory limit: %w", err)
 	}
 
 	objs := &BpfObjects{}
-	// TODO: BPF log level remove hardcoding. yaml in config?
 	spec, err := LoadBpf()
 	if err != nil {
 		return nil, fmt.Errorf("fail to load bpf spec: %w", err)
@@ -44,33 +44,4 @@ func ReadCollection(constants map[string]interface{}, mapSize uint32) (*BpfObjec
 	}
 
 	return objs, nil
-}
-
-func LoadDummyProgram() (*ebpf.Program, func(), error) {
-	// Remove memory limit for BPF
-	if err := rlimit.RemoveMemlock(); err != nil {
-		return nil, nil, fmt.Errorf("failed to remove memory limit: %w", err)
-	}
-
-	spec, err := LoadBpf()
-	if err != nil {
-		return nil, nil, fmt.Errorf("fail to load bpf spec: %w", err)
-	}
-
-	// Load only the dummy program
-	progSpec := spec.Programs["xdp_pass_dummy"]
-	if progSpec == nil {
-		return nil, nil, fmt.Errorf("xdp_pass_dummy program not found")
-	}
-
-	prog, err := ebpf.NewProgram(progSpec)
-	if err != nil {
-		return nil, nil, fmt.Errorf("fail to load xdp_pass_dummy: %w", err)
-	}
-
-	cleanup := func() {
-		prog.Close()
-	}
-
-	return prog, cleanup, nil
 }
