@@ -50,4 +50,29 @@ enum srv6_encap_mode {
     SRV6_ENCAP_MODE_ENCAP_H_M_GTP4_D = 6,    // H.M.GTP4.D
 };
 
+// Protocol numbers
+#define IPPROTO_ROUTING 43
+
+// Routing header types
+#define IPV6_SRCRT_TYPE_4 4  // Segment Routing
+
+// IPv6 Segment Routing Header (SRH)
+// RFC 8754 Section 2
+struct ipv6_sr_hdr {
+    __u8 nexthdr;         // Next Header
+    __u8 hdrlen;          // Header Extension Length (in 8-octet units, not including first 8)
+    __u8 type;            // Routing Type = 4 (Segment Routing)
+    __u8 segments_left;   // Segments Left
+    __u8 first_segment;   // First Segment (index of the first segment)
+    __u8 flags;           // Flags
+    __be16 tag;           // Tag
+    struct in6_addr segments[0]; // Segment list (variable length)
+} __attribute__((packed));
+
+// SRH Flags (RFC 8754)
+#define SR6_FLAG1_PROTECTED (1 << 6)
+#define SR6_FLAG1_OAM       (1 << 5)
+#define SR6_FLAG1_ALERT     (1 << 4)
+#define SR6_FLAG1_HMAC      (1 << 3)
+
 #endif // SRV6_H

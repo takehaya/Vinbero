@@ -1,5 +1,5 @@
 ---
-name: test
+name: Test
 
 on:
   push:
@@ -8,41 +8,138 @@ on:
       - '**.go'
       - '**.h'
       - '**.c'
+      - 'examples/**'
+      - 'src/**'
+      - 'pkg/**'
+      - 'cmd/**'
+      - '.github/workflows/test.yaml'
+  pull_request:
+    paths:
+      - 'go.*'
+      - '**.go'
+      - '**.h'
+      - '**.c'
+      - 'examples/**'
+      - 'src/**'
+      - 'pkg/**'
+      - 'cmd/**'
       - '.github/workflows/test.yaml'
 
 jobs:
   build:
-    permissions:
-      contents: 'read'
-      id-token: 'write'
+    name: Build
     runs-on: ubuntu-latest
-    steps:
-      - name: check out
-        uses: actions/checkout@v5
-      - name: setup go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: ./go.mod
-          cache: false
-      - name: install make
-        run: sudo apt-get update && sudo apt-get install -y make
-      - name: install build tools
-        run: make install-build-tools
-      - name: test buildable
-        run: make build
-      - name: test pass init() phase of all packages
-        run: make test-runnable
-  test:
     permissions:
-      contents: 'read'
-      id-token: 'write'
-    runs-on: ubuntu-latest
+      contents: read
     steps:
-      - name: check out
+      - name: Check out code
         uses: actions/checkout@v4
-      - name: setup go
+
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version-file: ./go.mod
-      - name: go test
+          cache: true
+
+      - name: Cache Go build tools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: ${{ runner.os }}-go-tools-${{ hashFiles('go.sum', 'scripts/install_build_tools.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-go-tools-
+
+      - name: Install build tools
+        run: make install-build-tools
+
+      - name: Build Vinbero
+        run: make build
+
+      - name: Test pass init() phase of all packages
+        run: make test-runnable
+
+      - name: Upload Vinbero binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: vinbero-binary
+          path: out/bin/vinbero
+          retention-days: 1
+
+  unit-test:
+    name: Unit Test
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ./go.mod
+          cache: true
+
+      - name: Run unit tests
         run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v ./...
+
+  integration-test:
+    name: Integration Test - ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - end
+          # Add more examples as they are created:
+          # - end-dx4
+          # - end-dx6
+          # - transit-v4
+          # - transit-v6
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Download Vinbero binary
+        uses: actions/download-artifact@v4
+        with:
+          name: vinbero-binary
+          path: out/bin/
+
+      - name: Make binary executable
+        run: chmod +x out/bin/vinbero
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            iproute2 \
+            iputils-ping \
+            curl
+
+      - name: Setup test environment
+        working-directory: examples/${{ matrix.example }}
+        run: sudo ./setup.sh
+
+      - name: Run tests
+        working-directory: examples/${{ matrix.example }}
+        run: sudo ./test.sh
+
+      - name: Cleanup
+        if: always()
+        working-directory: examples/${{ matrix.example }}
+        run: sudo ./teardown.sh || true
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Vinbero logs ==="
+          cat /tmp/vinbero_test.log 2>/dev/null || echo "No log file found"
+          echo "=== Network namespaces ==="
+          ip netns list || true
+          echo "=== Kernel messages ==="
+          sudo dmesg | tail -50 || true
