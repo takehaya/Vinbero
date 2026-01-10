@@ -54,7 +54,7 @@ type BpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfProgramSpecs struct {
-	XdpPassDummy *ebpf.ProgramSpec `ebpf:"xdp_pass_dummy"`
+	VinberoMain *ebpf.ProgramSpec `ebpf:"vinbero_main"`
 }
 
 // BpfMapSpecs contains maps before they are loaded into the kernel.
@@ -109,12 +109,12 @@ type BpfVariables struct {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfPrograms struct {
-	XdpPassDummy *ebpf.Program `ebpf:"xdp_pass_dummy"`
+	VinberoMain *ebpf.Program `ebpf:"vinbero_main"`
 }
 
 func (p *BpfPrograms) Close() error {
 	return _BpfClose(
-		p.XdpPassDummy,
+		p.VinberoMain,
 	)
 }
 
