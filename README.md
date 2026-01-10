@@ -10,6 +10,7 @@ https://github.com/takehaya/Vinbero-legacy/tree/master) has become outdated, so 
 
 ## Build
 ```shell
+make protobuf-gen
 make bpf-gen
 make build
 ```

@@ -53,9 +53,16 @@ test-runnable: ## check no panic at init()
 test: ## Run the tests of the project
 	$(GOTEST) -v -exec sudo -race ./... $(OUTPUT_OPTIONS)
 
-## Golang:
-.PHONY: bpf-gen
+## Generate:
+.PHONY: protobuf-gen
+protobuf-gen: ## generate protobuf
+	./scripts/generate-proto.sh
 
+.PHONY: go-gen
+go-gen: ## generate go code
+	go generate ./...
+
+.PHONY: bpf-gen
 bpf-gen: export BPF_CLANG := $(CLANG)
 bpf-gen: export BPF_CFLAGS := $(CFLAGS) $(CEXTRA_FLAGS)
 bpf-gen: ## generate ebpf code and object files
