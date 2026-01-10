@@ -1,0 +1,129 @@
+pre-commit:
+  parallel: true
+  commands:
+    check-executables-have-shebangs:
+      glob: "**/*"
+      run: |
+        for file in {staged_files}; do
+          # Skip non-text files
+          if ! file --mime-type "$file" | grep -q "text/"; then
+            continue
+          fi
+          if [ -x "$file" ] && [ -f "$file" ] && ! grep -q '^#!' "$file"; then
+            echo "Executable without shebang: $file"
+            exit 1
+          fi
+        done
+
+    trailing-whitespace:
+      glob: "**/*"
+      exclude:
+        - "*.md"
+        - "*.patch"
+      run: |
+        for file in {staged_files}; do
+          # Skip non-text files
+          if ! file --mime-type "$file" | grep -q "text/"; then
+            continue
+          fi
+          if grep -q '[[:space:]]$' "$file"; then
+            sed -i 's/[[:space:]]*$//' "$file"
+            echo "Fixed trailing whitespace in: $file"
+          fi
+        done
+
+    yamllint:
+      glob: "**/*.{yml,yaml}"
+      run: yamllint -f colored {staged_files}
+
+    check-json:
+      glob: "**/*.json"
+      exclude:
+        - ".vscode/**.json"
+      run: |
+        failed=0
+        for f in {staged_files}; do
+          if ! jq -e empty "$f" >/dev/null 2>&1; then
+            echo "JSON parse error in $f"
+            jq empty "$f"
+            failed=1
+          fi
+        done
+        exit $failed
+
+    check-toml:
+      glob: "**/*.toml"
+      run: taplo check {staged_files}
+
+    mixed-line-ending:
+      glob: "**/*"
+      run: |
+        for file in {staged_files}; do
+          # Skip non-text files
+          if ! file --mime-type "$file" | grep -q "text/"; then
+            continue
+          fi
+          dos2unix -q "$file"
+        done
+
+    buf-format:
+      glob: "**/*.proto"
+      run: |
+        BUF_ROOT=./proto
+        ARGS=""
+        for f in {staged_files}; do
+          [ -f "$f" ] || continue
+          ARGS="$ARGS --path $f"
+        done
+        [ -n "$ARGS" ] && buf format -w "$BUF_ROOT" $ARGS
+
+    buf-lint:
+      glob: "**/*.proto"
+      run: |
+        BUF_ROOT=./proto
+        ARGS=""
+        for f in {staged_files}; do
+          [ -f "$f" ] || continue
+          ARGS="$ARGS --path $f"
+        done
+        [ -n "$ARGS" ] && buf lint "$BUF_ROOT" $ARGS
+
+    golangci-lint:
+      glob: "**/*.go"
+      run: golangci-lint run --fix
+
+    ansible-lint:
+      glob: "{scripts/share_server,ansible}/**/*.{yml,yaml}"
+      run: ansible-lint --fix -x role-name {staged_files}
+
+commit-msg:
+  commands:
+    conventional-check:
+      run: |
+        if ! grep -qE '^(hotfix|feat|fix|docs|style|refactor|perf|test|chore|ci)((\([^\)]*\))|)!?:\s+' {1}; then
+          echo "Commit message must be conventional"
+          echo "Format: <type>(<scope>): <description>"
+          exit 1
+        fi
+
+post-checkout:
+  commands:
+    first-commit:
+      run: |
+        previous_head={1}
+        new_head={2}
+        branch_flag={3}
+        if [ "$branch_flag" != "1" ] || [ "$previous_head" != "$new_head" ]; then
+          exit 0
+        fi
+        current_branch=$(git branch --show-current)
+        lock_path=$(git rev-parse --git-path index.lock)
+        i=0
+        while [ -e "$lock_path" ] && [ $i -lt 50 ]; do
+          sleep 0.1
+          i=$((i+1))
+        done
+        LEFTHOOK=0 git commit --allow-empty -m "first commit for $current_branch"
+
+# Colors and output
+colors: true
