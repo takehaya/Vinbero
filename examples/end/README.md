@@ -56,12 +56,12 @@ sudo ip netns exec router2 curl -X POST http://127.0.0.1:8082/vinbero.v1.SidFunc
   -d '{
     "sid_functions": [
       {
-        "trigger_prefix": "fc00:0002:0000:0000:0000:0000:0000:0001",
+        "trigger_prefix": "fc00:2::1/128",
         "action": "SRV6_LOCAL_ACTION_END",
         "flavor": "SRV6_LOCAL_FLAVOR_NONE"
       },
       {
-        "trigger_prefix": "fc00:0002:0000:0000:0000:0000:0000:0002",
+        "trigger_prefix": "fc00:2::2/128",
         "action": "SRV6_LOCAL_ACTION_END",
         "flavor": "SRV6_LOCAL_FLAVOR_NONE"
       }

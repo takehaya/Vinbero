@@ -41,6 +41,14 @@ jobs:
           go-version-file: ./go.mod
           cache: true
 
+      - name: Cache Go build tools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: ${{ runner.os }}-go-tools-${{ hashFiles('go.sum', 'scripts/install_build_tools.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-go-tools-
+
       - name: Install build tools
         run: make install-build-tools
 
