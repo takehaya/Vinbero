@@ -8,9 +8,44 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type BpfLpmKeyV4 struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Addr      [4]uint8
+}
+
+type BpfLpmKeyV6 struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Addr      [16]uint8
+}
+
+type BpfSidFunctionEntry struct {
+	_            structs.HostLayout
+	Action       uint8
+	Flavor       uint8
+	SrcAddr      [16]uint8
+	DstAddr      [16]uint8
+	Nexthop      [16]uint8
+	ArgSrcOffset uint8
+	ArgDstOffset uint8
+	Pad          [2]uint8
+}
+
+type BpfTransitEntry struct {
+	_           structs.HostLayout
+	Mode        uint8
+	NumSegments uint8
+	Pad         [2]uint8
+	SrcAddr     [16]uint8
+	DstAddr     [16]uint8
+	Segments    [10][16]uint8
+}
 
 // LoadBpf returns the embedded CollectionSpec for Bpf.
 func LoadBpf() (*ebpf.CollectionSpec, error) {
@@ -61,7 +96,10 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
-	XdpcapHook *ebpf.MapSpec `ebpf:"xdpcap_hook"`
+	SidFunctionMap *ebpf.MapSpec `ebpf:"sid_function_map"`
+	TransitV4Map   *ebpf.MapSpec `ebpf:"transit_v4_map"`
+	TransitV6Map   *ebpf.MapSpec `ebpf:"transit_v6_map"`
+	XdpcapHook     *ebpf.MapSpec `ebpf:"xdpcap_hook"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -90,11 +128,17 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
-	XdpcapHook *ebpf.Map `ebpf:"xdpcap_hook"`
+	SidFunctionMap *ebpf.Map `ebpf:"sid_function_map"`
+	TransitV4Map   *ebpf.Map `ebpf:"transit_v4_map"`
+	TransitV6Map   *ebpf.Map `ebpf:"transit_v6_map"`
+	XdpcapHook     *ebpf.Map `ebpf:"xdpcap_hook"`
 }
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.SidFunctionMap,
+		m.TransitV4Map,
+		m.TransitV6Map,
 		m.XdpcapHook,
 	)
 }

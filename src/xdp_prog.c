@@ -13,7 +13,7 @@
 #include <string.h>
 
 #include "xdp_prog.h"
-#include "xdp_utils.h"
+#include "xdp_map.h"
 
 char _license[] SEC("license") = "GPL";
 

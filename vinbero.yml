@@ -1,0 +1,25 @@
+internal:
+  logfile: "./vinbero.log"
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    device_mode: "driver"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info      # debug, info, warn, error
+    format: text     # text, json
+    no_color: false
+    add_caller: false
+
+settings:
+  entries:
+    sid_function:
+      capacity: 1024
+    transitv4:
+      capacity: 1024
+    transitv6:
+      capacity: 1024

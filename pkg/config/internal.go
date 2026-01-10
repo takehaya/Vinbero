@@ -7,24 +7,28 @@ import (
 )
 
 type InternalConfig struct {
-	LogFile    string       `yaml:"logfile,omitempty" default:"/var/log/vinbero.log"`
-	BpfOptions BpfConfig    `yaml:"bpf_options,omitempty"`
+	BpfOptions BpfConfig    `yaml:"bpf,omitempty"`
 	Devices    []string     `yaml:"devices,omitempty"`
 	Logger     LoggerConfig `yaml:"logger,omitempty"`
+	Server     ServerConfig `yaml:"server,omitempty"`
 }
 
 type LoggerConfig struct {
-	JSON      bool `yaml:"json,omitempty" default:"false"`       // if true, use JSON format
-	NoColor   bool `yaml:"no_color,omitempty" default:"false"`   // if true, disable color output
-	Verbose   int  `yaml:"verbose,omitempty" default:"0"`        // 0 is Info level, 1 or higher is Debug
-	Quiet     bool `yaml:"quiet,omitempty" default:"false"`      // if true, raise to Warn level or higher
-	AddCaller bool `yaml:"add_caller,omitempty" default:"false"` // if true, add caller information to logs
+	Level     string `yaml:"level,omitempty" default:"info"`       // debug, info, warn, error
+	Format    string `yaml:"format,omitempty" default:"text"`      // text, json
+	NoColor   bool   `yaml:"no_color,omitempty" default:"false"`   // disable color output
+	AddCaller bool   `yaml:"add_caller,omitempty" default:"false"` // add caller information
 }
 
 type BpfConfig struct {
-	DeviceMode      string `yaml:"device_mode,omitempty" default:"driver"`
-	LogLevel        int    `yaml:"log_level,omitempty" default:"2"`
-	VerifierLogSize uint32 `yaml:"verifier_log_size,omitempty" default:"1073741823"`
+	DeviceMode       string `yaml:"device_mode,omitempty" default:"driver"`
+	VerifierLogLevel int    `yaml:"verifier_log_level,omitempty" default:"2"`
+	VerifierLogSize  uint32 `yaml:"verifier_log_size,omitempty" default:"1073741823"`
+}
+
+// ServerConfig holds the gRPC/Connect server configuration
+type ServerConfig struct {
+	BindAddress string `yaml:"bind,omitempty" default:"0.0.0.0:8080"`
 }
 
 func ConvToStrXDPAttachMode(name string) (link.XDPAttachFlags, error) {

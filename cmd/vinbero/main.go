@@ -9,10 +9,13 @@ import (
 	"syscall"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/logger"
+	"github.com/takehaya/vinbero/pkg/server"
 	"github.com/takehaya/vinbero/pkg/vinbero"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 )
 
 var (
@@ -23,88 +26,90 @@ var (
 )
 
 func main() {
-	app := newApp(version)
+	app := newApp()
 	if err := app.Run(os.Args); err != nil {
 		log.Fatalf("%+v", err)
 	}
 }
 
-func newApp(version string) *cli.App {
-	app := cli.NewApp()
-	app.Name = "vinbero"
-	app.Version = fmt.Sprintf("%s, %s, %s, %s", version, commit, date, builtBy)
-
-	app.Usage = "High Perfomance SRv6 Function Subset"
-
-	app.EnableBashCompletion = true
-
-	// Common flags for the main run command
-	app.Flags = []cli.Flag{
-		cli.StringFlag{
-			Name:  "config, cfg",
-			Value: "/etc/vinbero/vinbero.yaml",
-			Usage: "config path, default is /etc/vinbero/vinbero.yaml",
+func newApp() *cli.App {
+	return &cli.App{
+		Name:    "vinbero",
+		Version: fmt.Sprintf("%s, %s, %s, %s", version, commit, date, builtBy),
+		Usage:   "High Performance SRv6 Function Subset",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "config",
+				Aliases: []string{"c"},
+				Value:   "/etc/vinbero/vinbero.yaml",
+				Usage:   "config file path",
+			},
 		},
+		Action:                 run,
+		EnableBashCompletion:   true,
+		UseShortOptionHandling: true,
 	}
-	app.Action = run
-	return app
 }
 
-func run(ctx *cli.Context) error {
-	configPath := ctx.String("config")
+func run(cliCtx *cli.Context) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	if !config.FileExists(configPath) {
-		return fmt.Errorf("config file not found: %s", configPath)
-	}
-	c, err := config.LoadFile(configPath)
+	cfg, err := loadConfig(cliCtx.String("config"))
 	if err != nil {
-		return fmt.Errorf("load config error: %w", err)
+		return err
 	}
 
-	lg, cleanup, err := logger.NewLogger(c.InternalConfig.Logger)
+	lg, cleanup, err := logger.NewLogger(cfg.InternalConfig.Logger)
 	if err != nil {
-		return fmt.Errorf("failed to initialize logger: %w", err)
+		return fmt.Errorf("initialize logger: %w", err)
 	}
+	defer cleanup(context.Background())
 
-	vin, err := vinbero.NewVinbero(c, lg)
+	vin, err := vinbero.NewVinbero(cfg, lg)
 	if err != nil {
-		cleanup(context.Background())
-		return fmt.Errorf("failed to initialize vinbero: %w", err)
+		return fmt.Errorf("initialize vinbero: %w", err)
 	}
+	defer vin.Close()
+
 	if err := vin.LoadXDPProgram(); err != nil {
-		vin.Close()
-		cleanup(context.Background())
-		return fmt.Errorf("failed to load XDP program: %w", err)
+		return fmt.Errorf("load XDP program: %w", err)
+	}
+	lg.Info("Vinbero XDP program loaded successfully")
+
+	srv := server.NewServer(cfg, vin.GetMapOperations(), lg)
+	if err := srv.StartAsync(); err != nil {
+		return fmt.Errorf("start server: %w", err)
 	}
 
 	lg.Info("Vinbero started successfully")
 
-	// Wait for interrupt signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
+	// Wait for shutdown signal
+	<-ctx.Done()
 	lg.Info("Received shutdown signal, cleaning up...")
 
-	// Create context with 10 second timeout for graceful shutdown
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return shutdown(srv, lg)
+}
+
+func loadConfig(path string) (*config.Config, error) {
+	if !config.FileExists(path) {
+		return nil, fmt.Errorf("config file not found: %s", path)
+	}
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	return cfg, nil
+}
+
+func shutdown(srv *server.Server, lg *zap.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	done := make(chan struct{})
-	go func() {
-		vin.Close()
-		cleanup(shutdownCtx)
-		close(done)
-	}()
-
-	// Wait for cleanup or timeout
-	select {
-	case <-done:
-		lg.Info("Shutdown completed")
-		return nil
-	case <-shutdownCtx.Done():
-		lg.Error("Shutdown timed out after 10 seconds")
-		os.Exit(1)
-		return nil
+	if err := srv.Shutdown(ctx); err != nil {
+		lg.Error("Shutdown error", zap.Error(err))
+		return err
 	}
+	lg.Info("Shutdown completed")
+	return nil
 }

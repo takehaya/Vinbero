@@ -13,6 +13,7 @@ import (
 type Vinbero struct {
 	cfg      *config.Config
 	obj      *bpf.BpfObjects
+	mapOps   *bpf.MapOperations
 	devices  []net.Interface
 	devLinks []link.Link
 }
@@ -22,6 +23,9 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fail to bpf load: %w", err)
 	}
+
+	// Create map operations
+	mapOps := bpf.NewMapOperations(obj)
 
 	// resolve device interfaces
 	var devices []net.Interface
@@ -36,6 +40,7 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 	return &Vinbero{
 		cfg:     cfg,
 		obj:     obj,
+		mapOps:  mapOps,
 		devices: devices,
 	}, nil
 }
@@ -58,6 +63,16 @@ func (v *Vinbero) LoadXDPProgram() error {
 	}
 
 	return nil
+}
+
+// GetMapOperations returns the map operations instance
+func (v *Vinbero) GetMapOperations() *bpf.MapOperations {
+	return v.mapOps
+}
+
+// GetConfig returns the configuration
+func (v *Vinbero) GetConfig() *config.Config {
+	return v.cfg
 }
 
 func (v *Vinbero) Close() error {
