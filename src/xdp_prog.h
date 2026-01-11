@@ -17,6 +17,15 @@
 #define AF_INET6 10
 #endif
 
+// Protocol numbers for encapsulation
+#ifndef IPPROTO_IPIP
+#define IPPROTO_IPIP 4   // IPv4 in IPv6
+#endif
+
+#ifndef IPPROTO_IPV6
+#define IPPROTO_IPV6 41  // IPv6 in IPv6
+#endif
+
 // Boundary check macro
 #define CHECK_BOUND(ptr, end, size) \
     if ((void *)(ptr) + (size) > (void *)(end)) return XDP_PASS
@@ -57,13 +66,13 @@ struct sid_function_entry {
     __u8 _pad[2];                 // Padding for alignment
 } __attribute__((packed));
 
-// Transit entry (for T.Encaps, T.Insert, etc.)
-struct transit_entry {
-    __u8 mode;                              // srv6_encap_mode enum
+// Headend entry (for H.Encaps, H.Insert, etc.)
+struct headend_entry {
+    __u8 mode;                              // srv6_headend_behavior enum
     __u8 num_segments;                      // Number of segments (1-10)
     __u8 _pad[2];                           // Padding for alignment
-    __u8 src_addr[IPV6_ADDR_LEN];           // Encapsulated source address
-    __u8 dst_addr[IPV6_ADDR_LEN];           // Encapsulated destination address
+    __u8 src_addr[IPV6_ADDR_LEN];           // Outer IPv6 source address
+    __u8 dst_addr[IPV6_ADDR_LEN];           // Unused for H.Encaps (reserved)
     __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list (up to 10 segments)
 } __attribute__((packed));
 

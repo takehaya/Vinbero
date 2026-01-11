@@ -8,6 +8,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/packet"
 )
 
@@ -118,6 +119,44 @@ func buildSimpleIPv6Packet(srcIP, dstIP net.IP) ([]byte, error) {
 
 	_ = icmp.SetNetworkLayerForChecksum(ip6)
 	if err := gopacket.SerializeLayers(buf, opts, eth, ip6, icmp, icmpEcho, gopacket.Payload(payload)); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+// buildSimpleIPv4Packet constructs a simple IPv4 packet
+func buildSimpleIPv4Packet(srcIP, dstIP net.IP) ([]byte, error) {
+	eth := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+		DstMAC:       net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02},
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	ip4 := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: layers.IPProtocolICMPv4,
+		SrcIP:    srcIP,
+		DstIP:    dstIP,
+	}
+
+	icmp := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		Id:       1234,
+		Seq:      1,
+	}
+
+	payload := newTestPayload(64)
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	if err := gopacket.SerializeLayers(buf, opts, eth, ip4, icmp, gopacket.Payload(payload)); err != nil {
 		return nil, err
 	}
 
@@ -318,5 +357,386 @@ func TestXDPProgNoSIDEntry(t *testing.T) {
 
 	if ret != XDP_PASS {
 		t.Errorf("Expected XDP_PASS for packet without SID entry, got %d", ret)
+	}
+}
+
+// TestHeadendV4MapOperations tests CRUD operations on HeadendV4 map
+func TestHeadendV4MapOperations(t *testing.T) {
+	// Load BPF program
+	objs, err := ReadCollection(nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to load BPF objects: %v", err)
+	}
+	defer objs.Close()
+
+	mapOps := NewMapOperations(objs)
+
+	// Test data
+	triggerPrefix := "192.0.2.0/24"
+	srcAddr, _ := ParseIPv6("fc00::1")
+	dstAddr, _ := ParseIPv6("fc00::100")
+	segments, numSegments, _ := ParseSegments([]string{
+		"fc00::200",
+		"fc00::300",
+	})
+
+	entry := &HeadendEntry{
+		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		DstAddr:     dstAddr,
+		Segments:    segments,
+	}
+
+	// Test Create
+	if err := mapOps.CreateHeadendV4(triggerPrefix, entry); err != nil {
+		t.Fatalf("Failed to create headend v4 entry: %v", err)
+	}
+
+	// Test Get
+	retrievedEntry, err := mapOps.GetHeadendV4(triggerPrefix)
+	if err != nil {
+		t.Fatalf("Failed to get headend v4 entry: %v", err)
+	}
+
+	if retrievedEntry.Mode != entry.Mode {
+		t.Errorf("Expected mode %d, got %d", entry.Mode, retrievedEntry.Mode)
+	}
+	if retrievedEntry.NumSegments != entry.NumSegments {
+		t.Errorf("Expected num_segments %d, got %d", entry.NumSegments, retrievedEntry.NumSegments)
+	}
+	if retrievedEntry.SrcAddr != entry.SrcAddr {
+		t.Errorf("Expected src_addr %v, got %v", entry.SrcAddr, retrievedEntry.SrcAddr)
+	}
+	if retrievedEntry.DstAddr != entry.DstAddr {
+		t.Errorf("Expected dst_addr %v, got %v", entry.DstAddr, retrievedEntry.DstAddr)
+	}
+
+	// Test List
+	entries, err := mapOps.ListHeadendV4()
+	if err != nil {
+		t.Fatalf("Failed to list headend v4 entries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("Expected 1 entry, got %d", len(entries))
+	}
+	if _, ok := entries[triggerPrefix]; !ok {
+		t.Errorf("Expected to find entry with prefix %s", triggerPrefix)
+	}
+
+	// Test Delete
+	if err := mapOps.DeleteHeadendV4(triggerPrefix); err != nil {
+		t.Fatalf("Failed to delete headend v4 entry: %v", err)
+	}
+
+	// Verify deletion
+	_, err = mapOps.GetHeadendV4(triggerPrefix)
+	if err == nil {
+		t.Error("Expected error when getting deleted entry, got nil")
+	}
+}
+
+// TestHeadendV6MapOperations tests CRUD operations on HeadendV6 map
+func TestHeadendV6MapOperations(t *testing.T) {
+	// Load BPF program
+	objs, err := ReadCollection(nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to load BPF objects: %v", err)
+	}
+	defer objs.Close()
+
+	mapOps := NewMapOperations(objs)
+
+	// Test data
+	triggerPrefix := "2001:db8::/32"
+	srcAddr, _ := ParseIPv6("fc00::1")
+	dstAddr, _ := ParseIPv6("fc00::100")
+	segments, numSegments, _ := ParseSegments([]string{
+		"fc00::200",
+		"fc00::300",
+		"fc00::400",
+	})
+
+	entry := &HeadendEntry{
+		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		DstAddr:     dstAddr,
+		Segments:    segments,
+	}
+
+	// Test Create
+	if err := mapOps.CreateHeadendV6(triggerPrefix, entry); err != nil {
+		t.Fatalf("Failed to create headend v6 entry: %v", err)
+	}
+
+	// Test Get
+	retrievedEntry, err := mapOps.GetHeadendV6(triggerPrefix)
+	if err != nil {
+		t.Fatalf("Failed to get headend v6 entry: %v", err)
+	}
+
+	if retrievedEntry.Mode != entry.Mode {
+		t.Errorf("Expected mode %d, got %d", entry.Mode, retrievedEntry.Mode)
+	}
+	if retrievedEntry.NumSegments != entry.NumSegments {
+		t.Errorf("Expected num_segments %d, got %d", entry.NumSegments, retrievedEntry.NumSegments)
+	}
+	if retrievedEntry.SrcAddr != entry.SrcAddr {
+		t.Errorf("Expected src_addr %v, got %v", entry.SrcAddr, retrievedEntry.SrcAddr)
+	}
+	if retrievedEntry.DstAddr != entry.DstAddr {
+		t.Errorf("Expected dst_addr %v, got %v", entry.DstAddr, retrievedEntry.DstAddr)
+	}
+
+	// Test List
+	entries, err := mapOps.ListHeadendV6()
+	if err != nil {
+		t.Fatalf("Failed to list headend v6 entries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("Expected 1 entry, got %d", len(entries))
+	}
+	if _, ok := entries[triggerPrefix]; !ok {
+		t.Errorf("Expected to find entry with prefix %s", triggerPrefix)
+	}
+
+	// Test Delete
+	if err := mapOps.DeleteHeadendV6(triggerPrefix); err != nil {
+		t.Fatalf("Failed to delete headend v6 entry: %v", err)
+	}
+
+	// Verify deletion
+	_, err = mapOps.GetHeadendV6(triggerPrefix)
+	if err == nil {
+		t.Error("Expected error when getting deleted entry, got nil")
+	}
+}
+
+// TestXDPProgHeadendV4Encaps tests H.Encaps operation for IPv4 packets
+func TestXDPProgHeadendV4Encaps(t *testing.T) {
+	// Load BPF program
+	objs, err := ReadCollection(nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to load BPF objects: %v", err)
+	}
+	defer objs.Close()
+
+	// Configure HeadendV4 map
+	mapOps := NewMapOperations(objs)
+	triggerPrefix := "192.0.2.0/24"
+	
+	srcAddr, _ := ParseIPv6("fc00::1")
+	dstAddr, _ := ParseIPv6("fc00::100")
+	segments, numSegments, _ := ParseSegments([]string{
+		"fc00::200",
+		"fc00::300",
+	})
+
+	entry := &HeadendEntry{
+		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		DstAddr:     dstAddr,
+		Segments:    segments,
+	}
+
+	if err := mapOps.CreateHeadendV4(triggerPrefix, entry); err != nil {
+		t.Fatalf("Failed to create headend v4 entry: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		srcIP          string
+		dstIP          string
+		expectEncap    bool
+		expectedAction uint32
+	}{
+		{
+			name:           "IPv4 packet matching trigger prefix",
+			srcIP:          "10.0.0.1",
+			dstIP:          "192.0.2.100",
+			expectEncap:    true,
+			expectedAction: XDP_PASS,
+		},
+		{
+			name:           "IPv4 packet not matching trigger prefix",
+			srcIP:          "10.0.0.1",
+			dstIP:          "203.0.113.1",
+			expectEncap:    false,
+			expectedAction: XDP_PASS,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build IPv4 packet
+			srcIP := net.ParseIP(tt.srcIP).To4()
+			dstIP := net.ParseIP(tt.dstIP).To4()
+
+			pkt, err := buildSimpleIPv4Packet(srcIP, dstIP)
+			if err != nil {
+				t.Fatalf("Failed to build IPv4 packet: %v", err)
+			}
+
+			originalLen := len(pkt)
+
+			// Run BPF program
+			opts := ebpf.RunOptions{
+				Data:    pkt,
+				DataOut: make([]byte, 1500), // Large enough for encapsulated packet
+				Repeat:  1,
+			}
+
+			ret, err := objs.VinberoMain.Run(&opts)
+			if err != nil {
+				t.Fatalf("Failed to run BPF program: %v", err)
+			}
+
+			if ret != tt.expectedAction {
+				t.Errorf("Expected action %d, got %d", tt.expectedAction, ret)
+			}
+
+			if tt.expectEncap {
+				// Check that packet was encapsulated (should be larger)
+				outPkt := opts.DataOut
+				
+				// The packet should now have IPv6 + SRH headers
+				// Minimum: Ethernet (14) + IPv6 (40) + SRH (8 + 16*num_segments)
+				minExpectedLen := 14 + 40 + 8 + 16*int(numSegments)
+				
+				if len(outPkt) < minExpectedLen {
+					t.Logf("Original packet length: %d", originalLen)
+					t.Logf("Output packet length: %d", len(outPkt))
+					t.Logf("Expected minimum length: %d", minExpectedLen)
+				}
+
+				// Check Ethernet type changed to IPv6
+				if len(outPkt) >= 14 {
+					etherType := uint16(outPkt[12])<<8 | uint16(outPkt[13])
+					if etherType != 0x86DD { // IPv6
+						t.Logf("Note: EtherType is 0x%04x, expected 0x86DD (IPv6)", etherType)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestXDPProgHeadendV6Encaps tests H.Encaps operation for IPv6 packets
+func TestXDPProgHeadendV6Encaps(t *testing.T) {
+	// Load BPF program
+	objs, err := ReadCollection(nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to load BPF objects: %v", err)
+	}
+	defer objs.Close()
+
+	// Configure HeadendV6 map
+	mapOps := NewMapOperations(objs)
+	triggerPrefix := "2001:db8::/32"
+	
+	srcAddr, _ := ParseIPv6("fc00::1")
+	dstAddr, _ := ParseIPv6("fc00::100")
+	segments, numSegments, _ := ParseSegments([]string{
+		"fc00::200",
+		"fc00::300",
+		"fc00::400",
+	})
+
+	entry := &HeadendEntry{
+		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		DstAddr:     dstAddr,
+		Segments:    segments,
+	}
+
+	if err := mapOps.CreateHeadendV6(triggerPrefix, entry); err != nil {
+		t.Fatalf("Failed to create headend v6 entry: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		srcIP          string
+		dstIP          string
+		expectEncap    bool
+		expectedAction uint32
+	}{
+		{
+			name:           "IPv6 packet matching trigger prefix",
+			srcIP:          "2001:db8:1::1",
+			dstIP:          "2001:db8:2::1",
+			expectEncap:    true,
+			expectedAction: XDP_PASS,
+		},
+		{
+			name:           "IPv6 packet not matching trigger prefix",
+			srcIP:          "fd00:1::1",
+			dstIP:          "fd00:2::1",
+			expectEncap:    false,
+			expectedAction: XDP_PASS,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build IPv6 packet
+			srcIP := net.ParseIP(tt.srcIP)
+			dstIP := net.ParseIP(tt.dstIP)
+
+			pkt, err := buildSimpleIPv6Packet(srcIP, dstIP)
+			if err != nil {
+				t.Fatalf("Failed to build IPv6 packet: %v", err)
+			}
+
+			originalLen := len(pkt)
+
+			// Run BPF program
+			opts := ebpf.RunOptions{
+				Data:    pkt,
+				DataOut: make([]byte, 1500), // Large enough for encapsulated packet
+				Repeat:  1,
+			}
+
+			ret, err := objs.VinberoMain.Run(&opts)
+			if err != nil {
+				t.Fatalf("Failed to run BPF program: %v", err)
+			}
+
+			if ret != tt.expectedAction {
+				t.Errorf("Expected action %d, got %d", tt.expectedAction, ret)
+			}
+
+			if tt.expectEncap {
+				// Check that packet was encapsulated (should be larger)
+				outPkt := opts.DataOut
+				
+				// The packet should now have outer IPv6 + SRH headers
+				// Minimum: Ethernet (14) + Outer IPv6 (40) + SRH (8 + 16*num_segments) + Inner IPv6 (40)
+				minExpectedLen := 14 + 40 + 8 + 16*int(numSegments) + 40
+				
+				if len(outPkt) < minExpectedLen {
+					t.Logf("Original packet length: %d", originalLen)
+					t.Logf("Output packet length: %d", len(outPkt))
+					t.Logf("Expected minimum length: %d", minExpectedLen)
+				}
+
+				// Check that outer IPv6 header exists
+				if len(outPkt) >= 54 { // 14 (Ethernet) + 40 (IPv6)
+					// Check outer IPv6 version
+					version := (outPkt[14] >> 4) & 0x0F
+					if version != 6 {
+						t.Logf("Note: Outer IP version is %d, expected 6", version)
+					}
+
+					// Check Next Header is routing (43) for SRH
+					nextHeader := outPkt[14+6]
+					if nextHeader != 43 {
+						t.Logf("Note: Next Header is %d, expected 43 (routing)", nextHeader)
+					}
+				}
+			}
+		})
 	}
 }

@@ -47,6 +47,12 @@ type BpfSidFunctionEntry struct {
 	Pad          [2]uint8
 }
 
+type BpfStatsEntry struct {
+	_       structs.HostLayout
+	Packets uint64
+	Bytes   uint64
+}
+
 // LoadBpf returns the embedded CollectionSpec for Bpf.
 func LoadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)
@@ -99,6 +105,7 @@ type BpfMapSpecs struct {
 	HeadendV4Map   *ebpf.MapSpec `ebpf:"headend_v4_map"`
 	HeadendV6Map   *ebpf.MapSpec `ebpf:"headend_v6_map"`
 	SidFunctionMap *ebpf.MapSpec `ebpf:"sid_function_map"`
+	StatsMap       *ebpf.MapSpec `ebpf:"stats_map"`
 	XdpcapHook     *ebpf.MapSpec `ebpf:"xdpcap_hook"`
 }
 
@@ -106,6 +113,8 @@ type BpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfVariableSpecs struct {
+	EnableStats  *ebpf.VariableSpec `ebpf:"enable_stats"`
+	EnableXdpcap *ebpf.VariableSpec `ebpf:"enable_xdpcap"`
 }
 
 // BpfObjects contains all objects after they have been loaded into the kernel.
@@ -131,6 +140,7 @@ type BpfMaps struct {
 	HeadendV4Map   *ebpf.Map `ebpf:"headend_v4_map"`
 	HeadendV6Map   *ebpf.Map `ebpf:"headend_v6_map"`
 	SidFunctionMap *ebpf.Map `ebpf:"sid_function_map"`
+	StatsMap       *ebpf.Map `ebpf:"stats_map"`
 	XdpcapHook     *ebpf.Map `ebpf:"xdpcap_hook"`
 }
 
@@ -139,6 +149,7 @@ func (m *BpfMaps) Close() error {
 		m.HeadendV4Map,
 		m.HeadendV6Map,
 		m.SidFunctionMap,
+		m.StatsMap,
 		m.XdpcapHook,
 	)
 }
@@ -147,6 +158,8 @@ func (m *BpfMaps) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfVariables struct {
+	EnableStats  *ebpf.Variable `ebpf:"enable_stats"`
+	EnableXdpcap *ebpf.Variable `ebpf:"enable_xdpcap"`
 }
 
 // BpfPrograms contains all programs after they have been loaded into the kernel.
