@@ -10,6 +10,7 @@
 #include "xdp_prog.h"
 #include "srv6.h"
 #include "srv6_headend_utils.h"
+#include "srv6_fib.h"
 #include "xdp_stats.h"
 
 // Endpoint processing context - shared by all endpoint functions
@@ -73,34 +74,22 @@ static __always_inline int endpoint_update_da(struct endpoint_ctx *ectx)
 // Perform FIB lookup and redirect (common for End, End.T)
 static __always_inline int endpoint_fib_redirect(struct endpoint_ctx *ectx)
 {
-    struct bpf_fib_lookup fib_params = {};
-    fib_params.family = AF_INET6;
-    fib_params.ifindex = ectx->ctx->ingress_ifindex;
-
-    __builtin_memcpy(fib_params.ipv6_src, &ectx->ip6h->saddr, sizeof(fib_params.ipv6_src));
-    __builtin_memcpy(fib_params.ipv6_dst, &ectx->ip6h->daddr, sizeof(fib_params.ipv6_dst));
-
-    int ret = bpf_fib_lookup(ectx->ctx, &fib_params, sizeof(fib_params), 0);
-
-    switch (ret) {
-    case BPF_FIB_LKUP_RET_SUCCESS: {
-        void *data = (void *)(long)ectx->ctx->data;
-        void *data_end = (void *)(long)ectx->ctx->data_end;
-        struct ethhdr *eth = data;
-        if ((void *)eth + sizeof(*eth) > data_end) {
-            return XDP_DROP;
-        }
-        __builtin_memcpy(eth->h_dest, fib_params.dmac, ETH_ALEN);
-        __builtin_memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
-        STATS_INC(STATS_SRV6_END, 0);
-        return bpf_redirect(fib_params.ifindex, 0);
+    void *data = (void *)(long)ectx->ctx->data;
+    void *data_end = (void *)(long)ectx->ctx->data_end;
+    struct ethhdr *eth = data;
+    if ((void *)eth + sizeof(*eth) > data_end) {
+        return XDP_DROP;
     }
 
-    case BPF_FIB_LKUP_RET_BLACKHOLE:
-    case BPF_FIB_LKUP_RET_UNREACHABLE:
-    case BPF_FIB_LKUP_RET_PROHIBIT:
-        return XDP_DROP;
+    __u32 ifindex;
+    int fib_result = srv6_fib_lookup_and_update(ectx->ctx, ectx->ip6h, eth, &ifindex);
 
+    switch (fib_result) {
+    case FIB_RESULT_REDIRECT:
+        STATS_INC(STATS_SRV6_END, 0);
+        return bpf_redirect(ifindex, 0);
+    case FIB_RESULT_DROP:
+        return XDP_DROP;
     default:
         return XDP_PASS;
     }

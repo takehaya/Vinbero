@@ -11,6 +11,7 @@
 #include "xdp_prog.h"
 #include "srv6.h"
 #include "srv6_headend_utils.h"
+#include "srv6_fib.h"
 
 // H.Encaps core implementation - shared by both IPv4 and IPv6 encapsulation
 // RFC 8986 Section 5.1
@@ -101,30 +102,18 @@ static __always_inline int do_h_encaps_core(
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
     // 9. FIB lookup and redirect
-    struct bpf_fib_lookup fib_params = {};
-    fib_params.family = AF_INET6;
-    fib_params.ifindex = ctx->ingress_ifindex;
+    __u32 ifindex;
+    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex);
 
-    __builtin_memcpy(fib_params.ipv6_src, &outer_ip6h->saddr, sizeof(fib_params.ipv6_src));
-    __builtin_memcpy(fib_params.ipv6_dst, &outer_ip6h->daddr, sizeof(fib_params.ipv6_dst));
-
-    int ret = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0);
-
-    switch (ret) {
-    case BPF_FIB_LKUP_RET_SUCCESS:
-        __builtin_memcpy(new_eth->h_dest, fib_params.dmac, ETH_ALEN);
-        __builtin_memcpy(new_eth->h_source, fib_params.smac, ETH_ALEN);
-        DEBUG_PRINT("H.Encaps: Success, redirect to ifindex %d\n", fib_params.ifindex);
-        return bpf_redirect(fib_params.ifindex, 0);
-
-    case BPF_FIB_LKUP_RET_BLACKHOLE:
-    case BPF_FIB_LKUP_RET_UNREACHABLE:
-    case BPF_FIB_LKUP_RET_PROHIBIT:
-        DEBUG_PRINT("H.Encaps: FIB lookup drop (%d)\n", ret);
+    switch (fib_result) {
+    case FIB_RESULT_REDIRECT:
+        DEBUG_PRINT("H.Encaps: Success, redirect to ifindex %d\n", ifindex);
+        return bpf_redirect(ifindex, 0);
+    case FIB_RESULT_DROP:
+        DEBUG_PRINT("H.Encaps: FIB lookup drop\n");
         return XDP_DROP;
-
     default:
-        DEBUG_PRINT("H.Encaps: FIB lookup needs kernel (%d)\n", ret);
+        DEBUG_PRINT("H.Encaps: FIB lookup needs kernel\n");
         return XDP_PASS;
     }
 }
