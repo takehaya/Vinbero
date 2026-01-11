@@ -2,6 +2,7 @@
 
 VinberoのSRv6機能を実際に試せるPlayground環境です。
 
+GitHub Actionsのmatrix strategyにより、各exampleは独立したジョブとして並列実行されます。
 ## クイックスタート
 
 ```bash
@@ -9,37 +10,6 @@ cd examples/end
 sudo ./setup.sh    # 環境構築
 sudo ./test.sh     # テスト実行
 sudo ./teardown.sh # クリーンアップ
-```
-
-## ディレクトリ構造
-
-```
-examples/
-├── common/                    # 共通ユーティリティ
-│   ├── netns.sh              # Network namespace操作
-│   ├── veth.sh               # Veth pair操作
-│   ├── test_utils.sh         # テストヘルパー関数
-│   └── topologies/
-│       └── three_router.sh   # 3ルータートポロジー
-│
-├── end/                      # SRv6 End操作のデモ
-│   ├── README.md
-│   ├── setup.sh
-│   ├── test.sh
-│   ├── teardown.sh
-│   └── vinbero_router2.yaml
-│
-└── README.md                 # このファイル
-```
-
-## CI/CD並列実行
-
-GitHub Actionsのmatrix strategyにより、各exampleは独立したジョブとして並列実行されます：
-
-```yaml
-strategy:
-  matrix:
-    example: [end]  # 将来: end-dx4, end-dx6, headend-v4, ...
 ```
 
 各exampleはディレクトリ名をプレフィックスとして独自のnamespace空間を持つため（例: `end-host1`, `end-router1`）、衝突なく並列実行できます。

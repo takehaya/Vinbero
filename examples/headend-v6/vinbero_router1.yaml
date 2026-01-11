@@ -1,0 +1,24 @@
+internal:
+  devices:
+    - hv6-rt1h1   # Interface towards host1 (with prefix)
+    - hv6-rt1rt2  # Interface towards router2 (with prefix)
+  bpf:
+    device_mode: generic  # Required for veth pairs
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "127.0.0.1:8082"
+  logger:
+    level: debug
+    format: text
+    no_color: false
+    add_caller: true
+
+settings:
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
