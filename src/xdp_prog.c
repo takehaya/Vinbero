@@ -156,7 +156,7 @@ static __always_inline int process_srv6_localsid(
     }
 
     struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)srh_ptr;
-    
+
     // Verify this is Segment Routing (type 4)
     if (srh->type != IPV6_SRCRT_TYPE_4) {
         DEBUG_PRINT("SRv6: Not SR type (type=%d)\n", srh->type);

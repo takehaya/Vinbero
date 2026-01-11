@@ -1,6 +1,8 @@
 package bpf
 
 import (
+	"bytes"
+	"encoding/binary"
 	"net"
 	"net/netip"
 	"testing"
@@ -161,6 +163,202 @@ func buildSimpleIPv4Packet(srcIP, dstIP net.IP) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// ========== H.Encaps Verification Helper Functions ==========
+
+// Packet offsets for encapsulated packets
+const (
+	ethHeaderLen  = 14
+	ipv6HeaderLen = 40
+	srhBaseLen    = 8 // SRH header without segments
+	ipv6AddrLen   = 16
+	ipv4HeaderLen = 20
+)
+
+// verifyEthernetIPv6 verifies that the Ethernet header indicates IPv6
+func verifyEthernetIPv6(t *testing.T, pkt []byte) bool {
+	t.Helper()
+	if len(pkt) < ethHeaderLen {
+		t.Errorf("Packet too short for Ethernet header: %d bytes", len(pkt))
+		return false
+	}
+	etherType := binary.BigEndian.Uint16(pkt[12:14])
+	if etherType != 0x86DD {
+		t.Errorf("Expected EtherType 0x86DD (IPv6), got 0x%04X", etherType)
+		return false
+	}
+	return true
+}
+
+// verifyOuterIPv6Header verifies the outer IPv6 header of an encapsulated packet
+func verifyOuterIPv6Header(t *testing.T, pkt []byte, expectedSrc, expectedDst [16]byte) bool {
+	t.Helper()
+	offset := ethHeaderLen
+	if len(pkt) < offset+ipv6HeaderLen {
+		t.Errorf("Packet too short for IPv6 header: %d bytes", len(pkt))
+		return false
+	}
+
+	// Version (should be 6)
+	version := (pkt[offset] >> 4) & 0x0F
+	if version != 6 {
+		t.Errorf("Expected IPv6 version 6, got %d", version)
+		return false
+	}
+
+	// Next Header (should be 43 for Routing)
+	nextHeader := pkt[offset+6]
+	if nextHeader != 43 {
+		t.Errorf("Expected Next Header 43 (Routing), got %d", nextHeader)
+		return false
+	}
+
+	// Source Address (offset 8-23)
+	var actualSrc [16]byte
+	copy(actualSrc[:], pkt[offset+8:offset+24])
+	if !bytes.Equal(actualSrc[:], expectedSrc[:]) {
+		t.Errorf("Source address mismatch: expected %x, got %x", expectedSrc, actualSrc)
+		return false
+	}
+
+	// Destination Address (offset 24-39)
+	var actualDst [16]byte
+	copy(actualDst[:], pkt[offset+24:offset+40])
+	if !bytes.Equal(actualDst[:], expectedDst[:]) {
+		t.Errorf("Destination address mismatch: expected %x, got %x", expectedDst, actualDst)
+		return false
+	}
+
+	return true
+}
+
+// verifySRHStructure verifies the SRH structure of an encapsulated packet
+func verifySRHStructure(t *testing.T, pkt []byte, numSegments int, expectedSegments [][16]byte) bool {
+	t.Helper()
+	srhOffset := ethHeaderLen + ipv6HeaderLen
+	srhLen := srhBaseLen + numSegments*ipv6AddrLen
+
+	if len(pkt) < srhOffset+srhLen {
+		t.Errorf("Packet too short for SRH: need %d bytes, have %d", srhOffset+srhLen, len(pkt))
+		return false
+	}
+
+	// Routing Type (should be 4 for Segment Routing)
+	routingType := pkt[srhOffset+2]
+	if routingType != 4 {
+		t.Errorf("Expected Routing Type 4 (SR), got %d", routingType)
+		return false
+	}
+
+	// Segments Left (should be numSegments - 1)
+	segmentsLeft := pkt[srhOffset+3]
+	expectedSL := uint8(numSegments - 1)
+	if segmentsLeft != expectedSL {
+		t.Errorf("Expected Segments Left %d, got %d", expectedSL, segmentsLeft)
+		return false
+	}
+
+	// First Segment (should be numSegments - 1)
+	firstSegment := pkt[srhOffset+4]
+	expectedFS := uint8(numSegments - 1)
+	if firstSegment != expectedFS {
+		t.Errorf("Expected First Segment %d, got %d", expectedFS, firstSegment)
+		return false
+	}
+
+	// Verify segment list
+	for i, expectedSeg := range expectedSegments {
+		segOffset := srhOffset + srhBaseLen + i*ipv6AddrLen
+		var actualSeg [16]byte
+		copy(actualSeg[:], pkt[segOffset:segOffset+ipv6AddrLen])
+		if !bytes.Equal(actualSeg[:], expectedSeg[:]) {
+			t.Errorf("Segment[%d] mismatch: expected %x, got %x", i, expectedSeg, actualSeg)
+			return false
+		}
+	}
+
+	return true
+}
+
+// verifyInnerIPv4Packet verifies the inner IPv4 packet is preserved
+func verifyInnerIPv4Packet(t *testing.T, pkt []byte, numSegments int, expectedSrc, expectedDst net.IP) bool {
+	t.Helper()
+	srhLen := srhBaseLen + numSegments*ipv6AddrLen
+	innerOffset := ethHeaderLen + ipv6HeaderLen + srhLen
+
+	if len(pkt) < innerOffset+ipv4HeaderLen {
+		t.Errorf("Packet too short for inner IPv4: need %d bytes, have %d", innerOffset+ipv4HeaderLen, len(pkt))
+		return false
+	}
+
+	// Version (should be 4)
+	version := (pkt[innerOffset] >> 4) & 0x0F
+	if version != 4 {
+		t.Errorf("Expected inner IPv4 version 4, got %d", version)
+		return false
+	}
+
+	// Source Address (offset 12-15)
+	actualSrc := net.IP(pkt[innerOffset+12 : innerOffset+16])
+	if !actualSrc.Equal(expectedSrc) {
+		t.Errorf("Inner IPv4 source mismatch: expected %s, got %s", expectedSrc, actualSrc)
+		return false
+	}
+
+	// Destination Address (offset 16-19)
+	actualDst := net.IP(pkt[innerOffset+16 : innerOffset+20])
+	if !actualDst.Equal(expectedDst) {
+		t.Errorf("Inner IPv4 destination mismatch: expected %s, got %s", expectedDst, actualDst)
+		return false
+	}
+
+	return true
+}
+
+// verifyInnerIPv6Packet verifies the inner IPv6 packet is preserved
+func verifyInnerIPv6Packet(t *testing.T, pkt []byte, numSegments int, expectedSrc, expectedDst net.IP) bool {
+	t.Helper()
+	srhLen := srhBaseLen + numSegments*ipv6AddrLen
+	innerOffset := ethHeaderLen + ipv6HeaderLen + srhLen
+
+	if len(pkt) < innerOffset+ipv6HeaderLen {
+		t.Errorf("Packet too short for inner IPv6: need %d bytes, have %d", innerOffset+ipv6HeaderLen, len(pkt))
+		return false
+	}
+
+	// Version (should be 6)
+	version := (pkt[innerOffset] >> 4) & 0x0F
+	if version != 6 {
+		t.Errorf("Expected inner IPv6 version 6, got %d", version)
+		return false
+	}
+
+	// Source Address (offset 8-23)
+	actualSrc := net.IP(pkt[innerOffset+8 : innerOffset+24])
+	if !actualSrc.Equal(expectedSrc) {
+		t.Errorf("Inner IPv6 source mismatch: expected %s, got %s", expectedSrc, actualSrc)
+		return false
+	}
+
+	// Destination Address (offset 24-39)
+	actualDst := net.IP(pkt[innerOffset+24 : innerOffset+40])
+	if !actualDst.Equal(expectedDst) {
+		t.Errorf("Inner IPv6 destination mismatch: expected %s, got %s", expectedDst, actualDst)
+		return false
+	}
+
+	return true
+}
+
+// convertSegmentsToBytes converts segment addresses to byte arrays for verification
+// Segments in SRH are stored in reverse order (last segment first)
+func convertSegmentsToBytes(segments [10][16]byte, numSegments int) [][16]byte {
+	result := make([][16]byte, numSegments)
+	for i := range numSegments {
+		result[i] = segments[numSegments-1-i]
+	}
+	return result
 }
 
 // TestXDPProgEnd tests the End operation with SRv6 packets
@@ -522,47 +720,60 @@ func TestXDPProgHeadendV4Encaps(t *testing.T) {
 	}
 	defer objs.Close()
 
-	// Configure HeadendV4 map
 	mapOps := NewMapOperations(objs)
-	triggerPrefix := "192.0.2.0/24"
-	
-	srcAddr, _ := ParseIPv6("fc00::1")
-	dstAddr, _ := ParseIPv6("fc00::100")
-	segments, numSegments, _ := ParseSegments([]string{
-		"fc00::200",
-		"fc00::300",
-	})
-
-	entry := &HeadendEntry{
-		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
-		NumSegments: numSegments,
-		SrcAddr:     srcAddr,
-		DstAddr:     dstAddr,
-		Segments:    segments,
-	}
-
-	if err := mapOps.CreateHeadendV4(triggerPrefix, entry); err != nil {
-		t.Fatalf("Failed to create headend v4 entry: %v", err)
-	}
 
 	tests := []struct {
 		name           string
-		srcIP          string
-		dstIP          string
+		triggerPrefix  string
+		srcAddr        string
+		dstAddr        string
+		segmentStrs    []string
+		pktSrcIP       string
+		pktDstIP       string
 		expectEncap    bool
 		expectedAction uint32
 	}{
 		{
-			name:           "IPv4 packet matching trigger prefix",
-			srcIP:          "10.0.0.1",
-			dstIP:          "192.0.2.100",
+			name:           "Two segments encapsulation",
+			triggerPrefix:  "192.0.2.0/24",
+			srcAddr:        "fc00::1",
+			dstAddr:        "fc00::100",
+			segmentStrs:    []string{"fc00::200", "fc00::300"},
+			pktSrcIP:       "10.0.0.1",
+			pktDstIP:       "192.0.2.100",
 			expectEncap:    true,
 			expectedAction: XDP_PASS,
 		},
 		{
-			name:           "IPv4 packet not matching trigger prefix",
-			srcIP:          "10.0.0.1",
-			dstIP:          "203.0.113.1",
+			name:           "Single segment encapsulation",
+			triggerPrefix:  "198.51.100.0/24",
+			srcAddr:        "fc00::10",
+			dstAddr:        "fc00::200",
+			segmentStrs:    []string{"fc00::200"},
+			pktSrcIP:       "10.0.0.2",
+			pktDstIP:       "198.51.100.50",
+			expectEncap:    true,
+			expectedAction: XDP_PASS,
+		},
+		{
+			name:           "Three segments encapsulation",
+			triggerPrefix:  "203.0.113.0/24",
+			srcAddr:        "fc00::20",
+			dstAddr:        "fc00::100",
+			segmentStrs:    []string{"fc00::100", "fc00::200", "fc00::300"},
+			pktSrcIP:       "10.0.0.3",
+			pktDstIP:       "203.0.113.100",
+			expectEncap:    true,
+			expectedAction: XDP_PASS,
+		},
+		{
+			name:           "Packet not matching trigger prefix",
+			triggerPrefix:  "10.10.0.0/16",
+			srcAddr:        "fc00::1",
+			dstAddr:        "fc00::100",
+			segmentStrs:    []string{"fc00::200"},
+			pktSrcIP:       "10.0.0.1",
+			pktDstIP:       "172.16.0.1",
 			expectEncap:    false,
 			expectedAction: XDP_PASS,
 		},
@@ -570,11 +781,31 @@ func TestXDPProgHeadendV4Encaps(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Build IPv4 packet
-			srcIP := net.ParseIP(tt.srcIP).To4()
-			dstIP := net.ParseIP(tt.dstIP).To4()
+			// Setup entry for this test
+			srcAddr, _ := ParseIPv6(tt.srcAddr)
+			dstAddr, _ := ParseIPv6(tt.dstAddr)
+			segments, numSegments, _ := ParseSegments(tt.segmentStrs)
 
-			pkt, err := buildSimpleIPv4Packet(srcIP, dstIP)
+			entry := &HeadendEntry{
+				Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+				NumSegments: numSegments,
+				SrcAddr:     srcAddr,
+				DstAddr:     dstAddr,
+				Segments:    segments,
+			}
+
+			if err := mapOps.CreateHeadendV4(tt.triggerPrefix, entry); err != nil {
+				t.Fatalf("Failed to create headend v4 entry: %v", err)
+			}
+			defer func() {
+				_ = mapOps.DeleteHeadendV4(tt.triggerPrefix)
+			}()
+
+			// Build IPv4 packet
+			pktSrcIP := net.ParseIP(tt.pktSrcIP).To4()
+			pktDstIP := net.ParseIP(tt.pktDstIP).To4()
+
+			pkt, err := buildSimpleIPv4Packet(pktSrcIP, pktDstIP)
 			if err != nil {
 				t.Fatalf("Failed to build IPv4 packet: %v", err)
 			}
@@ -584,7 +815,7 @@ func TestXDPProgHeadendV4Encaps(t *testing.T) {
 			// Run BPF program
 			opts := ebpf.RunOptions{
 				Data:    pkt,
-				DataOut: make([]byte, 1500), // Large enough for encapsulated packet
+				DataOut: make([]byte, 1500),
 				Repeat:  1,
 			}
 
@@ -598,26 +829,43 @@ func TestXDPProgHeadendV4Encaps(t *testing.T) {
 			}
 
 			if tt.expectEncap {
-				// Check that packet was encapsulated (should be larger)
 				outPkt := opts.DataOut
-				
-				// The packet should now have IPv6 + SRH headers
-				// Minimum: Ethernet (14) + IPv6 (40) + SRH (8 + 16*num_segments)
-				minExpectedLen := 14 + 40 + 8 + 16*int(numSegments)
-				
+
+				// Calculate expected minimum length
+				srhLen := srhBaseLen + int(numSegments)*ipv6AddrLen
+				minExpectedLen := ethHeaderLen + ipv6HeaderLen + srhLen + ipv4HeaderLen
+
 				if len(outPkt) < minExpectedLen {
-					t.Logf("Original packet length: %d", originalLen)
-					t.Logf("Output packet length: %d", len(outPkt))
-					t.Logf("Expected minimum length: %d", minExpectedLen)
+					t.Fatalf("Output packet too short: got %d, want at least %d (original: %d)",
+						len(outPkt), minExpectedLen, originalLen)
 				}
 
-				// Check Ethernet type changed to IPv6
-				if len(outPkt) >= 14 {
-					etherType := uint16(outPkt[12])<<8 | uint16(outPkt[13])
-					if etherType != 0x86DD { // IPv6
-						t.Logf("Note: EtherType is 0x%04x, expected 0x86DD (IPv6)", etherType)
-					}
+				// Verify Ethernet header indicates IPv6
+				if !verifyEthernetIPv6(t, outPkt) {
+					return
 				}
+
+				// Verify outer IPv6 header
+				// Note: RFC 8986 Section 5.1 - outer IPv6 DA is set to Segment List[0] (first segment)
+				expectedDA := segments[0] // First segment becomes outer DA
+				if !verifyOuterIPv6Header(t, outPkt, srcAddr, expectedDA) {
+					return
+				}
+
+				// Verify SRH structure
+				// Segments are stored in reverse order in SRH
+				expectedSegs := convertSegmentsToBytes(segments, int(numSegments))
+				if !verifySRHStructure(t, outPkt, int(numSegments), expectedSegs) {
+					return
+				}
+
+				// Verify inner IPv4 packet is preserved
+				if !verifyInnerIPv4Packet(t, outPkt, int(numSegments), pktSrcIP, pktDstIP) {
+					return
+				}
+
+				t.Logf("SUCCESS: Encapsulation verified (original: %d bytes, encapsulated: %d bytes)",
+					originalLen, len(outPkt))
 			}
 		})
 	}
@@ -632,48 +880,60 @@ func TestXDPProgHeadendV6Encaps(t *testing.T) {
 	}
 	defer objs.Close()
 
-	// Configure HeadendV6 map
 	mapOps := NewMapOperations(objs)
-	triggerPrefix := "2001:db8::/32"
-	
-	srcAddr, _ := ParseIPv6("fc00::1")
-	dstAddr, _ := ParseIPv6("fc00::100")
-	segments, numSegments, _ := ParseSegments([]string{
-		"fc00::200",
-		"fc00::300",
-		"fc00::400",
-	})
-
-	entry := &HeadendEntry{
-		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
-		NumSegments: numSegments,
-		SrcAddr:     srcAddr,
-		DstAddr:     dstAddr,
-		Segments:    segments,
-	}
-
-	if err := mapOps.CreateHeadendV6(triggerPrefix, entry); err != nil {
-		t.Fatalf("Failed to create headend v6 entry: %v", err)
-	}
 
 	tests := []struct {
 		name           string
-		srcIP          string
-		dstIP          string
+		triggerPrefix  string
+		srcAddr        string
+		dstAddr        string
+		segmentStrs    []string
+		pktSrcIP       string
+		pktDstIP       string
 		expectEncap    bool
 		expectedAction uint32
 	}{
 		{
-			name:           "IPv6 packet matching trigger prefix",
-			srcIP:          "2001:db8:1::1",
-			dstIP:          "2001:db8:2::1",
+			name:           "Three segments encapsulation",
+			triggerPrefix:  "2001:db8::/32",
+			srcAddr:        "fc00::1",
+			dstAddr:        "fc00::100",
+			segmentStrs:    []string{"fc00::200", "fc00::300", "fc00::400"},
+			pktSrcIP:       "2001:db8:1::1",
+			pktDstIP:       "2001:db8:2::1",
 			expectEncap:    true,
 			expectedAction: XDP_PASS,
 		},
 		{
-			name:           "IPv6 packet not matching trigger prefix",
-			srcIP:          "fd00:1::1",
-			dstIP:          "fd00:2::1",
+			name:           "Single segment encapsulation",
+			triggerPrefix:  "2001:db9::/32",
+			srcAddr:        "fc00::10",
+			dstAddr:        "fc00::200",
+			segmentStrs:    []string{"fc00::200"},
+			pktSrcIP:       "2001:db9:1::1",
+			pktDstIP:       "2001:db9:2::1",
+			expectEncap:    true,
+			expectedAction: XDP_PASS,
+		},
+		{
+			name:           "Two segments encapsulation",
+			triggerPrefix:  "2001:dba::/32",
+			srcAddr:        "fc00::20",
+			dstAddr:        "fc00::100",
+			segmentStrs:    []string{"fc00::100", "fc00::200"},
+			pktSrcIP:       "2001:dba:1::1",
+			pktDstIP:       "2001:dba:2::1",
+			expectEncap:    true,
+			expectedAction: XDP_PASS,
+		},
+		{
+			name:           "Packet not matching trigger prefix",
+			triggerPrefix:  "2001:dbb::/32",
+			srcAddr:        "fc00::1",
+			dstAddr:        "fc00::100",
+			segmentStrs:    []string{"fc00::200"},
+			pktSrcIP:       "fd00:1::1",
+			pktDstIP:       "fd00:2::1",
 			expectEncap:    false,
 			expectedAction: XDP_PASS,
 		},
@@ -681,11 +941,31 @@ func TestXDPProgHeadendV6Encaps(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Build IPv6 packet
-			srcIP := net.ParseIP(tt.srcIP)
-			dstIP := net.ParseIP(tt.dstIP)
+			// Setup entry for this test
+			srcAddr, _ := ParseIPv6(tt.srcAddr)
+			dstAddr, _ := ParseIPv6(tt.dstAddr)
+			segments, numSegments, _ := ParseSegments(tt.segmentStrs)
 
-			pkt, err := buildSimpleIPv6Packet(srcIP, dstIP)
+			entry := &HeadendEntry{
+				Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+				NumSegments: numSegments,
+				SrcAddr:     srcAddr,
+				DstAddr:     dstAddr,
+				Segments:    segments,
+			}
+
+			if err := mapOps.CreateHeadendV6(tt.triggerPrefix, entry); err != nil {
+				t.Fatalf("Failed to create headend v6 entry: %v", err)
+			}
+			defer func() {
+				_ = mapOps.DeleteHeadendV6(tt.triggerPrefix)
+			}()
+
+			// Build IPv6 packet
+			pktSrcIP := net.ParseIP(tt.pktSrcIP)
+			pktDstIP := net.ParseIP(tt.pktDstIP)
+
+			pkt, err := buildSimpleIPv6Packet(pktSrcIP, pktDstIP)
 			if err != nil {
 				t.Fatalf("Failed to build IPv6 packet: %v", err)
 			}
@@ -695,7 +975,7 @@ func TestXDPProgHeadendV6Encaps(t *testing.T) {
 			// Run BPF program
 			opts := ebpf.RunOptions{
 				Data:    pkt,
-				DataOut: make([]byte, 1500), // Large enough for encapsulated packet
+				DataOut: make([]byte, 1500),
 				Repeat:  1,
 			}
 
@@ -709,33 +989,42 @@ func TestXDPProgHeadendV6Encaps(t *testing.T) {
 			}
 
 			if tt.expectEncap {
-				// Check that packet was encapsulated (should be larger)
 				outPkt := opts.DataOut
-				
-				// The packet should now have outer IPv6 + SRH headers
-				// Minimum: Ethernet (14) + Outer IPv6 (40) + SRH (8 + 16*num_segments) + Inner IPv6 (40)
-				minExpectedLen := 14 + 40 + 8 + 16*int(numSegments) + 40
-				
+
+				// Calculate expected minimum length
+				srhLen := srhBaseLen + int(numSegments)*ipv6AddrLen
+				minExpectedLen := ethHeaderLen + ipv6HeaderLen + srhLen + ipv6HeaderLen
+
 				if len(outPkt) < minExpectedLen {
-					t.Logf("Original packet length: %d", originalLen)
-					t.Logf("Output packet length: %d", len(outPkt))
-					t.Logf("Expected minimum length: %d", minExpectedLen)
+					t.Fatalf("Output packet too short: got %d, want at least %d (original: %d)",
+						len(outPkt), minExpectedLen, originalLen)
 				}
 
-				// Check that outer IPv6 header exists
-				if len(outPkt) >= 54 { // 14 (Ethernet) + 40 (IPv6)
-					// Check outer IPv6 version
-					version := (outPkt[14] >> 4) & 0x0F
-					if version != 6 {
-						t.Logf("Note: Outer IP version is %d, expected 6", version)
-					}
-
-					// Check Next Header is routing (43) for SRH
-					nextHeader := outPkt[14+6]
-					if nextHeader != 43 {
-						t.Logf("Note: Next Header is %d, expected 43 (routing)", nextHeader)
-					}
+				// Verify Ethernet header indicates IPv6
+				if !verifyEthernetIPv6(t, outPkt) {
+					return
 				}
+
+				// Verify outer IPv6 header
+				// Note: RFC 8986 Section 5.1 - outer IPv6 DA is set to Segment List[0] (first segment)
+				expectedDA := segments[0] // First segment becomes outer DA
+				if !verifyOuterIPv6Header(t, outPkt, srcAddr, expectedDA) {
+					return
+				}
+
+				// Verify SRH structure
+				expectedSegs := convertSegmentsToBytes(segments, int(numSegments))
+				if !verifySRHStructure(t, outPkt, int(numSegments), expectedSegs) {
+					return
+				}
+
+				// Verify inner IPv6 packet is preserved
+				if !verifyInnerIPv6Packet(t, outPkt, int(numSegments), pktSrcIP, pktDstIP) {
+					return
+				}
+
+				t.Logf("SUCCESS: Encapsulation verified (original: %d bytes, encapsulated: %d bytes)",
+					originalLen, len(outPkt))
 			}
 		})
 	}

@@ -120,7 +120,7 @@ static __always_inline int process_end(
 {
     struct endpoint_ctx ectx;
     int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
-    
+
     if (ret == -1) {
         DEBUG_PRINT("End: SL is 0, passing to upper layer\n");
         return XDP_PASS;
