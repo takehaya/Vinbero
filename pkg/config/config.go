@@ -22,8 +22,8 @@ type SettingConfig struct {
 // EntriesConfig holds the capacity settings for each entry type
 type EntriesConfig struct {
 	SidFunction EntryCapacityConfig `yaml:"sid_function,omitempty"`
-	Transitv4   EntryCapacityConfig `yaml:"transitv4,omitempty"`
-	Transitv6   EntryCapacityConfig `yaml:"transitv6,omitempty"`
+	Headendv4   EntryCapacityConfig `yaml:"headendv4,omitempty"`
+	Headendv6   EntryCapacityConfig `yaml:"headendv6,omitempty"`
 	MaxSegments int                 `yaml:"max_segments,omitempty" default:"10"`
 }
 

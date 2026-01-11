@@ -98,8 +98,8 @@ jobs:
           # Add more examples as they are created:
           # - end-dx4
           # - end-dx6
-          # - transit-v4
-          # - transit-v6
+          # - headend-v4
+          # - headend-v6
     steps:
       - name: Check out code
         uses: actions/checkout@v4
