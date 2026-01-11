@@ -95,11 +95,10 @@ jobs:
       matrix:
         example:
           - end
+          - end-dx4
+          - end-dx6
           - headend-v4
           - headend-v6
-          # Add more examples as they are created:
-          # - end-dx4
-          # - end-dx6
     steps:
       - name: Check out code
         uses: actions/checkout@v4
