@@ -18,7 +18,7 @@ type (
 	LpmKeyV4         = BpfLpmKeyV4
 	LpmKeyV6         = BpfLpmKeyV6
 	SidFunctionEntry = BpfSidFunctionEntry
-	TransitEntry     = BpfTransitEntry
+	HeadendEntry     = BpfHeadendEntry
 )
 
 // MapOperator interface for testability
@@ -137,55 +137,55 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 	return result, nil
 }
 
-// ===== Transit V4 Map Operations =====
+// ===== Headend V4 Map Operations =====
 
-// CreateTransitV4 adds a transit v4 entry to the map
-func (m *MapOperations) CreateTransitV4(triggerPrefix string, entry *TransitEntry) error {
+// CreateHeadendV4 adds a headend v4 entry to the map
+func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntry) error {
 	key, err := buildLpmKeyV4(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
-	if err := m.objs.TransitV4Map.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put transit v4 entry: %w", err)
+	if err := m.objs.HeadendV4Map.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put headend v4 entry: %w", err)
 	}
 	return nil
 }
 
-// DeleteTransitV4 removes a transit v4 entry from the map
-func (m *MapOperations) DeleteTransitV4(triggerPrefix string) error {
+// DeleteHeadendV4 removes a headend v4 entry from the map
+func (m *MapOperations) DeleteHeadendV4(triggerPrefix string) error {
 	key, err := buildLpmKeyV4(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
-	if err := m.objs.TransitV4Map.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete transit v4 entry: %w", err)
+	if err := m.objs.HeadendV4Map.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete headend v4 entry: %w", err)
 	}
 	return nil
 }
 
-// GetTransitV4 retrieves a transit v4 entry from the map
-func (m *MapOperations) GetTransitV4(triggerPrefix string) (*TransitEntry, error) {
+// GetHeadendV4 retrieves a headend v4 entry from the map
+func (m *MapOperations) GetHeadendV4(triggerPrefix string) (*HeadendEntry, error) {
 	key, err := buildLpmKeyV4(triggerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
-	var entry TransitEntry
-	if err := m.objs.TransitV4Map.Lookup(key, &entry); err != nil {
-		return nil, fmt.Errorf("failed to lookup transit v4 entry: %w", err)
+	var entry HeadendEntry
+	if err := m.objs.HeadendV4Map.Lookup(key, &entry); err != nil {
+		return nil, fmt.Errorf("failed to lookup headend v4 entry: %w", err)
 	}
 	return &entry, nil
 }
 
-// ListTransitV4 returns all transit v4 entries
-func (m *MapOperations) ListTransitV4() (map[string]*TransitEntry, error) {
-	result := make(map[string]*TransitEntry)
+// ListHeadendV4 returns all headend v4 entries
+func (m *MapOperations) ListHeadendV4() (map[string]*HeadendEntry, error) {
+	result := make(map[string]*HeadendEntry)
 
 	var key LpmKeyV4
-	var entry TransitEntry
-	iter := m.objs.TransitV4Map.Iterate()
+	var entry HeadendEntry
+	iter := m.objs.HeadendV4Map.Iterate()
 
 	for iter.Next(&key, &entry) {
 		prefix := lpmKeyV4ToString(&key)
@@ -194,60 +194,60 @@ func (m *MapOperations) ListTransitV4() (map[string]*TransitEntry, error) {
 	}
 
 	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("failed to iterate transit v4 map: %w", err)
+		return nil, fmt.Errorf("failed to iterate headend v4 map: %w", err)
 	}
 	return result, nil
 }
 
-// ===== Transit V6 Map Operations =====
+// ===== Headend V6 Map Operations =====
 
-// CreateTransitV6 adds a transit v6 entry to the map
-func (m *MapOperations) CreateTransitV6(triggerPrefix string, entry *TransitEntry) error {
+// CreateHeadendV6 adds a headend v6 entry to the map
+func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntry) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
-	if err := m.objs.TransitV6Map.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put transit v6 entry: %w", err)
+	if err := m.objs.HeadendV6Map.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put headend v6 entry: %w", err)
 	}
 	return nil
 }
 
-// DeleteTransitV6 removes a transit v6 entry from the map
-func (m *MapOperations) DeleteTransitV6(triggerPrefix string) error {
+// DeleteHeadendV6 removes a headend v6 entry from the map
+func (m *MapOperations) DeleteHeadendV6(triggerPrefix string) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
-	if err := m.objs.TransitV6Map.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete transit v6 entry: %w", err)
+	if err := m.objs.HeadendV6Map.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete headend v6 entry: %w", err)
 	}
 	return nil
 }
 
-// GetTransitV6 retrieves a transit v6 entry from the map
-func (m *MapOperations) GetTransitV6(triggerPrefix string) (*TransitEntry, error) {
+// GetHeadendV6 retrieves a headend v6 entry from the map
+func (m *MapOperations) GetHeadendV6(triggerPrefix string) (*HeadendEntry, error) {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
-	var entry TransitEntry
-	if err := m.objs.TransitV6Map.Lookup(key, &entry); err != nil {
-		return nil, fmt.Errorf("failed to lookup transit v6 entry: %w", err)
+	var entry HeadendEntry
+	if err := m.objs.HeadendV6Map.Lookup(key, &entry); err != nil {
+		return nil, fmt.Errorf("failed to lookup headend v6 entry: %w", err)
 	}
 	return &entry, nil
 }
 
-// ListTransitV6 returns all transit v6 entries
-func (m *MapOperations) ListTransitV6() (map[string]*TransitEntry, error) {
-	result := make(map[string]*TransitEntry)
+// ListHeadendV6 returns all headend v6 entries
+func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
+	result := make(map[string]*HeadendEntry)
 
 	var key LpmKeyV6
-	var entry TransitEntry
-	iter := m.objs.TransitV6Map.Iterate()
+	var entry HeadendEntry
+	iter := m.objs.HeadendV6Map.Iterate()
 
 	for iter.Next(&key, &entry) {
 		prefix := lpmKeyV6ToString(&key)
@@ -256,7 +256,7 @@ func (m *MapOperations) ListTransitV6() (map[string]*TransitEntry, error) {
 	}
 
 	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("failed to iterate transit v6 map: %w", err)
+		return nil, fmt.Errorf("failed to iterate headend v6 map: %w", err)
 	}
 	return result, nil
 }

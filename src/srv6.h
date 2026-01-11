@@ -25,7 +25,7 @@ enum srv6_local_action {
     SRV6_LOCAL_ACTION_END_S = 13,
     SRV6_LOCAL_ACTION_END_AS = 14,
     SRV6_LOCAL_ACTION_END_AM = 15,
-    SRV6_LOCAL_ACTION_END_BPF = 16,
+    SRV6_LOCAL_ACTION_END_BPF = 16,  // BPF-defined local action
 };
 
 // ========== SRv6 Local Flavor ==========
@@ -38,16 +38,14 @@ enum srv6_local_flavor {
     SRV6_LOCAL_FLAVOR_USD = 4,
 };
 
-// ========== SRv6 Encap Mode (Transit behavior) ==========
-// Maps to Srv6EncapMode enum in protobuf
-enum srv6_encap_mode {
-    SRV6_ENCAP_MODE_UNSPECIFIED = 0,
-    SRV6_ENCAP_MODE_INLINE = 1,              // T.Insert
-    SRV6_ENCAP_MODE_ENCAP = 2,               // T.Encaps
-    SRV6_ENCAP_MODE_L2ENCAP = 3,             // T.Encaps.L2
-    SRV6_ENCAP_MODE_ENCAP_T_M_GTP6_D = 4,    // T.M.GTP6.D
-    SRV6_ENCAP_MODE_ENCAP_T_M_GTP6_D_DI = 5, // T.M.GTP6.D.Di
-    SRV6_ENCAP_MODE_ENCAP_H_M_GTP4_D = 6,    // H.M.GTP4.D
+// ========== SRv6 Headend Behavior ==========
+// Maps to Srv6HeadendBehavior enum in protobuf
+enum srv6_headend_behavior {
+    SRV6_HEADEND_BEHAVIOR_UNSPECIFIED = 0,
+    SRV6_HEADEND_BEHAVIOR_H_INSERT = 1,     // H.Insert (Insert SRH after IPv6 header)
+    SRV6_HEADEND_BEHAVIOR_H_ENCAPS = 2,     // H.Encaps (Encapsulate with outer IPv6+SRH)
+    SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2 = 3,  // H.Encaps.L2 (L2 frame encapsulation)
+    SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D = 4,   // H.M.GTP4.D (GTP-U encapsulation)
 };
 
 // Protocol numbers

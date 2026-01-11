@@ -219,198 +219,198 @@ var SidFunctionService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	Transitv4Service_Transitv4Create_FullMethodName = "/vinbero.v1.Transitv4Service/Transitv4Create"
-	Transitv4Service_Transitv4Delete_FullMethodName = "/vinbero.v1.Transitv4Service/Transitv4Delete"
-	Transitv4Service_Transitv4List_FullMethodName   = "/vinbero.v1.Transitv4Service/Transitv4List"
-	Transitv4Service_Transitv4Get_FullMethodName    = "/vinbero.v1.Transitv4Service/Transitv4Get"
+	Headendv4Service_Headendv4Create_FullMethodName = "/vinbero.v1.Headendv4Service/Headendv4Create"
+	Headendv4Service_Headendv4Delete_FullMethodName = "/vinbero.v1.Headendv4Service/Headendv4Delete"
+	Headendv4Service_Headendv4List_FullMethodName   = "/vinbero.v1.Headendv4Service/Headendv4List"
+	Headendv4Service_Headendv4Get_FullMethodName    = "/vinbero.v1.Headendv4Service/Headendv4Get"
 )
 
-// Transitv4ServiceClient is the client API for Transitv4Service service.
+// Headendv4ServiceClient is the client API for Headendv4Service service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type Transitv4ServiceClient interface {
-	Transitv4Create(ctx context.Context, in *Transitv4CreateRequest, opts ...grpc.CallOption) (*Transitv4CreateResponse, error)
-	Transitv4Delete(ctx context.Context, in *Transitv4DeleteRequest, opts ...grpc.CallOption) (*Transitv4DeleteResponse, error)
-	Transitv4List(ctx context.Context, in *Transitv4ListRequest, opts ...grpc.CallOption) (*Transitv4ListResponse, error)
-	Transitv4Get(ctx context.Context, in *Transitv4GetRequest, opts ...grpc.CallOption) (*Transitv4GetResponse, error)
+type Headendv4ServiceClient interface {
+	Headendv4Create(ctx context.Context, in *Headendv4CreateRequest, opts ...grpc.CallOption) (*Headendv4CreateResponse, error)
+	Headendv4Delete(ctx context.Context, in *Headendv4DeleteRequest, opts ...grpc.CallOption) (*Headendv4DeleteResponse, error)
+	Headendv4List(ctx context.Context, in *Headendv4ListRequest, opts ...grpc.CallOption) (*Headendv4ListResponse, error)
+	Headendv4Get(ctx context.Context, in *Headendv4GetRequest, opts ...grpc.CallOption) (*Headendv4GetResponse, error)
 }
 
-type transitv4ServiceClient struct {
+type headendv4ServiceClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewTransitv4ServiceClient(cc grpc.ClientConnInterface) Transitv4ServiceClient {
-	return &transitv4ServiceClient{cc}
+func NewHeadendv4ServiceClient(cc grpc.ClientConnInterface) Headendv4ServiceClient {
+	return &headendv4ServiceClient{cc}
 }
 
-func (c *transitv4ServiceClient) Transitv4Create(ctx context.Context, in *Transitv4CreateRequest, opts ...grpc.CallOption) (*Transitv4CreateResponse, error) {
-	out := new(Transitv4CreateResponse)
-	err := c.cc.Invoke(ctx, Transitv4Service_Transitv4Create_FullMethodName, in, out, opts...)
+func (c *headendv4ServiceClient) Headendv4Create(ctx context.Context, in *Headendv4CreateRequest, opts ...grpc.CallOption) (*Headendv4CreateResponse, error) {
+	out := new(Headendv4CreateResponse)
+	err := c.cc.Invoke(ctx, Headendv4Service_Headendv4Create_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *transitv4ServiceClient) Transitv4Delete(ctx context.Context, in *Transitv4DeleteRequest, opts ...grpc.CallOption) (*Transitv4DeleteResponse, error) {
-	out := new(Transitv4DeleteResponse)
-	err := c.cc.Invoke(ctx, Transitv4Service_Transitv4Delete_FullMethodName, in, out, opts...)
+func (c *headendv4ServiceClient) Headendv4Delete(ctx context.Context, in *Headendv4DeleteRequest, opts ...grpc.CallOption) (*Headendv4DeleteResponse, error) {
+	out := new(Headendv4DeleteResponse)
+	err := c.cc.Invoke(ctx, Headendv4Service_Headendv4Delete_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *transitv4ServiceClient) Transitv4List(ctx context.Context, in *Transitv4ListRequest, opts ...grpc.CallOption) (*Transitv4ListResponse, error) {
-	out := new(Transitv4ListResponse)
-	err := c.cc.Invoke(ctx, Transitv4Service_Transitv4List_FullMethodName, in, out, opts...)
+func (c *headendv4ServiceClient) Headendv4List(ctx context.Context, in *Headendv4ListRequest, opts ...grpc.CallOption) (*Headendv4ListResponse, error) {
+	out := new(Headendv4ListResponse)
+	err := c.cc.Invoke(ctx, Headendv4Service_Headendv4List_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *transitv4ServiceClient) Transitv4Get(ctx context.Context, in *Transitv4GetRequest, opts ...grpc.CallOption) (*Transitv4GetResponse, error) {
-	out := new(Transitv4GetResponse)
-	err := c.cc.Invoke(ctx, Transitv4Service_Transitv4Get_FullMethodName, in, out, opts...)
+func (c *headendv4ServiceClient) Headendv4Get(ctx context.Context, in *Headendv4GetRequest, opts ...grpc.CallOption) (*Headendv4GetResponse, error) {
+	out := new(Headendv4GetResponse)
+	err := c.cc.Invoke(ctx, Headendv4Service_Headendv4Get_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// Transitv4ServiceServer is the server API for Transitv4Service service.
-// All implementations should embed UnimplementedTransitv4ServiceServer
+// Headendv4ServiceServer is the server API for Headendv4Service service.
+// All implementations should embed UnimplementedHeadendv4ServiceServer
 // for forward compatibility
-type Transitv4ServiceServer interface {
-	Transitv4Create(context.Context, *Transitv4CreateRequest) (*Transitv4CreateResponse, error)
-	Transitv4Delete(context.Context, *Transitv4DeleteRequest) (*Transitv4DeleteResponse, error)
-	Transitv4List(context.Context, *Transitv4ListRequest) (*Transitv4ListResponse, error)
-	Transitv4Get(context.Context, *Transitv4GetRequest) (*Transitv4GetResponse, error)
+type Headendv4ServiceServer interface {
+	Headendv4Create(context.Context, *Headendv4CreateRequest) (*Headendv4CreateResponse, error)
+	Headendv4Delete(context.Context, *Headendv4DeleteRequest) (*Headendv4DeleteResponse, error)
+	Headendv4List(context.Context, *Headendv4ListRequest) (*Headendv4ListResponse, error)
+	Headendv4Get(context.Context, *Headendv4GetRequest) (*Headendv4GetResponse, error)
 }
 
-// UnimplementedTransitv4ServiceServer should be embedded to have forward compatible implementations.
-type UnimplementedTransitv4ServiceServer struct {
+// UnimplementedHeadendv4ServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedHeadendv4ServiceServer struct {
 }
 
-func (UnimplementedTransitv4ServiceServer) Transitv4Create(context.Context, *Transitv4CreateRequest) (*Transitv4CreateResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Transitv4Create not implemented")
+func (UnimplementedHeadendv4ServiceServer) Headendv4Create(context.Context, *Headendv4CreateRequest) (*Headendv4CreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv4Create not implemented")
 }
-func (UnimplementedTransitv4ServiceServer) Transitv4Delete(context.Context, *Transitv4DeleteRequest) (*Transitv4DeleteResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Transitv4Delete not implemented")
+func (UnimplementedHeadendv4ServiceServer) Headendv4Delete(context.Context, *Headendv4DeleteRequest) (*Headendv4DeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv4Delete not implemented")
 }
-func (UnimplementedTransitv4ServiceServer) Transitv4List(context.Context, *Transitv4ListRequest) (*Transitv4ListResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Transitv4List not implemented")
+func (UnimplementedHeadendv4ServiceServer) Headendv4List(context.Context, *Headendv4ListRequest) (*Headendv4ListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv4List not implemented")
 }
-func (UnimplementedTransitv4ServiceServer) Transitv4Get(context.Context, *Transitv4GetRequest) (*Transitv4GetResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Transitv4Get not implemented")
+func (UnimplementedHeadendv4ServiceServer) Headendv4Get(context.Context, *Headendv4GetRequest) (*Headendv4GetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv4Get not implemented")
 }
 
-// UnsafeTransitv4ServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to Transitv4ServiceServer will
+// UnsafeHeadendv4ServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to Headendv4ServiceServer will
 // result in compilation errors.
-type UnsafeTransitv4ServiceServer interface {
-	mustEmbedUnimplementedTransitv4ServiceServer()
+type UnsafeHeadendv4ServiceServer interface {
+	mustEmbedUnimplementedHeadendv4ServiceServer()
 }
 
-func RegisterTransitv4ServiceServer(s grpc.ServiceRegistrar, srv Transitv4ServiceServer) {
-	s.RegisterService(&Transitv4Service_ServiceDesc, srv)
+func RegisterHeadendv4ServiceServer(s grpc.ServiceRegistrar, srv Headendv4ServiceServer) {
+	s.RegisterService(&Headendv4Service_ServiceDesc, srv)
 }
 
-func _Transitv4Service_Transitv4Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Transitv4CreateRequest)
+func _Headendv4Service_Headendv4Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv4CreateRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(Transitv4ServiceServer).Transitv4Create(ctx, in)
+		return srv.(Headendv4ServiceServer).Headendv4Create(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Transitv4Service_Transitv4Create_FullMethodName,
+		FullMethod: Headendv4Service_Headendv4Create_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(Transitv4ServiceServer).Transitv4Create(ctx, req.(*Transitv4CreateRequest))
+		return srv.(Headendv4ServiceServer).Headendv4Create(ctx, req.(*Headendv4CreateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Transitv4Service_Transitv4Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Transitv4DeleteRequest)
+func _Headendv4Service_Headendv4Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv4DeleteRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(Transitv4ServiceServer).Transitv4Delete(ctx, in)
+		return srv.(Headendv4ServiceServer).Headendv4Delete(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Transitv4Service_Transitv4Delete_FullMethodName,
+		FullMethod: Headendv4Service_Headendv4Delete_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(Transitv4ServiceServer).Transitv4Delete(ctx, req.(*Transitv4DeleteRequest))
+		return srv.(Headendv4ServiceServer).Headendv4Delete(ctx, req.(*Headendv4DeleteRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Transitv4Service_Transitv4List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Transitv4ListRequest)
+func _Headendv4Service_Headendv4List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv4ListRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(Transitv4ServiceServer).Transitv4List(ctx, in)
+		return srv.(Headendv4ServiceServer).Headendv4List(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Transitv4Service_Transitv4List_FullMethodName,
+		FullMethod: Headendv4Service_Headendv4List_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(Transitv4ServiceServer).Transitv4List(ctx, req.(*Transitv4ListRequest))
+		return srv.(Headendv4ServiceServer).Headendv4List(ctx, req.(*Headendv4ListRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Transitv4Service_Transitv4Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Transitv4GetRequest)
+func _Headendv4Service_Headendv4Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv4GetRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(Transitv4ServiceServer).Transitv4Get(ctx, in)
+		return srv.(Headendv4ServiceServer).Headendv4Get(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Transitv4Service_Transitv4Get_FullMethodName,
+		FullMethod: Headendv4Service_Headendv4Get_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(Transitv4ServiceServer).Transitv4Get(ctx, req.(*Transitv4GetRequest))
+		return srv.(Headendv4ServiceServer).Headendv4Get(ctx, req.(*Headendv4GetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-// Transitv4Service_ServiceDesc is the grpc.ServiceDesc for Transitv4Service service.
+// Headendv4Service_ServiceDesc is the grpc.ServiceDesc for Headendv4Service service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
-var Transitv4Service_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "vinbero.v1.Transitv4Service",
-	HandlerType: (*Transitv4ServiceServer)(nil),
+var Headendv4Service_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.Headendv4Service",
+	HandlerType: (*Headendv4ServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "Transitv4Create",
-			Handler:    _Transitv4Service_Transitv4Create_Handler,
+			MethodName: "Headendv4Create",
+			Handler:    _Headendv4Service_Headendv4Create_Handler,
 		},
 		{
-			MethodName: "Transitv4Delete",
-			Handler:    _Transitv4Service_Transitv4Delete_Handler,
+			MethodName: "Headendv4Delete",
+			Handler:    _Headendv4Service_Headendv4Delete_Handler,
 		},
 		{
-			MethodName: "Transitv4List",
-			Handler:    _Transitv4Service_Transitv4List_Handler,
+			MethodName: "Headendv4List",
+			Handler:    _Headendv4Service_Headendv4List_Handler,
 		},
 		{
-			MethodName: "Transitv4Get",
-			Handler:    _Transitv4Service_Transitv4Get_Handler,
+			MethodName: "Headendv4Get",
+			Handler:    _Headendv4Service_Headendv4Get_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -418,198 +418,198 @@ var Transitv4Service_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	Transitv6Service_Transitv6Create_FullMethodName = "/vinbero.v1.Transitv6Service/Transitv6Create"
-	Transitv6Service_Transitv6Delete_FullMethodName = "/vinbero.v1.Transitv6Service/Transitv6Delete"
-	Transitv6Service_Transitv6List_FullMethodName   = "/vinbero.v1.Transitv6Service/Transitv6List"
-	Transitv6Service_Transitv6Get_FullMethodName    = "/vinbero.v1.Transitv6Service/Transitv6Get"
+	Headendv6Service_Headendv6Create_FullMethodName = "/vinbero.v1.Headendv6Service/Headendv6Create"
+	Headendv6Service_Headendv6Delete_FullMethodName = "/vinbero.v1.Headendv6Service/Headendv6Delete"
+	Headendv6Service_Headendv6List_FullMethodName   = "/vinbero.v1.Headendv6Service/Headendv6List"
+	Headendv6Service_Headendv6Get_FullMethodName    = "/vinbero.v1.Headendv6Service/Headendv6Get"
 )
 
-// Transitv6ServiceClient is the client API for Transitv6Service service.
+// Headendv6ServiceClient is the client API for Headendv6Service service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type Transitv6ServiceClient interface {
-	Transitv6Create(ctx context.Context, in *Transitv6CreateRequest, opts ...grpc.CallOption) (*Transitv6CreateResponse, error)
-	Transitv6Delete(ctx context.Context, in *Transitv6DeleteRequest, opts ...grpc.CallOption) (*Transitv6DeleteResponse, error)
-	Transitv6List(ctx context.Context, in *Transitv6ListRequest, opts ...grpc.CallOption) (*Transitv6ListResponse, error)
-	Transitv6Get(ctx context.Context, in *Transitv6GetRequest, opts ...grpc.CallOption) (*Transitv6GetResponse, error)
+type Headendv6ServiceClient interface {
+	Headendv6Create(ctx context.Context, in *Headendv6CreateRequest, opts ...grpc.CallOption) (*Headendv6CreateResponse, error)
+	Headendv6Delete(ctx context.Context, in *Headendv6DeleteRequest, opts ...grpc.CallOption) (*Headendv6DeleteResponse, error)
+	Headendv6List(ctx context.Context, in *Headendv6ListRequest, opts ...grpc.CallOption) (*Headendv6ListResponse, error)
+	Headendv6Get(ctx context.Context, in *Headendv6GetRequest, opts ...grpc.CallOption) (*Headendv6GetResponse, error)
 }
 
-type transitv6ServiceClient struct {
+type headendv6ServiceClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewTransitv6ServiceClient(cc grpc.ClientConnInterface) Transitv6ServiceClient {
-	return &transitv6ServiceClient{cc}
+func NewHeadendv6ServiceClient(cc grpc.ClientConnInterface) Headendv6ServiceClient {
+	return &headendv6ServiceClient{cc}
 }
 
-func (c *transitv6ServiceClient) Transitv6Create(ctx context.Context, in *Transitv6CreateRequest, opts ...grpc.CallOption) (*Transitv6CreateResponse, error) {
-	out := new(Transitv6CreateResponse)
-	err := c.cc.Invoke(ctx, Transitv6Service_Transitv6Create_FullMethodName, in, out, opts...)
+func (c *headendv6ServiceClient) Headendv6Create(ctx context.Context, in *Headendv6CreateRequest, opts ...grpc.CallOption) (*Headendv6CreateResponse, error) {
+	out := new(Headendv6CreateResponse)
+	err := c.cc.Invoke(ctx, Headendv6Service_Headendv6Create_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *transitv6ServiceClient) Transitv6Delete(ctx context.Context, in *Transitv6DeleteRequest, opts ...grpc.CallOption) (*Transitv6DeleteResponse, error) {
-	out := new(Transitv6DeleteResponse)
-	err := c.cc.Invoke(ctx, Transitv6Service_Transitv6Delete_FullMethodName, in, out, opts...)
+func (c *headendv6ServiceClient) Headendv6Delete(ctx context.Context, in *Headendv6DeleteRequest, opts ...grpc.CallOption) (*Headendv6DeleteResponse, error) {
+	out := new(Headendv6DeleteResponse)
+	err := c.cc.Invoke(ctx, Headendv6Service_Headendv6Delete_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *transitv6ServiceClient) Transitv6List(ctx context.Context, in *Transitv6ListRequest, opts ...grpc.CallOption) (*Transitv6ListResponse, error) {
-	out := new(Transitv6ListResponse)
-	err := c.cc.Invoke(ctx, Transitv6Service_Transitv6List_FullMethodName, in, out, opts...)
+func (c *headendv6ServiceClient) Headendv6List(ctx context.Context, in *Headendv6ListRequest, opts ...grpc.CallOption) (*Headendv6ListResponse, error) {
+	out := new(Headendv6ListResponse)
+	err := c.cc.Invoke(ctx, Headendv6Service_Headendv6List_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *transitv6ServiceClient) Transitv6Get(ctx context.Context, in *Transitv6GetRequest, opts ...grpc.CallOption) (*Transitv6GetResponse, error) {
-	out := new(Transitv6GetResponse)
-	err := c.cc.Invoke(ctx, Transitv6Service_Transitv6Get_FullMethodName, in, out, opts...)
+func (c *headendv6ServiceClient) Headendv6Get(ctx context.Context, in *Headendv6GetRequest, opts ...grpc.CallOption) (*Headendv6GetResponse, error) {
+	out := new(Headendv6GetResponse)
+	err := c.cc.Invoke(ctx, Headendv6Service_Headendv6Get_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// Transitv6ServiceServer is the server API for Transitv6Service service.
-// All implementations should embed UnimplementedTransitv6ServiceServer
+// Headendv6ServiceServer is the server API for Headendv6Service service.
+// All implementations should embed UnimplementedHeadendv6ServiceServer
 // for forward compatibility
-type Transitv6ServiceServer interface {
-	Transitv6Create(context.Context, *Transitv6CreateRequest) (*Transitv6CreateResponse, error)
-	Transitv6Delete(context.Context, *Transitv6DeleteRequest) (*Transitv6DeleteResponse, error)
-	Transitv6List(context.Context, *Transitv6ListRequest) (*Transitv6ListResponse, error)
-	Transitv6Get(context.Context, *Transitv6GetRequest) (*Transitv6GetResponse, error)
+type Headendv6ServiceServer interface {
+	Headendv6Create(context.Context, *Headendv6CreateRequest) (*Headendv6CreateResponse, error)
+	Headendv6Delete(context.Context, *Headendv6DeleteRequest) (*Headendv6DeleteResponse, error)
+	Headendv6List(context.Context, *Headendv6ListRequest) (*Headendv6ListResponse, error)
+	Headendv6Get(context.Context, *Headendv6GetRequest) (*Headendv6GetResponse, error)
 }
 
-// UnimplementedTransitv6ServiceServer should be embedded to have forward compatible implementations.
-type UnimplementedTransitv6ServiceServer struct {
+// UnimplementedHeadendv6ServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedHeadendv6ServiceServer struct {
 }
 
-func (UnimplementedTransitv6ServiceServer) Transitv6Create(context.Context, *Transitv6CreateRequest) (*Transitv6CreateResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Transitv6Create not implemented")
+func (UnimplementedHeadendv6ServiceServer) Headendv6Create(context.Context, *Headendv6CreateRequest) (*Headendv6CreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv6Create not implemented")
 }
-func (UnimplementedTransitv6ServiceServer) Transitv6Delete(context.Context, *Transitv6DeleteRequest) (*Transitv6DeleteResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Transitv6Delete not implemented")
+func (UnimplementedHeadendv6ServiceServer) Headendv6Delete(context.Context, *Headendv6DeleteRequest) (*Headendv6DeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv6Delete not implemented")
 }
-func (UnimplementedTransitv6ServiceServer) Transitv6List(context.Context, *Transitv6ListRequest) (*Transitv6ListResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Transitv6List not implemented")
+func (UnimplementedHeadendv6ServiceServer) Headendv6List(context.Context, *Headendv6ListRequest) (*Headendv6ListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv6List not implemented")
 }
-func (UnimplementedTransitv6ServiceServer) Transitv6Get(context.Context, *Transitv6GetRequest) (*Transitv6GetResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Transitv6Get not implemented")
+func (UnimplementedHeadendv6ServiceServer) Headendv6Get(context.Context, *Headendv6GetRequest) (*Headendv6GetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv6Get not implemented")
 }
 
-// UnsafeTransitv6ServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to Transitv6ServiceServer will
+// UnsafeHeadendv6ServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to Headendv6ServiceServer will
 // result in compilation errors.
-type UnsafeTransitv6ServiceServer interface {
-	mustEmbedUnimplementedTransitv6ServiceServer()
+type UnsafeHeadendv6ServiceServer interface {
+	mustEmbedUnimplementedHeadendv6ServiceServer()
 }
 
-func RegisterTransitv6ServiceServer(s grpc.ServiceRegistrar, srv Transitv6ServiceServer) {
-	s.RegisterService(&Transitv6Service_ServiceDesc, srv)
+func RegisterHeadendv6ServiceServer(s grpc.ServiceRegistrar, srv Headendv6ServiceServer) {
+	s.RegisterService(&Headendv6Service_ServiceDesc, srv)
 }
 
-func _Transitv6Service_Transitv6Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Transitv6CreateRequest)
+func _Headendv6Service_Headendv6Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv6CreateRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(Transitv6ServiceServer).Transitv6Create(ctx, in)
+		return srv.(Headendv6ServiceServer).Headendv6Create(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Transitv6Service_Transitv6Create_FullMethodName,
+		FullMethod: Headendv6Service_Headendv6Create_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(Transitv6ServiceServer).Transitv6Create(ctx, req.(*Transitv6CreateRequest))
+		return srv.(Headendv6ServiceServer).Headendv6Create(ctx, req.(*Headendv6CreateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Transitv6Service_Transitv6Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Transitv6DeleteRequest)
+func _Headendv6Service_Headendv6Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv6DeleteRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(Transitv6ServiceServer).Transitv6Delete(ctx, in)
+		return srv.(Headendv6ServiceServer).Headendv6Delete(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Transitv6Service_Transitv6Delete_FullMethodName,
+		FullMethod: Headendv6Service_Headendv6Delete_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(Transitv6ServiceServer).Transitv6Delete(ctx, req.(*Transitv6DeleteRequest))
+		return srv.(Headendv6ServiceServer).Headendv6Delete(ctx, req.(*Headendv6DeleteRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Transitv6Service_Transitv6List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Transitv6ListRequest)
+func _Headendv6Service_Headendv6List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv6ListRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(Transitv6ServiceServer).Transitv6List(ctx, in)
+		return srv.(Headendv6ServiceServer).Headendv6List(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Transitv6Service_Transitv6List_FullMethodName,
+		FullMethod: Headendv6Service_Headendv6List_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(Transitv6ServiceServer).Transitv6List(ctx, req.(*Transitv6ListRequest))
+		return srv.(Headendv6ServiceServer).Headendv6List(ctx, req.(*Headendv6ListRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Transitv6Service_Transitv6Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Transitv6GetRequest)
+func _Headendv6Service_Headendv6Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv6GetRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(Transitv6ServiceServer).Transitv6Get(ctx, in)
+		return srv.(Headendv6ServiceServer).Headendv6Get(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Transitv6Service_Transitv6Get_FullMethodName,
+		FullMethod: Headendv6Service_Headendv6Get_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(Transitv6ServiceServer).Transitv6Get(ctx, req.(*Transitv6GetRequest))
+		return srv.(Headendv6ServiceServer).Headendv6Get(ctx, req.(*Headendv6GetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-// Transitv6Service_ServiceDesc is the grpc.ServiceDesc for Transitv6Service service.
+// Headendv6Service_ServiceDesc is the grpc.ServiceDesc for Headendv6Service service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
-var Transitv6Service_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "vinbero.v1.Transitv6Service",
-	HandlerType: (*Transitv6ServiceServer)(nil),
+var Headendv6Service_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.Headendv6Service",
+	HandlerType: (*Headendv6ServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "Transitv6Create",
-			Handler:    _Transitv6Service_Transitv6Create_Handler,
+			MethodName: "Headendv6Create",
+			Handler:    _Headendv6Service_Headendv6Create_Handler,
 		},
 		{
-			MethodName: "Transitv6Delete",
-			Handler:    _Transitv6Service_Transitv6Delete_Handler,
+			MethodName: "Headendv6Delete",
+			Handler:    _Headendv6Service_Headendv6Delete_Handler,
 		},
 		{
-			MethodName: "Transitv6List",
-			Handler:    _Transitv6Service_Transitv6List_Handler,
+			MethodName: "Headendv6List",
+			Handler:    _Headendv6Service_Headendv6List_Handler,
 		},
 		{
-			MethodName: "Transitv6Get",
-			Handler:    _Transitv6Service_Transitv6Get_Handler,
+			MethodName: "Headendv6Get",
+			Handler:    _Headendv6Service_Headendv6Get_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

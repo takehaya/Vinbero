@@ -1,7 +1,7 @@
 internal:
   devices:
-    - end-rt2rt1  # Interface towards router1 (with "end-" prefix)
-    - end-rt2rt3  # Interface towards router3 (with "end-" prefix)
+    - hv4-rt1h1   # Interface towards host1 (with prefix)
+    - hv4-rt1rt2  # Interface towards router2 (with prefix)
   bpf:
     device_mode: generic  # Required for veth pairs
     verifier_log_level: 2

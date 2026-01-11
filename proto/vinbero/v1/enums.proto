@@ -34,15 +34,13 @@ enum Srv6LocalAction {
   SRV6_LOCAL_ACTION_END_BPF = 16; // End.BPF
 }
 
-// Srv6EncapMode represents SRv6 encapsulation modes for Transit behavior
-enum Srv6EncapMode {
-  SRV6_ENCAP_MODE_UNSPECIFIED = 0;
-  SRV6_ENCAP_MODE_INLINE = 1; // T.Insert
-  SRV6_ENCAP_MODE_ENCAP = 2; // T.Encaps
-  SRV6_ENCAP_MODE_L2ENCAP = 3; // T.Encaps.L2
-  SRV6_ENCAP_MODE_ENCAP_T_M_GTP6_D = 4; // T.M.GTP6.D
-  SRV6_ENCAP_MODE_ENCAP_T_M_GTP6_D_DI = 5; // T.M.GTP6.D.Di
-  SRV6_ENCAP_MODE_ENCAP_H_M_GTP4_D = 6; // H.M.GTP4.D
+// Srv6HeadendBehavior represents SRv6 Headend behavior types
+enum Srv6HeadendBehavior {
+  SRV6_HEADEND_BEHAVIOR_UNSPECIFIED = 0;
+  SRV6_HEADEND_BEHAVIOR_H_INSERT = 1; // H.Insert (Insert SRH after IPv6 header)
+  SRV6_HEADEND_BEHAVIOR_H_ENCAPS = 2; // H.Encaps (Encapsulate with outer IPv6+SRH)
+  SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2 = 3; // H.Encaps.L2 (L2 frame encapsulation)
+  SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D = 4; // H.M.GTP4.D (GTP-U encapsulation)
 }
 
 // OperationError represents an error that occurred during a bulk operation

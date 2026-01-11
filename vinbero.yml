@@ -1,5 +1,4 @@
 internal:
-  logfile: "./vinbero.log"
   devices:
     - eth1
     - eth2
@@ -16,10 +15,13 @@ internal:
     add_caller: false
 
 settings:
+  # Runtime options for BPF program
+  enable_stats: false   # Enable packet statistics collection
+  enable_xdpcap: false  # Enable xdpcap packet capture support
   entries:
     sid_function:
       capacity: 1024
-    transitv4:
+    headendv4:
       capacity: 1024
-    transitv6:
+    headendv6:
       capacity: 1024
