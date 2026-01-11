@@ -16,7 +16,9 @@ type Config struct {
 }
 
 type SettingConfig struct {
-	Entries EntriesConfig `yaml:"entries,omitempty"`
+	Entries      EntriesConfig `yaml:"entries,omitempty"`
+	EnableStats  bool          `yaml:"enable_stats,omitempty" default:"false"`
+	EnableXdpcap bool          `yaml:"enable_xdpcap,omitempty" default:"false"`
 }
 
 // EntriesConfig holds the capacity settings for each entry type

@@ -19,7 +19,10 @@ type Vinbero struct {
 }
 
 func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
-	obj, err := bpf.ReadCollection(nil, cfg)
+	// Build BPF constants from config
+	constants := buildBpfConstants(cfg)
+
+	obj, err := bpf.ReadCollection(constants, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("fail to bpf load: %w", err)
 	}
@@ -85,4 +88,24 @@ func (v *Vinbero) Close() error {
 		return fmt.Errorf("failed to close bpf objects: %w", err)
 	}
 	return nil
+}
+
+// buildBpfConstants creates BPF constant values from config
+func buildBpfConstants(cfg *config.Config) map[string]interface{} {
+	constants := make(map[string]interface{})
+
+	// Convert bool to uint8 (BPF uses uint8 for these flags)
+	if cfg.Setting.EnableStats {
+		constants["enable_stats"] = uint8(1)
+	} else {
+		constants["enable_stats"] = uint8(0)
+	}
+
+	if cfg.Setting.EnableXdpcap {
+		constants["enable_xdpcap"] = uint32(1)
+	} else {
+		constants["enable_xdpcap"] = uint32(0)
+	}
+
+	return constants
 }
