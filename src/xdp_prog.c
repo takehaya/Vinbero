@@ -17,6 +17,7 @@
 #include "srv6.h"
 #include "xdp_utils.h"
 #include "srv6_headend_utils.h"
+#include "srv6_headend.h"
 #include "srv6_encaps.h"
 #include "xdp_stats.h"
 #include "xdpcap.h"
@@ -62,21 +63,14 @@ static __always_inline int process_headend_v4(
     };
     __builtin_memcpy(key.addr, &iph->daddr, IPV4_ADDR_LEN);
 
-    // 2. Lookup in headend_v4_map
+    // 2. Lookup and validate entry
     struct headend_entry *entry = bpf_map_lookup_elem(&headend_v4_map, &key);
-    if (!entry) {
-        return XDP_PASS;  // No rule, passthrough
-    }
-
-    // 3. Check mode (only H.Encaps supported for now)
-    if (entry->mode != SRV6_HEADEND_BEHAVIOR_H_ENCAPS) {
-        DEBUG_PRINT("Headend.v4: Unsupported mode %d\n", entry->mode);
+    if (!headend_should_encaps(entry)) {
         return XDP_PASS;
     }
 
-    DEBUG_PRINT("Headend.v4: Found entry, performing H.Encaps\n");
-
-    // 4. Perform H.Encaps
+    // 3. Perform H.Encaps
+    DEBUG_PRINT("Headend.v4: Performing H.Encaps\n");
     return do_h_encaps_v4(ctx, eth, iph, entry);
 }
 
@@ -118,21 +112,14 @@ static __always_inline int process_headend_v6(
     };
     __builtin_memcpy(key.addr, &ip6h->daddr, IPV6_ADDR_LEN);
 
-    // 2. Lookup in headend_v6_map
+    // 2. Lookup and validate entry
     struct headend_entry *entry = bpf_map_lookup_elem(&headend_v6_map, &key);
-    if (!entry) {
-        return XDP_PASS;  // No rule, passthrough
-    }
-
-    // 3. Check mode (only H.Encaps supported for now)
-    if (entry->mode != SRV6_HEADEND_BEHAVIOR_H_ENCAPS) {
-        DEBUG_PRINT("Headend.v6: Unsupported mode %d\n", entry->mode);
+    if (!headend_should_encaps(entry)) {
         return XDP_PASS;
     }
 
-    DEBUG_PRINT("Headend.v6: Found entry, performing H.Encaps\n");
-
-    // 4. Perform H.Encaps
+    // 3. Perform H.Encaps
+    DEBUG_PRINT("Headend.v6: Performing H.Encaps\n");
     return do_h_encaps_v6(ctx, eth, ip6h, entry);
 }
 
