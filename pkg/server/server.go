@@ -41,17 +41,17 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered SidFunctionService", zap.String("path", path))
 
-	// Transitv4 service
-	transitv4Server := NewTransitv4Server(s.mapOps)
-	path, handler = vinberov1connect.NewTransitv4ServiceHandler(transitv4Server)
+	// Headendv4 service
+	headendv4Server := NewHeadendv4Server(s.mapOps)
+	path, handler = vinberov1connect.NewHeadendv4ServiceHandler(headendv4Server)
 	s.mux.Handle(path, handler)
-	s.logger.Info("Registered Transitv4Service", zap.String("path", path))
+	s.logger.Info("Registered Headendv4Service", zap.String("path", path))
 
-	// Transitv6 service
-	transitv6Server := NewTransitv6Server(s.mapOps)
-	path, handler = vinberov1connect.NewTransitv6ServiceHandler(transitv6Server)
+	// Headendv6 service
+	headendv6Server := NewHeadendv6Server(s.mapOps)
+	path, handler = vinberov1connect.NewHeadendv6ServiceHandler(headendv6Server)
 	s.mux.Handle(path, handler)
-	s.logger.Info("Registered Transitv6Service", zap.String("path", path))
+	s.logger.Info("Registered Headendv6Service", zap.String("path", path))
 
 	// Health check endpoint
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

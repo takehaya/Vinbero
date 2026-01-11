@@ -13,6 +13,16 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type BpfHeadendEntry struct {
+	_           structs.HostLayout
+	Mode        uint8
+	NumSegments uint8
+	Pad         [2]uint8
+	SrcAddr     [16]uint8
+	DstAddr     [16]uint8
+	Segments    [10][16]uint8
+}
+
 type BpfLpmKeyV4 struct {
 	_         structs.HostLayout
 	Prefixlen uint32
@@ -35,16 +45,6 @@ type BpfSidFunctionEntry struct {
 	ArgSrcOffset uint8
 	ArgDstOffset uint8
 	Pad          [2]uint8
-}
-
-type BpfTransitEntry struct {
-	_           structs.HostLayout
-	Mode        uint8
-	NumSegments uint8
-	Pad         [2]uint8
-	SrcAddr     [16]uint8
-	DstAddr     [16]uint8
-	Segments    [10][16]uint8
 }
 
 // LoadBpf returns the embedded CollectionSpec for Bpf.
@@ -96,9 +96,9 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
+	HeadendV4Map   *ebpf.MapSpec `ebpf:"headend_v4_map"`
+	HeadendV6Map   *ebpf.MapSpec `ebpf:"headend_v6_map"`
 	SidFunctionMap *ebpf.MapSpec `ebpf:"sid_function_map"`
-	TransitV4Map   *ebpf.MapSpec `ebpf:"transit_v4_map"`
-	TransitV6Map   *ebpf.MapSpec `ebpf:"transit_v6_map"`
 	XdpcapHook     *ebpf.MapSpec `ebpf:"xdpcap_hook"`
 }
 
@@ -128,17 +128,17 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
+	HeadendV4Map   *ebpf.Map `ebpf:"headend_v4_map"`
+	HeadendV6Map   *ebpf.Map `ebpf:"headend_v6_map"`
 	SidFunctionMap *ebpf.Map `ebpf:"sid_function_map"`
-	TransitV4Map   *ebpf.Map `ebpf:"transit_v4_map"`
-	TransitV6Map   *ebpf.Map `ebpf:"transit_v6_map"`
 	XdpcapHook     *ebpf.Map `ebpf:"xdpcap_hook"`
 }
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.HeadendV4Map,
+		m.HeadendV6Map,
 		m.SidFunctionMap,
-		m.TransitV4Map,
-		m.TransitV6Map,
 		m.XdpcapHook,
 	)
 }

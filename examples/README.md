@@ -39,7 +39,7 @@ GitHub Actionsのmatrix strategyにより、各exampleは独立したジョブ�
 ```yaml
 strategy:
   matrix:
-    example: [end]  # 将来: end-dx4, end-dx6, transit-v4, ...
+    example: [end]  # 将来: end-dx4, end-dx6, headend-v4, ...
 ```
 
 各exampleはディレクトリ名をプレフィックスとして独自のnamespace空間を持つため（例: `end-host1`, `end-router1`）、衝突なく並列実行できます。
