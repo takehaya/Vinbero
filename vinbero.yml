@@ -1,5 +1,4 @@
 internal:
-  logfile: "./vinbero.log"
   devices:
     - eth1
     - eth2
