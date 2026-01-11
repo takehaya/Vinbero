@@ -12,7 +12,11 @@
 #define DEBUG_PRINT(fmt, ...) (void)0
 #endif
 
-// AF_INET6 is not available in BPF programs, define it manually
+// AF_INET/AF_INET6 are not available in BPF programs, define it manually
+#ifndef AF_INET
+#define AF_INET 2
+#endif
+
 #ifndef AF_INET6
 #define AF_INET6 10
 #endif

@@ -11,6 +11,7 @@
 #include "srv6.h"
 #include "srv6_headend_utils.h"
 #include "srv6_fib.h"
+#include "srv6_decaps.h"
 #include "xdp_stats.h"
 
 // Endpoint processing context - shared by all endpoint functions
@@ -181,12 +182,50 @@ static __always_inline int process_end_dx4(
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry)
 {
-    // TODO: Implement IPv4 decapsulation
-    // 1. Check SL == 0
-    // 2. Strip outer IPv6 + SRH headers
-    // 3. Forward inner IPv4 packet to nexthop
-    DEBUG_PRINT("End.DX4: Not yet implemented\n");
-    return XDP_PASS;
+    // 1. RFC 8986: SL must be 0 for DX4
+    if (srh->segments_left != 0) {
+        DEBUG_PRINT("End.DX4: SL != 0, passing\n");
+        return XDP_PASS;
+    }
+
+    // 2. Strip outer IPv6+SRH, expose inner IPv4
+    if (srv6_decap(ctx, srh, IPPROTO_IPIP) != 0) {
+        DEBUG_PRINT("End.DX4: Decapsulation failed\n");
+        return XDP_DROP;
+    }
+
+    // 3. Re-fetch pointers after adjust_head
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    // 4. Validate Ethernet + IPv4 headers
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end) {
+        return XDP_DROP;
+    }
+
+    struct iphdr *iph = (void *)(eth + 1);
+    if ((void *)(iph + 1) > data_end) {
+        return XDP_DROP;
+    }
+
+    // 5. Set EtherType to IPv4
+    eth->h_proto = bpf_htons(ETH_P_IP);
+
+    // 6. FIB lookup on inner IPv4 and redirect
+    DEBUG_PRINT("End.DX4: Decapsulated, forwarding inner IPv4\n");
+    STATS_INC(STATS_SRV6_END, 0);
+
+    // After decapsulation, we must not return XDP_PASS because:
+    // 1. Packet structure has changed (IPv4 instead of IPv6+SRH)
+    // 2. Old pointers in caller are invalidated
+    // So if FIB lookup fails (XDP_PASS), convert to XDP_DROP
+    int action = srv6_fib_redirect_v4(ctx, iph, eth);
+    if (action == XDP_PASS) {
+        DEBUG_PRINT("End.DX4: FIB lookup failed, dropping\n");
+        return XDP_DROP;
+    }
+    return action;
 }
 
 // End.DX6: Decapsulation with IPv6 cross-connect
@@ -197,12 +236,49 @@ static __always_inline int process_end_dx6(
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry)
 {
-    // TODO: Implement IPv6 decapsulation
-    // 1. Check SL == 0
-    // 2. Strip outer IPv6 + SRH headers
-    // 3. Forward inner IPv6 packet to nexthop
-    DEBUG_PRINT("End.DX6: Not yet implemented\n");
-    return XDP_PASS;
+    // 1. RFC 8986: SL must be 0 for DX6
+    if (srh->segments_left != 0) {
+        DEBUG_PRINT("End.DX6: SL != 0, passing\n");
+        return XDP_PASS;
+    }
+
+    // 2. Strip outer IPv6+SRH, expose inner IPv6
+    if (srv6_decap(ctx, srh, IPPROTO_IPV6) != 0) {
+        DEBUG_PRINT("End.DX6: Decapsulation failed\n");
+        return XDP_DROP;
+    }
+
+    // 3. Re-fetch pointers after adjust_head
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    // 4. Validate Ethernet + IPv6 headers
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end) {
+        return XDP_DROP;
+    }
+
+    struct ipv6hdr *inner_ip6h = (void *)(eth + 1);
+    if ((void *)(inner_ip6h + 1) > data_end) {
+        return XDP_DROP;
+    }
+
+    // 5. EtherType is already IPv6 (unchanged)
+
+    // 6. FIB lookup on inner IPv6 and redirect
+    DEBUG_PRINT("End.DX6: Decapsulated, forwarding inner IPv6\n");
+    STATS_INC(STATS_SRV6_END, 0);
+
+    // After decapsulation, we must not return XDP_PASS because:
+    // 1. Packet structure has changed (inner IPv6 only, outer IPv6+SRH stripped)
+    // 2. Old pointers in caller are invalidated
+    // So if FIB lookup fails (XDP_PASS), convert to XDP_DROP
+    int action = srv6_fib_redirect(ctx, inner_ip6h, eth);
+    if (action == XDP_PASS) {
+        DEBUG_PRINT("End.DX6: FIB lookup failed, dropping\n");
+        return XDP_DROP;
+    }
+    return action;
 }
 
 // End.DT4: Decapsulation with IPv4 table lookup
