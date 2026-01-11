@@ -23,10 +23,10 @@ const _ = connect.IsAtLeastVersion1_13_0
 const (
 	// SidFunctionServiceName is the fully-qualified name of the SidFunctionService service.
 	SidFunctionServiceName = "vinbero.v1.SidFunctionService"
-	// Transitv4ServiceName is the fully-qualified name of the Transitv4Service service.
-	Transitv4ServiceName = "vinbero.v1.Transitv4Service"
-	// Transitv6ServiceName is the fully-qualified name of the Transitv6Service service.
-	Transitv6ServiceName = "vinbero.v1.Transitv6Service"
+	// Headendv4ServiceName is the fully-qualified name of the Headendv4Service service.
+	Headendv4ServiceName = "vinbero.v1.Headendv4Service"
+	// Headendv6ServiceName is the fully-qualified name of the Headendv6Service service.
+	Headendv6ServiceName = "vinbero.v1.Headendv6Service"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -49,30 +49,30 @@ const (
 	// SidFunctionServiceSidFunctionGetProcedure is the fully-qualified name of the SidFunctionService's
 	// SidFunctionGet RPC.
 	SidFunctionServiceSidFunctionGetProcedure = "/vinbero.v1.SidFunctionService/SidFunctionGet"
-	// Transitv4ServiceTransitv4CreateProcedure is the fully-qualified name of the Transitv4Service's
-	// Transitv4Create RPC.
-	Transitv4ServiceTransitv4CreateProcedure = "/vinbero.v1.Transitv4Service/Transitv4Create"
-	// Transitv4ServiceTransitv4DeleteProcedure is the fully-qualified name of the Transitv4Service's
-	// Transitv4Delete RPC.
-	Transitv4ServiceTransitv4DeleteProcedure = "/vinbero.v1.Transitv4Service/Transitv4Delete"
-	// Transitv4ServiceTransitv4ListProcedure is the fully-qualified name of the Transitv4Service's
-	// Transitv4List RPC.
-	Transitv4ServiceTransitv4ListProcedure = "/vinbero.v1.Transitv4Service/Transitv4List"
-	// Transitv4ServiceTransitv4GetProcedure is the fully-qualified name of the Transitv4Service's
-	// Transitv4Get RPC.
-	Transitv4ServiceTransitv4GetProcedure = "/vinbero.v1.Transitv4Service/Transitv4Get"
-	// Transitv6ServiceTransitv6CreateProcedure is the fully-qualified name of the Transitv6Service's
-	// Transitv6Create RPC.
-	Transitv6ServiceTransitv6CreateProcedure = "/vinbero.v1.Transitv6Service/Transitv6Create"
-	// Transitv6ServiceTransitv6DeleteProcedure is the fully-qualified name of the Transitv6Service's
-	// Transitv6Delete RPC.
-	Transitv6ServiceTransitv6DeleteProcedure = "/vinbero.v1.Transitv6Service/Transitv6Delete"
-	// Transitv6ServiceTransitv6ListProcedure is the fully-qualified name of the Transitv6Service's
-	// Transitv6List RPC.
-	Transitv6ServiceTransitv6ListProcedure = "/vinbero.v1.Transitv6Service/Transitv6List"
-	// Transitv6ServiceTransitv6GetProcedure is the fully-qualified name of the Transitv6Service's
-	// Transitv6Get RPC.
-	Transitv6ServiceTransitv6GetProcedure = "/vinbero.v1.Transitv6Service/Transitv6Get"
+	// Headendv4ServiceHeadendv4CreateProcedure is the fully-qualified name of the Headendv4Service's
+	// Headendv4Create RPC.
+	Headendv4ServiceHeadendv4CreateProcedure = "/vinbero.v1.Headendv4Service/Headendv4Create"
+	// Headendv4ServiceHeadendv4DeleteProcedure is the fully-qualified name of the Headendv4Service's
+	// Headendv4Delete RPC.
+	Headendv4ServiceHeadendv4DeleteProcedure = "/vinbero.v1.Headendv4Service/Headendv4Delete"
+	// Headendv4ServiceHeadendv4ListProcedure is the fully-qualified name of the Headendv4Service's
+	// Headendv4List RPC.
+	Headendv4ServiceHeadendv4ListProcedure = "/vinbero.v1.Headendv4Service/Headendv4List"
+	// Headendv4ServiceHeadendv4GetProcedure is the fully-qualified name of the Headendv4Service's
+	// Headendv4Get RPC.
+	Headendv4ServiceHeadendv4GetProcedure = "/vinbero.v1.Headendv4Service/Headendv4Get"
+	// Headendv6ServiceHeadendv6CreateProcedure is the fully-qualified name of the Headendv6Service's
+	// Headendv6Create RPC.
+	Headendv6ServiceHeadendv6CreateProcedure = "/vinbero.v1.Headendv6Service/Headendv6Create"
+	// Headendv6ServiceHeadendv6DeleteProcedure is the fully-qualified name of the Headendv6Service's
+	// Headendv6Delete RPC.
+	Headendv6ServiceHeadendv6DeleteProcedure = "/vinbero.v1.Headendv6Service/Headendv6Delete"
+	// Headendv6ServiceHeadendv6ListProcedure is the fully-qualified name of the Headendv6Service's
+	// Headendv6List RPC.
+	Headendv6ServiceHeadendv6ListProcedure = "/vinbero.v1.Headendv6Service/Headendv6List"
+	// Headendv6ServiceHeadendv6GetProcedure is the fully-qualified name of the Headendv6Service's
+	// Headendv6Get RPC.
+	Headendv6ServiceHeadendv6GetProcedure = "/vinbero.v1.Headendv6Service/Headendv6Get"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -82,16 +82,16 @@ var (
 	sidFunctionServiceSidFunctionDeleteMethodDescriptor = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionDelete")
 	sidFunctionServiceSidFunctionListMethodDescriptor   = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionList")
 	sidFunctionServiceSidFunctionGetMethodDescriptor    = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionGet")
-	transitv4ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Transitv4Service")
-	transitv4ServiceTransitv4CreateMethodDescriptor     = transitv4ServiceServiceDescriptor.Methods().ByName("Transitv4Create")
-	transitv4ServiceTransitv4DeleteMethodDescriptor     = transitv4ServiceServiceDescriptor.Methods().ByName("Transitv4Delete")
-	transitv4ServiceTransitv4ListMethodDescriptor       = transitv4ServiceServiceDescriptor.Methods().ByName("Transitv4List")
-	transitv4ServiceTransitv4GetMethodDescriptor        = transitv4ServiceServiceDescriptor.Methods().ByName("Transitv4Get")
-	transitv6ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Transitv6Service")
-	transitv6ServiceTransitv6CreateMethodDescriptor     = transitv6ServiceServiceDescriptor.Methods().ByName("Transitv6Create")
-	transitv6ServiceTransitv6DeleteMethodDescriptor     = transitv6ServiceServiceDescriptor.Methods().ByName("Transitv6Delete")
-	transitv6ServiceTransitv6ListMethodDescriptor       = transitv6ServiceServiceDescriptor.Methods().ByName("Transitv6List")
-	transitv6ServiceTransitv6GetMethodDescriptor        = transitv6ServiceServiceDescriptor.Methods().ByName("Transitv6Get")
+	headendv4ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Headendv4Service")
+	headendv4ServiceHeadendv4CreateMethodDescriptor     = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Create")
+	headendv4ServiceHeadendv4DeleteMethodDescriptor     = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Delete")
+	headendv4ServiceHeadendv4ListMethodDescriptor       = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4List")
+	headendv4ServiceHeadendv4GetMethodDescriptor        = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Get")
+	headendv6ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Headendv6Service")
+	headendv6ServiceHeadendv6CreateMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Create")
+	headendv6ServiceHeadendv6DeleteMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Delete")
+	headendv6ServiceHeadendv6ListMethodDescriptor       = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6List")
+	headendv6ServiceHeadendv6GetMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
 )
 
 // SidFunctionServiceClient is a client for the vinbero.v1.SidFunctionService service.
@@ -240,294 +240,294 @@ func (UnimplementedSidFunctionServiceHandler) SidFunctionGet(context.Context, *c
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.SidFunctionService.SidFunctionGet is not implemented"))
 }
 
-// Transitv4ServiceClient is a client for the vinbero.v1.Transitv4Service service.
-type Transitv4ServiceClient interface {
-	Transitv4Create(context.Context, *connect.Request[v1.Transitv4CreateRequest]) (*connect.Response[v1.Transitv4CreateResponse], error)
-	Transitv4Delete(context.Context, *connect.Request[v1.Transitv4DeleteRequest]) (*connect.Response[v1.Transitv4DeleteResponse], error)
-	Transitv4List(context.Context, *connect.Request[v1.Transitv4ListRequest]) (*connect.Response[v1.Transitv4ListResponse], error)
-	Transitv4Get(context.Context, *connect.Request[v1.Transitv4GetRequest]) (*connect.Response[v1.Transitv4GetResponse], error)
+// Headendv4ServiceClient is a client for the vinbero.v1.Headendv4Service service.
+type Headendv4ServiceClient interface {
+	Headendv4Create(context.Context, *connect.Request[v1.Headendv4CreateRequest]) (*connect.Response[v1.Headendv4CreateResponse], error)
+	Headendv4Delete(context.Context, *connect.Request[v1.Headendv4DeleteRequest]) (*connect.Response[v1.Headendv4DeleteResponse], error)
+	Headendv4List(context.Context, *connect.Request[v1.Headendv4ListRequest]) (*connect.Response[v1.Headendv4ListResponse], error)
+	Headendv4Get(context.Context, *connect.Request[v1.Headendv4GetRequest]) (*connect.Response[v1.Headendv4GetResponse], error)
 }
 
-// NewTransitv4ServiceClient constructs a client for the vinbero.v1.Transitv4Service service. By
+// NewHeadendv4ServiceClient constructs a client for the vinbero.v1.Headendv4Service service. By
 // default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses,
 // and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
 // connect.WithGRPC() or connect.WithGRPCWeb() options.
 //
 // The URL supplied here should be the base URL for the Connect or gRPC server (for example,
 // http://api.acme.com or https://acme.com/grpc).
-func NewTransitv4ServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) Transitv4ServiceClient {
+func NewHeadendv4ServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) Headendv4ServiceClient {
 	baseURL = strings.TrimRight(baseURL, "/")
-	return &transitv4ServiceClient{
-		transitv4Create: connect.NewClient[v1.Transitv4CreateRequest, v1.Transitv4CreateResponse](
+	return &headendv4ServiceClient{
+		headendv4Create: connect.NewClient[v1.Headendv4CreateRequest, v1.Headendv4CreateResponse](
 			httpClient,
-			baseURL+Transitv4ServiceTransitv4CreateProcedure,
-			connect.WithSchema(transitv4ServiceTransitv4CreateMethodDescriptor),
+			baseURL+Headendv4ServiceHeadendv4CreateProcedure,
+			connect.WithSchema(headendv4ServiceHeadendv4CreateMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
-		transitv4Delete: connect.NewClient[v1.Transitv4DeleteRequest, v1.Transitv4DeleteResponse](
+		headendv4Delete: connect.NewClient[v1.Headendv4DeleteRequest, v1.Headendv4DeleteResponse](
 			httpClient,
-			baseURL+Transitv4ServiceTransitv4DeleteProcedure,
-			connect.WithSchema(transitv4ServiceTransitv4DeleteMethodDescriptor),
+			baseURL+Headendv4ServiceHeadendv4DeleteProcedure,
+			connect.WithSchema(headendv4ServiceHeadendv4DeleteMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
-		transitv4List: connect.NewClient[v1.Transitv4ListRequest, v1.Transitv4ListResponse](
+		headendv4List: connect.NewClient[v1.Headendv4ListRequest, v1.Headendv4ListResponse](
 			httpClient,
-			baseURL+Transitv4ServiceTransitv4ListProcedure,
-			connect.WithSchema(transitv4ServiceTransitv4ListMethodDescriptor),
+			baseURL+Headendv4ServiceHeadendv4ListProcedure,
+			connect.WithSchema(headendv4ServiceHeadendv4ListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
-		transitv4Get: connect.NewClient[v1.Transitv4GetRequest, v1.Transitv4GetResponse](
+		headendv4Get: connect.NewClient[v1.Headendv4GetRequest, v1.Headendv4GetResponse](
 			httpClient,
-			baseURL+Transitv4ServiceTransitv4GetProcedure,
-			connect.WithSchema(transitv4ServiceTransitv4GetMethodDescriptor),
+			baseURL+Headendv4ServiceHeadendv4GetProcedure,
+			connect.WithSchema(headendv4ServiceHeadendv4GetMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
 	}
 }
 
-// transitv4ServiceClient implements Transitv4ServiceClient.
-type transitv4ServiceClient struct {
-	transitv4Create *connect.Client[v1.Transitv4CreateRequest, v1.Transitv4CreateResponse]
-	transitv4Delete *connect.Client[v1.Transitv4DeleteRequest, v1.Transitv4DeleteResponse]
-	transitv4List   *connect.Client[v1.Transitv4ListRequest, v1.Transitv4ListResponse]
-	transitv4Get    *connect.Client[v1.Transitv4GetRequest, v1.Transitv4GetResponse]
+// headendv4ServiceClient implements Headendv4ServiceClient.
+type headendv4ServiceClient struct {
+	headendv4Create *connect.Client[v1.Headendv4CreateRequest, v1.Headendv4CreateResponse]
+	headendv4Delete *connect.Client[v1.Headendv4DeleteRequest, v1.Headendv4DeleteResponse]
+	headendv4List   *connect.Client[v1.Headendv4ListRequest, v1.Headendv4ListResponse]
+	headendv4Get    *connect.Client[v1.Headendv4GetRequest, v1.Headendv4GetResponse]
 }
 
-// Transitv4Create calls vinbero.v1.Transitv4Service.Transitv4Create.
-func (c *transitv4ServiceClient) Transitv4Create(ctx context.Context, req *connect.Request[v1.Transitv4CreateRequest]) (*connect.Response[v1.Transitv4CreateResponse], error) {
-	return c.transitv4Create.CallUnary(ctx, req)
+// Headendv4Create calls vinbero.v1.Headendv4Service.Headendv4Create.
+func (c *headendv4ServiceClient) Headendv4Create(ctx context.Context, req *connect.Request[v1.Headendv4CreateRequest]) (*connect.Response[v1.Headendv4CreateResponse], error) {
+	return c.headendv4Create.CallUnary(ctx, req)
 }
 
-// Transitv4Delete calls vinbero.v1.Transitv4Service.Transitv4Delete.
-func (c *transitv4ServiceClient) Transitv4Delete(ctx context.Context, req *connect.Request[v1.Transitv4DeleteRequest]) (*connect.Response[v1.Transitv4DeleteResponse], error) {
-	return c.transitv4Delete.CallUnary(ctx, req)
+// Headendv4Delete calls vinbero.v1.Headendv4Service.Headendv4Delete.
+func (c *headendv4ServiceClient) Headendv4Delete(ctx context.Context, req *connect.Request[v1.Headendv4DeleteRequest]) (*connect.Response[v1.Headendv4DeleteResponse], error) {
+	return c.headendv4Delete.CallUnary(ctx, req)
 }
 
-// Transitv4List calls vinbero.v1.Transitv4Service.Transitv4List.
-func (c *transitv4ServiceClient) Transitv4List(ctx context.Context, req *connect.Request[v1.Transitv4ListRequest]) (*connect.Response[v1.Transitv4ListResponse], error) {
-	return c.transitv4List.CallUnary(ctx, req)
+// Headendv4List calls vinbero.v1.Headendv4Service.Headendv4List.
+func (c *headendv4ServiceClient) Headendv4List(ctx context.Context, req *connect.Request[v1.Headendv4ListRequest]) (*connect.Response[v1.Headendv4ListResponse], error) {
+	return c.headendv4List.CallUnary(ctx, req)
 }
 
-// Transitv4Get calls vinbero.v1.Transitv4Service.Transitv4Get.
-func (c *transitv4ServiceClient) Transitv4Get(ctx context.Context, req *connect.Request[v1.Transitv4GetRequest]) (*connect.Response[v1.Transitv4GetResponse], error) {
-	return c.transitv4Get.CallUnary(ctx, req)
+// Headendv4Get calls vinbero.v1.Headendv4Service.Headendv4Get.
+func (c *headendv4ServiceClient) Headendv4Get(ctx context.Context, req *connect.Request[v1.Headendv4GetRequest]) (*connect.Response[v1.Headendv4GetResponse], error) {
+	return c.headendv4Get.CallUnary(ctx, req)
 }
 
-// Transitv4ServiceHandler is an implementation of the vinbero.v1.Transitv4Service service.
-type Transitv4ServiceHandler interface {
-	Transitv4Create(context.Context, *connect.Request[v1.Transitv4CreateRequest]) (*connect.Response[v1.Transitv4CreateResponse], error)
-	Transitv4Delete(context.Context, *connect.Request[v1.Transitv4DeleteRequest]) (*connect.Response[v1.Transitv4DeleteResponse], error)
-	Transitv4List(context.Context, *connect.Request[v1.Transitv4ListRequest]) (*connect.Response[v1.Transitv4ListResponse], error)
-	Transitv4Get(context.Context, *connect.Request[v1.Transitv4GetRequest]) (*connect.Response[v1.Transitv4GetResponse], error)
+// Headendv4ServiceHandler is an implementation of the vinbero.v1.Headendv4Service service.
+type Headendv4ServiceHandler interface {
+	Headendv4Create(context.Context, *connect.Request[v1.Headendv4CreateRequest]) (*connect.Response[v1.Headendv4CreateResponse], error)
+	Headendv4Delete(context.Context, *connect.Request[v1.Headendv4DeleteRequest]) (*connect.Response[v1.Headendv4DeleteResponse], error)
+	Headendv4List(context.Context, *connect.Request[v1.Headendv4ListRequest]) (*connect.Response[v1.Headendv4ListResponse], error)
+	Headendv4Get(context.Context, *connect.Request[v1.Headendv4GetRequest]) (*connect.Response[v1.Headendv4GetResponse], error)
 }
 
-// NewTransitv4ServiceHandler builds an HTTP handler from the service implementation. It returns the
+// NewHeadendv4ServiceHandler builds an HTTP handler from the service implementation. It returns the
 // path on which to mount the handler and the handler itself.
 //
 // By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
 // and JSON codecs. They also support gzip compression.
-func NewTransitv4ServiceHandler(svc Transitv4ServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
-	transitv4ServiceTransitv4CreateHandler := connect.NewUnaryHandler(
-		Transitv4ServiceTransitv4CreateProcedure,
-		svc.Transitv4Create,
-		connect.WithSchema(transitv4ServiceTransitv4CreateMethodDescriptor),
+func NewHeadendv4ServiceHandler(svc Headendv4ServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	headendv4ServiceHeadendv4CreateHandler := connect.NewUnaryHandler(
+		Headendv4ServiceHeadendv4CreateProcedure,
+		svc.Headendv4Create,
+		connect.WithSchema(headendv4ServiceHeadendv4CreateMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	transitv4ServiceTransitv4DeleteHandler := connect.NewUnaryHandler(
-		Transitv4ServiceTransitv4DeleteProcedure,
-		svc.Transitv4Delete,
-		connect.WithSchema(transitv4ServiceTransitv4DeleteMethodDescriptor),
+	headendv4ServiceHeadendv4DeleteHandler := connect.NewUnaryHandler(
+		Headendv4ServiceHeadendv4DeleteProcedure,
+		svc.Headendv4Delete,
+		connect.WithSchema(headendv4ServiceHeadendv4DeleteMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	transitv4ServiceTransitv4ListHandler := connect.NewUnaryHandler(
-		Transitv4ServiceTransitv4ListProcedure,
-		svc.Transitv4List,
-		connect.WithSchema(transitv4ServiceTransitv4ListMethodDescriptor),
+	headendv4ServiceHeadendv4ListHandler := connect.NewUnaryHandler(
+		Headendv4ServiceHeadendv4ListProcedure,
+		svc.Headendv4List,
+		connect.WithSchema(headendv4ServiceHeadendv4ListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	transitv4ServiceTransitv4GetHandler := connect.NewUnaryHandler(
-		Transitv4ServiceTransitv4GetProcedure,
-		svc.Transitv4Get,
-		connect.WithSchema(transitv4ServiceTransitv4GetMethodDescriptor),
+	headendv4ServiceHeadendv4GetHandler := connect.NewUnaryHandler(
+		Headendv4ServiceHeadendv4GetProcedure,
+		svc.Headendv4Get,
+		connect.WithSchema(headendv4ServiceHeadendv4GetMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	return "/vinbero.v1.Transitv4Service/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return "/vinbero.v1.Headendv4Service/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case Transitv4ServiceTransitv4CreateProcedure:
-			transitv4ServiceTransitv4CreateHandler.ServeHTTP(w, r)
-		case Transitv4ServiceTransitv4DeleteProcedure:
-			transitv4ServiceTransitv4DeleteHandler.ServeHTTP(w, r)
-		case Transitv4ServiceTransitv4ListProcedure:
-			transitv4ServiceTransitv4ListHandler.ServeHTTP(w, r)
-		case Transitv4ServiceTransitv4GetProcedure:
-			transitv4ServiceTransitv4GetHandler.ServeHTTP(w, r)
+		case Headendv4ServiceHeadendv4CreateProcedure:
+			headendv4ServiceHeadendv4CreateHandler.ServeHTTP(w, r)
+		case Headendv4ServiceHeadendv4DeleteProcedure:
+			headendv4ServiceHeadendv4DeleteHandler.ServeHTTP(w, r)
+		case Headendv4ServiceHeadendv4ListProcedure:
+			headendv4ServiceHeadendv4ListHandler.ServeHTTP(w, r)
+		case Headendv4ServiceHeadendv4GetProcedure:
+			headendv4ServiceHeadendv4GetHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
 	})
 }
 
-// UnimplementedTransitv4ServiceHandler returns CodeUnimplemented from all methods.
-type UnimplementedTransitv4ServiceHandler struct{}
+// UnimplementedHeadendv4ServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedHeadendv4ServiceHandler struct{}
 
-func (UnimplementedTransitv4ServiceHandler) Transitv4Create(context.Context, *connect.Request[v1.Transitv4CreateRequest]) (*connect.Response[v1.Transitv4CreateResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Transitv4Service.Transitv4Create is not implemented"))
+func (UnimplementedHeadendv4ServiceHandler) Headendv4Create(context.Context, *connect.Request[v1.Headendv4CreateRequest]) (*connect.Response[v1.Headendv4CreateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv4Service.Headendv4Create is not implemented"))
 }
 
-func (UnimplementedTransitv4ServiceHandler) Transitv4Delete(context.Context, *connect.Request[v1.Transitv4DeleteRequest]) (*connect.Response[v1.Transitv4DeleteResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Transitv4Service.Transitv4Delete is not implemented"))
+func (UnimplementedHeadendv4ServiceHandler) Headendv4Delete(context.Context, *connect.Request[v1.Headendv4DeleteRequest]) (*connect.Response[v1.Headendv4DeleteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv4Service.Headendv4Delete is not implemented"))
 }
 
-func (UnimplementedTransitv4ServiceHandler) Transitv4List(context.Context, *connect.Request[v1.Transitv4ListRequest]) (*connect.Response[v1.Transitv4ListResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Transitv4Service.Transitv4List is not implemented"))
+func (UnimplementedHeadendv4ServiceHandler) Headendv4List(context.Context, *connect.Request[v1.Headendv4ListRequest]) (*connect.Response[v1.Headendv4ListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv4Service.Headendv4List is not implemented"))
 }
 
-func (UnimplementedTransitv4ServiceHandler) Transitv4Get(context.Context, *connect.Request[v1.Transitv4GetRequest]) (*connect.Response[v1.Transitv4GetResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Transitv4Service.Transitv4Get is not implemented"))
+func (UnimplementedHeadendv4ServiceHandler) Headendv4Get(context.Context, *connect.Request[v1.Headendv4GetRequest]) (*connect.Response[v1.Headendv4GetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv4Service.Headendv4Get is not implemented"))
 }
 
-// Transitv6ServiceClient is a client for the vinbero.v1.Transitv6Service service.
-type Transitv6ServiceClient interface {
-	Transitv6Create(context.Context, *connect.Request[v1.Transitv6CreateRequest]) (*connect.Response[v1.Transitv6CreateResponse], error)
-	Transitv6Delete(context.Context, *connect.Request[v1.Transitv6DeleteRequest]) (*connect.Response[v1.Transitv6DeleteResponse], error)
-	Transitv6List(context.Context, *connect.Request[v1.Transitv6ListRequest]) (*connect.Response[v1.Transitv6ListResponse], error)
-	Transitv6Get(context.Context, *connect.Request[v1.Transitv6GetRequest]) (*connect.Response[v1.Transitv6GetResponse], error)
+// Headendv6ServiceClient is a client for the vinbero.v1.Headendv6Service service.
+type Headendv6ServiceClient interface {
+	Headendv6Create(context.Context, *connect.Request[v1.Headendv6CreateRequest]) (*connect.Response[v1.Headendv6CreateResponse], error)
+	Headendv6Delete(context.Context, *connect.Request[v1.Headendv6DeleteRequest]) (*connect.Response[v1.Headendv6DeleteResponse], error)
+	Headendv6List(context.Context, *connect.Request[v1.Headendv6ListRequest]) (*connect.Response[v1.Headendv6ListResponse], error)
+	Headendv6Get(context.Context, *connect.Request[v1.Headendv6GetRequest]) (*connect.Response[v1.Headendv6GetResponse], error)
 }
 
-// NewTransitv6ServiceClient constructs a client for the vinbero.v1.Transitv6Service service. By
+// NewHeadendv6ServiceClient constructs a client for the vinbero.v1.Headendv6Service service. By
 // default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses,
 // and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
 // connect.WithGRPC() or connect.WithGRPCWeb() options.
 //
 // The URL supplied here should be the base URL for the Connect or gRPC server (for example,
 // http://api.acme.com or https://acme.com/grpc).
-func NewTransitv6ServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) Transitv6ServiceClient {
+func NewHeadendv6ServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) Headendv6ServiceClient {
 	baseURL = strings.TrimRight(baseURL, "/")
-	return &transitv6ServiceClient{
-		transitv6Create: connect.NewClient[v1.Transitv6CreateRequest, v1.Transitv6CreateResponse](
+	return &headendv6ServiceClient{
+		headendv6Create: connect.NewClient[v1.Headendv6CreateRequest, v1.Headendv6CreateResponse](
 			httpClient,
-			baseURL+Transitv6ServiceTransitv6CreateProcedure,
-			connect.WithSchema(transitv6ServiceTransitv6CreateMethodDescriptor),
+			baseURL+Headendv6ServiceHeadendv6CreateProcedure,
+			connect.WithSchema(headendv6ServiceHeadendv6CreateMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
-		transitv6Delete: connect.NewClient[v1.Transitv6DeleteRequest, v1.Transitv6DeleteResponse](
+		headendv6Delete: connect.NewClient[v1.Headendv6DeleteRequest, v1.Headendv6DeleteResponse](
 			httpClient,
-			baseURL+Transitv6ServiceTransitv6DeleteProcedure,
-			connect.WithSchema(transitv6ServiceTransitv6DeleteMethodDescriptor),
+			baseURL+Headendv6ServiceHeadendv6DeleteProcedure,
+			connect.WithSchema(headendv6ServiceHeadendv6DeleteMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
-		transitv6List: connect.NewClient[v1.Transitv6ListRequest, v1.Transitv6ListResponse](
+		headendv6List: connect.NewClient[v1.Headendv6ListRequest, v1.Headendv6ListResponse](
 			httpClient,
-			baseURL+Transitv6ServiceTransitv6ListProcedure,
-			connect.WithSchema(transitv6ServiceTransitv6ListMethodDescriptor),
+			baseURL+Headendv6ServiceHeadendv6ListProcedure,
+			connect.WithSchema(headendv6ServiceHeadendv6ListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
-		transitv6Get: connect.NewClient[v1.Transitv6GetRequest, v1.Transitv6GetResponse](
+		headendv6Get: connect.NewClient[v1.Headendv6GetRequest, v1.Headendv6GetResponse](
 			httpClient,
-			baseURL+Transitv6ServiceTransitv6GetProcedure,
-			connect.WithSchema(transitv6ServiceTransitv6GetMethodDescriptor),
+			baseURL+Headendv6ServiceHeadendv6GetProcedure,
+			connect.WithSchema(headendv6ServiceHeadendv6GetMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
 	}
 }
 
-// transitv6ServiceClient implements Transitv6ServiceClient.
-type transitv6ServiceClient struct {
-	transitv6Create *connect.Client[v1.Transitv6CreateRequest, v1.Transitv6CreateResponse]
-	transitv6Delete *connect.Client[v1.Transitv6DeleteRequest, v1.Transitv6DeleteResponse]
-	transitv6List   *connect.Client[v1.Transitv6ListRequest, v1.Transitv6ListResponse]
-	transitv6Get    *connect.Client[v1.Transitv6GetRequest, v1.Transitv6GetResponse]
+// headendv6ServiceClient implements Headendv6ServiceClient.
+type headendv6ServiceClient struct {
+	headendv6Create *connect.Client[v1.Headendv6CreateRequest, v1.Headendv6CreateResponse]
+	headendv6Delete *connect.Client[v1.Headendv6DeleteRequest, v1.Headendv6DeleteResponse]
+	headendv6List   *connect.Client[v1.Headendv6ListRequest, v1.Headendv6ListResponse]
+	headendv6Get    *connect.Client[v1.Headendv6GetRequest, v1.Headendv6GetResponse]
 }
 
-// Transitv6Create calls vinbero.v1.Transitv6Service.Transitv6Create.
-func (c *transitv6ServiceClient) Transitv6Create(ctx context.Context, req *connect.Request[v1.Transitv6CreateRequest]) (*connect.Response[v1.Transitv6CreateResponse], error) {
-	return c.transitv6Create.CallUnary(ctx, req)
+// Headendv6Create calls vinbero.v1.Headendv6Service.Headendv6Create.
+func (c *headendv6ServiceClient) Headendv6Create(ctx context.Context, req *connect.Request[v1.Headendv6CreateRequest]) (*connect.Response[v1.Headendv6CreateResponse], error) {
+	return c.headendv6Create.CallUnary(ctx, req)
 }
 
-// Transitv6Delete calls vinbero.v1.Transitv6Service.Transitv6Delete.
-func (c *transitv6ServiceClient) Transitv6Delete(ctx context.Context, req *connect.Request[v1.Transitv6DeleteRequest]) (*connect.Response[v1.Transitv6DeleteResponse], error) {
-	return c.transitv6Delete.CallUnary(ctx, req)
+// Headendv6Delete calls vinbero.v1.Headendv6Service.Headendv6Delete.
+func (c *headendv6ServiceClient) Headendv6Delete(ctx context.Context, req *connect.Request[v1.Headendv6DeleteRequest]) (*connect.Response[v1.Headendv6DeleteResponse], error) {
+	return c.headendv6Delete.CallUnary(ctx, req)
 }
 
-// Transitv6List calls vinbero.v1.Transitv6Service.Transitv6List.
-func (c *transitv6ServiceClient) Transitv6List(ctx context.Context, req *connect.Request[v1.Transitv6ListRequest]) (*connect.Response[v1.Transitv6ListResponse], error) {
-	return c.transitv6List.CallUnary(ctx, req)
+// Headendv6List calls vinbero.v1.Headendv6Service.Headendv6List.
+func (c *headendv6ServiceClient) Headendv6List(ctx context.Context, req *connect.Request[v1.Headendv6ListRequest]) (*connect.Response[v1.Headendv6ListResponse], error) {
+	return c.headendv6List.CallUnary(ctx, req)
 }
 
-// Transitv6Get calls vinbero.v1.Transitv6Service.Transitv6Get.
-func (c *transitv6ServiceClient) Transitv6Get(ctx context.Context, req *connect.Request[v1.Transitv6GetRequest]) (*connect.Response[v1.Transitv6GetResponse], error) {
-	return c.transitv6Get.CallUnary(ctx, req)
+// Headendv6Get calls vinbero.v1.Headendv6Service.Headendv6Get.
+func (c *headendv6ServiceClient) Headendv6Get(ctx context.Context, req *connect.Request[v1.Headendv6GetRequest]) (*connect.Response[v1.Headendv6GetResponse], error) {
+	return c.headendv6Get.CallUnary(ctx, req)
 }
 
-// Transitv6ServiceHandler is an implementation of the vinbero.v1.Transitv6Service service.
-type Transitv6ServiceHandler interface {
-	Transitv6Create(context.Context, *connect.Request[v1.Transitv6CreateRequest]) (*connect.Response[v1.Transitv6CreateResponse], error)
-	Transitv6Delete(context.Context, *connect.Request[v1.Transitv6DeleteRequest]) (*connect.Response[v1.Transitv6DeleteResponse], error)
-	Transitv6List(context.Context, *connect.Request[v1.Transitv6ListRequest]) (*connect.Response[v1.Transitv6ListResponse], error)
-	Transitv6Get(context.Context, *connect.Request[v1.Transitv6GetRequest]) (*connect.Response[v1.Transitv6GetResponse], error)
+// Headendv6ServiceHandler is an implementation of the vinbero.v1.Headendv6Service service.
+type Headendv6ServiceHandler interface {
+	Headendv6Create(context.Context, *connect.Request[v1.Headendv6CreateRequest]) (*connect.Response[v1.Headendv6CreateResponse], error)
+	Headendv6Delete(context.Context, *connect.Request[v1.Headendv6DeleteRequest]) (*connect.Response[v1.Headendv6DeleteResponse], error)
+	Headendv6List(context.Context, *connect.Request[v1.Headendv6ListRequest]) (*connect.Response[v1.Headendv6ListResponse], error)
+	Headendv6Get(context.Context, *connect.Request[v1.Headendv6GetRequest]) (*connect.Response[v1.Headendv6GetResponse], error)
 }
 
-// NewTransitv6ServiceHandler builds an HTTP handler from the service implementation. It returns the
+// NewHeadendv6ServiceHandler builds an HTTP handler from the service implementation. It returns the
 // path on which to mount the handler and the handler itself.
 //
 // By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
 // and JSON codecs. They also support gzip compression.
-func NewTransitv6ServiceHandler(svc Transitv6ServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
-	transitv6ServiceTransitv6CreateHandler := connect.NewUnaryHandler(
-		Transitv6ServiceTransitv6CreateProcedure,
-		svc.Transitv6Create,
-		connect.WithSchema(transitv6ServiceTransitv6CreateMethodDescriptor),
+func NewHeadendv6ServiceHandler(svc Headendv6ServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	headendv6ServiceHeadendv6CreateHandler := connect.NewUnaryHandler(
+		Headendv6ServiceHeadendv6CreateProcedure,
+		svc.Headendv6Create,
+		connect.WithSchema(headendv6ServiceHeadendv6CreateMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	transitv6ServiceTransitv6DeleteHandler := connect.NewUnaryHandler(
-		Transitv6ServiceTransitv6DeleteProcedure,
-		svc.Transitv6Delete,
-		connect.WithSchema(transitv6ServiceTransitv6DeleteMethodDescriptor),
+	headendv6ServiceHeadendv6DeleteHandler := connect.NewUnaryHandler(
+		Headendv6ServiceHeadendv6DeleteProcedure,
+		svc.Headendv6Delete,
+		connect.WithSchema(headendv6ServiceHeadendv6DeleteMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	transitv6ServiceTransitv6ListHandler := connect.NewUnaryHandler(
-		Transitv6ServiceTransitv6ListProcedure,
-		svc.Transitv6List,
-		connect.WithSchema(transitv6ServiceTransitv6ListMethodDescriptor),
+	headendv6ServiceHeadendv6ListHandler := connect.NewUnaryHandler(
+		Headendv6ServiceHeadendv6ListProcedure,
+		svc.Headendv6List,
+		connect.WithSchema(headendv6ServiceHeadendv6ListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	transitv6ServiceTransitv6GetHandler := connect.NewUnaryHandler(
-		Transitv6ServiceTransitv6GetProcedure,
-		svc.Transitv6Get,
-		connect.WithSchema(transitv6ServiceTransitv6GetMethodDescriptor),
+	headendv6ServiceHeadendv6GetHandler := connect.NewUnaryHandler(
+		Headendv6ServiceHeadendv6GetProcedure,
+		svc.Headendv6Get,
+		connect.WithSchema(headendv6ServiceHeadendv6GetMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	return "/vinbero.v1.Transitv6Service/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return "/vinbero.v1.Headendv6Service/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case Transitv6ServiceTransitv6CreateProcedure:
-			transitv6ServiceTransitv6CreateHandler.ServeHTTP(w, r)
-		case Transitv6ServiceTransitv6DeleteProcedure:
-			transitv6ServiceTransitv6DeleteHandler.ServeHTTP(w, r)
-		case Transitv6ServiceTransitv6ListProcedure:
-			transitv6ServiceTransitv6ListHandler.ServeHTTP(w, r)
-		case Transitv6ServiceTransitv6GetProcedure:
-			transitv6ServiceTransitv6GetHandler.ServeHTTP(w, r)
+		case Headendv6ServiceHeadendv6CreateProcedure:
+			headendv6ServiceHeadendv6CreateHandler.ServeHTTP(w, r)
+		case Headendv6ServiceHeadendv6DeleteProcedure:
+			headendv6ServiceHeadendv6DeleteHandler.ServeHTTP(w, r)
+		case Headendv6ServiceHeadendv6ListProcedure:
+			headendv6ServiceHeadendv6ListHandler.ServeHTTP(w, r)
+		case Headendv6ServiceHeadendv6GetProcedure:
+			headendv6ServiceHeadendv6GetHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
 	})
 }
 
-// UnimplementedTransitv6ServiceHandler returns CodeUnimplemented from all methods.
-type UnimplementedTransitv6ServiceHandler struct{}
+// UnimplementedHeadendv6ServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedHeadendv6ServiceHandler struct{}
 
-func (UnimplementedTransitv6ServiceHandler) Transitv6Create(context.Context, *connect.Request[v1.Transitv6CreateRequest]) (*connect.Response[v1.Transitv6CreateResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Transitv6Service.Transitv6Create is not implemented"))
+func (UnimplementedHeadendv6ServiceHandler) Headendv6Create(context.Context, *connect.Request[v1.Headendv6CreateRequest]) (*connect.Response[v1.Headendv6CreateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6Create is not implemented"))
 }
 
-func (UnimplementedTransitv6ServiceHandler) Transitv6Delete(context.Context, *connect.Request[v1.Transitv6DeleteRequest]) (*connect.Response[v1.Transitv6DeleteResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Transitv6Service.Transitv6Delete is not implemented"))
+func (UnimplementedHeadendv6ServiceHandler) Headendv6Delete(context.Context, *connect.Request[v1.Headendv6DeleteRequest]) (*connect.Response[v1.Headendv6DeleteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6Delete is not implemented"))
 }
 
-func (UnimplementedTransitv6ServiceHandler) Transitv6List(context.Context, *connect.Request[v1.Transitv6ListRequest]) (*connect.Response[v1.Transitv6ListResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Transitv6Service.Transitv6List is not implemented"))
+func (UnimplementedHeadendv6ServiceHandler) Headendv6List(context.Context, *connect.Request[v1.Headendv6ListRequest]) (*connect.Response[v1.Headendv6ListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6List is not implemented"))
 }
 
-func (UnimplementedTransitv6ServiceHandler) Transitv6Get(context.Context, *connect.Request[v1.Transitv6GetRequest]) (*connect.Response[v1.Transitv6GetResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Transitv6Service.Transitv6Get is not implemented"))
+func (UnimplementedHeadendv6ServiceHandler) Headendv6Get(context.Context, *connect.Request[v1.Headendv6GetRequest]) (*connect.Response[v1.Headendv6GetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6Get is not implemented"))
 }

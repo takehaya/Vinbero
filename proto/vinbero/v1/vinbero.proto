@@ -53,89 +53,89 @@ message SidFunctionGetResponse {
   SidFunction sid_function = 1;
 }
 
-service Transitv4Service {
-  rpc Transitv4Create(Transitv4CreateRequest) returns (Transitv4CreateResponse);
-  rpc Transitv4Delete(Transitv4DeleteRequest) returns (Transitv4DeleteResponse);
-  rpc Transitv4List(Transitv4ListRequest) returns (Transitv4ListResponse);
-  rpc Transitv4Get(Transitv4GetRequest) returns (Transitv4GetResponse);
+service Headendv4Service {
+  rpc Headendv4Create(Headendv4CreateRequest) returns (Headendv4CreateResponse);
+  rpc Headendv4Delete(Headendv4DeleteRequest) returns (Headendv4DeleteResponse);
+  rpc Headendv4List(Headendv4ListRequest) returns (Headendv4ListResponse);
+  rpc Headendv4Get(Headendv4GetRequest) returns (Headendv4GetResponse);
 }
 
-// Transitv4 represents Transit behavior for IPv4 packets
-message Transitv4 {
-  Srv6EncapMode mode = 1;
+// Headendv4 represents Headend behavior for IPv4 packets
+message Headendv4 {
+  Srv6HeadendBehavior mode = 1;
   string trigger_prefix = 2; // CIDR format (e.g., 10.0.0.0/24)
   string src_addr = 3;
   string dst_addr = 4;
   repeated string segments = 5;
 }
-message Transitv4CreateRequest {
-  repeated Transitv4 transitv4s = 1;
+message Headendv4CreateRequest {
+  repeated Headendv4 headendv4s = 1;
 }
-message Transitv4CreateResponse {
-  repeated Transitv4 created = 1;
+message Headendv4CreateResponse {
+  repeated Headendv4 created = 1;
   repeated OperationError errors = 2;
 }
 
-message Transitv4DeleteRequest {
+message Headendv4DeleteRequest {
   repeated string trigger_prefixes = 1;
 }
-message Transitv4DeleteResponse {
+message Headendv4DeleteResponse {
   repeated string deleted_trigger_prefixes = 1;
   repeated OperationError errors = 2;
 }
 
-message Transitv4ListRequest {}
-message Transitv4ListResponse {
-  repeated Transitv4 transitv4s = 1;
+message Headendv4ListRequest {}
+message Headendv4ListResponse {
+  repeated Headendv4 headendv4s = 1;
 }
 
-message Transitv4GetRequest {
+message Headendv4GetRequest {
   string trigger_prefix = 1;
 }
-message Transitv4GetResponse {
-  Transitv4 transitv4 = 1;
+message Headendv4GetResponse {
+  Headendv4 headendv4 = 1;
 }
 
-service Transitv6Service {
-  rpc Transitv6Create(Transitv6CreateRequest) returns (Transitv6CreateResponse);
-  rpc Transitv6Delete(Transitv6DeleteRequest) returns (Transitv6DeleteResponse);
-  rpc Transitv6List(Transitv6ListRequest) returns (Transitv6ListResponse);
-  rpc Transitv6Get(Transitv6GetRequest) returns (Transitv6GetResponse);
+service Headendv6Service {
+  rpc Headendv6Create(Headendv6CreateRequest) returns (Headendv6CreateResponse);
+  rpc Headendv6Delete(Headendv6DeleteRequest) returns (Headendv6DeleteResponse);
+  rpc Headendv6List(Headendv6ListRequest) returns (Headendv6ListResponse);
+  rpc Headendv6Get(Headendv6GetRequest) returns (Headendv6GetResponse);
 }
 
-// Transitv6 represents Transit behavior for IPv6 packets
-message Transitv6 {
-  Srv6EncapMode mode = 1;
+// Headendv6 represents Headend behavior for IPv6 packets
+message Headendv6 {
+  Srv6HeadendBehavior mode = 1;
   string trigger_prefix = 2; // CIDR format (e.g., 2001:db8::/32)
   string src_addr = 3;
   string dst_addr = 4;
   repeated string segments = 5;
 }
 
-message Transitv6CreateRequest {
-  repeated Transitv6 transitv6s = 1;
+message Headendv6CreateRequest {
+  repeated Headendv6 headendv6s = 1;
 }
-message Transitv6CreateResponse {
-  repeated Transitv6 created = 1;
+message Headendv6CreateResponse {
+  repeated Headendv6 created = 1;
   repeated OperationError errors = 2;
 }
 
-message Transitv6DeleteRequest {
+message Headendv6DeleteRequest {
   repeated string trigger_prefixes = 1;
 }
-message Transitv6DeleteResponse {
+message Headendv6DeleteResponse {
   repeated string deleted_trigger_prefixes = 1;
   repeated OperationError errors = 2;
 }
 
-message Transitv6ListRequest {}
-message Transitv6ListResponse {
-  repeated Transitv6 transitv6s = 1;
+message Headendv6ListRequest {}
+message Headendv6ListResponse {
+  repeated Headendv6 headendv6s = 1;
 }
 
-message Transitv6GetRequest {
+message Headendv6GetRequest {
   string trigger_prefix = 1;
 }
-message Transitv6GetResponse {
-  Transitv6 transitv6 = 1;
+message Headendv6GetResponse {
+  Headendv6 headendv6 = 1;
 }
