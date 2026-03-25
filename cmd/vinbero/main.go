@@ -74,7 +74,7 @@ func run(cliCtx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize vinbero: %w", err)
 	}
-	defer vin.Close()
+	defer func() { _ = vin.Close() }()
 
 	if err := vin.LoadXDPProgram(); err != nil {
 		return fmt.Errorf("load XDP program: %w", err)

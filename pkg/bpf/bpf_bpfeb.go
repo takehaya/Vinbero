@@ -23,6 +23,12 @@ type BpfHeadendEntry struct {
 	Segments    [10][16]uint8
 }
 
+type BpfHeadendL2Key struct {
+	_      structs.HostLayout
+	VlanId uint16
+	Pad    [2]uint8
+}
+
 type BpfLpmKeyV4 struct {
 	_         structs.HostLayout
 	Prefixlen uint32
@@ -102,6 +108,7 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
+	HeadendL2Map   *ebpf.MapSpec `ebpf:"headend_l2_map"`
 	HeadendV4Map   *ebpf.MapSpec `ebpf:"headend_v4_map"`
 	HeadendV6Map   *ebpf.MapSpec `ebpf:"headend_v6_map"`
 	SidFunctionMap *ebpf.MapSpec `ebpf:"sid_function_map"`
@@ -137,6 +144,7 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
+	HeadendL2Map   *ebpf.Map `ebpf:"headend_l2_map"`
 	HeadendV4Map   *ebpf.Map `ebpf:"headend_v4_map"`
 	HeadendV6Map   *ebpf.Map `ebpf:"headend_v6_map"`
 	SidFunctionMap *ebpf.Map `ebpf:"sid_function_map"`
@@ -146,6 +154,7 @@ type BpfMaps struct {
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.HeadendL2Map,
 		m.HeadendV4Map,
 		m.HeadendV6Map,
 		m.SidFunctionMap,

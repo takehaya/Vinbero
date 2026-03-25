@@ -19,6 +19,7 @@ import (
 // SID Function action constants
 const (
 	actionEnd    = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END)
+	actionEndDX2 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2)
 	actionEndDX4 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX4)
 	actionEndDX6 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX6)
 )
@@ -47,7 +48,7 @@ func newXDPTestHelper(t *testing.T) *xdpTestHelper {
 	if err != nil {
 		t.Fatalf("Failed to load BPF objects: %v", err)
 	}
-	t.Cleanup(func() { objs.Close() })
+	t.Cleanup(func() { _ = objs.Close() })
 	return &xdpTestHelper{
 		t:      t,
 		objs:   objs,
@@ -77,6 +78,16 @@ func (h *xdpTestHelper) createSidFunction(prefix string, action uint8) {
 	}
 }
 
+func (h *xdpTestHelper) createSidFunctionWithOIF(prefix string, action uint8, oif uint32) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: action, Flavor: 0}
+	// OIF is stored as uint32 in the first 4 bytes of Nexthop (native endian)
+	binary.NativeEndian.PutUint32(entry.Nexthop[:4], oif)
+	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
+
 func (h *xdpTestHelper) createHeadendEntry(prefix string, srcAddr, dstAddr [16]byte, segments [10][16]byte, numSegments uint8, isIPv4 bool) {
 	h.t.Helper()
 	entry := &HeadendEntry{
@@ -101,6 +112,22 @@ func (h *xdpTestHelper) createHeadendEntry(prefix string, srcAddr, dstAddr [16]b
 		} else {
 			_ = h.mapOps.DeleteHeadendV6(prefix)
 		}
+	})
+}
+
+func (h *xdpTestHelper) createHeadendL2Entry(vlanID uint16, srcAddr [16]byte, segments [10][16]byte, numSegments uint8) {
+	h.t.Helper()
+	entry := &HeadendEntry{
+		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+	}
+	if err := h.mapOps.CreateHeadendL2(vlanID, entry); err != nil {
+		h.t.Fatalf("Failed to create headend L2 entry: %v", err)
+	}
+	h.t.Cleanup(func() {
+		_ = h.mapOps.DeleteHeadendL2(vlanID)
 	})
 }
 
@@ -200,6 +227,95 @@ func buildSimpleIPv4Packet(srcIP, dstIP net.IP) ([]byte, error) {
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 	if err := gopacket.SerializeLayers(buf, opts, eth, ip4, icmp, gopacket.Payload(newTestPayload(64))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// buildVlanTaggedIPv4Packet constructs a VLAN-tagged IPv4 packet
+func buildVlanTaggedIPv4Packet(vlanID uint16, srcIP, dstIP net.IP) ([]byte, error) {
+	eth := newTestEthernet(layers.EthernetTypeDot1Q)
+	vlan := &layers.Dot1Q{
+		VLANIdentifier: vlanID,
+		Type:           layers.EthernetTypeIPv4,
+	}
+	ip4 := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolICMPv4, SrcIP: srcIP, DstIP: dstIP,
+	}
+	icmp := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		Id: 1234, Seq: 1,
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, vlan, ip4, icmp, gopacket.Payload(newTestPayload(64))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// buildVlanTaggedIPv6Packet constructs a VLAN-tagged IPv6 packet
+func buildVlanTaggedIPv6Packet(vlanID uint16, srcIP, dstIP net.IP) ([]byte, error) {
+	eth := newTestEthernet(layers.EthernetTypeDot1Q)
+	vlan := &layers.Dot1Q{
+		VLANIdentifier: vlanID,
+		Type:           layers.EthernetTypeIPv6,
+	}
+	ip6 := &layers.IPv6{
+		Version: 6, HopLimit: 64,
+		NextHeader: layers.IPProtocolICMPv6, SrcIP: srcIP, DstIP: dstIP,
+	}
+	icmp, icmpEcho := newTestICMPv6Echo()
+	_ = icmp.SetNetworkLayerForChecksum(ip6)
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, vlan, ip6, icmp, icmpEcho, gopacket.Payload(newTestPayload(64))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// buildL2EncapsulatedPacket constructs an SRv6 packet with inner L2 frame (for End.DX2 testing)
+func buildL2EncapsulatedPacket(
+	outerSrcIP, outerDstIP net.IP,
+	segments []net.IP, segmentsLeft uint8,
+	innerVlanID uint16,
+	innerSrcIP, innerDstIP net.IP,
+	isIPv4Inner bool,
+) ([]byte, error) {
+	// Build inner L2 frame first
+	var innerFrame []byte
+	var err error
+	if isIPv4Inner {
+		innerFrame, err = buildVlanTaggedIPv4Packet(innerVlanID, innerSrcIP.To4(), innerDstIP.To4())
+	} else {
+		innerFrame, err = buildVlanTaggedIPv6Packet(innerVlanID, innerSrcIP, innerDstIP)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Build outer headers with inner L2 frame as payload
+	eth := newTestEthernet(layers.EthernetTypeIPv6)
+	outerIP6 := &layers.IPv6{
+		Version: 6, SrcIP: outerSrcIP, DstIP: outerDstIP,
+		NextHeader: layers.IPProtocol(43), HopLimit: 64,
+	}
+
+	numSegments := len(segments)
+	srv6 := &packet.Srv6Layer{
+		NextHeader:  143, // IPPROTO_ETHERNET
+		HdrExtLen:   uint8(numSegments * 2),
+		RoutingType: 4, SegmentsLeft: segmentsLeft,
+		LastEntry: uint8(numSegments - 1), Segments: segmentsToNetipAddr(segments),
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, outerIP6, srv6, gopacket.Payload(innerFrame)); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -432,6 +548,43 @@ func verifyDecapsulated(t *testing.T, pkt []byte, expectedSrc, expectedDst net.I
 			return false
 		}
 	}
+	return true
+}
+
+// verifyInnerVlanFrame verifies that the inner VLAN-tagged Ethernet frame is preserved
+func verifyInnerVlanFrame(t *testing.T, pkt []byte, innerOffset int, expectedVlanID uint16) bool {
+	t.Helper()
+
+	vlanFrameMinLen := ethHeaderLen + 4
+	if len(pkt) < innerOffset+vlanFrameMinLen {
+		t.Errorf("Packet too short for inner VLAN frame: got %d, need at least %d", len(pkt), innerOffset+vlanFrameMinLen)
+		return false
+	}
+
+	expectedDstMAC := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}
+	if !bytes.Equal(pkt[innerOffset:innerOffset+6], expectedDstMAC) {
+		t.Errorf("Inner Ethernet DstMAC mismatch: expected %x, got %x", expectedDstMAC, pkt[innerOffset:innerOffset+6])
+		return false
+	}
+
+	expectedSrcMAC := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x01}
+	if !bytes.Equal(pkt[innerOffset+6:innerOffset+12], expectedSrcMAC) {
+		t.Errorf("Inner Ethernet SrcMAC mismatch: expected %x, got %x", expectedSrcMAC, pkt[innerOffset+6:innerOffset+12])
+		return false
+	}
+
+	innerEtherType := binary.BigEndian.Uint16(pkt[innerOffset+12 : innerOffset+14])
+	if innerEtherType != 0x8100 {
+		t.Errorf("Inner EtherType: expected 0x8100 (802.1Q), got 0x%04x", innerEtherType)
+		return false
+	}
+
+	actualVlanID := binary.BigEndian.Uint16(pkt[innerOffset+14:innerOffset+16]) & 0x0FFF
+	if actualVlanID != expectedVlanID {
+		t.Errorf("Inner VLAN ID mismatch: expected %d, got %d", expectedVlanID, actualVlanID)
+		return false
+	}
+
 	return true
 }
 

@@ -41,6 +41,16 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } headend_v6_map SEC(".maps");
 
+// Headend L2 map (Hash)
+// Key: VLAN ID (future: consider Bridge Domain with ifindex+VLAN)
+// Value: Headend configuration (H.Encaps.L2)
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct headend_l2_key);
+    __type(value, struct headend_entry);
+    __uint(max_entries, 1024);
+} headend_l2_map SEC(".maps");
+
 // https://github.com/cloudflare/xdpcap
 // struct bpf_map_def SEC("maps") xdpcap_hook = XDPCAP_HOOK();
 struct xdpcap_hook {

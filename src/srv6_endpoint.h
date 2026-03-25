@@ -281,6 +281,52 @@ static __always_inline int process_end_dx6(
     return action;
 }
 
+// End.DX2: Decapsulation with L2 cross-connect
+// RFC 8986 Section 4.10
+// Strips outer Ethernet + IPv6 + SRH, exposes inner L2 frame,
+// and redirects to a specified output interface (OIF).
+// OIF is stored as __u32 in the first 4 bytes of entry->nexthop.
+static __always_inline int process_end_dx2(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry)
+{
+    if (srh->segments_left != 0) {
+        DEBUG_PRINT("End.DX2: SL != 0, passing\n");
+        return XDP_PASS;
+    }
+
+    if (srh->nexthdr != IPPROTO_ETHERNET) {
+        DEBUG_PRINT("End.DX2: nexthdr is not Ethernet (%d)\n", srh->nexthdr);
+        return XDP_DROP;
+    }
+
+    __u32 oif;
+    __builtin_memcpy(&oif, entry->nexthop, sizeof(__u32));
+    if (oif == 0) {
+        DEBUG_PRINT("End.DX2: OIF not configured\n");
+        return XDP_DROP;
+    }
+
+    int strip_len = calc_decap_strip_len(srh);
+    if (bpf_xdp_adjust_head(ctx, strip_len)) {
+        DEBUG_PRINT("End.DX2: bpf_xdp_adjust_head failed\n");
+        return XDP_DROP;
+    }
+
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    struct ethhdr *inner_eth = data;
+    if ((void *)(inner_eth + 1) > data_end) {
+        return XDP_DROP;
+    }
+
+    DEBUG_PRINT("End.DX2: Decapsulated, redirect to ifindex %d\n", oif);
+    STATS_INC(STATS_SRV6_END, 0);
+    return bpf_redirect(oif, 0);
+}
+
 // End.DT4: Decapsulation with IPv4 table lookup
 // RFC 8986 Section 4.8
 static __always_inline int process_end_dt4(
