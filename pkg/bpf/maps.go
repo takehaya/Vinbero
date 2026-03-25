@@ -17,6 +17,7 @@ const (
 type (
 	LpmKeyV4         = BpfLpmKeyV4
 	LpmKeyV6         = BpfLpmKeyV6
+	HeadendL2Key     = BpfHeadendL2Key
 	SidFunctionEntry = BpfSidFunctionEntry
 	HeadendEntry     = BpfHeadendEntry
 )
@@ -261,6 +262,58 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 	return result, nil
 }
 
+// ===== Headend L2 Map Operations =====
+
+// CreateHeadendL2 adds a headend L2 entry to the map (keyed by VLAN ID)
+func (m *MapOperations) CreateHeadendL2(vlanID uint16, entry *HeadendEntry) error {
+	key := buildHeadendL2Key(vlanID)
+
+	if err := m.objs.HeadendL2Map.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put headend L2 entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteHeadendL2 removes a headend L2 entry from the map
+func (m *MapOperations) DeleteHeadendL2(vlanID uint16) error {
+	key := buildHeadendL2Key(vlanID)
+
+	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete headend L2 entry: %w", err)
+	}
+	return nil
+}
+
+// GetHeadendL2 retrieves a headend L2 entry from the map
+func (m *MapOperations) GetHeadendL2(vlanID uint16) (*HeadendEntry, error) {
+	key := buildHeadendL2Key(vlanID)
+
+	var entry HeadendEntry
+	if err := m.objs.HeadendL2Map.Lookup(key, &entry); err != nil {
+		return nil, fmt.Errorf("failed to lookup headend L2 entry: %w", err)
+	}
+	return &entry, nil
+}
+
+// ListHeadendL2 returns all headend L2 entries
+func (m *MapOperations) ListHeadendL2() (map[uint16]*HeadendEntry, error) {
+	result := make(map[uint16]*HeadendEntry)
+
+	var key HeadendL2Key
+	var entry HeadendEntry
+	iter := m.objs.HeadendL2Map.Iterate()
+
+	for iter.Next(&key, &entry) {
+		entryCopy := entry
+		result[key.VlanId] = &entryCopy
+	}
+
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate headend L2 map: %w", err)
+	}
+	return result, nil
+}
+
 // ===== Helper Functions =====
 
 func buildLpmKeyV4(cidr string) (*LpmKeyV4, error) {
@@ -307,6 +360,12 @@ func lpmKeyV4ToString(key *LpmKeyV4) string {
 func lpmKeyV6ToString(key *LpmKeyV6) string {
 	ip := net.IP(key.Addr[:])
 	return fmt.Sprintf("%s/%d", ip.String(), key.Prefixlen)
+}
+
+func buildHeadendL2Key(vlanID uint16) *HeadendL2Key {
+	return &HeadendL2Key{
+		VlanId: vlanID,
+	}
 }
 
 // ParseSegments parses a list of segment strings into the Segments array
