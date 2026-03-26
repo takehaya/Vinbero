@@ -1,0 +1,27 @@
+internal:
+  devices:
+    - hl2-rt3h2   # Interface towards host2 (H.Encaps.L2 for return path)
+    - hl2-rt3rt2  # Interface towards router2
+  bpf:
+    device_mode: generic  # Required for veth pairs
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "127.0.0.1:8083"
+  logger:
+    level: debug
+    format: text
+    no_color: false
+    add_caller: true
+
+settings:
+  enable_stats: true
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headendl2:
+      capacity: 1024

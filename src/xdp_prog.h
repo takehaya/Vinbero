@@ -45,6 +45,14 @@
 #define IPV4_ADDR_LEN 4
 #define IPV6_ADDR_LEN 16
 
+#ifndef ETH_ALEN
+#define ETH_ALEN 6
+#endif
+
+#ifndef IPPROTO_ETHERNET
+#define IPPROTO_ETHERNET 143  // Ethernet in SRv6 (RFC 8986)
+#endif
+
 // LPM key for IPv4 prefix matching
 struct lpm_key_v4 {
     __u32 prefixlen;              // Prefix length (0-32)
@@ -57,6 +65,11 @@ struct lpm_key_v6 {
     __u8 addr[IPV6_ADDR_LEN];     // IPv6 address (16 bytes)
 } __attribute__((packed));
 
+// Key for L2 headend map (VLAN ID)
+struct headend_l2_key {
+    __u16 vlan_id;
+    __u8 _pad[2];                 // Padding for alignment
+} __attribute__((packed));
 
 // SID Function entry (for SRv6 Endpoint functions)
 struct sid_function_entry {

@@ -327,3 +327,166 @@ func TestXDPProgEndDX(t *testing.T) {
 		})
 	}
 }
+
+func TestXDPProgEndDX2(t *testing.T) {
+	tests := []struct {
+		name         string
+		triggerSID   string
+		outerSrcIP   string
+		outerDstIP   string
+		segments     []string
+		segmentsLeft uint8
+		innerVlanID  uint16
+		innerSrcIP   string
+		innerDstIP   string
+		isIPv4Inner  bool
+		oif          uint32
+		expectDecap  bool
+	}{
+		{"End.DX2 SL=0 IPv4 inner", "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10", []string{"fd00:1:100::10"}, 0, 100, "10.0.0.1", "192.0.2.100", true, 1, true},
+		{"End.DX2 SL=0 IPv6 inner", "fd00:1:100::20/128", "fd00:1:1::1", "fd00:1:100::20", []string{"fd00:1:100::20"}, 0, 200, "2001:db8:1::1", "2001:db8:2::1", false, 1, true},
+		{"End.DX2 SL!=0 (pass)", "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10", []string{"fd00:1:100::20", "fd00:1:100::10"}, 1, 100, "10.0.0.1", "192.0.2.100", true, 1, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithOIF(tt.triggerSID, actionEndDX2, tt.oif)
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+
+			pkt, err := buildL2EncapsulatedPacket(
+				net.ParseIP(tt.outerSrcIP), net.ParseIP(tt.outerDstIP),
+				segments, tt.segmentsLeft,
+				tt.innerVlanID,
+				net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP),
+				tt.isIPv4Inner,
+			)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+
+			if tt.expectDecap {
+				// End.DX2 uses bpf_redirect directly (no FIB lookup)
+				if ret != XDP_REDIRECT {
+					t.Errorf("Expected XDP_REDIRECT after decap, got %d", ret)
+				}
+
+				// After decap: inner L2 frame should be exposed (Eth + VLAN + IP)
+				if !verifyInnerVlanFrame(t, outPkt, 0, tt.innerVlanID) {
+					return
+				}
+
+				t.Logf("SUCCESS: End.DX2 decapsulation verified (action: %d)", ret)
+			} else {
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS for SL!=0 case, got %d", ret)
+				}
+			}
+		})
+	}
+}
+
+func TestXDPProgHeadendL2Encaps(t *testing.T) {
+	tests := []struct {
+		name        string
+		vlanID      uint16 // VLAN ID for the packet
+		entryVlanID uint16 // VLAN ID to register (0 means don't register)
+		srcAddr     string
+		segmentStrs []string
+		isIPv4Inner bool // true for IPv4 inner packet, false for IPv6
+		expectEncap bool
+	}{
+		{"L2 VLAN 100 IPv4 two segments", 100, 100, "fc00::1", []string{"fc00::200", "fc00::300"}, true, true},
+		{"L2 VLAN 100 IPv4 single segment", 100, 100, "fc00::10", []string{"fc00::200"}, true, true},
+		{"L2 VLAN 200 IPv6 two segments", 200, 200, "fc00::1", []string{"fc00::200", "fc00::300"}, false, true},
+		{"L2 VLAN mismatch", 100, 200, "fc00::1", []string{"fc00::200"}, true, false},
+		{"L2 no entry", 100, 0, "fc00::1", []string{"fc00::200"}, true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+
+			srcAddr, _ := ParseIPv6(tt.srcAddr)
+			segments, numSegments, _ := ParseSegments(tt.segmentStrs)
+
+			if tt.entryVlanID > 0 {
+				h.createHeadendL2Entry(tt.entryVlanID, srcAddr, segments, numSegments)
+			}
+
+			var pkt []byte
+			var err error
+			if tt.isIPv4Inner {
+				pkt, err = buildVlanTaggedIPv4Packet(
+					tt.vlanID,
+					net.ParseIP("10.0.0.1").To4(),
+					net.ParseIP("192.0.2.100").To4(),
+				)
+			} else {
+				pkt, err = buildVlanTaggedIPv6Packet(
+					tt.vlanID,
+					net.ParseIP("2001:db8:1::1"),
+					net.ParseIP("2001:db8:2::1"),
+				)
+			}
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			originalLen := len(pkt)
+			ret, outPkt := h.run(pkt)
+
+			if tt.expectEncap {
+				// After encapsulation, FIB lookup happens. In test env, it typically fails
+				// so we expect XDP_DROP. XDP_REDIRECT would mean FIB succeeded.
+				if ret != XDP_DROP && ret != XDP_REDIRECT {
+					t.Errorf("Expected XDP_DROP or XDP_REDIRECT after encap, got %d", ret)
+				}
+
+				innerL2Len := ethHeaderLen + 4 // Ethernet + VLAN tag
+				innerHeaderLen := ipv4HeaderLen
+				if !tt.isIPv4Inner {
+					innerHeaderLen = ipv6HeaderLen
+				}
+				srhLen := srhBaseLen + int(numSegments)*ipv6AddrLen
+				minExpectedLen := ethHeaderLen + ipv6HeaderLen + srhLen + innerL2Len + innerHeaderLen
+
+				if len(outPkt) < minExpectedLen {
+					t.Fatalf("Output packet too short: got %d, want at least %d", len(outPkt), minExpectedLen)
+				}
+
+				if !verifyEtherType(t, outPkt, 0x86DD) {
+					return
+				}
+
+				if !verifyOuterIPv6Header(t, outPkt, srcAddr, segments[0]) {
+					return
+				}
+
+				if !verifySRHStructure(t, outPkt, int(numSegments), convertSegmentsToBytes(segments, int(numSegments))) {
+					return
+				}
+
+				innerOffset := ethHeaderLen + ipv6HeaderLen + srhLen
+				if !verifyInnerVlanFrame(t, outPkt, innerOffset, tt.vlanID) {
+					return
+				}
+
+				t.Logf("SUCCESS: H.Encaps.L2 verified (original: %d, encapsulated: %d)", originalLen, len(outPkt))
+			} else {
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS for no-match case, got %d", ret)
+				}
+				if len(outPkt) != originalLen {
+					t.Errorf("Packet length changed unexpectedly: original %d, got %d", originalLen, len(outPkt))
+				}
+			}
+		})
+	}
+}

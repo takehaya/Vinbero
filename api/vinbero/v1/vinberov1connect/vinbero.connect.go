@@ -27,6 +27,8 @@ const (
 	Headendv4ServiceName = "vinbero.v1.Headendv4Service"
 	// Headendv6ServiceName is the fully-qualified name of the Headendv6Service service.
 	Headendv6ServiceName = "vinbero.v1.Headendv6Service"
+	// HeadendL2ServiceName is the fully-qualified name of the HeadendL2Service service.
+	HeadendL2ServiceName = "vinbero.v1.HeadendL2Service"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -73,6 +75,18 @@ const (
 	// Headendv6ServiceHeadendv6GetProcedure is the fully-qualified name of the Headendv6Service's
 	// Headendv6Get RPC.
 	Headendv6ServiceHeadendv6GetProcedure = "/vinbero.v1.Headendv6Service/Headendv6Get"
+	// HeadendL2ServiceHeadendL2CreateProcedure is the fully-qualified name of the HeadendL2Service's
+	// HeadendL2Create RPC.
+	HeadendL2ServiceHeadendL2CreateProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Create"
+	// HeadendL2ServiceHeadendL2DeleteProcedure is the fully-qualified name of the HeadendL2Service's
+	// HeadendL2Delete RPC.
+	HeadendL2ServiceHeadendL2DeleteProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Delete"
+	// HeadendL2ServiceHeadendL2ListProcedure is the fully-qualified name of the HeadendL2Service's
+	// HeadendL2List RPC.
+	HeadendL2ServiceHeadendL2ListProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2List"
+	// HeadendL2ServiceHeadendL2GetProcedure is the fully-qualified name of the HeadendL2Service's
+	// HeadendL2Get RPC.
+	HeadendL2ServiceHeadendL2GetProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Get"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -92,6 +106,11 @@ var (
 	headendv6ServiceHeadendv6DeleteMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Delete")
 	headendv6ServiceHeadendv6ListMethodDescriptor       = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6List")
 	headendv6ServiceHeadendv6GetMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
+	headendL2ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("HeadendL2Service")
+	headendL2ServiceHeadendL2CreateMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Create")
+	headendL2ServiceHeadendL2DeleteMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Delete")
+	headendL2ServiceHeadendL2ListMethodDescriptor       = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2List")
+	headendL2ServiceHeadendL2GetMethodDescriptor        = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Get")
 )
 
 // SidFunctionServiceClient is a client for the vinbero.v1.SidFunctionService service.
@@ -530,4 +549,150 @@ func (UnimplementedHeadendv6ServiceHandler) Headendv6List(context.Context, *conn
 
 func (UnimplementedHeadendv6ServiceHandler) Headendv6Get(context.Context, *connect.Request[v1.Headendv6GetRequest]) (*connect.Response[v1.Headendv6GetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6Get is not implemented"))
+}
+
+// HeadendL2ServiceClient is a client for the vinbero.v1.HeadendL2Service service.
+type HeadendL2ServiceClient interface {
+	HeadendL2Create(context.Context, *connect.Request[v1.HeadendL2CreateRequest]) (*connect.Response[v1.HeadendL2CreateResponse], error)
+	HeadendL2Delete(context.Context, *connect.Request[v1.HeadendL2DeleteRequest]) (*connect.Response[v1.HeadendL2DeleteResponse], error)
+	HeadendL2List(context.Context, *connect.Request[v1.HeadendL2ListRequest]) (*connect.Response[v1.HeadendL2ListResponse], error)
+	HeadendL2Get(context.Context, *connect.Request[v1.HeadendL2GetRequest]) (*connect.Response[v1.HeadendL2GetResponse], error)
+}
+
+// NewHeadendL2ServiceClient constructs a client for the vinbero.v1.HeadendL2Service service. By
+// default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses,
+// and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
+// connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewHeadendL2ServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) HeadendL2ServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &headendL2ServiceClient{
+		headendL2Create: connect.NewClient[v1.HeadendL2CreateRequest, v1.HeadendL2CreateResponse](
+			httpClient,
+			baseURL+HeadendL2ServiceHeadendL2CreateProcedure,
+			connect.WithSchema(headendL2ServiceHeadendL2CreateMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		headendL2Delete: connect.NewClient[v1.HeadendL2DeleteRequest, v1.HeadendL2DeleteResponse](
+			httpClient,
+			baseURL+HeadendL2ServiceHeadendL2DeleteProcedure,
+			connect.WithSchema(headendL2ServiceHeadendL2DeleteMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		headendL2List: connect.NewClient[v1.HeadendL2ListRequest, v1.HeadendL2ListResponse](
+			httpClient,
+			baseURL+HeadendL2ServiceHeadendL2ListProcedure,
+			connect.WithSchema(headendL2ServiceHeadendL2ListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		headendL2Get: connect.NewClient[v1.HeadendL2GetRequest, v1.HeadendL2GetResponse](
+			httpClient,
+			baseURL+HeadendL2ServiceHeadendL2GetProcedure,
+			connect.WithSchema(headendL2ServiceHeadendL2GetMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// headendL2ServiceClient implements HeadendL2ServiceClient.
+type headendL2ServiceClient struct {
+	headendL2Create *connect.Client[v1.HeadendL2CreateRequest, v1.HeadendL2CreateResponse]
+	headendL2Delete *connect.Client[v1.HeadendL2DeleteRequest, v1.HeadendL2DeleteResponse]
+	headendL2List   *connect.Client[v1.HeadendL2ListRequest, v1.HeadendL2ListResponse]
+	headendL2Get    *connect.Client[v1.HeadendL2GetRequest, v1.HeadendL2GetResponse]
+}
+
+// HeadendL2Create calls vinbero.v1.HeadendL2Service.HeadendL2Create.
+func (c *headendL2ServiceClient) HeadendL2Create(ctx context.Context, req *connect.Request[v1.HeadendL2CreateRequest]) (*connect.Response[v1.HeadendL2CreateResponse], error) {
+	return c.headendL2Create.CallUnary(ctx, req)
+}
+
+// HeadendL2Delete calls vinbero.v1.HeadendL2Service.HeadendL2Delete.
+func (c *headendL2ServiceClient) HeadendL2Delete(ctx context.Context, req *connect.Request[v1.HeadendL2DeleteRequest]) (*connect.Response[v1.HeadendL2DeleteResponse], error) {
+	return c.headendL2Delete.CallUnary(ctx, req)
+}
+
+// HeadendL2List calls vinbero.v1.HeadendL2Service.HeadendL2List.
+func (c *headendL2ServiceClient) HeadendL2List(ctx context.Context, req *connect.Request[v1.HeadendL2ListRequest]) (*connect.Response[v1.HeadendL2ListResponse], error) {
+	return c.headendL2List.CallUnary(ctx, req)
+}
+
+// HeadendL2Get calls vinbero.v1.HeadendL2Service.HeadendL2Get.
+func (c *headendL2ServiceClient) HeadendL2Get(ctx context.Context, req *connect.Request[v1.HeadendL2GetRequest]) (*connect.Response[v1.HeadendL2GetResponse], error) {
+	return c.headendL2Get.CallUnary(ctx, req)
+}
+
+// HeadendL2ServiceHandler is an implementation of the vinbero.v1.HeadendL2Service service.
+type HeadendL2ServiceHandler interface {
+	HeadendL2Create(context.Context, *connect.Request[v1.HeadendL2CreateRequest]) (*connect.Response[v1.HeadendL2CreateResponse], error)
+	HeadendL2Delete(context.Context, *connect.Request[v1.HeadendL2DeleteRequest]) (*connect.Response[v1.HeadendL2DeleteResponse], error)
+	HeadendL2List(context.Context, *connect.Request[v1.HeadendL2ListRequest]) (*connect.Response[v1.HeadendL2ListResponse], error)
+	HeadendL2Get(context.Context, *connect.Request[v1.HeadendL2GetRequest]) (*connect.Response[v1.HeadendL2GetResponse], error)
+}
+
+// NewHeadendL2ServiceHandler builds an HTTP handler from the service implementation. It returns the
+// path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewHeadendL2ServiceHandler(svc HeadendL2ServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	headendL2ServiceHeadendL2CreateHandler := connect.NewUnaryHandler(
+		HeadendL2ServiceHeadendL2CreateProcedure,
+		svc.HeadendL2Create,
+		connect.WithSchema(headendL2ServiceHeadendL2CreateMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	headendL2ServiceHeadendL2DeleteHandler := connect.NewUnaryHandler(
+		HeadendL2ServiceHeadendL2DeleteProcedure,
+		svc.HeadendL2Delete,
+		connect.WithSchema(headendL2ServiceHeadendL2DeleteMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	headendL2ServiceHeadendL2ListHandler := connect.NewUnaryHandler(
+		HeadendL2ServiceHeadendL2ListProcedure,
+		svc.HeadendL2List,
+		connect.WithSchema(headendL2ServiceHeadendL2ListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	headendL2ServiceHeadendL2GetHandler := connect.NewUnaryHandler(
+		HeadendL2ServiceHeadendL2GetProcedure,
+		svc.HeadendL2Get,
+		connect.WithSchema(headendL2ServiceHeadendL2GetMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.HeadendL2Service/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case HeadendL2ServiceHeadendL2CreateProcedure:
+			headendL2ServiceHeadendL2CreateHandler.ServeHTTP(w, r)
+		case HeadendL2ServiceHeadendL2DeleteProcedure:
+			headendL2ServiceHeadendL2DeleteHandler.ServeHTTP(w, r)
+		case HeadendL2ServiceHeadendL2ListProcedure:
+			headendL2ServiceHeadendL2ListHandler.ServeHTTP(w, r)
+		case HeadendL2ServiceHeadendL2GetProcedure:
+			headendL2ServiceHeadendL2GetHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedHeadendL2ServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedHeadendL2ServiceHandler struct{}
+
+func (UnimplementedHeadendL2ServiceHandler) HeadendL2Create(context.Context, *connect.Request[v1.HeadendL2CreateRequest]) (*connect.Response[v1.HeadendL2CreateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendL2Service.HeadendL2Create is not implemented"))
+}
+
+func (UnimplementedHeadendL2ServiceHandler) HeadendL2Delete(context.Context, *connect.Request[v1.HeadendL2DeleteRequest]) (*connect.Response[v1.HeadendL2DeleteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendL2Service.HeadendL2Delete is not implemented"))
+}
+
+func (UnimplementedHeadendL2ServiceHandler) HeadendL2List(context.Context, *connect.Request[v1.HeadendL2ListRequest]) (*connect.Response[v1.HeadendL2ListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendL2Service.HeadendL2List is not implemented"))
+}
+
+func (UnimplementedHeadendL2ServiceHandler) HeadendL2Get(context.Context, *connect.Request[v1.HeadendL2GetRequest]) (*connect.Response[v1.HeadendL2GetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendL2Service.HeadendL2Get is not implemented"))
 }

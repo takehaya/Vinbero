@@ -615,3 +615,202 @@ var Headendv6Service_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "vinbero/v1/vinbero.proto",
 }
+
+const (
+	HeadendL2Service_HeadendL2Create_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Create"
+	HeadendL2Service_HeadendL2Delete_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Delete"
+	HeadendL2Service_HeadendL2List_FullMethodName   = "/vinbero.v1.HeadendL2Service/HeadendL2List"
+	HeadendL2Service_HeadendL2Get_FullMethodName    = "/vinbero.v1.HeadendL2Service/HeadendL2Get"
+)
+
+// HeadendL2ServiceClient is the client API for HeadendL2Service service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type HeadendL2ServiceClient interface {
+	HeadendL2Create(ctx context.Context, in *HeadendL2CreateRequest, opts ...grpc.CallOption) (*HeadendL2CreateResponse, error)
+	HeadendL2Delete(ctx context.Context, in *HeadendL2DeleteRequest, opts ...grpc.CallOption) (*HeadendL2DeleteResponse, error)
+	HeadendL2List(ctx context.Context, in *HeadendL2ListRequest, opts ...grpc.CallOption) (*HeadendL2ListResponse, error)
+	HeadendL2Get(ctx context.Context, in *HeadendL2GetRequest, opts ...grpc.CallOption) (*HeadendL2GetResponse, error)
+}
+
+type headendL2ServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewHeadendL2ServiceClient(cc grpc.ClientConnInterface) HeadendL2ServiceClient {
+	return &headendL2ServiceClient{cc}
+}
+
+func (c *headendL2ServiceClient) HeadendL2Create(ctx context.Context, in *HeadendL2CreateRequest, opts ...grpc.CallOption) (*HeadendL2CreateResponse, error) {
+	out := new(HeadendL2CreateResponse)
+	err := c.cc.Invoke(ctx, HeadendL2Service_HeadendL2Create_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *headendL2ServiceClient) HeadendL2Delete(ctx context.Context, in *HeadendL2DeleteRequest, opts ...grpc.CallOption) (*HeadendL2DeleteResponse, error) {
+	out := new(HeadendL2DeleteResponse)
+	err := c.cc.Invoke(ctx, HeadendL2Service_HeadendL2Delete_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *headendL2ServiceClient) HeadendL2List(ctx context.Context, in *HeadendL2ListRequest, opts ...grpc.CallOption) (*HeadendL2ListResponse, error) {
+	out := new(HeadendL2ListResponse)
+	err := c.cc.Invoke(ctx, HeadendL2Service_HeadendL2List_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *headendL2ServiceClient) HeadendL2Get(ctx context.Context, in *HeadendL2GetRequest, opts ...grpc.CallOption) (*HeadendL2GetResponse, error) {
+	out := new(HeadendL2GetResponse)
+	err := c.cc.Invoke(ctx, HeadendL2Service_HeadendL2Get_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// HeadendL2ServiceServer is the server API for HeadendL2Service service.
+// All implementations should embed UnimplementedHeadendL2ServiceServer
+// for forward compatibility
+type HeadendL2ServiceServer interface {
+	HeadendL2Create(context.Context, *HeadendL2CreateRequest) (*HeadendL2CreateResponse, error)
+	HeadendL2Delete(context.Context, *HeadendL2DeleteRequest) (*HeadendL2DeleteResponse, error)
+	HeadendL2List(context.Context, *HeadendL2ListRequest) (*HeadendL2ListResponse, error)
+	HeadendL2Get(context.Context, *HeadendL2GetRequest) (*HeadendL2GetResponse, error)
+}
+
+// UnimplementedHeadendL2ServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedHeadendL2ServiceServer struct {
+}
+
+func (UnimplementedHeadendL2ServiceServer) HeadendL2Create(context.Context, *HeadendL2CreateRequest) (*HeadendL2CreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HeadendL2Create not implemented")
+}
+func (UnimplementedHeadendL2ServiceServer) HeadendL2Delete(context.Context, *HeadendL2DeleteRequest) (*HeadendL2DeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HeadendL2Delete not implemented")
+}
+func (UnimplementedHeadendL2ServiceServer) HeadendL2List(context.Context, *HeadendL2ListRequest) (*HeadendL2ListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HeadendL2List not implemented")
+}
+func (UnimplementedHeadendL2ServiceServer) HeadendL2Get(context.Context, *HeadendL2GetRequest) (*HeadendL2GetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HeadendL2Get not implemented")
+}
+
+// UnsafeHeadendL2ServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to HeadendL2ServiceServer will
+// result in compilation errors.
+type UnsafeHeadendL2ServiceServer interface {
+	mustEmbedUnimplementedHeadendL2ServiceServer()
+}
+
+func RegisterHeadendL2ServiceServer(s grpc.ServiceRegistrar, srv HeadendL2ServiceServer) {
+	s.RegisterService(&HeadendL2Service_ServiceDesc, srv)
+}
+
+func _HeadendL2Service_HeadendL2Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeadendL2CreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadendL2ServiceServer).HeadendL2Create(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadendL2Service_HeadendL2Create_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadendL2ServiceServer).HeadendL2Create(ctx, req.(*HeadendL2CreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HeadendL2Service_HeadendL2Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeadendL2DeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadendL2ServiceServer).HeadendL2Delete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadendL2Service_HeadendL2Delete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadendL2ServiceServer).HeadendL2Delete(ctx, req.(*HeadendL2DeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HeadendL2Service_HeadendL2List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeadendL2ListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadendL2ServiceServer).HeadendL2List(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadendL2Service_HeadendL2List_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadendL2ServiceServer).HeadendL2List(ctx, req.(*HeadendL2ListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HeadendL2Service_HeadendL2Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeadendL2GetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadendL2ServiceServer).HeadendL2Get(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadendL2Service_HeadendL2Get_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadendL2ServiceServer).HeadendL2Get(ctx, req.(*HeadendL2GetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// HeadendL2Service_ServiceDesc is the grpc.ServiceDesc for HeadendL2Service service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var HeadendL2Service_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.HeadendL2Service",
+	HandlerType: (*HeadendL2ServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "HeadendL2Create",
+			Handler:    _HeadendL2Service_HeadendL2Create_Handler,
+		},
+		{
+			MethodName: "HeadendL2Delete",
+			Handler:    _HeadendL2Service_HeadendL2Delete_Handler,
+		},
+		{
+			MethodName: "HeadendL2List",
+			Handler:    _HeadendL2Service_HeadendL2List_Handler,
+		},
+		{
+			MethodName: "HeadendL2Get",
+			Handler:    _HeadendL2Service_HeadendL2Get_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}
