@@ -23,6 +23,7 @@ message SidFunction {
   Srv6LocalFlavor flavor = 6; // PSP, USP, USD, etc.
   uint32 arg_src_offset = 7; // Bit offset for source in SID Args
   uint32 arg_dst_offset = 8; // Bit offset for destination in SID Args
+  uint32 oif = 9; // Output interface index (used by End.DX2)
 }
 
 message SidFunctionCreateRequest {
@@ -138,4 +139,46 @@ message Headendv6GetRequest {
 }
 message Headendv6GetResponse {
   Headendv6 headendv6 = 1;
+}
+
+service HeadendL2Service {
+  rpc HeadendL2Create(HeadendL2CreateRequest) returns (HeadendL2CreateResponse);
+  rpc HeadendL2Delete(HeadendL2DeleteRequest) returns (HeadendL2DeleteResponse);
+  rpc HeadendL2List(HeadendL2ListRequest) returns (HeadendL2ListResponse);
+  rpc HeadendL2Get(HeadendL2GetRequest) returns (HeadendL2GetResponse);
+}
+
+// HeadendL2 represents Headend behavior for L2 frames (H.Encaps.L2)
+message HeadendL2 {
+  uint32 vlan_id = 1; // VLAN ID (0 for untagged)
+  string src_addr = 2; // Outer IPv6 source address
+  repeated string segments = 3; // Segment list
+}
+
+message HeadendL2CreateRequest {
+  repeated HeadendL2 headend_l2s = 1;
+}
+message HeadendL2CreateResponse {
+  repeated HeadendL2 created = 1;
+  repeated OperationError errors = 2;
+}
+
+message HeadendL2DeleteRequest {
+  repeated uint32 vlan_ids = 1;
+}
+message HeadendL2DeleteResponse {
+  repeated uint32 deleted_vlan_ids = 1;
+  repeated OperationError errors = 2;
+}
+
+message HeadendL2ListRequest {}
+message HeadendL2ListResponse {
+  repeated HeadendL2 headend_l2s = 1;
+}
+
+message HeadendL2GetRequest {
+  uint32 vlan_id = 1;
+}
+message HeadendL2GetResponse {
+  HeadendL2 headend_l2 = 1;
 }

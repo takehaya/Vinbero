@@ -17,7 +17,7 @@
 | H.Insert.Red     |             | H.Insert with reduced SRH                        |
 | H.Encaps         | Supported   | Headend with encapsulation in outer IPv6 header  |
 | H.Encaps.Red     |             | H.Encaps with reduced SRH                        |
-| H.Encaps.L2      |             | H.Encaps with L2 payload                         |
+| H.Encaps.L2      | Supported   | H.Encaps with L2 payload                         |
 | H.Encaps.L2.Red  |             | H.Encaps.L2 with reduced SRH                     |
 
 ### Functions associated with a SID
@@ -27,7 +27,7 @@
 | End                  | Supported   | Endpoint function                                           |
 | End.X                |             | Endpoint with Layer-3 cross-connect                         |
 | End.T                |             | Endpoint with specific IPv6 table lookup                    |
-| End.DX2 (V)          |             | Endpoint with decap and L2 cross-connect (VLAN)             |
+| End.DX2 (V)          | Supported   | Endpoint with decap and L2 cross-connect (VLAN)             |
 | End.DT2 (U/M)        |             | Endpoint with decap and L2 table lookup (Unicast/Multicast) |
 | End.DX6              | Supported   | Endpoint with decap and IPv6 cross-connect                  |
 | End.DX4              | Supported   | Endpoint with decap and IPv4 cross-connect                  |

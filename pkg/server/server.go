@@ -53,6 +53,12 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered Headendv6Service", zap.String("path", path))
 
+	// HeadendL2 service
+	headendL2Server := NewHeadendL2Server(s.mapOps)
+	path, handler = vinberov1connect.NewHeadendL2ServiceHandler(headendL2Server)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered HeadendL2Service", zap.String("path", path))
+
 	// Health check endpoint
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
