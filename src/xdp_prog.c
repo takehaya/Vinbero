@@ -194,6 +194,9 @@ static __always_inline int process_srv6_localsid(
     case SRV6_LOCAL_ACTION_END_DT46:
         return process_end_dt46(ctx, ip6h, srh, entry);
 
+    case SRV6_LOCAL_ACTION_END_DT2:
+        return process_end_dt2(ctx, ip6h, srh, entry);
+
     // Phase 2+ endpoint functions (not yet implemented)
     case SRV6_LOCAL_ACTION_END_B6:
     case SRV6_LOCAL_ACTION_END_B6_ENCAPS:
@@ -270,7 +273,7 @@ static __noinline int do_h_encaps_l2(
     }
 
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex);
+    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
 
     switch (fib_result) {
     case FIB_RESULT_REDIRECT:
@@ -348,10 +351,37 @@ int vinbero_main(struct xdp_md *ctx)
         __u16 vlan_id = bpf_ntohs(vhdr->h_vlan_TCI) & 0x0FFF;
         __u16 inner_proto = vhdr->h_vlan_encapsulated_proto;
 
-        // L2 Headend check by VLAN ID
-        struct headend_l2_key l2_key = { .vlan_id = vlan_id };
+        // L2 Headend check by port + VLAN
+        struct headend_l2_key l2_key = { .ifindex = ctx->ingress_ifindex, .vlan_id = vlan_id };
         struct headend_entry *l2_entry = bpf_map_lookup_elem(&headend_l2_map, &l2_key);
         if (headend_should_encaps_l2(l2_entry)) {
+            // MAC learning + dst MAC判定 (bd_id != 0 の場合のみ)
+            if (l2_entry->bd_id != 0) {
+                struct fdb_key key = { .bd_id = l2_entry->bd_id };
+
+                // ① src MAC学習 (read-before-write: 既存エントリと同じなら書き込みスキップ)
+                __builtin_memcpy(key.mac, eth->h_source, ETH_ALEN);
+                struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &key);
+                if (!existing || existing->oif != ctx->ingress_ifindex) {
+                    struct fdb_entry learn_val = { .oif = ctx->ingress_ifindex };
+                    bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_ANY);
+                }
+
+                // ② BUM → XDP_PASS (bridge flood)
+                if (eth->h_dest[0] & 0x01) {
+                    action = XDP_PASS;
+                    goto out;
+                }
+
+                // ③ dst MACがローカルFDBにあれば → XDP_PASS (bridge forwarding)
+                __builtin_memcpy(key.mac, eth->h_dest, ETH_ALEN);
+                struct fdb_entry *dst_fdb = bpf_map_lookup_elem(&fdb_map, &key);
+                if (dst_fdb) {
+                    action = XDP_PASS;
+                    goto out;
+                }
+            }
+            // fdb miss = リモート宛 → H.Encaps.L2
             __u16 l2_frame_len = (__u16)pkt_len;
             action = do_h_encaps_l2(ctx, l2_entry, l2_frame_len);
             goto out;
@@ -387,6 +417,39 @@ int vinbero_main(struct xdp_md *ctx)
     }
 
     // ========== Non-VLAN packets ==========
+    {
+        // L2 Headend check for untagged traffic (vlan_id=0)
+        struct headend_l2_key l2_key = { .ifindex = ctx->ingress_ifindex, .vlan_id = 0 };
+        struct headend_entry *l2_entry = bpf_map_lookup_elem(&headend_l2_map, &l2_key);
+        if (headend_should_encaps_l2(l2_entry)) {
+            if (l2_entry->bd_id != 0) {
+                struct fdb_key key = { .bd_id = l2_entry->bd_id };
+
+                __builtin_memcpy(key.mac, eth->h_source, ETH_ALEN);
+                struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &key);
+                if (!existing || existing->oif != ctx->ingress_ifindex) {
+                    struct fdb_entry learn_val = { .oif = ctx->ingress_ifindex };
+                    bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_ANY);
+                }
+
+                if (eth->h_dest[0] & 0x01) {
+                    action = XDP_PASS;
+                    goto out;
+                }
+
+                __builtin_memcpy(key.mac, eth->h_dest, ETH_ALEN);
+                struct fdb_entry *dst_fdb = bpf_map_lookup_elem(&fdb_map, &key);
+                if (dst_fdb) {
+                    action = XDP_PASS;
+                    goto out;
+                }
+            }
+            __u16 l2_frame_len = (__u16)pkt_len;
+            action = do_h_encaps_l2(ctx, l2_entry, l2_frame_len);
+            goto out;
+        }
+    }
+
     // L3 at constant offset 14
     DO_L3_PROCESS(ctx, 14, data_end, eth_proto);
 

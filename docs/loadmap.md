@@ -28,12 +28,12 @@
 | End.X                |             | Endpoint with Layer-3 cross-connect                         |
 | End.T                |             | Endpoint with specific IPv6 table lookup                    |
 | End.DX2 (V)          | Supported   | Endpoint with decap and L2 cross-connect (VLAN)             |
-| End.DT2 (U/M)        |             | Endpoint with decap and L2 table lookup (Unicast/Multicast) |
+| End.DT2 (U/M)        | Supported   | Endpoint with decap and L2 table lookup (Unicast/Multicast) |
 | End.DX6              | Supported   | Endpoint with decap and IPv6 cross-connect                  |
 | End.DX4              | Supported   | Endpoint with decap and IPv4 cross-connect                  |
-| End.DT6              |             | Endpoint with decap and IPv6 table lookup                   |
-| End.DT4              |             | Endpoint with decap and IPv4 table lookup                   |
-| End.DT46             |             | Endpoint with decap and IP (v4/v6) table lookup             |
+| End.DT6              | Supported   | Endpoint with decap and IPv6 table lookup                   |
+| End.DT4              | Supported   | Endpoint with decap and IPv4 table lookup                   |
+| End.DT46             | Supported   | Endpoint with decap and IP (v4/v6) table lookup             |
 | End.B6.Insert        |             | Endpoint bound to SRv6 policy with insertion                |
 | End.B6.Insert.Red    |             | End.B6.Insert with reduced SRH                              |
 | End.B6.Encaps        |             | Endpoint bound to SRv6 policy with encapsulation            |

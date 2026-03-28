@@ -20,6 +20,8 @@ type (
 	HeadendL2Key     = BpfHeadendL2Key
 	SidFunctionEntry = BpfSidFunctionEntry
 	HeadendEntry     = BpfHeadendEntry
+	FdbKey           = BpfFdbKey
+	FdbEntry         = BpfFdbEntry
 )
 
 // MapOperator interface for testability
@@ -264,10 +266,9 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 
 // ===== Headend L2 Map Operations =====
 
-// CreateHeadendL2 adds a headend L2 entry to the map (keyed by VLAN ID)
-func (m *MapOperations) CreateHeadendL2(vlanID uint16, entry *HeadendEntry) error {
-	key := buildHeadendL2Key(vlanID)
-
+// CreateHeadendL2 adds a headend L2 entry to the map (keyed by port + VLAN)
+func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *HeadendEntry) error {
+	key := buildHeadendL2Key(ifindex, vlanID)
 	if err := m.objs.HeadendL2Map.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put headend L2 entry: %w", err)
 	}
@@ -275,9 +276,8 @@ func (m *MapOperations) CreateHeadendL2(vlanID uint16, entry *HeadendEntry) erro
 }
 
 // DeleteHeadendL2 removes a headend L2 entry from the map
-func (m *MapOperations) DeleteHeadendL2(vlanID uint16) error {
-	key := buildHeadendL2Key(vlanID)
-
+func (m *MapOperations) DeleteHeadendL2(ifindex uint32, vlanID uint16) error {
+	key := buildHeadendL2Key(ifindex, vlanID)
 	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete headend L2 entry: %w", err)
 	}
@@ -285,9 +285,8 @@ func (m *MapOperations) DeleteHeadendL2(vlanID uint16) error {
 }
 
 // GetHeadendL2 retrieves a headend L2 entry from the map
-func (m *MapOperations) GetHeadendL2(vlanID uint16) (*HeadendEntry, error) {
-	key := buildHeadendL2Key(vlanID)
-
+func (m *MapOperations) GetHeadendL2(ifindex uint32, vlanID uint16) (*HeadendEntry, error) {
+	key := buildHeadendL2Key(ifindex, vlanID)
 	var entry HeadendEntry
 	if err := m.objs.HeadendL2Map.Lookup(key, &entry); err != nil {
 		return nil, fmt.Errorf("failed to lookup headend L2 entry: %w", err)
@@ -296,20 +295,63 @@ func (m *MapOperations) GetHeadendL2(vlanID uint16) (*HeadendEntry, error) {
 }
 
 // ListHeadendL2 returns all headend L2 entries
-func (m *MapOperations) ListHeadendL2() (map[uint16]*HeadendEntry, error) {
-	result := make(map[uint16]*HeadendEntry)
-
+func (m *MapOperations) ListHeadendL2() (map[HeadendL2Key]*HeadendEntry, error) {
+	result := make(map[HeadendL2Key]*HeadendEntry)
 	var key HeadendL2Key
 	var entry HeadendEntry
 	iter := m.objs.HeadendL2Map.Iterate()
-
 	for iter.Next(&key, &entry) {
 		entryCopy := entry
-		result[key.VlanId] = &entryCopy
+		result[key] = &entryCopy
 	}
-
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("failed to iterate headend L2 map: %w", err)
+	}
+	return result, nil
+}
+
+// ===== FDB Map Operations (for End.DT2) =====
+
+// CreateFdb adds an FDB entry to the map
+func (m *MapOperations) CreateFdb(bdID uint16, mac net.HardwareAddr, entry *FdbEntry) error {
+	key := buildFdbKey(bdID, mac)
+	if err := m.objs.FdbMap.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put fdb entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteFdb removes an FDB entry from the map
+func (m *MapOperations) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
+	key := buildFdbKey(bdID, mac)
+	if err := m.objs.FdbMap.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete fdb entry: %w", err)
+	}
+	return nil
+}
+
+// GetFdb retrieves an FDB entry from the map
+func (m *MapOperations) GetFdb(bdID uint16, mac net.HardwareAddr) (*FdbEntry, error) {
+	key := buildFdbKey(bdID, mac)
+	var entry FdbEntry
+	if err := m.objs.FdbMap.Lookup(key, &entry); err != nil {
+		return nil, fmt.Errorf("failed to lookup fdb entry: %w", err)
+	}
+	return &entry, nil
+}
+
+// ListFdb returns all FDB entries
+func (m *MapOperations) ListFdb() (map[FdbKey]*FdbEntry, error) {
+	result := make(map[FdbKey]*FdbEntry)
+	var key FdbKey
+	var entry FdbEntry
+	iter := m.objs.FdbMap.Iterate()
+	for iter.Next(&key, &entry) {
+		entryCopy := entry
+		result[key] = &entryCopy
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate fdb map: %w", err)
 	}
 	return result, nil
 }
@@ -362,10 +404,17 @@ func lpmKeyV6ToString(key *LpmKeyV6) string {
 	return fmt.Sprintf("%s/%d", ip.String(), key.Prefixlen)
 }
 
-func buildHeadendL2Key(vlanID uint16) *HeadendL2Key {
+func buildHeadendL2Key(ifindex uint32, vlanID uint16) *HeadendL2Key {
 	return &HeadendL2Key{
-		VlanId: vlanID,
+		Ifindex: ifindex,
+		VlanId:  vlanID,
 	}
+}
+
+func buildFdbKey(bdID uint16, mac net.HardwareAddr) *FdbKey {
+	key := &FdbKey{BdId: bdID}
+	copy(key.Mac[:], mac)
+	return key
 }
 
 // ParseSegments parses a list of segment strings into the Segments array

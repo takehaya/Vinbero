@@ -1,21 +1,25 @@
 package vinbero
 
 import (
+	"context"
 	"fmt"
 	"net"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"go.uber.org/zap"
 )
 
 type Vinbero struct {
-	cfg      *config.Config
-	obj      *bpf.BpfObjects
-	mapOps   *bpf.MapOperations
-	devices  []net.Interface
-	devLinks []link.Link
+	cfg        *config.Config
+	obj        *bpf.BpfObjects
+	mapOps     *bpf.MapOperations
+	devices    []net.Interface
+	devLinks   []link.Link
+	fdbWatcher *netlinkwatch.FDBWatcher
+	logger     *zap.Logger
 }
 
 func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
@@ -45,6 +49,7 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 		obj:     obj,
 		mapOps:  mapOps,
 		devices: devices,
+		logger:  logger,
 	}, nil
 }
 
@@ -68,6 +73,21 @@ func (v *Vinbero) LoadXDPProgram() error {
 	return nil
 }
 
+// StartFDBWatcher starts the FDB watcher if bridge_domains are configured
+func (v *Vinbero) StartFDBWatcher(ctx context.Context) error {
+	if len(v.cfg.Setting.BridgeDomains) == 0 {
+		return nil
+	}
+
+	v.fdbWatcher = netlinkwatch.NewFDBWatcher(v.mapOps, v.cfg.Setting.BridgeDomains, v.logger)
+	if err := v.fdbWatcher.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start FDB watcher: %w", err)
+	}
+	v.logger.Info("FDB watcher started",
+		zap.Int("bridge_domains", len(v.cfg.Setting.BridgeDomains)))
+	return nil
+}
+
 // GetMapOperations returns the map operations instance
 func (v *Vinbero) GetMapOperations() *bpf.MapOperations {
 	return v.mapOps
@@ -79,6 +99,9 @@ func (v *Vinbero) GetConfig() *config.Config {
 }
 
 func (v *Vinbero) Close() error {
+	if v.fdbWatcher != nil {
+		v.fdbWatcher.Stop()
+	}
 	for _, l := range v.devLinks {
 		if err := l.Close(); err != nil {
 			return fmt.Errorf("failed to close link: %w", err)
