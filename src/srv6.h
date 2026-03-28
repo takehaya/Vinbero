@@ -26,6 +26,7 @@ enum srv6_local_action {
     SRV6_LOCAL_ACTION_END_AS = 14,
     SRV6_LOCAL_ACTION_END_AM = 15,
     SRV6_LOCAL_ACTION_END_BPF = 16,  // BPF-defined local action
+    SRV6_LOCAL_ACTION_END_DT2 = 17,  // End.DT2 (L2 table lookup with FDB)
 };
 
 // ========== SRv6 Local Flavor ==========

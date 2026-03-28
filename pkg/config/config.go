@@ -16,9 +16,16 @@ type Config struct {
 }
 
 type SettingConfig struct {
-	Entries      EntriesConfig `yaml:"entries,omitempty"`
-	EnableStats  bool          `yaml:"enable_stats,omitempty" default:"false"`
-	EnableXdpcap bool          `yaml:"enable_xdpcap,omitempty" default:"false"`
+	Entries       EntriesConfig        `yaml:"entries,omitempty"`
+	EnableStats   bool                 `yaml:"enable_stats,omitempty" default:"false"`
+	EnableXdpcap  bool                 `yaml:"enable_xdpcap,omitempty" default:"false"`
+	BridgeDomains []BridgeDomainConfig `yaml:"bridge_domains,omitempty"`
+}
+
+// BridgeDomainConfig holds configuration for a bridge domain (for End.DT2 FDB sync)
+type BridgeDomainConfig struct {
+	BridgeName string `yaml:"bridge_name"`
+	BdID       uint16 `yaml:"bd_id"`
 }
 
 // EntriesConfig holds the capacity settings for each entry type

@@ -103,7 +103,7 @@ static __always_inline int do_h_encaps_core(
 
     // 9. FIB lookup and redirect
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex);
+    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
 
     switch (fib_result) {
     case FIB_RESULT_REDIRECT:

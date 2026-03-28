@@ -51,6 +51,16 @@ struct {
     __uint(max_entries, 1024);
 } headend_l2_map SEC(".maps");
 
+// FDB map (Hash) for End.DT2 L2VPN forwarding database
+// Key: Bridge Domain ID + MAC address
+// Value: output interface + flags
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct fdb_key);
+    __type(value, struct fdb_entry);
+    __uint(max_entries, 8192);
+} fdb_map SEC(".maps");
+
 // https://github.com/cloudflare/xdpcap
 // struct bpf_map_def SEC("maps") xdpcap_hook = XDPCAP_HOOK();
 struct xdpcap_hook {

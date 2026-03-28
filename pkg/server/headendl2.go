@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -19,6 +20,14 @@ func NewHeadendL2Server(mapOps *bpf.MapOperations) *HeadendL2Server {
 	return &HeadendL2Server{mapOps: mapOps}
 }
 
+func resolveIfindex(name string) (uint32, error) {
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return 0, fmt.Errorf("interface %q not found: %w", name, err)
+	}
+	return uint32(iface.Index), nil
+}
+
 // HeadendL2Create creates Headend L2 entries
 func (s *HeadendL2Server) HeadendL2Create(
 	ctx context.Context,
@@ -30,19 +39,27 @@ func (s *HeadendL2Server) HeadendL2Create(
 	}
 
 	for _, headend := range req.Msg.HeadendL2S {
-		entry, err := s.protoToEntry(headend)
+		ifindex, err := resolveIfindex(headend.InterfaceName)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: fmt.Sprintf("vlan_id:%d", headend.VlanId),
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
 				Reason:        err.Error(),
 			})
 			continue
 		}
 
-		vlanID := uint16(headend.VlanId)
-		if err := s.mapOps.CreateHeadendL2(vlanID, entry); err != nil {
+		entry, err := s.protoToEntry(headend)
+		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: fmt.Sprintf("vlan_id:%d", headend.VlanId),
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
+				Reason:        err.Error(),
+			})
+			continue
+		}
+
+		if err := s.mapOps.CreateHeadendL2(ifindex, uint16(headend.VlanId), entry); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
 				Reason:        err.Error(),
 			})
 			continue
@@ -60,20 +77,29 @@ func (s *HeadendL2Server) HeadendL2Delete(
 	req *connect.Request[v1.HeadendL2DeleteRequest],
 ) (*connect.Response[v1.HeadendL2DeleteResponse], error) {
 	resp := &v1.HeadendL2DeleteResponse{
-		DeletedVlanIds: make([]uint32, 0),
-		Errors:         make([]*v1.OperationError, 0),
+		Deleted: make([]*v1.HeadendL2DeleteTarget, 0),
+		Errors:  make([]*v1.OperationError, 0),
 	}
 
-	for _, vlanID := range req.Msg.VlanIds {
-		if err := s.mapOps.DeleteHeadendL2(uint16(vlanID)); err != nil {
+	for _, target := range req.Msg.Targets {
+		ifindex, err := resolveIfindex(target.InterfaceName)
+		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: fmt.Sprintf("vlan_id:%d", vlanID),
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", target.InterfaceName, target.VlanId),
 				Reason:        err.Error(),
 			})
 			continue
 		}
 
-		resp.DeletedVlanIds = append(resp.DeletedVlanIds, vlanID)
+		if err := s.mapOps.DeleteHeadendL2(ifindex, uint16(target.VlanId)); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", target.InterfaceName, target.VlanId),
+				Reason:        err.Error(),
+			})
+			continue
+		}
+
+		resp.Deleted = append(resp.Deleted, target)
 	}
 
 	return connect.NewResponse(resp), nil
@@ -93,8 +119,8 @@ func (s *HeadendL2Server) HeadendL2List(
 		HeadendL2S: make([]*v1.HeadendL2, 0, len(entries)),
 	}
 
-	for vlanID, entry := range entries {
-		headend := s.entryToProto(vlanID, entry)
+	for key, entry := range entries {
+		headend := s.entryToProto(key, entry)
 		resp.HeadendL2S = append(resp.HeadendL2S, headend)
 	}
 
@@ -106,13 +132,19 @@ func (s *HeadendL2Server) HeadendL2Get(
 	ctx context.Context,
 	req *connect.Request[v1.HeadendL2GetRequest],
 ) (*connect.Response[v1.HeadendL2GetResponse], error) {
-	entry, err := s.mapOps.GetHeadendL2(uint16(req.Msg.VlanId))
+	ifindex, err := resolveIfindex(req.Msg.InterfaceName)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	entry, err := s.mapOps.GetHeadendL2(ifindex, uint16(req.Msg.VlanId))
 	if err != nil {
 		return nil, connect.NewError(connect.CodeNotFound, err)
 	}
 
+	key := bpf.HeadendL2Key{Ifindex: ifindex, VlanId: uint16(req.Msg.VlanId)}
 	resp := &v1.HeadendL2GetResponse{
-		HeadendL2: s.entryToProto(uint16(req.Msg.VlanId), entry),
+		HeadendL2: s.entryToProto(key, entry),
 	}
 
 	return connect.NewResponse(resp), nil
@@ -135,14 +167,23 @@ func (s *HeadendL2Server) protoToEntry(headend *v1.HeadendL2) (*bpf.HeadendEntry
 		NumSegments: numSegments,
 		SrcAddr:     srcAddr,
 		Segments:    segments,
+		BdId:        uint16(headend.BdId),
 	}, nil
 }
 
 // entryToProto converts a BPF map entry to a protobuf HeadendL2
-func (s *HeadendL2Server) entryToProto(vlanID uint16, entry *bpf.HeadendEntry) *v1.HeadendL2 {
+func (s *HeadendL2Server) entryToProto(key bpf.HeadendL2Key, entry *bpf.HeadendEntry) *v1.HeadendL2 {
+	// Reverse-resolve ifindex to interface name (best-effort)
+	ifaceName := fmt.Sprintf("ifindex:%d", key.Ifindex)
+	if iface, err := net.InterfaceByIndex(int(key.Ifindex)); err == nil {
+		ifaceName = iface.Name
+	}
+
 	return &v1.HeadendL2{
-		VlanId:   uint32(vlanID),
-		SrcAddr:  bpf.FormatIPv6(entry.SrcAddr),
-		Segments: bpf.FormatSegments(entry.Segments, entry.NumSegments),
+		VlanId:        uint32(key.VlanId),
+		SrcAddr:       bpf.FormatIPv6(entry.SrcAddr),
+		Segments:      bpf.FormatSegments(entry.Segments, entry.NumSegments),
+		BdId:          uint32(entry.BdId),
+		InterfaceName: ifaceName,
 	}
 }

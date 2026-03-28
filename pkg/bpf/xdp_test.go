@@ -417,7 +417,10 @@ func TestXDPProgHeadendL2Encaps(t *testing.T) {
 			segments, numSegments, _ := ParseSegments(tt.segmentStrs)
 
 			if tt.entryVlanID > 0 {
-				h.createHeadendL2Entry(tt.entryVlanID, srcAddr, segments, numSegments)
+				// ebpf.Run() may set ingress_ifindex to 0 or 1 depending on kernel;
+				// create entries for both to ensure the test works
+				h.createHeadendL2Entry(0, tt.entryVlanID, srcAddr, segments, numSegments, 0)
+				h.createHeadendL2Entry(1, tt.entryVlanID, srcAddr, segments, numSegments, 0)
 			}
 
 			var pkt []byte
@@ -486,6 +489,171 @@ func TestXDPProgHeadendL2Encaps(t *testing.T) {
 				if len(outPkt) != originalLen {
 					t.Errorf("Packet length changed unexpectedly: original %d, got %d", originalLen, len(outPkt))
 				}
+			}
+		})
+	}
+}
+
+func TestXDPProgEndDT(t *testing.T) {
+	tests := []struct {
+		name         string
+		action       uint8
+		isIPv4       bool
+		triggerSID   string
+		outerSrcIP   string
+		outerDstIP   string
+		segments     []string
+		segmentsLeft uint8
+		innerSrcIP   string
+		innerDstIP   string
+		vrfIfindex   uint32
+		expectDecap  bool
+	}{
+		// End.DT4 tests
+		{"End.DT4 SL=0 default VRF", actionEndDT4, true, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10", []string{"fd00:1:100::10"}, 0, "10.0.0.1", "192.0.2.100", 0, true},
+		{"End.DT4 SL!=0 (pass)", actionEndDT4, true, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10", []string{"fd00:1:100::20", "fd00:1:100::10"}, 1, "10.0.0.1", "192.0.2.100", 0, false},
+		// End.DT6 tests
+		{"End.DT6 SL=0 default VRF", actionEndDT6, false, "fd00:1:100::20/128", "fd00:1:1::1", "fd00:1:100::20", []string{"fd00:1:100::20"}, 0, "2001:db8:1::1", "2001:db8:2::1", 0, true},
+		{"End.DT6 SL!=0 (pass)", actionEndDT6, false, "fd00:1:100::20/128", "fd00:1:1::1", "fd00:1:100::20", []string{"fd00:1:100::30", "fd00:1:100::20"}, 1, "2001:db8:1::1", "2001:db8:2::1", 0, false},
+		// End.DT46 tests (dual-stack: IPv4 inner)
+		{"End.DT46 SL=0 IPv4 inner", actionEndDT46, true, "fd00:1:100::30/128", "fd00:1:1::1", "fd00:1:100::30", []string{"fd00:1:100::30"}, 0, "10.0.0.1", "192.0.2.100", 0, true},
+		// End.DT46 tests (dual-stack: IPv6 inner)
+		{"End.DT46 SL=0 IPv6 inner", actionEndDT46, false, "fd00:1:100::30/128", "fd00:1:1::1", "fd00:1:100::30", []string{"fd00:1:100::30"}, 0, "2001:db8:1::1", "2001:db8:2::1", 0, true},
+		{"End.DT46 SL!=0 (pass)", actionEndDT46, true, "fd00:1:100::30/128", "fd00:1:1::1", "fd00:1:100::30", []string{"fd00:1:100::40", "fd00:1:100::30"}, 1, "10.0.0.1", "192.0.2.100", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithVRF(tt.triggerSID, tt.action, tt.vrfIfindex)
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+
+			innerType := innerTypeIPv6
+			if tt.isIPv4 {
+				innerType = innerTypeIPv4
+			}
+
+			pkt, err := buildEncapsulatedPacket(
+				net.ParseIP(tt.outerSrcIP), net.ParseIP(tt.outerDstIP),
+				segments, tt.segmentsLeft,
+				net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP),
+				innerType,
+			)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			originalLen := len(pkt)
+			ret, outPkt := h.run(pkt)
+
+			if tt.expectDecap {
+				// After decap: XDP_REDIRECT (FIB success) or XDP_DROP (FIB fail in test env)
+				if ret != XDP_REDIRECT && ret != XDP_DROP {
+					t.Errorf("Expected XDP_REDIRECT or XDP_DROP after decap, got %d", ret)
+				}
+				if !verifyDecapsulated(t, outPkt, net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP), tt.isIPv4) {
+					return
+				}
+				t.Logf("SUCCESS: End.DT decapsulation verified (original: %d, decapsulated: %d, action: %d)", originalLen, len(outPkt), ret)
+			} else {
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS, got %d", ret)
+				}
+			}
+		})
+	}
+}
+
+func TestXDPProgEndDT2(t *testing.T) {
+	tests := []struct {
+		name         string
+		bdID         uint16
+		triggerSID   string
+		outerSrcIP   string
+		outerDstIP   string
+		segments     []string
+		segmentsLeft uint8
+		innerVlanID  uint16
+		innerSrcIP   string
+		innerDstIP   string
+		isIPv4Inner  bool
+		// FDB setup
+		fdbBdID  uint16
+		fdbMac   net.HardwareAddr
+		fdbOif   uint32
+		setupFDB bool
+		// Expected
+		expectAction uint32
+	}{
+		{
+			"End.DT2 known unicast (redirect)",
+			100, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10",
+			[]string{"fd00:1:100::10"}, 0,
+			100, "10.0.0.1", "192.0.2.100", true,
+			100, net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}, 1, true,
+			XDP_REDIRECT,
+		},
+		{
+			"End.DT2 unknown unicast (pass to kernel)",
+			100, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10",
+			[]string{"fd00:1:100::10"}, 0,
+			100, "10.0.0.1", "192.0.2.100", true,
+			0, nil, 0, false,
+			XDP_PASS,
+		},
+		{
+			"End.DT2 SL!=0 (pass)",
+			100, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10",
+			[]string{"fd00:1:100::20", "fd00:1:100::10"}, 1,
+			100, "10.0.0.1", "192.0.2.100", true,
+			0, nil, 0, false,
+			XDP_PASS,
+		},
+		{
+			"End.DT2 known unicast IPv6 inner (redirect)",
+			200, "fd00:1:100::20/128", "fd00:1:1::1", "fd00:1:100::20",
+			[]string{"fd00:1:100::20"}, 0,
+			200, "2001:db8:1::1", "2001:db8:2::1", false,
+			200, net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}, 2, true,
+			XDP_REDIRECT,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithBD(tt.triggerSID, actionEndDT2, tt.bdID)
+
+			if tt.setupFDB {
+				h.createFdbEntry(tt.fdbBdID, tt.fdbMac, tt.fdbOif)
+			}
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+
+			pkt, err := buildL2EncapsulatedPacket(
+				net.ParseIP(tt.outerSrcIP), net.ParseIP(tt.outerDstIP),
+				segments, tt.segmentsLeft,
+				tt.innerVlanID,
+				net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP),
+				tt.isIPv4Inner,
+			)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, _ := h.run(pkt)
+
+			if ret != tt.expectAction {
+				t.Errorf("Expected action %d, got %d", tt.expectAction, ret)
+			} else {
+				t.Logf("SUCCESS: End.DT2 action=%d as expected", ret)
 			}
 		})
 	}

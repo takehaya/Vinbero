@@ -81,6 +81,11 @@ func run(cliCtx *cli.Context) error {
 	}
 	lg.Info("Vinbero XDP program loaded successfully")
 
+	// Start FDB watcher if bridge domains are configured
+	if err := vin.StartFDBWatcher(ctx); err != nil {
+		return fmt.Errorf("start FDB watcher: %w", err)
+	}
+
 	srv := server.NewServer(cfg, vin.GetMapOperations(), lg)
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)

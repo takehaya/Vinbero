@@ -32,6 +32,7 @@ enum Srv6LocalAction {
   SRV6_LOCAL_ACTION_END_AS = 14; // End.AS
   SRV6_LOCAL_ACTION_END_AM = 15; // End.AM
   SRV6_LOCAL_ACTION_END_BPF = 16; // End.BPF
+  SRV6_LOCAL_ACTION_END_DT2 = 17; // End.DT2 (L2 table lookup with FDB)
 }
 
 // Srv6HeadendBehavior represents SRv6 Headend behavior types

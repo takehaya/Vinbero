@@ -140,6 +140,8 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		Nexthop:      nexthop,
 		ArgSrcOffset: uint8(sidFunc.ArgSrcOffset),
 		ArgDstOffset: uint8(sidFunc.ArgDstOffset),
+		VrfIfindex:   sidFunc.VrfIfindex,
+		BdId:         uint16(sidFunc.BdId),
 	}, nil
 }
 
@@ -154,5 +156,7 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 		Flavor:        v1.Srv6LocalFlavor(entry.Flavor),
 		ArgSrcOffset:  uint32(entry.ArgSrcOffset),
 		ArgDstOffset:  uint32(entry.ArgDstOffset),
+		VrfIfindex:    entry.VrfIfindex,
+		BdId:          uint32(entry.BdId),
 	}
 }
