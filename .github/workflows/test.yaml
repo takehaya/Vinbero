@@ -28,7 +28,7 @@ on:
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -67,7 +67,7 @@ jobs:
 
   unit-test:
     name: Unit Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     permissions:
       contents: read
@@ -86,7 +86,7 @@ jobs:
 
   integration-test:
     name: Integration Test - ${{ matrix.example }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     permissions:
       contents: read
@@ -97,8 +97,12 @@ jobs:
           - end
           - end-dx4
           - end-dx6
+          - end-dt4
+          - end-dt6
+          - end-dt2
           - headend-v4
           - headend-v6
+          - headend-l2
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -118,7 +122,10 @@ jobs:
           sudo apt-get install -y \
             iproute2 \
             iputils-ping \
-            curl
+            ethtool \
+            curl \
+            linux-modules-extra-$(uname -r)
+          sudo modprobe vrf
 
       - name: Setup test environment
         working-directory: examples/${{ matrix.example }}

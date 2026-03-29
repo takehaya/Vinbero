@@ -124,6 +124,7 @@ response=$(ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vin
     "headend_l2s": [
       {
         "vlan_id": 100,
+        "interface_name": "'"${TOPO_NS_PREFIX}rt1h1"'",
         "src_addr": "fc00:1::1",
         "segments": ["fc00:2::1", "fc00:3::3"]
       }
@@ -144,6 +145,7 @@ response=$(ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vin
     "headend_l2s": [
       {
         "vlan_id": 100,
+        "interface_name": "'"${TOPO_NS_PREFIX}rt3h2"'",
         "src_addr": "fc00:3::3",
         "segments": ["fc00:2::2", "fc00:1::2"]
       }
@@ -190,7 +192,7 @@ fi
 print_info "Testing HeadendL2Get API..."
 get_response=$(ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2Get \
   -H "Content-Type: application/json" \
-  -d '{"vlan_id": 100}')
+  -d '{"interface_name": "'"${TOPO_NS_PREFIX}rt1h1"'", "vlan_id": 100}')
 
 if echo "$get_response" | grep -q '"srcAddr":"fc00:1::1"'; then
     print_success "HeadendL2Get API: PASS (correct src_addr)"
@@ -211,9 +213,9 @@ echo "=========================================="
 print_info "Testing HeadendL2Delete API..."
 delete_response=$(ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2Delete \
   -H "Content-Type: application/json" \
-  -d '{"vlan_ids": [100]}')
+  -d '{"targets": [{"interface_name": "'"${TOPO_NS_PREFIX}rt1h1"'", "vlan_id": 100}]}')
 
-if echo "$delete_response" | grep -q '"deletedVlanIds":\[100\]'; then
+if echo "$delete_response" | grep -q '"deleted"'; then
     print_success "HeadendL2Delete API: PASS"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else

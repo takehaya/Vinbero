@@ -59,6 +59,12 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered HeadendL2Service", zap.String("path", path))
 
+	// Dmac service (read-only, for observability)
+	dmacServer := NewDmacServer(s.mapOps)
+	path, handler = vinberov1connect.NewDmacServiceHandler(dmacServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered DmacService", zap.String("path", path))
+
 	// Health check endpoint
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -27,6 +27,8 @@ const (
 	Headendv4ServiceName = "vinbero.v1.Headendv4Service"
 	// Headendv6ServiceName is the fully-qualified name of the Headendv6Service service.
 	Headendv6ServiceName = "vinbero.v1.Headendv6Service"
+	// DmacServiceName is the fully-qualified name of the DmacService service.
+	DmacServiceName = "vinbero.v1.DmacService"
 	// HeadendL2ServiceName is the fully-qualified name of the HeadendL2Service service.
 	HeadendL2ServiceName = "vinbero.v1.HeadendL2Service"
 )
@@ -75,6 +77,8 @@ const (
 	// Headendv6ServiceHeadendv6GetProcedure is the fully-qualified name of the Headendv6Service's
 	// Headendv6Get RPC.
 	Headendv6ServiceHeadendv6GetProcedure = "/vinbero.v1.Headendv6Service/Headendv6Get"
+	// DmacServiceDmacListProcedure is the fully-qualified name of the DmacService's DmacList RPC.
+	DmacServiceDmacListProcedure = "/vinbero.v1.DmacService/DmacList"
 	// HeadendL2ServiceHeadendL2CreateProcedure is the fully-qualified name of the HeadendL2Service's
 	// HeadendL2Create RPC.
 	HeadendL2ServiceHeadendL2CreateProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Create"
@@ -106,6 +110,8 @@ var (
 	headendv6ServiceHeadendv6DeleteMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Delete")
 	headendv6ServiceHeadendv6ListMethodDescriptor       = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6List")
 	headendv6ServiceHeadendv6GetMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
+	dmacServiceServiceDescriptor                        = v1.File_vinbero_v1_vinbero_proto.Services().ByName("DmacService")
+	dmacServiceDmacListMethodDescriptor                 = dmacServiceServiceDescriptor.Methods().ByName("DmacList")
 	headendL2ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("HeadendL2Service")
 	headendL2ServiceHeadendL2CreateMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Create")
 	headendL2ServiceHeadendL2DeleteMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Delete")
@@ -549,6 +555,74 @@ func (UnimplementedHeadendv6ServiceHandler) Headendv6List(context.Context, *conn
 
 func (UnimplementedHeadendv6ServiceHandler) Headendv6Get(context.Context, *connect.Request[v1.Headendv6GetRequest]) (*connect.Response[v1.Headendv6GetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6Get is not implemented"))
+}
+
+// DmacServiceClient is a client for the vinbero.v1.DmacService service.
+type DmacServiceClient interface {
+	DmacList(context.Context, *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error)
+}
+
+// NewDmacServiceClient constructs a client for the vinbero.v1.DmacService service. By default, it
+// uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses, and sends
+// uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the connect.WithGRPC() or
+// connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewDmacServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) DmacServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &dmacServiceClient{
+		dmacList: connect.NewClient[v1.DmacListRequest, v1.DmacListResponse](
+			httpClient,
+			baseURL+DmacServiceDmacListProcedure,
+			connect.WithSchema(dmacServiceDmacListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// dmacServiceClient implements DmacServiceClient.
+type dmacServiceClient struct {
+	dmacList *connect.Client[v1.DmacListRequest, v1.DmacListResponse]
+}
+
+// DmacList calls vinbero.v1.DmacService.DmacList.
+func (c *dmacServiceClient) DmacList(ctx context.Context, req *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error) {
+	return c.dmacList.CallUnary(ctx, req)
+}
+
+// DmacServiceHandler is an implementation of the vinbero.v1.DmacService service.
+type DmacServiceHandler interface {
+	DmacList(context.Context, *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error)
+}
+
+// NewDmacServiceHandler builds an HTTP handler from the service implementation. It returns the path
+// on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewDmacServiceHandler(svc DmacServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	dmacServiceDmacListHandler := connect.NewUnaryHandler(
+		DmacServiceDmacListProcedure,
+		svc.DmacList,
+		connect.WithSchema(dmacServiceDmacListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.DmacService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case DmacServiceDmacListProcedure:
+			dmacServiceDmacListHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedDmacServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedDmacServiceHandler struct{}
+
+func (UnimplementedDmacServiceHandler) DmacList(context.Context, *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.DmacService.DmacList is not implemented"))
 }
 
 // HeadendL2ServiceClient is a client for the vinbero.v1.HeadendL2Service service.

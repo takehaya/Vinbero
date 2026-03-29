@@ -65,10 +65,11 @@ struct lpm_key_v6 {
     __u8 addr[IPV6_ADDR_LEN];     // IPv6 address (16 bytes)
 } __attribute__((packed));
 
-// Key for L2 headend map (VLAN ID)
+// Key for L2 headend map (port + VLAN)
 struct headend_l2_key {
-    __u16 vlan_id;
-    __u8 _pad[2];                 // Padding for alignment
+    __u32 ifindex;                // Ingress port ifindex
+    __u16 vlan_id;                // VLAN ID (0 = untagged)
+    __u8 _pad[2];
 } __attribute__((packed));
 
 // SID Function entry (for SRv6 Endpoint functions)
@@ -80,8 +81,22 @@ struct sid_function_entry {
     __u8 nexthop[IPV6_ADDR_LEN];  // Next hop address
     __u8 arg_src_offset;          // Bit offset for source in SID Args
     __u8 arg_dst_offset;          // Bit offset for destination in SID Args
-    __u8 _pad[2];                 // Padding for alignment
+    __u32 vrf_ifindex;            // VRF interface index (for End.DT4/DT6/DT46)
+    __u16 bd_id;                  // Bridge Domain ID (for End.DT2)
 } __attribute__((packed));
+
+// Key for FDB map: Bridge Domain ID + MAC address
+struct fdb_key {
+    __u16 bd_id;                   // Bridge Domain ID
+    __u8 mac[ETH_ALEN];            // 6 bytes
+} __attribute__((packed));         // 8 bytes total
+
+// Value for FDB map: output interface + flags
+struct fdb_entry {
+    __u32 oif;                     // Output interface index
+    __u8 is_untag;                 // Strip VLAN tag on egress (future use)
+    __u8 _pad[3];
+} __attribute__((packed));         // 8 bytes total
 
 // Headend entry (for H.Encaps, H.Insert, etc.)
 struct headend_entry {
@@ -91,6 +106,7 @@ struct headend_entry {
     __u8 src_addr[IPV6_ADDR_LEN];           // Outer IPv6 source address
     __u8 dst_addr[IPV6_ADDR_LEN];           // Unused for H.Encaps (reserved)
     __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list (up to 10 segments)
+    __u16 bd_id;                            // Bridge Domain ID (for H.Encaps.L2)
 } __attribute__((packed));
 
 #endif // XDP_PROG_H
