@@ -617,6 +617,11 @@ func verifyInnerVlanFrame(t *testing.T, pkt []byte, innerOffset int, expectedVla
 	return true
 }
 
+// overrideDstMAC overwrites the destination MAC in an Ethernet frame
+func overrideDstMAC(pkt []byte, mac net.HardwareAddr) {
+	copy(pkt[0:6], mac)
+}
+
 // convertSegmentsToBytes converts segment addresses to byte arrays (reversed order for SRH)
 func convertSegmentsToBytes(segments [10][16]byte, numSegments int) [][16]byte {
 	result := make([][16]byte, numSegments)
