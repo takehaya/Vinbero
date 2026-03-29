@@ -617,6 +617,94 @@ var Headendv6Service_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	DmacService_DmacList_FullMethodName = "/vinbero.v1.DmacService/DmacList"
+)
+
+// DmacServiceClient is the client API for DmacService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type DmacServiceClient interface {
+	DmacList(ctx context.Context, in *DmacListRequest, opts ...grpc.CallOption) (*DmacListResponse, error)
+}
+
+type dmacServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewDmacServiceClient(cc grpc.ClientConnInterface) DmacServiceClient {
+	return &dmacServiceClient{cc}
+}
+
+func (c *dmacServiceClient) DmacList(ctx context.Context, in *DmacListRequest, opts ...grpc.CallOption) (*DmacListResponse, error) {
+	out := new(DmacListResponse)
+	err := c.cc.Invoke(ctx, DmacService_DmacList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DmacServiceServer is the server API for DmacService service.
+// All implementations should embed UnimplementedDmacServiceServer
+// for forward compatibility
+type DmacServiceServer interface {
+	DmacList(context.Context, *DmacListRequest) (*DmacListResponse, error)
+}
+
+// UnimplementedDmacServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedDmacServiceServer struct {
+}
+
+func (UnimplementedDmacServiceServer) DmacList(context.Context, *DmacListRequest) (*DmacListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DmacList not implemented")
+}
+
+// UnsafeDmacServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to DmacServiceServer will
+// result in compilation errors.
+type UnsafeDmacServiceServer interface {
+	mustEmbedUnimplementedDmacServiceServer()
+}
+
+func RegisterDmacServiceServer(s grpc.ServiceRegistrar, srv DmacServiceServer) {
+	s.RegisterService(&DmacService_ServiceDesc, srv)
+}
+
+func _DmacService_DmacList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DmacListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DmacServiceServer).DmacList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DmacService_DmacList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DmacServiceServer).DmacList(ctx, req.(*DmacListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// DmacService_ServiceDesc is the grpc.ServiceDesc for DmacService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var DmacService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.DmacService",
+	HandlerType: (*DmacServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "DmacList",
+			Handler:    _DmacService_DmacList_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}
+
+const (
 	HeadendL2Service_HeadendL2Create_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Create"
 	HeadendL2Service_HeadendL2Delete_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Delete"
 	HeadendL2Service_HeadendL2List_FullMethodName   = "/vinbero.v1.HeadendL2Service/HeadendL2List"

@@ -18,10 +18,14 @@ import (
 
 // SID Function action constants
 const (
-	actionEnd    = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END)
-	actionEndDX2 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2)
-	actionEndDX4 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX4)
-	actionEndDX6 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX6)
+	actionEnd     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END)
+	actionEndDX2  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2)
+	actionEndDX4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX4)
+	actionEndDX6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX6)
+	actionEndDT4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
+	actionEndDT6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
+	actionEndDT46 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
+	actionEndDT2  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
 )
 
 // Packet header lengths
@@ -78,6 +82,30 @@ func (h *xdpTestHelper) createSidFunction(prefix string, action uint8) {
 	}
 }
 
+func (h *xdpTestHelper) createFdbEntry(bdID uint16, mac net.HardwareAddr, oif uint32) {
+	h.t.Helper()
+	entry := &FdbEntry{Oif: oif}
+	if err := h.mapOps.CreateFdb(bdID, mac, entry); err != nil {
+		h.t.Fatalf("Failed to create FDB entry: %v", err)
+	}
+}
+
+func (h *xdpTestHelper) createSidFunctionWithBD(prefix string, action uint8, bdID uint16) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: action, Flavor: 0, BdId: bdID}
+	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
+
+func (h *xdpTestHelper) createSidFunctionWithVRF(prefix string, action uint8, vrfIfindex uint32) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: action, Flavor: 0, VrfIfindex: vrfIfindex}
+	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
+
 func (h *xdpTestHelper) createSidFunctionWithOIF(prefix string, action uint8, oif uint32) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: 0}
@@ -115,19 +143,20 @@ func (h *xdpTestHelper) createHeadendEntry(prefix string, srcAddr, dstAddr [16]b
 	})
 }
 
-func (h *xdpTestHelper) createHeadendL2Entry(vlanID uint16, srcAddr [16]byte, segments [10][16]byte, numSegments uint8) {
+func (h *xdpTestHelper) createHeadendL2Entry(ifindex uint32, vlanID uint16, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, bdID uint16) {
 	h.t.Helper()
 	entry := &HeadendEntry{
 		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
 		NumSegments: numSegments,
 		SrcAddr:     srcAddr,
 		Segments:    segments,
+		BdId:        bdID,
 	}
-	if err := h.mapOps.CreateHeadendL2(vlanID, entry); err != nil {
+	if err := h.mapOps.CreateHeadendL2(ifindex, vlanID, entry); err != nil {
 		h.t.Fatalf("Failed to create headend L2 entry: %v", err)
 	}
 	h.t.Cleanup(func() {
-		_ = h.mapOps.DeleteHeadendL2(vlanID)
+		_ = h.mapOps.DeleteHeadendL2(ifindex, vlanID)
 	})
 }
 
@@ -586,6 +615,11 @@ func verifyInnerVlanFrame(t *testing.T, pkt []byte, innerOffset int, expectedVla
 	}
 
 	return true
+}
+
+// overrideDstMAC overwrites the destination MAC in an Ethernet frame
+func overrideDstMAC(pkt []byte, mac net.HardwareAddr) {
+	copy(pkt[0:6], mac)
 }
 
 // convertSegmentsToBytes converts segment addresses to byte arrays (reversed order for SRH)

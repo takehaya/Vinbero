@@ -13,6 +13,19 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type BpfFdbEntry struct {
+	_       structs.HostLayout
+	Oif     uint32
+	IsUntag uint8
+	Pad     [3]uint8
+}
+
+type BpfFdbKey struct {
+	_    structs.HostLayout
+	BdId uint16
+	Mac  [6]uint8
+}
+
 type BpfHeadendEntry struct {
 	_           structs.HostLayout
 	Mode        uint8
@@ -21,12 +34,14 @@ type BpfHeadendEntry struct {
 	SrcAddr     [16]uint8
 	DstAddr     [16]uint8
 	Segments    [10][16]uint8
+	BdId        uint16
 }
 
 type BpfHeadendL2Key struct {
-	_      structs.HostLayout
-	VlanId uint16
-	Pad    [2]uint8
+	_       structs.HostLayout
+	Ifindex uint32
+	VlanId  uint16
+	Pad     [2]uint8
 }
 
 type BpfLpmKeyV4 struct {
@@ -50,7 +65,8 @@ type BpfSidFunctionEntry struct {
 	Nexthop      [16]uint8
 	ArgSrcOffset uint8
 	ArgDstOffset uint8
-	Pad          [2]uint8
+	VrfIfindex   uint32
+	BdId         uint16
 }
 
 type BpfStatsEntry struct {
@@ -108,6 +124,7 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
+	FdbMap         *ebpf.MapSpec `ebpf:"fdb_map"`
 	HeadendL2Map   *ebpf.MapSpec `ebpf:"headend_l2_map"`
 	HeadendV4Map   *ebpf.MapSpec `ebpf:"headend_v4_map"`
 	HeadendV6Map   *ebpf.MapSpec `ebpf:"headend_v6_map"`
@@ -144,6 +161,7 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
+	FdbMap         *ebpf.Map `ebpf:"fdb_map"`
 	HeadendL2Map   *ebpf.Map `ebpf:"headend_l2_map"`
 	HeadendV4Map   *ebpf.Map `ebpf:"headend_v4_map"`
 	HeadendV6Map   *ebpf.Map `ebpf:"headend_v6_map"`
@@ -154,6 +172,7 @@ type BpfMaps struct {
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.FdbMap,
 		m.HeadendL2Map,
 		m.HeadendV4Map,
 		m.HeadendV6Map,

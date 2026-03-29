@@ -417,7 +417,10 @@ func TestXDPProgHeadendL2Encaps(t *testing.T) {
 			segments, numSegments, _ := ParseSegments(tt.segmentStrs)
 
 			if tt.entryVlanID > 0 {
-				h.createHeadendL2Entry(tt.entryVlanID, srcAddr, segments, numSegments)
+				// ebpf.Run() may set ingress_ifindex to 0 or 1 depending on kernel;
+				// create entries for both to ensure the test works
+				h.createHeadendL2Entry(0, tt.entryVlanID, srcAddr, segments, numSegments, 0)
+				h.createHeadendL2Entry(1, tt.entryVlanID, srcAddr, segments, numSegments, 0)
 			}
 
 			var pkt []byte
@@ -489,4 +492,378 @@ func TestXDPProgHeadendL2Encaps(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestXDPProgEndDT(t *testing.T) {
+	tests := []struct {
+		name         string
+		action       uint8
+		isIPv4       bool
+		triggerSID   string
+		outerSrcIP   string
+		outerDstIP   string
+		segments     []string
+		segmentsLeft uint8
+		innerSrcIP   string
+		innerDstIP   string
+		vrfIfindex   uint32
+		expectDecap  bool
+	}{
+		// End.DT4 tests
+		{"End.DT4 SL=0 default VRF", actionEndDT4, true, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10", []string{"fd00:1:100::10"}, 0, "10.0.0.1", "192.0.2.100", 0, true},
+		{"End.DT4 SL!=0 (pass)", actionEndDT4, true, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10", []string{"fd00:1:100::20", "fd00:1:100::10"}, 1, "10.0.0.1", "192.0.2.100", 0, false},
+		// End.DT6 tests
+		{"End.DT6 SL=0 default VRF", actionEndDT6, false, "fd00:1:100::20/128", "fd00:1:1::1", "fd00:1:100::20", []string{"fd00:1:100::20"}, 0, "2001:db8:1::1", "2001:db8:2::1", 0, true},
+		{"End.DT6 SL!=0 (pass)", actionEndDT6, false, "fd00:1:100::20/128", "fd00:1:1::1", "fd00:1:100::20", []string{"fd00:1:100::30", "fd00:1:100::20"}, 1, "2001:db8:1::1", "2001:db8:2::1", 0, false},
+		// End.DT46 tests (dual-stack: IPv4 inner)
+		{"End.DT46 SL=0 IPv4 inner", actionEndDT46, true, "fd00:1:100::30/128", "fd00:1:1::1", "fd00:1:100::30", []string{"fd00:1:100::30"}, 0, "10.0.0.1", "192.0.2.100", 0, true},
+		// End.DT46 tests (dual-stack: IPv6 inner)
+		{"End.DT46 SL=0 IPv6 inner", actionEndDT46, false, "fd00:1:100::30/128", "fd00:1:1::1", "fd00:1:100::30", []string{"fd00:1:100::30"}, 0, "2001:db8:1::1", "2001:db8:2::1", 0, true},
+		{"End.DT46 SL!=0 (pass)", actionEndDT46, true, "fd00:1:100::30/128", "fd00:1:1::1", "fd00:1:100::30", []string{"fd00:1:100::40", "fd00:1:100::30"}, 1, "10.0.0.1", "192.0.2.100", 0, false},
+		// VRF path tests (vrf_ifindex != 0, FIB will fail in test env → XDP_DROP after decap)
+		{"End.DT4 SL=0 with VRF", actionEndDT4, true, "fd00:1:100::40/128", "fd00:1:1::1", "fd00:1:100::40", []string{"fd00:1:100::40"}, 0, "10.0.0.1", "192.0.2.100", 999, true},
+		{"End.DT6 SL=0 with VRF", actionEndDT6, false, "fd00:1:100::50/128", "fd00:1:1::1", "fd00:1:100::50", []string{"fd00:1:100::50"}, 0, "2001:db8:1::1", "2001:db8:2::1", 999, true},
+		{"End.DT46 SL=0 IPv4 with VRF", actionEndDT46, true, "fd00:1:100::60/128", "fd00:1:1::1", "fd00:1:100::60", []string{"fd00:1:100::60"}, 0, "10.0.0.1", "192.0.2.100", 999, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithVRF(tt.triggerSID, tt.action, tt.vrfIfindex)
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+
+			innerType := innerTypeIPv6
+			if tt.isIPv4 {
+				innerType = innerTypeIPv4
+			}
+
+			pkt, err := buildEncapsulatedPacket(
+				net.ParseIP(tt.outerSrcIP), net.ParseIP(tt.outerDstIP),
+				segments, tt.segmentsLeft,
+				net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP),
+				innerType,
+			)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			originalLen := len(pkt)
+			ret, outPkt := h.run(pkt)
+
+			if tt.expectDecap {
+				// After decap: XDP_REDIRECT (FIB success) or XDP_DROP (FIB fail in test env)
+				if ret != XDP_REDIRECT && ret != XDP_DROP {
+					t.Errorf("Expected XDP_REDIRECT or XDP_DROP after decap, got %d", ret)
+				}
+				if !verifyDecapsulated(t, outPkt, net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP), tt.isIPv4) {
+					return
+				}
+				t.Logf("SUCCESS: End.DT decapsulation verified (original: %d, decapsulated: %d, action: %d)", originalLen, len(outPkt), ret)
+			} else {
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS, got %d", ret)
+				}
+			}
+		})
+	}
+}
+
+func TestXDPProgEndDT2(t *testing.T) {
+	tests := []struct {
+		name         string
+		bdID         uint16
+		triggerSID   string
+		outerSrcIP   string
+		outerDstIP   string
+		segments     []string
+		segmentsLeft uint8
+		innerVlanID  uint16
+		innerSrcIP   string
+		innerDstIP   string
+		isIPv4Inner  bool
+		// FDB setup
+		fdbBdID  uint16
+		fdbMac   net.HardwareAddr
+		fdbOif   uint32
+		setupFDB bool
+		// Expected
+		expectAction uint32
+	}{
+		{
+			"End.DT2 known unicast (redirect)",
+			100, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10",
+			[]string{"fd00:1:100::10"}, 0,
+			100, "10.0.0.1", "192.0.2.100", true,
+			100, net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}, 1, true,
+			XDP_REDIRECT,
+		},
+		{
+			"End.DT2 unknown unicast (pass to kernel)",
+			100, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10",
+			[]string{"fd00:1:100::10"}, 0,
+			100, "10.0.0.1", "192.0.2.100", true,
+			0, nil, 0, false,
+			XDP_PASS,
+		},
+		{
+			"End.DT2 SL!=0 (pass)",
+			100, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10",
+			[]string{"fd00:1:100::20", "fd00:1:100::10"}, 1,
+			100, "10.0.0.1", "192.0.2.100", true,
+			0, nil, 0, false,
+			XDP_PASS,
+		},
+		{
+			"End.DT2 known unicast IPv6 inner (redirect)",
+			200, "fd00:1:100::20/128", "fd00:1:1::1", "fd00:1:100::20",
+			[]string{"fd00:1:100::20"}, 0,
+			200, "2001:db8:1::1", "2001:db8:2::1", false,
+			200, net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}, 2, true,
+			XDP_REDIRECT,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithBD(tt.triggerSID, actionEndDT2, tt.bdID)
+
+			if tt.setupFDB {
+				h.createFdbEntry(tt.fdbBdID, tt.fdbMac, tt.fdbOif)
+			}
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+
+			pkt, err := buildL2EncapsulatedPacket(
+				net.ParseIP(tt.outerSrcIP), net.ParseIP(tt.outerDstIP),
+				segments, tt.segmentsLeft,
+				tt.innerVlanID,
+				net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP),
+				tt.isIPv4Inner,
+			)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, _ := h.run(pkt)
+
+			if ret != tt.expectAction {
+				t.Errorf("Expected action %d, got %d", tt.expectAction, ret)
+			} else {
+				t.Logf("SUCCESS: End.DT2 action=%d as expected", ret)
+			}
+		})
+	}
+}
+
+func TestXDPProgHeadendL2MacLearning(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	srcAddr, _ := ParseIPv6("fc00::1")
+	segments, numSegments, _ := ParseSegments([]string{"fc00::200"})
+	bdID := uint16(100)
+
+	// Register headend_l2 entry with bd_id=100 (ifindex=0 and 1 for test env)
+	h.createHeadendL2Entry(0, 100, srcAddr, segments, numSegments, bdID)
+	h.createHeadendL2Entry(1, 100, srcAddr, segments, numSegments, bdID)
+
+	// Build VLAN 100 tagged packet (src MAC = 00:00:00:00:00:01)
+	pkt, err := buildVlanTaggedIPv4Packet(100, net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4())
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	// Run XDP program — H.Encaps.L2 should fire and learn src MAC
+	ret, _ := h.run(pkt)
+
+	// H.Encaps.L2 should encap (remote unicast, dst MAC not in fdb)
+	if ret != XDP_REDIRECT && ret != XDP_DROP {
+		t.Errorf("Expected XDP_REDIRECT or XDP_DROP after encap, got %d", ret)
+	}
+
+	// Verify src MAC was learned in fdb_map
+	srcMAC := net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x01}
+	fdbEntry, err := h.mapOps.GetFdb(bdID, srcMAC)
+	if err != nil {
+		t.Fatalf("src MAC not learned in fdb_map: %v", err)
+	}
+	t.Logf("SUCCESS: src MAC %s learned in fdb_map, oif=%d", srcMAC, fdbEntry.Oif)
+}
+
+func TestXDPProgHeadendL2DstMacJudgment(t *testing.T) {
+	h := newXDPTestHelper(t)
+	bdID := uint16(100)
+
+	srcAddr, _ := ParseIPv6("fc00::1")
+	segments, numSegments, _ := ParseSegments([]string{"fc00::200"})
+	h.createHeadendL2Entry(0, 100, srcAddr, segments, numSegments, bdID)
+	h.createHeadendL2Entry(1, 100, srcAddr, segments, numSegments, bdID)
+
+	tests := []struct {
+		name        string
+		dstMAC      net.HardwareAddr
+		setupLocal  bool
+		expectEncap bool
+	}{
+		{"BUM broadcast → PASS", net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, false, false},
+		{"BUM multicast → PASS", net.HardwareAddr{0x01, 0x00, 0x5e, 0x00, 0x00, 0x01}, false, false},
+		{"known local unicast → PASS", net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}, true, false},
+		{"unknown remote unicast → encap", net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x03}, false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setupLocal {
+				h.createFdbEntry(bdID, tt.dstMAC, 1)
+			}
+
+			pkt, err := buildVlanTaggedIPv4Packet(100, net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4())
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+			overrideDstMAC(pkt, tt.dstMAC)
+
+			ret, _ := h.run(pkt)
+
+			if tt.expectEncap {
+				if ret != XDP_REDIRECT && ret != XDP_DROP {
+					t.Errorf("Expected encap (XDP_REDIRECT/DROP), got %d", ret)
+				} else {
+					t.Logf("SUCCESS: remote unicast encapsulated (action=%d)", ret)
+				}
+			} else {
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS, got %d", ret)
+				} else {
+					t.Logf("SUCCESS: %s → XDP_PASS as expected", tt.name)
+				}
+			}
+		})
+	}
+}
+
+func TestXDPProgHeadendL2Untagged(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	srcAddr, _ := ParseIPv6("fc00::1")
+	segments, numSegments, _ := ParseSegments([]string{"fc00::200"})
+
+	// Register headend_l2 entry with vlan_id=0 (untagged) for ifindex 0 and 1
+	h.createHeadendL2Entry(0, 0, srcAddr, segments, numSegments, 0)
+	h.createHeadendL2Entry(1, 0, srcAddr, segments, numSegments, 0)
+
+	// Build untagged IPv4 packet (no VLAN tag)
+	pkt, err := buildSimpleIPv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4())
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	originalLen := len(pkt)
+	ret, outPkt := h.run(pkt)
+
+	// Should be encapsulated (XDP_DROP or XDP_REDIRECT)
+	if ret != XDP_REDIRECT && ret != XDP_DROP {
+		t.Errorf("Expected encap (XDP_REDIRECT/DROP) for untagged packet, got %d", ret)
+	} else {
+		t.Logf("SUCCESS: untagged packet encapsulated (action=%d, %d→%d bytes)", ret, originalLen, len(outPkt))
+	}
+}
+
+func TestXDPProgHeadendL2UntaggedNoEntry(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	// No headend_l2 entry → untagged packet should pass through to L3 processing
+	pkt, err := buildSimpleIPv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4())
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	ret, _ := h.run(pkt)
+
+	if ret != XDP_PASS {
+		t.Errorf("Expected XDP_PASS for untagged without entry, got %d", ret)
+	} else {
+		t.Logf("SUCCESS: untagged without entry → XDP_PASS")
+	}
+}
+
+func TestHeadendL2MapOperations(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	srcAddr, _ := ParseIPv6("fc00::1")
+	segments, numSegments, _ := ParseSegments([]string{"fc00::200", "fc00::300"})
+
+	entry := &HeadendEntry{
+		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+		BdId:        100,
+	}
+
+	// Create with (ifindex=1, vlan=100)
+	if err := h.mapOps.CreateHeadendL2(1, 100, entry); err != nil {
+		t.Fatalf("Create (1, 100) failed: %v", err)
+	}
+
+	// Get with same key → match
+	got, err := h.mapOps.GetHeadendL2(1, 100)
+	if err != nil {
+		t.Fatalf("Get (1, 100) failed: %v", err)
+	}
+	if got.BdId != 100 || got.NumSegments != numSegments {
+		t.Errorf("Entry mismatch: bd_id=%d, num_segments=%d", got.BdId, got.NumSegments)
+	}
+
+	// Create with (ifindex=2, vlan=100) → separate entry (same VLAN, different port)
+	entry2 := *entry
+	entry2.BdId = 200
+	if err := h.mapOps.CreateHeadendL2(2, 100, &entry2); err != nil {
+		t.Fatalf("Create (2, 100) failed: %v", err)
+	}
+
+	// List → 2 entries
+	all, err := h.mapOps.ListHeadendL2()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("Expected 2 entries, got %d", len(all))
+	}
+
+	// Verify they are separate
+	got1, err1 := h.mapOps.GetHeadendL2(1, 100)
+	got2, err2 := h.mapOps.GetHeadendL2(2, 100)
+	if err1 != nil || err2 != nil {
+		t.Fatalf("Get failed: err1=%v, err2=%v", err1, err2)
+	}
+	if got1.BdId != 100 || got2.BdId != 200 {
+		t.Errorf("Entries not separate: bd_id1=%d, bd_id2=%d", got1.BdId, got2.BdId)
+	}
+
+	// Delete one
+	if err := h.mapOps.DeleteHeadendL2(1, 100); err != nil {
+		t.Fatalf("Delete (1, 100) failed: %v", err)
+	}
+
+	// List → 1 entry
+	all, err = h.mapOps.ListHeadendL2()
+	if err != nil {
+		t.Fatalf("List after delete failed: %v", err)
+	}
+	if len(all) != 1 {
+		t.Errorf("Expected 1 entry after delete, got %d", len(all))
+	}
+
+	t.Logf("SUCCESS: HeadendL2 CRUD with (ifindex, vlan_id) key works correctly")
+
+	// Cleanup
+	_ = h.mapOps.DeleteHeadendL2(2, 100)
 }

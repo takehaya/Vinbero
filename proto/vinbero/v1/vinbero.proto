@@ -24,6 +24,8 @@ message SidFunction {
   uint32 arg_src_offset = 7; // Bit offset for source in SID Args
   uint32 arg_dst_offset = 8; // Bit offset for destination in SID Args
   uint32 oif = 9; // Output interface index (used by End.DX2)
+  uint32 vrf_ifindex = 10; // VRF interface index (used by End.DT4/DT6/DT46)
+  uint32 bd_id = 11; // Bridge Domain ID (used by End.DT2)
 }
 
 message SidFunctionCreateRequest {
@@ -141,6 +143,22 @@ message Headendv6GetResponse {
   Headendv6 headendv6 = 1;
 }
 
+service DmacService {
+  rpc DmacList(DmacListRequest) returns (DmacListResponse);
+}
+
+message DmacListEntry {
+  uint32 bd_id = 1; // Bridge Domain ID
+  string mac = 2; // MAC address as string "aa:bb:cc:dd:ee:ff"
+  uint32 oif = 3; // Output interface index
+  bool is_untag = 4; // Strip VLAN tag on egress
+}
+
+message DmacListRequest {}
+message DmacListResponse {
+  repeated DmacListEntry entries = 1;
+}
+
 service HeadendL2Service {
   rpc HeadendL2Create(HeadendL2CreateRequest) returns (HeadendL2CreateResponse);
   rpc HeadendL2Delete(HeadendL2DeleteRequest) returns (HeadendL2DeleteResponse);
@@ -153,6 +171,8 @@ message HeadendL2 {
   uint32 vlan_id = 1; // VLAN ID (0 for untagged)
   string src_addr = 2; // Outer IPv6 source address
   repeated string segments = 3; // Segment list
+  uint32 bd_id = 4; // Bridge Domain ID (for MAC learning)
+  string interface_name = 5; // Interface name (resolved to ifindex)
 }
 
 message HeadendL2CreateRequest {
@@ -163,11 +183,15 @@ message HeadendL2CreateResponse {
   repeated OperationError errors = 2;
 }
 
+message HeadendL2DeleteTarget {
+  string interface_name = 1;
+  uint32 vlan_id = 2;
+}
 message HeadendL2DeleteRequest {
-  repeated uint32 vlan_ids = 1;
+  repeated HeadendL2DeleteTarget targets = 1;
 }
 message HeadendL2DeleteResponse {
-  repeated uint32 deleted_vlan_ids = 1;
+  repeated HeadendL2DeleteTarget deleted = 1;
   repeated OperationError errors = 2;
 }
 
@@ -177,7 +201,8 @@ message HeadendL2ListResponse {
 }
 
 message HeadendL2GetRequest {
-  uint32 vlan_id = 1;
+  string interface_name = 1;
+  uint32 vlan_id = 2;
 }
 message HeadendL2GetResponse {
   HeadendL2 headend_l2 = 1;

@@ -15,17 +15,19 @@
 #define FIB_RESULT_PASS     -2   // Pass to kernel stack
 
 // Perform IPv6 FIB lookup and update Ethernet header
+// ifindex: L3 device index for lookup (use ctx->ingress_ifindex or VRF ifindex)
 // Returns: FIB_RESULT_REDIRECT (success), FIB_RESULT_DROP, or FIB_RESULT_PASS
-// On success, eth header is updated and ifindex is set
+// On success, eth header is updated and out_ifindex is set
 static __always_inline int srv6_fib_lookup_and_update(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ethhdr *eth,
-    __u32 *out_ifindex)
+    __u32 *out_ifindex,
+    __u32 ifindex)
 {
     struct bpf_fib_lookup fib_params = {};
     fib_params.family = AF_INET6;
-    fib_params.ifindex = ctx->ingress_ifindex;
+    fib_params.ifindex = ifindex;
 
     __builtin_memcpy(fib_params.ipv6_src, &ip6h->saddr, sizeof(fib_params.ipv6_src));
     __builtin_memcpy(fib_params.ipv6_dst, &ip6h->daddr, sizeof(fib_params.ipv6_dst));
@@ -54,14 +56,15 @@ static __always_inline int srv6_fib_lookup_and_update(
 static __always_inline int srv6_fib_redirect(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
-    struct ethhdr *eth)
+    struct ethhdr *eth,
+    __u32 ifindex)
 {
-    __u32 ifindex;
-    int result = srv6_fib_lookup_and_update(ctx, ip6h, eth, &ifindex);
+    __u32 out_ifindex;
+    int result = srv6_fib_lookup_and_update(ctx, ip6h, eth, &out_ifindex, ifindex);
 
     switch (result) {
     case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
+        return bpf_redirect(out_ifindex, 0);
     case FIB_RESULT_DROP:
         return XDP_DROP;
     default:
@@ -74,17 +77,17 @@ static __always_inline int srv6_fib_redirect(
 // ========================================================================
 
 // Perform IPv4 FIB lookup and update Ethernet header
-// Returns: FIB_RESULT_REDIRECT (success), FIB_RESULT_DROP, or FIB_RESULT_PASS
-// On success, eth header is updated and ifindex is set
+// ifindex: L3 device index for lookup (use ctx->ingress_ifindex or VRF ifindex)
 static __always_inline int srv6_fib_lookup_and_update_v4(
     struct xdp_md *ctx,
     struct iphdr *iph,
     struct ethhdr *eth,
-    __u32 *out_ifindex)
+    __u32 *out_ifindex,
+    __u32 ifindex)
 {
     struct bpf_fib_lookup fib_params = {};
     fib_params.family = AF_INET;
-    fib_params.ifindex = ctx->ingress_ifindex;
+    fib_params.ifindex = ifindex;
     fib_params.ipv4_src = iph->saddr;
     fib_params.ipv4_dst = iph->daddr;
 
@@ -112,14 +115,15 @@ static __always_inline int srv6_fib_lookup_and_update_v4(
 static __always_inline int srv6_fib_redirect_v4(
     struct xdp_md *ctx,
     struct iphdr *iph,
-    struct ethhdr *eth)
+    struct ethhdr *eth,
+    __u32 ifindex)
 {
-    __u32 ifindex;
-    int result = srv6_fib_lookup_and_update_v4(ctx, iph, eth, &ifindex);
+    __u32 out_ifindex;
+    int result = srv6_fib_lookup_and_update_v4(ctx, iph, eth, &out_ifindex, ifindex);
 
     switch (result) {
     case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
+        return bpf_redirect(out_ifindex, 0);
     case FIB_RESULT_DROP:
         return XDP_DROP;
     default:
