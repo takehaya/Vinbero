@@ -74,8 +74,8 @@ run ip netns exec "$ns_router3" ip link set "$veth_rt3_h2" master vrf100
 # Re-add IPv6 address in VRF context (enslaving may drop it)
 run ip netns exec "$ns_router3" ip -6 addr add 2001:2::2/64 dev "$veth_rt3_h2" 2>/dev/null || true
 
-# Return path: host2 -> host1
-run ip netns exec "$ns_router3" ip -6 route add 2001:1::/64 encap seg6 mode encap segs fc00:2::2,fc00:1::1 dev "$veth_rt3_rt2"
+# Return path: host2 -> host1 (must be in VRF table 100 since veth_rt3_h2 is enslaved)
+run ip netns exec "$ns_router3" ip -6 route add 2001:1::/64 encap seg6 mode encap segs fc00:2::2,fc00:1::1 dev "$veth_rt3_rt2" table 100
 
 # Linux native End.DT6 for baseline
 run ip netns exec "$ns_router3" ip -6 route del local fc00:3::3 2>/dev/null || true

@@ -50,6 +50,8 @@ run ip netns exec "$ns_router2" ip -6 route add local fc00:2::2/128 encap seg6lo
 # Configure router3 (End.DT4 with VRF - Vinbero will handle this)
 ns_sysctl "$ns_router3" net.ipv6.conf.${veth_rt3_h2}.seg6_enabled 1
 ns_sysctl "$ns_router3" net.ipv6.conf.${veth_rt3_rt2}.seg6_enabled 1
+ns_sysctl "$ns_router3" net.ipv4.conf.all.rp_filter 0
+ns_sysctl "$ns_router3" net.ipv4.conf.default.rp_filter 0
 ns_sysctl "$ns_router3" net.ipv4.conf.${veth_rt3_rt2}.rp_filter 0
 ns_sysctl "$ns_router3" net.ipv4.conf.${veth_rt3_h2}.rp_filter 0
 
@@ -64,12 +66,20 @@ run ip netns exec "$ns_router3" ip link set "$veth_rt3_h2" master vrf100
 
 # VRF enslave auto-adds connected route to table 100, so no manual route needed
 
-# Return path: host2 -> host1 (Linux native on router3)
-run ip netns exec "$ns_router3" ip route add 172.0.1.0/24 encap seg6 mode encap segs fc00:2::2,fc00:1::1 dev "$veth_rt3_rt2"
+# Return path: host2 -> host1 (must be in VRF table 100 since veth_rt3_h2 is enslaved)
+run ip netns exec "$ns_router3" ip route add 172.0.1.0/24 encap seg6 mode encap segs fc00:2::2,fc00:1::1 dev "$veth_rt3_rt2" table 100
 
 # Add Linux native End.DT4 for baseline testing (will be replaced by Vinbero)
 run ip netns exec "$ns_router3" ip -6 route del local fc00:3::3 2>/dev/null || true
 run ip netns exec "$ns_router3" ip -6 route add local fc00:3::3/128 encap seg6local action End.DT4 vrftable 100 dev lo
+
+# Pre-resolve NDP between routers and ARP in VRF context
+print_info "Pre-resolving NDP/ARP..."
+ip netns exec "$ns_router1" ping6 -c 1 -W 2 fc00:12::2 > /dev/null 2>&1 || true
+ip netns exec "$ns_router2" ping6 -c 1 -W 2 fc00:23::1 > /dev/null 2>&1 || true
+ip netns exec "$ns_router3" ping6 -c 1 -W 2 fc00:23::2 > /dev/null 2>&1 || true
+# ARP for host-facing link (VRF context)
+ip netns exec "$ns_router3" ip vrf exec vrf100 ping -c 1 -W 2 172.0.2.1 > /dev/null 2>&1 || true
 
 echo ""
 echo "=========================================="
