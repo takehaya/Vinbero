@@ -398,9 +398,8 @@ int vinbero_main(struct xdp_md *ctx)
                 action = bd_action;
                 goto out;
             }
-            // bd_id == 0: BUM flood (no BD-scoped forwarding)
-            xdp_write_bum_meta(ctx, vlan_id);
-            action = XDP_PASS;
+            // bd_id == 0: no Bridge Domain, direct H.Encaps.L2 for all traffic
+            action = do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
             goto out;
         }
 
@@ -441,9 +440,8 @@ int vinbero_main(struct xdp_md *ctx)
                 action = bd_action;
                 goto out;
             }
-            // bd_id == 0: BUM flood (no BD-scoped forwarding)
-            xdp_write_bum_meta(ctx, 0);
-            action = XDP_PASS;
+            // bd_id == 0: no Bridge Domain, direct H.Encaps.L2 for all traffic
+            action = do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
             goto out;
         }
     }

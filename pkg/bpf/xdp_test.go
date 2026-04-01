@@ -395,22 +395,20 @@ func TestXDPProgEndDX2(t *testing.T) {
 
 func TestXDPProgHeadendL2Encaps(t *testing.T) {
 	tests := []struct {
-		name           string
-		vlanID         uint16 // VLAN ID for the packet
-		entryVlanID    uint16 // VLAN ID to register (0 means don't register)
-		srcAddr        string
-		segmentStrs    []string
-		isIPv4Inner    bool // true for IPv4 inner packet, false for IPv6
-		expectBumFlood bool // true = FDB miss → XDP_PASS with BUM meta (packet grows by 8 bytes)
+		name        string
+		vlanID      uint16 // VLAN ID for the packet
+		entryVlanID uint16 // VLAN ID to register (0 means don't register)
+		srcAddr     string
+		segmentStrs []string
+		isIPv4Inner bool // true for IPv4 inner packet, false for IPv6
+		expectEncap bool // true = H.Encaps.L2 (bd_id=0, direct encap)
 	}{
-		{"L2 VLAN 100 IPv4 FDB miss floods", 100, 100, "fc00::1", []string{"fc00::200", "fc00::300"}, true, true},
-		{"L2 VLAN 100 IPv4 single seg FDB miss floods", 100, 100, "fc00::10", []string{"fc00::200"}, true, true},
-		{"L2 VLAN 200 IPv6 FDB miss floods", 200, 200, "fc00::1", []string{"fc00::200", "fc00::300"}, false, true},
+		{"L2 VLAN 100 IPv4 two segments", 100, 100, "fc00::1", []string{"fc00::200", "fc00::300"}, true, true},
+		{"L2 VLAN 100 IPv4 single segment", 100, 100, "fc00::10", []string{"fc00::200"}, true, true},
+		{"L2 VLAN 200 IPv6 two segments", 200, 200, "fc00::1", []string{"fc00::200", "fc00::300"}, false, true},
 		{"L2 VLAN mismatch", 100, 200, "fc00::1", []string{"fc00::200"}, true, false},
 		{"L2 no entry", 100, 0, "fc00::1", []string{"fc00::200"}, true, false},
 	}
-
-	bumMetaSize := 8 // sizeof(__u64) prepended by xdp_write_bum_meta
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -420,8 +418,7 @@ func TestXDPProgHeadendL2Encaps(t *testing.T) {
 			segments, numSegments, _ := ParseSegments(tt.segmentStrs)
 
 			if tt.entryVlanID > 0 {
-				// ebpf.Run() may set ingress_ifindex to 0 or 1 depending on kernel;
-				// create entries for both to ensure the test works
+				// bd_id=0: no Bridge Domain, direct H.Encaps.L2 for all traffic
 				h.createHeadendL2Entry(0, tt.entryVlanID, srcAddr, segments, numSegments, 0)
 				h.createHeadendL2Entry(1, tt.entryVlanID, srcAddr, segments, numSegments, 0)
 			}
@@ -448,21 +445,20 @@ func TestXDPProgHeadendL2Encaps(t *testing.T) {
 			originalLen := len(pkt)
 			ret, outPkt := h.run(pkt)
 
-			if ret != XDP_PASS {
-				t.Errorf("Expected XDP_PASS, got %d", ret)
-			}
-
-			if tt.expectBumFlood {
-				// FDB miss → XDP_PASS with BUM metadata prepended (8 bytes)
-				expectedLen := originalLen + bumMetaSize
-				if len(outPkt) != expectedLen {
-					t.Errorf("Expected BUM flood packet length %d (original %d + meta %d), got %d",
-						expectedLen, originalLen, bumMetaSize, len(outPkt))
+			if tt.expectEncap {
+				// bd_id=0: direct H.Encaps.L2. FIB lookup in test env typically fails → XDP_DROP.
+				if ret != XDP_DROP && ret != XDP_REDIRECT {
+					t.Errorf("Expected XDP_DROP or XDP_REDIRECT after encap, got %d", ret)
+				}
+				if len(outPkt) <= originalLen {
+					t.Errorf("Expected encapsulated packet to be larger, got %d (original %d)", len(outPkt), originalLen)
 				} else {
-					t.Logf("SUCCESS: FDB miss → BUM flood (XDP_PASS, %d→%d bytes with meta)", originalLen, len(outPkt))
+					t.Logf("SUCCESS: H.Encaps.L2 (bd_id=0, %d→%d bytes)", originalLen, len(outPkt))
 				}
 			} else {
-				// No L2 match → packet passes through unmodified
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS for no-match case, got %d", ret)
+				}
 				if len(outPkt) != originalLen {
 					t.Errorf("Packet length changed unexpectedly: original %d, got %d", originalLen, len(outPkt))
 				}
@@ -745,11 +741,11 @@ func TestXDPProgHeadendL2Untagged(t *testing.T) {
 	originalLen := len(pkt)
 	ret, outPkt := h.run(pkt)
 
-	// FDB miss → XDP_PASS (BUM flood via TC) regardless of bd_id
-	if ret != XDP_PASS {
-		t.Errorf("Expected XDP_PASS for FDB miss (BUM flood), got %d", ret)
+	// bd_id=0: direct H.Encaps.L2. FIB fails in test env → XDP_DROP or XDP_REDIRECT
+	if ret != XDP_REDIRECT && ret != XDP_DROP {
+		t.Errorf("Expected encap (XDP_REDIRECT/DROP) for untagged packet, got %d", ret)
 	} else {
-		t.Logf("SUCCESS: untagged FDB miss → XDP_PASS (BUM flood, %d→%d bytes)", originalLen, len(outPkt))
+		t.Logf("SUCCESS: untagged H.Encaps.L2 (bd_id=0, action=%d, %d→%d bytes)", ret, originalLen, len(outPkt))
 	}
 }
 
