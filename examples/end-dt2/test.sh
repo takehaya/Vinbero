@@ -92,6 +92,21 @@ ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.Hea
         "vlan_id": 100,
         "interface_name": "'"${TOPO_NS_PREFIX}rt1h1"'",
         "src_addr": "fc00:1::1",
+        "segments": ["fc00:2::1", "fc00:3::3"],
+        "bd_id": 100
+      }
+    ]
+  }' > /dev/null
+
+# Register BdPeer on router1 (BUM flood to router3)
+print_info "Registering BdPeer on router1..."
+ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.BdPeerService/BdPeerCreate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "peers": [
+      {
+        "bd_id": 100,
+        "src_addr": "fc00:1::1",
         "segments": ["fc00:2::1", "fc00:3::3"]
       }
     ]
@@ -119,6 +134,21 @@ ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vinbero.v1.Hea
       {
         "vlan_id": 100,
         "interface_name": "'"${TOPO_NS_PREFIX}rt3h2"'",
+        "src_addr": "fc00:3::3",
+        "segments": ["fc00:2::2", "fc00:1::2"],
+        "bd_id": 100
+      }
+    ]
+  }' > /dev/null
+
+# Register BdPeer on router3 (BUM flood to router1)
+print_info "Registering BdPeer on router3..."
+ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vinbero.v1.BdPeerService/BdPeerCreate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "peers": [
+      {
+        "bd_id": 100,
         "src_addr": "fc00:3::3",
         "segments": ["fc00:2::2", "fc00:1::2"]
       }
@@ -150,7 +180,8 @@ ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vinbero.v1.Sid
       {
         "trigger_prefix": "fc00:3::3/128",
         "action": "SRV6_LOCAL_ACTION_END_DT2",
-        "bd_id": 100
+        "bd_id": 100,
+        "bridge_name": "br100"
       }
     ]
   }' > /dev/null

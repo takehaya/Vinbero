@@ -8,20 +8,24 @@ import (
 )
 
 const (
-	MaxSegments = 10
-	IPv4AddrLen = 4
-	IPv6AddrLen = 16
+	MaxSegments    = 10
+	IPv4AddrLen    = 4
+	IPv6AddrLen    = 16
+	MaxBumNexthops = 8 // Must match MAX_BUM_NEXTHOPS in xdp_prog.h
 )
 
 // Type aliases for BPF generated types
 type (
-	LpmKeyV4         = BpfLpmKeyV4
-	LpmKeyV6         = BpfLpmKeyV6
-	HeadendL2Key     = BpfHeadendL2Key
-	SidFunctionEntry = BpfSidFunctionEntry
-	HeadendEntry     = BpfHeadendEntry
-	FdbKey           = BpfFdbKey
-	FdbEntry         = BpfFdbEntry
+	LpmKeyV4           = BpfLpmKeyV4
+	LpmKeyV6           = BpfLpmKeyV6
+	HeadendL2Key       = BpfHeadendL2Key
+	SidFunctionEntry   = BpfSidFunctionEntry
+	HeadendEntry       = BpfHeadendEntry
+	FdbKey             = BpfFdbKey
+	FdbEntry           = BpfFdbEntry
+	BdPeerKey          = BpfBdPeerKey
+	BdPeerReverseKey   = BpfBdPeerReverseKey
+	BdPeerReverseVal   = BpfBdPeerReverseVal
 )
 
 // MapOperator interface for testability
@@ -352,6 +356,88 @@ func (m *MapOperations) ListFdb() (map[FdbKey]*FdbEntry, error) {
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("failed to iterate fdb map: %w", err)
+	}
+	return result, nil
+}
+
+// ===== BD Peer Map Operations (for P2MP BUM flooding) =====
+
+// CreateBdPeer adds a BD peer entry for BUM flooding.
+// Also populates bd_peer_reverse_map for O(1) peer_index resolution in End.DT2.
+func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry) error {
+	key := &BdPeerKey{BdId: bdID, Index: index}
+	if err := m.objs.BdPeerMap.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put bd peer entry: %w", err)
+	}
+
+	// Maintain reverse map: {bd_id, src_addr} → index
+	rKey := &BdPeerReverseKey{BdId: bdID}
+	copy(rKey.SrcAddr[:], entry.SrcAddr[:])
+	rVal := &BdPeerReverseVal{Index: index}
+	if err := m.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
+		return fmt.Errorf("failed to put bd peer reverse entry: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteBdPeer removes a BD peer entry and its reverse-map entry.
+// Deletes forward map first to avoid inconsistency if reverse delete fails.
+func (m *MapOperations) DeleteBdPeer(bdID, index uint16) error {
+	// Look up the entry first to get src_addr for reverse map cleanup
+	key := &BdPeerKey{BdId: bdID, Index: index}
+	var entry HeadendEntry
+	hasEntry := m.objs.BdPeerMap.Lookup(key, &entry) == nil
+
+	if err := m.objs.BdPeerMap.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete bd peer entry: %w", err)
+	}
+
+	// Clean up reverse map (best-effort: ignore error if already gone)
+	if hasEntry {
+		rKey := &BdPeerReverseKey{BdId: bdID}
+		copy(rKey.SrcAddr[:], entry.SrcAddr[:])
+		_ = m.objs.BdPeerReverseMap.Delete(rKey)
+	}
+	return nil
+}
+
+// GetBdPeer retrieves a BD peer entry
+func (m *MapOperations) GetBdPeer(bdID, index uint16) (*HeadendEntry, error) {
+	key := &BdPeerKey{BdId: bdID, Index: index}
+	var entry HeadendEntry
+	if err := m.objs.BdPeerMap.Lookup(key, &entry); err != nil {
+		return nil, fmt.Errorf("failed to lookup bd peer entry: %w", err)
+	}
+	return &entry, nil
+}
+
+// FindFreeBdPeerIndex probes indexes 0..MaxBumNexthops-1 for a given BD
+// and returns the first unused index. Returns MaxBumNexthops if all slots are occupied.
+// This avoids iterating the entire bd_peer_map (ListBdPeers) on every create request.
+func (m *MapOperations) FindFreeBdPeerIndex(bdID uint16) uint16 {
+	var entry HeadendEntry
+	for i := uint16(0); i < MaxBumNexthops; i++ {
+		key := &BdPeerKey{BdId: bdID, Index: i}
+		if err := m.objs.BdPeerMap.Lookup(key, &entry); err != nil {
+			return i
+		}
+	}
+	return MaxBumNexthops
+}
+
+// ListBdPeers returns all BD peer entries
+func (m *MapOperations) ListBdPeers() (map[BdPeerKey]*HeadendEntry, error) {
+	result := make(map[BdPeerKey]*HeadendEntry)
+	var key BdPeerKey
+	var entry HeadendEntry
+	iter := m.objs.BdPeerMap.Iterate()
+	for iter.Next(&key, &entry) {
+		entryCopy := entry
+		result[key] = &entryCopy
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate bd peer map: %w", err)
 	}
 	return result, nil
 }

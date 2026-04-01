@@ -83,6 +83,8 @@ struct sid_function_entry {
     __u8 arg_dst_offset;          // Bit offset for destination in SID Args
     __u32 vrf_ifindex;            // VRF interface index (for End.DT4/DT6/DT46)
     __u16 bd_id;                  // Bridge Domain ID (for End.DT2)
+    __u16 _pad_sid;
+    __u32 bridge_ifindex;         // Bridge device ifindex (for End.DT2 FDB miss → redirect)
 } __attribute__((packed));
 
 // Key for FDB map: Bridge Domain ID + MAC address
@@ -91,12 +93,15 @@ struct fdb_key {
     __u8 mac[ETH_ALEN];            // 6 bytes
 } __attribute__((packed));         // 8 bytes total
 
-// Value for FDB map: output interface + flags
+// Value for FDB map: supports local and remote entries
 struct fdb_entry {
-    __u32 oif;                     // Output interface index
-    __u8 is_untag;                 // Strip VLAN tag on egress (future use)
-    __u8 _pad[3];
-} __attribute__((packed));         // 8 bytes total
+    __u32 oif;                     // Local: output interface index, Remote: 0
+    __u8 is_remote;                // 0=local, 1=remote (use bd_peer_map)
+    __u8 _pad;
+    __u16 peer_index;              // bd_peer_map index (when is_remote=1)
+    __u16 bd_id;                   // BD ID for bd_peer_map lookup (when is_remote=1)
+    __u8 _pad2[2];
+} __attribute__((packed));         // 12 bytes total
 
 // Headend entry (for H.Encaps, H.Insert, etc.)
 struct headend_entry {
@@ -107,6 +112,33 @@ struct headend_entry {
     __u8 dst_addr[IPV6_ADDR_LEN];           // Unused for H.Encaps (reserved)
     __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list (up to 10 segments)
     __u16 bd_id;                            // Bridge Domain ID (for H.Encaps.L2)
+} __attribute__((packed));
+
+// Maximum number of remote PEs per Bridge Domain for BUM flooding
+#define MAX_BUM_NEXTHOPS 8
+
+// Sentinel value for "peer index not found" (find_peer_index_by_src)
+#define BD_PEER_INDEX_INVALID 0xFFFF
+
+// Key for bd_peer_map: Bridge Domain ID + peer index
+struct bd_peer_key {
+    __u16 bd_id;
+    __u16 index;                   // 0..MAX_BUM_NEXTHOPS-1
+} __attribute__((packed));
+
+// Value: headend_entry (reuses existing struct for segments, src_addr, etc.)
+
+// Reverse-lookup key for bd_peer_reverse_map: {bd_id, src_addr} → peer_index
+// Used by End.DT2 to resolve peer_index in O(1) instead of iterating bd_peer_map.
+struct bd_peer_reverse_key {
+    __u16 bd_id;
+    __u8 src_addr[IPV6_ADDR_LEN];    // Remote PE source address
+    __u8 _pad[2];
+} __attribute__((packed));
+
+// Reverse-lookup value: peer index within the BD
+struct bd_peer_reverse_val {
+    __u16 index;
 } __attribute__((packed));
 
 #endif // XDP_PROG_H
