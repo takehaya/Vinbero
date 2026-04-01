@@ -29,6 +29,8 @@ const (
 	Headendv6ServiceName = "vinbero.v1.Headendv6Service"
 	// DmacServiceName is the fully-qualified name of the DmacService service.
 	DmacServiceName = "vinbero.v1.DmacService"
+	// BdPeerServiceName is the fully-qualified name of the BdPeerService service.
+	BdPeerServiceName = "vinbero.v1.BdPeerService"
 	// HeadendL2ServiceName is the fully-qualified name of the HeadendL2Service service.
 	HeadendL2ServiceName = "vinbero.v1.HeadendL2Service"
 )
@@ -79,6 +81,15 @@ const (
 	Headendv6ServiceHeadendv6GetProcedure = "/vinbero.v1.Headendv6Service/Headendv6Get"
 	// DmacServiceDmacListProcedure is the fully-qualified name of the DmacService's DmacList RPC.
 	DmacServiceDmacListProcedure = "/vinbero.v1.DmacService/DmacList"
+	// BdPeerServiceBdPeerCreateProcedure is the fully-qualified name of the BdPeerService's
+	// BdPeerCreate RPC.
+	BdPeerServiceBdPeerCreateProcedure = "/vinbero.v1.BdPeerService/BdPeerCreate"
+	// BdPeerServiceBdPeerDeleteProcedure is the fully-qualified name of the BdPeerService's
+	// BdPeerDelete RPC.
+	BdPeerServiceBdPeerDeleteProcedure = "/vinbero.v1.BdPeerService/BdPeerDelete"
+	// BdPeerServiceBdPeerListProcedure is the fully-qualified name of the BdPeerService's BdPeerList
+	// RPC.
+	BdPeerServiceBdPeerListProcedure = "/vinbero.v1.BdPeerService/BdPeerList"
 	// HeadendL2ServiceHeadendL2CreateProcedure is the fully-qualified name of the HeadendL2Service's
 	// HeadendL2Create RPC.
 	HeadendL2ServiceHeadendL2CreateProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Create"
@@ -112,6 +123,10 @@ var (
 	headendv6ServiceHeadendv6GetMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
 	dmacServiceServiceDescriptor                        = v1.File_vinbero_v1_vinbero_proto.Services().ByName("DmacService")
 	dmacServiceDmacListMethodDescriptor                 = dmacServiceServiceDescriptor.Methods().ByName("DmacList")
+	bdPeerServiceServiceDescriptor                      = v1.File_vinbero_v1_vinbero_proto.Services().ByName("BdPeerService")
+	bdPeerServiceBdPeerCreateMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerCreate")
+	bdPeerServiceBdPeerDeleteMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerDelete")
+	bdPeerServiceBdPeerListMethodDescriptor             = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerList")
 	headendL2ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("HeadendL2Service")
 	headendL2ServiceHeadendL2CreateMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Create")
 	headendL2ServiceHeadendL2DeleteMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Delete")
@@ -623,6 +638,126 @@ type UnimplementedDmacServiceHandler struct{}
 
 func (UnimplementedDmacServiceHandler) DmacList(context.Context, *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.DmacService.DmacList is not implemented"))
+}
+
+// BdPeerServiceClient is a client for the vinbero.v1.BdPeerService service.
+type BdPeerServiceClient interface {
+	BdPeerCreate(context.Context, *connect.Request[v1.BdPeerCreateRequest]) (*connect.Response[v1.BdPeerCreateResponse], error)
+	BdPeerDelete(context.Context, *connect.Request[v1.BdPeerDeleteRequest]) (*connect.Response[v1.BdPeerDeleteResponse], error)
+	BdPeerList(context.Context, *connect.Request[v1.BdPeerListRequest]) (*connect.Response[v1.BdPeerListResponse], error)
+}
+
+// NewBdPeerServiceClient constructs a client for the vinbero.v1.BdPeerService service. By default,
+// it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses, and
+// sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the connect.WithGRPC()
+// or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewBdPeerServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) BdPeerServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &bdPeerServiceClient{
+		bdPeerCreate: connect.NewClient[v1.BdPeerCreateRequest, v1.BdPeerCreateResponse](
+			httpClient,
+			baseURL+BdPeerServiceBdPeerCreateProcedure,
+			connect.WithSchema(bdPeerServiceBdPeerCreateMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		bdPeerDelete: connect.NewClient[v1.BdPeerDeleteRequest, v1.BdPeerDeleteResponse](
+			httpClient,
+			baseURL+BdPeerServiceBdPeerDeleteProcedure,
+			connect.WithSchema(bdPeerServiceBdPeerDeleteMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		bdPeerList: connect.NewClient[v1.BdPeerListRequest, v1.BdPeerListResponse](
+			httpClient,
+			baseURL+BdPeerServiceBdPeerListProcedure,
+			connect.WithSchema(bdPeerServiceBdPeerListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// bdPeerServiceClient implements BdPeerServiceClient.
+type bdPeerServiceClient struct {
+	bdPeerCreate *connect.Client[v1.BdPeerCreateRequest, v1.BdPeerCreateResponse]
+	bdPeerDelete *connect.Client[v1.BdPeerDeleteRequest, v1.BdPeerDeleteResponse]
+	bdPeerList   *connect.Client[v1.BdPeerListRequest, v1.BdPeerListResponse]
+}
+
+// BdPeerCreate calls vinbero.v1.BdPeerService.BdPeerCreate.
+func (c *bdPeerServiceClient) BdPeerCreate(ctx context.Context, req *connect.Request[v1.BdPeerCreateRequest]) (*connect.Response[v1.BdPeerCreateResponse], error) {
+	return c.bdPeerCreate.CallUnary(ctx, req)
+}
+
+// BdPeerDelete calls vinbero.v1.BdPeerService.BdPeerDelete.
+func (c *bdPeerServiceClient) BdPeerDelete(ctx context.Context, req *connect.Request[v1.BdPeerDeleteRequest]) (*connect.Response[v1.BdPeerDeleteResponse], error) {
+	return c.bdPeerDelete.CallUnary(ctx, req)
+}
+
+// BdPeerList calls vinbero.v1.BdPeerService.BdPeerList.
+func (c *bdPeerServiceClient) BdPeerList(ctx context.Context, req *connect.Request[v1.BdPeerListRequest]) (*connect.Response[v1.BdPeerListResponse], error) {
+	return c.bdPeerList.CallUnary(ctx, req)
+}
+
+// BdPeerServiceHandler is an implementation of the vinbero.v1.BdPeerService service.
+type BdPeerServiceHandler interface {
+	BdPeerCreate(context.Context, *connect.Request[v1.BdPeerCreateRequest]) (*connect.Response[v1.BdPeerCreateResponse], error)
+	BdPeerDelete(context.Context, *connect.Request[v1.BdPeerDeleteRequest]) (*connect.Response[v1.BdPeerDeleteResponse], error)
+	BdPeerList(context.Context, *connect.Request[v1.BdPeerListRequest]) (*connect.Response[v1.BdPeerListResponse], error)
+}
+
+// NewBdPeerServiceHandler builds an HTTP handler from the service implementation. It returns the
+// path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewBdPeerServiceHandler(svc BdPeerServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	bdPeerServiceBdPeerCreateHandler := connect.NewUnaryHandler(
+		BdPeerServiceBdPeerCreateProcedure,
+		svc.BdPeerCreate,
+		connect.WithSchema(bdPeerServiceBdPeerCreateMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	bdPeerServiceBdPeerDeleteHandler := connect.NewUnaryHandler(
+		BdPeerServiceBdPeerDeleteProcedure,
+		svc.BdPeerDelete,
+		connect.WithSchema(bdPeerServiceBdPeerDeleteMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	bdPeerServiceBdPeerListHandler := connect.NewUnaryHandler(
+		BdPeerServiceBdPeerListProcedure,
+		svc.BdPeerList,
+		connect.WithSchema(bdPeerServiceBdPeerListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.BdPeerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case BdPeerServiceBdPeerCreateProcedure:
+			bdPeerServiceBdPeerCreateHandler.ServeHTTP(w, r)
+		case BdPeerServiceBdPeerDeleteProcedure:
+			bdPeerServiceBdPeerDeleteHandler.ServeHTTP(w, r)
+		case BdPeerServiceBdPeerListProcedure:
+			bdPeerServiceBdPeerListHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedBdPeerServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedBdPeerServiceHandler struct{}
+
+func (UnimplementedBdPeerServiceHandler) BdPeerCreate(context.Context, *connect.Request[v1.BdPeerCreateRequest]) (*connect.Response[v1.BdPeerCreateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BdPeerService.BdPeerCreate is not implemented"))
+}
+
+func (UnimplementedBdPeerServiceHandler) BdPeerDelete(context.Context, *connect.Request[v1.BdPeerDeleteRequest]) (*connect.Response[v1.BdPeerDeleteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BdPeerService.BdPeerDelete is not implemented"))
+}
+
+func (UnimplementedBdPeerServiceHandler) BdPeerList(context.Context, *connect.Request[v1.BdPeerListRequest]) (*connect.Response[v1.BdPeerListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BdPeerService.BdPeerList is not implemented"))
 }
 
 // HeadendL2ServiceClient is a client for the vinbero.v1.HeadendL2Service service.

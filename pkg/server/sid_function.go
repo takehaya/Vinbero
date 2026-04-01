@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -132,7 +133,7 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		return nil, err
 	}
 
-	return &bpf.SidFunctionEntry{
+	entry := &bpf.SidFunctionEntry{
 		Action:       uint8(sidFunc.Action),
 		Flavor:       uint8(sidFunc.Flavor),
 		SrcAddr:      srcAddr,
@@ -142,7 +143,18 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		ArgDstOffset: uint8(sidFunc.ArgDstOffset),
 		VrfIfindex:   sidFunc.VrfIfindex,
 		BdId:         uint16(sidFunc.BdId),
-	}, nil
+	}
+
+	// Resolve bridge_name → bridge_ifindex for End.DT2
+	if sidFunc.BridgeName != "" {
+		bridgeIfindex, err := resolveIfindex(sidFunc.BridgeName)
+		if err != nil {
+			return nil, fmt.Errorf("bridge %q: %w", sidFunc.BridgeName, err)
+		}
+		entry.BridgeIfindex = bridgeIfindex
+	}
+
+	return entry, nil
 }
 
 // entryToProto converts a BPF map entry to a protobuf SidFunction
@@ -158,5 +170,6 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 		ArgDstOffset:  uint32(entry.ArgDstOffset),
 		VrfIfindex:    entry.VrfIfindex,
 		BdId:          uint32(entry.BdId),
+		BridgeName:    ifindexToName(entry.BridgeIfindex),
 	}
 }

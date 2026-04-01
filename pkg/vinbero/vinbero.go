@@ -2,9 +2,11 @@ package vinbero
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
@@ -18,6 +20,7 @@ type Vinbero struct {
 	mapOps     *bpf.MapOperations
 	devices    []net.Interface
 	devLinks   []link.Link
+	tcLinks    []link.Link
 	fdbWatcher *netlinkwatch.FDBWatcher
 	logger     *zap.Logger
 }
@@ -73,6 +76,21 @@ func (v *Vinbero) LoadXDPProgram() error {
 	return nil
 }
 
+func (v *Vinbero) LoadTCProgram() error {
+	for _, dev := range v.devices {
+		l, err := link.AttachTCX(link.TCXOptions{
+			Program:   v.obj.VinberoTcIngress,
+			Attach:    ebpf.AttachTCXIngress,
+			Interface: dev.Index,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to attach TC program to device %s: %w", dev.Name, err)
+		}
+		v.tcLinks = append(v.tcLinks, l)
+	}
+	return nil
+}
+
 // StartFDBWatcher starts the FDB watcher if bridge_domains are configured
 func (v *Vinbero) StartFDBWatcher(ctx context.Context) error {
 	if len(v.cfg.Setting.BridgeDomains) == 0 {
@@ -99,18 +117,27 @@ func (v *Vinbero) GetConfig() *config.Config {
 }
 
 func (v *Vinbero) Close() error {
+	var errs []error
+
 	if v.fdbWatcher != nil {
 		v.fdbWatcher.Stop()
 	}
+	// Detach XDP first (stop ingress) before removing TC (BUM encap).
+	// Otherwise XDP_PASS with BUM meta can reach a detached TC program.
 	for _, l := range v.devLinks {
 		if err := l.Close(); err != nil {
-			return fmt.Errorf("failed to close link: %w", err)
+			errs = append(errs, fmt.Errorf("failed to close XDP link: %w", err))
+		}
+	}
+	for _, l := range v.tcLinks {
+		if err := l.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close TC link: %w", err))
 		}
 	}
 	if err := v.obj.Close(); err != nil {
-		return fmt.Errorf("failed to close bpf objects: %w", err)
+		errs = append(errs, fmt.Errorf("failed to close bpf objects: %w", err))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // buildBpfConstants creates BPF constant values from config

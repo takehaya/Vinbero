@@ -28,6 +28,16 @@ func resolveIfindex(name string) (uint32, error) {
 	return uint32(iface.Index), nil
 }
 
+func ifindexToName(ifindex uint32) string {
+	if ifindex == 0 {
+		return ""
+	}
+	if iface, err := net.InterfaceByIndex(int(ifindex)); err == nil {
+		return iface.Name
+	}
+	return ""
+}
+
 // HeadendL2Create creates Headend L2 entries
 func (s *HeadendL2Server) HeadendL2Create(
 	ctx context.Context,

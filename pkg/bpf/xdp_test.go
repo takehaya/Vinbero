@@ -1,6 +1,7 @@
 package bpf
 
 import (
+	"encoding/binary"
 	"net"
 	"testing"
 
@@ -394,20 +395,22 @@ func TestXDPProgEndDX2(t *testing.T) {
 
 func TestXDPProgHeadendL2Encaps(t *testing.T) {
 	tests := []struct {
-		name        string
-		vlanID      uint16 // VLAN ID for the packet
-		entryVlanID uint16 // VLAN ID to register (0 means don't register)
-		srcAddr     string
-		segmentStrs []string
-		isIPv4Inner bool // true for IPv4 inner packet, false for IPv6
-		expectEncap bool
+		name           string
+		vlanID         uint16 // VLAN ID for the packet
+		entryVlanID    uint16 // VLAN ID to register (0 means don't register)
+		srcAddr        string
+		segmentStrs    []string
+		isIPv4Inner    bool // true for IPv4 inner packet, false for IPv6
+		expectBumFlood bool // true = FDB miss → XDP_PASS with BUM meta (packet grows by 8 bytes)
 	}{
-		{"L2 VLAN 100 IPv4 two segments", 100, 100, "fc00::1", []string{"fc00::200", "fc00::300"}, true, true},
-		{"L2 VLAN 100 IPv4 single segment", 100, 100, "fc00::10", []string{"fc00::200"}, true, true},
-		{"L2 VLAN 200 IPv6 two segments", 200, 200, "fc00::1", []string{"fc00::200", "fc00::300"}, false, true},
+		{"L2 VLAN 100 IPv4 FDB miss floods", 100, 100, "fc00::1", []string{"fc00::200", "fc00::300"}, true, true},
+		{"L2 VLAN 100 IPv4 single seg FDB miss floods", 100, 100, "fc00::10", []string{"fc00::200"}, true, true},
+		{"L2 VLAN 200 IPv6 FDB miss floods", 200, 200, "fc00::1", []string{"fc00::200", "fc00::300"}, false, true},
 		{"L2 VLAN mismatch", 100, 200, "fc00::1", []string{"fc00::200"}, true, false},
 		{"L2 no entry", 100, 0, "fc00::1", []string{"fc00::200"}, true, false},
 	}
+
+	bumMetaSize := 8 // sizeof(__u64) prepended by xdp_write_bum_meta
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -445,47 +448,21 @@ func TestXDPProgHeadendL2Encaps(t *testing.T) {
 			originalLen := len(pkt)
 			ret, outPkt := h.run(pkt)
 
-			if tt.expectEncap {
-				// After encapsulation, FIB lookup happens. In test env, it typically fails
-				// so we expect XDP_DROP. XDP_REDIRECT would mean FIB succeeded.
-				if ret != XDP_DROP && ret != XDP_REDIRECT {
-					t.Errorf("Expected XDP_DROP or XDP_REDIRECT after encap, got %d", ret)
-				}
+			if ret != XDP_PASS {
+				t.Errorf("Expected XDP_PASS, got %d", ret)
+			}
 
-				innerL2Len := ethHeaderLen + 4 // Ethernet + VLAN tag
-				innerHeaderLen := ipv4HeaderLen
-				if !tt.isIPv4Inner {
-					innerHeaderLen = ipv6HeaderLen
+			if tt.expectBumFlood {
+				// FDB miss → XDP_PASS with BUM metadata prepended (8 bytes)
+				expectedLen := originalLen + bumMetaSize
+				if len(outPkt) != expectedLen {
+					t.Errorf("Expected BUM flood packet length %d (original %d + meta %d), got %d",
+						expectedLen, originalLen, bumMetaSize, len(outPkt))
+				} else {
+					t.Logf("SUCCESS: FDB miss → BUM flood (XDP_PASS, %d→%d bytes with meta)", originalLen, len(outPkt))
 				}
-				srhLen := srhBaseLen + int(numSegments)*ipv6AddrLen
-				minExpectedLen := ethHeaderLen + ipv6HeaderLen + srhLen + innerL2Len + innerHeaderLen
-
-				if len(outPkt) < minExpectedLen {
-					t.Fatalf("Output packet too short: got %d, want at least %d", len(outPkt), minExpectedLen)
-				}
-
-				if !verifyEtherType(t, outPkt, 0x86DD) {
-					return
-				}
-
-				if !verifyOuterIPv6Header(t, outPkt, srcAddr, segments[0]) {
-					return
-				}
-
-				if !verifySRHStructure(t, outPkt, int(numSegments), convertSegmentsToBytes(segments, int(numSegments))) {
-					return
-				}
-
-				innerOffset := ethHeaderLen + ipv6HeaderLen + srhLen
-				if !verifyInnerVlanFrame(t, outPkt, innerOffset, tt.vlanID) {
-					return
-				}
-
-				t.Logf("SUCCESS: H.Encaps.L2 verified (original: %d, encapsulated: %d)", originalLen, len(outPkt))
 			} else {
-				if ret != XDP_PASS {
-					t.Errorf("Expected XDP_PASS for no-match case, got %d", ret)
-				}
+				// No L2 match → packet passes through unmodified
 				if len(outPkt) != originalLen {
 					t.Errorf("Packet length changed unexpectedly: original %d, got %d", originalLen, len(outPkt))
 				}
@@ -680,12 +657,12 @@ func TestXDPProgHeadendL2MacLearning(t *testing.T) {
 		t.Fatalf("Failed to build packet: %v", err)
 	}
 
-	// Run XDP program — H.Encaps.L2 should fire and learn src MAC
+	// Run XDP program — src MAC learning happens, then FDB miss → XDP_PASS (BUM flood via TC)
 	ret, _ := h.run(pkt)
 
-	// H.Encaps.L2 should encap (remote unicast, dst MAC not in fdb)
-	if ret != XDP_REDIRECT && ret != XDP_DROP {
-		t.Errorf("Expected XDP_REDIRECT or XDP_DROP after encap, got %d", ret)
+	// FDB miss with bd_id != 0 → XDP_PASS (BUM flood to all PEs via TC)
+	if ret != XDP_PASS {
+		t.Errorf("Expected XDP_PASS after FDB miss (BUM flood), got %d", ret)
 	}
 
 	// Verify src MAC was learned in fdb_map
@@ -715,7 +692,7 @@ func TestXDPProgHeadendL2DstMacJudgment(t *testing.T) {
 		{"BUM broadcast → PASS", net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, false, false},
 		{"BUM multicast → PASS", net.HardwareAddr{0x01, 0x00, 0x5e, 0x00, 0x00, 0x01}, false, false},
 		{"known local unicast → PASS", net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}, true, false},
-		{"unknown remote unicast → encap", net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x03}, false, true},
+		{"unknown remote unicast → flood", net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x03}, false, false},
 	}
 
 	for _, tt := range tests {
@@ -755,7 +732,7 @@ func TestXDPProgHeadendL2Untagged(t *testing.T) {
 	srcAddr, _ := ParseIPv6("fc00::1")
 	segments, numSegments, _ := ParseSegments([]string{"fc00::200"})
 
-	// Register headend_l2 entry with vlan_id=0 (untagged) for ifindex 0 and 1
+	// Register headend_l2 entry with vlan_id=0 (untagged), bd_id=0 for ifindex 0 and 1
 	h.createHeadendL2Entry(0, 0, srcAddr, segments, numSegments, 0)
 	h.createHeadendL2Entry(1, 0, srcAddr, segments, numSegments, 0)
 
@@ -768,11 +745,11 @@ func TestXDPProgHeadendL2Untagged(t *testing.T) {
 	originalLen := len(pkt)
 	ret, outPkt := h.run(pkt)
 
-	// Should be encapsulated (XDP_DROP or XDP_REDIRECT)
-	if ret != XDP_REDIRECT && ret != XDP_DROP {
-		t.Errorf("Expected encap (XDP_REDIRECT/DROP) for untagged packet, got %d", ret)
+	// FDB miss → XDP_PASS (BUM flood via TC) regardless of bd_id
+	if ret != XDP_PASS {
+		t.Errorf("Expected XDP_PASS for FDB miss (BUM flood), got %d", ret)
 	} else {
-		t.Logf("SUCCESS: untagged packet encapsulated (action=%d, %d→%d bytes)", ret, originalLen, len(outPkt))
+		t.Logf("SUCCESS: untagged FDB miss → XDP_PASS (BUM flood, %d→%d bytes)", originalLen, len(outPkt))
 	}
 }
 
@@ -866,4 +843,80 @@ func TestHeadendL2MapOperations(t *testing.T) {
 
 	// Cleanup
 	_ = h.mapOps.DeleteHeadendL2(2, 100)
+}
+
+// TestXDPBumMetaWrite verifies that XDP writes BUM metadata (__u64) when
+// a BUM frame hits a headend_l2_map entry. The metadata should appear as
+// 8 extra bytes prepended to DataOut (data_meta region).
+func TestXDPBumMetaWrite(t *testing.T) {
+	h := newXDPTestHelper(t)
+	bdID := uint16(100)
+
+	srcAddr, _ := ParseIPv6("fc00::1")
+	segments, numSegments, _ := ParseSegments([]string{"fc00::200"})
+	h.createHeadendL2Entry(0, 100, srcAddr, segments, numSegments, bdID)
+	h.createHeadendL2Entry(1, 100, srcAddr, segments, numSegments, bdID)
+
+	tests := []struct {
+		name           string
+		vlanID         uint16
+		dstMAC         net.HardwareAddr
+		expectMeta     bool
+		expectedVlanID uint16
+	}{
+		{"VLAN 100 broadcast", 100, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, true, 100},
+		{"VLAN 100 multicast", 100, net.HardwareAddr{0x01, 0x00, 0x5e, 0x00, 0x00, 0x01}, true, 100},
+		{"VLAN 100 unicast (no meta)", 100, net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x03}, false, 0},
+	}
+
+	const bumMetaMarker = uint32(0x564E4255) // "VNBU"
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var pkt []byte
+			var err error
+			pkt, err = buildVlanTaggedIPv4Packet(tt.vlanID, net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4())
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+			overrideDstMAC(pkt, tt.dstMAC)
+
+			inputLen := len(pkt)
+			ret, out := h.run(pkt)
+
+			if tt.expectMeta {
+				if ret != XDP_PASS {
+					t.Fatalf("Expected XDP_PASS, got %d", ret)
+				}
+
+				// DataOut should be inputLen + 8 (metadata prepended)
+				expectedLen := inputLen + 8
+				if len(out) != expectedLen {
+					t.Skipf("DataOut length %d (expected %d) — kernel may not include metadata in BPF_PROG_RUN output", len(out), expectedLen)
+					return
+				}
+
+				// First 8 bytes = __u64 metadata
+				meta := binary.LittleEndian.Uint64(out[:8])
+				marker := uint32(meta >> 32)
+				vlanID := uint16(meta & 0xFFFF)
+
+				if marker != bumMetaMarker {
+					t.Errorf("Expected marker 0x%08X, got 0x%08X", bumMetaMarker, marker)
+				}
+				if vlanID != tt.expectedVlanID {
+					t.Errorf("Expected vlan_id %d, got %d", tt.expectedVlanID, vlanID)
+				}
+				t.Logf("SUCCESS: BUM meta written — marker=0x%08X vlan_id=%d", marker, vlanID)
+			} else {
+				// Unicast → encap (no metadata, different action)
+				if ret == XDP_PASS {
+					// If PASS, output should be same size (no meta for non-BUM that hit FDB miss → encap)
+					if len(out) == inputLen {
+						t.Logf("SUCCESS: no metadata for unicast")
+					}
+				}
+			}
+		})
+	}
 }

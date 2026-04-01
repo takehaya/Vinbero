@@ -61,6 +61,26 @@ struct {
     __uint(max_entries, 8192);
 } fdb_map SEC(".maps");
 
+// BD Peer map (Hash) for P2MP BUM flooding
+// Key: Bridge Domain ID + peer index
+// Value: headend_entry (SRv6 encap info for reaching that PE)
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct bd_peer_key);
+    __type(value, struct headend_entry);
+    __uint(max_entries, 1024);
+} bd_peer_map SEC(".maps");
+
+// BD Peer reverse map: {bd_id, src_addr} → peer_index
+// Populated by userspace alongside bd_peer_map.
+// Used by End.DT2 for O(1) peer_index resolution during remote MAC learning.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct bd_peer_reverse_key);
+    __type(value, struct bd_peer_reverse_val);
+    __uint(max_entries, 1024);
+} bd_peer_reverse_map SEC(".maps");
+
 // https://github.com/cloudflare/xdpcap
 // struct bpf_map_def SEC("maps") xdpcap_hook = XDPCAP_HOOK();
 struct xdpcap_hook {

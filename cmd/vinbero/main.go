@@ -81,6 +81,11 @@ func run(cliCtx *cli.Context) error {
 	}
 	lg.Info("Vinbero XDP program loaded successfully")
 
+	if err := vin.LoadTCProgram(); err != nil {
+		return fmt.Errorf("load TC program: %w", err)
+	}
+	lg.Info("Vinbero TC BUM program loaded successfully")
+
 	// Start FDB watcher if bridge domains are configured
 	if err := vin.StartFDBWatcher(ctx); err != nil {
 		return fmt.Errorf("start FDB watcher: %w", err)
