@@ -9,7 +9,8 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
-VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 VINBERO_CONFIG="${SCRIPT_DIR}/vinbero_router3.yaml"
 
 export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-dt4-}"
@@ -72,7 +73,7 @@ echo "Phase 2: Vinbero XDP End.DT4 (VRF)"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router3..."
-ip netns exec "$ns_router3" ${VINBERO_BIN} -c ${VINBERO_CONFIG} > /tmp/vinbero_end_dt4_test.log 2>&1 &
+ip netns exec "$ns_router3" ${VINBEROD_BIN} -c ${VINBERO_CONFIG} > /tmp/vinbero_end_dt4_test.log 2>&1 &
 VINBERO_PID=$!
 
 sleep 2
@@ -86,17 +87,8 @@ fi
 print_success "Vinbero started (PID: $VINBERO_PID)"
 
 print_info "Registering SidFunction (End.DT4) entry with vrf_name=vrf100..."
-ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.SidFunctionService/SidFunctionCreate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sid_functions": [
-      {
-        "trigger_prefix": "fc00:3::3/128",
-        "action": "SRV6_LOCAL_ACTION_END_DT4",
-        "vrf_name": "vrf100"
-      }
-    ]
-  }' > /dev/null
+ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8082 sid create \
+  --trigger-prefix fc00:3::3/128 --action END_DT4 --vrf-name vrf100 > /dev/null
 
 print_success "SidFunction (End.DT4) entry registered"
 

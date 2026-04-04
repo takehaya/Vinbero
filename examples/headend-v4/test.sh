@@ -9,7 +9,8 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
-VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 VINBERO_CONFIG="${SCRIPT_DIR}/vinbero_router1.yaml"
 
 # Set namespace prefix (must match setup.sh)
@@ -66,7 +67,7 @@ echo "Phase 2: Vinbero XDP H.Encaps"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router1..."
-ip netns exec "$ns_router1" ${VINBERO_BIN} -c ${VINBERO_CONFIG} > /tmp/vinbero_headend_test.log 2>&1 &
+ip netns exec "$ns_router1" ${VINBEROD_BIN} -c ${VINBERO_CONFIG} > /tmp/vinbero_headend_test.log 2>&1 &
 VINBERO_PID=$!
 sleep 2
 
@@ -79,19 +80,8 @@ fi
 print_success "Vinbero started (PID: $VINBERO_PID)"
 
 print_info "Registering HeadendV4 entry..."
-ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.Headendv4Service/Headendv4Create \
-  -H "Content-Type: application/json" \
-  -d '{
-    "headendv4s": [
-      {
-        "trigger_prefix": "172.0.2.0/24",
-        "mode": "SRV6_HEADEND_BEHAVIOR_H_ENCAPS",
-        "src_addr": "fc00:1::1",
-        "dst_addr": "fc00:2::1",
-        "segments": ["fc00:2::1", "fc00:3::3"]
-      }
-    ]
-  }' > /dev/null
+ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 hv4 create \
+  --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3 > /dev/null
 
 print_success "HeadendV4 entry registered"
 
