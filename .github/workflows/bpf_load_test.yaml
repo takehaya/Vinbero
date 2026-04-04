@@ -4,21 +4,17 @@ name: BPF load test
 on:
   push:
     paths:
-      - 'go.*'
-      - '**.go'
       - '**.h'
       - '**.c'
       - 'src/**'
-      - 'pkg/bpf/**'
+      - 'pkg/bpf/*.o'
       - '.github/workflows/bpf_load_test.yaml'
   pull_request:
     paths:
-      - 'go.*'
-      - '**.go'
       - '**.h'
       - '**.c'
       - 'src/**'
-      - 'pkg/bpf/**'
+      - 'pkg/bpf/*.o'
       - '.github/workflows/bpf_load_test.yaml'
 
 jobs:
