@@ -30,7 +30,7 @@ func loadState(path string) (*ManagedState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &ManagedState{}, nil
+			return &ManagedState{VRFs: []ManagedVrf{}, Bridges: []ManagedBridge{}}, nil
 		}
 		return nil, err
 	}

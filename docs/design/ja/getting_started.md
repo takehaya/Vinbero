@@ -18,7 +18,7 @@ make bpf-gen
 make build
 ```
 
-ビルドが完了すると `out/bin/vinbero` にバイナリが生成されます。
+ビルドが完了すると `out/bin/vinberod`（デーモン）と `out/bin/vinbero`（CLI）が生成されます。
 
 ## 最小限の設定ファイル
 
@@ -49,7 +49,7 @@ settings:
 ## 起動
 
 ```bash
-sudo ./out/bin/vinbero -c vinbero.yml
+sudo ./out/bin/vinberod -c vinbero.yml
 ```
 
 ## L2VPN（P2MP）のセットアップ例

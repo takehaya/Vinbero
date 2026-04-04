@@ -12,6 +12,9 @@ func (m *ResourceManager) CreateBridge(name string, bdID uint16, members []strin
 	if existing, err := netlink.LinkByName(name); err == nil {
 		ifindex := uint32(existing.Attrs().Index)
 		m.ensureBridgeInState(name, bdID, members, ifindex)
+		if err := saveState(m.statePath, m.state); err != nil {
+			m.logger.Warn("failed to save state after bridge idempotent update", zap.Error(err))
+		}
 		return ifindex, nil
 	}
 

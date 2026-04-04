@@ -13,6 +13,9 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 	if existing, err := netlink.LinkByName(name); err == nil {
 		ifindex := uint32(existing.Attrs().Index)
 		m.ensureVrfInState(name, tableID, members, enableL3mdevRule, ifindex)
+		if err := saveState(m.statePath, m.state); err != nil {
+			m.logger.Warn("failed to save state after VRF idempotent update", zap.Error(err))
+		}
 		return ifindex, nil
 	}
 
@@ -123,7 +126,16 @@ func createVrfNetlink(name string, tableID uint32, members []string, enableL3mde
 }
 
 func ensureL3mdevRule() error {
-	rules, err := netlink.RuleList(unix.AF_INET)
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		if err := ensureL3mdevRuleForFamily(family); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureL3mdevRuleForFamily(family int) error {
+	rules, err := netlink.RuleList(family)
 	if err != nil {
 		return err
 	}
@@ -135,6 +147,6 @@ func ensureL3mdevRule() error {
 	rule := netlink.NewRule()
 	rule.Priority = 1000
 	rule.Table = 0
-	rule.Family = unix.AF_INET
+	rule.Family = family
 	return netlink.RuleAdd(rule)
 }
