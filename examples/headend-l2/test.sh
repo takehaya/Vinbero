@@ -9,7 +9,8 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
-VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 VINBERO_CONFIG_RT1="${SCRIPT_DIR}/vinbero_router1.yaml"
 VINBERO_CONFIG_RT3="${SCRIPT_DIR}/vinbero_router3.yaml"
 
@@ -86,7 +87,7 @@ echo "Phase 1: Starting Vinbero on router1 and router3"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router1..."
-ip netns exec "$ns_router1" ${VINBERO_BIN} -c ${VINBERO_CONFIG_RT1} > /tmp/vinbero_hl2_rt1.log 2>&1 &
+ip netns exec "$ns_router1" ${VINBEROD_BIN} -c ${VINBERO_CONFIG_RT1} > /tmp/vinbero_hl2_rt1.log 2>&1 &
 VINBERO_PID_RT1=$!
 sleep 2
 
@@ -98,7 +99,7 @@ fi
 print_success "Vinbero started on router1 (PID: $VINBERO_PID_RT1)"
 
 print_info "Starting Vinbero on $ns_router3..."
-ip netns exec "$ns_router3" ${VINBERO_BIN} -c ${VINBERO_CONFIG_RT3} > /tmp/vinbero_hl2_rt3.log 2>&1 &
+ip netns exec "$ns_router3" ${VINBEROD_BIN} -c ${VINBERO_CONFIG_RT3} > /tmp/vinbero_hl2_rt3.log 2>&1 &
 VINBERO_PID_RT3=$!
 sleep 2
 
@@ -118,42 +119,20 @@ echo "=========================================="
 
 # Forward path: router1 encapsulates VLAN 100 traffic towards host2
 print_info "Registering HeadendL2 entry on router1 (forward path)..."
-response=$(ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2Create \
-  -H "Content-Type: application/json" \
-  -d '{
-    "headend_l2s": [
-      {
-        "vlan_id": 100,
-        "interface_name": "'"${TOPO_NS_PREFIX}rt1h1"'",
-        "src_addr": "fc00:1::1",
-        "segments": ["fc00:2::1", "fc00:3::3"]
-      }
-    ]
-  }')
-
-if echo "$response" | grep -q "error"; then
-    print_error "Failed to register HeadendL2 entry on router1: $response"
+if ! ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 hl2 create \
+  --interface "${TOPO_NS_PREFIX}rt1h1" --vlan-id 100 --src-addr fc00:1::1 \
+  --segments fc00:2::1,fc00:3::3; then
+    print_error "Failed to register HeadendL2 entry on router1"
     exit 1
 fi
 print_success "Router1 HeadendL2: VLAN 100 -> [fc00:2::1, fc00:3::3]"
 
 # Return path: router3 encapsulates VLAN 100 traffic towards host1
 print_info "Registering HeadendL2 entry on router3 (return path)..."
-response=$(ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vinbero.v1.HeadendL2Service/HeadendL2Create \
-  -H "Content-Type: application/json" \
-  -d '{
-    "headend_l2s": [
-      {
-        "vlan_id": 100,
-        "interface_name": "'"${TOPO_NS_PREFIX}rt3h2"'",
-        "src_addr": "fc00:3::3",
-        "segments": ["fc00:2::2", "fc00:1::2"]
-      }
-    ]
-  }')
-
-if echo "$response" | grep -q "error"; then
-    print_error "Failed to register HeadendL2 entry on router3: $response"
+if ! ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8083 hl2 create \
+  --interface "${TOPO_NS_PREFIX}rt3h2" --vlan-id 100 --src-addr fc00:3::3 \
+  --segments fc00:2::2,fc00:1::2; then
+    print_error "Failed to register HeadendL2 entry on router3"
     exit 1
 fi
 print_success "Router3 HeadendL2: VLAN 100 -> [fc00:2::2, fc00:1::2]"
@@ -176,11 +155,9 @@ echo "Phase 4: HeadendL2 API Tests"
 echo "=========================================="
 
 print_info "Testing HeadendL2List API..."
-list_response=$(ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2List \
-  -H "Content-Type: application/json" \
-  -d '{}')
+list_response=$(ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 --json hl2 list)
 
-if echo "$list_response" | grep -q '"vlanId":100'; then
+if echo "$list_response" | grep -q '"vlan_id":100'; then
     print_success "HeadendL2List API: PASS (VLAN 100 entry found)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
@@ -190,11 +167,9 @@ else
 fi
 
 print_info "Testing HeadendL2Get API..."
-get_response=$(ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2Get \
-  -H "Content-Type: application/json" \
-  -d '{"interface_name": "'"${TOPO_NS_PREFIX}rt1h1"'", "vlan_id": 100}')
+get_response=$(ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 --json hl2 list)
 
-if echo "$get_response" | grep -q '"srcAddr":"fc00:1::1"'; then
+if echo "$get_response" | grep -q '"src_addr":"fc00:1::1"'; then
     print_success "HeadendL2Get API: PASS (correct src_addr)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
@@ -211,25 +186,19 @@ echo "Phase 5: HeadendL2 Delete Test"
 echo "=========================================="
 
 print_info "Testing HeadendL2Delete API..."
-delete_response=$(ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2Delete \
-  -H "Content-Type: application/json" \
-  -d '{"targets": [{"interface_name": "'"${TOPO_NS_PREFIX}rt1h1"'", "vlan_id": 100}]}')
-
-if echo "$delete_response" | grep -q '"deleted"'; then
+if ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 hl2 delete \
+  --interface "${TOPO_NS_PREFIX}rt1h1" --vlan-id 100; then
     print_success "HeadendL2Delete API: PASS"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     print_error "HeadendL2Delete API: FAIL"
-    print_info "Response: $delete_response"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 # Verify deletion
-list_after=$(ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2List \
-  -H "Content-Type: application/json" \
-  -d '{}')
+list_after=$(ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 --json hl2 list)
 
-if echo "$list_after" | grep -q '"vlanId":100'; then
+if echo "$list_after" | grep -q '"vlan_id":100'; then
     print_error "Entry still exists after deletion: FAIL"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 else
