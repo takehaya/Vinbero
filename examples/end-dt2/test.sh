@@ -169,7 +169,7 @@ echo "Phase 3: FDB Verification"
 echo "=========================================="
 
 print_info "Checking FDB on router3..."
-dmac_response=$(vbctl_rt3 fdb list --json)
+dmac_response=$(vbctl_rt3 --json fdb list)
 
 print_info "FDB response: $dmac_response"
 if echo "$dmac_response" | grep -q '"mac"'; then
