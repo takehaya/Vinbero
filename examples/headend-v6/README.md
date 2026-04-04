@@ -47,7 +47,7 @@ sudo ./setup.sh
 sudo ip netns exec hv6-router1 ip -6 route del 2001:2::/64 2>/dev/null
 
 # Vinbero起動
-sudo ip netns exec hv6-router1 ../../out/bin/vinbero -c vinbero_router1.yaml
+sudo ip netns exec hv6-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
 ```
 
 ### 2. HeadendV6エントリ登録
