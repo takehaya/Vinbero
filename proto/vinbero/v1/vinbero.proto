@@ -6,6 +6,11 @@ import "vinbero/v1/enums.proto";
 
 option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 
+// SidFunctionService manages SRv6 Endpoint functions (End, End.X, End.DT4, End.DT2, etc.).
+// Each SID is identified by a trigger_prefix (IPv6 CIDR) and maps to an action
+// that determines how matching SRv6 packets are processed.
+//
+// Depends on: NetworkResourceService (vrf_name, bridge_name must exist before use)
 service SidFunctionService {
   rpc SidFunctionCreate(SidFunctionCreateRequest) returns (SidFunctionCreateResponse);
   rpc SidFunctionDelete(SidFunctionDeleteRequest) returns (SidFunctionDeleteResponse);
@@ -13,20 +18,25 @@ service SidFunctionService {
   rpc SidFunctionGet(SidFunctionGetRequest) returns (SidFunctionGetResponse);
 }
 
-// SidFunction represents SRv6 Endpoint functions (End, End.X, End.DX4, End.DX6, etc.)
+// SidFunction represents a single SRv6 Endpoint function configuration.
+// The action field determines which optional fields are relevant:
+//   - End.DT4/DT6/DT46: vrf_name (VRF-aware FIB lookup)
+//   - End.DT2: bd_id + bridge_name (L2 FDB lookup + bridge flood on miss)
+//   - End.DX2: oif (direct L2 output to specific interface)
+//   - End/End.X/End.T: basic SRv6 transit, no extra fields needed
 message SidFunction {
-  Srv6LocalAction action = 1;
-  string trigger_prefix = 2; // CIDR format (e.g., fd00::1/128)
-  string src_addr = 3; // actionSrcAddr
-  string dst_addr = 4; // actionDstAddr
-  string nexthop = 5;
-  Srv6LocalFlavor flavor = 6; // PSP, USP, USD, etc.
-  uint32 arg_src_offset = 7; // Bit offset for source in SID Args
-  uint32 arg_dst_offset = 8; // Bit offset for destination in SID Args
-  uint32 oif = 9; // Output interface index (used by End.DX2)
-  uint32 vrf_ifindex = 10; // VRF interface index (used by End.DT4/DT6/DT46)
-  uint32 bd_id = 11; // Bridge Domain ID (used by End.DT2)
-  string bridge_name = 12; // Bridge device name for End.DT2 FDB miss flood
+  Srv6LocalAction action = 1;      // Endpoint function type
+  string trigger_prefix = 2;       // IPv6 CIDR that activates this SID (e.g., "fc00:1::1/128")
+  string src_addr = 3;             // Source address for encapsulation
+  string dst_addr = 4;             // Destination address override
+  string nexthop = 5;              // Next-hop for cross-connect functions (End.X)
+  Srv6LocalFlavor flavor = 6;      // SRv6 flavor: PSP, USP, USD
+  uint32 arg_src_offset = 7;       // Bit offset for source in SID Args
+  uint32 arg_dst_offset = 8;       // Bit offset for destination in SID Args
+  uint32 oif = 9;                  // Output interface index (End.DX2: direct L2 output)
+  string vrf_name = 10;            // VRF device name (End.DT4/DT6/DT46: resolved to ifindex for FIB lookup)
+  uint32 bd_id = 11;               // Bridge Domain ID (End.DT2: FDB scope for MAC learning)
+  string bridge_name = 12;         // Bridge device name (End.DT2: redirect target on FDB miss)
 }
 
 message SidFunctionCreateRequest {
@@ -34,11 +44,11 @@ message SidFunctionCreateRequest {
 }
 message SidFunctionCreateResponse {
   repeated SidFunction created = 1;
-  repeated OperationError errors = 2;
+  repeated OperationError errors = 2; // Per-entry errors; successful entries are in created
 }
 
 message SidFunctionDeleteRequest {
-  repeated string trigger_prefixes = 1;
+  repeated string trigger_prefixes = 1; // IPv6 CIDRs to delete
 }
 message SidFunctionDeleteResponse {
   repeated string deleted_trigger_prefixes = 1;
@@ -57,6 +67,8 @@ message SidFunctionGetResponse {
   SidFunction sid_function = 1;
 }
 
+// Headendv4Service manages SRv6 Headend behavior for IPv4 packets.
+// Matching IPv4 packets are encapsulated with an outer IPv6 header and SRH.
 service Headendv4Service {
   rpc Headendv4Create(Headendv4CreateRequest) returns (Headendv4CreateResponse);
   rpc Headendv4Delete(Headendv4DeleteRequest) returns (Headendv4DeleteResponse);
@@ -64,14 +76,15 @@ service Headendv4Service {
   rpc Headendv4Get(Headendv4GetRequest) returns (Headendv4GetResponse);
 }
 
-// Headendv4 represents Headend behavior for IPv4 packets
+// Headendv4 represents an IPv4 prefix → SRv6 encapsulation rule.
 message Headendv4 {
-  Srv6HeadendBehavior mode = 1;
-  string trigger_prefix = 2; // CIDR format (e.g., 10.0.0.0/24)
-  string src_addr = 3;
-  string dst_addr = 4;
-  repeated string segments = 5;
+  Srv6HeadendBehavior mode = 1;    // H.Insert or H.Encaps
+  string trigger_prefix = 2;       // IPv4 CIDR (e.g., "10.0.0.0/24")
+  string src_addr = 3;             // Outer IPv6 source address
+  string dst_addr = 4;             // Outer IPv6 destination (optional, usually derived from segments)
+  repeated string segments = 5;    // SRv6 segment list
 }
+
 message Headendv4CreateRequest {
   repeated Headendv4 headendv4s = 1;
 }
@@ -100,6 +113,7 @@ message Headendv4GetResponse {
   Headendv4 headendv4 = 1;
 }
 
+// Headendv6Service manages SRv6 Headend behavior for IPv6 packets.
 service Headendv6Service {
   rpc Headendv6Create(Headendv6CreateRequest) returns (Headendv6CreateResponse);
   rpc Headendv6Delete(Headendv6DeleteRequest) returns (Headendv6DeleteResponse);
@@ -107,10 +121,10 @@ service Headendv6Service {
   rpc Headendv6Get(Headendv6GetRequest) returns (Headendv6GetResponse);
 }
 
-// Headendv6 represents Headend behavior for IPv6 packets
+// Headendv6 represents an IPv6 prefix → SRv6 encapsulation rule.
 message Headendv6 {
   Srv6HeadendBehavior mode = 1;
-  string trigger_prefix = 2; // CIDR format (e.g., 2001:db8::/32)
+  string trigger_prefix = 2;       // IPv6 CIDR (e.g., "2001:db8::/32")
   string src_addr = 3;
   string dst_addr = 4;
   repeated string segments = 5;
@@ -144,15 +158,18 @@ message Headendv6GetResponse {
   Headendv6 headendv6 = 1;
 }
 
+// DmacService provides read-only access to the FDB (MAC address table).
+// Useful for observability and debugging of L2VPN MAC learning.
 service DmacService {
   rpc DmacList(DmacListRequest) returns (DmacListResponse);
 }
 
+// DmacListEntry represents a single FDB entry.
 message DmacListEntry {
-  uint32 bd_id = 1; // Bridge Domain ID
-  string mac = 2; // MAC address as string "aa:bb:cc:dd:ee:ff"
-  uint32 oif = 3; // Output interface index
-  bool is_untag = 4; // Strip VLAN tag on egress
+  uint32 bd_id = 1;    // Bridge Domain ID that scopes this MAC entry
+  string mac = 2;      // MAC address (e.g., "aa:bb:cc:dd:ee:ff")
+  uint32 oif = 3;      // Output interface index (for local entries)
+  bool is_untag = 4;   // Reserved for future VLAN tag stripping on egress
 }
 
 message DmacListRequest {}
@@ -160,17 +177,23 @@ message DmacListResponse {
   repeated DmacListEntry entries = 1;
 }
 
+// BdPeerService manages remote PEs within a Bridge Domain for BUM traffic flooding.
+// When a BUM frame (broadcast/unknown-unicast/multicast) is detected, Vinbero
+// sends SRv6-encapsulated copies to all registered peers in the same BD.
+//
+// Depends on: HeadendL2Service (bd_id must match an existing HeadendL2 entry)
 service BdPeerService {
   rpc BdPeerCreate(BdPeerCreateRequest) returns (BdPeerCreateResponse);
   rpc BdPeerDelete(BdPeerDeleteRequest) returns (BdPeerDeleteResponse);
   rpc BdPeerList(BdPeerListRequest) returns (BdPeerListResponse);
 }
 
-// BdPeer represents a remote PE participating in a Bridge Domain
+// BdPeer represents a remote PE that participates in a Bridge Domain.
+// Each peer has a segment list describing the SRv6 path to reach it.
 message BdPeer {
-  uint32 bd_id = 1; // Bridge Domain ID
-  string src_addr = 2; // Outer IPv6 source address for SRv6 encap
-  repeated string segments = 3; // Segment list to reach this PE
+  uint32 bd_id = 1;                // Bridge Domain ID this peer belongs to
+  string src_addr = 2;             // Outer IPv6 source address for SRv6 encap
+  repeated string segments = 3;    // Segment list to reach this PE
 }
 
 message BdPeerCreateRequest {
@@ -182,7 +205,7 @@ message BdPeerCreateResponse {
 }
 
 message BdPeerDeleteRequest {
-  repeated uint32 bd_ids = 1; // Delete all peers for these BD IDs
+  repeated uint32 bd_ids = 1;      // Delete all peers for these BD IDs
 }
 message BdPeerDeleteResponse {
   repeated uint32 deleted_bd_ids = 1;
@@ -190,12 +213,90 @@ message BdPeerDeleteResponse {
 }
 
 message BdPeerListRequest {
-  uint32 bd_id = 1; // 0 = list all
+  uint32 bd_id = 1;                // Filter by BD ID; 0 returns all peers
 }
 message BdPeerListResponse {
   repeated BdPeer peers = 1;
 }
 
+// NetworkResourceService manages Linux network resources (VRF, Bridge) via netlink.
+// Resources are persisted to a JSON state file and reconciled on startup.
+// BridgeCreate also registers the bridge with FDBWatcher for dynamic MAC learning.
+//
+// This service should be called before SidFunctionService, since SIDs reference
+// VRF/Bridge resources by name.
+service NetworkResourceService {
+  rpc VrfCreate(VrfCreateRequest) returns (VrfCreateResponse);
+  rpc VrfDelete(VrfDeleteRequest) returns (VrfDeleteResponse);
+  rpc VrfList(VrfListRequest) returns (VrfListResponse);
+  rpc BridgeCreate(BridgeCreateRequest) returns (BridgeCreateResponse);
+  rpc BridgeDelete(BridgeDeleteRequest) returns (BridgeDeleteResponse);
+  rpc BridgeList(BridgeListRequest) returns (BridgeListResponse);
+}
+
+// Vrf represents a Linux VRF device managed by Vinbero.
+// Used by End.DT4/DT6/DT46 for VRF-aware FIB lookup.
+message Vrf {
+  string name = 1;                 // VRF device name (e.g., "vrf100")
+  uint32 table_id = 2;            // Linux routing table ID
+  repeated string members = 3;    // Interfaces to enslave to this VRF
+  bool enable_l3mdev_rule = 4;    // Add "ip rule add l3mdev" if not already present
+}
+
+message VrfCreateRequest {
+  repeated Vrf vrfs = 1;
+}
+message VrfCreateResponse {
+  repeated Vrf created = 1;
+  repeated OperationError errors = 2;
+}
+
+message VrfDeleteRequest {
+  repeated string names = 1;       // VRF names to delete; fails if referenced by a SID
+}
+message VrfDeleteResponse {
+  repeated string deleted_names = 1;
+  repeated OperationError errors = 2;
+}
+
+message VrfListRequest {}
+message VrfListResponse {
+  repeated Vrf vrfs = 1;
+}
+
+// Bridge represents a Linux bridge device managed by Vinbero.
+// Used by End.DT2 for FDB miss flooding, and by FDBWatcher for MAC learning sync.
+message Bridge {
+  string name = 1;                 // Bridge device name (e.g., "br100")
+  uint32 bd_id = 2;               // Bridge Domain ID for FDB scoping and FDBWatcher registration
+  repeated string members = 3;    // Interfaces to enslave to this bridge
+}
+
+message BridgeCreateRequest {
+  repeated Bridge bridges = 1;
+}
+message BridgeCreateResponse {
+  repeated Bridge created = 1;
+  repeated OperationError errors = 2;
+}
+
+message BridgeDeleteRequest {
+  repeated string names = 1;       // Bridge names to delete; fails if referenced by a SID
+}
+message BridgeDeleteResponse {
+  repeated string deleted_names = 1;
+  repeated OperationError errors = 2;
+}
+
+message BridgeListRequest {}
+message BridgeListResponse {
+  repeated Bridge bridges = 1;
+}
+
+// HeadendL2Service manages L2 frame SRv6 encapsulation (H.Encaps.L2).
+// Frames arriving on a specific interface+VLAN are encapsulated with SRv6 headers.
+//
+// Depends on: NetworkResourceService (bridge must exist if bd_id > 0)
 service HeadendL2Service {
   rpc HeadendL2Create(HeadendL2CreateRequest) returns (HeadendL2CreateResponse);
   rpc HeadendL2Delete(HeadendL2DeleteRequest) returns (HeadendL2DeleteResponse);
@@ -203,13 +304,15 @@ service HeadendL2Service {
   rpc HeadendL2Get(HeadendL2GetRequest) returns (HeadendL2GetResponse);
 }
 
-// HeadendL2 represents Headend behavior for L2 frames (H.Encaps.L2)
+// HeadendL2 represents a port+VLAN → SRv6 L2 encapsulation rule.
+// When bd_id is 0, all frames are encapsulated directly (P2P mode, no MAC learning).
+// When bd_id > 0, MAC learning and FDB-based forwarding are enabled (P2MP mode).
 message HeadendL2 {
-  uint32 vlan_id = 1; // VLAN ID (0 for untagged)
-  string src_addr = 2; // Outer IPv6 source address
-  repeated string segments = 3; // Segment list
-  uint32 bd_id = 4; // Bridge Domain ID (for MAC learning)
-  string interface_name = 5; // Interface name (resolved to ifindex)
+  uint32 vlan_id = 1;              // VLAN ID to match (0 for untagged traffic)
+  string src_addr = 2;             // Outer IPv6 source address for SRv6 encap
+  repeated string segments = 3;    // SRv6 segment list
+  uint32 bd_id = 4;                // Bridge Domain ID; 0 = direct encap (no BD), >0 = MAC learning enabled
+  string interface_name = 5;       // Customer-facing interface name (resolved to ifindex internally)
 }
 
 message HeadendL2CreateRequest {

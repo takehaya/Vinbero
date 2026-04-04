@@ -11,6 +11,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
+	"github.com/takehaya/vinbero/pkg/netresource"
 	"go.uber.org/zap"
 )
 
@@ -22,6 +23,7 @@ type Vinbero struct {
 	devLinks   []link.Link
 	tcLinks    []link.Link
 	fdbWatcher *netlinkwatch.FDBWatcher
+	resMgr     *netresource.ResourceManager
 	logger     *zap.Logger
 }
 
@@ -91,19 +93,54 @@ func (v *Vinbero) LoadTCProgram() error {
 	return nil
 }
 
-// StartFDBWatcher starts the FDB watcher if bridge_domains are configured
-func (v *Vinbero) StartFDBWatcher(ctx context.Context) error {
-	if len(v.cfg.Setting.BridgeDomains) == 0 {
-		return nil
+const defaultStatePath = "/var/lib/vinbero/state.json"
+
+// InitResourceManager initializes the resource manager and reconciles state.
+func (v *Vinbero) InitResourceManager() error {
+	statePath := v.cfg.Setting.StatePath
+	if statePath == "" {
+		statePath = defaultStatePath
 	}
 
-	v.fdbWatcher = netlinkwatch.NewFDBWatcher(v.mapOps, v.cfg.Setting.BridgeDomains, v.logger)
+	resMgr, err := netresource.NewResourceManager(statePath, v.logger)
+	if err != nil {
+		return fmt.Errorf("init resource manager: %w", err)
+	}
+
+	if err := resMgr.Reconcile(); err != nil {
+		v.logger.Warn("resource reconciliation had issues", zap.Error(err))
+	}
+
+	v.resMgr = resMgr
+	return nil
+}
+
+// StartFDBWatcher starts the FDB watcher and registers reconciled bridges.
+func (v *Vinbero) StartFDBWatcher(ctx context.Context) error {
+	v.fdbWatcher = netlinkwatch.NewFDBWatcher(v.mapOps, v.logger)
 	if err := v.fdbWatcher.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start FDB watcher: %w", err)
 	}
-	v.logger.Info("FDB watcher started",
-		zap.Int("bridge_domains", len(v.cfg.Setting.BridgeDomains)))
+
+	// Register bridges from reconciled state so FDB sync works after restart
+	if v.resMgr != nil {
+		for _, br := range v.resMgr.ListBridges() {
+			v.fdbWatcher.RegisterBridge(int(br.Ifindex), br.BdID)
+		}
+	}
+
+	v.logger.Info("FDB watcher started")
 	return nil
+}
+
+// GetResourceManager returns the resource manager instance
+func (v *Vinbero) GetResourceManager() *netresource.ResourceManager {
+	return v.resMgr
+}
+
+// GetFDBWatcher returns the FDB watcher instance
+func (v *Vinbero) GetFDBWatcher() *netlinkwatch.FDBWatcher {
+	return v.fdbWatcher
 }
 
 // GetMapOperations returns the map operations instance

@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
-VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
+VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
 VINBERO_CONFIG="${SCRIPT_DIR}/vinbero_router3.yaml"
 
 # Set namespace prefix (must match setup.sh)

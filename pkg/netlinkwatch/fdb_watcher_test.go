@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
-	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -22,15 +21,9 @@ func newTestFDBWatcher(t *testing.T) (*FDBWatcher, *bpf.MapOperations) {
 	mapOps := bpf.NewMapOperations(objs)
 	logger := zap.NewNop()
 
-	configs := []config.BridgeDomainConfig{
-		{BridgeName: "dummy", BdID: 100},
-	}
-
-	w := NewFDBWatcher(mapOps, configs, logger)
-	// Manually set allowed map (skip netlink resolution since dummy bridge doesn't exist)
-	w.allowed = map[int]uint16{
-		10: 100, // bridge ifindex 10 → bd_id 100
-	}
+	w := NewFDBWatcher(mapOps, logger)
+	// Dynamically register a test bridge
+	w.RegisterBridge(10, 100) // bridge ifindex 10 → bd_id 100
 
 	return w, mapOps
 }

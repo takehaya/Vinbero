@@ -2,12 +2,10 @@ package netlinkwatch
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"sync"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
-	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -17,38 +15,41 @@ import (
 type FDBWatcher struct {
 	mapOps  *bpf.MapOperations
 	logger  *zap.Logger
-	configs []config.BridgeDomainConfig
+	mu      sync.RWMutex
 	allowed map[int]uint16 // bridge ifindex → bd_id (for O(1) filter)
 	done    chan struct{}
 	wg      sync.WaitGroup
 }
 
 // NewFDBWatcher creates a new FDB watcher
-func NewFDBWatcher(mapOps *bpf.MapOperations, configs []config.BridgeDomainConfig, logger *zap.Logger) *FDBWatcher {
+func NewFDBWatcher(mapOps *bpf.MapOperations, logger *zap.Logger) *FDBWatcher {
 	return &FDBWatcher{
 		mapOps:  mapOps,
 		logger:  logger,
-		configs: configs,
+		allowed: make(map[int]uint16),
 		done:    make(chan struct{}),
 	}
 }
 
-// Start resolves bridge names to ifindexes and begins watching FDB updates.
+// RegisterBridge dynamically adds a bridge to the FDB watch list.
+func (w *FDBWatcher) RegisterBridge(ifindex int, bdID uint16) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.allowed[ifindex] = bdID
+	w.logger.Info("Registered bridge for FDB watching",
+		zap.Int("ifindex", ifindex),
+		zap.Uint16("bd_id", bdID))
+}
+
+// UnregisterBridge removes a bridge from the FDB watch list.
+func (w *FDBWatcher) UnregisterBridge(ifindex int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.allowed, ifindex)
+}
+
+// Start begins watching FDB updates.
 func (w *FDBWatcher) Start(ctx context.Context) error {
-	// Resolve bridge names → ifindexes
-	w.allowed = make(map[int]uint16, len(w.configs))
-	for _, cfg := range w.configs {
-		link, err := netlink.LinkByName(cfg.BridgeName)
-		if err != nil {
-			return fmt.Errorf("bridge %q not found: %w", cfg.BridgeName, err)
-		}
-		ifindex := link.Attrs().Index
-		w.allowed[ifindex] = cfg.BdID
-		w.logger.Info("Resolved bridge domain",
-			zap.String("bridge", cfg.BridgeName),
-			zap.Int("ifindex", ifindex),
-			zap.Uint16("bd_id", cfg.BdID))
-	}
 
 	updates := make(chan netlink.NeighUpdate, 256)
 
@@ -90,8 +91,10 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 		return
 	}
 
-	// Filter: only process FDB entries from configured bridges
+	// Filter: only process FDB entries from registered bridges
+	w.mu.RLock()
 	bdID, ok := w.allowed[neigh.MasterIndex]
+	w.mu.RUnlock()
 	if !ok {
 		return
 	}

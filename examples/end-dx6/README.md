@@ -48,7 +48,7 @@ sudo ./setup.sh
 sudo ip netns exec dx6-router3 ip -6 route del local fc00:3::3/128 2>/dev/null
 
 # Vinbero起動
-sudo ip netns exec dx6-router3 ../../out/bin/vinbero -c vinbero_router3.yaml
+sudo ip netns exec dx6-router3 ../../out/bin/vinberod -c vinbero_router3.yaml
 ```
 
 ### 2. SidFunction (End.DX6) エントリ登録
