@@ -9,7 +9,8 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
-VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 VINBERO_CONFIG_RT1="${SCRIPT_DIR}/vinbero_router1.yaml"
 VINBERO_CONFIG_RT3="${SCRIPT_DIR}/vinbero_router3.yaml"
 
@@ -59,6 +60,10 @@ test_ping_with_counter() {
     fi
 }
 
+# Helper: run vinbero CLI inside a network namespace
+vbctl_rt1() { ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 "$@"; }
+vbctl_rt3() { ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8083 "$@"; }
+
 echo "=========================================="
 echo "SRv6 End.DT2 (L2VPN) Test"
 echo "=========================================="
@@ -71,7 +76,7 @@ echo "=========================================="
 
 # Start Vinbero on router1 for H.Encaps.L2 (forward path)
 print_info "Starting Vinbero on $ns_router1 (H.Encaps.L2)..."
-ip netns exec "$ns_router1" ${VINBERO_BIN} -c ${VINBERO_CONFIG_RT1} > /tmp/vinbero_dt2_rt1.log 2>&1 &
+ip netns exec "$ns_router1" ${VINBEROD_BIN} -c ${VINBERO_CONFIG_RT1} > /tmp/vinbero_dt2_rt1.log 2>&1 &
 VINBERO_PID_RT1=$!
 sleep 2
 
@@ -84,37 +89,23 @@ print_success "Vinbero started on router1 (PID: $VINBERO_PID_RT1)"
 
 # Register H.Encaps.L2 on router1 (forward path)
 print_info "Registering HeadendL2 on router1..."
-ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2Create \
-  -H "Content-Type: application/json" \
-  -d '{
-    "headend_l2s": [
-      {
-        "vlan_id": 100,
-        "interface_name": "'"${TOPO_NS_PREFIX}rt1h1"'",
-        "src_addr": "fc00:1::1",
-        "segments": ["fc00:2::1", "fc00:3::3"],
-        "bd_id": 100
-      }
-    ]
-  }' > /dev/null
+vbctl_rt1 hl2 create \
+  --interface "${TOPO_NS_PREFIX}rt1h1" \
+  --vlan-id 100 \
+  --src-addr fc00:1::1 \
+  --segments fc00:2::1,fc00:3::3 \
+  --bd-id 100
 
 # Register BdPeer on router1 (BUM flood to router3)
 print_info "Registering BdPeer on router1..."
-ip netns exec "$ns_router1" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.BdPeerService/BdPeerCreate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "peers": [
-      {
-        "bd_id": 100,
-        "src_addr": "fc00:1::1",
-        "segments": ["fc00:2::1", "fc00:3::3"]
-      }
-    ]
-  }' > /dev/null
+vbctl_rt1 peer create \
+  --bd-id 100 \
+  --src-addr fc00:1::1 \
+  --segments fc00:2::1,fc00:3::3
 
 # Also start Vinbero on router3 for H.Encaps.L2 (return path)
 print_info "Starting Vinbero on $ns_router3 (H.Encaps.L2 return)..."
-ip netns exec "$ns_router3" ${VINBERO_BIN} -c ${VINBERO_CONFIG_RT3} > /tmp/vinbero_dt2_rt3.log 2>&1 &
+ip netns exec "$ns_router3" ${VINBEROD_BIN} -c ${VINBERO_CONFIG_RT3} > /tmp/vinbero_dt2_rt3.log 2>&1 &
 VINBERO_PID_RT3=$!
 sleep 2
 
@@ -127,33 +118,19 @@ print_success "Vinbero started on router3 (PID: $VINBERO_PID_RT3)"
 
 # Register H.Encaps.L2 on router3 (return path)
 print_info "Registering HeadendL2 on router3..."
-ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vinbero.v1.HeadendL2Service/HeadendL2Create \
-  -H "Content-Type: application/json" \
-  -d '{
-    "headend_l2s": [
-      {
-        "vlan_id": 100,
-        "interface_name": "'"${TOPO_NS_PREFIX}rt3h2"'",
-        "src_addr": "fc00:3::3",
-        "segments": ["fc00:2::2", "fc00:1::2"],
-        "bd_id": 100
-      }
-    ]
-  }' > /dev/null
+vbctl_rt3 hl2 create \
+  --interface "${TOPO_NS_PREFIX}rt3h2" \
+  --vlan-id 100 \
+  --src-addr fc00:3::3 \
+  --segments fc00:2::2,fc00:1::2 \
+  --bd-id 100
 
 # Register BdPeer on router3 (BUM flood to router1)
 print_info "Registering BdPeer on router3..."
-ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vinbero.v1.BdPeerService/BdPeerCreate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "peers": [
-      {
-        "bd_id": 100,
-        "src_addr": "fc00:3::3",
-        "segments": ["fc00:2::2", "fc00:1::2"]
-      }
-    ]
-  }' > /dev/null
+vbctl_rt3 peer create \
+  --bd-id 100 \
+  --src-addr fc00:3::3 \
+  --segments fc00:2::2,fc00:1::2
 
 sleep 1
 
@@ -173,19 +150,11 @@ ip netns exec "$ns_router3" ip -6 route del local fc00:3::3/128 2>/dev/null || t
 
 # Register End.DT2 SID on router3
 print_info "Registering End.DT2 SID on router3 (bd_id=100)..."
-ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vinbero.v1.SidFunctionService/SidFunctionCreate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sid_functions": [
-      {
-        "trigger_prefix": "fc00:3::3/128",
-        "action": "SRV6_LOCAL_ACTION_END_DT2",
-        "bd_id": 100,
-        "bridge_name": "br100"
-      }
-    ]
-  }' > /dev/null
-
+vbctl_rt3 sid create \
+  --trigger-prefix fc00:3::3/128 \
+  --action END_DT2 \
+  --bd-id 100 \
+  --bridge-name br100
 print_success "End.DT2 SID registered"
 
 sleep 1
@@ -194,22 +163,20 @@ test_ping_with_counter "$ns_host1" 172.16.100.2 "host1 -> host2 via L2VPN (H.Enc
 
 echo ""
 
-# Phase 3: Verify DmacList API
+# Phase 3: Verify FDB entries
 echo "=========================================="
-echo "Phase 3: DmacList API Test"
+echo "Phase 3: FDB Verification"
 echo "=========================================="
 
-print_info "Checking DmacList API on router3..."
-dmac_response=$(ip netns exec "$ns_router3" curl -s -X POST http://127.0.0.1:8083/vinbero.v1.DmacService/DmacList \
-  -H "Content-Type: application/json" \
-  -d '{}')
+print_info "Checking FDB on router3..."
+dmac_response=$(vbctl_rt3 --json fdb list)
 
-print_info "DmacList response: $dmac_response"
+print_info "FDB response: $dmac_response"
 if echo "$dmac_response" | grep -q '"mac"'; then
-    print_success "DmacList API: PASS (entries found)"
+    print_success "FDB API: PASS (entries found)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    print_info "DmacList API: No entries (MAC learning may not have occurred yet)"
+    print_info "FDB API: No entries (MAC learning may not have occurred yet)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 fi
 

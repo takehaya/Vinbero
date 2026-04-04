@@ -9,7 +9,8 @@ source "${SCRIPT_DIR}/../common/test_utils.sh"
 
 check_root
 
-VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
+VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 VINBERO_CONFIG="${SCRIPT_DIR}/vinbero_router2.yaml"
 
 # Set namespace prefix (must match setup.sh)
@@ -68,7 +69,7 @@ echo "Phase 2: Vinbero XDP"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router2..."
-ip netns exec "$ns_router2" ${VINBERO_BIN} -c ${VINBERO_CONFIG} > /tmp/vinbero_test.log 2>&1 &
+ip netns exec "$ns_router2" ${VINBEROD_BIN} -c ${VINBERO_CONFIG} > /tmp/vinbero_test.log 2>&1 &
 VINBERO_PID=$!
 sleep 2
 
@@ -81,23 +82,10 @@ fi
 print_success "Vinbero started (PID: $VINBERO_PID)"
 
 print_info "Registering SID functions..."
-ip netns exec "$ns_router2" curl -s -X POST http://127.0.0.1:8082/vinbero.v1.SidFunctionService/SidFunctionCreate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sid_functions": [
-      {
-        "trigger_prefix": "fc00:2::1/128",
-        "action": "SRV6_LOCAL_ACTION_END",
-        "flavor": "SRV6_LOCAL_FLAVOR_NONE"
-      },
-      {
-        "trigger_prefix": "fc00:2::2/128",
-        "action": "SRV6_LOCAL_ACTION_END",
-        "flavor": "SRV6_LOCAL_FLAVOR_NONE"
-      }
-    ]
-  }' > /dev/null
-
+ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+  sid create --trigger-prefix fc00:2::1/128 --action END
+ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+  sid create --trigger-prefix fc00:2::2/128 --action END
 print_success "SID functions registered"
 
 sleep 1
