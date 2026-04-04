@@ -115,12 +115,20 @@ func (v *Vinbero) InitResourceManager() error {
 	return nil
 }
 
-// StartFDBWatcher starts the FDB watcher.
+// StartFDBWatcher starts the FDB watcher and registers reconciled bridges.
 func (v *Vinbero) StartFDBWatcher(ctx context.Context) error {
 	v.fdbWatcher = netlinkwatch.NewFDBWatcher(v.mapOps, v.logger)
 	if err := v.fdbWatcher.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start FDB watcher: %w", err)
 	}
+
+	// Register bridges from reconciled state so FDB sync works after restart
+	if v.resMgr != nil {
+		for _, br := range v.resMgr.ListBridges() {
+			v.fdbWatcher.RegisterBridge(int(br.Ifindex), br.BdID)
+		}
+	}
+
 	v.logger.Info("FDB watcher started")
 	return nil
 }

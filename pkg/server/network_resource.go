@@ -59,10 +59,16 @@ func (s *NetworkResourceServer) BridgeDelete(
 	}
 
 	for _, name := range req.Msg.Names {
-		// Use cached ifindex from ResourceManager instead of netlink query
-		br, ok := s.resMgr.GetBridgeByName(name)
-		if ok {
-			ref, err := s.findBridgeReference(br.Ifindex)
+		// Resolve ifindex from ResourceManager cache, falling back to netlink
+		var ifindex uint32
+		if br, ok := s.resMgr.GetBridgeByName(name); ok {
+			ifindex = br.Ifindex
+		} else if resolved, err := resolveIfindex(name); err == nil {
+			ifindex = resolved
+		}
+
+		if ifindex != 0 {
+			ref, err := s.findBridgeReference(ifindex)
 			if err != nil {
 				resp.Errors = append(resp.Errors, &v1.OperationError{
 					TriggerPrefix: name,
@@ -77,7 +83,7 @@ func (s *NetworkResourceServer) BridgeDelete(
 				})
 				continue
 			}
-			s.fdbWatcher.UnregisterBridge(int(br.Ifindex))
+			s.fdbWatcher.UnregisterBridge(int(ifindex))
 		}
 
 		if err := s.resMgr.DeleteBridge(name); err != nil {
@@ -146,10 +152,16 @@ func (s *NetworkResourceServer) VrfDelete(
 	}
 
 	for _, name := range req.Msg.Names {
-		// Use cached ifindex from ResourceManager
-		vrf, ok := s.resMgr.GetVrfByName(name)
-		if ok {
-			ref, err := s.findVrfReference(vrf.Ifindex)
+		// Resolve ifindex from ResourceManager cache, falling back to netlink
+		var ifindex uint32
+		if vrf, ok := s.resMgr.GetVrfByName(name); ok {
+			ifindex = vrf.Ifindex
+		} else if resolved, err := resolveIfindex(name); err == nil {
+			ifindex = resolved
+		}
+
+		if ifindex != 0 {
+			ref, err := s.findVrfReference(ifindex)
 			if err != nil {
 				resp.Errors = append(resp.Errors, &v1.OperationError{
 					TriggerPrefix: name,
