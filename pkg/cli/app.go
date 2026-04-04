@@ -11,9 +11,18 @@ import (
 
 const clientsKey = "vinbero-clients"
 
+var (
+	version = "dev"
+)
+
+func SetVersion(v string) {
+	version = v
+}
+
 func NewApp() *cli.App {
 	return &cli.App{
 		Name:                 "vinbero",
+		Version:              version,
 		Usage:                "Vinbero CLI - SRv6 control plane client",
 		EnableBashCompletion: true,
 		Flags: []cli.Flag{
