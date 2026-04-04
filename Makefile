@@ -53,6 +53,11 @@ test-runnable: ## check no panic at init()
 test: ## Run the tests of the project
 	$(GOTEST) -v -exec sudo -race ./... $(OUTPUT_OPTIONS)
 
+VIMTO_KERNEL ?= 6.6
+.PHONY: test-bpf-load
+test-bpf-load: ## Run BPF load test in QEMU VM (requires vimto + QEMU). Usage: make test-bpf-load [VIMTO_KERNEL=6.12]
+	vimto -sudo -kernel :$(VIMTO_KERNEL) -- go test -v -count 1 -timeout 5m ./pkg/bpf/ -run TestBpfLoad
+
 ## Generate:
 .PHONY: protobuf-gen
 protobuf-gen: ## generate protobuf

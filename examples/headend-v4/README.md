@@ -46,7 +46,7 @@ sudo ./setup.sh
 sudo ip netns exec hv4-router1 ip route del 172.0.2.0/24 2>/dev/null
 
 # Vinbero起動
-sudo ip netns exec hv4-router1 ../../out/bin/vinbero -c vinbero_router1.yaml
+sudo ip netns exec hv4-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
 ```
 
 ### 2. HeadendV4エントリ登録

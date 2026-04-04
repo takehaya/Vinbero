@@ -7,6 +7,11 @@ before:
   hooks:
     - go mod tidy
 builds:
+  - id: vinberod
+    binary: vinberod
+    main: ./cmd/vinberod
+    goos: [ linux ]
+    goarch: [ amd64 ]
   - id: vinbero
     binary: vinbero
     main: ./cmd/vinbero
@@ -17,6 +22,7 @@ archives:
     formats:
     - 'binary'
     ids:
+    - vinberod
     - vinbero
 checksum:
   name_template: 'checksums.txt'
