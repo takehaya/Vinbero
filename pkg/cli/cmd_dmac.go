@@ -11,9 +11,8 @@ import (
 
 func dmacCommand() *cli.Command {
 	return &cli.Command{
-		Name:    "dmac",
-		Aliases: []string{"fdb"},
-		Usage:   "Show FDB (MAC address table) entries",
+		Name:  "fdb",
+		Usage: "Show FDB (MAC address table) entries",
 		Subcommands: []*cli.Command{
 			{
 				Name:  "list",
