@@ -157,7 +157,7 @@ echo "=========================================="
 print_info "Testing HeadendL2List API..."
 list_response=$(ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 --json hl2 list)
 
-if echo "$list_response" | grep -q '"vlan_id":100'; then
+if echo "$list_response" | grep -q '"vlan_id": 100'; then
     print_success "HeadendL2List API: PASS (VLAN 100 entry found)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
@@ -169,7 +169,7 @@ fi
 print_info "Testing HeadendL2Get API..."
 get_response=$(ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 --json hl2 list)
 
-if echo "$get_response" | grep -q '"src_addr":"fc00:1::1"'; then
+if echo "$get_response" | grep -q '"src_addr": "fc00:1::1"'; then
     print_success "HeadendL2Get API: PASS (correct src_addr)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
@@ -198,7 +198,7 @@ fi
 # Verify deletion
 list_after=$(ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 --json hl2 list)
 
-if echo "$list_after" | grep -q '"vlan_id":100'; then
+if echo "$list_after" | grep -q '"vlan_id": 100'; then
     print_error "Entry still exists after deletion: FAIL"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 else
