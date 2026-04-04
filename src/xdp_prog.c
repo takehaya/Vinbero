@@ -23,120 +23,100 @@
 #include "xdpcap.h"
 #include "srv6_endpoint.h"
 #include "xdp_vlan.h"
+#include "bum_meta.h"
 
 char _license[] SEC("license") = "GPL";
 
-// Perform H.Encaps operation for IPv4 packets
-// RFC 8986 Section 5.1
+// H.Encaps for IPv4 (RFC 8986 Section 5.1)
 static __always_inline int do_h_encaps_v4(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct iphdr *iph,
     struct headend_entry *entry)
 {
-    // 1. Validate segment count (1-10)
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
         DEBUG_PRINT("H.Encaps.v4: Invalid segment count %d\n", entry->num_segments);
         return XDP_DROP;
     }
 
-    // 2. Save original Ethernet header before adjust_head
+    // Save before bpf_xdp_adjust_head invalidates packet pointers
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-
-    // 3. Get inner IPv4 packet length before adjust_head
     __u16 inner_total_len = bpf_ntohs(iph->tot_len);
 
-    // 4. Call shared encapsulation core
     return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPIP, inner_total_len);
 }
 
-// Process Headend for IPv4 packets
 static __always_inline int process_headend_v4(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct iphdr *iph)
 {
-    // 1. Build LPM key from destination address
     struct lpm_key_v4 key = {
         .prefixlen = 32,
     };
     __builtin_memcpy(key.addr, &iph->daddr, IPV4_ADDR_LEN);
 
-    // 2. Lookup and validate entry
     struct headend_entry *entry = bpf_map_lookup_elem(&headend_v4_map, &key);
     if (!headend_should_encaps(entry)) {
         return XDP_PASS;
     }
 
-    // 3. Perform H.Encaps
     DEBUG_PRINT("Headend.v4: Performing H.Encaps\n");
     return do_h_encaps_v4(ctx, eth, iph, entry);
 }
 
-// Perform H.Encaps operation for IPv6 packets
-// RFC 8986 Section 5.1
+// H.Encaps for IPv6 (RFC 8986 Section 5.1)
 static __always_inline int do_h_encaps_v6(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct ipv6hdr *inner_ip6h,
     struct headend_entry *entry)
 {
-    // 1. Validate segment count (1-10)
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
         DEBUG_PRINT("H.Encaps.v6: Invalid segment count %d\n", entry->num_segments);
         return XDP_DROP;
     }
 
-    // 2. Save original Ethernet header before adjust_head
+    // Save before bpf_xdp_adjust_head invalidates packet pointers
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-
-    // 3. Get inner IPv6 packet length before adjust_head
-    // IPv6 total length = 40 (header) + payload_len
+    // IPv6 total length = fixed header (40) + payload_len
     __u16 inner_total_len = 40 + bpf_ntohs(inner_ip6h->payload_len);
 
-    // 4. Call shared encapsulation core
     return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPV6, inner_total_len);
 }
 
-// Process Headend for IPv6 packets
 static __always_inline int process_headend_v6(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct ipv6hdr *ip6h)
 {
-    // 1. Build LPM key from destination address
     struct lpm_key_v6 key = {
         .prefixlen = 128,
     };
     __builtin_memcpy(key.addr, &ip6h->daddr, IPV6_ADDR_LEN);
 
-    // 2. Lookup and validate entry
     struct headend_entry *entry = bpf_map_lookup_elem(&headend_v6_map, &key);
     if (!headend_should_encaps(entry)) {
         return XDP_PASS;
     }
 
-    // 3. Perform H.Encaps
     DEBUG_PRINT("Headend.v6: Performing H.Encaps\n");
     return do_h_encaps_v6(ctx, eth, ip6h, entry);
 }
 
-// Process SRv6 Local SID (Endpoint functions)
-// Handles packets destined to a local SID
+// Dispatch SRv6 Local SID endpoint functions for packets with Routing Header
 static __always_inline int process_srv6_localsid(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct ipv6hdr *ip6h,
     void *data_end)
 {
-    // Check if next header is Routing Header
     if (ip6h->nexthdr != IPPROTO_ROUTING) {
         return XDP_PASS;
     }
 
-    // Parse SRH - check minimum 8 bytes first
     void *srh_ptr = (void *)(ip6h + 1);
     if (srh_ptr + 8 > data_end) {
         return XDP_PASS;
@@ -144,13 +124,11 @@ static __always_inline int process_srv6_localsid(
 
     struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)srh_ptr;
 
-    // Verify this is Segment Routing (type 4)
     if (srh->type != IPV6_SRCRT_TYPE_4) {
         DEBUG_PRINT("SRv6: Not SR type (type=%d)\n", srh->type);
         return XDP_PASS;
     }
 
-    // Lookup DA in sid_function_map
     struct lpm_key_v6 key = {
         .prefixlen = 128,
     };
@@ -164,12 +142,10 @@ static __always_inline int process_srv6_localsid(
 
     DEBUG_PRINT("SRv6: Found SID function, action=%d\n", entry->action);
 
-    // Dispatch based on action type
     switch (entry->action) {
     case SRV6_LOCAL_ACTION_END:
         return process_end(ctx, ip6h, srh, entry);
 
-    // Phase 1 endpoint functions (with skeleton implementations)
     case SRV6_LOCAL_ACTION_END_X:
         return process_end_x(ctx, ip6h, srh, entry);
 
@@ -211,9 +187,74 @@ static __always_inline int process_srv6_localsid(
     }
 }
 
-// H.Encaps.L2: Encapsulate entire L2 frame in SRv6
-// RFC 8986 Section 5.1
-// Prepends [Outer Eth][Outer IPv6][SRH] before the original L2 frame.
+// Forward declaration for do_h_encaps_l2 (defined below, used by process_bd_forwarding)
+static __noinline int do_h_encaps_l2(
+    struct xdp_md *ctx,
+    struct headend_entry *entry,
+    __u16 l2_frame_len);
+
+// BD forwarding: MAC learning, BUM flood, FDB-based unicast forwarding.
+// Shared by both VLAN-tagged and untagged paths.
+//
+// Returns:
+//   >= 0 : final XDP action (caller should goto out)
+//   -1   : no BD processing done (caller should fall through)
+static __always_inline int process_bd_forwarding(
+    struct xdp_md *ctx,
+    struct headend_entry *l2_entry,
+    __u16 vlan_id,
+    __u64 pkt_len)
+{
+    if (l2_entry->bd_id == 0)
+        return -1;
+
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_PASS;
+
+    struct fdb_key key = { .bd_id = l2_entry->bd_id };
+
+    // src MAC learning: only overwrite if missing or local entry with different oif.
+    // Do NOT overwrite remote entries (is_remote=1) — those are learned by End.DT2.
+    __builtin_memcpy(key.mac, eth->h_source, ETH_ALEN);
+    struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &key);
+    if (!existing ||
+        (!existing->is_remote && existing->oif != ctx->ingress_ifindex)) {
+        struct fdb_entry learn_val = { .oif = ctx->ingress_ifindex };
+        bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_ANY);
+    }
+
+    // BUM (broadcast/unknown-unicast/multicast) -> meta + XDP_PASS for TC flood
+    if (eth->h_dest[0] & 0x01) {
+        xdp_write_bum_meta(ctx, vlan_id);
+        return XDP_PASS;
+    }
+
+    // dst MAC lookup
+    __builtin_memcpy(key.mac, eth->h_dest, ETH_ALEN);
+    struct fdb_entry *dst_fdb = bpf_map_lookup_elem(&fdb_map, &key);
+    if (dst_fdb) {
+        if (dst_fdb->is_remote) {
+            // Remote FDB hit -> bd_peer_map -> SRv6 encap
+            struct bd_peer_key pk = { .bd_id = dst_fdb->bd_id, .index = dst_fdb->peer_index };
+            struct headend_entry *pe = bpf_map_lookup_elem(&bd_peer_map, &pk);
+            if (pe) {
+                __u16 l2_frame_len = (__u16)pkt_len;
+                return do_h_encaps_l2(ctx, pe, l2_frame_len);
+            }
+        }
+        // Local FDB hit -> bridge forwarding
+        return XDP_PASS;
+    }
+
+    // FDB miss -> BUM flood (unknown unicast)
+    xdp_write_bum_meta(ctx, vlan_id);
+    return XDP_PASS;
+}
+
+// H.Encaps.L2: Prepend [Outer Eth][Outer IPv6][SRH] before the L2 frame (RFC 8986 Section 5.1)
 static __noinline int do_h_encaps_l2(
     struct xdp_md *ctx,
     struct headend_entry *entry,
@@ -241,8 +282,7 @@ static __noinline int do_h_encaps_l2(
 
     struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
     CHECK_BOUND(srh, data_end, 8);
-    int srh_check_len = 8 + (16 * entry->num_segments);
-    CHECK_BOUND(srh, data_end, srh_check_len);
+    CHECK_BOUND(srh, data_end, srh_len);
 
     __builtin_memset(new_eth->h_dest, 0, ETH_ALEN);
     __builtin_memset(new_eth->h_source, 0, ETH_ALEN);
@@ -333,7 +373,6 @@ int vinbero_main(struct xdp_md *ctx)
 
     STATS_INC(STATS_RX_PACKETS, pkt_len);
 
-    // Parse Ethernet header (constant offset 14)
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         goto out;
@@ -351,39 +390,16 @@ int vinbero_main(struct xdp_md *ctx)
         __u16 vlan_id = bpf_ntohs(vhdr->h_vlan_TCI) & 0x0FFF;
         __u16 inner_proto = vhdr->h_vlan_encapsulated_proto;
 
-        // L2 Headend check by port + VLAN
         struct headend_l2_key l2_key = { .ifindex = ctx->ingress_ifindex, .vlan_id = vlan_id };
         struct headend_entry *l2_entry = bpf_map_lookup_elem(&headend_l2_map, &l2_key);
         if (headend_should_encaps_l2(l2_entry)) {
-            // MAC learning + dst MAC判定 (bd_id != 0 の場合のみ)
-            if (l2_entry->bd_id != 0) {
-                struct fdb_key key = { .bd_id = l2_entry->bd_id };
-
-                // ① src MAC学習 (read-before-write: 既存エントリと同じなら書き込みスキップ)
-                __builtin_memcpy(key.mac, eth->h_source, ETH_ALEN);
-                struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &key);
-                if (!existing || existing->oif != ctx->ingress_ifindex) {
-                    struct fdb_entry learn_val = { .oif = ctx->ingress_ifindex };
-                    bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_ANY);
-                }
-
-                // ② BUM → XDP_PASS (bridge flood)
-                if (eth->h_dest[0] & 0x01) {
-                    action = XDP_PASS;
-                    goto out;
-                }
-
-                // ③ dst MACがローカルFDBにあれば → XDP_PASS (bridge forwarding)
-                __builtin_memcpy(key.mac, eth->h_dest, ETH_ALEN);
-                struct fdb_entry *dst_fdb = bpf_map_lookup_elem(&fdb_map, &key);
-                if (dst_fdb) {
-                    action = XDP_PASS;
-                    goto out;
-                }
+            int bd_action = process_bd_forwarding(ctx, l2_entry, vlan_id, pkt_len);
+            if (bd_action >= 0) {
+                action = bd_action;
+                goto out;
             }
-            // fdb miss = リモート宛 → H.Encaps.L2
-            __u16 l2_frame_len = (__u16)pkt_len;
-            action = do_h_encaps_l2(ctx, l2_entry, l2_frame_len);
+            // bd_id == 0: no Bridge Domain, direct H.Encaps.L2 for all traffic
+            action = do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
             goto out;
         }
 
@@ -406,11 +422,9 @@ int vinbero_main(struct xdp_md *ctx)
                 if ((void *)(v2b + 1) > d2_end)
                     goto out;
                 __u16 proto2 = v2b->h_vlan_encapsulated_proto;
-                // L3 at constant offset 22 (eth=14 + vlan=4 + vlan=4)
-                DO_L3_PROCESS(ctx, 22, d2_end, proto2);
+                DO_L3_PROCESS(ctx, 22, d2_end, proto2);  /* eth(14) + 2*vlan(4) */
             } else {
-                // L3 at constant offset 18 (eth=14 + vlan=4)
-                DO_L3_PROCESS(ctx, 18, d2_end, inner_proto);
+                DO_L3_PROCESS(ctx, 18, d2_end, inner_proto);  /* eth(14) + vlan(4) */
             }
         }
         goto out;
@@ -418,40 +432,21 @@ int vinbero_main(struct xdp_md *ctx)
 
     // ========== Non-VLAN packets ==========
     {
-        // L2 Headend check for untagged traffic (vlan_id=0)
         struct headend_l2_key l2_key = { .ifindex = ctx->ingress_ifindex, .vlan_id = 0 };
         struct headend_entry *l2_entry = bpf_map_lookup_elem(&headend_l2_map, &l2_key);
         if (headend_should_encaps_l2(l2_entry)) {
-            if (l2_entry->bd_id != 0) {
-                struct fdb_key key = { .bd_id = l2_entry->bd_id };
-
-                __builtin_memcpy(key.mac, eth->h_source, ETH_ALEN);
-                struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &key);
-                if (!existing || existing->oif != ctx->ingress_ifindex) {
-                    struct fdb_entry learn_val = { .oif = ctx->ingress_ifindex };
-                    bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_ANY);
-                }
-
-                if (eth->h_dest[0] & 0x01) {
-                    action = XDP_PASS;
-                    goto out;
-                }
-
-                __builtin_memcpy(key.mac, eth->h_dest, ETH_ALEN);
-                struct fdb_entry *dst_fdb = bpf_map_lookup_elem(&fdb_map, &key);
-                if (dst_fdb) {
-                    action = XDP_PASS;
-                    goto out;
-                }
+            int bd_action = process_bd_forwarding(ctx, l2_entry, 0, pkt_len);
+            if (bd_action >= 0) {
+                action = bd_action;
+                goto out;
             }
-            __u16 l2_frame_len = (__u16)pkt_len;
-            action = do_h_encaps_l2(ctx, l2_entry, l2_frame_len);
+            // bd_id == 0: no Bridge Domain, direct H.Encaps.L2 for all traffic
+            action = do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
             goto out;
         }
     }
 
-    // L3 at constant offset 14
-    DO_L3_PROCESS(ctx, 14, data_end, eth_proto);
+    DO_L3_PROCESS(ctx, 14, data_end, eth_proto);  /* eth(14) */
 
 out:
     switch (action) {
@@ -469,4 +464,21 @@ out:
     }
 
     RETURN_ACTION(ctx, &xdpcap_hook, action);
+}
+
+#include "tc_bum.h"
+
+SEC("tc")
+int vinbero_tc_ingress(struct __sk_buff *skb)
+{
+    // Mode 2: Encap — clone returned to self with PE info in cb[]
+    if (skb->cb[0] == TC_CB_ENCAP_MAGIC)
+        return tc_do_single_pe_encap(skb, skb->cb[1], skb->cb[2]);
+
+    // Mode 1: Dispatch — XDP wrote BUM meta, clone to self for each PE
+    __u16 vlan_id;
+    if (!tc_read_bum_meta(skb, &vlan_id))
+        return TC_ACT_OK;
+
+    return tc_dispatch_bum_clones(skb, vlan_id);
 }

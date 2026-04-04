@@ -9,17 +9,14 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
-// DmacServer implements the DmacServiceHandler interface
 type DmacServer struct {
 	mapOps *bpf.MapOperations
 }
 
-// NewDmacServer creates a new DmacServer
 func NewDmacServer(mapOps *bpf.MapOperations) *DmacServer {
 	return &DmacServer{mapOps: mapOps}
 }
 
-// DmacList lists all FDB entries from the BPF map
 func (s *DmacServer) DmacList(
 	ctx context.Context,
 	req *connect.Request[v1.DmacListRequest],
@@ -36,10 +33,12 @@ func (s *DmacServer) DmacList(
 	for key, entry := range entries {
 		mac := net.HardwareAddr(key.Mac[:])
 		resp.Entries = append(resp.Entries, &v1.DmacListEntry{
-			BdId:    uint32(key.BdId),
-			Mac:     mac.String(),
-			Oif:     entry.Oif,
-			IsUntag: entry.IsUntag != 0,
+			BdId: uint32(key.BdId),
+			Mac:  mac.String(),
+			Oif:  entry.Oif,
+			// TODO: IsUntag is not yet tracked in the BPF fdb_entry struct.
+			// Once VLAN-tag stripping on egress is implemented in XDP,
+			// populate this from the FDB entry.
 		})
 	}
 

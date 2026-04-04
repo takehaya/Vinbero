@@ -13,11 +13,32 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type BpfFdbEntry struct {
+type BpfBdPeerKey struct {
+	_     structs.HostLayout
+	BdId  uint16
+	Index uint16
+}
+
+type BpfBdPeerReverseKey struct {
 	_       structs.HostLayout
-	Oif     uint32
-	IsUntag uint8
-	Pad     [3]uint8
+	BdId    uint16
+	SrcAddr [16]uint8
+	Pad     [2]uint8
+}
+
+type BpfBdPeerReverseVal struct {
+	_     structs.HostLayout
+	Index uint16
+}
+
+type BpfFdbEntry struct {
+	_         structs.HostLayout
+	Oif       uint32
+	IsRemote  uint8
+	Pad       uint8
+	PeerIndex uint16
+	BdId      uint16
+	Pad2      [2]uint8
 }
 
 type BpfFdbKey struct {
@@ -57,16 +78,18 @@ type BpfLpmKeyV6 struct {
 }
 
 type BpfSidFunctionEntry struct {
-	_            structs.HostLayout
-	Action       uint8
-	Flavor       uint8
-	SrcAddr      [16]uint8
-	DstAddr      [16]uint8
-	Nexthop      [16]uint8
-	ArgSrcOffset uint8
-	ArgDstOffset uint8
-	VrfIfindex   uint32
-	BdId         uint16
+	_             structs.HostLayout
+	Action        uint8
+	Flavor        uint8
+	SrcAddr       [16]uint8
+	DstAddr       [16]uint8
+	Nexthop       [16]uint8
+	ArgSrcOffset  uint8
+	ArgDstOffset  uint8
+	VrfIfindex    uint32
+	BdId          uint16
+	PadSid        uint16
+	BridgeIfindex uint32
 }
 
 type BpfStatsEntry struct {
@@ -117,20 +140,23 @@ type BpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfProgramSpecs struct {
-	VinberoMain *ebpf.ProgramSpec `ebpf:"vinbero_main"`
+	VinberoMain      *ebpf.ProgramSpec `ebpf:"vinbero_main"`
+	VinberoTcIngress *ebpf.ProgramSpec `ebpf:"vinbero_tc_ingress"`
 }
 
 // BpfMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
-	FdbMap         *ebpf.MapSpec `ebpf:"fdb_map"`
-	HeadendL2Map   *ebpf.MapSpec `ebpf:"headend_l2_map"`
-	HeadendV4Map   *ebpf.MapSpec `ebpf:"headend_v4_map"`
-	HeadendV6Map   *ebpf.MapSpec `ebpf:"headend_v6_map"`
-	SidFunctionMap *ebpf.MapSpec `ebpf:"sid_function_map"`
-	StatsMap       *ebpf.MapSpec `ebpf:"stats_map"`
-	XdpcapHook     *ebpf.MapSpec `ebpf:"xdpcap_hook"`
+	BdPeerMap        *ebpf.MapSpec `ebpf:"bd_peer_map"`
+	BdPeerReverseMap *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
+	FdbMap           *ebpf.MapSpec `ebpf:"fdb_map"`
+	HeadendL2Map     *ebpf.MapSpec `ebpf:"headend_l2_map"`
+	HeadendV4Map     *ebpf.MapSpec `ebpf:"headend_v4_map"`
+	HeadendV6Map     *ebpf.MapSpec `ebpf:"headend_v6_map"`
+	SidFunctionMap   *ebpf.MapSpec `ebpf:"sid_function_map"`
+	StatsMap         *ebpf.MapSpec `ebpf:"stats_map"`
+	XdpcapHook       *ebpf.MapSpec `ebpf:"xdpcap_hook"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -161,17 +187,21 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
-	FdbMap         *ebpf.Map `ebpf:"fdb_map"`
-	HeadendL2Map   *ebpf.Map `ebpf:"headend_l2_map"`
-	HeadendV4Map   *ebpf.Map `ebpf:"headend_v4_map"`
-	HeadendV6Map   *ebpf.Map `ebpf:"headend_v6_map"`
-	SidFunctionMap *ebpf.Map `ebpf:"sid_function_map"`
-	StatsMap       *ebpf.Map `ebpf:"stats_map"`
-	XdpcapHook     *ebpf.Map `ebpf:"xdpcap_hook"`
+	BdPeerMap        *ebpf.Map `ebpf:"bd_peer_map"`
+	BdPeerReverseMap *ebpf.Map `ebpf:"bd_peer_reverse_map"`
+	FdbMap           *ebpf.Map `ebpf:"fdb_map"`
+	HeadendL2Map     *ebpf.Map `ebpf:"headend_l2_map"`
+	HeadendV4Map     *ebpf.Map `ebpf:"headend_v4_map"`
+	HeadendV6Map     *ebpf.Map `ebpf:"headend_v6_map"`
+	SidFunctionMap   *ebpf.Map `ebpf:"sid_function_map"`
+	StatsMap         *ebpf.Map `ebpf:"stats_map"`
+	XdpcapHook       *ebpf.Map `ebpf:"xdpcap_hook"`
 }
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.BdPeerMap,
+		m.BdPeerReverseMap,
 		m.FdbMap,
 		m.HeadendL2Map,
 		m.HeadendV4Map,
@@ -194,12 +224,14 @@ type BpfVariables struct {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfPrograms struct {
-	VinberoMain *ebpf.Program `ebpf:"vinbero_main"`
+	VinberoMain      *ebpf.Program `ebpf:"vinbero_main"`
+	VinberoTcIngress *ebpf.Program `ebpf:"vinbero_tc_ingress"`
 }
 
 func (p *BpfPrograms) Close() error {
 	return _BpfClose(
 		p.VinberoMain,
+		p.VinberoTcIngress,
 	)
 }
 

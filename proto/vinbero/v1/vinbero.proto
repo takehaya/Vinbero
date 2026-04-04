@@ -26,6 +26,7 @@ message SidFunction {
   uint32 oif = 9; // Output interface index (used by End.DX2)
   uint32 vrf_ifindex = 10; // VRF interface index (used by End.DT4/DT6/DT46)
   uint32 bd_id = 11; // Bridge Domain ID (used by End.DT2)
+  string bridge_name = 12; // Bridge device name for End.DT2 FDB miss flood
 }
 
 message SidFunctionCreateRequest {
@@ -157,6 +158,42 @@ message DmacListEntry {
 message DmacListRequest {}
 message DmacListResponse {
   repeated DmacListEntry entries = 1;
+}
+
+service BdPeerService {
+  rpc BdPeerCreate(BdPeerCreateRequest) returns (BdPeerCreateResponse);
+  rpc BdPeerDelete(BdPeerDeleteRequest) returns (BdPeerDeleteResponse);
+  rpc BdPeerList(BdPeerListRequest) returns (BdPeerListResponse);
+}
+
+// BdPeer represents a remote PE participating in a Bridge Domain
+message BdPeer {
+  uint32 bd_id = 1; // Bridge Domain ID
+  string src_addr = 2; // Outer IPv6 source address for SRv6 encap
+  repeated string segments = 3; // Segment list to reach this PE
+}
+
+message BdPeerCreateRequest {
+  repeated BdPeer peers = 1;
+}
+message BdPeerCreateResponse {
+  repeated BdPeer created = 1;
+  repeated OperationError errors = 2;
+}
+
+message BdPeerDeleteRequest {
+  repeated uint32 bd_ids = 1; // Delete all peers for these BD IDs
+}
+message BdPeerDeleteResponse {
+  repeated uint32 deleted_bd_ids = 1;
+  repeated OperationError errors = 2;
+}
+
+message BdPeerListRequest {
+  uint32 bd_id = 1; // 0 = list all
+}
+message BdPeerListResponse {
+  repeated BdPeer peers = 1;
 }
 
 service HeadendL2Service {
