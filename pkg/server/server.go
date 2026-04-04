@@ -12,24 +12,30 @@ import (
 	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/netlinkwatch"
+	"github.com/takehaya/vinbero/pkg/netresource"
 )
 
 // Server represents the Connect RPC server
 type Server struct {
-	cfg    *config.Config
-	mapOps *bpf.MapOperations
-	logger *zap.Logger
-	mux    *http.ServeMux
-	server *http.Server
+	cfg        *config.Config
+	mapOps     *bpf.MapOperations
+	resMgr     *netresource.ResourceManager
+	fdbWatcher *netlinkwatch.FDBWatcher
+	logger     *zap.Logger
+	mux        *http.ServeMux
+	server     *http.Server
 }
 
 // NewServer creates a new Server instance
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, logger *zap.Logger) *Server {
 	return &Server{
-		cfg:    cfg,
-		mapOps: mapOps,
-		logger: logger,
-		mux:    http.NewServeMux(),
+		cfg:        cfg,
+		mapOps:     mapOps,
+		resMgr:     resMgr,
+		fdbWatcher: fdbWatcher,
+		logger:     logger,
+		mux:        http.NewServeMux(),
 	}
 }
 
@@ -64,6 +70,12 @@ func (s *Server) Setup() {
 	path, handler = vinberov1connect.NewBdPeerServiceHandler(bdPeerServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered BdPeerService", zap.String("path", path))
+
+	// NetworkResource service (VRF/Bridge management)
+	netResourceServer := NewNetworkResourceServer(s.resMgr, s.fdbWatcher, s.mapOps)
+	path, handler = vinberov1connect.NewNetworkResourceServiceHandler(netResourceServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered NetworkResourceService", zap.String("path", path))
 
 	// Dmac service (read-only, for observability)
 	dmacServer := NewDmacServer(s.mapOps)

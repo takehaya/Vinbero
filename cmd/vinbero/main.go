@@ -86,12 +86,17 @@ func run(cliCtx *cli.Context) error {
 	}
 	lg.Info("Vinbero TC BUM program loaded successfully")
 
-	// Start FDB watcher if bridge domains are configured
+	// Initialize resource manager (reconcile state before FDB watcher)
+	if err := vin.InitResourceManager(); err != nil {
+		return fmt.Errorf("init resource manager: %w", err)
+	}
+
+	// Start FDB watcher
 	if err := vin.StartFDBWatcher(ctx); err != nil {
 		return fmt.Errorf("start FDB watcher: %w", err)
 	}
 
-	srv := server.NewServer(cfg, vin.GetMapOperations(), lg)
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), lg)
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
