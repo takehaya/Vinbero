@@ -5,17 +5,12 @@ IPv6パケットをIPv6+SRHでカプセル化します（IPv6-in-IPv6）。
 
 ## トポロジー
 
-```
-┌─────────┐          ┌───────────┐          ┌──────────┐          ┌──────────┐          ┌─────────┐
-│  host1  │          │  router1  │          │ router2  │          │ router3  │          │  host2  │
-│         │          │ (Vinbero) │          │          │          │          │          │         │
-│2001:1::1├──────────┤2001:1::2  ├──────────┤ fc00:12  ├──────────┤2001:2::2 ├──────────┤2001:2::1│
-│         │          │fc00:1::1  │          │   ::2    │          │fc00:3::3 │          │         │
-│         │          │ H.Encaps  │          │   End    │          │ End.DX6  │          │         │
-└─────────┘          └───────────┘          └──────────┘          └──────────┘          └─────────┘
-                     ↑ Vinbero XDP
-                     Trigger: 2001:2::/64
-                     Segments: [fc00:2::1, fc00:3::3]
+```mermaid
+graph LR
+    host1[host1<br/>2001:1::1] -->|IPv6| router1[router1 / Vinbero XDP<br/>2001:1::2<br/>fc00:1::1<br/>H.Encaps<br/>Trigger: 2001:2::/64<br/>Segments: fc00:2::1, fc00:3::3]
+    router1 -->|SRv6| router2[router2<br/>fc00:12::2<br/>End]
+    router2 -->|SRv6| router3[router3<br/>2001:2::2<br/>fc00:3::3<br/>End.DX6]
+    router3 -->|IPv6| host2[host2<br/>2001:2::1]
 ```
 
 **パケットの流れ（host1→host2の例）:**

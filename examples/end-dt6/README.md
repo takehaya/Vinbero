@@ -4,18 +4,12 @@ Vinbero XDPによるSRv6 End.DT6 (Decapsulation with IPv6 Table lookup via VRF) 
 
 ## トポロジー
 
-```
-┌─────────┐          ┌───────────┐          ┌──────────┐          ┌──────────┐          ┌─────────┐
-│  host1  │          │  router1  │          │ router2  │          │ router3  │          │  host2  │
-│         │          │           │          │          │          │ (Vinbero)│          │         │
-│10.0.1.1 ├──────────┤fc00:1::1  ├──────────┤ fc00:12  ├──────────┤fc00:3::3 ├──────────┤10.0.1.2 │
-│2001:db8 │          │ H.Encaps  │          │   ::2    │          │ End.DT6  │          │2001:db8 │
-│:1::1    │          │           │          │   End    │          │ vrf100   │          │:2::1    │
-└─────────┘          └───────────┘          └──────────┘          └──────────┘          └─────────┘
-                                                                  ↑ Vinbero XDP
-                                                                  SID: fc00:3::3
-                                                                  Action: End.DT6
-                                                                  VRF: vrf100 (table 100)
+```mermaid
+graph LR
+    host1[host1<br/>10.0.1.1<br/>2001:db8:1::1] -->|IPv6| router1[router1<br/>fc00:1::1<br/>H.Encaps]
+    router1 -->|SRv6| router2[router2<br/>fc00:12::2<br/>End]
+    router2 -->|SRv6| router3[router3 / Vinbero XDP<br/>SID: fc00:3::3<br/>End.DT6<br/>VRF: vrf100 table 100]
+    router3 -->|IPv6| host2[host2<br/>10.0.1.2<br/>2001:db8:2::1]
 ```
 
 **パケットの流れ（host1 → host2の例）:**
