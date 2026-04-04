@@ -100,6 +100,7 @@ jobs:
           - end-dt4
           - end-dt6
           - end-dt2
+          - end-dt2-p2mp
           - headend-v4
           - headend-v6
           - headend-l2
