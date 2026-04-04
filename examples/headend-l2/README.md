@@ -57,17 +57,7 @@ sudo ip netns exec hl2-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
 ### 2. HeadendL2エントリ登録
 
 ```bash
-sudo ip netns exec hl2-router1 curl -X POST http://127.0.0.1:8082/vinbero.v1.HeadendL2Service/HeadendL2Create \
-  -H "Content-Type: application/json" \
-  -d '{
-    "headend_l2s": [
-      {
-        "vlan_id": 100,
-        "src_addr": "fc00:1::1",
-        "segments": ["fc00:2::1", "fc00:3::3"]
-      }
-    ]
-  }'
+sudo ip netns exec hl2-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 hl2 create --vlan-id 100 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
 ```
 
 ### 3. テスト

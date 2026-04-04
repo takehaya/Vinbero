@@ -51,22 +51,8 @@ sudo ip netns exec router2 ../../out/bin/vinberod -c vinbero_router2.yaml
 ### 2. SID登録
 
 ```bash
-sudo ip netns exec router2 curl -X POST http://127.0.0.1:8082/vinbero.v1.SidFunctionService/SidFunctionCreate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sid_functions": [
-      {
-        "trigger_prefix": "fc00:2::1/128",
-        "action": "SRV6_LOCAL_ACTION_END",
-        "flavor": "SRV6_LOCAL_FLAVOR_NONE"
-      },
-      {
-        "trigger_prefix": "fc00:2::2/128",
-        "action": "SRV6_LOCAL_ACTION_END",
-        "flavor": "SRV6_LOCAL_FLAVOR_NONE"
-      }
-    ]
-  }'
+sudo ip netns exec router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 sid create --trigger-prefix fc00:2::1/128 --action END
+sudo ip netns exec router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 sid create --trigger-prefix fc00:2::2/128 --action END
 ```
 
 ### 3. テスト
