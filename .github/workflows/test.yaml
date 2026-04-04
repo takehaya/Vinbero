@@ -58,11 +58,11 @@ jobs:
       - name: Test pass init() phase of all packages
         run: make test-runnable
 
-      - name: Upload Vinbero binary
+      - name: Upload Vinbero binaries
         uses: actions/upload-artifact@v4
         with:
           name: vinbero-binary
-          path: out/bin/vinbero
+          path: out/bin/
           retention-days: 1
 
   unit-test:
@@ -113,8 +113,8 @@ jobs:
           name: vinbero-binary
           path: out/bin/
 
-      - name: Make binary executable
-        run: chmod +x out/bin/vinbero
+      - name: Make binaries executable
+        run: chmod +x out/bin/*
 
       - name: Install test dependencies
         run: |
