@@ -51,7 +51,7 @@ sudo ./teardown.sh # クリーンアップ（環境削除）
 sudo ./setup.sh
 
 # Vinbero起動
-sudo ip netns exec hl2-router1 ../../out/bin/vinbero -c vinbero_router1.yaml
+sudo ip netns exec hl2-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
 ```
 
 ### 2. HeadendL2エントリ登録

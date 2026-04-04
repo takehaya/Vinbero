@@ -45,7 +45,7 @@ sudo ip netns exec router2 ip -6 route del local fc00:2::1/128 2>/dev/null
 sudo ip netns exec router2 ip -6 route del local fc00:2::2/128 2>/dev/null
 
 # Vinbero起動
-sudo ip netns exec router2 ../../out/bin/vinbero -c vinbero_router2.yaml
+sudo ip netns exec router2 ../../out/bin/vinberod -c vinbero_router2.yaml
 ```
 
 ### 2. SID登録
