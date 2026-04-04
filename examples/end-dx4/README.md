@@ -54,16 +54,7 @@ sudo ip netns exec dx4-router3 ../../out/bin/vinberod -c vinbero_router3.yaml
 ### 2. SidFunction (End.DX4) エントリ登録
 
 ```bash
-sudo ip netns exec dx4-router3 curl -X POST http://127.0.0.1:8082/vinbero.v1.SidFunctionService/SidFunctionCreate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sid_functions": [
-      {
-        "trigger_prefix": "fc00:3::3/128",
-        "action": "SRV6_LOCAL_ACTION_END_DX4"
-      }
-    ]
-  }'
+sudo ip netns exec dx4-router3 ../../out/bin/vinbero -s http://127.0.0.1:8082 sid create --trigger-prefix fc00:3::3/128 --action END_DX4
 ```
 
 ### 3. テスト

@@ -52,19 +52,7 @@ sudo ip netns exec hv4-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
 ### 2. HeadendV4エントリ登録
 
 ```bash
-sudo ip netns exec hv4-router1 curl -X POST http://127.0.0.1:8082/vinbero.v1.Headendv4Service/Headendv4Create \
-  -H "Content-Type: application/json" \
-  -d '{
-    "headendv4s": [
-      {
-        "trigger_prefix": "172.0.2.0/24",
-        "mode": "SRV6_HEADEND_BEHAVIOR_H_ENCAPS",
-        "src_addr": "fc00:1::1",
-        "dst_addr": "fc00:2::1",
-        "segments": ["fc00:2::1", "fc00:3::3"]
-      }
-    ]
-  }'
+sudo ip netns exec hv4-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 hv4 create --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
 ```
 
 ### 3. テスト
