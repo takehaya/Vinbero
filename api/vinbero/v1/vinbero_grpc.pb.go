@@ -705,6 +705,168 @@ var DmacService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	BdPeerService_BdPeerCreate_FullMethodName = "/vinbero.v1.BdPeerService/BdPeerCreate"
+	BdPeerService_BdPeerDelete_FullMethodName = "/vinbero.v1.BdPeerService/BdPeerDelete"
+	BdPeerService_BdPeerList_FullMethodName   = "/vinbero.v1.BdPeerService/BdPeerList"
+)
+
+// BdPeerServiceClient is the client API for BdPeerService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type BdPeerServiceClient interface {
+	BdPeerCreate(ctx context.Context, in *BdPeerCreateRequest, opts ...grpc.CallOption) (*BdPeerCreateResponse, error)
+	BdPeerDelete(ctx context.Context, in *BdPeerDeleteRequest, opts ...grpc.CallOption) (*BdPeerDeleteResponse, error)
+	BdPeerList(ctx context.Context, in *BdPeerListRequest, opts ...grpc.CallOption) (*BdPeerListResponse, error)
+}
+
+type bdPeerServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewBdPeerServiceClient(cc grpc.ClientConnInterface) BdPeerServiceClient {
+	return &bdPeerServiceClient{cc}
+}
+
+func (c *bdPeerServiceClient) BdPeerCreate(ctx context.Context, in *BdPeerCreateRequest, opts ...grpc.CallOption) (*BdPeerCreateResponse, error) {
+	out := new(BdPeerCreateResponse)
+	err := c.cc.Invoke(ctx, BdPeerService_BdPeerCreate_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *bdPeerServiceClient) BdPeerDelete(ctx context.Context, in *BdPeerDeleteRequest, opts ...grpc.CallOption) (*BdPeerDeleteResponse, error) {
+	out := new(BdPeerDeleteResponse)
+	err := c.cc.Invoke(ctx, BdPeerService_BdPeerDelete_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *bdPeerServiceClient) BdPeerList(ctx context.Context, in *BdPeerListRequest, opts ...grpc.CallOption) (*BdPeerListResponse, error) {
+	out := new(BdPeerListResponse)
+	err := c.cc.Invoke(ctx, BdPeerService_BdPeerList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// BdPeerServiceServer is the server API for BdPeerService service.
+// All implementations should embed UnimplementedBdPeerServiceServer
+// for forward compatibility
+type BdPeerServiceServer interface {
+	BdPeerCreate(context.Context, *BdPeerCreateRequest) (*BdPeerCreateResponse, error)
+	BdPeerDelete(context.Context, *BdPeerDeleteRequest) (*BdPeerDeleteResponse, error)
+	BdPeerList(context.Context, *BdPeerListRequest) (*BdPeerListResponse, error)
+}
+
+// UnimplementedBdPeerServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedBdPeerServiceServer struct {
+}
+
+func (UnimplementedBdPeerServiceServer) BdPeerCreate(context.Context, *BdPeerCreateRequest) (*BdPeerCreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BdPeerCreate not implemented")
+}
+func (UnimplementedBdPeerServiceServer) BdPeerDelete(context.Context, *BdPeerDeleteRequest) (*BdPeerDeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BdPeerDelete not implemented")
+}
+func (UnimplementedBdPeerServiceServer) BdPeerList(context.Context, *BdPeerListRequest) (*BdPeerListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BdPeerList not implemented")
+}
+
+// UnsafeBdPeerServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to BdPeerServiceServer will
+// result in compilation errors.
+type UnsafeBdPeerServiceServer interface {
+	mustEmbedUnimplementedBdPeerServiceServer()
+}
+
+func RegisterBdPeerServiceServer(s grpc.ServiceRegistrar, srv BdPeerServiceServer) {
+	s.RegisterService(&BdPeerService_ServiceDesc, srv)
+}
+
+func _BdPeerService_BdPeerCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BdPeerCreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BdPeerServiceServer).BdPeerCreate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BdPeerService_BdPeerCreate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BdPeerServiceServer).BdPeerCreate(ctx, req.(*BdPeerCreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BdPeerService_BdPeerDelete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BdPeerDeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BdPeerServiceServer).BdPeerDelete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BdPeerService_BdPeerDelete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BdPeerServiceServer).BdPeerDelete(ctx, req.(*BdPeerDeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BdPeerService_BdPeerList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BdPeerListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BdPeerServiceServer).BdPeerList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BdPeerService_BdPeerList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BdPeerServiceServer).BdPeerList(ctx, req.(*BdPeerListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// BdPeerService_ServiceDesc is the grpc.ServiceDesc for BdPeerService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var BdPeerService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.BdPeerService",
+	HandlerType: (*BdPeerServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "BdPeerCreate",
+			Handler:    _BdPeerService_BdPeerCreate_Handler,
+		},
+		{
+			MethodName: "BdPeerDelete",
+			Handler:    _BdPeerService_BdPeerDelete_Handler,
+		},
+		{
+			MethodName: "BdPeerList",
+			Handler:    _BdPeerService_BdPeerList_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}
+
+const (
 	HeadendL2Service_HeadendL2Create_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Create"
 	HeadendL2Service_HeadendL2Delete_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Delete"
 	HeadendL2Service_HeadendL2List_FullMethodName   = "/vinbero.v1.HeadendL2Service/HeadendL2List"

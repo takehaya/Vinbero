@@ -40,10 +40,14 @@ run ip netns exec "$ns_host2" ip link add link "${veth_h2_rt3}" name "${veth_h2_
 run ip netns exec "$ns_host2" ip addr add 172.16.100.2/24 dev "${veth_h2_rt3}.100"
 run ip netns exec "$ns_host2" ip link set "${veth_h2_rt3}.100" up
 
-# Disable VLAN TX offload for XDP compatibility
-print_info "Disabling VLAN TX offload for XDP compatibility..."
+# Disable VLAN offload for XDP compatibility
+# TX offload on sender: VLAN tags stored in skb->vlan_tci instead of packet data
+# RX offload on receiver: VLAN tags stripped from packet data before XDP sees them
+print_info "Disabling VLAN offload for XDP compatibility..."
 run ip netns exec "$ns_host1" ethtool -K "${veth_h1_rt1}" txvlan off 2>/dev/null || true
 run ip netns exec "$ns_host2" ethtool -K "${veth_h2_rt3}" txvlan off 2>/dev/null || true
+run ip netns exec "$ns_router1" ethtool -K "${veth_rt1_h1}" rxvlan off 2>/dev/null || true
+run ip netns exec "$ns_router3" ethtool -K "${veth_rt3_h2}" rxvlan off 2>/dev/null || true
 
 print_info "Configuring SRv6 End.DT2 settings..."
 

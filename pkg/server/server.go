@@ -59,6 +59,12 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered HeadendL2Service", zap.String("path", path))
 
+	// BdPeer service (for P2MP BUM flooding)
+	bdPeerServer := NewBdPeerServer(s.mapOps)
+	path, handler = vinberov1connect.NewBdPeerServiceHandler(bdPeerServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered BdPeerService", zap.String("path", path))
+
 	// Dmac service (read-only, for observability)
 	dmacServer := NewDmacServer(s.mapOps)
 	path, handler = vinberov1connect.NewDmacServiceHandler(dmacServer)
