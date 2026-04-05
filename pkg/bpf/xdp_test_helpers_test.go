@@ -19,6 +19,8 @@ import (
 // SID Function action constants
 const (
 	actionEnd     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END)
+	actionEndX    = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X)
+	actionEndT    = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T)
 	actionEndDX2  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2)
 	actionEndDX4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX4)
 	actionEndDX6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX6)
@@ -26,6 +28,13 @@ const (
 	actionEndDT6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
 	actionEndDT46 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
 	actionEndDT2  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+)
+
+// SRv6 Flavor constants (must match srv6_local_flavor enum in src/srv6.h)
+const (
+	flavorPSP = uint8(vinberov1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_PSP)
+	flavorUSP = uint8(vinberov1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_USP)
+	flavorUSD = uint8(vinberov1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_USD)
 )
 
 // Packet header lengths
@@ -101,6 +110,22 @@ func (h *xdpTestHelper) createSidFunctionWithBD(prefix string, action uint8, bdI
 func (h *xdpTestHelper) createSidFunctionWithVRF(prefix string, action uint8, vrfIfindex uint32) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: 0, VrfIfindex: vrfIfindex}
+	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
+
+func (h *xdpTestHelper) createSidFunctionWithNexthop(prefix string, action uint8, nexthop [16]byte) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: action, Nexthop: nexthop}
+	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
+
+func (h *xdpTestHelper) createSidFunctionWithFlavor(prefix string, action uint8, flavor uint8) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: action, Flavor: flavor}
 	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
@@ -614,6 +639,57 @@ func verifyInnerVlanFrame(t *testing.T, pkt []byte, innerOffset int, expectedVla
 		return false
 	}
 
+	return true
+}
+
+// verifyDAAndSL verifies that the IPv6 Destination Address and SRH Segments Left
+// were updated correctly after an End/End.X/End.T operation
+func verifyDAAndSL(t *testing.T, pkt []byte, expectedDA string, originalSL uint8) {
+	t.Helper()
+	daOffset := ethHeaderLen + 24 // IPv6 DA starts at byte 24 of IPv6 header
+	if len(pkt) < daOffset+ipv6AddrLen {
+		t.Errorf("Packet too short for DA check: %d bytes", len(pkt))
+		return
+	}
+	da := net.IP(pkt[daOffset : daOffset+ipv6AddrLen])
+	if !da.Equal(net.ParseIP(expectedDA)) {
+		t.Errorf("Expected DA %s, got %s", expectedDA, da)
+	}
+	slOffset := ethHeaderLen + ipv6HeaderLen + 3 // SRH segments_left field
+	if len(pkt) > slOffset {
+		if newSL := pkt[slOffset]; newSL != originalSL-1 {
+			t.Errorf("Expected segments_left %d, got %d", originalSL-1, newSL)
+		}
+	}
+}
+
+// verifySRHAbsent verifies the output packet has no SRH (IPv6 nexthdr != 43)
+func verifySRHAbsent(t *testing.T, pkt []byte) bool {
+	t.Helper()
+	if len(pkt) < ethHeaderLen+ipv6HeaderLen {
+		t.Errorf("Packet too short for IPv6 header: %d bytes", len(pkt))
+		return false
+	}
+	nextHeader := pkt[ethHeaderLen+6]
+	if nextHeader == 43 {
+		t.Errorf("Expected SRH to be stripped (nexthdr != 43), but got nexthdr=%d", nextHeader)
+		return false
+	}
+	return true
+}
+
+// verifySRHPresent verifies the output packet still has an SRH (IPv6 nexthdr == 43)
+func verifySRHPresent(t *testing.T, pkt []byte) bool {
+	t.Helper()
+	if len(pkt) < ethHeaderLen+ipv6HeaderLen {
+		t.Errorf("Packet too short for IPv6 header: %d bytes", len(pkt))
+		return false
+	}
+	nextHeader := pkt[ethHeaderLen+6]
+	if nextHeader != 43 {
+		t.Errorf("Expected SRH to be present (nexthdr == 43), but got nexthdr=%d", nextHeader)
+		return false
+	}
 	return true
 }
 
