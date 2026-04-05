@@ -63,11 +63,11 @@ run ip netns exec "$ns_router2" ip link set "$veth_rt2_rt1" master vrf100
 run ip netns exec "$ns_router2" ip link set "$veth_rt2_rt3" master vrf100
 
 # When interfaces are enslaved to VRF, connected routes (fc00:12::/64, fc00:23::/64)
-# move to table 100 automatically. The via-routes added by three_router.sh (in main
-# table) become unreachable because their dev moved to VRF. Re-add them in table 100.
-# Use "replace" to handle both cases (route exists from auto-move, or needs adding).
-ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT1} via ${TOPO_ROUTER1_RT2_IPV6%/*} dev "$veth_rt2_rt1" table 100
-ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT3} via ${TOPO_ROUTER3_RT2_IPV6%/*} dev "$veth_rt2_rt3" table 100
+# move to table 100 automatically. The via-routes from three_router.sh become stale.
+# After enslave, the neighbour cache is cleared, so "via <nexthop>" may fail with
+# "No route to host". Use onlink to skip nexthop reachability check.
+ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT1} via ${TOPO_ROUTER1_RT2_IPV6%/*} dev "$veth_rt2_rt1" table 100 onlink
+ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT3} via ${TOPO_ROUTER3_RT2_IPV6%/*} dev "$veth_rt2_rt3" table 100 onlink
 
 # Linux native End.T: process SRH then lookup updated DA in VRF table 100
 # Forward path SID
