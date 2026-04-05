@@ -62,16 +62,12 @@ ns_sysctl "$ns_router2" net.vrf.strict_mode 1
 run ip netns exec "$ns_router2" ip link set "$veth_rt2_rt1" master vrf100
 run ip netns exec "$ns_router2" ip link set "$veth_rt2_rt3" master vrf100
 
-# When interfaces are enslaved to VRF, their connected routes move to table 100
-# automatically. We need to re-add the inter-router routes in the VRF table.
-# The topology script added routes to the main table, but after enslavement they
-# need to be in table 100.
-
-# Re-add IPv6 routes in VRF table 100 (replace any that moved or need adding)
-run ip netns exec "$ns_router2" ip -6 route add ${TOPO_IPV6_PREFIX_RT1} via ${TOPO_ROUTER1_RT2_IPV6%/*} dev "$veth_rt2_rt1" table 100 2>/dev/null || true
-run ip netns exec "$ns_router2" ip -6 route add ${TOPO_IPV6_PREFIX_RT1_RT2} via ${TOPO_ROUTER1_RT2_IPV6%/*} dev "$veth_rt2_rt1" table 100 2>/dev/null || true
-run ip netns exec "$ns_router2" ip -6 route add ${TOPO_IPV6_PREFIX_RT3} via ${TOPO_ROUTER3_RT2_IPV6%/*} dev "$veth_rt2_rt3" table 100 2>/dev/null || true
-run ip netns exec "$ns_router2" ip -6 route add ${TOPO_IPV6_PREFIX_RT2_RT3} via ${TOPO_ROUTER3_RT2_IPV6%/*} dev "$veth_rt2_rt3" table 100 2>/dev/null || true
+# When interfaces are enslaved to VRF, connected routes (fc00:12::/64, fc00:23::/64)
+# move to table 100 automatically. The via-routes added by three_router.sh (in main
+# table) become unreachable because their dev moved to VRF. Re-add them in table 100.
+# Use "replace" to handle both cases (route exists from auto-move, or needs adding).
+ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT1} via ${TOPO_ROUTER1_RT2_IPV6%/*} dev "$veth_rt2_rt1" table 100
+ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT3} via ${TOPO_ROUTER3_RT2_IPV6%/*} dev "$veth_rt2_rt3" table 100
 
 # Linux native End.T: process SRH then lookup updated DA in VRF table 100
 # Forward path SID
