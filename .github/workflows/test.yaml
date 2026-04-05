@@ -95,6 +95,8 @@ jobs:
       matrix:
         example:
           - end
+          - end-x
+          - end-t
           - end-dx4
           - end-dx6
           - end-dt4

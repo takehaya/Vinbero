@@ -7,42 +7,67 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
 
-// resolveAction converts user-friendly action names to proto enum values.
-// Accepts: "END_DT4", "SRV6_LOCAL_ACTION_END_DT4", "End.DT4"
+// protoEnum is a constraint for protobuf-generated enum types
+type protoEnum interface {
+	~int32
+	String() string
+}
+
+// resolveProtoEnum converts user-friendly names to proto enum values.
+// Accepts short names ("END_DT4"), full names ("SRV6_LOCAL_ACTION_END_DT4"),
+// and dotted names ("End.DT4") which are normalized to underscore-uppercase.
+func resolveProtoEnum[T protoEnum](input string, prefix string, valueMap map[string]int32) (T, error) {
+	upper := strings.ToUpper(strings.ReplaceAll(input, ".", "_"))
+
+	if v, ok := valueMap[upper]; ok {
+		return T(v), nil
+	}
+	if v, ok := valueMap[prefix+upper]; ok {
+		return T(v), nil
+	}
+
+	// Build valid names list from the value map, excluding UNSPECIFIED
+	var valid []string
+	for name := range valueMap {
+		short := strings.TrimPrefix(name, prefix)
+		if short == "UNSPECIFIED" {
+			continue
+		}
+		valid = append(valid, short)
+	}
+	return 0, fmt.Errorf("unknown value: %s (valid: %s)", input, strings.Join(valid, ", "))
+}
+
+// formatProtoEnum converts proto enum to human-readable string, stripping the prefix.
+// Returns "" for NONE or UNSPECIFIED values.
+func formatProtoEnum[T protoEnum](value T, prefix string) string {
+	s := strings.TrimPrefix(value.String(), prefix)
+	if s == "NONE" || s == "UNSPECIFIED" {
+		return ""
+	}
+	return s
+}
+
 func resolveAction(input string) (v1.Srv6LocalAction, error) {
-	upper := strings.ToUpper(strings.ReplaceAll(input, ".", "_"))
-
-	if v, ok := v1.Srv6LocalAction_value[upper]; ok {
-		return v1.Srv6LocalAction(v), nil
-	}
-	if v, ok := v1.Srv6LocalAction_value["SRV6_LOCAL_ACTION_"+upper]; ok {
-		return v1.Srv6LocalAction(v), nil
-	}
-	return 0, fmt.Errorf("unknown action: %s (valid: END, END_X, END_T, END_DX2, END_DX4, END_DX6, END_DT2, END_DT4, END_DT6, END_DT46)", input)
+	return resolveProtoEnum[v1.Srv6LocalAction](input, "SRV6_LOCAL_ACTION_", v1.Srv6LocalAction_value)
 }
 
-// resolveMode converts user-friendly mode names to proto enum values.
-// Accepts: "H_ENCAPS", "SRV6_HEADEND_BEHAVIOR_H_ENCAPS", "H.Encaps"
 func resolveMode(input string) (v1.Srv6HeadendBehavior, error) {
-	upper := strings.ToUpper(strings.ReplaceAll(input, ".", "_"))
-
-	if v, ok := v1.Srv6HeadendBehavior_value[upper]; ok {
-		return v1.Srv6HeadendBehavior(v), nil
-	}
-	if v, ok := v1.Srv6HeadendBehavior_value["SRV6_HEADEND_BEHAVIOR_"+upper]; ok {
-		return v1.Srv6HeadendBehavior(v), nil
-	}
-	return 0, fmt.Errorf("unknown mode: %s (valid: H_INSERT, H_ENCAPS, H_ENCAPS_L2)", input)
+	return resolveProtoEnum[v1.Srv6HeadendBehavior](input, "SRV6_HEADEND_BEHAVIOR_", v1.Srv6HeadendBehavior_value)
 }
 
-// formatAction converts proto enum to human-readable string.
+func resolveFlavor(input string) (v1.Srv6LocalFlavor, error) {
+	return resolveProtoEnum[v1.Srv6LocalFlavor](input, "SRV6_LOCAL_FLAVOR_", v1.Srv6LocalFlavor_value)
+}
+
 func formatAction(action v1.Srv6LocalAction) string {
-	name := action.String()
-	return strings.TrimPrefix(name, "SRV6_LOCAL_ACTION_")
+	return formatProtoEnum(action, "SRV6_LOCAL_ACTION_")
 }
 
-// formatMode converts proto enum to human-readable string.
 func formatMode(mode v1.Srv6HeadendBehavior) string {
-	name := mode.String()
-	return strings.TrimPrefix(name, "SRV6_HEADEND_BEHAVIOR_")
+	return formatProtoEnum(mode, "SRV6_HEADEND_BEHAVIOR_")
+}
+
+func formatFlavor(flavor v1.Srv6LocalFlavor) string {
+	return formatProtoEnum(flavor, "SRV6_LOCAL_FLAVOR_")
 }

@@ -39,6 +39,7 @@ enum srv6_local_flavor {
     SRV6_LOCAL_FLAVOR_USD = 4,
 };
 
+
 // ========== SRv6 Headend Behavior ==========
 // Maps to Srv6HeadendBehavior enum in protobuf
 enum srv6_headend_behavior {

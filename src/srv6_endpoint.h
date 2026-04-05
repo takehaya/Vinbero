@@ -73,8 +73,9 @@ static __always_inline int endpoint_update_da(struct endpoint_ctx *ectx)
     return 0;
 }
 
-// Perform FIB lookup and redirect (common for End, End.T)
-static __always_inline int endpoint_fib_redirect(struct endpoint_ctx *ectx)
+// Core FIB lookup + redirect with explicit dst address
+// Re-derives all packet pointers from ctx->data (safe after bpf_xdp_adjust_head)
+static __always_inline int endpoint_fib_redirect_core(struct endpoint_ctx *ectx, void *dst, __u32 fib_ifindex)
 {
     void *data = (void *)(long)ectx->ctx->data;
     void *data_end = (void *)(long)ectx->ctx->data_end;
@@ -83,8 +84,13 @@ static __always_inline int endpoint_fib_redirect(struct endpoint_ctx *ectx)
         return XDP_DROP;
     }
 
+    struct ipv6hdr *ip6h = (struct ipv6hdr *)(eth + 1);
+    if ((void *)(ip6h + 1) > data_end) {
+        return XDP_DROP;
+    }
+
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ectx->ctx, ectx->ip6h, eth, &ifindex, ectx->ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_v6_core(ectx->ctx, ip6h, eth, &ifindex, dst, fib_ifindex);
 
     switch (fib_result) {
     case FIB_RESULT_REDIRECT:
@@ -97,12 +103,175 @@ static __always_inline int endpoint_fib_redirect(struct endpoint_ctx *ectx)
     }
 }
 
+// FIB lookup on ip6h->daddr (for End, End.T)
+static __always_inline int endpoint_fib_redirect(struct endpoint_ctx *ectx, __u32 fib_ifindex)
+{
+    void *data = (void *)(long)ectx->ctx->data;
+    void *data_end = (void *)(long)ectx->ctx->data_end;
+    struct ipv6hdr *ip6h = (void *)data + ETH_HLEN;
+    if ((void *)(ip6h + 1) > data_end) {
+        return XDP_DROP;
+    }
+    return endpoint_fib_redirect_core(ectx, &ip6h->daddr, fib_ifindex);
+}
+
+// FIB lookup on entry->nexthop (for End.X)
+static __always_inline int endpoint_fib_redirect_nexthop(struct endpoint_ctx *ectx)
+{
+    return endpoint_fib_redirect_core(ectx, ectx->entry->nexthop, ectx->ctx->ingress_ifindex);
+}
+
+// ========================================================================
+// SRv6 Flavor Helpers (PSP, USP, USD)
+// ========================================================================
+
+// Strip SRH from packet, preserving Ethernet + IPv6 headers
+// Uses the same adjust_head pattern as srv6_decap():
+//   1. Save Eth + IPv6 header to stack
+//   2. Strip all (Eth + IPv6 + SRH) via adjust_head(+)
+//   3. Re-expand Eth + IPv6 via adjust_head(-)
+//   4. Restore saved headers with updated nexthdr/payload_len
+//
+// Before: [Eth(14)][IPv6(40)][SRH][Upper Layer]
+// After:  [Eth(14)][IPv6(40)][Upper Layer]
+//
+// Returns: 0 on success, -1 on failure
+// Note: After success, caller must re-fetch all pointers from ctx->data
+static __always_inline int endpoint_strip_srh(struct endpoint_ctx *ectx)
+{
+    void *data = (void *)(long)ectx->ctx->data;
+    void *data_end = (void *)(long)ectx->ctx->data_end;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return -1;
+
+    struct ipv6hdr *ip6h = (struct ipv6hdr *)(eth + 1);
+    if ((void *)(ip6h + 1) > data_end)
+        return -1;
+
+    // Save headers to stack (54 bytes total, well within 512B BPF stack limit)
+    struct ethhdr saved_eth;
+    struct ipv6hdr saved_ip6h;
+    __builtin_memcpy(&saved_eth, eth, sizeof(saved_eth));
+    __builtin_memcpy(&saved_ip6h, ip6h, sizeof(saved_ip6h));
+
+    // Save SRH metadata before stripping
+    __u8 inner_nexthdr = ectx->srh->nexthdr;
+    int srh_len = 8 + (ectx->srh->hdrlen * 8);
+
+    // Strip Eth + IPv6 + SRH
+    int total_strip = ETH_HLEN + sizeof(struct ipv6hdr) + srh_len;
+    if (bpf_xdp_adjust_head(ectx->ctx, total_strip))
+        return -1;
+
+    // Re-expand for Eth + IPv6 header
+    if (bpf_xdp_adjust_head(ectx->ctx, -(int)(ETH_HLEN + sizeof(struct ipv6hdr))))
+        return -1;
+
+    // Re-fetch pointers
+    data = (void *)(long)ectx->ctx->data;
+    data_end = (void *)(long)ectx->ctx->data_end;
+
+    eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return -1;
+
+    ip6h = (struct ipv6hdr *)(eth + 1);
+    if ((void *)(ip6h + 1) > data_end)
+        return -1;
+
+    // Restore saved headers
+    __builtin_memcpy(eth, &saved_eth, sizeof(saved_eth));
+    __builtin_memcpy(ip6h, &saved_ip6h, sizeof(saved_ip6h));
+
+    // Update IPv6 header: point to upper layer, adjust length
+    ip6h->nexthdr = inner_nexthdr;
+    ip6h->payload_len = bpf_htons(bpf_ntohs(ip6h->payload_len) - srh_len);
+
+    return 0;
+}
+
+// Handle USD flavor: decapsulate inner packet at SL=0
+// Performs full decap (strip Eth+IPv6+SRH) and FIB redirect on inner packet
+static __always_inline int endpoint_handle_usd(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry)
+{
+    __u8 inner_proto = srh->nexthdr;
+
+    if (inner_proto == IPPROTO_IPIP) {
+        DEBUG_PRINT("USD: Decapsulating inner IPv4\n");
+        if (srv6_decap(ctx, srh, IPPROTO_IPIP) != 0)
+            return XDP_DROP;
+
+        void *data = (void *)(long)ctx->data;
+        void *data_end = (void *)(long)ctx->data_end;
+        struct ethhdr *eth = data;
+        if ((void *)(eth + 1) > data_end) return XDP_DROP;
+        struct iphdr *iph = (void *)(eth + 1);
+        if ((void *)(iph + 1) > data_end) return XDP_DROP;
+        eth->h_proto = bpf_htons(ETH_P_IP);
+        STATS_INC(STATS_SRV6_END, 0);
+        int action = srv6_fib_redirect_v4(ctx, iph, eth, ctx->ingress_ifindex);
+        return (action == XDP_PASS) ? XDP_DROP : action;
+    }
+
+    if (inner_proto == IPPROTO_IPV6) {
+        DEBUG_PRINT("USD: Decapsulating inner IPv6\n");
+        if (srv6_decap(ctx, srh, IPPROTO_IPV6) != 0)
+            return XDP_DROP;
+
+        void *data = (void *)(long)ctx->data;
+        void *data_end = (void *)(long)ctx->data_end;
+        struct ethhdr *eth = data;
+        if ((void *)(eth + 1) > data_end) return XDP_DROP;
+        struct ipv6hdr *inner_ip6h = (void *)(eth + 1);
+        if ((void *)(inner_ip6h + 1) > data_end) return XDP_DROP;
+        STATS_INC(STATS_SRV6_END, 0);
+        int action = srv6_fib_redirect(ctx, inner_ip6h, eth, ctx->ingress_ifindex);
+        return (action == XDP_PASS) ? XDP_DROP : action;
+    }
+
+    DEBUG_PRINT("USD: Unsupported inner protocol %d\n", inner_proto);
+    return XDP_DROP;
+}
+
+// Handle USP flavor: strip SRH at SL=0 and perform FIB lookup
+// Called when SL=0 and USP flavor is set
+static __always_inline int endpoint_handle_usp(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry,
+    __u32 fib_ifindex)
+{
+    struct endpoint_ctx ectx;
+    ectx.ctx = ctx;
+    ectx.ip6h = ip6h;
+    ectx.srh = srh;
+    ectx.entry = entry;
+    ectx.data_end = (void *)(long)ctx->data_end;
+
+    if (endpoint_strip_srh(&ectx) != 0) {
+        DEBUG_PRINT("USP: Failed to strip SRH\n");
+        return XDP_DROP;
+    }
+
+    DEBUG_PRINT("USP: Stripped SRH, FIB lookup on DA\n");
+    return endpoint_fib_redirect(&ectx, fib_ifindex);
+}
+
 // ========================================================================
 // Endpoint Function Implementations
 // ========================================================================
 
 // End: Basic SRv6 endpoint operation
 // RFC 8986 Section 4.1
+// Supports flavors: PSP (strip SRH at penultimate), USP (strip SRH at ultimate),
+//                   USD (decapsulate at ultimate)
 static __always_inline int process_end(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
@@ -113,6 +282,12 @@ static __always_inline int process_end(
     int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
 
     if (ret == -1) {
+        // SL=0: check USD and USP flavors
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD) {
+            return endpoint_handle_usd(ctx, ip6h, srh, entry);
+        } else if (entry->flavor == SRV6_LOCAL_FLAVOR_USP) {
+            return endpoint_handle_usp(ctx, ip6h, srh, entry, ctx->ingress_ifindex);
+        }
         DEBUG_PRINT("End: SL is 0, passing to upper layer\n");
         return XDP_PASS;
     }
@@ -126,12 +301,22 @@ static __always_inline int process_end(
         return XDP_DROP;
     }
 
+    // PSP: strip SRH when new_sl becomes 0 (penultimate segment)
+    if (ectx.new_sl == 0 && (entry->flavor == SRV6_LOCAL_FLAVOR_PSP)) {
+        DEBUG_PRINT("End+PSP: Stripping SRH at penultimate\n");
+        if (endpoint_strip_srh(&ectx) != 0) {
+            return XDP_DROP;
+        }
+    }
+
     DEBUG_PRINT("End: Updated DA, new SL=%d\n", ectx.new_sl);
-    return endpoint_fib_redirect(&ectx);
+    return endpoint_fib_redirect(&ectx, ectx.ctx->ingress_ifindex);
 }
 
 // End.X: Layer-3 cross-connect to specified nexthop
 // RFC 8986 Section 4.2
+// Like End but uses entry->nexthop for FIB lookup instead of the updated DA
+// Supports flavors: PSP, USP, USD
 static __always_inline int process_end_x(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
@@ -140,39 +325,68 @@ static __always_inline int process_end_x(
 {
     struct endpoint_ctx ectx;
     int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
-    if (ret == -1) return XDP_PASS;
+    if (ret == -1) {
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD) {
+            return endpoint_handle_usd(ctx, ip6h, srh, entry);
+        } else if (entry->flavor == SRV6_LOCAL_FLAVOR_USP) {
+            return endpoint_handle_usp(ctx, ip6h, srh, entry, ctx->ingress_ifindex);
+        }
+        return XDP_PASS;
+    }
     if (ret == -2) return XDP_DROP;
 
     if (endpoint_update_da(&ectx) != 0) {
         return XDP_DROP;
     }
 
-    // TODO: Implement L3 cross-connect to entry->nexthop
-    // Instead of FIB lookup, forward directly to nexthop
-    DEBUG_PRINT("End.X: Not yet implemented\n");
-    return XDP_PASS;
+    if (ectx.new_sl == 0 && (entry->flavor == SRV6_LOCAL_FLAVOR_PSP)) {
+        DEBUG_PRINT("End.X+PSP: Stripping SRH at penultimate\n");
+        if (endpoint_strip_srh(&ectx) != 0) {
+            return XDP_DROP;
+        }
+    }
+
+    DEBUG_PRINT("End.X: Updated DA, new SL=%d, forwarding via nexthop\n", ectx.new_sl);
+    return endpoint_fib_redirect_nexthop(&ectx);
 }
 
 // End.T: Lookup in specific routing table
 // RFC 8986 Section 4.3
+// Like End but uses entry->vrf_ifindex for VRF-aware FIB lookup
+// Supports flavors: PSP, USP, USD
 static __always_inline int process_end_t(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry)
 {
+    __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
+
     struct endpoint_ctx ectx;
     int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
-    if (ret == -1) return XDP_PASS;
+    if (ret == -1) {
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD) {
+            return endpoint_handle_usd(ctx, ip6h, srh, entry);
+        } else if (entry->flavor == SRV6_LOCAL_FLAVOR_USP) {
+            return endpoint_handle_usp(ctx, ip6h, srh, entry, fib_ifindex);
+        }
+        return XDP_PASS;
+    }
     if (ret == -2) return XDP_DROP;
 
     if (endpoint_update_da(&ectx) != 0) {
         return XDP_DROP;
     }
 
-    // TODO: Implement VRF/table-specific FIB lookup
-    DEBUG_PRINT("End.T: Not yet implemented\n");
-    return XDP_PASS;
+    if (ectx.new_sl == 0 && (entry->flavor == SRV6_LOCAL_FLAVOR_PSP)) {
+        DEBUG_PRINT("End.T+PSP: Stripping SRH at penultimate\n");
+        if (endpoint_strip_srh(&ectx) != 0) {
+            return XDP_DROP;
+        }
+    }
+
+    DEBUG_PRINT("End.T: Updated DA, new SL=%d, FIB ifindex=%d\n", ectx.new_sl, fib_ifindex);
+    return endpoint_fib_redirect(&ectx, fib_ifindex);
 }
 
 // End.DX4: Decapsulation with IPv4 cross-connect
