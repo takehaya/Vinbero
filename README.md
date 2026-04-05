@@ -18,10 +18,15 @@ make bpf-gen
 make build
 ```
 
+This produces two binaries:
+- `out/bin/vinberod` — SRv6 daemon (XDP/TC dataplane + Connect RPC server)
+- `out/bin/vinbero` — CLI client for managing the daemon
+
 ### Run
 
 ```bash
-sudo ./out/bin/vinbero -c vinbero.yml
+# Start the daemon
+sudo ./out/bin/vinberod -c vinbero.yml
 ```
 
 ### Configuration
@@ -39,21 +44,63 @@ internal:
     level: info
 ```
 
-### API Examples
+## CLI
 
-Register SRv6 SID function (End.DX4):
+`vinbero` CLI provides a convenient interface to the daemon's Connect RPC API.
+
 ```bash
-curl -X POST http://localhost:8080/vinbero.v1.SidFunctionService/SidFunctionCreate \
-  -H "Content-Type: application/json" \
-  -d '{"sid_functions": [{"trigger_prefix": "fc00::1/128", "action": "SRV6_LOCAL_ACTION_END_DX4"}]}'
+# Set default server address (optional, defaults to http://localhost:8080)
+export VINBERO_SERVER=http://localhost:8080
+
+# Network resources
+vinbero vrf create --name vrf100 --table-id 100 --members eth0 --enable-l3mdev-rule
+vinbero br create --name br100 --bd-id 100 --members eth1
+
+# SRv6 SID functions
+vinbero sid create --trigger-prefix fc00::1/128 --action END_DT4 --vrf-name vrf100
+vinbero sid create --trigger-prefix fc00::2/128 --action END_DT2 --bd-id 100 --bridge-name br100
+vinbero sid list
+
+# Headend encapsulation
+vinbero hv4 create --trigger-prefix 192.0.2.0/24 --src-addr fc00::1 --segments fc00::100,fc00::200
+vinbero hl2 create --interface eth1 --vlan-id 100 --src-addr fc00::1 --segments fc00::100,fc00::200 --bd-id 100
+
+# BUM flood peers
+vinbero peer create --bd-id 100 --src-addr fc00::1 --segments fc00::100,fc00::200
+
+# FDB (MAC address table)
+vinbero fdb list
+
+# JSON output
+vinbero --json sid list
+
+# Specify server address per command
+vinbero -s http://192.168.1.1:8080 sid list
 ```
 
-Register Headend encapsulation (H.Encaps for IPv4):
+### Shell Completion
+
 ```bash
-curl -X POST http://localhost:8080/vinbero.v1.Headendv4Service/Headendv4Create \
-  -H "Content-Type: application/json" \
-  -d '{"headends": [{"trigger_prefix": "192.0.2.0/24", "src_addr": "fc00::1", "segment_list": ["fc00::100", "fc00::200"], "behavior": "SRV6_HEADEND_BEHAVIOR_H_ENCAPS"}]}'
+# bash
+eval "$(vinbero completion bash)"
+
+# zsh
+eval "$(vinbero completion zsh)"
 ```
+
+### Available Commands
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `sid-function` | `sid` | SRv6 SID endpoint functions (End, End.DT4, End.DT2, etc.) |
+| `headend-v4` | `hv4` | SRv6 Headend for IPv4 (H.Encaps) |
+| `headend-v6` | `hv6` | SRv6 Headend for IPv6 (H.Encaps) |
+| `headend-l2` | `hl2` | SRv6 Headend for L2 frames (H.Encaps.L2) |
+| `bd-peer` | `peer` | Bridge Domain remote PE management |
+| `bridge` | `br` | Linux bridge device management |
+| `vrf` | | Linux VRF device management |
+| `fdb` | | FDB (MAC address table) entries |
+| `completion` | | Shell completion scripts |
 
 ## Supported SRv6 Functions
 

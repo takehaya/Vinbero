@@ -29,6 +29,7 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "dst-addr", Usage: "Destination IPv6 address"},
 					&cli.StringFlag{Name: "nexthop", Usage: "Next-hop IPv6 address (for End.X)"},
 					&cli.UintFlag{Name: "oif", Usage: "Output interface index (for End.DX2)"},
+					&cli.StringFlag{Name: "flavor", Usage: "SRv6 flavor (PSP, USP, USD)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -37,12 +38,22 @@ func sidFunctionCommand() *cli.Command {
 						return err
 					}
 
+					var flavor v1.Srv6LocalFlavor
+					if f := c.String("flavor"); f != "" {
+						var err error
+						flavor, err = resolveFlavor(f)
+						if err != nil {
+							return err
+						}
+					}
+
 					sid := &v1.SidFunction{
 						Action:        action,
 						TriggerPrefix: c.String("trigger-prefix"),
 						SrcAddr:       c.String("src-addr"),
 						DstAddr:       c.String("dst-addr"),
 						Nexthop:       c.String("nexthop"),
+						Flavor:        flavor,
 						VrfName:       c.String("vrf-name"),
 						BdId:          uint32(c.Uint("bd-id")),
 						BridgeName:    c.String("bridge-name"),
@@ -87,12 +98,13 @@ func sidFunctionCommand() *cli.Command {
 					if useJSON(c) {
 						return printJSON(resp.Msg.SidFunctions)
 					}
-					headers := []string{"TRIGGER PREFIX", "ACTION", "VRF", "BD_ID", "BRIDGE", "OIF"}
+					headers := []string{"TRIGGER PREFIX", "ACTION", "FLAVOR", "VRF", "BD_ID", "BRIDGE", "OIF"}
 					var rows [][]string
 					for _, s := range resp.Msg.SidFunctions {
 						rows = append(rows, []string{
 							s.TriggerPrefix,
 							formatAction(s.Action),
+							formatFlavor(s.Flavor),
 							s.VrfName,
 							fmt.Sprintf("%d", s.BdId),
 							s.BridgeName,
