@@ -62,19 +62,20 @@ ns_sysctl "$ns_router2" net.vrf.strict_mode 1
 run ip netns exec "$ns_router2" ip link set "$veth_rt2_rt1" master vrf100
 run ip netns exec "$ns_router2" ip link set "$veth_rt2_rt3" master vrf100
 
-# When interfaces are enslaved to VRF, connected routes (fc00:12::/64, fc00:23::/64)
-# move to table 100 automatically. The via-routes from three_router.sh become stale.
-# After enslave, the neighbour cache is cleared, so "via <nexthop>" may fail with
-# "No route to host". Use onlink to skip nexthop reachability check.
-ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT1} via ${TOPO_ROUTER1_RT2_IPV6%/*} dev "$veth_rt2_rt1" table 100 onlink
-ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT3} via ${TOPO_ROUTER3_RT2_IPV6%/*} dev "$veth_rt2_rt3" table 100 onlink
+# VRF enslave may drop global-scope IPv6 addresses. Re-add them.
+ip netns exec "$ns_router2" ip -6 addr add ${TOPO_ROUTER2_RT1_IPV6} dev "$veth_rt2_rt1" 2>/dev/null || true
+ip netns exec "$ns_router2" ip -6 addr add ${TOPO_ROUTER2_RT3_IPV6} dev "$veth_rt2_rt3" 2>/dev/null || true
+
+# Re-add inter-router routes in VRF table 100
+ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT1} via ${TOPO_ROUTER1_RT2_IPV6%/*} dev "$veth_rt2_rt1" table 100
+ip netns exec "$ns_router2" ip -6 route replace ${TOPO_IPV6_PREFIX_RT3} via ${TOPO_ROUTER3_RT2_IPV6%/*} dev "$veth_rt2_rt3" table 100
 
 # Linux native End.T: process SRH then lookup updated DA in VRF table 100
 # Forward path SID
 run ip netns exec "$ns_router2" ip -6 route del local fc00:2::2 2>/dev/null || true
-run ip netns exec "$ns_router2" ip -6 route add local fc00:2::1/128 encap seg6local action End.T vrftable 100 dev lo
+run ip netns exec "$ns_router2" ip -6 route add local fc00:2::1/128 encap seg6local action End.T table 100 dev lo
 # Return path SID
-run ip netns exec "$ns_router2" ip -6 route add local fc00:2::2/128 encap seg6local action End.T vrftable 100 dev lo
+run ip netns exec "$ns_router2" ip -6 route add local fc00:2::2/128 encap seg6local action End.T table 100 dev lo
 
 # Configure router3 (End.DX4)
 ns_sysctl "$ns_router3" net.ipv6.conf.${veth_rt3_h2}.seg6_enabled 1
