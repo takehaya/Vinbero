@@ -124,6 +124,7 @@ func (s *BdPeerServer) BdPeerList(
 			BdId:     uint32(key.BdId),
 			SrcAddr:  bpf.FormatIPv6(entry.SrcAddr),
 			Segments: bpf.FormatSegments(entry.Segments, entry.NumSegments),
+			Mode:     v1.Srv6HeadendBehavior(entry.Mode),
 		})
 	}
 
@@ -131,21 +132,5 @@ func (s *BdPeerServer) BdPeerList(
 }
 
 func (s *BdPeerServer) protoToEntry(peer *v1.BdPeer) (*bpf.HeadendEntry, error) {
-	srcAddr, err := bpf.ParseIPv6(peer.SrcAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	segments, numSegments, err := bpf.ParseSegments(peer.Segments)
-	if err != nil {
-		return nil, err
-	}
-
-	return &bpf.HeadendEntry{
-		Mode:        uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
-		NumSegments: numSegments,
-		SrcAddr:     srcAddr,
-		Segments:    segments,
-		BdId:        uint16(peer.BdId),
-	}, nil
+	return buildL2HeadendEntry(peer.SrcAddr, peer.Segments, peer.Mode, peer.BdId)
 }

@@ -13,12 +13,12 @@
 | Function         | Status      | Description                                      |
 |------------------|-------------|--------------------------------------------------|
 | H                |             | Headend with SRH insertion                       |
-| H.Insert         |             | Headend with SRH insertion (existing IPv6)       |
-| H.Insert.Red     |             | H.Insert with reduced SRH                        |
+| H.Insert         | Supported   | Headend with SRH insertion (existing IPv6)       |
+| H.Insert.Red     | Supported   | H.Insert with reduced SRH                        |
 | H.Encaps         | Supported   | Headend with encapsulation in outer IPv6 header  |
-| H.Encaps.Red     |             | H.Encaps with reduced SRH                        |
+| H.Encaps.Red     | Supported   | H.Encaps with reduced SRH                        |
 | H.Encaps.L2      | Supported   | H.Encaps with L2 payload                         |
-| H.Encaps.L2.Red  |             | H.Encaps.L2 with reduced SRH                     |
+| H.Encaps.L2.Red  | Supported   | H.Encaps.L2 with reduced SRH                     |
 
 ### Functions associated with a SID
 

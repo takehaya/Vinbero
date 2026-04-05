@@ -194,6 +194,7 @@ message BdPeer {
   uint32 bd_id = 1; // Bridge Domain ID this peer belongs to
   string src_addr = 2; // Outer IPv6 source address for SRv6 encap
   repeated string segments = 3; // Segment list to reach this PE
+  Srv6HeadendBehavior mode = 4; // Headend mode (default: H_ENCAPS_L2, or H_ENCAPS_L2_RED for Reduced SRH)
 }
 
 message BdPeerCreateRequest {
@@ -313,6 +314,7 @@ message HeadendL2 {
   repeated string segments = 3; // SRv6 segment list
   uint32 bd_id = 4; // Bridge Domain ID; 0 = direct encap (no BD), >0 = MAC learning enabled
   string interface_name = 5; // Customer-facing interface name (resolved to ifindex internally)
+  Srv6HeadendBehavior mode = 6; // Headend mode (default: H_ENCAPS_L2, or H_ENCAPS_L2_RED for Reduced SRH)
 }
 
 message HeadendL2CreateRequest {
