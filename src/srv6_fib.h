@@ -14,15 +14,17 @@
 #define FIB_RESULT_DROP     -1   // Drop packet (blackhole/unreachable)
 #define FIB_RESULT_PASS     -2   // Pass to kernel stack
 
-// Perform IPv6 FIB lookup and update Ethernet header
+// Core IPv6 FIB lookup with explicit dst address, update Ethernet header
+// dst: FIB lookup destination (ip6h->daddr for normal, nexthop for End.X)
 // ifindex: L3 device index for lookup (use ctx->ingress_ifindex or VRF ifindex)
 // Returns: FIB_RESULT_REDIRECT (success), FIB_RESULT_DROP, or FIB_RESULT_PASS
 // On success, eth header is updated and out_ifindex is set
-static __always_inline int srv6_fib_lookup_and_update(
+static __always_inline int srv6_fib_lookup_v6_core(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ethhdr *eth,
     __u32 *out_ifindex,
+    void *dst,
     __u32 ifindex)
 {
     struct bpf_fib_lookup fib_params = {};
@@ -30,7 +32,7 @@ static __always_inline int srv6_fib_lookup_and_update(
     fib_params.ifindex = ifindex;
 
     __builtin_memcpy(fib_params.ipv6_src, &ip6h->saddr, sizeof(fib_params.ipv6_src));
-    __builtin_memcpy(fib_params.ipv6_dst, &ip6h->daddr, sizeof(fib_params.ipv6_dst));
+    __builtin_memcpy(fib_params.ipv6_dst, dst, sizeof(fib_params.ipv6_dst));
 
     int ret = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0);
 
@@ -47,9 +49,31 @@ static __always_inline int srv6_fib_lookup_and_update(
         return FIB_RESULT_DROP;
 
     default:
-        // BPF_FIB_LKUP_RET_NOT_FWDED, etc.
         return FIB_RESULT_PASS;
     }
+}
+
+// Perform IPv6 FIB lookup using ip6h->daddr as destination
+static __always_inline int srv6_fib_lookup_and_update(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ethhdr *eth,
+    __u32 *out_ifindex,
+    __u32 ifindex)
+{
+    return srv6_fib_lookup_v6_core(ctx, ip6h, eth, out_ifindex, &ip6h->daddr, ifindex);
+}
+
+// Perform IPv6 FIB lookup using an explicit nexthop address (for End.X)
+static __always_inline int srv6_fib_lookup_and_update_nexthop(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ethhdr *eth,
+    __u32 *out_ifindex,
+    __u8 *nexthop,
+    __u32 ifindex)
+{
+    return srv6_fib_lookup_v6_core(ctx, ip6h, eth, out_ifindex, nexthop, ifindex);
 }
 
 // Convenience wrapper that performs FIB lookup and returns XDP action

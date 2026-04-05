@@ -25,8 +25,8 @@
 | Function             | Status      | Description                                                 |
 |----------------------|-------------|-------------------------------------------------------------|
 | End                  | Supported   | Endpoint function                                           |
-| End.X                |             | Endpoint with Layer-3 cross-connect                         |
-| End.T                |             | Endpoint with specific IPv6 table lookup                    |
+| End.X                | Supported   | Endpoint with Layer-3 cross-connect                         |
+| End.T                | Supported   | Endpoint with specific IPv6 table lookup                    |
 | End.DX2 (V)          | Supported   | Endpoint with decap and L2 cross-connect (VLAN)             |
 | End.DT2 (U/M)        | Supported   | Endpoint with decap and L2 table lookup (Unicast/Multicast) |
 | End.DX6              | Supported   | Endpoint with decap and IPv6 cross-connect                  |
@@ -53,6 +53,6 @@
 
 | Function | Status      | Description                    |
 |----------|-------------|--------------------------------|
-| PSP      |             | Penultimate Segment Pop        |
-| USP      |             | Ultimate Segment Pop           |
-| USD      |             | Ultimate Segment Decapsulation |
+| PSP      | Supported   | Penultimate Segment Pop        |
+| USP      | Supported   | Ultimate Segment Pop           |
+| USD      | Supported   | Ultimate Segment Decapsulation |
