@@ -43,15 +43,7 @@ func TestXDPProgEnd(t *testing.T) {
 			}
 
 			if tt.checkDA && tt.segmentsLeft > 0 {
-				da := net.IP(outPkt[38:54])
-				if !da.Equal(net.ParseIP(tt.expectedDA)) {
-					t.Errorf("Expected DA %s, got %s", tt.expectedDA, da)
-				}
-				if len(outPkt) > 57 {
-					if newSL := outPkt[57]; newSL != tt.segmentsLeft-1 {
-						t.Errorf("Expected segments_left %d, got %d", tt.segmentsLeft-1, newSL)
-					}
-				}
+				verifyDAAndSL(t, outPkt, tt.expectedDA, tt.segmentsLeft)
 			}
 		})
 	}
@@ -911,6 +903,251 @@ func TestXDPBumMetaWrite(t *testing.T) {
 					if len(out) == inputLen {
 						t.Logf("SUCCESS: no metadata for unicast")
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestXDPProgEndT(t *testing.T) {
+	tests := []struct {
+		name           string
+		srcIP, dstIP   string
+		segments       []string
+		segmentsLeft   uint8
+		vrfIfindex     uint32
+		expectedAction uint32
+		checkDA        bool
+		expectedDA     string
+	}{
+		{"End.T SL=1 default VRF", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::6", "fd00:1:100::5"}, 1, 0, XDP_PASS, true, "fd00:1:100::6"},
+		{"End.T SL=0 (pass)", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::6", "fd00:1:100::5"}, 0, 0, XDP_PASS, false, ""},
+		{"End.T SL=2", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::7", "fd00:1:100::6", "fd00:1:100::5"}, 2, 0, XDP_PASS, true, "fd00:1:100::6"},
+		{"End.T SL=1 with VRF", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::6", "fd00:1:100::5"}, 1, 999, XDP_PASS, true, "fd00:1:100::6"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithVRF("fd00:1:100::5/128", actionEndT, tt.vrfIfindex)
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+			pkt, err := buildSRv6Packet(net.ParseIP(tt.srcIP), net.ParseIP(tt.dstIP), segments, tt.segmentsLeft)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+			if ret != tt.expectedAction {
+				t.Errorf("Expected action %d, got %d", tt.expectedAction, ret)
+			}
+
+			if tt.checkDA && tt.segmentsLeft > 0 {
+				verifyDAAndSL(t, outPkt, tt.expectedDA, tt.segmentsLeft)
+			}
+		})
+	}
+}
+
+func TestXDPProgEndX(t *testing.T) {
+	nexthop, _ := ParseIPv6("fd00:1:1::99")
+
+	tests := []struct {
+		name           string
+		srcIP, dstIP   string
+		segments       []string
+		segmentsLeft   uint8
+		expectedAction uint32
+		checkDA        bool
+		expectedDA     string
+	}{
+		{"End.X SL=1", "fd00:1:1::1", "fd00:1:100::8", []string{"fd00:1:100::9", "fd00:1:100::8"}, 1, XDP_PASS, true, "fd00:1:100::9"},
+		{"End.X SL=0 (pass)", "fd00:1:1::1", "fd00:1:100::8", []string{"fd00:1:100::9", "fd00:1:100::8"}, 0, XDP_PASS, false, ""},
+		{"End.X SL=2", "fd00:1:1::1", "fd00:1:100::8", []string{"fd00:1:100::a", "fd00:1:100::9", "fd00:1:100::8"}, 2, XDP_PASS, true, "fd00:1:100::9"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithNexthop("fd00:1:100::8/128", actionEndX, nexthop)
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+			pkt, err := buildSRv6Packet(net.ParseIP(tt.srcIP), net.ParseIP(tt.dstIP), segments, tt.segmentsLeft)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+			if ret != tt.expectedAction {
+				t.Errorf("Expected action %d, got %d", tt.expectedAction, ret)
+			}
+
+			if tt.checkDA && tt.segmentsLeft > 0 {
+				verifyDAAndSL(t, outPkt, tt.expectedDA, tt.segmentsLeft)
+			}
+		})
+	}
+}
+
+func TestXDPProgEndPSP(t *testing.T) {
+	tests := []struct {
+		name           string
+		srcIP, dstIP   string
+		segments       []string
+		segmentsLeft   uint8
+		expectedAction uint32
+		expectSRH      bool // true=SRH should be present, false=SRH should be stripped
+		checkDA        bool
+		expectedDA     string
+	}{
+		{"End+PSP SL=1 (strip SRH)", "fd00:1:1::1", "fd00:1:100::a", []string{"fd00:1:100::b", "fd00:1:100::a"}, 1, XDP_PASS, false, true, "fd00:1:100::b"},
+		{"End+PSP SL=2 (keep SRH)", "fd00:1:1::1", "fd00:1:100::a", []string{"fd00:1:100::c", "fd00:1:100::b", "fd00:1:100::a"}, 2, XDP_PASS, true, true, "fd00:1:100::b"},
+		{"End+PSP SL=0 (pass)", "fd00:1:1::1", "fd00:1:100::a", []string{"fd00:1:100::b", "fd00:1:100::a"}, 0, XDP_PASS, true, false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithFlavor("fd00:1:100::a/128", actionEnd, flavorPSP)
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+			pkt, err := buildSRv6Packet(net.ParseIP(tt.srcIP), net.ParseIP(tt.dstIP), segments, tt.segmentsLeft)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+			if ret != tt.expectedAction {
+				t.Errorf("Expected action %d, got %d", tt.expectedAction, ret)
+			}
+
+			if tt.segmentsLeft > 0 {
+				if tt.expectSRH {
+					verifySRHPresent(t, outPkt)
+				} else {
+					verifySRHAbsent(t, outPkt)
+				}
+			}
+
+			if tt.checkDA && tt.segmentsLeft > 0 {
+				da := net.IP(outPkt[38:54])
+				if !da.Equal(net.ParseIP(tt.expectedDA)) {
+					t.Errorf("Expected DA %s, got %s", tt.expectedDA, da)
+				}
+			}
+		})
+	}
+}
+
+func TestXDPProgEndUSP(t *testing.T) {
+	tests := []struct {
+		name           string
+		srcIP, dstIP   string
+		segments       []string
+		segmentsLeft   uint8
+		expectedAction uint32
+		expectSRH      bool
+	}{
+		{"End+USP SL=0 (strip SRH)", "fd00:1:1::1", "fd00:1:100::c", []string{"fd00:1:100::d", "fd00:1:100::c"}, 0, XDP_PASS, false},
+		{"End+USP SL=1 (normal End)", "fd00:1:1::1", "fd00:1:100::c", []string{"fd00:1:100::d", "fd00:1:100::c"}, 1, XDP_PASS, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithFlavor("fd00:1:100::c/128", actionEnd, flavorUSP)
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+			pkt, err := buildSRv6Packet(net.ParseIP(tt.srcIP), net.ParseIP(tt.dstIP), segments, tt.segmentsLeft)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+			if ret != tt.expectedAction {
+				t.Errorf("Expected action %d, got %d", tt.expectedAction, ret)
+			}
+
+			if tt.expectSRH {
+				verifySRHPresent(t, outPkt)
+			} else {
+				verifySRHAbsent(t, outPkt)
+			}
+		})
+	}
+}
+
+func TestXDPProgEndUSD(t *testing.T) {
+	tests := []struct {
+		name         string
+		isIPv4       bool
+		triggerSID   string
+		outerSrcIP   string
+		outerDstIP   string
+		segments     []string
+		segmentsLeft uint8
+		innerSrcIP   string
+		innerDstIP   string
+		expectDecap  bool
+	}{
+		{"End+USD SL=0 inner IPv4", true, "fd00:1:100::e/128", "fd00:1:1::1", "fd00:1:100::e", []string{"fd00:1:100::e"}, 0, "10.0.0.1", "192.0.2.100", true},
+		{"End+USD SL=0 inner IPv6", false, "fd00:1:100::f/128", "fd00:1:1::1", "fd00:1:100::f", []string{"fd00:1:100::f"}, 0, "2001:db8:1::1", "2001:db8:2::1", true},
+		{"End+USD SL=1 (normal End)", false, "fd00:1:100::f/128", "fd00:1:1::1", "fd00:1:100::f", []string{"fd00:1:100::10", "fd00:1:100::f"}, 1, "2001:db8:1::1", "2001:db8:2::1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithFlavor(tt.triggerSID, actionEnd, flavorUSD)
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+
+			if tt.expectDecap {
+				innerType := innerTypeIPv6
+				if tt.isIPv4 {
+					innerType = innerTypeIPv4
+				}
+				pkt, err := buildEncapsulatedPacket(
+					net.ParseIP(tt.outerSrcIP), net.ParseIP(tt.outerDstIP),
+					segments, tt.segmentsLeft,
+					net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP),
+					innerType,
+				)
+				if err != nil {
+					t.Fatalf("Failed to build packet: %v", err)
+				}
+
+				ret, outPkt := h.run(pkt)
+				if ret != XDP_REDIRECT && ret != XDP_DROP {
+					t.Errorf("Expected XDP_REDIRECT or XDP_DROP after decap, got %d", ret)
+				}
+				if !verifyDecapsulated(t, outPkt, net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP), tt.isIPv4) {
+					return
+				}
+				t.Logf("SUCCESS: End+USD decapsulation verified (action: %d)", ret)
+			} else {
+				pkt, err := buildSRv6Packet(net.ParseIP(tt.outerSrcIP), net.ParseIP(tt.outerDstIP), segments, tt.segmentsLeft)
+				if err != nil {
+					t.Fatalf("Failed to build packet: %v", err)
+				}
+				ret, _ := h.run(pkt)
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS for SL!=0, got %d", ret)
 				}
 			}
 		})
