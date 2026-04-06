@@ -26,24 +26,27 @@ const (
 //   - End.DT4/DT6/DT46: vrf_name (VRF-aware FIB lookup)
 //   - End.DT2: bd_id + bridge_name (L2 FDB lookup + bridge flood on miss)
 //   - End.DX2: oif (direct L2 output to specific interface)
+//   - End.B6/End.B6.Encaps: segments + headend_mode + src_addr (policy binding)
 //   - End/End.X/End.T: basic SRv6 transit, no extra fields needed
 type SidFunction struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Action        Srv6LocalAction `protobuf:"varint,1,opt,name=action,proto3,enum=vinbero.v1.Srv6LocalAction" json:"action,omitempty"`   // Endpoint function type
-	TriggerPrefix string          `protobuf:"bytes,2,opt,name=trigger_prefix,json=triggerPrefix,proto3" json:"trigger_prefix,omitempty"` // IPv6 CIDR that activates this SID (e.g., "fc00:1::1/128")
-	SrcAddr       string          `protobuf:"bytes,3,opt,name=src_addr,json=srcAddr,proto3" json:"src_addr,omitempty"`                   // Source address for encapsulation
-	DstAddr       string          `protobuf:"bytes,4,opt,name=dst_addr,json=dstAddr,proto3" json:"dst_addr,omitempty"`                   // Destination address override
-	Nexthop       string          `protobuf:"bytes,5,opt,name=nexthop,proto3" json:"nexthop,omitempty"`                                  // Next-hop for cross-connect functions (End.X)
-	Flavor        Srv6LocalFlavor `protobuf:"varint,6,opt,name=flavor,proto3,enum=vinbero.v1.Srv6LocalFlavor" json:"flavor,omitempty"`   // SRv6 flavor: PSP, USP, USD
-	ArgSrcOffset  uint32          `protobuf:"varint,7,opt,name=arg_src_offset,json=argSrcOffset,proto3" json:"arg_src_offset,omitempty"` // Bit offset for source in SID Args
-	ArgDstOffset  uint32          `protobuf:"varint,8,opt,name=arg_dst_offset,json=argDstOffset,proto3" json:"arg_dst_offset,omitempty"` // Bit offset for destination in SID Args
-	Oif           uint32          `protobuf:"varint,9,opt,name=oif,proto3" json:"oif,omitempty"`                                         // Output interface index (End.DX2: direct L2 output)
-	VrfName       string          `protobuf:"bytes,10,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`                  // VRF device name (End.DT4/DT6/DT46: resolved to ifindex for FIB lookup)
-	BdId          uint32          `protobuf:"varint,11,opt,name=bd_id,json=bdId,proto3" json:"bd_id,omitempty"`                          // Bridge Domain ID (End.DT2: FDB scope for MAC learning)
-	BridgeName    string          `protobuf:"bytes,12,opt,name=bridge_name,json=bridgeName,proto3" json:"bridge_name,omitempty"`         // Bridge device name (End.DT2: redirect target on FDB miss)
+	Action        Srv6LocalAction     `protobuf:"varint,1,opt,name=action,proto3,enum=vinbero.v1.Srv6LocalAction" json:"action,omitempty"`                                   // Endpoint function type
+	TriggerPrefix string              `protobuf:"bytes,2,opt,name=trigger_prefix,json=triggerPrefix,proto3" json:"trigger_prefix,omitempty"`                                 // IPv6 CIDR that activates this SID (e.g., "fc00:1::1/128")
+	SrcAddr       string              `protobuf:"bytes,3,opt,name=src_addr,json=srcAddr,proto3" json:"src_addr,omitempty"`                                                   // Source address for encapsulation
+	DstAddr       string              `protobuf:"bytes,4,opt,name=dst_addr,json=dstAddr,proto3" json:"dst_addr,omitempty"`                                                   // Destination address override
+	Nexthop       string              `protobuf:"bytes,5,opt,name=nexthop,proto3" json:"nexthop,omitempty"`                                                                  // Next-hop for cross-connect functions (End.X)
+	Flavor        Srv6LocalFlavor     `protobuf:"varint,6,opt,name=flavor,proto3,enum=vinbero.v1.Srv6LocalFlavor" json:"flavor,omitempty"`                                   // SRv6 flavor: PSP, USP, USD
+	ArgSrcOffset  uint32              `protobuf:"varint,7,opt,name=arg_src_offset,json=argSrcOffset,proto3" json:"arg_src_offset,omitempty"`                                 // Bit offset for source in SID Args
+	ArgDstOffset  uint32              `protobuf:"varint,8,opt,name=arg_dst_offset,json=argDstOffset,proto3" json:"arg_dst_offset,omitempty"`                                 // Bit offset for destination in SID Args
+	Oif           uint32              `protobuf:"varint,9,opt,name=oif,proto3" json:"oif,omitempty"`                                                                         // Output interface index (End.DX2: direct L2 output)
+	VrfName       string              `protobuf:"bytes,10,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`                                                  // VRF device name (End.DT4/DT6/DT46: resolved to ifindex for FIB lookup)
+	BdId          uint32              `protobuf:"varint,11,opt,name=bd_id,json=bdId,proto3" json:"bd_id,omitempty"`                                                          // Bridge Domain ID (End.DT2: FDB scope for MAC learning)
+	BridgeName    string              `protobuf:"bytes,12,opt,name=bridge_name,json=bridgeName,proto3" json:"bridge_name,omitempty"`                                         // Bridge device name (End.DT2: redirect target on FDB miss)
+	Segments      []string            `protobuf:"bytes,13,rep,name=segments,proto3" json:"segments,omitempty"`                                                               // Policy segment list (End.B6/End.B6.Encaps)
+	HeadendMode   Srv6HeadendBehavior `protobuf:"varint,14,opt,name=headend_mode,json=headendMode,proto3,enum=vinbero.v1.Srv6HeadendBehavior" json:"headend_mode,omitempty"` // Policy mode: H_INSERT, H_ENCAPS, etc. (End.B6)
 }
 
 func (x *SidFunction) Reset() {
@@ -160,6 +163,20 @@ func (x *SidFunction) GetBridgeName() string {
 		return x.BridgeName
 	}
 	return ""
+}
+
+func (x *SidFunction) GetSegments() []string {
+	if x != nil {
+		return x.Segments
+	}
+	return nil
+}
+
+func (x *SidFunction) GetHeadendMode() Srv6HeadendBehavior {
+	if x != nil {
+		return x.HeadendMode
+	}
+	return Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_UNSPECIFIED
 }
 
 type SidFunctionCreateRequest struct {
@@ -3257,7 +3274,7 @@ var file_vinbero_v1_vinbero_proto_rawDesc = []byte{
 	0x0a, 0x18, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2f, 0x76, 0x31, 0x2f, 0x76, 0x69, 0x6e,
 	0x62, 0x65, 0x72, 0x6f, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x0a, 0x76, 0x69, 0x6e, 0x62,
 	0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x1a, 0x16, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2f,
-	0x76, 0x31, 0x2f, 0x65, 0x6e, 0x75, 0x6d, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x22, 0x9d,
+	0x76, 0x31, 0x2f, 0x65, 0x6e, 0x75, 0x6d, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x22, 0xfd,
 	0x03, 0x0a, 0x0b, 0x53, 0x69, 0x64, 0x46, 0x75, 0x6e, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x12, 0x33,
 	0x0a, 0x06, 0x61, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0e, 0x32, 0x1b,
 	0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x72, 0x76, 0x36,
@@ -3283,7 +3300,13 @@ var file_vinbero_v1_vinbero_proto_rawDesc = []byte{
 	0x07, 0x76, 0x72, 0x66, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x13, 0x0a, 0x05, 0x62, 0x64, 0x5f, 0x69,
 	0x64, 0x18, 0x0b, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x62, 0x64, 0x49, 0x64, 0x12, 0x1f, 0x0a,
 	0x0b, 0x62, 0x72, 0x69, 0x64, 0x67, 0x65, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x0c, 0x20, 0x01,
-	0x28, 0x09, 0x52, 0x0a, 0x62, 0x72, 0x69, 0x64, 0x67, 0x65, 0x4e, 0x61, 0x6d, 0x65, 0x22, 0x58,
+	0x28, 0x09, 0x52, 0x0a, 0x62, 0x72, 0x69, 0x64, 0x67, 0x65, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x1a,
+	0x0a, 0x08, 0x73, 0x65, 0x67, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x18, 0x0d, 0x20, 0x03, 0x28, 0x09,
+	0x52, 0x08, 0x73, 0x65, 0x67, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x12, 0x42, 0x0a, 0x0c, 0x68, 0x65,
+	0x61, 0x64, 0x65, 0x6e, 0x64, 0x5f, 0x6d, 0x6f, 0x64, 0x65, 0x18, 0x0e, 0x20, 0x01, 0x28, 0x0e,
+	0x32, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x72,
+	0x76, 0x36, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x42, 0x65, 0x68, 0x61, 0x76, 0x69, 0x6f,
+	0x72, 0x52, 0x0b, 0x68, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4d, 0x6f, 0x64, 0x65, 0x22, 0x58,
 	0x0a, 0x18, 0x53, 0x69, 0x64, 0x46, 0x75, 0x6e, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x43, 0x72, 0x65,
 	0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x3c, 0x0a, 0x0d, 0x73, 0x69,
 	0x64, 0x5f, 0x66, 0x75, 0x6e, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28,
@@ -3847,115 +3870,116 @@ var file_vinbero_v1_vinbero_proto_goTypes = []interface{}{
 	(*HeadendL2GetResponse)(nil),      // 60: vinbero.v1.HeadendL2GetResponse
 	(Srv6LocalAction)(0),              // 61: vinbero.v1.Srv6LocalAction
 	(Srv6LocalFlavor)(0),              // 62: vinbero.v1.Srv6LocalFlavor
-	(*OperationError)(nil),            // 63: vinbero.v1.OperationError
-	(Srv6HeadendBehavior)(0),          // 64: vinbero.v1.Srv6HeadendBehavior
+	(Srv6HeadendBehavior)(0),          // 63: vinbero.v1.Srv6HeadendBehavior
+	(*OperationError)(nil),            // 64: vinbero.v1.OperationError
 }
 var file_vinbero_v1_vinbero_proto_depIdxs = []int32{
 	61, // 0: vinbero.v1.SidFunction.action:type_name -> vinbero.v1.Srv6LocalAction
 	62, // 1: vinbero.v1.SidFunction.flavor:type_name -> vinbero.v1.Srv6LocalFlavor
-	0,  // 2: vinbero.v1.SidFunctionCreateRequest.sid_functions:type_name -> vinbero.v1.SidFunction
-	0,  // 3: vinbero.v1.SidFunctionCreateResponse.created:type_name -> vinbero.v1.SidFunction
-	63, // 4: vinbero.v1.SidFunctionCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	63, // 5: vinbero.v1.SidFunctionDeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	0,  // 6: vinbero.v1.SidFunctionListResponse.sid_functions:type_name -> vinbero.v1.SidFunction
-	0,  // 7: vinbero.v1.SidFunctionGetResponse.sid_function:type_name -> vinbero.v1.SidFunction
-	64, // 8: vinbero.v1.Headendv4.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
-	9,  // 9: vinbero.v1.Headendv4CreateRequest.headendv4s:type_name -> vinbero.v1.Headendv4
-	9,  // 10: vinbero.v1.Headendv4CreateResponse.created:type_name -> vinbero.v1.Headendv4
-	63, // 11: vinbero.v1.Headendv4CreateResponse.errors:type_name -> vinbero.v1.OperationError
-	63, // 12: vinbero.v1.Headendv4DeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	9,  // 13: vinbero.v1.Headendv4ListResponse.headendv4s:type_name -> vinbero.v1.Headendv4
-	9,  // 14: vinbero.v1.Headendv4GetResponse.headendv4:type_name -> vinbero.v1.Headendv4
-	64, // 15: vinbero.v1.Headendv6.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
-	18, // 16: vinbero.v1.Headendv6CreateRequest.headendv6s:type_name -> vinbero.v1.Headendv6
-	18, // 17: vinbero.v1.Headendv6CreateResponse.created:type_name -> vinbero.v1.Headendv6
-	63, // 18: vinbero.v1.Headendv6CreateResponse.errors:type_name -> vinbero.v1.OperationError
-	63, // 19: vinbero.v1.Headendv6DeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	18, // 20: vinbero.v1.Headendv6ListResponse.headendv6s:type_name -> vinbero.v1.Headendv6
-	18, // 21: vinbero.v1.Headendv6GetResponse.headendv6:type_name -> vinbero.v1.Headendv6
-	27, // 22: vinbero.v1.DmacListResponse.entries:type_name -> vinbero.v1.DmacListEntry
-	64, // 23: vinbero.v1.BdPeer.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
-	30, // 24: vinbero.v1.BdPeerCreateRequest.peers:type_name -> vinbero.v1.BdPeer
-	30, // 25: vinbero.v1.BdPeerCreateResponse.created:type_name -> vinbero.v1.BdPeer
-	63, // 26: vinbero.v1.BdPeerCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	63, // 27: vinbero.v1.BdPeerDeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	30, // 28: vinbero.v1.BdPeerListResponse.peers:type_name -> vinbero.v1.BdPeer
-	37, // 29: vinbero.v1.VrfCreateRequest.vrfs:type_name -> vinbero.v1.Vrf
-	37, // 30: vinbero.v1.VrfCreateResponse.created:type_name -> vinbero.v1.Vrf
-	63, // 31: vinbero.v1.VrfCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	63, // 32: vinbero.v1.VrfDeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	37, // 33: vinbero.v1.VrfListResponse.vrfs:type_name -> vinbero.v1.Vrf
-	44, // 34: vinbero.v1.BridgeCreateRequest.bridges:type_name -> vinbero.v1.Bridge
-	44, // 35: vinbero.v1.BridgeCreateResponse.created:type_name -> vinbero.v1.Bridge
-	63, // 36: vinbero.v1.BridgeCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	63, // 37: vinbero.v1.BridgeDeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	44, // 38: vinbero.v1.BridgeListResponse.bridges:type_name -> vinbero.v1.Bridge
-	64, // 39: vinbero.v1.HeadendL2.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
-	51, // 40: vinbero.v1.HeadendL2CreateRequest.headend_l2s:type_name -> vinbero.v1.HeadendL2
-	51, // 41: vinbero.v1.HeadendL2CreateResponse.created:type_name -> vinbero.v1.HeadendL2
-	63, // 42: vinbero.v1.HeadendL2CreateResponse.errors:type_name -> vinbero.v1.OperationError
-	54, // 43: vinbero.v1.HeadendL2DeleteRequest.targets:type_name -> vinbero.v1.HeadendL2DeleteTarget
-	54, // 44: vinbero.v1.HeadendL2DeleteResponse.deleted:type_name -> vinbero.v1.HeadendL2DeleteTarget
-	63, // 45: vinbero.v1.HeadendL2DeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	51, // 46: vinbero.v1.HeadendL2ListResponse.headend_l2s:type_name -> vinbero.v1.HeadendL2
-	51, // 47: vinbero.v1.HeadendL2GetResponse.headend_l2:type_name -> vinbero.v1.HeadendL2
-	1,  // 48: vinbero.v1.SidFunctionService.SidFunctionCreate:input_type -> vinbero.v1.SidFunctionCreateRequest
-	3,  // 49: vinbero.v1.SidFunctionService.SidFunctionDelete:input_type -> vinbero.v1.SidFunctionDeleteRequest
-	5,  // 50: vinbero.v1.SidFunctionService.SidFunctionList:input_type -> vinbero.v1.SidFunctionListRequest
-	7,  // 51: vinbero.v1.SidFunctionService.SidFunctionGet:input_type -> vinbero.v1.SidFunctionGetRequest
-	10, // 52: vinbero.v1.Headendv4Service.Headendv4Create:input_type -> vinbero.v1.Headendv4CreateRequest
-	12, // 53: vinbero.v1.Headendv4Service.Headendv4Delete:input_type -> vinbero.v1.Headendv4DeleteRequest
-	14, // 54: vinbero.v1.Headendv4Service.Headendv4List:input_type -> vinbero.v1.Headendv4ListRequest
-	16, // 55: vinbero.v1.Headendv4Service.Headendv4Get:input_type -> vinbero.v1.Headendv4GetRequest
-	19, // 56: vinbero.v1.Headendv6Service.Headendv6Create:input_type -> vinbero.v1.Headendv6CreateRequest
-	21, // 57: vinbero.v1.Headendv6Service.Headendv6Delete:input_type -> vinbero.v1.Headendv6DeleteRequest
-	23, // 58: vinbero.v1.Headendv6Service.Headendv6List:input_type -> vinbero.v1.Headendv6ListRequest
-	25, // 59: vinbero.v1.Headendv6Service.Headendv6Get:input_type -> vinbero.v1.Headendv6GetRequest
-	28, // 60: vinbero.v1.DmacService.DmacList:input_type -> vinbero.v1.DmacListRequest
-	31, // 61: vinbero.v1.BdPeerService.BdPeerCreate:input_type -> vinbero.v1.BdPeerCreateRequest
-	33, // 62: vinbero.v1.BdPeerService.BdPeerDelete:input_type -> vinbero.v1.BdPeerDeleteRequest
-	35, // 63: vinbero.v1.BdPeerService.BdPeerList:input_type -> vinbero.v1.BdPeerListRequest
-	38, // 64: vinbero.v1.NetworkResourceService.VrfCreate:input_type -> vinbero.v1.VrfCreateRequest
-	40, // 65: vinbero.v1.NetworkResourceService.VrfDelete:input_type -> vinbero.v1.VrfDeleteRequest
-	42, // 66: vinbero.v1.NetworkResourceService.VrfList:input_type -> vinbero.v1.VrfListRequest
-	45, // 67: vinbero.v1.NetworkResourceService.BridgeCreate:input_type -> vinbero.v1.BridgeCreateRequest
-	47, // 68: vinbero.v1.NetworkResourceService.BridgeDelete:input_type -> vinbero.v1.BridgeDeleteRequest
-	49, // 69: vinbero.v1.NetworkResourceService.BridgeList:input_type -> vinbero.v1.BridgeListRequest
-	52, // 70: vinbero.v1.HeadendL2Service.HeadendL2Create:input_type -> vinbero.v1.HeadendL2CreateRequest
-	55, // 71: vinbero.v1.HeadendL2Service.HeadendL2Delete:input_type -> vinbero.v1.HeadendL2DeleteRequest
-	57, // 72: vinbero.v1.HeadendL2Service.HeadendL2List:input_type -> vinbero.v1.HeadendL2ListRequest
-	59, // 73: vinbero.v1.HeadendL2Service.HeadendL2Get:input_type -> vinbero.v1.HeadendL2GetRequest
-	2,  // 74: vinbero.v1.SidFunctionService.SidFunctionCreate:output_type -> vinbero.v1.SidFunctionCreateResponse
-	4,  // 75: vinbero.v1.SidFunctionService.SidFunctionDelete:output_type -> vinbero.v1.SidFunctionDeleteResponse
-	6,  // 76: vinbero.v1.SidFunctionService.SidFunctionList:output_type -> vinbero.v1.SidFunctionListResponse
-	8,  // 77: vinbero.v1.SidFunctionService.SidFunctionGet:output_type -> vinbero.v1.SidFunctionGetResponse
-	11, // 78: vinbero.v1.Headendv4Service.Headendv4Create:output_type -> vinbero.v1.Headendv4CreateResponse
-	13, // 79: vinbero.v1.Headendv4Service.Headendv4Delete:output_type -> vinbero.v1.Headendv4DeleteResponse
-	15, // 80: vinbero.v1.Headendv4Service.Headendv4List:output_type -> vinbero.v1.Headendv4ListResponse
-	17, // 81: vinbero.v1.Headendv4Service.Headendv4Get:output_type -> vinbero.v1.Headendv4GetResponse
-	20, // 82: vinbero.v1.Headendv6Service.Headendv6Create:output_type -> vinbero.v1.Headendv6CreateResponse
-	22, // 83: vinbero.v1.Headendv6Service.Headendv6Delete:output_type -> vinbero.v1.Headendv6DeleteResponse
-	24, // 84: vinbero.v1.Headendv6Service.Headendv6List:output_type -> vinbero.v1.Headendv6ListResponse
-	26, // 85: vinbero.v1.Headendv6Service.Headendv6Get:output_type -> vinbero.v1.Headendv6GetResponse
-	29, // 86: vinbero.v1.DmacService.DmacList:output_type -> vinbero.v1.DmacListResponse
-	32, // 87: vinbero.v1.BdPeerService.BdPeerCreate:output_type -> vinbero.v1.BdPeerCreateResponse
-	34, // 88: vinbero.v1.BdPeerService.BdPeerDelete:output_type -> vinbero.v1.BdPeerDeleteResponse
-	36, // 89: vinbero.v1.BdPeerService.BdPeerList:output_type -> vinbero.v1.BdPeerListResponse
-	39, // 90: vinbero.v1.NetworkResourceService.VrfCreate:output_type -> vinbero.v1.VrfCreateResponse
-	41, // 91: vinbero.v1.NetworkResourceService.VrfDelete:output_type -> vinbero.v1.VrfDeleteResponse
-	43, // 92: vinbero.v1.NetworkResourceService.VrfList:output_type -> vinbero.v1.VrfListResponse
-	46, // 93: vinbero.v1.NetworkResourceService.BridgeCreate:output_type -> vinbero.v1.BridgeCreateResponse
-	48, // 94: vinbero.v1.NetworkResourceService.BridgeDelete:output_type -> vinbero.v1.BridgeDeleteResponse
-	50, // 95: vinbero.v1.NetworkResourceService.BridgeList:output_type -> vinbero.v1.BridgeListResponse
-	53, // 96: vinbero.v1.HeadendL2Service.HeadendL2Create:output_type -> vinbero.v1.HeadendL2CreateResponse
-	56, // 97: vinbero.v1.HeadendL2Service.HeadendL2Delete:output_type -> vinbero.v1.HeadendL2DeleteResponse
-	58, // 98: vinbero.v1.HeadendL2Service.HeadendL2List:output_type -> vinbero.v1.HeadendL2ListResponse
-	60, // 99: vinbero.v1.HeadendL2Service.HeadendL2Get:output_type -> vinbero.v1.HeadendL2GetResponse
-	74, // [74:100] is the sub-list for method output_type
-	48, // [48:74] is the sub-list for method input_type
-	48, // [48:48] is the sub-list for extension type_name
-	48, // [48:48] is the sub-list for extension extendee
-	0,  // [0:48] is the sub-list for field type_name
+	63, // 2: vinbero.v1.SidFunction.headend_mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	0,  // 3: vinbero.v1.SidFunctionCreateRequest.sid_functions:type_name -> vinbero.v1.SidFunction
+	0,  // 4: vinbero.v1.SidFunctionCreateResponse.created:type_name -> vinbero.v1.SidFunction
+	64, // 5: vinbero.v1.SidFunctionCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	64, // 6: vinbero.v1.SidFunctionDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	0,  // 7: vinbero.v1.SidFunctionListResponse.sid_functions:type_name -> vinbero.v1.SidFunction
+	0,  // 8: vinbero.v1.SidFunctionGetResponse.sid_function:type_name -> vinbero.v1.SidFunction
+	63, // 9: vinbero.v1.Headendv4.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	9,  // 10: vinbero.v1.Headendv4CreateRequest.headendv4s:type_name -> vinbero.v1.Headendv4
+	9,  // 11: vinbero.v1.Headendv4CreateResponse.created:type_name -> vinbero.v1.Headendv4
+	64, // 12: vinbero.v1.Headendv4CreateResponse.errors:type_name -> vinbero.v1.OperationError
+	64, // 13: vinbero.v1.Headendv4DeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	9,  // 14: vinbero.v1.Headendv4ListResponse.headendv4s:type_name -> vinbero.v1.Headendv4
+	9,  // 15: vinbero.v1.Headendv4GetResponse.headendv4:type_name -> vinbero.v1.Headendv4
+	63, // 16: vinbero.v1.Headendv6.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	18, // 17: vinbero.v1.Headendv6CreateRequest.headendv6s:type_name -> vinbero.v1.Headendv6
+	18, // 18: vinbero.v1.Headendv6CreateResponse.created:type_name -> vinbero.v1.Headendv6
+	64, // 19: vinbero.v1.Headendv6CreateResponse.errors:type_name -> vinbero.v1.OperationError
+	64, // 20: vinbero.v1.Headendv6DeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	18, // 21: vinbero.v1.Headendv6ListResponse.headendv6s:type_name -> vinbero.v1.Headendv6
+	18, // 22: vinbero.v1.Headendv6GetResponse.headendv6:type_name -> vinbero.v1.Headendv6
+	27, // 23: vinbero.v1.DmacListResponse.entries:type_name -> vinbero.v1.DmacListEntry
+	63, // 24: vinbero.v1.BdPeer.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	30, // 25: vinbero.v1.BdPeerCreateRequest.peers:type_name -> vinbero.v1.BdPeer
+	30, // 26: vinbero.v1.BdPeerCreateResponse.created:type_name -> vinbero.v1.BdPeer
+	64, // 27: vinbero.v1.BdPeerCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	64, // 28: vinbero.v1.BdPeerDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	30, // 29: vinbero.v1.BdPeerListResponse.peers:type_name -> vinbero.v1.BdPeer
+	37, // 30: vinbero.v1.VrfCreateRequest.vrfs:type_name -> vinbero.v1.Vrf
+	37, // 31: vinbero.v1.VrfCreateResponse.created:type_name -> vinbero.v1.Vrf
+	64, // 32: vinbero.v1.VrfCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	64, // 33: vinbero.v1.VrfDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	37, // 34: vinbero.v1.VrfListResponse.vrfs:type_name -> vinbero.v1.Vrf
+	44, // 35: vinbero.v1.BridgeCreateRequest.bridges:type_name -> vinbero.v1.Bridge
+	44, // 36: vinbero.v1.BridgeCreateResponse.created:type_name -> vinbero.v1.Bridge
+	64, // 37: vinbero.v1.BridgeCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	64, // 38: vinbero.v1.BridgeDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	44, // 39: vinbero.v1.BridgeListResponse.bridges:type_name -> vinbero.v1.Bridge
+	63, // 40: vinbero.v1.HeadendL2.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	51, // 41: vinbero.v1.HeadendL2CreateRequest.headend_l2s:type_name -> vinbero.v1.HeadendL2
+	51, // 42: vinbero.v1.HeadendL2CreateResponse.created:type_name -> vinbero.v1.HeadendL2
+	64, // 43: vinbero.v1.HeadendL2CreateResponse.errors:type_name -> vinbero.v1.OperationError
+	54, // 44: vinbero.v1.HeadendL2DeleteRequest.targets:type_name -> vinbero.v1.HeadendL2DeleteTarget
+	54, // 45: vinbero.v1.HeadendL2DeleteResponse.deleted:type_name -> vinbero.v1.HeadendL2DeleteTarget
+	64, // 46: vinbero.v1.HeadendL2DeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	51, // 47: vinbero.v1.HeadendL2ListResponse.headend_l2s:type_name -> vinbero.v1.HeadendL2
+	51, // 48: vinbero.v1.HeadendL2GetResponse.headend_l2:type_name -> vinbero.v1.HeadendL2
+	1,  // 49: vinbero.v1.SidFunctionService.SidFunctionCreate:input_type -> vinbero.v1.SidFunctionCreateRequest
+	3,  // 50: vinbero.v1.SidFunctionService.SidFunctionDelete:input_type -> vinbero.v1.SidFunctionDeleteRequest
+	5,  // 51: vinbero.v1.SidFunctionService.SidFunctionList:input_type -> vinbero.v1.SidFunctionListRequest
+	7,  // 52: vinbero.v1.SidFunctionService.SidFunctionGet:input_type -> vinbero.v1.SidFunctionGetRequest
+	10, // 53: vinbero.v1.Headendv4Service.Headendv4Create:input_type -> vinbero.v1.Headendv4CreateRequest
+	12, // 54: vinbero.v1.Headendv4Service.Headendv4Delete:input_type -> vinbero.v1.Headendv4DeleteRequest
+	14, // 55: vinbero.v1.Headendv4Service.Headendv4List:input_type -> vinbero.v1.Headendv4ListRequest
+	16, // 56: vinbero.v1.Headendv4Service.Headendv4Get:input_type -> vinbero.v1.Headendv4GetRequest
+	19, // 57: vinbero.v1.Headendv6Service.Headendv6Create:input_type -> vinbero.v1.Headendv6CreateRequest
+	21, // 58: vinbero.v1.Headendv6Service.Headendv6Delete:input_type -> vinbero.v1.Headendv6DeleteRequest
+	23, // 59: vinbero.v1.Headendv6Service.Headendv6List:input_type -> vinbero.v1.Headendv6ListRequest
+	25, // 60: vinbero.v1.Headendv6Service.Headendv6Get:input_type -> vinbero.v1.Headendv6GetRequest
+	28, // 61: vinbero.v1.DmacService.DmacList:input_type -> vinbero.v1.DmacListRequest
+	31, // 62: vinbero.v1.BdPeerService.BdPeerCreate:input_type -> vinbero.v1.BdPeerCreateRequest
+	33, // 63: vinbero.v1.BdPeerService.BdPeerDelete:input_type -> vinbero.v1.BdPeerDeleteRequest
+	35, // 64: vinbero.v1.BdPeerService.BdPeerList:input_type -> vinbero.v1.BdPeerListRequest
+	38, // 65: vinbero.v1.NetworkResourceService.VrfCreate:input_type -> vinbero.v1.VrfCreateRequest
+	40, // 66: vinbero.v1.NetworkResourceService.VrfDelete:input_type -> vinbero.v1.VrfDeleteRequest
+	42, // 67: vinbero.v1.NetworkResourceService.VrfList:input_type -> vinbero.v1.VrfListRequest
+	45, // 68: vinbero.v1.NetworkResourceService.BridgeCreate:input_type -> vinbero.v1.BridgeCreateRequest
+	47, // 69: vinbero.v1.NetworkResourceService.BridgeDelete:input_type -> vinbero.v1.BridgeDeleteRequest
+	49, // 70: vinbero.v1.NetworkResourceService.BridgeList:input_type -> vinbero.v1.BridgeListRequest
+	52, // 71: vinbero.v1.HeadendL2Service.HeadendL2Create:input_type -> vinbero.v1.HeadendL2CreateRequest
+	55, // 72: vinbero.v1.HeadendL2Service.HeadendL2Delete:input_type -> vinbero.v1.HeadendL2DeleteRequest
+	57, // 73: vinbero.v1.HeadendL2Service.HeadendL2List:input_type -> vinbero.v1.HeadendL2ListRequest
+	59, // 74: vinbero.v1.HeadendL2Service.HeadendL2Get:input_type -> vinbero.v1.HeadendL2GetRequest
+	2,  // 75: vinbero.v1.SidFunctionService.SidFunctionCreate:output_type -> vinbero.v1.SidFunctionCreateResponse
+	4,  // 76: vinbero.v1.SidFunctionService.SidFunctionDelete:output_type -> vinbero.v1.SidFunctionDeleteResponse
+	6,  // 77: vinbero.v1.SidFunctionService.SidFunctionList:output_type -> vinbero.v1.SidFunctionListResponse
+	8,  // 78: vinbero.v1.SidFunctionService.SidFunctionGet:output_type -> vinbero.v1.SidFunctionGetResponse
+	11, // 79: vinbero.v1.Headendv4Service.Headendv4Create:output_type -> vinbero.v1.Headendv4CreateResponse
+	13, // 80: vinbero.v1.Headendv4Service.Headendv4Delete:output_type -> vinbero.v1.Headendv4DeleteResponse
+	15, // 81: vinbero.v1.Headendv4Service.Headendv4List:output_type -> vinbero.v1.Headendv4ListResponse
+	17, // 82: vinbero.v1.Headendv4Service.Headendv4Get:output_type -> vinbero.v1.Headendv4GetResponse
+	20, // 83: vinbero.v1.Headendv6Service.Headendv6Create:output_type -> vinbero.v1.Headendv6CreateResponse
+	22, // 84: vinbero.v1.Headendv6Service.Headendv6Delete:output_type -> vinbero.v1.Headendv6DeleteResponse
+	24, // 85: vinbero.v1.Headendv6Service.Headendv6List:output_type -> vinbero.v1.Headendv6ListResponse
+	26, // 86: vinbero.v1.Headendv6Service.Headendv6Get:output_type -> vinbero.v1.Headendv6GetResponse
+	29, // 87: vinbero.v1.DmacService.DmacList:output_type -> vinbero.v1.DmacListResponse
+	32, // 88: vinbero.v1.BdPeerService.BdPeerCreate:output_type -> vinbero.v1.BdPeerCreateResponse
+	34, // 89: vinbero.v1.BdPeerService.BdPeerDelete:output_type -> vinbero.v1.BdPeerDeleteResponse
+	36, // 90: vinbero.v1.BdPeerService.BdPeerList:output_type -> vinbero.v1.BdPeerListResponse
+	39, // 91: vinbero.v1.NetworkResourceService.VrfCreate:output_type -> vinbero.v1.VrfCreateResponse
+	41, // 92: vinbero.v1.NetworkResourceService.VrfDelete:output_type -> vinbero.v1.VrfDeleteResponse
+	43, // 93: vinbero.v1.NetworkResourceService.VrfList:output_type -> vinbero.v1.VrfListResponse
+	46, // 94: vinbero.v1.NetworkResourceService.BridgeCreate:output_type -> vinbero.v1.BridgeCreateResponse
+	48, // 95: vinbero.v1.NetworkResourceService.BridgeDelete:output_type -> vinbero.v1.BridgeDeleteResponse
+	50, // 96: vinbero.v1.NetworkResourceService.BridgeList:output_type -> vinbero.v1.BridgeListResponse
+	53, // 97: vinbero.v1.HeadendL2Service.HeadendL2Create:output_type -> vinbero.v1.HeadendL2CreateResponse
+	56, // 98: vinbero.v1.HeadendL2Service.HeadendL2Delete:output_type -> vinbero.v1.HeadendL2DeleteResponse
+	58, // 99: vinbero.v1.HeadendL2Service.HeadendL2List:output_type -> vinbero.v1.HeadendL2ListResponse
+	60, // 100: vinbero.v1.HeadendL2Service.HeadendL2Get:output_type -> vinbero.v1.HeadendL2GetResponse
+	75, // [75:101] is the sub-list for method output_type
+	49, // [49:75] is the sub-list for method input_type
+	49, // [49:49] is the sub-list for extension type_name
+	49, // [49:49] is the sub-list for extension extendee
+	0,  // [0:49] is the sub-list for field type_name
 }
 
 func init() { file_vinbero_v1_vinbero_proto_init() }

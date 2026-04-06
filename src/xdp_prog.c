@@ -24,6 +24,7 @@
 #include "xdp_stats.h"
 #include "xdpcap.h"
 #include "srv6_endpoint.h"
+#include "srv6_end_b6.h"
 #include "xdp_vlan.h"
 #include "bum_meta.h"
 
@@ -354,6 +355,10 @@ static __always_inline int process_srv6_localsid(
         return process_end_dt46(ctx, ip6h, srh, entry);
     case SRV6_LOCAL_ACTION_END_DT2:
         return process_end_dt2(ctx, ip6h, srh, entry);
+    case SRV6_LOCAL_ACTION_END_B6:
+        return process_end_b6_insert(ctx, ip6h, srh, entry);
+    case SRV6_LOCAL_ACTION_END_B6_ENCAPS:
+        return process_end_b6_encaps(ctx, ip6h, srh, entry);
     default:
         return XDP_PASS;
     }

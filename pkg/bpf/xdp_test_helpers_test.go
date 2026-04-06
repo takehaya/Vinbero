@@ -27,7 +27,9 @@ const (
 	actionEndDT4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
 	actionEndDT6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
 	actionEndDT46 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
-	actionEndDT2  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	actionEndDT2      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	actionEndB6       = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6)
+	actionEndB6Encaps = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS)
 )
 
 // SRv6 Flavor constants (must match srv6_local_flavor enum in src/srv6.h)
@@ -138,6 +140,25 @@ func (h *xdpTestHelper) createSidFunctionWithOIF(prefix string, action uint8, oi
 	binary.NativeEndian.PutUint32(entry.Nexthop[:4], oif)
 	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
+
+func (h *xdpTestHelper) createSidFunctionB6(prefix string, action uint8, headendMode uint8, srcAddr [16]byte, segments [10][16]byte, numSegments uint8) {
+	h.t.Helper()
+	// Create SID function entry in sid_function_map
+	entry := &SidFunctionEntry{Action: action}
+	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.B6: %v", err)
+	}
+	// Create policy entry in end_b6_policy_map
+	policy := &HeadendEntry{
+		Mode:        headendMode,
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+	}
+	if err := h.mapOps.CreateEndB6Policy(prefix, policy); err != nil {
+		h.t.Fatalf("Failed to create End.B6 policy entry: %v", err)
 	}
 }
 

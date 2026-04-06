@@ -34,10 +34,10 @@
 | End.DT6              | Supported   | Endpoint with decap and IPv6 table lookup                   |
 | End.DT4              | Supported   | Endpoint with decap and IPv4 table lookup                   |
 | End.DT46             | Supported   | Endpoint with decap and IP (v4/v6) table lookup             |
-| End.B6.Insert        |             | Endpoint bound to SRv6 policy with insertion                |
-| End.B6.Insert.Red    |             | End.B6.Insert with reduced SRH                              |
-| End.B6.Encaps        |             | Endpoint bound to SRv6 policy with encapsulation            |
-| End.B6.Encaps.Red    |             | End.B6.Encaps with reduced SRH                              |
+| End.B6.Insert        | Supported   | Endpoint bound to SRv6 policy with insertion                |
+| End.B6.Insert.Red    | Supported   | End.B6.Insert with reduced SRH                              |
+| End.B6.Encaps        | Supported   | Endpoint bound to SRv6 policy with encapsulation            |
+| End.B6.Encaps.Red    | Supported   | End.B6.Encaps with reduced SRH                              |
 | End.BM               |             | Endpoint bound to SR-MPLS policy                            |
 | End.S                |             | Endpoint in search of a target in table T                   |
 | Args.Mob.Session     |             | Consider with End.MAP, End.DT and End.DX                    |

@@ -23,6 +23,7 @@ service SidFunctionService {
 //   - End.DT4/DT6/DT46: vrf_name (VRF-aware FIB lookup)
 //   - End.DT2: bd_id + bridge_name (L2 FDB lookup + bridge flood on miss)
 //   - End.DX2: oif (direct L2 output to specific interface)
+//   - End.B6/End.B6.Encaps: segments + headend_mode + src_addr (policy binding)
 //   - End/End.X/End.T: basic SRv6 transit, no extra fields needed
 message SidFunction {
   Srv6LocalAction action = 1; // Endpoint function type
@@ -37,6 +38,8 @@ message SidFunction {
   string vrf_name = 10; // VRF device name (End.DT4/DT6/DT46: resolved to ifindex for FIB lookup)
   uint32 bd_id = 11; // Bridge Domain ID (End.DT2: FDB scope for MAC learning)
   string bridge_name = 12; // Bridge device name (End.DT2: redirect target on FDB miss)
+  repeated string segments = 13; // Policy segment list (End.B6/End.B6.Encaps)
+  Srv6HeadendBehavior headend_mode = 14; // Policy mode: H_INSERT, H_ENCAPS, etc. (End.B6)
 }
 
 message SidFunctionCreateRequest {

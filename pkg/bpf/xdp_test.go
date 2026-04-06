@@ -1635,3 +1635,265 @@ func TestXDPProgEndDT2NoSRH(t *testing.T) {
 		t.Errorf("Unexpected return %d for End.DT2 no-SRH", ret)
 	}
 }
+
+// ========== End.B6 Tests ==========
+
+func TestXDPProgEndB6Insert(t *testing.T) {
+	tests := []struct {
+		name         string
+		sidPrefix    string
+		policySegs   []string
+		policySrc    string
+		pktSrcIP     string
+		pktDstIP     string // = SID
+		srhSegments  []string
+		segmentsLeft uint8
+	}{
+		{
+			"End.B6.Insert single policy segment",
+			"fd00:b6::1/128",
+			[]string{"fd00:a::1"},
+			"fc00::1",
+			"fd00:1::1",
+			"fd00:b6::1",
+			[]string{"fd00:1:100::3", "fd00:b6::1"}, // SRH: [S0, SID], SL=1
+			1,
+		},
+		{
+			"End.B6.Insert two policy segments",
+			"fd00:b6::2/128",
+			[]string{"fd00:a::1", "fd00:a::2"},
+			"fc00::1",
+			"fd00:1::1",
+			"fd00:b6::2",
+			[]string{"fd00:1:200::3", "fd00:b6::2"}, // SRH: [S0, SID], SL=1
+			1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+
+			// Create End.B6 SID function with H.Insert policy
+			srcAddr, _ := ParseIPv6(tt.policySrc)
+			policySegments, numPolicySegs, _ := ParseSegments(tt.policySegs)
+			h.createSidFunctionB6(tt.sidPrefix, actionEndB6,
+				uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT),
+				srcAddr, policySegments, numPolicySegs)
+
+			// Build SRv6 packet with DA=SID
+			srhSegs := make([]net.IP, len(tt.srhSegments))
+			for i, s := range tt.srhSegments {
+				srhSegs[i] = net.ParseIP(s)
+			}
+			pkt, err := buildSRv6Packet(net.ParseIP(tt.pktSrcIP), net.ParseIP(tt.pktDstIP), srhSegs, tt.segmentsLeft)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+			if ret != XDP_PASS {
+				t.Fatalf("Expected XDP_PASS, got %d", ret)
+			}
+
+			// After End.B6.Insert:
+			// 1. Endpoint: SL--, DA = SRH[new_SL] (= srhSegments[0] for SL=1→0)
+			// 2. H.Insert: new SRH inserted, DA = first policy segment
+			if !verifyEtherType(t, outPkt, 0x86DD) {
+				return
+			}
+
+			// DA = first policy segment, Src preserved (H.Insert: no outer header)
+			origSrc, _ := ParseIPv6(tt.pktSrcIP)
+			if !verifyOuterIPv6Header(t, outPkt, origSrc, policySegments[0]) {
+				return
+			}
+
+			// SRH should be present (the newly inserted policy SRH)
+			if !verifySRHPresent(t, outPkt) {
+				return
+			}
+
+			t.Logf("SUCCESS: End.B6.Insert with %d policy segments", numPolicySegs)
+		})
+	}
+}
+
+func TestXDPProgEndB6InsertRed(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	sidPrefix := "fd00:b6::10/128"
+	policySrc := "fc00::1"
+	policySegs := []string{"fd00:a::1", "fd00:a::2"}
+
+	srcAddr, _ := ParseIPv6(policySrc)
+	policySegments, numPolicySegs, _ := ParseSegments(policySegs)
+	h.createSidFunctionB6(sidPrefix, actionEndB6,
+		uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT_RED),
+		srcAddr, policySegments, numPolicySegs)
+
+	// Build SRv6 packet: DA=SID, SRH=[next_sid, SID], SL=1
+	srhSegs := []net.IP{net.ParseIP("fd00:1:100::3"), net.ParseIP("fd00:b6::10")}
+	pkt, err := buildSRv6Packet(net.ParseIP("fd00:1::1"), net.ParseIP("fd00:b6::10"), srhSegs, 1)
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	ret, outPkt := h.run(pkt)
+	if ret != XDP_PASS {
+		t.Fatalf("Expected XDP_PASS, got %d", ret)
+	}
+
+	if !verifyEtherType(t, outPkt, 0x86DD) {
+		return
+	}
+
+	// DA = first policy segment, Src preserved
+	origSrc, _ := ParseIPv6("fd00:1::1")
+	if !verifyOuterIPv6Header(t, outPkt, origSrc, policySegments[0]) {
+		return
+	}
+
+	if !verifySRHPresent(t, outPkt) {
+		return
+	}
+
+	t.Logf("SUCCESS: End.B6.Insert.Red with %d policy segments", numPolicySegs)
+}
+
+func TestXDPProgEndB6Encaps(t *testing.T) {
+	tests := []struct {
+		name         string
+		sidPrefix    string
+		policySegs   []string
+		policySrc    string
+		pktSrcIP     string
+		pktDstIP     string
+		srhSegments  []string
+		segmentsLeft uint8
+	}{
+		{
+			"End.B6.Encaps single policy segment",
+			"fd00:b6::20/128",
+			[]string{"fd00:a::1"},
+			"fc00::1",
+			"fd00:1::1",
+			"fd00:b6::20",
+			[]string{"fd00:1:100::3", "fd00:b6::20"},
+			1,
+		},
+		{
+			"End.B6.Encaps two policy segments",
+			"fd00:b6::21/128",
+			[]string{"fd00:a::1", "fd00:a::2"},
+			"fc00::1",
+			"fd00:1::1",
+			"fd00:b6::21",
+			[]string{"fd00:1:200::3", "fd00:b6::21"},
+			1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+
+			srcAddr, _ := ParseIPv6(tt.policySrc)
+			policySegments, numPolicySegs, _ := ParseSegments(tt.policySegs)
+			h.createSidFunctionB6(tt.sidPrefix, actionEndB6Encaps,
+				uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+				srcAddr, policySegments, numPolicySegs)
+
+			srhSegs := make([]net.IP, len(tt.srhSegments))
+			for i, s := range tt.srhSegments {
+				srhSegs[i] = net.ParseIP(s)
+			}
+			pkt, err := buildSRv6Packet(net.ParseIP(tt.pktSrcIP), net.ParseIP(tt.pktDstIP), srhSegs, tt.segmentsLeft)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+			if ret != XDP_PASS {
+				t.Fatalf("Expected XDP_PASS, got %d", ret)
+			}
+
+			if !verifyEtherType(t, outPkt, 0x86DD) {
+				return
+			}
+
+			// Outer: src = policy src_addr, DA = first policy segment
+			if !verifyOuterIPv6Header(t, outPkt, srcAddr, policySegments[0]) {
+				return
+			}
+
+			// Outer SRH should be present
+			if !verifySRHPresent(t, outPkt) {
+				return
+			}
+
+			t.Logf("SUCCESS: End.B6.Encaps with %d policy segments", numPolicySegs)
+		})
+	}
+}
+
+func TestXDPProgEndB6EncapsRed(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	sidPrefix := "fd00:b6::30/128"
+	policySrc := "fc00::1"
+	policySegs := []string{"fd00:a::1", "fd00:a::2"}
+
+	srcAddr, _ := ParseIPv6(policySrc)
+	policySegments, numPolicySegs, _ := ParseSegments(policySegs)
+	h.createSidFunctionB6(sidPrefix, actionEndB6Encaps,
+		uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED),
+		srcAddr, policySegments, numPolicySegs)
+
+	srhSegs := []net.IP{net.ParseIP("fd00:1:100::3"), net.ParseIP("fd00:b6::30")}
+	pkt, err := buildSRv6Packet(net.ParseIP("fd00:1::1"), net.ParseIP("fd00:b6::30"), srhSegs, 1)
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	ret, outPkt := h.run(pkt)
+	if ret != XDP_PASS {
+		t.Fatalf("Expected XDP_PASS, got %d", ret)
+	}
+
+	if !verifyEtherType(t, outPkt, 0x86DD) {
+		return
+	}
+
+	// Outer: src = policy src_addr, DA = first policy segment
+	if !verifyOuterIPv6Header(t, outPkt, srcAddr, policySegments[0]) {
+		return
+	}
+
+	t.Logf("SUCCESS: End.B6.Encaps.Red with %d policy segments", numPolicySegs)
+}
+
+func TestXDPProgEndB6SL0(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	sidPrefix := "fd00:b6::40/128"
+	srcAddr, _ := ParseIPv6("fc00::1")
+	policySegments, numPolicySegs, _ := ParseSegments([]string{"fd00:a::1"})
+	h.createSidFunctionB6(sidPrefix, actionEndB6,
+		uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT),
+		srcAddr, policySegments, numPolicySegs)
+
+	// SL=0 → should pass to upper layer
+	srhSegs := []net.IP{net.ParseIP("fd00:b6::40")}
+	pkt, err := buildSRv6Packet(net.ParseIP("fd00:1::1"), net.ParseIP("fd00:b6::40"), srhSegs, 0)
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	ret, _ := h.run(pkt)
+	if ret != XDP_PASS {
+		t.Errorf("Expected XDP_PASS for SL=0, got %d", ret)
+	}
+	t.Logf("SUCCESS: End.B6 SL=0 passes to upper layer")
+}
