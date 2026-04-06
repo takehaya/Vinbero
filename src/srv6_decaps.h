@@ -92,4 +92,61 @@ static __always_inline int srv6_decap(
     return 0;
 }
 
+// Decapsulate without SRH (for Reduced SRH single-segment case)
+// Strips outer Ethernet + IPv6 header only (no SRH to strip)
+// Returns: 0 on success, -1 on failure
+static __always_inline int srv6_decap_nosrh(
+    struct xdp_md *ctx,
+    __u8 expected_inner_proto,
+    __u8 actual_nexthdr)
+{
+    if (actual_nexthdr != expected_inner_proto)
+        return -1;
+
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return -1;
+
+    struct ethhdr saved_eth;
+    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
+
+    int strip_len = ETH_HLEN + sizeof(struct ipv6hdr);
+
+    if (bpf_xdp_adjust_head(ctx, strip_len))
+        return -1;
+
+    if (bpf_xdp_adjust_head(ctx, -(int)ETH_HLEN))
+        return -1;
+
+    data = (void *)(long)ctx->data;
+    data_end = (void *)(long)ctx->data_end;
+
+    eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return -1;
+
+    __builtin_memcpy(eth, &saved_eth, sizeof(struct ethhdr));
+    return 0;
+}
+
+// Decapsulate L2 frame without SRH
+// Strips outer Ethernet + IPv6, exposes inner L2 frame
+// Returns: 0 on success, -1 on failure
+static __always_inline int srv6_decap_l2_nosrh(
+    struct xdp_md *ctx,
+    __u8 actual_nexthdr)
+{
+    if (actual_nexthdr != IPPROTO_ETHERNET)
+        return -1;
+
+    int strip_len = ETH_HLEN + sizeof(struct ipv6hdr);
+    if (bpf_xdp_adjust_head(ctx, strip_len))
+        return -1;
+
+    return 0;
+}
+
 #endif // SRV6_DECAPS_H

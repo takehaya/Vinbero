@@ -13,12 +13,12 @@
 | Function         | Status      | Description                                      |
 |------------------|-------------|--------------------------------------------------|
 | H                |             | Headend with SRH insertion                       |
-| H.Insert         |             | Headend with SRH insertion (existing IPv6)       |
-| H.Insert.Red     |             | H.Insert with reduced SRH                        |
+| H.Insert         | Supported   | Headend with SRH insertion (existing IPv6)       |
+| H.Insert.Red     | Supported   | H.Insert with reduced SRH                        |
 | H.Encaps         | Supported   | Headend with encapsulation in outer IPv6 header  |
-| H.Encaps.Red     |             | H.Encaps with reduced SRH                        |
+| H.Encaps.Red     | Supported   | H.Encaps with reduced SRH                        |
 | H.Encaps.L2      | Supported   | H.Encaps with L2 payload                         |
-| H.Encaps.L2.Red  |             | H.Encaps.L2 with reduced SRH                     |
+| H.Encaps.L2.Red  | Supported   | H.Encaps.L2 with reduced SRH                     |
 
 ### Functions associated with a SID
 
@@ -34,10 +34,10 @@
 | End.DT6              | Supported   | Endpoint with decap and IPv6 table lookup                   |
 | End.DT4              | Supported   | Endpoint with decap and IPv4 table lookup                   |
 | End.DT46             | Supported   | Endpoint with decap and IP (v4/v6) table lookup             |
-| End.B6.Insert        |             | Endpoint bound to SRv6 policy with insertion                |
-| End.B6.Insert.Red    |             | End.B6.Insert with reduced SRH                              |
-| End.B6.Encaps        |             | Endpoint bound to SRv6 policy with encapsulation            |
-| End.B6.Encaps.Red    |             | End.B6.Encaps with reduced SRH                              |
+| End.B6.Insert        | Supported   | Endpoint bound to SRv6 policy with insertion                |
+| End.B6.Insert.Red    | Supported   | End.B6.Insert with reduced SRH                              |
+| End.B6.Encaps        | Supported   | Endpoint bound to SRv6 policy with encapsulation            |
+| End.B6.Encaps.Red    | Supported   | End.B6.Encaps with reduced SRH                              |
 | End.BM               |             | Endpoint bound to SR-MPLS policy                            |
 | End.S                |             | Endpoint in search of a target in table T                   |
 | Args.Mob.Session     |             | Consider with End.MAP, End.DT and End.DX                    |

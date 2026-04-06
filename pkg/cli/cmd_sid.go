@@ -30,6 +30,8 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "nexthop", Usage: "Next-hop IPv6 address (for End.X)"},
 					&cli.UintFlag{Name: "oif", Usage: "Output interface index (for End.DX2)"},
 					&cli.StringFlag{Name: "flavor", Usage: "SRv6 flavor (PSP, USP, USD)"},
+					&cli.StringFlag{Name: "segments", Usage: "Policy segment list, comma-separated (for End.B6)"},
+					&cli.StringFlag{Name: "headend-mode", Usage: "Policy mode: H_INSERT, H_INSERT_RED, H_ENCAPS, H_ENCAPS_RED (for End.B6)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -47,6 +49,23 @@ func sidFunctionCommand() *cli.Command {
 						}
 					}
 
+					var headendMode v1.Srv6HeadendBehavior
+					if m := c.String("headend-mode"); m != "" {
+						var err error
+						headendMode, err = resolveMode(m)
+						if err != nil {
+							return err
+						}
+					}
+
+					var segments []string
+					if s := c.String("segments"); s != "" {
+						segments = strings.Split(s, ",")
+						for i := range segments {
+							segments[i] = strings.TrimSpace(segments[i])
+						}
+					}
+
 					sid := &v1.SidFunction{
 						Action:        action,
 						TriggerPrefix: c.String("trigger-prefix"),
@@ -58,6 +77,8 @@ func sidFunctionCommand() *cli.Command {
 						BdId:          uint32(c.Uint("bd-id")),
 						BridgeName:    c.String("bridge-name"),
 						Oif:           uint32(c.Uint("oif")),
+						Segments:      segments,
+						HeadendMode:   headendMode,
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),

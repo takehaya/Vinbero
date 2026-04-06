@@ -56,6 +56,13 @@ func TestResolveMode(t *testing.T) {
 		{"H_ENCAPS_L2", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, false},
 		{"H.Encaps.L2", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, false},
 		{"SRV6_HEADEND_BEHAVIOR_H_INSERT", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT, false},
+		// Reduced SRH modes
+		{"H_ENCAPS_RED", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED, false},
+		{"H.Encaps.Red", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED, false},
+		{"H_ENCAPS_L2_RED", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED, false},
+		{"H.Encaps.L2.Red", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED, false},
+		{"H_INSERT_RED", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT_RED, false},
+		{"H.Insert.Red", v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT_RED, false},
 		{"INVALID", 0, true},
 	}
 
@@ -152,6 +159,9 @@ func TestFormatMode(t *testing.T) {
 	}{
 		{v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS, "H_ENCAPS"},
 		{v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT, "H_INSERT"},
+		{v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED, "H_ENCAPS_RED"},
+		{v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED, "H_ENCAPS_L2_RED"},
+		{v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_INSERT_RED, "H_INSERT_RED"},
 		{v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_UNSPECIFIED, ""},
 	}
 

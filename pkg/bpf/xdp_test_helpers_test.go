@@ -27,7 +27,9 @@ const (
 	actionEndDT4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
 	actionEndDT6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
 	actionEndDT46 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
-	actionEndDT2  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	actionEndDT2      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	actionEndB6       = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6)
+	actionEndB6Encaps = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS)
 )
 
 // SRv6 Flavor constants (must match srv6_local_flavor enum in src/srv6.h)
@@ -141,48 +143,35 @@ func (h *xdpTestHelper) createSidFunctionWithOIF(prefix string, action uint8, oi
 	}
 }
 
-func (h *xdpTestHelper) createHeadendEntry(prefix string, srcAddr, dstAddr [16]byte, segments [10][16]byte, numSegments uint8, isIPv4 bool) {
+func (h *xdpTestHelper) createSidFunctionB6(prefix string, action uint8, headendMode uint8, srcAddr [16]byte, segments [10][16]byte, numSegments uint8) {
 	h.t.Helper()
-	entry := &HeadendEntry{
-		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+	// Create SID function entry in sid_function_map
+	entry := &SidFunctionEntry{Action: action}
+	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.B6: %v", err)
+	}
+	// Create policy entry in end_b6_policy_map
+	policy := &HeadendEntry{
+		Mode:        headendMode,
 		NumSegments: numSegments,
 		SrcAddr:     srcAddr,
-		DstAddr:     dstAddr,
 		Segments:    segments,
 	}
-	var err error
-	if isIPv4 {
-		err = h.mapOps.CreateHeadendV4(prefix, entry)
-	} else {
-		err = h.mapOps.CreateHeadendV6(prefix, entry)
+	if err := h.mapOps.CreateEndB6Policy(prefix, policy); err != nil {
+		h.t.Fatalf("Failed to create End.B6 policy entry: %v", err)
 	}
-	if err != nil {
-		h.t.Fatalf("Failed to create headend entry: %v", err)
-	}
-	h.t.Cleanup(func() {
-		if isIPv4 {
-			_ = h.mapOps.DeleteHeadendV4(prefix)
-		} else {
-			_ = h.mapOps.DeleteHeadendV6(prefix)
-		}
-	})
+}
+
+func (h *xdpTestHelper) createHeadendEntry(prefix string, srcAddr, dstAddr [16]byte, segments [10][16]byte, numSegments uint8, isIPv4 bool) {
+	h.t.Helper()
+	h.createHeadendEntryWithMode(prefix, srcAddr, dstAddr, segments, numSegments, isIPv4,
+		vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
 }
 
 func (h *xdpTestHelper) createHeadendL2Entry(ifindex uint32, vlanID uint16, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, bdID uint16) {
 	h.t.Helper()
-	entry := &HeadendEntry{
-		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
-		NumSegments: numSegments,
-		SrcAddr:     srcAddr,
-		Segments:    segments,
-		BdId:        bdID,
-	}
-	if err := h.mapOps.CreateHeadendL2(ifindex, vlanID, entry); err != nil {
-		h.t.Fatalf("Failed to create headend L2 entry: %v", err)
-	}
-	h.t.Cleanup(func() {
-		_ = h.mapOps.DeleteHeadendL2(ifindex, vlanID)
-	})
+	h.createHeadendL2EntryWithMode(ifindex, vlanID, srcAddr, segments, numSegments, bdID,
+		vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2)
 }
 
 // ========== Packet Builders ==========
@@ -453,7 +442,14 @@ func verifyEtherType(t *testing.T, pkt []byte, expectedType uint16) bool {
 	return true
 }
 
+// verifyOuterIPv6Header verifies an outer IPv6 header with Next Header = 43 (Routing/SRH)
 func verifyOuterIPv6Header(t *testing.T, pkt []byte, expectedSrc, expectedDst [16]byte) bool {
+	t.Helper()
+	return verifyOuterIPv6HeaderWithNextHdr(t, pkt, expectedSrc, expectedDst, 43)
+}
+
+// verifyOuterIPv6HeaderWithNextHdr verifies an outer IPv6 header with a specified Next Header value
+func verifyOuterIPv6HeaderWithNextHdr(t *testing.T, pkt []byte, expectedSrc, expectedDst [16]byte, expectedNextHdr uint8) bool {
 	t.Helper()
 	offset := ethHeaderLen
 	if len(pkt) < offset+ipv6HeaderLen {
@@ -465,8 +461,8 @@ func verifyOuterIPv6Header(t *testing.T, pkt []byte, expectedSrc, expectedDst [1
 		t.Errorf("Expected IPv6 version 6, got %d", version)
 		return false
 	}
-	if nextHeader := pkt[offset+6]; nextHeader != 43 {
-		t.Errorf("Expected Next Header 43 (Routing), got %d", nextHeader)
+	if nextHeader := pkt[offset+6]; nextHeader != expectedNextHdr {
+		t.Errorf("Expected Next Header %d, got %d", expectedNextHdr, nextHeader)
 		return false
 	}
 
@@ -702,6 +698,227 @@ func overrideDstMAC(pkt []byte, mac net.HardwareAddr) {
 func convertSegmentsToBytes(segments [10][16]byte, numSegments int) [][16]byte {
 	result := make([][16]byte, numSegments)
 	for i := range numSegments {
+		result[i] = segments[numSegments-1-i]
+	}
+	return result
+}
+
+// createHeadendL2EntryWithMode creates a headend L2 entry with a specific mode
+func (h *xdpTestHelper) createHeadendL2EntryWithMode(ifindex uint32, vlanID uint16, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, bdID uint16, mode vinberov1.Srv6HeadendBehavior) {
+	h.t.Helper()
+	entry := &HeadendEntry{
+		Mode:        uint8(mode),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+		BdId:        bdID,
+	}
+	if err := h.mapOps.CreateHeadendL2(ifindex, vlanID, entry); err != nil {
+		h.t.Fatalf("Failed to create headend L2 entry: %v", err)
+	}
+	h.t.Cleanup(func() {
+		_ = h.mapOps.DeleteHeadendL2(ifindex, vlanID)
+	})
+}
+
+// ========== Reduced SRH (.Red) Test Helpers ==========
+
+// createHeadendEntryWithMode creates a headend entry with a specific mode
+func (h *xdpTestHelper) createHeadendEntryWithMode(prefix string, srcAddr, dstAddr [16]byte, segments [10][16]byte, numSegments uint8, isIPv4 bool, mode vinberov1.Srv6HeadendBehavior) {
+	h.t.Helper()
+	entry := &HeadendEntry{
+		Mode:        uint8(mode),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		DstAddr:     dstAddr,
+		Segments:    segments,
+	}
+	var err error
+	if isIPv4 {
+		err = h.mapOps.CreateHeadendV4(prefix, entry)
+	} else {
+		err = h.mapOps.CreateHeadendV6(prefix, entry)
+	}
+	if err != nil {
+		h.t.Fatalf("Failed to create headend entry: %v", err)
+	}
+	h.t.Cleanup(func() {
+		if isIPv4 {
+			_ = h.mapOps.DeleteHeadendV4(prefix)
+		} else {
+			_ = h.mapOps.DeleteHeadendV6(prefix)
+		}
+	})
+}
+
+// verifyOuterIPv6HeaderNoSRH verifies IPv6 header where nexthdr is inner proto (not routing)
+func verifyOuterIPv6HeaderNoSRH(t *testing.T, pkt []byte, expectedSrc, expectedDst [16]byte, expectedNextHdr uint8) bool {
+	t.Helper()
+	return verifyOuterIPv6HeaderWithNextHdr(t, pkt, expectedSrc, expectedDst, expectedNextHdr)
+}
+
+// verifyInnerPacketNoSRH verifies inner packet after outer IPv6 with no SRH
+func verifyInnerPacketNoSRH(t *testing.T, pkt []byte, expectedSrc, expectedDst net.IP, isIPv4 bool) bool {
+	t.Helper()
+	innerOffset := ethHeaderLen + ipv6HeaderLen // no SRH
+
+	if isIPv4 {
+		if len(pkt) < innerOffset+ipv4HeaderLen {
+			t.Errorf("Packet too short for inner IPv4: %d bytes", len(pkt))
+			return false
+		}
+		if version := (pkt[innerOffset] >> 4) & 0x0F; version != 4 {
+			t.Errorf("Expected inner IPv4 version 4, got %d", version)
+			return false
+		}
+		actualSrc := net.IP(pkt[innerOffset+12 : innerOffset+16])
+		actualDst := net.IP(pkt[innerOffset+16 : innerOffset+20])
+		if !actualSrc.Equal(expectedSrc) {
+			t.Errorf("Inner src mismatch: expected %v, got %v", expectedSrc, actualSrc)
+			return false
+		}
+		if !actualDst.Equal(expectedDst) {
+			t.Errorf("Inner dst mismatch: expected %v, got %v", expectedDst, actualDst)
+			return false
+		}
+	} else {
+		if len(pkt) < innerOffset+ipv6HeaderLen {
+			t.Errorf("Packet too short for inner IPv6: %d bytes", len(pkt))
+			return false
+		}
+		if version := (pkt[innerOffset] >> 4) & 0x0F; version != 6 {
+			t.Errorf("Expected inner IPv6 version 6, got %d", version)
+			return false
+		}
+		actualSrc := net.IP(pkt[innerOffset+8 : innerOffset+24])
+		actualDst := net.IP(pkt[innerOffset+24 : innerOffset+40])
+		if !actualSrc.Equal(expectedSrc) {
+			t.Errorf("Inner src mismatch: expected %v, got %v", expectedSrc, actualSrc)
+			return false
+		}
+		if !actualDst.Equal(expectedDst) {
+			t.Errorf("Inner dst mismatch: expected %v, got %v", expectedDst, actualDst)
+			return false
+		}
+	}
+	return true
+}
+
+// verifyReducedSRHStructure verifies a reduced SRH structure
+// Reduced SRH has segments_left = numSegmentsInSRH (points beyond the segment list)
+func verifyReducedSRHStructure(t *testing.T, pkt []byte, numSegmentsInSRH int, expectedSegments [][16]byte) bool {
+	t.Helper()
+	srhOffset := ethHeaderLen + ipv6HeaderLen
+	srhLen := srhBaseLen + numSegmentsInSRH*ipv6AddrLen
+
+	if len(pkt) < srhOffset+srhLen {
+		t.Errorf("Packet too short for reduced SRH: need %d bytes, have %d", srhOffset+srhLen, len(pkt))
+		return false
+	}
+
+	if routingType := pkt[srhOffset+2]; routingType != 4 {
+		t.Errorf("Expected Routing Type 4 (SR), got %d", routingType)
+		return false
+	}
+
+	expectedSL := uint8(numSegmentsInSRH)
+	if segmentsLeft := pkt[srhOffset+3]; segmentsLeft != expectedSL {
+		t.Errorf("Expected Segments Left %d, got %d", expectedSL, segmentsLeft)
+		return false
+	}
+
+	for i, expectedSeg := range expectedSegments {
+		segOffset := srhOffset + srhBaseLen + i*ipv6AddrLen
+		var actualSeg [16]byte
+		copy(actualSeg[:], pkt[segOffset:segOffset+ipv6AddrLen])
+		if !bytes.Equal(actualSeg[:], expectedSeg[:]) {
+			t.Errorf("Segment[%d] mismatch: expected %x, got %x", i, expectedSeg, actualSeg)
+			return false
+		}
+	}
+	return true
+}
+
+// buildEncapsulatedPacketNoSRH builds outer IPv6 (no SRH) + inner packet for nosrh endpoint tests
+func buildEncapsulatedPacketNoSRH(
+	outerSrcIP, outerDstIP net.IP,
+	innerSrcIP, innerDstIP net.IP,
+	innerType innerPacketType,
+) ([]byte, error) {
+	eth := newTestEthernet(layers.EthernetTypeIPv6)
+	nextHdrProto := layers.IPProtocol(4)
+	if innerType == innerTypeIPv6 {
+		nextHdrProto = layers.IPProtocol(41)
+	}
+	outerIP6 := &layers.IPv6{
+		Version: 6, SrcIP: outerSrcIP, DstIP: outerDstIP,
+		NextHeader: nextHdrProto, HopLimit: 64,
+	}
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if innerType == innerTypeIPv4 {
+		innerIP4 := &layers.IPv4{
+			Version: 4, IHL: 5, TTL: 64,
+			Protocol: layers.IPProtocolICMPv4, SrcIP: innerSrcIP.To4(), DstIP: innerDstIP.To4(),
+		}
+		icmp := &layers.ICMPv4{
+			TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+			Id: 1234, Seq: 1,
+		}
+		if err := gopacket.SerializeLayers(buf, opts, eth, outerIP6, innerIP4, icmp, gopacket.Payload(newTestPayload(64))); err != nil {
+			return nil, err
+		}
+	} else {
+		innerIP6 := &layers.IPv6{
+			Version: 6, SrcIP: innerSrcIP, DstIP: innerDstIP,
+			NextHeader: layers.IPProtocolICMPv6, HopLimit: 64,
+		}
+		icmp, icmpEcho := newTestICMPv6Echo()
+		_ = icmp.SetNetworkLayerForChecksum(innerIP6)
+		if err := gopacket.SerializeLayers(buf, opts, eth, outerIP6, innerIP6, icmp, icmpEcho, gopacket.Payload(newTestPayload(64))); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+// buildL2EncapsulatedPacketNoSRH builds outer IPv6 (nexthdr=IPPROTO_ETHERNET) + inner L2 frame
+func buildL2EncapsulatedPacketNoSRH(
+	outerSrcIP, outerDstIP net.IP,
+	innerVlanID uint16,
+	innerSrcIP, innerDstIP net.IP,
+	isIPv4Inner bool,
+) ([]byte, error) {
+	var innerFrame []byte
+	var err error
+	if isIPv4Inner {
+		innerFrame, err = buildVlanTaggedIPv4Packet(innerVlanID, innerSrcIP.To4(), innerDstIP.To4())
+	} else {
+		innerFrame, err = buildVlanTaggedIPv6Packet(innerVlanID, innerSrcIP, innerDstIP)
+	}
+	if err != nil {
+		return nil, err
+	}
+	eth := newTestEthernet(layers.EthernetTypeIPv6)
+	outerIP6 := &layers.IPv6{
+		Version: 6, SrcIP: outerSrcIP, DstIP: outerDstIP,
+		NextHeader: layers.IPProtocol(143), HopLimit: 64,
+	}
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, outerIP6, gopacket.Payload(innerFrame)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// convertReducedSegmentsToBytes converts segments for Reduced SRH verification
+// For H.Encaps.Red: omit segments[0], reverse the rest
+// Input: segments[0..N-1], Output: [SN-1, ..., S1] (segments[1..N-1] reversed)
+func convertReducedSegmentsToBytes(segments [10][16]byte, numSegments int) [][16]byte {
+	reducedCount := numSegments - 1
+	result := make([][16]byte, reducedCount)
+	for i := range reducedCount {
 		result[i] = segments[numSegments-1-i]
 	}
 	return result
