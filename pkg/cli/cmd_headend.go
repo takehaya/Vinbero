@@ -181,15 +181,21 @@ func headendL2Command() *cli.Command {
 					&cli.StringFlag{Name: "src-addr", Required: true, Usage: "Outer IPv6 source address"},
 					&cli.StringFlag{Name: "segments", Required: true, Usage: "Segment list (comma-separated)"},
 					&cli.UintFlag{Name: "bd-id", Usage: "Bridge Domain ID (0 = direct encap)"},
+					&cli.StringFlag{Name: "mode", Value: "H_ENCAPS_L2", Usage: "Headend mode (H_ENCAPS_L2, H_ENCAPS_L2_RED)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
+					mode, err := resolveMode(c.String("mode"))
+					if err != nil {
+						return err
+					}
 					entry := &v1.HeadendL2{
 						InterfaceName: c.String("interface"),
 						VlanId:        uint32(c.Uint("vlan-id")),
 						SrcAddr:       c.String("src-addr"),
 						Segments:      strings.Split(c.String("segments"), ","),
 						BdId:          uint32(c.Uint("bd-id")),
+						Mode:          mode,
 					}
 					resp, err := clients.Hl2.HeadendL2Create(context.Background(),
 						connect.NewRequest(&v1.HeadendL2CreateRequest{HeadendL2S: []*v1.HeadendL2{entry}}))
@@ -236,7 +242,7 @@ func headendL2Command() *cli.Command {
 					if useJSON(c) {
 						return printJSON(resp.Msg.HeadendL2S)
 					}
-					headers := []string{"INTERFACE", "VLAN", "SRC ADDR", "SEGMENTS", "BD_ID"}
+					headers := []string{"INTERFACE", "VLAN", "SRC ADDR", "SEGMENTS", "BD_ID", "MODE"}
 					var rows [][]string
 					for _, h := range resp.Msg.HeadendL2S {
 						rows = append(rows, []string{
@@ -245,6 +251,7 @@ func headendL2Command() *cli.Command {
 							h.SrcAddr,
 							strings.Join(h.Segments, ","),
 							fmt.Sprintf("%d", h.BdId),
+							formatMode(h.Mode),
 						})
 					}
 					printTable(headers, rows)

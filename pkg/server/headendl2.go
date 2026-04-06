@@ -160,25 +160,36 @@ func (s *HeadendL2Server) HeadendL2Get(
 	return connect.NewResponse(resp), nil
 }
 
-// protoToEntry converts a protobuf HeadendL2 to a BPF map entry
-func (s *HeadendL2Server) protoToEntry(headend *v1.HeadendL2) (*bpf.HeadendEntry, error) {
-	srcAddr, err := bpf.ParseIPv6(headend.SrcAddr)
+// buildL2HeadendEntry builds a HeadendEntry from L2 headend parameters.
+// Shared by HeadendL2Server and BdPeerServer.
+func buildL2HeadendEntry(srcAddrStr string, segments []string, mode v1.Srv6HeadendBehavior, bdID uint32) (*bpf.HeadendEntry, error) {
+	srcAddr, err := bpf.ParseIPv6(srcAddrStr)
 	if err != nil {
 		return nil, err
 	}
 
-	segments, numSegments, err := bpf.ParseSegments(headend.Segments)
+	segs, numSegments, err := bpf.ParseSegments(segments)
 	if err != nil {
 		return nil, err
+	}
+
+	m := uint8(mode)
+	if mode == v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_UNSPECIFIED {
+		m = uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2)
 	}
 
 	return &bpf.HeadendEntry{
-		Mode:        uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
+		Mode:        m,
 		NumSegments: numSegments,
 		SrcAddr:     srcAddr,
-		Segments:    segments,
-		BdId:        uint16(headend.BdId),
+		Segments:    segs,
+		BdId:        uint16(bdID),
 	}, nil
+}
+
+// protoToEntry converts a protobuf HeadendL2 to a BPF map entry
+func (s *HeadendL2Server) protoToEntry(headend *v1.HeadendL2) (*bpf.HeadendEntry, error) {
+	return buildL2HeadendEntry(headend.SrcAddr, headend.Segments, headend.Mode, headend.BdId)
 }
 
 // entryToProto converts a BPF map entry to a protobuf HeadendL2
@@ -195,5 +206,6 @@ func (s *HeadendL2Server) entryToProto(key bpf.HeadendL2Key, entry *bpf.HeadendE
 		Segments:      bpf.FormatSegments(entry.Segments, entry.NumSegments),
 		BdId:          uint32(entry.BdId),
 		InterfaceName: ifaceName,
+		Mode:          v1.Srv6HeadendBehavior(entry.Mode),
 	}
 }

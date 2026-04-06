@@ -25,4 +25,14 @@ static __always_inline bool headend_should_encaps_l2(struct headend_entry *entry
     return entry->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2;
 }
 
+// Check if headend entry is valid and mode is H.Encaps.L2 or H.Encaps.L2.Red
+static __always_inline bool headend_should_encaps_l2_any(struct headend_entry *entry)
+{
+    if (!entry) {
+        return false;
+    }
+    return entry->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2 ||
+           entry->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED;
+}
+
 #endif // SRV6_HEADEND_H

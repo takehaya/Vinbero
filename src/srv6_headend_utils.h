@@ -33,6 +33,36 @@ static __always_inline int copy_segments_to_srh(
     return 0;
 }
 
+// Copy segments to SRH in reverse order, omitting segments[0] (Reduced SRH)
+// For H.Encaps.Red: segments[0] is already in IPv6 DA, copy segments[1..N-1] reversed
+// Input: [S1, S2, S3] -> SRH storage: [S3, S2] (S1 omitted)
+// num_segments must be >= 2 (caller ensures this)
+static __always_inline int copy_segments_to_srh_reduced(
+    void *srh_segments,
+    void *data_end,
+    __u8 segments[MAX_SEGMENTS][16],
+    __u8 num_segments)
+{
+    if (num_segments < 2 || num_segments > MAX_SEGMENTS)
+        return -1;
+
+    __u8 reduced_count = num_segments - 1;
+
+    #pragma unroll
+    for (__u8 i = 0; i < MAX_SEGMENTS; i++) {
+        if (i < reduced_count) {
+            void *dst = srh_segments + (i * 16);
+            if (dst + 16 > data_end)
+                return -1;
+            __u8 idx = num_segments - 1 - i;
+            if (idx >= MAX_SEGMENTS)
+                return -1;
+            __builtin_memcpy(dst, &segments[idx], 16);
+        }
+    }
+    return 0;
+}
+
 // Copy a specific segment by index from SRH to destination
 // Used by process_end to update DA with segments[new_sl]
 // Returns 0 on success, -1 on failure

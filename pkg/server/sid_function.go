@@ -47,6 +47,28 @@ func (s *SidFunctionServer) SidFunctionCreate(
 			continue
 		}
 
+		// Create End.B6 policy entry if segments are specified
+		if len(sidFunc.Segments) > 0 {
+			policyEntry, err := s.buildPolicyEntry(sidFunc)
+			if err != nil {
+				// Rollback: remove the SID function entry
+				_ = s.mapOps.DeleteSidFunction(sidFunc.TriggerPrefix)
+				resp.Errors = append(resp.Errors, &v1.OperationError{
+					TriggerPrefix: sidFunc.TriggerPrefix,
+					Reason:        fmt.Sprintf("policy: %s", err.Error()),
+				})
+				continue
+			}
+			if err := s.mapOps.CreateEndB6Policy(sidFunc.TriggerPrefix, policyEntry); err != nil {
+				_ = s.mapOps.DeleteSidFunction(sidFunc.TriggerPrefix)
+				resp.Errors = append(resp.Errors, &v1.OperationError{
+					TriggerPrefix: sidFunc.TriggerPrefix,
+					Reason:        fmt.Sprintf("policy map: %s", err.Error()),
+				})
+				continue
+			}
+		}
+
 		resp.Created = append(resp.Created, sidFunc)
 	}
 
@@ -71,6 +93,8 @@ func (s *SidFunctionServer) SidFunctionDelete(
 			})
 			continue
 		}
+		// Best-effort cleanup of End.B6 policy entry
+		_ = s.mapOps.DeleteEndB6Policy(prefix)
 		resp.DeletedTriggerPrefixes = append(resp.DeletedTriggerPrefixes, prefix)
 	}
 
@@ -141,7 +165,7 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		Nexthop:      nexthop,
 		ArgSrcOffset: uint8(sidFunc.ArgSrcOffset),
 		ArgDstOffset: uint8(sidFunc.ArgDstOffset),
-		BdId: uint16(sidFunc.BdId),
+		BdId:         uint16(sidFunc.BdId),
 	}
 
 	// Resolve vrf_name → vrf_ifindex for End.DT4/DT6/DT46
@@ -167,7 +191,7 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 
 // entryToProto converts a BPF map entry to a protobuf SidFunction
 func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEntry) *v1.SidFunction {
-	return &v1.SidFunction{
+	sf := &v1.SidFunction{
 		Action:        v1.Srv6LocalAction(entry.Action),
 		TriggerPrefix: prefix,
 		SrcAddr:       bpf.FormatIPv6(entry.SrcAddr),
@@ -180,4 +204,36 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 		BdId:          uint32(entry.BdId),
 		BridgeName:    ifindexToName(entry.BridgeIfindex),
 	}
+
+	// Include policy fields for End.B6/End.B6.Encaps from policy map
+	if entry.Action == uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6) ||
+		entry.Action == uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS) {
+		policy, err := s.mapOps.GetEndB6Policy(prefix)
+		if err == nil && policy != nil {
+			sf.Segments = bpf.FormatSegments(policy.Segments, policy.NumSegments)
+			sf.HeadendMode = v1.Srv6HeadendBehavior(policy.Mode)
+		}
+	}
+
+	return sf
+}
+
+// buildPolicyEntry creates a HeadendEntry for the End.B6 policy map
+func (s *SidFunctionServer) buildPolicyEntry(sidFunc *v1.SidFunction) (*bpf.HeadendEntry, error) {
+	srcAddr, err := bpf.ParseIPv6(sidFunc.SrcAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	segments, numSegments, err := bpf.ParseSegments(sidFunc.Segments)
+	if err != nil {
+		return nil, err
+	}
+
+	return &bpf.HeadendEntry{
+		Mode:        uint8(sidFunc.HeadendMode),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+	}, nil
 }

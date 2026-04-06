@@ -44,10 +44,13 @@ enum srv6_local_flavor {
 // Maps to Srv6HeadendBehavior enum in protobuf
 enum srv6_headend_behavior {
     SRV6_HEADEND_BEHAVIOR_UNSPECIFIED = 0,
-    SRV6_HEADEND_BEHAVIOR_H_INSERT = 1,     // H.Insert (Insert SRH after IPv6 header)
-    SRV6_HEADEND_BEHAVIOR_H_ENCAPS = 2,     // H.Encaps (Encapsulate with outer IPv6+SRH)
-    SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2 = 3,  // H.Encaps.L2 (L2 frame encapsulation)
-    SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D = 4,   // H.M.GTP4.D (GTP-U encapsulation)
+    SRV6_HEADEND_BEHAVIOR_H_INSERT = 1,        // H.Insert (Insert SRH after IPv6 header)
+    SRV6_HEADEND_BEHAVIOR_H_ENCAPS = 2,        // H.Encaps (Encapsulate with outer IPv6+SRH)
+    SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2 = 3,     // H.Encaps.L2 (L2 frame encapsulation)
+    SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D = 4,      // H.M.GTP4.D (GTP-U encapsulation)
+    SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED = 5,    // H.Encaps.Red (Reduced SRH encapsulation)
+    SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED = 6, // H.Encaps.L2.Red (Reduced SRH L2 encapsulation)
+    SRV6_HEADEND_BEHAVIOR_H_INSERT_RED = 7,    // H.Insert.Red (Reduced SRH insertion)
 };
 
 // Protocol numbers

@@ -268,6 +268,45 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 	return result, nil
 }
 
+// ===== End.B6 Policy Map Operations =====
+
+// CreateEndB6Policy adds a policy entry for End.B6/End.B6.Encaps
+func (m *MapOperations) CreateEndB6Policy(triggerPrefix string, entry *HeadendEntry) error {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return fmt.Errorf("failed to build LPM key: %w", err)
+	}
+	if err := m.objs.EndB6PolicyMap.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put End.B6 policy entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteEndB6Policy removes a policy entry for End.B6
+func (m *MapOperations) DeleteEndB6Policy(triggerPrefix string) error {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return fmt.Errorf("failed to build LPM key: %w", err)
+	}
+	if err := m.objs.EndB6PolicyMap.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete End.B6 policy entry: %w", err)
+	}
+	return nil
+}
+
+// GetEndB6Policy retrieves a policy entry for End.B6
+func (m *MapOperations) GetEndB6Policy(triggerPrefix string) (*HeadendEntry, error) {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build LPM key: %w", err)
+	}
+	var entry HeadendEntry
+	if err := m.objs.EndB6PolicyMap.Lookup(key, &entry); err != nil {
+		return nil, fmt.Errorf("failed to lookup End.B6 policy entry: %w", err)
+	}
+	return &entry, nil
+}
+
 // ===== Headend L2 Map Operations =====
 
 // CreateHeadendL2 adds a headend L2 entry to the map (keyed by port + VLAN)
