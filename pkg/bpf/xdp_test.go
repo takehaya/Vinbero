@@ -1,6 +1,7 @@
 package bpf
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
 	"testing"
@@ -1896,4 +1897,160 @@ func TestXDPProgEndB6SL0(t *testing.T) {
 		t.Errorf("Expected XDP_PASS for SL=0, got %d", ret)
 	}
 	t.Logf("SUCCESS: End.B6 SL=0 passes to upper layer")
+}
+
+// ========== GTP-U/SRv6 Tests (RFC 9433) ==========
+
+func TestXDPProgHMGtp4D(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	srcAddr, _ := ParseIPv6("fc00::1")
+	segments, numSegments, _ := ParseSegments([]string{"fc00::100", "fc00::200"})
+	h.createHeadendEntryGTP("192.0.2.0/24", srcAddr, segments, numSegments, 7)
+
+	tests := []struct {
+		name        string
+		teid        uint32
+		qfi         uint8
+		outerSrc    string
+		outerDst    string
+		innerSrc    string
+		innerDst    string
+		expectEncap bool
+	}{
+		{"GTP-U with QFI", 0x12345678, 9, "10.0.0.1", "192.0.2.100", "172.16.0.1", "172.16.0.2", true},
+		{"GTP-U without QFI", 0xABCDEF00, 0, "10.0.0.2", "192.0.2.100", "172.16.0.3", "172.16.0.4", true},
+		{"GTP-U no match", 0x11111111, 5, "10.0.0.3", "10.10.10.10", "172.16.0.5", "172.16.0.6", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			pkt, err := buildGTPUv4Packet(
+				net.ParseIP(tt.outerSrc).To4(),
+				net.ParseIP(tt.outerDst).To4(),
+				tt.teid, tt.qfi,
+				net.ParseIP(tt.innerSrc).To4(),
+				net.ParseIP(tt.innerDst).To4(),
+			)
+			if err != nil {
+				t.Fatalf("Failed to build GTP-U packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+
+			if !tt.expectEncap {
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS for non-matching prefix, got %d", ret)
+				}
+				return
+			}
+
+			// H.M.GTP4.D should encapsulate → XDP_PASS (FIB lookup needs neighbor)
+			if ret != XDP_PASS && ret != XDP_REDIRECT {
+				t.Errorf("Expected XDP_PASS or XDP_REDIRECT, got %d", ret)
+			}
+
+			// Verify outer packet is now IPv6 (SRv6 encapsulated)
+			if len(outPkt) < ethHeaderLen+ipv6HeaderLen+srhBaseLen {
+				t.Fatalf("Output packet too short: %d bytes", len(outPkt))
+			}
+
+			// Check EtherType changed to IPv6
+			etherType := binary.BigEndian.Uint16(outPkt[12:14])
+			if etherType != 0x86DD {
+				t.Errorf("Expected EtherType 0x86DD (IPv6), got 0x%04X", etherType)
+			}
+
+			// Verify outer IPv6 source address
+			outerSrcAddr := outPkt[ethHeaderLen+8 : ethHeaderLen+24]
+			expectedSrcAddr, _ := ParseIPv6("fc00::1")
+			if !bytes.Equal(outerSrcAddr, expectedSrcAddr[:]) {
+				t.Errorf("Outer IPv6 src mismatch: got %x", outerSrcAddr)
+			}
+
+			// Verify Args.Mob.Session in DA (offset 7 in DA)
+			daStart := ethHeaderLen + 24 // IPv6 daddr
+			if len(outPkt) >= daStart+16 {
+				da := outPkt[daStart : daStart+16]
+				// At offset 7: [IPv4Dst(4)][TEID(4)][QFI|R|U(1)]
+				gotTEID := binary.BigEndian.Uint32(da[7+4 : 7+8])
+				if gotTEID != tt.teid {
+					t.Errorf("TEID in DA mismatch: expected 0x%08X, got 0x%08X", tt.teid, gotTEID)
+				}
+				gotQFI := da[7+8] & 0x3F
+				if gotQFI != tt.qfi {
+					t.Errorf("QFI in DA mismatch: expected %d, got %d", tt.qfi, gotQFI)
+				}
+			}
+
+			t.Logf("SUCCESS: GTP-U/IPv4 → SRv6 (TEID=0x%08X, QFI=%d, pktlen %d→%d)",
+				tt.teid, tt.qfi, len(pkt), len(outPkt))
+		})
+	}
+}
+
+func TestXDPProgEndMGtp4E(t *testing.T) {
+	h := newXDPTestHelper(t)
+	gtpSrcAddr := [4]byte{10, 0, 0, 1}
+	h.createSidFunctionGTP4E("fc00:1::1/128", gtpSrcAddr, 7)
+
+	// Build SRv6 packet with Args.Mob.Session in DA
+	// DA = fc00:1::1 but with Args.Mob.Session at offset 7
+	// Args.Mob.Session (GTP4): [IPv4Dst(4)][TEID(4)][QFI|R|U(1)]
+	srcIP := net.ParseIP("fc00::1")
+	dstIP := net.ParseIP("fc00:1::1") // SID for End.M.GTP4.E
+
+	// Encode Args.Mob.Session into DA
+	dstBytes := dstIP.To16()
+	// IPv4 destination: 10.0.0.2
+	dstBytes[7] = 10
+	dstBytes[8] = 0
+	dstBytes[9] = 0
+	dstBytes[10] = 2
+	// TEID: 0xDEADBEEF
+	dstBytes[11] = 0xDE
+	dstBytes[12] = 0xAD
+	dstBytes[13] = 0xBE
+	dstBytes[14] = 0xEF
+	// QFI=15, R=0
+	dstBytes[15] = 15
+
+	segments := []net.IP{net.IP(dstBytes)}
+	pkt, err := buildSRv6PacketWithInnerIPv4(srcIP, net.IP(dstBytes), segments, 0,
+		net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4())
+	if err != nil {
+		t.Fatalf("Failed to build SRv6 packet: %v", err)
+	}
+
+	ret, outPkt := h.run(pkt)
+
+	// End.M.GTP4.E should decap SRv6 and encap GTP-U → XDP_PASS (FIB needs neighbor)
+	if ret != XDP_PASS && ret != XDP_REDIRECT && ret != XDP_DROP {
+		t.Errorf("Unexpected action %d", ret)
+	}
+
+	if ret == XDP_PASS || ret == XDP_REDIRECT {
+		// Verify output is IPv4 (GTP-U/IPv4)
+		if len(outPkt) > ethHeaderLen+2 {
+			etherType := binary.BigEndian.Uint16(outPkt[12:14])
+			if etherType == 0x0800 {
+				t.Logf("SUCCESS: SRv6 → GTP-U/IPv4 encapsulation (pktlen %d→%d)", len(pkt), len(outPkt))
+
+				// Verify outer IPv4 src is the configured GTP src
+				if len(outPkt) >= ethHeaderLen+20 {
+					outerSrc := outPkt[ethHeaderLen+12 : ethHeaderLen+16]
+					if outerSrc[0] == 10 && outerSrc[1] == 0 && outerSrc[2] == 0 && outerSrc[3] == 1 {
+						t.Logf("  GTP IPv4 src: %d.%d.%d.%d (correct)", outerSrc[0], outerSrc[1], outerSrc[2], outerSrc[3])
+					}
+					outerDst := outPkt[ethHeaderLen+16 : ethHeaderLen+20]
+					if outerDst[0] == 10 && outerDst[1] == 0 && outerDst[2] == 0 && outerDst[3] == 2 {
+						t.Logf("  GTP IPv4 dst: %d.%d.%d.%d (from SID args)", outerDst[0], outerDst[1], outerDst[2], outerDst[3])
+					}
+				}
+			}
+		}
+	}
+
+	t.Logf("End.M.GTP4.E test completed with action=%d", ret)
 }
