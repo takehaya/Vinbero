@@ -27,6 +27,10 @@ enum srv6_local_action {
     SRV6_LOCAL_ACTION_END_AM = 15,
     SRV6_LOCAL_ACTION_END_BPF = 16,  // BPF-defined local action
     SRV6_LOCAL_ACTION_END_DT2 = 17,  // End.DT2 (L2 table lookup with FDB)
+    SRV6_LOCAL_ACTION_END_M_GTP6_D = 18,     // End.M.GTP6.D (GTP-U/IPv6 => SRv6)
+    SRV6_LOCAL_ACTION_END_M_GTP6_D_DI = 19,  // End.M.GTP6.D.Di (GTP-U/IPv6 => SRv6, Drop-In)
+    SRV6_LOCAL_ACTION_END_M_GTP6_E = 20,     // End.M.GTP6.E (SRv6 => GTP-U/IPv6)
+    SRV6_LOCAL_ACTION_END_M_GTP4_E = 21,     // End.M.GTP4.E (SRv6 => GTP-U/IPv4)
 };
 
 // ========== SRv6 Local Flavor ==========

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -133,12 +134,17 @@ func (s *Headendv4Server) protoToEntry(headend *v1.Headendv4) (*bpf.HeadendEntry
 		return nil, err
 	}
 
+	if headend.ArgsOffset > 15 {
+		return nil, fmt.Errorf("args_offset must be 0-15, got %d", headend.ArgsOffset)
+	}
+
 	return &bpf.HeadendEntry{
-		Mode:        uint8(headend.Mode),
-		NumSegments: numSegments,
-		SrcAddr:     srcAddr,
-		DstAddr:     dstAddr,
-		Segments:    segments,
+		Mode:          uint8(headend.Mode),
+		NumSegments:   numSegments,
+		SrcAddr:       srcAddr,
+		DstAddr:       dstAddr,
+		Segments:      segments,
+		ArgsOffset: uint8(headend.ArgsOffset),
 	}, nil
 }
 
@@ -150,5 +156,6 @@ func (s *Headendv4Server) entryToProto(prefix string, entry *bpf.HeadendEntry) *
 		SrcAddr:       bpf.FormatIPv6(entry.SrcAddr),
 		DstAddr:       bpf.FormatIPv6(entry.DstAddr),
 		Segments:      bpf.FormatSegments(entry.Segments, entry.NumSegments),
+		ArgsOffset: uint32(entry.ArgsOffset),
 	}
 }

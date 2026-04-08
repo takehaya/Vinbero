@@ -912,6 +912,113 @@ func buildL2EncapsulatedPacketNoSRH(
 	return buf.Bytes(), nil
 }
 
+// buildSRv6PacketWithInnerIPv4 builds an SRv6 packet encapsulating an inner IPv4 packet.
+// SRH nexthdr = IPPROTO_IPIP (4)
+func buildSRv6PacketWithInnerIPv4(srcIP, dstIP net.IP, segments []net.IP, segmentsLeft uint8, innerSrc, innerDst net.IP) ([]byte, error) {
+	eth := newTestEthernet(layers.EthernetTypeIPv6)
+	ip6 := &layers.IPv6{
+		Version: 6, SrcIP: srcIP, DstIP: dstIP,
+		NextHeader: layers.IPProtocol(43), HopLimit: 64,
+	}
+
+	numSegments := len(segments)
+	srv6 := &packet.Srv6Layer{
+		NextHeader: 4, // IPPROTO_IPIP
+		HdrExtLen:  uint8(numSegments * 2),
+		RoutingType: 4, SegmentsLeft: segmentsLeft,
+		LastEntry: uint8(numSegments - 1), Segments: segmentsToNetipAddr(segments),
+	}
+
+	// Inner IPv4 packet
+	innerIP := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolICMPv4,
+		SrcIP: innerSrc, DstIP: innerDst,
+	}
+	innerICMP := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		Id: 5678, Seq: 1,
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, ip6, srv6, innerIP, innerICMP, gopacket.Payload(newTestPayload(32))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// GTP-U action/mode constants
+const (
+	actionEndMGTP4E = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E)
+	actionEndMGTP6D = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D)
+	actionEndMGTP6E = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E)
+	modeHMGTP4D     = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D)
+)
+
+// createHeadendEntryGTP creates a headend v4 entry with H.M.GTP4.D mode and args_offset
+func (h *xdpTestHelper) createHeadendEntryGTP(prefix string, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
+	h.t.Helper()
+	entry := &HeadendEntry{
+		Mode:          modeHMGTP4D,
+		NumSegments:   numSegments,
+		SrcAddr:       srcAddr,
+		Segments:      segments,
+		ArgsOffset: argsOffset,
+	}
+	if err := h.mapOps.CreateHeadendV4(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create GTP headend entry: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteHeadendV4(prefix) })
+}
+
+// createSidFunctionGTP4E creates a SID function entry for End.M.GTP4.E
+func (h *xdpTestHelper) createSidFunctionGTP4E(prefix string, gtpV4SrcAddr [4]byte, argsOffset uint8) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{
+		Action:        actionEndMGTP4E,
+		ArgsOffset: argsOffset,
+		GtpV4SrcAddr:  gtpV4SrcAddr,
+	}
+	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.M.GTP4.E: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteSidFunction(prefix) })
+}
+
+// buildGTPUv4Packet builds a GTP-U/IPv4 packet with optional PDU Session Container.
+// Structure: [Eth][IPv4][UDP:2152][GTP-U][opt+PSC (if qfi>0)][Inner IPv4 ICMP]
+func buildGTPUv4Packet(outerSrc, outerDst net.IP, teid uint32, qfi uint8, innerSrc, innerDst net.IP) ([]byte, error) {
+	innerIP := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolICMPv4,
+		SrcIP:    innerSrc.To4(),
+		DstIP:    innerDst.To4(),
+	}
+	innerICMP := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		Id: 5678, Seq: 1,
+	}
+
+	gtp := &packet.GTPULayer{TEID: teid, QFI: qfi}
+	udp := &layers.UDP{SrcPort: 2152, DstPort: 2152}
+	outerIP := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolUDP,
+		SrcIP:    outerSrc.To4(),
+		DstIP:    outerDst.To4(),
+	}
+	_ = udp.SetNetworkLayerForChecksum(outerIP)
+	eth := newTestEthernet(layers.EthernetTypeIPv4)
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, outerIP, udp, gtp, innerIP, innerICMP, gopacket.Payload(newTestPayload(32))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // convertReducedSegmentsToBytes converts segments for Reduced SRH verification
 // For H.Encaps.Red: omit segments[0], reverse the rest
 // Input: segments[0..N-1], Output: [SN-1, ..., S1] (segments[1..N-1] reversed)

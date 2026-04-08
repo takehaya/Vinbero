@@ -92,6 +92,22 @@ struct {
     __uint(max_entries, 1024);
 } bd_peer_reverse_map SEC(".maps");
 
+// Per-CPU scratch buffer for mid-packet editing (e.g., End.M.GTP6.D header save/restore).
+// Used to work around BPF stack limit (512 bytes) by storing temporary data in map memory.
+// Max size covers ETH(14) + IPv6(40) + SRH(8 + MAX_SEGMENTS*16 = 168) = 222 bytes.
+#define SCRATCH_BUF_SIZE 224
+
+struct scratch_buf {
+    __u8 data[SCRATCH_BUF_SIZE];
+} __attribute__((packed));
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, struct scratch_buf);
+    __uint(max_entries, 1);
+} scratch_map SEC(".maps");
+
 // https://github.com/cloudflare/xdpcap
 // struct bpf_map_def SEC("maps") xdpcap_hook = XDPCAP_HOOK();
 struct xdpcap_hook {

@@ -157,15 +157,33 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		return nil, err
 	}
 
+	gtpV4Src, err := bpf.ParseIPv4Optional(sidFunc.GtpV4SrcAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate GTP-specific fields
+	action := v1.Srv6LocalAction(sidFunc.Action)
+	if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E {
+		if sidFunc.GtpV4SrcAddr == "" {
+			return nil, fmt.Errorf("gtp_v4_src_addr is required for END_M_GTP4_E")
+		}
+	}
+	if sidFunc.ArgsOffset > 15 {
+		return nil, fmt.Errorf("args_offset must be 0-15, got %d", sidFunc.ArgsOffset)
+	}
+
 	entry := &bpf.SidFunctionEntry{
-		Action:       uint8(sidFunc.Action),
-		Flavor:       uint8(sidFunc.Flavor),
-		SrcAddr:      srcAddr,
-		DstAddr:      dstAddr,
-		Nexthop:      nexthop,
-		ArgSrcOffset: uint8(sidFunc.ArgSrcOffset),
-		ArgDstOffset: uint8(sidFunc.ArgDstOffset),
-		BdId:         uint16(sidFunc.BdId),
+		Action:        uint8(sidFunc.Action),
+		Flavor:        uint8(sidFunc.Flavor),
+		SrcAddr:       srcAddr,
+		DstAddr:       dstAddr,
+		Nexthop:       nexthop,
+		ArgSrcOffset:  uint8(sidFunc.ArgSrcOffset),
+		ArgDstOffset:  uint8(sidFunc.ArgDstOffset),
+		BdId:          uint16(sidFunc.BdId),
+		ArgsOffset: uint8(sidFunc.ArgsOffset),
+		GtpV4SrcAddr:  gtpV4Src,
 	}
 
 	// Resolve vrf_name → vrf_ifindex for End.DT4/DT6/DT46
@@ -203,6 +221,8 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 		VrfName:       ifindexToName(entry.VrfIfindex),
 		BdId:          uint32(entry.BdId),
 		BridgeName:    ifindexToName(entry.BridgeIfindex),
+		ArgsOffset: uint32(entry.ArgsOffset),
+		GtpV4SrcAddr:  bpf.FormatIPv4Optional(entry.GtpV4SrcAddr),
 	}
 
 	// Include policy fields for End.B6/End.B6.Encaps from policy map
