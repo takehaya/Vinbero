@@ -983,6 +983,7 @@ func (h *xdpTestHelper) createSidFunctionGTP4E(prefix string, gtpV4SrcAddr [4]by
 	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
 		h.t.Fatalf("Failed to create SID function entry for End.M.GTP4.E: %v", err)
 	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteSidFunction(prefix) })
 }
 
 // buildGTPUv4Packet builds a GTP-U/IPv4 packet with optional PDU Session Container.

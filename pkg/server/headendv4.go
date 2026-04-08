@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -131,6 +132,10 @@ func (s *Headendv4Server) protoToEntry(headend *v1.Headendv4) (*bpf.HeadendEntry
 	segments, numSegments, err := bpf.ParseSegments(headend.Segments)
 	if err != nil {
 		return nil, err
+	}
+
+	if headend.ArgsOffset > 15 {
+		return nil, fmt.Errorf("args_offset must be 0-15, got %d", headend.ArgsOffset)
 	}
 
 	return &bpf.HeadendEntry{

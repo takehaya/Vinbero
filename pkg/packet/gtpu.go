@@ -31,7 +31,7 @@ func (g *GTPULayer) LayerType() gopacket.LayerType {
 }
 
 func (g *GTPULayer) SerializeTo(b gopacket.SerializeBuffer, opts gopacket.SerializeOptions) error {
-	hasPSC := g.QFI > 0
+	hasPSC := g.QFI > 0 || g.RQI > 0
 
 	var hdrLen int
 	if hasPSC {
@@ -107,10 +107,17 @@ func (g *GTPULayer) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) err
 			g.QFI = data[hdrLen+2] & 0x3F
 			g.RQI = (data[hdrLen+2] >> 6) & 0x01
 			extLen := int(data[hdrLen]) * 4
+			if extLen == 0 || hdrLen+extLen > len(data) {
+				df.SetTruncated()
+				return fmt.Errorf("GTP-U extension header truncated")
+			}
 			hdrLen += extLen
 		}
 	}
 
+	if hdrLen > len(data) {
+		hdrLen = len(data)
+	}
 	g.BaseLayer = layers.BaseLayer{
 		Contents: data[:hdrLen],
 		Payload:  data[hdrLen:],

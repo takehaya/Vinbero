@@ -162,6 +162,17 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		return nil, err
 	}
 
+	// Validate GTP-specific fields
+	action := v1.Srv6LocalAction(sidFunc.Action)
+	if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E {
+		if sidFunc.GtpV4SrcAddr == "" {
+			return nil, fmt.Errorf("gtp_v4_src_addr is required for END_M_GTP4_E")
+		}
+	}
+	if sidFunc.ArgsOffset > 15 {
+		return nil, fmt.Errorf("args_offset must be 0-15, got %d", sidFunc.ArgsOffset)
+	}
+
 	entry := &bpf.SidFunctionEntry{
 		Action:        uint8(sidFunc.Action),
 		Flavor:        uint8(sidFunc.Flavor),

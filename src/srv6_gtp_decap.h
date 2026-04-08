@@ -127,7 +127,7 @@ static __always_inline int do_h_m_gtp4_d(
     // Patch Args.Mob.Session into DA and first SRH segment.
     // args_offset is per-entry (from map), masked to 0-7 for verifier safety
     // (max valid: 7, since offset + 9 <= 16 = IPv6 addr len).
-    if (args_offset > 0) {
+    {
         args_offset &= 0x07;
         __be32 teid_be = bpf_htonl(teid);
         __u8 qfi_rqi = ENCODE_QFI_RQI(qfi, rqi);
@@ -217,92 +217,143 @@ static __always_inline int process_end_m_gtp6_d(
                            data_end, &inner_nexthdr) != 0)
         return XDP_DROP;
 
-    // Update SRH: decrement SL, update DA to next segment
-    __u8 new_sl = srh->segments_left - 1;
-    srh->segments_left = new_sl;
+    __u16 gtp_strip = sizeof(struct udphdr) + gtp_info.hdr_total_len;
+    __u16 outer_headers = sizeof(struct ethhdr) + sizeof(struct ipv6hdr) + srh_total_len;
 
-    // Get next segment from SRH
+    // Compute next segment BEFORE any mutation (for fallback safety)
+    __u8 new_sl = srh->segments_left - 1;
     void *seg_base = (void *)srh + 8;
     void *next_seg = seg_base + ((__u32)new_sl * 16);
     if (next_seg + 16 > data_end)
         return XDP_DROP;
 
-    // Update IPv6 DA
-    __builtin_memcpy(&ip6h->daddr, next_seg, sizeof(struct in6_addr));
-
-    // Update SRH nexthdr to inner protocol (removing GTP-U layer)
-    srh->nexthdr = inner_nexthdr;
-
-    __u16 gtp_strip = sizeof(struct udphdr) + gtp_info.hdr_total_len;
-
-    // Update IPv6 payload_len (remove UDP+GTP-U)
+    // Validate payload_len adjustment
     __u16 old_payload = bpf_ntohs(ip6h->payload_len);
     if (gtp_strip > old_payload)
         return XDP_DROP;
-    ip6h->payload_len = bpf_htons(old_payload - gtp_strip);
 
-    // Encode Args.Mob.Session into DA and SRH segment (per-entry offset)
-    if (entry->args_offset > 0) {
-        __u8 g6off = entry->args_offset & 0x0B;  // max 11 (offset + 5 <= 16)
-        __be32 teid_be = bpf_htonl(teid);
-        __u8 qfi_rqi = ENCODE_QFI_RQI(qfi, rqi);
-
-        __u8 *da2 = (__u8 *)&ip6h->daddr + g6off;
-        if ((void *)(da2 + 5) > data_end)
-            return XDP_DROP;
-        __builtin_memcpy(da2, &teid_be, 4);
-        da2[4] = qfi_rqi;
-
-        __u8 *seg = (__u8 *)next_seg + g6off;
-        if ((void *)(seg + 5) > data_end)
-            return XDP_DROP;
-        __builtin_memcpy(seg, &teid_be, 4);
-        seg[4] = qfi_rqi;
-    }
-
-    // Mid-packet GTP-U removal using per-CPU scratch map to bypass BPF stack limit.
-    //
-    // Before: [ETH(14)][IPv6(40)][SRH(var)][UDP+GTP-U(gtp_strip)][Inner IP]
-    // Step 1: Save [ETH][IPv6][SRH] (already modified above) to scratch_map
-    // Step 2: bpf_xdp_adjust_head(+outer_headers + gtp_strip) — strip everything
-    // Step 3: bpf_xdp_adjust_head(-outer_headers) — re-add space for headers
-    // Step 4: Copy saved headers from scratch_map back to packet
-    // After:  [ETH(14)][IPv6(40)][SRH(var)][Inner IP]
-
-    __u16 outer_headers = sizeof(struct ethhdr) + sizeof(struct ipv6hdr) + srh_total_len;
+    // Check scratch feasibility BEFORE mutating any headers.
+    // If we can't do mid-packet stripping, return XDP_PASS with the packet untouched.
     if (outer_headers > SCRATCH_BUF_SIZE)
-        return XDP_PASS;  // SRH too large, fall back to kernel
+        return XDP_PASS;
 
-    // Step 1: Save outer headers to per-CPU scratch buffer
     __u32 scratch_key = 0;
     struct scratch_buf *scratch = bpf_map_lookup_elem(&scratch_map, &scratch_key);
     if (!scratch)
         return XDP_DROP;
 
     void *data = (void *)(long)ctx->data;
-    // Validate entire SCRATCH_BUF_SIZE is readable (verifier needs fixed-size proof)
-    if (data + SCRATCH_BUF_SIZE > data_end)
-        return XDP_DROP;
 
-    __builtin_memcpy(scratch->data, data, SCRATCH_BUF_SIZE);
+    // Bounds check: need outer_headers readable for save.
+    // Use tiered fixed-size memcpy to avoid overwriting inner payload on restore.
+    // ETH(14)+IPv6(40)+SRH: 1seg=78, 2seg=94, 3seg=110, 4seg=126
+    #define TIER1 78
+    #define TIER2 94
+    #define TIER3 110
+    #define TIER4 126
 
-    // Step 2: Strip ETH + IPv6 + SRH + UDP + GTP-U
+    __u16 copy_size;
+    if (outer_headers <= TIER1) {
+        if (data + TIER1 > data_end) return XDP_DROP;
+        copy_size = TIER1;
+    } else if (outer_headers <= TIER2) {
+        if (data + TIER2 > data_end) return XDP_DROP;
+        copy_size = TIER2;
+    } else if (outer_headers <= TIER3) {
+        if (data + TIER3 > data_end) return XDP_DROP;
+        copy_size = TIER3;
+    } else if (outer_headers <= TIER4) {
+        if (data + TIER4 > data_end) return XDP_DROP;
+        copy_size = TIER4;
+    } else {
+        return XDP_PASS;
+    }
+
+    // Step 1: Save outer headers (unmodified) to scratch
+    if (copy_size == TIER1)
+        __builtin_memcpy(scratch->data, data, TIER1);
+    else if (copy_size == TIER2)
+        __builtin_memcpy(scratch->data, data, TIER2);
+    else if (copy_size == TIER3)
+        __builtin_memcpy(scratch->data, data, TIER3);
+    else
+        __builtin_memcpy(scratch->data, data, TIER4);
+
+    // Step 2: Mutate headers in scratch buffer (not in the packet).
+    // scratch layout: [ETH(14)][IPv6(40)][SRH(8+segments)]
+    // Modify: SRH.segments_left, SRH.nexthdr, IPv6.daddr, IPv6.payload_len
+    #define SCR_IPV6_OFF  14
+    #define SCR_SRH_OFF   54
+
+    // SRH.segments_left
+    scratch->data[SCR_SRH_OFF + 3] = new_sl;
+
+    // SRH.nexthdr
+    scratch->data[SCR_SRH_OFF + 0] = inner_nexthdr;
+
+    // IPv6.payload_len (bytes 4-5 of IPv6 header)
+    __u16 new_payload = bpf_htons(old_payload - gtp_strip);
+    scratch->data[SCR_IPV6_OFF + 4] = (__u8)(new_payload >> 8);
+    scratch->data[SCR_IPV6_OFF + 5] = (__u8)(new_payload & 0xFF);
+
+    // IPv6 DA = next segment (bytes 24-39 of IPv6 header)
+    __builtin_memcpy(scratch->data + SCR_IPV6_OFF + 24, next_seg, 16);
+
+    // Encode Args.Mob.Session into scratch DA and SRH segment
+    {
+        __u8 g6off = entry->args_offset & 0x0B;
+        __be32 teid_be = bpf_htonl(teid);
+        __u8 qfi_rqi = ENCODE_QFI_RQI(qfi, rqi);
+
+        // Patch DA in scratch (offset 14+24+g6off)
+        __u8 da_off = SCR_IPV6_OFF + 24 + g6off;
+        if (da_off + 5 <= SCRATCH_BUF_SIZE) {
+            __builtin_memcpy(scratch->data + da_off, &teid_be, 4);
+            scratch->data[da_off + 4] = qfi_rqi;
+        }
+
+        // Patch SRH segment[new_sl] in scratch (offset 54+8+new_sl*16+g6off)
+        __u16 seg_off = SCR_SRH_OFF + 8 + (__u16)new_sl * 16 + g6off;
+        if (seg_off + 5 <= SCRATCH_BUF_SIZE) {
+            __builtin_memcpy(scratch->data + seg_off, &teid_be, 4);
+            scratch->data[seg_off + 4] = qfi_rqi;
+        }
+    }
+
+    #undef SCR_IPV6_OFF
+    #undef SCR_SRH_OFF
+
+    // Step 3: Strip ETH + IPv6 + SRH + UDP + GTP-U
     int total_strip = (int)(outer_headers + gtp_strip);
     if (bpf_xdp_adjust_head(ctx, total_strip))
         return XDP_DROP;
 
-    // Step 3: Re-add space for ETH + IPv6 + SRH
+    // Step 4: Re-add space for outer headers
     if (bpf_xdp_adjust_head(ctx, -(int)outer_headers))
         return XDP_DROP;
 
-    // Step 4: Write saved headers back from scratch buffer
+    // Step 5: Write modified headers back from scratch (exact size, no inner overwrite)
     data = (void *)(long)ctx->data;
     data_end = (void *)(long)ctx->data_end;
 
-    if (data + SCRATCH_BUF_SIZE > data_end)
-        return XDP_DROP;
+    if (copy_size == TIER1) {
+        if (data + TIER1 > data_end) return XDP_DROP;
+        __builtin_memcpy(data, scratch->data, TIER1);
+    } else if (copy_size == TIER2) {
+        if (data + TIER2 > data_end) return XDP_DROP;
+        __builtin_memcpy(data, scratch->data, TIER2);
+    } else if (copy_size == TIER3) {
+        if (data + TIER3 > data_end) return XDP_DROP;
+        __builtin_memcpy(data, scratch->data, TIER3);
+    } else {
+        if (data + TIER4 > data_end) return XDP_DROP;
+        __builtin_memcpy(data, scratch->data, TIER4);
+    }
 
-    __builtin_memcpy(data, scratch->data, SCRATCH_BUF_SIZE);
+    #undef TIER1
+    #undef TIER2
+    #undef TIER3
+    #undef TIER4
 
     // FIB lookup and redirect
     struct ethhdr *new_eth = data;
@@ -359,17 +410,10 @@ static __always_inline int process_end_m_gtp6_d_di(
     if (gtpu_parse(udp_ptr, data_end, &gtp_info) != 0)
         return XDP_PASS;
 
-    __u8 inner_nexthdr;
-    if (detect_inner_proto((void *)udp_ptr + sizeof(struct udphdr) + gtp_info.hdr_total_len,
-                           data_end, &inner_nexthdr) != 0)
-        return XDP_DROP;
-
-    // Update SRH nexthdr to point to inner protocol (bypassing GTP-U).
-    // GTP-U bytes remain in the packet but the kernel follows nexthdr to inner IP.
-    // payload_len is NOT adjusted: the dead GTP-U bytes are still counted,
-    // keeping the packet length consistent with actual data on the wire.
-    srh->nexthdr = inner_nexthdr;
-
+    // Drop-In: pass the packet to kernel without any modification.
+    // Modifying nexthdr while GTP-U bytes remain would create an inconsistent
+    // packet (nexthdr says IPv4/IPv6 but actual bytes are UDP+GTP-U).
+    // The kernel processes the packet as-is with nexthdr=UDP.
     return XDP_PASS;
 }
 

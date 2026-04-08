@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Send GTP-U/IPv6 test packets over SRv6 using scapy.
+"""Send GTP-U/IPv6 test packets using scapy.
 
 Usage:
   sudo ip netns exec gtp6-host1 python3 send_gtpu_v6.py [--qfi QFI] [--teid TEID]
 
-Sends an SRv6 packet carrying GTP-U/UDP payload to router1 (End.M.GTP6.D).
+Sends a plain IPv6/UDP/GTP-U packet to the specified destination SID.
+Note: This sends a direct GTP-U/IPv6 packet WITHOUT an SRH. For full SRv6+GTP-U
+testing with SRH, an SRH-aware packet generator is needed.
 """
 import argparse
 import sys

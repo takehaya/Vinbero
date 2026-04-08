@@ -129,17 +129,23 @@ static __always_inline int gtpu_parse(
         if (psc->length == 0)
             return -1;
 
+        __u16 psc_bytes = (__u16)psc->length * 4;
+        if (ext_ptr + psc_bytes > data_end)
+            return -1;
+
         result->qfi = psc->qfi_flags & 0x3F;
         result->rqi = (psc->qfi_flags >> 6) & 0x01;
-        result->hdr_total_len += (__u16)psc->length * 4;
+        result->hdr_total_len += psc_bytes;
     } else if (next_ext != 0x00) {
-        // Non-PDU-Session extension header: read length to skip it
         if (ext_ptr + 1 > data_end)
             return -1;
         __u8 ext_len = *((__u8 *)ext_ptr);
         if (ext_len == 0)
             return -1;
-        result->hdr_total_len += (__u16)ext_len * 4;
+        __u16 ext_bytes = (__u16)ext_len * 4;
+        if (ext_ptr + ext_bytes > data_end)
+            return -1;
+        result->hdr_total_len += ext_bytes;
     }
 
     return 0;
