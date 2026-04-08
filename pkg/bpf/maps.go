@@ -567,6 +567,34 @@ func FormatIPv6(addr [IPv6AddrLen]uint8) string {
 	return ip.String()
 }
 
+// ParseIPv4Optional parses an IPv4 address string into a 4-byte array.
+// Returns zero array if addr is empty (optional field).
+func ParseIPv4Optional(addr string) ([IPv4AddrLen]uint8, error) {
+	var result [IPv4AddrLen]uint8
+	if addr == "" {
+		return result, nil
+	}
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return result, fmt.Errorf("invalid IPv4 address: %s", addr)
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return result, fmt.Errorf("not an IPv4 address: %s", addr)
+	}
+	copy(result[:], ip4)
+	return result, nil
+}
+
+// FormatIPv4Optional formats a 4-byte array as an IPv4 address string.
+// Returns empty string if all bytes are zero.
+func FormatIPv4Optional(addr [IPv4AddrLen]uint8) string {
+	if addr == [IPv4AddrLen]uint8{} {
+		return ""
+	}
+	return net.IP(addr[:]).String()
+}
+
 // FormatSegments formats the segments array as a string slice
 func FormatSegments(segments [MaxSegments][IPv6AddrLen]uint8, numSegments uint8) []string {
 	result := make([]string, 0, numSegments)

@@ -16,10 +16,10 @@ type Config struct {
 }
 
 type SettingConfig struct {
-	Entries      EntriesConfig `yaml:"entries,omitempty"`
-	EnableStats  bool          `yaml:"enable_stats,omitempty" default:"false"`
-	EnableXdpcap bool          `yaml:"enable_xdpcap,omitempty" default:"false"`
-	StatePath    string        `yaml:"state_path,omitempty"` // Path for resource state file (default: /var/lib/vinbero/state.json)
+	Entries           EntriesConfig `yaml:"entries,omitempty"`
+	EnableStats       bool          `yaml:"enable_stats,omitempty" default:"false"`
+	EnableXdpcap      bool          `yaml:"enable_xdpcap,omitempty" default:"false"`
+	StatePath string `yaml:"state_path,omitempty"` // Path for resource state file (default: /var/lib/vinbero/state.json)
 }
 
 // EntriesConfig holds the capacity settings for each entry type

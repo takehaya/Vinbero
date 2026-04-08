@@ -23,7 +23,8 @@ func headendV4Command() *cli.Command {
 					&cli.StringFlag{Name: "trigger-prefix", Required: true, Usage: "IPv4 CIDR (e.g., 10.0.0.0/24)"},
 					&cli.StringFlag{Name: "src-addr", Required: true, Usage: "Outer IPv6 source address"},
 					&cli.StringFlag{Name: "segments", Required: true, Usage: "Segment list (comma-separated)"},
-					&cli.StringFlag{Name: "mode", Value: "H_ENCAPS", Usage: "Headend mode (H_ENCAPS, H_INSERT)"},
+					&cli.StringFlag{Name: "mode", Value: "H_ENCAPS", Usage: "Headend mode (H_ENCAPS, H_INSERT, H_M_GTP4_D)"},
+					&cli.UintFlag{Name: "args-offset", Usage: "Args.Mob.Session byte offset in SID (for H.M.GTP4.D)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -36,6 +37,7 @@ func headendV4Command() *cli.Command {
 						TriggerPrefix: c.String("trigger-prefix"),
 						SrcAddr:       c.String("src-addr"),
 						Segments:      strings.Split(c.String("segments"), ","),
+						ArgsOffset: uint32(c.Uint("args-offset")),
 					}
 					resp, err := clients.Hv4.Headendv4Create(context.Background(),
 						connect.NewRequest(&v1.Headendv4CreateRequest{Headendv4S: []*v1.Headendv4{entry}}))

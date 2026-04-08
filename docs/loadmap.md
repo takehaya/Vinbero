@@ -40,13 +40,13 @@
 | End.B6.Encaps.Red    | Supported   | End.B6.Encaps with reduced SRH                              |
 | End.BM               |             | Endpoint bound to SR-MPLS policy                            |
 | End.S                |             | Endpoint in search of a target in table T                   |
-| Args.Mob.Session     |             | Consider with End.MAP, End.DT and End.DX                    |
+| Args.Mob.Session     | Supported   | GTP-U mobile session args in SID (RFC 9433)                  |
 | End.MAP              |             | Endpoint function with SID argument mapping                 |
-| End.M.GTP6.D         |             | GTP-U/IPv6 => SRv6                                          |
-| End.M.GTP6.D.Di      |             | GTP-U/IPv6 => SRv6 with DI (Drop-In)                        |
-| End.M.GTP6.E         |             | SRv6 => GTP-U/IPv6                                          |
-| End.M.GTP4.E         |             | SRv6 => GTP-U/IPv4                                          |
-| H.M.GTP4.D           |             | GTP-U/IPv4 => SRv6                                          |
+| End.M.GTP6.D         | Supported   | GTP-U/IPv6 => SRv6                                          |
+| End.M.GTP6.D.Di      | Supported   | GTP-U/IPv6 => SRv6 with DI (Drop-In)                        |
+| End.M.GTP6.E         | Supported   | SRv6 => GTP-U/IPv6                                          |
+| End.M.GTP4.E         | Supported   | SRv6 => GTP-U/IPv4                                          |
+| H.M.GTP4.D           | Supported   | GTP-U/IPv4 => SRv6                                          |
 | End.Limit            |             | Rate limiting function                                      |
 
 ### Flavours

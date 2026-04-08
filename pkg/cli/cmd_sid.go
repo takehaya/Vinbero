@@ -32,6 +32,8 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "flavor", Usage: "SRv6 flavor (PSP, USP, USD)"},
 					&cli.StringFlag{Name: "segments", Usage: "Policy segment list, comma-separated (for End.B6)"},
 					&cli.StringFlag{Name: "headend-mode", Usage: "Policy mode: H_INSERT, H_INSERT_RED, H_ENCAPS, H_ENCAPS_RED (for End.B6)"},
+					&cli.UintFlag{Name: "args-offset", Usage: "Args.Mob.Session byte offset in SID (for GTP functions)"},
+					&cli.StringFlag{Name: "gtp-v4-src-addr", Usage: "GTP4 outer IPv4 source address (for End.M.GTP4.E)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -79,6 +81,8 @@ func sidFunctionCommand() *cli.Command {
 						Oif:           uint32(c.Uint("oif")),
 						Segments:      segments,
 						HeadendMode:   headendMode,
+						ArgsOffset: uint32(c.Uint("args-offset")),
+						GtpV4SrcAddr:  c.String("gtp-v4-src-addr"),
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),

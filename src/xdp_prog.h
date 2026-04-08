@@ -85,6 +85,9 @@ struct sid_function_entry {
     __u16 bd_id;                  // Bridge Domain ID (for End.DT2)
     __u16 _pad_sid;
     __u32 bridge_ifindex;         // Bridge device ifindex (for End.DT2 FDB miss → redirect)
+    __u8 args_offset;             // Args byte offset within SID (RFC 9433 Args.Mob.Session)
+    __u8 gtp_v4_src_addr[IPV4_ADDR_LEN]; // End.M.GTP4.E: outer IPv4 source address
+    __u8 _pad_gtp;
 } __attribute__((packed));
 
 // Key for FDB map: Bridge Domain ID + MAC address
@@ -112,6 +115,8 @@ struct headend_entry {
     __u8 dst_addr[IPV6_ADDR_LEN];           // Unused for H.Encaps (reserved)
     __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list (up to 10 segments)
     __u16 bd_id;                            // Bridge Domain ID (for H.Encaps.L2)
+    __u8 args_offset;                       // Args byte offset within SID (RFC 9433 Args.Mob.Session)
+    __u8 _pad_gtp;
 } __attribute__((packed));
 
 // Maximum number of remote PEs per Bridge Domain for BUM flooding

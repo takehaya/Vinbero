@@ -27,6 +27,9 @@
 #include "srv6_end_b6.h"
 #include "xdp_vlan.h"
 #include "bum_meta.h"
+#include "srv6_gtp.h"
+#include "srv6_gtp_decap.h"
+#include "srv6_gtp_encap.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -90,6 +93,9 @@ static __noinline int process_headend_v4(
     case SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED:
         DEBUG_PRINT("Headend.v4: Performing H.Encaps.Red\n");
         return do_h_encaps_red_v4(ctx, eth, iph, entry);
+    case SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D:
+        DEBUG_PRINT("Headend.v4: Performing H.M.GTP4.D\n");
+        return do_h_m_gtp4_d(ctx, eth, iph, entry);
     default:
         return XDP_PASS;
     }
@@ -359,6 +365,14 @@ static __always_inline int process_srv6_localsid(
         return process_end_b6_insert(ctx, ip6h, srh, entry);
     case SRV6_LOCAL_ACTION_END_B6_ENCAPS:
         return process_end_b6_encaps(ctx, ip6h, srh, entry);
+    case SRV6_LOCAL_ACTION_END_M_GTP4_E:
+        return process_end_m_gtp4_e(ctx, ip6h, srh, entry);
+    case SRV6_LOCAL_ACTION_END_M_GTP6_D:
+        return process_end_m_gtp6_d(ctx, ip6h, srh, entry);
+    case SRV6_LOCAL_ACTION_END_M_GTP6_D_DI:
+        return process_end_m_gtp6_d_di(ctx, ip6h, srh, entry);
+    case SRV6_LOCAL_ACTION_END_M_GTP6_E:
+        return process_end_m_gtp6_e(ctx, ip6h, srh, entry);
     default:
         return XDP_PASS;
     }
