@@ -26,8 +26,10 @@
 // 4. Prepend IPv4 + UDP + GTP-U + PDU Session Container
 // 5. IPv4 FIB lookup + redirect
 //
-// GTP-U encap overhead: IPv4(20) + UDP(8) + GTP-U(8) + opt(4) + PSC(4) = 44 bytes
-#define GTP4E_ENCAP_OVERHEAD 44
+// GTP-U encap overhead: IPv4(20) + UDP(8) + GTP-U header (8 or 16)
+// With PSC: 20+8+16 = 44, Without PSC: 20+8+8 = 36
+#define GTP4E_OVERHEAD_WITH_PSC 44
+#define GTP4E_OVERHEAD_NO_PSC   36
 
 static __always_inline int process_end_m_gtp4_e(
     struct xdp_md *ctx,
@@ -83,15 +85,17 @@ static __always_inline int process_end_m_gtp4_e(
 
     __u16 inner_len = (__u16)(data_end - (void *)(eth + 1));
 
-    // 6. Prepend GTP-U/IPv4 headers
-    if (bpf_xdp_adjust_head(ctx, -(int)GTP4E_ENCAP_OVERHEAD))
+    // 6. Prepend GTP-U/IPv4 headers (size depends on QFI presence)
+    __u16 gtpu_hdr_len = gtpu_encap_hdr_len(qfi, rqi);
+    int encap_overhead = (int)(sizeof(struct iphdr) + sizeof(struct udphdr) + gtpu_hdr_len);
+
+    if (bpf_xdp_adjust_head(ctx, -encap_overhead))
         return XDP_DROP;
 
     data = (void *)(long)ctx->data;
     data_end = (void *)(long)ctx->data_end;
 
-    // Validate full header space: Eth(14) + IPv4(20) + UDP(8) + GTP-U(8) + opt(4) + PSC(4) = 58
-    if (data + sizeof(struct ethhdr) + GTP4E_ENCAP_OVERHEAD > data_end)
+    if (data + sizeof(struct ethhdr) + GTP4E_OVERHEAD_WITH_PSC > data_end)
         return XDP_DROP;
 
     struct ethhdr *new_eth = data;
@@ -108,7 +112,7 @@ static __always_inline int process_end_m_gtp4_e(
     outer_iph->version = 4;
     outer_iph->ihl = 5;  // No options
     outer_iph->tos = 0;
-    outer_iph->tot_len = bpf_htons(GTP4E_ENCAP_OVERHEAD + inner_len);
+    outer_iph->tot_len = bpf_htons(encap_overhead + inner_len);
     outer_iph->id = 0;
     outer_iph->frag_off = bpf_htons(0x4000);  // DF bit
     outer_iph->ttl = 64;
@@ -132,8 +136,7 @@ static __always_inline int process_end_m_gtp4_e(
     // 9. Build UDP header
     udph->source = bpf_htons(GTPU_PORT);
     udph->dest = bpf_htons(GTPU_PORT);
-    // UDP length = UDP(8) + GTP-U(8) + opt(4) + PSC(4) + inner
-    udph->len = bpf_htons(8 + GTPU_ENCAP_HDR_LEN + inner_len);
+    udph->len = bpf_htons(sizeof(struct udphdr) + gtpu_hdr_len + inner_len);
     udph->check = 0;  // Optional for IPv4
 
     // 10. Build GTP-U + PDU Session Container
@@ -141,11 +144,7 @@ static __always_inline int process_end_m_gtp4_e(
         return XDP_DROP;
 
     // 11. IPv4 FIB lookup + redirect
-    __u32 fib_ifindex = ctx->ingress_ifindex;
-    int action = srv6_fib_redirect_v4(ctx, outer_iph, new_eth, fib_ifindex);
-    if (action == XDP_PASS)
-        return XDP_DROP;  // After encap, must not pass to kernel
-    return action;
+    return srv6_fib_redirect_v4(ctx, outer_iph, new_eth, ctx->ingress_ifindex);
 }
 
 #endif // SRV6_GTP_ENCAP_H

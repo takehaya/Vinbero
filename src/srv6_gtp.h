@@ -268,20 +268,22 @@ static __always_inline int args_mob_decode_gtp6(
 
 // ========== GTP-U Header Builder (for encapsulation) ==========
 
-// Build GTP-U + PDU Session Container headers.
-// Returns total header size written (always 16 bytes: UDP(8) + GTP-U(8) + opt(4) + PSC(4) - UDP already separate).
-// Actually: GTP-U(8) + opt(4) + PSC(4) = 16 bytes of GTP-U portion.
-// Caller must prepend UDP header separately.
-//
-// Total encap overhead: IPv4(20) + UDP(8) + GTP-U mandatory(8) + opt(4) + PSC(4) = 44 bytes
-//                   or: IPv6(40) + UDP(8) + GTP-U mandatory(8) + opt(4) + PSC(4) = 64 bytes
-#define GTPU_ENCAP_HDR_LEN  16  // GTP-U mandatory(8) + optional(4) + PSC(4)
-#define GTPU_ENCAP_V4_TOTAL 44  // IPv4(20) + UDP(8) + GTPU_ENCAP_HDR_LEN(16)
-#define GTPU_ENCAP_V6_TOTAL 64  // IPv6(40) + UDP(8) + GTPU_ENCAP_HDR_LEN(16)
+// GTP-U encap header sizes:
+//   With PSC: GTP-U(8) + optional(4) + PSC(4) = 16 bytes
+//   Without PSC (QFI=0): GTP-U(8) = 8 bytes
+#define GTPU_ENCAP_HDR_WITH_PSC  16
+#define GTPU_ENCAP_HDR_NO_PSC     8
 
+// Return GTP-U encap header length based on whether QFI is present
+static __always_inline __u16 gtpu_encap_hdr_len(__u8 qfi, __u8 rqi)
+{
+    return (qfi > 0 || rqi > 0) ? GTPU_ENCAP_HDR_WITH_PSC : GTPU_ENCAP_HDR_NO_PSC;
+}
 
-// Build GTP-U headers with PDU Session Container at the given pointer.
-// ptr must have at least GTPU_ENCAP_HDR_LEN bytes available.
+// Build GTP-U headers at the given pointer.
+// If qfi==0 && rqi==0: minimal header (8 bytes, no extension).
+// Otherwise: with PDU Session Container (16 bytes).
+// Caller must ensure ptr has at least gtpu_encap_hdr_len(qfi,rqi) bytes available.
 // Returns 0 on success.
 static __always_inline int gtpu_build_headers(
     void *ptr,
@@ -289,32 +291,36 @@ static __always_inline int gtpu_build_headers(
     __u32 teid,
     __u8 qfi,
     __u8 rqi,
-    __u16 payload_len)  // Inner packet length (after GTP-U headers)
+    __u16 payload_len)
 {
-    if (ptr + GTPU_ENCAP_HDR_LEN > data_end)
+    int has_psc = (qfi > 0 || rqi > 0);
+    __u16 hdr_len = has_psc ? GTPU_ENCAP_HDR_WITH_PSC : GTPU_ENCAP_HDR_NO_PSC;
+
+    if (ptr + hdr_len > data_end)
         return -1;
 
-    // GTP-U mandatory header
     struct gtpu_hdr *gtph = (struct gtpu_hdr *)ptr;
-    gtph->flags = GTPU_V1_FLAGS | GTPU_FLAG_E;  // V1, PT=1, E=1
     gtph->type = GTPU_TYPE_GPDU;
-    // GTP-U length = everything after mandatory header
-    // = opt(4) + PSC(4) + payload
-    gtph->length = bpf_htons(4 + 4 + payload_len);
     gtph->teid = bpf_htonl(teid);
 
-    // Optional header (required when E flag is set)
-    struct gtpu_opt_hdr *opt = (struct gtpu_opt_hdr *)(gtph + 1);
-    opt->seq_num = 0;
-    opt->npdu_num = 0;
-    opt->next_ext = GTPU_EXT_PDU_SESSION;
+    if (has_psc) {
+        gtph->flags = GTPU_V1_FLAGS | GTPU_FLAG_E;
+        gtph->length = bpf_htons(4 + 4 + payload_len);
 
-    // PDU Session Container
-    struct pdu_session_container *psc = (struct pdu_session_container *)(opt + 1);
-    psc->length = 1;  // 1 * 4 = 4 bytes
-    psc->pdu_type_flags = 0x00;  // DL PDU Session Information (type=0)
-    psc->qfi_flags = (qfi & 0x3F) | ((rqi & 0x01) << 6);
-    psc->next_ext_type = 0x00;  // No more extensions
+        struct gtpu_opt_hdr *opt = (struct gtpu_opt_hdr *)(gtph + 1);
+        opt->seq_num = 0;
+        opt->npdu_num = 0;
+        opt->next_ext = GTPU_EXT_PDU_SESSION;
+
+        struct pdu_session_container *psc = (struct pdu_session_container *)(opt + 1);
+        psc->length = 1;
+        psc->pdu_type_flags = 0x00;
+        psc->qfi_flags = ENCODE_QFI_RQI(qfi, rqi);
+        psc->next_ext_type = 0x00;
+    } else {
+        gtph->flags = GTPU_V1_FLAGS;  // No E flag
+        gtph->length = bpf_htons(payload_len);
+    }
 
     return 0;
 }

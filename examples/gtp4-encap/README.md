@@ -22,9 +22,23 @@ graph LR
 ## クイックスタート
 
 ```bash
-sudo ./setup.sh    # 環境構築
-sudo ./test.sh     # テスト実行
-sudo ./teardown.sh # クリーンアップ
+pip3 install scapy  # GTP-Uパケット生成に必要
+sudo ./setup.sh     # 環境構築
+sudo ./test.sh      # テスト実行 (scapyでGTP-Uパケットを送信)
+sudo ./teardown.sh  # クリーンアップ
+```
+
+### 手動でGTP-Uパケットを送信
+
+```bash
+# QFI=9 (5G) のGTP-Uパケットを送信
+sudo ip netns exec gtp4-host1 python3 send_gtpu.py --teid 0x12345678 --qfi 9
+
+# QFI=0 (4G/LTE, 拡張ヘッダなし) のGTP-Uパケットを送信
+sudo ip netns exec gtp4-host1 python3 send_gtpu.py --teid 0xCAFEBABE --qfi 0
+
+# router2でSRv6パケットをキャプチャ
+sudo ip netns exec gtp4-router2 tcpdump -i gtp4-rt2rt1 -n ip6
 ```
 
 ## 手動実行

@@ -379,7 +379,8 @@ static __always_inline int process_end_m_gtp6_d_di(
 // Produces: [Eth][IPv6][UDP:2152][GTP-U(E=1)][PDU Session Container][Inner IP]
 //
 // Similar to End.M.GTP4.E but with IPv6 outer instead of IPv4.
-#define GTP6E_ENCAP_OVERHEAD 64  // IPv6(40) + UDP(8) + GTP-U(8) + opt(4) + PSC(4)
+// GTP6E max encap: IPv6(40) + UDP(8) + GTP-U with PSC(16) = 64
+#define GTP6E_OVERHEAD_MAX 64
 
 static __always_inline int process_end_m_gtp6_e(
     struct xdp_md *ctx,
@@ -428,9 +429,9 @@ static __always_inline int process_end_m_gtp6_e(
 
     __u16 inner_len = (__u16)(data_end - (void *)(eth + 1));
 
-    // 6. Prepend IPv6 + UDP + GTP-U headers
-    // Overhead = IPv6(40) + UDP(8) + GTP-U mandatory(8) + opt(4) + PSC(4) = 64
-    int encap_len = 40 + 8 + GTPU_ENCAP_HDR_LEN;  // 64
+    // 6. Prepend IPv6 + UDP + GTP-U headers (size depends on QFI)
+    __u16 gtpu_hdr_len = gtpu_encap_hdr_len(qfi, rqi);
+    int encap_len = (int)(sizeof(struct ipv6hdr) + sizeof(struct udphdr) + gtpu_hdr_len);
 
     if (bpf_xdp_adjust_head(ctx, -encap_len))
         return XDP_DROP;
@@ -438,7 +439,7 @@ static __always_inline int process_end_m_gtp6_e(
     data = (void *)(long)ctx->data;
     data_end = (void *)(long)ctx->data_end;
 
-    if (data + sizeof(struct ethhdr) + encap_len > data_end)
+    if (data + sizeof(struct ethhdr) + GTP6E_OVERHEAD_MAX > data_end)
         return XDP_DROP;
 
     struct ethhdr *new_eth = data;
@@ -455,8 +456,7 @@ static __always_inline int process_end_m_gtp6_e(
     outer_ip6h->flow_lbl[0] = 0;
     outer_ip6h->flow_lbl[1] = 0;
     outer_ip6h->flow_lbl[2] = 0;
-    // payload_len = UDP(8) + GTP-U headers(16) + inner
-    outer_ip6h->payload_len = bpf_htons(8 + GTPU_ENCAP_HDR_LEN + inner_len);
+    outer_ip6h->payload_len = bpf_htons(sizeof(struct udphdr) + gtpu_hdr_len + inner_len);
     outer_ip6h->nexthdr = IPPROTO_UDP;
     outer_ip6h->hop_limit = 64;
     __builtin_memcpy(&outer_ip6h->saddr, entry->src_addr, sizeof(struct in6_addr));
@@ -465,7 +465,7 @@ static __always_inline int process_end_m_gtp6_e(
     // 9. Build UDP header
     udph->source = bpf_htons(GTPU_PORT);
     udph->dest = bpf_htons(GTPU_PORT);
-    udph->len = bpf_htons(8 + GTPU_ENCAP_HDR_LEN + inner_len);
+    udph->len = bpf_htons(sizeof(struct udphdr) + gtpu_hdr_len + inner_len);
     // IPv6 UDP checksum: set to 0 per RFC 6935/6936 (zero checksum for
     // tunneling protocols over IPv6). Computing the full checksum over
     // variable-length inner payload is not feasible in XDP.
@@ -485,7 +485,7 @@ static __always_inline int process_end_m_gtp6_e(
     case FIB_RESULT_DROP:
         return XDP_DROP;
     default:
-        return XDP_DROP;  // After encap, must not pass to kernel
+        return XDP_PASS;
     }
 }
 
