@@ -6,7 +6,7 @@
 #include <linux/bpf.h>
 #include <linux/in.h>
 
-#include "xdp_prog.h"
+#include "core/xdp_prog.h"
 
 // SID Function map (IPv6 LPM Trie)
 // Key: IPv6 prefix (trigger_prefix)

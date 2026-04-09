@@ -9,7 +9,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/config"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ./src -I /usr/include/x86_64-linux-gnu
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ../../src -I /usr/include/x86_64-linux-gnu
 
 func ReadCollection(constants map[string]interface{}, cfg *config.Config) (*BpfObjects, error) {
 	// Remove memory limit for BPF

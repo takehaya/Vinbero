@@ -8,15 +8,15 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#include "xdp_prog.h"
-#include "srv6.h"
-#include "srv6_headend_utils.h"
-#include "srv6_fib.h"
-#include "srv6_endpoint.h"
-#include "srv6_insert.h"
-#include "srv6_encaps.h"
-#include "srv6_encaps_red.h"
-#include "xdp_map.h"
+#include "core/xdp_prog.h"
+#include "core/srv6.h"
+#include "headend/srv6_headend_utils.h"
+#include "core/srv6_fib.h"
+#include "endpoint/srv6_endpoint.h"
+#include "headend/srv6_insert.h"
+#include "headend/srv6_encaps.h"
+#include "headend/srv6_encaps_red.h"
+#include "core/xdp_map.h"
 
 // Lookup the End.B6 policy from end_b6_policy_map using the original DA (SID).
 // Must be called BEFORE endpoint_update_da modifies ip6h->daddr.

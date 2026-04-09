@@ -3,7 +3,7 @@
 
 #include <linux/types.h>
 #include <linux/in6.h>
-#include "xdp_prog.h"
+#include "core/xdp_prog.h"
 
 // Copy segments to SRH in reverse order (RFC 8754)
 // Input: [S1, S2, S3] -> SRH storage: [S3, S2, S1]

@@ -9,11 +9,11 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#include "xdp_prog.h"
-#include "srv6.h"
-#include "srv6_gtp.h"
-#include "srv6_headend_utils.h"
-#include "srv6_fib.h"
+#include "core/xdp_prog.h"
+#include "core/srv6.h"
+#include "mobile/srv6_gtp.h"
+#include "headend/srv6_headend_utils.h"
+#include "core/srv6_fib.h"
 
 // ========== H.M.GTP4.D: GTP-U/IPv4 → SRv6 (RFC 9433) ==========
 //

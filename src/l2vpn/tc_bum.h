@@ -9,12 +9,12 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#include "xdp_prog.h"
-#include "xdp_map.h"
-#include "srv6.h"
-#include "srv6_headend.h"
-#include "srv6_headend_utils.h"
-#include "bum_meta.h"
+#include "core/xdp_prog.h"
+#include "core/xdp_map.h"
+#include "core/srv6.h"
+#include "headend/srv6_headend.h"
+#include "headend/srv6_headend_utils.h"
+#include "l2vpn/bum_meta.h"
 
 // Magic value in skb->cb[0] to identify clone-to-self encap requests.
 // Reuses BUM_META_MARKER so both XDP meta and TC cb[] use the same sentinel.

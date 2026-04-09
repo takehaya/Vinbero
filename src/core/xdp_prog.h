@@ -49,6 +49,12 @@
 #define ETH_ALEN 6
 #endif
 
+// VLAN header structure (802.1Q)
+struct vlan_hdr {
+    __be16 h_vlan_TCI;
+    __be16 h_vlan_encapsulated_proto;
+};
+
 #ifndef IPPROTO_ETHERNET
 #define IPPROTO_ETHERNET 143  // Ethernet in SRv6 (RFC 8986)
 #endif

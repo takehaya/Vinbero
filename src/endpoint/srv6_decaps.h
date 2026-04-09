@@ -6,7 +6,7 @@
 #include <linux/ipv6.h>
 #include <bpf/bpf_helpers.h>
 
-#include "srv6.h"
+#include "core/srv6.h"
 
 // Calculate total headers to strip for decapsulation (Ethernet + IPv6 + SRH)
 // Returns: number of bytes to strip from front
