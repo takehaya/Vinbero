@@ -67,23 +67,8 @@ static __always_inline int do_h_encaps_core(
     CHECK_BOUND(srh, data_end, srh_len);
 
     // 5. Build outer IPv6 header
-    outer_ip6h->version = 6;
-    outer_ip6h->priority = 0;
-    outer_ip6h->flow_lbl[0] = 0;
-    outer_ip6h->flow_lbl[1] = 0;
-    outer_ip6h->flow_lbl[2] = 0;
-
-    // Payload length = SRH + inner packet
-    outer_ip6h->payload_len = bpf_htons(srh_len + inner_total_len);
-
-    outer_ip6h->nexthdr = IPPROTO_ROUTING;  // SRH
-    outer_ip6h->hop_limit = 64;
-
-    // Source address from entry
-    __builtin_memcpy(&outer_ip6h->saddr, entry->src_addr, sizeof(struct in6_addr));
-
-    // Destination address = first segment
-    __builtin_memcpy(&outer_ip6h->daddr, &entry->segments[0], sizeof(struct in6_addr));
+    build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + inner_total_len,
+                     entry->src_addr, &entry->segments[0]);
 
     // 6. Build SRH
     srh->nexthdr = inner_proto;

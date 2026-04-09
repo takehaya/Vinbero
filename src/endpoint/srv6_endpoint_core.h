@@ -158,16 +158,8 @@ static __always_inline int endpoint_strip_srh(struct endpoint_ctx *ectx)
     __builtin_memcpy(&saved_eth, eth, sizeof(saved_eth));
 
     // Save VLAN tag(s) between Eth and IPv6 (0, 4, or 8 bytes)
-    __u32 saved_vlan[2] = {};
-    if (l3_off > ETH_HLEN) {
-        void *vlan_ptr = (void *)eth + ETH_HLEN;
-        if (vlan_ptr + 4 > data_end) return -1;
-        __builtin_memcpy(&saved_vlan[0], vlan_ptr, 4);
-        if (l3_off > ETH_HLEN + 4) {
-            if (vlan_ptr + 8 > data_end) return -1;
-            __builtin_memcpy(&saved_vlan[1], vlan_ptr + 4, 4);
-        }
-    }
+    __u32 saved_vlan[2];
+    save_vlan_tags(saved_vlan, data, data_end, l3_off);
 
     // Save IPv6 header
     struct ipv6hdr saved_ip6h;
@@ -202,15 +194,8 @@ static __always_inline int endpoint_strip_srh(struct endpoint_ctx *ectx)
     __builtin_memcpy(eth, &saved_eth, sizeof(saved_eth));
 
     // Restore VLAN tag(s)
-    if (l3_off > ETH_HLEN) {
-        void *vlan_ptr = (void *)eth + ETH_HLEN;
-        if (vlan_ptr + 4 > data_end) return -1;
-        __builtin_memcpy(vlan_ptr, &saved_vlan[0], 4);
-        if (l3_off > ETH_HLEN + 4) {
-            if (vlan_ptr + 8 > data_end) return -1;
-            __builtin_memcpy(vlan_ptr + 4, &saved_vlan[1], 4);
-        }
-    }
+    if (restore_vlan_tags(saved_vlan, (void *)eth, data_end, l3_off) != 0)
+        return -1;
 
     // Restore IPv6 header with updated nexthdr and payload_len
     __builtin_memcpy(ip6h, &saved_ip6h, sizeof(saved_ip6h));
@@ -293,6 +278,48 @@ static __always_inline int endpoint_handle_usp(
 
     DEBUG_PRINT("USP: Stripped SRH, FIB lookup on DA\n");
     return endpoint_fib_redirect(&ectx, fib_ifindex);
+}
+
+// ========================================================================
+// Common End/End.X/End.T Pipeline
+// ========================================================================
+
+// Shared processing for End, End.X, End.T:
+//   init → SL=0 flavor handling (USD/USP) → DA update → PSP strip
+//
+// Returns >= 0: final XDP action (packet handled by SL=0 flavor or error).
+// Returns -1:   caller should perform variant-specific FIB redirect.
+//
+// usp_fib_ifindex: FIB ifindex for USP flavor (End/End.X: ingress, End.T: vrf)
+static __always_inline int endpoint_common_processing(
+    struct endpoint_ctx *ectx,
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry,
+    __u16 l3_offset,
+    __u32 usp_fib_ifindex)
+{
+    int ret = endpoint_init(ectx, ctx, ip6h, srh, entry, l3_offset);
+
+    if (ret == -1) {
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD)
+            return endpoint_handle_usd(ctx, ip6h, srh, entry, l3_offset);
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USP)
+            return endpoint_handle_usp(ctx, ip6h, srh, entry, usp_fib_ifindex, l3_offset);
+        return XDP_PASS;
+    }
+    if (ret == -2)
+        return XDP_DROP;
+
+    if (endpoint_update_da(ectx) != 0)
+        return XDP_DROP;
+
+    if (ectx->new_sl == 0 && entry->flavor == SRV6_LOCAL_FLAVOR_PSP)
+        if (endpoint_strip_srh(ectx) != 0)
+            return XDP_DROP;
+
+    return -1;
 }
 
 #endif // SRV6_ENDPOINT_CORE_H

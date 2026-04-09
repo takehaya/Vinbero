@@ -47,16 +47,8 @@ static __noinline int do_h_encaps_l2(
     __builtin_memset(new_eth->h_source, 0, ETH_ALEN);
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    outer_ip6h->version = 6;
-    outer_ip6h->priority = 0;
-    outer_ip6h->flow_lbl[0] = 0;
-    outer_ip6h->flow_lbl[1] = 0;
-    outer_ip6h->flow_lbl[2] = 0;
-    outer_ip6h->payload_len = bpf_htons(srh_len + l2_frame_len);
-    outer_ip6h->nexthdr = IPPROTO_ROUTING;
-    outer_ip6h->hop_limit = 64;
-    __builtin_memcpy(&outer_ip6h->saddr, entry->src_addr, sizeof(struct in6_addr));
-    __builtin_memcpy(&outer_ip6h->daddr, &entry->segments[0], sizeof(struct in6_addr));
+    build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
+                     entry->src_addr, &entry->segments[0]);
 
     srh->nexthdr = IPPROTO_ETHERNET;
     srh->hdrlen = (srh_len >> 3) - 1;
@@ -109,16 +101,8 @@ static __always_inline int do_h_encaps_l2_red_1seg(
     __builtin_memset(new_eth->h_source, 0, ETH_ALEN);
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    outer_ip6h->version = 6;
-    outer_ip6h->priority = 0;
-    outer_ip6h->flow_lbl[0] = 0;
-    outer_ip6h->flow_lbl[1] = 0;
-    outer_ip6h->flow_lbl[2] = 0;
-    outer_ip6h->payload_len = bpf_htons(l2_frame_len);
-    outer_ip6h->nexthdr = IPPROTO_ETHERNET;
-    outer_ip6h->hop_limit = 64;
-    __builtin_memcpy(&outer_ip6h->saddr, entry->src_addr, sizeof(struct in6_addr));
-    __builtin_memcpy(&outer_ip6h->daddr, &entry->segments[0], sizeof(struct in6_addr));
+    build_outer_ipv6(outer_ip6h, IPPROTO_ETHERNET, l2_frame_len,
+                     entry->src_addr, &entry->segments[0]);
 
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
@@ -169,16 +153,8 @@ static __always_inline int do_h_encaps_l2_red_multi(
     __builtin_memset(new_eth->h_source, 0, ETH_ALEN);
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    outer_ip6h->version = 6;
-    outer_ip6h->priority = 0;
-    outer_ip6h->flow_lbl[0] = 0;
-    outer_ip6h->flow_lbl[1] = 0;
-    outer_ip6h->flow_lbl[2] = 0;
-    outer_ip6h->payload_len = bpf_htons(srh_len + l2_frame_len);
-    outer_ip6h->nexthdr = IPPROTO_ROUTING;
-    outer_ip6h->hop_limit = 64;
-    __builtin_memcpy(&outer_ip6h->saddr, entry->src_addr, sizeof(struct in6_addr));
-    __builtin_memcpy(&outer_ip6h->daddr, &entry->segments[0], sizeof(struct in6_addr));
+    build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
+                     entry->src_addr, &entry->segments[0]);
 
     srh->nexthdr = IPPROTO_ETHERNET;
     srh->hdrlen = (srh_len >> 3) - 1;

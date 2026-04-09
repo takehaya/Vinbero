@@ -91,12 +91,8 @@ static __noinline int process_end_b6_insert(
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
     // Save VLAN tag(s) (H.Insert preserves VLAN)
-    __u32 saved_vlan[2] = {};
-    if (l3_offset > ETH_HLEN) {
-        __builtin_memcpy(&saved_vlan[0], (void *)eth + ETH_HLEN, 4);
-        if (l3_offset > ETH_HLEN + 4)
-            __builtin_memcpy(&saved_vlan[1], (void *)eth + ETH_HLEN + 4, 4);
-    }
+    __u32 saved_vlan[2];
+    save_vlan_tags(saved_vlan, (void *)eth, (void *)(long)ctx->data_end, l3_offset);
     struct ipv6hdr saved_ip6h;
     __builtin_memcpy(&saved_ip6h, cur_ip6h, sizeof(struct ipv6hdr));
 
