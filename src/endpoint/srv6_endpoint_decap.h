@@ -13,7 +13,8 @@ static __always_inline int process_end_dx4(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // 1. RFC 8986: SL must be 0 for DX4
     if (srh->segments_left != 0) {
@@ -22,7 +23,7 @@ static __always_inline int process_end_dx4(
     }
 
     // 2. Strip outer IPv6+SRH, expose inner IPv4
-    if (srv6_decap(ctx, srh, IPPROTO_IPIP) != 0) {
+    if (srv6_decap(ctx, srh, IPPROTO_IPIP, l3_offset) != 0) {
         DEBUG_PRINT("End.DX4: Decapsulation failed\n");
         return XDP_DROP;
     }
@@ -67,7 +68,8 @@ static __always_inline int process_end_dx6(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // 1. RFC 8986: SL must be 0 for DX6
     if (srh->segments_left != 0) {
@@ -76,7 +78,7 @@ static __always_inline int process_end_dx6(
     }
 
     // 2. Strip outer IPv6+SRH, expose inner IPv6
-    if (srv6_decap(ctx, srh, IPPROTO_IPV6) != 0) {
+    if (srv6_decap(ctx, srh, IPPROTO_IPV6, l3_offset) != 0) {
         DEBUG_PRINT("End.DX6: Decapsulation failed\n");
         return XDP_DROP;
     }
@@ -123,7 +125,8 @@ static __always_inline int process_end_dx2(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     if (srh->segments_left != 0) {
         DEBUG_PRINT("End.DX2: SL != 0, passing\n");
@@ -142,7 +145,7 @@ static __always_inline int process_end_dx2(
         return XDP_DROP;
     }
 
-    int strip_len = calc_decap_strip_len(srh);
+    int strip_len = calc_decap_strip_len(srh, l3_offset);
     if (bpf_xdp_adjust_head(ctx, strip_len)) {
         DEBUG_PRINT("End.DX2: bpf_xdp_adjust_head failed\n");
         return XDP_DROP;
@@ -167,7 +170,8 @@ static __always_inline int process_end_dt4(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // 1. RFC 8986: SL must be 0 for DT4
     if (srh->segments_left != 0) {
@@ -176,7 +180,7 @@ static __always_inline int process_end_dt4(
     }
 
     // 2. Strip outer IPv6+SRH, expose inner IPv4
-    if (srv6_decap(ctx, srh, IPPROTO_IPIP) != 0) {
+    if (srv6_decap(ctx, srh, IPPROTO_IPIP, l3_offset) != 0) {
         DEBUG_PRINT("End.DT4: Decapsulation failed\n");
         return XDP_DROP;
     }
@@ -220,7 +224,8 @@ static __always_inline int process_end_dt6(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // 1. RFC 8986: SL must be 0 for DT6
     if (srh->segments_left != 0) {
@@ -229,7 +234,7 @@ static __always_inline int process_end_dt6(
     }
 
     // 2. Strip outer IPv6+SRH, expose inner IPv6
-    if (srv6_decap(ctx, srh, IPPROTO_IPV6) != 0) {
+    if (srv6_decap(ctx, srh, IPPROTO_IPV6, l3_offset) != 0) {
         DEBUG_PRINT("End.DT6: Decapsulation failed\n");
         return XDP_DROP;
     }
@@ -272,17 +277,18 @@ static __always_inline int process_end_dt46(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // Detect inner protocol and dispatch (SL check is done by callee)
     __u8 inner_proto = srh->nexthdr;
 
     if (inner_proto == IPPROTO_IPIP) {
         DEBUG_PRINT("End.DT46: Inner protocol is IPv4, dispatching to DT4\n");
-        return process_end_dt4(ctx, ip6h, srh, entry);
+        return process_end_dt4(ctx, ip6h, srh, entry, l3_offset);
     } else if (inner_proto == IPPROTO_IPV6) {
         DEBUG_PRINT("End.DT46: Inner protocol is IPv6, dispatching to DT6\n");
-        return process_end_dt6(ctx, ip6h, srh, entry);
+        return process_end_dt6(ctx, ip6h, srh, entry, l3_offset);
     }
 
     DEBUG_PRINT("End.DT46: Unsupported inner protocol %d\n", inner_proto);

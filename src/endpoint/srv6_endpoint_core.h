@@ -23,6 +23,7 @@ struct endpoint_ctx {
     void *data_end;
     __u8 segments_left;
     __u8 new_sl;
+    __u16 l3_offset;  // distance from packet start to IPv6 header (14/18/22)
 };
 
 // Initialize endpoint context and perform common SL checks
@@ -35,7 +36,8 @@ static __always_inline int endpoint_init(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     ectx->ctx = ctx;
     ectx->ip6h = ip6h;
@@ -43,6 +45,7 @@ static __always_inline int endpoint_init(
     ectx->entry = entry;
     ectx->data_end = (void *)(long)ctx->data_end;
     ectx->segments_left = srh->segments_left;
+    ectx->l3_offset = l3_offset;
 
     // RFC 8986: If SL=0, pass to upper layer
     if (ectx->segments_left == 0) {
@@ -83,7 +86,7 @@ static __always_inline int endpoint_fib_redirect_core(struct endpoint_ctx *ectx,
         return XDP_DROP;
     }
 
-    struct ipv6hdr *ip6h = (struct ipv6hdr *)(eth + 1);
+    struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + ectx->l3_offset);
     if ((void *)(ip6h + 1) > data_end) {
         return XDP_DROP;
     }
@@ -107,7 +110,7 @@ static __always_inline int endpoint_fib_redirect(struct endpoint_ctx *ectx, __u3
 {
     void *data = (void *)(long)ectx->ctx->data;
     void *data_end = (void *)(long)ectx->ctx->data_end;
-    struct ipv6hdr *ip6h = (void *)data + ETH_HLEN;
+    struct ipv6hdr *ip6h = (void *)data + ectx->l3_offset;
     if ((void *)(ip6h + 1) > data_end) {
         return XDP_DROP;
     }
@@ -140,32 +143,47 @@ static __always_inline int endpoint_strip_srh(struct endpoint_ctx *ectx)
 {
     void *data = (void *)(long)ectx->ctx->data;
     void *data_end = (void *)(long)ectx->ctx->data_end;
+    __u16 l3_off = ectx->l3_offset;
 
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return -1;
 
-    struct ipv6hdr *ip6h = (struct ipv6hdr *)(eth + 1);
+    struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + l3_off);
     if ((void *)(ip6h + 1) > data_end)
         return -1;
 
-    // Save headers to stack (54 bytes total, well within 512B BPF stack limit)
+    // Save Eth header (always 14 bytes)
     struct ethhdr saved_eth;
-    struct ipv6hdr saved_ip6h;
     __builtin_memcpy(&saved_eth, eth, sizeof(saved_eth));
+
+    // Save VLAN tag(s) between Eth and IPv6 (0, 4, or 8 bytes)
+    __u32 saved_vlan[2] = {};
+    if (l3_off > ETH_HLEN) {
+        void *vlan_ptr = (void *)eth + ETH_HLEN;
+        if (vlan_ptr + 4 > data_end) return -1;
+        __builtin_memcpy(&saved_vlan[0], vlan_ptr, 4);
+        if (l3_off > ETH_HLEN + 4) {
+            if (vlan_ptr + 8 > data_end) return -1;
+            __builtin_memcpy(&saved_vlan[1], vlan_ptr + 4, 4);
+        }
+    }
+
+    // Save IPv6 header
+    struct ipv6hdr saved_ip6h;
     __builtin_memcpy(&saved_ip6h, ip6h, sizeof(saved_ip6h));
 
     // Save SRH metadata before stripping
     __u8 inner_nexthdr = ectx->srh->nexthdr;
     int srh_len = 8 + (ectx->srh->hdrlen * 8);
 
-    // Strip Eth + IPv6 + SRH
-    int total_strip = ETH_HLEN + sizeof(struct ipv6hdr) + srh_len;
+    // Strip L2 + IPv6 + SRH (includes VLAN tag if present)
+    int total_strip = l3_off + sizeof(struct ipv6hdr) + srh_len;
     if (bpf_xdp_adjust_head(ectx->ctx, total_strip))
         return -1;
 
-    // Re-expand for Eth + IPv6 header
-    if (bpf_xdp_adjust_head(ectx->ctx, -(int)(ETH_HLEN + sizeof(struct ipv6hdr))))
+    // Re-expand for L2 + IPv6 header (VLAN preserved)
+    if (bpf_xdp_adjust_head(ectx->ctx, -(int)(l3_off + sizeof(struct ipv6hdr))))
         return -1;
 
     // Re-fetch pointers
@@ -176,15 +194,26 @@ static __always_inline int endpoint_strip_srh(struct endpoint_ctx *ectx)
     if ((void *)(eth + 1) > data_end)
         return -1;
 
-    ip6h = (struct ipv6hdr *)(eth + 1);
+    ip6h = (struct ipv6hdr *)(data + l3_off);
     if ((void *)(ip6h + 1) > data_end)
         return -1;
 
-    // Restore saved headers
+    // Restore Eth header
     __builtin_memcpy(eth, &saved_eth, sizeof(saved_eth));
-    __builtin_memcpy(ip6h, &saved_ip6h, sizeof(saved_ip6h));
 
-    // Update IPv6 header: point to upper layer, adjust length
+    // Restore VLAN tag(s)
+    if (l3_off > ETH_HLEN) {
+        void *vlan_ptr = (void *)eth + ETH_HLEN;
+        if (vlan_ptr + 4 > data_end) return -1;
+        __builtin_memcpy(vlan_ptr, &saved_vlan[0], 4);
+        if (l3_off > ETH_HLEN + 4) {
+            if (vlan_ptr + 8 > data_end) return -1;
+            __builtin_memcpy(vlan_ptr + 4, &saved_vlan[1], 4);
+        }
+    }
+
+    // Restore IPv6 header with updated nexthdr and payload_len
+    __builtin_memcpy(ip6h, &saved_ip6h, sizeof(saved_ip6h));
     ip6h->nexthdr = inner_nexthdr;
     ip6h->payload_len = bpf_htons(bpf_ntohs(ip6h->payload_len) - srh_len);
 
@@ -197,13 +226,14 @@ static __always_inline int endpoint_handle_usd(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     __u8 inner_proto = srh->nexthdr;
 
     if (inner_proto == IPPROTO_IPIP) {
         DEBUG_PRINT("USD: Decapsulating inner IPv4\n");
-        if (srv6_decap(ctx, srh, IPPROTO_IPIP) != 0)
+        if (srv6_decap(ctx, srh, IPPROTO_IPIP, l3_offset) != 0)
             return XDP_DROP;
 
         void *data = (void *)(long)ctx->data;
@@ -220,7 +250,7 @@ static __always_inline int endpoint_handle_usd(
 
     if (inner_proto == IPPROTO_IPV6) {
         DEBUG_PRINT("USD: Decapsulating inner IPv6\n");
-        if (srv6_decap(ctx, srh, IPPROTO_IPV6) != 0)
+        if (srv6_decap(ctx, srh, IPPROTO_IPV6, l3_offset) != 0)
             return XDP_DROP;
 
         void *data = (void *)(long)ctx->data;
@@ -245,7 +275,8 @@ static __always_inline int endpoint_handle_usp(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
-    __u32 fib_ifindex)
+    __u32 fib_ifindex,
+    __u16 l3_offset)
 {
     struct endpoint_ctx ectx;
     ectx.ctx = ctx;
@@ -253,6 +284,7 @@ static __always_inline int endpoint_handle_usp(
     ectx.srh = srh;
     ectx.entry = entry;
     ectx.data_end = (void *)(long)ctx->data_end;
+    ectx.l3_offset = l3_offset;
 
     if (endpoint_strip_srh(&ectx) != 0) {
         DEBUG_PRINT("USP: Failed to strip SRH\n");

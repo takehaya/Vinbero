@@ -30,8 +30,10 @@
 static __always_inline int do_h_insert_core(
     struct xdp_md *ctx,
     struct ethhdr *saved_eth,
+    __u32 *saved_vlan,
     struct ipv6hdr *saved_ip6h,
-    struct headend_entry *entry)
+    struct headend_entry *entry,
+    __u16 l3_offset)
 {
     // Total SRH entries = policy segments + original DA
     int total_segments = entry->num_segments + 1;
@@ -40,7 +42,7 @@ static __always_inline int do_h_insert_core(
 
     int srh_len = 8 + (16 * total_segments);
 
-    // Expand packet: prepend SRH space (Eth + IPv6 will be restored from saved copies)
+    // Expand packet: prepend SRH space (Eth + VLAN + IPv6 will be restored)
     if (bpf_xdp_adjust_head(ctx, -srh_len)) {
         DEBUG_PRINT("H.Insert: bpf_xdp_adjust_head failed\n");
         return XDP_DROP;
@@ -52,16 +54,28 @@ static __always_inline int do_h_insert_core(
     struct ethhdr *new_eth = data;
     CHECK_BOUND(new_eth, data_end, sizeof(*new_eth));
 
-    struct ipv6hdr *new_ip6h = (struct ipv6hdr *)(new_eth + 1);
+    // IPv6 header is at data + l3_offset (accounts for VLAN tags)
+    struct ipv6hdr *new_ip6h = (struct ipv6hdr *)(data + l3_offset);
     CHECK_BOUND(new_ip6h, data_end, sizeof(*new_ip6h));
 
-    struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(new_ip6h + 1);
+    struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)((void *)new_ip6h + sizeof(*new_ip6h));
     // Minimum SRH size: 8 (header) + 32 (2 segments min) = 40 bytes
     CHECK_BOUND(srh, data_end, 40);
     CHECK_BOUND(srh, data_end, srh_len);
 
     // Restore Ethernet header
     __builtin_memcpy(new_eth, saved_eth, sizeof(struct ethhdr));
+
+    // Restore VLAN tag(s) if present
+    if (l3_offset > ETH_HLEN) {
+        void *vlan_ptr = (void *)new_eth + ETH_HLEN;
+        CHECK_BOUND(vlan_ptr, data_end, 4);
+        __builtin_memcpy(vlan_ptr, &saved_vlan[0], 4);
+        if (l3_offset > ETH_HLEN + 4) {
+            CHECK_BOUND(vlan_ptr + 4, data_end, 4);
+            __builtin_memcpy(vlan_ptr + 4, &saved_vlan[1], 4);
+        }
+    }
 
     // Restore and modify IPv6 header
     __builtin_memcpy(new_ip6h, saved_ip6h, sizeof(struct ipv6hdr));
@@ -118,12 +132,14 @@ static __always_inline int do_h_insert_core(
 static __always_inline int do_h_insert_red_core(
     struct xdp_md *ctx,
     struct ethhdr *saved_eth,
+    __u32 *saved_vlan,
     struct ipv6hdr *saved_ip6h,
-    struct headend_entry *entry)
+    struct headend_entry *entry,
+    __u16 l3_offset)
 {
     // N=1: fallback to normal H.Insert (SL=0 at S1 cannot restore original DA)
     if (entry->num_segments == 1) {
-        return do_h_insert_core(ctx, saved_eth, saved_ip6h, entry);
+        return do_h_insert_core(ctx, saved_eth, saved_vlan, saved_ip6h, entry, l3_offset);
     }
 
     if (entry->num_segments < 2 || entry->num_segments > MAX_SEGMENTS)
@@ -144,16 +160,27 @@ static __always_inline int do_h_insert_red_core(
     struct ethhdr *new_eth = data;
     CHECK_BOUND(new_eth, data_end, sizeof(*new_eth));
 
-    struct ipv6hdr *new_ip6h = (struct ipv6hdr *)(new_eth + 1);
+    struct ipv6hdr *new_ip6h = (struct ipv6hdr *)(data + l3_offset);
     CHECK_BOUND(new_ip6h, data_end, sizeof(*new_ip6h));
 
-    struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(new_ip6h + 1);
+    struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)((void *)new_ip6h + sizeof(*new_ip6h));
     // Minimum SRH: 8 (header) + 32 (2 entries: DA + 1 policy seg) = 40 bytes
     CHECK_BOUND(srh, data_end, 40);
     CHECK_BOUND(srh, data_end, srh_len);
 
     // Restore Ethernet header
     __builtin_memcpy(new_eth, saved_eth, sizeof(struct ethhdr));
+
+    // Restore VLAN tag(s) if present
+    if (l3_offset > ETH_HLEN) {
+        void *vlan_ptr = (void *)new_eth + ETH_HLEN;
+        CHECK_BOUND(vlan_ptr, data_end, 4);
+        __builtin_memcpy(vlan_ptr, &saved_vlan[0], 4);
+        if (l3_offset > ETH_HLEN + 4) {
+            CHECK_BOUND(vlan_ptr + 4, data_end, 4);
+            __builtin_memcpy(vlan_ptr + 4, &saved_vlan[1], 4);
+        }
+    }
 
     // Restore and modify IPv6 header
     __builtin_memcpy(new_ip6h, saved_ip6h, sizeof(struct ipv6hdr));
@@ -196,6 +223,61 @@ static __always_inline int do_h_insert_red_core(
     default:
         return XDP_PASS;
     }
+}
+
+// H.Insert for IPv6 (RFC 8986 Section 4.1)
+static __always_inline int do_h_insert_v6(
+    struct xdp_md *ctx,
+    struct ethhdr *eth,
+    struct ipv6hdr *ip6h,
+    struct headend_entry *entry,
+    __u16 l3_offset)
+{
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS - 1) {
+        DEBUG_PRINT("H.Insert.v6: Invalid segment count %d\n", entry->num_segments);
+        return XDP_DROP;
+    }
+
+    struct ethhdr saved_eth;
+    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
+    // Save VLAN tag(s) between Eth and IPv6 (H.Insert preserves VLAN)
+    __u32 saved_vlan[2] = {};
+    if (l3_offset > ETH_HLEN) {
+        __builtin_memcpy(&saved_vlan[0], (void *)eth + ETH_HLEN, 4);
+        if (l3_offset > ETH_HLEN + 4)
+            __builtin_memcpy(&saved_vlan[1], (void *)eth + ETH_HLEN + 4, 4);
+    }
+    struct ipv6hdr saved_ip6h;
+    __builtin_memcpy(&saved_ip6h, ip6h, sizeof(struct ipv6hdr));
+
+    return do_h_insert_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, entry, l3_offset);
+}
+
+// H.Insert.Red for IPv6 (RFC 8986 Section 4.1 + Reduced)
+static __always_inline int do_h_insert_red_v6(
+    struct xdp_md *ctx,
+    struct ethhdr *eth,
+    struct ipv6hdr *ip6h,
+    struct headend_entry *entry,
+    __u16 l3_offset)
+{
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
+        DEBUG_PRINT("H.Insert.Red.v6: Invalid segment count %d\n", entry->num_segments);
+        return XDP_DROP;
+    }
+
+    struct ethhdr saved_eth;
+    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
+    __u32 saved_vlan[2] = {};
+    if (l3_offset > ETH_HLEN) {
+        __builtin_memcpy(&saved_vlan[0], (void *)eth + ETH_HLEN, 4);
+        if (l3_offset > ETH_HLEN + 4)
+            __builtin_memcpy(&saved_vlan[1], (void *)eth + ETH_HLEN + 4, 4);
+    }
+    struct ipv6hdr saved_ip6h;
+    __builtin_memcpy(&saved_ip6h, ip6h, sizeof(struct ipv6hdr));
+
+    return do_h_insert_red_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, entry, l3_offset);
 }
 
 #endif // SRV6_INSERT_H

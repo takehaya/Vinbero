@@ -11,6 +11,7 @@
 #include "core/xdp_prog.h"
 #include "core/srv6.h"
 #include "headend/srv6_headend_utils.h"
+#include <linux/ip.h>
 #include "core/srv6_fib.h"
 
 // H.Encaps core implementation - shared by both IPv4 and IPv6 encapsulation
@@ -29,7 +30,8 @@ static __always_inline int do_h_encaps_core(
     struct ethhdr *saved_eth,
     struct headend_entry *entry,
     __u8 inner_proto,
-    __u16 inner_total_len)
+    __u16 inner_total_len,
+    __u16 l3_offset)
 {
     // 1. Calculate new header sizes
     // IPv6 basic header: 40 bytes
@@ -38,8 +40,11 @@ static __always_inline int do_h_encaps_core(
     int srh_len = 8 + (16 * entry->num_segments);
     int new_headers_len = ipv6_hdr_len + srh_len;
 
-    // 2. Make room for new headers at the front of the packet
-    if (bpf_xdp_adjust_head(ctx, -(new_headers_len))) {
+    // 2. Make room for new headers, accounting for VLAN tag removal.
+    // VLAN tag (if present) is part of the outer L2 and is discarded.
+    // vlan_len bytes of VLAN tag are "reclaimed" as part of the expansion.
+    int vlan_len = l3_offset - ETH_HLEN;
+    if (bpf_xdp_adjust_head(ctx, -(new_headers_len - vlan_len))) {
         DEBUG_PRINT("H.Encaps: bpf_xdp_adjust_head failed\n");
         return XDP_DROP;
     }
@@ -116,6 +121,46 @@ static __always_inline int do_h_encaps_core(
         DEBUG_PRINT("H.Encaps: FIB lookup needs kernel\n");
         return XDP_PASS;
     }
+}
+
+// H.Encaps for IPv4 (RFC 8986 Section 5.1)
+static __always_inline int do_h_encaps_v4(
+    struct xdp_md *ctx,
+    struct ethhdr *eth,
+    struct iphdr *iph,
+    struct headend_entry *entry,
+    __u16 l3_offset)
+{
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
+        DEBUG_PRINT("H.Encaps.v4: Invalid segment count %d\n", entry->num_segments);
+        return XDP_DROP;
+    }
+
+    struct ethhdr saved_eth;
+    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
+    __u16 inner_total_len = bpf_ntohs(iph->tot_len);
+
+    return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPIP, inner_total_len, l3_offset);
+}
+
+// H.Encaps for IPv6 (RFC 8986 Section 5.1)
+static __always_inline int do_h_encaps_v6(
+    struct xdp_md *ctx,
+    struct ethhdr *eth,
+    struct ipv6hdr *inner_ip6h,
+    struct headend_entry *entry,
+    __u16 l3_offset)
+{
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
+        DEBUG_PRINT("H.Encaps.v6: Invalid segment count %d\n", entry->num_segments);
+        return XDP_DROP;
+    }
+
+    struct ethhdr saved_eth;
+    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
+    __u16 inner_total_len = 40 + bpf_ntohs(inner_ip6h->payload_len);
+
+    return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPV6, inner_total_len, l3_offset);
 }
 
 #endif // SRV6_ENCAPS_H

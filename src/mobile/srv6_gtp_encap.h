@@ -35,7 +35,8 @@ static __always_inline int process_end_m_gtp4_e(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // 1. SL must be 0
     if (srh->segments_left != 0)
@@ -72,7 +73,7 @@ static __always_inline int process_end_m_gtp4_e(
     if (inner_nexthdr != IPPROTO_IPIP && inner_nexthdr != IPPROTO_IPV6)
         return XDP_DROP;
 
-    if (srv6_decap(ctx, srh, inner_nexthdr) != 0)
+    if (srv6_decap(ctx, srh, inner_nexthdr, l3_offset) != 0)
         return XDP_DROP;
 
     // 5. Re-derive pointers, get inner packet length

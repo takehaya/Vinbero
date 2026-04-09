@@ -29,49 +29,11 @@
 
 char _license[] SEC("license") = "GPL";
 
-// H.Encaps for IPv4 (RFC 8986 Section 5.1)
-static __always_inline int do_h_encaps_v4(
-    struct xdp_md *ctx,
-    struct ethhdr *eth,
-    struct iphdr *iph,
-    struct headend_entry *entry)
-{
-    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
-        DEBUG_PRINT("H.Encaps.v4: Invalid segment count %d\n", entry->num_segments);
-        return XDP_DROP;
-    }
-
-    // Save before bpf_xdp_adjust_head invalidates packet pointers
-    struct ethhdr saved_eth;
-    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-    __u16 inner_total_len = bpf_ntohs(iph->tot_len);
-
-    return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPIP, inner_total_len);
-}
-
-// H.Encaps.Red for IPv4 (RFC 8986 Section 5.1.1)
-static __always_inline int do_h_encaps_red_v4(
-    struct xdp_md *ctx,
-    struct ethhdr *eth,
-    struct iphdr *iph,
-    struct headend_entry *entry)
-{
-    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
-        DEBUG_PRINT("H.Encaps.Red.v4: Invalid segment count %d\n", entry->num_segments);
-        return XDP_DROP;
-    }
-
-    struct ethhdr saved_eth;
-    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-    __u16 inner_total_len = bpf_ntohs(iph->tot_len);
-
-    return do_h_encaps_red_core(ctx, &saved_eth, entry, IPPROTO_IPIP, inner_total_len);
-}
-
 static __noinline int process_headend_v4(
     struct xdp_md *ctx,
     struct ethhdr *eth,
-    struct iphdr *iph)
+    struct iphdr *iph,
+    __u16 l3_offset)
 {
     struct lpm_key_v4 key = {
         .prefixlen = 32,
@@ -85,102 +47,23 @@ static __noinline int process_headend_v4(
     switch (entry->mode) {
     case SRV6_HEADEND_BEHAVIOR_H_ENCAPS:
         DEBUG_PRINT("Headend.v4: Performing H.Encaps\n");
-        return do_h_encaps_v4(ctx, eth, iph, entry);
+        return do_h_encaps_v4(ctx, eth, iph, entry, l3_offset);
     case SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED:
         DEBUG_PRINT("Headend.v4: Performing H.Encaps.Red\n");
-        return do_h_encaps_red_v4(ctx, eth, iph, entry);
+        return do_h_encaps_red_v4(ctx, eth, iph, entry, l3_offset);
     case SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D:
         DEBUG_PRINT("Headend.v4: Performing H.M.GTP4.D\n");
-        return do_h_m_gtp4_d(ctx, eth, iph, entry);
+        return do_h_m_gtp4_d(ctx, eth, iph, entry, l3_offset);
     default:
         return XDP_PASS;
     }
 }
 
-// H.Encaps for IPv6 (RFC 8986 Section 5.1)
-static __always_inline int do_h_encaps_v6(
-    struct xdp_md *ctx,
-    struct ethhdr *eth,
-    struct ipv6hdr *inner_ip6h,
-    struct headend_entry *entry)
-{
-    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
-        DEBUG_PRINT("H.Encaps.v6: Invalid segment count %d\n", entry->num_segments);
-        return XDP_DROP;
-    }
-
-    // Save before bpf_xdp_adjust_head invalidates packet pointers
-    struct ethhdr saved_eth;
-    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-    // IPv6 total length = fixed header (40) + payload_len
-    __u16 inner_total_len = 40 + bpf_ntohs(inner_ip6h->payload_len);
-
-    return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPV6, inner_total_len);
-}
-
-// H.Encaps.Red for IPv6 (RFC 8986 Section 5.1.1)
-static __always_inline int do_h_encaps_red_v6(
-    struct xdp_md *ctx,
-    struct ethhdr *eth,
-    struct ipv6hdr *inner_ip6h,
-    struct headend_entry *entry)
-{
-    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
-        DEBUG_PRINT("H.Encaps.Red.v6: Invalid segment count %d\n", entry->num_segments);
-        return XDP_DROP;
-    }
-
-    struct ethhdr saved_eth;
-    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-    __u16 inner_total_len = 40 + bpf_ntohs(inner_ip6h->payload_len);
-
-    return do_h_encaps_red_core(ctx, &saved_eth, entry, IPPROTO_IPV6, inner_total_len);
-}
-
-// H.Insert for IPv6 (RFC 8986 Section 4.1)
-static __always_inline int do_h_insert_v6(
-    struct xdp_md *ctx,
-    struct ethhdr *eth,
-    struct ipv6hdr *ip6h,
-    struct headend_entry *entry)
-{
-    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS - 1) {
-        DEBUG_PRINT("H.Insert.v6: Invalid segment count %d\n", entry->num_segments);
-        return XDP_DROP;
-    }
-
-    struct ethhdr saved_eth;
-    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-    struct ipv6hdr saved_ip6h;
-    __builtin_memcpy(&saved_ip6h, ip6h, sizeof(struct ipv6hdr));
-
-    return do_h_insert_core(ctx, &saved_eth, &saved_ip6h, entry);
-}
-
-// H.Insert.Red for IPv6 (RFC 8986 Section 4.1 + Reduced)
-static __always_inline int do_h_insert_red_v6(
-    struct xdp_md *ctx,
-    struct ethhdr *eth,
-    struct ipv6hdr *ip6h,
-    struct headend_entry *entry)
-{
-    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
-        DEBUG_PRINT("H.Insert.Red.v6: Invalid segment count %d\n", entry->num_segments);
-        return XDP_DROP;
-    }
-
-    struct ethhdr saved_eth;
-    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-    struct ipv6hdr saved_ip6h;
-    __builtin_memcpy(&saved_ip6h, ip6h, sizeof(struct ipv6hdr));
-
-    return do_h_insert_red_core(ctx, &saved_eth, &saved_ip6h, entry);
-}
-
 static __noinline int process_headend_v6(
     struct xdp_md *ctx,
     struct ethhdr *eth,
-    struct ipv6hdr *ip6h)
+    struct ipv6hdr *ip6h,
+    __u16 l3_offset)
 {
     struct lpm_key_v6 key = {
         .prefixlen = 128,
@@ -194,19 +77,70 @@ static __noinline int process_headend_v6(
     switch (entry->mode) {
     case SRV6_HEADEND_BEHAVIOR_H_ENCAPS:
         DEBUG_PRINT("Headend.v6: Performing H.Encaps\n");
-        return do_h_encaps_v6(ctx, eth, ip6h, entry);
+        return do_h_encaps_v6(ctx, eth, ip6h, entry, l3_offset);
     case SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED:
         DEBUG_PRINT("Headend.v6: Performing H.Encaps.Red\n");
-        return do_h_encaps_red_v6(ctx, eth, ip6h, entry);
+        return do_h_encaps_red_v6(ctx, eth, ip6h, entry, l3_offset);
     case SRV6_HEADEND_BEHAVIOR_H_INSERT:
         DEBUG_PRINT("Headend.v6: Performing H.Insert\n");
-        return do_h_insert_v6(ctx, eth, ip6h, entry);
+        return do_h_insert_v6(ctx, eth, ip6h, entry, l3_offset);
     case SRV6_HEADEND_BEHAVIOR_H_INSERT_RED:
         DEBUG_PRINT("Headend.v6: Performing H.Insert.Red\n");
-        return do_h_insert_red_v6(ctx, eth, ip6h, entry);
+        return do_h_insert_red_v6(ctx, eth, ip6h, entry, l3_offset);
     default:
         return XDP_PASS;
     }
+}
+
+// FIB redirect after no-SRH decap.
+// After decapsulation, the packet is [Eth(14)][Inner IP].
+// Set EtherType, do FIB lookup, and redirect.
+// XDP_PASS is converted to XDP_DROP because the packet structure has changed
+// (inner IP exposed) and cannot be safely passed to the kernel stack.
+static __always_inline int nosrh_fib_v4(
+    struct xdp_md *ctx,
+    struct sid_function_entry *entry)
+{
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_DROP;
+
+    struct iphdr *iph = (void *)(eth + 1);
+    if ((void *)(iph + 1) > data_end)
+        return XDP_DROP;
+
+    eth->h_proto = bpf_htons(ETH_P_IP);
+    STATS_INC(STATS_SRV6_END, 0);
+
+    __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
+    int action = srv6_fib_redirect_v4(ctx, iph, eth, fib_ifindex);
+    return (action == XDP_PASS) ? XDP_DROP : action;
+}
+
+static __always_inline int nosrh_fib_v6(
+    struct xdp_md *ctx,
+    struct sid_function_entry *entry)
+{
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_DROP;
+
+    struct ipv6hdr *inner_ip6h = (void *)(eth + 1);
+    if ((void *)(inner_ip6h + 1) > data_end)
+        return XDP_DROP;
+
+    eth->h_proto = bpf_htons(ETH_P_IPV6);
+    STATS_INC(STATS_SRV6_END, 0);
+
+    __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
+    int action = srv6_fib_redirect(ctx, inner_ip6h, eth, fib_ifindex);
+    return (action == XDP_PASS) ? XDP_DROP : action;
 }
 
 // No-SRH decap for Reduced SRH single-segment packets.
@@ -214,7 +148,7 @@ static __noinline int process_headend_v6(
 static __noinline int process_srv6_decap_nosrh(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
-    void *unused)
+    __u16 l3_offset)
 {
     __u8 nh = ip6h->nexthdr;
     if (nh != IPPROTO_IPIP && nh != IPPROTO_IPV6 && nh != IPPROTO_ETHERNET)
@@ -229,98 +163,47 @@ static __noinline int process_srv6_decap_nosrh(
     switch (entry->action) {
     case SRV6_LOCAL_ACTION_END_DX4:
     case SRV6_LOCAL_ACTION_END_DT4:
-        if (srv6_decap_nosrh(ctx, IPPROTO_IPIP, nh) != 0) return XDP_DROP;
-        goto fib_v4;
+        if (srv6_decap_nosrh(ctx, IPPROTO_IPIP, nh, l3_offset) != 0) return XDP_DROP;
+        return nosrh_fib_v4(ctx, entry);
     case SRV6_LOCAL_ACTION_END_DX6:
     case SRV6_LOCAL_ACTION_END_DT6:
-        if (srv6_decap_nosrh(ctx, IPPROTO_IPV6, nh) != 0) return XDP_DROP;
-        goto fib_v6;
+        if (srv6_decap_nosrh(ctx, IPPROTO_IPV6, nh, l3_offset) != 0) return XDP_DROP;
+        return nosrh_fib_v6(ctx, entry);
     case SRV6_LOCAL_ACTION_END_DT46:
         if (nh == IPPROTO_IPIP) {
-            if (srv6_decap_nosrh(ctx, IPPROTO_IPIP, nh) != 0) return XDP_DROP;
-            goto fib_v4;
+            if (srv6_decap_nosrh(ctx, IPPROTO_IPIP, nh, l3_offset) != 0) return XDP_DROP;
+            return nosrh_fib_v4(ctx, entry);
         }
         if (nh == IPPROTO_IPV6) {
-            if (srv6_decap_nosrh(ctx, IPPROTO_IPV6, nh) != 0) return XDP_DROP;
-            goto fib_v6;
+            if (srv6_decap_nosrh(ctx, IPPROTO_IPV6, nh, l3_offset) != 0) return XDP_DROP;
+            return nosrh_fib_v6(ctx, entry);
         }
         return XDP_DROP;
     case SRV6_LOCAL_ACTION_END_DX2: {
         __u32 oif;
         __builtin_memcpy(&oif, entry->nexthop, sizeof(__u32));
         if (oif == 0) return XDP_DROP;
-        if (srv6_decap_l2_nosrh(ctx, nh) != 0) return XDP_DROP;
+        if (srv6_decap_l2_nosrh(ctx, nh, l3_offset) != 0) return XDP_DROP;
         STATS_INC(STATS_SRV6_END, 0);
         return bpf_redirect(oif, 0);
     }
-    case SRV6_LOCAL_ACTION_END_DT2: {
-        if (nh != IPPROTO_ETHERNET) return XDP_PASS;
-        struct bd_peer_reverse_key rev_key = { .bd_id = entry->bd_id };
-        __builtin_memcpy(rev_key.src_addr, &ip6h->saddr, IPV6_ADDR_LEN);
-        struct bd_peer_reverse_val *rev = bpf_map_lookup_elem(&bd_peer_reverse_map, &rev_key);
-        if (srv6_decap_l2_nosrh(ctx, nh) != 0) return XDP_DROP;
-        STATS_INC(STATS_SRV6_END, 0);
-        void *d2 = (void *)(long)ctx->data;
-        void *d2e = (void *)(long)ctx->data_end;
-        struct ethhdr *ie = d2;
-        if ((void *)(ie + 1) > d2e) return XDP_DROP;
-        if (entry->bd_id != 0 && !(ie->h_source[0] & 0x01) && rev) {
-            struct fdb_key lk = { .bd_id = entry->bd_id };
-            __builtin_memcpy(lk.mac, ie->h_source, ETH_ALEN);
-            struct fdb_entry lv = { .is_remote = 1, .peer_index = rev->index, .bd_id = entry->bd_id };
-            bpf_map_update_elem(&fdb_map, &lk, &lv, BPF_ANY);
-        }
-        struct fdb_key dk = { .bd_id = entry->bd_id };
-        __builtin_memcpy(dk.mac, ie->h_dest, ETH_ALEN);
-        struct fdb_entry *fdb = bpf_map_lookup_elem(&fdb_map, &dk);
-        if (!fdb || fdb->is_remote) {
-            if (entry->bridge_ifindex > 0)
-                return bpf_redirect(entry->bridge_ifindex, 0);
-            return XDP_PASS;
-        }
-        return bpf_redirect(fdb->oif, 0);
-    }
+    case SRV6_LOCAL_ACTION_END_DT2:
+        return process_end_dt2_nosrh(ctx, ip6h, nh, entry, l3_offset);
     default:
         return XDP_PASS;
     }
-
-fib_v4: {
-    void *d = (void *)(long)ctx->data;
-    void *de = (void *)(long)ctx->data_end;
-    struct ethhdr *e = d;
-    if ((void *)(e + 1) > de) return XDP_DROP;
-    struct iphdr *iph = (void *)(e + 1);
-    if ((void *)(iph + 1) > de) return XDP_DROP;
-    e->h_proto = bpf_htons(ETH_P_IP);
-    STATS_INC(STATS_SRV6_END, 0);
-    __u32 fi = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
-    int a = srv6_fib_redirect_v4(ctx, iph, e, fi);
-    return (a == XDP_PASS) ? XDP_DROP : a;
-}
-fib_v6: {
-    void *d = (void *)(long)ctx->data;
-    void *de = (void *)(long)ctx->data_end;
-    struct ethhdr *e = d;
-    if ((void *)(e + 1) > de) return XDP_DROP;
-    struct ipv6hdr *inner = (void *)(e + 1);
-    if ((void *)(inner + 1) > de) return XDP_DROP;
-    e->h_proto = bpf_htons(ETH_P_IPV6);
-    STATS_INC(STATS_SRV6_END, 0);
-    __u32 fi = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
-    int a = srv6_fib_redirect(ctx, inner, e, fi);
-    return (a == XDP_PASS) ? XDP_DROP : a;
-}
 }
 
 static __always_inline int process_srv6_localsid(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct ipv6hdr *ip6h,
-    void *data_end)
+    __u16 l3_offset)
 {
     if (ip6h->nexthdr != IPPROTO_ROUTING)
         return XDP_PASS;
 
+    void *data_end = (void *)(long)ctx->data_end;
     void *srh_ptr = (void *)(ip6h + 1);
     if (srh_ptr + 8 > data_end)
         return XDP_PASS;
@@ -338,37 +221,37 @@ static __always_inline int process_srv6_localsid(
 
     switch (entry->action) {
     case SRV6_LOCAL_ACTION_END:
-        return process_end(ctx, ip6h, srh, entry);
+        return process_end(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_X:
-        return process_end_x(ctx, ip6h, srh, entry);
+        return process_end_x(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_T:
-        return process_end_t(ctx, ip6h, srh, entry);
+        return process_end_t(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DX2:
-        return process_end_dx2(ctx, ip6h, srh, entry);
+        return process_end_dx2(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DX4:
-        return process_end_dx4(ctx, ip6h, srh, entry);
+        return process_end_dx4(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DX6:
-        return process_end_dx6(ctx, ip6h, srh, entry);
+        return process_end_dx6(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DT4:
-        return process_end_dt4(ctx, ip6h, srh, entry);
+        return process_end_dt4(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DT6:
-        return process_end_dt6(ctx, ip6h, srh, entry);
+        return process_end_dt6(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DT46:
-        return process_end_dt46(ctx, ip6h, srh, entry);
+        return process_end_dt46(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DT2:
-        return process_end_dt2(ctx, ip6h, srh, entry);
+        return process_end_dt2(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_B6:
-        return process_end_b6_insert(ctx, ip6h, srh, entry);
+        return process_end_b6_insert(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_B6_ENCAPS:
-        return process_end_b6_encaps(ctx, ip6h, srh, entry);
+        return process_end_b6_encaps(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP4_E:
-        return process_end_m_gtp4_e(ctx, ip6h, srh, entry);
+        return process_end_m_gtp4_e(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP6_D:
-        return process_end_m_gtp6_d(ctx, ip6h, srh, entry);
+        return process_end_m_gtp6_d(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP6_D_DI:
-        return process_end_m_gtp6_d_di(ctx, ip6h, srh, entry);
+        return process_end_m_gtp6_d_di(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP6_E:
-        return process_end_m_gtp6_e(ctx, ip6h, srh, entry);
+        return process_end_m_gtp6_e(ctx, ip6h, srh, entry, l3_offset);
     default:
         return XDP_PASS;
     }
@@ -439,54 +322,63 @@ static __always_inline int process_bd_forwarding(
     return XDP_PASS;
 }
 
-// L3 processing: SRv6 localsid -> no-SRH decap -> headend
-// Replaces the former DO_L3_PROCESS macro. __noinline creates a BPF subprogram
-// boundary so pointer re-derivation after bpf_xdp_adjust_head is self-contained.
+// L2 headend check: BD forwarding if bd_id > 0, else direct H.Encaps.L2.
+// __noinline: own stack frame to avoid inflating vinbero_main's stack
+// (process_bd_forwarding is __always_inline, expands here).
+//
+// Returns >= 0: final XDP action; -1: no L2 headend configured
+static __noinline int try_l2_headend(
+    struct xdp_md *ctx,
+    __u32 ifindex,
+    __u16 vlan_id,
+    __u64 pkt_len)
+{
+    struct headend_l2_key l2_key = { .ifindex = ifindex, .vlan_id = vlan_id };
+    struct headend_entry *l2_entry = bpf_map_lookup_elem(&headend_l2_map, &l2_key);
+    if (!headend_should_encaps_l2_any(l2_entry))
+        return -1;
+
+    int bd_action = process_bd_forwarding(ctx, l2_entry, vlan_id, pkt_len);
+    if (bd_action >= 0)
+        return bd_action;
+
+    // bd_id == 0: no Bridge Domain, direct H.Encaps.L2 for all traffic
+    if (l2_entry->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED)
+        return do_h_encaps_l2_red(ctx, l2_entry, (__u16)pkt_len);
+    return do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
+}
+
+// L3 processing pipeline.
+// IPv6: localsid (SRH endpoint) -> decap_nosrh (Reduced SRH) -> headend
+// IPv4: headend only (IPv4 is transit traffic for SRv6 encapsulation)
+//
+// __noinline: BPF subprogram boundary for verifier state isolation
 static __noinline int process_l3(struct xdp_md *ctx, __u16 l3_offset, __u16 proto)
 {
     if (proto == bpf_htons(ETH_P_IPV6)) {
-        void *data = (void *)(long)ctx->data;
-        void *data_end = (void *)(long)ctx->data_end;
-        struct ethhdr *eth = data;
-        if ((void *)(eth + 1) > data_end) return XDP_PASS;
-        struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + l3_offset);
-        if ((void *)(ip6h + 1) > data_end) return XDP_PASS;
+        struct ethhdr *eth;
+        struct ipv6hdr *ip6h;
 
-        int action = process_srv6_localsid(ctx, eth, ip6h, data_end);
+        // Stage 1: SRH-based endpoint processing (End, End.X, End.DT*, etc.)
+        REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
+        int action = process_srv6_localsid(ctx, eth, ip6h, l3_offset);
         if (action != XDP_PASS) return action;
 
-        // Re-derive pointers after localsid (bpf_xdp_adjust_head invalidates)
-        data = (void *)(long)ctx->data;
-        data_end = (void *)(long)ctx->data_end;
-        eth = data;
-        if ((void *)(eth + 1) > data_end) return XDP_PASS;
-        ip6h = (struct ipv6hdr *)(data + l3_offset);
-        if ((void *)(ip6h + 1) > data_end) return XDP_PASS;
-
-        // No-SRH decap for Reduced SRH single-segment
-        action = process_srv6_decap_nosrh(ctx, ip6h, NULL);
+        // Stage 2: Reduced SRH decap (re-derive: localsid may adjust_head)
+        REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
+        action = process_srv6_decap_nosrh(ctx, ip6h, l3_offset);
         if (action != XDP_PASS) return action;
 
-        // Re-derive after decap
-        data = (void *)(long)ctx->data;
-        data_end = (void *)(long)ctx->data_end;
-        eth = data;
-        if ((void *)(eth + 1) > data_end) return XDP_PASS;
-        ip6h = (struct ipv6hdr *)(data + l3_offset);
-        if ((void *)(ip6h + 1) > data_end) return XDP_PASS;
-
-        return process_headend_v6(ctx, eth, ip6h);
+        // Stage 3: Headend encapsulation (re-derive: decap may adjust_head)
+        REDERIVE_ETH_IP6(ctx, l3_offset, eth, ip6h);
+        return process_headend_v6(ctx, eth, ip6h, l3_offset);
     }
 
     if (proto == bpf_htons(ETH_P_IP)) {
-        void *data = (void *)(long)ctx->data;
-        void *data_end = (void *)(long)ctx->data_end;
-        struct ethhdr *eth = data;
-        if ((void *)(eth + 1) > data_end) return XDP_PASS;
-        struct iphdr *iph = (struct iphdr *)(data + l3_offset);
-        if ((void *)(iph + 1) > data_end) return XDP_PASS;
-
-        return process_headend_v4(ctx, eth, iph);
+        struct ethhdr *eth;
+        struct iphdr *iph;
+        REDERIVE_ETH_IP4(ctx, l3_offset, eth, iph);
+        return process_headend_v4(ctx, eth, iph, l3_offset);
     }
 
     return XDP_PASS;
@@ -519,66 +411,41 @@ int vinbero_main(struct xdp_md *ctx)
         __u16 vlan_id = bpf_ntohs(vhdr->h_vlan_TCI) & 0x0FFF;
         __u16 inner_proto = vhdr->h_vlan_encapsulated_proto;
 
-        struct headend_l2_key l2_key = { .ifindex = ctx->ingress_ifindex, .vlan_id = vlan_id };
-        struct headend_entry *l2_entry = bpf_map_lookup_elem(&headend_l2_map, &l2_key);
-        if (headend_should_encaps_l2_any(l2_entry)) {
-            int bd_action = process_bd_forwarding(ctx, l2_entry, vlan_id, pkt_len);
-            if (bd_action >= 0) {
-                action = bd_action;
-                goto out;
-            }
-            // bd_id == 0: no Bridge Domain, direct H.Encaps.L2 for all traffic
-            if (l2_entry->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED)
-                action = do_h_encaps_l2_red(ctx, l2_entry, (__u16)pkt_len);
-            else
-                action = do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
+        int l2_action = try_l2_headend(ctx, ctx->ingress_ifindex, vlan_id, pkt_len);
+        if (l2_action >= 0) {
+            action = l2_action;
             goto out;
         }
 
-        // L2 miss — use a fresh scope with new variables to prevent clang
-        // from reusing stale packet pointers from before the map lookup.
-        {
-            void *d2 = (void *)(long)ctx->data;
-            void *d2_end = (void *)(long)ctx->data_end;
-            struct ethhdr *e2 = d2;
-            if ((void *)(e2 + 1) > d2_end)
-                goto out;
+        // L2 miss — re-derive packet pointers after noinline call
+        // (inner_proto is a scalar on the stack, still valid)
+        data = (void *)(long)ctx->data;
+        data_end = (void *)(long)ctx->data_end;
+        eth = data;
+        if ((void *)(eth + 1) > data_end)
+            goto out;
 
-            if (inner_proto == bpf_htons(ETH_P_8021Q) ||
-                inner_proto == bpf_htons(ETH_P_8021AD)) {
-                // QinQ: skip 2 VLAN tags
-                struct vlan_hdr *v2a = (struct vlan_hdr *)(e2 + 1);
-                if ((void *)(v2a + 1) > d2_end)
-                    goto out;
-                struct vlan_hdr *v2b = v2a + 1;
-                if ((void *)(v2b + 1) > d2_end)
-                    goto out;
-                __u16 proto2 = v2b->h_vlan_encapsulated_proto;
-                action = process_l3(ctx, 22, proto2);  /* eth(14) + 2*vlan(4) */
+        if (inner_proto == bpf_htons(ETH_P_8021Q) ||
+            inner_proto == bpf_htons(ETH_P_8021AD)) {
+            // QinQ: skip 2 VLAN tags
+            struct vlan_hdr *v2a = (struct vlan_hdr *)(eth + 1);
+            if ((void *)(v2a + 1) > data_end)
                 goto out;
-            } else {
-                action = process_l3(ctx, 18, inner_proto);  /* eth(14) + vlan(4) */
+            struct vlan_hdr *v2b = v2a + 1;
+            if ((void *)(v2b + 1) > data_end)
                 goto out;
-            }
+            action = process_l3(ctx, 22, v2b->h_vlan_encapsulated_proto);
+        } else {
+            action = process_l3(ctx, 18, inner_proto);
         }
         goto out;
     }
 
     // ========== Non-VLAN packets ==========
     {
-        struct headend_l2_key l2_key = { .ifindex = ctx->ingress_ifindex, .vlan_id = 0 };
-        struct headend_entry *l2_entry = bpf_map_lookup_elem(&headend_l2_map, &l2_key);
-        if (headend_should_encaps_l2_any(l2_entry)) {
-            int bd_action = process_bd_forwarding(ctx, l2_entry, 0, pkt_len);
-            if (bd_action >= 0) {
-                action = bd_action;
-                goto out;
-            }
-            // bd_id == 0: no Bridge Domain, direct H.Encaps.L2 for all traffic
-            if (l2_entry->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED)
-                action = do_h_encaps_l2_red(ctx, l2_entry, (__u16)pkt_len);
-            else
-                action = do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
+        int l2_action = try_l2_headend(ctx, ctx->ingress_ifindex, 0, pkt_len);
+        if (l2_action >= 0) {
+            action = l2_action;
             goto out;
         }
     }

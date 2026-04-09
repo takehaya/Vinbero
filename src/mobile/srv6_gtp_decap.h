@@ -28,7 +28,8 @@ static __always_inline int do_h_m_gtp4_d(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct iphdr *iph,
-    struct headend_entry *entry)
+    struct headend_entry *entry,
+    __u16 l3_offset)
 {
     void *data_end = (void *)(long)ctx->data_end;
 
@@ -185,7 +186,8 @@ static __always_inline int process_end_m_gtp6_d(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     void *data_end = (void *)(long)ctx->data_end;
 
@@ -218,7 +220,7 @@ static __always_inline int process_end_m_gtp6_d(
         return XDP_DROP;
 
     __u16 gtp_strip = sizeof(struct udphdr) + gtp_info.hdr_total_len;
-    __u16 outer_headers = sizeof(struct ethhdr) + sizeof(struct ipv6hdr) + srh_total_len;
+    __u16 outer_headers = l3_offset + sizeof(struct ipv6hdr) + srh_total_len;
 
     // Compute next segment BEFORE any mutation (for fallback safety)
     __u8 new_sl = srh->segments_left - 1;
@@ -392,7 +394,8 @@ static __always_inline int process_end_m_gtp6_d_di(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     void *data_end = (void *)(long)ctx->data_end;
 
@@ -430,7 +433,8 @@ static __always_inline int process_end_m_gtp6_e(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // 1. SL must be 0
     if (srh->segments_left != 0)
@@ -460,7 +464,7 @@ static __always_inline int process_end_m_gtp6_e(
     if (inner_nexthdr != IPPROTO_IPIP && inner_nexthdr != IPPROTO_IPV6)
         return XDP_DROP;
 
-    if (srv6_decap(ctx, srh, inner_nexthdr) != 0)
+    if (srv6_decap(ctx, srh, inner_nexthdr, l3_offset) != 0)
         return XDP_DROP;
 
     // 5. Re-derive pointers

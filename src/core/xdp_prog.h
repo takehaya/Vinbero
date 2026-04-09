@@ -41,6 +41,31 @@
         ptr = (void *)(ptr) + (size); \
     } while (0)
 
+// Re-derive Ethernet + IPv6 header pointers after bpf_xdp_adjust_head.
+// All packet pointers are invalidated after adjust_head; this macro
+// re-fetches ctx->data/data_end, casts and bounds-checks both headers.
+// Returns XDP_PASS if bounds checks fail.
+#define REDERIVE_ETH_IP6(ctx, l3_off, eth, ip6h)              \
+    do {                                                        \
+        void *_data = (void *)(long)(ctx)->data;                \
+        void *_data_end = (void *)(long)(ctx)->data_end;        \
+        (eth) = (struct ethhdr *)_data;                         \
+        if ((void *)((eth) + 1) > _data_end) return XDP_PASS;  \
+        (ip6h) = (struct ipv6hdr *)(_data + (l3_off));          \
+        if ((void *)((ip6h) + 1) > _data_end) return XDP_PASS; \
+    } while (0)
+
+// Same as REDERIVE_ETH_IP6 but for IPv4 header.
+#define REDERIVE_ETH_IP4(ctx, l3_off, eth, iph)                \
+    do {                                                        \
+        void *_data = (void *)(long)(ctx)->data;                \
+        void *_data_end = (void *)(long)(ctx)->data_end;        \
+        (eth) = (struct ethhdr *)_data;                         \
+        if ((void *)((eth) + 1) > _data_end) return XDP_PASS;  \
+        (iph) = (struct iphdr *)(_data + (l3_off));             \
+        if ((void *)((iph) + 1) > _data_end) return XDP_PASS;  \
+    } while (0)
+
 #define MAX_SEGMENTS 10
 #define IPV4_ADDR_LEN 4
 #define IPV6_ADDR_LEN 16

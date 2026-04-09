@@ -15,17 +15,18 @@ static __always_inline int process_end(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     struct endpoint_ctx ectx;
-    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
+    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
 
     if (ret == -1) {
         // SL=0: check USD and USP flavors
         if (entry->flavor == SRV6_LOCAL_FLAVOR_USD) {
-            return endpoint_handle_usd(ctx, ip6h, srh, entry);
+            return endpoint_handle_usd(ctx, ip6h, srh, entry, l3_offset);
         } else if (entry->flavor == SRV6_LOCAL_FLAVOR_USP) {
-            return endpoint_handle_usp(ctx, ip6h, srh, entry, ctx->ingress_ifindex);
+            return endpoint_handle_usp(ctx, ip6h, srh, entry, ctx->ingress_ifindex, l3_offset);
         }
         DEBUG_PRINT("End: SL is 0, passing to upper layer\n");
         return XDP_PASS;
@@ -60,15 +61,16 @@ static __always_inline int process_end_x(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     struct endpoint_ctx ectx;
-    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
+    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
     if (ret == -1) {
         if (entry->flavor == SRV6_LOCAL_FLAVOR_USD) {
-            return endpoint_handle_usd(ctx, ip6h, srh, entry);
+            return endpoint_handle_usd(ctx, ip6h, srh, entry, l3_offset);
         } else if (entry->flavor == SRV6_LOCAL_FLAVOR_USP) {
-            return endpoint_handle_usp(ctx, ip6h, srh, entry, ctx->ingress_ifindex);
+            return endpoint_handle_usp(ctx, ip6h, srh, entry, ctx->ingress_ifindex, l3_offset);
         }
         return XDP_PASS;
     }
@@ -97,17 +99,18 @@ static __always_inline int process_end_t(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
 
     struct endpoint_ctx ectx;
-    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
+    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
     if (ret == -1) {
         if (entry->flavor == SRV6_LOCAL_FLAVOR_USD) {
-            return endpoint_handle_usd(ctx, ip6h, srh, entry);
+            return endpoint_handle_usd(ctx, ip6h, srh, entry, l3_offset);
         } else if (entry->flavor == SRV6_LOCAL_FLAVOR_USP) {
-            return endpoint_handle_usp(ctx, ip6h, srh, entry, fib_ifindex);
+            return endpoint_handle_usp(ctx, ip6h, srh, entry, fib_ifindex, l3_offset);
         }
         return XDP_PASS;
     }

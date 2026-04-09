@@ -41,7 +41,8 @@ static __noinline int process_end_b6_insert(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // Lookup policy BEFORE endpoint processing (DA will be overwritten)
     struct headend_entry *policy = end_b6_lookup_policy(ip6h);
@@ -52,7 +53,7 @@ static __noinline int process_end_b6_insert(
 
     // --- Phase 1: Endpoint processing ---
     struct endpoint_ctx ectx;
-    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
+    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
 
     if (ret == -1) {
         DEBUG_PRINT("End.B6.Insert: SL=0, pass to upper layer\n");
@@ -76,7 +77,7 @@ static __noinline int process_end_b6_insert(
     if ((void *)(eth + 1) > data_end)
         return XDP_DROP;
 
-    struct ipv6hdr *cur_ip6h = (struct ipv6hdr *)(eth + 1);
+    struct ipv6hdr *cur_ip6h = (struct ipv6hdr *)((void *)eth + l3_offset);
     if ((void *)(cur_ip6h + 1) > data_end)
         return XDP_DROP;
 
@@ -88,18 +89,25 @@ static __noinline int process_end_b6_insert(
 
     // Save headers before bpf_xdp_adjust_head
     struct ethhdr saved_eth;
-    struct ipv6hdr saved_ip6h;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
+    // Save VLAN tag(s) (H.Insert preserves VLAN)
+    __u32 saved_vlan[2] = {};
+    if (l3_offset > ETH_HLEN) {
+        __builtin_memcpy(&saved_vlan[0], (void *)eth + ETH_HLEN, 4);
+        if (l3_offset > ETH_HLEN + 4)
+            __builtin_memcpy(&saved_vlan[1], (void *)eth + ETH_HLEN + 4, 4);
+    }
+    struct ipv6hdr saved_ip6h;
     __builtin_memcpy(&saved_ip6h, cur_ip6h, sizeof(struct ipv6hdr));
 
     // Dispatch based on policy mode
     if (policy->mode == SRV6_HEADEND_BEHAVIOR_H_INSERT_RED) {
         DEBUG_PRINT("End.B6.Insert.Red: Inserting reduced policy SRH\n");
-        return do_h_insert_red_core(ctx, &saved_eth, &saved_ip6h, policy);
+        return do_h_insert_red_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, policy, l3_offset);
     }
 
     DEBUG_PRINT("End.B6.Insert: Inserting policy SRH\n");
-    return do_h_insert_core(ctx, &saved_eth, &saved_ip6h, policy);
+    return do_h_insert_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, policy, l3_offset);
 }
 
 // End.B6.Encaps / End.B6.Encaps.Red (RFC 8986 Section 4.13)
@@ -115,7 +123,8 @@ static __noinline int process_end_b6_encaps(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
 {
     // Lookup policy BEFORE endpoint processing
     struct headend_entry *policy = end_b6_lookup_policy(ip6h);
@@ -126,7 +135,7 @@ static __noinline int process_end_b6_encaps(
 
     // --- Phase 1: Endpoint processing ---
     struct endpoint_ctx ectx;
-    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry);
+    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
 
     if (ret == -1) {
         DEBUG_PRINT("End.B6.Encaps: SL=0, pass to upper layer\n");
@@ -150,7 +159,7 @@ static __noinline int process_end_b6_encaps(
     if ((void *)(eth + 1) > data_end)
         return XDP_DROP;
 
-    struct ipv6hdr *cur_ip6h = (struct ipv6hdr *)(eth + 1);
+    struct ipv6hdr *cur_ip6h = (struct ipv6hdr *)((void *)eth + l3_offset);
     if ((void *)(cur_ip6h + 1) > data_end)
         return XDP_DROP;
 
@@ -170,11 +179,11 @@ static __noinline int process_end_b6_encaps(
     // Dispatch based on policy mode
     if (policy->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED) {
         DEBUG_PRINT("End.B6.Encaps.Red: Encapsulating with reduced SRH\n");
-        return do_h_encaps_red_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len);
+        return do_h_encaps_red_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len, l3_offset);
     }
 
     DEBUG_PRINT("End.B6.Encaps: Encapsulating with outer IPv6+SRH\n");
-    return do_h_encaps_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len);
+    return do_h_encaps_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len, l3_offset);
 }
 
 #endif // SRV6_END_B6_H
