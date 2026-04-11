@@ -88,6 +88,56 @@ func (a *indexAllocator) Free(idx uint32) {
 	a.freeList = append(a.freeList, idx)
 }
 
+// RecoverUsed rebuilds allocator state from a list of indices currently in use.
+// Gaps between used indices are added to the free list for reuse.
+func (a *indexAllocator) RecoverUsed(usedIndices []uint32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if len(usedIndices) == 0 {
+		return
+	}
+
+	used := make(map[uint32]bool, len(usedIndices))
+	maxUsed := uint32(0)
+	for _, idx := range usedIndices {
+		used[idx] = true
+		if idx >= maxUsed {
+			maxUsed = idx
+		}
+	}
+
+	a.nextNew = maxUsed + 1
+	a.freeList = nil
+	for i := uint32(0); i < a.nextNew; i++ {
+		if !used[i] {
+			a.freeList = append(a.freeList, i)
+		}
+	}
+}
+
+// RecoverAuxIndices scans sid_function_map for entries with has_aux=1
+// and marks their aux_index as used in the allocator.
+// Call this on startup to restore allocator state after process restart.
+func (m *MapOperations) RecoverAuxIndices() error {
+	var key LpmKeyV6
+	var entry SidFunctionEntry
+	iter := m.objs.SidFunctionMap.Iterate()
+
+	var used []uint32
+	for iter.Next(&key, &entry) {
+		if entry.HasAux != 0 {
+			used = append(used, entry.AuxIndex)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("failed to iterate SID function map for recovery: %w", err)
+	}
+
+	m.auxAlloc.RecoverUsed(used)
+	return nil
+}
+
 // ===== SID Aux Entry Constructors =====
 // BpfSidAuxEntry is a Go representation of a C union.
 // bpf2go exposes only the first union member (nexthop).

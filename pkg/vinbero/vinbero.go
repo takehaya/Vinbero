@@ -36,8 +36,11 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 		return nil, fmt.Errorf("fail to bpf load: %w", err)
 	}
 
-	// Create map operations
+	// Create map operations and recover aux index state from existing entries
 	mapOps := bpf.NewMapOperations(obj)
+	if err := mapOps.RecoverAuxIndices(); err != nil {
+		logger.Warn("failed to recover aux indices, starting fresh", zap.Error(err))
+	}
 
 	// resolve device interfaces
 	var devices []net.Interface
