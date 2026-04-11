@@ -35,10 +35,11 @@ type BpfFdbEntry struct {
 	_         structs.HostLayout
 	Oif       uint32
 	IsRemote  uint8
-	Pad       uint8
+	IsStatic  uint8
 	PeerIndex uint16
 	BdId      uint16
-	Pad2      [2]uint8
+	Pad       [2]uint8
+	LastSeen  uint64
 }
 
 type BpfFdbKey struct {
@@ -84,22 +85,23 @@ type BpfScratchBuf struct {
 	Data [224]uint8
 }
 
+type BpfSidAuxEntry struct {
+	_       structs.HostLayout
+	Nexthop struct {
+		_       structs.HostLayout
+		Nexthop [16]uint8
+	}
+	_ [184]byte
+}
+
 type BpfSidFunctionEntry struct {
-	_             structs.HostLayout
-	Action        uint8
-	Flavor        uint8
-	SrcAddr       [16]uint8
-	DstAddr       [16]uint8
-	Nexthop       [16]uint8
-	ArgSrcOffset  uint8
-	ArgDstOffset  uint8
-	VrfIfindex    uint32
-	BdId          uint16
-	PadSid        uint16
-	BridgeIfindex uint32
-	ArgsOffset    uint8
-	GtpV4SrcAddr  [4]uint8
-	PadGtp        uint8
+	_          structs.HostLayout
+	Action     uint8
+	Flavor     uint8
+	HasAux     uint8
+	Pad        uint8
+	VrfIfindex uint32
+	AuxIndex   uint32
 }
 
 type BpfStatsEntry struct {
@@ -160,12 +162,12 @@ type BpfProgramSpecs struct {
 type BpfMapSpecs struct {
 	BdPeerMap        *ebpf.MapSpec `ebpf:"bd_peer_map"`
 	BdPeerReverseMap *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
-	EndB6PolicyMap   *ebpf.MapSpec `ebpf:"end_b6_policy_map"`
 	FdbMap           *ebpf.MapSpec `ebpf:"fdb_map"`
 	HeadendL2Map     *ebpf.MapSpec `ebpf:"headend_l2_map"`
 	HeadendV4Map     *ebpf.MapSpec `ebpf:"headend_v4_map"`
 	HeadendV6Map     *ebpf.MapSpec `ebpf:"headend_v6_map"`
 	ScratchMap       *ebpf.MapSpec `ebpf:"scratch_map"`
+	SidAuxMap        *ebpf.MapSpec `ebpf:"sid_aux_map"`
 	SidFunctionMap   *ebpf.MapSpec `ebpf:"sid_function_map"`
 	StatsMap         *ebpf.MapSpec `ebpf:"stats_map"`
 	XdpcapHook       *ebpf.MapSpec `ebpf:"xdpcap_hook"`
@@ -201,12 +203,12 @@ func (o *BpfObjects) Close() error {
 type BpfMaps struct {
 	BdPeerMap        *ebpf.Map `ebpf:"bd_peer_map"`
 	BdPeerReverseMap *ebpf.Map `ebpf:"bd_peer_reverse_map"`
-	EndB6PolicyMap   *ebpf.Map `ebpf:"end_b6_policy_map"`
 	FdbMap           *ebpf.Map `ebpf:"fdb_map"`
 	HeadendL2Map     *ebpf.Map `ebpf:"headend_l2_map"`
 	HeadendV4Map     *ebpf.Map `ebpf:"headend_v4_map"`
 	HeadendV6Map     *ebpf.Map `ebpf:"headend_v6_map"`
 	ScratchMap       *ebpf.Map `ebpf:"scratch_map"`
+	SidAuxMap        *ebpf.Map `ebpf:"sid_aux_map"`
 	SidFunctionMap   *ebpf.Map `ebpf:"sid_function_map"`
 	StatsMap         *ebpf.Map `ebpf:"stats_map"`
 	XdpcapHook       *ebpf.Map `ebpf:"xdpcap_hook"`
@@ -216,12 +218,12 @@ func (m *BpfMaps) Close() error {
 	return _BpfClose(
 		m.BdPeerMap,
 		m.BdPeerReverseMap,
-		m.EndB6PolicyMap,
 		m.FdbMap,
 		m.HeadendL2Map,
 		m.HeadendV4Map,
 		m.HeadendV6Map,
 		m.ScratchMap,
+		m.SidAuxMap,
 		m.SidFunctionMap,
 		m.StatsMap,
 		m.XdpcapHook,

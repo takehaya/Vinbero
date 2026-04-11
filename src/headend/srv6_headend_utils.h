@@ -2,8 +2,83 @@
 #define SRV6_HEADEND_UTILS_H
 
 #include <linux/types.h>
+#include <linux/if_ether.h>
+#include <linux/ipv6.h>
 #include <linux/in6.h>
-#include "xdp_prog.h"
+#include <bpf/bpf_endian.h>
+#include "core/xdp_prog.h"
+
+// ========================================================================
+// IPv6 Header Builder
+// ========================================================================
+
+// Build outer IPv6 header for SRv6 encapsulation/insertion.
+// Sets version=6, traffic class=0, flow label=0, hop limit=64.
+static __always_inline void build_outer_ipv6(
+    struct ipv6hdr *ip6h,
+    __u8 nexthdr,
+    __u16 payload_len,
+    const void *src_addr,
+    const void *dst_addr)
+{
+    ip6h->version = 6;
+    ip6h->priority = 0;
+    ip6h->flow_lbl[0] = 0;
+    ip6h->flow_lbl[1] = 0;
+    ip6h->flow_lbl[2] = 0;
+    ip6h->payload_len = bpf_htons(payload_len);
+    ip6h->nexthdr = nexthdr;
+    ip6h->hop_limit = 64;
+    __builtin_memcpy(&ip6h->saddr, src_addr, sizeof(struct in6_addr));
+    __builtin_memcpy(&ip6h->daddr, dst_addr, sizeof(struct in6_addr));
+}
+
+// ========================================================================
+// VLAN Tag Save/Restore Helpers
+// ========================================================================
+
+// Save VLAN tag(s) between Ethernet header and L3 header.
+// saved_vlan must be __u32[2] (8 bytes for up to QinQ).
+static __always_inline void save_vlan_tags(
+    __u32 *saved_vlan,
+    void *eth,
+    void *data_end,
+    __u16 l3_offset)
+{
+    saved_vlan[0] = 0;
+    saved_vlan[1] = 0;
+    if (l3_offset > ETH_HLEN) {
+        void *vlan_ptr = eth + ETH_HLEN;
+        if (vlan_ptr + 4 <= data_end)
+            __builtin_memcpy(&saved_vlan[0], vlan_ptr, 4);
+        if (l3_offset > ETH_HLEN + 4 && vlan_ptr + 8 <= data_end)
+            __builtin_memcpy(&saved_vlan[1], vlan_ptr + 4, 4);
+    }
+}
+
+// Restore VLAN tag(s) after Ethernet header.
+// Returns 0 on success, -1 on bounds failure.
+static __always_inline int restore_vlan_tags(
+    __u32 *saved_vlan,
+    void *eth,
+    void *data_end,
+    __u16 l3_offset)
+{
+    if (l3_offset > ETH_HLEN) {
+        void *vlan_ptr = eth + ETH_HLEN;
+        if (vlan_ptr + 4 > data_end) return -1;
+        __builtin_memcpy(vlan_ptr, &saved_vlan[0], 4);
+        if (l3_offset > ETH_HLEN + 4) {
+            if (vlan_ptr + 8 > data_end) return -1;
+            __builtin_memcpy(vlan_ptr + 4, &saved_vlan[1], 4);
+        }
+    }
+    return 0;
+}
+
+// ========================================================================
+// Segment Copy Utilities
+// ========================================================================
 
 // Copy segments to SRH in reverse order (RFC 8754)
 // Input: [S1, S2, S3] -> SRH storage: [S3, S2, S1]

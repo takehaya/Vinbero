@@ -36,8 +36,11 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 		return nil, fmt.Errorf("fail to bpf load: %w", err)
 	}
 
-	// Create map operations
+	// Create map operations and recover aux index state from existing entries
 	mapOps := bpf.NewMapOperations(obj)
+	if err := mapOps.RecoverAuxIndices(); err != nil {
+		logger.Warn("failed to recover aux indices, starting fresh", zap.Error(err))
+	}
 
 	// resolve device interfaces
 	var devices []net.Interface
@@ -118,6 +121,7 @@ func (v *Vinbero) InitResourceManager() error {
 // StartFDBWatcher starts the FDB watcher and registers reconciled bridges.
 func (v *Vinbero) StartFDBWatcher(ctx context.Context) error {
 	v.fdbWatcher = netlinkwatch.NewFDBWatcher(v.mapOps, v.logger)
+	v.fdbWatcher.SetAgingSeconds(v.cfg.Setting.FdbAgingSeconds)
 	if err := v.fdbWatcher.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start FDB watcher: %w", err)
 	}
@@ -178,8 +182,8 @@ func (v *Vinbero) Close() error {
 }
 
 // buildBpfConstants creates BPF constant values from config
-func buildBpfConstants(cfg *config.Config) map[string]interface{} {
-	constants := make(map[string]interface{})
+func buildBpfConstants(cfg *config.Config) map[string]any {
+	constants := make(map[string]any)
 
 	// Convert bool to uint8 (BPF uses uint8 for these flags)
 	if cfg.Setting.EnableStats {

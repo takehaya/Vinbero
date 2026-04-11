@@ -88,7 +88,7 @@ func (h *xdpTestHelper) run(pkt []byte) (uint32, []byte) {
 func (h *xdpTestHelper) createSidFunction(prefix string, action uint8) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: 0}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -103,8 +103,9 @@ func (h *xdpTestHelper) createFdbEntry(bdID uint16, mac net.HardwareAddr, oif ui
 
 func (h *xdpTestHelper) createSidFunctionWithBD(prefix string, action uint8, bdID uint16) {
 	h.t.Helper()
-	entry := &SidFunctionEntry{Action: action, Flavor: 0, BdId: bdID}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	entry := &SidFunctionEntry{Action: action, Flavor: 0}
+	aux := NewSidAuxL2(bdID, 0)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -112,15 +113,16 @@ func (h *xdpTestHelper) createSidFunctionWithBD(prefix string, action uint8, bdI
 func (h *xdpTestHelper) createSidFunctionWithVRF(prefix string, action uint8, vrfIfindex uint32) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: 0, VrfIfindex: vrfIfindex}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
 
 func (h *xdpTestHelper) createSidFunctionWithNexthop(prefix string, action uint8, nexthop [16]byte) {
 	h.t.Helper()
-	entry := &SidFunctionEntry{Action: action, Nexthop: nexthop}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	entry := &SidFunctionEntry{Action: action}
+	aux := NewSidAuxNexthop(nexthop)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -128,7 +130,7 @@ func (h *xdpTestHelper) createSidFunctionWithNexthop(prefix string, action uint8
 func (h *xdpTestHelper) createSidFunctionWithFlavor(prefix string, action uint8, flavor uint8) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: flavor}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -136,9 +138,10 @@ func (h *xdpTestHelper) createSidFunctionWithFlavor(prefix string, action uint8,
 func (h *xdpTestHelper) createSidFunctionWithOIF(prefix string, action uint8, oif uint32) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: 0}
-	// OIF is stored as uint32 in the first 4 bytes of Nexthop (native endian)
-	binary.NativeEndian.PutUint32(entry.Nexthop[:4], oif)
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	// OIF is stored as uint32 in the first 4 bytes of aux nexthop (native endian)
+	aux := &SidAuxEntry{}
+	binary.NativeEndian.PutUint32(aux.Nexthop.Nexthop[:4], oif)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -147,18 +150,16 @@ func (h *xdpTestHelper) createSidFunctionB6(prefix string, action uint8, headend
 	h.t.Helper()
 	// Create SID function entry in sid_function_map
 	entry := &SidFunctionEntry{Action: action}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
-		h.t.Fatalf("Failed to create SID function entry for End.B6: %v", err)
-	}
-	// Create policy entry in end_b6_policy_map
+	// Policy is stored in sid_aux_map (b6_policy variant)
 	policy := &HeadendEntry{
 		Mode:        headendMode,
 		NumSegments: numSegments,
 		SrcAddr:     srcAddr,
 		Segments:    segments,
 	}
-	if err := h.mapOps.CreateEndB6Policy(prefix, policy); err != nil {
-		h.t.Fatalf("Failed to create End.B6 policy entry: %v", err)
+	aux := NewSidAuxB6Policy(policy)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.B6: %v", err)
 	}
 }
 
@@ -951,8 +952,9 @@ func buildSRv6PacketWithInnerIPv4(srcIP, dstIP net.IP, segments []net.IP, segmen
 // GTP-U action/mode constants
 const (
 	actionEndMGTP4E = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E)
-	actionEndMGTP6D = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D)
-	actionEndMGTP6E = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E)
+	actionEndMGTP6D   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D)
+	actionEndMGTP6DDI = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D_DI)
+	actionEndMGTP6E   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E)
 	modeHMGTP4D     = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D)
 )
 
@@ -976,11 +978,10 @@ func (h *xdpTestHelper) createHeadendEntryGTP(prefix string, srcAddr [16]byte, s
 func (h *xdpTestHelper) createSidFunctionGTP4E(prefix string, gtpV4SrcAddr [4]byte, argsOffset uint8) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{
-		Action:        actionEndMGTP4E,
-		ArgsOffset: argsOffset,
-		GtpV4SrcAddr:  gtpV4SrcAddr,
+		Action: actionEndMGTP4E,
 	}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	aux := NewSidAuxGtp4e(argsOffset, gtpV4SrcAddr)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry for End.M.GTP4.E: %v", err)
 	}
 	h.t.Cleanup(func() { _ = h.mapOps.DeleteSidFunction(prefix) })
@@ -1017,6 +1018,101 @@ func buildGTPUv4Packet(outerSrc, outerDst net.IP, teid uint32, qfi uint8, innerS
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// createSidFunctionGTP6D creates a SID function entry for End.M.GTP6.D
+func (h *xdpTestHelper) createSidFunctionGTP6D(prefix string, argsOffset uint8) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: actionEndMGTP6D}
+	aux := NewSidAuxGtp6d(argsOffset)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.M.GTP6.D: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteSidFunction(prefix) })
+}
+
+// createSidFunctionGTP6E creates a SID function entry for End.M.GTP6.E
+func (h *xdpTestHelper) createSidFunctionGTP6E(prefix string, argsOffset uint8, srcAddr, dstAddr [16]byte) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: actionEndMGTP6E}
+	aux := NewSidAuxGtp6e(argsOffset, srcAddr, dstAddr)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.M.GTP6.E: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteSidFunction(prefix) })
+}
+
+// buildSRv6WithGTPUPayload builds an SRv6 packet carrying GTP-U as inner payload.
+// Structure: [Eth][IPv6][SRH(nexthdr=UDP, SL=1)][UDP:2152][GTP-U][Inner IPv4 ICMP]
+// Used for testing End.M.GTP6.D which receives SRv6 with GTP-U inside.
+func buildSRv6WithGTPUPayload(outerSrc net.IP, sid net.IP, nextSeg net.IP, teid uint32, qfi uint8, argsOffset uint8, innerSrc, innerDst net.IP) ([]byte, error) {
+	// Build inner: [IPv4][ICMP][payload]
+	innerIP := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolICMPv4,
+		SrcIP:    innerSrc.To4(), DstIP: innerDst.To4(),
+	}
+	innerICMP := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		Id: 5678, Seq: 1,
+	}
+	innerBuf := gopacket.NewSerializeBuffer()
+	innerOpts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(innerBuf, innerOpts, innerIP, innerICMP, gopacket.Payload(newTestPayload(32))); err != nil {
+		return nil, err
+	}
+	innerBytes := innerBuf.Bytes()
+
+	// Build GTP-U + UDP
+	gtp := &packet.GTPULayer{TEID: teid, QFI: qfi}
+	gtpBuf := gopacket.NewSerializeBuffer()
+	if err := gopacket.SerializeLayers(gtpBuf, innerOpts, gtp, gopacket.Payload(innerBytes)); err != nil {
+		return nil, err
+	}
+	gtpPayload := gtpBuf.Bytes()
+
+	udpHdr := make([]byte, 8)
+	binary.BigEndian.PutUint16(udpHdr[0:2], 2152) // src port
+	binary.BigEndian.PutUint16(udpHdr[2:4], 2152) // dst port
+	binary.BigEndian.PutUint16(udpHdr[4:6], uint16(8+len(gtpPayload)))
+	// checksum = 0
+
+	udpGtpPayload := append(udpHdr, gtpPayload...)
+
+	// SRH: 2 segments [nextSeg, sid], SL=1, nexthdr=17 (UDP)
+	numSegments := 2
+	srhLen := 8 + numSegments*16
+	srh := make([]byte, srhLen)
+	srh[0] = 17 // nexthdr = UDP
+	srh[1] = byte((srhLen - 8) / 8) // hdrlen
+	srh[2] = 4  // routing type = SRH
+	srh[3] = 1  // segments_left = 1
+	srh[4] = byte(numSegments - 1) // last_entry
+	// segments: [0]=nextSeg, [1]=sid (reversed order per RFC)
+	copy(srh[8:24], nextSeg.To16())
+	copy(srh[24:40], sid.To16())
+
+	// IPv6 header
+	ipv6 := make([]byte, 40)
+	ipv6[0] = 0x60 // version=6
+	payloadLen := srhLen + len(udpGtpPayload)
+	binary.BigEndian.PutUint16(ipv6[4:6], uint16(payloadLen))
+	ipv6[6] = 43 // nexthdr = Routing (SRH)
+	ipv6[7] = 64 // hop limit
+	copy(ipv6[8:24], outerSrc.To16())
+	copy(ipv6[24:40], sid.To16())
+
+	// Ethernet
+	eth := make([]byte, 14)
+	eth[12] = 0x86
+	eth[13] = 0xDD
+
+	pkt := make([]byte, 0, 14+40+srhLen+len(udpGtpPayload))
+	pkt = append(pkt, eth...)
+	pkt = append(pkt, ipv6...)
+	pkt = append(pkt, srh...)
+	pkt = append(pkt, udpGtpPayload...)
+	return pkt, nil
 }
 
 // convertReducedSegmentsToBytes converts segments for Reduced SRH verification

@@ -14,7 +14,8 @@ type Clients struct {
 	Hl2      vinberov1connect.HeadendL2ServiceClient
 	Peer     vinberov1connect.BdPeerServiceClient
 	Resource vinberov1connect.NetworkResourceServiceClient
-	Dmac     vinberov1connect.DmacServiceClient
+	Fdb      vinberov1connect.FdbServiceClient
+	Stats    vinberov1connect.StatsServiceClient
 }
 
 func NewClients(serverURL string) *Clients {
@@ -28,6 +29,7 @@ func NewClients(serverURL string) *Clients {
 		Hl2:      vinberov1connect.NewHeadendL2ServiceClient(httpClient, serverURL, opts...),
 		Peer:     vinberov1connect.NewBdPeerServiceClient(httpClient, serverURL, opts...),
 		Resource: vinberov1connect.NewNetworkResourceServiceClient(httpClient, serverURL, opts...),
-		Dmac:     vinberov1connect.NewDmacServiceClient(httpClient, serverURL, opts...),
+		Fdb:      vinberov1connect.NewFdbServiceClient(httpClient, serverURL, opts...),
+		Stats:    vinberov1connect.NewStatsServiceClient(httpClient, serverURL, opts...),
 	}
 }

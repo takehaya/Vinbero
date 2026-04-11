@@ -6,7 +6,7 @@
 #include <linux/bpf.h>
 #include <linux/in.h>
 
-#include "xdp_prog.h"
+#include "core/xdp_prog.h"
 
 // SID Function map (IPv6 LPM Trie)
 // Key: IPv6 prefix (trigger_prefix)
@@ -18,6 +18,16 @@ struct {
     __uint(max_entries, 1024);
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } sid_function_map SEC(".maps");
+
+// SID Auxiliary map (ARRAY)
+// Key: u32 index (from sid_function_entry.aux_index)
+// Value: Action-specific data (union, discriminated by action field)
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct sid_aux_entry);
+    __uint(max_entries, 512);
+} sid_aux_map SEC(".maps");
 
 // Headend v4 map (IPv4 LPM Trie)
 // Key: IPv4 prefix (trigger_prefix)
@@ -41,16 +51,7 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } headend_v6_map SEC(".maps");
 
-// End.B6 policy map (IPv6 LPM Trie)
-// Key: IPv6 prefix (same trigger_prefix as sid_function_map)
-// Value: Policy headend config (segments, src_addr, mode) for End.B6/End.B6.Encaps
-struct {
-    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-    __type(key, struct lpm_key_v6);
-    __type(value, struct headend_entry);
-    __uint(max_entries, 256);
-    __uint(map_flags, BPF_F_NO_PREALLOC);
-} end_b6_policy_map SEC(".maps");
+// End.B6 policy: stored in sid_aux_map (b6_policy variant), no separate map needed.
 
 // Headend L2 map (Hash)
 // Key: VLAN ID (future: consider Bridge Domain with ifindex+VLAN)

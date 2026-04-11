@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/vishvananda/netlink"
@@ -11,14 +12,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// FDBWatcher watches Linux bridge FDB updates via Netlink and syncs them to BPF fdb_map
+// FDBWatcher watches Linux bridge FDB updates via Netlink and syncs them to BPF fdb_map.
+// Also runs a periodic aging timer to delete stale dynamic entries.
 type FDBWatcher struct {
-	mapOps  *bpf.MapOperations
-	logger  *zap.Logger
-	mu      sync.RWMutex
-	allowed map[int]uint16 // bridge ifindex → bd_id (for O(1) filter)
-	done    chan struct{}
-	wg      sync.WaitGroup
+	mapOps       *bpf.MapOperations
+	logger       *zap.Logger
+	mu           sync.RWMutex
+	allowed      map[int]uint16 // bridge ifindex → bd_id (for O(1) filter)
+	done         chan struct{}
+	wg           sync.WaitGroup
+	agingSeconds int // 0=disabled
 }
 
 // NewFDBWatcher creates a new FDB watcher
@@ -65,7 +68,44 @@ func (w *FDBWatcher) Start(ctx context.Context) error {
 		w.processUpdates(ctx, updates)
 	}()
 
+	// Start aging timer if configured
+	if w.agingSeconds > 0 {
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.runAging(ctx)
+		}()
+	}
+
 	return nil
+}
+
+// SetAgingSeconds configures the FDB aging timeout.
+func (w *FDBWatcher) SetAgingSeconds(seconds int) {
+	w.agingSeconds = seconds
+}
+
+func (w *FDBWatcher) runAging(ctx context.Context) {
+	interval := time.Duration(w.agingSeconds) * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.done:
+			return
+		case <-ticker.C:
+			maxAgeNs := uint64(w.agingSeconds) * 1e9
+			deleted, err := w.mapOps.AgeFdbEntries(maxAgeNs)
+			if err != nil {
+				w.logger.Warn("FDB aging error", zap.Error(err))
+			} else if deleted > 0 {
+				w.logger.Info("FDB aging: deleted stale entries", zap.Int("count", deleted))
+			}
+		}
+	}
 }
 
 func (w *FDBWatcher) processUpdates(ctx context.Context, updates <-chan netlink.NeighUpdate) {
