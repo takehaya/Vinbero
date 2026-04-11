@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 
 	"connectrpc.com/connect"
@@ -43,4 +44,36 @@ func (s *FdbServer) FdbList(
 	}
 
 	return connect.NewResponse(resp), nil
+}
+
+func (s *FdbServer) FdbCreate(
+	ctx context.Context,
+	req *connect.Request[v1.FdbCreateRequest],
+) (*connect.Response[v1.FdbCreateResponse], error) {
+	mac, err := net.ParseMAC(req.Msg.Mac)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid MAC: %w", err))
+	}
+	entry := &bpf.FdbEntry{
+		Oif:      req.Msg.Oif,
+		IsStatic: 1,
+	}
+	if err := s.mapOps.CreateFdb(uint16(req.Msg.BdId), mac, entry); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.FdbCreateResponse{}), nil
+}
+
+func (s *FdbServer) FdbDelete(
+	ctx context.Context,
+	req *connect.Request[v1.FdbDeleteRequest],
+) (*connect.Response[v1.FdbDeleteResponse], error) {
+	mac, err := net.ParseMAC(req.Msg.Mac)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid MAC: %w", err))
+	}
+	if err := s.mapOps.DeleteFdb(uint16(req.Msg.BdId), mac); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.FdbDeleteResponse{}), nil
 }

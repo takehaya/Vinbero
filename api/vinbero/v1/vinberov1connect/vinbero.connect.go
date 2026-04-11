@@ -85,6 +85,10 @@ const (
 	Headendv6ServiceHeadendv6GetProcedure = "/vinbero.v1.Headendv6Service/Headendv6Get"
 	// FdbServiceFdbListProcedure is the fully-qualified name of the FdbService's FdbList RPC.
 	FdbServiceFdbListProcedure = "/vinbero.v1.FdbService/FdbList"
+	// FdbServiceFdbCreateProcedure is the fully-qualified name of the FdbService's FdbCreate RPC.
+	FdbServiceFdbCreateProcedure = "/vinbero.v1.FdbService/FdbCreate"
+	// FdbServiceFdbDeleteProcedure is the fully-qualified name of the FdbService's FdbDelete RPC.
+	FdbServiceFdbDeleteProcedure = "/vinbero.v1.FdbService/FdbDelete"
 	// BdPeerServiceBdPeerCreateProcedure is the fully-qualified name of the BdPeerService's
 	// BdPeerCreate RPC.
 	BdPeerServiceBdPeerCreateProcedure = "/vinbero.v1.BdPeerService/BdPeerCreate"
@@ -149,6 +153,8 @@ var (
 	headendv6ServiceHeadendv6GetMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
 	fdbServiceServiceDescriptor                         = v1.File_vinbero_v1_vinbero_proto.Services().ByName("FdbService")
 	fdbServiceFdbListMethodDescriptor                   = fdbServiceServiceDescriptor.Methods().ByName("FdbList")
+	fdbServiceFdbCreateMethodDescriptor                 = fdbServiceServiceDescriptor.Methods().ByName("FdbCreate")
+	fdbServiceFdbDeleteMethodDescriptor                 = fdbServiceServiceDescriptor.Methods().ByName("FdbDelete")
 	bdPeerServiceServiceDescriptor                      = v1.File_vinbero_v1_vinbero_proto.Services().ByName("BdPeerService")
 	bdPeerServiceBdPeerCreateMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerCreate")
 	bdPeerServiceBdPeerDeleteMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerDelete")
@@ -611,6 +617,8 @@ func (UnimplementedHeadendv6ServiceHandler) Headendv6Get(context.Context, *conne
 // FdbServiceClient is a client for the vinbero.v1.FdbService service.
 type FdbServiceClient interface {
 	FdbList(context.Context, *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error)
+	FdbCreate(context.Context, *connect.Request[v1.FdbCreateRequest]) (*connect.Response[v1.FdbCreateResponse], error)
+	FdbDelete(context.Context, *connect.Request[v1.FdbDeleteRequest]) (*connect.Response[v1.FdbDeleteResponse], error)
 }
 
 // NewFdbServiceClient constructs a client for the vinbero.v1.FdbService service. By default, it
@@ -629,12 +637,26 @@ func NewFdbServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			connect.WithSchema(fdbServiceFdbListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		fdbCreate: connect.NewClient[v1.FdbCreateRequest, v1.FdbCreateResponse](
+			httpClient,
+			baseURL+FdbServiceFdbCreateProcedure,
+			connect.WithSchema(fdbServiceFdbCreateMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		fdbDelete: connect.NewClient[v1.FdbDeleteRequest, v1.FdbDeleteResponse](
+			httpClient,
+			baseURL+FdbServiceFdbDeleteProcedure,
+			connect.WithSchema(fdbServiceFdbDeleteMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // fdbServiceClient implements FdbServiceClient.
 type fdbServiceClient struct {
-	fdbList *connect.Client[v1.FdbListRequest, v1.FdbListResponse]
+	fdbList   *connect.Client[v1.FdbListRequest, v1.FdbListResponse]
+	fdbCreate *connect.Client[v1.FdbCreateRequest, v1.FdbCreateResponse]
+	fdbDelete *connect.Client[v1.FdbDeleteRequest, v1.FdbDeleteResponse]
 }
 
 // FdbList calls vinbero.v1.FdbService.FdbList.
@@ -642,9 +664,21 @@ func (c *fdbServiceClient) FdbList(ctx context.Context, req *connect.Request[v1.
 	return c.fdbList.CallUnary(ctx, req)
 }
 
+// FdbCreate calls vinbero.v1.FdbService.FdbCreate.
+func (c *fdbServiceClient) FdbCreate(ctx context.Context, req *connect.Request[v1.FdbCreateRequest]) (*connect.Response[v1.FdbCreateResponse], error) {
+	return c.fdbCreate.CallUnary(ctx, req)
+}
+
+// FdbDelete calls vinbero.v1.FdbService.FdbDelete.
+func (c *fdbServiceClient) FdbDelete(ctx context.Context, req *connect.Request[v1.FdbDeleteRequest]) (*connect.Response[v1.FdbDeleteResponse], error) {
+	return c.fdbDelete.CallUnary(ctx, req)
+}
+
 // FdbServiceHandler is an implementation of the vinbero.v1.FdbService service.
 type FdbServiceHandler interface {
 	FdbList(context.Context, *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error)
+	FdbCreate(context.Context, *connect.Request[v1.FdbCreateRequest]) (*connect.Response[v1.FdbCreateResponse], error)
+	FdbDelete(context.Context, *connect.Request[v1.FdbDeleteRequest]) (*connect.Response[v1.FdbDeleteResponse], error)
 }
 
 // NewFdbServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -659,10 +693,26 @@ func NewFdbServiceHandler(svc FdbServiceHandler, opts ...connect.HandlerOption) 
 		connect.WithSchema(fdbServiceFdbListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	fdbServiceFdbCreateHandler := connect.NewUnaryHandler(
+		FdbServiceFdbCreateProcedure,
+		svc.FdbCreate,
+		connect.WithSchema(fdbServiceFdbCreateMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	fdbServiceFdbDeleteHandler := connect.NewUnaryHandler(
+		FdbServiceFdbDeleteProcedure,
+		svc.FdbDelete,
+		connect.WithSchema(fdbServiceFdbDeleteMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.FdbService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case FdbServiceFdbListProcedure:
 			fdbServiceFdbListHandler.ServeHTTP(w, r)
+		case FdbServiceFdbCreateProcedure:
+			fdbServiceFdbCreateHandler.ServeHTTP(w, r)
+		case FdbServiceFdbDeleteProcedure:
+			fdbServiceFdbDeleteHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -674,6 +724,14 @@ type UnimplementedFdbServiceHandler struct{}
 
 func (UnimplementedFdbServiceHandler) FdbList(context.Context, *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.FdbService.FdbList is not implemented"))
+}
+
+func (UnimplementedFdbServiceHandler) FdbCreate(context.Context, *connect.Request[v1.FdbCreateRequest]) (*connect.Response[v1.FdbCreateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.FdbService.FdbCreate is not implemented"))
+}
+
+func (UnimplementedFdbServiceHandler) FdbDelete(context.Context, *connect.Request[v1.FdbDeleteRequest]) (*connect.Response[v1.FdbDeleteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.FdbService.FdbDelete is not implemented"))
 }
 
 // BdPeerServiceClient is a client for the vinbero.v1.BdPeerService service.

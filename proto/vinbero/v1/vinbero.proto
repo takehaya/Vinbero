@@ -165,10 +165,13 @@ message Headendv6GetResponse {
 }
 
 // DmacService provides read-only access to the FDB (MAC address table).
-// FdbService provides read-only access to the FDB (forwarding database) for
-// observability and debugging of L2VPN MAC learning.
+// FdbService manages the FDB (forwarding database) for L2VPN MAC forwarding.
+// Dynamic entries are learned by the BPF data plane; static entries are
+// user-configured and never aged out.
 service FdbService {
   rpc FdbList(FdbListRequest) returns (FdbListResponse);
+  rpc FdbCreate(FdbCreateRequest) returns (FdbCreateResponse);
+  rpc FdbDelete(FdbDeleteRequest) returns (FdbDeleteResponse);
 }
 
 // FdbEntry represents a single FDB entry with aging and type information.
@@ -186,6 +189,19 @@ message FdbListRequest {}
 message FdbListResponse {
   repeated FdbEntry entries = 1;
 }
+
+message FdbCreateRequest {
+  uint32 bd_id = 1;
+  string mac = 2; // MAC address (e.g., "aa:bb:cc:dd:ee:ff")
+  uint32 oif = 3; // Output interface index
+}
+message FdbCreateResponse {}
+
+message FdbDeleteRequest {
+  uint32 bd_id = 1;
+  string mac = 2;
+}
+message FdbDeleteResponse {}
 
 // BdPeerService manages remote PEs within a Bridge Domain for BUM traffic flooding.
 // When a BUM frame (broadcast/unknown-unicast/multicast) is detected, Vinbero

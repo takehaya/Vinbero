@@ -14,8 +14,52 @@ import (
 func fdbCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "fdb",
-		Usage: "Show FDB (MAC address table) entries",
+		Usage: "Manage FDB (MAC address table) entries",
 		Subcommands: []*cli.Command{
+			{
+				Name:  "create",
+				Usage: "Create a static FDB entry",
+				Flags: []cli.Flag{
+					&cli.UintFlag{Name: "bd-id", Required: true, Usage: "Bridge Domain ID"},
+					&cli.StringFlag{Name: "mac", Required: true, Usage: "MAC address (e.g., aa:bb:cc:dd:ee:ff)"},
+					&cli.UintFlag{Name: "oif", Required: true, Usage: "Output interface index"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					_, err := clients.Fdb.FdbCreate(context.Background(),
+						connect.NewRequest(&v1.FdbCreateRequest{
+							BdId: uint32(c.Uint("bd-id")),
+							Mac:  c.String("mac"),
+							Oif:  uint32(c.Uint("oif")),
+						}))
+					if err != nil {
+						return err
+					}
+					fmt.Println("Static FDB entry created.")
+					return nil
+				},
+			},
+			{
+				Name:  "delete",
+				Usage: "Delete an FDB entry",
+				Flags: []cli.Flag{
+					&cli.UintFlag{Name: "bd-id", Required: true, Usage: "Bridge Domain ID"},
+					&cli.StringFlag{Name: "mac", Required: true, Usage: "MAC address"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					_, err := clients.Fdb.FdbDelete(context.Background(),
+						connect.NewRequest(&v1.FdbDeleteRequest{
+							BdId: uint32(c.Uint("bd-id")),
+							Mac:  c.String("mac"),
+						}))
+					if err != nil {
+						return err
+					}
+					fmt.Println("FDB entry deleted.")
+					return nil
+				},
+			},
 			{
 				Name:  "list",
 				Usage: "List all FDB entries",
