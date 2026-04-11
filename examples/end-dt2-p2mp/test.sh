@@ -31,7 +31,7 @@ cleanup() {
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
         if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
-            kill -9 "$pid" 2>/dev/null || true
+            kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
         fi
     done
@@ -65,23 +65,19 @@ echo ""
 # ==========================================
 # Start all Vinbero instances
 # ==========================================
-start_vinbero() {
-    local ns=$1 config=$2 log=$3
-    ip netns exec "$ns" bash -c "trap '' SIGINT SIGTERM; exec ${VINBEROD_BIN} -c ${config}" > "$log" 2>&1 &
-}
-
 print_info "Starting PE1 (router1)..."
-start_vinbero "$ns_router1" "${SCRIPT_DIR}/vinbero_pe1.yaml" "/tmp/vinbero_p2mp_pe1.log"
+ip netns exec "$ns_router1" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe1.yaml > /tmp/vinbero_p2mp_pe1.log 2>&1 &
 VINBERO_PID_PE1=$!
+sleep 1
 
 print_info "Starting PE2 (router3)..."
-start_vinbero "$ns_router3" "${SCRIPT_DIR}/vinbero_pe2.yaml" "/tmp/vinbero_p2mp_pe2.log"
+ip netns exec "$ns_router3" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe2.yaml > /tmp/vinbero_p2mp_pe2.log 2>&1 &
 VINBERO_PID_PE2=$!
+sleep 1
 
 print_info "Starting PE3 (router4)..."
-start_vinbero "$ns_router4" "${SCRIPT_DIR}/vinbero_pe3.yaml" "/tmp/vinbero_p2mp_pe3.log"
+ip netns exec "$ns_router4" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe3.yaml > /tmp/vinbero_p2mp_pe3.log 2>&1 &
 VINBERO_PID_PE3=$!
-
 sleep 2
 
 for entry in "PE1:VINBERO_PID_PE1:/tmp/vinbero_p2mp_pe1.log" \
