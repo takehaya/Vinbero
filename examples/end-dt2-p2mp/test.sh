@@ -66,15 +66,15 @@ echo ""
 # Start all Vinbero instances
 # ==========================================
 print_info "Starting PE1 (router1)..."
-ip netns exec "$ns_router1" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe1.yaml > /tmp/vinbero_p2mp_pe1.log 2>&1 &
+ip netns exec "$ns_router1" setsid ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe1.yaml > /tmp/vinbero_p2mp_pe1.log 2>&1 &
 VINBERO_PID_PE1=$!
 
 print_info "Starting PE2 (router3)..."
-ip netns exec "$ns_router3" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe2.yaml > /tmp/vinbero_p2mp_pe2.log 2>&1 &
+ip netns exec "$ns_router3" setsid ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe2.yaml > /tmp/vinbero_p2mp_pe2.log 2>&1 &
 VINBERO_PID_PE2=$!
 
 print_info "Starting PE3 (router4)..."
-ip netns exec "$ns_router4" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe3.yaml > /tmp/vinbero_p2mp_pe3.log 2>&1 &
+ip netns exec "$ns_router4" setsid ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe3.yaml > /tmp/vinbero_p2mp_pe3.log 2>&1 &
 VINBERO_PID_PE3=$!
 
 sleep 2
