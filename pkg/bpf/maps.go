@@ -401,11 +401,16 @@ func (m *MapOperations) ReadStats() ([]AggregatedStats, error) {
 	return result, nil
 }
 
-// ResetStats zeros all per-CPU stats counters
+// ResetStats zeros all per-CPU stats counters.
+// PERCPU_ARRAY requires a per-CPU slice for Put.
 func (m *MapOperations) ResetStats() error {
-	var zero BpfStatsEntry
+	numCPUs, err := ebpf.PossibleCPU()
+	if err != nil {
+		return fmt.Errorf("failed to get CPU count: %w", err)
+	}
+	zeros := make([]BpfStatsEntry, numCPUs)
 	for i := uint32(0); i < StatsMax; i++ {
-		if err := m.objs.StatsMap.Put(i, zero); err != nil {
+		if err := m.objs.StatsMap.Put(i, zeros); err != nil {
 			return fmt.Errorf("failed to reset stats counter %d: %w", i, err)
 		}
 	}
