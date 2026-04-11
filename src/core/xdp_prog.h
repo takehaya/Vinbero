@@ -181,11 +181,12 @@ struct fdb_key {
 struct fdb_entry {
     __u32 oif;                     // Local: output interface index, Remote: 0
     __u8 is_remote;                // 0=local, 1=remote (use bd_peer_map)
-    __u8 _pad;
+    __u8 is_static;                // 1=static (never aged out), 0=dynamic (BPF-learned)
     __u16 peer_index;              // bd_peer_map index (when is_remote=1)
     __u16 bd_id;                   // BD ID for bd_peer_map lookup (when is_remote=1)
-    __u8 _pad2[2];
-} __attribute__((packed));         // 12 bytes total
+    __u8 _pad[2];
+    __u64 last_seen;               // bpf_ktime_get_ns() timestamp (0=static entry)
+} __attribute__((packed));         // 20 bytes total
 
 // Maximum number of remote PEs per Bridge Domain for BUM flooding
 #define MAX_BUM_NEXTHOPS 8

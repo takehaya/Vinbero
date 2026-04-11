@@ -19,7 +19,8 @@ type SettingConfig struct {
 	Entries           EntriesConfig `yaml:"entries,omitempty"`
 	EnableStats       bool          `yaml:"enable_stats,omitempty" default:"false"`
 	EnableXdpcap      bool          `yaml:"enable_xdpcap,omitempty" default:"false"`
-	StatePath string `yaml:"state_path,omitempty"` // Path for resource state file (default: /var/lib/vinbero/state.json)
+	StatePath         string        `yaml:"state_path,omitempty"`      // Path for resource state file (default: /var/lib/vinbero/state.json)
+	FdbAgingSeconds   int           `yaml:"fdb_aging_seconds,omitempty" default:"300"` // FDB entry aging timeout (0=disabled)
 }
 
 // EntriesConfig holds the capacity settings for each entry type

@@ -36,3 +36,13 @@ func (s *StatsServer) StatsShow(
 
 	return connect.NewResponse(&v1.StatsShowResponse{Counters: counters}), nil
 }
+
+func (s *StatsServer) StatsReset(
+	ctx context.Context,
+	req *connect.Request[v1.StatsResetRequest],
+) (*connect.Response[v1.StatsResetResponse], error) {
+	if err := s.mapOps.ResetStats(); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.StatsResetResponse{}), nil
+}

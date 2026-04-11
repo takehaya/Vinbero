@@ -1339,7 +1339,8 @@ var HeadendL2Service_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	StatsService_StatsShow_FullMethodName = "/vinbero.v1.StatsService/StatsShow"
+	StatsService_StatsShow_FullMethodName  = "/vinbero.v1.StatsService/StatsShow"
+	StatsService_StatsReset_FullMethodName = "/vinbero.v1.StatsService/StatsReset"
 )
 
 // StatsServiceClient is the client API for StatsService service.
@@ -1347,6 +1348,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type StatsServiceClient interface {
 	StatsShow(ctx context.Context, in *StatsShowRequest, opts ...grpc.CallOption) (*StatsShowResponse, error)
+	StatsReset(ctx context.Context, in *StatsResetRequest, opts ...grpc.CallOption) (*StatsResetResponse, error)
 }
 
 type statsServiceClient struct {
@@ -1366,11 +1368,21 @@ func (c *statsServiceClient) StatsShow(ctx context.Context, in *StatsShowRequest
 	return out, nil
 }
 
+func (c *statsServiceClient) StatsReset(ctx context.Context, in *StatsResetRequest, opts ...grpc.CallOption) (*StatsResetResponse, error) {
+	out := new(StatsResetResponse)
+	err := c.cc.Invoke(ctx, StatsService_StatsReset_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StatsServiceServer is the server API for StatsService service.
 // All implementations should embed UnimplementedStatsServiceServer
 // for forward compatibility
 type StatsServiceServer interface {
 	StatsShow(context.Context, *StatsShowRequest) (*StatsShowResponse, error)
+	StatsReset(context.Context, *StatsResetRequest) (*StatsResetResponse, error)
 }
 
 // UnimplementedStatsServiceServer should be embedded to have forward compatible implementations.
@@ -1379,6 +1391,9 @@ type UnimplementedStatsServiceServer struct {
 
 func (UnimplementedStatsServiceServer) StatsShow(context.Context, *StatsShowRequest) (*StatsShowResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StatsShow not implemented")
+}
+func (UnimplementedStatsServiceServer) StatsReset(context.Context, *StatsResetRequest) (*StatsResetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StatsReset not implemented")
 }
 
 // UnsafeStatsServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -1410,6 +1425,24 @@ func _StatsService_StatsShow_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StatsService_StatsReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StatsServiceServer).StatsReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StatsService_StatsReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StatsServiceServer).StatsReset(ctx, req.(*StatsResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StatsService_ServiceDesc is the grpc.ServiceDesc for StatsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1420,6 +1453,10 @@ var StatsService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StatsShow",
 			Handler:    _StatsService_StatsShow_Handler,
+		},
+		{
+			MethodName: "StatsReset",
+			Handler:    _StatsService_StatsReset_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

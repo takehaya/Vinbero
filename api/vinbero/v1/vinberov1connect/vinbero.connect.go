@@ -126,6 +126,8 @@ const (
 	HeadendL2ServiceHeadendL2GetProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Get"
 	// StatsServiceStatsShowProcedure is the fully-qualified name of the StatsService's StatsShow RPC.
 	StatsServiceStatsShowProcedure = "/vinbero.v1.StatsService/StatsShow"
+	// StatsServiceStatsResetProcedure is the fully-qualified name of the StatsService's StatsReset RPC.
+	StatsServiceStatsResetProcedure = "/vinbero.v1.StatsService/StatsReset"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -165,6 +167,7 @@ var (
 	headendL2ServiceHeadendL2GetMethodDescriptor        = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Get")
 	statsServiceServiceDescriptor                       = v1.File_vinbero_v1_vinbero_proto.Services().ByName("StatsService")
 	statsServiceStatsShowMethodDescriptor               = statsServiceServiceDescriptor.Methods().ByName("StatsShow")
+	statsServiceStatsResetMethodDescriptor              = statsServiceServiceDescriptor.Methods().ByName("StatsReset")
 )
 
 // SidFunctionServiceClient is a client for the vinbero.v1.SidFunctionService service.
@@ -1141,6 +1144,7 @@ func (UnimplementedHeadendL2ServiceHandler) HeadendL2Get(context.Context, *conne
 // StatsServiceClient is a client for the vinbero.v1.StatsService service.
 type StatsServiceClient interface {
 	StatsShow(context.Context, *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error)
+	StatsReset(context.Context, *connect.Request[v1.StatsResetRequest]) (*connect.Response[v1.StatsResetResponse], error)
 }
 
 // NewStatsServiceClient constructs a client for the vinbero.v1.StatsService service. By default, it
@@ -1159,12 +1163,19 @@ func NewStatsServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(statsServiceStatsShowMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		statsReset: connect.NewClient[v1.StatsResetRequest, v1.StatsResetResponse](
+			httpClient,
+			baseURL+StatsServiceStatsResetProcedure,
+			connect.WithSchema(statsServiceStatsResetMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // statsServiceClient implements StatsServiceClient.
 type statsServiceClient struct {
-	statsShow *connect.Client[v1.StatsShowRequest, v1.StatsShowResponse]
+	statsShow  *connect.Client[v1.StatsShowRequest, v1.StatsShowResponse]
+	statsReset *connect.Client[v1.StatsResetRequest, v1.StatsResetResponse]
 }
 
 // StatsShow calls vinbero.v1.StatsService.StatsShow.
@@ -1172,9 +1183,15 @@ func (c *statsServiceClient) StatsShow(ctx context.Context, req *connect.Request
 	return c.statsShow.CallUnary(ctx, req)
 }
 
+// StatsReset calls vinbero.v1.StatsService.StatsReset.
+func (c *statsServiceClient) StatsReset(ctx context.Context, req *connect.Request[v1.StatsResetRequest]) (*connect.Response[v1.StatsResetResponse], error) {
+	return c.statsReset.CallUnary(ctx, req)
+}
+
 // StatsServiceHandler is an implementation of the vinbero.v1.StatsService service.
 type StatsServiceHandler interface {
 	StatsShow(context.Context, *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error)
+	StatsReset(context.Context, *connect.Request[v1.StatsResetRequest]) (*connect.Response[v1.StatsResetResponse], error)
 }
 
 // NewStatsServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1189,10 +1206,18 @@ func NewStatsServiceHandler(svc StatsServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(statsServiceStatsShowMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	statsServiceStatsResetHandler := connect.NewUnaryHandler(
+		StatsServiceStatsResetProcedure,
+		svc.StatsReset,
+		connect.WithSchema(statsServiceStatsResetMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.StatsService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case StatsServiceStatsShowProcedure:
 			statsServiceStatsShowHandler.ServeHTTP(w, r)
+		case StatsServiceStatsResetProcedure:
+			statsServiceStatsResetHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1204,4 +1229,8 @@ type UnimplementedStatsServiceHandler struct{}
 
 func (UnimplementedStatsServiceHandler) StatsShow(context.Context, *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsShow is not implemented"))
+}
+
+func (UnimplementedStatsServiceHandler) StatsReset(context.Context, *connect.Request[v1.StatsResetRequest]) (*connect.Response[v1.StatsResetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsReset is not implemented"))
 }

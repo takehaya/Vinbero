@@ -35,10 +35,11 @@ type BpfFdbEntry struct {
 	_         structs.HostLayout
 	Oif       uint32
 	IsRemote  uint8
-	Pad       uint8
+	IsStatic  uint8
 	PeerIndex uint16
 	BdId      uint16
-	Pad2      [2]uint8
+	Pad       [2]uint8
+	LastSeen  uint64
 }
 
 type BpfFdbKey struct {

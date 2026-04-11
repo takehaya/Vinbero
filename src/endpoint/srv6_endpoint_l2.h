@@ -50,13 +50,18 @@ static __always_inline void fdb_learn_remote_mac(
 
     // Check if existing entry already matches — avoid redundant map write
     struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &learn_key);
-    if (existing && existing->is_remote && existing->peer_index == peer_idx)
+    if (existing && existing->is_remote && existing->peer_index == peer_idx) {
+        // Refresh timestamp for existing dynamic entry
+        if (!existing->is_static)
+            existing->last_seen = bpf_ktime_get_ns();
         return;
+    }
 
     struct fdb_entry learn_val = {
         .is_remote = 1,
         .peer_index = peer_idx,
         .bd_id = bd_id,
+        .last_seen = bpf_ktime_get_ns(),
     };
     bpf_map_update_elem(&fdb_map, &learn_key, &learn_val, BPF_ANY);
     DEBUG_PRINT("FDB: learned remote MAC, bd_id=%d peer_index=%d\n", bd_id, peer_idx);

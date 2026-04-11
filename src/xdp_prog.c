@@ -299,12 +299,19 @@ static __always_inline int process_bd_forwarding(
 
     // src MAC learning: only overwrite if missing or local entry with different oif.
     // Do NOT overwrite remote entries (is_remote=1) — those are learned by End.DT2.
+    // Do NOT overwrite static entries (is_static=1) — those are user-configured.
     __builtin_memcpy(key.mac, eth->h_source, ETH_ALEN);
     struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &key);
     if (!existing ||
-        (!existing->is_remote && existing->oif != ctx->ingress_ifindex)) {
-        struct fdb_entry learn_val = { .oif = ctx->ingress_ifindex };
+        (!existing->is_remote && !existing->is_static && existing->oif != ctx->ingress_ifindex)) {
+        struct fdb_entry learn_val = {
+            .oif = ctx->ingress_ifindex,
+            .last_seen = bpf_ktime_get_ns(),
+        };
         bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_ANY);
+    } else if (existing && !existing->is_static) {
+        // Refresh timestamp for existing dynamic entry
+        existing->last_seen = bpf_ktime_get_ns();
     }
 
     // BUM (broadcast/unknown-unicast/multicast) -> meta + XDP_PASS for TC flood

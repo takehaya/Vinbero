@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -400,6 +401,17 @@ func (m *MapOperations) ReadStats() ([]AggregatedStats, error) {
 	return result, nil
 }
 
+// ResetStats zeros all per-CPU stats counters
+func (m *MapOperations) ResetStats() error {
+	var zero BpfStatsEntry
+	for i := uint32(0); i < StatsMax; i++ {
+		if err := m.objs.StatsMap.Put(i, zero); err != nil {
+			return fmt.Errorf("failed to reset stats counter %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
 // ===== Headend V4 Map Operations =====
 
 // CreateHeadendV4 adds a headend v4 entry to the map
@@ -614,6 +626,45 @@ func (m *MapOperations) ListFdb() (map[FdbKey]*FdbEntry, error) {
 		return nil, fmt.Errorf("failed to iterate fdb map: %w", err)
 	}
 	return result, nil
+}
+
+// AgeFdbEntries deletes dynamic FDB entries older than maxAgeNs nanoseconds.
+// Static entries (is_static=1) and entries with last_seen=0 are never aged out.
+// Returns the number of entries deleted.
+func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) (int, error) {
+	var key FdbKey
+	var entry FdbEntry
+	iter := m.objs.FdbMap.Iterate()
+
+	var toDelete []FdbKey
+	for iter.Next(&key, &entry) {
+		if entry.IsStatic != 0 || entry.LastSeen == 0 {
+			continue
+		}
+		age := currentKtimeNs() - entry.LastSeen
+		if age > maxAgeNs {
+			keyCopy := key
+			toDelete = append(toDelete, keyCopy)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("failed to iterate fdb map: %w", err)
+	}
+
+	deleted := 0
+	for _, k := range toDelete {
+		if err := m.objs.FdbMap.Delete(&k); err == nil {
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+// currentKtimeNs reads CLOCK_MONOTONIC to match bpf_ktime_get_ns()
+func currentKtimeNs() uint64 {
+	var ts unix.Timespec
+	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
+	return uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 }
 
 // ===== BD Peer Map Operations (for P2MP BUM flooding) =====

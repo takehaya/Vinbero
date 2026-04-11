@@ -40,6 +40,20 @@ func statsCommand() *cli.Command {
 					return nil
 				},
 			},
+			{
+				Name:  "reset",
+				Usage: "Reset all counters to zero",
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					_, err := clients.Stats.StatsReset(context.Background(),
+						connect.NewRequest(&v1.StatsResetRequest{}))
+					if err != nil {
+						return err
+					}
+					fmt.Println("Stats counters reset.")
+					return nil
+				},
+			},
 		},
 	}
 }

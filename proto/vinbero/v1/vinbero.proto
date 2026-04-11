@@ -360,6 +360,7 @@ message HeadendL2GetResponse {
 // Requires enable_stats: true in config; otherwise all counters are zero.
 service StatsService {
   rpc StatsShow(StatsShowRequest) returns (StatsShowResponse);
+  rpc StatsReset(StatsResetRequest) returns (StatsResetResponse);
 }
 
 message StatsCounter {
@@ -372,3 +373,6 @@ message StatsShowRequest {}
 message StatsShowResponse {
   repeated StatsCounter counters = 1;
 }
+
+message StatsResetRequest {}
+message StatsResetResponse {}
