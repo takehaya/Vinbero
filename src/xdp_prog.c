@@ -177,6 +177,8 @@ static __noinline int process_srv6_decap_nosrh(
         if (srv6_decap_nosrh(ctx, IPPROTO_IPV6, nh, l3_offset) != 0) return XDP_DROP;
         return nosrh_fib_v6(ctx, entry);
     case SRV6_LOCAL_ACTION_END_DT46:
+        // RFC 8986 Section 4.9: DT46 handles IPv4/IPv6 only.
+        // L2 (IPPROTO_ETHERNET) requires End.DT2.
         if (nh == IPPROTO_IPIP) {
             if (srv6_decap_nosrh(ctx, IPPROTO_IPIP, nh, l3_offset) != 0) return XDP_DROP;
             return nosrh_fib_v4(ctx, entry);
