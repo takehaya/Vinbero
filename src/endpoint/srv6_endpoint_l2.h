@@ -116,8 +116,11 @@ static __always_inline int process_end_dt2(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
+    if (!aux) return XDP_DROP;
+
     // 1. SL must be 0
     if (srh->segments_left != 0) {
         DEBUG_PRINT("End.DT2: SL != 0, passing\n");
@@ -129,6 +132,9 @@ static __always_inline int process_end_dt2(
         DEBUG_PRINT("End.DT2: nexthdr is not Ethernet (%d)\n", srh->nexthdr);
         return XDP_DROP;
     }
+
+    __u16 bd_id = aux->l2.bd_id;
+    __u32 bridge_ifindex = aux->l2.bridge_ifindex;
 
     // 3. Save outer IPv6 source for remote MAC learning (before decap)
     struct in6_addr outer_src;
@@ -149,14 +155,14 @@ static __always_inline int process_end_dt2(
         return XDP_DROP;
 
     // 6. Remote MAC learning
-    if (entry->bd_id != 0) {
-        __u16 peer_idx = find_peer_index_by_src(entry->bd_id, &outer_src);
+    if (bd_id != 0) {
+        __u16 peer_idx = find_peer_index_by_src(bd_id, &outer_src);
         if (peer_idx != BD_PEER_INDEX_INVALID)
-            fdb_learn_remote_mac(inner_eth, entry->bd_id, peer_idx);
+            fdb_learn_remote_mac(inner_eth, bd_id, peer_idx);
     }
 
     // 7. FDB forwarding decision
-    return fdb_forward_l2(ctx, inner_eth, entry->bd_id, entry->bridge_ifindex);
+    return fdb_forward_l2(ctx, inner_eth, bd_id, bridge_ifindex);
 }
 
 // End.DT2 for Reduced SRH (no-SRH) single-segment packets.
@@ -166,16 +172,22 @@ static __always_inline int process_end_dt2_nosrh(
     struct ipv6hdr *ip6h,
     __u8 nexthdr,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
+    if (!aux) return XDP_DROP;
+
     // 1. nexthdr must be IPPROTO_ETHERNET
     if (nexthdr != IPPROTO_ETHERNET)
         return XDP_PASS;
 
+    __u16 bd_id = aux->l2.bd_id;
+    __u32 bridge_ifindex = aux->l2.bridge_ifindex;
+
     // 2. Resolve peer index BEFORE decap (ip6h->saddr is lost after adjust_head)
     __u16 peer_idx = BD_PEER_INDEX_INVALID;
-    if (entry->bd_id != 0)
-        peer_idx = find_peer_index_by_src(entry->bd_id, &ip6h->saddr);
+    if (bd_id != 0)
+        peer_idx = find_peer_index_by_src(bd_id, &ip6h->saddr);
 
     // 3. Strip outer Ethernet + IPv6 (no SRH to strip)
     if (srv6_decap_l2_nosrh(ctx, nexthdr, l3_offset) != 0)
@@ -189,11 +201,11 @@ static __always_inline int process_end_dt2_nosrh(
         return XDP_DROP;
 
     // 5. Remote MAC learning (if BD configured and peer was resolved)
-    if (entry->bd_id != 0 && peer_idx != BD_PEER_INDEX_INVALID)
-        fdb_learn_remote_mac(inner_eth, entry->bd_id, peer_idx);
+    if (bd_id != 0 && peer_idx != BD_PEER_INDEX_INVALID)
+        fdb_learn_remote_mac(inner_eth, bd_id, peer_idx);
 
     // 6. FDB forwarding decision
-    return fdb_forward_l2(ctx, inner_eth, entry->bd_id, entry->bridge_ifindex);
+    return fdb_forward_l2(ctx, inner_eth, bd_id, bridge_ifindex);
 }
 
 #endif // SRV6_ENDPOINT_L2_H

@@ -160,6 +160,13 @@ static __noinline int process_srv6_decap_nosrh(
     if (!entry)
         return XDP_PASS;
 
+    // Aux lookup for actions that need it (DX2, DT2)
+    struct sid_aux_entry *aux = NULL;
+    if (entry->has_aux) {
+        __u32 idx = entry->aux_index;
+        aux = bpf_map_lookup_elem(&sid_aux_map, &idx);
+    }
+
     switch (entry->action) {
     case SRV6_LOCAL_ACTION_END_DX4:
     case SRV6_LOCAL_ACTION_END_DT4:
@@ -180,15 +187,16 @@ static __noinline int process_srv6_decap_nosrh(
         }
         return XDP_DROP;
     case SRV6_LOCAL_ACTION_END_DX2: {
+        if (!aux) return XDP_DROP;
         __u32 oif;
-        __builtin_memcpy(&oif, entry->nexthop, sizeof(__u32));
+        __builtin_memcpy(&oif, aux->nexthop.nexthop, sizeof(__u32));
         if (oif == 0) return XDP_DROP;
         if (srv6_decap_l2_nosrh(ctx, nh, l3_offset) != 0) return XDP_DROP;
         STATS_INC(STATS_SRV6_END, 0);
         return bpf_redirect(oif, 0);
     }
     case SRV6_LOCAL_ACTION_END_DT2:
-        return process_end_dt2_nosrh(ctx, ip6h, nh, entry, l3_offset);
+        return process_end_dt2_nosrh(ctx, ip6h, nh, entry, aux, l3_offset);
     default:
         return XDP_PASS;
     }
@@ -219,15 +227,22 @@ static __always_inline int process_srv6_localsid(
     if (!entry)
         return XDP_PASS;
 
+    // Aux lookup: only when entry->has_aux is set
+    struct sid_aux_entry *aux = NULL;
+    if (entry->has_aux) {
+        __u32 idx = entry->aux_index;
+        aux = bpf_map_lookup_elem(&sid_aux_map, &idx);
+    }
+
     switch (entry->action) {
     case SRV6_LOCAL_ACTION_END:
         return process_end(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_X:
-        return process_end_x(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_x(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_T:
         return process_end_t(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DX2:
-        return process_end_dx2(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_dx2(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_DX4:
         return process_end_dx4(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DX6:
@@ -239,19 +254,19 @@ static __always_inline int process_srv6_localsid(
     case SRV6_LOCAL_ACTION_END_DT46:
         return process_end_dt46(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_DT2:
-        return process_end_dt2(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_dt2(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_B6:
         return process_end_b6_insert(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_B6_ENCAPS:
         return process_end_b6_encaps(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP4_E:
-        return process_end_m_gtp4_e(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_m_gtp4_e(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP6_D:
-        return process_end_m_gtp6_d(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_m_gtp6_d(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP6_D_DI:
         return process_end_m_gtp6_d_di(ctx, ip6h, srh, entry, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP6_E:
-        return process_end_m_gtp6_e(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_m_gtp6_e(ctx, ip6h, srh, entry, aux, l3_offset);
     default:
         return XDP_PASS;
     }

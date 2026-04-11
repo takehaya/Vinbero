@@ -25,3 +25,9 @@ settings:
       capacity: 1024
     headendv6:
       capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024

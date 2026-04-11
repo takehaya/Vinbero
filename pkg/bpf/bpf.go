@@ -32,6 +32,27 @@ func ReadCollection(constants map[string]interface{}, cfg *config.Config) (*BpfO
 			return nil, err
 		}
 	}
+
+	// Override map capacities from config
+	if cfg != nil {
+		entries := cfg.Setting.Entries
+		mapSizes := map[string]int{
+			"sid_function_map":   entries.SidFunction.Capacity,
+			"sid_aux_map":        entries.SidFunction.Capacity,
+			"headend_v4_map":     entries.Headendv4.Capacity,
+			"headend_v6_map":     entries.Headendv6.Capacity,
+			"headend_l2_map":     entries.HeadendL2.Capacity,
+			"fdb_map":            entries.Fdb.Capacity,
+			"bd_peer_map":        entries.BdPeer.Capacity,
+			"bd_peer_reverse_map": entries.BdPeer.Capacity,
+		}
+		for name, size := range mapSizes {
+			if ms, ok := spec.Maps[name]; ok && size > 0 {
+				ms.MaxEntries = uint32(size)
+			}
+		}
+	}
+
 	err = spec.LoadAndAssign(objs, &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{LogSizeStart: 1073741823, LogLevel: ebpf.LogLevelInstruction},
 	})

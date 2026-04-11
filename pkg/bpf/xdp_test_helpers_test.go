@@ -88,7 +88,7 @@ func (h *xdpTestHelper) run(pkt []byte) (uint32, []byte) {
 func (h *xdpTestHelper) createSidFunction(prefix string, action uint8) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: 0}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -103,8 +103,9 @@ func (h *xdpTestHelper) createFdbEntry(bdID uint16, mac net.HardwareAddr, oif ui
 
 func (h *xdpTestHelper) createSidFunctionWithBD(prefix string, action uint8, bdID uint16) {
 	h.t.Helper()
-	entry := &SidFunctionEntry{Action: action, Flavor: 0, BdId: bdID}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	entry := &SidFunctionEntry{Action: action, Flavor: 0}
+	aux := NewSidAuxL2(bdID, 0)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -112,15 +113,16 @@ func (h *xdpTestHelper) createSidFunctionWithBD(prefix string, action uint8, bdI
 func (h *xdpTestHelper) createSidFunctionWithVRF(prefix string, action uint8, vrfIfindex uint32) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: 0, VrfIfindex: vrfIfindex}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
 
 func (h *xdpTestHelper) createSidFunctionWithNexthop(prefix string, action uint8, nexthop [16]byte) {
 	h.t.Helper()
-	entry := &SidFunctionEntry{Action: action, Nexthop: nexthop}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	entry := &SidFunctionEntry{Action: action}
+	aux := NewSidAuxNexthop(nexthop)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -128,7 +130,7 @@ func (h *xdpTestHelper) createSidFunctionWithNexthop(prefix string, action uint8
 func (h *xdpTestHelper) createSidFunctionWithFlavor(prefix string, action uint8, flavor uint8) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: flavor}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -136,9 +138,10 @@ func (h *xdpTestHelper) createSidFunctionWithFlavor(prefix string, action uint8,
 func (h *xdpTestHelper) createSidFunctionWithOIF(prefix string, action uint8, oif uint32) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{Action: action, Flavor: 0}
-	// OIF is stored as uint32 in the first 4 bytes of Nexthop (native endian)
-	binary.NativeEndian.PutUint32(entry.Nexthop[:4], oif)
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	// OIF is stored as uint32 in the first 4 bytes of aux nexthop (native endian)
+	aux := &SidAuxEntry{}
+	binary.NativeEndian.PutUint32(aux.Nexthop.Nexthop[:4], oif)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }
@@ -147,7 +150,7 @@ func (h *xdpTestHelper) createSidFunctionB6(prefix string, action uint8, headend
 	h.t.Helper()
 	// Create SID function entry in sid_function_map
 	entry := &SidFunctionEntry{Action: action}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
 		h.t.Fatalf("Failed to create SID function entry for End.B6: %v", err)
 	}
 	// Create policy entry in end_b6_policy_map
@@ -976,11 +979,10 @@ func (h *xdpTestHelper) createHeadendEntryGTP(prefix string, srcAddr [16]byte, s
 func (h *xdpTestHelper) createSidFunctionGTP4E(prefix string, gtpV4SrcAddr [4]byte, argsOffset uint8) {
 	h.t.Helper()
 	entry := &SidFunctionEntry{
-		Action:        actionEndMGTP4E,
-		ArgsOffset: argsOffset,
-		GtpV4SrcAddr:  gtpV4SrcAddr,
+		Action: actionEndMGTP4E,
 	}
-	if err := h.mapOps.CreateSidFunction(prefix, entry); err != nil {
+	aux := NewSidAuxGtp4e(argsOffset, gtpV4SrcAddr)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry for End.M.GTP4.E: %v", err)
 	}
 	h.t.Cleanup(func() { _ = h.mapOps.DeleteSidFunction(prefix) })

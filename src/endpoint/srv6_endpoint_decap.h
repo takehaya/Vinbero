@@ -95,8 +95,11 @@ static __always_inline int process_end_dx2(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
+    if (!aux) return XDP_DROP;
+
     if (srh->segments_left != 0) {
         DEBUG_PRINT("End.DX2: SL != 0, passing\n");
         return XDP_PASS;
@@ -108,7 +111,7 @@ static __always_inline int process_end_dx2(
     }
 
     __u32 oif;
-    __builtin_memcpy(&oif, entry->nexthop, sizeof(__u32));
+    __builtin_memcpy(&oif, aux->nexthop.nexthop, sizeof(__u32));
     if (oif == 0) {
         DEBUG_PRINT("End.DX2: OIF not configured\n");
         return XDP_DROP;

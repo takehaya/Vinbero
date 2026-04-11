@@ -117,10 +117,10 @@ static __always_inline int endpoint_fib_redirect(struct endpoint_ctx *ectx, __u3
     return endpoint_fib_redirect_core(ectx, &ip6h->daddr, fib_ifindex);
 }
 
-// FIB lookup on entry->nexthop (for End.X)
-static __always_inline int endpoint_fib_redirect_nexthop(struct endpoint_ctx *ectx)
+// FIB lookup on explicit nexthop (for End.X)
+static __always_inline int endpoint_fib_redirect_nexthop(struct endpoint_ctx *ectx, void *nexthop)
 {
-    return endpoint_fib_redirect_core(ectx, ectx->entry->nexthop, ectx->ctx->ingress_ifindex);
+    return endpoint_fib_redirect_core(ectx, nexthop, ectx->ctx->ingress_ifindex);
 }
 
 // ========================================================================

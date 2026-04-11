@@ -187,6 +187,7 @@ static __always_inline int process_end_m_gtp6_d(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
     void *data_end = (void *)(long)ctx->data_end;
@@ -303,7 +304,7 @@ static __always_inline int process_end_m_gtp6_d(
 
     // Encode Args.Mob.Session into scratch DA and SRH segment
     {
-        __u8 g6off = entry->args_offset & 0x0B;
+        __u8 g6off = aux ? (aux->gtp6d.args_offset & 0x0B) : 0;
         __be32 teid_be = bpf_htonl(teid);
         __u8 qfi_rqi = ENCODE_QFI_RQI(qfi, rqi);
 
@@ -434,15 +435,17 @@ static __always_inline int process_end_m_gtp6_e(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
+    if (!aux) return XDP_DROP;
     // 1. SL must be 0
     if (srh->segments_left != 0)
         return XDP_PASS;
 
     // 2. Decode Args.Mob.Session from DA (GTP6 format: TEID + QFI/R/U)
     void *data_end_e = (void *)(long)ctx->data_end;
-    __u8 g6off = entry->args_offset & 0x0B;  // per-entry, max 11
+    __u8 g6off = aux->gtp6e.args_offset & 0x0B;  // per-entry, max 11
     __u8 *da_ptr = (__u8 *)&ip6h->daddr + g6off;
     if ((void *)(da_ptr + 5) > data_end_e)
         return XDP_DROP;
@@ -507,8 +510,8 @@ static __always_inline int process_end_m_gtp6_e(
     outer_ip6h->payload_len = bpf_htons(sizeof(struct udphdr) + gtpu_hdr_len + inner_len);
     outer_ip6h->nexthdr = IPPROTO_UDP;
     outer_ip6h->hop_limit = 64;
-    __builtin_memcpy(&outer_ip6h->saddr, entry->src_addr, sizeof(struct in6_addr));
-    __builtin_memcpy(&outer_ip6h->daddr, entry->dst_addr, sizeof(struct in6_addr));
+    __builtin_memcpy(&outer_ip6h->saddr, aux->gtp6e.src_addr, sizeof(struct in6_addr));
+    __builtin_memcpy(&outer_ip6h->daddr, aux->gtp6e.dst_addr, sizeof(struct in6_addr));
 
     // 9. Build UDP header
     udph->source = bpf_htons(GTPU_PORT);

@@ -1,8 +1,11 @@
 package bpf
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
+	"sync"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 )
@@ -20,6 +23,7 @@ type (
 	LpmKeyV6           = BpfLpmKeyV6
 	HeadendL2Key       = BpfHeadendL2Key
 	SidFunctionEntry   = BpfSidFunctionEntry
+	SidAuxEntry        = BpfSidAuxEntry
 	HeadendEntry       = BpfHeadendEntry
 	FdbKey             = BpfFdbKey
 	FdbEntry           = BpfFdbEntry
@@ -38,12 +42,112 @@ type MapOperator interface {
 
 // MapOperations provides operations for BPF maps
 type MapOperations struct {
-	objs *BpfObjects
+	objs     *BpfObjects
+	auxAlloc *indexAllocator
 }
 
 // NewMapOperations creates a new MapOperations instance
 func NewMapOperations(objs *BpfObjects) *MapOperations {
-	return &MapOperations{objs: objs}
+	return &MapOperations{
+		objs:     objs,
+		auxAlloc: newIndexAllocator(512),
+	}
+}
+
+// indexAllocator manages a pool of uint32 indices with a free-list
+type indexAllocator struct {
+	mu       sync.Mutex
+	freeList []uint32
+	maxIndex uint32
+	nextNew  uint32
+}
+
+func newIndexAllocator(max uint32) *indexAllocator {
+	return &indexAllocator{maxIndex: max}
+}
+
+func (a *indexAllocator) Alloc() (uint32, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.freeList) > 0 {
+		idx := a.freeList[len(a.freeList)-1]
+		a.freeList = a.freeList[:len(a.freeList)-1]
+		return idx, nil
+	}
+	if a.nextNew >= a.maxIndex {
+		return 0, fmt.Errorf("aux index pool exhausted (max %d)", a.maxIndex)
+	}
+	idx := a.nextNew
+	a.nextNew++
+	return idx, nil
+}
+
+func (a *indexAllocator) Free(idx uint32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.freeList = append(a.freeList, idx)
+}
+
+// ===== SID Aux Entry Constructors =====
+// BpfSidAuxEntry is a Go representation of a C union.
+// bpf2go exposes only the first union member (nexthop).
+// These helpers construct the entry for each variant using raw byte layout.
+
+// NewSidAuxNexthop creates an aux entry for End.X / End.DX2
+func NewSidAuxNexthop(nexthop [IPv6AddrLen]uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	entry.Nexthop.Nexthop = nexthop
+	return entry
+}
+
+// NewSidAuxL2 creates an aux entry for End.DT2
+func NewSidAuxL2(bdID uint16, bridgeIfindex uint32) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	// C layout: bd_id(u16) + _pad(u16) + bridge_ifindex(u32) at union offset 0
+	binary.NativeEndian.PutUint16(entry.Nexthop.Nexthop[0:2], bdID)
+	binary.NativeEndian.PutUint32(entry.Nexthop.Nexthop[4:8], bridgeIfindex)
+	return entry
+}
+
+// NewSidAuxGtp4e creates an aux entry for End.M.GTP4.E
+func NewSidAuxGtp4e(argsOffset uint8, gtpV4SrcAddr [IPv4AddrLen]uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	entry.Nexthop.Nexthop[0] = argsOffset
+	copy(entry.Nexthop.Nexthop[1:5], gtpV4SrcAddr[:])
+	return entry
+}
+
+// NewSidAuxGtp6d creates an aux entry for End.M.GTP6.D
+func NewSidAuxGtp6d(argsOffset uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	entry.Nexthop.Nexthop[0] = argsOffset
+	return entry
+}
+
+// NewSidAuxGtp6e creates an aux entry for End.M.GTP6.E
+// Uses unsafe.Pointer to write into the anonymous padding field of the Go struct,
+// which corresponds to the C union's gtp6e variant (bytes 16-39).
+func NewSidAuxGtp6e(argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	raw := (*[40]byte)(unsafe.Pointer(entry))
+	raw[0] = argsOffset
+	copy(raw[8:24], srcAddr[:])
+	copy(raw[24:40], dstAddr[:])
+	return entry
+}
+
+// SidAuxL2Data extracts L2 variant fields from a SidAuxEntry
+func SidAuxL2Data(entry *SidAuxEntry) (bdID uint16, bridgeIfindex uint32) {
+	bdID = binary.NativeEndian.Uint16(entry.Nexthop.Nexthop[0:2])
+	bridgeIfindex = binary.NativeEndian.Uint32(entry.Nexthop.Nexthop[4:8])
+	return
+}
+
+// SidAuxGtp4eData extracts GTP4.E variant fields from a SidAuxEntry
+func SidAuxGtp4eData(entry *SidAuxEntry) (argsOffset uint8, gtpV4SrcAddr [IPv4AddrLen]uint8) {
+	argsOffset = entry.Nexthop.Nexthop[0]
+	copy(gtpV4SrcAddr[:], entry.Nexthop.Nexthop[1:5])
+	return
 }
 
 // ParseCIDR parses a CIDR string and returns the IP and prefix length
@@ -84,24 +188,52 @@ func ParseIPv6(addr string) ([IPv6AddrLen]uint8, error) {
 
 // ===== SID Function Map Operations =====
 
-// CreateSidFunction adds a SID function entry to the map
-func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFunctionEntry) error {
+// CreateSidFunction adds a SID function entry and optional aux data.
+// If aux is non-nil, an aux index is allocated and both maps are written.
+func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFunctionEntry, aux *SidAuxEntry) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
+	if aux != nil {
+		idx, err := m.auxAlloc.Alloc()
+		if err != nil {
+			return fmt.Errorf("failed to allocate aux index: %w", err)
+		}
+		entry.HasAux = 1
+		entry.AuxIndex = idx
+		if err := m.objs.SidAuxMap.Put(idx, aux); err != nil {
+			m.auxAlloc.Free(idx)
+			return fmt.Errorf("failed to put SID aux entry: %w", err)
+		}
+	}
+
 	if err := m.objs.SidFunctionMap.Put(key, entry); err != nil {
+		if aux != nil {
+			m.auxAlloc.Free(entry.AuxIndex)
+		}
 		return fmt.Errorf("failed to put SID function entry: %w", err)
 	}
 	return nil
 }
 
-// DeleteSidFunction removes a SID function entry from the map
+// DeleteSidFunction removes a SID function entry and its aux data
 func (m *MapOperations) DeleteSidFunction(triggerPrefix string) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
+	}
+
+	// Read entry first to free aux index
+	var entry SidFunctionEntry
+	if err := m.objs.SidFunctionMap.Lookup(key, &entry); err == nil {
+		if entry.HasAux != 0 {
+			// Zero out aux entry (ARRAY map entries can't be deleted, only zeroed)
+			var zeroAux SidAuxEntry
+			_ = m.objs.SidAuxMap.Put(entry.AuxIndex, &zeroAux)
+			m.auxAlloc.Free(entry.AuxIndex)
+		}
 	}
 
 	if err := m.objs.SidFunctionMap.Delete(key); err != nil {
@@ -122,6 +254,15 @@ func (m *MapOperations) GetSidFunction(triggerPrefix string) (*SidFunctionEntry,
 		return nil, fmt.Errorf("failed to lookup SID function entry: %w", err)
 	}
 	return &entry, nil
+}
+
+// GetSidAux retrieves a SID aux entry by index
+func (m *MapOperations) GetSidAux(index uint32) (*SidAuxEntry, error) {
+	var aux SidAuxEntry
+	if err := m.objs.SidAuxMap.Lookup(index, &aux); err != nil {
+		return nil, fmt.Errorf("failed to lookup SID aux entry: %w", err)
+	}
+	return &aux, nil
 }
 
 // ListSidFunctions returns all SID function entries

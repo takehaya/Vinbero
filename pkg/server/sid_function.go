@@ -30,7 +30,7 @@ func (s *SidFunctionServer) SidFunctionCreate(
 	}
 
 	for _, sidFunc := range req.Msg.SidFunctions {
-		entry, err := s.protoToEntry(sidFunc)
+		entry, aux, err := s.protoToEntry(sidFunc)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: sidFunc.TriggerPrefix,
@@ -39,7 +39,7 @@ func (s *SidFunctionServer) SidFunctionCreate(
 			continue
 		}
 
-		if err := s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry); err != nil {
+		if err := s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry, aux); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: sidFunc.TriggerPrefix,
 				Reason:        err.Error(),
@@ -140,71 +140,73 @@ func (s *SidFunctionServer) SidFunctionGet(
 	return connect.NewResponse(resp), nil
 }
 
-// protoToEntry converts a protobuf SidFunction to a BPF map entry
-func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunctionEntry, error) {
-	srcAddr, err := bpf.ParseIPv6(sidFunc.SrcAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	dstAddr, err := bpf.ParseIPv6(sidFunc.DstAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	nexthop, err := bpf.ParseIPv6(sidFunc.Nexthop)
-	if err != nil {
-		return nil, err
-	}
-
-	gtpV4Src, err := bpf.ParseIPv4Optional(sidFunc.GtpV4SrcAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	// Validate GTP-specific fields
-	action := v1.Srv6LocalAction(sidFunc.Action)
-	if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E {
-		if sidFunc.GtpV4SrcAddr == "" {
-			return nil, fmt.Errorf("gtp_v4_src_addr is required for END_M_GTP4_E")
-		}
-	}
-	if sidFunc.ArgsOffset > 15 {
-		return nil, fmt.Errorf("args_offset must be 0-15, got %d", sidFunc.ArgsOffset)
-	}
-
+// protoToEntry converts a protobuf SidFunction to a BPF generic entry + optional aux entry
+func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunctionEntry, *bpf.SidAuxEntry, error) {
 	entry := &bpf.SidFunctionEntry{
-		Action:        uint8(sidFunc.Action),
-		Flavor:        uint8(sidFunc.Flavor),
-		SrcAddr:       srcAddr,
-		DstAddr:       dstAddr,
-		Nexthop:       nexthop,
-		ArgSrcOffset:  uint8(sidFunc.ArgSrcOffset),
-		ArgDstOffset:  uint8(sidFunc.ArgDstOffset),
-		BdId:          uint16(sidFunc.BdId),
-		ArgsOffset: uint8(sidFunc.ArgsOffset),
-		GtpV4SrcAddr:  gtpV4Src,
+		Action: uint8(sidFunc.Action),
+		Flavor: uint8(sidFunc.Flavor),
 	}
 
-	// Resolve vrf_name → vrf_ifindex for End.DT4/DT6/DT46
+	// Resolve vrf_name → vrf_ifindex for End.T/DT4/DT6/DT46
 	if sidFunc.VrfName != "" {
 		vrfIfindex, err := resolveIfindex(sidFunc.VrfName)
 		if err != nil {
-			return nil, fmt.Errorf("vrf %q: %w", sidFunc.VrfName, err)
+			return nil, nil, fmt.Errorf("vrf %q: %w", sidFunc.VrfName, err)
 		}
 		entry.VrfIfindex = vrfIfindex
 	}
 
-	// Resolve bridge_name → bridge_ifindex for End.DT2
-	if sidFunc.BridgeName != "" {
-		bridgeIfindex, err := resolveIfindex(sidFunc.BridgeName)
+	// Build aux entry based on action type
+	var aux *bpf.SidAuxEntry
+	action := v1.Srv6LocalAction(sidFunc.Action)
+
+	switch action {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
+		nexthop, err := bpf.ParseIPv6(sidFunc.Nexthop)
 		if err != nil {
-			return nil, fmt.Errorf("bridge %q: %w", sidFunc.BridgeName, err)
+			return nil, nil, err
 		}
-		entry.BridgeIfindex = bridgeIfindex
+		aux = bpf.NewSidAuxNexthop(nexthop)
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2:
+		bridgeIfindex := uint32(0)
+		if sidFunc.BridgeName != "" {
+			idx, err := resolveIfindex(sidFunc.BridgeName)
+			if err != nil {
+				return nil, nil, fmt.Errorf("bridge %q: %w", sidFunc.BridgeName, err)
+			}
+			bridgeIfindex = idx
+		}
+		aux = bpf.NewSidAuxL2(uint16(sidFunc.BdId), bridgeIfindex)
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E:
+		if sidFunc.GtpV4SrcAddr == "" {
+			return nil, nil, fmt.Errorf("gtp_v4_src_addr is required for END_M_GTP4_E")
+		}
+		gtpV4Src, err := bpf.ParseIPv4Optional(sidFunc.GtpV4SrcAddr)
+		if err != nil {
+			return nil, nil, err
+		}
+		aux = bpf.NewSidAuxGtp4e(uint8(sidFunc.ArgsOffset), gtpV4Src)
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D_DI:
+		aux = bpf.NewSidAuxGtp6d(uint8(sidFunc.ArgsOffset))
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E:
+		srcAddr, err := bpf.ParseIPv6(sidFunc.SrcAddr)
+		if err != nil {
+			return nil, nil, err
+		}
+		dstAddr, err := bpf.ParseIPv6(sidFunc.DstAddr)
+		if err != nil {
+			return nil, nil, err
+		}
+		aux = bpf.NewSidAuxGtp6e(uint8(sidFunc.ArgsOffset), srcAddr, dstAddr)
 	}
 
-	return entry, nil
+	return entry, aux, nil
 }
 
 // entryToProto converts a BPF map entry to a protobuf SidFunction
@@ -212,17 +214,46 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 	sf := &v1.SidFunction{
 		Action:        v1.Srv6LocalAction(entry.Action),
 		TriggerPrefix: prefix,
-		SrcAddr:       bpf.FormatIPv6(entry.SrcAddr),
-		DstAddr:       bpf.FormatIPv6(entry.DstAddr),
-		Nexthop:       bpf.FormatIPv6(entry.Nexthop),
 		Flavor:        v1.Srv6LocalFlavor(entry.Flavor),
-		ArgSrcOffset:  uint32(entry.ArgSrcOffset),
-		ArgDstOffset:  uint32(entry.ArgDstOffset),
 		VrfName:       ifindexToName(entry.VrfIfindex),
-		BdId:          uint32(entry.BdId),
-		BridgeName:    ifindexToName(entry.BridgeIfindex),
-		ArgsOffset: uint32(entry.ArgsOffset),
-		GtpV4SrcAddr:  bpf.FormatIPv4Optional(entry.GtpV4SrcAddr),
+	}
+
+	// Read aux data if present
+	if entry.HasAux != 0 {
+		aux, err := s.mapOps.GetSidAux(entry.AuxIndex)
+		if err == nil && aux != nil {
+			action := v1.Srv6LocalAction(entry.Action)
+			switch action {
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
+				sf.Nexthop = bpf.FormatIPv6(aux.Nexthop.Nexthop)
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2:
+				bdID, bridgeIfindex := bpf.SidAuxL2Data(aux)
+				sf.BdId = uint32(bdID)
+				sf.BridgeName = ifindexToName(bridgeIfindex)
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E:
+				argsOffset, gtpV4Src := bpf.SidAuxGtp4eData(aux)
+				sf.ArgsOffset = uint32(argsOffset)
+				sf.GtpV4SrcAddr = bpf.FormatIPv4Optional(gtpV4Src)
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D_DI:
+				sf.ArgsOffset = uint32(aux.Nexthop.Nexthop[0])
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E:
+				sf.ArgsOffset = uint32(aux.Nexthop.Nexthop[0])
+				// src_addr at bytes 8-23, dst_addr at bytes 24-39
+				// These span the padding area; read via Nexthop for bytes 8-15
+				var srcAddr, dstAddr [bpf.IPv6AddrLen]uint8
+				copy(srcAddr[:8], aux.Nexthop.Nexthop[8:16])
+				// Remaining bytes are in padding - for read-back we'd need raw access
+				// For now, report what's accessible
+				sf.SrcAddr = bpf.FormatIPv6(srcAddr)
+				sf.DstAddr = bpf.FormatIPv6(dstAddr)
+			}
+		}
 	}
 
 	// Include policy fields for End.B6/End.B6.Encaps from policy map

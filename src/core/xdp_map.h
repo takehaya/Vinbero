@@ -19,6 +19,16 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } sid_function_map SEC(".maps");
 
+// SID Auxiliary map (ARRAY)
+// Key: u32 index (from sid_function_entry.aux_index)
+// Value: Action-specific data (union, discriminated by action field)
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct sid_aux_entry);
+    __uint(max_entries, 512);
+} sid_aux_map SEC(".maps");
+
 // Headend v4 map (IPv4 LPM Trie)
 // Key: IPv4 prefix (trigger_prefix)
 // Value: Headend configuration

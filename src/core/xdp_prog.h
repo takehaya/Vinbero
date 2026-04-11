@@ -103,22 +103,53 @@ struct headend_l2_key {
     __u8 _pad[2];
 } __attribute__((packed));
 
-// SID Function entry (for SRv6 Endpoint functions)
+// SID Function entry – generic fields (LPM trie value, kept small)
 struct sid_function_entry {
     __u8 action;                  // srv6_local_action enum
-    __u8 flavor;                  // srv6_local_flavor enum
-    __u8 src_addr[IPV6_ADDR_LEN]; // actionSrcAddr
-    __u8 dst_addr[IPV6_ADDR_LEN]; // actionDstAddr
-    __u8 nexthop[IPV6_ADDR_LEN];  // Next hop address
-    __u8 arg_src_offset;          // Bit offset for source in SID Args
-    __u8 arg_dst_offset;          // Bit offset for destination in SID Args
-    __u32 vrf_ifindex;            // VRF interface index (for End.DT4/DT6/DT46)
-    __u16 bd_id;                  // Bridge Domain ID (for End.DT2)
-    __u16 _pad_sid;
-    __u32 bridge_ifindex;         // Bridge device ifindex (for End.DT2 FDB miss → redirect)
-    __u8 args_offset;             // Args byte offset within SID (RFC 9433 Args.Mob.Session)
-    __u8 gtp_v4_src_addr[IPV4_ADDR_LEN]; // End.M.GTP4.E: outer IPv4 source address
-    __u8 _pad_gtp;
+    __u8 flavor;                  // srv6_local_flavor enum (PSP, USP, USD)
+    __u8 has_aux;                 // 1 if sid_aux_map[aux_index] has data
+    __u8 _pad;
+    __u32 vrf_ifindex;            // VRF interface index (End.T/DT4/DT6/DT46)
+    __u32 aux_index;              // Index into sid_aux_map (ARRAY)
+} __attribute__((packed));
+
+// SID Auxiliary entry – action-specific fields (ARRAY map value)
+// Discriminated by sid_function_entry.action
+struct sid_aux_entry {
+    union {
+        // End.X, End.DX2: nexthop address (DX2 stores OIF in first 4 bytes)
+        struct {
+            __u8 nexthop[IPV6_ADDR_LEN];
+        } nexthop;                                         // 16 bytes
+
+        // End.DT2: L2 bridge domain parameters
+        struct {
+            __u16 bd_id;
+            __u16 _pad;
+            __u32 bridge_ifindex;
+        } l2;                                              // 8 bytes
+
+        // End.M.GTP4.E: GTP-U to IPv4
+        struct {
+            __u8 args_offset;
+            __u8 gtp_v4_src_addr[IPV4_ADDR_LEN];
+            __u8 _pad[3];
+        } gtp4e;                                           // 8 bytes
+
+        // End.M.GTP6.D: GTP-U IPv6 decode
+        struct {
+            __u8 args_offset;
+            __u8 _pad[7];
+        } gtp6d;                                           // 8 bytes
+
+        // End.M.GTP6.E: GTP-U to IPv6
+        struct {
+            __u8 args_offset;
+            __u8 _pad[7];
+            __u8 src_addr[IPV6_ADDR_LEN];
+            __u8 dst_addr[IPV6_ADDR_LEN];
+        } gtp6e;                                           // 40 bytes
+    };
 } __attribute__((packed));
 
 // Key for FDB map: Bridge Domain ID + MAC address

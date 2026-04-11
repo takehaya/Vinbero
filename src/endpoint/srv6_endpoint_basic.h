@@ -30,13 +30,15 @@ static __always_inline int process_end_x(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
+    if (!aux) return XDP_DROP;
     struct endpoint_ctx ectx;
     int action = endpoint_common_processing(&ectx, ctx, ip6h, srh, entry,
                                             l3_offset, ctx->ingress_ifindex);
     if (action >= 0) return action;
-    return endpoint_fib_redirect_nexthop(&ectx);
+    return endpoint_fib_redirect_nexthop(&ectx, aux->nexthop.nexthop);
 }
 
 // End.T: VRF-aware FIB lookup (RFC 8986 Section 4.3)

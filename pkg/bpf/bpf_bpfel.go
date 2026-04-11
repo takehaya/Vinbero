@@ -84,22 +84,23 @@ type BpfScratchBuf struct {
 	Data [224]uint8
 }
 
+type BpfSidAuxEntry struct {
+	_       structs.HostLayout
+	Nexthop struct {
+		_       structs.HostLayout
+		Nexthop [16]uint8
+	}
+	_ [24]byte
+}
+
 type BpfSidFunctionEntry struct {
-	_             structs.HostLayout
-	Action        uint8
-	Flavor        uint8
-	SrcAddr       [16]uint8
-	DstAddr       [16]uint8
-	Nexthop       [16]uint8
-	ArgSrcOffset  uint8
-	ArgDstOffset  uint8
-	VrfIfindex    uint32
-	BdId          uint16
-	PadSid        uint16
-	BridgeIfindex uint32
-	ArgsOffset    uint8
-	GtpV4SrcAddr  [4]uint8
-	PadGtp        uint8
+	_          structs.HostLayout
+	Action     uint8
+	Flavor     uint8
+	HasAux     uint8
+	Pad        uint8
+	VrfIfindex uint32
+	AuxIndex   uint32
 }
 
 type BpfStatsEntry struct {
@@ -166,6 +167,7 @@ type BpfMapSpecs struct {
 	HeadendV4Map     *ebpf.MapSpec `ebpf:"headend_v4_map"`
 	HeadendV6Map     *ebpf.MapSpec `ebpf:"headend_v6_map"`
 	ScratchMap       *ebpf.MapSpec `ebpf:"scratch_map"`
+	SidAuxMap        *ebpf.MapSpec `ebpf:"sid_aux_map"`
 	SidFunctionMap   *ebpf.MapSpec `ebpf:"sid_function_map"`
 	StatsMap         *ebpf.MapSpec `ebpf:"stats_map"`
 	XdpcapHook       *ebpf.MapSpec `ebpf:"xdpcap_hook"`
@@ -207,6 +209,7 @@ type BpfMaps struct {
 	HeadendV4Map     *ebpf.Map `ebpf:"headend_v4_map"`
 	HeadendV6Map     *ebpf.Map `ebpf:"headend_v6_map"`
 	ScratchMap       *ebpf.Map `ebpf:"scratch_map"`
+	SidAuxMap        *ebpf.Map `ebpf:"sid_aux_map"`
 	SidFunctionMap   *ebpf.Map `ebpf:"sid_function_map"`
 	StatsMap         *ebpf.Map `ebpf:"stats_map"`
 	XdpcapHook       *ebpf.Map `ebpf:"xdpcap_hook"`
@@ -222,6 +225,7 @@ func (m *BpfMaps) Close() error {
 		m.HeadendV4Map,
 		m.HeadendV6Map,
 		m.ScratchMap,
+		m.SidAuxMap,
 		m.SidFunctionMap,
 		m.StatsMap,
 		m.XdpcapHook,

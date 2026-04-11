@@ -212,14 +212,22 @@ func (s *NetworkResourceServer) VrfList(
 }
 
 // findBridgeReference checks if any SID entry references the given bridge_ifindex.
+// Bridge ifindex is stored in the aux map (L2 variant), so we check entries with has_aux.
 func (s *NetworkResourceServer) findBridgeReference(ifindex uint32) (string, error) {
 	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
 		return "", fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
-		if entry.BridgeIfindex == ifindex {
-			return prefix, nil
+		if entry.HasAux != 0 {
+			aux, err := s.mapOps.GetSidAux(entry.AuxIndex)
+			if err != nil {
+				continue
+			}
+			_, bridgeIfindex := bpf.SidAuxL2Data(aux)
+			if bridgeIfindex == ifindex {
+				return prefix, nil
+			}
 		}
 	}
 	return "", nil

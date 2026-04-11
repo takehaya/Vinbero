@@ -27,6 +27,9 @@ type EntriesConfig struct {
 	SidFunction EntryCapacityConfig `yaml:"sid_function,omitempty"`
 	Headendv4   EntryCapacityConfig `yaml:"headendv4,omitempty"`
 	Headendv6   EntryCapacityConfig `yaml:"headendv6,omitempty"`
+	HeadendL2   EntryCapacityConfig `yaml:"headend_l2,omitempty"`
+	Fdb         EntryCapacityConfig `yaml:"fdb,omitempty"`
+	BdPeer      EntryCapacityConfig `yaml:"bd_peer,omitempty"`
 	MaxSegments int                 `yaml:"max_segments,omitempty" default:"10"`
 }
 
