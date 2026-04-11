@@ -147,7 +147,9 @@ jobs:
         if: failure()
         run: |
           echo "=== Vinbero logs ==="
-          cat /tmp/vinbero_test.log 2>/dev/null || echo "No log file found"
+          for f in /tmp/vinbero_*.log; do
+            [ -f "$f" ] && echo "--- $f ---" && cat "$f"
+          done
           echo "=== Network namespaces ==="
           ip netns list || true
           echo "=== Kernel messages ==="
