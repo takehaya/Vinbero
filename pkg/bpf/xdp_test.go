@@ -2229,3 +2229,41 @@ func TestXDPProgEndMGtp6E(t *testing.T) {
 		})
 	}
 }
+
+func TestXDPProgEndMGtp6DDI(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	// End.M.GTP6.D.DI: Drop-In variant — passes packet to kernel unmodified.
+	// No aux data needed (DI doesn't access entry fields).
+	entry := &SidFunctionEntry{Action: actionEndMGTP6DDI}
+	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", entry, nil); err != nil {
+		t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+
+	pkt, err := buildSRv6WithGTPUPayload(
+		net.ParseIP("fc00::1"),
+		net.ParseIP("fc00:1::1"),
+		net.ParseIP("fc00:2::1"),
+		0xAABBCCDD, 9, 3,
+		net.ParseIP("172.16.0.1").To4(),
+		net.ParseIP("172.16.0.2").To4(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	ret, outPkt := h.run(pkt)
+
+	// DI always returns XDP_PASS (hand off to kernel SRv6 stack)
+	if ret != XDP_PASS {
+		t.Errorf("Expected XDP_PASS, got %d", ret)
+	}
+
+	// Packet should be unmodified (same length, same content)
+	if len(outPkt) != len(pkt) {
+		t.Errorf("Packet length changed: %d → %d", len(pkt), len(outPkt))
+	}
+	if bytes.Equal(outPkt[:len(pkt)], pkt) {
+		t.Log("SUCCESS: GTP6.D.DI passed packet to kernel unmodified")
+	}
+}
