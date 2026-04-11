@@ -77,11 +77,11 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered NetworkResourceService", zap.String("path", path))
 
-	// Dmac service (read-only, for observability)
-	dmacServer := NewDmacServer(s.mapOps)
-	path, handler = vinberov1connect.NewDmacServiceHandler(dmacServer)
+	// FDB service (read-only, for observability)
+	fdbServer := NewFdbServer(s.mapOps)
+	path, handler = vinberov1connect.NewFdbServiceHandler(fdbServer)
 	s.mux.Handle(path, handler)
-	s.logger.Info("Registered DmacService", zap.String("path", path))
+	s.logger.Info("Registered FdbService", zap.String("path", path))
 
 	// Stats service (read-only, for observability)
 	statsServer := NewStatsServer(s.mapOps)

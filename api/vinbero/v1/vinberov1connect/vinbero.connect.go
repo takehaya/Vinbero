@@ -27,8 +27,8 @@ const (
 	Headendv4ServiceName = "vinbero.v1.Headendv4Service"
 	// Headendv6ServiceName is the fully-qualified name of the Headendv6Service service.
 	Headendv6ServiceName = "vinbero.v1.Headendv6Service"
-	// DmacServiceName is the fully-qualified name of the DmacService service.
-	DmacServiceName = "vinbero.v1.DmacService"
+	// FdbServiceName is the fully-qualified name of the FdbService service.
+	FdbServiceName = "vinbero.v1.FdbService"
 	// BdPeerServiceName is the fully-qualified name of the BdPeerService service.
 	BdPeerServiceName = "vinbero.v1.BdPeerService"
 	// NetworkResourceServiceName is the fully-qualified name of the NetworkResourceService service.
@@ -83,8 +83,8 @@ const (
 	// Headendv6ServiceHeadendv6GetProcedure is the fully-qualified name of the Headendv6Service's
 	// Headendv6Get RPC.
 	Headendv6ServiceHeadendv6GetProcedure = "/vinbero.v1.Headendv6Service/Headendv6Get"
-	// DmacServiceDmacListProcedure is the fully-qualified name of the DmacService's DmacList RPC.
-	DmacServiceDmacListProcedure = "/vinbero.v1.DmacService/DmacList"
+	// FdbServiceFdbListProcedure is the fully-qualified name of the FdbService's FdbList RPC.
+	FdbServiceFdbListProcedure = "/vinbero.v1.FdbService/FdbList"
 	// BdPeerServiceBdPeerCreateProcedure is the fully-qualified name of the BdPeerService's
 	// BdPeerCreate RPC.
 	BdPeerServiceBdPeerCreateProcedure = "/vinbero.v1.BdPeerService/BdPeerCreate"
@@ -147,8 +147,8 @@ var (
 	headendv6ServiceHeadendv6DeleteMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Delete")
 	headendv6ServiceHeadendv6ListMethodDescriptor       = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6List")
 	headendv6ServiceHeadendv6GetMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
-	dmacServiceServiceDescriptor                        = v1.File_vinbero_v1_vinbero_proto.Services().ByName("DmacService")
-	dmacServiceDmacListMethodDescriptor                 = dmacServiceServiceDescriptor.Methods().ByName("DmacList")
+	fdbServiceServiceDescriptor                         = v1.File_vinbero_v1_vinbero_proto.Services().ByName("FdbService")
+	fdbServiceFdbListMethodDescriptor                   = fdbServiceServiceDescriptor.Methods().ByName("FdbList")
 	bdPeerServiceServiceDescriptor                      = v1.File_vinbero_v1_vinbero_proto.Services().ByName("BdPeerService")
 	bdPeerServiceBdPeerCreateMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerCreate")
 	bdPeerServiceBdPeerDeleteMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerDelete")
@@ -608,72 +608,72 @@ func (UnimplementedHeadendv6ServiceHandler) Headendv6Get(context.Context, *conne
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6Get is not implemented"))
 }
 
-// DmacServiceClient is a client for the vinbero.v1.DmacService service.
-type DmacServiceClient interface {
-	DmacList(context.Context, *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error)
+// FdbServiceClient is a client for the vinbero.v1.FdbService service.
+type FdbServiceClient interface {
+	FdbList(context.Context, *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error)
 }
 
-// NewDmacServiceClient constructs a client for the vinbero.v1.DmacService service. By default, it
+// NewFdbServiceClient constructs a client for the vinbero.v1.FdbService service. By default, it
 // uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses, and sends
 // uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the connect.WithGRPC() or
 // connect.WithGRPCWeb() options.
 //
 // The URL supplied here should be the base URL for the Connect or gRPC server (for example,
 // http://api.acme.com or https://acme.com/grpc).
-func NewDmacServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) DmacServiceClient {
+func NewFdbServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) FdbServiceClient {
 	baseURL = strings.TrimRight(baseURL, "/")
-	return &dmacServiceClient{
-		dmacList: connect.NewClient[v1.DmacListRequest, v1.DmacListResponse](
+	return &fdbServiceClient{
+		fdbList: connect.NewClient[v1.FdbListRequest, v1.FdbListResponse](
 			httpClient,
-			baseURL+DmacServiceDmacListProcedure,
-			connect.WithSchema(dmacServiceDmacListMethodDescriptor),
+			baseURL+FdbServiceFdbListProcedure,
+			connect.WithSchema(fdbServiceFdbListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
 	}
 }
 
-// dmacServiceClient implements DmacServiceClient.
-type dmacServiceClient struct {
-	dmacList *connect.Client[v1.DmacListRequest, v1.DmacListResponse]
+// fdbServiceClient implements FdbServiceClient.
+type fdbServiceClient struct {
+	fdbList *connect.Client[v1.FdbListRequest, v1.FdbListResponse]
 }
 
-// DmacList calls vinbero.v1.DmacService.DmacList.
-func (c *dmacServiceClient) DmacList(ctx context.Context, req *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error) {
-	return c.dmacList.CallUnary(ctx, req)
+// FdbList calls vinbero.v1.FdbService.FdbList.
+func (c *fdbServiceClient) FdbList(ctx context.Context, req *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error) {
+	return c.fdbList.CallUnary(ctx, req)
 }
 
-// DmacServiceHandler is an implementation of the vinbero.v1.DmacService service.
-type DmacServiceHandler interface {
-	DmacList(context.Context, *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error)
+// FdbServiceHandler is an implementation of the vinbero.v1.FdbService service.
+type FdbServiceHandler interface {
+	FdbList(context.Context, *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error)
 }
 
-// NewDmacServiceHandler builds an HTTP handler from the service implementation. It returns the path
+// NewFdbServiceHandler builds an HTTP handler from the service implementation. It returns the path
 // on which to mount the handler and the handler itself.
 //
 // By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
 // and JSON codecs. They also support gzip compression.
-func NewDmacServiceHandler(svc DmacServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
-	dmacServiceDmacListHandler := connect.NewUnaryHandler(
-		DmacServiceDmacListProcedure,
-		svc.DmacList,
-		connect.WithSchema(dmacServiceDmacListMethodDescriptor),
+func NewFdbServiceHandler(svc FdbServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	fdbServiceFdbListHandler := connect.NewUnaryHandler(
+		FdbServiceFdbListProcedure,
+		svc.FdbList,
+		connect.WithSchema(fdbServiceFdbListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
-	return "/vinbero.v1.DmacService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return "/vinbero.v1.FdbService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case DmacServiceDmacListProcedure:
-			dmacServiceDmacListHandler.ServeHTTP(w, r)
+		case FdbServiceFdbListProcedure:
+			fdbServiceFdbListHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
 	})
 }
 
-// UnimplementedDmacServiceHandler returns CodeUnimplemented from all methods.
-type UnimplementedDmacServiceHandler struct{}
+// UnimplementedFdbServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedFdbServiceHandler struct{}
 
-func (UnimplementedDmacServiceHandler) DmacList(context.Context, *connect.Request[v1.DmacListRequest]) (*connect.Response[v1.DmacListResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.DmacService.DmacList is not implemented"))
+func (UnimplementedFdbServiceHandler) FdbList(context.Context, *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.FdbService.FdbList is not implemented"))
 }
 
 // BdPeerServiceClient is a client for the vinbero.v1.BdPeerService service.

@@ -51,7 +51,7 @@ func NewApp() *cli.App {
 			bdPeerCommand(),
 			bridgeCommand(),
 			vrfCommand(),
-			dmacCommand(),
+			fdbCommand(),
 			statsCommand(),
 			completion.Command(),
 		},

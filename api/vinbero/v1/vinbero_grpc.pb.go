@@ -617,87 +617,87 @@ var Headendv6Service_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	DmacService_DmacList_FullMethodName = "/vinbero.v1.DmacService/DmacList"
+	FdbService_FdbList_FullMethodName = "/vinbero.v1.FdbService/FdbList"
 )
 
-// DmacServiceClient is the client API for DmacService service.
+// FdbServiceClient is the client API for FdbService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type DmacServiceClient interface {
-	DmacList(ctx context.Context, in *DmacListRequest, opts ...grpc.CallOption) (*DmacListResponse, error)
+type FdbServiceClient interface {
+	FdbList(ctx context.Context, in *FdbListRequest, opts ...grpc.CallOption) (*FdbListResponse, error)
 }
 
-type dmacServiceClient struct {
+type fdbServiceClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewDmacServiceClient(cc grpc.ClientConnInterface) DmacServiceClient {
-	return &dmacServiceClient{cc}
+func NewFdbServiceClient(cc grpc.ClientConnInterface) FdbServiceClient {
+	return &fdbServiceClient{cc}
 }
 
-func (c *dmacServiceClient) DmacList(ctx context.Context, in *DmacListRequest, opts ...grpc.CallOption) (*DmacListResponse, error) {
-	out := new(DmacListResponse)
-	err := c.cc.Invoke(ctx, DmacService_DmacList_FullMethodName, in, out, opts...)
+func (c *fdbServiceClient) FdbList(ctx context.Context, in *FdbListRequest, opts ...grpc.CallOption) (*FdbListResponse, error) {
+	out := new(FdbListResponse)
+	err := c.cc.Invoke(ctx, FdbService_FdbList_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// DmacServiceServer is the server API for DmacService service.
-// All implementations should embed UnimplementedDmacServiceServer
+// FdbServiceServer is the server API for FdbService service.
+// All implementations should embed UnimplementedFdbServiceServer
 // for forward compatibility
-type DmacServiceServer interface {
-	DmacList(context.Context, *DmacListRequest) (*DmacListResponse, error)
+type FdbServiceServer interface {
+	FdbList(context.Context, *FdbListRequest) (*FdbListResponse, error)
 }
 
-// UnimplementedDmacServiceServer should be embedded to have forward compatible implementations.
-type UnimplementedDmacServiceServer struct {
+// UnimplementedFdbServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedFdbServiceServer struct {
 }
 
-func (UnimplementedDmacServiceServer) DmacList(context.Context, *DmacListRequest) (*DmacListResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method DmacList not implemented")
+func (UnimplementedFdbServiceServer) FdbList(context.Context, *FdbListRequest) (*FdbListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FdbList not implemented")
 }
 
-// UnsafeDmacServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to DmacServiceServer will
+// UnsafeFdbServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to FdbServiceServer will
 // result in compilation errors.
-type UnsafeDmacServiceServer interface {
-	mustEmbedUnimplementedDmacServiceServer()
+type UnsafeFdbServiceServer interface {
+	mustEmbedUnimplementedFdbServiceServer()
 }
 
-func RegisterDmacServiceServer(s grpc.ServiceRegistrar, srv DmacServiceServer) {
-	s.RegisterService(&DmacService_ServiceDesc, srv)
+func RegisterFdbServiceServer(s grpc.ServiceRegistrar, srv FdbServiceServer) {
+	s.RegisterService(&FdbService_ServiceDesc, srv)
 }
 
-func _DmacService_DmacList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DmacListRequest)
+func _FdbService_FdbList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FdbListRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DmacServiceServer).DmacList(ctx, in)
+		return srv.(FdbServiceServer).FdbList(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: DmacService_DmacList_FullMethodName,
+		FullMethod: FdbService_FdbList_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DmacServiceServer).DmacList(ctx, req.(*DmacListRequest))
+		return srv.(FdbServiceServer).FdbList(ctx, req.(*FdbListRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-// DmacService_ServiceDesc is the grpc.ServiceDesc for DmacService service.
+// FdbService_ServiceDesc is the grpc.ServiceDesc for FdbService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
-var DmacService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "vinbero.v1.DmacService",
-	HandlerType: (*DmacServiceServer)(nil),
+var FdbService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.FdbService",
+	HandlerType: (*FdbServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "DmacList",
-			Handler:    _DmacService_DmacList_Handler,
+			MethodName: "FdbList",
+			Handler:    _FdbService_FdbList_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

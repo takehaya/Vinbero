@@ -35,9 +35,9 @@ type (
 
 // MapOperator interface for testability
 type MapOperator interface {
-	Put(key, value interface{}) error
-	Delete(key interface{}) error
-	Lookup(key, valueOut interface{}) error
+	Put(key, value any) error
+	Delete(key any) error
+	Lookup(key, valueOut any) error
 	Iterate() *ebpf.MapIterator
 }
 

@@ -165,22 +165,26 @@ message Headendv6GetResponse {
 }
 
 // DmacService provides read-only access to the FDB (MAC address table).
-// Useful for observability and debugging of L2VPN MAC learning.
-service DmacService {
-  rpc DmacList(DmacListRequest) returns (DmacListResponse);
+// FdbService provides read-only access to the FDB (forwarding database) for
+// observability and debugging of L2VPN MAC learning.
+service FdbService {
+  rpc FdbList(FdbListRequest) returns (FdbListResponse);
 }
 
-// DmacListEntry represents a single FDB entry.
-message DmacListEntry {
+// FdbEntry represents a single FDB entry with aging and type information.
+message FdbEntry {
   uint32 bd_id = 1; // Bridge Domain ID that scopes this MAC entry
   string mac = 2; // MAC address (e.g., "aa:bb:cc:dd:ee:ff")
   uint32 oif = 3; // Output interface index (for local entries)
   bool is_untag = 4; // Reserved for future VLAN tag stripping on egress
+  bool is_remote = 5; // true if learned via SRv6 End.DT2 (remote PE)
+  bool is_static = 6; // true if user-configured (never aged out)
+  uint64 last_seen = 7; // bpf_ktime_get_ns() timestamp (0 for static entries)
 }
 
-message DmacListRequest {}
-message DmacListResponse {
-  repeated DmacListEntry entries = 1;
+message FdbListRequest {}
+message FdbListResponse {
+  repeated FdbEntry entries = 1;
 }
 
 // BdPeerService manages remote PEs within a Bridge Domain for BUM traffic flooding.

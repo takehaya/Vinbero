@@ -182,8 +182,8 @@ func (v *Vinbero) Close() error {
 }
 
 // buildBpfConstants creates BPF constant values from config
-func buildBpfConstants(cfg *config.Config) map[string]interface{} {
-	constants := make(map[string]interface{})
+func buildBpfConstants(cfg *config.Config) map[string]any {
+	constants := make(map[string]any)
 
 	// Convert bool to uint8 (BPF uses uint8 for these flags)
 	if cfg.Setting.EnableStats {
