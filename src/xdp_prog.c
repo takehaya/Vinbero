@@ -256,9 +256,9 @@ static __always_inline int process_srv6_localsid(
     case SRV6_LOCAL_ACTION_END_DT2:
         return process_end_dt2(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_B6:
-        return process_end_b6_insert(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_b6_insert(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_B6_ENCAPS:
-        return process_end_b6_encaps(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_b6_encaps(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP4_E:
         return process_end_m_gtp4_e(ctx, ip6h, srh, entry, aux, l3_offset);
     case SRV6_LOCAL_ACTION_END_M_GTP6_D:

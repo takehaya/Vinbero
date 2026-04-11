@@ -150,18 +150,16 @@ func (h *xdpTestHelper) createSidFunctionB6(prefix string, action uint8, headend
 	h.t.Helper()
 	// Create SID function entry in sid_function_map
 	entry := &SidFunctionEntry{Action: action}
-	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
-		h.t.Fatalf("Failed to create SID function entry for End.B6: %v", err)
-	}
-	// Create policy entry in end_b6_policy_map
+	// Policy is stored in sid_aux_map (b6_policy variant)
 	policy := &HeadendEntry{
 		Mode:        headendMode,
 		NumSegments: numSegments,
 		SrcAddr:     srcAddr,
 		Segments:    segments,
 	}
-	if err := h.mapOps.CreateEndB6Policy(prefix, policy); err != nil {
-		h.t.Fatalf("Failed to create End.B6 policy entry: %v", err)
+	aux := NewSidAuxB6Policy(policy)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.B6: %v", err)
 	}
 }
 

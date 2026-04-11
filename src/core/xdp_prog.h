@@ -103,6 +103,20 @@ struct headend_l2_key {
     __u8 _pad[2];
 } __attribute__((packed));
 
+// Headend entry (for H.Encaps, H.Insert, etc.)
+// Defined before sid_aux_entry so it can be embedded as b6_policy variant.
+struct headend_entry {
+    __u8 mode;                              // srv6_headend_behavior enum
+    __u8 num_segments;                      // Number of segments (1-10)
+    __u8 _pad[2];                           // Padding for alignment
+    __u8 src_addr[IPV6_ADDR_LEN];           // Outer IPv6 source address
+    __u8 dst_addr[IPV6_ADDR_LEN];           // Unused for H.Encaps (reserved)
+    __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list (up to 10 segments)
+    __u16 bd_id;                            // Bridge Domain ID (for H.Encaps.L2)
+    __u8 args_offset;                       // Args byte offset within SID (RFC 9433 Args.Mob.Session)
+    __u8 _pad_gtp;
+} __attribute__((packed));
+
 // SID Function entry – generic fields (LPM trie value, kept small)
 struct sid_function_entry {
     __u8 action;                  // srv6_local_action enum
@@ -114,7 +128,8 @@ struct sid_function_entry {
 } __attribute__((packed));
 
 // SID Auxiliary entry – action-specific fields (ARRAY map value)
-// Discriminated by sid_function_entry.action
+// Discriminated by sid_function_entry.action.
+// Max size = headend_entry (196 bytes) for End.B6/B6.Encaps policy.
 struct sid_aux_entry {
     union {
         // End.X, End.DX2: nexthop address (DX2 stores OIF in first 4 bytes)
@@ -149,6 +164,10 @@ struct sid_aux_entry {
             __u8 src_addr[IPV6_ADDR_LEN];
             __u8 dst_addr[IPV6_ADDR_LEN];
         } gtp6e;                                           // 40 bytes
+
+        // End.B6/End.B6.Encaps: policy headend configuration
+        // Replaces the former end_b6_policy_map (LPM trie).
+        struct headend_entry b6_policy;                    // 196 bytes
     };
 } __attribute__((packed));
 
@@ -167,19 +186,6 @@ struct fdb_entry {
     __u16 bd_id;                   // BD ID for bd_peer_map lookup (when is_remote=1)
     __u8 _pad2[2];
 } __attribute__((packed));         // 12 bytes total
-
-// Headend entry (for H.Encaps, H.Insert, etc.)
-struct headend_entry {
-    __u8 mode;                              // srv6_headend_behavior enum
-    __u8 num_segments;                      // Number of segments (1-10)
-    __u8 _pad[2];                           // Padding for alignment
-    __u8 src_addr[IPV6_ADDR_LEN];           // Outer IPv6 source address
-    __u8 dst_addr[IPV6_ADDR_LEN];           // Unused for H.Encaps (reserved)
-    __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list (up to 10 segments)
-    __u16 bd_id;                            // Bridge Domain ID (for H.Encaps.L2)
-    __u8 args_offset;                       // Args byte offset within SID (RFC 9433 Args.Mob.Session)
-    __u8 _pad_gtp;
-} __attribute__((packed));
 
 // Maximum number of remote PEs per Bridge Domain for BUM flooding
 #define MAX_BUM_NEXTHOPS 8

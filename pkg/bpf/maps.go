@@ -186,6 +186,34 @@ func NewSidAuxGtp6e(argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) *SidA
 	return entry
 }
 
+// NewSidAuxB6Policy creates an aux entry for End.B6/End.B6.Encaps
+// Stores a full HeadendEntry in the b6_policy union variant.
+func NewSidAuxB6Policy(policy *HeadendEntry) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	raw := (*[200]byte)(unsafe.Pointer(entry))
+	policyBytes := (*[196]byte)(unsafe.Pointer(policy))
+	copy(raw[:196], policyBytes[:])
+	return entry
+}
+
+// SidAuxB6PolicyData extracts End.B6 policy from a SidAuxEntry
+func SidAuxB6PolicyData(entry *SidAuxEntry) *HeadendEntry {
+	result := &HeadendEntry{}
+	raw := (*[200]byte)(unsafe.Pointer(entry))
+	resultBytes := (*[196]byte)(unsafe.Pointer(result))
+	copy(resultBytes[:], raw[:196])
+	return result
+}
+
+// SidAuxGtp6eData extracts GTP6.E variant fields from a SidAuxEntry
+func SidAuxGtp6eData(entry *SidAuxEntry) (argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) {
+	raw := (*[200]byte)(unsafe.Pointer(entry))
+	argsOffset = raw[0]
+	copy(srcAddr[:], raw[8:24])
+	copy(dstAddr[:], raw[24:40])
+	return
+}
+
 // SidAuxL2Data extracts L2 variant fields from a SidAuxEntry
 func SidAuxL2Data(entry *SidAuxEntry) (bdID uint16, bridgeIfindex uint32) {
 	bdID = binary.NativeEndian.Uint16(entry.Nexthop.Nexthop[0:2])
@@ -494,45 +522,6 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 		return nil, fmt.Errorf("failed to iterate headend v6 map: %w", err)
 	}
 	return result, nil
-}
-
-// ===== End.B6 Policy Map Operations =====
-
-// CreateEndB6Policy adds a policy entry for End.B6/End.B6.Encaps
-func (m *MapOperations) CreateEndB6Policy(triggerPrefix string, entry *HeadendEntry) error {
-	key, err := buildLpmKeyV6(triggerPrefix)
-	if err != nil {
-		return fmt.Errorf("failed to build LPM key: %w", err)
-	}
-	if err := m.objs.EndB6PolicyMap.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put End.B6 policy entry: %w", err)
-	}
-	return nil
-}
-
-// DeleteEndB6Policy removes a policy entry for End.B6
-func (m *MapOperations) DeleteEndB6Policy(triggerPrefix string) error {
-	key, err := buildLpmKeyV6(triggerPrefix)
-	if err != nil {
-		return fmt.Errorf("failed to build LPM key: %w", err)
-	}
-	if err := m.objs.EndB6PolicyMap.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete End.B6 policy entry: %w", err)
-	}
-	return nil
-}
-
-// GetEndB6Policy retrieves a policy entry for End.B6
-func (m *MapOperations) GetEndB6Policy(triggerPrefix string) (*HeadendEntry, error) {
-	key, err := buildLpmKeyV6(triggerPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build LPM key: %w", err)
-	}
-	var entry HeadendEntry
-	if err := m.objs.EndB6PolicyMap.Lookup(key, &entry); err != nil {
-		return nil, fmt.Errorf("failed to lookup End.B6 policy entry: %w", err)
-	}
-	return &entry, nil
 }
 
 // ===== Headend L2 Map Operations =====

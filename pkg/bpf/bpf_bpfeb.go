@@ -90,7 +90,7 @@ type BpfSidAuxEntry struct {
 		_       structs.HostLayout
 		Nexthop [16]uint8
 	}
-	_ [24]byte
+	_ [184]byte
 }
 
 type BpfSidFunctionEntry struct {
@@ -161,7 +161,6 @@ type BpfProgramSpecs struct {
 type BpfMapSpecs struct {
 	BdPeerMap        *ebpf.MapSpec `ebpf:"bd_peer_map"`
 	BdPeerReverseMap *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
-	EndB6PolicyMap   *ebpf.MapSpec `ebpf:"end_b6_policy_map"`
 	FdbMap           *ebpf.MapSpec `ebpf:"fdb_map"`
 	HeadendL2Map     *ebpf.MapSpec `ebpf:"headend_l2_map"`
 	HeadendV4Map     *ebpf.MapSpec `ebpf:"headend_v4_map"`
@@ -203,7 +202,6 @@ func (o *BpfObjects) Close() error {
 type BpfMaps struct {
 	BdPeerMap        *ebpf.Map `ebpf:"bd_peer_map"`
 	BdPeerReverseMap *ebpf.Map `ebpf:"bd_peer_reverse_map"`
-	EndB6PolicyMap   *ebpf.Map `ebpf:"end_b6_policy_map"`
 	FdbMap           *ebpf.Map `ebpf:"fdb_map"`
 	HeadendL2Map     *ebpf.Map `ebpf:"headend_l2_map"`
 	HeadendV4Map     *ebpf.Map `ebpf:"headend_v4_map"`
@@ -219,7 +217,6 @@ func (m *BpfMaps) Close() error {
 	return _BpfClose(
 		m.BdPeerMap,
 		m.BdPeerReverseMap,
-		m.EndB6PolicyMap,
 		m.FdbMap,
 		m.HeadendL2Map,
 		m.HeadendV4Map,

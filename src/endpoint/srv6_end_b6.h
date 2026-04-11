@@ -18,21 +18,11 @@
 #include "headend/srv6_encaps_red.h"
 #include "core/xdp_map.h"
 
-// Lookup the End.B6 policy from end_b6_policy_map using the original DA (SID).
-// Must be called BEFORE endpoint_update_da modifies ip6h->daddr.
-static __always_inline struct headend_entry *end_b6_lookup_policy(
-    struct ipv6hdr *ip6h)
-{
-    struct lpm_key_v6 pkey = { .prefixlen = 128 };
-    __builtin_memcpy(pkey.addr, &ip6h->daddr, IPV6_ADDR_LEN);
-    return bpf_map_lookup_elem(&end_b6_policy_map, &pkey);
-}
-
 // End.B6.Insert / End.B6.Insert.Red (RFC 8986 Section 4.12)
 //
-// 1. Lookup policy from end_b6_policy_map (must happen before DA update)
+// 1. Policy data is in aux->b6_policy (from sid_aux_map, already looked up)
 // 2. Standard endpoint processing: decrement SL, update DA
-// 3. Insert policy SRH (reuse H.Insert core functions with map pointer)
+// 3. Insert policy SRH (reuse H.Insert core functions)
 //
 // Policy headend_entry.mode selects the variant:
 //   H_INSERT     -> do_h_insert_core
@@ -42,14 +32,11 @@ static __noinline int process_end_b6_insert(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
-    // Lookup policy BEFORE endpoint processing (DA will be overwritten)
-    struct headend_entry *policy = end_b6_lookup_policy(ip6h);
-    if (!policy) {
-        DEBUG_PRINT("End.B6.Insert: No policy entry\n");
-        return XDP_DROP;
-    }
+    if (!aux) return XDP_DROP;
+    struct headend_entry *policy = &aux->b6_policy;
 
     // --- Phase 1: Endpoint processing ---
     struct endpoint_ctx ectx;
@@ -120,14 +107,11 @@ static __noinline int process_end_b6_encaps(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
-    // Lookup policy BEFORE endpoint processing
-    struct headend_entry *policy = end_b6_lookup_policy(ip6h);
-    if (!policy) {
-        DEBUG_PRINT("End.B6.Encaps: No policy entry\n");
-        return XDP_DROP;
-    }
+    if (!aux) return XDP_DROP;
+    struct headend_entry *policy = &aux->b6_policy;
 
     // --- Phase 1: Endpoint processing ---
     struct endpoint_ctx ectx;

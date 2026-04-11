@@ -47,27 +47,7 @@ func (s *SidFunctionServer) SidFunctionCreate(
 			continue
 		}
 
-		// Create End.B6 policy entry if segments are specified
-		if len(sidFunc.Segments) > 0 {
-			policyEntry, err := s.buildPolicyEntry(sidFunc)
-			if err != nil {
-				// Rollback: remove the SID function entry
-				_ = s.mapOps.DeleteSidFunction(sidFunc.TriggerPrefix)
-				resp.Errors = append(resp.Errors, &v1.OperationError{
-					TriggerPrefix: sidFunc.TriggerPrefix,
-					Reason:        fmt.Sprintf("policy: %s", err.Error()),
-				})
-				continue
-			}
-			if err := s.mapOps.CreateEndB6Policy(sidFunc.TriggerPrefix, policyEntry); err != nil {
-				_ = s.mapOps.DeleteSidFunction(sidFunc.TriggerPrefix)
-				resp.Errors = append(resp.Errors, &v1.OperationError{
-					TriggerPrefix: sidFunc.TriggerPrefix,
-					Reason:        fmt.Sprintf("policy map: %s", err.Error()),
-				})
-				continue
-			}
-		}
+		// End.B6 policy is stored in sid_aux_map (b6_policy variant), no separate map needed
 
 		resp.Created = append(resp.Created, sidFunc)
 	}
@@ -93,8 +73,7 @@ func (s *SidFunctionServer) SidFunctionDelete(
 			})
 			continue
 		}
-		// Best-effort cleanup of End.B6 policy entry
-		_ = s.mapOps.DeleteEndB6Policy(prefix)
+		// End.B6 policy is cleaned up automatically with aux entry
 		resp.DeletedTriggerPrefixes = append(resp.DeletedTriggerPrefixes, prefix)
 	}
 
@@ -204,6 +183,16 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			return nil, nil, err
 		}
 		aux = bpf.NewSidAuxGtp6e(uint8(sidFunc.ArgsOffset), srcAddr, dstAddr)
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS:
+		if len(sidFunc.Segments) > 0 {
+			policyEntry, err := s.buildPolicyEntry(sidFunc)
+			if err != nil {
+				return nil, nil, fmt.Errorf("policy: %w", err)
+			}
+			aux = bpf.NewSidAuxB6Policy(policyEntry)
+		}
 	}
 
 	return entry, aux, nil
@@ -243,26 +232,18 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				sf.ArgsOffset = uint32(aux.Nexthop.Nexthop[0])
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E:
-				sf.ArgsOffset = uint32(aux.Nexthop.Nexthop[0])
-				// src_addr at bytes 8-23, dst_addr at bytes 24-39
-				// These span the padding area; read via Nexthop for bytes 8-15
-				var srcAddr, dstAddr [bpf.IPv6AddrLen]uint8
-				copy(srcAddr[:8], aux.Nexthop.Nexthop[8:16])
-				// Remaining bytes are in padding - for read-back we'd need raw access
-				// For now, report what's accessible
+				argsOffset, srcAddr, dstAddr := bpf.SidAuxGtp6eData(aux)
+				sf.ArgsOffset = uint32(argsOffset)
 				sf.SrcAddr = bpf.FormatIPv6(srcAddr)
 				sf.DstAddr = bpf.FormatIPv6(dstAddr)
-			}
-		}
-	}
 
-	// Include policy fields for End.B6/End.B6.Encaps from policy map
-	if entry.Action == uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6) ||
-		entry.Action == uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS) {
-		policy, err := s.mapOps.GetEndB6Policy(prefix)
-		if err == nil && policy != nil {
-			sf.Segments = bpf.FormatSegments(policy.Segments, policy.NumSegments)
-			sf.HeadendMode = v1.Srv6HeadendBehavior(policy.Mode)
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS:
+				policy := bpf.SidAuxB6PolicyData(aux)
+				sf.Segments = bpf.FormatSegments(policy.Segments, policy.NumSegments)
+				sf.HeadendMode = v1.Srv6HeadendBehavior(policy.Mode)
+				sf.SrcAddr = bpf.FormatIPv6(policy.SrcAddr)
+			}
 		}
 	}
 
