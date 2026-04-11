@@ -9,11 +9,11 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#include "xdp_prog.h"
-#include "srv6.h"
-#include "srv6_gtp.h"
-#include "srv6_decaps.h"
-#include "srv6_fib.h"
+#include "core/xdp_prog.h"
+#include "core/srv6.h"
+#include "mobile/srv6_gtp.h"
+#include "endpoint/srv6_decaps.h"
+#include "core/srv6_fib.h"
 
 // ========== End.M.GTP4.E: SRv6 → GTP-U/IPv4 (RFC 9433) ==========
 //
@@ -35,15 +35,19 @@ static __always_inline int process_end_m_gtp4_e(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry)
+    struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    __u16 l3_offset)
 {
+    if (!aux) return XDP_DROP;
+
     // 1. SL must be 0
     if (srh->segments_left != 0)
         return XDP_PASS;
 
     // 2. Decode Args.Mob.Session from IPv6 DA (per-entry offset)
     void *args_de = (void *)(long)ctx->data_end;
-    __u8 off = entry->args_offset & 0x07;  // max 7 (offset + 9 <= 16)
+    __u8 off = aux->gtp4e.args_offset & 0x07;  // max 7 (offset + 9 <= 16)
     __u8 *da_ptr = (__u8 *)&ip6h->daddr + off;
     if ((void *)(da_ptr + 9) > args_de)
         return XDP_DROP;
@@ -62,9 +66,9 @@ static __always_inline int process_end_m_gtp4_e(
     __u8 qfi = flags_byte & 0x3F;
     __u8 rqi = (flags_byte >> 6) & 0x01;
 
-    // 3. Get GTP4 source IPv4 from sid_function_entry
+    // 3. Get GTP4 source IPv4 from auxiliary entry
     __u8 gtp4_src[IPV4_ADDR_LEN];
-    __builtin_memcpy(gtp4_src, entry->gtp_v4_src_addr, IPV4_ADDR_LEN);
+    __builtin_memcpy(gtp4_src, aux->gtp4e.gtp_v4_src_addr, IPV4_ADDR_LEN);
 
     // 4. Strip outer IPv6 + SRH → [Eth][Inner IP]
     // We accept any inner protocol (IPPROTO_IPIP or IPPROTO_IPV6)
@@ -72,7 +76,7 @@ static __always_inline int process_end_m_gtp4_e(
     if (inner_nexthdr != IPPROTO_IPIP && inner_nexthdr != IPPROTO_IPV6)
         return XDP_DROP;
 
-    if (srv6_decap(ctx, srh, inner_nexthdr) != 0)
+    if (srv6_decap(ctx, srh, inner_nexthdr, l3_offset) != 0)
         return XDP_DROP;
 
     // 5. Re-derive pointers, get inner packet length

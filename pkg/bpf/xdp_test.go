@@ -2077,3 +2077,193 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 		})
 	}
 }
+
+func TestXDPProgEndMGtp6D(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	// End.M.GTP6.D: SRv6 with GTP-U payload → strip GTP-U, encode Args in next segment DA
+	// args_offset=3: GTP6 uses mask & 0x0B, so 3 stays 3
+	argsOffset := uint8(3)
+	h.createSidFunctionGTP6D("fc00:1::1/128", argsOffset)
+
+	teid := uint32(0xAABBCCDD)
+	qfi := uint8(9)
+	nextSeg := net.ParseIP("fc00:2::1")
+
+	pkt, err := buildSRv6WithGTPUPayload(
+		net.ParseIP("fc00::1"),     // outerSrc
+		net.ParseIP("fc00:1::1"),   // SID (DA, matches entry)
+		nextSeg,                    // next segment
+		teid, qfi, argsOffset,
+		net.ParseIP("172.16.0.1").To4(), // innerSrc
+		net.ParseIP("172.16.0.2").To4(), // innerDst
+	)
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	ret, outPkt := h.run(pkt)
+
+	// GTP6.D does SRH manipulation + FIB lookup → XDP_PASS (no neighbor) or XDP_REDIRECT
+	if ret != XDP_PASS && ret != XDP_REDIRECT && ret != XDP_DROP {
+		t.Fatalf("Unexpected action %d", ret)
+	}
+
+	// Verify output is still IPv6 (SRv6 with modified DA)
+	if len(outPkt) < ethHeaderLen+ipv6HeaderLen {
+		t.Logf("Output packet too short (%d bytes), action=%d", len(outPkt), ret)
+		return
+	}
+
+	etherType := binary.BigEndian.Uint16(outPkt[12:14])
+	if etherType != 0x86DD {
+		t.Logf("EtherType not IPv6 (0x%04X), action=%d", etherType, ret)
+		return
+	}
+
+	// Verify DA has Args.Mob.Session encoded at argsOffset
+	daStart := ethHeaderLen + 24
+	if len(outPkt) >= daStart+16 {
+		da := outPkt[daStart : daStart+16]
+		off := int(argsOffset)
+		gotTEID := binary.BigEndian.Uint32(da[off : off+4])
+		if gotTEID != teid {
+			t.Errorf("TEID in DA[%d:%d]: got 0x%08X, want 0x%08X", off, off+4, gotTEID, teid)
+		}
+		gotQFI := da[off+4] & 0x3F
+		if gotQFI != qfi {
+			t.Errorf("QFI in DA[%d]: got %d, want %d", off+4, gotQFI, qfi)
+		}
+		t.Logf("SUCCESS: SRv6+GTP-U → SRv6 with Args (TEID=0x%08X, QFI=%d, action=%d)", teid, qfi, ret)
+	}
+}
+
+func TestXDPProgEndMGtp6E(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	// End.M.GTP6.E: SRv6 with Args in DA → GTP-U/IPv6
+	// /64 prefix: bytes 0-7 are prefix, bytes 8+ are Args
+	// args_offset=8: GTP6 uses mask & 0x0B → 8 & 11 = 8
+	gtpSrcAddr, _ := ParseIPv6("2001:db8::1")
+	gtpDstAddr, _ := ParseIPv6("2001:db8::2")
+	h.createSidFunctionGTP6E("fc00:1::/64", 8, gtpSrcAddr, gtpDstAddr)
+
+	tests := []struct {
+		name      string
+		teid      uint32
+		qfi       uint8
+		expectExt bool
+	}{
+		{"with QFI=9", 0xDEADBEEF, 9, true},
+		{"without QFI", 0xCAFEBABE, 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srcIP := net.ParseIP("fc00::1")
+			dstBytes := net.ParseIP("fc00:1::").To16()
+
+			// Encode Args.Mob.Session at offset 8: [TEID(4)][QFI|R|U(1)]
+			dstBytes[8] = byte(tt.teid >> 24)
+			dstBytes[9] = byte(tt.teid >> 16)
+			dstBytes[10] = byte(tt.teid >> 8)
+			dstBytes[11] = byte(tt.teid)
+			dstBytes[12] = tt.qfi
+
+			segments := []net.IP{net.IP(dstBytes)}
+			pkt, err := buildSRv6PacketWithInnerIPv4(srcIP, net.IP(dstBytes), segments, 0,
+				net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4())
+			if err != nil {
+				t.Fatalf("Failed to build SRv6 packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+
+			// FIB lookup may fail → XDP_DROP or XDP_PASS expected
+			if ret != XDP_PASS && ret != XDP_REDIRECT && ret != XDP_DROP {
+				t.Fatalf("Unexpected action %d", ret)
+			}
+
+			if len(outPkt) < ethHeaderLen+40 {
+				t.Logf("Output packet too short (%d bytes), action=%d", len(outPkt), ret)
+				return
+			}
+
+			etherType := binary.BigEndian.Uint16(outPkt[12:14])
+			if etherType != 0x86DD {
+				t.Logf("EtherType not IPv6 (0x%04X), action=%d", etherType, ret)
+				return
+			}
+
+			// Verify outer IPv6 src/dst are from aux entry
+			outerSrc := outPkt[ethHeaderLen+8 : ethHeaderLen+24]
+			if !bytes.Equal(outerSrc, gtpSrcAddr[:]) {
+				t.Errorf("Outer IPv6 src mismatch: got %x, want %x", outerSrc, gtpSrcAddr)
+			}
+			outerDst := outPkt[ethHeaderLen+24 : ethHeaderLen+40]
+			if !bytes.Equal(outerDst, gtpDstAddr[:]) {
+				t.Errorf("Outer IPv6 dst mismatch: got %x, want %x", outerDst, gtpDstAddr)
+			}
+
+			// Verify GTP-U header: [IPv6(40)][UDP(8)][GTP-U]
+			gtpOffset := ethHeaderLen + 40 + 8
+			if len(outPkt) > gtpOffset+8 {
+				gtpFlags := outPkt[gtpOffset]
+				hasExt := (gtpFlags & 0x04) != 0
+
+				if tt.expectExt && !hasExt {
+					t.Errorf("Expected E flag for QFI=%d, got flags=0x%02X", tt.qfi, gtpFlags)
+				}
+				if !tt.expectExt && hasExt {
+					t.Errorf("Expected no E flag for QFI=0, got flags=0x%02X", gtpFlags)
+				}
+
+				gotTEID := binary.BigEndian.Uint32(outPkt[gtpOffset+4 : gtpOffset+8])
+				if gotTEID != tt.teid {
+					t.Errorf("TEID mismatch: got 0x%08X, want 0x%08X", gotTEID, tt.teid)
+				}
+
+				t.Logf("SUCCESS: SRv6 → GTP-U/IPv6 (TEID=0x%08X, QFI=%d, E=%v, pktlen %d→%d)",
+					tt.teid, tt.qfi, hasExt, len(pkt), len(outPkt))
+			}
+		})
+	}
+}
+
+func TestXDPProgEndMGtp6DDI(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	// End.M.GTP6.D.DI: Drop-In variant — passes packet to kernel unmodified.
+	// No aux data needed (DI doesn't access entry fields).
+	entry := &SidFunctionEntry{Action: actionEndMGTP6DDI}
+	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", entry, nil); err != nil {
+		t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+
+	pkt, err := buildSRv6WithGTPUPayload(
+		net.ParseIP("fc00::1"),
+		net.ParseIP("fc00:1::1"),
+		net.ParseIP("fc00:2::1"),
+		0xAABBCCDD, 9, 3,
+		net.ParseIP("172.16.0.1").To4(),
+		net.ParseIP("172.16.0.2").To4(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to build packet: %v", err)
+	}
+
+	ret, outPkt := h.run(pkt)
+
+	// DI always returns XDP_PASS (hand off to kernel SRv6 stack)
+	if ret != XDP_PASS {
+		t.Errorf("Expected XDP_PASS, got %d", ret)
+	}
+
+	// Packet should be unmodified (same length, same content)
+	if len(outPkt) != len(pkt) {
+		t.Errorf("Packet length changed: %d → %d", len(pkt), len(outPkt))
+	}
+	if bytes.Equal(outPkt[:len(pkt)], pkt) {
+		t.Log("SUCCESS: GTP6.D.DI passed packet to kernel unmodified")
+	}
+}

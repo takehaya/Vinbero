@@ -9,16 +9,42 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#include "xdp_prog.h"
-#include "xdp_map.h"
-#include "srv6.h"
-#include "srv6_headend.h"
-#include "srv6_headend_utils.h"
-#include "bum_meta.h"
+#include "core/xdp_prog.h"
+#include "core/xdp_map.h"
+#include "core/srv6.h"
+#include "headend/srv6_headend.h"
+#include "headend/srv6_headend_utils.h"
+#include "l2vpn/bum_meta.h"
 
 // Magic value in skb->cb[0] to identify clone-to-self encap requests.
 // Reuses BUM_META_MARKER so both XDP meta and TC cb[] use the same sentinel.
 #define TC_CB_ENCAP_MAGIC BUM_META_MARKER
+
+// Materialize 802.1Q VLAN tag in the inner L2 frame after encapsulation.
+// Generic XDP on veth moves VLAN from packet data to skb->vlan_tci,
+// so by TC time the inner frame is untagged. This re-inserts the tag.
+//
+// Layout after bpf_skb_change_head(new_headers_len + 4):
+//   [outer headers][4-byte gap][dst MAC][src MAC][ethertype][payload]
+// After materialization:
+//   [outer headers][dst MAC][src MAC][0x8100][TCI][ethertype][payload]
+static __always_inline int tc_materialize_vlan(
+    struct __sk_buff *skb,
+    int inner_off,
+    __u16 vlan_id)
+{
+    __u8 mac_buf[12];
+    if (bpf_skb_load_bytes(skb, inner_off + 4, mac_buf, 12))
+        return -1;
+    if (bpf_skb_store_bytes(skb, inner_off, mac_buf, 12, 0))
+        return -1;
+    __u16 vlan_tag[2];
+    vlan_tag[0] = bpf_htons(ETH_P_8021Q);
+    vlan_tag[1] = bpf_htons(vlan_id);
+    if (bpf_skb_store_bytes(skb, inner_off + 12, vlan_tag, 4, 0))
+        return -1;
+    return 0;
+}
 
 // TC FIB lookup for IPv6 and update Ethernet header
 static __always_inline int tc_srv6_fib_lookup_and_update(
@@ -109,16 +135,8 @@ static __noinline int tc_do_single_pe_encap(
     if ((void *)(outer_ip6h + 1) > data_end)
         return TC_ACT_SHOT;
 
-    outer_ip6h->version = 6;
-    outer_ip6h->priority = 0;
-    outer_ip6h->flow_lbl[0] = 0;
-    outer_ip6h->flow_lbl[1] = 0;
-    outer_ip6h->flow_lbl[2] = 0;
-    outer_ip6h->payload_len = bpf_htons(srh_len + l2_frame_len);
-    outer_ip6h->nexthdr = IPPROTO_ROUTING;
-    outer_ip6h->hop_limit = 64;
-    __builtin_memcpy(&outer_ip6h->saddr, entry->src_addr, sizeof(struct in6_addr));
-    __builtin_memcpy(&outer_ip6h->daddr, &entry->segments[0], sizeof(struct in6_addr));
+    build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
+                     entry->src_addr, &entry->segments[0]);
 
     // SRH
     struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
@@ -146,26 +164,9 @@ static __noinline int tc_do_single_pe_encap(
         return TC_ACT_SHOT;
     }
 
-    // Materialize VLAN tag in inner L2 frame.
-    // After bpf_skb_change_head(new_headers_len + 4), packet layout is:
-    //   [outer headers (N bytes)][4-byte gap][dst MAC][src MAC][ethertype][payload]
-    // We shift dst+src MAC left by 4, then insert 802.1Q TPID+TCI:
-    //   [outer headers (N bytes)][dst MAC][src MAC][0x8100][TCI][ethertype][payload]
-    if (needs_vlan) {
-        int inner_off = new_headers_len;
-        __u8 mac_buf[12];
-        if (bpf_skb_load_bytes(skb, inner_off + 4, mac_buf, 12))
-            return TC_ACT_SHOT;
-        if (bpf_skb_store_bytes(skb, inner_off, mac_buf, 12, 0))
-            return TC_ACT_SHOT;
-        __u16 vlan_tag[2];
-        vlan_tag[0] = bpf_htons(ETH_P_8021Q);
-        vlan_tag[1] = bpf_htons(vlan_id);
-        if (bpf_skb_store_bytes(skb, inner_off + 12, vlan_tag, 4, 0))
-            return TC_ACT_SHOT;
-    }
+    if (needs_vlan && tc_materialize_vlan(skb, new_headers_len, vlan_id) != 0)
+        return TC_ACT_SHOT;
 
-    DEBUG_PRINT("TC encap: redirect to ifindex=%d vlan=%d\n", ifindex, vlan_id);
     return bpf_redirect(ifindex, 0);
 }
 
@@ -192,18 +193,15 @@ static __noinline int tc_do_single_pe_encap_red(
     int vlan_extra = needs_vlan ? 4 : 0;
     __u16 l2_frame_len = (__u16)(skb->len) + (__u16)vlan_extra;
 
-    int new_headers_len;
-    if (entry->num_segments == 1) {
-        // No SRH
-        new_headers_len = (int)sizeof(struct ethhdr) + (int)sizeof(struct ipv6hdr);
-    } else {
-        // Reduced SRH
-        __u8 nseg_r = entry->num_segments;
-        if (nseg_r < 2 || nseg_r > MAX_SEGMENTS) return TC_ACT_SHOT;
-        int reduced_count = nseg_r - 1;
-        int srh_len = 8 + (16 * reduced_count);
-        new_headers_len = (int)sizeof(struct ethhdr) + (int)sizeof(struct ipv6hdr) + srh_len;
+    int reduced_count = 0;
+    int srh_len = 0;
+    if (entry->num_segments >= 2) {
+        reduced_count = entry->num_segments - 1;
+        if (reduced_count < 1 || reduced_count > MAX_SEGMENTS - 1)
+            return TC_ACT_SHOT;
+        srh_len = 8 + (16 * reduced_count);
     }
+    int new_headers_len = (int)sizeof(struct ethhdr) + (int)sizeof(struct ipv6hdr) + srh_len;
 
     if (bpf_skb_change_head(skb, new_headers_len + vlan_extra, 0)) {
         DEBUG_PRINT("TC encap red: bpf_skb_change_head failed\n");
@@ -225,27 +223,12 @@ static __noinline int tc_do_single_pe_encap_red(
     if ((void *)(outer_ip6h + 1) > data_end)
         return TC_ACT_SHOT;
 
-    outer_ip6h->version = 6;
-    outer_ip6h->priority = 0;
-    outer_ip6h->flow_lbl[0] = 0;
-    outer_ip6h->flow_lbl[1] = 0;
-    outer_ip6h->flow_lbl[2] = 0;
-    outer_ip6h->hop_limit = 64;
-    __builtin_memcpy(&outer_ip6h->saddr, entry->src_addr, sizeof(struct in6_addr));
-    __builtin_memcpy(&outer_ip6h->daddr, &entry->segments[0], sizeof(struct in6_addr));
-
     if (entry->num_segments == 1) {
-        // No SRH — nexthdr is inner protocol directly
-        outer_ip6h->payload_len = bpf_htons(l2_frame_len);
-        outer_ip6h->nexthdr = IPPROTO_ETHERNET;
+        build_outer_ipv6(outer_ip6h, IPPROTO_ETHERNET, l2_frame_len,
+                         entry->src_addr, &entry->segments[0]);
     } else {
-        // Reduced SRH
-        __u8 nseg_r = entry->num_segments;
-        if (nseg_r < 2 || nseg_r > MAX_SEGMENTS) return TC_ACT_SHOT;
-        int reduced_count = nseg_r - 1;
-        int srh_len = 8 + (16 * reduced_count);
-        outer_ip6h->payload_len = bpf_htons(srh_len + l2_frame_len);
-        outer_ip6h->nexthdr = IPPROTO_ROUTING;
+        build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
+                         entry->src_addr, &entry->segments[0]);
 
         struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
         if ((void *)srh + 8 > data_end)
@@ -274,22 +257,9 @@ static __noinline int tc_do_single_pe_encap_red(
         return TC_ACT_SHOT;
     }
 
-    // Materialize VLAN tag in inner L2 frame (same as non-reduced path)
-    if (needs_vlan) {
-        int inner_off = new_headers_len;
-        __u8 mac_buf[12];
-        if (bpf_skb_load_bytes(skb, inner_off + 4, mac_buf, 12))
-            return TC_ACT_SHOT;
-        if (bpf_skb_store_bytes(skb, inner_off, mac_buf, 12, 0))
-            return TC_ACT_SHOT;
-        __u16 vlan_tag[2];
-        vlan_tag[0] = bpf_htons(ETH_P_8021Q);
-        vlan_tag[1] = bpf_htons(vlan_id);
-        if (bpf_skb_store_bytes(skb, inner_off + 12, vlan_tag, 4, 0))
-            return TC_ACT_SHOT;
-    }
+    if (needs_vlan && tc_materialize_vlan(skb, new_headers_len, vlan_id) != 0)
+        return TC_ACT_SHOT;
 
-    DEBUG_PRINT("TC encap red: redirect to ifindex=%d vlan=%d\n", ifindex, vlan_id);
     return bpf_redirect(ifindex, 0);
 }
 

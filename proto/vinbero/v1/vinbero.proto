@@ -165,23 +165,43 @@ message Headendv6GetResponse {
 }
 
 // DmacService provides read-only access to the FDB (MAC address table).
-// Useful for observability and debugging of L2VPN MAC learning.
-service DmacService {
-  rpc DmacList(DmacListRequest) returns (DmacListResponse);
+// FdbService manages the FDB (forwarding database) for L2VPN MAC forwarding.
+// Dynamic entries are learned by the BPF data plane; static entries are
+// user-configured and never aged out.
+service FdbService {
+  rpc FdbList(FdbListRequest) returns (FdbListResponse);
+  rpc FdbCreate(FdbCreateRequest) returns (FdbCreateResponse);
+  rpc FdbDelete(FdbDeleteRequest) returns (FdbDeleteResponse);
 }
 
-// DmacListEntry represents a single FDB entry.
-message DmacListEntry {
+// FdbEntry represents a single FDB entry with aging and type information.
+message FdbEntry {
   uint32 bd_id = 1; // Bridge Domain ID that scopes this MAC entry
   string mac = 2; // MAC address (e.g., "aa:bb:cc:dd:ee:ff")
   uint32 oif = 3; // Output interface index (for local entries)
   bool is_untag = 4; // Reserved for future VLAN tag stripping on egress
+  bool is_remote = 5; // true if learned via SRv6 End.DT2 (remote PE)
+  bool is_static = 6; // true if user-configured (never aged out)
+  uint64 last_seen = 7; // bpf_ktime_get_ns() timestamp (0 for static entries)
 }
 
-message DmacListRequest {}
-message DmacListResponse {
-  repeated DmacListEntry entries = 1;
+message FdbListRequest {}
+message FdbListResponse {
+  repeated FdbEntry entries = 1;
 }
+
+message FdbCreateRequest {
+  uint32 bd_id = 1;
+  string mac = 2; // MAC address (e.g., "aa:bb:cc:dd:ee:ff")
+  uint32 oif = 3; // Output interface index
+}
+message FdbCreateResponse {}
+
+message FdbDeleteRequest {
+  uint32 bd_id = 1;
+  string mac = 2;
+}
+message FdbDeleteResponse {}
 
 // BdPeerService manages remote PEs within a Bridge Domain for BUM traffic flooding.
 // When a BUM frame (broadcast/unknown-unicast/multicast) is detected, Vinbero
@@ -355,3 +375,24 @@ message HeadendL2GetRequest {
 message HeadendL2GetResponse {
   HeadendL2 headend_l2 = 1;
 }
+
+// StatsService provides read-only access to per-CPU XDP packet statistics.
+// Requires enable_stats: true in config; otherwise all counters are zero.
+service StatsService {
+  rpc StatsShow(StatsShowRequest) returns (StatsShowResponse);
+  rpc StatsReset(StatsResetRequest) returns (StatsResetResponse);
+}
+
+message StatsCounter {
+  string name = 1;
+  uint64 packets = 2;
+  uint64 bytes = 3;
+}
+
+message StatsShowRequest {}
+message StatsShowResponse {
+  repeated StatsCounter counters = 1;
+}
+
+message StatsResetRequest {}
+message StatsResetResponse {}

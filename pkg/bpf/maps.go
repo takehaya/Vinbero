@@ -1,10 +1,14 @@
 package bpf
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
+	"sync"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -20,6 +24,7 @@ type (
 	LpmKeyV6           = BpfLpmKeyV6
 	HeadendL2Key       = BpfHeadendL2Key
 	SidFunctionEntry   = BpfSidFunctionEntry
+	SidAuxEntry        = BpfSidAuxEntry
 	HeadendEntry       = BpfHeadendEntry
 	FdbKey             = BpfFdbKey
 	FdbEntry           = BpfFdbEntry
@@ -30,20 +35,213 @@ type (
 
 // MapOperator interface for testability
 type MapOperator interface {
-	Put(key, value interface{}) error
-	Delete(key interface{}) error
-	Lookup(key, valueOut interface{}) error
+	Put(key, value any) error
+	Delete(key any) error
+	Lookup(key, valueOut any) error
 	Iterate() *ebpf.MapIterator
 }
 
 // MapOperations provides operations for BPF maps
 type MapOperations struct {
-	objs *BpfObjects
+	objs     *BpfObjects
+	auxAlloc *indexAllocator
 }
 
-// NewMapOperations creates a new MapOperations instance
+// NewMapOperations creates a new MapOperations instance.
+// The aux index allocator capacity is derived from the actual sid_aux_map MaxEntries.
 func NewMapOperations(objs *BpfObjects) *MapOperations {
-	return &MapOperations{objs: objs}
+	auxMax := uint32(512) // fallback
+	if info, err := objs.SidAuxMap.Info(); err == nil {
+		auxMax = info.MaxEntries
+	}
+	return &MapOperations{
+		objs:     objs,
+		auxAlloc: newIndexAllocator(auxMax),
+	}
+}
+
+// indexAllocator manages a pool of uint32 indices with a free-list
+type indexAllocator struct {
+	mu       sync.Mutex
+	freeList []uint32
+	maxIndex uint32
+	nextNew  uint32
+}
+
+func newIndexAllocator(max uint32) *indexAllocator {
+	return &indexAllocator{maxIndex: max}
+}
+
+func (a *indexAllocator) Alloc() (uint32, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.freeList) > 0 {
+		idx := a.freeList[len(a.freeList)-1]
+		a.freeList = a.freeList[:len(a.freeList)-1]
+		return idx, nil
+	}
+	if a.nextNew >= a.maxIndex {
+		return 0, fmt.Errorf("aux index pool exhausted (max %d)", a.maxIndex)
+	}
+	idx := a.nextNew
+	a.nextNew++
+	return idx, nil
+}
+
+func (a *indexAllocator) Free(idx uint32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.freeList = append(a.freeList, idx)
+}
+
+// RecoverUsed rebuilds allocator state from a list of indices currently in use.
+// Gaps between used indices are added to the free list for reuse.
+// Indices >= maxIndex are silently ignored (e.g., stale data after config change).
+func (a *indexAllocator) RecoverUsed(usedIndices []uint32) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if len(usedIndices) == 0 {
+		return
+	}
+
+	used := make(map[uint32]bool, len(usedIndices))
+	maxUsed := uint32(0)
+	for _, idx := range usedIndices {
+		if idx >= a.maxIndex {
+			continue // skip out-of-range indices
+		}
+		used[idx] = true
+		if idx >= maxUsed {
+			maxUsed = idx
+		}
+	}
+
+	if len(used) == 0 {
+		return
+	}
+
+	a.nextNew = maxUsed + 1
+	a.freeList = nil
+	for i := uint32(0); i < a.nextNew; i++ {
+		if !used[i] {
+			a.freeList = append(a.freeList, i)
+		}
+	}
+}
+
+// RecoverAuxIndices scans sid_function_map for entries with has_aux=1
+// and marks their aux_index as used in the allocator.
+// Call this on startup to restore allocator state after process restart.
+func (m *MapOperations) RecoverAuxIndices() error {
+	var key LpmKeyV6
+	var entry SidFunctionEntry
+	iter := m.objs.SidFunctionMap.Iterate()
+
+	var used []uint32
+	for iter.Next(&key, &entry) {
+		if entry.HasAux != 0 {
+			used = append(used, entry.AuxIndex)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("failed to iterate SID function map for recovery: %w", err)
+	}
+
+	m.auxAlloc.RecoverUsed(used)
+	return nil
+}
+
+// ===== SID Aux Entry Constructors =====
+// BpfSidAuxEntry is a Go representation of a C union.
+// bpf2go exposes only the first union member (nexthop).
+// These helpers construct the entry for each variant using raw byte layout.
+
+// NewSidAuxNexthop creates an aux entry for End.X / End.DX2
+func NewSidAuxNexthop(nexthop [IPv6AddrLen]uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	entry.Nexthop.Nexthop = nexthop
+	return entry
+}
+
+// NewSidAuxL2 creates an aux entry for End.DT2
+func NewSidAuxL2(bdID uint16, bridgeIfindex uint32) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	// C layout: bd_id(u16) + _pad(u16) + bridge_ifindex(u32) at union offset 0
+	binary.NativeEndian.PutUint16(entry.Nexthop.Nexthop[0:2], bdID)
+	binary.NativeEndian.PutUint32(entry.Nexthop.Nexthop[4:8], bridgeIfindex)
+	return entry
+}
+
+// NewSidAuxGtp4e creates an aux entry for End.M.GTP4.E
+func NewSidAuxGtp4e(argsOffset uint8, gtpV4SrcAddr [IPv4AddrLen]uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	entry.Nexthop.Nexthop[0] = argsOffset
+	copy(entry.Nexthop.Nexthop[1:5], gtpV4SrcAddr[:])
+	return entry
+}
+
+// NewSidAuxGtp6d creates an aux entry for End.M.GTP6.D
+func NewSidAuxGtp6d(argsOffset uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	entry.Nexthop.Nexthop[0] = argsOffset
+	return entry
+}
+
+// NewSidAuxGtp6e creates an aux entry for End.M.GTP6.E
+// Uses unsafe.Pointer to write into the anonymous padding field of the Go struct,
+// which corresponds to the C union's gtp6e variant (bytes 16-39).
+func NewSidAuxGtp6e(argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	raw := (*[40]byte)(unsafe.Pointer(entry))
+	raw[0] = argsOffset
+	copy(raw[8:24], srcAddr[:])
+	copy(raw[24:40], dstAddr[:])
+	return entry
+}
+
+// NewSidAuxB6Policy creates an aux entry for End.B6/End.B6.Encaps
+// Stores a full HeadendEntry in the b6_policy union variant.
+func NewSidAuxB6Policy(policy *HeadendEntry) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	n := unsafe.Sizeof(*policy)
+	src := (*[256]byte)(unsafe.Pointer(policy))[:n]
+	dst := (*[256]byte)(unsafe.Pointer(entry))[:n]
+	copy(dst, src)
+	return entry
+}
+
+// SidAuxB6PolicyData extracts End.B6 policy from a SidAuxEntry
+func SidAuxB6PolicyData(entry *SidAuxEntry) *HeadendEntry {
+	result := &HeadendEntry{}
+	n := unsafe.Sizeof(*result)
+	src := (*[256]byte)(unsafe.Pointer(entry))[:n]
+	dst := (*[256]byte)(unsafe.Pointer(result))[:n]
+	copy(dst, src)
+	return result
+}
+
+// SidAuxGtp6eData extracts GTP6.E variant fields from a SidAuxEntry
+func SidAuxGtp6eData(entry *SidAuxEntry) (argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) {
+	raw := (*[200]byte)(unsafe.Pointer(entry))
+	argsOffset = raw[0]
+	copy(srcAddr[:], raw[8:24])
+	copy(dstAddr[:], raw[24:40])
+	return
+}
+
+// SidAuxL2Data extracts L2 variant fields from a SidAuxEntry
+func SidAuxL2Data(entry *SidAuxEntry) (bdID uint16, bridgeIfindex uint32) {
+	bdID = binary.NativeEndian.Uint16(entry.Nexthop.Nexthop[0:2])
+	bridgeIfindex = binary.NativeEndian.Uint32(entry.Nexthop.Nexthop[4:8])
+	return
+}
+
+// SidAuxGtp4eData extracts GTP4.E variant fields from a SidAuxEntry
+func SidAuxGtp4eData(entry *SidAuxEntry) (argsOffset uint8, gtpV4SrcAddr [IPv4AddrLen]uint8) {
+	argsOffset = entry.Nexthop.Nexthop[0]
+	copy(gtpV4SrcAddr[:], entry.Nexthop.Nexthop[1:5])
+	return
 }
 
 // ParseCIDR parses a CIDR string and returns the IP and prefix length
@@ -84,28 +282,56 @@ func ParseIPv6(addr string) ([IPv6AddrLen]uint8, error) {
 
 // ===== SID Function Map Operations =====
 
-// CreateSidFunction adds a SID function entry to the map
-func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFunctionEntry) error {
+// CreateSidFunction adds a SID function entry and optional aux data.
+// If aux is non-nil, an aux index is allocated and both maps are written.
+func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFunctionEntry, aux *SidAuxEntry) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
+	if aux != nil {
+		idx, err := m.auxAlloc.Alloc()
+		if err != nil {
+			return fmt.Errorf("failed to allocate aux index: %w", err)
+		}
+		entry.HasAux = 1
+		entry.AuxIndex = idx
+		if err := m.objs.SidAuxMap.Put(idx, aux); err != nil {
+			m.auxAlloc.Free(idx)
+			return fmt.Errorf("failed to put SID aux entry: %w", err)
+		}
+	}
+
 	if err := m.objs.SidFunctionMap.Put(key, entry); err != nil {
+		if aux != nil {
+			m.auxAlloc.Free(entry.AuxIndex)
+		}
 		return fmt.Errorf("failed to put SID function entry: %w", err)
 	}
 	return nil
 }
 
-// DeleteSidFunction removes a SID function entry from the map
+// DeleteSidFunction removes a SID function entry and its aux data
 func (m *MapOperations) DeleteSidFunction(triggerPrefix string) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
+	// Read entry first so aux can be cleaned up after successful delete
+	var entry SidFunctionEntry
+	hasEntry := m.objs.SidFunctionMap.Lookup(key, &entry) == nil
+
 	if err := m.objs.SidFunctionMap.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete SID function entry: %w", err)
+	}
+
+	// Clean up aux after SID entry is deleted to avoid index reuse while entry exists
+	if hasEntry && entry.HasAux != 0 {
+		var zeroAux SidAuxEntry
+		_ = m.objs.SidAuxMap.Put(entry.AuxIndex, &zeroAux)
+		m.auxAlloc.Free(entry.AuxIndex)
 	}
 	return nil
 }
@@ -122,6 +348,15 @@ func (m *MapOperations) GetSidFunction(triggerPrefix string) (*SidFunctionEntry,
 		return nil, fmt.Errorf("failed to lookup SID function entry: %w", err)
 	}
 	return &entry, nil
+}
+
+// GetSidAux retrieves a SID aux entry by index
+func (m *MapOperations) GetSidAux(index uint32) (*SidAuxEntry, error) {
+	var aux SidAuxEntry
+	if err := m.objs.SidAuxMap.Lookup(index, &aux); err != nil {
+		return nil, fmt.Errorf("failed to lookup SID aux entry: %w", err)
+	}
+	return &aux, nil
 }
 
 // ListSidFunctions returns all SID function entries
@@ -142,6 +377,59 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 		return nil, fmt.Errorf("failed to iterate SID function map: %w", err)
 	}
 	return result, nil
+}
+
+// ===== Stats Map Operations =====
+
+const StatsMax = 8
+
+var StatsCounterName = [StatsMax]string{
+	"RX_PACKETS", "SRV6_END", "H_ENCAPS_V4", "H_ENCAPS_V6",
+	"PASS", "DROP", "REDIRECT", "ERROR",
+}
+
+type AggregatedStats struct {
+	Name    string
+	Packets uint64
+	Bytes   uint64
+}
+
+// ReadStats reads the PERCPU_ARRAY stats_map and aggregates per-CPU values
+func (m *MapOperations) ReadStats() ([]AggregatedStats, error) {
+	result := make([]AggregatedStats, StatsMax)
+	for i := uint32(0); i < StatsMax; i++ {
+		var perCPU []BpfStatsEntry
+		if err := m.objs.StatsMap.Lookup(i, &perCPU); err != nil {
+			return nil, fmt.Errorf("failed to lookup stats counter %d: %w", i, err)
+		}
+		var totalPackets, totalBytes uint64
+		for _, cpu := range perCPU {
+			totalPackets += cpu.Packets
+			totalBytes += cpu.Bytes
+		}
+		result[i] = AggregatedStats{
+			Name:    StatsCounterName[i],
+			Packets: totalPackets,
+			Bytes:   totalBytes,
+		}
+	}
+	return result, nil
+}
+
+// ResetStats zeros all per-CPU stats counters.
+// PERCPU_ARRAY requires a per-CPU slice for Put.
+func (m *MapOperations) ResetStats() error {
+	numCPUs, err := ebpf.PossibleCPU()
+	if err != nil {
+		return fmt.Errorf("failed to get CPU count: %w", err)
+	}
+	zeros := make([]BpfStatsEntry, numCPUs)
+	for i := uint32(0); i < StatsMax; i++ {
+		if err := m.objs.StatsMap.Put(i, zeros); err != nil {
+			return fmt.Errorf("failed to reset stats counter %d: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // ===== Headend V4 Map Operations =====
@@ -268,45 +556,6 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 	return result, nil
 }
 
-// ===== End.B6 Policy Map Operations =====
-
-// CreateEndB6Policy adds a policy entry for End.B6/End.B6.Encaps
-func (m *MapOperations) CreateEndB6Policy(triggerPrefix string, entry *HeadendEntry) error {
-	key, err := buildLpmKeyV6(triggerPrefix)
-	if err != nil {
-		return fmt.Errorf("failed to build LPM key: %w", err)
-	}
-	if err := m.objs.EndB6PolicyMap.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put End.B6 policy entry: %w", err)
-	}
-	return nil
-}
-
-// DeleteEndB6Policy removes a policy entry for End.B6
-func (m *MapOperations) DeleteEndB6Policy(triggerPrefix string) error {
-	key, err := buildLpmKeyV6(triggerPrefix)
-	if err != nil {
-		return fmt.Errorf("failed to build LPM key: %w", err)
-	}
-	if err := m.objs.EndB6PolicyMap.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete End.B6 policy entry: %w", err)
-	}
-	return nil
-}
-
-// GetEndB6Policy retrieves a policy entry for End.B6
-func (m *MapOperations) GetEndB6Policy(triggerPrefix string) (*HeadendEntry, error) {
-	key, err := buildLpmKeyV6(triggerPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build LPM key: %w", err)
-	}
-	var entry HeadendEntry
-	if err := m.objs.EndB6PolicyMap.Lookup(key, &entry); err != nil {
-		return nil, fmt.Errorf("failed to lookup End.B6 policy entry: %w", err)
-	}
-	return &entry, nil
-}
-
 // ===== Headend L2 Map Operations =====
 
 // CreateHeadendL2 adds a headend L2 entry to the map (keyed by port + VLAN)
@@ -397,6 +646,49 @@ func (m *MapOperations) ListFdb() (map[FdbKey]*FdbEntry, error) {
 		return nil, fmt.Errorf("failed to iterate fdb map: %w", err)
 	}
 	return result, nil
+}
+
+// AgeFdbEntries deletes dynamic FDB entries older than maxAgeNs nanoseconds.
+// Static entries (is_static=1) and entries with last_seen=0 are never aged out.
+// Returns the number of entries deleted.
+func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) (int, error) {
+	var key FdbKey
+	var entry FdbEntry
+	iter := m.objs.FdbMap.Iterate()
+
+	now := currentKtimeNs()
+	var toDelete []FdbKey
+	for iter.Next(&key, &entry) {
+		if entry.IsStatic != 0 || entry.LastSeen == 0 {
+			continue
+		}
+		if entry.LastSeen > now {
+			continue // clock skew or corruption
+		}
+		age := now - entry.LastSeen
+		if age > maxAgeNs {
+			keyCopy := key
+			toDelete = append(toDelete, keyCopy)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("failed to iterate fdb map: %w", err)
+	}
+
+	deleted := 0
+	for _, k := range toDelete {
+		if err := m.objs.FdbMap.Delete(&k); err == nil {
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+// currentKtimeNs reads CLOCK_MONOTONIC to match bpf_ktime_get_ns()
+func currentKtimeNs() uint64 {
+	var ts unix.Timespec
+	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
+	return uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 }
 
 // ===== BD Peer Map Operations (for P2MP BUM flooding) =====

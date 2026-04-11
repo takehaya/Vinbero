@@ -6,99 +6,82 @@
 #include <linux/ipv6.h>
 #include <bpf/bpf_helpers.h>
 
-#include "srv6.h"
+#include "core/srv6.h"
 
-// Calculate total headers to strip for decapsulation (Ethernet + IPv6 + SRH)
+// Calculate total headers to strip for decapsulation (L2 + IPv6 + SRH)
+// l3_offset: distance from packet start to IPv6 header (14, 18, or 22 for VLAN)
 // Returns: number of bytes to strip from front
-static __always_inline int calc_decap_strip_len(struct ipv6_sr_hdr *srh)
+static __always_inline int calc_decap_strip_len(struct ipv6_sr_hdr *srh, __u16 l3_offset)
 {
-    // Ethernet (14 bytes) + IPv6 header (40 bytes) + SRH header (8 + hdrlen*8 bytes)
-    // hdrlen is in 8-octet units, excluding first 8 bytes
-    return ETH_HLEN + sizeof(struct ipv6hdr) + 8 + (srh->hdrlen * 8);
+    // L2 header (14/18/22 bytes) + IPv6 header (40 bytes) + SRH header (8 + hdrlen*8 bytes)
+    return l3_offset + sizeof(struct ipv6hdr) + 8 + (srh->hdrlen * 8);
 }
 
-// Strip outer IPv6+SRH headers, expose inner packet while preserving Ethernet header
+// Strip outer L2+IPv6+SRH headers, expose inner packet while preserving Ethernet header
 // This is the inverse operation of H.Encaps
 //
-// The decapsulation process:
-// Before: [Ethernet][Outer IPv6][SRH][Inner IP][Payload]
+// The decapsulation process (VLAN-tagged example):
+// Before: [Ethernet][VLAN?][Outer IPv6][SRH][Inner IP][Payload]
 // After:  [Ethernet][Inner IP][Payload]
-//
-// Implementation steps:
-// 1. Save original Ethernet header
-// 2. Strip (Ethernet + Outer IPv6 + SRH) using bpf_xdp_adjust_head(+)
-// 3. Expand head by ETH_HLEN using bpf_xdp_adjust_head(-)
-// 4. Restore saved Ethernet header
+// Note: VLAN tag is part of the outer tunnel and is discarded.
 //
 // Parameters:
 //   ctx: XDP context
 //   srh: Pointer to SRH (must be valid before call)
 //   expected_inner_proto: Expected inner protocol (IPPROTO_IPIP or IPPROTO_IPV6)
+//   l3_offset: Distance from packet start to IPv6 header (14, 18, or 22)
 //
 // Returns: 0 on success, -1 on failure
 // Note: After success, caller must re-fetch all pointers (data, data_end, eth, etc.)
 static __always_inline int srv6_decap(
     struct xdp_md *ctx,
     struct ipv6_sr_hdr *srh,
-    __u8 expected_inner_proto)
+    __u8 expected_inner_proto,
+    __u16 l3_offset)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
-    // 1. Validate Ethernet header access
     struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) {
+    if ((void *)(eth + 1) > data_end)
         return -1;
-    }
 
-    // 2. Verify inner protocol matches expected
-    if (srh->nexthdr != expected_inner_proto) {
+    if (srh->nexthdr != expected_inner_proto)
         return -1;
-    }
 
-    // 3. Save original Ethernet header (MACs will be rewritten by FIB lookup)
+    // Save original Ethernet header (14 bytes, MACs will be rewritten by FIB)
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
 
-    // 4. Calculate total strip length (Eth + Outer IPv6 + SRH)
-    int strip_len = calc_decap_strip_len(srh);
-
-    // 5. Shrink packet head - removes (Eth + Outer IPv6 + SRH) from front
-    // After this, ctx->data points to Inner IP header
-    if (bpf_xdp_adjust_head(ctx, strip_len)) {
+    // Strip (L2 + Outer IPv6 + SRH) — includes VLAN tag if present
+    int strip_len = calc_decap_strip_len(srh, l3_offset);
+    if (bpf_xdp_adjust_head(ctx, strip_len))
         return -1;
-    }
 
-    // 6. Expand head to add space for Ethernet header
-    // After this, ctx->data points to where we'll write the Ethernet header
-    if (bpf_xdp_adjust_head(ctx, -(int)ETH_HLEN)) {
+    // Re-expand by ETH_HLEN (always 14 — output is untagged Ethernet)
+    if (bpf_xdp_adjust_head(ctx, -(int)ETH_HLEN))
         return -1;
-    }
 
-    // 7. Re-fetch pointers after adjust_head
     data = (void *)(long)ctx->data;
     data_end = (void *)(long)ctx->data_end;
 
-    // 8. Validate we have enough space for Ethernet header
     eth = data;
-    if ((void *)(eth + 1) > data_end) {
+    if ((void *)(eth + 1) > data_end)
         return -1;
-    }
 
-    // 9. Restore the saved Ethernet header
-    // Note: EtherType will be updated by caller (for DX4) or remains IPv6 (for DX6)
     __builtin_memcpy(eth, &saved_eth, sizeof(struct ethhdr));
-
     return 0;
 }
 
 // Decapsulate without SRH (for Reduced SRH single-segment case)
-// Strips outer Ethernet + IPv6 header only (no SRH to strip)
+// Strips outer L2 + IPv6 header only (no SRH to strip)
+// VLAN tag (if present) is discarded as part of the outer tunnel.
 // Returns: 0 on success, -1 on failure
 static __always_inline int srv6_decap_nosrh(
     struct xdp_md *ctx,
     __u8 expected_inner_proto,
-    __u8 actual_nexthdr)
+    __u8 actual_nexthdr,
+    __u16 l3_offset)
 {
     if (actual_nexthdr != expected_inner_proto)
         return -1;
@@ -113,11 +96,12 @@ static __always_inline int srv6_decap_nosrh(
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
 
-    int strip_len = ETH_HLEN + sizeof(struct ipv6hdr);
+    int strip_len = l3_offset + sizeof(struct ipv6hdr);
 
     if (bpf_xdp_adjust_head(ctx, strip_len))
         return -1;
 
+    // Re-expand by ETH_HLEN (always 14 — output is untagged)
     if (bpf_xdp_adjust_head(ctx, -(int)ETH_HLEN))
         return -1;
 
@@ -133,16 +117,17 @@ static __always_inline int srv6_decap_nosrh(
 }
 
 // Decapsulate L2 frame without SRH
-// Strips outer Ethernet + IPv6, exposes inner L2 frame
+// Strips outer L2 + IPv6, exposes inner L2 frame
 // Returns: 0 on success, -1 on failure
 static __always_inline int srv6_decap_l2_nosrh(
     struct xdp_md *ctx,
-    __u8 actual_nexthdr)
+    __u8 actual_nexthdr,
+    __u16 l3_offset)
 {
     if (actual_nexthdr != IPPROTO_ETHERNET)
         return -1;
 
-    int strip_len = ETH_HLEN + sizeof(struct ipv6hdr);
+    int strip_len = l3_offset + sizeof(struct ipv6hdr);
     if (bpf_xdp_adjust_head(ctx, strip_len))
         return -1;
 

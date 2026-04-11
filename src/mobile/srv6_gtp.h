@@ -6,7 +6,7 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
-#include "xdp_prog.h"
+#include "core/xdp_prog.h"
 
 // ========== GTP-U Protocol Constants (3GPP TS 29.281) ==========
 

@@ -7,7 +7,7 @@
 #include <linux/ipv6.h>
 #include <bpf/bpf_helpers.h>
 
-#include "xdp_prog.h"
+#include "core/xdp_prog.h"
 
 // FIB lookup result codes
 #define FIB_RESULT_REDIRECT  0   // Success, redirect to ifindex
@@ -62,18 +62,6 @@ static __always_inline int srv6_fib_lookup_and_update(
     __u32 ifindex)
 {
     return srv6_fib_lookup_v6_core(ctx, ip6h, eth, out_ifindex, &ip6h->daddr, ifindex);
-}
-
-// Perform IPv6 FIB lookup using an explicit nexthop address (for End.X)
-static __always_inline int srv6_fib_lookup_and_update_nexthop(
-    struct xdp_md *ctx,
-    struct ipv6hdr *ip6h,
-    struct ethhdr *eth,
-    __u32 *out_ifindex,
-    __u8 *nexthop,
-    __u32 ifindex)
-{
-    return srv6_fib_lookup_v6_core(ctx, ip6h, eth, out_ifindex, nexthop, ifindex);
 }
 
 // Convenience wrapper that performs FIB lookup and returns XDP action

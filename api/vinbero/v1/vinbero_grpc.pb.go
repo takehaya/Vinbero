@@ -617,87 +617,161 @@ var Headendv6Service_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	DmacService_DmacList_FullMethodName = "/vinbero.v1.DmacService/DmacList"
+	FdbService_FdbList_FullMethodName   = "/vinbero.v1.FdbService/FdbList"
+	FdbService_FdbCreate_FullMethodName = "/vinbero.v1.FdbService/FdbCreate"
+	FdbService_FdbDelete_FullMethodName = "/vinbero.v1.FdbService/FdbDelete"
 )
 
-// DmacServiceClient is the client API for DmacService service.
+// FdbServiceClient is the client API for FdbService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type DmacServiceClient interface {
-	DmacList(ctx context.Context, in *DmacListRequest, opts ...grpc.CallOption) (*DmacListResponse, error)
+type FdbServiceClient interface {
+	FdbList(ctx context.Context, in *FdbListRequest, opts ...grpc.CallOption) (*FdbListResponse, error)
+	FdbCreate(ctx context.Context, in *FdbCreateRequest, opts ...grpc.CallOption) (*FdbCreateResponse, error)
+	FdbDelete(ctx context.Context, in *FdbDeleteRequest, opts ...grpc.CallOption) (*FdbDeleteResponse, error)
 }
 
-type dmacServiceClient struct {
+type fdbServiceClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewDmacServiceClient(cc grpc.ClientConnInterface) DmacServiceClient {
-	return &dmacServiceClient{cc}
+func NewFdbServiceClient(cc grpc.ClientConnInterface) FdbServiceClient {
+	return &fdbServiceClient{cc}
 }
 
-func (c *dmacServiceClient) DmacList(ctx context.Context, in *DmacListRequest, opts ...grpc.CallOption) (*DmacListResponse, error) {
-	out := new(DmacListResponse)
-	err := c.cc.Invoke(ctx, DmacService_DmacList_FullMethodName, in, out, opts...)
+func (c *fdbServiceClient) FdbList(ctx context.Context, in *FdbListRequest, opts ...grpc.CallOption) (*FdbListResponse, error) {
+	out := new(FdbListResponse)
+	err := c.cc.Invoke(ctx, FdbService_FdbList_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// DmacServiceServer is the server API for DmacService service.
-// All implementations should embed UnimplementedDmacServiceServer
+func (c *fdbServiceClient) FdbCreate(ctx context.Context, in *FdbCreateRequest, opts ...grpc.CallOption) (*FdbCreateResponse, error) {
+	out := new(FdbCreateResponse)
+	err := c.cc.Invoke(ctx, FdbService_FdbCreate_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *fdbServiceClient) FdbDelete(ctx context.Context, in *FdbDeleteRequest, opts ...grpc.CallOption) (*FdbDeleteResponse, error) {
+	out := new(FdbDeleteResponse)
+	err := c.cc.Invoke(ctx, FdbService_FdbDelete_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// FdbServiceServer is the server API for FdbService service.
+// All implementations should embed UnimplementedFdbServiceServer
 // for forward compatibility
-type DmacServiceServer interface {
-	DmacList(context.Context, *DmacListRequest) (*DmacListResponse, error)
+type FdbServiceServer interface {
+	FdbList(context.Context, *FdbListRequest) (*FdbListResponse, error)
+	FdbCreate(context.Context, *FdbCreateRequest) (*FdbCreateResponse, error)
+	FdbDelete(context.Context, *FdbDeleteRequest) (*FdbDeleteResponse, error)
 }
 
-// UnimplementedDmacServiceServer should be embedded to have forward compatible implementations.
-type UnimplementedDmacServiceServer struct {
+// UnimplementedFdbServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedFdbServiceServer struct {
 }
 
-func (UnimplementedDmacServiceServer) DmacList(context.Context, *DmacListRequest) (*DmacListResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method DmacList not implemented")
+func (UnimplementedFdbServiceServer) FdbList(context.Context, *FdbListRequest) (*FdbListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FdbList not implemented")
+}
+func (UnimplementedFdbServiceServer) FdbCreate(context.Context, *FdbCreateRequest) (*FdbCreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FdbCreate not implemented")
+}
+func (UnimplementedFdbServiceServer) FdbDelete(context.Context, *FdbDeleteRequest) (*FdbDeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FdbDelete not implemented")
 }
 
-// UnsafeDmacServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to DmacServiceServer will
+// UnsafeFdbServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to FdbServiceServer will
 // result in compilation errors.
-type UnsafeDmacServiceServer interface {
-	mustEmbedUnimplementedDmacServiceServer()
+type UnsafeFdbServiceServer interface {
+	mustEmbedUnimplementedFdbServiceServer()
 }
 
-func RegisterDmacServiceServer(s grpc.ServiceRegistrar, srv DmacServiceServer) {
-	s.RegisterService(&DmacService_ServiceDesc, srv)
+func RegisterFdbServiceServer(s grpc.ServiceRegistrar, srv FdbServiceServer) {
+	s.RegisterService(&FdbService_ServiceDesc, srv)
 }
 
-func _DmacService_DmacList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DmacListRequest)
+func _FdbService_FdbList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FdbListRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DmacServiceServer).DmacList(ctx, in)
+		return srv.(FdbServiceServer).FdbList(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: DmacService_DmacList_FullMethodName,
+		FullMethod: FdbService_FdbList_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DmacServiceServer).DmacList(ctx, req.(*DmacListRequest))
+		return srv.(FdbServiceServer).FdbList(ctx, req.(*FdbListRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-// DmacService_ServiceDesc is the grpc.ServiceDesc for DmacService service.
+func _FdbService_FdbCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FdbCreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FdbServiceServer).FdbCreate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FdbService_FdbCreate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FdbServiceServer).FdbCreate(ctx, req.(*FdbCreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FdbService_FdbDelete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FdbDeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FdbServiceServer).FdbDelete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FdbService_FdbDelete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FdbServiceServer).FdbDelete(ctx, req.(*FdbDeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// FdbService_ServiceDesc is the grpc.ServiceDesc for FdbService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
-var DmacService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "vinbero.v1.DmacService",
-	HandlerType: (*DmacServiceServer)(nil),
+var FdbService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.FdbService",
+	HandlerType: (*FdbServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "DmacList",
-			Handler:    _DmacService_DmacList_Handler,
+			MethodName: "FdbList",
+			Handler:    _FdbService_FdbList_Handler,
+		},
+		{
+			MethodName: "FdbCreate",
+			Handler:    _FdbService_FdbCreate_Handler,
+		},
+		{
+			MethodName: "FdbDelete",
+			Handler:    _FdbService_FdbDelete_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -1332,6 +1406,131 @@ var HeadendL2Service_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "HeadendL2Get",
 			Handler:    _HeadendL2Service_HeadendL2Get_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}
+
+const (
+	StatsService_StatsShow_FullMethodName  = "/vinbero.v1.StatsService/StatsShow"
+	StatsService_StatsReset_FullMethodName = "/vinbero.v1.StatsService/StatsReset"
+)
+
+// StatsServiceClient is the client API for StatsService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type StatsServiceClient interface {
+	StatsShow(ctx context.Context, in *StatsShowRequest, opts ...grpc.CallOption) (*StatsShowResponse, error)
+	StatsReset(ctx context.Context, in *StatsResetRequest, opts ...grpc.CallOption) (*StatsResetResponse, error)
+}
+
+type statsServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewStatsServiceClient(cc grpc.ClientConnInterface) StatsServiceClient {
+	return &statsServiceClient{cc}
+}
+
+func (c *statsServiceClient) StatsShow(ctx context.Context, in *StatsShowRequest, opts ...grpc.CallOption) (*StatsShowResponse, error) {
+	out := new(StatsShowResponse)
+	err := c.cc.Invoke(ctx, StatsService_StatsShow_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *statsServiceClient) StatsReset(ctx context.Context, in *StatsResetRequest, opts ...grpc.CallOption) (*StatsResetResponse, error) {
+	out := new(StatsResetResponse)
+	err := c.cc.Invoke(ctx, StatsService_StatsReset_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// StatsServiceServer is the server API for StatsService service.
+// All implementations should embed UnimplementedStatsServiceServer
+// for forward compatibility
+type StatsServiceServer interface {
+	StatsShow(context.Context, *StatsShowRequest) (*StatsShowResponse, error)
+	StatsReset(context.Context, *StatsResetRequest) (*StatsResetResponse, error)
+}
+
+// UnimplementedStatsServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedStatsServiceServer struct {
+}
+
+func (UnimplementedStatsServiceServer) StatsShow(context.Context, *StatsShowRequest) (*StatsShowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StatsShow not implemented")
+}
+func (UnimplementedStatsServiceServer) StatsReset(context.Context, *StatsResetRequest) (*StatsResetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StatsReset not implemented")
+}
+
+// UnsafeStatsServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to StatsServiceServer will
+// result in compilation errors.
+type UnsafeStatsServiceServer interface {
+	mustEmbedUnimplementedStatsServiceServer()
+}
+
+func RegisterStatsServiceServer(s grpc.ServiceRegistrar, srv StatsServiceServer) {
+	s.RegisterService(&StatsService_ServiceDesc, srv)
+}
+
+func _StatsService_StatsShow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsShowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StatsServiceServer).StatsShow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StatsService_StatsShow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StatsServiceServer).StatsShow(ctx, req.(*StatsShowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StatsService_StatsReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StatsServiceServer).StatsReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StatsService_StatsReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StatsServiceServer).StatsReset(ctx, req.(*StatsResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// StatsService_ServiceDesc is the grpc.ServiceDesc for StatsService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var StatsService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.StatsService",
+	HandlerType: (*StatsServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "StatsShow",
+			Handler:    _StatsService_StatsShow_Handler,
+		},
+		{
+			MethodName: "StatsReset",
+			Handler:    _StatsService_StatsReset_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -68,15 +68,16 @@ echo ""
 print_info "Starting PE1 (router1)..."
 ip netns exec "$ns_router1" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe1.yaml > /tmp/vinbero_p2mp_pe1.log 2>&1 &
 VINBERO_PID_PE1=$!
+sleep 1
 
 print_info "Starting PE2 (router3)..."
 ip netns exec "$ns_router3" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe2.yaml > /tmp/vinbero_p2mp_pe2.log 2>&1 &
 VINBERO_PID_PE2=$!
+sleep 1
 
 print_info "Starting PE3 (router4)..."
 ip netns exec "$ns_router4" ${VINBEROD_BIN} -c ${SCRIPT_DIR}/vinbero_pe3.yaml > /tmp/vinbero_p2mp_pe3.log 2>&1 &
 VINBERO_PID_PE3=$!
-
 sleep 2
 
 for entry in "PE1:VINBERO_PID_PE1:/tmp/vinbero_p2mp_pe1.log" \
@@ -84,8 +85,11 @@ for entry in "PE1:VINBERO_PID_PE1:/tmp/vinbero_p2mp_pe1.log" \
              "PE3:VINBERO_PID_PE3:/tmp/vinbero_p2mp_pe3.log"; do
     IFS=: read -r name pid_var log <<< "$entry"
     if ! ps -p "${!pid_var}" > /dev/null 2>&1; then
-        print_error "$name failed to start"
-        cat "$log"
+        print_error "$name failed to start (PID: ${!pid_var})"
+        echo "=== $name log ==="
+        cat "$log" 2>/dev/null || echo "(no log)"
+        echo "=== dmesg (last 20) ==="
+        dmesg | tail -20 2>/dev/null || true
         exit 1
     fi
     print_success "$name started (PID: ${!pid_var})"
@@ -98,6 +102,19 @@ echo ""
 echo "=========================================="
 echo "Phase 1: Configure P2MP L2VPN"
 echo "=========================================="
+
+# Verify all PEs are still alive before configuring
+for entry in "PE1:VINBERO_PID_PE1:/tmp/vinbero_p2mp_pe1.log" \
+             "PE2:VINBERO_PID_PE2:/tmp/vinbero_p2mp_pe2.log" \
+             "PE3:VINBERO_PID_PE3:/tmp/vinbero_p2mp_pe3.log"; do
+    IFS=: read -r name pid_var log <<< "$entry"
+    if ! ps -p "${!pid_var}" > /dev/null 2>&1; then
+        print_error "$name died before configuration"
+        echo "=== $name log ==="
+        cat "$log" 2>/dev/null || echo "(no log)"
+        exit 1
+    fi
+done
 
 # PE1: H.Encaps.L2 + BdPeer to PE2 and PE3
 print_info "Configuring PE1 (H.Encaps.L2 + BUM flood to PE2, PE3)..."
