@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -140,13 +141,17 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	action := v1.Srv6LocalAction(sidFunc.Action)
 
 	switch action {
-	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X,
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X:
 		nexthop, err := bpf.ParseIPv6(sidFunc.Nexthop)
 		if err != nil {
 			return nil, nil, err
 		}
 		aux = bpf.NewSidAuxNexthop(nexthop)
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
+		// DX2 stores OIF as uint32 in first 4 bytes of aux nexthop
+		aux = &bpf.SidAuxEntry{}
+		binary.NativeEndian.PutUint32(aux.Nexthop.Nexthop[:4], sidFunc.Oif)
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2:
 		bridgeIfindex := uint32(0)
@@ -213,9 +218,11 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 		if err == nil && aux != nil {
 			action := v1.Srv6LocalAction(entry.Action)
 			switch action {
-			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X,
-				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X:
 				sf.Nexthop = bpf.FormatIPv6(aux.Nexthop.Nexthop)
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
+				sf.Oif = binary.NativeEndian.Uint32(aux.Nexthop.Nexthop[:4])
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2:
 				bdID, bridgeIfindex := bpf.SidAuxL2Data(aux)

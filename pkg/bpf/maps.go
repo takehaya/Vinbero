@@ -319,19 +319,19 @@ func (m *MapOperations) DeleteSidFunction(triggerPrefix string) error {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 
-	// Read entry first to free aux index
+	// Read entry first so aux can be cleaned up after successful delete
 	var entry SidFunctionEntry
-	if err := m.objs.SidFunctionMap.Lookup(key, &entry); err == nil {
-		if entry.HasAux != 0 {
-			// Zero out aux entry (ARRAY map entries can't be deleted, only zeroed)
-			var zeroAux SidAuxEntry
-			_ = m.objs.SidAuxMap.Put(entry.AuxIndex, &zeroAux)
-			m.auxAlloc.Free(entry.AuxIndex)
-		}
-	}
+	hasEntry := m.objs.SidFunctionMap.Lookup(key, &entry) == nil
 
 	if err := m.objs.SidFunctionMap.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete SID function entry: %w", err)
+	}
+
+	// Clean up aux after SID entry is deleted to avoid index reuse while entry exists
+	if hasEntry && entry.HasAux != 0 {
+		var zeroAux SidAuxEntry
+		_ = m.objs.SidAuxMap.Put(entry.AuxIndex, &zeroAux)
+		m.auxAlloc.Free(entry.AuxIndex)
 	}
 	return nil
 }
@@ -656,12 +656,16 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) (int, error) {
 	var entry FdbEntry
 	iter := m.objs.FdbMap.Iterate()
 
+	now := currentKtimeNs()
 	var toDelete []FdbKey
 	for iter.Next(&key, &entry) {
 		if entry.IsStatic != 0 || entry.LastSeen == 0 {
 			continue
 		}
-		age := currentKtimeNs() - entry.LastSeen
+		if entry.LastSeen > now {
+			continue // clock skew or corruption
+		}
+		age := now - entry.LastSeen
 		if age > maxAgeNs {
 			keyCopy := key
 			toDelete = append(toDelete, keyCopy)
