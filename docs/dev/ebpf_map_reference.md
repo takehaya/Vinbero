@@ -9,12 +9,12 @@ Vinberoで使用される全eBPFマップの定義、ルックアップタイミ
 | Map名 | タイプ | Key | Value | Max Entries | フラグ | 定義場所 |
 |--------|--------|-----|-------|-------------|--------|----------|
 | `sid_function_map` | LPM_TRIE | `lpm_key_v6` (20B) | `sid_function_entry` (12B) | 1024 | NO_PREALLOC | `src/core/xdp_map.h:14` |
-| `sid_aux_map` | ARRAY | `__u32` (index) | `sid_aux_entry` (200B union) | 512 | - | `src/core/xdp_map.h:22` |
-| `headend_v4_map` | LPM_TRIE | `lpm_key_v4` (8B) | `headend_entry` (196B) | 1024 | NO_PREALLOC | `src/core/xdp_map.h:33` |
-| `headend_v6_map` | LPM_TRIE | `lpm_key_v6` (20B) | `headend_entry` (196B) | 1024 | NO_PREALLOC | `src/core/xdp_map.h:44` |
-| `headend_l2_map` | HASH | `headend_l2_key` (8B) | `headend_entry` (196B) | 1024 | - | `src/core/xdp_map.h:53` |
+| `sid_aux_map` | ARRAY | `__u32` (index) | `sid_aux_entry` (200B union) | 512 (configurable) | - | `src/core/xdp_map.h:22` |
+| `headend_v4_map` | LPM_TRIE | `lpm_key_v4` (8B) | `headend_entry` (200B) | 1024 | NO_PREALLOC | `src/core/xdp_map.h:33` |
+| `headend_v6_map` | LPM_TRIE | `lpm_key_v6` (20B) | `headend_entry` (200B) | 1024 | NO_PREALLOC | `src/core/xdp_map.h:44` |
+| `headend_l2_map` | HASH | `headend_l2_key` (8B) | `headend_entry` (200B) | 1024 | - | `src/core/xdp_map.h:53` |
 | `fdb_map` | HASH | `fdb_key` (8B) | `fdb_entry` (20B) | 8192 | - | `src/core/xdp_map.h:63` |
-| `bd_peer_map` | HASH | `bd_peer_key` (4B) | `headend_entry` (196B) | 1024 | - | `src/core/xdp_map.h:78` |
+| `bd_peer_map` | HASH | `bd_peer_key` (4B) | `headend_entry` (200B) | 1024 | - | `src/core/xdp_map.h:78` |
 | `bd_peer_reverse_map` | HASH | `bd_peer_reverse_key` (20B) | `bd_peer_reverse_val` (2B) | 1024 | - | `src/core/xdp_map.h:88` |
 
 ### 1.2 補助マップ
@@ -331,5 +331,5 @@ arg_dst_offset   |     |    |    |     |     |     |     |     |      |     |   
 | `Headendv6Service` | headend_v6_map | `pkg/server/headendv6.go` |
 | `HeadendL2Service` | headend_l2_map | `pkg/server/headendl2.go` |
 | `BdPeerService` | bd_peer_map, bd_peer_reverse_map | `pkg/server/bd_peer.go` |
-| `FdbService` | fdb_map (読み取りのみ) | `pkg/server/fdb.go` |
+| `FdbService` | fdb_map (一覧取得、静的エントリの作成/削除) | `pkg/server/fdb.go` |
 | `NetworkResourceService` | sid_function_map (参照チェック) | `pkg/server/network_resource.go` |

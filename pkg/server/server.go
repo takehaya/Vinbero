@@ -77,7 +77,7 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered NetworkResourceService", zap.String("path", path))
 
-	// FDB service (read-only, for observability)
+	// FDB service (list, create/delete static entries)
 	fdbServer := NewFdbServer(s.mapOps)
 	path, handler = vinberov1connect.NewFdbServiceHandler(fdbServer)
 	s.mux.Handle(path, handler)

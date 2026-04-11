@@ -47,11 +47,16 @@ type MapOperations struct {
 	auxAlloc *indexAllocator
 }
 
-// NewMapOperations creates a new MapOperations instance
+// NewMapOperations creates a new MapOperations instance.
+// The aux index allocator capacity is derived from the actual sid_aux_map MaxEntries.
 func NewMapOperations(objs *BpfObjects) *MapOperations {
+	auxMax := uint32(512) // fallback
+	if info, err := objs.SidAuxMap.Info(); err == nil {
+		auxMax = info.MaxEntries
+	}
 	return &MapOperations{
 		objs:     objs,
-		auxAlloc: newIndexAllocator(512),
+		auxAlloc: newIndexAllocator(auxMax),
 	}
 }
 
@@ -91,6 +96,7 @@ func (a *indexAllocator) Free(idx uint32) {
 
 // RecoverUsed rebuilds allocator state from a list of indices currently in use.
 // Gaps between used indices are added to the free list for reuse.
+// Indices >= maxIndex are silently ignored (e.g., stale data after config change).
 func (a *indexAllocator) RecoverUsed(usedIndices []uint32) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -102,10 +108,17 @@ func (a *indexAllocator) RecoverUsed(usedIndices []uint32) {
 	used := make(map[uint32]bool, len(usedIndices))
 	maxUsed := uint32(0)
 	for _, idx := range usedIndices {
+		if idx >= a.maxIndex {
+			continue // skip out-of-range indices
+		}
 		used[idx] = true
 		if idx >= maxUsed {
 			maxUsed = idx
 		}
+	}
+
+	if len(used) == 0 {
+		return
 	}
 
 	a.nextNew = maxUsed + 1
@@ -191,18 +204,20 @@ func NewSidAuxGtp6e(argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) *SidA
 // Stores a full HeadendEntry in the b6_policy union variant.
 func NewSidAuxB6Policy(policy *HeadendEntry) *SidAuxEntry {
 	entry := &SidAuxEntry{}
-	raw := (*[200]byte)(unsafe.Pointer(entry))
-	policyBytes := (*[196]byte)(unsafe.Pointer(policy))
-	copy(raw[:196], policyBytes[:])
+	n := unsafe.Sizeof(*policy)
+	src := (*[256]byte)(unsafe.Pointer(policy))[:n]
+	dst := (*[256]byte)(unsafe.Pointer(entry))[:n]
+	copy(dst, src)
 	return entry
 }
 
 // SidAuxB6PolicyData extracts End.B6 policy from a SidAuxEntry
 func SidAuxB6PolicyData(entry *SidAuxEntry) *HeadendEntry {
 	result := &HeadendEntry{}
-	raw := (*[200]byte)(unsafe.Pointer(entry))
-	resultBytes := (*[196]byte)(unsafe.Pointer(result))
-	copy(resultBytes[:], raw[:196])
+	n := unsafe.Sizeof(*result)
+	src := (*[256]byte)(unsafe.Pointer(entry))[:n]
+	dst := (*[256]byte)(unsafe.Pointer(result))[:n]
+	copy(dst, src)
 	return result
 }
 
