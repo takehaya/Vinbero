@@ -35,6 +35,8 @@ const (
 	NetworkResourceServiceName = "vinbero.v1.NetworkResourceService"
 	// HeadendL2ServiceName is the fully-qualified name of the HeadendL2Service service.
 	HeadendL2ServiceName = "vinbero.v1.HeadendL2Service"
+	// StatsServiceName is the fully-qualified name of the StatsService service.
+	StatsServiceName = "vinbero.v1.StatsService"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -122,6 +124,8 @@ const (
 	// HeadendL2ServiceHeadendL2GetProcedure is the fully-qualified name of the HeadendL2Service's
 	// HeadendL2Get RPC.
 	HeadendL2ServiceHeadendL2GetProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Get"
+	// StatsServiceStatsShowProcedure is the fully-qualified name of the StatsService's StatsShow RPC.
+	StatsServiceStatsShowProcedure = "/vinbero.v1.StatsService/StatsShow"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -159,6 +163,8 @@ var (
 	headendL2ServiceHeadendL2DeleteMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Delete")
 	headendL2ServiceHeadendL2ListMethodDescriptor       = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2List")
 	headendL2ServiceHeadendL2GetMethodDescriptor        = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Get")
+	statsServiceServiceDescriptor                       = v1.File_vinbero_v1_vinbero_proto.Services().ByName("StatsService")
+	statsServiceStatsShowMethodDescriptor               = statsServiceServiceDescriptor.Methods().ByName("StatsShow")
 )
 
 // SidFunctionServiceClient is a client for the vinbero.v1.SidFunctionService service.
@@ -1130,4 +1136,72 @@ func (UnimplementedHeadendL2ServiceHandler) HeadendL2List(context.Context, *conn
 
 func (UnimplementedHeadendL2ServiceHandler) HeadendL2Get(context.Context, *connect.Request[v1.HeadendL2GetRequest]) (*connect.Response[v1.HeadendL2GetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendL2Service.HeadendL2Get is not implemented"))
+}
+
+// StatsServiceClient is a client for the vinbero.v1.StatsService service.
+type StatsServiceClient interface {
+	StatsShow(context.Context, *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error)
+}
+
+// NewStatsServiceClient constructs a client for the vinbero.v1.StatsService service. By default, it
+// uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses, and sends
+// uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the connect.WithGRPC() or
+// connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewStatsServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) StatsServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &statsServiceClient{
+		statsShow: connect.NewClient[v1.StatsShowRequest, v1.StatsShowResponse](
+			httpClient,
+			baseURL+StatsServiceStatsShowProcedure,
+			connect.WithSchema(statsServiceStatsShowMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// statsServiceClient implements StatsServiceClient.
+type statsServiceClient struct {
+	statsShow *connect.Client[v1.StatsShowRequest, v1.StatsShowResponse]
+}
+
+// StatsShow calls vinbero.v1.StatsService.StatsShow.
+func (c *statsServiceClient) StatsShow(ctx context.Context, req *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error) {
+	return c.statsShow.CallUnary(ctx, req)
+}
+
+// StatsServiceHandler is an implementation of the vinbero.v1.StatsService service.
+type StatsServiceHandler interface {
+	StatsShow(context.Context, *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error)
+}
+
+// NewStatsServiceHandler builds an HTTP handler from the service implementation. It returns the
+// path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewStatsServiceHandler(svc StatsServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	statsServiceStatsShowHandler := connect.NewUnaryHandler(
+		StatsServiceStatsShowProcedure,
+		svc.StatsShow,
+		connect.WithSchema(statsServiceStatsShowMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.StatsService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case StatsServiceStatsShowProcedure:
+			statsServiceStatsShowHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedStatsServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedStatsServiceHandler struct{}
+
+func (UnimplementedStatsServiceHandler) StatsShow(context.Context, *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsShow is not implemented"))
 }

@@ -83,6 +83,12 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered DmacService", zap.String("path", path))
 
+	// Stats service (read-only, for observability)
+	statsServer := NewStatsServer(s.mapOps)
+	path, handler = vinberov1connect.NewStatsServiceHandler(statsServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered StatsService", zap.String("path", path))
+
 	// Health check endpoint
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

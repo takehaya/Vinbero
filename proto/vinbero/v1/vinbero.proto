@@ -355,3 +355,20 @@ message HeadendL2GetRequest {
 message HeadendL2GetResponse {
   HeadendL2 headend_l2 = 1;
 }
+
+// StatsService provides read-only access to per-CPU XDP packet statistics.
+// Requires enable_stats: true in config; otherwise all counters are zero.
+service StatsService {
+  rpc StatsShow(StatsShowRequest) returns (StatsShowResponse);
+}
+
+message StatsCounter {
+  string name = 1;
+  uint64 packets = 2;
+  uint64 bytes = 3;
+}
+
+message StatsShowRequest {}
+message StatsShowResponse {
+  repeated StatsCounter counters = 1;
+}

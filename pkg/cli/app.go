@@ -52,6 +52,7 @@ func NewApp() *cli.App {
 			bridgeCommand(),
 			vrfCommand(),
 			dmacCommand(),
+			statsCommand(),
 			completion.Command(),
 		},
 	}

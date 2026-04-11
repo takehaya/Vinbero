@@ -335,6 +335,43 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 	return result, nil
 }
 
+// ===== Stats Map Operations =====
+
+const StatsMax = 8
+
+var StatsCounterName = [StatsMax]string{
+	"RX_PACKETS", "SRV6_END", "H_ENCAPS_V4", "H_ENCAPS_V6",
+	"PASS", "DROP", "REDIRECT", "ERROR",
+}
+
+type AggregatedStats struct {
+	Name    string
+	Packets uint64
+	Bytes   uint64
+}
+
+// ReadStats reads the PERCPU_ARRAY stats_map and aggregates per-CPU values
+func (m *MapOperations) ReadStats() ([]AggregatedStats, error) {
+	result := make([]AggregatedStats, StatsMax)
+	for i := uint32(0); i < StatsMax; i++ {
+		var perCPU []BpfStatsEntry
+		if err := m.objs.StatsMap.Lookup(i, &perCPU); err != nil {
+			return nil, fmt.Errorf("failed to lookup stats counter %d: %w", i, err)
+		}
+		var totalPackets, totalBytes uint64
+		for _, cpu := range perCPU {
+			totalPackets += cpu.Packets
+			totalBytes += cpu.Bytes
+		}
+		result[i] = AggregatedStats{
+			Name:    StatsCounterName[i],
+			Packets: totalPackets,
+			Bytes:   totalBytes,
+		}
+	}
+	return result, nil
+}
+
 // ===== Headend V4 Map Operations =====
 
 // CreateHeadendV4 adds a headend v4 entry to the map
