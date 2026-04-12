@@ -35,5 +35,39 @@ sudo ./teardown.sh # クリーンアップ
 
 - **`common/netns.sh`**: namespace操作（create/delete/srv6有効化/sysctl設定）
 - **`common/veth.sh`**: vethペア作成とIP設定（IPv4/IPv6自動判定）
-- **`common/test_utils.sh`**: テストヘルパー（ping疎通確認、root権限チェック、カラー出力）
+- **`common/test_utils.sh`**: テストヘルパー（ping疎通確認、vinberodデーモン起動/readyチェック、root権限チェック、カラー出力）
 - **`common/topologies/three_router.sh`**: 3ルータートポロジーの構築/削除（設定変数でカスタマイズ可能）
+
+## Example一覧
+
+### Endpoint Functions
+| ディレクトリ | 機能 | 説明 |
+|---|---|---|
+| `end/` | End | 基本SRHエンドポイント処理 |
+| `end-x/` | End.X | ネクストホップ指定のクロスコネクト |
+| `end-t/` | End.T | VRF指定のFIBルックアップ |
+| `end-dx4/` | End.DX4 | IPv4デカプセレーション |
+| `end-dx6/` | End.DX6 | IPv6デカプセレーション |
+| `end-dt4/` | End.DT4 | VRF対応IPv4テーブルルックアップ |
+| `end-dt6/` | End.DT6 | VRF対応IPv6テーブルルックアップ |
+| `end-dt2/` | End.DT2 | L2VPN（FDB学習 + ブリッジ転送） |
+| `end-dt2-p2mp/` | End.DT2 P2MP | マルチサイトL2VPN（BUMフラッディング） |
+
+### Headend Functions
+| ディレクトリ | 機能 | 説明 |
+|---|---|---|
+| `headend-v4/` | H.Encaps (IPv4) | IPv4パケットのSRv6カプセル化 |
+| `headend-v6/` | H.Encaps (IPv6) | IPv6パケットのSRv6カプセル化 |
+| `headend-l2/` | H.Encaps.L2 | L2フレームのSRv6カプセル化 |
+
+### Mobile (GTP-U)
+| ディレクトリ | 機能 | 説明 |
+|---|---|---|
+| `gtp4-encap/` | H.M.GTP4.D + End.M.GTP4.E | GTP-U/IPv4とSRv6の相互変換 |
+| `gtp6-encap/` | End.M.GTP6.D + End.M.GTP6.E | GTP-U/IPv6とSRv6の相互変換 |
+| `gtp6-drop-in/` | End.M.GTP6.D.Di | GTP-U Drop-Inモード |
+
+### Plugin Extension
+| ディレクトリ | 機能 | 説明 |
+|---|---|---|
+| `plugin-counter/` | カスタムBPFプラグイン | パケットカウンタプラグインの動的登録デモ |

@@ -1,13 +1,13 @@
 #!/bin/bash
-# examples/plugin/setup.sh
-# Setup plugin demonstration environment
+# examples/plugin-counter/setup.sh
+# Setup plugin counter demonstration environment
 
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-EXAMPLE_NAME="$(basename "$SCRIPT_DIR")"
-export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-${EXAMPLE_NAME}-}"
+# Short prefix to stay within 15-char Linux interface name limit
+export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-plgcnt-}"
 
 source "${SCRIPT_DIR}/../common/topologies/three_router.sh"
 

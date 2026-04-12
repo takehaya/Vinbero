@@ -1,12 +1,11 @@
 #!/bin/bash
-# examples/plugin/teardown.sh
+# examples/plugin-counter/teardown.sh
 
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-EXAMPLE_NAME="$(basename "$SCRIPT_DIR")"
-export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-${EXAMPLE_NAME}-}"
+export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-plgcnt-}"
 
 source "${SCRIPT_DIR}/../common/topologies/three_router.sh"
 

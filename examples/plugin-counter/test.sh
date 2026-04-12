@@ -23,8 +23,7 @@ PLUGIN_SRC="${SCRIPT_DIR}/plugin_counter.c"
 PLUGIN_OBJ="/tmp/plugin_counter.o"
 PLUGIN_INDEX=32
 
-EXAMPLE_NAME="$(basename "$SCRIPT_DIR")"
-export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-${EXAMPLE_NAME}-}"
+export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-plgcnt-}"
 
 ns_host1="${TOPO_NS_PREFIX}host1"
 ns_router1="${TOPO_NS_PREFIX}router1"
