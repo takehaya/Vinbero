@@ -75,18 +75,9 @@ echo "Phase 2: Vinbero XDP End.T (VRF)"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router2..."
-ip netns exec "$ns_router2" ${VINBEROD_BIN} -c ${VINBERO_CONFIG} > /tmp/vinbero_end_t_test.log 2>&1 &
-VINBERO_PID=$!
-
-sleep 2
-
-if ! ps -p $VINBERO_PID > /dev/null; then
-    print_error "Vinbero failed to start"
-    cat /tmp/vinbero_end_t_test.log
-    exit 1
-fi
-
-print_success "Vinbero started (PID: $VINBERO_PID)"
+start_vinbero "$ns_router2" "${VINBERO_CONFIG}" "/tmp/vinbero_end_t_test.log"
+VINBERO_PID=$VINBERO_LAST_PID
+wait_vinbero_ready "$ns_router2" "127.0.0.1:8082" 10
 
 # Register End.T SID functions with VRF
 print_info "Registering SidFunction (End.T) entries with vrf_name=vrf100..."

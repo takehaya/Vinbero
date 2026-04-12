@@ -41,6 +41,44 @@ print_info() {
 
 # Test ping connectivity (auto-detects IPv4/IPv6)
 # Usage: test_ping <namespace> <destination> [count]
+# Start vinbero daemon in a namespace with signal isolation.
+# Uses setsid to prevent signal propagation from parent shell.
+# Sets VINBERO_LAST_PID to the background process PID.
+# Usage: start_vinbero <namespace> <config_path> <log_file>
+start_vinbero() {
+    local ns="$1" config="$2" log="$3"
+    setsid ip netns exec "$ns" ${VINBEROD_BIN} -c "$config" > "$log" 2>&1 &
+    VINBERO_LAST_PID=$!
+    sleep 0.5
+    if ! ps -p $VINBERO_LAST_PID > /dev/null 2>&1; then
+        print_error "Vinbero failed to start"
+        cat "$log" 2>/dev/null
+        return 1
+    fi
+    print_success "Vinbero started (PID: $VINBERO_LAST_PID)"
+    return 0
+}
+
+# Wait for vinbero's health endpoint to respond.
+# Polls /health every second until ready or timeout.
+# Usage: wait_vinbero_ready <namespace> <bind_addr> [timeout_sec]
+wait_vinbero_ready() {
+    local ns="$1" addr="$2" timeout="${3:-10}"
+    local elapsed=0
+    while [ $elapsed -lt $timeout ]; do
+        if ip netns exec "$ns" curl -sf "http://${addr}/health" > /dev/null 2>&1; then
+            print_success "Vinbero ready (${elapsed}s)"
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    print_error "Vinbero not ready after ${timeout}s"
+    return 1
+}
+
+# Test ping connectivity (auto-detects IPv4/IPv6)
+# Usage: test_ping <namespace> <destination> [count]
 test_ping() {
     local ns="$1"
     local dst="$2"

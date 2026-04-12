@@ -37,14 +37,14 @@ echo ""
 
 # Phase 1: Start Vinbero
 print_info "Starting Vinbero on $ns_router1..."
-ip netns exec "$ns_router1" ${VINBEROD_BIN} -c "${SCRIPT_DIR}/vinbero_router1.yaml" > /tmp/vinbero_gtp6_r1.log 2>&1 &
-PIDS="$! $PIDS"
-sleep 2
+start_vinbero "$ns_router1" "${SCRIPT_DIR}/vinbero_router1.yaml" "/tmp/vinbero_gtp6_r1.log"
+PIDS="$VINBERO_LAST_PID $PIDS"
+wait_vinbero_ready "$ns_router1" "127.0.0.1:8082" 10
 
 print_info "Starting Vinbero on $ns_router3..."
-ip netns exec "$ns_router3" ${VINBEROD_BIN} -c "${SCRIPT_DIR}/vinbero_router3.yaml" > /tmp/vinbero_gtp6_r3.log 2>&1 &
-PIDS="$! $PIDS"
-sleep 2
+start_vinbero "$ns_router3" "${SCRIPT_DIR}/vinbero_router3.yaml" "/tmp/vinbero_gtp6_r3.log"
+PIDS="$VINBERO_LAST_PID $PIDS"
+wait_vinbero_ready "$ns_router3" "127.0.0.1:8083" 10
 
 # Phase 2: Register entries
 # End.M.GTP6.E uses /56 prefix (Args.Mob.Session at offset 7)

@@ -33,9 +33,9 @@ echo "=========================================="
 echo ""
 
 print_info "Starting Vinbero on $ns_router1..."
-ip netns exec "$ns_router1" ${VINBEROD_BIN} -c "${SCRIPT_DIR}/vinbero_router1.yaml" > /tmp/vinbero_gtdi_r1.log 2>&1 &
-PIDS="$! $PIDS"
-sleep 2
+start_vinbero "$ns_router1" "${SCRIPT_DIR}/vinbero_router1.yaml" "/tmp/vinbero_gtdi_r1.log"
+PIDS="$VINBERO_LAST_PID $PIDS"
+wait_vinbero_ready "$ns_router1" "127.0.0.1:8082" 10
 
 # Drop-In does not use args_offset (no Args.Mob.Session encoding)
 print_info "Registering End.M.GTP6.D.Di on router1..."
