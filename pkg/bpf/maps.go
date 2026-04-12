@@ -900,27 +900,35 @@ func FormatSegments(segments [MaxSegments][IPv6AddrLen]uint8, numSegments uint8)
 
 const (
 	EndpointPluginBase = 32
+	EndpointProgMax    = 64
 	HeadendPluginBase  = 16
+	HeadendProgMax     = 32
 )
 
-var ErrReservedSlot = fmt.Errorf("cannot register plugin in reserved slot")
+var (
+	ErrReservedSlot = fmt.Errorf("cannot register plugin in reserved slot")
+	ErrIndexTooHigh = fmt.Errorf("plugin index exceeds PROG_ARRAY capacity")
+)
 
 // RegisterPlugin registers an external BPF program into a PROG_ARRAY slot.
 // Only plugin-range indices are allowed (built-in slots are protected).
 func (m *MapOperations) RegisterPlugin(mapType string, index uint32, progFD int) error {
-	targetMap, base, err := m.resolvePluginMap(mapType)
+	targetMap, base, maxEntries, err := m.resolvePluginMap(mapType)
 	if err != nil {
 		return err
 	}
 	if index < base {
 		return fmt.Errorf("%w: index %d < base %d for %s", ErrReservedSlot, index, base, mapType)
 	}
+	if index >= maxEntries {
+		return fmt.Errorf("%w: index %d >= max %d for %s", ErrIndexTooHigh, index, maxEntries, mapType)
+	}
 	return targetMap.Update(index, uint32(progFD), ebpf.UpdateAny)
 }
 
 // UnregisterPlugin removes a plugin from a PROG_ARRAY slot.
 func (m *MapOperations) UnregisterPlugin(mapType string, index uint32) error {
-	targetMap, base, err := m.resolvePluginMap(mapType)
+	targetMap, base, _, err := m.resolvePluginMap(mapType)
 	if err != nil {
 		return err
 	}
@@ -930,15 +938,15 @@ func (m *MapOperations) UnregisterPlugin(mapType string, index uint32) error {
 	return targetMap.Delete(index)
 }
 
-func (m *MapOperations) resolvePluginMap(mapType string) (*ebpf.Map, uint32, error) {
+func (m *MapOperations) resolvePluginMap(mapType string) (*ebpf.Map, uint32, uint32, error) {
 	switch mapType {
 	case "endpoint":
-		return m.objs.SidEndpointProgs, EndpointPluginBase, nil
+		return m.objs.SidEndpointProgs, EndpointPluginBase, EndpointProgMax, nil
 	case "headend_v4":
-		return m.objs.HeadendV4Progs, HeadendPluginBase, nil
+		return m.objs.HeadendV4Progs, HeadendPluginBase, HeadendProgMax, nil
 	case "headend_v6":
-		return m.objs.HeadendV6Progs, HeadendPluginBase, nil
+		return m.objs.HeadendV6Progs, HeadendPluginBase, HeadendProgMax, nil
 	default:
-		return nil, 0, fmt.Errorf("unknown plugin map type: %s", mapType)
+		return nil, 0, 0, fmt.Errorf("unknown plugin map type: %s", mapType)
 	}
 }

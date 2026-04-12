@@ -39,8 +39,6 @@ print_info() {
 }
 
 
-# Test ping connectivity (auto-detects IPv4/IPv6)
-# Usage: test_ping <namespace> <destination> [count]
 # Start vinbero daemon in a namespace with signal isolation.
 # Uses setsid to prevent signal propagation from parent shell.
 # Sets VINBERO_LAST_PID to the background process PID.
