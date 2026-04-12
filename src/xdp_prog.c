@@ -88,20 +88,20 @@ static __always_inline int nosrh_fib_v6(
     void *_data_end = (void *)(long)(ctx)->data_end;                          \
     (eth) = (struct ethhdr *)_data;                                           \
     if ((void *)((eth) + 1) > _data_end)                                      \
-        return tailcall_epilogue(ctx, XDP_DROP);                              \
+        TAILCALL_RETURN(ctx,XDP_DROP);                              \
     (ip6h) = (struct ipv6hdr *)(_data + (l3_off));                            \
     if ((void *)((ip6h) + 1) > _data_end)                                     \
-        return tailcall_epilogue(ctx, XDP_DROP);                              \
+        TAILCALL_RETURN(ctx,XDP_DROP);                              \
     void *_srh_ptr = (void *)((ip6h) + 1);                                   \
     if (_srh_ptr + 8 > _data_end)                                             \
-        return tailcall_epilogue(ctx, XDP_DROP);                              \
+        TAILCALL_RETURN(ctx,XDP_DROP);                              \
     (srh) = (struct ipv6_sr_hdr *)_srh_ptr;                                   \
 } while (0)
 
 // Bound l3_offset from per-CPU map context. Max valid: Eth(14) + QinQ(8) = 22.
 #define TAILCALL_BOUND_L3OFF(tctx, l3_off)                                    \
     __u16 l3_off = (tctx)->l3_offset;                                         \
-    if ((l3_off) > 22) return tailcall_epilogue(ctx, XDP_DROP)
+    if ((l3_off) > 22) TAILCALL_RETURN(ctx,XDP_DROP)
 
 // Call fn(ctx, ..., l3_offset) with l3_offset as a compile-time constant.
 // The BPF verifier cannot track variable packet offsets through deeply-inlined
@@ -134,7 +134,7 @@ SEC("xdp")
 int tailcall_endpoint_end(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     struct ethhdr *eth;
@@ -143,14 +143,14 @@ int tailcall_endpoint_end(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end, ctx, ip6h, srh, &tctx->sid_entry);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_x(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
@@ -161,14 +161,14 @@ int tailcall_endpoint_end_x(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_x, ctx, ip6h, srh, &tctx->sid_entry, aux);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_t(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     struct ethhdr *eth;
@@ -177,14 +177,14 @@ int tailcall_endpoint_end_t(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_t, ctx, ip6h, srh, &tctx->sid_entry);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_b6(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
@@ -195,14 +195,14 @@ int tailcall_endpoint_end_b6(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_b6_insert, ctx, ip6h, srh, &tctx->sid_entry, aux);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_b6_encaps(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
@@ -213,14 +213,14 @@ int tailcall_endpoint_end_b6_encaps(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_b6_encaps, ctx, ip6h, srh, &tctx->sid_entry, aux);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_m_gtp6_d(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
@@ -231,14 +231,14 @@ int tailcall_endpoint_end_m_gtp6_d(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_m_gtp6_d, ctx, ip6h, srh, &tctx->sid_entry, aux);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_m_gtp6_d_di(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     struct ethhdr *eth;
@@ -247,14 +247,14 @@ int tailcall_endpoint_end_m_gtp6_d_di(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_m_gtp6_d_di, ctx, ip6h, srh, &tctx->sid_entry);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_m_gtp6_e(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
@@ -265,14 +265,14 @@ int tailcall_endpoint_end_m_gtp6_e(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_m_gtp6_e, ctx, ip6h, srh, &tctx->sid_entry, aux);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_m_gtp4_e(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
@@ -283,7 +283,7 @@ int tailcall_endpoint_end_m_gtp4_e(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_m_gtp4_e, ctx, ip6h, srh, &tctx->sid_entry, aux);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 // --- Pattern B: localsid + nosrh dual-path actions ---
@@ -292,20 +292,20 @@ SEC("xdp")
 int tailcall_endpoint_end_dx2(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
-        if (!aux) return tailcall_epilogue(ctx, XDP_DROP);
+        if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
         __u32 oif;
         __builtin_memcpy(&oif, aux->nexthop.nexthop, sizeof(__u32));
-        if (oif == 0) return tailcall_epilogue(ctx, XDP_DROP);
+        if (oif == 0) TAILCALL_RETURN(ctx,XDP_DROP);
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_l2_nosrh, ctx, tctx->inner_proto) != 0)
-            return tailcall_epilogue(ctx, XDP_DROP);
+            TAILCALL_RETURN(ctx,XDP_DROP);
         STATS_INC(STATS_SRV6_END, 0);
-        return tailcall_epilogue(ctx, bpf_redirect(oif, 0));
+        TAILCALL_RETURN(ctx,bpf_redirect(oif, 0));
     }
 
     struct ethhdr *eth;
@@ -314,20 +314,20 @@ int tailcall_endpoint_end_dx2(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dx2, ctx, ip6h, srh, &tctx->sid_entry, aux);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_dx4(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)
-            return tailcall_epilogue(ctx, XDP_DROP);
-        return tailcall_epilogue(ctx, nosrh_fib_v4(ctx, &tctx->sid_entry));
+            TAILCALL_RETURN(ctx,XDP_DROP);
+        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, &tctx->sid_entry));
     }
 
     struct ethhdr *eth;
@@ -336,20 +336,20 @@ int tailcall_endpoint_end_dx4(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dx4, ctx, ip6h, srh, &tctx->sid_entry);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_dx6(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, tctx->inner_proto) != 0)
-            return tailcall_epilogue(ctx, XDP_DROP);
-        return tailcall_epilogue(ctx, nosrh_fib_v6(ctx, &tctx->sid_entry));
+            TAILCALL_RETURN(ctx,XDP_DROP);
+        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, &tctx->sid_entry));
     }
 
     struct ethhdr *eth;
@@ -358,20 +358,20 @@ int tailcall_endpoint_end_dx6(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dx6, ctx, ip6h, srh, &tctx->sid_entry);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_dt4(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)
-            return tailcall_epilogue(ctx, XDP_DROP);
-        return tailcall_epilogue(ctx, nosrh_fib_v4(ctx, &tctx->sid_entry));
+            TAILCALL_RETURN(ctx,XDP_DROP);
+        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, &tctx->sid_entry));
     }
 
     struct ethhdr *eth;
@@ -380,20 +380,20 @@ int tailcall_endpoint_end_dt4(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dt4, ctx, ip6h, srh, &tctx->sid_entry);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_dt6(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, tctx->inner_proto) != 0)
-            return tailcall_epilogue(ctx, XDP_DROP);
-        return tailcall_epilogue(ctx, nosrh_fib_v6(ctx, &tctx->sid_entry));
+            TAILCALL_RETURN(ctx,XDP_DROP);
+        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, &tctx->sid_entry));
     }
 
     struct ethhdr *eth;
@@ -402,29 +402,29 @@ int tailcall_endpoint_end_dt6(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dt6, ctx, ip6h, srh, &tctx->sid_entry);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         __u8 nh = tctx->inner_proto;
         if (nh == IPPROTO_IPIP) {
             if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
-                return tailcall_epilogue(ctx, XDP_DROP);
-            return tailcall_epilogue(ctx, nosrh_fib_v4(ctx, &tctx->sid_entry));
+                TAILCALL_RETURN(ctx,XDP_DROP);
+            TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, &tctx->sid_entry));
         }
         if (nh == IPPROTO_IPV6) {
             if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
-                return tailcall_epilogue(ctx, XDP_DROP);
-            return tailcall_epilogue(ctx, nosrh_fib_v6(ctx, &tctx->sid_entry));
+                TAILCALL_RETURN(ctx,XDP_DROP);
+            TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, &tctx->sid_entry));
         }
-        return tailcall_epilogue(ctx, XDP_DROP);
+        TAILCALL_RETURN(ctx,XDP_DROP);
     }
 
     struct ethhdr *eth;
@@ -433,14 +433,14 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dt46, ctx, ip6h, srh, &tctx->sid_entry);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 SEC("xdp")
 int tailcall_endpoint_end_dt2(struct xdp_md *ctx)
 {
     struct tailcall_ctx *tctx = tailcall_ctx_read();
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
@@ -451,11 +451,11 @@ int tailcall_endpoint_end_dt2(struct xdp_md *ctx)
         void *data_end = (void *)(long)ctx->data_end;
         struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + l3_off);
         if ((void *)(ip6h + 1) > data_end)
-            return tailcall_epilogue(ctx, XDP_DROP);
+            TAILCALL_RETURN(ctx,XDP_DROP);
 
         int action = CALL_WITH_CONST_L3(l3_off, process_end_dt2_nosrh, ctx, ip6h, tctx->inner_proto,
                                             &tctx->sid_entry, aux);
-        return tailcall_epilogue(ctx, action);
+        TAILCALL_RETURN(ctx,action);
     }
 
     struct ethhdr *eth;
@@ -464,7 +464,7 @@ int tailcall_endpoint_end_dt2(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dt2, ctx, ip6h, srh, &tctx->sid_entry, aux);
-    return tailcall_epilogue(ctx, action);
+    TAILCALL_RETURN(ctx,action);
 }
 
 // ========== Headend Tail Call Targets ==========
@@ -472,60 +472,60 @@ int tailcall_endpoint_end_dt2(struct xdp_md *ctx)
 // Helper macro for headend v4 tail call targets with per-branch bounds checks
 #define HEADEND_V4_BODY(fn_name)                                              \
     struct tailcall_ctx *tctx = tailcall_ctx_read();                          \
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);                       \
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);                       \
     TAILCALL_BOUND_L3OFF(tctx, l3_off);                                       \
     void *data = (void *)(long)ctx->data;                                     \
     void *data_end = (void *)(long)ctx->data_end;                             \
     int action;                                                                \
     if (l3_off == 18) {                                                        \
         struct ethhdr *eth = data;                                             \
-        if ((void *)(eth + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         struct iphdr *iph = (struct iphdr *)(data + 18);                       \
-        if ((void *)(iph + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(iph + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         action = fn_name(ctx, eth, iph, &tctx->headend, 18);                  \
     } else if (l3_off == 22) {                                                 \
         struct ethhdr *eth = data;                                             \
-        if ((void *)(eth + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         struct iphdr *iph = (struct iphdr *)(data + 22);                       \
-        if ((void *)(iph + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(iph + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         action = fn_name(ctx, eth, iph, &tctx->headend, 22);                  \
     } else {                                                                   \
         struct ethhdr *eth = data;                                             \
-        if ((void *)(eth + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         struct iphdr *iph = (struct iphdr *)(data + 14);                       \
-        if ((void *)(iph + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(iph + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         action = fn_name(ctx, eth, iph, &tctx->headend, 14);                  \
     }                                                                          \
-    return tailcall_epilogue(ctx, action)
+    TAILCALL_RETURN(ctx,action)
 
 // Helper macro for headend v6 tail call targets
 #define HEADEND_V6_BODY(fn_name)                                              \
     struct tailcall_ctx *tctx = tailcall_ctx_read();                          \
-    if (!tctx) return tailcall_epilogue(ctx, XDP_DROP);                       \
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);                       \
     TAILCALL_BOUND_L3OFF(tctx, l3_off);                                       \
     void *data = (void *)(long)ctx->data;                                     \
     void *data_end = (void *)(long)ctx->data_end;                             \
     int action;                                                                \
     if (l3_off == 18) {                                                        \
         struct ethhdr *eth = data;                                             \
-        if ((void *)(eth + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + 18);                  \
-        if ((void *)(ip6h + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(ip6h + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         action = fn_name(ctx, eth, ip6h, &tctx->headend, 18);                 \
     } else if (l3_off == 22) {                                                 \
         struct ethhdr *eth = data;                                             \
-        if ((void *)(eth + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + 22);                  \
-        if ((void *)(ip6h + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(ip6h + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         action = fn_name(ctx, eth, ip6h, &tctx->headend, 22);                 \
     } else {                                                                   \
         struct ethhdr *eth = data;                                             \
-        if ((void *)(eth + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(eth + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + 14);                  \
-        if ((void *)(ip6h + 1) > data_end) return tailcall_epilogue(ctx, XDP_DROP); \
+        if ((void *)(ip6h + 1) > data_end) TAILCALL_RETURN(ctx,XDP_DROP); \
         action = fn_name(ctx, eth, ip6h, &tctx->headend, 14);                 \
     }                                                                          \
-    return tailcall_epilogue(ctx, action)
+    TAILCALL_RETURN(ctx,action)
 
 SEC("xdp")
 int tailcall_headend_v4_h_encaps(struct xdp_md *ctx) { HEADEND_V4_BODY(do_h_encaps_v4); }

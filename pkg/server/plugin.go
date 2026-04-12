@@ -48,6 +48,30 @@ func (s *PluginServer) PluginRegister(
 			fmt.Errorf("section %q not found in ELF; available: %v", msg.Section, available))
 	}
 
+	// Verify the plugin includes tailcall_epilogue (required by plugin contract).
+	// tailcall_epilogue is a __noinline BPF subprogram that appears in the ELF
+	// as a function in the .text section. cilium/ebpf attaches subprograms to
+	// their calling program, so we check if any program references it by
+	// looking for it in the ELF's program specs (it may be in .text or as a
+	// subprogram of the main function). We verify by checking the function name
+	// exists in any program's instructions.
+	hasEpilogue := false
+	for _, ps := range spec.Programs {
+		for _, fn := range ps.Instructions.FunctionReferences() {
+			if fn == "tailcall_epilogue" {
+				hasEpilogue = true
+				break
+			}
+		}
+		if hasEpilogue {
+			break
+		}
+	}
+	if !hasEpilogue {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("plugin does not include tailcall_epilogue; include core/xdp_tailcall_helpers.h and call tailcall_epilogue() before returning"))
+	}
+
 	// Ensure all programs are XDP type
 	for _, ps := range spec.Programs {
 		ps.Type = ebpf.XDP

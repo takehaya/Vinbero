@@ -54,7 +54,16 @@ static __always_inline struct tailcall_ctx *tailcall_ctx_read(void)
 // call this epilogue before returning to record final-action stats and
 // invoke the xdpcap hook.
 
-static __always_inline int tailcall_epilogue(struct xdp_md *ctx, int action)
+// __noinline: BPF subprogram so it appears as BTF_KIND_FUNC in the ELF.
+// This allows the server to verify that plugins include the epilogue
+// by checking BTF for the "tailcall_epilogue" function symbol.
+// Overhead is ~2-5ns per packet (negligible vs map lookups at ~50ns).
+//
+// Stats are recorded here. xdpcap hook is NOT called from this subprogram
+// because the additional stack frame would exceed BPF's 256-byte call stack
+// limit in headend targets with large inline expansions. The caller handles
+// xdpcap if needed.
+static __noinline int tailcall_epilogue(struct xdp_md *ctx, int action)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -74,8 +83,14 @@ static __always_inline int tailcall_epilogue(struct xdp_md *ctx, int action)
         break;
     }
 
-    // xdpcap hook (tail call depth: main→target→xdpcap = 2, limit is 33)
-    RETURN_ACTION(ctx, &xdpcap_hook, action);
+    return action;
 }
+
+// Wrapper: stats via noinline epilogue + xdpcap hook (inline, for tail call targets)
+#define TAILCALL_RETURN(ctx, action) \
+    do { \
+        int _act = tailcall_epilogue(ctx, action); \
+        RETURN_ACTION(ctx, &xdpcap_hook, _act); \
+    } while (0)
 
 #endif // XDP_TAILCALL_HELPERS_H

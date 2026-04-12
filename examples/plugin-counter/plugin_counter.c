@@ -28,12 +28,12 @@ int plugin_counter(struct xdp_md *ctx)
     // 1. Read tail call context
     struct tailcall_ctx *tctx = tailcall_ctx_read();
     if (!tctx)
-        return tailcall_epilogue(ctx, XDP_DROP);
+        TAILCALL_RETURN(ctx,XDP_DROP);
 
     // 2. Bound l3_offset (mandatory for BPF verifier)
     __u16 l3_off = tctx->l3_offset;
     if (l3_off > 22)
-        return tailcall_epilogue(ctx, XDP_DROP);
+        TAILCALL_RETURN(ctx,XDP_DROP);
 
     // 3. Increment custom counter
     __u32 key = 0;
@@ -42,7 +42,7 @@ int plugin_counter(struct xdp_md *ctx)
         __sync_fetch_and_add(counter, 1);
 
     // 4. Pass packet through via epilogue (records stats + xdpcap)
-    return tailcall_epilogue(ctx, XDP_PASS);
+    TAILCALL_RETURN(ctx,XDP_PASS);
 }
 
 char _license[] SEC("license") = "GPL";
