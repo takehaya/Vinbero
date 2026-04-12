@@ -54,7 +54,7 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 	}
 
 	err = spec.LoadAndAssign(objs, &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{LogSizeStart: 1073741823, LogLevel: ebpf.LogLevelInstruction},
+		Programs: ebpf.ProgramOptions{LogSizeStart: 64 * 1024 * 1024, LogLevel: ebpf.LogLevelInstruction},
 	})
 	if err != nil {
 		var verr *ebpf.VerifierError
