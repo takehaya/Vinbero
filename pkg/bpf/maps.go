@@ -896,6 +896,28 @@ func FormatSegments(segments [MaxSegments][IPv6AddrLen]uint8, numSegments uint8)
 	return result
 }
 
+// GetSharedMaps returns a map of all BPF maps that plugins can reference.
+// Used by the server to replace map references when loading external plugins.
+func (m *MapOperations) GetSharedMaps() map[string]*ebpf.Map {
+	return map[string]*ebpf.Map{
+		"sid_function_map":   m.objs.SidFunctionMap,
+		"sid_aux_map":        m.objs.SidAuxMap,
+		"headend_v4_map":     m.objs.HeadendV4Map,
+		"headend_v6_map":     m.objs.HeadendV6Map,
+		"headend_l2_map":     m.objs.HeadendL2Map,
+		"fdb_map":            m.objs.FdbMap,
+		"bd_peer_map":        m.objs.BdPeerMap,
+		"bd_peer_reverse_map": m.objs.BdPeerReverseMap,
+		"scratch_map":        m.objs.ScratchMap,
+		"stats_map":          m.objs.StatsMap,
+		"xdpcap_hook":        m.objs.XdpcapHook,
+		"tailcall_ctx_map":   m.objs.TailcallCtxMap,
+		"sid_endpoint_progs": m.objs.SidEndpointProgs,
+		"headend_v4_progs":   m.objs.HeadendV4Progs,
+		"headend_v6_progs":   m.objs.HeadendV6Progs,
+	}
+}
+
 // ========== Plugin Registration ==========
 
 const (

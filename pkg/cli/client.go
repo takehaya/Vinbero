@@ -16,6 +16,7 @@ type Clients struct {
 	Resource vinberov1connect.NetworkResourceServiceClient
 	Fdb      vinberov1connect.FdbServiceClient
 	Stats    vinberov1connect.StatsServiceClient
+	Plugin   vinberov1connect.PluginServiceClient
 }
 
 func NewClients(serverURL string) *Clients {
@@ -31,5 +32,6 @@ func NewClients(serverURL string) *Clients {
 		Resource: vinberov1connect.NewNetworkResourceServiceClient(httpClient, serverURL, opts...),
 		Fdb:      vinberov1connect.NewFdbServiceClient(httpClient, serverURL, opts...),
 		Stats:    vinberov1connect.NewStatsServiceClient(httpClient, serverURL, opts...),
+		Plugin:   vinberov1connect.NewPluginServiceClient(httpClient, serverURL, opts...),
 	}
 }
