@@ -14,138 +14,168 @@
 #include <linux/ip.h>
 #include "core/srv6_fib.h"
 
-// H.Encaps core implementation - shared by both IPv4 and IPv6 encapsulation
-// RFC 8986 Section 5.1
+// Unified H.Encaps / H.Encaps.Red core implementation (RFC 8986 Section 5.1)
 //
-// Parameters:
-//   ctx: XDP context
-//   saved_eth: Pre-saved Ethernet header (must be saved before calling)
-//   entry: Headend entry with segments and source address
-//   inner_proto: Inner protocol (IPPROTO_IPIP for IPv4, IPPROTO_IPV6 for IPv6)
-//   inner_total_len: Total length of inner packet (IPv4: tot_len, IPv6: 40 + payload_len)
+// When reduced=false (H.Encaps):
+//   Full SRH with N segments. segments_left = N-1, first_segment = N-1.
+//
+// When reduced=true (H.Encaps.Red):
+//   N=1: No SRH, outer IPv6 nexthdr = inner_proto directly.
+//   N>=2: Reduced SRH with N-1 entries (S1 omitted).
+//         segments_left = N-1, first_segment = N-2.
 //
 // Returns: XDP action (XDP_REDIRECT, XDP_DROP, or XDP_PASS)
-static __always_inline int do_h_encaps_core(
+static __always_inline int do_h_encaps_impl(
     struct xdp_md *ctx,
     struct ethhdr *saved_eth,
     struct headend_entry *entry,
     __u8 inner_proto,
     __u16 inner_total_len,
-    __u16 l3_offset)
+    __u16 l3_offset,
+    bool reduced)
 {
-    // 1. Calculate new header sizes
-    // IPv6 basic header: 40 bytes
-    // SRH: 8 + 16 * num_segments bytes
-    int ipv6_hdr_len = sizeof(struct ipv6hdr);
-    int srh_len = 8 + (16 * entry->num_segments);
-    int new_headers_len = ipv6_hdr_len + srh_len;
+    bool no_srh = reduced && (entry->num_segments == 1);
+    int srh_entries = 0;
+    int srh_len = 0;
 
-    // 2. Make room for new headers, accounting for VLAN tag removal.
-    // VLAN tag (if present) is part of the outer L2 and is discarded.
-    // vlan_len bytes of VLAN tag are "reclaimed" as part of the expansion.
-    int vlan_len = l3_offset - ETH_HLEN;
-    if (bpf_xdp_adjust_head(ctx, -(new_headers_len - vlan_len))) {
-        DEBUG_PRINT("H.Encaps: bpf_xdp_adjust_head failed\n");
-        return XDP_DROP;
+    if (!no_srh) {
+        srh_entries = reduced ? entry->num_segments - 1 : entry->num_segments;
+        if (srh_entries < 1 || srh_entries > MAX_SEGMENTS)
+            return XDP_DROP;
+        srh_len = 8 + (16 * srh_entries);
     }
 
-    // 3. Re-fetch pointers after adjust_head (critical!)
+    int new_headers_len = (int)sizeof(struct ipv6hdr) + srh_len;
+
+    // Make room for new headers, reclaiming VLAN tag space
+    int vlan_len = l3_offset - ETH_HLEN;
+    if (bpf_xdp_adjust_head(ctx, -(new_headers_len - vlan_len)))
+        return XDP_DROP;
+
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
-    // 4. Boundary checks
     struct ethhdr *new_eth = data;
     CHECK_BOUND(new_eth, data_end, sizeof(*new_eth));
 
     struct ipv6hdr *outer_ip6h = (struct ipv6hdr *)(new_eth + 1);
     CHECK_BOUND(outer_ip6h, data_end, sizeof(*outer_ip6h));
 
-    struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
-    // Check SRH fixed header (8 bytes) first
-    CHECK_BOUND(srh, data_end, 8);
-    // Then check the entire SRH including segments
-    CHECK_BOUND(srh, data_end, srh_len);
-
-    // 5. Build outer IPv6 header
-    build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + inner_total_len,
+    // Build outer IPv6 header
+    build_outer_ipv6(outer_ip6h,
+                     no_srh ? inner_proto : IPPROTO_ROUTING,
+                     srh_len + inner_total_len,
                      entry->src_addr, &entry->segments[0]);
 
-    // 6. Build SRH
-    srh->nexthdr = inner_proto;
-    srh->hdrlen = (srh_len >> 3) - 1;  // Length in 8-byte units, excluding first 8 bytes
-    srh->type = IPV6_SRCRT_TYPE_4;  // Segment Routing
-    srh->segments_left = entry->num_segments - 1;
-    srh->first_segment = entry->num_segments - 1;
-    srh->flags = 0;
-    srh->tag = 0;
+    // Build SRH (if present)
+    if (!no_srh) {
+        struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
+        CHECK_BOUND(srh, data_end, 8);
+        CHECK_BOUND(srh, data_end, srh_len);
 
-    // 7. Copy segment list in reverse order (RFC 8754)
-    // Input: [S1, S2, S3] -> SRH storage: [S3, S2, S1]
-    void *srh_segments = (void *)srh + 8;
-    if (copy_segments_to_srh(srh_segments, data_end, entry->segments, entry->num_segments) != 0) {
-        DEBUG_PRINT("H.Encaps: Failed to copy segments\n");
-        return XDP_DROP;
+        srh->nexthdr = inner_proto;
+        srh->hdrlen = (srh_len >> 3) - 1;
+        srh->type = IPV6_SRCRT_TYPE_4;
+        srh->segments_left = reduced ? srh_entries : srh_entries - 1;
+        srh->first_segment = srh_entries - 1;
+        srh->flags = 0;
+        srh->tag = 0;
+
+        void *srh_segments = (void *)srh + 8;
+        int ret;
+        if (reduced)
+            ret = copy_segments_to_srh_reduced(srh_segments, data_end,
+                                               entry->segments, entry->num_segments);
+        else
+            ret = copy_segments_to_srh(srh_segments, data_end,
+                                       entry->segments, entry->num_segments);
+        if (ret != 0)
+            return XDP_DROP;
     }
 
-    // 8. Copy saved Ethernet header
+    // Restore Ethernet header
     __builtin_memcpy(new_eth, saved_eth, sizeof(struct ethhdr));
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    // 9. FIB lookup and redirect
+    // FIB lookup and redirect
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
-
-    switch (fib_result) {
-    case FIB_RESULT_REDIRECT:
-        DEBUG_PRINT("H.Encaps: Success, redirect to ifindex %d\n", ifindex);
-        return bpf_redirect(ifindex, 0);
-    case FIB_RESULT_DROP:
-        DEBUG_PRINT("H.Encaps: FIB lookup drop\n");
-        return XDP_DROP;
-    default:
-        DEBUG_PRINT("H.Encaps: FIB lookup needs kernel\n");
-        return XDP_PASS;
-    }
+    return fib_result_to_xdp_action(fib_result, ifindex);
 }
+
+// Thin wrappers preserving existing function signatures for callers
+static __always_inline int do_h_encaps_core(
+    struct xdp_md *ctx, struct ethhdr *saved_eth, struct headend_entry *entry,
+    __u8 inner_proto, __u16 inner_total_len, __u16 l3_offset)
+{
+    return do_h_encaps_impl(ctx, saved_eth, entry, inner_proto, inner_total_len, l3_offset, false);
+}
+
+static __always_inline int do_h_encaps_red_core(
+    struct xdp_md *ctx, struct ethhdr *saved_eth, struct headend_entry *entry,
+    __u8 inner_proto, __u16 inner_total_len, __u16 l3_offset)
+{
+    return do_h_encaps_impl(ctx, saved_eth, entry, inner_proto, inner_total_len, l3_offset, true);
+}
+
+// ========================================================================
+// IPv4/IPv6 Wrapper Functions
+// ========================================================================
 
 // H.Encaps for IPv4 (RFC 8986 Section 5.1)
 static __always_inline int do_h_encaps_v4(
-    struct xdp_md *ctx,
-    struct ethhdr *eth,
-    struct iphdr *iph,
-    struct headend_entry *entry,
-    __u16 l3_offset)
+    struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph,
+    struct headend_entry *entry, __u16 l3_offset)
 {
-    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
-        DEBUG_PRINT("H.Encaps.v4: Invalid segment count %d\n", entry->num_segments);
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
-    }
 
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-    __u16 inner_total_len = bpf_ntohs(iph->tot_len);
-
-    return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPIP, inner_total_len, l3_offset);
+    return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPIP,
+                            bpf_ntohs(iph->tot_len), l3_offset);
 }
 
 // H.Encaps for IPv6 (RFC 8986 Section 5.1)
 static __always_inline int do_h_encaps_v6(
-    struct xdp_md *ctx,
-    struct ethhdr *eth,
-    struct ipv6hdr *inner_ip6h,
-    struct headend_entry *entry,
-    __u16 l3_offset)
+    struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hdr *inner_ip6h,
+    struct headend_entry *entry, __u16 l3_offset)
 {
-    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS) {
-        DEBUG_PRINT("H.Encaps.v6: Invalid segment count %d\n", entry->num_segments);
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
-    }
 
     struct ethhdr saved_eth;
     __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
-    __u16 inner_total_len = 40 + bpf_ntohs(inner_ip6h->payload_len);
+    return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPV6,
+                            40 + bpf_ntohs(inner_ip6h->payload_len), l3_offset);
+}
 
-    return do_h_encaps_core(ctx, &saved_eth, entry, IPPROTO_IPV6, inner_total_len, l3_offset);
+// H.Encaps.Red for IPv4 (RFC 8986 Section 5.1.1)
+static __always_inline int do_h_encaps_red_v4(
+    struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph,
+    struct headend_entry *entry, __u16 l3_offset)
+{
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
+        return XDP_DROP;
+
+    struct ethhdr saved_eth;
+    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
+    return do_h_encaps_red_core(ctx, &saved_eth, entry, IPPROTO_IPIP,
+                                bpf_ntohs(iph->tot_len), l3_offset);
+}
+
+// H.Encaps.Red for IPv6 (RFC 8986 Section 5.1.1)
+static __always_inline int do_h_encaps_red_v6(
+    struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hdr *inner_ip6h,
+    struct headend_entry *entry, __u16 l3_offset)
+{
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
+        return XDP_DROP;
+
+    struct ethhdr saved_eth;
+    __builtin_memcpy(&saved_eth, eth, sizeof(struct ethhdr));
+    return do_h_encaps_red_core(ctx, &saved_eth, entry, IPPROTO_IPV6,
+                                40 + bpf_ntohs(inner_ip6h->payload_len), l3_offset);
 }
 
 #endif // SRV6_ENCAPS_H

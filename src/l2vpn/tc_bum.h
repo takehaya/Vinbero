@@ -70,27 +70,18 @@ static __always_inline int tc_srv6_fib_lookup_and_update(
     return 0;
 }
 
-// Mode 2: Encap a single clone for one PE, then redirect.
-// Called when cb[0] == TC_CB_ENCAP_MAGIC. The clone is consumed (redirected).
-// Uses bpf_skb_change_head (no skb->protocol restriction, unlike bpf_skb_adjust_room).
+// Unified Mode 2 encap: single clone for one PE, then redirect.
+// Handles both full SRH (reduced=false) and reduced SRH (reduced=true).
+// Uses bpf_skb_change_head (no skb->protocol restriction).
 //
-// VLAN materialization:
-// Generic XDP on veth converts xdp_buff→skb internally, and during that
-// conversion the kernel unconditionally moves the VLAN tag from packet data
-// to skb->vlan_tci (HW VLAN acceleration). ethtool -K rxvlan off does NOT
-// prevent this — it only controls NIC driver-level offload, not the generic
-// XDP conversion path.
-//
-// As a result, by the time TC ingress runs, packet data is already untagged.
-// If we encapsulate it as-is, the decap side (End.DT2) delivers an untagged
-// frame, breaking the return path (headend_l2_map keyed on vlan_id won't match).
-//
-// Fix: allocate 4 extra bytes in bpf_skb_change_head, shift the inner
-// dst+src MAC left, and insert 802.1Q TPID+TCI so the inner frame is tagged.
-static __noinline int tc_do_single_pe_encap(
+// VLAN materialization: Generic XDP on veth converts xdp_buff→skb internally,
+// moving VLAN tag from packet data to skb->vlan_tci unconditionally.
+// We re-insert the tag so the decap side (End.DT2) delivers a tagged frame.
+static __noinline int tc_do_single_pe_encap_impl(
     struct __sk_buff *skb,
     __u32 cb_bd_id,
-    __u32 cb_pe_index)
+    __u32 cb_pe_index,
+    bool reduced)
 {
     __u16 vlan_id = (__u16)skb->cb[3];
 
@@ -99,24 +90,34 @@ static __noinline int tc_do_single_pe_encap(
     if (!entry || entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return TC_ACT_SHOT;
 
-    int srh_len = 8 + (16 * entry->num_segments);
-    int new_headers_len = (int)sizeof(struct ethhdr) + (int)sizeof(struct ipv6hdr) + srh_len;
-
     // Pop HW VLAN if present (generic XDP moves VLAN tag to skb->vlan_tci)
     if (skb->vlan_present)
         bpf_skb_vlan_pop(skb);
 
-    // Allocate extra 4 bytes for VLAN tag materialization in inner frame
     bool needs_vlan = (vlan_id > 0);
     int vlan_extra = needs_vlan ? 4 : 0;
-
-    // l2_frame_len = untagged frame + VLAN tag bytes (for outer IPv6 payload_len)
     __u16 l2_frame_len = (__u16)(skb->len) + (__u16)vlan_extra;
 
-    if (bpf_skb_change_head(skb, new_headers_len + vlan_extra, 0)) {
-        DEBUG_PRINT("TC encap: bpf_skb_change_head failed\n");
-        return TC_ACT_SHOT;
+    // Compute SRH size
+    bool no_srh = reduced && (entry->num_segments == 1);
+    int srh_len = 0;
+    int reduced_count = 0;
+
+    if (!no_srh) {
+        if (reduced) {
+            reduced_count = entry->num_segments - 1;
+            if (reduced_count < 1 || reduced_count > MAX_SEGMENTS - 1)
+                return TC_ACT_SHOT;
+            srh_len = 8 + (16 * reduced_count);
+        } else {
+            srh_len = 8 + (16 * entry->num_segments);
+        }
     }
+
+    int new_headers_len = (int)sizeof(struct ethhdr) + (int)sizeof(struct ipv6hdr) + srh_len;
+
+    if (bpf_skb_change_head(skb, new_headers_len + vlan_extra, 0))
+        return TC_ACT_SHOT;
 
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
@@ -135,34 +136,49 @@ static __noinline int tc_do_single_pe_encap(
     if ((void *)(outer_ip6h + 1) > data_end)
         return TC_ACT_SHOT;
 
-    build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
-                     entry->src_addr, &entry->segments[0]);
+    if (no_srh) {
+        build_outer_ipv6(outer_ip6h, IPPROTO_ETHERNET, l2_frame_len,
+                         entry->src_addr, &entry->segments[0]);
+    } else {
+        build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
+                         entry->src_addr, &entry->segments[0]);
 
-    // SRH
-    struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
-    if ((void *)srh + 8 > data_end)
-        return TC_ACT_SHOT;
-    if ((void *)srh + 8 + (16 * entry->num_segments) > data_end)
-        return TC_ACT_SHOT;
+        // SRH
+        struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
+        if ((void *)srh + 8 > data_end)
+            return TC_ACT_SHOT;
+        if ((void *)srh + 8 + srh_len - 8 > data_end)
+            return TC_ACT_SHOT;
 
-    srh->nexthdr = IPPROTO_ETHERNET;
-    srh->hdrlen = (srh_len >> 3) - 1;
-    srh->type = IPV6_SRCRT_TYPE_4;
-    srh->segments_left = entry->num_segments - 1;
-    srh->first_segment = entry->num_segments - 1;
-    srh->flags = 0;
-    srh->tag = 0;
+        srh->nexthdr = IPPROTO_ETHERNET;
+        srh->hdrlen = (srh_len >> 3) - 1;
+        srh->type = IPV6_SRCRT_TYPE_4;
+        srh->flags = 0;
+        srh->tag = 0;
 
-    void *srh_segments = (void *)srh + 8;
-    if (copy_segments_to_srh(srh_segments, data_end, entry->segments, entry->num_segments) != 0)
-        return TC_ACT_SHOT;
+        if (reduced) {
+            // TODO: should be reduced_count per RFC 8986, but BPF verifier rejects it
+            // in TC context. XDP path uses the correct value.
+            srh->segments_left = reduced_count - 1;
+            srh->first_segment = reduced_count - 1;
 
-    // FIB lookup for next-hop MAC (must use direct pointers before store_bytes)
-    __u32 ifindex;
-    if (tc_srv6_fib_lookup_and_update(skb, outer_ip6h, new_eth, &ifindex) != 0) {
-        DEBUG_PRINT("TC encap: FIB lookup failed\n");
-        return TC_ACT_SHOT;
+            void *srh_segments = (void *)srh + 8;
+            if (copy_segments_to_srh_reduced(srh_segments, data_end, entry->segments, entry->num_segments) != 0)
+                return TC_ACT_SHOT;
+        } else {
+            srh->segments_left = entry->num_segments - 1;
+            srh->first_segment = entry->num_segments - 1;
+
+            void *srh_segments = (void *)srh + 8;
+            if (copy_segments_to_srh(srh_segments, data_end, entry->segments, entry->num_segments) != 0)
+                return TC_ACT_SHOT;
+        }
     }
+
+    // FIB lookup for next-hop MAC
+    __u32 ifindex;
+    if (tc_srv6_fib_lookup_and_update(skb, outer_ip6h, new_eth, &ifindex) != 0)
+        return TC_ACT_SHOT;
 
     if (needs_vlan && tc_materialize_vlan(skb, new_headers_len, vlan_id) != 0)
         return TC_ACT_SHOT;
@@ -170,97 +186,16 @@ static __noinline int tc_do_single_pe_encap(
     return bpf_redirect(ifindex, 0);
 }
 
-// TC H.Encaps.L2.Red: Reduced SRH variant for TC BUM clones
-// N=1: no SRH, just outer Eth + IPv6 (nexthdr=IPPROTO_ETHERNET)
-// N>=2: reduced SRH with N-1 segments (S1 omitted)
-static __noinline int tc_do_single_pe_encap_red(
-    struct __sk_buff *skb,
-    __u32 cb_bd_id,
-    __u32 cb_pe_index)
+static __noinline int tc_do_single_pe_encap(
+    struct __sk_buff *skb, __u32 cb_bd_id, __u32 cb_pe_index)
 {
-    __u16 vlan_id = (__u16)skb->cb[3];
+    return tc_do_single_pe_encap_impl(skb, cb_bd_id, cb_pe_index, false);
+}
 
-    struct bd_peer_key pk = { .bd_id = (__u16)cb_bd_id, .index = (__u16)cb_pe_index };
-    struct headend_entry *entry = bpf_map_lookup_elem(&bd_peer_map, &pk);
-    if (!entry || entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
-        return TC_ACT_SHOT;
-
-    // Pop HW VLAN if present
-    if (skb->vlan_present)
-        bpf_skb_vlan_pop(skb);
-
-    bool needs_vlan = (vlan_id > 0);
-    int vlan_extra = needs_vlan ? 4 : 0;
-    __u16 l2_frame_len = (__u16)(skb->len) + (__u16)vlan_extra;
-
-    int reduced_count = 0;
-    int srh_len = 0;
-    if (entry->num_segments >= 2) {
-        reduced_count = entry->num_segments - 1;
-        if (reduced_count < 1 || reduced_count > MAX_SEGMENTS - 1)
-            return TC_ACT_SHOT;
-        srh_len = 8 + (16 * reduced_count);
-    }
-    int new_headers_len = (int)sizeof(struct ethhdr) + (int)sizeof(struct ipv6hdr) + srh_len;
-
-    if (bpf_skb_change_head(skb, new_headers_len + vlan_extra, 0)) {
-        DEBUG_PRINT("TC encap red: bpf_skb_change_head failed\n");
-        return TC_ACT_SHOT;
-    }
-
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
-    struct ethhdr *new_eth = data;
-    if ((void *)(new_eth + 1) > data_end)
-        return TC_ACT_SHOT;
-
-    __builtin_memset(new_eth->h_dest, 0, ETH_ALEN);
-    __builtin_memset(new_eth->h_source, 0, ETH_ALEN);
-    new_eth->h_proto = bpf_htons(ETH_P_IPV6);
-
-    struct ipv6hdr *outer_ip6h = (struct ipv6hdr *)(new_eth + 1);
-    if ((void *)(outer_ip6h + 1) > data_end)
-        return TC_ACT_SHOT;
-
-    if (entry->num_segments == 1) {
-        build_outer_ipv6(outer_ip6h, IPPROTO_ETHERNET, l2_frame_len,
-                         entry->src_addr, &entry->segments[0]);
-    } else {
-        build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
-                         entry->src_addr, &entry->segments[0]);
-
-        struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);
-        if ((void *)srh + 8 > data_end)
-            return TC_ACT_SHOT;
-        if ((void *)srh + srh_len > data_end)
-            return TC_ACT_SHOT;
-
-        srh->nexthdr = IPPROTO_ETHERNET;
-        srh->hdrlen = (srh_len >> 3) - 1;
-        srh->type = IPV6_SRCRT_TYPE_4;
-        // TODO: should be reduced_count per RFC 8986, but BPF verifier rejects it
-        // in TC context. XDP path uses the correct value.
-        srh->segments_left = reduced_count - 1;
-        srh->first_segment = reduced_count - 1;
-        srh->flags = 0;
-        srh->tag = 0;
-
-        void *srh_segments = (void *)srh + 8;
-        if (copy_segments_to_srh_reduced(srh_segments, data_end, entry->segments, entry->num_segments) != 0)
-            return TC_ACT_SHOT;
-    }
-
-    __u32 ifindex;
-    if (tc_srv6_fib_lookup_and_update(skb, outer_ip6h, new_eth, &ifindex) != 0) {
-        DEBUG_PRINT("TC encap red: FIB lookup failed\n");
-        return TC_ACT_SHOT;
-    }
-
-    if (needs_vlan && tc_materialize_vlan(skb, new_headers_len, vlan_id) != 0)
-        return TC_ACT_SHOT;
-
-    return bpf_redirect(ifindex, 0);
+static __noinline int tc_do_single_pe_encap_red(
+    struct __sk_buff *skb, __u32 cb_bd_id, __u32 cb_pe_index)
+{
+    return tc_do_single_pe_encap_impl(skb, cb_bd_id, cb_pe_index, true);
 }
 
 // Mode 1: Dispatch clones to self for each remote PE in the BD.

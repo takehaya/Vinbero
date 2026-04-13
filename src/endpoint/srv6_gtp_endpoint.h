@@ -215,15 +215,7 @@ static __always_inline int process_end_m_gtp6_d(
 
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, new_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
-
-    switch (fib_result) {
-    case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
-    case FIB_RESULT_DROP:
-        return XDP_DROP;
-    default:
-        return XDP_PASS;
-    }
+    return fib_result_to_xdp_action(fib_result, ifindex);
 }
 
 // ========== End.M.GTP6.D.Di: GTP-U/IPv6 → SRv6 Drop-In (RFC 9433) ==========
@@ -376,15 +368,7 @@ static __always_inline int process_end_m_gtp6_e(
     // 11. FIB lookup + redirect
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
-
-    switch (fib_result) {
-    case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
-    case FIB_RESULT_DROP:
-        return XDP_DROP;
-    default:
-        return XDP_PASS;
-    }
+    return fib_result_to_xdp_action(fib_result, ifindex);
 }
 
 #endif // SRV6_GTP_ENDPOINT_H

@@ -64,6 +64,19 @@ static __always_inline int srv6_fib_lookup_and_update(
     return srv6_fib_lookup_v6_core(ctx, ip6h, eth, out_ifindex, &ip6h->daddr, ifindex);
 }
 
+// Convert FIB lookup result to XDP action (redirect/drop/pass)
+static __always_inline int fib_result_to_xdp_action(int fib_result, __u32 ifindex)
+{
+    switch (fib_result) {
+    case FIB_RESULT_REDIRECT:
+        return bpf_redirect(ifindex, 0);
+    case FIB_RESULT_DROP:
+        return XDP_DROP;
+    default:
+        return XDP_PASS;
+    }
+}
+
 // Convenience wrapper that performs FIB lookup and returns XDP action
 static __always_inline int srv6_fib_redirect(
     struct xdp_md *ctx,
@@ -73,15 +86,7 @@ static __always_inline int srv6_fib_redirect(
 {
     __u32 out_ifindex;
     int result = srv6_fib_lookup_and_update(ctx, ip6h, eth, &out_ifindex, ifindex);
-
-    switch (result) {
-    case FIB_RESULT_REDIRECT:
-        return bpf_redirect(out_ifindex, 0);
-    case FIB_RESULT_DROP:
-        return XDP_DROP;
-    default:
-        return XDP_PASS;
-    }
+    return fib_result_to_xdp_action(result, out_ifindex);
 }
 
 // ========================================================================
@@ -132,15 +137,7 @@ static __always_inline int srv6_fib_redirect_v4(
 {
     __u32 out_ifindex;
     int result = srv6_fib_lookup_and_update_v4(ctx, iph, eth, &out_ifindex, ifindex);
-
-    switch (result) {
-    case FIB_RESULT_REDIRECT:
-        return bpf_redirect(out_ifindex, 0);
-    case FIB_RESULT_DROP:
-        return XDP_DROP;
-    default:
-        return XDP_PASS;
-    }
+    return fib_result_to_xdp_action(result, out_ifindex);
 }
 
 #endif // SRV6_FIB_H
