@@ -22,7 +22,7 @@ func pluginCommand() *cli.Command {
 					&cli.StringFlag{Name: "type", Required: true, Usage: "PROG_ARRAY target: endpoint, headend_v4, headend_v6"},
 					&cli.UintFlag{Name: "index", Required: true, Usage: "Plugin slot index (endpoint: 32-63, headend: 16-31)"},
 					&cli.StringFlag{Name: "prog", Required: true, Usage: "Path to compiled BPF ELF object file"},
-					&cli.StringFlag{Name: "section", Value: "xdp", Usage: "BPF program section name in the ELF"},
+					&cli.StringFlag{Name: "program", Required: true, Usage: "BPF program function name in the ELF (e.g., plugin_counter)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -37,7 +37,7 @@ func pluginCommand() *cli.Command {
 						MapType: c.String("type"),
 						Index:   uint32(c.Uint("index")),
 						BpfElf:  elfBytes,
-						Section: c.String("section"),
+						Program: c.String("program"),
 					}
 
 					_, err = clients.Plugin.PluginRegister(context.Background(), connect.NewRequest(req))
@@ -45,8 +45,8 @@ func pluginCommand() *cli.Command {
 						return err
 					}
 
-					fmt.Printf("Plugin registered: type=%s index=%d prog=%s section=%s\n",
-						req.MapType, req.Index, elfPath, req.Section)
+					fmt.Printf("Plugin registered: type=%s index=%d prog=%s program=%s\n",
+						req.MapType, req.Index, elfPath, req.Program)
 					return nil
 				},
 			},

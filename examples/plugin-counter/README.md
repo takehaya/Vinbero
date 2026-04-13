@@ -78,11 +78,11 @@ sudo ip netns exec plgcnt-router2 ../../out/bin/vinberod -c vinbero_config.yaml 
 
 # プラグインをスロット32に登録
 sudo ip netns exec plgcnt-router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
-  plugin register --type endpoint --index 32 --prog /tmp/plugin_counter.o --section plugin_counter
+  plugin register --type endpoint --index 32 --prog /tmp/plugin_counter.o --program plugin_counter
 
 # SIDをプラグインに向ける
 sudo ip netns exec plgcnt-router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
-  sid create --trigger-prefix fc00:2::32/128 --action END_BPF
+  sid create --trigger-prefix fc00:2::32/128 --action 32
 ```
 
 ### 3. テスト

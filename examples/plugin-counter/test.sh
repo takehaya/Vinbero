@@ -83,7 +83,7 @@ ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
     --type endpoint \
     --index ${PLUGIN_INDEX} \
     --prog "${PLUGIN_OBJ}" \
-    --section plugin_counter
+    --program plugin_counter
 print_success "Plugin registered at slot ${PLUGIN_INDEX}"
 
 # ==========================================
@@ -95,9 +95,11 @@ print_info "Creating SID fc00:2::32/128 → plugin (action=${PLUGIN_INDEX})..."
 ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
     sid create --trigger-prefix fc00:2::1/128 --action END
 
-# Create the plugin SID — action=32 dispatches to our plugin
+# Create the plugin SID — action=32 dispatches to our plugin at slot 32.
+# Note: END_BPF resolves to enum value 16, not slot 32. Use the raw numeric
+# index so the tail call goes to the correct PROG_ARRAY slot.
 ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
-    sid create --trigger-prefix fc00:2::32/128 --action END_BPF
+    sid create --trigger-prefix fc00:2::32/128 --action ${PLUGIN_INDEX}
 
 # Update the route on router1 to use the plugin SID
 ip netns exec "$ns_router1" ip -6 route add fc00:3::/64 \

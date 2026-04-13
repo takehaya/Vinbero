@@ -28,8 +28,8 @@ func (s *PluginServer) PluginRegister(
 	if len(msg.BpfElf) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bpf_elf is empty"))
 	}
-	if msg.Section == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("section is required"))
+	if msg.Program == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("program is required"))
 	}
 
 	// Load BPF collection spec from ELF bytes
@@ -38,14 +38,14 @@ func (s *PluginServer) PluginRegister(
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("failed to parse BPF ELF: %w", err))
 	}
 
-	// Find the requested program section
-	if _, ok := spec.Programs[msg.Section]; !ok {
+	// Find the requested program by function name
+	if _, ok := spec.Programs[msg.Program]; !ok {
 		var available []string
 		for name := range spec.Programs {
 			available = append(available, name)
 		}
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("section %q not found in ELF; available: %v", msg.Section, available))
+			fmt.Errorf("program %q not found in ELF; available: %v", msg.Program, available))
 	}
 
 	// Verify the plugin includes tailcall_epilogue (required by plugin contract).
@@ -101,15 +101,16 @@ func (s *PluginServer) PluginRegister(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to load BPF program: %w", err))
 	}
+	// Close the collection when done. The PROG_ARRAY map holds a kernel
+	// reference to the program, so closing the userspace FD is safe.
+	defer coll.Close()
 
-	prog, ok := coll.Programs[msg.Section]
+	prog, ok := coll.Programs[msg.Program]
 	if !ok {
-		coll.Close()
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("program %q disappeared after load", msg.Section))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("program %q disappeared after load", msg.Program))
 	}
 
 	if err := s.mapOps.RegisterPlugin(msg.MapType, msg.Index, prog.FD()); err != nil {
-		coll.Close()
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("failed to register plugin: %w", err))
 	}
 

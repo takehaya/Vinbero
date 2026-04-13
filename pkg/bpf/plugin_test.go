@@ -62,8 +62,8 @@ func TestPluginOperations(t *testing.T) {
 		}
 
 		err = h.objs.SidEndpointProgs.Lookup(pluginIndex, &storedFD)
-		if err != nil {
-			t.Log("Slot cleared after unregister")
+		if err == nil {
+			t.Error("Expected lookup to fail after unregister, but it succeeded")
 		}
 	})
 
