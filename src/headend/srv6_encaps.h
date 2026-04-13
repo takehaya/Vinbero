@@ -103,19 +103,40 @@ static __always_inline int do_h_encaps_impl(
     return fib_result_to_xdp_action(fib_result, ifindex);
 }
 
-// Thin wrappers preserving existing function signatures for callers
+// Args struct for noinline subprogram (BPF functions support max 5 register args)
+struct h_encaps_args {
+    __u8 inner_proto;
+    bool reduced;
+    __u16 inner_total_len;
+    __u16 l3_offset;
+};
+
+// Noinline subprogram to limit verifier scope.
+// End.B6.Encaps calls both core and red_core; inlining both into the same
+// tail call target exceeds the verifier's state tracking on kernel 6.1.
+static __noinline int __do_h_encaps_subprog(
+    struct xdp_md *ctx, struct ethhdr *saved_eth, struct headend_entry *entry,
+    struct h_encaps_args *args)
+{
+    return do_h_encaps_impl(ctx, saved_eth, entry, args->inner_proto,
+                            args->inner_total_len, args->l3_offset, args->reduced);
+}
+
+// Inline wrappers preserving existing 6-arg signatures for callers
 static __always_inline int do_h_encaps_core(
     struct xdp_md *ctx, struct ethhdr *saved_eth, struct headend_entry *entry,
     __u8 inner_proto, __u16 inner_total_len, __u16 l3_offset)
 {
-    return do_h_encaps_impl(ctx, saved_eth, entry, inner_proto, inner_total_len, l3_offset, false);
+    struct h_encaps_args args = { inner_proto, false, inner_total_len, l3_offset };
+    return __do_h_encaps_subprog(ctx, saved_eth, entry, &args);
 }
 
 static __always_inline int do_h_encaps_red_core(
     struct xdp_md *ctx, struct ethhdr *saved_eth, struct headend_entry *entry,
     __u8 inner_proto, __u16 inner_total_len, __u16 l3_offset)
 {
-    return do_h_encaps_impl(ctx, saved_eth, entry, inner_proto, inner_total_len, l3_offset, true);
+    struct h_encaps_args args = { inner_proto, true, inner_total_len, l3_offset };
+    return __do_h_encaps_subprog(ctx, saved_eth, entry, &args);
 }
 
 // ========================================================================
