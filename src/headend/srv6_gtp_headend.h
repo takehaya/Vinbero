@@ -39,6 +39,9 @@ static __always_inline int do_h_m_gtp4_d(
     if (iph->protocol != IPPROTO_UDP)
         return XDP_PASS;
 
+    if (iph->ihl < 5)
+        return XDP_DROP;
+
     void *udp_ptr = (void *)iph + (iph->ihl * 4);
     if (udp_ptr + sizeof(struct udphdr) > data_end)
         return XDP_PASS;
