@@ -118,4 +118,43 @@ struct xdpcap_hook {
     __uint(max_entries, 5);
 } xdpcap_hook SEC(".maps");
 
+// ========== Tail Call Infrastructure ==========
+
+#include "core/xdp_tailcall.h"
+
+// Per-CPU context for passing data across tail calls (single element)
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, struct tailcall_ctx);
+    __uint(max_entries, 1);
+} tailcall_ctx_map SEC(".maps");
+
+// Endpoint PROG_ARRAY (localsid + nosrh unified, indexed by srv6_local_action)
+struct {
+    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, ENDPOINT_PROG_MAX);
+} sid_endpoint_progs SEC(".maps");
+
+// Headend v4 PROG_ARRAY (indexed by srv6_headend_behavior)
+struct {
+    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, HEADEND_PROG_MAX);
+} headend_v4_progs SEC(".maps");
+
+// Headend v6 PROG_ARRAY (indexed by srv6_headend_behavior)
+struct {
+    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, HEADEND_PROG_MAX);
+} headend_v6_progs SEC(".maps");
+
+// Tail call helpers (must come after map definitions they reference)
+#include "core/xdp_tailcall_helpers.h"
+
 #endif // XDP_MAP_H

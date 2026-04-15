@@ -48,10 +48,14 @@ static __always_inline void save_vlan_tags(
     saved_vlan[0] = 0;
     saved_vlan[1] = 0;
     if (l3_offset > ETH_HLEN) {
+        // Prove l3_offset bytes from eth are accessible (covers VLAN area).
+        // Using eth-based check so the verifier extends eth's range to l3_offset,
+        // preventing "invalid access to packet" when compiler collapses vlan_ptr to eth+14.
+        if (eth + l3_offset > data_end)
+            return;
         void *vlan_ptr = eth + ETH_HLEN;
-        if (vlan_ptr + 4 <= data_end)
-            __builtin_memcpy(&saved_vlan[0], vlan_ptr, 4);
-        if (l3_offset > ETH_HLEN + 4 && vlan_ptr + 8 <= data_end)
+        __builtin_memcpy(&saved_vlan[0], vlan_ptr, 4);
+        if (l3_offset > ETH_HLEN + 4)
             __builtin_memcpy(&saved_vlan[1], vlan_ptr + 4, 4);
     }
 }
@@ -65,13 +69,11 @@ static __always_inline int restore_vlan_tags(
     __u16 l3_offset)
 {
     if (l3_offset > ETH_HLEN) {
+        if (eth + l3_offset > data_end) return -1;
         void *vlan_ptr = eth + ETH_HLEN;
-        if (vlan_ptr + 4 > data_end) return -1;
         __builtin_memcpy(vlan_ptr, &saved_vlan[0], 4);
-        if (l3_offset > ETH_HLEN + 4) {
-            if (vlan_ptr + 8 > data_end) return -1;
+        if (l3_offset > ETH_HLEN + 4)
             __builtin_memcpy(vlan_ptr + 4, &saved_vlan[1], 4);
-        }
     }
     return 0;
 }

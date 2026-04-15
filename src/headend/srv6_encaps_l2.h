@@ -65,16 +65,9 @@ static __noinline int do_h_encaps_l2(
 
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
-
-    switch (fib_result) {
-    case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
-    case FIB_RESULT_DROP:
-        return XDP_DROP;
-    default:
-        // After encap, must not return XDP_PASS (stale pointers in caller)
-        return XDP_DROP;
-    }
+    // After encap, must not return XDP_PASS (stale pointers in caller)
+    int action = fib_result_to_xdp_action(fib_result, ifindex);
+    return (action == XDP_PASS) ? XDP_DROP : action;
 }
 
 // H.Encaps.L2.Red single-segment: no SRH, just outer Eth + IPv6 + inner L2
@@ -106,13 +99,8 @@ static __always_inline int do_h_encaps_l2_red_1seg(
 
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
-
-    switch (fib_result) {
-    case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
-    default:
-        return XDP_DROP;
-    }
+    int action = fib_result_to_xdp_action(fib_result, ifindex);
+    return (action == XDP_PASS) ? XDP_DROP : action;
 }
 
 // H.Encaps.L2.Red multi-segment: reduced SRH with N-1 entries
@@ -170,13 +158,8 @@ static __always_inline int do_h_encaps_l2_red_multi(
 
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
-
-    switch (fib_result) {
-    case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
-    default:
-        return XDP_DROP;
-    }
+    int action = fib_result_to_xdp_action(fib_result, ifindex);
+    return (action == XDP_PASS) ? XDP_DROP : action;
 }
 
 // H.Encaps.L2.Red dispatcher

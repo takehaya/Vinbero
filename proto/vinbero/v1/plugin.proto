@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// PluginService manages dynamic BPF plugin registration into tail call PROG_ARRAY maps.
+// Plugins are XDP programs compiled as ELF objects that extend Vinbero's packet processing
+// by occupying plugin slots in the endpoint or headend dispatch tables.
+service PluginService {
+  rpc PluginRegister(PluginRegisterRequest) returns (PluginRegisterResponse);
+  rpc PluginUnregister(PluginUnregisterRequest) returns (PluginUnregisterResponse);
+}
+
+message PluginRegisterRequest {
+  string map_type = 1; // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6"
+  uint32 index = 2; // Plugin slot index (endpoint: 32-63, headend: 16-31)
+  bytes bpf_elf = 3; // Compiled BPF ELF object file bytes
+  string program = 4; // BPF program function name within the ELF (e.g., "plugin_counter")
+}
+
+message PluginRegisterResponse {}
+
+message PluginUnregisterRequest {
+  string map_type = 1; // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6"
+  uint32 index = 2; // Plugin slot index to clear
+}
+
+message PluginUnregisterResponse {}

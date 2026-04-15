@@ -87,28 +87,14 @@ echo "Phase 1: Starting Vinbero on router1 and router3"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router1..."
-ip netns exec "$ns_router1" ${VINBEROD_BIN} -c ${VINBERO_CONFIG_RT1} > /tmp/vinbero_hl2_rt1.log 2>&1 &
-VINBERO_PID_RT1=$!
-sleep 2
-
-if ! ps -p $VINBERO_PID_RT1 > /dev/null; then
-    print_error "Vinbero failed to start on router1"
-    cat /tmp/vinbero_hl2_rt1.log
-    exit 1
-fi
-print_success "Vinbero started on router1 (PID: $VINBERO_PID_RT1)"
+start_vinbero "$ns_router1" "${VINBERO_CONFIG_RT1}" "/tmp/vinbero_hl2_rt1.log"
+VINBERO_PID_RT1=$VINBERO_LAST_PID
+wait_vinbero_ready "$ns_router1" "127.0.0.1:8082" 10
 
 print_info "Starting Vinbero on $ns_router3..."
-ip netns exec "$ns_router3" ${VINBEROD_BIN} -c ${VINBERO_CONFIG_RT3} > /tmp/vinbero_hl2_rt3.log 2>&1 &
-VINBERO_PID_RT3=$!
-sleep 2
-
-if ! ps -p $VINBERO_PID_RT3 > /dev/null; then
-    print_error "Vinbero failed to start on router3"
-    cat /tmp/vinbero_hl2_rt3.log
-    exit 1
-fi
-print_success "Vinbero started on router3 (PID: $VINBERO_PID_RT3)"
+start_vinbero "$ns_router3" "${VINBERO_CONFIG_RT3}" "/tmp/vinbero_hl2_rt3.log"
+VINBERO_PID_RT3=$VINBERO_LAST_PID
+wait_vinbero_ready "$ns_router3" "127.0.0.1:8083" 10
 
 echo ""
 

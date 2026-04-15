@@ -895,3 +895,80 @@ func FormatSegments(segments [MaxSegments][IPv6AddrLen]uint8, numSegments uint8)
 	}
 	return result
 }
+
+// GetSharedMaps returns a map of all BPF maps that plugins can reference.
+// Used by the server to replace map references when loading external plugins.
+func (m *MapOperations) GetSharedMaps() map[string]*ebpf.Map {
+	return map[string]*ebpf.Map{
+		"sid_function_map":   m.objs.SidFunctionMap,
+		"sid_aux_map":        m.objs.SidAuxMap,
+		"headend_v4_map":     m.objs.HeadendV4Map,
+		"headend_v6_map":     m.objs.HeadendV6Map,
+		"headend_l2_map":     m.objs.HeadendL2Map,
+		"fdb_map":            m.objs.FdbMap,
+		"bd_peer_map":        m.objs.BdPeerMap,
+		"bd_peer_reverse_map": m.objs.BdPeerReverseMap,
+		"scratch_map":        m.objs.ScratchMap,
+		"stats_map":          m.objs.StatsMap,
+		"xdpcap_hook":        m.objs.XdpcapHook,
+		"tailcall_ctx_map":   m.objs.TailcallCtxMap,
+		"sid_endpoint_progs": m.objs.SidEndpointProgs,
+		"headend_v4_progs":   m.objs.HeadendV4Progs,
+		"headend_v6_progs":   m.objs.HeadendV6Progs,
+	}
+}
+
+// ========== Plugin Registration ==========
+
+const (
+	EndpointPluginBase = 32
+	EndpointProgMax    = 64
+	HeadendPluginBase  = 16
+	HeadendProgMax     = 32
+)
+
+var (
+	ErrReservedSlot = fmt.Errorf("cannot register plugin in reserved slot")
+	ErrIndexTooHigh = fmt.Errorf("plugin index exceeds PROG_ARRAY capacity")
+)
+
+// RegisterPlugin registers an external BPF program into a PROG_ARRAY slot.
+// Only plugin-range indices are allowed (built-in slots are protected).
+func (m *MapOperations) RegisterPlugin(mapType string, index uint32, progFD int) error {
+	targetMap, base, maxEntries, err := m.resolvePluginMap(mapType)
+	if err != nil {
+		return err
+	}
+	if index < base {
+		return fmt.Errorf("%w: index %d < base %d for %s", ErrReservedSlot, index, base, mapType)
+	}
+	if index >= maxEntries {
+		return fmt.Errorf("%w: index %d >= max %d for %s", ErrIndexTooHigh, index, maxEntries, mapType)
+	}
+	return targetMap.Update(index, uint32(progFD), ebpf.UpdateAny)
+}
+
+// UnregisterPlugin removes a plugin from a PROG_ARRAY slot.
+func (m *MapOperations) UnregisterPlugin(mapType string, index uint32) error {
+	targetMap, base, _, err := m.resolvePluginMap(mapType)
+	if err != nil {
+		return err
+	}
+	if index < base {
+		return fmt.Errorf("%w: index %d < base %d for %s", ErrReservedSlot, index, base, mapType)
+	}
+	return targetMap.Delete(index)
+}
+
+func (m *MapOperations) resolvePluginMap(mapType string) (*ebpf.Map, uint32, uint32, error) {
+	switch mapType {
+	case "endpoint":
+		return m.objs.SidEndpointProgs, EndpointPluginBase, EndpointProgMax, nil
+	case "headend_v4":
+		return m.objs.HeadendV4Progs, HeadendPluginBase, HeadendProgMax, nil
+	case "headend_v6":
+		return m.objs.HeadendV6Progs, HeadendPluginBase, HeadendProgMax, nil
+	default:
+		return nil, 0, 0, fmt.Errorf("unknown plugin map type: %s", mapType)
+	}
+}

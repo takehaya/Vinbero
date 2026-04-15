@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -24,6 +25,11 @@ func resolveProtoEnum[T protoEnum](input string, prefix string, valueMap map[str
 	}
 	if v, ok := valueMap[prefix+upper]; ok {
 		return T(v), nil
+	}
+
+	// Allow raw numeric values (e.g., "32" for plugin slot indices)
+	if n, err := strconv.ParseInt(input, 10, 32); err == nil {
+		return T(n), nil
 	}
 
 	// Build valid names list from the value map, excluding UNSPECIFIED

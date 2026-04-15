@@ -53,6 +53,7 @@ func NewApp() *cli.App {
 			vrfCommand(),
 			fdbCommand(),
 			statsCommand(),
+			pluginCommand(),
 			completion.Command(),
 		},
 	}

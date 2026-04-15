@@ -89,6 +89,12 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered StatsService", zap.String("path", path))
 
+	// Plugin service (dynamic BPF plugin registration)
+	pluginServer := NewPluginServer(s.mapOps)
+	path, handler = vinberov1connect.NewPluginServiceHandler(pluginServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered PluginService", zap.String("path", path))
+
 	// Health check endpoint
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
