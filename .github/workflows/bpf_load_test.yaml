@@ -98,4 +98,4 @@ jobs:
           fi
 
       - name: Run BPF load test
-        run: vimto -sudo -kernel :${{ matrix.kernel }} -- go test -v -count 1 -timeout 5m ./pkg/bpf/ -run TestBpfLoad
+        run: vimto -sudo -memory 2G -kernel :${{ matrix.kernel }} -- go test -v -count 1 -timeout 5m ./pkg/bpf/ -run TestBpfLoad

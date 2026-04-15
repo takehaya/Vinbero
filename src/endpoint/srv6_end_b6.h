@@ -15,7 +15,6 @@
 #include "endpoint/srv6_endpoint.h"
 #include "headend/srv6_insert.h"
 #include "headend/srv6_encaps.h"
-#include "headend/srv6_encaps_red.h"
 #include "core/xdp_map.h"
 
 // End.B6.Insert / End.B6.Insert.Red (RFC 8986 Section 4.12)

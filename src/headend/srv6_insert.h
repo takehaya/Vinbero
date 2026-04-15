@@ -97,15 +97,7 @@ static __always_inline int do_h_insert_impl(
     // FIB lookup and redirect
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, new_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
-
-    switch (fib_result) {
-    case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
-    case FIB_RESULT_DROP:
-        return XDP_DROP;
-    default:
-        return XDP_PASS;
-    }
+    return fib_result_to_xdp_action(fib_result, ifindex);
 }
 
 // H.Insert (non-reduced)

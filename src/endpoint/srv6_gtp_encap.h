@@ -11,7 +11,7 @@
 
 #include "core/xdp_prog.h"
 #include "core/srv6.h"
-#include "mobile/srv6_gtp.h"
+#include "core/srv6_gtp.h"
 #include "endpoint/srv6_decaps.h"
 #include "core/srv6_fib.h"
 

@@ -66,17 +66,9 @@ echo "Phase 2: Vinbero XDP End.DX6"
 echo "=========================================="
 
 print_info "Starting Vinbero on $ns_router3..."
-ip netns exec "$ns_router3" ${VINBEROD_BIN} -c ${VINBERO_CONFIG} > /tmp/vinbero_end_dx6_test.log 2>&1 &
-VINBERO_PID=$!
-sleep 2
-
-if ! ps -p $VINBERO_PID > /dev/null; then
-    print_error "Vinbero failed to start"
-    cat /tmp/vinbero_end_dx6_test.log
-    exit 1
-fi
-
-print_success "Vinbero started (PID: $VINBERO_PID)"
+start_vinbero "$ns_router3" "${VINBERO_CONFIG}" "/tmp/vinbero_end_dx6_test.log"
+VINBERO_PID=$VINBERO_LAST_PID
+wait_vinbero_ready "$ns_router3" "127.0.0.1:8082" 10
 
 print_info "Registering SidFunction (End.DX6) entry..."
 ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8082 sid create \
