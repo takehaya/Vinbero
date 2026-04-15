@@ -386,6 +386,82 @@ func TestXDPProgEndDX2(t *testing.T) {
 	}
 }
 
+func TestXDPProgEndDX2V(t *testing.T) {
+	tests := []struct {
+		name         string
+		triggerSID   string
+		tableID      uint16
+		vlanID       uint16
+		vlanOIF      uint32
+		setupVlan    bool
+		outerSrc     string
+		outerDst     string
+		segments     []string
+		segmentsLeft uint8
+		innerSrc     string
+		innerDst     string
+		isIPv4Inner  bool
+		expectAction uint32
+	}{
+		{
+			"DX2V known VLAN (redirect)",
+			"fd00:1:100::30/128", 10, 100, 1, true,
+			"fd00:1:1::1", "fd00:1:100::30",
+			[]string{"fd00:1:100::30"}, 0,
+			"10.0.0.1", "192.0.2.100", true,
+			XDP_REDIRECT,
+		},
+		{
+			"DX2V unknown VLAN (drop)",
+			"fd00:1:100::30/128", 10, 100, 0, false,
+			"fd00:1:1::1", "fd00:1:100::30",
+			[]string{"fd00:1:100::30"}, 0,
+			"10.0.0.1", "192.0.2.100", true,
+			XDP_DROP,
+		},
+		{
+			"DX2V SL!=0 (pass)",
+			"fd00:1:100::30/128", 10, 100, 1, true,
+			"fd00:1:1::1", "fd00:1:100::30",
+			[]string{"fd00:1:100::40", "fd00:1:100::30"}, 1,
+			"10.0.0.1", "192.0.2.100", true,
+			XDP_PASS,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithTableID(tt.triggerSID, actionEndDX2V, tt.tableID)
+
+			if tt.setupVlan {
+				h.createDx2vVlanEntry(tt.tableID, tt.vlanID, tt.vlanOIF)
+			}
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+
+			pkt, err := buildL2EncapsulatedPacket(
+				net.ParseIP(tt.outerSrc), net.ParseIP(tt.outerDst),
+				segments, tt.segmentsLeft,
+				tt.vlanID,
+				net.ParseIP(tt.innerSrc), net.ParseIP(tt.innerDst),
+				tt.isIPv4Inner,
+			)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, _ := h.run(pkt)
+			if ret != tt.expectAction {
+				t.Errorf("Expected action %d, got %d", tt.expectAction, ret)
+			}
+		})
+	}
+}
+
 func TestXDPProgHeadendL2Encaps(t *testing.T) {
 	tests := []struct {
 		name        string

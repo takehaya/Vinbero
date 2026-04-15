@@ -13,7 +13,7 @@
 #define HEADEND_PLUGIN_BASE   16
 
 // PROG_ARRAY sizes: enum max + reserved + plugin slots
-#define ENDPOINT_PROG_MAX     64   // enum(22) + reserved(10) + plugin(32)
+#define ENDPOINT_PROG_MAX     64   // enum(23) + reserved(9) + plugin(32)
 #define HEADEND_PROG_MAX      32   // enum(8) + reserved(8) + plugin(16)
 
 // Per-CPU context key (single-element array)

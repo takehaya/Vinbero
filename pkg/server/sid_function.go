@@ -153,6 +153,9 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		aux = &bpf.SidAuxEntry{}
 		binary.NativeEndian.PutUint32(aux.Nexthop.Nexthop[:4], sidFunc.Oif)
 
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2V:
+		aux = bpf.NewSidAuxDx2v(uint16(sidFunc.TableId))
+
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2:
 		bridgeIfindex := uint32(0)
 		if sidFunc.BridgeName != "" {
@@ -223,6 +226,9 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 				sf.Oif = binary.NativeEndian.Uint32(aux.Nexthop.Nexthop[:4])
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2V:
+				sf.TableId = uint32(bpf.SidAuxDx2vData(aux))
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2:
 				bdID, bridgeIfindex := bpf.SidAuxL2Data(aux)

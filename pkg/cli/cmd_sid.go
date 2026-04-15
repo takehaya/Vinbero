@@ -34,6 +34,7 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "headend-mode", Usage: "Policy mode: H_INSERT, H_INSERT_RED, H_ENCAPS, H_ENCAPS_RED (for End.B6)"},
 					&cli.UintFlag{Name: "args-offset", Usage: "Args.Mob.Session byte offset in SID (for GTP functions)"},
 					&cli.StringFlag{Name: "gtp-v4-src-addr", Usage: "GTP4 outer IPv4 source address (for End.M.GTP4.E)"},
+					&cli.UintFlag{Name: "table-id", Usage: "VLAN table ID (for End.DX2V)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -81,8 +82,9 @@ func sidFunctionCommand() *cli.Command {
 						Oif:           uint32(c.Uint("oif")),
 						Segments:      segments,
 						HeadendMode:   headendMode,
-						ArgsOffset: uint32(c.Uint("args-offset")),
-						GtpV4SrcAddr:  c.String("gtp-v4-src-addr"),
+						ArgsOffset:   uint32(c.Uint("args-offset")),
+						GtpV4SrcAddr: c.String("gtp-v4-src-addr"),
+						TableId:      uint32(c.Uint("table-id")),
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),
@@ -123,7 +125,7 @@ func sidFunctionCommand() *cli.Command {
 					if useJSON(c) {
 						return printJSON(resp.Msg.SidFunctions)
 					}
-					headers := []string{"TRIGGER PREFIX", "ACTION", "FLAVOR", "VRF", "BD_ID", "BRIDGE", "OIF"}
+					headers := []string{"TRIGGER PREFIX", "ACTION", "FLAVOR", "VRF", "BD_ID", "BRIDGE", "OIF", "TABLE_ID"}
 					var rows [][]string
 					for _, s := range resp.Msg.SidFunctions {
 						rows = append(rows, []string{
@@ -134,6 +136,7 @@ func sidFunctionCommand() *cli.Command {
 							fmt.Sprintf("%d", s.BdId),
 							s.BridgeName,
 							fmt.Sprintf("%d", s.Oif),
+							fmt.Sprintf("%d", s.TableId),
 						})
 					}
 					printTable(headers, rows)

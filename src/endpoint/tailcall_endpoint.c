@@ -242,3 +242,29 @@ int tailcall_endpoint_end_dt2(struct xdp_md *ctx)
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dt2, ctx, ip6h, srh, &tctx->sid_entry, aux);
     TAILCALL_RETURN(ctx,action);
 }
+
+SEC("xdp")
+int tailcall_endpoint_end_dx2v(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+
+    if (tctx->dispatch_type == DISPATCH_NOSRH) {
+        if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
+        int action = CALL_WITH_CONST_L3(l3_off, process_end_dx2v_nosrh, ctx,
+                                        tctx->inner_proto, aux);
+        TAILCALL_RETURN(ctx,action);
+    }
+
+    struct ethhdr *eth;
+    struct ipv6hdr *ip6h;
+    struct ipv6_sr_hdr *srh;
+    TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_dx2v, ctx, ip6h, srh,
+                                    &tctx->sid_entry, aux);
+    TAILCALL_RETURN(ctx,action);
+}
