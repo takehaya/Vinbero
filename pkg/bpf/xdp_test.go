@@ -454,9 +454,16 @@ func TestXDPProgEndDX2V(t *testing.T) {
 				t.Fatalf("Failed to build packet: %v", err)
 			}
 
-			ret, _ := h.run(pkt)
+			ret, outPkt := h.run(pkt)
 			if ret != tt.expectAction {
 				t.Errorf("Expected action %d, got %d", tt.expectAction, ret)
+			}
+
+			if tt.expectAction == XDP_REDIRECT && len(outPkt) > 0 {
+				if !verifyInnerVlanFrame(t, outPkt, 0, tt.vlanID) {
+					return
+				}
+				t.Logf("SUCCESS: End.DX2V decapsulation verified (action: %d)", ret)
 			}
 		})
 	}

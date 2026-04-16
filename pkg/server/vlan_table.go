@@ -75,6 +75,13 @@ func (s *VlanTableServer) VlanTableDelete(
 	}
 
 	for _, e := range req.Msg.Entries {
+		if e.VlanId > 4095 || e.TableId > 65535 {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("table=%d,vlan=%d", e.TableId, e.VlanId),
+				Reason:        "table_id must be <= 65535 and vlan_id must be <= 4095",
+			})
+			continue
+		}
 		if err := s.mapOps.DeleteDx2vVlan(uint16(e.TableId), uint16(e.VlanId)); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("table=%d,vlan=%d", e.TableId, e.VlanId),

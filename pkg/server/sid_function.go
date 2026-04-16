@@ -154,6 +154,9 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		binary.NativeEndian.PutUint32(aux.Nexthop.Nexthop[:4], sidFunc.Oif)
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2V:
+		if sidFunc.TableId > 65535 {
+			return nil, nil, fmt.Errorf("table_id %d exceeds maximum 65535", sidFunc.TableId)
+		}
 		aux = bpf.NewSidAuxDx2v(uint16(sidFunc.TableId))
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2:
