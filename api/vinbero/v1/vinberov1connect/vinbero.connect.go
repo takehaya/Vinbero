@@ -29,6 +29,8 @@ const (
 	Headendv6ServiceName = "vinbero.v1.Headendv6Service"
 	// FdbServiceName is the fully-qualified name of the FdbService service.
 	FdbServiceName = "vinbero.v1.FdbService"
+	// VlanTableServiceName is the fully-qualified name of the VlanTableService service.
+	VlanTableServiceName = "vinbero.v1.VlanTableService"
 	// BdPeerServiceName is the fully-qualified name of the BdPeerService service.
 	BdPeerServiceName = "vinbero.v1.BdPeerService"
 	// NetworkResourceServiceName is the fully-qualified name of the NetworkResourceService service.
@@ -89,6 +91,15 @@ const (
 	FdbServiceFdbCreateProcedure = "/vinbero.v1.FdbService/FdbCreate"
 	// FdbServiceFdbDeleteProcedure is the fully-qualified name of the FdbService's FdbDelete RPC.
 	FdbServiceFdbDeleteProcedure = "/vinbero.v1.FdbService/FdbDelete"
+	// VlanTableServiceVlanTableCreateProcedure is the fully-qualified name of the VlanTableService's
+	// VlanTableCreate RPC.
+	VlanTableServiceVlanTableCreateProcedure = "/vinbero.v1.VlanTableService/VlanTableCreate"
+	// VlanTableServiceVlanTableDeleteProcedure is the fully-qualified name of the VlanTableService's
+	// VlanTableDelete RPC.
+	VlanTableServiceVlanTableDeleteProcedure = "/vinbero.v1.VlanTableService/VlanTableDelete"
+	// VlanTableServiceVlanTableListProcedure is the fully-qualified name of the VlanTableService's
+	// VlanTableList RPC.
+	VlanTableServiceVlanTableListProcedure = "/vinbero.v1.VlanTableService/VlanTableList"
 	// BdPeerServiceBdPeerCreateProcedure is the fully-qualified name of the BdPeerService's
 	// BdPeerCreate RPC.
 	BdPeerServiceBdPeerCreateProcedure = "/vinbero.v1.BdPeerService/BdPeerCreate"
@@ -155,6 +166,10 @@ var (
 	fdbServiceFdbListMethodDescriptor                   = fdbServiceServiceDescriptor.Methods().ByName("FdbList")
 	fdbServiceFdbCreateMethodDescriptor                 = fdbServiceServiceDescriptor.Methods().ByName("FdbCreate")
 	fdbServiceFdbDeleteMethodDescriptor                 = fdbServiceServiceDescriptor.Methods().ByName("FdbDelete")
+	vlanTableServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("VlanTableService")
+	vlanTableServiceVlanTableCreateMethodDescriptor     = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableCreate")
+	vlanTableServiceVlanTableDeleteMethodDescriptor     = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableDelete")
+	vlanTableServiceVlanTableListMethodDescriptor       = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableList")
 	bdPeerServiceServiceDescriptor                      = v1.File_vinbero_v1_vinbero_proto.Services().ByName("BdPeerService")
 	bdPeerServiceBdPeerCreateMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerCreate")
 	bdPeerServiceBdPeerDeleteMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerDelete")
@@ -732,6 +747,126 @@ func (UnimplementedFdbServiceHandler) FdbCreate(context.Context, *connect.Reques
 
 func (UnimplementedFdbServiceHandler) FdbDelete(context.Context, *connect.Request[v1.FdbDeleteRequest]) (*connect.Response[v1.FdbDeleteResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.FdbService.FdbDelete is not implemented"))
+}
+
+// VlanTableServiceClient is a client for the vinbero.v1.VlanTableService service.
+type VlanTableServiceClient interface {
+	VlanTableCreate(context.Context, *connect.Request[v1.VlanTableCreateRequest]) (*connect.Response[v1.VlanTableCreateResponse], error)
+	VlanTableDelete(context.Context, *connect.Request[v1.VlanTableDeleteRequest]) (*connect.Response[v1.VlanTableDeleteResponse], error)
+	VlanTableList(context.Context, *connect.Request[v1.VlanTableListRequest]) (*connect.Response[v1.VlanTableListResponse], error)
+}
+
+// NewVlanTableServiceClient constructs a client for the vinbero.v1.VlanTableService service. By
+// default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses,
+// and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
+// connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewVlanTableServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) VlanTableServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &vlanTableServiceClient{
+		vlanTableCreate: connect.NewClient[v1.VlanTableCreateRequest, v1.VlanTableCreateResponse](
+			httpClient,
+			baseURL+VlanTableServiceVlanTableCreateProcedure,
+			connect.WithSchema(vlanTableServiceVlanTableCreateMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		vlanTableDelete: connect.NewClient[v1.VlanTableDeleteRequest, v1.VlanTableDeleteResponse](
+			httpClient,
+			baseURL+VlanTableServiceVlanTableDeleteProcedure,
+			connect.WithSchema(vlanTableServiceVlanTableDeleteMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		vlanTableList: connect.NewClient[v1.VlanTableListRequest, v1.VlanTableListResponse](
+			httpClient,
+			baseURL+VlanTableServiceVlanTableListProcedure,
+			connect.WithSchema(vlanTableServiceVlanTableListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// vlanTableServiceClient implements VlanTableServiceClient.
+type vlanTableServiceClient struct {
+	vlanTableCreate *connect.Client[v1.VlanTableCreateRequest, v1.VlanTableCreateResponse]
+	vlanTableDelete *connect.Client[v1.VlanTableDeleteRequest, v1.VlanTableDeleteResponse]
+	vlanTableList   *connect.Client[v1.VlanTableListRequest, v1.VlanTableListResponse]
+}
+
+// VlanTableCreate calls vinbero.v1.VlanTableService.VlanTableCreate.
+func (c *vlanTableServiceClient) VlanTableCreate(ctx context.Context, req *connect.Request[v1.VlanTableCreateRequest]) (*connect.Response[v1.VlanTableCreateResponse], error) {
+	return c.vlanTableCreate.CallUnary(ctx, req)
+}
+
+// VlanTableDelete calls vinbero.v1.VlanTableService.VlanTableDelete.
+func (c *vlanTableServiceClient) VlanTableDelete(ctx context.Context, req *connect.Request[v1.VlanTableDeleteRequest]) (*connect.Response[v1.VlanTableDeleteResponse], error) {
+	return c.vlanTableDelete.CallUnary(ctx, req)
+}
+
+// VlanTableList calls vinbero.v1.VlanTableService.VlanTableList.
+func (c *vlanTableServiceClient) VlanTableList(ctx context.Context, req *connect.Request[v1.VlanTableListRequest]) (*connect.Response[v1.VlanTableListResponse], error) {
+	return c.vlanTableList.CallUnary(ctx, req)
+}
+
+// VlanTableServiceHandler is an implementation of the vinbero.v1.VlanTableService service.
+type VlanTableServiceHandler interface {
+	VlanTableCreate(context.Context, *connect.Request[v1.VlanTableCreateRequest]) (*connect.Response[v1.VlanTableCreateResponse], error)
+	VlanTableDelete(context.Context, *connect.Request[v1.VlanTableDeleteRequest]) (*connect.Response[v1.VlanTableDeleteResponse], error)
+	VlanTableList(context.Context, *connect.Request[v1.VlanTableListRequest]) (*connect.Response[v1.VlanTableListResponse], error)
+}
+
+// NewVlanTableServiceHandler builds an HTTP handler from the service implementation. It returns the
+// path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewVlanTableServiceHandler(svc VlanTableServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	vlanTableServiceVlanTableCreateHandler := connect.NewUnaryHandler(
+		VlanTableServiceVlanTableCreateProcedure,
+		svc.VlanTableCreate,
+		connect.WithSchema(vlanTableServiceVlanTableCreateMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vlanTableServiceVlanTableDeleteHandler := connect.NewUnaryHandler(
+		VlanTableServiceVlanTableDeleteProcedure,
+		svc.VlanTableDelete,
+		connect.WithSchema(vlanTableServiceVlanTableDeleteMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vlanTableServiceVlanTableListHandler := connect.NewUnaryHandler(
+		VlanTableServiceVlanTableListProcedure,
+		svc.VlanTableList,
+		connect.WithSchema(vlanTableServiceVlanTableListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.VlanTableService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case VlanTableServiceVlanTableCreateProcedure:
+			vlanTableServiceVlanTableCreateHandler.ServeHTTP(w, r)
+		case VlanTableServiceVlanTableDeleteProcedure:
+			vlanTableServiceVlanTableDeleteHandler.ServeHTTP(w, r)
+		case VlanTableServiceVlanTableListProcedure:
+			vlanTableServiceVlanTableListHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedVlanTableServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedVlanTableServiceHandler struct{}
+
+func (UnimplementedVlanTableServiceHandler) VlanTableCreate(context.Context, *connect.Request[v1.VlanTableCreateRequest]) (*connect.Response[v1.VlanTableCreateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VlanTableService.VlanTableCreate is not implemented"))
+}
+
+func (UnimplementedVlanTableServiceHandler) VlanTableDelete(context.Context, *connect.Request[v1.VlanTableDeleteRequest]) (*connect.Response[v1.VlanTableDeleteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VlanTableService.VlanTableDelete is not implemented"))
+}
+
+func (UnimplementedVlanTableServiceHandler) VlanTableList(context.Context, *connect.Request[v1.VlanTableListRequest]) (*connect.Response[v1.VlanTableListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VlanTableService.VlanTableList is not implemented"))
 }
 
 // BdPeerServiceClient is a client for the vinbero.v1.BdPeerService service.

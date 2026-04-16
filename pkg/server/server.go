@@ -83,6 +83,12 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered FdbService", zap.String("path", path))
 
+	// VlanTable service (VLAN cross-connect for End.DX2V)
+	vlanTableServer := NewVlanTableServer(s.mapOps)
+	path, handler = vinberov1connect.NewVlanTableServiceHandler(vlanTableServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered VlanTableService", zap.String("path", path))
+
 	// Stats service (read-only, for observability)
 	statsServer := NewStatsServer(s.mapOps)
 	path, handler = vinberov1connect.NewStatsServiceHandler(statsServer)

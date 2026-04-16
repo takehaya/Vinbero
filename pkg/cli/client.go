@@ -15,6 +15,7 @@ type Clients struct {
 	Peer     vinberov1connect.BdPeerServiceClient
 	Resource vinberov1connect.NetworkResourceServiceClient
 	Fdb      vinberov1connect.FdbServiceClient
+	VlanTbl  vinberov1connect.VlanTableServiceClient
 	Stats    vinberov1connect.StatsServiceClient
 	Plugin   vinberov1connect.PluginServiceClient
 }
@@ -31,6 +32,7 @@ func NewClients(serverURL string) *Clients {
 		Peer:     vinberov1connect.NewBdPeerServiceClient(httpClient, serverURL, opts...),
 		Resource: vinberov1connect.NewNetworkResourceServiceClient(httpClient, serverURL, opts...),
 		Fdb:      vinberov1connect.NewFdbServiceClient(httpClient, serverURL, opts...),
+		VlanTbl:  vinberov1connect.NewVlanTableServiceClient(httpClient, serverURL, opts...),
 		Stats:    vinberov1connect.NewStatsServiceClient(httpClient, serverURL, opts...),
 		Plugin:   vinberov1connect.NewPluginServiceClient(httpClient, serverURL, opts...),
 	}

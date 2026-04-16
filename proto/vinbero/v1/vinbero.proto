@@ -23,6 +23,7 @@ service SidFunctionService {
 //   - End.DT4/DT6/DT46: vrf_name (VRF-aware FIB lookup)
 //   - End.DT2: bd_id + bridge_name (L2 FDB lookup + bridge flood on miss)
 //   - End.DX2: oif (direct L2 output to specific interface)
+//   - End.DX2V: table_id (VLAN cross-connect table scope)
 //   - End.B6/End.B6.Encaps: segments + headend_mode + src_addr (policy binding)
 //   - End/End.X/End.T: basic SRv6 transit, no extra fields needed
 message SidFunction {
@@ -42,6 +43,7 @@ message SidFunction {
   Srv6HeadendBehavior headend_mode = 14; // Policy mode: H_INSERT, H_ENCAPS, etc. (End.B6)
   uint32 args_offset = 15; // Args.Mob.Session byte offset in SID (RFC 9433, for GTP functions)
   string gtp_v4_src_addr = 16; // GTP4 outer IPv4 source address (End.M.GTP4.E)
+  uint32 table_id = 17; // VLAN table ID (End.DX2V: VLAN cross-connect scope)
 }
 
 message SidFunctionCreateRequest {
@@ -202,6 +204,44 @@ message FdbDeleteRequest {
   string mac = 2;
 }
 message FdbDeleteResponse {}
+
+// VlanTableService manages VLAN cross-connect table entries for End.DX2V.
+// Each entry maps (table_id, vlan_id) to an output interface for VLAN-based
+// P2P cross-connect (EVPN Flexible Cross-connect).
+service VlanTableService {
+  rpc VlanTableCreate(VlanTableCreateRequest) returns (VlanTableCreateResponse);
+  rpc VlanTableDelete(VlanTableDeleteRequest) returns (VlanTableDeleteResponse);
+  rpc VlanTableList(VlanTableListRequest) returns (VlanTableListResponse);
+}
+
+message VlanTableEntry {
+  uint32 table_id = 1; // VLAN table scope (shared across SIDs)
+  uint32 vlan_id = 2; // VLAN ID (0-4095)
+  string interface_name = 3; // Output interface name (resolved to ifindex by server)
+}
+
+message VlanTableCreateRequest {
+  repeated VlanTableEntry entries = 1;
+}
+message VlanTableCreateResponse {
+  repeated VlanTableEntry created = 1;
+  repeated OperationError errors = 2;
+}
+
+message VlanTableDeleteRequest {
+  repeated VlanTableEntry entries = 1; // Identifies by (table_id, vlan_id)
+}
+message VlanTableDeleteResponse {
+  repeated VlanTableEntry deleted = 1;
+  repeated OperationError errors = 2;
+}
+
+message VlanTableListRequest {
+  uint32 table_id = 1; // Filter by table_id; 0 returns all entries
+}
+message VlanTableListResponse {
+  repeated VlanTableEntry entries = 1;
+}
 
 // BdPeerService manages remote PEs within a Bridge Domain for BUM traffic flooding.
 // When a BUM frame (broadcast/unknown-unicast/multicast) is detected, Vinbero

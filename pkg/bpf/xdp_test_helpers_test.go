@@ -28,6 +28,7 @@ const (
 	actionEndDT6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
 	actionEndDT46 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
 	actionEndDT2      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	actionEndDX2V     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2V)
 	actionEndB6       = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6)
 	actionEndB6Encaps = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS)
 )
@@ -143,6 +144,22 @@ func (h *xdpTestHelper) createSidFunctionWithOIF(prefix string, action uint8, oi
 	binary.NativeEndian.PutUint32(aux.Nexthop.Nexthop[:4], oif)
 	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
+
+func (h *xdpTestHelper) createSidFunctionWithTableID(prefix string, action uint8, tableID uint16) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: action, Flavor: 0}
+	aux := NewSidAuxDx2v(tableID)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
+		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
+
+func (h *xdpTestHelper) createDx2vVlanEntry(tableID, vlanID uint16, oif uint32) {
+	h.t.Helper()
+	if err := h.mapOps.CreateDx2vVlan(tableID, vlanID, oif); err != nil {
+		h.t.Fatalf("Failed to create DX2V VLAN entry: %v", err)
 	}
 }
 

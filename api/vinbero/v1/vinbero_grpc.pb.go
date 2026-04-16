@@ -779,6 +779,168 @@ var FdbService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	VlanTableService_VlanTableCreate_FullMethodName = "/vinbero.v1.VlanTableService/VlanTableCreate"
+	VlanTableService_VlanTableDelete_FullMethodName = "/vinbero.v1.VlanTableService/VlanTableDelete"
+	VlanTableService_VlanTableList_FullMethodName   = "/vinbero.v1.VlanTableService/VlanTableList"
+)
+
+// VlanTableServiceClient is the client API for VlanTableService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type VlanTableServiceClient interface {
+	VlanTableCreate(ctx context.Context, in *VlanTableCreateRequest, opts ...grpc.CallOption) (*VlanTableCreateResponse, error)
+	VlanTableDelete(ctx context.Context, in *VlanTableDeleteRequest, opts ...grpc.CallOption) (*VlanTableDeleteResponse, error)
+	VlanTableList(ctx context.Context, in *VlanTableListRequest, opts ...grpc.CallOption) (*VlanTableListResponse, error)
+}
+
+type vlanTableServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewVlanTableServiceClient(cc grpc.ClientConnInterface) VlanTableServiceClient {
+	return &vlanTableServiceClient{cc}
+}
+
+func (c *vlanTableServiceClient) VlanTableCreate(ctx context.Context, in *VlanTableCreateRequest, opts ...grpc.CallOption) (*VlanTableCreateResponse, error) {
+	out := new(VlanTableCreateResponse)
+	err := c.cc.Invoke(ctx, VlanTableService_VlanTableCreate_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vlanTableServiceClient) VlanTableDelete(ctx context.Context, in *VlanTableDeleteRequest, opts ...grpc.CallOption) (*VlanTableDeleteResponse, error) {
+	out := new(VlanTableDeleteResponse)
+	err := c.cc.Invoke(ctx, VlanTableService_VlanTableDelete_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vlanTableServiceClient) VlanTableList(ctx context.Context, in *VlanTableListRequest, opts ...grpc.CallOption) (*VlanTableListResponse, error) {
+	out := new(VlanTableListResponse)
+	err := c.cc.Invoke(ctx, VlanTableService_VlanTableList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// VlanTableServiceServer is the server API for VlanTableService service.
+// All implementations should embed UnimplementedVlanTableServiceServer
+// for forward compatibility
+type VlanTableServiceServer interface {
+	VlanTableCreate(context.Context, *VlanTableCreateRequest) (*VlanTableCreateResponse, error)
+	VlanTableDelete(context.Context, *VlanTableDeleteRequest) (*VlanTableDeleteResponse, error)
+	VlanTableList(context.Context, *VlanTableListRequest) (*VlanTableListResponse, error)
+}
+
+// UnimplementedVlanTableServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedVlanTableServiceServer struct {
+}
+
+func (UnimplementedVlanTableServiceServer) VlanTableCreate(context.Context, *VlanTableCreateRequest) (*VlanTableCreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VlanTableCreate not implemented")
+}
+func (UnimplementedVlanTableServiceServer) VlanTableDelete(context.Context, *VlanTableDeleteRequest) (*VlanTableDeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VlanTableDelete not implemented")
+}
+func (UnimplementedVlanTableServiceServer) VlanTableList(context.Context, *VlanTableListRequest) (*VlanTableListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VlanTableList not implemented")
+}
+
+// UnsafeVlanTableServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to VlanTableServiceServer will
+// result in compilation errors.
+type UnsafeVlanTableServiceServer interface {
+	mustEmbedUnimplementedVlanTableServiceServer()
+}
+
+func RegisterVlanTableServiceServer(s grpc.ServiceRegistrar, srv VlanTableServiceServer) {
+	s.RegisterService(&VlanTableService_ServiceDesc, srv)
+}
+
+func _VlanTableService_VlanTableCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VlanTableCreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VlanTableServiceServer).VlanTableCreate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VlanTableService_VlanTableCreate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VlanTableServiceServer).VlanTableCreate(ctx, req.(*VlanTableCreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VlanTableService_VlanTableDelete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VlanTableDeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VlanTableServiceServer).VlanTableDelete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VlanTableService_VlanTableDelete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VlanTableServiceServer).VlanTableDelete(ctx, req.(*VlanTableDeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VlanTableService_VlanTableList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VlanTableListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VlanTableServiceServer).VlanTableList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VlanTableService_VlanTableList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VlanTableServiceServer).VlanTableList(ctx, req.(*VlanTableListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// VlanTableService_ServiceDesc is the grpc.ServiceDesc for VlanTableService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var VlanTableService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.VlanTableService",
+	HandlerType: (*VlanTableServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "VlanTableCreate",
+			Handler:    _VlanTableService_VlanTableCreate_Handler,
+		},
+		{
+			MethodName: "VlanTableDelete",
+			Handler:    _VlanTableService_VlanTableDelete_Handler,
+		},
+		{
+			MethodName: "VlanTableList",
+			Handler:    _VlanTableService_VlanTableList_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}
+
+const (
 	BdPeerService_BdPeerCreate_FullMethodName = "/vinbero.v1.BdPeerService/BdPeerCreate"
 	BdPeerService_BdPeerDelete_FullMethodName = "/vinbero.v1.BdPeerService/BdPeerDelete"
 	BdPeerService_BdPeerList_FullMethodName   = "/vinbero.v1.BdPeerService/BdPeerList"

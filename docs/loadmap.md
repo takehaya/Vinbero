@@ -32,7 +32,7 @@
 | End.X                | Supported   | Endpoint with Layer-3 cross-connect                         | RFC 8986 Sec.4.2 |
 | End.T                | Supported   | Endpoint with specific IPv6 table lookup                    | RFC 8986 Sec.4.3 |
 | End.DX2              | Supported   | Endpoint with decap and L2 cross-connect                    | RFC 8986 Sec.4.9 |
-| End.DX2V             |             | Endpoint with decap and VLAN L2 table lookup                | RFC 8986 Sec.4.10 |
+| End.DX2V             | Supported   | Endpoint with decap and VLAN L2 table lookup                | RFC 8986 Sec.4.10 |
 | End.DT2U             | Supported   | Endpoint with decap and unicast MAC L2 table lookup         | RFC 8986 Sec.4.11 |
 | End.DT2M             |             | Endpoint with decap and L2 table flooding                   | RFC 8986 Sec.4.12 |
 | End.DX6              | Supported   | Endpoint with decap and IPv6 cross-connect                  | RFC 8986 Sec.4.4 |

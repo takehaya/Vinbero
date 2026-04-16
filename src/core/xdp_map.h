@@ -73,6 +73,16 @@ struct {
     __uint(max_entries, 8192);
 } fdb_map SEC(".maps");
 
+// VLAN cross-connect map (Hash) for End.DX2V
+// Key: table_id + VLAN ID
+// Value: output interface index
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct dx2v_key);
+    __type(value, struct dx2v_entry);
+    __uint(max_entries, 1024);
+} dx2v_map SEC(".maps");
+
 // BD Peer map (Hash) for P2MP BUM flooding
 // Key: Bridge Domain ID + peer index
 // Value: headend_entry (SRv6 encap info for reaching that PE)

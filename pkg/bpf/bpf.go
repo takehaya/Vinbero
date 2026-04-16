@@ -45,6 +45,7 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 			"fdb_map":            entries.Fdb.Capacity,
 			"bd_peer_map":        entries.BdPeer.Capacity,
 			"bd_peer_reverse_map": entries.BdPeer.Capacity,
+			"dx2v_map":            entries.VlanTable.Capacity,
 		}
 		for name, size := range mapSizes {
 			if ms, ok := spec.Maps[name]; ok && size > 0 {
@@ -91,6 +92,7 @@ func populateProgArrays(objs *BpfObjects) error {
 		10: objs.TailcallEndpointEndB6,
 		11: objs.TailcallEndpointEndB6Encaps,
 		17: objs.TailcallEndpointEndDt2,
+		22: objs.TailcallEndpointEndDx2v,
 		18: objs.TailcallEndpointEndM_gtp6D,
 		19: objs.TailcallEndpointEndM_gtp6D_di,
 		20: objs.TailcallEndpointEndM_gtp6E,
