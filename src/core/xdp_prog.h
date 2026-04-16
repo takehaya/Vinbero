@@ -103,6 +103,17 @@ struct headend_l2_key {
     __u8 _pad[2];
 } __attribute__((packed));
 
+// Key for VLAN cross-connect table (End.DX2V)
+struct dx2v_key {
+    __u16 table_id;    // VLAN table ID (user-configured scope)
+    __u16 vlan_id;     // Inner VLAN ID from decapsulated L2 frame
+} __attribute__((packed));
+
+// Value for VLAN cross-connect table (End.DX2V)
+struct dx2v_entry {
+    __u32 oif;         // Output interface index
+} __attribute__((packed));
+
 // Headend entry (for H.Encaps, H.Insert, etc.)
 // Defined before sid_aux_entry so it can be embedded as b6_policy variant.
 struct headend_entry {
@@ -143,6 +154,12 @@ struct sid_aux_entry {
             __u16 _pad;
             __u32 bridge_ifindex;
         } l2;                                              // 8 bytes
+
+        // End.DX2V: VLAN cross-connect table parameters
+        struct {
+            __u16 table_id;
+            __u16 _pad;
+        } dx2v;                                            // 4 bytes
 
         // End.M.GTP4.E: GTP-U to IPv4
         struct {

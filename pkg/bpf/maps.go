@@ -31,6 +31,8 @@ type (
 	BdPeerKey          = BpfBdPeerKey
 	BdPeerReverseKey   = BpfBdPeerReverseKey
 	BdPeerReverseVal   = BpfBdPeerReverseVal
+	Dx2vKey            = BpfDx2vKey
+	Dx2vEntry          = BpfDx2vEntry
 )
 
 // MapOperator interface for testability
@@ -171,6 +173,19 @@ func NewSidAuxL2(bdID uint16, bridgeIfindex uint32) *SidAuxEntry {
 	binary.NativeEndian.PutUint16(entry.Nexthop.Nexthop[0:2], bdID)
 	binary.NativeEndian.PutUint32(entry.Nexthop.Nexthop[4:8], bridgeIfindex)
 	return entry
+}
+
+// NewSidAuxDx2v creates an aux entry for End.DX2V
+func NewSidAuxDx2v(tableID uint16) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	// C layout: table_id(u16) + _pad(u16) at union offset 0
+	binary.NativeEndian.PutUint16(entry.Nexthop.Nexthop[0:2], tableID)
+	return entry
+}
+
+// SidAuxDx2vData extracts DX2V variant fields from a SidAuxEntry
+func SidAuxDx2vData(entry *SidAuxEntry) uint16 {
+	return binary.NativeEndian.Uint16(entry.Nexthop.Nexthop[0:2])
 }
 
 // NewSidAuxGtp4e creates an aux entry for End.M.GTP4.E
@@ -648,6 +663,43 @@ func (m *MapOperations) ListFdb() (map[FdbKey]*FdbEntry, error) {
 	return result, nil
 }
 
+// ===== VLAN Cross-Connect (DX2V) Map Operations =====
+
+// CreateDx2vVlan creates a VLAN cross-connect entry in dx2v_map
+func (m *MapOperations) CreateDx2vVlan(tableID, vlanID uint16, oif uint32) error {
+	key := &Dx2vKey{TableId: tableID, VlanId: vlanID}
+	entry := &Dx2vEntry{Oif: oif}
+	if err := m.objs.Dx2vMap.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put dx2v entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteDx2vVlan deletes a VLAN cross-connect entry from dx2v_map
+func (m *MapOperations) DeleteDx2vVlan(tableID, vlanID uint16) error {
+	key := &Dx2vKey{TableId: tableID, VlanId: vlanID}
+	if err := m.objs.Dx2vMap.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete dx2v entry: %w", err)
+	}
+	return nil
+}
+
+// ListDx2vVlan lists all VLAN cross-connect entries
+func (m *MapOperations) ListDx2vVlan() (map[Dx2vKey]*Dx2vEntry, error) {
+	result := make(map[Dx2vKey]*Dx2vEntry)
+	var key Dx2vKey
+	var entry Dx2vEntry
+	iter := m.objs.Dx2vMap.Iterate()
+	for iter.Next(&key, &entry) {
+		entryCopy := entry
+		result[key] = &entryCopy
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate dx2v map: %w", err)
+	}
+	return result, nil
+}
+
 // AgeFdbEntries deletes dynamic FDB entries older than maxAgeNs nanoseconds.
 // Static entries (is_static=1) and entries with last_seen=0 are never aged out.
 // Returns the number of entries deleted.
@@ -908,6 +960,7 @@ func (m *MapOperations) GetSharedMaps() map[string]*ebpf.Map {
 		"fdb_map":            m.objs.FdbMap,
 		"bd_peer_map":        m.objs.BdPeerMap,
 		"bd_peer_reverse_map": m.objs.BdPeerReverseMap,
+		"dx2v_map":           m.objs.Dx2vMap,
 		"scratch_map":        m.objs.ScratchMap,
 		"stats_map":          m.objs.StatsMap,
 		"xdpcap_hook":        m.objs.XdpcapHook,
