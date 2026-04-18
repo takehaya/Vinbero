@@ -116,21 +116,25 @@ echo "=========================================="
 PASSED=0
 FAILED=0
 
-# Test: Ping from host1 to host2 via plugin SID
-print_info "Sending traffic from host1 to host2 via plugin SID..."
-if ip netns exec "$ns_host1" ping6 -c 3 -W 2 fc00:3::100 > /dev/null 2>&1; then
-    print_success "Ping via plugin SID: PASS"
-    PASSED=$((PASSED + 1))
+# Test: send IPv6 packets from host1 that trigger router1's seg6 encap rule.
+# Reply may not come back (router2 kernel doesn't own fc00:2::32), but the
+# plugin must be invoked and record XDP_PASS stats on router2.
+print_info "Sending traffic from host1 towards fc00:3::3 (triggers SRv6 encap at router1)..."
+ip netns exec "$ns_host1" ping6 -c 3 -W 2 fc00:3::3 > /dev/null 2>&1 || true
+
+# Assert: PASS counter on router2's stats must have incremented, which
+# only happens when the plugin's tailcall_epilogue fires.
+print_info "Checking Vinbero stats..."
+STATS_OUTPUT=$(ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show)
+echo "$STATS_OUTPUT"
+PASS_COUNT=$(echo "$STATS_OUTPUT" | awk '/^PASS/ { print $2 }')
+if [ -z "$PASS_COUNT" ] || [ "$PASS_COUNT" -eq 0 ]; then
+    print_error "Plugin never invoked (PASS counter is ${PASS_COUNT:-<missing>})"
+    FAILED=$((FAILED + 1))
 else
-    # Plugin returns XDP_PASS, which means kernel stack handles the packet.
-    # In this topology, the packet should still be forwarded.
-    print_info "Ping via plugin SID: packet passed to kernel (expected for counter plugin)"
+    print_success "Plugin invoked: PASS counter = $PASS_COUNT"
     PASSED=$((PASSED + 1))
 fi
-
-# Test: Verify plugin was actually invoked by checking SID stats
-print_info "Checking Vinbero stats..."
-ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show || true
 
 echo ""
 echo "=========================================="

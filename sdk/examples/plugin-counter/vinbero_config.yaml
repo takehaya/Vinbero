@@ -15,6 +15,7 @@ internal:
     add_caller: true
 
 settings:
+  enable_stats: true
   entries:
     sid_function:
       capacity: 1024
