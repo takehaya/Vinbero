@@ -122,14 +122,10 @@ FAILED=0
 print_info "Sending traffic from host1 towards fc00:3::3 (triggers SRv6 encap at router1)..."
 ip netns exec "$ns_host1" ping6 -c 3 -W 2 fc00:3::3 > /dev/null 2>&1 || true
 
-# Informational: global XDP per-action counters. Includes unrelated
-# traffic (NDP / RA / MLD) so it is not suitable as a plugin-invocation
-# ground truth.
-print_info "Vinbero stats (informational):"
-ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show
-
-# Assert: plugin_counter_map is the ground truth — the plugin body
-# increments it on every invocation, before tailcall_epilogue.
+# plugin_counter_map is the plugin's private per-CPU counter, incremented
+# once per invocation. Reading it directly tells us exactly how many
+# times the plugin body ran. (vinbero's stats_map is a global per-action
+# aggregator and also counts unrelated traffic, so it's not shown here.)
 print_info "Reading plugin_counter_map via bpftool..."
 MAP_ID=$(ip netns exec "$ns_router2" bpftool map show 2>/dev/null \
     | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
