@@ -87,6 +87,24 @@ settings:
 
 有効化しないと `vinbero stats show` / `stats slot show` は全ゼロを返します。
 
+### `settings.pin_maps.*`
+
+制御状態 BPF マップを `/sys/fs/bpf/` に pin して **daemon 再起動後もデータを残す**オプション。デフォルト無効 (従来通り in-memory)。詳細と運用上の注意は [persistence.md](persistence.md) を参照。
+
+| キー | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | pin を有効化 |
+| `path` | string | `/sys/fs/bpf/vinbero` | pin 先ディレクトリ (bpffs 上) |
+
+```yaml
+settings:
+  pin_maps:
+    enabled: true
+    path: /sys/fs/bpf/vinbero
+```
+
+pin 対象: `sid_function_map` / `sid_aux_map` / `headend_v4_map` / `headend_v6_map` / `headend_l2_map` / `fdb_map` / `bd_peer_map` / `bd_peer_reverse_map` / `dx2v_map` の 9 本。stats / slot_stats / PROG_ARRAY 等は pin しません。
+
 ### `settings.state_path`
 
 ネットワークリソース (Bridge / VRF) の **管理状態を永続化する JSON ファイル**。詳しくは [persistence.md](persistence.md) を参照。

@@ -4,18 +4,18 @@
 
 ## TL;DR
 
-| リソース | 再起動で | 復旧手段 |
-|---|---|---|
-| `vinbero.yml` (設定ファイル) | 残る (disk) | そのまま再ロード |
-| XDP プログラムの attach | **消える** | daemon 起動時に `internal.devices` に attach し直す |
-| SID function / aux | **消える** (daemon 内 in-memory map) | RPC / CLI で再投入 |
-| Headend v4 / v6 / L2 | **消える** | RPC / CLI で再投入 |
-| BD peer / VLAN table / FDB (dynamic) | **消える** | RPC / CLI で再投入 (FDB は学習でも埋まる) |
-| Bridge / VRF デバイス | カーネル netlink に残る / netns 単位 | `state.json` から **自動 reconcile** |
-| 登録済み plugin (`PROG_ARRAY`) | **消える** | register RPC を再実行 |
-| Global stats / per-slot stats | **消える** (PERCPU_ARRAY) | 自然増加で埋まる |
+| リソース | `pin_maps: false` (default) | `pin_maps: true` | 復旧手段 |
+|---|---|---|---|
+| `vinbero.yml` (設定ファイル) | 残る (disk) | 残る | そのまま再ロード |
+| XDP プログラムの attach | **消える** | **消える** | daemon 起動時に `internal.devices` に attach し直す |
+| SID function / aux | **消える** | **残る** (bpffs pin) | default: RPC / CLI で再投入 |
+| Headend v4 / v6 / L2 | **消える** | **残る** (bpffs pin) | default: RPC / CLI で再投入 |
+| BD peer / VLAN table / FDB | **消える** | **残る** (bpffs pin) | default: RPC / CLI (FDB は学習でも埋まる) |
+| Bridge / VRF デバイス | カーネル netlink に残る / netns 単位 | 同左 | `state.json` から **自動 reconcile** |
+| 登録済み plugin (`PROG_ARRAY`) | **消える** | **消える** (pin しない) | register RPC を再実行 |
+| Global stats / per-slot stats | **消える** | **消える** (pin しない) | 自然増加で埋まる |
 
-基本原則: **ネットワークリソース (Bridge / VRF) のみ disk 永続化、それ以外は in-memory**。SRv6 制御状態は外部コントローラ (API クライアント) が source of truth として保持する想定です。
+デフォルトは **外部コントローラが source of truth** として振る舞う設計 (`pin_maps: false`)。SRv6 制御状態は API クライアント側で保持します。`pin_maps: true` に切り替えれば kernel 側に BPF マップを残せるので、daemon 単体でステートフル運用できます。
 
 ## 永続化層: `state.json`
 
@@ -31,23 +31,66 @@ Vinbero が daemon 内部で持つ状態のうち **永続化されるのは Net
 
 state.json フォーマットは内部実装扱いで、手編集は非推奨です。`vinbero` CLI 経由で操作してください。
 
-## In-memory: BPF マップ群
+## BPF マップ: in-memory vs pinned
 
-SRv6 制御状態 (`sid_function_map`, `sid_aux_map`, `headend_*_map`, `fdb_map`, `bd_peer_map`, `dx2v_map` 等) はすべて **daemon が所有する eBPF マップ**で、`/sys/fs/bpf/` への pin は行なっていません。このため:
+SRv6 制御状態 (`sid_function_map`, `sid_aux_map`, `headend_*_map`, `fdb_map`, `bd_peer_map`, `bd_peer_reverse_map`, `dx2v_map`) は daemon が所有する eBPF マップです。`settings.pin_maps.enabled` で挙動が切り替わります。
+
+### `pin_maps.enabled: false` (default)
 
 - **daemon 終了 = map 消滅 = データ消滅**
 - 次回起動時は空の map でスタート
 - 既存エントリの引き継ぎは一切なし
+- クライアント側 (API caller) が残りの状態を保持している前提
 
-クライアント側 (API caller) が残りの状態を保持している前提の設計です。大量の SID を扱う運用では、外部 DB / etcd / Kubernetes CRD 等に正本を置き、daemon 起動時に一括再投入するのが正攻法になります。
+大量の SID を扱う運用では外部 DB / etcd / Kubernetes CRD 等に正本を置き、daemon 起動時に一括再投入する "external SoT" モデルが向きます。
+
+### `pin_maps.enabled: true`
+
+cilium/ebpf の `PinByName` で、対象 9 マップを `/sys/fs/bpf/<path>/<map_name>` に pin します (`path` はデフォルト `/sys/fs/bpf/vinbero`)。
+
+挙動:
+- **daemon 起動時**: pin dir に map が無ければ新規作成して pin、既にあれば既存 map を reuse
+- **daemon 終了時**: ユーザ側 FD は閉じるが、bpffs の pin が FD を保持しているため **kernel map は生き残る**
+- **daemon 再起動**: 同じ pin dir を指定すれば、前回書き込んだエントリは全部見える
+
+```yaml
+settings:
+  pin_maps:
+    enabled: true
+    path: /sys/fs/bpf/vinbero
+```
+
+前提: `/sys/fs/bpf` が bpffs でマウントされていること (`mount -t bpf bpf /sys/fs/bpf/`)。netns 内で動かす場合はその netns の mount namespace でも同様にマウントが必要。
+
+### pin しないマップ
+
+以下は永続化対象外です:
+- `stats_map`, `slot_stats_*` (3 本): カウンタは再起動でリセットするのが自然
+- `scratch_map`, `tailcall_ctx_map`: per-CPU の ephemeral 一時領域
+- `sid_endpoint_progs`, `headend_v4_progs`, `headend_v6_progs` (PROG_ARRAY): プログラム FD が毎回異なるので pin しても意味がない
+
+### 破壊的変更時の注意
+
+**schema / capacity を変えたときは pin dir を削除**してください。BPF map の `max_entries` や value サイズは作成後に変更不可なので、cilium/ebpf は pin された既存 map と spec の不一致を見ると load エラーを返します。
+
+```bash
+sudo systemctl stop vinberod
+sudo rm -rf /sys/fs/bpf/vinbero
+sudo systemctl start vinberod
+```
+
+典型的にハマる場面:
+- `settings.entries.*.capacity` を変更した
+- Vinbero をアップグレードして BPF struct layout が変わった (例: plugin SDK v2 で `sid_function_entry` が 12B → 4B)
+- マップ名が変わった
 
 ### Aux index の allocator recovery
 
-唯一の例外として、**map 内の既存エントリを読んで allocator 状態を復元する仕組み**が 1 箇所あります (`pkg/bpf/maps.go::RecoverAuxIndices`):
+pin 有効時は特に重要なメカニズム (`pkg/bpf/maps.go::RecoverAuxIndices`):
 
-起動直後に `sid_function_map` を iterate して、`aux_index != 0` のエントリが参照している index を allocator が使用中としてマーク。gap 部分を free list に戻します。これは daemon を **map の pin 化 (将来機能)** なしで再起動する場面、または手動で kernel map に直接書き込まれた場合の整合性確保のための防御策です。
+起動直後に `sid_function_map` を iterate して、`aux_index != 0` のエントリが参照している index を allocator が使用中としてマーク。gap 部分を free list に戻します。pin された map を reuse したとき、allocator がすでに使われている index を二重に払い出さないためのガード。
 
-現状は `/sys/fs/bpf` pin が無いため実質「再起動 = map 空 = allocator も初期状態」ですが、将来 pin 永続化を入れたときにこのパスが生きます。
+pin 無効時は map が空なので recovery しても何も起きず、結果的に allocator は fresh start します (= 従来挙動)。
 
 ## XDP program の attach
 
@@ -82,15 +125,20 @@ SRv6 制御状態 (`sid_function_map`, `sid_aux_map`, `headend_*_map`, `fdb_map`
 
 1. **上流ルーティングで draining** (可能なら)。SID を減らす / BGP で切り離すなど
 2. `vinberod` 停止
-3. (必要なら) `ip link set dev <iface> xdp off` を実行、`make remove-ebpfmap` で残骸掃除
+3. (必要なら) `ip link set dev <iface> xdp off` を実行
 4. `vinberod -c vinbero.yml` 再起動 → XDP attach + Bridge/VRF reconcile が自動で走る
-5. **外部コントローラから SID / Headend / plugin を再投入**
-6. トラフィック監視 (`vinbero stats show`, `stats slot show`) で正常性確認
+5. SID / Headend を再投入:
+   - `pin_maps: false`: **外部コントローラから全部再投入**
+   - `pin_maps: true`: 前回のエントリが bpffs から復元されるので再投入不要
+6. **Plugin は常に再登録**が必要 (`vinbero plugin register ...`)
+7. トラフィック監視 (`vinbero stats show`, `stats slot show`) で正常性確認
+
+schema を変更したときは手順 3 の後に `rm -rf /sys/fs/bpf/vinbero/` を挟んでから再起動。
 
 ## 将来拡張候補
 
-- BPF マップの `/sys/fs/bpf` pin + daemon hand-off による hitless restart
-- SRv6 制御状態の state.json 永続化拡張 (Bridge/VRF と同様に SID も disk に書く)
-- Plugin の auto re-register (`plugins:` セクションを vinbero.yml に追加)
+- daemon hand-off による **hitless restart** (XDP link の継承 + pin 済み map 引き継ぎで無停止更新)
+- Plugin の auto re-register (`plugins:` セクションを vinbero.yml に追加し、起動時に自動ロード)
+- schema migration ツール (`vinbero admin pin-migrate` 等で capacity 変更を無停止適用)
 
-これらは未実装です。現時点では上記「外部が source of truth」の前提で運用してください。
+これらは未実装です。現状は `pin_maps: true` でデータは残せますが、再登録が必要なのは XDP attach と plugin、capacity/schema 変更時のリロードです。
