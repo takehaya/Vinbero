@@ -209,6 +209,24 @@ func TestEncode_TypeMismatch_Rejected(t *testing.T) {
 	}
 }
 
+// Fractional JSON numbers must not silently truncate when json.Number
+// falls back to Float64(). Regression for a review finding where
+// `{"a": 1.5}` silently became 1.
+func TestEncode_Fractional_Rejected(t *testing.T) {
+	s := &btf.Struct{
+		Name:    "aux",
+		Size:    4,
+		Members: []btf.Member{{Name: "a", Type: u32Type(), Offset: 0}},
+	}
+	_, err := EncodePluginAux(s, parseJSON(t, `{"a": 1.5}`))
+	if err == nil {
+		t.Fatal("expected fractional JSON number to be rejected")
+	}
+	if !strings.Contains(err.Error(), "fractional") {
+		t.Errorf("error should mention fractional, got: %v", err)
+	}
+}
+
 func TestEncode_SizeOverflow_OverflowsInt8(t *testing.T) {
 	s := &btf.Struct{
 		Name:    "aux",

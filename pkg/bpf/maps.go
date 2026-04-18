@@ -3,6 +3,7 @@ package bpf
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net"
 	"sync"
 	"unsafe"
@@ -338,6 +339,15 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 		idx, err := m.auxAlloc.Alloc()
 		if err != nil {
 			return fmt.Errorf("failed to allocate aux index: %w", err)
+		}
+		// sid_function_entry.aux_index is u16; the userspace allocator
+		// can in principle hand out higher values if the operator set
+		// an sid_aux_map capacity above 65535, which would silently
+		// truncate here. Reject before we write the truncated value.
+		if idx > math.MaxUint16 {
+			m.auxAlloc.Free(idx)
+			return fmt.Errorf("aux index %d exceeds uint16 range; reduce sid_aux_map capacity below %d",
+				idx, math.MaxUint16+1)
 		}
 		entry.AuxIndex = uint16(idx)
 		if err := m.objs.SidAuxMap.Put(idx, aux); err != nil {

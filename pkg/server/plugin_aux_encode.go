@@ -451,9 +451,14 @@ func toInt64(val any) (int64, bool, error) {
 		if i, err := v.Int64(); err == nil {
 			return i, i < 0, nil
 		}
+		// Int64 failed: either the value is fractional or it overflows
+		// int64. Accept only values that fit an int64 and are whole.
 		f, err := v.Float64()
 		if err != nil {
 			return 0, false, fmt.Errorf("invalid number %q: %w", v, err)
+		}
+		if f != float64(int64(f)) {
+			return 0, false, fmt.Errorf("expected integer, got fractional %v", v)
 		}
 		return int64(f), f < 0, nil
 	case float64:

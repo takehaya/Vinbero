@@ -121,7 +121,7 @@ encode the bytes themselves.
 
 ## Observability
 
-- Per-action global counters (RX / PASS / DROP / REDIRECT / ERROR):
+- Per-action global counters (RX / PASS / DROP / REDIRECT / ABORTED):
   ```
   vinbero stats show
   ```
