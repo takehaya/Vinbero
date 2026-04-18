@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -38,6 +39,8 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "gtp-v4-src-addr", Usage: "GTP4 outer IPv4 source address (for End.M.GTP4.E)"},
 					&cli.UintFlag{Name: "table-id", Usage: "VLAN table ID (for End.DX2V)"},
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 196 bytes after decode)"},
+					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
+					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -85,6 +88,21 @@ func sidFunctionCommand() *cli.Command {
 						pluginAuxRaw = decoded
 					}
 
+					pluginAuxJSON := c.String("plugin-aux-json")
+					if jsonPath := c.String("plugin-aux-json-file"); jsonPath != "" {
+						if pluginAuxJSON != "" {
+							return fmt.Errorf("--plugin-aux-json and --plugin-aux-json-file are mutually exclusive")
+						}
+						body, err := os.ReadFile(jsonPath)
+						if err != nil {
+							return fmt.Errorf("read %s: %w", jsonPath, err)
+						}
+						pluginAuxJSON = string(body)
+					}
+					if pluginAuxJSON != "" && pluginAuxRaw != nil {
+						return fmt.Errorf("--plugin-aux-hex and --plugin-aux-json* are mutually exclusive")
+					}
+
 					sid := &v1.SidFunction{
 						Action:        action,
 						TriggerPrefix: c.String("trigger-prefix"),
@@ -100,8 +118,9 @@ func sidFunctionCommand() *cli.Command {
 						HeadendMode:   headendMode,
 						ArgsOffset:   uint32(c.Uint("args-offset")),
 						GtpV4SrcAddr: c.String("gtp-v4-src-addr"),
-						TableId:      uint32(c.Uint("table-id")),
-						PluginAuxRaw: pluginAuxRaw,
+						TableId:       uint32(c.Uint("table-id")),
+						PluginAuxRaw:  pluginAuxRaw,
+						PluginAuxJson: pluginAuxJSON,
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),

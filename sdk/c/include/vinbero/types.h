@@ -25,4 +25,37 @@
 #define VINBERO_PLUGIN_AUX_CAST(type, aux_ptr) \
     ((type *)((aux_ptr)->plugin_raw))
 
+/*
+ * Well-known typedefs and structs for the BTF-driven CLI encoder.
+ *
+ * Plugin authors use these when they want their aux JSON to accept
+ * human-friendly formats instead of raw byte arrays. The server encoder
+ * detects these type names in the plugin's BTF and parses the JSON string
+ * value accordingly:
+ *
+ *   vinbero_mac_t          "aa:bb:cc:dd:ee:ff"
+ *   vinbero_ipv4_t         "10.0.0.1"              (network byte order)
+ *   vinbero_ipv6_t         "fc00::1"               (network byte order)
+ *   vinbero_ipv4_prefix_t  "10.0.0.0/24"
+ *   vinbero_ipv6_prefix_t  "fc00::/48"
+ *
+ * Plugins that stick with plain arrays (e.g. __u8 mac[6]) still work via
+ * hex string or JSON number array; special formats are opt-in.
+ */
+typedef __u8 vinbero_mac_t[6];
+typedef __u8 vinbero_ipv4_t[4];
+typedef __u8 vinbero_ipv6_t[16];
+
+struct vinbero_ipv4_prefix_t {
+    __u8 prefix_len;
+    __u8 _pad[3];
+    vinbero_ipv4_t addr;
+} __attribute__((packed));
+
+struct vinbero_ipv6_prefix_t {
+    __u8 prefix_len;
+    __u8 _pad[7];
+    vinbero_ipv6_t addr;
+} __attribute__((packed));
+
 #endif /* VINBERO_SDK_TYPES_H */

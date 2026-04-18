@@ -3,21 +3,34 @@ package server
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/cilium/ebpf/btf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
-// SidFunctionServer implements the SidFunctionServiceHandler interface
-type SidFunctionServer struct {
-	mapOps *bpf.MapOperations
+// AuxTypeLookup resolves a plugin slot to its BTF aux struct so the
+// SidFunction handler can encode plugin_aux_json without a hard
+// dependency on the full PluginServer. *PluginServer implements it.
+type AuxTypeLookup interface {
+	AuxType(mapType string, slot uint32) *btf.Struct
 }
 
-// NewSidFunctionServer creates a new SidFunctionServer
-func NewSidFunctionServer(mapOps *bpf.MapOperations) *SidFunctionServer {
-	return &SidFunctionServer{mapOps: mapOps}
+// SidFunctionServer implements the SidFunctionServiceHandler interface
+type SidFunctionServer struct {
+	mapOps    *bpf.MapOperations
+	pluginAux AuxTypeLookup
+}
+
+// NewSidFunctionServer creates a new SidFunctionServer. pluginAux may be
+// nil; in that case plugin_aux_json requests are rejected with a clear
+// error so deployments without the PluginServer wired up fail loudly.
+func NewSidFunctionServer(mapOps *bpf.MapOperations, pluginAux AuxTypeLookup) *SidFunctionServer {
+	return &SidFunctionServer{mapOps: mapOps, pluginAux: pluginAux}
 }
 
 // SidFunctionCreate creates SID function entries
@@ -220,7 +233,12 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	// (action value >= EndpointPluginBase) that have no built-in aux variant
 	// above; the built-in variants take precedence so a caller cannot shadow
 	// an End.X nexthop with arbitrary bytes.
-	if aux == nil && len(sidFunc.PluginAuxRaw) > 0 {
+	hasRaw := len(sidFunc.PluginAuxRaw) > 0
+	hasJSON := sidFunc.PluginAuxJson != ""
+	if hasRaw && hasJSON {
+		return nil, nil, fmt.Errorf("plugin_aux_raw and plugin_aux_json are mutually exclusive")
+	}
+	if aux == nil && hasRaw {
 		if len(sidFunc.PluginAuxRaw) > bpf.SidAuxPluginRawMax {
 			return nil, nil, fmt.Errorf(
 				"plugin_aux_raw length %d exceeds maximum %d",
@@ -229,8 +247,45 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		}
 		aux = bpf.NewSidAuxPluginRaw(sidFunc.PluginAuxRaw)
 	}
+	if aux == nil && hasJSON {
+		raw, err := s.encodePluginAuxJSON(sidFunc)
+		if err != nil {
+			return nil, nil, err
+		}
+		aux = bpf.NewSidAuxPluginRaw(raw)
+	}
 
 	return entry, aux, nil
+}
+
+// encodePluginAuxJSON resolves the plugin's BTF aux type and asks the
+// encoder to turn the caller's JSON into the byte layout the plugin
+// expects. The result is bounded by SidAuxPluginRawMax so it always fits
+// inside sid_aux_entry.plugin_raw.
+func (s *SidFunctionServer) encodePluginAuxJSON(sidFunc *v1.SidFunction) ([]byte, error) {
+	if s.pluginAux == nil {
+		return nil, fmt.Errorf("plugin_aux_json requires PluginService wiring")
+	}
+	action := uint32(sidFunc.Action)
+	if action < bpf.EndpointPluginBase {
+		return nil, fmt.Errorf("plugin_aux_json only valid for plugin actions (>= %d), got %d",
+			bpf.EndpointPluginBase, action)
+	}
+	auxType := s.pluginAux.AuxType(bpf.MapTypeEndpoint, action)
+	if auxType == nil {
+		return nil, fmt.Errorf("plugin at slot %d does not declare <program>_aux BTF; register a plugin that uses VINBERO_PLUGIN_AUX_TYPE", action)
+	}
+	if auxType.Size > bpf.SidAuxPluginRawMax {
+		return nil, fmt.Errorf("plugin aux struct is %d bytes, exceeds maximum %d",
+			auxType.Size, bpf.SidAuxPluginRawMax)
+	}
+	dec := json.NewDecoder(strings.NewReader(sidFunc.PluginAuxJson))
+	dec.UseNumber()
+	var payload map[string]any
+	if err := dec.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("plugin_aux_json is not a valid JSON object: %w", err)
+	}
+	return EncodePluginAux(auxType, payload)
 }
 
 // entryToProto converts a BPF map entry to a protobuf SidFunction

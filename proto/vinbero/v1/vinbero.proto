@@ -45,6 +45,7 @@ message SidFunction {
   string gtp_v4_src_addr = 16; // GTP4 outer IPv4 source address (End.M.GTP4.E)
   uint32 table_id = 17; // VLAN table ID (End.DX2V: VLAN cross-connect scope)
   bytes plugin_aux_raw = 18; // Plugin-defined auxiliary payload (<= 196 bytes, cast by plugin via VINBERO_PLUGIN_AUX_CAST)
+  string plugin_aux_json = 19; // Plugin-defined auxiliary payload as JSON; server encodes via plugin BTF. Mutually exclusive with plugin_aux_raw.
 }
 
 message SidFunctionCreateRequest {

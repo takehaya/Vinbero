@@ -96,8 +96,11 @@ ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
 # Create the plugin SID — action=32 dispatches to our plugin at slot 32.
 # Note: END_BPF resolves to enum value 16, not slot 32. Use the raw numeric
 # index so the tail call goes to the correct PROG_ARRAY slot.
+# The plugin aux carries an "increment" field (plugin_counter_aux); the
+# server encodes the JSON via the plugin's BTF.
 ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
-    sid create --trigger-prefix fc00:2::32/128 --action ${PLUGIN_INDEX}
+    sid create --trigger-prefix fc00:2::32/128 --action ${PLUGIN_INDEX} \
+    --plugin-aux-json '{"increment": 10}'
 
 # Update the route on router1 to use the plugin SID
 ip netns exec "$ns_router1" ip -6 route add fc00:3::/64 \
@@ -153,6 +156,16 @@ if [ -n "$MAP_ID" ]; then
     COUNTER_TOTAL=$(ip netns exec "$ns_router2" bpftool map dump id "$MAP_ID" 2>/dev/null \
         | grep -Eo '"value": [0-9]+' | awk '{ s += $2 } END { print s+0 }')
     print_info "plugin_counter_map total=${COUNTER_TOTAL}"
+    # The plugin aux sets increment=10, so with SLOT_PACKETS plugin
+    # invocations the counter should equal SLOT_PACKETS * 10.
+    EXPECTED=$((SLOT_PACKETS * 10))
+    if [ "$COUNTER_TOTAL" -eq "$EXPECTED" ]; then
+        print_success "counter matches increment=10 * ${SLOT_PACKETS} slot packets"
+        PASSED=$((PASSED + 1))
+    else
+        print_error "counter mismatch: got ${COUNTER_TOTAL}, expected ${EXPECTED}"
+        FAILED=$((FAILED + 1))
+    fi
 fi
 
 echo ""
