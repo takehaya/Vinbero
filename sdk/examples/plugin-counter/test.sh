@@ -117,23 +117,35 @@ PASSED=0
 FAILED=0
 
 # Test: send IPv6 packets from host1 that trigger router1's seg6 encap rule.
-# Reply may not come back (router2 kernel doesn't own fc00:2::32), but the
-# plugin must be invoked and record XDP_PASS stats on router2.
+# The reply never comes back (router2 kernel doesn't own fc00:2::32) so the
+# verification below reads plugin_counter_map directly via bpftool instead.
 print_info "Sending traffic from host1 towards fc00:3::3 (triggers SRv6 encap at router1)..."
 ip netns exec "$ns_host1" ping6 -c 3 -W 2 fc00:3::3 > /dev/null 2>&1 || true
 
-# Assert: PASS counter on router2's stats must have incremented, which
-# only happens when the plugin's tailcall_epilogue fires.
-print_info "Checking Vinbero stats..."
-STATS_OUTPUT=$(ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show)
-echo "$STATS_OUTPUT"
-PASS_COUNT=$(echo "$STATS_OUTPUT" | awk '/^PASS/ { print $2 }')
-if [ -z "$PASS_COUNT" ] || [ "$PASS_COUNT" -eq 0 ]; then
-    print_error "Plugin never invoked (PASS counter is ${PASS_COUNT:-<missing>})"
+# Informational: global XDP per-action counters. Includes unrelated
+# traffic (NDP / RA / MLD) so it is not suitable as a plugin-invocation
+# ground truth.
+print_info "Vinbero stats (informational):"
+ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show
+
+# Assert: plugin_counter_map is the ground truth — the plugin body
+# increments it on every invocation, before tailcall_epilogue.
+print_info "Reading plugin_counter_map via bpftool..."
+MAP_ID=$(ip netns exec "$ns_router2" bpftool map show 2>/dev/null \
+    | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
+if [ -z "$MAP_ID" ]; then
+    print_error "plugin_counter_map not visible via bpftool (bpftool missing?)"
     FAILED=$((FAILED + 1))
 else
-    print_success "Plugin invoked: PASS counter = $PASS_COUNT"
-    PASSED=$((PASSED + 1))
+    COUNTER_TOTAL=$(ip netns exec "$ns_router2" bpftool map dump id "$MAP_ID" 2>/dev/null \
+        | grep -Eo '"value": [0-9]+' | awk '{ s += $2 } END { print s+0 }')
+    if [ "$COUNTER_TOTAL" -gt 0 ]; then
+        print_success "plugin invoked $COUNTER_TOTAL times (plugin_counter_map total across CPUs)"
+        PASSED=$((PASSED + 1))
+    else
+        print_error "plugin_counter_map is zero — plugin was never invoked"
+        FAILED=$((FAILED + 1))
+    fi
 fi
 
 echo ""
