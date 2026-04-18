@@ -69,9 +69,6 @@ func vlanTableCommand() *cli.Command {
 					&cli.UintFlag{Name: "table-id", Usage: "Only flush this table (default: all tables)"},
 				},
 				Action: func(c *cli.Context) error {
-					if !c.Bool("yes") {
-						return fmt.Errorf("--yes is required to flush VLAN cross-connect entries")
-					}
 					clients := clientsFromContext(c)
 					resp, err := clients.VlanTbl.VlanTableFlush(context.Background(),
 						connect.NewRequest(&v1.VlanTableFlushRequest{TableId: uint32(c.Uint("table-id"))}))

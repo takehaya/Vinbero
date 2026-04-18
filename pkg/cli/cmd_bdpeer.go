@@ -72,9 +72,6 @@ func bdPeerCommand() *cli.Command {
 					&cli.UintFlag{Name: "bd-id", Usage: "Only flush this BD (default: all BDs)"},
 				},
 				Action: func(c *cli.Context) error {
-					if !c.Bool("yes") {
-						return fmt.Errorf("--yes is required to flush BD peers")
-					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Peer.BdPeerFlush(context.Background(),
 						connect.NewRequest(&v1.BdPeerFlushRequest{BdId: uint32(c.Uint("bd-id"))}))

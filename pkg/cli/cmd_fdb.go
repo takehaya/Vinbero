@@ -69,9 +69,6 @@ func fdbCommand() *cli.Command {
 					&cli.BoolFlag{Name: "keep-static", Usage: "Preserve user-configured static entries"},
 				},
 				Action: func(c *cli.Context) error {
-					if !c.Bool("yes") {
-						return fmt.Errorf("--yes is required to flush FDB entries")
-					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Fdb.FdbFlush(context.Background(),
 						connect.NewRequest(&v1.FdbFlushRequest{

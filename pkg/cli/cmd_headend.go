@@ -69,9 +69,6 @@ func headendV4Command() *cli.Command {
 					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
 				},
 				Action: func(c *cli.Context) error {
-					if !c.Bool("yes") {
-						return fmt.Errorf("--yes is required to flush all Headend v4 entries")
-					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv4.Headendv4Flush(context.Background(),
 						connect.NewRequest(&v1.Headendv4FlushRequest{}))
@@ -167,9 +164,6 @@ func headendV6Command() *cli.Command {
 					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
 				},
 				Action: func(c *cli.Context) error {
-					if !c.Bool("yes") {
-						return fmt.Errorf("--yes is required to flush all Headend v6 entries")
-					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv6.Headendv6Flush(context.Background(),
 						connect.NewRequest(&v1.Headendv6FlushRequest{}))
@@ -278,9 +272,6 @@ func headendL2Command() *cli.Command {
 					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
 				},
 				Action: func(c *cli.Context) error {
-					if !c.Bool("yes") {
-						return fmt.Errorf("--yes is required to flush all Headend L2 entries")
-					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Hl2.HeadendL2Flush(context.Background(),
 						connect.NewRequest(&v1.HeadendL2FlushRequest{}))

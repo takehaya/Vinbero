@@ -155,9 +155,6 @@ func sidFunctionCommand() *cli.Command {
 					&cli.BoolFlag{Name: "yes", Usage: "Confirm the destructive operation", Required: true},
 				},
 				Action: func(c *cli.Context) error {
-					if !c.Bool("yes") {
-						return fmt.Errorf("--yes is required to flush all SID functions")
-					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Sid.SidFunctionFlush(context.Background(),
 						connect.NewRequest(&v1.SidFunctionFlushRequest{}))
