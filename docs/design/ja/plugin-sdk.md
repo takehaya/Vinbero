@@ -81,7 +81,7 @@ struct tailcall_ctx {
 主な用途:
 
 - `l3_offset`: verifier 対策に `TAILCALL_BOUND_L3OFF(tctx, l3_off)` か `if (l3_off > 22)` でバウンドする
-- `sid_entry.has_aux` が立っていれば `aux_index` で `sid_aux_map` を再 lookup
+- `sid_entry.aux_index != 0` なら `aux_index` で `sid_aux_map` を再 lookup (0 は "aux なし" sentinel)
 - Headend 系なら `headend` に segments/flavor 等が入る
 
 ### 戻りの契約

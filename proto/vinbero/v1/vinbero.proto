@@ -44,6 +44,7 @@ message SidFunction {
   uint32 args_offset = 15; // Args.Mob.Session byte offset in SID (RFC 9433, for GTP functions)
   string gtp_v4_src_addr = 16; // GTP4 outer IPv4 source address (End.M.GTP4.E)
   uint32 table_id = 17; // VLAN table ID (End.DX2V: VLAN cross-connect scope)
+  bytes plugin_aux_raw = 18; // Plugin-defined auxiliary payload (<= 196 bytes, cast by plugin via VINBERO_PLUGIN_AUX_CAST)
 }
 
 message SidFunctionCreateRequest {

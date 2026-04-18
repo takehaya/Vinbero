@@ -106,13 +106,10 @@ type BpfSidAuxEntry struct {
 }
 
 type BpfSidFunctionEntry struct {
-	_          structs.HostLayout
-	Action     uint8
-	Flavor     uint8
-	HasAux     uint8
-	Pad        uint8
-	VrfIfindex uint32
-	AuxIndex   uint32
+	_        structs.HostLayout
+	Action   uint8
+	Flavor   uint8
+	AuxIndex uint16
 }
 
 type BpfStatsEntry struct {
@@ -129,7 +126,7 @@ type BpfTailcallCtx struct {
 	Slot         uint8
 	Pad          [3]uint8
 	SidEntry     BpfSidFunctionEntry
-	_            [188]byte
+	_            [196]byte
 }
 
 // LoadBpf returns the embedded CollectionSpec for Bpf.

@@ -16,4 +16,13 @@
 #include "core/xdp_prog.h"
 #include "core/xdp_tailcall.h"
 
+/*
+ * VINBERO_PLUGIN_AUX_CAST: interpret sid_aux_entry.plugin_raw as a plugin-
+ * defined struct. The caller is responsible for ensuring
+ *   sizeof(type) <= sizeof(((struct sid_aux_entry *)0)->plugin_raw)
+ * typically via _Static_assert at the plugin's translation-unit scope.
+ */
+#define VINBERO_PLUGIN_AUX_CAST(type, aux_ptr) \
+    ((type *)((aux_ptr)->plugin_raw))
+
 #endif /* VINBERO_SDK_TYPES_H */

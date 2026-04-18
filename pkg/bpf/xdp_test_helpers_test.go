@@ -126,8 +126,9 @@ func (h *xdpTestHelper) createSidFunctionWithBD(prefix string, action uint8, bdI
 
 func (h *xdpTestHelper) createSidFunctionWithVRF(prefix string, action uint8, vrfIfindex uint32) {
 	h.t.Helper()
-	entry := &SidFunctionEntry{Action: action, Flavor: 0, VrfIfindex: vrfIfindex}
-	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
+	entry := &SidFunctionEntry{Action: action, Flavor: 0}
+	aux := NewSidAuxL3Vrf(vrfIfindex)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }

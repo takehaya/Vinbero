@@ -86,7 +86,7 @@ func TestSidAuxRoundTrip(t *testing.T) {
 func TestRecoverAuxIndices(t *testing.T) {
 	h := newXDPTestHelper(t)
 
-	// Create entries with aux (indices 0, 1)
+	// Create entries with aux (indices 1, 2 — index 0 is the no-aux sentinel)
 	nh, _ := ParseIPv6("fc00::1")
 	e1 := &SidFunctionEntry{Action: actionEndX}
 	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", e1, NewSidAuxNexthop(nh)); err != nil {
@@ -102,7 +102,7 @@ func TestRecoverAuxIndices(t *testing.T) {
 		t.Fatalf("create 3: %v", err)
 	}
 
-	// Delete entry 1 to create a gap (index 0 freed)
+	// Delete entry 1 to create a gap (index 1 freed)
 	if err := h.mapOps.DeleteSidFunction("fc00:1::1/128"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestRecoverAuxIndices(t *testing.T) {
 		t.Fatalf("recover: %v", err)
 	}
 
-	// Allocate new index — should get 0 (freed gap), not 2
+	// Allocate new index — should get 1 (freed gap), not 3
 	e4 := &SidFunctionEntry{Action: actionEndX}
 	if err := freshMapOps.CreateSidFunction("fc00:4::1/128", e4, NewSidAuxNexthop(nh)); err != nil {
 		t.Fatalf("create after recover: %v", err)
@@ -123,8 +123,8 @@ func TestRecoverAuxIndices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.AuxIndex != 0 {
-		t.Errorf("expected recovered gap index 0, got %d", got.AuxIndex)
+	if got.AuxIndex != 1 {
+		t.Errorf("expected recovered gap index 1, got %d", got.AuxIndex)
 	}
 }
 

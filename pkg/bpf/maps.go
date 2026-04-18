@@ -62,7 +62,8 @@ func NewMapOperations(objs *BpfObjects) *MapOperations {
 	}
 }
 
-// indexAllocator manages a pool of uint32 indices with a free-list
+// indexAllocator manages a pool of uint32 indices with a free-list.
+// Index 0 is reserved as the "no aux" sentinel used by sid_function_entry.
 type indexAllocator struct {
 	mu       sync.Mutex
 	freeList []uint32
@@ -71,7 +72,7 @@ type indexAllocator struct {
 }
 
 func newIndexAllocator(max uint32) *indexAllocator {
-	return &indexAllocator{maxIndex: max}
+	return &indexAllocator{maxIndex: max, nextNew: 1}
 }
 
 func (a *indexAllocator) Alloc() (uint32, error) {
@@ -123,17 +124,17 @@ func (a *indexAllocator) RecoverUsed(usedIndices []uint32) {
 		return
 	}
 
-	a.nextNew = maxUsed + 1
+	a.nextNew = max(maxUsed+1, 1)
 	a.freeList = nil
-	for i := uint32(0); i < a.nextNew; i++ {
+	for i := uint32(1); i < a.nextNew; i++ {
 		if !used[i] {
 			a.freeList = append(a.freeList, i)
 		}
 	}
 }
 
-// RecoverAuxIndices scans sid_function_map for entries with has_aux=1
-// and marks their aux_index as used in the allocator.
+// RecoverAuxIndices scans sid_function_map for entries with a non-zero
+// aux_index and marks those indices as used in the allocator.
 // Call this on startup to restore allocator state after process restart.
 func (m *MapOperations) RecoverAuxIndices() error {
 	var key LpmKeyV6
@@ -142,8 +143,8 @@ func (m *MapOperations) RecoverAuxIndices() error {
 
 	var used []uint32
 	for iter.Next(&key, &entry) {
-		if entry.HasAux != 0 {
-			used = append(used, entry.AuxIndex)
+		if entry.AuxIndex != 0 {
+			used = append(used, uint32(entry.AuxIndex))
 		}
 	}
 	if err := iter.Err(); err != nil {
@@ -212,6 +213,34 @@ func NewSidAuxGtp6e(argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) *SidA
 	raw[0] = argsOffset
 	copy(raw[8:24], srcAddr[:])
 	copy(raw[24:40], dstAddr[:])
+	return entry
+}
+
+// NewSidAuxL3Vrf creates an aux entry for End.T/DT4/DT6/DT46 carrying the
+// resolved VRF ifindex in the l3vrf variant.
+func NewSidAuxL3Vrf(vrfIfindex uint32) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	binary.NativeEndian.PutUint32(entry.Nexthop.Nexthop[0:4], vrfIfindex)
+	return entry
+}
+
+// SidAuxL3VrfData extracts the VRF ifindex from the l3vrf variant.
+func SidAuxL3VrfData(entry *SidAuxEntry) uint32 {
+	return binary.NativeEndian.Uint32(entry.Nexthop.Nexthop[0:4])
+}
+
+// SidAuxPluginRawMax is the capacity of the plugin_raw variant in
+// sid_aux_entry. Writes longer than this are rejected at the RPC layer so
+// we never overflow the kernel-side union.
+const SidAuxPluginRawMax = 196
+
+// NewSidAuxPluginRaw creates an aux entry from a plugin-defined byte payload.
+// raw may be shorter than SidAuxPluginRawMax; remaining bytes are zero.
+// Callers (the RPC handler) must enforce len(raw) <= SidAuxPluginRawMax.
+func NewSidAuxPluginRaw(raw []byte) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	dst := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(entry))[:]
+	copy(dst, raw)
 	return entry
 }
 
@@ -310,8 +339,7 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 		if err != nil {
 			return fmt.Errorf("failed to allocate aux index: %w", err)
 		}
-		entry.HasAux = 1
-		entry.AuxIndex = idx
+		entry.AuxIndex = uint16(idx)
 		if err := m.objs.SidAuxMap.Put(idx, aux); err != nil {
 			m.auxAlloc.Free(idx)
 			return fmt.Errorf("failed to put SID aux entry: %w", err)
@@ -320,7 +348,7 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 
 	if err := m.objs.SidFunctionMap.Put(key, entry); err != nil {
 		if aux != nil {
-			m.auxAlloc.Free(entry.AuxIndex)
+			m.auxAlloc.Free(uint32(entry.AuxIndex))
 		}
 		return fmt.Errorf("failed to put SID function entry: %w", err)
 	}
@@ -343,10 +371,11 @@ func (m *MapOperations) DeleteSidFunction(triggerPrefix string) error {
 	}
 
 	// Clean up aux after SID entry is deleted to avoid index reuse while entry exists
-	if hasEntry && entry.HasAux != 0 {
+	if hasEntry && entry.AuxIndex != 0 {
 		var zeroAux SidAuxEntry
-		_ = m.objs.SidAuxMap.Put(entry.AuxIndex, &zeroAux)
-		m.auxAlloc.Free(entry.AuxIndex)
+		idx := uint32(entry.AuxIndex)
+		_ = m.objs.SidAuxMap.Put(idx, &zeroAux)
+		m.auxAlloc.Free(idx)
 	}
 	return nil
 }

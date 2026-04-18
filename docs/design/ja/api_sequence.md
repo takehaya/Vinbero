@@ -234,7 +234,7 @@ sequenceDiagram
     Note over Op,V: 基本的な End.X
 
     Op->>V: SidFunctionCreate<br/>{prefix: "fc00:1::a/128", action: End.X,<br/>nexthop: "fe80::1"}
-    V-->>V: nexthop パース → aux map (nexthop variant) 書き込み<br/>→ sid_function_map 書き込み (has_aux=1)
+    V-->>V: nexthop パース → aux map (nexthop variant) 書き込み<br/>→ sid_function_map 書き込み (aux_index!=0)
     V-->>Op: Created
 
     Note over Op,V: Flavor付き End.X（PSP: Penultimate Segment Pop）
@@ -268,7 +268,7 @@ sequenceDiagram
     Note over Op,V: End.B6.Encaps: 新しい外部IPv6+SRHでカプセル化
 
     Op->>V: SidFunctionCreate<br/>{prefix: "fc00:2::b6/128",<br/>action: End.B6.Encaps,<br/>src_addr: "fc00:2::1",<br/>segments: ["fc00:4::1","fc00:5::1"],<br/>headend_mode: H.Encaps}
-    V-->>V: policy entry (HeadendEntry) 構築<br/>→ aux map (b6_policy variant) 書き込み<br/>→ sid_function_map 書き込み (has_aux=1)
+    V-->>V: policy entry (HeadendEntry) 構築<br/>→ aux map (b6_policy variant) 書き込み<br/>→ sid_function_map 書き込み (aux_index!=0)
     V-->>Op: Created
 
     Note over Op,V: End.B6 (Insert): 既存SRHに新しいセグメントリストを挿入

@@ -14,6 +14,16 @@
 #include "endpoint/srv6_decaps.h"
 #include "core/xdp_stats.h"
 
+// Pick the VRF ifindex from aux->l3vrf, falling back to the ingress
+// interface when aux is absent or carries a zero ifindex (e.g. End.T
+// without a configured VRF).
+static __always_inline __u32 aux_vrf_or_ingress_ifindex(
+    struct sid_aux_entry *aux,
+    struct xdp_md *ctx)
+{
+    return (aux && aux->l3vrf.vrf_ifindex) ? aux->l3vrf.vrf_ifindex : ctx->ingress_ifindex;
+}
+
 // Endpoint processing context - shared by all endpoint functions
 struct endpoint_ctx {
     struct xdp_md *ctx;

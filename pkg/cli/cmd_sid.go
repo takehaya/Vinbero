@@ -2,11 +2,13 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/urfave/cli/v2"
 )
 
@@ -35,6 +37,7 @@ func sidFunctionCommand() *cli.Command {
 					&cli.UintFlag{Name: "args-offset", Usage: "Args.Mob.Session byte offset in SID (for GTP functions)"},
 					&cli.StringFlag{Name: "gtp-v4-src-addr", Usage: "GTP4 outer IPv4 source address (for End.M.GTP4.E)"},
 					&cli.UintFlag{Name: "table-id", Usage: "VLAN table ID (for End.DX2V)"},
+					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 196 bytes after decode)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -69,6 +72,19 @@ func sidFunctionCommand() *cli.Command {
 						}
 					}
 
+					var pluginAuxRaw []byte
+					if hx := c.String("plugin-aux-hex"); hx != "" {
+						decoded, err := hex.DecodeString(hx)
+						if err != nil {
+							return fmt.Errorf("invalid plugin-aux-hex: %w", err)
+						}
+						if len(decoded) > bpf.SidAuxPluginRawMax {
+							return fmt.Errorf("plugin-aux-hex decodes to %d bytes, max %d",
+								len(decoded), bpf.SidAuxPluginRawMax)
+						}
+						pluginAuxRaw = decoded
+					}
+
 					sid := &v1.SidFunction{
 						Action:        action,
 						TriggerPrefix: c.String("trigger-prefix"),
@@ -85,6 +101,7 @@ func sidFunctionCommand() *cli.Command {
 						ArgsOffset:   uint32(c.Uint("args-offset")),
 						GtpV4SrcAddr: c.String("gtp-v4-src-addr"),
 						TableId:      uint32(c.Uint("table-id")),
+						PluginAuxRaw: pluginAuxRaw,
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),

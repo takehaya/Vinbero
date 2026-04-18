@@ -47,9 +47,10 @@ static __always_inline int process_end_t(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
-    __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
+    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
     struct endpoint_ctx ectx;
     int action = endpoint_common_processing(&ectx, ctx, ip6h, srh, entry,
                                             l3_offset, fib_ifindex);

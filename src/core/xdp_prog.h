@@ -128,14 +128,17 @@ struct headend_entry {
     __u8 _pad_gtp;
 } __attribute__((packed));
 
-// SID Function entry – generic fields (LPM trie value, kept small)
+// Capacity of the plugin_raw variant in sid_aux_entry. Mirrored on the Go
+// side as bpf.SidAuxPluginRawMax.
+#define SID_AUX_PLUGIN_RAW_MAX 196
+
+// SID Function entry – generic fields (LPM trie value, kept small).
+// aux_index == 0 is the sentinel for "no aux data"; action-specific fields
+// (including VRF ifindex for End.T/DT*) live in sid_aux_entry variants.
 struct sid_function_entry {
     __u8 action;                  // srv6_local_action enum
     __u8 flavor;                  // srv6_local_flavor enum (PSP, USP, USD)
-    __u8 has_aux;                 // 1 if sid_aux_map[aux_index] has data
-    __u8 _pad;
-    __u32 vrf_ifindex;            // VRF interface index (End.T/DT4/DT6/DT46)
-    __u32 aux_index;              // Index into sid_aux_map (ARRAY)
+    __u16 aux_index;              // Index into sid_aux_map (0 = no aux)
 } __attribute__((packed));
 
 // SID Auxiliary entry – action-specific fields (ARRAY map value)
@@ -185,6 +188,17 @@ struct sid_aux_entry {
         // End.B6/End.B6.Encaps: policy headend configuration
         // Replaces the former end_b6_policy_map (LPM trie).
         struct headend_entry b6_policy;                    // 196 bytes
+
+        // End.T/DT4/DT6/DT46: VRF-aware FIB lookup target.
+        struct {
+            __u32 vrf_ifindex;
+        } l3vrf;                                           // 4 bytes
+
+        // Plugin-defined raw payload. Sized to the largest union variant so
+        // that existing behavior variants remain the layout anchor. Plugin
+        // code interprets this via VINBERO_PLUGIN_AUX_CAST after verifying
+        // sizeof(target_type) <= sizeof(plugin_raw) at compile time.
+        __u8 plugin_raw[SID_AUX_PLUGIN_RAW_MAX];
     };
 } __attribute__((packed));
 

@@ -127,13 +127,15 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		Flavor: uint8(sidFunc.Flavor),
 	}
 
-	// Resolve vrf_name → vrf_ifindex for End.T/DT4/DT6/DT46
+	// Resolve vrf_name → vrf_ifindex for End.T/DT4/DT6/DT46. The resolved
+	// ifindex is stored in the l3vrf aux variant below.
+	var vrfIfindex uint32
 	if sidFunc.VrfName != "" {
-		vrfIfindex, err := resolveIfindex(sidFunc.VrfName)
+		idx, err := resolveIfindex(sidFunc.VrfName)
 		if err != nil {
 			return nil, nil, fmt.Errorf("vrf %q: %w", sidFunc.VrfName, err)
 		}
-		entry.VrfIfindex = vrfIfindex
+		vrfIfindex = idx
 	}
 
 	// Build aux entry based on action type
@@ -141,6 +143,14 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	action := v1.Srv6LocalAction(sidFunc.Action)
 
 	switch action {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46:
+		if vrfIfindex != 0 {
+			aux = bpf.NewSidAuxL3Vrf(vrfIfindex)
+		}
+
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X:
 		nexthop, err := bpf.ParseIPv6(sidFunc.Nexthop)
 		if err != nil {
@@ -206,6 +216,20 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		}
 	}
 
+	// Plugin-defined auxiliary payload. Only populated for plugin actions
+	// (action value >= EndpointPluginBase) that have no built-in aux variant
+	// above; the built-in variants take precedence so a caller cannot shadow
+	// an End.X nexthop with arbitrary bytes.
+	if aux == nil && len(sidFunc.PluginAuxRaw) > 0 {
+		if len(sidFunc.PluginAuxRaw) > bpf.SidAuxPluginRawMax {
+			return nil, nil, fmt.Errorf(
+				"plugin_aux_raw length %d exceeds maximum %d",
+				len(sidFunc.PluginAuxRaw), bpf.SidAuxPluginRawMax,
+			)
+		}
+		aux = bpf.NewSidAuxPluginRaw(sidFunc.PluginAuxRaw)
+	}
+
 	return entry, aux, nil
 }
 
@@ -215,15 +239,20 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 		Action:        v1.Srv6LocalAction(entry.Action),
 		TriggerPrefix: prefix,
 		Flavor:        v1.Srv6LocalFlavor(entry.Flavor),
-		VrfName:       ifindexToName(entry.VrfIfindex),
 	}
 
 	// Read aux data if present
-	if entry.HasAux != 0 {
-		aux, err := s.mapOps.GetSidAux(entry.AuxIndex)
+	if entry.AuxIndex != 0 {
+		aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))
 		if err == nil && aux != nil {
 			action := v1.Srv6LocalAction(entry.Action)
 			switch action {
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46:
+				sf.VrfName = ifindexToName(bpf.SidAuxL3VrfData(aux))
+
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X:
 				sf.Nexthop = bpf.FormatIPv6(aux.Nexthop.Nexthop)
 

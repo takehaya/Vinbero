@@ -5,7 +5,7 @@
 
 static __always_inline int nosrh_fib_v4(
     struct xdp_md *ctx,
-    struct sid_function_entry *entry)
+    struct sid_aux_entry *aux)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -20,14 +20,14 @@ static __always_inline int nosrh_fib_v4(
 
     eth->h_proto = bpf_htons(ETH_P_IP);
 
-    __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
+    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
     int action = srv6_fib_redirect_v4(ctx, iph, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
 
 static __always_inline int nosrh_fib_v6(
     struct xdp_md *ctx,
-    struct sid_function_entry *entry)
+    struct sid_aux_entry *aux)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -42,7 +42,7 @@ static __always_inline int nosrh_fib_v6(
 
     eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
+    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
     int action = srv6_fib_redirect(ctx, inner_ip6h, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
@@ -50,9 +50,9 @@ static __always_inline int nosrh_fib_v6(
 // ========== Pattern A: localsid-only actions ==========
 
 DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end, process_end)
-DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end_t, process_end_t)
 DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end_m_gtp6_d_di, process_end_m_gtp6_d_di)
 
+DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_t, process_end_t)
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_x, process_end_x)
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_b6, process_end_b6_insert)
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_b6_encaps, process_end_b6_encaps)
@@ -97,10 +97,12 @@ int tailcall_endpoint_end_dx4(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, &tctx->sid_entry));
+        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux));
     }
 
     struct ethhdr *eth;
@@ -119,10 +121,12 @@ int tailcall_endpoint_end_dx6(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, &tctx->sid_entry));
+        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux));
     }
 
     struct ethhdr *eth;
@@ -141,10 +145,12 @@ int tailcall_endpoint_end_dt4(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, &tctx->sid_entry));
+        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux));
     }
 
     struct ethhdr *eth;
@@ -152,7 +158,7 @@ int tailcall_endpoint_end_dt4(struct xdp_md *ctx)
     struct ipv6_sr_hdr *srh;
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
-    int action = CALL_WITH_CONST_L3(l3_off, process_end_dt4, ctx, ip6h, srh, &tctx->sid_entry);
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_dt4, ctx, ip6h, srh, &tctx->sid_entry, aux);
     TAILCALL_RETURN(ctx,action);
 }
 
@@ -163,10 +169,12 @@ int tailcall_endpoint_end_dt6(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, &tctx->sid_entry));
+        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux));
     }
 
     struct ethhdr *eth;
@@ -174,7 +182,7 @@ int tailcall_endpoint_end_dt6(struct xdp_md *ctx)
     struct ipv6_sr_hdr *srh;
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
-    int action = CALL_WITH_CONST_L3(l3_off, process_end_dt6, ctx, ip6h, srh, &tctx->sid_entry);
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_dt6, ctx, ip6h, srh, &tctx->sid_entry, aux);
     TAILCALL_RETURN(ctx,action);
 }
 
@@ -185,17 +193,19 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         __u8 nh = tctx->inner_proto;
         if (nh == IPPROTO_IPIP) {
             if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
                 TAILCALL_RETURN(ctx,XDP_DROP);
-            TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, &tctx->sid_entry));
+            TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux));
         }
         if (nh == IPPROTO_IPV6) {
             if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
                 TAILCALL_RETURN(ctx,XDP_DROP);
-            TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, &tctx->sid_entry));
+            TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux));
         }
         TAILCALL_RETURN(ctx,XDP_DROP);
     }
@@ -205,7 +215,7 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
     struct ipv6_sr_hdr *srh;
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
-    int action = CALL_WITH_CONST_L3(l3_off, process_end_dt46, ctx, ip6h, srh, &tctx->sid_entry);
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_dt46, ctx, ip6h, srh, &tctx->sid_entry, aux);
     TAILCALL_RETURN(ctx,action);
 }
 
