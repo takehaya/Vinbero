@@ -19,7 +19,6 @@ static __always_inline int nosrh_fib_v4(
         return XDP_DROP;
 
     eth->h_proto = bpf_htons(ETH_P_IP);
-    STATS_INC(STATS_SRV6_END, 0);
 
     __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
     int action = srv6_fib_redirect_v4(ctx, iph, eth, fib_ifindex);
@@ -42,7 +41,6 @@ static __always_inline int nosrh_fib_v6(
         return XDP_DROP;
 
     eth->h_proto = bpf_htons(ETH_P_IPV6);
-    STATS_INC(STATS_SRV6_END, 0);
 
     __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
     int action = srv6_fib_redirect(ctx, inner_ip6h, eth, fib_ifindex);
@@ -80,7 +78,6 @@ int tailcall_endpoint_end_dx2(struct xdp_md *ctx)
         if (oif == 0) TAILCALL_RETURN(ctx,XDP_DROP);
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_l2_nosrh, ctx, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        STATS_INC(STATS_SRV6_END, 0);
         TAILCALL_RETURN(ctx,bpf_redirect(oif, 0));
     }
 

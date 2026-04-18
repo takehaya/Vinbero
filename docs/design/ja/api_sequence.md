@@ -450,14 +450,14 @@ sequenceDiagram
     V->>BPF: per-CPU stats_map 読み取り
     BPF-->>V: 各CPUのカウンタ
     V-->>V: CPU間で集計
-    V-->>Op: [{name: "RX", packets: 10000, bytes: 1500000},<br/>{name: "SRV6_END", packets: 5000, bytes: 750000},<br/>{name: "H_ENCAPS_V4", packets: 3000, bytes: 450000},<br/>{name: "PASS", packets: 1500, bytes: 225000},<br/>{name: "DROP", packets: 50, bytes: 7500},<br/>{name: "REDIRECT", packets: 450, bytes: 67500}]
+    V-->>Op: [{name: "RX_PACKETS", packets: 10000, bytes: 1500000},<br/>{name: "PASS", packets: 8450, bytes: 1267500},<br/>{name: "DROP", packets: 50, bytes: 7500},<br/>{name: "REDIRECT", packets: 1500, bytes: 225000},<br/>{name: "ABORTED", packets: 0, bytes: 0}]
 
     Op->>V: StatsReset
     V->>BPF: 全CPU/全キーをゼロクリア
     V-->>Op: Reset OK
 ```
 
-**カウンタ一覧:** RX, SRV6_END, H_ENCAPS_V4, H_ENCAPS_V6, PASS, DROP, REDIRECT, ERROR
+**グローバル per-action カウンタ:** RX_PACKETS, PASS, DROP, REDIRECT, ABORTED (XDP_ABORTED = BPF プログラム異常時の action)。tail-call target slot ごとの invocation 数は `StatsSlotShow` / `vinbero stats slot show` で取得 (builtin / plugin 共通)。
 
 ---
 

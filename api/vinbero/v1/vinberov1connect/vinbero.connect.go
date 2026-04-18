@@ -143,6 +143,12 @@ const (
 	StatsServiceStatsShowProcedure = "/vinbero.v1.StatsService/StatsShow"
 	// StatsServiceStatsResetProcedure is the fully-qualified name of the StatsService's StatsReset RPC.
 	StatsServiceStatsResetProcedure = "/vinbero.v1.StatsService/StatsReset"
+	// StatsServiceStatsSlotShowProcedure is the fully-qualified name of the StatsService's
+	// StatsSlotShow RPC.
+	StatsServiceStatsSlotShowProcedure = "/vinbero.v1.StatsService/StatsSlotShow"
+	// StatsServiceStatsSlotResetProcedure is the fully-qualified name of the StatsService's
+	// StatsSlotReset RPC.
+	StatsServiceStatsSlotResetProcedure = "/vinbero.v1.StatsService/StatsSlotReset"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -189,6 +195,8 @@ var (
 	statsServiceServiceDescriptor                       = v1.File_vinbero_v1_vinbero_proto.Services().ByName("StatsService")
 	statsServiceStatsShowMethodDescriptor               = statsServiceServiceDescriptor.Methods().ByName("StatsShow")
 	statsServiceStatsResetMethodDescriptor              = statsServiceServiceDescriptor.Methods().ByName("StatsReset")
+	statsServiceStatsSlotShowMethodDescriptor           = statsServiceServiceDescriptor.Methods().ByName("StatsSlotShow")
+	statsServiceStatsSlotResetMethodDescriptor          = statsServiceServiceDescriptor.Methods().ByName("StatsSlotReset")
 )
 
 // SidFunctionServiceClient is a client for the vinbero.v1.SidFunctionService service.
@@ -1338,6 +1346,8 @@ func (UnimplementedHeadendL2ServiceHandler) HeadendL2Get(context.Context, *conne
 type StatsServiceClient interface {
 	StatsShow(context.Context, *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error)
 	StatsReset(context.Context, *connect.Request[v1.StatsResetRequest]) (*connect.Response[v1.StatsResetResponse], error)
+	StatsSlotShow(context.Context, *connect.Request[v1.StatsSlotShowRequest]) (*connect.Response[v1.StatsSlotShowResponse], error)
+	StatsSlotReset(context.Context, *connect.Request[v1.StatsSlotResetRequest]) (*connect.Response[v1.StatsSlotResetResponse], error)
 }
 
 // NewStatsServiceClient constructs a client for the vinbero.v1.StatsService service. By default, it
@@ -1362,13 +1372,27 @@ func NewStatsServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(statsServiceStatsResetMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		statsSlotShow: connect.NewClient[v1.StatsSlotShowRequest, v1.StatsSlotShowResponse](
+			httpClient,
+			baseURL+StatsServiceStatsSlotShowProcedure,
+			connect.WithSchema(statsServiceStatsSlotShowMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		statsSlotReset: connect.NewClient[v1.StatsSlotResetRequest, v1.StatsSlotResetResponse](
+			httpClient,
+			baseURL+StatsServiceStatsSlotResetProcedure,
+			connect.WithSchema(statsServiceStatsSlotResetMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // statsServiceClient implements StatsServiceClient.
 type statsServiceClient struct {
-	statsShow  *connect.Client[v1.StatsShowRequest, v1.StatsShowResponse]
-	statsReset *connect.Client[v1.StatsResetRequest, v1.StatsResetResponse]
+	statsShow      *connect.Client[v1.StatsShowRequest, v1.StatsShowResponse]
+	statsReset     *connect.Client[v1.StatsResetRequest, v1.StatsResetResponse]
+	statsSlotShow  *connect.Client[v1.StatsSlotShowRequest, v1.StatsSlotShowResponse]
+	statsSlotReset *connect.Client[v1.StatsSlotResetRequest, v1.StatsSlotResetResponse]
 }
 
 // StatsShow calls vinbero.v1.StatsService.StatsShow.
@@ -1381,10 +1405,22 @@ func (c *statsServiceClient) StatsReset(ctx context.Context, req *connect.Reques
 	return c.statsReset.CallUnary(ctx, req)
 }
 
+// StatsSlotShow calls vinbero.v1.StatsService.StatsSlotShow.
+func (c *statsServiceClient) StatsSlotShow(ctx context.Context, req *connect.Request[v1.StatsSlotShowRequest]) (*connect.Response[v1.StatsSlotShowResponse], error) {
+	return c.statsSlotShow.CallUnary(ctx, req)
+}
+
+// StatsSlotReset calls vinbero.v1.StatsService.StatsSlotReset.
+func (c *statsServiceClient) StatsSlotReset(ctx context.Context, req *connect.Request[v1.StatsSlotResetRequest]) (*connect.Response[v1.StatsSlotResetResponse], error) {
+	return c.statsSlotReset.CallUnary(ctx, req)
+}
+
 // StatsServiceHandler is an implementation of the vinbero.v1.StatsService service.
 type StatsServiceHandler interface {
 	StatsShow(context.Context, *connect.Request[v1.StatsShowRequest]) (*connect.Response[v1.StatsShowResponse], error)
 	StatsReset(context.Context, *connect.Request[v1.StatsResetRequest]) (*connect.Response[v1.StatsResetResponse], error)
+	StatsSlotShow(context.Context, *connect.Request[v1.StatsSlotShowRequest]) (*connect.Response[v1.StatsSlotShowResponse], error)
+	StatsSlotReset(context.Context, *connect.Request[v1.StatsSlotResetRequest]) (*connect.Response[v1.StatsSlotResetResponse], error)
 }
 
 // NewStatsServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1405,12 +1441,28 @@ func NewStatsServiceHandler(svc StatsServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(statsServiceStatsResetMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	statsServiceStatsSlotShowHandler := connect.NewUnaryHandler(
+		StatsServiceStatsSlotShowProcedure,
+		svc.StatsSlotShow,
+		connect.WithSchema(statsServiceStatsSlotShowMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	statsServiceStatsSlotResetHandler := connect.NewUnaryHandler(
+		StatsServiceStatsSlotResetProcedure,
+		svc.StatsSlotReset,
+		connect.WithSchema(statsServiceStatsSlotResetMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.StatsService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case StatsServiceStatsShowProcedure:
 			statsServiceStatsShowHandler.ServeHTTP(w, r)
 		case StatsServiceStatsResetProcedure:
 			statsServiceStatsResetHandler.ServeHTTP(w, r)
+		case StatsServiceStatsSlotShowProcedure:
+			statsServiceStatsSlotShowHandler.ServeHTTP(w, r)
+		case StatsServiceStatsSlotResetProcedure:
+			statsServiceStatsSlotResetHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1426,4 +1478,12 @@ func (UnimplementedStatsServiceHandler) StatsShow(context.Context, *connect.Requ
 
 func (UnimplementedStatsServiceHandler) StatsReset(context.Context, *connect.Request[v1.StatsResetRequest]) (*connect.Response[v1.StatsResetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsReset is not implemented"))
+}
+
+func (UnimplementedStatsServiceHandler) StatsSlotShow(context.Context, *connect.Request[v1.StatsSlotShowRequest]) (*connect.Response[v1.StatsSlotShowResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsSlotShow is not implemented"))
+}
+
+func (UnimplementedStatsServiceHandler) StatsSlotReset(context.Context, *connect.Request[v1.StatsSlotResetRequest]) (*connect.Response[v1.StatsSlotResetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsSlotReset is not implemented"))
 }

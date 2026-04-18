@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
@@ -11,13 +12,39 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
+type pluginSlotKey struct {
+	MapType string
+	Slot    uint32
+}
+
 type PluginServer struct {
 	mapOps       *bpf.MapOperations
 	bpfConstants map[string]any
+
+	mu       sync.RWMutex
+	registry map[pluginSlotKey]string // slot -> program name (for stats labeling)
 }
 
 func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any) *PluginServer {
-	return &PluginServer{mapOps: mapOps, bpfConstants: bpfConstants}
+	return &PluginServer{
+		mapOps:       mapOps,
+		bpfConstants: bpfConstants,
+		registry:     make(map[pluginSlotKey]string),
+	}
+}
+
+// SnapshotNames returns slot -> program name for plugins currently
+// registered under the given map type. Used by StatsServer for labeling.
+func (s *PluginServer) SnapshotNames(mapType string) map[uint32]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[uint32]string)
+	for k, name := range s.registry {
+		if k.MapType == mapType {
+			out[k.Slot] = name
+		}
+	}
+	return out
 }
 
 func (s *PluginServer) PluginRegister(
@@ -94,6 +121,10 @@ func (s *PluginServer) PluginRegister(
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("failed to register plugin: %w", err))
 	}
 
+	s.mu.Lock()
+	s.registry[pluginSlotKey{MapType: msg.MapType, Slot: msg.Index}] = msg.Program
+	s.mu.Unlock()
+
 	return connect.NewResponse(&v1.PluginRegisterResponse{}), nil
 }
 
@@ -106,6 +137,10 @@ func (s *PluginServer) PluginUnregister(
 	if err := s.mapOps.UnregisterPlugin(msg.MapType, msg.Index); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("failed to unregister plugin: %w", err))
 	}
+
+	s.mu.Lock()
+	delete(s.registry, pluginSlotKey{MapType: msg.MapType, Slot: msg.Index})
+	s.mu.Unlock()
 
 	return connect.NewResponse(&v1.PluginUnregisterResponse{}), nil
 }

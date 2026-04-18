@@ -396,11 +396,10 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 
 // ===== Stats Map Operations =====
 
-const StatsMax = 8
+const StatsMax = 5
 
 var StatsCounterName = [StatsMax]string{
-	"RX_PACKETS", "SRV6_END", "H_ENCAPS_V4", "H_ENCAPS_V6",
-	"PASS", "DROP", "REDIRECT", "ERROR",
+	"RX_PACKETS", "PASS", "DROP", "REDIRECT", "ABORTED",
 }
 
 type AggregatedStats struct {
@@ -409,40 +408,121 @@ type AggregatedStats struct {
 	Bytes   uint64
 }
 
-// ReadStats reads the PERCPU_ARRAY stats_map and aggregates per-CPU values
-func (m *MapOperations) ReadStats() ([]AggregatedStats, error) {
-	result := make([]AggregatedStats, StatsMax)
-	for i := uint32(0); i < StatsMax; i++ {
+// aggregatePerCPUMap iterates keys 0..max-1 of a PERCPU_ARRAY whose value
+// type is BpfStatsEntry, aggregates the per-CPU packets/bytes per key, and
+// invokes emit(key, packets, bytes) for each. Shared by stats_map and
+// slot_stats_* reads.
+func aggregatePerCPUMap(m *ebpf.Map, max uint32, emit func(key, packets, bytes uint64)) error {
+	for i := uint32(0); i < max; i++ {
 		var perCPU []BpfStatsEntry
-		if err := m.objs.StatsMap.Lookup(i, &perCPU); err != nil {
-			return nil, fmt.Errorf("failed to lookup stats counter %d: %w", i, err)
+		if err := m.Lookup(i, &perCPU); err != nil {
+			return fmt.Errorf("slot %d: %w", i, err)
 		}
-		var totalPackets, totalBytes uint64
-		for _, cpu := range perCPU {
-			totalPackets += cpu.Packets
-			totalBytes += cpu.Bytes
+		var p, b uint64
+		for _, c := range perCPU {
+			p += c.Packets
+			b += c.Bytes
 		}
-		result[i] = AggregatedStats{
-			Name:    StatsCounterName[i],
-			Packets: totalPackets,
-			Bytes:   totalBytes,
-		}
+		emit(uint64(i), p, b)
 	}
-	return result, nil
+	return nil
 }
 
-// ResetStats zeros all per-CPU stats counters.
-// PERCPU_ARRAY requires a per-CPU slice for Put.
-func (m *MapOperations) ResetStats() error {
+// resetPerCPUMap zeros all per-CPU entries of a PERCPU_ARRAY stats map.
+func resetPerCPUMap(m *ebpf.Map, max uint32) error {
 	numCPUs, err := ebpf.PossibleCPU()
 	if err != nil {
 		return fmt.Errorf("failed to get CPU count: %w", err)
 	}
 	zeros := make([]BpfStatsEntry, numCPUs)
-	for i := uint32(0); i < StatsMax; i++ {
-		if err := m.objs.StatsMap.Put(i, zeros); err != nil {
-			return fmt.Errorf("failed to reset stats counter %d: %w", i, err)
+	for i := uint32(0); i < max; i++ {
+		if err := m.Put(i, zeros); err != nil {
+			return fmt.Errorf("slot %d: %w", i, err)
 		}
+	}
+	return nil
+}
+
+// ReadStats reads the PERCPU_ARRAY stats_map and aggregates per-CPU values
+func (m *MapOperations) ReadStats() ([]AggregatedStats, error) {
+	result := make([]AggregatedStats, StatsMax)
+	err := aggregatePerCPUMap(m.objs.StatsMap, StatsMax, func(i, p, b uint64) {
+		result[i] = AggregatedStats{Name: StatsCounterName[i], Packets: p, Bytes: b}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("stats_map: %w", err)
+	}
+	return result, nil
+}
+
+// ResetStats zeros all per-CPU stats counters.
+func (m *MapOperations) ResetStats() error {
+	if err := resetPerCPUMap(m.objs.StatsMap, StatsMax); err != nil {
+		return fmt.Errorf("stats_map: %w", err)
+	}
+	return nil
+}
+
+// ===== Per-slot Stats Map Operations =====
+
+// SlotStatsEndpointMax / SlotStatsHeadendMax mirror the BPF-side maps in
+// src/core/xdp_stats.h. Must match the C constants.
+const (
+	SlotStatsEndpointMax = 64
+	SlotStatsHeadendMax  = 32
+)
+
+// SlotStatsEntry is a per-slot invocation counter record.
+type SlotStatsEntry struct {
+	MapType string
+	Slot    uint32
+	Packets uint64
+	Bytes   uint64
+}
+
+func (m *MapOperations) slotStatsTarget(mapType string) (ebpfMap *ebpf.Map, max uint32, err error) {
+	switch mapType {
+	case MapTypeEndpoint:
+		return m.objs.SlotStatsEndpoint, SlotStatsEndpointMax, nil
+	case MapTypeHeadendV4:
+		return m.objs.SlotStatsHeadendV4, SlotStatsHeadendMax, nil
+	case MapTypeHeadendV6:
+		return m.objs.SlotStatsHeadendV6, SlotStatsHeadendMax, nil
+	default:
+		return nil, 0, fmt.Errorf("unknown slot stats map type: %s", mapType)
+	}
+}
+
+// ReadSlotStats reads one of the slot_stats_* PERCPU_ARRAYs and aggregates
+// each slot's per-CPU values.
+func (m *MapOperations) ReadSlotStats(mapType string) ([]SlotStatsEntry, error) {
+	ebpfMap, max, err := m.slotStatsTarget(mapType)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SlotStatsEntry, 0, max)
+	err = aggregatePerCPUMap(ebpfMap, max, func(i, p, b uint64) {
+		out = append(out, SlotStatsEntry{
+			MapType: mapType,
+			Slot:    uint32(i),
+			Packets: p,
+			Bytes:   b,
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", mapType, err)
+	}
+	return out, nil
+}
+
+// ResetSlotStats zeros all per-CPU entries of a single slot stats map.
+func (m *MapOperations) ResetSlotStats(mapType string) error {
+	ebpfMap, max, err := m.slotStatsTarget(mapType)
+	if err != nil {
+		return err
+	}
+	if err := resetPerCPUMap(ebpfMap, max); err != nil {
+		return fmt.Errorf("%s: %w", mapType, err)
 	}
 	return nil
 }
@@ -963,6 +1043,14 @@ func (m *MapOperations) GetSharedMaps() map[string]*ebpf.Map {
 		"dx2v_map":           m.objs.Dx2vMap,
 		"scratch_map":             m.objs.ScratchMap,
 		"stats_map":               m.objs.StatsMap,
+		// slot_stats_* are vinbero-internal observability maps. Exposed to
+		// plugins because the SDK header (xdp_stats.h) declares them, so
+		// plugin ELFs will end up with matching .maps entries and need to
+		// be redirected here to load. Plugin code should not write to them
+		// directly — the epilogue handles that.
+		"slot_stats_endpoint":     m.objs.SlotStatsEndpoint,
+		"slot_stats_headend_v4":   m.objs.SlotStatsHeadendV4,
+		"slot_stats_headend_v6":   m.objs.SlotStatsHeadendV6,
 		"tailcall_ctx_map":        m.objs.TailcallCtxMap,
 		MapNameSidEndpointProgs:   m.objs.SidEndpointProgs,
 		MapNameHeadendV4Progs:     m.objs.HeadendV4Progs,

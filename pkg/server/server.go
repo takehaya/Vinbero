@@ -89,17 +89,18 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VlanTableService", zap.String("path", path))
 
-	// Stats service (read-only, for observability)
-	statsServer := NewStatsServer(s.mapOps)
-	path, handler = vinberov1connect.NewStatsServiceHandler(statsServer)
-	s.mux.Handle(path, handler)
-	s.logger.Info("Registered StatsService", zap.String("path", path))
-
 	// Plugin service (dynamic BPF plugin registration)
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants())
 	path, handler = vinberov1connect.NewPluginServiceHandler(pluginServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered PluginService", zap.String("path", path))
+
+	// Stats service (read-only, for observability). Depends on pluginServer
+	// for resolving per-slot stat labels to plugin program names.
+	statsServer := NewStatsServer(s.mapOps, pluginServer)
+	path, handler = vinberov1connect.NewStatsServiceHandler(statsServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered StatsService", zap.String("path", path))
 
 	// Health check endpoint
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

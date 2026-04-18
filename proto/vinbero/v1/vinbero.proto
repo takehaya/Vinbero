@@ -421,6 +421,8 @@ message HeadendL2GetResponse {
 service StatsService {
   rpc StatsShow(StatsShowRequest) returns (StatsShowResponse);
   rpc StatsReset(StatsResetRequest) returns (StatsResetResponse);
+  rpc StatsSlotShow(StatsSlotShowRequest) returns (StatsSlotShowResponse);
+  rpc StatsSlotReset(StatsSlotResetRequest) returns (StatsSlotResetResponse);
 }
 
 message StatsCounter {
@@ -436,3 +438,26 @@ message StatsShowResponse {
 
 message StatsResetRequest {}
 message StatsResetResponse {}
+
+// Per-slot invocation counter entry (one per PROG_ARRAY slot).
+// name: human-readable label (built-in enum name, or "plugin:<program>", or empty for reserved).
+message SlotStatsEntry {
+  string map_type = 1; // "endpoint" | "headend_v4" | "headend_v6"
+  uint32 slot = 2; // 0-63 (endpoint) / 0-31 (headend)
+  string name = 3;
+  uint64 packets = 4;
+  uint64 bytes = 5;
+}
+
+message StatsSlotShowRequest {
+  repeated string map_types = 1; // empty = all three types
+  bool include_empty = 2; // include packets==0 slots (default: hide)
+}
+message StatsSlotShowResponse {
+  repeated SlotStatsEntry entries = 1;
+}
+
+message StatsSlotResetRequest {
+  repeated string map_types = 1; // empty = reset all three types
+}
+message StatsSlotResetResponse {}

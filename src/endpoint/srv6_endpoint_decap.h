@@ -30,7 +30,6 @@ static __always_inline int decap_and_fib_v4(
     if ((void *)(iph + 1) > data_end) return XDP_DROP;
 
     eth->h_proto = bpf_htons(ETH_P_IP);
-    STATS_INC(STATS_SRV6_END, 0);
 
     int action = srv6_fib_redirect_v4(ctx, iph, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
@@ -56,7 +55,6 @@ static __always_inline int decap_and_fib_v6(
     struct ipv6hdr *inner_ip6h = (void *)(eth + 1);
     if ((void *)(inner_ip6h + 1) > data_end) return XDP_DROP;
 
-    STATS_INC(STATS_SRV6_END, 0);
 
     int action = srv6_fib_redirect(ctx, inner_ip6h, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
@@ -131,7 +129,6 @@ static __always_inline int process_end_dx2(
     }
 
     DEBUG_PRINT("End.DX2: Decapsulated, redirect to ifindex %d\n", oif);
-    STATS_INC(STATS_SRV6_END, 0);
     return bpf_redirect(oif, 0);
 }
 

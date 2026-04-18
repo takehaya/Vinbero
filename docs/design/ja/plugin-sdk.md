@@ -187,21 +187,54 @@ vinbero -s http://127.0.0.1:8080 \
 
 ### `stats_map` (vinbero 全体の per-action 集計)
 
-`vinbero.yml` で `enable_stats: true` にすると `stats_map` に per-action 統計 (`XDP_PASS` / `XDP_DROP` / `XDP_REDIRECT` / `ERROR`) が蓄積されます。`vinbero stats show` コマンドで参照可能。
+`vinbero.yml` で `enable_stats: true` にすると `stats_map` に per-action 統計 (`RX_PACKETS` / `PASS` / `DROP` / `REDIRECT` / `ABORTED`) が蓄積されます。`vinbero stats show` で参照:
 
-- プラグイン ELF は SDK ヘッダ経由で `enable_stats` を取り込むため、ロード時に vinbero が `spec.Variables["enable_stats"].Set(...)` で書き換え、プラグインの `tailcall_epilogue` 内の `stats_inc` も同じ gate に従います。つまり **プラグイン経由で XDP_PASS 等した場合も `stats_map` にカウントされます**。
-- これは「XDP 入口を抜けた全パケットの per-action 合計」であって、**プラグインごとの invocation 数ではありません**。NDP / RA / MLD 等の背景 IPv6 パケットも XDP 入口で XDP_PASS になれば同じ counter に加算されます。
+```bash
+vinbero stats show
+# COUNTER     PACKETS  BYTES
+# RX_PACKETS  ...
+# PASS        ...
+# DROP        ...
+# REDIRECT    ...
+# ABORTED     ...
+```
+
+これは「XDP 入口を抜けた全パケットの per-action 合計」で、**プラグインごとの呼び出し回数ではありません**。NDP / RA / MLD 等の背景 IPv6 パケットも同じ counter に加算されます。プラグイン経由で `XDP_PASS` 等した場合もここに乗ります (plugin ELF の `enable_stats` もロード時に書き換えられます)。
+
+### Per-slot invocation counter (builtin + plugin)
+
+`vinbero stats slot show` で各 tail-call target slot が何回呼ばれたかを確認できます。builtin は enum 名、plugin は `plugin:<program_name>` でラベル付けされます。
+
+```bash
+vinbero stats slot show                     # 全 map、packets>0 のみ
+vinbero stats slot show --all               # packets=0 も含めて表示
+vinbero stats slot show --type endpoint     # endpoint PROG_ARRAY のみ
+vinbero stats slot show --plugin-only       # plugin スロットのみ
+vinbero stats slot show --top 10            # packets 降順で上位 N 件
+vinbero stats slot reset                    # 全リセット
+vinbero stats slot reset --type endpoint    # 指定 map のみリセット
+```
+
+出力例 (ping -c 3 で plugin slot 32 に到達した場合):
+
+```
+MAP       SLOT  NAME                   PACKETS  BYTES
+endpoint  1     End                    0        0
+endpoint  32    plugin:plugin_counter  3        594
+```
+
+内部では 3 本の PERCPU_ARRAY (`slot_stats_endpoint` / `slot_stats_headend_v4` / `slot_stats_headend_v6`) に `tailcall_epilogue` がインクリメントしています。`enable_stats` gate で on/off され、無効時は分岐 1 つで早期 return します。
 
 ### プラグイン固有カウンタ
 
-プラグイン単独の invocation 数や挙動別の計数が欲しい場合は、プラグイン ELF 内で独自の `BPF_MAP_TYPE_PERCPU_ARRAY` / `HASH` を宣言してそこに書くのが推奨パターンです。`sdk/examples/plugin-counter/plugin.c` の `plugin_counter_map` がこの形の最小例で、bpftool 経由で userspace から読めます:
+「この plugin 内で deny した回数」「src IP 別の集計」などプラグインロジック固有の計数は、plugin ELF 内で独自の `BPF_MAP_TYPE_PERCPU_ARRAY` / `HASH` を宣言してそこに書きます。`sdk/examples/plugin-counter/plugin.c` の `plugin_counter_map` が最小例で、bpftool から userspace 経由で読めます:
 
 ```bash
 MAP_ID=$(sudo bpftool map show | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
 sudo bpftool map dump id "$MAP_ID"
 ```
 
-将来的に `PluginRegister` がプラグイン固有マップの handle を userspace に返す経路 (Phase 1c) が整えば Go SDK から直接読めるようになる予定です。それまでは bpftool が standard な観測手段です。
+将来的に `PluginRegister` がプラグイン固有マップの handle を userspace に返す経路 (Phase 1c) が整えば Go SDK から直接読めるようになる予定です。
 
 ## サンプルプラグイン
 

@@ -72,5 +72,19 @@ char _license[] SEC("license") = "GPL";
 
 ## Observability
 
-For packet inspection, use the external `xdp-ninja` tool. The SDK does
-not require any BPF-side instrumentation for this.
+- Per-action global counters (RX / PASS / DROP / REDIRECT / ERROR):
+  ```
+  vinbero stats show
+  ```
+- Per-slot invocation counters (builtin + plugin, labeled by function name):
+  ```
+  vinbero stats slot show                  # all slots, packets>0
+  vinbero stats slot show --type endpoint  # one PROG_ARRAY only
+  vinbero stats slot show --plugin-only    # only plugin slots
+  vinbero stats slot show --top 10         # hot slots first
+  ```
+  Requires `enable_stats: true` in `vinbero.yml`. Plugin slots are
+  labeled `plugin:<program_name>` based on the registration.
+
+For packet capture / deep inspection, use the external `xdp-ninja` tool.
+The SDK does not require any BPF-side instrumentation for this.

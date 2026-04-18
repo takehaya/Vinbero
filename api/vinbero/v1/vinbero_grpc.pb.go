@@ -1575,8 +1575,10 @@ var HeadendL2Service_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	StatsService_StatsShow_FullMethodName  = "/vinbero.v1.StatsService/StatsShow"
-	StatsService_StatsReset_FullMethodName = "/vinbero.v1.StatsService/StatsReset"
+	StatsService_StatsShow_FullMethodName      = "/vinbero.v1.StatsService/StatsShow"
+	StatsService_StatsReset_FullMethodName     = "/vinbero.v1.StatsService/StatsReset"
+	StatsService_StatsSlotShow_FullMethodName  = "/vinbero.v1.StatsService/StatsSlotShow"
+	StatsService_StatsSlotReset_FullMethodName = "/vinbero.v1.StatsService/StatsSlotReset"
 )
 
 // StatsServiceClient is the client API for StatsService service.
@@ -1585,6 +1587,8 @@ const (
 type StatsServiceClient interface {
 	StatsShow(ctx context.Context, in *StatsShowRequest, opts ...grpc.CallOption) (*StatsShowResponse, error)
 	StatsReset(ctx context.Context, in *StatsResetRequest, opts ...grpc.CallOption) (*StatsResetResponse, error)
+	StatsSlotShow(ctx context.Context, in *StatsSlotShowRequest, opts ...grpc.CallOption) (*StatsSlotShowResponse, error)
+	StatsSlotReset(ctx context.Context, in *StatsSlotResetRequest, opts ...grpc.CallOption) (*StatsSlotResetResponse, error)
 }
 
 type statsServiceClient struct {
@@ -1613,12 +1617,32 @@ func (c *statsServiceClient) StatsReset(ctx context.Context, in *StatsResetReque
 	return out, nil
 }
 
+func (c *statsServiceClient) StatsSlotShow(ctx context.Context, in *StatsSlotShowRequest, opts ...grpc.CallOption) (*StatsSlotShowResponse, error) {
+	out := new(StatsSlotShowResponse)
+	err := c.cc.Invoke(ctx, StatsService_StatsSlotShow_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *statsServiceClient) StatsSlotReset(ctx context.Context, in *StatsSlotResetRequest, opts ...grpc.CallOption) (*StatsSlotResetResponse, error) {
+	out := new(StatsSlotResetResponse)
+	err := c.cc.Invoke(ctx, StatsService_StatsSlotReset_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StatsServiceServer is the server API for StatsService service.
 // All implementations should embed UnimplementedStatsServiceServer
 // for forward compatibility
 type StatsServiceServer interface {
 	StatsShow(context.Context, *StatsShowRequest) (*StatsShowResponse, error)
 	StatsReset(context.Context, *StatsResetRequest) (*StatsResetResponse, error)
+	StatsSlotShow(context.Context, *StatsSlotShowRequest) (*StatsSlotShowResponse, error)
+	StatsSlotReset(context.Context, *StatsSlotResetRequest) (*StatsSlotResetResponse, error)
 }
 
 // UnimplementedStatsServiceServer should be embedded to have forward compatible implementations.
@@ -1630,6 +1654,12 @@ func (UnimplementedStatsServiceServer) StatsShow(context.Context, *StatsShowRequ
 }
 func (UnimplementedStatsServiceServer) StatsReset(context.Context, *StatsResetRequest) (*StatsResetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StatsReset not implemented")
+}
+func (UnimplementedStatsServiceServer) StatsSlotShow(context.Context, *StatsSlotShowRequest) (*StatsSlotShowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StatsSlotShow not implemented")
+}
+func (UnimplementedStatsServiceServer) StatsSlotReset(context.Context, *StatsSlotResetRequest) (*StatsSlotResetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StatsSlotReset not implemented")
 }
 
 // UnsafeStatsServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -1679,6 +1709,42 @@ func _StatsService_StatsReset_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StatsService_StatsSlotShow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsSlotShowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StatsServiceServer).StatsSlotShow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StatsService_StatsSlotShow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StatsServiceServer).StatsSlotShow(ctx, req.(*StatsSlotShowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StatsService_StatsSlotReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsSlotResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StatsServiceServer).StatsSlotReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StatsService_StatsSlotReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StatsServiceServer).StatsSlotReset(ctx, req.(*StatsSlotResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StatsService_ServiceDesc is the grpc.ServiceDesc for StatsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1693,6 +1759,14 @@ var StatsService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StatsReset",
 			Handler:    _StatsService_StatsReset_Handler,
+		},
+		{
+			MethodName: "StatsSlotShow",
+			Handler:    _StatsService_StatsSlotShow_Handler,
+		},
+		{
+			MethodName: "StatsSlotReset",
+			Handler:    _StatsService_StatsSlotReset_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

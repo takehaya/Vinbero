@@ -163,6 +163,56 @@ func TestStatsReadReset(t *testing.T) {
 	}
 }
 
+// TestSlotStatsReadReset verifies per-slot counters round-trip for all
+// three PROG_ARRAYs (endpoint / headend_v4 / headend_v6).
+func TestSlotStatsReadReset(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	cases := []struct {
+		mapType string
+		max     int
+	}{
+		{MapTypeEndpoint, SlotStatsEndpointMax},
+		{MapTypeHeadendV4, SlotStatsHeadendMax},
+		{MapTypeHeadendV6, SlotStatsHeadendMax},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mapType, func(t *testing.T) {
+			entries, err := h.mapOps.ReadSlotStats(tc.mapType)
+			if err != nil {
+				t.Fatalf("ReadSlotStats(%s): %v", tc.mapType, err)
+			}
+			if len(entries) != tc.max {
+				t.Fatalf("expected %d entries, got %d", tc.max, len(entries))
+			}
+			for _, e := range entries {
+				if e.MapType != tc.mapType {
+					t.Errorf("map_type=%s, want %s", e.MapType, tc.mapType)
+				}
+				if e.Packets != 0 || e.Bytes != 0 {
+					t.Errorf("slot %d not zero on fresh read: p=%d b=%d",
+						e.Slot, e.Packets, e.Bytes)
+				}
+			}
+
+			if err := h.mapOps.ResetSlotStats(tc.mapType); err != nil {
+				t.Fatalf("ResetSlotStats(%s): %v", tc.mapType, err)
+			}
+
+			entries2, err := h.mapOps.ReadSlotStats(tc.mapType)
+			if err != nil {
+				t.Fatalf("ReadSlotStats after reset: %v", err)
+			}
+			for _, e := range entries2 {
+				if e.Packets != 0 || e.Bytes != 0 {
+					t.Errorf("slot %d not zero after reset: p=%d b=%d",
+						e.Slot, e.Packets, e.Bytes)
+				}
+			}
+		})
+	}
+}
+
 // TestFdbAging verifies that AgeFdbEntries deletes stale dynamic entries
 // and preserves static entries.
 func TestFdbAging(t *testing.T) {

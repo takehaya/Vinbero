@@ -59,8 +59,21 @@ type xdpTestHelper struct {
 }
 
 func newXDPTestHelper(t *testing.T) *xdpTestHelper {
+	return newXDPTestHelperWithConstants(t, nil)
+}
+
+// newXDPTestHelperWithStats loads the BPF collection with enable_stats=1
+// so that stats_inc / slot_stats_inc actually update their maps during
+// BPF_PROG_TEST_RUN. Use when asserting stats or slot_stats counters.
+func newXDPTestHelperWithStats(t *testing.T) *xdpTestHelper {
+	return newXDPTestHelperWithConstants(t, map[string]any{
+		"enable_stats": uint8(1),
+	})
+}
+
+func newXDPTestHelperWithConstants(t *testing.T, constants map[string]any) *xdpTestHelper {
 	t.Helper()
-	objs, err := ReadCollection(nil, nil)
+	objs, err := ReadCollection(constants, nil)
 	if err != nil {
 		t.Fatalf("Failed to load BPF objects: %v", err)
 	}

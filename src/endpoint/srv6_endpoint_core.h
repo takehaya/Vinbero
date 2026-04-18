@@ -96,7 +96,6 @@ static __always_inline int endpoint_fib_redirect_core(struct endpoint_ctx *ectx,
 
     switch (fib_result) {
     case FIB_RESULT_REDIRECT:
-        STATS_INC(STATS_SRV6_END, 0);
         return bpf_redirect(ifindex, 0);
     case FIB_RESULT_DROP:
         return XDP_DROP;
@@ -228,7 +227,6 @@ static __always_inline int endpoint_handle_usd(
         struct iphdr *iph = (void *)(eth + 1);
         if ((void *)(iph + 1) > data_end) return XDP_DROP;
         eth->h_proto = bpf_htons(ETH_P_IP);
-        STATS_INC(STATS_SRV6_END, 0);
         int action = srv6_fib_redirect_v4(ctx, iph, eth, ctx->ingress_ifindex);
         return (action == XDP_PASS) ? XDP_DROP : action;
     }
@@ -244,7 +242,6 @@ static __always_inline int endpoint_handle_usd(
         if ((void *)(eth + 1) > data_end) return XDP_DROP;
         struct ipv6hdr *inner_ip6h = (void *)(eth + 1);
         if ((void *)(inner_ip6h + 1) > data_end) return XDP_DROP;
-        STATS_INC(STATS_SRV6_END, 0);
         int action = srv6_fib_redirect(ctx, inner_ip6h, eth, ctx->ingress_ifindex);
         return (action == XDP_PASS) ? XDP_DROP : action;
     }
