@@ -219,15 +219,13 @@ type BpfMapSpecs struct {
 	SidFunctionMap   *ebpf.MapSpec `ebpf:"sid_function_map"`
 	StatsMap         *ebpf.MapSpec `ebpf:"stats_map"`
 	TailcallCtxMap   *ebpf.MapSpec `ebpf:"tailcall_ctx_map"`
-	XdpcapHook       *ebpf.MapSpec `ebpf:"xdpcap_hook"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfVariableSpecs struct {
-	EnableStats  *ebpf.VariableSpec `ebpf:"enable_stats"`
-	EnableXdpcap *ebpf.VariableSpec `ebpf:"enable_xdpcap"`
+	EnableStats *ebpf.VariableSpec `ebpf:"enable_stats"`
 }
 
 // BpfObjects contains all objects after they have been loaded into the kernel.
@@ -265,7 +263,6 @@ type BpfMaps struct {
 	SidFunctionMap   *ebpf.Map `ebpf:"sid_function_map"`
 	StatsMap         *ebpf.Map `ebpf:"stats_map"`
 	TailcallCtxMap   *ebpf.Map `ebpf:"tailcall_ctx_map"`
-	XdpcapHook       *ebpf.Map `ebpf:"xdpcap_hook"`
 }
 
 func (m *BpfMaps) Close() error {
@@ -285,7 +282,6 @@ func (m *BpfMaps) Close() error {
 		m.SidFunctionMap,
 		m.StatsMap,
 		m.TailcallCtxMap,
-		m.XdpcapHook,
 	)
 }
 
@@ -293,8 +289,7 @@ func (m *BpfMaps) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfVariables struct {
-	EnableStats  *ebpf.Variable `ebpf:"enable_stats"`
-	EnableXdpcap *ebpf.Variable `ebpf:"enable_xdpcap"`
+	EnableStats *ebpf.Variable `ebpf:"enable_stats"`
 }
 
 // BpfPrograms contains all programs after they have been loaded into the kernel.

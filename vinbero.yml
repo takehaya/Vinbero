@@ -17,7 +17,6 @@ internal:
 settings:
   # Runtime options for BPF program
   enable_stats: false   # Enable packet statistics collection
-  enable_xdpcap: false  # Enable xdpcap packet capture support
   fdb_aging_seconds: 300  # FDB entry aging timeout in seconds (0=disabled)
   entries:
     sid_function:

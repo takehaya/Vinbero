@@ -119,15 +119,6 @@ struct {
     __uint(max_entries, 1);
 } scratch_map SEC(".maps");
 
-// https://github.com/cloudflare/xdpcap
-// struct bpf_map_def SEC("maps") xdpcap_hook = XDPCAP_HOOK();
-struct xdpcap_hook {
-    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, sizeof(int));
-    __uint(max_entries, 5);
-} xdpcap_hook SEC(".maps");
-
 // ========== Tail Call Infrastructure ==========
 
 #include "core/xdp_tailcall.h"

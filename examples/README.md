@@ -68,6 +68,5 @@ sudo ./teardown.sh # クリーンアップ
 | `gtp6-drop-in/` | End.M.GTP6.D.Di | GTP-U Drop-Inモード |
 
 ### Plugin Extension
-| ディレクトリ | 機能 | 説明 |
-|---|---|---|
-| `plugin-counter/` | カスタムBPFプラグイン | パケットカウンタプラグインの動的登録デモ |
+
+プラグインによる拡張は SDK で行います。サンプル (ビルド確認 + E2E デモ) は [`../sdk/examples/`](../sdk/examples/) 参照、プラグインの書き方は [Plugin SDK ドキュメント](../docs/design/ja/plugin-sdk.md) 参照。

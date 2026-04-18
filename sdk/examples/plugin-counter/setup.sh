@@ -1,15 +1,16 @@
 #!/bin/bash
-# examples/plugin-counter/setup.sh
+# sdk/examples/plugin-counter/setup.sh
 # Setup plugin counter demonstration environment
 
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_DIR="${SCRIPT_DIR}/../../../examples/common"
 
 # Short prefix to stay within 15-char Linux interface name limit
 export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-plgcnt-}"
 
-source "${SCRIPT_DIR}/../common/topologies/three_router.sh"
+source "${COMMON_DIR}/topologies/three_router.sh"
 
 ns_router1="${TOPO_NS_PREFIX}router1"
 ns_router2="${TOPO_NS_PREFIX}router2"

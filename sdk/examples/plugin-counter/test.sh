@@ -1,5 +1,5 @@
 #!/bin/bash
-# examples/plugin/test.sh
+# sdk/examples/plugin-counter/test.sh
 # Plugin extension example: packet counter plugin
 #
 # Demonstrates:
@@ -11,16 +11,16 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR}/../.."
+REPO_ROOT="${SCRIPT_DIR}/../../.."
+COMMON_DIR="${REPO_ROOT}/examples/common"
 
-source "${SCRIPT_DIR}/../common/test_utils.sh"
+source "${COMMON_DIR}/test_utils.sh"
 check_root
 
 VINBEROD_BIN="${REPO_ROOT}/out/bin/vinberod"
 VINBERO_BIN="${REPO_ROOT}/out/bin/vinbero"
 VINBERO_CONFIG="${SCRIPT_DIR}/vinbero_config.yaml"
-PLUGIN_SRC="${SCRIPT_DIR}/plugin_counter.c"
-PLUGIN_OBJ="/tmp/plugin_counter.o"
+PLUGIN_OBJ="${SCRIPT_DIR}/plugin.o"
 PLUGIN_INDEX=32
 
 export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-plgcnt-}"
@@ -38,7 +38,7 @@ cleanup() {
         kill "$VINBERO_PID" 2>/dev/null || true
         wait "$VINBERO_PID" 2>/dev/null || true
     fi
-    rm -f "$PLUGIN_OBJ"
+    make -C "${SCRIPT_DIR}" clean >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -50,12 +50,10 @@ echo ""
 # ==========================================
 # Phase 1: Compile the plugin
 # ==========================================
-print_info "Compiling plugin: ${PLUGIN_SRC}"
+print_info "Compiling plugin via make -C ${SCRIPT_DIR}"
 
-clang -O2 -g -Wall -target bpf \
-    -I "${REPO_ROOT}/src" \
-    -I /usr/include/x86_64-linux-gnu \
-    -c "${PLUGIN_SRC}" -o "${PLUGIN_OBJ}"
+make -C "${SCRIPT_DIR}" clean
+make -C "${SCRIPT_DIR}"
 
 if [ ! -f "${PLUGIN_OBJ}" ]; then
     print_error "Plugin compilation failed"

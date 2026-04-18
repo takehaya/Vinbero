@@ -192,11 +192,5 @@ func buildBpfConstants(cfg *config.Config) map[string]any {
 		constants["enable_stats"] = uint8(0)
 	}
 
-	if cfg.Setting.EnableXdpcap {
-		constants["enable_xdpcap"] = uint32(1)
-	} else {
-		constants["enable_xdpcap"] = uint32(0)
-	}
-
 	return constants
 }
