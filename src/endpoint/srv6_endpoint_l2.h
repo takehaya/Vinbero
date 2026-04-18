@@ -97,7 +97,6 @@ static __always_inline int fdb_forward_l2(
     if (!fdb->is_remote) {
         // Local FDB hit: fast-path redirect
         DEBUG_PRINT("FDB: hit local, redirect to ifindex %d\n", fdb->oif);
-        STATS_INC(STATS_SRV6_END, 0);
         return bpf_redirect(fdb->oif, 0);
     }
 

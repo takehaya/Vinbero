@@ -2,12 +2,31 @@ package bpf
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/pkg/errors"
 	"github.com/takehaya/vinbero/pkg/config"
 )
+
+// pinnedControlMaps lists maps that hold user-facing control state. When
+// settings.pin_maps is enabled, these get PinByName so their contents
+// survive a vinberod restart. Ephemeral maps (stats, slot_stats,
+// scratch, tailcall_ctx, PROG_ARRAYs) are intentionally excluded —
+// they either reset naturally or hold program FDs that can't live
+// across processes.
+var pinnedControlMaps = []string{
+	"sid_function_map",
+	"sid_aux_map",
+	"headend_v4_map",
+	"headend_v6_map",
+	"headend_l2_map",
+	"fdb_map",
+	"bd_peer_map",
+	"bd_peer_reverse_map",
+	"dx2v_map",
+}
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ../../src -I /usr/include/x86_64-linux-gnu
 
@@ -54,9 +73,26 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 		}
 	}
 
-	err = spec.LoadAndAssign(objs, &ebpf.CollectionOptions{
+	collOpts := &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{LogSizeStart: 64 * 1024 * 1024, LogLevel: ebpf.LogLevelInstruction},
-	})
+	}
+	if cfg != nil && cfg.Setting.PinMaps.Enabled {
+		pinPath := cfg.Setting.PinMaps.Path
+		if pinPath == "" {
+			pinPath = "/sys/fs/bpf/vinbero"
+		}
+		if err := os.MkdirAll(pinPath, 0o755); err != nil {
+			return nil, fmt.Errorf("failed to create pin directory %q: %w", pinPath, err)
+		}
+		for _, name := range pinnedControlMaps {
+			if ms, ok := spec.Maps[name]; ok {
+				ms.Pinning = ebpf.PinByName
+			}
+		}
+		collOpts.Maps.PinPath = pinPath
+	}
+
+	err = spec.LoadAndAssign(objs, collOpts)
 	if err != nil {
 		var verr *ebpf.VerifierError
 		if errors.As(err, &verr) {

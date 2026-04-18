@@ -211,36 +211,53 @@ func (s *NetworkResourceServer) VrfList(
 	return connect.NewResponse(resp), nil
 }
 
-// findBridgeReference checks if any SID entry references the given bridge_ifindex.
-// Bridge ifindex is stored in the aux map (L2 variant), so we check entries with has_aux.
+// findBridgeReference checks if any End.DT2 SID entry references the given bridge_ifindex.
+// Bridge ifindex is stored in the aux map (L2 variant).
 func (s *NetworkResourceServer) findBridgeReference(ifindex uint32) (string, error) {
 	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
 		return "", fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
-		if entry.HasAux != 0 {
-			aux, err := s.mapOps.GetSidAux(entry.AuxIndex)
-			if err != nil {
-				continue
-			}
-			_, bridgeIfindex := bpf.SidAuxL2Data(aux)
-			if bridgeIfindex == ifindex {
-				return prefix, nil
-			}
+		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2 || entry.AuxIndex == 0 {
+			continue
+		}
+		aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))
+		if err != nil {
+			continue
+		}
+		_, bridgeIfindex := bpf.SidAuxL2Data(aux)
+		if bridgeIfindex == ifindex {
+			return prefix, nil
 		}
 	}
 	return "", nil
 }
 
-// findVrfReference checks if any SID entry references the given vrf_ifindex.
+// findVrfReference checks if any End.T/DT4/DT6/DT46 SID entry references the given vrf_ifindex.
+// VRF ifindex is stored in the aux map (l3vrf variant).
 func (s *NetworkResourceServer) findVrfReference(ifindex uint32) (string, error) {
 	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
 		return "", fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
-		if entry.VrfIfindex == ifindex {
+		switch v1.Srv6LocalAction(entry.Action) {
+		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46:
+		default:
+			continue
+		}
+		if entry.AuxIndex == 0 {
+			continue
+		}
+		aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))
+		if err != nil {
+			continue
+		}
+		if bpf.SidAuxL3VrfData(aux) == ifindex {
 			return prefix, nil
 		}
 	}

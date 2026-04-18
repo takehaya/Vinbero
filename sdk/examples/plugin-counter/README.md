@@ -88,7 +88,28 @@ sudo ip netns exec plgcnt-router2 ../../../out/bin/vinbero -s http://127.0.0.1:8
 ### 3. テスト
 
 ```bash
-sudo ip netns exec plgcnt-host1 ping6 -c 3 fc00:3::100
+sudo ip netns exec plgcnt-host1 ping6 -c 3 fc00:3::3
+```
+
+### 4. plugin が呼ばれた回数を確認
+
+`vinbero stats slot show` で per-slot の invocation counter が見えます
+(`enable_stats: true` が設定されている前提):
+
+```bash
+sudo ip netns exec plgcnt-router2 ../../../out/bin/vinbero -s http://127.0.0.1:8082 \
+  stats slot show --type endpoint --plugin-only
+# MAP       SLOT  NAME                   PACKETS  BYTES
+# endpoint  32    plugin:plugin_counter  3        594
+```
+
+plugin ELF 内で独自 map (`plugin_counter_map`) を持っている場合は
+bpftool で直読することも可能:
+
+```bash
+MAP_ID=$(sudo ip netns exec plgcnt-router2 bpftool map show \
+    | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
+sudo ip netns exec plgcnt-router2 bpftool map dump id "$MAP_ID"
 ```
 
 ## プラグイン開発について

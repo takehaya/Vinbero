@@ -14,7 +14,7 @@ static __always_inline int process_headend_v4(
     if (!entry)
         return XDP_PASS;
 
-    if (tailcall_ctx_write_headend(entry, l3_offset) == 0)
+    if (tailcall_ctx_write_headend(entry, l3_offset, DISPATCH_HEADEND_V4, entry->mode) == 0)
         bpf_tail_call(ctx, &headend_v4_progs, entry->mode);
 
     return XDP_PASS;
@@ -33,7 +33,7 @@ static __always_inline int process_headend_v6(
     if (!entry)
         return XDP_PASS;
 
-    if (tailcall_ctx_write_headend(entry, l3_offset) == 0)
+    if (tailcall_ctx_write_headend(entry, l3_offset, DISPATCH_HEADEND_V6, entry->mode) == 0)
         bpf_tail_call(ctx, &headend_v6_progs, entry->mode);
 
     return XDP_PASS;
@@ -54,7 +54,7 @@ static __always_inline int process_srv6_decap_nosrh(
     if (!entry)
         return XDP_PASS;
 
-    if (tailcall_ctx_write_sid(entry, l3_offset, DISPATCH_NOSRH, nh) == 0)
+    if (tailcall_ctx_write_sid(entry, l3_offset, DISPATCH_NOSRH, nh, entry->action) == 0)
         bpf_tail_call(ctx, &sid_endpoint_progs, entry->action);
 
     return XDP_PASS;
@@ -85,7 +85,7 @@ static __always_inline int process_srv6_localsid(
     if (!entry)
         return XDP_PASS;
 
-    if (tailcall_ctx_write_sid(entry, l3_offset, DISPATCH_LOCALSID, 0) == 0)
+    if (tailcall_ctx_write_sid(entry, l3_offset, DISPATCH_LOCALSID, 0, entry->action) == 0)
         bpf_tail_call(ctx, &sid_endpoint_progs, entry->action);
 
     return XDP_PASS;

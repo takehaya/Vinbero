@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/urfave/cli/v2"
 )
 
@@ -35,6 +38,9 @@ func sidFunctionCommand() *cli.Command {
 					&cli.UintFlag{Name: "args-offset", Usage: "Args.Mob.Session byte offset in SID (for GTP functions)"},
 					&cli.StringFlag{Name: "gtp-v4-src-addr", Usage: "GTP4 outer IPv4 source address (for End.M.GTP4.E)"},
 					&cli.UintFlag{Name: "table-id", Usage: "VLAN table ID (for End.DX2V)"},
+					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 196 bytes after decode)"},
+					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
+					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -69,6 +75,34 @@ func sidFunctionCommand() *cli.Command {
 						}
 					}
 
+					var pluginAuxRaw []byte
+					if hx := c.String("plugin-aux-hex"); hx != "" {
+						decoded, err := hex.DecodeString(hx)
+						if err != nil {
+							return fmt.Errorf("invalid plugin-aux-hex: %w", err)
+						}
+						if len(decoded) > bpf.SidAuxPluginRawMax {
+							return fmt.Errorf("plugin-aux-hex decodes to %d bytes, max %d",
+								len(decoded), bpf.SidAuxPluginRawMax)
+						}
+						pluginAuxRaw = decoded
+					}
+
+					pluginAuxJSON := c.String("plugin-aux-json")
+					if jsonPath := c.String("plugin-aux-json-file"); jsonPath != "" {
+						if pluginAuxJSON != "" {
+							return fmt.Errorf("--plugin-aux-json and --plugin-aux-json-file are mutually exclusive")
+						}
+						body, err := os.ReadFile(jsonPath)
+						if err != nil {
+							return fmt.Errorf("read %s: %w", jsonPath, err)
+						}
+						pluginAuxJSON = string(body)
+					}
+					if pluginAuxJSON != "" && pluginAuxRaw != nil {
+						return fmt.Errorf("--plugin-aux-hex and --plugin-aux-json* are mutually exclusive")
+					}
+
 					sid := &v1.SidFunction{
 						Action:        action,
 						TriggerPrefix: c.String("trigger-prefix"),
@@ -84,7 +118,9 @@ func sidFunctionCommand() *cli.Command {
 						HeadendMode:   headendMode,
 						ArgsOffset:   uint32(c.Uint("args-offset")),
 						GtpV4SrcAddr: c.String("gtp-v4-src-addr"),
-						TableId:      uint32(c.Uint("table-id")),
+						TableId:       uint32(c.Uint("table-id")),
+						PluginAuxRaw:  pluginAuxRaw,
+						PluginAuxJson: pluginAuxJSON,
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),
@@ -109,6 +145,23 @@ func sidFunctionCommand() *cli.Command {
 						return err
 					}
 					fmt.Printf("Deleted: %s\n", strings.Join(resp.Msg.DeletedTriggerPrefixes, ", "))
+					return nil
+				},
+			},
+			{
+				Name:  "flush",
+				Usage: "Delete every SID function entry (requires --yes)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "yes", Usage: "Confirm the destructive operation", Required: true},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					resp, err := clients.Sid.SidFunctionFlush(context.Background(),
+						connect.NewRequest(&v1.SidFunctionFlushRequest{}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Flushed %d SID functions\n", resp.Msg.DeletedCount)
 					return nil
 				},
 			},

@@ -103,6 +103,18 @@ func (s *BdPeerServer) BdPeerDelete(
 	return connect.NewResponse(resp), nil
 }
 
+// BdPeerFlush removes BD peer entries, optionally scoped to a BD.
+func (s *BdPeerServer) BdPeerFlush(
+	ctx context.Context,
+	req *connect.Request[v1.BdPeerFlushRequest],
+) (*connect.Response[v1.BdPeerFlushResponse], error) {
+	count, err := s.mapOps.FlushBdPeers(uint16(req.Msg.BdId))
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.BdPeerFlushResponse{DeletedCount: count}), nil
+}
+
 func (s *BdPeerServer) BdPeerList(
 	ctx context.Context,
 	req *connect.Request[v1.BdPeerListRequest],

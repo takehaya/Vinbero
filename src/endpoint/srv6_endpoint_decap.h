@@ -30,7 +30,6 @@ static __always_inline int decap_and_fib_v4(
     if ((void *)(iph + 1) > data_end) return XDP_DROP;
 
     eth->h_proto = bpf_htons(ETH_P_IP);
-    STATS_INC(STATS_SRV6_END, 0);
 
     int action = srv6_fib_redirect_v4(ctx, iph, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
@@ -56,7 +55,6 @@ static __always_inline int decap_and_fib_v6(
     struct ipv6hdr *inner_ip6h = (void *)(eth + 1);
     if ((void *)(inner_ip6h + 1) > data_end) return XDP_DROP;
 
-    STATS_INC(STATS_SRV6_END, 0);
 
     int action = srv6_fib_redirect(ctx, inner_ip6h, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
@@ -131,7 +129,6 @@ static __always_inline int process_end_dx2(
     }
 
     DEBUG_PRINT("End.DX2: Decapsulated, redirect to ifindex %d\n", oif);
-    STATS_INC(STATS_SRV6_END, 0);
     return bpf_redirect(oif, 0);
 }
 
@@ -141,9 +138,10 @@ static __always_inline int process_end_dt4(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
-    __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
+    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
     return decap_and_fib_v4(ctx, srh, fib_ifindex, l3_offset);
 }
 
@@ -153,9 +151,10 @@ static __always_inline int process_end_dt6(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
-    __u32 fib_ifindex = entry->vrf_ifindex ? entry->vrf_ifindex : ctx->ingress_ifindex;
+    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
     return decap_and_fib_v6(ctx, srh, fib_ifindex, l3_offset);
 }
 
@@ -165,6 +164,7 @@ static __always_inline int process_end_dt46(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
     // Detect inner protocol and dispatch (SL check is done by callee)
@@ -172,10 +172,10 @@ static __always_inline int process_end_dt46(
 
     if (inner_proto == IPPROTO_IPIP) {
         DEBUG_PRINT("End.DT46: Inner protocol is IPv4, dispatching to DT4\n");
-        return process_end_dt4(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_dt4(ctx, ip6h, srh, entry, aux, l3_offset);
     } else if (inner_proto == IPPROTO_IPV6) {
         DEBUG_PRINT("End.DT46: Inner protocol is IPv6, dispatching to DT6\n");
-        return process_end_dt6(ctx, ip6h, srh, entry, l3_offset);
+        return process_end_dt6(ctx, ip6h, srh, entry, aux, l3_offset);
     }
 
     DEBUG_PRINT("End.DT46: Unsupported inner protocol %d\n", inner_proto);

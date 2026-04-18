@@ -3,6 +3,7 @@ package bpf
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net"
 	"sync"
 	"unsafe"
@@ -62,7 +63,8 @@ func NewMapOperations(objs *BpfObjects) *MapOperations {
 	}
 }
 
-// indexAllocator manages a pool of uint32 indices with a free-list
+// indexAllocator manages a pool of uint32 indices with a free-list.
+// Index 0 is reserved as the "no aux" sentinel used by sid_function_entry.
 type indexAllocator struct {
 	mu       sync.Mutex
 	freeList []uint32
@@ -71,7 +73,7 @@ type indexAllocator struct {
 }
 
 func newIndexAllocator(max uint32) *indexAllocator {
-	return &indexAllocator{maxIndex: max}
+	return &indexAllocator{maxIndex: max, nextNew: 1}
 }
 
 func (a *indexAllocator) Alloc() (uint32, error) {
@@ -123,17 +125,17 @@ func (a *indexAllocator) RecoverUsed(usedIndices []uint32) {
 		return
 	}
 
-	a.nextNew = maxUsed + 1
+	a.nextNew = max(maxUsed+1, 1)
 	a.freeList = nil
-	for i := uint32(0); i < a.nextNew; i++ {
+	for i := uint32(1); i < a.nextNew; i++ {
 		if !used[i] {
 			a.freeList = append(a.freeList, i)
 		}
 	}
 }
 
-// RecoverAuxIndices scans sid_function_map for entries with has_aux=1
-// and marks their aux_index as used in the allocator.
+// RecoverAuxIndices scans sid_function_map for entries with a non-zero
+// aux_index and marks those indices as used in the allocator.
 // Call this on startup to restore allocator state after process restart.
 func (m *MapOperations) RecoverAuxIndices() error {
 	var key LpmKeyV6
@@ -142,8 +144,8 @@ func (m *MapOperations) RecoverAuxIndices() error {
 
 	var used []uint32
 	for iter.Next(&key, &entry) {
-		if entry.HasAux != 0 {
-			used = append(used, entry.AuxIndex)
+		if entry.AuxIndex != 0 {
+			used = append(used, uint32(entry.AuxIndex))
 		}
 	}
 	if err := iter.Err(); err != nil {
@@ -212,6 +214,34 @@ func NewSidAuxGtp6e(argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) *SidA
 	raw[0] = argsOffset
 	copy(raw[8:24], srcAddr[:])
 	copy(raw[24:40], dstAddr[:])
+	return entry
+}
+
+// NewSidAuxL3Vrf creates an aux entry for End.T/DT4/DT6/DT46 carrying the
+// resolved VRF ifindex in the l3vrf variant.
+func NewSidAuxL3Vrf(vrfIfindex uint32) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	binary.NativeEndian.PutUint32(entry.Nexthop.Nexthop[0:4], vrfIfindex)
+	return entry
+}
+
+// SidAuxL3VrfData extracts the VRF ifindex from the l3vrf variant.
+func SidAuxL3VrfData(entry *SidAuxEntry) uint32 {
+	return binary.NativeEndian.Uint32(entry.Nexthop.Nexthop[0:4])
+}
+
+// SidAuxPluginRawMax is the capacity of the plugin_raw variant in
+// sid_aux_entry. Writes longer than this are rejected at the RPC layer so
+// we never overflow the kernel-side union.
+const SidAuxPluginRawMax = 196
+
+// NewSidAuxPluginRaw creates an aux entry from a plugin-defined byte payload.
+// raw may be shorter than SidAuxPluginRawMax; remaining bytes are zero.
+// Callers (the RPC handler) must enforce len(raw) <= SidAuxPluginRawMax.
+func NewSidAuxPluginRaw(raw []byte) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	dst := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(entry))[:]
+	copy(dst, raw)
 	return entry
 }
 
@@ -310,8 +340,16 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 		if err != nil {
 			return fmt.Errorf("failed to allocate aux index: %w", err)
 		}
-		entry.HasAux = 1
-		entry.AuxIndex = idx
+		// sid_function_entry.aux_index is u16; the userspace allocator
+		// can in principle hand out higher values if the operator set
+		// an sid_aux_map capacity above 65535, which would silently
+		// truncate here. Reject before we write the truncated value.
+		if idx > math.MaxUint16 {
+			m.auxAlloc.Free(idx)
+			return fmt.Errorf("aux index %d exceeds uint16 range; reduce sid_aux_map capacity below %d",
+				idx, math.MaxUint16+1)
+		}
+		entry.AuxIndex = uint16(idx)
 		if err := m.objs.SidAuxMap.Put(idx, aux); err != nil {
 			m.auxAlloc.Free(idx)
 			return fmt.Errorf("failed to put SID aux entry: %w", err)
@@ -320,7 +358,7 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 
 	if err := m.objs.SidFunctionMap.Put(key, entry); err != nil {
 		if aux != nil {
-			m.auxAlloc.Free(entry.AuxIndex)
+			m.auxAlloc.Free(uint32(entry.AuxIndex))
 		}
 		return fmt.Errorf("failed to put SID function entry: %w", err)
 	}
@@ -343,10 +381,11 @@ func (m *MapOperations) DeleteSidFunction(triggerPrefix string) error {
 	}
 
 	// Clean up aux after SID entry is deleted to avoid index reuse while entry exists
-	if hasEntry && entry.HasAux != 0 {
+	if hasEntry && entry.AuxIndex != 0 {
 		var zeroAux SidAuxEntry
-		_ = m.objs.SidAuxMap.Put(entry.AuxIndex, &zeroAux)
-		m.auxAlloc.Free(entry.AuxIndex)
+		idx := uint32(entry.AuxIndex)
+		_ = m.objs.SidAuxMap.Put(idx, &zeroAux)
+		m.auxAlloc.Free(idx)
 	}
 	return nil
 }
@@ -396,11 +435,10 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 
 // ===== Stats Map Operations =====
 
-const StatsMax = 8
+const StatsMax = 5
 
 var StatsCounterName = [StatsMax]string{
-	"RX_PACKETS", "SRV6_END", "H_ENCAPS_V4", "H_ENCAPS_V6",
-	"PASS", "DROP", "REDIRECT", "ERROR",
+	"RX_PACKETS", "PASS", "DROP", "REDIRECT", "ABORTED",
 }
 
 type AggregatedStats struct {
@@ -409,40 +447,121 @@ type AggregatedStats struct {
 	Bytes   uint64
 }
 
-// ReadStats reads the PERCPU_ARRAY stats_map and aggregates per-CPU values
-func (m *MapOperations) ReadStats() ([]AggregatedStats, error) {
-	result := make([]AggregatedStats, StatsMax)
-	for i := uint32(0); i < StatsMax; i++ {
+// aggregatePerCPUMap iterates keys 0..max-1 of a PERCPU_ARRAY whose value
+// type is BpfStatsEntry, aggregates the per-CPU packets/bytes per key, and
+// invokes emit(key, packets, bytes) for each. Shared by stats_map and
+// slot_stats_* reads.
+func aggregatePerCPUMap(m *ebpf.Map, max uint32, emit func(key, packets, bytes uint64)) error {
+	for i := uint32(0); i < max; i++ {
 		var perCPU []BpfStatsEntry
-		if err := m.objs.StatsMap.Lookup(i, &perCPU); err != nil {
-			return nil, fmt.Errorf("failed to lookup stats counter %d: %w", i, err)
+		if err := m.Lookup(i, &perCPU); err != nil {
+			return fmt.Errorf("slot %d: %w", i, err)
 		}
-		var totalPackets, totalBytes uint64
-		for _, cpu := range perCPU {
-			totalPackets += cpu.Packets
-			totalBytes += cpu.Bytes
+		var p, b uint64
+		for _, c := range perCPU {
+			p += c.Packets
+			b += c.Bytes
 		}
-		result[i] = AggregatedStats{
-			Name:    StatsCounterName[i],
-			Packets: totalPackets,
-			Bytes:   totalBytes,
-		}
+		emit(uint64(i), p, b)
 	}
-	return result, nil
+	return nil
 }
 
-// ResetStats zeros all per-CPU stats counters.
-// PERCPU_ARRAY requires a per-CPU slice for Put.
-func (m *MapOperations) ResetStats() error {
+// resetPerCPUMap zeros all per-CPU entries of a PERCPU_ARRAY stats map.
+func resetPerCPUMap(m *ebpf.Map, max uint32) error {
 	numCPUs, err := ebpf.PossibleCPU()
 	if err != nil {
 		return fmt.Errorf("failed to get CPU count: %w", err)
 	}
 	zeros := make([]BpfStatsEntry, numCPUs)
-	for i := uint32(0); i < StatsMax; i++ {
-		if err := m.objs.StatsMap.Put(i, zeros); err != nil {
-			return fmt.Errorf("failed to reset stats counter %d: %w", i, err)
+	for i := uint32(0); i < max; i++ {
+		if err := m.Put(i, zeros); err != nil {
+			return fmt.Errorf("slot %d: %w", i, err)
 		}
+	}
+	return nil
+}
+
+// ReadStats reads the PERCPU_ARRAY stats_map and aggregates per-CPU values
+func (m *MapOperations) ReadStats() ([]AggregatedStats, error) {
+	result := make([]AggregatedStats, StatsMax)
+	err := aggregatePerCPUMap(m.objs.StatsMap, StatsMax, func(i, p, b uint64) {
+		result[i] = AggregatedStats{Name: StatsCounterName[i], Packets: p, Bytes: b}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("stats_map: %w", err)
+	}
+	return result, nil
+}
+
+// ResetStats zeros all per-CPU stats counters.
+func (m *MapOperations) ResetStats() error {
+	if err := resetPerCPUMap(m.objs.StatsMap, StatsMax); err != nil {
+		return fmt.Errorf("stats_map: %w", err)
+	}
+	return nil
+}
+
+// ===== Per-slot Stats Map Operations =====
+
+// SlotStatsEndpointMax / SlotStatsHeadendMax mirror the BPF-side maps in
+// src/core/xdp_stats.h. Must match the C constants.
+const (
+	SlotStatsEndpointMax = 64
+	SlotStatsHeadendMax  = 32
+)
+
+// SlotStatsEntry is a per-slot invocation counter record.
+type SlotStatsEntry struct {
+	MapType string
+	Slot    uint32
+	Packets uint64
+	Bytes   uint64
+}
+
+func (m *MapOperations) slotStatsTarget(mapType string) (ebpfMap *ebpf.Map, max uint32, err error) {
+	switch mapType {
+	case MapTypeEndpoint:
+		return m.objs.SlotStatsEndpoint, SlotStatsEndpointMax, nil
+	case MapTypeHeadendV4:
+		return m.objs.SlotStatsHeadendV4, SlotStatsHeadendMax, nil
+	case MapTypeHeadendV6:
+		return m.objs.SlotStatsHeadendV6, SlotStatsHeadendMax, nil
+	default:
+		return nil, 0, fmt.Errorf("unknown slot stats map type: %s", mapType)
+	}
+}
+
+// ReadSlotStats reads one of the slot_stats_* PERCPU_ARRAYs and aggregates
+// each slot's per-CPU values.
+func (m *MapOperations) ReadSlotStats(mapType string) ([]SlotStatsEntry, error) {
+	ebpfMap, max, err := m.slotStatsTarget(mapType)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SlotStatsEntry, 0, max)
+	err = aggregatePerCPUMap(ebpfMap, max, func(i, p, b uint64) {
+		out = append(out, SlotStatsEntry{
+			MapType: mapType,
+			Slot:    uint32(i),
+			Packets: p,
+			Bytes:   b,
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", mapType, err)
+	}
+	return out, nil
+}
+
+// ResetSlotStats zeros all per-CPU entries of a single slot stats map.
+func (m *MapOperations) ResetSlotStats(mapType string) error {
+	ebpfMap, max, err := m.slotStatsTarget(mapType)
+	if err != nil {
+		return err
+	}
+	if err := resetPerCPUMap(ebpfMap, max); err != nil {
+		return fmt.Errorf("%s: %w", mapType, err)
 	}
 	return nil
 }
@@ -825,6 +944,149 @@ func (m *MapOperations) ListBdPeers() (map[BdPeerKey]*HeadendEntry, error) {
 	return result, nil
 }
 
+// ===== Flush Operations =====
+//
+// Each Flush* method removes every entry from its target map in a single
+// operation. The two-phase pattern (collect keys then delete) avoids
+// mutating the map while iterating, which kernel BPF map iterators do
+// not guarantee safety for. Partial failures return the count of
+// entries already deleted plus an error so the caller can log progress.
+
+// FlushSidFunctions removes every SID function entry and releases the
+// associated aux indices. Returns the number of entries deleted.
+func (m *MapOperations) FlushSidFunctions() (uint32, error) {
+	entries, err := m.ListSidFunctions()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for prefix := range entries {
+		if err := m.DeleteSidFunction(prefix); err != nil {
+			return count, fmt.Errorf("flush sid_function: delete %q: %w", prefix, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushHeadendV4 removes every headend_v4 entry.
+func (m *MapOperations) FlushHeadendV4() (uint32, error) {
+	entries, err := m.ListHeadendV4()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for prefix := range entries {
+		if err := m.DeleteHeadendV4(prefix); err != nil {
+			return count, fmt.Errorf("flush headend_v4: delete %q: %w", prefix, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushHeadendV6 removes every headend_v6 entry.
+func (m *MapOperations) FlushHeadendV6() (uint32, error) {
+	entries, err := m.ListHeadendV6()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for prefix := range entries {
+		if err := m.DeleteHeadendV6(prefix); err != nil {
+			return count, fmt.Errorf("flush headend_v6: delete %q: %w", prefix, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushHeadendL2 removes every headend_l2 entry.
+func (m *MapOperations) FlushHeadendL2() (uint32, error) {
+	entries, err := m.ListHeadendL2()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for key := range entries {
+		if err := m.DeleteHeadendL2(key.Ifindex, key.VlanId); err != nil {
+			return count, fmt.Errorf("flush headend_l2: delete ifindex=%d vlan=%d: %w",
+				key.Ifindex, key.VlanId, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushFdb removes FDB entries, optionally scoped to a single BD and
+// optionally keeping user-configured static entries. bdID == 0 means
+// all BDs; keepStatic == true skips entries with IsStatic != 0.
+func (m *MapOperations) FlushFdb(bdID uint16, keepStatic bool) (uint32, error) {
+	entries, err := m.ListFdb()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for key, entry := range entries {
+		if bdID != 0 && key.BdId != bdID {
+			continue
+		}
+		if keepStatic && entry.IsStatic != 0 {
+			continue
+		}
+		mac := net.HardwareAddr(key.Mac[:])
+		if err := m.DeleteFdb(key.BdId, mac); err != nil {
+			return count, fmt.Errorf("flush fdb: delete bd=%d mac=%s: %w",
+				key.BdId, mac, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushBdPeers removes BD peer entries, optionally scoped to a single BD.
+// bdID == 0 means all BDs. The companion reverse-map entries are cleaned
+// up transitively via DeleteBdPeer.
+func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
+	entries, err := m.ListBdPeers()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for key := range entries {
+		if bdID != 0 && key.BdId != bdID {
+			continue
+		}
+		if err := m.DeleteBdPeer(key.BdId, key.Index); err != nil {
+			return count, fmt.Errorf("flush bd_peer: delete bd=%d idx=%d: %w",
+				key.BdId, key.Index, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushVlanTable removes dx2v entries, optionally scoped to a single
+// table. tableID == 0 means all tables.
+func (m *MapOperations) FlushVlanTable(tableID uint16) (uint32, error) {
+	entries, err := m.ListDx2vVlan()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for key := range entries {
+		if tableID != 0 && key.TableId != tableID {
+			continue
+		}
+		if err := m.DeleteDx2vVlan(key.TableId, key.VlanId); err != nil {
+			return count, fmt.Errorf("flush dx2v: delete table=%d vlan=%d: %w",
+				key.TableId, key.VlanId, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
 // ===== Helper Functions =====
 
 func buildLpmKeyV4(cidr string) (*LpmKeyV4, error) {
@@ -963,6 +1225,14 @@ func (m *MapOperations) GetSharedMaps() map[string]*ebpf.Map {
 		"dx2v_map":           m.objs.Dx2vMap,
 		"scratch_map":             m.objs.ScratchMap,
 		"stats_map":               m.objs.StatsMap,
+		// slot_stats_* are vinbero-internal observability maps. Exposed to
+		// plugins because the SDK header (xdp_stats.h) declares them, so
+		// plugin ELFs will end up with matching .maps entries and need to
+		// be redirected here to load. Plugin code should not write to them
+		// directly — the epilogue handles that.
+		"slot_stats_endpoint":     m.objs.SlotStatsEndpoint,
+		"slot_stats_headend_v4":   m.objs.SlotStatsHeadendV4,
+		"slot_stats_headend_v6":   m.objs.SlotStatsHeadendV6,
 		"tailcall_ctx_map":        m.objs.TailcallCtxMap,
 		MapNameSidEndpointProgs:   m.objs.SidEndpointProgs,
 		MapNameHeadendV4Progs:     m.objs.HeadendV4Progs,

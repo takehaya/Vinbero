@@ -27,10 +27,22 @@ func (c *Config) BpfConstants() map[string]any {
 }
 
 type SettingConfig struct {
-	Entries           EntriesConfig `yaml:"entries,omitempty"`
-	EnableStats       bool          `yaml:"enable_stats,omitempty" default:"false"`
-	StatePath         string        `yaml:"state_path,omitempty"`      // Path for resource state file (default: /var/lib/vinbero/state.json)
-	FdbAgingSeconds   int           `yaml:"fdb_aging_seconds,omitempty" default:"300"` // FDB entry aging timeout (0=disabled)
+	Entries         EntriesConfig  `yaml:"entries,omitempty"`
+	EnableStats     bool           `yaml:"enable_stats,omitempty" default:"false"`
+	StatePath       string         `yaml:"state_path,omitempty"`                      // Path for resource state file (default: /var/lib/vinbero/state.json)
+	FdbAgingSeconds int            `yaml:"fdb_aging_seconds,omitempty" default:"300"` // FDB entry aging timeout (0=disabled)
+	PinMaps         PinMapsConfig  `yaml:"pin_maps,omitempty"`                        // Pin control-state BPF maps under /sys/fs/bpf so they survive a vinberod restart.
+}
+
+// PinMapsConfig toggles pinning for the daemon's control-state BPF maps
+// (sid_function_map, sid_aux_map, headend_*_map, fdb_map, bd_peer_map,
+// bd_peer_reverse_map, dx2v_map). Ephemeral maps (stats, slot_stats,
+// scratch, tailcall_ctx, PROG_ARRAY) are never pinned: their values
+// either reset naturally at restart or hold program FDs that can't
+// survive a new process.
+type PinMapsConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty" default:"false"`
+	Path    string `yaml:"path,omitempty" default:"/sys/fs/bpf/vinbero"`
 }
 
 // EntriesConfig holds the capacity settings for each entry type

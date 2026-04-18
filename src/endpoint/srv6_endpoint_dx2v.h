@@ -36,7 +36,6 @@ static __always_inline int dx2v_forward_l2(
     }
 
     DEBUG_PRINT("End.DX2V: VLAN %d -> oif %d\n", vlan_id, entry->oif);
-    STATS_INC(STATS_SRV6_END, 0);
     return bpf_redirect(entry->oif, 0);
 }
 

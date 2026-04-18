@@ -9,12 +9,14 @@
 
 // ========== Context Helpers ==========
 
-// Write endpoint context (used by both localsid and nosrh dispatchers)
+// Write endpoint context (used by both localsid and nosrh dispatchers).
+// `slot` is the tail-call index (= entry->action).
 static __always_inline int tailcall_ctx_write_sid(
     struct sid_function_entry *entry,
     __u16 l3_offset,
     __u8 dispatch_type,
-    __u8 inner_proto)
+    __u8 inner_proto,
+    __u8 slot)
 {
     __u32 key = TAILCALL_CTX_KEY;
     struct tailcall_ctx *tctx = bpf_map_lookup_elem(&tailcall_ctx_map, &key);
@@ -22,19 +24,26 @@ static __always_inline int tailcall_ctx_write_sid(
     tctx->l3_offset = l3_offset;
     tctx->dispatch_type = dispatch_type;
     tctx->inner_proto = inner_proto;
+    tctx->slot = slot;
     __builtin_memcpy(&tctx->sid_entry, entry, sizeof(*entry));
     return 0;
 }
 
-// Write headend context
+// Write headend context. Caller must pass DISPATCH_HEADEND_V4 or
+// DISPATCH_HEADEND_V6 so the epilogue can select the right stats map.
+// `slot` is the tail-call index (= entry->mode).
 static __always_inline int tailcall_ctx_write_headend(
-    struct headend_entry *entry, __u16 l3_offset)
+    struct headend_entry *entry,
+    __u16 l3_offset,
+    __u8 dispatch_type,
+    __u8 slot)
 {
     __u32 key = TAILCALL_CTX_KEY;
     struct tailcall_ctx *tctx = bpf_map_lookup_elem(&tailcall_ctx_map, &key);
     if (!tctx) return -1;
     tctx->l3_offset = l3_offset;
-    tctx->dispatch_type = DISPATCH_HEADEND;
+    tctx->dispatch_type = dispatch_type;
+    tctx->slot = slot;
     __builtin_memcpy(&tctx->headend, entry, sizeof(*entry));
     return 0;
 }
@@ -63,18 +72,28 @@ int tailcall_epilogue(struct xdp_md *ctx, int action)
     void *data_end = (void *)(long)ctx->data_end;
     __u64 pkt_len = data_end - data;
 
-    switch (action) {
-    case XDP_PASS:
-        STATS_INC(STATS_PASS, pkt_len);
-        break;
-    case XDP_DROP:
-        STATS_INC(STATS_DROP, pkt_len);
-        break;
-    case XDP_REDIRECT:
-        STATS_INC(STATS_REDIRECT, pkt_len);
-        break;
-    default:
-        break;
+    stats_action_inc(action, pkt_len);
+
+    // Per-slot invocation counter. Gated inside slot_stats_inc (same
+    // enable_stats pattern as stats_inc above). Masks bound slot to each
+    // map's range so the verifier can prove the lookup key is in-range.
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (tctx) {
+        __u32 slot = tctx->slot;
+        switch (tctx->dispatch_type) {
+        case DISPATCH_LOCALSID:
+        case DISPATCH_NOSRH:
+            slot_stats_inc(&slot_stats_endpoint, slot & (SLOT_STATS_ENDPOINT_MAX - 1), pkt_len);
+            break;
+        case DISPATCH_HEADEND_V4:
+            slot_stats_inc(&slot_stats_headend_v4, slot & (SLOT_STATS_HEADEND_MAX - 1), pkt_len);
+            break;
+        case DISPATCH_HEADEND_V6:
+            slot_stats_inc(&slot_stats_headend_v6, slot & (SLOT_STATS_HEADEND_MAX - 1), pkt_len);
+            break;
+        default:
+            break;
+        }
     }
 
     return action;

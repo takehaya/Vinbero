@@ -3,21 +3,34 @@ package server
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/cilium/ebpf/btf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
-// SidFunctionServer implements the SidFunctionServiceHandler interface
-type SidFunctionServer struct {
-	mapOps *bpf.MapOperations
+// AuxTypeLookup resolves a plugin slot to its BTF aux struct so the
+// SidFunction handler can encode plugin_aux_json without a hard
+// dependency on the full PluginServer. *PluginServer implements it.
+type AuxTypeLookup interface {
+	AuxType(mapType string, slot uint32) *btf.Struct
 }
 
-// NewSidFunctionServer creates a new SidFunctionServer
-func NewSidFunctionServer(mapOps *bpf.MapOperations) *SidFunctionServer {
-	return &SidFunctionServer{mapOps: mapOps}
+// SidFunctionServer implements the SidFunctionServiceHandler interface
+type SidFunctionServer struct {
+	mapOps    *bpf.MapOperations
+	pluginAux AuxTypeLookup
+}
+
+// NewSidFunctionServer creates a new SidFunctionServer. pluginAux may be
+// nil; in that case plugin_aux_json requests are rejected with a clear
+// error so deployments without the PluginServer wired up fail loudly.
+func NewSidFunctionServer(mapOps *bpf.MapOperations, pluginAux AuxTypeLookup) *SidFunctionServer {
+	return &SidFunctionServer{mapOps: mapOps, pluginAux: pluginAux}
 }
 
 // SidFunctionCreate creates SID function entries
@@ -120,6 +133,18 @@ func (s *SidFunctionServer) SidFunctionGet(
 	return connect.NewResponse(resp), nil
 }
 
+// SidFunctionFlush removes every SID function entry and releases aux.
+func (s *SidFunctionServer) SidFunctionFlush(
+	ctx context.Context,
+	req *connect.Request[v1.SidFunctionFlushRequest],
+) (*connect.Response[v1.SidFunctionFlushResponse], error) {
+	count, err := s.mapOps.FlushSidFunctions()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.SidFunctionFlushResponse{DeletedCount: count}), nil
+}
+
 // protoToEntry converts a protobuf SidFunction to a BPF generic entry + optional aux entry
 func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunctionEntry, *bpf.SidAuxEntry, error) {
 	entry := &bpf.SidFunctionEntry{
@@ -127,13 +152,15 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		Flavor: uint8(sidFunc.Flavor),
 	}
 
-	// Resolve vrf_name → vrf_ifindex for End.T/DT4/DT6/DT46
+	// Resolve vrf_name → vrf_ifindex for End.T/DT4/DT6/DT46. The resolved
+	// ifindex is stored in the l3vrf aux variant below.
+	var vrfIfindex uint32
 	if sidFunc.VrfName != "" {
-		vrfIfindex, err := resolveIfindex(sidFunc.VrfName)
+		idx, err := resolveIfindex(sidFunc.VrfName)
 		if err != nil {
 			return nil, nil, fmt.Errorf("vrf %q: %w", sidFunc.VrfName, err)
 		}
-		entry.VrfIfindex = vrfIfindex
+		vrfIfindex = idx
 	}
 
 	// Build aux entry based on action type
@@ -141,6 +168,14 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	action := v1.Srv6LocalAction(sidFunc.Action)
 
 	switch action {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46:
+		if vrfIfindex != 0 {
+			aux = bpf.NewSidAuxL3Vrf(vrfIfindex)
+		}
+
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X:
 		nexthop, err := bpf.ParseIPv6(sidFunc.Nexthop)
 		if err != nil {
@@ -206,7 +241,63 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		}
 	}
 
+	// Plugin-defined auxiliary payload. Only populated for plugin actions
+	// (action value >= EndpointPluginBase) that have no built-in aux variant
+	// above; the built-in variants take precedence so a caller cannot shadow
+	// an End.X nexthop with arbitrary bytes.
+	hasRaw := len(sidFunc.PluginAuxRaw) > 0
+	hasJSON := sidFunc.PluginAuxJson != ""
+	if hasRaw && hasJSON {
+		return nil, nil, fmt.Errorf("plugin_aux_raw and plugin_aux_json are mutually exclusive")
+	}
+	if aux == nil && hasRaw {
+		if len(sidFunc.PluginAuxRaw) > bpf.SidAuxPluginRawMax {
+			return nil, nil, fmt.Errorf(
+				"plugin_aux_raw length %d exceeds maximum %d",
+				len(sidFunc.PluginAuxRaw), bpf.SidAuxPluginRawMax,
+			)
+		}
+		aux = bpf.NewSidAuxPluginRaw(sidFunc.PluginAuxRaw)
+	}
+	if aux == nil && hasJSON {
+		raw, err := s.encodePluginAuxJSON(sidFunc)
+		if err != nil {
+			return nil, nil, err
+		}
+		aux = bpf.NewSidAuxPluginRaw(raw)
+	}
+
 	return entry, aux, nil
+}
+
+// encodePluginAuxJSON resolves the plugin's BTF aux type and asks the
+// encoder to turn the caller's JSON into the byte layout the plugin
+// expects. The result is bounded by SidAuxPluginRawMax so it always fits
+// inside sid_aux_entry.plugin_raw.
+func (s *SidFunctionServer) encodePluginAuxJSON(sidFunc *v1.SidFunction) ([]byte, error) {
+	if s.pluginAux == nil {
+		return nil, fmt.Errorf("plugin_aux_json requires PluginService wiring")
+	}
+	action := uint32(sidFunc.Action)
+	if action < bpf.EndpointPluginBase {
+		return nil, fmt.Errorf("plugin_aux_json only valid for plugin actions (>= %d), got %d",
+			bpf.EndpointPluginBase, action)
+	}
+	auxType := s.pluginAux.AuxType(bpf.MapTypeEndpoint, action)
+	if auxType == nil {
+		return nil, fmt.Errorf("plugin at slot %d does not declare <program>_aux BTF; register a plugin that uses VINBERO_PLUGIN_AUX_TYPE", action)
+	}
+	if auxType.Size > bpf.SidAuxPluginRawMax {
+		return nil, fmt.Errorf("plugin aux struct is %d bytes, exceeds maximum %d",
+			auxType.Size, bpf.SidAuxPluginRawMax)
+	}
+	dec := json.NewDecoder(strings.NewReader(sidFunc.PluginAuxJson))
+	dec.UseNumber()
+	var payload map[string]any
+	if err := dec.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("plugin_aux_json is not a valid JSON object: %w", err)
+	}
+	return EncodePluginAux(auxType, payload)
 }
 
 // entryToProto converts a BPF map entry to a protobuf SidFunction
@@ -215,15 +306,20 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 		Action:        v1.Srv6LocalAction(entry.Action),
 		TriggerPrefix: prefix,
 		Flavor:        v1.Srv6LocalFlavor(entry.Flavor),
-		VrfName:       ifindexToName(entry.VrfIfindex),
 	}
 
 	// Read aux data if present
-	if entry.HasAux != 0 {
-		aux, err := s.mapOps.GetSidAux(entry.AuxIndex)
+	if entry.AuxIndex != 0 {
+		aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))
 		if err == nil && aux != nil {
 			action := v1.Srv6LocalAction(entry.Action)
 			switch action {
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46:
+				sf.VrfName = ifindexToName(bpf.SidAuxL3VrfData(aux))
+
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X:
 				sf.Nexthop = bpf.FormatIPv6(aux.Nexthop.Nexthop)
 

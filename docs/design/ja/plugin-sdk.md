@@ -81,7 +81,7 @@ struct tailcall_ctx {
 主な用途:
 
 - `l3_offset`: verifier 対策に `TAILCALL_BOUND_L3OFF(tctx, l3_off)` か `if (l3_off > 22)` でバウンドする
-- `sid_entry.has_aux` が立っていれば `aux_index` で `sid_aux_map` を再 lookup
+- `sid_entry.aux_index != 0` なら `aux_index` で `sid_aux_map` を再 lookup (0 は "aux なし" sentinel)
 - Headend 系なら `headend` に segments/flavor 等が入る
 
 ### 戻りの契約
@@ -135,6 +135,57 @@ vinbero plugin validate --prog plugin.o --program my_plugin
 
 ELF 内で `BPF_MAP_TYPE_HASH` / `PERCPU_ARRAY` などを独自に宣言すると、登録時に新規作成されます。`sdk/examples/simple-acl/` の `acl_deny_map` 参照。
 
+### プラグイン aux (SID 単位の設定値)
+
+SID ごとに異なる設定値をプラグインへ渡したい場合、`sid_aux_entry.plugin_raw` (196 バイト) に任意の構造体を置けます。共有マップを増やさず、SID と 1:1 で構成を持てるのが利点です。
+
+プラグイン作者は `struct <program>_aux` という名前で構造体を宣言し、`VINBERO_PLUGIN_AUX_TYPE` マクロで BTF に残します:
+
+```c
+#include <vinbero/types.h>
+
+struct my_plugin_aux {
+    __u32                        limit;
+    vinbero_mac_t                match_mac;
+    struct vinbero_ipv6_prefix_t source;
+};
+VINBERO_PLUGIN_AUX_TYPE(my_plugin, my_plugin_aux);
+
+VINBERO_PLUGIN(my_plugin)
+{
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (aux) {
+        struct my_plugin_aux *cfg =
+            VINBERO_PLUGIN_AUX_CAST(struct my_plugin_aux, aux);
+        // cfg->limit, cfg->match_mac, cfg->source.prefix_len / addr
+    }
+    return XDP_PASS;
+}
+```
+
+CLI からは hex (`--plugin-aux-hex`) か JSON (`--plugin-aux-json`) で指定できます。JSON はサーバ側がプラグインの BTF を使って構造体レイアウトへ自動変換します:
+
+```bash
+vinbero sid create --action 32 \
+  --plugin-aux-json '{"limit": 100,
+                      "match_mac": "aa:bb:cc:dd:ee:ff",
+                      "source": "fc00:1::/64"}'
+```
+
+SDK は次の well-known typedef/struct を提供しており、encoder はこれらを判別して人間が読み書きしやすい文字列フォーマットを受け付けます (`sdk/c/include/vinbero/types.h`):
+
+| 型 | JSON での書き方 | バイナリ |
+|---|---|---|
+| `vinbero_mac_t` | `"aa:bb:cc:dd:ee:ff"` (`:` / `-` / 連続 hex 可) | `[6]u8` |
+| `vinbero_ipv4_t` | `"10.0.0.1"` | `[4]u8` (network order) |
+| `vinbero_ipv6_t` | `"fc00::1"` | `[16]u8` (network order) |
+| `struct vinbero_ipv4_prefix_t` | `"10.0.0.0/24"` | `{prefix_len u8, _pad[3], addr [4]u8}` |
+| `struct vinbero_ipv6_prefix_t` | `"fc00::/48"` | `{prefix_len u8, _pad[7], addr [16]u8}` |
+| プレーン整数 | `42` または `"0x2a"` | native endian |
+| `__u8[N]` 配列 | `"aabbccdd..."` (hex 短縮) or `[0xaa, 0xbb, ...]` | そのままバイト列 |
+
+BTF に `<program>_aux` 型が無い場合は hex 経路だけが使えます。`plugin_aux_raw` と `plugin_aux_json` は同時指定不可 (InvalidArgument)。
+
 ### 制約事項
 
 | 項目 | 制約 |
@@ -187,23 +238,57 @@ vinbero -s http://127.0.0.1:8080 \
 
 ### `stats_map` (vinbero 全体の per-action 集計)
 
-`vinbero.yml` で `enable_stats: true` にすると `stats_map` に per-action 統計 (`XDP_PASS` / `XDP_DROP` / `XDP_REDIRECT` / `ERROR`) が蓄積されます。`vinbero stats show` コマンドで参照可能。
+`vinbero.yml` で `enable_stats: true` にすると `stats_map` に per-action 統計 (`RX_PACKETS` / `PASS` / `DROP` / `REDIRECT` / `ABORTED`) が蓄積されます。`vinbero stats show` で参照:
 
-- プラグイン ELF は SDK ヘッダ経由で `enable_stats` を取り込むため、ロード時に vinbero が `spec.Variables["enable_stats"].Set(...)` で書き換え、プラグインの `tailcall_epilogue` 内の `stats_inc` も同じ gate に従います。つまり **プラグイン経由で XDP_PASS 等した場合も `stats_map` にカウントされます**。
-- これは「XDP 入口を抜けた全パケットの per-action 合計」であって、**プラグインごとの invocation 数ではありません**。NDP / RA / MLD 等の背景 IPv6 パケットも XDP 入口で XDP_PASS になれば同じ counter に加算されます。
+```bash
+vinbero stats show
+# COUNTER     PACKETS  BYTES
+# RX_PACKETS  ...
+# PASS        ...
+# DROP        ...
+# REDIRECT    ...
+# ABORTED     ...
+```
+
+これは「XDP 入口を抜けた全パケットの per-action 合計」で、**プラグインごとの呼び出し回数ではありません**。NDP / RA / MLD 等の背景 IPv6 パケットも同じ counter に加算されます。プラグイン経由で `XDP_PASS` 等した場合もここに乗ります (plugin ELF の `enable_stats` もロード時に書き換えられます)。
+
+### Per-slot invocation counter (builtin + plugin)
+
+`vinbero stats slot show` で各 tail-call target slot が何回呼ばれたかを確認できます。builtin は enum 名、plugin は `plugin:<program_name>` でラベル付けされます。
+
+```bash
+vinbero stats slot show                     # 全 map、packets>0 のみ
+vinbero stats slot show --all               # packets=0 も含めて表示
+vinbero stats slot show --type endpoint     # endpoint PROG_ARRAY のみ
+vinbero stats slot show --plugin-only       # plugin スロットのみ
+vinbero stats slot show --top 10            # packets 降順で上位 N 件
+vinbero stats slot reset                    # 全リセット
+vinbero stats slot reset --type endpoint    # 指定 map のみリセット
+```
+
+出力例 (ping -c 3 で plugin slot 32 に到達した場合):
+
+```
+MAP       SLOT  NAME                   PACKETS  BYTES
+endpoint  1     End                    0        0
+endpoint  32    plugin:plugin_counter  3        594
+```
+
+内部では 3 本の PERCPU_ARRAY (`slot_stats_endpoint` / `slot_stats_headend_v4` / `slot_stats_headend_v6`) に `tailcall_epilogue` がインクリメントしています。`enable_stats` gate で on/off され、無効時は分岐 1 つで早期 return します。
 
 ### プラグイン固有カウンタ
 
-プラグイン単独の invocation 数や挙動別の計数が欲しい場合は、プラグイン ELF 内で独自の `BPF_MAP_TYPE_PERCPU_ARRAY` / `HASH` を宣言してそこに書くのが推奨パターンです。`sdk/examples/plugin-counter/plugin.c` の `plugin_counter_map` がこの形の最小例で、bpftool 経由で userspace から読めます:
+「この plugin 内で deny した回数」「src IP 別の集計」などプラグインロジック固有の計数は、plugin ELF 内で独自の `BPF_MAP_TYPE_PERCPU_ARRAY` / `HASH` を宣言してそこに書きます。`sdk/examples/plugin-counter/plugin.c` の `plugin_counter_map` が最小例で、bpftool から userspace 経由で読めます:
 
 ```bash
 MAP_ID=$(sudo bpftool map show | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
 sudo bpftool map dump id "$MAP_ID"
 ```
 
-将来的に `PluginRegister` がプラグイン固有マップの handle を userspace に返す経路 (Phase 1c) が整えば Go SDK から直接読めるようになる予定です。それまでは bpftool が standard な観測手段です。
+将来的に `PluginRegister` がプラグイン固有マップの handle を userspace に返す経路 (Phase 1c) が整えば Go SDK から直接読めるようになる予定です。
 
 ## サンプルプラグイン
 
-- `sdk/examples/plugin-counter/` : per-CPU カウンタ + 三台ルータ E2E デモ (setup / test / teardown スクリプト付き)
-- `sdk/examples/simple-acl/` : IPv6 ソースアドレス deny-list。`CALL_WITH_CONST_L3` のヘルパーマクロ使用例 (ビルド確認のみ)
+- `sdk/examples/plugin-counter/` : per-CPU カウンタ。aux の `increment` 値を JSON で指定して増分を可変にできる三台ルータ E2E デモ
+- `sdk/examples/plugin-acl-prefix/` : 外側 IPv6 src の prefix マッチ ACL。`vinbero_ipv6_prefix_t` を aux で渡し、同一プラグインスロットを複数 SID で使い分ける E2E デモ
+- `sdk/examples/simple-acl/` : IPv6 ソースアドレス deny-list (ハッシュマップ)。`CALL_WITH_CONST_L3` のヘルパーマクロ使用例 (ビルド確認のみ)

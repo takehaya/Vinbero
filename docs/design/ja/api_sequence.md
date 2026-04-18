@@ -234,7 +234,7 @@ sequenceDiagram
     Note over Op,V: 基本的な End.X
 
     Op->>V: SidFunctionCreate<br/>{prefix: "fc00:1::a/128", action: End.X,<br/>nexthop: "fe80::1"}
-    V-->>V: nexthop パース → aux map (nexthop variant) 書き込み<br/>→ sid_function_map 書き込み (has_aux=1)
+    V-->>V: nexthop パース → aux map (nexthop variant) 書き込み<br/>→ sid_function_map 書き込み (aux_index!=0)
     V-->>Op: Created
 
     Note over Op,V: Flavor付き End.X（PSP: Penultimate Segment Pop）
@@ -268,7 +268,7 @@ sequenceDiagram
     Note over Op,V: End.B6.Encaps: 新しい外部IPv6+SRHでカプセル化
 
     Op->>V: SidFunctionCreate<br/>{prefix: "fc00:2::b6/128",<br/>action: End.B6.Encaps,<br/>src_addr: "fc00:2::1",<br/>segments: ["fc00:4::1","fc00:5::1"],<br/>headend_mode: H.Encaps}
-    V-->>V: policy entry (HeadendEntry) 構築<br/>→ aux map (b6_policy variant) 書き込み<br/>→ sid_function_map 書き込み (has_aux=1)
+    V-->>V: policy entry (HeadendEntry) 構築<br/>→ aux map (b6_policy variant) 書き込み<br/>→ sid_function_map 書き込み (aux_index!=0)
     V-->>Op: Created
 
     Note over Op,V: End.B6 (Insert): 既存SRHに新しいセグメントリストを挿入
@@ -434,6 +434,30 @@ sequenceDiagram
 
 **プラグイン実装の制約:** `tailcall_epilogue()` を必ず呼び出すこと（共有mapから次のプログラムへchain可能にする契約）
 
+### プラグイン aux (SID 単位の設定値)
+
+プラグイン作者が C で `struct <program>_aux { ... };` を宣言し `VINBERO_PLUGIN_AUX_TYPE` マクロでアンカーすると BTF に型が残る。サーバは SID 作成時に JSON を BTF 経由で bytes に encode し、`sid_aux_entry.plugin_raw` に書き込む。
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant V as Vinbero
+    participant PS as PluginServer (registry)
+    participant AM as sid_aux_map
+
+    Op->>V: PluginRegister {bpf_elf, program: "my_plugin"}
+    V-->>PS: spec.Types.TypeByName("my_plugin_aux") を保存
+    V-->>Op: Registered
+
+    Op->>V: SidFunctionCreate<br/>{action: 32, plugin_aux_json: '{"limit": 100, "src_mac": "aa:bb:cc:dd:ee:ff"}'}
+    V->>PS: AuxType(slot=32) → *btf.Struct
+    V-->>V: BTF walk → bytes (196B 以内)
+    V->>AM: sid_aux_map[idx] = bytes (plugin_raw variant)
+    V-->>Op: Created
+```
+
+well-known typedef (`vinbero_mac_t` / `vinbero_ipv4_t` / `vinbero_ipv6_t` / `vinbero_ipv4_prefix_t` / `vinbero_ipv6_prefix_t`) は encoder が文字列形式 (`"aa:bb:cc:dd:ee:ff"` / `"10.0.0.0/24"` 等) を自動パース。`plugin_aux_raw` (生 hex) との排他。
+
 ---
 
 ## 統計観測
@@ -450,14 +474,14 @@ sequenceDiagram
     V->>BPF: per-CPU stats_map 読み取り
     BPF-->>V: 各CPUのカウンタ
     V-->>V: CPU間で集計
-    V-->>Op: [{name: "RX", packets: 10000, bytes: 1500000},<br/>{name: "SRV6_END", packets: 5000, bytes: 750000},<br/>{name: "H_ENCAPS_V4", packets: 3000, bytes: 450000},<br/>{name: "PASS", packets: 1500, bytes: 225000},<br/>{name: "DROP", packets: 50, bytes: 7500},<br/>{name: "REDIRECT", packets: 450, bytes: 67500}]
+    V-->>Op: [{name: "RX_PACKETS", packets: 10000, bytes: 1500000},<br/>{name: "PASS", packets: 8450, bytes: 1267500},<br/>{name: "DROP", packets: 50, bytes: 7500},<br/>{name: "REDIRECT", packets: 1500, bytes: 225000},<br/>{name: "ABORTED", packets: 0, bytes: 0}]
 
     Op->>V: StatsReset
     V->>BPF: 全CPU/全キーをゼロクリア
     V-->>Op: Reset OK
 ```
 
-**カウンタ一覧:** RX, SRV6_END, H_ENCAPS_V4, H_ENCAPS_V6, PASS, DROP, REDIRECT, ERROR
+**グローバル per-action カウンタ:** RX_PACKETS, PASS, DROP, REDIRECT, ABORTED (XDP_ABORTED = BPF プログラム異常時の action)。tail-call target slot ごとの invocation 数は `StatsSlotShow` / `vinbero stats slot show` で取得 (builtin / plugin 共通)。
 
 ---
 
@@ -560,15 +584,39 @@ sequenceDiagram
     V-->>Op: Deleted
 ```
 
+### 一括削除 (Flush)
+
+各制御リソース service に `*Flush` RPC があり、対象マップを一括でクリアする。サーバ側は List → iterate → 1 件ずつ Delete (BPF map iterator 中の mutation を避けるため 2 フェーズ) で実行、`deleted_count` を返す。
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant V as Vinbero
+    participant BPF as BPF map
+
+    Op->>V: SidFunctionFlush {}
+    V->>BPF: ListSidFunctions → keys[]
+    loop 各 key
+        V->>BPF: DeleteSidFunction(key)
+        V-->>V: auxAlloc.Free(idx)
+    end
+    V-->>Op: {deleted_count: N}
+```
+
+partial flush 対応: `FdbFlush` は `bd_id` / `keep_static` で、`BdPeerFlush` は `bd_id` で、`VlanTableFlush` は `table_id` で範囲を絞れる。CLI では `--yes` 必須 (`vinbero sid flush --yes`)。
+
 ---
 
 ## 再起動時のReconcile
+
+`state.json` からは Network Resource (Bridge / VRF) を netlink で復元する。`settings.pin_maps.enabled` を有効にしていると、制御 BPF マップ自体も `/sys/fs/bpf/<path>/` から再利用されるので SID / Headend / FDB / BD peer 等のエントリも一緒に引き継がれる。
 
 ```mermaid
 sequenceDiagram
     participant V as Vinbero
     participant K as Linux Kernel
     participant S as state.json
+    participant P as /sys/fs/bpf/vinbero/
 
     V->>S: 状態ファイル読み込み
     S-->>V: {bridges: [...], vrfs: [...]}
@@ -586,4 +634,12 @@ sequenceDiagram
     end
 
     V->>S: 状態保存
+
+    opt pin_maps.enabled
+        V->>P: 既存 map を open-or-create (PinByName)
+        P-->>V: 9 control-state maps (SID/Headend/FDB/...)
+        V-->>V: RecoverAuxIndices (allocator 状態を復元)
+    end
 ```
+
+詳細は [persistence.md](persistence.md) 参照。pin 無効時は SID / Headend 等は全て空で起動するので外部コントローラから再投入する。

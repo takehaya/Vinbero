@@ -1,8 +1,14 @@
 package bpf
 
 import (
+	"fmt"
 	"net"
+	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
+
+	"github.com/takehaya/vinbero/pkg/config"
 )
 
 // TestSidAuxRoundTrip verifies that aux entry constructors and readers
@@ -86,7 +92,7 @@ func TestSidAuxRoundTrip(t *testing.T) {
 func TestRecoverAuxIndices(t *testing.T) {
 	h := newXDPTestHelper(t)
 
-	// Create entries with aux (indices 0, 1)
+	// Create entries with aux (indices 1, 2 — index 0 is the no-aux sentinel)
 	nh, _ := ParseIPv6("fc00::1")
 	e1 := &SidFunctionEntry{Action: actionEndX}
 	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", e1, NewSidAuxNexthop(nh)); err != nil {
@@ -102,7 +108,7 @@ func TestRecoverAuxIndices(t *testing.T) {
 		t.Fatalf("create 3: %v", err)
 	}
 
-	// Delete entry 1 to create a gap (index 0 freed)
+	// Delete entry 1 to create a gap (index 1 freed)
 	if err := h.mapOps.DeleteSidFunction("fc00:1::1/128"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -113,7 +119,7 @@ func TestRecoverAuxIndices(t *testing.T) {
 		t.Fatalf("recover: %v", err)
 	}
 
-	// Allocate new index — should get 0 (freed gap), not 2
+	// Allocate new index — should get 1 (freed gap), not 3
 	e4 := &SidFunctionEntry{Action: actionEndX}
 	if err := freshMapOps.CreateSidFunction("fc00:4::1/128", e4, NewSidAuxNexthop(nh)); err != nil {
 		t.Fatalf("create after recover: %v", err)
@@ -123,8 +129,143 @@ func TestRecoverAuxIndices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.AuxIndex != 0 {
-		t.Errorf("expected recovered gap index 0, got %d", got.AuxIndex)
+	if got.AuxIndex != 1 {
+		t.Errorf("expected recovered gap index 1, got %d", got.AuxIndex)
+	}
+}
+
+// TestFlushSidFunctions verifies that FlushSidFunctions wipes every SID
+// entry, frees the matching aux indices back into the allocator, and
+// leaves the map ready to accept fresh entries from index 1 again.
+func TestFlushSidFunctions(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	nh, _ := ParseIPv6("fc00::1")
+	// 3 entries that each consume an aux_index, plus 1 without aux.
+	mustCreate := func(prefix string, action uint8, aux *SidAuxEntry) {
+		t.Helper()
+		entry := &SidFunctionEntry{Action: action}
+		if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
+			t.Fatalf("create %s: %v", prefix, err)
+		}
+	}
+	mustCreate("fc00:1::1/128", actionEndX, NewSidAuxNexthop(nh))
+	mustCreate("fc00:1::2/128", actionEndX, NewSidAuxNexthop(nh))
+	mustCreate("fc00:1::3/128", actionEndX, NewSidAuxNexthop(nh))
+	mustCreate("fc00:1::a/128", actionEnd, nil)
+
+	before, err := h.mapOps.ListSidFunctions()
+	if err != nil {
+		t.Fatalf("list before: %v", err)
+	}
+	if len(before) != 4 {
+		t.Fatalf("pre-flush count: got %d, want 4", len(before))
+	}
+
+	count, err := h.mapOps.FlushSidFunctions()
+	if err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if count != 4 {
+		t.Errorf("flush count: got %d, want 4", count)
+	}
+
+	after, err := h.mapOps.ListSidFunctions()
+	if err != nil {
+		t.Fatalf("list after: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("post-flush count: got %d, want 0", len(after))
+	}
+
+	// Allocator should have reclaimed the freed indices; the next
+	// allocation must pop one of them (1..3) rather than allocate a
+	// fresh index 4.
+	entry := &SidFunctionEntry{Action: actionEndX}
+	if err := h.mapOps.CreateSidFunction("fc00:2::1/128", entry, NewSidAuxNexthop(nh)); err != nil {
+		t.Fatalf("post-flush create: %v", err)
+	}
+	if entry.AuxIndex < 1 || entry.AuxIndex > 3 {
+		t.Errorf("expected reused aux_index in 1..3 after flush, got %d", entry.AuxIndex)
+	}
+}
+
+// TestBpfLoad_PinMapsRoundTrip verifies that settings.pin_maps.enabled
+// makes control-state maps survive a Collection close/reopen cycle.
+// The check is end-to-end via ReadCollection: create an entry, close
+// the objects, reload from the same pin path, confirm the entry is
+// still there.
+//
+// Requires /sys/fs/bpf to be bpffs-mounted. The test skips itself
+// gracefully when that is not the case (e.g. sandbox without bpffs),
+// and always cleans up the pin directory it allocated.
+func TestBpfLoad_PinMapsRoundTrip(t *testing.T) {
+	const bpffsRoot = "/sys/fs/bpf"
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(bpffsRoot, &stat); err != nil {
+		t.Skipf("bpffs not accessible at %s: %v", bpffsRoot, err)
+	}
+	const bpfFsMagic = 0xcafe4a11
+	if stat.Type != bpfFsMagic {
+		t.Skipf("%s is not bpffs (fstype=0x%x)", bpffsRoot, stat.Type)
+	}
+
+	pinPath := filepath.Join(bpffsRoot, fmt.Sprintf("vinbero-test-%d", os.Getpid()))
+	_ = os.RemoveAll(pinPath)
+	t.Cleanup(func() { _ = os.RemoveAll(pinPath) })
+
+	cfg := &config.Config{
+		Setting: config.SettingConfig{
+			PinMaps: config.PinMapsConfig{
+				Enabled: true,
+				Path:    pinPath,
+			},
+		},
+	}
+
+	// Phase 1: load fresh, create a SID entry, close.
+	{
+		objs, err := ReadCollection(nil, cfg)
+		if err != nil {
+			t.Fatalf("initial ReadCollection: %v", err)
+		}
+		mapOps := NewMapOperations(objs)
+		nh, _ := ParseIPv6("fc00::1")
+		entry := &SidFunctionEntry{Action: actionEndX}
+		if err := mapOps.CreateSidFunction("fc00:1::1/128", entry, NewSidAuxNexthop(nh)); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := objs.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+
+	// The pin files should still be present on bpffs.
+	for _, name := range pinnedControlMaps {
+		if _, err := os.Stat(filepath.Join(pinPath, name)); err != nil {
+			t.Fatalf("expected pin %q to persist after close: %v", name, err)
+		}
+	}
+
+	// Phase 2: reload from the same pin path and verify the SID entry
+	// is still there.
+	{
+		objs, err := ReadCollection(nil, cfg)
+		if err != nil {
+			t.Fatalf("reload ReadCollection: %v", err)
+		}
+		t.Cleanup(func() { _ = objs.Close() })
+		mapOps := NewMapOperations(objs)
+		got, err := mapOps.GetSidFunction("fc00:1::1/128")
+		if err != nil {
+			t.Fatalf("get after reload: %v", err)
+		}
+		if got.Action != actionEndX {
+			t.Errorf("action after reload: got %d, want %d", got.Action, actionEndX)
+		}
+		if got.AuxIndex == 0 {
+			t.Errorf("aux_index should be preserved across reload, got 0")
+		}
 	}
 }
 
@@ -160,6 +301,56 @@ func TestStatsReadReset(t *testing.T) {
 		if s.Packets != 0 || s.Bytes != 0 {
 			t.Errorf("counter %s not zero after reset: packets=%d, bytes=%d", s.Name, s.Packets, s.Bytes)
 		}
+	}
+}
+
+// TestSlotStatsReadReset verifies per-slot counters round-trip for all
+// three PROG_ARRAYs (endpoint / headend_v4 / headend_v6).
+func TestSlotStatsReadReset(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	cases := []struct {
+		mapType string
+		max     int
+	}{
+		{MapTypeEndpoint, SlotStatsEndpointMax},
+		{MapTypeHeadendV4, SlotStatsHeadendMax},
+		{MapTypeHeadendV6, SlotStatsHeadendMax},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mapType, func(t *testing.T) {
+			entries, err := h.mapOps.ReadSlotStats(tc.mapType)
+			if err != nil {
+				t.Fatalf("ReadSlotStats(%s): %v", tc.mapType, err)
+			}
+			if len(entries) != tc.max {
+				t.Fatalf("expected %d entries, got %d", tc.max, len(entries))
+			}
+			for _, e := range entries {
+				if e.MapType != tc.mapType {
+					t.Errorf("map_type=%s, want %s", e.MapType, tc.mapType)
+				}
+				if e.Packets != 0 || e.Bytes != 0 {
+					t.Errorf("slot %d not zero on fresh read: p=%d b=%d",
+						e.Slot, e.Packets, e.Bytes)
+				}
+			}
+
+			if err := h.mapOps.ResetSlotStats(tc.mapType); err != nil {
+				t.Fatalf("ResetSlotStats(%s): %v", tc.mapType, err)
+			}
+
+			entries2, err := h.mapOps.ReadSlotStats(tc.mapType)
+			if err != nil {
+				t.Fatalf("ReadSlotStats after reset: %v", err)
+			}
+			for _, e := range entries2 {
+				if e.Packets != 0 || e.Bytes != 0 {
+					t.Errorf("slot %d not zero after reset: p=%d b=%d",
+						e.Slot, e.Packets, e.Bytes)
+				}
+			}
+		})
 	}
 }
 

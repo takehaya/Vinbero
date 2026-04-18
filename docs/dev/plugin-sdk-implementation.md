@@ -283,6 +283,25 @@ int tailcall_epilogue(struct xdp_md *ctx, int action);
 
 ---
 
+## Per-slot invocation counter
+
+プラグイン (と builtin) の呼び出し回数を global stats とは独立に観測できるよう、per-slot counter を追加:
+
+- **新マップ 3 本**: `slot_stats_endpoint` (64 entries) / `slot_stats_headend_v4` (32) / `slot_stats_headend_v6` (32)、いずれも `PERCPU_ARRAY` で value は既存 `stats_entry` (packets / bytes)
+- **dispatch_type を細分化**: `DISPATCH_HEADEND = 2` を `DISPATCH_HEADEND_V4 = 2` / `DISPATCH_HEADEND_V6 = 3` に分離し、`tailcall_ctx` に `slot` フィールドを追加。dispatcher が書き込み時に slot 番号を保存、`tailcall_epilogue` が per-CPU 読み取り 1 回で対応 map にインクリメント
+- **enable_stats で gate**: 無効時は分岐 1 つ (~5ns) で早期 return、既存 `stats_inc` と同じコスト特性
+- **既存 SRV6_END / H_ENCAPS_V{4,6} を廃止**: `stats_counter` enum を 8→5 (`RX_PACKETS` / `PASS` / `DROP` / `REDIRECT` / `ABORTED`) に縮小。11 箇所の `STATS_INC(STATS_SRV6_END, 0)` 呼び出しを削除 (H_ENCAPS_V{4,6} は元々未使用)。`ABORTED` は従来 `ERROR` という名前 / 呼び出し側ゼロの dead counter だったのを、XDP_ABORTED 発生時に確実にインクリメントする形に正す
+- **CLI**: `vinbero stats slot show [--type X] [--all] [--top N] [--plugin-only]` / `stats slot reset [--type X]`。出力は `MAP / SLOT / NAME / PACKETS / BYTES` のテーブル。builtin は `Srv6LocalAction` / `Srv6HeadendBehavior` enum を逆引き、plugin は `PluginServer.registry` から `plugin:<program>` のラベル
+- **Plugin 名の記憶**: `PluginServer` に `registry map[slotKey]string` を追加、register/unregister で読み書き。Collection close の lifecycle は Phase 1c 課題として据え置き
+
+### 破壊的変更
+
+- `vinbero stats show` の出力が 8 カウンタ → 5 カウンタに減少。SRV6_END / H_ENCAPS_V4 / H_ENCAPS_V6 を参照する script は stats slot show 経由に切り替える必要
+- `tailcall_ctx` のレイアウトに `slot` (+ `_pad[3]`) が追加。`VINBERO_SDK_VERSION` は 1 のまま据え置き (当面バンプせず、plugin は再コンパイルで追従)
+- `tailcall_ctx_write_sid` / `tailcall_ctx_write_headend` のシグネチャ拡張 (dispatcher 側のみ追従、plugin は tailcall_ctx を read のみなので影響なし)
+
+---
+
 ## 保留 (次回 PR で再検討)
 
 - **Phase 1c**: プラグイン所有マップの lifecycle 管理。現状 `pkg/server/plugin.go` の `coll.Close()` で FD を閉じるため、プラグイン ELF 内で宣言した `acl_deny_map` などを userspace から書き換える経路がない。`pluginRegistry` で Collection を追跡し `Unregister` 時にクローズする案が有力。

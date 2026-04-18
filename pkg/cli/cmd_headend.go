@@ -63,6 +63,23 @@ func headendV4Command() *cli.Command {
 				},
 			},
 			{
+				Name:  "flush",
+				Usage: "Delete every Headend v4 entry (requires --yes)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					resp, err := clients.Hv4.Headendv4Flush(context.Background(),
+						connect.NewRequest(&v1.Headendv4FlushRequest{}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Flushed %d Headend v4 entries\n", resp.Msg.DeletedCount)
+					return nil
+				},
+			},
+			{
 				Name:  "list",
 				Usage: "List all Headend v4 entries",
 				Action: func(c *cli.Context) error {
@@ -137,6 +154,23 @@ func headendV6Command() *cli.Command {
 						return err
 					}
 					fmt.Printf("Deleted: %s\n", strings.Join(resp.Msg.DeletedTriggerPrefixes, ", "))
+					return nil
+				},
+			},
+			{
+				Name:  "flush",
+				Usage: "Delete every Headend v6 entry (requires --yes)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					resp, err := clients.Hv6.Headendv6Flush(context.Background(),
+						connect.NewRequest(&v1.Headendv6FlushRequest{}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Flushed %d Headend v6 entries\n", resp.Msg.DeletedCount)
 					return nil
 				},
 			},
@@ -228,6 +262,23 @@ func headendL2Command() *cli.Command {
 					for _, d := range resp.Msg.Deleted {
 						fmt.Printf("Deleted: %s vlan=%d\n", d.InterfaceName, d.VlanId)
 					}
+					return nil
+				},
+			},
+			{
+				Name:  "flush",
+				Usage: "Delete every Headend L2 entry (requires --yes)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					resp, err := clients.Hl2.HeadendL2Flush(context.Background(),
+						connect.NewRequest(&v1.HeadendL2FlushRequest{}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Flushed %d Headend L2 entries\n", resp.Msg.DeletedCount)
 					return nil
 				},
 			},

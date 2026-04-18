@@ -105,19 +105,7 @@ out:
     // Note: When tail call succeeds, this epilogue is NOT reached.
     // Each tail call target runs tailcall_epilogue() instead.
     // This path handles: L2 headend, tail call fallback (empty slot), XDP_PASS.
-    switch (action) {
-    case XDP_PASS:
-        STATS_INC(STATS_PASS, pkt_len);
-        break;
-    case XDP_DROP:
-        STATS_INC(STATS_DROP, pkt_len);
-        break;
-    case XDP_REDIRECT:
-        STATS_INC(STATS_REDIRECT, pkt_len);
-        break;
-    default:
-        break;
-    }
+    stats_action_inc(action, pkt_len);
 
     return action;
 }

@@ -23,6 +23,23 @@ var ValidTailCallMaps = []string{
 	MapNameHeadendV6Progs,
 }
 
+// ForbiddenHelpers names BPF helpers whose direct use from a plugin would
+// bypass vinbero's dispatch/stats/ownership invariants. Packet-level redirect
+// decisions must flow through the epilogue or a vinbero PROG_ARRAY.
+var ForbiddenHelpers = map[asm.BuiltinFunc]string{
+	asm.FnRedirect:      "bpf_redirect (go through tailcall_epilogue)",
+	asm.FnRedirectMap:   "bpf_redirect_map (plugins cannot own redirect maps)",
+	asm.FnRedirectNeigh: "bpf_redirect_neigh",
+	asm.FnRedirectPeer:  "bpf_redirect_peer",
+	asm.FnXdpOutput:     "bpf_xdp_output",
+}
+
+// ExitProximityWindow is how many instructions validator will scan backwards
+// from each exit to look for a tailcall_epilogue call or bpf_tail_call. Chosen
+// to cover clang's typical register-restore prologue between the call and the
+// exit while staying cheap enough to run on every plugin.
+const ExitProximityWindow = 64
+
 // ValidatePluginProgram enforces the plugin contract:
 //
 //  1. The program must be SEC("xdp").
@@ -30,11 +47,15 @@ var ValidTailCallMaps = []string{
 //     bpf_tail_calls into one of ValidTailCallMaps (handoff). Programs
 //     that do neither are rejected.
 //  3. bpf_tail_call into any other map is rejected.
-//
-// The leaf/handoff check is call-site presence only — it does not prove
-// every exit path satisfies the contract. But the tail-call whitelist is
-// enforced hard, so a plugin cannot escape the validation boundary by
-// routing packets through an unrelated PROG_ARRAY.
+//  4. Forbidden helpers (ForbiddenHelpers) are rejected — they let a plugin
+//     bypass vinbero dispatch. Kfunc calls are allowed; restrict specific
+//     kfuncs by extending the denylist if a concrete abuse emerges.
+//  5. Every exit instruction must be preceded, within ExitProximityWindow
+//     instructions, by a tailcall_epilogue call or a vinbero PROG_ARRAY
+//     tail-call. This is a structural check, not a full CFG analysis —
+//     plugins built with VINBERO_PLUGIN always pass because the macro
+//     produces a single exit; hand-written plugins must keep each return
+//     close to an epilogue or tail-call.
 func ValidatePluginProgram(spec *ebpf.ProgramSpec) error {
 	if spec == nil {
 		return fmt.Errorf("plugin ProgramSpec is nil")
@@ -48,9 +69,17 @@ func ValidatePluginProgram(spec *ebpf.ProgramSpec) error {
 
 	hasEpilogue := slices.Contains(spec.Instructions.FunctionReferences(), SymTailcallEpilogue)
 
-	var foreignTailCalls []string
-	hasValidTailCall := false
+	var (
+		foreignTailCalls []string
+		forbiddenHits    []string
+		hasValidTailCall bool
+	)
 	for i, ins := range spec.Instructions {
+		if ins.IsBuiltinCall() {
+			if name, bad := ForbiddenHelpers[asm.BuiltinFunc(ins.Constant)]; bad {
+				forbiddenHits = append(forbiddenHits, name)
+			}
+		}
 		if !isBpfTailCall(ins) {
 			continue
 		}
@@ -64,6 +93,14 @@ func ValidatePluginProgram(spec *ebpf.ProgramSpec) error {
 		} else {
 			foreignTailCalls = append(foreignTailCalls, mapName)
 		}
+	}
+
+	if len(forbiddenHits) > 0 {
+		return fmt.Errorf(
+			"plugin program %q calls forbidden helper(s) %v; redirect decisions "+
+				"must flow through tailcall_epilogue or a vinbero PROG_ARRAY",
+			spec.Name, forbiddenHits,
+		)
 	}
 
 	if len(foreignTailCalls) > 0 {
@@ -86,6 +123,10 @@ func ValidatePluginProgram(spec *ebpf.ProgramSpec) error {
 		)
 	}
 
+	if err := checkExitProximity(spec); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -106,6 +147,9 @@ func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string) (*ebpf.
 	}
 	target.Type = ebpf.XDP
 	if err := ValidatePluginProgram(target); err != nil {
+		return nil, err
+	}
+	if err := validatePluginMapTypes(spec); err != nil {
 		return nil, err
 	}
 	return target, nil
@@ -135,4 +179,53 @@ func findTailCallMapName(prev asm.Instructions) string {
 		return ""
 	}
 	return ""
+}
+
+// checkExitProximity verifies every exit instruction in the main program
+// has a tailcall_epilogue call or bpf_tail_call within the preceding
+// ExitProximityWindow. Only the main program is scanned — plugin ELFs
+// often carry subprogram bodies (e.g. tailcall_epilogue's own
+// implementation, emitted by clang when the SDK header is included) after
+// the main program, and those have their own exit that we must not
+// mistake for a plugin exit.
+//
+// This guards against hand-written plugins that forget the epilogue on
+// one branch but happen to have a call-site presence on another. Full
+// CFG analysis would be stronger but adds complexity the current threat
+// model does not warrant.
+func checkExitProximity(spec *ebpf.ProgramSpec) error {
+	ins := spec.Instructions
+	for i, in := range ins {
+		// Stop at the start of any subprogram past the entry point;
+		// subprogram bodies are appended after the main program.
+		if i > 0 && in.Symbol() != "" {
+			break
+		}
+		if in.OpCode.JumpOp() != asm.Exit {
+			continue
+		}
+		start := max(i-ExitProximityWindow, 0)
+		covered := false
+		for j := i - 1; j >= start; j-- {
+			prev := ins[j]
+			if isBpfTailCall(prev) {
+				covered = true
+				break
+			}
+			if prev.IsFunctionCall() && prev.Reference() == SymTailcallEpilogue {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return fmt.Errorf(
+				"plugin program %q has an exit at instruction %d with no "+
+					"%s call or bpf_tail_call in the previous %d instructions; "+
+					"wrap the program with VINBERO_PLUGIN or ensure every "+
+					"`return` goes through tailcall_epilogue",
+				spec.Name, i, SymTailcallEpilogue, ExitProximityWindow,
+			)
+		}
+	}
+	return nil
 }

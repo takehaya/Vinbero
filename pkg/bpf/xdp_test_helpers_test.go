@@ -59,8 +59,21 @@ type xdpTestHelper struct {
 }
 
 func newXDPTestHelper(t *testing.T) *xdpTestHelper {
+	return newXDPTestHelperWithConstants(t, nil)
+}
+
+// newXDPTestHelperWithStats loads the BPF collection with enable_stats=1
+// so that stats_inc / slot_stats_inc actually update their maps during
+// BPF_PROG_TEST_RUN. Use when asserting stats or slot_stats counters.
+func newXDPTestHelperWithStats(t *testing.T) *xdpTestHelper {
+	return newXDPTestHelperWithConstants(t, map[string]any{
+		"enable_stats": uint8(1),
+	})
+}
+
+func newXDPTestHelperWithConstants(t *testing.T, constants map[string]any) *xdpTestHelper {
 	t.Helper()
-	objs, err := ReadCollection(nil, nil)
+	objs, err := ReadCollection(constants, nil)
 	if err != nil {
 		t.Fatalf("Failed to load BPF objects: %v", err)
 	}
@@ -113,8 +126,9 @@ func (h *xdpTestHelper) createSidFunctionWithBD(prefix string, action uint8, bdI
 
 func (h *xdpTestHelper) createSidFunctionWithVRF(prefix string, action uint8, vrfIfindex uint32) {
 	h.t.Helper()
-	entry := &SidFunctionEntry{Action: action, Flavor: 0, VrfIfindex: vrfIfindex}
-	if err := h.mapOps.CreateSidFunction(prefix, entry, nil); err != nil {
+	entry := &SidFunctionEntry{Action: action, Flavor: 0}
+	aux := NewSidAuxL3Vrf(vrfIfindex)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
 		h.t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 }

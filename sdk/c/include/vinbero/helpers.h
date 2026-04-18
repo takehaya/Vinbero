@@ -15,7 +15,8 @@
  *       Parse Ethernet + IPv6 + SRH with per-step bounds checks.
  *
  *   - TAILCALL_AUX_LOOKUP(tctx, aux)
- *       Fetch sid_aux_map entry when sid_entry.has_aux is set.
+ *       Fetch sid_aux_map entry when sid_entry.aux_index != 0 (0 is the
+ *       reserved "no aux" sentinel). Leaves aux = NULL otherwise.
  */
 
 #include "core/xdp_tailcall_macros.h"
