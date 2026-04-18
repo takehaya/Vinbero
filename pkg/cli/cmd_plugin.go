@@ -6,7 +6,9 @@ import (
 	"os"
 
 	"connectrpc.com/connect"
+	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/urfave/cli/v2"
 )
 
@@ -15,6 +17,30 @@ func pluginCommand() *cli.Command {
 		Name:  "plugin",
 		Usage: "Manage BPF plugins",
 		Subcommands: []*cli.Command{
+			{
+				Name:  "validate",
+				Usage: "Validate a plugin ELF locally (no server contact)",
+				Description: "Exit codes: 0=OK, 1=validation failure, 2=file/parse error.\n" +
+					"Use in CI to catch contract violations before upload.",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "prog", Required: true, Usage: "Path to compiled BPF ELF object file"},
+					&cli.StringFlag{Name: "program", Required: true, Usage: "BPF program function name in the ELF"},
+				},
+				Action: func(c *cli.Context) error {
+					elfPath := c.String("prog")
+					programName := c.String("program")
+
+					spec, err := ebpf.LoadCollectionSpec(elfPath)
+					if err != nil {
+						return cli.Exit(fmt.Errorf("failed to parse BPF ELF %s: %w", elfPath, err), 2)
+					}
+					if _, err := bpf.ValidatePluginCollection(spec, programName); err != nil {
+						return cli.Exit(err, 1)
+					}
+					fmt.Printf("OK: %s (program=%s) passes plugin contract\n", elfPath, programName)
+					return nil
+				},
+			},
 			{
 				Name:  "register",
 				Usage: "Register a BPF plugin into a tail call slot",

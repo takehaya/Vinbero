@@ -96,7 +96,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered StatsService", zap.String("path", path))
 
 	// Plugin service (dynamic BPF plugin registration)
-	pluginServer := NewPluginServer(s.mapOps)
+	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants())
 	path, handler = vinberov1connect.NewPluginServiceHandler(pluginServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered PluginService", zap.String("path", path))

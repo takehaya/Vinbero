@@ -1,5 +1,5 @@
 #!/bin/bash
-# examples/plugin/test.sh
+# sdk/examples/plugin-counter/test.sh
 # Plugin extension example: packet counter plugin
 #
 # Demonstrates:
@@ -11,16 +11,16 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR}/../.."
+REPO_ROOT="${SCRIPT_DIR}/../../.."
+COMMON_DIR="${REPO_ROOT}/examples/common"
 
-source "${SCRIPT_DIR}/../common/test_utils.sh"
+source "${COMMON_DIR}/test_utils.sh"
 check_root
 
 VINBEROD_BIN="${REPO_ROOT}/out/bin/vinberod"
 VINBERO_BIN="${REPO_ROOT}/out/bin/vinbero"
 VINBERO_CONFIG="${SCRIPT_DIR}/vinbero_config.yaml"
-PLUGIN_SRC="${SCRIPT_DIR}/plugin_counter.c"
-PLUGIN_OBJ="/tmp/plugin_counter.o"
+PLUGIN_OBJ="${SCRIPT_DIR}/plugin.o"
 PLUGIN_INDEX=32
 
 export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-plgcnt-}"
@@ -38,7 +38,7 @@ cleanup() {
         kill "$VINBERO_PID" 2>/dev/null || true
         wait "$VINBERO_PID" 2>/dev/null || true
     fi
-    rm -f "$PLUGIN_OBJ"
+    make -C "${SCRIPT_DIR}" clean >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -50,12 +50,10 @@ echo ""
 # ==========================================
 # Phase 1: Compile the plugin
 # ==========================================
-print_info "Compiling plugin: ${PLUGIN_SRC}"
+print_info "Compiling plugin via make -C ${SCRIPT_DIR}"
 
-clang -O2 -g -Wall -target bpf \
-    -I "${REPO_ROOT}/src" \
-    -I /usr/include/x86_64-linux-gnu \
-    -c "${PLUGIN_SRC}" -o "${PLUGIN_OBJ}"
+make -C "${SCRIPT_DIR}" clean
+make -C "${SCRIPT_DIR}"
 
 if [ ! -f "${PLUGIN_OBJ}" ]; then
     print_error "Plugin compilation failed"
@@ -118,21 +116,38 @@ echo "=========================================="
 PASSED=0
 FAILED=0
 
-# Test: Ping from host1 to host2 via plugin SID
-print_info "Sending traffic from host1 to host2 via plugin SID..."
-if ip netns exec "$ns_host1" ping6 -c 3 -W 2 fc00:3::100 > /dev/null 2>&1; then
-    print_success "Ping via plugin SID: PASS"
-    PASSED=$((PASSED + 1))
-else
-    # Plugin returns XDP_PASS, which means kernel stack handles the packet.
-    # In this topology, the packet should still be forwarded.
-    print_info "Ping via plugin SID: packet passed to kernel (expected for counter plugin)"
-    PASSED=$((PASSED + 1))
-fi
+# Test: send IPv6 packets from host1 that trigger router1's seg6 encap rule.
+# The reply never comes back (router2 kernel doesn't own fc00:2::32) so the
+# verification below reads plugin_counter_map directly via bpftool instead.
+print_info "Sending traffic from host1 towards fc00:3::3 (triggers SRv6 encap at router1)..."
+ip netns exec "$ns_host1" ping6 -c 3 -W 2 fc00:3::3 > /dev/null 2>&1 || true
 
-# Test: Verify plugin was actually invoked by checking SID stats
-print_info "Checking Vinbero stats..."
-ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show || true
+# stats_map is vinbero's global per-action counter across the XDP entry.
+# Plugin invocations land here too, but so does unrelated traffic (NDP /
+# RA / MLD), so the numbers won't exactly match plugin invocations.
+print_info "stats_map (global per-action; includes non-plugin traffic):"
+ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show
+
+# plugin_counter_map is the plugin's private per-CPU counter, incremented
+# once per invocation — this is the ground truth for how many times the
+# plugin body ran.
+print_info "plugin_counter_map (plugin-private, per-CPU):"
+MAP_ID=$(ip netns exec "$ns_router2" bpftool map show 2>/dev/null \
+    | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
+if [ -z "$MAP_ID" ]; then
+    print_error "plugin_counter_map not visible via bpftool (bpftool missing?)"
+    FAILED=$((FAILED + 1))
+else
+    COUNTER_TOTAL=$(ip netns exec "$ns_router2" bpftool map dump id "$MAP_ID" 2>/dev/null \
+        | grep -Eo '"value": [0-9]+' | awk '{ s += $2 } END { print s+0 }')
+    if [ "$COUNTER_TOTAL" -gt 0 ]; then
+        print_success "plugin invoked $COUNTER_TOTAL times (plugin_counter_map total across CPUs)"
+        PASSED=$((PASSED + 1))
+    else
+        print_error "plugin_counter_map is zero — plugin was never invoked"
+        FAILED=$((FAILED + 1))
+    fi
+fi
 
 echo ""
 echo "=========================================="

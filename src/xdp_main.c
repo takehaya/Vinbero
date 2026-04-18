@@ -119,5 +119,5 @@ out:
         break;
     }
 
-    RETURN_ACTION(ctx, &xdpcap_hook, action);
+    return action;
 }

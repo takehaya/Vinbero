@@ -1,0 +1,30 @@
+# Vinbero plugin build template.
+#
+# Use this by `include`ing it from a plugin project's Makefile, or by
+# copying it in. Override VINBERO_SDK_ROOT / VINBERO_CORE_ROOT before the
+# include line when building against an in-tree checkout rather than
+# installed headers.
+#
+# Expected layout: one or more *.c files in the project directory.
+
+VINBERO_SDK_ROOT  ?= /usr/local/include
+VINBERO_CORE_ROOT ?= $(VINBERO_SDK_ROOT)
+BPF_CLANG         ?= clang
+BPF_ARCH          ?= $(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/')
+
+BPF_CFLAGS ?= -O2 -g -Wall -Werror -target bpf \
+              -D__TARGET_ARCH_$(BPF_ARCH) \
+              -I$(VINBERO_SDK_ROOT) \
+              -I$(VINBERO_CORE_ROOT)
+
+PLUGIN_SRC ?= $(wildcard *.c)
+PLUGIN_OBJ ?= $(PLUGIN_SRC:.c=.o)
+
+.PHONY: all clean
+all: $(PLUGIN_OBJ)
+
+%.o: %.c
+	$(BPF_CLANG) $(BPF_CFLAGS) -c $< -o $@
+
+clean:
+	rm -f $(PLUGIN_OBJ)

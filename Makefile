@@ -109,6 +109,42 @@ install-build-tools: ## install build tools
 install-dev-tools: ## install development tools
 	./scripts/install_dev_tools.sh
 
+## SDK:
+SDK_PREFIX ?= /usr/local
+SDK_EXAMPLES := $(wildcard sdk/examples/*/Makefile)
+SDK_EXAMPLE_DIRS := $(patsubst %/Makefile,%,$(SDK_EXAMPLES))
+
+.PHONY: install-sdk sdk-build sdk-test sdk-clean
+install-sdk: ## Install plugin SDK headers into $(SDK_PREFIX)/include/vinbero
+	install -d $(SDK_PREFIX)/include/vinbero
+	install -m 644 sdk/c/include/vinbero/*.h $(SDK_PREFIX)/include/vinbero/
+	install -d $(SDK_PREFIX)/include/core
+	install -m 644 src/core/*.h $(SDK_PREFIX)/include/core/
+	install -m 644 sdk/c/Makefile.plugin $(SDK_PREFIX)/include/vinbero/Makefile.plugin
+
+sdk-build: ## Build every sample plugin under sdk/examples/
+	@for d in $(SDK_EXAMPLE_DIRS); do \
+		echo "[sdk-build] $$d"; \
+		$(MAKE) -C $$d || exit 1; \
+	done
+
+sdk-test: sdk-build build-targets ## Validate every built sample plugin via the CLI
+	@for d in $(SDK_EXAMPLE_DIRS); do \
+		obj="$$d/plugin.o"; \
+		name=$$(basename $$d | tr '-' '_'); \
+		if [ ! -f "$$obj" ]; then \
+			echo "[sdk-test] skip $$d (no plugin.o)"; \
+			continue; \
+		fi; \
+		echo "[sdk-test] $$obj"; \
+		./out/bin/vinbero plugin validate --prog "$$obj" --program "$$name" || exit 1; \
+	done
+
+sdk-clean: ## Clean every sample plugin under sdk/examples/
+	@for d in $(SDK_EXAMPLE_DIRS); do \
+		$(MAKE) -C $$d clean; \
+	done
+
 ## Env:
 .PHONY: remove-ebpfmap show-trace_pipe
 remove-ebpfmap: ## remove all ebpf maps
