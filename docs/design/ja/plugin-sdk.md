@@ -185,7 +185,23 @@ vinbero -s http://127.0.0.1:8080 \
 
 パケットキャプチャやデバッグには外部ツール [xdp-ninja](https://github.com/takehaya/xdp-ninja) を推奨します。
 
-per-action 統計 (`XDP_PASS` / `XDP_DROP` / `XDP_REDIRECT` / エラー) は `vinbero.yml` で `enable_stats: true` にすると `stats_map` から読めます。
+### `stats_map` (vinbero 全体の per-action 集計)
+
+`vinbero.yml` で `enable_stats: true` にすると `stats_map` に per-action 統計 (`XDP_PASS` / `XDP_DROP` / `XDP_REDIRECT` / `ERROR`) が蓄積されます。`vinbero stats show` コマンドで参照可能。
+
+- プラグイン ELF は SDK ヘッダ経由で `enable_stats` を取り込むため、ロード時に vinbero が `spec.Variables["enable_stats"].Set(...)` で書き換え、プラグインの `tailcall_epilogue` 内の `stats_inc` も同じ gate に従います。つまり **プラグイン経由で XDP_PASS 等した場合も `stats_map` にカウントされます**。
+- これは「XDP 入口を抜けた全パケットの per-action 合計」であって、**プラグインごとの invocation 数ではありません**。NDP / RA / MLD 等の背景 IPv6 パケットも XDP 入口で XDP_PASS になれば同じ counter に加算されます。
+
+### プラグイン固有カウンタ
+
+プラグイン単独の invocation 数や挙動別の計数が欲しい場合は、プラグイン ELF 内で独自の `BPF_MAP_TYPE_PERCPU_ARRAY` / `HASH` を宣言してそこに書くのが推奨パターンです。`sdk/examples/plugin-counter/plugin.c` の `plugin_counter_map` がこの形の最小例で、bpftool 経由で userspace から読めます:
+
+```bash
+MAP_ID=$(sudo bpftool map show | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
+sudo bpftool map dump id "$MAP_ID"
+```
+
+将来的に `PluginRegister` がプラグイン固有マップの handle を userspace に返す経路 (Phase 1c) が整えば Go SDK から直接読めるようになる予定です。それまでは bpftool が standard な観測手段です。
 
 ## サンプルプラグイン
 
