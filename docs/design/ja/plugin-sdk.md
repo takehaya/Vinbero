@@ -135,6 +135,57 @@ vinbero plugin validate --prog plugin.o --program my_plugin
 
 ELF 内で `BPF_MAP_TYPE_HASH` / `PERCPU_ARRAY` などを独自に宣言すると、登録時に新規作成されます。`sdk/examples/simple-acl/` の `acl_deny_map` 参照。
 
+### プラグイン aux (SID 単位の設定値)
+
+SID ごとに異なる設定値をプラグインへ渡したい場合、`sid_aux_entry.plugin_raw` (196 バイト) に任意の構造体を置けます。共有マップを増やさず、SID と 1:1 で構成を持てるのが利点です。
+
+プラグイン作者は `struct <program>_aux` という名前で構造体を宣言し、`VINBERO_PLUGIN_AUX_TYPE` マクロで BTF に残します:
+
+```c
+#include <vinbero/types.h>
+
+struct my_plugin_aux {
+    __u32                        limit;
+    vinbero_mac_t                match_mac;
+    struct vinbero_ipv6_prefix_t source;
+};
+VINBERO_PLUGIN_AUX_TYPE(my_plugin, my_plugin_aux);
+
+VINBERO_PLUGIN(my_plugin)
+{
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (aux) {
+        struct my_plugin_aux *cfg =
+            VINBERO_PLUGIN_AUX_CAST(struct my_plugin_aux, aux);
+        // cfg->limit, cfg->match_mac, cfg->source.prefix_len / addr
+    }
+    return XDP_PASS;
+}
+```
+
+CLI からは hex (`--plugin-aux-hex`) か JSON (`--plugin-aux-json`) で指定できます。JSON はサーバ側がプラグインの BTF を使って構造体レイアウトへ自動変換します:
+
+```bash
+vinbero sid create --action 32 \
+  --plugin-aux-json '{"limit": 100,
+                      "match_mac": "aa:bb:cc:dd:ee:ff",
+                      "source": "fc00:1::/64"}'
+```
+
+SDK は次の well-known typedef/struct を提供しており、encoder はこれらを判別して人間が読み書きしやすい文字列フォーマットを受け付けます (`sdk/c/include/vinbero/types.h`):
+
+| 型 | JSON での書き方 | バイナリ |
+|---|---|---|
+| `vinbero_mac_t` | `"aa:bb:cc:dd:ee:ff"` (`:` / `-` / 連続 hex 可) | `[6]u8` |
+| `vinbero_ipv4_t` | `"10.0.0.1"` | `[4]u8` (network order) |
+| `vinbero_ipv6_t` | `"fc00::1"` | `[16]u8` (network order) |
+| `struct vinbero_ipv4_prefix_t` | `"10.0.0.0/24"` | `{prefix_len u8, _pad[3], addr [4]u8}` |
+| `struct vinbero_ipv6_prefix_t` | `"fc00::/48"` | `{prefix_len u8, _pad[7], addr [16]u8}` |
+| プレーン整数 | `42` または `"0x2a"` | native endian |
+| `__u8[N]` 配列 | `"aabbccdd..."` (hex 短縮) or `[0xaa, 0xbb, ...]` | そのままバイト列 |
+
+BTF に `<program>_aux` 型が無い場合は hex 経路だけが使えます。`plugin_aux_raw` と `plugin_aux_json` は同時指定不可 (InvalidArgument)。
+
 ### 制約事項
 
 | 項目 | 制約 |
@@ -238,5 +289,6 @@ sudo bpftool map dump id "$MAP_ID"
 
 ## サンプルプラグイン
 
-- `sdk/examples/plugin-counter/` : per-CPU カウンタ + 三台ルータ E2E デモ (setup / test / teardown スクリプト付き)
-- `sdk/examples/simple-acl/` : IPv6 ソースアドレス deny-list。`CALL_WITH_CONST_L3` のヘルパーマクロ使用例 (ビルド確認のみ)
+- `sdk/examples/plugin-counter/` : per-CPU カウンタ。aux の `increment` 値を JSON で指定して増分を可変にできる三台ルータ E2E デモ
+- `sdk/examples/plugin-acl-prefix/` : 外側 IPv6 src の prefix マッチ ACL。`vinbero_ipv6_prefix_t` を aux で渡し、同一プラグインスロットを複数 SID で使い分ける E2E デモ
+- `sdk/examples/simple-acl/` : IPv6 ソースアドレス deny-list (ハッシュマップ)。`CALL_WITH_CONST_L3` のヘルパーマクロ使用例 (ビルド確認のみ)
