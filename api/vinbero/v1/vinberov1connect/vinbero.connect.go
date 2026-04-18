@@ -58,6 +58,9 @@ const (
 	// SidFunctionServiceSidFunctionListProcedure is the fully-qualified name of the
 	// SidFunctionService's SidFunctionList RPC.
 	SidFunctionServiceSidFunctionListProcedure = "/vinbero.v1.SidFunctionService/SidFunctionList"
+	// SidFunctionServiceSidFunctionFlushProcedure is the fully-qualified name of the
+	// SidFunctionService's SidFunctionFlush RPC.
+	SidFunctionServiceSidFunctionFlushProcedure = "/vinbero.v1.SidFunctionService/SidFunctionFlush"
 	// SidFunctionServiceSidFunctionGetProcedure is the fully-qualified name of the SidFunctionService's
 	// SidFunctionGet RPC.
 	SidFunctionServiceSidFunctionGetProcedure = "/vinbero.v1.SidFunctionService/SidFunctionGet"
@@ -70,6 +73,9 @@ const (
 	// Headendv4ServiceHeadendv4ListProcedure is the fully-qualified name of the Headendv4Service's
 	// Headendv4List RPC.
 	Headendv4ServiceHeadendv4ListProcedure = "/vinbero.v1.Headendv4Service/Headendv4List"
+	// Headendv4ServiceHeadendv4FlushProcedure is the fully-qualified name of the Headendv4Service's
+	// Headendv4Flush RPC.
+	Headendv4ServiceHeadendv4FlushProcedure = "/vinbero.v1.Headendv4Service/Headendv4Flush"
 	// Headendv4ServiceHeadendv4GetProcedure is the fully-qualified name of the Headendv4Service's
 	// Headendv4Get RPC.
 	Headendv4ServiceHeadendv4GetProcedure = "/vinbero.v1.Headendv4Service/Headendv4Get"
@@ -85,12 +91,17 @@ const (
 	// Headendv6ServiceHeadendv6GetProcedure is the fully-qualified name of the Headendv6Service's
 	// Headendv6Get RPC.
 	Headendv6ServiceHeadendv6GetProcedure = "/vinbero.v1.Headendv6Service/Headendv6Get"
+	// Headendv6ServiceHeadendv6FlushProcedure is the fully-qualified name of the Headendv6Service's
+	// Headendv6Flush RPC.
+	Headendv6ServiceHeadendv6FlushProcedure = "/vinbero.v1.Headendv6Service/Headendv6Flush"
 	// FdbServiceFdbListProcedure is the fully-qualified name of the FdbService's FdbList RPC.
 	FdbServiceFdbListProcedure = "/vinbero.v1.FdbService/FdbList"
 	// FdbServiceFdbCreateProcedure is the fully-qualified name of the FdbService's FdbCreate RPC.
 	FdbServiceFdbCreateProcedure = "/vinbero.v1.FdbService/FdbCreate"
 	// FdbServiceFdbDeleteProcedure is the fully-qualified name of the FdbService's FdbDelete RPC.
 	FdbServiceFdbDeleteProcedure = "/vinbero.v1.FdbService/FdbDelete"
+	// FdbServiceFdbFlushProcedure is the fully-qualified name of the FdbService's FdbFlush RPC.
+	FdbServiceFdbFlushProcedure = "/vinbero.v1.FdbService/FdbFlush"
 	// VlanTableServiceVlanTableCreateProcedure is the fully-qualified name of the VlanTableService's
 	// VlanTableCreate RPC.
 	VlanTableServiceVlanTableCreateProcedure = "/vinbero.v1.VlanTableService/VlanTableCreate"
@@ -100,6 +111,9 @@ const (
 	// VlanTableServiceVlanTableListProcedure is the fully-qualified name of the VlanTableService's
 	// VlanTableList RPC.
 	VlanTableServiceVlanTableListProcedure = "/vinbero.v1.VlanTableService/VlanTableList"
+	// VlanTableServiceVlanTableFlushProcedure is the fully-qualified name of the VlanTableService's
+	// VlanTableFlush RPC.
+	VlanTableServiceVlanTableFlushProcedure = "/vinbero.v1.VlanTableService/VlanTableFlush"
 	// BdPeerServiceBdPeerCreateProcedure is the fully-qualified name of the BdPeerService's
 	// BdPeerCreate RPC.
 	BdPeerServiceBdPeerCreateProcedure = "/vinbero.v1.BdPeerService/BdPeerCreate"
@@ -109,6 +123,9 @@ const (
 	// BdPeerServiceBdPeerListProcedure is the fully-qualified name of the BdPeerService's BdPeerList
 	// RPC.
 	BdPeerServiceBdPeerListProcedure = "/vinbero.v1.BdPeerService/BdPeerList"
+	// BdPeerServiceBdPeerFlushProcedure is the fully-qualified name of the BdPeerService's BdPeerFlush
+	// RPC.
+	BdPeerServiceBdPeerFlushProcedure = "/vinbero.v1.BdPeerService/BdPeerFlush"
 	// NetworkResourceServiceVrfCreateProcedure is the fully-qualified name of the
 	// NetworkResourceService's VrfCreate RPC.
 	NetworkResourceServiceVrfCreateProcedure = "/vinbero.v1.NetworkResourceService/VrfCreate"
@@ -139,6 +156,9 @@ const (
 	// HeadendL2ServiceHeadendL2GetProcedure is the fully-qualified name of the HeadendL2Service's
 	// HeadendL2Get RPC.
 	HeadendL2ServiceHeadendL2GetProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Get"
+	// HeadendL2ServiceHeadendL2FlushProcedure is the fully-qualified name of the HeadendL2Service's
+	// HeadendL2Flush RPC.
+	HeadendL2ServiceHeadendL2FlushProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Flush"
 	// StatsServiceStatsShowProcedure is the fully-qualified name of the StatsService's StatsShow RPC.
 	StatsServiceStatsShowProcedure = "/vinbero.v1.StatsService/StatsShow"
 	// StatsServiceStatsResetProcedure is the fully-qualified name of the StatsService's StatsReset RPC.
@@ -157,29 +177,35 @@ var (
 	sidFunctionServiceSidFunctionCreateMethodDescriptor = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionCreate")
 	sidFunctionServiceSidFunctionDeleteMethodDescriptor = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionDelete")
 	sidFunctionServiceSidFunctionListMethodDescriptor   = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionList")
+	sidFunctionServiceSidFunctionFlushMethodDescriptor  = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionFlush")
 	sidFunctionServiceSidFunctionGetMethodDescriptor    = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionGet")
 	headendv4ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Headendv4Service")
 	headendv4ServiceHeadendv4CreateMethodDescriptor     = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Create")
 	headendv4ServiceHeadendv4DeleteMethodDescriptor     = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Delete")
 	headendv4ServiceHeadendv4ListMethodDescriptor       = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4List")
+	headendv4ServiceHeadendv4FlushMethodDescriptor      = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Flush")
 	headendv4ServiceHeadendv4GetMethodDescriptor        = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Get")
 	headendv6ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Headendv6Service")
 	headendv6ServiceHeadendv6CreateMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Create")
 	headendv6ServiceHeadendv6DeleteMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Delete")
 	headendv6ServiceHeadendv6ListMethodDescriptor       = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6List")
 	headendv6ServiceHeadendv6GetMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
+	headendv6ServiceHeadendv6FlushMethodDescriptor      = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Flush")
 	fdbServiceServiceDescriptor                         = v1.File_vinbero_v1_vinbero_proto.Services().ByName("FdbService")
 	fdbServiceFdbListMethodDescriptor                   = fdbServiceServiceDescriptor.Methods().ByName("FdbList")
 	fdbServiceFdbCreateMethodDescriptor                 = fdbServiceServiceDescriptor.Methods().ByName("FdbCreate")
 	fdbServiceFdbDeleteMethodDescriptor                 = fdbServiceServiceDescriptor.Methods().ByName("FdbDelete")
+	fdbServiceFdbFlushMethodDescriptor                  = fdbServiceServiceDescriptor.Methods().ByName("FdbFlush")
 	vlanTableServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("VlanTableService")
 	vlanTableServiceVlanTableCreateMethodDescriptor     = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableCreate")
 	vlanTableServiceVlanTableDeleteMethodDescriptor     = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableDelete")
 	vlanTableServiceVlanTableListMethodDescriptor       = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableList")
+	vlanTableServiceVlanTableFlushMethodDescriptor      = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableFlush")
 	bdPeerServiceServiceDescriptor                      = v1.File_vinbero_v1_vinbero_proto.Services().ByName("BdPeerService")
 	bdPeerServiceBdPeerCreateMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerCreate")
 	bdPeerServiceBdPeerDeleteMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerDelete")
 	bdPeerServiceBdPeerListMethodDescriptor             = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerList")
+	bdPeerServiceBdPeerFlushMethodDescriptor            = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerFlush")
 	networkResourceServiceServiceDescriptor             = v1.File_vinbero_v1_vinbero_proto.Services().ByName("NetworkResourceService")
 	networkResourceServiceVrfCreateMethodDescriptor     = networkResourceServiceServiceDescriptor.Methods().ByName("VrfCreate")
 	networkResourceServiceVrfDeleteMethodDescriptor     = networkResourceServiceServiceDescriptor.Methods().ByName("VrfDelete")
@@ -192,6 +218,7 @@ var (
 	headendL2ServiceHeadendL2DeleteMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Delete")
 	headendL2ServiceHeadendL2ListMethodDescriptor       = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2List")
 	headendL2ServiceHeadendL2GetMethodDescriptor        = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Get")
+	headendL2ServiceHeadendL2FlushMethodDescriptor      = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Flush")
 	statsServiceServiceDescriptor                       = v1.File_vinbero_v1_vinbero_proto.Services().ByName("StatsService")
 	statsServiceStatsShowMethodDescriptor               = statsServiceServiceDescriptor.Methods().ByName("StatsShow")
 	statsServiceStatsResetMethodDescriptor              = statsServiceServiceDescriptor.Methods().ByName("StatsReset")
@@ -204,6 +231,7 @@ type SidFunctionServiceClient interface {
 	SidFunctionCreate(context.Context, *connect.Request[v1.SidFunctionCreateRequest]) (*connect.Response[v1.SidFunctionCreateResponse], error)
 	SidFunctionDelete(context.Context, *connect.Request[v1.SidFunctionDeleteRequest]) (*connect.Response[v1.SidFunctionDeleteResponse], error)
 	SidFunctionList(context.Context, *connect.Request[v1.SidFunctionListRequest]) (*connect.Response[v1.SidFunctionListResponse], error)
+	SidFunctionFlush(context.Context, *connect.Request[v1.SidFunctionFlushRequest]) (*connect.Response[v1.SidFunctionFlushResponse], error)
 	SidFunctionGet(context.Context, *connect.Request[v1.SidFunctionGetRequest]) (*connect.Response[v1.SidFunctionGetResponse], error)
 }
 
@@ -235,6 +263,12 @@ func NewSidFunctionServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(sidFunctionServiceSidFunctionListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		sidFunctionFlush: connect.NewClient[v1.SidFunctionFlushRequest, v1.SidFunctionFlushResponse](
+			httpClient,
+			baseURL+SidFunctionServiceSidFunctionFlushProcedure,
+			connect.WithSchema(sidFunctionServiceSidFunctionFlushMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 		sidFunctionGet: connect.NewClient[v1.SidFunctionGetRequest, v1.SidFunctionGetResponse](
 			httpClient,
 			baseURL+SidFunctionServiceSidFunctionGetProcedure,
@@ -249,6 +283,7 @@ type sidFunctionServiceClient struct {
 	sidFunctionCreate *connect.Client[v1.SidFunctionCreateRequest, v1.SidFunctionCreateResponse]
 	sidFunctionDelete *connect.Client[v1.SidFunctionDeleteRequest, v1.SidFunctionDeleteResponse]
 	sidFunctionList   *connect.Client[v1.SidFunctionListRequest, v1.SidFunctionListResponse]
+	sidFunctionFlush  *connect.Client[v1.SidFunctionFlushRequest, v1.SidFunctionFlushResponse]
 	sidFunctionGet    *connect.Client[v1.SidFunctionGetRequest, v1.SidFunctionGetResponse]
 }
 
@@ -267,6 +302,11 @@ func (c *sidFunctionServiceClient) SidFunctionList(ctx context.Context, req *con
 	return c.sidFunctionList.CallUnary(ctx, req)
 }
 
+// SidFunctionFlush calls vinbero.v1.SidFunctionService.SidFunctionFlush.
+func (c *sidFunctionServiceClient) SidFunctionFlush(ctx context.Context, req *connect.Request[v1.SidFunctionFlushRequest]) (*connect.Response[v1.SidFunctionFlushResponse], error) {
+	return c.sidFunctionFlush.CallUnary(ctx, req)
+}
+
 // SidFunctionGet calls vinbero.v1.SidFunctionService.SidFunctionGet.
 func (c *sidFunctionServiceClient) SidFunctionGet(ctx context.Context, req *connect.Request[v1.SidFunctionGetRequest]) (*connect.Response[v1.SidFunctionGetResponse], error) {
 	return c.sidFunctionGet.CallUnary(ctx, req)
@@ -277,6 +317,7 @@ type SidFunctionServiceHandler interface {
 	SidFunctionCreate(context.Context, *connect.Request[v1.SidFunctionCreateRequest]) (*connect.Response[v1.SidFunctionCreateResponse], error)
 	SidFunctionDelete(context.Context, *connect.Request[v1.SidFunctionDeleteRequest]) (*connect.Response[v1.SidFunctionDeleteResponse], error)
 	SidFunctionList(context.Context, *connect.Request[v1.SidFunctionListRequest]) (*connect.Response[v1.SidFunctionListResponse], error)
+	SidFunctionFlush(context.Context, *connect.Request[v1.SidFunctionFlushRequest]) (*connect.Response[v1.SidFunctionFlushResponse], error)
 	SidFunctionGet(context.Context, *connect.Request[v1.SidFunctionGetRequest]) (*connect.Response[v1.SidFunctionGetResponse], error)
 }
 
@@ -304,6 +345,12 @@ func NewSidFunctionServiceHandler(svc SidFunctionServiceHandler, opts ...connect
 		connect.WithSchema(sidFunctionServiceSidFunctionListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	sidFunctionServiceSidFunctionFlushHandler := connect.NewUnaryHandler(
+		SidFunctionServiceSidFunctionFlushProcedure,
+		svc.SidFunctionFlush,
+		connect.WithSchema(sidFunctionServiceSidFunctionFlushMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	sidFunctionServiceSidFunctionGetHandler := connect.NewUnaryHandler(
 		SidFunctionServiceSidFunctionGetProcedure,
 		svc.SidFunctionGet,
@@ -318,6 +365,8 @@ func NewSidFunctionServiceHandler(svc SidFunctionServiceHandler, opts ...connect
 			sidFunctionServiceSidFunctionDeleteHandler.ServeHTTP(w, r)
 		case SidFunctionServiceSidFunctionListProcedure:
 			sidFunctionServiceSidFunctionListHandler.ServeHTTP(w, r)
+		case SidFunctionServiceSidFunctionFlushProcedure:
+			sidFunctionServiceSidFunctionFlushHandler.ServeHTTP(w, r)
 		case SidFunctionServiceSidFunctionGetProcedure:
 			sidFunctionServiceSidFunctionGetHandler.ServeHTTP(w, r)
 		default:
@@ -341,6 +390,10 @@ func (UnimplementedSidFunctionServiceHandler) SidFunctionList(context.Context, *
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.SidFunctionService.SidFunctionList is not implemented"))
 }
 
+func (UnimplementedSidFunctionServiceHandler) SidFunctionFlush(context.Context, *connect.Request[v1.SidFunctionFlushRequest]) (*connect.Response[v1.SidFunctionFlushResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.SidFunctionService.SidFunctionFlush is not implemented"))
+}
+
 func (UnimplementedSidFunctionServiceHandler) SidFunctionGet(context.Context, *connect.Request[v1.SidFunctionGetRequest]) (*connect.Response[v1.SidFunctionGetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.SidFunctionService.SidFunctionGet is not implemented"))
 }
@@ -350,6 +403,7 @@ type Headendv4ServiceClient interface {
 	Headendv4Create(context.Context, *connect.Request[v1.Headendv4CreateRequest]) (*connect.Response[v1.Headendv4CreateResponse], error)
 	Headendv4Delete(context.Context, *connect.Request[v1.Headendv4DeleteRequest]) (*connect.Response[v1.Headendv4DeleteResponse], error)
 	Headendv4List(context.Context, *connect.Request[v1.Headendv4ListRequest]) (*connect.Response[v1.Headendv4ListResponse], error)
+	Headendv4Flush(context.Context, *connect.Request[v1.Headendv4FlushRequest]) (*connect.Response[v1.Headendv4FlushResponse], error)
 	Headendv4Get(context.Context, *connect.Request[v1.Headendv4GetRequest]) (*connect.Response[v1.Headendv4GetResponse], error)
 }
 
@@ -381,6 +435,12 @@ func NewHeadendv4ServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(headendv4ServiceHeadendv4ListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		headendv4Flush: connect.NewClient[v1.Headendv4FlushRequest, v1.Headendv4FlushResponse](
+			httpClient,
+			baseURL+Headendv4ServiceHeadendv4FlushProcedure,
+			connect.WithSchema(headendv4ServiceHeadendv4FlushMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 		headendv4Get: connect.NewClient[v1.Headendv4GetRequest, v1.Headendv4GetResponse](
 			httpClient,
 			baseURL+Headendv4ServiceHeadendv4GetProcedure,
@@ -395,6 +455,7 @@ type headendv4ServiceClient struct {
 	headendv4Create *connect.Client[v1.Headendv4CreateRequest, v1.Headendv4CreateResponse]
 	headendv4Delete *connect.Client[v1.Headendv4DeleteRequest, v1.Headendv4DeleteResponse]
 	headendv4List   *connect.Client[v1.Headendv4ListRequest, v1.Headendv4ListResponse]
+	headendv4Flush  *connect.Client[v1.Headendv4FlushRequest, v1.Headendv4FlushResponse]
 	headendv4Get    *connect.Client[v1.Headendv4GetRequest, v1.Headendv4GetResponse]
 }
 
@@ -413,6 +474,11 @@ func (c *headendv4ServiceClient) Headendv4List(ctx context.Context, req *connect
 	return c.headendv4List.CallUnary(ctx, req)
 }
 
+// Headendv4Flush calls vinbero.v1.Headendv4Service.Headendv4Flush.
+func (c *headendv4ServiceClient) Headendv4Flush(ctx context.Context, req *connect.Request[v1.Headendv4FlushRequest]) (*connect.Response[v1.Headendv4FlushResponse], error) {
+	return c.headendv4Flush.CallUnary(ctx, req)
+}
+
 // Headendv4Get calls vinbero.v1.Headendv4Service.Headendv4Get.
 func (c *headendv4ServiceClient) Headendv4Get(ctx context.Context, req *connect.Request[v1.Headendv4GetRequest]) (*connect.Response[v1.Headendv4GetResponse], error) {
 	return c.headendv4Get.CallUnary(ctx, req)
@@ -423,6 +489,7 @@ type Headendv4ServiceHandler interface {
 	Headendv4Create(context.Context, *connect.Request[v1.Headendv4CreateRequest]) (*connect.Response[v1.Headendv4CreateResponse], error)
 	Headendv4Delete(context.Context, *connect.Request[v1.Headendv4DeleteRequest]) (*connect.Response[v1.Headendv4DeleteResponse], error)
 	Headendv4List(context.Context, *connect.Request[v1.Headendv4ListRequest]) (*connect.Response[v1.Headendv4ListResponse], error)
+	Headendv4Flush(context.Context, *connect.Request[v1.Headendv4FlushRequest]) (*connect.Response[v1.Headendv4FlushResponse], error)
 	Headendv4Get(context.Context, *connect.Request[v1.Headendv4GetRequest]) (*connect.Response[v1.Headendv4GetResponse], error)
 }
 
@@ -450,6 +517,12 @@ func NewHeadendv4ServiceHandler(svc Headendv4ServiceHandler, opts ...connect.Han
 		connect.WithSchema(headendv4ServiceHeadendv4ListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	headendv4ServiceHeadendv4FlushHandler := connect.NewUnaryHandler(
+		Headendv4ServiceHeadendv4FlushProcedure,
+		svc.Headendv4Flush,
+		connect.WithSchema(headendv4ServiceHeadendv4FlushMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	headendv4ServiceHeadendv4GetHandler := connect.NewUnaryHandler(
 		Headendv4ServiceHeadendv4GetProcedure,
 		svc.Headendv4Get,
@@ -464,6 +537,8 @@ func NewHeadendv4ServiceHandler(svc Headendv4ServiceHandler, opts ...connect.Han
 			headendv4ServiceHeadendv4DeleteHandler.ServeHTTP(w, r)
 		case Headendv4ServiceHeadendv4ListProcedure:
 			headendv4ServiceHeadendv4ListHandler.ServeHTTP(w, r)
+		case Headendv4ServiceHeadendv4FlushProcedure:
+			headendv4ServiceHeadendv4FlushHandler.ServeHTTP(w, r)
 		case Headendv4ServiceHeadendv4GetProcedure:
 			headendv4ServiceHeadendv4GetHandler.ServeHTTP(w, r)
 		default:
@@ -487,6 +562,10 @@ func (UnimplementedHeadendv4ServiceHandler) Headendv4List(context.Context, *conn
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv4Service.Headendv4List is not implemented"))
 }
 
+func (UnimplementedHeadendv4ServiceHandler) Headendv4Flush(context.Context, *connect.Request[v1.Headendv4FlushRequest]) (*connect.Response[v1.Headendv4FlushResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv4Service.Headendv4Flush is not implemented"))
+}
+
 func (UnimplementedHeadendv4ServiceHandler) Headendv4Get(context.Context, *connect.Request[v1.Headendv4GetRequest]) (*connect.Response[v1.Headendv4GetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv4Service.Headendv4Get is not implemented"))
 }
@@ -497,6 +576,7 @@ type Headendv6ServiceClient interface {
 	Headendv6Delete(context.Context, *connect.Request[v1.Headendv6DeleteRequest]) (*connect.Response[v1.Headendv6DeleteResponse], error)
 	Headendv6List(context.Context, *connect.Request[v1.Headendv6ListRequest]) (*connect.Response[v1.Headendv6ListResponse], error)
 	Headendv6Get(context.Context, *connect.Request[v1.Headendv6GetRequest]) (*connect.Response[v1.Headendv6GetResponse], error)
+	Headendv6Flush(context.Context, *connect.Request[v1.Headendv6FlushRequest]) (*connect.Response[v1.Headendv6FlushResponse], error)
 }
 
 // NewHeadendv6ServiceClient constructs a client for the vinbero.v1.Headendv6Service service. By
@@ -533,6 +613,12 @@ func NewHeadendv6ServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(headendv6ServiceHeadendv6GetMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		headendv6Flush: connect.NewClient[v1.Headendv6FlushRequest, v1.Headendv6FlushResponse](
+			httpClient,
+			baseURL+Headendv6ServiceHeadendv6FlushProcedure,
+			connect.WithSchema(headendv6ServiceHeadendv6FlushMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -542,6 +628,7 @@ type headendv6ServiceClient struct {
 	headendv6Delete *connect.Client[v1.Headendv6DeleteRequest, v1.Headendv6DeleteResponse]
 	headendv6List   *connect.Client[v1.Headendv6ListRequest, v1.Headendv6ListResponse]
 	headendv6Get    *connect.Client[v1.Headendv6GetRequest, v1.Headendv6GetResponse]
+	headendv6Flush  *connect.Client[v1.Headendv6FlushRequest, v1.Headendv6FlushResponse]
 }
 
 // Headendv6Create calls vinbero.v1.Headendv6Service.Headendv6Create.
@@ -564,12 +651,18 @@ func (c *headendv6ServiceClient) Headendv6Get(ctx context.Context, req *connect.
 	return c.headendv6Get.CallUnary(ctx, req)
 }
 
+// Headendv6Flush calls vinbero.v1.Headendv6Service.Headendv6Flush.
+func (c *headendv6ServiceClient) Headendv6Flush(ctx context.Context, req *connect.Request[v1.Headendv6FlushRequest]) (*connect.Response[v1.Headendv6FlushResponse], error) {
+	return c.headendv6Flush.CallUnary(ctx, req)
+}
+
 // Headendv6ServiceHandler is an implementation of the vinbero.v1.Headendv6Service service.
 type Headendv6ServiceHandler interface {
 	Headendv6Create(context.Context, *connect.Request[v1.Headendv6CreateRequest]) (*connect.Response[v1.Headendv6CreateResponse], error)
 	Headendv6Delete(context.Context, *connect.Request[v1.Headendv6DeleteRequest]) (*connect.Response[v1.Headendv6DeleteResponse], error)
 	Headendv6List(context.Context, *connect.Request[v1.Headendv6ListRequest]) (*connect.Response[v1.Headendv6ListResponse], error)
 	Headendv6Get(context.Context, *connect.Request[v1.Headendv6GetRequest]) (*connect.Response[v1.Headendv6GetResponse], error)
+	Headendv6Flush(context.Context, *connect.Request[v1.Headendv6FlushRequest]) (*connect.Response[v1.Headendv6FlushResponse], error)
 }
 
 // NewHeadendv6ServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -602,6 +695,12 @@ func NewHeadendv6ServiceHandler(svc Headendv6ServiceHandler, opts ...connect.Han
 		connect.WithSchema(headendv6ServiceHeadendv6GetMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	headendv6ServiceHeadendv6FlushHandler := connect.NewUnaryHandler(
+		Headendv6ServiceHeadendv6FlushProcedure,
+		svc.Headendv6Flush,
+		connect.WithSchema(headendv6ServiceHeadendv6FlushMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.Headendv6Service/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case Headendv6ServiceHeadendv6CreateProcedure:
@@ -612,6 +711,8 @@ func NewHeadendv6ServiceHandler(svc Headendv6ServiceHandler, opts ...connect.Han
 			headendv6ServiceHeadendv6ListHandler.ServeHTTP(w, r)
 		case Headendv6ServiceHeadendv6GetProcedure:
 			headendv6ServiceHeadendv6GetHandler.ServeHTTP(w, r)
+		case Headendv6ServiceHeadendv6FlushProcedure:
+			headendv6ServiceHeadendv6FlushHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -637,11 +738,16 @@ func (UnimplementedHeadendv6ServiceHandler) Headendv6Get(context.Context, *conne
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6Get is not implemented"))
 }
 
+func (UnimplementedHeadendv6ServiceHandler) Headendv6Flush(context.Context, *connect.Request[v1.Headendv6FlushRequest]) (*connect.Response[v1.Headendv6FlushResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.Headendv6Service.Headendv6Flush is not implemented"))
+}
+
 // FdbServiceClient is a client for the vinbero.v1.FdbService service.
 type FdbServiceClient interface {
 	FdbList(context.Context, *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error)
 	FdbCreate(context.Context, *connect.Request[v1.FdbCreateRequest]) (*connect.Response[v1.FdbCreateResponse], error)
 	FdbDelete(context.Context, *connect.Request[v1.FdbDeleteRequest]) (*connect.Response[v1.FdbDeleteResponse], error)
+	FdbFlush(context.Context, *connect.Request[v1.FdbFlushRequest]) (*connect.Response[v1.FdbFlushResponse], error)
 }
 
 // NewFdbServiceClient constructs a client for the vinbero.v1.FdbService service. By default, it
@@ -672,6 +778,12 @@ func NewFdbServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			connect.WithSchema(fdbServiceFdbDeleteMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		fdbFlush: connect.NewClient[v1.FdbFlushRequest, v1.FdbFlushResponse](
+			httpClient,
+			baseURL+FdbServiceFdbFlushProcedure,
+			connect.WithSchema(fdbServiceFdbFlushMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -680,6 +792,7 @@ type fdbServiceClient struct {
 	fdbList   *connect.Client[v1.FdbListRequest, v1.FdbListResponse]
 	fdbCreate *connect.Client[v1.FdbCreateRequest, v1.FdbCreateResponse]
 	fdbDelete *connect.Client[v1.FdbDeleteRequest, v1.FdbDeleteResponse]
+	fdbFlush  *connect.Client[v1.FdbFlushRequest, v1.FdbFlushResponse]
 }
 
 // FdbList calls vinbero.v1.FdbService.FdbList.
@@ -697,11 +810,17 @@ func (c *fdbServiceClient) FdbDelete(ctx context.Context, req *connect.Request[v
 	return c.fdbDelete.CallUnary(ctx, req)
 }
 
+// FdbFlush calls vinbero.v1.FdbService.FdbFlush.
+func (c *fdbServiceClient) FdbFlush(ctx context.Context, req *connect.Request[v1.FdbFlushRequest]) (*connect.Response[v1.FdbFlushResponse], error) {
+	return c.fdbFlush.CallUnary(ctx, req)
+}
+
 // FdbServiceHandler is an implementation of the vinbero.v1.FdbService service.
 type FdbServiceHandler interface {
 	FdbList(context.Context, *connect.Request[v1.FdbListRequest]) (*connect.Response[v1.FdbListResponse], error)
 	FdbCreate(context.Context, *connect.Request[v1.FdbCreateRequest]) (*connect.Response[v1.FdbCreateResponse], error)
 	FdbDelete(context.Context, *connect.Request[v1.FdbDeleteRequest]) (*connect.Response[v1.FdbDeleteResponse], error)
+	FdbFlush(context.Context, *connect.Request[v1.FdbFlushRequest]) (*connect.Response[v1.FdbFlushResponse], error)
 }
 
 // NewFdbServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -728,6 +847,12 @@ func NewFdbServiceHandler(svc FdbServiceHandler, opts ...connect.HandlerOption) 
 		connect.WithSchema(fdbServiceFdbDeleteMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	fdbServiceFdbFlushHandler := connect.NewUnaryHandler(
+		FdbServiceFdbFlushProcedure,
+		svc.FdbFlush,
+		connect.WithSchema(fdbServiceFdbFlushMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.FdbService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case FdbServiceFdbListProcedure:
@@ -736,6 +861,8 @@ func NewFdbServiceHandler(svc FdbServiceHandler, opts ...connect.HandlerOption) 
 			fdbServiceFdbCreateHandler.ServeHTTP(w, r)
 		case FdbServiceFdbDeleteProcedure:
 			fdbServiceFdbDeleteHandler.ServeHTTP(w, r)
+		case FdbServiceFdbFlushProcedure:
+			fdbServiceFdbFlushHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -757,11 +884,16 @@ func (UnimplementedFdbServiceHandler) FdbDelete(context.Context, *connect.Reques
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.FdbService.FdbDelete is not implemented"))
 }
 
+func (UnimplementedFdbServiceHandler) FdbFlush(context.Context, *connect.Request[v1.FdbFlushRequest]) (*connect.Response[v1.FdbFlushResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.FdbService.FdbFlush is not implemented"))
+}
+
 // VlanTableServiceClient is a client for the vinbero.v1.VlanTableService service.
 type VlanTableServiceClient interface {
 	VlanTableCreate(context.Context, *connect.Request[v1.VlanTableCreateRequest]) (*connect.Response[v1.VlanTableCreateResponse], error)
 	VlanTableDelete(context.Context, *connect.Request[v1.VlanTableDeleteRequest]) (*connect.Response[v1.VlanTableDeleteResponse], error)
 	VlanTableList(context.Context, *connect.Request[v1.VlanTableListRequest]) (*connect.Response[v1.VlanTableListResponse], error)
+	VlanTableFlush(context.Context, *connect.Request[v1.VlanTableFlushRequest]) (*connect.Response[v1.VlanTableFlushResponse], error)
 }
 
 // NewVlanTableServiceClient constructs a client for the vinbero.v1.VlanTableService service. By
@@ -792,6 +924,12 @@ func NewVlanTableServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(vlanTableServiceVlanTableListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		vlanTableFlush: connect.NewClient[v1.VlanTableFlushRequest, v1.VlanTableFlushResponse](
+			httpClient,
+			baseURL+VlanTableServiceVlanTableFlushProcedure,
+			connect.WithSchema(vlanTableServiceVlanTableFlushMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -800,6 +938,7 @@ type vlanTableServiceClient struct {
 	vlanTableCreate *connect.Client[v1.VlanTableCreateRequest, v1.VlanTableCreateResponse]
 	vlanTableDelete *connect.Client[v1.VlanTableDeleteRequest, v1.VlanTableDeleteResponse]
 	vlanTableList   *connect.Client[v1.VlanTableListRequest, v1.VlanTableListResponse]
+	vlanTableFlush  *connect.Client[v1.VlanTableFlushRequest, v1.VlanTableFlushResponse]
 }
 
 // VlanTableCreate calls vinbero.v1.VlanTableService.VlanTableCreate.
@@ -817,11 +956,17 @@ func (c *vlanTableServiceClient) VlanTableList(ctx context.Context, req *connect
 	return c.vlanTableList.CallUnary(ctx, req)
 }
 
+// VlanTableFlush calls vinbero.v1.VlanTableService.VlanTableFlush.
+func (c *vlanTableServiceClient) VlanTableFlush(ctx context.Context, req *connect.Request[v1.VlanTableFlushRequest]) (*connect.Response[v1.VlanTableFlushResponse], error) {
+	return c.vlanTableFlush.CallUnary(ctx, req)
+}
+
 // VlanTableServiceHandler is an implementation of the vinbero.v1.VlanTableService service.
 type VlanTableServiceHandler interface {
 	VlanTableCreate(context.Context, *connect.Request[v1.VlanTableCreateRequest]) (*connect.Response[v1.VlanTableCreateResponse], error)
 	VlanTableDelete(context.Context, *connect.Request[v1.VlanTableDeleteRequest]) (*connect.Response[v1.VlanTableDeleteResponse], error)
 	VlanTableList(context.Context, *connect.Request[v1.VlanTableListRequest]) (*connect.Response[v1.VlanTableListResponse], error)
+	VlanTableFlush(context.Context, *connect.Request[v1.VlanTableFlushRequest]) (*connect.Response[v1.VlanTableFlushResponse], error)
 }
 
 // NewVlanTableServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -848,6 +993,12 @@ func NewVlanTableServiceHandler(svc VlanTableServiceHandler, opts ...connect.Han
 		connect.WithSchema(vlanTableServiceVlanTableListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	vlanTableServiceVlanTableFlushHandler := connect.NewUnaryHandler(
+		VlanTableServiceVlanTableFlushProcedure,
+		svc.VlanTableFlush,
+		connect.WithSchema(vlanTableServiceVlanTableFlushMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.VlanTableService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case VlanTableServiceVlanTableCreateProcedure:
@@ -856,6 +1007,8 @@ func NewVlanTableServiceHandler(svc VlanTableServiceHandler, opts ...connect.Han
 			vlanTableServiceVlanTableDeleteHandler.ServeHTTP(w, r)
 		case VlanTableServiceVlanTableListProcedure:
 			vlanTableServiceVlanTableListHandler.ServeHTTP(w, r)
+		case VlanTableServiceVlanTableFlushProcedure:
+			vlanTableServiceVlanTableFlushHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -877,11 +1030,16 @@ func (UnimplementedVlanTableServiceHandler) VlanTableList(context.Context, *conn
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VlanTableService.VlanTableList is not implemented"))
 }
 
+func (UnimplementedVlanTableServiceHandler) VlanTableFlush(context.Context, *connect.Request[v1.VlanTableFlushRequest]) (*connect.Response[v1.VlanTableFlushResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VlanTableService.VlanTableFlush is not implemented"))
+}
+
 // BdPeerServiceClient is a client for the vinbero.v1.BdPeerService service.
 type BdPeerServiceClient interface {
 	BdPeerCreate(context.Context, *connect.Request[v1.BdPeerCreateRequest]) (*connect.Response[v1.BdPeerCreateResponse], error)
 	BdPeerDelete(context.Context, *connect.Request[v1.BdPeerDeleteRequest]) (*connect.Response[v1.BdPeerDeleteResponse], error)
 	BdPeerList(context.Context, *connect.Request[v1.BdPeerListRequest]) (*connect.Response[v1.BdPeerListResponse], error)
+	BdPeerFlush(context.Context, *connect.Request[v1.BdPeerFlushRequest]) (*connect.Response[v1.BdPeerFlushResponse], error)
 }
 
 // NewBdPeerServiceClient constructs a client for the vinbero.v1.BdPeerService service. By default,
@@ -912,6 +1070,12 @@ func NewBdPeerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(bdPeerServiceBdPeerListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		bdPeerFlush: connect.NewClient[v1.BdPeerFlushRequest, v1.BdPeerFlushResponse](
+			httpClient,
+			baseURL+BdPeerServiceBdPeerFlushProcedure,
+			connect.WithSchema(bdPeerServiceBdPeerFlushMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -920,6 +1084,7 @@ type bdPeerServiceClient struct {
 	bdPeerCreate *connect.Client[v1.BdPeerCreateRequest, v1.BdPeerCreateResponse]
 	bdPeerDelete *connect.Client[v1.BdPeerDeleteRequest, v1.BdPeerDeleteResponse]
 	bdPeerList   *connect.Client[v1.BdPeerListRequest, v1.BdPeerListResponse]
+	bdPeerFlush  *connect.Client[v1.BdPeerFlushRequest, v1.BdPeerFlushResponse]
 }
 
 // BdPeerCreate calls vinbero.v1.BdPeerService.BdPeerCreate.
@@ -937,11 +1102,17 @@ func (c *bdPeerServiceClient) BdPeerList(ctx context.Context, req *connect.Reque
 	return c.bdPeerList.CallUnary(ctx, req)
 }
 
+// BdPeerFlush calls vinbero.v1.BdPeerService.BdPeerFlush.
+func (c *bdPeerServiceClient) BdPeerFlush(ctx context.Context, req *connect.Request[v1.BdPeerFlushRequest]) (*connect.Response[v1.BdPeerFlushResponse], error) {
+	return c.bdPeerFlush.CallUnary(ctx, req)
+}
+
 // BdPeerServiceHandler is an implementation of the vinbero.v1.BdPeerService service.
 type BdPeerServiceHandler interface {
 	BdPeerCreate(context.Context, *connect.Request[v1.BdPeerCreateRequest]) (*connect.Response[v1.BdPeerCreateResponse], error)
 	BdPeerDelete(context.Context, *connect.Request[v1.BdPeerDeleteRequest]) (*connect.Response[v1.BdPeerDeleteResponse], error)
 	BdPeerList(context.Context, *connect.Request[v1.BdPeerListRequest]) (*connect.Response[v1.BdPeerListResponse], error)
+	BdPeerFlush(context.Context, *connect.Request[v1.BdPeerFlushRequest]) (*connect.Response[v1.BdPeerFlushResponse], error)
 }
 
 // NewBdPeerServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -968,6 +1139,12 @@ func NewBdPeerServiceHandler(svc BdPeerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(bdPeerServiceBdPeerListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	bdPeerServiceBdPeerFlushHandler := connect.NewUnaryHandler(
+		BdPeerServiceBdPeerFlushProcedure,
+		svc.BdPeerFlush,
+		connect.WithSchema(bdPeerServiceBdPeerFlushMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.BdPeerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BdPeerServiceBdPeerCreateProcedure:
@@ -976,6 +1153,8 @@ func NewBdPeerServiceHandler(svc BdPeerServiceHandler, opts ...connect.HandlerOp
 			bdPeerServiceBdPeerDeleteHandler.ServeHTTP(w, r)
 		case BdPeerServiceBdPeerListProcedure:
 			bdPeerServiceBdPeerListHandler.ServeHTTP(w, r)
+		case BdPeerServiceBdPeerFlushProcedure:
+			bdPeerServiceBdPeerFlushHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -995,6 +1174,10 @@ func (UnimplementedBdPeerServiceHandler) BdPeerDelete(context.Context, *connect.
 
 func (UnimplementedBdPeerServiceHandler) BdPeerList(context.Context, *connect.Request[v1.BdPeerListRequest]) (*connect.Response[v1.BdPeerListResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BdPeerService.BdPeerList is not implemented"))
+}
+
+func (UnimplementedBdPeerServiceHandler) BdPeerFlush(context.Context, *connect.Request[v1.BdPeerFlushRequest]) (*connect.Response[v1.BdPeerFlushResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BdPeerService.BdPeerFlush is not implemented"))
 }
 
 // NetworkResourceServiceClient is a client for the vinbero.v1.NetworkResourceService service.
@@ -1202,6 +1385,7 @@ type HeadendL2ServiceClient interface {
 	HeadendL2Delete(context.Context, *connect.Request[v1.HeadendL2DeleteRequest]) (*connect.Response[v1.HeadendL2DeleteResponse], error)
 	HeadendL2List(context.Context, *connect.Request[v1.HeadendL2ListRequest]) (*connect.Response[v1.HeadendL2ListResponse], error)
 	HeadendL2Get(context.Context, *connect.Request[v1.HeadendL2GetRequest]) (*connect.Response[v1.HeadendL2GetResponse], error)
+	HeadendL2Flush(context.Context, *connect.Request[v1.HeadendL2FlushRequest]) (*connect.Response[v1.HeadendL2FlushResponse], error)
 }
 
 // NewHeadendL2ServiceClient constructs a client for the vinbero.v1.HeadendL2Service service. By
@@ -1238,6 +1422,12 @@ func NewHeadendL2ServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(headendL2ServiceHeadendL2GetMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		headendL2Flush: connect.NewClient[v1.HeadendL2FlushRequest, v1.HeadendL2FlushResponse](
+			httpClient,
+			baseURL+HeadendL2ServiceHeadendL2FlushProcedure,
+			connect.WithSchema(headendL2ServiceHeadendL2FlushMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -1247,6 +1437,7 @@ type headendL2ServiceClient struct {
 	headendL2Delete *connect.Client[v1.HeadendL2DeleteRequest, v1.HeadendL2DeleteResponse]
 	headendL2List   *connect.Client[v1.HeadendL2ListRequest, v1.HeadendL2ListResponse]
 	headendL2Get    *connect.Client[v1.HeadendL2GetRequest, v1.HeadendL2GetResponse]
+	headendL2Flush  *connect.Client[v1.HeadendL2FlushRequest, v1.HeadendL2FlushResponse]
 }
 
 // HeadendL2Create calls vinbero.v1.HeadendL2Service.HeadendL2Create.
@@ -1269,12 +1460,18 @@ func (c *headendL2ServiceClient) HeadendL2Get(ctx context.Context, req *connect.
 	return c.headendL2Get.CallUnary(ctx, req)
 }
 
+// HeadendL2Flush calls vinbero.v1.HeadendL2Service.HeadendL2Flush.
+func (c *headendL2ServiceClient) HeadendL2Flush(ctx context.Context, req *connect.Request[v1.HeadendL2FlushRequest]) (*connect.Response[v1.HeadendL2FlushResponse], error) {
+	return c.headendL2Flush.CallUnary(ctx, req)
+}
+
 // HeadendL2ServiceHandler is an implementation of the vinbero.v1.HeadendL2Service service.
 type HeadendL2ServiceHandler interface {
 	HeadendL2Create(context.Context, *connect.Request[v1.HeadendL2CreateRequest]) (*connect.Response[v1.HeadendL2CreateResponse], error)
 	HeadendL2Delete(context.Context, *connect.Request[v1.HeadendL2DeleteRequest]) (*connect.Response[v1.HeadendL2DeleteResponse], error)
 	HeadendL2List(context.Context, *connect.Request[v1.HeadendL2ListRequest]) (*connect.Response[v1.HeadendL2ListResponse], error)
 	HeadendL2Get(context.Context, *connect.Request[v1.HeadendL2GetRequest]) (*connect.Response[v1.HeadendL2GetResponse], error)
+	HeadendL2Flush(context.Context, *connect.Request[v1.HeadendL2FlushRequest]) (*connect.Response[v1.HeadendL2FlushResponse], error)
 }
 
 // NewHeadendL2ServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1307,6 +1504,12 @@ func NewHeadendL2ServiceHandler(svc HeadendL2ServiceHandler, opts ...connect.Han
 		connect.WithSchema(headendL2ServiceHeadendL2GetMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	headendL2ServiceHeadendL2FlushHandler := connect.NewUnaryHandler(
+		HeadendL2ServiceHeadendL2FlushProcedure,
+		svc.HeadendL2Flush,
+		connect.WithSchema(headendL2ServiceHeadendL2FlushMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.HeadendL2Service/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case HeadendL2ServiceHeadendL2CreateProcedure:
@@ -1317,6 +1520,8 @@ func NewHeadendL2ServiceHandler(svc HeadendL2ServiceHandler, opts ...connect.Han
 			headendL2ServiceHeadendL2ListHandler.ServeHTTP(w, r)
 		case HeadendL2ServiceHeadendL2GetProcedure:
 			headendL2ServiceHeadendL2GetHandler.ServeHTTP(w, r)
+		case HeadendL2ServiceHeadendL2FlushProcedure:
+			headendL2ServiceHeadendL2FlushHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1340,6 +1545,10 @@ func (UnimplementedHeadendL2ServiceHandler) HeadendL2List(context.Context, *conn
 
 func (UnimplementedHeadendL2ServiceHandler) HeadendL2Get(context.Context, *connect.Request[v1.HeadendL2GetRequest]) (*connect.Response[v1.HeadendL2GetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendL2Service.HeadendL2Get is not implemented"))
+}
+
+func (UnimplementedHeadendL2ServiceHandler) HeadendL2Flush(context.Context, *connect.Request[v1.HeadendL2FlushRequest]) (*connect.Response[v1.HeadendL2FlushResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendL2Service.HeadendL2Flush is not implemented"))
 }
 
 // StatsServiceClient is a client for the vinbero.v1.StatsService service.
