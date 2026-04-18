@@ -12,11 +12,12 @@ import (
 )
 
 type PluginServer struct {
-	mapOps *bpf.MapOperations
+	mapOps       *bpf.MapOperations
+	bpfConstants map[string]any
 }
 
-func NewPluginServer(mapOps *bpf.MapOperations) *PluginServer {
-	return &PluginServer{mapOps: mapOps}
+func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any) *PluginServer {
+	return &PluginServer{mapOps: mapOps, bpfConstants: bpfConstants}
 }
 
 func (s *PluginServer) PluginRegister(
@@ -39,6 +40,21 @@ func (s *PluginServer) PluginRegister(
 
 	if _, err := bpf.ValidatePluginCollection(spec, msg.Program); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	// The plugin ELF ships its own copy of shared `const volatile` vars
+	// (notably enable_stats). Rewrite them to match vinbero's runtime
+	// config so that gated helpers like stats_inc() behave consistently
+	// between the main data plane and the plugin.
+	for name, value := range s.bpfConstants {
+		varSpec, ok := spec.Variables[name]
+		if !ok {
+			continue
+		}
+		if err := varSpec.Set(value); err != nil {
+			return nil, connect.NewError(connect.CodeInternal,
+				fmt.Errorf("failed to rewrite BPF constant %s: %w", name, err))
+		}
 	}
 
 	// Build map replacements: for maps that exist in both the plugin spec

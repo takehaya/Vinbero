@@ -15,6 +15,17 @@ type Config struct {
 	Configpath     string
 }
 
+// BpfConstants returns the set of read-only constants rewritten into every
+// BPF object vinbero loads (main data plane and plugin ELFs). The keys
+// match `const volatile` names in the C sources.
+func (c *Config) BpfConstants() map[string]any {
+	v := uint8(0)
+	if c.Setting.EnableStats {
+		v = 1
+	}
+	return map[string]any{"enable_stats": v}
+}
+
 type SettingConfig struct {
 	Entries           EntriesConfig `yaml:"entries,omitempty"`
 	EnableStats       bool          `yaml:"enable_stats,omitempty" default:"false"`
