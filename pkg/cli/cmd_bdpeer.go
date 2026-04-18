@@ -65,6 +65,27 @@ func bdPeerCommand() *cli.Command {
 				},
 			},
 			{
+				Name:  "flush",
+				Usage: "Delete BD peers (requires --yes)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
+					&cli.UintFlag{Name: "bd-id", Usage: "Only flush this BD (default: all BDs)"},
+				},
+				Action: func(c *cli.Context) error {
+					if !c.Bool("yes") {
+						return fmt.Errorf("--yes is required to flush BD peers")
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.Peer.BdPeerFlush(context.Background(),
+						connect.NewRequest(&v1.BdPeerFlushRequest{BdId: uint32(c.Uint("bd-id"))}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Flushed %d BD peers\n", resp.Msg.DeletedCount)
+					return nil
+				},
+			},
+			{
 				Name:  "list",
 				Usage: "List Bridge Domain peers",
 				Flags: []cli.Flag{

@@ -61,6 +61,31 @@ func fdbCommand() *cli.Command {
 				},
 			},
 			{
+				Name:  "flush",
+				Usage: "Delete FDB entries (requires --yes)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
+					&cli.UintFlag{Name: "bd-id", Usage: "Only flush this BD (default: all BDs)"},
+					&cli.BoolFlag{Name: "keep-static", Usage: "Preserve user-configured static entries"},
+				},
+				Action: func(c *cli.Context) error {
+					if !c.Bool("yes") {
+						return fmt.Errorf("--yes is required to flush FDB entries")
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.Fdb.FdbFlush(context.Background(),
+						connect.NewRequest(&v1.FdbFlushRequest{
+							BdId:       uint32(c.Uint("bd-id")),
+							KeepStatic: c.Bool("keep-static"),
+						}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Flushed %d FDB entries\n", resp.Msg.DeletedCount)
+					return nil
+				},
+			},
+			{
 				Name:  "list",
 				Usage: "List all FDB entries",
 				Action: func(c *cli.Context) error {

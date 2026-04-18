@@ -115,6 +115,18 @@ func (s *HeadendL2Server) HeadendL2Delete(
 	return connect.NewResponse(resp), nil
 }
 
+// HeadendL2Flush removes every headend L2 entry.
+func (s *HeadendL2Server) HeadendL2Flush(
+	ctx context.Context,
+	req *connect.Request[v1.HeadendL2FlushRequest],
+) (*connect.Response[v1.HeadendL2FlushResponse], error) {
+	count, err := s.mapOps.FlushHeadendL2()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.HeadendL2FlushResponse{DeletedCount: count}), nil
+}
+
 // HeadendL2List lists all Headend L2 entries
 func (s *HeadendL2Server) HeadendL2List(
 	ctx context.Context,

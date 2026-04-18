@@ -149,6 +149,26 @@ func sidFunctionCommand() *cli.Command {
 				},
 			},
 			{
+				Name:  "flush",
+				Usage: "Delete every SID function entry (requires --yes)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "yes", Usage: "Confirm the destructive operation", Required: true},
+				},
+				Action: func(c *cli.Context) error {
+					if !c.Bool("yes") {
+						return fmt.Errorf("--yes is required to flush all SID functions")
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.Sid.SidFunctionFlush(context.Background(),
+						connect.NewRequest(&v1.SidFunctionFlushRequest{}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Flushed %d SID functions\n", resp.Msg.DeletedCount)
+					return nil
+				},
+			},
+			{
 				Name:  "list",
 				Usage: "List all SID functions",
 				Action: func(c *cli.Context) error {

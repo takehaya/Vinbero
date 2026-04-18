@@ -934,6 +934,149 @@ func (m *MapOperations) ListBdPeers() (map[BdPeerKey]*HeadendEntry, error) {
 	return result, nil
 }
 
+// ===== Flush Operations =====
+//
+// Each Flush* method removes every entry from its target map in a single
+// operation. The two-phase pattern (collect keys then delete) avoids
+// mutating the map while iterating, which kernel BPF map iterators do
+// not guarantee safety for. Partial failures return the count of
+// entries already deleted plus an error so the caller can log progress.
+
+// FlushSidFunctions removes every SID function entry and releases the
+// associated aux indices. Returns the number of entries deleted.
+func (m *MapOperations) FlushSidFunctions() (uint32, error) {
+	entries, err := m.ListSidFunctions()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for prefix := range entries {
+		if err := m.DeleteSidFunction(prefix); err != nil {
+			return count, fmt.Errorf("flush sid_function: delete %q: %w", prefix, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushHeadendV4 removes every headend_v4 entry.
+func (m *MapOperations) FlushHeadendV4() (uint32, error) {
+	entries, err := m.ListHeadendV4()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for prefix := range entries {
+		if err := m.DeleteHeadendV4(prefix); err != nil {
+			return count, fmt.Errorf("flush headend_v4: delete %q: %w", prefix, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushHeadendV6 removes every headend_v6 entry.
+func (m *MapOperations) FlushHeadendV6() (uint32, error) {
+	entries, err := m.ListHeadendV6()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for prefix := range entries {
+		if err := m.DeleteHeadendV6(prefix); err != nil {
+			return count, fmt.Errorf("flush headend_v6: delete %q: %w", prefix, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushHeadendL2 removes every headend_l2 entry.
+func (m *MapOperations) FlushHeadendL2() (uint32, error) {
+	entries, err := m.ListHeadendL2()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for key := range entries {
+		if err := m.DeleteHeadendL2(key.Ifindex, key.VlanId); err != nil {
+			return count, fmt.Errorf("flush headend_l2: delete ifindex=%d vlan=%d: %w",
+				key.Ifindex, key.VlanId, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushFdb removes FDB entries, optionally scoped to a single BD and
+// optionally keeping user-configured static entries. bdID == 0 means
+// all BDs; keepStatic == true skips entries with IsStatic != 0.
+func (m *MapOperations) FlushFdb(bdID uint16, keepStatic bool) (uint32, error) {
+	entries, err := m.ListFdb()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for key, entry := range entries {
+		if bdID != 0 && key.BdId != bdID {
+			continue
+		}
+		if keepStatic && entry.IsStatic != 0 {
+			continue
+		}
+		mac := net.HardwareAddr(key.Mac[:])
+		if err := m.DeleteFdb(key.BdId, mac); err != nil {
+			return count, fmt.Errorf("flush fdb: delete bd=%d mac=%s: %w",
+				key.BdId, mac, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushBdPeers removes BD peer entries, optionally scoped to a single BD.
+// bdID == 0 means all BDs. The companion reverse-map entries are cleaned
+// up transitively via DeleteBdPeer.
+func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
+	entries, err := m.ListBdPeers()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for key := range entries {
+		if bdID != 0 && key.BdId != bdID {
+			continue
+		}
+		if err := m.DeleteBdPeer(key.BdId, key.Index); err != nil {
+			return count, fmt.Errorf("flush bd_peer: delete bd=%d idx=%d: %w",
+				key.BdId, key.Index, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushVlanTable removes dx2v entries, optionally scoped to a single
+// table. tableID == 0 means all tables.
+func (m *MapOperations) FlushVlanTable(tableID uint16) (uint32, error) {
+	entries, err := m.ListDx2vVlan()
+	if err != nil {
+		return 0, err
+	}
+	var count uint32
+	for key := range entries {
+		if tableID != 0 && key.TableId != tableID {
+			continue
+		}
+		if err := m.DeleteDx2vVlan(key.TableId, key.VlanId); err != nil {
+			return count, fmt.Errorf("flush dx2v: delete table=%d vlan=%d: %w",
+				key.TableId, key.VlanId, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
 // ===== Helper Functions =====
 
 func buildLpmKeyV4(cidr string) (*LpmKeyV4, error) {

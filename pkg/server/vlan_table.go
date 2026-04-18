@@ -96,6 +96,22 @@ func (s *VlanTableServer) VlanTableDelete(
 	return connect.NewResponse(resp), nil
 }
 
+// VlanTableFlush removes dx2v entries, optionally scoped to a table_id.
+func (s *VlanTableServer) VlanTableFlush(
+	ctx context.Context,
+	req *connect.Request[v1.VlanTableFlushRequest],
+) (*connect.Response[v1.VlanTableFlushResponse], error) {
+	if req.Msg.TableId > 65535 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("table_id must be <= 65535"))
+	}
+	count, err := s.mapOps.FlushVlanTable(uint16(req.Msg.TableId))
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.VlanTableFlushResponse{DeletedCount: count}), nil
+}
+
 func (s *VlanTableServer) VlanTableList(
 	ctx context.Context,
 	req *connect.Request[v1.VlanTableListRequest],

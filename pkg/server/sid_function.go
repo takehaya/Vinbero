@@ -133,6 +133,18 @@ func (s *SidFunctionServer) SidFunctionGet(
 	return connect.NewResponse(resp), nil
 }
 
+// SidFunctionFlush removes every SID function entry and releases aux.
+func (s *SidFunctionServer) SidFunctionFlush(
+	ctx context.Context,
+	req *connect.Request[v1.SidFunctionFlushRequest],
+) (*connect.Response[v1.SidFunctionFlushResponse], error) {
+	count, err := s.mapOps.FlushSidFunctions()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.SidFunctionFlushResponse{DeletedCount: count}), nil
+}
+
 // protoToEntry converts a protobuf SidFunction to a BPF generic entry + optional aux entry
 func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunctionEntry, *bpf.SidAuxEntry, error) {
 	entry := &bpf.SidFunctionEntry{

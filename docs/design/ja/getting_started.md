@@ -207,3 +207,22 @@ JSON で取りたいときは `--json` を足します (スクリプト向き):
 ```bash
 vinbero --json sid list | jq '.sid_functions[] | {prefix: .trigger_prefix, action}'
 ```
+
+## 一括削除 (flush)
+
+各リソース種別に `flush` サブコマンドがあり、そのマップ配下を一掃できます。誤操作防止のため **`--yes` 必須**。
+
+```bash
+vinbero sid flush --yes              # SID function 全消去
+vinbero hv4 flush --yes              # Headend v4 全消去
+vinbero hv6 flush --yes
+vinbero hl2 flush --yes
+vinbero peer flush --yes [--bd-id N] # BD peer (BD 単位も可)
+vinbero fdb flush --yes [--bd-id N] [--keep-static]
+vinbero vt flush --yes [--table-id N]
+```
+
+`pin_maps: true` との併用で安全な使い方:
+- デモ / test 環境の reset: `sid flush --yes && hv4 flush --yes && ...` で pin 済 map を空にしてから再投入
+- FDB の再学習: `fdb flush --yes --keep-static` で動的学習エントリだけ消す
+- BD 単位のマルテナント撤退: `peer flush --yes --bd-id 100 && fdb flush --yes --bd-id 100`

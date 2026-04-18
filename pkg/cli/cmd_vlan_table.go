@@ -62,6 +62,27 @@ func vlanTableCommand() *cli.Command {
 				},
 			},
 			{
+				Name:  "flush",
+				Usage: "Delete VLAN cross-connect entries (requires --yes)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
+					&cli.UintFlag{Name: "table-id", Usage: "Only flush this table (default: all tables)"},
+				},
+				Action: func(c *cli.Context) error {
+					if !c.Bool("yes") {
+						return fmt.Errorf("--yes is required to flush VLAN cross-connect entries")
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.VlanTbl.VlanTableFlush(context.Background(),
+						connect.NewRequest(&v1.VlanTableFlushRequest{TableId: uint32(c.Uint("table-id"))}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Flushed %d VLAN cross-connect entries\n", resp.Msg.DeletedCount)
+					return nil
+				},
+			},
+			{
 				Name:  "list",
 				Usage: "List VLAN cross-connect entries",
 				Flags: []cli.Flag{
