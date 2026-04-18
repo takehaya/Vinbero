@@ -22,7 +22,7 @@ make build
 
 ## 最小限の設定ファイル
 
-`vinbero.yml` にはデバイスとサーバーバインドの設定のみ記述します。VRF / Bridge 等のリソースは起動後に API / CLI 経由で設定します。
+`vinbero.yml` にはデバイスとサーバーバインドの設定のみ記述します。VRF / Bridge 等のリソースは起動後に API / CLI 経由で設定します。全フィールドの一覧は [configuration.md](configuration.md)、再起動時に何が残る / 消えるかは [persistence.md](persistence.md) を参照してください。
 
 ```yaml
 internal:
