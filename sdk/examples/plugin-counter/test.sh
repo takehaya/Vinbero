@@ -122,11 +122,16 @@ FAILED=0
 print_info "Sending traffic from host1 towards fc00:3::3 (triggers SRv6 encap at router1)..."
 ip netns exec "$ns_host1" ping6 -c 3 -W 2 fc00:3::3 > /dev/null 2>&1 || true
 
+# stats_map is vinbero's global per-action counter across the XDP entry.
+# Plugin invocations land here too, but so does unrelated traffic (NDP /
+# RA / MLD), so the numbers won't exactly match plugin invocations.
+print_info "stats_map (global per-action; includes non-plugin traffic):"
+ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show
+
 # plugin_counter_map is the plugin's private per-CPU counter, incremented
-# once per invocation. Reading it directly tells us exactly how many
-# times the plugin body ran. (vinbero's stats_map is a global per-action
-# aggregator and also counts unrelated traffic, so it's not shown here.)
-print_info "Reading plugin_counter_map via bpftool..."
+# once per invocation — this is the ground truth for how many times the
+# plugin body ran.
+print_info "plugin_counter_map (plugin-private, per-CPU):"
 MAP_ID=$(ip netns exec "$ns_router2" bpftool map show 2>/dev/null \
     | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
 if [ -z "$MAP_ID" ]; then
