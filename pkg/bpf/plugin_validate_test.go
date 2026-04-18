@@ -6,6 +6,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/btf"
 )
 
 func buildSpec(name string, progType ebpf.ProgramType, ins asm.Instructions) *ebpf.ProgramSpec {
@@ -145,5 +146,123 @@ func TestValidatePluginProgram_DynamicTailCall(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dynamic") {
 		t.Errorf("error should flag dynamic tail call, got: %v", err)
+	}
+}
+
+// Plugin calls bpf_redirect_map directly — must be rejected so all redirect
+// paths stay under vinbero's control.
+func TestValidatePluginProgram_ForbiddenHelper_RedirectMap(t *testing.T) {
+	ins := asm.Instructions{
+		asm.Mov.Imm(asm.R0, 0),
+		asm.FnRedirectMap.Call(),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	}
+	err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins))
+	if err == nil {
+		t.Fatal("expected error for bpf_redirect_map call")
+	}
+	if !strings.Contains(err.Error(), "bpf_redirect_map") {
+		t.Errorf("error should name the forbidden helper, got: %v", err)
+	}
+}
+
+// Kfuncs are allowed so plugins can access BPF-exposed kernel APIs.
+// Specific kfuncs can be blocked later by extending ForbiddenHelpers-style
+// lists if a concrete abuse emerges.
+func TestValidatePluginProgram_KfuncCall_Allowed(t *testing.T) {
+	kfunc := asm.Instruction{
+		OpCode:   asm.OpCode(asm.JumpClass).SetJumpOp(asm.Call),
+		Src:      asm.PseudoKfuncCall,
+		Constant: -1,
+	}.WithReference("some_kfunc")
+	ins := asm.Instructions{
+		asm.Mov.Imm(asm.R0, 0),
+		kfunc,
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	}
+	if err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins)); err != nil {
+		t.Fatalf("expected kfunc call to pass validation, got: %v", err)
+	}
+}
+
+// An exit far from any epilogue call must be caught by the proximity check,
+// even though the call-site presence test alone would pass.
+func TestValidatePluginProgram_ExitWithoutEpilogueNearby(t *testing.T) {
+	ins := asm.Instructions{
+		// early exit with no epilogue nearby
+		asm.Mov.Imm(asm.R0, 1),
+		asm.Return(),
+	}
+	// pad with > ExitProximityWindow no-ops, then a covered exit.
+	for range ExitProximityWindow + 4 {
+		ins = append(ins, asm.Mov.Imm(asm.R1, 0))
+	}
+	ins = append(ins,
+		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	)
+	err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins))
+	if err == nil {
+		t.Fatal("expected error for exit with no epilogue in proximity")
+	}
+	if !strings.Contains(err.Error(), "exit") {
+		t.Errorf("error should mention the exit, got: %v", err)
+	}
+}
+
+// BTF: plugin declares sid_function_map with a value struct whose name does
+// not match the core expectation. Must be caught at collection validation.
+func TestValidatePluginCollection_BTF_MapValueTypeMismatch(t *testing.T) {
+	prog := buildSpec("xdp_entry", ebpf.XDP, asm.Instructions{
+		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{"xdp_entry": prog},
+		Maps: map[string]*ebpf.MapSpec{
+			"sid_function_map": {
+				Name:       "sid_function_map",
+				Type:       ebpf.LPMTrie,
+				KeySize:    20,
+				ValueSize:  12,
+				MaxEntries: 1024,
+				Value:      &btf.Struct{Name: "wrong_name"},
+			},
+		},
+	}
+	if _, err := ValidatePluginCollection(spec, "xdp_entry"); err == nil {
+		t.Fatal("expected BTF type mismatch to be rejected")
+	} else if !strings.Contains(err.Error(), "sid_function_entry") {
+		t.Errorf("error should name the expected type, got: %v", err)
+	}
+}
+
+// BTF absent (stripped ELF): validation falls back to asm-level checks and
+// must succeed if those pass.
+func TestValidatePluginCollection_BTF_MissingOK(t *testing.T) {
+	prog := buildSpec("xdp_entry", ebpf.XDP, asm.Instructions{
+		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{"xdp_entry": prog},
+		Maps: map[string]*ebpf.MapSpec{
+			"sid_function_map": {
+				Name:       "sid_function_map",
+				Type:       ebpf.LPMTrie,
+				KeySize:    20,
+				ValueSize:  12,
+				MaxEntries: 1024,
+				// Value: nil — stripped BTF
+			},
+		},
+	}
+	if _, err := ValidatePluginCollection(spec, "xdp_entry"); err != nil {
+		t.Fatalf("expected stripped-BTF plugin to pass, got: %v", err)
 	}
 }

@@ -96,8 +96,11 @@ ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
 # Create the plugin SID — action=32 dispatches to our plugin at slot 32.
 # Note: END_BPF resolves to enum value 16, not slot 32. Use the raw numeric
 # index so the tail call goes to the correct PROG_ARRAY slot.
+# The plugin aux carries an "increment" field (plugin_counter_aux); the
+# server encodes the JSON via the plugin's BTF.
 ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
-    sid create --trigger-prefix fc00:2::32/128 --action ${PLUGIN_INDEX}
+    sid create --trigger-prefix fc00:2::32/128 --action ${PLUGIN_INDEX} \
+    --plugin-aux-json '{"increment": 10}'
 
 # Update the route on router1 to use the plugin SID
 ip netns exec "$ns_router1" ip -6 route add fc00:3::/64 \
@@ -128,23 +131,39 @@ ip netns exec "$ns_host1" ping6 -c 3 -W 2 fc00:3::3 > /dev/null 2>&1 || true
 print_info "stats_map (global per-action; includes non-plugin traffic):"
 ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show
 
-# plugin_counter_map is the plugin's private per-CPU counter, incremented
-# once per invocation — this is the ground truth for how many times the
-# plugin body ran.
-print_info "plugin_counter_map (plugin-private, per-CPU):"
-MAP_ID=$(ip netns exec "$ns_router2" bpftool map show 2>/dev/null \
-    | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
-if [ -z "$MAP_ID" ]; then
-    print_error "plugin_counter_map not visible via bpftool (bpftool missing?)"
+# Per-slot invocation counter, plugin-only view. This is the canonical
+# ground truth: vinbero increments slot_stats_endpoint[32] exactly once
+# per plugin body execution via tailcall_epilogue.
+print_info "stats slot show --type endpoint --plugin-only:"
+SLOT_OUT=$(ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+    stats slot show --type endpoint --plugin-only)
+echo "$SLOT_OUT"
+SLOT_PACKETS=$(echo "$SLOT_OUT" | awk -v slot="${PLUGIN_INDEX}" '$2 == slot { print $4; exit }')
+if [ -z "$SLOT_PACKETS" ] || [ "$SLOT_PACKETS" -eq 0 ]; then
+    print_error "slot_stats_endpoint[${PLUGIN_INDEX}] is zero — plugin was never invoked"
     FAILED=$((FAILED + 1))
 else
+    print_success "plugin invoked $SLOT_PACKETS times (slot=${PLUGIN_INDEX})"
+    PASSED=$((PASSED + 1))
+fi
+
+# plugin_counter_map is the plugin's private per-CPU counter — a second
+# independent check against bpftool.
+print_info "plugin_counter_map (plugin-private, read via bpftool):"
+MAP_ID=$(ip netns exec "$ns_router2" bpftool map show 2>/dev/null \
+    | awk '/name plugin_counter/ { sub(":","",$1); print $1; exit }')
+if [ -n "$MAP_ID" ]; then
     COUNTER_TOTAL=$(ip netns exec "$ns_router2" bpftool map dump id "$MAP_ID" 2>/dev/null \
         | grep -Eo '"value": [0-9]+' | awk '{ s += $2 } END { print s+0 }')
-    if [ "$COUNTER_TOTAL" -gt 0 ]; then
-        print_success "plugin invoked $COUNTER_TOTAL times (plugin_counter_map total across CPUs)"
+    print_info "plugin_counter_map total=${COUNTER_TOTAL}"
+    # The plugin aux sets increment=10, so with SLOT_PACKETS plugin
+    # invocations the counter should equal SLOT_PACKETS * 10.
+    EXPECTED=$((SLOT_PACKETS * 10))
+    if [ "$COUNTER_TOTAL" -eq "$EXPECTED" ]; then
+        print_success "counter matches increment=10 * ${SLOT_PACKETS} slot packets"
         PASSED=$((PASSED + 1))
     else
-        print_error "plugin_counter_map is zero — plugin was never invoked"
+        print_error "counter mismatch: got ${COUNTER_TOTAL}, expected ${EXPECTED}"
         FAILED=$((FAILED + 1))
     fi
 fi

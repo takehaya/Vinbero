@@ -43,10 +43,11 @@
         _a;                                                                    \
     })
 
-// Lookup sid_aux_map if has_aux is set
+// Lookup sid_aux_map when aux_index is non-zero. Index 0 is the "no aux"
+// sentinel reserved by the userspace allocator.
 #define TAILCALL_AUX_LOOKUP(tctx, aux)                                        \
     struct sid_aux_entry *(aux) = NULL;                                        \
-    if ((tctx)->sid_entry.has_aux) {                                           \
+    if ((tctx)->sid_entry.aux_index) {                                         \
         __u32 _idx = (tctx)->sid_entry.aux_index;                              \
         (aux) = bpf_map_lookup_elem(&sid_aux_map, &_idx);                      \
     }

@@ -78,6 +78,18 @@ func (s *Headendv4Server) Headendv4Delete(
 	return connect.NewResponse(resp), nil
 }
 
+// Headendv4Flush removes every headend v4 entry.
+func (s *Headendv4Server) Headendv4Flush(
+	ctx context.Context,
+	req *connect.Request[v1.Headendv4FlushRequest],
+) (*connect.Response[v1.Headendv4FlushResponse], error) {
+	count, err := s.mapOps.FlushHeadendV4()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.Headendv4FlushResponse{DeletedCount: count}), nil
+}
+
 // Headendv4List lists all Headend v4 entries
 func (s *Headendv4Server) Headendv4List(
 	ctx context.Context,

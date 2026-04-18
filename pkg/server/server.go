@@ -41,8 +41,13 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 
 // Setup registers all service handlers
 func (s *Server) Setup() {
+	// Plugin service is constructed first so SidFunctionServer can resolve
+	// per-slot aux BTF types when callers use plugin_aux_json. The actual
+	// handler registration happens further down with the other services.
+	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants())
+
 	// SidFunction service
-	sidFunctionServer := NewSidFunctionServer(s.mapOps)
+	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer)
 	path, handler := vinberov1connect.NewSidFunctionServiceHandler(sidFunctionServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered SidFunctionService", zap.String("path", path))
@@ -89,17 +94,19 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VlanTableService", zap.String("path", path))
 
-	// Stats service (read-only, for observability)
-	statsServer := NewStatsServer(s.mapOps)
-	path, handler = vinberov1connect.NewStatsServiceHandler(statsServer)
-	s.mux.Handle(path, handler)
-	s.logger.Info("Registered StatsService", zap.String("path", path))
-
-	// Plugin service (dynamic BPF plugin registration)
-	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants())
+	// Plugin service (dynamic BPF plugin registration). pluginServer was
+	// created at the top of Setup() so SidFunctionServer could hold a
+	// reference for plugin_aux_json encoding.
 	path, handler = vinberov1connect.NewPluginServiceHandler(pluginServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered PluginService", zap.String("path", path))
+
+	// Stats service (read-only, for observability). Depends on pluginServer
+	// for resolving per-slot stat labels to plugin program names.
+	statsServer := NewStatsServer(s.mapOps, pluginServer)
+	path, handler = vinberov1connect.NewStatsServiceHandler(statsServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered StatsService", zap.String("path", path))
 
 	// Health check endpoint
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

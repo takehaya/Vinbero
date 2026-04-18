@@ -23,6 +23,7 @@ const (
 	SidFunctionService_SidFunctionCreate_FullMethodName = "/vinbero.v1.SidFunctionService/SidFunctionCreate"
 	SidFunctionService_SidFunctionDelete_FullMethodName = "/vinbero.v1.SidFunctionService/SidFunctionDelete"
 	SidFunctionService_SidFunctionList_FullMethodName   = "/vinbero.v1.SidFunctionService/SidFunctionList"
+	SidFunctionService_SidFunctionFlush_FullMethodName  = "/vinbero.v1.SidFunctionService/SidFunctionFlush"
 	SidFunctionService_SidFunctionGet_FullMethodName    = "/vinbero.v1.SidFunctionService/SidFunctionGet"
 )
 
@@ -33,6 +34,7 @@ type SidFunctionServiceClient interface {
 	SidFunctionCreate(ctx context.Context, in *SidFunctionCreateRequest, opts ...grpc.CallOption) (*SidFunctionCreateResponse, error)
 	SidFunctionDelete(ctx context.Context, in *SidFunctionDeleteRequest, opts ...grpc.CallOption) (*SidFunctionDeleteResponse, error)
 	SidFunctionList(ctx context.Context, in *SidFunctionListRequest, opts ...grpc.CallOption) (*SidFunctionListResponse, error)
+	SidFunctionFlush(ctx context.Context, in *SidFunctionFlushRequest, opts ...grpc.CallOption) (*SidFunctionFlushResponse, error)
 	SidFunctionGet(ctx context.Context, in *SidFunctionGetRequest, opts ...grpc.CallOption) (*SidFunctionGetResponse, error)
 }
 
@@ -71,6 +73,15 @@ func (c *sidFunctionServiceClient) SidFunctionList(ctx context.Context, in *SidF
 	return out, nil
 }
 
+func (c *sidFunctionServiceClient) SidFunctionFlush(ctx context.Context, in *SidFunctionFlushRequest, opts ...grpc.CallOption) (*SidFunctionFlushResponse, error) {
+	out := new(SidFunctionFlushResponse)
+	err := c.cc.Invoke(ctx, SidFunctionService_SidFunctionFlush_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sidFunctionServiceClient) SidFunctionGet(ctx context.Context, in *SidFunctionGetRequest, opts ...grpc.CallOption) (*SidFunctionGetResponse, error) {
 	out := new(SidFunctionGetResponse)
 	err := c.cc.Invoke(ctx, SidFunctionService_SidFunctionGet_FullMethodName, in, out, opts...)
@@ -87,6 +98,7 @@ type SidFunctionServiceServer interface {
 	SidFunctionCreate(context.Context, *SidFunctionCreateRequest) (*SidFunctionCreateResponse, error)
 	SidFunctionDelete(context.Context, *SidFunctionDeleteRequest) (*SidFunctionDeleteResponse, error)
 	SidFunctionList(context.Context, *SidFunctionListRequest) (*SidFunctionListResponse, error)
+	SidFunctionFlush(context.Context, *SidFunctionFlushRequest) (*SidFunctionFlushResponse, error)
 	SidFunctionGet(context.Context, *SidFunctionGetRequest) (*SidFunctionGetResponse, error)
 }
 
@@ -102,6 +114,9 @@ func (UnimplementedSidFunctionServiceServer) SidFunctionDelete(context.Context, 
 }
 func (UnimplementedSidFunctionServiceServer) SidFunctionList(context.Context, *SidFunctionListRequest) (*SidFunctionListResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SidFunctionList not implemented")
+}
+func (UnimplementedSidFunctionServiceServer) SidFunctionFlush(context.Context, *SidFunctionFlushRequest) (*SidFunctionFlushResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SidFunctionFlush not implemented")
 }
 func (UnimplementedSidFunctionServiceServer) SidFunctionGet(context.Context, *SidFunctionGetRequest) (*SidFunctionGetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SidFunctionGet not implemented")
@@ -172,6 +187,24 @@ func _SidFunctionService_SidFunctionList_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SidFunctionService_SidFunctionFlush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SidFunctionFlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SidFunctionServiceServer).SidFunctionFlush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SidFunctionService_SidFunctionFlush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SidFunctionServiceServer).SidFunctionFlush(ctx, req.(*SidFunctionFlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SidFunctionService_SidFunctionGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SidFunctionGetRequest)
 	if err := dec(in); err != nil {
@@ -210,6 +243,10 @@ var SidFunctionService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SidFunctionService_SidFunctionList_Handler,
 		},
 		{
+			MethodName: "SidFunctionFlush",
+			Handler:    _SidFunctionService_SidFunctionFlush_Handler,
+		},
+		{
 			MethodName: "SidFunctionGet",
 			Handler:    _SidFunctionService_SidFunctionGet_Handler,
 		},
@@ -222,6 +259,7 @@ const (
 	Headendv4Service_Headendv4Create_FullMethodName = "/vinbero.v1.Headendv4Service/Headendv4Create"
 	Headendv4Service_Headendv4Delete_FullMethodName = "/vinbero.v1.Headendv4Service/Headendv4Delete"
 	Headendv4Service_Headendv4List_FullMethodName   = "/vinbero.v1.Headendv4Service/Headendv4List"
+	Headendv4Service_Headendv4Flush_FullMethodName  = "/vinbero.v1.Headendv4Service/Headendv4Flush"
 	Headendv4Service_Headendv4Get_FullMethodName    = "/vinbero.v1.Headendv4Service/Headendv4Get"
 )
 
@@ -232,6 +270,7 @@ type Headendv4ServiceClient interface {
 	Headendv4Create(ctx context.Context, in *Headendv4CreateRequest, opts ...grpc.CallOption) (*Headendv4CreateResponse, error)
 	Headendv4Delete(ctx context.Context, in *Headendv4DeleteRequest, opts ...grpc.CallOption) (*Headendv4DeleteResponse, error)
 	Headendv4List(ctx context.Context, in *Headendv4ListRequest, opts ...grpc.CallOption) (*Headendv4ListResponse, error)
+	Headendv4Flush(ctx context.Context, in *Headendv4FlushRequest, opts ...grpc.CallOption) (*Headendv4FlushResponse, error)
 	Headendv4Get(ctx context.Context, in *Headendv4GetRequest, opts ...grpc.CallOption) (*Headendv4GetResponse, error)
 }
 
@@ -270,6 +309,15 @@ func (c *headendv4ServiceClient) Headendv4List(ctx context.Context, in *Headendv
 	return out, nil
 }
 
+func (c *headendv4ServiceClient) Headendv4Flush(ctx context.Context, in *Headendv4FlushRequest, opts ...grpc.CallOption) (*Headendv4FlushResponse, error) {
+	out := new(Headendv4FlushResponse)
+	err := c.cc.Invoke(ctx, Headendv4Service_Headendv4Flush_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *headendv4ServiceClient) Headendv4Get(ctx context.Context, in *Headendv4GetRequest, opts ...grpc.CallOption) (*Headendv4GetResponse, error) {
 	out := new(Headendv4GetResponse)
 	err := c.cc.Invoke(ctx, Headendv4Service_Headendv4Get_FullMethodName, in, out, opts...)
@@ -286,6 +334,7 @@ type Headendv4ServiceServer interface {
 	Headendv4Create(context.Context, *Headendv4CreateRequest) (*Headendv4CreateResponse, error)
 	Headendv4Delete(context.Context, *Headendv4DeleteRequest) (*Headendv4DeleteResponse, error)
 	Headendv4List(context.Context, *Headendv4ListRequest) (*Headendv4ListResponse, error)
+	Headendv4Flush(context.Context, *Headendv4FlushRequest) (*Headendv4FlushResponse, error)
 	Headendv4Get(context.Context, *Headendv4GetRequest) (*Headendv4GetResponse, error)
 }
 
@@ -301,6 +350,9 @@ func (UnimplementedHeadendv4ServiceServer) Headendv4Delete(context.Context, *Hea
 }
 func (UnimplementedHeadendv4ServiceServer) Headendv4List(context.Context, *Headendv4ListRequest) (*Headendv4ListResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Headendv4List not implemented")
+}
+func (UnimplementedHeadendv4ServiceServer) Headendv4Flush(context.Context, *Headendv4FlushRequest) (*Headendv4FlushResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv4Flush not implemented")
 }
 func (UnimplementedHeadendv4ServiceServer) Headendv4Get(context.Context, *Headendv4GetRequest) (*Headendv4GetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Headendv4Get not implemented")
@@ -371,6 +423,24 @@ func _Headendv4Service_Headendv4List_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Headendv4Service_Headendv4Flush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv4FlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(Headendv4ServiceServer).Headendv4Flush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Headendv4Service_Headendv4Flush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(Headendv4ServiceServer).Headendv4Flush(ctx, req.(*Headendv4FlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Headendv4Service_Headendv4Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Headendv4GetRequest)
 	if err := dec(in); err != nil {
@@ -409,6 +479,10 @@ var Headendv4Service_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Headendv4Service_Headendv4List_Handler,
 		},
 		{
+			MethodName: "Headendv4Flush",
+			Handler:    _Headendv4Service_Headendv4Flush_Handler,
+		},
+		{
 			MethodName: "Headendv4Get",
 			Handler:    _Headendv4Service_Headendv4Get_Handler,
 		},
@@ -422,6 +496,7 @@ const (
 	Headendv6Service_Headendv6Delete_FullMethodName = "/vinbero.v1.Headendv6Service/Headendv6Delete"
 	Headendv6Service_Headendv6List_FullMethodName   = "/vinbero.v1.Headendv6Service/Headendv6List"
 	Headendv6Service_Headendv6Get_FullMethodName    = "/vinbero.v1.Headendv6Service/Headendv6Get"
+	Headendv6Service_Headendv6Flush_FullMethodName  = "/vinbero.v1.Headendv6Service/Headendv6Flush"
 )
 
 // Headendv6ServiceClient is the client API for Headendv6Service service.
@@ -432,6 +507,7 @@ type Headendv6ServiceClient interface {
 	Headendv6Delete(ctx context.Context, in *Headendv6DeleteRequest, opts ...grpc.CallOption) (*Headendv6DeleteResponse, error)
 	Headendv6List(ctx context.Context, in *Headendv6ListRequest, opts ...grpc.CallOption) (*Headendv6ListResponse, error)
 	Headendv6Get(ctx context.Context, in *Headendv6GetRequest, opts ...grpc.CallOption) (*Headendv6GetResponse, error)
+	Headendv6Flush(ctx context.Context, in *Headendv6FlushRequest, opts ...grpc.CallOption) (*Headendv6FlushResponse, error)
 }
 
 type headendv6ServiceClient struct {
@@ -478,6 +554,15 @@ func (c *headendv6ServiceClient) Headendv6Get(ctx context.Context, in *Headendv6
 	return out, nil
 }
 
+func (c *headendv6ServiceClient) Headendv6Flush(ctx context.Context, in *Headendv6FlushRequest, opts ...grpc.CallOption) (*Headendv6FlushResponse, error) {
+	out := new(Headendv6FlushResponse)
+	err := c.cc.Invoke(ctx, Headendv6Service_Headendv6Flush_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Headendv6ServiceServer is the server API for Headendv6Service service.
 // All implementations should embed UnimplementedHeadendv6ServiceServer
 // for forward compatibility
@@ -486,6 +571,7 @@ type Headendv6ServiceServer interface {
 	Headendv6Delete(context.Context, *Headendv6DeleteRequest) (*Headendv6DeleteResponse, error)
 	Headendv6List(context.Context, *Headendv6ListRequest) (*Headendv6ListResponse, error)
 	Headendv6Get(context.Context, *Headendv6GetRequest) (*Headendv6GetResponse, error)
+	Headendv6Flush(context.Context, *Headendv6FlushRequest) (*Headendv6FlushResponse, error)
 }
 
 // UnimplementedHeadendv6ServiceServer should be embedded to have forward compatible implementations.
@@ -503,6 +589,9 @@ func (UnimplementedHeadendv6ServiceServer) Headendv6List(context.Context, *Heade
 }
 func (UnimplementedHeadendv6ServiceServer) Headendv6Get(context.Context, *Headendv6GetRequest) (*Headendv6GetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Headendv6Get not implemented")
+}
+func (UnimplementedHeadendv6ServiceServer) Headendv6Flush(context.Context, *Headendv6FlushRequest) (*Headendv6FlushResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Headendv6Flush not implemented")
 }
 
 // UnsafeHeadendv6ServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -588,6 +677,24 @@ func _Headendv6Service_Headendv6Get_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Headendv6Service_Headendv6Flush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Headendv6FlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(Headendv6ServiceServer).Headendv6Flush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Headendv6Service_Headendv6Flush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(Headendv6ServiceServer).Headendv6Flush(ctx, req.(*Headendv6FlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Headendv6Service_ServiceDesc is the grpc.ServiceDesc for Headendv6Service service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -611,6 +718,10 @@ var Headendv6Service_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Headendv6Get",
 			Handler:    _Headendv6Service_Headendv6Get_Handler,
 		},
+		{
+			MethodName: "Headendv6Flush",
+			Handler:    _Headendv6Service_Headendv6Flush_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "vinbero/v1/vinbero.proto",
@@ -620,6 +731,7 @@ const (
 	FdbService_FdbList_FullMethodName   = "/vinbero.v1.FdbService/FdbList"
 	FdbService_FdbCreate_FullMethodName = "/vinbero.v1.FdbService/FdbCreate"
 	FdbService_FdbDelete_FullMethodName = "/vinbero.v1.FdbService/FdbDelete"
+	FdbService_FdbFlush_FullMethodName  = "/vinbero.v1.FdbService/FdbFlush"
 )
 
 // FdbServiceClient is the client API for FdbService service.
@@ -629,6 +741,7 @@ type FdbServiceClient interface {
 	FdbList(ctx context.Context, in *FdbListRequest, opts ...grpc.CallOption) (*FdbListResponse, error)
 	FdbCreate(ctx context.Context, in *FdbCreateRequest, opts ...grpc.CallOption) (*FdbCreateResponse, error)
 	FdbDelete(ctx context.Context, in *FdbDeleteRequest, opts ...grpc.CallOption) (*FdbDeleteResponse, error)
+	FdbFlush(ctx context.Context, in *FdbFlushRequest, opts ...grpc.CallOption) (*FdbFlushResponse, error)
 }
 
 type fdbServiceClient struct {
@@ -666,6 +779,15 @@ func (c *fdbServiceClient) FdbDelete(ctx context.Context, in *FdbDeleteRequest, 
 	return out, nil
 }
 
+func (c *fdbServiceClient) FdbFlush(ctx context.Context, in *FdbFlushRequest, opts ...grpc.CallOption) (*FdbFlushResponse, error) {
+	out := new(FdbFlushResponse)
+	err := c.cc.Invoke(ctx, FdbService_FdbFlush_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FdbServiceServer is the server API for FdbService service.
 // All implementations should embed UnimplementedFdbServiceServer
 // for forward compatibility
@@ -673,6 +795,7 @@ type FdbServiceServer interface {
 	FdbList(context.Context, *FdbListRequest) (*FdbListResponse, error)
 	FdbCreate(context.Context, *FdbCreateRequest) (*FdbCreateResponse, error)
 	FdbDelete(context.Context, *FdbDeleteRequest) (*FdbDeleteResponse, error)
+	FdbFlush(context.Context, *FdbFlushRequest) (*FdbFlushResponse, error)
 }
 
 // UnimplementedFdbServiceServer should be embedded to have forward compatible implementations.
@@ -687,6 +810,9 @@ func (UnimplementedFdbServiceServer) FdbCreate(context.Context, *FdbCreateReques
 }
 func (UnimplementedFdbServiceServer) FdbDelete(context.Context, *FdbDeleteRequest) (*FdbDeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FdbDelete not implemented")
+}
+func (UnimplementedFdbServiceServer) FdbFlush(context.Context, *FdbFlushRequest) (*FdbFlushResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FdbFlush not implemented")
 }
 
 // UnsafeFdbServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -754,6 +880,24 @@ func _FdbService_FdbDelete_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FdbService_FdbFlush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FdbFlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FdbServiceServer).FdbFlush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FdbService_FdbFlush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FdbServiceServer).FdbFlush(ctx, req.(*FdbFlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // FdbService_ServiceDesc is the grpc.ServiceDesc for FdbService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -773,6 +917,10 @@ var FdbService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "FdbDelete",
 			Handler:    _FdbService_FdbDelete_Handler,
 		},
+		{
+			MethodName: "FdbFlush",
+			Handler:    _FdbService_FdbFlush_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "vinbero/v1/vinbero.proto",
@@ -782,6 +930,7 @@ const (
 	VlanTableService_VlanTableCreate_FullMethodName = "/vinbero.v1.VlanTableService/VlanTableCreate"
 	VlanTableService_VlanTableDelete_FullMethodName = "/vinbero.v1.VlanTableService/VlanTableDelete"
 	VlanTableService_VlanTableList_FullMethodName   = "/vinbero.v1.VlanTableService/VlanTableList"
+	VlanTableService_VlanTableFlush_FullMethodName  = "/vinbero.v1.VlanTableService/VlanTableFlush"
 )
 
 // VlanTableServiceClient is the client API for VlanTableService service.
@@ -791,6 +940,7 @@ type VlanTableServiceClient interface {
 	VlanTableCreate(ctx context.Context, in *VlanTableCreateRequest, opts ...grpc.CallOption) (*VlanTableCreateResponse, error)
 	VlanTableDelete(ctx context.Context, in *VlanTableDeleteRequest, opts ...grpc.CallOption) (*VlanTableDeleteResponse, error)
 	VlanTableList(ctx context.Context, in *VlanTableListRequest, opts ...grpc.CallOption) (*VlanTableListResponse, error)
+	VlanTableFlush(ctx context.Context, in *VlanTableFlushRequest, opts ...grpc.CallOption) (*VlanTableFlushResponse, error)
 }
 
 type vlanTableServiceClient struct {
@@ -828,6 +978,15 @@ func (c *vlanTableServiceClient) VlanTableList(ctx context.Context, in *VlanTabl
 	return out, nil
 }
 
+func (c *vlanTableServiceClient) VlanTableFlush(ctx context.Context, in *VlanTableFlushRequest, opts ...grpc.CallOption) (*VlanTableFlushResponse, error) {
+	out := new(VlanTableFlushResponse)
+	err := c.cc.Invoke(ctx, VlanTableService_VlanTableFlush_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VlanTableServiceServer is the server API for VlanTableService service.
 // All implementations should embed UnimplementedVlanTableServiceServer
 // for forward compatibility
@@ -835,6 +994,7 @@ type VlanTableServiceServer interface {
 	VlanTableCreate(context.Context, *VlanTableCreateRequest) (*VlanTableCreateResponse, error)
 	VlanTableDelete(context.Context, *VlanTableDeleteRequest) (*VlanTableDeleteResponse, error)
 	VlanTableList(context.Context, *VlanTableListRequest) (*VlanTableListResponse, error)
+	VlanTableFlush(context.Context, *VlanTableFlushRequest) (*VlanTableFlushResponse, error)
 }
 
 // UnimplementedVlanTableServiceServer should be embedded to have forward compatible implementations.
@@ -849,6 +1009,9 @@ func (UnimplementedVlanTableServiceServer) VlanTableDelete(context.Context, *Vla
 }
 func (UnimplementedVlanTableServiceServer) VlanTableList(context.Context, *VlanTableListRequest) (*VlanTableListResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method VlanTableList not implemented")
+}
+func (UnimplementedVlanTableServiceServer) VlanTableFlush(context.Context, *VlanTableFlushRequest) (*VlanTableFlushResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VlanTableFlush not implemented")
 }
 
 // UnsafeVlanTableServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -916,6 +1079,24 @@ func _VlanTableService_VlanTableList_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VlanTableService_VlanTableFlush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VlanTableFlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VlanTableServiceServer).VlanTableFlush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VlanTableService_VlanTableFlush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VlanTableServiceServer).VlanTableFlush(ctx, req.(*VlanTableFlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VlanTableService_ServiceDesc is the grpc.ServiceDesc for VlanTableService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -935,6 +1116,10 @@ var VlanTableService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "VlanTableList",
 			Handler:    _VlanTableService_VlanTableList_Handler,
 		},
+		{
+			MethodName: "VlanTableFlush",
+			Handler:    _VlanTableService_VlanTableFlush_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "vinbero/v1/vinbero.proto",
@@ -944,6 +1129,7 @@ const (
 	BdPeerService_BdPeerCreate_FullMethodName = "/vinbero.v1.BdPeerService/BdPeerCreate"
 	BdPeerService_BdPeerDelete_FullMethodName = "/vinbero.v1.BdPeerService/BdPeerDelete"
 	BdPeerService_BdPeerList_FullMethodName   = "/vinbero.v1.BdPeerService/BdPeerList"
+	BdPeerService_BdPeerFlush_FullMethodName  = "/vinbero.v1.BdPeerService/BdPeerFlush"
 )
 
 // BdPeerServiceClient is the client API for BdPeerService service.
@@ -953,6 +1139,7 @@ type BdPeerServiceClient interface {
 	BdPeerCreate(ctx context.Context, in *BdPeerCreateRequest, opts ...grpc.CallOption) (*BdPeerCreateResponse, error)
 	BdPeerDelete(ctx context.Context, in *BdPeerDeleteRequest, opts ...grpc.CallOption) (*BdPeerDeleteResponse, error)
 	BdPeerList(ctx context.Context, in *BdPeerListRequest, opts ...grpc.CallOption) (*BdPeerListResponse, error)
+	BdPeerFlush(ctx context.Context, in *BdPeerFlushRequest, opts ...grpc.CallOption) (*BdPeerFlushResponse, error)
 }
 
 type bdPeerServiceClient struct {
@@ -990,6 +1177,15 @@ func (c *bdPeerServiceClient) BdPeerList(ctx context.Context, in *BdPeerListRequ
 	return out, nil
 }
 
+func (c *bdPeerServiceClient) BdPeerFlush(ctx context.Context, in *BdPeerFlushRequest, opts ...grpc.CallOption) (*BdPeerFlushResponse, error) {
+	out := new(BdPeerFlushResponse)
+	err := c.cc.Invoke(ctx, BdPeerService_BdPeerFlush_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BdPeerServiceServer is the server API for BdPeerService service.
 // All implementations should embed UnimplementedBdPeerServiceServer
 // for forward compatibility
@@ -997,6 +1193,7 @@ type BdPeerServiceServer interface {
 	BdPeerCreate(context.Context, *BdPeerCreateRequest) (*BdPeerCreateResponse, error)
 	BdPeerDelete(context.Context, *BdPeerDeleteRequest) (*BdPeerDeleteResponse, error)
 	BdPeerList(context.Context, *BdPeerListRequest) (*BdPeerListResponse, error)
+	BdPeerFlush(context.Context, *BdPeerFlushRequest) (*BdPeerFlushResponse, error)
 }
 
 // UnimplementedBdPeerServiceServer should be embedded to have forward compatible implementations.
@@ -1011,6 +1208,9 @@ func (UnimplementedBdPeerServiceServer) BdPeerDelete(context.Context, *BdPeerDel
 }
 func (UnimplementedBdPeerServiceServer) BdPeerList(context.Context, *BdPeerListRequest) (*BdPeerListResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BdPeerList not implemented")
+}
+func (UnimplementedBdPeerServiceServer) BdPeerFlush(context.Context, *BdPeerFlushRequest) (*BdPeerFlushResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BdPeerFlush not implemented")
 }
 
 // UnsafeBdPeerServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -1078,6 +1278,24 @@ func _BdPeerService_BdPeerList_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BdPeerService_BdPeerFlush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BdPeerFlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BdPeerServiceServer).BdPeerFlush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BdPeerService_BdPeerFlush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BdPeerServiceServer).BdPeerFlush(ctx, req.(*BdPeerFlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // BdPeerService_ServiceDesc is the grpc.ServiceDesc for BdPeerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1096,6 +1314,10 @@ var BdPeerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BdPeerList",
 			Handler:    _BdPeerService_BdPeerList_Handler,
+		},
+		{
+			MethodName: "BdPeerFlush",
+			Handler:    _BdPeerService_BdPeerFlush_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -1380,6 +1602,7 @@ const (
 	HeadendL2Service_HeadendL2Delete_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Delete"
 	HeadendL2Service_HeadendL2List_FullMethodName   = "/vinbero.v1.HeadendL2Service/HeadendL2List"
 	HeadendL2Service_HeadendL2Get_FullMethodName    = "/vinbero.v1.HeadendL2Service/HeadendL2Get"
+	HeadendL2Service_HeadendL2Flush_FullMethodName  = "/vinbero.v1.HeadendL2Service/HeadendL2Flush"
 )
 
 // HeadendL2ServiceClient is the client API for HeadendL2Service service.
@@ -1390,6 +1613,7 @@ type HeadendL2ServiceClient interface {
 	HeadendL2Delete(ctx context.Context, in *HeadendL2DeleteRequest, opts ...grpc.CallOption) (*HeadendL2DeleteResponse, error)
 	HeadendL2List(ctx context.Context, in *HeadendL2ListRequest, opts ...grpc.CallOption) (*HeadendL2ListResponse, error)
 	HeadendL2Get(ctx context.Context, in *HeadendL2GetRequest, opts ...grpc.CallOption) (*HeadendL2GetResponse, error)
+	HeadendL2Flush(ctx context.Context, in *HeadendL2FlushRequest, opts ...grpc.CallOption) (*HeadendL2FlushResponse, error)
 }
 
 type headendL2ServiceClient struct {
@@ -1436,6 +1660,15 @@ func (c *headendL2ServiceClient) HeadendL2Get(ctx context.Context, in *HeadendL2
 	return out, nil
 }
 
+func (c *headendL2ServiceClient) HeadendL2Flush(ctx context.Context, in *HeadendL2FlushRequest, opts ...grpc.CallOption) (*HeadendL2FlushResponse, error) {
+	out := new(HeadendL2FlushResponse)
+	err := c.cc.Invoke(ctx, HeadendL2Service_HeadendL2Flush_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HeadendL2ServiceServer is the server API for HeadendL2Service service.
 // All implementations should embed UnimplementedHeadendL2ServiceServer
 // for forward compatibility
@@ -1444,6 +1677,7 @@ type HeadendL2ServiceServer interface {
 	HeadendL2Delete(context.Context, *HeadendL2DeleteRequest) (*HeadendL2DeleteResponse, error)
 	HeadendL2List(context.Context, *HeadendL2ListRequest) (*HeadendL2ListResponse, error)
 	HeadendL2Get(context.Context, *HeadendL2GetRequest) (*HeadendL2GetResponse, error)
+	HeadendL2Flush(context.Context, *HeadendL2FlushRequest) (*HeadendL2FlushResponse, error)
 }
 
 // UnimplementedHeadendL2ServiceServer should be embedded to have forward compatible implementations.
@@ -1461,6 +1695,9 @@ func (UnimplementedHeadendL2ServiceServer) HeadendL2List(context.Context, *Heade
 }
 func (UnimplementedHeadendL2ServiceServer) HeadendL2Get(context.Context, *HeadendL2GetRequest) (*HeadendL2GetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HeadendL2Get not implemented")
+}
+func (UnimplementedHeadendL2ServiceServer) HeadendL2Flush(context.Context, *HeadendL2FlushRequest) (*HeadendL2FlushResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HeadendL2Flush not implemented")
 }
 
 // UnsafeHeadendL2ServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -1546,6 +1783,24 @@ func _HeadendL2Service_HeadendL2Get_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HeadendL2Service_HeadendL2Flush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeadendL2FlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadendL2ServiceServer).HeadendL2Flush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadendL2Service_HeadendL2Flush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadendL2ServiceServer).HeadendL2Flush(ctx, req.(*HeadendL2FlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HeadendL2Service_ServiceDesc is the grpc.ServiceDesc for HeadendL2Service service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1569,14 +1824,20 @@ var HeadendL2Service_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "HeadendL2Get",
 			Handler:    _HeadendL2Service_HeadendL2Get_Handler,
 		},
+		{
+			MethodName: "HeadendL2Flush",
+			Handler:    _HeadendL2Service_HeadendL2Flush_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "vinbero/v1/vinbero.proto",
 }
 
 const (
-	StatsService_StatsShow_FullMethodName  = "/vinbero.v1.StatsService/StatsShow"
-	StatsService_StatsReset_FullMethodName = "/vinbero.v1.StatsService/StatsReset"
+	StatsService_StatsShow_FullMethodName      = "/vinbero.v1.StatsService/StatsShow"
+	StatsService_StatsReset_FullMethodName     = "/vinbero.v1.StatsService/StatsReset"
+	StatsService_StatsSlotShow_FullMethodName  = "/vinbero.v1.StatsService/StatsSlotShow"
+	StatsService_StatsSlotReset_FullMethodName = "/vinbero.v1.StatsService/StatsSlotReset"
 )
 
 // StatsServiceClient is the client API for StatsService service.
@@ -1585,6 +1846,8 @@ const (
 type StatsServiceClient interface {
 	StatsShow(ctx context.Context, in *StatsShowRequest, opts ...grpc.CallOption) (*StatsShowResponse, error)
 	StatsReset(ctx context.Context, in *StatsResetRequest, opts ...grpc.CallOption) (*StatsResetResponse, error)
+	StatsSlotShow(ctx context.Context, in *StatsSlotShowRequest, opts ...grpc.CallOption) (*StatsSlotShowResponse, error)
+	StatsSlotReset(ctx context.Context, in *StatsSlotResetRequest, opts ...grpc.CallOption) (*StatsSlotResetResponse, error)
 }
 
 type statsServiceClient struct {
@@ -1613,12 +1876,32 @@ func (c *statsServiceClient) StatsReset(ctx context.Context, in *StatsResetReque
 	return out, nil
 }
 
+func (c *statsServiceClient) StatsSlotShow(ctx context.Context, in *StatsSlotShowRequest, opts ...grpc.CallOption) (*StatsSlotShowResponse, error) {
+	out := new(StatsSlotShowResponse)
+	err := c.cc.Invoke(ctx, StatsService_StatsSlotShow_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *statsServiceClient) StatsSlotReset(ctx context.Context, in *StatsSlotResetRequest, opts ...grpc.CallOption) (*StatsSlotResetResponse, error) {
+	out := new(StatsSlotResetResponse)
+	err := c.cc.Invoke(ctx, StatsService_StatsSlotReset_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StatsServiceServer is the server API for StatsService service.
 // All implementations should embed UnimplementedStatsServiceServer
 // for forward compatibility
 type StatsServiceServer interface {
 	StatsShow(context.Context, *StatsShowRequest) (*StatsShowResponse, error)
 	StatsReset(context.Context, *StatsResetRequest) (*StatsResetResponse, error)
+	StatsSlotShow(context.Context, *StatsSlotShowRequest) (*StatsSlotShowResponse, error)
+	StatsSlotReset(context.Context, *StatsSlotResetRequest) (*StatsSlotResetResponse, error)
 }
 
 // UnimplementedStatsServiceServer should be embedded to have forward compatible implementations.
@@ -1630,6 +1913,12 @@ func (UnimplementedStatsServiceServer) StatsShow(context.Context, *StatsShowRequ
 }
 func (UnimplementedStatsServiceServer) StatsReset(context.Context, *StatsResetRequest) (*StatsResetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StatsReset not implemented")
+}
+func (UnimplementedStatsServiceServer) StatsSlotShow(context.Context, *StatsSlotShowRequest) (*StatsSlotShowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StatsSlotShow not implemented")
+}
+func (UnimplementedStatsServiceServer) StatsSlotReset(context.Context, *StatsSlotResetRequest) (*StatsSlotResetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StatsSlotReset not implemented")
 }
 
 // UnsafeStatsServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -1679,6 +1968,42 @@ func _StatsService_StatsReset_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StatsService_StatsSlotShow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsSlotShowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StatsServiceServer).StatsSlotShow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StatsService_StatsSlotShow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StatsServiceServer).StatsSlotShow(ctx, req.(*StatsSlotShowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StatsService_StatsSlotReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatsSlotResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StatsServiceServer).StatsSlotReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StatsService_StatsSlotReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StatsServiceServer).StatsSlotReset(ctx, req.(*StatsSlotResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StatsService_ServiceDesc is the grpc.ServiceDesc for StatsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1693,6 +2018,14 @@ var StatsService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StatsReset",
 			Handler:    _StatsService_StatsReset_Handler,
+		},
+		{
+			MethodName: "StatsSlotShow",
+			Handler:    _StatsService_StatsSlotShow_Handler,
+		},
+		{
+			MethodName: "StatsSlotReset",
+			Handler:    _StatsService_StatsSlotReset_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

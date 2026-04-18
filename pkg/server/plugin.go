@@ -4,20 +4,70 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
+type pluginSlotKey struct {
+	MapType string
+	Slot    uint32
+}
+
+// pluginEntry captures per-slot metadata the server needs after the
+// Collection has been closed. AuxType is nil for plugins that did not
+// declare a <program>_aux struct — those plugins can still be driven by
+// plugin_aux_raw (hex), they just lose the JSON path.
+type pluginEntry struct {
+	program string
+	auxType *btf.Struct
+}
+
 type PluginServer struct {
 	mapOps       *bpf.MapOperations
 	bpfConstants map[string]any
+
+	mu       sync.RWMutex
+	registry map[pluginSlotKey]*pluginEntry
 }
 
 func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any) *PluginServer {
-	return &PluginServer{mapOps: mapOps, bpfConstants: bpfConstants}
+	return &PluginServer{
+		mapOps:       mapOps,
+		bpfConstants: bpfConstants,
+		registry:     make(map[pluginSlotKey]*pluginEntry),
+	}
+}
+
+// SnapshotNames returns slot -> program name for plugins currently
+// registered under the given map type. Used by StatsServer for labeling.
+func (s *PluginServer) SnapshotNames(mapType string) map[uint32]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[uint32]string)
+	for k, entry := range s.registry {
+		if k.MapType == mapType {
+			out[k.Slot] = entry.program
+		}
+	}
+	return out
+}
+
+// AuxType returns the BTF struct describing the plugin's aux layout, or
+// nil if the plugin did not declare <program>_aux. Callers use this to
+// encode plugin_aux_json into bytes.
+func (s *PluginServer) AuxType(mapType string, slot uint32) *btf.Struct {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.registry[pluginSlotKey{MapType: mapType, Slot: slot}]
+	if !ok {
+		return nil
+	}
+	return entry.auxType
 }
 
 func (s *PluginServer) PluginRegister(
@@ -94,6 +144,26 @@ func (s *PluginServer) PluginRegister(
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("failed to register plugin: %w", err))
 	}
 
+	// Capture the plugin's aux struct type, if it declared one via
+	// VINBERO_PLUGIN_AUX_TYPE. The struct lives on in the server after
+	// Collection.Close() because *btf.Struct is a pure Go value copied out
+	// of spec.Types. Plugins without the anchor get auxType == nil, which
+	// the JSON encoder treats as "use plugin_aux_raw instead".
+	var auxType *btf.Struct
+	if spec.Types != nil {
+		var t *btf.Struct
+		if err := spec.Types.TypeByName(msg.Program+"_aux", &t); err == nil {
+			auxType = t
+		}
+	}
+
+	s.mu.Lock()
+	s.registry[pluginSlotKey{MapType: msg.MapType, Slot: msg.Index}] = &pluginEntry{
+		program: msg.Program,
+		auxType: auxType,
+	}
+	s.mu.Unlock()
+
 	return connect.NewResponse(&v1.PluginRegisterResponse{}), nil
 }
 
@@ -106,6 +176,10 @@ func (s *PluginServer) PluginUnregister(
 	if err := s.mapOps.UnregisterPlugin(msg.MapType, msg.Index); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("failed to unregister plugin: %w", err))
 	}
+
+	s.mu.Lock()
+	delete(s.registry, pluginSlotKey{MapType: msg.MapType, Slot: msg.Index})
+	s.mu.Unlock()
 
 	return connect.NewResponse(&v1.PluginUnregisterResponse{}), nil
 }

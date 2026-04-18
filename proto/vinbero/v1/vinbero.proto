@@ -15,6 +15,7 @@ service SidFunctionService {
   rpc SidFunctionCreate(SidFunctionCreateRequest) returns (SidFunctionCreateResponse);
   rpc SidFunctionDelete(SidFunctionDeleteRequest) returns (SidFunctionDeleteResponse);
   rpc SidFunctionList(SidFunctionListRequest) returns (SidFunctionListResponse);
+  rpc SidFunctionFlush(SidFunctionFlushRequest) returns (SidFunctionFlushResponse);
   rpc SidFunctionGet(SidFunctionGetRequest) returns (SidFunctionGetResponse);
 }
 
@@ -44,6 +45,8 @@ message SidFunction {
   uint32 args_offset = 15; // Args.Mob.Session byte offset in SID (RFC 9433, for GTP functions)
   string gtp_v4_src_addr = 16; // GTP4 outer IPv4 source address (End.M.GTP4.E)
   uint32 table_id = 17; // VLAN table ID (End.DX2V: VLAN cross-connect scope)
+  bytes plugin_aux_raw = 18; // Plugin-defined auxiliary payload (<= 196 bytes, cast by plugin via VINBERO_PLUGIN_AUX_CAST)
+  string plugin_aux_json = 19; // Plugin-defined auxiliary payload as JSON; server encodes via plugin BTF. Mutually exclusive with plugin_aux_raw.
 }
 
 message SidFunctionCreateRequest {
@@ -74,12 +77,18 @@ message SidFunctionGetResponse {
   SidFunction sid_function = 1;
 }
 
+message SidFunctionFlushRequest {}
+message SidFunctionFlushResponse {
+  uint32 deleted_count = 1;
+}
+
 // Headendv4Service manages SRv6 Headend behavior for IPv4 packets.
 // Matching IPv4 packets are encapsulated with an outer IPv6 header and SRH.
 service Headendv4Service {
   rpc Headendv4Create(Headendv4CreateRequest) returns (Headendv4CreateResponse);
   rpc Headendv4Delete(Headendv4DeleteRequest) returns (Headendv4DeleteResponse);
   rpc Headendv4List(Headendv4ListRequest) returns (Headendv4ListResponse);
+  rpc Headendv4Flush(Headendv4FlushRequest) returns (Headendv4FlushResponse);
   rpc Headendv4Get(Headendv4GetRequest) returns (Headendv4GetResponse);
 }
 
@@ -121,12 +130,18 @@ message Headendv4GetResponse {
   Headendv4 headendv4 = 1;
 }
 
+message Headendv4FlushRequest {}
+message Headendv4FlushResponse {
+  uint32 deleted_count = 1;
+}
+
 // Headendv6Service manages SRv6 Headend behavior for IPv6 packets.
 service Headendv6Service {
   rpc Headendv6Create(Headendv6CreateRequest) returns (Headendv6CreateResponse);
   rpc Headendv6Delete(Headendv6DeleteRequest) returns (Headendv6DeleteResponse);
   rpc Headendv6List(Headendv6ListRequest) returns (Headendv6ListResponse);
   rpc Headendv6Get(Headendv6GetRequest) returns (Headendv6GetResponse);
+  rpc Headendv6Flush(Headendv6FlushRequest) returns (Headendv6FlushResponse);
 }
 
 // Headendv6 represents an IPv6 prefix → SRv6 encapsulation rule.
@@ -166,6 +181,11 @@ message Headendv6GetResponse {
   Headendv6 headendv6 = 1;
 }
 
+message Headendv6FlushRequest {}
+message Headendv6FlushResponse {
+  uint32 deleted_count = 1;
+}
+
 // DmacService provides read-only access to the FDB (MAC address table).
 // FdbService manages the FDB (forwarding database) for L2VPN MAC forwarding.
 // Dynamic entries are learned by the BPF data plane; static entries are
@@ -174,6 +194,7 @@ service FdbService {
   rpc FdbList(FdbListRequest) returns (FdbListResponse);
   rpc FdbCreate(FdbCreateRequest) returns (FdbCreateResponse);
   rpc FdbDelete(FdbDeleteRequest) returns (FdbDeleteResponse);
+  rpc FdbFlush(FdbFlushRequest) returns (FdbFlushResponse);
 }
 
 // FdbEntry represents a single FDB entry with aging and type information.
@@ -205,6 +226,14 @@ message FdbDeleteRequest {
 }
 message FdbDeleteResponse {}
 
+message FdbFlushRequest {
+  uint32 bd_id = 1; // 0 = flush all BDs; otherwise only entries in this BD
+  bool keep_static = 2; // if true, only learned/remote entries are removed
+}
+message FdbFlushResponse {
+  uint32 deleted_count = 1;
+}
+
 // VlanTableService manages VLAN cross-connect table entries for End.DX2V.
 // Each entry maps (table_id, vlan_id) to an output interface for VLAN-based
 // P2P cross-connect (EVPN Flexible Cross-connect).
@@ -212,6 +241,7 @@ service VlanTableService {
   rpc VlanTableCreate(VlanTableCreateRequest) returns (VlanTableCreateResponse);
   rpc VlanTableDelete(VlanTableDeleteRequest) returns (VlanTableDeleteResponse);
   rpc VlanTableList(VlanTableListRequest) returns (VlanTableListResponse);
+  rpc VlanTableFlush(VlanTableFlushRequest) returns (VlanTableFlushResponse);
 }
 
 message VlanTableEntry {
@@ -243,6 +273,13 @@ message VlanTableListResponse {
   repeated VlanTableEntry entries = 1;
 }
 
+message VlanTableFlushRequest {
+  uint32 table_id = 1; // 0 = flush all tables; otherwise only entries in this table
+}
+message VlanTableFlushResponse {
+  uint32 deleted_count = 1;
+}
+
 // BdPeerService manages remote PEs within a Bridge Domain for BUM traffic flooding.
 // When a BUM frame (broadcast/unknown-unicast/multicast) is detected, Vinbero
 // sends SRv6-encapsulated copies to all registered peers in the same BD.
@@ -252,6 +289,7 @@ service BdPeerService {
   rpc BdPeerCreate(BdPeerCreateRequest) returns (BdPeerCreateResponse);
   rpc BdPeerDelete(BdPeerDeleteRequest) returns (BdPeerDeleteResponse);
   rpc BdPeerList(BdPeerListRequest) returns (BdPeerListResponse);
+  rpc BdPeerFlush(BdPeerFlushRequest) returns (BdPeerFlushResponse);
 }
 
 // BdPeer represents a remote PE that participates in a Bridge Domain.
@@ -284,6 +322,13 @@ message BdPeerListRequest {
 }
 message BdPeerListResponse {
   repeated BdPeer peers = 1;
+}
+
+message BdPeerFlushRequest {
+  uint32 bd_id = 1; // 0 = flush all BDs; otherwise only peers in this BD
+}
+message BdPeerFlushResponse {
+  uint32 deleted_count = 1;
 }
 
 // NetworkResourceService manages Linux network resources (VRF, Bridge) via netlink.
@@ -369,6 +414,7 @@ service HeadendL2Service {
   rpc HeadendL2Delete(HeadendL2DeleteRequest) returns (HeadendL2DeleteResponse);
   rpc HeadendL2List(HeadendL2ListRequest) returns (HeadendL2ListResponse);
   rpc HeadendL2Get(HeadendL2GetRequest) returns (HeadendL2GetResponse);
+  rpc HeadendL2Flush(HeadendL2FlushRequest) returns (HeadendL2FlushResponse);
 }
 
 // HeadendL2 represents a port+VLAN → SRv6 L2 encapsulation rule.
@@ -416,11 +462,18 @@ message HeadendL2GetResponse {
   HeadendL2 headend_l2 = 1;
 }
 
+message HeadendL2FlushRequest {}
+message HeadendL2FlushResponse {
+  uint32 deleted_count = 1;
+}
+
 // StatsService provides read-only access to per-CPU XDP packet statistics.
 // Requires enable_stats: true in config; otherwise all counters are zero.
 service StatsService {
   rpc StatsShow(StatsShowRequest) returns (StatsShowResponse);
   rpc StatsReset(StatsResetRequest) returns (StatsResetResponse);
+  rpc StatsSlotShow(StatsSlotShowRequest) returns (StatsSlotShowResponse);
+  rpc StatsSlotReset(StatsSlotResetRequest) returns (StatsSlotResetResponse);
 }
 
 message StatsCounter {
@@ -436,3 +489,26 @@ message StatsShowResponse {
 
 message StatsResetRequest {}
 message StatsResetResponse {}
+
+// Per-slot invocation counter entry (one per PROG_ARRAY slot).
+// name: human-readable label (built-in enum name, or "plugin:<program>", or empty for reserved).
+message SlotStatsEntry {
+  string map_type = 1; // "endpoint" | "headend_v4" | "headend_v6"
+  uint32 slot = 2; // 0-63 (endpoint) / 0-31 (headend)
+  string name = 3;
+  uint64 packets = 4;
+  uint64 bytes = 5;
+}
+
+message StatsSlotShowRequest {
+  repeated string map_types = 1; // empty = all three types
+  bool include_empty = 2; // include packets==0 slots (default: hide)
+}
+message StatsSlotShowResponse {
+  repeated SlotStatsEntry entries = 1;
+}
+
+message StatsSlotResetRequest {
+  repeated string map_types = 1; // empty = reset all three types
+}
+message StatsSlotResetResponse {}

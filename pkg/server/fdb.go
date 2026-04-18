@@ -77,3 +77,16 @@ func (s *FdbServer) FdbDelete(
 	}
 	return connect.NewResponse(&v1.FdbDeleteResponse{}), nil
 }
+
+// FdbFlush removes FDB entries, optionally scoped to a BD and optionally
+// keeping user-configured static entries.
+func (s *FdbServer) FdbFlush(
+	ctx context.Context,
+	req *connect.Request[v1.FdbFlushRequest],
+) (*connect.Response[v1.FdbFlushResponse], error) {
+	count, err := s.mapOps.FlushFdb(uint16(req.Msg.BdId), req.Msg.KeepStatic)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.FdbFlushResponse{DeletedCount: count}), nil
+}

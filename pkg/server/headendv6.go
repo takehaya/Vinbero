@@ -77,6 +77,18 @@ func (s *Headendv6Server) Headendv6Delete(
 	return connect.NewResponse(resp), nil
 }
 
+// Headendv6Flush removes every headend v6 entry.
+func (s *Headendv6Server) Headendv6Flush(
+	ctx context.Context,
+	req *connect.Request[v1.Headendv6FlushRequest],
+) (*connect.Response[v1.Headendv6FlushResponse], error) {
+	count, err := s.mapOps.FlushHeadendV6()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.Headendv6FlushResponse{DeletedCount: count}), nil
+}
+
 // Headendv6List lists all Headend v6 entries
 func (s *Headendv6Server) Headendv6List(
 	ctx context.Context,

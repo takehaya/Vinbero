@@ -106,13 +106,10 @@ type BpfSidAuxEntry struct {
 }
 
 type BpfSidFunctionEntry struct {
-	_          structs.HostLayout
-	Action     uint8
-	Flavor     uint8
-	HasAux     uint8
-	Pad        uint8
-	VrfIfindex uint32
-	AuxIndex   uint32
+	_        structs.HostLayout
+	Action   uint8
+	Flavor   uint8
+	AuxIndex uint16
 }
 
 type BpfStatsEntry struct {
@@ -126,8 +123,10 @@ type BpfTailcallCtx struct {
 	L3Offset     uint16
 	DispatchType uint8
 	InnerProto   uint8
+	Slot         uint8
+	Pad          [3]uint8
 	SidEntry     BpfSidFunctionEntry
-	_            [188]byte
+	_            [196]byte
 }
 
 // LoadBpf returns the embedded CollectionSpec for Bpf.
@@ -204,21 +203,24 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
-	BdPeerMap        *ebpf.MapSpec `ebpf:"bd_peer_map"`
-	BdPeerReverseMap *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
-	Dx2vMap          *ebpf.MapSpec `ebpf:"dx2v_map"`
-	FdbMap           *ebpf.MapSpec `ebpf:"fdb_map"`
-	HeadendL2Map     *ebpf.MapSpec `ebpf:"headend_l2_map"`
-	HeadendV4Map     *ebpf.MapSpec `ebpf:"headend_v4_map"`
-	HeadendV4Progs   *ebpf.MapSpec `ebpf:"headend_v4_progs"`
-	HeadendV6Map     *ebpf.MapSpec `ebpf:"headend_v6_map"`
-	HeadendV6Progs   *ebpf.MapSpec `ebpf:"headend_v6_progs"`
-	ScratchMap       *ebpf.MapSpec `ebpf:"scratch_map"`
-	SidAuxMap        *ebpf.MapSpec `ebpf:"sid_aux_map"`
-	SidEndpointProgs *ebpf.MapSpec `ebpf:"sid_endpoint_progs"`
-	SidFunctionMap   *ebpf.MapSpec `ebpf:"sid_function_map"`
-	StatsMap         *ebpf.MapSpec `ebpf:"stats_map"`
-	TailcallCtxMap   *ebpf.MapSpec `ebpf:"tailcall_ctx_map"`
+	BdPeerMap          *ebpf.MapSpec `ebpf:"bd_peer_map"`
+	BdPeerReverseMap   *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
+	Dx2vMap            *ebpf.MapSpec `ebpf:"dx2v_map"`
+	FdbMap             *ebpf.MapSpec `ebpf:"fdb_map"`
+	HeadendL2Map       *ebpf.MapSpec `ebpf:"headend_l2_map"`
+	HeadendV4Map       *ebpf.MapSpec `ebpf:"headend_v4_map"`
+	HeadendV4Progs     *ebpf.MapSpec `ebpf:"headend_v4_progs"`
+	HeadendV6Map       *ebpf.MapSpec `ebpf:"headend_v6_map"`
+	HeadendV6Progs     *ebpf.MapSpec `ebpf:"headend_v6_progs"`
+	ScratchMap         *ebpf.MapSpec `ebpf:"scratch_map"`
+	SidAuxMap          *ebpf.MapSpec `ebpf:"sid_aux_map"`
+	SidEndpointProgs   *ebpf.MapSpec `ebpf:"sid_endpoint_progs"`
+	SidFunctionMap     *ebpf.MapSpec `ebpf:"sid_function_map"`
+	SlotStatsEndpoint  *ebpf.MapSpec `ebpf:"slot_stats_endpoint"`
+	SlotStatsHeadendV4 *ebpf.MapSpec `ebpf:"slot_stats_headend_v4"`
+	SlotStatsHeadendV6 *ebpf.MapSpec `ebpf:"slot_stats_headend_v6"`
+	StatsMap           *ebpf.MapSpec `ebpf:"stats_map"`
+	TailcallCtxMap     *ebpf.MapSpec `ebpf:"tailcall_ctx_map"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -248,21 +250,24 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
-	BdPeerMap        *ebpf.Map `ebpf:"bd_peer_map"`
-	BdPeerReverseMap *ebpf.Map `ebpf:"bd_peer_reverse_map"`
-	Dx2vMap          *ebpf.Map `ebpf:"dx2v_map"`
-	FdbMap           *ebpf.Map `ebpf:"fdb_map"`
-	HeadendL2Map     *ebpf.Map `ebpf:"headend_l2_map"`
-	HeadendV4Map     *ebpf.Map `ebpf:"headend_v4_map"`
-	HeadendV4Progs   *ebpf.Map `ebpf:"headend_v4_progs"`
-	HeadendV6Map     *ebpf.Map `ebpf:"headend_v6_map"`
-	HeadendV6Progs   *ebpf.Map `ebpf:"headend_v6_progs"`
-	ScratchMap       *ebpf.Map `ebpf:"scratch_map"`
-	SidAuxMap        *ebpf.Map `ebpf:"sid_aux_map"`
-	SidEndpointProgs *ebpf.Map `ebpf:"sid_endpoint_progs"`
-	SidFunctionMap   *ebpf.Map `ebpf:"sid_function_map"`
-	StatsMap         *ebpf.Map `ebpf:"stats_map"`
-	TailcallCtxMap   *ebpf.Map `ebpf:"tailcall_ctx_map"`
+	BdPeerMap          *ebpf.Map `ebpf:"bd_peer_map"`
+	BdPeerReverseMap   *ebpf.Map `ebpf:"bd_peer_reverse_map"`
+	Dx2vMap            *ebpf.Map `ebpf:"dx2v_map"`
+	FdbMap             *ebpf.Map `ebpf:"fdb_map"`
+	HeadendL2Map       *ebpf.Map `ebpf:"headend_l2_map"`
+	HeadendV4Map       *ebpf.Map `ebpf:"headend_v4_map"`
+	HeadendV4Progs     *ebpf.Map `ebpf:"headend_v4_progs"`
+	HeadendV6Map       *ebpf.Map `ebpf:"headend_v6_map"`
+	HeadendV6Progs     *ebpf.Map `ebpf:"headend_v6_progs"`
+	ScratchMap         *ebpf.Map `ebpf:"scratch_map"`
+	SidAuxMap          *ebpf.Map `ebpf:"sid_aux_map"`
+	SidEndpointProgs   *ebpf.Map `ebpf:"sid_endpoint_progs"`
+	SidFunctionMap     *ebpf.Map `ebpf:"sid_function_map"`
+	SlotStatsEndpoint  *ebpf.Map `ebpf:"slot_stats_endpoint"`
+	SlotStatsHeadendV4 *ebpf.Map `ebpf:"slot_stats_headend_v4"`
+	SlotStatsHeadendV6 *ebpf.Map `ebpf:"slot_stats_headend_v6"`
+	StatsMap           *ebpf.Map `ebpf:"stats_map"`
+	TailcallCtxMap     *ebpf.Map `ebpf:"tailcall_ctx_map"`
 }
 
 func (m *BpfMaps) Close() error {
@@ -280,6 +285,9 @@ func (m *BpfMaps) Close() error {
 		m.SidAuxMap,
 		m.SidEndpointProgs,
 		m.SidFunctionMap,
+		m.SlotStatsEndpoint,
+		m.SlotStatsHeadendV4,
+		m.SlotStatsHeadendV6,
 		m.StatsMap,
 		m.TailcallCtxMap,
 	)

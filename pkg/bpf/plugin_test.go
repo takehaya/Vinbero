@@ -98,3 +98,92 @@ func TestPluginOperations(t *testing.T) {
 		t.Logf("Plugin tail call at slot %d executed, action=%d", pluginIndex, action)
 	})
 }
+
+// TestSlotStatsRecordsTailCall verifies that tailcall_epilogue actually
+// increments slot_stats_endpoint for both a plugin slot and a builtin
+// slot. Uses newXDPTestHelperWithStats so enable_stats=1.
+func TestSlotStatsRecordsTailCall(t *testing.T) {
+	h := newXDPTestHelperWithStats(t)
+
+	cases := []struct {
+		name     string
+		sidAddr  string
+		action   uint8
+		progSlot uint32
+		prog     *ebpf.Program
+		register bool // true: register into plugin slot; false: use existing builtin slot
+	}{
+		{
+			name:     "plugin slot 32",
+			sidAddr:  "fd00::32",
+			action:   32,
+			progSlot: 32,
+			prog:     h.objs.TailcallEndpointEnd,
+			register: true,
+		},
+		{
+			name:     "builtin End slot 1",
+			sidAddr:  "fd00::1",
+			action:   1, // SRV6_LOCAL_ACTION_END
+			progSlot: 1,
+			register: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.register {
+				if err := h.objs.SidEndpointProgs.Update(tc.progSlot, tc.prog, ebpf.UpdateAny); err != nil {
+					t.Fatalf("register plugin: %v", err)
+				}
+				t.Cleanup(func() { _ = h.objs.SidEndpointProgs.Delete(tc.progSlot) })
+			}
+
+			sidEntry := &SidFunctionEntry{Action: tc.action, Flavor: 0}
+			if err := h.mapOps.CreateSidFunction(tc.sidAddr, sidEntry, nil); err != nil {
+				t.Fatalf("create SID: %v", err)
+			}
+
+			// Snapshot before sending traffic.
+			before, err := h.mapOps.ReadSlotStats(MapTypeEndpoint)
+			if err != nil {
+				t.Fatalf("ReadSlotStats before: %v", err)
+			}
+			beforePackets := before[tc.progSlot].Packets
+
+			pkt, err := buildSRv6Packet(
+				net.ParseIP("2001::1"),
+				net.ParseIP(tc.sidAddr),
+				[]net.IP{net.ParseIP("fd00::99")},
+				1,
+			)
+			if err != nil {
+				t.Fatalf("build packet: %v", err)
+			}
+			action, _ := h.run(pkt)
+			if action == 0 {
+				t.Fatalf("tail call failed (XDP_ABORTED) for slot %d", tc.progSlot)
+			}
+
+			after, err := h.mapOps.ReadSlotStats(MapTypeEndpoint)
+			if err != nil {
+				t.Fatalf("ReadSlotStats after: %v", err)
+			}
+			got := after[tc.progSlot].Packets - beforePackets
+			if got != 1 {
+				t.Errorf("slot_stats_endpoint[%d] delta = %d, want 1", tc.progSlot, got)
+			}
+
+			// Other slots must be untouched by this packet.
+			for i := range after {
+				if uint32(i) == tc.progSlot {
+					continue
+				}
+				delta := after[i].Packets - before[i].Packets
+				if delta != 0 {
+					t.Errorf("slot_stats_endpoint[%d] spuriously changed by %d", i, delta)
+				}
+			}
+		})
+	}
+}

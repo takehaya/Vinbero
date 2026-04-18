@@ -90,4 +90,29 @@
     static __always_inline int __vinbero_body_##name(                          \
         struct xdp_md *ctx, struct tailcall_ctx *tctx)
 
+/*
+ * VINBERO_PLUGIN_AUX_TYPE(program, aux_struct_name) — keep aux struct in BTF.
+ *
+ * Plant a dummy rodata variable of type `struct <aux_struct_name>` so clang
+ * preserves the BTF for that type even if the plugin body only accesses aux
+ * through a cast. The server-side JSON encoder finds the type by name
+ * (convention: `<program>_aux`) and uses its BTF layout to convert JSON
+ * into the byte layout plugin_raw expects.
+ *
+ *   struct plugin_foo_aux { __u32 flags; vinbero_mac_t src_mac; };
+ *   VINBERO_PLUGIN_AUX_TYPE(plugin_foo, plugin_foo_aux);
+ *
+ *   VINBERO_PLUGIN(plugin_foo)
+ *   {
+ *       struct sid_aux_entry *aux = ...;
+ *       struct plugin_foo_aux *x =
+ *           VINBERO_PLUGIN_AUX_CAST(struct plugin_foo_aux, aux);
+ *       ...
+ *   }
+ */
+#define VINBERO_PLUGIN_AUX_TYPE(program, aux_struct_name)                      \
+    static volatile const struct aux_struct_name                               \
+        __vinbero_aux_anchor_##program                                         \
+        __attribute__((used, section(".rodata"))) = {0}
+
 #endif /* VINBERO_SDK_PLUGIN_H */

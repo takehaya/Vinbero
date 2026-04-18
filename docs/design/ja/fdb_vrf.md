@@ -17,7 +17,7 @@ VrfCreate API → netlink: VRF作成
 SidFunctionCreate API → vrf_name → ifindex解決 → BPF map書き込み
 
 パケット処理:
-  SRv6パケット → SID照合 → sid_function_entry.vrf_ifindex
+  SRv6パケット → SID照合 → sid_aux_entry.l3vrf.vrf_ifindex
     → デカプセル → bpf_fib_lookup(ifindex=VRF) → redirect
 ```
 
