@@ -961,13 +961,12 @@ func (m *MapOperations) GetSharedMaps() map[string]*ebpf.Map {
 		"bd_peer_map":        m.objs.BdPeerMap,
 		"bd_peer_reverse_map": m.objs.BdPeerReverseMap,
 		"dx2v_map":           m.objs.Dx2vMap,
-		"scratch_map":        m.objs.ScratchMap,
-		"stats_map":          m.objs.StatsMap,
-		"xdpcap_hook":        m.objs.XdpcapHook,
-		"tailcall_ctx_map":   m.objs.TailcallCtxMap,
-		"sid_endpoint_progs": m.objs.SidEndpointProgs,
-		"headend_v4_progs":   m.objs.HeadendV4Progs,
-		"headend_v6_progs":   m.objs.HeadendV6Progs,
+		"scratch_map":             m.objs.ScratchMap,
+		"stats_map":               m.objs.StatsMap,
+		"tailcall_ctx_map":        m.objs.TailcallCtxMap,
+		MapNameSidEndpointProgs:   m.objs.SidEndpointProgs,
+		MapNameHeadendV4Progs:     m.objs.HeadendV4Progs,
+		MapNameHeadendV6Progs:     m.objs.HeadendV6Progs,
 	}
 }
 
@@ -978,6 +977,21 @@ const (
 	EndpointProgMax    = 64
 	HeadendPluginBase  = 16
 	HeadendProgMax     = 32
+)
+
+// PluginMapType identifiers accepted by RegisterPlugin / UnregisterPlugin.
+const (
+	MapTypeEndpoint  = "endpoint"
+	MapTypeHeadendV4 = "headend_v4"
+	MapTypeHeadendV6 = "headend_v6"
+)
+
+// BPF map names for vinbero-managed PROG_ARRAYs. Referenced by GetSharedMaps,
+// resolvePluginMap, and the plugin validator's tail-call whitelist.
+const (
+	MapNameSidEndpointProgs = "sid_endpoint_progs"
+	MapNameHeadendV4Progs   = "headend_v4_progs"
+	MapNameHeadendV6Progs   = "headend_v6_progs"
 )
 
 var (
@@ -1015,11 +1029,11 @@ func (m *MapOperations) UnregisterPlugin(mapType string, index uint32) error {
 
 func (m *MapOperations) resolvePluginMap(mapType string) (*ebpf.Map, uint32, uint32, error) {
 	switch mapType {
-	case "endpoint":
+	case MapTypeEndpoint:
 		return m.objs.SidEndpointProgs, EndpointPluginBase, EndpointProgMax, nil
-	case "headend_v4":
+	case MapTypeHeadendV4:
 		return m.objs.HeadendV4Progs, HeadendPluginBase, HeadendProgMax, nil
-	case "headend_v6":
+	case MapTypeHeadendV6:
 		return m.objs.HeadendV6Progs, HeadendPluginBase, HeadendProgMax, nil
 	default:
 		return nil, 0, 0, fmt.Errorf("unknown plugin map type: %s", mapType)

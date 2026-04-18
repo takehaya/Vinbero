@@ -22,7 +22,6 @@
 #include "headend/srv6_encaps.h"
 #include "headend/srv6_insert.h"
 #include "core/xdp_stats.h"
-#include "core/xdpcap.h"
 #include "endpoint/srv6_endpoint.h"
 #include "endpoint/srv6_end_b6.h"
 #include "l2vpn/bum_meta.h"

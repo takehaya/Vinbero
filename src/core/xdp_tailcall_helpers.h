@@ -6,7 +6,6 @@
 
 #include "core/xdp_tailcall.h"
 #include "core/xdp_stats.h"
-#include "core/xdpcap.h"
 
 // ========== Context Helpers ==========
 
@@ -49,21 +48,16 @@ static __always_inline struct tailcall_ctx *tailcall_ctx_read(void)
 
 // ========== Tail Call Epilogue ==========
 //
-// bpf_tail_call does not return to the caller on success, so vinbero_main's
-// out: label (stats + xdpcap) is never reached. Each tail call target must
-// call this epilogue before returning to record final-action stats and
-// invoke the xdpcap hook.
-
-// __noinline: BPF subprogram so it appears as BTF_KIND_FUNC in the ELF.
-// This allows the server to verify that plugins include the epilogue
-// by checking BTF for the "tailcall_epilogue" function symbol.
-// Overhead is ~2-5ns per packet (negligible vs map lookups at ~50ns).
+// bpf_tail_call does not return, so vinbero_main's stats epilogue is never
+// reached from a tail call target. tailcall_epilogue records final-action
+// stats instead, and is declared __noinline so BPF_CALL instructions
+// referencing it are visible to the plugin validator (~2-5ns overhead).
 //
-// Stats are recorded here. xdpcap hook is NOT called from this subprogram
-// because the additional stack frame would exceed BPF's 256-byte call stack
-// limit in headend targets with large inline expansions. The caller handles
-// xdpcap if needed.
-static __noinline int tailcall_epilogue(struct xdp_md *ctx, int action)
+// warn_unused_result catches `tailcall_epilogue(ctx, XDP_DROP);` (call
+// without return) at compile time — a common plugin-author mistake that
+// the static validator cannot detect.
+static __noinline __attribute__((warn_unused_result))
+int tailcall_epilogue(struct xdp_md *ctx, int action)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -86,11 +80,6 @@ static __noinline int tailcall_epilogue(struct xdp_md *ctx, int action)
     return action;
 }
 
-// Wrapper: stats via noinline epilogue + xdpcap hook (inline, for tail call targets)
-#define TAILCALL_RETURN(ctx, action) \
-    do { \
-        int _act = tailcall_epilogue(ctx, action); \
-        RETURN_ACTION(ctx, &xdpcap_hook, _act); \
-    } while (0)
+#define TAILCALL_RETURN(ctx, action) return tailcall_epilogue(ctx, action)
 
 #endif // XDP_TAILCALL_HELPERS_H

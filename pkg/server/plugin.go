@@ -12,11 +12,12 @@ import (
 )
 
 type PluginServer struct {
-	mapOps *bpf.MapOperations
+	mapOps       *bpf.MapOperations
+	bpfConstants map[string]any
 }
 
-func NewPluginServer(mapOps *bpf.MapOperations) *PluginServer {
-	return &PluginServer{mapOps: mapOps}
+func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any) *PluginServer {
+	return &PluginServer{mapOps: mapOps, bpfConstants: bpfConstants}
 }
 
 func (s *PluginServer) PluginRegister(
@@ -32,49 +33,28 @@ func (s *PluginServer) PluginRegister(
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("program is required"))
 	}
 
-	// Load BPF collection spec from ELF bytes
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(msg.BpfElf))
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("failed to parse BPF ELF: %w", err))
 	}
 
-	// Find the requested program by function name
-	if _, ok := spec.Programs[msg.Program]; !ok {
-		var available []string
-		for name := range spec.Programs {
-			available = append(available, name)
-		}
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("program %q not found in ELF; available: %v", msg.Program, available))
+	if _, err := bpf.ValidatePluginCollection(spec, msg.Program); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	// Verify the plugin includes tailcall_epilogue (required by plugin contract).
-	// tailcall_epilogue is a __noinline BPF subprogram that appears in the ELF
-	// as a function in the .text section. cilium/ebpf attaches subprograms to
-	// their calling program, so we check if any program references it by
-	// looking for it in the ELF's program specs (it may be in .text or as a
-	// subprogram of the main function). We verify by checking the function name
-	// exists in any program's instructions.
-	hasEpilogue := false
-	for _, ps := range spec.Programs {
-		for _, fn := range ps.Instructions.FunctionReferences() {
-			if fn == "tailcall_epilogue" {
-				hasEpilogue = true
-				break
-			}
+	// The plugin ELF ships its own copy of shared `const volatile` vars
+	// (notably enable_stats). Rewrite them to match vinbero's runtime
+	// config so that gated helpers like stats_inc() behave consistently
+	// between the main data plane and the plugin.
+	for name, value := range s.bpfConstants {
+		varSpec, ok := spec.Variables[name]
+		if !ok {
+			continue
 		}
-		if hasEpilogue {
-			break
+		if err := varSpec.Set(value); err != nil {
+			return nil, connect.NewError(connect.CodeInternal,
+				fmt.Errorf("failed to rewrite BPF constant %s: %w", name, err))
 		}
-	}
-	if !hasEpilogue {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("plugin does not include tailcall_epilogue; include core/xdp_tailcall_helpers.h and call tailcall_epilogue() before returning"))
-	}
-
-	// Ensure all programs are XDP type
-	for _, ps := range spec.Programs {
-		ps.Type = ebpf.XDP
 	}
 
 	// Build map replacements: for maps that exist in both the plugin spec
