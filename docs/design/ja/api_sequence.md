@@ -434,6 +434,30 @@ sequenceDiagram
 
 **プラグイン実装の制約:** `tailcall_epilogue()` を必ず呼び出すこと（共有mapから次のプログラムへchain可能にする契約）
 
+### プラグイン aux (SID 単位の設定値)
+
+プラグイン作者が C で `struct <program>_aux { ... };` を宣言し `VINBERO_PLUGIN_AUX_TYPE` マクロでアンカーすると BTF に型が残る。サーバは SID 作成時に JSON を BTF 経由で bytes に encode し、`sid_aux_entry.plugin_raw` に書き込む。
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant V as Vinbero
+    participant PS as PluginServer (registry)
+    participant AM as sid_aux_map
+
+    Op->>V: PluginRegister {bpf_elf, program: "my_plugin"}
+    V-->>PS: spec.Types.TypeByName("my_plugin_aux") を保存
+    V-->>Op: Registered
+
+    Op->>V: SidFunctionCreate<br/>{action: 32, plugin_aux_json: '{"limit": 100, "src_mac": "aa:bb:cc:dd:ee:ff"}'}
+    V->>PS: AuxType(slot=32) → *btf.Struct
+    V-->>V: BTF walk → bytes (196B 以内)
+    V->>AM: sid_aux_map[idx] = bytes (plugin_raw variant)
+    V-->>Op: Created
+```
+
+well-known typedef (`vinbero_mac_t` / `vinbero_ipv4_t` / `vinbero_ipv6_t` / `vinbero_ipv4_prefix_t` / `vinbero_ipv6_prefix_t`) は encoder が文字列形式 (`"aa:bb:cc:dd:ee:ff"` / `"10.0.0.0/24"` 等) を自動パース。`plugin_aux_raw` (生 hex) との排他。
+
 ---
 
 ## 統計観測
@@ -560,15 +584,39 @@ sequenceDiagram
     V-->>Op: Deleted
 ```
 
+### 一括削除 (Flush)
+
+各制御リソース service に `*Flush` RPC があり、対象マップを一括でクリアする。サーバ側は List → iterate → 1 件ずつ Delete (BPF map iterator 中の mutation を避けるため 2 フェーズ) で実行、`deleted_count` を返す。
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant V as Vinbero
+    participant BPF as BPF map
+
+    Op->>V: SidFunctionFlush {}
+    V->>BPF: ListSidFunctions → keys[]
+    loop 各 key
+        V->>BPF: DeleteSidFunction(key)
+        V-->>V: auxAlloc.Free(idx)
+    end
+    V-->>Op: {deleted_count: N}
+```
+
+partial flush 対応: `FdbFlush` は `bd_id` / `keep_static` で、`BdPeerFlush` は `bd_id` で、`VlanTableFlush` は `table_id` で範囲を絞れる。CLI では `--yes` 必須 (`vinbero sid flush --yes`)。
+
 ---
 
 ## 再起動時のReconcile
+
+`state.json` からは Network Resource (Bridge / VRF) を netlink で復元する。`settings.pin_maps.enabled` を有効にしていると、制御 BPF マップ自体も `/sys/fs/bpf/<path>/` から再利用されるので SID / Headend / FDB / BD peer 等のエントリも一緒に引き継がれる。
 
 ```mermaid
 sequenceDiagram
     participant V as Vinbero
     participant K as Linux Kernel
     participant S as state.json
+    participant P as /sys/fs/bpf/vinbero/
 
     V->>S: 状態ファイル読み込み
     S-->>V: {bridges: [...], vrfs: [...]}
@@ -586,4 +634,12 @@ sequenceDiagram
     end
 
     V->>S: 状態保存
+
+    opt pin_maps.enabled
+        V->>P: 既存 map を open-or-create (PinByName)
+        P-->>V: 9 control-state maps (SID/Headend/FDB/...)
+        V-->>V: RecoverAuxIndices (allocator 状態を復元)
+    end
 ```
+
+詳細は [persistence.md](persistence.md) 参照。pin 無効時は SID / Headend 等は全て空で起動するので外部コントローラから再投入する。
