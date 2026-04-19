@@ -126,13 +126,32 @@ echo "=========================================="
 echo "Phase C: Split-Horizon TX filter"
 echo "=========================================="
 print_info "Sending pings to trigger ARP broadcast from host1..."
+# Capture inbound traffic on the PE2 side of host1's veth. Any ARP whose
+# sender is host1's own MAC arriving INbound is a loopback (split-horizon
+# miss); split-horizon should make this count zero.
+HOST1_MAC_ADDR=02:00:00:00:00:01
+LOOPBACK_PCAP=/tmp/dt2m_loopback.pcap
+ip netns exec "$NS_H1" timeout 4 tcpdump -i mh-h1pe2 -Q in -p -nn -w "$LOOPBACK_PCAP" \
+    "ether src $HOST1_MAC_ADDR and arp" > /dev/null 2>&1 &
+TCPDUMP_PID=$!
+sleep 0.3
 ip netns exec "$NS_H1" ping -c 3 -W 1 -I mh-h1-v100 172.16.100.2 > /dev/null 2>&1 || true
-sleep 1
+wait "$TCPDUMP_PID" 2>/dev/null || true
 
 pe1_tx=$(stats_counter vbctl_pe1 SPLIT_HORIZON_TX)
 pe2_tx=$(stats_counter vbctl_pe2 SPLIT_HORIZON_TX)
 assert_nonzero "PE1 STATS_SPLIT_HORIZON_TX > 0" "${pe1_tx:-0}"
 assert_nonzero "PE2 STATS_SPLIT_HORIZON_TX > 0" "${pe2_tx:-0}"
+
+loopback_count=$(ip netns exec "$NS_H1" tcpdump -nn -r "$LOOPBACK_PCAP" 2>/dev/null | wc -l)
+if [ "$loopback_count" -eq 0 ]; then
+    print_success "pcap: 0 self-source ARP frames returned to host1 via PE2 (no loopback)"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    print_error "pcap: $loopback_count loopback ARP frames returned to host1 (split-horizon miss)"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+rm -f "$LOOPBACK_PCAP"
 
 print_info "Reachability: host1 -> host2 (unicast overlay)"
 if ip netns exec "$NS_H1" ping -c 3 -W 2 -I mh-h1-v100 172.16.100.2 > /dev/null 2>&1; then
