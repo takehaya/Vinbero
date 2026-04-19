@@ -4,143 +4,91 @@ import (
 	"net"
 	"testing"
 
-	"github.com/cilium/ebpf"
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
 
-// benchHelper mirrors xdpTestHelper but takes testing.TB so benchmarks and
-// tests can share setup. Kept local to split_horizon_bench_test.go because
-// the bench file is the only user so far.
-type benchHelper struct {
-	objs   *BpfObjects
-	mapOps *MapOperations
-}
+// Shared across the three split-horizon benchmarks to avoid repeating the
+// same test vectors three times.
+const (
+	benchTriggerSID   = "fd00:1:100::10/128"
+	benchPeerIPv6     = "fd00:1:1::1"
+	benchTriggerIPv6  = "fd00:1:100::10"
+	benchLocalESIStr  = "aa:aa:aa:aa:aa:aa:aa:aa:aa:01"
+	benchRemoteESIStr = "bb:bb:bb:bb:bb:bb:bb:bb:bb:01"
+	benchBdID         = uint16(100)
+	benchVlanID       = uint16(100)
+)
 
-func newBenchHelper(tb testing.TB) *benchHelper {
+// benchL2Peer builds the HeadendEntry used as the sender peer in all three
+// benchmarks. A separate function so the benchmarks stay noise-free.
+func benchL2Peer(tb testing.TB) (*HeadendEntry, [16]byte) {
 	tb.Helper()
-	objs, err := ReadCollection(nil, nil)
+	src, err := ParseIPv6(benchPeerIPv6)
 	if err != nil {
-		tb.Fatalf("ReadCollection: %v", err)
+		tb.Fatalf("ParseIPv6: %v", err)
 	}
-	tb.Cleanup(func() { _ = objs.Close() })
-	return &benchHelper{objs: objs, mapOps: NewMapOperations(objs)}
+	return &HeadendEntry{
+		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
+		NumSegments: 1,
+		SrcAddr:     src,
+	}, src
 }
 
-// runBPF executes the XDP program `repeat` times in a single
-// BPF_PROG_TEST_RUN syscall. Pair with b.N as the repeat count so Go's
-// benchmark timer divides the syscall's wall-clock by the iteration count.
-func (h *benchHelper) runBPF(tb testing.TB, pkt []byte, repeat uint32) {
+func benchPacket(tb testing.TB) []byte {
 	tb.Helper()
-	opts := ebpf.RunOptions{
-		Data:    pkt,
-		DataOut: make([]byte, 1500),
-		Repeat:  repeat,
+	pkt, err := buildL2EncapsulatedPacket(
+		net.ParseIP(benchPeerIPv6), net.ParseIP(benchTriggerIPv6),
+		[]net.IP{net.ParseIP(benchTriggerIPv6)}, 0,
+		benchVlanID, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true,
+	)
+	if err != nil {
+		tb.Fatalf("buildL2EncapsulatedPacket: %v", err)
 	}
-	if _, err := h.objs.VinberoMain.Run(&opts); err != nil {
-		tb.Fatalf("Run: %v", err)
-	}
+	return pkt
 }
 
-// BenchmarkEndDT2MSplitHorizonDrop measures the DT2M RX drop path when the
-// sender's ESI matches the local PE's attached ES (fail-safe split-horizon).
+// BenchmarkEndDT2MSplitHorizonDrop: RX split-horizon hit -> XDP_DROP.
 func BenchmarkEndDT2MSplitHorizonDrop(b *testing.B) {
-	h := newBenchHelper(b)
-	esi, _ := ParseESI("aa:aa:aa:aa:aa:aa:aa:aa:aa:01")
-	bdID := uint16(100)
+	h := newXDPTestHelper(b)
+	esi, _ := ParseESI(benchLocalESIStr)
 
-	entry := &SidFunctionEntry{Action: actionEndDT2M, Flavor: 0}
-	aux := NewSidAuxL2(bdID, 0)
-	if err := h.mapOps.CreateSidFunction("fd00:1:100::10/128", entry, aux); err != nil {
-		b.Fatalf("CreateSidFunction: %v", err)
-	}
+	h.createSidFunctionWithBD(benchTriggerSID, actionEndDT2M, benchBdID)
 	if err := h.mapOps.CreateEsi(esi, NewEsiEntry(EsiConfig{LocalAttached: true})); err != nil {
 		b.Fatalf("CreateEsi: %v", err)
 	}
-	peerSrc, _ := ParseIPv6("fd00:1:1::1")
-	peer := &HeadendEntry{
-		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
-		NumSegments: 1,
-		SrcAddr:     peerSrc,
-	}
-	if err := h.mapOps.CreateBdPeer(bdID, 0, peer, esi); err != nil {
+	peer, _ := benchL2Peer(b)
+	if err := h.mapOps.CreateBdPeer(benchBdID, 0, peer, esi); err != nil {
 		b.Fatalf("CreateBdPeer: %v", err)
 	}
 
-	pkt, err := buildL2EncapsulatedPacket(
-		net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::10"),
-		[]net.IP{net.ParseIP("fd00:1:100::10")}, 0,
-		100, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true,
-	)
-	if err != nil {
-		b.Fatalf("buildL2EncapsulatedPacket: %v", err)
-	}
-
 	b.ResetTimer()
-	h.runBPF(b, pkt, uint32(b.N))
+	h.runRepeat(benchPacket(b), uint32(b.N))
 }
 
-// BenchmarkEndDT2MForward measures the DT2M RX path when the sender's ESI
-// differs from the local ES (split-horizon passes through to FDB lookup).
-// No bridge is wired so the program PASSes after the DT2M gate — this
-// isolates the split-horizon + DF overhead from FDB forwarding cost.
+// BenchmarkEndDT2MForward: ESI mismatch, gate passes -> DT2 forward path.
 func BenchmarkEndDT2MForward(b *testing.B) {
-	h := newBenchHelper(b)
-	localESI, _ := ParseESI("aa:aa:aa:aa:aa:aa:aa:aa:aa:01")
-	remoteESI, _ := ParseESI("bb:bb:bb:bb:bb:bb:bb:bb:bb:01")
-	bdID := uint16(100)
+	h := newXDPTestHelper(b)
+	localESI, _ := ParseESI(benchLocalESIStr)
+	remoteESI, _ := ParseESI(benchRemoteESIStr)
 
-	entry := &SidFunctionEntry{Action: actionEndDT2M, Flavor: 0}
-	aux := NewSidAuxL2(bdID, 0)
-	if err := h.mapOps.CreateSidFunction("fd00:1:100::10/128", entry, aux); err != nil {
-		b.Fatalf("CreateSidFunction: %v", err)
-	}
+	h.createSidFunctionWithBD(benchTriggerSID, actionEndDT2M, benchBdID)
 	if err := h.mapOps.CreateEsi(localESI, NewEsiEntry(EsiConfig{LocalAttached: true})); err != nil {
 		b.Fatalf("CreateEsi: %v", err)
 	}
-	peerSrc, _ := ParseIPv6("fd00:1:1::1")
-	peer := &HeadendEntry{
-		Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
-		NumSegments: 1,
-		SrcAddr:     peerSrc,
-	}
-	if err := h.mapOps.CreateBdPeer(bdID, 0, peer, remoteESI); err != nil {
+	peer, _ := benchL2Peer(b)
+	if err := h.mapOps.CreateBdPeer(benchBdID, 0, peer, remoteESI); err != nil {
 		b.Fatalf("CreateBdPeer: %v", err)
 	}
 
-	pkt, err := buildL2EncapsulatedPacket(
-		net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::10"),
-		[]net.IP{net.ParseIP("fd00:1:100::10")}, 0,
-		100, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true,
-	)
-	if err != nil {
-		b.Fatalf("buildL2EncapsulatedPacket: %v", err)
-	}
-
 	b.ResetTimer()
-	h.runBPF(b, pkt, uint32(b.N))
+	h.runRepeat(benchPacket(b), uint32(b.N))
 }
 
-// BenchmarkEndDT2Baseline measures the DT2 (DT2U) RX path as a split-horizon-
-// free baseline: identical decap + FDB lookup without the DT2M ESI gate.
+// BenchmarkEndDT2Baseline: DT2U path, no split-horizon gate, as reference.
 func BenchmarkEndDT2Baseline(b *testing.B) {
-	h := newBenchHelper(b)
-	bdID := uint16(100)
-
-	entry := &SidFunctionEntry{Action: actionEndDT2, Flavor: 0}
-	aux := NewSidAuxL2(bdID, 0)
-	if err := h.mapOps.CreateSidFunction("fd00:1:100::10/128", entry, aux); err != nil {
-		b.Fatalf("CreateSidFunction: %v", err)
-	}
-
-	pkt, err := buildL2EncapsulatedPacket(
-		net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::10"),
-		[]net.IP{net.ParseIP("fd00:1:100::10")}, 0,
-		100, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true,
-	)
-	if err != nil {
-		b.Fatalf("buildL2EncapsulatedPacket: %v", err)
-	}
+	h := newXDPTestHelper(b)
+	h.createSidFunctionWithBD(benchTriggerSID, actionEndDT2, benchBdID)
 
 	b.ResetTimer()
-	h.runBPF(b, pkt, uint32(b.N))
+	h.runRepeat(benchPacket(b), uint32(b.N))
 }

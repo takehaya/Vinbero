@@ -25,6 +25,7 @@ ESI="01:00:00:00:00:00:00:00:00:01"
 PE1_SRC="fc00:1::1"
 PE2_SRC="fc00:2::2"
 PE3_SRC="fc00:3::3"
+HOST1_MAC="02:00:00:00:00:01" # matches setup.sh
 
 VINBERO_PID_PE1="" VINBERO_PID_PE2="" VINBERO_PID_PE3=""
 TESTS_PASSED=0
@@ -129,13 +130,14 @@ print_info "Sending pings to trigger ARP broadcast from host1..."
 # Capture inbound traffic on the PE2 side of host1's veth. Any ARP whose
 # sender is host1's own MAC arriving INbound is a loopback (split-horizon
 # miss); split-horizon should make this count zero.
-HOST1_MAC_ADDR=02:00:00:00:00:01
-LOOPBACK_PCAP=/tmp/dt2m_loopback.pcap
-ip netns exec "$NS_H1" timeout 4 tcpdump -i mh-h1pe2 -Q in -p -nn -w "$LOOPBACK_PCAP" \
-    "ether src $HOST1_MAC_ADDR and arp" > /dev/null 2>&1 &
+LOOPBACK_PCAP=$(mktemp --suffix=.pcap)
+trap 'rm -f "$LOOPBACK_PCAP"' RETURN 2>/dev/null || true
+ip netns exec "$NS_H1" tcpdump -i mh-h1pe2 -Q in -p -nn -w "$LOOPBACK_PCAP" \
+    "ether src $HOST1_MAC and arp" > /dev/null 2>&1 &
 TCPDUMP_PID=$!
 sleep 0.3
 ip netns exec "$NS_H1" ping -c 3 -W 1 -I mh-h1-v100 172.16.100.2 > /dev/null 2>&1 || true
+kill "$TCPDUMP_PID" 2>/dev/null || true
 wait "$TCPDUMP_PID" 2>/dev/null || true
 
 pe1_tx=$(stats_counter vbctl_pe1 SPLIT_HORIZON_TX)

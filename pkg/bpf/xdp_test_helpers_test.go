@@ -52,35 +52,36 @@ const (
 
 // ========== Test Helper ==========
 
-// xdpTestHelper provides common test utilities for XDP program testing
+// xdpTestHelper provides common utilities for XDP program testing.
+// Accepts testing.TB so benchmarks can share the same setup surface.
 type xdpTestHelper struct {
-	t      *testing.T
+	t      testing.TB
 	objs   *BpfObjects
 	mapOps *MapOperations
 }
 
-func newXDPTestHelper(t *testing.T) *xdpTestHelper {
-	return newXDPTestHelperWithConstants(t, nil)
+func newXDPTestHelper(tb testing.TB) *xdpTestHelper {
+	return newXDPTestHelperWithConstants(tb, nil)
 }
 
 // newXDPTestHelperWithStats loads the BPF collection with enable_stats=1
 // so that stats_inc / slot_stats_inc actually update their maps during
 // BPF_PROG_TEST_RUN. Use when asserting stats or slot_stats counters.
-func newXDPTestHelperWithStats(t *testing.T) *xdpTestHelper {
-	return newXDPTestHelperWithConstants(t, map[string]any{
+func newXDPTestHelperWithStats(tb testing.TB) *xdpTestHelper {
+	return newXDPTestHelperWithConstants(tb, map[string]any{
 		"enable_stats": uint8(1),
 	})
 }
 
-func newXDPTestHelperWithConstants(t *testing.T, constants map[string]any) *xdpTestHelper {
-	t.Helper()
+func newXDPTestHelperWithConstants(tb testing.TB, constants map[string]any) *xdpTestHelper {
+	tb.Helper()
 	objs, err := ReadCollection(constants, nil)
 	if err != nil {
-		t.Fatalf("Failed to load BPF objects: %v", err)
+		tb.Fatalf("Failed to load BPF objects: %v", err)
 	}
-	t.Cleanup(func() { _ = objs.Close() })
+	tb.Cleanup(func() { _ = objs.Close() })
 	return &xdpTestHelper{
-		t:      t,
+		t:      tb,
 		objs:   objs,
 		mapOps: NewMapOperations(objs),
 	}
@@ -98,6 +99,20 @@ func (h *xdpTestHelper) run(pkt []byte) (uint32, []byte) {
 		h.t.Fatalf("Failed to run BPF program: %v", err)
 	}
 	return ret, opts.DataOut
+}
+
+// runRepeat drives BPF_PROG_TEST_RUN with Repeat=n in a single syscall.
+// Pair with b.N in benchmarks so Go divides the syscall's wall-clock by n.
+func (h *xdpTestHelper) runRepeat(pkt []byte, n uint32) {
+	h.t.Helper()
+	opts := ebpf.RunOptions{
+		Data:    pkt,
+		DataOut: make([]byte, 1500),
+		Repeat:  n,
+	}
+	if _, err := h.objs.VinberoMain.Run(&opts); err != nil {
+		h.t.Fatalf("Failed to run BPF program: %v", err)
+	}
 }
 
 func (h *xdpTestHelper) createSidFunction(prefix string, action uint8) {
