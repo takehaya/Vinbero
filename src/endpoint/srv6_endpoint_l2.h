@@ -3,6 +3,8 @@
 
 #include "endpoint/srv6_endpoint_core.h"
 #include "core/xdp_map.h"
+#include "core/xdp_stats.h"
+#include "core/esi.h"
 
 // ========================================================================
 // L2 Bridge Domain Endpoint Functions (End.DT2)
@@ -210,6 +212,106 @@ static __always_inline int process_end_dt2_nosrh(
 
     // 6. FDB forwarding decision
     return fdb_forward_l2(ctx, inner_eth, bd_id, bridge_ifindex);
+}
+
+// End.DT2M — RFC 8986 §4.12 + RFC 9252 split-horizon + static DF election (RX).
+// TODO: `dt2m_rx_split_horizon` and `find_peer_index_by_src` both look up
+// bd_peer_reverse_map for the same key; a follow-up can thread peer_idx
+// through to save one BUM-path hash lookup.
+
+static __always_inline bool dt2m_rx_split_horizon(__u16 bd_id, struct in6_addr *outer_src)
+{
+    if (bd_id == 0)
+        return false;
+    struct bd_peer_reverse_key rk = { .bd_id = bd_id };
+    __builtin_memcpy(rk.src_addr, outer_src, sizeof(struct in6_addr));
+    struct bd_peer_reverse_val *rv = bpf_map_lookup_elem(&bd_peer_reverse_map, &rk);
+    if (!rv || esi_is_zero(rv->esi))
+        return false;
+    return esi_is_local_attached(rv->esi);
+}
+
+// RFC 7432 §8.5 / RFC 9252: on a PE that attaches to this ES, only the
+// Designated Forwarder forwards BUM to the local AC. Non-DF PEs drop.
+// Decision is per-BD (per local ES), NOT per sender: once the packet reaches
+// the local bridge, the DF rule gates access to the shared CE regardless of
+// which remote PE sent it.
+static __always_inline bool dt2m_non_df_drop(__u16 bd_id)
+{
+    if (bd_id == 0)
+        return false;
+
+    __u32 bd_id32 = bd_id;
+    struct bd_local_esi_val *lv = bpf_map_lookup_elem(&bd_local_esi_map, &bd_id32);
+    if (!lv || esi_is_zero(lv->esi))
+        return false; // BD has no local ES → DF n/a (single-homing)
+
+    struct esi_key ek = {};
+    __builtin_memcpy(ek.esi, lv->esi, ESI_LEN);
+    struct esi_entry *e = bpf_map_lookup_elem(&esi_map, &ek);
+    if (!e || !e->local_attached)
+        return false;
+
+    // DF not configured → fail-open until the operator sets one.
+    if (ipv6_is_zero(e->df_pe_src_addr))
+        return false;
+
+    return !ipv6_equal(e->df_pe_src_addr, e->local_pe_src_addr);
+}
+
+// dt2m_bum_filter returns XDP_DROP (with stats) if the BUM frame should be
+// filtered out, or DT2M_FILTER_CONTINUE (= -1) when the normal DT2 flow
+// should run. Shared by the SRH and noSRH DT2M entrypoints.
+#define DT2M_FILTER_CONTINUE (-1)
+
+static __always_inline int dt2m_bum_filter(
+    struct xdp_md *ctx, __u16 bd_id, struct in6_addr *outer_src)
+{
+    void *data_end = (void *)(long)ctx->data_end;
+    void *data     = (void *)(long)ctx->data;
+    __u64 pkt_len  = data_end - data;
+
+    if (dt2m_rx_split_horizon(bd_id, outer_src)) {
+        STATS_INC(STATS_SPLIT_HORIZON_RX, pkt_len);
+        return XDP_DROP;
+    }
+    if (dt2m_non_df_drop(bd_id)) {
+        STATS_INC(STATS_NON_DF_DROP, pkt_len);
+        return XDP_DROP;
+    }
+    return DT2M_FILTER_CONTINUE;
+}
+
+static __always_inline int process_end_dt2m(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    __u16 l3_offset)
+{
+    if (aux) {
+        int act = dt2m_bum_filter(ctx, aux->l2.bd_id, &ip6h->saddr);
+        if (act != DT2M_FILTER_CONTINUE)
+            return act;
+    }
+    return process_end_dt2(ctx, ip6h, srh, entry, aux, l3_offset);
+}
+
+static __always_inline int process_end_dt2m_nosrh(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    __u8 nexthdr,
+    struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    __u16 l3_offset)
+{
+    if (aux) {
+        int act = dt2m_bum_filter(ctx, aux->l2.bd_id, &ip6h->saddr);
+        if (act != DT2M_FILTER_CONTINUE)
+            return act;
+    }
+    return process_end_dt2_nosrh(ctx, ip6h, nexthdr, entry, aux, l3_offset);
 }
 
 #endif // SRV6_ENDPOINT_L2_H

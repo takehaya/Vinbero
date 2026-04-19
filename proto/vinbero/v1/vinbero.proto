@@ -206,6 +206,7 @@ message FdbEntry {
   bool is_remote = 5; // true if learned via SRv6 End.DT2 (remote PE)
   bool is_static = 6; // true if user-configured (never aged out)
   uint64 last_seen = 7; // bpf_ktime_get_ns() timestamp (0 for static entries)
+  string esi = 8; // Remote only: RFC 7432 ESI (e.g., "00:11:22:33:44:55:66:77:88:99"), empty=single-homing
 }
 
 message FdbListRequest {}
@@ -299,6 +300,7 @@ message BdPeer {
   string src_addr = 2; // Outer IPv6 source address for SRv6 encap
   repeated string segments = 3; // Segment list to reach this PE
   Srv6HeadendBehavior mode = 4; // Headend mode (default: H_ENCAPS_L2, or H_ENCAPS_L2_RED for Reduced SRH)
+  string esi = 5; // RFC 7432 Ethernet Segment Identifier this peer attaches to (empty=single-homing)
 }
 
 message BdPeerCreateRequest {
@@ -329,6 +331,75 @@ message BdPeerFlushRequest {
 }
 message BdPeerFlushResponse {
   uint32 deleted_count = 1;
+}
+
+// EthernetSegmentService manages RFC 7432 Ethernet Segment Identifiers (ESIs)
+// used for EVPN multi-homing: CRUD plus static Designated Forwarder (DF)
+// election via EsSetDf / EsClearDf.
+service EthernetSegmentService {
+  rpc EsCreate(EsCreateRequest) returns (EsCreateResponse);
+  rpc EsDelete(EsDeleteRequest) returns (EsDeleteResponse);
+  rpc EsList(EsListRequest) returns (EsListResponse);
+  rpc EsSetDf(EsSetDfRequest) returns (EsSetDfResponse);
+  rpc EsClearDf(EsClearDfRequest) returns (EsClearDfResponse);
+}
+
+// EsiRedundancyMode reflects RFC 7432 multi-homing modes.
+enum EsiRedundancyMode {
+  ESI_REDUNDANCY_MODE_UNSPECIFIED = 0;
+  ESI_REDUNDANCY_MODE_SINGLE_HOMING = 1;
+  ESI_REDUNDANCY_MODE_ALL_ACTIVE = 2;
+  ESI_REDUNDANCY_MODE_SINGLE_ACTIVE = 3;
+}
+
+// EthernetSegment represents a single ES entry stored in the ESI master table.
+message EthernetSegment {
+  string esi = 1; // 10-byte RFC 7432 ESI as colon-separated hex
+  bool local_attached = 2; // true if this PE attaches to the ES
+  // local_pe_src_addr is the IPv6 source this PE uses in H.Encaps.L2 for this
+  // ES. Required when local_attached=true so DF judgement can compare against
+  // df_pe_src_addr. Ignored otherwise.
+  string local_pe_src_addr = 3;
+  // df_pe_src_addr names the current Designated Forwarder for this ES. Empty
+  // means "no DF configured yet" (all attached PEs forward BUM, DF=implicit).
+  string df_pe_src_addr = 4;
+  EsiRedundancyMode redundancy_mode = 5;
+}
+
+message EsCreateRequest {
+  repeated EthernetSegment entries = 1;
+}
+message EsCreateResponse {
+  repeated EthernetSegment created = 1;
+  repeated OperationError errors = 2;
+}
+
+message EsDeleteRequest {
+  repeated string esis = 1; // ESI strings to delete
+}
+message EsDeleteResponse {
+  repeated string deleted = 1;
+  repeated OperationError errors = 2;
+}
+
+message EsListRequest {}
+message EsListResponse {
+  repeated EthernetSegment entries = 1;
+}
+
+message EsSetDfRequest {
+  string esi = 1;
+  string df_pe_src_addr = 2; // IPv6 of the PE promoted to DF
+}
+message EsSetDfResponse {
+  EthernetSegment updated = 1;
+}
+
+message EsClearDfRequest {
+  string esi = 1;
+}
+message EsClearDfResponse {
+  EthernetSegment updated = 1;
 }
 
 // NetworkResourceService manages Linux network resources (VRF, Bridge) via netlink.
@@ -427,6 +498,7 @@ message HeadendL2 {
   uint32 bd_id = 4; // Bridge Domain ID; 0 = direct encap (no BD), >0 = MAC learning enabled
   string interface_name = 5; // Customer-facing interface name (resolved to ifindex internally)
   Srv6HeadendBehavior mode = 6; // Headend mode (default: H_ENCAPS_L2, or H_ENCAPS_L2_RED for Reduced SRH)
+  string esi = 7; // RFC 7432 Ethernet Segment Identifier of the local AC (empty=single-homing)
 }
 
 message HeadendL2CreateRequest {

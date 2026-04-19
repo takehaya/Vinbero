@@ -33,14 +33,18 @@ func (s *FdbServer) FdbList(
 
 	for key, entry := range entries {
 		mac := net.HardwareAddr(key.Mac[:])
-		resp.Entries = append(resp.Entries, &v1.FdbEntry{
+		fdbEntry := &v1.FdbEntry{
 			BdId:     uint32(key.BdId),
 			Mac:      mac.String(),
 			Oif:      entry.Oif,
 			IsRemote: entry.IsRemote != 0,
 			IsStatic: entry.IsStatic != 0,
 			LastSeen: entry.LastSeen,
-		})
+		}
+		if entry.IsRemote != 0 {
+			fdbEntry.Esi = bpf.FormatESI(entry.Esi)
+		}
+		resp.Entries = append(resp.Entries, fdbEntry)
 	}
 
 	return connect.NewResponse(resp), nil

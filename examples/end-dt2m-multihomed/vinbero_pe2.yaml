@@ -1,0 +1,25 @@
+internal:
+  devices:
+    - mh-pe2h1
+    - mh-pe2p
+  bpf:
+    device_mode: generic
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "127.0.0.1:18102"
+  logger:
+    level: debug
+    format: text
+    no_color: false
+    add_caller: true
+
+settings:
+  enable_stats: true
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024

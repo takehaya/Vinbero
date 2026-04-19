@@ -12,6 +12,8 @@
 #include "core/xdp_prog.h"
 #include "core/xdp_map.h"
 #include "core/srv6.h"
+#include "core/esi.h"
+#include "core/xdp_stats.h"
 #include "headend/srv6_headend.h"
 #include "headend/srv6_headend_utils.h"
 #include "l2vpn/bum_meta.h"
@@ -198,9 +200,9 @@ static __noinline int tc_do_single_pe_encap_red(
     return tc_do_single_pe_encap_impl(skb, cb_bd_id, cb_pe_index, true);
 }
 
-// Mode 1: Dispatch clones to self for each remote PE in the BD.
-// Each clone re-enters TC ingress with cb[] set, triggering Mode 2.
-// The original frame continues to bridge via TC_ACT_OK.
+// Mode 1: clone-to-self, one clone per remote PE in the BD. RFC 9252
+// split-horizon: if the source AC's ESI matches a peer's ESI, the peer is on
+// the same Ethernet Segment and would re-flood to the shared CE — skip it.
 static __noinline int tc_dispatch_bum_clones(
     struct __sk_buff *skb,
     __u16 vlan_id)
@@ -216,13 +218,27 @@ static __noinline int tc_dispatch_bum_clones(
     __u16 bd_id = l2->bd_id;
     DEBUG_PRINT("TC dispatch: bd_id=%d\n", bd_id);
 
-    for (int i = 0; i < MAX_BUM_NEXTHOPS; i++) {
+    // Resolve source AC's ESI once, out of the per-peer loop.
+    struct headend_l2_ext_val *src_ext = bpf_map_lookup_elem(&headend_l2_ext_map, &l2_key);
+    bool src_esi_set = src_ext && !esi_is_zero(src_ext->esi);
+
+    for (__u16 i = 0; i < MAX_BUM_NEXTHOPS; i++) {
         struct bd_peer_key key = { .bd_id = bd_id, .index = i };
         struct headend_entry *peer = bpf_map_lookup_elem(&bd_peer_map, &key);
         if (!peer)
             continue; // Slot may be empty due to deletion; keep scanning
 
-        // Tag this clone for Mode 2 processing
+        if (src_esi_set) {
+            struct bd_peer_l2_ext_key ext_key = { .bd_id = bd_id, .index = i };
+            struct bd_peer_l2_ext_val *peer_ext =
+                bpf_map_lookup_elem(&bd_peer_l2_ext_map, &ext_key);
+            if (peer_ext && esi_equal(peer_ext->esi, src_ext->esi)) {
+                STATS_INC(STATS_SPLIT_HORIZON_TX, skb->len);
+                DEBUG_PRINT("TC dispatch: split-horizon skip peer=%d\n", i);
+                continue;
+            }
+        }
+
         skb->cb[0] = TC_CB_ENCAP_MAGIC;
         skb->cb[1] = bd_id;
         skb->cb[2] = i;

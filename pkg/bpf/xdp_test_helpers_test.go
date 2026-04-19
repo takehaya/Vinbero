@@ -18,16 +18,17 @@ import (
 
 // SID Function action constants
 const (
-	actionEnd     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END)
-	actionEndX    = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X)
-	actionEndT    = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T)
-	actionEndDX2  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2)
-	actionEndDX4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX4)
-	actionEndDX6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX6)
-	actionEndDT4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
-	actionEndDT6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
-	actionEndDT46 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
+	actionEnd         = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END)
+	actionEndX        = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X)
+	actionEndT        = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T)
+	actionEndDX2      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2)
+	actionEndDX4      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX4)
+	actionEndDX6      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX6)
+	actionEndDT4      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
+	actionEndDT6      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
+	actionEndDT46     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
 	actionEndDT2      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	actionEndDT2M     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2M)
 	actionEndDX2V     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2V)
 	actionEndB6       = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6)
 	actionEndB6Encaps = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS)
@@ -296,7 +297,7 @@ func buildSimpleIPv4Packet(srcIP, dstIP net.IP) ([]byte, error) {
 	}
 	icmp := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 1234, Seq: 1,
+		Id:       1234, Seq: 1,
 	}
 
 	buf := gopacket.NewSerializeBuffer()
@@ -320,7 +321,7 @@ func buildVlanTaggedIPv4Packet(vlanID uint16, srcIP, dstIP net.IP) ([]byte, erro
 	}
 	icmp := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 1234, Seq: 1,
+		Id:       1234, Seq: 1,
 	}
 
 	buf := gopacket.NewSerializeBuffer()
@@ -439,7 +440,7 @@ func buildEncapsulatedPacket(
 		}
 		icmp := &layers.ICMPv4{
 			TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-			Id: 1234, Seq: 1,
+			Id:       1234, Seq: 1,
 		}
 		if err := gopacket.SerializeLayers(buf, opts, eth, outerIP6, srv6, innerIP4, icmp, gopacket.Payload(newTestPayload(64))); err != nil {
 			return nil, err
@@ -745,7 +746,7 @@ func (h *xdpTestHelper) createHeadendL2EntryWithMode(ifindex uint32, vlanID uint
 		Segments:    segments,
 		BdId:        bdID,
 	}
-	if err := h.mapOps.CreateHeadendL2(ifindex, vlanID, entry); err != nil {
+	if err := h.mapOps.CreateHeadendL2(ifindex, vlanID, entry, [ESILen]byte{}); err != nil {
 		h.t.Fatalf("Failed to create headend L2 entry: %v", err)
 	}
 	h.t.Cleanup(func() {
@@ -895,7 +896,7 @@ func buildEncapsulatedPacketNoSRH(
 		}
 		icmp := &layers.ICMPv4{
 			TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-			Id: 1234, Seq: 1,
+			Id:       1234, Seq: 1,
 		}
 		if err := gopacket.SerializeLayers(buf, opts, eth, outerIP6, innerIP4, icmp, gopacket.Payload(newTestPayload(64))); err != nil {
 			return nil, err
@@ -955,8 +956,8 @@ func buildSRv6PacketWithInnerIPv4(srcIP, dstIP net.IP, segments []net.IP, segmen
 
 	numSegments := len(segments)
 	srv6 := &packet.Srv6Layer{
-		NextHeader: 4, // IPPROTO_IPIP
-		HdrExtLen:  uint8(numSegments * 2),
+		NextHeader:  4, // IPPROTO_IPIP
+		HdrExtLen:   uint8(numSegments * 2),
 		RoutingType: 4, SegmentsLeft: segmentsLeft,
 		LastEntry: uint8(numSegments - 1), Segments: segmentsToNetipAddr(segments),
 	}
@@ -965,11 +966,11 @@ func buildSRv6PacketWithInnerIPv4(srcIP, dstIP net.IP, segments []net.IP, segmen
 	innerIP := &layers.IPv4{
 		Version: 4, IHL: 5, TTL: 64,
 		Protocol: layers.IPProtocolICMPv4,
-		SrcIP: innerSrc, DstIP: innerDst,
+		SrcIP:    innerSrc, DstIP: innerDst,
 	}
 	innerICMP := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 5678, Seq: 1,
+		Id:       5678, Seq: 1,
 	}
 
 	buf := gopacket.NewSerializeBuffer()
@@ -982,22 +983,22 @@ func buildSRv6PacketWithInnerIPv4(srcIP, dstIP net.IP, segments []net.IP, segmen
 
 // GTP-U action/mode constants
 const (
-	actionEndMGTP4E = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E)
+	actionEndMGTP4E   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E)
 	actionEndMGTP6D   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D)
 	actionEndMGTP6DDI = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D_DI)
 	actionEndMGTP6E   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E)
-	modeHMGTP4D     = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D)
+	modeHMGTP4D       = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D)
 )
 
 // createHeadendEntryGTP creates a headend v4 entry with H.M.GTP4.D mode and args_offset
 func (h *xdpTestHelper) createHeadendEntryGTP(prefix string, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
 	h.t.Helper()
 	entry := &HeadendEntry{
-		Mode:          modeHMGTP4D,
-		NumSegments:   numSegments,
-		SrcAddr:       srcAddr,
-		Segments:      segments,
-		ArgsOffset: argsOffset,
+		Mode:        modeHMGTP4D,
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+		ArgsOffset:  argsOffset,
 	}
 	if err := h.mapOps.CreateHeadendV4(prefix, entry); err != nil {
 		h.t.Fatalf("Failed to create GTP headend entry: %v", err)
@@ -1029,7 +1030,7 @@ func buildGTPUv4Packet(outerSrc, outerDst net.IP, teid uint32, qfi uint8, innerS
 	}
 	innerICMP := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 5678, Seq: 1,
+		Id:       5678, Seq: 1,
 	}
 
 	gtp := &packet.GTPULayer{TEID: teid, QFI: qfi}
@@ -1085,7 +1086,7 @@ func buildSRv6WithGTPUPayload(outerSrc net.IP, sid net.IP, nextSeg net.IP, teid 
 	}
 	innerICMP := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 5678, Seq: 1,
+		Id:       5678, Seq: 1,
 	}
 	innerBuf := gopacket.NewSerializeBuffer()
 	innerOpts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
@@ -1114,11 +1115,11 @@ func buildSRv6WithGTPUPayload(outerSrc net.IP, sid net.IP, nextSeg net.IP, teid 
 	numSegments := 2
 	srhLen := 8 + numSegments*16
 	srh := make([]byte, srhLen)
-	srh[0] = 17 // nexthdr = UDP
+	srh[0] = 17                     // nexthdr = UDP
 	srh[1] = byte((srhLen - 8) / 8) // hdrlen
-	srh[2] = 4  // routing type = SRH
-	srh[3] = 1  // segments_left = 1
-	srh[4] = byte(numSegments - 1) // last_entry
+	srh[2] = 4                      // routing type = SRH
+	srh[3] = 1                      // segments_left = 1
+	srh[4] = byte(numSegments - 1)  // last_entry
 	// segments: [0]=nextSeg, [1]=sid (reversed order per RFC)
 	copy(srh[8:24], nextSeg.To16())
 	copy(srh[24:40], sid.To16())

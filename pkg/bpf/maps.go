@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -21,20 +22,25 @@ const (
 
 // Type aliases for BPF generated types
 type (
-	LpmKeyV4           = BpfLpmKeyV4
-	LpmKeyV6           = BpfLpmKeyV6
-	HeadendL2Key       = BpfHeadendL2Key
-	SidFunctionEntry   = BpfSidFunctionEntry
-	SidAuxEntry        = BpfSidAuxEntry
-	HeadendEntry       = BpfHeadendEntry
-	FdbKey             = BpfFdbKey
-	FdbEntry           = BpfFdbEntry
-	BdPeerKey          = BpfBdPeerKey
-	BdPeerReverseKey   = BpfBdPeerReverseKey
-	BdPeerReverseVal   = BpfBdPeerReverseVal
-	Dx2vKey            = BpfDx2vKey
-	Dx2vEntry          = BpfDx2vEntry
+	LpmKeyV4         = BpfLpmKeyV4
+	LpmKeyV6         = BpfLpmKeyV6
+	HeadendL2Key     = BpfHeadendL2Key
+	SidFunctionEntry = BpfSidFunctionEntry
+	SidAuxEntry      = BpfSidAuxEntry
+	HeadendEntry     = BpfHeadendEntry
+	FdbKey           = BpfFdbKey
+	FdbEntry         = BpfFdbEntry
+	BdPeerKey        = BpfBdPeerKey
+	BdPeerReverseKey = BpfBdPeerReverseKey
+	BdPeerReverseVal = BpfBdPeerReverseVal
+	Dx2vKey          = BpfDx2vKey
+	Dx2vEntry        = BpfDx2vEntry
+	EsiKey           = BpfEsiKey
+	EsiEntry         = BpfEsiEntry
 )
+
+// ESILen is the fixed length of RFC 7432 Ethernet Segment Identifier.
+const ESILen = 10
 
 // MapOperator interface for testability
 type MapOperator interface {
@@ -435,10 +441,11 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 
 // ===== Stats Map Operations =====
 
-const StatsMax = 5
+const StatsMax = 8
 
 var StatsCounterName = [StatsMax]string{
 	"RX_PACKETS", "PASS", "DROP", "REDIRECT", "ABORTED",
+	"SPLIT_HORIZON_TX", "SPLIT_HORIZON_RX", "NON_DF_DROP",
 }
 
 type AggregatedStats struct {
@@ -692,11 +699,33 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 
 // ===== Headend L2 Map Operations =====
 
-// CreateHeadendL2 adds a headend L2 entry to the map (keyed by port + VLAN)
-func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *HeadendEntry) error {
+// CreateHeadendL2 adds a headend L2 entry to the map (keyed by port + VLAN).
+// esi is the 10-byte RFC 7432 ESI of this local AC; all-zero means
+// single-homing and skips the side-table write. If entry.BdId is non-zero
+// and esi is set, bd_local_esi_map is also populated for the DT2M DF check.
+func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *HeadendEntry, esi [ESILen]byte) error {
 	key := buildHeadendL2Key(ifindex, vlanID)
 	if err := m.objs.HeadendL2Map.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put headend L2 entry: %w", err)
+	}
+
+	var zero [ESILen]byte
+	if esi != zero {
+		if err := m.objs.HeadendL2ExtMap.Put(key, &BpfHeadendL2ExtVal{Esi: esi}); err != nil {
+			return fmt.Errorf("failed to put headend L2 ESI ext: %w", err)
+		}
+		if entry.BdId != 0 {
+			bdKey := uint32(entry.BdId)
+			if err := m.objs.BdLocalEsiMap.Put(&bdKey, &BpfBdLocalEsiVal{Esi: esi}); err != nil {
+				return fmt.Errorf("failed to put bd_local_esi entry: %w", err)
+			}
+		}
+	} else {
+		_ = m.objs.HeadendL2ExtMap.Delete(key)
+		if entry.BdId != 0 {
+			bdKey := uint32(entry.BdId)
+			_ = m.objs.BdLocalEsiMap.Delete(&bdKey)
+		}
 	}
 	return nil
 }
@@ -704,10 +733,29 @@ func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *He
 // DeleteHeadendL2 removes a headend L2 entry from the map
 func (m *MapOperations) DeleteHeadendL2(ifindex uint32, vlanID uint16) error {
 	key := buildHeadendL2Key(ifindex, vlanID)
+	var prev HeadendEntry
+	hadEntry := m.objs.HeadendL2Map.Lookup(key, &prev) == nil
 	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete headend L2 entry: %w", err)
 	}
+	_ = m.objs.HeadendL2ExtMap.Delete(key)
+	if hadEntry && prev.BdId != 0 {
+		bdKey := uint32(prev.BdId)
+		_ = m.objs.BdLocalEsiMap.Delete(&bdKey)
+	}
 	return nil
+}
+
+// GetHeadendL2Esi looks up the side-table ESI for a given (ifindex, vlan).
+// Returns zero ESI if the entry is missing (single-homing).
+func (m *MapOperations) GetHeadendL2Esi(ifindex uint32, vlanID uint16) ([ESILen]byte, error) {
+	var out [ESILen]byte
+	key := buildHeadendL2Key(ifindex, vlanID)
+	var ext BpfHeadendL2ExtVal
+	if err := m.objs.HeadendL2ExtMap.Lookup(key, &ext); err != nil {
+		return out, nil // missing entry == single-homing
+	}
+	return ext.Esi, nil
 }
 
 // GetHeadendL2 retrieves a headend L2 entry from the map
@@ -865,19 +913,31 @@ func currentKtimeNs() uint64 {
 // ===== BD Peer Map Operations (for P2MP BUM flooding) =====
 
 // CreateBdPeer adds a BD peer entry for BUM flooding.
-// Also populates bd_peer_reverse_map for O(1) peer_index resolution in End.DT2.
-func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry) error {
+// Also populates bd_peer_reverse_map (RX split-horizon path) and
+// bd_peer_l2_ext_map (TX split-horizon path). esi is the 10-byte RFC 7432
+// Ethernet Segment Identifier; all-zero means single-homing.
+func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte) error {
 	key := &BdPeerKey{BdId: bdID, Index: index}
 	if err := m.objs.BdPeerMap.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put bd peer entry: %w", err)
 	}
 
-	// Maintain reverse map: {bd_id, src_addr} → index
 	rKey := &BdPeerReverseKey{BdId: bdID}
 	copy(rKey.SrcAddr[:], entry.SrcAddr[:])
-	rVal := &BdPeerReverseVal{Index: index}
+	rVal := &BdPeerReverseVal{Index: index, Esi: esi}
 	if err := m.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
 		return fmt.Errorf("failed to put bd peer reverse entry: %w", err)
+	}
+
+	var zero [ESILen]byte
+	extKey := &BpfBdPeerL2ExtKey{BdId: bdID, Index: index}
+	if esi != zero {
+		ext := &BpfBdPeerL2ExtVal{Esi: esi}
+		if err := m.objs.BdPeerL2ExtMap.Put(extKey, ext); err != nil {
+			return fmt.Errorf("failed to put bd peer L2 ESI ext: %w", err)
+		}
+	} else {
+		_ = m.objs.BdPeerL2ExtMap.Delete(extKey)
 	}
 
 	return nil
@@ -895,12 +955,13 @@ func (m *MapOperations) DeleteBdPeer(bdID, index uint16) error {
 		return fmt.Errorf("failed to delete bd peer entry: %w", err)
 	}
 
-	// Clean up reverse map (best-effort: ignore error if already gone)
+	// Clean up reverse map + ESI side tables (best-effort: ignore errors if already gone)
 	if hasEntry {
 		rKey := &BdPeerReverseKey{BdId: bdID}
 		copy(rKey.SrcAddr[:], entry.SrcAddr[:])
 		_ = m.objs.BdPeerReverseMap.Delete(rKey)
 	}
+	_ = m.objs.BdPeerL2ExtMap.Delete(&BpfBdPeerL2ExtKey{BdId: bdID, Index: index})
 	return nil
 }
 
@@ -1222,6 +1283,10 @@ func (m *MapOperations) GetSharedMaps() map[string]*ebpf.Map {
 		"fdb_map":            m.objs.FdbMap,
 		"bd_peer_map":        m.objs.BdPeerMap,
 		"bd_peer_reverse_map": m.objs.BdPeerReverseMap,
+		"esi_map":            m.objs.EsiMap,
+		"bd_peer_l2_ext_map":  m.objs.BdPeerL2ExtMap,
+		"headend_l2_ext_map":  m.objs.HeadendL2ExtMap,
+		"bd_local_esi_map":    m.objs.BdLocalEsiMap,
 		"dx2v_map":           m.objs.Dx2vMap,
 		"scratch_map":             m.objs.ScratchMap,
 		"stats_map":               m.objs.StatsMap,
@@ -1308,4 +1373,177 @@ func (m *MapOperations) resolvePluginMap(mapType string) (*ebpf.Map, uint32, uin
 	default:
 		return nil, 0, 0, fmt.Errorf("unknown plugin map type: %s", mapType)
 	}
+}
+
+// BdPeerEsiKey identifies a (BD, src_addr) pair for the caller-side
+// ESI lookup table returned by ListBdPeerEsi.
+type BdPeerEsiKey struct {
+	BdId    uint16
+	SrcAddr [IPv6AddrLen]uint8
+}
+
+// ListBdPeerEsi returns a per-peer ESI table built from bd_peer_reverse_map.
+func (m *MapOperations) ListBdPeerEsi() (map[BdPeerEsiKey][ESILen]byte, error) {
+	result := make(map[BdPeerEsiKey][ESILen]byte)
+	var key BdPeerReverseKey
+	var val BdPeerReverseVal
+	iter := m.objs.BdPeerReverseMap.Iterate()
+	for iter.Next(&key, &val) {
+		k := BdPeerEsiKey{BdId: key.BdId}
+		copy(k.SrcAddr[:], key.SrcAddr[:])
+		result[k] = val.Esi
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate bd_peer_reverse_map: %w", err)
+	}
+	return result, nil
+}
+
+// ===== Ethernet Segment (ESI) Map Operations =====
+
+// EsiConfig is the user-facing description of an Ethernet Segment. NewEsiEntry
+// packs it into the BPF-side EsiEntry (handling the bool→uint8 flag).
+type EsiConfig struct {
+	LocalAttached   bool
+	RedundancyMode  uint8 // zero = UNSPECIFIED
+	LocalPeSrcAddr  [IPv6AddrLen]byte
+	DfPeSrcAddr     [IPv6AddrLen]byte
+}
+
+// NewEsiEntry builds an EsiEntry from user-facing fields.
+func NewEsiEntry(cfg EsiConfig) *EsiEntry {
+	e := &EsiEntry{RedundancyMode: cfg.RedundancyMode}
+	if cfg.LocalAttached {
+		e.LocalAttached = 1
+	}
+	e.DfPeSrcAddr = cfg.DfPeSrcAddr
+	e.LocalPeSrcAddr = cfg.LocalPeSrcAddr
+	return e
+}
+
+// IsLocalAttached reports whether this PE attaches to the ES.
+func (e *EsiEntry) IsLocalAttached() bool { return e.LocalAttached != 0 }
+
+// ParseESI decodes a colon-separated 10-byte ESI string (e.g., "00:11:22:33:44:55:66:77:88:99")
+// into a fixed-size array. Empty string returns all-zero ESI (single-homing sentinel),
+// which is accepted by BdPeer callers but rejected by CreateEsi.
+func ParseESI(s string) ([ESILen]byte, error) {
+	var out [ESILen]byte
+	if s == "" {
+		return out, nil
+	}
+	// net.ParseMAC only accepts 6/8/20-byte MACs, so roll our own fixed-width parser.
+	hw, err := parseColonHex(s, ESILen)
+	if err != nil {
+		return out, fmt.Errorf("ESI: %w", err)
+	}
+	copy(out[:], hw)
+	return out, nil
+}
+
+// FormatESI encodes a 10-byte ESI as colon-separated hex. All-zero returns ""
+// so BdPeer/FdbEntry proto responses surface the "single-homing" case as empty.
+func FormatESI(esi [ESILen]byte) string {
+	var zero [ESILen]byte
+	if esi == zero {
+		return ""
+	}
+	return net.HardwareAddr(esi[:]).String()
+}
+
+// parseColonHex decodes a "xx:xx:..." colon-separated hex string of exactly
+// n bytes. A small generalisation point so ESI and any future colon-hex
+// identifiers can share it.
+func parseColonHex(s string, n int) ([]byte, error) {
+	parts := strings.Split(s, ":")
+	if len(parts) != n {
+		return nil, fmt.Errorf("must have %d colon-separated bytes, got %d", n, len(parts))
+	}
+	out := make([]byte, n)
+	for i, p := range parts {
+		if len(p) == 0 || len(p) > 2 {
+			return nil, fmt.Errorf("byte[%d]=%q: invalid length", i, p)
+		}
+		var b byte
+		for _, c := range p {
+			var nib byte
+			switch {
+			case c >= '0' && c <= '9':
+				nib = byte(c - '0')
+			case c >= 'a' && c <= 'f':
+				nib = byte(c-'a') + 10
+			case c >= 'A' && c <= 'F':
+				nib = byte(c-'A') + 10
+			default:
+				return nil, fmt.Errorf("byte[%d]=%q: non-hex character", i, p)
+			}
+			b = b<<4 | nib
+		}
+		out[i] = b
+	}
+	return out, nil
+}
+
+// CreateEsi upserts an Ethernet Segment entry into esi_map.
+// All-zero ESI is rejected — it is reserved as the single-homing sentinel.
+func (m *MapOperations) CreateEsi(esi [ESILen]byte, entry *EsiEntry) error {
+	var zero [ESILen]byte
+	if esi == zero {
+		return fmt.Errorf("all-zero ESI is reserved as single-homing sentinel")
+	}
+	key := &EsiKey{Esi: esi}
+	if err := m.objs.EsiMap.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put esi entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteEsi removes an Ethernet Segment entry by ESI.
+func (m *MapOperations) DeleteEsi(esi [ESILen]byte) error {
+	key := &EsiKey{Esi: esi}
+	if err := m.objs.EsiMap.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete esi entry: %w", err)
+	}
+	return nil
+}
+
+// GetEsi looks up an Ethernet Segment entry.
+func (m *MapOperations) GetEsi(esi [ESILen]byte) (*EsiEntry, error) {
+	key := &EsiKey{Esi: esi}
+	var entry EsiEntry
+	if err := m.objs.EsiMap.Lookup(key, &entry); err != nil {
+		return nil, fmt.Errorf("failed to lookup esi entry: %w", err)
+	}
+	return &entry, nil
+}
+
+// SetEsiDfPe replaces the df_pe_src_addr of an existing ES. Pass an all-zero
+// dfAddr to clear the DF. Returns ErrKeyNotExist if the ESI isn't registered.
+func (m *MapOperations) SetEsiDfPe(esi [ESILen]byte, dfAddr [IPv6AddrLen]byte) (*EsiEntry, error) {
+	entry, err := m.GetEsi(esi)
+	if err != nil {
+		return nil, err
+	}
+	entry.DfPeSrcAddr = dfAddr
+	key := &EsiKey{Esi: esi}
+	if err := m.objs.EsiMap.Put(key, entry); err != nil {
+		return nil, fmt.Errorf("failed to update esi entry: %w", err)
+	}
+	return entry, nil
+}
+
+// ListEsi returns all Ethernet Segment entries keyed by ESI.
+func (m *MapOperations) ListEsi() (map[[ESILen]byte]*EsiEntry, error) {
+	result := make(map[[ESILen]byte]*EsiEntry)
+	var key EsiKey
+	var entry EsiEntry
+	iter := m.objs.EsiMap.Iterate()
+	for iter.Next(&key, &entry) {
+		entryCopy := entry
+		result[key.Esi] = &entryCopy
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate esi map: %w", err)
+	}
+	return result, nil
 }

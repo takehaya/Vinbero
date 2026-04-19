@@ -13,10 +13,28 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type BpfBdLocalEsiVal struct {
+	_   structs.HostLayout
+	Esi [10]uint8
+	Pad [6]uint8
+}
+
 type BpfBdPeerKey struct {
 	_     structs.HostLayout
 	BdId  uint16
 	Index uint16
+}
+
+type BpfBdPeerL2ExtKey struct {
+	_     structs.HostLayout
+	BdId  uint16
+	Index uint16
+}
+
+type BpfBdPeerL2ExtVal struct {
+	_   structs.HostLayout
+	Esi [10]uint8
+	Pad [6]uint8
 }
 
 type BpfBdPeerReverseKey struct {
@@ -29,6 +47,8 @@ type BpfBdPeerReverseKey struct {
 type BpfBdPeerReverseVal struct {
 	_     structs.HostLayout
 	Index uint16
+	Esi   [10]uint8
+	Pad   [4]uint8
 }
 
 type BpfDx2vEntry struct {
@@ -42,6 +62,21 @@ type BpfDx2vKey struct {
 	VlanId  uint16
 }
 
+type BpfEsiEntry struct {
+	_              structs.HostLayout
+	LocalAttached  uint8
+	RedundancyMode uint8
+	Pad            [6]uint8
+	DfPeSrcAddr    [16]uint8
+	LocalPeSrcAddr [16]uint8
+}
+
+type BpfEsiKey struct {
+	_   structs.HostLayout
+	Esi [10]uint8
+	Pad [6]uint8
+}
+
 type BpfFdbEntry struct {
 	_         structs.HostLayout
 	Oif       uint32
@@ -51,6 +86,8 @@ type BpfFdbEntry struct {
 	BdId      uint16
 	Pad       [2]uint8
 	LastSeen  uint64
+	Esi       [10]uint8
+	PadEsi    [2]uint8
 }
 
 type BpfFdbKey struct {
@@ -70,6 +107,12 @@ type BpfHeadendEntry struct {
 	BdId        uint16
 	ArgsOffset  uint8
 	PadGtp      uint8
+}
+
+type BpfHeadendL2ExtVal struct {
+	_   structs.HostLayout
+	Esi [10]uint8
+	Pad [6]uint8
 }
 
 type BpfHeadendL2Key struct {
@@ -175,6 +218,7 @@ type BpfProgramSpecs struct {
 	TailcallEndpointEndB6         *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6"`
 	TailcallEndpointEndB6Encaps   *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6_encaps"`
 	TailcallEndpointEndDt2        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt2"`
+	TailcallEndpointEndDt2m       *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt2m"`
 	TailcallEndpointEndDt4        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt4"`
 	TailcallEndpointEndDt46       *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt46"`
 	TailcallEndpointEndDt6        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt6"`
@@ -203,10 +247,14 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
+	BdLocalEsiMap      *ebpf.MapSpec `ebpf:"bd_local_esi_map"`
+	BdPeerL2ExtMap     *ebpf.MapSpec `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap          *ebpf.MapSpec `ebpf:"bd_peer_map"`
 	BdPeerReverseMap   *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
 	Dx2vMap            *ebpf.MapSpec `ebpf:"dx2v_map"`
+	EsiMap             *ebpf.MapSpec `ebpf:"esi_map"`
 	FdbMap             *ebpf.MapSpec `ebpf:"fdb_map"`
+	HeadendL2ExtMap    *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
 	HeadendL2Map       *ebpf.MapSpec `ebpf:"headend_l2_map"`
 	HeadendV4Map       *ebpf.MapSpec `ebpf:"headend_v4_map"`
 	HeadendV4Progs     *ebpf.MapSpec `ebpf:"headend_v4_progs"`
@@ -250,10 +298,14 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
+	BdLocalEsiMap      *ebpf.Map `ebpf:"bd_local_esi_map"`
+	BdPeerL2ExtMap     *ebpf.Map `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap          *ebpf.Map `ebpf:"bd_peer_map"`
 	BdPeerReverseMap   *ebpf.Map `ebpf:"bd_peer_reverse_map"`
 	Dx2vMap            *ebpf.Map `ebpf:"dx2v_map"`
+	EsiMap             *ebpf.Map `ebpf:"esi_map"`
 	FdbMap             *ebpf.Map `ebpf:"fdb_map"`
+	HeadendL2ExtMap    *ebpf.Map `ebpf:"headend_l2_ext_map"`
 	HeadendL2Map       *ebpf.Map `ebpf:"headend_l2_map"`
 	HeadendV4Map       *ebpf.Map `ebpf:"headend_v4_map"`
 	HeadendV4Progs     *ebpf.Map `ebpf:"headend_v4_progs"`
@@ -272,10 +324,14 @@ type BpfMaps struct {
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.BdLocalEsiMap,
+		m.BdPeerL2ExtMap,
 		m.BdPeerMap,
 		m.BdPeerReverseMap,
 		m.Dx2vMap,
+		m.EsiMap,
 		m.FdbMap,
+		m.HeadendL2ExtMap,
 		m.HeadendL2Map,
 		m.HeadendV4Map,
 		m.HeadendV4Progs,
@@ -308,6 +364,7 @@ type BpfPrograms struct {
 	TailcallEndpointEndB6         *ebpf.Program `ebpf:"tailcall_endpoint_end_b6"`
 	TailcallEndpointEndB6Encaps   *ebpf.Program `ebpf:"tailcall_endpoint_end_b6_encaps"`
 	TailcallEndpointEndDt2        *ebpf.Program `ebpf:"tailcall_endpoint_end_dt2"`
+	TailcallEndpointEndDt2m       *ebpf.Program `ebpf:"tailcall_endpoint_end_dt2m"`
 	TailcallEndpointEndDt4        *ebpf.Program `ebpf:"tailcall_endpoint_end_dt4"`
 	TailcallEndpointEndDt46       *ebpf.Program `ebpf:"tailcall_endpoint_end_dt46"`
 	TailcallEndpointEndDt6        *ebpf.Program `ebpf:"tailcall_endpoint_end_dt6"`
@@ -338,6 +395,7 @@ func (p *BpfPrograms) Close() error {
 		p.TailcallEndpointEndB6,
 		p.TailcallEndpointEndB6Encaps,
 		p.TailcallEndpointEndDt2,
+		p.TailcallEndpointEndDt2m,
 		p.TailcallEndpointEndDt4,
 		p.TailcallEndpointEndDt46,
 		p.TailcallEndpointEndDt6,

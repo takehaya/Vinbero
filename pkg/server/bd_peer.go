@@ -58,7 +58,16 @@ func (s *BdPeerServer) BdPeerCreate(
 			continue
 		}
 
-		if err := s.mapOps.CreateBdPeer(bdID, index, entry); err != nil {
+		esi, err := bpf.ParseESI(peer.Esi)
+		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("bd_%d", peer.BdId),
+				Reason:        err.Error(),
+			})
+			continue
+		}
+
+		if err := s.mapOps.CreateBdPeer(bdID, index, entry, esi); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("bd_%d", peer.BdId),
 				Reason:        err.Error(),
@@ -128,16 +137,25 @@ func (s *BdPeerServer) BdPeerList(
 		Peers: make([]*v1.BdPeer, 0, len(entries)),
 	}
 
+	esiByPeer, err := s.mapOps.ListBdPeerEsi()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+
 	for key, entry := range entries {
 		if req.Msg.BdId != 0 && uint32(key.BdId) != req.Msg.BdId {
 			continue
 		}
-		resp.Peers = append(resp.Peers, &v1.BdPeer{
+		peer := &v1.BdPeer{
 			BdId:     uint32(key.BdId),
 			SrcAddr:  bpf.FormatIPv6(entry.SrcAddr),
 			Segments: bpf.FormatSegments(entry.Segments, entry.NumSegments),
 			Mode:     v1.Srv6HeadendBehavior(entry.Mode),
-		})
+		}
+		if esi, ok := esiByPeer[bpf.BdPeerEsiKey{BdId: key.BdId, SrcAddr: entry.SrcAddr}]; ok {
+			peer.Esi = bpf.FormatESI(esi)
+		}
+		resp.Peers = append(resp.Peers, peer)
 	}
 
 	return connect.NewResponse(resp), nil
