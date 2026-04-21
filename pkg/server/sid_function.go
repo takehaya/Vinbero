@@ -54,11 +54,12 @@ func (s *SidFunctionServer) SidFunctionCreate(
 		}
 
 		// plugin_aux_index path: aux already owned by the PluginAux RPC
-		// lifecycle, so we only bind the SID entry to it without touching
-		// auxAlloc. protoToEntry will have pre-set entry.AuxIndex + Flavor.
+		// lifecycle. CreateSidFunctionWithAuxIndex verifies the owner tag
+		// atomically with the bind so a racing Free cannot reassign the idx.
 		var createErr error
 		if sidFunc.PluginAuxIndex != 0 {
-			createErr = s.mapOps.CreateSidFunctionWithAuxIndex(sidFunc.TriggerPrefix, entry)
+			owner := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, uint32(sidFunc.Action))
+			createErr = s.mapOps.CreateSidFunctionWithAuxIndex(sidFunc.TriggerPrefix, entry, owner)
 		} else {
 			createErr = s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry, aux)
 		}
@@ -178,20 +179,14 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	}
 
 	// plugin_aux_index: the aux slot is already populated by PluginAuxAlloc.
-	// Confirm owner matches this SidFunction's (map_type, slot) so a SID
-	// cannot steal another plugin slot's aux; wire entry.AuxIndex and let
-	// the caller switch to CreateSidFunctionWithAuxIndex.
+	// Wire entry.AuxIndex; ownership verification happens atomically inside
+	// CreateSidFunctionWithAuxIndex so a racing PluginAuxFree cannot reassign
+	// the index between check and bind.
 	if sidFunc.PluginAuxIndex != 0 {
 		action := uint32(sidFunc.Action)
 		if action < bpf.EndpointPluginBase {
 			return nil, nil, fmt.Errorf("plugin_aux_index requires action >= %d (endpoint plugin range), got %d",
 				bpf.EndpointPluginBase, action)
-		}
-		wantOwner := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, action)
-		gotOwner := s.mapOps.AuxOwnerOf(sidFunc.PluginAuxIndex)
-		if gotOwner != wantOwner {
-			return nil, nil, fmt.Errorf("plugin_aux_index %d owner=%q, expected %q",
-				sidFunc.PluginAuxIndex, gotOwner, wantOwner)
 		}
 		if sidFunc.PluginAuxIndex > 0xFFFF {
 			return nil, nil, fmt.Errorf("plugin_aux_index %d exceeds uint16 range", sidFunc.PluginAuxIndex)
