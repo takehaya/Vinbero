@@ -1325,6 +1325,242 @@ var BdPeerService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	EthernetSegmentService_EsCreate_FullMethodName  = "/vinbero.v1.EthernetSegmentService/EsCreate"
+	EthernetSegmentService_EsDelete_FullMethodName  = "/vinbero.v1.EthernetSegmentService/EsDelete"
+	EthernetSegmentService_EsList_FullMethodName    = "/vinbero.v1.EthernetSegmentService/EsList"
+	EthernetSegmentService_EsSetDf_FullMethodName   = "/vinbero.v1.EthernetSegmentService/EsSetDf"
+	EthernetSegmentService_EsClearDf_FullMethodName = "/vinbero.v1.EthernetSegmentService/EsClearDf"
+)
+
+// EthernetSegmentServiceClient is the client API for EthernetSegmentService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type EthernetSegmentServiceClient interface {
+	EsCreate(ctx context.Context, in *EsCreateRequest, opts ...grpc.CallOption) (*EsCreateResponse, error)
+	EsDelete(ctx context.Context, in *EsDeleteRequest, opts ...grpc.CallOption) (*EsDeleteResponse, error)
+	EsList(ctx context.Context, in *EsListRequest, opts ...grpc.CallOption) (*EsListResponse, error)
+	EsSetDf(ctx context.Context, in *EsSetDfRequest, opts ...grpc.CallOption) (*EsSetDfResponse, error)
+	EsClearDf(ctx context.Context, in *EsClearDfRequest, opts ...grpc.CallOption) (*EsClearDfResponse, error)
+}
+
+type ethernetSegmentServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewEthernetSegmentServiceClient(cc grpc.ClientConnInterface) EthernetSegmentServiceClient {
+	return &ethernetSegmentServiceClient{cc}
+}
+
+func (c *ethernetSegmentServiceClient) EsCreate(ctx context.Context, in *EsCreateRequest, opts ...grpc.CallOption) (*EsCreateResponse, error) {
+	out := new(EsCreateResponse)
+	err := c.cc.Invoke(ctx, EthernetSegmentService_EsCreate_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ethernetSegmentServiceClient) EsDelete(ctx context.Context, in *EsDeleteRequest, opts ...grpc.CallOption) (*EsDeleteResponse, error) {
+	out := new(EsDeleteResponse)
+	err := c.cc.Invoke(ctx, EthernetSegmentService_EsDelete_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ethernetSegmentServiceClient) EsList(ctx context.Context, in *EsListRequest, opts ...grpc.CallOption) (*EsListResponse, error) {
+	out := new(EsListResponse)
+	err := c.cc.Invoke(ctx, EthernetSegmentService_EsList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ethernetSegmentServiceClient) EsSetDf(ctx context.Context, in *EsSetDfRequest, opts ...grpc.CallOption) (*EsSetDfResponse, error) {
+	out := new(EsSetDfResponse)
+	err := c.cc.Invoke(ctx, EthernetSegmentService_EsSetDf_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ethernetSegmentServiceClient) EsClearDf(ctx context.Context, in *EsClearDfRequest, opts ...grpc.CallOption) (*EsClearDfResponse, error) {
+	out := new(EsClearDfResponse)
+	err := c.cc.Invoke(ctx, EthernetSegmentService_EsClearDf_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// EthernetSegmentServiceServer is the server API for EthernetSegmentService service.
+// All implementations should embed UnimplementedEthernetSegmentServiceServer
+// for forward compatibility
+type EthernetSegmentServiceServer interface {
+	EsCreate(context.Context, *EsCreateRequest) (*EsCreateResponse, error)
+	EsDelete(context.Context, *EsDeleteRequest) (*EsDeleteResponse, error)
+	EsList(context.Context, *EsListRequest) (*EsListResponse, error)
+	EsSetDf(context.Context, *EsSetDfRequest) (*EsSetDfResponse, error)
+	EsClearDf(context.Context, *EsClearDfRequest) (*EsClearDfResponse, error)
+}
+
+// UnimplementedEthernetSegmentServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedEthernetSegmentServiceServer struct {
+}
+
+func (UnimplementedEthernetSegmentServiceServer) EsCreate(context.Context, *EsCreateRequest) (*EsCreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EsCreate not implemented")
+}
+func (UnimplementedEthernetSegmentServiceServer) EsDelete(context.Context, *EsDeleteRequest) (*EsDeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EsDelete not implemented")
+}
+func (UnimplementedEthernetSegmentServiceServer) EsList(context.Context, *EsListRequest) (*EsListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EsList not implemented")
+}
+func (UnimplementedEthernetSegmentServiceServer) EsSetDf(context.Context, *EsSetDfRequest) (*EsSetDfResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EsSetDf not implemented")
+}
+func (UnimplementedEthernetSegmentServiceServer) EsClearDf(context.Context, *EsClearDfRequest) (*EsClearDfResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EsClearDf not implemented")
+}
+
+// UnsafeEthernetSegmentServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to EthernetSegmentServiceServer will
+// result in compilation errors.
+type UnsafeEthernetSegmentServiceServer interface {
+	mustEmbedUnimplementedEthernetSegmentServiceServer()
+}
+
+func RegisterEthernetSegmentServiceServer(s grpc.ServiceRegistrar, srv EthernetSegmentServiceServer) {
+	s.RegisterService(&EthernetSegmentService_ServiceDesc, srv)
+}
+
+func _EthernetSegmentService_EsCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EsCreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EthernetSegmentServiceServer).EsCreate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EthernetSegmentService_EsCreate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EthernetSegmentServiceServer).EsCreate(ctx, req.(*EsCreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _EthernetSegmentService_EsDelete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EsDeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EthernetSegmentServiceServer).EsDelete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EthernetSegmentService_EsDelete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EthernetSegmentServiceServer).EsDelete(ctx, req.(*EsDeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _EthernetSegmentService_EsList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EsListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EthernetSegmentServiceServer).EsList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EthernetSegmentService_EsList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EthernetSegmentServiceServer).EsList(ctx, req.(*EsListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _EthernetSegmentService_EsSetDf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EsSetDfRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EthernetSegmentServiceServer).EsSetDf(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EthernetSegmentService_EsSetDf_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EthernetSegmentServiceServer).EsSetDf(ctx, req.(*EsSetDfRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _EthernetSegmentService_EsClearDf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EsClearDfRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EthernetSegmentServiceServer).EsClearDf(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EthernetSegmentService_EsClearDf_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EthernetSegmentServiceServer).EsClearDf(ctx, req.(*EsClearDfRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// EthernetSegmentService_ServiceDesc is the grpc.ServiceDesc for EthernetSegmentService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var EthernetSegmentService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.EthernetSegmentService",
+	HandlerType: (*EthernetSegmentServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "EsCreate",
+			Handler:    _EthernetSegmentService_EsCreate_Handler,
+		},
+		{
+			MethodName: "EsDelete",
+			Handler:    _EthernetSegmentService_EsDelete_Handler,
+		},
+		{
+			MethodName: "EsList",
+			Handler:    _EthernetSegmentService_EsList_Handler,
+		},
+		{
+			MethodName: "EsSetDf",
+			Handler:    _EthernetSegmentService_EsSetDf_Handler,
+		},
+		{
+			MethodName: "EsClearDf",
+			Handler:    _EthernetSegmentService_EsClearDf_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}
+
+const (
 	NetworkResourceService_VrfCreate_FullMethodName    = "/vinbero.v1.NetworkResourceService/VrfCreate"
 	NetworkResourceService_VrfDelete_FullMethodName    = "/vinbero.v1.NetworkResourceService/VrfDelete"
 	NetworkResourceService_VrfList_FullMethodName      = "/vinbero.v1.NetworkResourceService/VrfList"

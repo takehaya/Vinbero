@@ -24,6 +24,7 @@ func bdPeerCommand() *cli.Command {
 					&cli.StringFlag{Name: "src-addr", Required: true, Usage: "Outer IPv6 source address"},
 					&cli.StringFlag{Name: "segments", Required: true, Usage: "Segment list (comma-separated)"},
 					&cli.StringFlag{Name: "mode", Value: "H_ENCAPS_L2", Usage: "Headend mode (H_ENCAPS_L2, H_ENCAPS_L2_RED)"},
+					&cli.StringFlag{Name: "esi", Usage: "RFC 7432 Ethernet Segment Identifier (10 colon-separated hex bytes)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -36,6 +37,7 @@ func bdPeerCommand() *cli.Command {
 						SrcAddr:  c.String("src-addr"),
 						Segments: strings.Split(c.String("segments"), ","),
 						Mode:     mode,
+						Esi:      c.String("esi"),
 					}
 					resp, err := clients.Peer.BdPeerCreate(context.Background(),
 						connect.NewRequest(&v1.BdPeerCreateRequest{Peers: []*v1.BdPeer{peer}}))
@@ -98,11 +100,11 @@ func bdPeerCommand() *cli.Command {
 					if useJSON(c) {
 						return printJSON(resp.Msg.Peers)
 					}
-					headers := []string{"BD_ID", "SRC ADDR", "SEGMENTS", "MODE"}
+					headers := []string{"BD_ID", "SRC ADDR", "SEGMENTS", "MODE", "ESI"}
 					var rows [][]string
 					for _, p := range resp.Msg.Peers {
 						rows = append(rows, []string{
-							fmt.Sprintf("%d", p.BdId), p.SrcAddr, strings.Join(p.Segments, ","), formatMode(p.Mode),
+							fmt.Sprintf("%d", p.BdId), p.SrcAddr, strings.Join(p.Segments, ","), formatMode(p.Mode), p.Esi,
 						})
 					}
 					printTable(headers, rows)

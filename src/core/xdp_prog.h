@@ -208,6 +208,9 @@ struct fdb_key {
     __u8 mac[ETH_ALEN];            // 6 bytes
 } __attribute__((packed));         // 8 bytes total
 
+// RFC 7432 Ethernet Segment Identifier length (Type 0-5).
+#define ESI_LEN 10
+
 // Value for FDB map: supports local and remote entries
 struct fdb_entry {
     __u32 oif;                     // Local: output interface index, Remote: 0
@@ -217,7 +220,9 @@ struct fdb_entry {
     __u16 bd_id;                   // BD ID for bd_peer_map lookup (when is_remote=1)
     __u8 _pad[2];
     __u64 last_seen;               // bpf_ktime_get_ns() timestamp (0=static entry)
-} __attribute__((packed));         // 20 bytes total
+    __u8 esi[ESI_LEN];             // Remote only: ES this MAC was learned from (all-zero = single-homing)
+    __u8 _pad_esi[2];
+} __attribute__((packed));         // 32 bytes total
 
 // Maximum number of remote PEs per Bridge Domain for BUM flooding
 #define MAX_BUM_NEXTHOPS 8
@@ -241,9 +246,66 @@ struct bd_peer_reverse_key {
     __u8 _pad[2];
 } __attribute__((packed));
 
-// Reverse-lookup value: peer index within the BD
+// Reverse-lookup value: peer index + ESI the peer attaches to (all-zero = single-homing).
+// Co-locating ESI here lets the receiving side do split-horizon filtering in a
+// single hash lookup.
 struct bd_peer_reverse_val {
     __u16 index;
+    __u8 esi[ESI_LEN];
+    __u8 _pad[4];
+} __attribute__((packed));
+
+// RFC 7432 Ethernet Segment master table key.
+struct esi_key {
+    __u8 esi[ESI_LEN];
+    __u8 _pad[6];
+} __attribute__((packed));
+
+// RFC 7432 Ethernet Segment master table value.
+// local_pe_src_addr is captured on EsCreate (not hard-coded via const volatile)
+// so one BPF image can serve any number of SIDs without a reload.
+struct esi_entry {
+    __u8 local_attached;           // 1 if this PE attaches to the ES
+    __u8 redundancy_mode;          // enum esi_redundancy_mode
+    __u8 _pad[6];
+    __u8 df_pe_src_addr[IPV6_ADDR_LEN];    // current DF (all-zero = not configured)
+    __u8 local_pe_src_addr[IPV6_ADDR_LEN]; // this PE's H.Encaps.L2 source for this ES
+} __attribute__((packed));
+
+enum esi_redundancy_mode {
+    ESI_REDUNDANCY_MODE_UNSPECIFIED   = 0,
+    ESI_REDUNDANCY_MODE_SINGLE_HOMING = 1,
+    ESI_REDUNDANCY_MODE_ALL_ACTIVE    = 2,
+    ESI_REDUNDANCY_MODE_SINGLE_ACTIVE = 3,
+};
+
+// Side table: (bd_id, peer index) → peer's ESI. Keeps ESI out of
+// bd_peer_map's HeadendEntry value so that struct stays shared with L3
+// headend maps.
+struct bd_peer_l2_ext_key {
+    __u16 bd_id;
+    __u16 index;
+} __attribute__((packed));
+
+struct bd_peer_l2_ext_val {
+    __u8 esi[ESI_LEN];
+    __u8 _pad[6];
+} __attribute__((packed));
+
+// Side table: (ifindex, vlan_id) → local AC's source ESI.
+// Reuses headend_l2_key so Go-side updates parallel headend_l2_map.
+struct headend_l2_ext_val {
+    __u8 esi[ESI_LEN];
+    __u8 _pad[6];
+} __attribute__((packed));
+
+// BD → local ES lookup for DF judgement. Populated from HeadendL2 side-table
+// whenever an HeadendL2 carries an ESI; BPF reads this on the DT2M RX path
+// to decide "is this PE the DF for this BD's local ES?". One local ES per BD
+// today; multi-ES-per-BD is a future extension.
+struct bd_local_esi_val {
+    __u8 esi[ESI_LEN];
+    __u8 _pad[6];
 } __attribute__((packed));
 
 #endif // XDP_PROG_H

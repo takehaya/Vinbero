@@ -67,7 +67,16 @@ func (s *HeadendL2Server) HeadendL2Create(
 			continue
 		}
 
-		if err := s.mapOps.CreateHeadendL2(ifindex, uint16(headend.VlanId), entry); err != nil {
+		esi, err := bpf.ParseESI(headend.Esi)
+		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
+				Reason:        err.Error(),
+			})
+			continue
+		}
+
+		if err := s.mapOps.CreateHeadendL2(ifindex, uint16(headend.VlanId), entry, esi); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
 				Reason:        err.Error(),
@@ -212,7 +221,7 @@ func (s *HeadendL2Server) entryToProto(key bpf.HeadendL2Key, entry *bpf.HeadendE
 		ifaceName = iface.Name
 	}
 
-	return &v1.HeadendL2{
+	out := &v1.HeadendL2{
 		VlanId:        uint32(key.VlanId),
 		SrcAddr:       bpf.FormatIPv6(entry.SrcAddr),
 		Segments:      bpf.FormatSegments(entry.Segments, entry.NumSegments),
@@ -220,4 +229,8 @@ func (s *HeadendL2Server) entryToProto(key bpf.HeadendL2Key, entry *bpf.HeadendE
 		InterfaceName: ifaceName,
 		Mode:          v1.Srv6HeadendBehavior(entry.Mode),
 	}
+	if esi, err := s.mapOps.GetHeadendL2Esi(key.Ifindex, key.VlanId); err == nil {
+		out.Esi = bpf.FormatESI(esi)
+	}
+	return out
 }

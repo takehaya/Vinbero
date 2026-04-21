@@ -32,6 +32,7 @@ enum srv6_local_action {
     SRV6_LOCAL_ACTION_END_M_GTP6_E = 20,     // End.M.GTP6.E (SRv6 => GTP-U/IPv6)
     SRV6_LOCAL_ACTION_END_M_GTP4_E = 21,     // End.M.GTP4.E (SRv6 => GTP-U/IPv4)
     SRV6_LOCAL_ACTION_END_DX2V = 22,         // End.DX2V (VLAN L2 cross-connect)
+    SRV6_LOCAL_ACTION_END_DT2M = 23,         // End.DT2M (L2 flood for BUM, RFC 8986 Sec.4.12)
 };
 
 // ========== SRv6 Local Flavor ==========

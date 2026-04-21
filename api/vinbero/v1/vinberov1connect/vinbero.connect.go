@@ -33,6 +33,8 @@ const (
 	VlanTableServiceName = "vinbero.v1.VlanTableService"
 	// BdPeerServiceName is the fully-qualified name of the BdPeerService service.
 	BdPeerServiceName = "vinbero.v1.BdPeerService"
+	// EthernetSegmentServiceName is the fully-qualified name of the EthernetSegmentService service.
+	EthernetSegmentServiceName = "vinbero.v1.EthernetSegmentService"
 	// NetworkResourceServiceName is the fully-qualified name of the NetworkResourceService service.
 	NetworkResourceServiceName = "vinbero.v1.NetworkResourceService"
 	// HeadendL2ServiceName is the fully-qualified name of the HeadendL2Service service.
@@ -126,6 +128,21 @@ const (
 	// BdPeerServiceBdPeerFlushProcedure is the fully-qualified name of the BdPeerService's BdPeerFlush
 	// RPC.
 	BdPeerServiceBdPeerFlushProcedure = "/vinbero.v1.BdPeerService/BdPeerFlush"
+	// EthernetSegmentServiceEsCreateProcedure is the fully-qualified name of the
+	// EthernetSegmentService's EsCreate RPC.
+	EthernetSegmentServiceEsCreateProcedure = "/vinbero.v1.EthernetSegmentService/EsCreate"
+	// EthernetSegmentServiceEsDeleteProcedure is the fully-qualified name of the
+	// EthernetSegmentService's EsDelete RPC.
+	EthernetSegmentServiceEsDeleteProcedure = "/vinbero.v1.EthernetSegmentService/EsDelete"
+	// EthernetSegmentServiceEsListProcedure is the fully-qualified name of the EthernetSegmentService's
+	// EsList RPC.
+	EthernetSegmentServiceEsListProcedure = "/vinbero.v1.EthernetSegmentService/EsList"
+	// EthernetSegmentServiceEsSetDfProcedure is the fully-qualified name of the
+	// EthernetSegmentService's EsSetDf RPC.
+	EthernetSegmentServiceEsSetDfProcedure = "/vinbero.v1.EthernetSegmentService/EsSetDf"
+	// EthernetSegmentServiceEsClearDfProcedure is the fully-qualified name of the
+	// EthernetSegmentService's EsClearDf RPC.
+	EthernetSegmentServiceEsClearDfProcedure = "/vinbero.v1.EthernetSegmentService/EsClearDf"
 	// NetworkResourceServiceVrfCreateProcedure is the fully-qualified name of the
 	// NetworkResourceService's VrfCreate RPC.
 	NetworkResourceServiceVrfCreateProcedure = "/vinbero.v1.NetworkResourceService/VrfCreate"
@@ -206,6 +223,12 @@ var (
 	bdPeerServiceBdPeerDeleteMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerDelete")
 	bdPeerServiceBdPeerListMethodDescriptor             = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerList")
 	bdPeerServiceBdPeerFlushMethodDescriptor            = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerFlush")
+	ethernetSegmentServiceServiceDescriptor             = v1.File_vinbero_v1_vinbero_proto.Services().ByName("EthernetSegmentService")
+	ethernetSegmentServiceEsCreateMethodDescriptor      = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsCreate")
+	ethernetSegmentServiceEsDeleteMethodDescriptor      = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsDelete")
+	ethernetSegmentServiceEsListMethodDescriptor        = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsList")
+	ethernetSegmentServiceEsSetDfMethodDescriptor       = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsSetDf")
+	ethernetSegmentServiceEsClearDfMethodDescriptor     = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsClearDf")
 	networkResourceServiceServiceDescriptor             = v1.File_vinbero_v1_vinbero_proto.Services().ByName("NetworkResourceService")
 	networkResourceServiceVrfCreateMethodDescriptor     = networkResourceServiceServiceDescriptor.Methods().ByName("VrfCreate")
 	networkResourceServiceVrfDeleteMethodDescriptor     = networkResourceServiceServiceDescriptor.Methods().ByName("VrfDelete")
@@ -1178,6 +1201,179 @@ func (UnimplementedBdPeerServiceHandler) BdPeerList(context.Context, *connect.Re
 
 func (UnimplementedBdPeerServiceHandler) BdPeerFlush(context.Context, *connect.Request[v1.BdPeerFlushRequest]) (*connect.Response[v1.BdPeerFlushResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BdPeerService.BdPeerFlush is not implemented"))
+}
+
+// EthernetSegmentServiceClient is a client for the vinbero.v1.EthernetSegmentService service.
+type EthernetSegmentServiceClient interface {
+	EsCreate(context.Context, *connect.Request[v1.EsCreateRequest]) (*connect.Response[v1.EsCreateResponse], error)
+	EsDelete(context.Context, *connect.Request[v1.EsDeleteRequest]) (*connect.Response[v1.EsDeleteResponse], error)
+	EsList(context.Context, *connect.Request[v1.EsListRequest]) (*connect.Response[v1.EsListResponse], error)
+	EsSetDf(context.Context, *connect.Request[v1.EsSetDfRequest]) (*connect.Response[v1.EsSetDfResponse], error)
+	EsClearDf(context.Context, *connect.Request[v1.EsClearDfRequest]) (*connect.Response[v1.EsClearDfResponse], error)
+}
+
+// NewEthernetSegmentServiceClient constructs a client for the vinbero.v1.EthernetSegmentService
+// service. By default, it uses the Connect protocol with the binary Protobuf Codec, asks for
+// gzipped responses, and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply
+// the connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewEthernetSegmentServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) EthernetSegmentServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &ethernetSegmentServiceClient{
+		esCreate: connect.NewClient[v1.EsCreateRequest, v1.EsCreateResponse](
+			httpClient,
+			baseURL+EthernetSegmentServiceEsCreateProcedure,
+			connect.WithSchema(ethernetSegmentServiceEsCreateMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		esDelete: connect.NewClient[v1.EsDeleteRequest, v1.EsDeleteResponse](
+			httpClient,
+			baseURL+EthernetSegmentServiceEsDeleteProcedure,
+			connect.WithSchema(ethernetSegmentServiceEsDeleteMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		esList: connect.NewClient[v1.EsListRequest, v1.EsListResponse](
+			httpClient,
+			baseURL+EthernetSegmentServiceEsListProcedure,
+			connect.WithSchema(ethernetSegmentServiceEsListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		esSetDf: connect.NewClient[v1.EsSetDfRequest, v1.EsSetDfResponse](
+			httpClient,
+			baseURL+EthernetSegmentServiceEsSetDfProcedure,
+			connect.WithSchema(ethernetSegmentServiceEsSetDfMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		esClearDf: connect.NewClient[v1.EsClearDfRequest, v1.EsClearDfResponse](
+			httpClient,
+			baseURL+EthernetSegmentServiceEsClearDfProcedure,
+			connect.WithSchema(ethernetSegmentServiceEsClearDfMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// ethernetSegmentServiceClient implements EthernetSegmentServiceClient.
+type ethernetSegmentServiceClient struct {
+	esCreate  *connect.Client[v1.EsCreateRequest, v1.EsCreateResponse]
+	esDelete  *connect.Client[v1.EsDeleteRequest, v1.EsDeleteResponse]
+	esList    *connect.Client[v1.EsListRequest, v1.EsListResponse]
+	esSetDf   *connect.Client[v1.EsSetDfRequest, v1.EsSetDfResponse]
+	esClearDf *connect.Client[v1.EsClearDfRequest, v1.EsClearDfResponse]
+}
+
+// EsCreate calls vinbero.v1.EthernetSegmentService.EsCreate.
+func (c *ethernetSegmentServiceClient) EsCreate(ctx context.Context, req *connect.Request[v1.EsCreateRequest]) (*connect.Response[v1.EsCreateResponse], error) {
+	return c.esCreate.CallUnary(ctx, req)
+}
+
+// EsDelete calls vinbero.v1.EthernetSegmentService.EsDelete.
+func (c *ethernetSegmentServiceClient) EsDelete(ctx context.Context, req *connect.Request[v1.EsDeleteRequest]) (*connect.Response[v1.EsDeleteResponse], error) {
+	return c.esDelete.CallUnary(ctx, req)
+}
+
+// EsList calls vinbero.v1.EthernetSegmentService.EsList.
+func (c *ethernetSegmentServiceClient) EsList(ctx context.Context, req *connect.Request[v1.EsListRequest]) (*connect.Response[v1.EsListResponse], error) {
+	return c.esList.CallUnary(ctx, req)
+}
+
+// EsSetDf calls vinbero.v1.EthernetSegmentService.EsSetDf.
+func (c *ethernetSegmentServiceClient) EsSetDf(ctx context.Context, req *connect.Request[v1.EsSetDfRequest]) (*connect.Response[v1.EsSetDfResponse], error) {
+	return c.esSetDf.CallUnary(ctx, req)
+}
+
+// EsClearDf calls vinbero.v1.EthernetSegmentService.EsClearDf.
+func (c *ethernetSegmentServiceClient) EsClearDf(ctx context.Context, req *connect.Request[v1.EsClearDfRequest]) (*connect.Response[v1.EsClearDfResponse], error) {
+	return c.esClearDf.CallUnary(ctx, req)
+}
+
+// EthernetSegmentServiceHandler is an implementation of the vinbero.v1.EthernetSegmentService
+// service.
+type EthernetSegmentServiceHandler interface {
+	EsCreate(context.Context, *connect.Request[v1.EsCreateRequest]) (*connect.Response[v1.EsCreateResponse], error)
+	EsDelete(context.Context, *connect.Request[v1.EsDeleteRequest]) (*connect.Response[v1.EsDeleteResponse], error)
+	EsList(context.Context, *connect.Request[v1.EsListRequest]) (*connect.Response[v1.EsListResponse], error)
+	EsSetDf(context.Context, *connect.Request[v1.EsSetDfRequest]) (*connect.Response[v1.EsSetDfResponse], error)
+	EsClearDf(context.Context, *connect.Request[v1.EsClearDfRequest]) (*connect.Response[v1.EsClearDfResponse], error)
+}
+
+// NewEthernetSegmentServiceHandler builds an HTTP handler from the service implementation. It
+// returns the path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewEthernetSegmentServiceHandler(svc EthernetSegmentServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	ethernetSegmentServiceEsCreateHandler := connect.NewUnaryHandler(
+		EthernetSegmentServiceEsCreateProcedure,
+		svc.EsCreate,
+		connect.WithSchema(ethernetSegmentServiceEsCreateMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	ethernetSegmentServiceEsDeleteHandler := connect.NewUnaryHandler(
+		EthernetSegmentServiceEsDeleteProcedure,
+		svc.EsDelete,
+		connect.WithSchema(ethernetSegmentServiceEsDeleteMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	ethernetSegmentServiceEsListHandler := connect.NewUnaryHandler(
+		EthernetSegmentServiceEsListProcedure,
+		svc.EsList,
+		connect.WithSchema(ethernetSegmentServiceEsListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	ethernetSegmentServiceEsSetDfHandler := connect.NewUnaryHandler(
+		EthernetSegmentServiceEsSetDfProcedure,
+		svc.EsSetDf,
+		connect.WithSchema(ethernetSegmentServiceEsSetDfMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	ethernetSegmentServiceEsClearDfHandler := connect.NewUnaryHandler(
+		EthernetSegmentServiceEsClearDfProcedure,
+		svc.EsClearDf,
+		connect.WithSchema(ethernetSegmentServiceEsClearDfMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.EthernetSegmentService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EthernetSegmentServiceEsCreateProcedure:
+			ethernetSegmentServiceEsCreateHandler.ServeHTTP(w, r)
+		case EthernetSegmentServiceEsDeleteProcedure:
+			ethernetSegmentServiceEsDeleteHandler.ServeHTTP(w, r)
+		case EthernetSegmentServiceEsListProcedure:
+			ethernetSegmentServiceEsListHandler.ServeHTTP(w, r)
+		case EthernetSegmentServiceEsSetDfProcedure:
+			ethernetSegmentServiceEsSetDfHandler.ServeHTTP(w, r)
+		case EthernetSegmentServiceEsClearDfProcedure:
+			ethernetSegmentServiceEsClearDfHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedEthernetSegmentServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedEthernetSegmentServiceHandler struct{}
+
+func (UnimplementedEthernetSegmentServiceHandler) EsCreate(context.Context, *connect.Request[v1.EsCreateRequest]) (*connect.Response[v1.EsCreateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.EthernetSegmentService.EsCreate is not implemented"))
+}
+
+func (UnimplementedEthernetSegmentServiceHandler) EsDelete(context.Context, *connect.Request[v1.EsDeleteRequest]) (*connect.Response[v1.EsDeleteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.EthernetSegmentService.EsDelete is not implemented"))
+}
+
+func (UnimplementedEthernetSegmentServiceHandler) EsList(context.Context, *connect.Request[v1.EsListRequest]) (*connect.Response[v1.EsListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.EthernetSegmentService.EsList is not implemented"))
+}
+
+func (UnimplementedEthernetSegmentServiceHandler) EsSetDf(context.Context, *connect.Request[v1.EsSetDfRequest]) (*connect.Response[v1.EsSetDfResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.EthernetSegmentService.EsSetDf is not implemented"))
+}
+
+func (UnimplementedEthernetSegmentServiceHandler) EsClearDf(context.Context, *connect.Request[v1.EsClearDfRequest]) (*connect.Response[v1.EsClearDfResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.EthernetSegmentService.EsClearDf is not implemented"))
 }
 
 // NetworkResourceServiceClient is a client for the vinbero.v1.NetworkResourceService service.

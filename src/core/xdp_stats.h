@@ -12,11 +12,14 @@ const volatile __u8 enable_stats = 0;
 // Statistics counter indices (global per-action). Per-target invocation
 // counts live in slot_stats_* maps below.
 enum stats_counter {
-    STATS_RX_PACKETS = 0,   // Total received packets
-    STATS_PASS       = 1,   // XDP_PASS count
-    STATS_DROP       = 2,   // XDP_DROP count
-    STATS_REDIRECT   = 3,   // XDP_REDIRECT count
-    STATS_ABORTED    = 4,   // XDP_ABORTED count (BPF program error path)
+    STATS_RX_PACKETS         = 0,   // Total received packets
+    STATS_PASS               = 1,   // XDP_PASS count
+    STATS_DROP               = 2,   // XDP_DROP count
+    STATS_REDIRECT           = 3,   // XDP_REDIRECT count
+    STATS_ABORTED            = 4,   // XDP_ABORTED count (BPF program error path)
+    STATS_SPLIT_HORIZON_TX   = 5,   // BUM clones skipped by send-side split-horizon
+    STATS_SPLIT_HORIZON_RX   = 6,   // DT2M receives dropped by recv-side split-horizon
+    STATS_NON_DF_DROP        = 7,   // DT2M BUM dropped on a non-DF PE
     STATS_MAX,
 };
 

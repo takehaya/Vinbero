@@ -18,6 +18,7 @@ type Clients struct {
 	VlanTbl  vinberov1connect.VlanTableServiceClient
 	Stats    vinberov1connect.StatsServiceClient
 	Plugin   vinberov1connect.PluginServiceClient
+	Es       vinberov1connect.EthernetSegmentServiceClient
 }
 
 func NewClients(serverURL string) *Clients {
@@ -35,5 +36,6 @@ func NewClients(serverURL string) *Clients {
 		VlanTbl:  vinberov1connect.NewVlanTableServiceClient(httpClient, serverURL, opts...),
 		Stats:    vinberov1connect.NewStatsServiceClient(httpClient, serverURL, opts...),
 		Plugin:   vinberov1connect.NewPluginServiceClient(httpClient, serverURL, opts...),
+		Es:       vinberov1connect.NewEthernetSegmentServiceClient(httpClient, serverURL, opts...),
 	}
 }

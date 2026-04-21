@@ -178,7 +178,7 @@ func TestTCBumProgramLoaded(t *testing.T) {
 		BdId:        100,
 	}
 
-	if err := h.mapOps.CreateHeadendL2(1, 100, entry); err != nil {
+	if err := h.mapOps.CreateHeadendL2(1, 100, entry, [ESILen]byte{}); err != nil {
 		t.Fatalf("Failed to create headend L2 entry: %v", err)
 	}
 	t.Cleanup(func() { _ = h.mapOps.DeleteHeadendL2(1, 100) })

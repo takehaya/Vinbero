@@ -211,7 +211,7 @@ func (s *NetworkResourceServer) VrfList(
 	return connect.NewResponse(resp), nil
 }
 
-// findBridgeReference checks if any End.DT2 SID entry references the given bridge_ifindex.
+// findBridgeReference checks if any End.DT2/DT2M SID entry references the given bridge_ifindex.
 // Bridge ifindex is stored in the aux map (L2 variant).
 func (s *NetworkResourceServer) findBridgeReference(ifindex uint32) (string, error) {
 	entries, err := s.mapOps.ListSidFunctions()
@@ -219,7 +219,13 @@ func (s *NetworkResourceServer) findBridgeReference(ifindex uint32) (string, err
 		return "", fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
-		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2 || entry.AuxIndex == 0 {
+		switch v1.Srv6LocalAction(entry.Action) {
+		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2M:
+		default:
+			continue
+		}
+		if entry.AuxIndex == 0 {
 			continue
 		}
 		aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))

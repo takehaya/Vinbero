@@ -76,6 +76,12 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered BdPeerService", zap.String("path", path))
 
+	// Ethernet Segment service (RFC 7432 ESI master table)
+	esServer := NewEthernetSegmentServer(s.mapOps)
+	path, handler = vinberov1connect.NewEthernetSegmentServiceHandler(esServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered EthernetSegmentService", zap.String("path", path))
+
 	// NetworkResource service (VRF/Bridge management)
 	netResourceServer := NewNetworkResourceServer(s.resMgr, s.fdbWatcher, s.mapOps)
 	path, handler = vinberov1connect.NewNetworkResourceServiceHandler(netResourceServer)
