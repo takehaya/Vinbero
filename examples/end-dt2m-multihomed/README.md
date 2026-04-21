@@ -1,82 +1,103 @@
-# End.DT2M Multihomed Playground
+# End.DT2M マルチホーム Playground
 
-Validates RFC 9252 split-horizon filtering and static DF election on a
-5-namespace topology where **host1 dual-homes to PE1 and PE2** via a shared
-Linux bridge. Implements the scenario documented in
-[`docs/dev/end_dt2m_multihomed_topology.md`](../../docs/dev/end_dt2m_multihomed_topology.md).
+RFC 9252 の split-horizon フィルタリングと静的 DF 選出を、**host1 が共有 Linux
+ブリッジ経由で PE1 と PE2 にデュアルホームする** 5-namespace トポロジー上で
+検証します。
 
-## Topology
+- ESI: `01:00:00:00:00:00:00:00:00:01` (PE1/PE2 共に `local_attached`)
+- Bridge Domain: `bd_id = 100` / VLAN 100
+- host1 の MAC は MAC Pinning で `02:00:00:00:00:01` 固定
+- host1 側の veth は `ethtool -K <veth> txvlan off` で VLAN タグをパケット
+  データに残す (veth の VLAN offload は既知の罠)
 
+## トポロジー
+
+```mermaid
+flowchart LR
+    host1["host1<br/>172.16.100.1<br/>VLAN 100"]
+
+    subgraph ES1["ES-1 (共有 CE / mh-h1-br)"]
+      direction LR
+      leg1(( )):::leg
+      leg2(( )):::leg
+    end
+
+    pe1["mh-pe1<br/>fc00:1::1<br/>local_attached ES-1"]
+    pe2["mh-pe2<br/>fc00:2::2<br/>local_attached ES-1"]
+    p["mh-p<br/>fc00:99::1<br/>End (transit)"]
+    pe3["mh-pe3<br/>fc00:3::3"]
+    host2["host2<br/>172.16.100.2"]
+
+    host1 --- leg1
+    host1 --- leg2
+    leg1 --- pe1
+    leg2 --- pe2
+
+    pe1 <-. SRv6 .-> p
+    pe2 <-. SRv6 .-> p
+    p   <-. SRv6 .-> pe3
+    pe3 --- host2
+
+    classDef leg fill:#eef,stroke:#88a,stroke-dasharray:2 2;
 ```
-host1 (172.16.100.1, VLAN 100)
-   │ shared CE (ES-1)
-   │    ┌─── mh-pe1 (fc00:1::1, local_attached ES-1)
-   │────┤
-   │    └─── mh-pe2 (fc00:2::2, local_attached ES-1)
-   │
-   │                  ↓ SRv6
-   │               mh-p (fc00:99::1, End transit)
-   │                  ↓
-   └──────────── mh-pe3 (fc00:3::3) ── host2 (172.16.100.2)
-```
 
-Both PE1 and PE2 attach to host1 via `mh-h1-br` inside `mh-host1`, producing
-two veth legs. Without split-horizon, a broadcast from host1 loops back via
-the other PE; with RFC 9252 split-horizon + DF election the broadcast fans
-out correctly.
+PE1 と PE2 は `mh-host1` 内の `mh-h1-br` を介して host1 と接続され、2 本の
+veth レッグが生えます。split-horizon が無いと host1 からの BUM が他方の PE
+経由でループバックしてきますが、RFC 9252 の split-horizon + DF 選出を入れ
+ることで BUM が正しく一方向にファンアウトします。
 
-## Quick start (requires sudo)
+## クイックスタート (要 sudo)
 
 ```bash
 sudo ./setup.sh
-# (wait for vinberod to be ready on each PE)
+# (各 PE で vinberod が ready になるのを待つ)
 sudo ./test.sh
 sudo ./teardown.sh
 ```
 
-## What the test verifies
+## テストで検証する内容
 
-1. **Split-horizon (Phase C)**: `host1 → broadcast → PE1` is NOT re-flooded
-   back to host1 via PE2. Assert `SPLIT_HORIZON_TX > 0` on PE1 and
-   `SPLIT_HORIZON_RX` on PE2 (fail-safe path).
-2. **DF election (Phase D)**:
-   - Initially DF=PE1 → `vbctl es df-set --esi ES-1 --pe fc00:1::1` on both
-     PEs (so they agree on who the DF is).
-   - Remote `PE3 → BUM → host1` should reach host1 only via PE1 (PE2 drops
-     with `NON_DF_DROP`).
-   - Swap DF to PE2: `vbctl es df-set --esi ES-1 --pe fc00:2::2` → delivery
-     now comes via PE2.
+1. **Split-horizon (Phase C)**: `host1 → broadcast → PE1` が PE2 経由で
+   host1 に戻ってこないこと。PE1 側で `SPLIT_HORIZON_TX > 0`、PE2 側
+   (fail-safe 経路) で `SPLIT_HORIZON_RX` をアサート。
+2. **DF 選出 (Phase D)**:
+   - 初期状態は DF=PE1。両 PE で
+     `vbctl es df-set --esi ES-1 --pe fc00:1::1` を実行して DF を一致させる。
+   - リモートからの `PE3 → BUM → host1` は PE1 経由でのみ host1 に届く
+     (PE2 側は `NON_DF_DROP` で落ちる)。
+   - DF を PE2 に切り替え: `vbctl es df-set --esi ES-1 --pe fc00:2::2`
+     → 以降は PE2 経由で届く。
 
-## Status
+## ステータス
 
-**DATA PLANE** (eBPF logic): fully covered by `pkg/bpf/split_horizon_test.go`
-with BPF_PROG_TEST_RUN assertions. See:
-- `TestXDPProgEndDT2MSplitHorizonRX` (Phase C RX drop)
-- `TestXDPProgEndDT2MNonDFDrop` (Phase D DF gate)
-- `TestBdPeerReverseEsi` (ESI propagation into bd_peer_reverse_map)
+**データプレーン** (eBPF ロジック): `pkg/bpf/split_horizon_test.go` の
+BPF_PROG_TEST_RUN ベースのアサーションで完全にカバー済み。
+- `TestXDPProgEndDT2MSplitHorizonRX` (Phase C: RX 側 drop)
+- `TestXDPProgEndDT2MNonDFDrop` (Phase D: DF ゲート)
+- `TestBdPeerReverseEsi` (`bd_peer_reverse_map` への ESI 伝播)
 
-**CONTROL PLANE API** (Connect RPC): exercised by `smoke_api.sh` in this
-directory, which brings up a single vinberod instance (no dataplane traffic)
-and round-trips `es create / list / df-set / df-clear / delete` plus
-`bd-peer create --esi`.
+**コントロールプレーン API** (Connect RPC): 同ディレクトリの
+`smoke_api.sh` で検証。vinberod を 1 台だけ立ち上げ (データプレーントラ
+フィック無し)、`es create / list / df-set / df-clear / delete` と
+`bd-peer create --esi` を一通り叩きます。
 
-**FULL E2E TOPOLOGY**: `setup.sh` / `test.sh` in this directory bring up
-the 5-namespace shared-CE topology. The BPF code has been validated via the
-unit tests above; running the topology end-to-end is still useful for
-verifying Linux bridge interactions (veth tx-vlan offload, ARP duplicates,
-MAC Pinning). Start with `smoke_api.sh` first, then attempt `setup.sh` +
-`test.sh` once the API smoke is green.
+**フル E2E トポロジー**: 同ディレクトリの `setup.sh` / `test.sh` で
+5-namespace の shared-CE トポロジーを立ち上げます。BPF コード自体は
+上記のユニットテストで検証済みですが、Linux bridge との相互作用
+(veth tx-vlan offload、ARP 重複、MAC Pinning 等) の確認には E2E が有用
+です。まず `smoke_api.sh` を green にしてから `setup.sh` + `test.sh`
+に進むのがおすすめです。
 
-## Files
+## ファイル一覧
 
-| File | Purpose |
+| ファイル | 用途 |
 |---|---|
-| `README.md` | This document |
-| `smoke_api.sh` | Quick API exercise (1 PE, no dataplane); runs in <10s |
-| `setup.sh` | 5-namespace topology including shared-CE bridge |
-| `teardown.sh` | Remove namespaces / veths |
-| `test.sh` | End-to-end test with pcap + stats assertions |
-| `vinbero_pe1.yaml` | PE1 config (ES-1 local_attached) |
-| `vinbero_pe2.yaml` | PE2 config (ES-1 local_attached) |
-| `vinbero_p.yaml` | Transit router config (End) |
-| `vinbero_pe3.yaml` | Egress PE config (single-homed) |
+| `README.md` | 本ドキュメント |
+| `smoke_api.sh` | API のみのスモーク (PE 1 台、データプレーン無し、10 秒以内に完走) |
+| `setup.sh` | 共有 CE ブリッジを含む 5-namespace トポロジー構築 |
+| `teardown.sh` | namespace / veth の撤去 |
+| `test.sh` | pcap + stats アサーション付きの E2E テスト |
+| `vinbero_pe1.yaml` | PE1 設定 (ES-1 local_attached) |
+| `vinbero_pe2.yaml` | PE2 設定 (ES-1 local_attached) |
+| `vinbero_p.yaml` | 中継ルータ設定 (End) |
+| `vinbero_pe3.yaml` | 出口 PE 設定 (シングルホーム) |
