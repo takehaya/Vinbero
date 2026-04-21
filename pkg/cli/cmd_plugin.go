@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -147,6 +148,141 @@ func pluginCommand() *cli.Command {
 							fmt.Printf("    owned:     [%s]\n", strings.Join(p.OwnedMapNames, ", "))
 						}
 					}
+					return nil
+				},
+			},
+			pluginAuxCommand(),
+		},
+	}
+}
+
+// pluginAuxCommand groups the four PluginAux RPCs (alloc / update / get /
+// free) so plugin state can be prepared and updated without going through a
+// SidFunction create cycle. Each subcommand requires --map-type and --slot,
+// matching the owner tag the server derives server-side.
+func pluginAuxCommand() *cli.Command {
+	typeFlag := &cli.StringFlag{Name: "map-type", Required: true, Usage: "Plugin map type: endpoint, headend_v4, headend_v6"}
+	slotFlag := &cli.UintFlag{Name: "slot", Required: true, Usage: "Plugin PROG_ARRAY slot (endpoint >= 32, headend >= 16)"}
+	jsonFlag := &cli.StringFlag{Name: "json", Usage: "JSON payload encoded via the plugin's <program>_aux BTF type"}
+	rawFlag := &cli.StringFlag{Name: "raw", Usage: "Raw payload as hex (<= 196 bytes). Mutually exclusive with --json"}
+	indexFlag := &cli.UintFlag{Name: "index", Required: true, Usage: "Aux index previously returned by PluginAuxAlloc"}
+
+	parsePayload := func(c *cli.Context) (jsonStr string, rawBytes []byte, err error) {
+		jsonStr = c.String("json")
+		rawHex := c.String("raw")
+		if jsonStr != "" && rawHex != "" {
+			return "", nil, fmt.Errorf("--json and --raw are mutually exclusive")
+		}
+		if rawHex != "" {
+			rawBytes, err = hex.DecodeString(rawHex)
+			if err != nil {
+				return "", nil, fmt.Errorf("--raw is not valid hex: %w", err)
+			}
+		}
+		return jsonStr, rawBytes, nil
+	}
+
+	return &cli.Command{
+		Name:  "aux",
+		Usage: "Allocate / update / read / free plugin aux entries",
+		Subcommands: []*cli.Command{
+			{
+				Name:  "alloc",
+				Usage: "Reserve an aux index and write payload",
+				Flags: []cli.Flag{typeFlag, slotFlag, jsonFlag, rawFlag},
+				Action: func(c *cli.Context) error {
+					js, raw, err := parsePayload(c)
+					if err != nil {
+						return err
+					}
+					if js == "" && len(raw) == 0 {
+						return fmt.Errorf("either --json or --raw is required")
+					}
+					clients := clientsFromContext(c)
+					req := &v1.PluginAuxAllocRequest{
+						MapType: c.String("map-type"),
+						Slot:    uint32(c.Uint("slot")),
+					}
+					if js != "" {
+						req.Payload = &v1.PluginAuxAllocRequest_Json{Json: js}
+					} else {
+						req.Payload = &v1.PluginAuxAllocRequest_Raw{Raw: raw}
+					}
+					resp, err := clients.Plugin.PluginAuxAlloc(context.Background(), connect.NewRequest(req))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Allocated plugin_aux_index=%d\n", resp.Msg.Index)
+					return nil
+				},
+			},
+			{
+				Name:  "update",
+				Usage: "Rewrite payload at an existing aux index",
+				Flags: []cli.Flag{typeFlag, slotFlag, indexFlag, jsonFlag, rawFlag},
+				Action: func(c *cli.Context) error {
+					js, raw, err := parsePayload(c)
+					if err != nil {
+						return err
+					}
+					if js == "" && len(raw) == 0 {
+						return fmt.Errorf("either --json or --raw is required")
+					}
+					clients := clientsFromContext(c)
+					req := &v1.PluginAuxUpdateRequest{
+						Index:   uint32(c.Uint("index")),
+						MapType: c.String("map-type"),
+						Slot:    uint32(c.Uint("slot")),
+					}
+					if js != "" {
+						req.Payload = &v1.PluginAuxUpdateRequest_Json{Json: js}
+					} else {
+						req.Payload = &v1.PluginAuxUpdateRequest_Raw{Raw: raw}
+					}
+					_, err = clients.Plugin.PluginAuxUpdate(context.Background(), connect.NewRequest(req))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Updated plugin_aux_index=%d\n", req.Index)
+					return nil
+				},
+			},
+			{
+				Name:  "get",
+				Usage: "Read raw bytes from an aux index",
+				Flags: []cli.Flag{typeFlag, slotFlag, indexFlag},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					req := &v1.PluginAuxGetRequest{
+						Index:   uint32(c.Uint("index")),
+						MapType: c.String("map-type"),
+						Slot:    uint32(c.Uint("slot")),
+					}
+					resp, err := clients.Plugin.PluginAuxGet(context.Background(), connect.NewRequest(req))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("owner=%s has_aux_type=%v\n", resp.Msg.Owner, resp.Msg.HasAuxType)
+					fmt.Printf("raw(hex)=%s\n", hex.EncodeToString(resp.Msg.Raw))
+					return nil
+				},
+			},
+			{
+				Name:  "free",
+				Usage: "Release an aux index back to the allocator",
+				Flags: []cli.Flag{typeFlag, slotFlag, indexFlag},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					req := &v1.PluginAuxFreeRequest{
+						Index:   uint32(c.Uint("index")),
+						MapType: c.String("map-type"),
+						Slot:    uint32(c.Uint("slot")),
+					}
+					_, err := clients.Plugin.PluginAuxFree(context.Background(), connect.NewRequest(req))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Freed plugin_aux_index=%d\n", req.Index)
 					return nil
 				},
 			},

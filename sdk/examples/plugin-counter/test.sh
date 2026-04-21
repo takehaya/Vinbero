@@ -168,6 +168,87 @@ if [ -n "$MAP_ID" ]; then
     fi
 fi
 
+# ==========================================
+# Phase 6: PluginAux standalone lifecycle (alloc → bind → update → free)
+# ==========================================
+echo ""
+echo "=========================================="
+echo "PluginAux standalone flow"
+echo "=========================================="
+
+# 6.1 Allocate a stand-alone aux entry (no SID attached yet). The server
+#     encodes {"increment":7} via the plugin's BTF and hands back an index.
+print_info "PluginAuxAlloc (increment=7)..."
+ALLOC_OUT=$(ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+    plugin aux alloc --map-type endpoint --slot ${PLUGIN_INDEX} \
+    --json '{"increment": 7}')
+echo "$ALLOC_OUT"
+AUX_IDX=$(echo "$ALLOC_OUT" | awk -F'=' '/plugin_aux_index=/ { print $2; exit }')
+if [ -z "$AUX_IDX" ] || [ "$AUX_IDX" -eq 0 ]; then
+    print_error "PluginAuxAlloc returned no index"
+    FAILED=$((FAILED + 1))
+else
+    print_success "Allocated plugin_aux_index=${AUX_IDX}"
+    PASSED=$((PASSED + 1))
+fi
+
+# 6.2 Bind a second SID to that pre-allocated aux via --plugin-aux-index.
+#     The server confirms the owner tag matches (endpoint, 32) before writing
+#     sid_function_map, and does not touch auxAlloc (owner side manages it).
+if [ -n "$AUX_IDX" ] && [ "$AUX_IDX" -ne 0 ]; then
+    print_info "Creating SID fc00:2::aa/128 with --plugin-aux-index=${AUX_IDX}..."
+    ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+        sid create --trigger-prefix fc00:2::aa/128 --action ${PLUGIN_INDEX} \
+        --plugin-aux-index "${AUX_IDX}"
+    print_success "SID bound to plugin_aux_index=${AUX_IDX}"
+
+    # 6.3 Read it back via PluginAuxGet. Owner tag must round-trip.
+    print_info "PluginAuxGet:"
+    GET_OUT=$(ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+        plugin aux get --map-type endpoint --slot ${PLUGIN_INDEX} --index "${AUX_IDX}")
+    echo "$GET_OUT"
+    if echo "$GET_OUT" | grep -q "owner=plugin:endpoint:${PLUGIN_INDEX}"; then
+        print_success "owner tag reflects (endpoint, ${PLUGIN_INDEX})"
+        PASSED=$((PASSED + 1))
+    else
+        print_error "owner tag mismatch"
+        FAILED=$((FAILED + 1))
+    fi
+
+    # 6.4 Rewrite payload (increment=7 → 9) without touching the SID.
+    print_info "PluginAuxUpdate (increment=9)..."
+    ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+        plugin aux update --map-type endpoint --slot ${PLUGIN_INDEX} \
+        --index "${AUX_IDX}" --json '{"increment": 9}'
+
+    # 6.5 Cross-slot free must be rejected (owner tag mismatch).
+    print_info "Verifying cross-slot free is rejected..."
+    if ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+        plugin aux free --map-type endpoint --slot 33 --index "${AUX_IDX}" 2>/dev/null; then
+        print_error "cross-slot free unexpectedly succeeded"
+        FAILED=$((FAILED + 1))
+    else
+        print_success "cross-slot free rejected as expected"
+        PASSED=$((PASSED + 1))
+    fi
+
+    # 6.6 PluginList should show the registered plugin with owned/shared maps.
+    print_info "PluginList (verbose):"
+    ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 plugin list -v
+
+    # 6.7 Delete the SID first (keeps aux alive because plugin owns it), then
+    #     free the aux explicitly. Skipping the aux free here would leak the
+    #     allocator slot until process restart.
+    print_info "Deleting SID fc00:2::aa/128 (plugin aux should survive)..."
+    ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+        sid delete --trigger-prefix fc00:2::aa/128 || true
+
+    print_info "Freeing plugin_aux_index=${AUX_IDX}..."
+    ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+        plugin aux free --map-type endpoint --slot ${PLUGIN_INDEX} --index "${AUX_IDX}"
+    print_success "Standalone aux lifecycle complete"
+fi
+
 echo ""
 echo "=========================================="
 echo "Test Summary"

@@ -241,6 +241,15 @@ func TestValidatePluginCollection_BTF_MapValueTypeMismatch(t *testing.T) {
 	}
 }
 
+// validatePluginAuxType short-circuits when spec.Types is nil. Covers the
+// stripped-BTF fallback path so a plugin without BTF can still register.
+func TestValidatePluginAuxType_NilTypes(t *testing.T) {
+	spec := &ebpf.CollectionSpec{}
+	if err := validatePluginAuxType(spec, "my_program"); err != nil {
+		t.Errorf("nil spec.Types should pass, got: %v", err)
+	}
+}
+
 // BTF absent (stripped ELF): validation falls back to asm-level checks and
 // must succeed if those pass.
 func TestValidatePluginCollection_BTF_MissingOK(t *testing.T) {

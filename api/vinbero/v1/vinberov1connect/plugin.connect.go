@@ -42,6 +42,18 @@ const (
 	// PluginServicePluginListProcedure is the fully-qualified name of the PluginService's PluginList
 	// RPC.
 	PluginServicePluginListProcedure = "/vinbero.v1.PluginService/PluginList"
+	// PluginServicePluginAuxAllocProcedure is the fully-qualified name of the PluginService's
+	// PluginAuxAlloc RPC.
+	PluginServicePluginAuxAllocProcedure = "/vinbero.v1.PluginService/PluginAuxAlloc"
+	// PluginServicePluginAuxUpdateProcedure is the fully-qualified name of the PluginService's
+	// PluginAuxUpdate RPC.
+	PluginServicePluginAuxUpdateProcedure = "/vinbero.v1.PluginService/PluginAuxUpdate"
+	// PluginServicePluginAuxGetProcedure is the fully-qualified name of the PluginService's
+	// PluginAuxGet RPC.
+	PluginServicePluginAuxGetProcedure = "/vinbero.v1.PluginService/PluginAuxGet"
+	// PluginServicePluginAuxFreeProcedure is the fully-qualified name of the PluginService's
+	// PluginAuxFree RPC.
+	PluginServicePluginAuxFreeProcedure = "/vinbero.v1.PluginService/PluginAuxFree"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -50,6 +62,10 @@ var (
 	pluginServicePluginRegisterMethodDescriptor   = pluginServiceServiceDescriptor.Methods().ByName("PluginRegister")
 	pluginServicePluginUnregisterMethodDescriptor = pluginServiceServiceDescriptor.Methods().ByName("PluginUnregister")
 	pluginServicePluginListMethodDescriptor       = pluginServiceServiceDescriptor.Methods().ByName("PluginList")
+	pluginServicePluginAuxAllocMethodDescriptor   = pluginServiceServiceDescriptor.Methods().ByName("PluginAuxAlloc")
+	pluginServicePluginAuxUpdateMethodDescriptor  = pluginServiceServiceDescriptor.Methods().ByName("PluginAuxUpdate")
+	pluginServicePluginAuxGetMethodDescriptor     = pluginServiceServiceDescriptor.Methods().ByName("PluginAuxGet")
+	pluginServicePluginAuxFreeMethodDescriptor    = pluginServiceServiceDescriptor.Methods().ByName("PluginAuxFree")
 )
 
 // PluginServiceClient is a client for the vinbero.v1.PluginService service.
@@ -57,6 +73,17 @@ type PluginServiceClient interface {
 	PluginRegister(context.Context, *connect.Request[v1.PluginRegisterRequest]) (*connect.Response[v1.PluginRegisterResponse], error)
 	PluginUnregister(context.Context, *connect.Request[v1.PluginUnregisterRequest]) (*connect.Response[v1.PluginUnregisterResponse], error)
 	PluginList(context.Context, *connect.Request[v1.PluginListRequest]) (*connect.Response[v1.PluginListResponse], error)
+	// Allocate a fresh aux index, write the given payload, and return the
+	// index. Owner tag is derived from (map_type, slot) so later Update /
+	// Get / Free calls must come through the same (map_type, slot) pair.
+	PluginAuxAlloc(context.Context, *connect.Request[v1.PluginAuxAllocRequest]) (*connect.Response[v1.PluginAuxAllocResponse], error)
+	// Overwrite the payload at an index already owned by (map_type, slot).
+	PluginAuxUpdate(context.Context, *connect.Request[v1.PluginAuxUpdateRequest]) (*connect.Response[v1.PluginAuxUpdateResponse], error)
+	// Read the on-wire bytes stored at an index. Caller decodes via its own
+	// BTF / Go struct layout; the server returns raw bytes + the owner tag.
+	PluginAuxGet(context.Context, *connect.Request[v1.PluginAuxGetRequest]) (*connect.Response[v1.PluginAuxGetResponse], error)
+	// Zero the entry and release the index back to the allocator.
+	PluginAuxFree(context.Context, *connect.Request[v1.PluginAuxFreeRequest]) (*connect.Response[v1.PluginAuxFreeResponse], error)
 }
 
 // NewPluginServiceClient constructs a client for the vinbero.v1.PluginService service. By default,
@@ -87,6 +114,30 @@ func NewPluginServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(pluginServicePluginListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		pluginAuxAlloc: connect.NewClient[v1.PluginAuxAllocRequest, v1.PluginAuxAllocResponse](
+			httpClient,
+			baseURL+PluginServicePluginAuxAllocProcedure,
+			connect.WithSchema(pluginServicePluginAuxAllocMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		pluginAuxUpdate: connect.NewClient[v1.PluginAuxUpdateRequest, v1.PluginAuxUpdateResponse](
+			httpClient,
+			baseURL+PluginServicePluginAuxUpdateProcedure,
+			connect.WithSchema(pluginServicePluginAuxUpdateMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		pluginAuxGet: connect.NewClient[v1.PluginAuxGetRequest, v1.PluginAuxGetResponse](
+			httpClient,
+			baseURL+PluginServicePluginAuxGetProcedure,
+			connect.WithSchema(pluginServicePluginAuxGetMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		pluginAuxFree: connect.NewClient[v1.PluginAuxFreeRequest, v1.PluginAuxFreeResponse](
+			httpClient,
+			baseURL+PluginServicePluginAuxFreeProcedure,
+			connect.WithSchema(pluginServicePluginAuxFreeMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -95,6 +146,10 @@ type pluginServiceClient struct {
 	pluginRegister   *connect.Client[v1.PluginRegisterRequest, v1.PluginRegisterResponse]
 	pluginUnregister *connect.Client[v1.PluginUnregisterRequest, v1.PluginUnregisterResponse]
 	pluginList       *connect.Client[v1.PluginListRequest, v1.PluginListResponse]
+	pluginAuxAlloc   *connect.Client[v1.PluginAuxAllocRequest, v1.PluginAuxAllocResponse]
+	pluginAuxUpdate  *connect.Client[v1.PluginAuxUpdateRequest, v1.PluginAuxUpdateResponse]
+	pluginAuxGet     *connect.Client[v1.PluginAuxGetRequest, v1.PluginAuxGetResponse]
+	pluginAuxFree    *connect.Client[v1.PluginAuxFreeRequest, v1.PluginAuxFreeResponse]
 }
 
 // PluginRegister calls vinbero.v1.PluginService.PluginRegister.
@@ -112,11 +167,42 @@ func (c *pluginServiceClient) PluginList(ctx context.Context, req *connect.Reque
 	return c.pluginList.CallUnary(ctx, req)
 }
 
+// PluginAuxAlloc calls vinbero.v1.PluginService.PluginAuxAlloc.
+func (c *pluginServiceClient) PluginAuxAlloc(ctx context.Context, req *connect.Request[v1.PluginAuxAllocRequest]) (*connect.Response[v1.PluginAuxAllocResponse], error) {
+	return c.pluginAuxAlloc.CallUnary(ctx, req)
+}
+
+// PluginAuxUpdate calls vinbero.v1.PluginService.PluginAuxUpdate.
+func (c *pluginServiceClient) PluginAuxUpdate(ctx context.Context, req *connect.Request[v1.PluginAuxUpdateRequest]) (*connect.Response[v1.PluginAuxUpdateResponse], error) {
+	return c.pluginAuxUpdate.CallUnary(ctx, req)
+}
+
+// PluginAuxGet calls vinbero.v1.PluginService.PluginAuxGet.
+func (c *pluginServiceClient) PluginAuxGet(ctx context.Context, req *connect.Request[v1.PluginAuxGetRequest]) (*connect.Response[v1.PluginAuxGetResponse], error) {
+	return c.pluginAuxGet.CallUnary(ctx, req)
+}
+
+// PluginAuxFree calls vinbero.v1.PluginService.PluginAuxFree.
+func (c *pluginServiceClient) PluginAuxFree(ctx context.Context, req *connect.Request[v1.PluginAuxFreeRequest]) (*connect.Response[v1.PluginAuxFreeResponse], error) {
+	return c.pluginAuxFree.CallUnary(ctx, req)
+}
+
 // PluginServiceHandler is an implementation of the vinbero.v1.PluginService service.
 type PluginServiceHandler interface {
 	PluginRegister(context.Context, *connect.Request[v1.PluginRegisterRequest]) (*connect.Response[v1.PluginRegisterResponse], error)
 	PluginUnregister(context.Context, *connect.Request[v1.PluginUnregisterRequest]) (*connect.Response[v1.PluginUnregisterResponse], error)
 	PluginList(context.Context, *connect.Request[v1.PluginListRequest]) (*connect.Response[v1.PluginListResponse], error)
+	// Allocate a fresh aux index, write the given payload, and return the
+	// index. Owner tag is derived from (map_type, slot) so later Update /
+	// Get / Free calls must come through the same (map_type, slot) pair.
+	PluginAuxAlloc(context.Context, *connect.Request[v1.PluginAuxAllocRequest]) (*connect.Response[v1.PluginAuxAllocResponse], error)
+	// Overwrite the payload at an index already owned by (map_type, slot).
+	PluginAuxUpdate(context.Context, *connect.Request[v1.PluginAuxUpdateRequest]) (*connect.Response[v1.PluginAuxUpdateResponse], error)
+	// Read the on-wire bytes stored at an index. Caller decodes via its own
+	// BTF / Go struct layout; the server returns raw bytes + the owner tag.
+	PluginAuxGet(context.Context, *connect.Request[v1.PluginAuxGetRequest]) (*connect.Response[v1.PluginAuxGetResponse], error)
+	// Zero the entry and release the index back to the allocator.
+	PluginAuxFree(context.Context, *connect.Request[v1.PluginAuxFreeRequest]) (*connect.Response[v1.PluginAuxFreeResponse], error)
 }
 
 // NewPluginServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -143,6 +229,30 @@ func NewPluginServiceHandler(svc PluginServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(pluginServicePluginListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	pluginServicePluginAuxAllocHandler := connect.NewUnaryHandler(
+		PluginServicePluginAuxAllocProcedure,
+		svc.PluginAuxAlloc,
+		connect.WithSchema(pluginServicePluginAuxAllocMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	pluginServicePluginAuxUpdateHandler := connect.NewUnaryHandler(
+		PluginServicePluginAuxUpdateProcedure,
+		svc.PluginAuxUpdate,
+		connect.WithSchema(pluginServicePluginAuxUpdateMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	pluginServicePluginAuxGetHandler := connect.NewUnaryHandler(
+		PluginServicePluginAuxGetProcedure,
+		svc.PluginAuxGet,
+		connect.WithSchema(pluginServicePluginAuxGetMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	pluginServicePluginAuxFreeHandler := connect.NewUnaryHandler(
+		PluginServicePluginAuxFreeProcedure,
+		svc.PluginAuxFree,
+		connect.WithSchema(pluginServicePluginAuxFreeMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.PluginService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case PluginServicePluginRegisterProcedure:
@@ -151,6 +261,14 @@ func NewPluginServiceHandler(svc PluginServiceHandler, opts ...connect.HandlerOp
 			pluginServicePluginUnregisterHandler.ServeHTTP(w, r)
 		case PluginServicePluginListProcedure:
 			pluginServicePluginListHandler.ServeHTTP(w, r)
+		case PluginServicePluginAuxAllocProcedure:
+			pluginServicePluginAuxAllocHandler.ServeHTTP(w, r)
+		case PluginServicePluginAuxUpdateProcedure:
+			pluginServicePluginAuxUpdateHandler.ServeHTTP(w, r)
+		case PluginServicePluginAuxGetProcedure:
+			pluginServicePluginAuxGetHandler.ServeHTTP(w, r)
+		case PluginServicePluginAuxFreeProcedure:
+			pluginServicePluginAuxFreeHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -170,4 +288,20 @@ func (UnimplementedPluginServiceHandler) PluginUnregister(context.Context, *conn
 
 func (UnimplementedPluginServiceHandler) PluginList(context.Context, *connect.Request[v1.PluginListRequest]) (*connect.Response[v1.PluginListResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.PluginList is not implemented"))
+}
+
+func (UnimplementedPluginServiceHandler) PluginAuxAlloc(context.Context, *connect.Request[v1.PluginAuxAllocRequest]) (*connect.Response[v1.PluginAuxAllocResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.PluginAuxAlloc is not implemented"))
+}
+
+func (UnimplementedPluginServiceHandler) PluginAuxUpdate(context.Context, *connect.Request[v1.PluginAuxUpdateRequest]) (*connect.Response[v1.PluginAuxUpdateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.PluginAuxUpdate is not implemented"))
+}
+
+func (UnimplementedPluginServiceHandler) PluginAuxGet(context.Context, *connect.Request[v1.PluginAuxGetRequest]) (*connect.Response[v1.PluginAuxGetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.PluginAuxGet is not implemented"))
+}
+
+func (UnimplementedPluginServiceHandler) PluginAuxFree(context.Context, *connect.Request[v1.PluginAuxFreeRequest]) (*connect.Response[v1.PluginAuxFreeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.PluginAuxFree is not implemented"))
 }

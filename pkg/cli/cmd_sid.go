@@ -41,6 +41,7 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 196 bytes after decode)"},
 					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
 					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},
+					&cli.UintFlag{Name: "plugin-aux-index", Usage: "Reference an aux index previously returned by `plugin aux alloc` (mutually exclusive with --plugin-aux-hex/--plugin-aux-json*)"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -102,25 +103,30 @@ func sidFunctionCommand() *cli.Command {
 					if pluginAuxJSON != "" && pluginAuxRaw != nil {
 						return fmt.Errorf("--plugin-aux-hex and --plugin-aux-json* are mutually exclusive")
 					}
+					pluginAuxIndex := uint32(c.Uint("plugin-aux-index"))
+					if pluginAuxIndex != 0 && (pluginAuxRaw != nil || pluginAuxJSON != "") {
+						return fmt.Errorf("--plugin-aux-index is mutually exclusive with --plugin-aux-hex and --plugin-aux-json*")
+					}
 
 					sid := &v1.SidFunction{
-						Action:        action,
-						TriggerPrefix: c.String("trigger-prefix"),
-						SrcAddr:       c.String("src-addr"),
-						DstAddr:       c.String("dst-addr"),
-						Nexthop:       c.String("nexthop"),
-						Flavor:        flavor,
-						VrfName:       c.String("vrf-name"),
-						BdId:          uint32(c.Uint("bd-id")),
-						BridgeName:    c.String("bridge-name"),
-						Oif:           uint32(c.Uint("oif")),
-						Segments:      segments,
-						HeadendMode:   headendMode,
-						ArgsOffset:   uint32(c.Uint("args-offset")),
-						GtpV4SrcAddr: c.String("gtp-v4-src-addr"),
-						TableId:       uint32(c.Uint("table-id")),
-						PluginAuxRaw:  pluginAuxRaw,
-						PluginAuxJson: pluginAuxJSON,
+						Action:         action,
+						TriggerPrefix:  c.String("trigger-prefix"),
+						SrcAddr:        c.String("src-addr"),
+						DstAddr:        c.String("dst-addr"),
+						Nexthop:        c.String("nexthop"),
+						Flavor:         flavor,
+						VrfName:        c.String("vrf-name"),
+						BdId:           uint32(c.Uint("bd-id")),
+						BridgeName:     c.String("bridge-name"),
+						Oif:            uint32(c.Uint("oif")),
+						Segments:       segments,
+						HeadendMode:    headendMode,
+						ArgsOffset:     uint32(c.Uint("args-offset")),
+						GtpV4SrcAddr:   c.String("gtp-v4-src-addr"),
+						TableId:        uint32(c.Uint("table-id")),
+						PluginAuxRaw:   pluginAuxRaw,
+						PluginAuxJson:  pluginAuxJSON,
+						PluginAuxIndex: pluginAuxIndex,
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),
