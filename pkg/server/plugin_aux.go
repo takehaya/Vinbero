@@ -64,10 +64,23 @@ func (s *PluginServer) encodePluginAuxPayload(mapType string, slot uint32, rawIn
 	return EncodePluginAux(auxType, payload)
 }
 
-// ownerMismatchToConnectErr converts an ErrOwnerMismatch into a
-// PermissionDenied connect error so clients can distinguish it from
-// transport / verification failures.
-func ownerMismatchToConnectErr(err error) error {
+// ownerFor validates the (map_type, slot) pair and, if non-zero, the aux
+// index, then returns the owner tag used by every PluginAux op on that slot.
+// requireIdx=false is used by Alloc where no index exists yet.
+func ownerFor(mapType string, slot, idx uint32, requireIdx bool) (string, error) {
+	if err := validatePluginSlot(mapType, slot); err != nil {
+		return "", err
+	}
+	if requireIdx && idx == 0 {
+		return "", fmt.Errorf("index 0 is the no-aux sentinel")
+	}
+	return bpf.AuxOwnerPluginTag(mapType, slot), nil
+}
+
+// toRPCError maps a MapOperations error to a connect code. Owner-mismatch
+// surfaces as PermissionDenied so clients can distinguish it from transport
+// or verification failures; everything else is Internal.
+func toRPCError(err error) error {
 	if errors.Is(err, bpf.ErrOwnerMismatch) {
 		return connect.NewError(connect.CodePermissionDenied, err)
 	}
@@ -79,20 +92,19 @@ func (s *PluginServer) PluginAuxAlloc(
 	req *connect.Request[v1.PluginAuxAllocRequest],
 ) (*connect.Response[v1.PluginAuxAllocResponse], error) {
 	msg := req.Msg
-	if err := validatePluginSlot(msg.MapType, msg.Slot); err != nil {
+	owner, err := ownerFor(msg.MapType, msg.Slot, 0, false)
+	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	raw, err := s.encodePluginAuxPayload(msg.MapType, msg.Slot, msg.GetRaw(), msg.GetJson())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	owner := bpf.AuxOwnerPluginTag(msg.MapType, msg.Slot)
 	idx, err := s.mapOps.AllocPluginAux(owner)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeResourceExhausted, err)
 	}
 	if err := s.mapOps.PutPluginAux(idx, raw, owner); err != nil {
-		// roll back the allocator so the index can be reused
 		_ = s.mapOps.FreePluginAux(idx, owner)
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -104,20 +116,16 @@ func (s *PluginServer) PluginAuxUpdate(
 	req *connect.Request[v1.PluginAuxUpdateRequest],
 ) (*connect.Response[v1.PluginAuxUpdateResponse], error) {
 	msg := req.Msg
-	if err := validatePluginSlot(msg.MapType, msg.Slot); err != nil {
+	owner, err := ownerFor(msg.MapType, msg.Slot, msg.Index, true)
+	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
-	}
-	if msg.Index == 0 {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("index 0 is the no-aux sentinel"))
 	}
 	raw, err := s.encodePluginAuxPayload(msg.MapType, msg.Slot, msg.GetRaw(), msg.GetJson())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	owner := bpf.AuxOwnerPluginTag(msg.MapType, msg.Slot)
 	if err := s.mapOps.PutPluginAux(msg.Index, raw, owner); err != nil {
-		return nil, ownerMismatchToConnectErr(err)
+		return nil, toRPCError(err)
 	}
 	return connect.NewResponse(&v1.PluginAuxUpdateResponse{}), nil
 }
@@ -127,17 +135,13 @@ func (s *PluginServer) PluginAuxGet(
 	req *connect.Request[v1.PluginAuxGetRequest],
 ) (*connect.Response[v1.PluginAuxGetResponse], error) {
 	msg := req.Msg
-	if err := validatePluginSlot(msg.MapType, msg.Slot); err != nil {
+	owner, err := ownerFor(msg.MapType, msg.Slot, msg.Index, true)
+	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if msg.Index == 0 {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("index 0 is the no-aux sentinel"))
-	}
-	owner := bpf.AuxOwnerPluginTag(msg.MapType, msg.Slot)
 	raw, err := s.mapOps.GetPluginAux(msg.Index, owner)
 	if err != nil {
-		return nil, ownerMismatchToConnectErr(err)
+		return nil, toRPCError(err)
 	}
 	return connect.NewResponse(&v1.PluginAuxGetResponse{
 		Raw:        raw,
@@ -151,16 +155,12 @@ func (s *PluginServer) PluginAuxFree(
 	req *connect.Request[v1.PluginAuxFreeRequest],
 ) (*connect.Response[v1.PluginAuxFreeResponse], error) {
 	msg := req.Msg
-	if err := validatePluginSlot(msg.MapType, msg.Slot); err != nil {
+	owner, err := ownerFor(msg.MapType, msg.Slot, msg.Index, true)
+	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if msg.Index == 0 {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("index 0 is the no-aux sentinel"))
-	}
-	owner := bpf.AuxOwnerPluginTag(msg.MapType, msg.Slot)
 	if err := s.mapOps.FreePluginAux(msg.Index, owner); err != nil {
-		return nil, ownerMismatchToConnectErr(err)
+		return nil, toRPCError(err)
 	}
 	return connect.NewResponse(&v1.PluginAuxFreeResponse{}), nil
 }

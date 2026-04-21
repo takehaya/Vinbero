@@ -137,12 +137,9 @@ func (a *indexAllocator) AllocOwner(owner string) (uint32, error) {
 	return idx, nil
 }
 
-// FreeOwner releases idx only if owner matches the tag recorded at Alloc
-// time. Mismatched owners return ErrOwnerMismatch and leave the allocator
-// state untouched. Freeing an already-free index is also ErrOwnerMismatch.
-func (a *indexAllocator) FreeOwner(idx uint32, owner string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// verifyOwnerLocked checks idx is allocated and owned by owner. Callers
+// must hold a.mu.
+func (a *indexAllocator) verifyOwnerLocked(idx uint32, owner string) error {
 	got, ok := a.owners[idx]
 	if !ok {
 		return fmt.Errorf("%w: index %d is not allocated", ErrOwnerMismatch, idx)
@@ -151,12 +148,46 @@ func (a *indexAllocator) FreeOwner(idx uint32, owner string) error {
 		return fmt.Errorf("%w: index %d owned by %q, caller %q",
 			ErrOwnerMismatch, idx, got, owner)
 	}
-	delete(a.owners, idx)
-	a.freeList = append(a.freeList, idx)
 	return nil
 }
 
+// freeOwnerLocked is the lockless core of FreeOwner. Callers must have
+// already verified ownership and hold a.mu.
+func (a *indexAllocator) freeOwnerLocked(idx uint32) {
+	delete(a.owners, idx)
+	a.freeList = append(a.freeList, idx)
+}
+
+// FreeOwner releases idx only if owner matches the tag recorded at Alloc
+// time. Mismatched owners return ErrOwnerMismatch and leave the allocator
+// state untouched. Freeing an already-free index is also ErrOwnerMismatch.
+func (a *indexAllocator) FreeOwner(idx uint32, owner string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.verifyOwnerLocked(idx, owner); err != nil {
+		return err
+	}
+	a.freeOwnerLocked(idx)
+	return nil
+}
+
+// WithOwnerLocked verifies idx is owned by owner and runs fn while holding
+// the allocator lock so a concurrent Free / Alloc cannot reassign idx
+// underneath fn. fn should be short (typically one BPF map op) to avoid
+// blocking other aux operations.
+func (a *indexAllocator) WithOwnerLocked(idx uint32, owner string, fn func() error) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.verifyOwnerLocked(idx, owner); err != nil {
+		return err
+	}
+	return fn()
+}
+
 // OwnerOf returns the owner tag registered for idx, or "" if idx is free.
+// Advisory: the returned value may be stale by the time the caller acts on
+// it. For operations that must be atomic with the owner check (map puts,
+// sid_function binding), use WithOwnerLocked instead.
 func (a *indexAllocator) OwnerOf(idx uint32) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -448,11 +479,13 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 	return nil
 }
 
-// CreateSidFunctionWithAuxIndex creates a SID function entry that references
-// an aux index already allocated by PluginAuxAlloc. The caller is responsible
-// for writing / freeing the aux entry via the PluginAux RPC path; this
-// helper only touches sid_function_map. Intended for action >= plugin base.
-func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entry *SidFunctionEntry) error {
+// CreateSidFunctionWithAuxIndex binds a SID function entry to an aux index
+// already allocated by PluginAuxAlloc. The allocator lock is held across the
+// owner verification and the sid_function_map write so a concurrent
+// PluginAuxFree cannot reassign the index between the two. expectedOwner is
+// the tag the caller believes owns the index (typically
+// AuxOwnerPluginTag(mapType, slot)); mismatch returns ErrOwnerMismatch.
+func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entry *SidFunctionEntry, expectedOwner string) error {
 	if entry.AuxIndex == 0 {
 		return fmt.Errorf("aux_index must be non-zero")
 	}
@@ -460,17 +493,12 @@ func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entr
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
-	if err := m.objs.SidFunctionMap.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put SID function entry: %w", err)
-	}
-	return nil
-}
-
-// AuxOwnerOf returns the owner tag currently registered for idx, or "" if
-// idx is not allocated. Used by SidFunction create handlers to verify that a
-// supplied plugin_aux_index belongs to the expected plugin slot.
-func (m *MapOperations) AuxOwnerOf(idx uint32) string {
-	return m.auxAlloc.OwnerOf(idx)
+	return m.auxAlloc.WithOwnerLocked(uint32(entry.AuxIndex), expectedOwner, func() error {
+		if err := m.objs.SidFunctionMap.Put(key, entry); err != nil {
+			return fmt.Errorf("failed to put SID function entry: %w", err)
+		}
+		return nil
+	})
 }
 
 // AllocPluginAux reserves an index in the plugin_raw variant of sid_aux_map
@@ -481,56 +509,56 @@ func (m *MapOperations) AllocPluginAux(owner string) (uint32, error) {
 	return m.auxAlloc.AllocOwner(owner)
 }
 
-// PutPluginAux writes raw into sid_aux_map[idx] after verifying owner. raw
-// must be <= SidAuxPluginRawMax; shorter payloads are zero-padded on the
-// wire. Owner mismatch returns ErrOwnerMismatch and does not touch the map.
+// PutPluginAux writes raw into sid_aux_map[idx] atomically w.r.t. the owner
+// check: a racing Free cannot reassign idx between check and write. raw must
+// be <= SidAuxPluginRawMax; shorter payloads are zero-padded on the wire.
 func (m *MapOperations) PutPluginAux(idx uint32, raw []byte, owner string) error {
-	if got := m.auxAlloc.OwnerOf(idx); got != owner {
-		return fmt.Errorf("%w: index %d owned by %q, caller %q",
-			ErrOwnerMismatch, idx, got, owner)
-	}
 	if len(raw) > SidAuxPluginRawMax {
 		return fmt.Errorf("raw length %d exceeds SidAuxPluginRawMax (%d)",
 			len(raw), SidAuxPluginRawMax)
 	}
-	entry := NewSidAuxPluginRaw(raw)
-	if err := m.objs.SidAuxMap.Put(idx, entry); err != nil {
-		return fmt.Errorf("failed to put plugin aux entry: %w", err)
-	}
-	return nil
+	return m.auxAlloc.WithOwnerLocked(idx, owner, func() error {
+		entry := NewSidAuxPluginRaw(raw)
+		if err := m.objs.SidAuxMap.Put(idx, entry); err != nil {
+			return fmt.Errorf("failed to put plugin aux entry: %w", err)
+		}
+		return nil
+	})
 }
 
-// GetPluginAux returns the raw bytes stored at idx after verifying owner.
-// Returned slice length is always SidAuxPluginRawMax (the on-wire size).
-// Owner mismatch returns ErrOwnerMismatch.
+// GetPluginAux returns the raw bytes stored at idx after verifying owner,
+// holding the allocator lock across the lookup so a racing Free cannot
+// reassign idx mid-read. Returned slice length is SidAuxPluginRawMax.
 func (m *MapOperations) GetPluginAux(idx uint32, owner string) ([]byte, error) {
-	if got := m.auxAlloc.OwnerOf(idx); got != owner {
-		return nil, fmt.Errorf("%w: index %d owned by %q, caller %q",
-			ErrOwnerMismatch, idx, got, owner)
+	var raw []byte
+	err := m.auxAlloc.WithOwnerLocked(idx, owner, func() error {
+		var entry SidAuxEntry
+		if err := m.objs.SidAuxMap.Lookup(idx, &entry); err != nil {
+			return fmt.Errorf("failed to look up plugin aux entry: %w", err)
+		}
+		raw = make([]byte, SidAuxPluginRawMax)
+		src := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(&entry))[:]
+		copy(raw, src)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	var entry SidAuxEntry
-	if err := m.objs.SidAuxMap.Lookup(idx, &entry); err != nil {
-		return nil, fmt.Errorf("failed to look up plugin aux entry: %w", err)
-	}
-	raw := make([]byte, SidAuxPluginRawMax)
-	src := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(&entry))[:]
-	copy(raw, src)
 	return raw, nil
 }
 
-// FreePluginAux zeroes sid_aux_map[idx] and releases the allocator slot.
-// Owner mismatch returns ErrOwnerMismatch; both map and allocator remain
-// untouched in that case.
+// FreePluginAux zeroes sid_aux_map[idx] and releases the allocator slot in a
+// single critical section: the idx cannot be re-allocated between the zero-
+// write and the slot release.
 func (m *MapOperations) FreePluginAux(idx uint32, owner string) error {
-	if got := m.auxAlloc.OwnerOf(idx); got != owner {
-		return fmt.Errorf("%w: index %d owned by %q, caller %q",
-			ErrOwnerMismatch, idx, got, owner)
-	}
-	var zero SidAuxEntry
-	if err := m.objs.SidAuxMap.Put(idx, &zero); err != nil {
-		return fmt.Errorf("failed to zero plugin aux entry: %w", err)
-	}
-	return m.auxAlloc.FreeOwner(idx, owner)
+	return m.auxAlloc.WithOwnerLocked(idx, owner, func() error {
+		var zero SidAuxEntry
+		if err := m.objs.SidAuxMap.Put(idx, &zero); err != nil {
+			return fmt.Errorf("failed to zero plugin aux entry: %w", err)
+		}
+		m.auxAlloc.freeOwnerLocked(idx)
+		return nil
+	})
 }
 
 // DeleteSidFunction removes a SID function entry and its aux data
