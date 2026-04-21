@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.3](https://github.com/takehaya/Vinbero/compare/v0.0.2...v0.0.3) (2026-04-21)
+
+
+### 🎉 Features
+
+* End.DT2M + EVPN multi-homing (RFC 7432/9252 Split-Horizon + DF) ([#22](https://github.com/takehaya/Vinbero/issues/22)) ([c00bcea](https://github.com/takehaya/Vinbero/commit/c00bcea7e4f9c83976473231d5b509c83ad15cb9))
+* plugin SDK v2 + BTF-driven aux JSON + per-slot stats ([#21](https://github.com/takehaya/Vinbero/issues/21)) ([fa69f06](https://github.com/takehaya/Vinbero/commit/fa69f0606a033b49c6aba7b616cefed2391873a3))
+* plugin SDK with static validator, VINBERO_PLUGIN macro, samples ([#19](https://github.com/takehaya/Vinbero/issues/19)) ([a372b7d](https://github.com/takehaya/Vinbero/commit/a372b7de900cbdbdcbdb09e403d01d544a8d2835))
+
 ## [0.0.2](https://github.com/takehaya/Vinbero/compare/v0.0.1...v0.0.2) (2026-04-16)
 
 
