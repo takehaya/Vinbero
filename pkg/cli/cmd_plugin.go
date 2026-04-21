@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
+	"text/tabwriter"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
@@ -97,6 +99,54 @@ func pluginCommand() *cli.Command {
 					}
 
 					fmt.Printf("Plugin unregistered: type=%s index=%d\n", req.MapType, req.Index)
+					return nil
+				},
+			},
+			{
+				Name:  "list",
+				Usage: "List registered plugins",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "type", Usage: "Filter by map type: endpoint, headend_v4, headend_v6"},
+					&cli.BoolFlag{Name: "verbose", Aliases: []string{"v"}, Usage: "Show map linkage (shared/owned)"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					req := &v1.PluginListRequest{MapTypeFilter: c.String("type")}
+					resp, err := clients.Plugin.PluginList(context.Background(), connect.NewRequest(req))
+					if err != nil {
+						return err
+					}
+					tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+					if _, err := fmt.Fprintln(tw, "MAP_TYPE\tSLOT\tPROGRAM\tAUX_TYPE\tREGISTERED"); err != nil {
+						return err
+					}
+					for _, p := range resp.Msg.Plugins {
+						aux := "-"
+						if p.HasAuxType {
+							aux = p.AuxTypeName
+							if aux == "" {
+								aux = "(anonymous)"
+							}
+						}
+						ts := ""
+						if p.RegisteredAt != nil {
+							ts = p.RegisteredAt.AsTime().UTC().Format("2006-01-02T15:04:05Z")
+						}
+						if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", p.MapType, p.Slot, p.Program, aux, ts); err != nil {
+							return err
+						}
+					}
+					if err := tw.Flush(); err != nil {
+						return err
+					}
+					if c.Bool("verbose") {
+						for _, p := range resp.Msg.Plugins {
+							fmt.Printf("  %s/%d:\n", p.MapType, p.Slot)
+							fmt.Printf("    shared_ro: [%s]\n", strings.Join(p.SharedRoNames, ", "))
+							fmt.Printf("    shared_rw: [%s]\n", strings.Join(p.SharedRwNames, ", "))
+							fmt.Printf("    owned:     [%s]\n", strings.Join(p.OwnedMapNames, ", "))
+						}
+					}
 					return nil
 				},
 			},

@@ -1271,37 +1271,43 @@ func FormatSegments(segments [MaxSegments][IPv6AddrLen]uint8, numSegments uint8)
 	return result
 }
 
-// GetSharedMaps returns a map of all BPF maps that plugins can reference.
-// Used by the server to replace map references when loading external plugins.
-func (m *MapOperations) GetSharedMaps() map[string]*ebpf.Map {
+// GetSharedReadOnlyMaps returns BPF maps that vinbero manages and plugins may
+// only read. Writes from a plugin into one of these maps will be flagged by the
+// validator (Phase 2 will escalate to a hard reject; today it only warns).
+func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 	return map[string]*ebpf.Map{
-		"sid_function_map":   m.objs.SidFunctionMap,
-		"sid_aux_map":        m.objs.SidAuxMap,
-		"headend_v4_map":     m.objs.HeadendV4Map,
-		"headend_v6_map":     m.objs.HeadendV6Map,
-		"headend_l2_map":     m.objs.HeadendL2Map,
-		"fdb_map":            m.objs.FdbMap,
-		"bd_peer_map":        m.objs.BdPeerMap,
+		"sid_function_map":    m.objs.SidFunctionMap,
+		"sid_aux_map":         m.objs.SidAuxMap,
+		"headend_v4_map":      m.objs.HeadendV4Map,
+		"headend_v6_map":      m.objs.HeadendV6Map,
+		"headend_l2_map":      m.objs.HeadendL2Map,
+		"fdb_map":             m.objs.FdbMap,
+		"bd_peer_map":         m.objs.BdPeerMap,
 		"bd_peer_reverse_map": m.objs.BdPeerReverseMap,
-		"esi_map":            m.objs.EsiMap,
+		"esi_map":             m.objs.EsiMap,
 		"bd_peer_l2_ext_map":  m.objs.BdPeerL2ExtMap,
 		"headend_l2_ext_map":  m.objs.HeadendL2ExtMap,
 		"bd_local_esi_map":    m.objs.BdLocalEsiMap,
-		"dx2v_map":           m.objs.Dx2vMap,
-		"scratch_map":             m.objs.ScratchMap,
-		"stats_map":               m.objs.StatsMap,
-		// slot_stats_* are vinbero-internal observability maps. Exposed to
-		// plugins because the SDK header (xdp_stats.h) declares them, so
-		// plugin ELFs will end up with matching .maps entries and need to
-		// be redirected here to load. Plugin code should not write to them
-		// directly — the epilogue handles that.
-		"slot_stats_endpoint":     m.objs.SlotStatsEndpoint,
-		"slot_stats_headend_v4":   m.objs.SlotStatsHeadendV4,
-		"slot_stats_headend_v6":   m.objs.SlotStatsHeadendV6,
-		"tailcall_ctx_map":        m.objs.TailcallCtxMap,
-		MapNameSidEndpointProgs:   m.objs.SidEndpointProgs,
-		MapNameHeadendV4Progs:     m.objs.HeadendV4Progs,
-		MapNameHeadendV6Progs:     m.objs.HeadendV6Progs,
+		"dx2v_map":            m.objs.Dx2vMap,
+		"tailcall_ctx_map":    m.objs.TailcallCtxMap,
+	}
+}
+
+// GetSharedReadWriteMaps returns BPF maps plugins may write to (or that are
+// logically vinbero-managed but the kernel verifier requires write access for
+// normal operation — stats counters, scratch buffers, PROG_ARRAY dispatch).
+// slot_stats_* are written from tailcall_epilogue on behalf of the plugin, so
+// they need to appear writable to the plugin ELF at verification time.
+func (m *MapOperations) GetSharedReadWriteMaps() map[string]*ebpf.Map {
+	return map[string]*ebpf.Map{
+		"scratch_map":           m.objs.ScratchMap,
+		"stats_map":             m.objs.StatsMap,
+		"slot_stats_endpoint":   m.objs.SlotStatsEndpoint,
+		"slot_stats_headend_v4": m.objs.SlotStatsHeadendV4,
+		"slot_stats_headend_v6": m.objs.SlotStatsHeadendV6,
+		MapNameSidEndpointProgs: m.objs.SidEndpointProgs,
+		MapNameHeadendV4Progs:   m.objs.HeadendV4Progs,
+		MapNameHeadendV6Progs:   m.objs.HeadendV6Progs,
 	}
 }
 
@@ -1321,8 +1327,8 @@ const (
 	MapTypeHeadendV6 = "headend_v6"
 )
 
-// BPF map names for vinbero-managed PROG_ARRAYs. Referenced by GetSharedMaps,
-// resolvePluginMap, and the plugin validator's tail-call whitelist.
+// BPF map names for vinbero-managed PROG_ARRAYs. Referenced by the shared-map
+// getters, resolvePluginMap, and the plugin validator's tail-call whitelist.
 const (
 	MapNameSidEndpointProgs = "sid_endpoint_progs"
 	MapNameHeadendV4Progs   = "headend_v4_progs"

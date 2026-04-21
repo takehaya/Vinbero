@@ -22,6 +22,7 @@ const _ = grpc.SupportPackageIsVersion7
 const (
 	PluginService_PluginRegister_FullMethodName   = "/vinbero.v1.PluginService/PluginRegister"
 	PluginService_PluginUnregister_FullMethodName = "/vinbero.v1.PluginService/PluginUnregister"
+	PluginService_PluginList_FullMethodName       = "/vinbero.v1.PluginService/PluginList"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -30,6 +31,7 @@ const (
 type PluginServiceClient interface {
 	PluginRegister(ctx context.Context, in *PluginRegisterRequest, opts ...grpc.CallOption) (*PluginRegisterResponse, error)
 	PluginUnregister(ctx context.Context, in *PluginUnregisterRequest, opts ...grpc.CallOption) (*PluginUnregisterResponse, error)
+	PluginList(ctx context.Context, in *PluginListRequest, opts ...grpc.CallOption) (*PluginListResponse, error)
 }
 
 type pluginServiceClient struct {
@@ -58,12 +60,22 @@ func (c *pluginServiceClient) PluginUnregister(ctx context.Context, in *PluginUn
 	return out, nil
 }
 
+func (c *pluginServiceClient) PluginList(ctx context.Context, in *PluginListRequest, opts ...grpc.CallOption) (*PluginListResponse, error) {
+	out := new(PluginListResponse)
+	err := c.cc.Invoke(ctx, PluginService_PluginList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PluginServiceServer is the server API for PluginService service.
 // All implementations should embed UnimplementedPluginServiceServer
 // for forward compatibility
 type PluginServiceServer interface {
 	PluginRegister(context.Context, *PluginRegisterRequest) (*PluginRegisterResponse, error)
 	PluginUnregister(context.Context, *PluginUnregisterRequest) (*PluginUnregisterResponse, error)
+	PluginList(context.Context, *PluginListRequest) (*PluginListResponse, error)
 }
 
 // UnimplementedPluginServiceServer should be embedded to have forward compatible implementations.
@@ -75,6 +87,9 @@ func (UnimplementedPluginServiceServer) PluginRegister(context.Context, *PluginR
 }
 func (UnimplementedPluginServiceServer) PluginUnregister(context.Context, *PluginUnregisterRequest) (*PluginUnregisterResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PluginUnregister not implemented")
+}
+func (UnimplementedPluginServiceServer) PluginList(context.Context, *PluginListRequest) (*PluginListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PluginList not implemented")
 }
 
 // UnsafePluginServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -124,6 +139,24 @@ func _PluginService_PluginUnregister_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_PluginList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PluginListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).PluginList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_PluginList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).PluginList(ctx, req.(*PluginListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PluginService_ServiceDesc is the grpc.ServiceDesc for PluginService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -138,6 +171,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PluginUnregister",
 			Handler:    _PluginService_PluginUnregister_Handler,
+		},
+		{
+			MethodName: "PluginList",
+			Handler:    _PluginService_PluginList_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

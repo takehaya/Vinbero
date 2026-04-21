@@ -39,6 +39,9 @@ const (
 	// PluginServicePluginUnregisterProcedure is the fully-qualified name of the PluginService's
 	// PluginUnregister RPC.
 	PluginServicePluginUnregisterProcedure = "/vinbero.v1.PluginService/PluginUnregister"
+	// PluginServicePluginListProcedure is the fully-qualified name of the PluginService's PluginList
+	// RPC.
+	PluginServicePluginListProcedure = "/vinbero.v1.PluginService/PluginList"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -46,12 +49,14 @@ var (
 	pluginServiceServiceDescriptor                = v1.File_vinbero_v1_plugin_proto.Services().ByName("PluginService")
 	pluginServicePluginRegisterMethodDescriptor   = pluginServiceServiceDescriptor.Methods().ByName("PluginRegister")
 	pluginServicePluginUnregisterMethodDescriptor = pluginServiceServiceDescriptor.Methods().ByName("PluginUnregister")
+	pluginServicePluginListMethodDescriptor       = pluginServiceServiceDescriptor.Methods().ByName("PluginList")
 )
 
 // PluginServiceClient is a client for the vinbero.v1.PluginService service.
 type PluginServiceClient interface {
 	PluginRegister(context.Context, *connect.Request[v1.PluginRegisterRequest]) (*connect.Response[v1.PluginRegisterResponse], error)
 	PluginUnregister(context.Context, *connect.Request[v1.PluginUnregisterRequest]) (*connect.Response[v1.PluginUnregisterResponse], error)
+	PluginList(context.Context, *connect.Request[v1.PluginListRequest]) (*connect.Response[v1.PluginListResponse], error)
 }
 
 // NewPluginServiceClient constructs a client for the vinbero.v1.PluginService service. By default,
@@ -76,6 +81,12 @@ func NewPluginServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(pluginServicePluginUnregisterMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		pluginList: connect.NewClient[v1.PluginListRequest, v1.PluginListResponse](
+			httpClient,
+			baseURL+PluginServicePluginListProcedure,
+			connect.WithSchema(pluginServicePluginListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -83,6 +94,7 @@ func NewPluginServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 type pluginServiceClient struct {
 	pluginRegister   *connect.Client[v1.PluginRegisterRequest, v1.PluginRegisterResponse]
 	pluginUnregister *connect.Client[v1.PluginUnregisterRequest, v1.PluginUnregisterResponse]
+	pluginList       *connect.Client[v1.PluginListRequest, v1.PluginListResponse]
 }
 
 // PluginRegister calls vinbero.v1.PluginService.PluginRegister.
@@ -95,10 +107,16 @@ func (c *pluginServiceClient) PluginUnregister(ctx context.Context, req *connect
 	return c.pluginUnregister.CallUnary(ctx, req)
 }
 
+// PluginList calls vinbero.v1.PluginService.PluginList.
+func (c *pluginServiceClient) PluginList(ctx context.Context, req *connect.Request[v1.PluginListRequest]) (*connect.Response[v1.PluginListResponse], error) {
+	return c.pluginList.CallUnary(ctx, req)
+}
+
 // PluginServiceHandler is an implementation of the vinbero.v1.PluginService service.
 type PluginServiceHandler interface {
 	PluginRegister(context.Context, *connect.Request[v1.PluginRegisterRequest]) (*connect.Response[v1.PluginRegisterResponse], error)
 	PluginUnregister(context.Context, *connect.Request[v1.PluginUnregisterRequest]) (*connect.Response[v1.PluginUnregisterResponse], error)
+	PluginList(context.Context, *connect.Request[v1.PluginListRequest]) (*connect.Response[v1.PluginListResponse], error)
 }
 
 // NewPluginServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -119,12 +137,20 @@ func NewPluginServiceHandler(svc PluginServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(pluginServicePluginUnregisterMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	pluginServicePluginListHandler := connect.NewUnaryHandler(
+		PluginServicePluginListProcedure,
+		svc.PluginList,
+		connect.WithSchema(pluginServicePluginListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.PluginService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case PluginServicePluginRegisterProcedure:
 			pluginServicePluginRegisterHandler.ServeHTTP(w, r)
 		case PluginServicePluginUnregisterProcedure:
 			pluginServicePluginUnregisterHandler.ServeHTTP(w, r)
+		case PluginServicePluginListProcedure:
+			pluginServicePluginListHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -140,4 +166,8 @@ func (UnimplementedPluginServiceHandler) PluginRegister(context.Context, *connec
 
 func (UnimplementedPluginServiceHandler) PluginUnregister(context.Context, *connect.Request[v1.PluginUnregisterRequest]) (*connect.Response[v1.PluginUnregisterResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.PluginUnregister is not implemented"))
+}
+
+func (UnimplementedPluginServiceHandler) PluginList(context.Context, *connect.Request[v1.PluginListRequest]) (*connect.Response[v1.PluginListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.PluginList is not implemented"))
 }

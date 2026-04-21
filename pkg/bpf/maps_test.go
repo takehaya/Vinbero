@@ -11,6 +11,42 @@ import (
 	"github.com/takehaya/vinbero/pkg/config"
 )
 
+// TestSharedMapPartitioning verifies that every map returned by the
+// plugin-visible getters is classified into exactly one of RO / RW. Both the
+// validator (plugin_validate_btf.go) and PluginRegister rely on this
+// invariant to audit plugin-ELF map usage.
+func TestSharedMapPartitioning(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	ro := h.mapOps.GetSharedReadOnlyMaps()
+	rw := h.mapOps.GetSharedReadWriteMaps()
+
+	for name := range ro {
+		if _, dup := rw[name]; dup {
+			t.Errorf("map %q appears in both RO and RW sets", name)
+		}
+	}
+	if len(ro) == 0 {
+		t.Error("GetSharedReadOnlyMaps returned an empty set")
+	}
+	if len(rw) == 0 {
+		t.Error("GetSharedReadWriteMaps returned an empty set")
+	}
+
+	// sanity check: the validator's expected value types should all refer to
+	// maps that exist in one of the two sets (otherwise validation targets a
+	// map plugins can no longer reference).
+	for name := range expectedMapValueTypes {
+		if _, ok := ro[name]; ok {
+			continue
+		}
+		if _, ok := rw[name]; ok {
+			continue
+		}
+		t.Errorf("expectedMapValueTypes references %q but neither RO nor RW contains it", name)
+	}
+}
+
 // TestSidAuxRoundTrip verifies that aux entry constructors and readers
 // produce consistent data for each union variant.
 func TestSidAuxRoundTrip(t *testing.T) {
