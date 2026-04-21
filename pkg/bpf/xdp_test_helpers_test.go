@@ -18,16 +18,17 @@ import (
 
 // SID Function action constants
 const (
-	actionEnd     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END)
-	actionEndX    = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X)
-	actionEndT    = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T)
-	actionEndDX2  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2)
-	actionEndDX4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX4)
-	actionEndDX6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX6)
-	actionEndDT4  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
-	actionEndDT6  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
-	actionEndDT46 = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
+	actionEnd         = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END)
+	actionEndX        = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X)
+	actionEndT        = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T)
+	actionEndDX2      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2)
+	actionEndDX4      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX4)
+	actionEndDX6      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX6)
+	actionEndDT4      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
+	actionEndDT6      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6)
+	actionEndDT46     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46)
 	actionEndDT2      = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	actionEndDT2M     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2M)
 	actionEndDX2V     = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2V)
 	actionEndB6       = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6)
 	actionEndB6Encaps = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_B6_ENCAPS)
@@ -51,35 +52,36 @@ const (
 
 // ========== Test Helper ==========
 
-// xdpTestHelper provides common test utilities for XDP program testing
+// xdpTestHelper provides common utilities for XDP program testing.
+// Accepts testing.TB so benchmarks can share the same setup surface.
 type xdpTestHelper struct {
-	t      *testing.T
+	t      testing.TB
 	objs   *BpfObjects
 	mapOps *MapOperations
 }
 
-func newXDPTestHelper(t *testing.T) *xdpTestHelper {
-	return newXDPTestHelperWithConstants(t, nil)
+func newXDPTestHelper(tb testing.TB) *xdpTestHelper {
+	return newXDPTestHelperWithConstants(tb, nil)
 }
 
 // newXDPTestHelperWithStats loads the BPF collection with enable_stats=1
 // so that stats_inc / slot_stats_inc actually update their maps during
 // BPF_PROG_TEST_RUN. Use when asserting stats or slot_stats counters.
-func newXDPTestHelperWithStats(t *testing.T) *xdpTestHelper {
-	return newXDPTestHelperWithConstants(t, map[string]any{
+func newXDPTestHelperWithStats(tb testing.TB) *xdpTestHelper {
+	return newXDPTestHelperWithConstants(tb, map[string]any{
 		"enable_stats": uint8(1),
 	})
 }
 
-func newXDPTestHelperWithConstants(t *testing.T, constants map[string]any) *xdpTestHelper {
-	t.Helper()
+func newXDPTestHelperWithConstants(tb testing.TB, constants map[string]any) *xdpTestHelper {
+	tb.Helper()
 	objs, err := ReadCollection(constants, nil)
 	if err != nil {
-		t.Fatalf("Failed to load BPF objects: %v", err)
+		tb.Fatalf("Failed to load BPF objects: %v", err)
 	}
-	t.Cleanup(func() { _ = objs.Close() })
+	tb.Cleanup(func() { _ = objs.Close() })
 	return &xdpTestHelper{
-		t:      t,
+		t:      tb,
 		objs:   objs,
 		mapOps: NewMapOperations(objs),
 	}
@@ -97,6 +99,20 @@ func (h *xdpTestHelper) run(pkt []byte) (uint32, []byte) {
 		h.t.Fatalf("Failed to run BPF program: %v", err)
 	}
 	return ret, opts.DataOut
+}
+
+// runRepeat drives BPF_PROG_TEST_RUN with Repeat=n in a single syscall.
+// Pair with b.N in benchmarks so Go divides the syscall's wall-clock by n.
+func (h *xdpTestHelper) runRepeat(pkt []byte, n uint32) {
+	h.t.Helper()
+	opts := ebpf.RunOptions{
+		Data:    pkt,
+		DataOut: make([]byte, 1500),
+		Repeat:  n,
+	}
+	if _, err := h.objs.VinberoMain.Run(&opts); err != nil {
+		h.t.Fatalf("Failed to run BPF program: %v", err)
+	}
 }
 
 func (h *xdpTestHelper) createSidFunction(prefix string, action uint8) {
@@ -296,7 +312,7 @@ func buildSimpleIPv4Packet(srcIP, dstIP net.IP) ([]byte, error) {
 	}
 	icmp := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 1234, Seq: 1,
+		Id:       1234, Seq: 1,
 	}
 
 	buf := gopacket.NewSerializeBuffer()
@@ -320,7 +336,7 @@ func buildVlanTaggedIPv4Packet(vlanID uint16, srcIP, dstIP net.IP) ([]byte, erro
 	}
 	icmp := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 1234, Seq: 1,
+		Id:       1234, Seq: 1,
 	}
 
 	buf := gopacket.NewSerializeBuffer()
@@ -439,7 +455,7 @@ func buildEncapsulatedPacket(
 		}
 		icmp := &layers.ICMPv4{
 			TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-			Id: 1234, Seq: 1,
+			Id:       1234, Seq: 1,
 		}
 		if err := gopacket.SerializeLayers(buf, opts, eth, outerIP6, srv6, innerIP4, icmp, gopacket.Payload(newTestPayload(64))); err != nil {
 			return nil, err
@@ -745,7 +761,7 @@ func (h *xdpTestHelper) createHeadendL2EntryWithMode(ifindex uint32, vlanID uint
 		Segments:    segments,
 		BdId:        bdID,
 	}
-	if err := h.mapOps.CreateHeadendL2(ifindex, vlanID, entry); err != nil {
+	if err := h.mapOps.CreateHeadendL2(ifindex, vlanID, entry, [ESILen]byte{}); err != nil {
 		h.t.Fatalf("Failed to create headend L2 entry: %v", err)
 	}
 	h.t.Cleanup(func() {
@@ -895,7 +911,7 @@ func buildEncapsulatedPacketNoSRH(
 		}
 		icmp := &layers.ICMPv4{
 			TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-			Id: 1234, Seq: 1,
+			Id:       1234, Seq: 1,
 		}
 		if err := gopacket.SerializeLayers(buf, opts, eth, outerIP6, innerIP4, icmp, gopacket.Payload(newTestPayload(64))); err != nil {
 			return nil, err
@@ -955,8 +971,8 @@ func buildSRv6PacketWithInnerIPv4(srcIP, dstIP net.IP, segments []net.IP, segmen
 
 	numSegments := len(segments)
 	srv6 := &packet.Srv6Layer{
-		NextHeader: 4, // IPPROTO_IPIP
-		HdrExtLen:  uint8(numSegments * 2),
+		NextHeader:  4, // IPPROTO_IPIP
+		HdrExtLen:   uint8(numSegments * 2),
 		RoutingType: 4, SegmentsLeft: segmentsLeft,
 		LastEntry: uint8(numSegments - 1), Segments: segmentsToNetipAddr(segments),
 	}
@@ -965,11 +981,11 @@ func buildSRv6PacketWithInnerIPv4(srcIP, dstIP net.IP, segments []net.IP, segmen
 	innerIP := &layers.IPv4{
 		Version: 4, IHL: 5, TTL: 64,
 		Protocol: layers.IPProtocolICMPv4,
-		SrcIP: innerSrc, DstIP: innerDst,
+		SrcIP:    innerSrc, DstIP: innerDst,
 	}
 	innerICMP := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 5678, Seq: 1,
+		Id:       5678, Seq: 1,
 	}
 
 	buf := gopacket.NewSerializeBuffer()
@@ -982,22 +998,22 @@ func buildSRv6PacketWithInnerIPv4(srcIP, dstIP net.IP, segments []net.IP, segmen
 
 // GTP-U action/mode constants
 const (
-	actionEndMGTP4E = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E)
+	actionEndMGTP4E   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E)
 	actionEndMGTP6D   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D)
 	actionEndMGTP6DDI = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D_DI)
 	actionEndMGTP6E   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E)
-	modeHMGTP4D     = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D)
+	modeHMGTP4D       = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D)
 )
 
 // createHeadendEntryGTP creates a headend v4 entry with H.M.GTP4.D mode and args_offset
 func (h *xdpTestHelper) createHeadendEntryGTP(prefix string, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
 	h.t.Helper()
 	entry := &HeadendEntry{
-		Mode:          modeHMGTP4D,
-		NumSegments:   numSegments,
-		SrcAddr:       srcAddr,
-		Segments:      segments,
-		ArgsOffset: argsOffset,
+		Mode:        modeHMGTP4D,
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+		ArgsOffset:  argsOffset,
 	}
 	if err := h.mapOps.CreateHeadendV4(prefix, entry); err != nil {
 		h.t.Fatalf("Failed to create GTP headend entry: %v", err)
@@ -1029,7 +1045,7 @@ func buildGTPUv4Packet(outerSrc, outerDst net.IP, teid uint32, qfi uint8, innerS
 	}
 	innerICMP := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 5678, Seq: 1,
+		Id:       5678, Seq: 1,
 	}
 
 	gtp := &packet.GTPULayer{TEID: teid, QFI: qfi}
@@ -1085,7 +1101,7 @@ func buildSRv6WithGTPUPayload(outerSrc net.IP, sid net.IP, nextSeg net.IP, teid 
 	}
 	innerICMP := &layers.ICMPv4{
 		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-		Id: 5678, Seq: 1,
+		Id:       5678, Seq: 1,
 	}
 	innerBuf := gopacket.NewSerializeBuffer()
 	innerOpts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
@@ -1114,11 +1130,11 @@ func buildSRv6WithGTPUPayload(outerSrc net.IP, sid net.IP, nextSeg net.IP, teid 
 	numSegments := 2
 	srhLen := 8 + numSegments*16
 	srh := make([]byte, srhLen)
-	srh[0] = 17 // nexthdr = UDP
+	srh[0] = 17                     // nexthdr = UDP
 	srh[1] = byte((srhLen - 8) / 8) // hdrlen
-	srh[2] = 4  // routing type = SRH
-	srh[3] = 1  // segments_left = 1
-	srh[4] = byte(numSegments - 1) // last_entry
+	srh[2] = 4                      // routing type = SRH
+	srh[3] = 1                      // segments_left = 1
+	srh[4] = byte(numSegments - 1)  // last_entry
 	// segments: [0]=nextSeg, [1]=sid (reversed order per RFC)
 	copy(srh[8:24], nextSeg.To16())
 	copy(srh[24:40], sid.To16())

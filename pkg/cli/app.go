@@ -49,6 +49,7 @@ func NewApp() *cli.App {
 			headendV6Command(),
 			headendL2Command(),
 			bdPeerCommand(),
+			esCommand(),
 			bridgeCommand(),
 			vrfCommand(),
 			fdbCommand(),

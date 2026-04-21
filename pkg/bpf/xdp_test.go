@@ -712,6 +712,79 @@ func TestXDPProgEndDT2(t *testing.T) {
 	}
 }
 
+// TestXDPProgEndDT2M verifies that SRV6_LOCAL_ACTION_END_DT2M (value 23, RFC 8986
+// §4.12) dispatches through the new tail-call slot and reaches DT2-equivalent
+// FDB-based forwarding.
+func TestXDPProgEndDT2M(t *testing.T) {
+	tests := []struct {
+		name         string
+		bdID         uint16
+		triggerSID   string
+		outerSrcIP   string
+		outerDstIP   string
+		segments     []string
+		segmentsLeft uint8
+		innerVlanID  uint16
+		innerSrcIP   string
+		innerDstIP   string
+		isIPv4Inner  bool
+		fdbBdID      uint16
+		fdbMac       net.HardwareAddr
+		fdbOif       uint32
+		setupFDB     bool
+		expectAction uint32
+	}{
+		{
+			"End.DT2M known unicast (redirect via FDB)",
+			100, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10",
+			[]string{"fd00:1:100::10"}, 0,
+			100, "10.0.0.1", "192.0.2.100", true,
+			100, net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x02}, 1, true,
+			XDP_REDIRECT,
+		},
+		{
+			"End.DT2M unknown unicast (pass to kernel without bridge)",
+			100, "fd00:1:100::10/128", "fd00:1:1::1", "fd00:1:100::10",
+			[]string{"fd00:1:100::10"}, 0,
+			100, "10.0.0.1", "192.0.2.100", true,
+			0, nil, 0, false,
+			XDP_PASS,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionWithBD(tt.triggerSID, actionEndDT2M, tt.bdID)
+
+			if tt.setupFDB {
+				h.createFdbEntry(tt.fdbBdID, tt.fdbMac, tt.fdbOif)
+			}
+
+			segments := make([]net.IP, len(tt.segments))
+			for i, s := range tt.segments {
+				segments[i] = net.ParseIP(s)
+			}
+
+			pkt, err := buildL2EncapsulatedPacket(
+				net.ParseIP(tt.outerSrcIP), net.ParseIP(tt.outerDstIP),
+				segments, tt.segmentsLeft,
+				tt.innerVlanID,
+				net.ParseIP(tt.innerSrcIP), net.ParseIP(tt.innerDstIP),
+				tt.isIPv4Inner,
+			)
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, _ := h.run(pkt)
+			if ret != tt.expectAction {
+				t.Errorf("Expected action %d, got %d", tt.expectAction, ret)
+			}
+		})
+	}
+}
+
 func TestXDPProgHeadendL2MacLearning(t *testing.T) {
 	h := newXDPTestHelper(t)
 
@@ -858,7 +931,7 @@ func TestHeadendL2MapOperations(t *testing.T) {
 	}
 
 	// Create with (ifindex=1, vlan=100)
-	if err := h.mapOps.CreateHeadendL2(1, 100, entry); err != nil {
+	if err := h.mapOps.CreateHeadendL2(1, 100, entry, [ESILen]byte{}); err != nil {
 		t.Fatalf("Create (1, 100) failed: %v", err)
 	}
 
@@ -874,7 +947,7 @@ func TestHeadendL2MapOperations(t *testing.T) {
 	// Create with (ifindex=2, vlan=100) → separate entry (same VLAN, different port)
 	entry2 := *entry
 	entry2.BdId = 200
-	if err := h.mapOps.CreateHeadendL2(2, 100, &entry2); err != nil {
+	if err := h.mapOps.CreateHeadendL2(2, 100, &entry2, [ESILen]byte{}); err != nil {
 		t.Fatalf("Create (2, 100) failed: %v", err)
 	}
 

@@ -103,6 +103,42 @@ struct {
     __uint(max_entries, 1024);
 } bd_peer_reverse_map SEC(".maps");
 
+// RFC 7432 Ethernet Segment master table.
+// Populated by userspace via EthernetSegmentService.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct esi_key);
+    __type(value, struct esi_entry);
+    __uint(max_entries, 256);
+} esi_map SEC(".maps");
+
+// Peer ESI side table: (bd_id, index) → ESI. Paired with bd_peer_map.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct bd_peer_l2_ext_key);
+    __type(value, struct bd_peer_l2_ext_val);
+    __uint(max_entries, 1024);
+} bd_peer_l2_ext_map SEC(".maps");
+
+// Local AC source ESI side table: (ifindex, vlan_id) → ESI. Paired with headend_l2_map.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct headend_l2_key);
+    __type(value, struct headend_l2_ext_val);
+    __uint(max_entries, 1024);
+} headend_l2_ext_map SEC(".maps");
+
+// BD → local ES, materialised by userspace from HeadendL2.esi configuration.
+// The DT2M RX DF check uses this to find "which ES does this BD attach to
+// locally?" without iterating esi_map in BPF. Key is __u32-widened bd_id
+// to match the rest of vinbero's BPF map-key convention.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32 /* bd_id */);
+    __type(value, struct bd_local_esi_val);
+    __uint(max_entries, 512);
+} bd_local_esi_map SEC(".maps");
+
 // Per-CPU scratch buffer for mid-packet editing (e.g., End.M.GTP6.D header save/restore).
 // Used to work around BPF stack limit (512 bytes) by storing temporary data in map memory.
 // Max size covers ETH(14) + IPv6(40) + SRH(8 + MAX_SEGMENTS*16 = 168) = 222 bytes.

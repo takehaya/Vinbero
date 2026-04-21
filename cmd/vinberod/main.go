@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/logger"
 	"github.com/takehaya/vinbero/pkg/server"
@@ -43,6 +44,10 @@ func newApp() *cli.App {
 				Aliases: []string{"c"},
 				Value:   "/etc/vinbero/vinbero.yaml",
 				Usage:   "config file path",
+			},
+			&cli.BoolFlag{
+				Name:  "bgp-enabled",
+				Usage: "Enable BGP EVPN control plane",
 			},
 		},
 		Action:                 run,
@@ -99,6 +104,12 @@ func run(cliCtx *cli.Context) error {
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), lg)
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
+	}
+
+	bgpClient := bgp.NewClient(lg, bgp.WithEnabled(cliCtx.Bool("bgp-enabled")))
+	defer bgpClient.Stop()
+	if err := bgpClient.Start(ctx); err != nil {
+		return fmt.Errorf("start BGP client: %w", err)
 	}
 
 	lg.Info("Vinbero started successfully")
