@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package vinbero.v1;
 
+import "google/protobuf/timestamp.proto";
+
 option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 
 // PluginService manages dynamic BPF plugin registration into tail call PROG_ARRAY maps.
@@ -10,6 +12,19 @@ option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 service PluginService {
   rpc PluginRegister(PluginRegisterRequest) returns (PluginRegisterResponse);
   rpc PluginUnregister(PluginUnregisterRequest) returns (PluginUnregisterResponse);
+  rpc PluginList(PluginListRequest) returns (PluginListResponse);
+
+  // Allocate a fresh aux index, write the given payload, and return the
+  // index. Owner tag is derived from (map_type, slot) so later Update /
+  // Get / Free calls must come through the same (map_type, slot) pair.
+  rpc PluginAuxAlloc(PluginAuxAllocRequest) returns (PluginAuxAllocResponse);
+  // Overwrite the payload at an index already owned by (map_type, slot).
+  rpc PluginAuxUpdate(PluginAuxUpdateRequest) returns (PluginAuxUpdateResponse);
+  // Read the on-wire bytes stored at an index. Caller decodes via its own
+  // BTF / Go struct layout; the server returns raw bytes + the owner tag.
+  rpc PluginAuxGet(PluginAuxGetRequest) returns (PluginAuxGetResponse);
+  // Zero the entry and release the index back to the allocator.
+  rpc PluginAuxFree(PluginAuxFreeRequest) returns (PluginAuxFreeResponse);
 }
 
 message PluginRegisterRequest {
@@ -27,3 +42,64 @@ message PluginUnregisterRequest {
 }
 
 message PluginUnregisterResponse {}
+
+message PluginListRequest {
+  string map_type_filter = 1; // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6"
+}
+
+message PluginInfo {
+  string map_type = 1;
+  uint32 slot = 2;
+  string program = 3;
+  bool has_aux_type = 4;
+  string aux_type_name = 5;
+  repeated string owned_map_names = 6; // Maps the plugin ELF declared that were not replaced by vinbero-shared ones
+  repeated string shared_rw_names = 7;
+  repeated string shared_ro_names = 8;
+  google.protobuf.Timestamp registered_at = 9;
+}
+
+message PluginListResponse {
+  repeated PluginInfo plugins = 1;
+}
+
+message PluginAuxAllocRequest {
+  string map_type = 1;
+  uint32 slot = 2;
+  oneof payload {
+    string json = 3; // Encoded by the server via the plugin's BTF-declared <program>_aux type.
+    bytes raw = 4; // Raw bytes, <= SidAuxPluginRawMax (196).
+  }
+}
+message PluginAuxAllocResponse {
+  uint32 index = 1;
+}
+
+message PluginAuxUpdateRequest {
+  uint32 index = 1;
+  string map_type = 2;
+  uint32 slot = 3;
+  oneof payload {
+    string json = 4;
+    bytes raw = 5;
+  }
+}
+message PluginAuxUpdateResponse {}
+
+message PluginAuxGetRequest {
+  uint32 index = 1;
+  string map_type = 2;
+  uint32 slot = 3;
+}
+message PluginAuxGetResponse {
+  bytes raw = 1; // Exactly SidAuxPluginRawMax bytes.
+  string owner = 2; // Owner tag registered at Alloc time.
+  bool has_aux_type = 3; // Whether the plugin registered a BTF <program>_aux struct.
+}
+
+message PluginAuxFreeRequest {
+  uint32 index = 1;
+  string map_type = 2;
+  uint32 slot = 3;
+}
+message PluginAuxFreeResponse {}

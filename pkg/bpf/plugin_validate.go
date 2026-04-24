@@ -1,12 +1,14 @@
 package bpf
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/btf"
 )
 
 // SymTailcallEpilogue is the BPF subprogram every plugin must call before
@@ -152,7 +154,39 @@ func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string) (*ebpf.
 	if err := validatePluginMapTypes(spec); err != nil {
 		return nil, err
 	}
+	if err := validatePluginAuxType(spec, program); err != nil {
+		return nil, err
+	}
 	return target, nil
+}
+
+// validatePluginAuxType rejects plugin aux structs that would not fit in the
+// plugin_raw variant of sid_aux_entry. The anchor is VINBERO_PLUGIN_AUX_TYPE,
+// which emits a `<program>_aux` BTF struct; plugins without the anchor pass
+// through untouched (they are limited to the plugin_aux_raw hex path).
+func validatePluginAuxType(spec *ebpf.CollectionSpec, program string) error {
+	if spec.Types == nil {
+		return nil
+	}
+	var t *btf.Struct
+	if err := spec.Types.TypeByName(program+"_aux", &t); err != nil {
+		if errors.Is(err, btf.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to look up %s_aux BTF type: %w", program, err)
+	}
+	size, err := btf.Sizeof(t)
+	if err != nil {
+		return fmt.Errorf("cannot determine size of %s_aux: %w", program, err)
+	}
+	if size > SidAuxPluginRawMax {
+		return fmt.Errorf(
+			"plugin aux type %s_aux size %d exceeds SidAuxPluginRawMax (%d); "+
+				"reduce struct size or split state across multiple SID entries",
+			program, size, SidAuxPluginRawMax,
+		)
+	}
+	return nil
 }
 
 // isBpfTailCall reports whether ins is a BPF_CALL to the tail_call helper.

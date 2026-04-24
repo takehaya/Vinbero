@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
+	"sort"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type pluginSlotKey struct {
@@ -23,8 +27,26 @@ type pluginSlotKey struct {
 // declare a <program>_aux struct — those plugins can still be driven by
 // plugin_aux_raw (hex), they just lose the JSON path.
 type pluginEntry struct {
-	program string
-	auxType *btf.Struct
+	program       string
+	auxType       *btf.Struct
+	ownedMapNames []string
+	sharedRWNames []string
+	sharedRONames []string
+	registeredAt  time.Time
+}
+
+// PluginEntryInfo is a read-only snapshot of a registered plugin's metadata.
+// Returned by SnapshotEntries for PluginList RPC and logging.
+type PluginEntryInfo struct {
+	MapType       string
+	Slot          uint32
+	Program       string
+	HasAuxType    bool
+	AuxTypeName   string
+	OwnedMapNames []string
+	SharedRWNames []string
+	SharedRONames []string
+	RegisteredAt  time.Time
 }
 
 type PluginServer struct {
@@ -70,6 +92,40 @@ func (s *PluginServer) AuxType(mapType string, slot uint32) *btf.Struct {
 	return entry.auxType
 }
 
+// SnapshotEntries returns a deterministic snapshot of all registered plugins.
+// Optional filter restricts results to a single map_type ("" means all).
+func (s *PluginServer) SnapshotEntries(mapTypeFilter string) []PluginEntryInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]PluginEntryInfo, 0, len(s.registry))
+	for k, e := range s.registry {
+		if mapTypeFilter != "" && k.MapType != mapTypeFilter {
+			continue
+		}
+		info := PluginEntryInfo{
+			MapType:       k.MapType,
+			Slot:          k.Slot,
+			Program:       e.program,
+			HasAuxType:    e.auxType != nil,
+			OwnedMapNames: append([]string(nil), e.ownedMapNames...),
+			SharedRWNames: append([]string(nil), e.sharedRWNames...),
+			SharedRONames: append([]string(nil), e.sharedRONames...),
+			RegisteredAt:  e.registeredAt,
+		}
+		if e.auxType != nil {
+			info.AuxTypeName = e.auxType.Name
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].MapType != out[j].MapType {
+			return out[i].MapType < out[j].MapType
+		}
+		return out[i].Slot < out[j].Slot
+	})
+	return out
+}
+
 func (s *PluginServer) PluginRegister(
 	ctx context.Context,
 	req *connect.Request[v1.PluginRegisterRequest],
@@ -110,17 +166,43 @@ func (s *PluginServer) PluginRegister(
 	// Build map replacements: for maps that exist in both the plugin spec
 	// and vinbero's shared maps. Update the spec's MaxEntries to match the
 	// runtime map (plugin ELF has compile-time defaults, but vinbero config
-	// may override them at runtime).
-	sharedMaps := s.mapOps.GetSharedMaps()
+	// may override them at runtime). Classify each replacement as RO or RW
+	// so PluginList / audit can show intent; any map declared by the plugin
+	// ELF that is not a shared vinbero map is recorded as plugin-owned.
+	sharedRO := s.mapOps.GetSharedReadOnlyMaps()
+	sharedRW := s.mapOps.GetSharedReadWriteMaps()
 	replacements := make(map[string]*ebpf.Map)
-	for name, m := range sharedMaps {
-		if ms, exists := spec.Maps[name]; exists {
+	var usedRO, usedRW, ownedMaps []string
+	for name, ms := range spec.Maps {
+		if m, ok := sharedRO[name]; ok {
 			if info, err := m.Info(); err == nil {
 				ms.MaxEntries = info.MaxEntries
 			}
 			replacements[name] = m
+			usedRO = append(usedRO, name)
+			continue
 		}
+		if m, ok := sharedRW[name]; ok {
+			if info, err := m.Info(); err == nil {
+				ms.MaxEntries = info.MaxEntries
+			}
+			replacements[name] = m
+			usedRW = append(usedRW, name)
+			continue
+		}
+		ownedMaps = append(ownedMaps, name)
 	}
+	sort.Strings(usedRO)
+	sort.Strings(usedRW)
+	sort.Strings(ownedMaps)
+	slog.InfoContext(ctx, "plugin map linkage",
+		"program", msg.Program,
+		"map_type", msg.MapType,
+		"slot", msg.Index,
+		"shared_ro", usedRO,
+		"shared_rw", usedRW,
+		"owned_maps", ownedMaps,
+	)
 
 	// Load the collection with shared map references from vinbero.
 	// This allows the plugin to access tailcall_ctx_map, stats_map, etc.
@@ -159,8 +241,12 @@ func (s *PluginServer) PluginRegister(
 
 	s.mu.Lock()
 	s.registry[pluginSlotKey{MapType: msg.MapType, Slot: msg.Index}] = &pluginEntry{
-		program: msg.Program,
-		auxType: auxType,
+		program:       msg.Program,
+		auxType:       auxType,
+		ownedMapNames: ownedMaps,
+		sharedRWNames: usedRW,
+		sharedRONames: usedRO,
+		registeredAt:  time.Now(),
 	}
 	s.mu.Unlock()
 
@@ -182,4 +268,26 @@ func (s *PluginServer) PluginUnregister(
 	s.mu.Unlock()
 
 	return connect.NewResponse(&v1.PluginUnregisterResponse{}), nil
+}
+
+func (s *PluginServer) PluginList(
+	ctx context.Context,
+	req *connect.Request[v1.PluginListRequest],
+) (*connect.Response[v1.PluginListResponse], error) {
+	entries := s.SnapshotEntries(req.Msg.MapTypeFilter)
+	resp := &v1.PluginListResponse{Plugins: make([]*v1.PluginInfo, 0, len(entries))}
+	for _, e := range entries {
+		resp.Plugins = append(resp.Plugins, &v1.PluginInfo{
+			MapType:       e.MapType,
+			Slot:          e.Slot,
+			Program:       e.Program,
+			HasAuxType:    e.HasAuxType,
+			AuxTypeName:   e.AuxTypeName,
+			OwnedMapNames: e.OwnedMapNames,
+			SharedRwNames: e.SharedRWNames,
+			SharedRoNames: e.SharedRONames,
+			RegisteredAt:  timestamppb.New(e.RegisteredAt),
+		})
+	}
+	return connect.NewResponse(resp), nil
 }
