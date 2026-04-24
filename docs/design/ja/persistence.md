@@ -88,9 +88,26 @@ sudo systemctl start vinberod
 
 pin 有効時は特に重要なメカニズム (`pkg/bpf/maps.go::RecoverAuxIndices`):
 
-起動直後に `sid_function_map` を iterate して、`aux_index != 0` のエントリが参照している index を allocator が使用中としてマーク。gap 部分を free list に戻します。pin された map を reuse したとき、allocator がすでに使われている index を二重に払い出さないためのガード。
+起動直後に `sid_function_map` を iterate して、`aux_index != 0` のエントリが参照している index を allocator が使用中としてマーク。gap 部分を free list に戻します。pin された map を reuse したとき、allocator がすでに使われている index を二重に払い出さないためのガード。各 index には同時に owner タグ (`builtin` か `plugin:<mapType>:<slot>`) が `entry.Action >= EndpointPluginBase` の判定で再構築されます。
 
 pin 無効時は map が空なので recovery しても何も起きず、結果的に allocator は fresh start します (= 従来挙動)。
+
+#### 独立 PluginAux は復元対象外
+
+`vbctl plugin aux alloc` で払い出した index のうち、まだ `sid_function_map` に紐づいていない「独立 aux」は **`RecoverAuxIndices` の探索経路に乗らない** (sid_function_map iterate でしか owner が再構築できないため)。`pin_maps: true` で `sid_aux_map` が pin されていても、index 使用状況を daemon 側の in-memory allocator が忘れてしまうので、実質的に daemon 再起動で消失します。
+
+運用上の影響:
+
+- `PluginAuxAlloc → SidFunctionCreate(--plugin-aux-index)` の順で使う場合、SID create までに daemon 再起動が挟まると index が引き継がれない
+- 複数 SID で同じ index を共有していた場合、再起動後は allocator が同じ index を他用途に払い出してしまう可能性がある
+
+回避策は以下のいずれか:
+
+1. `vbctl plugin aux alloc` 直後に `vbctl sid create --plugin-aux-index` まで 1 アトミックに走らせる (独立 aux を長期間寝かせない)
+2. 独立 aux は短命とし、長寿命な aux は `--plugin-aux-json` で SID と一体化させる
+3. 外部コントローラから起動時に `plugin aux alloc` + `sid create` を再投入する
+
+恒久的な解決 (owner map 自体を pin + PluginAuxAlloc で即 bpffs に反映) は Phase 2 の BPF pinning 拡張として未実装。
 
 ## XDP program の attach
 
