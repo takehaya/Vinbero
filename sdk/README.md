@@ -90,22 +90,64 @@ if (aux) {
 }
 ```
 
-On the CLI side, write the aux as JSON — the server uses the plugin's
-BTF to encode it into the byte layout the plugin expects:
+On the CLI side there are three ways to attach aux data to a SID, and
+they are mutually exclusive per SID:
 
 ```
+# A) inline JSON — server encodes via plugin BTF, aux lives with the SID
 vinbero sid create --action 32 \
   --plugin-aux-json '{"limit": 100,
                       "match_mac": "aa:bb:cc:dd:ee:ff",
                       "source": "fc00:1::/64"}'
+
+# B) raw bytes — bypass BTF, caller pre-encodes
+vinbero sid create --action 32 --plugin-aux-raw <hex>
+
+# C) reference a standalone aux allocated separately
+IDX=$(vinbero plugin aux alloc --map-type endpoint --slot 32 \
+        --json '{"limit":200}' | jq -r .index)
+vinbero sid create --action 32 --plugin-aux-index "$IDX"
 ```
 
 Well-known SDK typedefs (`vinbero_mac_t`, `vinbero_ipv4_t`,
 `vinbero_ipv6_t`, `vinbero_ipv4_prefix_t`, `vinbero_ipv6_prefix_t`)
 get parsed from their natural string forms. Plain arrays and integers
-accept hex or decimal strings / JSON numbers. The raw hex escape
-(`--plugin-aux-hex`) is still available for callers that prefer to
-encode the bytes themselves.
+accept hex or decimal strings / JSON numbers.
+
+### Standalone aux lifecycle
+
+The `vinbero plugin aux` subcommands manage aux entries independently of
+SID creation. Each entry carries an owner tag (`plugin:<map_type>:<slot>`)
+so only the slot that allocated it can touch it:
+
+```
+vinbero plugin aux alloc  --map-type endpoint --slot 32 --json '{...}'
+vinbero plugin aux update --map-type endpoint --slot 32 --index 1 --json '{...}'
+vinbero plugin aux get    --map-type endpoint --slot 32 --index 1
+vinbero plugin aux free   --map-type endpoint --slot 32 --index 1
+```
+
+Standalone aux entries are **not persisted across daemon restarts** —
+see [`docs/design/ja/persistence.md`](../docs/design/ja/persistence.md)
+for details.
+
+### Go client wrapper
+
+For Go controllers there's a small typed wrapper under
+`sdk/go/plugin`:
+
+```go
+import "github.com/takehaya/vinbero/sdk/go/plugin"
+
+aux := plugin.NewPluginAux[MyAuxStruct](client, "endpoint", 32)
+idx, _ := aux.Alloc(ctx, MyAuxStruct{Limit: 100})
+v, _   := aux.Get(ctx, idx)
+_       = aux.Free(ctx, idx)
+```
+
+`MyAuxStruct` must be a fixed-size, little-endian, C-struct compatible
+layout (it is decoded from the on-wire raw bytes via
+`encoding/binary`).
 
 ## Directories
 
@@ -121,6 +163,12 @@ encode the bytes themselves.
 
 ## Observability
 
+- Registered plugins (program name, aux type, map classification):
+  ```
+  vinbero plugin list                  # MAP_TYPE / SLOT / PROGRAM / AUX / REGISTERED
+  vinbero plugin list --type endpoint  # filter by PROG_ARRAY
+  vinbero plugin list -v               # expand owned / shared RO / shared RW maps
+  ```
 - Per-action global counters (RX / PASS / DROP / REDIRECT / ABORTED):
   ```
   vinbero stats show

@@ -1,6 +1,6 @@
-# プラグイン SDK 実装記録 (Phase 0 + 1a + 1b + 1e)
+# プラグイン SDK 実装記録 (Phase 0 + 1a + 1b + 1c + 1d + 1e)
 
-Vinbero の XDP プラグイン SDK を段階的に強化した際の実装記録。`docs/plan/plugin-sdk-enhancement.md` で策定したプランのうち、今回は Phase 0 / 1a / 1b と、path coverage を構造的に保証する追加ステップ Phase 1e を実施した。
+Vinbero の XDP プラグイン SDK を段階的に強化した際の実装記録。`docs/plan/plugin-sdk-enhancement.md` で策定したプランに沿って、Phase 0 / 1a / 1b / 1e まで実施したのち、残タスクだった Phase 1c (plugin-visible map の分類と可視化) と Phase 1d (typed PluginAux ライフサイクル) を実装した (PR #23)。
 
 開発者向けの最終的な使い方ドキュメントは [`docs/design/ja/plugin-sdk.md`](../design/ja/plugin-sdk.md) を参照。
 
@@ -304,8 +304,8 @@ int tailcall_epilogue(struct xdp_md *ctx, int action);
 
 ## 保留 (次回 PR で再検討)
 
-- **Phase 1c**: プラグイン所有マップの lifecycle 管理。現状 `pkg/server/plugin.go` の `coll.Close()` で FD を閉じるため、プラグイン ELF 内で宣言した `acl_deny_map` などを userspace から書き換える経路がない。`pluginRegistry` で Collection を追跡し `Unregister` 時にクローズする案が有力。
-- **Phase 1d**: Plugin Aux API。`sid_aux_entry` の union に `__u8 plugin_raw[200]` variant を追加して、`PluginAux[T]` ジェネリック Go ラッパーから型安全にアクセスできるようにする案。Phase 1c で userspace からプラグイン固有マップを叩く経路が整った時点で、Go SDK パッケージ (`sdk/go/plugin/`) の復元と合わせて検討する。
+- **Phase 2 — asm-level RO write enforce**: Phase 1c で共有マップを RO / RW に分類して audit ログを出すところまでは入ったが、RO マップへの write 命令は reject していない。cilium/ebpf の `asm.Instructions` を走査して `BPF_ST*` / `BPF_STX*` のターゲット map を特定し、RO set に含まれていれば load 前に reject する CFG analyzer を入れる。概ね +300〜500 LOC 規模。
+- **Phase 2 — BPF pinning / 独立 PluginAux の永続化**: 今回追加した `PluginAuxAlloc` は SID 関数に紐づかない「独立 aux」を生むが、`sid_function_map` を iterate して index 使用状況を復元している `RecoverAuxIndices` の仕組みでは拾えず、daemon 再起動で消失する。`pin_maps.enabled: true` の拡張として owner map 自体も pin する設計が要るが、schema migration の扱いも含めて別 PR 扱い。
 - **SDK 配布体験の改善**: 現状 `sudo make install-sdk` は vinbero リポジトリを clone した状態でないと実行できず、完全に外部のプラグイン作者には体験が重い。改善案:
   - **案 A (推奨): SDK tarball のリリース**. goreleaser に `vinbero-sdk-vX.Y.tar.gz` を追加。中身は `sdk/c/include/vinbero/*.h` + 必要な `src/core/*.h` + `Makefile.plugin`。ユーザーは `curl -L .../vinbero-sdk.tar.gz \| sudo tar xz -C /` で完結。既存 `install-sdk` のロジックを再利用して `sdk-archive` ターゲット追加する程度の工数で、リリースごとに SDK バージョンが固定できるのでバージョニングも綺麗
   - **案 B: 単一ヘッダ化**. `quom`/`amalgamate` で公開ヘッダ一式を `vinbero.h` 1 ファイルにマージ。`curl -o vinbero.h ...` 1 発で済むが、デバッグ時の line 番号と元 source の乖離が発生
@@ -315,10 +315,196 @@ int tailcall_epilogue(struct xdp_md *ctx, int action);
 
 詳細な背景・代替案の比較は `docs/plan/plugin-sdk-enhancement.md` に ADR として残してある。
 
-### 既に撤去されたもの
+### 既に撤去されたもの / 部分復活したもの
 
-- **Go SDK パッケージ (`sdk/go/plugin/`)**: Phase 1b で初期実装したが、リポジトリ内 import ゼロ + CLI と機能完全重複のため YAGNI 判断で削除 (ADR-6)。復元条件は Phase 1c 実装時。
+- **Go SDK パッケージ (`sdk/go/plugin/`)**: Phase 1b で初期実装したが、リポジトリ内 import ゼロ + CLI と機能完全重複のため YAGNI 判断で削除 (ADR-6)。Phase 1d で `PluginAux[T]` generic wrapper の用例が具体化したため、**`aux.go` + `doc.go` のみ部分復活**。`Map[K, V]` などは引き続き保留。
 - **SDK 配下への examples 集約**: サンプルは `sdk/examples/plugin-counter/` (E2E デモ) と `sdk/examples/simple-acl/` (ビルド確認) に集約 (ADR-7)。
+
+---
+
+## Phase 1c: 共有マップの RO/RW 分類 + PluginList
+
+**目的**: プラグインから参照される共有マップを「read-only な制御状態」と「read-write な統計/scratch」に分類して audit ログで可視化し、将来の asm-level enforce (Phase 2) の土台を作る。合わせて登録済プラグインの一覧を RPC / CLI から引けるようにする。
+
+### 共有マップの分類
+
+`MapOperations.GetSharedMaps()` を廃止し、以下の 2 getter に分離した (`pkg/bpf/maps.go`):
+
+- `GetSharedReadOnlyMaps()` (14 本): `sid_function_map`, `sid_aux_map`, `headend_{v4,v6,l2}_map`, `fdb_map`, `bd_peer_map`, `bd_peer_reverse_map`, `esi_map`, `bd_peer_l2_ext_map`, `headend_l2_ext_map`, `bd_local_esi_map`, `dx2v_map`, `tailcall_ctx_map`
+- `GetSharedReadWriteMaps()` (8 本): `scratch_map`, `stats_map`, `slot_stats_endpoint/v4/v6`, `sid_endpoint_progs`, `headend_v4_progs`, `headend_v6_progs`
+
+`slot_stats_*` は「プラグインから直接書かない (epilogue 経由)」という運用慣習ではあるが、BPF verifier 視点では write 可能なので RW 側に分類。PROG_ARRAY 3 本はプラグインから `bpf_tail_call` の対象になるため RW 扱い。
+
+`TestSharedMapPartitioning` (`pkg/bpf/maps_test.go`) が「RO と RW が disjoint + 既知マップ全てを網羅」をハードコード辞書で assert する。新マップ追加時に片側に入れ忘れると落ちる。
+
+### プラグイン登録時の分類ログと記録
+
+`PluginServer.PluginRegister` (`pkg/server/plugin.go`) を書き直し、プラグイン ELF が宣言した各 `spec.Maps` を
+
+1. RO にマッチ → `replacements[name] = sharedRO[name]` に入れ、`usedRO` に追加
+2. RW にマッチ → 同様に `usedRW` へ
+3. どちらにも該当しない → plugin-owned map として ELF 内定義で新規作成、`ownedMaps` へ
+
+と振り分ける。結果は `slog.InfoContext(ctx, "plugin map linkage", …)` で audit ログに構造化出力し、同時に `pluginEntry` に保存する:
+
+```go
+type pluginEntry struct {
+    program       string
+    auxType       *btf.Struct
+    ownedMapNames []string
+    sharedRWNames []string
+    sharedRONames []string
+    registeredAt  time.Time
+}
+```
+
+### `PluginList` RPC + `vbctl plugin list`
+
+`proto/vinbero/v1/plugin.proto` に `PluginList` RPC を追加:
+
+```proto
+rpc PluginList(PluginListRequest) returns (PluginListResponse);
+
+message PluginListRequest { string map_type_filter = 1; }
+message PluginInfo {
+    string map_type = 1;
+    uint32 slot = 2;
+    string program = 3;
+    bool has_aux_type = 4;
+    string aux_type_name = 5;
+    repeated string owned_map_names = 6;
+    repeated string shared_rw_names = 7;
+    repeated string shared_ro_names = 8;
+    google.protobuf.Timestamp registered_at = 9;
+}
+message PluginListResponse { repeated PluginInfo plugins = 1; }
+```
+
+サーバ側は `PluginServer.SnapshotEntries(mapTypeFilter)` を追加、`map_type / slot` でソートした `[]PluginEntryInfo` を返す。CLI (`pkg/cli/cmd_plugin.go`) は `vbctl plugin list [--type X] [-v]`、verbose 時に owned / shared RO / RW の各リストを展開表示する。
+
+### 非スコープ
+
+- RO マップへの write 命令の asm-level 拒否: Phase 2 送り。現状は audit ログ止まりで、プラグイン作者が誤って write してもロード自体は通る (kernel verifier が read-only bind していない限り)。
+- `slot_stats_*` の書き込み許可を「epilogue 経由のみ」に絞る enforce: 同上。
+
+---
+
+## Phase 1d: Typed PluginAux ライフサイクル
+
+**目的**: SID 関数の create / delete サイクルから独立に、プラグイン作者が自分の aux エントリを alloc / update / get / free できるようにする。複数プラグインと builtin が同じ `sid_aux_map` を共有するので、誤って他人の aux を書き換える事故を owner タグで防ぐ。
+
+### Owner 付き indexAllocator
+
+既存の `indexAllocator.Alloc / Free / RecoverUsed` を全削除し、以下の owner 必須 API に置換 (`pkg/bpf/maps.go`):
+
+```go
+const AuxOwnerBuiltin = "builtin"
+func AuxOwnerPluginTag(mapType string, slot uint32) string {
+    return fmt.Sprintf("plugin:%s:%d", mapType, slot)
+}
+var ErrOwnerMismatch = fmt.Errorf("aux owner mismatch")
+
+type indexAllocator struct {
+    mu       sync.Mutex
+    freeList []uint32
+    maxIndex uint32
+    nextNew  uint32
+    owners   map[uint32]string  // idx -> owner tag
+}
+
+func (a *indexAllocator) AllocOwner(owner string) (uint32, error)
+func (a *indexAllocator) FreeOwner(idx uint32, owner string) error
+func (a *indexAllocator) OwnerOf(idx uint32) string
+func (a *indexAllocator) WithOwnerLocked(idx uint32, owner string, fn func() error) error
+func (a *indexAllocator) RecoverWithOwners(owners map[uint32]string)
+```
+
+Owner 形式は `builtin` か `plugin:<mapType>:<slot>` の文字列。選択肢として「ownerタグを別 metadata map に格納」する案もあったが、**同一 pool + in-memory metadata** に落ち着いた (sid_aux_map の容量は config で決まるので pool split は避けたい)。
+
+`RecoverAuxIndices` は `sid_function_map` を iterate して `entry.Action >= EndpointPluginBase` なら `plugin:endpoint:<action>`、それ以外は `builtin` として owner を再構築。独立 aux (Phase 1d 新設) はこの経路で拾えないため daemon 再起動で消失する (永続化は Phase 2 の `BPF pinning` 課題)。詳細は [`docs/design/ja/persistence.md`](../design/ja/persistence.md) 参照。
+
+### TOCTOU 対策: `WithOwnerLocked`
+
+初版は `OwnerOf(idx) → SidAuxMap.Put` の 2 step で owner 検証していたが、並走する `FreePluginAux` がチェック成功後・Put 前に idx を再割当できる race があった。`WithOwnerLocked(idx, owner, fn)` に統一し、allocator ロックを握ったまま callback で BPF map op を実行する形にした。`CreateSidFunctionWithAuxIndex` も同じく `expectedOwner` を引数に取りアトミック検証する。
+
+### 単発 aux 操作 API
+
+```go
+func (m *MapOperations) AllocPluginAux(owner string) (uint32, error)
+func (m *MapOperations) PutPluginAux(idx uint32, raw []byte, owner string) error
+func (m *MapOperations) GetPluginAux(idx uint32, owner string) ([]byte, error)
+func (m *MapOperations) FreePluginAux(idx uint32, owner string) error
+```
+
+Put / Get / Free は全て `WithOwnerLocked` でラップされ、owner mismatch は `ErrOwnerMismatch` を返す (RPC 層で `PermissionDenied` に変換)。
+
+### `validatePluginAuxType`: サイズ事前チェック
+
+`pkg/bpf/plugin_validate.go` に新関数を追加。`VINBERO_PLUGIN_AUX_TYPE(prog, type)` マクロで anchor された `<program>_aux` 構造体を `spec.Types.TypeByName` で探し、`btf.Sizeof` が `SidAuxPluginRawMax (=196)` を超えていたら register 時点で reject する。anchor 無しの plugin は skip (許容)。
+
+### RPC: `PluginAuxAlloc / Update / Get / Free`
+
+`proto/vinbero/v1/plugin.proto` に 4 RPC を追加。Alloc / Update は `oneof payload { string json; bytes raw; }` で payload を受け取る。JSON なら既存 `EncodePluginAux` (BTF 駆動) で byte 列に変換、raw ならそのまま `NewSidAuxPluginRaw` で `sid_aux_entry.plugin_raw` に収まる形に包む。
+
+サーバ実装 (`pkg/server/plugin_aux.go`, 新規) は共通ヘルパ `ownerFor(mapType, slot, idx, requireIdx)` で slot 範囲バリデーション + owner タグ算出 + idx != 0 チェックをまとめて行い、各 RPC はそれを 1 回呼ぶだけ。Owner mismatch は `toRPCError` で `PermissionDenied`、slot 範囲外や payload 不正は `InvalidArgument`、枯渇は `ResourceExhausted`。
+
+### `SidFunction.plugin_aux_index` — 独立 aux を SID に紐づける
+
+`proto/vinbero/v1/vinbero.proto` の `SidFunction` に field 20 として追加。`plugin_aux_raw` (18) / `plugin_aux_json` (19) / `plugin_aux_index` (20) は 3-way mutually exclusive。
+
+`pkg/server/sid_function.go` の `protoToEntry` で:
+
+1. 3 つのうち 2 つ以上指定されたら `InvalidArgument`
+2. `plugin_aux_index != 0` なら SID の action が plugin 範囲であることを確認
+3. action から map_type / slot を推定し、`CreateSidFunctionWithAuxIndex(triggerPrefix, entry, expectedOwner)` を呼ぶ — owner 検証は `WithOwnerLocked` 内でアトミックに行われる
+
+`DeleteSidFunction` は `entry.AuxIndex != 0` なら owner を read し、builtin なら map ゼロ化 + FreeOwner、plugin owner なら「PluginAuxFree に任せる」で **touch しない** (SID delete で独立 aux を勝手に解放してしまわないため)。
+
+### CLI
+
+`vbctl plugin aux {alloc,update,get,free}` (`pkg/cli/cmd_plugin.go`) を追加。`--json` / `--raw` (hex) どちらかの payload 指定、`--map-type` / `--slot` / `--index` でターゲット指定。`vbctl sid create` には `--plugin-aux-index` フラグ追加、既存 `--plugin-aux-json` / `--plugin-aux-raw` と 3-way 排他。
+
+### Go SDK (`sdk/go/plugin/aux.go`)
+
+ADR-6 で YAGNI として削除されていた `sdk/go/plugin/` パッケージを、`aux.go` + `doc.go` のみ復活。
+
+```go
+type PluginAux[T any] struct { ... }
+
+func NewPluginAux[T any](client vinberov1connect.PluginServiceClient,
+    mapType string, slot uint32) *PluginAux[T]
+
+func (p *PluginAux[T]) Alloc(ctx context.Context, v T) (uint32, error)
+func (p *PluginAux[T]) Update(ctx context.Context, idx uint32, v T) error
+func (p *PluginAux[T]) Get(ctx context.Context, idx uint32) (T, error)
+func (p *PluginAux[T]) Free(ctx context.Context, idx uint32) error
+```
+
+`Alloc / Update` は `json.Marshal(v)` → サーバ側 BTF で C 構造体レイアウトに encode。`Get` は server からの raw bytes を `binary.Read(LittleEndian)` で復元するので、T に「固定サイズ・LittleEndian・C struct 互換」という制約がかかる (`doc.go` に明記)。
+
+### サンプル / E2E
+
+`sdk/examples/plugin-counter/test.sh` に Phase 6 として以下のフローを追加:
+
+1. `vbctl plugin aux alloc --map-type endpoint --slot 32 --json '{"increment":20}'` で idx 払い出し
+2. `vbctl sid create --prefix fc00::200/128 --action 32 --plugin-aux-index <idx>` で別 SID を同 idx に束縛
+3. `vbctl plugin aux get` で owner タグが `plugin:endpoint:32` に設定されていることを確認
+4. `vbctl plugin aux update` で payload を差し替え
+5. 別スロット (33) 経由で free しようとして `PermissionDenied` を確認
+6. 正しい slot で free → aux クリア
+
+### 新規 / 書き換えテスト
+
+| テスト | 検証内容 |
+|---|---|
+| `TestIndexAllocatorOwnerRoundTrip` (`pkg/bpf/plugin_aux_alloc_test.go`) | AllocOwner → OwnerOf → FreeOwner |
+| `TestIndexAllocatorOwnerMismatch` | cross-owner free が `ErrOwnerMismatch` |
+| `TestIndexAllocatorExhaustion` | max_index 超過で error |
+| `TestRecoverWithOwners` | builtin / plugin 混在 index から allocator 再構築 |
+| `TestValidatePluginAuxType_NilTypes` | BTF types 無しは skip |
+| `TestValidatePluginSlot` (`pkg/server/plugin_aux_test.go`) | 各 map_type の plugin slot 範囲境界 |
+| `TestEncodePluginAuxPayload_*` | raw / json / mutex / size limit |
+| `TestSnapshotEntriesFilterAndSort` (`pkg/server/plugin_test.go`) | map_type filter + ソート順 |
 
 ---
 
@@ -327,4 +513,5 @@ int tailcall_epilogue(struct xdp_md *ctx, int action);
 - `make lint` : 0 issues (buf-format / buf-lint / yamllint / golangci-lint / trailing-whitespace / check-executables-have-shebangs / mixed-line-ending)
 - `go test ./...` : 全パス (50+ XDP E2E テストケースを含む)
 - `make test-runnable` : 両バイナリ起動 OK
-- `make sdk-test` : `packet-counter` / `simple-acl` 両サンプルが validate 通過
+- `make sdk-test` : `plugin-counter` / `plugin-acl-prefix` / `simple-acl` 全サンプルが validate 通過
+- `sdk/examples/plugin-counter/test.sh` : 既存 embed フロー + Phase 1d の alloc/bind フロー両方で E2E 通過
