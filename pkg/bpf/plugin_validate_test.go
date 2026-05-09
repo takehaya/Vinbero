@@ -1,6 +1,8 @@
 package bpf
 
 import (
+	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 
@@ -8,6 +10,27 @@ import (
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
 )
+
+// buildBTFSpec round-trips a list of types through Builder.Marshal +
+// LoadSpecFromReader so the resulting *btf.Spec actually answers TypeByName
+// queries. btf.Spec has unexported fields and no public constructor, so this
+// is the supported way to synthesize one from Go-side struct literals.
+func buildBTFSpec(t *testing.T, types []btf.Type) *btf.Spec {
+	t.Helper()
+	b, err := btf.NewBuilder(types)
+	if err != nil {
+		t.Fatalf("btf.NewBuilder: %v", err)
+	}
+	raw, err := b.Marshal(nil, &btf.MarshalOptions{Order: binary.NativeEndian})
+	if err != nil {
+		t.Fatalf("btf Marshal: %v", err)
+	}
+	spec, err := btf.LoadSpecFromReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("btf.LoadSpecFromReader: %v", err)
+	}
+	return spec
+}
 
 func buildSpec(name string, progType ebpf.ProgramType, ins asm.Instructions) *ebpf.ProgramSpec {
 	return &ebpf.ProgramSpec{
@@ -247,6 +270,71 @@ func TestValidatePluginAuxType_NilTypes(t *testing.T) {
 	spec := &ebpf.CollectionSpec{}
 	if err := validatePluginAuxType(spec, "my_program"); err != nil {
 		t.Errorf("nil spec.Types should pass, got: %v", err)
+	}
+}
+
+// auxStruct fabricates a `<program>_aux` struct of the requested size with a
+// single byte-array member so btf.Sizeof yields exactly size. Both Array
+// fields (Index and Type) must be non-nil — BTF traversal panics otherwise.
+func auxStruct(name string, size uint32) *btf.Struct {
+	idxInt := &btf.Int{Name: "u32", Size: 4, Encoding: btf.Unsigned}
+	byteInt := &btf.Int{Name: "u8", Size: 1, Encoding: btf.Unsigned}
+	arr := &btf.Array{
+		Index:  idxInt,
+		Type:   byteInt,
+		Nelems: size,
+	}
+	return &btf.Struct{
+		Name:    name,
+		Size:    size,
+		Members: []btf.Member{{Name: "buf", Type: arr}},
+	}
+}
+
+// validatePluginAuxType must reject aux structs larger than the plugin_raw
+// variant — otherwise we would silently truncate state at runtime.
+func TestValidatePluginAuxType_Oversize(t *testing.T) {
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{
+			"foo": {Name: "foo", Type: ebpf.XDP},
+		},
+		Types: buildBTFSpec(t, []btf.Type{auxStruct("foo_aux", 200)}),
+	}
+	err := validatePluginAuxType(spec, "foo")
+	if err == nil {
+		t.Fatal("expected oversize aux type to be rejected")
+	}
+	if !strings.Contains(err.Error(), "196") {
+		t.Errorf("error should mention SidAuxPluginRawMax (196), got: %v", err)
+	}
+}
+
+// Boundary case: a struct exactly equal to SidAuxPluginRawMax must pass.
+// Guards against off-by-one regressions in the size check.
+func TestValidatePluginAuxType_Boundary(t *testing.T) {
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{
+			"foo": {Name: "foo", Type: ebpf.XDP},
+		},
+		Types: buildBTFSpec(t, []btf.Type{auxStruct("foo_aux", SidAuxPluginRawMax)}),
+	}
+	if err := validatePluginAuxType(spec, "foo"); err != nil {
+		t.Errorf("size == SidAuxPluginRawMax must pass, got: %v", err)
+	}
+}
+
+// Plugin built without the VINBERO_PLUGIN_AUX_TYPE anchor exposes no
+// `<program>_aux` BTF struct. validatePluginAuxType must treat that as
+// "raw bytes only" (no error) — not as a hard failure.
+func TestValidatePluginAuxType_AnchorMissing(t *testing.T) {
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{
+			"foo": {Name: "foo", Type: ebpf.XDP},
+		},
+		Types: buildBTFSpec(t, []btf.Type{auxStruct("unrelated_struct", 8)}),
+	}
+	if err := validatePluginAuxType(spec, "foo"); err != nil {
+		t.Errorf("missing foo_aux must pass (raw-bytes path), got: %v", err)
 	}
 }
 

@@ -2,7 +2,9 @@ package bpf
 
 import (
 	"errors"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestIndexAllocatorOwnerRoundTrip covers the happy path: owner tag is
@@ -122,5 +124,87 @@ func TestIndexAllocatorRejectsEmptyOwner(t *testing.T) {
 	a := newIndexAllocator(4)
 	if _, err := a.AllocOwner(""); err == nil {
 		t.Error("AllocOwner(\"\") should fail")
+	}
+}
+
+// TestIndexAllocatorWithOwnerLockedSerializesFree verifies that FreeOwner
+// blocks while a concurrent WithOwnerLocked is still inside its callback.
+// This is the property that closes the TOCTOU window for callers that need
+// "owner check + map op" to be atomic against PluginAuxFree.
+func TestIndexAllocatorWithOwnerLockedSerializesFree(t *testing.T) {
+	a := newIndexAllocator(16)
+	idx, err := a.AllocOwner("owner-a")
+	if err != nil {
+		t.Fatalf("AllocOwner: %v", err)
+	}
+
+	const slowFnDuration = 50 * time.Millisecond
+	started := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = a.WithOwnerLocked(idx, "owner-a", func() error {
+			close(started)
+			time.Sleep(slowFnDuration)
+			return nil
+		})
+	}()
+
+	// Make sure goroutine A actually entered the critical section before we
+	// start measuring; otherwise B could finish before A even runs.
+	<-started
+
+	freeStart := time.Now()
+	if err := a.FreeOwner(idx, "owner-a"); err != nil {
+		t.Fatalf("FreeOwner: %v", err)
+	}
+	elapsed := time.Since(freeStart)
+
+	// Use a generous lower bound (40ms) to absorb scheduler jitter while
+	// still proving Free was blocked behind WithOwnerLocked.
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("FreeOwner returned in %v; expected >=40ms (serialization broken)",
+			elapsed)
+	}
+
+	wg.Wait()
+}
+
+// TestIndexAllocatorConcurrentAllocFree stresses Alloc/Free under the race
+// detector to catch any unsynchronized access to freeList / owners /
+// nextNew. After the storm settles every index must be free again.
+func TestIndexAllocatorConcurrentAllocFree(t *testing.T) {
+	const goroutines = 100
+	const iterations = 1000
+	const maxIndex = 256
+	a := newIndexAllocator(maxIndex)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for range iterations {
+				idx, err := a.AllocOwner("stress")
+				if err != nil {
+					// Pool exhaustion is acceptable here (concurrent peak
+					// load can hit the cap); just retry next iteration.
+					continue
+				}
+				if err := a.FreeOwner(idx, "stress"); err != nil {
+					t.Errorf("FreeOwner: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	for i := uint32(1); i < maxIndex; i++ {
+		if got := a.OwnerOf(i); got != "" {
+			t.Errorf("idx %d owner after stress: %q, want empty", i, got)
+		}
 	}
 }
