@@ -2,6 +2,7 @@ package bpf
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -84,7 +85,13 @@ func AuxOwnerPluginTag(mapType string, slot uint32) string {
 // / FreePluginAux are called with an owner tag that does not match the tag
 // recorded at Alloc time. Guards against a plugin freeing another plugin's
 // aux index or a builtin path accidentally stepping on plugin state.
-var ErrOwnerMismatch = fmt.Errorf("aux owner mismatch")
+var ErrOwnerMismatch = errors.New("aux owner mismatch")
+
+// ErrAuxPayloadTooLarge is returned by PutPluginAux when the caller's raw
+// payload exceeds SidAuxPluginRawMax. Surfaced as a sentinel so the RPC
+// layer can map this caller-side mistake to InvalidArgument instead of the
+// generic Internal that other write failures use.
+var ErrAuxPayloadTooLarge = errors.New("plugin aux payload exceeds SidAuxPluginRawMax")
 
 // indexAllocator manages a pool of uint32 indices with a free-list and an
 // owner tag per live index. Index 0 is reserved as the "no aux" sentinel
@@ -98,6 +105,13 @@ type indexAllocator struct {
 }
 
 func newIndexAllocator(max uint32) *indexAllocator {
+	// sid_function_entry.aux_index is uint16 on the BPF side, so any index
+	// above math.MaxUint16 would silently truncate when stored. Clamp the
+	// allocator capacity to keep the storable range as a hard ceiling
+	// regardless of operator-configured sid_aux_map capacity.
+	if max > math.MaxUint16+1 {
+		max = math.MaxUint16 + 1
+	}
 	return &indexAllocator{
 		maxIndex: max,
 		nextNew:  1,
@@ -244,6 +258,12 @@ func (a *indexAllocator) RecoverWithOwners(owners map[uint32]string) {
 // binding to a SID function) are NOT recovered: they are not visible from
 // sid_function_map. Such indices vanish across process restart — BPF pinning
 // would be required to preserve them (Phase 2).
+//
+// Entries whose action is in the plugin range but >= EndpointProgMax are
+// considered corrupt (no AllocPluginAux path can produce them today; they
+// would come from a manual bpftool edit or a kernel-side bug). They are
+// skipped — the idx is left unowned so a fresh alloc can reuse it after the
+// operator cleans up the SID entry.
 func (m *MapOperations) RecoverAuxIndices() error {
 	var key LpmKeyV6
 	var entry SidFunctionEntry
@@ -255,9 +275,15 @@ func (m *MapOperations) RecoverAuxIndices() error {
 			continue
 		}
 		idx := uint32(entry.AuxIndex)
-		if uint32(entry.Action) >= EndpointPluginBase {
+		action := uint32(entry.Action)
+		if action >= EndpointPluginBase {
+			if action >= EndpointProgMax {
+				// Out-of-range plugin action: skip recovery so the idx isn't
+				// claimed by a tag no live plugin can ever match.
+				continue
+			}
 			// endpoint PROG_ARRAY slot == action for plugin behaviors
-			owners[idx] = AuxOwnerPluginTag(MapTypeEndpoint, uint32(entry.Action))
+			owners[idx] = AuxOwnerPluginTag(MapTypeEndpoint, action)
 		} else {
 			owners[idx] = AuxOwnerBuiltin
 		}
@@ -489,6 +515,12 @@ func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entr
 	if entry.AuxIndex == 0 {
 		return fmt.Errorf("aux_index must be non-zero")
 	}
+	// AllocOwner rejects empty owner so a populated allocator cannot have one;
+	// this guard catches caller-side bugs before the WithOwnerLocked verify
+	// would surface as a confusing "owned by X, caller \"\"" error.
+	if expectedOwner == "" {
+		return fmt.Errorf("expectedOwner must be non-empty")
+	}
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
@@ -506,7 +538,19 @@ func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entr
 // PutPluginAux; allocating and writing are split so a JSON-encode error
 // leaves no half-populated entry behind.
 func (m *MapOperations) AllocPluginAux(owner string) (uint32, error) {
-	return m.auxAlloc.AllocOwner(owner)
+	idx, err := m.auxAlloc.AllocOwner(owner)
+	if err != nil {
+		return 0, err
+	}
+	// Defense in depth: newIndexAllocator already clamps maxIndex to the
+	// uint16 range, so this branch is unreachable today. Keep the explicit
+	// guard so SidFunctionEntry.AuxIndex (uint16) can never silently
+	// truncate the value we hand back to the caller.
+	if idx > math.MaxUint16 {
+		_ = m.auxAlloc.FreeOwner(idx, owner)
+		return 0, fmt.Errorf("aux index %d exceeds uint16 range", idx)
+	}
+	return idx, nil
 }
 
 // PutPluginAux writes raw into sid_aux_map[idx] atomically w.r.t. the owner
@@ -514,8 +558,7 @@ func (m *MapOperations) AllocPluginAux(owner string) (uint32, error) {
 // be <= SidAuxPluginRawMax; shorter payloads are zero-padded on the wire.
 func (m *MapOperations) PutPluginAux(idx uint32, raw []byte, owner string) error {
 	if len(raw) > SidAuxPluginRawMax {
-		return fmt.Errorf("raw length %d exceeds SidAuxPluginRawMax (%d)",
-			len(raw), SidAuxPluginRawMax)
+		return fmt.Errorf("%w: %d > %d", ErrAuxPayloadTooLarge, len(raw), SidAuxPluginRawMax)
 	}
 	return m.auxAlloc.WithOwnerLocked(idx, owner, func() error {
 		entry := NewSidAuxPluginRaw(raw)
@@ -582,11 +625,16 @@ func (m *MapOperations) DeleteSidFunction(triggerPrefix string) error {
 	// the reference.
 	if hasEntry && entry.AuxIndex != 0 {
 		idx := uint32(entry.AuxIndex)
-		if m.auxAlloc.OwnerOf(idx) == AuxOwnerBuiltin {
-			var zeroAux SidAuxEntry
-			_ = m.objs.SidAuxMap.Put(idx, &zeroAux)
-			_ = m.auxAlloc.FreeOwner(idx, AuxOwnerBuiltin)
-		}
+		// Builtin aux is freed in lockstep with the zero-write so a racing
+		// PluginAuxFree → PluginAuxAlloc cannot reassign idx between the
+		// owner check and the map op. Owner mismatch (plugin-owned) leaves
+		// the entry intact — that lifecycle belongs to PluginAuxFree.
+		_ = m.auxAlloc.WithOwnerLocked(idx, AuxOwnerBuiltin, func() error {
+			var zero SidAuxEntry
+			_ = m.objs.SidAuxMap.Put(idx, &zero)
+			m.auxAlloc.freeOwnerLocked(idx)
+			return nil
+		})
 	}
 	return nil
 }
@@ -1535,30 +1583,59 @@ var (
 	ErrIndexTooHigh = fmt.Errorf("plugin index exceeds PROG_ARRAY capacity")
 )
 
-// RegisterPlugin registers an external BPF program into a PROG_ARRAY slot.
-// Only plugin-range indices are allowed (built-in slots are protected).
-func (m *MapOperations) RegisterPlugin(mapType string, index uint32, progFD int) error {
-	targetMap, base, maxEntries, err := m.resolvePluginMap(mapType)
+// PluginSlotRange returns the [base, max) plugin slot range for the given
+// map_type, or an error if map_type is unknown. Single source of truth for
+// "what counts as a plugin slot" — RegisterPlugin / UnregisterPlugin and the
+// PluginAux RPC validators all derive from this.
+func PluginSlotRange(mapType string) (base, max uint32, err error) {
+	switch mapType {
+	case MapTypeEndpoint:
+		return EndpointPluginBase, EndpointProgMax, nil
+	case MapTypeHeadendV4, MapTypeHeadendV6:
+		return HeadendPluginBase, HeadendProgMax, nil
+	default:
+		return 0, 0, fmt.Errorf("unknown map_type %q (expected endpoint / headend_v4 / headend_v6)", mapType)
+	}
+}
+
+// ValidatePluginSlot rejects (map_type, slot) pairs that fall outside a plugin
+// PROG_ARRAY range. Errors wrap ErrReservedSlot (slot below base, would step on
+// builtin behaviors) or ErrIndexTooHigh (slot at or above the array capacity).
+func ValidatePluginSlot(mapType string, slot uint32) error {
+	base, max, err := PluginSlotRange(mapType)
 	if err != nil {
 		return err
 	}
-	if index < base {
-		return fmt.Errorf("%w: index %d < base %d for %s", ErrReservedSlot, index, base, mapType)
+	if slot < base {
+		return fmt.Errorf("%w: index %d < base %d for %s", ErrReservedSlot, slot, base, mapType)
 	}
-	if index >= maxEntries {
-		return fmt.Errorf("%w: index %d >= max %d for %s", ErrIndexTooHigh, index, maxEntries, mapType)
+	if slot >= max {
+		return fmt.Errorf("%w: index %d >= max %d for %s", ErrIndexTooHigh, slot, max, mapType)
+	}
+	return nil
+}
+
+// RegisterPlugin registers an external BPF program into a PROG_ARRAY slot.
+// Only plugin-range indices are allowed (built-in slots are protected).
+func (m *MapOperations) RegisterPlugin(mapType string, index uint32, progFD int) error {
+	if err := ValidatePluginSlot(mapType, index); err != nil {
+		return err
+	}
+	targetMap, _, _, err := m.resolvePluginMap(mapType)
+	if err != nil {
+		return err
 	}
 	return targetMap.Update(index, uint32(progFD), ebpf.UpdateAny)
 }
 
 // UnregisterPlugin removes a plugin from a PROG_ARRAY slot.
 func (m *MapOperations) UnregisterPlugin(mapType string, index uint32) error {
-	targetMap, base, _, err := m.resolvePluginMap(mapType)
-	if err != nil {
+	if err := ValidatePluginSlot(mapType, index); err != nil {
 		return err
 	}
-	if index < base {
-		return fmt.Errorf("%w: index %d < base %d for %s", ErrReservedSlot, index, base, mapType)
+	targetMap, _, _, err := m.resolvePluginMap(mapType)
+	if err != nil {
+		return err
 	}
 	return targetMap.Delete(index)
 }
@@ -1747,4 +1824,26 @@ func (m *MapOperations) ListEsi() (map[[ESILen]byte]*EsiEntry, error) {
 		return nil, fmt.Errorf("failed to iterate esi map: %w", err)
 	}
 	return result, nil
+}
+
+// CountAuxByOwner returns the number of live aux indices currently owned
+// by ownerTag. Used by PluginUnregister to surface orphan plugin aux
+// (indices that should have been freed via PluginAuxFree before the slot
+// was retired). Stale lookups are unavoidable — the answer can change as
+// soon as the lock is released.
+func (m *MapOperations) CountAuxByOwner(ownerTag string) int {
+	return m.auxAlloc.countByOwner(ownerTag)
+}
+
+// countByOwner is the locked underpinning of CountAuxByOwner.
+func (a *indexAllocator) countByOwner(ownerTag string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for _, o := range a.owners {
+		if o == ownerTag {
+			n++
+		}
+	}
+	return n
 }

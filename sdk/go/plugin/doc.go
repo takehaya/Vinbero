@@ -14,13 +14,27 @@
 // scope; they will be reintroduced if future phases grow a concrete need.
 //
 // T layout. PluginAux[T] uses encoding/json to send and encoding/binary
-// (LittleEndian) to receive. T must therefore:
+// (NativeEndian) to receive. NativeEndian matches the server's BTF
+// encoder and the BPF data plane's in-memory layout (BPF maps are
+// host-endian by ABI). T must therefore:
 //
 //   - Be fixed size (no slices, maps, pointers, strings).
 //   - Match the C struct field order exactly.
-//   - Use field tags (`json:"..."`) that match the BTF field names.
+//   - Use JSON tags (`json:"..."`) that match the BTF field names.
 //   - Pack naturally without padding surprises (use [N]byte for fixed arrays).
+//   - Have unsafe.Sizeof(T) <= 196 (SidAuxPluginRawMax). NewPluginAux
+//     panics at construction time if this is violated.
 //
 // Plugins that cannot meet these constraints should use the raw-bytes
 // variants (PluginAuxAllocRequest.Raw) and marshal themselves.
+//
+// Persistence. Aux indices allocated via Alloc but not bound to a
+// SidFunction live only in the daemon's in-memory allocator. They are
+// lost on daemon restart (BPF map pinning is not yet wired through to
+// the plugin allocator — see docs/design/ja/persistence.md). Plugin
+// authors should either re-allocate at startup or bind the index to a
+// SidFunction immediately after allocating. PluginUnregister also does
+// NOT free aux indices owned by the slot; call Free per-index before
+// unregistering, or expect the daemon to log a warning about orphaned
+// aux entries.
 package plugin

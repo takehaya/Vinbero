@@ -109,6 +109,10 @@ pin 無効時は map が空なので recovery しても何も起きず、結果�
 
 恒久的な解決 (owner map 自体を pin + PluginAuxAlloc で即 bpffs に反映) は Phase 2 の BPF pinning 拡張として未実装。
 
+#### PluginUnregister は aux を解放しない
+
+`PluginUnregister` は PROG_ARRAY スロットと server の registry エントリを消すだけで、**そのスロットが所有していた aux index の自動解放は行いません**。`PluginAuxFree` を呼ばずに unregister するとそれらは in-memory allocator に残留し、次回 daemon 再起動まで回収されません (再起動時には独立 aux と同様、`sid_function_map` 経由で再構築されない限り消失します)。サーバ側ではこの状態を検知すると `plugin slot unregistered with live aux entries` の warn ログを出すので、運用では unregister 前に各 index を Free するか、ログを監視して取り残しに気付ける状態にしてください。
+
 ## XDP program の attach
 
 `ip link set dev eth0 xdp off` しない限り、カーネルは XDP プログラムを持ち続けます。ただし:

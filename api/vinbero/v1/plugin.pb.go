@@ -387,6 +387,8 @@ type PluginListResponse struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
+	// Plugins are sorted by (map_type, slot) ascending so callers can rely on
+	// stable ordering for diffs and snapshot comparisons.
 	Plugins []*PluginInfo `protobuf:"bytes,1,rep,name=plugins,proto3" json:"plugins,omitempty"`
 }
 

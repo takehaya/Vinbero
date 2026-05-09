@@ -6,11 +6,16 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
 )
+
+// SidAuxPluginRawMax mirrors pkg/bpf.SidAuxPluginRawMax. Duplicated to
+// keep sdk/go/plugin importable without pulling in the BPF stack.
+const SidAuxPluginRawMax = 196
 
 // PluginAux is a typed client for the four PluginAux RPCs, parameterized by
 // the Go struct T that mirrors the plugin's <program>_aux BTF type. See the
@@ -23,9 +28,25 @@ type PluginAux[T any] struct {
 
 // NewPluginAux binds a PluginAux helper to a specific (map_type, slot) pair.
 // The owner tag server-side is derived from this pair, so all subsequent
-// calls on the same PluginAux target the same plugin slot.
+// calls on the same PluginAux target the same plugin slot. Panics if T
+// is larger than SidAuxPluginRawMax — that is a programming error the
+// caller should fix at compile time, not at runtime in production.
 func NewPluginAux[T any](client vinberov1connect.PluginServiceClient, mapType string, slot uint32) *PluginAux[T] {
+	var zero T
+	if size := reflect.TypeOf(zero).Size(); size > SidAuxPluginRawMax {
+		panic(fmt.Sprintf("PluginAux[T] size %d exceeds SidAuxPluginRawMax (%d); "+
+			"split T into smaller pieces", size, SidAuxPluginRawMax))
+	}
 	return &PluginAux[T]{client: client, mapType: mapType, slot: slot}
+}
+
+// expectedOwner mirrors the server-side AuxOwnerPluginTag format. SDK
+// callers don't import pkg/bpf to keep the dependency surface minimal,
+// so we duplicate the format string and pin it with a test (see the
+// server-side TestOwnerTagFor). A drift here would surface as an Owner
+// mismatch on Get; cheap to detect.
+func (p *PluginAux[T]) expectedOwner() string {
+	return fmt.Sprintf("plugin:%s:%d", p.mapType, p.slot)
 }
 
 // Alloc encodes v as JSON (so the server can translate via BTF), asks the
@@ -62,9 +83,12 @@ func (p *PluginAux[T]) Update(ctx context.Context, idx uint32, v T) error {
 	return err
 }
 
-// Get reads the raw bytes at idx and decodes them into T using
-// encoding/binary + LittleEndian. T must be a fixed-size structure matching
-// the C layout; see the package doc for the full constraints.
+// Get reads the raw bytes at idx, verifies the server-reported owner
+// matches this PluginAux instance, and decodes the bytes into T using
+// encoding/binary with NativeEndian. NativeEndian matches the server's
+// BTF encoder (see pkg/server/plugin_aux_encode.go) and the BPF data
+// plane's natural alignment. T must satisfy the constraints listed in
+// the package doc.
 func (p *PluginAux[T]) Get(ctx context.Context, idx uint32) (T, error) {
 	var zero T
 	resp, err := p.client.PluginAuxGet(ctx, connect.NewRequest(&v1.PluginAuxGetRequest{
@@ -75,8 +99,12 @@ func (p *PluginAux[T]) Get(ctx context.Context, idx uint32) (T, error) {
 	if err != nil {
 		return zero, err
 	}
+	if want := p.expectedOwner(); resp.Msg.Owner != want {
+		return zero, fmt.Errorf("aux at idx %d is owned by %q, expected %q",
+			idx, resp.Msg.Owner, want)
+	}
 	var out T
-	if err := binary.Read(bytes.NewReader(resp.Msg.Raw), binary.LittleEndian, &out); err != nil {
+	if err := binary.Read(bytes.NewReader(resp.Msg.Raw), binary.NativeEndian, &out); err != nil {
 		return zero, fmt.Errorf("decode raw: %w", err)
 	}
 	return out, nil

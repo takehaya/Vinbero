@@ -168,6 +168,9 @@ func sidFunctionCommand() *cli.Command {
 						return err
 					}
 					fmt.Printf("Flushed %d SID functions\n", resp.Msg.DeletedCount)
+					fmt.Println("Note: plugin-owned aux entries are NOT freed by flush.")
+					fmt.Println("      Use `vbctl plugin aux free --map-type ... --slot ... --index ...`")
+					fmt.Println("      per index to release them, or `vbctl plugin list -v` to inspect.")
 					return nil
 				},
 			},

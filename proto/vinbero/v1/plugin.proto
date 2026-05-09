@@ -60,6 +60,8 @@ message PluginInfo {
 }
 
 message PluginListResponse {
+  // Plugins are sorted by (map_type, slot) ascending so callers can rely on
+  // stable ordering for diffs and snapshot comparisons.
   repeated PluginInfo plugins = 1;
 }
 

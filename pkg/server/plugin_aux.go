@@ -12,25 +12,12 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
-// validatePluginSlot rejects (map_type, slot) pairs that fall outside a plugin
-// PROG_ARRAY range — all PluginAux ownership is scoped by this tuple, so a
-// non-plugin slot would produce owner tags nothing else can match.
+// validatePluginSlot is a thin server-side alias for bpf.ValidatePluginSlot;
+// kept under this name because every PluginAux RPC handler reads cleaner with
+// the unprefixed call site, and to make any future server-only relaxation
+// (e.g. allowing reserved slots in a debug mode) a one-liner.
 func validatePluginSlot(mapType string, slot uint32) error {
-	switch mapType {
-	case bpf.MapTypeEndpoint:
-		if slot < bpf.EndpointPluginBase || slot >= bpf.EndpointProgMax {
-			return fmt.Errorf("endpoint plugin slot must be in [%d, %d), got %d",
-				bpf.EndpointPluginBase, bpf.EndpointProgMax, slot)
-		}
-	case bpf.MapTypeHeadendV4, bpf.MapTypeHeadendV6:
-		if slot < bpf.HeadendPluginBase || slot >= bpf.HeadendProgMax {
-			return fmt.Errorf("headend plugin slot must be in [%d, %d), got %d",
-				bpf.HeadendPluginBase, bpf.HeadendProgMax, slot)
-		}
-	default:
-		return fmt.Errorf("unknown map_type %q (expected endpoint / headend_v4 / headend_v6)", mapType)
-	}
-	return nil
+	return bpf.ValidatePluginSlot(mapType, slot)
 }
 
 // encodePluginAuxPayload normalizes a PluginAux payload to its on-wire byte
@@ -79,12 +66,17 @@ func ownerFor(mapType string, slot, idx uint32, requireIdx bool) (string, error)
 
 // toRPCError maps a MapOperations error to a connect code. Owner-mismatch
 // surfaces as PermissionDenied so clients can distinguish it from transport
-// or verification failures; everything else is Internal.
+// or verification failures; payload-too-large is the caller's mistake and
+// surfaces as InvalidArgument; everything else is Internal.
 func toRPCError(err error) error {
-	if errors.Is(err, bpf.ErrOwnerMismatch) {
+	switch {
+	case errors.Is(err, bpf.ErrOwnerMismatch):
 		return connect.NewError(connect.CodePermissionDenied, err)
+	case errors.Is(err, bpf.ErrAuxPayloadTooLarge):
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	default:
+		return connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewError(connect.CodeInternal, err)
 }
 
 func (s *PluginServer) PluginAuxAlloc(

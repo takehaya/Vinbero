@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/cilium/ebpf/btf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -52,15 +52,17 @@ type PluginEntryInfo struct {
 type PluginServer struct {
 	mapOps       *bpf.MapOperations
 	bpfConstants map[string]any
+	logger       *zap.Logger
 
 	mu       sync.RWMutex
 	registry map[pluginSlotKey]*pluginEntry
 }
 
-func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any) *PluginServer {
+func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any, logger *zap.Logger) *PluginServer {
 	return &PluginServer{
 		mapOps:       mapOps,
 		bpfConstants: bpfConstants,
+		logger:       logger,
 		registry:     make(map[pluginSlotKey]*pluginEntry),
 	}
 }
@@ -195,13 +197,13 @@ func (s *PluginServer) PluginRegister(
 	sort.Strings(usedRO)
 	sort.Strings(usedRW)
 	sort.Strings(ownedMaps)
-	slog.InfoContext(ctx, "plugin map linkage",
-		"program", msg.Program,
-		"map_type", msg.MapType,
-		"slot", msg.Index,
-		"shared_ro", usedRO,
-		"shared_rw", usedRW,
-		"owned_maps", ownedMaps,
+	s.logger.Info("plugin map linkage",
+		zap.String("program", msg.Program),
+		zap.String("map_type", msg.MapType),
+		zap.Uint32("slot", msg.Index),
+		zap.Strings("shared_ro", usedRO),
+		zap.Strings("shared_rw", usedRW),
+		zap.Strings("owned_maps", ownedMaps),
 	)
 
 	// Load the collection with shared map references from vinbero.
@@ -266,6 +268,21 @@ func (s *PluginServer) PluginUnregister(
 	s.mu.Lock()
 	delete(s.registry, pluginSlotKey{MapType: msg.MapType, Slot: msg.Index})
 	s.mu.Unlock()
+
+	// Surface orphan aux indices owned by this slot. PluginUnregister does
+	// not free them — callers are expected to PluginAuxFree per index before
+	// retiring the slot, otherwise the indices leak in the in-memory
+	// allocator until daemon restart. Log only; do not fail the RPC because
+	// the registry / PROG_ARRAY removal already succeeded.
+	ownerTag := bpf.AuxOwnerPluginTag(msg.MapType, msg.Index)
+	if remaining := s.mapOps.CountAuxByOwner(ownerTag); remaining > 0 {
+		s.logger.Warn("plugin slot unregistered with live aux entries",
+			zap.String("owner", ownerTag),
+			zap.String("map_type", msg.MapType),
+			zap.Uint32("slot", msg.Index),
+			zap.Int("remaining_aux", remaining),
+		)
+	}
 
 	return connect.NewResponse(&v1.PluginUnregisterResponse{}), nil
 }

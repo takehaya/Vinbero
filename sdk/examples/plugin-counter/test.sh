@@ -8,7 +8,7 @@
 #   3. Creating a SID that dispatches to the plugin
 #   4. Verifying the plugin processes packets
 
-set -eu
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}/../../.."

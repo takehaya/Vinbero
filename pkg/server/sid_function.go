@@ -56,6 +56,10 @@ func (s *SidFunctionServer) SidFunctionCreate(
 		// plugin_aux_index path: aux already owned by the PluginAux RPC
 		// lifecycle. CreateSidFunctionWithAuxIndex verifies the owner tag
 		// atomically with the bind so a racing Free cannot reassign the idx.
+		// SID functions live in the endpoint LPM map, so the owner tag is
+		// always derived against MapTypeEndpoint. Headend plugins (if they
+		// gain a separate plugin_aux_index path in the future) will need
+		// their own bind helper with a different map_type.
 		var createErr error
 		if sidFunc.PluginAuxIndex != 0 {
 			owner := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, uint32(sidFunc.Action))
@@ -157,6 +161,12 @@ func (s *SidFunctionServer) SidFunctionFlush(
 
 // protoToEntry converts a protobuf SidFunction to a BPF generic entry + optional aux entry
 func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunctionEntry, *bpf.SidAuxEntry, error) {
+	// SidFunctionEntry.Action is uint8, so any value > 255 (or negative) would
+	// be silently truncated and produce an entry whose stored action disagrees
+	// with the action used to derive the plugin owner tag. Reject up front.
+	if sidFunc.Action < 0 || sidFunc.Action > 255 {
+		return nil, nil, fmt.Errorf("action %d out of uint8 range [0, 255]", sidFunc.Action)
+	}
 	entry := &bpf.SidFunctionEntry{
 		Action: uint8(sidFunc.Action),
 		Flavor: uint8(sidFunc.Flavor),
@@ -184,9 +194,9 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	// the index between check and bind.
 	if sidFunc.PluginAuxIndex != 0 {
 		action := uint32(sidFunc.Action)
-		if action < bpf.EndpointPluginBase {
-			return nil, nil, fmt.Errorf("plugin_aux_index requires action >= %d (endpoint plugin range), got %d",
-				bpf.EndpointPluginBase, action)
+		if action < bpf.EndpointPluginBase || action >= bpf.EndpointProgMax {
+			return nil, nil, fmt.Errorf("plugin_aux_index requires action in [%d, %d) (endpoint plugin range), got %d",
+				bpf.EndpointPluginBase, bpf.EndpointProgMax, action)
 		}
 		if sidFunc.PluginAuxIndex > 0xFFFF {
 			return nil, nil, fmt.Errorf("plugin_aux_index %d exceeds uint16 range", sidFunc.PluginAuxIndex)
