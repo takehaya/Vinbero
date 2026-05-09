@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"unsafe"
@@ -59,26 +60,109 @@ type MapOperations struct {
 
 // NewMapOperations creates a new MapOperations instance.
 // The aux index allocator capacity is derived from the actual sid_aux_map MaxEntries.
+// When the BPF AuxOwnerMap is available it is wired into the allocator so
+// owner tags persist across daemon restarts (Phase 2 BPF pinning); a nil
+// AuxOwnerMap leaves the allocator in the in-memory-only behavior of
+// Phase 1d.
 func NewMapOperations(objs *BpfObjects) *MapOperations {
 	auxMax := uint32(512) // fallback
 	if info, err := objs.SidAuxMap.Info(); err == nil {
 		auxMax = info.MaxEntries
 	}
+	alloc := newIndexAllocator(auxMax)
+	alloc.ownerMap = newAuxOwnerMap(objs.AuxOwnerMap)
 	return &MapOperations{
 		objs:     objs,
-		auxAlloc: newIndexAllocator(auxMax),
+		auxAlloc: alloc,
 	}
 }
 
 // AuxOwnerBuiltin tags aux indices that belong to vinbero-managed SID
 // behaviors (End.X / End.DT2 / End.B6 / etc.). Plugin-owned indices use
 // AuxOwnerPluginTag with (mapType, slot).
+//
+// In-memory uses still rely on this short form. Persistence to
+// aux_owner_map writes the version-stamped AuxOwnerBuiltinTag so old pins
+// remain readable when the format evolves.
 const AuxOwnerBuiltin = "builtin"
 
-// AuxOwnerPluginTag returns the owner tag used for plugin-allocated aux
-// indices. Matches the tag PluginAux RPC handlers register at Alloc time.
+// AuxOwnerVersion is bumped when the on-wire owner tag format changes.
+// Tags written by older versions are accepted by ParseAuxOwnerTag for
+// forward migration; tags newly minted by AuxOwnerPluginTag /
+// AuxOwnerBuiltinTag always use the current version.
+const AuxOwnerVersion = "v1"
+
+// AuxOwnerBuiltinTag is the version-stamped builtin owner tag persisted
+// in aux_owner_map. Returned as a constant rather than the bare
+// AuxOwnerBuiltin so persisted tags survive future format changes.
+var AuxOwnerBuiltinTag = "builtin:" + AuxOwnerVersion
+
+// AuxOwnerPluginTag returns the persisted plugin owner tag. Format is
+// "plugin:<version>:<mapType>:<slot>" (Phase 2). Phase 1d shipped the
+// short form "plugin:<mapType>:<slot>"; ParseAuxOwnerTag accepts both so
+// reading an older pin is loss-less.
 func AuxOwnerPluginTag(mapType string, slot uint32) string {
-	return fmt.Sprintf("plugin:%s:%d", mapType, slot)
+	return fmt.Sprintf("plugin:%s:%s:%d", AuxOwnerVersion, mapType, slot)
+}
+
+// AuxOwnerKind values returned by ParseAuxOwnerTag.
+const (
+	AuxOwnerKindBuiltin = "builtin"
+	AuxOwnerKindPlugin  = "plugin"
+)
+
+// ParseAuxOwnerTag splits a persisted tag into its components. Accepts
+// both the legacy ("plugin:endpoint:32" / "builtin") form and the
+// version-stamped ("plugin:v1:endpoint:32" / "builtin:v1") form so
+// reading an older pin is loss-less. The parsed result always carries
+// the current version semantics -- callers that re-persist a parsed tag
+// should re-render via AuxOwnerPluginTag / AuxOwnerBuiltinTag.
+//
+// Returns:
+//   - kind: "builtin" or "plugin"
+//   - mapType: the owning plugin map type (empty for builtin)
+//   - slot: the plugin PROG_ARRAY slot (zero for builtin)
+//   - err: non-nil if the tag does not match a recognized layout
+func ParseAuxOwnerTag(tag string) (kind, mapType string, slot uint32, err error) {
+	if tag == "" {
+		return "", "", 0, fmt.Errorf("empty owner tag")
+	}
+	parts := strings.Split(tag, ":")
+	switch parts[0] {
+	case AuxOwnerKindBuiltin:
+		// Accept both "builtin" (legacy) and "builtin:v1" (versioned).
+		if len(parts) == 1 {
+			return AuxOwnerKindBuiltin, "", 0, nil
+		}
+		if len(parts) == 2 && strings.HasPrefix(parts[1], "v") {
+			return AuxOwnerKindBuiltin, "", 0, nil
+		}
+		return "", "", 0, fmt.Errorf("malformed builtin owner tag %q", tag)
+	case AuxOwnerKindPlugin:
+		// Versioned form: plugin:v1:<mapType>:<slot> -> 4 segments.
+		// Legacy form:    plugin:<mapType>:<slot>    -> 3 segments.
+		var mt, slotStr string
+		switch len(parts) {
+		case 4:
+			if !strings.HasPrefix(parts[1], "v") {
+				return "", "", 0, fmt.Errorf("malformed plugin owner tag %q (expected version prefix)", tag)
+			}
+			mt = parts[2]
+			slotStr = parts[3]
+		case 3:
+			mt = parts[1]
+			slotStr = parts[2]
+		default:
+			return "", "", 0, fmt.Errorf("malformed plugin owner tag %q", tag)
+		}
+		n, perr := strconv.ParseUint(slotStr, 10, 32)
+		if perr != nil {
+			return "", "", 0, fmt.Errorf("plugin owner tag %q: bad slot: %w", tag, perr)
+		}
+		return AuxOwnerKindPlugin, mt, uint32(n), nil
+	default:
+		return "", "", 0, fmt.Errorf("unknown owner tag scheme %q", tag)
+	}
 }
 
 // ErrOwnerMismatch is returned when FreeOwner / PutPluginAux / GetPluginAux
@@ -93,6 +177,87 @@ var ErrOwnerMismatch = errors.New("aux owner mismatch")
 // generic Internal that other write failures use.
 var ErrAuxPayloadTooLarge = errors.New("plugin aux payload exceeds SidAuxPluginRawMax")
 
+// auxOwnerMap is the persistence backing for indexAllocator.owners.
+// A nil receiver means pinning is disabled (or AuxOwnerMap was never
+// loaded); Put/Delete become no-ops in that case so the allocator
+// falls back to the Phase 1d in-memory-only behavior.
+type auxOwnerMap struct {
+	m *ebpf.Map
+}
+
+// auxOwnerTagBytes is the wire size of struct aux_owner.tag in
+// src/core/srv6.h. ARRAY map values are fixed-width, so the userspace
+// side mirrors the C layout exactly.
+const auxOwnerTagBytes = 64
+
+// newAuxOwnerMap wraps an ebpf.Map for aux_owner_map persistence. Returns
+// nil when m is nil so callers can pass through "pinning disabled" without
+// an extra branch.
+func newAuxOwnerMap(m *ebpf.Map) *auxOwnerMap {
+	if m == nil {
+		return nil
+	}
+	return &auxOwnerMap{m: m}
+}
+
+// Put writes tag to aux_owner_map[idx] as a null-terminated fixed-width
+// payload. tag is silently truncated to 63 bytes plus the terminator;
+// AuxOwnerPluginTag is well within that bound, so truncation only bites
+// future format changes that exceed it.
+func (a *auxOwnerMap) Put(idx uint32, tag string) error {
+	if a == nil {
+		return nil
+	}
+	var v [auxOwnerTagBytes]byte
+	// Reserve byte 63 for the null terminator regardless of input length.
+	copy(v[:auxOwnerTagBytes-1], tag)
+	return a.m.Put(idx, v)
+}
+
+// Delete clears aux_owner_map[idx]. ARRAY maps have no real Delete, so we
+// zero-write the slot; subsequent Iterate calls treat zero entries as
+// "unused".
+func (a *auxOwnerMap) Delete(idx uint32) error {
+	if a == nil {
+		return nil
+	}
+	var zero [auxOwnerTagBytes]byte
+	return a.m.Put(idx, zero)
+}
+
+// Iterate returns every non-empty (idx, tag) pair currently in
+// aux_owner_map. Index 0 is the "no aux" sentinel and is never returned.
+// Empty (zero) entries are silently skipped.
+func (a *auxOwnerMap) Iterate() (map[uint32]string, error) {
+	out := make(map[uint32]string)
+	if a == nil {
+		return out, nil
+	}
+	var idx uint32
+	var v [auxOwnerTagBytes]byte
+	iter := a.m.Iterate()
+	for iter.Next(&idx, &v) {
+		if idx == 0 {
+			continue
+		}
+		// Slots are zero-initialized; treat any all-zero value as unused so
+		// reading the map after a fresh load (or after Delete()) does not
+		// re-populate the allocator with empty owners.
+		n := 0
+		for n < len(v) && v[n] != 0 {
+			n++
+		}
+		if n == 0 {
+			continue
+		}
+		out[idx] = string(v[:n])
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("iterate aux_owner_map: %w", err)
+	}
+	return out, nil
+}
+
 // indexAllocator manages a pool of uint32 indices with a free-list and an
 // owner tag per live index. Index 0 is reserved as the "no aux" sentinel
 // used by sid_function_entry.
@@ -102,6 +267,12 @@ type indexAllocator struct {
 	maxIndex uint32
 	nextNew  uint32
 	owners   map[uint32]string
+	// ownerMap is the optional BPF-side persistence of owners. When non-nil,
+	// AllocOwner / freeOwnerLocked mirror their in-memory updates here so
+	// owner identity survives daemon restart. Nil means in-memory-only
+	// (Phase 1d) -- typically because pin_maps is disabled or the
+	// aux_owner_map handle is not available.
+	ownerMap *auxOwnerMap
 }
 
 func newIndexAllocator(max uint32) *indexAllocator {
@@ -117,6 +288,17 @@ func newIndexAllocator(max uint32) *indexAllocator {
 		nextNew:  1,
 		owners:   make(map[uint32]string),
 	}
+}
+
+// persistedOwnerTag returns the on-wire form of an in-memory owner tag.
+// Phase 1d's bare "builtin" is rewritten to the version-stamped
+// "builtin:v1" so old pins migrate forward; plugin tags already carry
+// their version prefix and are passed through unchanged.
+func persistedOwnerTag(owner string) string {
+	if owner == AuxOwnerBuiltin {
+		return AuxOwnerBuiltinTag
+	}
+	return owner
 }
 
 // allocLocked is the core allocation primitive; callers must hold a.mu.
@@ -137,6 +319,12 @@ func (a *indexAllocator) allocLocked() (uint32, error) {
 // AllocOwner hands out the next free aux index and records owner as the
 // allocator of that index. owner must be non-empty; use AuxOwnerBuiltin
 // for vinbero-managed allocations and AuxOwnerPluginTag for plugin ones.
+//
+// When ownerMap is non-nil the persisted tag is also written to
+// aux_owner_map[idx] before returning. A failed write rolls the idx back
+// to the free list so the allocator state matches the on-disk pin --
+// otherwise an in-memory entry could outlive a restart with no
+// corresponding pin record.
 func (a *indexAllocator) AllocOwner(owner string) (uint32, error) {
 	if owner == "" {
 		return 0, fmt.Errorf("aux owner tag must be non-empty")
@@ -146,6 +334,13 @@ func (a *indexAllocator) AllocOwner(owner string) (uint32, error) {
 	idx, err := a.allocLocked()
 	if err != nil {
 		return 0, err
+	}
+	if err := a.ownerMap.Put(idx, persistedOwnerTag(owner)); err != nil {
+		// Roll back: return idx to the free list so a retry can reissue
+		// it. We cannot leave it in a.owners because the on-wire pin has
+		// no record of it.
+		a.freeList = append(a.freeList, idx)
+		return 0, fmt.Errorf("persist aux owner tag: %w", err)
 	}
 	a.owners[idx] = owner
 	return idx, nil
@@ -166,9 +361,13 @@ func (a *indexAllocator) verifyOwnerLocked(idx uint32, owner string) error {
 }
 
 // freeOwnerLocked is the lockless core of FreeOwner. Callers must have
-// already verified ownership and hold a.mu.
+// already verified ownership and hold a.mu. BPF map clear failures are
+// best-effort: in-memory state advances regardless because blocking the
+// allocator on a transient kernel error would create an ABA hazard for
+// PluginAuxFree -> PluginAuxAlloc retries.
 func (a *indexAllocator) freeOwnerLocked(idx uint32) {
 	delete(a.owners, idx)
+	_ = a.ownerMap.Delete(idx)
 	a.freeList = append(a.freeList, idx)
 }
 
@@ -248,23 +447,57 @@ func (a *indexAllocator) RecoverWithOwners(owners map[uint32]string) {
 	}
 }
 
-// RecoverAuxIndices scans sid_function_map for entries with a non-zero
-// aux_index and marks those indices as used in the allocator, reconstructing
-// owner tags from each entry's action: actions below EndpointPluginBase are
-// vinbero-managed (AuxOwnerBuiltin) and the rest are plugin-owned at the
-// endpoint PROG_ARRAY slot indicated by action.
+// RecoverAuxIndices rebuilds the in-memory allocator state at startup.
 //
-// Stand-alone plugin aux indices (allocated via PluginAuxAlloc without ever
-// binding to a SID function) are NOT recovered: they are not visible from
-// sid_function_map. Such indices vanish across process restart — BPF pinning
-// would be required to preserve them (Phase 2).
+// Phase 2 path (preferred): when aux_owner_map carries persisted tags,
+// iterate it and feed RecoverWithOwners directly. This recovers
+// stand-alone PluginAuxAlloc indices that are not yet bound to a SID
+// function -- something the legacy sid_function_map iterate cannot do.
+//
+// Phase 1d fallback: when aux_owner_map is empty (fresh pin path, or the
+// feature is disabled), reconstruct owners from sid_function_map by
+// looking at each entry's action -- actions below EndpointPluginBase are
+// vinbero-managed (AuxOwnerBuiltin), the rest are plugin-owned at the
+// endpoint PROG_ARRAY slot indicated by action. This branch runs once
+// per pin lifecycle: if persistence is on, we write the recovered tags
+// back into aux_owner_map so subsequent restarts take the v2 path.
 //
 // Entries whose action is in the plugin range but >= EndpointProgMax are
 // considered corrupt (no AllocPluginAux path can produce them today; they
 // would come from a manual bpftool edit or a kernel-side bug). They are
-// skipped — the idx is left unowned so a fresh alloc can reuse it after the
-// operator cleans up the SID entry.
+// skipped -- the idx is left unowned so a fresh alloc can reuse it after
+// the operator cleans up the SID entry.
 func (m *MapOperations) RecoverAuxIndices() error {
+	// Phase 2: try aux_owner_map first when present.
+	if m.auxAlloc.ownerMap != nil {
+		owners, err := m.auxAlloc.ownerMap.Iterate()
+		if err != nil {
+			return fmt.Errorf("read aux_owner_map: %w", err)
+		}
+		if len(owners) > 0 {
+			// Translate the persisted tags into the in-memory canonical
+			// form used by AllocOwner / FreeOwner.
+			inMem := make(map[uint32]string, len(owners))
+			for idx, tag := range owners {
+				kind, mt, slot, perr := ParseAuxOwnerTag(tag)
+				if perr != nil {
+					// Corrupt persisted tag: drop the idx so a fresh
+					// alloc can reuse it. The unused slot is harmless.
+					continue
+				}
+				switch kind {
+				case AuxOwnerKindBuiltin:
+					inMem[idx] = AuxOwnerBuiltin
+				case AuxOwnerKindPlugin:
+					inMem[idx] = AuxOwnerPluginTag(mt, slot)
+				}
+			}
+			m.auxAlloc.RecoverWithOwners(inMem)
+			return nil
+		}
+		// owner_map empty -> fall through to v1 reconstruction + back-fill.
+	}
+
 	var key LpmKeyV6
 	var entry SidFunctionEntry
 	iter := m.objs.SidFunctionMap.Iterate()
@@ -293,7 +526,87 @@ func (m *MapOperations) RecoverAuxIndices() error {
 	}
 
 	m.auxAlloc.RecoverWithOwners(owners)
+
+	// v1 -> v2 migration: write the recovered tags back into aux_owner_map
+	// so subsequent restarts take the persisted path. Best-effort: a
+	// transient failure here just means the next start re-runs the v1
+	// reconstruction.
+	if m.auxAlloc.ownerMap != nil {
+		for idx, tag := range owners {
+			_ = m.auxAlloc.ownerMap.Put(idx, persistedOwnerTag(tag))
+		}
+	}
 	return nil
+}
+
+// FreeAllByOwner releases every index whose owner tag equals ownerTag.
+// The in-memory map and aux_owner_map are cleared in the same critical
+// section as the per-idx free, but the caller is responsible for any
+// payload zero-write on sid_aux_map -- see MapOperations.FreeAllByOwner
+// for that combined operation. Returns the number of indices that were
+// freed.
+func (a *indexAllocator) FreeAllByOwner(ownerTag string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var idxs []uint32
+	for idx, owner := range a.owners {
+		if owner == ownerTag {
+			idxs = append(idxs, idx)
+		}
+	}
+	for _, idx := range idxs {
+		a.freeOwnerLocked(idx)
+	}
+	return len(idxs)
+}
+
+// AuxIndexInfo is one entry returned by ListAuxByOwner. Owner uses the
+// persisted (version-stamped) form so callers can feed it straight back
+// into PluginAuxList responses without an extra rewrite step.
+type AuxIndexInfo struct {
+	Index uint32
+	Owner string
+}
+
+// ListAuxByOwner returns every live aux index, optionally filtered by
+// owner kind. mapTypeFilter == "" returns all indices regardless of
+// owner. Otherwise only plugin-owned indices matching mapTypeFilter (and
+// slotFilter when matchSlot is true) are returned. Output is sorted by
+// idx so callers get stable ordering for diff / snapshot.
+func (m *MapOperations) ListAuxByOwner(mapTypeFilter string, slotFilter uint32, matchSlot bool) []AuxIndexInfo {
+	return m.auxAlloc.listByOwner(mapTypeFilter, slotFilter, matchSlot)
+}
+
+func (a *indexAllocator) listByOwner(mapTypeFilter string, slotFilter uint32, matchSlot bool) []AuxIndexInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]AuxIndexInfo, 0, len(a.owners))
+	for idx, tag := range a.owners {
+		persisted := persistedOwnerTag(tag)
+		if mapTypeFilter == "" {
+			out = append(out, AuxIndexInfo{Index: idx, Owner: persisted})
+			continue
+		}
+		// Filter is set: only plugin-owned indices that match.
+		kind, mt, slot, err := ParseAuxOwnerTag(tag)
+		if err != nil || kind != AuxOwnerKindPlugin {
+			continue
+		}
+		if mt != mapTypeFilter {
+			continue
+		}
+		if matchSlot && slot != slotFilter {
+			continue
+		}
+		out = append(out, AuxIndexInfo{Index: idx, Owner: persisted})
+	}
+	// Sort ascending by idx for deterministic responses.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1].Index > out[j].Index; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
 }
 
 // ===== SID Aux Entry Constructors =====
@@ -1682,10 +1995,10 @@ func (m *MapOperations) ListBdPeerEsi() (map[BdPeerEsiKey][ESILen]byte, error) {
 // EsiConfig is the user-facing description of an Ethernet Segment. NewEsiEntry
 // packs it into the BPF-side EsiEntry (handling the bool→uint8 flag).
 type EsiConfig struct {
-	LocalAttached   bool
-	RedundancyMode  uint8 // zero = UNSPECIFIED
-	LocalPeSrcAddr  [IPv6AddrLen]byte
-	DfPeSrcAddr     [IPv6AddrLen]byte
+	LocalAttached  bool
+	RedundancyMode uint8 // zero = UNSPECIFIED
+	LocalPeSrcAddr [IPv6AddrLen]byte
+	DfPeSrcAddr    [IPv6AddrLen]byte
 }
 
 // NewEsiEntry builds an EsiEntry from user-facing fields.
@@ -1833,6 +2146,47 @@ func (m *MapOperations) ListEsi() (map[[ESILen]byte]*EsiEntry, error) {
 // soon as the lock is released.
 func (m *MapOperations) CountAuxByOwner(ownerTag string) int {
 	return m.auxAlloc.countByOwner(ownerTag)
+}
+
+// FreeAllByOwner zero-writes sid_aux_map for every index owned by
+// ownerTag and releases those indices in the allocator. Returns the
+// number of indices that were freed. Used by PluginAuxPurge after a slot
+// has been retired with PluginUnregister to clean up indices that the
+// plugin failed to release through PluginAuxFree.
+//
+// Errors on the BPF zero-write are best-effort: the allocator slot is
+// still released so a subsequent alloc can reuse the index. The
+// per-index error path mirrors freeOwnerLocked's "advance regardless"
+// stance for exactly the same ABA-avoidance reason.
+func (m *MapOperations) FreeAllByOwner(ownerTag string) int {
+	// Collect first (under the allocator lock indirectly via OwnerOf-style
+	// snapshot) so the zero-writes happen outside the lock and a long
+	// purge cannot starve concurrent PluginAux RPCs. We accept the small
+	// race that a concurrent FreeOwner could free an index between snap
+	// and zero-write -- the zero-write of an already-cleared slot is a
+	// harmless duplicate.
+	idxs := m.auxAlloc.snapshotByOwner(ownerTag)
+	for _, idx := range idxs {
+		var zero SidAuxEntry
+		_ = m.objs.SidAuxMap.Put(idx, &zero)
+	}
+	// Then collapse the allocator state in one critical section.
+	return m.auxAlloc.FreeAllByOwner(ownerTag)
+}
+
+// snapshotByOwner returns a copy of every index currently tagged with
+// ownerTag. Lock is taken just long enough to copy; the returned slice
+// is safe to consult outside the allocator mutex.
+func (a *indexAllocator) snapshotByOwner(ownerTag string) []uint32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]uint32, 0, len(a.owners))
+	for idx, owner := range a.owners {
+		if owner == ownerTag {
+			out = append(out, idx)
+		}
+	}
+	return out
 }
 
 // countByOwner is the locked underpinning of CountAuxByOwner.

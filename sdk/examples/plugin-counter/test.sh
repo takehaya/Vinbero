@@ -207,7 +207,7 @@ if [ -n "$AUX_IDX" ] && [ "$AUX_IDX" -ne 0 ]; then
     GET_OUT=$(ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
         plugin aux get --map-type endpoint --slot ${PLUGIN_INDEX} --index "${AUX_IDX}")
     echo "$GET_OUT"
-    if echo "$GET_OUT" | grep -q "owner=plugin:endpoint:${PLUGIN_INDEX}"; then
+    if echo "$GET_OUT" | grep -q "owner=plugin:v1:endpoint:${PLUGIN_INDEX}"; then
         print_success "owner tag reflects (endpoint, ${PLUGIN_INDEX})"
         PASSED=$((PASSED + 1))
     else
