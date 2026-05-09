@@ -1867,6 +1867,60 @@ func (m *MapOperations) GetSharedReadWriteMaps() map[string]*ebpf.Map {
 	}
 }
 
+// SharedReadOnlyMapNames returns the names of every shared map that vinbero
+// treats as plugin-readable but not plugin-writable. The list mirrors
+// GetSharedReadOnlyMaps; TestSharedMapPartitioning enforces the invariant
+// so the asm-level RO write enforcer in the validator keeps in sync with
+// the runtime classification.
+//
+// Used by callers (notably `vbctl plugin validate`) that want the RO set
+// without instantiating MapOperations against a live BPF object.
+func SharedReadOnlyMapNames() []string {
+	return []string{
+		"sid_function_map",
+		"sid_aux_map",
+		"headend_v4_map",
+		"headend_v6_map",
+		"headend_l2_map",
+		"fdb_map",
+		"bd_peer_map",
+		"bd_peer_reverse_map",
+		"esi_map",
+		"bd_peer_l2_ext_map",
+		"headend_l2_ext_map",
+		"bd_local_esi_map",
+		"dx2v_map",
+		"tailcall_ctx_map",
+	}
+}
+
+// SharedReadWriteMapNames returns the names of every shared map plugins may
+// write to (or that the kernel verifier needs writable for normal operation).
+// Mirrors GetSharedReadWriteMaps; same partitioning invariant applies.
+func SharedReadWriteMapNames() []string {
+	return []string{
+		"scratch_map",
+		"stats_map",
+		"slot_stats_endpoint",
+		"slot_stats_headend_v4",
+		"slot_stats_headend_v6",
+		MapNameSidEndpointProgs,
+		MapNameHeadendV4Progs,
+		MapNameHeadendV6Progs,
+	}
+}
+
+// SharedReadOnlyMapNamesSet returns SharedReadOnlyMapNames in set form so
+// the validator can do O(1) membership tests without rebuilding a map per
+// plugin.
+func SharedReadOnlyMapNamesSet() map[string]struct{} {
+	out := make(map[string]struct{}, 16)
+	for _, n := range SharedReadOnlyMapNames() {
+		out[n] = struct{}{}
+	}
+	return out
+}
+
 // ========== Plugin Registration ==========
 
 const (

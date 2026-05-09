@@ -11,9 +11,58 @@ import (
 	"github.com/cilium/ebpf/btf"
 )
 
+// ErrPluginROWrite is the sentinel returned (wrapped via fmt.Errorf("%w"))
+// by the validator when a plugin writes to a vinbero shared RO map or to
+// a map pointer that cannot be statically resolved. Callers (notably the
+// daemon's PluginRegister) use errors.Is to decide whether the staged
+// warn-only rollout applies; CLI shift-left always rejects.
+var ErrPluginROWrite = errors.New("plugin RO map write")
+
 // SymTailcallEpilogue is the BPF subprogram every plugin must call before
 // returning an XDP action so per-action stats are recorded.
 const SymTailcallEpilogue = "tailcall_epilogue"
+
+// ROEnforceMode selects how the asm-level RO-write violation is surfaced.
+// The validator itself always returns the violation as an error; the mode
+// is consumed by callers (typically PluginRegister) to decide whether to
+// reject the request or just log a warning. CLI shift-left uses the
+// returned error directly and ignores the mode.
+type ROEnforceMode int
+
+const (
+	// ROEnforceWarn is the default: the violation is logged but the
+	// register/load proceeds. Used during the staged rollout so existing
+	// plugins keep working while ops watches the warn audit log.
+	ROEnforceWarn ROEnforceMode = iota
+	// ROEnforceEnforce hard-rejects the register call. CLI's `plugin
+	// validate` is always effectively in this mode regardless of config.
+	ROEnforceEnforce
+)
+
+// String renders the mode as the same token accepted by ParseROEnforceMode
+// so logs and config dumps stay reversible.
+func (m ROEnforceMode) String() string {
+	switch m {
+	case ROEnforceEnforce:
+		return "enforce"
+	default:
+		return "warn"
+	}
+}
+
+// ParseROEnforceMode converts a config string into a mode. Empty / "warn"
+// map to warn-only; "enforce" maps to hard-reject. Anything else is a
+// config error so typos don't silently downgrade the policy.
+func ParseROEnforceMode(s string) (ROEnforceMode, error) {
+	switch s {
+	case "", "warn":
+		return ROEnforceWarn, nil
+	case "enforce":
+		return ROEnforceEnforce, nil
+	default:
+		return 0, fmt.Errorf("invalid ro_enforce: %q (expected 'warn' or 'enforce')", s)
+	}
+}
 
 // ValidTailCallMaps lists the vinbero-managed PROG_ARRAYs a plugin is allowed
 // to bpf_tail_call into. Dispatching back to a vinbero PROG_ARRAY is how a
@@ -58,7 +107,10 @@ const ExitProximityWindow = 64
 //     plugins built with VINBERO_PLUGIN always pass because the macro
 //     produces a single exit; hand-written plugins must keep each return
 //     close to an epilogue or tail-call.
-func ValidatePluginProgram(spec *ebpf.ProgramSpec) error {
+//  6. Stores into vinbero shared read-only maps are rejected (Phase 2
+//     RO-enforce). roMaps == nil disables the check; production callers
+//     pass SharedReadOnlyMapNamesSet().
+func ValidatePluginProgram(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	if spec == nil {
 		return fmt.Errorf("plugin ProgramSpec is nil")
 	}
@@ -129,13 +181,21 @@ func ValidatePluginProgram(spec *ebpf.ProgramSpec) error {
 		return err
 	}
 
+	if err := checkROWrites(spec, roMaps); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // ValidatePluginCollection locates the named program in spec, forces its
 // type to XDP, and enforces the plugin contract on it. Used by the server,
 // the CLI, and the SDK to keep the lookup/validation flow consistent.
-func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string) (*ebpf.ProgramSpec, error) {
+//
+// roMaps == nil skips the asm-level RO-write check (back-compat for tests
+// that exercise the rest of the pipeline). Production callers must pass
+// SharedReadOnlyMapNamesSet().
+func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string, roMaps map[string]struct{}) (*ebpf.ProgramSpec, error) {
 	if spec == nil {
 		return nil, fmt.Errorf("plugin CollectionSpec is nil")
 	}
@@ -148,7 +208,7 @@ func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string) (*ebpf.
 		return nil, fmt.Errorf("program %q not found in ELF; available: %v", program, names)
 	}
 	target.Type = ebpf.XDP
-	if err := ValidatePluginProgram(target); err != nil {
+	if err := ValidatePluginProgram(target, roMaps); err != nil {
 		return nil, err
 	}
 	if err := validatePluginMapTypes(spec); err != nil {
@@ -219,6 +279,131 @@ func findTailCallMapName(prev asm.Instructions) string {
 		return ""
 	}
 	return ""
+}
+
+// isMapWrite reports whether ins writes to memory through a register-based
+// destination. We treat both classic stores (BPF_ST/BPF_STX, regardless of
+// MemMode vs immediate) and atomic RMW operations (BPF_STX | AtomicMode,
+// which covers BPF_ATOMIC and the legacy BPF_XADD) as writes; LDX (read)
+// is intentionally excluded.
+func isMapWrite(ins asm.Instruction) bool {
+	cls := ins.OpCode.Class()
+	return cls == asm.StClass || cls == asm.StXClass
+}
+
+// isStackStore reports whether the store targets the BPF stack frame
+// (R10 / RFP). R10 is the read-only frame pointer; clang lowers C local
+// variables (including the `struct foo key;` pattern feeding
+// bpf_map_lookup_elem) to *(R10 + off) = ... stores. These are not map
+// writes and must be excluded from the RO-write enforcer to avoid
+// false-positives on every plugin that uses a stack-allocated key.
+func isStackStore(ins asm.Instruction) bool {
+	return ins.Dst == asm.RFP
+}
+
+// findStoreTargetMapName walks back to the most recent instruction that
+// wrote dstReg and returns the map name when that origin is a static
+// LoadMapPtr. Anything else (BPF_CALL return value, register copy from
+// another register, stack reload) yields "" so the caller can reject the
+// store conservatively.
+//
+// Mirrors findTailCallMapName but generalised over the destination
+// register: clang emits `LoadMapPtr Rx, &m; ...; *(Rx + off) = ...` for
+// the canonical "static map pointer + write" pattern. Optimised paths
+// that move the pointer through the stack or another register fall
+// through to the conservative reject.
+func findStoreTargetMapName(prev asm.Instructions, dstReg asm.Register) string {
+	for i := len(prev) - 1; i >= 0; i-- {
+		p := prev[i]
+		if p.Dst != dstReg {
+			continue
+		}
+		if p.IsLoadFromMap() {
+			return p.Reference()
+		}
+		return "" // overwritten by something we can't trace statically
+	}
+	return ""
+}
+
+// roViolation describes one disallowed map write detected during static
+// analysis. Aggregated across the program so a single error message can
+// list every offender; mapName == "" means the store target could not be
+// resolved to a static map reference.
+type roViolation struct {
+	insIdx  int
+	mapName string
+}
+
+// checkROWrites scans the main program (subprograms excluded) for stores
+// whose target is a vinbero shared RO map, or whose target cannot be
+// statically resolved. The check is a no-op when roMaps is empty, for
+// back-compat with callers that don't yet supply the set (notably tests).
+//
+// Subprogram exclusion mirrors checkExitProximity. Plugin ELFs that pull
+// in tailcall_epilogue end up with the epilogue body appended after the
+// main program; that body legitimately writes to slot_stats_* (currently
+// RW, but we don't want to lock out the epilogue if/when it migrates to
+// RO), so scanning past the first sub-program would risk false positives
+// on every plugin.
+func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
+	if len(roMaps) == 0 {
+		return nil
+	}
+	var violations []roViolation
+	ins := spec.Instructions
+	for i, in := range ins {
+		// Stop at the start of any subprogram past the entry point.
+		if i > 0 && in.Symbol() != "" {
+			break
+		}
+		if !isMapWrite(in) {
+			continue
+		}
+		// Stack stores (Dst == R10) are local-variable assignments, not
+		// map writes — clang emits one for every `struct k key;` that
+		// later feeds bpf_map_lookup_elem. Treating them as map writes
+		// would dynamic-reject every plugin that uses a stack-built key.
+		if isStackStore(in) {
+			continue
+		}
+		mapName := findStoreTargetMapName(ins[:i], in.Dst)
+		if mapName == "" {
+			// Conservative reject: clang typically emits a static
+			// LoadMapPtr right before the store, so a non-trace-able
+			// destination usually means lookup-return-value writes
+			// (e.g. *(map_lookup_elem(&m, &k)) = ...) which would
+			// still be writing into some map's values; rather than
+			// chase the lookup origin we ask the plugin author to
+			// route writes through an RW map.
+			violations = append(violations, roViolation{insIdx: i})
+			continue
+		}
+		if _, ro := roMaps[mapName]; ro {
+			violations = append(violations, roViolation{insIdx: i, mapName: mapName})
+		}
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	details := make([]string, 0, len(violations))
+	for _, v := range violations {
+		if v.mapName == "" {
+			details = append(details, fmt.Sprintf(
+				"instruction #%d: store target is a (dynamic) map pointer "+
+					"(LoadMapPtr-sourced register expected)", v.insIdx))
+		} else {
+			details = append(details, fmt.Sprintf(
+				"instruction #%d: store into read-only map %q",
+				v.insIdx, v.mapName))
+		}
+	}
+	return fmt.Errorf(
+		"%w: plugin program %q has %d disallowed map write(s); shared RO "+
+			"maps are read-only from plugins (use scratch_map / stats_map "+
+			"or plugin-owned maps for state). Violations:\n  - %s",
+		ErrPluginROWrite, spec.Name, len(violations), strings.Join(details, "\n  - "),
+	)
 }
 
 // checkExitProximity verifies every exit instruction in the main program

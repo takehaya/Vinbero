@@ -3,6 +3,7 @@ package bpf
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 
@@ -66,7 +67,7 @@ func TestValidatePluginProgram_Valid(t *testing.T) {
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	}
-	if err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins)); err != nil {
+	if err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins), nil); err != nil {
 		t.Fatalf("expected valid spec to pass, got: %v", err)
 	}
 }
@@ -76,7 +77,7 @@ func TestValidatePluginProgram_MissingEpilogueAndTailCall(t *testing.T) {
 		asm.Mov.Imm(asm.R0, 2),
 		asm.Return(),
 	}
-	err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins))
+	err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins), nil)
 	if err == nil {
 		t.Fatal("expected error when neither epilogue nor tail call present")
 	}
@@ -91,14 +92,14 @@ func TestValidatePluginProgram_WrongProgType(t *testing.T) {
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	}
-	err := ValidatePluginProgram(buildSpec("tc", ebpf.SchedCLS, ins))
+	err := ValidatePluginProgram(buildSpec("tc", ebpf.SchedCLS, ins), nil)
 	if err == nil || !strings.Contains(err.Error(), "xdp") {
 		t.Fatalf("expected 'xdp' in error, got: %v", err)
 	}
 }
 
 func TestValidatePluginProgram_NilSpec(t *testing.T) {
-	if err := ValidatePluginProgram(nil); err == nil {
+	if err := ValidatePluginProgram(nil, nil); err == nil {
 		t.Fatal("expected error for nil spec")
 	}
 }
@@ -109,7 +110,7 @@ func TestValidatePluginProgram_CallsOtherSymbol(t *testing.T) {
 		callToSymbol("some_helper"),
 		asm.Return(),
 	}
-	if err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins)); err == nil {
+	if err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins), nil); err == nil {
 		t.Fatal("expected error when tailcall_epilogue absent even with other calls")
 	}
 }
@@ -118,7 +119,7 @@ func TestValidatePluginProgram_CallsOtherSymbol(t *testing.T) {
 func TestValidatePluginProgram_ValidTailCallOnly(t *testing.T) {
 	ins := append(asm.Instructions{}, tailCallTo("sid_endpoint_progs", 33)...)
 	ins = append(ins, asm.Mov.Imm(asm.R0, 2), asm.Return())
-	if err := ValidatePluginProgram(buildSpec("dispatch", ebpf.XDP, ins)); err != nil {
+	if err := ValidatePluginProgram(buildSpec("dispatch", ebpf.XDP, ins), nil); err != nil {
 		t.Fatalf("expected tail-call-only plugin to pass, got: %v", err)
 	}
 }
@@ -126,7 +127,7 @@ func TestValidatePluginProgram_ValidTailCallOnly(t *testing.T) {
 func TestValidatePluginProgram_ValidTailCallHeadendV4(t *testing.T) {
 	ins := append(asm.Instructions{}, tailCallTo("headend_v4_progs", 20)...)
 	ins = append(ins, asm.Mov.Imm(asm.R0, 2), asm.Return())
-	if err := ValidatePluginProgram(buildSpec("dispatch", ebpf.XDP, ins)); err != nil {
+	if err := ValidatePluginProgram(buildSpec("dispatch", ebpf.XDP, ins), nil); err != nil {
 		t.Fatalf("expected tail-call into headend_v4_progs to pass, got: %v", err)
 	}
 }
@@ -135,7 +136,7 @@ func TestValidatePluginProgram_ValidTailCallHeadendV4(t *testing.T) {
 func TestValidatePluginProgram_BothEpilogueAndTailCall(t *testing.T) {
 	ins := append(asm.Instructions{}, tailCallTo("sid_endpoint_progs", 40)...)
 	ins = append(ins, callToSymbol(SymTailcallEpilogue), asm.Return())
-	if err := ValidatePluginProgram(buildSpec("mixed", ebpf.XDP, ins)); err != nil {
+	if err := ValidatePluginProgram(buildSpec("mixed", ebpf.XDP, ins), nil); err != nil {
 		t.Fatalf("expected leaf+dispatch plugin to pass, got: %v", err)
 	}
 }
@@ -144,7 +145,7 @@ func TestValidatePluginProgram_BothEpilogueAndTailCall(t *testing.T) {
 func TestValidatePluginProgram_ForeignTailCall(t *testing.T) {
 	ins := append(asm.Instructions{}, tailCallTo("my_private_progs", 0)...)
 	ins = append(ins, callToSymbol(SymTailcallEpilogue), asm.Return())
-	err := ValidatePluginProgram(buildSpec("escape", ebpf.XDP, ins))
+	err := ValidatePluginProgram(buildSpec("escape", ebpf.XDP, ins), nil)
 	if err == nil {
 		t.Fatal("expected error for tail-call into unauthorized map")
 	}
@@ -163,7 +164,7 @@ func TestValidatePluginProgram_DynamicTailCall(t *testing.T) {
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	}
-	err := ValidatePluginProgram(buildSpec("dyn", ebpf.XDP, ins))
+	err := ValidatePluginProgram(buildSpec("dyn", ebpf.XDP, ins), nil)
 	if err == nil {
 		t.Fatal("expected error for dynamic (non-static-map) tail call")
 	}
@@ -181,7 +182,7 @@ func TestValidatePluginProgram_ForbiddenHelper_RedirectMap(t *testing.T) {
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	}
-	err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins))
+	err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins), nil)
 	if err == nil {
 		t.Fatal("expected error for bpf_redirect_map call")
 	}
@@ -205,7 +206,7 @@ func TestValidatePluginProgram_KfuncCall_Allowed(t *testing.T) {
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	}
-	if err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins)); err != nil {
+	if err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins), nil); err != nil {
 		t.Fatalf("expected kfunc call to pass validation, got: %v", err)
 	}
 }
@@ -227,7 +228,7 @@ func TestValidatePluginProgram_ExitWithoutEpilogueNearby(t *testing.T) {
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	)
-	err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins))
+	err := ValidatePluginProgram(buildSpec("p", ebpf.XDP, ins), nil)
 	if err == nil {
 		t.Fatal("expected error for exit with no epilogue in proximity")
 	}
@@ -257,7 +258,7 @@ func TestValidatePluginCollection_BTF_MapValueTypeMismatch(t *testing.T) {
 			},
 		},
 	}
-	if _, err := ValidatePluginCollection(spec, "xdp_entry"); err == nil {
+	if _, err := ValidatePluginCollection(spec, "xdp_entry", nil); err == nil {
 		t.Fatal("expected BTF type mismatch to be rejected")
 	} else if !strings.Contains(err.Error(), "sid_function_entry") {
 		t.Errorf("error should name the expected type, got: %v", err)
@@ -338,6 +339,207 @@ func TestValidatePluginAuxType_AnchorMissing(t *testing.T) {
 	}
 }
 
+// roSet is the canonical Phase 2 RO set used across the asm-level write
+// tests. Keeping the helper close to the tests makes intent obvious — a
+// real-world miswire would be a no-op for the dispatch tests above
+// (which pass nil) but invalidate the tests below (which need a non-nil
+// set to exercise checkROWrites).
+func roSet() map[string]struct{} {
+	return SharedReadOnlyMapNamesSet()
+}
+
+// roSpec wraps a sequence of instructions in the minimal "valid plugin"
+// shell (epilogue call + return) so individual write tests don't have to
+// duplicate boilerplate. The caller provides the lead-in instructions
+// that exercise the RO-write detection.
+func roSpec(name string, lead asm.Instructions) *ebpf.ProgramSpec {
+	ins := append(asm.Instructions{}, lead...)
+	ins = append(ins, callToSymbol(SymTailcallEpilogue), asm.Return())
+	return buildSpec(name, ebpf.XDP, ins)
+}
+
+// Direct store into a vinbero-managed read-only map must reject. Mirrors
+// the canonical clang sequence `LoadMapPtr Rx, &m; *(Rx + off) = imm`.
+func TestValidatePluginROWrites_DirectROWrite(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.StoreImm(asm.R1, 0, 99, asm.Word),
+	}
+	err := ValidatePluginProgram(roSpec("evil", lead), roSet())
+	if err == nil {
+		t.Fatal("expected RO write to be rejected")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sid_function_map") {
+		t.Errorf("error should name the RO map, got: %v", err)
+	}
+}
+
+// Atomic RMW (BPF_ATOMIC family, e.g. __sync_fetch_and_add) into an RO
+// map must also reject — atomic encodes as StXClass with AtomicMode and
+// is a write as far as the kernel verifier is concerned.
+func TestValidatePluginROWrites_DirectROAtomic(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.Mov.Imm(asm.R2, 1),
+		asm.FetchAdd.Mem(asm.R1, asm.R2, asm.DWord, 0),
+	}
+	err := ValidatePluginProgram(roSpec("evil_atomic", lead), roSet())
+	if err == nil {
+		t.Fatal("expected atomic RO write to be rejected")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite, got: %v", err)
+	}
+}
+
+// Writes targeting an RW map (scratch_map / stats_map) are the supported
+// way for plugins to keep mutable state and must pass.
+func TestValidatePluginROWrites_RWAllowed(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("scratch_map"),
+		asm.StoreImm(asm.R1, 0, 7, asm.Word),
+	}
+	if err := ValidatePluginProgram(roSpec("ok", lead), roSet()); err != nil {
+		t.Fatalf("write into scratch_map (RW) should pass, got: %v", err)
+	}
+}
+
+// A store whose destination register cannot be traced back to a static
+// LoadMapPtr must reject conservatively — typical case is writing
+// through a map_lookup_elem return value (R0 after a BPF_CALL).
+func TestValidatePluginROWrites_DynamicReject(t *testing.T) {
+	// Sequence simulates: `R1 = bpf_map_lookup_elem(...); *(R1 + 0) = 1;`
+	// The R1 source is the helper return (R0 → R1 mov), not a LoadMapPtr,
+	// so findStoreTargetMapName returns "" and the violation is reported
+	// as "(dynamic)".
+	lead := asm.Instructions{
+		asm.FnMapLookupElem.Call(),    // R0 = lookup result
+		asm.Mov.Reg(asm.R1, asm.R0),   // hide the origin
+		asm.StoreImm(asm.R1, 0, 1, asm.Word),
+	}
+	err := ValidatePluginProgram(roSpec("dyn", lead), roSet())
+	if err == nil {
+		t.Fatal("expected dynamic store target to be rejected")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "(dynamic)") {
+		t.Errorf("error should mention (dynamic), got: %v", err)
+	}
+}
+
+// Subprogram body sitting after the main program (clang appends them
+// after the entry point) must NOT be scanned. Otherwise legitimate
+// epilogue writes to slot_stats_* would trip the check the moment we
+// re-classify those maps as RO.
+func TestValidatePluginROWrites_SubprogramSkipped(t *testing.T) {
+	main := asm.Instructions{
+		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	}
+	// Subprogram boundary: an instruction with a non-empty Symbol().
+	// We simulate `slot_stats_endpoint` (currently RW, classified as
+	// such; for the purposes of the test we treat it as RO via the set
+	// override below) being written from inside the subprogram.
+	subStart := asm.LoadMapPtr(asm.R1, 0).
+		WithReference("slot_stats_endpoint").
+		WithSymbol("subprogram_body")
+	sub := asm.Instructions{
+		subStart,
+		asm.StoreImm(asm.R1, 0, 1, asm.Word),
+		asm.Return(),
+	}
+	prog := buildSpec("with_sub", ebpf.XDP, append(main, sub...))
+
+	// Force "slot_stats_endpoint" into the RO set so the test can prove
+	// the scope guard wins even when the map name would otherwise match.
+	ro := map[string]struct{}{"slot_stats_endpoint": {}}
+	if err := ValidatePluginProgram(prog, ro); err != nil {
+		t.Fatalf("subprogram writes must be skipped, got: %v", err)
+	}
+}
+
+// A plugin-owned map (not in any vinbero shared set) is fine; the
+// validator only enforces the RO contract for vinbero-managed names.
+func TestValidatePluginROWrites_OwnedMapAllowed(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("plugin_counter_map"),
+		asm.StoreImm(asm.R1, 0, 42, asm.Word),
+	}
+	if err := ValidatePluginProgram(roSpec("owned", lead), roSet()); err != nil {
+		t.Fatalf("plugin-owned map write should pass, got: %v", err)
+	}
+}
+
+// Stack writes (Dst == R10/RFP) are how clang lowers C local variables
+// such as `struct ipv6_key key;`. They must not be flagged as map
+// writes — otherwise every plugin that builds a lookup key on the
+// stack would be rejected as (dynamic). Regression test pinning the
+// fix that landed alongside the simple-acl example.
+func TestValidatePluginROWrites_StackStoreIgnored(t *testing.T) {
+	lead := asm.Instructions{
+		// `*(R10 - 8) = 0;` — clang's typical stack-zero before key
+		// construction. Should be silently ignored.
+		asm.StoreImm(asm.RFP, -8, 0, asm.DWord),
+		// And a register store to the stack as well, to cover both
+		// StClass (immediate) and StXClass (register) opcodes.
+		asm.Mov.Imm(asm.R1, 42),
+		asm.StoreMem(asm.RFP, -16, asm.R1, asm.Word),
+	}
+	if err := ValidatePluginProgram(roSpec("stack", lead), roSet()); err != nil {
+		t.Fatalf("stack stores must be ignored, got: %v", err)
+	}
+}
+
+// Back-compat path: when roMaps is nil the check is a no-op even if the
+// plugin clearly writes to an RO map. Tests and any internal callers
+// that don't supply the set must keep working.
+func TestValidatePluginROWrites_NilROSet(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.StoreImm(asm.R1, 0, 99, asm.Word),
+	}
+	if err := ValidatePluginProgram(roSpec("legacy", lead), nil); err != nil {
+		t.Fatalf("nil roMaps must skip the RO check, got: %v", err)
+	}
+}
+
+// ParseROEnforceMode round-trip: empty / "warn" → ROEnforceWarn,
+// "enforce" → ROEnforceEnforce, anything else is an error so a typo in
+// vinbero.yaml can't silently downgrade the policy.
+func TestParseROEnforceMode(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   ROEnforceMode
+		hasErr bool
+	}{
+		{"", ROEnforceWarn, false},
+		{"warn", ROEnforceWarn, false},
+		{"enforce", ROEnforceEnforce, false},
+		{"strict", 0, true},
+	}
+	for _, c := range cases {
+		got, err := ParseROEnforceMode(c.in)
+		if (err != nil) != c.hasErr {
+			t.Errorf("ParseROEnforceMode(%q) err=%v hasErr=%v", c.in, err, c.hasErr)
+			continue
+		}
+		if !c.hasErr && got != c.want {
+			t.Errorf("ParseROEnforceMode(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+	// Stringer round-trips so log output stays parseable.
+	if ROEnforceWarn.String() != "warn" || ROEnforceEnforce.String() != "enforce" {
+		t.Errorf("String() round-trip mismatch: warn=%q enforce=%q",
+			ROEnforceWarn.String(), ROEnforceEnforce.String())
+	}
+}
+
 // BTF absent (stripped ELF): validation falls back to asm-level checks and
 // must succeed if those pass.
 func TestValidatePluginCollection_BTF_MissingOK(t *testing.T) {
@@ -359,7 +561,7 @@ func TestValidatePluginCollection_BTF_MissingOK(t *testing.T) {
 			},
 		},
 	}
-	if _, err := ValidatePluginCollection(spec, "xdp_entry"); err != nil {
+	if _, err := ValidatePluginCollection(spec, "xdp_entry", nil); err != nil {
 		t.Fatalf("expected stripped-BTF plugin to pass, got: %v", err)
 	}
 }
