@@ -179,11 +179,11 @@ func (s *PluginServer) PluginRegister(
 	// O(1) per name so the cost is in the noise compared to ELF parsing.
 	roSet := bpf.SharedReadOnlyMapNamesSet()
 	if _, err := bpf.ValidatePluginCollection(spec, msg.Program, roSet); err != nil {
-		// Phase 2 staged rollout: in warn mode we keep loading the
-		// plugin but surface every detected violation to the audit log
-		// so ops can see who would be rejected once we flip to enforce.
-		// Other validator failures (forbidden helper, missing epilogue,
-		// BTF mismatch, ...) are not warn-eligible and always reject.
+		// In warn mode we keep loading the plugin but surface every
+		// detected violation to the audit log so ops can see who would
+		// be rejected once enforce is flipped on. Other validator
+		// failures (forbidden helper, missing epilogue, BTF mismatch,
+		// ...) are not warn-eligible and always reject.
 		if s.roEnforce == bpf.ROEnforceWarn && errors.Is(err, bpf.ErrPluginROWrite) {
 			s.logger.Warn("plugin RO write violation (warn-only)",
 				zap.String("program", msg.Program),

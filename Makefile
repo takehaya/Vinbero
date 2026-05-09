@@ -146,7 +146,7 @@ sdk-test: sdk-build build-targets ## Validate every built sample plugin via the 
 		./out/bin/vinbero plugin validate --prog "$$obj" --program "$$name" || exit 1; \
 	done
 
-# Phase 2 RO-write enforcement regression check: every plugin under
+# RO-write enforcement regression check: every plugin under
 # SDK_NEGATIVE_DIRS is expected to fail `vbctl plugin validate`. If one
 # of them ever passes, the validator silently regressed — fail loudly.
 sdk-test-negative: build-targets ## Confirm validator rejects intentionally-bad sample plugins

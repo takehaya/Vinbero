@@ -174,10 +174,10 @@ func TestIndexAllocatorWithOwnerLockedSerializesFree(t *testing.T) {
 
 // TestParseAuxOwnerTag covers every persisted format we promise to
 // understand: the legacy unversioned "plugin:endpoint:32" / "builtin" of
-// Phase 1d, the version-stamped "plugin:v1:endpoint:32" / "builtin:v1"
-// of Phase 2, and well-formed errors for malformed inputs. Tests pin the
-// migration contract: ParseAuxOwnerTag must accept old pins so Phase 2
-// daemons can read pins written by Phase 1d.
+// the version-stamped "plugin:v1:endpoint:32" / "builtin:v1", and
+// well-formed errors for malformed inputs. The migration contract:
+// ParseAuxOwnerTag must accept the legacy unversioned pins so old pin
+// directories remain readable.
 func TestParseAuxOwnerTag(t *testing.T) {
 	cases := []struct {
 		name        string

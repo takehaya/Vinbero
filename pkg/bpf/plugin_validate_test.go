@@ -413,11 +413,11 @@ func TestValidatePluginROWrites_RWAllowed(t *testing.T) {
 func TestValidatePluginROWrites_DynamicReject(t *testing.T) {
 	// Sequence simulates: `R1 = bpf_map_lookup_elem(...); *(R1 + 0) = 1;`
 	// The R1 source is the helper return (R0 → R1 mov), not a LoadMapPtr,
-	// so findStoreTargetMapName returns "" and the violation is reported
-	// as "(dynamic)".
+	// so findStaticMapPtrSource returns "" and the violation falls into
+	// the "could not be resolved" branch.
 	lead := asm.Instructions{
-		asm.FnMapLookupElem.Call(),    // R0 = lookup result
-		asm.Mov.Reg(asm.R1, asm.R0),   // hide the origin
+		asm.FnMapLookupElem.Call(),  // R0 = lookup result
+		asm.Mov.Reg(asm.R1, asm.R0), // hide the origin
 		asm.StoreImm(asm.R1, 0, 1, asm.Word),
 	}
 	err := ValidatePluginProgram(roSpec("dyn", lead), roSet())
@@ -427,8 +427,8 @@ func TestValidatePluginROWrites_DynamicReject(t *testing.T) {
 	if !errors.Is(err, ErrPluginROWrite) {
 		t.Errorf("expected ErrPluginROWrite, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "(dynamic)") {
-		t.Errorf("error should mention (dynamic), got: %v", err)
+	if !strings.Contains(err.Error(), "could not be resolved") {
+		t.Errorf("error should describe the unresolved store, got: %v", err)
 	}
 }
 

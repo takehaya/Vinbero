@@ -45,7 +45,7 @@ func (s *Server) Setup() {
 	// per-slot aux BTF types when callers use plugin_aux_json. The actual
 	// handler registration happens further down with the other services.
 	//
-	// roEnforce gates the Phase 2 asm-level RO-write check. An invalid
+	// roEnforce gates the asm-level RO-write check. An invalid
 	// config string falls back to warn-only so a typo in vinbero.yaml
 	// can't accidentally lock out previously-working plugins; the parse
 	// failure is surfaced via the audit log instead.

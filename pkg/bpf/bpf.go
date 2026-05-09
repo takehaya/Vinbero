@@ -19,7 +19,7 @@ import (
 var pinnedControlMaps = []string{
 	"sid_function_map",
 	"sid_aux_map",
-	"aux_owner_map", // Phase 2: persistent owner tags paired with sid_aux_map
+	"aux_owner_map", // persistent owner tags paired with sid_aux_map
 	"headend_v4_map",
 	"headend_v6_map",
 	"headend_l2_map",

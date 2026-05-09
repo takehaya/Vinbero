@@ -107,7 +107,7 @@ const ExitProximityWindow = 64
 //     plugins built with VINBERO_PLUGIN always pass because the macro
 //     produces a single exit; hand-written plugins must keep each return
 //     close to an epilogue or tail-call.
-//  6. Stores into vinbero shared read-only maps are rejected (Phase 2
+//  6. Stores into vinbero shared read-only maps are rejected (the
 //     RO-enforce). roMaps == nil disables the check; production callers
 //     pass SharedReadOnlyMapNamesSet().
 func ValidatePluginProgram(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
@@ -260,25 +260,34 @@ func isBpfTailCall(ins asm.Instruction) bool {
 	return ins.IsBuiltinCall() && ins.Constant == int64(asm.FnTailCall)
 }
 
-// findTailCallMapName walks backwards to find the most recent instruction
-// that wrote R2 (the map argument of bpf_tail_call). Returns the map name
-// when R2 was set by a static LoadMapPtr; "" otherwise.
+// findStaticMapPtrSource walks back to the most recent instruction that
+// wrote dstReg and returns the map name when that origin is a static
+// LoadMapPtr. Anything else (BPF_CALL return value, register copy from
+// another register, stack reload) yields "" so the caller can reject
+// the access conservatively.
 //
-// Assumes clang's canonical `LoadMapPtr R2, <map>; ...; bpf_tail_call`
-// emission pattern. Inline assembly or hand-edited BPF that derives R2
-// from a non-map-pointer source is reported as "(dynamic)" and rejected.
-func findTailCallMapName(prev asm.Instructions) string {
+// Assumes clang's canonical `LoadMapPtr Rx, &m; ...; <use Rx>` emission
+// pattern. Optimised paths that move the map pointer through the stack
+// or another register fall through to the conservative empty result.
+func findStaticMapPtrSource(prev asm.Instructions, dstReg asm.Register) string {
 	for i := len(prev) - 1; i >= 0; i-- {
 		ins := prev[i]
-		if ins.Dst != asm.R2 {
+		if ins.Dst != dstReg {
 			continue
 		}
 		if ins.IsLoadFromMap() {
 			return ins.Reference()
 		}
-		return ""
+		return "" // overwritten by something we can't trace statically
 	}
 	return ""
+}
+
+// findTailCallMapName resolves the map argument (R2) of a bpf_tail_call.
+// Thin specialization of findStaticMapPtrSource fixed to R2; "(dynamic)"
+// pointers are reported as "" and rejected upstream.
+func findTailCallMapName(prev asm.Instructions) string {
+	return findStaticMapPtrSource(prev, asm.R2)
 }
 
 // isMapWrite reports whether ins writes to memory through a register-based
@@ -299,31 +308,6 @@ func isMapWrite(ins asm.Instruction) bool {
 // false-positives on every plugin that uses a stack-allocated key.
 func isStackStore(ins asm.Instruction) bool {
 	return ins.Dst == asm.RFP
-}
-
-// findStoreTargetMapName walks back to the most recent instruction that
-// wrote dstReg and returns the map name when that origin is a static
-// LoadMapPtr. Anything else (BPF_CALL return value, register copy from
-// another register, stack reload) yields "" so the caller can reject the
-// store conservatively.
-//
-// Mirrors findTailCallMapName but generalised over the destination
-// register: clang emits `LoadMapPtr Rx, &m; ...; *(Rx + off) = ...` for
-// the canonical "static map pointer + write" pattern. Optimised paths
-// that move the pointer through the stack or another register fall
-// through to the conservative reject.
-func findStoreTargetMapName(prev asm.Instructions, dstReg asm.Register) string {
-	for i := len(prev) - 1; i >= 0; i-- {
-		p := prev[i]
-		if p.Dst != dstReg {
-			continue
-		}
-		if p.IsLoadFromMap() {
-			return p.Reference()
-		}
-		return "" // overwritten by something we can't trace statically
-	}
-	return ""
 }
 
 // roViolation describes one disallowed map write detected during static
@@ -350,6 +334,12 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	if len(roMaps) == 0 {
 		return nil
 	}
+	// One forward pass: track the most recent LoadMapPtr-sourced map name
+	// per destination register. Anything else that writes a register
+	// invalidates the entry. This avoids a quadratic reverse-scan per
+	// store on adversarial inputs.
+	const numRegs = 11 // R0..R10
+	var lastMap [numRegs]string
 	var violations []roViolation
 	ins := spec.Instructions
 	for i, in := range ins {
@@ -357,30 +347,39 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 		if i > 0 && in.Symbol() != "" {
 			break
 		}
-		if !isMapWrite(in) {
+		if isMapWrite(in) {
+			// Stack stores (Dst == R10) are local-variable assignments,
+			// not map writes — clang emits one for every `struct k key;`
+			// that later feeds bpf_map_lookup_elem.
+			if !isStackStore(in) {
+				dst := int(in.Dst)
+				var mapName string
+				if dst >= 0 && dst < numRegs {
+					mapName = lastMap[dst]
+				}
+				if mapName == "" {
+					violations = append(violations, roViolation{insIdx: i})
+				} else if _, ro := roMaps[mapName]; ro {
+					violations = append(violations, roViolation{insIdx: i, mapName: mapName})
+				}
+			}
+		}
+		// Update the map-pointer table for this instruction's Dst.
+		// LoadMapPtr writes a known map name; any other write to a
+		// register invalidates whatever was there. Stores (BPF_ST*) do
+		// not modify Dst (they write *through* it), so they leave the
+		// table alone.
+		if in.OpCode.Class() == asm.StClass || in.OpCode.Class() == asm.StXClass {
 			continue
 		}
-		// Stack stores (Dst == R10) are local-variable assignments, not
-		// map writes — clang emits one for every `struct k key;` that
-		// later feeds bpf_map_lookup_elem. Treating them as map writes
-		// would dynamic-reject every plugin that uses a stack-built key.
-		if isStackStore(in) {
+		dst := int(in.Dst)
+		if dst < 0 || dst >= numRegs {
 			continue
 		}
-		mapName := findStoreTargetMapName(ins[:i], in.Dst)
-		if mapName == "" {
-			// Conservative reject: clang typically emits a static
-			// LoadMapPtr right before the store, so a non-trace-able
-			// destination usually means lookup-return-value writes
-			// (e.g. *(map_lookup_elem(&m, &k)) = ...) which would
-			// still be writing into some map's values; rather than
-			// chase the lookup origin we ask the plugin author to
-			// route writes through an RW map.
-			violations = append(violations, roViolation{insIdx: i})
-			continue
-		}
-		if _, ro := roMaps[mapName]; ro {
-			violations = append(violations, roViolation{insIdx: i, mapName: mapName})
+		if in.IsLoadFromMap() {
+			lastMap[dst] = in.Reference()
+		} else if in.Dst != 0 || in.OpCode != 0 { // any real instruction with Dst
+			lastMap[dst] = ""
 		}
 	}
 	if len(violations) == 0 {
@@ -390,8 +389,9 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	for _, v := range violations {
 		if v.mapName == "" {
 			details = append(details, fmt.Sprintf(
-				"instruction #%d: store target is a (dynamic) map pointer "+
-					"(LoadMapPtr-sourced register expected)", v.insIdx))
+				"instruction #%d: store target could not be resolved to a "+
+					"known map; route writes through scratch_map / stats_map "+
+					"or a plugin-owned map", v.insIdx))
 		} else {
 			details = append(details, fmt.Sprintf(
 				"instruction #%d: store into read-only map %q",

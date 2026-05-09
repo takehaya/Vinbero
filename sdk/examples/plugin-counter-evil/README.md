@@ -1,6 +1,6 @@
 # Plugin Example (Negative): Read-Only Map Write Violation
 
-このディレクトリは Vinbero Plugin SDK Phase 2 (asm-level RO write enforce) の
+このディレクトリは Vinbero Plugin SDK の asm-level RO-write enforcer に対する
 **負の例 (negative example)** です。意図的に契約違反となるプラグインを
 コンパイルし、`vbctl plugin validate` が確実に reject することを確認するため
 だけに存在します。

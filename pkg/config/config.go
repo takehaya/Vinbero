@@ -40,7 +40,7 @@ type SettingConfig struct {
 // these values — they only adjust the behaviour of `PluginRegister`.
 type ValidateConfig struct {
 	// RoEnforce selects how plugin writes into vinbero shared read-only
-	// maps are handled at register time. "warn" (default during the Phase 2
+	// maps are handled at register time. "warn" (default during initial
 	// rollout) logs the violation but still loads the plugin; "enforce"
 	// hard-rejects the RPC. Empty string is treated as "warn".
 	RoEnforce string `yaml:"ro_enforce,omitempty" default:"warn"`
