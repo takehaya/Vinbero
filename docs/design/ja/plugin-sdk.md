@@ -124,7 +124,7 @@ vinbero plugin validate --prog plugin.o --program my_plugin
 | **Read-Only** (14 本) | `sid_function_map`, `sid_aux_map`, `headend_v4_map`, `headend_v6_map`, `headend_l2_map`, `fdb_map`, `bd_peer_map`, `bd_peer_reverse_map`, `esi_map`, `bd_peer_l2_ext_map`, `headend_l2_ext_map`, `bd_local_esi_map`, `dx2v_map`, `tailcall_ctx_map` | ルーティング / BD / ESI などの制御状態 | プラグインから書き換えるとデータプレーンが壊れる。必ず読み取りのみ |
 | **Read-Write** (8 本) | `scratch_map`, `stats_map`, `slot_stats_endpoint`, `slot_stats_headend_v4`, `slot_stats_headend_v6`, `sid_endpoint_progs`, `headend_v4_progs`, `headend_v6_progs` | 統計 / scratch / PROG_ARRAY | 書き込み可 (ただし `slot_stats_*` は epilogue 経由、PROG_ARRAY は `bpf_tail_call` 専用) |
 
-プラグイン ELF が RO カテゴリのマップに write 命令を含んでいると、将来バージョン (Phase 2) では register 時に reject される予定です。現状は audit ログ (`slog` の `plugin map linkage` イベント) に記録されるのみ。
+プラグイン ELF が RO カテゴリのマップに write 命令 (`BPF_ST` / `BPF_STX` / `BPF_ATOMIC`) を含んでいると、Phase 2 の asm レベル静的検証 (`pkg/bpf/plugin_validate.go::checkROWrites`) が **load 前に検出**します。書き込み先レジスタが静的に追えない場合 (例: `bpf_map_lookup_elem` の戻り値経由) も保守的に reject します。CLI (`vbctl plugin validate`) は常に enforce で動き、サーバー側は段階導入のため `settings.validate.ro_enforce` で `warn` (audit ログのみ、デフォルト) と `enforce` (RPC 拒否) を切替できます。BPF stack (`R10` = frame pointer) への書き込みはローカル変数のためのもので map 書込ではないので除外されます。
 
 ### プラグイン固有マップ
 

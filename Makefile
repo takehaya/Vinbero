@@ -112,9 +112,15 @@ install-dev-tools: ## install development tools
 ## SDK:
 SDK_PREFIX ?= /usr/local
 SDK_EXAMPLES := $(wildcard sdk/examples/*/Makefile)
-SDK_EXAMPLE_DIRS := $(patsubst %/Makefile,%,$(SDK_EXAMPLES))
+SDK_ALL_DIRS := $(patsubst %/Makefile,%,$(SDK_EXAMPLES))
+# Negative examples are plugins authored to violate the contract on
+# purpose. They MUST be excluded from sdk-build / sdk-test (which assume
+# every example passes `vbctl plugin validate`) and instead run through
+# sdk-test-negative, which expects validate to fail.
+SDK_NEGATIVE_DIRS := sdk/examples/plugin-counter-evil
+SDK_EXAMPLE_DIRS := $(filter-out $(SDK_NEGATIVE_DIRS),$(SDK_ALL_DIRS))
 
-.PHONY: install-sdk sdk-build sdk-test sdk-clean
+.PHONY: install-sdk sdk-build sdk-test sdk-test-negative sdk-clean
 install-sdk: ## Install plugin SDK headers into $(SDK_PREFIX)/include/vinbero
 	install -d $(SDK_PREFIX)/include/vinbero
 	install -m 644 sdk/c/include/vinbero/*.h $(SDK_PREFIX)/include/vinbero/
@@ -122,7 +128,7 @@ install-sdk: ## Install plugin SDK headers into $(SDK_PREFIX)/include/vinbero
 	install -m 644 src/core/*.h $(SDK_PREFIX)/include/core/
 	install -m 644 sdk/c/Makefile.plugin $(SDK_PREFIX)/include/vinbero/Makefile.plugin
 
-sdk-build: ## Build every sample plugin under sdk/examples/
+sdk-build: ## Build every sample plugin under sdk/examples/ (positive examples only)
 	@for d in $(SDK_EXAMPLE_DIRS); do \
 		echo "[sdk-build] $$d"; \
 		$(MAKE) -C $$d || exit 1; \
@@ -140,8 +146,26 @@ sdk-test: sdk-build build-targets ## Validate every built sample plugin via the 
 		./out/bin/vinbero plugin validate --prog "$$obj" --program "$$name" || exit 1; \
 	done
 
-sdk-clean: ## Clean every sample plugin under sdk/examples/
-	@for d in $(SDK_EXAMPLE_DIRS); do \
+# Phase 2 RO-write enforcement regression check: every plugin under
+# SDK_NEGATIVE_DIRS is expected to fail `vbctl plugin validate`. If one
+# of them ever passes, the validator silently regressed — fail loudly.
+sdk-test-negative: build-targets ## Confirm validator rejects intentionally-bad sample plugins
+	@for d in $(SDK_NEGATIVE_DIRS); do \
+		echo "[sdk-test-negative] build $$d"; \
+		$(MAKE) -C $$d || exit 1; \
+		obj="$$d/plugin.o"; \
+		name=$$(basename $$d | tr '-' '_'); \
+		echo "[sdk-test-negative] expect-reject $$obj"; \
+		if ./out/bin/vinbero plugin validate --prog "$$obj" --program "$$name" >/dev/null 2>&1; then \
+			echo "FAIL: $$obj passed validate but should be rejected"; \
+			exit 1; \
+		else \
+			echo "OK: $$obj correctly rejected"; \
+		fi; \
+	done
+
+sdk-clean: ## Clean every sample plugin under sdk/examples/ (positive + negative)
+	@for d in $(SDK_ALL_DIRS); do \
 		$(MAKE) -C $$d clean; \
 	done
 

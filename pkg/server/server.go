@@ -44,7 +44,23 @@ func (s *Server) Setup() {
 	// Plugin service is constructed first so SidFunctionServer can resolve
 	// per-slot aux BTF types when callers use plugin_aux_json. The actual
 	// handler registration happens further down with the other services.
-	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), s.logger)
+	//
+	// roEnforce gates the Phase 2 asm-level RO-write check. An invalid
+	// config string falls back to warn-only so a typo in vinbero.yaml
+	// can't accidentally lock out previously-working plugins; the parse
+	// failure is surfaced via the audit log instead.
+	roEnforce, err := bpf.ParseROEnforceMode(s.cfg.Setting.Validate.RoEnforce)
+	if err != nil {
+		s.logger.Warn("invalid settings.validate.ro_enforce; defaulting to warn",
+			zap.String("value", s.cfg.Setting.Validate.RoEnforce),
+			zap.Error(err),
+		)
+		roEnforce = bpf.ROEnforceWarn
+	}
+	s.logger.Info("plugin RO-write enforcement",
+		zap.String("mode", roEnforce.String()),
+	)
+	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
 
 	// SidFunction service
 	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer)
