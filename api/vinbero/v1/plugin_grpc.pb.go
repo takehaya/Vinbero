@@ -27,6 +27,8 @@ const (
 	PluginService_PluginAuxUpdate_FullMethodName  = "/vinbero.v1.PluginService/PluginAuxUpdate"
 	PluginService_PluginAuxGet_FullMethodName     = "/vinbero.v1.PluginService/PluginAuxGet"
 	PluginService_PluginAuxFree_FullMethodName    = "/vinbero.v1.PluginService/PluginAuxFree"
+	PluginService_PluginAuxPurge_FullMethodName   = "/vinbero.v1.PluginService/PluginAuxPurge"
+	PluginService_PluginAuxList_FullMethodName    = "/vinbero.v1.PluginService/PluginAuxList"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -47,6 +49,13 @@ type PluginServiceClient interface {
 	PluginAuxGet(ctx context.Context, in *PluginAuxGetRequest, opts ...grpc.CallOption) (*PluginAuxGetResponse, error)
 	// Zero the entry and release the index back to the allocator.
 	PluginAuxFree(ctx context.Context, in *PluginAuxFreeRequest, opts ...grpc.CallOption) (*PluginAuxFreeResponse, error)
+	// Free every aux index owned by (map_type, slot). Use after
+	// PluginUnregister to release indices that were not freed by
+	// PluginAuxFree before the slot was retired.
+	PluginAuxPurge(ctx context.Context, in *PluginAuxPurgeRequest, opts ...grpc.CallOption) (*PluginAuxPurgeResponse, error)
+	// Enumerate aux indices currently owned by the given filter. Empty
+	// filter returns all live indices.
+	PluginAuxList(ctx context.Context, in *PluginAuxListRequest, opts ...grpc.CallOption) (*PluginAuxListResponse, error)
 }
 
 type pluginServiceClient struct {
@@ -120,6 +129,24 @@ func (c *pluginServiceClient) PluginAuxFree(ctx context.Context, in *PluginAuxFr
 	return out, nil
 }
 
+func (c *pluginServiceClient) PluginAuxPurge(ctx context.Context, in *PluginAuxPurgeRequest, opts ...grpc.CallOption) (*PluginAuxPurgeResponse, error) {
+	out := new(PluginAuxPurgeResponse)
+	err := c.cc.Invoke(ctx, PluginService_PluginAuxPurge_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *pluginServiceClient) PluginAuxList(ctx context.Context, in *PluginAuxListRequest, opts ...grpc.CallOption) (*PluginAuxListResponse, error) {
+	out := new(PluginAuxListResponse)
+	err := c.cc.Invoke(ctx, PluginService_PluginAuxList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PluginServiceServer is the server API for PluginService service.
 // All implementations should embed UnimplementedPluginServiceServer
 // for forward compatibility
@@ -138,6 +165,13 @@ type PluginServiceServer interface {
 	PluginAuxGet(context.Context, *PluginAuxGetRequest) (*PluginAuxGetResponse, error)
 	// Zero the entry and release the index back to the allocator.
 	PluginAuxFree(context.Context, *PluginAuxFreeRequest) (*PluginAuxFreeResponse, error)
+	// Free every aux index owned by (map_type, slot). Use after
+	// PluginUnregister to release indices that were not freed by
+	// PluginAuxFree before the slot was retired.
+	PluginAuxPurge(context.Context, *PluginAuxPurgeRequest) (*PluginAuxPurgeResponse, error)
+	// Enumerate aux indices currently owned by the given filter. Empty
+	// filter returns all live indices.
+	PluginAuxList(context.Context, *PluginAuxListRequest) (*PluginAuxListResponse, error)
 }
 
 // UnimplementedPluginServiceServer should be embedded to have forward compatible implementations.
@@ -164,6 +198,12 @@ func (UnimplementedPluginServiceServer) PluginAuxGet(context.Context, *PluginAux
 }
 func (UnimplementedPluginServiceServer) PluginAuxFree(context.Context, *PluginAuxFreeRequest) (*PluginAuxFreeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PluginAuxFree not implemented")
+}
+func (UnimplementedPluginServiceServer) PluginAuxPurge(context.Context, *PluginAuxPurgeRequest) (*PluginAuxPurgeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PluginAuxPurge not implemented")
+}
+func (UnimplementedPluginServiceServer) PluginAuxList(context.Context, *PluginAuxListRequest) (*PluginAuxListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PluginAuxList not implemented")
 }
 
 // UnsafePluginServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -303,6 +343,42 @@ func _PluginService_PluginAuxFree_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_PluginAuxPurge_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PluginAuxPurgeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).PluginAuxPurge(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_PluginAuxPurge_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).PluginAuxPurge(ctx, req.(*PluginAuxPurgeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PluginService_PluginAuxList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PluginAuxListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).PluginAuxList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_PluginAuxList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).PluginAuxList(ctx, req.(*PluginAuxListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PluginService_ServiceDesc is the grpc.ServiceDesc for PluginService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -337,6 +413,14 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PluginAuxFree",
 			Handler:    _PluginService_PluginAuxFree_Handler,
+		},
+		{
+			MethodName: "PluginAuxPurge",
+			Handler:    _PluginService_PluginAuxPurge_Handler,
+		},
+		{
+			MethodName: "PluginAuxList",
+			Handler:    _PluginService_PluginAuxList_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

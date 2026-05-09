@@ -176,3 +176,56 @@ func (s *PluginServer) PluginAuxFree(
 	}
 	return connect.NewResponse(&v1.PluginAuxFreeResponse{}), nil
 }
+
+// PluginAuxPurge releases every aux index owned by (map_type, slot). The
+// typical operator flow is PluginUnregister -> PluginAuxList (to confirm
+// what leaks) -> PluginAuxPurge. We deliberately keep this separate from
+// PluginUnregister so a re-register does not surprise the new tenant
+// with the previous tenant's residual state -- callers must opt in.
+func (s *PluginServer) PluginAuxPurge(
+	ctx context.Context,
+	req *connect.Request[v1.PluginAuxPurgeRequest],
+) (*connect.Response[v1.PluginAuxPurgeResponse], error) {
+	msg := req.Msg
+	if err := bpf.ValidatePluginSlot(msg.MapType, msg.Slot); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	ownerTag := bpf.AuxOwnerPluginTag(msg.MapType, msg.Slot)
+	n := s.mapOps.FreeAllByOwner(ownerTag)
+	return connect.NewResponse(&v1.PluginAuxPurgeResponse{PurgedCount: uint32(n)}), nil
+}
+
+// PluginAuxList enumerates live aux indices for an operator-friendly
+// view. Empty filter returns everything (builtin + plugin); a populated
+// map_type narrows to plugin-owned indices for that map type, and
+// match_slot narrows further to one slot. The owner string carries the
+// version-stamped persisted form so external diff tools see a stable
+// representation independent of in-memory canonicalization.
+func (s *PluginServer) PluginAuxList(
+	ctx context.Context,
+	req *connect.Request[v1.PluginAuxListRequest],
+) (*connect.Response[v1.PluginAuxListResponse], error) {
+	msg := req.Msg
+	if msg.MapType != "" {
+		// When a filter is applied we still want to validate the (map_type,
+		// slot) pair so a typo surfaces as InvalidArgument rather than
+		// "always empty result". match_slot=false skips the slot range
+		// check because the slot is irrelevant to the filter.
+		if msg.MatchSlot {
+			if err := bpf.ValidatePluginSlot(msg.MapType, msg.Slot); err != nil {
+				return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			}
+		} else if _, _, err := bpf.PluginSlotRange(msg.MapType); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
+	infos := s.mapOps.ListAuxByOwner(msg.MapType, msg.Slot, msg.MatchSlot)
+	resp := &v1.PluginAuxListResponse{Entries: make([]*v1.AuxIndexInfo, 0, len(infos))}
+	for _, info := range infos {
+		resp.Entries = append(resp.Entries, &v1.AuxIndexInfo{
+			Index: info.Index,
+			Owner: info.Owner,
+		})
+	}
+	return connect.NewResponse(resp), nil
+}

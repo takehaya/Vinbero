@@ -1,10 +1,14 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"connectrpc.com/connect"
 	"github.com/cilium/ebpf/btf"
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
@@ -123,12 +127,76 @@ func TestEncodePluginAuxPayload_JSONWithAuxType(t *testing.T) {
 
 // TestOwnerTagFor fixes the owner-tag format. Both the server and the CLI
 // derive the same string from (map_type, slot), so a change here requires
-// coordinated updates elsewhere.
+// coordinated updates elsewhere. Phase 2 stamps the tag with a version
+// prefix so future format changes can be detected by ParseAuxOwnerTag.
 func TestOwnerTagFor(t *testing.T) {
-	if got := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, 32); got != "plugin:endpoint:32" {
-		t.Errorf("got %q, want plugin:endpoint:32", got)
+	if got := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, 32); got != "plugin:v1:endpoint:32" {
+		t.Errorf("got %q, want plugin:v1:endpoint:32", got)
 	}
-	if got := bpf.AuxOwnerPluginTag(bpf.MapTypeHeadendV4, 16); got != "plugin:headend_v4:16" {
-		t.Errorf("got %q, want plugin:headend_v4:16", got)
+	if got := bpf.AuxOwnerPluginTag(bpf.MapTypeHeadendV4, 16); got != "plugin:v1:headend_v4:16" {
+		t.Errorf("got %q, want plugin:v1:headend_v4:16", got)
 	}
+}
+
+// TestPluginAuxPurge_InvalidArgs guards the front-door validation on the
+// purge RPC. Real purge behaviour is exercised in the pkg/bpf allocator
+// tests because those don't need a BPF map handle; here we just pin the
+// error path so a typo in (map_type, slot) surfaces as InvalidArgument
+// rather than a silent no-op.
+func TestPluginAuxPurge_InvalidArgs(t *testing.T) {
+	s := &PluginServer{registry: map[pluginSlotKey]*pluginEntry{}}
+
+	cases := []struct {
+		name    string
+		mapType string
+		slot    uint32
+	}{
+		{"unknown_map_type", "bogus", 32},
+		{"endpoint_below_base", bpf.MapTypeEndpoint, bpf.EndpointPluginBase - 1},
+		{"endpoint_above_max", bpf.MapTypeEndpoint, bpf.EndpointProgMax},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := connect.NewRequest(&v1.PluginAuxPurgeRequest{MapType: c.mapType, Slot: c.slot})
+			_, err := s.PluginAuxPurge(context.Background(), req)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var connectErr *connect.Error
+			if !errors.As(err, &connectErr) || connectErr.Code() != connect.CodeInvalidArgument {
+				t.Errorf("expected InvalidArgument, got %v", err)
+			}
+		})
+	}
+}
+
+// TestPluginAuxList_FilterValidation pins the "filter must validate"
+// promise: an unknown map_type or an out-of-range slot under
+// match_slot=true returns InvalidArgument so callers spot typos
+// immediately. The empty-filter "list everything" path still works.
+func TestPluginAuxList_FilterValidation(t *testing.T) {
+	s := &PluginServer{registry: map[pluginSlotKey]*pluginEntry{}}
+
+	t.Run("unknown_map_type", func(t *testing.T) {
+		req := connect.NewRequest(&v1.PluginAuxListRequest{MapType: "bogus"})
+		if _, err := s.PluginAuxList(context.Background(), req); err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("match_slot_below_base", func(t *testing.T) {
+		req := connect.NewRequest(&v1.PluginAuxListRequest{
+			MapType:   bpf.MapTypeEndpoint,
+			Slot:      bpf.EndpointPluginBase - 1,
+			MatchSlot: true,
+		})
+		_, err := s.PluginAuxList(context.Background(), req)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		var connectErr *connect.Error
+		if !errors.As(err, &connectErr) || connectErr.Code() != connect.CodeInvalidArgument {
+			t.Errorf("expected InvalidArgument, got %v", err)
+		}
+	})
 }
