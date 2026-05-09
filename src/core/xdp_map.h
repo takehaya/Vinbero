@@ -7,6 +7,7 @@
 #include <linux/in.h>
 
 #include "core/xdp_prog.h"
+#include "core/srv6.h"  // struct aux_owner (paired with sid_aux_map persistence)
 
 // SID Function map (IPv6 LPM Trie)
 // Key: IPv6 prefix (trigger_prefix)
@@ -28,6 +29,21 @@ struct {
     __type(value, struct sid_aux_entry);
     __uint(max_entries, 512);
 } sid_aux_map SEC(".maps");
+
+// aux_owner_map: per-idx owner tag for sid_aux_map. ARRAY map paired with
+// sid_aux_map (same key=u32 idx, same max_entries) so the userspace
+// allocator can persist owner identity across daemon restart. Key 0 is
+// the "no aux" sentinel and never written.
+//
+// value layout matches struct aux_owner in src/core/srv6.h. Keep size
+// at 64 bytes -- long enough for "plugin:v1:headend_v4:65535" plus a
+// null terminator and rounded to a cache-friendly boundary.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(struct aux_owner));
+    __uint(max_entries, 512);
+} aux_owner_map SEC(".maps");
 
 // Headend v4 map (IPv4 LPM Trie)
 // Key: IPv4 prefix (trigger_prefix)
