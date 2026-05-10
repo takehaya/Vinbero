@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"go.uber.org/zap"
 )
 
 // validatePluginSlot is a thin server-side alias for bpf.ValidatePluginSlot;
@@ -79,6 +80,8 @@ func toRPCError(err error) error {
 	}
 }
 
+// PluginAuxAlloc reserves a fresh aux index for (map_type, slot), writes
+// the caller's payload, and returns the index.
 func (s *PluginServer) PluginAuxAlloc(
 	ctx context.Context,
 	req *connect.Request[v1.PluginAuxAllocRequest],
@@ -97,12 +100,25 @@ func (s *PluginServer) PluginAuxAlloc(
 		return nil, connect.NewError(connect.CodeResourceExhausted, err)
 	}
 	if err := s.mapOps.PutPluginAux(idx, raw, owner); err != nil {
-		_ = s.mapOps.FreePluginAux(idx, owner)
+		// Roll back the alloc so a Put failure doesn't leak the index.
+		// FreePluginAux should always succeed here because we just
+		// minted idx with the same owner tag, but log unexpected
+		// failures so a leaked allocator slot stays observable rather
+		// than disappearing into _ assignment.
+		if freeErr := s.mapOps.FreePluginAux(idx, owner); freeErr != nil {
+			s.logger.Warn("PluginAuxAlloc rollback failed",
+				zap.Uint32("index", idx),
+				zap.String("owner", owner),
+				zap.Error(freeErr),
+			)
+		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&v1.PluginAuxAllocResponse{Index: idx}), nil
 }
 
+// PluginAuxUpdate overwrites the payload at an existing aux index that
+// the caller's (map_type, slot) already owns.
 func (s *PluginServer) PluginAuxUpdate(
 	ctx context.Context,
 	req *connect.Request[v1.PluginAuxUpdateRequest],
@@ -122,6 +138,8 @@ func (s *PluginServer) PluginAuxUpdate(
 	return connect.NewResponse(&v1.PluginAuxUpdateResponse{}), nil
 }
 
+// PluginAuxGet returns the on-wire bytes stored at an aux index along
+// with its owner tag so the caller can detect cross-tenant binds early.
 func (s *PluginServer) PluginAuxGet(
 	ctx context.Context,
 	req *connect.Request[v1.PluginAuxGetRequest],
@@ -142,6 +160,8 @@ func (s *PluginServer) PluginAuxGet(
 	}), nil
 }
 
+// PluginAuxFree zeroes the entry at idx and releases the index back to
+// the allocator. Cross-tenant frees surface as PermissionDenied.
 func (s *PluginServer) PluginAuxFree(
 	ctx context.Context,
 	req *connect.Request[v1.PluginAuxFreeRequest],

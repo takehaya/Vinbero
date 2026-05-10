@@ -3,15 +3,16 @@
 // PluginAuxFree Connect RPCs so Go programs driving a Vinbero daemon can
 // manage plugin state without hand-rolling the proto request structs.
 //
-// History. ADR-6 in docs/plan/plugin-sdk-enhancement.md originally deleted
-// sdk/go/ on YAGNI grounds: Phase 1b exposed Client / ValidateFile / Map[K, V]
-// helpers but nothing in the repo imported them. Phase 1d restored this
-// package (only) because PluginAux[T] is the motivating use case for a typed
-// client: callers want to pass a Go struct matching the plugin's BTF aux
-// layout and have the SDK handle encoding + RPC.
+// History. An earlier ADR deleted sdk/go/ on YAGNI grounds: the first
+// pass exposed Client / ValidateFile / Map[K, V] helpers but nothing in
+// the repo imported them. This package was later restored — only — because
+// PluginAux[T] is the motivating use case for a typed client: callers
+// want to pass a Go struct matching the plugin's BTF aux layout and have
+// the SDK handle encoding + RPC. See docs/dev/plugin-sdk-implementation.md
+// for the full rationale.
 //
-// Scope. Map[K, V] and the broader validate-from-Go wrappers are still out of
-// scope; they will be reintroduced if future phases grow a concrete need.
+// Scope. Map[K, V] and the broader validate-from-Go wrappers are still
+// out of scope; they will be reintroduced if a concrete need surfaces.
 //
 // T layout. PluginAux[T] uses encoding/json to send and encoding/binary
 // (NativeEndian) to receive. NativeEndian matches the server's BTF

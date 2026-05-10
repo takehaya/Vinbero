@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -16,6 +17,19 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// pluginIdentRe matches the BPF section-name alphabet. Applied to the
+// caller-controlled program / map_type strings before they hit the audit
+// log so a malicious caller cannot inject newlines or quotes that would
+// forge a synthetic event line in grep-based monitoring pipelines.
+var pluginIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+
+// validPluginIdent reports whether s is a safe identifier to interpolate
+// into a structured log record. Empty strings are rejected; the proto
+// layer already screens those, this is defense in depth.
+func validPluginIdent(s string) bool {
+	return pluginIdentRe.MatchString(s)
+}
 
 type pluginSlotKey struct {
 	MapType string
@@ -139,6 +153,17 @@ func (s *PluginServer) PluginRegister(
 	}
 	if msg.Program == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("program is required"))
+	}
+	// Constrain program / map_type to the BPF section-name alphabet so a
+	// caller cannot smuggle newlines or quotes through to the audit log
+	// and forge a synthetic event line in stdout-grep style monitoring.
+	if !validPluginIdent(msg.Program) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("program must match [A-Za-z_][A-Za-z0-9_]{0,63}"))
+	}
+	if !validPluginIdent(msg.MapType) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("map_type must match [A-Za-z_][A-Za-z0-9_]{0,63}"))
 	}
 
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(msg.BpfElf))
