@@ -432,6 +432,90 @@ func TestValidatePluginROWrites_DynamicReject(t *testing.T) {
 	}
 }
 
+// `bpf_map_lookup_elem(&owned_rw, &key); lock *(u64 *)(r0 + 0) += rN`
+// is what clang emits for `__sync_fetch_and_add(counter, step)` against
+// a plugin-owned PERCPU_ARRAY. R0 is the helper return, so without the
+// lookup-aware propagation the analyzer sees a "dynamic" store target
+// and falsely flags every plugin-owned counter update. The fix tracks
+// LoadMapPtr → R1 → call FnMapLookupElem → R0 so the write resolves to
+// the plugin-owned map name and clears the RO contract.
+func TestValidatePluginROWrites_LookupOwnedRW_Allowed(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("plugin_counter_map"),
+		asm.FnMapLookupElem.Call(),
+		asm.Mov.Imm(asm.R7, 1),
+		asm.FetchAdd.Mem(asm.R0, asm.R7, asm.DWord, 0),
+	}
+	if err := ValidatePluginProgram(roSpec("owned_atomic", lead), roSet()); err != nil {
+		t.Fatalf("atomic into looked-up plugin-owned RW map should pass, got: %v", err)
+	}
+}
+
+// Same lookup-then-write pattern but with the clang-canonical NULL
+// check (`if (r0 == 0) goto skip`) between the helper and the store.
+// JEq references R0 as the compare LHS but does not write it; the
+// validator must not invalidate lastMap[R0] on that read, otherwise
+// every plugin that follows the kernel-mandated NULL check (i.e. every
+// real plugin) trips a false positive.
+func TestValidatePluginROWrites_LookupThenNullCheck_Allowed(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("plugin_counter_map"),
+		asm.FnMapLookupElem.Call(),
+		asm.Mov.Imm(asm.R7, 1),
+		asm.JEq.Imm(asm.R0, 0, "skip"), // NULL check; reads R0, must not clear lastMap[R0]
+		asm.FetchAdd.Mem(asm.R0, asm.R7, asm.DWord, 0),
+		asm.Mov.Imm(asm.R0, 0).WithSymbol("skip"),
+	}
+	if err := ValidatePluginProgram(roSpec("nullcheck", lead), roSet()); err != nil {
+		t.Fatalf("lookup → null check → atomic update should pass, got: %v", err)
+	}
+}
+
+// Symmetric to the case above but with an RO map: lookup-aware
+// propagation must not become a hole — a write through R0 (or any
+// reg-MOV-derived alias) into an RO map must still be flagged with the
+// proper map name, not as "unresolved".
+func TestValidatePluginROWrites_LookupROReject(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.FnMapLookupElem.Call(),
+		asm.Mov.Reg(asm.R2, asm.R0), // alias R0 through R2
+		asm.StoreImm(asm.R2, 0, 1, asm.Word),
+	}
+	err := ValidatePluginProgram(roSpec("lookup_ro", lead), roSet())
+	if err == nil {
+		t.Fatal("write through lookup of RO map must reject")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sid_function_map") {
+		t.Errorf("error should name the RO map, got: %v", err)
+	}
+}
+
+// Register-to-register MOV must propagate the tracked map identity so
+// `LoadMapPtr R1, &ro_map; R2 = R1; *(R2 + 0) = ...` is still caught.
+// Without this propagation an attacker could trivially launder the
+// origin through a single MOV.
+func TestValidatePluginROWrites_MovPropagatesRO(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.Mov.Reg(asm.R2, asm.R1),
+		asm.StoreImm(asm.R2, 0, 99, asm.Word),
+	}
+	err := ValidatePluginProgram(roSpec("ro_via_mov", lead), roSet())
+	if err == nil {
+		t.Fatal("RO write laundered through MOV must still reject")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sid_function_map") {
+		t.Errorf("error should name the RO map, got: %v", err)
+	}
+}
+
 // Subprogram body sitting after the main program (clang appends them
 // after the entry point) must NOT be scanned. Otherwise legitimate
 // epilogue writes to slot_stats_* would trip the check the moment we

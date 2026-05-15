@@ -372,13 +372,60 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 		if in.OpCode.Class() == asm.StClass || in.OpCode.Class() == asm.StXClass {
 			continue
 		}
+		// BPF helper / subprogram calls. The kernel ABI hands the return
+		// value back in R0 and treats R1..R5 as caller-saved. For map
+		// lookup helpers we additionally propagate the map identity from
+		// R1 (the &map argument established by a preceding LoadMapPtr)
+		// into R0 — without this every `*(u64 *)(r0 + 0) += ...` after a
+		// bpf_map_lookup_elem looks "dynamic" to the analyzer and trips
+		// a false-positive RO violation on plugins that legitimately
+		// mutate their own RW maps.
+		if in.OpCode.JumpOp() == asm.Call {
+			fn := asm.BuiltinFunc(in.Constant)
+			r1Map := lastMap[1]
+			for r := 1; r <= 5; r++ {
+				lastMap[r] = ""
+			}
+			switch fn {
+			case asm.FnMapLookupElem, asm.FnMapLookupPercpuElem:
+				lastMap[0] = r1Map
+			default:
+				lastMap[0] = ""
+			}
+			continue
+		}
+		// Register-to-register MOV propagates the map identity from src
+		// to dst. clang frequently emits `Rn = R0` between a lookup and
+		// the subsequent store; without this propagation the dst is
+		// treated as dynamic and the write is flagged spuriously.
+		op := in.OpCode
+		if (op.Class() == asm.ALU64Class || op.Class() == asm.ALUClass) &&
+			op.ALUOp() == asm.Mov && op.Source() == asm.RegSource {
+			src := int(in.Src)
+			dst := int(in.Dst)
+			if dst >= 0 && dst < numRegs && src >= 0 && src < numRegs {
+				lastMap[dst] = lastMap[src]
+				continue
+			}
+		}
+		// Only load / ALU classes actually write Dst. Jump and Jump32
+		// reference Dst as the left-hand operand of a compare; clobbering
+		// lastMap[Dst] for those would erase the just-propagated lookup
+		// result on the canonical clang `if (r0 == 0) goto ...; *(r0 +
+		// 0) += rN` pattern emitted after every bpf_map_lookup_elem and
+		// resurface the very false-positive we are trying to kill.
+		cls := in.OpCode.Class()
+		if cls != asm.LdClass && cls != asm.LdXClass &&
+			cls != asm.ALUClass && cls != asm.ALU64Class {
+			continue
+		}
 		dst := int(in.Dst)
 		if dst < 0 || dst >= numRegs {
 			continue
 		}
 		if in.IsLoadFromMap() {
 			lastMap[dst] = in.Reference()
-		} else if in.Dst != 0 || in.OpCode != 0 { // any real instruction with Dst
+		} else {
 			lastMap[dst] = ""
 		}
 	}
