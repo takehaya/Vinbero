@@ -5,6 +5,7 @@
 #include <bpf/bpf_helpers.h>
 #include <linux/bpf.h>
 #include <linux/in.h>
+#include <linux/in6.h>
 
 // ========== SRv6 Local Action (Endpoint functions) ==========
 // Maps to Srv6LocalAction enum in protobuf
