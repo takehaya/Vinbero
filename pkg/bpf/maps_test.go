@@ -11,10 +11,53 @@ import (
 	"github.com/takehaya/vinbero/pkg/config"
 )
 
+// TestSharedMapNamesStatic verifies the BPF-free helpers used by the CLI
+// validator: SharedReadOnlyMapNames / SharedReadWriteMapNames must be
+// disjoint and the set-form helper must agree with the slice form. This
+// test runs without sudo so CI sandboxes that can't load BPF still catch
+// classification regressions.
+func TestSharedMapNamesStatic(t *testing.T) {
+	ro := SharedReadOnlyMapNames()
+	rw := SharedReadWriteMapNames()
+	if len(ro) == 0 {
+		t.Fatal("SharedReadOnlyMapNames is empty")
+	}
+	if len(rw) == 0 {
+		t.Fatal("SharedReadWriteMapNames is empty")
+	}
+	roSet := make(map[string]struct{}, len(ro))
+	for _, n := range ro {
+		if _, dup := roSet[n]; dup {
+			t.Errorf("SharedReadOnlyMapNames duplicate %q", n)
+		}
+		roSet[n] = struct{}{}
+	}
+	for _, n := range rw {
+		if _, clash := roSet[n]; clash {
+			t.Errorf("map %q listed in both RO and RW slices", n)
+		}
+	}
+	gotSet := SharedReadOnlyMapNamesSet()
+	if len(gotSet) != len(roSet) {
+		t.Errorf("SharedReadOnlyMapNamesSet size %d != %d", len(gotSet), len(roSet))
+	}
+	for n := range roSet {
+		if _, ok := gotSet[n]; !ok {
+			t.Errorf("SharedReadOnlyMapNamesSet missing %q", n)
+		}
+	}
+}
+
 // TestSharedMapPartitioning verifies that every map returned by the
 // plugin-visible getters is classified into exactly one of RO / RW. Both the
 // validator (plugin_validate_btf.go) and PluginRegister rely on this
 // invariant to audit plugin-ELF map usage.
+//
+// Also verifies that the static helpers SharedReadOnlyMapNames /
+// SharedReadWriteMapNames (used by the CLI validator, which has no live
+// MapOperations) carry the same key set. Drift would mean the asm-level
+// RO-write enforcer rejects in one path but lets the same plugin through
+// in another.
 func TestSharedMapPartitioning(t *testing.T) {
 	h := newXDPTestHelper(t)
 
@@ -31,6 +74,62 @@ func TestSharedMapPartitioning(t *testing.T) {
 	}
 	if len(rw) == 0 {
 		t.Error("GetSharedReadWriteMaps returned an empty set")
+	}
+
+	// Static helper agrees with the live getter, in both directions. The
+	// helper is what `vbctl plugin validate` consumes, so any divergence
+	// would create a CLI-vs-server validation gap.
+	staticRO := make(map[string]struct{})
+	for _, n := range SharedReadOnlyMapNames() {
+		if _, dup := staticRO[n]; dup {
+			t.Errorf("SharedReadOnlyMapNames duplicate entry %q", n)
+		}
+		staticRO[n] = struct{}{}
+	}
+	if len(staticRO) != len(ro) {
+		t.Errorf("RO size mismatch: static=%d, live=%d", len(staticRO), len(ro))
+	}
+	for name := range ro {
+		if _, ok := staticRO[name]; !ok {
+			t.Errorf("live RO map %q missing from SharedReadOnlyMapNames", name)
+		}
+	}
+	for name := range staticRO {
+		if _, ok := ro[name]; !ok {
+			t.Errorf("static RO map %q missing from GetSharedReadOnlyMaps", name)
+		}
+	}
+
+	staticRW := make(map[string]struct{})
+	for _, n := range SharedReadWriteMapNames() {
+		if _, dup := staticRW[n]; dup {
+			t.Errorf("SharedReadWriteMapNames duplicate entry %q", n)
+		}
+		staticRW[n] = struct{}{}
+	}
+	if len(staticRW) != len(rw) {
+		t.Errorf("RW size mismatch: static=%d, live=%d", len(staticRW), len(rw))
+	}
+	for name := range rw {
+		if _, ok := staticRW[name]; !ok {
+			t.Errorf("live RW map %q missing from SharedReadWriteMapNames", name)
+		}
+	}
+	for name := range staticRW {
+		if _, ok := rw[name]; !ok {
+			t.Errorf("static RW map %q missing from GetSharedReadWriteMaps", name)
+		}
+	}
+
+	// Set-form helper covers the same keys as the slice form.
+	roSet := SharedReadOnlyMapNamesSet()
+	if len(roSet) != len(staticRO) {
+		t.Errorf("SharedReadOnlyMapNamesSet size %d != slice %d", len(roSet), len(staticRO))
+	}
+	for name := range staticRO {
+		if _, ok := roSet[name]; !ok {
+			t.Errorf("SharedReadOnlyMapNamesSet missing %q", name)
+		}
 	}
 
 	// sanity check: the validator's expected value types should all refer to

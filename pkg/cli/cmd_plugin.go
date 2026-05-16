@@ -37,7 +37,12 @@ func pluginCommand() *cli.Command {
 					if err != nil {
 						return cli.Exit(fmt.Errorf("failed to parse BPF ELF %s: %w", elfPath, err), 2)
 					}
-					if _, err := bpf.ValidatePluginCollection(spec, programName); err != nil {
+					// CLI is the shift-left path: always enforce the RO-write
+					// check so plugin authors get the same answer they would get
+					// from the server with `validate.ro_enforce: enforce`. The
+					// daemon may still default to warn-only during the staged
+					// rollout (see config.ValidateConfig).
+					if _, err := bpf.ValidatePluginCollection(spec, programName, bpf.SharedReadOnlyMapNamesSet()); err != nil {
 						return cli.Exit(err, 1)
 					}
 					fmt.Printf("OK: %s (program=%s) passes plugin contract\n", elfPath, programName)

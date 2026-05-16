@@ -515,3 +515,56 @@ func (p *PluginAux[T]) Free(ctx context.Context, idx uint32) error
 - `make test-runnable` : 両バイナリ起動 OK
 - `make sdk-test` : `plugin-counter` / `plugin-acl-prefix` / `simple-acl` 全サンプルが validate 通過
 - `sdk/examples/plugin-counter/test.sh` : 既存 embed フロー + Phase 1d の alloc/bind フロー両方で E2E 通過
+
+---
+
+## Phase 2: asm レベル RO write enforce
+
+設計書: `docs/plan/plugin-sdk-2-asm-ro-enforce.md`
+
+### 追加した CFG analyzer
+
+`pkg/bpf/plugin_validate.go::checkROWrites` がメインプログラムを線形走査し、
+`BPF_ST` / `BPF_STX` / `BPF_ATOMIC` ファミリの命令を全て検出する。書き込み先
+レジスタの直近上書きを後ろから探し、`LoadMapPtr` ならその map 名と RO 集合を
+照合、それ以外なら `(dynamic)` として **保守的 reject**。
+
+スコープはメインプログラム本体に限定 (`Symbol() != ""` で停止)。プラグイン ELF
+末尾に展開される `tailcall_epilogue` 等のサブプログラム本体を巻き込まないため。
+
+`R10` (frame pointer) を Dst にするストアは BPF stack 書き込みなので除外
+(`isStackStore`)。clang は C のローカル変数 (`struct foo key;`) を必ず stack に
+落とすため、ここを map 書込として扱うと全プラグインが (dynamic) reject される
+(`simple-acl` 例で実観測した false positive)。
+
+### 段階導入
+
+`settings.validate.ro_enforce` (`warn` | `enforce`、デフォルト `warn`)。
+`bpf.ROEnforceMode` enum + `ParseROEnforceMode` で string→enum 変換。
+violation は `bpf.ErrPluginROWrite` をラップして返し、`PluginRegister` が
+`errors.Is` で warn-eligible 判定する。**CLI は常に enforce 固定** (shift-left)。
+
+### 静的 helper
+
+CLI は `MapOperations` インスタンスを持たないため、`pkg/bpf/maps.go` に
+`SharedReadOnlyMapNames()` / `SharedReadWriteMapNames()` / `SharedReadOnlyMapNamesSet()`
+を追加。`TestSharedMapPartitioning` を拡張し、live getter と完全一致 (双方向)
+を assert することで分類のドリフトを実行時に防ぐ。新たに `TestSharedMapNamesStatic`
+も追加し、BPF load 不要 (sudo 不要) のサンドボックスでも分類のドリフトを検出
+できるようにした。
+
+### 負例サンプル
+
+`sdk/examples/plugin-counter-evil/` を新設。`sid_function_map` を
+`bpf_map_lookup_elem` 経由で書き換える plugin。CI ターゲット
+`make sdk-test-negative` が `vbctl plugin validate` の reject を確認する。
+通常の `sdk-test` には含めない (Makefile の `SDK_NEGATIVE_DIRS` で除外)。
+
+### 検証
+
+- `go build ./...` / `go vet ./...` : 0 issue
+- `go test -race -count=1 -run 'TestValidatePlugin|TestSharedMapNamesStatic|TestParseROEnforceMode' ./pkg/bpf/... ./pkg/server/...` : 全 25+ ケース pass
+- 実 plugin (`sdk/examples/simple-acl/plugin.o`) を `vbctl plugin validate` に
+  通し、stack-store filter 追加後は OK (false positive なし)
+- BPF objects のビルド (clang) はサンドボックス外でのみ実行可能 (kernel header の
+  `linux/in6.h` 解決問題)。`make sdk-test-negative` の実行は実機側で確認

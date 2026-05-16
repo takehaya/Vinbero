@@ -33,7 +33,7 @@ func TestValidatePluginSlot(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validatePluginSlot(c.mapType, c.slot)
+			err := bpf.ValidatePluginSlot(c.mapType, c.slot)
 			if c.wantErr && err == nil {
 				t.Errorf("expected error, got nil")
 			}

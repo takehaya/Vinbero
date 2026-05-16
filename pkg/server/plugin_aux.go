@@ -13,14 +13,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// validatePluginSlot is a thin server-side alias for bpf.ValidatePluginSlot;
-// kept under this name because every PluginAux RPC handler reads cleaner with
-// the unprefixed call site, and to make any future server-only relaxation
-// (e.g. allowing reserved slots in a debug mode) a one-liner.
-func validatePluginSlot(mapType string, slot uint32) error {
-	return bpf.ValidatePluginSlot(mapType, slot)
-}
-
 // encodePluginAuxPayload normalizes a PluginAux payload to its on-wire byte
 // form. Exactly one of rawIn / jsonIn must be non-empty; json is encoded via
 // the plugin's BTF-declared <program>_aux struct.
@@ -56,7 +48,7 @@ func (s *PluginServer) encodePluginAuxPayload(mapType string, slot uint32, rawIn
 // index, then returns the owner tag used by every PluginAux op on that slot.
 // requireIdx=false is used by Alloc where no index exists yet.
 func ownerFor(mapType string, slot, idx uint32, requireIdx bool) (string, error) {
-	if err := validatePluginSlot(mapType, slot); err != nil {
+	if err := bpf.ValidatePluginSlot(mapType, slot); err != nil {
 		return "", err
 	}
 	if requireIdx && idx == 0 {
