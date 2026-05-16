@@ -598,7 +598,7 @@ sequenceDiagram
     V->>BPF: ListSidFunctions → keys[]
     loop 各 key
         V->>BPF: DeleteSidFunction(key)
-        V-->>V: auxAlloc.Free(idx)
+        V-->>V: auxAlloc.FreeOwner(idx, AuxOwnerBuiltin)
     end
     V-->>Op: {deleted_count: N}
 ```

@@ -44,7 +44,7 @@ func (s *Server) Setup() {
 	// Plugin service is constructed first so SidFunctionServer can resolve
 	// per-slot aux BTF types when callers use plugin_aux_json. The actual
 	// handler registration happens further down with the other services.
-	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants())
+	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), s.logger)
 
 	// SidFunction service
 	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer)

@@ -12,8 +12,9 @@ import (
 // (e.g. an outdated SDK copy), the replacement at load time would silently
 // reinterpret memory. Catch that at validation time instead.
 //
-// Only maps exposed by GetSharedMaps() are listed. Maps absent from the
-// plugin ELF are fine; plugins only replace what they declare.
+// Only maps exposed via GetSharedReadOnlyMaps / GetSharedReadWriteMaps are
+// listed. Maps absent from the plugin ELF are fine; plugins only replace what
+// they declare.
 var expectedMapValueTypes = map[string]string{
 	"sid_function_map":      "sid_function_entry",
 	"sid_aux_map":           "sid_aux_entry",

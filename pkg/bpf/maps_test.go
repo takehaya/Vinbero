@@ -11,6 +11,42 @@ import (
 	"github.com/takehaya/vinbero/pkg/config"
 )
 
+// TestSharedMapPartitioning verifies that every map returned by the
+// plugin-visible getters is classified into exactly one of RO / RW. Both the
+// validator (plugin_validate_btf.go) and PluginRegister rely on this
+// invariant to audit plugin-ELF map usage.
+func TestSharedMapPartitioning(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	ro := h.mapOps.GetSharedReadOnlyMaps()
+	rw := h.mapOps.GetSharedReadWriteMaps()
+
+	for name := range ro {
+		if _, dup := rw[name]; dup {
+			t.Errorf("map %q appears in both RO and RW sets", name)
+		}
+	}
+	if len(ro) == 0 {
+		t.Error("GetSharedReadOnlyMaps returned an empty set")
+	}
+	if len(rw) == 0 {
+		t.Error("GetSharedReadWriteMaps returned an empty set")
+	}
+
+	// sanity check: the validator's expected value types should all refer to
+	// maps that exist in one of the two sets (otherwise validation targets a
+	// map plugins can no longer reference).
+	for name := range expectedMapValueTypes {
+		if _, ok := ro[name]; ok {
+			continue
+		}
+		if _, ok := rw[name]; ok {
+			continue
+		}
+		t.Errorf("expectedMapValueTypes references %q but neither RO nor RW contains it", name)
+	}
+}
+
 // TestSidAuxRoundTrip verifies that aux entry constructors and readers
 // produce consistent data for each union variant.
 func TestSidAuxRoundTrip(t *testing.T) {
@@ -452,4 +488,49 @@ func TestFdbMacLearningTimestamp(t *testing.T) {
 		t.Error("BPF-learned FDB entry should not be static")
 	}
 	t.Logf("SUCCESS: learned MAC=%s oif=%d last_seen=%d", srcMAC, fdbEntry.Oif, fdbEntry.LastSeen)
+}
+
+// TestDeleteSidFunctionPreservesPluginAux pins the contract that DeleteSidFunction
+// only releases builtin-owned aux indices; plugin-owned aux must survive a SID
+// unbind so the plugin's PluginAuxFree RPC stays in charge of that lifecycle.
+// Regressions here would let SID delete corrupt unrelated plugin state.
+func TestDeleteSidFunctionPreservesPluginAux(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	owner := AuxOwnerPluginTag(MapTypeEndpoint, EndpointPluginBase)
+	idx, err := h.mapOps.AllocPluginAux(owner)
+	if err != nil {
+		t.Fatalf("AllocPluginAux: %v", err)
+	}
+	if idx == 0 {
+		t.Fatal("AllocPluginAux returned sentinel 0")
+	}
+
+	const prefix = "fc00:1::1/128"
+	entry := &SidFunctionEntry{
+		Action:   uint8(EndpointPluginBase),
+		AuxIndex: uint16(idx),
+	}
+	if err := h.mapOps.CreateSidFunctionWithAuxIndex(prefix, entry, owner); err != nil {
+		t.Fatalf("CreateSidFunctionWithAuxIndex: %v", err)
+	}
+
+	if err := h.mapOps.DeleteSidFunction(prefix); err != nil {
+		t.Fatalf("DeleteSidFunction: %v", err)
+	}
+
+	// Plugin owner tag must still be intact — DeleteSidFunction only unbinds
+	// the SID, never the plugin aux slot.
+	if got := h.mapOps.auxAlloc.OwnerOf(idx); got != owner {
+		t.Errorf("aux owner after SID delete: got %q, want %q", got, owner)
+	}
+	if _, err := h.mapOps.GetPluginAux(idx, owner); err != nil {
+		t.Errorf("GetPluginAux after SID delete: %v", err)
+	}
+	if err := h.mapOps.FreePluginAux(idx, owner); err != nil {
+		t.Errorf("FreePluginAux: %v", err)
+	}
+	if got := h.mapOps.auxAlloc.OwnerOf(idx); got != "" {
+		t.Errorf("aux owner after FreePluginAux: got %q, want \"\"", got)
+	}
 }
