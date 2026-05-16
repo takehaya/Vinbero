@@ -559,8 +559,14 @@ func TestValidatePluginROWrites_MovPropagatesRO(t *testing.T) {
 // epilogue writes to slot_stats_* would trip the check the moment we
 // re-classify those maps as RO.
 func TestValidatePluginROWrites_SubprogramSkipped(t *testing.T) {
+	// Real subprograms in compiled BPF show up in FunctionReferences()
+	// because something in main calls them. Without a matching call,
+	// the scanner now ignores the Symbol() boundary on purpose (see
+	// ForgedSymbolDoesNotBypass below). Plant a real call so this test
+	// keeps exercising the legitimate-subprogram path.
 	main := asm.Instructions{
 		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol("subprogram_body"),
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	}
@@ -583,6 +589,34 @@ func TestValidatePluginROWrites_SubprogramSkipped(t *testing.T) {
 	ro := map[string]struct{}{"slot_stats_endpoint": {}}
 	if err := ValidatePluginProgram(prog, ro); err != nil {
 		t.Fatalf("subprogram writes must be skipped, got: %v", err)
+	}
+}
+
+// ForgedSymbolDoesNotBypass guards the validator against ELF symbol
+// tampering. A hand-edited STT_FUNC entry can plant a fake Symbol()
+// midway through main; cilium's loader propagates that metadata to the
+// instruction it lands on. Pre-fix, the scanner saw any non-empty
+// Symbol() past index 0 as a subprogram boundary and broke out — letting
+// the writes that followed run unscanned even though the kernel
+// verifier (which keys off BPF2BPF call instructions, not symbols)
+// happily executes them. Post-fix the boundary only triggers on names
+// that something actually calls, so the forged symbol is ignored and
+// the RO write is caught.
+func TestValidatePluginROWrites_ForgedSymbolDoesNotBypass(t *testing.T) {
+	lead := asm.Instructions{
+		asm.Mov.Imm(asm.R0, 0).WithSymbol("not_actually_called"),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.StoreImm(asm.R1, 0, 99, asm.Word),
+	}
+	err := ValidatePluginProgram(roSpec("forged", lead), roSet())
+	if err == nil {
+		t.Fatal("RO write hiding behind a forged symbol must still be detected")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sid_function_map") {
+		t.Errorf("error should name the RO map, got: %v", err)
 	}
 }
 

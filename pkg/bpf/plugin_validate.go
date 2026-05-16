@@ -326,6 +326,25 @@ func isStackStore(ins asm.Instruction) bool {
 	return ins.Dst == asm.RFP
 }
 
+// knownSubprogNames returns the set of subprogram names actually invoked
+// from somewhere in ins via a BPF2BPF call. Cilium's ELF loader places
+// per-symbol metadata on instructions wherever an ELF STT_FUNC sits,
+// including symbols a malicious author injects mid-main. Trusting
+// in.Symbol() == "" as the only "still in main" signal lets such a forged
+// symbol terminate the scan early while the kernel verifier — which
+// resolves subprogram boundaries from BPF2BPF call instructions, not
+// symbol metadata — happily executes the writes that follow. Restricting
+// the break trigger to names that something actually calls keeps the
+// kernel and validator on the same view of what counts as a subprogram.
+func knownSubprogNames(ins asm.Instructions) map[string]struct{} {
+	names := ins.FunctionReferences()
+	out := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		out[n] = struct{}{}
+	}
+	return out
+}
+
 // roViolation describes one disallowed map write detected during static
 // analysis. Aggregated across the program so a single error message can
 // list every offender; mapName == "" means the store target could not be
@@ -358,10 +377,17 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	var lastMap [numRegs]string
 	var violations []roViolation
 	ins := spec.Instructions
+	subprogs := knownSubprogNames(ins)
 	for i, in := range ins {
-		// Stop at the start of any subprogram past the entry point.
-		if i > 0 && in.Symbol() != "" {
-			break
+		// Stop at the start of a real subprogram (one something actually
+		// calls). A bare Symbol() with no caller is metadata noise — or
+		// an injected fake — and must not terminate the scan.
+		if i > 0 {
+			if sym := in.Symbol(); sym != "" {
+				if _, ok := subprogs[sym]; ok {
+					break
+				}
+			}
 		}
 		if isMapWrite(in) {
 			// Stack stores (Dst == R10) are local-variable assignments,
@@ -483,11 +509,17 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 // model does not warrant.
 func checkExitProximity(spec *ebpf.ProgramSpec) error {
 	ins := spec.Instructions
+	subprogs := knownSubprogNames(ins)
 	for i, in := range ins {
-		// Stop at the start of any subprogram past the entry point;
-		// subprogram bodies are appended after the main program.
-		if i > 0 && in.Symbol() != "" {
-			break
+		// See knownSubprogNames: only Symbol()s that match a called
+		// subprogram terminate the scan. A forged symbol mid-main must
+		// not let an exit-without-epilogue slip through.
+		if i > 0 {
+			if sym := in.Symbol(); sym != "" {
+				if _, ok := subprogs[sym]; ok {
+					break
+				}
+			}
 		}
 		if in.OpCode.JumpOp() != asm.Exit {
 			continue
