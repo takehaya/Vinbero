@@ -53,10 +53,24 @@ func (s *SidFunctionServer) SidFunctionCreate(
 			continue
 		}
 
-		if err := s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry, aux); err != nil {
+		// plugin_aux_index path: aux already owned by the PluginAux RPC
+		// lifecycle. CreateSidFunctionWithAuxIndex verifies the owner tag
+		// atomically with the bind so a racing Free cannot reassign the idx.
+		// SID functions live in the endpoint LPM map, so the owner tag is
+		// always derived against MapTypeEndpoint. Headend plugins (if they
+		// gain a separate plugin_aux_index path in the future) will need
+		// their own bind helper with a different map_type.
+		var createErr error
+		if sidFunc.PluginAuxIndex != 0 {
+			owner := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, uint32(sidFunc.Action))
+			createErr = s.mapOps.CreateSidFunctionWithAuxIndex(sidFunc.TriggerPrefix, entry, owner)
+		} else {
+			createErr = s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry, aux)
+		}
+		if createErr != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: sidFunc.TriggerPrefix,
-				Reason:        err.Error(),
+				Reason:        createErr.Error(),
 			})
 			continue
 		}
@@ -147,9 +161,48 @@ func (s *SidFunctionServer) SidFunctionFlush(
 
 // protoToEntry converts a protobuf SidFunction to a BPF generic entry + optional aux entry
 func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunctionEntry, *bpf.SidAuxEntry, error) {
+	// SidFunctionEntry.Action is uint8, so any value > 255 (or negative) would
+	// be silently truncated and produce an entry whose stored action disagrees
+	// with the action used to derive the plugin owner tag. Reject up front.
+	if sidFunc.Action < 0 || sidFunc.Action > 255 {
+		return nil, nil, fmt.Errorf("action %d out of uint8 range [0, 255]", sidFunc.Action)
+	}
 	entry := &bpf.SidFunctionEntry{
 		Action: uint8(sidFunc.Action),
 		Flavor: uint8(sidFunc.Flavor),
+	}
+
+	// 3-way exclusive: plugin_aux_raw, plugin_aux_json, plugin_aux_index
+	// cannot appear together on the same SidFunction.
+	exclusives := 0
+	if len(sidFunc.PluginAuxRaw) > 0 {
+		exclusives++
+	}
+	if sidFunc.PluginAuxJson != "" {
+		exclusives++
+	}
+	if sidFunc.PluginAuxIndex != 0 {
+		exclusives++
+	}
+	if exclusives > 1 {
+		return nil, nil, fmt.Errorf("plugin_aux_raw / plugin_aux_json / plugin_aux_index are mutually exclusive")
+	}
+
+	// plugin_aux_index: the aux slot is already populated by PluginAuxAlloc.
+	// Wire entry.AuxIndex; ownership verification happens atomically inside
+	// CreateSidFunctionWithAuxIndex so a racing PluginAuxFree cannot reassign
+	// the index between check and bind.
+	if sidFunc.PluginAuxIndex != 0 {
+		action := uint32(sidFunc.Action)
+		if action < bpf.EndpointPluginBase || action >= bpf.EndpointProgMax {
+			return nil, nil, fmt.Errorf("plugin_aux_index requires action in [%d, %d) (endpoint plugin range), got %d",
+				bpf.EndpointPluginBase, bpf.EndpointProgMax, action)
+		}
+		if sidFunc.PluginAuxIndex > 0xFFFF {
+			return nil, nil, fmt.Errorf("plugin_aux_index %d exceeds uint16 range", sidFunc.PluginAuxIndex)
+		}
+		entry.AuxIndex = uint16(sidFunc.PluginAuxIndex)
+		return entry, nil, nil
 	}
 
 	// Resolve vrf_name → vrf_ifindex for End.T/DT4/DT6/DT46. The resolved
@@ -245,12 +298,11 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	// Plugin-defined auxiliary payload. Only populated for plugin actions
 	// (action value >= EndpointPluginBase) that have no built-in aux variant
 	// above; the built-in variants take precedence so a caller cannot shadow
-	// an End.X nexthop with arbitrary bytes.
+	// an End.X nexthop with arbitrary bytes. The 3-way mutex check above
+	// already rejected any combination of raw / json / index, so at this
+	// point at most one of hasRaw / hasJSON is set.
 	hasRaw := len(sidFunc.PluginAuxRaw) > 0
 	hasJSON := sidFunc.PluginAuxJson != ""
-	if hasRaw && hasJSON {
-		return nil, nil, fmt.Errorf("plugin_aux_raw and plugin_aux_json are mutually exclusive")
-	}
 	if aux == nil && hasRaw {
 		if len(sidFunc.PluginAuxRaw) > bpf.SidAuxPluginRawMax {
 			return nil, nil, fmt.Errorf(
@@ -307,6 +359,12 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 		Action:        v1.Srv6LocalAction(entry.Action),
 		TriggerPrefix: prefix,
 		Flavor:        v1.Srv6LocalFlavor(entry.Flavor),
+	}
+
+	// For plugin actions, surface the aux_index so the caller can tell
+	// which PluginAuxAlloc-allocated slot is wired to this SID.
+	if entry.AuxIndex != 0 && uint32(entry.Action) >= bpf.EndpointPluginBase {
+		sf.PluginAuxIndex = uint32(entry.AuxIndex)
 	}
 
 	// Read aux data if present

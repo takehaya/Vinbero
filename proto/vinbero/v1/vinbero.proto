@@ -47,6 +47,7 @@ message SidFunction {
   uint32 table_id = 17; // VLAN table ID (End.DX2V: VLAN cross-connect scope)
   bytes plugin_aux_raw = 18; // Plugin-defined auxiliary payload (<= 196 bytes, cast by plugin via VINBERO_PLUGIN_AUX_CAST)
   string plugin_aux_json = 19; // Plugin-defined auxiliary payload as JSON; server encodes via plugin BTF. Mutually exclusive with plugin_aux_raw.
+  uint32 plugin_aux_index = 20; // Reference an aux index previously returned by PluginAuxAlloc. Mutually exclusive with plugin_aux_raw / plugin_aux_json. Requires action >= EndpointPluginBase.
 }
 
 message SidFunctionCreateRequest {

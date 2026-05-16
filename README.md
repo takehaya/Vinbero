@@ -145,15 +145,48 @@ See [docs/loadmap.md](./docs/loadmap.md) for supported functions and roadmap.
 
 ## Plugins
 
-Custom XDP logic can be compiled as a BPF plugin and registered into a
-reserved tail-call slot at runtime. The SDK lives under [`sdk/`](./sdk/);
-see [`sdk/README.md`](./sdk/README.md) for the C API surface, the
-`VINBERO_PLUGIN` / `VINBERO_PLUGIN_AUX_TYPE` macros, and the well-known
-typedefs (`vinbero_mac_t`, `vinbero_ipv4_t`, `vinbero_ipv6_t`,
-`vinbero_ipv4_prefix_t`, `vinbero_ipv6_prefix_t`) that let the server
-encode `--plugin-aux-json` into the plugin's struct layout via BTF.
-Runnable examples: [`sdk/examples/plugin-counter/`](./sdk/examples/plugin-counter/)
-and [`sdk/examples/plugin-acl-prefix/`](./sdk/examples/plugin-acl-prefix/).
+Vinbero's XDP data plane can be extended with custom BPF plugins.
+Plugins are loaded into reserved PROG_ARRAY slots and can be dynamically
+registered / unregistered via the Connect RPC API or the `vinbero plugin` CLI.
+
+### Quick Start
+
+```c
+#include <vinbero/plugin.h>
+
+VINBERO_PLUGIN(my_plugin)
+{
+    return XDP_PASS;
+}
+char _license[] SEC("license") = "GPL";
+```
+
+```bash
+# Build, validate, and register
+make -f /usr/local/include/vinbero/Makefile.plugin
+vinbero plugin validate --prog my_plugin.o --program my_plugin
+vinbero plugin register --type endpoint --index 32 \
+    --prog my_plugin.o --program my_plugin
+```
+
+### Plugin Aux (per-SID Config)
+
+Declare a struct with the `VINBERO_PLUGIN_AUX_TYPE` macro, and JSON
+passed via `--plugin-aux-json` is automatically encoded into the
+plugin's byte layout through BTF.
+
+SDK-provided types accept their natural string representations:
+
+| Type | JSON Example |
+|------|-------------|
+| `vinbero_mac_t` | `"aa:bb:cc:dd:ee:ff"` |
+| `vinbero_ipv4_t` | `"192.0.2.1"` |
+| `vinbero_ipv6_t` | `"fc00::1"` |
+| `vinbero_ipv4_prefix_t` | `"192.0.2.0/24"` |
+| `vinbero_ipv6_prefix_t` | `"fc00:1::/64"` |
+
+Runnable examples live under [`sdk/examples/`](./sdk/examples/).
+See [`sdk/README.md`](./sdk/README.md) for the full SDK reference.
 
 ## Examples
 

@@ -4,14 +4,32 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"regexp"
+	"sort"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// pluginIdentRe matches the BPF section-name alphabet. Applied to the
+// caller-controlled program / map_type strings before they hit the audit
+// log so a malicious caller cannot inject newlines or quotes that would
+// forge a synthetic event line in grep-based monitoring pipelines.
+var pluginIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+
+// validPluginIdent reports whether s is a safe identifier to interpolate
+// into a structured log record. Empty strings are rejected; the proto
+// layer already screens those, this is defense in depth.
+func validPluginIdent(s string) bool {
+	return pluginIdentRe.MatchString(s)
+}
 
 type pluginSlotKey struct {
 	MapType string
@@ -23,22 +41,42 @@ type pluginSlotKey struct {
 // declare a <program>_aux struct — those plugins can still be driven by
 // plugin_aux_raw (hex), they just lose the JSON path.
 type pluginEntry struct {
-	program string
-	auxType *btf.Struct
+	program       string
+	auxType       *btf.Struct
+	ownedMapNames []string
+	sharedRWNames []string
+	sharedRONames []string
+	registeredAt  time.Time
+}
+
+// PluginEntryInfo is a read-only snapshot of a registered plugin's metadata.
+// Returned by SnapshotEntries for PluginList RPC and logging.
+type PluginEntryInfo struct {
+	MapType       string
+	Slot          uint32
+	Program       string
+	HasAuxType    bool
+	AuxTypeName   string
+	OwnedMapNames []string
+	SharedRWNames []string
+	SharedRONames []string
+	RegisteredAt  time.Time
 }
 
 type PluginServer struct {
 	mapOps       *bpf.MapOperations
 	bpfConstants map[string]any
+	logger       *zap.Logger
 
 	mu       sync.RWMutex
 	registry map[pluginSlotKey]*pluginEntry
 }
 
-func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any) *PluginServer {
+func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any, logger *zap.Logger) *PluginServer {
 	return &PluginServer{
 		mapOps:       mapOps,
 		bpfConstants: bpfConstants,
+		logger:       logger,
 		registry:     make(map[pluginSlotKey]*pluginEntry),
 	}
 }
@@ -70,6 +108,40 @@ func (s *PluginServer) AuxType(mapType string, slot uint32) *btf.Struct {
 	return entry.auxType
 }
 
+// SnapshotEntries returns a deterministic snapshot of all registered plugins.
+// Optional filter restricts results to a single map_type ("" means all).
+func (s *PluginServer) SnapshotEntries(mapTypeFilter string) []PluginEntryInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]PluginEntryInfo, 0, len(s.registry))
+	for k, e := range s.registry {
+		if mapTypeFilter != "" && k.MapType != mapTypeFilter {
+			continue
+		}
+		info := PluginEntryInfo{
+			MapType:       k.MapType,
+			Slot:          k.Slot,
+			Program:       e.program,
+			HasAuxType:    e.auxType != nil,
+			OwnedMapNames: append([]string(nil), e.ownedMapNames...),
+			SharedRWNames: append([]string(nil), e.sharedRWNames...),
+			SharedRONames: append([]string(nil), e.sharedRONames...),
+			RegisteredAt:  e.registeredAt,
+		}
+		if e.auxType != nil {
+			info.AuxTypeName = e.auxType.Name
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].MapType != out[j].MapType {
+			return out[i].MapType < out[j].MapType
+		}
+		return out[i].Slot < out[j].Slot
+	})
+	return out
+}
+
 func (s *PluginServer) PluginRegister(
 	ctx context.Context,
 	req *connect.Request[v1.PluginRegisterRequest],
@@ -81,6 +153,17 @@ func (s *PluginServer) PluginRegister(
 	}
 	if msg.Program == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("program is required"))
+	}
+	// Constrain program / map_type to the BPF section-name alphabet so a
+	// caller cannot smuggle newlines or quotes through to the audit log
+	// and forge a synthetic event line in stdout-grep style monitoring.
+	if !validPluginIdent(msg.Program) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("program must match [A-Za-z_][A-Za-z0-9_]{0,63}"))
+	}
+	if !validPluginIdent(msg.MapType) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("map_type must match [A-Za-z_][A-Za-z0-9_]{0,63}"))
 	}
 
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(msg.BpfElf))
@@ -110,17 +193,43 @@ func (s *PluginServer) PluginRegister(
 	// Build map replacements: for maps that exist in both the plugin spec
 	// and vinbero's shared maps. Update the spec's MaxEntries to match the
 	// runtime map (plugin ELF has compile-time defaults, but vinbero config
-	// may override them at runtime).
-	sharedMaps := s.mapOps.GetSharedMaps()
+	// may override them at runtime). Classify each replacement as RO or RW
+	// so PluginList / audit can show intent; any map declared by the plugin
+	// ELF that is not a shared vinbero map is recorded as plugin-owned.
+	sharedRO := s.mapOps.GetSharedReadOnlyMaps()
+	sharedRW := s.mapOps.GetSharedReadWriteMaps()
 	replacements := make(map[string]*ebpf.Map)
-	for name, m := range sharedMaps {
-		if ms, exists := spec.Maps[name]; exists {
+	var usedRO, usedRW, ownedMaps []string
+	for name, ms := range spec.Maps {
+		if m, ok := sharedRO[name]; ok {
 			if info, err := m.Info(); err == nil {
 				ms.MaxEntries = info.MaxEntries
 			}
 			replacements[name] = m
+			usedRO = append(usedRO, name)
+			continue
 		}
+		if m, ok := sharedRW[name]; ok {
+			if info, err := m.Info(); err == nil {
+				ms.MaxEntries = info.MaxEntries
+			}
+			replacements[name] = m
+			usedRW = append(usedRW, name)
+			continue
+		}
+		ownedMaps = append(ownedMaps, name)
 	}
+	sort.Strings(usedRO)
+	sort.Strings(usedRW)
+	sort.Strings(ownedMaps)
+	s.logger.Info("plugin map linkage",
+		zap.String("program", msg.Program),
+		zap.String("map_type", msg.MapType),
+		zap.Uint32("slot", msg.Index),
+		zap.Strings("shared_ro", usedRO),
+		zap.Strings("shared_rw", usedRW),
+		zap.Strings("owned_maps", ownedMaps),
+	)
 
 	// Load the collection with shared map references from vinbero.
 	// This allows the plugin to access tailcall_ctx_map, stats_map, etc.
@@ -159,8 +268,12 @@ func (s *PluginServer) PluginRegister(
 
 	s.mu.Lock()
 	s.registry[pluginSlotKey{MapType: msg.MapType, Slot: msg.Index}] = &pluginEntry{
-		program: msg.Program,
-		auxType: auxType,
+		program:       msg.Program,
+		auxType:       auxType,
+		ownedMapNames: ownedMaps,
+		sharedRWNames: usedRW,
+		sharedRONames: usedRO,
+		registeredAt:  time.Now(),
 	}
 	s.mu.Unlock()
 
@@ -181,5 +294,42 @@ func (s *PluginServer) PluginUnregister(
 	delete(s.registry, pluginSlotKey{MapType: msg.MapType, Slot: msg.Index})
 	s.mu.Unlock()
 
+	// Surface orphan aux indices owned by this slot. PluginUnregister does
+	// not free them — callers are expected to PluginAuxFree per index before
+	// retiring the slot, otherwise the indices leak in the in-memory
+	// allocator until daemon restart. Log only; do not fail the RPC because
+	// the registry / PROG_ARRAY removal already succeeded.
+	ownerTag := bpf.AuxOwnerPluginTag(msg.MapType, msg.Index)
+	if remaining := s.mapOps.CountAuxByOwner(ownerTag); remaining > 0 {
+		s.logger.Warn("plugin slot unregistered with live aux entries",
+			zap.String("owner", ownerTag),
+			zap.String("map_type", msg.MapType),
+			zap.Uint32("slot", msg.Index),
+			zap.Int("remaining_aux", remaining),
+		)
+	}
+
 	return connect.NewResponse(&v1.PluginUnregisterResponse{}), nil
+}
+
+func (s *PluginServer) PluginList(
+	ctx context.Context,
+	req *connect.Request[v1.PluginListRequest],
+) (*connect.Response[v1.PluginListResponse], error) {
+	entries := s.SnapshotEntries(req.Msg.MapTypeFilter)
+	resp := &v1.PluginListResponse{Plugins: make([]*v1.PluginInfo, 0, len(entries))}
+	for _, e := range entries {
+		resp.Plugins = append(resp.Plugins, &v1.PluginInfo{
+			MapType:       e.MapType,
+			Slot:          e.Slot,
+			Program:       e.Program,
+			HasAuxType:    e.HasAuxType,
+			AuxTypeName:   e.AuxTypeName,
+			OwnedMapNames: e.OwnedMapNames,
+			SharedRwNames: e.SharedRWNames,
+			SharedRoNames: e.SharedRONames,
+			RegisteredAt:  timestamppb.New(e.RegisteredAt),
+		})
+	}
+	return connect.NewResponse(resp), nil
 }
