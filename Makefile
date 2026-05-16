@@ -167,6 +167,7 @@ sdk-archive: ## Build SDK tarball into out/
 	@install -m 644 src/core/xdp_tailcall_helpers.h $(SDK_STAGE)/include/core/
 	@install -m 644 src/core/xdp_tailcall_macros.h $(SDK_STAGE)/include/core/
 	@install -m 644 src/core/xdp_stats.h $(SDK_STAGE)/include/core/
+	@install -m 644 src/core/srv6.h $(SDK_STAGE)/include/core/
 	@install -m 644 sdk/README.md $(SDK_STAGE)/share/vinbero-sdk/
 	@install -m 644 LICENSE $(SDK_STAGE)/share/vinbero-sdk/
 	@for d in sdk/examples/plugin-counter sdk/examples/simple-acl; do \

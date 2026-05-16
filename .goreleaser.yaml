@@ -43,7 +43,8 @@ archives:
         dst: include/vinbero/
       # Internal headers that the public ones #include via "core/...".
       # These are listed individually (not src/core/*.h) to keep the public
-      # surface explicit; srv6.h / esi.h / xdp_stats.h stay private.
+      # surface explicit. Anything added here ships transitively to plugin
+      # authors — every entry must justify itself.
       - src: src/core/xdp_map.h
         dst: include/core/
       - src: src/core/xdp_prog.h
@@ -59,6 +60,14 @@ archives:
       # from this header, so plugins that go through the epilogue (the
       # SDK's required return contract) cannot build without it.
       - src: src/core/xdp_stats.h
+        dst: include/core/
+      # srv6.h is required transitively from this PR onward: xdp_map.h
+      # references `struct aux_owner` (defined in srv6.h) to declare the
+      # aux_owner_map BPF map type. Without this, every plugin build that
+      # pulls <vinbero/plugin.h> -> core/xdp_map.h fails with
+      # "'core/srv6.h' file not found". scripts/sdk_archive_verify.sh
+      # exercises a real plugin build so the regression is caught in CI.
+      - src: src/core/srv6.h
         dst: include/core/
       # Build template — drop next to the public headers so the
       # one-liner Makefile (`include /usr/local/include/vinbero/Makefile.plugin`)
