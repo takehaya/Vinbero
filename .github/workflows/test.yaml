@@ -84,6 +84,28 @@ jobs:
       - name: Run unit tests
         run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v ./...
 
+  sdk-archive-verify:
+    name: SDK Archive Verify
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ./go.mod
+          cache: true
+
+      - name: Install clang for sample plugin builds
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libelf-dev
+
+      - name: Build SDK tarball and verify it produces a working plugin
+        run: make sdk-archive-verify
+
   integration-test:
     name: Integration Test - ${{ matrix.example }}
     runs-on: ubuntu-24.04
