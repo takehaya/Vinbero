@@ -100,8 +100,8 @@ jobs:
           go-version-file: ./go.mod
           cache: true
 
-      - name: Install clang for sample plugin builds
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libelf-dev
+      - name: Install clang + libbpf headers for sample plugin builds
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libelf-dev libbpf-dev
 
       - name: Build SDK tarball and verify it produces a working plugin
         run: make sdk-archive-verify
