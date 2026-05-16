@@ -12,10 +12,21 @@ VINBERO_CORE_ROOT ?= $(VINBERO_SDK_ROOT)
 BPF_CLANG         ?= clang
 BPF_ARCH          ?= $(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/')
 
+# Debian/Ubuntu host the per-architecture kernel UAPI headers (notably
+# asm/types.h, pulled in by <linux/types.h>) under the multiarch path
+# /usr/include/<machine>-linux-gnu/. Add it conditionally — Alpine / other
+# distros that put everything under /usr/include/ have an empty dir and
+# fall through cleanly. Skipping this is the difference between a clean
+# `make` on a stock Ubuntu CI image and `fatal error: 'asm/types.h' file
+# not found`.
+BPF_SYS_INC_DIR := /usr/include/$(shell uname -m)-linux-gnu
+BPF_SYS_INC     := $(if $(wildcard $(BPF_SYS_INC_DIR)/asm/types.h),-I$(BPF_SYS_INC_DIR),)
+
 BPF_CFLAGS ?= -O2 -g -Wall -Werror -target bpf \
               -D__TARGET_ARCH_$(BPF_ARCH) \
               -I$(VINBERO_SDK_ROOT) \
-              -I$(VINBERO_CORE_ROOT)
+              -I$(VINBERO_CORE_ROOT) \
+              $(BPF_SYS_INC)
 
 PLUGIN_SRC ?= $(wildcard *.c)
 PLUGIN_OBJ ?= $(PLUGIN_SRC:.c=.o)
