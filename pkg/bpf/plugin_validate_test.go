@@ -451,6 +451,44 @@ func TestValidatePluginROWrites_LookupOwnedRW_Allowed(t *testing.T) {
 	}
 }
 
+// BPF_LOAD_ACQ encodes as StXClass | AtomicMode but is a read with
+// acquire semantics. The validator must not classify it as a write —
+// otherwise every plugin doing a load-acquire from a shared RO map
+// (e.g. atomically reading a config field that another updater
+// store-releases) gets rejected. clang 17+ emits this for
+// __atomic_load_n with __ATOMIC_ACQUIRE.
+func TestValidatePluginROWrites_LoadAcquireFromRO_Allowed(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.LoadAcquire(asm.R2, asm.R1, asm.DWord, 0),
+	}
+	if err := ValidatePluginProgram(roSpec("ldacq", lead), roSet()); err != nil {
+		t.Fatalf("load-acquire on RO map is a read, must pass: %v", err)
+	}
+}
+
+// Symmetric to the above: BPF_STORE_REL *is* a write (release-store
+// semantics), so storing into an RO map via store-release must still
+// reject. This catches the easy mistake of widening the load-acquire
+// exception to all atomic ops.
+func TestValidatePluginROWrites_StoreReleaseToRO_Rejected(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.Mov.Imm(asm.R2, 99),
+		asm.StoreRelease(asm.R1, asm.R2, asm.DWord, 0),
+	}
+	err := ValidatePluginProgram(roSpec("strel", lead), roSet())
+	if err == nil {
+		t.Fatal("store-release into RO map must reject")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sid_function_map") {
+		t.Errorf("error should name the RO map, got: %v", err)
+	}
+}
+
 // Same lookup-then-write pattern but with the clang-canonical NULL
 // check (`if (r0 == 0) goto skip`) between the helper and the store.
 // JEq references R0 as the compare LHS but does not write it; the

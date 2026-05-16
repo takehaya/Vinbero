@@ -290,14 +290,30 @@ func findTailCallMapName(prev asm.Instructions) string {
 	return findStaticMapPtrSource(prev, asm.R2)
 }
 
+// loadAcqAtomicOp is the AtomicOp value encoded by BPF_LOAD_ACQ. cilium's
+// loadAcquire constant is package-private, so we reconstruct it once from
+// the LoadAcquire constructor and compare in the hot path.
+var loadAcqAtomicOp = asm.LoadAcquire(asm.R0, asm.R0, asm.DWord, 0).OpCode.AtomicOp()
+
 // isMapWrite reports whether ins writes to memory through a register-based
-// destination. We treat both classic stores (BPF_ST/BPF_STX, regardless of
-// MemMode vs immediate) and atomic RMW operations (BPF_STX | AtomicMode,
-// which covers BPF_ATOMIC and the legacy BPF_XADD) as writes; LDX (read)
-// is intentionally excluded.
+// destination. Classic stores (BPF_ST/BPF_STX MemMode) and atomic RMW ops
+// (BPF_STX | AtomicMode — Add/And/Or/Xor, the Fetch* variants, Xchg,
+// CmpXchg, StoreRelease) are writes; BPF_LOAD_ACQ also encodes as
+// StXClass | AtomicMode but is a load with acquire semantics, so it must
+// not be flagged. Plain BPF_LDX (read) is excluded by class.
 func isMapWrite(ins asm.Instruction) bool {
 	cls := ins.OpCode.Class()
-	return cls == asm.StClass || cls == asm.StXClass
+	switch cls {
+	case asm.StClass:
+		return true
+	case asm.StXClass:
+		if ins.OpCode.Mode() == asm.AtomicMode &&
+			ins.OpCode.AtomicOp() == loadAcqAtomicOp {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // isStackStore reports whether the store targets the BPF stack frame
