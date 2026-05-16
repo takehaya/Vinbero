@@ -145,6 +145,43 @@ sdk-clean: ## Clean every sample plugin under sdk/examples/
 		$(MAKE) -C $$d clean; \
 	done
 
+## SDK packaging:
+# SDK_VERSION follows the host repo's git description so a local tarball
+# built from a tagged commit lines up with the goreleaser-generated one.
+# Falls back to "dev" when git metadata is unavailable (CI shallow clones).
+SDK_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+SDK_STAGE := out/sdk-stage
+SDK_TARBALL := out/vinbero-sdk-$(SDK_VERSION).tar.gz
+
+.PHONY: sdk-archive
+sdk-archive: ## Build SDK tarball into out/
+	@rm -rf $(SDK_STAGE)
+	@install -d $(SDK_STAGE)/include/vinbero
+	@install -d $(SDK_STAGE)/include/core
+	@install -d $(SDK_STAGE)/share/vinbero-sdk/examples
+	@install -m 644 sdk/c/include/vinbero/*.h $(SDK_STAGE)/include/vinbero/
+	@install -m 644 sdk/c/Makefile.plugin $(SDK_STAGE)/include/vinbero/Makefile.plugin
+	@install -m 644 src/core/xdp_map.h $(SDK_STAGE)/include/core/
+	@install -m 644 src/core/xdp_prog.h $(SDK_STAGE)/include/core/
+	@install -m 644 src/core/xdp_tailcall.h $(SDK_STAGE)/include/core/
+	@install -m 644 src/core/xdp_tailcall_helpers.h $(SDK_STAGE)/include/core/
+	@install -m 644 src/core/xdp_tailcall_macros.h $(SDK_STAGE)/include/core/
+	@install -m 644 src/core/xdp_stats.h $(SDK_STAGE)/include/core/
+	@install -m 644 sdk/README.md $(SDK_STAGE)/share/vinbero-sdk/
+	@install -m 644 LICENSE $(SDK_STAGE)/share/vinbero-sdk/
+	@for d in sdk/examples/plugin-counter sdk/examples/simple-acl; do \
+		name=$$(basename $$d); \
+		install -d $(SDK_STAGE)/share/vinbero-sdk/examples/$$name; \
+		install -m 644 $$d/Makefile $$d/plugin.c $$d/README.md \
+			$(SDK_STAGE)/share/vinbero-sdk/examples/$$name/; \
+	done
+	@cd $(SDK_STAGE) && tar czf ../vinbero-sdk-$(SDK_VERSION).tar.gz .
+	@echo "Created: $(SDK_TARBALL)"
+
+.PHONY: sdk-archive-verify
+sdk-archive-verify: sdk-archive build ## Verify tarball end-to-end
+	./scripts/sdk_archive_verify.sh $(SDK_TARBALL)
+
 ## Env:
 .PHONY: remove-ebpfmap show-trace_pipe
 remove-ebpfmap: ## remove all ebpf maps

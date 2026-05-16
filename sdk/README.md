@@ -36,13 +36,37 @@ VINBERO_PLUGIN(my_plugin)
 char _license[] SEC("license") = "GPL";
 ```
 
+## Installation
+
+Two options:
+
+### From a release tarball (recommended for plugin authors)
+
+```bash
+curl -L https://github.com/takehaya/Vinbero/releases/download/vX.Y.Z/vinbero-sdk-vX.Y.Z.tar.gz \
+  | sudo tar xz -C /usr/local/
+```
+
+This installs:
+
+- `/usr/local/include/vinbero/*.h` — public ABI headers
+- `/usr/local/include/core/*.h` — internal headers referenced by the public ones
+- `/usr/local/include/vinbero/Makefile.plugin` — build template for plugin projects
+- `/usr/local/share/vinbero-sdk/{README.md,LICENSE,examples/}` — docs and worked examples
+
+### From an in-tree checkout (for vinbero developers)
+
+```bash
+git clone https://github.com/takehaya/Vinbero
+cd Vinbero
+sudo make install-sdk
+```
+
+This installs the same files from the working tree without producing a tarball.
+
 ## Build
 
-1. Install the SDK headers:
-   ```
-   sudo make install-sdk   # from vinbero source
-   ```
-2. Create a one-line Makefile that includes the SDK template:
+1. Create a one-line Makefile that includes the SDK template:
    ```
    echo 'include /usr/local/include/vinbero/Makefile.plugin' > Makefile
    make
@@ -50,11 +74,11 @@ char _license[] SEC("license") = "GPL";
    The template picks up every `*.c` in the directory and builds `*.o`.
    See `sdk/examples/*/Makefile` for the in-tree pattern (overrides
    `VINBERO_SDK_ROOT` / `VINBERO_CORE_ROOT` for local builds).
-3. Validate locally before uploading:
+2. Validate locally before uploading:
    ```
    vinbero plugin validate --prog plugin.o --program my_plugin
    ```
-4. Register with a running vinbero:
+3. Register with a running vinbero:
    ```
    vinbero -s http://localhost:8080 plugin register \
        --type endpoint --index 32 --prog plugin.o --program my_plugin
