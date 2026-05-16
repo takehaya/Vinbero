@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf/btf"
@@ -167,6 +168,37 @@ func TestPluginAuxPurge_InvalidArgs(t *testing.T) {
 				t.Errorf("expected InvalidArgument, got %v", err)
 			}
 		})
+	}
+}
+
+// TestPluginAuxPurge_RejectsLiveSlot pins the precondition guard that
+// stops purge from nuking aux of a still-registered plugin. The
+// canonical operator flow is PluginUnregister -> PluginAuxList ->
+// PluginAuxPurge; without this guard a stray purge would zero every aux
+// entry the running plugin depends on. mapOps is intentionally nil — the
+// guard must fire before any BPF call so mapOps is never reached on the
+// reject path.
+func TestPluginAuxPurge_RejectsLiveSlot(t *testing.T) {
+	key := pluginSlotKey{MapType: bpf.MapTypeEndpoint, Slot: 32}
+	s := &PluginServer{
+		registry: map[pluginSlotKey]*pluginEntry{
+			key: {program: "plugin_counter", registeredAt: time.Now()},
+		},
+	}
+	req := connect.NewRequest(&v1.PluginAuxPurgeRequest{
+		MapType: bpf.MapTypeEndpoint,
+		Slot:    32,
+	})
+	_, err := s.PluginAuxPurge(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected FailedPrecondition for live slot, got nil")
+	}
+	var connectErr *connect.Error
+	if !errors.As(err, &connectErr) || connectErr.Code() != connect.CodeFailedPrecondition {
+		t.Errorf("expected FailedPrecondition, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "still registered") {
+		t.Errorf("error should explain the live-registration block, got: %v", err)
 	}
 }
 

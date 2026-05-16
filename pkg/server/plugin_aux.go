@@ -190,6 +190,22 @@ func (s *PluginServer) PluginAuxPurge(
 	if err := bpf.ValidatePluginSlot(msg.MapType, msg.Slot); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	// Refuse to purge under a live registration. The documented flow is
+	// PluginUnregister -> PluginAuxList -> PluginAuxPurge; running purge
+	// against an active slot would nuke the running plugin's working
+	// state with no audit trail. RLock matches the other read paths
+	// against s.registry.
+	s.mu.RLock()
+	_, live := s.registry[pluginSlotKey{MapType: msg.MapType, Slot: msg.Slot}]
+	s.mu.RUnlock()
+	if live {
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			fmt.Errorf("plugin slot %s/%d is still registered; "+
+				"PluginUnregister it before calling PluginAuxPurge",
+				msg.MapType, msg.Slot),
+		)
+	}
 	ownerTag := bpf.AuxOwnerPluginTag(msg.MapType, msg.Slot)
 	n := s.mapOps.FreeAllByOwner(ownerTag)
 	return connect.NewResponse(&v1.PluginAuxPurgeResponse{PurgedCount: uint32(n)}), nil
