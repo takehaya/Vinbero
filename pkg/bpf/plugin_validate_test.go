@@ -467,6 +467,39 @@ func TestValidatePluginROWrites_LoadAcquireFromRO_Allowed(t *testing.T) {
 	}
 }
 
+// LoadAcquire writes Dst (it is a load), so the map-identity tracker
+// must clear lastMap[Dst]. Pre-fix, the StX continue branch fell
+// through without clearing Dst, leaving stale tracking that could
+// either spuriously detect a "store into RO" on a register that no
+// longer held a map pointer, or hide a real violation behind a stale
+// "this register still points at scratch_map" memory.
+func TestValidatePluginROWrites_LoadAcquireClearsDst(t *testing.T) {
+	// R1 is loaded with sid_function_map (RO). LoadAcquire then writes
+	// R1 with whatever was at *(R0 + 0) — that value is not a map
+	// pointer, so lastMap[R1] must clear. The subsequent store through
+	// R1 should therefore fall under the "could not be resolved" arm,
+	// not the "store into sid_function_map" arm.
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.LoadAcquire(asm.R1, asm.R0, asm.DWord, 0),
+		asm.StoreImm(asm.R1, 0, 1, asm.Word),
+	}
+	err := ValidatePluginProgram(roSpec("ldacq_clears", lead), roSet())
+	if err == nil {
+		t.Fatal("post-LoadAcquire store with cleared tracking must be flagged")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "sid_function_map") {
+		t.Errorf("error must NOT name sid_function_map (lastMap should have "+
+			"been cleared by LoadAcquire), got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "could not be resolved") {
+		t.Errorf("error should describe unresolved store, got: %v", err)
+	}
+}
+
 // Symmetric to the above: BPF_STORE_REL *is* a write (release-store
 // semantics), so storing into an RO map via store-release must still
 // reject. This catches the easy mistake of widening the load-acquire
@@ -697,6 +730,64 @@ func TestParseROEnforceMode(t *testing.T) {
 }
 
 // BTF absent (stripped ELF): validation falls back to asm-level checks and
+// Pins the check-ordering invariant inside ValidatePluginCollection:
+// when a plugin trips BOTH an always-fatal validator (here, oversize
+// aux struct) AND the warn-eligible RO-write check, the returned error
+// must be the fatal one — not ErrPluginROWrite. Otherwise a server
+// running under ro_enforce=warn would swallow the wrapped error and
+// implicitly skip the aux-size check, loading an unsafe plugin.
+func TestValidatePluginCollection_RWWriteDoesNotMaskFatalErrors(t *testing.T) {
+	prog := buildSpec("xdp_entry", ebpf.XDP, asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.StoreImm(asm.R1, 0, 99, asm.Word), // RO write violation
+		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{"xdp_entry": prog},
+		Types:    buildBTFSpec(t, []btf.Type{auxStruct("xdp_entry_aux", 200)}),
+	}
+	_, err := ValidatePluginCollection(spec, "xdp_entry", roSet())
+	if err == nil {
+		t.Fatal("expected oversize aux to be rejected")
+	}
+	if errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("aux-size error must not be wrapped as ErrPluginROWrite "+
+			"(warn-mode caller would swallow it); got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "196") {
+		t.Errorf("error should be the aux-size diagnostic, got: %v", err)
+	}
+}
+
+// Symmetric to the above: when ONLY RO-write fails (every fatal check
+// passes), the returned error MUST be ErrPluginROWrite so a warn-mode
+// caller can recognize it and downgrade to a log.
+func TestValidatePluginCollection_PureROWriteIsWarnEligible(t *testing.T) {
+	prog := buildSpec("xdp_entry", ebpf.XDP, asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.StoreImm(asm.R1, 0, 99, asm.Word),
+		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	spec := &ebpf.CollectionSpec{
+		Programs: map[string]*ebpf.ProgramSpec{"xdp_entry": prog},
+	}
+	target, err := ValidatePluginCollection(spec, "xdp_entry", roSet())
+	if err == nil {
+		t.Fatal("expected RO write to be flagged")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("expected ErrPluginROWrite (warn-eligible), got: %v", err)
+	}
+	if target == nil {
+		t.Errorf("ValidatePluginCollection must return a non-nil target on " +
+			"warn-eligible failure so callers can proceed in warn mode")
+	}
+}
+
 // must succeed if those pass.
 func TestValidatePluginCollection_BTF_MissingOK(t *testing.T) {
 	prog := buildSpec("xdp_entry", ebpf.XDP, asm.Instructions{

@@ -181,8 +181,17 @@ func ValidatePluginProgram(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) e
 		return err
 	}
 
-	if err := checkROWrites(spec, roMaps); err != nil {
-		return err
+	// RO-write is run by ValidatePluginCollection AFTER the always-fatal
+	// validators, not from inside this function, so warn-mode callers
+	// (PluginRegister with ro_enforce=warn) can downgrade just that one
+	// error without skipping the rest of the validator. Keeping the
+	// parameter here for callers that still want the bundled behaviour
+	// (notably tests under pkg/bpf that exercise the asm-level enforcer
+	// without going through ValidatePluginCollection).
+	if roMaps != nil {
+		if err := checkROWrites(spec, roMaps); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -192,9 +201,21 @@ func ValidatePluginProgram(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) e
 // type to XDP, and enforces the plugin contract on it. Used by the server,
 // the CLI, and the SDK to keep the lookup/validation flow consistent.
 //
-// roMaps == nil skips the asm-level RO-write check (back-compat for tests
-// that exercise the rest of the pipeline). Production callers must pass
-// SharedReadOnlyMapNamesSet().
+// Check order is intentional:
+//  1. validatePluginMapTypes — BTF map types match shared-map declarations
+//  2. validatePluginAuxType  — <program>_aux fits SidAuxPluginRawMax
+//  3. ValidatePluginProgram  — XDP class, epilogue/tail-call, forbidden
+//     helpers, exit proximity (called with roMaps==nil so RO-write runs
+//     separately below)
+//  4. checkROWrites          — only step that may be warn-downgraded
+//
+// Steps 1-3 always fatal. Step 4 returns ErrPluginROWrite, which a caller
+// running under ro_enforce=warn may choose to log instead of reject; the
+// returned ProgramSpec is non-nil in that case so the caller can proceed
+// with the same target the strict path would have produced.
+//
+// roMaps == nil skips step 4 entirely (used by tests / callers that have
+// no shared-map context). Production callers pass SharedReadOnlyMapNamesSet().
 func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string, roMaps map[string]struct{}) (*ebpf.ProgramSpec, error) {
 	if spec == nil {
 		return nil, fmt.Errorf("plugin CollectionSpec is nil")
@@ -208,14 +229,32 @@ func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string, roMaps 
 		return nil, fmt.Errorf("program %q not found in ELF; available: %v", program, names)
 	}
 	target.Type = ebpf.XDP
-	if err := ValidatePluginProgram(target, roMaps); err != nil {
-		return nil, err
-	}
+
+	// Run mandatory (always-fatal) checks first so the warn-eligible
+	// RO-write check below runs LAST. Otherwise a caller that swallows
+	// ErrPluginROWrite in warn mode would also be implicitly swallowing
+	// any map-type or aux-size violation that came in alongside it,
+	// because the early return from ValidatePluginProgram would short-
+	// circuit the rest of the pipeline.
 	if err := validatePluginMapTypes(spec); err != nil {
 		return nil, err
 	}
 	if err := validatePluginAuxType(spec, program); err != nil {
 		return nil, err
+	}
+	if err := ValidatePluginProgram(target, nil); err != nil {
+		return nil, err
+	}
+
+	// RO-write is intentionally split out: it is the only validator
+	// failure mode that may be downgraded to a warn-only log under
+	// settings.validate.ro_enforce=warn. Returning the target spec
+	// alongside the error lets warn-mode callers proceed with the same
+	// program ref the strict path would have produced.
+	if roMaps != nil {
+		if err := checkROWrites(target, roMaps); err != nil {
+			return target, err
+		}
 	}
 	return target, nil
 }
@@ -410,8 +449,23 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 		// LoadMapPtr writes a known map name; any other write to a
 		// register invalidates whatever was there. Stores (BPF_ST*) do
 		// not modify Dst (they write *through* it), so they leave the
-		// table alone.
-		if in.OpCode.Class() == asm.StClass || in.OpCode.Class() == asm.StXClass {
+		// table alone — with one exception: BPF_LOAD_ACQ is encoded as
+		// StXClass | AtomicMode but actually loads memory into Dst with
+		// acquire semantics. Skipping the table update there would let
+		// a stale map name carry past the load and either spuriously
+		// detect a "store into RO" or hide a real violation behind the
+		// stale tracking. Fall through to invalidate Dst for it.
+		if cls := in.OpCode.Class(); cls == asm.StClass || cls == asm.StXClass {
+			isLoadAcquire := cls == asm.StXClass &&
+				in.OpCode.Mode() == asm.AtomicMode &&
+				in.OpCode.AtomicOp() == loadAcqAtomicOp
+			if !isLoadAcquire {
+				continue
+			}
+			dst := int(in.Dst)
+			if dst >= 0 && dst < numRegs {
+				lastMap[dst] = ""
+			}
 			continue
 		}
 		// BPF helper / subprogram calls. The kernel ABI hands the return
