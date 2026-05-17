@@ -97,9 +97,17 @@ struct {
     __uint(max_entries, SLOT_STATS_HEADEND_MAX);
 } slot_stats_headend_v6 SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, struct stats_entry);
+    __uint(max_entries, SLOT_STATS_HEADEND_MAX);
+} slot_stats_headend_l2 SEC(".maps");
+
 // slot_stats_inc: gated by enable_stats like stats_inc. `map` must be one
-// of slot_stats_endpoint / slot_stats_headend_v4 / slot_stats_headend_v6,
-// and `slot` must be already masked to the map's range by the caller.
+// of slot_stats_endpoint / slot_stats_headend_v4 / slot_stats_headend_v6
+// / slot_stats_headend_l2, and `slot` must be already masked to the
+// map's range by the caller.
 static __always_inline void slot_stats_inc(void *map, __u32 slot, __u64 bytes)
 {
     if (!enable_stats)

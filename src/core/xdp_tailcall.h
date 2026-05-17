@@ -19,20 +19,25 @@
 // Per-CPU context key (single-element array)
 #define TAILCALL_CTX_KEY 0
 
-// Dispatch type constants. HEADEND is split into V4/V6 so tailcall_epilogue
-// can pick the right slot_stats_* map without inspecting packet headers.
+// Dispatch type constants. HEADEND is split into V4/V6/L2 so
+// tailcall_epilogue can pick the right slot_stats_* map without
+// inspecting packet headers. The L2 dispatch reuses the headend variant
+// of tailcall_ctx because struct headend_entry already carries bd_id
+// and the SRH that h_encaps_l2 needs.
 #define DISPATCH_LOCALSID    0   // SRH present (via process_srv6_localsid)
 #define DISPATCH_NOSRH       1   // No SRH (via process_srv6_decap_nosrh)
 #define DISPATCH_HEADEND_V4  2   // Headend IPv4 encapsulation
 #define DISPATCH_HEADEND_V6  3   // Headend IPv6 encapsulation
+#define DISPATCH_HEADEND_L2  4   // Headend L2 (H.Encaps.L2 / H.Encaps.L2.Red)
 
 // ========== Tail Call Context ==========
 
 // Context passed from dispatcher to tail call target via per-CPU map.
 // Dispatcher writes before bpf_tail_call; target reads on entry.
 struct tailcall_ctx {
-    __u16 l3_offset;        // Distance from packet start to L3 header (14/18/22)
-    __u8  dispatch_type;    // DISPATCH_LOCALSID / DISPATCH_NOSRH / DISPATCH_HEADEND_V{4,6}
+    __u16 l3_offset;        // Distance from packet start to L3 header (14/18/22).
+                            // Unused for DISPATCH_HEADEND_L2 (set to 0 by dispatcher).
+    __u8  dispatch_type;    // DISPATCH_LOCALSID / DISPATCH_NOSRH / DISPATCH_HEADEND_V{4,6} / DISPATCH_HEADEND_L2
     __u8  inner_proto;      // For DISPATCH_NOSRH: nexthdr (IPPROTO_IPIP/IPV6/ETHERNET)
     __u8  slot;             // Tail-call target slot. Physical type is u8 (0-255);
                             // logically bounded to slot_stats_* map size (64/32)

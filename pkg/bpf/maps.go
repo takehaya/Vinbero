@@ -1840,9 +1840,15 @@ func (m *MapOperations) GetSharedReadWriteMaps() map[string]*ebpf.Map {
 		"slot_stats_endpoint":   m.objs.SlotStatsEndpoint,
 		"slot_stats_headend_v4": m.objs.SlotStatsHeadendV4,
 		"slot_stats_headend_v6": m.objs.SlotStatsHeadendV6,
+		"slot_stats_headend_l2": m.objs.SlotStatsHeadendL2,
 		MapNameSidEndpointProgs: m.objs.SidEndpointProgs,
 		MapNameHeadendV4Progs:   m.objs.HeadendV4Progs,
 		MapNameHeadendV6Progs:   m.objs.HeadendV6Progs,
+		// headend_l2_progs is intentionally NOT exposed here in Phase 1:
+		// the validator's tail-call whitelist (ValidTailCallMaps) does
+		// not include it yet, so external plugins cannot dispatch into
+		// L2 slots. Phase 2 of the L2 plugin rollout adds it together
+		// with MapTypeHeadendL2 / MapNameHeadendL2Progs constants.
 	}
 }
 
@@ -1883,6 +1889,7 @@ func SharedReadWriteMapNames() []string {
 		"slot_stats_endpoint",
 		"slot_stats_headend_v4",
 		"slot_stats_headend_v6",
+		"slot_stats_headend_l2",
 		MapNameSidEndpointProgs,
 		MapNameHeadendV4Progs,
 		MapNameHeadendV6Progs,

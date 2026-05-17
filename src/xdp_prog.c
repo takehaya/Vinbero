@@ -40,6 +40,7 @@ char _license[] SEC("license") = "GPL";
 #include "headend/tailcall_headend.c"
 #include "dispatch/srv6_dispatch.c"
 #include "headend/srv6_encaps_l2.h"
+#include "headend/tailcall_headend_l2.c"
 #include "dispatch/l2_headend.c"
 #include "xdp_main.c"
 #include "l2vpn/tc_bum.h"
