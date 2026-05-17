@@ -25,6 +25,13 @@ service PluginService {
   rpc PluginAuxGet(PluginAuxGetRequest) returns (PluginAuxGetResponse);
   // Zero the entry and release the index back to the allocator.
   rpc PluginAuxFree(PluginAuxFreeRequest) returns (PluginAuxFreeResponse);
+  // Free every aux index owned by (map_type, slot). Use after
+  // PluginUnregister to release indices that were not freed by
+  // PluginAuxFree before the slot was retired.
+  rpc PluginAuxPurge(PluginAuxPurgeRequest) returns (PluginAuxPurgeResponse);
+  // Enumerate aux indices currently owned by the given filter. Empty
+  // filter returns all live indices.
+  rpc PluginAuxList(PluginAuxListRequest) returns (PluginAuxListResponse);
 }
 
 message PluginRegisterRequest {
@@ -105,3 +112,38 @@ message PluginAuxFreeRequest {
   uint32 slot = 3;
 }
 message PluginAuxFreeResponse {}
+
+message PluginAuxPurgeRequest {
+  string map_type = 1;
+  uint32 slot = 2;
+}
+message PluginAuxPurgeResponse {
+  uint32 purged_count = 1;
+}
+
+message PluginAuxListRequest {
+  // Filter behaviour:
+  //   - both empty: return all live aux indices (builtin + plugin)
+  //   - map_type set: restrict to plugin-owned indices for that map type
+  //   - map_type + slot + match_slot=true: restrict to that exact slot.
+  //     match_slot is required because slot=0 is a valid uint32 zero
+  //     value but never a valid plugin slot; without the boolean we
+  //     could not distinguish "no slot filter" from "slot 0".
+  string map_type = 1;
+  uint32 slot = 2;
+  // match_slot disambiguates "filter only by map_type" (false) from
+  // "filter by both map_type and slot" (true). Plugin slots start at
+  // the per-map-type base, so a zero slot with match_slot=true falls
+  // outside the valid range and surfaces an empty result -- safer than
+  // overloading slot=0 as the wildcard.
+  bool match_slot = 3;
+}
+
+message AuxIndexInfo {
+  uint32 index = 1;
+  string owner = 2; // Persisted owner tag (e.g. "plugin:v1:endpoint:32").
+}
+
+message PluginAuxListResponse {
+  repeated AuxIndexInfo entries = 1;
+}

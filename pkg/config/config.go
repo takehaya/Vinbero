@@ -32,6 +32,18 @@ type SettingConfig struct {
 	StatePath       string         `yaml:"state_path,omitempty"`                      // Path for resource state file (default: /var/lib/vinbero/state.json)
 	FdbAgingSeconds int            `yaml:"fdb_aging_seconds,omitempty" default:"300"` // FDB entry aging timeout (0=disabled)
 	PinMaps         PinMapsConfig  `yaml:"pin_maps,omitempty"`                        // Pin control-state BPF maps under /sys/fs/bpf so they survive a vinberod restart.
+	Validate        ValidateConfig `yaml:"validate,omitempty"`                        // Plugin validator policy knobs.
+}
+
+// ValidateConfig knobs the plugin validator enforces on the server side.
+// CLI `plugin validate` always runs in shift-left enforce regardless of
+// these values — they only adjust the behaviour of `PluginRegister`.
+type ValidateConfig struct {
+	// RoEnforce selects how plugin writes into vinbero shared read-only
+	// maps are handled at register time. "warn" (default during initial
+	// rollout) logs the violation but still loads the plugin; "enforce"
+	// hard-rejects the RPC. Empty string is treated as "warn".
+	RoEnforce string `yaml:"ro_enforce,omitempty" default:"warn"`
 }
 
 // PinMapsConfig toggles pinning for the daemon's control-state BPF maps

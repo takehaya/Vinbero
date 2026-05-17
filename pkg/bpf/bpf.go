@@ -19,6 +19,7 @@ import (
 var pinnedControlMaps = []string{
 	"sid_function_map",
 	"sid_aux_map",
+	"aux_owner_map", // persistent owner tags paired with sid_aux_map
 	"headend_v4_map",
 	"headend_v6_map",
 	"headend_l2_map",
@@ -56,13 +57,14 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 	if cfg != nil {
 		entries := cfg.Setting.Entries
 		mapSizes := map[string]int{
-			"sid_function_map":   entries.SidFunction.Capacity,
-			"sid_aux_map":        entries.SidFunction.Capacity,
-			"headend_v4_map":     entries.Headendv4.Capacity,
-			"headend_v6_map":     entries.Headendv6.Capacity,
-			"headend_l2_map":     entries.HeadendL2.Capacity,
-			"fdb_map":            entries.Fdb.Capacity,
-			"bd_peer_map":        entries.BdPeer.Capacity,
+			"sid_function_map":    entries.SidFunction.Capacity,
+			"sid_aux_map":         entries.SidFunction.Capacity,
+			"aux_owner_map":       entries.SidFunction.Capacity, // paired with sid_aux_map keyspace
+			"headend_v4_map":      entries.Headendv4.Capacity,
+			"headend_v6_map":      entries.Headendv6.Capacity,
+			"headend_l2_map":      entries.HeadendL2.Capacity,
+			"fdb_map":             entries.Fdb.Capacity,
+			"bd_peer_map":         entries.BdPeer.Capacity,
 			"bd_peer_reverse_map": entries.BdPeer.Capacity,
 			"dx2v_map":            entries.VlanTable.Capacity,
 		}
