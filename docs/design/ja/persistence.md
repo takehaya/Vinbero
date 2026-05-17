@@ -88,30 +88,33 @@ sudo systemctl start vinberod
 
 pin 有効時は特に重要なメカニズム (`pkg/bpf/maps.go::RecoverAuxIndices`):
 
-起動直後に `sid_function_map` を iterate して、`aux_index != 0` のエントリが参照している index を allocator が使用中としてマーク。gap 部分を free list に戻します。pin された map を reuse したとき、allocator がすでに使われている index を二重に払い出さないためのガード。各 index には同時に owner タグ (`builtin` か `plugin:<mapType>:<slot>`) が `entry.Action >= EndpointPluginBase` の判定で再構築されます。
+Phase 2 で `aux_owner_map` (BPF ARRAY map) を `sid_aux_map` と同じ keyspace で導入しました。各 index に対し owner タグ (`builtin:v1` か `plugin:v1:<mapType>:<slot>`) を持ち、`pinnedControlMaps` の一員として pin されます。
 
-pin 無効時は map が空なので recovery しても何も起きず、結果的に allocator は fresh start します (= 従来挙動)。
+起動時のフロー:
 
-#### 独立 PluginAux は復元対象外
+1. `aux_owner_map` が空でなければそれを iterate して owner を再構築 (Phase 2 path)。**独立 PluginAux も復元される**ため、SID に bind されていない索引も daemon 再起動を跨いで生存します。
+2. 空のときは fallback として `sid_function_map` を iterate して owner を再構築 (Phase 1d 互換)。再構築後 `aux_owner_map` に書き戻し、次回起動以降は Phase 2 path を取ります (legacy → v1 forward migration)。
 
-`vbctl plugin aux alloc` で払い出した index のうち、まだ `sid_function_map` に紐づいていない「独立 aux」は **`RecoverAuxIndices` の探索経路に乗らない** (sid_function_map iterate でしか owner が再構築できないため)。`pin_maps: true` で `sid_aux_map` が pin されていても、index 使用状況を daemon 側の in-memory allocator が忘れてしまうので、実質的に daemon 再起動で消失します。
+pin 無効時は `aux_owner_map` も in-memory なので、allocator は fresh start します (= 従来挙動)。
 
-運用上の影響:
+owner タグ format は `pkg/bpf/maps.go::AuxOwnerVersion` で版数管理しており、`ParseAuxOwnerTag` は legacy の unversioned format (`plugin:endpoint:32` / `builtin`) と v1 の versioned format (`plugin:v1:endpoint:32` / `builtin:v1`) の両方を受理します。
 
-- `PluginAuxAlloc → SidFunctionCreate(--plugin-aux-index)` の順で使う場合、SID create までに daemon 再起動が挟まると index が引き継がれない
-- 複数 SID で同じ index を共有していた場合、再起動後は allocator が同じ index を他用途に払い出してしまう可能性がある
+#### 独立 PluginAux は復元される (Phase 2)
 
-回避策は以下のいずれか:
+Phase 1d までは `vbctl plugin aux alloc` で払い出した「独立 aux」(SID に未 bind の index) は daemon 再起動で失われていました。Phase 2 で `aux_owner_map` の pin を導入したため、`pin_maps.enabled: true` の構成では独立 aux も含めて owner と index 使用状況が再起動を跨いで保持されます。
 
-1. `vbctl plugin aux alloc` 直後に `vbctl sid create --plugin-aux-index` まで 1 アトミックに走らせる (独立 aux を長期間寝かせない)
-2. 独立 aux は短命とし、長寿命な aux は `--plugin-aux-json` で SID と一体化させる
-3. 外部コントローラから起動時に `plugin aux alloc` + `sid create` を再投入する
+実装詳細は `pkg/bpf/maps.go::RecoverAuxIndices` を参照。
 
-恒久的な解決 (owner map 自体を pin + PluginAuxAlloc で即 bpffs に反映) は Phase 2 の BPF pinning 拡張として未実装。
+#### PluginUnregister は aux を解放しない (PluginAuxPurge で明示解放)
 
-#### PluginUnregister は aux を解放しない
+`PluginUnregister` は PROG_ARRAY スロットと server の registry エントリを消すだけで、**そのスロットが所有していた aux index の自動解放は行いません**。これは「同じ slot で再 register したときに前回の状態を予期せず継承しない」ための明示的な設計です。サーバ側ではこの状態を検知すると `plugin slot unregistered with live aux entries` の warn ログを出します。
 
-`PluginUnregister` は PROG_ARRAY スロットと server の registry エントリを消すだけで、**そのスロットが所有していた aux index の自動解放は行いません**。`PluginAuxFree` を呼ばずに unregister するとそれらは in-memory allocator に残留し、次回 daemon 再起動まで回収されません (再起動時には独立 aux と同様、`sid_function_map` 経由で再構築されない限り消失します)。サーバ側ではこの状態を検知すると `plugin slot unregistered with live aux entries` の warn ログを出すので、運用では unregister 前に各 index を Free するか、ログを監視して取り残しに気付ける状態にしてください。
+取り残し index を解放するには Phase 2 で導入した RPC を使います:
+
+- `vbctl plugin aux list --map-type <mt> --slot <n> --match-slot`: 取り残し index を列挙
+- `vbctl plugin aux purge --map-type <mt> --slot <n>`: 取り残し index をまとめて解放
+
+`PluginAuxPurge` は `sid_aux_map` の zero-write と allocator slot 解放、`aux_owner_map` のクリアを 1 RPC で行います。Phase 1d までは daemon 再起動まで回収されない問題がありましたが、Phase 2 ではオンライン回収が可能です。
 
 ## XDP program の attach
 

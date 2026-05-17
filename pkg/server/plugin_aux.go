@@ -13,14 +13,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// validatePluginSlot is a thin server-side alias for bpf.ValidatePluginSlot;
-// kept under this name because every PluginAux RPC handler reads cleaner with
-// the unprefixed call site, and to make any future server-only relaxation
-// (e.g. allowing reserved slots in a debug mode) a one-liner.
-func validatePluginSlot(mapType string, slot uint32) error {
-	return bpf.ValidatePluginSlot(mapType, slot)
-}
-
 // encodePluginAuxPayload normalizes a PluginAux payload to its on-wire byte
 // form. Exactly one of rawIn / jsonIn must be non-empty; json is encoded via
 // the plugin's BTF-declared <program>_aux struct.
@@ -56,7 +48,7 @@ func (s *PluginServer) encodePluginAuxPayload(mapType string, slot uint32, rawIn
 // index, then returns the owner tag used by every PluginAux op on that slot.
 // requireIdx=false is used by Alloc where no index exists yet.
 func ownerFor(mapType string, slot, idx uint32, requireIdx bool) (string, error) {
-	if err := validatePluginSlot(mapType, slot); err != nil {
+	if err := bpf.ValidatePluginSlot(mapType, slot); err != nil {
 		return "", err
 	}
 	if requireIdx && idx == 0 {
@@ -175,4 +167,80 @@ func (s *PluginServer) PluginAuxFree(
 		return nil, toRPCError(err)
 	}
 	return connect.NewResponse(&v1.PluginAuxFreeResponse{}), nil
+}
+
+// PluginAuxPurge releases every aux index owned by (map_type, slot). The
+// typical operator flow is PluginUnregister -> PluginAuxList (to confirm
+// what leaks) -> PluginAuxPurge. We deliberately keep this separate from
+// PluginUnregister so a re-register does not surprise the new tenant
+// with the previous tenant's residual state -- callers must opt in.
+func (s *PluginServer) PluginAuxPurge(
+	ctx context.Context,
+	req *connect.Request[v1.PluginAuxPurgeRequest],
+) (*connect.Response[v1.PluginAuxPurgeResponse], error) {
+	msg := req.Msg
+	if err := bpf.ValidatePluginSlot(msg.MapType, msg.Slot); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	// Refuse to purge under a live registration. The documented flow is
+	// PluginUnregister -> PluginAuxList -> PluginAuxPurge; running purge
+	// against an active slot would nuke the running plugin's working
+	// state with no audit trail.
+	//
+	// RLock is held through FreeAllByOwner — not just across the
+	// registry probe — to close the TOCTOU window between the live
+	// check and the actual zero-write. A concurrent PluginRegister
+	// takes s.mu.Lock() and so blocks until purge completes, keeping
+	// "registry says slot X is empty" and "purge runs on slot X"
+	// indistinguishable from atomic for the duration. Purge is not a
+	// hot-path RPC; stalling Register/Unregister during a multi-ms BPF
+	// map walk is acceptable.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, live := s.registry[pluginSlotKey{MapType: msg.MapType, Slot: msg.Slot}]; live {
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			fmt.Errorf("plugin slot %s/%d is still registered; "+
+				"PluginUnregister it before calling PluginAuxPurge",
+				msg.MapType, msg.Slot),
+		)
+	}
+	ownerTag := bpf.AuxOwnerPluginTag(msg.MapType, msg.Slot)
+	n := s.mapOps.FreeAllByOwner(ownerTag)
+	return connect.NewResponse(&v1.PluginAuxPurgeResponse{PurgedCount: uint32(n)}), nil
+}
+
+// PluginAuxList enumerates live aux indices for an operator-friendly
+// view. Empty filter returns everything (builtin + plugin); a populated
+// map_type narrows to plugin-owned indices for that map type, and
+// match_slot narrows further to one slot. The owner string carries the
+// version-stamped persisted form so external diff tools see a stable
+// representation independent of in-memory canonicalization.
+func (s *PluginServer) PluginAuxList(
+	ctx context.Context,
+	req *connect.Request[v1.PluginAuxListRequest],
+) (*connect.Response[v1.PluginAuxListResponse], error) {
+	msg := req.Msg
+	if msg.MapType != "" {
+		// When a filter is applied we still want to validate the (map_type,
+		// slot) pair so a typo surfaces as InvalidArgument rather than
+		// "always empty result". match_slot=false skips the slot range
+		// check because the slot is irrelevant to the filter.
+		if msg.MatchSlot {
+			if err := bpf.ValidatePluginSlot(msg.MapType, msg.Slot); err != nil {
+				return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			}
+		} else if _, _, err := bpf.PluginSlotRange(msg.MapType); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
+	infos := s.mapOps.ListAuxByOwner(msg.MapType, msg.Slot, msg.MatchSlot)
+	resp := &v1.PluginAuxListResponse{Entries: make([]*v1.AuxIndexInfo, 0, len(infos))}
+	for _, info := range infos {
+		resp.Entries = append(resp.Entries, &v1.AuxIndexInfo{
+			Index: info.Index,
+			Owner: info.Owner,
+		})
+	}
+	return connect.NewResponse(resp), nil
 }

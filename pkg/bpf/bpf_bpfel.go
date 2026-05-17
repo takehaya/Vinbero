@@ -247,6 +247,7 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
+	AuxOwnerMap        *ebpf.MapSpec `ebpf:"aux_owner_map"`
 	BdLocalEsiMap      *ebpf.MapSpec `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap     *ebpf.MapSpec `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap          *ebpf.MapSpec `ebpf:"bd_peer_map"`
@@ -298,6 +299,7 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
+	AuxOwnerMap        *ebpf.Map `ebpf:"aux_owner_map"`
 	BdLocalEsiMap      *ebpf.Map `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap     *ebpf.Map `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap          *ebpf.Map `ebpf:"bd_peer_map"`
@@ -324,6 +326,7 @@ type BpfMaps struct {
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.AuxOwnerMap,
 		m.BdLocalEsiMap,
 		m.BdPeerL2ExtMap,
 		m.BdPeerMap,

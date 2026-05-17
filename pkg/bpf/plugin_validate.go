@@ -11,9 +11,58 @@ import (
 	"github.com/cilium/ebpf/btf"
 )
 
+// ErrPluginROWrite is the sentinel returned (wrapped via fmt.Errorf("%w"))
+// by the validator when a plugin writes to a vinbero shared RO map or to
+// a map pointer that cannot be statically resolved. Callers (notably the
+// daemon's PluginRegister) use errors.Is to decide whether the staged
+// warn-only rollout applies; CLI shift-left always rejects.
+var ErrPluginROWrite = errors.New("plugin RO map write")
+
 // SymTailcallEpilogue is the BPF subprogram every plugin must call before
 // returning an XDP action so per-action stats are recorded.
 const SymTailcallEpilogue = "tailcall_epilogue"
+
+// ROEnforceMode selects how the asm-level RO-write violation is surfaced.
+// The validator itself always returns the violation as an error; the mode
+// is consumed by callers (typically PluginRegister) to decide whether to
+// reject the request or just log a warning. CLI shift-left uses the
+// returned error directly and ignores the mode.
+type ROEnforceMode int
+
+const (
+	// ROEnforceWarn is the default: the violation is logged but the
+	// register/load proceeds. Used during the staged rollout so existing
+	// plugins keep working while ops watches the warn audit log.
+	ROEnforceWarn ROEnforceMode = iota
+	// ROEnforceEnforce hard-rejects the register call. CLI's `plugin
+	// validate` is always effectively in this mode regardless of config.
+	ROEnforceEnforce
+)
+
+// String renders the mode as the same token accepted by ParseROEnforceMode
+// so logs and config dumps stay reversible.
+func (m ROEnforceMode) String() string {
+	switch m {
+	case ROEnforceEnforce:
+		return "enforce"
+	default:
+		return "warn"
+	}
+}
+
+// ParseROEnforceMode converts a config string into a mode. Empty / "warn"
+// map to warn-only; "enforce" maps to hard-reject. Anything else is a
+// config error so typos don't silently downgrade the policy.
+func ParseROEnforceMode(s string) (ROEnforceMode, error) {
+	switch s {
+	case "", "warn":
+		return ROEnforceWarn, nil
+	case "enforce":
+		return ROEnforceEnforce, nil
+	default:
+		return 0, fmt.Errorf("invalid ro_enforce: %q (expected 'warn' or 'enforce')", s)
+	}
+}
 
 // ValidTailCallMaps lists the vinbero-managed PROG_ARRAYs a plugin is allowed
 // to bpf_tail_call into. Dispatching back to a vinbero PROG_ARRAY is how a
@@ -58,7 +107,10 @@ const ExitProximityWindow = 64
 //     plugins built with VINBERO_PLUGIN always pass because the macro
 //     produces a single exit; hand-written plugins must keep each return
 //     close to an epilogue or tail-call.
-func ValidatePluginProgram(spec *ebpf.ProgramSpec) error {
+//  6. Stores into vinbero shared read-only maps are rejected (the
+//     RO-enforce). roMaps == nil disables the check; production callers
+//     pass SharedReadOnlyMapNamesSet().
+func ValidatePluginProgram(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	if spec == nil {
 		return fmt.Errorf("plugin ProgramSpec is nil")
 	}
@@ -129,13 +181,42 @@ func ValidatePluginProgram(spec *ebpf.ProgramSpec) error {
 		return err
 	}
 
+	// RO-write is run by ValidatePluginCollection AFTER the always-fatal
+	// validators, not from inside this function, so warn-mode callers
+	// (PluginRegister with ro_enforce=warn) can downgrade just that one
+	// error without skipping the rest of the validator. Keeping the
+	// parameter here for callers that still want the bundled behaviour
+	// (notably tests under pkg/bpf that exercise the asm-level enforcer
+	// without going through ValidatePluginCollection).
+	if roMaps != nil {
+		if err := checkROWrites(spec, roMaps); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
 // ValidatePluginCollection locates the named program in spec, forces its
 // type to XDP, and enforces the plugin contract on it. Used by the server,
 // the CLI, and the SDK to keep the lookup/validation flow consistent.
-func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string) (*ebpf.ProgramSpec, error) {
+//
+// Check order is intentional:
+//  1. validatePluginMapTypes — BTF map types match shared-map declarations
+//  2. validatePluginAuxType  — <program>_aux fits SidAuxPluginRawMax
+//  3. ValidatePluginProgram  — XDP class, epilogue/tail-call, forbidden
+//     helpers, exit proximity (called with roMaps==nil so RO-write runs
+//     separately below)
+//  4. checkROWrites          — only step that may be warn-downgraded
+//
+// Steps 1-3 always fatal. Step 4 returns ErrPluginROWrite, which a caller
+// running under ro_enforce=warn may choose to log instead of reject; the
+// returned ProgramSpec is non-nil in that case so the caller can proceed
+// with the same target the strict path would have produced.
+//
+// roMaps == nil skips step 4 entirely (used by tests / callers that have
+// no shared-map context). Production callers pass SharedReadOnlyMapNamesSet().
+func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string, roMaps map[string]struct{}) (*ebpf.ProgramSpec, error) {
 	if spec == nil {
 		return nil, fmt.Errorf("plugin CollectionSpec is nil")
 	}
@@ -148,14 +229,32 @@ func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string) (*ebpf.
 		return nil, fmt.Errorf("program %q not found in ELF; available: %v", program, names)
 	}
 	target.Type = ebpf.XDP
-	if err := ValidatePluginProgram(target); err != nil {
-		return nil, err
-	}
+
+	// Run mandatory (always-fatal) checks first so the warn-eligible
+	// RO-write check below runs LAST. Otherwise a caller that swallows
+	// ErrPluginROWrite in warn mode would also be implicitly swallowing
+	// any map-type or aux-size violation that came in alongside it,
+	// because the early return from ValidatePluginProgram would short-
+	// circuit the rest of the pipeline.
 	if err := validatePluginMapTypes(spec); err != nil {
 		return nil, err
 	}
 	if err := validatePluginAuxType(spec, program); err != nil {
 		return nil, err
+	}
+	if err := ValidatePluginProgram(target, nil); err != nil {
+		return nil, err
+	}
+
+	// RO-write is intentionally split out: it is the only validator
+	// failure mode that may be downgraded to a warn-only log under
+	// settings.validate.ro_enforce=warn. Returning the target spec
+	// alongside the error lets warn-mode callers proceed with the same
+	// program ref the strict path would have produced.
+	if roMaps != nil {
+		if err := checkROWrites(target, roMaps); err != nil {
+			return target, err
+		}
 	}
 	return target, nil
 }
@@ -200,25 +299,254 @@ func isBpfTailCall(ins asm.Instruction) bool {
 	return ins.IsBuiltinCall() && ins.Constant == int64(asm.FnTailCall)
 }
 
-// findTailCallMapName walks backwards to find the most recent instruction
-// that wrote R2 (the map argument of bpf_tail_call). Returns the map name
-// when R2 was set by a static LoadMapPtr; "" otherwise.
+// findStaticMapPtrSource walks back to the most recent instruction that
+// wrote dstReg and returns the map name when that origin is a static
+// LoadMapPtr. Anything else (BPF_CALL return value, register copy from
+// another register, stack reload) yields "" so the caller can reject
+// the access conservatively.
 //
-// Assumes clang's canonical `LoadMapPtr R2, <map>; ...; bpf_tail_call`
-// emission pattern. Inline assembly or hand-edited BPF that derives R2
-// from a non-map-pointer source is reported as "(dynamic)" and rejected.
-func findTailCallMapName(prev asm.Instructions) string {
+// Assumes clang's canonical `LoadMapPtr Rx, &m; ...; <use Rx>` emission
+// pattern. Optimised paths that move the map pointer through the stack
+// or another register fall through to the conservative empty result.
+func findStaticMapPtrSource(prev asm.Instructions, dstReg asm.Register) string {
 	for i := len(prev) - 1; i >= 0; i-- {
 		ins := prev[i]
-		if ins.Dst != asm.R2 {
+		if ins.Dst != dstReg {
 			continue
 		}
 		if ins.IsLoadFromMap() {
 			return ins.Reference()
 		}
-		return ""
+		return "" // overwritten by something we can't trace statically
 	}
 	return ""
+}
+
+// findTailCallMapName resolves the map argument (R2) of a bpf_tail_call.
+// Thin specialization of findStaticMapPtrSource fixed to R2; "(dynamic)"
+// pointers are reported as "" and rejected upstream.
+func findTailCallMapName(prev asm.Instructions) string {
+	return findStaticMapPtrSource(prev, asm.R2)
+}
+
+// loadAcqAtomicOp is the AtomicOp value encoded by BPF_LOAD_ACQ. cilium's
+// loadAcquire constant is package-private, so we reconstruct it once from
+// the LoadAcquire constructor and compare in the hot path.
+var loadAcqAtomicOp = asm.LoadAcquire(asm.R0, asm.R0, asm.DWord, 0).OpCode.AtomicOp()
+
+// isMapWrite reports whether ins writes to memory through a register-based
+// destination. Classic stores (BPF_ST/BPF_STX MemMode) and atomic RMW ops
+// (BPF_STX | AtomicMode — Add/And/Or/Xor, the Fetch* variants, Xchg,
+// CmpXchg, StoreRelease) are writes; BPF_LOAD_ACQ also encodes as
+// StXClass | AtomicMode but is a load with acquire semantics, so it must
+// not be flagged. Plain BPF_LDX (read) is excluded by class.
+func isMapWrite(ins asm.Instruction) bool {
+	cls := ins.OpCode.Class()
+	switch cls {
+	case asm.StClass:
+		return true
+	case asm.StXClass:
+		if ins.OpCode.Mode() == asm.AtomicMode &&
+			ins.OpCode.AtomicOp() == loadAcqAtomicOp {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// isStackStore reports whether the store targets the BPF stack frame
+// (R10 / RFP). R10 is the read-only frame pointer; clang lowers C local
+// variables (including the `struct foo key;` pattern feeding
+// bpf_map_lookup_elem) to *(R10 + off) = ... stores. These are not map
+// writes and must be excluded from the RO-write enforcer to avoid
+// false-positives on every plugin that uses a stack-allocated key.
+func isStackStore(ins asm.Instruction) bool {
+	return ins.Dst == asm.RFP
+}
+
+// knownSubprogNames returns the set of subprogram names actually invoked
+// from somewhere in ins via a BPF2BPF call. Cilium's ELF loader places
+// per-symbol metadata on instructions wherever an ELF STT_FUNC sits,
+// including symbols a malicious author injects mid-main. Trusting
+// in.Symbol() == "" as the only "still in main" signal lets such a forged
+// symbol terminate the scan early while the kernel verifier — which
+// resolves subprogram boundaries from BPF2BPF call instructions, not
+// symbol metadata — happily executes the writes that follow. Restricting
+// the break trigger to names that something actually calls keeps the
+// kernel and validator on the same view of what counts as a subprogram.
+func knownSubprogNames(ins asm.Instructions) map[string]struct{} {
+	names := ins.FunctionReferences()
+	out := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		out[n] = struct{}{}
+	}
+	return out
+}
+
+// roViolation describes one disallowed map write detected during static
+// analysis. Aggregated across the program so a single error message can
+// list every offender; mapName == "" means the store target could not be
+// resolved to a static map reference.
+type roViolation struct {
+	insIdx  int
+	mapName string
+}
+
+// checkROWrites scans the main program (subprograms excluded) for stores
+// whose target is a vinbero shared RO map, or whose target cannot be
+// statically resolved. The check is a no-op when roMaps is empty, for
+// back-compat with callers that don't yet supply the set (notably tests).
+//
+// Subprogram exclusion mirrors checkExitProximity. Plugin ELFs that pull
+// in tailcall_epilogue end up with the epilogue body appended after the
+// main program; that body legitimately writes to slot_stats_* (currently
+// RW, but we don't want to lock out the epilogue if/when it migrates to
+// RO), so scanning past the first sub-program would risk false positives
+// on every plugin.
+func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
+	if len(roMaps) == 0 {
+		return nil
+	}
+	// One forward pass: track the most recent LoadMapPtr-sourced map name
+	// per destination register. Anything else that writes a register
+	// invalidates the entry. This avoids a quadratic reverse-scan per
+	// store on adversarial inputs.
+	const numRegs = 11 // R0..R10
+	var lastMap [numRegs]string
+	var violations []roViolation
+	ins := spec.Instructions
+	subprogs := knownSubprogNames(ins)
+	for i, in := range ins {
+		// Stop at the start of a real subprogram (one something actually
+		// calls). A bare Symbol() with no caller is metadata noise — or
+		// an injected fake — and must not terminate the scan.
+		if i > 0 {
+			if sym := in.Symbol(); sym != "" {
+				if _, ok := subprogs[sym]; ok {
+					break
+				}
+			}
+		}
+		if isMapWrite(in) {
+			// Stack stores (Dst == R10) are local-variable assignments,
+			// not map writes — clang emits one for every `struct k key;`
+			// that later feeds bpf_map_lookup_elem.
+			if !isStackStore(in) {
+				dst := int(in.Dst)
+				var mapName string
+				if dst >= 0 && dst < numRegs {
+					mapName = lastMap[dst]
+				}
+				if mapName == "" {
+					violations = append(violations, roViolation{insIdx: i})
+				} else if _, ro := roMaps[mapName]; ro {
+					violations = append(violations, roViolation{insIdx: i, mapName: mapName})
+				}
+			}
+		}
+		// Update the map-pointer table for this instruction's Dst.
+		// LoadMapPtr writes a known map name; any other write to a
+		// register invalidates whatever was there. Stores (BPF_ST*) do
+		// not modify Dst (they write *through* it), so they leave the
+		// table alone — with one exception: BPF_LOAD_ACQ is encoded as
+		// StXClass | AtomicMode but actually loads memory into Dst with
+		// acquire semantics. Skipping the table update there would let
+		// a stale map name carry past the load and either spuriously
+		// detect a "store into RO" or hide a real violation behind the
+		// stale tracking. Fall through to invalidate Dst for it.
+		if cls := in.OpCode.Class(); cls == asm.StClass || cls == asm.StXClass {
+			isLoadAcquire := cls == asm.StXClass &&
+				in.OpCode.Mode() == asm.AtomicMode &&
+				in.OpCode.AtomicOp() == loadAcqAtomicOp
+			if !isLoadAcquire {
+				continue
+			}
+			dst := int(in.Dst)
+			if dst >= 0 && dst < numRegs {
+				lastMap[dst] = ""
+			}
+			continue
+		}
+		// BPF helper / subprogram calls. The kernel ABI hands the return
+		// value back in R0 and treats R1..R5 as caller-saved. For map
+		// lookup helpers we additionally propagate the map identity from
+		// R1 (the &map argument established by a preceding LoadMapPtr)
+		// into R0 — without this every `*(u64 *)(r0 + 0) += ...` after a
+		// bpf_map_lookup_elem looks "dynamic" to the analyzer and trips
+		// a false-positive RO violation on plugins that legitimately
+		// mutate their own RW maps.
+		if in.OpCode.JumpOp() == asm.Call {
+			fn := asm.BuiltinFunc(in.Constant)
+			r1Map := lastMap[1]
+			for r := 1; r <= 5; r++ {
+				lastMap[r] = ""
+			}
+			switch fn {
+			case asm.FnMapLookupElem, asm.FnMapLookupPercpuElem:
+				lastMap[0] = r1Map
+			default:
+				lastMap[0] = ""
+			}
+			continue
+		}
+		// Register-to-register MOV propagates the map identity from src
+		// to dst. clang frequently emits `Rn = R0` between a lookup and
+		// the subsequent store; without this propagation the dst is
+		// treated as dynamic and the write is flagged spuriously.
+		op := in.OpCode
+		if (op.Class() == asm.ALU64Class || op.Class() == asm.ALUClass) &&
+			op.ALUOp() == asm.Mov && op.Source() == asm.RegSource {
+			src := int(in.Src)
+			dst := int(in.Dst)
+			if dst >= 0 && dst < numRegs && src >= 0 && src < numRegs {
+				lastMap[dst] = lastMap[src]
+				continue
+			}
+		}
+		// Only load / ALU classes actually write Dst. Jump and Jump32
+		// reference Dst as the left-hand operand of a compare; clobbering
+		// lastMap[Dst] for those would erase the just-propagated lookup
+		// result on the canonical clang `if (r0 == 0) goto ...; *(r0 +
+		// 0) += rN` pattern emitted after every bpf_map_lookup_elem and
+		// resurface the very false-positive we are trying to kill.
+		cls := in.OpCode.Class()
+		if cls != asm.LdClass && cls != asm.LdXClass &&
+			cls != asm.ALUClass && cls != asm.ALU64Class {
+			continue
+		}
+		dst := int(in.Dst)
+		if dst < 0 || dst >= numRegs {
+			continue
+		}
+		if in.IsLoadFromMap() {
+			lastMap[dst] = in.Reference()
+		} else {
+			lastMap[dst] = ""
+		}
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	details := make([]string, 0, len(violations))
+	for _, v := range violations {
+		if v.mapName == "" {
+			details = append(details, fmt.Sprintf(
+				"instruction #%d: store target could not be resolved to a "+
+					"known map; route writes through scratch_map / stats_map "+
+					"or a plugin-owned map", v.insIdx))
+		} else {
+			details = append(details, fmt.Sprintf(
+				"instruction #%d: store into read-only map %q",
+				v.insIdx, v.mapName))
+		}
+	}
+	return fmt.Errorf(
+		"%w: plugin program %q has %d disallowed map write(s); shared RO "+
+			"maps are read-only from plugins (use scratch_map / stats_map "+
+			"or plugin-owned maps for state). Violations:\n  - %s",
+		ErrPluginROWrite, spec.Name, len(violations), strings.Join(details, "\n  - "),
+	)
 }
 
 // checkExitProximity verifies every exit instruction in the main program
@@ -235,11 +563,17 @@ func findTailCallMapName(prev asm.Instructions) string {
 // model does not warrant.
 func checkExitProximity(spec *ebpf.ProgramSpec) error {
 	ins := spec.Instructions
+	subprogs := knownSubprogNames(ins)
 	for i, in := range ins {
-		// Stop at the start of any subprogram past the entry point;
-		// subprogram bodies are appended after the main program.
-		if i > 0 && in.Symbol() != "" {
-			break
+		// See knownSubprogNames: only Symbol()s that match a called
+		// subprogram terminate the scan. A forged symbol mid-main must
+		// not let an exit-without-epilogue slip through.
+		if i > 0 {
+			if sym := in.Symbol(); sym != "" {
+				if _, ok := subprogs[sym]; ok {
+					break
+				}
+			}
 		}
 		if in.OpCode.JumpOp() != asm.Exit {
 			continue

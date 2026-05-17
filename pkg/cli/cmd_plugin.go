@@ -37,7 +37,12 @@ func pluginCommand() *cli.Command {
 					if err != nil {
 						return cli.Exit(fmt.Errorf("failed to parse BPF ELF %s: %w", elfPath, err), 2)
 					}
-					if _, err := bpf.ValidatePluginCollection(spec, programName); err != nil {
+					// CLI is the shift-left path: always enforce the RO-write
+					// check so plugin authors get the same answer they would get
+					// from the server with `validate.ro_enforce: enforce`. The
+					// daemon may still default to warn-only during the staged
+					// rollout (see config.ValidateConfig).
+					if _, err := bpf.ValidatePluginCollection(spec, programName, bpf.SharedReadOnlyMapNamesSet()); err != nil {
 						return cli.Exit(err, 1)
 					}
 					fmt.Printf("OK: %s (program=%s) passes plugin contract\n", elfPath, programName)
@@ -284,6 +289,56 @@ func pluginAuxCommand() *cli.Command {
 					}
 					fmt.Printf("Freed plugin_aux_index=%d\n", req.Index)
 					return nil
+				},
+			},
+			{
+				Name:  "purge",
+				Usage: "Free every aux index owned by (map-type, slot). Run after `plugin unregister` to clean up leftover indices.",
+				Flags: []cli.Flag{typeFlag, slotFlag},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					req := &v1.PluginAuxPurgeRequest{
+						MapType: c.String("map-type"),
+						Slot:    uint32(c.Uint("slot")),
+					}
+					resp, err := clients.Plugin.PluginAuxPurge(context.Background(), connect.NewRequest(req))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Purged %d plugin_aux entries from %s/%d\n",
+						resp.Msg.PurgedCount, req.MapType, req.Slot)
+					return nil
+				},
+			},
+			{
+				Name:  "list",
+				Usage: "Enumerate live aux indices. Without --map-type, lists every owner.",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "map-type", Usage: "Filter to one plugin map type (endpoint / headend_v4 / headend_v6)"},
+					&cli.UintFlag{Name: "slot", Usage: "Restrict to one slot. Only honoured with --match-slot."},
+					&cli.BoolFlag{Name: "match-slot", Usage: "Use --slot value as an exact filter."},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					req := &v1.PluginAuxListRequest{
+						MapType:   c.String("map-type"),
+						Slot:      uint32(c.Uint("slot")),
+						MatchSlot: c.Bool("match-slot"),
+					}
+					resp, err := clients.Plugin.PluginAuxList(context.Background(), connect.NewRequest(req))
+					if err != nil {
+						return err
+					}
+					tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+					if _, err := fmt.Fprintln(tw, "INDEX\tOWNER"); err != nil {
+						return err
+					}
+					for _, e := range resp.Msg.Entries {
+						if _, err := fmt.Fprintf(tw, "%d\t%s\n", e.Index, e.Owner); err != nil {
+							return err
+						}
+					}
+					return tw.Flush()
 				},
 			},
 		},

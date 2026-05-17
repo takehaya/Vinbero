@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -66,16 +67,18 @@ type PluginEntryInfo struct {
 type PluginServer struct {
 	mapOps       *bpf.MapOperations
 	bpfConstants map[string]any
+	roEnforce    bpf.ROEnforceMode
 	logger       *zap.Logger
 
 	mu       sync.RWMutex
 	registry map[pluginSlotKey]*pluginEntry
 }
 
-func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any, logger *zap.Logger) *PluginServer {
+func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any, roEnforce bpf.ROEnforceMode, logger *zap.Logger) *PluginServer {
 	return &PluginServer{
 		mapOps:       mapOps,
 		bpfConstants: bpfConstants,
+		roEnforce:    roEnforce,
 		logger:       logger,
 		registry:     make(map[pluginSlotKey]*pluginEntry),
 	}
@@ -171,8 +174,26 @@ func (s *PluginServer) PluginRegister(
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("failed to parse BPF ELF: %w", err))
 	}
 
-	if _, err := bpf.ValidatePluginCollection(spec, msg.Program); err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	// The shared-RO set is rebuilt per call so a future runtime
+	// reconfiguration can change it without rebooting; the helper is
+	// O(1) per name so the cost is in the noise compared to ELF parsing.
+	roSet := bpf.SharedReadOnlyMapNamesSet()
+	if _, err := bpf.ValidatePluginCollection(spec, msg.Program, roSet); err != nil {
+		// In warn mode we keep loading the plugin but surface every
+		// detected violation to the audit log so ops can see who would
+		// be rejected once enforce is flipped on. Other validator
+		// failures (forbidden helper, missing epilogue, BTF mismatch,
+		// ...) are not warn-eligible and always reject.
+		if s.roEnforce == bpf.ROEnforceWarn && errors.Is(err, bpf.ErrPluginROWrite) {
+			s.logger.Warn("plugin RO write violation (warn-only)",
+				zap.String("program", msg.Program),
+				zap.String("map_type", msg.MapType),
+				zap.Uint32("slot", msg.Index),
+				zap.Error(err),
+			)
+		} else {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
 	}
 
 	// The plugin ELF ships its own copy of shared `const volatile` vars

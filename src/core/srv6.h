@@ -60,6 +60,16 @@ enum srv6_headend_behavior {
     SRV6_HEADEND_BEHAVIOR_H_INSERT_RED = 7,    // H.Insert.Red (Reduced SRH insertion)
 };
 
+// aux_owner: persistent owner tag for an sid_aux_map index, paired
+// with aux_owner_map. The 64-byte payload is a null-terminated ASCII
+// string in one of two formats today:
+//   "builtin:v1"          -- vinbero-managed (End.X / End.DT2 / etc.)
+//   "plugin:v1:<mt>:<n>"  -- plugin-allocated, mt=endpoint|headend_v4|headend_v6
+// The version prefix lets future format evolutions parse old pins.
+struct aux_owner {
+    char tag[64];
+};
+
 // Protocol numbers
 #define IPPROTO_ROUTING 43
 
