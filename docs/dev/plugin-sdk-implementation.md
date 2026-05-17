@@ -524,13 +524,26 @@ func (p *PluginAux[T]) Free(ctx context.Context, idx uint32) error
 
 ### 追加した CFG analyzer
 
-`pkg/bpf/plugin_validate.go::checkROWrites` がメインプログラムを線形走査し、
-`BPF_ST` / `BPF_STX` / `BPF_ATOMIC` ファミリの命令を全て検出する。書き込み先
-レジスタの直近上書きを後ろから探し、`LoadMapPtr` ならその map 名と RO 集合を
-照合、それ以外なら `(dynamic)` として **保守的 reject**。
+`pkg/bpf/plugin_validate.go::checkROWrites` がメインプログラムを 1-pass forward
+走査し、各レジスタの「直近 `LoadMapPtr` で入った map 名」を `lastMap[reg]` に
+追跡する。`BPF_ST` / `BPF_STX` (`MemMode` + atomic RMW / `StoreRelease`) の書き
+込み命令を検出したら、書き込み先レジスタの `lastMap` を引いて RO 集合と照合、
+未追跡なら `(dynamic)` として **保守的 reject**。`BPF_LOAD_ACQ` は StXClass で
+ありつつ実体は load なので write 判定からは除外し、Dst の `lastMap` をクリア
+する (read 後の値は map ポインタではない)。
 
-スコープはメインプログラム本体に限定 (`Symbol() != ""` で停止)。プラグイン ELF
-末尾に展開される `tailcall_epilogue` 等のサブプログラム本体を巻き込まないため。
+`call FnMapLookupElem` / `FnMapLookupPercpuElem` は R1 (`&map` 引数)
+の map 名を R0 (戻り値) に伝播させる特殊ケース。これがないと
+`__sync_fetch_and_add(counter, ...)` のようなプラグイン所有 RW map への
+atomic 加算が「dynamic write」扱いされ false positive になる。register-to-
+register MOV も `lastMap` を伝播するので、`r2 = r1` 経由の identity laundering
+は塞がれている。
+
+スコープはメインプログラム本体に限定。サブプログラム境界は「**実際に呼ばれて
+いる subprogram 名** のみ」(`Instructions.FunctionReferences()` のセット) で
+判定し、ELF symtab に偽 `STT_FUNC` を仕込まれても scanner が早期終了しない
+ようにしてある (kernel verifier も symbol metadata は無視するので、ここで
+scanner だけ抜けると検出抜けになる)。
 
 `R10` (frame pointer) を Dst にするストアは BPF stack 書き込みなので除外
 (`isStackStore`)。clang は C のローカル変数 (`struct foo key;`) を必ず stack に

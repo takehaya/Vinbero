@@ -1053,18 +1053,19 @@ type PluginAuxListRequest struct {
 	unknownFields protoimpl.UnknownFields
 
 	// Filter behaviour:
-	//
-	//	both empty   -> return all live aux indices (builtin + plugin)
-	//	map_type set -> restrict to plugin-owned indices for that map type
-	//	slot also set (slot != 0 or slot_set=true semantics handled server side
-	//	by treating slot=0 with map_type set as "all slots")
+	//   - both empty: return all live aux indices (builtin + plugin)
+	//   - map_type set: restrict to plugin-owned indices for that map type
+	//   - map_type + slot + match_slot=true: restrict to that exact slot.
+	//     match_slot is required because slot=0 is a valid uint32 zero
+	//     value but never a valid plugin slot; without the boolean we
+	//     could not distinguish "no slot filter" from "slot 0".
 	MapType string `protobuf:"bytes,1,opt,name=map_type,json=mapType,proto3" json:"map_type,omitempty"`
 	Slot    uint32 `protobuf:"varint,2,opt,name=slot,proto3" json:"slot,omitempty"`
 	// match_slot disambiguates "filter only by map_type" (false) from
-	// "filter by both map_type and slot, including slot=0 by accident"
-	// (true). Plugin slots start at the per-map-type base, so a zero slot
-	// with match_slot=true falls outside the valid range and surfaces an
-	// empty result -- still safer than overloading slot=0 as the wildcard.
+	// "filter by both map_type and slot" (true). Plugin slots start at
+	// the per-map-type base, so a zero slot with match_slot=true falls
+	// outside the valid range and surfaces an empty result -- safer than
+	// overloading slot=0 as the wildcard.
 	MatchSlot bool `protobuf:"varint,3,opt,name=match_slot,json=matchSlot,proto3" json:"match_slot,omitempty"`
 }
 

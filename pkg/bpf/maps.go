@@ -512,10 +512,10 @@ func (m *MapOperations) RecoverAuxIndices() error {
 
 	m.auxAlloc.RecoverWithOwners(owners)
 
-	// v1 -> v2 migration: write the recovered tags back into aux_owner_map
-	// so subsequent restarts take the persisted path. Best-effort: a
-	// transient failure here just means the next start re-runs the v1
-	// reconstruction.
+	// legacy -> v1 forward migration: write the recovered tags back into
+	// aux_owner_map so subsequent restarts take the persisted path.
+	// Best-effort: a transient failure here just means the next start
+	// re-runs the legacy reconstruction from sid_function_map.
 	if m.auxAlloc.ownerMap != nil {
 		for idx, tag := range owners {
 			_ = m.auxAlloc.ownerMap.Put(idx, tag)
