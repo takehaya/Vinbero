@@ -185,12 +185,19 @@ func (s *PluginServer) PluginAuxPurge(
 	// Refuse to purge under a live registration. The documented flow is
 	// PluginUnregister -> PluginAuxList -> PluginAuxPurge; running purge
 	// against an active slot would nuke the running plugin's working
-	// state with no audit trail. RLock matches the other read paths
-	// against s.registry.
+	// state with no audit trail.
+	//
+	// RLock is held through FreeAllByOwner — not just across the
+	// registry probe — to close the TOCTOU window between the live
+	// check and the actual zero-write. A concurrent PluginRegister
+	// takes s.mu.Lock() and so blocks until purge completes, keeping
+	// "registry says slot X is empty" and "purge runs on slot X"
+	// indistinguishable from atomic for the duration. Purge is not a
+	// hot-path RPC; stalling Register/Unregister during a multi-ms BPF
+	// map walk is acceptable.
 	s.mu.RLock()
-	_, live := s.registry[pluginSlotKey{MapType: msg.MapType, Slot: msg.Slot}]
-	s.mu.RUnlock()
-	if live {
+	defer s.mu.RUnlock()
+	if _, live := s.registry[pluginSlotKey{MapType: msg.MapType, Slot: msg.Slot}]; live {
 		return nil, connect.NewError(
 			connect.CodeFailedPrecondition,
 			fmt.Errorf("plugin slot %s/%d is still registered; "+
