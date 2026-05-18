@@ -127,6 +127,15 @@ func run(cliCtx *cli.Context) error {
 		if err := startBGPSession(ctx, bgpSession, cfg.BGP); err != nil {
 			return fmt.Errorf("start BGP: %w", err)
 		}
+		// Phase 1d-b: surface received routes in the log. Phase 1d-c
+		// replaces this handler with one that drives the data plane.
+		cancelSub, err := bgpSession.Subscribe("", func(ev bgp.RouteEvent) {
+			logBGPRoute(lg, ev)
+		})
+		if err != nil {
+			return fmt.Errorf("subscribe BGP routes: %w", err)
+		}
+		defer cancelSub()
 	}
 
 	lg.Info("Vinbero started successfully")
@@ -170,6 +179,23 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 		}
 	}
 	return nil
+}
+
+// logBGPRoute is the Phase 1d-b route handler: it only records what the
+// BGP session received. The data-plane wiring (map writes, FIB
+// injection) arrives in Phase 1d-c.
+func logBGPRoute(lg *zap.Logger, ev bgp.RouteEvent) {
+	fields := []zap.Field{
+		zap.String("family", ev.Family.String()),
+		zap.Bool("withdraw", ev.IsWithdraw),
+	}
+	switch {
+	case ev.VPN != nil:
+		fields = append(fields, zap.String("prefix", ev.VPN.Prefix))
+	case ev.Unicast != nil:
+		fields = append(fields, zap.String("prefix", ev.Unicast.Prefix))
+	}
+	lg.Info("BGP route received", fields...)
 }
 
 func loadConfig(path string) (*config.Config, error) {
