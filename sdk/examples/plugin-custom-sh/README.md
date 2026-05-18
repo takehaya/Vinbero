@@ -15,7 +15,8 @@ vinbero_l2_lookup_esi(ifindex, vlan_id, src_esi);   // local AC の ESI
 vinbero_l2_dst_peer_esi(ctx, bd_id, dst_esi);       // dst peer の ESI (FDB → bd_peer_l2_ext_map)
 ```
 
-両方が non-zero でかつ一致 → drop。それ以外は `bpf_tail_call(&headend_l2_progs, H_ENCAPS_L2)`
+両方が non-zero でかつ一致 → drop。それ以外は
+`bpf_tail_call(ctx, &headend_l2_progs, SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2)`
 で built-in encap に戻す。
 
 ## ビルド + 登録

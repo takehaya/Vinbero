@@ -62,6 +62,25 @@ static __always_inline bool vinbero_l2_esi_equal(const __u8 a[ESI_LEN], const __
     return (a_hi == b_hi) && (a_lo == b_lo);
 }
 
+/* IPv6 byte-level helpers. Same rationale as the ESI ones: core/esi.h's
+ * ipv6_{is_zero,equal} aren't on the SDK include path, and the DF check
+ * below needs them. 8+8 split keeps the verifier happy. */
+static __always_inline bool vinbero_l2_ipv6_is_zero(const __u8 addr[IPV6_ADDR_LEN])
+{
+    __u64 hi = *(const __u64 *)addr;
+    __u64 lo = *(const __u64 *)(addr + 8);
+    return (hi | lo) == 0;
+}
+
+static __always_inline bool vinbero_l2_ipv6_equal(const __u8 a[IPV6_ADDR_LEN], const __u8 b[IPV6_ADDR_LEN])
+{
+    __u64 a_hi = *(const __u64 *)a;
+    __u64 b_hi = *(const __u64 *)b;
+    __u64 a_lo = *(const __u64 *)(a + 8);
+    __u64 b_lo = *(const __u64 *)(b + 8);
+    return (a_hi == b_hi) && (a_lo == b_lo);
+}
+
 /* Outer VLAN ID parsed from the packet. Returns 0 for untagged frames or
  * if the buffer is too short to safely read the VLAN header. QinQ outer
  * tag is preferred; inner-tag parsing is left to the plugin. */
@@ -142,19 +161,43 @@ static __always_inline int vinbero_l2_dst_peer_esi(const struct xdp_md *ctx, __u
     return 0;
 }
 
-/* Whether this PE is the DF for the given BD's local ES. Reads
- * bd_local_esi_map[bd_id] (populated by vinberod from HeadendL2.esi
- * config) and compares its ESI against the plugin-supplied one. Returns
- * true only if they match — i.e. the caller's ESI is the BD's local ES
- * AND this PE is the active DF. Callers that already know the local
- * ESI (via vinbero_l2_lookup_esi above) can pass it straight in. */
-static __always_inline bool vinbero_l2_is_df_for_esi(__u16 bd_id, const __u8 esi[ESI_LEN])
+/* RFC 7432 §8.5 / RFC 9252: is this PE the Designated Forwarder for the
+ * BD's local Ethernet Segment? Mirrors src/endpoint/srv6_endpoint_l2.h
+ * ::dt2m_non_df_drop so plugins observe the same DF state the built-in
+ * BUM filter uses. Returns true only when:
+ *
+ *   1. bd_local_esi_map[bd_id] resolves to a non-zero ESI (BD has a
+ *      local ES configured).
+ *   2. That ESI is registered in esi_map with local_attached=1
+ *      (this PE actually attaches to the ES).
+ *   3. esi_map[esi].df_pe_src_addr is set (DF election has completed —
+ *      all-zero is treated as "not yet configured" and returns false to
+ *      fail closed for plugins; the built-in NON_DF filter fails open
+ *      in this state, the SDK contract is stricter on purpose).
+ *   4. df_pe_src_addr == local_pe_src_addr (this PE is the active DF).
+ *
+ * bd_id==0 (no BD) returns false. Callers don't need to pre-lookup the
+ * ESI; this helper handles the entire chain. */
+static __always_inline bool vinbero_l2_is_df(__u16 bd_id)
 {
-    __u32 key = bd_id;
-    struct bd_local_esi_val *val = bpf_map_lookup_elem(&bd_local_esi_map, &key);
-    if (!val)
+    if (bd_id == 0)
         return false;
-    return vinbero_l2_esi_equal(val->esi, esi);
+
+    __u32 key = bd_id;
+    struct bd_local_esi_val *lv = bpf_map_lookup_elem(&bd_local_esi_map, &key);
+    if (!lv || vinbero_l2_esi_is_zero(lv->esi))
+        return false;
+
+    struct esi_key ek = {};
+    __builtin_memcpy(ek.esi, lv->esi, ESI_LEN);
+    struct esi_entry *e = bpf_map_lookup_elem(&esi_map, &ek);
+    if (!e || !e->local_attached)
+        return false;
+
+    if (vinbero_l2_ipv6_is_zero(e->df_pe_src_addr))
+        return false;
+
+    return vinbero_l2_ipv6_equal(e->df_pe_src_addr, e->local_pe_src_addr);
 }
 
 #endif /* VINBERO_SDK_HEADEND_L2_HELPERS_H */

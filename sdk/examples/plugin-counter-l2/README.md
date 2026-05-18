@@ -55,7 +55,7 @@ bpftool map dump pinned /sys/fs/bpf/plugin_counter_l2_map
 - `vinbero_l2_frame_len(ctx)` — pre-encap の inner L2 frame 長
 - `vinbero_l2_lookup_esi(ifindex, vlan_id, out_esi)` — 自 AC の source ESI
 - `vinbero_l2_dst_peer_esi(ctx, bd_id, out_esi)` — dst peer の ESI (FDB → bd_peer_l2_ext_map)
-- `vinbero_l2_is_df_for_esi(bd_id, esi)` — 自 PE が DF か
+- `vinbero_l2_is_df(bd_id)` — 自 PE が BD の local ES の DF か (RFC 7432 §8.5)
 
 ## 仕様メモ
 
