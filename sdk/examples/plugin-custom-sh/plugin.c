@@ -24,9 +24,10 @@
 
 // Per-(bd_id) drop counter — observability for ops to confirm the
 // plugin is taking effect. Real deployments would also export this via
-// vinbero stats; for the example we keep it plugin-private.
+// vinbero stats; for the example we keep it plugin-private. PERCPU_HASH
+// keeps the increment lock-free in the XDP per-packet path.
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
     __type(key, __u32);
     __type(value, __u64);
     __uint(max_entries, 256);
@@ -42,7 +43,7 @@ static __always_inline void bump_drops(__u16 bd_id)
         c = bpf_map_lookup_elem(&plugin_custom_sh_drops, &key);
     }
     if (c)
-        __sync_fetch_and_add(c, 1);
+        (*c)++;
 }
 
 VINBERO_PLUGIN(plugin_custom_sh)
@@ -63,15 +64,7 @@ VINBERO_PLUGIN(plugin_custom_sh)
     // Drop only when BOTH sides have a non-zero ESI AND they match.
     // Comparing zeros against zeros would drop every non-multihomed
     // frame, which is obviously wrong.
-    bool src_set = false, eq = true;
-    #pragma unroll
-    for (int i = 0; i < ESI_LEN; i++) {
-        if (src_esi[i] != 0)
-            src_set = true;
-        if (src_esi[i] != dst_esi[i])
-            eq = false;
-    }
-    if (src_set && eq) {
+    if (!vinbero_l2_esi_is_zero(src_esi) && vinbero_l2_esi_equal(src_esi, dst_esi)) {
         bump_drops(bd_id);
         return XDP_DROP;
     }

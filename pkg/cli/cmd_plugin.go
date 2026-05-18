@@ -15,6 +15,13 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+// pluginMapTypesCSV joins bpf.SlotStatsMapTypes with ", " so --type help
+// strings stay in sync with the canonical list (one place to add new map
+// types when more plugin slots open up).
+func pluginMapTypesCSV() string {
+	return strings.Join(bpf.SlotStatsMapTypes, ", ")
+}
+
 func pluginCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "plugin",
@@ -53,7 +60,7 @@ func pluginCommand() *cli.Command {
 				Name:  "register",
 				Usage: "Register a BPF plugin into a tail call slot",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "type", Required: true, Usage: "PROG_ARRAY target: endpoint, headend_v4, headend_v6, headend_l2"},
+					&cli.StringFlag{Name: "type", Required: true, Usage: "PROG_ARRAY target: " + pluginMapTypesCSV()},
 					&cli.UintFlag{Name: "index", Required: true, Usage: "Plugin slot index (endpoint: 32-63, headend: 16-31)"},
 					&cli.StringFlag{Name: "prog", Required: true, Usage: "Path to compiled BPF ELF object file"},
 					&cli.StringFlag{Name: "program", Required: true, Usage: "BPF program function name in the ELF (e.g., plugin_counter)"},
@@ -88,7 +95,7 @@ func pluginCommand() *cli.Command {
 				Name:  "unregister",
 				Usage: "Unregister a BPF plugin from a tail call slot",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "type", Required: true, Usage: "PROG_ARRAY target: endpoint, headend_v4, headend_v6, headend_l2"},
+					&cli.StringFlag{Name: "type", Required: true, Usage: "PROG_ARRAY target: " + pluginMapTypesCSV()},
 					&cli.UintFlag{Name: "index", Required: true, Usage: "Plugin slot index to clear"},
 				},
 				Action: func(c *cli.Context) error {
@@ -112,7 +119,7 @@ func pluginCommand() *cli.Command {
 				Name:  "list",
 				Usage: "List registered plugins",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "type", Usage: "Filter by map type: endpoint, headend_v4, headend_v6, headend_l2"},
+					&cli.StringFlag{Name: "type", Usage: "Filter by map type: " + pluginMapTypesCSV()},
 					&cli.BoolFlag{Name: "verbose", Aliases: []string{"v"}, Usage: "Show map linkage (shared/owned)"},
 				},
 				Action: func(c *cli.Context) error {
@@ -166,7 +173,7 @@ func pluginCommand() *cli.Command {
 // SidFunction create cycle. Each subcommand requires --map-type and --slot,
 // matching the owner tag the server derives server-side.
 func pluginAuxCommand() *cli.Command {
-	typeFlag := &cli.StringFlag{Name: "map-type", Required: true, Usage: "Plugin map type: endpoint, headend_v4, headend_v6, headend_l2"}
+	typeFlag := &cli.StringFlag{Name: "map-type", Required: true, Usage: "Plugin map type: " + pluginMapTypesCSV()}
 	slotFlag := &cli.UintFlag{Name: "slot", Required: true, Usage: "Plugin PROG_ARRAY slot (endpoint >= 32, headend >= 16)"}
 	jsonFlag := &cli.StringFlag{Name: "json", Usage: "JSON payload encoded via the plugin's <program>_aux BTF type"}
 	rawFlag := &cli.StringFlag{Name: "raw", Usage: "Raw payload as hex (<= 196 bytes). Mutually exclusive with --json"}
@@ -314,7 +321,7 @@ func pluginAuxCommand() *cli.Command {
 				Name:  "list",
 				Usage: "Enumerate live aux indices. Without --map-type, lists every owner.",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "map-type", Usage: "Filter to one plugin map type (endpoint / headend_v4 / headend_v6 / headend_l2)"},
+					&cli.StringFlag{Name: "map-type", Usage: "Filter to one plugin map type (" + pluginMapTypesCSV() + ")"},
 					&cli.UintFlag{Name: "slot", Usage: "Restrict to one slot. Only honoured with --match-slot."},
 					&cli.BoolFlag{Name: "match-slot", Usage: "Use --slot value as an exact filter."},
 				},

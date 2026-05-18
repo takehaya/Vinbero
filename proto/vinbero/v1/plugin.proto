@@ -51,7 +51,7 @@ message PluginUnregisterRequest {
 message PluginUnregisterResponse {}
 
 message PluginListRequest {
-  string map_type_filter = 1; // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6"
+  string map_type_filter = 1; // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6" / "headend_l2"
 }
 
 message PluginInfo {

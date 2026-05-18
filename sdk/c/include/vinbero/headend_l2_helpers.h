@@ -42,6 +42,26 @@ static __always_inline __u16 vinbero_l2_frame_len(const struct xdp_md *ctx)
     return (__u16)((long)ctx->data_end - (long)ctx->data);
 }
 
+/* ESI byte-level helpers. core/esi.h's esi_{is_zero,equal} aren't exposed
+ * to plugins (only headers under vinbero/ ship in the SDK), so plugins
+ * that compare ESIs use these. 8+2 split matches the in-tree pattern: it
+ * gives the verifier two scalar loads instead of a 10-byte unrolled loop. */
+static __always_inline bool vinbero_l2_esi_is_zero(const __u8 esi[ESI_LEN])
+{
+    __u64 hi = *(const __u64 *)esi;
+    __u16 lo = *(const __u16 *)(esi + 8);
+    return (hi | (__u64)lo) == 0;
+}
+
+static __always_inline bool vinbero_l2_esi_equal(const __u8 a[ESI_LEN], const __u8 b[ESI_LEN])
+{
+    __u64 a_hi = *(const __u64 *)a;
+    __u64 b_hi = *(const __u64 *)b;
+    __u16 a_lo = *(const __u16 *)(a + 8);
+    __u16 b_lo = *(const __u16 *)(b + 8);
+    return (a_hi == b_hi) && (a_lo == b_lo);
+}
+
 /* Outer VLAN ID parsed from the packet. Returns 0 for untagged frames or
  * if the buffer is too short to safely read the VLAN header. QinQ outer
  * tag is preferred; inner-tag parsing is left to the plugin. */
@@ -134,11 +154,7 @@ static __always_inline bool vinbero_l2_is_df_for_esi(__u16 bd_id, const __u8 esi
     struct bd_local_esi_val *val = bpf_map_lookup_elem(&bd_local_esi_map, &key);
     if (!val)
         return false;
-    for (int i = 0; i < ESI_LEN; i++) {
-        if (val->esi[i] != esi[i])
-            return false;
-    }
-    return true;
+    return vinbero_l2_esi_equal(val->esi, esi);
 }
 
 #endif /* VINBERO_SDK_HEADEND_L2_HELPERS_H */

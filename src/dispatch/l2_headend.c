@@ -10,12 +10,12 @@
 //
 // FDB src learning, broadcast/multicast BUM meta, and missing-FDB BUM meta
 // are all handled here so the caller stays simple. Keeping the bpf_tail_call
-// out of this helper is intentional — having a second lexical tail_call
-// site to headend_l2_progs (e.g. one here AND one in try_l2_headend) makes
-// the kernel silently drop the redirected frames, even when this BD-peer
-// branch is dead code for the caller's traffic. Root cause is still under
-// investigation (Phase 2); the workaround is to keep tail_call as a single
-// inline instruction in try_l2_headend below.
+// out of this helper is intentional and enforced as an invariant: any second
+// lexical bpf_tail_call site into headend_l2_progs in the same translation
+// unit causes the kernel to silently drop the redirected frame on the first
+// callsite, even when that branch is dead code at runtime. See
+// reference_bpf_tail_call_redirect_gotcha for repro notes — tail_call must
+// stay as a single inline instruction in try_l2_headend below.
 static __always_inline struct headend_entry *try_bd_peer_lookup(
     struct xdp_md *ctx,
     struct headend_entry *l2_entry,

@@ -5,7 +5,7 @@
  * Vinbero Plugin SDK: entry-point header.
  *
  * A plugin is a SEC("xdp") BPF program registered into one of vinbero's
- * PROG_ARRAY slots (endpoint 32..63, headend_v4/v6 16..31) via the
+ * PROG_ARRAY slots (endpoint 32..63, headend_v4/v6/l2 16..31) via the
  * PluginService API. Include this header to get:
  *
  *   - struct tailcall_ctx definition (per-CPU context handed in by the

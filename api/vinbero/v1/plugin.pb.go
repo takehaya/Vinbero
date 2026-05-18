@@ -229,7 +229,7 @@ type PluginListRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	MapTypeFilter string `protobuf:"bytes,1,opt,name=map_type_filter,json=mapTypeFilter,proto3" json:"map_type_filter,omitempty"` // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6"
+	MapTypeFilter string `protobuf:"bytes,1,opt,name=map_type_filter,json=mapTypeFilter,proto3" json:"map_type_filter,omitempty"` // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6" / "headend_l2"
 }
 
 func (x *PluginListRequest) Reset() {

@@ -19,15 +19,30 @@ make
 # Register (slot 16 = HEADEND_PLUGIN_BASE)
 vinbero plugin register --type headend_l2 --index 16 \
     --prog plugin.o --program plugin_counter_l2
+```
 
-# Wire HL2 entry to use slot 16 instead of the built-in (= sid create flow
-# is not applicable for headend_l2; instead, the dispatcher in vinbero
-# selects the plugin slot when sid_function_entry.action is set).
-# NOTE: hooking by slot for L2 headend is automatic once registered —
-# any traffic that reaches the no-BD path or remote-peer encap will run
-# through the plugin chain. (Future: per-HL2-entry plugin slot selection.)
+### Plugin slot を HL2 entry に紐付ける
 
-# Observe
+L2 headend dispatcher は `headend_entry.mode` の値を `headend_l2_progs` の
+tail-call index として使う (`src/dispatch/l2_headend.c`)。Plugin を呼ぶには
+対象 HL2 entry の `mode` をプラグインスロット値 (= 上で指定した index、
+ここでは 16) に書き換える必要がある。
+
+Phase 2 時点では `HeadendL2Create` の `mode` フィールドは `Srv6HeadendBehavior`
+enum (組込み 0..15) なので、plugin slot 値 (16..31) を gRPC 経由で直接渡せる
+control-plane API はまだない (Phase 3 で追加予定: per-HL2-entry plugin slot
+selection)。デモ用には map を直接書き換える:
+
+```bash
+# 既存の HL2 entry (mode=3 = H_ENCAPS_L2) を slot 16 に向ける
+bpftool map update pinned /sys/fs/bpf/headend_l2_map \
+    key <ifindex+vlan_le> value <headend_entry with mode=16>
+```
+
+### 観測
+
+```bash
+# Plugin counter は PERCPU_HASH なので bpftool が自動で per-CPU を集計
 bpftool map dump pinned /sys/fs/bpf/plugin_counter_l2_map
 ```
 

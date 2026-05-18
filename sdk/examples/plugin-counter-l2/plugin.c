@@ -17,9 +17,11 @@
 #include <vinbero/headend_l2_helpers.h>
 
 // Per-(bd_id) packet counter. bd_id is __u16 from headend_entry; the
-// map keys it as __u32 to keep things verifier-simple.
+// map keys it as __u32 to keep things verifier-simple. PERCPU_HASH avoids
+// the LOCK XADD / cacheline bouncing that plain HASH would incur on the
+// XDP per-packet path; bpftool aggregates per-CPU values automatically.
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
     __type(key, __u32);
     __type(value, __u64);
     __uint(max_entries, 256);
@@ -35,7 +37,7 @@ VINBERO_PLUGIN(plugin_counter_l2)
         counter = bpf_map_lookup_elem(&plugin_counter_l2_map, &key);
     }
     if (counter)
-        __sync_fetch_and_add(counter, 1);
+        (*counter)++;
 
     // Hand control back to the built-in H.Encaps.L2 encap so the packet
     // continues on its normal path. tctx->headend already carries the
