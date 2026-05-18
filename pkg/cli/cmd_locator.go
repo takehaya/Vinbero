@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -80,12 +81,17 @@ func locatorCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					if len(resp.Msg.Errors) > 0 {
-						for _, e := range resp.Msg.Errors {
-							fmt.Printf("error: %s: %s\n", e.TriggerPrefix, e.Reason)
-						}
+					for _, e := range resp.Msg.Errors {
+						fmt.Fprintf(os.Stderr, "error: %s: %s\n", e.TriggerPrefix, e.Reason)
 					}
-					fmt.Printf("Deleted: %s\n", strings.Join(resp.Msg.DeletedNames, ", "))
+					if len(resp.Msg.DeletedNames) > 0 {
+						fmt.Printf("Deleted: %s\n", strings.Join(resp.Msg.DeletedNames, ", "))
+					}
+					// Surface per-item errors as a non-zero exit so
+					// scripts/automation can detect partial failures.
+					if len(resp.Msg.Errors) > 0 {
+						return fmt.Errorf("%d locator delete operation(s) failed", len(resp.Msg.Errors))
+					}
 					return nil
 				},
 			},

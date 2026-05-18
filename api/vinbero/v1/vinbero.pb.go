@@ -108,10 +108,13 @@ type SidFunction struct {
 	PluginAuxJson  string              `protobuf:"bytes,19,opt,name=plugin_aux_json,json=pluginAuxJson,proto3" json:"plugin_aux_json,omitempty"`                              // Plugin-defined auxiliary payload as JSON; server encodes via plugin BTF. Mutually exclusive with plugin_aux_raw.
 	PluginAuxIndex uint32              `protobuf:"varint,20,opt,name=plugin_aux_index,json=pluginAuxIndex,proto3" json:"plugin_aux_index,omitempty"`                          // Reference an aux index previously returned by PluginAuxAlloc. Mutually exclusive with plugin_aux_raw / plugin_aux_json. Requires action >= EndpointPluginBase.
 	// Allocate the SID from a registered locator pool. Mutually exclusive
-	// with trigger_prefix: when locator_ref is set the server builds the
-	// SID from locator.prefix + locator_ref.function and ignores any
-	// trigger_prefix payload. List / Get reuse trigger_prefix to surface
-	// the materialized SID regardless of how it was originally created.
+	// with trigger_prefix: requests that set both fields are rejected with
+	// a per-entry error, and requests that set neither are likewise
+	// rejected at the SidFunctionCreate boundary. When locator_ref alone
+	// is set the server builds the SID from locator.prefix +
+	// locator_ref.function and materializes the result back into
+	// trigger_prefix, so List / Get see the same /128 prefix regardless of
+	// how the entry was originally created.
 	LocatorRef *LocatorRef `protobuf:"bytes,21,opt,name=locator_ref,json=locatorRef,proto3,oneof" json:"locator_ref,omitempty"`
 }
 

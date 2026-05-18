@@ -150,3 +150,23 @@ func TestValidate_AutoStartAboveMax(t *testing.T) {
 		t.Errorf("auto_start above max: got %v, want ErrInvalidLocator", err)
 	}
 }
+
+// TestBindingTable_RecordRejectsDuplicate guards against a double-Record
+// silently overwriting the original binding: if it did, ReleaseSID would
+// later return the function to whichever allocator the second Record
+// pointed at, possibly the wrong one.
+func TestBindingTable_RecordRejectsDuplicate(t *testing.T) {
+	bt := NewBindingTable()
+	sid := netip.MustParseAddr("fd00:1:1::1")
+	if err := bt.Record(sid, Binding{LocatorName: "LOC1", Function: 1}); err != nil {
+		t.Fatalf("first Record: %v", err)
+	}
+	if err := bt.Record(sid, Binding{LocatorName: "LOC2", Function: 2}); !errors.Is(err, ErrBindingExists) {
+		t.Errorf("duplicate Record: got %v, want ErrBindingExists", err)
+	}
+	// Original binding must remain intact.
+	got, ok := bt.Lookup(sid)
+	if !ok || got.LocatorName != "LOC1" || got.Function != 1 {
+		t.Errorf("Lookup after rejected duplicate: got %+v, want LOC1/1", got)
+	}
+}

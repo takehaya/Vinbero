@@ -1,9 +1,17 @@
 package locator
 
 import (
+	"errors"
+	"fmt"
 	"net/netip"
 	"sync"
 )
+
+// ErrBindingExists is returned by BindingTable.Record when the SID is
+// already bound. Manager.AllocateSID treats this as a programming-side
+// invariant failure and rolls back the just-allocated function, but the
+// underlying allocator state stays self-consistent.
+var ErrBindingExists = errors.New("locator: binding already recorded for SID")
 
 // Binding records which (locator, function) pair minted a given SID, so
 // SidFunctionDelete can return the function to the allocator. Phase 1
@@ -44,6 +52,9 @@ func NewBindingTable() BindingTable {
 func (b *inMemoryBindings) Record(sid netip.Addr, binding Binding) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if existing, ok := b.bindings[sid]; ok {
+		return fmt.Errorf("%w: sid=%s, existing=%+v", ErrBindingExists, sid, existing)
+	}
 	b.bindings[sid] = binding
 	return nil
 }

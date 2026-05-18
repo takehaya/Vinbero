@@ -17,6 +17,22 @@ import (
 	"github.com/takehaya/vinbero/pkg/locator"
 )
 
+// sidFunctionErrorIdentifier picks a stable string for the OperationError
+// TriggerPrefix field so a batched SidFunctionCreate response can be
+// correlated back to its input. trigger_prefix is the natural choice
+// when it is set; for locator_ref requests that fail before
+// materialization the prefix is empty, so we fall back to the locator
+// name (prefixed) which is recoverable to the operator's input.
+func sidFunctionErrorIdentifier(sidFunc *v1.SidFunction) string {
+	if p := sidFunc.GetTriggerPrefix(); p != "" {
+		return p
+	}
+	if ref := sidFunc.GetLocatorRef(); ref != nil {
+		return "locator:" + ref.GetName()
+	}
+	return ""
+}
+
 // parseLocatorSID extracts the 128-bit address from a /128 trigger_prefix
 // minted by resolveLocatorRef so it can be looked up against the binding
 // table. Non-/128 prefixes (legacy operator-built SIDs) return an error
@@ -77,7 +93,7 @@ func (s *SidFunctionServer) SidFunctionCreate(
 				return nil, cerr
 			}
 			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: sidFunc.GetTriggerPrefix(),
+				TriggerPrefix: sidFunctionErrorIdentifier(sidFunc),
 				Reason:        err.Error(),
 			})
 			continue
