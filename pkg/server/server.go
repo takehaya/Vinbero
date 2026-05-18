@@ -12,19 +12,21 @@ import (
 	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
 )
 
 // Server represents the Connect RPC server
 type Server struct {
-	cfg        *config.Config
-	mapOps     *bpf.MapOperations
-	resMgr     *netresource.ResourceManager
-	fdbWatcher *netlinkwatch.FDBWatcher
-	logger     *zap.Logger
-	mux        *http.ServeMux
-	server     *http.Server
+	cfg         *config.Config
+	mapOps      *bpf.MapOperations
+	resMgr      *netresource.ResourceManager
+	fdbWatcher  *netlinkwatch.FDBWatcher
+	locatorMgr  *locator.Manager
+	logger      *zap.Logger
+	mux         *http.ServeMux
+	server      *http.Server
 }
 
 // NewServer creates a new Server instance
@@ -34,6 +36,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		mapOps:     mapOps,
 		resMgr:     resMgr,
 		fdbWatcher: fdbWatcher,
+		locatorMgr: locator.NewManager(),
 		logger:     logger,
 		mux:        http.NewServeMux(),
 	}
@@ -62,9 +65,17 @@ func (s *Server) Setup() {
 	)
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
 
+	// Locator service (SRv6 locator manager). Registered before
+	// SidFunctionService so the latter can receive the manager and
+	// honor locator_ref in SidFunctionCreate.
+	locatorServer := NewLocatorServer(s.locatorMgr)
+	path, handler := vinberov1connect.NewLocatorServiceHandler(locatorServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered LocatorService", zap.String("path", path))
+
 	// SidFunction service
-	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer)
-	path, handler := vinberov1connect.NewSidFunctionServiceHandler(sidFunctionServer)
+	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr)
+	path, handler = vinberov1connect.NewSidFunctionServiceHandler(sidFunctionServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered SidFunctionService", zap.String("path", path))
 
