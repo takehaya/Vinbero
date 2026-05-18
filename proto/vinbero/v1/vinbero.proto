@@ -3,6 +3,7 @@ syntax = "proto3";
 package vinbero.v1;
 
 import "vinbero/v1/enums.proto";
+import "vinbero/v1/locator.proto";
 
 option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 
@@ -48,6 +49,13 @@ message SidFunction {
   bytes plugin_aux_raw = 18; // Plugin-defined auxiliary payload (<= 196 bytes, cast by plugin via VINBERO_PLUGIN_AUX_CAST)
   string plugin_aux_json = 19; // Plugin-defined auxiliary payload as JSON; server encodes via plugin BTF. Mutually exclusive with plugin_aux_raw.
   uint32 plugin_aux_index = 20; // Reference an aux index previously returned by PluginAuxAlloc. Mutually exclusive with plugin_aux_raw / plugin_aux_json. Requires action >= EndpointPluginBase.
+
+  // Allocate the SID from a registered locator pool. Mutually exclusive
+  // with trigger_prefix: when locator_ref is set the server builds the
+  // SID from locator.prefix + locator_ref.function and ignores any
+  // trigger_prefix payload. List / Get reuse trigger_prefix to surface
+  // the materialized SID regardless of how it was originally created.
+  optional LocatorRef locator_ref = 21;
 }
 
 message SidFunctionCreateRequest {
