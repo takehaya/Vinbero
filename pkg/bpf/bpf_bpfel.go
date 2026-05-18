@@ -232,6 +232,8 @@ type BpfProgramSpecs struct {
 	TailcallEndpointEndM_gtp6E    *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_e"`
 	TailcallEndpointEndT          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_t"`
 	TailcallEndpointEndX          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_x"`
+	TailcallHeadendL2H_encaps     *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps"`
+	TailcallHeadendL2H_encapsRed  *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps_red"`
 	TailcallHeadendV4H_encaps     *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_encaps"`
 	TailcallHeadendV4H_encapsRed  *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_encaps_red"`
 	TailcallHeadendV4H_mGtp4D     *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_m_gtp4_d"`
@@ -257,6 +259,7 @@ type BpfMapSpecs struct {
 	FdbMap             *ebpf.MapSpec `ebpf:"fdb_map"`
 	HeadendL2ExtMap    *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
 	HeadendL2Map       *ebpf.MapSpec `ebpf:"headend_l2_map"`
+	HeadendL2Progs     *ebpf.MapSpec `ebpf:"headend_l2_progs"`
 	HeadendV4Map       *ebpf.MapSpec `ebpf:"headend_v4_map"`
 	HeadendV4Progs     *ebpf.MapSpec `ebpf:"headend_v4_progs"`
 	HeadendV6Map       *ebpf.MapSpec `ebpf:"headend_v6_map"`
@@ -266,6 +269,7 @@ type BpfMapSpecs struct {
 	SidEndpointProgs   *ebpf.MapSpec `ebpf:"sid_endpoint_progs"`
 	SidFunctionMap     *ebpf.MapSpec `ebpf:"sid_function_map"`
 	SlotStatsEndpoint  *ebpf.MapSpec `ebpf:"slot_stats_endpoint"`
+	SlotStatsHeadendL2 *ebpf.MapSpec `ebpf:"slot_stats_headend_l2"`
 	SlotStatsHeadendV4 *ebpf.MapSpec `ebpf:"slot_stats_headend_v4"`
 	SlotStatsHeadendV6 *ebpf.MapSpec `ebpf:"slot_stats_headend_v6"`
 	StatsMap           *ebpf.MapSpec `ebpf:"stats_map"`
@@ -309,6 +313,7 @@ type BpfMaps struct {
 	FdbMap             *ebpf.Map `ebpf:"fdb_map"`
 	HeadendL2ExtMap    *ebpf.Map `ebpf:"headend_l2_ext_map"`
 	HeadendL2Map       *ebpf.Map `ebpf:"headend_l2_map"`
+	HeadendL2Progs     *ebpf.Map `ebpf:"headend_l2_progs"`
 	HeadendV4Map       *ebpf.Map `ebpf:"headend_v4_map"`
 	HeadendV4Progs     *ebpf.Map `ebpf:"headend_v4_progs"`
 	HeadendV6Map       *ebpf.Map `ebpf:"headend_v6_map"`
@@ -318,6 +323,7 @@ type BpfMaps struct {
 	SidEndpointProgs   *ebpf.Map `ebpf:"sid_endpoint_progs"`
 	SidFunctionMap     *ebpf.Map `ebpf:"sid_function_map"`
 	SlotStatsEndpoint  *ebpf.Map `ebpf:"slot_stats_endpoint"`
+	SlotStatsHeadendL2 *ebpf.Map `ebpf:"slot_stats_headend_l2"`
 	SlotStatsHeadendV4 *ebpf.Map `ebpf:"slot_stats_headend_v4"`
 	SlotStatsHeadendV6 *ebpf.Map `ebpf:"slot_stats_headend_v6"`
 	StatsMap           *ebpf.Map `ebpf:"stats_map"`
@@ -336,6 +342,7 @@ func (m *BpfMaps) Close() error {
 		m.FdbMap,
 		m.HeadendL2ExtMap,
 		m.HeadendL2Map,
+		m.HeadendL2Progs,
 		m.HeadendV4Map,
 		m.HeadendV4Progs,
 		m.HeadendV6Map,
@@ -345,6 +352,7 @@ func (m *BpfMaps) Close() error {
 		m.SidEndpointProgs,
 		m.SidFunctionMap,
 		m.SlotStatsEndpoint,
+		m.SlotStatsHeadendL2,
 		m.SlotStatsHeadendV4,
 		m.SlotStatsHeadendV6,
 		m.StatsMap,
@@ -381,6 +389,8 @@ type BpfPrograms struct {
 	TailcallEndpointEndM_gtp6E    *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_e"`
 	TailcallEndpointEndT          *ebpf.Program `ebpf:"tailcall_endpoint_end_t"`
 	TailcallEndpointEndX          *ebpf.Program `ebpf:"tailcall_endpoint_end_x"`
+	TailcallHeadendL2H_encaps     *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps"`
+	TailcallHeadendL2H_encapsRed  *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps_red"`
 	TailcallHeadendV4H_encaps     *ebpf.Program `ebpf:"tailcall_headend_v4_h_encaps"`
 	TailcallHeadendV4H_encapsRed  *ebpf.Program `ebpf:"tailcall_headend_v4_h_encaps_red"`
 	TailcallHeadendV4H_mGtp4D     *ebpf.Program `ebpf:"tailcall_headend_v4_h_m_gtp4_d"`
@@ -412,6 +422,8 @@ func (p *BpfPrograms) Close() error {
 		p.TailcallEndpointEndM_gtp6E,
 		p.TailcallEndpointEndT,
 		p.TailcallEndpointEndX,
+		p.TailcallHeadendL2H_encaps,
+		p.TailcallHeadendL2H_encapsRed,
 		p.TailcallHeadendV4H_encaps,
 		p.TailcallHeadendV4H_encapsRed,
 		p.TailcallHeadendV4H_mGtp4D,

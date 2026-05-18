@@ -2,20 +2,45 @@
 // Included from xdp_prog.c — not compiled standalone.
 // Depends on headend/srv6_encaps_l2.h (must be included before this file).
 
-static __always_inline int process_bd_forwarding(
+// Look up the BD peer to encap towards, given the local L2 entry. Returns:
+//   non-NULL  -> encap with this headend_entry (caller does the tail-call)
+//   NULL      -> no BD encap was selected; *out_action carries the action
+//                the caller should bubble up (-1 means "no BD; fall through
+//                to the no-BD path", XDP_PASS means "leave to kernel").
+//
+// FDB src learning, broadcast/multicast BUM meta, and missing-FDB BUM meta
+// are all handled here so the caller stays simple. Keeping the bpf_tail_call
+// out of this helper is intentional and enforced as an invariant: any second
+// lexical bpf_tail_call site into headend_l2_progs in the same translation
+// unit causes the kernel to silently drop the redirected frame on the first
+// callsite, even when that branch is dead code at runtime.
+//
+// Repro (kernel 6.x, observed 2026-05): two lexical bpf_tail_call sites in
+// xdp_main.c targeting the same PROG_ARRAY (headend_l2_progs) cause the
+// first site's XDP_REDIRECT (set by the target program's bpf_redirect()
+// call) to be silently dropped. The xdp:xdp_redirect{_err,_map_err}
+// tracepoints do not fire. Collapsing all callers to a single inline
+// bpf_tail_call instruction in try_l2_headend below restores delivery.
+// Root cause is not yet pinned down — verifier register-state merge / JIT
+// dispatch / per-CPU bpf_redirect_info aliasing are all suspects.
+static __always_inline struct headend_entry *try_bd_peer_lookup(
     struct xdp_md *ctx,
     struct headend_entry *l2_entry,
     __u16 vlan_id,
-    __u64 pkt_len)
+    int *out_action)
 {
-    if (l2_entry->bd_id == 0)
-        return -1;
+    if (l2_entry->bd_id == 0) {
+        *out_action = -1;
+        return NULL;
+    }
 
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
-        return XDP_PASS;
+    if ((void *)(eth + 1) > data_end) {
+        *out_action = XDP_PASS;
+        return NULL;
+    }
 
     struct fdb_key key = { .bd_id = l2_entry->bd_id };
 
@@ -34,7 +59,8 @@ static __always_inline int process_bd_forwarding(
 
     if (eth->h_dest[0] & 0x01) {
         xdp_write_bum_meta(ctx, vlan_id);
-        return XDP_PASS;
+        *out_action = XDP_PASS;
+        return NULL;
     }
 
     __builtin_memcpy(key.mac, eth->h_dest, ETH_ALEN);
@@ -44,17 +70,16 @@ static __always_inline int process_bd_forwarding(
             struct bd_peer_key pk = { .bd_id = dst_fdb->bd_id, .index = dst_fdb->peer_index };
             struct headend_entry *pe = bpf_map_lookup_elem(&bd_peer_map, &pk);
             if (pe) {
-                __u16 l2_frame_len = (__u16)pkt_len;
-                if (pe->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED)
-                    return do_h_encaps_l2_red(ctx, pe, l2_frame_len);
-                return do_h_encaps_l2(ctx, pe, l2_frame_len);
+                return pe;
             }
         }
-        return XDP_PASS;
+        *out_action = XDP_PASS;
+        return NULL;
     }
 
     xdp_write_bum_meta(ctx, vlan_id);
-    return XDP_PASS;
+    *out_action = XDP_PASS;
+    return NULL;
 }
 
 static __noinline int try_l2_headend(
@@ -68,11 +93,16 @@ static __noinline int try_l2_headend(
     if (!headend_should_encaps_l2_any(l2_entry))
         return -1;
 
-    int bd_action = process_bd_forwarding(ctx, l2_entry, vlan_id, pkt_len);
-    if (bd_action >= 0)
-        return bd_action;
+    int bd_action = XDP_PASS;
+    struct headend_entry *encap = try_bd_peer_lookup(ctx, l2_entry, vlan_id, &bd_action);
+    if (!encap) {
+        if (bd_action == -1)
+            encap = l2_entry; // no-BD path: encap with the local L2 entry
+        else
+            return bd_action; // BUM / pass / etc. handled by the lookup helper
+    }
 
-    if (l2_entry->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED)
-        return do_h_encaps_l2_red(ctx, l2_entry, (__u16)pkt_len);
-    return do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
+    if (tailcall_ctx_write_headend(encap, 0, DISPATCH_HEADEND_L2, encap->mode) == 0)
+        bpf_tail_call(ctx, &headend_l2_progs, encap->mode);
+    return XDP_DROP;
 }

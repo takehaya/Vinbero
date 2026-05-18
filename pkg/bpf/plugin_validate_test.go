@@ -132,6 +132,14 @@ func TestValidatePluginProgram_ValidTailCallHeadendV4(t *testing.T) {
 	}
 }
 
+func TestValidatePluginProgram_ValidTailCallHeadendL2(t *testing.T) {
+	ins := append(asm.Instructions{}, tailCallTo("headend_l2_progs", 20)...)
+	ins = append(ins, asm.Mov.Imm(asm.R0, 2), asm.Return())
+	if err := ValidatePluginProgram(buildSpec("dispatch", ebpf.XDP, ins), nil); err != nil {
+		t.Fatalf("expected tail-call into headend_l2_progs to pass, got: %v", err)
+	}
+}
+
 // Plugin uses both routes: leaf on one path, dispatch on another.
 func TestValidatePluginProgram_BothEpilogueAndTailCall(t *testing.T) {
 	ins := append(asm.Instructions{}, tailCallTo("sid_endpoint_progs", 40)...)

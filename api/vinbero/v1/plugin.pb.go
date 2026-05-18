@@ -27,7 +27,7 @@ type PluginRegisterRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	MapType string `protobuf:"bytes,1,opt,name=map_type,json=mapType,proto3" json:"map_type,omitempty"` // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6"
+	MapType string `protobuf:"bytes,1,opt,name=map_type,json=mapType,proto3" json:"map_type,omitempty"` // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6", "headend_l2"
 	Index   uint32 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`                   // Plugin slot index (endpoint: 32-63, headend: 16-31)
 	BpfElf  []byte `protobuf:"bytes,3,opt,name=bpf_elf,json=bpfElf,proto3" json:"bpf_elf,omitempty"`    // Compiled BPF ELF object file bytes
 	Program string `protobuf:"bytes,4,opt,name=program,proto3" json:"program,omitempty"`                // BPF program function name within the ELF (e.g., "plugin_counter")
@@ -136,7 +136,7 @@ type PluginUnregisterRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	MapType string `protobuf:"bytes,1,opt,name=map_type,json=mapType,proto3" json:"map_type,omitempty"` // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6"
+	MapType string `protobuf:"bytes,1,opt,name=map_type,json=mapType,proto3" json:"map_type,omitempty"` // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6", "headend_l2"
 	Index   uint32 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`                   // Plugin slot index to clear
 }
 
@@ -229,7 +229,7 @@ type PluginListRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	MapTypeFilter string `protobuf:"bytes,1,opt,name=map_type_filter,json=mapTypeFilter,proto3" json:"map_type_filter,omitempty"` // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6"
+	MapTypeFilter string `protobuf:"bytes,1,opt,name=map_type_filter,json=mapTypeFilter,proto3" json:"map_type_filter,omitempty"` // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6" / "headend_l2"
 }
 
 func (x *PluginListRequest) Reset() {

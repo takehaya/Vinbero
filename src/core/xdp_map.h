@@ -207,6 +207,16 @@ struct {
     __uint(max_entries, HEADEND_PROG_MAX);
 } headend_v6_progs SEC(".maps");
 
+// Headend L2 PROG_ARRAY (indexed by srv6_headend_behavior; only the L2
+// variants -- H_ENCAPS_L2 / H_ENCAPS_L2_RED -- are populated. Reuses
+// HEADEND_PROG_MAX so plugin slots line up with L3 (16-31).
+struct {
+    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, HEADEND_PROG_MAX);
+} headend_l2_progs SEC(".maps");
+
 // Tail call helpers (must come after map definitions they reference)
 #include "core/xdp_tailcall_helpers.h"
 
