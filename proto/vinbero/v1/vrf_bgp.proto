@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+import "vinbero/v1/enums.proto";
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// VrfBgpService binds a VRF to its BGP route-target policy. A VPNv4 /
+// VPNv6 route received over BGP is accepted only when one of its route
+// targets matches some VRF's import_rts; advertised routes carry the
+// VRF's export_rts. default_locator names the locator the VRF's local
+// Endpoint SIDs are allocated from.
+//
+// Depends on: NetworkResourceService (the vrf_name must already exist)
+// and LocatorService (default_locator must be registered).
+service VrfBgpService {
+  rpc VrfBgpBind(VrfBgpBindRequest) returns (VrfBgpBindResponse);
+  rpc VrfBgpUnbind(VrfBgpUnbindRequest) returns (VrfBgpUnbindResponse);
+  rpc VrfBgpList(VrfBgpListRequest) returns (VrfBgpListResponse);
+}
+
+// VrfBgpBinding is one VRF's BGP route-target policy.
+message VrfBgpBinding {
+  string vrf_name = 1;
+  repeated string import_rts = 2; // route targets accepted on receive, "65000:100" form
+  repeated string export_rts = 3; // route targets attached on advertise
+  string default_locator = 4;     // locator name for this VRF's local SIDs
+}
+
+message VrfBgpBindRequest {
+  repeated VrfBgpBinding bindings = 1;
+}
+message VrfBgpBindResponse {
+  repeated VrfBgpBinding bound = 1;
+  repeated OperationError errors = 2;
+}
+
+message VrfBgpUnbindRequest {
+  repeated string vrf_names = 1;
+}
+message VrfBgpUnbindResponse {
+  repeated string unbound_vrf_names = 1;
+  repeated OperationError errors = 2;
+}
+
+message VrfBgpListRequest {}
+message VrfBgpListResponse {
+  repeated VrfBgpBinding bindings = 1;
+}

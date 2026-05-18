@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+import "vinbero/v1/enums.proto";
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// LocatorService manages SRv6 locator definitions: an IPv6 prefix pool
+// from which SID functions allocate function values. A locator captures
+// the bit layout (block / node / function / argument) so that BGP
+// advertise can encode the SRv6 SID Structure sub-sub-TLV (RFC 9252)
+// directly from the locator's metadata.
+//
+// Phase 1 implements Classic SRv6 (RFC 8986). uSID locators
+// (RFC 9800) are accepted at the API surface but reject SID build /
+// parse with Unimplemented; full support arrives in Phase 2 of the
+// GoBGP integration plan.
+service LocatorService {
+  rpc LocatorCreate(LocatorCreateRequest) returns (LocatorCreateResponse);
+  rpc LocatorDelete(LocatorDeleteRequest) returns (LocatorDeleteResponse);
+  rpc LocatorList(LocatorListRequest) returns (LocatorListResponse);
+  rpc LocatorGet(LocatorGetRequest) returns (LocatorGetResponse);
+}
+
+// LocatorBehaviorMode selects the SID structure semantics. Classic uses
+// RFC 8986 layout; uSID uses RFC 9800 compressed SIDs. The two are not
+// interchangeable -- mixing modes inside one locator would break BGP
+// SID-Structure encoding, so each LocatorBehaviorMode lives in its own
+// Locator instance.
+enum LocatorBehaviorMode {
+  LOCATOR_BEHAVIOR_MODE_UNSPECIFIED = 0;
+  LOCATOR_BEHAVIOR_MODE_CLASSIC = 1;
+  LOCATOR_BEHAVIOR_MODE_USID = 2;
+}
+
+// Locator describes a Vinbero locator: the prefix the daemon advertises
+// and the bit layout used to slice SIDs from it.
+//
+// The (block_len + node_len) bits at the front of the prefix identify
+// the PE; the next function_len bits identify the local behavior; the
+// last argument_len bits are reserved for argument material (END.X
+// neighbor selectors, etc.). Their sum must equal 128.
+message Locator {
+  string name = 1; // Operator-chosen locator name, e.g. "LOC1-CLASSIC".
+  string prefix = 2; // IPv6 prefix, e.g. "fd00:1:1::/48".
+  uint32 block_len = 3; // Locator-block length in bits.
+  uint32 node_len = 4; // Locator-node length in bits.
+  uint32 function_len = 5; // Function length in bits.
+  uint32 argument_len = 6; // Argument length in bits.
+  LocatorBehaviorMode behavior = 7;
+  uint32 function_auto_start = 8; // Inclusive lower bound for auto-allocated functions.
+  uint32 function_auto_end = 9; // Inclusive upper bound for auto-allocated functions.
+}
+
+// LocatorRef points at a locator by name and optionally pins a function
+// value. When function is unset, the server auto-allocates the next
+// available slot from [function_auto_start, function_auto_end]. When
+// set, any value inside the function_len bit width is accepted -- manual
+// allocations may sit outside the auto-allocator range so operator-
+// reserved low / high slots can still be claimed explicitly. Conflicts
+// (value already in use) surface as a per-entry error.
+message LocatorRef {
+  string name = 1;
+  optional uint32 function = 2;
+}
+
+message LocatorCreateRequest {
+  repeated Locator locators = 1;
+}
+message LocatorCreateResponse {
+  repeated Locator created = 1;
+  repeated OperationError errors = 2;
+}
+
+message LocatorDeleteRequest {
+  repeated string names = 1;
+  // Force=true drops the locator from the manager even while SID
+  // functions reference it. The operator is responsible for tearing
+  // down those upstream SIDs first -- the server does not cascade.
+  // Without force, the call returns an error listing the dangling
+  // bindings so the caller knows what to clean up.
+  bool force = 2;
+}
+message LocatorDeleteResponse {
+  repeated string deleted_names = 1;
+  repeated OperationError errors = 2;
+}
+
+message LocatorListRequest {}
+message LocatorListResponse {
+  repeated Locator locators = 1;
+}
+
+message LocatorGetRequest {
+  string name = 1;
+}
+message LocatorGetResponse {
+  Locator locator = 1;
+}

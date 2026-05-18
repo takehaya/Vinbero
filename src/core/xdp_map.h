@@ -67,6 +67,35 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } headend_v6_map SEC(".maps");
 
+// Per-entry owner-tag tables, paired with sid_function_map / headend_v4_map /
+// headend_v6_map. The keys match the corresponding main map's key type so
+// userspace can read/write the owner alongside each entry. HASH (not
+// LPM_TRIE) because we look up exact entries, not longest-prefix matches.
+// Value matches struct aux_owner -- a 64-byte null-terminated tag like
+// "rpc:v1" or "bgp:v1:asn=65000:rd=65000:100". BPF programs never read
+// these maps; they exist only for userspace conflict detection and
+// owner-scoped flush.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct lpm_key_v6);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 1024);
+} sid_function_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct lpm_key_v4);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 1024);
+} headend_v4_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct lpm_key_v6);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 1024);
+} headend_v6_owner_map SEC(".maps");
+
 // End.B6 policy: stored in sid_aux_map (b6_policy variant), no separate map needed.
 
 // Headend L2 map (Hash)

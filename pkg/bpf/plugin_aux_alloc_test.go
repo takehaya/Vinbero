@@ -229,7 +229,7 @@ func TestAuxOwnerPluginTag_VersionStamped(t *testing.T) {
 	if got := AuxOwnerPluginTag("endpoint", 32); got != "plugin:v1:endpoint:32" {
 		t.Errorf("plugin tag: got %q want plugin:v1:endpoint:32", got)
 	}
-	if got := AuxOwnerBuiltinTag; got != "builtin:v1" {
+	if got := AuxOwnerBuiltin; got != "builtin:v1" {
 		t.Errorf("builtin tag: got %q want builtin:v1", got)
 	}
 }

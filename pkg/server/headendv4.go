@@ -39,7 +39,7 @@ func (s *Headendv4Server) Headendv4Create(
 			continue
 		}
 
-		if err := s.mapOps.CreateHeadendV4(headend.TriggerPrefix, entry); err != nil {
+		if err := s.mapOps.CreateHeadendV4(headend.TriggerPrefix, entry, bpf.OwnerRPC); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: headend.TriggerPrefix,
 				Reason:        err.Error(),
@@ -64,7 +64,7 @@ func (s *Headendv4Server) Headendv4Delete(
 	}
 
 	for _, prefix := range req.Msg.TriggerPrefixes {
-		if err := s.mapOps.DeleteHeadendV4(prefix); err != nil {
+		if err := s.mapOps.DeleteHeadendV4(prefix, bpf.OwnerRPC); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: prefix,
 				Reason:        err.Error(),
@@ -83,7 +83,7 @@ func (s *Headendv4Server) Headendv4Flush(
 	ctx context.Context,
 	req *connect.Request[v1.Headendv4FlushRequest],
 ) (*connect.Response[v1.Headendv4FlushResponse], error) {
-	count, err := s.mapOps.FlushHeadendV4()
+	count, err := s.mapOps.FlushHeadendV4(bpf.OwnerRPC)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -151,12 +151,12 @@ func (s *Headendv4Server) protoToEntry(headend *v1.Headendv4) (*bpf.HeadendEntry
 	}
 
 	return &bpf.HeadendEntry{
-		Mode:          uint8(headend.Mode),
-		NumSegments:   numSegments,
-		SrcAddr:       srcAddr,
-		DstAddr:       dstAddr,
-		Segments:      segments,
-		ArgsOffset: uint8(headend.ArgsOffset),
+		Mode:        uint8(headend.Mode),
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		DstAddr:     dstAddr,
+		Segments:    segments,
+		ArgsOffset:  uint8(headend.ArgsOffset),
 	}, nil
 }
 
@@ -168,6 +168,6 @@ func (s *Headendv4Server) entryToProto(prefix string, entry *bpf.HeadendEntry) *
 		SrcAddr:       bpf.FormatIPv6(entry.SrcAddr),
 		DstAddr:       bpf.FormatIPv6(entry.DstAddr),
 		Segments:      bpf.FormatSegments(entry.Segments, entry.NumSegments),
-		ArgsOffset: uint32(entry.ArgsOffset),
+		ArgsOffset:    uint32(entry.ArgsOffset),
 	}
 }

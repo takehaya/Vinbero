@@ -85,3 +85,21 @@
 | PSP      | Supported   | Penultimate Segment Pop        | RFC 8986 Sec.4.16.1 |
 | USP      | Supported   | Ultimate Segment Pop           | RFC 8986 Sec.4.16.2 |
 | USD      | Supported   | Ultimate Segment Decapsulation | RFC 8986 Sec.4.16.3 |
+
+### BGP control plane (SRv6 services)
+
+In-process GoBGP speaker for exchanging SRv6 service routes (RFC 9252).
+VPNv4/VPNv6 (L3) is implemented and installs SRv6 H.Encaps headend
+entries; EVPN (L2VPN) is on the roadmap below.
+
+| Function                   | Status    | Description                                              | Reference |
+|----------------------------|-----------|----------------------------------------------------------|-----------|
+| VPNv4/VPNv6 receive        | Supported | Decode SRv6 service SID/RD/RT, install H.Encaps headends | RFC 9252 |
+| VPNv4/VPNv6 advertise      | Supported | Operator-explicit advertise/withdraw via BgpRouteService | RFC 9252 |
+| IPv6 unicast receive       | Supported | Inject BGP-learned routes into the kernel FIB            | RFC 4760 |
+| SRv6 locator manager       | Supported | RPC-driven locator pool / SID allocation                 | RFC 8986 |
+| VRF <-> route-target binding | Supported | Import-RT filter for received VPN routes               | RFC 9252 |
+| SR Policy (SAFI 73)        |           | Color-based steering (control + data plane)              | RFC 9256 |
+| BGP MUP                    |           | Mobile User Plane route exchange via the MUP SAFI        | draft-mpmz-bess-mup-safi |
+| Automatic advertise        |           | Advertise local SID/headend state without operator RPC   | RFC 9252 |
+| EVPN (RT2/3/4)             |           | L2VPN over BGP EVPN (MAC/IP, Inclusive Multicast, ESI)   | RFC 9252 |
