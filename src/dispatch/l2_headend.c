@@ -2,20 +2,38 @@
 // Included from xdp_prog.c — not compiled standalone.
 // Depends on headend/srv6_encaps_l2.h (must be included before this file).
 
-static __always_inline int process_bd_forwarding(
+// Look up the BD peer to encap towards, given the local L2 entry. Returns:
+//   non-NULL  -> encap with this headend_entry (caller does the tail-call)
+//   NULL      -> no BD encap was selected; *out_action carries the action
+//                the caller should bubble up (-1 means "no BD; fall through
+//                to the no-BD path", XDP_PASS means "leave to kernel").
+//
+// FDB src learning, broadcast/multicast BUM meta, and missing-FDB BUM meta
+// are all handled here so the caller stays simple. Keeping the bpf_tail_call
+// out of this helper is intentional — having a second lexical tail_call
+// site to headend_l2_progs (e.g. one here AND one in try_l2_headend) makes
+// the kernel silently drop the redirected frames, even when this BD-peer
+// branch is dead code for the caller's traffic. Root cause is still under
+// investigation (Phase 2); the workaround is to keep tail_call as a single
+// inline instruction in try_l2_headend below.
+static __always_inline struct headend_entry *try_bd_peer_lookup(
     struct xdp_md *ctx,
     struct headend_entry *l2_entry,
     __u16 vlan_id,
-    __u64 pkt_len)
+    int *out_action)
 {
-    if (l2_entry->bd_id == 0)
-        return -1;
+    if (l2_entry->bd_id == 0) {
+        *out_action = -1;
+        return NULL;
+    }
 
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
-        return XDP_PASS;
+    if ((void *)(eth + 1) > data_end) {
+        *out_action = XDP_PASS;
+        return NULL;
+    }
 
     struct fdb_key key = { .bd_id = l2_entry->bd_id };
 
@@ -34,7 +52,8 @@ static __always_inline int process_bd_forwarding(
 
     if (eth->h_dest[0] & 0x01) {
         xdp_write_bum_meta(ctx, vlan_id);
-        return XDP_PASS;
+        *out_action = XDP_PASS;
+        return NULL;
     }
 
     __builtin_memcpy(key.mac, eth->h_dest, ETH_ALEN);
@@ -44,25 +63,16 @@ static __always_inline int process_bd_forwarding(
             struct bd_peer_key pk = { .bd_id = dst_fdb->bd_id, .index = dst_fdb->peer_index };
             struct headend_entry *pe = bpf_map_lookup_elem(&bd_peer_map, &pk);
             if (pe) {
-                // Inline encap is intentional here (mirrors try_l2_headend
-                // below): converting this branch to a second
-                // bpf_tail_call(&headend_l2_progs, ...) site triggers a
-                // reproducible silent drop of redirected frames even
-                // though the BD-peer branch is dead code for the
-                // no-BD-entry tests (headend-l2 example with bd_id=0).
-                // Phase 2 investigates the kernel-level cause before
-                // flipping this site.
-                __u16 l2_frame_len = (__u16)pkt_len;
-                if (pe->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED)
-                    return do_h_encaps_l2_red(ctx, pe, l2_frame_len);
-                return do_h_encaps_l2(ctx, pe, l2_frame_len);
+                return pe;
             }
         }
-        return XDP_PASS;
+        *out_action = XDP_PASS;
+        return NULL;
     }
 
     xdp_write_bum_meta(ctx, vlan_id);
-    return XDP_PASS;
+    *out_action = XDP_PASS;
+    return NULL;
 }
 
 static __noinline int try_l2_headend(
@@ -76,16 +86,16 @@ static __noinline int try_l2_headend(
     if (!headend_should_encaps_l2_any(l2_entry))
         return -1;
 
-    int bd_action = process_bd_forwarding(ctx, l2_entry, vlan_id, pkt_len);
-    if (bd_action >= 0)
-        return bd_action;
+    int bd_action = XDP_PASS;
+    struct headend_entry *encap = try_bd_peer_lookup(ctx, l2_entry, vlan_id, &bd_action);
+    if (!encap) {
+        if (bd_action == -1)
+            encap = l2_entry; // no-BD path: encap with the local L2 entry
+        else
+            return bd_action; // BUM / pass / etc. handled by the lookup helper
+    }
 
-    // No-BD path tail-calls into headend_l2_progs[mode]. Built-in
-    // slots 3 (H.Encaps.L2) and 6 (H.Encaps.L2.Red) host the encap
-    // bodies. The BD-peer encap branch in process_bd_forwarding above
-    // stays inline — see the comment there for the regression that
-    // blocks the second tail-call site.
-    if (tailcall_ctx_write_headend(l2_entry, 0, DISPATCH_HEADEND_L2, l2_entry->mode) == 0)
-        bpf_tail_call(ctx, &headend_l2_progs, l2_entry->mode);
+    if (tailcall_ctx_write_headend(encap, 0, DISPATCH_HEADEND_L2, encap->mode) == 0)
+        bpf_tail_call(ctx, &headend_l2_progs, encap->mode);
     return XDP_DROP;
 }
