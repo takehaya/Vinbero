@@ -70,3 +70,19 @@ func TestLoad_NoBGPSection(t *testing.T) {
 		t.Errorf("BGP.Peers should be empty, got %d", len(cfg.BGP.Peers))
 	}
 }
+
+// TestLoad_ExplicitZeroSurvives is the regression guard for the BGP-peer
+// default fix: the per-peer SetDefaults pass must stay scoped to
+// bgp.peers[] and never re-stamp the rest of the config. A user who
+// writes settings.fdb_aging_seconds: 0 ("disabled") must keep the 0,
+// not have it bounced back to the 300 default.
+func TestLoad_ExplicitZeroSurvives(t *testing.T) {
+	cfg, err := Load("settings:\n  fdb_aging_seconds: 0\n")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Setting.FdbAgingSeconds != 0 {
+		t.Errorf("fdb_aging_seconds = %d, want 0 (explicit 0 = disabled must survive)",
+			cfg.Setting.FdbAgingSeconds)
+	}
+}

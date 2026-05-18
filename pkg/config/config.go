@@ -130,12 +130,15 @@ func Load(s string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Re-apply defaults after unmarshal: slice-of-struct elements (e.g.
-	// bgp.peers[]) do not exist during the pre-unmarshal SetDefaults
-	// call, so their `default:` tags would otherwise stay zero. A second
-	// pass only fills fields still at their zero value, leaving every
-	// value the YAML actually set intact.
-	defaults.SetDefaults(&cfg)
+	// bgp.peers[] elements do not exist during the pre-unmarshal
+	// SetDefaults call, so their `default:` tags need a targeted second
+	// pass. This is scoped to each peer element on purpose: a blanket
+	// SetDefaults(&cfg) here would re-stamp every zero-valued field in
+	// the whole config and clobber values a user set to zero
+	// deliberately (e.g. settings.fdb_aging_seconds: 0 means "disabled").
+	for i := range cfg.BGP.Peers {
+		defaults.SetDefaults(&cfg.BGP.Peers[i])
+	}
 	cfg.Original = s
 	return &cfg, nil
 }
