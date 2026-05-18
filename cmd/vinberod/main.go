@@ -111,7 +111,20 @@ func run(cliCtx *cli.Context) error {
 	// created over RPC are visible to the BGP receive path.
 	locatorMgr := locator.NewManager()
 	vrfBgpMgr := vrfbgp.NewManager()
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, lg)
+
+	// The BGP session is constructed (unstarted) before the RPC server
+	// so the server can hold it as a RouteAdvertiser for BgpRouteService.
+	// bgpSession / advertiser stay nil when BGP is disabled -- a typed
+	// nil must not leak into the interface, so advertiser is only
+	// assigned inside the enabled branch.
+	var bgpSession *gobgp.Session
+	var advertiser bgp.RouteAdvertiser
+	if cliCtx.Bool("bgp-enabled") {
+		bgpSession = gobgp.NewSession(lg)
+		advertiser = bgpSession
+	}
+
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, lg)
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
@@ -124,8 +137,7 @@ func run(cliCtx *cli.Context) error {
 		}
 	}()
 
-	if cliCtx.Bool("bgp-enabled") {
-		bgpSession := gobgp.NewSession(lg)
+	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
 		// (global up, peers half-added) still gets torn down.
 		defer func() {

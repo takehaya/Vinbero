@@ -16,6 +16,7 @@ type Clients struct {
 	Resource vinberov1connect.NetworkResourceServiceClient
 	Locator  vinberov1connect.LocatorServiceClient
 	VrfBgp   vinberov1connect.VrfBgpServiceClient
+	BgpRoute vinberov1connect.BgpRouteServiceClient
 	Fdb      vinberov1connect.FdbServiceClient
 	VlanTbl  vinberov1connect.VlanTableServiceClient
 	Stats    vinberov1connect.StatsServiceClient
@@ -36,6 +37,7 @@ func NewClients(serverURL string) *Clients {
 		Resource: vinberov1connect.NewNetworkResourceServiceClient(httpClient, serverURL, opts...),
 		Locator:  vinberov1connect.NewLocatorServiceClient(httpClient, serverURL, opts...),
 		VrfBgp:   vinberov1connect.NewVrfBgpServiceClient(httpClient, serverURL, opts...),
+		BgpRoute: vinberov1connect.NewBgpRouteServiceClient(httpClient, serverURL, opts...),
 		Fdb:      vinberov1connect.NewFdbServiceClient(httpClient, serverURL, opts...),
 		VlanTbl:  vinberov1connect.NewVlanTableServiceClient(httpClient, serverURL, opts...),
 		Stats:    vinberov1connect.NewStatsServiceClient(httpClient, serverURL, opts...),

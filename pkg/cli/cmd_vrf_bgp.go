@@ -38,7 +38,7 @@ func vrfBgpCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					return printOperationResult(resp.Msg.Bound, resp.Msg.Errors, "VrfBgpBinding")
+					return printOperationResult(resp.Msg.Bound, resp.Msg.Errors, "VrfBgpBinding", "bound")
 				},
 			},
 			{

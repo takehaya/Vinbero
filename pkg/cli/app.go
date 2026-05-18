@@ -54,6 +54,7 @@ func NewApp() *cli.App {
 			vrfCommand(),
 			locatorCommand(),
 			vrfBgpCommand(),
+			bgpCommand(),
 			fdbCommand(),
 			vlanTableCommand(),
 			statsCommand(),
@@ -71,9 +72,16 @@ func clientsFromContext(c *cli.Context) *Clients {
 	return v.(*Clients)
 }
 
-func printOperationResult[T any](created []T, errors []*v1.OperationError, resourceName string) error {
+// printOperationResult reports a batch RPC result. verb names the action
+// for the success line and defaults to "created"; advertise / withdraw
+// style commands pass their own ("advertised", "withdrawn", ...).
+func printOperationResult[T any](created []T, errors []*v1.OperationError, resourceName string, verb ...string) error {
+	action := "created"
+	if len(verb) > 0 {
+		action = verb[0]
+	}
 	if len(created) > 0 {
-		fmt.Printf("%s created: %d\n", resourceName, len(created))
+		fmt.Printf("%s %s: %d\n", resourceName, action, len(created))
 	}
 	for _, e := range errors {
 		fmt.Fprintf(os.Stderr, "Error [%s]: %s\n", e.TriggerPrefix, e.Reason)
