@@ -44,12 +44,14 @@ static __always_inline int process_bd_forwarding(
             struct bd_peer_key pk = { .bd_id = dst_fdb->bd_id, .index = dst_fdb->peer_index };
             struct headend_entry *pe = bpf_map_lookup_elem(&bd_peer_map, &pk);
             if (pe) {
-                // See TODO in try_l2_headend below — Phase 1 keeps the
-                // inline encap to avoid the bpf_tail_call + bpf_redirect
-                // regression observed under generic XDP. Both this
-                // (BD remote-peer) branch and the no-BD branch in
-                // try_l2_headend must flip together when Phase 2
-                // reactivates the tail-call dispatch.
+                // Inline encap is intentional here (mirrors try_l2_headend
+                // below): converting this branch to a second
+                // bpf_tail_call(&headend_l2_progs, ...) site triggers a
+                // reproducible silent drop of redirected frames even
+                // though the BD-peer branch is dead code for the
+                // no-BD-entry tests (headend-l2 example with bd_id=0).
+                // Phase 2 investigates the kernel-level cause before
+                // flipping this site.
                 __u16 l2_frame_len = (__u16)pkt_len;
                 if (pe->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED)
                     return do_h_encaps_l2_red(ctx, pe, l2_frame_len);
@@ -78,16 +80,12 @@ static __noinline int try_l2_headend(
     if (bd_action >= 0)
         return bd_action;
 
-    // TODO(headend-l2-tailcall): integration test examples/headend-l2 fails
-    // with this tail-call dispatch even though bpf_xdp_adjust_head +
-    // bpf_redirect appear to succeed (ret=XDP_REDIRECT, stats counter
-    // increments). tcpdump on router2 shows no encapped traffic. Likely a
-    // bpf_tail_call + bpf_redirect interaction under generic XDP. Falling
-    // back to the original inline encap until the kernel-level cause is
-    // understood; the new headend_l2_progs map + slot_stats_headend_l2 +
-    // DISPATCH_HEADEND_L2 epilogue case all remain in place so Phase 2 can
-    // pick the dispatch flip back up cleanly.
-    if (l2_entry->mode == SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED)
-        return do_h_encaps_l2_red(ctx, l2_entry, (__u16)pkt_len);
-    return do_h_encaps_l2(ctx, l2_entry, (__u16)pkt_len);
+    // No-BD path tail-calls into headend_l2_progs[mode]. Built-in
+    // slots 3 (H.Encaps.L2) and 6 (H.Encaps.L2.Red) host the encap
+    // bodies. The BD-peer encap branch in process_bd_forwarding above
+    // stays inline — see the comment there for the regression that
+    // blocks the second tail-call site.
+    if (tailcall_ctx_write_headend(l2_entry, 0, DISPATCH_HEADEND_L2, l2_entry->mode) == 0)
+        bpf_tail_call(ctx, &headend_l2_progs, l2_entry->mode);
+    return XDP_DROP;
 }

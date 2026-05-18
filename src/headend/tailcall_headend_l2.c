@@ -8,13 +8,6 @@
 // tctx->headend (same union variant L3 uses) before tail-calling here,
 // so bd_id and SRH are already accessible from the target.
 
-// Note: these targets are defined and registered into headend_l2_progs
-// for the upcoming plugin SDK contract (Phase 2). The Phase 1 dispatcher
-// in src/dispatch/l2_headend.c does NOT yet bpf_tail_call into them
-// (regression on the bpf_tail_call + bpf_redirect path under generic
-// XDP — see TODO comment in try_l2_headend). They remain compiled and
-// loaded so the PROG_ARRAY layout is stable when Phase 2 reactivates
-// the tail-call dispatch.
 #define HEADEND_L2_BODY(fn_name)                                              \
     struct tailcall_ctx *tctx = tailcall_ctx_read();                          \
     if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);                                \
