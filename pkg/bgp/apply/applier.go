@@ -167,25 +167,23 @@ func (a *Applier) applyUnicast(ur *bgp.UnicastRoute, withdraw bool) {
 
 // buildHeadendEntry assembles an H.Encaps headend entry that encapsulates
 // matching traffic towards the remote PE's SRv6 service SID. The single
-// segment is the SID itself, and the outer destination equals it.
+// segment is the SID itself and the outer destination equals it; parsing
+// the SID once via ParseSegments keeps DstAddr and Segments[0]
+// byte-identical.
 func (a *Applier) buildHeadendEntry(sid string) (*bpf.HeadendEntry, error) {
 	src, err := a.encapSource()
 	if err != nil {
 		return nil, err
 	}
-	dst, err := bpf.ParseIPv6(sid)
-	if err != nil {
-		return nil, fmt.Errorf("parse SRv6 SID %q: %w", sid, err)
-	}
 	segments, numSegments, err := bpf.ParseSegments([]string{sid})
 	if err != nil {
-		return nil, fmt.Errorf("parse segments: %w", err)
+		return nil, fmt.Errorf("parse SRv6 SID %q: %w", sid, err)
 	}
 	return &bpf.HeadendEntry{
 		Mode:        uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
 		NumSegments: numSegments,
 		SrcAddr:     src,
-		DstAddr:     dst,
+		DstAddr:     segments[0],
 		Segments:    segments,
 	}, nil
 }

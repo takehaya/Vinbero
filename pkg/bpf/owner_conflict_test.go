@@ -317,3 +317,22 @@ func TestCreateRejectsEmptyOwner(t *testing.T) {
 		t.Errorf("CreateHeadendV6 with empty owner: got %v, want ErrEmptyOwner", err)
 	}
 }
+
+// TestDeleteAbsentEntryIsIdempotent pins that deleting an entry that was
+// never created is a no-op, not an error. The BGP applier relies on this
+// for safe double-withdraw handling: a withdraw for a route that was
+// never installed (e.g. filtered out, or replayed) must not surface as
+// a failure.
+func TestDeleteAbsentEntryIsIdempotent(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	if err := h.mapOps.DeleteSidFunction("fc00:abef::/128", OwnerRPC); err != nil {
+		t.Errorf("DeleteSidFunction of an absent prefix: %v", err)
+	}
+	if err := h.mapOps.DeleteHeadendV4("203.0.113.0/24", OwnerRPC); err != nil {
+		t.Errorf("DeleteHeadendV4 of an absent prefix: %v", err)
+	}
+	if err := h.mapOps.DeleteHeadendV6("2001:db8:abef::/48", OwnerRPC); err != nil {
+		t.Errorf("DeleteHeadendV6 of an absent prefix: %v", err)
+	}
+}
