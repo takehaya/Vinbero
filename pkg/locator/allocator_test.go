@@ -7,10 +7,7 @@ import (
 
 func TestAllocator_AutoIncremental(t *testing.T) {
 	loc := makeClassic48(t)
-	a, err := NewBitmapAllocator(&loc)
-	if err != nil {
-		t.Fatalf("NewBitmapAllocator: %v", err)
-	}
+	a := NewBitmapAllocator(&loc)
 	want := []uint32{0x10, 0x11, 0x12}
 	for _, w := range want {
 		got, err := a.Allocate(nil)
@@ -25,7 +22,7 @@ func TestAllocator_AutoIncremental(t *testing.T) {
 
 func TestAllocator_ManualThenAutoSkips(t *testing.T) {
 	loc := makeClassic48(t)
-	a, _ := NewBitmapAllocator(&loc)
+	a := NewBitmapAllocator(&loc)
 
 	manual := uint32(0x20)
 	got, err := a.Allocate(&manual)
@@ -48,7 +45,7 @@ func TestAllocator_ManualThenAutoSkips(t *testing.T) {
 
 func TestAllocator_ConflictRejected(t *testing.T) {
 	loc := makeClassic48(t)
-	a, _ := NewBitmapAllocator(&loc)
+	a := NewBitmapAllocator(&loc)
 	v := uint32(0x42)
 	if _, err := a.Allocate(&v); err != nil {
 		t.Fatalf("first manual: %v", err)
@@ -60,7 +57,7 @@ func TestAllocator_ConflictRejected(t *testing.T) {
 
 func TestAllocator_ReleaseLetsReuse(t *testing.T) {
 	loc := makeClassic48(t)
-	a, _ := NewBitmapAllocator(&loc)
+	a := NewBitmapAllocator(&loc)
 	v := uint32(0x123)
 	if _, err := a.Allocate(&v); err != nil {
 		t.Fatalf("alloc: %v", err)
@@ -79,7 +76,7 @@ func TestAllocator_AutoExhaustion(t *testing.T) {
 	loc := makeClassic48(t)
 	loc.FunctionAutoStart = 0
 	loc.FunctionAutoEnd = 1
-	a, _ := NewBitmapAllocator(&loc)
+	a := NewBitmapAllocator(&loc)
 	if _, err := a.Allocate(nil); err != nil {
 		t.Fatalf("alloc 1: %v", err)
 	}
@@ -93,7 +90,7 @@ func TestAllocator_AutoExhaustion(t *testing.T) {
 
 func TestAllocator_ReleaseUnallocatedIsNoOp(t *testing.T) {
 	loc := makeClassic48(t)
-	a, _ := NewBitmapAllocator(&loc)
+	a := NewBitmapAllocator(&loc)
 	a.Release(0x55) // never allocated; must not panic
 	if a.InUse(0x55) {
 		t.Errorf("InUse after spurious release")
@@ -102,9 +99,54 @@ func TestAllocator_ReleaseUnallocatedIsNoOp(t *testing.T) {
 
 func TestAllocator_ManualOutsideFunctionLenRejected(t *testing.T) {
 	loc := makeClassic48(t)
-	a, _ := NewBitmapAllocator(&loc)
+	a := NewBitmapAllocator(&loc)
 	tooBig := uint32(0x10000) // function_len=16
 	if _, err := a.Allocate(&tooBig); !errors.Is(err, ErrFunctionOutsideAutoRange) {
 		t.Errorf("oversize manual: got %v, want ErrFunctionOutsideAutoRange", err)
+	}
+}
+
+// TestAllocator_SingleSlotExhaustion pins the edge case where the auto
+// range has exactly one slot. The word-scan path must succeed once and
+// fail the second time without an infinite loop.
+func TestAllocator_SingleSlotExhaustion(t *testing.T) {
+	loc := makeClassic48(t)
+	loc.FunctionAutoStart = 0x80
+	loc.FunctionAutoEnd = 0x80
+	a := NewBitmapAllocator(&loc)
+	got, err := a.Allocate(nil)
+	if err != nil {
+		t.Fatalf("first alloc: %v", err)
+	}
+	if got != 0x80 {
+		t.Errorf("first alloc: got %#x, want 0x80", got)
+	}
+	if _, err := a.Allocate(nil); !errors.Is(err, ErrPoolExhausted) {
+		t.Errorf("second alloc: got %v, want ErrPoolExhausted", err)
+	}
+}
+
+// TestAllocator_WordBoundaryWalk verifies the word-scan optimization walks
+// across uint64 word boundaries correctly: fill the entire first word,
+// then auto-allocate -- the result must land in the next word, not loop
+// forever on the busy one.
+func TestAllocator_WordBoundaryWalk(t *testing.T) {
+	loc := makeClassic48(t)
+	loc.FunctionAutoStart = 0
+	loc.FunctionAutoEnd = 200
+	a := NewBitmapAllocator(&loc)
+	// Pre-allocate manually so positions 0..63 are taken.
+	for i := range uint32(64) {
+		v := i
+		if _, err := a.Allocate(&v); err != nil {
+			t.Fatalf("pre-alloc %d: %v", i, err)
+		}
+	}
+	got, err := a.Allocate(nil)
+	if err != nil {
+		t.Fatalf("auto after word fill: %v", err)
+	}
+	if got != 64 {
+		t.Errorf("auto after word fill: got %d, want 64", got)
 	}
 }

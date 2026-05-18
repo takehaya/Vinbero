@@ -195,9 +195,11 @@ func (x *Locator) GetFunctionAutoEnd() uint32 {
 
 // LocatorRef points at a locator by name and optionally pins a function
 // value. When function is unset, the server auto-allocates the next
-// available slot from the locator's pool. When set, the value must fall
-// inside [function_auto_start, function_auto_end] and must not be in
-// use.
+// available slot from [function_auto_start, function_auto_end]. When
+// set, any value inside the function_len bit width is accepted -- manual
+// allocations may sit outside the auto-allocator range so operator-
+// reserved low / high slots can still be claimed explicitly. Conflicts
+// (value already in use) surface as a per-entry error.
 type LocatorRef struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -361,8 +363,11 @@ type LocatorDeleteRequest struct {
 	unknownFields protoimpl.UnknownFields
 
 	Names []string `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"`
-	// Force=true deletes a locator even while SID functions reference it,
-	// cascading by tearing down every SID built from the locator.
+	// Force=true drops the locator from the manager even while SID
+	// functions reference it. The operator is responsible for tearing
+	// down those upstream SIDs first -- the server does not cascade.
+	// Without force, the call returns an error listing the dangling
+	// bindings so the caller knows what to clean up.
 	Force bool `protobuf:"varint,2,opt,name=force,proto3" json:"force,omitempty"`
 }
 

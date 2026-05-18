@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 
 	"connectrpc.com/connect"
@@ -99,6 +100,23 @@ func protoToLocator(in *v1.Locator) (locator.Locator, error) {
 	prefix, err := netip.ParsePrefix(in.GetPrefix())
 	if err != nil {
 		return locator.Locator{}, err
+	}
+	// proto fields are uint32 but the locator struct stores them as uint8
+	// (max 128 bits in an IPv6 SID, plus a small safety margin). Reject
+	// values that would silently truncate so a typo like block_len=384
+	// cannot wrap to a valid-looking 128.
+	for _, f := range []struct {
+		name string
+		v    uint32
+	}{
+		{"block_len", in.GetBlockLen()},
+		{"node_len", in.GetNodeLen()},
+		{"function_len", in.GetFunctionLen()},
+		{"argument_len", in.GetArgumentLen()},
+	} {
+		if f.v > 255 {
+			return locator.Locator{}, fmt.Errorf("%s=%d exceeds uint8 range", f.name, f.v)
+		}
 	}
 	return locator.Locator{
 		Name:              in.GetName(),

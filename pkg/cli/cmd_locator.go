@@ -10,6 +10,14 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+func resolveLocatorBehavior(s string) (v1.LocatorBehaviorMode, error) {
+	return resolveProtoEnum[v1.LocatorBehaviorMode](s, "LOCATOR_BEHAVIOR_MODE_", v1.LocatorBehaviorMode_value)
+}
+
+func formatLocatorBehavior(b v1.LocatorBehaviorMode) string {
+	return formatProtoEnum(b, "LOCATOR_BEHAVIOR_MODE_")
+}
+
 func locatorCommand() *cli.Command {
 	return &cli.Command{
 		Name:    "locator",
@@ -31,7 +39,7 @@ func locatorCommand() *cli.Command {
 					&cli.UintFlag{Name: "function-auto-end", Value: 0xFFFE, Usage: "Auto-allocator upper bound"},
 				},
 				Action: func(c *cli.Context) error {
-					behavior, err := parseLocatorBehavior(c.String("behavior"))
+					behavior, err := resolveLocatorBehavior(c.String("behavior"))
 					if err != nil {
 						return err
 					}
@@ -98,7 +106,7 @@ func locatorCommand() *cli.Command {
 					var rows [][]string
 					for _, l := range resp.Msg.Locators {
 						rows = append(rows, []string{
-							l.Name, l.Prefix, locatorBehaviorString(l.Behavior),
+							l.Name, l.Prefix, formatLocatorBehavior(l.Behavior),
 							fmt.Sprintf("%d", l.BlockLen),
 							fmt.Sprintf("%d", l.NodeLen),
 							fmt.Sprintf("%d", l.FunctionLen),
@@ -129,7 +137,7 @@ func locatorCommand() *cli.Command {
 					l := resp.Msg.Locator
 					fmt.Printf("Name:           %s\n", l.Name)
 					fmt.Printf("Prefix:         %s\n", l.Prefix)
-					fmt.Printf("Behavior:       %s\n", locatorBehaviorString(l.Behavior))
+					fmt.Printf("Behavior:       %s\n", formatLocatorBehavior(l.Behavior))
 					fmt.Printf("Block / Node:   %d / %d\n", l.BlockLen, l.NodeLen)
 					fmt.Printf("Func / Arg:     %d / %d\n", l.FunctionLen, l.ArgumentLen)
 					fmt.Printf("Auto range:     0x%x .. 0x%x\n", l.FunctionAutoStart, l.FunctionAutoEnd)
@@ -140,25 +148,3 @@ func locatorCommand() *cli.Command {
 	}
 }
 
-func parseLocatorBehavior(s string) (v1.LocatorBehaviorMode, error) {
-	switch strings.ToLower(s) {
-	case "classic":
-		return v1.LocatorBehaviorMode_LOCATOR_BEHAVIOR_MODE_CLASSIC, nil
-	case "usid":
-		return v1.LocatorBehaviorMode_LOCATOR_BEHAVIOR_MODE_USID, nil
-	default:
-		return v1.LocatorBehaviorMode_LOCATOR_BEHAVIOR_MODE_UNSPECIFIED,
-			fmt.Errorf("unknown behavior %q (expected classic | usid)", s)
-	}
-}
-
-func locatorBehaviorString(b v1.LocatorBehaviorMode) string {
-	switch b {
-	case v1.LocatorBehaviorMode_LOCATOR_BEHAVIOR_MODE_CLASSIC:
-		return "classic"
-	case v1.LocatorBehaviorMode_LOCATOR_BEHAVIOR_MODE_USID:
-		return "usid"
-	default:
-		return "?"
-	}
-}

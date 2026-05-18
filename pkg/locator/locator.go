@@ -70,6 +70,13 @@ var (
 	ErrFunctionOutOfRange = errors.New("locator: function value out of range")
 )
 
+// maxFunctionLenBits caps how large a function field the bitmap allocator
+// will materialize. function_len=24 backs a 2 MiB bitmap; beyond that the
+// memory cost crosses into "needs sparse storage" territory and is
+// intentionally rejected so an operator-side typo cannot accidentally
+// commit hundreds of megabytes.
+const maxFunctionLenBits = 24
+
 // Validate checks structural invariants before the locator is registered.
 // It does not check uniqueness or runtime conflicts -- the manager handles
 // those.
@@ -91,20 +98,22 @@ func (l *Locator) Validate() error {
 	if l.FunctionLen == 0 {
 		return fmt.Errorf("%w: function_len must be > 0", ErrInvalidLocator)
 	}
-	if l.FunctionLen > 32 {
-		// Beyond 32 bits the API surface (uint32 function) cannot
-		// represent every possible value; carve out a future extension
-		// rather than silently truncate here.
-		return fmt.Errorf("%w: function_len > 32 is not supported (API uses uint32 functions)", ErrInvalidLocator)
+	if l.FunctionLen > maxFunctionLenBits {
+		return fmt.Errorf("%w: function_len > %d is not supported (bitmap memory cost)",
+			ErrInvalidLocator, maxFunctionLenBits)
+	}
+	max := uint32((uint64(1) << l.FunctionLen) - 1)
+	if l.FunctionAutoStart > max {
+		return fmt.Errorf("%w: function_auto_start (%d) exceeds function_len max (%d)",
+			ErrInvalidLocator, l.FunctionAutoStart, max)
+	}
+	if l.FunctionAutoEnd > max {
+		return fmt.Errorf("%w: function_auto_end (%d) exceeds function_len max (%d)",
+			ErrInvalidLocator, l.FunctionAutoEnd, max)
 	}
 	if l.FunctionAutoEnd < l.FunctionAutoStart {
 		return fmt.Errorf("%w: function_auto_end (%d) < function_auto_start (%d)",
 			ErrInvalidLocator, l.FunctionAutoEnd, l.FunctionAutoStart)
-	}
-	max := uint32((uint64(1) << l.FunctionLen) - 1)
-	if l.FunctionAutoEnd > max {
-		return fmt.Errorf("%w: function_auto_end (%d) exceeds function_len max (%d)",
-			ErrInvalidLocator, l.FunctionAutoEnd, max)
 	}
 	switch l.Behavior {
 	case BehaviorClassic, BehaviorUSID:

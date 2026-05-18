@@ -3,6 +3,7 @@ package locator
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 	"sync"
 )
 
@@ -51,11 +52,11 @@ type bitmapAllocator struct {
 	autoNext  uint32 // hint for the next auto search; rolls forward to avoid scanning from 0 every time
 }
 
-// NewBitmapAllocator returns an allocator preconfigured for loc.
-func NewBitmapAllocator(loc *Locator) (FunctionAllocator, error) {
-	if err := loc.Validate(); err != nil {
-		return nil, err
-	}
+// NewBitmapAllocator returns an allocator preconfigured for loc. The
+// caller must have already passed loc through Locator.Validate (Manager.Add
+// does so before reaching here); the constructor itself does not
+// re-validate to avoid double-running the same checks on every Add.
+func NewBitmapAllocator(loc *Locator) FunctionAllocator {
 	max := loc.MaxFunction()
 	words := (uint64(max) + 64) / 64 // round up so the highest bit fits
 	return &bitmapAllocator{
@@ -64,7 +65,7 @@ func NewBitmapAllocator(loc *Locator) (FunctionAllocator, error) {
 		autoStart: loc.FunctionAutoStart,
 		autoEnd:   loc.FunctionAutoEnd,
 		autoNext:  loc.FunctionAutoStart,
-	}, nil
+	}
 }
 
 func (a *bitmapAllocator) Allocate(requested *uint32) (uint32, error) {
@@ -81,22 +82,59 @@ func (a *bitmapAllocator) Allocate(requested *uint32) (uint32, error) {
 		a.setLocked(f)
 		return f, nil
 	}
-	// Auto: linear probe forward from autoNext, wrapping once.
-	start := a.autoNext
-	for offset := uint64(0); offset <= uint64(a.autoEnd-a.autoStart); offset++ {
-		cand := a.autoStart + uint32((uint64(start-a.autoStart)+offset)%(uint64(a.autoEnd-a.autoStart)+1))
-		if !a.isSetLocked(cand) {
+	// Auto: scan [autoNext, autoEnd] then [autoStart, autoNext-1] using
+	// bits.TrailingZeros64 to skip 64 slots per word. A near-full pool
+	// (FunctionLen=24, 99% occupied) walks ~256K words instead of ~16M
+	// bits.
+	if cand, ok := a.autoFindLocked(a.autoNext, a.autoEnd); ok {
+		a.setLocked(cand)
+		a.advanceAutoNextLocked(cand)
+		return cand, nil
+	}
+	if a.autoNext > a.autoStart {
+		if cand, ok := a.autoFindLocked(a.autoStart, a.autoNext-1); ok {
 			a.setLocked(cand)
-			// Advance the hint so the next auto-alloc does not retry this slot.
-			if cand == a.autoEnd {
-				a.autoNext = a.autoStart
-			} else {
-				a.autoNext = cand + 1
-			}
+			a.advanceAutoNextLocked(cand)
 			return cand, nil
 		}
 	}
 	return 0, ErrPoolExhausted
+}
+
+// autoFindLocked returns the lowest free function in [from, to] (inclusive),
+// or ok=false if every slot in the range is allocated. Word-aligned for
+// O(slots/64) on the worst case.
+func (a *bitmapAllocator) autoFindLocked(from, to uint32) (uint32, bool) {
+	if from > to {
+		return 0, false
+	}
+	fromWord := from / 64
+	fromBit := from % 64
+	toWord := to / 64
+	toBit := to % 64
+	for w := fromWord; w <= toWord; w++ {
+		free := ^a.bits[w]
+		if w == fromWord && fromBit > 0 {
+			free &^= (uint64(1) << fromBit) - 1
+		}
+		if w == toWord && toBit < 63 {
+			free &= (uint64(1) << (toBit + 1)) - 1
+		}
+		if free == 0 {
+			continue
+		}
+		bitOffset := uint32(bits.TrailingZeros64(free))
+		return w*64 + bitOffset, true
+	}
+	return 0, false
+}
+
+func (a *bitmapAllocator) advanceAutoNextLocked(cand uint32) {
+	if cand == a.autoEnd {
+		a.autoNext = a.autoStart
+	} else {
+		a.autoNext = cand + 1
+	}
 }
 
 func (a *bitmapAllocator) Release(function uint32) {

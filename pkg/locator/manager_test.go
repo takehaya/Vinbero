@@ -109,3 +109,44 @@ func TestManager_ReleaseUnknownIsNoOp(t *testing.T) {
 	m := NewManager()
 	m.ReleaseSID(netip.MustParseAddr("fd00:dead::1")) // must not panic
 }
+
+// TestManager_DuplicatePrefixRejected pins the contract that two
+// locators cannot share a prefix even under different names -- the
+// resulting SID byte representations would collide.
+func TestManager_DuplicatePrefixRejected(t *testing.T) {
+	m := NewManager()
+	loc := makeClassic48(t)
+	if err := m.Add(&loc); err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+	dup := loc
+	dup.Name = "LOC2"
+	if err := m.Add(&dup); !errors.Is(err, ErrLocatorPrefixInUse) {
+		t.Errorf("duplicate prefix: got %v, want ErrLocatorPrefixInUse", err)
+	}
+}
+
+// TestValidate_FunctionLenAboveCap pins the bitmap memory cap: function_len
+// values that would back a >2 MiB bitmap are rejected so an operator typo
+// cannot silently commit hundreds of megabytes.
+func TestValidate_FunctionLenAboveCap(t *testing.T) {
+	loc := makeClassic48(t)
+	loc.FunctionLen = maxFunctionLenBits + 1
+	loc.ArgumentLen = uint8(128 - uint16(loc.BlockLen) - uint16(loc.NodeLen) - uint16(loc.FunctionLen))
+	if err := loc.Validate(); !errors.Is(err, ErrInvalidLocator) {
+		t.Errorf("function_len above cap: got %v, want ErrInvalidLocator", err)
+	}
+}
+
+// TestValidate_AutoStartAboveMax catches a typo where function_auto_start
+// exceeds the function_len max. Previously this was only caught when
+// function_auto_end < function_auto_start, which depended on what
+// function_auto_end happened to be.
+func TestValidate_AutoStartAboveMax(t *testing.T) {
+	loc := makeClassic48(t)
+	loc.FunctionAutoStart = 0xFFFF + 1
+	loc.FunctionAutoEnd = 0xFFFF + 1
+	if err := loc.Validate(); !errors.Is(err, ErrInvalidLocator) {
+		t.Errorf("auto_start above max: got %v, want ErrInvalidLocator", err)
+	}
+}

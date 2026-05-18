@@ -15,6 +15,11 @@ type Binding struct {
 	Function    uint32
 }
 
+// ListAll returns every recorded sid. Reserved for Phase 2 persistence
+// recovery (rebuild allocator bitmaps from the materialized bindings
+// after daemon restart). Implementation lives on the concrete type so
+// the interface stays minimal; callers go through *Manager.
+
 // BindingTable is the lookup surface used by the SID delete path. Safe
 // for concurrent use.
 type BindingTable interface {

@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf/btf"
-	"net/netip"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
@@ -65,71 +66,90 @@ func (s *SidFunctionServer) SidFunctionCreate(
 	}
 
 	for _, sidFunc := range req.Msg.SidFunctions {
-		// locator_ref materialization happens before protoToEntry so the
-		// generated SID becomes the trigger_prefix used by the rest of
-		// the pipeline. The manager's Binding survives the request so
-		// SidFunctionDelete can return the function to the locator pool.
-		if err := s.resolveLocatorRef(sidFunc); err != nil {
+		if err := s.createOneSidFunction(sidFunc); err != nil {
+			// A connect.Error means the request itself is malformed at
+			// the server-config level (e.g. locator_ref given but
+			// LocatorService not wired up) and per-item recovery is not
+			// meaningful -- bubble up so the client sees the precise
+			// status code instead of a per-entry error string.
+			var cerr *connect.Error
+			if errors.As(err, &cerr) {
+				return nil, cerr
+			}
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: sidFunc.GetTriggerPrefix(),
 				Reason:        err.Error(),
 			})
 			continue
 		}
-
-		entry, aux, err := s.protoToEntry(sidFunc)
-		if err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: sidFunc.TriggerPrefix,
-				Reason:        err.Error(),
-			})
-			s.rollbackLocatorRef(sidFunc)
-			continue
-		}
-
-		// plugin_aux_index path: aux already owned by the PluginAux RPC
-		// lifecycle. CreateSidFunctionWithAuxIndex verifies the owner tag
-		// atomically with the bind so a racing Free cannot reassign the idx.
-		// SID functions live in the endpoint LPM map, so the owner tag is
-		// always derived against MapTypeEndpoint. Headend plugins (if they
-		// gain a separate plugin_aux_index path in the future) will need
-		// their own bind helper with a different map_type.
-		var createErr error
-		if sidFunc.PluginAuxIndex != 0 {
-			owner := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, uint32(sidFunc.Action))
-			createErr = s.mapOps.CreateSidFunctionWithAuxIndex(sidFunc.TriggerPrefix, entry, owner, bpf.OwnerRPC)
-		} else {
-			createErr = s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry, aux, bpf.OwnerRPC)
-		}
-		if createErr != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: sidFunc.TriggerPrefix,
-				Reason:        createErr.Error(),
-			})
-			s.rollbackLocatorRef(sidFunc)
-			continue
-		}
-
-		// End.B6 policy is stored in sid_aux_map (b6_policy variant), no separate map needed
-
 		resp.Created = append(resp.Created, sidFunc)
 	}
 
 	return connect.NewResponse(resp), nil
 }
 
+// createOneSidFunction owns the per-entry lifecycle of a SidFunctionCreate
+// request. The defer-based rollback ensures any locator function we
+// claimed at the top is returned to the pool on any downstream failure,
+// removing the need for hand-mirrored rollback calls at each error path.
+func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error {
+	if err := s.resolveLocatorRef(sidFunc); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			s.rollbackLocatorRef(sidFunc)
+		}
+	}()
+
+	entry, aux, err := s.protoToEntry(sidFunc)
+	if err != nil {
+		return err
+	}
+
+	// plugin_aux_index path: aux already owned by the PluginAux RPC
+	// lifecycle. CreateSidFunctionWithAuxIndex verifies the owner tag
+	// atomically with the bind so a racing Free cannot reassign the idx.
+	// SID functions live in the endpoint LPM map, so the owner tag is
+	// always derived against MapTypeEndpoint. Headend plugins (if they
+	// gain a separate plugin_aux_index path in the future) will need
+	// their own bind helper with a different map_type.
+	if sidFunc.PluginAuxIndex != 0 {
+		owner := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, uint32(sidFunc.Action))
+		if err := s.mapOps.CreateSidFunctionWithAuxIndex(sidFunc.TriggerPrefix, entry, owner, bpf.OwnerRPC); err != nil {
+			return err
+		}
+	} else {
+		if err := s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry, aux, bpf.OwnerRPC); err != nil {
+			return err
+		}
+	}
+	committed = true
+	return nil
+}
+
 // resolveLocatorRef materializes a SID prefix from sidFunc.LocatorRef.
-// When the request did not include a locator_ref, the function leaves
-// the caller's trigger_prefix untouched. The allocated binding is held
-// inside the locator manager; on any downstream failure the caller must
-// invoke rollbackLocatorRef so the function value returns to the pool.
+// When the request did not include a locator_ref the function still
+// validates that trigger_prefix is set; an entirely empty SidFunction
+// is rejected here so the missing-prefix error is reported with locator
+// context.
+//
+// Returning a connect.Error signals a server-config problem the caller
+// should bubble up as the RPC status code (FailedPrecondition for an
+// unwired LocatorService); plain errors are per-entry validation
+// failures.
 func (s *SidFunctionServer) resolveLocatorRef(sidFunc *v1.SidFunction) error {
 	ref := sidFunc.GetLocatorRef()
 	if ref == nil {
+		if sidFunc.GetTriggerPrefix() == "" {
+			return fmt.Errorf("either trigger_prefix or locator_ref must be set")
+		}
 		return nil
 	}
 	if s.locatorMgr == nil {
-		return fmt.Errorf("locator_ref requires LocatorService to be wired up")
+		return connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("locator_ref requires LocatorService to be wired up"))
 	}
 	if sidFunc.GetTriggerPrefix() != "" {
 		return fmt.Errorf("locator_ref and trigger_prefix are mutually exclusive")
