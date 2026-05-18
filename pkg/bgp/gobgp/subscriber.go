@@ -52,23 +52,22 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 }
 
 // pathToRouteEvent converts a gobgp received Path into a Vinbero
-// RouteEvent. Phase 1d-b fills in only family / prefix / withdraw; the
-// SRv6 service SID and RD/RT decode lands in Phase 1d-c.
+// RouteEvent. VPN families are fully decoded (RD / prefix / SRv6 SID /
+// route targets / next hop); IPv6 unicast carries prefix and next hop.
 func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 	fam, ok := apiFamilyToVinbero(p.Family)
 	if !ok {
 		return bgp.RouteEvent{}, false
 	}
-	var prefix string
-	if p.Nlri != nil {
-		prefix = p.Nlri.String()
-	}
 	ev := bgp.RouteEvent{Family: fam, IsWithdraw: p.Withdrawal}
 	switch fam {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
-		ev.VPN = &bgp.VPNRoute{Family: fam, Prefix: prefix}
+		ev.VPN = decodeVPNRoute(p, fam)
 	case bgp.FamilyIPv6Unicast:
-		ev.Unicast = &bgp.UnicastRoute{Prefix: prefix}
+		ev.Unicast = &bgp.UnicastRoute{
+			Prefix:  nlriString(p.Nlri),
+			NextHop: decodeNextHop(p.Attrs),
+		}
 	}
 	return ev, true
 }
