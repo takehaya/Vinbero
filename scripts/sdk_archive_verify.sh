@@ -17,6 +17,7 @@ required=(
   "$WORK/prefix/include/vinbero/maps.h"
   "$WORK/prefix/include/vinbero/types.h"
   "$WORK/prefix/include/vinbero/helpers.h"
+  "$WORK/prefix/include/vinbero/headend_l2_helpers.h"
   "$WORK/prefix/include/vinbero/Makefile.plugin"
   "$WORK/prefix/include/core/xdp_tailcall.h"
   "$WORK/prefix/include/core/xdp_prog.h"
@@ -29,6 +30,10 @@ required=(
   "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter/plugin.c"
   "$WORK/prefix/share/vinbero-sdk/examples/simple-acl/Makefile"
   "$WORK/prefix/share/vinbero-sdk/examples/simple-acl/plugin.c"
+  "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter-l2/Makefile"
+  "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter-l2/plugin.c"
+  "$WORK/prefix/share/vinbero-sdk/examples/plugin-custom-sh/Makefile"
+  "$WORK/prefix/share/vinbero-sdk/examples/plugin-custom-sh/plugin.c"
 )
 for f in "${required[@]}"; do
   test -f "$f" || { echo "missing: $f" >&2; exit 1; }
@@ -38,7 +43,7 @@ done
 #    immediately if a #include path is wrong or a header is missing.
 #    MAKEFILE_PLUGIN points at the template shipped inside the tarball
 #    so the in-tree relative include (../../c/Makefile.plugin) is bypassed.
-for ex in plugin-counter simple-acl; do
+for ex in plugin-counter simple-acl plugin-counter-l2 plugin-custom-sh; do
   exdir="$WORK/prefix/share/vinbero-sdk/examples/$ex"
   echo "[verify] building $ex"
   make -C "$exdir" \
@@ -63,5 +68,11 @@ fi
 "$VBCTL" plugin validate \
   --prog "$WORK/prefix/share/vinbero-sdk/examples/simple-acl/plugin.o" \
   --program simple_acl
+"$VBCTL" plugin validate \
+  --prog "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter-l2/plugin.o" \
+  --program plugin_counter_l2
+"$VBCTL" plugin validate \
+  --prog "$WORK/prefix/share/vinbero-sdk/examples/plugin-custom-sh/plugin.o" \
+  --program plugin_custom_sh
 
 echo "[verify] OK"

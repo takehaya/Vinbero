@@ -29,6 +29,10 @@ func TestValidatePluginSlot(t *testing.T) {
 		{"endpoint_above_max", bpf.MapTypeEndpoint, bpf.EndpointProgMax, true},
 		{"headend_v4_valid", bpf.MapTypeHeadendV4, bpf.HeadendPluginBase, false},
 		{"headend_v6_below_base", bpf.MapTypeHeadendV6, bpf.HeadendPluginBase - 1, true},
+		{"headend_l2_valid_low", bpf.MapTypeHeadendL2, bpf.HeadendPluginBase, false},
+		{"headend_l2_valid_high", bpf.MapTypeHeadendL2, bpf.HeadendProgMax - 1, false},
+		{"headend_l2_below_base", bpf.MapTypeHeadendL2, bpf.HeadendPluginBase - 1, true},
+		{"headend_l2_above_max", bpf.MapTypeHeadendL2, bpf.HeadendProgMax, true},
 		{"unknown_map_type", "bogus", 32, true},
 	}
 	for _, c := range cases {

@@ -15,6 +15,7 @@ var SlotStatsMapTypes = []string{
 	MapTypeEndpoint,
 	MapTypeHeadendV4,
 	MapTypeHeadendV6,
+	MapTypeHeadendL2,
 }
 
 // ValidateSlotStatsMapType returns an error if mapType is not one of

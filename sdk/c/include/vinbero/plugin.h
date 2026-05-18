@@ -38,11 +38,17 @@
  *       verifier-helper macros, shared map declarations.
  *   v2: adds VINBERO_PLUGIN(name) entry macro; tailcall_epilogue gains
  *       warn_unused_result.
+ *   v3: opens headend_l2 plugin slot. headend_l2_progs is now a valid
+ *       bpf_tail_call target (ValidTailCallMaps) and --type=headend_l2
+ *       is accepted by the CLI / PluginService. Adds
+ *       vinbero/headend_l2_helpers.h with VLAN / ESI / DF observation
+ *       helpers; tctx->headend carries the chosen encap target for L2
+ *       dispatch (existing union variant, re-used).
  *
  * Version bumps are additive. Plugins compiled against an older SDK
  * remain valid against newer vinbero.
  */
-#define VINBERO_SDK_VERSION 2
+#define VINBERO_SDK_VERSION 3
 
 /*
  * VINBERO_PLUGIN(name) — recommended entry macro for plugin authors.

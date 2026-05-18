@@ -194,7 +194,7 @@ sdk-archive: ## Build SDK tarball into out/
 	@install -m 644 src/core/srv6.h $(SDK_STAGE)/include/core/
 	@install -m 644 sdk/README.md $(SDK_STAGE)/share/vinbero-sdk/
 	@install -m 644 LICENSE $(SDK_STAGE)/share/vinbero-sdk/
-	@for d in sdk/examples/plugin-counter sdk/examples/simple-acl; do \
+	@for d in sdk/examples/plugin-counter sdk/examples/simple-acl sdk/examples/plugin-counter-l2 sdk/examples/plugin-custom-sh; do \
 		name=$$(basename $$d); \
 		install -d $(SDK_STAGE)/share/vinbero-sdk/examples/$$name; \
 		install -m 644 $$d/Makefile $$d/plugin.c $$d/README.md \
