@@ -10,12 +10,19 @@
 //
 // FDB src learning, broadcast/multicast BUM meta, and missing-FDB BUM meta
 // are all handled here so the caller stays simple. Keeping the bpf_tail_call
-// out of this helper is intentional — having a second lexical tail_call
-// site to headend_l2_progs (e.g. one here AND one in try_l2_headend) makes
-// the kernel silently drop the redirected frames, even when this BD-peer
-// branch is dead code for the caller's traffic. Root cause is still under
-// investigation (Phase 2); the workaround is to keep tail_call as a single
-// inline instruction in try_l2_headend below.
+// out of this helper is intentional and enforced as an invariant: any second
+// lexical bpf_tail_call site into headend_l2_progs in the same translation
+// unit causes the kernel to silently drop the redirected frame on the first
+// callsite, even when that branch is dead code at runtime.
+//
+// Repro (kernel 6.x, observed 2026-05): two lexical bpf_tail_call sites in
+// xdp_main.c targeting the same PROG_ARRAY (headend_l2_progs) cause the
+// first site's XDP_REDIRECT (set by the target program's bpf_redirect()
+// call) to be silently dropped. The xdp:xdp_redirect{_err,_map_err}
+// tracepoints do not fire. Collapsing all callers to a single inline
+// bpf_tail_call instruction in try_l2_headend below restores delivery.
+// Root cause is not yet pinned down — verifier register-state merge / JIT
+// dispatch / per-CPU bpf_redirect_info aliasing are all suspects.
 static __always_inline struct headend_entry *try_bd_peer_lookup(
     struct xdp_md *ctx,
     struct headend_entry *l2_entry,

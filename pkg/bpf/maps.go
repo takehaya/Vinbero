@@ -1844,11 +1844,7 @@ func (m *MapOperations) GetSharedReadWriteMaps() map[string]*ebpf.Map {
 		MapNameSidEndpointProgs: m.objs.SidEndpointProgs,
 		MapNameHeadendV4Progs:   m.objs.HeadendV4Progs,
 		MapNameHeadendV6Progs:   m.objs.HeadendV6Progs,
-		// headend_l2_progs is intentionally NOT exposed here in Phase 1:
-		// the validator's tail-call whitelist (ValidTailCallMaps) does
-		// not include it yet, so external plugins cannot dispatch into
-		// L2 slots. Phase 2 of the L2 plugin rollout adds it together
-		// with MapTypeHeadendL2 / MapNameHeadendL2Progs constants.
+		MapNameHeadendL2Progs:   m.objs.HeadendL2Progs,
 	}
 }
 
@@ -1893,6 +1889,7 @@ func SharedReadWriteMapNames() []string {
 		MapNameSidEndpointProgs,
 		MapNameHeadendV4Progs,
 		MapNameHeadendV6Progs,
+		MapNameHeadendL2Progs,
 	}
 }
 
@@ -1921,6 +1918,7 @@ const (
 	MapTypeEndpoint  = "endpoint"
 	MapTypeHeadendV4 = "headend_v4"
 	MapTypeHeadendV6 = "headend_v6"
+	MapTypeHeadendL2 = "headend_l2"
 )
 
 // BPF map names for vinbero-managed PROG_ARRAYs. Referenced by the shared-map
@@ -1929,6 +1927,7 @@ const (
 	MapNameSidEndpointProgs = "sid_endpoint_progs"
 	MapNameHeadendV4Progs   = "headend_v4_progs"
 	MapNameHeadendV6Progs   = "headend_v6_progs"
+	MapNameHeadendL2Progs   = "headend_l2_progs"
 )
 
 var (
@@ -1944,10 +1943,10 @@ func PluginSlotRange(mapType string) (base, max uint32, err error) {
 	switch mapType {
 	case MapTypeEndpoint:
 		return EndpointPluginBase, EndpointProgMax, nil
-	case MapTypeHeadendV4, MapTypeHeadendV6:
+	case MapTypeHeadendV4, MapTypeHeadendV6, MapTypeHeadendL2:
 		return HeadendPluginBase, HeadendProgMax, nil
 	default:
-		return 0, 0, fmt.Errorf("unknown map_type %q (expected endpoint / headend_v4 / headend_v6)", mapType)
+		return 0, 0, fmt.Errorf("unknown map_type %q (expected endpoint / headend_v4 / headend_v6 / headend_l2)", mapType)
 	}
 }
 
@@ -2001,6 +2000,8 @@ func (m *MapOperations) resolvePluginMap(mapType string) (*ebpf.Map, uint32, uin
 		return m.objs.HeadendV4Progs, HeadendPluginBase, HeadendProgMax, nil
 	case MapTypeHeadendV6:
 		return m.objs.HeadendV6Progs, HeadendPluginBase, HeadendProgMax, nil
+	case MapTypeHeadendL2:
+		return m.objs.HeadendL2Progs, HeadendPluginBase, HeadendProgMax, nil
 	default:
 		return nil, 0, 0, fmt.Errorf("unknown plugin map type: %s", mapType)
 	}
