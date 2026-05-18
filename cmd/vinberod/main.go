@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/logger"
 	"github.com/takehaya/vinbero/pkg/server"
@@ -105,20 +106,70 @@ func run(cliCtx *cli.Context) error {
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
+	// Defer the RPC server shutdown right after StartAsync so an early
+	// return below (e.g. BGP start failure) tears it down instead of
+	// leaking it. The normal path falls through to the same defer.
+	defer func() {
+		if err := shutdown(srv, lg); err != nil {
+			lg.Error("server shutdown error", zap.Error(err))
+		}
+	}()
 
-	bgpClient := bgp.NewClient(lg, bgp.WithEnabled(cliCtx.Bool("bgp-enabled")))
-	defer bgpClient.Stop()
-	if err := bgpClient.Start(ctx); err != nil {
-		return fmt.Errorf("start BGP client: %w", err)
+	if cliCtx.Bool("bgp-enabled") {
+		bgpSession := gobgp.NewSession(lg)
+		// Registered before the Start attempt so a partial failure
+		// (global up, peers half-added) still gets torn down.
+		defer func() {
+			if err := bgpSession.Stop(context.Background()); err != nil {
+				lg.Warn("BGP session stop failed", zap.Error(err))
+			}
+		}()
+		if err := startBGPSession(ctx, bgpSession, cfg.BGP); err != nil {
+			return fmt.Errorf("start BGP: %w", err)
+		}
 	}
 
 	lg.Info("Vinbero started successfully")
 
-	// Wait for shutdown signal
+	// Wait for shutdown signal; cleanup runs via the deferred shutdown
+	// (RPC server) and bgpSession.Stop above.
 	<-ctx.Done()
 	lg.Info("Received shutdown signal, cleaning up...")
+	return nil
+}
 
-	return shutdown(srv, lg)
+// startBGPSession brings up the in-process BGP speaker and registers
+// every neighbor from the config. Peer FSMs run asynchronously; this
+// function returns once they are configured, not once they reach
+// ESTABLISHED.
+func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPConfig) error {
+	if err := session.Start(ctx, bgp.GlobalConfig{
+		LocalASN:   cfg.Global.LocalASN,
+		RouterID:   cfg.Global.RouterID,
+		ListenPort: cfg.Global.ListenPort,
+	}); err != nil {
+		return err
+	}
+	for _, p := range cfg.Peers {
+		families := make([]bgp.Family, 0, len(p.Families))
+		for _, f := range p.Families {
+			fam, err := bgp.ParseFamily(f)
+			if err != nil {
+				return fmt.Errorf("peer %s: %w", p.Neighbor, err)
+			}
+			families = append(families, fam)
+		}
+		if err := session.AddPeer(ctx, bgp.PeerConfig{
+			Neighbor:     p.Neighbor,
+			PeerASN:      p.PeerASN,
+			HoldTimeSec:  p.HoldTimeSec,
+			KeepaliveSec: p.KeepaliveSec,
+			Families:     families,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func loadConfig(path string) (*config.Config, error) {

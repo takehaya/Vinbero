@@ -39,6 +39,9 @@ type FunctionAllocator interface {
 	InUse(function uint32) bool
 }
 
+// compile-time assertion that *bitmapAllocator satisfies the interface.
+var _ FunctionAllocator = (*bitmapAllocator)(nil)
+
 // bitmapAllocator is the default FunctionAllocator: an in-memory bitmap
 // sized by the locator's FunctionLen (clamped at 32 bits to keep memory
 // usage finite -- a 16-bit function fits 8 KiB, a 24-bit function 2 MiB,
