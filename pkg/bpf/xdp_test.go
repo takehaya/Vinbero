@@ -2154,11 +2154,11 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 	h.createSidFunctionGTP4E("fc00:1::/56", gtpSrcAddr, 7)
 
 	tests := []struct {
-		name       string
-		teid       uint32
-		qfi        uint8
-		ipv4Dst    [4]byte
-		expectExt  bool // expect PDU Session Container in output
+		name      string
+		teid      uint32
+		qfi       uint8
+		ipv4Dst   [4]byte
+		expectExt bool // expect PDU Session Container in output
 	}{
 		{"with QFI=15", 0xDEADBEEF, 15, [4]byte{10, 0, 0, 2}, true},
 		{"without QFI (4G)", 0xCAFEBABE, 0, [4]byte{10, 0, 0, 3}, false},
@@ -2247,9 +2247,9 @@ func TestXDPProgEndMGtp6D(t *testing.T) {
 	nextSeg := net.ParseIP("fc00:2::1")
 
 	pkt, err := buildSRv6WithGTPUPayload(
-		net.ParseIP("fc00::1"),     // outerSrc
-		net.ParseIP("fc00:1::1"),   // SID (DA, matches entry)
-		nextSeg,                    // next segment
+		net.ParseIP("fc00::1"),   // outerSrc
+		net.ParseIP("fc00:1::1"), // SID (DA, matches entry)
+		nextSeg,                  // next segment
 		teid, qfi, argsOffset,
 		net.ParseIP("172.16.0.1").To4(), // innerSrc
 		net.ParseIP("172.16.0.2").To4(), // innerDst

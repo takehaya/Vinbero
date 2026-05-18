@@ -594,7 +594,6 @@ func (m *MapOperations) RecoverAuxIndices() error {
 	return nil
 }
 
-
 // FreeAllByOwner releases every index whose owner tag equals ownerTag,
 // clearing both the in-memory allocator and aux_owner_map. Used by tests
 // that exercise allocator semantics without a BPF map; production purge

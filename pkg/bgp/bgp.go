@@ -110,12 +110,12 @@ type RouteKey struct {
 // SID. Fields are intentionally minimal for Phase 1c; Phase 1d/1e fill
 // in the SID structure and extended-community detail.
 type VPNRoute struct {
-	Family   Family
-	Prefix   string
-	RD       string
-	RTs      []string
-	SRv6SID  string
-	NextHop  string
+	Family  Family
+	Prefix  string
+	RD      string
+	RTs     []string
+	SRv6SID string
+	NextHop string
 }
 
 // UnicastRoute is a plain IPv6 unicast route.
