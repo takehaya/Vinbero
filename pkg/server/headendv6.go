@@ -38,7 +38,7 @@ func (s *Headendv6Server) Headendv6Create(
 			continue
 		}
 
-		if err := s.mapOps.CreateHeadendV6(headend.TriggerPrefix, entry); err != nil {
+		if err := s.mapOps.CreateHeadendV6(headend.TriggerPrefix, entry, bpf.OwnerRPC); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: headend.TriggerPrefix,
 				Reason:        err.Error(),
@@ -63,7 +63,7 @@ func (s *Headendv6Server) Headendv6Delete(
 	}
 
 	for _, prefix := range req.Msg.TriggerPrefixes {
-		if err := s.mapOps.DeleteHeadendV6(prefix); err != nil {
+		if err := s.mapOps.DeleteHeadendV6(prefix, bpf.OwnerRPC); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: prefix,
 				Reason:        err.Error(),
@@ -82,7 +82,7 @@ func (s *Headendv6Server) Headendv6Flush(
 	ctx context.Context,
 	req *connect.Request[v1.Headendv6FlushRequest],
 ) (*connect.Response[v1.Headendv6FlushResponse], error) {
-	count, err := s.mapOps.FlushHeadendV6()
+	count, err := s.mapOps.FlushHeadendV6(bpf.OwnerRPC)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}

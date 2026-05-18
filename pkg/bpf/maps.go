@@ -57,6 +57,15 @@ type MapOperator interface {
 type MapOperations struct {
 	objs     *BpfObjects
 	auxAlloc *indexAllocator
+	// Per-entry owner tracking for the main LPM maps. Paired HASH maps
+	// (key matches the corresponding main map) record the OwnerTag that
+	// wrote each entry; Create/Delete/Flush consult them to detect cross-
+	// owner mutation. Nil when the BPF handle is unavailable (e.g. test
+	// fixtures that load a subset of the program), in which case all
+	// owner checks short-circuit to "no recorded owner".
+	sidFunctionOwners *entryOwnerMap
+	headendV4Owners   *entryOwnerMap
+	headendV6Owners   *entryOwnerMap
 }
 
 // NewMapOperations creates a new MapOperations instance.
@@ -72,9 +81,74 @@ func NewMapOperations(objs *BpfObjects) *MapOperations {
 	alloc := newIndexAllocator(auxMax)
 	alloc.ownerMap = newAuxOwnerMap(objs.AuxOwnerMap)
 	return &MapOperations{
-		objs:     objs,
-		auxAlloc: alloc,
+		objs:              objs,
+		auxAlloc:          alloc,
+		sidFunctionOwners: newEntryOwnerMap(objs.SidFunctionOwnerMap),
+		headendV4Owners:   newEntryOwnerMap(objs.HeadendV4OwnerMap),
+		headendV6Owners:   newEntryOwnerMap(objs.HeadendV6OwnerMap),
 	}
+}
+
+// checkEntryOwner validates that caller is allowed to write or delete the
+// entry at key. It rejects an empty caller (which would silently match the
+// "no recorded owner" sentinel) and surfaces ErrEntryOwnerMismatch for
+// cross-owner attempts. alreadyOwned=true means the entry is already
+// owned by caller and Create can skip re-writing the owner map. A nil
+// owners argument means owner tracking is disabled for this handle, so
+// the call is allowed but always reports "fresh ownership" (caller must
+// still write the owner map -- it just becomes a no-op).
+func checkEntryOwner(owners *entryOwnerMap, key any, caller OwnerTag) (alreadyOwned bool, err error) {
+	if caller == "" {
+		return false, ErrEmptyOwner
+	}
+	if owners == nil {
+		return false, nil
+	}
+	existing, ok, lookupErr := owners.Lookup(key)
+	if lookupErr != nil {
+		return false, fmt.Errorf("lookup entry owner: %w", lookupErr)
+	}
+	if !ok {
+		return false, nil
+	}
+	if existing == caller {
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: existing %q, caller %q", ErrEntryOwnerMismatch, existing, caller)
+}
+
+// putMainAndOwner writes value to the main map and, when not already
+// owned, mirrors the owner to the paired owner map. A failure on the
+// owner write rolls the main write back so the invariant "main entry =>
+// owner entry (or alreadyOwned)" holds. cleanup runs only when the
+// rollback is taken; pass nil if there is no extra teardown.
+func putMainAndOwner[K, V any](
+	main *ebpf.Map,
+	owners *entryOwnerMap,
+	key K,
+	value *V,
+	owner OwnerTag,
+	alreadyOwned bool,
+	label string,
+	cleanup func(),
+) error {
+	if err := main.Put(key, value); err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return fmt.Errorf("failed to put %s entry: %w", label, err)
+	}
+	if alreadyOwned {
+		return nil
+	}
+	if err := owners.Put(key, owner); err != nil {
+		_ = main.Delete(key)
+		if cleanup != nil {
+			cleanup()
+		}
+		return fmt.Errorf("failed to put %s owner: %w", label, err)
+	}
+	return nil
 }
 
 // AuxOwnerVersion is bumped when the owner tag format changes. Tags
@@ -88,10 +162,6 @@ const AuxOwnerVersion = "v1"
 // AuxOwnerPluginTag with (mapType, slot). The same string is used for
 // in-memory comparisons and for persistence in aux_owner_map.
 const AuxOwnerBuiltin = "builtin:" + AuxOwnerVersion
-
-// AuxOwnerBuiltinTag is preserved as an alias of AuxOwnerBuiltin for
-// callers that have already adopted the explicit "Tag" naming.
-const AuxOwnerBuiltinTag = AuxOwnerBuiltin
 
 // AuxOwnerPluginTag returns the persisted plugin owner tag. Format is
 // "plugin:<version>:<mapType>:<slot>". ParseAuxOwnerTag also accepts the
@@ -112,7 +182,7 @@ const (
 // version-stamped ("plugin:v1:endpoint:32" / "builtin:v1") form so
 // reading an older pin is loss-less. The parsed result always carries
 // the current version semantics -- callers that re-persist a parsed tag
-// should re-render via AuxOwnerPluginTag / AuxOwnerBuiltinTag.
+// should re-render via AuxOwnerPluginTag / AuxOwnerBuiltin.
 //
 // Returns:
 //   - kind: "builtin" or "plugin"
@@ -196,17 +266,14 @@ func newAuxOwnerMap(m *ebpf.Map) *auxOwnerMap {
 	return &auxOwnerMap{m: m}
 }
 
-// Put writes tag to aux_owner_map[idx] as a null-terminated fixed-width
-// payload. tag is silently truncated to 63 bytes plus the terminator;
-// AuxOwnerPluginTag is well within that bound, so truncation only bites
-// future format changes that exceed it.
+// Put writes tag to aux_owner_map[idx]. AuxOwnerPluginTag fits well
+// within the 63-byte limit; longer format changes would be truncated by
+// encodeOwnerTag.
 func (a *auxOwnerMap) Put(idx uint32, tag string) error {
 	if a == nil {
 		return nil
 	}
-	var v [auxOwnerTagBytes]byte
-	// Reserve byte 63 for the null terminator regardless of input length.
-	copy(v[:auxOwnerTagBytes-1], tag)
+	v := encodeOwnerTag(tag)
 	return a.m.Put(idx, v)
 }
 
@@ -223,7 +290,8 @@ func (a *auxOwnerMap) Delete(idx uint32) error {
 
 // Iterate returns every non-empty (idx, tag) pair currently in
 // aux_owner_map. Index 0 is the "no aux" sentinel and is never returned.
-// Empty (zero) entries are silently skipped.
+// Zero-valued slots (fresh load or post-Delete) are skipped so the
+// allocator does not re-populate them with empty owners.
 func (a *auxOwnerMap) Iterate() (map[uint32]string, error) {
 	out := make(map[uint32]string)
 	if a == nil {
@@ -236,17 +304,9 @@ func (a *auxOwnerMap) Iterate() (map[uint32]string, error) {
 		if idx == 0 {
 			continue
 		}
-		// Slots are zero-initialized; treat any all-zero value as unused so
-		// reading the map after a fresh load (or after Delete()) does not
-		// re-populate the allocator with empty owners.
-		n := 0
-		for n < len(v) && v[n] != 0 {
-			n++
+		if s, ok := decodeOwnerTag(v[:]); ok {
+			out[idx] = s
 		}
-		if n == 0 {
-			continue
-		}
-		out[idx] = string(v[:n])
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("iterate aux_owner_map: %w", err)
@@ -758,69 +818,87 @@ func ParseIPv6(addr string) ([IPv6AddrLen]uint8, error) {
 
 // ===== SID Function Map Operations =====
 
-// CreateSidFunction adds a SID function entry and optional aux data.
-// If aux is non-nil, an aux index is allocated and both maps are written.
-func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFunctionEntry, aux *SidAuxEntry) error {
-	key, err := buildLpmKeyV6(triggerPrefix)
+// allocAndPutBuiltinAux reserves an aux index under the builtin owner tag,
+// writes aux to sid_aux_map at that index, and stamps entry.AuxIndex so
+// the caller can chain a sid_function_map write. On failure the slot is
+// released so the allocator never leaks. Used only from CreateSidFunction
+// (aux != nil); CreateSidFunctionWithAuxIndex consumes an aux index that
+// is already owned by a plugin.
+func (m *MapOperations) allocAndPutBuiltinAux(entry *SidFunctionEntry, aux *SidAuxEntry) error {
+	idx, err := m.auxAlloc.AllocOwner(AuxOwnerBuiltin)
 	if err != nil {
-		return fmt.Errorf("failed to build LPM key: %w", err)
+		return fmt.Errorf("failed to allocate aux index: %w", err)
 	}
-
-	if aux != nil {
-		idx, err := m.auxAlloc.AllocOwner(AuxOwnerBuiltin)
-		if err != nil {
-			return fmt.Errorf("failed to allocate aux index: %w", err)
-		}
-		// sid_function_entry.aux_index is u16; the userspace allocator
-		// can in principle hand out higher values if the operator set
-		// an sid_aux_map capacity above 65535, which would silently
-		// truncate here. Reject before we write the truncated value.
-		if idx > math.MaxUint16 {
-			_ = m.auxAlloc.FreeOwner(idx, AuxOwnerBuiltin)
-			return fmt.Errorf("aux index %d exceeds uint16 range; reduce sid_aux_map capacity below %d",
-				idx, math.MaxUint16+1)
-		}
-		entry.AuxIndex = uint16(idx)
-		if err := m.objs.SidAuxMap.Put(idx, aux); err != nil {
-			_ = m.auxAlloc.FreeOwner(idx, AuxOwnerBuiltin)
-			return fmt.Errorf("failed to put SID aux entry: %w", err)
-		}
+	// sid_function_entry.aux_index is u16; allocator capacity can in
+	// principle exceed 65535 if the operator raised sid_aux_map size,
+	// which would silently truncate. Reject before storing the truncated
+	// value.
+	if idx > math.MaxUint16 {
+		_ = m.auxAlloc.FreeOwner(idx, AuxOwnerBuiltin)
+		return fmt.Errorf("aux index %d exceeds uint16 range; reduce sid_aux_map capacity below %d",
+			idx, math.MaxUint16+1)
 	}
-
-	if err := m.objs.SidFunctionMap.Put(key, entry); err != nil {
-		if aux != nil {
-			_ = m.auxAlloc.FreeOwner(uint32(entry.AuxIndex), AuxOwnerBuiltin)
-		}
-		return fmt.Errorf("failed to put SID function entry: %w", err)
+	entry.AuxIndex = uint16(idx)
+	if err := m.objs.SidAuxMap.Put(idx, aux); err != nil {
+		_ = m.auxAlloc.FreeOwner(idx, AuxOwnerBuiltin)
+		return fmt.Errorf("failed to put SID aux entry: %w", err)
 	}
 	return nil
 }
 
+// CreateSidFunction adds a SID function entry and optional aux data.
+// owner is persisted to sid_function_owner_map so cross-owner mutation
+// is rejected (see ErrEntryOwnerMismatch). An empty owner is rejected
+// up front (see ErrEmptyOwner).
+func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFunctionEntry, aux *SidAuxEntry, owner OwnerTag) error {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return fmt.Errorf("failed to build LPM key: %w", err)
+	}
+	alreadyOwned, err := checkEntryOwner(m.sidFunctionOwners, key, owner)
+	if err != nil {
+		return err
+	}
+	if aux != nil {
+		if err := m.allocAndPutBuiltinAux(entry, aux); err != nil {
+			return err
+		}
+	}
+	auxCleanup := func() {
+		if aux != nil {
+			_ = m.auxAlloc.FreeOwner(uint32(entry.AuxIndex), AuxOwnerBuiltin)
+		}
+	}
+	return putMainAndOwner(m.objs.SidFunctionMap, m.sidFunctionOwners, key, entry, owner, alreadyOwned, "SID function", auxCleanup)
+}
+
 // CreateSidFunctionWithAuxIndex binds a SID function entry to an aux index
-// already allocated by PluginAuxAlloc. The allocator lock is held across the
-// owner verification and the sid_function_map write so a concurrent
-// PluginAuxFree cannot reassign the index between the two. expectedOwner is
-// the tag the caller believes owns the index (typically
+// already allocated by PluginAuxAlloc. The allocator lock is held across
+// the owner verification and the sid_function_map write so a concurrent
+// PluginAuxFree cannot reassign the index. expectedAuxOwner is the tag
+// the caller believes owns the aux index (typically
 // AuxOwnerPluginTag(mapType, slot)); mismatch returns ErrOwnerMismatch.
-func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entry *SidFunctionEntry, expectedOwner string) error {
+// entryOwner is the OwnerTag persisted to sid_function_owner_map so the
+// entry itself participates in the same ownership scheme as builtin SIDs.
+func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entry *SidFunctionEntry, expectedAuxOwner string, entryOwner OwnerTag) error {
 	if entry.AuxIndex == 0 {
 		return fmt.Errorf("aux_index must be non-zero")
 	}
-	// AllocOwner rejects empty owner so a populated allocator cannot have one;
-	// this guard catches caller-side bugs before the WithOwnerLocked verify
-	// would surface as a confusing "owned by X, caller \"\"" error.
-	if expectedOwner == "" {
-		return fmt.Errorf("expectedOwner must be non-empty")
+	// Caller-side guard so the WithOwnerLocked verify does not surface as
+	// a confusing "owned by X, caller \"\"" error.
+	if expectedAuxOwner == "" {
+		return fmt.Errorf("expectedAuxOwner must be non-empty")
 	}
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
-	return m.auxAlloc.WithOwnerLocked(uint32(entry.AuxIndex), expectedOwner, func() error {
-		if err := m.objs.SidFunctionMap.Put(key, entry); err != nil {
-			return fmt.Errorf("failed to put SID function entry: %w", err)
-		}
-		return nil
+	alreadyOwned, err := checkEntryOwner(m.sidFunctionOwners, key, entryOwner)
+	if err != nil {
+		return err
+	}
+	return m.auxAlloc.WithOwnerLocked(uint32(entry.AuxIndex), expectedAuxOwner, func() error {
+		return putMainAndOwner(m.objs.SidFunctionMap, m.sidFunctionOwners, key, entry, entryOwner, alreadyOwned, "SID function", nil)
 	})
 }
 
@@ -895,31 +973,49 @@ func (m *MapOperations) FreePluginAux(idx uint32, owner string) error {
 	})
 }
 
-// DeleteSidFunction removes a SID function entry and its aux data
-func (m *MapOperations) DeleteSidFunction(triggerPrefix string) error {
+// DeleteSidFunction removes a SID function entry after verifying that
+// requester owns it. Cross-owner deletes return ErrEntryOwnerMismatch.
+// Use ForceDeleteSidFunction for migration / force-override paths.
+func (m *MapOperations) DeleteSidFunction(triggerPrefix string, requester OwnerTag) error {
+	return m.deleteSidFunctionInternal(triggerPrefix, requester, false)
+}
+
+// ForceDeleteSidFunction removes a SID function entry regardless of
+// recorded owner. Reserved for operator escape hatches and the implicit
+// scope=all flush path; everyday RPC/BGP paths should use DeleteSidFunction.
+func (m *MapOperations) ForceDeleteSidFunction(triggerPrefix string) error {
+	return m.deleteSidFunctionInternal(triggerPrefix, "", true)
+}
+
+func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requester OwnerTag, force bool) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
+	if !force {
+		if _, err := checkEntryOwner(m.sidFunctionOwners, key, requester); err != nil {
+			return err
+		}
+	}
 
-	// Read entry first so aux can be cleaned up after successful delete
+	// Read entry first so aux can be cleaned up after successful delete.
 	var entry SidFunctionEntry
 	hasEntry := m.objs.SidFunctionMap.Lookup(key, &entry) == nil
 
 	if err := m.objs.SidFunctionMap.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete SID function entry: %w", err)
 	}
+	if err := m.sidFunctionOwners.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete SID function owner: %w", err)
+	}
 
-	// Clean up aux after SID entry is deleted to avoid index reuse while
-	// entry exists. Plugin-owned aux is NOT freed here — the plugin path
-	// (PluginAuxFree RPC) owns that lifecycle, so SID delete just unbinds
-	// the reference.
+	// Plugin-owned aux is NOT freed here — the plugin path (PluginAuxFree
+	// RPC) owns that lifecycle, so SID delete just unbinds the reference.
+	// Builtin aux is freed in lockstep with the zero-write so a racing
+	// PluginAuxFree → PluginAuxAlloc cannot reassign idx between the
+	// owner check and the map op.
 	if hasEntry && entry.AuxIndex != 0 {
 		idx := uint32(entry.AuxIndex)
-		// Builtin aux is freed in lockstep with the zero-write so a racing
-		// PluginAuxFree → PluginAuxAlloc cannot reassign idx between the
-		// owner check and the map op. Owner mismatch (plugin-owned) leaves
-		// the entry intact — that lifecycle belongs to PluginAuxFree.
 		_ = m.auxAlloc.WithOwnerLocked(idx, AuxOwnerBuiltin, func() error {
 			var zero SidAuxEntry
 			_ = m.objs.SidAuxMap.Put(idx, &zero)
@@ -1109,28 +1205,49 @@ func (m *MapOperations) ResetSlotStats(mapType string) error {
 
 // ===== Headend V4 Map Operations =====
 
-// CreateHeadendV4 adds a headend v4 entry to the map
-func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntry) error {
+// CreateHeadendV4 adds a headend v4 entry. owner is persisted to
+// headend_v4_owner_map; empty owner returns ErrEmptyOwner, cross-owner
+// write returns ErrEntryOwnerMismatch.
+func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
 	key, err := buildLpmKeyV4(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
-
-	if err := m.objs.HeadendV4Map.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put headend v4 entry: %w", err)
+	alreadyOwned, err := checkEntryOwner(m.headendV4Owners, key, owner)
+	if err != nil {
+		return err
 	}
-	return nil
+	return putMainAndOwner(m.objs.HeadendV4Map, m.headendV4Owners, key, entry, owner, alreadyOwned, "headend v4", nil)
 }
 
-// DeleteHeadendV4 removes a headend v4 entry from the map
-func (m *MapOperations) DeleteHeadendV4(triggerPrefix string) error {
+// DeleteHeadendV4 removes a headend v4 entry after verifying the caller
+// owns it. Cross-owner deletes return ErrEntryOwnerMismatch. Use
+// ForceDeleteHeadendV4 for migration / force-override paths.
+func (m *MapOperations) DeleteHeadendV4(triggerPrefix string, requester OwnerTag) error {
+	return m.deleteHeadendV4Internal(triggerPrefix, requester, false)
+}
+
+// ForceDeleteHeadendV4 removes a headend v4 entry regardless of recorded
+// owner.
+func (m *MapOperations) ForceDeleteHeadendV4(triggerPrefix string) error {
+	return m.deleteHeadendV4Internal(triggerPrefix, "", true)
+}
+
+func (m *MapOperations) deleteHeadendV4Internal(triggerPrefix string, requester OwnerTag, force bool) error {
 	key, err := buildLpmKeyV4(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
-
+	if !force {
+		if _, err := checkEntryOwner(m.headendV4Owners, key, requester); err != nil {
+			return err
+		}
+	}
 	if err := m.objs.HeadendV4Map.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete headend v4 entry: %w", err)
+	}
+	if err := m.headendV4Owners.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete headend v4 owner: %w", err)
 	}
 	return nil
 }
@@ -1171,28 +1288,49 @@ func (m *MapOperations) ListHeadendV4() (map[string]*HeadendEntry, error) {
 
 // ===== Headend V6 Map Operations =====
 
-// CreateHeadendV6 adds a headend v6 entry to the map
-func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntry) error {
+// CreateHeadendV6 adds a headend v6 entry. owner is persisted to
+// headend_v6_owner_map; empty owner returns ErrEmptyOwner, cross-owner
+// write returns ErrEntryOwnerMismatch.
+func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
-
-	if err := m.objs.HeadendV6Map.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put headend v6 entry: %w", err)
+	alreadyOwned, err := checkEntryOwner(m.headendV6Owners, key, owner)
+	if err != nil {
+		return err
 	}
-	return nil
+	return putMainAndOwner(m.objs.HeadendV6Map, m.headendV6Owners, key, entry, owner, alreadyOwned, "headend v6", nil)
 }
 
-// DeleteHeadendV6 removes a headend v6 entry from the map
-func (m *MapOperations) DeleteHeadendV6(triggerPrefix string) error {
+// DeleteHeadendV6 removes a headend v6 entry after verifying the caller
+// owns it. Cross-owner deletes return ErrEntryOwnerMismatch. Use
+// ForceDeleteHeadendV6 for migration / force-override paths.
+func (m *MapOperations) DeleteHeadendV6(triggerPrefix string, requester OwnerTag) error {
+	return m.deleteHeadendV6Internal(triggerPrefix, requester, false)
+}
+
+// ForceDeleteHeadendV6 removes a headend v6 entry regardless of recorded
+// owner.
+func (m *MapOperations) ForceDeleteHeadendV6(triggerPrefix string) error {
+	return m.deleteHeadendV6Internal(triggerPrefix, "", true)
+}
+
+func (m *MapOperations) deleteHeadendV6Internal(triggerPrefix string, requester OwnerTag, force bool) error {
 	key, err := buildLpmKeyV6(triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
-
+	if !force {
+		if _, err := checkEntryOwner(m.headendV6Owners, key, requester); err != nil {
+			return err
+		}
+	}
 	if err := m.objs.HeadendV6Map.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete headend v6 entry: %w", err)
+	}
+	if err := m.headendV6Owners.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete headend v6 owner: %w", err)
 	}
 	return nil
 }
@@ -1547,53 +1685,121 @@ func (m *MapOperations) ListBdPeers() (map[BdPeerKey]*HeadendEntry, error) {
 // not guarantee safety for. Partial failures return the count of
 // entries already deleted plus an error so the caller can log progress.
 
-// FlushSidFunctions removes every SID function entry and releases the
-// associated aux indices. Returns the number of entries deleted.
-func (m *MapOperations) FlushSidFunctions() (uint32, error) {
+// flushKeys deletes the listed prefixes from one of the main LPM maps.
+// When scope is non-empty, entries whose recorded owner differs are
+// skipped (owner-scoped flush). When scope is empty every entry is
+// deleted with force=true to bypass the owner check; this is the
+// "drop everything" mode kept for migrations and operator escape hatches.
+// The two-pass shape (list, then delete) mirrors the existing
+// non-owner-aware flush and keeps the kernel BPF iterator from observing
+// mutations mid-traversal.
+// flushScoped deletes only the prefixes recorded under scope.
+// Cross-owner entries surface as ErrEntryOwnerMismatch from deleteOne and
+// are treated as skips; any other error halts the flush and returns the
+// partial count so the caller can log progress.
+func flushScoped[E any](
+	entries map[string]*E,
+	scope OwnerTag,
+	deleteOne func(prefix string, requester OwnerTag) error,
+	label string,
+) (uint32, error) {
+	var count uint32
+	for prefix := range entries {
+		if err := deleteOne(prefix, scope); err != nil {
+			if errors.Is(err, ErrEntryOwnerMismatch) {
+				continue
+			}
+			return count, fmt.Errorf("flush %s: delete %q: %w", label, prefix, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// flushForce deletes every prefix unconditionally. Any error halts and
+// returns the partial count.
+func flushForce[E any](
+	entries map[string]*E,
+	deleteOne func(prefix string) error,
+	label string,
+) (uint32, error) {
+	var count uint32
+	for prefix := range entries {
+		if err := deleteOne(prefix); err != nil {
+			return count, fmt.Errorf("flush %s: delete %q: %w", label, prefix, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// FlushSidFunctions removes SID function entries whose owner matches
+// scope. scope must be non-empty; use ForceFlushSidFunctions to drop
+// every entry regardless of owner.
+func (m *MapOperations) FlushSidFunctions(scope OwnerTag) (uint32, error) {
+	if scope == "" {
+		return 0, fmt.Errorf("FlushSidFunctions: scope must be non-empty; use ForceFlushSidFunctions for unconditional flush")
+	}
 	entries, err := m.ListSidFunctions()
 	if err != nil {
 		return 0, err
 	}
-	var count uint32
-	for prefix := range entries {
-		if err := m.DeleteSidFunction(prefix); err != nil {
-			return count, fmt.Errorf("flush sid_function: delete %q: %w", prefix, err)
-		}
-		count++
-	}
-	return count, nil
+	return flushScoped(entries, scope, m.DeleteSidFunction, "sid_function")
 }
 
-// FlushHeadendV4 removes every headend_v4 entry.
-func (m *MapOperations) FlushHeadendV4() (uint32, error) {
+// ForceFlushSidFunctions removes every SID function entry regardless of
+// owner. Reserved for operator escape hatches; the everyday flush path
+// (RPC and BGP) scopes by owner via FlushSidFunctions.
+func (m *MapOperations) ForceFlushSidFunctions() (uint32, error) {
+	entries, err := m.ListSidFunctions()
+	if err != nil {
+		return 0, err
+	}
+	return flushForce(entries, m.ForceDeleteSidFunction, "sid_function")
+}
+
+// FlushHeadendV4 removes headend_v4 entries whose owner matches scope.
+// scope must be non-empty; use ForceFlushHeadendV4 to drop every entry.
+func (m *MapOperations) FlushHeadendV4(scope OwnerTag) (uint32, error) {
+	if scope == "" {
+		return 0, fmt.Errorf("FlushHeadendV4: scope must be non-empty; use ForceFlushHeadendV4 for unconditional flush")
+	}
 	entries, err := m.ListHeadendV4()
 	if err != nil {
 		return 0, err
 	}
-	var count uint32
-	for prefix := range entries {
-		if err := m.DeleteHeadendV4(prefix); err != nil {
-			return count, fmt.Errorf("flush headend_v4: delete %q: %w", prefix, err)
-		}
-		count++
-	}
-	return count, nil
+	return flushScoped(entries, scope, m.DeleteHeadendV4, "headend_v4")
 }
 
-// FlushHeadendV6 removes every headend_v6 entry.
-func (m *MapOperations) FlushHeadendV6() (uint32, error) {
+// ForceFlushHeadendV4 removes every headend_v4 entry regardless of owner.
+func (m *MapOperations) ForceFlushHeadendV4() (uint32, error) {
+	entries, err := m.ListHeadendV4()
+	if err != nil {
+		return 0, err
+	}
+	return flushForce(entries, m.ForceDeleteHeadendV4, "headend_v4")
+}
+
+// FlushHeadendV6 removes headend_v6 entries whose owner matches scope.
+// scope must be non-empty; use ForceFlushHeadendV6 to drop every entry.
+func (m *MapOperations) FlushHeadendV6(scope OwnerTag) (uint32, error) {
+	if scope == "" {
+		return 0, fmt.Errorf("FlushHeadendV6: scope must be non-empty; use ForceFlushHeadendV6 for unconditional flush")
+	}
 	entries, err := m.ListHeadendV6()
 	if err != nil {
 		return 0, err
 	}
-	var count uint32
-	for prefix := range entries {
-		if err := m.DeleteHeadendV6(prefix); err != nil {
-			return count, fmt.Errorf("flush headend_v6: delete %q: %w", prefix, err)
-		}
-		count++
+	return flushScoped(entries, scope, m.DeleteHeadendV6, "headend_v6")
+}
+
+// ForceFlushHeadendV6 removes every headend_v6 entry regardless of owner.
+func (m *MapOperations) ForceFlushHeadendV6() (uint32, error) {
+	entries, err := m.ListHeadendV6()
+	if err != nil {
+		return 0, err
 	}
-	return count, nil
+	return flushForce(entries, m.ForceDeleteHeadendV6, "headend_v6")
 }
 
 // FlushHeadendL2 removes every headend_l2 entry.

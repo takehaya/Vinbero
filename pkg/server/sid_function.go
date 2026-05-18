@@ -63,9 +63,9 @@ func (s *SidFunctionServer) SidFunctionCreate(
 		var createErr error
 		if sidFunc.PluginAuxIndex != 0 {
 			owner := bpf.AuxOwnerPluginTag(bpf.MapTypeEndpoint, uint32(sidFunc.Action))
-			createErr = s.mapOps.CreateSidFunctionWithAuxIndex(sidFunc.TriggerPrefix, entry, owner)
+			createErr = s.mapOps.CreateSidFunctionWithAuxIndex(sidFunc.TriggerPrefix, entry, owner, bpf.OwnerRPC)
 		} else {
-			createErr = s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry, aux)
+			createErr = s.mapOps.CreateSidFunction(sidFunc.TriggerPrefix, entry, aux, bpf.OwnerRPC)
 		}
 		if createErr != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
@@ -94,7 +94,7 @@ func (s *SidFunctionServer) SidFunctionDelete(
 	}
 
 	for _, prefix := range req.Msg.TriggerPrefixes {
-		if err := s.mapOps.DeleteSidFunction(prefix); err != nil {
+		if err := s.mapOps.DeleteSidFunction(prefix, bpf.OwnerRPC); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: prefix,
 				Reason:        err.Error(),
@@ -152,7 +152,7 @@ func (s *SidFunctionServer) SidFunctionFlush(
 	ctx context.Context,
 	req *connect.Request[v1.SidFunctionFlushRequest],
 ) (*connect.Response[v1.SidFunctionFlushResponse], error) {
-	count, err := s.mapOps.FlushSidFunctions()
+	count, err := s.mapOps.FlushSidFunctions(bpf.OwnerRPC)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}

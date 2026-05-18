@@ -106,9 +106,9 @@ func TestHeadendMapOperations(t *testing.T) {
 			// Test Create
 			var err error
 			if tc.isIPv4 {
-				err = h.mapOps.CreateHeadendV4(tc.prefix, entry)
+				err = h.mapOps.CreateHeadendV4(tc.prefix, entry, OwnerRPC)
 			} else {
-				err = h.mapOps.CreateHeadendV6(tc.prefix, entry)
+				err = h.mapOps.CreateHeadendV6(tc.prefix, entry, OwnerRPC)
 			}
 			if err != nil {
 				t.Fatalf("Failed to create entry: %v", err)
@@ -145,9 +145,9 @@ func TestHeadendMapOperations(t *testing.T) {
 
 			// Test Delete
 			if tc.isIPv4 {
-				err = h.mapOps.DeleteHeadendV4(tc.prefix)
+				err = h.mapOps.DeleteHeadendV4(tc.prefix, OwnerRPC)
 			} else {
-				err = h.mapOps.DeleteHeadendV6(tc.prefix)
+				err = h.mapOps.DeleteHeadendV6(tc.prefix, OwnerRPC)
 			}
 			if err != nil {
 				t.Fatalf("Failed to delete entry: %v", err)
@@ -2392,7 +2392,7 @@ func TestXDPProgEndMGtp6DDI(t *testing.T) {
 	// End.M.GTP6.D.DI: Drop-In variant — passes packet to kernel unmodified.
 	// No aux data needed (DI doesn't access entry fields).
 	entry := &SidFunctionEntry{Action: actionEndMGTP6DDI}
-	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", entry, nil); err != nil {
+	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", entry, nil, OwnerRPC); err != nil {
 		t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 

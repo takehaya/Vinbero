@@ -230,21 +230,21 @@ func TestRecoverAuxIndices(t *testing.T) {
 	// Create entries with aux (indices 1, 2 — index 0 is the no-aux sentinel)
 	nh, _ := ParseIPv6("fc00::1")
 	e1 := &SidFunctionEntry{Action: actionEndX}
-	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", e1, NewSidAuxNexthop(nh)); err != nil {
+	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", e1, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
 		t.Fatalf("create 1: %v", err)
 	}
 	e2 := &SidFunctionEntry{Action: actionEndX}
-	if err := h.mapOps.CreateSidFunction("fc00:2::1/128", e2, NewSidAuxNexthop(nh)); err != nil {
+	if err := h.mapOps.CreateSidFunction("fc00:2::1/128", e2, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
 		t.Fatalf("create 2: %v", err)
 	}
 	// Create entry without aux (no index used)
 	e3 := &SidFunctionEntry{Action: actionEnd}
-	if err := h.mapOps.CreateSidFunction("fc00:3::1/128", e3, nil); err != nil {
+	if err := h.mapOps.CreateSidFunction("fc00:3::1/128", e3, nil, OwnerRPC); err != nil {
 		t.Fatalf("create 3: %v", err)
 	}
 
 	// Delete entry 1 to create a gap (index 1 freed)
-	if err := h.mapOps.DeleteSidFunction("fc00:1::1/128"); err != nil {
+	if err := h.mapOps.DeleteSidFunction("fc00:1::1/128", OwnerRPC); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -256,7 +256,7 @@ func TestRecoverAuxIndices(t *testing.T) {
 
 	// Allocate new index — should get 1 (freed gap), not 3
 	e4 := &SidFunctionEntry{Action: actionEndX}
-	if err := freshMapOps.CreateSidFunction("fc00:4::1/128", e4, NewSidAuxNexthop(nh)); err != nil {
+	if err := freshMapOps.CreateSidFunction("fc00:4::1/128", e4, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
 		t.Fatalf("create after recover: %v", err)
 	}
 
@@ -280,7 +280,7 @@ func TestFlushSidFunctions(t *testing.T) {
 	mustCreate := func(prefix string, action uint8, aux *SidAuxEntry) {
 		t.Helper()
 		entry := &SidFunctionEntry{Action: action}
-		if err := h.mapOps.CreateSidFunction(prefix, entry, aux); err != nil {
+		if err := h.mapOps.CreateSidFunction(prefix, entry, aux, OwnerRPC); err != nil {
 			t.Fatalf("create %s: %v", prefix, err)
 		}
 	}
@@ -297,7 +297,7 @@ func TestFlushSidFunctions(t *testing.T) {
 		t.Fatalf("pre-flush count: got %d, want 4", len(before))
 	}
 
-	count, err := h.mapOps.FlushSidFunctions()
+	count, err := h.mapOps.FlushSidFunctions(OwnerRPC)
 	if err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestFlushSidFunctions(t *testing.T) {
 	// allocation must pop one of them (1..3) rather than allocate a
 	// fresh index 4.
 	entry := &SidFunctionEntry{Action: actionEndX}
-	if err := h.mapOps.CreateSidFunction("fc00:2::1/128", entry, NewSidAuxNexthop(nh)); err != nil {
+	if err := h.mapOps.CreateSidFunction("fc00:2::1/128", entry, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
 		t.Fatalf("post-flush create: %v", err)
 	}
 	if entry.AuxIndex < 1 || entry.AuxIndex > 3 {
@@ -367,7 +367,7 @@ func TestBpfLoad_PinMapsRoundTrip(t *testing.T) {
 		mapOps := NewMapOperations(objs)
 		nh, _ := ParseIPv6("fc00::1")
 		entry := &SidFunctionEntry{Action: actionEndX}
-		if err := mapOps.CreateSidFunction("fc00:1::1/128", entry, NewSidAuxNexthop(nh)); err != nil {
+		if err := mapOps.CreateSidFunction("fc00:1::1/128", entry, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		if err := objs.Close(); err != nil {
@@ -610,11 +610,11 @@ func TestDeleteSidFunctionPreservesPluginAux(t *testing.T) {
 		Action:   uint8(EndpointPluginBase),
 		AuxIndex: uint16(idx),
 	}
-	if err := h.mapOps.CreateSidFunctionWithAuxIndex(prefix, entry, owner); err != nil {
+	if err := h.mapOps.CreateSidFunctionWithAuxIndex(prefix, entry, owner, OwnerRPC); err != nil {
 		t.Fatalf("CreateSidFunctionWithAuxIndex: %v", err)
 	}
 
-	if err := h.mapOps.DeleteSidFunction(prefix); err != nil {
+	if err := h.mapOps.DeleteSidFunction(prefix, OwnerRPC); err != nil {
 		t.Fatalf("DeleteSidFunction: %v", err)
 	}
 
