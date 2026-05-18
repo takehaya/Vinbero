@@ -11,8 +11,41 @@ import (
 type Config struct {
 	InternalConfig InternalConfig `yaml:"internal,omitempty"`
 	Setting        SettingConfig  `yaml:"settings,omitempty"`
+	BGP            BGPConfig      `yaml:"bgp,omitempty"`
 	Original       string
 	Configpath     string
+}
+
+// BGPConfig is the optional in-process BGP speaker configuration. It is
+// only consulted when vinberod is started with --bgp-enabled; an empty
+// section leaves BGP off.
+type BGPConfig struct {
+	Global BGPGlobalConfig `yaml:"global,omitempty"`
+	Peers  []BGPPeerConfig `yaml:"peers,omitempty"`
+}
+
+// BGPGlobalConfig is the speaker's own BGP identity.
+type BGPGlobalConfig struct {
+	LocalASN uint32 `yaml:"local_asn,omitempty"`
+	RouterID string `yaml:"router_id,omitempty"`
+	// ListenPort defaults to -1: the in-process speaker does not bind
+	// TCP/179, so it coexists with a host BGP daemon. Set a real port
+	// only when vinberod owns BGP on the box.
+	ListenPort int32 `yaml:"listen_port,omitempty" default:"-1"`
+	// SourceLocator names the locator whose prefix supplies the SRv6
+	// encap source address for BGP-driven headend entries (see plan
+	// §6-5). Unused until Phase 1d; accepted now so config files are
+	// forward-compatible.
+	SourceLocator string `yaml:"source_locator,omitempty"`
+}
+
+// BGPPeerConfig describes one BGP neighbor.
+type BGPPeerConfig struct {
+	Neighbor     string   `yaml:"neighbor,omitempty"`
+	PeerASN      uint32   `yaml:"peer_asn,omitempty"`
+	HoldTimeSec  uint32   `yaml:"hold_time_sec,omitempty" default:"90"`
+	KeepaliveSec uint32   `yaml:"keepalive_sec,omitempty" default:"30"`
+	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6
 }
 
 // BpfConstants returns the set of read-only constants rewritten into every
@@ -97,6 +130,12 @@ func Load(s string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Re-apply defaults after unmarshal: slice-of-struct elements (e.g.
+	// bgp.peers[]) do not exist during the pre-unmarshal SetDefaults
+	// call, so their `default:` tags would otherwise stay zero. A second
+	// pass only fills fields still at their zero value, leaving every
+	// value the YAML actually set intact.
+	defaults.SetDefaults(&cfg)
 	cfg.Original = s
 	return &cfg, nil
 }
