@@ -53,6 +53,7 @@ func NewApp() *cli.App {
 			bridgeCommand(),
 			vrfCommand(),
 			locatorCommand(),
+			vrfBgpCommand(),
 			fdbCommand(),
 			vlanTableCommand(),
 			statsCommand(),

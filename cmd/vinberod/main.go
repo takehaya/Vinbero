@@ -12,11 +12,15 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bgp/apply"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/fib"
+	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
 	"github.com/takehaya/vinbero/pkg/server"
 	"github.com/takehaya/vinbero/pkg/vinbero"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
 	"github.com/urfave/cli/v2"
 )
 
@@ -102,7 +106,12 @@ func run(cliCtx *cli.Context) error {
 		return fmt.Errorf("start FDB watcher: %w", err)
 	}
 
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), lg)
+	// The locator.Manager and vrfbgp.Manager are shared between the RPC
+	// server and the BGP route applier, so locators / VRF bindings
+	// created over RPC are visible to the BGP receive path.
+	locatorMgr := locator.NewManager()
+	vrfBgpMgr := vrfbgp.NewManager()
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, lg)
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
@@ -127,11 +136,18 @@ func run(cliCtx *cli.Context) error {
 		if err := startBGPSession(ctx, bgpSession, cfg.BGP); err != nil {
 			return fmt.Errorf("start BGP: %w", err)
 		}
-		// Phase 1d-b: surface received routes in the log. Phase 1d-c
-		// replaces this handler with one that drives the data plane.
-		cancelSub, err := bgpSession.Subscribe("", func(ev bgp.RouteEvent) {
-			logBGPRoute(lg, ev)
-		})
+		// Drive the data plane from received BGP routes: VPNv4/v6 ->
+		// headend maps, IPv6 unicast -> kernel FIB.
+		applier := apply.NewApplier(
+			vin.GetMapOperations(),
+			locatorMgr,
+			vrfBgpMgr,
+			fib.NewKernelInjector(),
+			cfg.BGP.Global.SourceLocator,
+			cfg.BGP.Global.LocalASN,
+			lg,
+		)
+		cancelSub, err := bgpSession.Subscribe("", applier.Apply)
 		if err != nil {
 			return fmt.Errorf("subscribe BGP routes: %w", err)
 		}
@@ -179,23 +195,6 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 		}
 	}
 	return nil
-}
-
-// logBGPRoute is the Phase 1d-b route handler: it only records what the
-// BGP session received. The data-plane wiring (map writes, FIB
-// injection) arrives in Phase 1d-c.
-func logBGPRoute(lg *zap.Logger, ev bgp.RouteEvent) {
-	fields := []zap.Field{
-		zap.String("family", ev.Family.String()),
-		zap.Bool("withdraw", ev.IsWithdraw),
-	}
-	switch {
-	case ev.VPN != nil:
-		fields = append(fields, zap.String("prefix", ev.VPN.Prefix))
-	case ev.Unicast != nil:
-		fields = append(fields, zap.String("prefix", ev.Unicast.Prefix))
-	}
-	lg.Info("BGP route received", fields...)
 }
 
 func loadConfig(path string) (*config.Config, error) {
