@@ -31,3 +31,22 @@ settings:
       capacity: 8192
     bd_peer:
       capacity: 1024
+
+# In-process BGP speaker. Only consulted when vinberod runs with
+# --bgp-enabled; otherwise this whole section is ignored.
+# bgp:
+#   global:
+#     local_asn: 65000
+#     router_id: "10.0.0.1"
+#     listen_port: -1          # -1 = do not bind TCP/179 (coexist with host BGP)
+#     source_locator: "LOC1"   # locator supplying the SRv6 encap source (Phase 1d+)
+#   peers:
+#     - neighbor: "10.0.0.2"
+#       peer_asn: 65000
+#       hold_time_sec: 90
+#       keepalive_sec: 30
+#       families:
+#         - vpnv4
+#         - vpnv6
+#         - ipv6_unicast
+#         - sr_policy_ipv6

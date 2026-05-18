@@ -13,7 +13,7 @@ import (
 // s.mapOps; tests that exercise raw / index / range-check paths can therefore
 // share this minimal server without spinning up real BPF maps.
 func newProtoToEntryServer() *SidFunctionServer {
-	return NewSidFunctionServer(nil, nil)
+	return NewSidFunctionServer(nil, nil, nil)
 }
 
 // pluginAction returns a v1.Srv6LocalAction value inside the endpoint plugin

@@ -78,7 +78,7 @@ func TestPluginOperations(t *testing.T) {
 
 		sidPrefix := "fd00::32"
 		entry := &SidFunctionEntry{Action: uint8(pluginIndex), Flavor: 0}
-		if err := h.mapOps.CreateSidFunction(sidPrefix, entry, nil); err != nil {
+		if err := h.mapOps.CreateSidFunction(sidPrefix, entry, nil, OwnerRPC); err != nil {
 			t.Fatalf("Failed to create SID: %v", err)
 		}
 
@@ -140,7 +140,7 @@ func TestSlotStatsRecordsTailCall(t *testing.T) {
 			}
 
 			sidEntry := &SidFunctionEntry{Action: tc.action, Flavor: 0}
-			if err := h.mapOps.CreateSidFunction(tc.sidAddr, sidEntry, nil); err != nil {
+			if err := h.mapOps.CreateSidFunction(tc.sidAddr, sidEntry, nil, OwnerRPC); err != nil {
 				t.Fatalf("create SID: %v", err)
 			}
 

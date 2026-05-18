@@ -106,9 +106,9 @@ func TestHeadendMapOperations(t *testing.T) {
 			// Test Create
 			var err error
 			if tc.isIPv4 {
-				err = h.mapOps.CreateHeadendV4(tc.prefix, entry)
+				err = h.mapOps.CreateHeadendV4(tc.prefix, entry, OwnerRPC)
 			} else {
-				err = h.mapOps.CreateHeadendV6(tc.prefix, entry)
+				err = h.mapOps.CreateHeadendV6(tc.prefix, entry, OwnerRPC)
 			}
 			if err != nil {
 				t.Fatalf("Failed to create entry: %v", err)
@@ -145,9 +145,9 @@ func TestHeadendMapOperations(t *testing.T) {
 
 			// Test Delete
 			if tc.isIPv4 {
-				err = h.mapOps.DeleteHeadendV4(tc.prefix)
+				err = h.mapOps.DeleteHeadendV4(tc.prefix, OwnerRPC)
 			} else {
-				err = h.mapOps.DeleteHeadendV6(tc.prefix)
+				err = h.mapOps.DeleteHeadendV6(tc.prefix, OwnerRPC)
 			}
 			if err != nil {
 				t.Fatalf("Failed to delete entry: %v", err)
@@ -2154,11 +2154,11 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 	h.createSidFunctionGTP4E("fc00:1::/56", gtpSrcAddr, 7)
 
 	tests := []struct {
-		name       string
-		teid       uint32
-		qfi        uint8
-		ipv4Dst    [4]byte
-		expectExt  bool // expect PDU Session Container in output
+		name      string
+		teid      uint32
+		qfi       uint8
+		ipv4Dst   [4]byte
+		expectExt bool // expect PDU Session Container in output
 	}{
 		{"with QFI=15", 0xDEADBEEF, 15, [4]byte{10, 0, 0, 2}, true},
 		{"without QFI (4G)", 0xCAFEBABE, 0, [4]byte{10, 0, 0, 3}, false},
@@ -2247,9 +2247,9 @@ func TestXDPProgEndMGtp6D(t *testing.T) {
 	nextSeg := net.ParseIP("fc00:2::1")
 
 	pkt, err := buildSRv6WithGTPUPayload(
-		net.ParseIP("fc00::1"),     // outerSrc
-		net.ParseIP("fc00:1::1"),   // SID (DA, matches entry)
-		nextSeg,                    // next segment
+		net.ParseIP("fc00::1"),   // outerSrc
+		net.ParseIP("fc00:1::1"), // SID (DA, matches entry)
+		nextSeg,                  // next segment
 		teid, qfi, argsOffset,
 		net.ParseIP("172.16.0.1").To4(), // innerSrc
 		net.ParseIP("172.16.0.2").To4(), // innerDst
@@ -2392,7 +2392,7 @@ func TestXDPProgEndMGtp6DDI(t *testing.T) {
 	// End.M.GTP6.D.DI: Drop-In variant — passes packet to kernel unmodified.
 	// No aux data needed (DI doesn't access entry fields).
 	entry := &SidFunctionEntry{Action: actionEndMGTP6DDI}
-	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", entry, nil); err != nil {
+	if err := h.mapOps.CreateSidFunction("fc00:1::1/128", entry, nil, OwnerRPC); err != nil {
 		t.Fatalf("Failed to create SID function entry: %v", err)
 	}
 

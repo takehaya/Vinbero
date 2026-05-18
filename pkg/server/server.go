@@ -10,10 +10,13 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
+	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
 // Server represents the Connect RPC server
@@ -22,18 +25,29 @@ type Server struct {
 	mapOps     *bpf.MapOperations
 	resMgr     *netresource.ResourceManager
 	fdbWatcher *netlinkwatch.FDBWatcher
+	locatorMgr *locator.Manager
+	vrfBgpMgr  *vrfbgp.Manager
+	advertiser bgp.RouteAdvertiser
 	logger     *zap.Logger
 	mux        *http.ServeMux
 	server     *http.Server
 }
 
-// NewServer creates a new Server instance
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, logger *zap.Logger) *Server {
+// NewServer creates a new Server instance. locatorMgr and vrfBgpMgr are
+// shared with the BGP route applier so RPC-created locators / VRF
+// bindings and the BGP receive path see the same state; pass fresh
+// managers when BGP is disabled. advertiser is nil when BGP is
+// disabled, in which case BgpRouteService RPCs fail with
+// FailedPrecondition.
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, logger *zap.Logger) *Server {
 	return &Server{
 		cfg:        cfg,
 		mapOps:     mapOps,
 		resMgr:     resMgr,
 		fdbWatcher: fdbWatcher,
+		locatorMgr: locatorMgr,
+		vrfBgpMgr:  vrfBgpMgr,
+		advertiser: advertiser,
 		logger:     logger,
 		mux:        http.NewServeMux(),
 	}
@@ -62,9 +76,29 @@ func (s *Server) Setup() {
 	)
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
 
+	// VrfBgp service (VRF <-> BGP route-target bindings).
+	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr)
+	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
+	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
+	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
+
+	// BgpRoute service (operator-explicit BGP advertise / withdraw).
+	bgpRouteServer := NewBgpRouteServer(s.advertiser)
+	bgpRoutePath, bgpRouteHandler := vinberov1connect.NewBgpRouteServiceHandler(bgpRouteServer)
+	s.mux.Handle(bgpRoutePath, bgpRouteHandler)
+	s.logger.Info("Registered BgpRouteService", zap.String("path", bgpRoutePath))
+
+	// Locator service (SRv6 locator manager). Registered before
+	// SidFunctionService so the latter can receive the manager and
+	// honor locator_ref in SidFunctionCreate.
+	locatorServer := NewLocatorServer(s.locatorMgr)
+	path, handler := vinberov1connect.NewLocatorServiceHandler(locatorServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered LocatorService", zap.String("path", path))
+
 	// SidFunction service
-	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer)
-	path, handler := vinberov1connect.NewSidFunctionServiceHandler(sidFunctionServer)
+	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr)
+	path, handler = vinberov1connect.NewSidFunctionServiceHandler(sidFunctionServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered SidFunctionService", zap.String("path", path))
 
