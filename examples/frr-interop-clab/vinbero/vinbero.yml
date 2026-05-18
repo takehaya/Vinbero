@@ -1,0 +1,57 @@
+internal:
+  # eth1 faces FRR (BGP session + SRv6 underlay). The XDP data plane is
+  # attached here; encap of CE traffic is exercised by the netns E2E
+  # test, so this lab focuses on the control-plane exchange.
+  devices:
+    - eth1
+  bpf:
+    # generic mode: veth links in containerlab do not support native XDP.
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+
+# In-process BGP speaker. Consulted because vinberod is started with
+# --bgp-enabled (see start.sh). Vinbero is the PE under test (AS 65100);
+# FRR (AS 65200) is the independent RFC 9252 peer on the eth1 link.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.100"
+    # Bind TCP/179: vinberod owns BGP on this node, FRR connects in.
+    listen_port: 179
+    # Locator supplying the SRv6 encap source for routes learned from
+    # FRR. Registered over RPC by start.sh before the session settles
+    # (the applier needs it present to materialise headend entries).
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "2001:db8:ff::1"
+      peer_asn: 65200
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - vpnv4
+        - vpnv6
