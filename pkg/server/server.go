@@ -15,6 +15,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
 // Server represents the Connect RPC server
@@ -24,19 +25,24 @@ type Server struct {
 	resMgr      *netresource.ResourceManager
 	fdbWatcher  *netlinkwatch.FDBWatcher
 	locatorMgr  *locator.Manager
+	vrfBgpMgr   *vrfbgp.Manager
 	logger      *zap.Logger
 	mux         *http.ServeMux
 	server      *http.Server
 }
 
-// NewServer creates a new Server instance
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, logger *zap.Logger) *Server {
+// NewServer creates a new Server instance. locatorMgr and vrfBgpMgr are
+// shared with the BGP route applier so RPC-created locators / VRF
+// bindings and the BGP receive path see the same state; pass fresh
+// managers when BGP is disabled.
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, logger *zap.Logger) *Server {
 	return &Server{
 		cfg:        cfg,
 		mapOps:     mapOps,
 		resMgr:     resMgr,
 		fdbWatcher: fdbWatcher,
-		locatorMgr: locator.NewManager(),
+		locatorMgr: locatorMgr,
+		vrfBgpMgr:  vrfBgpMgr,
 		logger:     logger,
 		mux:        http.NewServeMux(),
 	}
@@ -64,6 +70,12 @@ func (s *Server) Setup() {
 		zap.String("mode", roEnforce.String()),
 	)
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
+
+	// VrfBgp service (VRF <-> BGP route-target bindings).
+	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr)
+	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
+	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
+	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
 
 	// Locator service (SRv6 locator manager). Registered before
 	// SidFunctionService so the latter can receive the manager and
