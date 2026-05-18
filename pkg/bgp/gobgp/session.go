@@ -12,7 +12,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
+	"github.com/google/uuid"
 	gobgpapi "github.com/osrg/gobgp/v4/api"
 	gobgpsrv "github.com/osrg/gobgp/v4/pkg/server"
 	"go.uber.org/zap"
@@ -23,17 +25,31 @@ import (
 // Session is the GoBGP-backed bgp.Session. A zero Session is not
 // usable; construct one with NewSession. Start / Stop are not safe for
 // concurrent use -- the daemon drives them from a single goroutine.
+//
+// It also satisfies bgp.RouteAdvertiser; advertised tracks the gobgp
+// path UUID for each advertised route so Withdraw can delete the exact
+// path. advMu guards that map since advertise / withdraw can be driven
+// from concurrent RPC handlers.
 type Session struct {
 	logger *zap.Logger
 	server *gobgpsrv.BgpServer
+
+	advMu      sync.Mutex
+	advertised map[bgp.RouteKey]uuid.UUID
 }
 
-// compile-time assertion that *Session satisfies the interface.
-var _ bgp.Session = (*Session)(nil)
+// compile-time assertions for the interfaces *Session satisfies.
+var (
+	_ bgp.Session         = (*Session)(nil)
+	_ bgp.RouteAdvertiser = (*Session)(nil)
+)
 
 // NewSession returns an unstarted Session.
 func NewSession(logger *zap.Logger) *Session {
-	return &Session{logger: logger.Named("bgp.gobgp")}
+	return &Session{
+		logger:     logger.Named("bgp.gobgp"),
+		advertised: make(map[bgp.RouteKey]uuid.UUID),
+	}
 }
 
 // Start brings up the in-process BgpServer and runs the OPEN handshake
