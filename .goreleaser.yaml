@@ -91,6 +91,18 @@ archives:
         dst: share/vinbero-sdk/examples/simple-acl/plugin.c
       - src: sdk/examples/simple-acl/README.md
         dst: share/vinbero-sdk/examples/simple-acl/README.md
+      - src: sdk/examples/plugin-counter-l2/Makefile
+        dst: share/vinbero-sdk/examples/plugin-counter-l2/Makefile
+      - src: sdk/examples/plugin-counter-l2/plugin.c
+        dst: share/vinbero-sdk/examples/plugin-counter-l2/plugin.c
+      - src: sdk/examples/plugin-counter-l2/README.md
+        dst: share/vinbero-sdk/examples/plugin-counter-l2/README.md
+      - src: sdk/examples/plugin-custom-sh/Makefile
+        dst: share/vinbero-sdk/examples/plugin-custom-sh/Makefile
+      - src: sdk/examples/plugin-custom-sh/plugin.c
+        dst: share/vinbero-sdk/examples/plugin-custom-sh/plugin.c
+      - src: sdk/examples/plugin-custom-sh/README.md
+        dst: share/vinbero-sdk/examples/plugin-custom-sh/README.md
 checksum:
   name_template: 'checksums.txt'
 snapshot:

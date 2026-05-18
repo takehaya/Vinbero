@@ -168,5 +168,19 @@ func populateProgArrays(objs *BpfObjects) error {
 		}
 	}
 
+	// Headend L2 PROG_ARRAY (indexed by srv6_headend_behavior enum). Only
+	// the L2 behaviors (H_ENCAPS_L2=3, H_ENCAPS_L2_RED=6) are populated;
+	// other slots remain empty and the dispatcher in l2_headend.c drops if
+	// it ever sees a mode that isn't installed here.
+	headendL2Progs := map[uint32]*ebpf.Program{
+		3: objs.TailcallHeadendL2H_encaps,
+		6: objs.TailcallHeadendL2H_encapsRed,
+	}
+	for idx, prog := range headendL2Progs {
+		if err := objs.HeadendL2Progs.Update(idx, prog, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("headend_l2_progs[%d]: %w", idx, err)
+		}
+	}
+
 	return nil
 }

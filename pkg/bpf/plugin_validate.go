@@ -72,6 +72,7 @@ var ValidTailCallMaps = []string{
 	MapNameSidEndpointProgs,
 	MapNameHeadendV4Progs,
 	MapNameHeadendV6Progs,
+	MapNameHeadendL2Progs,
 }
 
 // ForbiddenHelpers names BPF helpers whose direct use from a plugin would

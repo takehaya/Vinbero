@@ -35,7 +35,7 @@ service PluginService {
 }
 
 message PluginRegisterRequest {
-  string map_type = 1; // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6"
+  string map_type = 1; // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6", "headend_l2"
   uint32 index = 2; // Plugin slot index (endpoint: 32-63, headend: 16-31)
   bytes bpf_elf = 3; // Compiled BPF ELF object file bytes
   string program = 4; // BPF program function name within the ELF (e.g., "plugin_counter")
@@ -44,14 +44,14 @@ message PluginRegisterRequest {
 message PluginRegisterResponse {}
 
 message PluginUnregisterRequest {
-  string map_type = 1; // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6"
+  string map_type = 1; // PROG_ARRAY target: "endpoint", "headend_v4", "headend_v6", "headend_l2"
   uint32 index = 2; // Plugin slot index to clear
 }
 
 message PluginUnregisterResponse {}
 
 message PluginListRequest {
-  string map_type_filter = 1; // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6"
+  string map_type_filter = 1; // Empty = all map types; otherwise "endpoint" / "headend_v4" / "headend_v6" / "headend_l2"
 }
 
 message PluginInfo {

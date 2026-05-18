@@ -25,3 +25,6 @@ int tailcall_headend_v6_h_insert(struct xdp_md *ctx) { HEADEND_BODY(do_h_insert_
 
 SEC("xdp")
 int tailcall_headend_v6_h_insert_red(struct xdp_md *ctx) { HEADEND_BODY(do_h_insert_red_v6, struct ipv6hdr); }
+
+// L2 tail call targets live in tailcall_headend_l2.c, included AFTER
+// srv6_encaps_l2.h in xdp_prog.c so do_h_encaps_l2{,_red} are in scope.

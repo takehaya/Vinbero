@@ -106,6 +106,9 @@ jobs:
       - name: Build SDK tarball and verify it produces a working plugin
         run: make sdk-archive-verify
 
+      - name: Confirm validator rejects intentionally-bad sample plugins
+        run: make sdk-test-negative
+
   integration-test:
     name: Integration Test - ${{ matrix.example }}
     runs-on: ubuntu-24.04
