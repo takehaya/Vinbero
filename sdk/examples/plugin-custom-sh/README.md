@@ -29,9 +29,14 @@ vinbero plugin register --type headend_l2 --index 17 \
 
 ## 観測
 
+Plugin-owned map は bpffs に pin されないので、`bpftool map show` で ID を
+取得して dump する:
+
 ```bash
-# Plugin が drop した frame の per-BD カウント
-bpftool map dump pinned /sys/fs/bpf/plugin_custom_sh_drops
+# Plugin が drop した frame の per-BD カウント (PERCPU_HASH)
+MAP_ID=$(sudo bpftool map show \
+    | awk '/name plugin_custom_sh_drops/ { sub(":","",$1); print $1; exit }')
+sudo bpftool map dump id "$MAP_ID"
 
 # Vinbero の組込み NON_DF_DROP カウンタとの比較
 vinbero stats show

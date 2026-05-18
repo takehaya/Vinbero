@@ -41,9 +41,14 @@ bpftool map update pinned /sys/fs/bpf/headend_l2_map \
 
 ### 観測
 
+PluginRegister は owned map を bpffs に pin しない。`bpftool map show` で
+ID を引いてから dump する:
+
 ```bash
-# Plugin counter は PERCPU_HASH なので bpftool が自動で per-CPU を集計
-bpftool map dump pinned /sys/fs/bpf/plugin_counter_l2_map
+MAP_ID=$(sudo bpftool map show \
+    | awk '/name plugin_counter_l2/ { sub(":","",$1); print $1; exit }')
+# PERCPU_HASH なので bpftool が自動で per-CPU を集計
+sudo bpftool map dump id "$MAP_ID"
 ```
 
 ## SDK helper の例
