@@ -1,0 +1,53 @@
+# containerlab topology for the FRR <-> Vinbero SRv6 L3VPN interop lab.
+#
+#    ce (host)            vinbero (PE, under test)        frr (remote PE, RFC impl)
+#  +---------+  veth     +----------------------+  veth  +---------------------+
+#  | traffic |<--------->| eth2          eth1   |<------>| eth1   bgpd (FRR)   |
+#  | source  |  eth1     |   vinberod --bgp     |  BGP   | SRv6 locator +      |
+#  +---------+           |   in-proc speaker    | VPNv4/6| VPNv4/VPNv6 export  |
+#                        +----------------------+        +---------------------+
+#
+# The control-plane exchange (BGP session + RFC 9252 SRv6 service TLVs)
+# is the focus. The `ce` node exists for the optional data-plane stretch
+# goal; control-plane interop does not depend on it.
+name: frr-interop
+
+topology:
+  nodes:
+    # --- Vinbero PE: the implementation under test --------------------------
+    vinbero:
+      kind: linux
+      image: vinbero-interop:latest
+      # containerlab runs linux nodes privileged by default, which is
+      # what the XDP attach + BPF FS need.
+      binds:
+        - vinbero/vinbero.yml:/vinbero.yml
+        - vinbero/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    # --- FRR remote PE: the independent RFC 9252 implementation -------------
+    frr:
+      kind: linux
+      image: frr-interop:10.2.1
+      binds:
+        - frr/daemons:/etc/frr/daemons
+        - frr/frr.conf:/etc/frr/frr.conf
+        - frr/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    # --- CE: plaintext traffic source (data-plane stretch goal only) --------
+    ce:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.0.0.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace 10.200.0.0/24 via 10.0.0.1
+
+  links:
+    # Vinbero PE <-> FRR remote PE: BGP session + SRv6 underlay.
+    - endpoints: [vinbero:eth1, frr:eth1]
+    # CE <-> Vinbero PE customer-facing port.
+    - endpoints: [ce:eth1, vinbero:eth2]

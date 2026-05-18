@@ -1,0 +1,28 @@
+# FRR daemon selection for the interop lab's remote PE.
+# Only bgpd + zebra are needed: zebra owns the SRv6 locator and the
+# VRF, bgpd runs the VPNv4/VPNv6 sessions and the SRv6 service TLVs.
+zebra=yes
+bgpd=yes
+ospfd=no
+ospf6d=no
+ripd=no
+ripngd=no
+isisd=no
+pimd=no
+pim6d=no
+ldpd=no
+nhrpd=no
+eigrpd=no
+babeld=no
+sharpd=no
+pbrd=no
+bfdd=no
+fabricd=no
+vrrpd=no
+pathd=no
+staticd=yes
+
+vtysh_enable=yes
+zebra_options="  -A 127.0.0.1 -s 90000000"
+bgpd_options="   -A 127.0.0.1"
+staticd_options="-A 127.0.0.1"
