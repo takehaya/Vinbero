@@ -12,7 +12,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
+	"github.com/google/uuid"
 	gobgpapi "github.com/osrg/gobgp/v4/api"
 	gobgpsrv "github.com/osrg/gobgp/v4/pkg/server"
 	"go.uber.org/zap"
@@ -23,17 +25,46 @@ import (
 // Session is the GoBGP-backed bgp.Session. A zero Session is not
 // usable; construct one with NewSession. Start / Stop are not safe for
 // concurrent use -- the daemon drives them from a single goroutine.
+//
+// It also satisfies bgp.RouteAdvertiser; advertised tracks the gobgp
+// path UUID for each advertised route so Withdraw can delete the exact
+// path. advMu guards that map since advertise / withdraw can be driven
+// from concurrent RPC handlers.
+//
+// srvMu guards the server handle itself: Start / Stop publish and clear
+// it while RPC handlers read it, so the pointer must not be touched
+// without the lock. Read it through bgpServer().
 type Session struct {
 	logger *zap.Logger
+
+	srvMu  sync.RWMutex
 	server *gobgpsrv.BgpServer
+
+	advMu      sync.Mutex
+	advertised map[bgp.RouteKey]uuid.UUID
 }
 
-// compile-time assertion that *Session satisfies the interface.
-var _ bgp.Session = (*Session)(nil)
+// bgpServer returns the running BgpServer, or nil when the session is
+// not started. The pointer is snapshotted under srvMu so a concurrent
+// Stop cannot race the read.
+func (s *Session) bgpServer() *gobgpsrv.BgpServer {
+	s.srvMu.RLock()
+	defer s.srvMu.RUnlock()
+	return s.server
+}
+
+// compile-time assertions for the interfaces *Session satisfies.
+var (
+	_ bgp.Session         = (*Session)(nil)
+	_ bgp.RouteAdvertiser = (*Session)(nil)
+)
 
 // NewSession returns an unstarted Session.
 func NewSession(logger *zap.Logger) *Session {
-	return &Session{logger: logger.Named("bgp.gobgp")}
+	return &Session{
+		logger:     logger.Named("bgp.gobgp"),
+		advertised: make(map[bgp.RouteKey]uuid.UUID),
+	}
 }
 
 // Start brings up the in-process BgpServer and runs the OPEN handshake
@@ -58,7 +89,9 @@ func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
 		srv.Stop()
 		return fmt.Errorf("start bgp (asn=%d router_id=%s): %w", cfg.LocalASN, cfg.RouterID, err)
 	}
+	s.srvMu.Lock()
 	s.server = srv
+	s.srvMu.Unlock()
 	s.logger.Info("BGP session started",
 		zap.Uint32("local_asn", cfg.LocalASN),
 		zap.String("router_id", cfg.RouterID),
@@ -76,9 +109,12 @@ func (s *Session) Stop(ctx context.Context) error {
 	if s.server == nil {
 		return nil
 	}
-	stopErr := s.server.StopBgp(ctx, &gobgpapi.StopBgpRequest{})
-	s.server.Stop()
+	s.srvMu.Lock()
+	srv := s.server
 	s.server = nil
+	s.srvMu.Unlock()
+	stopErr := srv.StopBgp(ctx, &gobgpapi.StopBgpRequest{})
+	srv.Stop()
 	s.logger.Info("BGP session stopped")
 	if stopErr != nil {
 		return fmt.Errorf("stop bgp: %w", stopErr)
@@ -89,7 +125,8 @@ func (s *Session) Stop(ctx context.Context) error {
 // AddPeer configures a neighbor. The peer starts the FSM immediately;
 // reaching ESTABLISHED is asynchronous and observed via Peers.
 func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
-	if s.server == nil {
+	srv := s.bgpServer()
+	if srv == nil {
 		return bgp.ErrSessionNotStarted
 	}
 	afiSafis, err := familiesToAfiSafis(p.Families)
@@ -109,7 +146,7 @@ func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 		},
 		AfiSafis: afiSafis,
 	}
-	if err := s.server.AddPeer(ctx, &gobgpapi.AddPeerRequest{Peer: peer}); err != nil {
+	if err := srv.AddPeer(ctx, &gobgpapi.AddPeerRequest{Peer: peer}); err != nil {
 		return fmt.Errorf("add peer %s: %w", p.Neighbor, err)
 	}
 	s.logger.Info("BGP peer added", zap.String("neighbor", p.Neighbor), zap.Uint32("peer_asn", p.PeerASN))
@@ -118,10 +155,11 @@ func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 
 // DeletePeer removes a neighbor.
 func (s *Session) DeletePeer(ctx context.Context, neighbor string) error {
-	if s.server == nil {
+	srv := s.bgpServer()
+	if srv == nil {
 		return bgp.ErrSessionNotStarted
 	}
-	if err := s.server.DeletePeer(ctx, &gobgpapi.DeletePeerRequest{Address: neighbor}); err != nil {
+	if err := srv.DeletePeer(ctx, &gobgpapi.DeletePeerRequest{Address: neighbor}); err != nil {
 		return fmt.Errorf("delete peer %s: %w", neighbor, err)
 	}
 	s.logger.Info("BGP peer deleted", zap.String("neighbor", neighbor))
@@ -130,13 +168,14 @@ func (s *Session) DeletePeer(ctx context.Context, neighbor string) error {
 
 // Peers returns a snapshot of every configured neighbor's session state.
 func (s *Session) Peers(ctx context.Context) ([]bgp.PeerState, error) {
-	if s.server == nil {
+	srv := s.bgpServer()
+	if srv == nil {
 		return nil, bgp.ErrSessionNotStarted
 	}
 	// Small initial cap: peer counts are typically single digits to low
 	// dozens, so one allocation covers the common case.
 	out := make([]bgp.PeerState, 0, 16)
-	err := s.server.ListPeer(ctx, &gobgpapi.ListPeerRequest{}, func(p *gobgpapi.Peer) {
+	err := srv.ListPeer(ctx, &gobgpapi.ListPeerRequest{}, func(p *gobgpapi.Peer) {
 		st := bgp.PeerState{}
 		if c := p.GetConf(); c != nil {
 			st.Neighbor = c.GetNeighborAddress()

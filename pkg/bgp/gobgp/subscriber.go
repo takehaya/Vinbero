@@ -23,7 +23,8 @@ var _ bgp.RouteSubscriber = (*Session)(nil)
 // (see bgp.RouteHandler). filter restricts delivery to one family; an
 // empty filter delivers every supported family.
 func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func(), error) {
-	if s.server == nil {
+	srv := s.bgpServer()
+	if srv == nil {
 		return nil, bgp.ErrSessionNotStarted
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -44,7 +45,7 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 	// WatchPostUpdate: post-import-policy routes, which is what the data
 	// plane should mirror. current=true replays the existing RIB so a
 	// subscriber that attaches after peers are up still sees them.
-	if err := s.server.WatchEvent(ctx, cbs, gobgpsrv.WatchPostUpdate(true, "", "")); err != nil {
+	if err := srv.WatchEvent(ctx, cbs, gobgpsrv.WatchPostUpdate(true, "", "")); err != nil {
 		cancel()
 		return nil, fmt.Errorf("watch event: %w", err)
 	}
