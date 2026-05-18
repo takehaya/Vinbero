@@ -117,6 +117,16 @@ func checkEntryOwner(owners *entryOwnerMap, key any, caller OwnerTag) (alreadyOw
 	return false, fmt.Errorf("%w: existing %q, caller %q", ErrEntryOwnerMismatch, existing, caller)
 }
 
+// deleteMapKey removes key from m, treating a missing key as success so
+// callers can delete idempotently. A double withdraw or a delete
+// replayed after a restart must not surface as an error.
+func deleteMapKey(m *ebpf.Map, key any) error {
+	if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return err
+	}
+	return nil
+}
+
 // putMainAndOwner writes value to the main map and, when not already
 // owned, mirrors the owner to the paired owner map. A failure on the
 // owner write rolls the main write back so the invariant "main entry =>
@@ -1002,7 +1012,7 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	var entry SidFunctionEntry
 	hasEntry := m.objs.SidFunctionMap.Lookup(key, &entry) == nil
 
-	if err := m.objs.SidFunctionMap.Delete(key); err != nil {
+	if err := deleteMapKey(m.objs.SidFunctionMap, key); err != nil {
 		return fmt.Errorf("failed to delete SID function entry: %w", err)
 	}
 	if err := m.sidFunctionOwners.Delete(key); err != nil {
@@ -1243,7 +1253,7 @@ func (m *MapOperations) deleteHeadendV4Internal(triggerPrefix string, requester 
 			return err
 		}
 	}
-	if err := m.objs.HeadendV4Map.Delete(key); err != nil {
+	if err := deleteMapKey(m.objs.HeadendV4Map, key); err != nil {
 		return fmt.Errorf("failed to delete headend v4 entry: %w", err)
 	}
 	if err := m.headendV4Owners.Delete(key); err != nil {
@@ -1326,7 +1336,7 @@ func (m *MapOperations) deleteHeadendV6Internal(triggerPrefix string, requester 
 			return err
 		}
 	}
-	if err := m.objs.HeadendV6Map.Delete(key); err != nil {
+	if err := deleteMapKey(m.objs.HeadendV6Map, key); err != nil {
 		return fmt.Errorf("failed to delete headend v6 entry: %w", err)
 	}
 	if err := m.headendV6Owners.Delete(key); err != nil {
