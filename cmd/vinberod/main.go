@@ -106,6 +106,14 @@ func run(cliCtx *cli.Context) error {
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
+	// Defer the RPC server shutdown right after StartAsync so an early
+	// return below (e.g. BGP start failure) tears it down instead of
+	// leaking it. The normal path falls through to the same defer.
+	defer func() {
+		if err := shutdown(srv, lg); err != nil {
+			lg.Error("server shutdown error", zap.Error(err))
+		}
+	}()
 
 	if cliCtx.Bool("bgp-enabled") {
 		bgpSession := gobgp.NewSession(lg)
@@ -123,18 +131,18 @@ func run(cliCtx *cli.Context) error {
 
 	lg.Info("Vinbero started successfully")
 
-	// Wait for shutdown signal
+	// Wait for shutdown signal; cleanup runs via the deferred shutdown
+	// (RPC server) and bgpSession.Stop above.
 	<-ctx.Done()
 	lg.Info("Received shutdown signal, cleaning up...")
-
-	return shutdown(srv, lg)
+	return nil
 }
 
 // startBGPSession brings up the in-process BGP speaker and registers
 // every neighbor from the config. Peer FSMs run asynchronously; this
 // function returns once they are configured, not once they reach
 // ESTABLISHED.
-func startBGPSession(ctx context.Context, session bgp.BGPSession, cfg config.BGPConfig) error {
+func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPConfig) error {
 	if err := session.Start(ctx, bgp.GlobalConfig{
 		LocalASN:   cfg.Global.LocalASN,
 		RouterID:   cfg.Global.RouterID,

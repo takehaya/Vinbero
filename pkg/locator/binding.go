@@ -44,6 +44,9 @@ type inMemoryBindings struct {
 	bindings map[netip.Addr]Binding
 }
 
+// compile-time assertion that *inMemoryBindings satisfies the interface.
+var _ BindingTable = (*inMemoryBindings)(nil)
+
 // NewBindingTable returns an in-memory BindingTable.
 func NewBindingTable() BindingTable {
 	return &inMemoryBindings{bindings: make(map[netip.Addr]Binding)}

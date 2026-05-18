@@ -6,19 +6,27 @@
 // The surface is split into four roles per the GoBGP integration plan
 // (docs/plan/gobgp-integration.md §2.2):
 //
-//   - BGPSession         -- peer / global lifecycle, no data path
+//   - Session            -- peer / global lifecycle, no data path
 //   - RouteAdvertiser    -- push local state out as BGP routes
 //   - RouteSubscriber    -- receive BGP routes into Vinbero
 //   - SRPolicyController -- SR Policy specific receive / advertise
 //
-// Phase 1c implements BGPSession only (peer establishment). The other
+// Phase 1c implements Session only (peer establishment). The other
 // three interfaces are defined here so Phase 1d / 1e can fill them in
 // without reshaping the package.
 package bgp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+)
+
+// Session lifecycle errors. Exposed as sentinels so callers can branch
+// with errors.Is rather than string-matching.
+var (
+	ErrSessionNotStarted     = errors.New("bgp: session not started")
+	ErrSessionAlreadyStarted = errors.New("bgp: session already started")
 )
 
 // Family identifies an AFI/SAFI pair in operator-friendly form. The
@@ -32,15 +40,27 @@ const (
 	FamilySRPolicyIPv6 Family = "sr_policy_ipv6"
 )
 
+// String renders the family for logs and error messages.
+func (f Family) String() string { return string(f) }
+
+// Valid reports whether f is one of the recognized families.
+func (f Family) Valid() bool {
+	switch f {
+	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6:
+		return true
+	default:
+		return false
+	}
+}
+
 // ParseFamily validates an operator-supplied family string (as written
 // in vinbero.yml) and returns the typed Family.
 func ParseFamily(s string) (Family, error) {
-	switch Family(s) {
-	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6:
-		return Family(s), nil
-	default:
+	f := Family(s)
+	if !f.Valid() {
 		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6)", s)
 	}
+	return f, nil
 }
 
 // GlobalConfig is the BGP speaker's own identity.
@@ -69,9 +89,9 @@ type PeerState struct {
 	SessionState string // "idle" / "connect" / "active" / "opensent" / "openconfirm" / "established"
 }
 
-// BGPSession owns peer and global lifecycle. It carries no data-path
+// Session owns peer and global lifecycle. It carries no data-path
 // responsibility -- route exchange lives in the other three interfaces.
-type BGPSession interface {
+type Session interface {
 	Start(ctx context.Context, cfg GlobalConfig) error
 	Stop(ctx context.Context) error
 	AddPeer(ctx context.Context, p PeerConfig) error

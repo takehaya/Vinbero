@@ -3,7 +3,7 @@
 // starts a gRPC listener, so the BGP speaker is driven purely through
 // the Go API.
 //
-// Phase 1c implements bgp.BGPSession (peer lifecycle) only. The route
+// Phase 1c implements bgp.Session (peer lifecycle) only. The route
 // exchange interfaces (RouteAdvertiser / RouteSubscriber /
 // SRPolicyController) land in Phase 1d / 1e.
 package gobgp
@@ -20,7 +20,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp"
 )
 
-// Session is the GoBGP-backed bgp.BGPSession. A zero Session is not
+// Session is the GoBGP-backed bgp.Session. A zero Session is not
 // usable; construct one with NewSession. Start / Stop are not safe for
 // concurrent use -- the daemon drives them from a single goroutine.
 type Session struct {
@@ -28,8 +28,8 @@ type Session struct {
 	server *gobgpsrv.BgpServer
 }
 
-// compile-time assertion that Session satisfies the interface.
-var _ bgp.BGPSession = (*Session)(nil)
+// compile-time assertion that *Session satisfies the interface.
+var _ bgp.Session = (*Session)(nil)
 
 // NewSession returns an unstarted Session.
 func NewSession(logger *zap.Logger) *Session {
@@ -41,7 +41,7 @@ func NewSession(logger *zap.Logger) *Session {
 // started Session is an error so a double-wire bug surfaces loudly.
 func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
 	if s.server != nil {
-		return fmt.Errorf("bgp session already started")
+		return bgp.ErrSessionAlreadyStarted
 	}
 	srv := gobgpsrv.NewBgpServer()
 	// Serve() is the blocking API event loop; it must run in its own
@@ -90,7 +90,7 @@ func (s *Session) Stop(ctx context.Context) error {
 // reaching ESTABLISHED is asynchronous and observed via Peers.
 func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 	if s.server == nil {
-		return fmt.Errorf("bgp session not started")
+		return bgp.ErrSessionNotStarted
 	}
 	afiSafis, err := familiesToAfiSafis(p.Families)
 	if err != nil {
@@ -119,7 +119,7 @@ func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 // DeletePeer removes a neighbor.
 func (s *Session) DeletePeer(ctx context.Context, neighbor string) error {
 	if s.server == nil {
-		return fmt.Errorf("bgp session not started")
+		return bgp.ErrSessionNotStarted
 	}
 	if err := s.server.DeletePeer(ctx, &gobgpapi.DeletePeerRequest{Address: neighbor}); err != nil {
 		return fmt.Errorf("delete peer %s: %w", neighbor, err)
@@ -131,7 +131,7 @@ func (s *Session) DeletePeer(ctx context.Context, neighbor string) error {
 // Peers returns a snapshot of every configured neighbor's session state.
 func (s *Session) Peers(ctx context.Context) ([]bgp.PeerState, error) {
 	if s.server == nil {
-		return nil, fmt.Errorf("bgp session not started")
+		return nil, bgp.ErrSessionNotStarted
 	}
 	// Small initial cap: peer counts are typically single digits to low
 	// dozens, so one allocation covers the common case.

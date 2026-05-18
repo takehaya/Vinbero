@@ -42,14 +42,16 @@ const (
 
 // OwnerBGPVPN is the entry owner for a VPNv4 / VPNv6 prefix installed from
 // a BGP UPDATE. The (asn, rd) pair is sufficient to attribute the entry
-// back to the BGP session that learned it.
+// back to the BGP session that learned it. Defined now; the receive path
+// that calls it is wired up in Phase 1d.
 func OwnerBGPVPN(asn uint32, rd string) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:rd=%s", OwnerTagVersion, asn, rd))
 }
 
 // OwnerBGPUnicast is the entry owner for an IPv6 unicast prefix derived
 // from a BGP UPDATE. Reserved for any future path that caches unicast
-// routes in BPF; today these go through netlink to the kernel FIB.
+// routes in BPF; today (Phase 1d plan) these go through netlink to the
+// kernel FIB, so this is defined for completeness but not yet called.
 func OwnerBGPUnicast(asn uint32) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:unicast", OwnerTagVersion, asn))
 }
@@ -125,8 +127,12 @@ func decodeOwnerTag(v []byte) (string, bool) {
 // Key type matches the paired main map -- LpmKeyV6 for
 // sid_function_owner_map and headend_v6_owner_map, LpmKeyV4 for
 // headend_v4_owner_map. We accept it as any so one wrapper covers all
-// three maps without generics. Phase 1b is expected to reuse this for
-// locator manager; LPM_TRIE handles share the same Put/Delete semantics.
+// three maps without generics.
+//
+// This type tracks write-permission ownership. It is deliberately not
+// reused by the locator manager (pkg/locator): that subsystem's
+// BindingTable records SID allocation provenance, a different concern,
+// so the two stay separate.
 type entryOwnerMap struct {
 	m *ebpf.Map
 }
