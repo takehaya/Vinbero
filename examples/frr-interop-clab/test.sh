@@ -115,24 +115,29 @@ else
     dexec "$VIN" vbctl headend-v6 list || true
 fi
 
-# 2c. The decoded SRv6 SID is the one FRR allocated (headend SEGMENTS
-#     column carries the segment list = the service SID).
-# `show bgp <afi> vpn <prefix> json` is keyed by route-distinguisher,
-# each RD value carrying a `paths` list -- dig the first path's SID out.
+# frr_route_sid digs the first path's remoteSid out of vtysh JSON
+# (`show bgp <afi> vpn <prefix> json` is keyed by route-distinguisher,
+# each RD value carrying a `paths` list). Used here and in section 3.
 frr_route_sid() {
-    # stdin = vtysh JSON; prints the first path's remoteSid.
     python3 -c "import sys,json; d=json.load(sys.stdin); \
 rds=[v for v in d.values() if isinstance(v,dict) and 'paths' in v]; \
 print(rds[0]['paths'][0].get('remoteSid','') if rds else '')"
 }
-frr_v4_sid=$(dexec "$FRR" vtysh -c "show bgp ipv4 vpn $FRR_V4_PREFIX json" 2>/dev/null \
+
+# 2c. RFC 9252 §4 transposition. FRR carries the SID function bits in
+#     the VPN label, so the SID *on the wire* is the bare locator.
+#     Vinbero must fold the label back and reconstruct FRR's real
+#     End.DT4 localsid -- the headend SEGMENTS column must show the
+#     full SID, not the bare on-wire locator.
+FRR_V4_FULL_SID=fd00:200:0:0:1::   # FRR's transposed End.DT4 localsid
+frr_v4_wire_sid=$(dexec "$FRR" vtysh -c "show bgp ipv4 vpn $FRR_V4_PREFIX json" 2>/dev/null \
   | frr_route_sid 2>/dev/null)
 vin_v4_seg=$(dexec "$VIN" vbctl headend-v4 list 2>/dev/null \
   | awk -v p="$FRR_V4_PREFIX" '$1==p {print $NF}')
-if [ -n "$frr_v4_sid" ] && [ "$frr_v4_sid" = "$vin_v4_seg" ]; then
-    ok "SRv6 service SID matches end-to-end: FRR=$frr_v4_sid  Vinbero=$vin_v4_seg"
+if [ "$vin_v4_seg" = "$FRR_V4_FULL_SID" ] && [ "$frr_v4_wire_sid" != "$FRR_V4_FULL_SID" ]; then
+    ok "Vinbero folded the transposed SID: wire=$frr_v4_wire_sid -> full=$vin_v4_seg"
 else
-    ng "SRv6 service SID mismatch: FRR='$frr_v4_sid' Vinbero='$vin_v4_seg'"
+    ng "transposition decode wrong: wire='$frr_v4_wire_sid' Vinbero='$vin_v4_seg' want='$FRR_V4_FULL_SID'"
 fi
 
 # --- 3. Vinbero -> FRR: SRv6 Service TLV encode ----------------------------
