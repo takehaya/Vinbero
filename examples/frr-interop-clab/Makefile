@@ -45,7 +45,8 @@ destroy:
 
 reload: destroy deploy
 
-# Bidirectional SRv6 L3VPN interop assertions.
+# SRv6 L3VPN interop assertions: bidirectional route exchange (control
+# plane) plus a bidirectional ping over the L3VPN (data plane).
 test:
 	sudo bash test.sh
 

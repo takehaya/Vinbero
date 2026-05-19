@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # FRR <-> Vinbero BGP SRv6 L3VPN interop assertions.
 #
-# Verifies, against a running `make deploy` lab, the three things the
+# Verifies, against a running `make deploy` lab, the four things the
 # example exists to prove:
 #   1. the BGP session is ESTABLISHED on both sides;
 #   2. FRR -> Vinbero: a VPN route FRR advertises (with an RFC 9252
@@ -9,17 +9,26 @@
 #      map -- SRv6 Service TLV *decode* interop;
 #   3. Vinbero -> FRR: a route advertised via `vbctl bgp advertise-vpn`
 #      reaches FRR's VPN RIB with the SRv6 SID intact -- SRv6 Service
-#      TLV *encode* interop.
+#      TLV *encode* interop;
+#   4. data plane: a real `ping` succeeds both ways between the CE host
+#      and FRR's customer over the SRv6 L3VPN -- Vinbero H.Encaps /
+#      End.DT4 decap interop with FRR's seg6 dataplane.
 #
 # Exit non-zero on the first failed assertion.
 set -u
 
 FRR=clab-frr-interop-frr
 VIN=clab-frr-interop-vinbero
+CE=clab-frr-interop-ce
 
 # Customer prefixes FRR exports (see frr/frr.conf).
 FRR_V4_PREFIX=10.200.0.0/24
 FRR_V6_PREFIX=fd00:c200::/64
+
+# Data-plane endpoints: the CE host and FRR's customer address in
+# vrf-cust. All CE<->customer traffic rides the SRv6 L3VPN.
+CE_ADDR=10.0.0.10
+FRR_CUST_ADDR=10.200.0.1
 
 # Prefixes / SIDs Vinbero advertises towards FRR.
 VIN_V4_PREFIX=10.100.0.0/24
@@ -168,6 +177,43 @@ if retry check_frr_rib ipv6 "$VIN_V6_PREFIX" "$VIN_V6_SID"; then
 else
     ng "FRR RIB missing $VIN_V6_PREFIX / wrong SID"
     dexec "$FRR" vtysh -c "show bgp ipv6 vpn" || true
+fi
+
+# --- 4. Data plane: bidirectional SRv6 L3VPN ping --------------------------
+echo ""
+echo "[4] Data plane  (SRv6 L3VPN ping, both directions)"
+
+# 4a. CE -> FRR customer. The CE sends plaintext IPv4 to FRR's customer
+# address; Vinbero's XDP H.Encaps it towards FRR's service SID, FRR's
+# seg6 End.DT4 decaps it into vrf-cust. The reply rides the L3VPN back.
+# Retry: the BGP-driven headend / End.DT4 entries settle asynchronously.
+ce_to_frr() {
+    dexec "$CE" ping -c 2 -W 2 "$FRR_CUST_ADDR" >/dev/null 2>&1
+}
+if retry ce_to_frr; then
+    ok "CE ($CE_ADDR) -> FRR customer ($FRR_CUST_ADDR) ping over SRv6 L3VPN"
+    dexec "$CE" ping -c 3 -W 2 "$FRR_CUST_ADDR" 2>&1 \
+      | grep -E 'packets transmitted|rtt|round-trip' | sed 's/^/      /'
+else
+    ng "CE -> FRR customer ping failed"
+    dexec "$CE" ping -c 3 -W 2 "$FRR_CUST_ADDR" 2>&1 | sed 's/^/      /' || true
+fi
+
+# 4b. FRR customer -> CE (return direction). FRR H.Encaps the customer
+# traffic towards Vinbero's End.DT4 SID; Vinbero's XDP decaps it and
+# forwards to the CE. `ip vrf exec` sources the ping from vrf-cust.
+frr_to_ce() {
+    dexec "$FRR" ip vrf exec vrf-cust \
+        ping -c 2 -W 2 -I "$FRR_CUST_ADDR" "$CE_ADDR" >/dev/null 2>&1
+}
+if retry frr_to_ce; then
+    ok "FRR customer ($FRR_CUST_ADDR) -> CE ($CE_ADDR) ping over SRv6 L3VPN"
+    dexec "$FRR" ip vrf exec vrf-cust ping -c 3 -W 2 -I "$FRR_CUST_ADDR" "$CE_ADDR" 2>&1 \
+      | grep -E 'packets transmitted|rtt|round-trip' | sed 's/^/      /'
+else
+    ng "FRR customer -> CE ping failed"
+    dexec "$FRR" ip vrf exec vrf-cust ping -c 3 -W 2 -I "$FRR_CUST_ADDR" "$CE_ADDR" 2>&1 \
+      | sed 's/^/      /' || true
 fi
 
 # --- summary ---------------------------------------------------------------
