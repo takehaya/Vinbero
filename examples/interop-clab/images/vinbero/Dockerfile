@@ -1,8 +1,8 @@
-# Example-local runtime image for the FRR <-> Vinbero BGP SRv6 interop lab.
+# Shared Vinbero runtime image for the interop-clab scenarios.
 #
 # This is NOT a release artifact: it stays decoupled from the goreleaser
-# pipeline on purpose (see docs/plan/frr-interop-clab.md). It only builds
-# the two binaries the lab needs and drops them onto a small Debian base.
+# pipeline on purpose. It only builds the two binaries the lab needs and
+# drops them onto a small Debian base.
 #
 # The BPF objects are committed under pkg/bpf/ and embedded via go:embed,
 # so `make bpf-gen` is NOT needed -- a plain `go build` is enough.

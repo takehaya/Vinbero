@@ -17,3 +17,7 @@ RUN touch /etc/frr/vtysh.conf \
  && mkdir -p /var/log/frr \
  && touch /var/log/frr/frr.log \
  && chmod 766 /var/log/frr/frr.log
+
+# Daemon selection (zebra + bgpd). This is image-level config shared by
+# every scenario; the per-scenario frr.conf is still bind-mounted.
+COPY daemons /etc/frr/daemons

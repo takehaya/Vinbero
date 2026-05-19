@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# FRR <-> Vinbero BGP SRv6 L3VPN interop assertions.
+# l3vpn-2site interop scenario assertions (Vinbero <-> FRR).
 #
-# Verifies, against a running `make deploy` lab, the things the example
+# Verifies, against a running `make deploy` lab, the things the scenario
 # exists to prove:
 #   1. the iBGP session is ESTABLISHED on both sides;
 #   2. FRR -> Vinbero: a VPN route FRR advertises (with an RFC 9252
@@ -27,11 +27,11 @@
 # Exit non-zero on the first failed assertion.
 set -u
 
-PE_TOKYO=clab-frr-interop-pe-tokyo   # Vinbero PE
-PE_OSAKA=clab-frr-interop-pe-osaka   # FRR PE
-CORE=clab-frr-interop-core
-CE_TOKYO=clab-frr-interop-ce-tokyo
-CE_OSAKA=clab-frr-interop-ce-osaka
+PE_TOKYO=clab-l3vpn-2site-pe-tokyo   # Vinbero PE
+PE_OSAKA=clab-l3vpn-2site-pe-osaka   # FRR PE
+CORE=clab-l3vpn-2site-core
+CE_TOKYO=clab-l3vpn-2site-ce-tokyo
+CE_OSAKA=clab-l3vpn-2site-ce-osaka
 
 # Customer prefixes.
 TOKYO_PREFIX=10.1.0.0/24      # ce-tokyo subnet, advertised by Vinbero
@@ -73,7 +73,7 @@ retry_n() {
 }
 
 echo "=============================================="
-echo " FRR <-> Vinbero SRv6 L3VPN interop test"
+echo " l3vpn-2site interop scenario test (Vinbero <-> FRR)"
 echo "=============================================="
 
 # --- 1. iBGP session ESTABLISHED on both sides -----------------------------

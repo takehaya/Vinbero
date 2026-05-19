@@ -1,36 +1,37 @@
 ---
-# FRR <-> Vinbero BGP SRv6 L3VPN interop lab.
+# Vinbero interop containerlab labs.
 #
-# Deliberately separate from the netns-based example matrix: this lab
-# needs Docker, containerlab and privileged containers, which the
-# shell/netns examples do not. The lab proves RFC 9252 SRv6 Service TLV
-# interop with an independent BGP implementation (FRR).
-name: FRR interop (containerlab)
+# Deliberately separate from the netns-based example matrix: these labs
+# need Docker, containerlab and privileged containers, which the
+# shell/netns examples do not. They prove interop between Vinbero and an
+# independent third-party implementation; the l3vpn-2site scenario peers
+# Vinbero with FRR over an SRv6 L3VPN.
+name: interop-clab (containerlab)
 
 on:
   push:
     paths:
-      - 'examples/frr-interop-clab/**'
+      - 'examples/interop-clab/**'
       - 'pkg/bgp/**'
       - 'pkg/config/config.go'
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
       - 'pkg/bpf/*.o'
-      - '.github/workflows/frr-interop.yaml'
+      - '.github/workflows/interop-clab.yaml'
   pull_request:
     paths:
-      - 'examples/frr-interop-clab/**'
+      - 'examples/interop-clab/**'
       - 'pkg/bgp/**'
       - 'pkg/config/config.go'
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
       - 'pkg/bpf/*.o'
-      - '.github/workflows/frr-interop.yaml'
+      - '.github/workflows/interop-clab.yaml'
   workflow_dispatch:
 
 jobs:
-  frr-interop:
-    name: FRR <-> Vinbero SRv6 L3VPN interop
+  interop-clab:
+    name: l3vpn-2site SRv6 L3VPN interop
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -43,23 +44,23 @@ jobs:
         run: bash -c "$(curl -sL https://get.containerlab.dev)"
 
       - name: Build images
-        working-directory: examples/frr-interop-clab
+        working-directory: examples/interop-clab
         run: make build
 
       - name: Deploy lab
-        working-directory: examples/frr-interop-clab
+        working-directory: examples/interop-clab
         run: make deploy
 
       - name: Run interop test
-        working-directory: examples/frr-interop-clab
+        working-directory: examples/interop-clab
         run: make test
 
       - name: Dump lab state on failure
         if: failure()
-        working-directory: examples/frr-interop-clab
+        working-directory: examples/interop-clab
         run: make status logs
 
       - name: Destroy lab
         if: always()
-        working-directory: examples/frr-interop-clab
+        working-directory: examples/interop-clab
         run: make destroy

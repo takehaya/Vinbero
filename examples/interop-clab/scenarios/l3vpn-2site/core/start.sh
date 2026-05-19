@@ -1,5 +1,5 @@
 #!/bin/sh
-# Provider backbone router for the FRR <-> Vinbero SRv6 L3VPN lab.
+# Provider backbone router for the l3vpn-2site interop scenario.
 #
 # An SRv6 L3VPN transit node forwards purely by the *outer* IPv6 header,
 # so `core` needs NO SRv6-service awareness -- it is a plain IPv6

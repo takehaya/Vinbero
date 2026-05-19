@@ -1,14 +1,10 @@
-# containerlab topology for the FRR <-> Vinbero SRv6 L3VPN interop lab.
+# containerlab topology for the l3vpn-2site interop scenario.
 #
-# A textbook 2-site SRv6 L3VPN:
+# A textbook 2-site SRv6 L3VPN. Vinbero is the PE under test; FRR is the
+# independent third-party PE it interoperates with in this scenario:
 #
 #   ce-tokyo --- pe-tokyo ===== core ===== pe-osaka --- ce-osaka
 #  10.1.0.0/24  (Vinbero PE)  (IPv6 core)  (FRR PE)   10.2.0.0/24
-#
-#   +----------+      +-------------+     +--------+     +-------------+      +----------+
-#   | ce-tokyo |-eth1-| pe-tokyo    |-eth1| core   |eth2-| pe-osaka    |-eth1-| ce-osaka |
-#   |10.1.0.10 | eth2 |  Vinbero PE | eth1| IPv6   |eth2 |  FRR 10.2.1 | eth1 |10.2.0.10 |
-#   +----------+      +-------------+     | router |     +-------------+      +----------+
 #
 # Both PEs are in ONE provider AS (65100) and run iBGP (VPNv4 + VPNv6)
 # peering on their loopbacks. iBGP is naturally multi-hop, so the session
@@ -18,7 +14,9 @@
 #
 # Both customer sites sit in a single L3VPN / VRF, so the ce-tokyo and
 # ce-osaka hosts reach each other end to end over SRv6.
-name: frr-interop
+#
+# `name:` is the scenario name, so containers are clab-l3vpn-2site-<node>.
+name: l3vpn-2site
 
 topology:
   nodes:
@@ -60,8 +58,9 @@ topology:
     pe-osaka:
       kind: linux
       image: frr-interop:10.2.1
+      # /etc/frr/daemons is baked into the frr-interop image (it is
+      # image-level config); only the per-scenario files are bound here.
       binds:
-        - frr/daemons:/etc/frr/daemons
         - frr/frr.conf:/etc/frr/frr.conf
         - frr/start.sh:/start.sh
       exec:
