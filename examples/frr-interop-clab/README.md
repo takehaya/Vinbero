@@ -1,16 +1,19 @@
 # FRR ⇄ Vinbero — BGP SRv6 L3VPN interop (containerlab)
 
-A [containerlab](https://containerlab.dev/) lab that peers **Vinbero**
-with **FRRouting** — an independent, mature BGP implementation — and
-verifies a complete SRv6 L3VPN: both the **control plane** (VPNv4 /
-VPNv6 routes carrying RFC 9252 SRv6 Service TLVs, exchanged both ways)
-and the **data plane** (a real `ping` between a customer host and FRR's
-customer, riding the SRv6 L3VPN end to end).
+A [containerlab](https://containerlab.dev/) lab that builds a textbook
+**2-site SRv6 L3VPN** and peers **Vinbero** with **FRRouting** — an
+independent, mature BGP implementation — as the two provider-edge
+routers. It verifies a complete SRv6 L3VPN: both the **control plane**
+(VPNv4 / VPNv6 routes carrying RFC 9252 SRv6 Service TLVs, exchanged
+both ways over iBGP) and the **data plane** (a real `ping` between two
+customer hosts, riding the SRv6 L3VPN end to end through both PEs and a
+provider core).
 
 The lab proves two things:
 
 * **Protocol interop** — Vinbero's RFC 9252 SRv6 Service TLV **encode**
-  and **decode** are wire-compatible with a different implementation.
+  and **decode** are wire-compatible with a different implementation,
+  including the §4 SID-structure **transposition**.
 * **Data-plane interop** — Vinbero's XDP **H.Encaps** and **End.DT4**
   decap interoperate with FRR's native `seg6` dataplane, so customer
   traffic actually flows over the L3VPN in both directions.
@@ -18,55 +21,69 @@ The lab proves two things:
 ## Topology
 
 ```
-   ce (host)            vinbero (PE, under test)        frr (remote PE, RFC impl)
- +---------+  veth     +----------------------+  veth  +---------------------+
- | traffic |<--------->| eth2          eth1   |<------>| eth1   bgpd (FRR)   |
- | source  |  eth1     |   vinberod --bgp     |  BGP   | SRv6 locator +      |
- +---------+           |   in-proc speaker    | VPNv4/6| VPNv4/VPNv6 export  |
-                       +----------------------+        +---------------------+
+ ce-tokyo --- pe-tokyo ===== core ===== pe-osaka --- ce-osaka
+10.1.0.0/24  (Vinbero PE)  (IPv6 core)  (FRR PE)   10.2.0.0/24
 ```
 
-| Node      | AS     | Role                                                       |
-|-----------|--------|------------------------------------------------------------|
-| `vinbero` | 65100  | PE under test. `vinberod --bgp-enabled`, XDP on eth1+eth2. |
-| `frr`     | 65200  | Remote PE. FRR 10.2.1, SRv6 locator + VPN export.          |
-| `ce`      | —      | Customer host. Plaintext IPv4 source/sink for the L3VPN.   |
+| Node       | Role                                                              |
+|------------|-------------------------------------------------------------------|
+| `ce-tokyo` | Customer host, subnet `10.1.0.0/24`, host `10.1.0.10`.            |
+| `pe-tokyo` | The Vinbero PE under test. `vinberod --bgp-enabled`, XDP.        |
+| `core`     | Provider backbone — a plain IPv6 router, static routes, no IGP.  |
+| `pe-osaka` | The FRR PE (interop peer). FRR 10.2.1, SRv6 locator + VPN export.|
+| `ce-osaka` | Customer host, subnet `10.2.0.0/24`, host `10.2.0.10`.           |
 
-The BGP session runs over the IPv6 link `2001:db8:ff::/64`.
+### BGP design — iBGP within one provider AS
 
-* Vinbero locator block: `fd00:100::/48` (encap source for learned routes)
-* FRR locator block: `fd00:200::/64` (its VPN service SIDs)
-* CE customer subnet: `10.0.0.0/24` (CE host `10.0.0.10`)
-* FRR customer subnet: `10.200.0.0/24` (FRR `cust0` `10.200.0.1`, in `vrf-cust`)
+Both PEs are in **one provider AS (65100)** and run **iBGP** (VPNv4 +
+VPNv6), peering on their **loopbacks** (`2001:db8:ff::1` /
+`2001:db8:ff::2`). This is the textbook SRv6 L3VPN model: the PEs of a
+single provider domain peer iBGP. iBGP is naturally multi-hop, so the
+session crosses the core with **no `ebgp-multihop` knob**.
+
+`core` is **not in BGP** — it only routes the IPv6 underlay so the two
+PE loopbacks (and the SRv6 locator blocks) are mutually reachable. The
+underlay uses **static routes, no IGP**, so there is no convergence race
+that could make the data-plane test flaky.
+
+### Addressing
+
+* Underlay links: `2001:db8:1::/64` (pe-tokyo↔core),
+  `2001:db8:2::/64` (core↔pe-osaka).
+* PE loopbacks: `2001:db8:ff::1` (pe-tokyo), `2001:db8:ff::2` (pe-osaka).
+* Vinbero SRv6 locator block: `fd00:100::/48`.
+* FRR SRv6 locator block: `fd00:200::/48`.
+* Customer subnets: `10.1.0.0/24` (Tokyo), `10.2.0.0/24` (Osaka), both
+  in a single L3VPN / VRF so the two customers reach each other.
 
 ## Data-plane path
 
 Both PEs are full SRv6 L3VPN PEs: each H.Encaps plaintext customer
-traffic and runs a decap endpoint for the return direction. The CE and
-FRR's customer reach each other purely over the `2001:db8:ff::/64`
-underlay — every customer packet rides SRv6.
+traffic towards the far PE's service SID and runs an End.DT4 decap
+endpoint for the return direction. The core forwards purely by the
+**outer IPv6 header**.
 
 ```
-CE -> FRR direction:
-  CE 10.0.0.10 --IPv4--> vinbero eth2
-    vinbero XDP H.Encaps -> outer IPv6 dst = FRR service SID (fd00:200::)
-    kernel forwards out eth1 --SRv6--> frr eth1
-    frr seg6 End.DT4 decaps into vrf-cust -> cust0 10.200.0.1
+ce-tokyo -> ce-osaka direction:
+  ce-tokyo 10.1.0.10 --IPv4--> pe-tokyo eth2
+    Vinbero XDP H.Encaps -> outer IPv6 dst = FRR service SID (fd00:200:0:1::)
+    kernel forwards out eth1 --SRv6--> core --> pe-osaka
+    FRR seg6 End.DT4 decaps into vrf-cust -> eth1 -> ce-osaka 10.2.0.10
 
-FRR -> CE direction (return):
-  frr cust0 10.200.0.1 --IPv4--> vrf-cust
-    frr H.Encaps -> outer IPv6 dst = Vinbero service SID (fd00:100:0:1::)
-    --SRv6--> vinbero eth1
-    vinbero XDP End.DT4 decaps, FIB lookup in vrf-cust table 100 -> eth2
-    --IPv4--> CE 10.0.0.10
+ce-osaka -> ce-tokyo direction (return):
+  ce-osaka 10.2.0.10 --IPv4--> pe-osaka eth1 (vrf-cust)
+    FRR H.Encaps -> outer IPv6 dst = Vinbero service SID (fd00:100:0:1::)
+    --SRv6--> core --> pe-tokyo eth1
+    Vinbero XDP End.DT4 decaps, FIB lookup in vrf-cust table 100 -> eth2
+    --IPv4--> ce-tokyo 10.1.0.10
 ```
 
 Control-plane glue that makes the data plane work:
 
 * Vinbero attaches XDP to **both** eth1 (End.DT4 decap of return
   traffic) and eth2 (H.Encaps of CE traffic), registers an `END_DT4`
-  SID function at `fd00:100:0:1::`, and advertises the CE subnet
-  `10.0.0.0/24` with `vbctl bgp advertise-vpn` (RT `65000:200`, so FRR's
+  SID function at `fd00:100:0:1::`, and advertises the Tokyo subnet
+  `10.1.0.0/24` with `vbctl bgp advertise-vpn` (RT `65000:200`, so FRR's
   `vrf-cust` imports it).
 * FRR auto-installs an `End.DT4` `seg6local` route for the SID it
   advertises. Vinbero reconstructs that full SID from the bare on-wire
@@ -76,7 +93,7 @@ Control-plane glue that makes the data plane work:
 * FRR carries Vinbero's locator block `fd00:100::/48` as a connected
   prefix so its BGP SRv6 nexthop validation accepts the route, plus a
   more-specific `/128` route so the encapsulated return traffic is
-  forwarded to Vinbero rather than NDP-resolved on-link.
+  forwarded onward to the core rather than NDP-resolved on-link.
 
 ## Layout
 
@@ -84,17 +101,19 @@ Control-plane glue that makes the data plane work:
 examples/frr-interop-clab/
 ├── README.md
 ├── Dockerfile          # vinberod runtime image (multi-stage, example-local)
-├── clab.yml            # containerlab topology
+├── clab.yml            # containerlab 5-node topology
 ├── Makefile            # build / deploy / test / destroy
-├── test.sh             # control-plane + data-plane assertions
+├── test.sh             # control-plane + data-plane assertions (readiness-gated)
+├── core/
+│   └── start.sh        # plain IPv6 router, static underlay routes
 ├── frr/
 │   ├── Dockerfile      # FRR image (quay.io/frrouting/frr:10.2.1 pinned)
 │   ├── daemons         # zebra + bgpd
-│   ├── frr.conf        # SRv6 locator + VPNv4/VPNv6 export
+│   ├── frr.conf        # SRv6 locator + VPNv4/VPNv6 export + iBGP
 │   └── start.sh        # creates the customer VRF, starts FRR
 └── vinbero/
-    ├── vinbero.yml     # bgp: section — peer = frr, families = vpnv4/vpnv6
-    └── start.sh        # starts vinberod, registers the SRv6 source locator
+    ├── vinbero.yml     # bgp: section — iBGP peer = pe-osaka loopback
+    └── start.sh        # starts vinberod, registers locator, advertises VPN
 ```
 
 This lab is intentionally independent of the netns shell examples
@@ -117,8 +136,8 @@ no `make bpf-gen` is required.
 
 ```bash
 make build      # build the vinberod + FRR images
-make deploy     # bring the 3-node topology up
-make test       # assert bidirectional SRv6 L3VPN interop
+make deploy     # bring the 5-node topology up
+make test       # assert bidirectional SRv6 L3VPN interop + ping
 make destroy    # tear the lab down
 
 make all        # build + deploy + test + destroy in one shot
@@ -128,43 +147,42 @@ make all        # build + deploy + test + destroy in one shot
 
 ## What `test.sh` verifies
 
-1. **BGP session ESTABLISHED** — on the FRR side (`show bgp summary
+1. **iBGP session ESTABLISHED** — on the FRR side (`show bgp summary
    json`) and confirmed on the Vinbero side from the daemon log.
-2. **FRR → Vinbero (decode)** — FRR exports its customer VRF prefixes
-   (`10.200.0.0/24`, `fd00:c200::/64`) as VPNv4 / VPNv6 routes with an
-   SRv6 service SID. Vinbero decodes the SRv6 Service TLV and installs
-   the routes into its `headend_v4` / `headend_v6` maps; `vbctl headend-*
-   list` shows the SID as the encap segment list.
-3. **Vinbero → FRR (encode)** — `vbctl bgp advertise-vpn` advertises
-   VPNv4 / VPNv6 routes (`10.100.0.0/24`, `fd00:c100::/64`) with explicit
-   SRv6 SIDs. They appear in FRR's VPN RIB (`show bgp ipv4/ipv6 vpn`)
-   with the SRv6 SID intact (`Remote SID: …`).
+2. **FRR → Vinbero (decode)** — FRR exports the `ce-osaka` subnet
+   (`10.2.0.0/24`) as a VPNv4 route with an SRv6 service SID. Vinbero
+   decodes the SRv6 Service TLV, applies the RFC 9252 §4 transposition,
+   and installs the route into its `headend_v4` map with the full SID
+   as the encap segment list.
+3. **Vinbero → FRR (encode)** — `vbctl bgp advertise-vpn` advertises the
+   `ce-tokyo` subnet (`10.1.0.0/24`) with an explicit SRv6 SID. It
+   reaches FRR's VPN RIB (`Remote SID: …`) and FRR installs it into
+   `vrf-cust` as an `encap seg6` route.
 4. **Data plane (bidirectional ping)** — a real `ping` succeeds both
-   ways between the CE host (`10.0.0.10`) and FRR's customer
-   (`10.200.0.1` in `vrf-cust`), proving Vinbero's XDP H.Encaps /
-   End.DT4 decap interoperate with FRR's `seg6` dataplane over the
-   SRv6 L3VPN.
+   ways between `ce-tokyo` (`10.1.0.10`) and `ce-osaka` (`10.2.0.10`),
+   proving Vinbero's XDP H.Encaps / End.DT4 decap interoperate with
+   FRR's `seg6` dataplane over the SRv6 L3VPN.
 
-A passing run prints `RESULT: 11 passed, 0 failed`.
+A passing run prints `RESULT: 8 passed, 0 failed`.
 
-## Expected output (excerpt)
+## Data-plane readiness gating
 
-```
-[2] FRR -> Vinbero  (SRv6 Service TLV decode)
-  PASS: FRR VPNv4 route 10.200.0.0/24 installed in Vinbero headend-v4 map
-      TRIGGER PREFIX  MODE      SRC ADDR    SEGMENTS
-      10.200.0.0/24   H_ENCAPS  fd00:100::  fd00:200::
-  PASS: SRv6 service SID matches end-to-end: FRR=fd00:200::  Vinbero=fd00:200::
+The SRv6 L3VPN data plane settles **asynchronously**: XDP attach, BGP
+convergence, FRR's auto-installed `seg6` localsid and underlay NDP all
+come up on their own clocks. To keep the data-plane test deterministic,
+section 4 of `test.sh` does **not** ping until it has gated on every
+precondition:
 
-[3] Vinbero -> FRR  (SRv6 Service TLV encode)
-  PASS: FRR RIB has 10.100.0.0/24 with SRv6 SID fd00:100:0:1::
+* both iBGP sessions `Established`;
+* the learned VPN routes installed on both PEs (Vinbero `headend_v4`
+  map + FRR `vrf-cust` kernel FIB);
+* the decap endpoints present (Vinbero `END_DT4` SID function + FRR's
+  `seg6local` localsid);
+* the PE loopbacks mutually reachable through the core, and the
+  customer-side ARP warmed.
 
-[4] Data plane  (SRv6 L3VPN ping, both directions)
-  PASS: CE (10.0.0.10) -> FRR customer (10.200.0.1) ping over SRv6 L3VPN
-      3 packets transmitted, 3 packets received, 0% packet loss
-  PASS: FRR customer (10.200.0.1) -> CE (10.0.0.10) ping over SRv6 L3VPN
-      3 packets transmitted, 3 packets received, 0% packet loss
-```
+Only once all gates pass does it `ping`, with a generous retry. A slow
+data-plane settle therefore cannot produce a spurious `FAIL`.
 
 ## Notes
 
@@ -174,30 +192,33 @@ A passing run prints `RESULT: 11 passed, 0 failed`.
   SRv6 locator is attached to the *default* BGP instance and each VRF
   instance carries `sid vpn export <index>` per address-family. Bump the
   tag only together with a `frr.conf` review.
-* The customer VRF (`vrf-cust`) and its dummy port are created by
-  `frr/start.sh` **before** FRR loads its config — zebra binds to
-  existing devices, it does not create the VRF master itself.
+* The customer VRF (`vrf-cust`) is created by each PE's `start.sh`
+  **before** the routing daemon loads its config — zebra / vinberod
+  bind to existing devices, they do not create the VRF master.
 * Vinbero's BGP applier needs the SRv6 *source locator* registered
   before learned VPN routes can become headend entries;
   `vinbero/start.sh` does this with `vbctl locator create` right after
   the daemon comes up.
 * XDP attaches in **generic** mode — containerlab veth links do not
   support native XDP.
+* **Loopback-sourced iBGP.** The session peers loopback-to-loopback.
+  GoBGP sets no explicit `Transport.LocalAddress`, so `vinbero/start.sh`
+  adds the static route to the peer loopback with a `src` hint, forcing
+  the kernel to source the iBGP TCP connection from the loopback. FRR
+  uses `neighbor … update-source lo` for the same effect.
 * **SID-structure transposition.** FRR advertises its VPNv4 service SID
   with an RFC 9252 SID-structure sub-sub-TLV: the function bits are
   carried transposed in the MPLS label, so the SID *on the wire* is the
   bare locator `fd00:200::` while FRR's `seg6local` localsid sits at the
-  transposed full SID `fd00:200:0:0:1::`. Vinbero's decoder
+  transposed full SID `fd00:200:0:1::`. Vinbero's decoder
   (`pkg/bgp/gobgp/decode.go`) folds the label bits back per RFC 9252 §4
-  and reconstructs the full SID, so it encapsulates straight to FRR's
-  localsid — no lab-side workaround. `test.sh` step 2c asserts the
-  reconstruction.
+  and reconstructs the full SID. `test.sh` step 2 asserts it.
 * **FRR SRv6 nexthop validation.** FRR will not install a VPN route
   whose service SID resolves only via a gateway (`show bgp nexthop`
   reports `Must be Connected`). `frr/start.sh` therefore carries
   Vinbero's locator block `fd00:100::/48` as a connected prefix on
-  `eth1`, plus a more-specific `/128` route so the encapsulated return
-  traffic is still forwarded to Vinbero.
+  `eth2`, plus a more-specific `/128` route so the encapsulated return
+  traffic is still forwarded onward to the core.
 * The return-path `End.DT4` localsid on FRR uses `vrftable`, which the
   kernel only accepts with `net.vrf.strict_mode=1` — set in
   `frr/start.sh`.

@@ -1,9 +1,9 @@
-# FRR <-> Vinbero BGP SRv6 interop lab (containerlab).
+# FRR <-> Vinbero BGP SRv6 L3VPN interop lab (containerlab).
 #
 # Typical flow:
 #   make build      # build both container images
-#   make deploy     # bring the 3-node topology up
-#   make test       # assert bidirectional SRv6 L3VPN route exchange
+#   make deploy     # bring the 5-node 2-site L3VPN topology up
+#   make test       # assert bidirectional SRv6 L3VPN route exchange + ping
 #   make destroy    # tear the lab down
 #
 # `make all` chains build + deploy + test + destroy.
@@ -53,17 +53,17 @@ test:
 # Quick state dump for debugging.
 status:
 	@echo "=== FRR BGP summary ==="
-	-docker exec clab-frr-interop-frr vtysh -c "show bgp summary"
+	-docker exec clab-frr-interop-pe-osaka vtysh -c "show bgp summary"
 	@echo ""
 	@echo "=== FRR VPNv4 table ==="
-	-docker exec clab-frr-interop-frr vtysh -c "show bgp ipv4 vpn"
+	-docker exec clab-frr-interop-pe-osaka vtysh -c "show bgp ipv4 vpn"
 	@echo ""
 	@echo "=== Vinbero headend-v4 entries ==="
-	-docker exec clab-frr-interop-vinbero vbctl headend-v4 list
+	-docker exec clab-frr-interop-pe-tokyo vbctl headend-v4 list
 
 logs:
 	@echo "=== vinberod log ==="
-	-docker exec clab-frr-interop-vinbero cat /var/log/vinberod.log
+	-docker exec clab-frr-interop-pe-tokyo cat /var/log/vinberod.log
 	@echo ""
 	@echo "=== FRR log ==="
-	-docker exec clab-frr-interop-frr cat /var/log/frr/frr.log
+	-docker exec clab-frr-interop-pe-osaka cat /var/log/frr/frr.log

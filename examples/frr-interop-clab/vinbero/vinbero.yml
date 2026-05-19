@@ -1,7 +1,7 @@
 internal:
-  # eth1 faces FRR (BGP session + SRv6 underlay): the XDP data plane
-  # here runs the End.DT4 *decap* of return traffic from FRR.
-  # eth2 faces the CE: the XDP data plane there runs the H.Encaps of
+  # eth1 faces the core (SRv6 underlay): the XDP data plane here runs the
+  # End.DT4 *decap* of return traffic coming back from pe-osaka.
+  # eth2 faces ce-tokyo: the XDP data plane there runs the H.Encaps of
   # plaintext customer traffic towards FRR's service SID. Both ports
   # carry XDP so the full bidirectional SRv6 L3VPN data plane works.
   devices:
@@ -38,12 +38,19 @@ settings:
       capacity: 1024
 
 # In-process BGP speaker. Consulted because vinberod is started with
-# --bgp-enabled (see start.sh). Vinbero is the PE under test (AS 65100);
-# FRR (AS 65200) is the independent RFC 9252 peer on the eth1 link.
+# --bgp-enabled (see start.sh). Both PEs sit in one provider AS 65100
+# and run an iBGP VPNv4/VPNv6 session -- the textbook SRv6 L3VPN design
+# (PEs of a single provider domain peer iBGP). pe-osaka runs FRR, the
+# independent RFC 9252 implementation; pe-tokyo runs Vinbero under test.
+#
+# The two PEs peer MP-BGP directly over their loopbacks, multihop past
+# the core router (which is NOT in BGP). iBGP imposes no TTL=1 limit, so
+# the loopback-to-loopback session crosses the core cleanly. The loopback
+# nexthop is reachable via the static underlay routes from start.sh.
 bgp:
   global:
     local_asn: 65100
-    router_id: "10.255.0.100"
+    router_id: "10.255.0.1"
     # Bind TCP/179: vinberod owns BGP on this node, FRR connects in.
     listen_port: 179
     # Locator supplying the SRv6 encap source for routes learned from
@@ -51,8 +58,9 @@ bgp:
     # (the applier needs it present to materialise headend entries).
     source_locator: "LOC1"
   peers:
-    - neighbor: "2001:db8:ff::1"
-      peer_asn: 65200
+    # pe-osaka's loopback. Multihop iBGP session via the IPv6 core.
+    - neighbor: "2001:db8:ff::2"
+      peer_asn: 65100
       hold_time_sec: 30
       keepalive_sec: 10
       families:
