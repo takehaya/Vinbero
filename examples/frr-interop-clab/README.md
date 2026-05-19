@@ -69,10 +69,10 @@ Control-plane glue that makes the data plane work:
   `10.0.0.0/24` with `vbctl bgp advertise-vpn` (RT `65000:200`, so FRR's
   `vrf-cust` imports it).
 * FRR auto-installs an `End.DT4` `seg6local` route for the SID it
-  advertises. A static `End.DT4` localsid for the bare locator
-  `fd00:200::` is also added because RFC 9252 SID-structure
-  transposition means the SID *on the wire* is the bare locator, not
-  FRR's transposed full SID.
+  advertises. Vinbero reconstructs that full SID from the bare on-wire
+  locator by applying RFC 9252 §4 transposition (the function bits
+  travel in the VPN label), so it encapsulates straight to FRR's real
+  localsid — no lab-side workaround is needed.
 * FRR carries Vinbero's locator block `fd00:100::/48` as a connected
   prefix so its BGP SRv6 nexthop validation accepts the route, plus a
   more-specific `/128` route so the encapsulated return traffic is
@@ -186,10 +186,12 @@ A passing run prints `RESULT: 11 passed, 0 failed`.
 * **SID-structure transposition.** FRR advertises its VPNv4 service SID
   with an RFC 9252 SID-structure sub-sub-TLV: the function bits are
   carried transposed in the MPLS label, so the SID *on the wire* is the
-  bare locator `fd00:200::` while FRR's own `seg6local` localsid sits at
-  the transposed full SID `fd00:200:0:0:1::`. Vinbero decodes (and
-  encaps towards) the on-wire SID as-is, so `frr/start.sh` adds an extra
-  static `End.DT4` localsid for `fd00:200::` to decap what Vinbero sends.
+  bare locator `fd00:200::` while FRR's `seg6local` localsid sits at the
+  transposed full SID `fd00:200:0:0:1::`. Vinbero's decoder
+  (`pkg/bgp/gobgp/decode.go`) folds the label bits back per RFC 9252 §4
+  and reconstructs the full SID, so it encapsulates straight to FRR's
+  localsid — no lab-side workaround. `test.sh` step 2c asserts the
+  reconstruction.
 * **FRR SRv6 nexthop validation.** FRR will not install a VPN route
   whose service SID resolves only via a gateway (`show bgp nexthop`
   reports `Must be Connected`). `frr/start.sh` therefore carries

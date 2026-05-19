@@ -18,7 +18,7 @@ func TestDecodeSRv6SID(t *testing.T) {
 			},
 		},
 	}
-	got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid})
+	got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0)
 	if got != sid.String() {
 		t.Errorf("decodeSRv6SID = %q, want %q", got, sid.String())
 	}
@@ -26,8 +26,70 @@ func TestDecodeSRv6SID(t *testing.T) {
 
 func TestDecodeSRv6SID_AbsentAttribute(t *testing.T) {
 	// A path with no Prefix-SID attribute yields an empty SID.
-	if got := decodeSRv6SID(nil); got != "" {
+	if got := decodeSRv6SID(nil, 0); got != "" {
 		t.Errorf("decodeSRv6SID(nil) = %q, want empty", got)
+	}
+}
+
+// TestDecodeSRv6SID_Transposition covers RFC 9252 §4 transposition: the
+// SID Structure Sub-Sub-TLV says 16 bits are transposed at offset 64,
+// so the SID TLV on the wire carries only the bare locator fd00:200::
+// and the function value travels in the VPN label. decodeSRv6SID must
+// fold the label bits back to reconstruct the full SID -- this is what
+// FRR (and Cisco / Juniper) advertise.
+func TestDecodeSRv6SID_Transposition(t *testing.T) {
+	onWire := netip.MustParseAddr("fd00:200::")
+	psid := &gobgppkt.PathAttributePrefixSID{
+		TLVs: []gobgppkt.PrefixSIDTLVInterface{
+			&gobgppkt.SRv6ServiceTLV{
+				SubTLVs: []gobgppkt.PrefixSIDTLVInterface{
+					&gobgppkt.SRv6InformationSubTLV{
+						SID: onWire.AsSlice(),
+						SubSubTLVs: []gobgppkt.PrefixSIDTLVInterface{
+							// lbl=32 lnl=16 fl=16 al=0 tl=16 to=64
+							gobgppkt.NewSRv6SIDStructureSubSubTLV(32, 16, 16, 0, 16, 64),
+						},
+					},
+				},
+			},
+		},
+	}
+	// The function value 1 travels in the high 16 bits of the 20-bit label.
+	const label = 1 << (20 - 16)
+	got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, label)
+	if want := "fd00:200:0:0:1::"; got != want {
+		t.Errorf("decodeSRv6SID with transposition = %q, want %q", got, want)
+	}
+
+	// Without the label the bare locator must come back unchanged, so a
+	// non-transposing peer is unaffected.
+	if got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0); got != "fd00:200::" {
+		t.Errorf("decodeSRv6SID transposition with zero label = %q, want fd00:200::", got)
+	}
+}
+
+// TestDecodeSRv6SID_TranspositionMalformed: a SID Structure Sub-Sub-TLV
+// whose transposed window (offset+length) runs past the 128-bit SID is
+// malformed -- the real SID cannot be reconstructed, so decodeSRv6SID
+// drops it rather than return a truncated, wrong encap target.
+func TestDecodeSRv6SID_TranspositionMalformed(t *testing.T) {
+	psid := &gobgppkt.PathAttributePrefixSID{
+		TLVs: []gobgppkt.PrefixSIDTLVInterface{
+			&gobgppkt.SRv6ServiceTLV{
+				SubTLVs: []gobgppkt.PrefixSIDTLVInterface{
+					&gobgppkt.SRv6InformationSubTLV{
+						SID: netip.MustParseAddr("fd00:200::").AsSlice(),
+						SubSubTLVs: []gobgppkt.PrefixSIDTLVInterface{
+							// offset 120 + length 20 = 140 > 128 bits.
+							gobgppkt.NewSRv6SIDStructureSubSubTLV(32, 16, 16, 0, 20, 120),
+						},
+					},
+				},
+			},
+		},
+	}
+	if got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0xFFFFF); got != "" {
+		t.Errorf("malformed transposition: decodeSRv6SID = %q, want empty", got)
 	}
 }
 

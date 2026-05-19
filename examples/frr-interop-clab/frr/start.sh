@@ -14,8 +14,8 @@ sysctl -w net.ipv6.conf.default.seg6_enabled=1 2>/dev/null || true
 sysctl -w net.ipv6.conf.eth1.seg6_enabled=1 2>/dev/null || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 2>/dev/null || true
 sysctl -w net.ipv4.conf.default.rp_filter=0 2>/dev/null || true
-# VRF strict mode is required by the kernel before a seg6local End.DT4
-# localsid can be installed with `vrftable` (the decap path below).
+# VRF strict mode is required by the kernel before FRR's auto-installed
+# seg6local End.DT4 localsid (which uses `vrftable`) can come up.
 sysctl -w net.vrf.strict_mode=1 2>/dev/null || true
 
 # --- customer VRF + customer-facing port -----------------------------------
@@ -56,15 +56,10 @@ sleep 4
 # Vinbero advertises with 10.0.0.0/24.
 ip -6 route replace fd00:100:0:1::/128 via 2001:db8:ff::2 dev eth1
 
-# Decap endpoint for the SID Vinbero H.Encaps the CE -> FRR traffic to.
 # FRR auto-installs its End.DT4 localsid at the transposed full SID
-# (fd00:200:0:0:1::), but RFC 9252 SID-structure transposition means
-# the SID advertised on the wire -- and therefore the outer destination
-# Vinbero encapsulates towards -- is the bare locator fd00:200::. This
-# static End.DT4 localsid makes FRR decap that bare SID into vrf-cust
-# (`vrftable` needs the net.vrf.strict_mode knob set above).
-ip -6 route replace local fd00:200::/128 \
-    encap seg6local action End.DT4 vrftable 100 dev vrf-cust
+# (fd00:200:0:0:1::). Vinbero applies RFC 9252 §4 transposition when it
+# decodes the route, so it encapsulates straight to that full SID --
+# no lab-side static localsid for the bare locator is needed.
 
 # Pre-resolve the NDP neighbour for the underlay so the first
 # encapsulated packet is not dropped on BPF_FIB_LKUP_RET_NO_NEIGH.
