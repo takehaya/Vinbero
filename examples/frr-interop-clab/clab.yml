@@ -7,9 +7,9 @@
 #  +---------+           |   in-proc speaker    | VPNv4/6| VPNv4/VPNv6 export  |
 #                        +----------------------+        +---------------------+
 #
-# The control-plane exchange (BGP session + RFC 9252 SRv6 service TLVs)
-# is the focus. The `ce` node exists for the optional data-plane stretch
-# goal; control-plane interop does not depend on it.
+# The lab proves both the control-plane exchange (BGP session + RFC 9252
+# SRv6 service TLVs) and the data plane: the `ce` host and FRR's customer
+# ping each other end to end over the SRv6 L3VPN (test.sh section 4).
 name: frr-interop
 
 topology:
@@ -37,7 +37,7 @@ topology:
       exec:
         - sh /start.sh
 
-    # --- CE: plaintext traffic source (data-plane stretch goal only) --------
+    # --- CE: customer host -- plaintext IPv4 source/sink for the L3VPN -----
     ce:
       kind: linux
       image: alpine:3.20

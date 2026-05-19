@@ -1,9 +1,12 @@
 internal:
-  # eth1 faces FRR (BGP session + SRv6 underlay). The XDP data plane is
-  # attached here; encap of CE traffic is exercised by the netns E2E
-  # test, so this lab focuses on the control-plane exchange.
+  # eth1 faces FRR (BGP session + SRv6 underlay): the XDP data plane
+  # here runs the End.DT4 *decap* of return traffic from FRR.
+  # eth2 faces the CE: the XDP data plane there runs the H.Encaps of
+  # plaintext customer traffic towards FRR's service SID. Both ports
+  # carry XDP so the full bidirectional SRv6 L3VPN data plane works.
   devices:
     - eth1
+    - eth2
   bpf:
     # generic mode: veth links in containerlab do not support native XDP.
     device_mode: "generic"
