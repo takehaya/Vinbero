@@ -1,15 +1,19 @@
-# FRR ⇄ Vinbero — BGP SRv6 L3VPN interop (containerlab)
+# l3vpn-2site — 2-site SRv6 L3VPN interop (Vinbero ⇄ FRR)
 
-A [containerlab](https://containerlab.dev/) lab that builds a textbook
-**2-site SRv6 L3VPN** and peers **Vinbero** with **FRRouting** — an
-independent, mature BGP implementation — as the two provider-edge
-routers. It verifies a complete SRv6 L3VPN: both the **control plane**
-(VPNv4 / VPNv6 routes carrying RFC 9252 SRv6 Service TLVs, exchanged
-both ways over iBGP) and the **data plane** (a real `ping` between two
-customer hosts, riding the SRv6 L3VPN end to end through both PEs and a
-provider core).
+A [containerlab](https://containerlab.dev/) scenario that builds a
+textbook **2-site SRv6 L3VPN** and peers **Vinbero** (the
+implementation under test) with **FRRouting** — an independent, mature
+BGP implementation — as the two provider-edge routers. FRR is the peer
+chosen *for this scenario*; see the [interop-clab
+overview](../../README.md) for the library as a whole.
 
-The lab proves two things:
+It verifies a complete SRv6 L3VPN: both the **control plane** (VPNv4 /
+VPNv6 routes carrying RFC 9252 SRv6 Service TLVs, exchanged both ways
+over iBGP) and the **data plane** (a real `ping` between two customer
+hosts, riding the SRv6 L3VPN end to end through both PEs and a provider
+core).
+
+The scenario proves two things:
 
 * **Protocol interop** — Vinbero's RFC 9252 SRv6 Service TLV **encode**
   and **decode** are wire-compatible with a different implementation,
@@ -20,9 +24,18 @@ The lab proves two things:
 
 ## Topology
 
-```
- ce-tokyo --- pe-tokyo ===== core ===== pe-osaka --- ce-osaka
-10.1.0.0/24  (Vinbero PE)  (IPv6 core)  (FRR PE)   10.2.0.0/24
+```mermaid
+graph LR
+    CE_T["ce-tokyo<br/>10.1.0.10<br/>customer host"]
+    PE_T["pe-tokyo<br/>Vinbero PE<br/>(under test)"]
+    CORE["core<br/>IPv6 backbone<br/>(no BGP)"]
+    PE_O["pe-osaka<br/>FRR 10.2.1 PE<br/>(interop peer)"]
+    CE_O["ce-osaka<br/>10.2.0.10<br/>customer host"]
+
+    CE_T ---|"10.1.0.0/24"| PE_T
+    PE_T ===|"SRv6 underlay"| CORE
+    CORE ===|"SRv6 underlay"| PE_O
+    PE_O ---|"10.2.0.0/24"| CE_O
 ```
 
 | Node       | Role                                                              |
@@ -32,6 +45,9 @@ The lab proves two things:
 | `core`     | Provider backbone — a plain IPv6 router, static routes, no IGP.  |
 | `pe-osaka` | The FRR PE (interop peer). FRR 10.2.1, SRv6 locator + VPN export.|
 | `ce-osaka` | Customer host, subnet `10.2.0.0/24`, host `10.2.0.10`.           |
+
+Containers are named `clab-l3vpn-2site-<node>` (the topology `name:` is
+the scenario name).
 
 ### BGP design — iBGP within one provider AS
 
@@ -89,7 +105,7 @@ Control-plane glue that makes the data plane work:
   advertises. Vinbero reconstructs that full SID from the bare on-wire
   locator by applying RFC 9252 §4 transposition (the function bits
   travel in the VPN label), so it encapsulates straight to FRR's real
-  localsid — no lab-side workaround is needed.
+  localsid — no scenario-side workaround is needed.
 * FRR carries Vinbero's locator block `fd00:100::/48` as a connected
   prefix so its BGP SRv6 nexthop validation accepts the route, plus a
   more-specific `/128` route so the encapsulated return traffic is
@@ -98,17 +114,13 @@ Control-plane glue that makes the data plane work:
 ## Layout
 
 ```
-examples/frr-interop-clab/
-├── README.md
-├── Dockerfile          # vinberod runtime image (multi-stage, example-local)
+scenarios/l3vpn-2site/
+├── README.md           # this file
 ├── clab.yml            # containerlab 5-node topology
-├── Makefile            # build / deploy / test / destroy
 ├── test.sh             # control-plane + data-plane assertions (readiness-gated)
 ├── core/
 │   └── start.sh        # plain IPv6 router, static underlay routes
 ├── frr/
-│   ├── Dockerfile      # FRR image (quay.io/frrouting/frr:10.2.1 pinned)
-│   ├── daemons         # zebra + bgpd
 │   ├── frr.conf        # SRv6 locator + VPNv4/VPNv6 export + iBGP
 │   └── start.sh        # creates the customer VRF, starts FRR
 └── vinbero/
@@ -116,33 +128,29 @@ examples/frr-interop-clab/
     └── start.sh        # starts vinberod, registers locator, advertises VPN
 ```
 
+The container images are shared across the interop-clab library and
+live in `../../images/` (`images/vinbero/`, `images/frr/`).
+
 This lab is intentionally independent of the netns shell examples
 (`examples/common/`, `examples/run_all.sh`): it needs Docker, privileged
 containers and the `containerlab` binary, which the netns examples do
 not.
 
-## Prerequisites
-
-* Docker
-* [containerlab](https://containerlab.dev/install/)
-* `sudo` (containerlab needs it)
-* `python3` (test.sh parses vtysh JSON)
-
-The Vinbero runtime image is built straight from the repo — the BPF
-objects are committed under `pkg/bpf/` and embedded via `go:embed`, so
-no `make bpf-gen` is required.
-
 ## Run
 
-```bash
-make build      # build the vinberod + FRR images
-make deploy     # bring the 5-node topology up
-make test       # assert bidirectional SRv6 L3VPN interop + ping
-make destroy    # tear the lab down
+From `examples/interop-clab/`:
 
-make all        # build + deploy + test + destroy in one shot
+```bash
+make build                       # build the vinberod + FRR images
+make deploy                      # bring the 5-node topology up
+make test                        # assert bidirectional SRv6 L3VPN interop + ping
+make destroy                     # tear the lab down
+
+make all                         # build + deploy + test + destroy in one shot
+make all SCENARIO=l3vpn-2site     # the same, scenario named explicitly
 ```
 
+`l3vpn-2site` is the default scenario, so bare `make all` runs it.
 `make status` / `make logs` dump BGP and daemon state for debugging.
 
 ## What `test.sh` verifies
