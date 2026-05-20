@@ -59,7 +59,13 @@ ethtool -K eth2 rxvlan off 2>/dev/null || true
 # to the *main* table for the fd00:200::/48 underlay route, while the
 # decap path (FRR -> CE) hands the End.DT4 BPF FIB lookup the VRF device
 # so it resolves the customer prefix from table 100 instead.
-ip link add vrf-cust type vrf table 100 2>/dev/null || true
+if ! ip link show vrf-cust >/dev/null 2>&1; then
+    ip link add vrf-cust type vrf table 100
+fi
+if ! ip link show vrf-cust >/dev/null 2>&1; then
+    echo "ERROR: failed to create VRF vrf-cust -- is the kernel 'vrf' module loaded on the host? (modprobe vrf)" >&2
+    exit 1
+fi
 ip link set vrf-cust up
 ip rule add l3mdev protocol kernel prio 1000 2>/dev/null || true
 # The local customer subnet reachable out eth2. Placed in table 100 so
