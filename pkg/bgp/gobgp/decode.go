@@ -15,26 +15,34 @@ import (
 // communities, and the next hop from MP_REACH_NLRI.
 func decodeVPNRoute(p *apiutil.Path, fam bgp.Family) *bgp.VPNRoute {
 	vr := &bgp.VPNRoute{Family: fam}
+	var label uint32
 	if vpn, ok := p.Nlri.(*gobgppkt.LabeledVPNIPAddrPrefix); ok {
 		vr.Prefix = vpn.Prefix.String()
 		if vpn.RD != nil {
 			vr.RD = vpn.RD.String()
+		}
+		// RFC 9252 transposition may carry part of the SRv6 SID in the
+		// VPN label; decodeSRv6SID folds it back into the SID.
+		if len(vpn.Labels.Labels) > 0 {
+			label = vpn.Labels.Labels[0]
 		}
 	} else if p.Nlri != nil {
 		// Unexpected NLRI shape: keep the generic rendering rather than
 		// dropping the route silently so the anomaly is still visible.
 		vr.Prefix = p.Nlri.String()
 	}
-	vr.SRv6SID = decodeSRv6SID(p.Attrs)
+	vr.SRv6SID = decodeSRv6SID(p.Attrs, label)
 	vr.RTs = decodeRouteTargets(p.Attrs)
 	vr.NextHop = decodeNextHop(p.Attrs)
 	return vr
 }
 
 // decodeSRv6SID walks the BGP Prefix-SID attribute (RFC 9252) and
-// returns the first SRv6 service SID, rendered as an IPv6 string. An
-// empty result means the path carried no SRv6 SID.
-func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface) string {
+// returns the first SRv6 service SID as an IPv6 string. When the SID
+// Structure Sub-Sub-TLV signals transposition, the transposed bits are
+// folded back in from the VPN label (RFC 9252 §4); label is the route's
+// MPLS label. An empty result means the path carried no SRv6 SID.
+func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface, label uint32) string {
 	for _, a := range attrs {
 		psid, ok := a.(*gobgppkt.PathAttributePrefixSID)
 		if !ok {
@@ -47,16 +55,70 @@ func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface) string {
 			}
 			for _, st := range svc.SubTLVs {
 				info, ok := st.(*gobgppkt.SRv6InformationSubTLV)
-				if !ok {
+				if !ok || len(info.SID) != 16 {
 					continue
 				}
-				if sid, ok := netip.AddrFromSlice(info.SID); ok {
-					return sid.String()
+				sid := info.SID
+				if length, offset, ok := transpositionParams(info); ok {
+					folded := make([]byte, 16)
+					copy(folded, info.SID)
+					if !foldTransposedLabel(folded, label, length, offset) {
+						// Transposition is signalled but the SID
+						// Structure Sub-Sub-TLV is malformed: the real
+						// SID cannot be rebuilt, so skip it rather than
+						// install a wrong encap target.
+						continue
+					}
+					sid = folded
+				}
+				if addr, ok := netip.AddrFromSlice(sid); ok {
+					return addr.String()
 				}
 			}
 		}
 	}
 	return ""
+}
+
+// transpositionParams returns the transposition length and offset from
+// an SRv6 Information Sub-TLV's SID Structure Sub-Sub-TLV (RFC 9252
+// §3.2.1). ok is false when there is no structure TLV or it signals no
+// transposition.
+func transpositionParams(info *gobgppkt.SRv6InformationSubTLV) (length, offset uint8, ok bool) {
+	for _, ss := range info.SubSubTLVs {
+		st, isStruct := ss.(*gobgppkt.SRv6SIDStructureSubSubTLV)
+		if !isStruct {
+			continue
+		}
+		if st.TranspositionLength == 0 {
+			return 0, 0, false
+		}
+		return st.TranspositionLength, st.TranspositionOffset, true
+	}
+	return 0, 0, false
+}
+
+// foldTransposedLabel reconstructs an SRv6 SID whose bits were
+// transposed into the VPN MPLS label (RFC 9252 §4): the high-order
+// `length` bits of the 20-bit label are OR-ed into sid at bit `offset`
+// counted from the SID's most significant bit. The on-wire SID has that
+// bit range zeroed, so OR-folding is sufficient. It returns false,
+// leaving sid untouched, when the parameters -- both attacker-controlled
+// off the wire -- cannot describe a valid transposition into the SID.
+func foldTransposedLabel(sid []byte, label uint32, length, offset uint8) bool {
+	const mplsLabelBits = 20
+	if length == 0 || length > mplsLabelBits || int(offset)+int(length) > 8*len(sid) {
+		return false
+	}
+	val := (label & (1<<mplsLabelBits - 1)) >> (mplsLabelBits - length)
+	for i := 0; i < int(length); i++ {
+		if (val>>uint(int(length)-1-i))&1 == 0 {
+			continue
+		}
+		pos := int(offset) + i
+		sid[pos/8] |= byte(1) << uint(7-pos%8)
+	}
+	return true
 }
 
 // decodeRouteTargets returns every route-target extended community on

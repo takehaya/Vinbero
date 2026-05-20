@@ -1,0 +1,82 @@
+---
+# Vinbero interop containerlab labs.
+#
+# Deliberately separate from the netns-based example matrix: these labs
+# need Docker, containerlab and privileged containers, which the
+# shell/netns examples do not. They prove interop between Vinbero and an
+# independent third-party implementation; the l3vpn-2site scenario peers
+# Vinbero with FRR over an SRv6 L3VPN.
+name: interop-clab (containerlab)
+
+on:
+  push:
+    paths:
+      - 'examples/interop-clab/**'
+      - 'pkg/bgp/**'
+      - 'pkg/config/config.go'
+      - 'cmd/vinberod/**'
+      - 'cmd/vinbero/**'
+      - 'pkg/bpf/*.o'
+      - '.github/workflows/interop-clab.yaml'
+  pull_request:
+    paths:
+      - 'examples/interop-clab/**'
+      - 'pkg/bgp/**'
+      - 'pkg/config/config.go'
+      - 'cmd/vinberod/**'
+      - 'cmd/vinbero/**'
+      - 'pkg/bpf/*.o'
+      - '.github/workflows/interop-clab.yaml'
+  workflow_dispatch:
+
+jobs:
+  interop-clab:
+    name: l3vpn-2site SRv6 L3VPN interop
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install containerlab
+        run: bash -c "$(curl -sL https://get.containerlab.dev)"
+
+      - name: Ensure vrf kernel module
+        # GitHub Actions ubuntu-latest ships an Azure-tuned kernel whose
+        # base linux-image package does NOT include `vrf` -- the module
+        # lives in `linux-modules-extra-<kernel>`. Try a direct load
+        # first; only pay the apt cost (~25s) when the module is absent.
+        # This is forward-proof against runner images that later bundle
+        # the module or build it in.
+        run: |
+          if ! sudo modprobe vrf 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+            sudo modprobe vrf
+          fi
+          test -d /sys/module/vrf
+          echo "vrf module loaded"
+
+      - name: Build images
+        working-directory: examples/interop-clab
+        run: make build
+
+      - name: Deploy lab
+        working-directory: examples/interop-clab
+        run: make deploy
+
+      - name: Run interop test
+        working-directory: examples/interop-clab
+        run: make test
+
+      - name: Dump lab state on failure
+        if: failure()
+        working-directory: examples/interop-clab
+        run: make status logs
+
+      - name: Destroy lab
+        if: always()
+        working-directory: examples/interop-clab
+        run: make destroy
