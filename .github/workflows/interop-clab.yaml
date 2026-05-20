@@ -43,6 +43,12 @@ jobs:
       - name: Install containerlab
         run: bash -c "$(curl -sL https://get.containerlab.dev)"
 
+      - name: Ensure vrf kernel module
+        run: |
+          sudo modprobe vrf
+          test -d /sys/module/vrf
+          echo "vrf module loaded"
+
       - name: Build images
         working-directory: examples/interop-clab
         run: make build

@@ -28,7 +28,13 @@ sysctl -w net.vrf.strict_mode=1 2>/dev/null || true
 # vrf-cust is the L3VPN tenant. eth1 faces ce-osaka and is enslaved to
 # the VRF; FRR exports the 10.2.0.0/24 connected prefix into VPNv4 with
 # an SRv6 service SID.
-ip link add vrf-cust type vrf table 100 2>/dev/null || true
+if ! ip link show vrf-cust >/dev/null 2>&1; then
+    ip link add vrf-cust type vrf table 100
+fi
+if ! ip link show vrf-cust >/dev/null 2>&1; then
+    echo "ERROR: failed to create VRF vrf-cust -- is the kernel 'vrf' module loaded on the host? (modprobe vrf)" >&2
+    exit 1
+fi
 ip link set vrf-cust up
 ip link set eth1 master vrf-cust
 ip link set eth1 up
