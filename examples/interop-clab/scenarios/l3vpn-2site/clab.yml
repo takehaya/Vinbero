@@ -1,0 +1,84 @@
+# containerlab topology for the l3vpn-2site interop scenario.
+#
+# A textbook 2-site SRv6 L3VPN. Vinbero is the PE under test; FRR is the
+# independent third-party PE it interoperates with in this scenario:
+#
+#   ce-tokyo --- pe-tokyo ===== core ===== pe-osaka --- ce-osaka
+#  10.1.0.0/24  (Vinbero PE)  (IPv6 core)  (FRR PE)   10.2.0.0/24
+#
+# Both PEs are in ONE provider AS (65100) and run iBGP (VPNv4 + VPNv6)
+# peering on their loopbacks. iBGP is naturally multi-hop, so the session
+# crosses `core` with no ebgp-multihop knob. `core` is NOT in BGP -- it
+# only routes the IPv6 underlay with static routes (no IGP), so there is
+# no convergence race that could make the data-plane test flaky.
+#
+# Both customer sites sit in a single L3VPN / VRF, so the ce-tokyo and
+# ce-osaka hosts reach each other end to end over SRv6.
+#
+# `name:` is the scenario name, so containers are clab-l3vpn-2site-<node>.
+name: l3vpn-2site
+
+topology:
+  nodes:
+    # --- ce-tokyo: customer host behind the Vinbero PE ----------------------
+    ce-tokyo:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.1.0.10/24 dev eth1
+        - ip link set eth1 up
+        # Reach the far customer site through the local PE.
+        - ip route replace 10.2.0.0/24 via 10.1.0.1
+
+    # --- pe-tokyo: the Vinbero PE under test --------------------------------
+    pe-tokyo:
+      kind: linux
+      image: vinbero-interop:latest
+      # containerlab runs linux nodes privileged by default, which is
+      # what the XDP attach + BPF FS need.
+      binds:
+        - vinbero/vinbero.yml:/vinbero.yml
+        - vinbero/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    # --- core: provider backbone, plain IPv6 router -------------------------
+    # An SRv6 L3VPN transit router forwards purely by the outer IPv6
+    # header and needs NO SRv6-service awareness, so `core` is just a
+    # Linux node with IPv6 forwarding and static underlay routes.
+    core:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - core/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    # --- pe-osaka: the FRR PE (interop peer) --------------------------------
+    pe-osaka:
+      kind: linux
+      image: frr-interop:10.2.1
+      # /etc/frr/daemons is baked into the frr-interop image (it is
+      # image-level config); only the per-scenario files are bound here.
+      binds:
+        - frr/frr.conf:/etc/frr/frr.conf
+        - frr/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    # --- ce-osaka: customer host behind the FRR PE --------------------------
+    ce-osaka:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.2.0.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace 10.1.0.0/24 via 10.2.0.1
+
+  links:
+    # CE <-> PE customer-facing ports.
+    - endpoints: [ce-tokyo:eth1, pe-tokyo:eth2]
+    - endpoints: [ce-osaka:eth1, pe-osaka:eth1]
+    # Provider underlay: pe-tokyo <-> core <-> pe-osaka.
+    - endpoints: [pe-tokyo:eth1, core:eth1]
+    - endpoints: [core:eth2, pe-osaka:eth2]
