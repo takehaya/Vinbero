@@ -54,7 +54,13 @@ build-frr:
 		-f $(LAB_DIR)/images/frr/Dockerfile \
 		$(LAB_DIR)/images/frr
 
+# `vrf` is loaded on demand: GitHub Actions runners (and some minimal
+# hosts) ship CONFIG_NET_VRF=m unloaded, so `ip link add ... type vrf`
+# inside each PE container would silently fail and FRR / Vinbero would
+# come up without their customer VRF. Best-effort load; the local
+# `make` already worked before this line.
 deploy:
+	@sudo modprobe vrf 2>/dev/null || true
 	sudo containerlab -t $(TOPO) deploy
 
 destroy:
