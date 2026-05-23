@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.3](https://github.com/takehaya/Vinbero/compare/v0.0.2...v0.0.3) (2026-05-20)
+
+
+### 🎉 Features
+
+* **bgp:** integrate GoBGP for SRv6 service route exchange (Phase 1) ([#39](https://github.com/takehaya/Vinbero/issues/39)) ([00b521b](https://github.com/takehaya/Vinbero/commit/00b521b1b35d7fdc510d67f57f84312942d19860))
+* **bpf:** scaffold L2 headend tail-call infrastructure (Phase 1) ([#29](https://github.com/takehaya/Vinbero/issues/29)) ([0ee3e5f](https://github.com/takehaya/Vinbero/commit/0ee3e5f573ae3c9150dc7fee8066cf65e61c9649))
+* End.DT2M + EVPN multi-homing (RFC 7432/9252 Split-Horizon + DF) ([#22](https://github.com/takehaya/Vinbero/issues/22)) ([c00bcea](https://github.com/takehaya/Vinbero/commit/c00bcea7e4f9c83976473231d5b509c83ad15cb9))
+* plugin SDK Phase 1c/1d — map classification + typed aux lifecycle ([#23](https://github.com/takehaya/Vinbero/issues/23)) ([8dc0f39](https://github.com/takehaya/Vinbero/commit/8dc0f392c7e019788ef7b0b69dab8f51c8c87b83))
+* plugin SDK v2 + BTF-driven aux JSON + per-slot stats ([#21](https://github.com/takehaya/Vinbero/issues/21)) ([fa69f06](https://github.com/takehaya/Vinbero/commit/fa69f0606a033b49c6aba7b616cefed2391873a3))
+* plugin SDK with static validator, VINBERO_PLUGIN macro, samples ([#19](https://github.com/takehaya/Vinbero/issues/19)) ([a372b7d](https://github.com/takehaya/Vinbero/commit/a372b7de900cbdbdcbdb09e403d01d544a8d2835))
+* **sdk:** publish a goreleaser tarball alongside the binaries ([#24](https://github.com/takehaya/Vinbero/issues/24)) ([05decd7](https://github.com/takehaya/Vinbero/commit/05decd7c4ff2df732acd7e9a49b6595a89c09dd4))
+* SRv6 L3VPN interop lab (containerlab) + RFC 9252 SID transposition fix ([#40](https://github.com/takehaya/Vinbero/issues/40)) ([bb7853e](https://github.com/takehaya/Vinbero/commit/bb7853e72d15eea85bdc5925faf6cecabd41736b))
+
+
+### 🐛 Bug Fixes
+
+* **bpf:** make src/core/srv6.h self-sufficient by including linux/in6.h ([#27](https://github.com/takehaya/Vinbero/issues/27)) ([a90767a](https://github.com/takehaya/Vinbero/commit/a90767ac6bf022247299e84d46deb48419f79c98))
+
+
+### 🔧 Miscellaneous Chores
+
+* land squashed [#25](https://github.com/takehaya/Vinbero/issues/25) and [#26](https://github.com/takehaya/Vinbero/issues/26) onto main ([#28](https://github.com/takehaya/Vinbero/issues/28)) ([70fcf1e](https://github.com/takehaya/Vinbero/commit/70fcf1e0917334e5eca2228b57c294c618d4dced))
+
 ## [0.0.2](https://github.com/takehaya/Vinbero/compare/v0.0.1...v0.0.2) (2026-04-16)
 
 
