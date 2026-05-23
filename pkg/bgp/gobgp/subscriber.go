@@ -69,6 +69,8 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 			Prefix:  nlriString(p.Nlri),
 			NextHop: decodeNextHop(p.Attrs),
 		}
+	case bgp.FamilySRPolicyIPv6:
+		ev.SRPolicy = decodeSRPolicy(p)
 	}
 	return ev, true
 }
