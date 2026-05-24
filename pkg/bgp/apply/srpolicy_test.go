@@ -12,26 +12,26 @@ import (
 // fakePolicyMap records the writes the table makes to the data plane.
 type fakePolicyMap struct {
 	upserts []upsertCall
-	deletes []uint32
-	current map[uint32][]netip.Addr // id -> last transport written (nil = deleted)
+	deletes []uint16
+	current map[uint16][]netip.Addr // id -> last transport written (nil = deleted)
 }
 
 type upsertCall struct {
-	id        uint32
+	id        uint16
 	transport []netip.Addr
 }
 
 func newFakePolicyMap() *fakePolicyMap {
-	return &fakePolicyMap{current: map[uint32][]netip.Addr{}}
+	return &fakePolicyMap{current: map[uint16][]netip.Addr{}}
 }
 
-func (f *fakePolicyMap) UpsertPolicy(id uint32, transport []netip.Addr) error {
+func (f *fakePolicyMap) UpsertSRPolicy(id uint16, transport []netip.Addr) error {
 	f.upserts = append(f.upserts, upsertCall{id, transport})
 	f.current[id] = transport
 	return nil
 }
 
-func (f *fakePolicyMap) DeletePolicy(id uint32) error {
+func (f *fakePolicyMap) DeleteSRPolicy(id uint16) error {
 	f.deletes = append(f.deletes, id)
 	delete(f.current, id)
 	return nil

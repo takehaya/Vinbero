@@ -152,6 +152,7 @@ func run(cliCtx *cli.Context) error {
 		// headend maps, IPv6 unicast -> kernel FIB.
 		applier := apply.NewApplier(
 			vin.GetMapOperations(),
+			vin.GetMapOperations(),
 			locatorMgr,
 			vrfBgpMgr,
 			fib.NewKernelInjector(),

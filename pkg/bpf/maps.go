@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -1376,6 +1377,66 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 		return nil, fmt.Errorf("failed to iterate headend v6 map: %w", err)
 	}
 	return result, nil
+}
+
+// ===== SR Policy Map Operations =====
+
+// UpsertSRPolicy installs (or atomically replaces) the transport SID list
+// shared by every headend entry whose policy_id == policyID. The XDP
+// headend prepends these SIDs to each route's own service SID. The write
+// is value-atomic, so a policy change never exposes a torn segment list,
+// and it is O(1) regardless of how many routes steer onto the policy.
+func (m *MapOperations) UpsertSRPolicy(policyID uint16, transport []netip.Addr) error {
+	if len(transport) < 1 || len(transport) > MaxSegments {
+		return fmt.Errorf("sr_policy %d: transport length %d out of range 1..%d",
+			policyID, len(transport), MaxSegments)
+	}
+	var val BpfSrPolicyValue
+	val.Len = uint8(len(transport))
+	for i, sid := range transport {
+		if !sid.Is6() && !sid.Is4In6() {
+			return fmt.Errorf("sr_policy %d: segment %d (%s) is not an IPv6 SID", policyID, i, sid)
+		}
+		val.Segs[i] = sid.As16()
+	}
+	key := uint32(policyID)
+	if err := m.objs.SrPolicyMap.Put(key, &val); err != nil {
+		return fmt.Errorf("put sr_policy_map[%d]: %w", policyID, err)
+	}
+	return nil
+}
+
+// DeleteSRPolicy removes a policy's transport list. Referencing routes
+// then miss the lookup in XDP and fall back to their bare service SID.
+// A missing entry is not an error (idempotent withdraw).
+func (m *MapOperations) DeleteSRPolicy(policyID uint16) error {
+	key := uint32(policyID)
+	if err := m.objs.SrPolicyMap.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("delete sr_policy_map[%d]: %w", policyID, err)
+	}
+	return nil
+}
+
+// GetSRPolicy returns the transport SID list installed for policyID, or
+// nil when no entry exists. Intended for tests and introspection.
+func (m *MapOperations) GetSRPolicy(policyID uint16) ([]net.IP, error) {
+	var val BpfSrPolicyValue
+	key := uint32(policyID)
+	if err := m.objs.SrPolicyMap.Lookup(key, &val); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup sr_policy_map[%d]: %w", policyID, err)
+	}
+	n := int(val.Len)
+	if n > MaxSegments {
+		n = MaxSegments
+	}
+	out := make([]net.IP, n)
+	for i := 0; i < n; i++ {
+		out[i] = net.IP(append([]byte(nil), val.Segs[i][:]...))
+	}
+	return out, nil
 }
 
 // ===== Headend L2 Map Operations =====

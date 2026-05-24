@@ -119,13 +119,24 @@ struct dx2v_entry {
 struct headend_entry {
     __u8 mode;                              // srv6_headend_behavior enum
     __u8 num_segments;                      // Number of segments (1-10)
-    __u8 _pad[2];                           // Padding for alignment
+    __u16 policy_id;                         // SR Policy steering ref (0 = none); reuses former _pad[2]
     __u8 src_addr[IPV6_ADDR_LEN];           // Outer IPv6 source address
     __u8 dst_addr[IPV6_ADDR_LEN];           // Unused for H.Encaps (reserved)
-    __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list (up to 10 segments)
+    __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list; with policy_id != 0 holds only the per-route service SID(s)
     __u16 bd_id;                            // Bridge Domain ID (for H.Encaps.L2)
     __u8 args_offset;                       // Args byte offset within SID (RFC 9433 Args.Mob.Session)
     __u8 _pad_gtp;
+} __attribute__((packed));
+
+// SR Policy transport segment list, shared by every route that steers onto
+// this policy (keyed by headend_entry.policy_id). The XDP headend prepends
+// these transport SIDs to the route's own service SID (RFC 9252 §8); a
+// lookup miss means the policy is absent/withdrawn, so the route falls back
+// to its bare service SID. Written by the BGP applier, one entry per policy.
+struct sr_policy_value {
+    __u8 len;                                  // transport SID count (1..MAX_SEGMENTS-1)
+    __u8 _pad[3];
+    __u8 segs[MAX_SEGMENTS][IPV6_ADDR_LEN];    // transport SIDs (active candidate)
 } __attribute__((packed));
 
 // Capacity of the plugin_raw variant in sid_aux_entry. Mirrored on the Go

@@ -15,8 +15,8 @@ import (
 // the per-route service SID is composed onto the transport list in the
 // XDP program, not here.
 type policyMapOps interface {
-	UpsertPolicy(policyID uint32, transport []netip.Addr) error
-	DeletePolicy(policyID uint32) error
+	UpsertSRPolicy(policyID uint16, transport []netip.Addr) error
+	DeleteSRPolicy(policyID uint16) error
 }
 
 // policyKey is the SR Policy identity (RFC 9256 §2.1). Color and endpoint
@@ -37,7 +37,7 @@ type candidateID struct {
 }
 
 type policyState struct {
-	id         uint32
+	id         uint16
 	candidates map[candidateID]bgp.CandidatePath
 	// installed is the transport SID list last written to sr_policy_map,
 	// or nil when no map entry exists. Used to skip redundant writes.
@@ -54,7 +54,7 @@ type policyState struct {
 type srPolicyTable struct {
 	mu     sync.Mutex
 	mapOps policyMapOps
-	nextID uint32
+	nextID uint16
 	byKey  map[policyKey]*policyState
 	logger *zap.Logger
 }
@@ -72,7 +72,7 @@ func newSRPolicyTable(mapOps policyMapOps, logger *zap.Logger) *srPolicyTable {
 // itself arrives: the map entry is absent until then, so the XDP lookup
 // misses and the route falls back; when the policy arrives the same id is
 // populated and the route is steered without being rewritten.
-func (t *srPolicyTable) ensureID(color uint32, endpoint netip.Addr) uint32 {
+func (t *srPolicyTable) ensureID(color uint32, endpoint netip.Addr) uint16 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.ensureState(policyKey{color: color, endpoint: endpoint}).id
@@ -110,6 +110,17 @@ func (t *srPolicyTable) ensureState(key policyKey) *policyState {
 	if st := t.byKey[key]; st != nil {
 		return st
 	}
+	// policy_id is a uint16 (it rides in headend_entry.policy_id, which
+	// reuses former padding to avoid growing the struct). 65535 concurrent
+	// {color, endpoint} policies is far beyond realistic; if exhausted,
+	// allocate id 0 so the key simply never steers (safe degradation).
+	if t.nextID == ^uint16(0) {
+		t.logger.Error("SR Policy id space exhausted (uint16); key will not steer",
+			zap.Uint32("color", key.color), zap.Stringer("endpoint", key.endpoint))
+		st := &policyState{id: 0, candidates: make(map[candidateID]bgp.CandidatePath)}
+		t.byKey[key] = st
+		return st
+	}
 	t.nextID++
 	st := &policyState{id: t.nextID, candidates: make(map[candidateID]bgp.CandidatePath)}
 	t.byKey[key] = st
@@ -124,9 +135,9 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 		// No usable candidate: drop the map entry so referencing routes
 		// fall back to their bare service SID (lookup-miss).
 		if st.installed != nil {
-			if err := t.mapOps.DeletePolicy(st.id); err != nil {
+			if err := t.mapOps.DeleteSRPolicy(st.id); err != nil {
 				t.logger.Error("delete sr_policy_map entry",
-					zap.Uint32("policy_id", st.id), zap.Error(err))
+					zap.Uint16("policy_id", st.id), zap.Error(err))
 				return
 			}
 			st.installed = nil
@@ -136,15 +147,15 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 	if segmentsEqual(st.installed, best.SegmentList) {
 		return // active path unchanged; skip a redundant write
 	}
-	if err := t.mapOps.UpsertPolicy(st.id, best.SegmentList); err != nil {
+	if err := t.mapOps.UpsertSRPolicy(st.id, best.SegmentList); err != nil {
 		t.logger.Error("upsert sr_policy_map entry",
-			zap.Uint32("policy_id", st.id), zap.Error(err))
+			zap.Uint16("policy_id", st.id), zap.Error(err))
 		return
 	}
 	st.installed = best.SegmentList
 	t.logger.Info("SR Policy active path installed",
 		zap.Uint32("color", key.color), zap.Stringer("endpoint", key.endpoint),
-		zap.Uint32("policy_id", st.id), zap.Int("segments", len(best.SegmentList)))
+		zap.Uint16("policy_id", st.id), zap.Int("segments", len(best.SegmentList)))
 }
 
 // bestCandidate selects the active candidate path (RFC 9256 §2.9 subset):

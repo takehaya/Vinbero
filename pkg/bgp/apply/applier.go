@@ -41,6 +41,7 @@ type Applier struct {
 	fib         fib.Injector
 	srcLocator  string
 	localASN    uint32
+	srPolicy    *srPolicyTable
 	logger      *zap.Logger
 }
 
@@ -48,7 +49,7 @@ type Applier struct {
 // supplies the SRv6 encapsulation source address (see plan §6-5).
 // vrfBindings supplies the route-target import filter; an empty manager
 // accepts every received route.
-func NewApplier(headend headendOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
+func NewApplier(headend headendOps, policyMap policyMapOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
 	return &Applier{
 		headend:     headend,
 		locators:    locators,
@@ -56,6 +57,7 @@ func NewApplier(headend headendOps, locators *locator.Manager, vrfBindings *vrfb
 		fib:         fibInjector,
 		srcLocator:  srcLocator,
 		localASN:    localASN,
+		srPolicy:    newSRPolicyTable(policyMap, logger),
 		logger:      logger.Named("bgp.apply"),
 	}
 }
@@ -81,11 +83,20 @@ func (a *Applier) CleanupFIB() error {
 // Apply is the bgp.RouteHandler entry point.
 func (a *Applier) Apply(ev bgp.RouteEvent) {
 	switch {
+	case ev.SRPolicy != nil:
+		a.srPolicy.apply(*ev.SRPolicy, ev.IsWithdraw)
 	case ev.VPN != nil:
 		a.applyVPN(ev.VPN, ev.IsWithdraw)
 	case ev.Unicast != nil:
 		a.applyUnicast(ev.Unicast, ev.IsWithdraw)
 	}
+}
+
+// ApplyLocalSRPolicy installs or withdraws an operator-defined (origin
+// local) SR Policy through the same state machine as BGP-received ones.
+// It is the entry point for the SRPolicyService CRUD handlers.
+func (a *Applier) ApplyLocalSRPolicy(p bgp.SRPolicy, withdraw bool) {
+	a.srPolicy.apply(p, withdraw)
 }
 
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
@@ -123,6 +134,20 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 		a.logger.Error("build headend entry",
 			zap.String("prefix", vr.Prefix), zap.Error(err))
 		return
+	}
+	// Color-based auto-steering: stamp the SR Policy id for {color, next
+	// hop} so the XDP headend composes this route's service SID onto that
+	// policy's transport. ensureID reserves the id even if the SR Policy
+	// has not arrived yet -- the data plane falls back until it does.
+	if vr.Color != 0 {
+		endpoint, perr := netip.ParseAddr(vr.NextHop)
+		if perr != nil {
+			a.logger.Warn("colored VPN route has no parseable next hop; not steering",
+				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
+				zap.String("nexthop", vr.NextHop))
+		} else {
+			entry.PolicyId = a.srPolicy.ensureID(vr.Color, endpoint)
+		}
 	}
 	if err := a.createHeadend(vr.Family, vr.Prefix, entry, owner); err != nil {
 		a.logger.Error("install VPN route",

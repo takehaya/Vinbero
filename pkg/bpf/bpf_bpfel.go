@@ -105,7 +105,7 @@ type BpfHeadendEntry struct {
 	_           structs.HostLayout
 	Mode        uint8
 	NumSegments uint8
-	Pad         [2]uint8
+	PolicyId    uint16
 	SrcAddr     [16]uint8
 	DstAddr     [16]uint8
 	Segments    [10][16]uint8
@@ -158,6 +158,13 @@ type BpfSidFunctionEntry struct {
 	Action   uint8
 	Flavor   uint8
 	AuxIndex uint16
+}
+
+type BpfSrPolicyValue struct {
+	_    structs.HostLayout
+	Len  uint8
+	Pad  [3]uint8
+	Segs [10][16]uint8
 }
 
 type BpfStatsEntry struct {
@@ -280,6 +287,7 @@ type BpfMapSpecs struct {
 	SlotStatsHeadendL2  *ebpf.MapSpec `ebpf:"slot_stats_headend_l2"`
 	SlotStatsHeadendV4  *ebpf.MapSpec `ebpf:"slot_stats_headend_v4"`
 	SlotStatsHeadendV6  *ebpf.MapSpec `ebpf:"slot_stats_headend_v6"`
+	SrPolicyMap         *ebpf.MapSpec `ebpf:"sr_policy_map"`
 	StatsMap            *ebpf.MapSpec `ebpf:"stats_map"`
 	TailcallCtxMap      *ebpf.MapSpec `ebpf:"tailcall_ctx_map"`
 }
@@ -337,6 +345,7 @@ type BpfMaps struct {
 	SlotStatsHeadendL2  *ebpf.Map `ebpf:"slot_stats_headend_l2"`
 	SlotStatsHeadendV4  *ebpf.Map `ebpf:"slot_stats_headend_v4"`
 	SlotStatsHeadendV6  *ebpf.Map `ebpf:"slot_stats_headend_v6"`
+	SrPolicyMap         *ebpf.Map `ebpf:"sr_policy_map"`
 	StatsMap            *ebpf.Map `ebpf:"stats_map"`
 	TailcallCtxMap      *ebpf.Map `ebpf:"tailcall_ctx_map"`
 }
@@ -369,6 +378,7 @@ func (m *BpfMaps) Close() error {
 		m.SlotStatsHeadendL2,
 		m.SlotStatsHeadendV4,
 		m.SlotStatsHeadendV6,
+		m.SrPolicyMap,
 		m.StatsMap,
 		m.TailcallCtxMap,
 	)
