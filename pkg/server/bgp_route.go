@@ -175,31 +175,13 @@ func (s *BgpRouteServer) BgpWithdrawSrPolicy(
 // protoToAdvertiseSRPolicy converts a BgpSrPolicy advertise request into a
 // bgp.SRPolicy with a single local candidate path.
 func protoToAdvertiseSRPolicy(p *v1.BgpSrPolicy) (bgp.SRPolicy, error) {
-	endpoint, err := netip.ParseAddr(p.GetEndpoint())
+	endpoint, segments, err := parseSRPolicyEndpointSegments(p.GetEndpoint(), p.GetSegments())
 	if err != nil {
-		return bgp.SRPolicy{}, fmt.Errorf("invalid endpoint: %w", err)
-	}
-	// Reject up front, mirroring protoToLocalSRPolicy: the SR Policy endpoint
-	// is matched against the VPN route's IPv6 next hop (RFC 9252 SRv6 over
-	// IPv6), so an IPv4 endpoint could never steer; and a policy needs at
-	// least one transport segment to compose ahead of the service SID.
-	if !endpoint.Is6() {
-		return bgp.SRPolicy{}, fmt.Errorf("endpoint must be IPv6: %s", endpoint)
-	}
-	if len(p.GetSegments()) == 0 {
-		return bgp.SRPolicy{}, errors.New("at least one transport segment is required")
+		return bgp.SRPolicy{}, err
 	}
 	nh, err := netip.ParseAddr(p.GetNextHop())
 	if err != nil {
 		return bgp.SRPolicy{}, fmt.Errorf("invalid next hop: %w", err)
-	}
-	segments := make([]netip.Addr, 0, len(p.GetSegments()))
-	for _, s := range p.GetSegments() {
-		sid, err := netip.ParseAddr(s)
-		if err != nil {
-			return bgp.SRPolicy{}, err
-		}
-		segments = append(segments, sid)
 	}
 	preference := p.GetPreference()
 	if preference == 0 {

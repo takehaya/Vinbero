@@ -132,27 +132,39 @@ func (s *SrPolicyServer) SrPolicyList(
 }
 
 func protoToLocalSRPolicy(def *v1.SrPolicyDef) (bgp.SRPolicy, error) {
-	endpoint, err := netip.ParseAddr(def.GetEndpoint())
+	endpoint, segments, err := parseSRPolicyEndpointSegments(def.GetEndpoint(), def.GetSegments())
 	if err != nil {
-		return bgp.SRPolicy{}, fmt.Errorf("invalid endpoint: %w", err)
-	}
-	// The SR Policy endpoint is matched against the VPN route's IPv6 next
-	// hop (RFC 9252 SRv6 over IPv6), so an IPv4 endpoint can never steer.
-	if !endpoint.Is6() {
-		return bgp.SRPolicy{}, fmt.Errorf("endpoint must be IPv6: %s", endpoint)
-	}
-	if len(def.GetSegments()) == 0 {
-		return bgp.SRPolicy{}, errors.New("at least one transport segment is required")
-	}
-	segments := make([]netip.Addr, 0, len(def.GetSegments()))
-	for _, s := range def.GetSegments() {
-		sid, err := netip.ParseAddr(s)
-		if err != nil {
-			return bgp.SRPolicy{}, fmt.Errorf("invalid segment %q: %w", s, err)
-		}
-		segments = append(segments, sid)
+		return bgp.SRPolicy{}, err
 	}
 	return apply.LocalSRPolicy(def.GetColor(), endpoint, segments, def.GetPreference()), nil
+}
+
+// parseSRPolicyEndpointSegments validates and parses an SR Policy endpoint
+// and its transport segment list, shared by the local-CRUD and advertise
+// converters. The endpoint must be IPv6: it is matched against the VPN
+// route's IPv6 next hop (RFC 9252 SRv6 over IPv6), so an IPv4 endpoint could
+// never steer. A policy needs at least one transport segment to compose
+// ahead of the service SID.
+func parseSRPolicyEndpointSegments(endpoint string, segs []string) (netip.Addr, []netip.Addr, error) {
+	ep, err := netip.ParseAddr(endpoint)
+	if err != nil {
+		return netip.Addr{}, nil, fmt.Errorf("invalid endpoint: %w", err)
+	}
+	if !ep.Is6() {
+		return netip.Addr{}, nil, fmt.Errorf("endpoint must be IPv6: %s", ep)
+	}
+	if len(segs) == 0 {
+		return netip.Addr{}, nil, errors.New("at least one transport segment is required")
+	}
+	out := make([]netip.Addr, 0, len(segs))
+	for _, s := range segs {
+		sid, err := netip.ParseAddr(s)
+		if err != nil {
+			return netip.Addr{}, nil, fmt.Errorf("invalid segment %q: %w", s, err)
+		}
+		out = append(out, sid)
+	}
+	return ep, out, nil
 }
 
 func snapshotToProto(snap *apply.SRPolicySnapshot) *v1.SrPolicyEntry {
