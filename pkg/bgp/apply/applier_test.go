@@ -272,3 +272,74 @@ func TestApplier_VPNv4ColorStampsPolicyId(t *testing.T) {
 		t.Errorf("colored route with no next hop must not steer; policy_id = %d", e.PolicyId)
 	}
 }
+
+// TestApplier_ColorSteerRefcountLifecycle covers the reverse-index refcount
+// seam: a colored route reserves a policy_id, a re-advertise of the same
+// target must not double-count the reference, and the withdraw must release
+// it so the policy is reaped (a leaked reference here would keep the id
+// pinned forever).
+func TestApplier_ColorSteerRefcountLifecycle(t *testing.T) {
+	fh := newFakeHeadend()
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	ep := netip.MustParseAddr("2001:db8::2")
+
+	colored := func() bgp.RouteEvent {
+		return bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &bgp.VPNRoute{
+			Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+			SRv6SID: "fd00:1:1:a::", Color: 100, NextHop: "2001:db8::2",
+		}}
+	}
+
+	a.Apply(colored())
+	id := a.srPolicy.idOf(100, ep)
+	if id == 0 {
+		t.Fatalf("colored route did not reserve a policy_id")
+	}
+	if got := fh.v4created["10.0.0.0/24"].PolicyId; got != id {
+		t.Fatalf("stamped policy_id %d != reserved %d", got, id)
+	}
+
+	// Re-advertise the unchanged route: same id, reference not double-counted.
+	a.Apply(colored())
+	if got := a.srPolicy.idOf(100, ep); got != id {
+		t.Fatalf("policy_id changed on re-advertise: %d -> %d", id, got)
+	}
+
+	// Withdraw releases the single reference -> the policy is reaped.
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, IsWithdraw: true, VPN: &bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+	}})
+	if got := a.srPolicy.idOf(100, ep); got != 0 {
+		t.Errorf("policy not reaped after withdraw (idOf=%d); a re-advertise likely leaked a reference", got)
+	}
+}
+
+// TestApplier_ColorSteerRetarget covers a route changing its steering target
+// on re-advertise: the old policy reference is released and the new one
+// taken, so the stale {color, endpoint} is reaped.
+func TestApplier_ColorSteerRetarget(t *testing.T) {
+	fh := newFakeHeadend()
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	ep1 := netip.MustParseAddr("2001:db8::2")
+	ep2 := netip.MustParseAddr("2001:db8::3")
+
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", Color: 100, NextHop: "2001:db8::2",
+	}})
+	if a.srPolicy.idOf(100, ep1) == 0 {
+		t.Fatalf("first advertise did not reserve a policy_id")
+	}
+
+	// Same prefix re-advertised steering to a different next hop.
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", Color: 100, NextHop: "2001:db8::3",
+	}})
+	if got := a.srPolicy.idOf(100, ep1); got != 0 {
+		t.Errorf("stale steering target not released on retarget (idOf=%d)", got)
+	}
+	if id2 := a.srPolicy.idOf(100, ep2); id2 == 0 {
+		t.Errorf("new steering target not referenced after retarget")
+	}
+}

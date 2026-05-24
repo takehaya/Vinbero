@@ -62,7 +62,9 @@ type candidateID struct {
 }
 
 type policyState struct {
-	id         uint32
+	id   uint32
+	refs uint32 // steering routes pointing at this id; gc collects when 0
+	// candidates are the candidate paths known for this {color, endpoint}.
 	candidates map[candidateID]bgp.CandidatePath
 	// installed is the transport SID list last written to sr_policy_map,
 	// or nil when no map entry exists. Used to skip redundant writes.
@@ -76,12 +78,18 @@ type policyState struct {
 // how many routes steer onto it. A withdrawn / unusable policy simply
 // deletes its map entry; the XDP lookup-miss then falls the referencing
 // routes back to their bare service SID.
+//
+// Each policy_id is reference-counted by the steering routes that stamp it
+// (ref/unref). When a key has neither references nor candidate paths it is
+// garbage-collected and its id returned to freeIDs for reuse, so churn does
+// not leak ids.
 type srPolicyTable struct {
-	mu     sync.Mutex
-	mapOps policyMapOps
-	nextID uint32
-	byKey  map[policyKey]*policyState
-	logger *zap.Logger
+	mu      sync.Mutex
+	mapOps  policyMapOps
+	nextID  uint32
+	freeIDs []uint32 // ids freed by gc, handed out before nextID grows
+	byKey   map[policyKey]*policyState
+	logger  *zap.Logger
 }
 
 func newSRPolicyTable(mapOps policyMapOps, logger *zap.Logger) *srPolicyTable {
@@ -92,15 +100,44 @@ func newSRPolicyTable(mapOps policyMapOps, logger *zap.Logger) *srPolicyTable {
 	}
 }
 
-// ensureID returns the stable policy_id for a {color, endpoint}, allocating
-// one on first use. A route can resolve its policy_id before the SR Policy
-// itself arrives: the map entry is absent until then, so the XDP lookup
-// misses and the route falls back; when the policy arrives the same id is
-// populated and the route is steered without being rewritten.
-func (t *srPolicyTable) ensureID(color uint32, endpoint netip.Addr) uint32 {
+// ref reserves the policy_id for {color, endpoint} on behalf of one
+// steering route and bumps its reference count. A route can reserve the id
+// before the SR Policy itself arrives: the map entry is absent until then,
+// so the XDP lookup misses and the route falls back; when the policy
+// arrives the same id is populated and the route steers without being
+// rewritten.
+func (t *srPolicyTable) ref(color uint32, endpoint netip.Addr) uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.ensureState(policyKey{color: color, endpoint: endpoint}).id
+	st := t.ensureState(policyKey{color: color, endpoint: endpoint})
+	st.refs++
+	return st.id
+}
+
+// unref releases one steering route's reference and garbage-collects the
+// policy when nothing references it and it carries no candidate paths.
+func (t *srPolicyTable) unref(color uint32, endpoint netip.Addr) {
+	key := policyKey{color: color, endpoint: endpoint}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st := t.byKey[key]
+	if st == nil || st.refs == 0 {
+		return
+	}
+	st.refs--
+	t.gc(key, st)
+}
+
+// idOf returns the policy_id already reserved for {color, endpoint}, or 0
+// if none. Used to re-stamp a route that re-advertises unchanged, without
+// churning the reference count.
+func (t *srPolicyTable) idOf(color uint32, endpoint netip.Addr) uint32 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if st := t.byKey[policyKey{color: color, endpoint: endpoint}]; st != nil {
+		return st.id
+	}
+	return 0
 }
 
 // apply merges an SR Policy event (one candidate path) into the table and
@@ -127,6 +164,11 @@ func (t *srPolicyTable) apply(p bgp.SRPolicy, withdraw bool) {
 		}
 	}
 	t.reconcile(key, st)
+	if withdraw {
+		// Reap the policy if that removed its last candidate and no route
+		// references it; reconcile has already dropped the map entry.
+		t.gc(key, st)
+	}
 }
 
 // ensureState returns the policyState for key, allocating a stable
@@ -135,22 +177,49 @@ func (t *srPolicyTable) ensureState(key policyKey) *policyState {
 	if st := t.byKey[key]; st != nil {
 		return st
 	}
-	// policy_id is a uint32 (headend_entry.policy_id). Ids are allocated per
-	// distinct {color, endpoint}; re-advertising the same key reuses its id.
-	// The u32 space is effectively inexhaustible; the guard below is purely
-	// defensive. If somehow exhausted, allocate id 0 so the key simply never
-	// steers (safe degradation).
+	st := &policyState{id: t.allocID(key), candidates: make(map[candidateID]bgp.CandidatePath)}
+	t.byKey[key] = st
+	return st
+}
+
+// allocID hands out a policy_id, reusing one freed by gc before drawing a
+// fresh one. policy_id is a uint32 (headend_entry.policy_id); the space is
+// effectively inexhaustible, so the exhaustion guard is purely defensive --
+// on exhaustion it returns 0 so the key simply never steers (safe
+// degradation). Caller holds t.mu.
+func (t *srPolicyTable) allocID(key policyKey) uint32 {
+	if n := len(t.freeIDs); n > 0 {
+		id := t.freeIDs[n-1]
+		t.freeIDs = t.freeIDs[:n-1]
+		return id
+	}
 	if t.nextID == ^uint32(0) {
 		t.logger.Error("SR Policy id space exhausted; key will not steer",
 			zap.Uint32("color", key.color), zap.Stringer("endpoint", key.endpoint))
-		st := &policyState{id: 0, candidates: make(map[candidateID]bgp.CandidatePath)}
-		t.byKey[key] = st
-		return st
+		return 0
 	}
 	t.nextID++
-	st := &policyState{id: t.nextID, candidates: make(map[candidateID]bgp.CandidatePath)}
-	t.byKey[key] = st
-	return st
+	return t.nextID
+}
+
+// gc drops a policy that has no steering references and no candidate paths,
+// returning its id to freeIDs for reuse. Caller holds t.mu.
+func (t *srPolicyTable) gc(key policyKey, st *policyState) {
+	if st.refs > 0 || len(st.candidates) > 0 {
+		return
+	}
+	if st.installed != nil {
+		if err := t.mapOps.DeleteSRPolicy(st.id); err != nil {
+			t.logger.Error("gc: delete sr_policy_map entry",
+				zap.Uint32("policy_id", st.id), zap.Error(err))
+			return // keep the state so a later unref/withdraw retries the delete
+		}
+		st.installed = nil
+	}
+	delete(t.byKey, key)
+	if st.id != 0 {
+		t.freeIDs = append(t.freeIDs, st.id)
+	}
 }
 
 // reconcile recomputes the active candidate and writes it to the data
