@@ -1,11 +1,13 @@
 package gobgp
 
 import (
+	"context"
 	"net/netip"
 	"testing"
 
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	gobgppkt "github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
 )
@@ -112,6 +114,55 @@ func TestEncodeSRPolicyPath_Rejects(t *testing.T) {
 				t.Errorf("expected encodeSRPolicyPath to reject %q", name)
 			}
 		})
+	}
+}
+
+// Advertising a local SR Policy through a started gobgp session must be
+// accepted into the RIB (a malformed MP_REACH / NLRI / Tunnel Encap would
+// make AddPath fail here), tracked for withdrawal, superseded on
+// re-advertise, and removed on withdraw. Exercises the live gobgp path,
+// not just the offline encoder. No root or peer required.
+func (s *Session) advertisedLen() int {
+	s.advMu.Lock()
+	defer s.advMu.Unlock()
+	return len(s.advertised)
+}
+
+func TestSession_AdvertiseSRPolicyLifecycle(t *testing.T) {
+	s := NewSession(zap.NewNop())
+	ctx := context.Background()
+	if err := s.Start(ctx, bgp.GlobalConfig{LocalASN: 65100, RouterID: "10.255.0.9", ListenPort: 10251}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop(ctx) })
+
+	p := advSRPolicy(100, 1, 200, "2001:db8::2", "2001:db8::1", "fd00:200:0:1::", "fd00:200:0:2::")
+	if err := s.PushPolicy(ctx, p); err != nil {
+		t.Fatalf("PushPolicy (gobgp rejected the encoded SR Policy path): %v", err)
+	}
+	if n := s.advertisedLen(); n != 1 {
+		t.Fatalf("advertised entries = %d, want 1", n)
+	}
+
+	// Re-advertising the same {color, endpoint, distinguisher} supersedes the
+	// prior path rather than leaving an orphan.
+	if err := s.PushPolicy(ctx, p); err != nil {
+		t.Fatalf("re-advertise PushPolicy: %v", err)
+	}
+	if n := s.advertisedLen(); n != 1 {
+		t.Errorf("after re-advertise advertised entries = %d, want 1", n)
+	}
+
+	key := bgp.SRPolicyKey{Color: 100, Endpoint: netip.MustParseAddr("2001:db8::2"), Distinguisher: 1}
+	if err := s.WithdrawPolicy(ctx, key); err != nil {
+		t.Fatalf("WithdrawPolicy: %v", err)
+	}
+	if n := s.advertisedLen(); n != 0 {
+		t.Errorf("after withdraw advertised entries = %d, want 0", n)
+	}
+	// Withdrawing again is a no-op.
+	if err := s.WithdrawPolicy(ctx, key); err != nil {
+		t.Errorf("idempotent WithdrawPolicy: %v", err)
 	}
 }
 

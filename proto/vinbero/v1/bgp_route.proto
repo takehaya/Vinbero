@@ -25,11 +25,11 @@ service BgpRouteService {
 
 // BgpVpnRoute is an L3VPN route to advertise.
 message BgpVpnRoute {
-  string family = 1;                // "vpnv4" or "vpnv6"
-  string prefix = 2;                // CIDR, e.g. "10.0.0.0/24"
-  string rd = 3;                    // route distinguisher, "65000:100"
+  string family = 1; // "vpnv4" or "vpnv6"
+  string prefix = 2; // CIDR, e.g. "10.0.0.0/24"
+  string rd = 3; // route distinguisher, "65000:100"
   repeated string route_targets = 4; // "65000:100" form
-  string srv6_sid = 5;              // SRv6 service SID (IPv6)
+  string srv6_sid = 5; // SRv6 service SID (IPv6)
   string next_hop = 6;
 }
 
@@ -43,7 +43,7 @@ message BgpUnicastRoute {
 message BgpRouteKey {
   string family = 1; // "vpnv4" / "vpnv6" / "ipv6_unicast"
   string prefix = 2;
-  string rd = 3;     // empty for ipv6_unicast
+  string rd = 3; // empty for ipv6_unicast
 }
 
 message BgpAdvertiseVpnRequest {
@@ -75,11 +75,11 @@ message BgpWithdrawResponse {
 // segments are the transport SID list of the single candidate path.
 message BgpSrPolicy {
   uint32 color = 1;
-  string endpoint = 2;           // IPv6 endpoint
-  repeated string segments = 3;  // transport SID list (IPv6)
-  uint32 preference = 4;         // 0 -> RFC 9256 default
+  string endpoint = 2; // IPv6 endpoint
+  repeated string segments = 3; // transport SID list (IPv6)
+  uint32 preference = 4; // 0 -> RFC 9256 default
   uint32 distinguisher = 5;
-  string next_hop = 6;           // IPv6 BGP next hop
+  string next_hop = 6; // IPv6 BGP next hop
 }
 
 // BgpSrPolicyKey identifies a previously advertised SR Policy for withdrawal.

@@ -82,6 +82,9 @@ ip route replace 10.1.0.0/24 dev eth2 table 100
 ip -6 route replace 2001:db8:ff::2/128 via 2001:db8:1::2 dev eth1 \
     src 2001:db8:ff::1
 ip -6 route replace fd00:200::/48 via 2001:db8:1::2 dev eth1
+# core's SRv6 waypoint block: the first segment of the steered SR Policy
+# (fd00:300:0:ee::1, an End on `core`) must route to the core node.
+ip -6 route replace fd00:300::/48 via 2001:db8:1::2 dev eth1
 
 # BPF filesystem for pinned maps / XDP links.
 mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
@@ -133,14 +136,29 @@ done
 # tags its 10.2.0.0/24 VPN route with Color 100 (frr.conf route-map), and
 # its BGP next hop is the loopback below, so the applier matches the route
 # to this policy and stamps its policy_id on the 10.2.0.0/24 headend entry.
-# The XDP headend then composes the transport SID [fd00:200:0:ee::1] ahead of
-# FRR's End.DT4 service SID, so ce-osaka-bound traffic is steered through
-# the transport hop. The endpoint MUST equal the route's IPv6 next hop for
-# the match to land.
+# The XDP headend composes the TWO transport segments [fd00:300:0:ee::1,
+# fd00:200:0:ee::1] ahead of FRR's End.DT4 service SID, so ce-osaka-bound
+# traffic chains through core's End and then FRR's End before decap -- a
+# real multi-hop service chain. The endpoint MUST equal the route's IPv6
+# next hop for the match to land.
 /usr/local/bin/vbctl sr-policy create \
     --color 100 \
     --endpoint 2001:db8:ff::2 \
-    --segments fd00:200:0:ee::1 || true
+    --segments fd00:300:0:ee::1,fd00:200:0:ee::1 || true
+
+# --- advertise the SR Policy into BGP (SAFI 73) ----------------------------
+# Demonstrates the advertise direction (vbctl bgp advertise-sr-policy ->
+# BgpRouteService -> gobgp SR Policy NLRI + Tunnel Encap). The iBGP peer in
+# this lab is FRR, whose 10.2 build does not implement SAFI 73 reception, so
+# this is a control-plane smoke of the encode path in a real deployment; the
+# receive/decode interop is covered by the gobgp e2e tests. distinguisher 1
+# and next hop = our loopback.
+/usr/local/bin/vbctl bgp advertise-sr-policy \
+    --color 100 \
+    --endpoint 2001:db8:ff::2 \
+    --segments fd00:300:0:ee::1,fd00:200:0:ee::1 \
+    --distinguisher 1 \
+    --next-hop 2001:db8:ff::1 || true
 
 # Pre-resolve neighbours so the XDP BPF FIB lookups never hit
 # BPF_FIB_LKUP_RET_NO_NEIGH on the first packet: the underlay NDP entry

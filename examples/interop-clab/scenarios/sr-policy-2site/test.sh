@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # sr-policy-2site interop scenario assertions (Vinbero <-> FRR).
 #
-# Builds on l3vpn-2site and adds color-based SR Policy steering. It proves:
+# Builds on l3vpn-2site and adds color-based SR Policy steering with a
+# multi-hop service chain. It proves:
 #   1. the iBGP session is ESTABLISHED;
-#   2. the operator-defined SR Policy is installed (vbctl sr-policy list);
+#   2. the operator-defined TWO-segment SR Policy is installed
+#      (vbctl sr-policy list shows [core End, FRR End]);
+#   2b. vbctl bgp advertise-sr-policy runs in a real deployment (encode-path
+#      smoke; FRR 10.2 does not receive SAFI 73, so reception is covered by
+#      the gobgp e2e tests);
 #   3. FRR's color-100 VPN route is received and the policy has an ACTIVE
 #      candidate -- i.e. a colored route resolved onto the policy_id;
-#   4. data plane: ce-tokyo -> ce-osaka rides the *steered* path
-#      (transport SID fd00:200:0:ee::1 -> End -> End.DT4 service SID), proven
-#      by the transport End SID's packet counter incrementing;
+#   4. data plane: ce-tokyo -> ce-osaka rides the *steered chain*
+#      (core End fd00:300:0:ee::1 -> FRR End fd00:200:0:ee::1 -> End.DT4
+#      service SID), proven by the outer DA changing per hop on the wire;
 #   5. negative: the return direction (ce-osaka -> ce-tokyo), which carries
 #      no color and matches no policy, still forwards as a plain L3VPN.
 #
@@ -20,6 +25,7 @@ set -u
 
 PE_TOKYO=clab-sr-policy-2site-pe-tokyo   # Vinbero PE
 PE_OSAKA=clab-sr-policy-2site-pe-osaka   # FRR PE
+CORE=clab-sr-policy-2site-core           # SRv6 waypoint (core End)
 CE_TOKYO=clab-sr-policy-2site-ce-tokyo
 CE_OSAKA=clab-sr-policy-2site-ce-osaka
 
@@ -29,7 +35,10 @@ CE_OSAKA_ADDR=10.2.0.10
 
 VIN_LOOPBACK=2001:db8:ff::1   # pe-tokyo (Vinbero)
 FRR_LOOPBACK=2001:db8:ff::2   # pe-osaka (FRR), = SR Policy endpoint
-TRANSPORT_SID=fd00:200:0:ee::1  # SR Policy transport hop (End SID on FRR)
+# Two-segment SR Policy transport list: core's End, then FRR's End. The
+# packet must visit them in order before decap -- a real service chain.
+CORE_SID=fd00:300:0:ee::1       # 1st segment: End on core (outer DA tokyo->core)
+TRANSPORT_SID=fd00:200:0:ee::1  # 2nd segment: End on FRR (outer DA core->osaka)
 
 pass=0
 fail=0
@@ -70,16 +79,39 @@ fi
 
 # --- 2. local SR Policy installed ------------------------------------------
 echo ""
-echo "[2] operator-defined SR Policy installed"
+echo "[2] operator-defined SR Policy installed (two-segment chain)"
 srp_has_local() {
-    dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -qi "$TRANSPORT_SID"
+    # The policy must carry BOTH transport segments (core End then FRR End).
+    dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -qi "$CORE_SID" \
+      && dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -qi "$TRANSPORT_SID"
 }
 if retry srp_has_local; then
-    ok "vbctl sr-policy list shows the local policy (transport $TRANSPORT_SID)"
+    ok "vbctl sr-policy list shows the 2-segment policy ($CORE_SID -> $TRANSPORT_SID)"
     dexec "$PE_TOKYO" vbctl sr-policy list | sed 's/^/      /'
 else
-    ng "local SR Policy not found in vbctl sr-policy list"
+    ng "two-segment local SR Policy not found in vbctl sr-policy list"
     dexec "$PE_TOKYO" vbctl sr-policy list || true
+fi
+
+# --- 2b. advertise-sr-policy succeeds (encode-path smoke) -------------------
+# The FRR peer here does not implement SAFI 73 reception, so this only
+# confirms the advertise command/RPC/encode path runs in a real deployment
+# (the receive/decode interop is covered by the gobgp e2e tests).
+echo ""
+echo "[2b] advertise-sr-policy encode-path smoke"
+adv_ok() {
+    dexec "$PE_TOKYO" vbctl bgp advertise-sr-policy \
+      --color 100 --endpoint "$FRR_LOOPBACK" \
+      --segments "$CORE_SID,$TRANSPORT_SID" \
+      --distinguisher 1 --next-hop "$VIN_LOOPBACK" 2>/dev/null | grep -qi "advertised"
+}
+if retry adv_ok; then
+    ok "vbctl bgp advertise-sr-policy advertised the SR Policy (encode path OK)"
+else
+    ng "vbctl bgp advertise-sr-policy did not report success"
+    dexec "$PE_TOKYO" vbctl bgp advertise-sr-policy \
+      --color 100 --endpoint "$FRR_LOOPBACK" --segments "$CORE_SID,$TRANSPORT_SID" \
+      --distinguisher 1 --next-hop "$VIN_LOOPBACK" 2>&1 | sed 's/^/      /' || true
 fi
 
 # --- 3. FRR color route received + policy has an ACTIVE candidate ----------
@@ -109,7 +141,15 @@ gate_underlay() {
 gate_transport() {
     dexec "$PE_OSAKA" ip -6 route show "$TRANSPORT_SID" 2>/dev/null | grep -qi "seg6local"
 }
+gate_core() {
+    dexec "$CORE" ip -6 route show "$CORE_SID" 2>/dev/null | grep -qi "seg6local"
+}
 retry gate_underlay || ng "gate: PE loopbacks not mutually reachable"
+if retry gate_core; then
+    echo "  gate: core waypoint End SID ($CORE_SID) present"
+else
+    ng "gate: core waypoint End SID never appeared"
+fi
 if retry gate_transport; then
     echo "  gate: FRR transport End SID ($TRANSPORT_SID) present"
 else
@@ -128,26 +168,38 @@ else
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" 2>&1 | sed 's/^/      /' || true
 fi
 
-# Steering proof: capture the encapsulated packet arriving at FRR and assert
-# its OUTER IPv6 destination is the TRANSPORT SID. A non-steered route would
-# encap straight to the service SID, so seeing the transport SID as the
-# outer DA proves the SR Policy composed transport ahead of the service SID.
-capfile=$(mktemp)
-dexec "$PE_OSAKA" timeout 8 tcpdump -nli eth2 "ip6 and dst $TRANSPORT_SID" >"$capfile" 2>/dev/null &
-cappid=$!
+# Chain proof: the steered packet must visit BOTH transport segments in
+# order. Capture on the tokyo->core link (outer DA = core's End SID, the
+# first segment) and on the core->osaka link (outer DA = FRR's End SID, the
+# second segment, after core's End advanced the DA). Seeing the outer DA
+# CHANGE from CORE_SID to TRANSPORT_SID across consecutive hops proves a
+# real segment-by-segment service chain, not a single-hop detour.
+cap_core=$(mktemp)
+cap_osaka=$(mktemp)
+dexec "$CORE" timeout 8 tcpdump -nli eth1 "ip6 and dst $CORE_SID" >"$cap_core" 2>/dev/null &
+core_pid=$!
+dexec "$PE_OSAKA" timeout 8 tcpdump -nli eth2 "ip6 and dst $TRANSPORT_SID" >"$cap_osaka" 2>/dev/null &
+osaka_pid=$!
 sleep 1
-for _ in 1 2 3 4 5; do
+for _ in 1 2 3 4 5 6 7 8; do
     dexec "$CE_TOKYO" ping -c 1 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1
     sleep 1
 done
-wait "$cappid" 2>/dev/null
-if grep -q "$TRANSPORT_SID" "$capfile"; then
-    ok "steered packet seen with outer DA = transport SID $TRANSPORT_SID (steering confirmed)"
-    sed 's/^/      /' "$capfile" | head -1
+wait "$core_pid" 2>/dev/null
+wait "$osaka_pid" 2>/dev/null
+if grep -q "$CORE_SID" "$cap_core"; then
+    ok "hop 1: tokyo->core packet has outer DA = core End SID $CORE_SID"
+    sed 's/^/      /' "$cap_core" | head -1
 else
-    ng "no packet with outer DA $TRANSPORT_SID observed: traffic not steered"
+    ng "no packet with outer DA $CORE_SID on tokyo->core: first segment not imposed"
 fi
-rm -f "$capfile"
+if grep -q "$TRANSPORT_SID" "$cap_osaka"; then
+    ok "hop 2: core->osaka packet has outer DA = FRR End SID $TRANSPORT_SID (chain advanced)"
+    sed 's/^/      /' "$cap_osaka" | head -1
+else
+    ng "no packet with outer DA $TRANSPORT_SID on core->osaka: chain did not advance"
+fi
+rm -f "$cap_core" "$cap_osaka"
 
 # --- 5. Negative: un-colored return path still forwards --------------------
 echo ""
