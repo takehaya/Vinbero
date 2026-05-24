@@ -86,6 +86,58 @@ func bgpCommand() *cli.Command {
 					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpRouteKey", "withdrawn")
 				},
 			},
+			{
+				Name:  "advertise-sr-policy",
+				Usage: "Advertise a local SR Policy (SAFI 73)",
+				Flags: []cli.Flag{
+					&cli.UintFlag{Name: "color", Required: true, Usage: "SR Policy color"},
+					&cli.StringFlag{Name: "endpoint", Required: true, Usage: "SR Policy endpoint (IPv6)"},
+					&cli.StringFlag{Name: "segments", Required: true, Usage: "Transport SID list (comma-separated IPv6)"},
+					&cli.UintFlag{Name: "preference", Usage: "Candidate path preference (0 = RFC default)"},
+					&cli.UintFlag{Name: "distinguisher", Usage: "Candidate path distinguisher"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop (IPv6)"},
+				},
+				Action: func(c *cli.Context) error {
+					p := &v1.BgpSrPolicy{
+						Color:         uint32(c.Uint("color")),
+						Endpoint:      c.String("endpoint"),
+						Segments:      csvFlag(c.String("segments")),
+						Preference:    uint32(c.Uint("preference")),
+						Distinguisher: uint32(c.Uint("distinguisher")),
+						NextHop:       c.String("next-hop"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseSrPolicy(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{Policies: []*v1.BgpSrPolicy{p}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpSrPolicy", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-sr-policy",
+				Usage: "Withdraw a previously advertised SR Policy",
+				Flags: []cli.Flag{
+					&cli.UintFlag{Name: "color", Required: true, Usage: "SR Policy color"},
+					&cli.StringFlag{Name: "endpoint", Required: true, Usage: "SR Policy endpoint (IPv6)"},
+					&cli.UintFlag{Name: "distinguisher", Usage: "Candidate path distinguisher"},
+				},
+				Action: func(c *cli.Context) error {
+					k := &v1.BgpSrPolicyKey{
+						Color:         uint32(c.Uint("color")),
+						Endpoint:      c.String("endpoint"),
+						Distinguisher: uint32(c.Uint("distinguisher")),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawSrPolicy(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawSrPolicyRequest{Keys: []*v1.BgpSrPolicyKey{k}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpSrPolicyKey", "withdrawn")
+				},
+			},
 		},
 	}
 }

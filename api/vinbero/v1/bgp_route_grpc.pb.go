@@ -20,9 +20,11 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	BgpRouteService_BgpAdvertiseVpn_FullMethodName     = "/vinbero.v1.BgpRouteService/BgpAdvertiseVpn"
-	BgpRouteService_BgpAdvertiseUnicast_FullMethodName = "/vinbero.v1.BgpRouteService/BgpAdvertiseUnicast"
-	BgpRouteService_BgpWithdraw_FullMethodName         = "/vinbero.v1.BgpRouteService/BgpWithdraw"
+	BgpRouteService_BgpAdvertiseVpn_FullMethodName      = "/vinbero.v1.BgpRouteService/BgpAdvertiseVpn"
+	BgpRouteService_BgpAdvertiseUnicast_FullMethodName  = "/vinbero.v1.BgpRouteService/BgpAdvertiseUnicast"
+	BgpRouteService_BgpWithdraw_FullMethodName          = "/vinbero.v1.BgpRouteService/BgpWithdraw"
+	BgpRouteService_BgpAdvertiseSrPolicy_FullMethodName = "/vinbero.v1.BgpRouteService/BgpAdvertiseSrPolicy"
+	BgpRouteService_BgpWithdrawSrPolicy_FullMethodName  = "/vinbero.v1.BgpRouteService/BgpWithdrawSrPolicy"
 )
 
 // BgpRouteServiceClient is the client API for BgpRouteService service.
@@ -32,6 +34,8 @@ type BgpRouteServiceClient interface {
 	BgpAdvertiseVpn(ctx context.Context, in *BgpAdvertiseVpnRequest, opts ...grpc.CallOption) (*BgpAdvertiseVpnResponse, error)
 	BgpAdvertiseUnicast(ctx context.Context, in *BgpAdvertiseUnicastRequest, opts ...grpc.CallOption) (*BgpAdvertiseUnicastResponse, error)
 	BgpWithdraw(ctx context.Context, in *BgpWithdrawRequest, opts ...grpc.CallOption) (*BgpWithdrawResponse, error)
+	BgpAdvertiseSrPolicy(ctx context.Context, in *BgpAdvertiseSrPolicyRequest, opts ...grpc.CallOption) (*BgpAdvertiseSrPolicyResponse, error)
+	BgpWithdrawSrPolicy(ctx context.Context, in *BgpWithdrawSrPolicyRequest, opts ...grpc.CallOption) (*BgpWithdrawSrPolicyResponse, error)
 }
 
 type bgpRouteServiceClient struct {
@@ -69,6 +73,24 @@ func (c *bgpRouteServiceClient) BgpWithdraw(ctx context.Context, in *BgpWithdraw
 	return out, nil
 }
 
+func (c *bgpRouteServiceClient) BgpAdvertiseSrPolicy(ctx context.Context, in *BgpAdvertiseSrPolicyRequest, opts ...grpc.CallOption) (*BgpAdvertiseSrPolicyResponse, error) {
+	out := new(BgpAdvertiseSrPolicyResponse)
+	err := c.cc.Invoke(ctx, BgpRouteService_BgpAdvertiseSrPolicy_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *bgpRouteServiceClient) BgpWithdrawSrPolicy(ctx context.Context, in *BgpWithdrawSrPolicyRequest, opts ...grpc.CallOption) (*BgpWithdrawSrPolicyResponse, error) {
+	out := new(BgpWithdrawSrPolicyResponse)
+	err := c.cc.Invoke(ctx, BgpRouteService_BgpWithdrawSrPolicy_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BgpRouteServiceServer is the server API for BgpRouteService service.
 // All implementations should embed UnimplementedBgpRouteServiceServer
 // for forward compatibility
@@ -76,6 +98,8 @@ type BgpRouteServiceServer interface {
 	BgpAdvertiseVpn(context.Context, *BgpAdvertiseVpnRequest) (*BgpAdvertiseVpnResponse, error)
 	BgpAdvertiseUnicast(context.Context, *BgpAdvertiseUnicastRequest) (*BgpAdvertiseUnicastResponse, error)
 	BgpWithdraw(context.Context, *BgpWithdrawRequest) (*BgpWithdrawResponse, error)
+	BgpAdvertiseSrPolicy(context.Context, *BgpAdvertiseSrPolicyRequest) (*BgpAdvertiseSrPolicyResponse, error)
+	BgpWithdrawSrPolicy(context.Context, *BgpWithdrawSrPolicyRequest) (*BgpWithdrawSrPolicyResponse, error)
 }
 
 // UnimplementedBgpRouteServiceServer should be embedded to have forward compatible implementations.
@@ -90,6 +114,12 @@ func (UnimplementedBgpRouteServiceServer) BgpAdvertiseUnicast(context.Context, *
 }
 func (UnimplementedBgpRouteServiceServer) BgpWithdraw(context.Context, *BgpWithdrawRequest) (*BgpWithdrawResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BgpWithdraw not implemented")
+}
+func (UnimplementedBgpRouteServiceServer) BgpAdvertiseSrPolicy(context.Context, *BgpAdvertiseSrPolicyRequest) (*BgpAdvertiseSrPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BgpAdvertiseSrPolicy not implemented")
+}
+func (UnimplementedBgpRouteServiceServer) BgpWithdrawSrPolicy(context.Context, *BgpWithdrawSrPolicyRequest) (*BgpWithdrawSrPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BgpWithdrawSrPolicy not implemented")
 }
 
 // UnsafeBgpRouteServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -157,6 +187,42 @@ func _BgpRouteService_BgpWithdraw_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BgpRouteService_BgpAdvertiseSrPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BgpAdvertiseSrPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BgpRouteServiceServer).BgpAdvertiseSrPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BgpRouteService_BgpAdvertiseSrPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BgpRouteServiceServer).BgpAdvertiseSrPolicy(ctx, req.(*BgpAdvertiseSrPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BgpRouteService_BgpWithdrawSrPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BgpWithdrawSrPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BgpRouteServiceServer).BgpWithdrawSrPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BgpRouteService_BgpWithdrawSrPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BgpRouteServiceServer).BgpWithdrawSrPolicy(ctx, req.(*BgpWithdrawSrPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // BgpRouteService_ServiceDesc is the grpc.ServiceDesc for BgpRouteService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -175,6 +241,14 @@ var BgpRouteService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BgpWithdraw",
 			Handler:    _BgpRouteService_BgpWithdraw_Handler,
+		},
+		{
+			MethodName: "BgpAdvertiseSrPolicy",
+			Handler:    _BgpRouteService_BgpAdvertiseSrPolicy_Handler,
+		},
+		{
+			MethodName: "BgpWithdrawSrPolicy",
+			Handler:    _BgpRouteService_BgpWithdrawSrPolicy_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

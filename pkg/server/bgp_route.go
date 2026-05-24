@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"net/netip"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -10,16 +11,17 @@ import (
 )
 
 // BgpRouteServer is the Connect RPC handler for BgpRouteService. It is a
-// thin adapter over bgp.RouteAdvertiser. advertiser is nil when vinberod
-// runs without --bgp-enabled; every RPC then fails with
-// FailedPrecondition so the operator gets a clear signal rather than a
-// silent no-op.
+// thin adapter over bgp.RouteAdvertiser (VPN / unicast) and
+// bgp.SRPolicyController (SR Policy). Both are nil when vinberod runs
+// without --bgp-enabled; every RPC then fails with FailedPrecondition so
+// the operator gets a clear signal rather than a silent no-op.
 type BgpRouteServer struct {
 	advertiser bgp.RouteAdvertiser
+	srPolicy   bgp.SRPolicyController
 }
 
-func NewBgpRouteServer(advertiser bgp.RouteAdvertiser) *BgpRouteServer {
-	return &BgpRouteServer{advertiser: advertiser}
+func NewBgpRouteServer(advertiser bgp.RouteAdvertiser, srPolicy bgp.SRPolicyController) *BgpRouteServer {
+	return &BgpRouteServer{advertiser: advertiser, srPolicy: srPolicy}
 }
 
 // errBGPDisabled is returned (as FailedPrecondition) when an advertise /
@@ -110,4 +112,96 @@ func (s *BgpRouteServer) BgpWithdraw(
 		resp.Withdrawn = append(resp.Withdrawn, k)
 	}
 	return connect.NewResponse(resp), nil
+}
+
+func (s *BgpRouteServer) BgpAdvertiseSrPolicy(
+	ctx context.Context,
+	req *connect.Request[v1.BgpAdvertiseSrPolicyRequest],
+) (*connect.Response[v1.BgpAdvertiseSrPolicyResponse], error) {
+	if s.srPolicy == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errBGPDisabled)
+	}
+	resp := &v1.BgpAdvertiseSrPolicyResponse{
+		Advertised: make([]*v1.BgpSrPolicy, 0),
+		Errors:     make([]*v1.OperationError, 0),
+	}
+	for _, p := range req.Msg.Policies {
+		policy, err := protoToAdvertiseSRPolicy(p)
+		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: p.GetEndpoint(), Reason: err.Error()})
+			continue
+		}
+		if err := s.srPolicy.PushPolicy(ctx, policy); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: p.GetEndpoint(), Reason: err.Error()})
+			continue
+		}
+		resp.Advertised = append(resp.Advertised, p)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *BgpRouteServer) BgpWithdrawSrPolicy(
+	ctx context.Context,
+	req *connect.Request[v1.BgpWithdrawSrPolicyRequest],
+) (*connect.Response[v1.BgpWithdrawSrPolicyResponse], error) {
+	if s.srPolicy == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errBGPDisabled)
+	}
+	resp := &v1.BgpWithdrawSrPolicyResponse{
+		Withdrawn: make([]*v1.BgpSrPolicyKey, 0),
+		Errors:    make([]*v1.OperationError, 0),
+	}
+	for _, k := range req.Msg.Keys {
+		endpoint, err := netip.ParseAddr(k.GetEndpoint())
+		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: k.GetEndpoint(), Reason: err.Error()})
+			continue
+		}
+		if err := s.srPolicy.WithdrawPolicy(ctx, bgp.SRPolicyKey{
+			Color:         k.GetColor(),
+			Endpoint:      endpoint,
+			Distinguisher: k.GetDistinguisher(),
+		}); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: k.GetEndpoint(), Reason: err.Error()})
+			continue
+		}
+		resp.Withdrawn = append(resp.Withdrawn, k)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// protoToAdvertiseSRPolicy converts a BgpSrPolicy advertise request into a
+// bgp.SRPolicy with a single local candidate path.
+func protoToAdvertiseSRPolicy(p *v1.BgpSrPolicy) (bgp.SRPolicy, error) {
+	endpoint, err := netip.ParseAddr(p.GetEndpoint())
+	if err != nil {
+		return bgp.SRPolicy{}, err
+	}
+	nh, err := netip.ParseAddr(p.GetNextHop())
+	if err != nil {
+		return bgp.SRPolicy{}, err
+	}
+	segments := make([]netip.Addr, 0, len(p.GetSegments()))
+	for _, s := range p.GetSegments() {
+		sid, err := netip.ParseAddr(s)
+		if err != nil {
+			return bgp.SRPolicy{}, err
+		}
+		segments = append(segments, sid)
+	}
+	preference := p.GetPreference()
+	if preference == 0 {
+		preference = bgp.SRPolicyDefaultPreference
+	}
+	return bgp.SRPolicy{
+		Color:            p.GetColor(),
+		Endpoint:         endpoint,
+		AdvertiseNextHop: nh,
+		Candidates: []bgp.CandidatePath{{
+			Origin:        bgp.OriginLocal,
+			Distinguisher: p.GetDistinguisher(),
+			Preference:    preference,
+			SegmentList:   segments,
+		}},
+	}, nil
 }

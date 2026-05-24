@@ -9,15 +9,18 @@ option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 // BgpRouteService advertises and withdraws BGP routes through the
 // in-process BGP speaker. Phase 1e exposes operator-explicit
 // advertisement: the caller supplies the full route (prefix, RD, route
-// targets, SRv6 SID, next hop) rather than deriving it from existing
-// SID / headend entries. Automatic advertisement of local state is a
-// Phase 2 follow-up.
+// targets, SRv6 SID, next hop), or a full SR Policy (color, endpoint,
+// transport segments, preference, next hop), rather than deriving it from
+// existing SID / headend entries. Automatic advertisement of local state
+// is a Phase 2 follow-up.
 //
 // Only meaningful when vinberod runs with --bgp-enabled.
 service BgpRouteService {
   rpc BgpAdvertiseVpn(BgpAdvertiseVpnRequest) returns (BgpAdvertiseVpnResponse);
   rpc BgpAdvertiseUnicast(BgpAdvertiseUnicastRequest) returns (BgpAdvertiseUnicastResponse);
   rpc BgpWithdraw(BgpWithdrawRequest) returns (BgpWithdrawResponse);
+  rpc BgpAdvertiseSrPolicy(BgpAdvertiseSrPolicyRequest) returns (BgpAdvertiseSrPolicyResponse);
+  rpc BgpWithdrawSrPolicy(BgpWithdrawSrPolicyRequest) returns (BgpWithdrawSrPolicyResponse);
 }
 
 // BgpVpnRoute is an L3VPN route to advertise.
@@ -64,5 +67,40 @@ message BgpWithdrawRequest {
 }
 message BgpWithdrawResponse {
   repeated BgpRouteKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpSrPolicy is a local SR Policy (SAFI 73) to advertise. The
+// {color, endpoint, distinguisher} tuple is the NLRI key (RFC 9830); the
+// segments are the transport SID list of the single candidate path.
+message BgpSrPolicy {
+  uint32 color = 1;
+  string endpoint = 2;           // IPv6 endpoint
+  repeated string segments = 3;  // transport SID list (IPv6)
+  uint32 preference = 4;         // 0 -> RFC 9256 default
+  uint32 distinguisher = 5;
+  string next_hop = 6;           // IPv6 BGP next hop
+}
+
+// BgpSrPolicyKey identifies a previously advertised SR Policy for withdrawal.
+message BgpSrPolicyKey {
+  uint32 color = 1;
+  string endpoint = 2;
+  uint32 distinguisher = 3;
+}
+
+message BgpAdvertiseSrPolicyRequest {
+  repeated BgpSrPolicy policies = 1;
+}
+message BgpAdvertiseSrPolicyResponse {
+  repeated BgpSrPolicy advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawSrPolicyRequest {
+  repeated BgpSrPolicyKey keys = 1;
+}
+message BgpWithdrawSrPolicyResponse {
+  repeated BgpSrPolicyKey withdrawn = 1;
   repeated OperationError errors = 2;
 }

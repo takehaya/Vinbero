@@ -193,6 +193,9 @@ type SRPolicy struct {
 	Color      uint32
 	Endpoint   netip.Addr
 	Candidates []CandidatePath
+	// AdvertiseNextHop is the BGP next hop used only when advertising this
+	// policy (PushPolicy). It is the zero Addr for received policies.
+	AdvertiseNextHop netip.Addr
 }
 
 // SRPolicyDefaultPreference is the candidate path preference assumed when
@@ -212,10 +215,23 @@ type CandidatePath struct {
 	SegmentList []netip.Addr
 }
 
+// SRPolicyKey identifies a previously-advertised SR Policy for
+// withdrawal: the {Distinguisher, Color, Endpoint} tuple of the NLRI
+// (RFC 9830).
+type SRPolicyKey struct {
+	Color         uint32
+	Endpoint      netip.Addr
+	Distinguisher uint32
+}
+
 // SRPolicyController advertises local SR Policies into BGP (SAFI 73).
 // Reception is delivered through RouteSubscriber as RouteEvent.SRPolicy;
-// PushPolicy is the advertise direction, surfaced operator-side as
-// `vbctl bgp advertise-sr-policy`.
+// PushPolicy / WithdrawPolicy are the advertise direction, surfaced
+// operator-side as `vbctl bgp advertise-sr-policy` / `withdraw-sr-policy`.
+//
+// PushPolicy advertises exactly one candidate path: p.Candidates must hold
+// a single CandidatePath, and p.AdvertiseNextHop supplies the BGP next hop.
 type SRPolicyController interface {
 	PushPolicy(ctx context.Context, p SRPolicy) error
+	WithdrawPolicy(ctx context.Context, key SRPolicyKey) error
 }

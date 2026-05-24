@@ -29,6 +29,7 @@ type Server struct {
 	locatorMgr   *locator.Manager
 	vrfBgpMgr    *vrfbgp.Manager
 	advertiser   bgp.RouteAdvertiser
+	srPolicyAdv  bgp.SRPolicyController
 	srPolicyCtrl srPolicyController
 	logger       *zap.Logger
 	mux          *http.ServeMux
@@ -45,17 +46,18 @@ type Server struct {
 // enabled, or nil otherwise. Taking the concrete type (not the interface)
 // keeps a typed-nil from leaking into srPolicyCtrl, so the FailedPrecondition
 // guard in SrPolicyServer works.
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyApplier *apply.Applier, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, srPolicyApplier *apply.Applier, logger *zap.Logger) *Server {
 	s := &Server{
-		cfg:        cfg,
-		mapOps:     mapOps,
-		resMgr:     resMgr,
-		fdbWatcher: fdbWatcher,
-		locatorMgr: locatorMgr,
-		vrfBgpMgr:  vrfBgpMgr,
-		advertiser: advertiser,
-		logger:     logger,
-		mux:        http.NewServeMux(),
+		cfg:         cfg,
+		mapOps:      mapOps,
+		resMgr:      resMgr,
+		fdbWatcher:  fdbWatcher,
+		locatorMgr:  locatorMgr,
+		vrfBgpMgr:   vrfBgpMgr,
+		advertiser:  advertiser,
+		srPolicyAdv: srPolicyAdv,
+		logger:      logger,
+		mux:         http.NewServeMux(),
 	}
 	if srPolicyApplier != nil {
 		s.srPolicyCtrl = srPolicyApplier
@@ -93,7 +95,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
 
 	// BgpRoute service (operator-explicit BGP advertise / withdraw).
-	bgpRouteServer := NewBgpRouteServer(s.advertiser)
+	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv)
 	bgpRoutePath, bgpRouteHandler := vinberov1connect.NewBgpRouteServiceHandler(bgpRouteServer)
 	s.mux.Handle(bgpRoutePath, bgpRouteHandler)
 	s.logger.Info("Registered BgpRouteService", zap.String("path", bgpRoutePath))
