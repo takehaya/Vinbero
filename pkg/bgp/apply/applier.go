@@ -171,7 +171,9 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 	// Color-based auto-steering: stamp the SR Policy id for {color, next
 	// hop} so the XDP headend composes this route's service SID onto that
 	// policy's transport. The id is reserved even if the SR Policy has not
-	// arrived yet -- the data plane falls back until it does.
+	// arrived yet -- the data plane falls back until it does. reserveID only
+	// resolves the id; the steering reference is committed (steer) after the
+	// headend write succeeds, so a failed write never pins the id.
 	var want *policyKey
 	if vr.Color != 0 {
 		endpoint, perr := netip.ParseAddr(vr.NextHop)
@@ -181,14 +183,17 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 				zap.String("nexthop", vr.NextHop))
 		} else {
 			want = &policyKey{color: vr.Color, endpoint: endpoint}
+			entry.PolicyId = a.srPolicy.reserveID(want.color, want.endpoint)
 		}
 	}
-	entry.PolicyId = a.steer(rk, want)
 	if err := a.createHeadend(vr.Family, vr.Prefix, entry, owner); err != nil {
 		a.logger.Error("install VPN route",
 			zap.String("prefix", vr.Prefix), zap.Error(err))
 		return
 	}
+	// The entry is installed -- commit the steering reference (or release a
+	// stale one when the route is no longer steered).
+	a.steer(rk, want)
 	a.logger.Info("VPN route installed",
 		zap.String("prefix", vr.Prefix), zap.String("sid", vr.SRv6SID))
 }

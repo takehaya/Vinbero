@@ -1,19 +1,25 @@
 package apply
 
 import (
+	"errors"
+	"fmt"
 	"net/netip"
 	"testing"
 
 	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
 // fakePolicyMap records the writes the table makes to the data plane.
+// deleteErr, when set, makes DeleteSRPolicy fail so the table's
+// keep-state-and-retry recovery paths can be exercised.
 type fakePolicyMap struct {
-	upserts []upsertCall
-	deletes []uint32
-	current map[uint32][]netip.Addr // id -> last transport written (nil = deleted)
+	upserts   []upsertCall
+	deletes   []uint32
+	current   map[uint32][]netip.Addr // id -> last transport written (nil = deleted)
+	deleteErr error
 }
 
 type upsertCall struct {
@@ -33,6 +39,9 @@ func (f *fakePolicyMap) UpsertSRPolicy(id uint32, transport []netip.Addr) error 
 
 func (f *fakePolicyMap) DeleteSRPolicy(id uint32) error {
 	f.deletes = append(f.deletes, id)
+	if f.deleteErr != nil {
+		return f.deleteErr // simulate a data-plane delete failure
+	}
 	delete(f.current, id)
 	return nil
 }
@@ -242,6 +251,80 @@ func TestSRPolicyTable_NoReapWhileCandidateOrRefRemains(t *testing.T) {
 	}
 	if _, ok := fm.current[id]; ok {
 		t.Errorf("map entry %d still present after reap", id)
+	}
+}
+
+// A candidate whose transport list is too long to install (>= MaxSegments,
+// since the route's service SID composes onto the tail) is ineligible: a
+// usable shorter candidate wins instead of the policy silently never
+// installing.
+func TestSRPolicyTable_TooLongCandidateIneligible(t *testing.T) {
+	tbl, fm := newTestTable()
+	ep := netip.MustParseAddr("2001:db8::2")
+
+	long := make([]netip.Addr, bpf.MaxSegments) // one too long for UpsertSRPolicy
+	for i := range long {
+		long[i] = netip.MustParseAddr(fmt.Sprintf("fd00:f::%d", i+1))
+	}
+	// Higher preference, but uninstallable.
+	tbl.apply(bgp.SRPolicy{Color: 100, Endpoint: ep, Candidates: []bgp.CandidatePath{
+		{Origin: bgp.OriginBGP, Distinguisher: 1, Preference: 300, SegmentList: long},
+	}}, false)
+	// Lower preference, but installable.
+	tbl.apply(policy(100, "2001:db8::2", bgpCand(2, 100, "fd00:200:0:1::")), false)
+
+	id := tbl.idOf(100, ep)
+	got, ok := fm.current[id]
+	if !ok || len(got) != 1 || got[0] != netip.MustParseAddr("fd00:200:0:1::") {
+		t.Errorf("active = %v (ok=%v), want the installable shorter candidate fd00:200:0:1::", got, ok)
+	}
+}
+
+// When the data-plane delete fails, the table must keep the state (and its
+// id) rather than free an id whose stale map entry still steers traffic; a
+// later candidate withdraw retries the delete and reaps once it succeeds.
+func TestSRPolicyTable_GCDeleteFailureKeepsState(t *testing.T) {
+	tbl, fm := newTestTable()
+	ep := netip.MustParseAddr("2001:db8::2")
+	id := tbl.ref(100, ep)
+	tbl.apply(policy(100, "2001:db8::2", bgpCand(1, 100, "fd00:1::")), false)
+	if _, ok := fm.current[id]; !ok {
+		t.Fatalf("policy not installed")
+	}
+
+	fm.deleteErr = errors.New("boom")
+	tbl.unref(100, ep)                                                       // refs->0 (candidate still present -> no gc delete yet)
+	tbl.apply(policy(100, "2001:db8::2", bgpCand(1, 100, "fd00:1::")), true) // withdraw candidate: reconcile + gc both attempt the delete and fail
+	if tbl.idOf(100, ep) != id {
+		t.Fatalf("state reaped despite delete failure -- id %d could be reused while its map entry persists", id)
+	}
+	if len(fm.deletes) == 0 {
+		t.Errorf("expected at least one delete attempt during the failure window")
+	}
+
+	fm.deleteErr = nil
+	tbl.apply(policy(100, "2001:db8::2", bgpCand(1, 100, "fd00:1::")), true) // retry: delete now succeeds -> reaped
+	if tbl.idOf(100, ep) != 0 {
+		t.Errorf("state not reaped after the delete succeeded on retry")
+	}
+}
+
+// reconcile's delete-failure path must keep `installed` intact so the entry
+// is not treated as gone while the map still holds it; a later active-path
+// change still writes correctly.
+func TestSRPolicyTable_ReconcileDeleteFailureKeepsInstalled(t *testing.T) {
+	tbl, fm := newTestTable()
+	ep := netip.MustParseAddr("2001:db8::2")
+	id := tbl.ref(100, ep) // refs>0 throughout so gc never reaps; isolates reconcile
+	tbl.apply(policy(100, "2001:db8::2", bgpCand(1, 100, "fd00:1::")), false)
+
+	fm.deleteErr = errors.New("boom")
+	tbl.apply(policy(100, "2001:db8::2", bgpCand(1, 100, "fd00:1::")), true) // withdraw -> reconcile delete fails -> installed retained
+
+	fm.deleteErr = nil
+	tbl.apply(policy(100, "2001:db8::2", bgpCand(2, 100, "fd00:2::")), false) // new active path must still be written
+	if got := fm.current[id]; len(got) != 1 || got[0] != netip.MustParseAddr("fd00:2::") {
+		t.Errorf("after a failed delete then a new candidate, active = %v, want fd00:2::", got)
 	}
 }
 

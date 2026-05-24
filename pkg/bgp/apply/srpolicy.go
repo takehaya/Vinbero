@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
 // localDistinguisher is the distinguisher for operator-defined (local)
@@ -98,6 +99,17 @@ func newSRPolicyTable(mapOps policyMapOps, logger *zap.Logger) *srPolicyTable {
 		byKey:  make(map[policyKey]*policyState),
 		logger: logger.Named("srpolicy"),
 	}
+}
+
+// reserveID returns the stable policy_id for {color, endpoint}, allocating
+// the state on first use WITHOUT taking a reference. The applier stamps a
+// headend entry with this id before writing it to the data plane, then
+// commits the reference (ref, via steer) only once the write succeeds -- so
+// a failed headend write never leaves a dangling reference pinning the id.
+func (t *srPolicyTable) reserveID(color uint32, endpoint netip.Addr) uint32 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.ensureState(policyKey{color: color, endpoint: endpoint}).id
 }
 
 // ref reserves the policy_id for {color, endpoint} on behalf of one
@@ -212,7 +224,10 @@ func (t *srPolicyTable) gc(key policyKey, st *policyState) {
 		if err := t.mapOps.DeleteSRPolicy(st.id); err != nil {
 			t.logger.Error("gc: delete sr_policy_map entry",
 				zap.Uint32("policy_id", st.id), zap.Error(err))
-			return // keep the state so a later unref/withdraw retries the delete
+			// Keep the state (and its id) so the stale map entry is never
+			// orphaned under a reused id. A later candidate withdraw re-runs
+			// reconcile + gc and retries the delete.
+			return
 		}
 		st.installed = nil
 	}
@@ -255,15 +270,19 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 		zap.Uint32("policy_id", st.id), zap.Int("segments", len(best.SegmentList)))
 }
 
-// bestCandidate selects the active candidate path (RFC 9256 §2.9 subset):
-// only paths with a non-empty transport list are eligible (an empty list
-// would blackhole), and among those the winner is decided by the strict
-// order in betterCandidate. ok is false when no candidate is eligible.
+// bestCandidate selects the active candidate path (RFC 9256 §2.9 subset).
+// A candidate is eligible only if its transport list is installable: a
+// non-empty list (an empty one would blackhole) that still leaves room for
+// the route's service SID composed onto the tail. UpsertSRPolicy rejects a
+// transport of MaxSegments or longer, so such a candidate could win
+// best-path yet never install, silently leaving the policy down -- treat it
+// as ineligible here instead. Among eligible candidates the winner is the
+// strict order in betterCandidate. ok is false when none is eligible.
 func bestCandidate(cands map[candidateID]bgp.CandidatePath) (bgp.CandidatePath, bool) {
 	var best bgp.CandidatePath
 	found := false
 	for _, c := range cands {
-		if len(c.SegmentList) == 0 {
+		if len(c.SegmentList) == 0 || len(c.SegmentList) >= bpf.MaxSegments {
 			continue
 		}
 		if !found || betterCandidate(c, best) {

@@ -45,6 +45,16 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 	// WatchPostUpdate: post-import-policy routes, which is what the data
 	// plane should mirror. current=true replays the existing RIB so a
 	// subscriber that attaches after peers are up still sees them.
+	//
+	// INVARIANT: Subscribe is called exactly once, at daemon start, before
+	// any local route/SR Policy is advertised (see cmd/vinberod/main.go).
+	// The current=true replay therefore only ever delivers peer-learned
+	// routes, never this node's own advertisements. If that ordering is ever
+	// broken -- a second Subscribe, or advertising before subscribing -- the
+	// replay would feed the node's own advertised routes back into the
+	// applier. A node that both advertises and steers would then act on its
+	// own SR Policy / VPN routes. Preserve the single-boot-subscribe ordering,
+	// or filter local-origin paths here, before relaxing this.
 	if err := srv.WatchEvent(ctx, cbs, gobgpsrv.WatchPostUpdate(true, "", "")); err != nil {
 		cancel()
 		return nil, fmt.Errorf("watch event: %w", err)
