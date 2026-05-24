@@ -1,36 +1,31 @@
 #!/usr/bin/env bash
-# sr-policy-bgp-2site interop scenario assertions (Vinbero <-> Vinbero <-> FRR).
+# sr-policy-bgp-2site interop scenario assertions (Vinbero <-> Vinbero).
 #
-# Like sr-policy-2site but the SR Policy is LEARNED OVER BGP (SAFI 73) from a
-# separate controller (srctl) instead of being defined locally on the PE. It
-# proves Vinbero's SR Policy receive/decode path over a real BGP session:
-#   1. the iBGP VPN session with FRR is ESTABLISHED;
-#   2. the PE LEARNED the SR Policy over BGP -- vbctl sr-policy list shows it
-#      with ORIGIN bgp (not local), proving the SAFI 73 session and the
-#      decode of the SR Policy NLRI + Tunnel Encap attribute;
-#   3. FRR's color-100 VPN route resolves onto the BGP-learned policy (the
+# Two Vinbero PEs exchange SR Policies edge-to-edge over BGP (SAFI 73) and
+# steer their L3VPN traffic through a shared TE waypoint. It proves:
+#   1. each PE LEARNED the peer's SR Policy over BGP (origin bgp), whose
+#      transport segment is the waypoint End SID -- the SAFI 73 session and
+#      the NLRI / Tunnel Encap decode both work;
+#   2. each PE's color-100 VPN route resolves onto the learned policy (the
 #      headend entry exists and the policy has an ACTIVE candidate);
-#   4. data plane: ce-tokyo -> ce-osaka rides the steered path (outer DA =
-#      transport SID fd00:200:0:ee::1), proven on the wire;
-#   5. negative: the un-colored return direction still forwards as plain
-#      L3VPN.
+#   3. data plane, both directions: ce-tokyo <-> ce-osaka ping, and the
+#      steered packets detour through the waypoint (outer DA = the waypoint
+#      End SID on the core<->waypoint link) -- a real BGP-signaled SR-TE path.
 #
 # Exit non-zero on the first failed assertion.
 set -u
 
-PE_TOKYO=clab-sr-policy-bgp-2site-pe-tokyo   # Vinbero PE under test
-PE_OSAKA=clab-sr-policy-bgp-2site-pe-osaka   # FRR PE
-SRCTL=clab-sr-policy-bgp-2site-srctl         # Vinbero SR Policy controller
+PE_TOKYO=clab-sr-policy-bgp-2site-pe-tokyo
+PE_OSAKA=clab-sr-policy-bgp-2site-pe-osaka
+WAYPOINT=clab-sr-policy-bgp-2site-waypoint
 CE_TOKYO=clab-sr-policy-bgp-2site-ce-tokyo
 CE_OSAKA=clab-sr-policy-bgp-2site-ce-osaka
 
-OSAKA_PREFIX=10.2.0.0/24      # ce-osaka subnet, advertised by FRR with color 100
+TOKYO_LOOPBACK=2001:db8:ff::1
+OSAKA_LOOPBACK=2001:db8:ff::2
+WAYPOINT_SID=fd00:300:0:ee::1   # TE waypoint End SID (outer DA on the detour)
 CE_TOKYO_ADDR=10.1.0.10
 CE_OSAKA_ADDR=10.2.0.10
-
-VIN_LOOPBACK=2001:db8:ff::1   # pe-tokyo (Vinbero)
-FRR_LOOPBACK=2001:db8:ff::2   # pe-osaka (FRR), = SR Policy endpoint
-TRANSPORT_SID=fd00:200:0:ee::1  # SR Policy transport hop (End SID on FRR)
 
 pass=0
 fail=0
@@ -51,123 +46,103 @@ retry_n() {
 }
 
 echo "=============================================="
-echo " sr-policy-bgp-2site interop scenario test (BGP-learned SR Policy)"
+echo " sr-policy-bgp-2site interop test (edge-to-edge SR Policy + TE)"
 echo "=============================================="
 
-# --- 1. iBGP VPN session with FRR ESTABLISHED ------------------------------
+# --- 1. Each PE learned the peer's SR Policy over BGP ----------------------
 echo ""
-echo "[1] iBGP VPN session (FRR) ESTABLISHED"
-frr_established() {
-    dexec "$PE_OSAKA" vtysh -c "show bgp summary json" 2>/dev/null \
-      | python3 -c "import sys,json; d=json.load(sys.stdin); \
-sys.exit(0 if d.get('ipv4Vpn',{}).get('peers',{}).get('$VIN_LOOPBACK',{}).get('state')=='Established' else 1)"
-}
-if retry frr_established; then
-    ok "FRR sees peer $VIN_LOOPBACK Established (ipv4 vpn)"
-else
-    ng "FRR peer $VIN_LOOPBACK not Established"
-    dexec "$PE_OSAKA" vtysh -c "show bgp summary" || true
-fi
-
-# --- 2. PE learned the SR Policy over BGP (SAFI 73) ------------------------
-echo ""
-echo "[2] PE learned the SR Policy over BGP from srctl"
-srp_origin_bgp() {
-    # The policy must be present with ORIGIN bgp -- proof the SAFI 73 session
-    # is up and the NLRI + Tunnel Encap decoded. Match the transport SID and
-    # a bgp origin row.
-    dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -qi "$TRANSPORT_SID" \
+echo "[1] SR Policy exchanged edge-to-edge (origin bgp)"
+# pe-tokyo must have pe-osaka's policy {endpoint = osaka loopback}; pe-osaka
+# must have pe-tokyo's. Both must carry the waypoint End SID and be origin bgp.
+tokyo_has_osaka_policy() {
+    dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -q "$OSAKA_LOOPBACK" \
+      && dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -q "$WAYPOINT_SID" \
       && dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -iq "bgp"
 }
-if retry srp_origin_bgp; then
-    ok "vbctl sr-policy list shows the BGP-learned policy (origin bgp, transport $TRANSPORT_SID)"
+osaka_has_tokyo_policy() {
+    dexec "$PE_OSAKA" vbctl sr-policy list 2>/dev/null | grep -q "$TOKYO_LOOPBACK" \
+      && dexec "$PE_OSAKA" vbctl sr-policy list 2>/dev/null | grep -q "$WAYPOINT_SID" \
+      && dexec "$PE_OSAKA" vbctl sr-policy list 2>/dev/null | grep -iq "bgp"
+}
+if retry tokyo_has_osaka_policy; then
+    ok "pe-tokyo learned pe-osaka's SR Policy (origin bgp, transport $WAYPOINT_SID)"
     dexec "$PE_TOKYO" vbctl sr-policy list | sed 's/^/      /'
 else
-    ng "BGP-learned SR Policy (origin bgp) not found on the PE"
+    ng "pe-tokyo did not learn pe-osaka's SR Policy"
     dexec "$PE_TOKYO" vbctl sr-policy list || true
-    echo "    --- srctl advertise log ---"
-    dexec "$SRCTL" sh -c 'tail -5 /var/log/vinberod.log' 2>/dev/null | sed 's/^/      /' || true
+fi
+if retry osaka_has_tokyo_policy; then
+    ok "pe-osaka learned pe-tokyo's SR Policy (origin bgp, transport $WAYPOINT_SID)"
+else
+    ng "pe-osaka did not learn pe-tokyo's SR Policy"
+    dexec "$PE_OSAKA" vbctl sr-policy list || true
 fi
 
-# --- 3. FRR color route resolves onto the BGP-learned policy ---------------
+# --- 2. Color routes resolve onto the learned policies ---------------------
 echo ""
-echo "[3] FRR color-100 route resolves onto the BGP-learned policy"
-if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
-    ok "FRR's $OSAKA_PREFIX installed in Vinbero headend-v4 map"
+echo "[2] color routes resolve onto the learned policies"
+if retry bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '10.2.0.0/24'" \
+   && dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -q '\*'; then
+    ok "pe-tokyo: 10.2.0.0/24 in headend-v4 map, policy has an active candidate"
 else
-    ng "FRR's $OSAKA_PREFIX missing from Vinbero headend-v4 map"
+    ng "pe-tokyo: 10.2.0.0/24 not steered"
     dexec "$PE_TOKYO" vbctl headend-v4 list || true
 fi
-srp_active() {
-    dexec "$PE_TOKYO" vbctl sr-policy list 2>/dev/null | grep -q '\*'
-}
-if retry srp_active; then
-    ok "SR Policy has an active candidate (color route resolved onto policy_id)"
+if retry bash -c "docker exec $PE_OSAKA vbctl headend-v4 list 2>/dev/null | grep -q '10.1.0.0/24'" \
+   && dexec "$PE_OSAKA" vbctl sr-policy list 2>/dev/null | grep -q '\*'; then
+    ok "pe-osaka: 10.1.0.0/24 in headend-v4 map, policy has an active candidate"
 else
-    ng "SR Policy has no active candidate"
+    ng "pe-osaka: 10.1.0.0/24 not steered"
+    dexec "$PE_OSAKA" vbctl headend-v4 list || true
 fi
 
-# --- 4. Data plane: steered ce-tokyo -> ce-osaka ---------------------------
+# --- 3. Data plane: bidirectional, steered through the waypoint ------------
 echo ""
-echo "[4] Data plane  (steered path via transport End SID)"
-gate_underlay() {
-    dexec "$PE_TOKYO" ping6 -c 1 -W 2 -I "$VIN_LOOPBACK" "$FRR_LOOPBACK" >/dev/null 2>&1
+echo "[3] Data plane (bidirectional TE through the waypoint)"
+gate_waypoint() {
+    dexec "$WAYPOINT" ip -6 route show "$WAYPOINT_SID" 2>/dev/null | grep -qi "seg6local"
 }
-gate_transport() {
-    dexec "$PE_OSAKA" ip -6 route show "$TRANSPORT_SID" 2>/dev/null | grep -qi "seg6local"
-}
-retry gate_underlay || ng "gate: PE loopbacks not mutually reachable"
-if retry gate_transport; then
-    echo "  gate: FRR transport End SID ($TRANSPORT_SID) present"
+if retry gate_waypoint; then
+    echo "  gate: waypoint End SID ($WAYPOINT_SID) present"
 else
-    ng "gate: FRR transport End SID never appeared"
+    ng "gate: waypoint End SID never appeared"
 fi
+
+# Warm the ARP/NDP entries.
 dexec "$PE_TOKYO" ping -c 1 -W 2 "$CE_TOKYO_ADDR" >/dev/null 2>&1 || true
-dexec "$PE_OSAKA" ip vrf exec vrf-cust ping -c 1 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1 || true
+dexec "$PE_OSAKA" ping -c 1 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1 || true
 
-ce_tokyo_to_osaka() {
-    dexec "$CE_TOKYO" ping -c 2 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1
-}
-if retry_n 45 ce_tokyo_to_osaka; then
-    ok "ce-tokyo -> ce-osaka ping over the steered SRv6 path"
-else
-    ng "ce-tokyo -> ce-osaka ping failed"
-    dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" 2>&1 | sed 's/^/      /' || true
-fi
-
-# Steering proof: the encapsulated packet arriving at FRR must carry the
-# transport SID as its outer destination. A non-steered route would encap
-# straight to the service SID, so the transport SID as outer DA proves the
-# BGP-learned policy composed transport ahead of the service SID.
-capfile=$(mktemp)
-dexec "$PE_OSAKA" timeout 8 tcpdump -nli eth2 "ip6 and dst $TRANSPORT_SID" >"$capfile" 2>/dev/null &
-cappid=$!
-sleep 1
-for _ in 1 2 3 4 5; do
-    dexec "$CE_TOKYO" ping -c 1 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1
+# steered_dir <container> <dst> "<label>": capture the waypoint End SID on
+# the core<->waypoint link while pinging one direction; the outer DA being
+# the waypoint SID proves that direction detours through the waypoint.
+steered_dir() {
+    local src_c=$1 dst=$2 label=$3
+    if ! retry_n 45 bash -c "docker exec $src_c ping -c 2 -W 2 $dst >/dev/null 2>&1"; then
+        ng "$label: ping failed"
+        dexec "$src_c" ping -c 3 -W 2 "$dst" 2>&1 | sed 's/^/      /' || true
+        return
+    fi
+    ok "$label: ping over the steered SRv6 path"
+    local cap; cap=$(mktemp)
+    dexec "$WAYPOINT" timeout 8 tcpdump -nli eth1 "ip6 and dst $WAYPOINT_SID" >"$cap" 2>/dev/null &
+    local pid=$!
     sleep 1
-done
-wait "$cappid" 2>/dev/null
-if grep -q "$TRANSPORT_SID" "$capfile"; then
-    ok "steered packet seen with outer DA = transport SID $TRANSPORT_SID (BGP-learned steering confirmed)"
-    sed 's/^/      /' "$capfile" | head -1
-else
-    ng "no packet with outer DA $TRANSPORT_SID observed: traffic not steered"
-fi
-rm -f "$capfile"
-
-# --- 5. Negative: un-colored return path still forwards --------------------
-echo ""
-echo "[5] Negative  (no-color return path forwards as plain L3VPN)"
-ce_osaka_to_tokyo() {
-    dexec "$CE_OSAKA" ping -c 2 -W 2 "$CE_TOKYO_ADDR" >/dev/null 2>&1
+    for _ in 1 2 3 4 5; do
+        dexec "$src_c" ping -c 1 -W 2 "$dst" >/dev/null 2>&1
+        sleep 1
+    done
+    wait "$pid" 2>/dev/null
+    if grep -q "$WAYPOINT_SID" "$cap"; then
+        ok "$label: outer DA = waypoint End SID $WAYPOINT_SID (TE detour confirmed)"
+        sed 's/^/      /' "$cap" | head -1
+    else
+        ng "$label: no packet with outer DA $WAYPOINT_SID (not steered through waypoint)"
+    fi
+    rm -f "$cap"
 }
-if retry_n 45 ce_osaka_to_tokyo; then
-    ok "ce-osaka -> ce-tokyo ping (un-colored, non-steered) still works"
-else
-    ng "ce-osaka -> ce-tokyo ping failed"
-    dexec "$CE_OSAKA" ping -c 3 -W 2 "$CE_TOKYO_ADDR" 2>&1 | sed 's/^/      /' || true
-fi
+
+steered_dir "$CE_TOKYO" "$CE_OSAKA_ADDR" "ce-tokyo -> ce-osaka"
+steered_dir "$CE_OSAKA" "$CE_TOKYO_ADDR" "ce-osaka -> ce-tokyo"
 
 echo ""
 echo "=============================================="

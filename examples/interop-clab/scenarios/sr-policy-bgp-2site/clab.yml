@@ -1,28 +1,27 @@
 # containerlab topology for the sr-policy-bgp-2site interop scenario.
 #
-# Same 2-site SRv6 L3VPN as sr-policy-2site, but the SR Policy is LEARNED
-# OVER BGP (SAFI 73) from a separate controller instead of being defined
-# locally on the PE. This exercises Vinbero's SR Policy receive/decode path
-# against a real BGP session, complementing sr-policy-2site (which tests a
-# locally-defined policy):
+# Two Vinbero PEs that exchange SR Policies edge-to-edge over BGP (SAFI 73)
+# and steer their L3VPN traffic through a shared TE waypoint:
 #
 #   ce-tokyo --- pe-tokyo ===== core ===== pe-osaka --- ce-osaka
-#  10.1.0.0/24  (Vinbero PE)  (IPv6 core)  (FRR PE)   10.2.0.0/24
-#                   |
-#                 srctl (Vinbero SR Policy controller)
+#  10.1.0.0/24  (Vinbero PE)    |  |       (Vinbero PE)  10.2.0.0/24
+#                            waypoint (SRv6 End, TE 経由点)
 #
-# pe-tokyo runs two iBGP sessions in AS 65100: VPNv4/VPNv6 with FRR
-# (pe-osaka) over the loopbacks, and SR Policy (SAFI 73) with srctl over a
-# direct link. srctl advertises one SR Policy {color 100, endpoint = FRR
-# loopback, transport = FRR End SID}; pe-tokyo receives it (origin BGP) and
-# steers FRR's color-100 route onto it. The controller is Vinbero today and
-# can be swapped for a third-party SR Policy speaker (Cisco XRd, Nokia SR
-# OS, GoBGP) later.
+# Both PEs run in one provider AS (65100) and peer iBGP over their
+# loopbacks, carrying VPNv4/VPNv6 (L3VPN) AND SR Policy (SAFI 73) on the
+# same session. Each PE advertises a colored VPN route for its own customer
+# subnet and an SR Policy for reaching itself whose transport segment is the
+# waypoint's End SID. The peer receives both (origin BGP) and steers the
+# colored route onto the policy, so both directions detour through the
+# waypoint -- a real BGP-signaled SR-TE path, not the shortest path.
+#
+# `core` is a plain IPv6 router (no BGP); `waypoint` is an SRv6 End node
+# (iproute2 seg6local). No FRR and no separate controller: the two edges
+# drive everything themselves.
 name: sr-policy-bgp-2site
 
 topology:
   nodes:
-    # --- ce-tokyo: customer host behind the Vinbero PE ----------------------
     ce-tokyo:
       kind: linux
       image: alpine:3.20
@@ -31,27 +30,15 @@ topology:
         - ip link set eth1 up
         - ip route replace 10.2.0.0/24 via 10.1.0.1
 
-    # --- pe-tokyo: the Vinbero PE under test --------------------------------
     pe-tokyo:
       kind: linux
       image: vinbero-interop:latest
       binds:
-        - vinbero/vinbero.yml:/vinbero.yml
-        - vinbero/start.sh:/start.sh
+        - pe-tokyo/vinbero.yml:/vinbero.yml
+        - pe-tokyo/start.sh:/start.sh
       exec:
         - bash /start.sh
 
-    # --- srctl: Vinbero SR Policy controller (advertises SAFI 73) -----------
-    srctl:
-      kind: linux
-      image: vinbero-interop:latest
-      binds:
-        - srctl/vinbero.yml:/vinbero.yml
-        - srctl/start.sh:/start.sh
-      exec:
-        - bash /start.sh
-
-    # --- core: provider backbone, plain IPv6 router -------------------------
     core:
       kind: linux
       image: alpine:3.20
@@ -60,17 +47,23 @@ topology:
       exec:
         - sh /start.sh
 
-    # --- pe-osaka: the FRR PE (interop peer) --------------------------------
-    pe-osaka:
+    waypoint:
       kind: linux
-      image: frr-interop:10.2.1
+      image: alpine:3.20
       binds:
-        - frr/frr.conf:/etc/frr/frr.conf
-        - frr/start.sh:/start.sh
+        - waypoint/start.sh:/start.sh
       exec:
         - sh /start.sh
 
-    # --- ce-osaka: customer host behind the FRR PE --------------------------
+    pe-osaka:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - pe-osaka/vinbero.yml:/vinbero.yml
+        - pe-osaka/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
     ce-osaka:
       kind: linux
       image: alpine:3.20
@@ -82,9 +75,9 @@ topology:
   links:
     # CE <-> PE customer-facing ports.
     - endpoints: [ce-tokyo:eth1, pe-tokyo:eth2]
-    - endpoints: [ce-osaka:eth1, pe-osaka:eth1]
+    - endpoints: [ce-osaka:eth1, pe-osaka:eth2]
     # Provider underlay: pe-tokyo <-> core <-> pe-osaka.
     - endpoints: [pe-tokyo:eth1, core:eth1]
-    - endpoints: [core:eth2, pe-osaka:eth2]
-    # SR Policy control link: pe-tokyo <-> srctl (SAFI 73 iBGP).
-    - endpoints: [pe-tokyo:eth3, srctl:eth1]
+    - endpoints: [pe-osaka:eth1, core:eth2]
+    # TE waypoint hangs off the core.
+    - endpoints: [core:eth3, waypoint:eth1]

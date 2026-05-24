@@ -1,9 +1,9 @@
 internal:
-  # srctl is an SR Policy controller: it only advertises a BGP SR Policy and
-  # has no forwarding role. eth1 still carries an XDP program (vinberod
-  # always loads one), which harmlessly passes the BGP traffic.
+  # eth1 faces the core (SRv6 underlay + iBGP transport); eth2 faces
+  # ce-osaka. Both carry XDP for the bidirectional L3VPN data plane.
   devices:
     - eth1
+    - eth2
   bpf:
     device_mode: "generic"
     verifier_log_level: 2
@@ -33,19 +33,21 @@ settings:
     bd_peer:
       capacity: 1024
 
-# In-process BGP speaker. srctl peers with pe-tokyo over the direct eth1
-# link and carries the SR Policy family (SAFI 73) only. No source_locator
-# is needed: srctl advertises an SR Policy but never materialises VPN
-# headend entries.
+# In-process BGP speaker. The mirror of pe-tokyo: both Vinbero PEs in AS
+# 65100 peer iBGP over their loopbacks, carrying VPNv4/VPNv6 and SR Policy
+# (SAFI 73) on one session.
 bgp:
   global:
     local_asn: 65100
-    router_id: "10.255.0.3"
+    router_id: "10.255.0.2"
     listen_port: 179
+    source_locator: "LOC1"
   peers:
-    - neighbor: "2001:db8:cc::1"
+    - neighbor: "2001:db8:ff::1"
       peer_asn: 65100
       hold_time_sec: 30
       keepalive_sec: 10
       families:
+        - vpnv4
+        - vpnv6
         - sr_policy_ipv6
