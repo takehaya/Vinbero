@@ -31,6 +31,7 @@ message BgpVpnRoute {
   repeated string route_targets = 4; // "65000:100" form
   string srv6_sid = 5; // SRv6 service SID (IPv6)
   string next_hop = 6;
+  uint32 color = 7; // Color Extended Community (0 = none)
 }
 
 // BgpUnicastRoute is an IPv6 unicast route to advertise.

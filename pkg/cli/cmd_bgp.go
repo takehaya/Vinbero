@@ -23,6 +23,7 @@ func bgpCommand() *cli.Command {
 					&cli.StringFlag{Name: "rts", Usage: "Route targets (comma-separated)"},
 					&cli.StringFlag{Name: "sid", Required: true, Usage: "SRv6 service SID (IPv6)"},
 					&cli.StringFlag{Name: "next-hop", Required: true},
+					&cli.UintFlag{Name: "color", Usage: "Color Extended Community for SR Policy steering (0 = none)"},
 				},
 				Action: func(c *cli.Context) error {
 					r := &v1.BgpVpnRoute{
@@ -32,6 +33,7 @@ func bgpCommand() *cli.Command {
 						RouteTargets: csvFlag(c.String("rts")),
 						Srv6Sid:      c.String("sid"),
 						NextHop:      c.String("next-hop"),
+						Color:        uint32(c.Uint("color")),
 					}
 					clients := clientsFromContext(c)
 					resp, err := clients.BgpRoute.BgpAdvertiseVpn(context.Background(),

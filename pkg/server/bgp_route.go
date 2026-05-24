@@ -53,6 +53,7 @@ func (s *BgpRouteServer) BgpAdvertiseVpn(
 			RTs:     r.GetRouteTargets(),
 			SRv6SID: r.GetSrv6Sid(),
 			NextHop: r.GetNextHop(),
+			Color:   r.GetColor(),
 		})
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: r.GetPrefix(), Reason: err.Error()})
