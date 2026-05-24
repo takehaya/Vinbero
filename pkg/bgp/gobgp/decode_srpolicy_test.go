@@ -141,6 +141,19 @@ func TestDecodeSRPolicy_NotSRPolicyNLRI(t *testing.T) {
 	}
 }
 
+// An IPv4 endpoint on the IPv6 SR Policy family is rejected: it could
+// never match the always-IPv6 VPN next hop, so the policy must not decode.
+func TestDecodeSRPolicy_RejectsIPv4Endpoint(t *testing.T) {
+	nlri, err := gobgppkt.NewSRPolicy(gobgppkt.RF_SR_POLICY_IPv6, gobgppkt.SRPolicyIPv6NLRILen, 1, 100, []byte{10, 0, 0, 1})
+	if err != nil {
+		t.Fatalf("NewSRPolicy: %v", err)
+	}
+	p := &apiutil.Path{Family: gobgppkt.RF_SR_POLICY_IPv6, Nlri: nlri}
+	if got := decodeSRPolicy(p); got != nil {
+		t.Errorf("decodeSRPolicy(IPv4 endpoint) = %+v, want nil", got)
+	}
+}
+
 // A withdrawal carries the NLRI key but no attributes: the candidate
 // comes back with the default preference and no segments, enough for the
 // applier to remove it by {color, endpoint, distinguisher}.

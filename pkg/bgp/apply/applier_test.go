@@ -239,3 +239,36 @@ func TestApplier_CreateErrorLogged(t *testing.T) {
 	})
 	// No assertion beyond "did not panic"; the error path is logged.
 }
+
+// TestApplier_VPNv4ColorStampsPolicyId covers the color->policy_id steering
+// seam in applyVPN: a colored route with a parseable IPv6 next hop must
+// stamp a non-zero policy_id on the headend entry, while an un-colored
+// route (or one with no usable next hop) must not steer.
+func TestApplier_VPNv4ColorStampsPolicyId(t *testing.T) {
+	fh := newFakeHeadend()
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", Color: 100, NextHop: "2001:db8::2",
+	}})
+	if e := fh.v4created["10.0.0.0/24"]; e == nil || e.PolicyId == 0 {
+		t.Fatalf("colored route should stamp a non-zero policy_id; got %+v", e)
+	}
+
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.1.0.0/24", RD: "65000:101",
+		SRv6SID: "fd00:1:1:b::", // no Color
+	}})
+	if e := fh.v4created["10.1.0.0/24"]; e == nil || e.PolicyId != 0 {
+		t.Errorf("un-colored route must not steer; policy_id = %d", e.PolicyId)
+	}
+
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.2.0.0/24", RD: "65000:102",
+		SRv6SID: "fd00:1:1:c::", Color: 200, NextHop: "", // unparseable next hop
+	}})
+	if e := fh.v4created["10.2.0.0/24"]; e == nil || e.PolicyId != 0 {
+		t.Errorf("colored route with no next hop must not steer; policy_id = %d", e.PolicyId)
+	}
+}

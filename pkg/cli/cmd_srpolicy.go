@@ -14,7 +14,14 @@ import (
 // the shared printOperationResult helper: the operation succeeded iff no
 // per-item error came back.
 func reportSRPolicy(errs []*v1.OperationError, verb string) error {
-	return printOperationResult(make([]struct{}, 1-len(errs)), errs, "SR Policy", verb)
+	// Each CLI mutation submits exactly one policy, so success means no
+	// per-item error came back. Represent that as a 0- or 1-element slice
+	// for printOperationResult (avoids a negative make() length).
+	var ok []struct{}
+	if len(errs) == 0 {
+		ok = []struct{}{{}}
+	}
+	return printOperationResult(ok, errs, "SR Policy", verb)
 }
 
 func srPolicyDefFromFlags(c *cli.Context) *v1.SrPolicyDef {

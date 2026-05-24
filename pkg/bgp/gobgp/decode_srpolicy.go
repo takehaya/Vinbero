@@ -25,8 +25,15 @@ func decodeSRPolicy(p *apiutil.Path) *bgp.SRPolicy {
 	if !ok {
 		return nil
 	}
+	// Endpoint must be a 16-byte IPv6 address. gobgp does not width-validate
+	// the NLRI endpoint, so a 4-byte (IPv4) endpoint on the IPv6 family would
+	// otherwise decode to an Is4() key that can never match the always-IPv6
+	// VPN next hop -- the policy would install but silently never steer.
+	if len(nlri.Endpoint) != 16 {
+		return nil
+	}
 	endpoint, ok := netip.AddrFromSlice(nlri.Endpoint)
-	if !ok {
+	if !ok || !endpoint.Is6() {
 		return nil
 	}
 	preference, segments := decodeSRPolicyTunnel(p.Attrs)

@@ -97,6 +97,13 @@ func (s *SrPolicyServer) SrPolicyDelete(
 			})
 			continue
 		}
+		if !endpoint.Is6() {
+			errs = append(errs, &v1.OperationError{
+				TriggerPrefix: key.GetEndpoint(),
+				Reason:        "endpoint must be IPv6",
+			})
+			continue
+		}
 		if !s.ctrl.HasLocalSRPolicy(key.GetColor(), endpoint) {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: key.GetEndpoint(),
@@ -128,6 +135,11 @@ func protoToLocalSRPolicy(def *v1.SrPolicyDef) (bgp.SRPolicy, error) {
 	endpoint, err := netip.ParseAddr(def.GetEndpoint())
 	if err != nil {
 		return bgp.SRPolicy{}, fmt.Errorf("invalid endpoint: %w", err)
+	}
+	// The SR Policy endpoint is matched against the VPN route's IPv6 next
+	// hop (RFC 9252 SRv6 over IPv6), so an IPv4 endpoint can never steer.
+	if !endpoint.Is6() {
+		return bgp.SRPolicy{}, fmt.Errorf("endpoint must be IPv6: %s", endpoint)
 	}
 	if len(def.GetSegments()) == 0 {
 		return bgp.SRPolicy{}, errors.New("at least one transport segment is required")
