@@ -119,7 +119,12 @@ struct dx2v_entry {
 struct headend_entry {
     __u8 mode;                              // srv6_headend_behavior enum
     __u8 num_segments;                      // Number of segments (1-10)
-    __u16 policy_id;                         // SR Policy steering ref (0 = none); reuses former _pad[2]
+    // Keep policy_id 4-byte aligned so the bpf2go-generated Go struct (which
+    // cannot represent an unaligned __u32 in a packed layout) matches this C
+    // layout byte-for-byte; without this pad Go inserts 2 bytes here and every
+    // following field is offset by 2 across the maps.go memcpy.
+    __u16 _pad_policy;
+    __u32 policy_id;                        // SR Policy steering ref (0 = none)
     __u8 src_addr[IPV6_ADDR_LEN];           // Outer IPv6 source address
     __u8 dst_addr[IPV6_ADDR_LEN];           // Unused for H.Encaps (reserved)
     __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list; with policy_id != 0 holds only the per-route service SID(s)
@@ -139,9 +144,15 @@ struct sr_policy_value {
     __u8 segs[MAX_SEGMENTS][IPV6_ADDR_LEN];    // transport SIDs (active candidate)
 } __attribute__((packed));
 
-// Capacity of the plugin_raw variant in sid_aux_entry. Mirrored on the Go
-// side as bpf.SidAuxPluginRawMax.
-#define SID_AUX_PLUGIN_RAW_MAX 196
+// Capacity of the plugin_raw variant in sid_aux_entry, and the pinned size
+// of the whole union. Chosen larger than every behavior variant (the
+// biggest is headend_entry / b6_policy, 204 bytes) so plugin_raw is the
+// layout anchor: the union stays a fixed 256 bytes and behavior variants
+// can grow (up to this cap) without rippling the map value size or the
+// plugin ABI. A _Static_assert below guards the invariant. Mirrored on the
+// Go side as bpf.SidAuxPluginRawMax. Bumping this is a plugin ABI change
+// (plugins must be recompiled).
+#define SID_AUX_PLUGIN_RAW_MAX 256
 
 // SID Function entry – generic fields (LPM trie value, kept small).
 // aux_index == 0 is the sentinel for "no aux data"; action-specific fields
@@ -153,8 +164,10 @@ struct sid_function_entry {
 } __attribute__((packed));
 
 // SID Auxiliary entry – action-specific fields (ARRAY map value)
-// Discriminated by sid_function_entry.action.
-// Max size = headend_entry (196 bytes) for End.B6/B6.Encaps policy.
+// Discriminated by sid_function_entry.action. Size is pinned at
+// SID_AUX_PLUGIN_RAW_MAX by the plugin_raw variant (see below), so adding
+// or growing a behavior variant does not change the map value size as long
+// as it stays within the cap.
 struct sid_aux_entry {
     union {
         // End.X, End.DX2: nexthop address (DX2 stores OIF in first 4 bytes)
@@ -198,20 +211,25 @@ struct sid_aux_entry {
 
         // End.B6/End.B6.Encaps: policy headend configuration
         // Replaces the former end_b6_policy_map (LPM trie).
-        struct headend_entry b6_policy;                    // 196 bytes
+        struct headend_entry b6_policy;                    // 204 bytes
 
         // End.T/DT4/DT6/DT46: VRF-aware FIB lookup target.
         struct {
             __u32 vrf_ifindex;
         } l3vrf;                                           // 4 bytes
 
-        // Plugin-defined raw payload. Sized to the largest union variant so
-        // that existing behavior variants remain the layout anchor. Plugin
-        // code interprets this via VINBERO_PLUGIN_AUX_CAST after verifying
-        // sizeof(target_type) <= sizeof(plugin_raw) at compile time.
+        // Plugin-defined raw payload. Sized larger than every behavior
+        // variant so it is the union's layout anchor (pins the union size).
+        // Plugin code interprets this via VINBERO_PLUGIN_AUX_CAST after
+        // verifying sizeof(target_type) <= sizeof(plugin_raw) at compile time.
         __u8 plugin_raw[SID_AUX_PLUGIN_RAW_MAX];
     };
 } __attribute__((packed));
+
+// plugin_raw must remain the largest variant so the union size is pinned;
+// if a behavior variant ever outgrows the cap, bump SID_AUX_PLUGIN_RAW_MAX.
+_Static_assert(sizeof(struct headend_entry) <= SID_AUX_PLUGIN_RAW_MAX,
+               "headend_entry must fit the sid_aux plugin_raw anchor");
 
 // Key for FDB map: Bridge Domain ID + MAC address
 struct fdb_key {

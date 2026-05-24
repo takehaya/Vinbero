@@ -105,7 +105,8 @@ type BpfHeadendEntry struct {
 	_           structs.HostLayout
 	Mode        uint8
 	NumSegments uint8
-	PolicyId    uint16
+	PadPolicy   uint16
+	PolicyId    uint32
 	SrcAddr     [16]uint8
 	DstAddr     [16]uint8
 	Segments    [10][16]uint8
@@ -150,7 +151,7 @@ type BpfSidAuxEntry struct {
 		_       structs.HostLayout
 		Nexthop [16]uint8
 	}
-	_ [184]byte
+	_ [240]byte
 }
 
 type BpfSidFunctionEntry struct {
@@ -181,7 +182,7 @@ type BpfTailcallCtx struct {
 	Slot         uint8
 	Pad          [3]uint8
 	SidEntry     BpfSidFunctionEntry
-	_            [196]byte
+	_            [200]byte
 }
 
 // LoadBpf returns the embedded CollectionSpec for Bpf.

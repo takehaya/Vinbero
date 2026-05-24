@@ -174,7 +174,7 @@ func snapshotToProto(snap *apply.SRPolicySnapshot) *v1.SrPolicyEntry {
 	return &v1.SrPolicyEntry{
 		Color:      snap.Color,
 		Endpoint:   snap.Endpoint.String(),
-		PolicyId:   uint32(snap.PolicyID),
+		PolicyId:   snap.PolicyID,
 		Candidates: cands,
 	}
 }

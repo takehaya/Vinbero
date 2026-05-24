@@ -32,8 +32,8 @@ func newFakeHeadend() *fakeHeadend {
 
 // no-op SR Policy map ops so fakeHeadend satisfies the applier's dataPlane
 // interface; the SR Policy table is unit-tested separately (srpolicy_test).
-func (f *fakeHeadend) UpsertSRPolicy(uint16, []netip.Addr) error { return nil }
-func (f *fakeHeadend) DeleteSRPolicy(uint16) error               { return nil }
+func (f *fakeHeadend) UpsertSRPolicy(uint32, []netip.Addr) error { return nil }
+func (f *fakeHeadend) DeleteSRPolicy(uint32) error               { return nil }
 
 func (f *fakeHeadend) CreateHeadendV4(p string, e *bpf.HeadendEntry, _ bpf.OwnerTag) error {
 	if f.createErr != nil {

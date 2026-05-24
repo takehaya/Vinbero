@@ -732,9 +732,10 @@ func SidAuxL3VrfData(entry *SidAuxEntry) uint32 {
 }
 
 // SidAuxPluginRawMax is the capacity of the plugin_raw variant in
-// sid_aux_entry. Writes longer than this are rejected at the RPC layer so
-// we never overflow the kernel-side union.
-const SidAuxPluginRawMax = 196
+// sid_aux_entry and the pinned size of the union. Writes longer than this
+// are rejected at the RPC layer so we never overflow the kernel-side union.
+// Must match SID_AUX_PLUGIN_RAW_MAX in src/core/xdp_prog.h.
+const SidAuxPluginRawMax = 256
 
 // NewSidAuxPluginRaw creates an aux entry from a plugin-defined byte payload.
 // raw may be shorter than SidAuxPluginRawMax; remaining bytes are zero.
@@ -1386,7 +1387,7 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 // headend prepends these SIDs to each route's own service SID. The write
 // is value-atomic, so a policy change never exposes a torn segment list,
 // and it is O(1) regardless of how many routes steer onto the policy.
-func (m *MapOperations) UpsertSRPolicy(policyID uint16, transport []netip.Addr) error {
+func (m *MapOperations) UpsertSRPolicy(policyID uint32, transport []netip.Addr) error {
 	// Cap at MaxSegments-1: the XDP headend composes the route's service SID
 	// onto the tail, so a transport of MaxSegments would always overflow the
 	// SRH and silently fall back. Reject it at write time instead.
@@ -1402,8 +1403,7 @@ func (m *MapOperations) UpsertSRPolicy(policyID uint16, transport []netip.Addr) 
 		}
 		val.Segs[i] = sid.As16()
 	}
-	key := uint32(policyID)
-	if err := m.objs.SrPolicyMap.Put(key, &val); err != nil {
+	if err := m.objs.SrPolicyMap.Put(policyID, &val); err != nil {
 		return fmt.Errorf("put sr_policy_map[%d]: %w", policyID, err)
 	}
 	return nil
@@ -1412,9 +1412,8 @@ func (m *MapOperations) UpsertSRPolicy(policyID uint16, transport []netip.Addr) 
 // DeleteSRPolicy removes a policy's transport list. Referencing routes
 // then miss the lookup in XDP and fall back to their bare service SID.
 // A missing entry is not an error (idempotent withdraw).
-func (m *MapOperations) DeleteSRPolicy(policyID uint16) error {
-	key := uint32(policyID)
-	if err := m.objs.SrPolicyMap.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+func (m *MapOperations) DeleteSRPolicy(policyID uint32) error {
+	if err := m.objs.SrPolicyMap.Delete(policyID); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("delete sr_policy_map[%d]: %w", policyID, err)
 	}
 	return nil
@@ -1422,10 +1421,9 @@ func (m *MapOperations) DeleteSRPolicy(policyID uint16) error {
 
 // GetSRPolicy returns the transport SID list installed for policyID, or
 // nil when no entry exists. Intended for tests and introspection.
-func (m *MapOperations) GetSRPolicy(policyID uint16) ([]net.IP, error) {
+func (m *MapOperations) GetSRPolicy(policyID uint32) ([]net.IP, error) {
 	var val BpfSrPolicyValue
-	key := uint32(policyID)
-	if err := m.objs.SrPolicyMap.Lookup(key, &val); err != nil {
+	if err := m.objs.SrPolicyMap.Lookup(policyID, &val); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			return nil, nil
 		}

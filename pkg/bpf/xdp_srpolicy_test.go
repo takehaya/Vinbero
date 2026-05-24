@@ -24,7 +24,7 @@ func TestXDPProgSRPolicyCompose(t *testing.T) {
 	}
 
 	// headend entry: one service SID, steered via policy_id.
-	newEntry := func(policyID uint16) *HeadendEntry {
+	newEntry := func(policyID uint32) *HeadendEntry {
 		var segs [MaxSegments][IPv6AddrLen]uint8
 		segs[0] = serviceSID
 		return &HeadendEntry{

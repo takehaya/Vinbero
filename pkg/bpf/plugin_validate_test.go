@@ -307,14 +307,14 @@ func TestValidatePluginAuxType_Oversize(t *testing.T) {
 		Programs: map[string]*ebpf.ProgramSpec{
 			"foo": {Name: "foo", Type: ebpf.XDP},
 		},
-		Types: buildBTFSpec(t, []btf.Type{auxStruct("foo_aux", 200)}),
+		Types: buildBTFSpec(t, []btf.Type{auxStruct("foo_aux", 300)}),
 	}
 	err := validatePluginAuxType(spec, "foo")
 	if err == nil {
 		t.Fatal("expected oversize aux type to be rejected")
 	}
-	if !strings.Contains(err.Error(), "196") {
-		t.Errorf("error should mention SidAuxPluginRawMax (196), got: %v", err)
+	if !strings.Contains(err.Error(), "256") {
+		t.Errorf("error should mention SidAuxPluginRawMax (256), got: %v", err)
 	}
 }
 
@@ -754,7 +754,7 @@ func TestValidatePluginCollection_RWWriteDoesNotMaskFatalErrors(t *testing.T) {
 	})
 	spec := &ebpf.CollectionSpec{
 		Programs: map[string]*ebpf.ProgramSpec{"xdp_entry": prog},
-		Types:    buildBTFSpec(t, []btf.Type{auxStruct("xdp_entry_aux", 200)}),
+		Types:    buildBTFSpec(t, []btf.Type{auxStruct("xdp_entry_aux", 300)}),
 	}
 	_, err := ValidatePluginCollection(spec, "xdp_entry", roSet())
 	if err == nil {
@@ -764,7 +764,7 @@ func TestValidatePluginCollection_RWWriteDoesNotMaskFatalErrors(t *testing.T) {
 		t.Errorf("aux-size error must not be wrapped as ErrPluginROWrite "+
 			"(warn-mode caller would swallow it); got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "196") {
+	if !strings.Contains(err.Error(), "256") {
 		t.Errorf("error should be the aux-size diagnostic, got: %v", err)
 	}
 }

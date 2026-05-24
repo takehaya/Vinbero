@@ -40,8 +40,8 @@ func LocalSRPolicy(color uint32, endpoint netip.Addr, segments []netip.Addr, pre
 // the per-route service SID is composed onto the transport list in the
 // XDP program, not here.
 type policyMapOps interface {
-	UpsertSRPolicy(policyID uint16, transport []netip.Addr) error
-	DeleteSRPolicy(policyID uint16) error
+	UpsertSRPolicy(policyID uint32, transport []netip.Addr) error
+	DeleteSRPolicy(policyID uint32) error
 }
 
 // policyKey is the SR Policy identity (RFC 9256 §2.1). Color and endpoint
@@ -62,7 +62,7 @@ type candidateID struct {
 }
 
 type policyState struct {
-	id         uint16
+	id         uint32
 	candidates map[candidateID]bgp.CandidatePath
 	// installed is the transport SID list last written to sr_policy_map,
 	// or nil when no map entry exists. Used to skip redundant writes.
@@ -79,7 +79,7 @@ type policyState struct {
 type srPolicyTable struct {
 	mu     sync.Mutex
 	mapOps policyMapOps
-	nextID uint16
+	nextID uint32
 	byKey  map[policyKey]*policyState
 	logger *zap.Logger
 }
@@ -97,7 +97,7 @@ func newSRPolicyTable(mapOps policyMapOps, logger *zap.Logger) *srPolicyTable {
 // itself arrives: the map entry is absent until then, so the XDP lookup
 // misses and the route falls back; when the policy arrives the same id is
 // populated and the route is steered without being rewritten.
-func (t *srPolicyTable) ensureID(color uint32, endpoint netip.Addr) uint16 {
+func (t *srPolicyTable) ensureID(color uint32, endpoint netip.Addr) uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.ensureState(policyKey{color: color, endpoint: endpoint}).id
@@ -135,17 +135,13 @@ func (t *srPolicyTable) ensureState(key policyKey) *policyState {
 	if st := t.byKey[key]; st != nil {
 		return st
 	}
-	// policy_id is a uint16 (it rides in headend_entry.policy_id, which
-	// reuses former padding to avoid growing the struct). Ids are allocated
-	// per *distinct* {color, endpoint} and never reused, so the limiter is
-	// the count of distinct keys ever seen (bounded by colors x endpoints in
-	// a deployment, far below 65535); re-advertising the same key reuses its
-	// id. policyState/ids are not GC'd when a key is fully withdrawn -- a
-	// bounded leak acceptable for Phase 1e-c. Refcounted reclaim (tracking
-	// the routes referencing each id) is the follow-up. If exhausted,
-	// allocate id 0 so the key simply never steers (safe degradation).
-	if t.nextID == ^uint16(0) {
-		t.logger.Error("SR Policy id space exhausted (uint16); key will not steer",
+	// policy_id is a uint32 (headend_entry.policy_id). Ids are allocated per
+	// distinct {color, endpoint}; re-advertising the same key reuses its id.
+	// The u32 space is effectively inexhaustible; the guard below is purely
+	// defensive. If somehow exhausted, allocate id 0 so the key simply never
+	// steers (safe degradation).
+	if t.nextID == ^uint32(0) {
+		t.logger.Error("SR Policy id space exhausted; key will not steer",
 			zap.Uint32("color", key.color), zap.Stringer("endpoint", key.endpoint))
 		st := &policyState{id: 0, candidates: make(map[candidateID]bgp.CandidatePath)}
 		t.byKey[key] = st
@@ -167,7 +163,7 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 		if st.installed != nil {
 			if err := t.mapOps.DeleteSRPolicy(st.id); err != nil {
 				t.logger.Error("delete sr_policy_map entry",
-					zap.Uint16("policy_id", st.id), zap.Error(err))
+					zap.Uint32("policy_id", st.id), zap.Error(err))
 				return
 			}
 			st.installed = nil
@@ -179,7 +175,7 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 	}
 	if err := t.mapOps.UpsertSRPolicy(st.id, best.SegmentList); err != nil {
 		t.logger.Error("upsert sr_policy_map entry",
-			zap.Uint16("policy_id", st.id), zap.Error(err))
+			zap.Uint32("policy_id", st.id), zap.Error(err))
 		return
 	}
 	// Clone so `installed` does not alias the candidate's slice: the
@@ -187,7 +183,7 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 	st.installed = slices.Clone(best.SegmentList)
 	t.logger.Info("SR Policy active path installed",
 		zap.Uint32("color", key.color), zap.Stringer("endpoint", key.endpoint),
-		zap.Uint16("policy_id", st.id), zap.Int("segments", len(best.SegmentList)))
+		zap.Uint32("policy_id", st.id), zap.Int("segments", len(best.SegmentList)))
 }
 
 // bestCandidate selects the active candidate path (RFC 9256 §2.9 subset):
@@ -228,7 +224,7 @@ func betterCandidate(a, b bgp.CandidatePath) bool {
 type SRPolicySnapshot struct {
 	Color      uint32
 	Endpoint   netip.Addr
-	PolicyID   uint16
+	PolicyID   uint32
 	Candidates []CandidateSnapshot
 }
 
