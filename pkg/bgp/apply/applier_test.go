@@ -30,6 +30,11 @@ func newFakeHeadend() *fakeHeadend {
 	}
 }
 
+// no-op SR Policy map ops so fakeHeadend satisfies the applier's dataPlane
+// interface; the SR Policy table is unit-tested separately (srpolicy_test).
+func (f *fakeHeadend) UpsertSRPolicy(uint16, []netip.Addr) error { return nil }
+func (f *fakeHeadend) DeleteSRPolicy(uint16) error               { return nil }
+
 func (f *fakeHeadend) CreateHeadendV4(p string, e *bpf.HeadendEntry, _ bpf.OwnerTag) error {
 	if f.createErr != nil {
 		return f.createErr
@@ -90,7 +95,7 @@ func testLocatorManager(t *testing.T) *locator.Manager {
 
 func TestApplier_VPNv4Advertise(t *testing.T) {
 	fh := newFakeHeadend()
-	a := NewApplier(fh, newFakePolicyMap(), testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
 
 	a.Apply(bgp.RouteEvent{
 		Family: bgp.FamilyVPNv4,
@@ -123,7 +128,7 @@ func TestApplier_VPNv4Advertise(t *testing.T) {
 
 func TestApplier_VPNWithdraw(t *testing.T) {
 	fh := newFakeHeadend()
-	a := NewApplier(fh, newFakePolicyMap(), testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
 
 	a.Apply(bgp.RouteEvent{
 		Family:     bgp.FamilyVPNv6,
@@ -137,7 +142,7 @@ func TestApplier_VPNWithdraw(t *testing.T) {
 
 func TestApplier_VPNRouteWithoutSIDSkipped(t *testing.T) {
 	fh := newFakeHeadend()
-	a := NewApplier(fh, newFakePolicyMap(), testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
 
 	a.Apply(bgp.RouteEvent{
 		Family: bgp.FamilyVPNv4,
@@ -151,7 +156,7 @@ func TestApplier_VPNRouteWithoutSIDSkipped(t *testing.T) {
 func TestApplier_MissingSourceLocatorSkips(t *testing.T) {
 	fh := newFakeHeadend()
 	// srcLocator names a locator the manager does not have.
-	a := NewApplier(fh, newFakePolicyMap(), testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "NOPE", 65000, zap.NewNop())
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "NOPE", 65000, zap.NewNop())
 
 	a.Apply(bgp.RouteEvent{
 		Family: bgp.FamilyVPNv4,
@@ -164,7 +169,7 @@ func TestApplier_MissingSourceLocatorSkips(t *testing.T) {
 
 func TestApplier_UnicastAdvertiseAndWithdraw(t *testing.T) {
 	ff := &fakeFib{}
-	a := NewApplier(newFakeHeadend(), newFakePolicyMap(), testLocatorManager(t), vrfbgp.NewManager(), ff, "LOC1", 65000, zap.NewNop())
+	a := NewApplier(newFakeHeadend(), testLocatorManager(t), vrfbgp.NewManager(), ff, "LOC1", 65000, zap.NewNop())
 
 	a.Apply(bgp.RouteEvent{
 		Family:  bgp.FamilyIPv6Unicast,
@@ -195,7 +200,7 @@ func TestApplier_ImportRTFilter(t *testing.T) {
 	if err := vm.Bind(vrfbgp.Binding{VRFName: "vrf-a", ImportRTs: []string{"65000:100"}}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	a := NewApplier(fh, newFakePolicyMap(), testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
 
 	// RT 65000:999 matches no VRF import -> dropped.
 	a.Apply(bgp.RouteEvent{
@@ -227,7 +232,7 @@ func TestApplier_ImportRTFilter(t *testing.T) {
 func TestApplier_CreateErrorLogged(t *testing.T) {
 	fh := newFakeHeadend()
 	fh.createErr = errors.New("boom")
-	a := NewApplier(fh, newFakePolicyMap(), testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
 	a.Apply(bgp.RouteEvent{
 		Family: bgp.FamilyVPNv4,
 		VPN:    &bgp.VPNRoute{Family: bgp.FamilyVPNv4, Prefix: "10.3.0.0/24", RD: "65000:3", SRv6SID: "fd00:1:1:c::"},

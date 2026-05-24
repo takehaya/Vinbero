@@ -1387,9 +1387,12 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 // is value-atomic, so a policy change never exposes a torn segment list,
 // and it is O(1) regardless of how many routes steer onto the policy.
 func (m *MapOperations) UpsertSRPolicy(policyID uint16, transport []netip.Addr) error {
-	if len(transport) < 1 || len(transport) > MaxSegments {
+	// Cap at MaxSegments-1: the XDP headend composes the route's service SID
+	// onto the tail, so a transport of MaxSegments would always overflow the
+	// SRH and silently fall back. Reject it at write time instead.
+	if len(transport) < 1 || len(transport) >= MaxSegments {
 		return fmt.Errorf("sr_policy %d: transport length %d out of range 1..%d",
-			policyID, len(transport), MaxSegments)
+			policyID, len(transport), MaxSegments-1)
 	}
 	var val BpfSrPolicyValue
 	val.Len = uint8(len(transport))

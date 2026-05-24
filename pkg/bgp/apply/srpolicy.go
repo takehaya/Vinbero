@@ -2,6 +2,7 @@ package apply
 
 import (
 	"net/netip"
+	"slices"
 	"sync"
 
 	"go.uber.org/zap"
@@ -14,16 +15,12 @@ import (
 // {color, endpoint}, so a fixed value suffices.
 const localDistinguisher = 0
 
-// srPolicyDefaultPreference is assumed when an operator-defined policy
-// gives no preference (RFC 9256 §2.7).
-const srPolicyDefaultPreference = 100
-
 // LocalSRPolicy builds an operator-defined SR Policy (origin local) for
 // {color, endpoint} with the given transport segments and preference
 // (0 -> the RFC default). Pass it to Applier.ApplyLocalSRPolicy.
 func LocalSRPolicy(color uint32, endpoint netip.Addr, segments []netip.Addr, preference uint32) bgp.SRPolicy {
 	if preference == 0 {
-		preference = srPolicyDefaultPreference
+		preference = bgp.SRPolicyDefaultPreference
 	}
 	return bgp.SRPolicy{
 		Color:    color,
@@ -139,8 +136,13 @@ func (t *srPolicyTable) ensureState(key policyKey) *policyState {
 		return st
 	}
 	// policy_id is a uint16 (it rides in headend_entry.policy_id, which
-	// reuses former padding to avoid growing the struct). 65535 concurrent
-	// {color, endpoint} policies is far beyond realistic; if exhausted,
+	// reuses former padding to avoid growing the struct). Ids are allocated
+	// per *distinct* {color, endpoint} and never reused, so the limiter is
+	// the count of distinct keys ever seen (bounded by colors x endpoints in
+	// a deployment, far below 65535); re-advertising the same key reuses its
+	// id. policyState/ids are not GC'd when a key is fully withdrawn -- a
+	// bounded leak acceptable for Phase 1e-c. Refcounted reclaim (tracking
+	// the routes referencing each id) is the follow-up. If exhausted,
 	// allocate id 0 so the key simply never steers (safe degradation).
 	if t.nextID == ^uint16(0) {
 		t.logger.Error("SR Policy id space exhausted (uint16); key will not steer",
@@ -172,7 +174,7 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 		}
 		return
 	}
-	if segmentsEqual(st.installed, best.SegmentList) {
+	if slices.Equal(st.installed, best.SegmentList) {
 		return // active path unchanged; skip a redundant write
 	}
 	if err := t.mapOps.UpsertSRPolicy(st.id, best.SegmentList); err != nil {
@@ -180,7 +182,9 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 			zap.Uint16("policy_id", st.id), zap.Error(err))
 		return
 	}
-	st.installed = best.SegmentList
+	// Clone so `installed` does not alias the candidate's slice: the
+	// diff-skip above must compare against a stable snapshot.
+	st.installed = slices.Clone(best.SegmentList)
 	t.logger.Info("SR Policy active path installed",
 		zap.Uint32("color", key.color), zap.Stringer("endpoint", key.endpoint),
 		zap.Uint16("policy_id", st.id), zap.Int("segments", len(best.SegmentList)))
@@ -273,16 +277,4 @@ func (t *srPolicyTable) hasLocalCandidate(color uint32, endpoint netip.Addr) boo
 	}
 	_, ok := st.candidates[candidateID{origin: bgp.OriginLocal, distinguisher: localDistinguisher}]
 	return ok
-}
-
-func segmentsEqual(a, b []netip.Addr) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

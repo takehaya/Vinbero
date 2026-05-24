@@ -195,6 +195,10 @@ type SRPolicy struct {
 	Candidates []CandidatePath
 }
 
+// SRPolicyDefaultPreference is the candidate path preference assumed when
+// none is signaled (RFC 9256 §2.7).
+const SRPolicyDefaultPreference = 100
+
 // CandidatePath is one segment-list option for an SRPolicy. The active
 // path is chosen per RFC 9256 §2.9: highest Preference, then highest
 // Origin, then lowest Distinguisher.

@@ -119,16 +119,15 @@ func run(cliCtx *cli.Context) error {
 	// assigned inside the enabled branch.
 	var bgpSession *gobgp.Session
 	var advertiser bgp.RouteAdvertiser
-	// applier is created before the server so SrPolicyService can share its
-	// SR Policy table (BGP-received and operator-defined policies live in
-	// one table; two would collide on policy_id). It stays nil when BGP is
-	// disabled, in which case SrPolicyService RPCs return FailedPrecondition.
+	// applier holds the SR Policy table SrPolicyService also drives, so it is
+	// shared via NewServer below: BGP-received and operator-defined policies
+	// must share one table or collide on policy_id. nil when BGP is disabled
+	// -> SrPolicyService RPCs return FailedPrecondition.
 	var applier *apply.Applier
 	if cliCtx.Bool("bgp-enabled") {
 		bgpSession = gobgp.NewSession(lg)
 		advertiser = bgpSession
 		applier = apply.NewApplier(
-			vin.GetMapOperations(),
 			vin.GetMapOperations(),
 			locatorMgr,
 			vrfBgpMgr,

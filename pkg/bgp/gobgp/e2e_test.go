@@ -107,7 +107,7 @@ func setupVPNv4Receive(t *testing.T) e2eReceive {
 	if err := locMgr.Add(&srcLoc); err != nil {
 		t.Fatalf("locator Add: %v", err)
 	}
-	applier := apply.NewApplier(mapOps, mapOps, locMgr, vrfbgp.NewManager(),
+	applier := apply.NewApplier(mapOps, locMgr, vrfbgp.NewManager(),
 		fib.NewKernelInjector(), "LOC1", 65002, zap.NewNop())
 
 	// --- Vinbero PE (PE2): gobgp.Session, the code under test ---

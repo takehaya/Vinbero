@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -11,37 +10,18 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-func parseSegmentsCSV(s string) []string {
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// reportSRPolicyErrors prints per-item errors and a success count, and
-// returns a non-zero error when any item failed (for scripting).
-func reportSRPolicyErrors(total int, errs []*v1.OperationError, verb string) error {
-	for _, e := range errs {
-		fmt.Fprintf(os.Stderr, "Error [%s]: %s\n", e.TriggerPrefix, e.Reason)
-	}
-	if ok := total - len(errs); ok > 0 {
-		fmt.Printf("SR Policy %s: %d\n", verb, ok)
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("%d SR Policy %s operation(s) failed", len(errs), verb)
-	}
-	return nil
+// reportSRPolicy reports a single-item create/update/delete result through
+// the shared printOperationResult helper: the operation succeeded iff no
+// per-item error came back.
+func reportSRPolicy(errs []*v1.OperationError, verb string) error {
+	return printOperationResult(make([]struct{}, 1-len(errs)), errs, "SR Policy", verb)
 }
 
 func srPolicyDefFromFlags(c *cli.Context) *v1.SrPolicyDef {
 	return &v1.SrPolicyDef{
 		Color:      uint32(c.Uint("color")),
 		Endpoint:   c.String("endpoint"),
-		Segments:   parseSegmentsCSV(c.String("segments")),
+		Segments:   csvFlag(c.String("segments")),
 		Preference: uint32(c.Uint("preference")),
 	}
 }
@@ -73,7 +53,7 @@ func srPolicyCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					return reportSRPolicyErrors(1, resp.Msg.Errors, "created")
+					return reportSRPolicy(resp.Msg.Errors, "created")
 				},
 			},
 			{
@@ -87,7 +67,7 @@ func srPolicyCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					return reportSRPolicyErrors(1, resp.Msg.Errors, "updated")
+					return reportSRPolicy(resp.Msg.Errors, "updated")
 				},
 			},
 			{
@@ -104,7 +84,7 @@ func srPolicyCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					return reportSRPolicyErrors(1, resp.Msg.Errors, "deleted")
+					return reportSRPolicy(resp.Msg.Errors, "deleted")
 				},
 			},
 			{

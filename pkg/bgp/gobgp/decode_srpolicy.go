@@ -9,10 +9,6 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp"
 )
 
-// srPolicyDefaultPreference is the candidate path preference assumed when
-// the Preference sub-TLV is absent (RFC 9256 §2.7).
-const srPolicyDefaultPreference = 100
-
 // decodeSRPolicy builds the Vinbero view of a received BGP SR Policy
 // (SAFI 73) path. The {Color, Endpoint} key and Distinguisher come from
 // the NLRI (RFC 9830); a single CandidatePath (preference + transport
@@ -33,55 +29,51 @@ func decodeSRPolicy(p *apiutil.Path) *bgp.SRPolicy {
 	if !ok {
 		return nil
 	}
+	preference, segments := decodeSRPolicyTunnel(p.Attrs)
 	return &bgp.SRPolicy{
 		Color:    nlri.Color,
 		Endpoint: endpoint,
 		Candidates: []bgp.CandidatePath{{
 			Origin:        bgp.OriginBGP,
 			Distinguisher: nlri.Distinguisher,
-			Preference:    srPolicyPreference(p.Attrs),
-			SegmentList:   srPolicySegments(p.Attrs),
+			Preference:    preference,
+			SegmentList:   segments,
 		}},
 	}
 }
 
-// srPolicyPreference returns the candidate path preference from the
-// Preference sub-TLV (RFC 9830 sub-TLV type 12), or the RFC default when
-// absent.
-func srPolicyPreference(attrs []gobgppkt.PathAttributeInterface) uint32 {
+// decodeSRPolicyTunnel walks the SR Policy tunnel sub-TLVs once and returns
+// the candidate path's preference and transport SID list:
+//   - Preference sub-TLV (RFC 9830 type 12); RFC 9256 default when absent.
+//   - the FIRST Segment List sub-TLV (type 128); additional ones (weighted
+//     ECMP) are ignored in Phase 1e-c. Only Type B (SRv6 SID) segments are
+//     understood -- Type I/J/K (RFC 9831) carry node/adjacency descriptors
+//     needing a SID/topology DB Vinbero lacks, so they are skipped.
+func decodeSRPolicyTunnel(attrs []gobgppkt.PathAttributeInterface) (uint32, []netip.Addr) {
+	preference := uint32(bgp.SRPolicyDefaultPreference)
+	var segments []netip.Addr
+	haveSegments := false
 	for _, tlv := range srPolicyTunnelSubTLVs(attrs) {
-		if pref, ok := tlv.(*gobgppkt.TunnelEncapSubTLVSRPreference); ok {
-			return pref.Preference
-		}
-	}
-	return srPolicyDefaultPreference
-}
-
-// srPolicySegments returns the transport SID list from the FIRST Segment
-// List sub-TLV (RFC 9830 type 128). Only Type B (SRv6 SID) segments are
-// understood; Type I/J/K (RFC 9831) carry node/adjacency descriptors that
-// need a SID/topology database Vinbero does not have, so they are skipped.
-// Additional Segment List sub-TLVs (weighted ECMP) are ignored in Phase
-// 1e-c -- the first list wins.
-func srPolicySegments(attrs []gobgppkt.PathAttributeInterface) []netip.Addr {
-	for _, tlv := range srPolicyTunnelSubTLVs(attrs) {
-		sl, ok := tlv.(*gobgppkt.TunnelEncapSubTLVSRSegmentList)
-		if !ok {
-			continue
-		}
-		var segs []netip.Addr
-		for _, seg := range sl.Segments {
-			b, ok := seg.(*gobgppkt.SegmentTypeB)
-			if !ok {
-				continue // Type I/J/K etc.: unsupported, skip
+		switch v := tlv.(type) {
+		case *gobgppkt.TunnelEncapSubTLVSRPreference:
+			preference = v.Preference
+		case *gobgppkt.TunnelEncapSubTLVSRSegmentList:
+			if haveSegments {
+				continue // first Segment List sub-TLV wins
 			}
-			if addr, ok := netip.AddrFromSlice(b.SID); ok {
-				segs = append(segs, addr)
+			haveSegments = true
+			for _, seg := range v.Segments {
+				b, ok := seg.(*gobgppkt.SegmentTypeB)
+				if !ok {
+					continue // Type I/J/K etc.: unsupported, skip
+				}
+				if addr, ok := netip.AddrFromSlice(b.SID); ok {
+					segments = append(segments, addr)
+				}
 			}
 		}
-		return segs // first Segment List sub-TLV only
 	}
-	return nil
+	return preference, segments
 }
 
 // srPolicyTunnelSubTLVs returns the sub-TLVs of the SR Policy tunnel

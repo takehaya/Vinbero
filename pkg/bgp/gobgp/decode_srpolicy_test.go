@@ -84,8 +84,8 @@ func TestDecodeSRPolicy_DefaultPreference(t *testing.T) {
 	if got == nil || len(got.Candidates) != 1 {
 		t.Fatalf("decodeSRPolicy = %+v", got)
 	}
-	if got.Candidates[0].Preference != srPolicyDefaultPreference {
-		t.Errorf("preference = %d, want %d", got.Candidates[0].Preference, srPolicyDefaultPreference)
+	if got.Candidates[0].Preference != bgp.SRPolicyDefaultPreference {
+		t.Errorf("preference = %d, want %d", got.Candidates[0].Preference, bgp.SRPolicyDefaultPreference)
 	}
 }
 

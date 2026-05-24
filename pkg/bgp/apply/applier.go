@@ -33,6 +33,14 @@ type headendOps interface {
 	DeleteHeadendV6(triggerPrefix string, requester bpf.OwnerTag) error
 }
 
+// dataPlane is the BPF map surface the applier writes: headend encap
+// entries plus the SR Policy transport map. *bpf.MapOperations satisfies
+// it; the narrow sub-interfaces keep the applier unit-testable.
+type dataPlane interface {
+	headendOps
+	policyMapOps
+}
+
 // Applier applies received BGP routes to the Vinbero data plane.
 type Applier struct {
 	headend     headendOps
@@ -49,15 +57,15 @@ type Applier struct {
 // supplies the SRv6 encapsulation source address (see plan §6-5).
 // vrfBindings supplies the route-target import filter; an empty manager
 // accepts every received route.
-func NewApplier(headend headendOps, policyMap policyMapOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
+func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
 	return &Applier{
-		headend:     headend,
+		headend:     dp,
 		locators:    locators,
 		vrfBindings: vrfBindings,
 		fib:         fibInjector,
 		srcLocator:  srcLocator,
 		localASN:    localASN,
-		srPolicy:    newSRPolicyTable(policyMap, logger),
+		srPolicy:    newSRPolicyTable(dp, logger),
 		logger:      logger.Named("bgp.apply"),
 	}
 }
