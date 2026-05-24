@@ -40,8 +40,9 @@ jobs:
       fail-fast: false
       matrix:
         scenario:
-          - l3vpn-2site      # SRv6 L3VPN (transposition)
-          - sr-policy-2site  # color-based SR Policy steering
+          - l3vpn-2site          # SRv6 L3VPN (transposition)
+          - sr-policy-2site      # color-based SR Policy steering (local + multi-hop chain)
+          - sr-policy-bgp-2site  # SR Policy learned over BGP (SAFI 73)
     steps:
       - name: Checkout
         uses: actions/checkout@v5

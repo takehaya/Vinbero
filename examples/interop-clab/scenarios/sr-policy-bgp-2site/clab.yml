@@ -1,0 +1,90 @@
+# containerlab topology for the sr-policy-bgp-2site interop scenario.
+#
+# Same 2-site SRv6 L3VPN as sr-policy-2site, but the SR Policy is LEARNED
+# OVER BGP (SAFI 73) from a separate controller instead of being defined
+# locally on the PE. This exercises Vinbero's SR Policy receive/decode path
+# against a real BGP session, complementing sr-policy-2site (which tests a
+# locally-defined policy):
+#
+#   ce-tokyo --- pe-tokyo ===== core ===== pe-osaka --- ce-osaka
+#  10.1.0.0/24  (Vinbero PE)  (IPv6 core)  (FRR PE)   10.2.0.0/24
+#                   |
+#                 srctl (Vinbero SR Policy controller)
+#
+# pe-tokyo runs two iBGP sessions in AS 65100: VPNv4/VPNv6 with FRR
+# (pe-osaka) over the loopbacks, and SR Policy (SAFI 73) with srctl over a
+# direct link. srctl advertises one SR Policy {color 100, endpoint = FRR
+# loopback, transport = FRR End SID}; pe-tokyo receives it (origin BGP) and
+# steers FRR's color-100 route onto it. The controller is Vinbero today and
+# can be swapped for a third-party SR Policy speaker (Cisco XRd, Nokia SR
+# OS, GoBGP) later.
+name: sr-policy-bgp-2site
+
+topology:
+  nodes:
+    # --- ce-tokyo: customer host behind the Vinbero PE ----------------------
+    ce-tokyo:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.1.0.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace 10.2.0.0/24 via 10.1.0.1
+
+    # --- pe-tokyo: the Vinbero PE under test --------------------------------
+    pe-tokyo:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - vinbero/vinbero.yml:/vinbero.yml
+        - vinbero/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    # --- srctl: Vinbero SR Policy controller (advertises SAFI 73) -----------
+    srctl:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - srctl/vinbero.yml:/vinbero.yml
+        - srctl/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    # --- core: provider backbone, plain IPv6 router -------------------------
+    core:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - core/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    # --- pe-osaka: the FRR PE (interop peer) --------------------------------
+    pe-osaka:
+      kind: linux
+      image: frr-interop:10.2.1
+      binds:
+        - frr/frr.conf:/etc/frr/frr.conf
+        - frr/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    # --- ce-osaka: customer host behind the FRR PE --------------------------
+    ce-osaka:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.2.0.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace 10.1.0.0/24 via 10.2.0.1
+
+  links:
+    # CE <-> PE customer-facing ports.
+    - endpoints: [ce-tokyo:eth1, pe-tokyo:eth2]
+    - endpoints: [ce-osaka:eth1, pe-osaka:eth1]
+    # Provider underlay: pe-tokyo <-> core <-> pe-osaka.
+    - endpoints: [pe-tokyo:eth1, core:eth1]
+    - endpoints: [core:eth2, pe-osaka:eth2]
+    # SR Policy control link: pe-tokyo <-> srctl (SAFI 73 iBGP).
+    - endpoints: [pe-tokyo:eth3, srctl:eth1]
