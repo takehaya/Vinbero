@@ -22,6 +22,7 @@ type Clients struct {
 	Stats    vinberov1connect.StatsServiceClient
 	Plugin   vinberov1connect.PluginServiceClient
 	Es       vinberov1connect.EthernetSegmentServiceClient
+	SrPolicy vinberov1connect.SrPolicyServiceClient
 }
 
 func NewClients(serverURL string) *Clients {
@@ -43,5 +44,6 @@ func NewClients(serverURL string) *Clients {
 		Stats:    vinberov1connect.NewStatsServiceClient(httpClient, serverURL, opts...),
 		Plugin:   vinberov1connect.NewPluginServiceClient(httpClient, serverURL, opts...),
 		Es:       vinberov1connect.NewEthernetSegmentServiceClient(httpClient, serverURL, opts...),
+		SrPolicy: vinberov1connect.NewSrPolicyServiceClient(httpClient, serverURL, opts...),
 	}
 }

@@ -9,6 +9,34 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp"
 )
 
+// localDistinguisher is the distinguisher for operator-defined (local)
+// candidate paths. Phase 1e-c supports one local candidate per
+// {color, endpoint}, so a fixed value suffices.
+const localDistinguisher = 0
+
+// srPolicyDefaultPreference is assumed when an operator-defined policy
+// gives no preference (RFC 9256 §2.7).
+const srPolicyDefaultPreference = 100
+
+// LocalSRPolicy builds an operator-defined SR Policy (origin local) for
+// {color, endpoint} with the given transport segments and preference
+// (0 -> the RFC default). Pass it to Applier.ApplyLocalSRPolicy.
+func LocalSRPolicy(color uint32, endpoint netip.Addr, segments []netip.Addr, preference uint32) bgp.SRPolicy {
+	if preference == 0 {
+		preference = srPolicyDefaultPreference
+	}
+	return bgp.SRPolicy{
+		Color:    color,
+		Endpoint: endpoint,
+		Candidates: []bgp.CandidatePath{{
+			Origin:        bgp.OriginLocal,
+			Distinguisher: localDistinguisher,
+			Preference:    preference,
+			SegmentList:   segments,
+		}},
+	}
+}
+
 // policyMapOps is the data-plane writer the SR Policy table drives. It is
 // satisfied by the BPF sr_policy_map binding (Stage D) and mocked in
 // tests. A policy update is one map write keyed by the opaque policyID;
@@ -189,6 +217,62 @@ func betterCandidate(a, b bgp.CandidatePath) bool {
 		return a.Origin > b.Origin
 	}
 	return a.Distinguisher < b.Distinguisher
+}
+
+// SRPolicySnapshot is a read-only view of one {color, endpoint} policy,
+// returned by the applier for SrPolicyService / vbctl introspection.
+type SRPolicySnapshot struct {
+	Color      uint32
+	Endpoint   netip.Addr
+	PolicyID   uint16
+	Candidates []CandidateSnapshot
+}
+
+// CandidateSnapshot is one candidate path within an SRPolicySnapshot.
+// Active marks the path currently installed in the data plane.
+type CandidateSnapshot struct {
+	Origin        bgp.Origin
+	Distinguisher uint32
+	Preference    uint32
+	SegmentList   []netip.Addr
+	Active        bool
+}
+
+// list returns a snapshot of every known policy, marking the active
+// candidate per key.
+func (t *srPolicyTable) list() []SRPolicySnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]SRPolicySnapshot, 0, len(t.byKey))
+	for key, st := range t.byKey {
+		best, hasBest := bestCandidate(st.candidates)
+		snap := SRPolicySnapshot{Color: key.color, Endpoint: key.endpoint, PolicyID: st.id}
+		for cid, cp := range st.candidates {
+			snap.Candidates = append(snap.Candidates, CandidateSnapshot{
+				Origin:        cp.Origin,
+				Distinguisher: cp.Distinguisher,
+				Preference:    cp.Preference,
+				SegmentList:   cp.SegmentList,
+				Active:        hasBest && cid.origin == best.Origin && cid.distinguisher == best.Distinguisher,
+			})
+		}
+		out = append(out, snap)
+	}
+	return out
+}
+
+// hasLocalCandidate reports whether key has an operator-defined (local)
+// candidate path. Used by SrPolicyDelete to reject removing a policy that
+// is only known via BGP.
+func (t *srPolicyTable) hasLocalCandidate(color uint32, endpoint netip.Addr) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st := t.byKey[policyKey{color: color, endpoint: endpoint}]
+	if st == nil {
+		return false
+	}
+	_, ok := st.candidates[candidateID{origin: bgp.OriginLocal, distinguisher: localDistinguisher}]
+	return ok
 }
 
 func segmentsEqual(a, b []netip.Addr) bool {

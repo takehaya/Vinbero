@@ -99,6 +99,19 @@ func (a *Applier) ApplyLocalSRPolicy(p bgp.SRPolicy, withdraw bool) {
 	a.srPolicy.apply(p, withdraw)
 }
 
+// ListSRPolicies returns a snapshot of every known SR Policy (local and
+// BGP), for SrPolicyService / vbctl introspection.
+func (a *Applier) ListSRPolicies() []SRPolicySnapshot {
+	return a.srPolicy.list()
+}
+
+// HasLocalSRPolicy reports whether an operator-defined SR Policy exists
+// for {color, endpoint}. SrPolicyDelete uses it to reject removing a
+// policy that is only known via BGP.
+func (a *Applier) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
+	return a.srPolicy.hasLocalCandidate(color, endpoint)
+}
+
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 	owner := bpf.OwnerBGPVPN(a.localASN, vr.RD)
 	if withdraw {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bgp/apply"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/locator"
@@ -25,12 +26,13 @@ type Server struct {
 	mapOps     *bpf.MapOperations
 	resMgr     *netresource.ResourceManager
 	fdbWatcher *netlinkwatch.FDBWatcher
-	locatorMgr *locator.Manager
-	vrfBgpMgr  *vrfbgp.Manager
-	advertiser bgp.RouteAdvertiser
-	logger     *zap.Logger
-	mux        *http.ServeMux
-	server     *http.Server
+	locatorMgr   *locator.Manager
+	vrfBgpMgr    *vrfbgp.Manager
+	advertiser   bgp.RouteAdvertiser
+	srPolicyCtrl srPolicyController
+	logger       *zap.Logger
+	mux          *http.ServeMux
+	server       *http.Server
 }
 
 // NewServer creates a new Server instance. locatorMgr and vrfBgpMgr are
@@ -39,8 +41,12 @@ type Server struct {
 // managers when BGP is disabled. advertiser is nil when BGP is
 // disabled, in which case BgpRouteService RPCs fail with
 // FailedPrecondition.
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, logger *zap.Logger) *Server {
-	return &Server{
+// srPolicyApplier is *apply.Applier when the in-process BGP speaker is
+// enabled, or nil otherwise. Taking the concrete type (not the interface)
+// keeps a typed-nil from leaking into srPolicyCtrl, so the FailedPrecondition
+// guard in SrPolicyServer works.
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyApplier *apply.Applier, logger *zap.Logger) *Server {
+	s := &Server{
 		cfg:        cfg,
 		mapOps:     mapOps,
 		resMgr:     resMgr,
@@ -51,6 +57,10 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		logger:     logger,
 		mux:        http.NewServeMux(),
 	}
+	if srPolicyApplier != nil {
+		s.srPolicyCtrl = srPolicyApplier
+	}
+	return s
 }
 
 // Setup registers all service handlers
@@ -87,6 +97,14 @@ func (s *Server) Setup() {
 	bgpRoutePath, bgpRouteHandler := vinberov1connect.NewBgpRouteServiceHandler(bgpRouteServer)
 	s.mux.Handle(bgpRoutePath, bgpRouteHandler)
 	s.logger.Info("Registered BgpRouteService", zap.String("path", bgpRoutePath))
+
+	// SrPolicy service (color-based steering; local CRUD + read-only view
+	// of BGP-learned policies). srPolicyCtrl is nil when BGP is disabled,
+	// in which case the RPCs return FailedPrecondition.
+	srPolicyServer := NewSrPolicyServer(s.srPolicyCtrl)
+	srPolicyPath, srPolicyHandler := vinberov1connect.NewSrPolicyServiceHandler(srPolicyServer)
+	s.mux.Handle(srPolicyPath, srPolicyHandler)
+	s.logger.Info("Registered SrPolicyService", zap.String("path", srPolicyPath))
 
 	// Locator service (SRv6 locator manager). Registered before
 	// SidFunctionService so the latter can receive the manager and
