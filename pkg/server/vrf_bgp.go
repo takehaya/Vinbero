@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"math"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -27,6 +29,16 @@ func (s *VrfBgpServer) VrfBgpBind(
 		Errors: make([]*v1.OperationError, 0),
 	}
 	for _, b := range req.Msg.Bindings {
+		// bd_id is uint32 on the wire but a uint16 bridge domain in the data
+		// plane; reject out-of-range values rather than silently truncating
+		// (which would bind to a different BD than the caller asked for).
+		if b.GetBdId() > math.MaxUint16 {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: b.GetVrfName(),
+				Reason:        fmt.Sprintf("bd_id %d out of range (max %d)", b.GetBdId(), math.MaxUint16),
+			})
+			continue
+		}
 		if err := s.mgr.Bind(vrfbgp.Binding{
 			VRFName:        b.GetVrfName(),
 			ImportRTs:      b.GetImportRts(),
