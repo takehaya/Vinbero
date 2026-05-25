@@ -13,8 +13,15 @@ import (
 
 type fakeSRPolicyCtrl struct {
 	applied  []appliedPolicy
-	hasLocal map[string]bool
+	hasLocal map[srPolicyTestKey]bool
 	list     []apply.SRPolicySnapshot
+}
+
+// srPolicyTestKey mirrors the {color, endpoint} identity HasLocalSRPolicy
+// keys on, so a Delete handler that drops color would be caught.
+type srPolicyTestKey struct {
+	color    uint32
+	endpoint string
 }
 
 type appliedPolicy struct {
@@ -27,7 +34,7 @@ func (f *fakeSRPolicyCtrl) ApplyLocalSRPolicy(p bgp.SRPolicy, withdraw bool) {
 }
 func (f *fakeSRPolicyCtrl) ListSRPolicies() []apply.SRPolicySnapshot { return f.list }
 func (f *fakeSRPolicyCtrl) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
-	return f.hasLocal[endpoint.String()]
+	return f.hasLocal[srPolicyTestKey{color, endpoint.String()}]
 }
 
 // A nil controller (BGP disabled) makes every RPC fail FailedPrecondition.
@@ -101,7 +108,7 @@ func TestSrPolicyServer_CreateValidation(t *testing.T) {
 // Delete of a key with no local candidate is rejected (BGP-learned policies
 // are read-only).
 func TestSrPolicyServer_DeleteRejectsNonLocal(t *testing.T) {
-	ctrl := &fakeSRPolicyCtrl{hasLocal: map[string]bool{"2001:db8::9": true}}
+	ctrl := &fakeSRPolicyCtrl{hasLocal: map[srPolicyTestKey]bool{{2, "2001:db8::9"}: true}}
 	s := NewSrPolicyServer(ctrl)
 	resp, err := s.SrPolicyDelete(context.Background(), connect.NewRequest(&v1.SrPolicyDeleteRequest{
 		Keys: []*v1.SrPolicyKey{

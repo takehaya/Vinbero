@@ -162,6 +162,23 @@ func TestBgpRoute_AdvertiseSrPolicy_IPv4SegmentIsPerItemError(t *testing.T) {
 	}
 }
 
+// An IPv4 next hop is a per-item error at the RPC boundary, matching the
+// endpoint/segment constraint, rather than failing later in the controller.
+func TestBgpRoute_AdvertiseSrPolicy_IPv4NextHopIsPerItemError(t *testing.T) {
+	fp := &fakeSRPolicyAdv{}
+	s := NewBgpRouteServer(nil, fp)
+	resp, err := s.BgpAdvertiseSrPolicy(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{Policies: []*v1.BgpSrPolicy{{
+			Color: 1, Endpoint: "2001:db8::2", Segments: []string{"2001:db8::3"}, NextHop: "10.0.0.1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseSrPolicy: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 || len(fp.pushed) != 0 {
+		t.Errorf("an IPv4 next hop must be a per-item error and not reach the controller")
+	}
+}
+
 func TestBgpRoute_WithdrawSrPolicy(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
 	s := NewBgpRouteServer(nil, fp)
