@@ -99,7 +99,7 @@ entries; EVPN (L2VPN) is on the roadmap below.
 | IPv6 unicast receive       | Supported | Inject BGP-learned routes into the kernel FIB            | RFC 4760 |
 | SRv6 locator manager       | Supported | RPC-driven locator pool / SID allocation                 | RFC 8986 |
 | VRF <-> route-target binding | Supported | Import-RT filter for received VPN routes               | RFC 9252 |
-| SR Policy (SAFI 73)        |           | Color-based steering (control + data plane)              | RFC 9256 |
+| SR Policy (SAFI 73)        | Supported | Color-based steering (control + data plane)              | RFC 9256 |
 | BGP MUP                    |           | Mobile User Plane route exchange via the MUP SAFI        | draft-mpmz-bess-mup-safi |
 | Automatic advertise        |           | Advertise local SID/headend state without operator RPC   | RFC 9252 |
 | EVPN (RT2/3/4)             |           | L2VPN over BGP EVPN (MAC/IP, Inclusive Multicast, ESI)   | RFC 9252 |
