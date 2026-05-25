@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"syscall"
@@ -111,6 +112,25 @@ func run(cliCtx *cli.Context) error {
 	// created over RPC are visible to the BGP receive path.
 	locatorMgr := locator.NewManager()
 	vrfBgpMgr := vrfbgp.NewManager()
+
+	// Load config-time VRF <-> route-target bindings before the BGP session
+	// starts receiving. EVPN routes require a bridge-domain binding to be
+	// installed; applying bindings here (rather than via VrfBgpBind after
+	// boot) means a route that arrives early is not dropped for lack of one.
+	for _, b := range cfg.BGP.VrfBindings {
+		if b.BDID > math.MaxUint16 {
+			return fmt.Errorf("bgp.vrf_bindings %q: bd_id %d out of range (max %d)", b.VRFName, b.BDID, math.MaxUint16)
+		}
+		if err := vrfBgpMgr.Bind(vrfbgp.Binding{
+			VRFName:        b.VRFName,
+			ImportRTs:      b.ImportRTs,
+			ExportRTs:      b.ExportRTs,
+			DefaultLocator: b.DefaultLocator,
+			BDID:           uint16(b.BDID),
+		}); err != nil {
+			return fmt.Errorf("bgp.vrf_bindings %q: %w", b.VRFName, err)
+		}
+	}
 
 	// The BGP session is constructed (unstarted) before the RPC server
 	// so the server can hold it as a RouteAdvertiser for BgpRouteService.
