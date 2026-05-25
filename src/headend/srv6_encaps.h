@@ -9,6 +9,7 @@
 #include <bpf/bpf_endian.h>
 
 #include "core/xdp_prog.h"
+#include "core/xdp_map.h" // sr_policy_map, used by resolve_sr_policy (explicit, not include-order dependent)
 #include "core/srv6.h"
 #include "headend/srv6_headend_utils.h"
 #include <linux/ip.h>

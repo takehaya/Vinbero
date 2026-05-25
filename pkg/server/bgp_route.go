@@ -130,11 +130,11 @@ func (s *BgpRouteServer) BgpAdvertiseSrPolicy(
 	for _, p := range req.Msg.Policies {
 		policy, err := protoToAdvertiseSRPolicy(p)
 		if err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: p.GetEndpoint(), Reason: err.Error()})
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: srPolicyKeyTrigger(p.GetColor(), p.GetEndpoint(), p.GetDistinguisher()), Reason: err.Error()})
 			continue
 		}
 		if err := s.srPolicy.PushPolicy(ctx, policy); err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: p.GetEndpoint(), Reason: err.Error()})
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: srPolicyKeyTrigger(p.GetColor(), p.GetEndpoint(), p.GetDistinguisher()), Reason: err.Error()})
 			continue
 		}
 		resp.Advertised = append(resp.Advertised, p)
@@ -156,14 +156,14 @@ func (s *BgpRouteServer) BgpWithdrawSrPolicy(
 	for _, k := range req.Msg.Keys {
 		endpoint, err := netip.ParseAddr(k.GetEndpoint())
 		if err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: k.GetEndpoint(), Reason: err.Error()})
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: srPolicyKeyTrigger(k.GetColor(), k.GetEndpoint(), k.GetDistinguisher()), Reason: err.Error()})
 			continue
 		}
 		// Match the Advertise/Create constraint: SR Policy endpoints are
 		// IPv6, so an IPv4 endpoint can never identify a real policy. Reject
 		// it instead of reporting a no-op withdraw as success.
 		if !endpoint.Is6() {
-			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: k.GetEndpoint(), Reason: "endpoint must be IPv6"})
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: srPolicyKeyTrigger(k.GetColor(), k.GetEndpoint(), k.GetDistinguisher()), Reason: "endpoint must be IPv6"})
 			continue
 		}
 		if err := s.srPolicy.WithdrawPolicy(ctx, bgp.SRPolicyKey{
@@ -171,7 +171,7 @@ func (s *BgpRouteServer) BgpWithdrawSrPolicy(
 			Endpoint:      endpoint,
 			Distinguisher: k.GetDistinguisher(),
 		}); err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: k.GetEndpoint(), Reason: err.Error()})
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: srPolicyKeyTrigger(k.GetColor(), k.GetEndpoint(), k.GetDistinguisher()), Reason: err.Error()})
 			continue
 		}
 		resp.Withdrawn = append(resp.Withdrawn, k)

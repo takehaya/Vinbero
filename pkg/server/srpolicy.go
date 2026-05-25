@@ -46,7 +46,7 @@ func (s *SrPolicyServer) upsert(defs []*v1.SrPolicyDef) []*v1.OperationError {
 		p, err := protoToLocalSRPolicy(def)
 		if err != nil {
 			errs = append(errs, &v1.OperationError{
-				TriggerPrefix: def.GetEndpoint(),
+				TriggerPrefix: srPolicyTrigger(def.GetColor(), def.GetEndpoint()),
 				Reason:        err.Error(),
 			})
 			continue
@@ -92,21 +92,21 @@ func (s *SrPolicyServer) SrPolicyDelete(
 		endpoint, err := netip.ParseAddr(key.GetEndpoint())
 		if err != nil {
 			errs = append(errs, &v1.OperationError{
-				TriggerPrefix: key.GetEndpoint(),
+				TriggerPrefix: srPolicyTrigger(key.GetColor(), key.GetEndpoint()),
 				Reason:        fmt.Sprintf("invalid endpoint: %v", err),
 			})
 			continue
 		}
 		if !endpoint.Is6() {
 			errs = append(errs, &v1.OperationError{
-				TriggerPrefix: key.GetEndpoint(),
+				TriggerPrefix: srPolicyTrigger(key.GetColor(), key.GetEndpoint()),
 				Reason:        "endpoint must be IPv6",
 			})
 			continue
 		}
 		if !s.ctrl.HasLocalSRPolicy(key.GetColor(), endpoint) {
 			errs = append(errs, &v1.OperationError{
-				TriggerPrefix: key.GetEndpoint(),
+				TriggerPrefix: srPolicyTrigger(key.GetColor(), key.GetEndpoint()),
 				Reason:        "no local SR Policy for this color/endpoint (BGP-learned policies are read-only)",
 			})
 			continue
@@ -171,6 +171,19 @@ func parseSRPolicyEndpointSegments(endpoint string, segs []string) (netip.Addr, 
 		out = append(out, sid)
 	}
 	return ep, out, nil
+}
+
+// srPolicyTrigger formats the SR Policy identity for an OperationError so a
+// per-item failure names the offending {color, endpoint} rather than just
+// the endpoint -- multiple colors can share one endpoint.
+func srPolicyTrigger(color uint32, endpoint string) string {
+	return fmt.Sprintf("color=%d endpoint=%s", color, endpoint)
+}
+
+// srPolicyKeyTrigger is srPolicyTrigger plus the distinguisher, for the BGP
+// advertise/withdraw paths whose NLRI key is {color, endpoint, distinguisher}.
+func srPolicyKeyTrigger(color uint32, endpoint string, distinguisher uint32) string {
+	return fmt.Sprintf("color=%d endpoint=%s dist=%d", color, endpoint, distinguisher)
 }
 
 func snapshotToProto(snap *apply.SRPolicySnapshot) *v1.SrPolicyEntry {

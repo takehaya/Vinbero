@@ -1388,6 +1388,12 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 // is value-atomic, so a policy change never exposes a torn segment list,
 // and it is O(1) regardless of how many routes steer onto the policy.
 func (m *MapOperations) UpsertSRPolicy(policyID uint32, transport []netip.Addr) error {
+	// policy_id 0 is the "no steering" sentinel in the headend entry, so the
+	// XDP program never looks it up; an sr_policy_map[0] entry would be dead.
+	// Reject it to catch a caller that handed out 0 (e.g. an exhausted id).
+	if policyID == 0 {
+		return fmt.Errorf("sr_policy: policy_id 0 is reserved (no steering)")
+	}
 	// Cap at MaxSegments-1: the XDP headend composes the route's service SID
 	// onto the tail, so a transport of MaxSegments would always overflow the
 	// SRH and silently fall back. Reject it at write time instead.

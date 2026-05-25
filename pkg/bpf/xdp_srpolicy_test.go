@@ -135,3 +135,13 @@ func TestXDPProgSRPolicyCompose(t *testing.T) {
 		}
 	})
 }
+
+// policy_id 0 is the headend "no steering" sentinel, so the XDP program never
+// looks it up; UpsertSRPolicy must reject it rather than create a dead
+// sr_policy_map[0] entry.
+func TestUpsertSRPolicyRejectsZeroID(t *testing.T) {
+	h := newXDPTestHelper(t)
+	if err := h.mapOps.UpsertSRPolicy(0, []netip.Addr{netip.MustParseAddr("fd00:200:0:1::")}); err == nil {
+		t.Fatal("UpsertSRPolicy(0, ...) must be rejected (policy_id 0 = no steering)")
+	}
+}
