@@ -67,6 +67,19 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } headend_v6_map SEC(".maps");
 
+// SR Policy map: policy_id (headend_entry.policy_id) -> transport SID list.
+// HASH so a policy update / withdraw is one O(1), atomic-per-value write
+// regardless of how many routes steer onto it; a missing entry is the
+// "fall back to bare service SID" signal for the XDP headend. This default
+// is overridable from config via settings.entries.sr_policy.capacity
+// (pkg/bpf/bpf.go), like the other control maps.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, struct sr_policy_value);
+    __uint(max_entries, 1024);
+} sr_policy_map SEC(".maps");
+
 // Per-entry owner-tag tables, paired with sid_function_map / headend_v4_map /
 // headend_v6_map. The keys match the corresponding main map's key type so
 // userspace can read/write the owner alongside each entry. HASH (not

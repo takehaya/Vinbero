@@ -34,7 +34,28 @@ func decodeVPNRoute(p *apiutil.Path, fam bgp.Family) *bgp.VPNRoute {
 	vr.SRv6SID = decodeSRv6SID(p.Attrs, label)
 	vr.RTs = decodeRouteTargets(p.Attrs)
 	vr.NextHop = decodeNextHop(p.Attrs)
+	vr.Color = decodeColor(p.Attrs)
 	return vr
+}
+
+// decodeColor returns the value of the Color Extended Community (RFC 9012
+// §4.3) on the path, or 0 when none is present. When several are present
+// the highest color value wins. CO bits (Color-Only steering) are not
+// interpreted in Phase 1e-c -- CO=00 is assumed.
+func decodeColor(attrs []gobgppkt.PathAttributeInterface) uint32 {
+	var color uint32
+	for _, a := range attrs {
+		ec, ok := a.(*gobgppkt.PathAttributeExtendedCommunities)
+		if !ok {
+			continue
+		}
+		for _, c := range ec.Value {
+			if col, ok := c.(*gobgppkt.ColorExtended); ok && col.Color > color {
+				color = col.Color
+			}
+		}
+	}
+	return color
 }
 
 // decodeSRv6SID walks the BGP Prefix-SID attribute (RFC 9252) and

@@ -97,11 +97,17 @@ func vrfBgpCommand() *cli.Command {
 	}
 }
 
-// csvFlag splits a comma-separated CLI flag into a slice, returning nil
-// for an empty flag (strings.Split would otherwise yield [""]).
+// csvFlag splits a comma-separated CLI flag into a slice, trimming each
+// element and dropping empties, returning nil for an empty flag.
 func csvFlag(s string) []string {
 	if s == "" {
 		return nil
 	}
-	return strings.Split(s, ",")
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

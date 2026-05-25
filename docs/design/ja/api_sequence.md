@@ -5,6 +5,9 @@
 - [L2VPN（P2MP）セットアップ](#l2vpnp2mpセットアップ)
 - [L2VPN（P2P）セットアップ](#l2vpnp2pセットアップ)
 - [L3VPN セットアップ](#l3vpn-セットアップ)
+- [BGP L3VPN (VPNv4/VPNv6) セットアップ](#bgp-l3vpn-vpnv4vpnv6-セットアップ)
+- [SR Policy (color steering)](#sr-policy-color-steering)
+- [L3VPN + SR Policy (BGP 学習)](#l3vpn--sr-policy-bgp-学習)
 - [L3 Headend (IPv4)](#l3-headend-ipv4)
 - [L3 Headend (IPv6)](#l3-headend-ipv6)
 - [End.DX4 / End.DX6 (L3クロスコネクト)](#enddx4--enddx6-l3クロスコネクト)
@@ -66,7 +69,7 @@ sequenceDiagram
 
 ## L2VPN（P2P）セットアップ
 
-`bd_id=0` を指定することで、BD/MAC学習を使わないシンプルなP2P L2VPN を構成する。全フレームが直接SRv6エンカプセルされる。
+`bd_id=0` を指定することで、BD/MAC学習を使わないシンプルなP2P L2VPN を構成する。全フレームが直接 SRv6 で encap される。
 
 ```mermaid
 sequenceDiagram
@@ -128,6 +131,121 @@ sequenceDiagram
 ```
 
 End.DT6 / End.DT46 も同様のフローで、`action` を変更するだけで対応可能。
+
+---
+
+## BGP L3VPN (VPNv4/VPNv6) セットアップ
+
+前節の L3VPN を BGP で自動化する構成です。Vinbero は in-process の BGP speaker (gobgp) を持ち、`--bgp-enabled` で起動します。リモート PE (ここでは FRR) と iBGP を張り、VPNv4/VPNv6 経路を交換します。受信した VPN 経路は SRv6 service SID (End.DT4/DT6) を運び、applier がそれを headend_v4/v6 map の encap entry に変換します。RFC 9252 の SRv6 L3VPN です。
+
+経路には RD と route target が付き、service SID は RFC 9252 §4 の transposition で運ばれます。Vinbero は decode 時に transposition を戻し、full SID へ encap します。
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant VB as pe-tokyo (Vinbero)
+    participant FRR as pe-osaka (FRR)
+
+    Note over Op,FRR: Phase 1: ローカル設定 (locator + VRF + End.DT4)
+
+    Op->>VB: LocatorCreate<br/>{name: LOC1, prefix: fd00:100::/48}
+    VB-->>Op: Created
+    Op->>VB: SidFunctionCreate<br/>{prefix: fd00:100:0:1::/128,<br/>action: End.DT4, vrf_name: vrf-cust}
+    VB-->>Op: Created
+
+    Note over Op,FRR: Phase 2: iBGP 確立 (VPNv4/VPNv6)
+
+    VB->>FRR: BGP OPEN (AS 65100, families: vpnv4/vpnv6)
+    FRR-->>VB: OPEN / Established
+
+    Note over Op,FRR: Phase 3: ローカル顧客経路を広報
+
+    Op->>VB: BgpAdvertiseVpn<br/>{prefix: 10.1.0.0/24, rd, rts,<br/>sid: fd00:100:0:1::, next_hop: lo}
+    VB->>FRR: UPDATE (VPNv4 NLRI + PrefixSID + RT)
+
+    Note over Op,FRR: Phase 4: リモート経路を受信 → データプレーン反映
+
+    FRR->>VB: UPDATE (10.2.0.0/24, service SID, RT)
+    VB-->>VB: decode → RT import filter → buildHeadendEntry<br/>(H.Encaps, segments=[service SID])
+    VB-->>VB: CreateHeadendV4 → headend_v4_map
+
+    Note over Op,FRR: Data plane: ce-tokyo → 10.2.0.0/24 は<br/>service SID へ H.Encaps される
+```
+
+VPNv6 も同じフローで、`family` を vpnv6、service SID を End.DT6 にするだけで対応します。RT import filter は VrfBgpService で設定し、import RT にマッチしない経路は破棄します。
+
+---
+
+## SR Policy (color steering)
+
+color extended community (RFC 9012) が付いた VPN 経路を、SR Policy (RFC 9256 / RFC 9830) の transport segment list に乗せて転送する構成です。SR Policy は {color, endpoint} で識別し、operator がローカル定義するか BGP で学習します。本節は operator 定義の例です。BGP 学習は次節で扱います。
+
+applier は SR Policy ごとに opaque な policy_id を割り当て、headend エントリに stamp します。XDP は転送時に sr_policy_map を引いて transport SID を service SID の前に合成します (RFC 9252 §8 / RFC 9256 §8)。policy_id を介した間接参照なので、SR Policy の変更は map 1 本の書き換えで済み、経路エントリには触りません。
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant VB as pe-tokyo (Vinbero)
+    participant FRR as pe-osaka (FRR)
+
+    Note over Op,FRR: 前提: BGP L3VPN が確立済み (前節)
+
+    Note over Op,FRR: Phase 1: ローカル SR Policy を定義
+
+    Op->>VB: SrPolicyCreate<br/>{color: 100, endpoint: FRR-loopback,<br/>segments: [transport SID]}
+    VB-->>VB: applier: {color, endpoint} に policy_id 割当<br/>sr_policy_map[policy_id] = [transport SID]
+    VB-->>Op: Created
+
+    Note over Op,FRR: Phase 2: color 付き経路を受信 → 解決
+
+    FRR->>VB: UPDATE (10.2.0.0/24, color 100,<br/>next_hop = FRR-loopback, service SID)
+    VB-->>VB: color 100 + next_hop が {color, endpoint} に一致<br/>→ reserveID → headend エントリに policy_id を stamp
+    VB-->>VB: createHeadend 成功後に steer() で参照を確定
+
+    Note over Op,FRR: Phase 3: 転送時の合成 (XDP)
+
+    Note over VB: headend lookup → policy_id != 0<br/>→ sr_policy_map 参照 → segments = transport ++ service<br/>→ H.Encaps → outer DA = transport SID
+
+    Note over Op,FRR: 広報方向 (任意): SR Policy を BGP へ出す
+
+    Op->>VB: BgpAdvertiseSrPolicy<br/>{color, endpoint, segments,<br/>distinguisher, next_hop}
+    VB->>FRR: UPDATE (SR Policy NLRI + Tunnel Encap)
+```
+
+SR Policy が未着またはwithdrawの場合、sr_policy_map の lookup が miss し、経路は bare な service SID へ fallback します。policy_id は steering 経路を refcount し、参照も candidate も無くなった時点で回収して再利用します。
+
+> 注記: 広報先の FRR 10.2 は SR Policy (SAFI 73) を受信しません。`BgpAdvertiseSrPolicy` の相互接続は SR Policy を受信できる実装 (Cisco IOS XR / Nokia SR OS / GoBGP / Vinbero) を peer に置いた場合に実現できます。
+
+---
+
+## L3VPN + SR Policy (BGP 学習)
+
+SR Policy を operator がローカル定義するのではなく、別の controller が BGP (SAFI 73) で広報し、Vinbero PE が受信 (origin BGP) して steering する構成です。controller は SR Policy を話せる実装なら何でもよく、ここでは Vinbero を controller 役に置いています。これは前節のローカル定義版に対する、受信・decode 経路の検証構成です。
+
+```mermaid
+sequenceDiagram
+    participant SC as srctl (SR Policy controller)
+    participant VB as pe-tokyo (Vinbero PE)
+    participant FRR as pe-osaka (FRR)
+
+    Note over SC,FRR: 前提: VB↔FRR は VPNv4/VPNv6、VB↔SC は SR Policy (SAFI 73)
+
+    Note over SC,FRR: Phase 1: controller が SR Policy を広報
+
+    SC->>VB: UPDATE (SR Policy NLRI {distinguisher, color, endpoint}<br/>+ Tunnel Encap: Preference + Segment List(Type B))
+    VB-->>VB: decode → SR Policy table に格納 (origin BGP)<br/>best-path 選定 → sr_policy_map[policy_id] = transport
+
+    Note over SC,FRR: Phase 2: FRR が color 付き VPN 経路を広報
+
+    FRR->>VB: UPDATE (10.2.0.0/24, color 100,<br/>next_hop = FRR-loopback, service SID)
+    VB-->>VB: {color, endpoint} が BGP 学習済み policy に一致<br/>→ policy_id を headend エントリに stamp
+
+    Note over SC,FRR: Phase 3: 転送時の合成 (XDP)
+
+    Note over VB: headend → policy_id → sr_policy_map<br/>→ transport ++ service を H.Encaps
+```
+
+受信時の best-path 選定は RFC 9256 §2.9 に従います。Preference が高い候補、次に protocol-origin (local > BGP > PCEP)、最後に distinguisher の小さい候補が active になります。operator 定義 (origin local) と BGP 学習 (origin BGP) は同一の {color, endpoint} テーブルで競合し、同じ規則で選定されます。
 
 ---
 

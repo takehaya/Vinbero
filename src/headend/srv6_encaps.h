@@ -9,10 +9,64 @@
 #include <bpf/bpf_endian.h>
 
 #include "core/xdp_prog.h"
+#include "core/xdp_map.h" // sr_policy_map, used by resolve_sr_policy (explicit, not include-order dependent)
 #include "core/srv6.h"
 #include "headend/srv6_headend_utils.h"
 #include <linux/ip.h>
 #include "core/srv6_fib.h"
+
+// resolve_sr_policy applies color-based SR Policy steering (RFC 9252 §8).
+// When entry->policy_id is set and sr_policy_map has a transport list for
+// it, it builds an effective headend_entry in *out whose segment list is
+// <transport SIDs> ++ <entry's service SID(s)> and returns out. Otherwise
+// (no steering, lookup miss = withdrawn policy, or composed list too long)
+// it returns entry unchanged so the route encaps to its bare service SID
+// -- the fallback path. The transport is shared per policy in the map, so
+// a policy change is one map write and never rewrites this route's entry.
+static __always_inline struct headend_entry *resolve_sr_policy(
+    struct headend_entry *entry, struct headend_entry *out)
+{
+    if (entry->policy_id == 0)
+        return entry;
+    // A malformed service SID list (num_segments out of range) must not be
+    // composed: with num_segments==0 the transport alone would form a valid
+    // composed entry whose service SID is missing, and that bypasses the
+    // caller's num_segments check. Return the entry unchanged so do_h_encaps_*
+    // validates the original count and DROPs it.
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
+        return entry;
+    __u32 pid = entry->policy_id;
+    struct sr_policy_value *pol = bpf_map_lookup_elem(&sr_policy_map, &pid);
+    if (!pol)
+        return entry; // policy absent/withdrawn -> bare service SID
+    __u8 tlen = pol->len;
+    if (tlen < 1 || tlen > MAX_SEGMENTS)
+        return entry;
+    __u16 total = (__u16)tlen + (__u16)entry->num_segments;
+    if (total < 1 || total > MAX_SEGMENTS)
+        return entry; // composed list would overflow the SRH -> fall back
+
+    __builtin_memset(out, 0, sizeof(*out));
+    out->mode = entry->mode;
+    out->policy_id = 0; // composed entry is terminal; never re-resolve
+    out->num_segments = (__u8)total;
+    __builtin_memcpy(out->src_addr, entry->src_addr, IPV6_ADDR_LEN);
+
+    // Destination index k is constant per unrolled iteration (stack-safe);
+    // the service-segment source index is a bounded variable read from the
+    // entry's segment array (same idiom as copy_segments_to_srh).
+    #pragma unroll
+    for (__u8 k = 0; k < MAX_SEGMENTS; k++) {
+        if (k < tlen) {
+            __builtin_memcpy(out->segments[k], pol->segs[k], IPV6_ADDR_LEN);
+        } else if (k < total) {
+            __u8 sidx = k - tlen;
+            if (sidx < MAX_SEGMENTS)
+                __builtin_memcpy(out->segments[k], entry->segments[sidx], IPV6_ADDR_LEN);
+        }
+    }
+    return out;
+}
 
 // Unified H.Encaps / H.Encaps.Red core implementation (RFC 8986 Section 5.1)
 //
@@ -148,6 +202,8 @@ static __always_inline int do_h_encaps_v4(
     struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph,
     struct headend_entry *entry, __u16 l3_offset)
 {
+    struct headend_entry composed;
+    entry = resolve_sr_policy(entry, &composed);
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
 
@@ -162,6 +218,8 @@ static __always_inline int do_h_encaps_v6(
     struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hdr *inner_ip6h,
     struct headend_entry *entry, __u16 l3_offset)
 {
+    struct headend_entry composed;
+    entry = resolve_sr_policy(entry, &composed);
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
 
@@ -176,6 +234,8 @@ static __always_inline int do_h_encaps_red_v4(
     struct xdp_md *ctx, struct ethhdr *eth, struct iphdr *iph,
     struct headend_entry *entry, __u16 l3_offset)
 {
+    struct headend_entry composed;
+    entry = resolve_sr_policy(entry, &composed);
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
 
@@ -190,6 +250,8 @@ static __always_inline int do_h_encaps_red_v6(
     struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hdr *inner_ip6h,
     struct headend_entry *entry, __u16 l3_offset)
 {
+    struct headend_entry composed;
+    entry = resolve_sr_policy(entry, &composed);
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
 

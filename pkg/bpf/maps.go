@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -731,9 +732,10 @@ func SidAuxL3VrfData(entry *SidAuxEntry) uint32 {
 }
 
 // SidAuxPluginRawMax is the capacity of the plugin_raw variant in
-// sid_aux_entry. Writes longer than this are rejected at the RPC layer so
-// we never overflow the kernel-side union.
-const SidAuxPluginRawMax = 196
+// sid_aux_entry and the pinned size of the union. Writes longer than this
+// are rejected at the RPC layer so we never overflow the kernel-side union.
+// Must match SID_AUX_PLUGIN_RAW_MAX in src/core/xdp_prog.h.
+const SidAuxPluginRawMax = 256
 
 // NewSidAuxPluginRaw creates an aux entry from a plugin-defined byte payload.
 // raw may be shorter than SidAuxPluginRawMax; remaining bytes are zero.
@@ -1376,6 +1378,75 @@ func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
 		return nil, fmt.Errorf("failed to iterate headend v6 map: %w", err)
 	}
 	return result, nil
+}
+
+// ===== SR Policy Map Operations =====
+
+// UpsertSRPolicy installs (or atomically replaces) the transport SID list
+// shared by every headend entry whose policy_id == policyID. The XDP
+// headend prepends these SIDs to each route's own service SID. The write
+// is value-atomic, so a policy change never exposes a torn segment list,
+// and it is O(1) regardless of how many routes steer onto the policy.
+func (m *MapOperations) UpsertSRPolicy(policyID uint32, transport []netip.Addr) error {
+	// policy_id 0 is the "no steering" sentinel in the headend entry, so the
+	// XDP program never looks it up; an sr_policy_map[0] entry would be dead.
+	// Reject it to catch a caller that handed out 0 (e.g. an exhausted id).
+	if policyID == 0 {
+		return fmt.Errorf("sr_policy: policy_id 0 is reserved (no steering)")
+	}
+	// Cap at MaxSegments-1: the XDP headend composes the route's service SID
+	// onto the tail, so a transport of MaxSegments would always overflow the
+	// SRH and silently fall back. Reject it at write time instead.
+	if len(transport) < 1 || len(transport) >= MaxSegments {
+		return fmt.Errorf("sr_policy %d: transport length %d out of range 1..%d",
+			policyID, len(transport), MaxSegments-1)
+	}
+	var val BpfSrPolicyValue
+	val.Len = uint8(len(transport))
+	for i, sid := range transport {
+		// Is6 already covers IPv4-mapped IPv6 (Is4In6 implies Is6), so this
+		// single check rejects only genuine IPv4 SIDs, matching the decode
+		// and RPC-boundary validation.
+		if !sid.Is6() {
+			return fmt.Errorf("sr_policy %d: segment %d (%s) is not an IPv6 SID", policyID, i, sid)
+		}
+		val.Segs[i] = sid.As16()
+	}
+	if err := m.objs.SrPolicyMap.Put(policyID, &val); err != nil {
+		return fmt.Errorf("put sr_policy_map[%d]: %w", policyID, err)
+	}
+	return nil
+}
+
+// DeleteSRPolicy removes a policy's transport list. Referencing routes
+// then miss the lookup in XDP and fall back to their bare service SID.
+// A missing entry is not an error (idempotent withdraw).
+func (m *MapOperations) DeleteSRPolicy(policyID uint32) error {
+	if err := m.objs.SrPolicyMap.Delete(policyID); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("delete sr_policy_map[%d]: %w", policyID, err)
+	}
+	return nil
+}
+
+// GetSRPolicy returns the transport SID list installed for policyID, or
+// nil when no entry exists. Intended for tests and introspection.
+func (m *MapOperations) GetSRPolicy(policyID uint32) ([]net.IP, error) {
+	var val BpfSrPolicyValue
+	if err := m.objs.SrPolicyMap.Lookup(policyID, &val); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup sr_policy_map[%d]: %w", policyID, err)
+	}
+	n := int(val.Len)
+	if n > MaxSegments {
+		n = MaxSegments
+	}
+	out := make([]net.IP, n)
+	for i := 0; i < n; i++ {
+		out[i] = net.IP(append([]byte(nil), val.Segs[i][:]...))
+	}
+	return out, nil
 }
 
 // ===== Headend L2 Map Operations =====

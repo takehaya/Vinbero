@@ -31,11 +31,18 @@ on:
 
 jobs:
   interop-clab:
-    name: l3vpn-2site SRv6 L3VPN interop
+    name: ${{ matrix.scenario }} interop
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - l3vpn-2site          # SRv6 L3VPN (transposition)
+          - sr-policy-2site      # color-based SR Policy steering (local + multi-hop chain)
+          - sr-policy-bgp-2site  # SR Policy learned over BGP (SAFI 73)
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -61,22 +68,22 @@ jobs:
 
       - name: Build images
         working-directory: examples/interop-clab
-        run: make build
+        run: make build SCENARIO=${{ matrix.scenario }}
 
       - name: Deploy lab
         working-directory: examples/interop-clab
-        run: make deploy
+        run: make deploy SCENARIO=${{ matrix.scenario }}
 
       - name: Run interop test
         working-directory: examples/interop-clab
-        run: make test
+        run: make test SCENARIO=${{ matrix.scenario }}
 
       - name: Dump lab state on failure
         if: failure()
         working-directory: examples/interop-clab
-        run: make status logs
+        run: make status logs SCENARIO=${{ matrix.scenario }}
 
       - name: Destroy lab
         if: always()
         working-directory: examples/interop-clab
-        run: make destroy
+        run: make destroy SCENARIO=${{ matrix.scenario }}
