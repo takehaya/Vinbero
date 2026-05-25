@@ -1,0 +1,61 @@
+internal:
+  # eth1 faces the core (SRv6 underlay + iBGP transport); eth2 faces
+  # ce-tokyo. Both carry XDP for the bidirectional L2VPN data plane.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+    sr_policy:
+      capacity: 1024
+
+# In-process BGP speaker. pe-tokyo and pe-osaka are both Vinbero PEs in one
+# provider AS (65100) peering iBGP over their loopbacks. The session carries
+# the EVPN family (AFI 25 / SAFI 70): the two edges exchange their customer
+# MAC routes (RT2) directly, with no separate controller.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.2"
+    listen_port: 179
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "2001:db8:ff::1"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - evpn
+  # Bind bd 100 to the EVPN import RT before the session receives, so an RT2
+  # that arrives early is not dropped for lack of a bridge-domain binding.
+  vrf_bindings:
+    - vrf_name: evi-100
+      import_rts:
+        - "65000:100"
+      bd_id: 100
