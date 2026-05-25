@@ -39,6 +39,7 @@ const (
 	FamilyVPNv6        Family = "vpnv6"
 	FamilyIPv6Unicast  Family = "ipv6_unicast"
 	FamilySRPolicyIPv6 Family = "sr_policy_ipv6"
+	FamilyEVPN         Family = "evpn" // AFI 25 (L2VPN) / SAFI 70 (EVPN)
 )
 
 // String renders the family for logs and error messages.
@@ -47,7 +48,7 @@ func (f Family) String() string { return string(f) }
 // Valid reports whether f is one of the recognized families.
 func (f Family) Valid() bool {
 	switch f {
-	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6:
+	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6, FamilyEVPN:
 		return true
 	default:
 		return false
@@ -59,7 +60,7 @@ func (f Family) Valid() bool {
 func ParseFamily(s string) (Family, error) {
 	f := Family(s)
 	if !f.Valid() {
-		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6)", s)
+		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6|evpn)", s)
 	}
 	return f, nil
 }
@@ -145,6 +146,7 @@ type RouteEvent struct {
 	VPN        *VPNRoute
 	Unicast    *UnicastRoute
 	SRPolicy   *SRPolicy
+	EVPN       *EVPNRoute
 	IsWithdraw bool
 }
 
@@ -234,4 +236,33 @@ type SRPolicyKey struct {
 type SRPolicyController interface {
 	PushPolicy(ctx context.Context, p SRPolicy) error
 	WithdrawPolicy(ctx context.Context, key SRPolicyKey) error
+}
+
+// EVPNRouteType enumerates the RFC 7432 / RFC 9252 EVPN NLRI types
+// Vinbero consumes. RT1 (Ethernet A-D), RT5 (IP Prefix), and RT6/7
+// (multicast) are out of scope (see docs/dev/bgp_evpn_integration.md).
+type EVPNRouteType uint8
+
+const (
+	EVPNRouteTypeMACIP              EVPNRouteType = 2 // RT2: MAC/IP -> fdb_map + bd_peer_map
+	EVPNRouteTypeInclusiveMulticast EVPNRouteType = 3 // RT3: Inclusive Multicast -> bd_peer_map (BUM)
+	EVPNRouteTypeEthernetSegment    EVPNRouteType = 4 // RT4: Ethernet Segment -> esi_map (DF election)
+)
+
+// EVPNRoute is a decoded BGP EVPN NLRI (AFI 25 / SAFI 70). One envelope
+// carries every route type; the fields a type does not use stay zero.
+// The SRv6 service SID (End.DT2U for RT2, End.DT2M for RT3) is decoded
+// from the BGP Prefix-SID attribute's SRv6 L2 Service TLV (RFC 9252 §6);
+// RT4 carries no SID. The route targets resolve the local bridge domain
+// through the same import-RT filter the L3VPN path uses.
+type EVPNRoute struct {
+	Type        EVPNRouteType
+	RD          string
+	RTs         []string
+	ESI         [10]byte
+	EthernetTag uint32
+	MAC         string // RT2: "aa:bb:cc:dd:ee:ff"
+	IPAddr      string // RT2: optional host IP (IRB); "" when MAC-only
+	SRv6SID     string // End.DT2U (RT2) / End.DT2M (RT3); "" if none
+	NextHop     string
 }

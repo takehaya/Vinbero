@@ -32,6 +32,7 @@ func (s *VrfBgpServer) VrfBgpBind(
 			ImportRTs:      b.GetImportRts(),
 			ExportRTs:      b.GetExportRts(),
 			DefaultLocator: b.GetDefaultLocator(),
+			BDID:           uint16(b.GetBdId()),
 		}); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: b.GetVrfName(),
@@ -77,6 +78,7 @@ func (s *VrfBgpServer) VrfBgpList(
 			ImportRts:      b.ImportRTs,
 			ExportRts:      b.ExportRTs,
 			DefaultLocator: b.DefaultLocator,
+			BdId:           uint32(b.BDID),
 		})
 	}
 	return connect.NewResponse(&v1.VrfBgpListResponse{Bindings: out}), nil

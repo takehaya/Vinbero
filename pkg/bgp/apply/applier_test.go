@@ -2,6 +2,7 @@ package apply
 
 import (
 	"errors"
+	"net"
 	"net/netip"
 	"testing"
 
@@ -14,6 +15,16 @@ import (
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
+// fdbKey / bdPeerKey identify recorded EVPN writes in fakeHeadend.
+type fdbKey struct {
+	bdID uint16
+	mac  string
+}
+type bdPeerKey struct {
+	bdID  uint16
+	index uint16
+}
+
 // fakeHeadend records headend map calls instead of touching BPF.
 type fakeHeadend struct {
 	v4created map[string]*bpf.HeadendEntry
@@ -21,13 +32,57 @@ type fakeHeadend struct {
 	v4deleted []string
 	v6deleted []string
 	createErr error
+
+	fdb       map[fdbKey]*bpf.FdbEntry
+	bdPeers   map[bdPeerKey]*bpf.HeadendEntry
+	bdPeerErr error
+	fdbErr    error
 }
 
 func newFakeHeadend() *fakeHeadend {
 	return &fakeHeadend{
 		v4created: map[string]*bpf.HeadendEntry{},
 		v6created: map[string]*bpf.HeadendEntry{},
+		fdb:       map[fdbKey]*bpf.FdbEntry{},
+		bdPeers:   map[bdPeerKey]*bpf.HeadendEntry{},
 	}
+}
+
+func (f *fakeHeadend) CreateFdb(bdID uint16, mac net.HardwareAddr, e *bpf.FdbEntry) error {
+	if f.fdbErr != nil {
+		return f.fdbErr
+	}
+	f.fdb[fdbKey{bdID, mac.String()}] = e
+	return nil
+}
+
+func (f *fakeHeadend) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
+	delete(f.fdb, fdbKey{bdID, mac.String()})
+	return nil
+}
+
+func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [bpf.ESILen]byte) error {
+	if f.bdPeerErr != nil {
+		return f.bdPeerErr
+	}
+	f.bdPeers[bdPeerKey{bdID, index}] = e
+	return nil
+}
+
+func (f *fakeHeadend) DeleteBdPeer(bdID, index uint16) error {
+	delete(f.bdPeers, bdPeerKey{bdID, index})
+	return nil
+}
+
+// FindFreeBdPeerIndex returns the lowest index not present in bdPeers for bdID,
+// mirroring the real map-probing allocator.
+func (f *fakeHeadend) FindFreeBdPeerIndex(bdID uint16) uint16 {
+	for i := uint16(0); i < bpf.MaxBumNexthops; i++ {
+		if _, ok := f.bdPeers[bdPeerKey{bdID, i}]; !ok {
+			return i
+		}
+	}
+	return bpf.MaxBumNexthops
 }
 
 // no-op SR Policy map ops so fakeHeadend satisfies the applier's dataPlane

@@ -23,6 +23,10 @@ type Binding struct {
 	ImportRTs      []string
 	ExportRTs      []string
 	DefaultLocator string
+	// BDID is the bridge domain a received EVPN route (RT2/3/4) installs
+	// into when its route targets match ImportRTs. It is 0 for L3VPN-only
+	// bindings; EVPN reception requires a non-zero BDID.
+	BDID uint16
 }
 
 // Manager holds VRF<->RT bindings. Safe for concurrent use.
@@ -83,6 +87,26 @@ func (m *Manager) MatchImport(rts []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// MatchImportBD returns the bridge domain of the EVPN binding whose
+// import_rts contain any of rts. ok=false means no binding with a
+// non-zero BDID imports the route, so the EVPN applier drops it (an EVPN
+// route can only install into an explicitly bound bridge domain).
+func (m *Manager) MatchImportBD(rts []string) (uint16, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, b := range m.bindings {
+		if b.BDID == 0 {
+			continue
+		}
+		for _, want := range b.ImportRTs {
+			if slices.Contains(rts, want) {
+				return b.BDID, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // Empty reports whether no bindings are registered. The applier treats

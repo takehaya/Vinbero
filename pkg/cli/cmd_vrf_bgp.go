@@ -24,6 +24,7 @@ func vrfBgpCommand() *cli.Command {
 					&cli.StringFlag{Name: "import-rts", Usage: "Import route targets (comma-separated, e.g. 65000:100,65000:101)"},
 					&cli.StringFlag{Name: "export-rts", Usage: "Export route targets (comma-separated)"},
 					&cli.StringFlag{Name: "default-locator", Usage: "Locator name for this VRF's local SIDs"},
+					&cli.UintFlag{Name: "bd-id", Usage: "Bridge domain for EVPN routes matching import-rts (0 = L3VPN-only)"},
 				},
 				Action: func(c *cli.Context) error {
 					b := &v1.VrfBgpBinding{
@@ -31,6 +32,7 @@ func vrfBgpCommand() *cli.Command {
 						ImportRts:      csvFlag(c.String("import-rts")),
 						ExportRts:      csvFlag(c.String("export-rts")),
 						DefaultLocator: c.String("default-locator"),
+						BdId:           uint32(c.Uint("bd-id")),
 					}
 					clients := clientsFromContext(c)
 					resp, err := clients.VrfBgp.VrfBgpBind(context.Background(),

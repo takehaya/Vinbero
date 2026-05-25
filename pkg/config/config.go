@@ -45,7 +45,7 @@ type BGPPeerConfig struct {
 	PeerASN      uint32   `yaml:"peer_asn,omitempty"`
 	HoldTimeSec  uint32   `yaml:"hold_time_sec,omitempty" default:"90"`
 	KeepaliveSec uint32   `yaml:"keepalive_sec,omitempty" default:"30"`
-	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6
+	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6 / evpn
 }
 
 // BpfConstants returns the set of read-only constants rewritten into every
