@@ -119,12 +119,31 @@ func run(cliCtx *cli.Context) error {
 	// assigned inside the enabled branch.
 	var bgpSession *gobgp.Session
 	var advertiser bgp.RouteAdvertiser
+	// srPolicyAdvertiser is the SR Policy advertise direction (SAFI 73),
+	// satisfied by the same gobgp session. Like advertiser, it stays nil
+	// when BGP is disabled so no typed nil leaks into the interface.
+	var srPolicyAdvertiser bgp.SRPolicyController
+	// applier holds the SR Policy table SrPolicyService also drives, so it is
+	// shared via NewServer below: BGP-received and operator-defined policies
+	// must share one table or collide on policy_id. nil when BGP is disabled
+	// -> SrPolicyService RPCs return FailedPrecondition.
+	var applier *apply.Applier
 	if cliCtx.Bool("bgp-enabled") {
 		bgpSession = gobgp.NewSession(lg)
 		advertiser = bgpSession
+		srPolicyAdvertiser = bgpSession
+		applier = apply.NewApplier(
+			vin.GetMapOperations(),
+			locatorMgr,
+			vrfBgpMgr,
+			fib.NewKernelInjector(),
+			cfg.BGP.Global.SourceLocator,
+			cfg.BGP.Global.LocalASN,
+			lg,
+		)
 	}
 
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, lg)
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, applier, lg)
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
@@ -148,17 +167,9 @@ func run(cliCtx *cli.Context) error {
 		if err := startBGPSession(ctx, bgpSession, cfg.BGP); err != nil {
 			return fmt.Errorf("start BGP: %w", err)
 		}
-		// Drive the data plane from received BGP routes: VPNv4/v6 ->
-		// headend maps, IPv6 unicast -> kernel FIB.
-		applier := apply.NewApplier(
-			vin.GetMapOperations(),
-			locatorMgr,
-			vrfBgpMgr,
-			fib.NewKernelInjector(),
-			cfg.BGP.Global.SourceLocator,
-			cfg.BGP.Global.LocalASN,
-			lg,
-		)
+		// applier was created above (shared with SrPolicyService). It drives
+		// the data plane from received BGP routes: VPNv4/v6 -> headend maps,
+		// IPv6 unicast -> kernel FIB, SR Policy -> sr_policy_map.
 		// Drop BGP-learned kernel FIB routes on shutdown so they do not
 		// outlive the process. Runs after cancelSub (deferred below) so no
 		// route can be re-installed while cleanup is in flight.

@@ -42,14 +42,22 @@ const (
 	// BgpRouteServiceBgpWithdrawProcedure is the fully-qualified name of the BgpRouteService's
 	// BgpWithdraw RPC.
 	BgpRouteServiceBgpWithdrawProcedure = "/vinbero.v1.BgpRouteService/BgpWithdraw"
+	// BgpRouteServiceBgpAdvertiseSrPolicyProcedure is the fully-qualified name of the BgpRouteService's
+	// BgpAdvertiseSrPolicy RPC.
+	BgpRouteServiceBgpAdvertiseSrPolicyProcedure = "/vinbero.v1.BgpRouteService/BgpAdvertiseSrPolicy"
+	// BgpRouteServiceBgpWithdrawSrPolicyProcedure is the fully-qualified name of the BgpRouteService's
+	// BgpWithdrawSrPolicy RPC.
+	BgpRouteServiceBgpWithdrawSrPolicyProcedure = "/vinbero.v1.BgpRouteService/BgpWithdrawSrPolicy"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
 var (
-	bgpRouteServiceServiceDescriptor                   = v1.File_vinbero_v1_bgp_route_proto.Services().ByName("BgpRouteService")
-	bgpRouteServiceBgpAdvertiseVpnMethodDescriptor     = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpAdvertiseVpn")
-	bgpRouteServiceBgpAdvertiseUnicastMethodDescriptor = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpAdvertiseUnicast")
-	bgpRouteServiceBgpWithdrawMethodDescriptor         = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpWithdraw")
+	bgpRouteServiceServiceDescriptor                    = v1.File_vinbero_v1_bgp_route_proto.Services().ByName("BgpRouteService")
+	bgpRouteServiceBgpAdvertiseVpnMethodDescriptor      = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpAdvertiseVpn")
+	bgpRouteServiceBgpAdvertiseUnicastMethodDescriptor  = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpAdvertiseUnicast")
+	bgpRouteServiceBgpWithdrawMethodDescriptor          = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpWithdraw")
+	bgpRouteServiceBgpAdvertiseSrPolicyMethodDescriptor = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpAdvertiseSrPolicy")
+	bgpRouteServiceBgpWithdrawSrPolicyMethodDescriptor  = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpWithdrawSrPolicy")
 )
 
 // BgpRouteServiceClient is a client for the vinbero.v1.BgpRouteService service.
@@ -57,6 +65,8 @@ type BgpRouteServiceClient interface {
 	BgpAdvertiseVpn(context.Context, *connect.Request[v1.BgpAdvertiseVpnRequest]) (*connect.Response[v1.BgpAdvertiseVpnResponse], error)
 	BgpAdvertiseUnicast(context.Context, *connect.Request[v1.BgpAdvertiseUnicastRequest]) (*connect.Response[v1.BgpAdvertiseUnicastResponse], error)
 	BgpWithdraw(context.Context, *connect.Request[v1.BgpWithdrawRequest]) (*connect.Response[v1.BgpWithdrawResponse], error)
+	BgpAdvertiseSrPolicy(context.Context, *connect.Request[v1.BgpAdvertiseSrPolicyRequest]) (*connect.Response[v1.BgpAdvertiseSrPolicyResponse], error)
+	BgpWithdrawSrPolicy(context.Context, *connect.Request[v1.BgpWithdrawSrPolicyRequest]) (*connect.Response[v1.BgpWithdrawSrPolicyResponse], error)
 }
 
 // NewBgpRouteServiceClient constructs a client for the vinbero.v1.BgpRouteService service. By
@@ -87,14 +97,28 @@ func NewBgpRouteServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(bgpRouteServiceBgpWithdrawMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		bgpAdvertiseSrPolicy: connect.NewClient[v1.BgpAdvertiseSrPolicyRequest, v1.BgpAdvertiseSrPolicyResponse](
+			httpClient,
+			baseURL+BgpRouteServiceBgpAdvertiseSrPolicyProcedure,
+			connect.WithSchema(bgpRouteServiceBgpAdvertiseSrPolicyMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		bgpWithdrawSrPolicy: connect.NewClient[v1.BgpWithdrawSrPolicyRequest, v1.BgpWithdrawSrPolicyResponse](
+			httpClient,
+			baseURL+BgpRouteServiceBgpWithdrawSrPolicyProcedure,
+			connect.WithSchema(bgpRouteServiceBgpWithdrawSrPolicyMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // bgpRouteServiceClient implements BgpRouteServiceClient.
 type bgpRouteServiceClient struct {
-	bgpAdvertiseVpn     *connect.Client[v1.BgpAdvertiseVpnRequest, v1.BgpAdvertiseVpnResponse]
-	bgpAdvertiseUnicast *connect.Client[v1.BgpAdvertiseUnicastRequest, v1.BgpAdvertiseUnicastResponse]
-	bgpWithdraw         *connect.Client[v1.BgpWithdrawRequest, v1.BgpWithdrawResponse]
+	bgpAdvertiseVpn      *connect.Client[v1.BgpAdvertiseVpnRequest, v1.BgpAdvertiseVpnResponse]
+	bgpAdvertiseUnicast  *connect.Client[v1.BgpAdvertiseUnicastRequest, v1.BgpAdvertiseUnicastResponse]
+	bgpWithdraw          *connect.Client[v1.BgpWithdrawRequest, v1.BgpWithdrawResponse]
+	bgpAdvertiseSrPolicy *connect.Client[v1.BgpAdvertiseSrPolicyRequest, v1.BgpAdvertiseSrPolicyResponse]
+	bgpWithdrawSrPolicy  *connect.Client[v1.BgpWithdrawSrPolicyRequest, v1.BgpWithdrawSrPolicyResponse]
 }
 
 // BgpAdvertiseVpn calls vinbero.v1.BgpRouteService.BgpAdvertiseVpn.
@@ -112,11 +136,23 @@ func (c *bgpRouteServiceClient) BgpWithdraw(ctx context.Context, req *connect.Re
 	return c.bgpWithdraw.CallUnary(ctx, req)
 }
 
+// BgpAdvertiseSrPolicy calls vinbero.v1.BgpRouteService.BgpAdvertiseSrPolicy.
+func (c *bgpRouteServiceClient) BgpAdvertiseSrPolicy(ctx context.Context, req *connect.Request[v1.BgpAdvertiseSrPolicyRequest]) (*connect.Response[v1.BgpAdvertiseSrPolicyResponse], error) {
+	return c.bgpAdvertiseSrPolicy.CallUnary(ctx, req)
+}
+
+// BgpWithdrawSrPolicy calls vinbero.v1.BgpRouteService.BgpWithdrawSrPolicy.
+func (c *bgpRouteServiceClient) BgpWithdrawSrPolicy(ctx context.Context, req *connect.Request[v1.BgpWithdrawSrPolicyRequest]) (*connect.Response[v1.BgpWithdrawSrPolicyResponse], error) {
+	return c.bgpWithdrawSrPolicy.CallUnary(ctx, req)
+}
+
 // BgpRouteServiceHandler is an implementation of the vinbero.v1.BgpRouteService service.
 type BgpRouteServiceHandler interface {
 	BgpAdvertiseVpn(context.Context, *connect.Request[v1.BgpAdvertiseVpnRequest]) (*connect.Response[v1.BgpAdvertiseVpnResponse], error)
 	BgpAdvertiseUnicast(context.Context, *connect.Request[v1.BgpAdvertiseUnicastRequest]) (*connect.Response[v1.BgpAdvertiseUnicastResponse], error)
 	BgpWithdraw(context.Context, *connect.Request[v1.BgpWithdrawRequest]) (*connect.Response[v1.BgpWithdrawResponse], error)
+	BgpAdvertiseSrPolicy(context.Context, *connect.Request[v1.BgpAdvertiseSrPolicyRequest]) (*connect.Response[v1.BgpAdvertiseSrPolicyResponse], error)
+	BgpWithdrawSrPolicy(context.Context, *connect.Request[v1.BgpWithdrawSrPolicyRequest]) (*connect.Response[v1.BgpWithdrawSrPolicyResponse], error)
 }
 
 // NewBgpRouteServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -143,6 +179,18 @@ func NewBgpRouteServiceHandler(svc BgpRouteServiceHandler, opts ...connect.Handl
 		connect.WithSchema(bgpRouteServiceBgpWithdrawMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	bgpRouteServiceBgpAdvertiseSrPolicyHandler := connect.NewUnaryHandler(
+		BgpRouteServiceBgpAdvertiseSrPolicyProcedure,
+		svc.BgpAdvertiseSrPolicy,
+		connect.WithSchema(bgpRouteServiceBgpAdvertiseSrPolicyMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	bgpRouteServiceBgpWithdrawSrPolicyHandler := connect.NewUnaryHandler(
+		BgpRouteServiceBgpWithdrawSrPolicyProcedure,
+		svc.BgpWithdrawSrPolicy,
+		connect.WithSchema(bgpRouteServiceBgpWithdrawSrPolicyMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.BgpRouteService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BgpRouteServiceBgpAdvertiseVpnProcedure:
@@ -151,6 +199,10 @@ func NewBgpRouteServiceHandler(svc BgpRouteServiceHandler, opts ...connect.Handl
 			bgpRouteServiceBgpAdvertiseUnicastHandler.ServeHTTP(w, r)
 		case BgpRouteServiceBgpWithdrawProcedure:
 			bgpRouteServiceBgpWithdrawHandler.ServeHTTP(w, r)
+		case BgpRouteServiceBgpAdvertiseSrPolicyProcedure:
+			bgpRouteServiceBgpAdvertiseSrPolicyHandler.ServeHTTP(w, r)
+		case BgpRouteServiceBgpWithdrawSrPolicyProcedure:
+			bgpRouteServiceBgpWithdrawSrPolicyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -170,4 +222,12 @@ func (UnimplementedBgpRouteServiceHandler) BgpAdvertiseUnicast(context.Context, 
 
 func (UnimplementedBgpRouteServiceHandler) BgpWithdraw(context.Context, *connect.Request[v1.BgpWithdrawRequest]) (*connect.Response[v1.BgpWithdrawResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BgpRouteService.BgpWithdraw is not implemented"))
+}
+
+func (UnimplementedBgpRouteServiceHandler) BgpAdvertiseSrPolicy(context.Context, *connect.Request[v1.BgpAdvertiseSrPolicyRequest]) (*connect.Response[v1.BgpAdvertiseSrPolicyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BgpRouteService.BgpAdvertiseSrPolicy is not implemented"))
+}
+
+func (UnimplementedBgpRouteServiceHandler) BgpWithdrawSrPolicy(context.Context, *connect.Request[v1.BgpWithdrawSrPolicyRequest]) (*connect.Response[v1.BgpWithdrawSrPolicyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BgpRouteService.BgpWithdrawSrPolicy is not implemented"))
 }

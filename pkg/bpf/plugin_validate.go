@@ -264,11 +264,11 @@ func ValidatePluginCollection(spec *ebpf.CollectionSpec, program string, roMaps 
 // plugin_raw variant of sid_aux_entry. The anchor is VINBERO_PLUGIN_AUX_TYPE,
 // which emits a `<program>_aux` BTF struct; plugins without the anchor pass
 // through untouched (they are limited to the plugin_aux_raw hex path, where
-// the 196-byte cap is enforced at the RPC layer instead).
+// the 256-byte cap is enforced at the RPC layer instead).
 func validatePluginAuxType(spec *ebpf.CollectionSpec, program string) error {
 	// Plugins compiled without BTF (e.g. -g omitted) cannot be size-checked
 	// here. They lose the json payload path (encodePluginAuxJSON requires the
-	// aux type) but the raw path still enforces the 196-byte cap, so skipping
+	// aux type) but the raw path still enforces the 256-byte cap, so skipping
 	// is safe.
 	if spec.Types == nil {
 		return nil

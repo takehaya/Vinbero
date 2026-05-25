@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 )
 
 // Session lifecycle errors. Exposed as sentinels so callers can branch
@@ -116,6 +117,10 @@ type VPNRoute struct {
 	RTs     []string
 	SRv6SID string
 	NextHop string
+	// Color is the value of the Color Extended Community (RFC 9012 §4.3),
+	// or 0 when the route carries none. A non-zero color requests
+	// auto-steering onto the SR Policy keyed by {Color, NextHop}.
+	Color uint32
 }
 
 // UnicastRoute is a plain IPv6 unicast route.
@@ -139,6 +144,7 @@ type RouteEvent struct {
 	Family     Family
 	VPN        *VPNRoute
 	Unicast    *UnicastRoute
+	SRPolicy   *SRPolicy
 	IsWithdraw bool
 }
 
@@ -152,17 +158,80 @@ type RouteSubscriber interface {
 	Subscribe(filter Family, handler RouteHandler) (cancel func(), err error)
 }
 
-// SRPolicy is a received or to-be-advertised BGP SR Policy. Detail is
-// filled in by Phase 1e.
-type SRPolicy struct {
-	Endpoint    string
-	Color       uint32
-	SegmentList []string
+// Origin identifies what signaled a candidate path (RFC 9256 §2.4
+// Protocol-Origin). The numeric values are the RFC's recommended
+// defaults; the best-path tie-break prefers the HIGHER value, so a
+// locally configured path outranks one learned via BGP, which outranks
+// PCEP.
+type Origin uint8
+
+const (
+	OriginPCEP  Origin = 10
+	OriginBGP   Origin = 20
+	OriginLocal Origin = 30
+)
+
+// String renders the origin for logs.
+func (o Origin) String() string {
+	switch o {
+	case OriginPCEP:
+		return "pcep"
+	case OriginBGP:
+		return "bgp"
+	case OriginLocal:
+		return "local"
+	default:
+		return fmt.Sprintf("origin(%d)", uint8(o))
+	}
 }
 
-// SRPolicyController handles the SR Policy address family. Implemented
-// in Phase 1e.
+// SRPolicy is an SR Policy identified by {Color, Endpoint} (RFC 9256
+// §2.1). It aggregates the candidate paths advertised for that key; a
+// single received BGP SR Policy NLRI (or one local definition) maps to
+// exactly one CandidatePath, distinguished by Distinguisher.
+type SRPolicy struct {
+	Color      uint32
+	Endpoint   netip.Addr
+	Candidates []CandidatePath
+	// AdvertiseNextHop is the BGP next hop used only when advertising this
+	// policy (PushPolicy). It is the zero Addr for received policies.
+	AdvertiseNextHop netip.Addr
+}
+
+// SRPolicyDefaultPreference is the candidate path preference assumed when
+// none is signaled (RFC 9256 §2.7).
+const SRPolicyDefaultPreference = 100
+
+// CandidatePath is one segment-list option for an SRPolicy. The active
+// path is chosen per RFC 9256 §2.9: highest Preference, then highest
+// Origin, then lowest Distinguisher.
+type CandidatePath struct {
+	Origin        Origin
+	Distinguisher uint32
+	Preference    uint32
+	// SegmentList is the SR Policy transport SID list (RFC 9830/9831
+	// Type B SRv6 SIDs). The VPN service SID is composed onto the tail
+	// in the data plane, not stored here.
+	SegmentList []netip.Addr
+}
+
+// SRPolicyKey identifies a previously-advertised SR Policy for
+// withdrawal: the {Distinguisher, Color, Endpoint} tuple of the NLRI
+// (RFC 9830).
+type SRPolicyKey struct {
+	Color         uint32
+	Endpoint      netip.Addr
+	Distinguisher uint32
+}
+
+// SRPolicyController advertises local SR Policies into BGP (SAFI 73).
+// Reception is delivered through RouteSubscriber as RouteEvent.SRPolicy;
+// PushPolicy / WithdrawPolicy are the advertise direction, surfaced
+// operator-side as `vbctl bgp advertise-sr-policy` / `withdraw-sr-policy`.
+//
+// PushPolicy advertises exactly one candidate path: p.Candidates must hold
+// a single CandidatePath, and p.AdvertiseNextHop supplies the BGP next hop.
 type SRPolicyController interface {
-	OnPolicy(handler func(SRPolicy))
 	PushPolicy(ctx context.Context, p SRPolicy) error
+	WithdrawPolicy(ctx context.Context, key SRPolicyKey) error
 }

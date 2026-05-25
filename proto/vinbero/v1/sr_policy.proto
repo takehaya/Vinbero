@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+import "vinbero/v1/enums.proto";
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// SrPolicyService manages SR Policies (RFC 9256) used for color-based
+// steering of overlay (VPNv4/VPNv6) traffic onto an SRv6 transport path.
+//
+// CRUD operates on operator-defined (origin local) SR Policies, which are
+// installed straight into the data plane. SR Policies learned over BGP
+// (SAFI 73, origin bgp) are read-only: they appear in SrPolicyList but
+// SrPolicyUpdate / SrPolicyDelete reject them. Advertising a local SR
+// Policy into BGP is a separate concern surfaced as `vbctl bgp
+// advertise-sr-policy` (not part of this service).
+//
+// The whole service requires the in-process BGP speaker (--bgp-enabled);
+// without it the RPCs fail with FailedPrecondition.
+service SrPolicyService {
+  rpc SrPolicyCreate(SrPolicyCreateRequest) returns (SrPolicyCreateResponse);
+  rpc SrPolicyUpdate(SrPolicyUpdateRequest) returns (SrPolicyUpdateResponse);
+  rpc SrPolicyDelete(SrPolicyDeleteRequest) returns (SrPolicyDeleteResponse);
+  rpc SrPolicyList(SrPolicyListRequest) returns (SrPolicyListResponse);
+}
+
+// SrPolicyOrigin records what signaled a candidate path (RFC 9256 §2.4
+// Protocol-Origin). On equal preference, local outranks bgp.
+enum SrPolicyOrigin {
+  SR_POLICY_ORIGIN_UNSPECIFIED = 0;
+  SR_POLICY_ORIGIN_LOCAL = 1;
+  SR_POLICY_ORIGIN_BGP = 2;
+}
+
+// SrPolicyDef is an operator-defined SR Policy candidate path, keyed by
+// {color, endpoint}. Create and Update both upsert it.
+message SrPolicyDef {
+  uint32 color = 1; // Color matched by the Color Extended Community.
+  string endpoint = 2; // SR Policy endpoint (IPv6), = the egress PE's BGP next hop.
+  repeated string segments = 3; // Transport SRv6 SIDs (the route's service SID is appended in the data plane).
+  uint32 preference = 4; // Candidate path preference; 0 means the RFC default of 100.
+}
+
+// SrPolicyKey identifies a policy for deletion / lookup.
+message SrPolicyKey {
+  uint32 color = 1;
+  string endpoint = 2;
+}
+
+// SrPolicyCandidate is one candidate path of a policy as held in the table.
+message SrPolicyCandidate {
+  SrPolicyOrigin origin = 1;
+  uint32 distinguisher = 2;
+  uint32 preference = 3;
+  repeated string segments = 4;
+  bool active = 5; // True for the currently selected best path.
+}
+
+// SrPolicyEntry is the full state of one {color, endpoint} policy.
+message SrPolicyEntry {
+  uint32 color = 1;
+  string endpoint = 2;
+  uint32 policy_id = 3; // Opaque data-plane handle (sr_policy_map key).
+  repeated SrPolicyCandidate candidates = 4;
+}
+
+message SrPolicyCreateRequest {
+  repeated SrPolicyDef policies = 1;
+}
+message SrPolicyCreateResponse {
+  repeated OperationError errors = 1;
+}
+
+message SrPolicyUpdateRequest {
+  repeated SrPolicyDef policies = 1;
+}
+message SrPolicyUpdateResponse {
+  repeated OperationError errors = 1;
+}
+
+message SrPolicyDeleteRequest {
+  repeated SrPolicyKey keys = 1;
+}
+message SrPolicyDeleteResponse {
+  repeated OperationError errors = 1;
+}
+
+message SrPolicyListRequest {}
+message SrPolicyListResponse {
+  repeated SrPolicyEntry entries = 1;
+}

@@ -33,6 +33,14 @@ type headendOps interface {
 	DeleteHeadendV6(triggerPrefix string, requester bpf.OwnerTag) error
 }
 
+// dataPlane is the BPF map surface the applier writes: headend encap
+// entries plus the SR Policy transport map. *bpf.MapOperations satisfies
+// it; the narrow sub-interfaces keep the applier unit-testable.
+type dataPlane interface {
+	headendOps
+	policyMapOps
+}
+
 // Applier applies received BGP routes to the Vinbero data plane.
 type Applier struct {
 	headend     headendOps
@@ -41,22 +49,31 @@ type Applier struct {
 	fib         fib.Injector
 	srcLocator  string
 	localASN    uint32
-	logger      *zap.Logger
+	srPolicy    *srPolicyTable
+	// steeredRoutes maps a steered VPN route to the SR Policy key it
+	// references, so a withdraw (which carries no color/next-hop) can unref
+	// the right policy. Touched only from applyVPN, which runs on the single
+	// GoBGP RouteHandler goroutine, so it needs no extra locking; the
+	// srPolicyTable it drives is mutex-guarded for the concurrent CRUD path.
+	steeredRoutes map[bgp.RouteKey]policyKey
+	logger        *zap.Logger
 }
 
 // NewApplier wires an Applier. srcLocator names the locator whose prefix
 // supplies the SRv6 encapsulation source address (see plan §6-5).
 // vrfBindings supplies the route-target import filter; an empty manager
 // accepts every received route.
-func NewApplier(headend headendOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
+func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
 	return &Applier{
-		headend:     headend,
-		locators:    locators,
-		vrfBindings: vrfBindings,
-		fib:         fibInjector,
-		srcLocator:  srcLocator,
-		localASN:    localASN,
-		logger:      logger.Named("bgp.apply"),
+		headend:       dp,
+		locators:      locators,
+		vrfBindings:   vrfBindings,
+		fib:           fibInjector,
+		srcLocator:    srcLocator,
+		localASN:      localASN,
+		srPolicy:      newSRPolicyTable(dp, logger),
+		steeredRoutes: make(map[bgp.RouteKey]policyKey),
+		logger:        logger.Named("bgp.apply"),
 	}
 }
 
@@ -81,6 +98,8 @@ func (a *Applier) CleanupFIB() error {
 // Apply is the bgp.RouteHandler entry point.
 func (a *Applier) Apply(ev bgp.RouteEvent) {
 	switch {
+	case ev.SRPolicy != nil:
+		a.srPolicy.apply(*ev.SRPolicy, ev.IsWithdraw)
 	case ev.VPN != nil:
 		a.applyVPN(ev.VPN, ev.IsWithdraw)
 	case ev.Unicast != nil:
@@ -88,9 +107,34 @@ func (a *Applier) Apply(ev bgp.RouteEvent) {
 	}
 }
 
+// ApplyLocalSRPolicy installs or withdraws an operator-defined (origin
+// local) SR Policy through the same state machine as BGP-received ones.
+// It is the entry point for the SRPolicyService CRUD handlers.
+func (a *Applier) ApplyLocalSRPolicy(p bgp.SRPolicy, withdraw bool) {
+	a.srPolicy.apply(p, withdraw)
+}
+
+// ListSRPolicies returns a snapshot of every known SR Policy (local and
+// BGP), for SrPolicyService / vbctl introspection.
+func (a *Applier) ListSRPolicies() []SRPolicySnapshot {
+	return a.srPolicy.list()
+}
+
+// HasLocalSRPolicy reports whether an operator-defined SR Policy exists
+// for {color, endpoint}. SrPolicyDelete uses it to reject removing a
+// policy that is only known via BGP.
+func (a *Applier) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
+	return a.srPolicy.hasLocalCandidate(color, endpoint)
+}
+
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 	owner := bpf.OwnerBGPVPN(a.localASN, vr.RD)
+	rk := bgp.RouteKey{Family: vr.Family, Prefix: vr.Prefix, RD: vr.RD}
 	if withdraw {
+		// Release any SR Policy reference this route held. The withdraw
+		// event carries no color/next-hop, so the reverse index is the only
+		// way to know which policy to unref.
+		a.steer(rk, nil)
 		// Withdraw bypasses the import-RT filter so a route accepted
 		// earlier is always torn down (deleteHeadend is a no-op when the
 		// entry is already absent).
@@ -124,13 +168,67 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 			zap.String("prefix", vr.Prefix), zap.Error(err))
 		return
 	}
+	// Color-based auto-steering: stamp the SR Policy id for {color, next
+	// hop} so the XDP headend composes this route's service SID onto that
+	// policy's transport. The id is reserved even if the SR Policy has not
+	// arrived yet -- the data plane falls back until it does. reserveID only
+	// resolves the id; the steering reference is committed (steer) after the
+	// headend write succeeds, so a failed write never pins the id.
+	var want *policyKey
+	if vr.Color != 0 {
+		endpoint, perr := netip.ParseAddr(vr.NextHop)
+		switch {
+		case perr != nil:
+			a.logger.Warn("colored VPN route has no parseable next hop; not steering",
+				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
+				zap.String("nexthop", vr.NextHop))
+		case !endpoint.Is6():
+			// SR Policy endpoints are always IPv6 (SRv6 over IPv6), so an
+			// IPv4 next hop could never match a policy. Don't steer -- and
+			// don't reserve a policy_id that would never resolve and would
+			// keep a phantom reference alive until withdraw.
+			a.logger.Warn("colored VPN route next hop is not IPv6; not steering",
+				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
+				zap.String("nexthop", vr.NextHop))
+		default:
+			want = &policyKey{color: vr.Color, endpoint: endpoint}
+			entry.PolicyId = a.srPolicy.reserveID(want.color, want.endpoint)
+		}
+	}
 	if err := a.createHeadend(vr.Family, vr.Prefix, entry, owner); err != nil {
 		a.logger.Error("install VPN route",
 			zap.String("prefix", vr.Prefix), zap.Error(err))
 		return
 	}
+	// The entry is installed -- commit the steering reference (or release a
+	// stale one when the route is no longer steered).
+	a.steer(rk, want)
 	a.logger.Info("VPN route installed",
 		zap.String("prefix", vr.Prefix), zap.String("sid", vr.SRv6SID))
+}
+
+// steer reconciles a route's SR Policy reference against its desired target
+// (want == nil means "not steered") and returns the policy_id to stamp (0
+// when unsteered). It diffs against the recorded reference so a re-advertise
+// with an unchanged target neither leaks nor double-counts a reference.
+func (a *Applier) steer(rk bgp.RouteKey, want *policyKey) uint32 {
+	old, had := a.steeredRoutes[rk]
+	switch {
+	case want == nil:
+		if had {
+			a.srPolicy.unref(old.color, old.endpoint)
+			delete(a.steeredRoutes, rk)
+		}
+		return 0
+	case had && old == *want:
+		return a.srPolicy.idOf(want.color, want.endpoint)
+	default:
+		if had {
+			a.srPolicy.unref(old.color, old.endpoint)
+		}
+		a.steeredRoutes[rk] = *want
+		return a.srPolicy.ref(want.color, want.endpoint)
+	}
 }
 
 func (a *Applier) applyUnicast(ur *bgp.UnicastRoute, withdraw bool) {

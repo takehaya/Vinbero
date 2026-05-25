@@ -99,6 +99,7 @@ type EntriesConfig struct {
 	Fdb         EntryCapacityConfig `yaml:"fdb,omitempty"`
 	BdPeer      EntryCapacityConfig `yaml:"bd_peer,omitempty"`
 	VlanTable   EntryCapacityConfig `yaml:"vlan_table,omitempty"`
+	SrPolicy    EntryCapacityConfig `yaml:"sr_policy,omitempty"`
 	MaxSegments int                 `yaml:"max_segments,omitempty" default:"10"`
 }
 

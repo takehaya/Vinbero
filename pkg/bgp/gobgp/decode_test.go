@@ -118,6 +118,34 @@ func TestDecodeRouteTargets_None(t *testing.T) {
 	}
 }
 
+func TestDecodeColor(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		ec := &gobgppkt.PathAttributeExtendedCommunities{
+			Value: []gobgppkt.ExtendedCommunityInterface{gobgppkt.NewColorExtended(100)},
+		}
+		if got := decodeColor([]gobgppkt.PathAttributeInterface{ec}); got != 100 {
+			t.Errorf("decodeColor = %d, want 100", got)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		if got := decodeColor(nil); got != 0 {
+			t.Errorf("decodeColor(nil) = %d, want 0", got)
+		}
+	})
+	t.Run("highest-wins", func(t *testing.T) {
+		ec := &gobgppkt.PathAttributeExtendedCommunities{
+			Value: []gobgppkt.ExtendedCommunityInterface{
+				gobgppkt.NewColorExtended(50),
+				gobgppkt.NewColorExtended(200),
+				gobgppkt.NewColorExtended(100),
+			},
+		}
+		if got := decodeColor([]gobgppkt.PathAttributeInterface{ec}); got != 200 {
+			t.Errorf("decodeColor (multiple) = %d, want highest 200", got)
+		}
+	})
+}
+
 func TestDecodeNextHop(t *testing.T) {
 	t.Run("mp-reach", func(t *testing.T) {
 		nh := netip.MustParseAddr("2001:db8::1")

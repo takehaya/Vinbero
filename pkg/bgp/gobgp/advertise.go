@@ -134,15 +134,21 @@ func encodeVPNPath(r bgp.VPNRoute) (*apiutil.Path, error) {
 		return nil, fmt.Errorf("build VPN NLRI: %w", err)
 	}
 	attrs := []gobgppkt.PathAttributeInterface{gobgppkt.NewPathAttributeOrigin(0)}
-	if len(r.RTs) > 0 {
-		ecs := make([]gobgppkt.ExtendedCommunityInterface, 0, len(r.RTs))
-		for _, rt := range r.RTs {
-			ec, err := gobgppkt.ParseRouteTarget(rt)
-			if err != nil {
-				return nil, fmt.Errorf("parse RT %q: %w", rt, err)
-			}
-			ecs = append(ecs, ec)
+	// Route targets and the Color Extended Community (RFC 9012 §4.3) are both
+	// extended communities; carry them in one attribute. Color != 0 marks the
+	// route for SR Policy steering on the receiving headend.
+	ecs := make([]gobgppkt.ExtendedCommunityInterface, 0, len(r.RTs)+1)
+	for _, rt := range r.RTs {
+		ec, err := gobgppkt.ParseRouteTarget(rt)
+		if err != nil {
+			return nil, fmt.Errorf("parse RT %q: %w", rt, err)
 		}
+		ecs = append(ecs, ec)
+	}
+	if r.Color != 0 {
+		ecs = append(ecs, gobgppkt.NewColorExtended(r.Color))
+	}
+	if len(ecs) > 0 {
 		attrs = append(attrs, gobgppkt.NewPathAttributeExtendedCommunities(ecs))
 	}
 	if r.SRv6SID != "" {

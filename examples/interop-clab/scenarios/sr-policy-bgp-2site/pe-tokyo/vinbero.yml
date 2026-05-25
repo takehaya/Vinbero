@@ -1,0 +1,55 @@
+internal:
+  # eth1 faces the core (SRv6 underlay + iBGP transport); eth2 faces
+  # ce-tokyo. Both carry XDP for the bidirectional L3VPN data plane.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+
+# In-process BGP speaker. pe-tokyo and pe-osaka are both Vinbero PEs in one
+# provider AS (65100) peering iBGP over their loopbacks. One session carries
+# VPNv4/VPNv6 (L3VPN) and SR Policy (SAFI 73): the two edges exchange both
+# their colored VPN routes and their SR Policies directly, with no separate
+# controller.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    listen_port: 179
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "2001:db8:ff::2"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - vpnv4
+        - vpnv6
+        - sr_policy_ipv6
