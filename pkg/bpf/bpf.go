@@ -27,6 +27,7 @@ var pinnedControlMaps = []string{
 	"bd_peer_map",
 	"bd_peer_reverse_map",
 	"dx2v_map",
+	"sr_policy_map", // headend policy_id refs persist here, so pin it alongside the headend maps
 }
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ../../src -I /usr/include/x86_64-linux-gnu
@@ -67,6 +68,7 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 			"bd_peer_map":         entries.BdPeer.Capacity,
 			"bd_peer_reverse_map": entries.BdPeer.Capacity,
 			"dx2v_map":            entries.VlanTable.Capacity,
+			"sr_policy_map":       entries.SrPolicy.Capacity,
 		}
 		for name, size := range mapSizes {
 			if ms, ok := spec.Maps[name]; ok && size > 0 {

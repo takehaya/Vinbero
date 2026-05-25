@@ -56,6 +56,12 @@ func decodeSRPolicy(p *apiutil.Path) *bgp.SRPolicy {
 //     ECMP) are ignored in Phase 1e-c. Only Type B (SRv6 SID) segments are
 //     understood -- Type I/J/K (RFC 9831) carry node/adjacency descriptors
 //     needing a SID/topology DB Vinbero lacks, so they are skipped.
+//
+// Without ECMP there is exactly one usable list, so we deliberately take the
+// first one and do not fall through to later lists when it is malformed: an
+// invalid first list yields empty segments and an ineligible candidate,
+// rather than silently steering onto a lower-preference alternate. Picking
+// the first *valid* list is a weighted-ECMP concern deferred with it.
 func decodeSRPolicyTunnel(attrs []gobgppkt.PathAttributeInterface) (uint32, []netip.Addr) {
 	preference := uint32(bgp.SRPolicyDefaultPreference)
 	var segments []netip.Addr

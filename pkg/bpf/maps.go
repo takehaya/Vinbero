@@ -1404,7 +1404,10 @@ func (m *MapOperations) UpsertSRPolicy(policyID uint32, transport []netip.Addr) 
 	var val BpfSrPolicyValue
 	val.Len = uint8(len(transport))
 	for i, sid := range transport {
-		if !sid.Is6() && !sid.Is4In6() {
+		// Is6 already covers IPv4-mapped IPv6 (Is4In6 implies Is6), so this
+		// single check rejects only genuine IPv4 SIDs, matching the decode
+		// and RPC-boundary validation.
+		if !sid.Is6() {
 			return fmt.Errorf("sr_policy %d: segment %d (%s) is not an IPv6 SID", policyID, i, sid)
 		}
 		val.Segs[i] = sid.As16()
