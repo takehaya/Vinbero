@@ -25,8 +25,8 @@ message VrfBgpBinding {
   string vrf_name = 1;
   repeated string import_rts = 2; // route targets accepted on receive, "65000:100" form
   repeated string export_rts = 3; // route targets attached on advertise
-  string default_locator = 4;     // locator name for this VRF's local SIDs
-  uint32 bd_id = 5;               // bridge domain EVPN routes matching import_rts install into; 0 = L3VPN-only
+  string default_locator = 4; // locator name for this VRF's local SIDs
+  uint32 bd_id = 5; // bridge domain EVPN routes matching import_rts install into; 0 = L3VPN-only
 }
 
 message VrfBgpBindRequest {
