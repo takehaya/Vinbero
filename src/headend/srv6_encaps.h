@@ -28,6 +28,13 @@ static __always_inline struct headend_entry *resolve_sr_policy(
 {
     if (entry->policy_id == 0)
         return entry;
+    // A malformed service SID list (num_segments out of range) must not be
+    // composed: with num_segments==0 the transport alone would form a valid
+    // composed entry whose service SID is missing, and that bypasses the
+    // caller's num_segments check. Return the entry unchanged so do_h_encaps_*
+    // validates the original count and DROPs it.
+    if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
+        return entry;
     __u32 pid = entry->policy_id;
     struct sr_policy_value *pol = bpf_map_lookup_elem(&sr_policy_map, &pid);
     if (!pol)

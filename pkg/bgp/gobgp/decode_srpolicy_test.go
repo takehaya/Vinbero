@@ -109,6 +109,27 @@ func TestDecodeSRPolicy_SkipNonTypeB(t *testing.T) {
 	}
 }
 
+// A non-IPv6 (IPv4) transport SID makes the whole segment list unusable: the
+// candidate must end up with empty segments so it is ineligible rather than
+// installed with a wrong path.
+func TestDecodeSRPolicy_RejectsNonIPv6SID(t *testing.T) {
+	p := srPolicyPath(t, 1, 100, "2001:db8::2",
+		&gobgppkt.TunnelEncapSubTLVSRSegmentList{
+			Segments: []gobgppkt.TunnelEncapSubTLVInterface{
+				typeB(t, "fd00:200:0:1::"),
+				typeB(t, "10.0.0.1"), // IPv4 SID -> invalidates the list
+			},
+		},
+	)
+	got := decodeSRPolicy(p)
+	if got == nil || len(got.Candidates) != 1 {
+		t.Fatalf("decodeSRPolicy = %+v", got)
+	}
+	if segs := got.Candidates[0].SegmentList; len(segs) != 0 {
+		t.Errorf("segments = %v, want empty (ineligible candidate)", segs)
+	}
+}
+
 // Multiple Segment List sub-TLVs (weighted ECMP): only the first wins.
 func TestDecodeSRPolicy_FirstSegmentListWins(t *testing.T) {
 	p := srPolicyPath(t, 1, 100, "2001:db8::2",

@@ -69,14 +69,25 @@ func decodeSRPolicyTunnel(attrs []gobgppkt.PathAttributeInterface) (uint32, []ne
 				continue // first Segment List sub-TLV wins
 			}
 			haveSegments = true
+			valid := true
 			for _, seg := range v.Segments {
 				b, ok := seg.(*gobgppkt.SegmentTypeB)
 				if !ok {
 					continue // Type I/J/K etc.: unsupported, skip
 				}
-				if addr, ok := netip.AddrFromSlice(b.SID); ok {
-					segments = append(segments, addr)
+				addr, ok := netip.AddrFromSlice(b.SID)
+				// A transport SID must be an SRv6 (IPv6) SID. A malformed or
+				// IPv4 SID makes the whole list unusable -- dropping just this
+				// SID would steer along a wrong path, so discard the list and
+				// let the candidate fall out as ineligible (empty segments).
+				if !ok || !addr.Is6() {
+					valid = false
+					break
 				}
+				segments = append(segments, addr)
+			}
+			if !valid {
+				segments = nil
 			}
 		}
 	}
