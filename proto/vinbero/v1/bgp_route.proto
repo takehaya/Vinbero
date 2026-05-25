@@ -114,11 +114,11 @@ message BgpWithdrawSrPolicyResponse {
 message BgpEvpnMac {
   string rd = 1;
   repeated string route_targets = 2;
-  string mac = 3;          // "aa:bb:cc:dd:ee:ff"
+  string mac = 3; // "aa:bb:cc:dd:ee:ff"
   uint32 ethernet_tag = 4;
-  string sid = 5;          // local End.DT2U SID (IPv6)
-  string next_hop = 6;     // IPv6 BGP next hop
-  string esi = 7;          // optional, "00:00:..." 10-octet form; empty = single-homed
+  string sid = 5; // local End.DT2U SID (IPv6)
+  string next_hop = 6; // IPv6 BGP next hop
+  string esi = 7; // optional, "00:00:..." 10-octet form; empty = single-homed
 }
 
 // BgpEvpnMacKey identifies a previously advertised RT2 for withdrawal.
