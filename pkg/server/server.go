@@ -30,6 +30,7 @@ type Server struct {
 	vrfBgpMgr    *vrfbgp.Manager
 	advertiser   bgp.RouteAdvertiser
 	srPolicyAdv  bgp.SRPolicyController
+	evpnAdv      bgp.EVPNController
 	srPolicyCtrl srPolicyController
 	logger       *zap.Logger
 	mux          *http.ServeMux
@@ -46,7 +47,7 @@ type Server struct {
 // enabled, or nil otherwise. Taking the concrete type (not the interface)
 // keeps a typed-nil from leaking into srPolicyCtrl, so the FailedPrecondition
 // guard in SrPolicyServer works.
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, srPolicyApplier *apply.Applier, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, srPolicyApplier *apply.Applier, logger *zap.Logger) *Server {
 	s := &Server{
 		cfg:         cfg,
 		mapOps:      mapOps,
@@ -56,6 +57,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		vrfBgpMgr:   vrfBgpMgr,
 		advertiser:  advertiser,
 		srPolicyAdv: srPolicyAdv,
+		evpnAdv:     evpnAdv,
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}
@@ -95,7 +97,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
 
 	// BgpRoute service (operator-explicit BGP advertise / withdraw).
-	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv)
+	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv, s.evpnAdv)
 	bgpRoutePath, bgpRouteHandler := vinberov1connect.NewBgpRouteServiceHandler(bgpRouteServer)
 	s.mux.Handle(bgpRoutePath, bgpRouteHandler)
 	s.logger.Info("Registered BgpRouteService", zap.String("path", bgpRoutePath))

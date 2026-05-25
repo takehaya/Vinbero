@@ -140,6 +140,60 @@ func bgpCommand() *cli.Command {
 					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpSrPolicyKey", "withdrawn")
 				},
 			},
+			{
+				Name:  "advertise-evpn-mac",
+				Usage: "Advertise a local EVPN RT2 (MAC/IP) with an End.DT2U SID",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
+					&cli.StringFlag{Name: "route-targets", Required: true, Usage: "Export route targets (comma-separated)"},
+					&cli.StringFlag{Name: "mac", Required: true, Usage: "MAC address (aa:bb:cc:dd:ee:ff)"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
+					&cli.StringFlag{Name: "sid", Required: true, Usage: "Local End.DT2U SID (IPv6)"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop (IPv6)"},
+					&cli.StringFlag{Name: "esi", Usage: "Ethernet Segment Identifier (10-octet, optional)"},
+				},
+				Action: func(c *cli.Context) error {
+					m := &v1.BgpEvpnMac{
+						Rd:           c.String("rd"),
+						RouteTargets: csvFlag(c.String("route-targets")),
+						Mac:          c.String("mac"),
+						EthernetTag:  uint32(c.Uint("ethernet-tag")),
+						Sid:          c.String("sid"),
+						NextHop:      c.String("next-hop"),
+						Esi:          c.String("esi"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseEvpnMac(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseEvpnMacRequest{Macs: []*v1.BgpEvpnMac{m}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpEvpnMac", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-evpn-mac",
+				Usage: "Withdraw a previously advertised EVPN RT2",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
+					&cli.StringFlag{Name: "mac", Required: true, Usage: "MAC address"},
+				},
+				Action: func(c *cli.Context) error {
+					k := &v1.BgpEvpnMacKey{
+						Rd:          c.String("rd"),
+						EthernetTag: uint32(c.Uint("ethernet-tag")),
+						Mac:         c.String("mac"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawEvpnMac(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawEvpnMacRequest{Keys: []*v1.BgpEvpnMacKey{k}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnMacKey", "withdrawn")
+				},
+			},
 		},
 	}
 }

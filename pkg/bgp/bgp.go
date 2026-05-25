@@ -249,6 +249,25 @@ const (
 	EVPNRouteTypeEthernetSegment    EVPNRouteType = 4 // RT4: Ethernet Segment -> esi_map (DF election)
 )
 
+// EVPNMACKey identifies a previously-advertised RT2 for withdrawal: the
+// {RD, EthernetTag, MAC} tuple of the NLRI.
+type EVPNMACKey struct {
+	RD          string
+	EthernetTag uint32
+	MAC         string
+}
+
+// EVPNController advertises Vinbero's local EVPN state into BGP (AFI 25 /
+// SAFI 70). Reception is delivered through RouteSubscriber as
+// RouteEvent.EVPN; PushEVPNMac / WithdrawEVPNMac are the advertise direction
+// for RT2 (MAC/IP), surfaced operator-side as `vbctl bgp advertise-evpn-mac`
+// / `withdraw-evpn-mac`. The EVPNRoute argument carries the RD, route
+// targets, MAC, End.DT2U SID, next hop, and optional ESI to encode.
+type EVPNController interface {
+	PushEVPNMac(ctx context.Context, r EVPNRoute) error
+	WithdrawEVPNMac(ctx context.Context, key EVPNMACKey) error
+}
+
 // EVPNRoute is a decoded BGP EVPN NLRI (AFI 25 / SAFI 70). One envelope
 // carries every route type; the fields a type does not use stay zero.
 // The SRv6 service SID (End.DT2U for RT2, End.DT2M for RT3) is decoded

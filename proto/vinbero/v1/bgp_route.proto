@@ -21,6 +21,8 @@ service BgpRouteService {
   rpc BgpWithdraw(BgpWithdrawRequest) returns (BgpWithdrawResponse);
   rpc BgpAdvertiseSrPolicy(BgpAdvertiseSrPolicyRequest) returns (BgpAdvertiseSrPolicyResponse);
   rpc BgpWithdrawSrPolicy(BgpWithdrawSrPolicyRequest) returns (BgpWithdrawSrPolicyResponse);
+  rpc BgpAdvertiseEvpnMac(BgpAdvertiseEvpnMacRequest) returns (BgpAdvertiseEvpnMacResponse);
+  rpc BgpWithdrawEvpnMac(BgpWithdrawEvpnMacRequest) returns (BgpWithdrawEvpnMacResponse);
 }
 
 // BgpVpnRoute is an L3VPN route to advertise.
@@ -103,5 +105,41 @@ message BgpWithdrawSrPolicyRequest {
 }
 message BgpWithdrawSrPolicyResponse {
   repeated BgpSrPolicyKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpEvpnMac is a local EVPN RT2 (MAC/IP) to advertise. The {rd,
+// ethernet_tag, mac} tuple is the NLRI key; the SID is the local End.DT2U
+// service SID and route_targets are the EVI's export RTs.
+message BgpEvpnMac {
+  string rd = 1;
+  repeated string route_targets = 2;
+  string mac = 3;          // "aa:bb:cc:dd:ee:ff"
+  uint32 ethernet_tag = 4;
+  string sid = 5;          // local End.DT2U SID (IPv6)
+  string next_hop = 6;     // IPv6 BGP next hop
+  string esi = 7;          // optional, "00:00:..." 10-octet form; empty = single-homed
+}
+
+// BgpEvpnMacKey identifies a previously advertised RT2 for withdrawal.
+message BgpEvpnMacKey {
+  string rd = 1;
+  uint32 ethernet_tag = 2;
+  string mac = 3;
+}
+
+message BgpAdvertiseEvpnMacRequest {
+  repeated BgpEvpnMac macs = 1;
+}
+message BgpAdvertiseEvpnMacResponse {
+  repeated BgpEvpnMac advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawEvpnMacRequest {
+  repeated BgpEvpnMacKey keys = 1;
+}
+message BgpWithdrawEvpnMacResponse {
+  repeated BgpEvpnMacKey withdrawn = 1;
   repeated OperationError errors = 2;
 }
