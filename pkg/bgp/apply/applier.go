@@ -177,11 +177,20 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 	var want *policyKey
 	if vr.Color != 0 {
 		endpoint, perr := netip.ParseAddr(vr.NextHop)
-		if perr != nil {
+		switch {
+		case perr != nil:
 			a.logger.Warn("colored VPN route has no parseable next hop; not steering",
 				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
 				zap.String("nexthop", vr.NextHop))
-		} else {
+		case !endpoint.Is6():
+			// SR Policy endpoints are always IPv6 (SRv6 over IPv6), so an
+			// IPv4 next hop could never match a policy. Don't steer -- and
+			// don't reserve a policy_id that would never resolve and would
+			// keep a phantom reference alive until withdraw.
+			a.logger.Warn("colored VPN route next hop is not IPv6; not steering",
+				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
+				zap.String("nexthop", vr.NextHop))
+		default:
 			want = &policyKey{color: vr.Color, endpoint: endpoint}
 			entry.PolicyId = a.srPolicy.reserveID(want.color, want.endpoint)
 		}

@@ -271,6 +271,19 @@ func TestApplier_VPNv4ColorStampsPolicyId(t *testing.T) {
 	if e := fh.v4created["10.2.0.0/24"]; e == nil || e.PolicyId != 0 {
 		t.Errorf("colored route with no next hop must not steer; policy_id = %d", e.PolicyId)
 	}
+
+	// An IPv4 next hop could never match an IPv6 SR Policy endpoint, so the
+	// route must not steer and must not reserve a phantom policy_id.
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyVPNv4, VPN: &bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.3.0.0/24", RD: "65000:103",
+		SRv6SID: "fd00:1:1:d::", Color: 200, NextHop: "10.9.9.9",
+	}})
+	if e := fh.v4created["10.3.0.0/24"]; e == nil || e.PolicyId != 0 {
+		t.Errorf("colored route with an IPv4 next hop must not steer; policy_id = %d", e.PolicyId)
+	}
+	if id := a.srPolicy.idOf(200, netip.MustParseAddr("10.9.9.9")); id != 0 {
+		t.Errorf("an IPv4 next hop must not reserve a policy_id; got %d", id)
+	}
 }
 
 // TestApplier_ColorSteerRefcountLifecycle covers the reverse-index refcount

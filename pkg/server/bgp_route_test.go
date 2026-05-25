@@ -145,6 +145,23 @@ func TestBgpRoute_AdvertiseSrPolicy_BadEndpointIsPerItemError(t *testing.T) {
 	}
 }
 
+// A non-IPv6 transport segment is a per-item error, not a silent create that
+// the data-plane write would later refuse.
+func TestBgpRoute_AdvertiseSrPolicy_IPv4SegmentIsPerItemError(t *testing.T) {
+	fp := &fakeSRPolicyAdv{}
+	s := NewBgpRouteServer(nil, fp)
+	resp, err := s.BgpAdvertiseSrPolicy(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{Policies: []*v1.BgpSrPolicy{{
+			Color: 1, Endpoint: "2001:db8::2", Segments: []string{"10.0.0.1"}, NextHop: "2001:db8::1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseSrPolicy: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 || len(fp.pushed) != 0 {
+		t.Errorf("an IPv4 transport segment must be a per-item error and not reach the controller")
+	}
+}
+
 func TestBgpRoute_WithdrawSrPolicy(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
 	s := NewBgpRouteServer(nil, fp)
@@ -160,6 +177,23 @@ func TestBgpRoute_WithdrawSrPolicy(t *testing.T) {
 	}
 	if fp.withdrawn[0].Color != 100 || fp.withdrawn[0].Distinguisher != 1 {
 		t.Errorf("forwarded SR Policy key = %+v", fp.withdrawn[0])
+	}
+}
+
+// An IPv4 withdraw endpoint is a per-item error, matching the advertise/create
+// constraint, rather than a no-op reported as success.
+func TestBgpRoute_WithdrawSrPolicy_IPv4EndpointIsPerItemError(t *testing.T) {
+	fp := &fakeSRPolicyAdv{}
+	s := NewBgpRouteServer(nil, fp)
+	resp, err := s.BgpWithdrawSrPolicy(context.Background(),
+		connect.NewRequest(&v1.BgpWithdrawSrPolicyRequest{Keys: []*v1.BgpSrPolicyKey{{
+			Color: 100, Endpoint: "10.0.0.1", Distinguisher: 1,
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpWithdrawSrPolicy: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 || len(resp.Msg.Withdrawn) != 0 || len(fp.withdrawn) != 0 {
+		t.Errorf("an IPv4 endpoint must be a per-item error, not a no-op success")
 	}
 }
 

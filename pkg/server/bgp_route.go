@@ -159,6 +159,13 @@ func (s *BgpRouteServer) BgpWithdrawSrPolicy(
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: k.GetEndpoint(), Reason: err.Error()})
 			continue
 		}
+		// Match the Advertise/Create constraint: SR Policy endpoints are
+		// IPv6, so an IPv4 endpoint can never identify a real policy. Reject
+		// it instead of reporting a no-op withdraw as success.
+		if !endpoint.Is6() {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: k.GetEndpoint(), Reason: "endpoint must be IPv6"})
+			continue
+		}
 		if err := s.srPolicy.WithdrawPolicy(ctx, bgp.SRPolicyKey{
 			Color:         k.GetColor(),
 			Endpoint:      endpoint,

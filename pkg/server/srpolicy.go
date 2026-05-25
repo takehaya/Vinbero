@@ -162,6 +162,12 @@ func parseSRPolicyEndpointSegments(endpoint string, segs []string) (netip.Addr, 
 		if err != nil {
 			return netip.Addr{}, nil, fmt.Errorf("invalid segment %q: %w", s, err)
 		}
+		// Transport segments are SRv6 SIDs, so they must be IPv6. Rejecting
+		// here returns a per-item RPC error instead of a silent create that
+		// the data-plane write (UpsertSRPolicy) would later refuse.
+		if !sid.Is6() {
+			return netip.Addr{}, nil, fmt.Errorf("transport segment must be IPv6: %s", sid)
+		}
 		out = append(out, sid)
 	}
 	return ep, out, nil
