@@ -33,10 +33,12 @@ type fakeHeadend struct {
 	v6deleted []string
 	createErr error
 
-	fdb       map[fdbKey]*bpf.FdbEntry
-	bdPeers   map[bdPeerKey]*bpf.HeadendEntry
-	bdPeerErr error
-	fdbErr    error
+	fdb          map[fdbKey]*bpf.FdbEntry
+	bdPeers      map[bdPeerKey]*bpf.HeadendEntry
+	bdPeerErr    error
+	fdbErr       error
+	fdbDelErr    error
+	bdPeerDelErr error
 }
 
 func newFakeHeadend() *fakeHeadend {
@@ -57,6 +59,9 @@ func (f *fakeHeadend) CreateFdb(bdID uint16, mac net.HardwareAddr, e *bpf.FdbEnt
 }
 
 func (f *fakeHeadend) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
+	if f.fdbDelErr != nil {
+		return f.fdbDelErr
+	}
 	delete(f.fdb, fdbKey{bdID, mac.String()})
 	return nil
 }
@@ -70,6 +75,9 @@ func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [b
 }
 
 func (f *fakeHeadend) DeleteBdPeer(bdID, index uint16) error {
+	if f.bdPeerDelErr != nil {
+		return f.bdPeerDelErr
+	}
 	delete(f.bdPeers, bdPeerKey{bdID, index})
 	return nil
 }

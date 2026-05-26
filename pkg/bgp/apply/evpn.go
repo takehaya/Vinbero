@@ -208,12 +208,21 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 // caller holds the only goroutine that touches evpnTable.
 func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 	if err := a.fdbBd.DeleteFdb(st.bdID, st.mac); err != nil {
+		// The FDB entry is still in the map. Keep the reverse index so a
+		// later retry can find and remove it; dropping it here would orphan
+		// the map entry and the peer reference it holds.
 		a.logger.Error("withdraw EVPN MAC",
 			zap.String("mac", st.mac.String()), zap.Error(err))
+		return
 	}
 	delete(a.evpn.fdb, fk)
 	if idx, gone := a.evpn.releaseIndex(st.peer); gone {
 		if err := a.fdbBd.DeleteBdPeer(st.bdID, idx); err != nil {
+			// The bd_peer is still in the map but releaseIndex already
+			// dropped it from the ledger. Re-pin the index (refs 0) so a
+			// re-learn of this PE reuses the surviving entry instead of
+			// allocating a duplicate and leaking the slot.
+			a.evpn.peers[st.peer] = &evpnPeerState{index: idx, refs: 0}
 			a.logger.Error("delete EVPN bd_peer",
 				zap.Uint16("bd_id", st.bdID), zap.Uint16("index", idx), zap.Error(err))
 		}

@@ -231,3 +231,53 @@ func TestApplier_EVPNRT2UnknownWithdrawNoop(t *testing.T) {
 		t.Errorf("unknown withdraw must be a no-op; fdb=%v peers=%v", fh.fdb, fh.bdPeers)
 	}
 }
+
+// A DeleteFdb failure on withdraw must keep the reverse index so a retry can
+// still remove the MAC; dropping it would orphan the FDB entry and its peer.
+func TestApplier_EVPNRT2WithdrawFdbDeleteErrorKeepsLedger(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+
+	fh.fdbDelErr = errors.New("boom")
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+	if len(a.evpn.fdb) != 1 || len(fh.bdPeers) != 1 {
+		t.Fatalf("failed DeleteFdb must keep ledger and peer; ledger=%d peers=%v", len(a.evpn.fdb), fh.bdPeers)
+	}
+
+	// A retry once the map op recovers cleans everything up.
+	fh.fdbDelErr = nil
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+	if len(a.evpn.fdb) != 0 || len(fh.bdPeers) != 0 || len(fh.fdb) != 0 {
+		t.Errorf("retry withdraw must clear all state; ledger=%d peers=%v fdb=%v", len(a.evpn.fdb), fh.bdPeers, fh.fdb)
+	}
+}
+
+// A DeleteBdPeer failure on the last withdraw leaves the bd_peer in the map,
+// so the index must be re-pinned: a re-learn of the same PE reuses that
+// surviving entry instead of allocating a duplicate and leaking the slot.
+func TestApplier_EVPNRT2WithdrawBdPeerDeleteErrorRepinsIndex(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+	peer := a.evpn.peers[evpnPeerKey{100, "fd00:2:2:d2::"}]
+	if peer == nil {
+		t.Fatal("peer state missing after install")
+	}
+	idx := peer.index
+
+	fh.bdPeerDelErr = errors.New("boom")
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+	repinned := a.evpn.peers[evpnPeerKey{100, "fd00:2:2:d2::"}]
+	if repinned == nil || repinned.index != idx || repinned.refs != 0 {
+		t.Fatalf("failed DeleteBdPeer must re-pin index %d at refs 0; got %+v", idx, repinned)
+	}
+
+	// Re-learn the PE: it must reuse the surviving index, not allocate anew.
+	fh.bdPeerDelErr = nil
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:02", "fd00:2:2:d2::")})
+	if len(fh.bdPeers) != 1 {
+		t.Errorf("re-learn must reuse the surviving bd_peer; peers=%v", fh.bdPeers)
+	}
+	if got := a.evpn.peers[evpnPeerKey{100, "fd00:2:2:d2::"}]; got == nil || got.index != idx {
+		t.Errorf("re-learn must reuse index %d; got %+v", idx, got)
+	}
+}
