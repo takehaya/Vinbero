@@ -332,19 +332,22 @@ func TestE2E_EVPNRT3ToBdPeer(t *testing.T) {
 		t.Fatalf("PE1 AddPath: %v", err)
 	}
 
-	// The RT3 installs a BUM flood bd_peer at the lowest free index (0 for
-	// this fresh bridge domain) carrying the End.DT2M SID.
+	// The RT3 installs a BUM flood bd_peer carrying the End.DT2M SID. Scan the
+	// BD's slots for that SID rather than assuming an index, since the BPF maps
+	// persist across tests in the process.
+	wantSID := netip.MustParseAddr(evpnDT2MSID).As16()
 	var peer *bpf.HeadendEntry
 	waitFor(t, "RT3 BUM peer installed in bd_peer_map", 15*time.Second, func() bool {
-		p, err := mapOps.GetBdPeer(evpnRT3BDID, 0)
-		if err != nil {
-			return false
+		for i := uint16(0); i < bpf.MaxBumNexthops; i++ {
+			p, err := mapOps.GetBdPeer(evpnRT3BDID, i)
+			if err == nil && p.Segments[0] == wantSID {
+				peer = p
+				return true
+			}
 		}
-		peer = p
-		return true
+		return false
 	})
-	wantSID := netip.MustParseAddr(evpnDT2MSID).As16()
-	if peer.Segments[0] != wantSID {
-		t.Errorf("bd_peer Segments[0] = %v, want End.DT2M SID %v", peer.Segments[0], wantSID)
+	if peer == nil || peer.Segments[0] != wantSID {
+		t.Errorf("no bd_peer carrying the End.DT2M SID %v", wantSID)
 	}
 }

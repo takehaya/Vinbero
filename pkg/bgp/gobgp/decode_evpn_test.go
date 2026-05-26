@@ -116,3 +116,32 @@ func TestDecodeEVPN_RT3(t *testing.T) {
 		t.Errorf("RTs = %v, want [65000:100]", r.RTs)
 	}
 }
+
+// An RT3 with no PMSI Tunnel attribute still decodes: the End.DT2M SID comes
+// from the L2 Service TLV and the transposition label defaults to 0. This is
+// untrusted wire input (a peer may omit or vary the PMSI), so it must not panic
+// or drop the SID.
+func TestDecodeEVPN_RT3NoPmsi(t *testing.T) {
+	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
+	nlri := &gobgppkt.EVPNNLRI{
+		RouteType:     gobgppkt.EVPN_INCLUSIVE_MULTICAST_ETHERNET_TAG,
+		RouteTypeData: &gobgppkt.EVPNMulticastEthernetTagRoute{RD: rd, ETag: 0},
+	}
+	rt, _ := gobgppkt.ParseExtendedCommunity(gobgppkt.EC_SUBTYPE_ROUTE_TARGET, "65000:100")
+	attrs := []gobgppkt.PathAttributeInterface{
+		gobgppkt.NewPathAttributeExtendedCommunities([]gobgppkt.ExtendedCommunityInterface{rt}),
+		gobgppkt.NewPathAttributePrefixSID(
+			gobgppkt.NewSRv6ServiceTLV(
+				gobgppkt.TLVTypeSRv6L2Service,
+				gobgppkt.NewSRv6InformationSubTLV(netip.MustParseAddr("fd00:2:2:24::"), gobgppkt.END_DT2M),
+			),
+		),
+	}
+	r := decodeEVPNRoute(&apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri, Attrs: attrs})
+	if r == nil || r.Type != bgp.EVPNRouteTypeInclusiveMulticast {
+		t.Fatalf("RT3 without PMSI must still decode as Inclusive Multicast; got %+v", r)
+	}
+	if r.SRv6SID != "fd00:2:2:24::" {
+		t.Errorf("SRv6SID = %q, want fd00:2:2:24:: from the L2 Service TLV", r.SRv6SID)
+	}
+}

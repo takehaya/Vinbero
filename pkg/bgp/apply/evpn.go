@@ -306,6 +306,13 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 			zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 		return
 	}
+	// CreateBdPeer also writes bd_peer_reverse_map keyed by {bd_id, local
+	// SrcAddr}. The RT2 unicast peer in this BD shares that key (same local
+	// encap source), so the two reverse entries collide and withdrawing one
+	// clears the other's. This is inert under single-homing: the reverse map is
+	// keyed by the local src rather than the sender's outer_src, so RX
+	// peer-resolution / split-horizon do not consult it correctly today either.
+	// E3 (multi-homing) re-keys the reverse map by remote src and resolves both.
 	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI); err != nil {
 		a.logger.Error("install EVPN BUM bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
@@ -328,10 +335,11 @@ func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) {
 }
 
 // buildL2HeadendEntry assembles an H.Encaps.L2 entry that encapsulates the
-// matched L2 frame toward a remote PE's End.DT2U SID. SrcAddr is the local
-// encap source (the outer IPv6 source on the wire); the destination is the
-// SID, taken from Segments[0] by the data plane, so DstAddr is left unset to
-// match the server's L2 peer construction.
+// matched L2 frame toward a remote PE's L2 service SID -- End.DT2U for an RT2
+// unicast peer, End.DT2M for an RT3 BUM flood peer. SrcAddr is the local encap
+// source (the outer IPv6 source on the wire); the destination is the SID, taken
+// from Segments[0] by the data plane, so DstAddr is left unset to match the
+// server's L2 peer construction.
 func (a *Applier) buildL2HeadendEntry(sid string, bdID uint16) (*bpf.HeadendEntry, error) {
 	src, err := a.encapSource()
 	if err != nil {
@@ -339,7 +347,7 @@ func (a *Applier) buildL2HeadendEntry(sid string, bdID uint16) (*bpf.HeadendEntr
 	}
 	segments, numSegments, err := bpf.ParseSegments([]string{sid})
 	if err != nil {
-		return nil, fmt.Errorf("parse End.DT2U SID %q: %w", sid, err)
+		return nil, fmt.Errorf("parse L2 service SID %q: %w", sid, err)
 	}
 	return &bpf.HeadendEntry{
 		Mode:        uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),

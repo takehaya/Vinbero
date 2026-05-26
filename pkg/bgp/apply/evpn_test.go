@@ -355,3 +355,51 @@ func TestApplier_EVPNRT3InvalidSIDOrNoBindingSkipped(t *testing.T) {
 		t.Errorf("unmatched RT must be dropped; peers=%v", fh.bdPeers)
 	}
 }
+
+// A DeleteBdPeer failure on RT3 withdraw must keep the reverse index so a retry
+// can still remove the flood peer (mirrors the RT2 withdraw error path).
+func TestApplier_EVPNRT3WithdrawDeleteErrorKeepsLedger(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:24::")})
+
+	fh.bdPeerDelErr = errors.New("boom")
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt3("fd00:2:2:24::")})
+	if len(a.evpn.mcast) != 1 || len(fh.bdPeers) != 1 {
+		t.Fatalf("failed DeleteBdPeer must keep ledger and peer; mcast=%d peers=%v", len(a.evpn.mcast), fh.bdPeers)
+	}
+
+	fh.bdPeerDelErr = nil
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt3("fd00:2:2:24::")})
+	if len(a.evpn.mcast) != 0 || len(fh.bdPeers) != 0 {
+		t.Errorf("retry withdraw must clear all state; mcast=%d peers=%v", len(a.evpn.mcast), fh.bdPeers)
+	}
+}
+
+// An RT3 whose SID moves (same RD/EthernetTag, new End.DT2M SID) tears the old
+// flood peer down and installs the new one, leaving exactly one bd_peer.
+func TestApplier_EVPNRT3SidMove(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:24::")})
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:3:3:24::")})
+	if len(fh.bdPeers) != 1 {
+		t.Fatalf("SID move must leave exactly one BUM bd_peer; got %d", len(fh.bdPeers))
+	}
+	for _, p := range fh.bdPeers {
+		if p.Segments[0] != netip.MustParseAddr("fd00:3:3:24::").As16() {
+			t.Errorf("BUM bd_peer Segments[0] = %v, want the new End.DT2M SID", p.Segments[0])
+		}
+	}
+}
+
+// When the bridge domain's bd_peer slots are exhausted, an RT3 installs nothing
+// and records no mcast ledger entry.
+func TestApplier_EVPNRT3BdFull(t *testing.T) {
+	a, fh := evpnApplier(t)
+	for i := uint16(0); i < bpf.MaxBumNexthops; i++ {
+		fh.bdPeers[bdPeerKey{100, i}] = &bpf.HeadendEntry{}
+	}
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:24::")})
+	if _, ok := a.evpn.mcast[evpnMcastKey{rd: "65000:100", etag: 0}]; ok {
+		t.Error("BD-full must not record an RT3 mcast ledger entry")
+	}
+}
