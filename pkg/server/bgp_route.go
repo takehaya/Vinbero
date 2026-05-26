@@ -237,9 +237,69 @@ func (s *BgpRouteServer) BgpWithdrawEvpnMac(
 	return connect.NewResponse(resp), nil
 }
 
+func (s *BgpRouteServer) BgpAdvertiseEvpnImet(
+	ctx context.Context,
+	req *connect.Request[v1.BgpAdvertiseEvpnImetRequest],
+) (*connect.Response[v1.BgpAdvertiseEvpnImetResponse], error) {
+	if s.evpn == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errBGPDisabled)
+	}
+	resp := &v1.BgpAdvertiseEvpnImetResponse{
+		Advertised: make([]*v1.BgpEvpnImet, 0),
+		Errors:     make([]*v1.OperationError, 0),
+	}
+	for _, m := range req.Msg.Imets {
+		// SID / next-hop / RD are validated in the encoder, so a bad request
+		// surfaces as a per-item error rather than a controller failure.
+		route := bgp.EVPNRoute{
+			Type:        bgp.EVPNRouteTypeInclusiveMulticast,
+			RD:          m.GetRd(),
+			RTs:         m.GetRouteTargets(),
+			EthernetTag: m.GetEthernetTag(),
+			SRv6SID:     m.GetSid(),
+			NextHop:     m.GetNextHop(),
+		}
+		if err := s.evpn.PushEVPNInclusiveMulticast(ctx, route); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnImetTrigger(m.GetRd(), m.GetEthernetTag()), Reason: err.Error()})
+			continue
+		}
+		resp.Advertised = append(resp.Advertised, m)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *BgpRouteServer) BgpWithdrawEvpnImet(
+	ctx context.Context,
+	req *connect.Request[v1.BgpWithdrawEvpnImetRequest],
+) (*connect.Response[v1.BgpWithdrawEvpnImetResponse], error) {
+	if s.evpn == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errBGPDisabled)
+	}
+	resp := &v1.BgpWithdrawEvpnImetResponse{
+		Withdrawn: make([]*v1.BgpEvpnImetKey, 0),
+		Errors:    make([]*v1.OperationError, 0),
+	}
+	for _, k := range req.Msg.Keys {
+		if err := s.evpn.WithdrawEVPNInclusiveMulticast(ctx, bgp.EVPNMcastKey{
+			RD:          k.GetRd(),
+			EthernetTag: k.GetEthernetTag(),
+		}); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnImetTrigger(k.GetRd(), k.GetEthernetTag()), Reason: err.Error()})
+			continue
+		}
+		resp.Withdrawn = append(resp.Withdrawn, k)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // evpnMacTrigger names the RT2 identity for an OperationError.
 func evpnMacTrigger(rd string, etag uint32, mac string) string {
 	return fmt.Sprintf("rd=%s etag=%d mac=%s", rd, etag, mac)
+}
+
+// evpnImetTrigger names the RT3 identity for an OperationError.
+func evpnImetTrigger(rd string, etag uint32) string {
+	return fmt.Sprintf("rd=%s etag=%d", rd, etag)
 }
 
 // protoToAdvertiseEvpnMac validates a BgpEvpnMac advertise request and

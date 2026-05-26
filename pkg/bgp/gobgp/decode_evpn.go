@@ -8,9 +8,9 @@ import (
 )
 
 // decodeEVPNRoute builds Vinbero's EVPNRoute view of a received EVPN NLRI
-// (AFI 25 / SAFI 70). Only RT2 (MAC/IP) is decoded in Phase E1; other
-// route types return nil, which the Applier treats as a no-op until their
-// phase lands (RT3 in E2, RT4 in E3).
+// (AFI 25 / SAFI 70). RT2 (MAC/IP) and RT3 (Inclusive Multicast) are decoded;
+// other route types return nil, which the Applier treats as a no-op until
+// their phase lands (RT4 in E3).
 func decodeEVPNRoute(p *apiutil.Path) *bgp.EVPNRoute {
 	nlri, ok := p.Nlri.(*gobgppkt.EVPNNLRI)
 	if !ok {
@@ -19,6 +19,8 @@ func decodeEVPNRoute(p *apiutil.Path) *bgp.EVPNRoute {
 	switch rt := nlri.RouteTypeData.(type) {
 	case *gobgppkt.EVPNMacIPAdvertisementRoute:
 		return decodeEVPNMacIP(p, rt)
+	case *gobgppkt.EVPNMulticastEthernetTagRoute:
+		return decodeEVPNMulticast(p, rt)
 	default:
 		return nil
 	}
@@ -51,6 +53,37 @@ func decodeEVPNMacIP(p *apiutil.Path, rt *gobgppkt.EVPNMacIPAdvertisementRoute) 
 	}
 	r.SRv6SID = decodeSRv6SID(p.Attrs, label)
 	return r
+}
+
+// decodeEVPNMulticast decodes an RT3 Inclusive Multicast Ethernet Tag route
+// (RFC 7432 §7.3). The End.DT2M flood SID rides in the Prefix-SID L2 Service
+// TLV (RFC 9252 §6.3); any transposition offset is carried in the PMSI Tunnel
+// label rather than an NLRI label. RD / Ethernet Tag identify the flood peer;
+// the originating router IP arrives as the next hop.
+func decodeEVPNMulticast(p *apiutil.Path, rt *gobgppkt.EVPNMulticastEthernetTagRoute) *bgp.EVPNRoute {
+	r := &bgp.EVPNRoute{
+		Type:        bgp.EVPNRouteTypeInclusiveMulticast,
+		EthernetTag: rt.ETag,
+		RTs:         decodeRouteTargets(p.Attrs),
+		NextHop:     decodeNextHop(p.Attrs),
+	}
+	if rt.RD != nil {
+		r.RD = rt.RD.String()
+	}
+	r.SRv6SID = decodeSRv6SID(p.Attrs, pmsiLabel(p.Attrs))
+	return r
+}
+
+// pmsiLabel returns the transposition label from the PMSI Tunnel attribute
+// (Ingress Replication), or 0 when absent. RFC 9252 §6.3 places the RT3
+// transposition offset here, mirroring RT2's NLRI label.
+func pmsiLabel(attrs []gobgppkt.PathAttributeInterface) uint32 {
+	for _, a := range attrs {
+		if p, ok := a.(*gobgppkt.PathAttributePmsiTunnel); ok {
+			return p.Label
+		}
+	}
+	return 0
 }
 
 // esiToArray renders a gobgp ESI as the RFC 7432 10-byte identifier:

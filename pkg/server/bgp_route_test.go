@@ -71,9 +71,11 @@ func (f *fakeSRPolicyAdv) WithdrawPolicy(_ context.Context, k bgp.SRPolicyKey) e
 
 // fakeEvpnAdv records EVPNController calls instead of touching gobgp.
 type fakeEvpnAdv struct {
-	pushed    []bgp.EVPNRoute
-	withdrawn []bgp.EVPNMACKey
-	err       error
+	pushed         []bgp.EVPNRoute
+	withdrawn      []bgp.EVPNMACKey
+	mcastPushed    []bgp.EVPNRoute
+	mcastWithdrawn []bgp.EVPNMcastKey
+	err            error
 }
 
 var _ bgp.EVPNController = (*fakeEvpnAdv)(nil)
@@ -91,6 +93,22 @@ func (f *fakeEvpnAdv) WithdrawEVPNMac(_ context.Context, k bgp.EVPNMACKey) error
 		return f.err
 	}
 	f.withdrawn = append(f.withdrawn, k)
+	return nil
+}
+
+func (f *fakeEvpnAdv) PushEVPNInclusiveMulticast(_ context.Context, r bgp.EVPNRoute) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.mcastPushed = append(f.mcastPushed, r)
+	return nil
+}
+
+func (f *fakeEvpnAdv) WithdrawEVPNInclusiveMulticast(_ context.Context, k bgp.EVPNMcastKey) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.mcastWithdrawn = append(f.mcastWithdrawn, k)
 	return nil
 }
 
@@ -152,6 +170,43 @@ func TestBgpRoute_WithdrawEvpnMac(t *testing.T) {
 	}
 	if fe.withdrawn[0].MAC != "aa:bb:cc:00:00:01" {
 		t.Errorf("forwarded key = %+v", fe.withdrawn[0])
+	}
+}
+
+func TestBgpRoute_AdvertiseEvpnImet(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpAdvertiseEvpnImet(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnImetRequest{Imets: []*v1.BgpEvpnImet{{
+			Rd: "65000:100", RouteTargets: []string{"65000:100"},
+			Sid: "fd00:200:0:24::", NextHop: "2001:db8::1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseEvpnImet: %v", err)
+	}
+	if len(resp.Msg.Advertised) != 1 || len(fe.mcastPushed) != 1 {
+		t.Fatalf("advertised=%d pushed=%d, want 1/1", len(resp.Msg.Advertised), len(fe.mcastPushed))
+	}
+	if fe.mcastPushed[0].Type != bgp.EVPNRouteTypeInclusiveMulticast || fe.mcastPushed[0].SRv6SID != "fd00:200:0:24::" {
+		t.Errorf("forwarded RT3 route = %+v", fe.mcastPushed[0])
+	}
+}
+
+func TestBgpRoute_WithdrawEvpnImet(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpWithdrawEvpnImet(context.Background(),
+		connect.NewRequest(&v1.BgpWithdrawEvpnImetRequest{Keys: []*v1.BgpEvpnImetKey{{
+			Rd: "65000:100", EthernetTag: 7,
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpWithdrawEvpnImet: %v", err)
+	}
+	if len(resp.Msg.Withdrawn) != 1 || len(fe.mcastWithdrawn) != 1 {
+		t.Fatalf("withdrawn=%d fake=%d, want 1/1", len(resp.Msg.Withdrawn), len(fe.mcastWithdrawn))
+	}
+	if fe.mcastWithdrawn[0].RD != "65000:100" || fe.mcastWithdrawn[0].EthernetTag != 7 {
+		t.Errorf("forwarded key = %+v", fe.mcastWithdrawn[0])
 	}
 }
 

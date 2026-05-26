@@ -281,3 +281,77 @@ func TestApplier_EVPNRT2WithdrawBdPeerDeleteErrorRepinsIndex(t *testing.T) {
 		t.Errorf("re-learn must reuse index %d; got %+v", idx, got)
 	}
 }
+
+// rt3 builds an RT3 Inclusive Multicast route for bd 100 with a given
+// End.DT2M flood SID.
+func rt3(sid string) *bgp.EVPNRoute {
+	return &bgp.EVPNRoute{
+		Type:    bgp.EVPNRouteTypeInclusiveMulticast,
+		RD:      "65000:100",
+		RTs:     []string{"65000:100"},
+		SRv6SID: sid,
+	}
+}
+
+// An RT3 installs a BUM flood bd_peer (End.DT2M) without touching the FDB.
+func TestApplier_EVPNRT3Install(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:24::")})
+
+	if len(fh.bdPeers) != 1 {
+		t.Fatalf("RT3 must install one BUM bd_peer; got %d", len(fh.bdPeers))
+	}
+	if len(fh.fdb) != 0 {
+		t.Errorf("RT3 must not write FDB entries; fdb=%v", fh.fdb)
+	}
+	for _, p := range fh.bdPeers {
+		if p.Mode != uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2) {
+			t.Errorf("RT3 bd_peer mode = %d, want H.Encaps.L2", p.Mode)
+		}
+		if p.Segments[0] != netip.MustParseAddr("fd00:2:2:24::").As16() {
+			t.Errorf("RT3 bd_peer Segments[0] = %v, want End.DT2M SID", p.Segments[0])
+		}
+	}
+}
+
+// Re-advertising the same RT3 is idempotent; a withdraw removes the peer.
+func TestApplier_EVPNRT3ReadvertiseAndWithdraw(t *testing.T) {
+	a, fh := evpnApplier(t)
+	for i := 0; i < 3; i++ {
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:24::")})
+	}
+	if len(fh.bdPeers) != 1 {
+		t.Fatalf("re-advertise must be idempotent; peers=%d", len(fh.bdPeers))
+	}
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt3("fd00:2:2:24::")})
+	if len(fh.bdPeers) != 0 {
+		t.Errorf("withdraw must remove the BUM bd_peer; peers=%v", fh.bdPeers)
+	}
+}
+
+// RT2 (unicast, End.DT2U) and RT3 (BUM, End.DT2M) for the same BD coexist as
+// two distinct bd_peers; the data-plane flood loop sweeps both (Step 3 will
+// add a flood-exclude flag to drop the unicast peer from the flood).
+func TestApplier_EVPNRT2AndRT3Coexist(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:24::")})
+	if len(fh.bdPeers) != 2 {
+		t.Fatalf("RT2 + RT3 must install two distinct bd_peers; got %d", len(fh.bdPeers))
+	}
+}
+
+// An RT3 with an unusable SID, or whose RTs match no binding, installs nothing.
+func TestApplier_EVPNRT3InvalidSIDOrNoBindingSkipped(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("::")})
+	if len(fh.bdPeers) != 0 {
+		t.Errorf("unspecified SID must be skipped; peers=%v", fh.bdPeers)
+	}
+	r := rt3("fd00:2:2:24::")
+	r.RTs = []string{"65000:999"}
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: r})
+	if len(fh.bdPeers) != 0 {
+		t.Errorf("unmatched RT must be dropped; peers=%v", fh.bdPeers)
+	}
+}

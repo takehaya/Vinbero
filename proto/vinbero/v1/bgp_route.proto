@@ -23,6 +23,8 @@ service BgpRouteService {
   rpc BgpWithdrawSrPolicy(BgpWithdrawSrPolicyRequest) returns (BgpWithdrawSrPolicyResponse);
   rpc BgpAdvertiseEvpnMac(BgpAdvertiseEvpnMacRequest) returns (BgpAdvertiseEvpnMacResponse);
   rpc BgpWithdrawEvpnMac(BgpWithdrawEvpnMacRequest) returns (BgpWithdrawEvpnMacResponse);
+  rpc BgpAdvertiseEvpnImet(BgpAdvertiseEvpnImetRequest) returns (BgpAdvertiseEvpnImetResponse);
+  rpc BgpWithdrawEvpnImet(BgpWithdrawEvpnImetRequest) returns (BgpWithdrawEvpnImetResponse);
 }
 
 // BgpVpnRoute is an L3VPN route to advertise.
@@ -141,5 +143,38 @@ message BgpWithdrawEvpnMacRequest {
 }
 message BgpWithdrawEvpnMacResponse {
   repeated BgpEvpnMacKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpEvpnImet is a local EVPN RT3 (Inclusive Multicast) to advertise. The
+// {rd, ethernet_tag} tuple is the NLRI key; the SID is the local End.DT2M
+// flood service SID and route_targets are the EVI's export RTs.
+message BgpEvpnImet {
+  string rd = 1;
+  repeated string route_targets = 2;
+  uint32 ethernet_tag = 3;
+  string sid = 4; // local End.DT2M SID (IPv6)
+  string next_hop = 5; // IPv6 BGP next hop / originating router
+}
+
+// BgpEvpnImetKey identifies a previously advertised RT3 for withdrawal.
+message BgpEvpnImetKey {
+  string rd = 1;
+  uint32 ethernet_tag = 2;
+}
+
+message BgpAdvertiseEvpnImetRequest {
+  repeated BgpEvpnImet imets = 1;
+}
+message BgpAdvertiseEvpnImetResponse {
+  repeated BgpEvpnImet advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawEvpnImetRequest {
+  repeated BgpEvpnImetKey keys = 1;
+}
+message BgpWithdrawEvpnImetResponse {
+  repeated BgpEvpnImetKey withdrawn = 1;
   repeated OperationError errors = 2;
 }

@@ -194,6 +194,54 @@ func bgpCommand() *cli.Command {
 					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnMacKey", "withdrawn")
 				},
 			},
+			{
+				Name:  "advertise-evpn-imet",
+				Usage: "Advertise a local EVPN RT3 (Inclusive Multicast) with an End.DT2M SID",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
+					&cli.StringFlag{Name: "route-targets", Required: true, Usage: "Export route targets (comma-separated)"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
+					&cli.StringFlag{Name: "sid", Required: true, Usage: "Local End.DT2M flood SID (IPv6)"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop / originating router (IPv6)"},
+				},
+				Action: func(c *cli.Context) error {
+					m := &v1.BgpEvpnImet{
+						Rd:           c.String("rd"),
+						RouteTargets: csvFlag(c.String("route-targets")),
+						EthernetTag:  uint32(c.Uint("ethernet-tag")),
+						Sid:          c.String("sid"),
+						NextHop:      c.String("next-hop"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseEvpnImet(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseEvpnImetRequest{Imets: []*v1.BgpEvpnImet{m}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpEvpnImet", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-evpn-imet",
+				Usage: "Withdraw a previously advertised EVPN RT3",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
+				},
+				Action: func(c *cli.Context) error {
+					k := &v1.BgpEvpnImetKey{
+						Rd:          c.String("rd"),
+						EthernetTag: uint32(c.Uint("ethernet-tag")),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawEvpnImet(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawEvpnImetRequest{Keys: []*v1.BgpEvpnImetKey{k}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnImetKey", "withdrawn")
+				},
+			},
 		},
 	}
 }

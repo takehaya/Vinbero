@@ -53,18 +53,37 @@ type evpnFdbState struct {
 	peer evpnPeerKey
 }
 
+// evpnMcastKey is the stable identity of an RT3 Inclusive Multicast NLRI
+// ({RD, EthernetTag}). A withdrawal -- whose route targets may be absent --
+// recovers the bridge domain and bd_peer index from this reverse index.
+type evpnMcastKey struct {
+	rd   string
+	etag uint32
+}
+
+// evpnMcastState records the BUM flood bd_peer an RT3 installed. Unlike a
+// unicast peer it carries no reference count: one RT3 per remote PE maps to
+// exactly one flood bd_peer.
+type evpnMcastState struct {
+	bdID  uint16
+	index uint16
+	sid   string
+}
+
 // evpnTable holds the EVPN applier's in-memory bookkeeping. It is touched
 // only from the single GoBGP RouteHandler goroutine (like steeredRoutes),
 // so it needs no locking.
 type evpnTable struct {
 	peers map[evpnPeerKey]*evpnPeerState
 	fdb   map[evpnFdbKey]evpnFdbState
+	mcast map[evpnMcastKey]evpnMcastState
 }
 
 func newEVPNTable() *evpnTable {
 	return &evpnTable{
 		peers: make(map[evpnPeerKey]*evpnPeerState),
 		fdb:   make(map[evpnFdbKey]evpnFdbState),
+		mcast: make(map[evpnMcastKey]evpnMcastState),
 	}
 }
 
@@ -105,9 +124,10 @@ func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
 	switch r.Type {
 	case bgp.EVPNRouteTypeMACIP:
 		a.applyEVPNMacIP(r, withdraw)
+	case bgp.EVPNRouteTypeInclusiveMulticast:
+		a.applyEVPNInclusiveMulticast(r, withdraw)
 	default:
-		// RT3 (Inclusive Multicast) and RT4 (Ethernet Segment) arrive in
-		// later phases; ignore them until then.
+		// RT4 (Ethernet Segment) arrives in a later phase; ignore until then.
 	}
 }
 
@@ -227,6 +247,84 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 				zap.Uint16("bd_id", st.bdID), zap.Uint16("index", idx), zap.Error(err))
 		}
 	}
+}
+
+// applyEVPNInclusiveMulticast installs (or withdraws) an RT3 Inclusive
+// Multicast route as a BUM flood bd_peer toward the advertising PE's End.DT2M
+// SID. The data-plane flood loop (tc_dispatch_bum_clones) replicates BUM
+// frames to every bd_peer in the bridge domain, so adding the End.DT2M entry
+// here is all the control plane has to do. One RT3 per PE maps to one
+// flood bd_peer; no MAC/refcount bookkeeping is needed.
+func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
+	mk := evpnMcastKey{rd: r.RD, etag: r.EthernetTag}
+
+	if withdraw {
+		// A withdrawal may carry no route targets, so the bridge domain and
+		// bd_peer index come from the reverse index. An unknown withdraw is a
+		// no-op.
+		if st, ok := a.evpn.mcast[mk]; ok {
+			a.withdrawEVPNMcast(mk, st)
+		}
+		return
+	}
+
+	bdID, ok := a.vrfBindings.MatchImportBD(r.RTs)
+	if !ok {
+		a.logger.Warn("EVPN RT3 matches no bridge-domain binding; dropping",
+			zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
+		return
+	}
+	if r.SRv6SID == "" {
+		a.logger.Warn("EVPN RT3 has no SRv6 SID; skipping", zap.String("rd", r.RD))
+		return
+	}
+	// The End.DT2M SID must be a usable SRv6 (IPv6) SID, same guard as RT2.
+	if sid, err := netip.ParseAddr(r.SRv6SID); err != nil || !sid.Is6() || sid.Is4In6() || sid.IsUnspecified() {
+		a.logger.Warn("EVPN RT3 SID is not a usable IPv6 SID; skipping",
+			zap.String("rd", r.RD), zap.String("sid", r.SRv6SID))
+		return
+	}
+
+	// Re-advertise: if nothing changed, leave the installed bd_peer untouched.
+	// If the BD or SID moved, tear the old flood peer down before rebuilding.
+	if prev, ok := a.evpn.mcast[mk]; ok {
+		if prev.bdID == bdID && prev.sid == r.SRv6SID {
+			return
+		}
+		a.withdrawEVPNMcast(mk, prev)
+	}
+
+	entry, err := a.buildL2HeadendEntry(r.SRv6SID, bdID)
+	if err != nil {
+		a.logger.Error("build EVPN RT3 headend entry",
+			zap.String("rd", r.RD), zap.Error(err))
+		return
+	}
+	idx := a.fdbBd.FindFreeBdPeerIndex(bdID)
+	if idx >= bpf.MaxBumNexthops {
+		a.logger.Error("EVPN bridge domain is full; cannot add BUM peer",
+			zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
+		return
+	}
+	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI); err != nil {
+		a.logger.Error("install EVPN BUM bd_peer",
+			zap.Uint16("bd_id", bdID), zap.Error(err))
+		return
+	}
+	a.evpn.mcast[mk] = evpnMcastState{bdID: bdID, index: idx, sid: r.SRv6SID}
+	a.logger.Info("EVPN inclusive multicast (BUM) peer installed",
+		zap.String("rd", r.RD), zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
+}
+
+// withdrawEVPNMcast removes the BUM flood bd_peer recorded for mk. The ledger
+// entry is kept if the map delete fails so a retry can still remove it.
+func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) {
+	if err := a.fdbBd.DeleteBdPeer(st.bdID, st.index); err != nil {
+		a.logger.Error("delete EVPN BUM bd_peer",
+			zap.Uint16("bd_id", st.bdID), zap.Uint16("index", st.index), zap.Error(err))
+		return
+	}
+	delete(a.evpn.mcast, mk)
 }
 
 // buildL2HeadendEntry assembles an H.Encaps.L2 entry that encapsulates the

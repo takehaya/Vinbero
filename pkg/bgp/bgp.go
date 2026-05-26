@@ -257,6 +257,13 @@ type EVPNMACKey struct {
 	MAC         string
 }
 
+// EVPNMcastKey identifies a previously-advertised RT3 (Inclusive Multicast)
+// for withdrawal: the {RD, EthernetTag} tuple of the NLRI.
+type EVPNMcastKey struct {
+	RD          string
+	EthernetTag uint32
+}
+
 // EVPNController advertises Vinbero's local EVPN state into BGP (AFI 25 /
 // SAFI 70). Reception is delivered through RouteSubscriber as
 // RouteEvent.EVPN; PushEVPNMac / WithdrawEVPNMac are the advertise direction
@@ -266,6 +273,11 @@ type EVPNMACKey struct {
 type EVPNController interface {
 	PushEVPNMac(ctx context.Context, r EVPNRoute) error
 	WithdrawEVPNMac(ctx context.Context, key EVPNMACKey) error
+	// PushEVPNInclusiveMulticast / WithdrawEVPNInclusiveMulticast are the
+	// advertise direction for RT3 (Inclusive Multicast), carrying the local
+	// End.DT2M flood SID so remote PEs flood BUM traffic toward this node.
+	PushEVPNInclusiveMulticast(ctx context.Context, r EVPNRoute) error
+	WithdrawEVPNInclusiveMulticast(ctx context.Context, key EVPNMcastKey) error
 }
 
 // EVPNRoute is a decoded BGP EVPN NLRI (AFI 25 / SAFI 70). One envelope
