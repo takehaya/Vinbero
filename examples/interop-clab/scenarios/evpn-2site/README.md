@@ -4,11 +4,13 @@
 
 A [containerlab](https://containerlab.dev/) scenario where two Vinbero PEs run
 an SRv6 EVPN L2VPN (ELAN). Each PE advertises its local customer MAC as a BGP
-EVPN RT2 (MAC/IP Advertisement, AFI 25 / SAFI 70) carrying its own End.DT2U
-service SID, and installs the peer's RT2 to forward unicast L2 frames toward
-it. The two customer hosts sit in one subnet and are bridged at L2 across the
-SRv6 core — a stretched broadcast domain signalled entirely by BGP EVPN, with
-no separate controller and no FRR.
+EVPN RT2 (MAC/IP, AFI 25 / SAFI 70) carrying its own End.DT2U service SID, and
+its BUM flood endpoint as an EVPN RT3 (Inclusive Multicast) carrying an
+End.DT2M SID. It installs the peer's RT2 to forward unicast L2 frames and the
+peer's RT3 to flood broadcast / unknown-unicast toward it. The two customer
+hosts sit in one subnet and are bridged at L2 across the SRv6 core — a stretched
+broadcast domain signalled entirely by BGP EVPN, with no separate controller
+and no FRR.
 
 ## Topology
 
@@ -33,22 +35,25 @@ header.
 
 ## What it proves
 
-1. **MAC exchange over BGP EVPN (RT2).** Each PE learns the peer's customer
-   MAC over BGP — the RT2 appears in `fdb_map` as a remote entry pointing at a
-   `bd_peer` whose segment is the peer's End.DT2U SID. The SAFI 70 session and
-   the RT2 / SRv6 L2 Service TLV decode both work.
+1. **MAC + flood-endpoint exchange over BGP EVPN.** Each PE learns the peer's
+   customer MAC over RT2 (a `fdb_map` remote entry pointing at a `bd_peer` whose
+   segment is the peer's End.DT2U SID) and the peer's BUM flood endpoint over
+   RT3 (a second `bd_peer` toward the peer's End.DT2M SID). The SAFI 70 session
+   and the RT2 / RT3 SRv6 L2 Service TLV + PMSI decode all work.
 2. **Data plane, both directions.** `ce-tokyo` ⇄ `ce-osaka` ping over the
    stretched L2 domain, with the frame H.Encaps.L2'd toward the peer's
    End.DT2U SID (the outer DA captured on the core link) and decapped into the
    far bridge — BGP-learned RT2 actually drives the L2 forwarding path.
+3. **BUM flood.** The customer hosts carry no static ARP: the ARP broadcast is
+   flooded over the EVPN toward each peer's End.DT2M SID and resolved
+   dynamically, after which unicast follows over RT2.
 
 ## Scope
 
-RT2 (unicast) only. BUM flooding (broadcast / unknown-unicast) needs RT3
-(Inclusive Multicast), a later phase, so the customer hosts carry static ARP
-for each other to keep the traffic pure unicast. Multi-homing (RT4 / ESI / DF
-election) and the advertise of data-plane-learned MACs are also later phases;
-here each PE advertises its customer MAC explicitly at boot.
+RT2 (unicast) + RT3 (Inclusive Multicast / BUM flood); the customer hosts
+resolve ARP dynamically over the flood. Multi-homing (RT4 / ESI / DF election)
+and the advertise of data-plane-learned MACs are later phases; here each PE
+advertises its customer MAC and its flood endpoint explicitly at boot.
 
 ## Run
 
@@ -70,14 +75,16 @@ Needs Docker, containerlab, and sudo. The `vrf` kernel module is not required
 Each PE (see `pe-*/start.sh` and `pe-*/vinbero.yml`):
 
 - bridges its customer port (`eth2`) into bd 100 via `br100` and an `hl2`
-  (headend-L2) entry, and registers an `END_DT2` SID that decaps a core-bound
-  frame into `br100`;
+  (headend-L2) entry, and registers an `END_DT2` SID (unicast decap) and an
+  `END_DT2M` SID (BUM flood decap) that both deliver a core-bound frame into
+  `br100`;
 - binds bd 100 to the EVPN import route target `65000:100` at boot through
   `bgp.vrf_bindings` in `vinbero.yml`. Binding in config (rather than via
-  `vbctl bgp vrf-bind` after boot) means a peer's RT2 that arrives early is not
-  dropped for lack of a bridge-domain binding;
-- advertises its customer MAC with `vbctl bgp advertise-evpn-mac`, carrying its
-  own End.DT2U SID and the export RT.
+  `vbctl bgp vrf-bind` after boot) means a peer's RT2/RT3 that arrives early is
+  not dropped for lack of a bridge-domain binding;
+- advertises its customer MAC with `vbctl bgp advertise-evpn-mac` (End.DT2U SID)
+  and its flood endpoint with `vbctl bgp advertise-evpn-imet` (End.DT2M SID).
 
-A received RT2 then installs `fdb_map[bd, peer-MAC] → bd_peer(End.DT2U SID)`,
-and the customer-facing XDP headend H.Encaps.L2's unicast frames toward it.
+A received RT2 installs `fdb_map[bd, peer-MAC] → bd_peer(End.DT2U SID)` so the
+XDP headend H.Encaps.L2's unicast frames toward it; a received RT3 installs a
+flood `bd_peer(End.DT2M SID)` that the TC clone-to-self BUM path replicates to.

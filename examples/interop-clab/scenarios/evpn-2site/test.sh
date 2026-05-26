@@ -169,6 +169,29 @@ check_dynamic_arp() {
 check_dynamic_arp "$CE_TOKYO" "$CE_OSAKA_ADDR" "$CE_OSAKA_MAC" "ce-tokyo"
 check_dynamic_arp "$CE_OSAKA" "$CE_TOKYO_ADDR" "$CE_TOKYO_MAC" "ce-osaka"
 
+# Directly capture the ARP broadcast encapped toward the peer's End.DT2M SID,
+# isolating the RT3 flood path (a unicast-only setup could resolve ARP too, so
+# the dynamic-resolve check above is necessary but not sufficient). Drop the
+# resolved neighbour first (needs net-tools' arp -d) so the ping re-ARPs.
+docker exec "$CE_TOKYO" apk add --no-cache net-tools >/dev/null 2>&1
+docker exec "$CE_TOKYO" arp -d "$CE_OSAKA_ADDR" >/dev/null 2>&1
+fcap=$(mktemp)
+dexec "$CORE" timeout 8 tcpdump -nli any "ip6 and dst $OSAKA_DT2M" >"$fcap" 2>/dev/null &
+fpid=$!
+sleep 1
+for _ in 1 2 3; do
+    docker exec "$CE_TOKYO" ping -c 1 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1
+    sleep 1
+done
+wait "$fpid" 2>/dev/null
+if grep -qi "ARP" "$fcap"; then
+    ok "ce-tokyo: ARP broadcast flooded toward End.DT2M SID $OSAKA_DT2M (RT3 flood path confirmed)"
+    grep -i ARP "$fcap" | head -1 | sed 's/^/      /'
+else
+    ng "ce-tokyo: no ARP flood captured toward $OSAKA_DT2M (RT3 flood path not exercised)"
+fi
+rm -f "$fcap"
+
 echo ""
 echo "=============================================="
 echo " RESULT: $pass passed, $fail failed"
