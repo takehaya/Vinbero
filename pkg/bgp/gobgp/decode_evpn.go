@@ -9,8 +9,8 @@ import (
 
 // decodeEVPNRoute builds Vinbero's EVPNRoute view of a received EVPN NLRI
 // (AFI 25 / SAFI 70). Only RT2 (MAC/IP) is decoded in Phase E1; other
-// route types return nil so the subscriber skips them until their phase
-// (RT3 in E2, RT4 in E3).
+// route types return nil, which the Applier treats as a no-op until their
+// phase lands (RT3 in E2, RT4 in E3).
 func decodeEVPNRoute(p *apiutil.Path) *bgp.EVPNRoute {
 	nlri, ok := p.Nlri.(*gobgppkt.EVPNNLRI)
 	if !ok {

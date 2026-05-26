@@ -1,6 +1,6 @@
 internal:
   # eth1 faces the core (SRv6 underlay + iBGP transport); eth2 faces
-  # ce-tokyo. Both carry XDP for the bidirectional L2VPN data plane.
+  # ce-osaka. Both carry XDP for the bidirectional L2VPN data plane.
   devices:
     - eth1
     - eth2
