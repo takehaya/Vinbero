@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -27,12 +28,19 @@ func vrfBgpCommand() *cli.Command {
 					&cli.UintFlag{Name: "bd-id", Usage: "Bridge domain for EVPN routes matching import-rts (0 = L3VPN-only)"},
 				},
 				Action: func(c *cli.Context) error {
+					// c.Uint may be 64-bit; reject out-of-range bd_id here so a
+					// large value cannot fold into uint32 and slip past the
+					// server's uint16 range check, binding an unintended BD.
+					bdID := c.Uint("bd-id")
+					if bdID > math.MaxUint16 {
+						return fmt.Errorf("bd-id %d out of range (max %d)", bdID, math.MaxUint16)
+					}
 					b := &v1.VrfBgpBinding{
 						VrfName:        c.String("vrf"),
 						ImportRts:      csvFlag(c.String("import-rts")),
 						ExportRts:      csvFlag(c.String("export-rts")),
 						DefaultLocator: c.String("default-locator"),
-						BdId:           uint32(c.Uint("bd-id")),
+						BdId:           uint32(bdID),
 					}
 					clients := clientsFromContext(c)
 					resp, err := clients.VrfBgp.VrfBgpBind(context.Background(),
