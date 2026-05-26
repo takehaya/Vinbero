@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # evpn-2site interop scenario assertions (Vinbero <-> Vinbero).
 #
-# Two Vinbero PEs run an SRv6 EVPN L2VPN (ELAN), exchanging customer MACs as
-# BGP EVPN RT2 (MAC/IP). It proves:
+# Two Vinbero PEs run an SRv6 EVPN L2VPN (ELAN). They exchange customer MACs
+# as BGP EVPN RT2 (MAC/IP) and their BUM flood endpoints as RT3 (Inclusive
+# Multicast). It proves:
 #   1. each PE LEARNED the peer's MAC over BGP -- the RT2 appears in fdb_map
-#      as a remote entry pointing at a bd_peer (the SAFI 70 session and the
-#      RT2 / SRv6 L2 Service TLV decode both work);
+#      as a remote entry pointing at a bd_peer, and the RT3 installs a second
+#      bd_peer toward the peer's End.DT2M flood SID;
 #   2. data plane, both directions: ce-tokyo <-> ce-osaka ping over the
 #      stretched L2 domain, with the frame H.Encaps.L2'd toward the peer's
-#      End.DT2U SID (outer DA on the core link) -- BGP-learned RT2 actually
-#      drives the L2 forwarding path.
+#      End.DT2U SID (outer DA on the core link);
+#   3. BUM flood: the CEs resolve ARP dynamically (no static ARP) -- the ARP
+#      broadcast is flooded over the EVPN, proving RT3 / End.DT2M works.
 #
-# Scope: RT2 unicast only (the CEs carry static ARP, so no BUM flood is
-# needed). Exit non-zero on the first failed assertion.
+# Exit non-zero on the first failed assertion.
 set -u
 
 PE_TOKYO=clab-evpn-2site-pe-tokyo
@@ -27,6 +28,8 @@ CE_TOKYO_ADDR=10.0.0.10
 CE_OSAKA_ADDR=10.0.0.20
 TOKYO_DT2U=fd00:100:0:2::   # pe-tokyo End.DT2U SID (outer DA for osaka->tokyo)
 OSAKA_DT2U=fd00:200:0:2::   # pe-osaka End.DT2U SID (outer DA for tokyo->osaka)
+TOKYO_DT2M=fd00:100:0:3::   # pe-tokyo End.DT2M flood SID (RT3)
+OSAKA_DT2M=fd00:200:0:3::   # pe-osaka End.DT2M flood SID (RT3)
 
 pass=0
 fail=0
@@ -35,7 +38,9 @@ ng() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
 dexec() { docker exec "$@"; }
 
-retry()   { retry_n 30 "$@"; }
+# Allow generous time for the iBGP session to establish and RT2/RT3 to
+# replicate: two PEs starting together can take ~100s to converge.
+retry()   { retry_n 75 "$@"; }
 retry_n() {
     local n=$1; shift
     local i
@@ -89,6 +94,21 @@ else
     dexec "$PE_OSAKA" vbctl bd-peer list || true
 fi
 
+# Each PE must also have the RT3 BUM flood bd_peer (the End.DT2M encap target
+# the peer's RT3 installed). This is the second bd_peer per BD.
+if retry bash -c "docker exec $PE_TOKYO vbctl bd-peer list 2>/dev/null | grep -q '$OSAKA_DT2M'"; then
+    ok "pe-tokyo has a BUM flood bd_peer toward pe-osaka's End.DT2M SID ($OSAKA_DT2M)"
+else
+    ng "pe-tokyo has no BUM flood bd_peer toward $OSAKA_DT2M"
+    dexec "$PE_TOKYO" vbctl bd-peer list || true
+fi
+if retry bash -c "docker exec $PE_OSAKA vbctl bd-peer list 2>/dev/null | grep -q '$TOKYO_DT2M'"; then
+    ok "pe-osaka has a BUM flood bd_peer toward pe-tokyo's End.DT2M SID ($TOKYO_DT2M)"
+else
+    ng "pe-osaka has no BUM flood bd_peer toward $TOKYO_DT2M"
+    dexec "$PE_OSAKA" vbctl bd-peer list || true
+fi
+
 # --- 2. Data plane: bidirectional L2, encapped toward the learned SID ------
 echo ""
 echo "[2] Data plane (stretched L2 over SRv6 EVPN)"
@@ -124,6 +144,30 @@ l2_dir() {
 
 l2_dir "$CE_TOKYO" "$CE_OSAKA_ADDR" "$OSAKA_DT2U" "ce-tokyo -> ce-osaka"
 l2_dir "$CE_OSAKA" "$CE_TOKYO_ADDR" "$TOKYO_DT2U" "ce-osaka -> ce-tokyo"
+
+# --- 3. BUM flood: ARP resolved dynamically (no static ARP) ----------------
+echo ""
+echo "[3] BUM flood (ARP resolved over RT3 / End.DT2M)"
+# The pings above resolved ARP with no static entries: the ARP broadcast was
+# BUM-flooded over the EVPN toward the peer's End.DT2M SID, decapped into the
+# peer bridge, and answered. A dynamic (non-PERMANENT) neighbour entry holding
+# the peer's MAC proves the flood path works.
+check_dynamic_arp() {
+    local ce=$1 addr=$2 mac=$3 label=$4
+    local entry
+    entry=$(dexec "$ce" ip neigh show "$addr" dev eth1 2>/dev/null)
+    if ! echo "$entry" | grep -iq "$mac"; then
+        ng "$label: no resolved ARP entry for $addr ($entry)"
+        return
+    fi
+    if echo "$entry" | grep -q PERMANENT; then
+        ng "$label: ARP entry for $addr is PERMANENT (static), not flooded"
+        return
+    fi
+    ok "$label: resolved $addr dynamically via BUM flood"
+}
+check_dynamic_arp "$CE_TOKYO" "$CE_OSAKA_ADDR" "$CE_OSAKA_MAC" "ce-tokyo"
+check_dynamic_arp "$CE_OSAKA" "$CE_TOKYO_ADDR" "$CE_TOKYO_MAC" "ce-osaka"
 
 echo ""
 echo "=============================================="

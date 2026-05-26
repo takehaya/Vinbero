@@ -65,6 +65,13 @@ done
     --bd-id 100 \
     --bridge-name br100 || true
 
+# End.DT2M service SID: decaps a core-bound BUM (flood) L2 frame into br100.
+/usr/local/bin/vbctl sid create \
+    --trigger-prefix fd00:200:0:3::/128 \
+    --action END_DT2M \
+    --bd-id 100 \
+    --bridge-name br100 || true
+
 /usr/local/bin/vbctl hl2 create \
     --interface eth2 \
     --vlan-id 0 \
@@ -80,6 +87,13 @@ done
     --route-targets 65000:100 \
     --mac aa:bb:cc:00:00:20 \
     --sid fd00:200:0:2:: \
+    --next-hop 2001:db8:ff::2 || true
+
+# Advertise the BUM flood endpoint as an EVPN RT3 with our End.DT2M SID.
+/usr/local/bin/vbctl bgp advertise-evpn-imet \
+    --rd 65100:2 \
+    --route-targets 65000:100 \
+    --sid fd00:200:0:3:: \
     --next-hop 2001:db8:ff::2 || true
 
 ping6 -c 1 -W 2 2001:db8:2::2 >/dev/null 2>&1 || true

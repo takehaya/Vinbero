@@ -69,10 +69,18 @@ done
     --block-len 32 --node-len 16 --function-len 16 --argument-len 64 \
     --behavior classic || true
 
-# End.DT2U service SID: decaps a core-bound L2 frame into br100 -> ce-tokyo.
+# End.DT2U service SID: decaps a core-bound unicast L2 frame into br100 -> ce-tokyo.
 /usr/local/bin/vbctl sid create \
     --trigger-prefix fd00:100:0:2::/128 \
     --action END_DT2 \
+    --bd-id 100 \
+    --bridge-name br100 || true
+
+# End.DT2M service SID: decaps a core-bound BUM (flood) L2 frame into br100.
+# RT3 advertises this SID so the peer floods broadcast / unknown-unicast here.
+/usr/local/bin/vbctl sid create \
+    --trigger-prefix fd00:100:0:3::/128 \
+    --action END_DT2M \
     --bd-id 100 \
     --bridge-name br100 || true
 
@@ -97,6 +105,15 @@ done
     --route-targets 65000:100 \
     --mac aa:bb:cc:00:00:10 \
     --sid fd00:100:0:2:: \
+    --next-hop 2001:db8:ff::1 || true
+
+# Advertise the BUM flood endpoint as an EVPN RT3 (Inclusive Multicast) with
+# our End.DT2M SID. pe-osaka floods broadcast / unknown-unicast toward this SID,
+# so the CEs no longer need static ARP.
+/usr/local/bin/vbctl bgp advertise-evpn-imet \
+    --rd 65100:1 \
+    --route-targets 65000:100 \
+    --sid fd00:100:0:3:: \
     --next-hop 2001:db8:ff::1 || true
 
 # Pre-resolve the core neighbour.

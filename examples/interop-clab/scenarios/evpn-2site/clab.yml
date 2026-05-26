@@ -14,9 +14,10 @@
 # EVPN family. ce-tokyo's frame to ce-osaka is H.Encaps.L2'd toward pe-osaka's
 # End.DT2U SID (learned via RT2) and decapped into pe-osaka's bridge.
 #
-# Scope: RT2 (unicast) only. BUM flooding (broadcast/unknown-unicast) needs
-# RT3 (Inclusive Multicast), a later phase, so the CEs carry static ARP for
-# each other to keep the traffic pure unicast. `core` is a plain IPv6 router.
+# Scope: RT2 (unicast) + RT3 (Inclusive Multicast). The CEs resolve ARP
+# dynamically: broadcast is BUM-flooded toward each PE's End.DT2M SID and
+# decapped into the peer bridge, so no static ARP is needed. `core` is a
+# plain IPv6 router.
 name: evpn-2site
 
 topology:
@@ -28,7 +29,6 @@ topology:
         - ip link set eth1 address aa:bb:cc:00:00:10
         - ip addr add 10.0.0.10/24 dev eth1
         - ip link set eth1 up
-        - arp -s 10.0.0.20 aa:bb:cc:00:00:20
 
     pe-tokyo:
       kind: linux
@@ -63,7 +63,6 @@ topology:
         - ip link set eth1 address aa:bb:cc:00:00:20
         - ip addr add 10.0.0.20/24 dev eth1
         - ip link set eth1 up
-        - arp -s 10.0.0.10 aa:bb:cc:00:00:10
 
   links:
     # CE <-> PE customer-facing ports (one stretched L2 domain).
