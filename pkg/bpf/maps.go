@@ -1664,25 +1664,32 @@ func currentKtimeNs() uint64 {
 
 // ===== BD Peer Map Operations (for P2MP BUM flooding) =====
 
-// CreateBdPeer adds a BD peer entry for BUM flooding.
-// Also populates bd_peer_reverse_map (RX split-horizon path) and
-// bd_peer_l2_ext_map (TX split-horizon path). esi is the 10-byte RFC 7432
-// Ethernet Segment Identifier; all-zero means single-homing. remoteSrc is the
-// advertising PE's encap source -- the outer IPv6 source on its transmitted
-// packets -- which is what the End.DT2 RX path keys the reverse map on. It
-// differs from entry.SrcAddr, which is THIS PE's local encap source for TX. For
-// an operator-created peer with no known remote source, pass entry.SrcAddr.
-func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte) error {
+// CreateBdPeer adds a BD peer entry for BUM flooding. It also populates
+// bd_peer_l2_ext_map (TX split-horizon path) and, when writeReverse is true,
+// bd_peer_reverse_map (RX split-horizon + remote-MAC learning).
+//
+// esi is the 10-byte RFC 7432 Ethernet Segment Identifier; all-zero means
+// single-homing. remoteSrc is the advertising PE's encap source -- the outer
+// IPv6 source on its transmitted packets -- which is what the End.DT2 RX path
+// keys the reverse map on; it differs from entry.SrcAddr (THIS PE's local TX
+// source). writeReverse must be true only for the unicast peer toward a remote
+// PE (RT2 End.DT2U and operator-created peers): the reverse map is index-less,
+// so one PE maps to one reverse entry, and the RT3 End.DT2M BUM peer toward the
+// same PE must pass false so it does not clobber that entry (the RX path needs
+// the unicast peer).
+func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) error {
 	key := &BdPeerKey{BdId: bdID, Index: index}
 	if err := m.objs.BdPeerMap.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put bd peer entry: %w", err)
 	}
 
-	rKey := &BdPeerReverseKey{BdId: bdID}
-	copy(rKey.SrcAddr[:], remoteSrc[:])
-	rVal := &BdPeerReverseVal{Index: index, Esi: esi}
-	if err := m.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
-		return fmt.Errorf("failed to put bd peer reverse entry: %w", err)
+	if writeReverse {
+		rKey := &BdPeerReverseKey{BdId: bdID}
+		copy(rKey.SrcAddr[:], remoteSrc[:])
+		rVal := &BdPeerReverseVal{Index: index, Esi: esi}
+		if err := m.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
+			return fmt.Errorf("failed to put bd peer reverse entry: %w", err)
+		}
 	}
 
 	var zero [ESILen]byte

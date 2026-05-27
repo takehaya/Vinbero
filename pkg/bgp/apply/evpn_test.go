@@ -336,14 +336,24 @@ func TestApplier_EVPNRT3ReadvertiseAndWithdraw(t *testing.T) {
 }
 
 // RT2 (unicast, End.DT2U) and RT3 (BUM, End.DT2M) for the same BD coexist as
-// two distinct bd_peers; the data-plane flood loop sweeps both (Step 3 will
-// add a flood-exclude flag to drop the unicast peer from the flood).
+// two distinct bd_peers. The unicast peer is flood-excluded (flood_exclude=1)
+// and owns the reverse-map entry; the BUM peer is flooded and does not write
+// the reverse map (it would collide on the index-less {bd_id, remote-src} key).
 func TestApplier_EVPNRT2AndRT3Coexist(t *testing.T) {
 	a, fh := evpnApplier(t)
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:24::")})
 	if len(fh.bdPeers) != 2 {
 		t.Fatalf("RT2 + RT3 must install two distinct bd_peers; got %d", len(fh.bdPeers))
+	}
+	rt2Idx := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}].PeerIndex
+	if !fh.bdPeerReverse[bdPeerKey{100, rt2Idx}] {
+		t.Error("RT2 unicast peer must write the reverse map")
+	}
+	for k, wr := range fh.bdPeerReverse {
+		if k.index != rt2Idx && wr {
+			t.Errorf("RT3 BUM peer (index %d) must not write the reverse map", k.index)
+		}
 	}
 }
 
@@ -467,16 +477,17 @@ func TestApplier_EVPNRT4WithdrawReelects(t *testing.T) {
 	}
 }
 
-// An RT4 for an ESI this PE does not locally attach records membership only and
-// never writes esi_map -- a crafted RT4 cannot mint a phantom segment.
+// An RT4 for an ESI this PE does not locally attach is ignored entirely: it
+// writes no esi_map (no phantom segment from a crafted RT4) and records no
+// membership (so crafted RT4s cannot grow esMembers without bound).
 func TestApplier_EVPNRT4NotLocallyAttachedNoWrite(t *testing.T) {
 	a, fh := evpnApplier(t)
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "fc00::1")})
 	if _, ok := fh.esis[testESI]; ok {
 		t.Error("RT4 must not create an esi_map entry for an unattached ESI")
 	}
-	if _, ok := a.evpn.esMembers[testESI]; !ok {
-		t.Error("membership should still be recorded when not locally attached")
+	if _, ok := a.evpn.esMembers[testESI]; ok {
+		t.Error("membership must not be recorded for an unattached ESI (DoS guard)")
 	}
 }
 

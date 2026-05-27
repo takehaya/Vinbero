@@ -69,7 +69,7 @@ func (s *BdPeerServer) BdPeerCreate(
 
 		// Operator-created peers carry no advertising-PE source, so key the
 		// reverse map on the entry's own SrcAddr (preserving prior behavior).
-		if err := s.mapOps.CreateBdPeer(bdID, index, entry, esi, entry.SrcAddr); err != nil {
+		if err := s.mapOps.CreateBdPeer(bdID, index, entry, esi, entry.SrcAddr, true); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("bd_%d", peer.BdId),
 				Reason:        err.Error(),

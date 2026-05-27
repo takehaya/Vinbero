@@ -33,22 +33,24 @@ type fakeHeadend struct {
 	v6deleted []string
 	createErr error
 
-	fdb          map[fdbKey]*bpf.FdbEntry
-	bdPeers      map[bdPeerKey]*bpf.HeadendEntry
-	bdPeerErr    error
-	fdbErr       error
-	fdbDelErr    error
-	bdPeerDelErr error
-	esis         map[[bpf.ESILen]byte]*bpf.EsiEntry
+	fdb           map[fdbKey]*bpf.FdbEntry
+	bdPeers       map[bdPeerKey]*bpf.HeadendEntry
+	bdPeerReverse map[bdPeerKey]bool // writeReverse flag passed per peer
+	bdPeerErr     error
+	fdbErr        error
+	fdbDelErr     error
+	bdPeerDelErr  error
+	esis          map[[bpf.ESILen]byte]*bpf.EsiEntry
 }
 
 func newFakeHeadend() *fakeHeadend {
 	return &fakeHeadend{
-		v4created: map[string]*bpf.HeadendEntry{},
-		v6created: map[string]*bpf.HeadendEntry{},
-		fdb:       map[fdbKey]*bpf.FdbEntry{},
-		bdPeers:   map[bdPeerKey]*bpf.HeadendEntry{},
-		esis:      map[[bpf.ESILen]byte]*bpf.EsiEntry{},
+		v4created:     map[string]*bpf.HeadendEntry{},
+		v6created:     map[string]*bpf.HeadendEntry{},
+		fdb:           map[fdbKey]*bpf.FdbEntry{},
+		bdPeers:       map[bdPeerKey]*bpf.HeadendEntry{},
+		bdPeerReverse: map[bdPeerKey]bool{},
+		esis:          map[[bpf.ESILen]byte]*bpf.EsiEntry{},
 	}
 }
 
@@ -68,11 +70,12 @@ func (f *fakeHeadend) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
 	return nil
 }
 
-func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [bpf.ESILen]byte, _ [bpf.IPv6AddrLen]byte) error {
+func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [bpf.ESILen]byte, _ [bpf.IPv6AddrLen]byte, writeReverse bool) error {
 	if f.bdPeerErr != nil {
 		return f.bdPeerErr
 	}
 	f.bdPeers[bdPeerKey{bdID, index}] = e
+	f.bdPeerReverse[bdPeerKey{bdID, index}] = writeReverse
 	return nil
 }
 

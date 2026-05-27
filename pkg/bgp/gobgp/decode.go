@@ -138,6 +138,12 @@ func srv6SIDLocatorLen(info *gobgppkt.SRv6InformationSubTLV) uint8 {
 // to fallbackLen. Returns "" if there is no usable SID. The End.DT2 RX path
 // keys split-horizon and remote-MAC learning on this remote source -- distinct
 // from the local encap source the bd_peer's SrcAddr holds for TX.
+//
+// This assumes the remote PE's outer encap source equals its SID's locator base
+// (true Vinbero-to-Vinbero, where encapSource() returns the source-locator
+// prefix). A third-party PE that sources packets from an address outside the
+// SID locator (e.g. a loopback) would not match the data plane's full-outer-src
+// reverse-map key; third-party interop is future work.
 func decodeRemoteSrc(attrs []gobgppkt.PathAttributeInterface, label uint32, fallbackLen uint8) string {
 	sid, locLen, ok := srv6L2ServiceSIDBytes(attrs, label)
 	if !ok {

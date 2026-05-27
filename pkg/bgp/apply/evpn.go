@@ -19,7 +19,7 @@ import (
 type fdbBdOps interface {
 	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
 	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
-	CreateBdPeer(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte) error
+	CreateBdPeer(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) error
 	DeleteBdPeer(bdID, index uint16) error
 	// FindFreeBdPeerIndex returns the lowest bd_peer index not in use in the
 	// real map, so a BGP-allocated peer never collides with an operator-created
@@ -230,7 +230,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 			zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 		return
 	}
-	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI, rsrc); err != nil {
+	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI, rsrc, true); err != nil {
 		a.logger.Error("install EVPN bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
 		a.evpn.releaseIndex(pk)
@@ -332,14 +332,13 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 			zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 		return
 	}
-	// CreateBdPeer keys bd_peer_reverse_map by the advertising PE's source
-	// (remoteSrc, derived from the SID locator). The RT2 unicast peer toward the
-	// same PE shares that source, so the reverse entry points at whichever of
-	// {RT2, RT3} was installed last -- both identify the same remote PE, which
-	// is what the End.DT2 RX path needs for remote-MAC learning and Local-Bias
-	// split-horizon.
-	rsrc := remoteSrcOrLocal(r.RemoteSrc, entry.SrcAddr)
-	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI, rsrc); err != nil {
+	// The RT3 BUM peer does NOT write bd_peer_reverse_map (writeReverse=false):
+	// that index-less map identifies the remote PE for the End.DT2 RX path
+	// (remote-MAC learning, Local-Bias split-horizon) and must hold the unicast
+	// RT2 (End.DT2U) peer toward the same PE, not this flood peer. remoteSrc is
+	// therefore unused here.
+	var noRemoteSrc [bpf.IPv6AddrLen]byte
+	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI, noRemoteSrc, false); err != nil {
 		a.logger.Error("install EVPN BUM bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
 		return
@@ -378,6 +377,13 @@ func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
 	if pe == "" {
 		a.logger.Warn("EVPN RT4 has no originating PE (next hop); skipping",
 			zap.String("rd", r.RD))
+		return
+	}
+
+	// Track membership only for an ESI this PE locally attaches (operator-
+	// declared). DF election ignores unattached ESIs anyway, and tracking every
+	// crafted RT4's ESI would let a peer grow esMembers without bound.
+	if entry, err := a.fdbBd.GetEsi(r.ESI); err != nil || entry == nil || entry.LocalAttached == 0 {
 		return
 	}
 
