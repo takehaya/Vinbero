@@ -87,8 +87,14 @@ type PeerConfig struct {
 	// full mesh both ends would otherwise dial each other at once, and the
 	// resulting connection collision makes gobgp tear a freshly
 	// ESTABLISHED socket back down, flapping the session. Marking one end
-	// of every pair passive pins each pair to a single direction.
+	// of every pair passive pins each pair to a single direction. Note both
+	// ends passive forms no session at all (nobody dials), and both ends
+	// active reintroduces the flap -- exactly one end of each pair must be set.
 	Passive bool
+	// ConnectRetrySec is the BGP ConnectRetry timer in seconds. gobgp's
+	// default is 120s; a smaller value reconnects faster after a startup or
+	// transient failure. Governs the pre-establishment dial only.
+	ConnectRetrySec uint32
 }
 
 // PeerState is a read-only snapshot of a neighbor's session.

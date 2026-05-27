@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"strings"
 	"sync"
@@ -23,16 +22,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
-)
-
-const (
-	// bgpPort is the well-known BGP TCP port used as each neighbor's remote port.
-	bgpPort = 179
-	// connectRetrySec overrides gobgp's 120s default ConnectRetry timer so a
-	// neighbor that is briefly unreachable at startup (e.g. the underlay
-	// next-hop not yet up) reconnects within seconds instead of stalling for
-	// two minutes after the first failed dial.
-	connectRetrySec uint64 = 5
 )
 
 // Session is the GoBGP-backed bgp.Session. A zero Session is not
@@ -152,16 +141,6 @@ func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 	if err != nil {
 		return fmt.Errorf("add peer %s: %w", p.Neighbor, err)
 	}
-	// gobgp normally fills the transport local address from the neighbor's
-	// family in SetDefaultNeighborConfigValues, but that default pass does
-	// not run on the dynamic AddPeer path. Once we populate Transport at all
-	// (for PassiveMode), an unset LocalAddress stays invalid and the active
-	// dial fails to resolve, so we mirror gobgp's default (wildcard for the
-	// neighbor's family) here and let the routing table pick the source.
-	localAddr := "0.0.0.0"
-	if ip := net.ParseIP(p.Neighbor); ip != nil && ip.To4() == nil {
-		localAddr = "::"
-	}
 	peer := &gobgpapi.Peer{
 		Conf: &gobgpapi.PeerConf{
 			NeighborAddress: p.Neighbor,
@@ -171,16 +150,21 @@ func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 			Config: &gobgpapi.TimersConfig{
 				HoldTime:          uint64(p.HoldTimeSec),
 				KeepaliveInterval: uint64(p.KeepaliveSec),
-				ConnectRetry:      connectRetrySec,
+				// gobgp defaults ConnectRetry to 120s; the daemon passes a few
+				// seconds (see config) so a neighbor unreachable at startup --
+				// e.g. the underlay next-hop not yet up -- reconnects quickly
+				// instead of stalling for two minutes after the first failed dial.
+				ConnectRetry: uint64(p.ConnectRetrySec),
 			},
 		},
+		// Transport carries only PassiveMode. In an iBGP full mesh both ends of
+		// a pair would otherwise dial at once and the connection collision
+		// flaps the session, so one end is marked passive (accept-only). gobgp
+		// fills the rest of Transport -- local address from the neighbor family
+		// and remote port 179 -- in SetDefaultNeighborConfigValues on the
+		// AddPeer path, so nothing else is set here.
 		Transport: &gobgpapi.Transport{
 			PassiveMode: p.Passive,
-			// RemotePort must be set explicitly: a populated Transport
-			// defaults RemotePort to 0, so without this an active peer would
-			// dial TCP port 0 instead of BGP's 179 and never connect.
-			RemotePort:   bgpPort,
-			LocalAddress: localAddr,
 		},
 		AfiSafis: afiSafis,
 	}

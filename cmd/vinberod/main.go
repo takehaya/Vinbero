@@ -241,12 +241,13 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 			families = append(families, fam)
 		}
 		if err := session.AddPeer(ctx, bgp.PeerConfig{
-			Neighbor:     p.Neighbor,
-			PeerASN:      p.PeerASN,
-			HoldTimeSec:  p.HoldTimeSec,
-			KeepaliveSec: p.KeepaliveSec,
-			Families:     families,
-			Passive:      p.Passive,
+			Neighbor:        p.Neighbor,
+			PeerASN:         p.PeerASN,
+			HoldTimeSec:     p.HoldTimeSec,
+			KeepaliveSec:    p.KeepaliveSec,
+			Families:        families,
+			Passive:         p.Passive,
+			ConnectRetrySec: p.ConnectRetrySec,
 		}); err != nil {
 			return err
 		}

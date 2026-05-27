@@ -64,6 +64,10 @@ type BGPPeerConfig struct {
 	// neighbor's inbound connection. Set it on one end of each iBGP
 	// full-mesh pair to avoid connection-collision flap.
 	Passive bool `yaml:"passive,omitempty"`
+	// ConnectRetrySec is the BGP ConnectRetry timer in seconds. Defaults to
+	// 5 (gobgp's own default is 120) so a peer unreachable at startup
+	// reconnects within seconds.
+	ConnectRetrySec uint32 `yaml:"connect_retry_sec,omitempty" default:"5"`
 }
 
 // BpfConstants returns the set of read-only constants rewritten into every
