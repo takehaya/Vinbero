@@ -11,9 +11,6 @@
 
 set -u
 
-# tcpdump lets the test confirm SRv6 outer DAs on transit.
-apk add --no-cache tcpdump >/dev/null 2>&1 || true
-
 ip link set eth1 up; ip -6 addr add 2001:db8:1::2/64 dev eth1 2>/dev/null || true
 ip link set eth2 up; ip -6 addr add 2001:db8:2::2/64 dev eth2 2>/dev/null || true
 ip link set eth3 up; ip -6 addr add 2001:db8:3::2/64 dev eth3 2>/dev/null || true

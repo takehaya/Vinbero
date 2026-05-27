@@ -22,6 +22,7 @@ CE_MH_MAC=aa:bb:cc:00:00:10
 CE_REMOTE_MAC=aa:bb:cc:00:00:30
 CE_MH_ADDR=10.0.0.10
 CE_REMOTE_ADDR=10.0.0.30
+ESI=00:00:00:00:00:00:00:00:00:01
 DF_SRC=fd00:100::   # pe1's encap source = the elected DF (lowest of pe1/pe2)
 
 pass=0
@@ -29,6 +30,14 @@ fail=0
 ok() { echo "  PASS: $1"; pass=$((pass + 1)); }
 ng() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 dexec() { docker exec "$@"; }
+
+# DF_PE is the 4th column of `vbctl es list` (ESI, LOCAL_ATTACHED, LOCAL_PE,
+# DF_PE, MODE). Reading the column -- not grepping the whole line -- avoids a
+# false pass: on pe1 the LOCAL_PE column is also fd00:100::, so a substring
+# match would succeed even with no DF elected. When DF_PE is empty the columns
+# shift and $4 holds MODE, which never equals an address, so the check fails.
+df_pe() { docker exec "$1" vbctl es list 2>/dev/null | awk -v e="$ESI" '$1==e {print $4}'; }
+df_is() { [ "$(df_pe "$1")" = "$2" ]; }
 
 # Two PEs plus DF election can take a while to converge.
 retry() { retry_n 75 "$@"; }
@@ -65,19 +74,19 @@ fi
 # --- 2. DF election: pe1 and pe2 agree DF = pe1 (lowest encap source) -------
 echo ""
 echo "[2] DF election (RFC 8584; lowest PE source wins)"
-# pe2's local PE is fd00:200::, so a matching fd00:100:: in its ES list can only
-# be the elected DF (pe1) -- proving both PEs ran the same election.
-if retry bash -c "docker exec $PE1 vbctl es list 2>/dev/null | grep -qi $DF_SRC"; then
-    ok "pe1 elected DF = $DF_SRC (pe1)"
+# Assert the DF_PE column on both PEs equals fd00:100:: (pe1). Both PEs run the
+# election independently, so agreement proves they computed the same result.
+if retry df_is "$PE1" "$DF_SRC"; then
+    ok "pe1 elected DF = $DF_SRC (pe1) [DF_PE column]"
 else
-    ng "pe1 did not elect DF $DF_SRC"
+    ng "pe1 did not elect DF $DF_SRC (DF_PE=$(df_pe "$PE1"))"
     dexec "$PE1" vbctl es list || true
 fi
-if retry bash -c "docker exec $PE2 vbctl es list 2>/dev/null | grep -qi $DF_SRC"; then
-    ok "pe2 agrees DF = $DF_SRC (pe1)"
+if retry df_is "$PE2" "$DF_SRC"; then
+    ok "pe2 agrees DF = $DF_SRC (pe1) [DF_PE column]"
     dexec "$PE2" vbctl es list | sed 's/^/      /'
 else
-    ng "pe2 did not agree DF $DF_SRC"
+    ng "pe2 did not agree DF $DF_SRC (DF_PE=$(df_pe "$PE2"))"
     dexec "$PE2" vbctl es list || true
 fi
 
@@ -103,13 +112,25 @@ echo "[4] BUM single delivery to the dual-homed CE"
 # Re-ARP from ce-remote so the request is BUM-flooded to both pe1/pe2's
 # End.DT2M; only the DF (pe1) delivers to ce-mh and split-horizon prevents a
 # loop, so ce-remote must see no duplicate (DUP!) ICMP replies.
-docker exec "$CE_REMOTE" apk add --no-cache net-tools >/dev/null 2>&1
-docker exec "$CE_REMOTE" arp -d "$CE_MH_ADDR" >/dev/null 2>&1
-dup=$(docker exec "$CE_REMOTE" ping -c 3 -W 2 "$CE_MH_ADDR" 2>&1 | grep -c "DUP!")
-if [ "$dup" -eq 0 ]; then
-    ok "ce-remote -> ce-mh: no duplicate replies (single DF delivery + split-horizon)"
+#
+# busybox ip cannot delete a neighbour entry, so flush with net-tools arp -d.
+# Critically, ASSERT the flush happened before counting DUP!: under `set -u`
+# (no -e) a failed apk/arp would otherwise leave the step-3 entry resolved, the
+# ping would not re-flood, and dup=0 would pass without exercising DF or
+# split-horizon at all. A still-resolved neighbour is a setup failure, not a pass.
+docker exec "$CE_REMOTE" sh -c \
+    "command -v arp >/dev/null 2>&1 || apk add --no-cache net-tools >/dev/null 2>&1" || true
+docker exec "$CE_REMOTE" arp -d "$CE_MH_ADDR" >/dev/null 2>&1 || true
+if docker exec "$CE_REMOTE" ip neigh show "$CE_MH_ADDR" dev eth1 2>/dev/null \
+        | grep -qiE "REACHABLE|STALE|DELAY|PROBE|PERMANENT"; then
+    ng "ce-remote: $CE_MH_ADDR neighbour not flushed (setup failed); BUM single-delivery not asserted"
 else
-    ng "ce-remote -> ce-mh: $dup duplicate reply/replies (multi-homing double-delivery)"
+    dup=$(docker exec "$CE_REMOTE" ping -c 3 -W 2 "$CE_MH_ADDR" 2>&1 | grep -c "DUP!")
+    if [ "$dup" -eq 0 ]; then
+        ok "ce-remote -> ce-mh: no duplicate replies (single DF delivery + split-horizon)"
+    else
+        ng "ce-remote -> ce-mh: $dup duplicate reply/replies (multi-homing double-delivery)"
+    fi
 fi
 
 echo ""
