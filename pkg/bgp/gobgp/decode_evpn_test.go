@@ -197,3 +197,25 @@ func TestDecodeEVPN_RT4(t *testing.T) {
 		t.Errorf("ESI = %v, want %v", r.ESI, want)
 	}
 }
+
+// decodeRemoteSrc derives the advertising PE's encap source by masking the
+// received SID to its locator length. rt2Path carries no SID Structure
+// sub-sub-TLV, so this exercises the configurable fallback length.
+func TestDecodeRemoteSrc_Fallback(t *testing.T) {
+	p := rt2Path(t, "aa:bb:cc:00:00:01", "fd00:200:0:2::")
+	if got := decodeRemoteSrc(p.Attrs, 0, 48); got != "fd00:200::" {
+		t.Errorf("remote src (/48) = %q, want fd00:200::", got)
+	}
+	// A different fallback length changes the mask.
+	if got := decodeRemoteSrc(p.Attrs, 0, 64); got != "fd00:200:0:2::" {
+		t.Errorf("remote src (/64) = %q, want fd00:200:0:2::", got)
+	}
+}
+
+// An RT2 with the decoded RemoteSrc reaches the route via decodeEVPNRoute.
+func TestDecodeEVPN_RT2RemoteSrc(t *testing.T) {
+	r := decodeEVPNRoute(rt2Path(t, "aa:bb:cc:00:00:01", "fd00:200:0:2::"))
+	if r == nil || r.RemoteSrc != "fd00:200::" {
+		t.Errorf("RemoteSrc = %q, want fd00:200:: (/48 fallback)", r.RemoteSrc)
+	}
+}

@@ -1667,15 +1667,19 @@ func currentKtimeNs() uint64 {
 // CreateBdPeer adds a BD peer entry for BUM flooding.
 // Also populates bd_peer_reverse_map (RX split-horizon path) and
 // bd_peer_l2_ext_map (TX split-horizon path). esi is the 10-byte RFC 7432
-// Ethernet Segment Identifier; all-zero means single-homing.
-func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte) error {
+// Ethernet Segment Identifier; all-zero means single-homing. remoteSrc is the
+// advertising PE's encap source -- the outer IPv6 source on its transmitted
+// packets -- which is what the End.DT2 RX path keys the reverse map on. It
+// differs from entry.SrcAddr, which is THIS PE's local encap source for TX. For
+// an operator-created peer with no known remote source, pass entry.SrcAddr.
+func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte) error {
 	key := &BdPeerKey{BdId: bdID, Index: index}
 	if err := m.objs.BdPeerMap.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put bd peer entry: %w", err)
 	}
 
 	rKey := &BdPeerReverseKey{BdId: bdID}
-	copy(rKey.SrcAddr[:], entry.SrcAddr[:])
+	copy(rKey.SrcAddr[:], remoteSrc[:])
 	rVal := &BdPeerReverseVal{Index: index, Esi: esi}
 	if err := m.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
 		return fmt.Errorf("failed to put bd peer reverse entry: %w", err)
@@ -1695,23 +1699,27 @@ func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, es
 	return nil
 }
 
-// DeleteBdPeer removes a BD peer entry and its reverse-map entry.
-// Deletes forward map first to avoid inconsistency if reverse delete fails.
+// DeleteBdPeer removes a BD peer entry and its reverse-map entry. The reverse
+// map is keyed by the remote PE source (not the index), and the forward entry
+// no longer carries it, so the matching reverse entry is found by scanning for
+// the one pointing at this index (a BD holds at most MAX_BUM_NEXTHOPS peers).
+// Deletes the forward map first to avoid inconsistency if reverse delete fails.
 func (m *MapOperations) DeleteBdPeer(bdID, index uint16) error {
-	// Look up the entry first to get src_addr for reverse map cleanup
 	key := &BdPeerKey{BdId: bdID, Index: index}
-	var entry HeadendEntry
-	hasEntry := m.objs.BdPeerMap.Lookup(key, &entry) == nil
-
 	if err := m.objs.BdPeerMap.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete bd peer entry: %w", err)
 	}
 
-	// Clean up reverse map + ESI side tables (best-effort: ignore errors if already gone)
-	if hasEntry {
-		rKey := &BdPeerReverseKey{BdId: bdID}
-		copy(rKey.SrcAddr[:], entry.SrcAddr[:])
-		_ = m.objs.BdPeerReverseMap.Delete(rKey)
+	// Clean up reverse map + ESI side tables (best-effort: ignore errors).
+	var rKey BdPeerReverseKey
+	var rVal BdPeerReverseVal
+	iter := m.objs.BdPeerReverseMap.Iterate()
+	for iter.Next(&rKey, &rVal) {
+		if rKey.BdId == bdID && rVal.Index == index {
+			k := rKey
+			_ = m.objs.BdPeerReverseMap.Delete(&k)
+			break
+		}
 	}
 	_ = m.objs.BdPeerL2ExtMap.Delete(&BpfBdPeerL2ExtKey{BdId: bdID, Index: index})
 	return nil

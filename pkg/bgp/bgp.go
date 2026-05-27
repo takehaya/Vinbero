@@ -309,4 +309,9 @@ type EVPNRoute struct {
 	SRv6SID     string // End.DT2U (RT2) / End.DT2M (RT3); "" if none
 	NextHop     string
 	ESImportRT  string // RT4: ES-Import route target ("aa:bb:cc:dd:ee:ff"); "" otherwise
+	// RemoteSrc is the advertising PE's SRv6 encap source (the SID's locator
+	// base) for RT2/RT3, used as the RX reverse-map key for split-horizon and
+	// remote-MAC learning -- distinct from the local TX encap source. "" if not
+	// derivable.
+	RemoteSrc string
 }

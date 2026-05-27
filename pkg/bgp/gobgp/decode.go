@@ -64,6 +64,22 @@ func decodeColor(attrs []gobgppkt.PathAttributeInterface) uint32 {
 // folded back in from the VPN label (RFC 9252 §4); label is the route's
 // MPLS label. An empty result means the path carried no SRv6 SID.
 func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface, label uint32) string {
+	sid, _, ok := srv6L2ServiceSIDBytes(attrs, label)
+	if !ok {
+		return ""
+	}
+	addr, ok := netip.AddrFromSlice(sid)
+	if !ok {
+		return ""
+	}
+	return addr.String()
+}
+
+// srv6L2ServiceSIDBytes returns the reconstructed 16-byte service SID and its
+// locator length in bits (0 when no SID Structure Sub-Sub-TLV is present),
+// folding any RFC 9252 transposed label bits back in. ok is false when no
+// usable SID is found.
+func srv6L2ServiceSIDBytes(attrs []gobgppkt.PathAttributeInterface, label uint32) ([]byte, uint8, bool) {
 	for _, a := range attrs {
 		psid, ok := a.(*gobgppkt.PathAttributePrefixSID)
 		if !ok {
@@ -84,21 +100,61 @@ func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface, label uint32) string
 					folded := make([]byte, 16)
 					copy(folded, info.SID)
 					if !foldTransposedLabel(folded, label, length, offset) {
-						// Transposition is signalled but the SID
-						// Structure Sub-Sub-TLV is malformed: the real
-						// SID cannot be rebuilt, so skip it rather than
-						// install a wrong encap target.
+						// Transposition is signalled but the SID Structure
+						// Sub-Sub-TLV is malformed: the real SID cannot be
+						// rebuilt, so skip it rather than use a wrong target.
 						continue
 					}
 					sid = folded
 				}
-				if addr, ok := netip.AddrFromSlice(sid); ok {
-					return addr.String()
-				}
+				return sid, srv6SIDLocatorLen(info), true
 			}
 		}
 	}
-	return ""
+	return nil, 0, false
+}
+
+// srv6SIDLocatorLen returns the locator length in bits (LocatorBlockLength +
+// LocatorNodeLength) from the SID Structure Sub-Sub-TLV (RFC 9252 §3.2.1), or
+// 0 when there is no structure TLV or the value is out of range.
+func srv6SIDLocatorLen(info *gobgppkt.SRv6InformationSubTLV) uint8 {
+	for _, ss := range info.SubSubTLVs {
+		st, ok := ss.(*gobgppkt.SRv6SIDStructureSubSubTLV)
+		if !ok {
+			continue
+		}
+		n := int(st.LocatorBlockLength) + int(st.LocatorNodeLength)
+		if n <= 0 || n > 128 {
+			return 0
+		}
+		return uint8(n)
+	}
+	return 0
+}
+
+// decodeRemoteSrc derives the advertising PE's SRv6 encap source from a
+// received L2 service SID: the SID masked to its locator length. The length
+// comes from the SID Structure Sub-Sub-TLV; when that is absent it falls back
+// to fallbackLen. Returns "" if there is no usable SID. The End.DT2 RX path
+// keys split-horizon and remote-MAC learning on this remote source -- distinct
+// from the local encap source the bd_peer's SrcAddr holds for TX.
+func decodeRemoteSrc(attrs []gobgppkt.PathAttributeInterface, label uint32, fallbackLen uint8) string {
+	sid, locLen, ok := srv6L2ServiceSIDBytes(attrs, label)
+	if !ok {
+		return ""
+	}
+	if locLen == 0 {
+		locLen = fallbackLen
+	}
+	addr, ok := netip.AddrFromSlice(sid)
+	if !ok {
+		return ""
+	}
+	prefix, err := addr.Prefix(int(locLen))
+	if err != nil {
+		return ""
+	}
+	return prefix.Addr().String()
 }
 
 // transpositionParams returns the transposition length and offset from

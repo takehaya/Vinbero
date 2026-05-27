@@ -57,7 +57,7 @@ func BenchmarkEndDT2MSplitHorizonDrop(b *testing.B) {
 		b.Fatalf("CreateEsi: %v", err)
 	}
 	peer, _ := benchL2Peer(b)
-	if err := h.mapOps.CreateBdPeer(benchBdID, 0, peer, esi); err != nil {
+	if err := h.mapOps.CreateBdPeer(benchBdID, 0, peer, esi, peer.SrcAddr); err != nil {
 		b.Fatalf("CreateBdPeer: %v", err)
 	}
 
@@ -76,7 +76,7 @@ func BenchmarkEndDT2MForward(b *testing.B) {
 		b.Fatalf("CreateEsi: %v", err)
 	}
 	peer, _ := benchL2Peer(b)
-	if err := h.mapOps.CreateBdPeer(benchBdID, 0, peer, remoteESI); err != nil {
+	if err := h.mapOps.CreateBdPeer(benchBdID, 0, peer, remoteESI, peer.SrcAddr); err != nil {
 		b.Fatalf("CreateBdPeer: %v", err)
 	}
 

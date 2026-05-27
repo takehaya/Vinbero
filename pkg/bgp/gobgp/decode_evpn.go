@@ -71,6 +71,7 @@ func decodeEVPNMacIP(p *apiutil.Path, rt *gobgppkt.EVPNMacIPAdvertisementRoute) 
 		label = rt.Labels[0]
 	}
 	r.SRv6SID = decodeSRv6SID(p.Attrs, label)
+	r.RemoteSrc = decodeRemoteSrc(p.Attrs, label, defaultLocatorPrefixLen)
 	return r
 }
 
@@ -89,9 +90,16 @@ func decodeEVPNMulticast(p *apiutil.Path, rt *gobgppkt.EVPNMulticastEthernetTagR
 	if rt.RD != nil {
 		r.RD = rt.RD.String()
 	}
-	r.SRv6SID = decodeSRv6SID(p.Attrs, pmsiLabel(p.Attrs))
+	label := pmsiLabel(p.Attrs)
+	r.SRv6SID = decodeSRv6SID(p.Attrs, label)
+	r.RemoteSrc = decodeRemoteSrc(p.Attrs, label, defaultLocatorPrefixLen)
 	return r
 }
+
+// defaultLocatorPrefixLen is the assumed SRv6 locator length (bits) when a
+// received SID carries no SID Structure Sub-Sub-TLV. /48 matches Vinbero's
+// own encapSource() convention and the locators used in the interop labs.
+const defaultLocatorPrefixLen uint8 = 48
 
 // pmsiLabel returns the transposition label from the PMSI Tunnel attribute
 // (Ingress Replication), or 0 when absent. RFC 9252 §6.3 places the RT3

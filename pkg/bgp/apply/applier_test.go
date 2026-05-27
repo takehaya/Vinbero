@@ -68,7 +68,7 @@ func (f *fakeHeadend) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
 	return nil
 }
 
-func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [bpf.ESILen]byte) error {
+func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [bpf.ESILen]byte, _ [bpf.IPv6AddrLen]byte) error {
 	if f.bdPeerErr != nil {
 		return f.bdPeerErr
 	}

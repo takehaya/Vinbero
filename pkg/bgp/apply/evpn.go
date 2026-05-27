@@ -19,7 +19,7 @@ import (
 type fdbBdOps interface {
 	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
 	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
-	CreateBdPeer(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte) error
+	CreateBdPeer(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte) error
 	DeleteBdPeer(bdID, index uint16) error
 	// FindFreeBdPeerIndex returns the lowest bd_peer index not in use in the
 	// real map, so a BGP-allocated peer never collides with an operator-created
@@ -132,6 +132,17 @@ func (t *evpnTable) releaseIndex(key evpnPeerKey) (uint16, bool) {
 	return st.index, true
 }
 
+// remoteSrcOrLocal renders the advertising PE's source (derived from the SID
+// locator) as a 16-byte reverse-map key, falling back to the local encap
+// source when it could not be derived, so the reverse entry stays
+// self-consistent for delete.
+func remoteSrcOrLocal(remoteSrc string, local [bpf.IPv6AddrLen]byte) [bpf.IPv6AddrLen]byte {
+	if addr, err := netip.ParseAddr(remoteSrc); err == nil && addr.Is6() && !addr.Is4In6() {
+		return addr.As16()
+	}
+	return local
+}
+
 func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
 	switch r.Type {
 	case bgp.EVPNRouteTypeMACIP:
@@ -212,13 +223,14 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 			zap.String("mac", r.MAC), zap.Error(err))
 		return
 	}
+	rsrc := remoteSrcOrLocal(r.RemoteSrc, entry.SrcAddr)
 	idx, ok := a.evpn.allocIndex(pk, func() uint16 { return a.fdbBd.FindFreeBdPeerIndex(bdID) })
 	if !ok {
 		a.logger.Error("EVPN bridge domain is full; cannot add peer",
 			zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 		return
 	}
-	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI); err != nil {
+	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI, rsrc); err != nil {
 		a.logger.Error("install EVPN bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
 		a.evpn.releaseIndex(pk)
@@ -320,14 +332,14 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 			zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 		return
 	}
-	// CreateBdPeer also writes bd_peer_reverse_map keyed by {bd_id, local
-	// SrcAddr}. The RT2 unicast peer in this BD shares that key (same local
-	// encap source), so the two reverse entries collide and withdrawing one
-	// clears the other's. This is inert under single-homing: the reverse map is
-	// keyed by the local src rather than the sender's outer_src, so RX
-	// peer-resolution / split-horizon do not consult it correctly today either.
-	// E3 (multi-homing) re-keys the reverse map by remote src and resolves both.
-	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI); err != nil {
+	// CreateBdPeer keys bd_peer_reverse_map by the advertising PE's source
+	// (remoteSrc, derived from the SID locator). The RT2 unicast peer toward the
+	// same PE shares that source, so the reverse entry points at whichever of
+	// {RT2, RT3} was installed last -- both identify the same remote PE, which
+	// is what the End.DT2 RX path needs for remote-MAC learning and Local-Bias
+	// split-horizon.
+	rsrc := remoteSrcOrLocal(r.RemoteSrc, entry.SrcAddr)
+	if err := a.fdbBd.CreateBdPeer(bdID, idx, entry, r.ESI, rsrc); err != nil {
 		a.logger.Error("install EVPN BUM bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
 		return
