@@ -1,0 +1,64 @@
+internal:
+  # eth1 faces the core; eth2 faces the single-homed ce-remote.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+    sr_policy:
+      capacity: 1024
+
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.3"
+    listen_port: 179
+    source_locator: "LOC1"
+  peers:
+    # pe3 has the highest loopback, so it stays passive toward both pe1 and
+    # pe2 and lets them dial in -- one TCP direction per pair, no collision.
+    - neighbor: "2001:db8:ff::1"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      passive: true
+      families:
+        - evpn
+    - neighbor: "2001:db8:ff::2"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      passive: true
+      families:
+        - evpn
+  vrf_bindings:
+    - vrf_name: evi-100
+      import_rts:
+        - "65000:100"
+      bd_id: 100

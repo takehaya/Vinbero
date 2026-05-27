@@ -1,0 +1,94 @@
+# containerlab topology for the evpn-multihoming interop scenario.
+#
+# A customer (ce-mh) is dual-homed to two Vinbero PEs (pe1, pe2) over a shared
+# bridge -- one Ethernet Segment (ES-1) -- and reaches a remote single-homed
+# customer (ce-remote behind pe3) over SRv6 EVPN:
+#
+#   ce-mh --- pe1 --+
+#  10.0.0.10        |== core ==== pe3 --- ce-remote
+#   (dual-homed) ---+ pe2              10.0.0.30
+#       ES-1 (pe1+pe2 local_attached)
+#
+# pe1 and pe2 advertise their attachment to ES-1 as BGP EVPN RT4 (Ethernet
+# Segment, ES-Import RT) and run RFC 8584 DF election; only the elected DF
+# forwards BUM toward ce-mh, and RFC 9252 Local-Bias split-horizon stops a PE
+# from re-flooding the other's BUM back to the shared CE. All three PEs are in
+# provider AS 65100 and peer iBGP full-mesh over their loopbacks carrying the
+# EVPN family (AFI 25 / SAFI 70). `core` is a plain IPv6 router.
+#
+# Scope: RT2 (unicast) + RT3 (BUM) + RT4 (Ethernet Segment / DF). Both CEs
+# resolve ARP dynamically (no static ARP); single-active-style delivery is
+# enforced by DF election + split-horizon, not by static config.
+name: evpn-multihoming
+
+topology:
+  nodes:
+    ce-mh:
+      kind: linux
+      image: alpine:3.20
+      # Dual-homed CE: a local bridge fans the host out to pe1 and pe2 over two
+      # legs of the same Ethernet Segment. The host is MAC-pinned on the bridge
+      # so both PEs see one stable customer MAC.
+      exec:
+        - ip link add br-ce type bridge
+        - ip link set br-ce address aa:bb:cc:00:00:10
+        - ip link set eth1 master br-ce
+        - ip link set eth2 master br-ce
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set br-ce up
+        - ip addr add 10.0.0.10/24 dev br-ce
+
+    pe1:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - pe1/vinbero.yml:/vinbero.yml
+        - pe1/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    pe2:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - pe2/vinbero.yml:/vinbero.yml
+        - pe2/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    core:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - core/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    pe3:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - pe3/vinbero.yml:/vinbero.yml
+        - pe3/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    ce-remote:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip link set eth1 address aa:bb:cc:00:00:30
+        - ip addr add 10.0.0.30/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    # Dual-homed CE legs (the shared Ethernet Segment).
+    - endpoints: [ce-mh:eth1, pe1:eth2]
+    - endpoints: [ce-mh:eth2, pe2:eth2]
+    # Provider underlay: pe1/pe2/pe3 <-> core.
+    - endpoints: [pe1:eth1, core:eth1]
+    - endpoints: [pe2:eth1, core:eth2]
+    - endpoints: [pe3:eth1, core:eth3]
+    # Remote single-homed CE.
+    - endpoints: [ce-remote:eth1, pe3:eth2]
