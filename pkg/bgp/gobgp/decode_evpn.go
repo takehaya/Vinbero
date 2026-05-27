@@ -8,9 +8,9 @@ import (
 )
 
 // decodeEVPNRoute builds Vinbero's EVPNRoute view of a received EVPN NLRI
-// (AFI 25 / SAFI 70). RT2 (MAC/IP) and RT3 (Inclusive Multicast) are decoded;
-// other route types return nil, which the Applier treats as a no-op until
-// their phase lands (RT4 in E3).
+// (AFI 25 / SAFI 70). RT2 (MAC/IP), RT3 (Inclusive Multicast), and RT4
+// (Ethernet Segment) are decoded; other route types return nil, which the
+// Applier treats as a no-op.
 func decodeEVPNRoute(p *apiutil.Path) *bgp.EVPNRoute {
 	nlri, ok := p.Nlri.(*gobgppkt.EVPNNLRI)
 	if !ok {
@@ -21,9 +21,28 @@ func decodeEVPNRoute(p *apiutil.Path) *bgp.EVPNRoute {
 		return decodeEVPNMacIP(p, rt)
 	case *gobgppkt.EVPNMulticastEthernetTagRoute:
 		return decodeEVPNMulticast(p, rt)
+	case *gobgppkt.EVPNEthernetSegmentRoute:
+		return decodeEVPNEthernetSegment(p, rt)
 	default:
 		return nil
 	}
+}
+
+// decodeEVPNEthernetSegment decodes an RT4 Ethernet Segment route (RFC 7432
+// §7.6). RT4 carries no SRv6 SID; it signals ES membership with the ES-Import
+// route target. The ESI and the originating router IP (the next hop) identify
+// which PE attaches to the segment, the inputs to DF election.
+func decodeEVPNEthernetSegment(p *apiutil.Path, rt *gobgppkt.EVPNEthernetSegmentRoute) *bgp.EVPNRoute {
+	r := &bgp.EVPNRoute{
+		Type:       bgp.EVPNRouteTypeEthernetSegment,
+		ESI:        esiToArray(rt.ESI),
+		ESImportRT: decodeESImportRT(p.Attrs),
+		NextHop:    decodeNextHop(p.Attrs),
+	}
+	if rt.RD != nil {
+		r.RD = rt.RD.String()
+	}
+	return r
 }
 
 // decodeEVPNMacIP decodes an RT2 MAC/IP Advertisement. The End.DT2U

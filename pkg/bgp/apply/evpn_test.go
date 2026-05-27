@@ -403,3 +403,98 @@ func TestApplier_EVPNRT3BdFull(t *testing.T) {
 		t.Error("BD-full must not record an RT3 mcast ledger entry")
 	}
 }
+
+var testESI = [10]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+
+// seedLocalEsi marks an ESI as locally attached in the fake esi_map so DF
+// election runs for it (the operator-declared `vbctl es create --local-attached`).
+func seedLocalEsi(fh *fakeHeadend, esi [10]byte, localPE string) {
+	fh.esis[esi] = &bpf.EsiEntry{
+		LocalAttached:  1,
+		LocalPeSrcAddr: netip.MustParseAddr(localPE).As16(),
+	}
+}
+
+func rt4(esi [10]byte, pe string) *bgp.EVPNRoute {
+	return &bgp.EVPNRoute{
+		Type:       bgp.EVPNRouteTypeEthernetSegment,
+		RD:         "65000:1",
+		ESI:        esi,
+		ESImportRT: "aa:bb:cc:dd:ee:ff",
+		NextHop:    pe,
+	}
+}
+
+func dfAddr(fh *fakeHeadend, esi [10]byte) string {
+	return netip.AddrFrom16(fh.esis[esi].DfPeSrcAddr).Unmap().String()
+}
+
+// DF election picks the numerically lowest PE among {local, RT4 members} for
+// ELAN (ETag 0). A higher-addressed remote keeps local as DF; a lower-addressed
+// remote wins.
+func TestApplier_EVPNRT4DFElection(t *testing.T) {
+	a, fh := evpnApplier(t)
+	seedLocalEsi(fh, testESI, "fd00:1:1::")
+
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "fd00:2:2::")})
+	if got := dfAddr(fh, testESI); got != "fd00:1:1::" {
+		t.Errorf("DF = %s, want local fd00:1:1:: (lowest of {local, fd00:2:2::})", got)
+	}
+
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "fc00::1")})
+	if got := dfAddr(fh, testESI); got != "fc00::1" {
+		t.Errorf("DF = %s, want fc00::1 (now the lowest)", got)
+	}
+}
+
+// Withdrawing a member re-elects the DF over the remaining candidates.
+func TestApplier_EVPNRT4WithdrawReelects(t *testing.T) {
+	a, fh := evpnApplier(t)
+	seedLocalEsi(fh, testESI, "fd00:1:1::")
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "fc00::1")})
+	if got := dfAddr(fh, testESI); got != "fc00::1" {
+		t.Fatalf("precondition: DF should be fc00::1, got %s", got)
+	}
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt4(testESI, "fc00::1")})
+	if got := dfAddr(fh, testESI); got != "fd00:1:1::" {
+		t.Errorf("after withdraw DF = %s, want local fd00:1:1:: (only candidate left)", got)
+	}
+}
+
+// An RT4 for an ESI this PE does not locally attach records membership only and
+// never writes esi_map -- a crafted RT4 cannot mint a phantom segment.
+func TestApplier_EVPNRT4NotLocallyAttachedNoWrite(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "fc00::1")})
+	if _, ok := fh.esis[testESI]; ok {
+		t.Error("RT4 must not create an esi_map entry for an unattached ESI")
+	}
+	if _, ok := a.evpn.esMembers[testESI]; !ok {
+		t.Error("membership should still be recorded when not locally attached")
+	}
+}
+
+// A crafted RT4 with an IPv4-mapped next hop must not enter DF election (the
+// same guard RT2/RT3 apply to SIDs); the local PE stays DF. Without the guard
+// ::ffff:0.0.0.1 sorts before fd00:1:1:: and would steal DF.
+func TestApplier_EVPNRT4RejectsMappedMemberAddr(t *testing.T) {
+	a, fh := evpnApplier(t)
+	seedLocalEsi(fh, testESI, "fd00:1:1::")
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "::ffff:0.0.0.1")})
+	if got := dfAddr(fh, testESI); got != "fd00:1:1::" {
+		t.Errorf("IPv4-mapped member must be rejected; DF = %s, want local fd00:1:1::", got)
+	}
+}
+
+// A locally-attached ES whose local PE source is unspecified must not elect a
+// DF -- electing :: would black-hole the segment.
+func TestApplier_EVPNRT4ZeroLocalSkipsElection(t *testing.T) {
+	a, fh := evpnApplier(t)
+	fh.esis[testESI] = &bpf.EsiEntry{LocalAttached: 1} // LocalPeSrcAddr all-zero
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "fd00:2:2::")})
+	var zero [bpf.IPv6AddrLen]byte
+	if fh.esis[testESI].DfPeSrcAddr != zero {
+		t.Errorf("zero local source must skip election; DF = %v, want unset",
+			netip.AddrFrom16(fh.esis[testESI].DfPeSrcAddr))
+	}
+}

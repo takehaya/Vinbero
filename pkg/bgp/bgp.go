@@ -296,4 +296,5 @@ type EVPNRoute struct {
 	IPAddr      string // RT2: optional host IP (IRB); "" when MAC-only
 	SRv6SID     string // End.DT2U (RT2) / End.DT2M (RT3); "" if none
 	NextHop     string
+	ESImportRT  string // RT4: ES-Import route target ("aa:bb:cc:dd:ee:ff"); "" otherwise
 }

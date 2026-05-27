@@ -39,6 +39,7 @@ type fakeHeadend struct {
 	fdbErr       error
 	fdbDelErr    error
 	bdPeerDelErr error
+	esis         map[[bpf.ESILen]byte]*bpf.EsiEntry
 }
 
 func newFakeHeadend() *fakeHeadend {
@@ -47,6 +48,7 @@ func newFakeHeadend() *fakeHeadend {
 		v6created: map[string]*bpf.HeadendEntry{},
 		fdb:       map[fdbKey]*bpf.FdbEntry{},
 		bdPeers:   map[bdPeerKey]*bpf.HeadendEntry{},
+		esis:      map[[bpf.ESILen]byte]*bpf.EsiEntry{},
 	}
 }
 
@@ -91,6 +93,25 @@ func (f *fakeHeadend) FindFreeBdPeerIndex(bdID uint16) uint16 {
 		}
 	}
 	return bpf.MaxBumNexthops
+}
+
+// GetEsi / SetEsiDfPe model the esi_map for DF election tests. A test seeds an
+// ESI (local-attached or not) into f.esis; SetEsiDfPe records the elected DF.
+func (f *fakeHeadend) GetEsi(esi [bpf.ESILen]byte) (*bpf.EsiEntry, error) {
+	e, ok := f.esis[esi]
+	if !ok {
+		return nil, errors.New("esi not found")
+	}
+	return e, nil
+}
+
+func (f *fakeHeadend) SetEsiDfPe(esi [bpf.ESILen]byte, dfAddr [bpf.IPv6AddrLen]byte) (*bpf.EsiEntry, error) {
+	e, ok := f.esis[esi]
+	if !ok {
+		return nil, errors.New("esi not found")
+	}
+	e.DfPeSrcAddr = dfAddr
+	return e, nil
 }
 
 // no-op SR Policy map ops so fakeHeadend satisfies the applier's dataPlane

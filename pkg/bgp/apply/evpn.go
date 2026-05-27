@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 
 	"go.uber.org/zap"
 
@@ -13,7 +14,8 @@ import (
 )
 
 // fdbBdOps is the subset of bpf.MapOperations the EVPN applier writes:
-// the FDB (MAC -> peer) and the per-PE bd_peer encap entry.
+// the FDB (MAC -> peer), the per-PE bd_peer encap entry, and the Ethernet
+// Segment (ESI) table that DF election drives.
 type fdbBdOps interface {
 	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
 	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
@@ -23,6 +25,12 @@ type fdbBdOps interface {
 	// real map, so a BGP-allocated peer never collides with an operator-created
 	// or restart-pinned entry.
 	FindFreeBdPeerIndex(bdID uint16) uint16
+	// GetEsi / SetEsiDfPe drive DF election: GetEsi reports whether this PE
+	// locally attaches the segment (and its local source), SetEsiDfPe writes
+	// the elected DF's source address. RT4 never creates an ES locally; the
+	// operator declares attachment via `vbctl es create --local-attached`.
+	GetEsi(esi [bpf.ESILen]byte) (*bpf.EsiEntry, error)
+	SetEsiDfPe(esi [bpf.ESILen]byte, dfAddr [bpf.IPv6AddrLen]byte) (*bpf.EsiEntry, error)
 }
 
 // evpnPeerKey identifies a remote PE within a bridge domain by its End.DT2U
@@ -77,13 +85,17 @@ type evpnTable struct {
 	peers map[evpnPeerKey]*evpnPeerState
 	fdb   map[evpnFdbKey]evpnFdbState
 	mcast map[evpnMcastKey]evpnMcastState
+	// esMembers maps an ESI to the set of member PE source IPs learned from
+	// RT4 (Ethernet Segment routes), the candidate set for DF election.
+	esMembers map[[bpf.ESILen]byte]map[string]struct{}
 }
 
 func newEVPNTable() *evpnTable {
 	return &evpnTable{
-		peers: make(map[evpnPeerKey]*evpnPeerState),
-		fdb:   make(map[evpnFdbKey]evpnFdbState),
-		mcast: make(map[evpnMcastKey]evpnMcastState),
+		peers:     make(map[evpnPeerKey]*evpnPeerState),
+		fdb:       make(map[evpnFdbKey]evpnFdbState),
+		mcast:     make(map[evpnMcastKey]evpnMcastState),
+		esMembers: make(map[[bpf.ESILen]byte]map[string]struct{}),
 	}
 }
 
@@ -126,8 +138,10 @@ func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
 		a.applyEVPNMacIP(r, withdraw)
 	case bgp.EVPNRouteTypeInclusiveMulticast:
 		a.applyEVPNInclusiveMulticast(r, withdraw)
+	case bgp.EVPNRouteTypeEthernetSegment:
+		a.applyEVPNEthernetSegment(r, withdraw)
 	default:
-		// RT4 (Ethernet Segment) arrives in a later phase; ignore until then.
+		// Unsupported route types (RT1 Ethernet A-D, RT5 IP Prefix) are ignored.
 	}
 }
 
@@ -332,6 +346,98 @@ func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) {
 		return
 	}
 	delete(a.evpn.mcast, mk)
+}
+
+// applyEVPNEthernetSegment records (or removes) a remote PE's membership in an
+// Ethernet Segment from an RT4 route, then re-runs DF election for that ESI.
+// RT4 carries no SID; the ESI plus the originating router IP (next hop)
+// identify the attaching PE. Membership is tracked for every ESI, but DF
+// election only writes esi_map for an ESI this PE locally attaches (declared by
+// the operator via `vbctl es create --local-attached`); an RT4 for an
+// unattached ESI is recorded informationally and never creates a local ES, so a
+// crafted RT4 cannot mint a phantom segment.
+func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
+	var zeroESI [bpf.ESILen]byte
+	if r.ESI == zeroESI {
+		a.logger.Warn("EVPN RT4 has all-zero ESI; skipping", zap.String("rd", r.RD))
+		return
+	}
+	pe := r.NextHop
+	if pe == "" {
+		a.logger.Warn("EVPN RT4 has no originating PE (next hop); skipping",
+			zap.String("rd", r.RD))
+		return
+	}
+
+	members := a.evpn.esMembers[r.ESI]
+	if withdraw {
+		if members == nil {
+			return
+		}
+		delete(members, pe)
+		if len(members) == 0 {
+			delete(a.evpn.esMembers, r.ESI)
+		}
+	} else {
+		if members == nil {
+			members = make(map[string]struct{})
+			a.evpn.esMembers[r.ESI] = members
+		}
+		members[pe] = struct{}{}
+	}
+	a.electDF(r.ESI)
+}
+
+// electDF runs the RFC 8584 default DF election for an ESI and writes the
+// winner to esi_map. It is a no-op unless this PE locally attaches the ESI. The
+// candidate set is the union of the RT4-advertised member PE sources and this
+// PE's own local source; sorted numerically, the DF is index (ETag mod N).
+// ELAN uses a single Ethernet Tag (0), so this picks the lowest PE in the
+// ordered list -- deterministic and identical across PEs that see the same
+// membership.
+func (a *Applier) electDF(esi [bpf.ESILen]byte) {
+	entry, err := a.fdbBd.GetEsi(esi)
+	if err != nil || entry == nil || entry.LocalAttached == 0 {
+		return // not locally attached: membership recorded only, no map write
+	}
+	local := netip.AddrFrom16(entry.LocalPeSrcAddr)
+	// The server requires a local PE source when an ES is locally attached, but
+	// guard here too: an unspecified or IPv4-mapped local source would sort
+	// first (::) and win DF, installing a black-hole. Skip election (fail-open:
+	// DF stays unset so all PEs forward) rather than write a bogus DF.
+	if !local.Is6() || local.Is4In6() || local.IsUnspecified() {
+		a.logger.Error("EVPN ES locally attached but local PE source is not a usable IPv6; skipping DF election",
+			zap.String("local", local.String()))
+		return
+	}
+
+	// Candidate set: local PE plus the RT4 member PEs, deduplicated. Reject
+	// IPv4-mapped member addresses (the same guard RT2/RT3 apply to SIDs) so a
+	// crafted next hop cannot skew the ordering or be elected as a bogus DF.
+	seen := map[netip.Addr]struct{}{local: {}}
+	cands := []netip.Addr{local}
+	for peStr := range a.evpn.esMembers[esi] {
+		addr, perr := netip.ParseAddr(peStr)
+		if perr != nil || !addr.Is6() || addr.Is4In6() {
+			continue
+		}
+		if _, dup := seen[addr]; dup {
+			continue
+		}
+		seen[addr] = struct{}{}
+		cands = append(cands, addr)
+	}
+	slices.SortFunc(cands, func(x, y netip.Addr) int { return x.Compare(y) })
+
+	const etag = 0 // ELAN: single Ethernet Tag
+	df := cands[etag%len(cands)]
+	if _, err := a.fdbBd.SetEsiDfPe(esi, df.As16()); err != nil {
+		a.logger.Error("set EVPN DF",
+			zap.String("df", df.String()), zap.Error(err))
+		return
+	}
+	a.logger.Info("EVPN DF elected",
+		zap.String("df", df.String()), zap.Int("candidates", len(cands)))
 }
 
 // buildL2HeadendEntry assembles an H.Encaps.L2 entry that encapsulates the

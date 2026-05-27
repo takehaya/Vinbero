@@ -145,3 +145,55 @@ func TestDecodeEVPN_RT3NoPmsi(t *testing.T) {
 		t.Errorf("SRv6SID = %q, want fd00:2:2:24:: from the L2 Service TLV", r.SRv6SID)
 	}
 }
+
+// rt4Path builds a received EVPN RT4 (Ethernet Segment) path: an ESI, an
+// ES-Import route target, and the originating router IP as the next hop. RT4
+// carries no SRv6 SID.
+func rt4Path(t *testing.T, esiValue []byte, nh string) *apiutil.Path {
+	t.Helper()
+	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 1)
+	nlri := &gobgppkt.EVPNNLRI{
+		RouteType: gobgppkt.EVPN_ETHERNET_SEGMENT_ROUTE,
+		RouteTypeData: &gobgppkt.EVPNEthernetSegmentRoute{
+			RD:              rd,
+			ESI:             gobgppkt.EthernetSegmentIdentifier{Type: gobgppkt.ESI_ARBITRARY, Value: esiValue},
+			IPAddressLength: 128,
+			IPAddress:       netip.MustParseAddr(nh),
+		},
+	}
+	esImport := gobgppkt.NewESImportRouteTarget("aa:bb:cc:dd:ee:ff")
+	mpReach, err := gobgppkt.NewPathAttributeMpReachNLRI(
+		gobgppkt.RF_EVPN, []gobgppkt.PathNLRI{{NLRI: nlri}}, netip.MustParseAddr(nh))
+	if err != nil {
+		t.Fatalf("build MP_REACH_NLRI: %v", err)
+	}
+	attrs := []gobgppkt.PathAttributeInterface{
+		gobgppkt.NewPathAttributeExtendedCommunities([]gobgppkt.ExtendedCommunityInterface{esImport}),
+		mpReach,
+	}
+	return &apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri, Attrs: attrs}
+}
+
+func TestDecodeEVPN_RT4(t *testing.T) {
+	r := decodeEVPNRoute(rt4Path(t, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9}, "2001:db8::1"))
+	if r == nil {
+		t.Fatal("decodeEVPNRoute returned nil for an RT4 path")
+	}
+	if r.Type != bgp.EVPNRouteTypeEthernetSegment {
+		t.Errorf("Type = %d, want RT4 (Ethernet Segment)", r.Type)
+	}
+	if r.NextHop != "2001:db8::1" {
+		t.Errorf("NextHop = %q, want 2001:db8::1 (originating PE)", r.NextHop)
+	}
+	if r.ESImportRT != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("ESImportRT = %q, want aa:bb:cc:dd:ee:ff", r.ESImportRT)
+	}
+	if r.SRv6SID != "" {
+		t.Errorf("RT4 carries no SID; got %q", r.SRv6SID)
+	}
+	// esiToArray: Type (0) + 9-byte value.
+	want := [10]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	if r.ESI != want {
+		t.Errorf("ESI = %v, want %v", r.ESI, want)
+	}
+}

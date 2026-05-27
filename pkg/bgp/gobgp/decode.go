@@ -162,6 +162,25 @@ func decodeRouteTargets(attrs []gobgppkt.PathAttributeInterface) []string {
 	return rts
 }
 
+// decodeESImportRT returns the ES-Import route target (RFC 7432 §7.6) carried
+// on the path, rendered as a MAC string, or "" if absent. RT4 signals Ethernet
+// Segment membership with this community (sub-type EC_SUBTYPE_ES_IMPORT), which
+// is distinct from the ordinary route targets decodeRouteTargets returns.
+func decodeESImportRT(attrs []gobgppkt.PathAttributeInterface) string {
+	for _, a := range attrs {
+		ec, ok := a.(*gobgppkt.PathAttributeExtendedCommunities)
+		if !ok {
+			continue
+		}
+		for _, c := range ec.Value {
+			if esi, ok := c.(*gobgppkt.ESImportRouteTarget); ok {
+				return esi.ESImport.String()
+			}
+		}
+	}
+	return ""
+}
+
 // decodeNextHop returns the path's next hop. VPN families carry it in
 // MP_REACH_NLRI; plain IPv4 unicast uses the legacy NEXT_HOP attribute.
 func decodeNextHop(attrs []gobgppkt.PathAttributeInterface) string {
