@@ -264,6 +264,13 @@ type EVPNMcastKey struct {
 	EthernetTag uint32
 }
 
+// EVPNESKey identifies a previously-advertised RT4 (Ethernet Segment) for
+// withdrawal: the {RD, ESI} tuple of the NLRI.
+type EVPNESKey struct {
+	RD  string
+	ESI [10]byte
+}
+
 // EVPNController advertises Vinbero's local EVPN state into BGP (AFI 25 /
 // SAFI 70). Reception is delivered through RouteSubscriber as
 // RouteEvent.EVPN; PushEVPNMac / WithdrawEVPNMac are the advertise direction
@@ -278,6 +285,11 @@ type EVPNController interface {
 	// End.DT2M flood SID so remote PEs flood BUM traffic toward this node.
 	PushEVPNInclusiveMulticast(ctx context.Context, r EVPNRoute) error
 	WithdrawEVPNInclusiveMulticast(ctx context.Context, key EVPNMcastKey) error
+	// PushEVPNEthernetSegment / WithdrawEVPNEthernetSegment are the advertise
+	// direction for RT4 (Ethernet Segment), carrying the ES-Import route target
+	// so peers learn this PE attaches to the segment (DF election input).
+	PushEVPNEthernetSegment(ctx context.Context, r EVPNRoute) error
+	WithdrawEVPNEthernetSegment(ctx context.Context, key EVPNESKey) error
 }
 
 // EVPNRoute is a decoded BGP EVPN NLRI (AFI 25 / SAFI 70). One envelope

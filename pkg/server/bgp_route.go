@@ -302,6 +302,70 @@ func evpnImetTrigger(rd string, etag uint32) string {
 	return fmt.Sprintf("rd=%s etag=%d", rd, etag)
 }
 
+func (s *BgpRouteServer) BgpAdvertiseEvpnEs(
+	ctx context.Context,
+	req *connect.Request[v1.BgpAdvertiseEvpnEsRequest],
+) (*connect.Response[v1.BgpAdvertiseEvpnEsResponse], error) {
+	if s.evpn == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errBGPDisabled)
+	}
+	resp := &v1.BgpAdvertiseEvpnEsResponse{
+		Advertised: make([]*v1.BgpEvpnEs, 0),
+		Errors:     make([]*v1.OperationError, 0),
+	}
+	for _, m := range req.Msg.Segments {
+		esi, err := bpf.ParseESI(m.GetEsi())
+		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnEsTrigger(m.GetRd(), m.GetEsi()), Reason: fmt.Sprintf("invalid ESI: %v", err)})
+			continue
+		}
+		route := bgp.EVPNRoute{
+			Type:       bgp.EVPNRouteTypeEthernetSegment,
+			RD:         m.GetRd(),
+			ESI:        esi,
+			ESImportRT: m.GetEsImportRt(),
+			NextHop:    m.GetNextHop(),
+		}
+		if err := s.evpn.PushEVPNEthernetSegment(ctx, route); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnEsTrigger(m.GetRd(), m.GetEsi()), Reason: err.Error()})
+			continue
+		}
+		resp.Advertised = append(resp.Advertised, m)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *BgpRouteServer) BgpWithdrawEvpnEs(
+	ctx context.Context,
+	req *connect.Request[v1.BgpWithdrawEvpnEsRequest],
+) (*connect.Response[v1.BgpWithdrawEvpnEsResponse], error) {
+	if s.evpn == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errBGPDisabled)
+	}
+	resp := &v1.BgpWithdrawEvpnEsResponse{
+		Withdrawn: make([]*v1.BgpEvpnEsKey, 0),
+		Errors:    make([]*v1.OperationError, 0),
+	}
+	for _, k := range req.Msg.Keys {
+		esi, err := bpf.ParseESI(k.GetEsi())
+		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnEsTrigger(k.GetRd(), k.GetEsi()), Reason: fmt.Sprintf("invalid ESI: %v", err)})
+			continue
+		}
+		if err := s.evpn.WithdrawEVPNEthernetSegment(ctx, bgp.EVPNESKey{RD: k.GetRd(), ESI: esi}); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnEsTrigger(k.GetRd(), k.GetEsi()), Reason: err.Error()})
+			continue
+		}
+		resp.Withdrawn = append(resp.Withdrawn, k)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// evpnEsTrigger names the RT4 identity for an OperationError.
+func evpnEsTrigger(rd, esi string) string {
+	return fmt.Sprintf("rd=%s esi=%s", rd, esi)
+}
+
 // protoToAdvertiseEvpnMac validates a BgpEvpnMac advertise request and
 // converts it to a bgp.EVPNRoute. The SID / next-hop IPv6 checks happen in the
 // encoder; the MAC and optional ESI are validated here so a bad request is a

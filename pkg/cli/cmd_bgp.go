@@ -242,6 +242,52 @@ func bgpCommand() *cli.Command {
 					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnImetKey", "withdrawn")
 				},
 			},
+			{
+				Name:  "advertise-evpn-es",
+				Usage: "Advertise a local EVPN RT4 (Ethernet Segment) with an ES-Import RT",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:1"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: "Ethernet Segment Identifier (10-octet, e.g. 00:11:...)"},
+					&cli.StringFlag{Name: "es-import-rt", Required: true, Usage: "ES-Import route target as a MAC (aa:bb:cc:dd:ee:ff)"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop / originating PE source (IPv6)"},
+				},
+				Action: func(c *cli.Context) error {
+					m := &v1.BgpEvpnEs{
+						Rd:         c.String("rd"),
+						Esi:        c.String("esi"),
+						EsImportRt: c.String("es-import-rt"),
+						NextHop:    c.String("next-hop"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseEvpnEs(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseEvpnEsRequest{Segments: []*v1.BgpEvpnEs{m}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpEvpnEs", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-evpn-es",
+				Usage: "Withdraw a previously advertised EVPN RT4",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: "Ethernet Segment Identifier (10-octet)"},
+				},
+				Action: func(c *cli.Context) error {
+					k := &v1.BgpEvpnEsKey{
+						Rd:  c.String("rd"),
+						Esi: c.String("esi"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawEvpnEs(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawEvpnEsRequest{Keys: []*v1.BgpEvpnEsKey{k}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnEsKey", "withdrawn")
+				},
+			},
 		},
 	}
 }

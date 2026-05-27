@@ -60,6 +60,12 @@ const (
 	// BgpRouteServiceBgpWithdrawEvpnImetProcedure is the fully-qualified name of the BgpRouteService's
 	// BgpWithdrawEvpnImet RPC.
 	BgpRouteServiceBgpWithdrawEvpnImetProcedure = "/vinbero.v1.BgpRouteService/BgpWithdrawEvpnImet"
+	// BgpRouteServiceBgpAdvertiseEvpnEsProcedure is the fully-qualified name of the BgpRouteService's
+	// BgpAdvertiseEvpnEs RPC.
+	BgpRouteServiceBgpAdvertiseEvpnEsProcedure = "/vinbero.v1.BgpRouteService/BgpAdvertiseEvpnEs"
+	// BgpRouteServiceBgpWithdrawEvpnEsProcedure is the fully-qualified name of the BgpRouteService's
+	// BgpWithdrawEvpnEs RPC.
+	BgpRouteServiceBgpWithdrawEvpnEsProcedure = "/vinbero.v1.BgpRouteService/BgpWithdrawEvpnEs"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -74,6 +80,8 @@ var (
 	bgpRouteServiceBgpWithdrawEvpnMacMethodDescriptor   = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpWithdrawEvpnMac")
 	bgpRouteServiceBgpAdvertiseEvpnImetMethodDescriptor = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpAdvertiseEvpnImet")
 	bgpRouteServiceBgpWithdrawEvpnImetMethodDescriptor  = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpWithdrawEvpnImet")
+	bgpRouteServiceBgpAdvertiseEvpnEsMethodDescriptor   = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpAdvertiseEvpnEs")
+	bgpRouteServiceBgpWithdrawEvpnEsMethodDescriptor    = bgpRouteServiceServiceDescriptor.Methods().ByName("BgpWithdrawEvpnEs")
 )
 
 // BgpRouteServiceClient is a client for the vinbero.v1.BgpRouteService service.
@@ -87,6 +95,8 @@ type BgpRouteServiceClient interface {
 	BgpWithdrawEvpnMac(context.Context, *connect.Request[v1.BgpWithdrawEvpnMacRequest]) (*connect.Response[v1.BgpWithdrawEvpnMacResponse], error)
 	BgpAdvertiseEvpnImet(context.Context, *connect.Request[v1.BgpAdvertiseEvpnImetRequest]) (*connect.Response[v1.BgpAdvertiseEvpnImetResponse], error)
 	BgpWithdrawEvpnImet(context.Context, *connect.Request[v1.BgpWithdrawEvpnImetRequest]) (*connect.Response[v1.BgpWithdrawEvpnImetResponse], error)
+	BgpAdvertiseEvpnEs(context.Context, *connect.Request[v1.BgpAdvertiseEvpnEsRequest]) (*connect.Response[v1.BgpAdvertiseEvpnEsResponse], error)
+	BgpWithdrawEvpnEs(context.Context, *connect.Request[v1.BgpWithdrawEvpnEsRequest]) (*connect.Response[v1.BgpWithdrawEvpnEsResponse], error)
 }
 
 // NewBgpRouteServiceClient constructs a client for the vinbero.v1.BgpRouteService service. By
@@ -153,6 +163,18 @@ func NewBgpRouteServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(bgpRouteServiceBgpWithdrawEvpnImetMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		bgpAdvertiseEvpnEs: connect.NewClient[v1.BgpAdvertiseEvpnEsRequest, v1.BgpAdvertiseEvpnEsResponse](
+			httpClient,
+			baseURL+BgpRouteServiceBgpAdvertiseEvpnEsProcedure,
+			connect.WithSchema(bgpRouteServiceBgpAdvertiseEvpnEsMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		bgpWithdrawEvpnEs: connect.NewClient[v1.BgpWithdrawEvpnEsRequest, v1.BgpWithdrawEvpnEsResponse](
+			httpClient,
+			baseURL+BgpRouteServiceBgpWithdrawEvpnEsProcedure,
+			connect.WithSchema(bgpRouteServiceBgpWithdrawEvpnEsMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -167,6 +189,8 @@ type bgpRouteServiceClient struct {
 	bgpWithdrawEvpnMac   *connect.Client[v1.BgpWithdrawEvpnMacRequest, v1.BgpWithdrawEvpnMacResponse]
 	bgpAdvertiseEvpnImet *connect.Client[v1.BgpAdvertiseEvpnImetRequest, v1.BgpAdvertiseEvpnImetResponse]
 	bgpWithdrawEvpnImet  *connect.Client[v1.BgpWithdrawEvpnImetRequest, v1.BgpWithdrawEvpnImetResponse]
+	bgpAdvertiseEvpnEs   *connect.Client[v1.BgpAdvertiseEvpnEsRequest, v1.BgpAdvertiseEvpnEsResponse]
+	bgpWithdrawEvpnEs    *connect.Client[v1.BgpWithdrawEvpnEsRequest, v1.BgpWithdrawEvpnEsResponse]
 }
 
 // BgpAdvertiseVpn calls vinbero.v1.BgpRouteService.BgpAdvertiseVpn.
@@ -214,6 +238,16 @@ func (c *bgpRouteServiceClient) BgpWithdrawEvpnImet(ctx context.Context, req *co
 	return c.bgpWithdrawEvpnImet.CallUnary(ctx, req)
 }
 
+// BgpAdvertiseEvpnEs calls vinbero.v1.BgpRouteService.BgpAdvertiseEvpnEs.
+func (c *bgpRouteServiceClient) BgpAdvertiseEvpnEs(ctx context.Context, req *connect.Request[v1.BgpAdvertiseEvpnEsRequest]) (*connect.Response[v1.BgpAdvertiseEvpnEsResponse], error) {
+	return c.bgpAdvertiseEvpnEs.CallUnary(ctx, req)
+}
+
+// BgpWithdrawEvpnEs calls vinbero.v1.BgpRouteService.BgpWithdrawEvpnEs.
+func (c *bgpRouteServiceClient) BgpWithdrawEvpnEs(ctx context.Context, req *connect.Request[v1.BgpWithdrawEvpnEsRequest]) (*connect.Response[v1.BgpWithdrawEvpnEsResponse], error) {
+	return c.bgpWithdrawEvpnEs.CallUnary(ctx, req)
+}
+
 // BgpRouteServiceHandler is an implementation of the vinbero.v1.BgpRouteService service.
 type BgpRouteServiceHandler interface {
 	BgpAdvertiseVpn(context.Context, *connect.Request[v1.BgpAdvertiseVpnRequest]) (*connect.Response[v1.BgpAdvertiseVpnResponse], error)
@@ -225,6 +259,8 @@ type BgpRouteServiceHandler interface {
 	BgpWithdrawEvpnMac(context.Context, *connect.Request[v1.BgpWithdrawEvpnMacRequest]) (*connect.Response[v1.BgpWithdrawEvpnMacResponse], error)
 	BgpAdvertiseEvpnImet(context.Context, *connect.Request[v1.BgpAdvertiseEvpnImetRequest]) (*connect.Response[v1.BgpAdvertiseEvpnImetResponse], error)
 	BgpWithdrawEvpnImet(context.Context, *connect.Request[v1.BgpWithdrawEvpnImetRequest]) (*connect.Response[v1.BgpWithdrawEvpnImetResponse], error)
+	BgpAdvertiseEvpnEs(context.Context, *connect.Request[v1.BgpAdvertiseEvpnEsRequest]) (*connect.Response[v1.BgpAdvertiseEvpnEsResponse], error)
+	BgpWithdrawEvpnEs(context.Context, *connect.Request[v1.BgpWithdrawEvpnEsRequest]) (*connect.Response[v1.BgpWithdrawEvpnEsResponse], error)
 }
 
 // NewBgpRouteServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -287,6 +323,18 @@ func NewBgpRouteServiceHandler(svc BgpRouteServiceHandler, opts ...connect.Handl
 		connect.WithSchema(bgpRouteServiceBgpWithdrawEvpnImetMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	bgpRouteServiceBgpAdvertiseEvpnEsHandler := connect.NewUnaryHandler(
+		BgpRouteServiceBgpAdvertiseEvpnEsProcedure,
+		svc.BgpAdvertiseEvpnEs,
+		connect.WithSchema(bgpRouteServiceBgpAdvertiseEvpnEsMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	bgpRouteServiceBgpWithdrawEvpnEsHandler := connect.NewUnaryHandler(
+		BgpRouteServiceBgpWithdrawEvpnEsProcedure,
+		svc.BgpWithdrawEvpnEs,
+		connect.WithSchema(bgpRouteServiceBgpWithdrawEvpnEsMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.BgpRouteService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BgpRouteServiceBgpAdvertiseVpnProcedure:
@@ -307,6 +355,10 @@ func NewBgpRouteServiceHandler(svc BgpRouteServiceHandler, opts ...connect.Handl
 			bgpRouteServiceBgpAdvertiseEvpnImetHandler.ServeHTTP(w, r)
 		case BgpRouteServiceBgpWithdrawEvpnImetProcedure:
 			bgpRouteServiceBgpWithdrawEvpnImetHandler.ServeHTTP(w, r)
+		case BgpRouteServiceBgpAdvertiseEvpnEsProcedure:
+			bgpRouteServiceBgpAdvertiseEvpnEsHandler.ServeHTTP(w, r)
+		case BgpRouteServiceBgpWithdrawEvpnEsProcedure:
+			bgpRouteServiceBgpWithdrawEvpnEsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -350,4 +402,12 @@ func (UnimplementedBgpRouteServiceHandler) BgpAdvertiseEvpnImet(context.Context,
 
 func (UnimplementedBgpRouteServiceHandler) BgpWithdrawEvpnImet(context.Context, *connect.Request[v1.BgpWithdrawEvpnImetRequest]) (*connect.Response[v1.BgpWithdrawEvpnImetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BgpRouteService.BgpWithdrawEvpnImet is not implemented"))
+}
+
+func (UnimplementedBgpRouteServiceHandler) BgpAdvertiseEvpnEs(context.Context, *connect.Request[v1.BgpAdvertiseEvpnEsRequest]) (*connect.Response[v1.BgpAdvertiseEvpnEsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BgpRouteService.BgpAdvertiseEvpnEs is not implemented"))
+}
+
+func (UnimplementedBgpRouteServiceHandler) BgpWithdrawEvpnEs(context.Context, *connect.Request[v1.BgpWithdrawEvpnEsRequest]) (*connect.Response[v1.BgpWithdrawEvpnEsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.BgpRouteService.BgpWithdrawEvpnEs is not implemented"))
 }

@@ -125,7 +125,7 @@ func encodeEVPNMulticastPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 		return nil, fmt.Errorf("EVPN RT3 SID must be a usable IPv6 SID: %q", r.SRv6SID)
 	}
 	nh, err := netip.ParseAddr(r.NextHop)
-	if err != nil || !nh.Is6() {
+	if err != nil || !nh.Is6() || nh.Is4In6() {
 		return nil, fmt.Errorf("EVPN RT3 next hop must be IPv6: %q", r.NextHop)
 	}
 	rd, err := gobgppkt.ParseRouteDistinguisher(r.RD)
@@ -193,7 +193,7 @@ func encodeEVPNMacPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 		return nil, fmt.Errorf("EVPN RT2 SID must be a usable IPv6 SID: %q", r.SRv6SID)
 	}
 	nh, err := netip.ParseAddr(r.NextHop)
-	if err != nil || !nh.Is6() {
+	if err != nil || !nh.Is6() || nh.Is4In6() {
 		return nil, fmt.Errorf("EVPN RT2 next hop must be IPv6: %q", r.NextHop)
 	}
 	rd, err := gobgppkt.ParseRouteDistinguisher(r.RD)
@@ -229,6 +229,100 @@ func encodeEVPNMacPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 	svcTLV := gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L2Service, infoSubTLV)
 	attrs = append(attrs, gobgppkt.NewPathAttributePrefixSID(svcTLV))
 
+	mpReach, err := gobgppkt.NewPathAttributeMpReachNLRI(
+		gobgppkt.RF_EVPN, []gobgppkt.PathNLRI{{NLRI: nlri}}, nh)
+	if err != nil {
+		return nil, fmt.Errorf("build MP_REACH_NLRI: %w", err)
+	}
+	attrs = append(attrs, mpReach)
+	return &apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri, Attrs: attrs}, nil
+}
+
+// PushEVPNEthernetSegment advertises a local EVPN RT4 (Ethernet Segment) into
+// the BGP RIB so peers learn this PE attaches to the segment. The path UUID is
+// tracked under {RD, ESI} for a later withdraw.
+func (s *Session) PushEVPNEthernetSegment(_ context.Context, r bgp.EVPNRoute) error {
+	srv := s.bgpServer()
+	if srv == nil {
+		return bgp.ErrSessionNotStarted
+	}
+	path, err := encodeEVPNEthernetSegmentPath(r)
+	if err != nil {
+		return err
+	}
+	return s.addAndTrack(srv, path, evpnEsKey(r.RD, r.ESI))
+}
+
+// WithdrawEVPNEthernetSegment removes a previously advertised RT4. Withdrawing
+// one never advertised is a no-op.
+func (s *Session) WithdrawEVPNEthernetSegment(_ context.Context, key bgp.EVPNESKey) error {
+	srv := s.bgpServer()
+	if srv == nil {
+		return bgp.ErrSessionNotStarted
+	}
+	rk := evpnEsKey(key.RD, key.ESI)
+	s.advMu.Lock()
+	id, ok := s.advertised[rk]
+	s.advMu.Unlock()
+	if !ok {
+		return nil
+	}
+	if err := srv.DeletePath(apiutil.DeletePathRequest{UUIDs: []uuid.UUID{id}}); err != nil {
+		return fmt.Errorf("withdraw EVPN RT4 {rd=%s, esi=%x}: %w", key.RD, key.ESI, err)
+	}
+	s.advMu.Lock()
+	delete(s.advertised, rk)
+	s.advMu.Unlock()
+	return nil
+}
+
+// evpnEsKey synthesizes the advertised-path tracking key for an RT4, encoding
+// {RD, ESI} into Prefix.
+func evpnEsKey(rd string, esi [10]byte) bgp.RouteKey {
+	return bgp.RouteKey{
+		Family: bgp.FamilyEVPN,
+		Prefix: fmt.Sprintf("evpn-rt4:%s:%x", rd, esi),
+	}
+}
+
+// encodeEVPNEthernetSegmentPath builds the gobgp Path for an RT4 advertisement:
+// the {RD, ESI, originating router IP} NLRI and the ES-Import route target as
+// an extended community. RT4 carries no Prefix-SID; the next hop rides in
+// MP_REACH_NLRI.
+func encodeEVPNEthernetSegmentPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
+	var zeroESI [10]byte
+	if r.ESI == zeroESI {
+		return nil, fmt.Errorf("EVPN RT4 ESI must be non-zero")
+	}
+	nh, err := netip.ParseAddr(r.NextHop)
+	if err != nil || !nh.Is6() || nh.Is4In6() {
+		return nil, fmt.Errorf("EVPN RT4 next hop must be IPv6: %q", r.NextHop)
+	}
+	rd, err := gobgppkt.ParseRouteDistinguisher(r.RD)
+	if err != nil {
+		return nil, fmt.Errorf("parse RD %q: %w", r.RD, err)
+	}
+	if r.ESImportRT == "" {
+		return nil, fmt.Errorf("EVPN RT4 requires an ES-Import route target")
+	}
+	esImport := gobgppkt.NewESImportRouteTarget(r.ESImportRT)
+	if esImport == nil {
+		return nil, fmt.Errorf("invalid ES-Import RT (must be a MAC): %q", r.ESImportRT)
+	}
+
+	nlri := gobgppkt.NewEVPNNLRI(
+		gobgppkt.EVPN_ETHERNET_SEGMENT_ROUTE,
+		&gobgppkt.EVPNEthernetSegmentRoute{
+			RD:              rd,
+			ESI:             arrayToESI(r.ESI),
+			IPAddressLength: uint8(nh.BitLen()),
+			IPAddress:       nh,
+		},
+	)
+	attrs := []gobgppkt.PathAttributeInterface{
+		gobgppkt.NewPathAttributeOrigin(0),
+		gobgppkt.NewPathAttributeExtendedCommunities([]gobgppkt.ExtendedCommunityInterface{esImport}),
+	}
 	mpReach, err := gobgppkt.NewPathAttributeMpReachNLRI(
 		gobgppkt.RF_EVPN, []gobgppkt.PathNLRI{{NLRI: nlri}}, nh)
 	if err != nil {

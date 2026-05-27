@@ -120,3 +120,61 @@ func TestEncodeEVPNMulticastPath_RejectsBadInput(t *testing.T) {
 		}
 	}
 }
+
+// Encoding an RT4 then decoding it back must round-trip the ESI, the ES-Import
+// route target, and the originating PE next hop. RT4 carries no SID.
+func TestEncodeEVPNEthernetSegmentPath_RoundTrip(t *testing.T) {
+	in := bgp.EVPNRoute{
+		Type:       bgp.EVPNRouteTypeEthernetSegment,
+		RD:         "65000:1",
+		ESI:        [10]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99},
+		ESImportRT: "aa:bb:cc:dd:ee:ff",
+		NextHop:    "2001:db8::1",
+	}
+	path, err := encodeEVPNEthernetSegmentPath(in)
+	if err != nil {
+		t.Fatalf("encodeEVPNEthernetSegmentPath: %v", err)
+	}
+	got := decodeEVPNRoute(path)
+	if got == nil {
+		t.Fatal("decodeEVPNRoute returned nil for an encoded RT4")
+	}
+	if got.Type != bgp.EVPNRouteTypeEthernetSegment {
+		t.Errorf("Type = %d, want EthernetSegment", got.Type)
+	}
+	if got.ESI != in.ESI {
+		t.Errorf("ESI = %v, want %v", got.ESI, in.ESI)
+	}
+	if got.ESImportRT != in.ESImportRT {
+		t.Errorf("ESImportRT = %q, want %q", got.ESImportRT, in.ESImportRT)
+	}
+	if got.NextHop != in.NextHop {
+		t.Errorf("NextHop = %q, want %q", got.NextHop, in.NextHop)
+	}
+	if got.SRv6SID != "" {
+		t.Errorf("RT4 carries no SID; got %q", got.SRv6SID)
+	}
+}
+
+func TestEncodeEVPNEthernetSegmentPath_RejectsBadInput(t *testing.T) {
+	base := bgp.EVPNRoute{
+		Type: bgp.EVPNRouteTypeEthernetSegment, RD: "65000:1",
+		ESI:        [10]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99},
+		ESImportRT: "aa:bb:cc:dd:ee:ff", NextHop: "2001:db8::1",
+	}
+	cases := map[string]func(*bgp.EVPNRoute){
+		"zero ESI":             func(r *bgp.EVPNRoute) { r.ESI = [10]byte{} },
+		"IPv4 next hop":        func(r *bgp.EVPNRoute) { r.NextHop = "10.0.0.1" },
+		"IPv4-mapped next hop": func(r *bgp.EVPNRoute) { r.NextHop = "::ffff:10.0.0.1" },
+		"bad RD":               func(r *bgp.EVPNRoute) { r.RD = "not-an-rd" },
+		"empty ES-Import":      func(r *bgp.EVPNRoute) { r.ESImportRT = "" },
+		"bad ES-Import":        func(r *bgp.EVPNRoute) { r.ESImportRT = "zz" },
+	}
+	for name, mut := range cases {
+		r := base
+		mut(&r)
+		if _, err := encodeEVPNEthernetSegmentPath(r); err == nil {
+			t.Errorf("%s: expected an error, got nil", name)
+		}
+	}
+}

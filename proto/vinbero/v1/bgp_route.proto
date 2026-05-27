@@ -25,6 +25,8 @@ service BgpRouteService {
   rpc BgpWithdrawEvpnMac(BgpWithdrawEvpnMacRequest) returns (BgpWithdrawEvpnMacResponse);
   rpc BgpAdvertiseEvpnImet(BgpAdvertiseEvpnImetRequest) returns (BgpAdvertiseEvpnImetResponse);
   rpc BgpWithdrawEvpnImet(BgpWithdrawEvpnImetRequest) returns (BgpWithdrawEvpnImetResponse);
+  rpc BgpAdvertiseEvpnEs(BgpAdvertiseEvpnEsRequest) returns (BgpAdvertiseEvpnEsResponse);
+  rpc BgpWithdrawEvpnEs(BgpWithdrawEvpnEsRequest) returns (BgpWithdrawEvpnEsResponse);
 }
 
 // BgpVpnRoute is an L3VPN route to advertise.
@@ -176,5 +178,37 @@ message BgpWithdrawEvpnImetRequest {
 }
 message BgpWithdrawEvpnImetResponse {
   repeated BgpEvpnImetKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpEvpnEs is a local EVPN RT4 (Ethernet Segment) to advertise. It carries no
+// SRv6 SID; the ES-Import route target signals segment membership and the next
+// hop is the originating PE source used in DF election.
+message BgpEvpnEs {
+  string rd = 1;
+  string esi = 2; // 10-octet ESI, "00:11:22:..." form
+  string es_import_rt = 3; // ES-Import RT as a MAC "aa:bb:cc:dd:ee:ff"
+  string next_hop = 4; // IPv6 BGP next hop / originating PE source
+}
+
+// BgpEvpnEsKey identifies a previously advertised RT4 for withdrawal.
+message BgpEvpnEsKey {
+  string rd = 1;
+  string esi = 2;
+}
+
+message BgpAdvertiseEvpnEsRequest {
+  repeated BgpEvpnEs segments = 1;
+}
+message BgpAdvertiseEvpnEsResponse {
+  repeated BgpEvpnEs advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawEvpnEsRequest {
+  repeated BgpEvpnEsKey keys = 1;
+}
+message BgpWithdrawEvpnEsResponse {
+  repeated BgpEvpnEsKey withdrawn = 1;
   repeated OperationError errors = 2;
 }
