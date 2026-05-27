@@ -60,6 +60,10 @@ type BGPPeerConfig struct {
 	HoldTimeSec  uint32   `yaml:"hold_time_sec,omitempty" default:"90"`
 	KeepaliveSec uint32   `yaml:"keepalive_sec,omitempty" default:"30"`
 	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6 / evpn
+	// Passive stops this peer from dialing out; it only accepts the
+	// neighbor's inbound connection. Set it on one end of each iBGP
+	// full-mesh pair to avoid connection-collision flap.
+	Passive bool `yaml:"passive,omitempty"`
 }
 
 // BpfConstants returns the set of read-only constants rewritten into every

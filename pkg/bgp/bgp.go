@@ -82,6 +82,13 @@ type PeerConfig struct {
 	HoldTimeSec  uint32
 	KeepaliveSec uint32
 	Families     []Family
+	// Passive keeps this neighbor from initiating the TCP connection; the
+	// session is established only when the remote dials in. In an iBGP
+	// full mesh both ends would otherwise dial each other at once, and the
+	// resulting connection collision makes gobgp tear a freshly
+	// ESTABLISHED socket back down, flapping the session. Marking one end
+	// of every pair passive pins each pair to a single direction.
+	Passive bool
 }
 
 // PeerState is a read-only snapshot of a neighbor's session.

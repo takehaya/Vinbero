@@ -246,6 +246,7 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 			HoldTimeSec:  p.HoldTimeSec,
 			KeepaliveSec: p.KeepaliveSec,
 			Families:     families,
+			Passive:      p.Passive,
 		}); err != nil {
 			return err
 		}
