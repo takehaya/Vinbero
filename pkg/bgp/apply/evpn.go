@@ -217,7 +217,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		a.withdrawEVPNMac(fk, prev)
 	}
 
-	entry, err := a.buildL2HeadendEntry(r.SRv6SID, bdID)
+	entry, err := a.buildL2HeadendEntry(r.SRv6SID, bdID, true)
 	if err != nil {
 		a.logger.Error("build EVPN headend entry",
 			zap.String("mac", r.MAC), zap.Error(err))
@@ -320,7 +320,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 		a.withdrawEVPNMcast(mk, prev)
 	}
 
-	entry, err := a.buildL2HeadendEntry(r.SRv6SID, bdID)
+	entry, err := a.buildL2HeadendEntry(r.SRv6SID, bdID, false)
 	if err != nil {
 		a.logger.Error("build EVPN RT3 headend entry",
 			zap.String("rd", r.RD), zap.Error(err))
@@ -458,7 +458,7 @@ func (a *Applier) electDF(esi [bpf.ESILen]byte) {
 // source (the outer IPv6 source on the wire); the destination is the SID, taken
 // from Segments[0] by the data plane, so DstAddr is left unset to match the
 // server's L2 peer construction.
-func (a *Applier) buildL2HeadendEntry(sid string, bdID uint16) (*bpf.HeadendEntry, error) {
+func (a *Applier) buildL2HeadendEntry(sid string, bdID uint16, floodExclude bool) (*bpf.HeadendEntry, error) {
 	src, err := a.encapSource()
 	if err != nil {
 		return nil, err
@@ -467,11 +467,17 @@ func (a *Applier) buildL2HeadendEntry(sid string, bdID uint16) (*bpf.HeadendEntr
 	if err != nil {
 		return nil, fmt.Errorf("parse L2 service SID %q: %w", sid, err)
 	}
-	return &bpf.HeadendEntry{
+	e := &bpf.HeadendEntry{
 		Mode:        uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2),
 		NumSegments: numSegments,
 		SrcAddr:     src,
 		Segments:    segments,
 		BdId:        bdID,
-	}, nil
+	}
+	if floodExclude {
+		// An RT2 unicast peer (End.DT2U) is a known-unicast target, not a BUM
+		// flood destination; exclude it from the TC flood loop.
+		e.FloodExclude = 1
+	}
+	return e, nil
 }

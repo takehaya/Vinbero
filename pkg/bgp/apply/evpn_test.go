@@ -61,6 +61,9 @@ func TestApplier_EVPNRT2Install(t *testing.T) {
 	if peer.Segments[0] != netip.MustParseAddr("fd00:2:2:d2::").As16() {
 		t.Errorf("bd_peer Segments[0] = %v, want remote DT2U SID", peer.Segments[0])
 	}
+	if peer.FloodExclude != 1 {
+		t.Errorf("RT2 unicast (End.DT2U) peer must be flood-excluded; FloodExclude = %d", peer.FloodExclude)
+	}
 }
 
 // Two MACs from the same remote PE share a single bd_peer; withdrawing one
@@ -310,6 +313,9 @@ func TestApplier_EVPNRT3Install(t *testing.T) {
 		}
 		if p.Segments[0] != netip.MustParseAddr("fd00:2:2:24::").As16() {
 			t.Errorf("RT3 bd_peer Segments[0] = %v, want End.DT2M SID", p.Segments[0])
+		}
+		if p.FloodExclude != 0 {
+			t.Errorf("RT3 BUM (End.DT2M) peer must be flooded; FloodExclude = %d", p.FloodExclude)
 		}
 	}
 }
