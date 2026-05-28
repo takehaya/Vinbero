@@ -113,14 +113,17 @@ echo "[4] BUM single delivery to the dual-homed CE"
 # End.DT2M; only the DF (pe1) delivers to ce-mh and split-horizon prevents a
 # loop, so ce-remote must see no duplicate (DUP!) ICMP replies.
 #
-# busybox ip cannot delete a neighbour entry, so flush with net-tools arp -d.
-# Critically, ASSERT the flush happened before counting DUP!: under `set -u`
-# (no -e) a failed apk/arp would otherwise leave the step-3 entry resolved, the
-# ping would not re-flood, and dup=0 would pass without exercising DF or
-# split-horizon at all. A still-resolved neighbour is a setup failure, not a pass.
-docker exec "$CE_REMOTE" sh -c \
-    "command -v arp >/dev/null 2>&1 || apk add --no-cache net-tools >/dev/null 2>&1" || true
-docker exec "$CE_REMOTE" arp -d "$CE_MH_ADDR" >/dev/null 2>&1 || true
+# Flush the resolved neighbour so the next ping re-ARPs. Use busybox `ip neigh
+# flush` (always present, no runtime apk -- net-tools arp -d would need an
+# `apk add` that fails on a CI runner with no Alpine mirror), falling back to
+# bouncing the access link (which also clears the cache). Critically, ASSERT the
+# entry is gone before counting DUP!: under `set -u` (no -e) a failed flush would
+# otherwise leave the step-3 entry resolved, the ping would not re-flood, and
+# dup=0 would pass without exercising DF or split-horizon at all.
+docker exec "$CE_REMOTE" ip neigh flush dev eth1 >/dev/null 2>&1 \
+    || docker exec "$CE_REMOTE" sh -c "ip link set dev eth1 down; ip link set dev eth1 up" >/dev/null 2>&1 \
+    || true
+sleep 1
 if docker exec "$CE_REMOTE" ip neigh show "$CE_MH_ADDR" dev eth1 2>/dev/null \
         | grep -qiE "REACHABLE|STALE|DELAY|PROBE|PERMANENT"; then
     ng "ce-remote: $CE_MH_ADDR neighbour not flushed (setup failed); BUM single-delivery not asserted"
