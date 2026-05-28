@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync"
 	"testing"
 
 	"go.uber.org/zap"
@@ -477,18 +478,66 @@ func TestApplier_EVPNRT4WithdrawReelects(t *testing.T) {
 	}
 }
 
-// An RT4 for an ESI this PE does not locally attach is ignored entirely: it
-// writes no esi_map (no phantom segment from a crafted RT4) and records no
-// membership (so crafted RT4s cannot grow esMembers without bound).
-func TestApplier_EVPNRT4NotLocallyAttachedNoWrite(t *testing.T) {
+// An RT4 for an ESI this PE does not yet locally attach records membership (so a
+// later local attach can elect from it) but writes no esi_map: only election --
+// gated on local attachment -- writes, so a crafted RT4 cannot mint a phantom DF.
+func TestApplier_EVPNRT4UnattachedRecordsMembershipNoWrite(t *testing.T) {
 	a, fh := evpnApplier(t)
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "fc00::1")})
 	if _, ok := fh.esis[testESI]; ok {
 		t.Error("RT4 must not create an esi_map entry for an unattached ESI")
 	}
-	if _, ok := a.evpn.esMembers[testESI]; ok {
-		t.Error("membership must not be recorded for an unattached ESI (DoS guard)")
+	if _, ok := a.evpn.esMembers[testESI]["fc00::1"]; !ok {
+		t.Error("membership should be recorded so a later local attach can elect from it")
 	}
+}
+
+// Regression for the RT4-before-es-create race. When the RT4 arrives before the
+// operator marks the ESI locally attached, receive-time election is skipped (no
+// DF). The operator path then calls ReelectDF, which must elect from the
+// already-recorded membership rather than wait for another BGP event -- without
+// this, the DF stays unset and BUM double-delivers to the multi-homed CE.
+func TestApplier_EVPNRT4ReelectAfterLocalAttach(t *testing.T) {
+	a, fh := evpnApplier(t)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, "fc00::1")})
+	if _, ok := fh.esis[testESI]; ok {
+		t.Fatal("precondition: no esi_map entry before local attach")
+	}
+	seedLocalEsi(fh, testESI, "fd00:1:1::") // operator: vbctl es create --local-attached
+	a.ReelectDF(testESI)
+	if got := dfAddr(fh, testESI); got != "fc00::1" {
+		t.Errorf("DF = %s, want fc00::1 (lowest of {local fd00:1:1::, member fc00::1})", got)
+	}
+}
+
+// Membership is bounded: flooding more than maxMembersPerESI distinct PEs for one
+// ESI stops recording new members, so a crafted RT4 stream cannot grow it without
+// limit.
+func TestApplier_EVPNRT4MembershipBounded(t *testing.T) {
+	a, _ := evpnApplier(t)
+	for i := 0; i < maxMembersPerESI+10; i++ {
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, fmt.Sprintf("fc00::%x", i+1))})
+	}
+	if n := len(a.evpn.esMembers[testESI]); n > maxMembersPerESI {
+		t.Errorf("members = %d, want <= %d (bounded)", n, maxMembersPerESI)
+	}
+}
+
+// ReelectDF runs on the RPC goroutine while RT4s arrive on the BGP goroutine;
+// esMu must serialize the two. Run under -race to catch a regression.
+func TestApplier_EVPNRT4ConcurrentReelect(t *testing.T) {
+	a, fh := evpnApplier(t)
+	seedLocalEsi(fh, testESI, "fd00:1:1::")
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func(n int) {
+			defer wg.Done()
+			a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt4(testESI, fmt.Sprintf("fc00::%x", n+1))})
+		}(i)
+		go func() { defer wg.Done(); a.ReelectDF(testESI) }()
+	}
+	wg.Wait()
 }
 
 // A crafted RT4 with an IPv4-mapped next hop must not enter DF election (the

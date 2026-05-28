@@ -22,16 +22,17 @@ import (
 
 // Server represents the Connect RPC server
 type Server struct {
-	cfg        *config.Config
-	mapOps     *bpf.MapOperations
-	resMgr     *netresource.ResourceManager
-	fdbWatcher *netlinkwatch.FDBWatcher
+	cfg          *config.Config
+	mapOps       *bpf.MapOperations
+	resMgr       *netresource.ResourceManager
+	fdbWatcher   *netlinkwatch.FDBWatcher
 	locatorMgr   *locator.Manager
 	vrfBgpMgr    *vrfbgp.Manager
 	advertiser   bgp.RouteAdvertiser
 	srPolicyAdv  bgp.SRPolicyController
 	evpnAdv      bgp.EVPNController
 	srPolicyCtrl srPolicyController
+	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
@@ -63,6 +64,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 	}
 	if srPolicyApplier != nil {
 		s.srPolicyCtrl = srPolicyApplier
+		s.esReElectDF = srPolicyApplier.ReelectDF
 	}
 	return s
 }
@@ -149,7 +151,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered BdPeerService", zap.String("path", path))
 
 	// Ethernet Segment service (RFC 7432 ESI master table)
-	esServer := NewEthernetSegmentServer(s.mapOps)
+	esServer := NewEthernetSegmentServer(s.mapOps, s.esReElectDF)
 	path, handler = vinberov1connect.NewEthernetSegmentServiceHandler(esServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered EthernetSegmentService", zap.String("path", path))

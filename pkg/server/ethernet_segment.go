@@ -13,10 +13,15 @@ import (
 
 type EthernetSegmentServer struct {
 	mapOps *bpf.MapOperations
+	// reElect re-runs BGP DF election for an ESI after a local attach. It is
+	// nil when the in-process BGP speaker is disabled. Without it, an RT4 that
+	// arrived before `es create` would never elect a DF (the applier skipped it
+	// at receive time because the ESI was not yet locally attached).
+	reElect func(esi [bpf.ESILen]byte)
 }
 
-func NewEthernetSegmentServer(mapOps *bpf.MapOperations) *EthernetSegmentServer {
-	return &EthernetSegmentServer{mapOps: mapOps}
+func NewEthernetSegmentServer(mapOps *bpf.MapOperations, reElect func(esi [bpf.ESILen]byte)) *EthernetSegmentServer {
+	return &EthernetSegmentServer{mapOps: mapOps, reElect: reElect}
 }
 
 func protoToEsiCfg(e *v1.EthernetSegment) (bpf.EsiConfig, error) {
@@ -79,6 +84,13 @@ func (s *EthernetSegmentServer) EsCreate(
 		if err := s.mapOps.CreateEsi(esi, bpf.NewEsiEntry(cfg)); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: e.Esi, Reason: err.Error()})
 			continue
+		}
+		// A local attach is what lets DF election write esi_map. Re-run it now
+		// so an RT4 received before this create (recorded in the applier's
+		// membership but skipped at the time) elects a DF without waiting for
+		// the next BGP event.
+		if cfg.LocalAttached && s.reElect != nil {
+			s.reElect(esi)
 		}
 		resp.Created = append(resp.Created, e)
 	}

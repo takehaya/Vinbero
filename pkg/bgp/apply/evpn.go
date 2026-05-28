@@ -5,12 +5,20 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"sync"
 
 	"go.uber.org/zap"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+)
+
+// EVPN RT4 membership is bounded so a peer flooding crafted Ethernet Segment
+// routes cannot grow the in-memory tables without limit.
+const (
+	maxTrackedESIs   = 256 // distinct ESIs whose membership we track
+	maxMembersPerESI = 32  // member PE sources per ESI (DF candidates)
 )
 
 // fdbBdOps is the subset of bpf.MapOperations the EVPN applier writes:
@@ -78,16 +86,20 @@ type evpnMcastState struct {
 	sid   string
 }
 
-// evpnTable holds the EVPN applier's in-memory bookkeeping. It is touched
-// only from the single GoBGP RouteHandler goroutine (like steeredRoutes),
-// so it needs no locking.
+// evpnTable holds the EVPN applier's in-memory bookkeeping. peers/fdb/mcast are
+// touched only from the single GoBGP RouteHandler goroutine (like steeredRoutes)
+// and need no locking. esMembers and DF election are the exception: the operator
+// path (es create -> ReelectDF) re-runs election from the RPC goroutine, so
+// esMu serializes esMembers access and electDF across the two goroutines.
 type evpnTable struct {
 	peers map[evpnPeerKey]*evpnPeerState
 	fdb   map[evpnFdbKey]evpnFdbState
 	mcast map[evpnMcastKey]evpnMcastState
 	// esMembers maps an ESI to the set of member PE source IPs learned from
 	// RT4 (Ethernet Segment routes), the candidate set for DF election.
+	// Guarded by esMu.
 	esMembers map[[bpf.ESILen]byte]map[string]struct{}
+	esMu      sync.Mutex
 }
 
 func newEVPNTable() *evpnTable {
@@ -380,12 +392,15 @@ func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
 		return
 	}
 
-	// Track membership only for an ESI this PE locally attaches (operator-
-	// declared). DF election ignores unattached ESIs anyway, and tracking every
-	// crafted RT4's ESI would let a peer grow esMembers without bound.
-	if entry, err := a.fdbBd.GetEsi(r.ESI); err != nil || entry == nil || entry.LocalAttached == 0 {
-		return
-	}
+	// Record membership for every ESI, attached or not: an RT4 that arrives
+	// before the operator runs `es create` must still be remembered, so the
+	// later local attach can elect a DF from it (ReelectDF). DF election itself
+	// (electDF) is what gates on local attachment, so an unattached ESI is still
+	// only informational and never writes esi_map. Membership is bounded
+	// (maxTrackedESIs / maxMembersPerESI) so crafted RT4s cannot grow it without
+	// limit. esMu serializes this against ReelectDF on the RPC goroutine.
+	a.evpn.esMu.Lock()
+	defer a.evpn.esMu.Unlock()
 
 	members := a.evpn.esMembers[r.ESI]
 	if withdraw {
@@ -398,12 +413,33 @@ func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
 		}
 	} else {
 		if members == nil {
+			if len(a.evpn.esMembers) >= maxTrackedESIs {
+				a.logger.Warn("EVPN RT4 ESI table full; ignoring segment",
+					zap.String("rd", r.RD), zap.Int("max", maxTrackedESIs))
+				return
+			}
 			members = make(map[string]struct{})
 			a.evpn.esMembers[r.ESI] = members
+		}
+		if _, known := members[pe]; !known && len(members) >= maxMembersPerESI {
+			a.logger.Warn("EVPN RT4 member set full for ESI; ignoring PE",
+				zap.String("rd", r.RD), zap.String("pe", pe), zap.Int("max", maxMembersPerESI))
+			return
 		}
 		members[pe] = struct{}{}
 	}
 	a.electDF(r.ESI)
+}
+
+// ReelectDF re-runs DF election for an ESI from the membership already learned
+// over RT4. The operator path calls it right after `es create` marks an ESI
+// locally attached, so an RT4 that arrived before the local attach -- recorded
+// in esMembers but skipped by election at the time, since electDF gates on local
+// attachment -- is finally acted on. Safe to call for an unattached ESI (no-op).
+func (a *Applier) ReelectDF(esi [bpf.ESILen]byte) {
+	a.evpn.esMu.Lock()
+	defer a.evpn.esMu.Unlock()
+	a.electDF(esi)
 }
 
 // electDF runs the RFC 8584 default DF election for an ESI and writes the
@@ -412,7 +448,7 @@ func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
 // PE's own local source; sorted numerically, the DF is index (ETag mod N).
 // ELAN uses a single Ethernet Tag (0), so this picks the lowest PE in the
 // ordered list -- deterministic and identical across PEs that see the same
-// membership.
+// membership. The caller must hold a.evpn.esMu (it reads esMembers).
 func (a *Applier) electDF(esi [bpf.ESILen]byte) {
 	entry, err := a.fdbBd.GetEsi(esi)
 	if err != nil || entry == nil || entry.LocalAttached == 0 {
