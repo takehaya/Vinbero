@@ -1683,11 +1683,16 @@ func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, es
 		return fmt.Errorf("failed to put bd peer entry: %w", err)
 	}
 
+	var rKey *BdPeerReverseKey
 	if writeReverse {
-		rKey := &BdPeerReverseKey{BdId: bdID}
+		rKey = &BdPeerReverseKey{BdId: bdID}
 		copy(rKey.SrcAddr[:], remoteSrc[:])
 		rVal := &BdPeerReverseVal{Index: index, Esi: esi}
 		if err := m.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
+			// Roll back the forward entry: a half-installed peer would orphan a
+			// bd_peer slot (FindFreeBdPeerIndex skips it forever) and leave the
+			// map inconsistent with the applier ledger.
+			_ = m.objs.BdPeerMap.Delete(key)
 			return fmt.Errorf("failed to put bd peer reverse entry: %w", err)
 		}
 	}
@@ -1697,6 +1702,12 @@ func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, es
 	if esi != zero {
 		ext := &BpfBdPeerL2ExtVal{Esi: esi}
 		if err := m.objs.BdPeerL2ExtMap.Put(extKey, ext); err != nil {
+			// Roll back the forward (and reverse, if written) entries so the
+			// slot is not orphaned by a partial install.
+			_ = m.objs.BdPeerMap.Delete(key)
+			if rKey != nil {
+				_ = m.objs.BdPeerReverseMap.Delete(rKey)
+			}
 			return fmt.Errorf("failed to put bd peer L2 ESI ext: %w", err)
 		}
 	} else {

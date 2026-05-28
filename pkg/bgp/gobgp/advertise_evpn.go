@@ -125,7 +125,7 @@ func encodeEVPNMulticastPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 		return nil, fmt.Errorf("EVPN RT3 SID must be a usable IPv6 SID: %q", r.SRv6SID)
 	}
 	nh, err := netip.ParseAddr(r.NextHop)
-	if err != nil || !nh.Is6() || nh.Is4In6() {
+	if err != nil || !nh.Is6() || nh.Is4In6() || nh.IsUnspecified() {
 		return nil, fmt.Errorf("EVPN RT3 next hop must be IPv6: %q", r.NextHop)
 	}
 	rd, err := gobgppkt.ParseRouteDistinguisher(r.RD)
@@ -193,7 +193,7 @@ func encodeEVPNMacPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 		return nil, fmt.Errorf("EVPN RT2 SID must be a usable IPv6 SID: %q", r.SRv6SID)
 	}
 	nh, err := netip.ParseAddr(r.NextHop)
-	if err != nil || !nh.Is6() || nh.Is4In6() {
+	if err != nil || !nh.Is6() || nh.Is4In6() || nh.IsUnspecified() {
 		return nil, fmt.Errorf("EVPN RT2 next hop must be IPv6: %q", r.NextHop)
 	}
 	rd, err := gobgppkt.ParseRouteDistinguisher(r.RD)
@@ -295,7 +295,7 @@ func encodeEVPNEthernetSegmentPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 		return nil, fmt.Errorf("EVPN RT4 ESI must be non-zero")
 	}
 	nh, err := netip.ParseAddr(r.NextHop)
-	if err != nil || !nh.Is6() || nh.Is4In6() {
+	if err != nil || !nh.Is6() || nh.Is4In6() || nh.IsUnspecified() {
 		return nil, fmt.Errorf("EVPN RT4 next hop must be IPv6: %q", r.NextHop)
 	}
 	rd, err := gobgppkt.ParseRouteDistinguisher(r.RD)

@@ -49,11 +49,12 @@ func TestEncodeEVPNMacPath_RejectsBadInput(t *testing.T) {
 		MAC: "aa:bb:cc:00:00:01", SRv6SID: "fd00:2:2:d2::", NextHop: "2001:db8::1",
 	}
 	cases := map[string]func(*bgp.EVPNRoute){
-		"bad MAC":         func(r *bgp.EVPNRoute) { r.MAC = "zz" },
-		"IPv4 SID":        func(r *bgp.EVPNRoute) { r.SRv6SID = "10.0.0.1" },
-		"unspecified SID": func(r *bgp.EVPNRoute) { r.SRv6SID = "::" },
-		"IPv4 next hop":   func(r *bgp.EVPNRoute) { r.NextHop = "10.0.0.1" },
-		"bad RD":          func(r *bgp.EVPNRoute) { r.RD = "not-an-rd" },
+		"bad MAC":              func(r *bgp.EVPNRoute) { r.MAC = "zz" },
+		"IPv4 SID":             func(r *bgp.EVPNRoute) { r.SRv6SID = "10.0.0.1" },
+		"unspecified SID":      func(r *bgp.EVPNRoute) { r.SRv6SID = "::" },
+		"IPv4 next hop":        func(r *bgp.EVPNRoute) { r.NextHop = "10.0.0.1" },
+		"unspecified next hop": func(r *bgp.EVPNRoute) { r.NextHop = "::" },
+		"bad RD":               func(r *bgp.EVPNRoute) { r.RD = "not-an-rd" },
 	}
 	for name, mut := range cases {
 		r := base
@@ -107,10 +108,11 @@ func TestEncodeEVPNMulticastPath_RejectsBadInput(t *testing.T) {
 		SRv6SID: "fd00:2:2:24::", NextHop: "2001:db8::1",
 	}
 	cases := map[string]func(*bgp.EVPNRoute){
-		"IPv4 SID":        func(r *bgp.EVPNRoute) { r.SRv6SID = "10.0.0.1" },
-		"unspecified SID": func(r *bgp.EVPNRoute) { r.SRv6SID = "::" },
-		"IPv4 next hop":   func(r *bgp.EVPNRoute) { r.NextHop = "10.0.0.1" },
-		"bad RD":          func(r *bgp.EVPNRoute) { r.RD = "not-an-rd" },
+		"IPv4 SID":             func(r *bgp.EVPNRoute) { r.SRv6SID = "10.0.0.1" },
+		"unspecified SID":      func(r *bgp.EVPNRoute) { r.SRv6SID = "::" },
+		"IPv4 next hop":        func(r *bgp.EVPNRoute) { r.NextHop = "10.0.0.1" },
+		"unspecified next hop": func(r *bgp.EVPNRoute) { r.NextHop = "::" },
+		"bad RD":               func(r *bgp.EVPNRoute) { r.RD = "not-an-rd" },
 	}
 	for name, mut := range cases {
 		r := base
@@ -166,6 +168,7 @@ func TestEncodeEVPNEthernetSegmentPath_RejectsBadInput(t *testing.T) {
 		"zero ESI":             func(r *bgp.EVPNRoute) { r.ESI = [10]byte{} },
 		"IPv4 next hop":        func(r *bgp.EVPNRoute) { r.NextHop = "10.0.0.1" },
 		"IPv4-mapped next hop": func(r *bgp.EVPNRoute) { r.NextHop = "::ffff:10.0.0.1" },
+		"unspecified next hop": func(r *bgp.EVPNRoute) { r.NextHop = "::" },
 		"bad RD":               func(r *bgp.EVPNRoute) { r.RD = "not-an-rd" },
 		"empty ES-Import":      func(r *bgp.EVPNRoute) { r.ESImportRT = "" },
 		"bad ES-Import":        func(r *bgp.EVPNRoute) { r.ESImportRT = "zz" },
