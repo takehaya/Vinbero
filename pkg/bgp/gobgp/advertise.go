@@ -102,9 +102,27 @@ func vinberoFamilyToAPI(f bgp.Family) (gobgppkt.Family, error) {
 		return gobgppkt.RF_SR_POLICY_IPv6, nil
 	case bgp.FamilyEVPN:
 		return gobgppkt.RF_EVPN, nil
+	case bgp.FamilyMUPIPv4:
+		return gobgppkt.RF_MUP_IPv4, nil
+	case bgp.FamilyMUPIPv6:
+		return gobgppkt.RF_MUP_IPv6, nil
 	default:
 		return 0, fmt.Errorf("unsupported BGP family %q", f)
 	}
+}
+
+// parseRouteTargets parses route-target strings into extended communities.
+// Shared by the VPN / EVPN / MUP path encoders.
+func parseRouteTargets(rts []string) ([]gobgppkt.ExtendedCommunityInterface, error) {
+	ecs := make([]gobgppkt.ExtendedCommunityInterface, 0, len(rts))
+	for _, rt := range rts {
+		ec, err := gobgppkt.ParseRouteTarget(rt)
+		if err != nil {
+			return nil, fmt.Errorf("parse RT %q: %w", rt, err)
+		}
+		ecs = append(ecs, ec)
+	}
+	return ecs, nil
 }
 
 // vpnEndpointBehavior is the SRv6 endpoint behavior advertised with a
@@ -139,13 +157,9 @@ func encodeVPNPath(r bgp.VPNRoute) (*apiutil.Path, error) {
 	// Route targets and the Color Extended Community (RFC 9012 §4.3) are both
 	// extended communities; carry them in one attribute. Color != 0 marks the
 	// route for SR Policy steering on the receiving headend.
-	ecs := make([]gobgppkt.ExtendedCommunityInterface, 0, len(r.RTs)+1)
-	for _, rt := range r.RTs {
-		ec, err := gobgppkt.ParseRouteTarget(rt)
-		if err != nil {
-			return nil, fmt.Errorf("parse RT %q: %w", rt, err)
-		}
-		ecs = append(ecs, ec)
+	ecs, err := parseRouteTargets(r.RTs)
+	if err != nil {
+		return nil, err
 	}
 	if r.Color != 0 {
 		ecs = append(ecs, gobgppkt.NewColorExtended(r.Color))

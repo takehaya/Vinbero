@@ -150,6 +150,7 @@ func populateProgArrays(objs *BpfObjects) error {
 		2: objs.TailcallHeadendV4H_encaps,
 		4: objs.TailcallHeadendV4H_mGtp4D,
 		5: objs.TailcallHeadendV4H_encapsRed,
+		8: objs.TailcallHeadendV4H_mGtp4D_teid,
 	}
 	for idx, prog := range headendV4Progs {
 		if err := objs.HeadendV4Progs.Update(idx, prog, ebpf.UpdateAny); err != nil {
@@ -159,10 +160,12 @@ func populateProgArrays(objs *BpfObjects) error {
 
 	// Headend v6 PROG_ARRAY (indexed by srv6_headend_behavior enum)
 	headendV6Progs := map[uint32]*ebpf.Program{
-		1: objs.TailcallHeadendV6H_insert,
-		2: objs.TailcallHeadendV6H_encaps,
-		5: objs.TailcallHeadendV6H_encapsRed,
-		7: objs.TailcallHeadendV6H_insertRed,
+		1:  objs.TailcallHeadendV6H_insert,
+		2:  objs.TailcallHeadendV6H_encaps,
+		5:  objs.TailcallHeadendV6H_encapsRed,
+		7:  objs.TailcallHeadendV6H_insertRed,
+		9:  objs.TailcallHeadendV6H_mGtp6D,
+		10: objs.TailcallHeadendV6H_mGtp6D_teid,
 	}
 	for idx, prog := range headendV6Progs {
 		if err := objs.HeadendV6Progs.Update(idx, prog, ebpf.UpdateAny); err != nil {

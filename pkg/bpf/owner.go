@@ -48,6 +48,31 @@ func OwnerBGPVPN(asn uint32, rd string) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:rd=%s", OwnerTagVersion, asn, rd))
 }
 
+// OwnerBGPMUP is the entry owner for a downlink H.Encaps headend installed from
+// a BGP MUP T1ST route (SAFI 85). Distinct from OwnerBGPVPN so MUP-owned entries
+// are attributed to MUP and not to an L3VPN route that may share the same RD.
+//
+// NOTE (lifecycle): MUP entries are not yet owner-reconciled on boot/shutdown —
+// there is no FlushByOwner caller for OwnerBGPMUP, and the mup_uplink_v{4,6}_map
+// F-TEID entries carry no owner tag at all (they are keyed by the F-TEID, which
+// is what the packet carries). With pinned maps, MUP data-plane state can outlive
+// the process; today the in-memory reverse indexes in pkg/bgp/apply are the
+// source of truth and a manual `make remove-ebpfmap` clears stale state between
+// runs. Owner-scoped MUP reconcile is a forward-looking item.
+func OwnerBGPMUP(asn uint32, rd string) OwnerTag {
+	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:mup:rd=%s", OwnerTagVersion, asn, rd))
+}
+
+// OwnerBGPMUPGate is the entry owner for the H.M.GTP{4,6}.D_TEID uplink gate
+// (BGP MUP T2ST). The gate is shared by every session on one N3 endpoint
+// regardless of RD — the uplink data plane keys on the F-TEID, not the RD — so
+// the gate owner is deliberately RD-independent. This lets any session create or
+// release the gate; an RD-scoped owner would make a second RD's withdraw fail the
+// cross-owner check and leak the gate.
+func OwnerBGPMUPGate(asn uint32) OwnerTag {
+	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:mup-gate", OwnerTagVersion, asn))
+}
+
 // OwnerBGPUnicast is the entry owner for an IPv6 unicast prefix derived
 // from a BGP UPDATE. Reserved for any future path that caches unicast
 // routes in BPF; today (Phase 1d plan) these go through netlink to the

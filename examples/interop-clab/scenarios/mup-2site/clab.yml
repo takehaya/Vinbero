@@ -1,0 +1,88 @@
+# containerlab topology for the mup-2site interop scenario.
+#
+# A realistic BGP MUP (SAFI 85; draft-mpmz-bess-mup-safi, RFC 9433) deployment:
+# a MUP Controller signals UE-session state, a Vinbero MUP-GW (access) and MUP-PE
+# (data) program the SRv6 GTP data plane, and emulated gNB / DN endpoints drive
+# real GTP-U <-> SRv6 traffic in both directions.
+#
+#   gNB --N3-- mup-gw ===== core ===== mup-pe --N6-- DN
+#  (GTP-U/IPv4)  (MUP-GW)      |  ^        (MUP-PE)     (data net)
+#                              | mup-c (MUP Controller, iBGP only)
+#
+# Roles (RFC 9433):
+#   - mup-c  : MUP Controller. Advertises the (SID-less) T1ST/T2ST session
+#              routes over iBGP (SAFI 85) to both edge nodes; forwards no data.
+#   - mup-gw : gNB-facing MUP-GW. Hosts the interwork segment (End.M.GTP4.E,
+#              downlink SRv6->GTP toward the gNB), advertises its ISD, and from
+#              the received T2ST the H.M.GTP4.D_TEID gate + F-TEID (GTP->SRv6).
+#   - mup-pe : DN-facing MUP-PE. Hosts the direct segment (End.DT4 -> DN VRF,
+#              uplink delivery), advertises its DSD, and from the received
+#              T1ST the downlink H.Encaps onto the UE prefix.
+#   - gNB/DN : traffic endpoints. gNB sends/receives GTP-U/IPv4 on N3; DN is
+#              the data network the UE (10.1.0.0/24) talks to (10.0.0.0/24).
+#   - core   : plain IPv6 backbone carrying the SRv6 underlay + iBGP.
+#
+# Data path: uplink  gNB -GTP-U-> mup-gw -SRv6-> mup-pe -End.DT4-> DN
+#            downlink DN -> mup-pe -H.Encaps/SRv6-> mup-gw -End.M.GTP4.E-> gNB
+name: mup-2site
+
+topology:
+  nodes:
+    gnb:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - gnb/start.sh:/start.sh
+        - send_gtpu.py:/send_gtpu.py
+      exec:
+        - sh /start.sh
+
+    mup-gw:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - mup-gw/vinbero.yml:/vinbero.yml
+        - mup-gw/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    core:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - core/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    mup-c:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - mup-c/vinbero.yml:/vinbero.yml
+        - mup-c/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    mup-pe:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - mup-pe/vinbero.yml:/vinbero.yml
+        - mup-pe/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    dn:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - dn/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+  links:
+    - endpoints: [gnb:eth1, mup-gw:eth1]        # N3 (GTP-U/IPv4)
+    - endpoints: [mup-gw:eth2, core:eth1]        # SRv6 underlay
+    - endpoints: [core:eth2, mup-pe:eth1]          # SRv6 underlay
+    - endpoints: [core:eth3, mup-c:eth1]            # iBGP transport
+    - endpoints: [mup-pe:eth2, dn:eth1]            # N6 (data network)

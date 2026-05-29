@@ -1,0 +1,51 @@
+internal:
+  # eth1 faces the gNB (N3 GTP-U; uplink F-TEID gate); eth2 faces the core
+  # (SRv6 underlay; downlink End.M.GTP4.E). Both carry XDP.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+
+# Access-side MUP gateway. Passive iBGP (SAFI 85) toward the controller; applies
+# the received T2ST (uplink F-TEID). source_locator supplies the SRv6 encap
+# source for the uplink H.Encaps toward the direct segment.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    listen_port: 179
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "2001:db8:ff::c"   # mup-c (controller dials us)
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      passive: true
+      families:
+        - mup_ipv4
+    - neighbor: "2001:db8:ff::d"   # mup-pe (we dial; exchange ISD/DSD)
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - mup_ipv4

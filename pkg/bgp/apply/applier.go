@@ -33,6 +33,18 @@ type headendOps interface {
 	DeleteHeadendV6(triggerPrefix string, requester bpf.OwnerTag) error
 }
 
+// mupOps is the subset of bpf.MapOperations the BGP MUP uplink path needs:
+// the F-TEID map (mup_uplink_v4_map) that the H.M.GTP4.D_TEID behavior reads.
+// The downlink path reuses headendOps (H.Encaps into headend_v4_map), and the
+// uplink gate is an ordinary headend_v4_map entry, so only the F-TEID map is
+// new here.
+type mupOps interface {
+	CreateMupUplinkV4(endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
+	DeleteMupUplinkV4(endpoint string, teid uint32, teidPrefixBits uint8) error
+	CreateMupUplinkV6(endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
+	DeleteMupUplinkV6(endpoint string, teid uint32, teidPrefixBits uint8) error
+}
+
 // dataPlane is the BPF map surface the applier writes: headend encap
 // entries plus the SR Policy transport map. *bpf.MapOperations satisfies
 // it; the narrow sub-interfaces keep the applier unit-testable.
@@ -40,12 +52,14 @@ type dataPlane interface {
 	headendOps
 	policyMapOps
 	fdbBdOps
+	mupOps
 }
 
 // Applier applies received BGP routes to the Vinbero data plane.
 type Applier struct {
 	headend     headendOps
 	fdbBd       fdbBdOps
+	mupUplink   mupOps
 	locators    *locator.Manager
 	vrfBindings *vrfbgp.Manager
 	fib         fib.Injector
@@ -53,6 +67,21 @@ type Applier struct {
 	localASN    uint32
 	srPolicy    *srPolicyTable
 	evpn        *evpnTable
+	// MUP receive state. Touched only from the single GoBGP RouteHandler
+	// goroutine (like steeredRoutes), so it needs no locking. mupT1ST / mupT2ST
+	// hold each session's full route plus the SID currently programmed for it,
+	// so a discovery route arriving or withdrawing can re-resolve and reconcile
+	// the install (a withdraw NLRI may also lack the Prefix-SID/RTs the install
+	// used). mupISD / mupDSD are the segment-discovery tables a session resolves
+	// against (T1ST against its ISD by endpoint, T2ST against its DSD by the MUP
+	// segment id). mupGateRefs counts how many uplink sessions share each
+	// endpoint's H.M.GTP4.D_TEID gate so the gate is removed only when its last
+	// session withdraws.
+	mupT1ST     map[mupT1STKey]*mupSessionState
+	mupT2ST     map[mupT2STKey]*mupSessionState
+	mupISD      map[mupISDKey]mupISDEntry
+	mupDSD      map[mupDSDKey]mupDSDEntry
+	mupGateRefs map[string]int
 	// steeredRoutes maps a steered VPN route to the SR Policy key it
 	// references, so a withdraw (which carries no color/next-hop) can unref
 	// the right policy. Touched only from applyVPN, which runs on the single
@@ -70,6 +99,7 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 	return &Applier{
 		headend:       dp,
 		fdbBd:         dp,
+		mupUplink:     dp,
 		locators:      locators,
 		vrfBindings:   vrfBindings,
 		fib:           fibInjector,
@@ -78,6 +108,11 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 		srPolicy:      newSRPolicyTable(dp, logger),
 		evpn:          newEVPNTable(),
 		steeredRoutes: make(map[bgp.RouteKey]policyKey),
+		mupT1ST:       make(map[mupT1STKey]*mupSessionState),
+		mupT2ST:       make(map[mupT2STKey]*mupSessionState),
+		mupISD:        make(map[mupISDKey]mupISDEntry),
+		mupDSD:        make(map[mupDSDKey]mupDSDEntry),
+		mupGateRefs:   make(map[string]int),
 		logger:        logger.Named("bgp.apply"),
 	}
 }
@@ -111,6 +146,8 @@ func (a *Applier) Apply(ev bgp.RouteEvent) {
 		a.applyUnicast(ev.Unicast, ev.IsWithdraw)
 	case ev.EVPN != nil:
 		a.applyEVPN(ev.EVPN, ev.IsWithdraw)
+	case ev.MUP != nil:
+		a.applyMUP(ev.MUP, ev.IsWithdraw)
 	}
 }
 
