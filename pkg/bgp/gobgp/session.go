@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	gobgpapi "github.com/osrg/gobgp/v4/api"
@@ -108,11 +109,22 @@ func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
 	return nil
 }
 
-// Stop tears the session down. It is safe to call on a Session that was
-// never started (no-op) so callers can defer it unconditionally. Even
-// when StopBgp errors, the Serve() goroutine is still reaped and the
-// handle cleared so the Session does not wedge -- the StopBgp error is
-// returned afterwards for the caller to log.
+// stopTimeout bounds the graceful gobgp teardown. gobgp's StopBgp and Stop both
+// funnel through a single management channel served by one goroutine, and the
+// caller blocks on an unbuffered channel receive with no ctx escape
+// (mgmtOperation). If that goroutine is wedged -- e.g. a shutdown race where the
+// Serve loop is mid-delivery of a peer-down/withdraw event to a watcher whose
+// reader has just been canceled -- the call never returns. This timeout keeps a
+// deferred Stop() (in tests and in daemon shutdown) from hanging the caller
+// indefinitely; the wedged gobgp goroutine is abandoned, which is acceptable on
+// the one-shot shutdown path where the process exits and reaps it.
+const stopTimeout = 10 * time.Second
+
+// Stop tears the session down. It is safe to call on a Session that was never
+// started (no-op) so callers can defer it unconditionally, and it always clears
+// the handle so the Session does not wedge. The graceful gobgp teardown is
+// bounded by stopTimeout (and by ctx): if gobgp does not return in time, Stop
+// abandons it and returns an error for the caller to log rather than blocking.
 func (s *Session) Stop(ctx context.Context) error {
 	if s.server == nil {
 		return nil
@@ -121,13 +133,34 @@ func (s *Session) Stop(ctx context.Context) error {
 	srv := s.server
 	s.server = nil
 	s.srvMu.Unlock()
-	stopErr := srv.StopBgp(ctx, &gobgpapi.StopBgpRequest{})
-	srv.Stop()
-	s.logger.Info("BGP session stopped")
-	if stopErr != nil {
-		return fmt.Errorf("stop bgp: %w", stopErr)
+
+	// Run the graceful stop off the caller's goroutine so a wedged gobgp
+	// management loop cannot hang us. StopBgp cancels the Serve context; the
+	// subsequent Stop() is gobgp's hard stop (its internal StopBgp then returns
+	// immediately with "not running").
+	done := make(chan error, 1)
+	go func() {
+		err := srv.StopBgp(ctx, &gobgpapi.StopBgpRequest{})
+		srv.Stop()
+		done <- err
+	}()
+
+	select {
+	case stopErr := <-done:
+		s.logger.Info("BGP session stopped")
+		if stopErr != nil {
+			return fmt.Errorf("stop bgp: %w", stopErr)
+		}
+		return nil
+	case <-ctx.Done():
+		s.logger.Warn("BGP session stop canceled by context; abandoning gobgp teardown",
+			zap.Error(ctx.Err()))
+		return fmt.Errorf("stop bgp: %w", ctx.Err())
+	case <-time.After(stopTimeout):
+		s.logger.Warn("BGP session stop timed out; abandoning gobgp teardown",
+			zap.Duration("timeout", stopTimeout))
+		return fmt.Errorf("stop bgp: timed out after %s", stopTimeout)
 	}
-	return nil
 }
 
 // AddPeer configures a neighbor. The peer starts the FSM immediately;
