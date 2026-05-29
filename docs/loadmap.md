@@ -89,8 +89,9 @@
 ### BGP control plane (SRv6 services)
 
 In-process GoBGP speaker for exchanging SRv6 service routes (RFC 9252).
-VPNv4/VPNv6 (L3) is implemented and installs SRv6 H.Encaps headend
-entries; EVPN (L2VPN) is on the roadmap below.
+VPNv4/VPNv6 (L3) installs SRv6 H.Encaps headend entries, and EVPN (L2VPN)
+bridges L2 over SRv6 with multi-homing; see the table below for the full
+status.
 
 | Function                   | Status    | Description                                              | Reference |
 |----------------------------|-----------|----------------------------------------------------------|-----------|
@@ -102,4 +103,4 @@ entries; EVPN (L2VPN) is on the roadmap below.
 | SR Policy (SAFI 73)        | Supported | Color-based steering (control + data plane)              | RFC 9256 |
 | BGP MUP                    |           | Mobile User Plane route exchange via the MUP SAFI        | draft-mpmz-bess-mup-safi |
 | Automatic advertise        |           | Advertise local SID/headend state without operator RPC   | RFC 9252 |
-| EVPN (RT2/3/4)             |           | L2VPN over BGP EVPN (MAC/IP, Inclusive Multicast, ESI)   | RFC 9252 |
+| EVPN (RT2/3/4)             | Supported | L2VPN over BGP EVPN: RT2 MAC/IP, RT3 Inclusive Multicast, RT4 Ethernet Segment + RFC 8584 DF election / Local-Bias split-horizon (multi-homing). IRB (RT2 L3) and RT5 not yet supported | RFC 9252 / 7432 / 8584 |
