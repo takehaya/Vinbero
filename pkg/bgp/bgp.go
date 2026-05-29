@@ -39,6 +39,7 @@ const (
 	FamilyVPNv6        Family = "vpnv6"
 	FamilyIPv6Unicast  Family = "ipv6_unicast"
 	FamilySRPolicyIPv6 Family = "sr_policy_ipv6"
+	FamilyEVPN         Family = "evpn" // AFI 25 (L2VPN) / SAFI 70 (EVPN)
 )
 
 // String renders the family for logs and error messages.
@@ -47,7 +48,7 @@ func (f Family) String() string { return string(f) }
 // Valid reports whether f is one of the recognized families.
 func (f Family) Valid() bool {
 	switch f {
-	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6:
+	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6, FamilyEVPN:
 		return true
 	default:
 		return false
@@ -59,7 +60,7 @@ func (f Family) Valid() bool {
 func ParseFamily(s string) (Family, error) {
 	f := Family(s)
 	if !f.Valid() {
-		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6)", s)
+		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6|evpn)", s)
 	}
 	return f, nil
 }
@@ -81,6 +82,19 @@ type PeerConfig struct {
 	HoldTimeSec  uint32
 	KeepaliveSec uint32
 	Families     []Family
+	// Passive keeps this neighbor from initiating the TCP connection; the
+	// session is established only when the remote dials in. In an iBGP
+	// full mesh both ends would otherwise dial each other at once, and the
+	// resulting connection collision makes gobgp tear a freshly
+	// ESTABLISHED socket back down, flapping the session. Marking one end
+	// of every pair passive pins each pair to a single direction. Note both
+	// ends passive forms no session at all (nobody dials), and both ends
+	// active reintroduces the flap -- exactly one end of each pair must be set.
+	Passive bool
+	// ConnectRetrySec is the BGP ConnectRetry timer in seconds. gobgp's
+	// default is 120s; a smaller value reconnects faster after a startup or
+	// transient failure. Governs the pre-establishment dial only.
+	ConnectRetrySec uint32
 }
 
 // PeerState is a read-only snapshot of a neighbor's session.
@@ -145,6 +159,7 @@ type RouteEvent struct {
 	VPN        *VPNRoute
 	Unicast    *UnicastRoute
 	SRPolicy   *SRPolicy
+	EVPN       *EVPNRoute
 	IsWithdraw bool
 }
 
@@ -234,4 +249,82 @@ type SRPolicyKey struct {
 type SRPolicyController interface {
 	PushPolicy(ctx context.Context, p SRPolicy) error
 	WithdrawPolicy(ctx context.Context, key SRPolicyKey) error
+}
+
+// EVPNRouteType enumerates the RFC 7432 / RFC 9252 EVPN NLRI types
+// Vinbero consumes. RT1 (Ethernet A-D), RT5 (IP Prefix), and RT6/7
+// (multicast) are out of scope (see docs/dev/bgp_evpn_integration.md).
+type EVPNRouteType uint8
+
+const (
+	EVPNRouteTypeMACIP              EVPNRouteType = 2 // RT2: MAC/IP -> fdb_map + bd_peer_map
+	EVPNRouteTypeInclusiveMulticast EVPNRouteType = 3 // RT3: Inclusive Multicast -> bd_peer_map (BUM)
+	EVPNRouteTypeEthernetSegment    EVPNRouteType = 4 // RT4: Ethernet Segment -> esi_map (DF election)
+)
+
+// EVPNMACKey identifies a previously-advertised RT2 for withdrawal: the
+// {RD, EthernetTag, MAC} tuple of the NLRI.
+type EVPNMACKey struct {
+	RD          string
+	EthernetTag uint32
+	MAC         string
+}
+
+// EVPNMcastKey identifies a previously-advertised RT3 (Inclusive Multicast)
+// for withdrawal: the {RD, EthernetTag} tuple of the NLRI.
+type EVPNMcastKey struct {
+	RD          string
+	EthernetTag uint32
+}
+
+// EVPNESKey identifies a previously-advertised RT4 (Ethernet Segment) for
+// withdrawal: the {RD, ESI} tuple of the NLRI.
+type EVPNESKey struct {
+	RD  string
+	ESI [10]byte
+}
+
+// EVPNController advertises Vinbero's local EVPN state into BGP (AFI 25 /
+// SAFI 70). Reception is delivered through RouteSubscriber as
+// RouteEvent.EVPN; PushEVPNMac / WithdrawEVPNMac are the advertise direction
+// for RT2 (MAC/IP), surfaced operator-side as `vbctl bgp advertise-evpn-mac`
+// / `withdraw-evpn-mac`. The EVPNRoute argument carries the RD, route
+// targets, MAC, End.DT2U SID, next hop, and optional ESI to encode.
+type EVPNController interface {
+	PushEVPNMac(ctx context.Context, r EVPNRoute) error
+	WithdrawEVPNMac(ctx context.Context, key EVPNMACKey) error
+	// PushEVPNInclusiveMulticast / WithdrawEVPNInclusiveMulticast are the
+	// advertise direction for RT3 (Inclusive Multicast), carrying the local
+	// End.DT2M flood SID so remote PEs flood BUM traffic toward this node.
+	PushEVPNInclusiveMulticast(ctx context.Context, r EVPNRoute) error
+	WithdrawEVPNInclusiveMulticast(ctx context.Context, key EVPNMcastKey) error
+	// PushEVPNEthernetSegment / WithdrawEVPNEthernetSegment are the advertise
+	// direction for RT4 (Ethernet Segment), carrying the ES-Import route target
+	// so peers learn this PE attaches to the segment (DF election input).
+	PushEVPNEthernetSegment(ctx context.Context, r EVPNRoute) error
+	WithdrawEVPNEthernetSegment(ctx context.Context, key EVPNESKey) error
+}
+
+// EVPNRoute is a decoded BGP EVPN NLRI (AFI 25 / SAFI 70). One envelope
+// carries every route type; the fields a type does not use stay zero.
+// The SRv6 service SID (End.DT2U for RT2, End.DT2M for RT3) is decoded
+// from the BGP Prefix-SID attribute's SRv6 L2 Service TLV (RFC 9252 §6);
+// RT4 carries no SID. The route targets resolve the local bridge domain
+// through the same import-RT filter the L3VPN path uses.
+type EVPNRoute struct {
+	Type        EVPNRouteType
+	RD          string
+	RTs         []string
+	ESI         [10]byte
+	EthernetTag uint32
+	MAC         string // RT2: "aa:bb:cc:dd:ee:ff"
+	IPAddr      string // RT2: optional host IP (IRB); "" when MAC-only
+	SRv6SID     string // End.DT2U (RT2) / End.DT2M (RT3); "" if none
+	NextHop     string
+	ESImportRT  string // RT4: ES-Import route target ("aa:bb:cc:dd:ee:ff"); "" otherwise
+	// RemoteSrc is the advertising PE's SRv6 encap source (the SID's locator
+	// base) for RT2/RT3, used as the RX reverse-map key for split-horizon and
+	// remote-MAC learning -- distinct from the local TX encap source. "" if not
+	// derivable.
+	RemoteSrc string
 }

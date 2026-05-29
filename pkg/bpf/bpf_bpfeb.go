@@ -102,17 +102,17 @@ type BpfFdbKey struct {
 }
 
 type BpfHeadendEntry struct {
-	_           structs.HostLayout
-	Mode        uint8
-	NumSegments uint8
-	PadPolicy   uint16
-	PolicyId    uint32
-	SrcAddr     [16]uint8
-	DstAddr     [16]uint8
-	Segments    [10][16]uint8
-	BdId        uint16
-	ArgsOffset  uint8
-	PadGtp      uint8
+	_            structs.HostLayout
+	Mode         uint8
+	NumSegments  uint8
+	PadPolicy    uint16
+	PolicyId     uint32
+	SrcAddr      [16]uint8
+	DstAddr      [16]uint8
+	Segments     [10][16]uint8
+	BdId         uint16
+	ArgsOffset   uint8
+	FloodExclude uint8
 }
 
 type BpfHeadendL2ExtVal struct {

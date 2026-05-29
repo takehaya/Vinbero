@@ -140,6 +140,154 @@ func bgpCommand() *cli.Command {
 					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpSrPolicyKey", "withdrawn")
 				},
 			},
+			{
+				Name:  "advertise-evpn-mac",
+				Usage: "Advertise a local EVPN RT2 (MAC/IP) with an End.DT2U SID",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
+					&cli.StringFlag{Name: "route-targets", Required: true, Usage: "Export route targets (comma-separated)"},
+					&cli.StringFlag{Name: "mac", Required: true, Usage: "MAC address (aa:bb:cc:dd:ee:ff)"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
+					&cli.StringFlag{Name: "sid", Required: true, Usage: "Local End.DT2U SID (IPv6)"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop (IPv6)"},
+					&cli.StringFlag{Name: "esi", Usage: "Ethernet Segment Identifier (10-octet, optional)"},
+				},
+				Action: func(c *cli.Context) error {
+					m := &v1.BgpEvpnMac{
+						Rd:           c.String("rd"),
+						RouteTargets: csvFlag(c.String("route-targets")),
+						Mac:          c.String("mac"),
+						EthernetTag:  uint32(c.Uint("ethernet-tag")),
+						Sid:          c.String("sid"),
+						NextHop:      c.String("next-hop"),
+						Esi:          c.String("esi"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseEvpnMac(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseEvpnMacRequest{Macs: []*v1.BgpEvpnMac{m}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpEvpnMac", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-evpn-mac",
+				Usage: "Withdraw a previously advertised EVPN RT2",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
+					&cli.StringFlag{Name: "mac", Required: true, Usage: "MAC address"},
+				},
+				Action: func(c *cli.Context) error {
+					k := &v1.BgpEvpnMacKey{
+						Rd:          c.String("rd"),
+						EthernetTag: uint32(c.Uint("ethernet-tag")),
+						Mac:         c.String("mac"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawEvpnMac(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawEvpnMacRequest{Keys: []*v1.BgpEvpnMacKey{k}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnMacKey", "withdrawn")
+				},
+			},
+			{
+				Name:  "advertise-evpn-imet",
+				Usage: "Advertise a local EVPN RT3 (Inclusive Multicast) with an End.DT2M SID",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
+					&cli.StringFlag{Name: "route-targets", Required: true, Usage: "Export route targets (comma-separated)"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
+					&cli.StringFlag{Name: "sid", Required: true, Usage: "Local End.DT2M flood SID (IPv6)"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop / originating router (IPv6)"},
+				},
+				Action: func(c *cli.Context) error {
+					m := &v1.BgpEvpnImet{
+						Rd:           c.String("rd"),
+						RouteTargets: csvFlag(c.String("route-targets")),
+						EthernetTag:  uint32(c.Uint("ethernet-tag")),
+						Sid:          c.String("sid"),
+						NextHop:      c.String("next-hop"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseEvpnImet(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseEvpnImetRequest{Imets: []*v1.BgpEvpnImet{m}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpEvpnImet", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-evpn-imet",
+				Usage: "Withdraw a previously advertised EVPN RT3",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID"},
+				},
+				Action: func(c *cli.Context) error {
+					k := &v1.BgpEvpnImetKey{
+						Rd:          c.String("rd"),
+						EthernetTag: uint32(c.Uint("ethernet-tag")),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawEvpnImet(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawEvpnImetRequest{Keys: []*v1.BgpEvpnImetKey{k}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnImetKey", "withdrawn")
+				},
+			},
+			{
+				Name:  "advertise-evpn-es",
+				Usage: "Advertise a local EVPN RT4 (Ethernet Segment) with an ES-Import RT",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:1"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: "Ethernet Segment Identifier (10-octet, e.g. 00:11:...)"},
+					&cli.StringFlag{Name: "es-import-rt", Required: true, Usage: "ES-Import route target as a MAC (aa:bb:cc:dd:ee:ff)"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop / originating PE source (IPv6)"},
+				},
+				Action: func(c *cli.Context) error {
+					m := &v1.BgpEvpnEs{
+						Rd:         c.String("rd"),
+						Esi:        c.String("esi"),
+						EsImportRt: c.String("es-import-rt"),
+						NextHop:    c.String("next-hop"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseEvpnEs(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseEvpnEsRequest{Segments: []*v1.BgpEvpnEs{m}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpEvpnEs", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-evpn-es",
+				Usage: "Withdraw a previously advertised EVPN RT4",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: "Ethernet Segment Identifier (10-octet)"},
+				},
+				Action: func(c *cli.Context) error {
+					k := &v1.BgpEvpnEsKey{
+						Rd:  c.String("rd"),
+						Esi: c.String("esi"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawEvpnEs(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawEvpnEsRequest{Keys: []*v1.BgpEvpnEsKey{k}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnEsKey", "withdrawn")
+				},
+			},
 		},
 	}
 }

@@ -23,6 +23,10 @@ type Binding struct {
 	ImportRTs      []string
 	ExportRTs      []string
 	DefaultLocator string
+	// BDID is the bridge domain a received EVPN route (RT2/3/4) installs
+	// into when its route targets match ImportRTs. It is 0 for L3VPN-only
+	// bindings; EVPN reception requires a non-zero BDID.
+	BDID uint16
 }
 
 // Manager holds VRF<->RT bindings. Safe for concurrent use.
@@ -85,10 +89,33 @@ func (m *Manager) MatchImport(rts []string) (string, bool) {
 	return "", false
 }
 
-// Empty reports whether no bindings are registered. The applier treats
-// an empty Manager as "accept every route" so BGP receive works before
-// any VrfBgpBind call; once at least one binding exists, import_rts
-// filtering takes effect.
+// MatchImportBD returns the bridge domain of the EVPN binding whose
+// import_rts contain any of rts. ok=false means no binding with a
+// non-zero BDID imports the route, so the EVPN applier drops it (an EVPN
+// route can only install into an explicitly bound bridge domain).
+func (m *Manager) MatchImportBD(rts []string) (uint16, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, b := range m.bindings {
+		if b.BDID == 0 {
+			continue
+		}
+		for _, want := range b.ImportRTs {
+			if slices.Contains(rts, want) {
+				return b.BDID, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// Empty reports whether no bindings are registered. This accept-all fallback
+// is for the L3VPN receive path only: the applier treats an empty Manager as
+// "accept every route" so VPNv4/VPNv6 works before any VrfBgpBind call, and
+// import_rts filtering takes effect once a binding exists. EVPN does NOT use
+// this -- MatchImportBD always requires a non-zero-BDID binding, so an EVPN
+// route is dropped until its bridge domain is explicitly bound (there is no
+// bridge domain to install into otherwise).
 func (m *Manager) Empty() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

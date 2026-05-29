@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	gobgpapi "github.com/osrg/gobgp/v4/api"
 	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -104,6 +105,48 @@ func TestSession_AddListDeletePeer(t *testing.T) {
 	}
 	if len(peers) != 0 {
 		t.Errorf("Peers after delete returned %d, want 0", len(peers))
+	}
+}
+
+// TestSession_AddPeerSetsPassiveAndConnectRetry pins that PeerConfig.Passive
+// and PeerConfig.ConnectRetrySec actually reach gobgp's neighbor config. Peers()
+// does not surface them, so this reads the raw gobgp config back via ListPeer.
+// It is the guard that the AddPeer Transport/Timers wiring stays correct (a
+// regression here is how the port-0 / passive bugs slipped past unit tests).
+func TestSession_AddPeerSetsPassiveAndConnectRetry(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+
+	const nbr = "10.255.0.4"
+	if err := s.AddPeer(context.Background(), bgp.PeerConfig{
+		Neighbor:        nbr,
+		PeerASN:         65003,
+		HoldTimeSec:     90,
+		KeepaliveSec:    30,
+		ConnectRetrySec: 7,
+		Passive:         true,
+		Families:        []bgp.Family{bgp.FamilyIPv6Unicast},
+	}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+
+	srv := s.bgpServer()
+	if srv == nil {
+		t.Fatal("bgpServer is nil after Start")
+	}
+	var got *gobgpapi.Peer
+	if err := srv.ListPeer(context.Background(), &gobgpapi.ListPeerRequest{Address: nbr},
+		func(p *gobgpapi.Peer) { got = p }); err != nil {
+		t.Fatalf("ListPeer: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("peer %s not found", nbr)
+	}
+	if !got.GetTransport().GetPassiveMode() {
+		t.Errorf("PassiveMode = false, want true")
+	}
+	if cr := got.GetTimers().GetConfig().GetConnectRetry(); cr != 7 {
+		t.Errorf("ConnectRetry = %d, want 7", cr)
 	}
 }
 

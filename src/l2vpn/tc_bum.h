@@ -228,6 +228,12 @@ static __noinline int tc_dispatch_bum_clones(
         if (!peer)
             continue; // Slot may be empty due to deletion; keep scanning
 
+        // RT2 installs the unicast End.DT2U peer with flood_exclude set: it is a
+        // known-unicast forwarding target, not a BUM flood destination. The RT3
+        // End.DT2M peer (and manually-created peers) leave it 0 and are flooded.
+        if (peer->flood_exclude)
+            continue;
+
         if (src_esi_set) {
             struct bd_peer_l2_ext_key ext_key = { .bd_id = bd_id, .index = i };
             struct bd_peer_l2_ext_val *peer_ext =

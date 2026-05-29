@@ -11,6 +11,8 @@ package gobgp
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"strings"
 	"sync"
 
@@ -74,7 +76,13 @@ func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
 	if s.server != nil {
 		return bgp.ErrSessionAlreadyStarted
 	}
-	srv := gobgpsrv.NewBgpServer()
+	// gobgp discards all of its own logs unless given a logger. Wire one at
+	// info level so peer up/down and notifications surface in the daemon log
+	// (FSM and per-update lines stay at debug and are suppressed).
+	gobgpLevel := new(slog.LevelVar)
+	gobgpLevel.Set(slog.LevelInfo)
+	gobgpLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: gobgpLevel}))
+	srv := gobgpsrv.NewBgpServer(gobgpsrv.LoggerOption(gobgpLogger, gobgpLevel))
 	// Serve() is the blocking API event loop; it must run in its own
 	// goroutine for the duration of the session.
 	go srv.Serve()
@@ -142,7 +150,21 @@ func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 			Config: &gobgpapi.TimersConfig{
 				HoldTime:          uint64(p.HoldTimeSec),
 				KeepaliveInterval: uint64(p.KeepaliveSec),
+				// gobgp defaults ConnectRetry to 120s; the daemon passes a few
+				// seconds (see config) so a neighbor unreachable at startup --
+				// e.g. the underlay next-hop not yet up -- reconnects quickly
+				// instead of stalling for two minutes after the first failed dial.
+				ConnectRetry: uint64(p.ConnectRetrySec),
 			},
+		},
+		// Transport carries only PassiveMode. In an iBGP full mesh both ends of
+		// a pair would otherwise dial at once and the connection collision
+		// flaps the session, so one end is marked passive (accept-only). gobgp
+		// fills the rest of Transport -- local address from the neighbor family
+		// and remote port 179 -- in SetDefaultNeighborConfigValues on the
+		// AddPeer path, so nothing else is set here.
+		Transport: &gobgpapi.Transport{
+			PassiveMode: p.Passive,
 		},
 		AfiSafis: afiSafis,
 	}
@@ -203,6 +225,8 @@ func familyToAPI(f bgp.Family) (*gobgpapi.Family, error) {
 		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP6, Safi: gobgpapi.Family_SAFI_UNICAST}, nil
 	case bgp.FamilySRPolicyIPv6:
 		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP6, Safi: gobgpapi.Family_SAFI_SR_POLICY}, nil
+	case bgp.FamilyEVPN:
+		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_L2VPN, Safi: gobgpapi.Family_SAFI_EVPN}, nil
 	default:
 		return nil, fmt.Errorf("unknown BGP family %q", f)
 	}

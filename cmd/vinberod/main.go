@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"syscall"
@@ -123,15 +124,39 @@ func run(cliCtx *cli.Context) error {
 	// satisfied by the same gobgp session. Like advertiser, it stays nil
 	// when BGP is disabled so no typed nil leaks into the interface.
 	var srPolicyAdvertiser bgp.SRPolicyController
+	// evpnAdvertiser is the EVPN advertise direction (AFI 25 / SAFI 70),
+	// satisfied by the same gobgp session; nil when BGP is disabled.
+	var evpnAdvertiser bgp.EVPNController
 	// applier holds the SR Policy table SrPolicyService also drives, so it is
 	// shared via NewServer below: BGP-received and operator-defined policies
 	// must share one table or collide on policy_id. nil when BGP is disabled
 	// -> SrPolicyService RPCs return FailedPrecondition.
 	var applier *apply.Applier
 	if cliCtx.Bool("bgp-enabled") {
+		// Load config-time VRF <-> route-target bindings before the BGP
+		// session starts receiving. EVPN routes require a bridge-domain
+		// binding to be installed; applying bindings here (rather than via
+		// VrfBgpBind after boot) means a route that arrives early is not
+		// dropped for lack of one. Only relevant when BGP is enabled.
+		for _, b := range cfg.BGP.VrfBindings {
+			if b.BDID > math.MaxUint16 {
+				return fmt.Errorf("bgp.vrf_bindings %q: bd_id %d out of range (max %d)", b.VRFName, b.BDID, math.MaxUint16)
+			}
+			if err := vrfBgpMgr.Bind(vrfbgp.Binding{
+				VRFName:        b.VRFName,
+				ImportRTs:      b.ImportRTs,
+				ExportRTs:      b.ExportRTs,
+				DefaultLocator: b.DefaultLocator,
+				BDID:           uint16(b.BDID),
+			}); err != nil {
+				return fmt.Errorf("bgp.vrf_bindings %q: %w", b.VRFName, err)
+			}
+		}
+
 		bgpSession = gobgp.NewSession(lg)
 		advertiser = bgpSession
 		srPolicyAdvertiser = bgpSession
+		evpnAdvertiser = bgpSession
 		applier = apply.NewApplier(
 			vin.GetMapOperations(),
 			locatorMgr,
@@ -143,7 +168,7 @@ func run(cliCtx *cli.Context) error {
 		)
 	}
 
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, applier, lg)
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, applier, lg)
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
@@ -216,11 +241,13 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 			families = append(families, fam)
 		}
 		if err := session.AddPeer(ctx, bgp.PeerConfig{
-			Neighbor:     p.Neighbor,
-			PeerASN:      p.PeerASN,
-			HoldTimeSec:  p.HoldTimeSec,
-			KeepaliveSec: p.KeepaliveSec,
-			Families:     families,
+			Neighbor:        p.Neighbor,
+			PeerASN:         p.PeerASN,
+			HoldTimeSec:     p.HoldTimeSec,
+			KeepaliveSec:    p.KeepaliveSec,
+			Families:        families,
+			Passive:         p.Passive,
+			ConnectRetrySec: p.ConnectRetrySec,
 		}); err != nil {
 			return err
 		}

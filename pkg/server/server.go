@@ -22,15 +22,17 @@ import (
 
 // Server represents the Connect RPC server
 type Server struct {
-	cfg        *config.Config
-	mapOps     *bpf.MapOperations
-	resMgr     *netresource.ResourceManager
-	fdbWatcher *netlinkwatch.FDBWatcher
+	cfg          *config.Config
+	mapOps       *bpf.MapOperations
+	resMgr       *netresource.ResourceManager
+	fdbWatcher   *netlinkwatch.FDBWatcher
 	locatorMgr   *locator.Manager
 	vrfBgpMgr    *vrfbgp.Manager
 	advertiser   bgp.RouteAdvertiser
 	srPolicyAdv  bgp.SRPolicyController
+	evpnAdv      bgp.EVPNController
 	srPolicyCtrl srPolicyController
+	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
@@ -46,7 +48,7 @@ type Server struct {
 // enabled, or nil otherwise. Taking the concrete type (not the interface)
 // keeps a typed-nil from leaking into srPolicyCtrl, so the FailedPrecondition
 // guard in SrPolicyServer works.
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, srPolicyApplier *apply.Applier, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, srPolicyApplier *apply.Applier, logger *zap.Logger) *Server {
 	s := &Server{
 		cfg:         cfg,
 		mapOps:      mapOps,
@@ -56,11 +58,13 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		vrfBgpMgr:   vrfBgpMgr,
 		advertiser:  advertiser,
 		srPolicyAdv: srPolicyAdv,
+		evpnAdv:     evpnAdv,
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}
 	if srPolicyApplier != nil {
 		s.srPolicyCtrl = srPolicyApplier
+		s.esReElectDF = srPolicyApplier.ReelectDF
 	}
 	return s
 }
@@ -95,7 +99,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
 
 	// BgpRoute service (operator-explicit BGP advertise / withdraw).
-	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv)
+	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv, s.evpnAdv)
 	bgpRoutePath, bgpRouteHandler := vinberov1connect.NewBgpRouteServiceHandler(bgpRouteServer)
 	s.mux.Handle(bgpRoutePath, bgpRouteHandler)
 	s.logger.Info("Registered BgpRouteService", zap.String("path", bgpRoutePath))
@@ -147,7 +151,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered BdPeerService", zap.String("path", path))
 
 	// Ethernet Segment service (RFC 7432 ESI master table)
-	esServer := NewEthernetSegmentServer(s.mapOps)
+	esServer := NewEthernetSegmentServer(s.mapOps, s.esReElectDF)
 	path, handler = vinberov1connect.NewEthernetSegmentServiceHandler(esServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered EthernetSegmentService", zap.String("path", path))

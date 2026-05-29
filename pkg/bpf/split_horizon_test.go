@@ -44,7 +44,7 @@ func TestXDPProgEndDT2MSplitHorizonRX(t *testing.T) {
 		NumSegments: 1,
 		SrcAddr:     peerSrc,
 	}
-			if err := h.mapOps.CreateBdPeer(bdID, 0, peerEntry, tc.peerEsi); err != nil {
+			if err := h.mapOps.CreateBdPeer(bdID, 0, peerEntry, tc.peerEsi, peerEntry.SrcAddr, true); err != nil {
 				t.Fatalf("CreateBdPeer: %v", err)
 			}
 
@@ -121,7 +121,7 @@ func TestXDPProgEndDT2MNonDFDrop(t *testing.T) {
 				NumSegments: 1,
 				SrcAddr:     peerSrc,
 			}
-			if err := h.mapOps.CreateBdPeer(100, 0, peerEntry, senderESI); err != nil {
+			if err := h.mapOps.CreateBdPeer(100, 0, peerEntry, senderESI, peerEntry.SrcAddr, true); err != nil {
 				t.Fatalf("CreateBdPeer: %v", err)
 			}
 
@@ -159,7 +159,7 @@ func TestXDPProgEndDT2SplitHorizonUnaffected(t *testing.T) {
 		NumSegments: 1,
 		SrcAddr:     peerSrc,
 	}
-	if err := h.mapOps.CreateBdPeer(100, 0, peerEntry, esi); err != nil {
+	if err := h.mapOps.CreateBdPeer(100, 0, peerEntry, esi, peerEntry.SrcAddr, true); err != nil {
 		t.Fatalf("CreateBdPeer: %v", err)
 	}
 	// Prime FDB so DT2U hits

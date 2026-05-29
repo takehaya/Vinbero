@@ -1,0 +1,63 @@
+internal:
+  # eth1 faces the core; eth2 is the other leg of the dual-homed CE's ES-1.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+    sr_policy:
+      capacity: 1024
+
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.2"
+    listen_port: 179
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "2001:db8:ff::1"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      # Higher loopback of the pe1-pe2 pair stays passive so only pe1 dials,
+      # avoiding the iBGP full-mesh connection-collision flap.
+      passive: true
+      families:
+        - evpn
+    - neighbor: "2001:db8:ff::3"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - evpn
+  vrf_bindings:
+    - vrf_name: evi-100
+      import_rts:
+        - "65000:100"
+      bd_id: 100

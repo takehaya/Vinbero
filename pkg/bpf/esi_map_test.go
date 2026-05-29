@@ -99,7 +99,7 @@ func TestBdPeerReverseEsi(t *testing.T) {
 		SrcAddr:     srcAddr,
 	}
 
-	if err := h.mapOps.CreateBdPeer(100, 0, entry, esi); err != nil {
+	if err := h.mapOps.CreateBdPeer(100, 0, entry, esi, entry.SrcAddr, true); err != nil {
 		t.Fatalf("CreateBdPeer: %v", err)
 	}
 
@@ -117,7 +117,7 @@ func TestBdPeerReverseEsi(t *testing.T) {
 	}
 
 	// Empty ESI (single-homing) should round-trip to zero
-	if err := h.mapOps.CreateBdPeer(100, 1, entry, [ESILen]byte{}); err != nil {
+	if err := h.mapOps.CreateBdPeer(100, 1, entry, [ESILen]byte{}, entry.SrcAddr, true); err != nil {
 		t.Fatalf("CreateBdPeer single-homing: %v", err)
 	}
 
