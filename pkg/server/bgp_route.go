@@ -220,14 +220,17 @@ func (s *BgpRouteServer) BgpWithdrawEvpnMac(
 		Errors:    make([]*v1.OperationError, 0),
 	}
 	for _, k := range req.Msg.Keys {
-		if _, err := net.ParseMAC(k.GetMac()); err != nil {
+		hw, err := net.ParseMAC(k.GetMac())
+		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnMacTrigger(k.GetRd(), k.GetEthernetTag(), k.GetMac()), Reason: fmt.Sprintf("invalid MAC: %v", err)})
 			continue
 		}
+		// Normalize the MAC the same way advertise does, so the withdraw key
+		// matches the advertised-path tracking key regardless of input format.
 		if err := s.evpn.WithdrawEVPNMac(ctx, bgp.EVPNMACKey{
 			RD:          k.GetRd(),
 			EthernetTag: k.GetEthernetTag(),
-			MAC:         k.GetMac(),
+			MAC:         hw.String(),
 		}); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnMacTrigger(k.GetRd(), k.GetEthernetTag(), k.GetMac()), Reason: err.Error()})
 			continue
@@ -371,7 +374,8 @@ func evpnEsTrigger(rd, esi string) string {
 // encoder; the MAC and optional ESI are validated here so a bad request is a
 // per-item error rather than a controller failure.
 func protoToAdvertiseEvpnMac(m *v1.BgpEvpnMac) (bgp.EVPNRoute, error) {
-	if _, err := net.ParseMAC(m.GetMac()); err != nil {
+	hw, err := net.ParseMAC(m.GetMac())
+	if err != nil {
 		return bgp.EVPNRoute{}, fmt.Errorf("invalid MAC %q: %w", m.GetMac(), err)
 	}
 	var esi [bpf.ESILen]byte
@@ -388,9 +392,13 @@ func protoToAdvertiseEvpnMac(m *v1.BgpEvpnMac) (bgp.EVPNRoute, error) {
 		RTs:         m.GetRouteTargets(),
 		ESI:         esi,
 		EthernetTag: m.GetEthernetTag(),
-		MAC:         m.GetMac(),
-		SRv6SID:     m.GetSid(),
-		NextHop:     m.GetNextHop(),
+		// Store the canonical MAC: gobgp keys the advertised-path tracking
+		// map on this string, so a withdraw must derive the same key. Using
+		// the raw request value would let case / separator / zero-pad
+		// variants miss on withdraw and strand the path.
+		MAC:     hw.String(),
+		SRv6SID: m.GetSid(),
+		NextHop: m.GetNextHop(),
 	}, nil
 }
 

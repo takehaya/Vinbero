@@ -191,6 +191,40 @@ func TestBgpRoute_WithdrawEvpnMac(t *testing.T) {
 	}
 }
 
+// Advertise and withdraw must derive the same tracking key even when the MAC is
+// given in a different textual form (gobgp keys advertised paths on the MAC
+// string, so a format mismatch would make withdraw a no-op and strand the
+// route). Both the advertise route and the withdraw key must carry the
+// canonical net.HardwareAddr.String() form.
+func TestBgpRoute_EvpnMac_NormalizedForTracking(t *testing.T) {
+	const canonical = "aa:bb:cc:00:00:01"
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+
+	// Advertise with upper-case, withdraw with a dotted form: both denote the
+	// same MAC and must normalize to the same key.
+	if _, err := s.BgpAdvertiseEvpnMac(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnMacRequest{Macs: []*v1.BgpEvpnMac{{
+			Rd: "65000:100", RouteTargets: []string{"65000:100"},
+			Mac: "AA:BB:CC:00:00:01", Sid: "fd00:2:2:d2::", NextHop: "2001:db8::1",
+		}}})); err != nil {
+		t.Fatalf("BgpAdvertiseEvpnMac: %v", err)
+	}
+	if len(fe.pushed) != 1 || fe.pushed[0].MAC != canonical {
+		t.Fatalf("advertised MAC = %q, want canonical %q", fe.pushed[0].MAC, canonical)
+	}
+
+	if _, err := s.BgpWithdrawEvpnMac(context.Background(),
+		connect.NewRequest(&v1.BgpWithdrawEvpnMacRequest{Keys: []*v1.BgpEvpnMacKey{{
+			Rd: "65000:100", Mac: "aabb.cc00.0001",
+		}}})); err != nil {
+		t.Fatalf("BgpWithdrawEvpnMac: %v", err)
+	}
+	if len(fe.withdrawn) != 1 || fe.withdrawn[0].MAC != canonical {
+		t.Fatalf("withdrawn MAC = %q, want canonical %q", fe.withdrawn[0].MAC, canonical)
+	}
+}
+
 func TestBgpRoute_AdvertiseEvpnImet(t *testing.T) {
 	fe := &fakeEvpnAdv{}
 	s := NewBgpRouteServer(nil, nil, fe)
