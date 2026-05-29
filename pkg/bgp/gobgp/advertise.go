@@ -100,6 +100,8 @@ func vinberoFamilyToAPI(f bgp.Family) (gobgppkt.Family, error) {
 		return gobgppkt.RF_IPv6_UC, nil
 	case bgp.FamilySRPolicyIPv6:
 		return gobgppkt.RF_SR_POLICY_IPv6, nil
+	case bgp.FamilyEVPN:
+		return gobgppkt.RF_EVPN, nil
 	default:
 		return 0, fmt.Errorf("unsupported BGP family %q", f)
 	}

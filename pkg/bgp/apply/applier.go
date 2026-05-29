@@ -39,17 +39,20 @@ type headendOps interface {
 type dataPlane interface {
 	headendOps
 	policyMapOps
+	fdbBdOps
 }
 
 // Applier applies received BGP routes to the Vinbero data plane.
 type Applier struct {
 	headend     headendOps
+	fdbBd       fdbBdOps
 	locators    *locator.Manager
 	vrfBindings *vrfbgp.Manager
 	fib         fib.Injector
 	srcLocator  string
 	localASN    uint32
 	srPolicy    *srPolicyTable
+	evpn        *evpnTable
 	// steeredRoutes maps a steered VPN route to the SR Policy key it
 	// references, so a withdraw (which carries no color/next-hop) can unref
 	// the right policy. Touched only from applyVPN, which runs on the single
@@ -66,12 +69,14 @@ type Applier struct {
 func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
 	return &Applier{
 		headend:       dp,
+		fdbBd:         dp,
 		locators:      locators,
 		vrfBindings:   vrfBindings,
 		fib:           fibInjector,
 		srcLocator:    srcLocator,
 		localASN:      localASN,
 		srPolicy:      newSRPolicyTable(dp, logger),
+		evpn:          newEVPNTable(),
 		steeredRoutes: make(map[bgp.RouteKey]policyKey),
 		logger:        logger.Named("bgp.apply"),
 	}
@@ -104,6 +109,8 @@ func (a *Applier) Apply(ev bgp.RouteEvent) {
 		a.applyVPN(ev.VPN, ev.IsWithdraw)
 	case ev.Unicast != nil:
 		a.applyUnicast(ev.Unicast, ev.IsWithdraw)
+	case ev.EVPN != nil:
+		a.applyEVPN(ev.EVPN, ev.IsWithdraw)
 	}
 }
 

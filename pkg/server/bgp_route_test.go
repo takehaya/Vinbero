@@ -69,8 +69,254 @@ func (f *fakeSRPolicyAdv) WithdrawPolicy(_ context.Context, k bgp.SRPolicyKey) e
 	return nil
 }
 
+// fakeEvpnAdv records EVPNController calls instead of touching gobgp.
+type fakeEvpnAdv struct {
+	pushed         []bgp.EVPNRoute
+	withdrawn      []bgp.EVPNMACKey
+	mcastPushed    []bgp.EVPNRoute
+	mcastWithdrawn []bgp.EVPNMcastKey
+	esPushed       []bgp.EVPNRoute
+	esWithdrawn    []bgp.EVPNESKey
+	err            error
+}
+
+var _ bgp.EVPNController = (*fakeEvpnAdv)(nil)
+
+func (f *fakeEvpnAdv) PushEVPNMac(_ context.Context, r bgp.EVPNRoute) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.pushed = append(f.pushed, r)
+	return nil
+}
+
+func (f *fakeEvpnAdv) WithdrawEVPNMac(_ context.Context, k bgp.EVPNMACKey) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.withdrawn = append(f.withdrawn, k)
+	return nil
+}
+
+func (f *fakeEvpnAdv) PushEVPNInclusiveMulticast(_ context.Context, r bgp.EVPNRoute) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.mcastPushed = append(f.mcastPushed, r)
+	return nil
+}
+
+func (f *fakeEvpnAdv) WithdrawEVPNInclusiveMulticast(_ context.Context, k bgp.EVPNMcastKey) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.mcastWithdrawn = append(f.mcastWithdrawn, k)
+	return nil
+}
+
+func (f *fakeEvpnAdv) PushEVPNEthernetSegment(_ context.Context, r bgp.EVPNRoute) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.esPushed = append(f.esPushed, r)
+	return nil
+}
+
+func (f *fakeEvpnAdv) WithdrawEVPNEthernetSegment(_ context.Context, k bgp.EVPNESKey) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.esWithdrawn = append(f.esWithdrawn, k)
+	return nil
+}
+
+func TestBgpRoute_EvpnDisabledWithoutController(t *testing.T) {
+	s := NewBgpRouteServer(nil, nil, nil)
+	if _, err := s.BgpAdvertiseEvpnMac(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnMacRequest{})); err == nil {
+		t.Error("BgpAdvertiseEvpnMac must fail when the EVPN controller is nil")
+	}
+}
+
+func TestBgpRoute_AdvertiseEvpnMac(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpAdvertiseEvpnMac(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnMacRequest{Macs: []*v1.BgpEvpnMac{{
+			Rd: "65000:100", RouteTargets: []string{"65000:100"},
+			Mac: "aa:bb:cc:00:00:01", Sid: "fd00:2:2:d2::", NextHop: "2001:db8::1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseEvpnMac: %v", err)
+	}
+	if len(resp.Msg.Advertised) != 1 || len(fe.pushed) != 1 {
+		t.Fatalf("advertised=%d pushed=%d, want 1/1", len(resp.Msg.Advertised), len(fe.pushed))
+	}
+	if fe.pushed[0].MAC != "aa:bb:cc:00:00:01" || fe.pushed[0].SRv6SID != "fd00:2:2:d2::" {
+		t.Errorf("forwarded EVPN route = %+v", fe.pushed[0])
+	}
+}
+
+// An invalid MAC is a per-item error and never reaches the controller.
+func TestBgpRoute_AdvertiseEvpnMac_BadMacIsPerItemError(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpAdvertiseEvpnMac(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnMacRequest{Macs: []*v1.BgpEvpnMac{{
+			Rd: "65000:100", Mac: "zz", Sid: "fd00:2:2:d2::", NextHop: "2001:db8::1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseEvpnMac: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 || len(fe.pushed) != 0 {
+		t.Errorf("a bad MAC must be a per-item error and not reach the controller")
+	}
+}
+
+func TestBgpRoute_WithdrawEvpnMac(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpWithdrawEvpnMac(context.Background(),
+		connect.NewRequest(&v1.BgpWithdrawEvpnMacRequest{Keys: []*v1.BgpEvpnMacKey{{
+			Rd: "65000:100", Mac: "aa:bb:cc:00:00:01",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpWithdrawEvpnMac: %v", err)
+	}
+	if len(resp.Msg.Withdrawn) != 1 || len(fe.withdrawn) != 1 {
+		t.Fatalf("withdrawn=%d fake=%d, want 1/1", len(resp.Msg.Withdrawn), len(fe.withdrawn))
+	}
+	if fe.withdrawn[0].MAC != "aa:bb:cc:00:00:01" {
+		t.Errorf("forwarded key = %+v", fe.withdrawn[0])
+	}
+}
+
+// Advertise and withdraw must derive the same tracking key even when the MAC is
+// given in a different textual form (gobgp keys advertised paths on the MAC
+// string, so a format mismatch would make withdraw a no-op and strand the
+// route). Both the advertise route and the withdraw key must carry the
+// canonical net.HardwareAddr.String() form.
+func TestBgpRoute_EvpnMac_NormalizedForTracking(t *testing.T) {
+	const canonical = "aa:bb:cc:00:00:01"
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+
+	// Advertise with upper-case, withdraw with a dotted form: both denote the
+	// same MAC and must normalize to the same key.
+	if _, err := s.BgpAdvertiseEvpnMac(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnMacRequest{Macs: []*v1.BgpEvpnMac{{
+			Rd: "65000:100", RouteTargets: []string{"65000:100"},
+			Mac: "AA:BB:CC:00:00:01", Sid: "fd00:2:2:d2::", NextHop: "2001:db8::1",
+		}}})); err != nil {
+		t.Fatalf("BgpAdvertiseEvpnMac: %v", err)
+	}
+	if len(fe.pushed) != 1 || fe.pushed[0].MAC != canonical {
+		t.Fatalf("advertised MAC = %q, want canonical %q", fe.pushed[0].MAC, canonical)
+	}
+
+	if _, err := s.BgpWithdrawEvpnMac(context.Background(),
+		connect.NewRequest(&v1.BgpWithdrawEvpnMacRequest{Keys: []*v1.BgpEvpnMacKey{{
+			Rd: "65000:100", Mac: "aabb.cc00.0001",
+		}}})); err != nil {
+		t.Fatalf("BgpWithdrawEvpnMac: %v", err)
+	}
+	if len(fe.withdrawn) != 1 || fe.withdrawn[0].MAC != canonical {
+		t.Fatalf("withdrawn MAC = %q, want canonical %q", fe.withdrawn[0].MAC, canonical)
+	}
+}
+
+func TestBgpRoute_AdvertiseEvpnImet(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpAdvertiseEvpnImet(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnImetRequest{Imets: []*v1.BgpEvpnImet{{
+			Rd: "65000:100", RouteTargets: []string{"65000:100"},
+			Sid: "fd00:200:0:24::", NextHop: "2001:db8::1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseEvpnImet: %v", err)
+	}
+	if len(resp.Msg.Advertised) != 1 || len(fe.mcastPushed) != 1 {
+		t.Fatalf("advertised=%d pushed=%d, want 1/1", len(resp.Msg.Advertised), len(fe.mcastPushed))
+	}
+	if fe.mcastPushed[0].Type != bgp.EVPNRouteTypeInclusiveMulticast || fe.mcastPushed[0].SRv6SID != "fd00:200:0:24::" {
+		t.Errorf("forwarded RT3 route = %+v", fe.mcastPushed[0])
+	}
+}
+
+func TestBgpRoute_WithdrawEvpnImet(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpWithdrawEvpnImet(context.Background(),
+		connect.NewRequest(&v1.BgpWithdrawEvpnImetRequest{Keys: []*v1.BgpEvpnImetKey{{
+			Rd: "65000:100", EthernetTag: 7,
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpWithdrawEvpnImet: %v", err)
+	}
+	if len(resp.Msg.Withdrawn) != 1 || len(fe.mcastWithdrawn) != 1 {
+		t.Fatalf("withdrawn=%d fake=%d, want 1/1", len(resp.Msg.Withdrawn), len(fe.mcastWithdrawn))
+	}
+	if fe.mcastWithdrawn[0].RD != "65000:100" || fe.mcastWithdrawn[0].EthernetTag != 7 {
+		t.Errorf("forwarded key = %+v", fe.mcastWithdrawn[0])
+	}
+}
+
+func TestBgpRoute_AdvertiseEvpnEs(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpAdvertiseEvpnEs(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnEsRequest{Segments: []*v1.BgpEvpnEs{{
+			Rd: "65000:1", Esi: "00:11:22:33:44:55:66:77:88:99",
+			EsImportRt: "aa:bb:cc:dd:ee:ff", NextHop: "2001:db8::1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseEvpnEs: %v", err)
+	}
+	if len(resp.Msg.Advertised) != 1 || len(fe.esPushed) != 1 {
+		t.Fatalf("advertised=%d pushed=%d, want 1/1", len(resp.Msg.Advertised), len(fe.esPushed))
+	}
+	if fe.esPushed[0].Type != bgp.EVPNRouteTypeEthernetSegment || fe.esPushed[0].ESImportRT != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("forwarded RT4 route = %+v", fe.esPushed[0])
+	}
+}
+
+// An invalid ESI is a per-item error and never reaches the controller.
+func TestBgpRoute_AdvertiseEvpnEs_BadEsiIsPerItemError(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpAdvertiseEvpnEs(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnEsRequest{Segments: []*v1.BgpEvpnEs{{
+			Rd: "65000:1", Esi: "zz", EsImportRt: "aa:bb:cc:dd:ee:ff", NextHop: "2001:db8::1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseEvpnEs: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 || len(fe.esPushed) != 0 {
+		t.Errorf("a bad ESI must be a per-item error and not reach the controller")
+	}
+}
+
+func TestBgpRoute_WithdrawEvpnEs(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe)
+	resp, err := s.BgpWithdrawEvpnEs(context.Background(),
+		connect.NewRequest(&v1.BgpWithdrawEvpnEsRequest{Keys: []*v1.BgpEvpnEsKey{{
+			Rd: "65000:1", Esi: "00:11:22:33:44:55:66:77:88:99",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpWithdrawEvpnEs: %v", err)
+	}
+	if len(resp.Msg.Withdrawn) != 1 || len(fe.esWithdrawn) != 1 {
+		t.Fatalf("withdrawn=%d fake=%d, want 1/1", len(resp.Msg.Withdrawn), len(fe.esWithdrawn))
+	}
+	if fe.esWithdrawn[0].RD != "65000:1" {
+		t.Errorf("forwarded key = %+v", fe.esWithdrawn[0])
+	}
+}
+
 func TestBgpRoute_DisabledWithoutAdvertiser(t *testing.T) {
-	s := NewBgpRouteServer(nil, nil)
+	s := NewBgpRouteServer(nil, nil, nil)
 	_, err := s.BgpAdvertiseVpn(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseVpnRequest{}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
@@ -79,7 +325,7 @@ func TestBgpRoute_DisabledWithoutAdvertiser(t *testing.T) {
 }
 
 func TestBgpRoute_SrPolicyDisabledWithoutController(t *testing.T) {
-	s := NewBgpRouteServer(&fakeAdvertiser{}, nil)
+	s := NewBgpRouteServer(&fakeAdvertiser{}, nil, nil)
 	_, err := s.BgpAdvertiseSrPolicy(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
@@ -89,7 +335,7 @@ func TestBgpRoute_SrPolicyDisabledWithoutController(t *testing.T) {
 
 func TestBgpRoute_AdvertiseSrPolicy(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
-	s := NewBgpRouteServer(nil, fp)
+	s := NewBgpRouteServer(nil, fp, nil)
 	resp, err := s.BgpAdvertiseSrPolicy(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{Policies: []*v1.BgpSrPolicy{{
 			Color:         100,
@@ -117,7 +363,7 @@ func TestBgpRoute_AdvertiseSrPolicy(t *testing.T) {
 // A zero preference must map to the RFC 9256 default.
 func TestBgpRoute_AdvertiseSrPolicy_DefaultPreference(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
-	s := NewBgpRouteServer(nil, fp)
+	s := NewBgpRouteServer(nil, fp, nil)
 	if _, err := s.BgpAdvertiseSrPolicy(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{Policies: []*v1.BgpSrPolicy{{
 			Color: 1, Endpoint: "2001:db8::2", Segments: []string{"fd00::1"}, NextHop: "2001:db8::1",
@@ -132,7 +378,7 @@ func TestBgpRoute_AdvertiseSrPolicy_DefaultPreference(t *testing.T) {
 // A bad endpoint is a per-item error and must not reach the controller.
 func TestBgpRoute_AdvertiseSrPolicy_BadEndpointIsPerItemError(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
-	s := NewBgpRouteServer(nil, fp)
+	s := NewBgpRouteServer(nil, fp, nil)
 	resp, err := s.BgpAdvertiseSrPolicy(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{Policies: []*v1.BgpSrPolicy{{
 			Color: 1, Endpoint: "not-an-ip", Segments: []string{"fd00::1"}, NextHop: "2001:db8::1",
@@ -149,7 +395,7 @@ func TestBgpRoute_AdvertiseSrPolicy_BadEndpointIsPerItemError(t *testing.T) {
 // the data-plane write would later refuse.
 func TestBgpRoute_AdvertiseSrPolicy_IPv4SegmentIsPerItemError(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
-	s := NewBgpRouteServer(nil, fp)
+	s := NewBgpRouteServer(nil, fp, nil)
 	resp, err := s.BgpAdvertiseSrPolicy(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{Policies: []*v1.BgpSrPolicy{{
 			Color: 1, Endpoint: "2001:db8::2", Segments: []string{"10.0.0.1"}, NextHop: "2001:db8::1",
@@ -166,7 +412,7 @@ func TestBgpRoute_AdvertiseSrPolicy_IPv4SegmentIsPerItemError(t *testing.T) {
 // endpoint/segment constraint, rather than failing later in the controller.
 func TestBgpRoute_AdvertiseSrPolicy_IPv4NextHopIsPerItemError(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
-	s := NewBgpRouteServer(nil, fp)
+	s := NewBgpRouteServer(nil, fp, nil)
 	resp, err := s.BgpAdvertiseSrPolicy(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseSrPolicyRequest{Policies: []*v1.BgpSrPolicy{{
 			Color: 1, Endpoint: "2001:db8::2", Segments: []string{"2001:db8::3"}, NextHop: "10.0.0.1",
@@ -181,7 +427,7 @@ func TestBgpRoute_AdvertiseSrPolicy_IPv4NextHopIsPerItemError(t *testing.T) {
 
 func TestBgpRoute_WithdrawSrPolicy(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
-	s := NewBgpRouteServer(nil, fp)
+	s := NewBgpRouteServer(nil, fp, nil)
 	resp, err := s.BgpWithdrawSrPolicy(context.Background(),
 		connect.NewRequest(&v1.BgpWithdrawSrPolicyRequest{Keys: []*v1.BgpSrPolicyKey{{
 			Color: 100, Endpoint: "2001:db8::2", Distinguisher: 1,
@@ -201,7 +447,7 @@ func TestBgpRoute_WithdrawSrPolicy(t *testing.T) {
 // constraint, rather than a no-op reported as success.
 func TestBgpRoute_WithdrawSrPolicy_IPv4EndpointIsPerItemError(t *testing.T) {
 	fp := &fakeSRPolicyAdv{}
-	s := NewBgpRouteServer(nil, fp)
+	s := NewBgpRouteServer(nil, fp, nil)
 	resp, err := s.BgpWithdrawSrPolicy(context.Background(),
 		connect.NewRequest(&v1.BgpWithdrawSrPolicyRequest{Keys: []*v1.BgpSrPolicyKey{{
 			Color: 100, Endpoint: "10.0.0.1", Distinguisher: 1,
@@ -216,7 +462,7 @@ func TestBgpRoute_WithdrawSrPolicy_IPv4EndpointIsPerItemError(t *testing.T) {
 
 func TestBgpRoute_AdvertiseVpn(t *testing.T) {
 	fa := &fakeAdvertiser{}
-	s := NewBgpRouteServer(fa, nil)
+	s := NewBgpRouteServer(fa, nil, nil)
 	resp, err := s.BgpAdvertiseVpn(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseVpnRequest{Routes: []*v1.BgpVpnRoute{{
 			Family:       "vpnv4",
@@ -239,7 +485,7 @@ func TestBgpRoute_AdvertiseVpn(t *testing.T) {
 
 func TestBgpRoute_AdvertiseVpn_BadFamilyIsPerItemError(t *testing.T) {
 	fa := &fakeAdvertiser{}
-	s := NewBgpRouteServer(fa, nil)
+	s := NewBgpRouteServer(fa, nil, nil)
 	resp, err := s.BgpAdvertiseVpn(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseVpnRequest{Routes: []*v1.BgpVpnRoute{{
 			Family: "bogus", Prefix: "10.0.0.0/24",
@@ -257,7 +503,7 @@ func TestBgpRoute_AdvertiseVpn_BadFamilyIsPerItemError(t *testing.T) {
 
 func TestBgpRoute_AdvertiseUnicast(t *testing.T) {
 	fa := &fakeAdvertiser{}
-	s := NewBgpRouteServer(fa, nil)
+	s := NewBgpRouteServer(fa, nil, nil)
 	if _, err := s.BgpAdvertiseUnicast(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseUnicastRequest{Routes: []*v1.BgpUnicastRoute{{
 			Prefix: "2001:db8:dead::/64", NextHop: "fd00:f1b::2",
@@ -271,7 +517,7 @@ func TestBgpRoute_AdvertiseUnicast(t *testing.T) {
 
 func TestBgpRoute_Withdraw(t *testing.T) {
 	fa := &fakeAdvertiser{}
-	s := NewBgpRouteServer(fa, nil)
+	s := NewBgpRouteServer(fa, nil, nil)
 	resp, err := s.BgpWithdraw(context.Background(),
 		connect.NewRequest(&v1.BgpWithdrawRequest{Keys: []*v1.BgpRouteKey{{
 			Family: "vpnv4", Prefix: "10.0.0.0/24", Rd: "65000:100",
@@ -289,7 +535,7 @@ func TestBgpRoute_Withdraw(t *testing.T) {
 
 func TestBgpRoute_AdvertiserErrorIsPerItem(t *testing.T) {
 	fa := &fakeAdvertiser{err: errors.New("gobgp boom")}
-	s := NewBgpRouteServer(fa, nil)
+	s := NewBgpRouteServer(fa, nil, nil)
 	resp, err := s.BgpAdvertiseVpn(context.Background(),
 		connect.NewRequest(&v1.BgpAdvertiseVpnRequest{Routes: []*v1.BgpVpnRoute{{
 			Family: "vpnv4", Prefix: "10.0.0.0/24", Rd: "65000:1", Srv6Sid: "fd00::1", NextHop: "2001:db8::1",

@@ -21,6 +21,12 @@ service BgpRouteService {
   rpc BgpWithdraw(BgpWithdrawRequest) returns (BgpWithdrawResponse);
   rpc BgpAdvertiseSrPolicy(BgpAdvertiseSrPolicyRequest) returns (BgpAdvertiseSrPolicyResponse);
   rpc BgpWithdrawSrPolicy(BgpWithdrawSrPolicyRequest) returns (BgpWithdrawSrPolicyResponse);
+  rpc BgpAdvertiseEvpnMac(BgpAdvertiseEvpnMacRequest) returns (BgpAdvertiseEvpnMacResponse);
+  rpc BgpWithdrawEvpnMac(BgpWithdrawEvpnMacRequest) returns (BgpWithdrawEvpnMacResponse);
+  rpc BgpAdvertiseEvpnImet(BgpAdvertiseEvpnImetRequest) returns (BgpAdvertiseEvpnImetResponse);
+  rpc BgpWithdrawEvpnImet(BgpWithdrawEvpnImetRequest) returns (BgpWithdrawEvpnImetResponse);
+  rpc BgpAdvertiseEvpnEs(BgpAdvertiseEvpnEsRequest) returns (BgpAdvertiseEvpnEsResponse);
+  rpc BgpWithdrawEvpnEs(BgpWithdrawEvpnEsRequest) returns (BgpWithdrawEvpnEsResponse);
 }
 
 // BgpVpnRoute is an L3VPN route to advertise.
@@ -103,5 +109,106 @@ message BgpWithdrawSrPolicyRequest {
 }
 message BgpWithdrawSrPolicyResponse {
   repeated BgpSrPolicyKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpEvpnMac is a local EVPN RT2 (MAC/IP) to advertise. The {rd,
+// ethernet_tag, mac} tuple is the NLRI key; the SID is the local End.DT2U
+// service SID and route_targets are the EVI's export RTs.
+message BgpEvpnMac {
+  string rd = 1;
+  repeated string route_targets = 2;
+  string mac = 3; // "aa:bb:cc:dd:ee:ff"
+  uint32 ethernet_tag = 4;
+  string sid = 5; // local End.DT2U SID (IPv6)
+  string next_hop = 6; // IPv6 BGP next hop
+  string esi = 7; // optional, "00:00:..." 10-octet form; empty = single-homed
+}
+
+// BgpEvpnMacKey identifies a previously advertised RT2 for withdrawal.
+message BgpEvpnMacKey {
+  string rd = 1;
+  uint32 ethernet_tag = 2;
+  string mac = 3;
+}
+
+message BgpAdvertiseEvpnMacRequest {
+  repeated BgpEvpnMac macs = 1;
+}
+message BgpAdvertiseEvpnMacResponse {
+  repeated BgpEvpnMac advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawEvpnMacRequest {
+  repeated BgpEvpnMacKey keys = 1;
+}
+message BgpWithdrawEvpnMacResponse {
+  repeated BgpEvpnMacKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpEvpnImet is a local EVPN RT3 (Inclusive Multicast) to advertise. The
+// {rd, ethernet_tag} tuple is the NLRI key; the SID is the local End.DT2M
+// flood service SID and route_targets are the EVI's export RTs.
+message BgpEvpnImet {
+  string rd = 1;
+  repeated string route_targets = 2;
+  uint32 ethernet_tag = 3;
+  string sid = 4; // local End.DT2M SID (IPv6)
+  string next_hop = 5; // IPv6 BGP next hop / originating router
+}
+
+// BgpEvpnImetKey identifies a previously advertised RT3 for withdrawal.
+message BgpEvpnImetKey {
+  string rd = 1;
+  uint32 ethernet_tag = 2;
+}
+
+message BgpAdvertiseEvpnImetRequest {
+  repeated BgpEvpnImet imets = 1;
+}
+message BgpAdvertiseEvpnImetResponse {
+  repeated BgpEvpnImet advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawEvpnImetRequest {
+  repeated BgpEvpnImetKey keys = 1;
+}
+message BgpWithdrawEvpnImetResponse {
+  repeated BgpEvpnImetKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpEvpnEs is a local EVPN RT4 (Ethernet Segment) to advertise. It carries no
+// SRv6 SID; the ES-Import route target signals segment membership and the next
+// hop is the originating PE source used in DF election.
+message BgpEvpnEs {
+  string rd = 1;
+  string esi = 2; // 10-octet ESI, "00:11:22:..." form
+  string es_import_rt = 3; // ES-Import RT as a MAC "aa:bb:cc:dd:ee:ff"
+  string next_hop = 4; // IPv6 BGP next hop / originating PE source
+}
+
+// BgpEvpnEsKey identifies a previously advertised RT4 for withdrawal.
+message BgpEvpnEsKey {
+  string rd = 1;
+  string esi = 2;
+}
+
+message BgpAdvertiseEvpnEsRequest {
+  repeated BgpEvpnEs segments = 1;
+}
+message BgpAdvertiseEvpnEsResponse {
+  repeated BgpEvpnEs advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawEvpnEsRequest {
+  repeated BgpEvpnEsKey keys = 1;
+}
+message BgpWithdrawEvpnEsResponse {
+  repeated BgpEvpnEsKey withdrawn = 1;
   repeated OperationError errors = 2;
 }

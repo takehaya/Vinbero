@@ -130,7 +130,7 @@ struct headend_entry {
     __u8 segments[MAX_SEGMENTS][IPV6_ADDR_LEN]; // SID list; with policy_id != 0 holds only the per-route service SID(s)
     __u16 bd_id;                            // Bridge Domain ID (for H.Encaps.L2)
     __u8 args_offset;                       // Args byte offset within SID (RFC 9433 Args.Mob.Session)
-    __u8 _pad_gtp;
+    __u8 flood_exclude;                     // 1 = skip this peer in the BUM flood (RT2 unicast End.DT2U); 0 = flooded (default: manual bd_peer / RT3 End.DT2M)
 } __attribute__((packed));
 
 // SR Policy transport segment list, shared by every route that steers onto

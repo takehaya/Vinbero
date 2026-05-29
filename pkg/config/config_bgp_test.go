@@ -30,6 +30,12 @@ bgp:
 	if p.KeepaliveSec != 30 {
 		t.Errorf("KeepaliveSec = %d, want 30 (default)", p.KeepaliveSec)
 	}
+	if p.ConnectRetrySec != 5 {
+		t.Errorf("ConnectRetrySec = %d, want 5 (default)", p.ConnectRetrySec)
+	}
+	if p.Passive {
+		t.Errorf("Passive = true, want false (default)")
+	}
 	if cfg.BGP.Global.ListenPort != -1 {
 		t.Errorf("Global.ListenPort = %d, want -1 (default)", cfg.BGP.Global.ListenPort)
 	}
@@ -45,6 +51,8 @@ bgp:
       peer_asn: 65001
       hold_time_sec: 180
       keepalive_sec: 60
+      connect_retry_sec: 10
+      passive: true
 `
 	cfg, err := Load(y)
 	if err != nil {
@@ -56,6 +64,12 @@ bgp:
 	}
 	if p.KeepaliveSec != 60 {
 		t.Errorf("KeepaliveSec = %d, want 60 (explicit)", p.KeepaliveSec)
+	}
+	if p.ConnectRetrySec != 10 {
+		t.Errorf("ConnectRetrySec = %d, want 10 (explicit)", p.ConnectRetrySec)
+	}
+	if !p.Passive {
+		t.Errorf("Passive = false, want true (explicit)")
 	}
 }
 

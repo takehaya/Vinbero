@@ -20,8 +20,22 @@ type Config struct {
 // only consulted when vinberod is started with --bgp-enabled; an empty
 // section leaves BGP off.
 type BGPConfig struct {
-	Global BGPGlobalConfig `yaml:"global,omitempty"`
-	Peers  []BGPPeerConfig `yaml:"peers,omitempty"`
+	Global      BGPGlobalConfig    `yaml:"global,omitempty"`
+	Peers       []BGPPeerConfig    `yaml:"peers,omitempty"`
+	VrfBindings []VrfBindingConfig `yaml:"vrf_bindings,omitempty"`
+}
+
+// VrfBindingConfig is a VRF <-> route-target binding applied at startup,
+// before the BGP session begins receiving. Configuring it here (rather than
+// via VrfBgpBind after boot) avoids a race where an EVPN route arrives before
+// its bridge-domain binding exists and is dropped. bd_id is the bridge domain
+// for EVPN routes matching import_rts (0 for L3VPN-only bindings).
+type VrfBindingConfig struct {
+	VRFName        string   `yaml:"vrf_name,omitempty"`
+	ImportRTs      []string `yaml:"import_rts,omitempty"`
+	ExportRTs      []string `yaml:"export_rts,omitempty"`
+	DefaultLocator string   `yaml:"default_locator,omitempty"`
+	BDID           uint32   `yaml:"bd_id,omitempty"`
 }
 
 // BGPGlobalConfig is the speaker's own BGP identity.
@@ -45,7 +59,15 @@ type BGPPeerConfig struct {
 	PeerASN      uint32   `yaml:"peer_asn,omitempty"`
 	HoldTimeSec  uint32   `yaml:"hold_time_sec,omitempty" default:"90"`
 	KeepaliveSec uint32   `yaml:"keepalive_sec,omitempty" default:"30"`
-	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6
+	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6 / evpn
+	// Passive stops this peer from dialing out; it only accepts the
+	// neighbor's inbound connection. Set it on one end of each iBGP
+	// full-mesh pair to avoid connection-collision flap.
+	Passive bool `yaml:"passive,omitempty"`
+	// ConnectRetrySec is the BGP ConnectRetry timer in seconds. Defaults to
+	// 5 (gobgp's own default is 120) so a peer unreachable at startup
+	// reconnects within seconds.
+	ConnectRetrySec uint32 `yaml:"connect_retry_sec,omitempty" default:"5"`
 }
 
 // BpfConstants returns the set of read-only constants rewritten into every
