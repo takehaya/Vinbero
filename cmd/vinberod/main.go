@@ -127,6 +127,9 @@ func run(cliCtx *cli.Context) error {
 	// evpnAdvertiser is the EVPN advertise direction (AFI 25 / SAFI 70),
 	// satisfied by the same gobgp session; nil when BGP is disabled.
 	var evpnAdvertiser bgp.EVPNController
+	// mupAdvertiser is the BGP MUP advertise direction (SAFI 85), satisfied by
+	// the same gobgp session; nil when BGP is disabled.
+	var mupAdvertiser bgp.MUPController
 	// applier holds the SR Policy table SrPolicyService also drives, so it is
 	// shared via NewServer below: BGP-received and operator-defined policies
 	// must share one table or collide on policy_id. nil when BGP is disabled
@@ -157,6 +160,7 @@ func run(cliCtx *cli.Context) error {
 		advertiser = bgpSession
 		srPolicyAdvertiser = bgpSession
 		evpnAdvertiser = bgpSession
+		mupAdvertiser = bgpSession
 		applier = apply.NewApplier(
 			vin.GetMapOperations(),
 			locatorMgr,
@@ -168,7 +172,7 @@ func run(cliCtx *cli.Context) error {
 		)
 	}
 
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, applier, lg)
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, lg)
 	if err := srv.StartAsync(); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}

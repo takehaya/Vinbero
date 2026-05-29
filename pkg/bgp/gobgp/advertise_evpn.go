@@ -150,13 +150,9 @@ func encodeEVPNMulticastPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 	)
 
 	attrs := []gobgppkt.PathAttributeInterface{gobgppkt.NewPathAttributeOrigin(0)}
-	ecs := make([]gobgppkt.ExtendedCommunityInterface, 0, len(r.RTs))
-	for _, rt := range r.RTs {
-		ec, err := gobgppkt.ParseRouteTarget(rt)
-		if err != nil {
-			return nil, fmt.Errorf("parse RT %q: %w", rt, err)
-		}
-		ecs = append(ecs, ec)
+	ecs, err := parseRouteTargets(r.RTs)
+	if err != nil {
+		return nil, err
 	}
 	if len(ecs) > 0 {
 		attrs = append(attrs, gobgppkt.NewPathAttributeExtendedCommunities(ecs))
@@ -220,13 +216,9 @@ func encodeEVPNMacPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 	)
 
 	attrs := []gobgppkt.PathAttributeInterface{gobgppkt.NewPathAttributeOrigin(0)}
-	ecs := make([]gobgppkt.ExtendedCommunityInterface, 0, len(r.RTs))
-	for _, rt := range r.RTs {
-		ec, err := gobgppkt.ParseRouteTarget(rt)
-		if err != nil {
-			return nil, fmt.Errorf("parse RT %q: %w", rt, err)
-		}
-		ecs = append(ecs, ec)
+	ecs, err := parseRouteTargets(r.RTs)
+	if err != nil {
+		return nil, err
 	}
 	if len(ecs) > 0 {
 		attrs = append(attrs, gobgppkt.NewPathAttributeExtendedCommunities(ecs))

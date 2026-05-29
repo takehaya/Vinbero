@@ -41,7 +41,16 @@ type (
 	Dx2vEntry        = BpfDx2vEntry
 	EsiKey           = BpfEsiKey
 	EsiEntry         = BpfEsiEntry
+	MupUplinkV4Key   = BpfMupUplinkV4Key
+	MupUplinkV6Key   = BpfMupUplinkV6Key
 )
+
+// MupArgsOffsetNone is the headend_entry.args_offset sentinel meaning "do not
+// patch Args.Mob.Session" on the F-TEID uplink path (mirrors
+// MUP_ARGS_OFFSET_NONE in src/core/xdp_prog.h). A plain direct (End.DT4) SID
+// uses it so the TEID stays a lookup key only; a real offset (0..7) re-enables
+// Args.Mob.Session patching for the End.M.GTP4.E-to-UPF variant.
+const MupArgsOffsetNone uint8 = 0xFF
 
 // ESILen is the fixed length of RFC 7432 Ethernet Segment Identifier.
 const ESILen = 10
@@ -1297,6 +1306,122 @@ func (m *MapOperations) ListHeadendV4() (map[string]*HeadendEntry, error) {
 	return result, nil
 }
 
+// ===== MUP Uplink V4 Map Operations (BGP MUP T2ST / F-TEID) =====
+
+// buildMupUplinkV4Key assembles the LPM_TRIE key for mup_uplink_v4_map.
+// endpoint is the GTP-U outer destination (the N3/UPF endpoint, always a full
+// /32); teid is the GTP-U TEID and teidPrefixBits (0..32) is how many of its
+// high-order bits are significant — BGP MUP T2ST carries the TEID as a
+// variable-length prefix, so teidPrefixBits == EndpointAddressLength - 32.
+// prefixlen = 32 + teidPrefixBits. teid is stored network byte order and masked
+// to the prefix so the insert/delete key is canonical.
+func buildMupUplinkV4Key(endpoint string, teid uint32, teidPrefixBits uint8) (*MupUplinkV4Key, error) {
+	if teidPrefixBits > 32 {
+		return nil, fmt.Errorf("mup uplink teid prefix bits %d exceeds 32", teidPrefixBits)
+	}
+	ep, err := ParseIPv4Optional(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("mup uplink endpoint: %w", err)
+	}
+	if ep == ([IPv4AddrLen]uint8{}) {
+		return nil, fmt.Errorf("mup uplink endpoint is required")
+	}
+	key := &MupUplinkV4Key{Prefixlen: 32 + uint32(teidPrefixBits)}
+	copy(key.Endpoint[:], ep[:])
+	// Mask the TEID to its prefix bits so the insert/delete key is canonical.
+	// Go shift semantics fold the edge cases into one expression: a shift count
+	// >= width yields 0 (teidPrefixBits == 0) and a count of 0 is a no-op
+	// (teidPrefixBits == 32). teidPrefixBits > 32 is rejected above.
+	masked := teid & (^uint32(0) << (32 - teidPrefixBits))
+	binary.BigEndian.PutUint32(key.Teid[:], masked)
+	return key, nil
+}
+
+// CreateMupUplinkV4 installs an F-TEID uplink session entry (BGP MUP T2ST,
+// draft-mpmz-bess-mup-safi): GTP-U whose {endpoint, TEID-prefix} matches is
+// transformed by the H.M.GTP4.D_TEID behavior into SRv6 toward entry's segment
+// list (the direct SID). teidPrefixBits is the significant TEID prefix length
+// (32 = exact session, 0 = every TEID toward endpoint). entry is a plain
+// H.Encaps headend_entry; set entry.ArgsOffset = MupArgsOffsetNone for a direct
+// (End.DT4) target so Args.Mob.Session is not patched into the outgoing SID.
+func (m *MapOperations) CreateMupUplinkV4(endpoint string, teid uint32, teidPrefixBits uint8, entry *HeadendEntry) error {
+	key, err := buildMupUplinkV4Key(endpoint, teid, teidPrefixBits)
+	if err != nil {
+		return err
+	}
+	if err := m.objs.MupUplinkV4Map.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put mup uplink v4 entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteMupUplinkV4 removes an F-TEID uplink session entry. The {endpoint, teid,
+// teidPrefixBits} tuple must match an installed prefix. A missing key is treated
+// as success so a double withdraw is idempotent.
+func (m *MapOperations) DeleteMupUplinkV4(endpoint string, teid uint32, teidPrefixBits uint8) error {
+	key, err := buildMupUplinkV4Key(endpoint, teid, teidPrefixBits)
+	if err != nil {
+		return err
+	}
+	if err := deleteMapKey(m.objs.MupUplinkV4Map, key); err != nil {
+		return fmt.Errorf("failed to delete mup uplink v4 entry: %w", err)
+	}
+	return nil
+}
+
+// buildMupUplinkV6Key assembles the LPM_TRIE key for mup_uplink_v6_map: the
+// IPv6 counterpart of buildMupUplinkV4Key. endpoint is the GTP-U/IPv6 outer
+// destination (full /128); teidPrefixBits (0..32) is the significant TEID prefix
+// length, so prefixlen = 128 + teidPrefixBits. teid is stored network byte order
+// and masked to the prefix so the insert/delete key is canonical.
+func buildMupUplinkV6Key(endpoint string, teid uint32, teidPrefixBits uint8) (*MupUplinkV6Key, error) {
+	if teidPrefixBits > 32 {
+		return nil, fmt.Errorf("mup uplink teid prefix bits %d exceeds 32", teidPrefixBits)
+	}
+	ep, err := ParseIPv6(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("mup uplink v6 endpoint: %w", err)
+	}
+	// ParseIPv6 maps an empty string to the unspecified address rather than an
+	// error, so reject it explicitly (matching the V4 path); an empty / "::"
+	// endpoint must not become a real F-TEID entry.
+	if ep == ([IPv6AddrLen]uint8{}) {
+		return nil, fmt.Errorf("mup uplink v6 endpoint is required")
+	}
+	key := &MupUplinkV6Key{Prefixlen: 128 + uint32(teidPrefixBits)}
+	copy(key.Endpoint[:], ep[:])
+	masked := teid & (^uint32(0) << (32 - teidPrefixBits))
+	binary.BigEndian.PutUint32(key.Teid[:], masked)
+	return key, nil
+}
+
+// CreateMupUplinkV6 installs an F-TEID uplink session entry over GTP6 (BGP MUP
+// T2ST, IPv6 endpoint): the IPv6 counterpart of CreateMupUplinkV4, read by the
+// H.M.GTP6.D_TEID behavior. See CreateMupUplinkV4 for the entry semantics.
+func (m *MapOperations) CreateMupUplinkV6(endpoint string, teid uint32, teidPrefixBits uint8, entry *HeadendEntry) error {
+	key, err := buildMupUplinkV6Key(endpoint, teid, teidPrefixBits)
+	if err != nil {
+		return err
+	}
+	if err := m.objs.MupUplinkV6Map.Put(key, entry); err != nil {
+		return fmt.Errorf("failed to put mup uplink v6 entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteMupUplinkV6 removes an F-TEID uplink session entry over GTP6. A missing
+// key is treated as success so a double withdraw is idempotent.
+func (m *MapOperations) DeleteMupUplinkV6(endpoint string, teid uint32, teidPrefixBits uint8) error {
+	key, err := buildMupUplinkV6Key(endpoint, teid, teidPrefixBits)
+	if err != nil {
+		return err
+	}
+	if err := deleteMapKey(m.objs.MupUplinkV6Map, key); err != nil {
+		return fmt.Errorf("failed to delete mup uplink v6 entry: %w", err)
+	}
+	return nil
+}
+
 // ===== Headend V6 Map Operations =====
 
 // CreateHeadendV6 adds a headend v6 entry. owner is persisted to
@@ -2135,6 +2260,8 @@ func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 		"sid_aux_map":         m.objs.SidAuxMap,
 		"headend_v4_map":      m.objs.HeadendV4Map,
 		"headend_v6_map":      m.objs.HeadendV6Map,
+		"mup_uplink_v4_map":   m.objs.MupUplinkV4Map,
+		"mup_uplink_v6_map":   m.objs.MupUplinkV6Map,
 		"headend_l2_map":      m.objs.HeadendL2Map,
 		"fdb_map":             m.objs.FdbMap,
 		"bd_peer_map":         m.objs.BdPeerMap,
@@ -2182,6 +2309,8 @@ func SharedReadOnlyMapNames() []string {
 		"sid_aux_map",
 		"headend_v4_map",
 		"headend_v6_map",
+		"mup_uplink_v4_map",
+		"mup_uplink_v6_map",
 		"headend_l2_map",
 		"fdb_map",
 		"bd_peer_map",

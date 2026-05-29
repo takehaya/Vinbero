@@ -1,7 +1,7 @@
-// Headend tail call targets (7 SEC("xdp") programs).
+// Headend tail call targets (10 SEC("xdp") programs).
 // Included from xdp_prog.c — not compiled standalone.
 
-// ========== Headend v4 Tail Call Targets (3 programs) ==========
+// ========== Headend v4 Tail Call Targets (4 programs) ==========
 
 SEC("xdp")
 int tailcall_headend_v4_h_encaps(struct xdp_md *ctx) { HEADEND_BODY(do_h_encaps_v4, struct iphdr); }
@@ -12,7 +12,10 @@ int tailcall_headend_v4_h_encaps_red(struct xdp_md *ctx) { HEADEND_BODY(do_h_enc
 SEC("xdp")
 int tailcall_headend_v4_h_m_gtp4_d(struct xdp_md *ctx) { HEADEND_BODY(do_h_m_gtp4_d, struct iphdr); }
 
-// ========== Headend v6 Tail Call Targets (4 programs) ==========
+SEC("xdp")
+int tailcall_headend_v4_h_m_gtp4_d_teid(struct xdp_md *ctx) { HEADEND_BODY(do_h_m_gtp4_d_teid, struct iphdr); }
+
+// ========== Headend v6 Tail Call Targets (6 programs) ==========
 
 SEC("xdp")
 int tailcall_headend_v6_h_encaps(struct xdp_md *ctx) { HEADEND_BODY(do_h_encaps_v6, struct ipv6hdr); }
@@ -25,6 +28,12 @@ int tailcall_headend_v6_h_insert(struct xdp_md *ctx) { HEADEND_BODY(do_h_insert_
 
 SEC("xdp")
 int tailcall_headend_v6_h_insert_red(struct xdp_md *ctx) { HEADEND_BODY(do_h_insert_red_v6, struct ipv6hdr); }
+
+SEC("xdp")
+int tailcall_headend_v6_h_m_gtp6_d(struct xdp_md *ctx) { HEADEND_BODY(do_h_m_gtp6_d, struct ipv6hdr); }
+
+SEC("xdp")
+int tailcall_headend_v6_h_m_gtp6_d_teid(struct xdp_md *ctx) { HEADEND_BODY(do_h_m_gtp6_d_teid, struct ipv6hdr); }
 
 // L2 tail call targets live in tailcall_headend_l2.c, included AFTER
 // srv6_encaps_l2.h in xdp_prog.c so do_h_encaps_l2{,_red} are in scope.

@@ -4,13 +4,14 @@
 
 このドキュメントは、Vinbero が BGP control plane の上で SRv6 サービスをどう実現しているか、そのメンタルモデルを説明します。実装のクラスや関数の羅列ではなく、概念とデータの関係、そして Vinbero がどの役割分担で組んでいるかに焦点を当てます。
 
-BGP でシグナルする SRv6 サービスは複数あり、この資料はそれらを 1 つの枠組みで捉える場所にします。現在カバーするのは次の 3 つです。
+BGP でシグナルする SRv6 サービスは複数あり、この資料はそれらを 1 つの枠組みで捉える場所にします。現在カバーするのは次の 4 つです。
 
 - L3VPN (VPNv4/VPNv6): RD/RT で経路を区別してインストールする
 - color steering: 経路に付く color を SR Policy の path に紐付けて転送する
 - EVPN (L2VPN): MAC を RD/RT で配り、SRv6 service SID で拠点をブリッジする (multi-homing を含む)
+- SRv6 MUP (mobile user plane): モバイルの GTP-U セッションを BGP で配り、SRv6 の GTP behavior へ反映する
 
-SRv6 MUP (mobile user plane) も同じ BGP シグナルの SRv6 サービスで、いずれこの枠組みに加える想定です。RD/RT による区別とインストールというメンタルモデルは、これにも共通します (詳細は [今後の BGP SRv6 サービス](#今後の-bgp-srv6-サービス))。
+RD/RT による区別とインストールというメンタルモデルは、これらすべてに共通します。MUP は加えて、セッション経路 (T1ST/T2ST) が segment discovery 経路 (ISD/DSD) から SID を解決する仕組みを持ちます (詳細は [SRv6 MUP (mobile user plane)](#srv6-mup-mobile-user-plane))。
 
 実装のシーケンスは [api_sequence.md](./api_sequence.md)、interop の検証構成は `examples/interop-clab/scenarios/` を参照してください。
 
@@ -277,17 +278,67 @@ flowchart LR
     Q -->|未解決 / BUM| B --> EB
 ```
 
+## SRv6 MUP (mobile user plane)
+
+### 概要
+
+SRv6 MUP (RFC 9433、draft-mpmz-bess-mup-safi) は、モバイルの GTP-U セッションを SRv6 へマッピングするサービスです。5G では gNB と UPF の間 (N3) を GTP-U で運びますが、これを SRv6 segment に載せ替えると、コアを純粋な IPv6/SRv6 fabric にでき、per-UE のトンネル状態をコアの中間ノードから排除できます。
+
+役割は 3 つに分かれます。MUP Controller (MUP-C) が UE セッション状態を BGP で配り、MUP Gateway (MUP-GW) が access 側で GTP-U と相互接続し、MUP Provider Edge (MUP-PE) が data 側で DN へ届けます。AFI/SAFI は MUP (1/85) を使い、L3VPN/EVPN と同じく RD で経路を一意にし、SID は Prefix-SID で運びます。
+
+### route type と方向
+
+MUP は経路の種類で役割が分かれ、方向ごとにペアになります。
+
+- T1ST (session transformed type 1): per-UE の downlink セッションです。UE prefix・TEID・QFI・gNB endpoint を運び、MUP-PE が消費します。
+- T2ST (session transformed type 2): uplink の aggregate セッションです。endpoint と可変長の TEID prefix を運び、MUP-GW が消費します。
+- ISD (interwork segment discovery): interwork segment の到達性です。MUP-GW が広報し、T1ST の SID 解決に使います。
+- DSD (direct segment discovery): direct segment の到達性で、MUP Extended Community の segment id を持ちます。MUP-PE が広報し、T2ST の SID 解決に使います。
+
+ペアは downlink が T1ST + ISD、uplink が T2ST + DSD です。T1ST は TEID を exact 値で運びますが、T2ST は TEID を可変長 prefix で運び (EndpointAddressLength が endpoint と TEID の有効ビットを覆う)、1 経路で TEID 範囲を集約できます。これが uplink の data plane の選択を決めます。
+
+```mermaid
+flowchart LR
+    T1ST["T1ST (downlink)"] --> ISD["ISD (MUP-GW 広報)<br/>endpoint で SID 解決"]
+    T2ST["T2ST (uplink)"] --> DSD["DSD (MUP-PE 広報)<br/>segment id で SID 解決"]
+    ISD --> ENC["MUP-PE: UE prefix へ<br/>H.Encaps (interwork SID)"]
+    DSD --> FTE["MUP-GW: F-TEID lookup<br/>(direct SID)"]
+```
+
+### SID 解決 (segment discovery)
+
+L3VPN/EVPN は service SID を経路自身の Prefix-SID で運びますが、MUP は加えて、セッション経路が segment discovery 経路から SID を解決できます (RFC 9433 §3)。controller はセッション状態だけを配り、SID は各 gateway/PE が相手の discovery 経路から引きます。
+
+- T1ST → ISD: gNB endpoint を含む ISD prefix の longest-match で interwork SID を解決します。
+- T2ST → DSD: 同じ segment id を持つ DSD から direct SID を解決します。
+- セッション経路が自分の Prefix-SID を載せる構成も可能で、その場合は discovery で解決できないときの fallback になります。
+
+解決は同一 RD 内に限定します。別 VPN の経路がより具体的な prefix や同じ segment id を広報して他セッションの SID を奪うことを防ぐためです。BGP は到着順を保証しないので、discovery 経路が後から届いたら同型の全セッションを再解決し、deferred だったものを install、discovery を withdraw したら依存セッションを撤去します。RD 内では ISD の longest-match と DSD の segment id 解決はどちらも一意に決まるよう実装し (DSD の id 衝突は最小 SID を決定的に選ぶ)、map の反復順でデータプレーンが揺れないようにします。
+
+### data plane の分担
+
+downlink と uplink で lookup キーが非対称で、これはセッション経路が運ぶ情報に対応します。
+
+- downlink (T1ST): MUP-PE が UE prefix に対し、interwork SID へ Args.Mob.Session (gNB、TEID、QFI) を合成して H.Encaps します。受信側 MUP-GW の End.M.GTP4.E が SID 宛先から gNB/TEID/QFI を実行時に読み、GTP-U を gNB へ送ります。SID がセッション情報を内包するので、End.M.GTP4.E はセッション非依存に一度設置すれば足ります。
+- uplink (T2ST): MUP-GW が 2 段で dispatch します。まず endpoint に H.M.GTP4.D_TEID の gate を置いて GTP-U を変換対象と認識させ、次に GTP-U の TEID で mup_uplink_v4_map (LPM) を最長一致 lookup して direct SID へ encap します。T2ST が TEID を可変長 prefix で運ぶため、exact HASH でなく LPM になります。受信側 MUP-PE の End.DT4 が inner IP で DN へ届けます。GTP6 も同型で、H.M.GTP6.D_TEID と mup_uplink_v6_map を使います。
+
+interop の検証構成は `examples/interop-clab/scenarios/mup-2site` を参照してください。MUP-C・MUP-GW・MUP-PE・gNB・DN を模し、controller が SID なしの T1ST/T2ST を、各 gateway/PE が SID 付きの ISD/DSD を広報して、解決だけで双方向の GTP-U ⇄ SRv6 が通ることを検証します。
+
+```mermaid
+flowchart LR
+    UP["uplink: gNB GTP-U"] --> GW["MUP-GW<br/>gate + F-TEID lookup"]
+    GW -->|direct SID で SRv6| PE["MUP-PE<br/>End.DT4 → DN"]
+    DN["downlink: DN → UE prefix"] --> PE2["MUP-PE<br/>H.Encaps (interwork SID)"]
+    PE2 -->|Args.Mob.Session で SRv6| GW2["MUP-GW<br/>End.M.GTP4.E → gNB GTP-U"]
+```
+
 ## 広報方向
 
-Vinbero は経路や SR Policy を受け取るだけでなく、広報もできます。ローカルの顧客 prefix を service SID 付きで VPN 経路として広報し、ローカル定義の SR Policy を SAFI 73 で広報できます。広報した SR Policy は {distinguisher, color, endpoint} で管理し、取り消しもこの鍵で行います。
+Vinbero は経路や SR Policy を受け取るだけでなく、広報もできます。ローカルの顧客 prefix を service SID 付きで VPN 経路として広報し、ローカル定義の SR Policy を SAFI 73 で広報できます。広報した SR Policy は {distinguisher, color, endpoint} で管理し、取り消しもこの鍵で行います。MUP も同じく広報でき、MUP-C は T1ST/T2ST を、MUP-GW/MUP-PE はそれぞれ自分の ISD/DSD を出します。
 
 ## 今後の BGP SRv6 サービス
 
-この資料は SRv6 over BGP の置き場所なので、今後追加するサービスもここに積みます。いずれも本文と同じメンタルモデル (RD/RT による区別とインストール、color と SR Policy の steering) が下敷きになります。
-
-- SRv6 MUP (mobile user plane): モバイルの GTP-U セッションを SRv6 へマッピングするサービスです。BGP で MUP の状態を配り、SRv6 の End.M.GTP4.E などの behavior と組み合わせます。
-
-これを足すときは、本文の VPNv4/v6 や EVPN の節と同じ粒度で、何を RD/RT で区別し、何を service SID に紐付け、Vinbero がどの役割分担で install するかを書き足します。
+この資料は SRv6 over BGP の置き場所なので、今後追加するサービスもここに積みます。いずれも本文と同じメンタルモデル (RD/RT による区別とインストール、color と SR Policy の steering、MUP の segment discovery 解決) が下敷きになります。新しいサービスを足すときは、本文の VPNv4/v6・EVPN・MUP の節と同じ粒度で、何を RD/RT で区別し、何を service SID に紐付け、Vinbero がどの役割分担で install するかを書き足します。
 
 ## 参照 RFC
 
@@ -299,4 +350,6 @@ Vinbero は経路や SR Policy を受け取るだけでなく、広報もでき�
 - RFC 9831 — SR Policy の segment type 拡張 (Type C〜K、現状は範囲外)
 - RFC 7432 — BGP MPLS-Based Ethernet VPN (EVPN の route type RT2/RT3/RT4)
 - RFC 8584 — EVPN の default DF election (ordinal modulo)
-- draft-ietf-dmm-srv6-mobile-uplane 系 — SRv6 MUP (mobile user plane、今後の追加対象)
+- RFC 9433 — SRv6 Mobile User Plane (End.M.GTP4.E / End.DT4 / Args.Mob.Session ほかの GTP behavior)
+- draft-mpmz-bess-mup-safi — BGP MUP SAFI (85) による MUP route (ISD/DSD/T1ST/T2ST) のシグナリング
+- draft-ietf-dmm-srv6-mobile-uplane 系 — SRv6 MUP のアーキテクチャ

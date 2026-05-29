@@ -1003,7 +1003,43 @@ const (
 	actionEndMGTP6DDI = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D_DI)
 	actionEndMGTP6E   = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_E)
 	modeHMGTP4D       = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D)
+	modeHMGTP4DTeid   = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID)
+	modeHMGTP6DTeid   = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID)
+	modeHEncaps       = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
 )
+
+// createMupUplinkGate installs the headend_v4_map gate entry that triggers the
+// F-TEID uplink behavior (H.M.GTP4.D_TEID) for GTP-U arriving at the given N3
+// endpoint prefix. Its segment list is unused; the real direct SID comes from
+// mup_uplink_v4_map.
+func (h *xdpTestHelper) createMupUplinkGate(prefix string) {
+	h.t.Helper()
+	entry := &HeadendEntry{Mode: modeHMGTP4DTeid}
+	if err := h.mapOps.CreateHeadendV4(prefix, entry, OwnerRPC); err != nil {
+		h.t.Fatalf("Failed to create MUP uplink gate entry: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteHeadendV4(prefix, OwnerRPC) })
+}
+
+// createMupUplinkSession installs an F-TEID uplink session into
+// mup_uplink_v4_map: GTP-U matching {endpoint, TEID-prefix} → H.Encaps toward
+// the direct SID. teidPrefixBits is the significant TEID prefix length (32 =
+// exact, shorter = aggregate a TEID range). argsOffset = MupArgsOffsetNone
+// leaves Args.Mob.Session unpatched (End.DT4).
+func (h *xdpTestHelper) createMupUplinkSession(endpoint string, teid uint32, teidPrefixBits uint8, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
+	h.t.Helper()
+	entry := &HeadendEntry{
+		Mode:        modeHEncaps,
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+		ArgsOffset:  argsOffset,
+	}
+	if err := h.mapOps.CreateMupUplinkV4(endpoint, teid, teidPrefixBits, entry); err != nil {
+		h.t.Fatalf("Failed to create MUP uplink session: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteMupUplinkV4(endpoint, teid, teidPrefixBits) })
+}
 
 // createHeadendEntryGTP creates a headend v4 entry with H.M.GTP4.D mode and args_offset
 func (h *xdpTestHelper) createHeadendEntryGTP(prefix string, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
@@ -1065,6 +1101,67 @@ func buildGTPUv4Packet(outerSrc, outerDst net.IP, teid uint32, qfi uint8, innerS
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// buildGTPUv6Packet builds a raw GTP-U/IPv6 packet (the uplink the access PE
+// intercepts). Structure: [Eth][IPv6][UDP:2152][GTP-U][Inner IPv4 ICMP].
+func buildGTPUv6Packet(outerSrc, outerDst net.IP, teid uint32, qfi uint8, innerSrc, innerDst net.IP) ([]byte, error) {
+	innerIP := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolICMPv4,
+		SrcIP:    innerSrc.To4(),
+		DstIP:    innerDst.To4(),
+	}
+	innerICMP := &layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		Id:       5678, Seq: 1,
+	}
+
+	gtp := &packet.GTPULayer{TEID: teid, QFI: qfi}
+	udp := &layers.UDP{SrcPort: 2152, DstPort: 2152}
+	outerIP := &layers.IPv6{
+		Version: 6, HopLimit: 64,
+		NextHeader: layers.IPProtocolUDP,
+		SrcIP:      outerSrc.To16(),
+		DstIP:      outerDst.To16(),
+	}
+	_ = udp.SetNetworkLayerForChecksum(outerIP)
+	eth := newTestEthernet(layers.EthernetTypeIPv6)
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, outerIP, udp, gtp, innerIP, innerICMP, gopacket.Payload(newTestPayload(32))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// createMupUplinkGateV6 installs the headend_v6_map gate that triggers the GTP6
+// F-TEID behavior (H.M.GTP6.D_TEID) for GTP-U/IPv6 arriving at the endpoint.
+func (h *xdpTestHelper) createMupUplinkGateV6(prefix string) {
+	h.t.Helper()
+	entry := &HeadendEntry{Mode: modeHMGTP6DTeid}
+	if err := h.mapOps.CreateHeadendV6(prefix, entry, OwnerRPC); err != nil {
+		h.t.Fatalf("Failed to create MUP uplink v6 gate entry: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteHeadendV6(prefix, OwnerRPC) })
+}
+
+// createMupUplinkSessionV6 installs an F-TEID uplink session into
+// mup_uplink_v6_map toward a direct SID (no Args.Mob.Session patch).
+func (h *xdpTestHelper) createMupUplinkSessionV6(endpoint string, teid uint32, teidPrefixBits uint8, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
+	h.t.Helper()
+	entry := &HeadendEntry{
+		Mode:        modeHEncaps,
+		NumSegments: numSegments,
+		SrcAddr:     srcAddr,
+		Segments:    segments,
+		ArgsOffset:  argsOffset,
+	}
+	if err := h.mapOps.CreateMupUplinkV6(endpoint, teid, teidPrefixBits, entry); err != nil {
+		h.t.Fatalf("Failed to create MUP uplink v6 session: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteMupUplinkV6(endpoint, teid, teidPrefixBits) })
 }
 
 // createSidFunctionGTP6D creates a SID function entry for End.M.GTP6.D

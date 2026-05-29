@@ -29,6 +29,7 @@
 #include "endpoint/srv6_gtp_endpoint.h"
 #include "endpoint/srv6_gtp_encap.h"
 #include "headend/srv6_gtp_headend.h"
+#include "headend/srv6_gtp6_headend.h"
 
 char _license[] SEC("license") = "GPL";
 

@@ -23,6 +23,7 @@
 | H.Encaps.L2      | Supported   | H.Encaps with L2 payload                         | RFC 8986 Sec.5.3 |
 | H.Encaps.L2.Red  | Supported   | H.Encaps.L2 with reduced SRH                     | RFC 8986 Sec.5.4 |
 | H.M.GTP4.D       | Supported   | GTP-U/IPv4 => SRv6                               | RFC 9433 Sec.6.7 |
+| H.M.GTP6.D       | Supported   | GTP-U/IPv6 => SRv6                               | RFC 9433 |
 
 ### Functions associated with a SID
 
@@ -101,6 +102,6 @@ status.
 | SRv6 locator manager       | Supported | RPC-driven locator pool / SID allocation                 | RFC 8986 |
 | VRF <-> route-target binding | Supported | Import-RT filter for received VPN routes               | RFC 9252 |
 | SR Policy (SAFI 73)        | Supported | Color-based steering (control + data plane)              | RFC 9256 |
-| BGP MUP                    |           | Mobile User Plane route exchange via the MUP SAFI        | draft-mpmz-bess-mup-safi |
+| BGP MUP (SAFI 85)          | Supported | MUP route exchange (ISD/DSD/T1ST/T2ST, IPv4/IPv6) + apply: GTP4/GTP6 downlink H.Encaps + uplink F-TEID (H.M.GTP4.D_TEID / H.M.GTP6.D_TEID) | draft-mpmz-bess-mup-safi |
 | Automatic advertise        |           | Advertise local SID/headend state without operator RPC   | RFC 9252 |
 | EVPN (RT2/3/4)             | Supported | L2VPN over BGP EVPN: RT2 MAC/IP, RT3 Inclusive Multicast, RT4 Ethernet Segment + RFC 8584 DF election / Local-Bias split-horizon (multi-homing). IRB (RT2 L3) and RT5 not yet supported | RFC 9252 / 7432 / 8584 |

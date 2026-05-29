@@ -31,6 +31,8 @@ const (
 	BgpRouteService_BgpWithdrawEvpnImet_FullMethodName  = "/vinbero.v1.BgpRouteService/BgpWithdrawEvpnImet"
 	BgpRouteService_BgpAdvertiseEvpnEs_FullMethodName   = "/vinbero.v1.BgpRouteService/BgpAdvertiseEvpnEs"
 	BgpRouteService_BgpWithdrawEvpnEs_FullMethodName    = "/vinbero.v1.BgpRouteService/BgpWithdrawEvpnEs"
+	BgpRouteService_BgpAdvertiseMup_FullMethodName      = "/vinbero.v1.BgpRouteService/BgpAdvertiseMup"
+	BgpRouteService_BgpWithdrawMup_FullMethodName       = "/vinbero.v1.BgpRouteService/BgpWithdrawMup"
 )
 
 // BgpRouteServiceClient is the client API for BgpRouteService service.
@@ -48,6 +50,8 @@ type BgpRouteServiceClient interface {
 	BgpWithdrawEvpnImet(ctx context.Context, in *BgpWithdrawEvpnImetRequest, opts ...grpc.CallOption) (*BgpWithdrawEvpnImetResponse, error)
 	BgpAdvertiseEvpnEs(ctx context.Context, in *BgpAdvertiseEvpnEsRequest, opts ...grpc.CallOption) (*BgpAdvertiseEvpnEsResponse, error)
 	BgpWithdrawEvpnEs(ctx context.Context, in *BgpWithdrawEvpnEsRequest, opts ...grpc.CallOption) (*BgpWithdrawEvpnEsResponse, error)
+	BgpAdvertiseMup(ctx context.Context, in *BgpAdvertiseMupRequest, opts ...grpc.CallOption) (*BgpAdvertiseMupResponse, error)
+	BgpWithdrawMup(ctx context.Context, in *BgpWithdrawMupRequest, opts ...grpc.CallOption) (*BgpWithdrawMupResponse, error)
 }
 
 type bgpRouteServiceClient struct {
@@ -157,6 +161,24 @@ func (c *bgpRouteServiceClient) BgpWithdrawEvpnEs(ctx context.Context, in *BgpWi
 	return out, nil
 }
 
+func (c *bgpRouteServiceClient) BgpAdvertiseMup(ctx context.Context, in *BgpAdvertiseMupRequest, opts ...grpc.CallOption) (*BgpAdvertiseMupResponse, error) {
+	out := new(BgpAdvertiseMupResponse)
+	err := c.cc.Invoke(ctx, BgpRouteService_BgpAdvertiseMup_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *bgpRouteServiceClient) BgpWithdrawMup(ctx context.Context, in *BgpWithdrawMupRequest, opts ...grpc.CallOption) (*BgpWithdrawMupResponse, error) {
+	out := new(BgpWithdrawMupResponse)
+	err := c.cc.Invoke(ctx, BgpRouteService_BgpWithdrawMup_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BgpRouteServiceServer is the server API for BgpRouteService service.
 // All implementations should embed UnimplementedBgpRouteServiceServer
 // for forward compatibility
@@ -172,6 +194,8 @@ type BgpRouteServiceServer interface {
 	BgpWithdrawEvpnImet(context.Context, *BgpWithdrawEvpnImetRequest) (*BgpWithdrawEvpnImetResponse, error)
 	BgpAdvertiseEvpnEs(context.Context, *BgpAdvertiseEvpnEsRequest) (*BgpAdvertiseEvpnEsResponse, error)
 	BgpWithdrawEvpnEs(context.Context, *BgpWithdrawEvpnEsRequest) (*BgpWithdrawEvpnEsResponse, error)
+	BgpAdvertiseMup(context.Context, *BgpAdvertiseMupRequest) (*BgpAdvertiseMupResponse, error)
+	BgpWithdrawMup(context.Context, *BgpWithdrawMupRequest) (*BgpWithdrawMupResponse, error)
 }
 
 // UnimplementedBgpRouteServiceServer should be embedded to have forward compatible implementations.
@@ -210,6 +234,12 @@ func (UnimplementedBgpRouteServiceServer) BgpAdvertiseEvpnEs(context.Context, *B
 }
 func (UnimplementedBgpRouteServiceServer) BgpWithdrawEvpnEs(context.Context, *BgpWithdrawEvpnEsRequest) (*BgpWithdrawEvpnEsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BgpWithdrawEvpnEs not implemented")
+}
+func (UnimplementedBgpRouteServiceServer) BgpAdvertiseMup(context.Context, *BgpAdvertiseMupRequest) (*BgpAdvertiseMupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BgpAdvertiseMup not implemented")
+}
+func (UnimplementedBgpRouteServiceServer) BgpWithdrawMup(context.Context, *BgpWithdrawMupRequest) (*BgpWithdrawMupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BgpWithdrawMup not implemented")
 }
 
 // UnsafeBgpRouteServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -421,6 +451,42 @@ func _BgpRouteService_BgpWithdrawEvpnEs_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BgpRouteService_BgpAdvertiseMup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BgpAdvertiseMupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BgpRouteServiceServer).BgpAdvertiseMup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BgpRouteService_BgpAdvertiseMup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BgpRouteServiceServer).BgpAdvertiseMup(ctx, req.(*BgpAdvertiseMupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BgpRouteService_BgpWithdrawMup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BgpWithdrawMupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BgpRouteServiceServer).BgpWithdrawMup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BgpRouteService_BgpWithdrawMup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BgpRouteServiceServer).BgpWithdrawMup(ctx, req.(*BgpWithdrawMupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // BgpRouteService_ServiceDesc is the grpc.ServiceDesc for BgpRouteService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -471,6 +537,14 @@ var BgpRouteService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BgpWithdrawEvpnEs",
 			Handler:    _BgpRouteService_BgpWithdrawEvpnEs_Handler,
+		},
+		{
+			MethodName: "BgpAdvertiseMup",
+			Handler:    _BgpRouteService_BgpAdvertiseMup_Handler,
+		},
+		{
+			MethodName: "BgpWithdrawMup",
+			Handler:    _BgpRouteService_BgpWithdrawMup_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

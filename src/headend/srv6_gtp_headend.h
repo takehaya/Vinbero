@@ -24,31 +24,25 @@
 //   strip_len = IPv4 + UDP + GTP-U
 //   add_len   = IPv6 + SRH
 //   delta     = strip_len - add_len (positive = shrink, negative = grow)
-static __always_inline int do_h_m_gtp4_d(
+// gtp4_d_build_srv6 performs the H.M.GTP4.D transform once the GTP-U header has
+// been parsed: strip IPv4+UDP+GTP-U, prepend outer IPv6+SRH from `entry`, and
+// (when patch_args != 0) write Args.Mob.Session into the SID DA + first segment.
+// Shared by the prefix-keyed do_h_m_gtp4_d and the F-TEID-keyed
+// do_h_m_gtp4_d_teid (BGP MUP T2ST). The direct-segment (End.DT4) case passes
+// patch_args=0 so the TEID stays a lookup key only and is not re-encoded.
+static __always_inline int gtp4_d_build_srv6(
     struct xdp_md *ctx,
     struct ethhdr *eth,
     struct iphdr *iph,
     struct headend_entry *entry,
-    __u16 l3_offset)
+    struct gtpu_parsed *gtp_info,
+    __u16 l3_offset,
+    int patch_args)
 {
     void *data_end = (void *)(long)ctx->data_end;
 
     if (entry->num_segments < 1 || entry->num_segments > MAX_SEGMENTS)
         return XDP_DROP;
-
-    if (iph->protocol != IPPROTO_UDP)
-        return XDP_PASS;
-
-    if (iph->ihl < 5)
-        return XDP_DROP;
-
-    void *udp_ptr = (void *)iph + (iph->ihl * 4);
-    if (udp_ptr + sizeof(struct udphdr) > data_end)
-        return XDP_PASS;
-
-    struct gtpu_parsed gtp_info = {};
-    if (gtpu_parse(udp_ptr, data_end, &gtp_info) != 0)
-        return XDP_PASS;
 
     // Save state
     struct ethhdr saved_eth;
@@ -58,7 +52,7 @@ static __always_inline int do_h_m_gtp4_d(
     __builtin_memcpy(ipv4_dst, &iph->daddr, IPV4_ADDR_LEN);
 
     __u16 ipv4_hdr_len = iph->ihl * 4;
-    __u16 strip_len = ipv4_hdr_len + sizeof(struct udphdr) + gtp_info.hdr_total_len;
+    __u16 strip_len = ipv4_hdr_len + sizeof(struct udphdr) + gtp_info->hdr_total_len;
     __u16 ipv4_total = bpf_ntohs(iph->tot_len);
     if (strip_len >= ipv4_total)
         return XDP_DROP;
@@ -75,9 +69,9 @@ static __always_inline int do_h_m_gtp4_d(
     int add_len = (int)sizeof(struct ipv6hdr) + srh_len;
     int delta = (int)strip_len - add_len;
 
-    __u32 teid = gtp_info.teid;
-    __u8 qfi = gtp_info.qfi;
-    __u8 rqi = gtp_info.rqi;
+    __u32 teid = gtp_info->teid;
+    __u8 qfi = gtp_info->qfi;
+    __u8 rqi = gtp_info->rqi;
     __u8 args_offset = entry->args_offset;
 
     // Single adjust_head: replace IPv4+UDP+GTP-U with IPv6+SRH
@@ -129,10 +123,15 @@ static __always_inline int do_h_m_gtp4_d(
         return XDP_DROP;
 
     // Patch Args.Mob.Session into DA and first SRH segment.
-    // args_offset is per-entry (from map), masked to 0-7 for verifier safety
-    // (max valid: 7, since offset + 9 <= 16 = IPv6 addr len).
-    {
-        args_offset &= 0x07;
+    // Max valid offset is 7 (offset + 9 <= 16 = IPv6 addr len). Reject an
+    // out-of-range offset rather than silently masking it (which would fold the
+    // 9-byte args over the locator) -- matches the GTP6 path's explicit drop and
+    // self-defends against a map value that bypassed the userspace offset guard.
+    // Skipped entirely when patch_args == 0 (F-TEID uplink toward a plain
+    // direct/End.DT4 SID).
+    if (patch_args) {
+        if (args_offset > 7)
+            return XDP_DROP;
         __be32 teid_be = bpf_htonl(teid);
         __u8 qfi_rqi = ENCODE_QFI_RQI(qfi, rqi);
 
@@ -169,6 +168,85 @@ static __always_inline int do_h_m_gtp4_d(
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
     return srv6_fib_redirect(ctx, outer_ip6h, new_eth, ctx->ingress_ifindex);
+}
+
+// gtp4_d_parse validates the GTP-U/IPv4 packet and parses its header. Shared
+// preamble for both H.M.GTP4.D variants. Returns 0 on success (gtp_info
+// populated), or an XDP action (>0) to return immediately.
+static __always_inline int gtp4_d_parse(
+    struct xdp_md *ctx,
+    struct iphdr *iph,
+    struct gtpu_parsed *gtp_info)
+{
+    void *data_end = (void *)(long)ctx->data_end;
+
+    if (iph->protocol != IPPROTO_UDP)
+        return XDP_PASS;
+    if (iph->ihl < 5)
+        return XDP_DROP;
+
+    void *udp_ptr = (void *)iph + (iph->ihl * 4);
+    if (udp_ptr + sizeof(struct udphdr) > data_end)
+        return XDP_PASS;
+
+    if (gtpu_parse(udp_ptr, data_end, gtp_info) != 0)
+        return XDP_PASS;
+
+    return 0;
+}
+
+// do_h_m_gtp4_d: prefix-keyed H.M.GTP4.D. The headend_v4_map entry carries the
+// segment list directly and the Args.Mob.Session is patched from the parsed
+// TEID/QFI (RFC 9433 §6.7).
+static __always_inline int do_h_m_gtp4_d(
+    struct xdp_md *ctx,
+    struct ethhdr *eth,
+    struct iphdr *iph,
+    struct headend_entry *entry,
+    __u16 l3_offset)
+{
+    struct gtpu_parsed gtp_info = {};
+    int ret = gtp4_d_parse(ctx, iph, &gtp_info);
+    if (ret != 0)
+        return ret;
+
+    return gtp4_d_build_srv6(ctx, eth, iph, entry, &gtp_info, l3_offset, /*patch_args=*/1);
+}
+
+// do_h_m_gtp4_d_teid: F-TEID-keyed H.M.GTP4.D (BGP MUP T2ST,
+// draft-mpmz-bess-mup-safi). `entry` is the gate entry from headend_v4_map on
+// the N3/UPF endpoint prefix; its segment list is unused. The real per-session
+// direct SID is resolved from mup_uplink_v4_map keyed on {outer dst, TEID}.
+// patch_args follows the resolved entry's args_offset sentinel: a plain direct
+// (End.DT4) SID sets MUP_ARGS_OFFSET_NONE and skips Args.Mob.Session patching.
+static __always_inline int do_h_m_gtp4_d_teid(
+    struct xdp_md *ctx,
+    struct ethhdr *eth,
+    struct iphdr *iph,
+    struct headend_entry *entry,
+    __u16 l3_offset)
+{
+    // entry is the headend_v4_map gate (mode trigger) only; the real
+    // per-session segments come from the F-TEID lookup below, so it is unused.
+    struct gtpu_parsed gtp_info = {};
+    int ret = gtp4_d_parse(ctx, iph, &gtp_info);
+    if (ret != 0)
+        return ret;
+
+    // Full-length lookup key: the LPM trie returns the longest installed prefix,
+    // so the endpoint is matched fully (32 bits) and the TEID matched as a prefix.
+    struct mup_uplink_v4_key key = {};
+    key.prefixlen = 64;
+    __builtin_memcpy(key.endpoint, &iph->daddr, IPV4_ADDR_LEN);
+    __be32 teid_be = bpf_htonl(gtp_info.teid); // network order so the MSB aligns to the prefix
+    __builtin_memcpy(key.teid, &teid_be, 4);
+
+    struct headend_entry *session = bpf_map_lookup_elem(&mup_uplink_v4_map, &key);
+    if (!session)
+        return XDP_PASS; // no session mapping for this F-TEID
+
+    int patch_args = (session->args_offset != MUP_ARGS_OFFSET_NONE);
+    return gtp4_d_build_srv6(ctx, eth, iph, session, &gtp_info, l3_offset, patch_args);
 }
 
 #endif // SRV6_GTP_HEADEND_H
