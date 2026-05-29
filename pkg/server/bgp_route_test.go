@@ -547,3 +547,79 @@ func TestBgpRoute_AdvertiserErrorIsPerItem(t *testing.T) {
 		t.Errorf("advertiser failure must surface as a per-item error, got %d", len(resp.Msg.Errors))
 	}
 }
+
+// fakeMup records pushed MUP routes so tests can assert what reached the
+// controller (and what was rejected before it).
+type fakeMup struct {
+	isd, dsd, t1st, t2st []bgp.MUPRoute
+}
+
+func (f *fakeMup) PushMUPISD(_ context.Context, r bgp.MUPRoute) error {
+	f.isd = append(f.isd, r)
+	return nil
+}
+func (f *fakeMup) PushMUPDSD(_ context.Context, r bgp.MUPRoute) error {
+	f.dsd = append(f.dsd, r)
+	return nil
+}
+func (f *fakeMup) PushMUPT1ST(_ context.Context, r bgp.MUPRoute) error {
+	f.t1st = append(f.t1st, r)
+	return nil
+}
+func (f *fakeMup) PushMUPT2ST(_ context.Context, r bgp.MUPRoute) error {
+	f.t2st = append(f.t2st, r)
+	return nil
+}
+func (f *fakeMup) WithdrawMUPISD(context.Context, bgp.MUPISDKey) error   { return nil }
+func (f *fakeMup) WithdrawMUPDSD(context.Context, bgp.MUPDSDKey) error   { return nil }
+func (f *fakeMup) WithdrawMUPT1ST(context.Context, bgp.MUPT1STKey) error { return nil }
+func (f *fakeMup) WithdrawMUPT2ST(context.Context, bgp.MUPT2STKey) error { return nil }
+
+func TestBgpRoute_MupDisabledWithoutController(t *testing.T) {
+	s := NewBgpRouteServer(nil, nil, nil, nil)
+	if _, err := s.BgpAdvertiseMup(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseMupRequest{})); err == nil {
+		t.Error("BgpAdvertiseMup must fail when the MUP controller is nil")
+	}
+}
+
+func TestBgpRoute_AdvertiseMup_T2ST(t *testing.T) {
+	fm := &fakeMup{}
+	s := NewBgpRouteServer(&fakeAdvertiser{}, nil, nil, fm)
+	resp, err := s.BgpAdvertiseMup(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseMupRequest{Routes: []*v1.BgpMupRoute{{
+			RouteType: "t2st", Rd: "65100:1", Endpoint: "172.16.0.254",
+			Teid: 256, TeidLen: 32, SegmentId2: 1, SegmentId4: 2, NextHop: "2001:db8:ff::d",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseMup: %v", err)
+	}
+	if len(resp.Msg.Advertised) != 1 || len(fm.t2st) != 1 {
+		t.Fatalf("advertised=%d fake.t2st=%d, want 1/1", len(resp.Msg.Advertised), len(fm.t2st))
+	}
+	if fm.t2st[0].Type != bgp.MUPRouteTypeT2ST || fm.t2st[0].TEIDLen != 32 || fm.t2st[0].SegmentID2 != 1 {
+		t.Errorf("forwarded T2ST = %+v", fm.t2st[0])
+	}
+}
+
+// An out-of-range proto value (teid_len=288) would wrap to uint8 32 and slip
+// past the downstream "TEIDLen > 32" guard. It must be a per-item error and
+// must never reach the controller.
+func TestBgpRoute_AdvertiseMup_OutOfRangeIsPerItemError(t *testing.T) {
+	fm := &fakeMup{}
+	s := NewBgpRouteServer(&fakeAdvertiser{}, nil, nil, fm)
+	resp, err := s.BgpAdvertiseMup(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseMupRequest{Routes: []*v1.BgpMupRoute{{
+			RouteType: "t2st", Rd: "65100:1", Endpoint: "172.16.0.254",
+			Teid: 256, TeidLen: 288, NextHop: "2001:db8:ff::d",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseMup returned a top-level error, want per-item: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 {
+		t.Errorf("out-of-range teid_len must be a per-item error, got %d", len(resp.Msg.Errors))
+	}
+	if len(fm.t2st) != 0 {
+		t.Errorf("a rejected route must not reach the controller: %+v", fm.t2st)
+	}
+}

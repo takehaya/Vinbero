@@ -10,8 +10,30 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp"
 )
 
+// validateMUPRouteFields rejects wire values that do not fit the narrower fields
+// they map to. Without this an out-of-range proto uint32 would silently wrap to
+// a different in-range value (e.g. teid_len=288 -> uint8 32), slipping past the
+// downstream "TEIDLen > 32" guard and advertising an unintended route.
+func validateMUPRouteFields(r *v1.BgpMupRoute) error {
+	if v := r.GetTeidLen(); v > 32 {
+		return fmt.Errorf("teid_len %d out of range (0-32)", v)
+	}
+	if v := r.GetQfi(); v > 63 {
+		return fmt.Errorf("qfi %d out of range (0-63)", v)
+	}
+	if v := r.GetRqi(); v > 1 {
+		return fmt.Errorf("rqi %d out of range (0-1)", v)
+	}
+	if v := r.GetSegmentId2(); v > 0xFFFF {
+		return fmt.Errorf("segment_id2 %d out of range (0-65535)", v)
+	}
+	return nil
+}
+
 // protoToMUPRoute converts a wire BgpMupRoute into the bgpd-agnostic form. The
-// route type is parsed separately so a bad type is reported per-route.
+// route type is parsed separately so a bad type is reported per-route, and the
+// caller must run validateMUPRouteFields first so the narrowing casts below
+// cannot wrap an out-of-range value.
 func protoToMUPRoute(r *v1.BgpMupRoute) bgp.MUPRoute {
 	return bgp.MUPRoute{
 		RD:         r.GetRd(),
@@ -76,6 +98,10 @@ func (s *BgpRouteServer) BgpAdvertiseMup(
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
+		if err = validateMUPRouteFields(r); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
+			continue
+		}
 		mr := protoToMUPRoute(r)
 		mr.Type = typ
 		switch typ {
@@ -111,6 +137,13 @@ func (s *BgpRouteServer) BgpWithdrawMup(
 	for _, r := range req.Msg.Routes {
 		typ, err := mupRouteType(r.GetRouteType())
 		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
+			continue
+		}
+		// Guard the same narrowing cast as advertise (the T2ST key narrows
+		// teid_len to uint8), so an out-of-range value cannot wrap to a key that
+		// silently mismatches what was advertised.
+		if err = validateMUPRouteFields(r); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}

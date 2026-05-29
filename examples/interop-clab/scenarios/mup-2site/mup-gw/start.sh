@@ -49,8 +49,8 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 
 # Advertise this gateway's Interwork Segment Discovery route: it hosts the
 # End.M.GTP4.E interwork segment (SID fd00:a:0:1::) reachable for the gNB N3
-# block. The controller's T1ST resolves against this; in this build the SID is
-# also carried on the T1ST, so ISD is the segment-reachability announcement.
+# block. The controller's (SID-less) T1ST resolves its interwork SID from this
+# ISD by gNB endpoint, so the SID is carried here, not on the T1ST.
 sleep 6
 /usr/local/bin/vbctl bgp advertise-mup --route-type isd \
     --rd 65100:1 --prefix 172.16.0.0/24 \
