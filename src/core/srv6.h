@@ -58,6 +58,9 @@ enum srv6_headend_behavior {
     SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED = 5,    // H.Encaps.Red (Reduced SRH encapsulation)
     SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED = 6, // H.Encaps.L2.Red (Reduced SRH L2 encapsulation)
     SRV6_HEADEND_BEHAVIOR_H_INSERT_RED = 7,    // H.Insert.Red (Reduced SRH insertion)
+    SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID = 8, // H.M.GTP4.D with F-TEID lookup (BGP MUP, draft-mpmz-bess-mup-safi)
+    SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D = 9,      // H.M.GTP6.D (GTP-U/IPv6 => SRv6)
+    SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID = 10, // H.M.GTP6.D with F-TEID lookup (BGP MUP)
 };
 
 // aux_owner: persistent owner tag for an sid_aux_map index, paired

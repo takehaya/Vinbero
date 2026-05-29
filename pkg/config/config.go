@@ -59,7 +59,7 @@ type BGPPeerConfig struct {
 	PeerASN      uint32   `yaml:"peer_asn,omitempty"`
 	HoldTimeSec  uint32   `yaml:"hold_time_sec,omitempty" default:"90"`
 	KeepaliveSec uint32   `yaml:"keepalive_sec,omitempty" default:"30"`
-	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6 / evpn
+	Families     []string `yaml:"families,omitempty"` // vpnv4 / vpnv6 / ipv6_unicast / sr_policy_ipv6 / evpn / mup_ipv4
 	// Passive stops this peer from dialing out; it only accepts the
 	// neighbor's inbound connection. Set it on one end of each iBGP
 	// full-mesh pair to avoid connection-collision flap.

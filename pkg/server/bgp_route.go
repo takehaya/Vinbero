@@ -22,10 +22,11 @@ type BgpRouteServer struct {
 	advertiser bgp.RouteAdvertiser
 	srPolicy   bgp.SRPolicyController
 	evpn       bgp.EVPNController
+	mup        bgp.MUPController
 }
 
-func NewBgpRouteServer(advertiser bgp.RouteAdvertiser, srPolicy bgp.SRPolicyController, evpn bgp.EVPNController) *BgpRouteServer {
-	return &BgpRouteServer{advertiser: advertiser, srPolicy: srPolicy, evpn: evpn}
+func NewBgpRouteServer(advertiser bgp.RouteAdvertiser, srPolicy bgp.SRPolicyController, evpn bgp.EVPNController, mup bgp.MUPController) *BgpRouteServer {
+	return &BgpRouteServer{advertiser: advertiser, srPolicy: srPolicy, evpn: evpn, mup: mup}
 }
 
 // errBGPDisabled is returned (as FailedPrecondition) when an advertise /

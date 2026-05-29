@@ -45,6 +45,7 @@ jobs:
           - sr-policy-bgp-2site  # SR Policy learned over BGP (SAFI 73)
           - evpn-2site           # EVPN RT2 (MAC/IP) L2VPN over BGP (SAFI 70)
           - evpn-multihoming     # EVPN RT4 multi-homing: DF election + split-horizon
+          - mup-2site            # BGP MUP (SAFI 85): controller advertises, gateway applies
     steps:
       - name: Checkout
         uses: actions/checkout@v5

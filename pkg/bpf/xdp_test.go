@@ -2146,6 +2146,178 @@ func TestXDPProgHMGtp4D(t *testing.T) {
 	}
 }
 
+// TestXDPProgHMGtp4DTeid exercises the F-TEID uplink behavior (BGP MUP T2ST,
+// draft-mpmz-bess-mup-safi): a gate entry on the N3 endpoint prefix triggers
+// H.M.GTP4.D_TEID, which parses the GTP-U TEID, looks up mup_uplink_v4_map by
+// {endpoint, TEID}, and encapsulates the inner packet toward the resolved
+// direct SID. Unlike the prefix-keyed H.M.GTP4.D, the direct (End.DT4) target
+// does NOT patch Args.Mob.Session, so the outer DA equals the direct SID
+// verbatim and different TEIDs steer to different SIDs.
+func TestXDPProgHMGtp4DTeid(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	const n3Endpoint = "192.0.2.100"
+	srcAddr, _ := ParseIPv6("fc00::1")
+
+	// Gate on the N3/UPF endpoint prefix so GTP-U toward it is transformed.
+	h.createMupUplinkGate("192.0.2.0/24")
+
+	// Direct SIDs for the sessions below.
+	directExact, _ := ParseIPv6("fc00:a::abcd")  // exact /32 TEID match
+	directAgg, _ := ParseIPv6("fc00:b::ef01")    // /8 TEID-prefix aggregate
+	directMore, _ := ParseIPv6("fc00:c::1234")   // /16 inside the aggregate (longest-match wins)
+	segsExact, nE, _ := ParseSegments([]string{"fc00:a::abcd"})
+	segsAgg, nA, _ := ParseSegments([]string{"fc00:b::ef01"})
+	segsMore, nM, _ := ParseSegments([]string{"fc00:c::1234"})
+
+	// Exact session: TEID 0x12345678, all 32 bits significant.
+	h.createMupUplinkSession(n3Endpoint, 0x12345678, 32, srcAddr, segsExact, nE, MupArgsOffsetNone)
+	// Aggregate: TEID prefix 0xAB/8 → every TEID 0xAB?????? steers here.
+	h.createMupUplinkSession(n3Endpoint, 0xAB000000, 8, srcAddr, segsAgg, nA, MupArgsOffsetNone)
+	// More-specific inside the aggregate: TEID prefix 0xABCD/16 → longest match
+	// must beat the /8 for TEIDs under 0xABCD.
+	h.createMupUplinkSession(n3Endpoint, 0xABCD0000, 16, srcAddr, segsMore, nM, MupArgsOffsetNone)
+
+	tests := []struct {
+		name        string
+		teid        uint32
+		qfi         uint8
+		outerDst    string
+		expectEncap bool
+		wantDA      [16]byte
+	}{
+		{"exact F-TEID → exact SID", 0x12345678, 9, n3Endpoint, true, directExact},
+		{"TEID in /8 aggregate → aggregate SID", 0xAB123456, 0, n3Endpoint, true, directAgg},
+		{"TEID in /16 → longest match wins over /8", 0xABCD9999, 7, n3Endpoint, true, directMore},
+		{"unknown F-TEID → no session", 0x99999999, 5, n3Endpoint, false, [16]byte{}},
+		{"gate miss (other dst)", 0x12345678, 9, "10.10.10.10", false, [16]byte{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkt, err := buildGTPUv4Packet(
+				net.ParseIP("10.0.0.1").To4(),
+				net.ParseIP(tt.outerDst).To4(),
+				tt.teid, tt.qfi,
+				net.ParseIP("172.16.0.1").To4(),
+				net.ParseIP("172.16.0.2").To4(),
+			)
+			if err != nil {
+				t.Fatalf("Failed to build GTP-U packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+
+			if !tt.expectEncap {
+				// No gate match or no F-TEID session → leave the packet alone.
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS, got %d", ret)
+				}
+				return
+			}
+
+			// Transformed → XDP_PASS or XDP_REDIRECT (FIB lookup needs a neighbor).
+			if ret != XDP_PASS && ret != XDP_REDIRECT {
+				t.Errorf("Expected XDP_PASS or XDP_REDIRECT, got %d", ret)
+			}
+			if len(outPkt) < ethHeaderLen+ipv6HeaderLen+srhBaseLen {
+				t.Fatalf("Output packet too short: %d bytes", len(outPkt))
+			}
+
+			// EtherType is now IPv6 (SRv6 encapsulated).
+			if etherType := binary.BigEndian.Uint16(outPkt[12:14]); etherType != 0x86DD {
+				t.Errorf("Expected EtherType 0x86DD (IPv6), got 0x%04X", etherType)
+			}
+
+			// Outer IPv6 source from the session entry.
+			outerSrcAddr := outPkt[ethHeaderLen+8 : ethHeaderLen+24]
+			if !bytes.Equal(outerSrcAddr, srcAddr[:]) {
+				t.Errorf("Outer IPv6 src mismatch: got %x, want %x", outerSrcAddr, srcAddr)
+			}
+
+			// Outer DA == direct SID verbatim (Args.Mob.Session NOT patched).
+			outerDA := outPkt[ethHeaderLen+24 : ethHeaderLen+40]
+			if !bytes.Equal(outerDA, tt.wantDA[:]) {
+				t.Errorf("Outer DA mismatch: got %x, want %x (direct SID must not be arg-patched)", outerDA, tt.wantDA)
+			}
+
+			t.Logf("SUCCESS: GTP-U/IPv4 (TEID=0x%08X) → SRv6 direct SID %s (pktlen %d→%d)",
+				tt.teid, net.IP(tt.wantDA[:]), len(pkt), len(outPkt))
+		})
+	}
+}
+
+// TestXDPProgHMGtp6DTeid exercises the GTP6 F-TEID uplink behavior: a gate on
+// the GTP-U/IPv6 endpoint triggers H.M.GTP6.D_TEID, which parses the TEID, looks
+// up mup_uplink_v6_map by {endpoint, TEID} (longest prefix), and encapsulates the
+// inner packet toward the resolved direct SID with no Args.Mob.Session patch.
+func TestXDPProgHMGtp6DTeid(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	const n3Endpoint = "2001:db8:e::1"
+	srcAddr, _ := ParseIPv6("fd00:200::1")
+
+	h.createMupUplinkGateV6("2001:db8:e::/64")
+
+	directExact, _ := ParseIPv6("fd00:d:a::abcd")
+	directAgg, _ := ParseIPv6("fd00:d:b::ef01")
+	segsExact, nE, _ := ParseSegments([]string{"fd00:d:a::abcd"})
+	segsAgg, nA, _ := ParseSegments([]string{"fd00:d:b::ef01"})
+	h.createMupUplinkSessionV6(n3Endpoint, 0x12345678, 32, srcAddr, segsExact, nE, MupArgsOffsetNone)
+	h.createMupUplinkSessionV6(n3Endpoint, 0xAB000000, 8, srcAddr, segsAgg, nA, MupArgsOffsetNone)
+
+	tests := []struct {
+		name        string
+		teid        uint32
+		outerDst    string
+		expectEncap bool
+		wantDA      [16]byte
+	}{
+		{"exact F-TEID → exact SID", 0x12345678, n3Endpoint, true, directExact},
+		{"TEID in /8 aggregate → aggregate SID", 0xAB123456, n3Endpoint, true, directAgg},
+		{"unknown F-TEID → no session", 0x99999999, n3Endpoint, false, [16]byte{}},
+		{"gate miss (other dst)", 0x12345678, "2001:db8:f::1", false, [16]byte{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkt, err := buildGTPUv6Packet(
+				net.ParseIP("2001:db8:1::9"),
+				net.ParseIP(tt.outerDst),
+				tt.teid, 0,
+				net.ParseIP("172.16.0.1").To4(),
+				net.ParseIP("172.16.0.2").To4(),
+			)
+			if err != nil {
+				t.Fatalf("Failed to build GTP-U/IPv6 packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+
+			if !tt.expectEncap {
+				if ret != XDP_PASS {
+					t.Errorf("Expected XDP_PASS, got %d", ret)
+				}
+				return
+			}
+			if ret != XDP_PASS && ret != XDP_REDIRECT {
+				t.Errorf("Expected XDP_PASS or XDP_REDIRECT, got %d", ret)
+			}
+			if len(outPkt) < ethHeaderLen+ipv6HeaderLen+srhBaseLen {
+				t.Fatalf("Output packet too short: %d bytes", len(outPkt))
+			}
+			if etherType := binary.BigEndian.Uint16(outPkt[12:14]); etherType != 0x86DD {
+				t.Errorf("Expected EtherType 0x86DD (IPv6), got 0x%04X", etherType)
+			}
+			outerDA := outPkt[ethHeaderLen+24 : ethHeaderLen+40]
+			if !bytes.Equal(outerDA, tt.wantDA[:]) {
+				t.Errorf("Outer DA mismatch: got %x, want %x (direct SID, no arg patch)", outerDA, tt.wantDA)
+			}
+			t.Logf("SUCCESS: GTP-U/IPv6 (TEID=0x%08X) → SRv6 direct SID %s", tt.teid, net.IP(tt.wantDA[:]))
+		})
+	}
+}
+
 func TestXDPProgEndMGtp4E(t *testing.T) {
 	h := newXDPTestHelper(t)
 	gtpSrcAddr := [4]byte{10, 0, 0, 1}

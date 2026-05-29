@@ -83,6 +83,8 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 		ev.SRPolicy = decodeSRPolicy(p)
 	case bgp.FamilyEVPN:
 		ev.EVPN = decodeEVPNRoute(p)
+	case bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6:
+		ev.MUP = decodeMUPRoute(p)
 	}
 	return ev, true
 }
@@ -101,6 +103,10 @@ func apiFamilyToVinbero(f gobgppkt.Family) (bgp.Family, bool) {
 		return bgp.FamilySRPolicyIPv6, true
 	case gobgppkt.RF_EVPN:
 		return bgp.FamilyEVPN, true
+	case gobgppkt.RF_MUP_IPv4:
+		return bgp.FamilyMUPIPv4, true
+	case gobgppkt.RF_MUP_IPv6:
+		return bgp.FamilyMUPIPv6, true
 	default:
 		return "", false
 	}

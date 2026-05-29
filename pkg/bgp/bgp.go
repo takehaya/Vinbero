@@ -39,7 +39,9 @@ const (
 	FamilyVPNv6        Family = "vpnv6"
 	FamilyIPv6Unicast  Family = "ipv6_unicast"
 	FamilySRPolicyIPv6 Family = "sr_policy_ipv6"
-	FamilyEVPN         Family = "evpn" // AFI 25 (L2VPN) / SAFI 70 (EVPN)
+	FamilyEVPN         Family = "evpn"     // AFI 25 (L2VPN) / SAFI 70 (EVPN)
+	FamilyMUPIPv4      Family = "mup_ipv4" // AFI 1 (IPv4) / SAFI 85 (BGP MUP, GTP4)
+	FamilyMUPIPv6      Family = "mup_ipv6" // AFI 2 (IPv6) / SAFI 85 (BGP MUP, GTP6)
 )
 
 // String renders the family for logs and error messages.
@@ -48,7 +50,7 @@ func (f Family) String() string { return string(f) }
 // Valid reports whether f is one of the recognized families.
 func (f Family) Valid() bool {
 	switch f {
-	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6, FamilyEVPN:
+	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6, FamilyEVPN, FamilyMUPIPv4, FamilyMUPIPv6:
 		return true
 	default:
 		return false
@@ -60,7 +62,7 @@ func (f Family) Valid() bool {
 func ParseFamily(s string) (Family, error) {
 	f := Family(s)
 	if !f.Valid() {
-		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6|evpn)", s)
+		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6|evpn|mup_ipv4|mup_ipv6)", s)
 	}
 	return f, nil
 }
@@ -160,6 +162,7 @@ type RouteEvent struct {
 	Unicast    *UnicastRoute
 	SRPolicy   *SRPolicy
 	EVPN       *EVPNRoute
+	MUP        *MUPRoute
 	IsWithdraw bool
 }
 
@@ -327,4 +330,115 @@ type EVPNRoute struct {
 	// remote-MAC learning -- distinct from the local TX encap source. "" if not
 	// derivable.
 	RemoteSrc string
+}
+
+// MUPRouteType enumerates the BGP MUP SAFI (85) route types Vinbero consumes
+// under Architecture Type 1 (3GPP-5G), per draft-mpmz-bess-mup-safi §3.1.
+type MUPRouteType uint8
+
+const (
+	MUPRouteTypeISD  MUPRouteType = 1 // Interwork Segment Discovery (downlink interwork segment)
+	MUPRouteTypeDSD  MUPRouteType = 2 // Direct Segment Discovery (uplink direct segment)
+	MUPRouteTypeT1ST MUPRouteType = 3 // Type-1 Session Transformed (per-UE, downlink)
+	MUPRouteTypeT2ST MUPRouteType = 4 // Type-2 Session Transformed (aggregate, uplink)
+)
+
+// String renders the MUP route type for logs.
+func (t MUPRouteType) String() string {
+	switch t {
+	case MUPRouteTypeISD:
+		return "isd"
+	case MUPRouteTypeDSD:
+		return "dsd"
+	case MUPRouteTypeT1ST:
+		return "t1st"
+	case MUPRouteTypeT2ST:
+		return "t2st"
+	default:
+		return fmt.Sprintf("mup-type(%d)", uint8(t))
+	}
+}
+
+// MUPRoute is a decoded BGP MUP NLRI (SAFI 85, 3GPP-5G). One envelope carries
+// every route type; fields a type does not use stay zero. The SRv6 service SID
+// (the interwork/direct segment locator:function) is decoded from the
+// Prefix-SID attribute's SRv6 Services TLV, the same path VPNv4/EVPN use.
+//
+// Direction mapping (draft-mpmz-bess-mup-safi, RFC 9433): T1ST is the downlink
+// per-UE session (UE Prefix + exact TEID + QFI + gNB Endpoint), T2ST the uplink
+// aggregate (Endpoint + a variable-length TEID *prefix*). ISD/DSD advertise the
+// interwork/direct segments that T1ST/T2ST resolve against.
+type MUPRoute struct {
+	Type MUPRouteType
+	RD   string
+	RTs  []string
+
+	// Prefix is the ISD interwork-segment prefix or the T1ST UE prefix (CIDR).
+	Prefix string
+	// Address is the DSD originating speaker's direct-segment endpoint.
+	Address string
+
+	// TEID is the GTP-U Tunnel Endpoint Identifier. For T1ST it is an exact
+	// 32-bit value; for T2ST it is the high-order bits of a TEID prefix whose
+	// significant length is TEIDLen (the rest are zero).
+	TEID uint32
+	// TEIDLen is the significant TEID prefix length in bits: 32 for T1ST (exact),
+	// 0..32 for T2ST (EndpointAddressLength - 32 for IPv4). 0 means "any TEID".
+	TEIDLen uint8
+	QFI     uint8  // T1ST QoS Flow Identifier
+	RQI     uint8  // T1ST Reflective QoS Indicator
+	Endpoint string // T1ST gNB N3 address / T2ST GTP tunnel endpoint
+	Source   string // T1ST optional source address ("" if none)
+
+	// SegmentID2 / SegmentID4 are the BGP MUP Extended Community segment
+	// identifier halves (draft §3.2), used to resolve a T2ST against its Direct
+	// Segment (DSD). Zero when the community is absent.
+	SegmentID2 uint16
+	SegmentID4 uint32
+
+	// SRv6SID is the segment's locator:function base from the Prefix-SID TLV;
+	// "" if none.
+	SRv6SID string
+	NextHop string
+}
+
+// MUP withdraw keys identify a previously-advertised MUP route by the subset of
+// NLRI fields that form its BGP route key (draft-mpmz-bess-mup-safi §3.1).
+type (
+	MUPISDKey struct {
+		RD     string
+		Prefix string
+	}
+	MUPDSDKey struct {
+		RD      string
+		Address string
+	}
+	MUPT1STKey struct {
+		RD     string
+		Prefix string // UE prefix
+		TEID   uint32
+	}
+	MUPT2STKey struct {
+		RD       string
+		Endpoint string
+		TEID     uint32
+		TEIDLen  uint8
+	}
+)
+
+// MUPController advertises Vinbero's local BGP MUP routes (SAFI 85). Reception
+// is delivered through RouteSubscriber as RouteEvent.MUP; the Push / Withdraw
+// methods are the advertise direction, surfaced operator-side as
+// `vbctl bgp advertise-mup --route-type {isd|dsd|t1st|t2st}` / `withdraw-mup`.
+// This is the MUP Controller role: a node that signals UE-session and segment
+// state without necessarily forwarding the data itself.
+type MUPController interface {
+	PushMUPISD(ctx context.Context, r MUPRoute) error
+	WithdrawMUPISD(ctx context.Context, key MUPISDKey) error
+	PushMUPDSD(ctx context.Context, r MUPRoute) error
+	WithdrawMUPDSD(ctx context.Context, key MUPDSDKey) error
+	PushMUPT1ST(ctx context.Context, r MUPRoute) error
+	WithdrawMUPT1ST(ctx context.Context, key MUPT1STKey) error
+	PushMUPT2ST(ctx context.Context, r MUPRoute) error
+	WithdrawMUPT2ST(ctx context.Context, key MUPT2STKey) error
 }

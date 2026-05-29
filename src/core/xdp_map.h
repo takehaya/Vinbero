@@ -67,6 +67,33 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } headend_v6_map SEC(".maps");
 
+// MUP uplink F-TEID map (LPM Trie) for BGP MUP T2ST (draft-mpmz-bess-mup-safi).
+// Key: {prefixlen, outer GTP-U dst IPv4, TEID}. Value: headend_entry holding the
+// direct SID segment list. The H.M.GTP4.D_TEID behavior, gated by a
+// headend_v4_map entry on the N3/UPF endpoint prefix, parses the GTP-U TEID and
+// looks this up to select the per-session direct SID (VPP-style F-TEID lookup).
+// LPM_TRIE (not HASH) because BGP MUP T2ST carries the TEID as a variable-length
+// prefix, so one route can aggregate a TEID range; the endpoint occupies the
+// high 32 bits of the key so it is always fully matched before the TEID prefix.
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct mup_uplink_v4_key);
+    __type(value, struct headend_entry);
+    __uint(max_entries, 4096);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} mup_uplink_v4_map SEC(".maps");
+
+// MUP uplink F-TEID map (LPM Trie) for BGP MUP T2ST over GTP6. IPv6 counterpart
+// of mup_uplink_v4_map: keyed on {prefixlen, GTP-U/IPv6 dst, TEID prefix}, read
+// by the H.M.GTP6.D_TEID behavior to select the per-session direct SID.
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct mup_uplink_v6_key);
+    __type(value, struct headend_entry);
+    __uint(max_entries, 4096);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} mup_uplink_v6_map SEC(".maps");
+
 // SR Policy map: policy_id (headend_entry.policy_id) -> transport SID list.
 // HASH so a policy update / withdraw is one O(1), atomic-per-value write
 // regardless of how many routes steer onto it; a missing entry is the

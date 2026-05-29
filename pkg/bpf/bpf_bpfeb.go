@@ -140,6 +140,20 @@ type BpfLpmKeyV6 struct {
 	Addr      [16]uint8
 }
 
+type BpfMupUplinkV4Key struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Endpoint  [4]uint8
+	Teid      [4]uint8
+}
+
+type BpfMupUplinkV6Key struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Endpoint  [16]uint8
+	Teid      [4]uint8
+}
+
 type BpfScratchBuf struct {
 	_    structs.HostLayout
 	Data [224]uint8
@@ -227,35 +241,38 @@ type BpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfProgramSpecs struct {
-	TailcallEndpointEnd           *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end"`
-	TailcallEndpointEndB6         *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6"`
-	TailcallEndpointEndB6Encaps   *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6_encaps"`
-	TailcallEndpointEndDt2        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt2"`
-	TailcallEndpointEndDt2m       *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt2m"`
-	TailcallEndpointEndDt4        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt4"`
-	TailcallEndpointEndDt46       *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt46"`
-	TailcallEndpointEndDt6        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt6"`
-	TailcallEndpointEndDx2        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dx2"`
-	TailcallEndpointEndDx2v       *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dx2v"`
-	TailcallEndpointEndDx4        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dx4"`
-	TailcallEndpointEndDx6        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dx6"`
-	TailcallEndpointEndM_gtp4E    *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp4_e"`
-	TailcallEndpointEndM_gtp6D    *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_d"`
-	TailcallEndpointEndM_gtp6D_di *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_d_di"`
-	TailcallEndpointEndM_gtp6E    *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_e"`
-	TailcallEndpointEndT          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_t"`
-	TailcallEndpointEndX          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_x"`
-	TailcallHeadendL2H_encaps     *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps"`
-	TailcallHeadendL2H_encapsRed  *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps_red"`
-	TailcallHeadendV4H_encaps     *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_encaps"`
-	TailcallHeadendV4H_encapsRed  *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_encaps_red"`
-	TailcallHeadendV4H_mGtp4D     *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_m_gtp4_d"`
-	TailcallHeadendV6H_encaps     *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_encaps"`
-	TailcallHeadendV6H_encapsRed  *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_encaps_red"`
-	TailcallHeadendV6H_insert     *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_insert"`
-	TailcallHeadendV6H_insertRed  *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_insert_red"`
-	VinberoMain                   *ebpf.ProgramSpec `ebpf:"vinbero_main"`
-	VinberoTcIngress              *ebpf.ProgramSpec `ebpf:"vinbero_tc_ingress"`
+	TailcallEndpointEnd            *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end"`
+	TailcallEndpointEndB6          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6"`
+	TailcallEndpointEndB6Encaps    *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6_encaps"`
+	TailcallEndpointEndDt2         *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt2"`
+	TailcallEndpointEndDt2m        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt2m"`
+	TailcallEndpointEndDt4         *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt4"`
+	TailcallEndpointEndDt46        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt46"`
+	TailcallEndpointEndDt6         *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dt6"`
+	TailcallEndpointEndDx2         *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dx2"`
+	TailcallEndpointEndDx2v        *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dx2v"`
+	TailcallEndpointEndDx4         *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dx4"`
+	TailcallEndpointEndDx6         *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_dx6"`
+	TailcallEndpointEndM_gtp4E     *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp4_e"`
+	TailcallEndpointEndM_gtp6D     *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_d"`
+	TailcallEndpointEndM_gtp6D_di  *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_d_di"`
+	TailcallEndpointEndM_gtp6E     *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_e"`
+	TailcallEndpointEndT           *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_t"`
+	TailcallEndpointEndX           *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_x"`
+	TailcallHeadendL2H_encaps      *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps"`
+	TailcallHeadendL2H_encapsRed   *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps_red"`
+	TailcallHeadendV4H_encaps      *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_encaps"`
+	TailcallHeadendV4H_encapsRed   *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_encaps_red"`
+	TailcallHeadendV4H_mGtp4D      *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_m_gtp4_d"`
+	TailcallHeadendV4H_mGtp4D_teid *ebpf.ProgramSpec `ebpf:"tailcall_headend_v4_h_m_gtp4_d_teid"`
+	TailcallHeadendV6H_encaps      *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_encaps"`
+	TailcallHeadendV6H_encapsRed   *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_encaps_red"`
+	TailcallHeadendV6H_insert      *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_insert"`
+	TailcallHeadendV6H_insertRed   *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_insert_red"`
+	TailcallHeadendV6H_mGtp6D      *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_m_gtp6_d"`
+	TailcallHeadendV6H_mGtp6D_teid *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_m_gtp6_d_teid"`
+	VinberoMain                    *ebpf.ProgramSpec `ebpf:"vinbero_main"`
+	VinberoTcIngress               *ebpf.ProgramSpec `ebpf:"vinbero_tc_ingress"`
 }
 
 // BpfMapSpecs contains maps before they are loaded into the kernel.
@@ -279,6 +296,8 @@ type BpfMapSpecs struct {
 	HeadendV6Map        *ebpf.MapSpec `ebpf:"headend_v6_map"`
 	HeadendV6OwnerMap   *ebpf.MapSpec `ebpf:"headend_v6_owner_map"`
 	HeadendV6Progs      *ebpf.MapSpec `ebpf:"headend_v6_progs"`
+	MupUplinkV4Map      *ebpf.MapSpec `ebpf:"mup_uplink_v4_map"`
+	MupUplinkV6Map      *ebpf.MapSpec `ebpf:"mup_uplink_v6_map"`
 	ScratchMap          *ebpf.MapSpec `ebpf:"scratch_map"`
 	SidAuxMap           *ebpf.MapSpec `ebpf:"sid_aux_map"`
 	SidEndpointProgs    *ebpf.MapSpec `ebpf:"sid_endpoint_progs"`
@@ -337,6 +356,8 @@ type BpfMaps struct {
 	HeadendV6Map        *ebpf.Map `ebpf:"headend_v6_map"`
 	HeadendV6OwnerMap   *ebpf.Map `ebpf:"headend_v6_owner_map"`
 	HeadendV6Progs      *ebpf.Map `ebpf:"headend_v6_progs"`
+	MupUplinkV4Map      *ebpf.Map `ebpf:"mup_uplink_v4_map"`
+	MupUplinkV6Map      *ebpf.Map `ebpf:"mup_uplink_v6_map"`
 	ScratchMap          *ebpf.Map `ebpf:"scratch_map"`
 	SidAuxMap           *ebpf.Map `ebpf:"sid_aux_map"`
 	SidEndpointProgs    *ebpf.Map `ebpf:"sid_endpoint_progs"`
@@ -370,6 +391,8 @@ func (m *BpfMaps) Close() error {
 		m.HeadendV6Map,
 		m.HeadendV6OwnerMap,
 		m.HeadendV6Progs,
+		m.MupUplinkV4Map,
+		m.MupUplinkV6Map,
 		m.ScratchMap,
 		m.SidAuxMap,
 		m.SidEndpointProgs,
@@ -396,35 +419,38 @@ type BpfVariables struct {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfPrograms struct {
-	TailcallEndpointEnd           *ebpf.Program `ebpf:"tailcall_endpoint_end"`
-	TailcallEndpointEndB6         *ebpf.Program `ebpf:"tailcall_endpoint_end_b6"`
-	TailcallEndpointEndB6Encaps   *ebpf.Program `ebpf:"tailcall_endpoint_end_b6_encaps"`
-	TailcallEndpointEndDt2        *ebpf.Program `ebpf:"tailcall_endpoint_end_dt2"`
-	TailcallEndpointEndDt2m       *ebpf.Program `ebpf:"tailcall_endpoint_end_dt2m"`
-	TailcallEndpointEndDt4        *ebpf.Program `ebpf:"tailcall_endpoint_end_dt4"`
-	TailcallEndpointEndDt46       *ebpf.Program `ebpf:"tailcall_endpoint_end_dt46"`
-	TailcallEndpointEndDt6        *ebpf.Program `ebpf:"tailcall_endpoint_end_dt6"`
-	TailcallEndpointEndDx2        *ebpf.Program `ebpf:"tailcall_endpoint_end_dx2"`
-	TailcallEndpointEndDx2v       *ebpf.Program `ebpf:"tailcall_endpoint_end_dx2v"`
-	TailcallEndpointEndDx4        *ebpf.Program `ebpf:"tailcall_endpoint_end_dx4"`
-	TailcallEndpointEndDx6        *ebpf.Program `ebpf:"tailcall_endpoint_end_dx6"`
-	TailcallEndpointEndM_gtp4E    *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp4_e"`
-	TailcallEndpointEndM_gtp6D    *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_d"`
-	TailcallEndpointEndM_gtp6D_di *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_d_di"`
-	TailcallEndpointEndM_gtp6E    *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_e"`
-	TailcallEndpointEndT          *ebpf.Program `ebpf:"tailcall_endpoint_end_t"`
-	TailcallEndpointEndX          *ebpf.Program `ebpf:"tailcall_endpoint_end_x"`
-	TailcallHeadendL2H_encaps     *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps"`
-	TailcallHeadendL2H_encapsRed  *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps_red"`
-	TailcallHeadendV4H_encaps     *ebpf.Program `ebpf:"tailcall_headend_v4_h_encaps"`
-	TailcallHeadendV4H_encapsRed  *ebpf.Program `ebpf:"tailcall_headend_v4_h_encaps_red"`
-	TailcallHeadendV4H_mGtp4D     *ebpf.Program `ebpf:"tailcall_headend_v4_h_m_gtp4_d"`
-	TailcallHeadendV6H_encaps     *ebpf.Program `ebpf:"tailcall_headend_v6_h_encaps"`
-	TailcallHeadendV6H_encapsRed  *ebpf.Program `ebpf:"tailcall_headend_v6_h_encaps_red"`
-	TailcallHeadendV6H_insert     *ebpf.Program `ebpf:"tailcall_headend_v6_h_insert"`
-	TailcallHeadendV6H_insertRed  *ebpf.Program `ebpf:"tailcall_headend_v6_h_insert_red"`
-	VinberoMain                   *ebpf.Program `ebpf:"vinbero_main"`
-	VinberoTcIngress              *ebpf.Program `ebpf:"vinbero_tc_ingress"`
+	TailcallEndpointEnd            *ebpf.Program `ebpf:"tailcall_endpoint_end"`
+	TailcallEndpointEndB6          *ebpf.Program `ebpf:"tailcall_endpoint_end_b6"`
+	TailcallEndpointEndB6Encaps    *ebpf.Program `ebpf:"tailcall_endpoint_end_b6_encaps"`
+	TailcallEndpointEndDt2         *ebpf.Program `ebpf:"tailcall_endpoint_end_dt2"`
+	TailcallEndpointEndDt2m        *ebpf.Program `ebpf:"tailcall_endpoint_end_dt2m"`
+	TailcallEndpointEndDt4         *ebpf.Program `ebpf:"tailcall_endpoint_end_dt4"`
+	TailcallEndpointEndDt46        *ebpf.Program `ebpf:"tailcall_endpoint_end_dt46"`
+	TailcallEndpointEndDt6         *ebpf.Program `ebpf:"tailcall_endpoint_end_dt6"`
+	TailcallEndpointEndDx2         *ebpf.Program `ebpf:"tailcall_endpoint_end_dx2"`
+	TailcallEndpointEndDx2v        *ebpf.Program `ebpf:"tailcall_endpoint_end_dx2v"`
+	TailcallEndpointEndDx4         *ebpf.Program `ebpf:"tailcall_endpoint_end_dx4"`
+	TailcallEndpointEndDx6         *ebpf.Program `ebpf:"tailcall_endpoint_end_dx6"`
+	TailcallEndpointEndM_gtp4E     *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp4_e"`
+	TailcallEndpointEndM_gtp6D     *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_d"`
+	TailcallEndpointEndM_gtp6D_di  *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_d_di"`
+	TailcallEndpointEndM_gtp6E     *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_e"`
+	TailcallEndpointEndT           *ebpf.Program `ebpf:"tailcall_endpoint_end_t"`
+	TailcallEndpointEndX           *ebpf.Program `ebpf:"tailcall_endpoint_end_x"`
+	TailcallHeadendL2H_encaps      *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps"`
+	TailcallHeadendL2H_encapsRed   *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps_red"`
+	TailcallHeadendV4H_encaps      *ebpf.Program `ebpf:"tailcall_headend_v4_h_encaps"`
+	TailcallHeadendV4H_encapsRed   *ebpf.Program `ebpf:"tailcall_headend_v4_h_encaps_red"`
+	TailcallHeadendV4H_mGtp4D      *ebpf.Program `ebpf:"tailcall_headend_v4_h_m_gtp4_d"`
+	TailcallHeadendV4H_mGtp4D_teid *ebpf.Program `ebpf:"tailcall_headend_v4_h_m_gtp4_d_teid"`
+	TailcallHeadendV6H_encaps      *ebpf.Program `ebpf:"tailcall_headend_v6_h_encaps"`
+	TailcallHeadendV6H_encapsRed   *ebpf.Program `ebpf:"tailcall_headend_v6_h_encaps_red"`
+	TailcallHeadendV6H_insert      *ebpf.Program `ebpf:"tailcall_headend_v6_h_insert"`
+	TailcallHeadendV6H_insertRed   *ebpf.Program `ebpf:"tailcall_headend_v6_h_insert_red"`
+	TailcallHeadendV6H_mGtp6D      *ebpf.Program `ebpf:"tailcall_headend_v6_h_m_gtp6_d"`
+	TailcallHeadendV6H_mGtp6D_teid *ebpf.Program `ebpf:"tailcall_headend_v6_h_m_gtp6_d_teid"`
+	VinberoMain                    *ebpf.Program `ebpf:"vinbero_main"`
+	VinberoTcIngress               *ebpf.Program `ebpf:"vinbero_tc_ingress"`
 }
 
 func (p *BpfPrograms) Close() error {
@@ -452,10 +478,13 @@ func (p *BpfPrograms) Close() error {
 		p.TailcallHeadendV4H_encaps,
 		p.TailcallHeadendV4H_encapsRed,
 		p.TailcallHeadendV4H_mGtp4D,
+		p.TailcallHeadendV4H_mGtp4D_teid,
 		p.TailcallHeadendV6H_encaps,
 		p.TailcallHeadendV6H_encapsRed,
 		p.TailcallHeadendV6H_insert,
 		p.TailcallHeadendV6H_insertRed,
+		p.TailcallHeadendV6H_mGtp6D,
+		p.TailcallHeadendV6H_mGtp6D_teid,
 		p.VinberoMain,
 		p.VinberoTcIngress,
 	)

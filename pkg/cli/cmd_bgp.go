@@ -288,6 +288,82 @@ func bgpCommand() *cli.Command {
 					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnEsKey", "withdrawn")
 				},
 			},
+			{
+				Name:  "advertise-mup",
+				Usage: "Advertise a BGP MUP route (SAFI 85; --route-type isd|dsd|t1st|t2st)",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "route-type", Required: true, Usage: "isd | dsd | t1st | t2st"},
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
+					&cli.StringFlag{Name: "route-targets", Usage: "Export route targets (comma-separated)"},
+					&cli.StringFlag{Name: "prefix", Usage: "isd segment prefix / t1st UE prefix (CIDR)"},
+					&cli.StringFlag{Name: "address", Usage: "dsd direct-segment endpoint address"},
+					&cli.UintFlag{Name: "teid", Usage: "GTP-U TEID (t1st exact / t2st prefix value)"},
+					&cli.UintFlag{Name: "teid-len", Value: 32, Usage: "t2st significant TEID prefix bits (t1st: 32)"},
+					&cli.UintFlag{Name: "qfi", Usage: "t1st QoS Flow Identifier"},
+					&cli.UintFlag{Name: "rqi", Usage: "t1st Reflective QoS Indicator"},
+					&cli.StringFlag{Name: "endpoint", Usage: "t1st gNB N3 address / t2st GTP tunnel endpoint"},
+					&cli.StringFlag{Name: "source", Usage: "t1st optional source address"},
+					&cli.UintFlag{Name: "segment-id2", Usage: "MUP Extended Community segment id (16-bit half)"},
+					&cli.UintFlag{Name: "segment-id4", Usage: "MUP Extended Community segment id (32-bit half)"},
+					&cli.StringFlag{Name: "sid", Usage: "Segment SRv6 SID (IPv6)"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop"},
+				},
+				Action: func(c *cli.Context) error {
+					r := mupRouteFromFlags(c)
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseMup(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseMupRequest{Routes: []*v1.BgpMupRoute{r}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpMupRoute", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-mup",
+				Usage: "Withdraw a previously advertised BGP MUP route",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "route-type", Required: true, Usage: "isd | dsd | t1st | t2st"},
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+					&cli.StringFlag{Name: "prefix", Usage: "isd segment prefix / t1st UE prefix (CIDR)"},
+					&cli.StringFlag{Name: "address", Usage: "dsd direct-segment endpoint address"},
+					&cli.UintFlag{Name: "teid", Usage: "GTP-U TEID (t1st / t2st)"},
+					&cli.UintFlag{Name: "teid-len", Value: 32, Usage: "t2st TEID prefix bits"},
+					&cli.StringFlag{Name: "endpoint", Usage: "t2st GTP tunnel endpoint"},
+				},
+				Action: func(c *cli.Context) error {
+					r := mupRouteFromFlags(c)
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawMup(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawMupRequest{Routes: []*v1.BgpMupRoute{r}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpMupRoute", "withdrawn")
+				},
+			},
 		},
+	}
+}
+
+// mupRouteFromFlags assembles a BgpMupRoute from the shared MUP command flags.
+// Unset fields stay zero; the server validates per route type.
+func mupRouteFromFlags(c *cli.Context) *v1.BgpMupRoute {
+	return &v1.BgpMupRoute{
+		RouteType:    c.String("route-type"),
+		Rd:           c.String("rd"),
+		RouteTargets: csvFlag(c.String("route-targets")),
+		Prefix:       c.String("prefix"),
+		Address:      c.String("address"),
+		Teid:         uint32(c.Uint("teid")),
+		TeidLen:      uint32(c.Uint("teid-len")),
+		Qfi:          uint32(c.Uint("qfi")),
+		Rqi:          uint32(c.Uint("rqi")),
+		Endpoint:     c.String("endpoint"),
+		Source:       c.String("source"),
+		SegmentId2:   uint32(c.Uint("segment-id2")),
+		SegmentId4:   uint32(c.Uint("segment-id4")),
+		Srv6Sid:      c.String("sid"),
+		NextHop:      c.String("next-hop"),
 	}
 }

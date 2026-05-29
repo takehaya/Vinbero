@@ -27,6 +27,8 @@ service BgpRouteService {
   rpc BgpWithdrawEvpnImet(BgpWithdrawEvpnImetRequest) returns (BgpWithdrawEvpnImetResponse);
   rpc BgpAdvertiseEvpnEs(BgpAdvertiseEvpnEsRequest) returns (BgpAdvertiseEvpnEsResponse);
   rpc BgpWithdrawEvpnEs(BgpWithdrawEvpnEsRequest) returns (BgpWithdrawEvpnEsResponse);
+  rpc BgpAdvertiseMup(BgpAdvertiseMupRequest) returns (BgpAdvertiseMupResponse);
+  rpc BgpWithdrawMup(BgpWithdrawMupRequest) returns (BgpWithdrawMupResponse);
 }
 
 // BgpVpnRoute is an L3VPN route to advertise.
@@ -210,5 +212,48 @@ message BgpWithdrawEvpnEsRequest {
 }
 message BgpWithdrawEvpnEsResponse {
   repeated BgpEvpnEsKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpMupRoute is a BGP MUP route (SAFI 85, 3GPP-5G; draft-mpmz-bess-mup-safi).
+// One message carries every route type; route_type selects which fields apply.
+// Unlike EVPN (which uses a typed message + RPC per route type), MUP's four
+// types share nearly all NLRI fields, so a single envelope + route_type
+// discriminator mirrors the internal bgp.MUPRoute and avoids four near-identical
+// messages; this is a deliberate divergence from the EVPN precedent.
+// Direction: t1st is the per-UE downlink, t2st the aggregate uplink (TEID as a
+// variable-length prefix of teid_len bits); isd/dsd advertise the interwork /
+// direct segments.
+message BgpMupRoute {
+  string route_type = 1; // "isd" | "dsd" | "t1st" | "t2st"
+  string rd = 2;
+  repeated string route_targets = 3;
+  string prefix = 4; // isd segment prefix / t1st UE prefix (CIDR)
+  string address = 5; // dsd direct-segment endpoint address
+  uint32 teid = 6; // t1st exact TEID / t2st TEID-prefix value
+  uint32 teid_len = 7; // t2st significant TEID prefix bits (t1st: 32)
+  uint32 qfi = 8; // t1st QoS Flow Identifier
+  uint32 rqi = 9; // t1st Reflective QoS Indicator
+  string endpoint = 10; // t1st gNB N3 address / t2st GTP tunnel endpoint
+  string source = 11; // t1st optional source address
+  uint32 segment_id2 = 12; // BGP MUP Extended Community segment id (16-bit half)
+  uint32 segment_id4 = 13; // BGP MUP Extended Community segment id (32-bit half)
+  string srv6_sid = 14; // segment locator:function (SRv6 Services TLV)
+  string next_hop = 15;
+}
+
+message BgpAdvertiseMupRequest {
+  repeated BgpMupRoute routes = 1;
+}
+message BgpAdvertiseMupResponse {
+  repeated BgpMupRoute advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawMupRequest {
+  repeated BgpMupRoute routes = 1;
+}
+message BgpWithdrawMupResponse {
+  repeated BgpMupRoute withdrawn = 1;
   repeated OperationError errors = 2;
 }

@@ -260,6 +260,10 @@ func familyToAPI(f bgp.Family) (*gobgpapi.Family, error) {
 		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP6, Safi: gobgpapi.Family_SAFI_SR_POLICY}, nil
 	case bgp.FamilyEVPN:
 		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_L2VPN, Safi: gobgpapi.Family_SAFI_EVPN}, nil
+	case bgp.FamilyMUPIPv4:
+		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP, Safi: gobgpapi.Family_SAFI_MUP}, nil
+	case bgp.FamilyMUPIPv6:
+		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP6, Safi: gobgpapi.Family_SAFI_MUP}, nil
 	default:
 		return nil, fmt.Errorf("unknown BGP family %q", f)
 	}
