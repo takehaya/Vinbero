@@ -197,6 +197,27 @@ flowchart LR
 
 bd と RT の対応は config か RPC で事前に登録し、VRF↔RT と同じ in-memory の map で保持します。広報方向も同じ data model で、ローカルの顧客 MAC を End.DT2U SID 付きで RT2、flood 宛先を End.DT2M SID 付きで RT3 として出します。
 
+```mermaid
+flowchart LR
+    PEER["BGP peer"]
+    subgraph VB["Vinbero (control plane)"]
+        SPK["BGP speaker<br/>(default: gobgp, in-process)"]
+        APP["route handler (applier)"]
+        BIND["bd↔RT binding<br/>import RT → bd_id"]
+    end
+    FDB["fdb_map[bd, MAC]<br/>→ bd_peer(End.DT2U SID)"]
+    MC["bd_peer(End.DT2M SID)<br/>BUM flood"]
+    DP["XDP / TC data plane<br/>H.Encaps.L2 / flood"]
+
+    PEER -->|RT2 / RT3 UPDATE| SPK
+    SPK -->|受信経路| APP
+    APP <-->|RT 照合| BIND
+    APP -->|RT2: MAC を install| FDB
+    APP -->|RT3: flood 宛先を install| MC
+    FDB --> DP
+    MC --> DP
+```
+
 ### multi-homing (RT4 / DF election / split-horizon)
 
 1 つの顧客を 2 つの PE にぶら下げると (multi-homing)、BUM が両 PE から顧客へ二重に届いたり、片方が受けた BUM をもう片方経由で顧客へ送り返してループになったりします。これを防ぐのが Designated Forwarder (DF) と split-horizon です。
@@ -222,9 +243,39 @@ flowchart TB
 
 DF election が書き込むのは、operator が local 接続を宣言した (es create) ESI だけです。spoof された RT4 で phantom な ES を作らせないためです。ただし RT4 と es create の到着順は決まりません。そこで membership (RT4 で学習した PE の集合) は local 接続の有無に関わらず常に記録し (件数に上限を設けて crafted RT4 の氾濫を防ぎ)、es create を契機に election を再実行します。RT4 が es create より先に来ても membership に残るので、後から local 接続を宣言した時点で正しい DF を選べます。逆順なら RT4 受信時の election で収束します。どちらの順序でも同じ DF に落ち着きます。
 
+```mermaid
+flowchart TB
+    subgraph O1["RT4 が先 (es create より前)"]
+        direction TB
+        A1["RT4 受信"] --> A2["membership に記録<br/>未 attach なので election は保留"]
+        A2 --> A3["es create"] --> A4["ReelectDF"]
+    end
+    subgraph O2["es create が先"]
+        direction TB
+        B1["es create"] --> B2["election<br/>(member まだ無し)"]
+        B2 --> B3["RT4 受信"] --> B4["election"]
+    end
+    A4 --> R["同じ DF に収束<br/>esi_map に DF を書く"]
+    B4 --> R
+```
+
 ### data plane の分担
 
 control plane は何を install するかを決め、eBPF/XDP の data plane がそれを高速に実行します。XDP headend が unicast フレームを End.DT2U SID へ H.Encaps.L2 し、End.DT2 / End.DT2M で decap して bridge domain へ渡します。BUM は TC の clone-to-self で各 flood 先へ複製し、DF drop と split-horizon をここで効かせます。interop の検証構成は `examples/interop-clab/scenarios/evpn-2site` (RT2/RT3) と `evpn-multihoming` (RT4 DF + split-horizon) を参照してください。
+
+```mermaid
+flowchart LR
+    F["顧客フレーム (bd)"]
+    Q{"宛先 MAC を<br/>fdb_map で解決?"}
+    U["unicast<br/>End.DT2U へ H.Encaps.L2"]
+    B["BUM<br/>TC clone-to-self で<br/>全 End.DT2M peer へ複製"]
+    EU["egress: End.DT2 で decap → bd"]
+    EB["egress: End.DT2M で decap<br/>DF だけ転送 / split-horizon で抑制"]
+
+    F --> Q
+    Q -->|解決 (unicast)| U --> EU
+    Q -->|未解決 / BUM| B --> EB
+```
 
 ## 広報方向
 
