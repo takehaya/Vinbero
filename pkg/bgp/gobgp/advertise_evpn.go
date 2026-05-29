@@ -57,12 +57,16 @@ func (s *Session) WithdrawEVPNMac(_ context.Context, key bgp.EVPNMACKey) error {
 }
 
 // evpnAdvKey synthesizes the advertised-path tracking key for an RT2. The
-// shared advertised map is keyed by bgp.RouteKey, so the {RD, EthernetTag,
-// MAC} tuple is encoded into the Prefix field.
+// shared advertised map is keyed by bgp.RouteKey. The RD goes in the dedicated
+// RD field (like the VPNv4 path) rather than the Prefix, so the ':'-bearing RD
+// cannot blur the boundary with the rest of the tuple; Prefix holds only the
+// EthernetTag (digits) and the already-normalized MAC (fixed 17 chars), which
+// cannot collide across distinct tuples.
 func evpnAdvKey(rd string, etag uint32, mac string) bgp.RouteKey {
 	return bgp.RouteKey{
 		Family: bgp.FamilyEVPN,
-		Prefix: fmt.Sprintf("evpn-rt2:%s:%d:%s", rd, etag, mac),
+		RD:     rd,
+		Prefix: fmt.Sprintf("evpn-rt2:%d:%s", etag, mac),
 	}
 }
 
@@ -106,11 +110,13 @@ func (s *Session) WithdrawEVPNInclusiveMulticast(_ context.Context, key bgp.EVPN
 }
 
 // evpnImetKey synthesizes the advertised-path tracking key for an RT3
-// (Inclusive Multicast Ethernet Tag), encoding {RD, EthernetTag} into Prefix.
+// (Inclusive Multicast Ethernet Tag). RD goes in the dedicated RD field;
+// Prefix holds only the EthernetTag.
 func evpnImetKey(rd string, etag uint32) bgp.RouteKey {
 	return bgp.RouteKey{
 		Family: bgp.FamilyEVPN,
-		Prefix: fmt.Sprintf("evpn-rt3:%s:%d", rd, etag),
+		RD:     rd,
+		Prefix: fmt.Sprintf("evpn-rt3:%d", etag),
 	}
 }
 
@@ -276,12 +282,13 @@ func (s *Session) WithdrawEVPNEthernetSegment(_ context.Context, key bgp.EVPNESK
 	return nil
 }
 
-// evpnEsKey synthesizes the advertised-path tracking key for an RT4, encoding
-// {RD, ESI} into Prefix.
+// evpnEsKey synthesizes the advertised-path tracking key for an RT4. RD goes in
+// the dedicated RD field; Prefix holds only the fixed-width hex ESI.
 func evpnEsKey(rd string, esi [10]byte) bgp.RouteKey {
 	return bgp.RouteKey{
 		Family: bgp.FamilyEVPN,
-		Prefix: fmt.Sprintf("evpn-rt4:%s:%x", rd, esi),
+		RD:     rd,
+		Prefix: fmt.Sprintf("evpn-rt4:%x", esi),
 	}
 }
 

@@ -1728,7 +1728,12 @@ func (m *MapOperations) DeleteBdPeer(bdID, index uint16) error {
 		return fmt.Errorf("failed to delete bd peer entry: %w", err)
 	}
 
-	// Clean up reverse map + ESI side tables (best-effort: ignore errors).
+	// Find and delete the matching reverse entry. The reverse map is keyed by
+	// the remote PE source, not the index, so it is scanned for the one pointing
+	// at this index (a BD holds at most MAX_BUM_NEXTHOPS peers, so the scan is
+	// bounded). iter.Err() is checked so a truncated scan -- which could leave a
+	// stale reverse entry that misroutes the RX split-horizon -- surfaces instead
+	// of being silently swallowed.
 	var rKey BdPeerReverseKey
 	var rVal BdPeerReverseVal
 	iter := m.objs.BdPeerReverseMap.Iterate()
@@ -1738,6 +1743,9 @@ func (m *MapOperations) DeleteBdPeer(bdID, index uint16) error {
 			_ = m.objs.BdPeerReverseMap.Delete(&k)
 			break
 		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("scan bd peer reverse map for {bd %d, index %d}: %w", bdID, index, err)
 	}
 	_ = m.objs.BdPeerL2ExtMap.Delete(&BpfBdPeerL2ExtKey{BdId: bdID, Index: index})
 	return nil

@@ -109,10 +109,13 @@ func (m *Manager) MatchImportBD(rts []string) (uint16, bool) {
 	return 0, false
 }
 
-// Empty reports whether no bindings are registered. The applier treats
-// an empty Manager as "accept every route" so BGP receive works before
-// any VrfBgpBind call; once at least one binding exists, import_rts
-// filtering takes effect.
+// Empty reports whether no bindings are registered. This accept-all fallback
+// is for the L3VPN receive path only: the applier treats an empty Manager as
+// "accept every route" so VPNv4/VPNv6 works before any VrfBgpBind call, and
+// import_rts filtering takes effect once a binding exists. EVPN does NOT use
+// this -- MatchImportBD always requires a non-zero-BDID binding, so an EVPN
+// route is dropped until its bridge domain is explicitly bound (there is no
+// bridge domain to install into otherwise).
 func (m *Manager) Empty() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
