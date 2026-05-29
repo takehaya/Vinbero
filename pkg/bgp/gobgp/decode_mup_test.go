@@ -155,6 +155,29 @@ func TestDecodeMUP_T2ST_MalformedLength(t *testing.T) {
 	}
 }
 
+// A T2ST whose EndpointAddressLength exceeds the endpoint width + 32 implies a
+// TEID prefix longer than the 32-bit TEID. Decode must drop it so it never
+// reaches the applier's session table (where it would fail every re-reconcile
+// because the F-TEID map write rejects TEIDLen > 32).
+func TestDecodeMUP_T2ST_TEIDLenTooLong(t *testing.T) {
+	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
+	// IPv4: 32 (endpoint) + 40 = 72 > 64, so TEIDLen would be 40 (> 32).
+	v4 := gobgppkt.NewMUPType2SessionTransformedRoute(rd, 72, netip.MustParseAddr("192.0.2.100"), teidAddr(0xAB000000))
+	if got := decodeMUPRoute(mupPath(v4)); got != nil {
+		t.Errorf("decodeMUPRoute(T2ST IPv4 EAL 72) = %+v, want nil", got)
+	}
+	// IPv6: 128 + 33 = 161 > 160, so TEIDLen would be 33 (> 32).
+	v6 := gobgppkt.NewMUPType2SessionTransformedRoute(rd, 161, netip.MustParseAddr("2001:db8::1"), teidAddr(0xAB000000))
+	if got := decodeMUPRoute(mupPath(v6)); got != nil {
+		t.Errorf("decodeMUPRoute(T2ST IPv6 EAL 161) = %+v, want nil", got)
+	}
+	// The exact upper bound (endpointBits + 32) is still valid (full 32-bit TEID).
+	ok := gobgppkt.NewMUPType2SessionTransformedRoute(rd, 64, netip.MustParseAddr("192.0.2.100"), teidAddr(0xAB000000))
+	if got := decodeMUPRoute(mupPath(ok)); got == nil || got.TEIDLen != 32 {
+		t.Errorf("decodeMUPRoute(T2ST EAL 64) = %+v, want TEIDLen 32", got)
+	}
+}
+
 // A non-MUP NLRI yields nil so the caller skips it.
 func TestDecodeMUP_NotMUPNLRI(t *testing.T) {
 	nlri, err := gobgppkt.NewIPAddrPrefix(netip.MustParsePrefix("10.0.0.0/24"))

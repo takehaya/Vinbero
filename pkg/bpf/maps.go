@@ -1382,6 +1382,12 @@ func buildMupUplinkV6Key(endpoint string, teid uint32, teidPrefixBits uint8) (*M
 	if err != nil {
 		return nil, fmt.Errorf("mup uplink v6 endpoint: %w", err)
 	}
+	// ParseIPv6 maps an empty string to the unspecified address rather than an
+	// error, so reject it explicitly (matching the V4 path); an empty / "::"
+	// endpoint must not become a real F-TEID entry.
+	if ep == ([IPv6AddrLen]uint8{}) {
+		return nil, fmt.Errorf("mup uplink v6 endpoint is required")
+	}
 	key := &MupUplinkV6Key{Prefixlen: 128 + uint32(teidPrefixBits)}
 	copy(key.Endpoint[:], ep[:])
 	masked := teid & (^uint32(0) << (32 - teidPrefixBits))

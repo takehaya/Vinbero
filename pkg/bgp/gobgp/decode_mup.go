@@ -63,13 +63,16 @@ func decodeMUPRoute(p *apiutil.Path) *bgp.MUPRoute {
 		if rt.EndpointAddress.Is6() {
 			endpointBits = 128
 		}
-		// An EndpointAddressLength below the endpoint's own width is malformed per
-		// the draft's length semantics. Skip it rather than silently leaving
-		// TEIDLen=0, which would install a match-ALL-TEID wildcard for the endpoint
-		// (a remote advertiser could broaden a session's scope by understating the
-		// length). A length exactly equal to endpointBits is a legitimate
-		// "aggregate every TEID" route (TEIDLen=0).
-		if rt.EndpointAddressLength < endpointBits {
+		// EndpointAddressLength must land within [endpointBits, endpointBits+32]:
+		// the endpoint's own width plus 0..32 significant TEID bits (a TEID is
+		// 32 bits). Below the endpoint width is malformed and would silently leave
+		// TEIDLen=0, installing a match-ALL-TEID wildcard a remote advertiser could
+		// use to broaden a session's scope. Above endpointBits+32 yields TEIDLen>32,
+		// which the F-TEID map write rejects but which would otherwise linger in the
+		// applier's session table and fail every re-reconcile. Drop both at decode
+		// time. A length exactly equal to endpointBits is a legitimate "aggregate
+		// every TEID" route (TEIDLen=0).
+		if rt.EndpointAddressLength < endpointBits || rt.EndpointAddressLength > endpointBits+32 {
 			return nil
 		}
 		r.TEID = teidToUint32(rt.TEID)
