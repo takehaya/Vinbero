@@ -103,6 +103,9 @@ type BGPGlobalConfig struct {
 	// whose main-table IPv6 prefixes are auto-advertised as IPv6 unicast
 	// (underlay reachability). Empty = no underlay advertise.
 	UnderlayRedistribute []string `yaml:"underlay_redistribute,omitempty"`
+	// UnderlayMaxPrefixes caps how many underlay prefixes are advertised
+	// (0 = unlimited).
+	UnderlayMaxPrefixes uint32 `yaml:"underlay_max_prefixes,omitempty"`
 }
 
 // BGPPeerConfig describes one BGP neighbor.

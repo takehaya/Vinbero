@@ -150,15 +150,20 @@ echo "[3] Vinbero -> FRR  (SRv6 Service TLV encode)"
 
 # Vinbero auto-advertises the ce-tokyo subnet (10.1.0.0/24): the exporter mints
 # the End.DT4 SID from LOC1 and advertises the route with no vbctl call. The SID
-# is dynamic, so discover it from Vinbero rather than hard-coding it.
-VIN_SID=$(dexec "$PE_TOKYO" vbctl sid list 2>/dev/null \
-  | awk 'tolower($0) ~ /end_dt4/ {print $1; exit}')
-VIN_SID=${VIN_SID%/128}
+# is dynamic, so discover it from Vinbero inside the retry -- it may not be in
+# sid_function_map yet on the first poll, and an empty SID must NOT false-PASS
+# the comparison (an empty FRR remote SID would otherwise match an empty VIN_SID).
+VIN_SID=""
 check_frr_rib() {
-    local got
+    local got sid
+    sid=$(dexec "$PE_TOKYO" vbctl sid list 2>/dev/null \
+      | awk 'tolower($0) ~ /end_dt4/ {print $1; exit}')
+    sid=${sid%/128}
+    [ -n "$sid" ] || return 1
+    VIN_SID="$sid"
     got=$(dexec "$PE_OSAKA" vtysh -c "show bgp ipv4 vpn $TOKYO_PREFIX json" 2>/dev/null \
       | frr_route_sid 2>/dev/null)
-    [ "$got" = "$VIN_SID" ]
+    [ -n "$got" ] && [ "$got" = "$sid" ]
 }
 if retry check_frr_rib; then
     ok "FRR RIB has $TOKYO_PREFIX with SRv6 SID $VIN_SID"

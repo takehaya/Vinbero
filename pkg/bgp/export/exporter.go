@@ -55,6 +55,15 @@ type VRFResolver interface {
 	Resolve(vrfName string) (ifindex uint32, table uint32, err error)
 }
 
+// UnderlayConfig configures IPv6 unicast underlay advertisement.
+type UnderlayConfig struct {
+	// Redistribute lists the main-table route protocols ("connected"/"static")
+	// whose IPv6 prefixes are advertised as IPv6 unicast. Empty = disabled.
+	Redistribute []string
+	// MaxPrefixes caps how many underlay prefixes are advertised (0 = unlimited).
+	MaxPrefixes uint32
+}
+
 // vrfState is the per-VRF export bookkeeping: the binding, the resolved table,
 // the two Endpoint SIDs minted from the binding's locator, and the set of
 // prefixes currently advertised (so DisableVRF can withdraw them all and a
@@ -90,48 +99,67 @@ type Exporter struct {
 	// is deliberately NOT the locator base -- a locator prefix's subnet-router
 	// anycast address (e.g. fd00:100::) is treated as a local address by a
 	// receiving PE, which then fails to forward the SRv6-encapsulated traffic.
-	// The next hop must be an ordinary node address.
-	nextHop string
-	// underlayRedist lists the protocols whose main-table IPv6 prefixes are
-	// advertised as IPv6 unicast. Empty = no underlay advertise.
-	underlayRedist []string
-	logger         *zap.Logger
-	vrfs           map[string]*vrfState
-	byTable        map[uint32]*vrfState
-	underlay       *underlayState // non-nil once Start enables underlay advertise
+	// Validated once in Start.
+	nextHop     string
+	underlayCfg UnderlayConfig
+	logger      *zap.Logger
+	vrfs        map[string]*vrfState
+	byTable     map[uint32]*vrfState
+	underlay    *underlayState // non-nil once Start enables underlay advertise
 }
 
 // New wires an Exporter and its RouteWatcher. nextHop is the advertising PE's
 // reachable IPv6 address (its loopback), stamped as the BGP next hop on every
-// advertised route. underlayRedist lists the protocols whose main-table IPv6
-// prefixes are advertised as IPv6 unicast (empty = none). vrfBindings is the
-// shared binding registry the applier also reads, so the advertise and receive
-// directions agree on which VRFs exist.
-func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, resolver VRFResolver, nextHop string, underlayRedist []string, logger *zap.Logger) *Exporter {
+// advertised route. underlay configures IPv6 unicast underlay advertisement.
+// vrfBindings is the shared binding registry the applier also reads, so the
+// advertise and receive directions agree on which VRFs exist.
+func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, resolver VRFResolver, nextHop string, underlay UnderlayConfig, logger *zap.Logger) *Exporter {
 	e := &Exporter{
-		advertiser:     advertiser,
-		sidOps:         sidOps,
-		locators:       locators,
-		vrfBindings:    vrfBindings,
-		resolver:       resolver,
-		nextHop:        nextHop,
-		underlayRedist: underlayRedist,
-		logger:         logger.Named("bgp.export"),
-		vrfs:           make(map[string]*vrfState),
-		byTable:        make(map[uint32]*vrfState),
+		advertiser:  advertiser,
+		sidOps:      sidOps,
+		locators:    locators,
+		vrfBindings: vrfBindings,
+		resolver:    resolver,
+		nextHop:     nextHop,
+		underlayCfg: underlay,
+		logger:      logger.Named("bgp.export"),
+		vrfs:        make(map[string]*vrfState),
+		byTable:     make(map[uint32]*vrfState),
 	}
-	e.watcher = netlinkwatch.NewRouteWatcher(e, logger)
+	// Nest the watcher's logger under bgp.export so its lines are attributable.
+	e.watcher = netlinkwatch.NewRouteWatcher(e, e.logger)
 	return e
 }
 
-// Start enables every VRF binding that lists a redistribute set, enables the
-// IPv6 unicast underlay if configured, and begins watching the kernel routing
-// tables. EnableVRF mints each VRF's End.DT4/DT6 service SID and returns the
-// table the watcher must observe; the watcher's ListExisting replay then
-// advertises prefixes already present at boot. A binding with no redistribute
-// set is left receive-only. If any binding fails to enable, the VRFs already
-// enabled in this call are unwound so a partial startup leaves no orphaned SID.
+// validateNextHop checks the BGP next hop once at Start: it must be a non-empty
+// IPv6 (not v4-mapped) address. SRv6 VPN / unicast transport is IPv6-only; an
+// IPv4 next hop serializes into a route no PE can forward toward.
+func (e *Exporter) validateNextHop() error {
+	if e.nextHop == "" {
+		return fmt.Errorf("bgp.global.next_hop is required for auto advertise")
+	}
+	a, err := netip.ParseAddr(e.nextHop)
+	if err != nil {
+		return fmt.Errorf("bgp.global.next_hop %q is invalid: %w", e.nextHop, err)
+	}
+	if !a.Is6() || a.Is4In6() {
+		return fmt.Errorf("bgp.global.next_hop %q must be an IPv6 address", e.nextHop)
+	}
+	return nil
+}
+
+// Start validates the next hop, enables every VRF binding that lists a
+// redistribute set, enables the IPv6 unicast underlay if configured, and begins
+// watching the kernel routing tables. EnableVRF mints each VRF's End.DT4/DT6
+// service SID and returns the table the watcher must observe; the watcher's
+// ListExisting replay then advertises prefixes already present at boot. A
+// binding with no redistribute set is left receive-only. If any step fails, the
+// VRFs already enabled in this call are unwound so a partial startup leaves no
+// orphaned SID.
 func (e *Exporter) Start(ctx context.Context) error {
+	if err := e.validateNextHop(); err != nil {
+		return err
+	}
 	enabled := make([]string, 0)
 	for _, b := range e.vrfBindings.List() {
 		if len(b.Redistribute) == 0 {
@@ -142,21 +170,19 @@ func (e *Exporter) Start(ctx context.Context) error {
 			e.unwind(enabled)
 			return fmt.Errorf("auto-advertise vrf %q: %w", b.VRFName, err)
 		}
+		// Record the VRF as enabled before RegisterTable, so a RegisterTable
+		// failure unwinds THIS VRF's SIDs too, not just the earlier ones.
+		enabled = append(enabled, b.VRFName)
 		if err := e.watcher.RegisterTable(table, b.Redistribute); err != nil {
 			e.unwind(enabled)
 			return fmt.Errorf("auto-advertise vrf %q: %w", b.VRFName, err)
 		}
-		enabled = append(enabled, b.VRFName)
 	}
-	if len(e.underlayRedist) > 0 {
-		if e.nextHop == "" {
-			e.unwind(enabled)
-			return fmt.Errorf("underlay redistribute requires bgp.global.next_hop")
-		}
+	if len(e.underlayCfg.Redistribute) > 0 {
 		e.mu.Lock()
 		e.underlay = &underlayState{advertised: make(map[bgp.RouteKey]struct{})}
 		e.mu.Unlock()
-		if err := e.watcher.RegisterTable(unix.RT_TABLE_MAIN, e.underlayRedist); err != nil {
+		if err := e.watcher.RegisterTable(unix.RT_TABLE_MAIN, e.underlayCfg.Redistribute); err != nil {
 			e.unwind(enabled)
 			return fmt.Errorf("underlay redistribute: %w", err)
 		}
@@ -200,16 +226,16 @@ func (e *Exporter) EnableVRF(b vrfbgp.Binding) (uint32, error) {
 	if b.DefaultLocator == "" {
 		return 0, fmt.Errorf("vrf %q: default_locator is required for auto advertise", b.VRFName)
 	}
-	if e.nextHop == "" {
-		return 0, fmt.Errorf("vrf %q: bgp.global.next_hop is required for auto advertise", b.VRFName)
-	}
-	if _, err := netip.ParseAddr(e.nextHop); err != nil {
-		return 0, fmt.Errorf("vrf %q: bgp.global.next_hop %q is invalid: %w", b.VRFName, e.nextHop, err)
-	}
 
 	ifindex, table, err := e.resolver.Resolve(b.VRFName)
 	if err != nil {
 		return 0, fmt.Errorf("resolve vrf %q: %w", b.VRFName, err)
+	}
+	// A VRF must own a dedicated table. The reserved main/local/default tables
+	// belong to the underlay path (RT_TABLE_MAIN) and the rest of the system; a
+	// VRF resolving to one of them would mis-dispatch in OnRoute.
+	if table == unix.RT_TABLE_MAIN || table == unix.RT_TABLE_LOCAL || table == unix.RT_TABLE_DEFAULT {
+		return 0, fmt.Errorf("vrf %q: routing table %d is reserved", b.VRFName, table)
 	}
 
 	e.mu.Lock()
@@ -354,16 +380,27 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 }
 
 // applyUnderlay advertises or withdraws a main-table prefix as an IPv6 unicast
-// route. Only IPv6 prefixes are eligible (an IPv4 main-table route is not an
-// SRv6 underlay prefix). The caller holds e.mu.
+// route. Only global IPv6 prefixes are eligible: link-local, the unspecified
+// address, the default route, and IPv4 are never valid SRv6 underlay
+// advertisements. The MaxPrefixes cap bounds the blast radius of a main-table
+// route flood. The caller holds e.mu.
 func (e *Exporter) applyUnderlay(prefix netip.Prefix, added bool) {
-	if !prefix.Addr().Unmap().Is6() {
+	addr := prefix.Addr().Unmap()
+	if !addr.Is6() {
+		return
+	}
+	if addr.IsLinkLocalUnicast() || addr.IsUnspecified() || prefix.Bits() == 0 {
 		return
 	}
 	ur := bgp.UnicastRoute{Prefix: prefix.String(), NextHop: e.nextHop}
 	key := bgp.RouteKey{Family: bgp.FamilyIPv6Unicast, Prefix: ur.Prefix}
 	if added {
 		if _, dup := e.underlay.advertised[key]; dup {
+			return
+		}
+		if e.underlayCfg.MaxPrefixes > 0 && uint32(len(e.underlay.advertised)) >= e.underlayCfg.MaxPrefixes {
+			e.logger.Warn("underlay prefix limit reached; not advertising",
+				zap.String("prefix", ur.Prefix), zap.Uint32("max", e.underlayCfg.MaxPrefixes))
 			return
 		}
 		if err := e.advertiser.AdvertiseUnicast(context.Background(), ur); err != nil {

@@ -100,7 +100,7 @@ func newTestExporter(t *testing.T) (*Exporter, *fakeAdvertiser, *fakeSidOps) {
 	}
 	adv := &fakeAdvertiser{}
 	sid := &fakeSidOps{}
-	e := New(adv, sid, locs, vrfbgp.NewManager(), fakeResolver{ifindex: 10, table: testTable}, "2001:db8:ff::1", nil, zap.NewNop())
+	e := New(adv, sid, locs, vrfbgp.NewManager(), fakeResolver{ifindex: 10, table: testTable}, "2001:db8:ff::1", UnderlayConfig{}, zap.NewNop())
 	return e, adv, sid
 }
 
@@ -328,15 +328,41 @@ func TestOnRouteUnderlayAdvertisesIPv6Unicast(t *testing.T) {
 	if adv.unicast[0].Prefix != "2001:db8:ff::1/128" || adv.unicast[0].NextHop != "2001:db8:ff::1" {
 		t.Errorf("unicast route = %+v", adv.unicast[0])
 	}
-	// An IPv4 main-table route is not an SRv6 underlay prefix; skip it.
+	// IPv4, link-local, and the default route are never SRv6 underlay
+	// advertisements; they must be skipped.
 	e.OnRoute(unix.RT_TABLE_MAIN, netip.MustParsePrefix("10.9.0.0/24"), true)
+	e.OnRoute(unix.RT_TABLE_MAIN, netip.MustParsePrefix("fe80::/64"), true)
+	e.OnRoute(unix.RT_TABLE_MAIN, netip.MustParsePrefix("::/0"), true)
 	if len(adv.unicast) != 1 {
-		t.Errorf("IPv4 underlay route must be skipped, got %d", len(adv.unicast))
+		t.Errorf("IPv4 / link-local / default underlay routes must be skipped, got %d", len(adv.unicast))
 	}
 	// Withdraw on delete.
 	e.OnRoute(unix.RT_TABLE_MAIN, netip.MustParsePrefix("2001:db8:ff::1/128"), false)
 	if len(adv.withdrawn) != 1 {
 		t.Errorf("underlay delete should withdraw, got %d", len(adv.withdrawn))
+	}
+}
+
+func TestEnableVRFRejectsReservedTable(t *testing.T) {
+	// A VRF resolving to the reserved main table (254) must be rejected before
+	// any SID is minted, so it never mis-dispatches into the underlay path.
+	e := New(&fakeAdvertiser{}, &fakeSidOps{}, locator.NewManager(), vrfbgp.NewManager(),
+		fakeResolver{ifindex: 10, table: unix.RT_TABLE_MAIN}, "2001:db8:ff::1", UnderlayConfig{}, zap.NewNop())
+	if _, err := e.EnableVRF(testBinding()); err == nil {
+		t.Error("EnableVRF must reject a VRF resolving to the reserved main table")
+	}
+}
+
+func TestOnRouteUnderlayRespectsMaxPrefixes(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	e := New(adv, &fakeSidOps{}, locator.NewManager(), vrfbgp.NewManager(),
+		fakeResolver{ifindex: 10, table: testTable}, "2001:db8:ff::1",
+		UnderlayConfig{Redistribute: []string{"connected"}, MaxPrefixes: 1}, zap.NewNop())
+	e.underlay = &underlayState{advertised: make(map[bgp.RouteKey]struct{})}
+	e.OnRoute(unix.RT_TABLE_MAIN, netip.MustParsePrefix("2001:db8:1::/64"), true)
+	e.OnRoute(unix.RT_TABLE_MAIN, netip.MustParsePrefix("2001:db8:2::/64"), true)
+	if len(adv.unicast) != 1 {
+		t.Errorf("underlay max_prefixes=1 should cap at 1, got %d", len(adv.unicast))
 	}
 }
 
