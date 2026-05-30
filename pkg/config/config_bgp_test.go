@@ -100,3 +100,81 @@ func TestLoad_ExplicitZeroSurvives(t *testing.T) {
 			cfg.Setting.FdbAgingSeconds)
 	}
 }
+
+// TestLoad_BGPAutoAdvertiseFields pins that the auto-advertise config surface
+// round-trips through Load: the global next_hop / underlay fields, the per-VRF
+// rd / redistribute / max_prefixes, and the locator defaults (which live on a
+// slice-of-struct field, so the second SetDefaults pass must reach them).
+func TestLoad_BGPAutoAdvertiseFields(t *testing.T) {
+	const y = `
+bgp:
+  global:
+    local_asn: 65100
+    auto_advertise: true
+    next_hop: "2001:db8:ff::1"
+    underlay_redistribute: [connected]
+    underlay_max_prefixes: 100
+  locators:
+    - name: LOC1
+      prefix: "fd00:100::/48"
+      block_len: 32
+      node_len: 16
+      function_len: 16
+      argument_len: 64
+  vrf_bindings:
+    - vrf_name: vrf1
+      rd: "65100:200"
+      import_rts: ["65000:200"]
+      export_rts: ["65000:200"]
+      default_locator: LOC1
+      redistribute: [connected, static]
+      max_prefixes: 1000
+`
+	cfg, err := Load(y)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	g := cfg.BGP.Global
+	if !g.AutoAdvertise {
+		t.Error("AutoAdvertise = false, want true")
+	}
+	if g.NextHop != "2001:db8:ff::1" {
+		t.Errorf("NextHop = %q", g.NextHop)
+	}
+	if len(g.UnderlayRedistribute) != 1 || g.UnderlayRedistribute[0] != "connected" {
+		t.Errorf("UnderlayRedistribute = %v", g.UnderlayRedistribute)
+	}
+	if g.UnderlayMaxPrefixes != 100 {
+		t.Errorf("UnderlayMaxPrefixes = %d, want 100", g.UnderlayMaxPrefixes)
+	}
+	if len(cfg.BGP.Locators) != 1 {
+		t.Fatalf("Locators len = %d, want 1", len(cfg.BGP.Locators))
+	}
+	loc := cfg.BGP.Locators[0]
+	if loc.Name != "LOC1" || loc.Prefix != "fd00:100::/48" {
+		t.Errorf("locator = %+v", loc)
+	}
+	// Defaults reach the slice-of-struct locator via the second pass.
+	if loc.Behavior != "classic" {
+		t.Errorf("locator Behavior = %q, want classic (default)", loc.Behavior)
+	}
+	if loc.FunctionAutoStart != 16 {
+		t.Errorf("locator FunctionAutoStart = %d, want 16 (default)", loc.FunctionAutoStart)
+	}
+	if loc.FunctionAutoEnd != 65534 {
+		t.Errorf("locator FunctionAutoEnd = %d, want 65534 (default)", loc.FunctionAutoEnd)
+	}
+	if len(cfg.BGP.VrfBindings) != 1 {
+		t.Fatalf("VrfBindings len = %d, want 1", len(cfg.BGP.VrfBindings))
+	}
+	b := cfg.BGP.VrfBindings[0]
+	if b.RD != "65100:200" {
+		t.Errorf("binding RD = %q", b.RD)
+	}
+	if len(b.Redistribute) != 2 {
+		t.Errorf("binding Redistribute = %v", b.Redistribute)
+	}
+	if b.MaxPrefixes != 1000 {
+		t.Errorf("binding MaxPrefixes = %d, want 1000", b.MaxPrefixes)
+	}
+}

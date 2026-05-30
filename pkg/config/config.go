@@ -23,6 +23,29 @@ type BGPConfig struct {
 	Global      BGPGlobalConfig    `yaml:"global,omitempty"`
 	Peers       []BGPPeerConfig    `yaml:"peers,omitempty"`
 	VrfBindings []VrfBindingConfig `yaml:"vrf_bindings,omitempty"`
+	// Locators are SRv6 locator pools registered at startup, before the BGP
+	// session settles. Auto-advertise needs each VRF binding's default_locator
+	// to exist when the exporter enables it, and the receive applier needs the
+	// source_locator present to materialize headend entries -- both run before
+	// any RPC, so config is the only way to have them ready in time. Locators
+	// can still also be created over the LocatorService RPC.
+	Locators []LocatorConfig `yaml:"locators,omitempty"`
+}
+
+// LocatorConfig declares an SRv6 locator pool statically. It mirrors the
+// LocatorService RPC fields so the BGP paths that need a locator at startup
+// (auto-advertise, the receive applier's encap source) do not depend on an RPC
+// arriving first.
+type LocatorConfig struct {
+	Name              string `yaml:"name,omitempty"`
+	Prefix            string `yaml:"prefix,omitempty"`
+	BlockLen          uint8  `yaml:"block_len,omitempty"`
+	NodeLen           uint8  `yaml:"node_len,omitempty"`
+	FunctionLen       uint8  `yaml:"function_len,omitempty"`
+	ArgumentLen       uint8  `yaml:"argument_len,omitempty"`
+	Behavior          string `yaml:"behavior,omitempty" default:"classic"`
+	FunctionAutoStart uint32 `yaml:"function_auto_start,omitempty" default:"16"`
+	FunctionAutoEnd   uint32 `yaml:"function_auto_end,omitempty" default:"65534"`
 }
 
 // VrfBindingConfig is a VRF <-> route-target binding applied at startup,
@@ -31,11 +54,24 @@ type BGPConfig struct {
 // its bridge-domain binding exists and is dropped. bd_id is the bridge domain
 // for EVPN routes matching import_rts (0 for L3VPN-only bindings).
 type VrfBindingConfig struct {
-	VRFName        string   `yaml:"vrf_name,omitempty"`
-	ImportRTs      []string `yaml:"import_rts,omitempty"`
-	ExportRTs      []string `yaml:"export_rts,omitempty"`
-	DefaultLocator string   `yaml:"default_locator,omitempty"`
-	BDID           uint32   `yaml:"bd_id,omitempty"`
+	VRFName   string   `yaml:"vrf_name,omitempty"`
+	ImportRTs []string `yaml:"import_rts,omitempty"`
+	ExportRTs []string `yaml:"export_rts,omitempty"`
+	// RD is the route distinguisher used when auto-advertising this VRF's
+	// local prefixes. Required for auto advertise; receive-only bindings may
+	// leave it empty.
+	RD             string `yaml:"rd,omitempty"`
+	DefaultLocator string `yaml:"default_locator,omitempty"`
+	BDID           uint32 `yaml:"bd_id,omitempty"`
+	// Redistribute lists the route protocols whose VRF-local prefixes are
+	// auto-advertised as VPNv4/VPNv6 when bgp.global.auto_advertise is on.
+	// Recognized values are "connected" (RTPROT_KERNEL) and "static"
+	// (RTPROT_STATIC). Routes Vinbero itself installed (RTPROT_BGP) are never
+	// redistributed, so a received route is not re-advertised back out.
+	Redistribute []string `yaml:"redistribute,omitempty"`
+	// MaxPrefixes caps how many prefixes auto-advertise originates for this VRF
+	// (0 = unlimited), bounding the blast radius of a VRF-route flood.
+	MaxPrefixes uint32 `yaml:"max_prefixes,omitempty"`
 }
 
 // BGPGlobalConfig is the speaker's own BGP identity.
@@ -51,6 +87,25 @@ type BGPGlobalConfig struct {
 	// §6-5). Unused until Phase 1d; accepted now so config files are
 	// forward-compatible.
 	SourceLocator string `yaml:"source_locator,omitempty"`
+	// AutoAdvertise turns on the VRF-export driven auto advertise path
+	// (pkg/bgp/export): VRF-local prefixes matching a binding's redistribute
+	// list are advertised as VPNv4/VPNv6 without an explicit BgpRouteService
+	// call. Defaults to false so the operator-explicit path stays the only
+	// behavior unless opted in.
+	AutoAdvertise bool `yaml:"auto_advertise,omitempty" default:"false"`
+	// NextHop is the BGP next hop the auto-advertise path stamps on routes it
+	// originates: this PE's own reachable IPv6 address (its loopback). Required
+	// when auto_advertise is on. It must NOT be a locator base -- a locator
+	// prefix's subnet-router anycast address is treated as local by a receiving
+	// PE, which then fails to forward the SRv6-encapsulated traffic.
+	NextHop string `yaml:"next_hop,omitempty"`
+	// UnderlayRedistribute lists the route protocols ("connected"/"static")
+	// whose main-table IPv6 prefixes are auto-advertised as IPv6 unicast
+	// (underlay reachability). Empty = no underlay advertise.
+	UnderlayRedistribute []string `yaml:"underlay_redistribute,omitempty"`
+	// UnderlayMaxPrefixes caps how many underlay prefixes are advertised
+	// (0 = unlimited).
+	UnderlayMaxPrefixes uint32 `yaml:"underlay_max_prefixes,omitempty"`
 }
 
 // BGPPeerConfig describes one BGP neighbor.
@@ -161,6 +216,9 @@ func Load(s string) (*Config, error) {
 	// deliberately (e.g. settings.fdb_aging_seconds: 0 means "disabled").
 	for i := range cfg.BGP.Peers {
 		defaults.SetDefaults(&cfg.BGP.Peers[i])
+	}
+	for i := range cfg.BGP.Locators {
+		defaults.SetDefaults(&cfg.BGP.Locators[i])
 	}
 	cfg.Original = s
 	return &cfg, nil

@@ -139,6 +139,11 @@ type VPNRoute struct {
 	Color uint32
 }
 
+// Key returns the RouteKey that identifies this VPN route for withdrawal.
+func (r VPNRoute) Key() RouteKey {
+	return RouteKey{Family: r.Family, Prefix: r.Prefix, RD: r.RD}
+}
+
 // UnicastRoute is a plain IPv6 unicast route.
 type UnicastRoute struct {
 	Prefix  string
@@ -384,9 +389,9 @@ type MUPRoute struct {
 	TEID uint32
 	// TEIDLen is the significant TEID prefix length in bits: 32 for T1ST (exact),
 	// 0..32 for T2ST (EndpointAddressLength - 32 for IPv4). 0 means "any TEID".
-	TEIDLen uint8
-	QFI     uint8  // T1ST QoS Flow Identifier
-	RQI     uint8  // T1ST Reflective QoS Indicator
+	TEIDLen  uint8
+	QFI      uint8  // T1ST QoS Flow Identifier
+	RQI      uint8  // T1ST Reflective QoS Indicator
 	Endpoint string // T1ST gNB N3 address / T2ST GTP tunnel endpoint
 	Source   string // T1ST optional source address ("" if none)
 
