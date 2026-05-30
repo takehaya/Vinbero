@@ -30,7 +30,11 @@ type Binding struct {
 	// Redistribute lists the route protocols ("connected" / "static") whose
 	// VRF-local prefixes the auto-advertise path (pkg/bgp/export) exports.
 	// Empty means the binding is receive-only.
-	Redistribute   []string
+	Redistribute []string
+	// MaxPrefixes caps how many prefixes the auto-advertise path originates for
+	// this VRF (0 = unlimited). It bounds the blast radius of a misbehaving or
+	// hostile VRF-route writer flooding the VPN.
+	MaxPrefixes    uint32
 	DefaultLocator string
 	// BDID is the bridge domain a received EVPN route (RT2/3/4) installs
 	// into when its route targets match ImportRTs. It is 0 for L3VPN-only

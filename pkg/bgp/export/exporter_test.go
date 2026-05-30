@@ -289,6 +289,20 @@ func TestDisableVRFWithdrawsAllAndReleases(t *testing.T) {
 	}
 }
 
+func TestOnRouteRespectsMaxPrefixes(t *testing.T) {
+	e, adv, _ := newTestExporter(t)
+	b := testBinding()
+	b.MaxPrefixes = 1
+	if _, err := e.EnableVRF(b); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.0.0/24"), true)
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.1.0/24"), true)
+	if len(adv.advertised) != 1 {
+		t.Errorf("max_prefixes=1 should cap advertisements at 1, got %d", len(adv.advertised))
+	}
+}
+
 func TestCloseDisablesEveryVRF(t *testing.T) {
 	e, adv, _ := newTestExporter(t)
 	if _, err := e.EnableVRF(testBinding()); err != nil {

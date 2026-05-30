@@ -69,6 +69,9 @@ type VrfBindingConfig struct {
 	// (RTPROT_STATIC). Routes Vinbero itself installed (RTPROT_BGP) are never
 	// redistributed, so a received route is not re-advertised back out.
 	Redistribute []string `yaml:"redistribute,omitempty"`
+	// MaxPrefixes caps how many prefixes auto-advertise originates for this VRF
+	// (0 = unlimited), bounding the blast radius of a VRF-route flood.
+	MaxPrefixes uint32 `yaml:"max_prefixes,omitempty"`
 }
 
 // BGPGlobalConfig is the speaker's own BGP identity.

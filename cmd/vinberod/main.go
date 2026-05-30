@@ -305,6 +305,7 @@ func configToBinding(b config.VrfBindingConfig) vrfbgp.Binding {
 		ImportRTs:      b.ImportRTs,
 		ExportRTs:      b.ExportRTs,
 		Redistribute:   b.Redistribute,
+		MaxPrefixes:    b.MaxPrefixes,
 		DefaultLocator: b.DefaultLocator,
 		BDID:           uint16(b.BDID),
 	}

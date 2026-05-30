@@ -282,6 +282,15 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 			// AddPath and log.
 			return
 		}
+		if st.binding.MaxPrefixes > 0 && uint32(len(st.advertised)) >= st.binding.MaxPrefixes {
+			// Per-VRF prefix cap reached: do not originate more, bounding the
+			// blast radius of a flood of VRF-local routes.
+			e.logger.Warn("VRF prefix limit reached; not advertising",
+				zap.String("vrf", st.binding.VRFName),
+				zap.String("prefix", vr.Prefix),
+				zap.Uint32("max", st.binding.MaxPrefixes))
+			return
+		}
 		if err := e.advertiser.Advertise(context.Background(), vr); err != nil {
 			e.logger.Error("advertise VRF-local prefix",
 				zap.String("vrf", st.binding.VRFName), zap.String("prefix", vr.Prefix), zap.Error(err))
