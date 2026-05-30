@@ -87,7 +87,13 @@ type underlayState struct {
 // the RouteWatcher goroutine while EnableVRF / DisableVRF run on the daemon's
 // setup / teardown path, so one mutex guards all state.
 type Exporter struct {
-	mu          sync.Mutex
+	mu sync.Mutex
+	// opMu serializes the runtime mutators AddVRF / RemoveVRF so two concurrent
+	// VrfBgpBind / VrfBgpUnbind RPCs for the same VRF cannot interleave their
+	// remove-then-enable steps and desync the manager from the exporter. mu only
+	// guards the in-memory maps for the brief windows EnableVRF / OnRoute hold
+	// it; opMu spans a whole runtime mutate.
+	opMu        sync.Mutex
 	advertiser  bgp.RouteAdvertiser
 	sidOps      SidOps
 	locators    *locator.Manager
@@ -106,6 +112,11 @@ type Exporter struct {
 	vrfs        map[string]*vrfState
 	byTable     map[uint32]*vrfState
 	underlay    *underlayState // non-nil once Start enables underlay advertise
+	// dumpWG tracks in-flight asynchronous replay dumps: AddVRF kicks DumpTable
+	// on a goroutine so the RPC handler does not block on a large table walk, and
+	// Stop waits on this before withdrawing so a late dump cannot re-advertise
+	// after Close.
+	dumpWG sync.WaitGroup
 }
 
 // New wires an Exporter and its RouteWatcher. nextHop is the advertising PE's
@@ -211,6 +222,9 @@ func (e *Exporter) unwind(names []string) {
 // races the withdraw, then Close drains the advertised state.
 func (e *Exporter) Stop() {
 	e.watcher.Stop()
+	// Wait for any in-flight runtime replay dumps to finish before withdrawing,
+	// so a late DumpTable cannot re-advertise a prefix after Close drains it.
+	e.dumpWG.Wait()
 	e.Close()
 }
 
@@ -335,10 +349,14 @@ func (e *Exporter) Close() {
 // Start has begun watching. A binding with no redistribute set is a no-op.
 // next_hop is assumed already validated by Start.
 func (e *Exporter) AddVRF(b vrfbgp.Binding) error {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
 	// Replace any existing enablement so a re-bind updates cleanly instead of
 	// hitting EnableVRF's already-enabled check, which would leave the exporter
 	// advertising while the handler rolls the manager binding back (desync).
-	e.RemoveVRF(b.VRFName)
+	// Holding opMu across the remove-then-enable makes this atomic against a
+	// concurrent AddVRF / RemoveVRF for the same VRF.
+	e.removeVRFLocked(b.VRFName)
 	if len(b.Redistribute) == 0 {
 		return nil
 	}
@@ -361,11 +379,18 @@ func (e *Exporter) enableAndWatch(b vrfbgp.Binding, replay bool) error {
 		return err
 	}
 	if replay {
-		// A dump failure is non-fatal: live RTM_NEWROUTE events still flow.
-		if err := e.watcher.DumpTable(table); err != nil {
-			e.logger.Warn("dump existing routes for runtime VRF",
-				zap.String("vrf", b.VRFName), zap.Uint32("table", table), zap.Error(err))
-		}
+		// Replay the table's existing routes on a goroutine so a VrfBgpBind RPC
+		// returns without blocking on a full table walk. The live watch already
+		// covers anything that changes after RegisterTable, so the dump only
+		// backfills pre-existing routes (eventual consistency, like the boot
+		// path's ListExisting). A dump failure is non-fatal; Stop waits on
+		// dumpWG so a late dump cannot outlive Close.
+		e.dumpWG.Go(func() {
+			if err := e.watcher.DumpTable(table); err != nil {
+				e.logger.Warn("dump existing routes for runtime VRF",
+					zap.String("vrf", b.VRFName), zap.Uint32("table", table), zap.Error(err))
+			}
+		})
 	}
 	return nil
 }
@@ -374,6 +399,15 @@ func (e *Exporter) enableAndWatch(b vrfbgp.Binding, replay bool) error {
 // it withdraws the VRF's advertised prefixes, releases its Endpoint SIDs, and
 // unregisters the table from the watcher. A no-op for an unknown VRF.
 func (e *Exporter) RemoveVRF(vrfName string) {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	e.removeVRFLocked(vrfName)
+}
+
+// removeVRFLocked disables the VRF and unregisters its table. The caller holds
+// opMu: AddVRF's replace step and RemoveVRF both go through here, so a runtime
+// add and a runtime remove for the same VRF cannot race.
+func (e *Exporter) removeVRFLocked(vrfName string) {
 	if table, ok := e.DisableVRF(vrfName); ok {
 		e.watcher.UnregisterTable(table)
 	}

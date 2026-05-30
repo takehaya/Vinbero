@@ -134,3 +134,51 @@ func TestVrfBgpBind_RebindFailureRestoresPrior(t *testing.T) {
 		t.Errorf("re-bind failure must restore the prior binding (RD 65100:200); got %+v", got)
 	}
 }
+
+// The new rd / redistribute / max_prefixes fields survive a bind -> list round
+// trip through protoToBinding and back, and import/export RTs are not swapped.
+func TestVrfBgpList_RoundTripsNewFields(t *testing.T) {
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil)
+	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{
+			{
+				VrfName:        "vrf1",
+				Rd:             "65100:200",
+				ImportRts:      []string{"65000:200"},
+				ExportRts:      []string{"65000:201"},
+				Redistribute:   []string{"connected", "static"},
+				MaxPrefixes:    42,
+				DefaultLocator: "LOC1",
+				BdId:           100,
+			},
+		},
+	})); err != nil {
+		t.Fatalf("VrfBgpBind: %v", err)
+	}
+	resp, err := s.VrfBgpList(context.Background(), connect.NewRequest(&v1.VrfBgpListRequest{}))
+	if err != nil {
+		t.Fatalf("VrfBgpList: %v", err)
+	}
+	if len(resp.Msg.Bindings) != 1 {
+		t.Fatalf("want 1 binding, got %d", len(resp.Msg.Bindings))
+	}
+	b := resp.Msg.Bindings[0]
+	if b.GetRd() != "65100:200" {
+		t.Errorf("rd = %q, want 65100:200", b.GetRd())
+	}
+	if got := b.GetRedistribute(); len(got) != 2 || got[0] != "connected" || got[1] != "static" {
+		t.Errorf("redistribute = %v, want [connected static]", got)
+	}
+	if b.GetMaxPrefixes() != 42 {
+		t.Errorf("max_prefixes = %d, want 42", b.GetMaxPrefixes())
+	}
+	if b.GetBdId() != 100 {
+		t.Errorf("bd_id = %d, want 100", b.GetBdId())
+	}
+	if got := b.GetImportRts(); len(got) != 1 || got[0] != "65000:200" {
+		t.Errorf("import_rts = %v, want [65000:200] (import/export must not be swapped)", got)
+	}
+	if got := b.GetExportRts(); len(got) != 1 || got[0] != "65000:201" {
+		t.Errorf("export_rts = %v, want [65000:201] (import/export must not be swapped)", got)
+	}
+}
