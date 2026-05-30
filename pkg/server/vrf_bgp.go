@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -24,6 +25,11 @@ type VrfExporter interface {
 type VrfBgpServer struct {
 	mgr      *vrfbgp.Manager
 	exporter VrfExporter // nil when auto-advertise is off
+	// mu serializes a bind/unbind's manager + exporter mutations per call so two
+	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
+	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
+	// cannot see the manager, so the agreement must be enforced here).
+	mu sync.Mutex
 }
 
 func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter) *VrfBgpServer {
@@ -64,48 +70,55 @@ func (s *VrfBgpServer) VrfBgpBind(
 			})
 			continue
 		}
-		binding := protoToBinding(b)
-		// Capture any prior binding so a failed re-bind can restore it. Bind
-		// replaces in place and AddVRF removes the old enablement before
-		// re-enabling, so a mid-way failure would otherwise drop a previously
-		// working binding from both the manager and the exporter.
-		prev, existed := s.mgr.Get(binding.VRFName)
-		if err := s.mgr.Bind(binding); err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: b.GetVrfName(),
-				Reason:        err.Error(),
-			})
-			continue
+		if bound, opErr := s.bindOne(b); opErr != nil {
+			resp.Errors = append(resp.Errors, opErr)
+		} else {
+			resp.Bound = append(resp.Bound, bound)
 		}
-		// Enable auto advertise for the binding. On failure restore the prior
-		// state so the binding registry and the exporter stay consistent: a
-		// re-bind rolls back to the binding that was working before, a brand-new
-		// bind rolls all the way back to unbound.
-		if s.exporter != nil {
-			if err := s.exporter.AddVRF(binding); err != nil {
-				reason := fmt.Sprintf("auto advertise: %v", err)
-				if existed {
-					_ = s.mgr.Bind(prev)
-					if rerr := s.exporter.AddVRF(prev); rerr != nil {
-						// The prior binding could not be re-enabled either; drop
-						// it cleanly rather than leave the manager out of sync
-						// with the exporter.
-						_ = s.mgr.Unbind(binding.VRFName)
-						reason = fmt.Sprintf("auto advertise: %v; restoring prior binding failed: %v", err, rerr)
-					}
-				} else {
-					_ = s.mgr.Unbind(binding.VRFName)
-				}
-				resp.Errors = append(resp.Errors, &v1.OperationError{
-					TriggerPrefix: b.GetVrfName(),
-					Reason:        reason,
-				})
-				continue
-			}
-		}
-		resp.Bound = append(resp.Bound, b)
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// bindOne binds one VRF and drives the exporter, holding s.mu so the manager and
+// exporter mutations are atomic against a concurrent same-VRF bind/unbind. It
+// drives the exporter FIRST and commits the manager binding only if the exporter
+// accepts it, so the manager always reflects what the exporter is honoring. On a
+// failed re-bind it restores the prior binding in the exporter (the manager still
+// holds it); a failed brand-new bind leaves the VRF unbound. It returns either
+// the bound binding or a per-item error, never both.
+func (s *VrfBgpServer) bindOne(b *v1.VrfBgpBinding) (*v1.VrfBgpBinding, *v1.OperationError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	binding := protoToBinding(b)
+	if s.exporter != nil {
+		// AddVRF removes any prior enablement before re-enabling, so capture the
+		// prior binding to restore it if the re-bind fails.
+		prev, existed := s.mgr.Get(binding.VRFName)
+		if err := s.exporter.AddVRF(binding); err != nil {
+			reason := fmt.Sprintf("auto advertise: %v", err)
+			if existed {
+				// Restore the prior enablement AddVRF tore down. The manager
+				// still holds prev (we have not rebound it), so a successful
+				// restore needs no manager write; only if the restore also fails
+				// do we drop prev from the manager so both registries agree.
+				if rerr := s.exporter.AddVRF(prev); rerr != nil {
+					_ = s.mgr.Unbind(binding.VRFName)
+					reason = fmt.Sprintf("auto advertise: %v; restoring prior binding failed: %v", err, rerr)
+				}
+			}
+			return nil, &v1.OperationError{TriggerPrefix: b.GetVrfName(), Reason: reason}
+		}
+	}
+	// The exporter accepted the binding (or auto-advertise is off): commit it to
+	// the manager. On the rare Bind failure, undo the exporter enablement so the
+	// two registries do not diverge.
+	if err := s.mgr.Bind(binding); err != nil {
+		if s.exporter != nil {
+			s.exporter.RemoveVRF(binding.VRFName)
+		}
+		return nil, &v1.OperationError{TriggerPrefix: b.GetVrfName(), Reason: err.Error()}
+	}
+	return b, nil
 }
 
 func (s *VrfBgpServer) VrfBgpUnbind(
@@ -117,15 +130,20 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 		Errors:          make([]*v1.OperationError, 0),
 	}
 	for _, name := range req.Msg.VrfNames {
-		if err := s.mgr.Unbind(name); err != nil {
+		// Hold s.mu across the manager Unbind + exporter RemoveVRF so an unbind
+		// and a concurrent same-VRF bind cannot interleave.
+		s.mu.Lock()
+		err := s.mgr.Unbind(name)
+		if err == nil && s.exporter != nil {
+			s.exporter.RemoveVRF(name)
+		}
+		s.mu.Unlock()
+		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: name,
 				Reason:        err.Error(),
 			})
 			continue
-		}
-		if s.exporter != nil {
-			s.exporter.RemoveVRF(name)
 		}
 		resp.UnboundVrfNames = append(resp.UnboundVrfNames, name)
 	}

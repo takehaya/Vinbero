@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -38,21 +39,33 @@ type fakeVrfExporter struct {
 	added    []string
 	removed  []string
 	addErr   error
-	failOnRD string // AddVRF fails for a binding whose RD equals this (re-bind tests)
+	failOnRD string                    // AddVRF fails for a binding whose RD equals this
+	enabled  map[string]vrfbgp.Binding // current enabled state, modelling the real exporter
 }
 
+// AddVRF models the real Exporter: it removes any prior enablement before
+// (attempting and possibly) failing, so a failed AddVRF leaves the VRF disabled.
 func (f *fakeVrfExporter) AddVRF(b vrfbgp.Binding) error {
+	if f.enabled == nil {
+		f.enabled = make(map[string]vrfbgp.Binding)
+	}
 	if f.addErr != nil {
+		delete(f.enabled, b.VRFName)
 		return f.addErr
 	}
 	if f.failOnRD != "" && b.RD == f.failOnRD {
+		delete(f.enabled, b.VRFName)
 		return errors.New("boom")
 	}
+	f.enabled[b.VRFName] = b
 	f.added = append(f.added, b.VRFName)
 	return nil
 }
 
-func (f *fakeVrfExporter) RemoveVRF(name string) { f.removed = append(f.removed, name) }
+func (f *fakeVrfExporter) RemoveVRF(name string) {
+	delete(f.enabled, name)
+	f.removed = append(f.removed, name)
+}
 
 // A successful bind drives the exporter's AddVRF, and an unbind its RemoveVRF.
 func TestVrfBgpBind_DrivesExporter(t *testing.T) {
@@ -132,6 +145,44 @@ func TestVrfBgpBind_RebindFailureRestoresPrior(t *testing.T) {
 	got := mgr.List()
 	if len(got) != 1 || got[0].RD != "65100:200" {
 		t.Errorf("re-bind failure must restore the prior binding (RD 65100:200); got %+v", got)
+	}
+	// The exporter must be re-enabled with the prior binding too, not just the
+	// manager: without the restore AddVRF(prev), the failed re-bind would leave
+	// the VRF disabled in the exporter.
+	if eb, ok := exp.enabled["vrf1"]; !ok || eb.RD != "65100:200" {
+		t.Errorf("re-bind failure must re-apply the prior binding to the exporter (RD 65100:200); got enabled=%+v", exp.enabled)
+	}
+}
+
+// Two concurrent same-VRF binds — one the exporter accepts, one it rejects — must
+// leave the manager and the exporter agreeing on the VRF, never the desync where
+// the manager loses the binding while the exporter keeps advertising (or vice
+// versa). Run under -race.
+func TestVrfBgpBind_ConcurrentSameVRFStaysConsistent(t *testing.T) {
+	for i := range 300 {
+		mgr := vrfbgp.NewManager()
+		exp := &fakeVrfExporter{failOnRD: "fail"}
+		s := NewVrfBgpServer(mgr, exp)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = s.bindOne(&v1.VrfBgpBinding{VrfName: "vrf1", Rd: "ok", DefaultLocator: "LOC1", Redistribute: []string{"static"}})
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = s.bindOne(&v1.VrfBgpBinding{VrfName: "vrf1", Rd: "fail", DefaultLocator: "LOC1", Redistribute: []string{"static"}})
+		}()
+		wg.Wait()
+
+		mb, mok := mgr.Get("vrf1")
+		eb, eok := exp.enabled["vrf1"]
+		if mok != eok {
+			t.Fatalf("iter %d: manager has vrf1=%v but exporter has vrf1=%v (desync)", i, mok, eok)
+		}
+		if mok && mb.RD != eb.RD {
+			t.Fatalf("iter %d: manager RD=%q != exporter RD=%q (desync)", i, mb.RD, eb.RD)
+		}
 	}
 }
 
