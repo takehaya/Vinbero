@@ -33,6 +33,7 @@ type Server struct {
 	evpnAdv      bgp.EVPNController
 	mupAdv       bgp.MUPController
 	srPolicyCtrl srPolicyController
+	vrfExporter  VrfExporter                // runtime auto-advertise hook; nil when off
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
@@ -49,7 +50,7 @@ type Server struct {
 // enabled, or nil otherwise. Taking the concrete type (not the interface)
 // keeps a typed-nil from leaking into srPolicyCtrl, so the FailedPrecondition
 // guard in SrPolicyServer works.
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, mupAdv bgp.MUPController, srPolicyApplier *apply.Applier, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, mupAdv bgp.MUPController, srPolicyApplier *apply.Applier, vrfExporter VrfExporter, logger *zap.Logger) *Server {
 	s := &Server{
 		cfg:         cfg,
 		mapOps:      mapOps,
@@ -61,6 +62,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		srPolicyAdv: srPolicyAdv,
 		evpnAdv:     evpnAdv,
 		mupAdv:      mupAdv,
+		vrfExporter: vrfExporter,
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}
@@ -95,7 +97,7 @@ func (s *Server) Setup() {
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
 
 	// VrfBgp service (VRF <-> BGP route-target bindings).
-	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr)
+	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter)
 	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
