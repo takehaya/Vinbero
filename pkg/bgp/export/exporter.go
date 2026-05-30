@@ -7,9 +7,10 @@
 // VPN route, resolves its route targets to a VRF, and installs a headend
 // encap entry, the export path takes a VRF-local prefix, composes the VRF's
 // export route targets and its End.DT4/DT6 service SID, and advertises a VPN
-// route. The exporter owns its RouteWatcher: Start enables every VRF binding
-// that lists a redistribute set and begins watching, so the daemon wiring is a
-// single Start / Stop pair (mirroring vinbero.StartFDBWatcher).
+// route. The exporter also auto-advertises main-table IPv6 prefixes as IPv6
+// unicast (underlay reachability). It owns its RouteWatcher: Start enables
+// every VRF binding that lists a redistribute set and begins watching, so the
+// daemon wiring is a single Start / Stop pair (mirroring vinbero.StartFDBWatcher).
 package export
 
 import (
@@ -19,6 +20,7 @@ import (
 	"sync"
 
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -65,10 +67,16 @@ type vrfState struct {
 	advertised map[bgp.RouteKey]struct{}
 }
 
-// Exporter advertises VRF-local prefixes as VPNv4 / VPNv6 routes. It is safe
-// for concurrent use: OnRoute runs on the RouteWatcher goroutine while
-// EnableVRF / DisableVRF run on the daemon's setup / teardown path, so one
-// mutex guards all state.
+// underlayState tracks the IPv6 unicast underlay prefixes advertised from the
+// main routing table.
+type underlayState struct {
+	advertised map[bgp.RouteKey]struct{}
+}
+
+// Exporter advertises VRF-local prefixes as VPNv4 / VPNv6 routes and main-table
+// IPv6 prefixes as IPv6 unicast. It is safe for concurrent use: OnRoute runs on
+// the RouteWatcher goroutine while EnableVRF / DisableVRF run on the daemon's
+// setup / teardown path, so one mutex guards all state.
 type Exporter struct {
 	mu          sync.Mutex
 	advertiser  bgp.RouteAdvertiser
@@ -84,39 +92,45 @@ type Exporter struct {
 	// receiving PE, which then fails to forward the SRv6-encapsulated traffic.
 	// The next hop must be an ordinary node address.
 	nextHop string
-	logger  *zap.Logger
-	vrfs    map[string]*vrfState
-	byTable map[uint32]*vrfState
+	// underlayRedist lists the protocols whose main-table IPv6 prefixes are
+	// advertised as IPv6 unicast. Empty = no underlay advertise.
+	underlayRedist []string
+	logger         *zap.Logger
+	vrfs           map[string]*vrfState
+	byTable        map[uint32]*vrfState
+	underlay       *underlayState // non-nil once Start enables underlay advertise
 }
 
 // New wires an Exporter and its RouteWatcher. nextHop is the advertising PE's
 // reachable IPv6 address (its loopback), stamped as the BGP next hop on every
-// advertised route. vrfBindings is the shared binding registry the applier
-// also reads, so the advertise and receive directions agree on which VRFs
-// exist.
-func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, resolver VRFResolver, nextHop string, logger *zap.Logger) *Exporter {
+// advertised route. underlayRedist lists the protocols whose main-table IPv6
+// prefixes are advertised as IPv6 unicast (empty = none). vrfBindings is the
+// shared binding registry the applier also reads, so the advertise and receive
+// directions agree on which VRFs exist.
+func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, resolver VRFResolver, nextHop string, underlayRedist []string, logger *zap.Logger) *Exporter {
 	e := &Exporter{
-		advertiser:  advertiser,
-		sidOps:      sidOps,
-		locators:    locators,
-		vrfBindings: vrfBindings,
-		resolver:    resolver,
-		nextHop:     nextHop,
-		logger:      logger.Named("bgp.export"),
-		vrfs:        make(map[string]*vrfState),
-		byTable:     make(map[uint32]*vrfState),
+		advertiser:     advertiser,
+		sidOps:         sidOps,
+		locators:       locators,
+		vrfBindings:    vrfBindings,
+		resolver:       resolver,
+		nextHop:        nextHop,
+		underlayRedist: underlayRedist,
+		logger:         logger.Named("bgp.export"),
+		vrfs:           make(map[string]*vrfState),
+		byTable:        make(map[uint32]*vrfState),
 	}
 	e.watcher = netlinkwatch.NewRouteWatcher(e, logger)
 	return e
 }
 
-// Start enables every VRF binding that lists a redistribute set and begins
-// watching the kernel routing tables. EnableVRF mints each VRF's End.DT4/DT6
-// service SID and returns the table the watcher must observe; the watcher's
-// ListExisting replay then advertises prefixes already present at boot. A
-// binding with no redistribute set is left receive-only. If any binding fails
-// to enable, the VRFs already enabled in this call are unwound so a partial
-// startup leaves no orphaned SID.
+// Start enables every VRF binding that lists a redistribute set, enables the
+// IPv6 unicast underlay if configured, and begins watching the kernel routing
+// tables. EnableVRF mints each VRF's End.DT4/DT6 service SID and returns the
+// table the watcher must observe; the watcher's ListExisting replay then
+// advertises prefixes already present at boot. A binding with no redistribute
+// set is left receive-only. If any binding fails to enable, the VRFs already
+// enabled in this call are unwound so a partial startup leaves no orphaned SID.
 func (e *Exporter) Start(ctx context.Context) error {
 	enabled := make([]string, 0)
 	for _, b := range e.vrfBindings.List() {
@@ -133,6 +147,19 @@ func (e *Exporter) Start(ctx context.Context) error {
 			return fmt.Errorf("auto-advertise vrf %q: %w", b.VRFName, err)
 		}
 		enabled = append(enabled, b.VRFName)
+	}
+	if len(e.underlayRedist) > 0 {
+		if e.nextHop == "" {
+			e.unwind(enabled)
+			return fmt.Errorf("underlay redistribute requires bgp.global.next_hop")
+		}
+		e.mu.Lock()
+		e.underlay = &underlayState{advertised: make(map[bgp.RouteKey]struct{})}
+		e.mu.Unlock()
+		if err := e.watcher.RegisterTable(unix.RT_TABLE_MAIN, e.underlayRedist); err != nil {
+			e.unwind(enabled)
+			return fmt.Errorf("underlay redistribute: %w", err)
+		}
 	}
 	if err := e.watcher.Start(ctx); err != nil {
 		e.unwind(enabled)
@@ -247,8 +274,9 @@ func (e *Exporter) DisableVRF(vrfName string) {
 	e.logger.Info("VRF disabled for auto advertise", zap.String("vrf", vrfName))
 }
 
-// Close disables every enabled VRF. It is the withdraw half of Stop; the
-// route watcher must already be stopped so no advertisement races it.
+// Close disables every enabled VRF and withdraws the underlay prefixes. It is
+// the withdraw half of Stop; the route watcher must already be stopped so no
+// advertisement races it.
 func (e *Exporter) Close() {
 	e.mu.Lock()
 	names := make([]string, 0, len(e.vrfs))
@@ -259,16 +287,31 @@ func (e *Exporter) Close() {
 	for _, name := range names {
 		e.DisableVRF(name)
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.underlay != nil {
+		for key := range e.underlay.advertised {
+			if err := e.advertiser.Withdraw(context.Background(), key); err != nil {
+				e.logger.Warn("withdraw underlay on close",
+					zap.String("prefix", key.Prefix), zap.Error(err))
+			}
+		}
+		e.underlay = nil
+	}
 }
 
-// OnRoute reacts to a VRF-local prefix appearing (added=true) or being removed
+// OnRoute reacts to a prefix appearing (added=true) or being removed
 // (added=false) in a routing table. It is the RouteWatcher (RouteSink)
-// callback. A prefix in a table no VRF owns is ignored. The underlying
-// advertiser.Withdraw is a no-op for a route that was never advertised, so
-// duplicate deletes are safe.
+// callback. A main-table prefix is advertised as IPv6 unicast underlay; a
+// prefix in a VRF table is advertised as a VPN route; a prefix in any other
+// table is ignored.
 func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.underlay != nil && table == unix.RT_TABLE_MAIN {
+		e.applyUnderlay(prefix, added)
+		return
+	}
 	st, ok := e.byTable[table]
 	if !ok {
 		return
@@ -308,6 +351,36 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 		return
 	}
 	delete(st.advertised, key)
+}
+
+// applyUnderlay advertises or withdraws a main-table prefix as an IPv6 unicast
+// route. Only IPv6 prefixes are eligible (an IPv4 main-table route is not an
+// SRv6 underlay prefix). The caller holds e.mu.
+func (e *Exporter) applyUnderlay(prefix netip.Prefix, added bool) {
+	if !prefix.Addr().Unmap().Is6() {
+		return
+	}
+	ur := bgp.UnicastRoute{Prefix: prefix.String(), NextHop: e.nextHop}
+	key := bgp.RouteKey{Family: bgp.FamilyIPv6Unicast, Prefix: ur.Prefix}
+	if added {
+		if _, dup := e.underlay.advertised[key]; dup {
+			return
+		}
+		if err := e.advertiser.AdvertiseUnicast(context.Background(), ur); err != nil {
+			e.logger.Error("advertise underlay prefix",
+				zap.String("prefix", ur.Prefix), zap.Error(err))
+			return
+		}
+		e.underlay.advertised[key] = struct{}{}
+		e.logger.Info("auto-advertised underlay prefix", zap.String("prefix", ur.Prefix))
+		return
+	}
+	if err := e.advertiser.Withdraw(context.Background(), key); err != nil {
+		e.logger.Error("withdraw underlay prefix",
+			zap.String("prefix", ur.Prefix), zap.Error(err))
+		return
+	}
+	delete(e.underlay.advertised, key)
 }
 
 // buildVPNRoute composes the VPNv4 / VPNv6 advertisement for a VRF-local

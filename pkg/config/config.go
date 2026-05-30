@@ -99,6 +99,10 @@ type BGPGlobalConfig struct {
 	// prefix's subnet-router anycast address is treated as local by a receiving
 	// PE, which then fails to forward the SRv6-encapsulated traffic.
 	NextHop string `yaml:"next_hop,omitempty"`
+	// UnderlayRedistribute lists the route protocols ("connected"/"static")
+	// whose main-table IPv6 prefixes are auto-advertised as IPv6 unicast
+	// (underlay reachability). Empty = no underlay advertise.
+	UnderlayRedistribute []string `yaml:"underlay_redistribute,omitempty"`
 }
 
 // BGPPeerConfig describes one BGP neighbor.

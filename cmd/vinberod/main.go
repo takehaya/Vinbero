@@ -192,6 +192,7 @@ func run(cliCtx *cli.Context) error {
 				vrfBgpMgr,
 				export.NetlinkVRFResolver{},
 				cfg.BGP.Global.NextHop,
+				cfg.BGP.Global.UnderlayRedistribute,
 				lg,
 			)
 		}
