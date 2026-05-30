@@ -94,12 +94,17 @@ type underlayState struct {
 // setup / teardown path, so one mutex guards all state.
 type Exporter struct {
 	mu sync.Mutex
-	// opMu serializes the runtime mutators AddVRF / RemoveVRF so two concurrent
-	// VrfBgpBind / VrfBgpUnbind RPCs for the same VRF cannot interleave their
-	// remove-then-enable steps and desync the manager from the exporter. mu only
-	// guards the in-memory maps for the brief windows EnableVRF / OnRoute hold
-	// it; opMu spans a whole runtime mutate.
-	opMu        sync.Mutex
+	// opMu serializes the exporter's own runtime mutators AddVRF / RemoveVRF so
+	// their remove-then-enable steps cannot interleave for the same VRF, and it
+	// guards stopped. It does NOT span vrfbgp.Manager: the manager/exporter
+	// agreement under concurrent binds is the handler's responsibility
+	// (server.VrfBgpServer serializes that). mu guards the in-memory maps for the
+	// brief windows EnableVRF / OnRoute hold it; opMu spans a whole runtime mutate.
+	opMu sync.Mutex
+	// stopped is set under opMu when Stop begins, so AddVRF stops launching replay
+	// dumps. Without it a VrfBgpBind racing shutdown could dumpWG.Go (Add from a
+	// zero counter) after Stop's dumpWG.Wait -- a sync.WaitGroup misuse.
+	stopped     bool
 	advertiser  bgp.RouteAdvertiser
 	sidOps      SidOps
 	locators    *locator.Manager
@@ -227,6 +232,13 @@ func (e *Exporter) unwind(names []string) {
 // meant for graceful shutdown: the watcher stops first so no new advertisement
 // races the withdraw, then Close drains the advertised state.
 func (e *Exporter) Stop() {
+	// Flip stopped under opMu first so no AddVRF can launch a new replay dump
+	// after this point: every dumpWG.Go runs while opMu is held, and AddVRF
+	// rechecks stopped under the same opMu, so dumpWG.Wait below cannot race a
+	// dumpWG.Go.
+	e.opMu.Lock()
+	e.stopped = true
+	e.opMu.Unlock()
 	e.watcher.Stop()
 	// Wait for any in-flight runtime replay dumps to finish before withdrawing,
 	// so a late DumpTable cannot re-advertise a prefix after Close drains it.
@@ -357,6 +369,10 @@ func (e *Exporter) Close() {
 func (e *Exporter) AddVRF(b vrfbgp.Binding) error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
+	if e.stopped {
+		// Stop has begun; refuse new enablement so no dumpWG.Go races dumpWG.Wait.
+		return fmt.Errorf("exporter is shutting down")
+	}
 	// Replace any existing enablement so a re-bind updates cleanly instead of
 	// hitting EnableVRF's already-enabled check, which would leave the exporter
 	// advertising while the handler rolls the manager binding back (desync).
