@@ -74,12 +74,18 @@ type vrfState struct {
 	v4SID      netip.Addr
 	v6SID      netip.Addr
 	advertised map[bgp.RouteKey]struct{}
+	// atLimit is set once the VRF crosses into the MaxPrefixes-capped state, so
+	// the cap-reached warning logs once per crossing instead of once per dropped
+	// prefix. A withdraw that frees headroom clears it.
+	atLimit bool
 }
 
 // underlayState tracks the IPv6 unicast underlay prefixes advertised from the
 // main routing table.
 type underlayState struct {
 	advertised map[bgp.RouteKey]struct{}
+	// atLimit mirrors vrfState.atLimit for the underlay MaxPrefixes cap.
+	atLimit bool
 }
 
 // Exporter advertises VRF-local prefixes as VPNv4 / VPNv6 routes and main-table
@@ -385,6 +391,14 @@ func (e *Exporter) enableAndWatch(b vrfbgp.Binding, replay bool) error {
 		// backfills pre-existing routes (eventual consistency, like the boot
 		// path's ListExisting). A dump failure is non-fatal; Stop waits on
 		// dumpWG so a late dump cannot outlive Close.
+		//
+		// A narrow window remains: a route present in the RouteListFiltered
+		// snapshot but deleted before the dump delivers it can be re-advertised
+		// stale if its live RTM_DELROUTE was processed before the replay add. The
+		// common case is covered -- the live delete withdraws it and OnRoute's
+		// dedup stops a concurrent live add and the replay add from
+		// double-advertising -- so this is left as a benign Low; closing it fully
+		// would need per-route generation tracking, not worth the complexity.
 		e.dumpWG.Go(func() {
 			if err := e.watcher.DumpTable(table); err != nil {
 				e.logger.Warn("dump existing routes for runtime VRF",
@@ -440,11 +454,17 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 		}
 		if st.binding.MaxPrefixes > 0 && uint32(len(st.advertised)) >= st.binding.MaxPrefixes {
 			// Per-VRF prefix cap reached: do not originate more, bounding the
-			// blast radius of a flood of VRF-local routes.
-			e.logger.Warn("VRF prefix limit reached; not advertising",
-				zap.String("vrf", st.binding.VRFName),
-				zap.String("prefix", vr.Prefix),
-				zap.Uint32("max", st.binding.MaxPrefixes))
+			// blast radius of a flood of VRF-local routes. max_prefixes is a
+			// nondeterministic admission cap, not a deterministic selection: which
+			// prefixes land under the cap follows dump/event order. Log once per
+			// crossing into the capped state so a flood does not also flood the
+			// log; atLimit clears when a withdraw frees headroom.
+			if !st.atLimit {
+				e.logger.Warn("VRF prefix limit reached; capping auto-advertise",
+					zap.String("vrf", st.binding.VRFName),
+					zap.Uint32("max", st.binding.MaxPrefixes))
+				st.atLimit = true
+			}
 			return
 		}
 		if err := e.advertiser.Advertise(context.Background(), vr); err != nil {
@@ -470,6 +490,8 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 		return
 	}
 	delete(st.advertised, key)
+	// Headroom freed: allow the cap-reached warning to fire again if it refills.
+	st.atLimit = false
 }
 
 // applyUnderlay advertises or withdraws a main-table prefix as an IPv6 unicast
@@ -492,8 +514,13 @@ func (e *Exporter) applyUnderlay(prefix netip.Prefix, added bool) {
 			return
 		}
 		if e.underlayCfg.MaxPrefixes > 0 && uint32(len(e.underlay.advertised)) >= e.underlayCfg.MaxPrefixes {
-			e.logger.Warn("underlay prefix limit reached; not advertising",
-				zap.String("prefix", ur.Prefix), zap.Uint32("max", e.underlayCfg.MaxPrefixes))
+			// Same nondeterministic admission cap as the VRF path; log once per
+			// crossing so an underlay route flood does not flood the log.
+			if !e.underlay.atLimit {
+				e.logger.Warn("underlay prefix limit reached; capping auto-advertise",
+					zap.String("prefix", ur.Prefix), zap.Uint32("max", e.underlayCfg.MaxPrefixes))
+				e.underlay.atLimit = true
+			}
 			return
 		}
 		if err := e.advertiser.AdvertiseUnicast(context.Background(), ur); err != nil {
@@ -516,6 +543,8 @@ func (e *Exporter) applyUnderlay(prefix netip.Prefix, added bool) {
 		return
 	}
 	delete(e.underlay.advertised, key)
+	// Headroom freed: allow the cap-reached warning to fire again if it refills.
+	e.underlay.atLimit = false
 }
 
 // buildVPNRoute composes the VPNv4 / VPNv6 advertisement for a VRF-local
