@@ -1,0 +1,90 @@
+internal:
+  # eth1 faces the core (SRv6 underlay): the XDP data plane here runs the
+  # End.DT4 *decap* of return traffic coming back from pe-osaka.
+  # eth2 faces ce-tokyo: the XDP data plane there runs the H.Encaps of
+  # plaintext customer traffic towards FRR's service SID.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+
+# In-process BGP speaker with VRF-export driven auto-advertise.
+#
+# Unlike l3vpn-2site, this scenario advertises the customer prefix WITHOUT a
+# `vbctl bgp advertise-vpn` call: the locator, the VRF binding, and the
+# auto_advertise toggle are all declared here, so the exporter mints the
+# End.DT4/DT6 service SID and advertises 10.1.0.0/24 on its own once it sees
+# the route in the vrf-cust table. The locator is declared in config (not over
+# RPC) because the exporter resolves default_locator at startup, before any
+# RPC arrives.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    listen_port: 179
+    # Source locator for the receive applier's encap source AND the
+    # auto-advertise next hop (the locator block is reachable through the core,
+    # FRR has a static route to fd00:100::/48).
+    source_locator: "LOC1"
+    # Turn on the VRF-export auto-advertise path.
+    auto_advertise: true
+    # BGP next hop for auto-advertised routes: our loopback (a normal node
+    # address), NOT the locator base -- FRR treats a locator's subnet-router
+    # anycast address as local and would not forward toward it.
+    next_hop: "2001:db8:ff::1"
+  locators:
+    - name: LOC1
+      prefix: fd00:100::/48
+      block_len: 32
+      node_len: 16
+      function_len: 16
+      argument_len: 64
+      behavior: classic
+  vrf_bindings:
+    # vrf-cust's static routes (10.1.0.0/24, proto static) are auto-advertised
+    # as VPNv4 with RT 65000:200 (FRR's vrf-cust import RT) and an End.DT4 SID
+    # minted from LOC1.
+    - vrf_name: vrf-cust
+      rd: "65100:200"
+      # import_rts is required now that a binding exists: with any binding
+      # registered the applier stops accepting every route and filters by
+      # import RT. FRR exports 10.2.0.0/24 with RT 65000:200 (rt vpn both).
+      import_rts: ["65000:200"]
+      export_rts: ["65000:200"]
+      default_locator: LOC1
+      redistribute: [static]
+  peers:
+    - neighbor: "2001:db8:ff::2"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - vpnv4
+        - vpnv6

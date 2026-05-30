@@ -77,30 +77,31 @@ type Exporter struct {
 	vrfBindings *vrfbgp.Manager
 	resolver    VRFResolver
 	watcher     *netlinkwatch.RouteWatcher
-	srcLocator  string
-	logger      *zap.Logger
-	vrfs        map[string]*vrfState
-	byTable     map[uint32]*vrfState
-	// srcAddr is the SRv6 next hop (the advertising PE's reachable address),
-	// resolved once from srcLocator on the first EnableVRF and reused for every
-	// advertisement so the hot OnRoute path does no locator lookup.
-	srcAddr     netip.Addr
-	srcResolved bool
+	// nextHop is the BGP next hop stamped on every advertised route: the
+	// advertising PE's own reachable IPv6 address (typically its loopback). It
+	// is deliberately NOT the locator base -- a locator prefix's subnet-router
+	// anycast address (e.g. fd00:100::) is treated as a local address by a
+	// receiving PE, which then fails to forward the SRv6-encapsulated traffic.
+	// The next hop must be an ordinary node address.
+	nextHop string
+	logger  *zap.Logger
+	vrfs    map[string]*vrfState
+	byTable map[uint32]*vrfState
 }
 
-// New wires an Exporter and its RouteWatcher. srcLocator names the locator
-// whose prefix supplies the SRv6 next hop, matching the receive path's encap
-// source (apply.encapSource). vrfBindings is the shared binding registry the
-// applier also reads, so the advertise and receive directions agree on which
-// VRFs exist.
-func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, resolver VRFResolver, srcLocator string, logger *zap.Logger) *Exporter {
+// New wires an Exporter and its RouteWatcher. nextHop is the advertising PE's
+// reachable IPv6 address (its loopback), stamped as the BGP next hop on every
+// advertised route. vrfBindings is the shared binding registry the applier
+// also reads, so the advertise and receive directions agree on which VRFs
+// exist.
+func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manager, vrfBindings *vrfbgp.Manager, resolver VRFResolver, nextHop string, logger *zap.Logger) *Exporter {
 	e := &Exporter{
 		advertiser:  advertiser,
 		sidOps:      sidOps,
 		locators:    locators,
 		vrfBindings: vrfBindings,
 		resolver:    resolver,
-		srcLocator:  srcLocator,
+		nextHop:     nextHop,
 		logger:      logger.Named("bgp.export"),
 		vrfs:        make(map[string]*vrfState),
 		byTable:     make(map[uint32]*vrfState),
@@ -113,7 +114,9 @@ func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manage
 // watching the kernel routing tables. EnableVRF mints each VRF's End.DT4/DT6
 // service SID and returns the table the watcher must observe; the watcher's
 // ListExisting replay then advertises prefixes already present at boot. A
-// binding with no redistribute set is left receive-only.
+// binding with no redistribute set is left receive-only. If any binding fails
+// to enable, the VRFs already enabled in this call are unwound so a partial
+// startup leaves no orphaned SID.
 func (e *Exporter) Start(ctx context.Context) error {
 	enabled := make([]string, 0)
 	for _, b := range e.vrfBindings.List() {
@@ -170,6 +173,12 @@ func (e *Exporter) EnableVRF(b vrfbgp.Binding) (uint32, error) {
 	if b.DefaultLocator == "" {
 		return 0, fmt.Errorf("vrf %q: default_locator is required for auto advertise", b.VRFName)
 	}
+	if e.nextHop == "" {
+		return 0, fmt.Errorf("vrf %q: bgp.global.next_hop is required for auto advertise", b.VRFName)
+	}
+	if _, err := netip.ParseAddr(e.nextHop); err != nil {
+		return 0, fmt.Errorf("vrf %q: bgp.global.next_hop %q is invalid: %w", b.VRFName, e.nextHop, err)
+	}
 
 	ifindex, table, err := e.resolver.Resolve(b.VRFName)
 	if err != nil {
@@ -178,9 +187,6 @@ func (e *Exporter) EnableVRF(b vrfbgp.Binding) (uint32, error) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err := e.ensureEncapSource(); err != nil {
-		return 0, fmt.Errorf("vrf %q: %w", b.VRFName, err)
-	}
 	if _, ok := e.vrfs[b.VRFName]; ok {
 		return 0, fmt.Errorf("vrf %q: already enabled", b.VRFName)
 	}
@@ -297,9 +303,9 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 
 // buildVPNRoute composes the VPNv4 / VPNv6 advertisement for a VRF-local
 // prefix: the family and Endpoint SID follow the prefix's address family, the
-// route targets and RD come from the binding, and the next hop is the cached
-// encap source. The caller holds e.mu (srcAddr is resolved before any VRF is
-// enabled). It performs no I/O so it is the natural unit-test seam.
+// route targets and RD come from the binding, and the next hop is the
+// configured PE address. The caller holds e.mu. It performs no I/O so it is the
+// natural unit-test seam.
 func (e *Exporter) buildVPNRoute(st *vrfState, prefix netip.Prefix) bgp.VPNRoute {
 	addr := prefix.Addr().Unmap()
 	family := bgp.FamilyVPNv6
@@ -316,27 +322,8 @@ func (e *Exporter) buildVPNRoute(st *vrfState, prefix netip.Prefix) bgp.VPNRoute
 		RD:      st.binding.RD,
 		RTs:     st.binding.ExportRTs,
 		SRv6SID: sid.String(),
-		NextHop: e.srcAddr.String(),
+		NextHop: e.nextHop,
 	}
-}
-
-// ensureEncapSource resolves the SRv6 next hop from the source locator once and
-// caches it. It mirrors apply.encapSource so the advertise and receive
-// directions agree on the PE's address. The caller holds e.mu.
-func (e *Exporter) ensureEncapSource() error {
-	if e.srcResolved {
-		return nil
-	}
-	if e.srcLocator == "" {
-		return fmt.Errorf("bgp.global.source_locator is not configured")
-	}
-	loc, ok := e.locators.Get(e.srcLocator)
-	if !ok {
-		return fmt.Errorf("source locator %q is not registered", e.srcLocator)
-	}
-	e.srcAddr = loc.Prefix.Masked().Addr()
-	e.srcResolved = true
-	return nil
 }
 
 // installEndpointSID mints a function from locatorName, builds the SID, and

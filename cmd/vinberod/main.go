@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -145,6 +146,18 @@ func run(cliCtx *cli.Context) error {
 		// binding to be installed; applying bindings here (rather than via
 		// VrfBgpBind after boot) means a route that arrives early is not
 		// dropped for lack of one. Only relevant when BGP is enabled.
+		// Register config-declared locators before VRF bindings: the
+		// auto-advertise exporter resolves each binding's default_locator at
+		// EnableVRF time, and EnableVRF runs at startup before any RPC arrives.
+		for _, lc := range cfg.BGP.Locators {
+			loc, err := configToLocator(lc)
+			if err != nil {
+				return fmt.Errorf("bgp.locators %q: %w", lc.Name, err)
+			}
+			if err := locatorMgr.Add(loc); err != nil {
+				return fmt.Errorf("bgp.locators %q: %w", lc.Name, err)
+			}
+		}
 		for _, b := range cfg.BGP.VrfBindings {
 			if b.BDID > math.MaxUint16 {
 				return fmt.Errorf("bgp.vrf_bindings %q: bd_id %d out of range (max %d)", b.VRFName, b.BDID, math.MaxUint16)
@@ -178,7 +191,7 @@ func run(cliCtx *cli.Context) error {
 				locatorMgr,
 				vrfBgpMgr,
 				export.NetlinkVRFResolver{},
-				cfg.BGP.Global.SourceLocator,
+				cfg.BGP.Global.NextHop,
 				lg,
 			)
 		}
@@ -295,6 +308,34 @@ func configToBinding(b config.VrfBindingConfig) vrfbgp.Binding {
 		DefaultLocator: b.DefaultLocator,
 		BDID:           uint16(b.BDID),
 	}
+}
+
+// configToLocator converts a config locator declaration into a locator.Locator.
+func configToLocator(lc config.LocatorConfig) (*locator.Locator, error) {
+	prefix, err := netip.ParsePrefix(lc.Prefix)
+	if err != nil {
+		return nil, fmt.Errorf("invalid prefix %q: %w", lc.Prefix, err)
+	}
+	var behavior locator.Behavior
+	switch lc.Behavior {
+	case "", "classic":
+		behavior = locator.BehaviorClassic
+	case "usid":
+		behavior = locator.BehaviorUSID
+	default:
+		return nil, fmt.Errorf("unknown behavior %q (want classic|usid)", lc.Behavior)
+	}
+	return &locator.Locator{
+		Name:              lc.Name,
+		Prefix:            prefix,
+		BlockLen:          lc.BlockLen,
+		NodeLen:           lc.NodeLen,
+		FunctionLen:       lc.FunctionLen,
+		ArgumentLen:       lc.ArgumentLen,
+		Behavior:          behavior,
+		FunctionAutoStart: lc.FunctionAutoStart,
+		FunctionAutoEnd:   lc.FunctionAutoEnd,
+	}, nil
 }
 
 func loadConfig(path string) (*config.Config, error) {

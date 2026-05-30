@@ -97,7 +97,7 @@ func newTestExporter(t *testing.T) (*Exporter, *fakeAdvertiser, *fakeSidOps) {
 	}
 	adv := &fakeAdvertiser{}
 	sid := &fakeSidOps{}
-	e := New(adv, sid, locs, vrfbgp.NewManager(), fakeResolver{ifindex: 10, table: testTable}, "LOC1", zap.NewNop())
+	e := New(adv, sid, locs, vrfbgp.NewManager(), fakeResolver{ifindex: 10, table: testTable}, "2001:db8:ff::1", zap.NewNop())
 	return e, adv, sid
 }
 
@@ -208,8 +208,8 @@ func TestOnRouteAdvertisesV4(t *testing.T) {
 	if len(r.RTs) != 1 || r.RTs[0] != "65000:100" {
 		t.Errorf("rts = %v", r.RTs)
 	}
-	if r.NextHop != "fd00:1:1::" {
-		t.Errorf("nexthop = %q, want fd00:1:1::", r.NextHop)
+	if r.NextHop != "2001:db8:ff::1" {
+		t.Errorf("nexthop = %q, want 2001:db8:ff::1", r.NextHop)
 	}
 	wantSID, ok := sidForAction(sid.created, endpointActionDT4)
 	if !ok || r.SRv6SID+"/128" != wantSID {
