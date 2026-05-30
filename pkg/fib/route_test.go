@@ -11,6 +11,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestIPNetToPrefix(t *testing.T) {
+	// A 4-in-6 net.IP must render as a plain IPv4 prefix.
+	v4 := &net.IPNet{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(24, 32)}
+	if p, ok := IPNetToPrefix(v4); !ok || p.String() != "10.0.0.0/24" || !p.Addr().Is4() {
+		t.Errorf("IPNetToPrefix(10.0.0.0/24) = %q ok=%v is4=%v", p, ok, p.Addr().Is4())
+	}
+	_, v6, _ := net.ParseCIDR("2001:db8::/64")
+	if p, ok := IPNetToPrefix(v6); !ok || p.String() != "2001:db8::/64" {
+		t.Errorf("IPNetToPrefix(2001:db8::/64) = %q ok=%v", p, ok)
+	}
+}
+
 // withTestNetns moves the calling goroutine's OS thread into a fresh
 // network namespace with one up dummy interface, so route mutations
 // never touch the host's real routing table. Requires CAP_NET_ADMIN

@@ -31,11 +31,21 @@ type BGPConfig struct {
 // its bridge-domain binding exists and is dropped. bd_id is the bridge domain
 // for EVPN routes matching import_rts (0 for L3VPN-only bindings).
 type VrfBindingConfig struct {
-	VRFName        string   `yaml:"vrf_name,omitempty"`
-	ImportRTs      []string `yaml:"import_rts,omitempty"`
-	ExportRTs      []string `yaml:"export_rts,omitempty"`
-	DefaultLocator string   `yaml:"default_locator,omitempty"`
-	BDID           uint32   `yaml:"bd_id,omitempty"`
+	VRFName   string   `yaml:"vrf_name,omitempty"`
+	ImportRTs []string `yaml:"import_rts,omitempty"`
+	ExportRTs []string `yaml:"export_rts,omitempty"`
+	// RD is the route distinguisher used when auto-advertising this VRF's
+	// local prefixes. Required for auto advertise; receive-only bindings may
+	// leave it empty.
+	RD             string `yaml:"rd,omitempty"`
+	DefaultLocator string `yaml:"default_locator,omitempty"`
+	BDID           uint32 `yaml:"bd_id,omitempty"`
+	// Redistribute lists the route protocols whose VRF-local prefixes are
+	// auto-advertised as VPNv4/VPNv6 when bgp.global.auto_advertise is on.
+	// Recognized values are "connected" (RTPROT_KERNEL) and "static"
+	// (RTPROT_STATIC). Routes Vinbero itself installed (RTPROT_BGP) are never
+	// redistributed, so a received route is not re-advertised back out.
+	Redistribute []string `yaml:"redistribute,omitempty"`
 }
 
 // BGPGlobalConfig is the speaker's own BGP identity.
@@ -51,6 +61,12 @@ type BGPGlobalConfig struct {
 	// §6-5). Unused until Phase 1d; accepted now so config files are
 	// forward-compatible.
 	SourceLocator string `yaml:"source_locator,omitempty"`
+	// AutoAdvertise turns on the VRF-export driven auto advertise path
+	// (pkg/bgp/export): VRF-local prefixes matching a binding's redistribute
+	// list are advertised as VPNv4/VPNv6 without an explicit BgpRouteService
+	// call. Defaults to false so the operator-explicit path stays the only
+	// behavior unless opted in.
+	AutoAdvertise bool `yaml:"auto_advertise,omitempty" default:"false"`
 }
 
 // BGPPeerConfig describes one BGP neighbor.

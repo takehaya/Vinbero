@@ -14,6 +14,7 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bgp/apply"
+	"github.com/takehaya/vinbero/pkg/bgp/export"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/fib"
@@ -135,6 +136,9 @@ func run(cliCtx *cli.Context) error {
 	// must share one table or collide on policy_id. nil when BGP is disabled
 	// -> SrPolicyService RPCs return FailedPrecondition.
 	var applier *apply.Applier
+	// exporter / routeWatcher drive the auto-advertise path (VRF export).
+	// They stay nil unless BGP is enabled with bgp.global.auto_advertise.
+	var exporter *export.Exporter
 	if cliCtx.Bool("bgp-enabled") {
 		// Load config-time VRF <-> route-target bindings before the BGP
 		// session starts receiving. EVPN routes require a bridge-domain
@@ -145,13 +149,7 @@ func run(cliCtx *cli.Context) error {
 			if b.BDID > math.MaxUint16 {
 				return fmt.Errorf("bgp.vrf_bindings %q: bd_id %d out of range (max %d)", b.VRFName, b.BDID, math.MaxUint16)
 			}
-			if err := vrfBgpMgr.Bind(vrfbgp.Binding{
-				VRFName:        b.VRFName,
-				ImportRTs:      b.ImportRTs,
-				ExportRTs:      b.ExportRTs,
-				DefaultLocator: b.DefaultLocator,
-				BDID:           uint16(b.BDID),
-			}); err != nil {
+			if err := vrfBgpMgr.Bind(configToBinding(b)); err != nil {
 				return fmt.Errorf("bgp.vrf_bindings %q: %w", b.VRFName, err)
 			}
 		}
@@ -170,6 +168,20 @@ func run(cliCtx *cli.Context) error {
 			cfg.BGP.Global.LocalASN,
 			lg,
 		)
+		// Auto-advertise (VRF export) is opt-in via bgp.global.auto_advertise.
+		// The exporter shares the locator manager, VRF bindings, and BGP
+		// advertiser with the rest of the daemon and owns its route watcher.
+		if cfg.BGP.Global.AutoAdvertise {
+			exporter = export.New(
+				advertiser,
+				vin.GetMapOperations(),
+				locatorMgr,
+				vrfBgpMgr,
+				export.NetlinkVRFResolver{},
+				cfg.BGP.Global.SourceLocator,
+				lg,
+			)
+		}
 	}
 
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, lg)
@@ -212,6 +224,18 @@ func run(cliCtx *cli.Context) error {
 			return fmt.Errorf("subscribe BGP routes: %w", err)
 		}
 		defer cancelSub()
+
+		// Auto-advertise: the exporter enables each VRF binding with a
+		// redistribute set and starts watching. Starting after Subscribe means
+		// its ListExisting replay advertises boot-time prefixes through an
+		// already-running advertiser; the deferred Stop withdraws them before
+		// the session drops.
+		if exporter != nil {
+			if err := exporter.Start(ctx); err != nil {
+				return fmt.Errorf("start auto-advertise: %w", err)
+			}
+			defer exporter.Stop()
+		}
 	}
 
 	lg.Info("Vinbero started successfully")
@@ -257,6 +281,20 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 		}
 	}
 	return nil
+}
+
+// configToBinding converts a config VRF binding into the runtime vrfbgp
+// Binding. The caller is responsible for validating b.BDID's range first.
+func configToBinding(b config.VrfBindingConfig) vrfbgp.Binding {
+	return vrfbgp.Binding{
+		VRFName:        b.VRFName,
+		RD:             b.RD,
+		ImportRTs:      b.ImportRTs,
+		ExportRTs:      b.ExportRTs,
+		Redistribute:   b.Redistribute,
+		DefaultLocator: b.DefaultLocator,
+		BDID:           uint16(b.BDID),
+	}
 }
 
 func loadConfig(path string) (*config.Config, error) {

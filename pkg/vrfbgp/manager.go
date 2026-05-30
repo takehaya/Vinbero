@@ -19,9 +19,18 @@ var ErrBindingNotFound = errors.New("vrfbgp: binding not found")
 
 // Binding is one VRF's BGP route-target policy.
 type Binding struct {
-	VRFName        string
-	ImportRTs      []string
-	ExportRTs      []string
+	VRFName string
+	// RD is the route distinguisher this VRF advertises its local prefixes
+	// under (RFC 4364). It is empty for receive-only bindings; the auto
+	// advertise path (pkg/bgp/export) requires it to be non-empty before it
+	// will export a prefix, so a binding without an RD simply never exports.
+	RD        string
+	ImportRTs []string
+	ExportRTs []string
+	// Redistribute lists the route protocols ("connected" / "static") whose
+	// VRF-local prefixes the auto-advertise path (pkg/bgp/export) exports.
+	// Empty means the binding is receive-only.
+	Redistribute   []string
 	DefaultLocator string
 	// BDID is the bridge domain a received EVPN route (RT2/3/4) installs
 	// into when its route targets match ImportRTs. It is 0 for L3VPN-only

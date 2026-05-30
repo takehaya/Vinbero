@@ -123,7 +123,7 @@ func fromNetlinkRoute(nl *netlink.Route) (Route, bool) {
 	if nl.Dst == nil {
 		return Route{}, false
 	}
-	prefix, ok := ipNetToPrefix(nl.Dst)
+	prefix, ok := IPNetToPrefix(nl.Dst)
 	if !ok {
 		return Route{}, false
 	}
@@ -147,7 +147,10 @@ func prefixToIPNet(p netip.Prefix) (*net.IPNet, error) {
 	}, nil
 }
 
-func ipNetToPrefix(n *net.IPNet) (netip.Prefix, bool) {
+// IPNetToPrefix converts a kernel route destination (*net.IPNet) to a
+// netip.Prefix, normalizing a 4-in-6 address to a plain IPv4 prefix. ok is
+// false when the address cannot be represented as a netip.Addr.
+func IPNetToPrefix(n *net.IPNet) (netip.Prefix, bool) {
 	addr, ok := netip.AddrFromSlice(n.IP)
 	if !ok {
 		return netip.Prefix{}, false
