@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -84,6 +86,11 @@ const testTable = 100
 
 func newTestExporter(t *testing.T) (*Exporter, *fakeAdvertiser, *fakeSidOps) {
 	t.Helper()
+	return newTestExporterLogger(t, zap.NewNop())
+}
+
+func newTestExporterLogger(t *testing.T, logger *zap.Logger) (*Exporter, *fakeAdvertiser, *fakeSidOps) {
+	t.Helper()
 	locs := locator.NewManager()
 	if err := locs.Add(&locator.Locator{
 		Name:              "LOC1",
@@ -100,7 +107,7 @@ func newTestExporter(t *testing.T) (*Exporter, *fakeAdvertiser, *fakeSidOps) {
 	}
 	adv := &fakeAdvertiser{}
 	sid := &fakeSidOps{}
-	e := New(adv, sid, locs, vrfbgp.NewManager(), fakeResolver{ifindex: 10, table: testTable}, "2001:db8:ff::1", UnderlayConfig{}, zap.NewNop())
+	e := New(adv, sid, locs, vrfbgp.NewManager(), fakeResolver{ifindex: 10, table: testTable}, "2001:db8:ff::1", UnderlayConfig{}, logger)
 	return e, adv, sid
 }
 
@@ -306,6 +313,33 @@ func TestOnRouteRespectsMaxPrefixes(t *testing.T) {
 	}
 }
 
+// A flood of over-cap prefixes logs the cap-reached warning once, not once per
+// dropped prefix, and a withdraw that frees headroom re-arms the warning.
+func TestOnRouteMaxPrefixesLogsOncePerCrossing(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	e, _, _ := newTestExporterLogger(t, zap.New(core))
+	b := testBinding()
+	b.MaxPrefixes = 1
+	if _, err := e.EnableVRF(b); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	const msg = "VRF prefix limit reached; capping auto-advertise"
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.0.0/24"), true) // advertised (1/1)
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.1.0/24"), true) // capped, logs once
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.2.0/24"), true) // still capped, no new log
+	if n := logs.FilterMessage(msg).Len(); n != 1 {
+		t.Fatalf("a flood of over-cap prefixes must log once, got %d", n)
+	}
+	// Withdraw the advertised prefix to free headroom, then overflow again: the
+	// warning re-arms, so a second crossing logs once more.
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.0.0/24"), false)
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.3.0/24"), true) // fills the freed slot
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.4.0/24"), true) // capped again, logs once more
+	if n := logs.FilterMessage(msg).Len(); n != 2 {
+		t.Errorf("a fresh crossing after freeing headroom must log again, got %d total", n)
+	}
+}
+
 func TestCloseDisablesEveryVRF(t *testing.T) {
 	e, adv, _ := newTestExporter(t)
 	if _, err := e.EnableVRF(testBinding()); err != nil {
@@ -419,5 +453,77 @@ func TestOnRouteAddIsIdempotent(t *testing.T) {
 	e.OnRoute(testTable, p, true) // duplicate NEWROUTE / ListExisting refresh
 	if len(adv.advertised) != 1 {
 		t.Errorf("a duplicate add should advertise once, got %d", len(adv.advertised))
+	}
+}
+
+// A runtime AddVRF for a binding with no redistribute set enables nothing: it is
+// receive-only, so no Endpoint SID is minted and no table is watched.
+func TestAddVRFEmptyRedistributeIsNoop(t *testing.T) {
+	e, _, sid := newTestExporter(t)
+	if err := e.AddVRF(testBinding()); err != nil { // testBinding has no Redistribute
+		t.Fatalf("AddVRF with empty redistribute: %v", err)
+	}
+	if len(e.vrfs) != 0 {
+		t.Errorf("a binding with no redistribute set must enable nothing; vrfs=%v", e.vrfs)
+	}
+	if len(sid.created) != 0 {
+		t.Errorf("a no-op AddVRF must mint no Endpoint SID, got %d", len(sid.created))
+	}
+}
+
+// When RegisterTable rejects the redistribute set, enableAndWatch self-disables
+// the VRF so AddVRF leaves no SID installed -- the invariant Start's unwind now
+// relies on. An unknown protocol keyword makes RegisterTable fail without
+// touching netlink, so this stays a pure unit test.
+func TestAddVRFRollsBackOnRegisterTableFailure(t *testing.T) {
+	e, _, sid := newTestExporter(t)
+	b := testBinding()
+	b.Redistribute = []string{"bogus"}
+	if err := e.AddVRF(b); err == nil {
+		t.Fatal("AddVRF should fail when RegisterTable rejects the redistribute set")
+	}
+	if len(e.vrfs) != 0 {
+		t.Errorf("a RegisterTable failure must self-disable the VRF; vrfs=%v", e.vrfs)
+	}
+	if len(sid.created) != 2 || len(sid.deleted) != 2 {
+		t.Errorf("both Endpoint SIDs must be minted then rolled back; created=%d deleted=%d",
+			len(sid.created), len(sid.deleted))
+	}
+}
+
+// RemoveVRF of an unknown VRF is a no-op: nothing to withdraw, no SID to release.
+func TestRemoveVRFUnknownIsNoop(t *testing.T) {
+	e, adv, sid := newTestExporter(t)
+	e.RemoveVRF("nope")
+	if len(adv.withdrawn) != 0 || len(sid.deleted) != 0 {
+		t.Errorf("RemoveVRF of an unknown VRF must be a no-op; withdrawn=%d deleted=%d",
+			len(adv.withdrawn), len(sid.deleted))
+	}
+}
+
+// RemoveVRF withdraws the VRF's advertised prefixes, releases both Endpoint
+// SIDs, and unregisters its table from the watcher.
+func TestRemoveVRFWithdrawsAndUnregisters(t *testing.T) {
+	e, adv, sid := newTestExporter(t)
+	if _, err := e.EnableVRF(testBinding()); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	if err := e.watcher.RegisterTable(testTable, []string{"connected"}); err != nil {
+		t.Fatalf("RegisterTable: %v", err)
+	}
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.0.0/24"), true)
+
+	e.RemoveVRF("vrf1")
+
+	if len(adv.withdrawn) != 1 {
+		t.Errorf("RemoveVRF must withdraw the advertised prefix, got %d", len(adv.withdrawn))
+	}
+	if len(sid.deleted) != 2 {
+		t.Errorf("RemoveVRF must release both Endpoint SIDs, got %d", len(sid.deleted))
+	}
+	// The table must be unregistered: DumpTable now reports it as not registered,
+	// a pure check that returns before touching netlink.
+	if err := e.watcher.DumpTable(testTable); err == nil {
+		t.Error("RemoveVRF must unregister the table from the watcher")
 	}
 }

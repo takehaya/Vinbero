@@ -122,6 +122,16 @@ func TestHandleRouteIgnoresNilDst(t *testing.T) {
 	}
 }
 
+// DumpTable of a table that was never registered returns an error before it
+// touches netlink, so a caller (the runtime AddVRF replay) learns the table is
+// not being watched instead of silently dumping nothing.
+func TestDumpTableUnregisteredReturnsError(t *testing.T) {
+	w := NewRouteWatcher(&fakeSink{}, zap.NewNop())
+	if err := w.DumpTable(100); err == nil {
+		t.Error("DumpTable of an unregistered table should return an error")
+	}
+}
+
 func TestHandleRouteDelMapsToWithdraw(t *testing.T) {
 	sink := &fakeSink{}
 	w := NewRouteWatcher(sink, zap.NewNop())

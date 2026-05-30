@@ -27,6 +27,9 @@ message VrfBgpBinding {
   repeated string export_rts = 3; // route targets attached on advertise
   string default_locator = 4; // locator name for this VRF's local SIDs
   uint32 bd_id = 5; // bridge domain EVPN routes matching import_rts install into; 0 = L3VPN-only
+  string rd = 6; // route distinguisher for auto-advertised local prefixes, "65100:200" form
+  repeated string redistribute = 7; // "connected"/"static" protocols auto-advertised; empty = receive-only
+  uint32 max_prefixes = 8; // cap on auto-advertised prefixes for this VRF; 0 = unlimited
 }
 
 message VrfBgpBindRequest {
