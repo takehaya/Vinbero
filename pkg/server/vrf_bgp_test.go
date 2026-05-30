@@ -35,14 +35,18 @@ func TestVrfBgpBind_BdIdOutOfRange(t *testing.T) {
 }
 
 type fakeVrfExporter struct {
-	added   []string
-	removed []string
-	addErr  error
+	added    []string
+	removed  []string
+	addErr   error
+	failOnRD string // AddVRF fails for a binding whose RD equals this (re-bind tests)
 }
 
 func (f *fakeVrfExporter) AddVRF(b vrfbgp.Binding) error {
 	if f.addErr != nil {
 		return f.addErr
+	}
+	if f.failOnRD != "" && b.RD == f.failOnRD {
+		return errors.New("boom")
 	}
 	f.added = append(f.added, b.VRFName)
 	return nil
@@ -94,5 +98,39 @@ func TestVrfBgpBind_AddVRFFailureRollsBack(t *testing.T) {
 	}
 	if got := mgr.List(); len(got) != 0 {
 		t.Errorf("failed AddVRF must roll back the manager bind; got %+v", got)
+	}
+}
+
+// Re-binding an already-bound VRF with a change the exporter rejects must
+// restore the prior binding rather than dropping it from both registries.
+func TestVrfBgpBind_RebindFailureRestoresPrior(t *testing.T) {
+	mgr := vrfbgp.NewManager()
+	exp := &fakeVrfExporter{failOnRD: "65100:999"}
+	s := NewVrfBgpServer(mgr, exp)
+
+	// Initial bind succeeds.
+	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{
+			{VrfName: "vrf1", Rd: "65100:200", DefaultLocator: "LOC1", Redistribute: []string{"static"}},
+		},
+	})); err != nil {
+		t.Fatalf("initial VrfBgpBind: %v", err)
+	}
+
+	// Re-bind with a changed RD the exporter rejects.
+	resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{
+			{VrfName: "vrf1", Rd: "65100:999", DefaultLocator: "LOC1", Redistribute: []string{"static"}},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("re-bind VrfBgpBind: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 {
+		t.Errorf("re-bind failure should be a per-item error; errors=%v", resp.Msg.Errors)
+	}
+	got := mgr.List()
+	if len(got) != 1 || got[0].RD != "65100:200" {
+		t.Errorf("re-bind failure must restore the prior binding (RD 65100:200); got %+v", got)
 	}
 }

@@ -75,6 +75,14 @@ func (m *Manager) Unbind(vrfName string) error {
 	return nil
 }
 
+// Get returns the binding for vrfName and ok=false if none is registered.
+func (m *Manager) Get(vrfName string) (Binding, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	b, ok := m.bindings[vrfName]
+	return b, ok
+}
+
 // List returns a snapshot of every binding.
 func (m *Manager) List() []Binding {
 	m.mu.RLock()

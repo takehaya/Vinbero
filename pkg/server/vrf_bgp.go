@@ -65,6 +65,11 @@ func (s *VrfBgpServer) VrfBgpBind(
 			continue
 		}
 		binding := protoToBinding(b)
+		// Capture any prior binding so a failed re-bind can restore it. Bind
+		// replaces in place and AddVRF removes the old enablement before
+		// re-enabling, so a mid-way failure would otherwise drop a previously
+		// working binding from both the manager and the exporter.
+		prev, existed := s.mgr.Get(binding.VRFName)
 		if err := s.mgr.Bind(binding); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: b.GetVrfName(),
@@ -72,14 +77,28 @@ func (s *VrfBgpServer) VrfBgpBind(
 			})
 			continue
 		}
-		// Enable auto advertise for the binding. On failure roll the manager
-		// bind back so the binding registry and the exporter stay consistent.
+		// Enable auto advertise for the binding. On failure restore the prior
+		// state so the binding registry and the exporter stay consistent: a
+		// re-bind rolls back to the binding that was working before, a brand-new
+		// bind rolls all the way back to unbound.
 		if s.exporter != nil {
 			if err := s.exporter.AddVRF(binding); err != nil {
-				_ = s.mgr.Unbind(binding.VRFName)
+				reason := fmt.Sprintf("auto advertise: %v", err)
+				if existed {
+					_ = s.mgr.Bind(prev)
+					if rerr := s.exporter.AddVRF(prev); rerr != nil {
+						// The prior binding could not be re-enabled either; drop
+						// it cleanly rather than leave the manager out of sync
+						// with the exporter.
+						_ = s.mgr.Unbind(binding.VRFName)
+						reason = fmt.Sprintf("auto advertise: %v; restoring prior binding failed: %v", err, rerr)
+					}
+				} else {
+					_ = s.mgr.Unbind(binding.VRFName)
+				}
 				resp.Errors = append(resp.Errors, &v1.OperationError{
 					TriggerPrefix: b.GetVrfName(),
-					Reason:        fmt.Sprintf("auto advertise: %v", err),
+					Reason:        reason,
 				})
 				continue
 			}
