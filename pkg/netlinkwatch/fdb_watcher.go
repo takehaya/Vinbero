@@ -12,13 +12,31 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// MACSink consumes local bridge FDB MAC changes the FDBWatcher observes, for
+// EVPN RT2 auto-advertise. The kernel bridge FDB only holds locally-learned
+// MACs -- the EVPN receive path installs remote MACs into the BPF fdb_map with
+// IsRemote=1, never into the kernel FDB -- so every MAC delivered here is local
+// and advertising it as RT2 cannot loop. nil sink means no auto-advertise.
+type MACSink interface {
+	OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool)
+}
+
+// fdbMapOps is the subset of *bpf.MapOperations the FDBWatcher needs, narrowed
+// to an interface so the watcher is unit-testable without a live BPF map.
+type fdbMapOps interface {
+	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
+	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
+	AgeFdbEntries(maxAgeNs uint64) (int, error)
+}
+
 // FDBWatcher watches Linux bridge FDB updates via Netlink and syncs them to BPF fdb_map.
 // Also runs a periodic aging timer to delete stale dynamic entries.
 type FDBWatcher struct {
-	mapOps       *bpf.MapOperations
+	mapOps       fdbMapOps
 	logger       *zap.Logger
 	mu           sync.RWMutex
 	allowed      map[int]uint16 // bridge ifindex → bd_id (for O(1) filter)
+	macSink      MACSink        // nil unless EVPN auto-advertise is on
 	done         chan struct{}
 	wg           sync.WaitGroup
 	agingSeconds int // 0=disabled
@@ -62,19 +80,15 @@ func (w *FDBWatcher) Start(ctx context.Context) error {
 		return err
 	}
 
-	w.wg.Add(1)
-	go func() {
-		defer w.wg.Done()
+	w.wg.Go(func() {
 		w.processUpdates(ctx, updates)
-	}()
+	})
 
 	// Start aging timer if configured
 	if w.agingSeconds > 0 {
-		w.wg.Add(1)
-		go func() {
-			defer w.wg.Done()
+		w.wg.Go(func() {
 			w.runAging(ctx)
-		}()
+		})
 	}
 
 	return nil
@@ -83,6 +97,14 @@ func (w *FDBWatcher) Start(ctx context.Context) error {
 // SetAgingSeconds configures the FDB aging timeout.
 func (w *FDBWatcher) SetAgingSeconds(seconds int) {
 	w.agingSeconds = seconds
+}
+
+// SetMACSink installs the sink that receives local MAC add/delete events for
+// EVPN RT2 auto-advertise. Call before Start.
+func (w *FDBWatcher) SetMACSink(sink MACSink) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.macSink = sink
 }
 
 func (w *FDBWatcher) runAging(ctx context.Context) {
@@ -134,6 +156,7 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 	// Filter: only process FDB entries from registered bridges
 	w.mu.RLock()
 	bdID, ok := w.allowed[neigh.MasterIndex]
+	sink := w.macSink
 	w.mu.RUnlock()
 	if !ok {
 		return
@@ -160,6 +183,7 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 				zap.Uint16("bd_id", bdID),
 				zap.Error(err))
 		}
+		w.notifyMAC(sink, bdID, mac, true)
 
 	case unix.RTM_DELNEIGH:
 		if err := w.mapOps.DeleteFdb(bdID, net.HardwareAddr(mac)); err != nil {
@@ -168,7 +192,17 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 				zap.Uint16("bd_id", bdID),
 				zap.Error(err))
 		}
+		w.notifyMAC(sink, bdID, mac, false)
 	}
+}
+
+// notifyMAC forwards a local MAC change to the EVPN auto-advertise sink, if one
+// is set. It copies the MAC because the netlink-supplied slice may be reused.
+func (w *FDBWatcher) notifyMAC(sink MACSink, bdID uint16, mac net.HardwareAddr, added bool) {
+	if sink == nil {
+		return
+	}
+	sink.OnLocalMAC(bdID, append(net.HardwareAddr(nil), mac...), added)
 }
 
 // Stop stops the FDB watcher and waits for cleanup
