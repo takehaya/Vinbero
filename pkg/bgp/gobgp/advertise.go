@@ -25,7 +25,7 @@ func (s *Session) Advertise(_ context.Context, r bgp.VPNRoute) error {
 	if err != nil {
 		return err
 	}
-	return s.addAndTrack(srv, path, bgp.RouteKey{Family: r.Family, Prefix: r.Prefix, RD: r.RD})
+	return s.addAndTrack(srv, path, r.Key())
 }
 
 // AdvertiseUnicast injects an IPv6 unicast route.

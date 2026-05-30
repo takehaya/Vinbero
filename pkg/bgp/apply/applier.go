@@ -173,7 +173,7 @@ func (a *Applier) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
 
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 	owner := bpf.OwnerBGPVPN(a.localASN, vr.RD)
-	rk := bgp.RouteKey{Family: vr.Family, Prefix: vr.Prefix, RD: vr.RD}
+	rk := vr.Key()
 	if withdraw {
 		// Release any SR Policy reference this route held. The withdraw
 		// event carries no color/next-hop, so the reverse index is the only
