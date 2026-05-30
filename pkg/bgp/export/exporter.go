@@ -165,18 +165,13 @@ func (e *Exporter) Start(ctx context.Context) error {
 		if len(b.Redistribute) == 0 {
 			continue
 		}
-		table, err := e.EnableVRF(b)
-		if err != nil {
+		// enableAndWatch disables the VRF itself on a RegisterTable failure, so
+		// nothing for this binding leaks; unwind cleans up the earlier ones.
+		if err := e.enableAndWatch(b, false); err != nil {
 			e.unwind(enabled)
 			return fmt.Errorf("auto-advertise vrf %q: %w", b.VRFName, err)
 		}
-		// Record the VRF as enabled before RegisterTable, so a RegisterTable
-		// failure unwinds THIS VRF's SIDs too, not just the earlier ones.
 		enabled = append(enabled, b.VRFName)
-		if err := e.watcher.RegisterTable(table, b.Redistribute); err != nil {
-			e.unwind(enabled)
-			return fmt.Errorf("auto-advertise vrf %q: %w", b.VRFName, err)
-		}
 	}
 	if len(e.underlayCfg.Redistribute) > 0 {
 		e.mu.Lock()
@@ -287,13 +282,14 @@ func (e *Exporter) EnableVRF(b vrfbgp.Binding) (uint32, error) {
 }
 
 // DisableVRF withdraws every prefix advertised for vrfName and releases its
-// Endpoint SIDs back to the locator pool. It is a no-op for an unknown VRF.
-func (e *Exporter) DisableVRF(vrfName string) {
+// Endpoint SIDs back to the locator pool. It returns the routing table the VRF
+// used (so a caller can unregister it) and ok=false for an unknown VRF.
+func (e *Exporter) DisableVRF(vrfName string) (uint32, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	st, ok := e.vrfs[vrfName]
 	if !ok {
-		return
+		return 0, false
 	}
 	for key := range st.advertised {
 		if err := e.advertiser.Withdraw(context.Background(), key); err != nil {
@@ -306,6 +302,7 @@ func (e *Exporter) DisableVRF(vrfName string) {
 	delete(e.byTable, st.table)
 	delete(e.vrfs, vrfName)
 	e.logger.Info("VRF disabled for auto advertise", zap.String("vrf", vrfName))
+	return st.table, true
 }
 
 // Close disables every enabled VRF and withdraws the underlay prefixes. It is
@@ -331,6 +328,54 @@ func (e *Exporter) Close() {
 			}
 		}
 		e.underlay = nil
+	}
+}
+
+// AddVRF enables a VRF binding at runtime (e.g. from a VrfBgpBind RPC) after
+// Start has begun watching. A binding with no redistribute set is a no-op.
+// next_hop is assumed already validated by Start.
+func (e *Exporter) AddVRF(b vrfbgp.Binding) error {
+	// Replace any existing enablement so a re-bind updates cleanly instead of
+	// hitting EnableVRF's already-enabled check, which would leave the exporter
+	// advertising while the handler rolls the manager binding back (desync).
+	e.RemoveVRF(b.VRFName)
+	if len(b.Redistribute) == 0 {
+		return nil
+	}
+	return e.enableAndWatch(b, true)
+}
+
+// enableAndWatch enables one VRF binding and registers its table with the
+// watcher, disabling the VRF on a RegisterTable failure so no SID leaks. With
+// replay=true it also dumps the table's existing routes -- needed for a runtime
+// add, where the subscription's ListExisting (which only fires at Start) did not
+// cover a table registered now. The boot path (Start) passes replay=false: its
+// ListExisting already covers every table registered before Start.
+func (e *Exporter) enableAndWatch(b vrfbgp.Binding, replay bool) error {
+	table, err := e.EnableVRF(b)
+	if err != nil {
+		return err
+	}
+	if err := e.watcher.RegisterTable(table, b.Redistribute); err != nil {
+		e.DisableVRF(b.VRFName)
+		return err
+	}
+	if replay {
+		// A dump failure is non-fatal: live RTM_NEWROUTE events still flow.
+		if err := e.watcher.DumpTable(table); err != nil {
+			e.logger.Warn("dump existing routes for runtime VRF",
+				zap.String("vrf", b.VRFName), zap.Uint32("table", table), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// RemoveVRF disables a VRF binding at runtime (e.g. from a VrfBgpUnbind RPC):
+// it withdraws the VRF's advertised prefixes, releases its Endpoint SIDs, and
+// unregisters the table from the watcher. A no-op for an unknown VRF.
+func (e *Exporter) RemoveVRF(vrfName string) {
+	if table, ok := e.DisableVRF(vrfName); ok {
+		e.watcher.UnregisterTable(table)
 	}
 }
 

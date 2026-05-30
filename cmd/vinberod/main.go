@@ -201,18 +201,13 @@ func run(cliCtx *cli.Context) error {
 		}
 	}
 
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, lg)
-	if err := srv.StartAsync(); err != nil {
-		return fmt.Errorf("start server: %w", err)
+	// exporter implements server.VrfExporter; avoid leaking a typed nil into
+	// the interface so the VrfBgpServer's nil check holds when BGP is off.
+	var vrfExp server.VrfExporter
+	if exporter != nil {
+		vrfExp = exporter
 	}
-	// Defer the RPC server shutdown right after StartAsync so an early
-	// return below (e.g. BGP start failure) tears it down instead of
-	// leaking it. The normal path falls through to the same defer.
-	defer func() {
-		if err := shutdown(srv, lg); err != nil {
-			lg.Error("server shutdown error", zap.Error(err))
-		}
-	}()
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, lg)
 
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
@@ -254,6 +249,20 @@ func run(cliCtx *cli.Context) error {
 			defer exporter.Stop()
 		}
 	}
+
+	// Start the RPC server only after the exporter is watching, so a
+	// VrfBgpBind that arrives drives an already-running auto-advertise path
+	// rather than registering a table the watcher has not started yet. The
+	// deferred shutdown runs first on teardown (LIFO), stopping new RPCs before
+	// the exporter withdraws and the BGP session drops.
+	if err := srv.StartAsync(); err != nil {
+		return fmt.Errorf("start server: %w", err)
+	}
+	defer func() {
+		if err := shutdown(srv, lg); err != nil {
+			lg.Error("server shutdown error", zap.Error(err))
+		}
+	}()
 
 	lg.Info("Vinbero started successfully")
 

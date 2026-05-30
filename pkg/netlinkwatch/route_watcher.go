@@ -3,6 +3,7 @@ package netlinkwatch
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"sync"
 
@@ -148,24 +149,31 @@ func (w *RouteWatcher) handleRouteUpdate(u netlink.RouteUpdate) {
 	if !watched {
 		return
 	}
-	if _, allow := protos[int(u.Protocol)]; !allow {
+	switch u.Type {
+	case unix.RTM_NEWROUTE:
+		w.deliver(table, protos, int(u.Protocol), u.Dst, true)
+	case unix.RTM_DELROUTE:
+		w.deliver(table, protos, int(u.Protocol), u.Dst, false)
+	}
+}
+
+// deliver applies the redistribute protocol allowlist to one route and forwards
+// it to the sink. Shared by the live update path (handleRouteUpdate) and the
+// replay path (DumpTable) so the filter contract lives in one place.
+func (w *RouteWatcher) deliver(table uint32, protos map[int]struct{}, proto int, dst *net.IPNet, added bool) {
+	if _, allow := protos[proto]; !allow {
 		return
 	}
-	// A nil destination is the default route / a route with no prefix; there
-	// is nothing specific to advertise, so skip it.
-	if u.Dst == nil {
+	// A nil destination is the default route / a route with no prefix; nothing
+	// specific to advertise.
+	if dst == nil {
 		return
 	}
-	prefix, ok := fib.IPNetToPrefix(u.Dst)
+	prefix, ok := fib.IPNetToPrefix(dst)
 	if !ok {
 		return
 	}
-	switch u.Type {
-	case unix.RTM_NEWROUTE:
-		w.sink.OnRoute(table, prefix, true)
-	case unix.RTM_DELROUTE:
-		w.sink.OnRoute(table, prefix, false)
-	}
+	w.sink.OnRoute(table, prefix, added)
 }
 
 // Stop ends the watch and waits for the drain goroutine to exit.
@@ -176,4 +184,28 @@ func (w *RouteWatcher) Stop() {
 		close(w.done)
 	}
 	w.wg.Wait()
+}
+
+// DumpTable replays a registered table's existing routes through the sink as
+// adds. The initial ListExisting replay in Start only covers tables registered
+// before Start; a table registered later (e.g. a VRF bound at runtime over RPC)
+// needs this to pick up routes already present. Routes are filtered by the same
+// protocol allowlist RegisterTable recorded for the table.
+func (w *RouteWatcher) DumpTable(table uint32) error {
+	w.mu.RLock()
+	protos, watched := w.watched[table]
+	w.mu.RUnlock()
+	if !watched {
+		return fmt.Errorf("table %d is not registered", table)
+	}
+	routes, err := netlink.RouteListFiltered(unix.AF_UNSPEC,
+		&netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return fmt.Errorf("list routes in table %d: %w", table, err)
+	}
+	for i := range routes {
+		r := &routes[i]
+		w.deliver(table, protos, int(r.Protocol), r.Dst, true)
+	}
+	return nil
 }

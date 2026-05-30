@@ -10,14 +10,39 @@ import (
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
-// VrfBgpServer is the Connect RPC handler for VrfBgpService, a thin
-// adapter over vrfbgp.Manager.
-type VrfBgpServer struct {
-	mgr *vrfbgp.Manager
+// VrfExporter is the runtime auto-advertise hook a VrfBgpServer drives: a
+// successful Bind enables the VRF for auto advertise, an Unbind disables it.
+// *pkg/bgp/export.Exporter satisfies it; it is nil when auto-advertise is off.
+type VrfExporter interface {
+	AddVRF(b vrfbgp.Binding) error
+	RemoveVRF(vrfName string)
 }
 
-func NewVrfBgpServer(mgr *vrfbgp.Manager) *VrfBgpServer {
-	return &VrfBgpServer{mgr: mgr}
+// VrfBgpServer is the Connect RPC handler for VrfBgpService, a thin
+// adapter over vrfbgp.Manager. When auto-advertise is on it also drives a
+// VrfExporter so a runtime bind/unbind enables/disables auto advertise.
+type VrfBgpServer struct {
+	mgr      *vrfbgp.Manager
+	exporter VrfExporter // nil when auto-advertise is off
+}
+
+func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter) *VrfBgpServer {
+	return &VrfBgpServer{mgr: mgr, exporter: exporter}
+}
+
+// protoToBinding converts a wire VrfBgpBinding into the runtime Binding. The
+// caller is responsible for validating bd_id's range first.
+func protoToBinding(b *v1.VrfBgpBinding) vrfbgp.Binding {
+	return vrfbgp.Binding{
+		VRFName:        b.GetVrfName(),
+		RD:             b.GetRd(),
+		ImportRTs:      b.GetImportRts(),
+		ExportRTs:      b.GetExportRts(),
+		Redistribute:   b.GetRedistribute(),
+		MaxPrefixes:    b.GetMaxPrefixes(),
+		DefaultLocator: b.GetDefaultLocator(),
+		BDID:           uint16(b.GetBdId()),
+	}
 }
 
 func (s *VrfBgpServer) VrfBgpBind(
@@ -39,18 +64,25 @@ func (s *VrfBgpServer) VrfBgpBind(
 			})
 			continue
 		}
-		if err := s.mgr.Bind(vrfbgp.Binding{
-			VRFName:        b.GetVrfName(),
-			ImportRTs:      b.GetImportRts(),
-			ExportRTs:      b.GetExportRts(),
-			DefaultLocator: b.GetDefaultLocator(),
-			BDID:           uint16(b.GetBdId()),
-		}); err != nil {
+		binding := protoToBinding(b)
+		if err := s.mgr.Bind(binding); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: b.GetVrfName(),
 				Reason:        err.Error(),
 			})
 			continue
+		}
+		// Enable auto advertise for the binding. On failure roll the manager
+		// bind back so the binding registry and the exporter stay consistent.
+		if s.exporter != nil {
+			if err := s.exporter.AddVRF(binding); err != nil {
+				_ = s.mgr.Unbind(binding.VRFName)
+				resp.Errors = append(resp.Errors, &v1.OperationError{
+					TriggerPrefix: b.GetVrfName(),
+					Reason:        fmt.Sprintf("auto advertise: %v", err),
+				})
+				continue
+			}
 		}
 		resp.Bound = append(resp.Bound, b)
 	}
@@ -73,6 +105,9 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 			})
 			continue
 		}
+		if s.exporter != nil {
+			s.exporter.RemoveVRF(name)
+		}
 		resp.UnboundVrfNames = append(resp.UnboundVrfNames, name)
 	}
 	return connect.NewResponse(resp), nil
@@ -87,8 +122,11 @@ func (s *VrfBgpServer) VrfBgpList(
 	for _, b := range bindings {
 		out = append(out, &v1.VrfBgpBinding{
 			VrfName:        b.VRFName,
+			Rd:             b.RD,
 			ImportRts:      b.ImportRTs,
 			ExportRts:      b.ExportRTs,
+			Redistribute:   b.Redistribute,
+			MaxPrefixes:    b.MaxPrefixes,
 			DefaultLocator: b.DefaultLocator,
 			BdId:           uint32(b.BDID),
 		})
