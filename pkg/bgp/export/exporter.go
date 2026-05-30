@@ -201,6 +201,14 @@ func (e *Exporter) unwind(names []string) {
 	for _, name := range names {
 		e.DisableVRF(name)
 	}
+	// Roll the underlay registration back too, so a failure after the underlay
+	// was enabled leaves no RT_TABLE_MAIN watch or underlay state behind.
+	e.mu.Lock()
+	if e.underlay != nil {
+		e.watcher.UnregisterTable(unix.RT_TABLE_MAIN)
+		e.underlay = nil
+	}
+	e.mu.Unlock()
 }
 
 // Stop halts the route watcher and withdraws every advertised route. It is
@@ -371,6 +379,12 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 			zap.String("sid", vr.SRv6SID))
 		return
 	}
+	if _, ok := st.advertised[key]; !ok {
+		// We never advertised this prefix (skipped by max-prefix, or a failed
+		// initial Advertise): do not withdraw -- the same NLRI could belong to
+		// another owner in the gobgp tracking map.
+		return
+	}
 	if err := e.advertiser.Withdraw(context.Background(), key); err != nil {
 		e.logger.Error("withdraw VRF-local prefix",
 			zap.String("vrf", st.binding.VRFName), zap.String("prefix", vr.Prefix), zap.Error(err))
@@ -410,6 +424,11 @@ func (e *Exporter) applyUnderlay(prefix netip.Prefix, added bool) {
 		}
 		e.underlay.advertised[key] = struct{}{}
 		e.logger.Info("auto-advertised underlay prefix", zap.String("prefix", ur.Prefix))
+		return
+	}
+	if _, ok := e.underlay.advertised[key]; !ok {
+		// Never advertised (filtered, or a failed AdvertiseUnicast); skip the
+		// withdraw so we don't touch another owner's same-NLRI path.
 		return
 	}
 	if err := e.advertiser.Withdraw(context.Background(), key); err != nil {

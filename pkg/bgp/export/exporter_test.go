@@ -343,6 +343,19 @@ func TestOnRouteUnderlayAdvertisesIPv6Unicast(t *testing.T) {
 	}
 }
 
+func TestOnRouteWithdrawUnadvertisedIsNoop(t *testing.T) {
+	e, adv, _ := newTestExporter(t)
+	if _, err := e.EnableVRF(testBinding()); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	// Delete a prefix we never advertised (capped, or its Advertise failed):
+	// must NOT issue a Withdraw that could hit another owner's same-NLRI path.
+	e.OnRoute(testTable, netip.MustParsePrefix("10.5.0.0/24"), false)
+	if len(adv.withdrawn) != 0 {
+		t.Errorf("withdraw of an unadvertised prefix must be a no-op, got %d", len(adv.withdrawn))
+	}
+}
+
 func TestEnableVRFRejectsReservedTable(t *testing.T) {
 	// A VRF resolving to the reserved main table (254) must be rejected before
 	// any SID is minted, so it never mis-dispatches into the underlay path.
