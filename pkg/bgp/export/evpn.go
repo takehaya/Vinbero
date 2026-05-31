@@ -97,9 +97,9 @@ func checkNextHop(nextHop string) error {
 // auto-advertise: it mints an End.DT2U service SID from the binding's default
 // locator and installs it into sid_function_map keyed to the bridge, so a remote
 // PE can decap unicast toward this node. bridgeIfindex is the BD's Linux bridge
-// device, needed for the L2 aux entry. A binding without an RD, a default
-// locator, or a non-zero BDID is rejected. It is idempotent: a BD already
-// enabled is replaced.
+// device, needed for the L2 aux entry. A binding with a zero BDID, or without an
+// RD or a default locator, is rejected. It is idempotent: a BD already enabled
+// is replaced.
 func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	if err := checkNextHop(e.nextHop); err != nil {
 		return fmt.Errorf("vrf %q: %w", b.VRFName, err)
@@ -147,6 +147,20 @@ func (e *EVPNExporter) DisableBD(bdID uint16) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.disableBDLocked(bdID)
+}
+
+// SIDForBD returns the End.DT2U SID (as a "<addr>/128" sid_function_map key) the
+// exporter installed for the bridge domain, so BridgeDelete can exclude this
+// lifecycle-owned SID from its bridge-reference check. ok=false for a BD the
+// exporter has not enabled.
+func (e *EVPNExporter) SIDForBD(bdID uint16) (string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st, ok := e.bds[bdID]
+	if !ok {
+		return "", false
+	}
+	return st.sidStr + "/128", true
 }
 
 // Close disables every enabled bridge domain, withdrawing its RT2s and releasing

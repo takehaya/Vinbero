@@ -115,6 +115,24 @@ func TestEnableBDRejectsMissingFields(t *testing.T) {
 	}
 }
 
+func TestSIDForBD(t *testing.T) {
+	e, _, sid := newTestEVPNExporter(t)
+	if _, ok := e.SIDForBD(100); ok {
+		t.Error("SIDForBD must miss before the BD is enabled")
+	}
+	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+		t.Fatalf("EnableBD: %v", err)
+	}
+	got, ok := e.SIDForBD(100)
+	if !ok || got != sid.created[0].prefix {
+		t.Errorf("SIDForBD(100) = %q,%v; want the installed End.DT2U key %q", got, ok, sid.created[0].prefix)
+	}
+	e.DisableBD(100)
+	if _, ok := e.SIDForBD(100); ok {
+		t.Error("SIDForBD must miss after the BD is disabled")
+	}
+}
+
 func TestOnLocalMACAdvertisesRT2(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
 	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
