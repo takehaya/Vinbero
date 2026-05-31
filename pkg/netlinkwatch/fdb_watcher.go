@@ -184,6 +184,9 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 				zap.String("mac", mac.String()),
 				zap.Uint16("bd_id", bdID),
 				zap.Error(err))
+			// The dataplane FDB was not installed; do not advertise RT2 for a MAC
+			// the data plane cannot decap to, or remote traffic would blackhole.
+			return
 		}
 		w.notifyMAC(sink, bdID, mac, true)
 

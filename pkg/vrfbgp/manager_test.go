@@ -84,6 +84,14 @@ func TestManager_GetByBDID(t *testing.T) {
 	if _, ok := m.GetByBDID(0); ok {
 		t.Error("GetByBDID(0) must never match an L3VPN-only binding")
 	}
+	// Two bindings claiming the same bd_id is ambiguous: GetByBDID must refuse
+	// rather than return a map-order-dependent result.
+	if err := m.Bind(Binding{VRFName: "evi100-dup", RD: "65000:101", BDID: 100}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if _, ok := m.GetByBDID(100); ok {
+		t.Error("GetByBDID(100) must be ambiguous (ok=false) when two bindings share the bd_id")
+	}
 }
 
 func TestManager_MatchImport(t *testing.T) {

@@ -1,6 +1,7 @@
 package netlinkwatch
 
 import (
+	"errors"
 	"net"
 	"testing"
 
@@ -13,11 +14,15 @@ import (
 // fakeFdbMapOps records FDB writes without a live BPF map (the MAC string of
 // each create/delete).
 type fakeFdbMapOps struct {
-	created []string // mac.String() of each CreateFdb
-	deleted []string // mac.String() of each DeleteFdb
+	created   []string // mac.String() of each CreateFdb
+	deleted   []string // mac.String() of each DeleteFdb
+	createErr error    // when set, CreateFdb fails (dataplane sync failure)
 }
 
 func (f *fakeFdbMapOps) CreateFdb(bdID uint16, mac net.HardwareAddr, _ *bpf.FdbEntry) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
 	f.created = append(f.created, mac.String())
 	return nil
 }
@@ -91,6 +96,21 @@ func TestFDBWatcherSinkIgnoresUnregisteredBridge(t *testing.T) {
 	})
 	if len(sink.events) != 0 {
 		t.Errorf("a MAC on an unregistered bridge must not reach the sink, got %+v", sink.events)
+	}
+}
+
+// When the BPF fdb_map sync fails, the MAC must NOT reach the sink: advertising
+// an RT2 for a MAC the data plane cannot decap to would blackhole remote traffic.
+func TestFDBWatcherSinkSkippedWhenBPFSyncFails(t *testing.T) {
+	sink := &fakeMACSink{}
+	w, ops := newSinkTestWatcher(sink)
+	ops.createErr = errors.New("map full")
+	w.handleNeighUpdate(netlink.NeighUpdate{
+		Type:  unix.RTM_NEWNEIGH,
+		Neigh: netlink.Neigh{Family: unix.AF_BRIDGE, MasterIndex: 10, LinkIndex: 3, HardwareAddr: net.HardwareAddr{0xaa, 0, 0, 0, 0, 1}},
+	})
+	if len(sink.events) != 0 {
+		t.Errorf("a failed BPF sync must not notify the sink, got %+v", sink.events)
 	}
 }
 
