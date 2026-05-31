@@ -66,6 +66,26 @@ func TestManager_BindReplaces(t *testing.T) {
 	}
 }
 
+func TestManager_GetByBDID(t *testing.T) {
+	m := NewManager()
+	if err := m.Bind(Binding{VRFName: "evi100", RD: "65000:100", BDID: 100}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if err := m.Bind(Binding{VRFName: "l3vrf", RD: "65000:1"}); err != nil { // BDID 0
+		t.Fatalf("Bind: %v", err)
+	}
+	b, ok := m.GetByBDID(100)
+	if !ok || b.VRFName != "evi100" {
+		t.Errorf("GetByBDID(100) = %+v, %v; want the evi100 binding", b, ok)
+	}
+	if _, ok := m.GetByBDID(200); ok {
+		t.Error("GetByBDID(200) should miss when no binding has that bd_id")
+	}
+	if _, ok := m.GetByBDID(0); ok {
+		t.Error("GetByBDID(0) must never match an L3VPN-only binding")
+	}
+}
+
 func TestManager_MatchImport(t *testing.T) {
 	m := NewManager()
 	if err := m.Bind(Binding{VRFName: "vrf-a", ImportRTs: []string{"65000:100", "65000:101"}}); err != nil {

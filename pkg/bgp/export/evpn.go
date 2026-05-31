@@ -34,6 +34,7 @@ type EVPNAdvertiser interface {
 type bdState struct {
 	binding    vrfbgp.Binding
 	sid        netip.Addr
+	sidStr     string // sid.String(), rendered once (it is constant per BD)
 	remoteSrc  string
 	advertised map[bgp.EVPNMACKey]struct{}
 }
@@ -111,6 +112,7 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	e.bds[b.BDID] = &bdState{
 		binding:    b,
 		sid:        sid,
+		sidStr:     sid.String(),
 		remoteSrc:  remoteSrc,
 		advertised: make(map[bgp.EVPNMACKey]struct{}),
 	}
@@ -126,6 +128,17 @@ func (e *EVPNExporter) DisableBD(bdID uint16) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.disableBDLocked(bdID)
+}
+
+// Close disables every enabled bridge domain, withdrawing its RT2s and releasing
+// its End.DT2U SIDs. It is the graceful-shutdown counterpart of EnableBD; the
+// BGP session teardown is the backstop, but this withdraws explicitly first.
+func (e *EVPNExporter) Close() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for bdID := range e.bds {
+		e.disableBDLocked(bdID)
+	}
 }
 
 // disableBDLocked withdraws the BD's advertised RT2s, releases its SID, and
@@ -157,7 +170,8 @@ func (e *EVPNExporter) OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool)
 	if !ok {
 		return
 	}
-	key := bgp.EVPNMACKey{RD: st.binding.RD, EthernetTag: 0, MAC: mac.String()}
+	macStr := mac.String()
+	key := bgp.EVPNMACKey{RD: st.binding.RD, EthernetTag: 0, MAC: macStr}
 	if added {
 		if _, dup := st.advertised[key]; dup {
 			return
@@ -170,8 +184,8 @@ func (e *EVPNExporter) OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool)
 			// left zero -- single-homed; multi-homing RT2 ESI is a future
 			// increment that needs the bridge's ES attribute.
 			EthernetTag: 0,
-			MAC:         mac.String(),
-			SRv6SID:     st.sid.String(),
+			MAC:         macStr,
+			SRv6SID:     st.sidStr,
 			NextHop:     e.nextHop,
 			RemoteSrc:   st.remoteSrc,
 		}

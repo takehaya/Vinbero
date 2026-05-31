@@ -93,6 +93,11 @@ type BGPGlobalConfig struct {
 	// call. Defaults to false so the operator-explicit path stays the only
 	// behavior unless opted in.
 	AutoAdvertise bool `yaml:"auto_advertise,omitempty" default:"false"`
+	// EVPNAutoAdvertise turns on the EVPN RT2 auto advertise path
+	// (pkg/bgp/export.EVPNExporter): a locally-learned bridge MAC in a bound
+	// bridge domain is advertised as an EVPN RT2 (MAC/IP) without an explicit
+	// BgpRouteService call. Shares NextHop with the L3VPN path. Defaults to false.
+	EVPNAutoAdvertise bool `yaml:"evpn_auto_advertise,omitempty" default:"false"`
 	// NextHop is the BGP next hop the auto-advertise path stamps on routes it
 	// originates: this PE's own reachable IPv6 address (its loopback). Required
 	// when auto_advertise is on. It must NOT be a locator base -- a locator

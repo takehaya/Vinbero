@@ -9,16 +9,29 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
+	"go.uber.org/zap"
 )
+
+// EvpnBridgeHook enables or disables EVPN RT2 auto-advertise for a bridge domain
+// as its bridge is created or deleted. *pkg/bgp/export.EVPNExporter satisfies
+// it; it is nil unless EVPN auto-advertise is on.
+type EvpnBridgeHook interface {
+	EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error
+	DisableBD(bdID uint16)
+}
 
 type NetworkResourceServer struct {
 	resMgr     *netresource.ResourceManager
 	fdbWatcher *netlinkwatch.FDBWatcher
 	mapOps     *bpf.MapOperations
+	mgr        *vrfbgp.Manager // binding registry, to resolve a bd_id to its EVPN binding
+	evpn       EvpnBridgeHook  // nil unless EVPN auto-advertise is on
+	logger     *zap.Logger
 }
 
-func NewNetworkResourceServer(resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, mapOps *bpf.MapOperations) *NetworkResourceServer {
-	return &NetworkResourceServer{resMgr: resMgr, fdbWatcher: fdbWatcher, mapOps: mapOps}
+func NewNetworkResourceServer(resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, mapOps *bpf.MapOperations, mgr *vrfbgp.Manager, evpn EvpnBridgeHook, logger *zap.Logger) *NetworkResourceServer {
+	return &NetworkResourceServer{resMgr: resMgr, fdbWatcher: fdbWatcher, mapOps: mapOps, mgr: mgr, evpn: evpn, logger: logger}
 }
 
 func (s *NetworkResourceServer) BridgeCreate(
@@ -43,6 +56,18 @@ func (s *NetworkResourceServer) BridgeCreate(
 		// Register with FDB watcher for dynamic MAC learning
 		s.fdbWatcher.RegisterBridge(int(ifindex), uint16(br.BdId))
 
+		// If EVPN auto-advertise is on and this bd_id has a binding, enable RT2
+		// auto-advertise for the bridge. A failure here is non-fatal: the bridge
+		// is created regardless, it just won't auto-originate RT2.
+		if s.evpn != nil {
+			if b, ok := s.mgr.GetByBDID(uint16(br.BdId)); ok {
+				if err := s.evpn.EnableBD(b, ifindex); err != nil {
+					s.logger.Warn("enable EVPN RT2 auto-advertise for bridge",
+						zap.String("bridge", br.Name), zap.Uint32("bd_id", br.BdId), zap.Error(err))
+				}
+			}
+		}
+
 		resp.Created = append(resp.Created, br)
 	}
 
@@ -59,10 +84,13 @@ func (s *NetworkResourceServer) BridgeDelete(
 	}
 
 	for _, name := range req.Msg.Names {
-		// Resolve ifindex from ResourceManager cache, falling back to netlink
+		// Resolve ifindex (and bd_id) from ResourceManager cache, falling back to
+		// netlink for the ifindex.
 		var ifindex uint32
+		var bdID uint16
 		if br, ok := s.resMgr.GetBridgeByName(name); ok {
 			ifindex = br.Ifindex
+			bdID = br.BdID
 		} else if resolved, err := resolveIfindex(name); err == nil {
 			ifindex = resolved
 		}
@@ -84,6 +112,12 @@ func (s *NetworkResourceServer) BridgeDelete(
 				continue
 			}
 			s.fdbWatcher.UnregisterBridge(int(ifindex))
+		}
+
+		// Disable EVPN RT2 auto-advertise for the bridge domain before deleting:
+		// withdraws its RT2s and releases the End.DT2U SID.
+		if s.evpn != nil && bdID != 0 {
+			s.evpn.DisableBD(bdID)
 		}
 
 		if err := s.resMgr.DeleteBridge(name); err != nil {
