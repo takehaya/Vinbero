@@ -99,6 +99,13 @@ func (s *NetworkResourceServer) BridgeDelete(
 		// RT2s and releases its End.DT2U SID. That SID references this bridge's
 		// ifindex, so findBridgeReference below would otherwise report the bridge
 		// as still referenced and block the delete (and DisableBD would never run).
+		// On a ResourceManager cache miss (e.g. after a restart) bdID is 0 here,
+		// so recover it from the installed L2 SID's aux to still disable cleanly.
+		if s.evpn != nil && bdID == 0 && ifindex != 0 {
+			if bd, ok := s.bdIDForBridge(ifindex); ok {
+				bdID = bd
+			}
+		}
 		if s.evpn != nil && bdID != 0 {
 			s.evpn.DisableBD(bdID)
 		}
@@ -245,6 +252,38 @@ func (s *NetworkResourceServer) VrfList(
 		})
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// bdIDForBridge returns the bd_id of an End.DT2/DT2M SID installed for the given
+// bridge ifindex. BridgeDelete uses it to recover the bd_id (and so disable EVPN
+// auto-advertise) when the ResourceManager cache has no record of the bridge.
+// ok=false when no L2 SID references the bridge. DisableBD is a no-op for a bd_id
+// the exporter has not enabled, so a non-exporter L2 SID match is harmless.
+func (s *NetworkResourceServer) bdIDForBridge(ifindex uint32) (uint16, bool) {
+	entries, err := s.mapOps.ListSidFunctions()
+	if err != nil {
+		return 0, false
+	}
+	for _, entry := range entries {
+		switch v1.Srv6LocalAction(entry.Action) {
+		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2M:
+		default:
+			continue
+		}
+		if entry.AuxIndex == 0 {
+			continue
+		}
+		aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))
+		if err != nil {
+			continue
+		}
+		bdID, bridgeIfindex := bpf.SidAuxL2Data(aux)
+		if bridgeIfindex == ifindex {
+			return bdID, true
+		}
+	}
+	return 0, false
 }
 
 // findBridgeReference checks if any End.DT2/DT2M SID entry references the given bridge_ifindex.
