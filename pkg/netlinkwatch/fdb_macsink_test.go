@@ -10,10 +10,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fakeFdbMapOps records FDB writes without a live BPF map.
+// fakeFdbMapOps records FDB writes without a live BPF map (the MAC string of
+// each create/delete).
 type fakeFdbMapOps struct {
-	created []string // "bd/mac"
-	deleted []string
+	created []string // mac.String() of each CreateFdb
+	deleted []string // mac.String() of each DeleteFdb
 }
 
 func (f *fakeFdbMapOps) CreateFdb(bdID uint16, mac net.HardwareAddr, _ *bpf.FdbEntry) error {

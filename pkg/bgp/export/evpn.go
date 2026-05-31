@@ -54,7 +54,6 @@ type EVPNExporter struct {
 	evpn     EVPNAdvertiser
 	sidOps   SidOps
 	locators *locator.Manager
-	bindings *vrfbgp.Manager
 	// nextHop is the BGP next hop stamped on every RT2: this PE's reachable IPv6
 	// address (its loopback), NOT the locator base -- same rule as the L3VPN path.
 	nextHop string
@@ -63,18 +62,35 @@ type EVPNExporter struct {
 }
 
 // NewEVPNExporter wires an EVPN RT2 exporter. nextHop is the advertising PE's
-// reachable IPv6 address (its loopback). bindings is the shared binding registry
-// the L3VPN path also reads; an EVPN binding is one whose BDID is non-zero.
-func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manager, bindings *vrfbgp.Manager, nextHop string, logger *zap.Logger) *EVPNExporter {
+// reachable IPv6 address (its loopback); the caller resolves a bridge domain to
+// its binding and passes it to EnableBD.
+func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manager, nextHop string, logger *zap.Logger) *EVPNExporter {
 	return &EVPNExporter{
 		evpn:     evpn,
 		sidOps:   sidOps,
 		locators: locators,
-		bindings: bindings,
 		nextHop:  nextHop,
 		logger:   logger.Named("bgp.export.evpn"),
 		bds:      make(map[uint16]*bdState),
 	}
+}
+
+// checkNextHop validates the BGP next hop: a non-empty IPv6 (not v4-in-6)
+// address. SRv6 VPN transport is IPv6-only; an empty / IPv4 / malformed next hop
+// serializes into an RT2 no PE can forward toward. Mirrors the L3VPN exporter's
+// Start-time validation, applied per EnableBD since the EVPN path has no Start.
+func checkNextHop(nextHop string) error {
+	if nextHop == "" {
+		return fmt.Errorf("bgp.global.next_hop is required for EVPN auto advertise")
+	}
+	a, err := netip.ParseAddr(nextHop)
+	if err != nil {
+		return fmt.Errorf("bgp.global.next_hop %q is invalid: %w", nextHop, err)
+	}
+	if !a.Is6() || a.Is4In6() {
+		return fmt.Errorf("bgp.global.next_hop %q must be an IPv6 address", nextHop)
+	}
+	return nil
 }
 
 // EnableBD makes a bridge domain's locally-learned MACs eligible for RT2
@@ -85,6 +101,9 @@ func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manag
 // locator, or a non-zero BDID is rejected. It is idempotent: a BD already
 // enabled is replaced.
 func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
+	if err := checkNextHop(e.nextHop); err != nil {
+		return fmt.Errorf("vrf %q: %w", b.VRFName, err)
+	}
 	if b.BDID == 0 {
 		return fmt.Errorf("vrf %q: bd_id is required for EVPN auto advertise", b.VRFName)
 	}

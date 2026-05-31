@@ -52,7 +52,7 @@ func newTestEVPNExporter(t *testing.T) (*EVPNExporter, *fakeEVPNAdv, *fakeSidOps
 	}
 	adv := &fakeEVPNAdv{}
 	sid := &fakeSidOps{}
-	e := NewEVPNExporter(adv, sid, locs, vrfbgp.NewManager(), "2001:db8:ff::1", zap.NewNop())
+	e := NewEVPNExporter(adv, sid, locs, "2001:db8:ff::1", zap.NewNop())
 	return e, adv, sid
 }
 
@@ -76,6 +76,23 @@ func TestEnableBDInstallsDT2U(t *testing.T) {
 	}
 	if sid.created[0].action != endpointActionDT2U {
 		t.Errorf("installed SID action = %d, want End.DT2U %d", sid.created[0].action, endpointActionDT2U)
+	}
+}
+
+func TestEnableBDRejectsInvalidNextHop(t *testing.T) {
+	locs := locator.NewManager()
+	if err := locs.Add(&locator.Locator{
+		Name: "LOC1", Prefix: netip.MustParsePrefix("fd00:1:1::/48"),
+		BlockLen: 32, NodeLen: 16, FunctionLen: 16, ArgumentLen: 64,
+		Behavior: locator.BehaviorClassic, FunctionAutoStart: 0x10, FunctionAutoEnd: 0xfffe,
+	}); err != nil {
+		t.Fatalf("add locator: %v", err)
+	}
+	for _, nh := range []string{"", "10.0.0.1", "not-an-ip"} {
+		e := NewEVPNExporter(&fakeEVPNAdv{}, &fakeSidOps{}, locs, nh, zap.NewNop())
+		if err := e.EnableBD(evpnTestBinding(), 10); err == nil {
+			t.Errorf("EnableBD with next_hop %q should fail (must be a valid IPv6)", nh)
+		}
 	}
 }
 

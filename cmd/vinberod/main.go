@@ -211,7 +211,6 @@ func run(cliCtx *cli.Context) error {
 				bgpSession,
 				vin.GetMapOperations(),
 				locatorMgr,
-				vrfBgpMgr,
 				cfg.BGP.Global.NextHop,
 				lg,
 			)

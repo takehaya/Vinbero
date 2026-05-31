@@ -95,6 +95,14 @@ func (s *NetworkResourceServer) BridgeDelete(
 			ifindex = resolved
 		}
 
+		// Disable EVPN RT2 auto-advertise first: it withdraws the bridge domain's
+		// RT2s and releases its End.DT2U SID. That SID references this bridge's
+		// ifindex, so findBridgeReference below would otherwise report the bridge
+		// as still referenced and block the delete (and DisableBD would never run).
+		if s.evpn != nil && bdID != 0 {
+			s.evpn.DisableBD(bdID)
+		}
+
 		if ifindex != 0 {
 			ref, err := s.findBridgeReference(ifindex)
 			if err != nil {
@@ -112,12 +120,6 @@ func (s *NetworkResourceServer) BridgeDelete(
 				continue
 			}
 			s.fdbWatcher.UnregisterBridge(int(ifindex))
-		}
-
-		// Disable EVPN RT2 auto-advertise for the bridge domain before deleting:
-		// withdraws its RT2s and releases the End.DT2U SID.
-		if s.evpn != nil && bdID != 0 {
-			s.evpn.DisableBD(bdID)
 		}
 
 		if err := s.resMgr.DeleteBridge(name); err != nil {

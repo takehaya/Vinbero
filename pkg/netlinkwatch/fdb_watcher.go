@@ -100,7 +100,9 @@ func (w *FDBWatcher) SetAgingSeconds(seconds int) {
 }
 
 // SetMACSink installs the sink that receives local MAC add/delete events for
-// EVPN RT2 auto-advertise. Call before Start.
+// EVPN RT2 auto-advertise. It is safe to call at any time (guarded by w.mu),
+// but setting it after Start means the boot-time ListExisting replay has already
+// run, so MACs present at that point are not delivered to the sink.
 func (w *FDBWatcher) SetMACSink(sink MACSink) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
