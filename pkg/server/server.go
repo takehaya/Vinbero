@@ -34,6 +34,7 @@ type Server struct {
 	mupAdv       bgp.MUPController
 	srPolicyCtrl srPolicyController
 	vrfExporter  VrfExporter                // runtime auto-advertise hook; nil when off
+	evpnBridge   EvpnBridgeHook             // EVPN RT2 auto-advertise BD hook; nil when off
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
@@ -50,7 +51,7 @@ type Server struct {
 // enabled, or nil otherwise. Taking the concrete type (not the interface)
 // keeps a typed-nil from leaking into srPolicyCtrl, so the FailedPrecondition
 // guard in SrPolicyServer works.
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, mupAdv bgp.MUPController, srPolicyApplier *apply.Applier, vrfExporter VrfExporter, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, mupAdv bgp.MUPController, srPolicyApplier *apply.Applier, vrfExporter VrfExporter, evpnBridge EvpnBridgeHook, logger *zap.Logger) *Server {
 	s := &Server{
 		cfg:         cfg,
 		mapOps:      mapOps,
@@ -63,6 +64,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		evpnAdv:     evpnAdv,
 		mupAdv:      mupAdv,
 		vrfExporter: vrfExporter,
+		evpnBridge:  evpnBridge,
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}
@@ -161,7 +163,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered EthernetSegmentService", zap.String("path", path))
 
 	// NetworkResource service (VRF/Bridge management)
-	netResourceServer := NewNetworkResourceServer(s.resMgr, s.fdbWatcher, s.mapOps)
+	netResourceServer := NewNetworkResourceServer(s.resMgr, s.fdbWatcher, s.mapOps, s.vrfBgpMgr, s.evpnBridge, s.logger)
 	path, handler = vinberov1connect.NewNetworkResourceServiceHandler(netResourceServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered NetworkResourceService", zap.String("path", path))
