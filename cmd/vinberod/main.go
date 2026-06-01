@@ -140,8 +140,9 @@ func run(cliCtx *cli.Context) error {
 	// exporter / routeWatcher drive the auto-advertise path (VRF export).
 	// They stay nil unless BGP is enabled with bgp.global.auto_advertise.
 	var exporter *export.Exporter
-	// evpnExporter drives EVPN RT2 auto-advertise (local MAC -> RT2). nil unless
-	// BGP is enabled with bgp.global.evpn_auto_advertise.
+	// evpnExporter drives EVPN auto-advertise: RT2 (local bridge MAC), RT3 (BUM
+	// flood for a bound bridge domain), and RT4 (local Ethernet Segment). nil
+	// unless BGP is enabled with bgp.global.evpn_auto_advertise.
 	var evpnExporter *export.EVPNExporter
 	if cliCtx.Bool("bgp-enabled") {
 		// Load config-time VRF <-> route-target bindings before the BGP
@@ -202,10 +203,11 @@ func run(cliCtx *cli.Context) error {
 				lg,
 			)
 		}
-		// EVPN RT2 auto-advertise (local MAC -> RT2) is opt-in via
+		// EVPN auto-advertise (RT2/RT3/RT4) is opt-in via
 		// bgp.global.evpn_auto_advertise. It shares the locator manager, VRF
-		// bindings, and BGP advertiser; the FDBWatcher feeds it local MACs and
-		// BridgeCreate/BridgeDelete enable/disable each bound bridge domain.
+		// bindings, and BGP advertiser; the FDBWatcher feeds it local MACs and both
+		// the bridge-device (BridgeCreate/Delete) and binding (VrfBgpBind/Unbind)
+		// lifecycles enable/disable each bound bridge domain.
 		if cfg.BGP.Global.EVPNAutoAdvertise {
 			evpnExporter = export.NewEVPNExporter(
 				bgpSession,
@@ -223,16 +225,23 @@ func run(cliCtx *cli.Context) error {
 	if exporter != nil {
 		vrfExp = exporter
 	}
-	// evpnExporter implements server.EvpnBridgeHook (RT2/RT3) and
-	// server.EvpnEsHook (RT4); same typed-nil avoidance so the handlers' nil
-	// checks hold when EVPN auto-advertise is off.
-	var evpnBridge server.EvpnBridgeHook
+	// The EVPN coordinator drives RT2/RT3 across both the bridge-device axis
+	// (BridgeCreate/Delete) and the binding axis (VrfBgpBind/Unbind), resolving a
+	// bridge domain to its bridge ifindex and replaying its FDB on enable. evpnES
+	// is the RT4 (Ethernet Segment) hook. Both stay nil unless EVPN auto-advertise
+	// is on, so the handlers' nil checks hold.
+	var evpnCoord *server.EvpnCoordinator
 	var evpnES server.EvpnEsHook
 	if evpnExporter != nil {
-		evpnBridge = evpnExporter
+		evpnCoord = server.NewEvpnCoordinator(
+			evpnExporter,
+			vin.GetResourceManager().BridgeIfindexByBDID,
+			vin.GetFDBWatcher().DumpBridge,
+			lg,
+		)
 		evpnES = evpnExporter
 	}
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnBridge, evpnES, lg)
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, lg)
 
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
@@ -277,13 +286,21 @@ func run(cliCtx *cli.Context) error {
 		// EVPN exporter. The sink is set here, after the FDBWatcher has already
 		// started (StartFDBWatcher, above), so MACs present at that boot
 		// ListExisting replay are NOT captured; a MAC learned after a BridgeCreate
-		// enables its bridge domain is. Replaying a bridge's existing FDB on enable
-		// (an FDB dump seam symmetric with RouteWatcher.DumpTable) is a follow-up.
-		// Close (withdraw RT2s + release SIDs) runs before the BGP session drops,
-		// like exporter.Stop above.
+		// enables its bridge domain is. BridgeCreate / VrfBgpBind replay a bridge's
+		// existing FDB via the coordinator, so a bridge that predates the bind is
+		// still picked up.
 		if evpnExporter != nil {
 			vin.GetFDBWatcher().SetMACSink(evpnExporter)
-			defer evpnExporter.Close()
+			// Teardown ordering: detach the sink BEFORE Close so an in-flight FDB
+			// event cannot re-advertise a MAC after Close has withdrawn it. Close
+			// also empties the BD table, so any OnLocalMAC that still races in is a
+			// no-op (unknown BD); the detach makes that the common case rather than
+			// relying on it. Close (withdraw RT2s/RT3 + release SIDs) runs before the
+			// BGP session drops, like exporter.Stop above (LIFO defers).
+			defer func() {
+				vin.GetFDBWatcher().SetMACSink(nil)
+				evpnExporter.Close()
+			}()
 		}
 	}
 

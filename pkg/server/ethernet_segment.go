@@ -18,6 +18,9 @@ import (
 type EvpnEsHook interface {
 	EnableES(esi [bpf.ESILen]byte, rd string) error
 	DisableES(esi [bpf.ESILen]byte)
+	// RDForESI returns the RD the ES's RT4 is advertised with so EsList can echo
+	// it; the BPF esi_map does not store the RD. ok=false when not advertised.
+	RDForESI(esi [bpf.ESILen]byte) (string, bool)
 }
 
 type EthernetSegmentServer struct {
@@ -68,6 +71,14 @@ func (s *EthernetSegmentServer) entryToProto(esi [bpf.ESILen]byte, entry *bpf.Es
 	}
 	if entry.DfPeSrcAddr != zero {
 		out.DfPeSrcAddr = bpf.FormatIPv6(entry.DfPeSrcAddr)
+	}
+	// The RD lives only in the auto-advertise exporter's state (the BPF esi_map
+	// carries no RD), so echo it from there when EVPN auto-advertise is on and this
+	// ES is advertised. Off / not-advertised leaves rd empty.
+	if s.evpn != nil {
+		if rd, ok := s.evpn.RDForESI(esi); ok {
+			out.Rd = rd
+		}
 	}
 	return out
 }

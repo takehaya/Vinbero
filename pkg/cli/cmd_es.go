@@ -80,7 +80,7 @@ func esCommand() *cli.Command {
 					if useJSON(c) {
 						return printJSON(resp.Msg.Entries)
 					}
-					headers := []string{"ESI", "LOCAL_ATTACHED", "LOCAL_PE", "DF_PE", "MODE"}
+					headers := []string{"ESI", "LOCAL_ATTACHED", "LOCAL_PE", "DF_PE", "MODE", "RD"}
 					var rows [][]string
 					for _, e := range resp.Msg.Entries {
 						rows = append(rows, []string{
@@ -89,6 +89,7 @@ func esCommand() *cli.Command {
 							e.LocalPeSrcAddr,
 							e.DfPeSrcAddr,
 							formatEsiMode(e.RedundancyMode),
+							e.Rd,
 						})
 					}
 					printTable(headers, rows)
