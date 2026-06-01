@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
@@ -22,6 +23,8 @@ type fakeEVPNAdv struct {
 	withdrawn      []bgp.EVPNMACKey
 	pushedMcast    []bgp.EVPNRoute
 	withdrawnMcast []bgp.EVPNMcastKey
+	pushedES       []bgp.EVPNRoute
+	withdrawnES    []bgp.EVPNESKey
 	pushErr        error
 }
 
@@ -48,6 +51,19 @@ func (f *fakeEVPNAdv) PushEVPNInclusiveMulticast(_ context.Context, r bgp.EVPNRo
 
 func (f *fakeEVPNAdv) WithdrawEVPNInclusiveMulticast(_ context.Context, key bgp.EVPNMcastKey) error {
 	f.withdrawnMcast = append(f.withdrawnMcast, key)
+	return nil
+}
+
+func (f *fakeEVPNAdv) PushEVPNEthernetSegment(_ context.Context, r bgp.EVPNRoute) error {
+	if f.pushErr != nil {
+		return f.pushErr
+	}
+	f.pushedES = append(f.pushedES, r)
+	return nil
+}
+
+func (f *fakeEVPNAdv) WithdrawEVPNEthernetSegment(_ context.Context, key bgp.EVPNESKey) error {
+	f.withdrawnES = append(f.withdrawnES, key)
 	return nil
 }
 
@@ -337,5 +353,90 @@ func TestOnLocalMACPushFailureNotRecorded(t *testing.T) {
 	e.DisableBD(100)
 	if len(adv.withdrawn) != 0 {
 		t.Errorf("a failed push must not be recorded, but disable withdrew %d", len(adv.withdrawn))
+	}
+}
+
+// testESI is a Type-0 ESI whose value's high-order 6 octets (bytes 1..6) encode
+// the MAC aa:bb:cc:dd:ee:ff, which RFC 7432 Sec. 7.6 derives as the ES-Import RT.
+var testESI = [bpf.ESILen]byte{0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03}
+
+func TestEnableESAdvertisesRT4(t *testing.T) {
+	e, adv, sid := newTestEVPNExporter(t)
+	if err := e.EnableES(testESI, "65000:200"); err != nil {
+		t.Fatalf("EnableES: %v", err)
+	}
+	if len(adv.pushedES) != 1 {
+		t.Fatalf("want 1 RT4 advertised, got %d", len(adv.pushedES))
+	}
+	r := adv.pushedES[0]
+	if r.Type != bgp.EVPNRouteTypeEthernetSegment {
+		t.Errorf("type = %d, want RT4", r.Type)
+	}
+	if r.RD != "65000:200" {
+		t.Errorf("rd = %q", r.RD)
+	}
+	if r.ESI != testESI {
+		t.Errorf("esi = %x, want %x", r.ESI, testESI)
+	}
+	if r.ESImportRT != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("es_import_rt = %q, want aa:bb:cc:dd:ee:ff (derived from the ESI)", r.ESImportRT)
+	}
+	if r.NextHop != "2001:db8:ff::1" {
+		t.Errorf("nexthop = %q, want the configured loopback", r.NextHop)
+	}
+	if r.SRv6SID != "" {
+		t.Errorf("RT4 carries no SRv6 SID, got %q", r.SRv6SID)
+	}
+	// RT4 mints no SID.
+	if len(sid.created) != 0 {
+		t.Errorf("RT4 must not mint any SID, got %d", len(sid.created))
+	}
+}
+
+func TestEnableESRejectsEmptyRDAndBadNextHop(t *testing.T) {
+	e, _, _ := newTestEVPNExporter(t)
+	if err := e.EnableES(testESI, ""); err == nil {
+		t.Error("EnableES without an RD should fail")
+	}
+	bad := NewEVPNExporter(&fakeEVPNAdv{}, &fakeSidOps{}, locator.NewManager(), "10.0.0.1", zap.NewNop())
+	if err := bad.EnableES(testESI, "65000:200"); err == nil {
+		t.Error("EnableES with a non-IPv6 next_hop should fail")
+	}
+}
+
+func TestDisableESWithdrawsRT4(t *testing.T) {
+	e, adv, _ := newTestEVPNExporter(t)
+	if err := e.EnableES(testESI, "65000:200"); err != nil {
+		t.Fatalf("EnableES: %v", err)
+	}
+	e.DisableES(testESI)
+	if len(adv.withdrawnES) != 1 {
+		t.Fatalf("want 1 RT4 withdrawn, got %d", len(adv.withdrawnES))
+	}
+	k := adv.withdrawnES[0]
+	if k.RD != "65000:200" || k.ESI != testESI {
+		t.Errorf("withdraw key = %+v", k)
+	}
+	// A second disable is a no-op.
+	e.DisableES(testESI)
+	if len(adv.withdrawnES) != 1 {
+		t.Errorf("disable of an unadvertised ES must be a no-op, got %d", len(adv.withdrawnES))
+	}
+}
+
+func TestEnableESReplaces(t *testing.T) {
+	e, adv, _ := newTestEVPNExporter(t)
+	if err := e.EnableES(testESI, "65000:200"); err != nil {
+		t.Fatalf("EnableES: %v", err)
+	}
+	// Re-enable with a different RD: the old RT4 is withdrawn and a new one pushed.
+	if err := e.EnableES(testESI, "65000:201"); err != nil {
+		t.Fatalf("re-EnableES: %v", err)
+	}
+	if len(adv.withdrawnES) != 1 || adv.withdrawnES[0].RD != "65000:200" {
+		t.Errorf("re-enable must withdraw the prior RT4 (RD 65000:200), got %+v", adv.withdrawnES)
+	}
+	if len(adv.pushedES) != 2 || adv.pushedES[1].RD != "65000:201" {
+		t.Errorf("re-enable must push the new RT4 (RD 65000:201), got %+v", adv.pushedES)
 	}
 }

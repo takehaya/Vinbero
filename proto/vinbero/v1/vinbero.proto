@@ -376,6 +376,12 @@ message EthernetSegment {
   // means "no DF configured yet" (all attached PEs forward BUM, DF=implicit).
   string df_pe_src_addr = 4;
   EsiRedundancyMode redundancy_mode = 5;
+  // rd is the route distinguisher for this Ethernet Segment's RT4 (Ethernet
+  // Segment route). When set together with local_attached=true and EVPN
+  // auto-advertise on, the daemon originates the RT4 automatically (the
+  // ES-Import route target is derived from the ESI). Empty disables RT4
+  // auto-advertise for this ES.
+  string rd = 6;
 }
 
 message EsCreateRequest {

@@ -34,7 +34,8 @@ type Server struct {
 	mupAdv       bgp.MUPController
 	srPolicyCtrl srPolicyController
 	vrfExporter  VrfExporter                // runtime auto-advertise hook; nil when off
-	evpnBridge   EvpnBridgeHook             // EVPN RT2 auto-advertise BD hook; nil when off
+	evpnBridge   EvpnBridgeHook             // EVPN RT2/RT3 auto-advertise BD hook; nil when off
+	evpnES       EvpnEsHook                 // EVPN RT4 auto-advertise ES hook; nil when off
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
@@ -51,7 +52,7 @@ type Server struct {
 // enabled, or nil otherwise. Taking the concrete type (not the interface)
 // keeps a typed-nil from leaking into srPolicyCtrl, so the FailedPrecondition
 // guard in SrPolicyServer works.
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, mupAdv bgp.MUPController, srPolicyApplier *apply.Applier, vrfExporter VrfExporter, evpnBridge EvpnBridgeHook, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, mupAdv bgp.MUPController, srPolicyApplier *apply.Applier, vrfExporter VrfExporter, evpnBridge EvpnBridgeHook, evpnES EvpnEsHook, logger *zap.Logger) *Server {
 	s := &Server{
 		cfg:         cfg,
 		mapOps:      mapOps,
@@ -65,6 +66,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		mupAdv:      mupAdv,
 		vrfExporter: vrfExporter,
 		evpnBridge:  evpnBridge,
+		evpnES:      evpnES,
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}
@@ -157,7 +159,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered BdPeerService", zap.String("path", path))
 
 	// Ethernet Segment service (RFC 7432 ESI master table)
-	esServer := NewEthernetSegmentServer(s.mapOps, s.esReElectDF)
+	esServer := NewEthernetSegmentServer(s.mapOps, s.esReElectDF, s.evpnES, s.logger)
 	path, handler = vinberov1connect.NewEthernetSegmentServiceHandler(esServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered EthernetSegmentService", zap.String("path", path))

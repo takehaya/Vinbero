@@ -26,13 +26,15 @@ const (
 )
 
 // EVPNAdvertiser is the subset of bgp.EVPNController the EVPN exporter drives:
-// RT2 (MAC/IP) for local MACs and RT3 (Inclusive Multicast) for the bridge
-// domain's BUM flood endpoint. RT4 (Ethernet Segment) is a future increment.
+// RT2 (MAC/IP) for local MACs, RT3 (Inclusive Multicast) for the bridge domain's
+// BUM flood endpoint, and RT4 (Ethernet Segment) for a locally-attached ES.
 type EVPNAdvertiser interface {
 	PushEVPNMac(ctx context.Context, r bgp.EVPNRoute) error
 	WithdrawEVPNMac(ctx context.Context, key bgp.EVPNMACKey) error
 	PushEVPNInclusiveMulticast(ctx context.Context, r bgp.EVPNRoute) error
 	WithdrawEVPNInclusiveMulticast(ctx context.Context, key bgp.EVPNMcastKey) error
+	PushEVPNEthernetSegment(ctx context.Context, r bgp.EVPNRoute) error
+	WithdrawEVPNEthernetSegment(ctx context.Context, key bgp.EVPNESKey) error
 }
 
 // bdState is the per-bridge-domain EVPN export bookkeeping: the binding, the
@@ -70,6 +72,10 @@ type EVPNExporter struct {
 	nextHop string
 	logger  *zap.Logger
 	bds     map[uint16]*bdState
+	// es maps a locally-attached Ethernet Segment ID to the RD its RT4 was
+	// advertised with, so DisableES can build the withdraw key. RT4 carries no
+	// SRv6 SID, so there is no per-ES SID to track.
+	es map[[bpf.ESILen]byte]string
 }
 
 // NewEVPNExporter wires an EVPN exporter (RT2 + RT3). nextHop is the advertising
@@ -83,7 +89,64 @@ func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manag
 		nextHop:  nextHop,
 		logger:   logger.Named("bgp.export.evpn"),
 		bds:      make(map[uint16]*bdState),
+		es:       make(map[[bpf.ESILen]byte]string),
 	}
+}
+
+// EnableES advertises an EVPN RT4 (Ethernet Segment route) for a locally-attached
+// Ethernet Segment so peers run RFC 8584 DF election with this PE as a candidate.
+// The ES-Import route target is auto-derived from the high-order 6 octets of the
+// ESI value (RFC 7432 Sec. 7.6); RT4 carries no SRv6 SID. rd must be set. It is
+// idempotent: an ES already advertised is replaced. A push failure is returned
+// (the caller logs it; the ES data-plane entry is unaffected).
+func (e *EVPNExporter) EnableES(esi [bpf.ESILen]byte, rd string) error {
+	if err := checkNextHop(e.nextHop); err != nil {
+		return err
+	}
+	if rd == "" {
+		return fmt.Errorf("rd is required for EVPN RT4 auto advertise")
+	}
+	// ESI byte 0 is the type; bytes 1..6 are the MAC encoded as the ES-Import RT.
+	esImportRT := net.HardwareAddr(esi[1:7]).String()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.disableESLocked(esi) // replace any existing advertisement
+	r := bgp.EVPNRoute{
+		Type:       bgp.EVPNRouteTypeEthernetSegment,
+		RD:         rd,
+		ESI:        esi,
+		ESImportRT: esImportRT,
+		NextHop:    e.nextHop,
+	}
+	if err := e.evpn.PushEVPNEthernetSegment(context.Background(), r); err != nil {
+		return fmt.Errorf("advertise RT4 for esi %s: %w", bpf.FormatESI(esi), err)
+	}
+	e.es[esi] = rd
+	e.logger.Info("ethernet segment enabled for EVPN RT4 auto advertise",
+		zap.String("esi", bpf.FormatESI(esi)), zap.String("rd", rd),
+		zap.String("es_import_rt", esImportRT))
+	return nil
+}
+
+// DisableES withdraws the RT4 advertised for the Ethernet Segment. A no-op for an
+// ES that was not advertised.
+func (e *EVPNExporter) DisableES(esi [bpf.ESILen]byte) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.disableESLocked(esi)
+}
+
+// disableESLocked withdraws the ES's RT4 and drops its state. The caller holds e.mu.
+func (e *EVPNExporter) disableESLocked(esi [bpf.ESILen]byte) {
+	rd, ok := e.es[esi]
+	if !ok {
+		return
+	}
+	if err := e.evpn.WithdrawEVPNEthernetSegment(context.Background(), bgp.EVPNESKey{RD: rd, ESI: esi}); err != nil {
+		e.logger.Warn("withdraw RT4 on disable", zap.String("esi", bpf.FormatESI(esi)), zap.Error(err))
+	}
+	delete(e.es, esi)
 }
 
 // checkNextHop validates the BGP next hop: a non-empty IPv6 (not v4-in-6)
@@ -214,6 +277,9 @@ func (e *EVPNExporter) Close() {
 	defer e.mu.Unlock()
 	for bdID := range e.bds {
 		e.disableBDLocked(bdID)
+	}
+	for esi := range e.es {
+		e.disableESLocked(esi)
 	}
 }
 
