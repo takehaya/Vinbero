@@ -54,7 +54,8 @@ type sidCreate struct {
 type fakeSidOps struct {
 	created    []sidCreate
 	deleted    []string
-	failOnCall int // 0 = never; N = fail the Nth CreateSidFunction call
+	failOnCall int   // 0 = never; N = fail the Nth CreateSidFunction call
+	deleteErr  error // when set, DeleteSidFunction fails (e.g. to test rollback)
 	calls      int
 }
 
@@ -68,6 +69,9 @@ func (f *fakeSidOps) CreateSidFunction(triggerPrefix string, entry *bpf.SidFunct
 }
 
 func (f *fakeSidOps) DeleteSidFunction(triggerPrefix string, _ bpf.OwnerTag) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	f.deleted = append(f.deleted, triggerPrefix)
 	return nil
 }
