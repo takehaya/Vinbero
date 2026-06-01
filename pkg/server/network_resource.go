@@ -100,10 +100,11 @@ func (s *NetworkResourceServer) BridgeDelete(
 			ifindex = resolved
 		}
 
-		// The EVPN auto-advertise End.DT2U SID for this bd is lifecycle-tied to the
-		// bridge: it is released by DisableBD as part of this delete, so exclude it
-		// from the reference check below (otherwise it would always report the
-		// bridge as referenced and block the delete). On a ResourceManager cache
+		// The EVPN auto-advertise SIDs for this bd (End.DT2U for RT2, End.DT2M for
+		// RT3) are lifecycle-tied to the bridge: they are released by DisableBD as
+		// part of this delete, so exclude them (selfSIDs) from the reference check
+		// below (otherwise they would always report the bridge as referenced and
+		// block the delete). On a ResourceManager cache
 		// miss (e.g. after a restart) bdID is 0, so recover it from the installed
 		// L2 SID's aux. DisableBD itself runs only AFTER the bridge is actually
 		// deleted, so a failed reference check or DeleteBridge leaves EVPN
