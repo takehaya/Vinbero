@@ -2,6 +2,7 @@ package netlinkwatch
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -165,30 +166,13 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 	}
 
 	mac := neigh.HardwareAddr
-	if mac == nil || len(mac) != 6 {
-		return
-	}
-
-	// Skip broadcast/multicast MACs
-	if mac[0]&0x01 != 0 {
+	if !isUnicastMAC(mac) {
 		return
 	}
 
 	switch update.Type {
 	case unix.RTM_NEWNEIGH:
-		entry := &bpf.FdbEntry{
-			Oif: uint32(neigh.LinkIndex),
-		}
-		if err := w.mapOps.CreateFdb(bdID, net.HardwareAddr(mac), entry); err != nil {
-			w.logger.Debug("Failed to sync FDB entry to BPF map",
-				zap.String("mac", mac.String()),
-				zap.Uint16("bd_id", bdID),
-				zap.Error(err))
-			// The dataplane FDB was not installed; do not advertise RT2 for a MAC
-			// the data plane cannot decap to, or remote traffic would blackhole.
-			return
-		}
-		w.notifyMAC(sink, bdID, mac, true)
+		w.syncAndNotify(sink, bdID, mac, neigh.LinkIndex)
 
 	case unix.RTM_DELNEIGH:
 		if err := w.mapOps.DeleteFdb(bdID, net.HardwareAddr(mac)); err != nil {
@@ -201,6 +185,23 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 	}
 }
 
+// syncAndNotify installs a locally-learned MAC into the BPF fdb_map and, only on
+// success, forwards it to the EVPN auto-advertise sink as an add. Gating the
+// sink on the data-plane write means RT2 is never advertised for a MAC the data
+// plane cannot decap to (which would blackhole remote traffic). Shared by the
+// live update path (handleNeighUpdate) and the replay path (DumpBridge), so the
+// two cannot drift on this safety rule. The caller has already filtered to a
+// registered bridge and a unicast MAC.
+func (w *FDBWatcher) syncAndNotify(sink MACSink, bdID uint16, mac net.HardwareAddr, linkIndex int) {
+	entry := &bpf.FdbEntry{Oif: uint32(linkIndex)}
+	if err := w.mapOps.CreateFdb(bdID, mac, entry); err != nil {
+		w.logger.Debug("Failed to sync FDB entry to BPF map",
+			zap.String("mac", mac.String()), zap.Uint16("bd_id", bdID), zap.Error(err))
+		return
+	}
+	w.notifyMAC(sink, bdID, mac, true)
+}
+
 // notifyMAC forwards a local MAC change to the EVPN auto-advertise sink, if one
 // is set. It copies the MAC because the netlink-supplied slice may be reused.
 func (w *FDBWatcher) notifyMAC(sink MACSink, bdID uint16, mac net.HardwareAddr, added bool) {
@@ -208,6 +209,50 @@ func (w *FDBWatcher) notifyMAC(sink MACSink, bdID uint16, mac net.HardwareAddr, 
 		return
 	}
 	sink.OnLocalMAC(bdID, append(net.HardwareAddr(nil), mac...), added)
+}
+
+// isUnicastMAC reports whether mac is a 6-byte unicast address (the only FDB
+// entries the watcher forwards: broadcast/multicast are skipped).
+func isUnicastMAC(mac net.HardwareAddr) bool {
+	return len(mac) == 6 && mac[0]&0x01 == 0
+}
+
+// DumpBridge replays a registered bridge's existing kernel FDB through the same
+// sync-then-advertise path as a live add, for EVPN RT2 auto-advertise. The
+// boot-time ListExisting replay in Start only reaches the sink if it was set
+// before Start; a bridge registered later (or whose sink is wired after Start)
+// needs this to pick up MACs already learned. Each MAC is re-synced into the BPF
+// fdb_map (idempotent, and a backstop for a failed Start-time Put) and advertised
+// only on success; the sink dedups, so a replay is idempotent. A no-op when no
+// sink is set.
+func (w *FDBWatcher) DumpBridge(ifindex int) error {
+	w.mu.RLock()
+	bdID, ok := w.allowed[ifindex]
+	sink := w.macSink
+	w.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("bridge ifindex %d is not registered", ifindex)
+	}
+	if sink == nil {
+		return nil
+	}
+	// NeighList(0, AF_BRIDGE) lists every bridge FDB entry; filter by MasterIndex
+	// to this bridge, mirroring the live handleNeighUpdate path.
+	neighs, err := netlink.NeighList(0, unix.AF_BRIDGE)
+	if err != nil {
+		return fmt.Errorf("list bridge FDB: %w", err)
+	}
+	for i := range neighs {
+		n := &neighs[i]
+		if n.MasterIndex != ifindex || !isUnicastMAC(n.HardwareAddr) {
+			continue
+		}
+		// Same path as a live add: re-sync the BPF fdb_map (idempotent for entries
+		// already present, and a backstop if a Start-time Put had failed) and only
+		// then advertise RT2, so a MAC missing from the data plane is not advertised.
+		w.syncAndNotify(sink, bdID, n.HardwareAddr, n.LinkIndex)
+	}
+	return nil
 }
 
 // Stop stops the FDB watcher and waits for cleanup
