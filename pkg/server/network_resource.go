@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -13,9 +14,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// EvpnBridgeHook enables or disables EVPN RT2 auto-advertise for a bridge domain
-// as its bridge is created or deleted. *pkg/bgp/export.EVPNExporter satisfies
-// it; it is nil unless EVPN auto-advertise is on.
+// EvpnBridgeHook enables or disables EVPN auto-advertise (RT2 + RT3) for a bridge
+// domain as its bridge is created or deleted. *pkg/bgp/export.EVPNExporter
+// satisfies it; it is nil unless EVPN auto-advertise is on.
 type EvpnBridgeHook interface {
 	EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error
 	DisableBD(bdID uint16)
@@ -60,13 +61,13 @@ func (s *NetworkResourceServer) BridgeCreate(
 		// Register with FDB watcher for dynamic MAC learning
 		s.fdbWatcher.RegisterBridge(int(ifindex), uint16(br.BdId))
 
-		// If EVPN auto-advertise is on and this bd_id has a binding, enable RT2
-		// auto-advertise for the bridge. A failure here is non-fatal: the bridge
-		// is created regardless, it just won't auto-originate RT2.
+		// If EVPN auto-advertise is on and this bd_id has a binding, enable
+		// auto-advertise (RT2 + RT3) for the bridge. A failure here is non-fatal:
+		// the bridge is created regardless, it just won't auto-originate.
 		if s.evpn != nil {
 			if b, ok := s.mgr.GetByBDID(uint16(br.BdId)); ok {
 				if err := s.evpn.EnableBD(b, ifindex); err != nil {
-					s.logger.Warn("enable EVPN RT2 auto-advertise for bridge",
+					s.logger.Warn("enable EVPN auto-advertise for bridge",
 						zap.String("bridge", br.Name), zap.Uint32("bd_id", br.BdId), zap.Error(err))
 				}
 			}
@@ -306,16 +307,12 @@ func (s *NetworkResourceServer) bdIDForBridge(ifindex uint32) (uint16, bool) {
 // skipped so they do not block the delete. Bridge ifindex is stored in the aux
 // map (L2 variant).
 func (s *NetworkResourceServer) findBridgeReference(ifindex uint32, exclude []string) (string, error) {
-	excluded := make(map[string]struct{}, len(exclude))
-	for _, e := range exclude {
-		excluded[e] = struct{}{}
-	}
 	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
 		return "", fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
-		if _, skip := excluded[prefix]; skip {
+		if slices.Contains(exclude, prefix) {
 			continue
 		}
 		switch v1.Srv6LocalAction(entry.Action) {
