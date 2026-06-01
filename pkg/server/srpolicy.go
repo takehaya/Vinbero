@@ -72,6 +72,18 @@ func (s *SrPolicyServer) upsert(ctx context.Context, defs []*v1.SrPolicyDef) []*
 	return errs
 }
 
+// srPolicyAdvertiseKey is the BGP SR Policy NLRI key for advertising or
+// withdrawing a local policy. It reuses the local candidate's distinguisher so a
+// withdraw matches what syncAdvertise pushed; a local policy from
+// apply.LocalSRPolicy always carries exactly one candidate.
+func srPolicyAdvertiseKey(p bgp.SRPolicy) bgp.SRPolicyKey {
+	return bgp.SRPolicyKey{
+		Color:         p.Color,
+		Endpoint:      p.Endpoint,
+		Distinguisher: p.Candidates[0].Distinguisher,
+	}
+}
+
 // syncAdvertise reconciles a local policy's BGP advertisement with its advertise
 // flag: push it into SAFI 73 (origin local) when set, or withdraw any prior
 // advertisement when not, so toggling the flag off on an Update stops advertising.
@@ -85,13 +97,8 @@ func (s *SrPolicyServer) syncAdvertise(ctx context.Context, def *v1.SrPolicyDef,
 		}
 		return nil
 	}
-	key := bgp.SRPolicyKey{
-		Color:         p.Color,
-		Endpoint:      p.Endpoint,
-		Distinguisher: p.Candidates[0].Distinguisher,
-	}
 	if !def.GetAdvertise() {
-		return s.advertiser.WithdrawPolicy(ctx, key)
+		return s.advertiser.WithdrawPolicy(ctx, srPolicyAdvertiseKey(p))
 	}
 	nh, err := netip.ParseAddr(s.nextHop)
 	if err != nil || !nh.Is6() || nh.Is4In6() {
@@ -163,11 +170,7 @@ func (s *SrPolicyServer) SrPolicyDelete(
 		// advertised). The key reuses the local candidate's distinguisher so it
 		// matches what syncAdvertise pushed.
 		if s.advertiser != nil {
-			if err := s.advertiser.WithdrawPolicy(ctx, bgp.SRPolicyKey{
-				Color:         lp.Color,
-				Endpoint:      lp.Endpoint,
-				Distinguisher: lp.Candidates[0].Distinguisher,
-			}); err != nil {
+			if err := s.advertiser.WithdrawPolicy(ctx, srPolicyAdvertiseKey(lp)); err != nil {
 				errs = append(errs, &v1.OperationError{
 					TriggerPrefix: srPolicyTrigger(key.GetColor(), key.GetEndpoint()),
 					Reason:        err.Error(),
