@@ -401,6 +401,26 @@ func TestEnableBDIdempotentOnUnchangedReBind(t *testing.T) {
 	}
 }
 
+// Reordering the export RTs is not a change (BGP RTs are an unordered set), so a
+// re-bind that only permutes them must stay a no-op rather than flap.
+func TestEnableBDReorderedRTsIsNoop(t *testing.T) {
+	e, adv, sid := newTestEVPNExporter(t)
+	b := evpnTestBinding()
+	b.ExportRTs = []string{"65000:100", "65000:200"}
+	if err := e.EnableBD(b, 10); err != nil {
+		t.Fatalf("EnableBD: %v", err)
+	}
+	createdBefore := len(sid.created)
+	b.ExportRTs = []string{"65000:200", "65000:100"} // same set, reversed
+	if err := e.EnableBD(b, 10); err != nil {
+		t.Fatalf("reordered-RT re-EnableBD: %v", err)
+	}
+	if len(sid.created) != createdBefore || len(sid.deleted) != 0 || len(adv.withdrawnMcast) != 0 {
+		t.Errorf("a reordered-RT re-bind must be a no-op; created=%d deleted=%d withdrawnMcast=%d",
+			len(sid.created), len(sid.deleted), len(adv.withdrawnMcast))
+	}
+}
+
 // A re-enable that changes an advertisement-affecting field (here the bridge
 // ifindex) tears the BD down and re-enables cleanly: old SIDs released, new SIDs
 // minted, RT3 withdrawn then re-advertised.
