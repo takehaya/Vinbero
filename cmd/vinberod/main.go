@@ -223,13 +223,16 @@ func run(cliCtx *cli.Context) error {
 	if exporter != nil {
 		vrfExp = exporter
 	}
-	// evpnExporter implements server.EvpnBridgeHook; same typed-nil avoidance so
-	// BridgeCreate's nil check holds when EVPN auto-advertise is off.
+	// evpnExporter implements server.EvpnBridgeHook (RT2/RT3) and
+	// server.EvpnEsHook (RT4); same typed-nil avoidance so the handlers' nil
+	// checks hold when EVPN auto-advertise is off.
 	var evpnBridge server.EvpnBridgeHook
+	var evpnES server.EvpnEsHook
 	if evpnExporter != nil {
 		evpnBridge = evpnExporter
+		evpnES = evpnExporter
 	}
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnBridge, lg)
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnBridge, evpnES, lg)
 
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure

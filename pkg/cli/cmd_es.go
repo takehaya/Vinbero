@@ -24,6 +24,7 @@ func esCommand() *cli.Command {
 					&cli.StringFlag{Name: "local-pe", Usage: "Local PE IPv6 (required when --local-attached, used for DF judgement)"},
 					&cli.StringFlag{Name: "df-pe", Usage: "Initial Designated Forwarder IPv6 (optional; set later with df-set)"},
 					&cli.StringFlag{Name: "mode", Value: "ALL_ACTIVE", Usage: "Redundancy mode: SINGLE_HOMING, ALL_ACTIVE, SINGLE_ACTIVE"},
+					&cli.StringFlag{Name: "rd", Usage: "Route distinguisher for RT4 auto-advertise (with --local-attached; ES-Import RT is derived from the ESI). Empty = no RT4 auto-advertise"},
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -32,11 +33,12 @@ func esCommand() *cli.Command {
 						return err
 					}
 					entry := &v1.EthernetSegment{
-						Esi:             c.String("esi"),
-						LocalAttached:   c.Bool("local-attached"),
-						LocalPeSrcAddr:  c.String("local-pe"),
-						DfPeSrcAddr:     c.String("df-pe"),
-						RedundancyMode:  mode,
+						Esi:            c.String("esi"),
+						LocalAttached:  c.Bool("local-attached"),
+						LocalPeSrcAddr: c.String("local-pe"),
+						DfPeSrcAddr:    c.String("df-pe"),
+						RedundancyMode: mode,
+						Rd:             c.String("rd"),
 					}
 					resp, err := clients.Es.EsCreate(context.Background(),
 						connect.NewRequest(&v1.EsCreateRequest{Entries: []*v1.EthernetSegment{entry}}))
