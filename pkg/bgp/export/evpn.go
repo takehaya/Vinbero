@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 
 	"go.uber.org/zap"
@@ -43,6 +44,7 @@ type EVPNAdvertiser interface {
 // advertised, and the set of locally-learned MACs currently advertised as RT2.
 type bdState struct {
 	binding       vrfbgp.Binding
+	bridgeIfindex uint32     // the BD's Linux bridge device, for the re-enable idempotency check
 	sid           netip.Addr // End.DT2U (RT2 unicast)
 	sidStr        string     // sid.String(), rendered once (constant per BD)
 	dt2mSID       netip.Addr // End.DT2M (RT3 BUM flood)
@@ -104,7 +106,7 @@ func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manag
 // idempotent: an ES already advertised is replaced. A push failure is returned
 // (the caller logs it; the ES data-plane entry is unaffected).
 func (e *EVPNExporter) EnableES(esi [bpf.ESILen]byte, rd string) error {
-	if err := checkNextHop(e.nextHop); err != nil {
+	if err := validateIPv6NextHop(e.nextHop); err != nil {
 		return err
 	}
 	if rd == "" {
@@ -178,22 +180,20 @@ func (e *EVPNExporter) disableESLocked(esi [bpf.ESILen]byte) {
 	delete(e.es, esi)
 }
 
-// checkNextHop validates the BGP next hop: a non-empty IPv6 (not v4-in-6)
-// address. SRv6 VPN transport is IPv6-only; an empty / IPv4 / malformed next hop
-// serializes into an RT2 no PE can forward toward. Mirrors the L3VPN exporter's
-// Start-time validation, applied per EnableBD since the EVPN path has no Start.
-func checkNextHop(nextHop string) error {
-	if nextHop == "" {
-		return fmt.Errorf("bgp.global.next_hop is required for EVPN auto advertise")
-	}
-	a, err := netip.ParseAddr(nextHop)
-	if err != nil {
-		return fmt.Errorf("bgp.global.next_hop %q is invalid: %w", nextHop, err)
-	}
-	if !a.Is6() || a.Is4In6() {
-		return fmt.Errorf("bgp.global.next_hop %q must be an IPv6 address", nextHop)
-	}
-	return nil
+// bdAdvertiseUnchanged reports whether re-enabling the bridge domain with binding
+// b and bridgeIfindex would produce the same advertisements and SIDs as the
+// current state st, so EnableBD can skip a needless disable + SID re-mint + RT3
+// re-advertise. It compares only the fields that shape what this exporter
+// originates: the RD and export RTs (RT2/RT3 keys + attributes), the default
+// locator (SID minting + RemoteSrc), the bridge ifindex (the End.DT2 L2 aux), and
+// the RT2 MaxPrefixes cap. Receive-only fields (import RTs, redistribute) do not
+// affect origination, so changing them alone is a no-op here.
+func bdAdvertiseUnchanged(st *bdState, b vrfbgp.Binding, bridgeIfindex uint32) bool {
+	return st.bridgeIfindex == bridgeIfindex &&
+		st.binding.RD == b.RD &&
+		st.binding.DefaultLocator == b.DefaultLocator &&
+		st.binding.MaxPrefixes == b.MaxPrefixes &&
+		slices.Equal(st.binding.ExportRTs, b.ExportRTs)
 }
 
 // EnableBD makes a bridge domain eligible for EVPN auto-advertise: it mints the
@@ -202,10 +202,11 @@ func checkNextHop(nextHop string) error {
 // bridge, and advertises RT3 so remote PEs flood BUM toward this node; local MACs
 // then advertise as RT2 via OnLocalMAC. bridgeIfindex is the BD's Linux bridge
 // device, needed for the L2 aux entry. A binding with a zero BDID, or without an
-// RD or a default locator, is rejected. It is idempotent: a BD already enabled
-// is replaced.
+// RD or a default locator, is rejected. It is idempotent: a re-enable whose
+// advertisement-affecting fields are unchanged is a no-op (no RT3/SID flap); any
+// real change re-enables cleanly (the prior enablement is torn down first).
 func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
-	if err := checkNextHop(e.nextHop); err != nil {
+	if err := validateIPv6NextHop(e.nextHop); err != nil {
 		return fmt.Errorf("vrf %q: %w", b.VRFName, err)
 	}
 	if b.BDID == 0 {
@@ -225,6 +226,15 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Idempotent re-enable: if the BD is already enabled and nothing that affects
+	// its advertisements changed, skip the disable + SID re-mint + RT3 re-advertise
+	// that would otherwise flap the bridge domain's routes for no change. A
+	// VrfBgpBind re-binds the same VRF on every call, so without this an unchanged
+	// re-bind would withdraw and re-originate RT3 + every RT2 and rewrite
+	// sid_function_map each time.
+	if st, ok := e.bds[b.BDID]; ok && bdAdvertiseUnchanged(st, b, bridgeIfindex) {
+		return nil
+	}
 	// Replace any existing enablement so a re-enable updates cleanly.
 	e.disableBDLocked(b.BDID)
 
@@ -243,13 +253,14 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 		return fmt.Errorf("vrf %q: install End.DT2M SID: %w", b.VRFName, err)
 	}
 	st := &bdState{
-		binding:    b,
-		sid:        dt2uSID,
-		sidStr:     dt2uSID.String(),
-		dt2mSID:    dt2mSID,
-		dt2mSIDStr: dt2mSID.String(),
-		remoteSrc:  remoteSrc,
-		advertised: make(map[bgp.EVPNMACKey]struct{}),
+		binding:       b,
+		bridgeIfindex: bridgeIfindex,
+		sid:           dt2uSID,
+		sidStr:        dt2uSID.String(),
+		dt2mSID:       dt2mSID,
+		dt2mSIDStr:    dt2mSID.String(),
+		remoteSrc:     remoteSrc,
+		advertised:    make(map[bgp.EVPNMACKey]struct{}),
 	}
 	e.bds[b.BDID] = st
 	// Advertise RT3 (Inclusive Multicast) so remote PEs flood BUM traffic toward

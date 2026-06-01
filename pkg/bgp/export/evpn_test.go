@@ -356,6 +356,74 @@ func TestOnLocalMACPushFailureNotRecorded(t *testing.T) {
 	}
 }
 
+// A re-enable whose advertisement-affecting fields are unchanged is a no-op: no
+// SID re-mint, no RT3 flap, and the already-advertised MACs stay tracked. A change
+// to a receive-only field (import RTs) is likewise a no-op for origination.
+func TestEnableBDIdempotentOnUnchangedReBind(t *testing.T) {
+	e, adv, sid := newTestEVPNExporter(t)
+	b := evpnTestBinding()
+	if err := e.EnableBD(b, 10); err != nil {
+		t.Fatalf("EnableBD: %v", err)
+	}
+	mac := net.HardwareAddr{0xaa, 0, 0, 0, 0, 1}
+	e.OnLocalMAC(100, mac, true)
+	createdBefore, mcastBefore := len(sid.created), len(adv.pushedMcast)
+
+	// Re-bind with an identical binding + ifindex.
+	if err := e.EnableBD(b, 10); err != nil {
+		t.Fatalf("re-EnableBD: %v", err)
+	}
+	if len(sid.created) != createdBefore {
+		t.Errorf("unchanged re-bind must not re-mint SIDs; created %d -> %d", createdBefore, len(sid.created))
+	}
+	if len(sid.deleted) != 0 {
+		t.Errorf("unchanged re-bind must not release SIDs; deleted=%d", len(sid.deleted))
+	}
+	if len(adv.pushedMcast) != mcastBefore || len(adv.withdrawnMcast) != 0 {
+		t.Errorf("unchanged re-bind must not flap RT3; pushedMcast=%d withdrawnMcast=%d", len(adv.pushedMcast), len(adv.withdrawnMcast))
+	}
+
+	// A change limited to a receive-only field (import RTs) does not affect what
+	// this exporter originates, so it is still a no-op.
+	b.ImportRTs = []string{"65000:999"}
+	if err := e.EnableBD(b, 10); err != nil {
+		t.Fatalf("import-rt-only re-EnableBD: %v", err)
+	}
+	if len(sid.deleted) != 0 || len(adv.withdrawnMcast) != 0 {
+		t.Errorf("a receive-only import_rts change must not re-enable origination; deleted=%d withdrawnMcast=%d", len(sid.deleted), len(adv.withdrawnMcast))
+	}
+
+	// The MAC advertised before the re-binds is still tracked (state was preserved,
+	// not rebuilt): withdrawing it fires exactly one withdraw.
+	e.OnLocalMAC(100, mac, false)
+	if len(adv.withdrawn) != 1 {
+		t.Errorf("the pre-rebind MAC must still be tracked after a no-op re-bind; withdrawn=%d", len(adv.withdrawn))
+	}
+}
+
+// A re-enable that changes an advertisement-affecting field (here the bridge
+// ifindex) tears the BD down and re-enables cleanly: old SIDs released, new SIDs
+// minted, RT3 withdrawn then re-advertised.
+func TestEnableBDReEnablesOnChange(t *testing.T) {
+	e, adv, sid := newTestEVPNExporter(t)
+	b := evpnTestBinding()
+	if err := e.EnableBD(b, 10); err != nil {
+		t.Fatalf("EnableBD: %v", err)
+	}
+	if err := e.EnableBD(b, 20); err != nil { // bridge ifindex changed 10 -> 20
+		t.Fatalf("changed re-EnableBD: %v", err)
+	}
+	if len(sid.deleted) != 2 {
+		t.Errorf("a changed re-bind must release both old SIDs; deleted=%d want 2", len(sid.deleted))
+	}
+	if len(sid.created) != 4 {
+		t.Errorf("a changed re-bind must re-mint both SIDs; created=%d want 4", len(sid.created))
+	}
+	if len(adv.withdrawnMcast) != 1 || len(adv.pushedMcast) != 2 {
+		t.Errorf("a changed re-bind must flap RT3; pushedMcast=%d withdrawnMcast=%d", len(adv.pushedMcast), len(adv.withdrawnMcast))
+	}
+}
+
 // testESI is a Type-0 ESI whose value's high-order 6 octets (bytes 1..6) encode
 // the MAC aa:bb:cc:dd:ee:ff, which RFC 7432 Sec. 7.6 derives as the ES-Import RT.
 var testESI = [bpf.ESILen]byte{0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03}
