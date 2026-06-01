@@ -17,7 +17,7 @@ import (
 // fakeEVPNAdv records RT2 (MAC/IP) and RT3 (Inclusive Multicast) advertise /
 // withdraw calls.
 type fakeEVPNAdv struct {
-	pushed    []bgp.EVPNRoute
+	pushed         []bgp.EVPNRoute
 	withdrawn      []bgp.EVPNMACKey
 	pushedMcast    []bgp.EVPNRoute
 	withdrawnMcast []bgp.EVPNMcastKey
