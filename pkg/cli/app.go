@@ -56,6 +56,7 @@ func NewApp() *cli.App {
 			vrfBgpCommand(),
 			bgpCommand(),
 			srPolicyCommand(),
+			mupCommand(),
 			fdbCommand(),
 			vlanTableCommand(),
 			statsCommand(),

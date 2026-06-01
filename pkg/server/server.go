@@ -121,6 +121,13 @@ func (s *Server) Setup() {
 	s.mux.Handle(srPolicyPath, srPolicyHandler)
 	s.logger.Info("Registered SrPolicyService", zap.String("path", srPolicyPath))
 
+	// Mup service (local BGP MUP route origination, SAFI 85). s.mupAdv is nil
+	// when BGP is disabled, in which case the RPCs return FailedPrecondition.
+	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop)
+	mupPath, mupHandler := vinberov1connect.NewMupServiceHandler(mupServer)
+	s.mux.Handle(mupPath, mupHandler)
+	s.logger.Info("Registered MupService", zap.String("path", mupPath))
+
 	// Locator service (SRv6 locator manager). Registered before
 	// SidFunctionService so the latter can receive the manager and
 	// honor locator_ref in SidFunctionCreate.
