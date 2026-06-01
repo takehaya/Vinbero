@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/netip"
 	"sort"
 	"sync"
 
@@ -53,6 +52,12 @@ func mupKeyFor(mr bgp.MUPRoute) mupLocalKey {
 // FailedPrecondition); nextHop is the default BGP next hop
 // (bgp.global.next_hop) used when a route does not carry its own.
 type MupServer struct {
+	// mu guards only routes (taken for the map read/write, not held across the
+	// gobgp Push/Withdraw I/O). Operator CRUD is sequential; two concurrent
+	// contradictory same-key RPCs (a create and a delete) are NOT serialized
+	// against each other, so the local table can momentarily diverge from the
+	// gobgp RIB. The RIB is the source of truth (what is actually advertised);
+	// routes is the List view, and bgpSession.Stop clears any orphan on shutdown.
 	mu         sync.Mutex
 	advertiser bgp.MUPController
 	nextHop    string
@@ -84,15 +89,15 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 			continue
 		}
 		// Default an empty next hop to the configured bgp.global.next_hop, then
-		// require it to be a routable IPv6 (SRv6 over IPv6); an empty / IPv4 next
-		// hop serializes into a route no PE can forward toward.
+		// require it to be a routable IPv6 (SRv6 over IPv6); empty / IPv4 / :: would
+		// serialize into a route no PE can forward toward.
 		if mr.NextHop == "" {
 			mr.NextHop = s.nextHop
 		}
-		if nh, err := netip.ParseAddr(mr.NextHop); err != nil || !nh.Is6() || nh.Is4In6() {
+		if _, err := parseAdvertiseNextHop(mr.NextHop); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: mupRouteID(r),
-				Reason:        fmt.Sprintf("next_hop %q must be IPv6 (set bgp.global.next_hop or --next-hop)", mr.NextHop),
+				Reason:        fmt.Sprintf("%v (set bgp.global.next_hop or --next-hop)", err),
 			})
 			continue
 		}

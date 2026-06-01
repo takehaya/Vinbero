@@ -99,6 +99,12 @@ func TestMupServer_DisabledWhenNoBGP(t *testing.T) {
 	if _, err := s.MupCreate(context.Background(), connect.NewRequest(&v1.MupCreateRequest{})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("MupCreate err = %v, want FailedPrecondition", err)
 	}
+	if _, err := s.MupUpdate(context.Background(), connect.NewRequest(&v1.MupUpdateRequest{})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("MupUpdate err = %v, want FailedPrecondition", err)
+	}
+	if _, err := s.MupDelete(context.Background(), connect.NewRequest(&v1.MupDeleteRequest{})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("MupDelete err = %v, want FailedPrecondition", err)
+	}
 }
 
 // Create originates each route through the matching per-type Push method and
@@ -137,11 +143,12 @@ func TestMupServer_RequiresIPv6NextHop(t *testing.T) {
 	msg := mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24"},                   // empty + no default
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1", NextHop: "192.0.2.1"}, // IPv4
+		&v1.BgpMupRoute{RouteType: "t1st", Rd: "65000:1", Prefix: "10.0.0.2/32", NextHop: "::"},     // unspecified -> blackhole
 	)
-	if len(msg.Errors) != 2 {
-		t.Fatalf("both routes should error on next hop; errors=%v", msg.Errors)
+	if len(msg.Errors) != 3 {
+		t.Fatalf("each bad next hop should error; errors=%v", msg.Errors)
 	}
-	if len(adv.pushedISD) != 0 || len(adv.pushedDSD) != 0 {
+	if len(adv.pushedISD) != 0 || len(adv.pushedDSD) != 0 || len(adv.pushedT1ST) != 0 {
 		t.Errorf("nothing should be pushed without a valid next hop")
 	}
 	if got := mupListRoutes(t, s); len(got) != 0 {
@@ -241,26 +248,34 @@ func TestMupServer_TypeDisambiguatesKey(t *testing.T) {
 	}
 }
 
-// List round-trips every field through mupRouteToProto (route_type strings).
+// List round-trips every field through mupRouteToProto, including the uint8 ->
+// uint32 widening (qfi/rqi/teid_len/segment_id2) and the route_type string.
 func TestMupServer_ListRoundTrips(t *testing.T) {
 	adv := &fakeMUPController{}
 	s := NewMupServer(adv, mupTestNH)
 	mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24"},
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
-		&v1.BgpMupRoute{RouteType: "t1st", Rd: "65000:1", Prefix: "10.0.0.2/32", Teid: 100},
-		&v1.BgpMupRoute{RouteType: "t2st", Rd: "65000:1", Endpoint: "2001:db8::9", Teid: 200, TeidLen: 32},
+		&v1.BgpMupRoute{RouteType: "t1st", Rd: "65000:1", Prefix: "10.0.0.2/32", Teid: 100, Qfi: 5, Rqi: 1},
+		&v1.BgpMupRoute{RouteType: "t2st", Rd: "65000:1", Endpoint: "2001:db8::9", Teid: 200, TeidLen: 24, SegmentId2: 7},
 	)
-	types := map[string]bool{}
+	byType := map[string]*v1.BgpMupRoute{}
 	for _, r := range mupListRoutes(t, s) {
-		types[r.GetRouteType()] = true
+		byType[r.GetRouteType()] = r
 		if r.GetNextHop() != mupTestNH {
 			t.Errorf("route %s missing defaulted next hop", r.GetRouteType())
 		}
 	}
 	for _, want := range []string{"isd", "dsd", "t1st", "t2st"} {
-		if !types[want] {
+		if byType[want] == nil {
 			t.Errorf("List missing route_type %q", want)
 		}
+	}
+	// Pin the narrowing/widening round-trip so a wrong cast in mupRouteToProto fails.
+	if r := byType["t1st"]; r != nil && (r.GetQfi() != 5 || r.GetRqi() != 1 || r.GetTeid() != 100) {
+		t.Errorf("t1st fields did not round-trip: qfi=%d rqi=%d teid=%d", r.GetQfi(), r.GetRqi(), r.GetTeid())
+	}
+	if r := byType["t2st"]; r != nil && (r.GetTeidLen() != 24 || r.GetSegmentId2() != 7) {
+		t.Errorf("t2st fields did not round-trip: teid_len=%d segment_id2=%d", r.GetTeidLen(), r.GetSegmentId2())
 	}
 }
