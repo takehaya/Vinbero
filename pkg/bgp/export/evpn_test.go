@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -14,11 +15,14 @@ import (
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
-// fakeEVPNAdv records RT2 advertise / withdraw calls.
+// fakeEVPNAdv records RT2 (MAC/IP) and RT3 (Inclusive Multicast) advertise /
+// withdraw calls.
 type fakeEVPNAdv struct {
-	pushed    []bgp.EVPNRoute
-	withdrawn []bgp.EVPNMACKey
-	pushErr   error
+	pushed         []bgp.EVPNRoute
+	withdrawn      []bgp.EVPNMACKey
+	pushedMcast    []bgp.EVPNRoute
+	withdrawnMcast []bgp.EVPNMcastKey
+	pushErr        error
 }
 
 func (f *fakeEVPNAdv) PushEVPNMac(_ context.Context, r bgp.EVPNRoute) error {
@@ -31,6 +35,19 @@ func (f *fakeEVPNAdv) PushEVPNMac(_ context.Context, r bgp.EVPNRoute) error {
 
 func (f *fakeEVPNAdv) WithdrawEVPNMac(_ context.Context, key bgp.EVPNMACKey) error {
 	f.withdrawn = append(f.withdrawn, key)
+	return nil
+}
+
+func (f *fakeEVPNAdv) PushEVPNInclusiveMulticast(_ context.Context, r bgp.EVPNRoute) error {
+	if f.pushErr != nil {
+		return f.pushErr
+	}
+	f.pushedMcast = append(f.pushedMcast, r)
+	return nil
+}
+
+func (f *fakeEVPNAdv) WithdrawEVPNInclusiveMulticast(_ context.Context, key bgp.EVPNMcastKey) error {
+	f.withdrawnMcast = append(f.withdrawnMcast, key)
 	return nil
 }
 
@@ -66,16 +83,70 @@ func evpnTestBinding() vrfbgp.Binding {
 	}
 }
 
-func TestEnableBDInstallsDT2U(t *testing.T) {
-	e, _, sid := newTestEVPNExporter(t)
+func TestEnableBDInstallsBothL2SIDs(t *testing.T) {
+	e, adv, sid := newTestEVPNExporter(t)
 	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
-	if len(sid.created) != 1 {
-		t.Fatalf("want 1 End.DT2U SID installed, got %d: %+v", len(sid.created), sid.created)
+	if len(sid.created) != 2 {
+		t.Fatalf("want 2 L2 SIDs installed (DT2U + DT2M), got %d: %+v", len(sid.created), sid.created)
 	}
-	if sid.created[0].action != endpointActionDT2U {
-		t.Errorf("installed SID action = %d, want End.DT2U %d", sid.created[0].action, endpointActionDT2U)
+	if _, ok := sidForAction(sid.created, endpointActionDT2U); !ok {
+		t.Errorf("no End.DT2U SID installed: %+v", sid.created)
+	}
+	if _, ok := sidForAction(sid.created, endpointActionDT2M); !ok {
+		t.Errorf("no End.DT2M SID installed: %+v", sid.created)
+	}
+	// RT3 (Inclusive Multicast) is advertised once at enable, carrying the DT2M SID.
+	if len(adv.pushedMcast) != 1 {
+		t.Fatalf("want 1 RT3 advertised at enable, got %d", len(adv.pushedMcast))
+	}
+	r3 := adv.pushedMcast[0]
+	if r3.Type != bgp.EVPNRouteTypeInclusiveMulticast {
+		t.Errorf("type = %d, want RT3 inclusive multicast", r3.Type)
+	}
+	dt2m, _ := sidForAction(sid.created, endpointActionDT2M)
+	if r3.SRv6SID+"/128" != dt2m {
+		t.Errorf("RT3 SID = %q, want the installed End.DT2M %q", r3.SRv6SID, dt2m)
+	}
+	if r3.RD != "65000:100" || r3.NextHop != "2001:db8:ff::1" || r3.RemoteSrc != "fd00:1:1::" {
+		t.Errorf("RT3 fields wrong: %+v", r3)
+	}
+}
+
+func TestEnableBDRollsBackDT2UWhenDT2MFails(t *testing.T) {
+	e, _, sid := newTestEVPNExporter(t)
+	// DT2U installs (call 1), DT2M (call 2) fails -> the DT2U rollback path runs.
+	sid.failOnCall = 2
+	if err := e.EnableBD(evpnTestBinding(), 10); err == nil {
+		t.Fatal("EnableBD should fail when the End.DT2M SID install fails")
+	}
+	if len(sid.created) != 1 {
+		t.Fatalf("want only the DT2U SID created before the failure, got %d", len(sid.created))
+	}
+	if len(sid.deleted) != 1 {
+		t.Fatalf("want the DT2U SID rolled back, got %d deletes", len(sid.deleted))
+	}
+	if sid.created[0].prefix != sid.deleted[0] {
+		t.Errorf("rolled-back SID %q != installed DT2U %q", sid.deleted[0], sid.created[0].prefix)
+	}
+	// Re-enable must work (the DT2U function was returned to the pool).
+	sid.failOnCall = 0
+	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+		t.Fatalf("re-enable after rollback: %v", err)
+	}
+}
+
+func TestEnableBDRollbackFailureSurfacesStrandedSID(t *testing.T) {
+	e, _, sid := newTestEVPNExporter(t)
+	sid.failOnCall = 2                       // DT2M install fails
+	sid.deleteErr = errors.New("map locked") // the DT2U rollback delete also fails
+	err := e.EnableBD(evpnTestBinding(), 10)
+	if err == nil {
+		t.Fatal("EnableBD should fail when both the DT2M install and the DT2U rollback fail")
+	}
+	if !strings.Contains(err.Error(), "stranded") {
+		t.Errorf("error should surface the stranded DT2U SID, got: %v", err)
 	}
 }
 
@@ -115,21 +186,30 @@ func TestEnableBDRejectsMissingFields(t *testing.T) {
 	}
 }
 
-func TestSIDForBD(t *testing.T) {
-	e, _, sid := newTestEVPNExporter(t)
-	if _, ok := e.SIDForBD(100); ok {
-		t.Error("SIDForBD must miss before the BD is enabled")
+func TestSIDsForBD(t *testing.T) {
+	e, _, _ := newTestEVPNExporter(t)
+	if got := e.SIDsForBD(100); got != nil {
+		t.Errorf("SIDsForBD must be nil before the BD is enabled, got %v", got)
 	}
 	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
-	got, ok := e.SIDForBD(100)
-	if !ok || got != sid.created[0].prefix {
-		t.Errorf("SIDForBD(100) = %q,%v; want the installed End.DT2U key %q", got, ok, sid.created[0].prefix)
+	got := e.SIDsForBD(100)
+	if len(got) != 2 {
+		t.Fatalf("SIDsForBD(100) should return both the DT2U and DT2M keys, got %v", got)
+	}
+	// Both must be valid "<addr>/128" sid_function_map keys and distinct.
+	if got[0] == got[1] {
+		t.Errorf("the DT2U and DT2M keys must differ, got %v", got)
+	}
+	for _, k := range got {
+		if _, _, err := net.ParseCIDR(k); err != nil {
+			t.Errorf("SID key %q is not a valid prefix: %v", k, err)
+		}
 	}
 	e.DisableBD(100)
-	if _, ok := e.SIDForBD(100); ok {
-		t.Error("SIDForBD must miss after the BD is disabled")
+	if got := e.SIDsForBD(100); got != nil {
+		t.Errorf("SIDsForBD must be nil after the BD is disabled, got %v", got)
 	}
 }
 
@@ -163,8 +243,9 @@ func TestOnLocalMACAdvertisesRT2(t *testing.T) {
 	if r.RemoteSrc != "fd00:1:1::" {
 		t.Errorf("remote_src = %q, want the locator base fd00:1:1::", r.RemoteSrc)
 	}
-	if r.SRv6SID+"/128" != sid.created[0].prefix {
-		t.Errorf("SID = %q, want the installed End.DT2U %q", r.SRv6SID, sid.created[0].prefix)
+	dt2u, _ := sidForAction(sid.created, endpointActionDT2U)
+	if r.SRv6SID+"/128" != dt2u {
+		t.Errorf("SID = %q, want the installed End.DT2U %q", r.SRv6SID, dt2u)
 	}
 }
 
@@ -231,8 +312,11 @@ func TestDisableBDWithdrawsAllAndReleases(t *testing.T) {
 	if len(adv.withdrawn) != 2 {
 		t.Errorf("want 2 RT2 withdrawn on disable, got %d", len(adv.withdrawn))
 	}
-	if len(sid.deleted) != 1 {
-		t.Errorf("want the End.DT2U SID released on disable, got %d", len(sid.deleted))
+	if len(adv.withdrawnMcast) != 1 {
+		t.Errorf("want the RT3 withdrawn on disable, got %d", len(adv.withdrawnMcast))
+	}
+	if len(sid.deleted) != 2 {
+		t.Errorf("want both L2 SIDs (DT2U + DT2M) released on disable, got %d", len(sid.deleted))
 	}
 	// The BD is gone, so re-enabling must succeed.
 	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {

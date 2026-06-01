@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -13,16 +14,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// EvpnBridgeHook enables or disables EVPN RT2 auto-advertise for a bridge domain
-// as its bridge is created or deleted. *pkg/bgp/export.EVPNExporter satisfies
-// it; it is nil unless EVPN auto-advertise is on.
+// EvpnBridgeHook enables or disables EVPN auto-advertise (RT2 + RT3) for a bridge
+// domain as its bridge is created or deleted. *pkg/bgp/export.EVPNExporter
+// satisfies it; it is nil unless EVPN auto-advertise is on.
 type EvpnBridgeHook interface {
 	EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error
 	DisableBD(bdID uint16)
-	// SIDForBD returns the End.DT2U SID (a sid_function_map key) the exporter
-	// installed for the bd, so BridgeDelete can exclude this lifecycle-owned SID
-	// from its reference check. ok=false for a bd that is not enabled.
-	SIDForBD(bdID uint16) (string, bool)
+	// SIDsForBD returns the sid_function_map keys the exporter installed for the
+	// bd (End.DT2U + End.DT2M), so BridgeDelete can exclude these lifecycle-owned
+	// SIDs from its reference check. nil for a bd that is not enabled.
+	SIDsForBD(bdID uint16) []string
 }
 
 type NetworkResourceServer struct {
@@ -60,13 +61,13 @@ func (s *NetworkResourceServer) BridgeCreate(
 		// Register with FDB watcher for dynamic MAC learning
 		s.fdbWatcher.RegisterBridge(int(ifindex), uint16(br.BdId))
 
-		// If EVPN auto-advertise is on and this bd_id has a binding, enable RT2
-		// auto-advertise for the bridge. A failure here is non-fatal: the bridge
-		// is created regardless, it just won't auto-originate RT2.
+		// If EVPN auto-advertise is on and this bd_id has a binding, enable
+		// auto-advertise (RT2 + RT3) for the bridge. A failure here is non-fatal:
+		// the bridge is created regardless, it just won't auto-originate.
 		if s.evpn != nil {
 			if b, ok := s.mgr.GetByBDID(uint16(br.BdId)); ok {
 				if err := s.evpn.EnableBD(b, ifindex); err != nil {
-					s.logger.Warn("enable EVPN RT2 auto-advertise for bridge",
+					s.logger.Warn("enable EVPN auto-advertise for bridge",
 						zap.String("bridge", br.Name), zap.Uint32("bd_id", br.BdId), zap.Error(err))
 				}
 			}
@@ -99,10 +100,11 @@ func (s *NetworkResourceServer) BridgeDelete(
 			ifindex = resolved
 		}
 
-		// The EVPN auto-advertise End.DT2U SID for this bd is lifecycle-tied to the
-		// bridge: it is released by DisableBD as part of this delete, so exclude it
-		// from the reference check below (otherwise it would always report the
-		// bridge as referenced and block the delete). On a ResourceManager cache
+		// The EVPN auto-advertise SIDs for this bd (End.DT2U for RT2, End.DT2M for
+		// RT3) are lifecycle-tied to the bridge: they are released by DisableBD as
+		// part of this delete, so exclude them (selfSIDs) from the reference check
+		// below (otherwise they would always report the bridge as referenced and
+		// block the delete). On a ResourceManager cache
 		// miss (e.g. after a restart) bdID is 0, so recover it from the installed
 		// L2 SID's aux. DisableBD itself runs only AFTER the bridge is actually
 		// deleted, so a failed reference check or DeleteBridge leaves EVPN
@@ -112,15 +114,13 @@ func (s *NetworkResourceServer) BridgeDelete(
 				bdID = bd
 			}
 		}
-		var selfSID string
+		var selfSIDs []string
 		if s.evpn != nil && bdID != 0 {
-			if sid, ok := s.evpn.SIDForBD(bdID); ok {
-				selfSID = sid
-			}
+			selfSIDs = s.evpn.SIDsForBD(bdID)
 		}
 
 		if ifindex != 0 {
-			ref, err := s.findBridgeReference(ifindex, selfSID)
+			ref, err := s.findBridgeReference(ifindex, selfSIDs)
 			if err != nil {
 				resp.Errors = append(resp.Errors, &v1.OperationError{
 					TriggerPrefix: name,
@@ -303,17 +303,17 @@ func (s *NetworkResourceServer) bdIDForBridge(ifindex uint32) (uint16, bool) {
 }
 
 // findBridgeReference checks if any End.DT2/DT2M SID entry references the given
-// bridge_ifindex, returning the first such SID prefix. The exclude prefix (the
-// EVPN auto-advertise SID for this bridge, which the delete itself releases) is
-// skipped so it does not block the delete. Bridge ifindex is stored in the aux
+// bridge_ifindex, returning the first such SID prefix. The exclude prefixes (the
+// EVPN auto-advertise SIDs for this bridge, which the delete itself releases) are
+// skipped so they do not block the delete. Bridge ifindex is stored in the aux
 // map (L2 variant).
-func (s *NetworkResourceServer) findBridgeReference(ifindex uint32, exclude string) (string, error) {
+func (s *NetworkResourceServer) findBridgeReference(ifindex uint32, exclude []string) (string, error) {
 	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
 		return "", fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
-		if exclude != "" && prefix == exclude {
+		if slices.Contains(exclude, prefix) {
 			continue
 		}
 		switch v1.Srv6LocalAction(entry.Action) {
