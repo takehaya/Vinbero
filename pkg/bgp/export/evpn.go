@@ -176,7 +176,7 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	}
 	e.logger.Info("bridge domain enabled for EVPN auto advertise",
 		zap.String("vrf", b.VRFName), zap.Uint16("bd_id", b.BDID), zap.String("rd", b.RD),
-		zap.String("dt2u_sid", dt2uSID.String()), zap.String("dt2m_sid", dt2mSID.String()))
+		zap.String("dt2u_sid", st.sidStr), zap.String("dt2m_sid", st.dt2mSIDStr))
 	return nil
 }
 
