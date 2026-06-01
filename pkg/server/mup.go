@@ -78,17 +78,11 @@ func (s *MupServer) disabledErr() error {
 func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.OperationError {
 	errs := make([]*v1.OperationError, 0)
 	for _, r := range routes {
-		typ, err := mupRouteType(r.GetRouteType())
+		mr, err := parseMUPRoute(r)
 		if err != nil {
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		if err := validateMUPRouteFields(r); err != nil {
-			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
-			continue
-		}
-		mr := protoToMUPRoute(r)
-		mr.Type = typ
 		// Default an empty next hop to the configured bgp.global.next_hop, then
 		// require it to be a routable IPv6 (SRv6 over IPv6); an empty / IPv4 next
 		// hop serializes into a route no PE can forward toward.
@@ -102,7 +96,7 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 			})
 			continue
 		}
-		if err := s.pushMUP(ctx, mr); err != nil {
+		if err := pushMUPRoute(ctx, s.advertiser, mr); err != nil {
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
@@ -111,41 +105,6 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 		s.mu.Unlock()
 	}
 	return errs
-}
-
-// pushMUP advertises one route through the type's PushMUP* method. The caller
-// has set mr.Type and validated the fields.
-func (s *MupServer) pushMUP(ctx context.Context, mr bgp.MUPRoute) error {
-	switch mr.Type {
-	case bgp.MUPRouteTypeISD:
-		return s.advertiser.PushMUPISD(ctx, mr)
-	case bgp.MUPRouteTypeDSD:
-		return s.advertiser.PushMUPDSD(ctx, mr)
-	case bgp.MUPRouteTypeT1ST:
-		return s.advertiser.PushMUPT1ST(ctx, mr)
-	case bgp.MUPRouteTypeT2ST:
-		return s.advertiser.PushMUPT2ST(ctx, mr)
-	default:
-		return fmt.Errorf("unsupported MUP route type %v", mr.Type)
-	}
-}
-
-// withdrawMUP withdraws one route through the type's WithdrawMUP* method, using
-// the same per-type key fields mupKeyFor tracks. WithdrawMUP* is a no-op for a
-// route that was never advertised.
-func (s *MupServer) withdrawMUP(ctx context.Context, mr bgp.MUPRoute) error {
-	switch mr.Type {
-	case bgp.MUPRouteTypeISD:
-		return s.advertiser.WithdrawMUPISD(ctx, bgp.MUPISDKey{RD: mr.RD, Prefix: mr.Prefix})
-	case bgp.MUPRouteTypeDSD:
-		return s.advertiser.WithdrawMUPDSD(ctx, bgp.MUPDSDKey{RD: mr.RD, Address: mr.Address})
-	case bgp.MUPRouteTypeT1ST:
-		return s.advertiser.WithdrawMUPT1ST(ctx, bgp.MUPT1STKey{RD: mr.RD, Prefix: mr.Prefix, TEID: mr.TEID})
-	case bgp.MUPRouteTypeT2ST:
-		return s.advertiser.WithdrawMUPT2ST(ctx, bgp.MUPT2STKey{RD: mr.RD, Endpoint: mr.Endpoint, TEID: mr.TEID, TEIDLen: mr.TEIDLen})
-	default:
-		return fmt.Errorf("unsupported MUP route type %v", mr.Type)
-	}
 }
 
 func (s *MupServer) MupCreate(
@@ -177,20 +136,14 @@ func (s *MupServer) MupDelete(
 	}
 	errs := make([]*v1.OperationError, 0)
 	for _, r := range req.Msg.GetRoutes() {
-		typ, err := mupRouteType(r.GetRouteType())
+		// parseMUPRoute re-runs validateMUPRouteFields so the T2ST teid_len
+		// narrowing cast cannot wrap into a key that mismatches what was pushed.
+		mr, err := parseMUPRoute(r)
 		if err != nil {
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		// Run the same field validation as advertise so the T2ST teid_len
-		// narrowing cast cannot wrap into a key that mismatches what was pushed.
-		if err := validateMUPRouteFields(r); err != nil {
-			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
-			continue
-		}
-		mr := protoToMUPRoute(r)
-		mr.Type = typ
-		if err := s.withdrawMUP(ctx, mr); err != nil {
+		if err := withdrawMUPRoute(ctx, s.advertiser, mr); err != nil {
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}

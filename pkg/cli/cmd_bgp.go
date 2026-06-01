@@ -291,23 +291,7 @@ func bgpCommand() *cli.Command {
 			{
 				Name:  "advertise-mup",
 				Usage: "Advertise a BGP MUP route (SAFI 85; --route-type isd|dsd|t1st|t2st)",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "route-type", Required: true, Usage: "isd | dsd | t1st | t2st"},
-					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
-					&cli.StringFlag{Name: "route-targets", Usage: "Export route targets (comma-separated)"},
-					&cli.StringFlag{Name: "prefix", Usage: "isd segment prefix / t1st UE prefix (CIDR)"},
-					&cli.StringFlag{Name: "address", Usage: "dsd direct-segment endpoint address"},
-					&cli.UintFlag{Name: "teid", Usage: "GTP-U TEID (t1st exact / t2st prefix value)"},
-					&cli.UintFlag{Name: "teid-len", Value: 32, Usage: "t2st significant TEID prefix bits (t1st: 32)"},
-					&cli.UintFlag{Name: "qfi", Usage: "t1st QoS Flow Identifier"},
-					&cli.UintFlag{Name: "rqi", Usage: "t1st Reflective QoS Indicator"},
-					&cli.StringFlag{Name: "endpoint", Usage: "t1st gNB N3 address / t2st GTP tunnel endpoint"},
-					&cli.StringFlag{Name: "source", Usage: "t1st optional source address"},
-					&cli.UintFlag{Name: "segment-id2", Usage: "MUP Extended Community segment id (16-bit half)"},
-					&cli.UintFlag{Name: "segment-id4", Usage: "MUP Extended Community segment id (32-bit half)"},
-					&cli.StringFlag{Name: "sid", Usage: "Segment SRv6 SID (IPv6)"},
-					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop"},
-				},
+				Flags: mupRouteFlags(true),
 				Action: func(c *cli.Context) error {
 					r := mupRouteFromFlags(c)
 					clients := clientsFromContext(c)
@@ -322,15 +306,7 @@ func bgpCommand() *cli.Command {
 			{
 				Name:  "withdraw-mup",
 				Usage: "Withdraw a previously advertised BGP MUP route",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "route-type", Required: true, Usage: "isd | dsd | t1st | t2st"},
-					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
-					&cli.StringFlag{Name: "prefix", Usage: "isd segment prefix / t1st UE prefix (CIDR)"},
-					&cli.StringFlag{Name: "address", Usage: "dsd direct-segment endpoint address"},
-					&cli.UintFlag{Name: "teid", Usage: "GTP-U TEID (t1st / t2st)"},
-					&cli.UintFlag{Name: "teid-len", Value: 32, Usage: "t2st TEID prefix bits"},
-					&cli.StringFlag{Name: "endpoint", Usage: "t2st GTP tunnel endpoint"},
-				},
+				Flags: mupKeyFlags(),
 				Action: func(c *cli.Context) error {
 					r := mupRouteFromFlags(c)
 					clients := clientsFromContext(c)
@@ -343,6 +319,49 @@ func bgpCommand() *cli.Command {
 				},
 			},
 		},
+	}
+}
+
+// mupRouteFlags returns the full MUP route flag set shared by `bgp advertise-mup`
+// and `mup create/update`. requireNextHop is true for the explicit advertise
+// command (next hop mandatory) and false for `mup create/update`, where an
+// omitted next hop defaults to bgp.global.next_hop server-side.
+func mupRouteFlags(requireNextHop bool) []cli.Flag {
+	nextHopUsage := "BGP next hop (IPv6)"
+	if !requireNextHop {
+		nextHopUsage = "BGP next hop (IPv6); defaults to bgp.global.next_hop"
+	}
+	return []cli.Flag{
+		&cli.StringFlag{Name: "route-type", Required: true, Usage: "isd | dsd | t1st | t2st"},
+		&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
+		&cli.StringFlag{Name: "route-targets", Usage: "Export route targets (comma-separated)"},
+		&cli.StringFlag{Name: "prefix", Usage: "isd segment prefix / t1st UE prefix (CIDR)"},
+		&cli.StringFlag{Name: "address", Usage: "dsd direct-segment endpoint address"},
+		&cli.UintFlag{Name: "teid", Usage: "GTP-U TEID (t1st exact / t2st prefix value)"},
+		&cli.UintFlag{Name: "teid-len", Value: 32, Usage: "t2st significant TEID prefix bits (t1st: 32)"},
+		&cli.UintFlag{Name: "qfi", Usage: "t1st QoS Flow Identifier"},
+		&cli.UintFlag{Name: "rqi", Usage: "t1st Reflective QoS Indicator"},
+		&cli.StringFlag{Name: "endpoint", Usage: "t1st gNB N3 address / t2st GTP tunnel endpoint"},
+		&cli.StringFlag{Name: "source", Usage: "t1st optional source address"},
+		&cli.UintFlag{Name: "segment-id2", Usage: "MUP Extended Community segment id (16-bit half)"},
+		&cli.UintFlag{Name: "segment-id4", Usage: "MUP Extended Community segment id (32-bit half)"},
+		&cli.StringFlag{Name: "sid", Usage: "Segment SRv6 SID (IPv6)"},
+		&cli.StringFlag{Name: "next-hop", Required: requireNextHop, Usage: nextHopUsage},
+	}
+}
+
+// mupKeyFlags returns the smaller flag set for withdraw / delete: the route type
+// plus the type's identifying fields. Shared by `bgp withdraw-mup` and
+// `mup delete`.
+func mupKeyFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{Name: "route-type", Required: true, Usage: "isd | dsd | t1st | t2st"},
+		&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+		&cli.StringFlag{Name: "prefix", Usage: "isd segment prefix / t1st UE prefix (CIDR)"},
+		&cli.StringFlag{Name: "address", Usage: "dsd direct-segment endpoint address"},
+		&cli.UintFlag{Name: "teid", Usage: "GTP-U TEID (t1st / t2st)"},
+		&cli.UintFlag{Name: "teid-len", Value: 32, Usage: "t2st TEID prefix bits"},
+		&cli.StringFlag{Name: "endpoint", Usage: "t2st GTP tunnel endpoint"},
 	}
 }
 

@@ -81,6 +81,57 @@ func mupRouteID(r *v1.BgpMupRoute) string {
 	}
 }
 
+// parseMUPRoute validates a wire MUP route and converts it to the domain form
+// with its Type set. Shared by the advertise/withdraw RPCs and MupService so the
+// "parse type + range-check + convert" preamble lives in one place.
+func parseMUPRoute(r *v1.BgpMupRoute) (bgp.MUPRoute, error) {
+	typ, err := mupRouteType(r.GetRouteType())
+	if err != nil {
+		return bgp.MUPRoute{}, err
+	}
+	if err := validateMUPRouteFields(r); err != nil {
+		return bgp.MUPRoute{}, err
+	}
+	mr := protoToMUPRoute(r)
+	mr.Type = typ
+	return mr, nil
+}
+
+// pushMUPRoute advertises mr through the MUPController method for its type.
+// The caller has set mr.Type (parseMUPRoute does).
+func pushMUPRoute(ctx context.Context, ctrl bgp.MUPController, mr bgp.MUPRoute) error {
+	switch mr.Type {
+	case bgp.MUPRouteTypeISD:
+		return ctrl.PushMUPISD(ctx, mr)
+	case bgp.MUPRouteTypeDSD:
+		return ctrl.PushMUPDSD(ctx, mr)
+	case bgp.MUPRouteTypeT1ST:
+		return ctrl.PushMUPT1ST(ctx, mr)
+	case bgp.MUPRouteTypeT2ST:
+		return ctrl.PushMUPT2ST(ctx, mr)
+	default:
+		return fmt.Errorf("unsupported MUP route type %v", mr.Type)
+	}
+}
+
+// withdrawMUPRoute withdraws mr through the MUPController method for its type,
+// deriving the per-type key from mr. WithdrawMUP* no-ops for a route that was
+// never advertised.
+func withdrawMUPRoute(ctx context.Context, ctrl bgp.MUPController, mr bgp.MUPRoute) error {
+	switch mr.Type {
+	case bgp.MUPRouteTypeISD:
+		return ctrl.WithdrawMUPISD(ctx, bgp.MUPISDKey{RD: mr.RD, Prefix: mr.Prefix})
+	case bgp.MUPRouteTypeDSD:
+		return ctrl.WithdrawMUPDSD(ctx, bgp.MUPDSDKey{RD: mr.RD, Address: mr.Address})
+	case bgp.MUPRouteTypeT1ST:
+		return ctrl.WithdrawMUPT1ST(ctx, bgp.MUPT1STKey{RD: mr.RD, Prefix: mr.Prefix, TEID: mr.TEID})
+	case bgp.MUPRouteTypeT2ST:
+		return ctrl.WithdrawMUPT2ST(ctx, bgp.MUPT2STKey{RD: mr.RD, Endpoint: mr.Endpoint, TEID: mr.TEID, TEIDLen: mr.TEIDLen})
+	default:
+		return fmt.Errorf("unsupported MUP route type %v", mr.Type)
+	}
+}
+
 func (s *BgpRouteServer) BgpAdvertiseMup(
 	ctx context.Context,
 	req *connect.Request[v1.BgpAdvertiseMupRequest],
@@ -93,28 +144,12 @@ func (s *BgpRouteServer) BgpAdvertiseMup(
 		Errors:     make([]*v1.OperationError, 0),
 	}
 	for _, r := range req.Msg.Routes {
-		typ, err := mupRouteType(r.GetRouteType())
+		mr, err := parseMUPRoute(r)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		if err = validateMUPRouteFields(r); err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
-			continue
-		}
-		mr := protoToMUPRoute(r)
-		mr.Type = typ
-		switch typ {
-		case bgp.MUPRouteTypeISD:
-			err = s.mup.PushMUPISD(ctx, mr)
-		case bgp.MUPRouteTypeDSD:
-			err = s.mup.PushMUPDSD(ctx, mr)
-		case bgp.MUPRouteTypeT1ST:
-			err = s.mup.PushMUPT1ST(ctx, mr)
-		case bgp.MUPRouteTypeT2ST:
-			err = s.mup.PushMUPT2ST(ctx, mr)
-		}
-		if err != nil {
+		if err := pushMUPRoute(ctx, s.mup, mr); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
@@ -135,29 +170,15 @@ func (s *BgpRouteServer) BgpWithdrawMup(
 		Errors:    make([]*v1.OperationError, 0),
 	}
 	for _, r := range req.Msg.Routes {
-		typ, err := mupRouteType(r.GetRouteType())
-		if err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
-			continue
-		}
-		// Guard the same narrowing cast as advertise (the T2ST key narrows
-		// teid_len to uint8), so an out-of-range value cannot wrap to a key that
+		// parseMUPRoute runs validateMUPRouteFields, guarding the T2ST teid_len
+		// narrowing cast so an out-of-range value cannot wrap to a key that
 		// silently mismatches what was advertised.
-		if err = validateMUPRouteFields(r); err != nil {
+		mr, err := parseMUPRoute(r)
+		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		switch typ {
-		case bgp.MUPRouteTypeISD:
-			err = s.mup.WithdrawMUPISD(ctx, bgp.MUPISDKey{RD: r.GetRd(), Prefix: r.GetPrefix()})
-		case bgp.MUPRouteTypeDSD:
-			err = s.mup.WithdrawMUPDSD(ctx, bgp.MUPDSDKey{RD: r.GetRd(), Address: r.GetAddress()})
-		case bgp.MUPRouteTypeT1ST:
-			err = s.mup.WithdrawMUPT1ST(ctx, bgp.MUPT1STKey{RD: r.GetRd(), Prefix: r.GetPrefix(), TEID: r.GetTeid()})
-		case bgp.MUPRouteTypeT2ST:
-			err = s.mup.WithdrawMUPT2ST(ctx, bgp.MUPT2STKey{RD: r.GetRd(), Endpoint: r.GetEndpoint(), TEID: r.GetTeid(), TEIDLen: uint8(r.GetTeidLen())})
-		}
-		if err != nil {
+		if err := withdrawMUPRoute(ctx, s.mup, mr); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
