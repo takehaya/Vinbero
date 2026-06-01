@@ -71,6 +71,7 @@ type UnderlayConfig struct {
 type vrfState struct {
 	binding    vrfbgp.Binding
 	table      uint32
+	ifindex    uint32 // the VRF l3mdev device, for the re-bind idempotency check
 	v4SID      netip.Addr
 	v6SID      netip.Addr
 	advertised map[bgp.RouteKey]struct{}
@@ -302,6 +303,7 @@ func (e *Exporter) EnableVRF(b vrfbgp.Binding) (uint32, error) {
 	st := &vrfState{
 		binding:    b,
 		table:      table,
+		ifindex:    ifindex,
 		v4SID:      v4SID,
 		v6SID:      v6SID,
 		advertised: make(map[bgp.RouteKey]struct{}),
@@ -375,6 +377,15 @@ func (e *Exporter) AddVRF(b vrfbgp.Binding) error {
 		// Stop has begun; refuse new enablement so no dumpWG.Go races dumpWG.Wait.
 		return fmt.Errorf("exporter is shutting down")
 	}
+	// Idempotent re-bind: if the VRF is already enabled and nothing that affects its
+	// advertisements changed (binding export fields + the resolved device), skip the
+	// disable + Endpoint-SID re-mint + table re-register + replay below, which would
+	// otherwise withdraw and re-originate every VPNv4/VPNv6 prefix for no change.
+	// VrfBgpBind re-binds the same VRF on every call, so without this an unchanged
+	// re-bind flaps the whole VRF (the EVPN EnableBD path guards the same way).
+	if e.vrfAdvertiseUnchanged(b) {
+		return nil
+	}
 	// Replace any existing enablement so a re-bind updates cleanly instead of
 	// hitting EnableVRF's already-enabled check, which would leave the exporter
 	// advertising while the handler rolls the manager binding back (desync).
@@ -385,6 +396,39 @@ func (e *Exporter) AddVRF(b vrfbgp.Binding) error {
 		return nil
 	}
 	return e.enableAndWatch(b, true)
+}
+
+// vrfAdvertiseUnchanged reports whether re-enabling b would produce the same
+// VPNv4/VPNv6 advertisements and SIDs as the current state, so AddVRF can skip a
+// needless flap. It compares the cheap binding fields that shape origination
+// FIRST -- RD and export RTs (route keys + attributes), default locator (SID
+// minting), MaxPrefixes (cap), and the redistribute set (which prefixes export) --
+// so a binding change forces a re-enable without a netlink resolve. Only when the
+// binding matches does it resolve the device, since the one remaining trigger is a
+// VRF netdev recreated under the same name with a new ifindex/table (the
+// End.DT4/DT6 aux and table mapping would be stale). A transient resolve failure
+// on an otherwise-unchanged binding is treated as unchanged: tearing down a
+// working VRF over a momentary netlink error is worse than leaving it, and a later
+// re-bind reconciles once resolve recovers.
+func (e *Exporter) vrfAdvertiseUnchanged(b vrfbgp.Binding) bool {
+	e.mu.Lock()
+	st, ok := e.vrfs[b.VRFName]
+	e.mu.Unlock()
+	if !ok {
+		return false
+	}
+	if st.binding.RD != b.RD ||
+		st.binding.DefaultLocator != b.DefaultLocator ||
+		st.binding.MaxPrefixes != b.MaxPrefixes ||
+		!sameStringSet(st.binding.ExportRTs, b.ExportRTs) ||
+		!sameStringSet(st.binding.Redistribute, b.Redistribute) {
+		return false
+	}
+	ifindex, table, err := e.resolver.Resolve(b.VRFName)
+	if err != nil {
+		return true
+	}
+	return st.ifindex == ifindex && st.table == table
 }
 
 // enableAndWatch enables one VRF binding and registers its table with the
