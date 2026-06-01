@@ -12,9 +12,10 @@ option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 // CRUD operates on operator-defined (origin local) SR Policies, which are
 // installed straight into the data plane. SR Policies learned over BGP
 // (SAFI 73, origin bgp) are read-only: they appear in SrPolicyList but
-// SrPolicyUpdate / SrPolicyDelete reject them. Advertising a local SR
-// Policy into BGP is a separate concern surfaced as `vbctl bgp
-// advertise-sr-policy` (not part of this service).
+// SrPolicyUpdate / SrPolicyDelete reject them. A local SR Policy is also
+// advertised into BGP (SAFI 73) when its `advertise` flag is set, so a remote
+// headend can learn it; the explicit `vbctl bgp advertise-sr-policy` path
+// remains for advertising arbitrary policies independent of the local table.
 //
 // The whole service requires the in-process BGP speaker (--bgp-enabled);
 // without it the RPCs fail with FailedPrecondition.
@@ -40,6 +41,7 @@ message SrPolicyDef {
   string endpoint = 2; // SR Policy endpoint (IPv6), = the egress PE's BGP next hop.
   repeated string segments = 3; // Transport SRv6 SIDs (the route's service SID is appended in the data plane).
   uint32 preference = 4; // Candidate path preference; 0 means the RFC default of 100.
+  bool advertise = 5; // When true, also advertise this policy into BGP (SAFI 73, origin local) using bgp.global.next_hop; default false = local steering only.
 }
 
 // SrPolicyKey identifies a policy for deletion / lookup.

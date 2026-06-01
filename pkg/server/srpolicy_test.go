@@ -39,7 +39,7 @@ func (f *fakeSRPolicyCtrl) HasLocalSRPolicy(color uint32, endpoint netip.Addr) b
 
 // A nil controller (BGP disabled) makes every RPC fail FailedPrecondition.
 func TestSrPolicyServer_DisabledWhenNoBGP(t *testing.T) {
-	s := NewSrPolicyServer(nil)
+	s := NewSrPolicyServer(nil, nil, "")
 	_, err := s.SrPolicyList(context.Background(), connect.NewRequest(&v1.SrPolicyListRequest{}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("SrPolicyList err = %v, want FailedPrecondition", err)
@@ -52,7 +52,7 @@ func TestSrPolicyServer_DisabledWhenNoBGP(t *testing.T) {
 
 func TestSrPolicyServer_CreateAppliesLocalCandidate(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{}
-	s := NewSrPolicyServer(ctrl)
+	s := NewSrPolicyServer(ctrl, nil, "")
 	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
 		Policies: []*v1.SrPolicyDef{{
 			Color:    100,
@@ -87,7 +87,7 @@ func TestSrPolicyServer_CreateAppliesLocalCandidate(t *testing.T) {
 // A bad endpoint / empty segments surface as a per-item error, not a call.
 func TestSrPolicyServer_CreateValidation(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{}
-	s := NewSrPolicyServer(ctrl)
+	s := NewSrPolicyServer(ctrl, nil, "")
 	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
 		Policies: []*v1.SrPolicyDef{
 			{Color: 1, Endpoint: "not-an-ip", Segments: []string{"fd00:2::1"}},
@@ -109,7 +109,7 @@ func TestSrPolicyServer_CreateValidation(t *testing.T) {
 // are read-only).
 func TestSrPolicyServer_DeleteRejectsNonLocal(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{hasLocal: map[srPolicyTestKey]bool{{2, "2001:db8::9"}: true}}
-	s := NewSrPolicyServer(ctrl)
+	s := NewSrPolicyServer(ctrl, nil, "")
 	resp, err := s.SrPolicyDelete(context.Background(), connect.NewRequest(&v1.SrPolicyDeleteRequest{
 		Keys: []*v1.SrPolicyKey{
 			{Color: 1, Endpoint: "2001:db8::2"}, // no local -> rejected
@@ -127,6 +127,105 @@ func TestSrPolicyServer_DeleteRejectsNonLocal(t *testing.T) {
 	}
 }
 
+// A local policy created with advertise=true is originated into BGP (SAFI 73)
+// with the configured next hop; one without the flag is not.
+func TestSrPolicyServer_CreateAdvertises(t *testing.T) {
+	ctrl := &fakeSRPolicyCtrl{}
+	adv := &fakeSRPolicyAdv{}
+	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1")
+	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
+		Policies: []*v1.SrPolicyDef{
+			{Color: 100, Endpoint: "2001:db8::2", Segments: []string{"fd00:2::1"}, Advertise: true},
+			{Color: 200, Endpoint: "2001:db8::3", Segments: []string{"fd00:3::1"}}, // advertise=false
+		},
+	}))
+	if err != nil {
+		t.Fatalf("SrPolicyCreate: %v", err)
+	}
+	if len(resp.Msg.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", resp.Msg.Errors)
+	}
+	if len(ctrl.applied) != 2 {
+		t.Fatalf("both policies should install locally regardless of advertise; got %d", len(ctrl.applied))
+	}
+	if len(adv.pushed) != 1 {
+		t.Fatalf("only the advertise=true policy should originate into BGP; pushed=%d", len(adv.pushed))
+	}
+	p := adv.pushed[0]
+	if p.Color != 100 || p.Endpoint != netip.MustParseAddr("2001:db8::2") {
+		t.Errorf("advertised key = {%d,%s}, want {100, 2001:db8::2}", p.Color, p.Endpoint)
+	}
+	if p.AdvertiseNextHop != netip.MustParseAddr("2001:db8:ff::1") {
+		t.Errorf("advertised next hop = %s, want the configured 2001:db8:ff::1", p.AdvertiseNextHop)
+	}
+	if len(p.Candidates) != 1 || p.Candidates[0].Origin != bgp.OriginLocal {
+		t.Errorf("advertised candidate = %+v, want one local candidate", p.Candidates)
+	}
+}
+
+// advertise=true with no / invalid configured next hop is a per-item error, and
+// the policy is NOT originated (but still installed locally).
+func TestSrPolicyServer_AdvertiseRequiresIPv6NextHop(t *testing.T) {
+	ctrl := &fakeSRPolicyCtrl{}
+	adv := &fakeSRPolicyAdv{}
+	s := NewSrPolicyServer(ctrl, adv, "") // no next hop configured
+	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
+		Policies: []*v1.SrPolicyDef{{Color: 100, Endpoint: "2001:db8::2", Segments: []string{"fd00:2::1"}, Advertise: true}},
+	}))
+	if err != nil {
+		t.Fatalf("SrPolicyCreate: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 {
+		t.Fatalf("advertise with no next hop must be a per-item error; errors=%v", resp.Msg.Errors)
+	}
+	if len(adv.pushed) != 0 {
+		t.Errorf("no policy should be originated without a valid next hop; pushed=%d", len(adv.pushed))
+	}
+	if len(ctrl.applied) != 1 {
+		t.Errorf("the local install still happens; applied=%d", len(ctrl.applied))
+	}
+}
+
+// Updating a previously-advertised policy with advertise=false withdraws it.
+func TestSrPolicyServer_UpdateToggleOffWithdraws(t *testing.T) {
+	ctrl := &fakeSRPolicyCtrl{}
+	adv := &fakeSRPolicyAdv{}
+	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1")
+	def := &v1.SrPolicyDef{Color: 100, Endpoint: "2001:db8::2", Segments: []string{"fd00:2::1"}, Advertise: true}
+	if _, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{Policies: []*v1.SrPolicyDef{def}})); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	def.Advertise = false
+	if _, err := s.SrPolicyUpdate(context.Background(), connect.NewRequest(&v1.SrPolicyUpdateRequest{Policies: []*v1.SrPolicyDef{def}})); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(adv.withdrawn) != 1 {
+		t.Fatalf("toggling advertise off must withdraw; withdrawn=%d", len(adv.withdrawn))
+	}
+	if k := adv.withdrawn[0]; k.Color != 100 || k.Endpoint != netip.MustParseAddr("2001:db8::2") {
+		t.Errorf("withdraw key = {%d,%s}, want {100, 2001:db8::2}", k.Color, k.Endpoint)
+	}
+}
+
+// Deleting a local policy also withdraws its BGP advertisement.
+func TestSrPolicyServer_DeleteWithdraws(t *testing.T) {
+	ctrl := &fakeSRPolicyCtrl{hasLocal: map[srPolicyTestKey]bool{{100, "2001:db8::2"}: true}}
+	adv := &fakeSRPolicyAdv{}
+	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1")
+	resp, err := s.SrPolicyDelete(context.Background(), connect.NewRequest(&v1.SrPolicyDeleteRequest{
+		Keys: []*v1.SrPolicyKey{{Color: 100, Endpoint: "2001:db8::2"}},
+	}))
+	if err != nil {
+		t.Fatalf("SrPolicyDelete: %v", err)
+	}
+	if len(resp.Msg.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", resp.Msg.Errors)
+	}
+	if len(adv.withdrawn) != 1 || adv.withdrawn[0].Color != 100 {
+		t.Errorf("delete must withdraw the advertisement; withdrawn=%+v", adv.withdrawn)
+	}
+}
+
 func TestSrPolicyServer_ListTranslatesSnapshot(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{list: []apply.SRPolicySnapshot{{
 		Color:    100,
@@ -139,7 +238,7 @@ func TestSrPolicyServer_ListTranslatesSnapshot(t *testing.T) {
 			Active:      true,
 		}},
 	}}}
-	s := NewSrPolicyServer(ctrl)
+	s := NewSrPolicyServer(ctrl, nil, "")
 	resp, err := s.SrPolicyList(context.Background(), connect.NewRequest(&v1.SrPolicyListRequest{}))
 	if err != nil {
 		t.Fatalf("SrPolicyList: %v", err)
