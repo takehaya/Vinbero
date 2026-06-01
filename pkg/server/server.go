@@ -114,8 +114,9 @@ func (s *Server) Setup() {
 
 	// SrPolicy service (color-based steering; local CRUD + read-only view
 	// of BGP-learned policies). srPolicyCtrl is nil when BGP is disabled,
-	// in which case the RPCs return FailedPrecondition.
-	srPolicyServer := NewSrPolicyServer(s.srPolicyCtrl)
+	// in which case the RPCs return FailedPrecondition. srPolicyAdv +
+	// next_hop let a local policy with advertise=true originate into SAFI 73.
+	srPolicyServer := NewSrPolicyServer(s.srPolicyCtrl, s.srPolicyAdv, s.cfg.BGP.Global.NextHop)
 	srPolicyPath, srPolicyHandler := vinberov1connect.NewSrPolicyServiceHandler(srPolicyServer)
 	s.mux.Handle(srPolicyPath, srPolicyHandler)
 	s.logger.Info("Registered SrPolicyService", zap.String("path", srPolicyPath))

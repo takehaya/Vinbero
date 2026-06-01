@@ -30,6 +30,7 @@ func srPolicyDefFromFlags(c *cli.Context) *v1.SrPolicyDef {
 		Endpoint:   c.String("endpoint"),
 		Segments:   csvFlag(c.String("segments")),
 		Preference: uint32(c.Uint("preference")),
+		Advertise:  c.Bool("advertise"),
 	}
 }
 
@@ -39,6 +40,7 @@ func srPolicyCommand() *cli.Command {
 		&cli.StringFlag{Name: "endpoint", Required: true, Usage: "Endpoint IPv6 (= egress PE BGP next hop)"},
 		&cli.StringFlag{Name: "segments", Required: true, Usage: "Comma-separated transport SRv6 SIDs, e.g. fd00:2::1,fd00:2::2"},
 		&cli.UintFlag{Name: "preference", Value: 0, Usage: "Candidate path preference (0 = RFC default 100)"},
+		&cli.BoolFlag{Name: "advertise", Usage: "Also advertise this policy into BGP (SAFI 73) using bgp.global.next_hop. update is a full replace: omitting --advertise withdraws a previously advertised policy, so pass it again to keep advertising"},
 	}
 	keyFlags := []cli.Flag{
 		&cli.UintFlag{Name: "color", Required: true, Usage: "SR Policy color"},
