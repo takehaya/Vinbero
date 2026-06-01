@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -133,6 +134,19 @@ func TestEnableBDRollsBackDT2UWhenDT2MFails(t *testing.T) {
 	sid.failOnCall = 0
 	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
 		t.Fatalf("re-enable after rollback: %v", err)
+	}
+}
+
+func TestEnableBDRollbackFailureSurfacesStrandedSID(t *testing.T) {
+	e, _, sid := newTestEVPNExporter(t)
+	sid.failOnCall = 2                       // DT2M install fails
+	sid.deleteErr = errors.New("map locked") // the DT2U rollback delete also fails
+	err := e.EnableBD(evpnTestBinding(), 10)
+	if err == nil {
+		t.Fatal("EnableBD should fail when both the DT2M install and the DT2U rollback fail")
+	}
+	if !strings.Contains(err.Error(), "stranded") {
+		t.Errorf("error should surface the stranded DT2U SID, got: %v", err)
 	}
 }
 

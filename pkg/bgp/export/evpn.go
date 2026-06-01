@@ -142,8 +142,12 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	}
 	dt2mSID, err := e.installL2SID(b.DefaultLocator, b.BDID, bridgeIfindex, endpointActionDT2M)
 	if err != nil {
-		// Roll the DT2U SID back so a half-enabled BD leaves no orphan.
-		e.removeL2SID(dt2uSID)
+		// Roll the DT2U SID back so a half-enabled BD leaves no orphan. If the
+		// rollback delete itself fails, surface it: the DT2U SID is then stranded
+		// in sid_function_map and would block a later BridgeDelete reference check.
+		if rbErr := e.removeL2SID(dt2uSID); rbErr != nil {
+			return fmt.Errorf("vrf %q: install End.DT2M SID: %w; rolling back the End.DT2U SID failed (%v): it may be stranded in sid_function_map", b.VRFName, err, rbErr)
+		}
 		return fmt.Errorf("vrf %q: install End.DT2M SID: %w", b.VRFName, err)
 	}
 	st := &bdState{
@@ -232,8 +236,9 @@ func (e *EVPNExporter) disableBDLocked(bdID uint16) {
 				zap.Uint16("bd_id", bdID), zap.String("mac", key.MAC), zap.Error(err))
 		}
 	}
-	e.removeL2SID(st.sid)
-	e.removeL2SID(st.dt2mSID)
+	// Teardown is best-effort; removeL2SID logs a delete failure internally.
+	_ = e.removeL2SID(st.sid)
+	_ = e.removeL2SID(st.dt2mSID)
 	delete(e.bds, bdID)
 	e.logger.Info("bridge domain disabled for EVPN auto advertise", zap.Uint16("bd_id", bdID))
 }
@@ -309,16 +314,18 @@ func (e *EVPNExporter) installL2SID(locatorName string, bdID uint16, bridgeIfind
 	return sid, nil
 }
 
-// removeL2SID deletes an L2 endpoint SID and returns its function to the pool.
-// The caller holds e.mu. On a delete failure the SID is NOT released: the
+// removeL2SID deletes an L2 endpoint SID and returns its function to the pool,
+// returning the delete error so a caller doing a rollback can surface a stranded
+// SID. The caller holds e.mu. On a delete failure the SID is NOT released: the
 // sid_function_map entry may still be present, and releasing the SID would let a
 // later AllocateSID hand out the same SID, whose CreateSidFunction would then hit
 // an owner conflict on the stuck entry. Leaking the SID is the safer outcome.
-func (e *EVPNExporter) removeL2SID(sid netip.Addr) {
+func (e *EVPNExporter) removeL2SID(sid netip.Addr) error {
 	if err := e.sidOps.DeleteSidFunction(sid.String()+"/128", bpf.OwnerBuiltin); err != nil {
 		e.logger.Warn("delete L2 endpoint SID; keeping it allocated to avoid reuse",
 			zap.String("sid", sid.String()), zap.Error(err))
-		return
+		return err
 	}
 	e.locators.ReleaseSID(sid)
+	return nil
 }
