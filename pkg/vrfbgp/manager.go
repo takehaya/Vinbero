@@ -83,6 +83,31 @@ func (m *Manager) Get(vrfName string) (Binding, bool) {
 	return b, ok
 }
 
+// GetByBDID returns the binding whose BDID matches bdID, for the EVPN
+// auto-advertise path to resolve a bridge domain back to its binding. bdID 0
+// (L3VPN-only bindings) never matches. If more than one binding claims the same
+// bd_id it is ambiguous, so ok=false: refusing to guess is safer than
+// originating RT2 with a map-iteration-order-dependent VRF/RD/RT.
+func (m *Manager) GetByBDID(bdID uint16) (Binding, bool) {
+	if bdID == 0 {
+		return Binding{}, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var found Binding
+	n := 0
+	for _, b := range m.bindings {
+		if b.BDID == bdID {
+			found = b
+			n++
+		}
+	}
+	if n != 1 {
+		return Binding{}, false
+	}
+	return found, true
+}
+
 // List returns a snapshot of every binding.
 func (m *Manager) List() []Binding {
 	m.mu.RLock()
