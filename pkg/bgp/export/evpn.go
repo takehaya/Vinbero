@@ -193,7 +193,21 @@ func bdAdvertiseUnchanged(st *bdState, b vrfbgp.Binding, bridgeIfindex uint32) b
 		st.binding.RD == b.RD &&
 		st.binding.DefaultLocator == b.DefaultLocator &&
 		st.binding.MaxPrefixes == b.MaxPrefixes &&
-		slices.Equal(st.binding.ExportRTs, b.ExportRTs)
+		sameRTSet(st.binding.ExportRTs, b.ExportRTs)
+}
+
+// sameRTSet reports whether two route-target lists carry the same set. BGP RT
+// extended communities are unordered, so an export-RT list reordered (e.g. by a
+// config rewrite) is the same advertisement and must not trigger a re-enable.
+// The lists are tiny; sort clones and compare (also handles duplicates).
+func sameRTSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ac, bc := slices.Clone(a), slices.Clone(b)
+	slices.Sort(ac)
+	slices.Sort(bc)
+	return slices.Equal(ac, bc)
 }
 
 // EnableBD makes a bridge domain eligible for EVPN auto-advertise: it mints the
