@@ -310,10 +310,15 @@ func (e *EVPNExporter) installL2SID(locatorName string, bdID uint16, bridgeIfind
 }
 
 // removeL2SID deletes an L2 endpoint SID and returns its function to the pool.
-// Best-effort: a delete failure is logged, not propagated. The caller holds e.mu.
+// The caller holds e.mu. On a delete failure the SID is NOT released: the
+// sid_function_map entry may still be present, and releasing the SID would let a
+// later AllocateSID hand out the same SID, whose CreateSidFunction would then hit
+// an owner conflict on the stuck entry. Leaking the SID is the safer outcome.
 func (e *EVPNExporter) removeL2SID(sid netip.Addr) {
 	if err := e.sidOps.DeleteSidFunction(sid.String()+"/128", bpf.OwnerBuiltin); err != nil {
-		e.logger.Warn("delete L2 endpoint SID", zap.String("sid", sid.String()), zap.Error(err))
+		e.logger.Warn("delete L2 endpoint SID; keeping it allocated to avoid reuse",
+			zap.String("sid", sid.String()), zap.Error(err))
+		return
 	}
 	e.locators.ReleaseSID(sid)
 }
