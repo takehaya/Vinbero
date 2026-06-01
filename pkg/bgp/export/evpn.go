@@ -184,8 +184,8 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	return nil
 }
 
-// DisableBD withdraws every RT2 advertised for the bridge domain and releases
-// its End.DT2U SID. A no-op for an unknown BD.
+// DisableBD withdraws the bridge domain's RT3 and every advertised RT2, and
+// releases its End.DT2U and End.DT2M SIDs. A no-op for an unknown BD.
 func (e *EVPNExporter) DisableBD(bdID uint16) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
