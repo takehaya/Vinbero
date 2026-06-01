@@ -24,13 +24,21 @@ type srPolicyController interface {
 
 // SrPolicyServer is the Connect RPC handler for SrPolicyService. CRUD acts
 // on operator-defined (local) SR Policies; BGP-learned policies are
-// read-only (visible in List, rejected by Update/Delete).
+// read-only (visible in List, rejected by Update/Delete). A local policy whose
+// advertise flag is set is also originated into BGP (SAFI 73) via advertiser.
 type SrPolicyServer struct {
 	ctrl srPolicyController
+	// advertiser originates a local SR Policy into BGP (SAFI 73) when its
+	// advertise flag is set. Non-nil exactly when the in-process BGP speaker is
+	// up (the same condition that makes ctrl non-nil).
+	advertiser bgp.SRPolicyController
+	// nextHop is the BGP next hop stamped on an advertised SR Policy: this PE's
+	// reachable IPv6 address (bgp.global.next_hop), validated per advertise.
+	nextHop string
 }
 
-func NewSrPolicyServer(ctrl srPolicyController) *SrPolicyServer {
-	return &SrPolicyServer{ctrl: ctrl}
+func NewSrPolicyServer(ctrl srPolicyController, advertiser bgp.SRPolicyController, nextHop string) *SrPolicyServer {
+	return &SrPolicyServer{ctrl: ctrl, advertiser: advertiser, nextHop: nextHop}
 }
 
 func (s *SrPolicyServer) disabledErr() error {
@@ -52,8 +60,45 @@ func (s *SrPolicyServer) upsert(defs []*v1.SrPolicyDef) []*v1.OperationError {
 			continue
 		}
 		s.ctrl.ApplyLocalSRPolicy(p, false)
+		if err := s.syncAdvertise(def, p); err != nil {
+			errs = append(errs, &v1.OperationError{
+				TriggerPrefix: srPolicyTrigger(def.GetColor(), def.GetEndpoint()),
+				Reason:        err.Error(),
+			})
+			continue
+		}
 	}
 	return errs
+}
+
+// syncAdvertise reconciles a local policy's BGP advertisement with its advertise
+// flag: push it into SAFI 73 (origin local) when set, or withdraw any prior
+// advertisement when not, so toggling the flag off on an Update stops advertising.
+// The advertised NLRI reuses the local candidate's distinguisher, so the withdraw
+// key is deterministic. WithdrawPolicy is a no-op for a policy that was never
+// advertised, so the not-advertised branch is safe to run on every upsert.
+func (s *SrPolicyServer) syncAdvertise(def *v1.SrPolicyDef, p bgp.SRPolicy) error {
+	if s.advertiser == nil {
+		if def.GetAdvertise() {
+			return errors.New("advertise requires the in-process BGP speaker (--bgp-enabled)")
+		}
+		return nil
+	}
+	key := bgp.SRPolicyKey{
+		Color:         p.Color,
+		Endpoint:      p.Endpoint,
+		Distinguisher: p.Candidates[0].Distinguisher,
+	}
+	if !def.GetAdvertise() {
+		return s.advertiser.WithdrawPolicy(context.Background(), key)
+	}
+	nh, err := netip.ParseAddr(s.nextHop)
+	if err != nil || !nh.Is6() || nh.Is4In6() {
+		return fmt.Errorf("advertise requires a valid IPv6 bgp.global.next_hop, got %q", s.nextHop)
+	}
+	adv := p
+	adv.AdvertiseNextHop = nh
+	return s.advertiser.PushPolicy(context.Background(), adv)
 }
 
 func (s *SrPolicyServer) SrPolicyCreate(
@@ -111,7 +156,24 @@ func (s *SrPolicyServer) SrPolicyDelete(
 			})
 			continue
 		}
-		s.ctrl.ApplyLocalSRPolicy(apply.LocalSRPolicy(key.GetColor(), endpoint, nil, 0), true)
+		lp := apply.LocalSRPolicy(key.GetColor(), endpoint, nil, 0)
+		s.ctrl.ApplyLocalSRPolicy(lp, true)
+		// Withdraw any BGP advertisement this policy had (a no-op if it was never
+		// advertised). The key reuses the local candidate's distinguisher so it
+		// matches what syncAdvertise pushed.
+		if s.advertiser != nil {
+			if err := s.advertiser.WithdrawPolicy(context.Background(), bgp.SRPolicyKey{
+				Color:         lp.Color,
+				Endpoint:      lp.Endpoint,
+				Distinguisher: lp.Candidates[0].Distinguisher,
+			}); err != nil {
+				errs = append(errs, &v1.OperationError{
+					TriggerPrefix: srPolicyTrigger(key.GetColor(), key.GetEndpoint()),
+					Reason:        err.Error(),
+				})
+				continue
+			}
+		}
 	}
 	return connect.NewResponse(&v1.SrPolicyDeleteResponse{Errors: errs}), nil
 }
