@@ -29,8 +29,9 @@ type srPolicyController interface {
 type SrPolicyServer struct {
 	ctrl srPolicyController
 	// advertiser originates a local SR Policy into BGP (SAFI 73) when its
-	// advertise flag is set. Non-nil exactly when the in-process BGP speaker is
-	// up (the same condition that makes ctrl non-nil).
+	// advertise flag is set. It is wired non-nil alongside ctrl when the
+	// in-process BGP speaker is up; if it is nil, an advertise=true request is a
+	// per-item error rather than a silent no-op.
 	advertiser bgp.SRPolicyController
 	// nextHop is the BGP next hop stamped on an advertised SR Policy: this PE's
 	// reachable IPv6 address (bgp.global.next_hop), validated per advertise.
@@ -48,7 +49,7 @@ func (s *SrPolicyServer) disabledErr() error {
 
 // upsert handles both Create and Update: each is an idempotent set of the
 // local candidate path for {color, endpoint}.
-func (s *SrPolicyServer) upsert(defs []*v1.SrPolicyDef) []*v1.OperationError {
+func (s *SrPolicyServer) upsert(ctx context.Context, defs []*v1.SrPolicyDef) []*v1.OperationError {
 	errs := make([]*v1.OperationError, 0)
 	for _, def := range defs {
 		p, err := protoToLocalSRPolicy(def)
@@ -60,7 +61,7 @@ func (s *SrPolicyServer) upsert(defs []*v1.SrPolicyDef) []*v1.OperationError {
 			continue
 		}
 		s.ctrl.ApplyLocalSRPolicy(p, false)
-		if err := s.syncAdvertise(def, p); err != nil {
+		if err := s.syncAdvertise(ctx, def, p); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: srPolicyTrigger(def.GetColor(), def.GetEndpoint()),
 				Reason:        err.Error(),
@@ -77,7 +78,7 @@ func (s *SrPolicyServer) upsert(defs []*v1.SrPolicyDef) []*v1.OperationError {
 // The advertised NLRI reuses the local candidate's distinguisher, so the withdraw
 // key is deterministic. WithdrawPolicy is a no-op for a policy that was never
 // advertised, so the not-advertised branch is safe to run on every upsert.
-func (s *SrPolicyServer) syncAdvertise(def *v1.SrPolicyDef, p bgp.SRPolicy) error {
+func (s *SrPolicyServer) syncAdvertise(ctx context.Context, def *v1.SrPolicyDef, p bgp.SRPolicy) error {
 	if s.advertiser == nil {
 		if def.GetAdvertise() {
 			return errors.New("advertise requires the in-process BGP speaker (--bgp-enabled)")
@@ -90,7 +91,7 @@ func (s *SrPolicyServer) syncAdvertise(def *v1.SrPolicyDef, p bgp.SRPolicy) erro
 		Distinguisher: p.Candidates[0].Distinguisher,
 	}
 	if !def.GetAdvertise() {
-		return s.advertiser.WithdrawPolicy(context.Background(), key)
+		return s.advertiser.WithdrawPolicy(ctx, key)
 	}
 	nh, err := netip.ParseAddr(s.nextHop)
 	if err != nil || !nh.Is6() || nh.Is4In6() {
@@ -98,35 +99,35 @@ func (s *SrPolicyServer) syncAdvertise(def *v1.SrPolicyDef, p bgp.SRPolicy) erro
 	}
 	adv := p
 	adv.AdvertiseNextHop = nh
-	return s.advertiser.PushPolicy(context.Background(), adv)
+	return s.advertiser.PushPolicy(ctx, adv)
 }
 
 func (s *SrPolicyServer) SrPolicyCreate(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[v1.SrPolicyCreateRequest],
 ) (*connect.Response[v1.SrPolicyCreateResponse], error) {
 	if s.ctrl == nil {
 		return nil, s.disabledErr()
 	}
 	return connect.NewResponse(&v1.SrPolicyCreateResponse{
-		Errors: s.upsert(req.Msg.GetPolicies()),
+		Errors: s.upsert(ctx, req.Msg.GetPolicies()),
 	}), nil
 }
 
 func (s *SrPolicyServer) SrPolicyUpdate(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[v1.SrPolicyUpdateRequest],
 ) (*connect.Response[v1.SrPolicyUpdateResponse], error) {
 	if s.ctrl == nil {
 		return nil, s.disabledErr()
 	}
 	return connect.NewResponse(&v1.SrPolicyUpdateResponse{
-		Errors: s.upsert(req.Msg.GetPolicies()),
+		Errors: s.upsert(ctx, req.Msg.GetPolicies()),
 	}), nil
 }
 
 func (s *SrPolicyServer) SrPolicyDelete(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[v1.SrPolicyDeleteRequest],
 ) (*connect.Response[v1.SrPolicyDeleteResponse], error) {
 	if s.ctrl == nil {
@@ -162,7 +163,7 @@ func (s *SrPolicyServer) SrPolicyDelete(
 		// advertised). The key reuses the local candidate's distinguisher so it
 		// matches what syncAdvertise pushed.
 		if s.advertiser != nil {
-			if err := s.advertiser.WithdrawPolicy(context.Background(), bgp.SRPolicyKey{
+			if err := s.advertiser.WithdrawPolicy(ctx, bgp.SRPolicyKey{
 				Color:         lp.Color,
 				Endpoint:      lp.Endpoint,
 				Distinguisher: lp.Candidates[0].Distinguisher,
