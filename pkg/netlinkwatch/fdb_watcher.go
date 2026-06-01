@@ -2,6 +2,7 @@ package netlinkwatch
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -165,12 +166,7 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 	}
 
 	mac := neigh.HardwareAddr
-	if mac == nil || len(mac) != 6 {
-		return
-	}
-
-	// Skip broadcast/multicast MACs
-	if mac[0]&0x01 != 0 {
+	if !isUnicastMAC(mac) {
 		return
 	}
 
@@ -208,6 +204,46 @@ func (w *FDBWatcher) notifyMAC(sink MACSink, bdID uint16, mac net.HardwareAddr, 
 		return
 	}
 	sink.OnLocalMAC(bdID, append(net.HardwareAddr(nil), mac...), added)
+}
+
+// isUnicastMAC reports whether mac is a 6-byte unicast address (the only FDB
+// entries the watcher forwards: broadcast/multicast are skipped).
+func isUnicastMAC(mac net.HardwareAddr) bool {
+	return len(mac) == 6 && mac[0]&0x01 == 0
+}
+
+// DumpBridge replays a registered bridge's existing kernel FDB to the MAC sink
+// as adds, for EVPN RT2 auto-advertise. The boot-time ListExisting replay in
+// Start only reaches the sink if it was set before Start; a bridge registered
+// later (or whose sink is wired after Start) needs this to pick up MACs already
+// learned. It does not touch the BPF fdb_map (Start's sync already covers that);
+// it only feeds the sink, which dedups, so a replay is idempotent. A no-op when
+// no sink is set.
+func (w *FDBWatcher) DumpBridge(ifindex int) error {
+	w.mu.RLock()
+	bdID, ok := w.allowed[ifindex]
+	sink := w.macSink
+	w.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("bridge ifindex %d is not registered", ifindex)
+	}
+	if sink == nil {
+		return nil
+	}
+	// NeighList(0, AF_BRIDGE) lists every bridge FDB entry; filter by MasterIndex
+	// to this bridge, mirroring the live handleNeighUpdate path.
+	neighs, err := netlink.NeighList(0, unix.AF_BRIDGE)
+	if err != nil {
+		return fmt.Errorf("list bridge FDB: %w", err)
+	}
+	for i := range neighs {
+		n := &neighs[i]
+		if n.MasterIndex != ifindex || !isUnicastMAC(n.HardwareAddr) {
+			continue
+		}
+		sink.OnLocalMAC(bdID, append(net.HardwareAddr(nil), n.HardwareAddr...), true)
+	}
+	return nil
 }
 
 // Stop stops the FDB watcher and waits for cleanup

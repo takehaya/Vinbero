@@ -69,6 +69,12 @@ func (s *NetworkResourceServer) BridgeCreate(
 				if err := s.evpn.EnableBD(b, ifindex); err != nil {
 					s.logger.Warn("enable EVPN auto-advertise for bridge",
 						zap.String("bridge", br.Name), zap.Uint32("bd_id", br.BdId), zap.Error(err))
+				} else if err := s.fdbWatcher.DumpBridge(int(ifindex)); err != nil {
+					// Replay MACs already in the bridge's FDB (e.g. a pre-existing
+					// bridge) so they advertise as RT2. Non-fatal: live events still
+					// cover anything learned after this.
+					s.logger.Warn("replay bridge FDB for EVPN RT2 auto-advertise",
+						zap.String("bridge", br.Name), zap.Uint32("bd_id", br.BdId), zap.Error(err))
 				}
 			}
 		}

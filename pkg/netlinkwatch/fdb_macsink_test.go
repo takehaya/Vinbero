@@ -126,3 +126,36 @@ func TestFDBWatcherNilSinkStillSyncsBPF(t *testing.T) {
 		t.Errorf("BPF sync must still run with a nil sink, got %+v", ops.created)
 	}
 }
+
+func TestIsUnicastMAC(t *testing.T) {
+	cases := []struct {
+		name string
+		mac  net.HardwareAddr
+		want bool
+	}{
+		{"unicast", net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}, true},
+		{"multicast", net.HardwareAddr{0x01, 0x00, 0x5e, 0, 0, 1}, false},
+		{"broadcast", net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, false},
+		{"too short", net.HardwareAddr{0xaa, 0xbb, 0xcc}, false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := isUnicastMAC(c.mac); got != c.want {
+			t.Errorf("isUnicastMAC(%v) = %v, want %v", c.mac, got, c.want)
+		}
+	}
+}
+
+func TestDumpBridgeUnregisteredReturnsError(t *testing.T) {
+	w, _ := newSinkTestWatcher(&fakeMACSink{})
+	if err := w.DumpBridge(99); err == nil { // only ifindex 10 is registered
+		t.Error("DumpBridge of an unregistered bridge should return an error")
+	}
+}
+
+func TestDumpBridgeNilSinkIsNoop(t *testing.T) {
+	w, _ := newSinkTestWatcher(nil) // registers bridge ifindex 10, no sink
+	if err := w.DumpBridge(10); err != nil {
+		t.Errorf("DumpBridge with no sink must be a no-op, got %v", err)
+	}
+}
