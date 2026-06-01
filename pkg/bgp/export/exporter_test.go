@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"go.uber.org/zap"
@@ -492,6 +493,93 @@ func TestAddVRFRollsBackOnRegisterTableFailure(t *testing.T) {
 	if len(sid.created) != 2 || len(sid.deleted) != 2 {
 		t.Errorf("both Endpoint SIDs must be minted then rolled back; created=%d deleted=%d",
 			len(sid.created), len(sid.deleted))
+	}
+}
+
+// vrfFullBinding is testBinding plus a redistribute set and a second export RT,
+// so the set/order-independence of the re-bind idempotency check is exercised.
+func vrfFullBinding() vrfbgp.Binding {
+	b := testBinding()
+	b.ExportRTs = []string{"65000:100", "65000:200"}
+	b.Redistribute = []string{"connected", "static"}
+	return b
+}
+
+// vrfAdvertiseUnchanged treats an identical re-bind (and one that only reorders
+// the RT / redistribute sets) as unchanged, but any change to an
+// advertisement-affecting field forces a re-enable.
+func TestVRFAdvertiseUnchanged(t *testing.T) {
+	e, _, _ := newTestExporter(t)
+	b := vrfFullBinding()
+	if _, err := e.EnableVRF(b); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	if !e.vrfAdvertiseUnchanged(b) {
+		t.Error("an identical re-bind must be unchanged")
+	}
+	reordered := b
+	reordered.ExportRTs = []string{"65000:200", "65000:100"}
+	reordered.Redistribute = []string{"static", "connected"}
+	if !e.vrfAdvertiseUnchanged(reordered) {
+		t.Error("reordered RT / redistribute sets must be unchanged")
+	}
+	for name, mut := range map[string]func(*vrfbgp.Binding){
+		"rd":           func(x *vrfbgp.Binding) { x.RD = "65000:999" },
+		"export rts":   func(x *vrfbgp.Binding) { x.ExportRTs = []string{"65000:100"} },
+		"redistribute": func(x *vrfbgp.Binding) { x.Redistribute = []string{"connected"} },
+		"locator":      func(x *vrfbgp.Binding) { x.DefaultLocator = "LOC2" },
+		"max prefixes": func(x *vrfbgp.Binding) { x.MaxPrefixes = 5 },
+	} {
+		changed := b
+		changed.ExportRTs = slices.Clone(b.ExportRTs)
+		changed.Redistribute = slices.Clone(b.Redistribute)
+		mut(&changed)
+		if e.vrfAdvertiseUnchanged(changed) {
+			t.Errorf("a changed %s must force re-enable", name)
+		}
+	}
+	other := b
+	other.VRFName = "vrf2"
+	if e.vrfAdvertiseUnchanged(other) {
+		t.Error("an unenabled VRF must not report unchanged")
+	}
+}
+
+// A VRF netdev recreated under the same name with a new ifindex or table must
+// force a re-enable, so the End.DT4/DT6 aux and table mapping refresh.
+func TestVRFAdvertiseUnchangedDetectsDeviceChange(t *testing.T) {
+	e, _, _ := newTestExporter(t) // fakeResolver{ifindex:10, table:testTable}
+	b := vrfFullBinding()
+	if _, err := e.EnableVRF(b); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	e.resolver = fakeResolver{ifindex: 11, table: testTable}
+	if e.vrfAdvertiseUnchanged(b) {
+		t.Error("a recreated device (new ifindex) must force re-enable")
+	}
+	e.resolver = fakeResolver{ifindex: 10, table: testTable + 1}
+	if e.vrfAdvertiseUnchanged(b) {
+		t.Error("a changed routing table must force re-enable")
+	}
+}
+
+// A transient resolve failure on an otherwise-unchanged binding stays a no-op
+// (don't tear down a working VRF over a momentary netlink error), but a binding
+// change is still detected without needing resolve at all.
+func TestVRFAdvertiseUnchangedResolveFailure(t *testing.T) {
+	e, _, _ := newTestExporter(t)
+	b := vrfFullBinding()
+	if _, err := e.EnableVRF(b); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	e.resolver = fakeResolver{err: errors.New("netlink busy")}
+	if !e.vrfAdvertiseUnchanged(b) {
+		t.Error("a transient resolve failure on an unchanged binding must stay a no-op")
+	}
+	changed := b
+	changed.RD = "65000:999"
+	if e.vrfAdvertiseUnchanged(changed) {
+		t.Error("a binding change must force re-enable even when resolve would fail (binding compared first)")
 	}
 }
 
