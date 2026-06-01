@@ -400,12 +400,16 @@ func (e *Exporter) AddVRF(b vrfbgp.Binding) error {
 
 // vrfAdvertiseUnchanged reports whether re-enabling b would produce the same
 // VPNv4/VPNv6 advertisements and SIDs as the current state, so AddVRF can skip a
-// needless flap. It compares the binding fields that shape origination -- RD and
-// export RTs (route keys + attributes), default locator (SID minting),
-// MaxPrefixes (cap), and the redistribute set (which prefixes export) -- plus the
-// resolved device: a VRF netdev recreated under the same name with a new
-// ifindex/table must re-enable so the End.DT4/DT6 aux and the table mapping
-// refresh. A resolve failure returns false so the normal path surfaces the error.
+// needless flap. It compares the cheap binding fields that shape origination
+// FIRST -- RD and export RTs (route keys + attributes), default locator (SID
+// minting), MaxPrefixes (cap), and the redistribute set (which prefixes export) --
+// so a binding change forces a re-enable without a netlink resolve. Only when the
+// binding matches does it resolve the device, since the one remaining trigger is a
+// VRF netdev recreated under the same name with a new ifindex/table (the
+// End.DT4/DT6 aux and table mapping would be stale). A transient resolve failure
+// on an otherwise-unchanged binding is treated as unchanged: tearing down a
+// working VRF over a momentary netlink error is worse than leaving it, and a later
+// re-bind reconciles once resolve recovers.
 func (e *Exporter) vrfAdvertiseUnchanged(b vrfbgp.Binding) bool {
 	e.mu.Lock()
 	st, ok := e.vrfs[b.VRFName]
@@ -413,17 +417,18 @@ func (e *Exporter) vrfAdvertiseUnchanged(b vrfbgp.Binding) bool {
 	if !ok {
 		return false
 	}
-	ifindex, table, err := e.resolver.Resolve(b.VRFName)
-	if err != nil {
+	if st.binding.RD != b.RD ||
+		st.binding.DefaultLocator != b.DefaultLocator ||
+		st.binding.MaxPrefixes != b.MaxPrefixes ||
+		!sameStringSet(st.binding.ExportRTs, b.ExportRTs) ||
+		!sameStringSet(st.binding.Redistribute, b.Redistribute) {
 		return false
 	}
-	return st.table == table &&
-		st.ifindex == ifindex &&
-		st.binding.RD == b.RD &&
-		st.binding.DefaultLocator == b.DefaultLocator &&
-		st.binding.MaxPrefixes == b.MaxPrefixes &&
-		sameStringSet(st.binding.ExportRTs, b.ExportRTs) &&
-		sameStringSet(st.binding.Redistribute, b.Redistribute)
+	ifindex, table, err := e.resolver.Resolve(b.VRFName)
+	if err != nil {
+		return true
+	}
+	return st.ifindex == ifindex && st.table == table
 }
 
 // enableAndWatch enables one VRF binding and registers its table with the

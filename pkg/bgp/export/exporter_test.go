@@ -563,6 +563,26 @@ func TestVRFAdvertiseUnchangedDetectsDeviceChange(t *testing.T) {
 	}
 }
 
+// A transient resolve failure on an otherwise-unchanged binding stays a no-op
+// (don't tear down a working VRF over a momentary netlink error), but a binding
+// change is still detected without needing resolve at all.
+func TestVRFAdvertiseUnchangedResolveFailure(t *testing.T) {
+	e, _, _ := newTestExporter(t)
+	b := vrfFullBinding()
+	if _, err := e.EnableVRF(b); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	e.resolver = fakeResolver{err: errors.New("netlink busy")}
+	if !e.vrfAdvertiseUnchanged(b) {
+		t.Error("a transient resolve failure on an unchanged binding must stay a no-op")
+	}
+	changed := b
+	changed.RD = "65000:999"
+	if e.vrfAdvertiseUnchanged(changed) {
+		t.Error("a binding change must force re-enable even when resolve would fail (binding compared first)")
+	}
+}
+
 // RemoveVRF of an unknown VRF is a no-op: nothing to withdraw, no SID to release.
 func TestRemoveVRFUnknownIsNoop(t *testing.T) {
 	e, adv, sid := newTestExporter(t)
