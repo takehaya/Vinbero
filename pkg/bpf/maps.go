@@ -1744,16 +1744,31 @@ func (m *MapOperations) ListDx2vVlan() (map[Dx2vKey]*Dx2vEntry, error) {
 	return result, nil
 }
 
+// AgedFdbEntry identifies an FDB entry the ager removed, so the EVPN
+// auto-advertise path can withdraw its RT2. IsRemote distinguishes a
+// locally-learned MAC (advertised as RT2) from an EVPN-received one (never
+// advertised), so the caller only withdraws what it originated.
+type AgedFdbEntry struct {
+	BDID     uint16
+	MAC      net.HardwareAddr
+	IsRemote bool
+}
+
 // AgeFdbEntries deletes dynamic FDB entries older than maxAgeNs nanoseconds.
 // Static entries (is_static=1) and entries with last_seen=0 are never aged out.
-// Returns the number of entries deleted.
-func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) (int, error) {
+// It returns the entries actually deleted so the caller can withdraw their RT2
+// advertisements; len() is the number deleted.
+func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 	var key FdbKey
 	var entry FdbEntry
 	iter := m.objs.FdbMap.Iterate()
 
 	now := currentKtimeNs()
-	var toDelete []FdbKey
+	type candidate struct {
+		key      FdbKey
+		isRemote bool
+	}
+	var toDelete []candidate
 	for iter.Next(&key, &entry) {
 		if entry.IsStatic != 0 || entry.LastSeen == 0 {
 			continue
@@ -1763,18 +1778,22 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) (int, error) {
 		}
 		age := now - entry.LastSeen
 		if age > maxAgeNs {
-			keyCopy := key
-			toDelete = append(toDelete, keyCopy)
+			toDelete = append(toDelete, candidate{key: key, isRemote: entry.IsRemote != 0})
 		}
 	}
 	if err := iter.Err(); err != nil {
-		return 0, fmt.Errorf("failed to iterate fdb map: %w", err)
+		return nil, fmt.Errorf("failed to iterate fdb map: %w", err)
 	}
 
-	deleted := 0
-	for _, k := range toDelete {
+	deleted := make([]AgedFdbEntry, 0, len(toDelete))
+	for _, c := range toDelete {
+		k := c.key
 		if err := m.objs.FdbMap.Delete(&k); err == nil {
-			deleted++
+			deleted = append(deleted, AgedFdbEntry{
+				BDID:     k.BdId,
+				MAC:      net.HardwareAddr(append([]byte(nil), k.Mac[:]...)),
+				IsRemote: c.isRemote,
+			})
 		}
 	}
 	return deleted, nil

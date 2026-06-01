@@ -50,6 +50,9 @@ type bdState struct {
 	remoteSrc     string
 	rt3Advertised bool
 	advertised    map[bgp.EVPNMACKey]struct{}
+	// atLimit is set once the BD crosses into the MaxPrefixes-capped state, so the
+	// cap-reached warning fires once per crossing rather than per flooded MAC.
+	atLimit bool
 }
 
 // EVPNExporter turns local bridge-domain state into EVPN advertisements, the
@@ -78,7 +81,8 @@ type EVPNExporter struct {
 	es map[[bpf.ESILen]byte]string
 }
 
-// NewEVPNExporter wires an EVPN exporter (RT2 + RT3). nextHop is the advertising
+// NewEVPNExporter wires an EVPN exporter (RT2 + RT3 per bridge domain, RT4 per
+// Ethernet Segment). nextHop is the advertising
 // PE's reachable IPv6 address (its loopback); the caller resolves a bridge domain
 // to its binding and passes it to EnableBD.
 func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manager, nextHop string, logger *zap.Logger) *EVPNExporter {
@@ -111,7 +115,7 @@ func (e *EVPNExporter) EnableES(esi [bpf.ESILen]byte, rd string) error {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.disableESLocked(esi) // replace any existing advertisement
+	prevRD, hadPrev := e.es[esi]
 	r := bgp.EVPNRoute{
 		Type:       bgp.EVPNRouteTypeEthernetSegment,
 		RD:         rd,
@@ -119,8 +123,22 @@ func (e *EVPNExporter) EnableES(esi [bpf.ESILen]byte, rd string) error {
 		ESImportRT: esImportRT,
 		NextHop:    e.nextHop,
 	}
+	// Push the new RT4 FIRST. gobgp AddPath supersedes a same-NLRI path, so for an
+	// unchanged RD this replaces the prior advertisement in place; for a changed RD
+	// the old NLRI survives and is withdrawn below. Pushing first means a push
+	// failure returns with the prior advertisement still intact rather than having
+	// withdrawn it for a replacement that never landed.
 	if err := e.evpn.PushEVPNEthernetSegment(context.Background(), r); err != nil {
 		return fmt.Errorf("advertise RT4 for esi %s: %w", bpf.FormatESI(esi), err)
+	}
+	if hadPrev && prevRD != rd {
+		// The RD changed, so the new push created a different NLRI (RD+ESI) and did
+		// not supersede the old one; withdraw it explicitly. Non-fatal: the new RT4
+		// is already up.
+		if err := e.evpn.WithdrawEVPNEthernetSegment(context.Background(), bgp.EVPNESKey{RD: prevRD, ESI: esi}); err != nil {
+			e.logger.Warn("withdraw superseded RT4 after RD change",
+				zap.String("esi", bpf.FormatESI(esi)), zap.String("old_rd", prevRD), zap.Error(err))
+		}
 	}
 	e.es[esi] = rd
 	e.logger.Info("ethernet segment enabled for EVPN RT4 auto advertise",
@@ -135,6 +153,17 @@ func (e *EVPNExporter) DisableES(esi [bpf.ESILen]byte) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.disableESLocked(esi)
+}
+
+// RDForESI returns the route distinguisher the ES's RT4 is currently advertised
+// with, so EsList can echo the operator-supplied RD that lives only in this
+// control-plane state (the BPF esi_map carries no RD). ok=false for an ES that
+// is not auto-advertised.
+func (e *EVPNExporter) RDForESI(esi [bpf.ESILen]byte) (string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rd, ok := e.es[esi]
+	return rd, ok
 }
 
 // disableESLocked withdraws the ES's RT4 and drops its state. The caller holds e.mu.
@@ -326,6 +355,20 @@ func (e *EVPNExporter) OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool)
 		if _, dup := st.advertised[key]; dup {
 			return
 		}
+		if st.binding.MaxPrefixes > 0 && uint32(len(st.advertised)) >= st.binding.MaxPrefixes {
+			// Per-BD MAC cap reached: stop originating RT2 so a local-MAC flood into
+			// a bound bridge cannot amplify into unbounded off-box advertisements
+			// (the same blast-radius bound the L3VPN path applies). Which MACs land
+			// under the cap follows FDB event/dump order, not a deterministic
+			// selection. Warn once per crossing so the flood does not also flood the
+			// log; atLimit clears when a withdraw frees headroom.
+			if !st.atLimit {
+				e.logger.Warn("bridge domain MAC limit reached; capping EVPN RT2 auto-advertise",
+					zap.Uint16("bd_id", bdID), zap.Uint32("max", st.binding.MaxPrefixes))
+				st.atLimit = true
+			}
+			return
+		}
 		r := bgp.EVPNRoute{
 			Type: bgp.EVPNRouteTypeMACIP,
 			RD:   st.binding.RD,
@@ -360,6 +403,8 @@ func (e *EVPNExporter) OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool)
 		return
 	}
 	delete(st.advertised, key)
+	// Headroom freed: let the cap-reached warning fire again if it refills.
+	st.atLimit = false
 }
 
 // installL2SID mints a function from locatorName and installs an L2 bridge-domain
