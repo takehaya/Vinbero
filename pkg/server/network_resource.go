@@ -30,12 +30,12 @@ type NetworkResourceServer struct {
 	resMgr     *netresource.ResourceManager
 	fdbWatcher *netlinkwatch.FDBWatcher
 	mapOps     *bpf.MapOperations
-	mgr        *vrfbgp.Manager // binding registry, to resolve a bd_id to its EVPN binding
-	evpn       EvpnBridgeHook  // nil unless EVPN auto-advertise is on
+	mgr        *vrfbgp.Manager  // binding registry, to resolve a bd_id to its EVPN binding
+	evpn       *EvpnCoordinator // EVPN BD lifecycle (device axis); nil unless auto-advertise is on
 	logger     *zap.Logger
 }
 
-func NewNetworkResourceServer(resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, mapOps *bpf.MapOperations, mgr *vrfbgp.Manager, evpn EvpnBridgeHook, logger *zap.Logger) *NetworkResourceServer {
+func NewNetworkResourceServer(resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, mapOps *bpf.MapOperations, mgr *vrfbgp.Manager, evpn *EvpnCoordinator, logger *zap.Logger) *NetworkResourceServer {
 	return &NetworkResourceServer{resMgr: resMgr, fdbWatcher: fdbWatcher, mapOps: mapOps, mgr: mgr, evpn: evpn, logger: logger}
 }
 
@@ -62,20 +62,12 @@ func (s *NetworkResourceServer) BridgeCreate(
 		s.fdbWatcher.RegisterBridge(int(ifindex), uint16(br.BdId))
 
 		// If EVPN auto-advertise is on and this bd_id has a binding, enable
-		// auto-advertise (RT2 + RT3) for the bridge. A failure here is non-fatal:
-		// the bridge is created regardless, it just won't auto-originate.
+		// auto-advertise (RT2 + RT3) for the bridge (the device axis). The
+		// coordinator's EnableForBridge handles the EnableBD + FDB replay; failures
+		// are non-fatal (logged, not returned) so the bridge is created regardless.
 		if s.evpn != nil {
 			if b, ok := s.mgr.GetByBDID(uint16(br.BdId)); ok {
-				if err := s.evpn.EnableBD(b, ifindex); err != nil {
-					s.logger.Warn("enable EVPN auto-advertise for bridge",
-						zap.String("bridge", br.Name), zap.Uint32("bd_id", br.BdId), zap.Error(err))
-				} else if err := s.fdbWatcher.DumpBridge(int(ifindex)); err != nil {
-					// Replay MACs already in the bridge's FDB (e.g. a pre-existing
-					// bridge) so they advertise as RT2. Non-fatal: live events still
-					// cover anything learned after this.
-					s.logger.Warn("replay bridge FDB for EVPN RT2 auto-advertise",
-						zap.String("bridge", br.Name), zap.Uint32("bd_id", br.BdId), zap.Error(err))
-				}
+				s.evpn.EnableForBridge(b, ifindex, br.Name)
 			}
 		}
 
@@ -154,9 +146,10 @@ func (s *NetworkResourceServer) BridgeDelete(
 
 		// The bridge is gone; now release the EVPN auto-advertise SID and withdraw
 		// its RT2s. Doing it here (not earlier) keeps EVPN intact if the delete
-		// above failed.
+		// above failed. The binding may still exist (only the device left); a later
+		// VrfBgpUnbind is a no-op for an already-disabled BD.
 		if s.evpn != nil && bdID != 0 {
-			s.evpn.DisableBD(bdID)
+			s.evpn.Disable(bdID)
 		}
 
 		resp.DeletedNames = append(resp.DeletedNames, name)

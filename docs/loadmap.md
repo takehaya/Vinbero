@@ -103,5 +103,5 @@ status.
 | VRF <-> route-target binding | Supported | Import-RT filter for received VPN routes               | RFC 9252 |
 | SR Policy (SAFI 73)        | Supported | Color-based steering (control + data plane)              | RFC 9256 |
 | BGP MUP (SAFI 85)          | Supported | MUP route exchange (ISD/DSD/T1ST/T2ST, IPv4/IPv6) + apply: GTP4/GTP6 downlink H.Encaps + uplink F-TEID (H.M.GTP4.D_TEID / H.M.GTP6.D_TEID) | draft-mpmz-bess-mup-safi |
-| Automatic advertise        | Partial   | VRF-export driven (config-time bindings and runtime VrfBgpBind RPC): connected/static prefixes auto-advertised as VPNv4/v6. EVPN / SR Policy / MUP auto-advertise deferred | RFC 9252 |
+| Automatic advertise        | Partial   | VRF-export driven (config-time bindings and runtime VrfBgpBind RPC): connected/static prefixes auto-advertised as VPNv4/v6, and EVPN RT2/RT3 (local bridge MAC/BUM) and RT4 (local Ethernet Segment) driven by the bridge-device and binding lifecycles. SR Policy / MUP auto-advertise deferred | RFC 9252 / 7432 |
 | EVPN (RT2/3/4)             | Supported | L2VPN over BGP EVPN: RT2 MAC/IP, RT3 Inclusive Multicast, RT4 Ethernet Segment + RFC 8584 DF election / Local-Bias split-horizon (multi-homing). IRB (RT2 L3) and RT5 not yet supported | RFC 9252 / 7432 / 8584 |

@@ -3,18 +3,54 @@ package server
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
+	"go.uber.org/zap"
 )
+
+// fakeEvpnBridge records the EVPN coordinator's exporter calls so the
+// binding-axis tests can assert which bridge domains were enabled / disabled.
+type fakeEvpnBridge struct {
+	enabled  map[uint16]bool // bd_ids currently enabled
+	disabled []uint16        // each DisableBD's bd_id, in order
+}
+
+func (f *fakeEvpnBridge) EnableBD(b vrfbgp.Binding, _ uint32) error {
+	if f.enabled == nil {
+		f.enabled = make(map[uint16]bool)
+	}
+	f.enabled[b.BDID] = true
+	return nil
+}
+
+func (f *fakeEvpnBridge) DisableBD(bdID uint16) {
+	delete(f.enabled, bdID)
+	f.disabled = append(f.disabled, bdID)
+}
+
+func (f *fakeEvpnBridge) SIDsForBD(uint16) []string { return nil }
+
+// newEvpnCoordForTest builds a coordinator over hook, treating the bd_id ->
+// ifindex entries in bridges as the bridges that already exist; replayFDB is a
+// no-op.
+func newEvpnCoordForTest(hook EvpnBridgeHook, bridges map[uint16]uint32) *EvpnCoordinator {
+	return NewEvpnCoordinator(
+		hook,
+		func(bdID uint16) (uint32, bool) { ifindex, ok := bridges[bdID]; return ifindex, ok },
+		func(int) error { return nil },
+		zap.NewNop(),
+	)
+}
 
 // An out-of-range bd_id (> uint16) is rejected as a per-item error rather than
 // silently truncated into a different bridge domain.
 func TestVrfBgpBind_BdIdOutOfRange(t *testing.T) {
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil)
 	resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			{VrfName: "evi-ok", ImportRts: []string{"65000:100"}, BdId: 100},
@@ -70,7 +106,7 @@ func (f *fakeVrfExporter) RemoveVRF(name string) {
 // A successful bind drives the exporter's AddVRF, and an unbind its RemoveVRF.
 func TestVrfBgpBind_DrivesExporter(t *testing.T) {
 	exp := &fakeVrfExporter{}
-	s := NewVrfBgpServer(vrfbgp.NewManager(), exp)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), exp, nil)
 	resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			{VrfName: "vrf1", Rd: "65100:200", ExportRts: []string{"65000:200"}, DefaultLocator: "LOC1", Redistribute: []string{"static"}},
@@ -97,7 +133,7 @@ func TestVrfBgpBind_DrivesExporter(t *testing.T) {
 // registry and the exporter stay consistent.
 func TestVrfBgpBind_AddVRFFailureRollsBack(t *testing.T) {
 	mgr := vrfbgp.NewManager()
-	s := NewVrfBgpServer(mgr, &fakeVrfExporter{addErr: errors.New("boom")})
+	s := NewVrfBgpServer(mgr, &fakeVrfExporter{addErr: errors.New("boom")}, nil)
 	resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			{VrfName: "vrf1", Rd: "65100:200", DefaultLocator: "LOC1", Redistribute: []string{"static"}},
@@ -119,7 +155,7 @@ func TestVrfBgpBind_AddVRFFailureRollsBack(t *testing.T) {
 func TestVrfBgpBind_RebindFailureRestoresPrior(t *testing.T) {
 	mgr := vrfbgp.NewManager()
 	exp := &fakeVrfExporter{failOnRD: "65100:999"}
-	s := NewVrfBgpServer(mgr, exp)
+	s := NewVrfBgpServer(mgr, exp, nil)
 
 	// Initial bind succeeds.
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
@@ -162,7 +198,7 @@ func TestVrfBgpBind_ConcurrentSameVRFStaysConsistent(t *testing.T) {
 	for i := range 300 {
 		mgr := vrfbgp.NewManager()
 		exp := &fakeVrfExporter{failOnRD: "fail"}
-		s := NewVrfBgpServer(mgr, exp)
+		s := NewVrfBgpServer(mgr, exp, nil)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -189,7 +225,7 @@ func TestVrfBgpBind_ConcurrentSameVRFStaysConsistent(t *testing.T) {
 // The new rd / redistribute / max_prefixes fields survive a bind -> list round
 // trip through protoToBinding and back, and import/export RTs are not swapped.
 func TestVrfBgpList_RoundTripsNewFields(t *testing.T) {
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			{
@@ -231,5 +267,88 @@ func TestVrfBgpList_RoundTripsNewFields(t *testing.T) {
 	}
 	if got := b.GetExportRts(); len(got) != 1 || got[0] != "65000:201" {
 		t.Errorf("export_rts = %v, want [65000:201] (import/export must not be swapped)", got)
+	}
+}
+
+// Binding a VRF whose bridge domain already has a bridge enables EVPN
+// auto-advertise on the binding axis; binding one whose bridge has not been
+// created yet is a no-op (BridgeCreate enables it when the bridge arrives).
+func TestVrfBgpBind_EnablesEvpnOnlyWhenBridgeUp(t *testing.T) {
+	hook := &fakeEvpnBridge{}
+	// bd_id 100's bridge exists; bd_id 200's does not.
+	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord)
+
+	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{
+			{VrfName: "evi-up", Rd: "65100:100", BdId: 100},
+			{VrfName: "evi-down", Rd: "65100:200", BdId: 200},
+			{VrfName: "l3-only", Rd: "65100:300"}, // BDID 0: never EVPN
+		},
+	})); err != nil {
+		t.Fatalf("VrfBgpBind: %v", err)
+	}
+	if !hook.enabled[100] {
+		t.Errorf("bd_id 100 (bridge up) must be EVPN-enabled on bind; enabled=%v", hook.enabled)
+	}
+	if hook.enabled[200] {
+		t.Errorf("bd_id 200 (no bridge yet) must NOT be enabled on bind; enabled=%v", hook.enabled)
+	}
+	if hook.enabled[0] {
+		t.Errorf("an L3VPN-only binding (bd_id 0) must never touch EVPN; enabled=%v", hook.enabled)
+	}
+}
+
+// Unbinding a VRF disables its bridge domain's EVPN auto-advertise even though
+// the bridge device is still up — closing the gap where the exporter kept
+// originating RT2/RT3 under a removed RD/RT.
+func TestVrfBgpUnbind_DisablesEvpn(t *testing.T) {
+	hook := &fakeEvpnBridge{}
+	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord)
+
+	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{{VrfName: "evi", Rd: "65100:100", BdId: 100}},
+	})); err != nil {
+		t.Fatalf("VrfBgpBind: %v", err)
+	}
+	if !hook.enabled[100] {
+		t.Fatalf("precondition: bd_id 100 should be enabled after bind; enabled=%v", hook.enabled)
+	}
+	if _, err := s.VrfBgpUnbind(context.Background(), connect.NewRequest(&v1.VrfBgpUnbindRequest{VrfNames: []string{"evi"}})); err != nil {
+		t.Fatalf("VrfBgpUnbind: %v", err)
+	}
+	if len(hook.disabled) != 1 || hook.disabled[0] != 100 {
+		t.Errorf("VrfBgpUnbind must DisableBD(100); disabled=%v", hook.disabled)
+	}
+	if hook.enabled[100] {
+		t.Errorf("bd_id 100 must be disabled after unbind; enabled=%v", hook.enabled)
+	}
+}
+
+// Re-binding a VRF onto a different bridge domain disables the old BD before
+// enabling the new one, so the vacated BD stops advertising.
+func TestVrfBgpBind_RebindMovingBridgeDomainDisablesOld(t *testing.T) {
+	hook := &fakeEvpnBridge{}
+	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5, 200: 6})
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord)
+
+	bind := func(bdID uint32) {
+		if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+			Bindings: []*v1.VrfBgpBinding{{VrfName: "evi", Rd: "65100:100", BdId: bdID}},
+		})); err != nil {
+			t.Fatalf("VrfBgpBind bd_id %d: %v", bdID, err)
+		}
+	}
+	bind(100)
+	bind(200) // move the VRF to a different bridge domain
+	if !slices.Contains(hook.disabled, uint16(100)) {
+		t.Errorf("re-bind moving bd_id 100 -> 200 must DisableBD(100); disabled=%v", hook.disabled)
+	}
+	if !hook.enabled[200] {
+		t.Errorf("bd_id 200 must be enabled after the move; enabled=%v", hook.enabled)
+	}
+	if hook.enabled[100] {
+		t.Errorf("bd_id 100 must be disabled after the move; enabled=%v", hook.enabled)
 	}
 }

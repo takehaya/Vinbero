@@ -85,6 +85,37 @@ func (m *ResourceManager) GetBridgeByName(name string) (ManagedBridge, bool) {
 	return ManagedBridge{}, false
 }
 
+// BridgeIfindexByBDID returns the Linux bridge ifindex of the managed bridge
+// whose bridge domain id is bdID. The EVPN auto-advertise binding axis
+// (VrfBgpBind) uses it to enable a bridge domain whose bridge already exists.
+// ok=false when no managed bridge claims bdID (bind arrived before the bridge,
+// so BridgeCreate will enable it instead) or when bdID is 0.
+//
+// It REFUSES an ambiguous bd_id (more than one bridge claims it) with ok=false,
+// mirroring vrfbgp.Manager.GetByBDID: CreateBridge does not enforce bd_id
+// uniqueness, and resolving a duplicate by first match would let the bridge that
+// happens to sort first steer which device's FDB/decap target a route advertises.
+// Fail closed instead so an ambiguous bd_id originates nothing on either axis.
+func (m *ResourceManager) BridgeIfindexByBDID(bdID uint16) (uint32, bool) {
+	if bdID == 0 {
+		return 0, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var ifindex uint32
+	n := 0
+	for _, b := range m.state.Bridges {
+		if b.BdID == bdID {
+			ifindex = b.Ifindex
+			n++
+		}
+	}
+	if n != 1 {
+		return 0, false
+	}
+	return ifindex, true
+}
+
 // GetVrfByName returns the managed VRF info by name.
 func (m *ResourceManager) GetVrfByName(name string) (ManagedVrf, bool) {
 	m.mu.RLock()

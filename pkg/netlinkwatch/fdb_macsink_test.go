@@ -14,9 +14,10 @@ import (
 // fakeFdbMapOps records FDB writes without a live BPF map (the MAC string of
 // each create/delete).
 type fakeFdbMapOps struct {
-	created   []string // mac.String() of each CreateFdb
-	deleted   []string // mac.String() of each DeleteFdb
-	createErr error    // when set, CreateFdb fails (dataplane sync failure)
+	created   []string           // mac.String() of each CreateFdb
+	deleted   []string           // mac.String() of each DeleteFdb
+	createErr error              // when set, CreateFdb fails (dataplane sync failure)
+	aged      []bpf.AgedFdbEntry // returned by AgeFdbEntries (the entries it removed)
 }
 
 func (f *fakeFdbMapOps) CreateFdb(bdID uint16, mac net.HardwareAddr, _ *bpf.FdbEntry) error {
@@ -30,7 +31,7 @@ func (f *fakeFdbMapOps) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
 	f.deleted = append(f.deleted, mac.String())
 	return nil
 }
-func (f *fakeFdbMapOps) AgeFdbEntries(uint64) (int, error) { return 0, nil }
+func (f *fakeFdbMapOps) AgeFdbEntries(uint64) ([]bpf.AgedFdbEntry, error) { return f.aged, nil }
 
 type macEvent struct {
 	bdID  uint16
@@ -52,7 +53,9 @@ func newSinkTestWatcher(sink MACSink) (*FDBWatcher, *fakeFdbMapOps) {
 		mapOps:  ops,
 		logger:  zap.NewNop(),
 		allowed: make(map[int]uint16),
-		done:    make(chan struct{}),
+		// Default to an empty bridge FDB; DumpBridge tests override this.
+		neighList: func(int, int) ([]netlink.Neigh, error) { return nil, nil },
+		done:      make(chan struct{}),
 	}
 	w.RegisterBridge(10, 100) // bridge ifindex 10 -> bd_id 100
 	w.SetMACSink(sink)
@@ -140,9 +143,11 @@ func TestIsUnicastMAC(t *testing.T) {
 		{"nil", nil, false},
 	}
 	for _, c := range cases {
-		if got := isUnicastMAC(c.mac); got != c.want {
-			t.Errorf("isUnicastMAC(%v) = %v, want %v", c.mac, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if got := isUnicastMAC(c.mac); got != c.want {
+				t.Errorf("isUnicastMAC(%v) = %v, want %v", c.mac, got, c.want)
+			}
+		})
 	}
 }
 
@@ -157,5 +162,80 @@ func TestDumpBridgeNilSinkIsNoop(t *testing.T) {
 	w, _ := newSinkTestWatcher(nil) // registers bridge ifindex 10, no sink
 	if err := w.DumpBridge(10); err != nil {
 		t.Errorf("DumpBridge with no sink must be a no-op, got %v", err)
+	}
+}
+
+// DumpBridge replays only the registered bridge's unicast MACs (MasterIndex
+// filter), and syncs each into the BPF fdb_map before advertising it (the
+// gating that prevents advertising a MAC the data plane cannot decap).
+func TestDumpBridgeFiltersAndSyncsBeforeAdvertise(t *testing.T) {
+	onBridge := net.HardwareAddr{0xaa, 0, 0, 0, 0, 1}     // ifindex 10 (registered) -> replayed
+	otherBridge := net.HardwareAddr{0xaa, 0, 0, 0, 0, 2}  // ifindex 20 -> filtered out
+	multicast := net.HardwareAddr{0x01, 0, 0x5e, 0, 0, 9} // ifindex 10 but multicast -> skipped
+
+	sink := &fakeMACSink{}
+	w, ops := newSinkTestWatcher(sink)
+	w.neighList = func(int, int) ([]netlink.Neigh, error) {
+		return []netlink.Neigh{
+			{Family: unix.AF_BRIDGE, MasterIndex: 10, LinkIndex: 3, HardwareAddr: onBridge},
+			{Family: unix.AF_BRIDGE, MasterIndex: 20, LinkIndex: 4, HardwareAddr: otherBridge},
+			{Family: unix.AF_BRIDGE, MasterIndex: 10, LinkIndex: 3, HardwareAddr: multicast},
+		}, nil
+	}
+	if err := w.DumpBridge(10); err != nil {
+		t.Fatalf("DumpBridge: %v", err)
+	}
+
+	// Only the registered bridge's unicast MAC is synced + advertised.
+	if len(ops.created) != 1 || ops.created[0] != onBridge.String() {
+		t.Errorf("only the registered bridge's unicast MAC should sync to BPF, got %v", ops.created)
+	}
+	if len(sink.events) != 1 {
+		t.Fatalf("only the registered bridge's unicast MAC should advertise, got %+v", sink.events)
+	}
+	ev := sink.events[0]
+	if ev.bdID != 100 || ev.mac != onBridge.String() || !ev.added {
+		t.Errorf("replayed event = %+v, want bd 100 add of %s", ev, onBridge)
+	}
+}
+
+// DumpBridge must not advertise a MAC whose BPF fdb_map sync fails (the data
+// plane cannot decap it), the same gating the live path applies.
+func TestDumpBridgeSkipsAdvertiseWhenSyncFails(t *testing.T) {
+	sink := &fakeMACSink{}
+	w, ops := newSinkTestWatcher(sink)
+	ops.createErr = errors.New("map full")
+	w.neighList = func(int, int) ([]netlink.Neigh, error) {
+		return []netlink.Neigh{
+			{Family: unix.AF_BRIDGE, MasterIndex: 10, LinkIndex: 3, HardwareAddr: net.HardwareAddr{0xaa, 0, 0, 0, 0, 1}},
+		}, nil
+	}
+	if err := w.DumpBridge(10); err != nil {
+		t.Fatalf("DumpBridge: %v", err)
+	}
+	if len(sink.events) != 0 {
+		t.Errorf("a MAC whose BPF sync fails must not advertise, got %+v", sink.events)
+	}
+}
+
+// The aging pass withdraws RT2 for each aged locally-learned MAC (so an
+// aging-removed entry does not stay advertised with no data-plane entry), but
+// not for EVPN-received (remote) entries, which were never advertised.
+func TestAgeAndWithdrawWithdrawsLocalNotRemote(t *testing.T) {
+	local := net.HardwareAddr{0xaa, 0, 0, 0, 0, 1}
+	remote := net.HardwareAddr{0xaa, 0, 0, 0, 0, 2}
+	sink := &fakeMACSink{}
+	w, ops := newSinkTestWatcher(sink)
+	ops.aged = []bpf.AgedFdbEntry{
+		{BDID: 100, MAC: local, IsRemote: false},
+		{BDID: 100, MAC: remote, IsRemote: true},
+	}
+	w.ageAndWithdraw(1e9)
+	if len(sink.events) != 1 {
+		t.Fatalf("only the local aged MAC should be withdrawn, got %+v", sink.events)
+	}
+	ev := sink.events[0]
+	if ev.bdID != 100 || ev.mac != local.String() || ev.added {
+		t.Errorf("withdraw event = %+v, want bd 100 delete of %s", ev, local)
 	}
 }

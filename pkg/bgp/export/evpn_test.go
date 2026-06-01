@@ -429,7 +429,8 @@ func TestEnableESReplaces(t *testing.T) {
 	if err := e.EnableES(testESI, "65000:200"); err != nil {
 		t.Fatalf("EnableES: %v", err)
 	}
-	// Re-enable with a different RD: the old RT4 is withdrawn and a new one pushed.
+	// Re-enable with a different RD: the new RT4 is pushed (push-first) and the old
+	// one, a different NLRI key, is withdrawn.
 	if err := e.EnableES(testESI, "65000:201"); err != nil {
 		t.Fatalf("re-EnableES: %v", err)
 	}
@@ -438,5 +439,86 @@ func TestEnableESReplaces(t *testing.T) {
 	}
 	if len(adv.pushedES) != 2 || adv.pushedES[1].RD != "65000:201" {
 		t.Errorf("re-enable must push the new RT4 (RD 65000:201), got %+v", adv.pushedES)
+	}
+}
+
+// Re-enabling an ES with the SAME RD relies on gobgp AddPath superseding the
+// same-NLRI path, so no explicit withdraw is issued (an explicit withdraw would
+// race the re-push and could blackhole the ES).
+func TestEnableESSameRDDoesNotWithdraw(t *testing.T) {
+	e, adv, _ := newTestEVPNExporter(t)
+	if err := e.EnableES(testESI, "65000:200"); err != nil {
+		t.Fatalf("EnableES: %v", err)
+	}
+	if err := e.EnableES(testESI, "65000:200"); err != nil {
+		t.Fatalf("re-EnableES same RD: %v", err)
+	}
+	if len(adv.withdrawnES) != 0 {
+		t.Errorf("same-RD re-enable must not withdraw (AddPath supersedes), got %d", len(adv.withdrawnES))
+	}
+	if len(adv.pushedES) != 2 {
+		t.Errorf("each EnableES re-pushes the RT4, got %d", len(adv.pushedES))
+	}
+}
+
+// A failed re-EnableES push must leave the prior RT4 intact (push-first): the
+// withdraw of the old advertisement only runs after the new push lands.
+func TestEnableESPushFailureKeepsPrior(t *testing.T) {
+	e, adv, _ := newTestEVPNExporter(t)
+	if err := e.EnableES(testESI, "65000:200"); err != nil {
+		t.Fatalf("EnableES: %v", err)
+	}
+	adv.pushErr = errors.New("push failed")
+	if err := e.EnableES(testESI, "65000:201"); err == nil {
+		t.Fatal("EnableES should return the push error")
+	}
+	if len(adv.withdrawnES) != 0 {
+		t.Errorf("a failed re-EnableES must not withdraw the prior RT4, got %d", len(adv.withdrawnES))
+	}
+	if rd, ok := e.RDForESI(testESI); !ok || rd != "65000:200" {
+		t.Errorf("the prior RD must remain advertised after a failed re-enable; RDForESI=%q,%v", rd, ok)
+	}
+}
+
+func TestRDForESI(t *testing.T) {
+	e, _, _ := newTestEVPNExporter(t)
+	if _, ok := e.RDForESI(testESI); ok {
+		t.Error("RDForESI must report not-advertised before EnableES")
+	}
+	if err := e.EnableES(testESI, "65000:200"); err != nil {
+		t.Fatalf("EnableES: %v", err)
+	}
+	if rd, ok := e.RDForESI(testESI); !ok || rd != "65000:200" {
+		t.Errorf("RDForESI = %q,%v want 65000:200,true", rd, ok)
+	}
+	e.DisableES(testESI)
+	if _, ok := e.RDForESI(testESI); ok {
+		t.Error("RDForESI must report not-advertised after DisableES")
+	}
+}
+
+// MaxPrefixes bounds how many local MACs a bridge domain originates as RT2; a
+// withdraw frees headroom for a later MAC.
+func TestOnLocalMACMaxPrefixesCap(t *testing.T) {
+	e, adv, _ := newTestEVPNExporter(t)
+	b := evpnTestBinding()
+	b.MaxPrefixes = 2
+	if err := e.EnableBD(b, 10); err != nil {
+		t.Fatalf("EnableBD: %v", err)
+	}
+	macs := []net.HardwareAddr{
+		{0xaa, 0, 0, 0, 0, 1}, {0xaa, 0, 0, 0, 0, 2}, {0xaa, 0, 0, 0, 0, 3},
+	}
+	for _, m := range macs {
+		e.OnLocalMAC(100, m, true)
+	}
+	if len(adv.pushed) != 2 {
+		t.Fatalf("MaxPrefixes=2 must cap RT2 at 2, got %d", len(adv.pushed))
+	}
+	// Withdraw one (frees headroom), then a new MAC advertises again.
+	e.OnLocalMAC(100, macs[0], false)
+	e.OnLocalMAC(100, net.HardwareAddr{0xaa, 0, 0, 0, 0, 4}, true)
+	if len(adv.pushed) != 3 {
+		t.Errorf("freeing headroom must let a new MAC advertise; total pushed=%d, want 3", len(adv.pushed))
 	}
 }
