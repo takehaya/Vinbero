@@ -153,19 +153,21 @@ func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manage
 	return e
 }
 
-// validateNextHop checks the BGP next hop once at Start: it must be a non-empty
-// IPv6 (not v4-mapped) address. SRv6 VPN / unicast transport is IPv6-only; an
-// IPv4 next hop serializes into a route no PE can forward toward.
-func (e *Exporter) validateNextHop() error {
-	if e.nextHop == "" {
+// validateIPv6NextHop checks the BGP next hop: a non-empty IPv6 (not v4-mapped)
+// address. SRv6 VPN / unicast / EVPN transport is IPv6-only; an empty / IPv4 /
+// malformed next hop serializes into a route no PE can forward toward. Shared by
+// the L3VPN exporter's Start-time check and the EVPN exporter's per-EnableBD/ES
+// check (the EVPN path has no Start).
+func validateIPv6NextHop(nextHop string) error {
+	if nextHop == "" {
 		return fmt.Errorf("bgp.global.next_hop is required for auto advertise")
 	}
-	a, err := netip.ParseAddr(e.nextHop)
+	a, err := netip.ParseAddr(nextHop)
 	if err != nil {
-		return fmt.Errorf("bgp.global.next_hop %q is invalid: %w", e.nextHop, err)
+		return fmt.Errorf("bgp.global.next_hop %q is invalid: %w", nextHop, err)
 	}
 	if !a.Is6() || a.Is4In6() {
-		return fmt.Errorf("bgp.global.next_hop %q must be an IPv6 address", e.nextHop)
+		return fmt.Errorf("bgp.global.next_hop %q must be an IPv6 address", nextHop)
 	}
 	return nil
 }
@@ -179,7 +181,7 @@ func (e *Exporter) validateNextHop() error {
 // VRFs already enabled in this call are unwound so a partial startup leaves no
 // orphaned SID.
 func (e *Exporter) Start(ctx context.Context) error {
-	if err := e.validateNextHop(); err != nil {
+	if err := validateIPv6NextHop(e.nextHop); err != nil {
 		return err
 	}
 	enabled := make([]string, 0)
