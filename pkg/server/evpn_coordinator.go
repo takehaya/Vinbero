@@ -38,15 +38,17 @@ func NewEvpnCoordinator(exporter EvpnBridgeHook, bridgeIfindex func(bdID uint16)
 	}
 }
 
-// EnableForBridge is the device axis: a bridge was just created (or already
-// existed) for a binding, so enable EVPN auto-advertise and replay the bridge's
-// existing FDB as RT2. Both steps are non-fatal -- the bridge is usable
-// regardless; it just won't auto-originate -- so failures are logged, not
-// returned.
+// EnableForBridge enables EVPN auto-advertise for a binding whose bridge is at
+// ifindex, and replays the bridge's existing FDB as RT2. Both steps are
+// non-fatal -- the bridge is usable regardless; it just won't auto-originate --
+// so failures are logged, not returned. bridgeName is the Linux bridge device
+// name when the caller knows it (the device axis, BridgeCreate); the binding
+// axis passes "" since it resolves only the ifindex, so the log omits the
+// bridge field rather than mislabelling another value as the bridge name.
 func (c *EvpnCoordinator) EnableForBridge(b vrfbgp.Binding, ifindex uint32, bridgeName string) {
 	if err := c.exporter.EnableBD(b, ifindex); err != nil {
-		c.logger.Warn("enable EVPN auto-advertise for bridge",
-			zap.String("bridge", bridgeName), zap.Uint16("bd_id", b.BDID), zap.Error(err))
+		c.logger.Warn("enable EVPN auto-advertise for bridge domain",
+			c.bdFields(b, bridgeName, zap.Error(err))...)
 		return
 	}
 	if err := c.replayFDB(int(ifindex)); err != nil {
@@ -54,8 +56,19 @@ func (c *EvpnCoordinator) EnableForBridge(b vrfbgp.Binding, ifindex uint32, brid
 		// they advertise as RT2. Non-fatal: live events still cover anything
 		// learned after this.
 		c.logger.Warn("replay bridge FDB for EVPN RT2 auto-advertise",
-			zap.String("bridge", bridgeName), zap.Uint16("bd_id", b.BDID), zap.Error(err))
+			c.bdFields(b, bridgeName, zap.Error(err))...)
 	}
+}
+
+// bdFields builds the common log fields for a bridge domain: vrf and bd_id
+// always, bridge only when its name is known, plus any extra fields.
+func (c *EvpnCoordinator) bdFields(b vrfbgp.Binding, bridgeName string, extra ...zap.Field) []zap.Field {
+	f := make([]zap.Field, 0, 3+len(extra))
+	f = append(f, zap.String("vrf", b.VRFName), zap.Uint16("bd_id", b.BDID))
+	if bridgeName != "" {
+		f = append(f, zap.String("bridge", bridgeName))
+	}
+	return append(f, extra...)
 }
 
 // EnableForBinding is the binding axis: a VRF was just bound, so enable EVPN
@@ -73,7 +86,9 @@ func (c *EvpnCoordinator) EnableForBinding(b vrfbgp.Binding) {
 			zap.String("vrf", b.VRFName), zap.Uint16("bd_id", b.BDID))
 		return
 	}
-	c.EnableForBridge(b, ifindex, b.VRFName)
+	// The binding axis resolves only the ifindex, not the bridge device name, so
+	// pass "" -- EnableForBridge omits the bridge log field rather than mislabel.
+	c.EnableForBridge(b, ifindex, "")
 }
 
 // Disable tears down a bridge domain's EVPN auto-advertise (withdraw RT2/RT3,
