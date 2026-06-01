@@ -105,11 +105,17 @@ func (s *EthernetSegmentServer) EsCreate(
 		}
 		// If EVPN auto-advertise is on and this ES is locally attached with an RD,
 		// originate its RT4 (Ethernet Segment route) for DF election. Non-fatal:
-		// the ES data-plane entry is created regardless.
-		if s.evpn != nil && cfg.LocalAttached && e.GetRd() != "" {
-			if err := s.evpn.EnableES(esi, e.GetRd()); err != nil {
-				s.logger.Warn("enable EVPN RT4 auto-advertise for ethernet segment",
-					zap.String("esi", e.Esi), zap.Error(err))
+		// the ES data-plane entry is created regardless. EsCreate is an upsert, so
+		// re-creating with rd cleared or local_attached=false must withdraw any
+		// RT4 previously advertised for this ESI (DisableES is a no-op otherwise).
+		if s.evpn != nil {
+			if cfg.LocalAttached && e.GetRd() != "" {
+				if err := s.evpn.EnableES(esi, e.GetRd()); err != nil {
+					s.logger.Warn("enable EVPN RT4 auto-advertise for ethernet segment",
+						zap.String("esi", e.Esi), zap.Error(err))
+				}
+			} else {
+				s.evpn.DisableES(esi)
 			}
 		}
 		resp.Created = append(resp.Created, e)
