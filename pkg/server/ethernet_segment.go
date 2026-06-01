@@ -9,7 +9,16 @@ import (
 	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"go.uber.org/zap"
 )
+
+// EvpnEsHook advertises or withdraws an EVPN RT4 (Ethernet Segment route) as a
+// local Ethernet Segment is created or deleted. *pkg/bgp/export.EVPNExporter
+// satisfies it; it is nil unless EVPN auto-advertise is on.
+type EvpnEsHook interface {
+	EnableES(esi [bpf.ESILen]byte, rd string) error
+	DisableES(esi [bpf.ESILen]byte)
+}
 
 type EthernetSegmentServer struct {
 	mapOps *bpf.MapOperations
@@ -18,10 +27,12 @@ type EthernetSegmentServer struct {
 	// arrived before `es create` would never elect a DF (the applier skipped it
 	// at receive time because the ESI was not yet locally attached).
 	reElect func(esi [bpf.ESILen]byte)
+	evpn    EvpnEsHook // RT4 auto-advertise hook; nil when off
+	logger  *zap.Logger
 }
 
-func NewEthernetSegmentServer(mapOps *bpf.MapOperations, reElect func(esi [bpf.ESILen]byte)) *EthernetSegmentServer {
-	return &EthernetSegmentServer{mapOps: mapOps, reElect: reElect}
+func NewEthernetSegmentServer(mapOps *bpf.MapOperations, reElect func(esi [bpf.ESILen]byte), evpn EvpnEsHook, logger *zap.Logger) *EthernetSegmentServer {
+	return &EthernetSegmentServer{mapOps: mapOps, reElect: reElect, evpn: evpn, logger: logger}
 }
 
 func protoToEsiCfg(e *v1.EthernetSegment) (bpf.EsiConfig, error) {
@@ -92,6 +103,21 @@ func (s *EthernetSegmentServer) EsCreate(
 		if cfg.LocalAttached && s.reElect != nil {
 			s.reElect(esi)
 		}
+		// If EVPN auto-advertise is on and this ES is locally attached with an RD,
+		// originate its RT4 (Ethernet Segment route) for DF election. Non-fatal:
+		// the ES data-plane entry is created regardless. EsCreate is an upsert, so
+		// re-creating with rd cleared or local_attached=false must withdraw any
+		// RT4 previously advertised for this ESI (DisableES is a no-op otherwise).
+		if s.evpn != nil {
+			if cfg.LocalAttached && e.GetRd() != "" {
+				if err := s.evpn.EnableES(esi, e.GetRd()); err != nil {
+					s.logger.Warn("enable EVPN RT4 auto-advertise for ethernet segment",
+						zap.String("esi", e.Esi), zap.Error(err))
+				}
+			} else {
+				s.evpn.DisableES(esi)
+			}
+		}
 		resp.Created = append(resp.Created, e)
 	}
 
@@ -119,6 +145,10 @@ func (s *EthernetSegmentServer) EsDelete(
 			}
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: esiStr, Reason: err.Error()})
 			continue
+		}
+		// Withdraw any RT4 auto-advertised for this ES (a no-op if it was not).
+		if s.evpn != nil {
+			s.evpn.DisableES(esi)
 		}
 		resp.Deleted = append(resp.Deleted, esiStr)
 	}
