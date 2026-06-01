@@ -27,17 +27,20 @@ type MACSink interface {
 type fdbMapOps interface {
 	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
 	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
-	AgeFdbEntries(maxAgeNs uint64) (int, error)
+	AgeFdbEntries(maxAgeNs uint64) ([]bpf.AgedFdbEntry, error)
 }
 
 // FDBWatcher watches Linux bridge FDB updates via Netlink and syncs them to BPF fdb_map.
 // Also runs a periodic aging timer to delete stale dynamic entries.
 type FDBWatcher struct {
-	mapOps       fdbMapOps
-	logger       *zap.Logger
-	mu           sync.RWMutex
-	allowed      map[int]uint16 // bridge ifindex → bd_id (for O(1) filter)
-	macSink      MACSink        // nil unless EVPN auto-advertise is on
+	mapOps  fdbMapOps
+	logger  *zap.Logger
+	mu      sync.RWMutex
+	allowed map[int]uint16 // bridge ifindex → bd_id (for O(1) filter)
+	macSink MACSink        // nil unless EVPN auto-advertise is on
+	// neighList lists kernel neighbor entries (defaults to netlink.NeighList);
+	// overridable in tests so DumpBridge's filter + sync path needs no live bridge.
+	neighList    func(linkIndex, family int) ([]netlink.Neigh, error)
 	done         chan struct{}
 	wg           sync.WaitGroup
 	agingSeconds int // 0=disabled
@@ -46,10 +49,11 @@ type FDBWatcher struct {
 // NewFDBWatcher creates a new FDB watcher
 func NewFDBWatcher(mapOps *bpf.MapOperations, logger *zap.Logger) *FDBWatcher {
 	return &FDBWatcher{
-		mapOps:  mapOps,
-		logger:  logger,
-		allowed: make(map[int]uint16),
-		done:    make(chan struct{}),
+		mapOps:    mapOps,
+		logger:    logger,
+		allowed:   make(map[int]uint16),
+		neighList: netlink.NeighList,
+		done:      make(chan struct{}),
 	}
 }
 
@@ -122,15 +126,36 @@ func (w *FDBWatcher) runAging(ctx context.Context) {
 		case <-w.done:
 			return
 		case <-ticker.C:
-			maxAgeNs := uint64(w.agingSeconds) * 1e9
-			deleted, err := w.mapOps.AgeFdbEntries(maxAgeNs)
-			if err != nil {
-				w.logger.Warn("FDB aging error", zap.Error(err))
-			} else if deleted > 0 {
-				w.logger.Info("FDB aging: deleted stale entries", zap.Int("count", deleted))
-			}
+			w.ageAndWithdraw(uint64(w.agingSeconds) * 1e9)
 		}
 	}
+}
+
+// ageAndWithdraw runs one BPF aging pass and withdraws the RT2 for each aged
+// locally-learned MAC. Vinbero's BPF ager may remove an fdb_map entry the kernel
+// FDB still holds (the kernel runs its own aging and would emit RTM_DELNEIGH), so
+// without this the route stays advertised with no data-plane entry behind it --
+// an aging-induced blackhole. Remote entries (IsRemote) were never advertised as
+// RT2, so they are skipped.
+func (w *FDBWatcher) ageAndWithdraw(maxAgeNs uint64) {
+	aged, err := w.mapOps.AgeFdbEntries(maxAgeNs)
+	if err != nil {
+		w.logger.Warn("FDB aging error", zap.Error(err))
+		return
+	}
+	if len(aged) == 0 {
+		return
+	}
+	w.mu.RLock()
+	sink := w.macSink
+	w.mu.RUnlock()
+	for _, a := range aged {
+		if a.IsRemote {
+			continue
+		}
+		w.notifyMAC(sink, a.BDID, a.MAC, false)
+	}
+	w.logger.Info("FDB aging: deleted stale entries", zap.Int("count", len(aged)))
 }
 
 func (w *FDBWatcher) processUpdates(ctx context.Context, updates <-chan netlink.NeighUpdate) {
@@ -236,9 +261,9 @@ func (w *FDBWatcher) DumpBridge(ifindex int) error {
 	if sink == nil {
 		return nil
 	}
-	// NeighList(0, AF_BRIDGE) lists every bridge FDB entry; filter by MasterIndex
+	// neighList(0, AF_BRIDGE) lists every bridge FDB entry; filter by MasterIndex
 	// to this bridge, mirroring the live handleNeighUpdate path.
-	neighs, err := netlink.NeighList(0, unix.AF_BRIDGE)
+	neighs, err := w.neighList(0, unix.AF_BRIDGE)
 	if err != nil {
 		return fmt.Errorf("list bridge FDB: %w", err)
 	}

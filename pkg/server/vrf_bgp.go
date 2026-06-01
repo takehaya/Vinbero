@@ -20,11 +20,14 @@ type VrfExporter interface {
 }
 
 // VrfBgpServer is the Connect RPC handler for VrfBgpService, a thin
-// adapter over vrfbgp.Manager. When auto-advertise is on it also drives a
-// VrfExporter so a runtime bind/unbind enables/disables auto advertise.
+// adapter over vrfbgp.Manager. When auto-advertise is on it also drives the
+// L3VPN VrfExporter and the EVPN coordinator so a runtime bind/unbind
+// enables/disables auto advertise on both families: L3VPN (DT4/DT6) and EVPN
+// (RT2/RT3) for a binding with a bridge domain.
 type VrfBgpServer struct {
 	mgr      *vrfbgp.Manager
-	exporter VrfExporter // nil when auto-advertise is off
+	exporter VrfExporter      // L3VPN auto-advertise hook; nil when off
+	evpn     *EvpnCoordinator // EVPN BD lifecycle (binding axis); nil when off
 	// mu serializes a bind/unbind's manager + exporter mutations per call so two
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
@@ -32,8 +35,8 @@ type VrfBgpServer struct {
 	mu sync.Mutex
 }
 
-func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter) *VrfBgpServer {
-	return &VrfBgpServer{mgr: mgr, exporter: exporter}
+func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator) *VrfBgpServer {
+	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn}
 }
 
 // protoToBinding converts a wire VrfBgpBinding into the runtime Binding. The
@@ -90,10 +93,12 @@ func (s *VrfBgpServer) bindOne(b *v1.VrfBgpBinding) (*v1.VrfBgpBinding, *v1.Oper
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	binding := protoToBinding(b)
+	// Capture the prior binding once: the L3VPN restore path needs it to undo a
+	// failed re-bind, and the EVPN axis needs it to disable a bridge domain a
+	// re-bind moved off of.
+	prev, existed := s.mgr.Get(binding.VRFName)
 	if s.exporter != nil {
-		// AddVRF removes any prior enablement before re-enabling, so capture the
-		// prior binding to restore it if the re-bind fails.
-		prev, existed := s.mgr.Get(binding.VRFName)
+		// AddVRF removes any prior enablement before re-enabling.
 		if err := s.exporter.AddVRF(binding); err != nil {
 			reason := fmt.Sprintf("auto advertise: %v", err)
 			if existed {
@@ -118,6 +123,16 @@ func (s *VrfBgpServer) bindOne(b *v1.VrfBgpBinding) (*v1.VrfBgpBinding, *v1.Oper
 		}
 		return nil, &v1.OperationError{TriggerPrefix: b.GetVrfName(), Reason: err.Error()}
 	}
+	// EVPN binding axis: enable auto-advertise for the committed binding's bridge
+	// domain if its bridge is already up (a no-op otherwise; BridgeCreate enables
+	// it when the bridge arrives). A re-bind that moved the VRF to a different BD
+	// (or dropped it) disables the old BD first so it stops advertising.
+	if s.evpn != nil {
+		if existed && prev.BDID != 0 && prev.BDID != binding.BDID {
+			s.evpn.Disable(prev.BDID)
+		}
+		s.evpn.EnableForBinding(binding)
+	}
 	return b, nil
 }
 
@@ -130,12 +145,23 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 		Errors:          make([]*v1.OperationError, 0),
 	}
 	for _, name := range req.Msg.VrfNames {
-		// Hold s.mu across the manager Unbind + exporter RemoveVRF so an unbind
-		// and a concurrent same-VRF bind cannot interleave.
+		// Hold s.mu across the manager Unbind + exporter/EVPN teardown so an unbind
+		// and a concurrent same-VRF bind cannot interleave. Capture the binding
+		// before Unbind so the EVPN axis knows which bridge domain to disable.
 		s.mu.Lock()
+		prev, existed := s.mgr.Get(name)
 		err := s.mgr.Unbind(name)
-		if err == nil && s.exporter != nil {
-			s.exporter.RemoveVRF(name)
+		if err == nil {
+			if s.exporter != nil {
+				s.exporter.RemoveVRF(name)
+			}
+			// EVPN: stop advertising RT2/RT3 for the unbound binding's bridge domain.
+			// Without this the exporter would keep originating under the removed
+			// RD/RT even though the binding is gone (the bridge device may still be
+			// up; a later re-bind re-enables it via the binding axis).
+			if s.evpn != nil && existed && prev.BDID != 0 {
+				s.evpn.Disable(prev.BDID)
+			}
 		}
 		s.mu.Unlock()
 		if err != nil {
