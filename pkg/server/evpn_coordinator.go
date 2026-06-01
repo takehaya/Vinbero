@@ -82,7 +82,11 @@ func (c *EvpnCoordinator) EnableForBinding(b vrfbgp.Binding) {
 	}
 	ifindex, ok := c.bridgeIfindex(b.BDID)
 	if !ok {
-		c.logger.Debug("EVPN binding has no bridge yet; BridgeCreate will enable it",
+		// bridgeIfindex fails closed for an absent OR ambiguous bd_id (more than one
+		// bridge claims it); either way nothing is enabled here. For the absent case
+		// BridgeCreate enables it when the bridge arrives; an ambiguous bd_id
+		// originates nothing on either axis (the device axis refuses it too).
+		c.logger.Debug("EVPN binding has no unique bridge yet (absent or ambiguous bd_id)",
 			zap.String("vrf", b.VRFName), zap.Uint16("bd_id", b.BDID))
 		return
 	}
