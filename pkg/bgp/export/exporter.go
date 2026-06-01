@@ -172,11 +172,6 @@ func validateIPv6NextHop(nextHop string) error {
 	return nil
 }
 
-// validateNextHop checks this exporter's configured next hop once at Start.
-func (e *Exporter) validateNextHop() error {
-	return validateIPv6NextHop(e.nextHop)
-}
-
 // Start validates the next hop, enables every VRF binding that lists a
 // redistribute set, enables the IPv6 unicast underlay if configured, and begins
 // watching the kernel routing tables. EnableVRF mints each VRF's End.DT4/DT6
@@ -186,7 +181,7 @@ func (e *Exporter) validateNextHop() error {
 // VRFs already enabled in this call are unwound so a partial startup leaves no
 // orphaned SID.
 func (e *Exporter) Start(ctx context.Context) error {
-	if err := e.validateNextHop(); err != nil {
+	if err := validateIPv6NextHop(e.nextHop); err != nil {
 		return err
 	}
 	enabled := make([]string, 0)
