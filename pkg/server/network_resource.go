@@ -19,10 +19,10 @@ import (
 type EvpnBridgeHook interface {
 	EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error
 	DisableBD(bdID uint16)
-	// SIDForBD returns the End.DT2U SID (a sid_function_map key) the exporter
-	// installed for the bd, so BridgeDelete can exclude this lifecycle-owned SID
-	// from its reference check. ok=false for a bd that is not enabled.
-	SIDForBD(bdID uint16) (string, bool)
+	// SIDsForBD returns the sid_function_map keys the exporter installed for the
+	// bd (End.DT2U + End.DT2M), so BridgeDelete can exclude these lifecycle-owned
+	// SIDs from its reference check. nil for a bd that is not enabled.
+	SIDsForBD(bdID uint16) []string
 }
 
 type NetworkResourceServer struct {
@@ -112,15 +112,13 @@ func (s *NetworkResourceServer) BridgeDelete(
 				bdID = bd
 			}
 		}
-		var selfSID string
+		var selfSIDs []string
 		if s.evpn != nil && bdID != 0 {
-			if sid, ok := s.evpn.SIDForBD(bdID); ok {
-				selfSID = sid
-			}
+			selfSIDs = s.evpn.SIDsForBD(bdID)
 		}
 
 		if ifindex != 0 {
-			ref, err := s.findBridgeReference(ifindex, selfSID)
+			ref, err := s.findBridgeReference(ifindex, selfSIDs)
 			if err != nil {
 				resp.Errors = append(resp.Errors, &v1.OperationError{
 					TriggerPrefix: name,
@@ -303,17 +301,21 @@ func (s *NetworkResourceServer) bdIDForBridge(ifindex uint32) (uint16, bool) {
 }
 
 // findBridgeReference checks if any End.DT2/DT2M SID entry references the given
-// bridge_ifindex, returning the first such SID prefix. The exclude prefix (the
-// EVPN auto-advertise SID for this bridge, which the delete itself releases) is
-// skipped so it does not block the delete. Bridge ifindex is stored in the aux
+// bridge_ifindex, returning the first such SID prefix. The exclude prefixes (the
+// EVPN auto-advertise SIDs for this bridge, which the delete itself releases) are
+// skipped so they do not block the delete. Bridge ifindex is stored in the aux
 // map (L2 variant).
-func (s *NetworkResourceServer) findBridgeReference(ifindex uint32, exclude string) (string, error) {
+func (s *NetworkResourceServer) findBridgeReference(ifindex uint32, exclude []string) (string, error) {
+	excluded := make(map[string]struct{}, len(exclude))
+	for _, e := range exclude {
+		excluded[e] = struct{}{}
+	}
 	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
 		return "", fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
-		if exclude != "" && prefix == exclude {
+		if _, skip := excluded[prefix]; skip {
 			continue
 		}
 		switch v1.Srv6LocalAction(entry.Action) {
