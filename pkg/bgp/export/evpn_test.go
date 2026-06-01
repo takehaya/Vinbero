@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
@@ -357,7 +358,7 @@ func TestOnLocalMACPushFailureNotRecorded(t *testing.T) {
 
 // testESI is a Type-0 ESI whose value's high-order 6 octets (bytes 1..6) encode
 // the MAC aa:bb:cc:dd:ee:ff, which RFC 7432 Sec. 7.6 derives as the ES-Import RT.
-var testESI = [10]byte{0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03}
+var testESI = [bpf.ESILen]byte{0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03}
 
 func TestEnableESAdvertisesRT4(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
