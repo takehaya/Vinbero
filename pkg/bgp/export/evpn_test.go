@@ -14,7 +14,8 @@ import (
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
-// fakeEVPNAdv records RT2 advertise / withdraw calls.
+// fakeEVPNAdv records RT2 (MAC/IP) and RT3 (Inclusive Multicast) advertise /
+// withdraw calls.
 type fakeEVPNAdv struct {
 	pushed    []bgp.EVPNRoute
 	withdrawn      []bgp.EVPNMACKey
