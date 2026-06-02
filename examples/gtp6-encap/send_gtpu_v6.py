@@ -22,7 +22,7 @@ try:
     from scapy.contrib.gtp import GTPHeader, GTPPDUSessionContainer
     from scapy.layers.inet6 import IPv6ExtHdrSegmentRouting
 except ImportError:
-    print("ERROR: scapy is required. Install with: pip3 install scapy")
+    print("ERROR: scapy is required. Install with: apt-get install -y python3-scapy")
     sys.exit(1)
 
 conf.verb = 0
@@ -52,9 +52,11 @@ def main():
         gtp = GTPHeader(teid=args.teid, gtp_type=0xFF)
 
     # SRH: segments [next_seg, sid] with segments_left=1, so the active segment
-    # (the IPv6 DA) is sid; after End.M.GTP6.D it advances to next_seg.
+    # (the IPv6 DA) is sid; after End.M.GTP6.D it advances to next_seg. nh=17
+    # (UDP) is set explicitly -- End.M.GTP6.D early-returns unless the SRH next
+    # header is UDP, so do not rely on scapy's autocompletion of it.
     srh = IPv6ExtHdrSegmentRouting(addresses=[args.next_seg, args.sid],
-                                   segleft=1, lastentry=1)
+                                   segleft=1, lastentry=1, nh=17)
 
     pkt = IPv6(src=args.src, dst=args.sid) / srh / \
         UDP(sport=2152, dport=2152) / gtp / raw(inner)

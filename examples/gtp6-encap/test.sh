@@ -76,18 +76,22 @@ echo "=========================================="
 echo "Phase 3: SRv6+GTP-U Packet Test"
 echo "=========================================="
 
-if ! python3 -c "from scapy.all import IPv6" 2>/dev/null; then
-    print_info "scapy not installed, skipping data-plane test"
+# Check every dependency send_gtpu_v6.py actually imports, not just scapy.all,
+# so a partial scapy install skips cleanly instead of failing mid-run under set -e.
+if ! python3 -c "from scapy.all import IPv6, UDP, IP; from scapy.contrib.gtp import GTPHeader; from scapy.layers.inet6 import IPv6ExtHdrSegmentRouting" 2>/dev/null; then
+    print_info "scapy (with contrib.gtp + SRH) not installed, skipping data-plane test"
     print_info "Install with: apt-get install -y python3-scapy"
     print_success "Entry registration test passed (packet test skipped)"
     exit 0
 fi
 
 print_info "Capturing SRv6 on the router1->router2 link while sending..."
+rm -f /tmp/gtp6_encap.pcap  # drop any stale capture so we never read a previous run's
 ip netns exec "$ns_router2" \
     tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 3 -w /tmp/gtp6_encap.pcap \
     'ip6 and dst net fc00:3::/64' 2>/dev/null &
 TCPDUMP_PID=$!
+PIDS="$TCPDUMP_PID $PIDS"  # also kill it on early exit
 sleep 1
 
 ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu_v6.py" \
