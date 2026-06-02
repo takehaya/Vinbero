@@ -100,9 +100,9 @@ func (s *SrPolicyServer) syncAdvertise(ctx context.Context, def *v1.SrPolicyDef,
 	if !def.GetAdvertise() {
 		return s.advertiser.WithdrawPolicy(ctx, srPolicyAdvertiseKey(p))
 	}
-	nh, err := netip.ParseAddr(s.nextHop)
-	if err != nil || !nh.Is6() || nh.Is4In6() {
-		return fmt.Errorf("advertise requires a valid IPv6 bgp.global.next_hop, got %q", s.nextHop)
+	nh, err := parseAdvertiseNextHop(s.nextHop)
+	if err != nil {
+		return fmt.Errorf("advertise requires a routable IPv6 bgp.global.next_hop: %w", err)
 	}
 	adv := p
 	adv.AdvertiseNextHop = nh

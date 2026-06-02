@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+import "vinbero/v1/enums.proto";
+import "vinbero/v1/bgp_route.proto";
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// MupService manages local (operator-defined) BGP MUP routes (SAFI 85,
+// draft-mpmz-bess-mup-safi) and auto-advertises them. CRUD originates this
+// node's MUP routes -- Interwork Segment Discovery (ISD), Direct Segment
+// Discovery (DSD), and the Type-1 / Type-2 Session Transformed routes
+// (T1ST/T2ST) -- into BGP, tracking them in an in-memory table so MupList can
+// report what this node originates. It is the managed counterpart of the
+// fire-and-forget `BgpRouteService.BgpAdvertiseMup`; both originate over the
+// same RIB, so do not manage one route through both paths (a withdraw on one
+// drops the shared NLRI the other still lists).
+//
+// The route shape is the same `BgpMupRoute` the explicit advertise path uses.
+// The whole service requires the in-process BGP speaker (--bgp-enabled);
+// without it the RPCs fail with FailedPrecondition.
+service MupService {
+  rpc MupCreate(MupCreateRequest) returns (MupCreateResponse);
+  rpc MupUpdate(MupUpdateRequest) returns (MupUpdateResponse);
+  rpc MupDelete(MupDeleteRequest) returns (MupDeleteResponse);
+  rpc MupList(MupListRequest) returns (MupListResponse);
+}
+
+// Create and Update both upsert the local MUP route keyed by its route type and
+// the type's identifying fields (ISD: rd+prefix; DSD: rd+address; T1ST:
+// rd+prefix+teid; T2ST: rd+endpoint+teid+teid_len). An empty next_hop defaults
+// to bgp.global.next_hop.
+message MupCreateRequest {
+  repeated BgpMupRoute routes = 1;
+}
+message MupCreateResponse {
+  repeated OperationError errors = 1;
+}
+
+message MupUpdateRequest {
+  repeated BgpMupRoute routes = 1;
+}
+message MupUpdateResponse {
+  repeated OperationError errors = 1;
+}
+
+// Delete reuses BgpMupRoute (like BgpWithdrawMup): only the route type and its
+// identifying fields are read; the rest are ignored.
+message MupDeleteRequest {
+  repeated BgpMupRoute routes = 1;
+}
+message MupDeleteResponse {
+  repeated OperationError errors = 1;
+}
+
+message MupListRequest {}
+// MupList returns the MUP routes this node currently originates (local table);
+// BGP-learned MUP routes are not included.
+message MupListResponse {
+  repeated BgpMupRoute routes = 1;
+}

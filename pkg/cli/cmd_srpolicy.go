@@ -10,20 +10,6 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// reportSRPolicy reports a single-item create/update/delete result through
-// the shared printOperationResult helper: the operation succeeded iff no
-// per-item error came back.
-func reportSRPolicy(errs []*v1.OperationError, verb string) error {
-	// Each CLI mutation submits exactly one policy, so success means no
-	// per-item error came back. Represent that as a 0- or 1-element slice
-	// for printOperationResult (avoids a negative make() length).
-	var ok []struct{}
-	if len(errs) == 0 {
-		ok = []struct{}{{}}
-	}
-	return printOperationResult(ok, errs, "SR Policy", verb)
-}
-
 func srPolicyDefFromFlags(c *cli.Context) *v1.SrPolicyDef {
 	return &v1.SrPolicyDef{
 		Color:      uint32(c.Uint("color")),
@@ -62,7 +48,7 @@ func srPolicyCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					return reportSRPolicy(resp.Msg.Errors, "created")
+					return reportSingle(resp.Msg.Errors, "SR Policy", "created")
 				},
 			},
 			{
@@ -76,7 +62,7 @@ func srPolicyCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					return reportSRPolicy(resp.Msg.Errors, "updated")
+					return reportSingle(resp.Msg.Errors, "SR Policy", "updated")
 				},
 			},
 			{
@@ -93,7 +79,7 @@ func srPolicyCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					return reportSRPolicy(resp.Msg.Errors, "deleted")
+					return reportSingle(resp.Msg.Errors, "SR Policy", "deleted")
 				},
 			},
 			{

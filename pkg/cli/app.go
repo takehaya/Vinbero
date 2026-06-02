@@ -56,6 +56,7 @@ func NewApp() *cli.App {
 			vrfBgpCommand(),
 			bgpCommand(),
 			srPolicyCommand(),
+			mupCommand(),
 			fdbCommand(),
 			vlanTableCommand(),
 			statsCommand(),
@@ -91,4 +92,15 @@ func printOperationResult[T any](created []T, errors []*v1.OperationError, resou
 		return fmt.Errorf("%d error(s) occurred", len(errors))
 	}
 	return nil
+}
+
+// reportSingle prints the result of a single-item create/update/delete: success
+// iff no per-item error came back. Each such CLI mutation submits exactly one
+// item, so a 0- or 1-element ok slice drives printOperationResult's count.
+func reportSingle(errs []*v1.OperationError, resourceName, verb string) error {
+	var ok []struct{}
+	if len(errs) == 0 {
+		ok = []struct{}{{}}
+	}
+	return printOperationResult(ok, errs, resourceName, verb)
 }
