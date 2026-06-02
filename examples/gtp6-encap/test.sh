@@ -80,7 +80,7 @@ echo "=========================================="
 
 # Check every dependency send_gtpu_v6.py imports, not just scapy.all, so a
 # partial scapy install skips cleanly instead of failing mid-run under set -e.
-if ! python3 -c "from scapy.all import IPv6, UDP, ICMPv6EchoRequest, raw; from scapy.contrib.gtp import GTPHeader, GTPPDUSessionContainer" 2>/dev/null; then
+if ! python3 -c "from scapy.all import IPv6, UDP, ICMPv6EchoRequest, send, conf, raw; from scapy.contrib.gtp import GTPHeader, GTPPDUSessionContainer" 2>/dev/null; then
     print_info "scapy not installed, skipping data-plane test"
     print_info "Install with: apt-get install -y python3-scapy"
     print_success "Entry registration test passed (packet test skipped)"
