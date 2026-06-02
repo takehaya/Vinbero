@@ -18,6 +18,9 @@ import (
 // is disabled, in which case every RPC fails with FailedPrecondition.
 type srPolicyController interface {
 	ApplyLocalSRPolicy(p bgp.SRPolicy, withdraw bool)
+	// ApplyLocalSRPolicyCapped installs a local policy, rejecting a NEW one beyond
+	// max (0 = unlimited); the count check and install are atomic.
+	ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error
 	ListSRPolicies() []apply.SRPolicySnapshot
 	HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool
 }
@@ -36,10 +39,14 @@ type SrPolicyServer struct {
 	// nextHop is the BGP next hop stamped on an advertised SR Policy: this PE's
 	// reachable IPv6 address (bgp.global.next_hop), validated per advertise.
 	nextHop string
+	// maxPolicies caps how many local SR Policies may exist (0 = unlimited),
+	// bounding the unauthenticated CRUD surface; a new policy beyond the cap is a
+	// per-item error.
+	maxPolicies uint32
 }
 
-func NewSrPolicyServer(ctrl srPolicyController, advertiser bgp.SRPolicyController, nextHop string) *SrPolicyServer {
-	return &SrPolicyServer{ctrl: ctrl, advertiser: advertiser, nextHop: nextHop}
+func NewSrPolicyServer(ctrl srPolicyController, advertiser bgp.SRPolicyController, nextHop string, maxPolicies uint32) *SrPolicyServer {
+	return &SrPolicyServer{ctrl: ctrl, advertiser: advertiser, nextHop: nextHop, maxPolicies: maxPolicies}
 }
 
 func (s *SrPolicyServer) disabledErr() error {
@@ -60,7 +67,16 @@ func (s *SrPolicyServer) upsert(ctx context.Context, defs []*v1.SrPolicyDef) []*
 			})
 			continue
 		}
-		s.ctrl.ApplyLocalSRPolicy(p, false)
+		// Install under the origination cap: a NEW local policy beyond the limit is
+		// rejected atomically (an update of an existing {color, endpoint} is always
+		// allowed). maxPolicies 0 means unlimited.
+		if err := s.ctrl.ApplyLocalSRPolicyCapped(p, s.maxPolicies); err != nil {
+			errs = append(errs, &v1.OperationError{
+				TriggerPrefix: srPolicyTrigger(def.GetColor(), def.GetEndpoint()),
+				Reason:        fmt.Sprintf("SR Policy limit reached (sr_policy_max_policies=%d)", s.maxPolicies),
+			})
+			continue
+		}
 		if err := s.syncAdvertise(ctx, def, p); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: srPolicyTrigger(def.GetColor(), def.GetEndpoint()),
@@ -100,9 +116,9 @@ func (s *SrPolicyServer) syncAdvertise(ctx context.Context, def *v1.SrPolicyDef,
 	if !def.GetAdvertise() {
 		return s.advertiser.WithdrawPolicy(ctx, srPolicyAdvertiseKey(p))
 	}
-	nh, err := parseAdvertiseNextHop(s.nextHop)
+	nh, err := bgp.ValidateIPv6NextHop(s.nextHop)
 	if err != nil {
-		return fmt.Errorf("advertise requires a routable IPv6 bgp.global.next_hop: %w", err)
+		return fmt.Errorf("bgp.global.next_hop %w", err)
 	}
 	adv := p
 	adv.AdvertiseNextHop = nh
