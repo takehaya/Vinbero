@@ -411,10 +411,12 @@ func protoToAdvertiseSRPolicy(p *v1.BgpSrPolicy) (bgp.SRPolicy, error) {
 		return bgp.SRPolicy{}, err
 	}
 	// The SR Policy NLRI carries an IPv6 next hop (SRv6 over IPv6); reject a
-	// non-routable next hop at the RPC boundary with a per-item error.
+	// non-routable next hop at the RPC boundary with a per-item error that names
+	// the field (the policy also has an endpoint + segments, so an unprefixed
+	// error would be ambiguous).
 	nh, err := bgp.ValidateIPv6NextHop(p.GetNextHop())
 	if err != nil {
-		return bgp.SRPolicy{}, err
+		return bgp.SRPolicy{}, fmt.Errorf("next_hop %w", err)
 	}
 	preference := p.GetPreference()
 	if preference == 0 {

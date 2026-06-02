@@ -16,7 +16,7 @@ type fakeSRPolicyCtrl struct {
 	applied  []appliedPolicy
 	hasLocal map[srPolicyTestKey]bool
 	list     []apply.SRPolicySnapshot
-	local    int // value returned by LocalSRPolicyCount (origination cap tests)
+	local    int // current local-policy count ApplyLocalSRPolicyCapped checks (cap tests)
 }
 
 // srPolicyTestKey mirrors the {color, endpoint} identity HasLocalSRPolicy

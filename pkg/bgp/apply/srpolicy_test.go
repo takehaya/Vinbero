@@ -340,3 +340,31 @@ func TestSRPolicyTable_UnrefUnknownIsNoop(t *testing.T) {
 		t.Errorf("policy reaped by spurious unref")
 	}
 }
+
+// applyLocalCapped rejects a NEW local policy beyond the cap (atomic count +
+// apply), allows updating an existing one at the cap, and treats max=0 as
+// unlimited. This pins the security-critical cap core directly, not via a
+// server-side fake.
+func TestSRPolicyTable_LocalCap(t *testing.T) {
+	tbl, _ := newTestTable()
+	mk := func(color uint32, ep string) bgp.SRPolicy {
+		return LocalSRPolicy(color, netip.MustParseAddr(ep), segs("fd00:1::1"), 100)
+	}
+	if err := tbl.applyLocalCapped(mk(1, "2001:db8::1"), 2); err != nil {
+		t.Fatalf("1st local policy under cap: %v", err)
+	}
+	if err := tbl.applyLocalCapped(mk(2, "2001:db8::2"), 2); err != nil {
+		t.Fatalf("2nd local policy under cap: %v", err)
+	}
+	if err := tbl.applyLocalCapped(mk(3, "2001:db8::3"), 2); !errors.Is(err, ErrSRPolicyLimitReached) {
+		t.Fatalf("3rd NEW policy must hit the cap, got %v", err)
+	}
+	// Updating an existing policy at the cap is allowed (not a new policy).
+	if err := tbl.applyLocalCapped(mk(1, "2001:db8::1"), 2); err != nil {
+		t.Errorf("update of an existing policy at the cap must be allowed, got %v", err)
+	}
+	// max=0 is unlimited.
+	if err := tbl.applyLocalCapped(mk(9, "2001:db8::9"), 0); err != nil {
+		t.Errorf("max=0 must be unlimited, got %v", err)
+	}
+}

@@ -73,7 +73,7 @@ func (s *SrPolicyServer) upsert(ctx context.Context, defs []*v1.SrPolicyDef) []*
 		if err := s.ctrl.ApplyLocalSRPolicyCapped(p, s.maxPolicies); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: srPolicyTrigger(def.GetColor(), def.GetEndpoint()),
-				Reason:        fmt.Sprintf("SR Policy limit reached (srpolicy_max_policies=%d)", s.maxPolicies),
+				Reason:        fmt.Sprintf("SR Policy limit reached (sr_policy_max_policies=%d)", s.maxPolicies),
 			})
 			continue
 		}

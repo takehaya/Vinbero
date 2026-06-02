@@ -40,7 +40,12 @@ func ValidateIPv6NextHop(nextHop string) (netip.Addr, error) {
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("%q is not a valid IP address", nextHop)
 	}
-	if !a.Is6() || a.Is4In6() || a.IsUnspecified() {
+	// Must be a global-scope IPv6 unicast address a remote PE can forward toward:
+	// reject IPv4 / v4-in-6, and the unspecified (::), loopback (::1),
+	// link-local (fe80::/10), and multicast (ff00::/8) addresses, which would all
+	// originate a route no PE can use.
+	if !a.Is6() || a.Is4In6() || a.IsUnspecified() || a.IsLoopback() ||
+		a.IsLinkLocalUnicast() || a.IsMulticast() {
 		return netip.Addr{}, fmt.Errorf("%q must be a routable IPv6 address", nextHop)
 	}
 	return a, nil

@@ -47,6 +47,9 @@ func TestValidateIPv6NextHop(t *testing.T) {
 		{in: "192.0.2.1", wantErr: true},        // IPv4
 		{in: "::ffff:192.0.2.1", wantErr: true}, // v4-in-6
 		{in: "::", wantErr: true},               // unspecified -> blackhole
+		{in: "::1", wantErr: true},              // loopback
+		{in: "fe80::1", wantErr: true},          // link-local
+		{in: "ff02::1", wantErr: true},          // multicast
 	}
 	for _, tc := range tests {
 		t.Run(tc.in, func(t *testing.T) {

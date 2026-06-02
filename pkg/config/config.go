@@ -115,7 +115,7 @@ type BGPGlobalConfig struct {
 	// SrPolicyService will hold, bounding both the BGP origination and the
 	// sr_policy_map data-plane footprint a flood of CRUD RPCs can reach on the
 	// unauthenticated surface (0 = unlimited).
-	SrPolicyMaxPolicies uint32 `yaml:"srpolicy_max_policies,omitempty"`
+	SrPolicyMaxPolicies uint32 `yaml:"sr_policy_max_policies,omitempty"`
 	// MupMaxRoutes caps how many local MUP routes the MupService will originate,
 	// bounding SAFI 85 amplification from the unauthenticated surface
 	// (0 = unlimited).
