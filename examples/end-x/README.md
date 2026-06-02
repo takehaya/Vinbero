@@ -44,8 +44,8 @@ sudo ./setup.sh
 sudo ip netns exec end-x-router2 ip -6 route del local fc00:2::1/128 2>/dev/null
 sudo ip netns exec end-x-router2 ip -6 route del local fc00:2::2/128 2>/dev/null
 
-# Vinbero起動
-sudo ip netns exec end-x-router2 ../../out/bin/vinberod -c vinbero_router2.yaml
+# Vinbero起動（フォアグラウンドで動き続けるので & でバックグラウンド起動するか別ターミナルで）
+sudo ip netns exec end-x-router2 ../../out/bin/vinberod -c vinbero_router2.yaml &
 ```
 
 ### 2. SidFunction (End.X) エントリ登録

@@ -4,7 +4,7 @@ VinberoのSRv6機能を実際に試せるPlayground環境です。
 
 ここには2系統のサンプルがあります。
 
-- netns example（このディレクトリ直下の `end-*` / `headend-*` / `gtp*-*`）。各 SRv6 機能を単独の Linux network namespace 上で検証する自己完結スクリプト。`test.yaml` の matrix で並列実行します。
+- netns example（このディレクトリ直下の `end-*` / `headend-*` / `gtp*-*`）。各 SRv6 機能を単独の Linux network namespace 上で検証する自己完結スクリプト。`test.yaml` の matrix に登録した example を CI で並列実行します。matrix 未登録の example はローカル実行のみです。
 - interop ラボ（[`interop-clab/`](interop-clab/)）。Vinbero を FRR など第三者実装と相互運用させる containerlab シナリオ群。
 
 このページは netns example を説明します。interop ラボは [`interop-clab/README.md`](interop-clab/README.md) を参照してください。
