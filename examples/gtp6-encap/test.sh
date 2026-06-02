@@ -105,6 +105,8 @@ wait $TCPDUMP_PID 2>/dev/null || true
 
 CAPTURED=0
 if [ -f /tmp/gtp6_encap.pcap ]; then
+    # tcpdump's "reading from file ..." banner goes to stderr (dropped by
+    # 2>/dev/null), so wc -l counts only packet lines -> 0 for an empty capture.
     CAPTURED=$(tcpdump -r /tmp/gtp6_encap.pcap 2>/dev/null | wc -l)
 fi
 if [ "$CAPTURED" -gt 0 ]; then
