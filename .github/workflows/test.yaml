@@ -128,9 +128,13 @@ jobs:
           - end-dt6
           - end-dt2
           - end-dt2-p2mp
+          - end-dt2m-multihomed
+          - end-dx2v
           - headend-v4
           - headend-v6
           - headend-l2
+          - gtp6-encap
+          - gtp6-drop-in
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -152,8 +156,10 @@ jobs:
             iputils-ping \
             ethtool \
             curl \
+            python3-scapy \
             linux-modules-extra-$(uname -r)
           sudo modprobe vrf
+          sudo modprobe 8021q
 
       - name: Setup test environment
         working-directory: examples/${{ matrix.example }}
