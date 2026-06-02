@@ -40,30 +40,6 @@ cleanup() {
 
 trap cleanup EXIT
 
-# Test ping with counter
-test_ping_with_counter() {
-    local ns=$1
-    local target=$2
-    local desc=$3
-    local interface=${4:-}
-
-    print_info "Testing: $desc"
-    local ping_cmd="ping -c 3 -W 2 $target"
-    if [ -n "$interface" ]; then
-        ping_cmd="ping -c 3 -W 2 -I $interface $target"
-    fi
-
-    if ip netns exec $ns $ping_cmd > /dev/null 2>&1; then
-        print_success "$desc: PASS"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        return 0
-    else
-        print_error "$desc: FAIL"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        return 1
-    fi
-}
-
 echo "=========================================="
 echo "SRv6 H.Encaps.L2 (Headend L2VPN) Test"
 echo "=========================================="

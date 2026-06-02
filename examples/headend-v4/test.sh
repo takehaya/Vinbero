@@ -23,24 +23,6 @@ ns_router1="${TOPO_NS_PREFIX}router1"
 TESTS_PASSED=0
 TESTS_FAILED=0
 
-# Test ping with counter
-test_ping_with_counter() {
-    local ns=$1
-    local target=$2
-    local desc=$3
-
-    print_info "Testing: $desc"
-    if ip netns exec $ns ping -c 3 -W 2 $target > /dev/null 2>&1; then
-        print_success "$desc: PASS"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        return 0
-    else
-        print_error "$desc: FAIL"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        return 1
-    fi
-}
-
 echo "=========================================="
 echo "SRv6 H.Encaps (Headend IPv4) Test"
 echo "=========================================="
