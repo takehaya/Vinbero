@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"testing"
 
@@ -33,8 +34,17 @@ type appliedPolicy struct {
 func (f *fakeSRPolicyCtrl) ApplyLocalSRPolicy(p bgp.SRPolicy, withdraw bool) {
 	f.applied = append(f.applied, appliedPolicy{p, withdraw})
 }
+
+// ApplyLocalSRPolicyCapped mirrors the applier: reject a NEW local policy beyond
+// max (using f.local as the current count and f.hasLocal for "is this new").
+func (f *fakeSRPolicyCtrl) ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error {
+	if max > 0 && !f.hasLocal[srPolicyTestKey{p.Color, p.Endpoint.String()}] && uint32(f.local) >= max {
+		return errors.New("local SR Policy limit reached")
+	}
+	f.applied = append(f.applied, appliedPolicy{p, false})
+	return nil
+}
 func (f *fakeSRPolicyCtrl) ListSRPolicies() []apply.SRPolicySnapshot { return f.list }
-func (f *fakeSRPolicyCtrl) LocalSRPolicyCount() int                  { return f.local }
 func (f *fakeSRPolicyCtrl) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
 	return f.hasLocal[srPolicyTestKey{color, endpoint.String()}]
 }

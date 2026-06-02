@@ -18,11 +18,11 @@ import (
 // is disabled, in which case every RPC fails with FailedPrecondition.
 type srPolicyController interface {
 	ApplyLocalSRPolicy(p bgp.SRPolicy, withdraw bool)
+	// ApplyLocalSRPolicyCapped installs a local policy, rejecting a NEW one beyond
+	// max (0 = unlimited); the count check and install are atomic.
+	ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error
 	ListSRPolicies() []apply.SRPolicySnapshot
 	HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool
-	// LocalSRPolicyCount is the number of operator-defined SR Policies, for the
-	// origination cap.
-	LocalSRPolicyCount() int
 }
 
 // SrPolicyServer is the Connect RPC handler for SrPolicyService. CRUD acts
@@ -67,17 +67,16 @@ func (s *SrPolicyServer) upsert(ctx context.Context, defs []*v1.SrPolicyDef) []*
 			})
 			continue
 		}
-		// Origination cap: reject a NEW local policy once the limit is reached
-		// (an update of an existing {color, endpoint} is always allowed).
-		if s.maxPolicies > 0 && !s.ctrl.HasLocalSRPolicy(p.Color, p.Endpoint) &&
-			uint32(s.ctrl.LocalSRPolicyCount()) >= s.maxPolicies {
+		// Install under the origination cap: a NEW local policy beyond the limit is
+		// rejected atomically (an update of an existing {color, endpoint} is always
+		// allowed). maxPolicies 0 means unlimited.
+		if err := s.ctrl.ApplyLocalSRPolicyCapped(p, s.maxPolicies); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: srPolicyTrigger(def.GetColor(), def.GetEndpoint()),
 				Reason:        fmt.Sprintf("SR Policy limit reached (srpolicy_max_policies=%d)", s.maxPolicies),
 			})
 			continue
 		}
-		s.ctrl.ApplyLocalSRPolicy(p, false)
 		if err := s.syncAdvertise(ctx, def, p); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: srPolicyTrigger(def.GetColor(), def.GetEndpoint()),
@@ -119,7 +118,7 @@ func (s *SrPolicyServer) syncAdvertise(ctx context.Context, def *v1.SrPolicyDef,
 	}
 	nh, err := bgp.ValidateIPv6NextHop(s.nextHop)
 	if err != nil {
-		return fmt.Errorf("advertise requires a routable IPv6 bgp.global.next_hop: %w", err)
+		return fmt.Errorf("bgp.global.next_hop %w", err)
 	}
 	adv := p
 	adv.AdvertiseNextHop = nh

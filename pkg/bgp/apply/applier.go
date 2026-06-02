@@ -171,10 +171,11 @@ func (a *Applier) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
 	return a.srPolicy.hasLocalCandidate(color, endpoint)
 }
 
-// LocalSRPolicyCount returns the number of operator-defined (local) SR Policies,
-// for the SrPolicyService origination cap.
-func (a *Applier) LocalSRPolicyCount() int {
-	return a.srPolicy.localCount()
+// ApplyLocalSRPolicyCapped installs a local SR Policy, rejecting a NEW one when
+// it would exceed max (0 = unlimited). The count check and the install are
+// atomic, so the SrPolicyService cap holds under concurrent RPCs.
+func (a *Applier) ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error {
+	return a.srPolicy.applyLocalCapped(p, max)
 }
 
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {

@@ -164,7 +164,7 @@ func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manage
 // orphaned SID.
 func (e *Exporter) Start(ctx context.Context) error {
 	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
-		return err
+		return fmt.Errorf("bgp.global.next_hop %w", err)
 	}
 	enabled := make([]string, 0)
 	for _, b := range e.vrfBindings.List() {

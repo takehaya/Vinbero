@@ -107,7 +107,7 @@ func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manag
 // (the caller logs it; the ES data-plane entry is unaffected).
 func (e *EVPNExporter) EnableES(esi [bpf.ESILen]byte, rd string) error {
 	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
-		return err
+		return fmt.Errorf("bgp.global.next_hop %w", err)
 	}
 	if rd == "" {
 		return fmt.Errorf("rd is required for EVPN RT4 auto advertise")
@@ -223,7 +223,7 @@ func sameStringSet(a, b []string) bool {
 // real change re-enables cleanly (the prior enablement is torn down first).
 func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
-		return fmt.Errorf("vrf %q: %w", b.VRFName, err)
+		return fmt.Errorf("vrf %q: bgp.global.next_hop %w", b.VRFName, err)
 	}
 	if b.BDID == 0 {
 		return fmt.Errorf("vrf %q: bd_id is required for EVPN auto advertise", b.VRFName)

@@ -52,12 +52,12 @@ func mupKeyFor(mr bgp.MUPRoute) mupLocalKey {
 // FailedPrecondition); nextHop is the default BGP next hop
 // (bgp.global.next_hop) used when a route does not carry its own.
 type MupServer struct {
-	// mu guards only routes (taken for the map read/write, not held across the
-	// gobgp Push/Withdraw I/O). Operator CRUD is sequential; two concurrent
-	// contradictory same-key RPCs (a create and a delete) are NOT serialized
-	// against each other, so the local table can momentarily diverge from the
-	// gobgp RIB. The RIB is the source of truth (what is actually advertised);
-	// routes is the List view, and bgpSession.Stop clears any orphan on shutdown.
+	// mu is held across the gobgp Push/Withdraw I/O of a create/update/delete (not
+	// just the routes map access), so the origination cap is exact under
+	// concurrent RPCs and the table stays consistent with the RIB even for
+	// concurrent same-key operations. gobgp AddPath/DeletePath are local and fast;
+	// MupList briefly waits behind an in-flight mutate, acceptable on this
+	// control-plane path.
 	mu         sync.Mutex
 	advertiser bgp.MUPController
 	nextHop    string
@@ -102,19 +102,18 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 		if _, err := bgp.ValidateIPv6NextHop(mr.NextHop); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: mupRouteID(r),
-				Reason:        fmt.Sprintf("%v (set bgp.global.next_hop or --next-hop)", err),
+				Reason:        fmt.Sprintf("bgp.global.next_hop %v (or set --next-hop)", err),
 			})
 			continue
 		}
-		// Origination cap: reject a NEW route once the limit is reached (an update
-		// of an existing key is always allowed). Checked before Push so a capped
-		// route is never originated.
+		// Hold s.mu across the cap check, the Push, and the store so concurrent
+		// creates cannot both pass an under-cap check and exceed maxRoutes, and so
+		// the table and the gobgp RIB stay consistent. A NEW route beyond the cap
+		// is rejected before Push (an update of an existing key is always allowed).
 		key := mupKeyFor(mr)
 		s.mu.Lock()
-		_, exists := s.routes[key]
-		atCap := s.maxRoutes > 0 && !exists && uint32(len(s.routes)) >= s.maxRoutes
-		s.mu.Unlock()
-		if atCap {
+		if _, exists := s.routes[key]; !exists && s.maxRoutes > 0 && uint32(len(s.routes)) >= s.maxRoutes {
+			s.mu.Unlock()
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: mupRouteID(r),
 				Reason:        fmt.Sprintf("MUP route limit reached (mup_max_routes=%d)", s.maxRoutes),
@@ -122,10 +121,10 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 			continue
 		}
 		if err := pushMUPRoute(ctx, s.advertiser, mr); err != nil {
+			s.mu.Unlock()
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		s.mu.Lock()
 		s.routes[key] = mr
 		s.mu.Unlock()
 	}
@@ -168,11 +167,14 @@ func (s *MupServer) MupDelete(
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
+		// Hold s.mu across the Withdraw + drop so a concurrent same-key create
+		// cannot interleave and leave the table and the RIB inconsistent.
+		s.mu.Lock()
 		if err := withdrawMUPRoute(ctx, s.advertiser, mr); err != nil {
+			s.mu.Unlock()
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		s.mu.Lock()
 		delete(s.routes, mupKeyFor(mr))
 		s.mu.Unlock()
 	}

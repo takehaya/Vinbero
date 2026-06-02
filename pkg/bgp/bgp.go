@@ -31,15 +31,17 @@ import (
 // toward, reachable over the unauthenticated RPC surface. Shared by every
 // advertise path (pkg/bgp/export, pkg/server) so they enforce it identically.
 func ValidateIPv6NextHop(nextHop string) (netip.Addr, error) {
+	// Messages are subject-neutral so each caller can prefix the source (e.g.
+	// "bgp.global.next_hop") without repeating the word "next_hop".
 	if nextHop == "" {
-		return netip.Addr{}, fmt.Errorf("next_hop is required for advertise")
+		return netip.Addr{}, errors.New("is required (a routable IPv6 address)")
 	}
 	a, err := netip.ParseAddr(nextHop)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("next_hop %q is not a valid IP address", nextHop)
+		return netip.Addr{}, fmt.Errorf("%q is not a valid IP address", nextHop)
 	}
 	if !a.Is6() || a.Is4In6() || a.IsUnspecified() {
-		return netip.Addr{}, fmt.Errorf("next_hop %q must be a routable IPv6 address", nextHop)
+		return netip.Addr{}, fmt.Errorf("%q must be a routable IPv6 address", nextHop)
 	}
 	return a, nil
 }
