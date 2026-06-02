@@ -89,8 +89,10 @@ fi
 
 print_info "Capturing SRv6 on the router1->router2 link while sending..."
 rm -f /tmp/gtp6_encap.pcap  # drop any stale capture so we never read a previous run's
+# tcpdump self-terminates after -c 3 (timeout caps it if fewer arrive, so a
+# capture miss surfaces in ~8s instead of always paying a fixed drain wait).
 ip netns exec "$ns_router2" \
-    tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 3 -w /tmp/gtp6_encap.pcap \
+    timeout 8 tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 3 -w /tmp/gtp6_encap.pcap \
     'ip6 and dst net fc00:3::/64' 2>/dev/null &
 TCPDUMP_PID=$!
 PIDS="$TCPDUMP_PID $PIDS"  # also kill it on early exit
@@ -98,9 +100,7 @@ sleep 1
 
 ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu_v6.py" \
     --dst 2001:db8:caf::1 --teid 0xAABBCCDD --qfi 5 --count 3
-sleep 2
 
-kill $TCPDUMP_PID 2>/dev/null || true
 wait $TCPDUMP_PID 2>/dev/null || true
 
 CAPTURED=0
