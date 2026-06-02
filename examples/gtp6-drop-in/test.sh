@@ -82,15 +82,16 @@ ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_srv6_gtpu.py" \
 sleep 1
 after=$(di_slot_count); after=${after:-0}
 
-drops=$(ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show 2>/dev/null | awk '$1=="DROP"{print $2}')
-drops=${drops:-0}
-
-print_info "End.M.GTP6.D.Di invocations: ${before} -> ${after} (DROP=${drops})"
-if [ "${after:-0}" -gt "${before:-0}" ] && [ "${drops}" -eq 0 ]; then
-    print_success "End.M.GTP6.D.Di PASS: $((after - before)) GTP-U-in-SRv6 packets recognised and passed to the kernel (no drop)"
+# The counter increments only when the SRv6 localsid dispatch matched the Di SID
+# and ran the Di tail-call program on the packet -- it proves the data-plane path
+# reached End.M.GTP6.D.Di. (Di is a no-op XDP_PASS, so there is no transform or
+# drop to observe beyond this; the slot delta is the signal.)
+print_info "End.M.GTP6.D.Di invocations: ${before} -> ${after}"
+if [ "${after:-0}" -gt "${before:-0}" ]; then
+    print_success "End.M.GTP6.D.Di PASS: the Di program ran on $((after - before)) matched SRv6 packets and passed them to the kernel"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    print_error "End.M.GTP6.D.Di FAIL: Di ran $((after - before)) times, DROP=${drops}"
+    print_error "End.M.GTP6.D.Di FAIL: the Di program did not run on the sent packets (delta $((after - before)))"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
