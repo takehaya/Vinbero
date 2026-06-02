@@ -65,31 +65,22 @@ if ! python3 -c "from scapy.all import IPv6, UDP, IP, ICMP, send, conf, raw; fro
     exit 0
 fi
 
-# End.M.GTP6.D.Di per-slot packet counter (slot 19 = SRV6_LOCAL_ACTION_END_M_GTP6_D_DI),
-# summed across CPUs; echoes 0 when stats are unavailable.
+# End.M.GTP6.D.Di per-slot packet counter, via the shipped CLI (vbctl stats slot
+# show prints one row per non-zero tail-call slot: MAP SLOT NAME PACKETS BYTES).
+# Match by name so it is robust to slot renumbering; echoes nothing (-> 0) until
+# the slot has been hit.
 di_slot_count() {
-    ip netns exec "$ns_router1" bash -c '
-        id=$(bpftool map show 2>/dev/null | grep -i "slot_stats_endp" | head -1 | cut -d: -f1)
-        [ -z "$id" ] && { echo 0; exit 0; }
-        # No -j: bpftool uses the map BTF to emit structured JSON (key as int,
-        # value as {packets,bytes}); -j would instead dump raw byte arrays.
-        bpftool map dump id "$id" 2>/dev/null | python3 -c "
-import sys, json
-try: d = json.load(sys.stdin)
-except Exception: print(0); sys.exit()
-for e in d:
-    if e.get(\"key\") == 19:
-        print(sum(v[\"value\"][\"packets\"] for v in e.get(\"values\", []))); sys.exit()
-print(0)
-"'
+    ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 \
+        stats slot show --type endpoint 2>/dev/null \
+        | awk '$3 == "End.M.GTP6.D.Di" { print $4 }'
 }
 
-before=$(di_slot_count)
+before=$(di_slot_count); before=${before:-0}  # slot absent until first hit -> 0
 print_info "Sending SRv6+GTP-U to the Di SID (fc00:1::1)..."
 ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_srv6_gtpu.py" \
     --sid fc00:1::1 --next-seg fc00:3::3 --teid 0xAABBCCDD --qfi 5 --count 3
 sleep 1
-after=$(di_slot_count)
+after=$(di_slot_count); after=${after:-0}
 
 drops=$(ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 stats show 2>/dev/null | awk '$1=="DROP"{print $2}')
 drops=${drops:-0}
