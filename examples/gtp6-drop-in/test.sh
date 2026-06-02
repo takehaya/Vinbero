@@ -65,8 +65,9 @@ if ! python3 -c "from scapy.all import IPv6, UDP, IP, ICMP, send, conf, raw; fro
     exit 0
 fi
 
-# End.M.GTP6.D.Di per-slot packet counter, via the shipped CLI (vbctl stats slot
-# show prints one row per non-zero tail-call slot: MAP SLOT NAME PACKETS BYTES).
+# End.M.GTP6.D.Di per-slot packet counter, via the shipped CLI (the example calls
+# it as $VINBERO_BIN, i.e. `vinbero stats slot show`, which prints one row per
+# non-zero tail-call slot: MAP SLOT NAME PACKETS BYTES).
 # Match by name so it is robust to slot renumbering; echoes nothing (-> 0) until
 # the slot has been hit.
 di_slot_count() {
