@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -145,12 +146,20 @@ func (s *Headendv6Server) protoToEntry(headend *v1.Headendv6) (*bpf.HeadendEntry
 		return nil, err
 	}
 
+	// H.M.GTP6.D writes the 5-byte Args.Mob.Session at args_offset, so offset+5
+	// must fit the 16-byte SID: max 11. The BPF drops anything larger, so reject
+	// it here for a create-time error instead of a silent per-packet drop.
+	if headend.ArgsOffset > 11 {
+		return nil, fmt.Errorf("args_offset must be 0-11, got %d", headend.ArgsOffset)
+	}
+
 	return &bpf.HeadendEntry{
 		Mode:        uint8(headend.Mode),
 		NumSegments: numSegments,
 		SrcAddr:     srcAddr,
 		DstAddr:     dstAddr,
 		Segments:    segments,
+		ArgsOffset:  uint8(headend.ArgsOffset),
 	}, nil
 }
 
@@ -162,5 +171,6 @@ func (s *Headendv6Server) entryToProto(prefix string, entry *bpf.HeadendEntry) *
 		SrcAddr:       bpf.FormatIPv6(entry.SrcAddr),
 		DstAddr:       bpf.FormatIPv6(entry.DstAddr),
 		Segments:      bpf.FormatSegments(entry.Segments, entry.NumSegments),
+		ArgsOffset:    uint32(entry.ArgsOffset),
 	}
 }

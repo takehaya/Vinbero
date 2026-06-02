@@ -73,7 +73,7 @@ sudo ./teardown.sh # クリーンアップ
 | ディレクトリ | 機能 | 説明 |
 |---|---|---|
 | `gtp4-encap/` | H.M.GTP4.D + End.M.GTP4.E | GTP-U/IPv4とSRv6の相互変換 |
-| `gtp6-encap/` | End.M.GTP6.D + End.M.GTP6.E | GTP-U/IPv6とSRv6の相互変換 |
+| `gtp6-encap/` | H.M.GTP6.D + End.M.GTP6.E | GTP-U/IPv6とSRv6の相互変換 |
 | `gtp6-drop-in/` | End.M.GTP6.D.Di | GTP-U Drop-Inモード |
 
 ### Plugin Extension

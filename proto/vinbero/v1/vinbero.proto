@@ -163,6 +163,7 @@ message Headendv6 {
   string src_addr = 3;
   string dst_addr = 4;
   repeated string segments = 5;
+  uint32 args_offset = 6; // Args.Mob.Session byte offset in SID (RFC 9433, for H.M.GTP6.D)
 }
 
 message Headendv6CreateRequest {

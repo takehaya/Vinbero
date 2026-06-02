@@ -1,22 +1,24 @@
-# SRv6 GTP-U/IPv6 (End.M.GTP6.D + End.M.GTP6.E)
+# SRv6 GTP-U/IPv6 (H.M.GTP6.D + End.M.GTP6.E)
 
-RFC 9433に基づくGTP-U/IPv6とSRv6の双方向変換のデモ環境です。
+RFC 9433 に基づく GTP-U/IPv6 と SRv6 の変換デモ環境です。gtp4-encap の IPv6 対称版で、router1 は素の GTP-U/IPv6 tunnel を outer IPv6 dst で intercept して SRv6 化する headend (H.M.GTP6.D) として動きます。
 
 ## トポロジー
 
 ```mermaid
 graph LR
-    gNB[gNB/host1<br/>GTP-U/IPv6] -->|GTP-U/IPv6| router1[router1 / Vinbero XDP<br/>fc00:1::1<br/>End.M.GTP6.D]
-    router1 -->|SRv6| router2[router2<br/>fc00:2::1<br/>End]
-    router2 -->|SRv6| router3[router3 / Vinbero XDP<br/>fc00:3::3<br/>End.M.GTP6.E]
+    gNB[gNB/host1<br/>GTP-U/IPv6] -->|GTP-U/IPv6 to 2001:db8:caf::/64| router1[router1 / Vinbero XDP<br/>H.M.GTP6.D]
+    router1 -->|SRv6| router2[router2<br/>IPv6 transit]
+    router2 -->|SRv6| router3[router3 / Vinbero XDP<br/>fc00:3::/56<br/>End.M.GTP6.E]
     router3 -->|GTP-U/IPv6| UPF[UPF/host2<br/>GTP-U/IPv6]
 ```
 
 **パケットの流れ:**
-1. gNBがGTP-U/IPv6パケットをSRv6パス上で送信
-2. **router1 (End.M.GTP6.D)**: GTP-Uを剥離、SRv6セグメント処理を継続。TEID/QFIを次SIDのArgs.Mob.Sessionにエンコード
-3. router2 (End): SRv6 transit
-4. **router3 (End.M.GTP6.E)**: SRv6を剥離、SIDからTEID/QFIをデコード、GTP-U/IPv6で再カプセル化
+1. gNB が素の GTP-U/IPv6 パケットを N3/UPF アドレス (2001:db8:caf::/64) 宛に送信。router1 経由でルーティングされる
+2. **router1 (H.M.GTP6.D)**: outer IPv6 dst で GTP-U tunnel を intercept し、外側 IPv6+UDP+GTP-U を剥離して End.M.GTP6.E SID 向けに SRv6 encap。TEID/QFI を SID の Args.Mob.Session (args_offset 8) にエンコード
+3. router2: SRv6 を素の IPv6 として transit (localsid なし)
+4. **router3 (End.M.GTP6.E)**: SRv6 を剥離、SID から TEID/QFI をデコードして GTP-U/IPv6 で再カプセル化
+
+args_offset を 8 にすることで Args.Mob.Session の 5 バイトが /64 locator の外 (byte 8-12) に入り、SID が経路可能なまま保たれます。
 
 ## クイックスタート
 
@@ -25,3 +27,5 @@ sudo ./setup.sh
 sudo ./test.sh
 sudo ./teardown.sh
 ```
+
+`test.sh` は router1 で H.M.GTP6.D を登録 (`hv6 create --mode H_M_GTP6_D --args-offset 8`)、host1 から素の GTP-U/IPv6 を送り、router1→router2 リンクで変換後の SRv6 パケットを捕捉して変換を検証します。
