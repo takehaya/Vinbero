@@ -105,6 +105,12 @@ test_ping() {
 # Like test_ping but tallies the caller's TESTS_PASSED / TESTS_FAILED counters
 # (define both before calling). Pass an interface to ping with -I (used by the
 # VLAN/L2 examples to pick the source subinterface).
+#
+# Always returns 0: callers run under `set -e` and want every assertion to run
+# and be tallied, then fail at the end via `[ $TESTS_FAILED -gt 0 ] && exit 1`.
+# A non-zero return would abort the script on the first failed ping, before the
+# summary. The ping argv is built as an array so the target / -I argument are
+# never word-split or globbed.
 test_ping_with_counter() {
     local ns=$1
     local target=$2
@@ -112,20 +118,18 @@ test_ping_with_counter() {
     local interface=${4:-}
 
     print_info "Testing: $desc"
-    local ping_cmd="ping -c 3 -W 2 $target"
-    if [ -n "$interface" ]; then
-        ping_cmd="ping -c 3 -W 2 -I $interface $target"
-    fi
+    local ping_cmd=(ping -c 3 -W 2)
+    [ -n "$interface" ] && ping_cmd+=(-I "$interface")
+    ping_cmd+=("$target")
 
-    if ip netns exec "$ns" $ping_cmd > /dev/null 2>&1; then
+    if ip netns exec "$ns" "${ping_cmd[@]}" > /dev/null 2>&1; then
         print_success "$desc: PASS"
         TESTS_PASSED=$((TESTS_PASSED + 1))
-        return 0
     else
         print_error "$desc: FAIL"
         TESTS_FAILED=$((TESTS_FAILED + 1))
-        return 1
     fi
+    return 0
 }
 
 
