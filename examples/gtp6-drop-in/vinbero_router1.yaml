@@ -13,6 +13,7 @@ internal:
     format: text
 
 settings:
+  enable_stats: true
   entries:
     sid_function:
       capacity: 1024
