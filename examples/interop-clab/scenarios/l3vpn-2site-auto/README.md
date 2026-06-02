@@ -1,5 +1,7 @@
 # l3vpn-2site-auto — auto-advertise SRv6 L3VPN interop (Vinbero ⇄ FRR)
 
+*(日本語: [README.ja.md](./README.ja.md))*
+
 The auto-advertise variant of [l3vpn-2site](../l3vpn-2site/). The topology,
 addressing, and FRR PE are identical; the only difference is how the Vinbero PE
 originates its customer route.

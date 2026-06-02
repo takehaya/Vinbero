@@ -2,7 +2,13 @@
 
 VinberoのSRv6機能を実際に試せるPlayground環境です。
 
-GitHub Actionsのmatrix strategyにより、各exampleは独立したジョブとして並列実行されます。
+ここには2系統のサンプルがあります。
+
+- netns example（このディレクトリ直下の `end-*` / `headend-*` / `gtp*-*`）。各 SRv6 機能を単独の Linux network namespace 上で検証する自己完結スクリプト。`test.yaml` の matrix で並列実行します。
+- interop ラボ（[`interop-clab/`](interop-clab/)）。Vinbero を FRR など第三者実装と相互運用させる containerlab シナリオ群。
+
+このページは netns example を説明します。interop ラボは [`interop-clab/README.md`](interop-clab/README.md) を参照してください。
+
 ## クイックスタート
 
 ```bash
@@ -12,7 +18,7 @@ sudo ./test.sh     # テスト実行
 sudo ./teardown.sh # クリーンアップ
 ```
 
-各exampleはディレクトリ名をプレフィックスとして独自のnamespace空間を持つため（例: `end-host1`, `end-router1`）、衝突なく並列実行できます。
+各 example は固有のプレフィックスで独自の namespace 空間を持つため（例: `end-host1`、`dx4-router1`）、衝突なく並列実行できます。
 
 ## 新しいExampleの追加
 1. **ディレクトリを作成**: `examples/<name>/`
@@ -22,12 +28,13 @@ sudo ./teardown.sh # クリーンアップ
    - `test.sh`: テスト実行
    - `teardown.sh`: クリーンアップ
    - `vinbero_*.yaml`: Vinbero設定
-3. **プレフィックス設定**:
+3. **プレフィックス設定**: 他 example と衝突しない固有のプレフィックスを `TOPO_NS_PREFIX` に設定します。ディレクトリ名から導くか、短い固有文字列を直接指定します。
    ```bash
    EXAMPLE_NAME="$(basename "$SCRIPT_DIR")"
    export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-${EXAMPLE_NAME}-}"
+   # または短い固有プレフィックス: export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-dx4-}"
    ```
-4. **ワークフローに追加**: `.github/workflows/examples.yaml`のmatrixに追加
+4. **ワークフローに追加**: `.github/workflows/test.yaml`の`Integration Test`ジョブの`matrix.example`に追加
 
 ## 共通機能
 
@@ -52,6 +59,8 @@ sudo ./teardown.sh # クリーンアップ
 | `end-dt6/` | End.DT6 | VRF対応IPv6テーブルルックアップ |
 | `end-dt2/` | End.DT2 | L2VPN（FDB学習 + ブリッジ転送） |
 | `end-dt2-p2mp/` | End.DT2 P2MP | マルチサイトL2VPN（BUMフラッディング） |
+| `end-dt2m-multihomed/` | End.DT2M | multi-homed L2VPN（DF election + split-horizon） |
+| `end-dx2v/` | End.DX2V | VLAN単位のL2クロスコネクト |
 
 ### Headend Functions
 | ディレクトリ | 機能 | 説明 |

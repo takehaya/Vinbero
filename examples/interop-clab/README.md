@@ -24,9 +24,17 @@ through the shared `Makefile` with the `SCENARIO` variable.
 
 ## Scenarios
 
-| Scenario       | Peer       | What it proves                                                                 |
-|----------------|------------|--------------------------------------------------------------------------------|
-| `l3vpn-2site`  | FRR 10.2.1 | 2-site SRv6 L3VPN — VPNv4/VPNv6 Service TLV encode+decode (RFC 9252 §4 transposition) and a bidirectional SRv6 data-plane ping. See [`scenarios/l3vpn-2site/README.md`](scenarios/l3vpn-2site/README.md). |
+Each row links to the scenario's own README.
+
+| Scenario | Peer | What it proves |
+|----------|------|----------------|
+| [`l3vpn-2site`](scenarios/l3vpn-2site/README.md) | FRR 10.2.1 | 2-site SRv6 L3VPN — VPNv4/VPNv6 Service TLV encode+decode (RFC 9252 §4 transposition) and a bidirectional SRv6 data-plane ping. |
+| [`l3vpn-2site-auto`](scenarios/l3vpn-2site-auto/README.md) | FRR 10.2.1 | The same L3VPN, but Vinbero originates its VRF route automatically from config (`auto_advertise` + `vrf_bindings`) via the `pkg/bgp/export` exporter — no `vbctl` advertise call. |
+| [`sr-policy-2site`](scenarios/sr-policy-2site/README.md) | FRR 10.2.1 | Color-based SR Policy steering (RFC 9256 / RFC 9252 §8): FRR tags a route with a Color Extended Community and Vinbero steers it onto an operator-defined SR Policy carrying a two-segment service chain. |
+| [`sr-policy-bgp-2site`](scenarios/sr-policy-bgp-2site/README.md) | Vinbero | Edge-to-edge SR Policy exchange over BGP (SAFI 73): both PEs advertise and receive SR Policies and steer their L3VPN traffic through a shared TE waypoint — exercises the SR Policy receive/decode path. |
+| [`evpn-2site`](scenarios/evpn-2site/README.md) | Vinbero | SRv6 EVPN L2VPN (ELAN): RT2 (MAC/IP) unicast + RT3 (Inclusive Multicast) BUM flood, a stretched broadcast domain signalled entirely by BGP EVPN. |
+| [`evpn-multihoming`](scenarios/evpn-multihoming/README.md) | Vinbero | SRv6 EVPN multi-homing: RT4 (Ethernet Segment) with RFC 8584 DF election + split-horizon for a dual-homed CE. |
+| [`mup-2site`](scenarios/mup-2site/README.md) | Vinbero | SRv6 MUP (SAFI 85, `draft-mpmz-bess-mup-safi` / RFC 9433): a MUP controller signals UE-session state over iBGP, GW/PE nodes program the SRv6 GTP data plane, and emulated gNB/DN endpoints drive real GTP-U ⇄ SRv6 traffic. |
 
 ## Layout
 
@@ -39,14 +47,20 @@ examples/interop-clab/
 │   └── frr/                   # FRR peer image
 │       ├── Dockerfile
 │       └── daemons
-└── scenarios/
-    └── l3vpn-2site/           # scenario #1
-        ├── README.md          # this scenario's detailed doc
-        ├── clab.yml           # containerlab topology
-        ├── test.sh            # scenario assertions
-        ├── core/start.sh
-        ├── frr/{frr.conf,start.sh}
-        └── vinbero/{vinbero.yml,start.sh}
+└── scenarios/                 # one subdir per scenario (see the table above)
+    ├── l3vpn-2site/
+    │   ├── README.md          # this scenario's detailed doc (+ README.ja.md)
+    │   ├── clab.yml           # containerlab topology
+    │   ├── test.sh            # scenario assertions
+    │   ├── core/start.sh
+    │   ├── frr/{frr.conf,start.sh}
+    │   └── vinbero/{vinbero.yml,start.sh}
+    ├── l3vpn-2site-auto/
+    ├── sr-policy-2site/
+    ├── sr-policy-bgp-2site/
+    ├── evpn-2site/
+    ├── evpn-multihoming/
+    └── mup-2site/
 ```
 
 `images/` is per-implementation so a future `images/srlinux/` slots in
