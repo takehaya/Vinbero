@@ -47,14 +47,17 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
     --trigger-prefix fd00:a::/56 --action END_M_GTP4_E \
     --gtp-v4-src-addr 172.16.0.254 --args-offset 7 || true
 
-# Advertise this gateway's Interwork Segment Discovery route: it hosts the
+# Originate this gateway's Interwork Segment Discovery route via MupService
+# (a managed local table auto-advertised into SAFI 85): it hosts the
 # End.M.GTP4.E interwork segment (SID fd00:a:0:1::) reachable for the gNB N3
 # block. The controller's (SID-less) T1ST resolves its interwork SID from this
 # ISD by gNB endpoint, so the SID is carried here, not on the T1ST.
 sleep 6
-/usr/local/bin/vbctl bgp advertise-mup --route-type isd \
+/usr/local/bin/vbctl mup create --route-type isd \
     --rd 65100:1 --prefix 172.16.0.0/24 \
     --sid fd00:a:0:1:: --next-hop 2001:db8:ff::a || true
+echo "[start.sh] mup-gw originated ISD; local MUP table:"
+/usr/local/bin/vbctl mup list || true
 
 # Pre-resolve neighbours so bpf_fib_lookup on the redirect path succeeds.
 ping6 -c 1 -W 2 2001:db8:1::2 >/dev/null 2>&1 || true

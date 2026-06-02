@@ -39,7 +39,7 @@ sleep 6
 # T1ST (downlink): UE 10.1.0.1, gNB endpoint 172.16.0.1. mup-pe resolves the
 # interwork SID from the ISD covering 172.16.0.0/24, composes Args.Mob.Session
 # onto it, and installs the H.Encaps; mup-gw's End.M.GTP4.E emits GTP-U.
-/usr/local/bin/vbctl bgp advertise-mup --route-type t1st \
+/usr/local/bin/vbctl mup create --route-type t1st \
     --rd 65100:1 --prefix 10.1.0.1/32 \
     --teid 256 --qfi 9 --endpoint 172.16.0.1 \
     --next-hop 2001:db8:ff::a || true
@@ -47,10 +47,11 @@ sleep 6
 # T2ST (uplink): gNB GTP-U to the N3 endpoint, segment id 1:2. mup-gw resolves
 # the direct SID from the DSD carrying segment id 1:2, installs the F-TEID entry
 # + H.M.GTP4.D_TEID gate; mup-pe's End.DT4 delivers to the DN.
-/usr/local/bin/vbctl bgp advertise-mup --route-type t2st \
+/usr/local/bin/vbctl mup create --route-type t2st \
     --rd 65100:1 --endpoint 172.16.0.254 \
     --teid 256 --teid-len 32 \
     --segment-id2 1 --segment-id4 2 \
     --next-hop 2001:db8:ff::d || true
 
-echo "[start.sh] mup-c (MUP Controller) advertised T1ST/T2ST (SID-less; resolved by gateways)"
+echo "[start.sh] mup-c (MUP Controller) originated T1ST/T2ST via MupService (SID-less; resolved by gateways); local MUP table:"
+/usr/local/bin/vbctl mup list || true
