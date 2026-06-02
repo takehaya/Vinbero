@@ -53,14 +53,17 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 /usr/local/bin/vbctl sid create \
     --trigger-prefix fd00:d:0:1::/128 --action END_DT4 --vrf-name vrf-cust || true
 
-# Advertise this PE's Direct Segment Discovery route: it hosts the End.DT4
-# direct segment (SID fd00:d:0:1::) tagged with a MUP Extended Community segment
-# id, which the controller's T2ST resolves against.
+# Originate this PE's Direct Segment Discovery route via MupService (a managed
+# local table auto-advertised into SAFI 85): it hosts the End.DT4 direct segment
+# (SID fd00:d:0:1::) tagged with a MUP Extended Community segment id, which the
+# controller's T2ST resolves against.
 sleep 6
-/usr/local/bin/vbctl bgp advertise-mup --route-type dsd \
+/usr/local/bin/vbctl mup create --route-type dsd \
     --rd 65100:1 --address 10.0.0.1 \
     --segment-id2 1 --segment-id4 2 \
     --sid fd00:d:0:1:: --next-hop 2001:db8:ff::d || true
+echo "[start.sh] mup-pe originated DSD; local MUP table:"
+/usr/local/bin/vbctl mup list || true
 
 # Pre-resolve neighbours for the redirect FIB lookups.
 ping6 -c 1 -W 2 2001:db8:2::2 >/dev/null 2>&1 || true
