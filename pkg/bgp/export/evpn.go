@@ -106,7 +106,7 @@ func NewEVPNExporter(evpn EVPNAdvertiser, sidOps SidOps, locators *locator.Manag
 // idempotent: an ES already advertised is replaced. A push failure is returned
 // (the caller logs it; the ES data-plane entry is unaffected).
 func (e *EVPNExporter) EnableES(esi [bpf.ESILen]byte, rd string) error {
-	if err := validateIPv6NextHop(e.nextHop); err != nil {
+	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
 		return err
 	}
 	if rd == "" {
@@ -222,7 +222,7 @@ func sameStringSet(a, b []string) bool {
 // advertisement-affecting fields are unchanged is a no-op (no RT3/SID flap); any
 // real change re-enables cleanly (the prior enablement is torn down first).
 func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
-	if err := validateIPv6NextHop(e.nextHop); err != nil {
+	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
 		return fmt.Errorf("vrf %q: %w", b.VRFName, err)
 	}
 	if b.BDID == 0 {

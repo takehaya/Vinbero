@@ -410,15 +410,11 @@ func protoToAdvertiseSRPolicy(p *v1.BgpSrPolicy) (bgp.SRPolicy, error) {
 	if err != nil {
 		return bgp.SRPolicy{}, err
 	}
-	nh, err := netip.ParseAddr(p.GetNextHop())
+	// The SR Policy NLRI carries an IPv6 next hop (SRv6 over IPv6); reject a
+	// non-routable next hop at the RPC boundary with a per-item error.
+	nh, err := bgp.ValidateIPv6NextHop(p.GetNextHop())
 	if err != nil {
-		return bgp.SRPolicy{}, fmt.Errorf("invalid next hop: %w", err)
-	}
-	// The SR Policy NLRI carries an IPv6 next hop (SRv6 over IPv6); an IPv4
-	// next hop would be rejected later by the controller, so fail at the RPC
-	// boundary with a per-item error to match Advertise/Create.
-	if !nh.Is6() {
-		return bgp.SRPolicy{}, fmt.Errorf("next hop must be IPv6: %s", nh)
+		return bgp.SRPolicy{}, err
 	}
 	preference := p.GetPreference()
 	if preference == 0 {

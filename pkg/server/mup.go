@@ -61,13 +61,18 @@ type MupServer struct {
 	mu         sync.Mutex
 	advertiser bgp.MUPController
 	nextHop    string
-	routes     map[mupLocalKey]bgp.MUPRoute
+	// maxRoutes caps how many local MUP routes may be originated (0 = unlimited),
+	// bounding SAFI 85 amplification from the unauthenticated surface; a new route
+	// beyond the cap is a per-item error.
+	maxRoutes uint32
+	routes    map[mupLocalKey]bgp.MUPRoute
 }
 
-func NewMupServer(advertiser bgp.MUPController, nextHop string) *MupServer {
+func NewMupServer(advertiser bgp.MUPController, nextHop string, maxRoutes uint32) *MupServer {
 	return &MupServer{
 		advertiser: advertiser,
 		nextHop:    nextHop,
+		maxRoutes:  maxRoutes,
 		routes:     make(map[mupLocalKey]bgp.MUPRoute),
 	}
 }
@@ -94,10 +99,25 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 		if mr.NextHop == "" {
 			mr.NextHop = s.nextHop
 		}
-		if _, err := parseAdvertiseNextHop(mr.NextHop); err != nil {
+		if _, err := bgp.ValidateIPv6NextHop(mr.NextHop); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: mupRouteID(r),
 				Reason:        fmt.Sprintf("%v (set bgp.global.next_hop or --next-hop)", err),
+			})
+			continue
+		}
+		// Origination cap: reject a NEW route once the limit is reached (an update
+		// of an existing key is always allowed). Checked before Push so a capped
+		// route is never originated.
+		key := mupKeyFor(mr)
+		s.mu.Lock()
+		_, exists := s.routes[key]
+		atCap := s.maxRoutes > 0 && !exists && uint32(len(s.routes)) >= s.maxRoutes
+		s.mu.Unlock()
+		if atCap {
+			errs = append(errs, &v1.OperationError{
+				TriggerPrefix: mupRouteID(r),
+				Reason:        fmt.Sprintf("MUP route limit reached (mup_max_routes=%d)", s.maxRoutes),
 			})
 			continue
 		}
@@ -106,7 +126,7 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 			continue
 		}
 		s.mu.Lock()
-		s.routes[mupKeyFor(mr)] = mr
+		s.routes[key] = mr
 		s.mu.Unlock()
 	}
 	return errs

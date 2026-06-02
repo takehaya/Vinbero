@@ -171,6 +171,12 @@ func (a *Applier) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
 	return a.srPolicy.hasLocalCandidate(color, endpoint)
 }
 
+// LocalSRPolicyCount returns the number of operator-defined (local) SR Policies,
+// for the SrPolicyService origination cap.
+func (a *Applier) LocalSRPolicyCount() int {
+	return a.srPolicy.localCount()
+}
+
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 	owner := bpf.OwnerBGPVPN(a.localASN, vr.RD)
 	rk := vr.Key()

@@ -362,3 +362,17 @@ func (t *srPolicyTable) hasLocalCandidate(color uint32, endpoint netip.Addr) boo
 	_, ok := st.candidates[candidateID{origin: bgp.OriginLocal, distinguisher: localDistinguisher}]
 	return ok
 }
+
+// localCount returns how many policies hold an operator-defined (local)
+// candidate path, for the SrPolicyService origination cap.
+func (t *srPolicyTable) localCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for _, st := range t.byKey {
+		if _, ok := st.candidates[candidateID{origin: bgp.OriginLocal, distinguisher: localDistinguisher}]; ok {
+			n++
+		}
+	}
+	return n
+}

@@ -15,6 +15,7 @@ type fakeSRPolicyCtrl struct {
 	applied  []appliedPolicy
 	hasLocal map[srPolicyTestKey]bool
 	list     []apply.SRPolicySnapshot
+	local    int // value returned by LocalSRPolicyCount (origination cap tests)
 }
 
 // srPolicyTestKey mirrors the {color, endpoint} identity HasLocalSRPolicy
@@ -33,13 +34,14 @@ func (f *fakeSRPolicyCtrl) ApplyLocalSRPolicy(p bgp.SRPolicy, withdraw bool) {
 	f.applied = append(f.applied, appliedPolicy{p, withdraw})
 }
 func (f *fakeSRPolicyCtrl) ListSRPolicies() []apply.SRPolicySnapshot { return f.list }
+func (f *fakeSRPolicyCtrl) LocalSRPolicyCount() int                  { return f.local }
 func (f *fakeSRPolicyCtrl) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
 	return f.hasLocal[srPolicyTestKey{color, endpoint.String()}]
 }
 
 // A nil controller (BGP disabled) makes every RPC fail FailedPrecondition.
 func TestSrPolicyServer_DisabledWhenNoBGP(t *testing.T) {
-	s := NewSrPolicyServer(nil, nil, "")
+	s := NewSrPolicyServer(nil, nil, "", 0)
 	_, err := s.SrPolicyList(context.Background(), connect.NewRequest(&v1.SrPolicyListRequest{}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("SrPolicyList err = %v, want FailedPrecondition", err)
@@ -52,7 +54,7 @@ func TestSrPolicyServer_DisabledWhenNoBGP(t *testing.T) {
 
 func TestSrPolicyServer_CreateAppliesLocalCandidate(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{}
-	s := NewSrPolicyServer(ctrl, nil, "")
+	s := NewSrPolicyServer(ctrl, nil, "", 0)
 	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
 		Policies: []*v1.SrPolicyDef{{
 			Color:    100,
@@ -87,7 +89,7 @@ func TestSrPolicyServer_CreateAppliesLocalCandidate(t *testing.T) {
 // A bad endpoint / empty segments surface as a per-item error, not a call.
 func TestSrPolicyServer_CreateValidation(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{}
-	s := NewSrPolicyServer(ctrl, nil, "")
+	s := NewSrPolicyServer(ctrl, nil, "", 0)
 	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
 		Policies: []*v1.SrPolicyDef{
 			{Color: 1, Endpoint: "not-an-ip", Segments: []string{"fd00:2::1"}},
@@ -109,7 +111,7 @@ func TestSrPolicyServer_CreateValidation(t *testing.T) {
 // are read-only).
 func TestSrPolicyServer_DeleteRejectsNonLocal(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{hasLocal: map[srPolicyTestKey]bool{{2, "2001:db8::9"}: true}}
-	s := NewSrPolicyServer(ctrl, nil, "")
+	s := NewSrPolicyServer(ctrl, nil, "", 0)
 	resp, err := s.SrPolicyDelete(context.Background(), connect.NewRequest(&v1.SrPolicyDeleteRequest{
 		Keys: []*v1.SrPolicyKey{
 			{Color: 1, Endpoint: "2001:db8::2"}, // no local -> rejected
@@ -132,7 +134,7 @@ func TestSrPolicyServer_DeleteRejectsNonLocal(t *testing.T) {
 func TestSrPolicyServer_CreateAdvertises(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{}
 	adv := &fakeSRPolicyAdv{}
-	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1")
+	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1", 0)
 	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
 		Policies: []*v1.SrPolicyDef{
 			{Color: 100, Endpoint: "2001:db8::2", Segments: []string{"fd00:2::1"}, Advertise: true},
@@ -168,7 +170,7 @@ func TestSrPolicyServer_CreateAdvertises(t *testing.T) {
 func TestSrPolicyServer_AdvertiseRequiresIPv6NextHop(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{}
 	adv := &fakeSRPolicyAdv{}
-	s := NewSrPolicyServer(ctrl, adv, "") // no next hop configured
+	s := NewSrPolicyServer(ctrl, adv, "", 0) // no next hop configured
 	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
 		Policies: []*v1.SrPolicyDef{{Color: 100, Endpoint: "2001:db8::2", Segments: []string{"fd00:2::1"}, Advertise: true}},
 	}))
@@ -190,7 +192,7 @@ func TestSrPolicyServer_AdvertiseRequiresIPv6NextHop(t *testing.T) {
 func TestSrPolicyServer_UpdateToggleOffWithdraws(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{}
 	adv := &fakeSRPolicyAdv{}
-	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1")
+	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1", 0)
 	def := &v1.SrPolicyDef{Color: 100, Endpoint: "2001:db8::2", Segments: []string{"fd00:2::1"}, Advertise: true}
 	if _, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{Policies: []*v1.SrPolicyDef{def}})); err != nil {
 		t.Fatalf("create: %v", err)
@@ -211,7 +213,7 @@ func TestSrPolicyServer_UpdateToggleOffWithdraws(t *testing.T) {
 func TestSrPolicyServer_DeleteWithdraws(t *testing.T) {
 	ctrl := &fakeSRPolicyCtrl{hasLocal: map[srPolicyTestKey]bool{{100, "2001:db8::2"}: true}}
 	adv := &fakeSRPolicyAdv{}
-	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1")
+	s := NewSrPolicyServer(ctrl, adv, "2001:db8:ff::1", 0)
 	resp, err := s.SrPolicyDelete(context.Background(), connect.NewRequest(&v1.SrPolicyDeleteRequest{
 		Keys: []*v1.SrPolicyKey{{Color: 100, Endpoint: "2001:db8::2"}},
 	}))
@@ -223,6 +225,38 @@ func TestSrPolicyServer_DeleteWithdraws(t *testing.T) {
 	}
 	if len(adv.withdrawn) != 1 || adv.withdrawn[0].Color != 100 {
 		t.Errorf("delete must withdraw the advertisement; withdrawn=%+v", adv.withdrawn)
+	}
+}
+
+// The origination cap rejects a NEW local policy once the limit is reached, but
+// an update of an existing {color, endpoint} is always allowed.
+func TestSrPolicyServer_OriginationCap(t *testing.T) {
+	// At the cap (2 local), creating a new policy is rejected and nothing applied.
+	ctrl := &fakeSRPolicyCtrl{local: 2}
+	s := NewSrPolicyServer(ctrl, nil, "", 2)
+	resp, err := s.SrPolicyCreate(context.Background(), connect.NewRequest(&v1.SrPolicyCreateRequest{
+		Policies: []*v1.SrPolicyDef{{Color: 9, Endpoint: "2001:db8::9", Segments: []string{"fd00:9::1"}}},
+	}))
+	if err != nil {
+		t.Fatalf("SrPolicyCreate: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 {
+		t.Fatalf("a new policy beyond the cap must be a per-item error; errors=%v", resp.Msg.Errors)
+	}
+	if len(ctrl.applied) != 0 {
+		t.Errorf("nothing should be applied when capped; applied=%d", len(ctrl.applied))
+	}
+	// Updating an EXISTING local policy at the cap is allowed (not a new policy).
+	ctrl2 := &fakeSRPolicyCtrl{local: 2, hasLocal: map[srPolicyTestKey]bool{{1, "2001:db8::1"}: true}}
+	s2 := NewSrPolicyServer(ctrl2, nil, "", 2)
+	resp2, err := s2.SrPolicyUpdate(context.Background(), connect.NewRequest(&v1.SrPolicyUpdateRequest{
+		Policies: []*v1.SrPolicyDef{{Color: 1, Endpoint: "2001:db8::1", Segments: []string{"fd00:1::1"}}},
+	}))
+	if err != nil {
+		t.Fatalf("SrPolicyUpdate: %v", err)
+	}
+	if len(resp2.Msg.Errors) != 0 || len(ctrl2.applied) != 1 {
+		t.Errorf("updating an existing policy at the cap must be allowed; errors=%v applied=%d", resp2.Msg.Errors, len(ctrl2.applied))
 	}
 }
 
@@ -238,7 +272,7 @@ func TestSrPolicyServer_ListTranslatesSnapshot(t *testing.T) {
 			Active:      true,
 		}},
 	}}}
-	s := NewSrPolicyServer(ctrl, nil, "")
+	s := NewSrPolicyServer(ctrl, nil, "", 0)
 	resp, err := s.SrPolicyList(context.Background(), connect.NewRequest(&v1.SrPolicyListRequest{}))
 	if err != nil {
 		t.Fatalf("SrPolicyList: %v", err)

@@ -111,6 +111,15 @@ type BGPGlobalConfig struct {
 	// UnderlayMaxPrefixes caps how many underlay prefixes are advertised
 	// (0 = unlimited).
 	UnderlayMaxPrefixes uint32 `yaml:"underlay_max_prefixes,omitempty"`
+	// SrPolicyMaxPolicies caps how many local (operator-defined) SR Policies the
+	// SrPolicyService will hold, bounding both the BGP origination and the
+	// sr_policy_map data-plane footprint a flood of CRUD RPCs can reach on the
+	// unauthenticated surface (0 = unlimited).
+	SrPolicyMaxPolicies uint32 `yaml:"srpolicy_max_policies,omitempty"`
+	// MupMaxRoutes caps how many local MUP routes the MupService will originate,
+	// bounding SAFI 85 amplification from the unauthenticated surface
+	// (0 = unlimited).
+	MupMaxRoutes uint32 `yaml:"mup_max_routes,omitempty"`
 }
 
 // BGPPeerConfig describes one BGP neighbor.

@@ -34,3 +34,32 @@ func TestParseFamily(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateIPv6NextHop(t *testing.T) {
+	tests := []struct {
+		in      string
+		wantErr bool
+	}{
+		{in: "2001:db8:ff::1"},                  // routable IPv6 -> ok
+		{in: "fd00:1::1"},                       // ULA -> ok
+		{in: "", wantErr: true},                 // empty
+		{in: "not-an-ip", wantErr: true},        // garbage
+		{in: "192.0.2.1", wantErr: true},        // IPv4
+		{in: "::ffff:192.0.2.1", wantErr: true}, // v4-in-6
+		{in: "::", wantErr: true},               // unspecified -> blackhole
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			addr, err := ValidateIPv6NextHop(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("ValidateIPv6NextHop(%q) = %v, want error", tc.in, addr)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ValidateIPv6NextHop(%q): unexpected error %v", tc.in, err)
+			}
+		})
+	}
+}

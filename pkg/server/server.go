@@ -116,14 +116,14 @@ func (s *Server) Setup() {
 	// of BGP-learned policies). srPolicyCtrl is nil when BGP is disabled,
 	// in which case the RPCs return FailedPrecondition. srPolicyAdv +
 	// next_hop let a local policy with advertise=true originate into SAFI 73.
-	srPolicyServer := NewSrPolicyServer(s.srPolicyCtrl, s.srPolicyAdv, s.cfg.BGP.Global.NextHop)
+	srPolicyServer := NewSrPolicyServer(s.srPolicyCtrl, s.srPolicyAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.SrPolicyMaxPolicies)
 	srPolicyPath, srPolicyHandler := vinberov1connect.NewSrPolicyServiceHandler(srPolicyServer)
 	s.mux.Handle(srPolicyPath, srPolicyHandler)
 	s.logger.Info("Registered SrPolicyService", zap.String("path", srPolicyPath))
 
 	// Mup service (local BGP MUP route origination, SAFI 85). s.mupAdv is nil
 	// when BGP is disabled, in which case the RPCs return FailedPrecondition.
-	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop)
+	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.MupMaxRoutes)
 	mupPath, mupHandler := vinberov1connect.NewMupServiceHandler(mupServer)
 	s.mux.Handle(mupPath, mupHandler)
 	s.logger.Info("Registered MupService", zap.String("path", mupPath))
