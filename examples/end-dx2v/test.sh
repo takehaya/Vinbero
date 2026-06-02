@@ -177,8 +177,8 @@ print_info "Checking VLAN table on router3..."
 vlan_response=$(vbctl_rt3 --json vlan-table list --table-id 1)
 print_info "VLAN table response: $vlan_response"
 
-if echo "$vlan_response" | grep -q '"vlanId"'; then
-    entry_count=$(echo "$vlan_response" | grep -c '"vlanId"')
+if echo "$vlan_response" | grep -q '"vlan_id"'; then
+    entry_count=$(echo "$vlan_response" | grep -c '"vlan_id"')
     print_success "VLAN table API: PASS ($entry_count entries found)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
