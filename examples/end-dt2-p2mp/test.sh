@@ -38,20 +38,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test_ping_with_counter() {
-    local ns=$1 target=$2 desc=$3 interface=${4:-}
-    print_info "Testing: $desc"
-    local ping_cmd="ping -c 3 -W 2 $target"
-    [ -n "$interface" ] && ping_cmd="ping -c 3 -W 2 -I $interface $target"
-    if ip netns exec $ns $ping_cmd > /dev/null 2>&1; then
-        print_success "$desc: PASS"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    else
-        print_error "$desc: FAIL"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-    fi
-}
-
 # CLI helpers
 vbctl_pe1() { ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 "$@"; }
 vbctl_pe2() { ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8083 "$@"; }
