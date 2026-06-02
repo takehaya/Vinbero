@@ -24,11 +24,14 @@ def build_gtpu_packet(outer_dst, teid, qfi, inner_src, inner_dst):
     """Build a GTP-U/IPv4 packet with optional PDU Session Container."""
     outer = IP(dst=outer_dst) / UDP(sport=2152, dport=2152)
 
+    # gtp_type=0xFF marks the message as a G-PDU (user data); the BPF
+    # gtpu_parse rejects anything else, and scapy's GTPHeader defaults the
+    # field to 0, so it must be set explicitly.
     if qfi > 0:
-        gtp = GTPHeader(teid=teid, E=1, next_ex=0x85) / \
+        gtp = GTPHeader(teid=teid, gtp_type=0xFF, E=1, next_ex=0x85) / \
               GTPPDUSessionContainer(type=0, QFI=qfi)
     else:
-        gtp = GTPHeader(teid=teid)
+        gtp = GTPHeader(teid=teid, gtp_type=0xFF)
 
     inner = IP(src=inner_src, dst=inner_dst) / ICMP(id=0x1234, seq=1) / (b"A" * 32)
 

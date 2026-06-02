@@ -34,12 +34,14 @@ def main():
     # Build inner packet
     inner = IPv6(src="fd00:10::1", dst="fd00:10::2") / ICMPv6EchoRequest() / (b"B" * 32)
 
-    # Build GTP-U
+    # Build GTP-U. gtp_type=0xFF marks the message as a G-PDU (user data); the
+    # BPF gtpu_parse rejects anything else, and scapy's GTPHeader defaults the
+    # field to 0, so it must be set explicitly.
     if args.qfi > 0:
-        gtp = GTPHeader(teid=args.teid, E=1, next_ex=0x85) / \
+        gtp = GTPHeader(teid=args.teid, gtp_type=0xFF, E=1, next_ex=0x85) / \
               GTPPDUSessionContainer(type=0, QFI=args.qfi)
     else:
-        gtp = GTPHeader(teid=args.teid)
+        gtp = GTPHeader(teid=args.teid, gtp_type=0xFF)
 
     # Build outer IPv6 + SRH + UDP + GTP-U
     # Note: SRH with segments is complex in scapy. Use plain IPv6 + UDP for simplicity.
