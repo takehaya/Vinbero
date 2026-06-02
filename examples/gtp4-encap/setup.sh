@@ -24,6 +24,14 @@ veth_rt2_rt3="${TOPO_NS_PREFIX}rt2rt3"
 veth_rt3_h2="${TOPO_NS_PREFIX}rt3h2"
 veth_rt3_rt2="${TOPO_NS_PREFIX}rt3rt2"
 
+# H.M.GTP4.D writes Args.Mob.Session into the outer DA at args_offset=7 (byte 7
+# onward), so the End.M.GTP4.E SID locator must be <= 56 bits and the underlay
+# must route that /56 (the default /64 would not cover an address whose byte 7
+# carries the IPv4 destination). End.M.GTP4.E lives on fc00:1:: (return) and
+# fc00:3:: (forward); route both as /56 so the args-bearing DA is forwardable.
+export TOPO_IPV6_PREFIX_RT1=fc00:1::/56
+export TOPO_IPV6_PREFIX_RT3=fc00:3::/56
+
 setup_three_router_topology
 
 print_info "Configuring SRv6 GTP-U/IPv4 settings..."
@@ -34,13 +42,11 @@ ns_sysctl "$ns_router1" net.ipv6.conf.${veth_rt1_rt2}.seg6_enabled 1
 ns_sysctl "$ns_router1" net.ipv4.conf.${veth_rt1_rt2}.rp_filter 0
 ns_sysctl "$ns_router1" net.ipv4.conf.${veth_rt1_h1}.rp_filter 0
 
-# router2: End (transit)
+# router2: pure IPv6 transit. The H.M.GTP4.D headend encapsulates straight to
+# the End.M.GTP4.E SID (single segment), so router2 only forwards the /56 SID
+# routes set up above -- no SRv6 localsid here.
 ns_sysctl "$ns_router2" net.ipv6.conf.${veth_rt2_rt1}.seg6_enabled 1
 ns_sysctl "$ns_router2" net.ipv6.conf.${veth_rt2_rt3}.seg6_enabled 1
-
-run ip netns exec "$ns_router2" ip -6 route del local fc00:2::2 2>/dev/null || true
-run ip netns exec "$ns_router2" ip -6 route add local fc00:2::1/128 encap seg6local action End dev lo
-run ip netns exec "$ns_router2" ip -6 route add local fc00:2::2/128 encap seg6local action End dev lo
 
 # router3: End.M.GTP4.E (forward) / H.M.GTP4.D (return)
 ns_sysctl "$ns_router3" net.ipv6.conf.${veth_rt3_h2}.seg6_enabled 1
@@ -53,12 +59,12 @@ echo "=========================================="
 echo "SRv6 GTP-U/IPv4 (H.M.GTP4.D + End.M.GTP4.E) Setup Complete!"
 echo "=========================================="
 echo "Topology:"
-echo "  gNB/host1 (172.0.1.1) <---> router1 (fc00:1::1, H.M.GTP4.D / End.M.GTP4.E)"
-echo "  router1 (fc00:12::1) <---> router2 (fc00:2::1, fc00:2::2, End)"
-echo "  router2 (fc00:23::2) <---> router3 (fc00:3::3, End.M.GTP4.E / H.M.GTP4.D)"
+echo "  gNB/host1 (172.0.1.1) <---> router1 (fc00:1::/56, H.M.GTP4.D / End.M.GTP4.E)"
+echo "  router1 (fc00:12::1) <---> router2 (IPv6 transit)"
+echo "  router2 (fc00:23::2) <---> router3 (fc00:3::/56, End.M.GTP4.E / H.M.GTP4.D)"
 echo "  router3 <---> UPF/host2 (172.0.2.1)"
 echo ""
-echo "Forward: GTP-U/IPv4 -> H.M.GTP4.D (router1) -> End (router2) -> End.M.GTP4.E (router3) -> GTP-U/IPv4"
-echo "Return:  GTP-U/IPv4 -> H.M.GTP4.D (router3) -> End (router2) -> End.M.GTP4.E (router1) -> GTP-U/IPv4"
+echo "Forward: GTP-U/IPv4 -> H.M.GTP4.D (router1) -> transit (router2) -> End.M.GTP4.E (router3) -> GTP-U/IPv4"
+echo "Return:  GTP-U/IPv4 -> H.M.GTP4.D (router3) -> transit (router2) -> End.M.GTP4.E (router1) -> GTP-U/IPv4"
 echo ""
 print_success "Ready for testing!"

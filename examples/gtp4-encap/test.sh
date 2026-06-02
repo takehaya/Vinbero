@@ -58,22 +58,22 @@ echo "=========================================="
 echo "Phase 2: Register Entries"
 echo "=========================================="
 
-# Forward path: gNB(host1) -> router1(H.M.GTP4.D) -> router2(End) -> router3(End.M.GTP4.E) -> UPF(host2)
+# Forward path: gNB(host1) -> router1(H.M.GTP4.D) -> router2(transit) -> router3(End.M.GTP4.E) -> UPF(host2)
 print_info "Forward: H.M.GTP4.D on router1..."
 ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 hv4 create \
   --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 \
-  --segments fc00:2::1,fc00:3::3 --mode H_M_GTP4_D --args-offset 7 > /dev/null
+  --segments fc00:3::3 --mode H_M_GTP4_D --args-offset 7 > /dev/null
 
 print_info "Forward: End.M.GTP4.E on router3..."
 ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8083 sid create \
   --trigger-prefix fc00:3::/56 --action END_M_GTP4_E \
   --gtp-v4-src-addr 172.0.2.2 --args-offset 7 > /dev/null
 
-# Return path: UPF(host2) -> router3(H.M.GTP4.D) -> router2(End) -> router1(End.M.GTP4.E) -> gNB(host1)
+# Return path: UPF(host2) -> router3(H.M.GTP4.D) -> router2(transit) -> router1(End.M.GTP4.E) -> gNB(host1)
 print_info "Return: H.M.GTP4.D on router3..."
 ip netns exec "$ns_router3" ${VINBERO_BIN} -s http://127.0.0.1:8083 hv4 create \
   --trigger-prefix 172.0.1.0/24 --src-addr fc00:3::3 \
-  --segments fc00:2::2,fc00:1::1 --mode H_M_GTP4_D --args-offset 7 > /dev/null
+  --segments fc00:1::1 --mode H_M_GTP4_D --args-offset 7 > /dev/null
 
 print_info "Return: End.M.GTP4.E on router1..."
 ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 sid create \
