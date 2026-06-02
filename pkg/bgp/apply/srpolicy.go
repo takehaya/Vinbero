@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"errors"
 	"net/netip"
 	"slices"
 	"sync"
@@ -156,10 +157,15 @@ func (t *srPolicyTable) idOf(color uint32, endpoint netip.Addr) uint32 {
 // reconciles the data plane. The same path serves BGP reception and local
 // CRUD; withdraw removes the candidate.
 func (t *srPolicyTable) apply(p bgp.SRPolicy, withdraw bool) {
-	key := policyKey{color: p.Color, endpoint: p.Endpoint}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.applyLocked(p, withdraw)
+}
 
+// applyLocked is apply with t.mu already held, so a caller that must decide and
+// mutate atomically (applyLocalCapped) can do so under one lock acquisition.
+func (t *srPolicyTable) applyLocked(p bgp.SRPolicy, withdraw bool) {
+	key := policyKey{color: p.Color, endpoint: p.Endpoint}
 	st := t.byKey[key]
 	if st == nil {
 		if withdraw {
@@ -181,6 +187,42 @@ func (t *srPolicyTable) apply(p bgp.SRPolicy, withdraw bool) {
 		// references it; reconcile has already dropped the map entry.
 		t.gc(key, st)
 	}
+}
+
+// ErrSRPolicyLimitReached is returned by applyLocalCapped when a NEW local SR
+// Policy would exceed the configured cap.
+var ErrSRPolicyLimitReached = errors.New("local SR Policy limit reached")
+
+// applyLocalCapped installs a local SR Policy candidate, rejecting a NEW local
+// policy when it would push the local count past max (0 = unlimited). The count
+// check and the apply happen under one lock acquisition, so concurrent creates
+// cannot both pass an under-cap check and exceed the limit.
+func (t *srPolicyTable) applyLocalCapped(p bgp.SRPolicy, max uint32) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if max > 0 && !t.hasLocalLocked(p.Color, p.Endpoint) {
+		n := 0
+		for _, st := range t.byKey {
+			if _, ok := st.candidates[candidateID{origin: bgp.OriginLocal, distinguisher: localDistinguisher}]; ok {
+				n++
+			}
+		}
+		if uint32(n) >= max {
+			return ErrSRPolicyLimitReached
+		}
+	}
+	t.applyLocked(p, false)
+	return nil
+}
+
+// hasLocalLocked is hasLocalCandidate with t.mu already held.
+func (t *srPolicyTable) hasLocalLocked(color uint32, endpoint netip.Addr) bool {
+	st := t.byKey[policyKey{color: color, endpoint: endpoint}]
+	if st == nil {
+		return false
+	}
+	_, ok := st.candidates[candidateID{origin: bgp.OriginLocal, distinguisher: localDistinguisher}]
+	return ok
 }
 
 // ensureState returns the policyState for key, allocating a stable
@@ -355,10 +397,5 @@ func (t *srPolicyTable) list() []SRPolicySnapshot {
 func (t *srPolicyTable) hasLocalCandidate(color uint32, endpoint netip.Addr) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	st := t.byKey[policyKey{color: color, endpoint: endpoint}]
-	if st == nil {
-		return false
-	}
-	_, ok := st.candidates[candidateID{origin: bgp.OriginLocal, distinguisher: localDistinguisher}]
-	return ok
+	return t.hasLocalLocked(color, endpoint)
 }

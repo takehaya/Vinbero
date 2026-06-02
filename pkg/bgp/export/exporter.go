@@ -154,25 +154,6 @@ func New(advertiser bgp.RouteAdvertiser, sidOps SidOps, locators *locator.Manage
 	return e
 }
 
-// validateIPv6NextHop checks the BGP next hop: a non-empty IPv6 (not v4-mapped)
-// address. SRv6 VPN / unicast / EVPN transport is IPv6-only; an empty / IPv4 /
-// malformed next hop serializes into a route no PE can forward toward. Shared by
-// the L3VPN exporter's Start-time check and the EVPN exporter's per-EnableBD/ES
-// check (the EVPN path has no Start).
-func validateIPv6NextHop(nextHop string) error {
-	if nextHop == "" {
-		return fmt.Errorf("bgp.global.next_hop is required for auto advertise")
-	}
-	a, err := netip.ParseAddr(nextHop)
-	if err != nil {
-		return fmt.Errorf("bgp.global.next_hop %q is invalid: %w", nextHop, err)
-	}
-	if !a.Is6() || a.Is4In6() {
-		return fmt.Errorf("bgp.global.next_hop %q must be an IPv6 address", nextHop)
-	}
-	return nil
-}
-
 // Start validates the next hop, enables every VRF binding that lists a
 // redistribute set, enables the IPv6 unicast underlay if configured, and begins
 // watching the kernel routing tables. EnableVRF mints each VRF's End.DT4/DT6
@@ -182,8 +163,8 @@ func validateIPv6NextHop(nextHop string) error {
 // VRFs already enabled in this call are unwound so a partial startup leaves no
 // orphaned SID.
 func (e *Exporter) Start(ctx context.Context) error {
-	if err := validateIPv6NextHop(e.nextHop); err != nil {
-		return err
+	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
+		return fmt.Errorf("bgp.global.next_hop %w", err)
 	}
 	enabled := make([]string, 0)
 	for _, b := range e.vrfBindings.List() {

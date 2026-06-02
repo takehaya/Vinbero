@@ -171,6 +171,13 @@ func (a *Applier) HasLocalSRPolicy(color uint32, endpoint netip.Addr) bool {
 	return a.srPolicy.hasLocalCandidate(color, endpoint)
 }
 
+// ApplyLocalSRPolicyCapped installs a local SR Policy, rejecting a NEW one when
+// it would exceed max (0 = unlimited). The count check and the install are
+// atomic, so the SrPolicyService cap holds under concurrent RPCs.
+func (a *Applier) ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error {
+	return a.srPolicy.applyLocalCapped(p, max)
+}
+
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 	owner := bpf.OwnerBGPVPN(a.localASN, vr.RD)
 	rk := vr.Key()

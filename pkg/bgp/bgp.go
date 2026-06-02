@@ -23,6 +23,34 @@ import (
 	"net/netip"
 )
 
+// ValidateIPv6NextHop validates a BGP next hop for an advertised SRv6 route and
+// returns the parsed address. SRv6 VPN / SR Policy / MUP / EVPN transport is
+// IPv6-only, so the next hop must be a specific, routable IPv6 address: empty,
+// IPv4, v4-in-6, and the unspecified address (::) are all rejected. :: in
+// particular would originate a blackhole next hop no receiving PE can forward
+// toward, reachable over the unauthenticated RPC surface. Shared by every
+// advertise path (pkg/bgp/export, pkg/server) so they enforce it identically.
+func ValidateIPv6NextHop(nextHop string) (netip.Addr, error) {
+	// Messages are subject-neutral so each caller can prefix the source (e.g.
+	// "bgp.global.next_hop") without repeating the word "next_hop".
+	if nextHop == "" {
+		return netip.Addr{}, errors.New("is required (a routable IPv6 address)")
+	}
+	a, err := netip.ParseAddr(nextHop)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("%q is not a valid IP address", nextHop)
+	}
+	// Must be a global-scope IPv6 unicast address a remote PE can forward toward:
+	// reject IPv4 / v4-in-6, and the unspecified (::), loopback (::1),
+	// link-local (fe80::/10), and multicast (ff00::/8) addresses, which would all
+	// originate a route no PE can use.
+	if !a.Is6() || a.Is4In6() || a.IsUnspecified() || a.IsLoopback() ||
+		a.IsLinkLocalUnicast() || a.IsMulticast() {
+		return netip.Addr{}, fmt.Errorf("%q must be a routable IPv6 address", nextHop)
+	}
+	return a, nil
+}
+
 // Session lifecycle errors. Exposed as sentinels so callers can branch
 // with errors.Is rather than string-matching.
 var (

@@ -92,7 +92,7 @@ func mupListRoutes(t *testing.T, s *MupServer) []*v1.BgpMupRoute {
 
 // A nil advertiser (BGP disabled) makes every RPC fail FailedPrecondition.
 func TestMupServer_DisabledWhenNoBGP(t *testing.T) {
-	s := NewMupServer(nil, "")
+	s := NewMupServer(nil, "", 0)
 	if _, err := s.MupList(context.Background(), connect.NewRequest(&v1.MupListRequest{})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("MupList err = %v, want FailedPrecondition", err)
 	}
@@ -111,7 +111,7 @@ func TestMupServer_DisabledWhenNoBGP(t *testing.T) {
 // defaults an empty next hop to the server's configured value.
 func TestMupServer_CreateAdvertisesPerType(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH)
+	s := NewMupServer(adv, mupTestNH, 0)
 	msg := mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24", Srv6Sid: "fd00:a:0:1::"},
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
@@ -139,7 +139,7 @@ func TestMupServer_CreateAdvertisesPerType(t *testing.T) {
 // advertise with no usable next hop is a per-item error: not pushed, not stored.
 func TestMupServer_RequiresIPv6NextHop(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, "") // no configured next hop
+	s := NewMupServer(adv, "", 0) // no configured next hop
 	msg := mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24"},                   // empty + no default
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1", NextHop: "192.0.2.1"}, // IPv4
@@ -159,7 +159,7 @@ func TestMupServer_RequiresIPv6NextHop(t *testing.T) {
 // An out-of-range teid_len is rejected per-item and not stored.
 func TestMupServer_FieldValidation(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH)
+	s := NewMupServer(adv, mupTestNH, 0)
 	msg := mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "t2st", Rd: "65000:1", Endpoint: "2001:db8::9", Teid: 1, TeidLen: 33},
 	)
@@ -175,7 +175,7 @@ func TestMupServer_FieldValidation(t *testing.T) {
 // List never reports a route BGP rejected.
 func TestMupServer_PushFailureNotStored(t *testing.T) {
 	adv := &fakeMUPController{err: context.Canceled}
-	s := NewMupServer(adv, mupTestNH)
+	s := NewMupServer(adv, mupTestNH, 0)
 	msg := mupCreate(t, s, &v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24"})
 	if len(msg.Errors) != 1 {
 		t.Fatalf("a push failure must be a per-item error; errors=%v", msg.Errors)
@@ -190,7 +190,7 @@ func TestMupServer_PushFailureNotStored(t *testing.T) {
 // local table.
 func TestMupServer_DeleteWithdrawsAndDrops(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH)
+	s := NewMupServer(adv, mupTestNH, 0)
 	t2st := &v1.BgpMupRoute{RouteType: "t2st", Rd: "65000:1", Endpoint: "2001:db8::9", Teid: 200, TeidLen: 24}
 	mupCreate(t, s, t2st)
 	resp, err := s.MupDelete(context.Background(), connect.NewRequest(&v1.MupDeleteRequest{Routes: []*v1.BgpMupRoute{t2st}}))
@@ -215,7 +215,7 @@ func TestMupServer_DeleteWithdrawsAndDrops(t *testing.T) {
 // still shows exactly one route.
 func TestMupServer_UpdateReplacesInPlace(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH)
+	s := NewMupServer(adv, mupTestNH, 0)
 	r := &v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24", Srv6Sid: "fd00:a:0:1::"}
 	mupCreate(t, s, r)
 	r.Srv6Sid = "fd00:a:0:2::" // change a non-key field
@@ -238,7 +238,7 @@ func TestMupServer_UpdateReplacesInPlace(t *testing.T) {
 // {rd,prefix,teid=0} with the same rd+prefix are two distinct entries.
 func TestMupServer_TypeDisambiguatesKey(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH)
+	s := NewMupServer(adv, mupTestNH, 0)
 	mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "10.0.0.0/24"},
 		&v1.BgpMupRoute{RouteType: "t1st", Rd: "65000:1", Prefix: "10.0.0.0/24", Teid: 0},
@@ -248,11 +248,36 @@ func TestMupServer_TypeDisambiguatesKey(t *testing.T) {
 	}
 }
 
+// The origination cap rejects a NEW route once the limit is reached, but an
+// update of an existing route is always allowed.
+func TestMupServer_OriginationCap(t *testing.T) {
+	adv := &fakeMUPController{}
+	s := NewMupServer(adv, mupTestNH, 2)
+	if msg := mupCreate(t, s,
+		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "10.0.0.0/24"},
+		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
+	); len(msg.Errors) != 0 {
+		t.Fatalf("two routes within the cap must succeed; errors=%v", msg.Errors)
+	}
+	// A third NEW route is over the cap: per-item error, not stored.
+	msg := mupCreate(t, s, &v1.BgpMupRoute{RouteType: "t1st", Rd: "65000:1", Prefix: "10.0.0.2/32", Teid: 5})
+	if len(msg.Errors) != 1 {
+		t.Fatalf("a new route beyond the cap must be a per-item error; errors=%v", msg.Errors)
+	}
+	if got := mupListRoutes(t, s); len(got) != 2 {
+		t.Errorf("a capped route must not be stored; List=%d", len(got))
+	}
+	// Updating an existing route at the cap is allowed.
+	if msg := mupCreate(t, s, &v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "10.0.0.0/24", Srv6Sid: "fd00:a::"}); len(msg.Errors) != 0 {
+		t.Errorf("updating an existing route at the cap must be allowed; errors=%v", msg.Errors)
+	}
+}
+
 // List round-trips every field through mupRouteToProto, including the uint8 ->
 // uint32 widening (qfi/rqi/teid_len/segment_id2) and the route_type string.
 func TestMupServer_ListRoundTrips(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH)
+	s := NewMupServer(adv, mupTestNH, 0)
 	mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24"},
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},

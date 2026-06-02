@@ -52,22 +52,27 @@ func mupKeyFor(mr bgp.MUPRoute) mupLocalKey {
 // FailedPrecondition); nextHop is the default BGP next hop
 // (bgp.global.next_hop) used when a route does not carry its own.
 type MupServer struct {
-	// mu guards only routes (taken for the map read/write, not held across the
-	// gobgp Push/Withdraw I/O). Operator CRUD is sequential; two concurrent
-	// contradictory same-key RPCs (a create and a delete) are NOT serialized
-	// against each other, so the local table can momentarily diverge from the
-	// gobgp RIB. The RIB is the source of truth (what is actually advertised);
-	// routes is the List view, and bgpSession.Stop clears any orphan on shutdown.
-	mu         sync.Mutex
+	// mu guards routes + pending only -- it is NOT held across the gobgp
+	// Push/Withdraw I/O (so a wedged gobgp management channel cannot block
+	// MupList or other RPCs). To keep the cap exact under concurrent creates, a
+	// new route reserves a slot (pending++) under mu before its Push and finalizes
+	// (pending--, store on success) under mu after; the cap counts routes+pending.
+	mu      sync.Mutex
+	pending int // NEW routes whose Push is in flight, reserved against the cap
+	// maxRoutes caps how many local MUP routes may be originated (0 = unlimited),
+	// bounding SAFI 85 amplification from the unauthenticated surface; a new route
+	// beyond the cap is a per-item error.
+	maxRoutes  uint32
 	advertiser bgp.MUPController
 	nextHop    string
 	routes     map[mupLocalKey]bgp.MUPRoute
 }
 
-func NewMupServer(advertiser bgp.MUPController, nextHop string) *MupServer {
+func NewMupServer(advertiser bgp.MUPController, nextHop string, maxRoutes uint32) *MupServer {
 	return &MupServer{
 		advertiser: advertiser,
 		nextHop:    nextHop,
+		maxRoutes:  maxRoutes,
 		routes:     make(map[mupLocalKey]bgp.MUPRoute),
 	}
 }
@@ -94,19 +99,46 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 		if mr.NextHop == "" {
 			mr.NextHop = s.nextHop
 		}
-		if _, err := parseAdvertiseNextHop(mr.NextHop); err != nil {
+		if _, err := bgp.ValidateIPv6NextHop(mr.NextHop); err != nil {
 			errs = append(errs, &v1.OperationError{
 				TriggerPrefix: mupRouteID(r),
-				Reason:        fmt.Sprintf("%v (set bgp.global.next_hop or --next-hop)", err),
+				Reason:        fmt.Sprintf("bgp.global.next_hop %v (or set --next-hop)", err),
 			})
 			continue
 		}
-		if err := pushMUPRoute(ctx, s.advertiser, mr); err != nil {
+		// Cap + reserve atomically, then Push outside the lock. A NEW route reserves
+		// a slot (pending++) so a concurrent create sees it and cannot also pass an
+		// under-cap check; an update of an existing key is always allowed. The
+		// counter is conservative (it can only over-count, never under-count), so
+		// the cap is never exceeded. The route is stored only after Push succeeds.
+		key := mupKeyFor(mr)
+		s.mu.Lock()
+		_, exists := s.routes[key]
+		if !exists && s.maxRoutes > 0 && uint32(len(s.routes)+s.pending) >= s.maxRoutes {
+			s.mu.Unlock()
+			errs = append(errs, &v1.OperationError{
+				TriggerPrefix: mupRouteID(r),
+				Reason:        fmt.Sprintf("MUP route limit reached (mup_max_routes=%d)", s.maxRoutes),
+			})
+			continue
+		}
+		if !exists {
+			s.pending++
+		}
+		s.mu.Unlock()
+
+		err = pushMUPRoute(ctx, s.advertiser, mr)
+
+		s.mu.Lock()
+		if !exists {
+			s.pending--
+		}
+		if err != nil {
+			s.mu.Unlock()
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		s.mu.Lock()
-		s.routes[mupKeyFor(mr)] = mr
+		s.routes[key] = mr
 		s.mu.Unlock()
 	}
 	return errs
@@ -148,6 +180,10 @@ func (s *MupServer) MupDelete(
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
+		// Withdraw outside the lock (the lock never spans gobgp I/O), then drop the
+		// table entry. WithdrawMUP* no-ops for an unadvertised route. A concurrent
+		// same-key create races here, but the RIB is authoritative and the table is
+		// the List view -- the same benign window the create path accepts.
 		if err := withdrawMUPRoute(ctx, s.advertiser, mr); err != nil {
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
