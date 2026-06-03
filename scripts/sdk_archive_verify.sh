@@ -4,12 +4,23 @@
 set -euo pipefail
 
 TARBALL="${1:?usage: sdk_archive_verify.sh <tarball>}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # 1. Extract tarball to a fake /usr/local prefix.
 mkdir -p "$WORK/prefix"
 tar xzf "$TARBALL" -C "$WORK/prefix"
+
+# The installer extracts the tarball straight into /usr/local, so its top level
+# must be only include/ and share/ (this mirrors the installer's entry guard and
+# catches any stray top-level file — e.g. a leaked binary — before it ships).
+for entry in "$WORK"/prefix/*; do
+  case "$(basename "$entry")" in
+    include|share) ;;
+    *) echo "unexpected top-level entry in SDK tarball: $(basename "$entry")" >&2; exit 1 ;;
+  esac
+done
 
 # 2. Confirm the expected files landed at the documented paths.
 required=(
@@ -44,7 +55,7 @@ fi
 #    path or a missing/collapsed core header fails the build immediately.
 #    MAKEFILE_PLUGIN points at the template shipped inside the tarball so the
 #    in-tree relative include (../../c/Makefile.plugin) is bypassed.
-EXAMPLES_SRC="${EXAMPLES_SRC:-sdk/examples}"
+EXAMPLES_SRC="${EXAMPLES_SRC:-$ROOT/sdk/examples}"
 for ex in plugin-counter simple-acl plugin-counter-l2 plugin-custom-sh; do
   exdir="$WORK/examples/$ex"
   mkdir -p "$exdir"
@@ -61,7 +72,7 @@ done
 #    regressions in the tailcall_epilogue / forbidden-helper rules.
 #    Note: the binary is named `vinbero` in this repo (not `vbctl`); the
 #    `plugin validate` subcommand is provided by cmd/vinbero.
-VBCTL="${VBCTL:-./out/bin/vinbero}"
+VBCTL="${VBCTL:-$ROOT/out/bin/vinbero}"
 if [ ! -x "$VBCTL" ]; then
   echo "vinbero CLI not found at $VBCTL — run 'make build' first" >&2
   exit 1

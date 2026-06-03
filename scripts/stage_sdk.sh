@@ -15,6 +15,11 @@ set -euo pipefail
 DEST="${1:?usage: stage_sdk.sh <dest-dir>}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Guard the rm -rf below against obviously catastrophic destinations.
+case "$DEST" in
+  /|.|..|"$HOME") echo "stage_sdk.sh: refusing to wipe '$DEST'" >&2; exit 1 ;;
+esac
+
 rm -rf "$DEST"
 install -d "$DEST/include/vinbero" "$DEST/include/core" "$DEST/share/vinbero-sdk"
 
