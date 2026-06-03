@@ -32,9 +32,13 @@ if ! "${gobin}/goreleaser" --version >/dev/null 2>&1; then
   exit 1
 fi
 echo "✓ goreleaser ${GORELEASER_VERSION} installed at ${gobin}/goreleaser"
-# 実際に実行される goreleaser は PATH の優先順位で決まるため、make goreleaser 等で
-# pinned 版を使うには ${gobin} を PATH に含める必要がある。
-command -v goreleaser >/dev/null 2>&1 || \
+# 実際に実行される goreleaser は PATH の優先順位で決まる。make goreleaser 等で
+# pinned 版を使うため、PATH 解決結果が ${gobin}/goreleaser と一致するか確認する。
+resolved="$(command -v goreleaser 2>/dev/null || true)"
+if [ -z "$resolved" ]; then
   echo "note: ${gobin} is not on PATH; add it (e.g. export PATH=\"${gobin}:\$PATH\") to use 'make goreleaser'." >&2
+elif [ "$resolved" != "${gobin}/goreleaser" ]; then
+  echo "note: 'goreleaser' on PATH resolves to ${resolved}, not the pinned ${gobin}/goreleaser; PATH order may run a different version." >&2
+fi
 
 echo "✅ All build tools have been installed successfully!"
