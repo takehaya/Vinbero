@@ -60,8 +60,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# 必須コマンドの確認。
-for cmd in curl jq tar install; do
+# 必須コマンドの確認。常に使う curl / jq / install のみ必須にする。
+# tar は --with-sdk 時にだけ、sha256sum は checksums 検証時にだけ確認する。
+for cmd in curl jq install; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "Required command not found: $cmd" >&2
     echo "Please install it first (e.g. 'apt-get install -y $cmd')." >&2
@@ -107,9 +108,15 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 verify_checksum() {
   local file="$1"
   [ -n "$CHK_URL" ] || return 0
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "warning: sha256sum not found, skipping checksum verification" >&2
+    return 0
+  fi
   [ -f "$TMP/checksums.txt" ] || curl -fsSL "$CHK_URL" -o "$TMP/checksums.txt"
   local base line; base="$(basename "$file")"
-  line="$(grep " ${base}\$" "$TMP/checksums.txt" || true)"
+  # checksums.txt は `<sha256>  <filename>` 形式。ファイル名を第2フィールドで厳密一致
+  # させ、grep の正規表現で `.` などが任意文字として誤マッチするのを避ける。
+  line="$(awk -v f="$base" '$2 == f {print; exit}' "$TMP/checksums.txt")"
   if [ -n "$line" ]; then
     ( cd "$TMP" && printf '%s\n' "$line" | sha256sum -c - >/dev/null )
     echo "verified  ${base}"
@@ -133,13 +140,15 @@ done
 
 # plugin SDK (optional)
 if [ "$WITH_SDK" -eq 1 ]; then
+  command -v tar >/dev/null 2>&1 || { echo "Required command not found: tar (needed for --with-sdk)" >&2; exit 1; }
   SDK_URL="$(asset_url "/vinbero-sdk-.*\\.tar\\.gz$")"
   if [ -n "$SDK_URL" ]; then
     SDK_FILE="$TMP/$(basename "$SDK_URL")"
     curl -fsSL "$SDK_URL" -o "$SDK_FILE"
     verify_checksum "$SDK_FILE"
     # tarball の top-level は include/ と share/ なので /usr/local に直接展開する。
-    tar xzf "$SDK_FILE" -C "$SDK_PREFIX"
+    # root 実行を想定し、archive 内の owner / permission を持ち込まない。
+    tar --no-same-owner --no-same-permissions -xzf "$SDK_FILE" -C "$SDK_PREFIX"
     echo "SDK      ${SDK_PREFIX}/include/vinbero, ${SDK_PREFIX}/share/vinbero-sdk"
   else
     echo "warning: --with-sdk requested but no SDK tarball found in ${TAG_NAME:-release}" >&2

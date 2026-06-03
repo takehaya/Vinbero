@@ -14,7 +14,8 @@ https://github.com/takehaya/Vinbero-legacy/tree/master) has become outdated, so 
 
 The fastest way to get `vinberod` and `vinbero` is the one-liner installer,
 which pulls the latest GitHub release and drops both binaries into
-`/usr/local/bin`. It needs `curl` and `jq` available.
+`/usr/local/bin`. It needs `curl` and `jq` available (plus coreutils
+`install` / `sha256sum`, and `tar` when using `--with-sdk`).
 
 ```bash
 # Latest release
