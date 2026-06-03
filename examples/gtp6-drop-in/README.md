@@ -33,4 +33,4 @@ sudo ./teardown.sh
 3. パケットを書き換えずに `XDP_PASS` でカーネルに委譲 (SL/DA/nexthdr は不変)
 4. カーネル SRv6 スタックがそのまま処理
 
-変換が無いため、`test.sh` は per-slot 呼び出しカウンタ (`vbctl stats slot show`) で Di プログラムが当該パケットに対して実行されたことを確認します。
+変換が無いため、`test.sh` は per-slot 呼び出しカウンタ (`vinbero stats slot show`) で Di プログラムが当該パケットに対して実行されたことを確認します。netns example のクライアントバイナリは `vinbero` です (`out/bin/vbctl` はありません。`vbctl` は interop-clab の Docker image 内の symlink です)。

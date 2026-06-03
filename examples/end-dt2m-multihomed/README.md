@@ -60,12 +60,16 @@ sudo ./teardown.sh
 1. **Split-horizon (Phase C)**: `host1 → broadcast → PE1` が PE2 経由で
    host1 に戻ってこないこと。PE1 側で `SPLIT_HORIZON_TX > 0`、PE2 側
    (fail-safe 経路) で `SPLIT_HORIZON_RX` をアサート。
-2. **DF 選出 (Phase D)**:
+2. **DF 選出 (Phase D)**: 以下のコマンド例の `vbctl` は `test.sh` /
+   `smoke_api.sh` が `vinbero -s http://127.0.0.1:<PE port>` を包んだシェル関数
+   です。netns 内に `vbctl` という実バイナリはありません。`--esi` には冒頭の実
+   ESI を渡します。
    - 初期状態は DF=PE1。両 PE で
-     `vbctl es df-set --esi ES-1 --pe fc00:1::1` を実行して DF を一致させる。
+     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:1::1` を実行して DF を一致させる。
    - リモートからの `PE3 → BUM → host1` は PE1 経由でのみ host1 に届く
      (PE2 側は `NON_DF_DROP` で落ちる)。
-   - DF を PE2 に切り替え: `vbctl es df-set --esi ES-1 --pe fc00:2::2`
+   - DF を PE2 に切り替え:
+     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:2::2`
      → 以降は PE2 経由で届く。
 
 ## ステータス

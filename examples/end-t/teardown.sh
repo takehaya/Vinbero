@@ -14,10 +14,8 @@ echo "=========================================="
 echo "Tearing down SRv6 End.T environment"
 echo "=========================================="
 
-print_info "Stopping Vinbero processes..."
-pkill -f "vinbero.*end-t" 2>/dev/null || true
-sleep 1
-
+# Teardown topology. vinberod is started and stopped within test.sh (its EXIT
+# trap fires even on an aborted run), so teardown only removes the namespaces.
 teardown_three_router_topology
 
 echo ""

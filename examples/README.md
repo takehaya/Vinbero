@@ -9,6 +9,16 @@ VinberoのSRv6機能を実際に試せるPlayground環境です。
 
 このページは netns example を説明します。interop ラボは [`interop-clab/README.md`](interop-clab/README.md) を参照してください。
 
+## 前提のビルド
+
+netns example は `out/bin/vinberod` と `out/bin/vinbero` を使います。clone 直後は repo ルートで一度ビルドしてください。
+
+```bash
+make protobuf-gen && make bpf-gen && make build
+```
+
+ビルドしていないと `setup.sh` は通っても `test.sh` が Vinbero failed to start で落ちます。
+
 ## クイックスタート
 
 ```bash

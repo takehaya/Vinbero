@@ -22,24 +22,16 @@ ns_router1="${TOPO_NS_PREFIX}router1"
 
 TESTS_PASSED=0
 TESTS_FAILED=0
+VINBERO_PID=""
 
-# Test ping6 with counter
-test_ping6_with_counter() {
-    local ns=$1
-    local target=$2
-    local desc=$3
-
-    print_info "Testing: $desc"
-    if ip netns exec $ns ping6 -c 3 -W 2 $target > /dev/null 2>&1; then
-        print_success "$desc: PASS"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        return 0
-    else
-        print_error "$desc: FAIL"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        return 1
+cleanup() {
+    # Guard against PID reuse: only kill if the PID is still our vinberod.
+    if [ -n "$VINBERO_PID" ] && [ "$(ps -o comm= -p "$VINBERO_PID" 2>/dev/null)" = "vinberod" ]; then
+        kill "$VINBERO_PID" 2>/dev/null || true
+        wait "$VINBERO_PID" 2>/dev/null || true
     fi
 }
+trap cleanup EXIT
 
 echo "=========================================="
 echo "SRv6 H.Encaps (Headend IPv6) Test"
@@ -53,8 +45,8 @@ echo "=========================================="
 
 print_info "Linux native T.Encaps is already configured on $ns_router1 (from setup.sh)"
 
-test_ping6_with_counter "$ns_host1" 2001:2::1 "host1 -> host2 (Linux native T.Encaps)"
-test_ping6_with_counter "$ns_host2" 2001:1::1 "host2 -> host1 (Linux native T.Encaps)"
+test_ping_with_counter "$ns_host1" 2001:2::1 "host1 -> host2 (Linux native T.Encaps)"
+test_ping_with_counter "$ns_host2" 2001:1::1 "host2 -> host1 (Linux native T.Encaps)"
 
 print_info "Removing Linux native T.Encaps route from $ns_router1..."
 ip netns exec "$ns_router1" ip -6 route del 2001:2::/64 2>/dev/null || true
@@ -79,8 +71,8 @@ print_success "HeadendV6 entry registered"
 
 sleep 1
 
-test_ping6_with_counter "$ns_host1" 2001:2::1 "host1 -> host2 (Vinbero XDP H.Encaps)"
-test_ping6_with_counter "$ns_host2" 2001:1::1 "host2 -> host1 (Vinbero XDP)"
+test_ping_with_counter "$ns_host1" 2001:2::1 "host1 -> host2 (Vinbero XDP H.Encaps)"
+test_ping_with_counter "$ns_host2" 2001:1::1 "host2 -> host1 (Vinbero XDP)"
 
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true

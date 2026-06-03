@@ -14,9 +14,9 @@ graph LR
 
 **パケットの流れ:**
 1. gNB が素の GTP-U/IPv6 パケットを N3/UPF アドレス (2001:db8:caf::/64) 宛に送信。router1 経由でルーティングされる
-2. **router1 (H.M.GTP6.D)**: outer IPv6 dst で GTP-U tunnel を intercept し、外側 IPv6+UDP+GTP-U を剥離して End.M.GTP6.E SID 向けに SRv6 encap。TEID/QFI を SID の Args.Mob.Session (args_offset 8) にエンコード
+2. **router1 (H.M.GTP6.D)**: outer IPv6 dst で GTP-U tunnel を intercept し、外側 IPv6+UDP+GTP-U を剥離して End.M.GTP6.E SID 向けに SRv6 encap。TEID/QFI を SID の Args.Mob.Session (args_offset 8) に encode
 3. router2: SRv6 を素の IPv6 として transit (localsid なし)
-4. **router3 (End.M.GTP6.E)**: SRv6 を剥離、SID から TEID/QFI をデコードして GTP-U/IPv6 で再カプセル化
+4. **router3 (End.M.GTP6.E)**: SRv6 を剥離、SID から TEID/QFI を decode して GTP-U/IPv6 で再カプセル化
 
 args_offset を 8 にすることで Args.Mob.Session の 5 バイトが /64 locator の外 (byte 8-12) に入り、SID が経路可能なまま保たれます。
 

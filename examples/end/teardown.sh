@@ -17,12 +17,10 @@ echo "=========================================="
 echo "Tearing down SRv6 End environment"
 echo "=========================================="
 
-# Kill Vinbero if running
-print_info "Stopping Vinbero processes..."
-pkill -f "vinbero.*vinbero_router2.yaml" 2>/dev/null || true
-sleep 1
-
-# Teardown topology
+# Teardown topology. vinberod is started and stopped within test.sh (its EXIT
+# trap fires even on an aborted run), so teardown only removes the namespaces.
+# A broad "pkill -f vinbero..." here would kill a sibling example's daemon
+# during parallel CI runs that share the same config filename.
 teardown_three_router_topology
 
 echo ""

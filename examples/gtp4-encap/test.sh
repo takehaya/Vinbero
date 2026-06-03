@@ -103,71 +103,75 @@ if ! python3 -c "from scapy.all import IP" 2>/dev/null; then
     exit 0
 fi
 
-# Test 1: GTP-U with QFI (5G)
+# Test 1: GTP-U with QFI (5G). Capture on router2's link toward router1 and
+# filter to the End.M.GTP4.E SID locator (fc00:3::/56) so we only count
+# SRv6-encapsulated packets, not stray NDP/ICMPv6 on the same link. CAPTURED is
+# initialised outside the -f guard so a missing pcap fails instead of silently
+# skipping. timeout caps tcpdump so a capture miss surfaces in ~8s.
 print_info "Test 1: GTP-U with QFI=9 (5G mode)"
+rm -f /tmp/gtp4_test1.pcap
 ip netns exec "$ns_router2" \
-    tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 3 -w /tmp/gtp4_test1.pcap \
-    ip6 2>/dev/null &
+    timeout 8 tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 3 -w /tmp/gtp4_test1.pcap \
+    'ip6 and dst net fc00:3::/56' 2>/dev/null &
 TCPDUMP_PID=$!
+PIDS="$TCPDUMP_PID $PIDS"
 sleep 1
 
 ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu.py" \
     --outer-dst 172.0.2.100 --teid 0x12345678 --qfi 9 --count 3
-sleep 2
 
-kill $TCPDUMP_PID 2>/dev/null || true
 wait $TCPDUMP_PID 2>/dev/null || true
+PIDS="${PIDS/$TCPDUMP_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
 
-if [ -f /tmp/gtp4_test1.pcap ]; then
-    CAPTURED=$(tcpdump -r /tmp/gtp4_test1.pcap 2>/dev/null | wc -l)
-    if [ "$CAPTURED" -gt 0 ]; then
-        print_success "Test 1 PASS: $CAPTURED SRv6 packets captured (H.M.GTP4.D works)"
-        tcpdump -r /tmp/gtp4_test1.pcap -n 2>/dev/null | head -3
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    else
-        print_error "Test 1 FAIL: No SRv6 packets captured"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-    fi
-    rm -f /tmp/gtp4_test1.pcap
+CAPTURED=0
+[ -f /tmp/gtp4_test1.pcap ] && CAPTURED=$(tcpdump -r /tmp/gtp4_test1.pcap 2>/dev/null | wc -l)
+if [ "$CAPTURED" -gt 0 ]; then
+    print_success "Test 1 PASS: $CAPTURED SRv6 packets toward End.M.GTP4.E captured (H.M.GTP4.D works)"
+    tcpdump -r /tmp/gtp4_test1.pcap -n 2>/dev/null | head -3
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    print_error "Test 1 FAIL: no SRv6 packets toward the End.M.GTP4.E SID captured"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
+rm -f /tmp/gtp4_test1.pcap
 
 # Test 2: GTP-U without QFI (4G/LTE mode)
 echo ""
 print_info "Test 2: GTP-U without QFI (4G/LTE mode)"
+rm -f /tmp/gtp4_test2.pcap
 ip netns exec "$ns_router2" \
-    tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 1 -w /tmp/gtp4_test2.pcap \
-    ip6 2>/dev/null &
+    timeout 8 tcpdump -i "${TOPO_NS_PREFIX}rt2rt1" -c 1 -w /tmp/gtp4_test2.pcap \
+    'ip6 and dst net fc00:3::/56' 2>/dev/null &
 TCPDUMP_PID=$!
+PIDS="$TCPDUMP_PID $PIDS"
 sleep 1
 
 ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu.py" \
     --outer-dst 172.0.2.100 --teid 0xCAFEBABE --qfi 0 --count 1
-sleep 2
 
-kill $TCPDUMP_PID 2>/dev/null || true
 wait $TCPDUMP_PID 2>/dev/null || true
+PIDS="${PIDS/$TCPDUMP_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
 
-if [ -f /tmp/gtp4_test2.pcap ]; then
-    CAPTURED=$(tcpdump -r /tmp/gtp4_test2.pcap 2>/dev/null | wc -l)
-    if [ "$CAPTURED" -gt 0 ]; then
-        print_success "Test 2 PASS: $CAPTURED SRv6 packets captured (4G compat works)"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    else
-        print_error "Test 2 FAIL: No SRv6 packets captured"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-    fi
-    rm -f /tmp/gtp4_test2.pcap
+CAPTURED=0
+[ -f /tmp/gtp4_test2.pcap ] && CAPTURED=$(tcpdump -r /tmp/gtp4_test2.pcap 2>/dev/null | wc -l)
+if [ "$CAPTURED" -gt 0 ]; then
+    print_success "Test 2 PASS: $CAPTURED SRv6 packets toward End.M.GTP4.E captured (4G compat works)"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    print_error "Test 2 FAIL: no SRv6 packets toward the End.M.GTP4.E SID captured"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
+rm -f /tmp/gtp4_test2.pcap
 
 # Test 3: Non-GTP-U traffic should pass through
 echo ""
 print_info "Test 3: Non-GTP-U IPv4 (should XDP_PASS)"
-ip netns exec "$ns_host1" ping -c 1 -W 2 172.0.2.1 > /dev/null 2>&1 && {
+if ip netns exec "$ns_host1" ping -c 1 -W 2 172.0.2.1 > /dev/null 2>&1; then
     print_success "Test 3 PASS: Plain IPv4 passes through"
     TESTS_PASSED=$((TESTS_PASSED + 1))
-} || {
+else
     print_info "Test 3 SKIP: Plain IPv4 ping failed (expected in some setups)"
-}
+fi
 
 echo ""
 echo "=========================================="
