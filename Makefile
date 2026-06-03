@@ -177,30 +177,13 @@ SDK_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 SDK_STAGE := out/sdk-stage
 SDK_TARBALL := out/vinbero-sdk-$(SDK_VERSION).tar.gz
 
+.PHONY: sdk-stage
+sdk-stage: ## Stage SDK tree into $(SDK_STAGE) (shared with goreleaser)
+	@./scripts/stage_sdk.sh $(SDK_STAGE)
+
 .PHONY: sdk-archive
-sdk-archive: ## Build SDK tarball into out/
-	@rm -rf $(SDK_STAGE)
-	@install -d $(SDK_STAGE)/include/vinbero
-	@install -d $(SDK_STAGE)/include/core
-	@install -d $(SDK_STAGE)/share/vinbero-sdk/examples
-	@install -m 644 sdk/c/include/vinbero/*.h $(SDK_STAGE)/include/vinbero/
-	@install -m 644 sdk/c/Makefile.plugin $(SDK_STAGE)/include/vinbero/Makefile.plugin
-	@install -m 644 src/core/xdp_map.h $(SDK_STAGE)/include/core/
-	@install -m 644 src/core/xdp_prog.h $(SDK_STAGE)/include/core/
-	@install -m 644 src/core/xdp_tailcall.h $(SDK_STAGE)/include/core/
-	@install -m 644 src/core/xdp_tailcall_helpers.h $(SDK_STAGE)/include/core/
-	@install -m 644 src/core/xdp_tailcall_macros.h $(SDK_STAGE)/include/core/
-	@install -m 644 src/core/xdp_stats.h $(SDK_STAGE)/include/core/
-	@install -m 644 src/core/srv6.h $(SDK_STAGE)/include/core/
-	@install -m 644 sdk/README.md $(SDK_STAGE)/share/vinbero-sdk/
-	@install -m 644 LICENSE $(SDK_STAGE)/share/vinbero-sdk/
-	@for d in sdk/examples/plugin-counter sdk/examples/simple-acl sdk/examples/plugin-counter-l2 sdk/examples/plugin-custom-sh; do \
-		name=$$(basename $$d); \
-		install -d $(SDK_STAGE)/share/vinbero-sdk/examples/$$name; \
-		install -m 644 $$d/Makefile $$d/plugin.c $$d/README.md \
-			$(SDK_STAGE)/share/vinbero-sdk/examples/$$name/; \
-	done
-	@cd $(SDK_STAGE) && tar czf ../vinbero-sdk-$(SDK_VERSION).tar.gz .
+sdk-archive: sdk-stage ## Build SDK tarball into out/
+	@cd $(SDK_STAGE) && tar czf ../vinbero-sdk-$(SDK_VERSION).tar.gz include share
 	@echo "Created: $(SDK_TARBALL)"
 
 .PHONY: sdk-archive-verify

@@ -27,7 +27,7 @@ Usage: install_vinbero.sh [--version <tag>] [--with-sdk]
   --version <tag>   install a specific release tag (e.g. v0.0.4).
                     defaults to the latest release.
                     can also be set via VINBERO_VERSION.
-  --with-sdk        also install the plugin SDK (headers + examples)
+  --with-sdk        also install the plugin SDK (headers + docs)
                     under /usr/local.
   -h, --help        show this help.
 EOF
