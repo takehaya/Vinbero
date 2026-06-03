@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.8](https://github.com/takehaya/Vinbero/compare/v0.0.7...v0.0.8) (2026-06-03)
+
+
+### 🐛 Bug Fixes
+
+* **cli:** stamp vinbero CLI version from build ldflags ([#77](https://github.com/takehaya/Vinbero/issues/77)) ([2008036](https://github.com/takehaya/Vinbero/commit/200803693c02d4597acad1ce8e6d0eede106f3f2))
+
 ## [0.0.7](https://github.com/takehaya/Vinbero/compare/v0.0.6...v0.0.7) (2026-06-03)
 
 
