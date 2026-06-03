@@ -70,11 +70,27 @@ for cmd in curl jq install; do
   }
 done
 
-# write 権限の確認。root でない場合は早めに知らせる。
-if [ ! -w "$(dirname "$BIN_DIR")" ] && [ "$(id -u)" -ne 0 ]; then
-  echo "This installer needs to write under ${BIN_DIR}; re-run with sudo." >&2
-  exit 1
+# write 権限の確認。root でない場合は早めに知らせる。配置先が存在すればそのディレクトリ、
+# 無ければ最初に存在する親ディレクトリの書き込み可否を見る。
+writable_target() {
+  local d="$1"
+  while [ ! -e "$d" ]; do d="$(dirname "$d")"; done
+  [ -w "$d" ]
+}
+if [ "$(id -u)" -ne 0 ]; then
+  for d in "$BIN_DIR" "$SHARE_DIR"; do
+    writable_target "$d" || {
+      echo "This installer needs to write under ${d}; re-run with sudo." >&2
+      exit 1
+    }
+  done
 fi
+
+# Vinbero は linux バイナリのみ配布するため、Linux 以外は早期に中断する。
+case "$(uname -s)" in
+  Linux) ;;
+  *) echo "Unsupported OS: $(uname -s) (Vinbero ships linux binaries only)" >&2; exit 1 ;;
+esac
 
 case "$(uname -m)" in
   x86_64|amd64) ARCH="amd64" ;;
