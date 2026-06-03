@@ -89,13 +89,14 @@ else
 fi
 JSON="$(curl -fsSL "$META_URL")"
 
-TAG_NAME="$(echo "$JSON" | jq -r '.tag_name // empty')"
+TAG_NAME="$(printf '%s' "$JSON" | jq -r '.tag_name // empty')"
 
 # goreleaser の format=binary は各バイナリを
 # `{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}` (例: vinberod_0.0.4_linux_amd64) で upload する。
+# JSON を渡すのに echo を使うと xpg_echo などでバックスラッシュが解釈され壊れうるため printf を使う。
 asset_url() {
   local pattern="$1"
-  echo "$JSON" | jq -r --arg p "$pattern" '
+  printf '%s' "$JSON" | jq -r --arg p "$pattern" '
     .assets[]?.browser_download_url | select(test($p))
   ' | head -n1
 }
@@ -112,7 +113,13 @@ verify_checksum() {
     echo "warning: sha256sum not found, skipping checksum verification" >&2
     return 0
   fi
-  [ -f "$TMP/checksums.txt" ] || curl -fsSL "$CHK_URL" -o "$TMP/checksums.txt"
+  if [ ! -f "$TMP/checksums.txt" ]; then
+    # 取得に失敗しても install は止めず、検証だけスキップする (best-effort)。
+    curl -fsSL "$CHK_URL" -o "$TMP/checksums.txt" || {
+      echo "warning: failed to download checksums.txt, skipping verification" >&2
+      return 0
+    }
+  fi
   local base line; base="$(basename "$file")"
   # checksums.txt は `<sha256>  <filename>` 形式。ファイル名を第2フィールドで厳密一致
   # させ、grep の正規表現で `.` などが任意文字として誤マッチするのを避ける。
@@ -165,6 +172,7 @@ Installed Vinbero
   version  ${TAG_NAME:-${VERSION:-latest}}
 
 Next steps:
-  vinberod --help        # start the SRv6 daemon
-  vinbero --help         # control it via the CLI
+  sudo vinberod -c vinbero.yml   # start the SRv6 daemon
+  vinberod --help                # daemon options
+  vinbero --help                 # CLI usage
 EOF
