@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.5](https://github.com/takehaya/Vinbero/compare/v0.0.4...v0.0.5) (2026-06-03)
+
+
+### 🎉 Features
+
+* **scripts:** add one-liner installer for prebuilt binaries ([#70](https://github.com/takehaya/Vinbero/issues/70)) ([bb5c1f5](https://github.com/takehaya/Vinbero/commit/bb5c1f54685b8d4757bd65d026a1d5d00912911c))
+
+
+### 📝 Documentation
+
+* **srv6-bgp:** quote Mermaid edge labels containing parens and slashes ([#71](https://github.com/takehaya/Vinbero/issues/71)) ([6499e00](https://github.com/takehaya/Vinbero/commit/6499e00506290c9aee4c47e6f9022ec00c82aa36))
+
 ## [0.0.4](https://github.com/takehaya/Vinbero/compare/v0.0.3...v0.0.4) (2026-06-03)
 
 
