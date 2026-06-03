@@ -274,8 +274,8 @@ flowchart LR
     EB["egress: End.DT2M で decap<br/>DF だけ転送 / split-horizon で抑制"]
 
     F --> Q
-    Q -->|解決 (unicast)| U --> EU
-    Q -->|未解決 / BUM| B --> EB
+    Q -->|"解決 (unicast)"| U --> EU
+    Q -->|"未解決 / BUM"| B --> EB
 ```
 
 ## SRv6 MUP (mobile user plane)
