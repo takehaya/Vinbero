@@ -6,6 +6,10 @@ env:
 before:
   hooks:
     - go mod tidy
+    # Stage the SDK tree so the `sdk` archive below can ship it verbatim. This
+    # is the same script `make sdk-archive` uses, so the CI-verified tarball and
+    # the released tarball are built from one source of truth.
+    - ./scripts/stage_sdk.sh out/sdk-stage
 builds:
   - id: vinberod
     binary: vinberod
@@ -28,10 +32,10 @@ archives:
   # `curl | sudo tar xz -C /usr/local/` and start building without cloning
   # the vinbero repo. Layout matches docs/plan/plugin-sdk-3-tarball-distribution.md §2.
   - id: sdk
-    # meta archives carry only the `files` below (headers + docs) and none of
-    # the build binaries. The deprecated `builds: []` / empty `ids: []` are both
-    # ignored by goreleaser v2 (treated as "all builds"), which leaked vinberod /
-    # vinbero into the SDK tarball and tripped the installer's entry guard.
+    # meta archives carry only the `files` below and none of the build binaries.
+    # The deprecated `builds: []` / empty `ids: []` are both ignored by goreleaser
+    # v2 (treated as "all builds"), which leaked vinberod / vinbero into the SDK
+    # tarball and tripped the installer's entry guard.
     meta: true
     name_template: "vinbero-sdk-{{ .Version }}"
     formats:
@@ -41,72 +45,17 @@ archives:
     # `include/` and `share/` directly. Re-wrapping would force users to
     # pass --strip-components=1.
     wrap_in_directory: false
+    # Ship the pre-staged tree verbatim (see the stage_sdk.sh before-hook). Each
+    # entry archives a directory under its `dst`, so structure is preserved and
+    # there is no per-file list to keep in sync — adding an SDK header is a
+    # one-line change in scripts/stage_sdk.sh. Listing files individually here
+    # (src: foo.h, dst: include/core/) silently collapses them into a single
+    # file `include/core` under goreleaser v2, which is exactly what this avoids.
     files:
-      # Public ABI headers.
-      - src: sdk/c/include/vinbero/*.h
-        dst: include/vinbero/
-      # Internal headers that the public ones #include via "core/...".
-      # These are listed individually (not src/core/*.h) to keep the public
-      # surface explicit. Anything added here ships transitively to plugin
-      # authors — every entry must justify itself.
-      - src: src/core/xdp_map.h
-        dst: include/core/
-      - src: src/core/xdp_prog.h
-        dst: include/core/
-      - src: src/core/xdp_tailcall.h
-        dst: include/core/
-      - src: src/core/xdp_tailcall_helpers.h
-        dst: include/core/
-      - src: src/core/xdp_tailcall_macros.h
-        dst: include/core/
-      # xdp_stats.h is required transitively: xdp_tailcall_helpers.h
-      # implements tailcall_epilogue using stats_action_inc / slot_stats_inc
-      # from this header, so plugins that go through the epilogue (the
-      # SDK's required return contract) cannot build without it.
-      - src: src/core/xdp_stats.h
-        dst: include/core/
-      # srv6.h is required transitively from this PR onward: xdp_map.h
-      # references `struct aux_owner` (defined in srv6.h) to declare the
-      # aux_owner_map BPF map type. Without this, every plugin build that
-      # pulls <vinbero/plugin.h> -> core/xdp_map.h fails with
-      # "'core/srv6.h' file not found". scripts/sdk_archive_verify.sh
-      # exercises a real plugin build so the regression is caught in CI.
-      - src: src/core/srv6.h
-        dst: include/core/
-      # Build template — drop next to the public headers so the
-      # one-liner Makefile (`include /usr/local/include/vinbero/Makefile.plugin`)
-      # works out of the box.
-      - src: sdk/c/Makefile.plugin
-        dst: include/vinbero/Makefile.plugin
-      # Static data (docs / examples) live under share/ per FHS.
-      - src: sdk/README.md
-        dst: share/vinbero-sdk/README.md
-      - src: LICENSE
-        dst: share/vinbero-sdk/LICENSE
-      - src: sdk/examples/plugin-counter/Makefile
-        dst: share/vinbero-sdk/examples/plugin-counter/Makefile
-      - src: sdk/examples/plugin-counter/plugin.c
-        dst: share/vinbero-sdk/examples/plugin-counter/plugin.c
-      - src: sdk/examples/plugin-counter/README.md
-        dst: share/vinbero-sdk/examples/plugin-counter/README.md
-      - src: sdk/examples/simple-acl/Makefile
-        dst: share/vinbero-sdk/examples/simple-acl/Makefile
-      - src: sdk/examples/simple-acl/plugin.c
-        dst: share/vinbero-sdk/examples/simple-acl/plugin.c
-      - src: sdk/examples/simple-acl/README.md
-        dst: share/vinbero-sdk/examples/simple-acl/README.md
-      - src: sdk/examples/plugin-counter-l2/Makefile
-        dst: share/vinbero-sdk/examples/plugin-counter-l2/Makefile
-      - src: sdk/examples/plugin-counter-l2/plugin.c
-        dst: share/vinbero-sdk/examples/plugin-counter-l2/plugin.c
-      - src: sdk/examples/plugin-counter-l2/README.md
-        dst: share/vinbero-sdk/examples/plugin-counter-l2/README.md
-      - src: sdk/examples/plugin-custom-sh/Makefile
-        dst: share/vinbero-sdk/examples/plugin-custom-sh/Makefile
-      - src: sdk/examples/plugin-custom-sh/plugin.c
-        dst: share/vinbero-sdk/examples/plugin-custom-sh/plugin.c
-      - src: sdk/examples/plugin-custom-sh/README.md
-        dst: share/vinbero-sdk/examples/plugin-custom-sh/README.md
+      - src: out/sdk-stage/include
+        dst: include
+      - src: out/sdk-stage/share
+        dst: share
 checksum:
   name_template: 'checksums.txt'
 snapshot:
