@@ -8,30 +8,31 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# 1. Extract tarball to a fake /usr/local prefix. Validate entries first so a
-#    tarball with absolute or `..` paths cannot escape $WORK/prefix during
-#    extraction (defence-in-depth; this runs in CI). Mirrors the installer guard.
+# 1. Extract to a fake /usr/local prefix. First assert the tarball matches the
+#    contract install_vinbero.sh enforces on download — no path traversal, only
+#    regular files/dirs, only include/ and share/ at the top level. The tarball
+#    is built in-house, so this is a producer/installer contract test: it fails
+#    CI if goreleaser ever ships something the installer would reject (e.g. the
+#    binary-leak / collapsed-header regressions this packaging has already hit).
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
   case "$entry" in
     /*|..|../*|*/../*|*/..) echo "unsafe path in SDK tarball: $entry" >&2; exit 1 ;;
   esac
 done <<<"$(tar -tzf "$TARBALL")"
-# Reject non-regular entries (symlink/device/fifo/hardlink) before extraction,
-# matching the installer: a symlink could redirect a later test -f or build.
+# Only regular files / directories — the installer rejects symlink/device/fifo.
 while IFS= read -r line; do
   [ -n "$line" ] || continue
   case "$line" in
     -*|d*) ;;
-    *) echo "non-regular entry in SDK tarball: ${line##* }" >&2; exit 1 ;;
+    *) echo "non-regular entry in SDK tarball: $line" >&2; exit 1 ;;
   esac
 done <<<"$(tar -tvzf "$TARBALL")"
 mkdir -p "$WORK/prefix"
 tar xzf "$TARBALL" -C "$WORK/prefix"
 
-# The installer extracts the tarball straight into /usr/local, so its top level
-# must be only include/ and share/ (this mirrors the installer's entry guard and
-# catches any stray top-level file — e.g. a leaked binary — before it ships).
+# Top level must be only include/ and share/ (catches a stray entry — e.g. a
+# leaked binary — that the installer would also reject).
 for entry in "$WORK"/prefix/*; do
   case "$(basename "$entry")" in
     include|share) ;;
