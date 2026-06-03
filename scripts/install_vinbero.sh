@@ -116,8 +116,8 @@ TAG_NAME="$(printf '%s' "$JSON" | jq -r '.tag_name // empty')"
 # JSON を渡すのに echo を使うと xpg_echo などでバックスラッシュが解釈され壊れうるため printf を使う。
 asset_url() {
   local pattern="$1"
-  # 先頭一致を jq の first() で取り、head へのパイプを無くす。pipefail 下で
-  # 複数マッチ時に上流 jq が SIGPIPE で落ちて呼び出しが失敗するのを避ける。
+  # 配列順で最初にマッチした要素を jq の first() で取り、head へのパイプを無くす。
+  # pipefail 下で複数マッチ時に上流 jq が SIGPIPE で落ちて呼び出しが失敗するのを避ける。
   printf '%s' "$JSON" | jq -r --arg p "$pattern" '
     first(.assets[]?.browser_download_url | select(test($p))) // empty
   '
