@@ -102,6 +102,7 @@ ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu_v6.py" \
     --dst 2001:db8:caf::1 --teid 0xAABBCCDD --qfi 5 --count 3
 
 wait $TCPDUMP_PID 2>/dev/null || true
+PIDS="${PIDS/$TCPDUMP_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
 
 CAPTURED=0
 if [ -f /tmp/gtp6_encap.pcap ]; then

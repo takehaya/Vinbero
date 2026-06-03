@@ -34,7 +34,8 @@ TESTS_FAILED=0
 cleanup() {
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
-        [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1 && kill "$pid" 2>/dev/null || true
+        # Guard against PID reuse: only kill if the PID is still our vinberod.
+        [ -n "$pid" ] && [ "$(ps -o comm= -p "$pid" 2>/dev/null)" = "vinberod" ] && kill "$pid" 2>/dev/null || true
         [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
     done
 }
