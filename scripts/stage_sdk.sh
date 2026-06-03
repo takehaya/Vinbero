@@ -15,8 +15,12 @@ set -euo pipefail
 DEST="${1:?usage: stage_sdk.sh <dest-dir>}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Guard the rm -rf below against obviously catastrophic destinations.
-case "$DEST" in
+# Guard the rm -rf below against obviously catastrophic destinations. Strip
+# trailing slashes first so "/", "$HOME/" etc. can't slip past the match.
+norm="$DEST"
+while [ -n "$norm" ] && [ "$norm" != "${norm%/}" ]; do norm="${norm%/}"; done
+[ -n "$norm" ] || norm="/"
+case "$norm" in
   /|.|..|"$HOME") echo "stage_sdk.sh: refusing to wipe '$DEST'" >&2; exit 1 ;;
 esac
 

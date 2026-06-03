@@ -17,6 +17,15 @@ while IFS= read -r entry; do
     /*|..|../*|*/../*|*/..) echo "unsafe path in SDK tarball: $entry" >&2; exit 1 ;;
   esac
 done <<<"$(tar -tzf "$TARBALL")"
+# Reject non-regular entries (symlink/device/fifo/hardlink) before extraction,
+# matching the installer: a symlink could redirect a later test -f or build.
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  case "$line" in
+    -*|d*) ;;
+    *) echo "non-regular entry in SDK tarball: ${line##* }" >&2; exit 1 ;;
+  esac
+done <<<"$(tar -tvzf "$TARBALL")"
 mkdir -p "$WORK/prefix"
 tar xzf "$TARBALL" -C "$WORK/prefix"
 
