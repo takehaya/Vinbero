@@ -23,6 +23,16 @@ ns_router2="${TOPO_NS_PREFIX}router2"
 
 TESTS_PASSED=0
 TESTS_FAILED=0
+VINBERO_PID=""
+
+cleanup() {
+    # Guard against PID reuse: only kill if the PID is still our vinberod.
+    if [ -n "$VINBERO_PID" ] && [ "$(ps -o comm= -p "$VINBERO_PID" 2>/dev/null)" = "vinberod" ]; then
+        kill "$VINBERO_PID" 2>/dev/null || true
+        wait "$VINBERO_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 echo "=========================================="
 echo "SRv6 End Operation Test"

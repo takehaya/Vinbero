@@ -24,7 +24,8 @@ TESTS_FAILED=0
 VINBERO_PID=""
 
 cleanup() {
-    if [ -n "$VINBERO_PID" ] && ps -p "$VINBERO_PID" > /dev/null 2>&1; then
+    # Guard against PID reuse: only kill if the PID is still our vinberod.
+    if [ -n "$VINBERO_PID" ] && [ "$(ps -o comm= -p "$VINBERO_PID" 2>/dev/null)" = "vinberod" ]; then
         kill "$VINBERO_PID" 2>/dev/null || true
         wait "$VINBERO_PID" 2>/dev/null || true
     fi

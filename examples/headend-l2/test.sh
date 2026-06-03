@@ -28,11 +28,12 @@ VINBERO_PID_RT3=""
 
 # Cleanup function
 cleanup() {
-    if [ -n "$VINBERO_PID_RT1" ] && ps -p "$VINBERO_PID_RT1" > /dev/null 2>&1; then
+    # Guard against PID reuse: only kill if the PID is still our vinberod.
+    if [ -n "$VINBERO_PID_RT1" ] && [ "$(ps -o comm= -p "$VINBERO_PID_RT1" 2>/dev/null)" = "vinberod" ]; then
         kill "$VINBERO_PID_RT1" 2>/dev/null || true
         wait "$VINBERO_PID_RT1" 2>/dev/null || true
     fi
-    if [ -n "$VINBERO_PID_RT3" ] && ps -p "$VINBERO_PID_RT3" > /dev/null 2>&1; then
+    if [ -n "$VINBERO_PID_RT3" ] && [ "$(ps -o comm= -p "$VINBERO_PID_RT3" 2>/dev/null)" = "vinberod" ]; then
         kill "$VINBERO_PID_RT3" 2>/dev/null || true
         wait "$VINBERO_PID_RT3" 2>/dev/null || true
     fi

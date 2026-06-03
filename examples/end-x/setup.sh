@@ -6,9 +6,10 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Set namespace prefix for this example (allows parallel execution)
-# Default: use directory name (e.g., "end-x" -> "end-x-")
-# Override with TOPO_NS_PREFIX environment variable if needed
+# Set namespace prefix for this example (allows parallel execution).
+# Default: directory name (e.g., "end-x" -> "end-x-").
+# Note: vinbero_*.yaml hardcodes device names with this prefix, so overriding
+# TOPO_NS_PREFIX at runtime also requires editing the devices: list in the YAML.
 EXAMPLE_NAME="$(basename "$SCRIPT_DIR")"
 export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-${EXAMPLE_NAME}-}"
 
