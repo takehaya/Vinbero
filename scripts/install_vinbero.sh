@@ -116,9 +116,11 @@ TAG_NAME="$(printf '%s' "$JSON" | jq -r '.tag_name // empty')"
 # JSON を渡すのに echo を使うと xpg_echo などでバックスラッシュが解釈され壊れうるため printf を使う。
 asset_url() {
   local pattern="$1"
+  # 先頭一致を jq の first() で取り、head へのパイプを無くす。pipefail 下で
+  # 複数マッチ時に上流 jq が SIGPIPE で落ちて呼び出しが失敗するのを避ける。
   printf '%s' "$JSON" | jq -r --arg p "$pattern" '
-    .assets[]?.browser_download_url | select(test($p))
-  ' | head -n1
+    first(.assets[]?.browser_download_url | select(test($p))) // empty
+  '
 }
 
 CHK_URL="$(asset_url "/checksums\\.txt$")"
@@ -191,6 +193,18 @@ if [ "$WITH_SDK" -eq 1 ]; then
           exit 1 ;;
       esac
     done <<<"$sdk_entries"
+    # entry の種別も検証する。tar -tv の先頭文字が type を表すため、通常ファイル (-)
+    # とディレクトリ (d) 以外 (symlink / hardlink / device / fifo 等) は中断する。
+    # root で /usr/local に展開するため、非通常 entry の持ち込みを防ぐ。
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        -*|d*) ;;
+        *)
+          echo "error: SDK tarball has a non-regular entry (symlink/device/fifo); aborting" >&2
+          exit 1 ;;
+      esac
+    done <<<"$(tar tvzf "$SDK_FILE")"
     # tarball の top-level は include/ と share/ なので /usr/local に直接展開する。
     # root 実行を想定し、archive 内の owner / permission を持ち込まない。
     tar --no-same-owner --no-same-permissions -xzf "$SDK_FILE" -C "$SDK_PREFIX"
