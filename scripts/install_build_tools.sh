@@ -22,6 +22,11 @@ if [ -z "$gobin" ]; then
   gopath="$(go env GOPATH)"
   gobin="${gopath%%:*}/bin"
 fi
+# 先頭の ~ は変数展開では $HOME に展開されないため、明示的に展開してパスを確定する。
+case "$gobin" in
+  "~") gobin="$HOME" ;;
+  "~/"*) gobin="$HOME/${gobin#\~/}" ;;
+esac
 if ! "${gobin}/goreleaser" --version >/dev/null 2>&1; then
   echo "✗ goreleaser is not executable at ${gobin}/goreleaser after install" >&2
   exit 1
