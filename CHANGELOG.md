@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.9](https://github.com/takehaya/Vinbero/compare/v0.0.8...v0.0.9) (2026-06-03)
+
+
+### 🐛 Bug Fixes
+
+* **release:** unify SDK staging and fix include/core packaging ([#80](https://github.com/takehaya/Vinbero/issues/80)) ([97670cb](https://github.com/takehaya/Vinbero/commit/97670cb9f4038ad32212a538f61c141f3082c370))
+
+
+### 📝 Documentation
+
+* **readme:** bump pinned install example to v0.0.8 ([#79](https://github.com/takehaya/Vinbero/issues/79)) ([2ba8a23](https://github.com/takehaya/Vinbero/commit/2ba8a237d41c945c80ae9af339eb8bb23c9e91d6))
+
 ## [0.0.8](https://github.com/takehaya/Vinbero/compare/v0.0.7...v0.0.8) (2026-06-03)
 
 
