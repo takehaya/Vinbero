@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.6](https://github.com/takehaya/Vinbero/compare/v0.0.5...v0.0.6) (2026-06-03)
+
+
+### 🐛 Bug Fixes
+
+* **build:** pin goreleaser to v2.13.0 for Go 1.25 compatibility ([#73](https://github.com/takehaya/Vinbero/issues/73)) ([85a5c25](https://github.com/takehaya/Vinbero/commit/85a5c259ccc62a5d3dca7aa3d9b76713c6d4644f))
+
 ## [0.0.5](https://github.com/takehaya/Vinbero/compare/v0.0.4...v0.0.5) (2026-06-03)
 
 
