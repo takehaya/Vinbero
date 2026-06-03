@@ -7,16 +7,16 @@ RFC 9433に基づくGTP-U/IPv4とSRv6の双方向変換のデモ環境です。
 ```mermaid
 graph LR
     gNB[gNB/host1<br/>172.0.1.1<br/>GTP-U/IPv4] -->|GTP-U| router1[router1 / Vinbero XDP<br/>fc00:1::1<br/>H.M.GTP4.D → SRv6<br/>End.M.GTP4.E ← SRv6]
-    router1 -->|SRv6| router2[router2<br/>fc00:2::1<br/>End]
-    router2 -->|SRv6| router3[router3 / Vinbero XDP<br/>fc00:3::3<br/>End.M.GTP4.E → GTP-U<br/>H.M.GTP4.D ← GTP-U]
+    router1 -->|SRv6| router2[router2<br/>IPv6 transit]
+    router2 -->|SRv6| router3[router3 / Vinbero XDP<br/>fc00:3::/56<br/>End.M.GTP4.E → GTP-U<br/>H.M.GTP4.D ← GTP-U]
     router3 -->|GTP-U| UPF[UPF/host2<br/>172.0.2.1<br/>GTP-U/IPv4]
 ```
 
 **パケットの流れ（gNB→UPF）:**
 1. gNBがGTP-U/IPv4パケットを送信 (TEID, QFI付き)
-2. **router1 (H.M.GTP4.D)**: GTP-Uを剥離、SRv6でカプセル化。Args.Mob.Session (IPv4Dst, TEID, QFI) をSIDにエンコード
-3. router2 (End): SRv6 transit (SL--, DA更新)
-4. **router3 (End.M.GTP4.E)**: SRv6を剥離、SIDからTEID/QFIをデコード、GTP-U/IPv4で再カプセル化
+2. **router1 (H.M.GTP4.D)**: GTP-Uを剥離、SRv6でカプセル化。Args.Mob.Session (IPv4Dst, TEID, QFI) を End.M.GTP4.E SID へ single segment で encode
+3. router2: 素の IPv6 として transit (localsid なし、single segment なので End hop は無い)
+4. **router3 (End.M.GTP4.E)**: SRv6を剥離、SIDからTEID/QFIを decode、GTP-U/IPv4で再カプセル化
 5. UPFがGTP-U/IPv4パケットを受信
 
 ## クイックスタート
@@ -57,21 +57,33 @@ sudo ip netns exec gtp4-router3 ../../out/bin/vinberod -c vinbero_router3.yaml &
 
 ### 2. エントリ登録
 
+router2 は素の IPv6 transit なので、headend は single segment で End.M.GTP4.E SID へ直接 encap します。End.M.GTP4.E は args-offset 7 で Args.Mob.Session が SID の byte 7-15 に入るため、`/128` ではマッチせず `/56` locator で登録します。
+
 ```bash
 # Forward: gNB -> SRv6 (router1: H.M.GTP4.D)
 sudo ip netns exec gtp4-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
   hv4 create --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 \
-  --segments fc00:2::1,fc00:3::3 --mode H_M_GTP4_D --args-offset 7
+  --segments fc00:3::3 --mode H_M_GTP4_D --args-offset 7
 
 # Forward: SRv6 -> UPF (router3: End.M.GTP4.E)
 sudo ip netns exec gtp4-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
-  sid create --trigger-prefix fc00:3::3/128 --action END_M_GTP4_E \
+  sid create --trigger-prefix fc00:3::/56 --action END_M_GTP4_E \
   --gtp-v4-src-addr 172.0.2.2 --args-offset 7
+
+# Return: UPF -> SRv6 (router3: H.M.GTP4.D)
+sudo ip netns exec gtp4-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hv4 create --trigger-prefix 172.0.1.0/24 --src-addr fc00:3::3 \
+  --segments fc00:1::1 --mode H_M_GTP4_D --args-offset 7
+
+# Return: SRv6 -> gNB (router1: End.M.GTP4.E)
+sudo ip netns exec gtp4-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
+  sid create --trigger-prefix fc00:1::/56 --action END_M_GTP4_E \
+  --gtp-v4-src-addr 172.0.1.2 --args-offset 7
 ```
 
 ### 3. Args.Mob.Session
 
-SID内のオフセット7からArgs.Mob.Sessionがエンコードされます:
+SID内のオフセット7からArgs.Mob.Sessionが encode されます:
 
 ```
 SID (128 bit): [LOC:FUNCT (56 bit)][IPv4DstAddr (32 bit)][TEID (32 bit)][QFI(6)|R(1)|U(1)]

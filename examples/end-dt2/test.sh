@@ -139,8 +139,11 @@ if echo "$dmac_response" | grep -q '"mac"'; then
     print_success "FDB API: PASS (entries found)"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    print_info "FDB API: No entries (MAC learning may not have occurred yet)"
-    TESTS_PASSED=$((TESTS_PASSED + 1))
+    # Phase 2's L2VPN ping already crossed the bridge on router3, so the FDB
+    # must hold a learned MAC by now. An empty FDB here means MAC learning is
+    # broken -> fail instead of masking it with a PASS.
+    print_error "FDB API: FAIL (no FDB entries learned after L2VPN traffic)"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 echo ""

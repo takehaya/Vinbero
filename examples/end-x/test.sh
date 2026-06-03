@@ -23,6 +23,15 @@ ns_router2="${TOPO_NS_PREFIX}router2"
 
 TESTS_PASSED=0
 TESTS_FAILED=0
+VINBERO_PID=""
+
+cleanup() {
+    if [ -n "$VINBERO_PID" ] && ps -p "$VINBERO_PID" > /dev/null 2>&1; then
+        kill "$VINBERO_PID" 2>/dev/null || true
+        wait "$VINBERO_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 echo "=========================================="
 echo "SRv6 End.X Operation Test"

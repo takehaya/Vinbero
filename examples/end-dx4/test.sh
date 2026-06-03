@@ -21,6 +21,15 @@ ns_router3="${TOPO_NS_PREFIX}router3"
 
 TESTS_PASSED=0
 TESTS_FAILED=0
+VINBERO_PID=""
+
+cleanup() {
+    if [ -n "$VINBERO_PID" ] && ps -p "$VINBERO_PID" > /dev/null 2>&1; then
+        kill "$VINBERO_PID" 2>/dev/null || true
+        wait "$VINBERO_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 echo "=========================================="
 echo "SRv6 End.DX4 Test"
@@ -61,7 +70,7 @@ print_success "SidFunction (End.DX4) entry registered"
 sleep 1
 
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Vinbero XDP End.DX4)"
-test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Vinbero XDP)"
+test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (return path, native baseline)"
 
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true

@@ -30,23 +30,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test_ping6_with_counter() {
-    local ns=$1
-    local target=$2
-    local desc=$3
-
-    print_info "Testing: $desc"
-    if ip netns exec $ns ping6 -c 3 -W 2 $target > /dev/null 2>&1; then
-        print_success "$desc: PASS"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        return 0
-    else
-        print_error "$desc: FAIL"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        return 1
-    fi
-}
-
 echo "=========================================="
 echo "SRv6 End.DT6 (VRF) Test"
 echo "=========================================="
@@ -57,8 +40,8 @@ echo "=========================================="
 echo "Phase 1: Linux Native SRv6 (Baseline)"
 echo "=========================================="
 
-test_ping6_with_counter "$ns_host1" 2001:2::1 "host1 -> host2 (Linux native End.DT6 VRF)"
-test_ping6_with_counter "$ns_host2" 2001:1::1 "host2 -> host1 (Linux native)"
+test_ping_with_counter "$ns_host1" 2001:2::1 "host1 -> host2 (Linux native End.DT6 VRF)"
+test_ping_with_counter "$ns_host2" 2001:1::1 "host2 -> host1 (Linux native)"
 
 print_info "Removing Linux native End.DT6 route from $ns_router3..."
 ip netns exec "$ns_router3" ip -6 route del local fc00:3::3/128 2>/dev/null || true
@@ -87,8 +70,8 @@ sleep 1
 print_info "Pre-resolving NDP..."
 ip netns exec "$ns_router3" ping6 -c 1 -W 1 fc00:23::2 > /dev/null 2>&1 || true
 
-test_ping6_with_counter "$ns_host1" 2001:2::1 "host1 -> host2 (Vinbero XDP End.DT6 VRF)"
-test_ping6_with_counter "$ns_host2" 2001:1::1 "host2 -> host1 (Vinbero XDP)"
+test_ping_with_counter "$ns_host1" 2001:2::1 "host1 -> host2 (Vinbero XDP End.DT6 VRF)"
+test_ping_with_counter "$ns_host2" 2001:1::1 "host2 -> host1 (return path, native baseline)"
 
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true

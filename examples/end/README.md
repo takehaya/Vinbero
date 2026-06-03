@@ -29,42 +29,44 @@ sudo ./teardown.sh # クリーンアップ（環境削除）
 
 ## 手動実行
 
+namespace と veth は setup.sh が `end-` を前置します (例: namespace `end-router2`、veth `end-rt3rt2`)。TOPO_NS_PREFIX を変えた場合はこの prefix も読み替えてください。
+
 ### 1. 環境構築とVinbero起動
 
 ```bash
 sudo ./setup.sh
 
 # router2のLinux native SRv6を削除
-sudo ip netns exec router2 ip -6 route del local fc00:2::1/128 2>/dev/null
-sudo ip netns exec router2 ip -6 route del local fc00:2::2/128 2>/dev/null
+sudo ip netns exec end-router2 ip -6 route del local fc00:2::1/128 2>/dev/null
+sudo ip netns exec end-router2 ip -6 route del local fc00:2::2/128 2>/dev/null
 
-# Vinbero起動
-sudo ip netns exec router2 ../../out/bin/vinberod -c vinbero_router2.yaml
+# Vinbero起動 (バックグラウンド)
+sudo ip netns exec end-router2 ../../out/bin/vinberod -c vinbero_router2.yaml &
 ```
 
 ### 2. SID登録
 
 ```bash
-sudo ip netns exec router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 sid create --trigger-prefix fc00:2::1/128 --action END
-sudo ip netns exec router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 sid create --trigger-prefix fc00:2::2/128 --action END
+sudo ip netns exec end-router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 sid create --trigger-prefix fc00:2::1/128 --action END
+sudo ip netns exec end-router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 sid create --trigger-prefix fc00:2::2/128 --action END
 ```
 
 ### 3. テスト
 
 ```bash
-sudo ip netns exec host1 ping -c 3 172.0.2.1
-sudo ip netns exec host2 ping -c 3 172.0.1.1
+sudo ip netns exec end-host1 ping -c 3 172.0.2.1
+sudo ip netns exec end-host2 ping -c 3 172.0.1.1
 ```
 
 #### パケットキャプチャ
 
 ```bash
-sudo ip netns exec router3 tcpdump -i veth-rt3-rt2 -n ip6
+sudo ip netns exec end-router3 tcpdump -i end-rt3rt2 -n ip6
 ```
 
 SRv6 Routing Header (RT6) でsegleft: 1→0、DA: fc00:2::1→fc00:3::3の変化が確認できます。
 
-### 4. 環境のクリーンナップ
+### 4. 環境のクリーンアップ
 ```bash
 sudo ./teardown.sh
 ```

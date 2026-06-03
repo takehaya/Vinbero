@@ -45,6 +45,10 @@ print_info() {
 # Usage: start_vinbero <namespace> <config_path> <log_file>
 start_vinbero() {
     local ns="$1" config="$2" log="$3"
+    if [ ! -x "${VINBEROD_BIN}" ]; then
+        print_error "vinberod not found at ${VINBEROD_BIN}. Build it first from the repo root: make build"
+        return 1
+    fi
     setsid ip netns exec "$ns" ${VINBEROD_BIN} -c "$config" > "$log" 2>&1 &
     VINBERO_LAST_PID=$!
     sleep 0.5
@@ -118,7 +122,11 @@ test_ping_with_counter() {
     local interface=${4:-}
 
     print_info "Testing: $desc"
-    local ping_cmd=(ping -c 3 -W 2)
+    # Auto-detect IPv6 by the presence of a colon in the target, mirroring
+    # test_ping above so callers do not need a separate ping6 helper.
+    local ping_bin=ping
+    [[ "$target" == *":"* ]] && ping_bin=ping6
+    local ping_cmd=("$ping_bin" -c 3 -W 2)
     [ -n "$interface" ] && ping_cmd+=(-I "$interface")
     ping_cmd+=("$target")
 
