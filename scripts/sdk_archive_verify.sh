@@ -8,7 +8,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# 1. Extract tarball to a fake /usr/local prefix.
+# 1. Extract tarball to a fake /usr/local prefix. Validate entries first so a
+#    tarball with absolute or `..` paths cannot escape $WORK/prefix during
+#    extraction (defence-in-depth; this runs in CI). Mirrors the installer guard.
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  case "$entry" in
+    /*|..|../*|*/../*|*/..) echo "unsafe path in SDK tarball: $entry" >&2; exit 1 ;;
+  esac
+done <<<"$(tar -tzf "$TARBALL")"
 mkdir -p "$WORK/prefix"
 tar xzf "$TARBALL" -C "$WORK/prefix"
 
