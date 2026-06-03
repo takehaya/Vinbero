@@ -26,26 +26,30 @@ required=(
   "$WORK/prefix/include/core/srv6.h"
   "$WORK/prefix/share/vinbero-sdk/README.md"
   "$WORK/prefix/share/vinbero-sdk/LICENSE"
-  "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter/Makefile"
-  "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter/plugin.c"
-  "$WORK/prefix/share/vinbero-sdk/examples/simple-acl/Makefile"
-  "$WORK/prefix/share/vinbero-sdk/examples/simple-acl/plugin.c"
-  "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter-l2/Makefile"
-  "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter-l2/plugin.c"
-  "$WORK/prefix/share/vinbero-sdk/examples/plugin-custom-sh/Makefile"
-  "$WORK/prefix/share/vinbero-sdk/examples/plugin-custom-sh/plugin.c"
 )
 for f in "${required[@]}"; do
   test -f "$f" || { echo "missing: $f" >&2; exit 1; }
 done
 
-# 3. Build each example using only headers from the tarball; this fails
-#    immediately if a #include path is wrong or a header is missing.
-#    MAKEFILE_PLUGIN points at the template shipped inside the tarball
-#    so the in-tree relative include (../../c/Makefile.plugin) is bypassed.
+# The tarball ships headers + docs only; examples are NOT bundled (they live in
+# the repo under sdk/examples/). Confirm no stray example tree leaked in.
+if [ -e "$WORK/prefix/share/vinbero-sdk/examples" ]; then
+  echo "unexpected: examples/ should not be in the SDK tarball" >&2
+  exit 1
+fi
+
+# 3. Build the repo's example plugins against ONLY the tarball's headers. The
+#    sources come from the repo (sdk/examples/, not shipped in the tarball) but
+#    every #include resolves against the extracted headers, so a wrong include
+#    path or a missing/collapsed core header fails the build immediately.
+#    MAKEFILE_PLUGIN points at the template shipped inside the tarball so the
+#    in-tree relative include (../../c/Makefile.plugin) is bypassed.
+EXAMPLES_SRC="${EXAMPLES_SRC:-sdk/examples}"
 for ex in plugin-counter simple-acl plugin-counter-l2 plugin-custom-sh; do
-  exdir="$WORK/prefix/share/vinbero-sdk/examples/$ex"
-  echo "[verify] building $ex"
+  exdir="$WORK/examples/$ex"
+  mkdir -p "$exdir"
+  cp "$EXAMPLES_SRC/$ex/Makefile" "$EXAMPLES_SRC/$ex/plugin.c" "$exdir/"
+  echo "[verify] building $ex (repo source, tarball headers)"
   make -C "$exdir" \
     VINBERO_SDK_ROOT="$WORK/prefix/include" \
     VINBERO_CORE_ROOT="$WORK/prefix/include" \
@@ -63,16 +67,16 @@ if [ ! -x "$VBCTL" ]; then
   exit 1
 fi
 "$VBCTL" plugin validate \
-  --prog "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter/plugin.o" \
+  --prog "$WORK/examples/plugin-counter/plugin.o" \
   --program plugin_counter
 "$VBCTL" plugin validate \
-  --prog "$WORK/prefix/share/vinbero-sdk/examples/simple-acl/plugin.o" \
+  --prog "$WORK/examples/simple-acl/plugin.o" \
   --program simple_acl
 "$VBCTL" plugin validate \
-  --prog "$WORK/prefix/share/vinbero-sdk/examples/plugin-counter-l2/plugin.o" \
+  --prog "$WORK/examples/plugin-counter-l2/plugin.o" \
   --program plugin_counter_l2
 "$VBCTL" plugin validate \
-  --prog "$WORK/prefix/share/vinbero-sdk/examples/plugin-custom-sh/plugin.o" \
+  --prog "$WORK/examples/plugin-custom-sh/plugin.o" \
   --program plugin_custom_sh
 
 echo "[verify] OK"
