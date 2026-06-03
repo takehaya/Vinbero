@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.0.4](https://github.com/takehaya/Vinbero/compare/v0.0.3...v0.0.4) (2026-06-03)
+
+
+### 🎉 Features
+
+* BGP SR Policy (SAFI 73) reception + color-based steering (Phase 1e-c) ([#41](https://github.com/takehaya/Vinbero/issues/41)) ([d274093](https://github.com/takehaya/Vinbero/commit/d2740930409eacff41a1663924443498116f6a99))
+* **bgp:** advertise a local SR Policy into BGP via a per-policy flag ([#58](https://github.com/takehaya/Vinbero/issues/58)) ([5172274](https://github.com/takehaya/Vinbero/commit/51722749fad75ac227f0d0764a7737d46b9d0bbb))
+* **bgp:** EVPN auto-advertise binding-axis + exporter hardening ([#55](https://github.com/takehaya/Vinbero/issues/55)) ([9ecd5b0](https://github.com/takehaya/Vinbero/commit/9ecd5b06cbe870c99feaab1e838efa1826eea1f2))
+* **bgp:** EVPN RT2 auto-advertise (local MAC → RT2) ([#50](https://github.com/takehaya/Vinbero/issues/50)) ([8f79090](https://github.com/takehaya/Vinbero/commit/8f790900e99fa506d3dbbbe7b0b3606bacc2457c))
+* **bgp:** EVPN RT3 (Inclusive Multicast / BUM) auto-advertise ([#54](https://github.com/takehaya/Vinbero/issues/54)) ([ccc2ee5](https://github.com/takehaya/Vinbero/commit/ccc2ee5030ee30212566b9d256d959adaf71d23a))
+* **bgp:** EVPN RT4 (Ethernet Segment) auto-advertise ([#52](https://github.com/takehaya/Vinbero/issues/52)) ([a3a0163](https://github.com/takehaya/Vinbero/commit/a3a0163404a01eeb75020047a154036f4777223e))
+* **bgp:** MupService CRUD to originate local BGP MUP routes (SAFI 85) ([#59](https://github.com/takehaya/Vinbero/issues/59)) ([7e51b90](https://github.com/takehaya/Vinbero/commit/7e51b90a156ce7c1595cb3b9f2b7148edb247eff))
+* **bgp:** replay a bridge's existing FDB on enable for EVPN RT2 ([#53](https://github.com/takehaya/Vinbero/issues/53)) ([740725c](https://github.com/takehaya/Vinbero/commit/740725c80feae212686f968be6e79b1462f60811))
+* **bgp:** RPC-driven VRF auto-advertise ([#49](https://github.com/takehaya/Vinbero/issues/49)) ([6c8bd1d](https://github.com/takehaya/Vinbero/commit/6c8bd1df009c9eaac0727712bb57315b94f3d156))
+* **bgp:** unify advertise next-hop validation + per-service origination caps ([#60](https://github.com/takehaya/Vinbero/issues/60)) ([d8025ea](https://github.com/takehaya/Vinbero/commit/d8025ea496670e83abb0551af6278f07e7e48129))
+* **bgp:** VRF-export driven automatic advertise (Phase 2a/2b) ([#48](https://github.com/takehaya/Vinbero/issues/48)) ([b21c1bf](https://github.com/takehaya/Vinbero/commit/b21c1bf2051f4e534e9e57e0aa91dcdd23b56c4f))
+* EVPN over SRv6 (RFC 9252) — RT2/RT3/RT4 + multi-homing DF/split-horizon (Phase E1-E3) ([#44](https://github.com/takehaya/Vinbero/issues/44)) ([9d7bbed](https://github.com/takehaya/Vinbero/commit/9d7bbed457bb5733c8c430278991859655a08016))
+* **headend:** plumb args_offset through Headendv6 so H.M.GTP6.D is usable; fix gtp6-encap ([#67](https://github.com/takehaya/Vinbero/issues/67)) ([fe270d0](https://github.com/takehaya/Vinbero/commit/fe270d0c2c8dcc297544ba53989a67f401c074e9))
+* SRv6 MUP (RFC 9433 + draft-mpmz-bess-mup-safi) — BGP MUP SAFI 85 + GTP4/6 data plane + segment-discovery SID resolution ([#45](https://github.com/takehaya/Vinbero/issues/45)) ([9e0528f](https://github.com/takehaya/Vinbero/commit/9e0528fd610d3dd1d70b15979692b2a8ea79db48))
+
+
+### 🐛 Bug Fixes
+
+* **examples:** correct false-green FDB test, daemon leaks, and doc drift ([#69](https://github.com/takehaya/Vinbero/issues/69)) ([22a1112](https://github.com/takehaya/Vinbero/commit/22a1112505cb598463255b7f2eaabe93eac52691))
+* **examples:** make gtp4-encap actually transform GTP-U-&gt;SRv6, add it to CI ([#65](https://github.com/takehaya/Vinbero/issues/65)) ([ae2ca8f](https://github.com/takehaya/Vinbero/commit/ae2ca8f9b0b908fa3e95286e1c57f3c230f2d0aa))
+* **gobgp:** bound Session.Stop() so a wedged gobgp teardown can't hang ([#47](https://github.com/takehaya/Vinbero/issues/47)) ([682b264](https://github.com/takehaya/Vinbero/commit/682b26479b7ddb7ac8eb464ce8352ea6e525e14f))
+
+
+### 📝 Documentation
+
+* **examples:** refresh stale READMEs (netns + interop-clab) ([#62](https://github.com/takehaya/Vinbero/issues/62)) ([fb88467](https://github.com/takehaya/Vinbero/commit/fb884678d9c370f27ce9276272f56ec7f3ec6f53))
+* **loadmap:** mark EVPN (RT2/3/4) as Supported ([#46](https://github.com/takehaya/Vinbero/issues/46)) ([4dfedef](https://github.com/takehaya/Vinbero/commit/4dfedef21a1b33cef8ac9cc4bb234befed31bcbf))
+* **loadmap:** mark SR Policy (SAFI 73) as Supported ([#43](https://github.com/takehaya/Vinbero/issues/43)) ([1784e65](https://github.com/takehaya/Vinbero/commit/1784e65d76314b9d075bec5283455443c7b90188))
+
+
+### ♻️ Code Refactoring
+
+* **bgp:** idempotent EVPN EnableBD + shared next-hop validation ([#56](https://github.com/takehaya/Vinbero/issues/56)) ([e82d5fd](https://github.com/takehaya/Vinbero/commit/e82d5fd02a1ac1aaf58c1a3e829a14275bdc67c9))
+* **bgp:** make L3VPN AddVRF idempotent on an unchanged re-bind ([#57](https://github.com/takehaya/Vinbero/issues/57)) ([30b2509](https://github.com/takehaya/Vinbero/commit/30b250908d83e31b1937118dfcc8baad6f03227d))
+* **examples:** hoist test_ping_with_counter into common/test_utils.sh ([#64](https://github.com/takehaya/Vinbero/issues/64)) ([d94d6b2](https://github.com/takehaya/Vinbero/commit/d94d6b221e38ae12670dce76cd085c225a615015))
+
 ## [0.0.3](https://github.com/takehaya/Vinbero/compare/v0.0.2...v0.0.3) (2026-05-20)
 
 
