@@ -28,7 +28,11 @@ archives:
   # `curl | sudo tar xz -C /usr/local/` and start building without cloning
   # the vinbero repo. Layout matches docs/plan/plugin-sdk-3-tarball-distribution.md §2.
   - id: sdk
-    builds: []
+    # meta archives carry only the `files` below (headers + docs) and none of
+    # the build binaries. The deprecated `builds: []` / empty `ids: []` are both
+    # ignored by goreleaser v2 (treated as "all builds"), which leaked vinberod /
+    # vinbero into the SDK tarball and tripped the installer's entry guard.
+    meta: true
     name_template: "vinbero-sdk-{{ .Version }}"
     formats:
       - 'tar.gz'
