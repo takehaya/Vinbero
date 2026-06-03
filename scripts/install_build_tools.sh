@@ -17,7 +17,11 @@ go install "github.com/goreleaser/goreleaser/v2@${GORELEASER_VERSION}"
 # go install の配置先 (GOBIN もしくは GOPATH/bin) を直接見て実行できるか検証する。
 # PATH 設定に依存せず install の成否を確認するため。
 gobin="$(go env GOBIN)"
-[ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
+if [ -z "$gobin" ]; then
+  # GOPATH は : 区切りで複数返ることがある。go install は先頭要素の bin に置く。
+  gopath="$(go env GOPATH)"
+  gobin="${gopath%%:*}/bin"
+fi
 if ! "${gobin}/goreleaser" --version >/dev/null 2>&1; then
   echo "✗ goreleaser is not executable at ${gobin}/goreleaser after install" >&2
   exit 1
