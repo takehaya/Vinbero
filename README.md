@@ -23,7 +23,7 @@ verification uses `sha256sum` when present and is skipped otherwise, and
 curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash
 
 # Pin a specific release
-curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --version v0.0.4
+curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --version v0.0.8
 
 # Also install the plugin SDK (headers + examples) under /usr/local
 curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --with-sdk
