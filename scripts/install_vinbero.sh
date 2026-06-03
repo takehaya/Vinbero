@@ -64,18 +64,22 @@ done
 # tar は --with-sdk 時にだけ、sha256sum は checksums 検証時にだけ確認する。
 for cmd in curl jq install; do
   command -v "$cmd" >/dev/null 2>&1 || {
-    echo "Required command not found: $cmd" >&2
-    echo "Please install it first (e.g. 'apt-get install -y $cmd')." >&2
+    case "$cmd" in
+      install) pkg="coreutils" ;;  # install は coreutils 由来でパッケージ名が異なる
+      *) pkg="$cmd" ;;
+    esac
+    echo "Required command not found: $cmd (provided by the '$pkg' package)" >&2
     exit 1
   }
 done
 
 # write 権限の確認。root でない場合は早めに知らせる。配置先が存在すればそのディレクトリ、
-# 無ければ最初に存在する親ディレクトリの書き込み可否を見る。
+# 無ければ最初に存在する親ディレクトリの書き込み可否を見る。配下にファイルを作るには
+# 書き込み (w) に加えて探索 (x) 権が要るため両方を確認する。
 writable_target() {
   local d="$1"
   while [ ! -e "$d" ]; do d="$(dirname "$d")"; done
-  [ -w "$d" ]
+  [ -w "$d" ] && [ -x "$d" ]
 }
 if [ "$(id -u)" -ne 0 ]; then
   for d in "$BIN_DIR" "$SHARE_DIR"; do
@@ -169,6 +173,24 @@ if [ "$WITH_SDK" -eq 1 ]; then
     SDK_FILE="$TMP/$(basename "$SDK_URL")"
     curl -fsSL "$SDK_URL" -o "$SDK_FILE"
     verify_checksum "$SDK_FILE"
+    # root で /usr/local に展開するため、path traversal を防ぐ。展開前に各 entry を
+    # 検証し、絶対パス・`..`・include/ share/ 配下以外を含む場合は中断する。grep の
+    # -v / -q は実装差があるため、移植性のある case で 1 行ずつ判定する。
+    sdk_entries="$(tar tzf "$SDK_FILE")"
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      case "$entry" in
+        /*|..|../*|*/../*|*/..)
+          echo "error: SDK tarball contains absolute or '..' paths; aborting" >&2
+          exit 1 ;;
+      esac
+      case "${entry#./}" in
+        include|share|include/*|share/*) ;;
+        *)
+          echo "error: SDK tarball has entries outside include/ or share/; aborting" >&2
+          exit 1 ;;
+      esac
+    done <<<"$sdk_entries"
     # tarball の top-level は include/ と share/ なので /usr/local に直接展開する。
     # root 実行を想定し、archive 内の owner / permission を持ち込まない。
     tar --no-same-owner --no-same-permissions -xzf "$SDK_FILE" -C "$SDK_PREFIX"
