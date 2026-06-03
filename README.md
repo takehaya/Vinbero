@@ -20,13 +20,13 @@ verification uses `sha256sum` when present and is skipped otherwise, and
 
 ```bash
 # Latest release
-curl -fsSL https://raw.githubusercontent.com/takehaya/vinbero/main/scripts/install_vinbero.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash
 
 # Pin a specific release
-curl -fsSL https://raw.githubusercontent.com/takehaya/vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --version v0.0.4
+curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --version v0.0.4
 
 # Also install the plugin SDK (headers + examples) under /usr/local
-curl -fsSL https://raw.githubusercontent.com/takehaya/vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --with-sdk
+curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --with-sdk
 ```
 
 Prebuilt binaries currently target `linux/amd64`. To build from source instead,

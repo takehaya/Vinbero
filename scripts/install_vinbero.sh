@@ -2,16 +2,16 @@
 # Vinbero one-liner installer.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/takehaya/vinbero/main/scripts/install_vinbero.sh | sudo bash
-#   curl -fsSL https://raw.githubusercontent.com/takehaya/vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --version v0.0.4
-#   curl -fsSL https://raw.githubusercontent.com/takehaya/vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --with-sdk
+#   curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --version v0.0.4
+#   curl -fsSL https://raw.githubusercontent.com/takehaya/Vinbero/main/scripts/install_vinbero.sh | sudo bash -s -- --with-sdk
 #
 # GitHub release から goreleaser 生成のバイナリ (vinberod / vinbero) を取得し
 # /usr/local/bin に配置する。--with-sdk を付けると plugin SDK tarball も
 # /usr/local 以下へ展開する。
 set -euo pipefail
 
-REPO="takehaya/vinbero"
+REPO="takehaya/Vinbero"
 BIN_DIR="/usr/local/bin"
 SHARE_DIR="/usr/local/share/vinbero"
 STATE_FILE="${SHARE_DIR}/.installed-from-tag"
@@ -131,8 +131,8 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 verify_checksum() {
   local file="$1"
   [ -n "$CHK_URL" ] || return 0
-  if ! command -v sha256sum >/dev/null 2>&1; then
-    echo "warning: sha256sum not found, skipping checksum verification" >&2
+  if ! command -v sha256sum >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1; then
+    echo "warning: sha256sum/awk not found, skipping checksum verification" >&2
     return 0
   fi
   if [ ! -f "$TMP/checksums.txt" ]; then
@@ -147,8 +147,12 @@ verify_checksum() {
   # させ、grep の正規表現で `.` などが任意文字として誤マッチするのを避ける。
   line="$(awk -v f="$base" '$2 == f {print; exit}' "$TMP/checksums.txt")"
   if [ -n "$line" ]; then
-    ( cd "$TMP" && printf '%s\n' "$line" | sha256sum -c - >/dev/null )
-    echo "verified  ${base}"
+    if ( cd "$TMP" && printf '%s\n' "$line" | sha256sum -c - >/dev/null 2>&1 ); then
+      echo "verified  ${base}"
+    else
+      echo "error: checksum verification failed for ${base}; aborting" >&2
+      exit 1
+    fi
   else
     echo "warning: no checksum entry for ${base}, skipping verification" >&2
   fi
@@ -178,7 +182,7 @@ if [ "$WITH_SDK" -eq 1 ]; then
     # root で /usr/local に展開するため、path traversal を防ぐ。展開前に各 entry を
     # 検証し、絶対パス・`..`・include/ share/ 配下以外を含む場合は中断する。grep の
     # -v / -q は実装差があるため、移植性のある case で 1 行ずつ判定する。
-    sdk_entries="$(tar tzf "$SDK_FILE")"
+    sdk_entries="$(tar -tzf "$SDK_FILE")"
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       case "$entry" in
@@ -204,7 +208,7 @@ if [ "$WITH_SDK" -eq 1 ]; then
           echo "error: SDK tarball has a non-regular entry (symlink/device/fifo); aborting" >&2
           exit 1 ;;
       esac
-    done <<<"$(tar tvzf "$SDK_FILE")"
+    done <<<"$(tar -tvzf "$SDK_FILE")"
     # tarball の top-level は include/ と share/ なので /usr/local に直接展開する。
     # root 実行を想定し、archive 内の owner / permission を持ち込まない。
     tar --no-same-owner --no-same-permissions -xzf "$SDK_FILE" -C "$SDK_PREFIX"
