@@ -121,6 +121,7 @@ ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu.py" \
     --outer-dst 172.0.2.100 --teid 0x12345678 --qfi 9 --count 3
 
 wait $TCPDUMP_PID 2>/dev/null || true
+PIDS="${PIDS/$TCPDUMP_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
 
 CAPTURED=0
 [ -f /tmp/gtp4_test1.pcap ] && CAPTURED=$(tcpdump -r /tmp/gtp4_test1.pcap 2>/dev/null | wc -l)
@@ -149,6 +150,7 @@ ip netns exec "$ns_host1" python3 "${SCRIPT_DIR}/send_gtpu.py" \
     --outer-dst 172.0.2.100 --teid 0xCAFEBABE --qfi 0 --count 1
 
 wait $TCPDUMP_PID 2>/dev/null || true
+PIDS="${PIDS/$TCPDUMP_PID /}"  # reaped; drop it so the EXIT trap can't kill a recycled PID
 
 CAPTURED=0
 [ -f /tmp/gtp4_test2.pcap ] && CAPTURED=$(tcpdump -r /tmp/gtp4_test2.pcap 2>/dev/null | wc -l)
