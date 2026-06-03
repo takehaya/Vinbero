@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.7](https://github.com/takehaya/Vinbero/compare/v0.0.6...v0.0.7) (2026-06-03)
+
+
+### 🐛 Bug Fixes
+
+* **release:** ship SDK tarball without binaries and verify goreleaser install ([#75](https://github.com/takehaya/Vinbero/issues/75)) ([278c9be](https://github.com/takehaya/Vinbero/commit/278c9be2843b7997f435a897ff69a262db2891c3))
+
 ## [0.0.6](https://github.com/takehaya/Vinbero/compare/v0.0.5...v0.0.6) (2026-06-03)
 
 
