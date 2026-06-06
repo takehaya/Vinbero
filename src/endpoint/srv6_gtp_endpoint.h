@@ -262,54 +262,66 @@ static __always_inline int process_end_m_gtp6_d_di(
 
 // ========== End.M.GTP6.E: SRv6 → GTP-U/IPv6 (RFC 9433) ==========
 //
-// Receives: [Eth][IPv6(DA=SID)][SRH][Inner IP]
+// Receives: [Eth][IPv6(DA=SID)][SRH?][Inner IP]
 // Produces: [Eth][IPv6][UDP:2152][GTP-U(E=1)][PDU Session Container][Inner IP]
 //
-// Similar to End.M.GTP4.E but with IPv6 outer instead of IPv4.
+// Similar to End.M.GTP4.E but with IPv6 outer instead of IPv4. Same dual-path
+// shape: the SRH-present variant is RFC 9433 §6.2 nominal, the no-SRH variant
+// handles RFC 8986 §4.1.1 single-SID H.Encaps reduced encap (the common output
+// of VPP's `sr policy add ... next SID encap` with one segment).
+//
 // GTP6E max encap: IPv6(40) + UDP(8) + GTP-U with PSC(16) = 64
 #define GTP6E_OVERHEAD_MAX 64
 
-static __always_inline int process_end_m_gtp6_e(
+// Parsed Args.Mob.Session view shared by both SRH-present and reduced-encap
+// paths. Args layout in the IPv6 DA at aux->gtp6e.args_offset:
+//   bytes 0-3: TEID (big-endian)
+//   byte 4: flags = (RQI << 6) | QFI
+// Outer IPv6 src/dst come from the auxiliary entry, not from the SID.
+struct gtp6e_args {
+    __u32 teid;
+    __u8 qfi;
+    __u8 rqi;
+    __u8 src_addr[16];
+    __u8 dst_addr[16];
+};
+
+static __always_inline int gtp6e_parse_args(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
-    struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry,
     struct sid_aux_entry *aux,
-    __u16 l3_offset)
+    struct gtp6e_args *out)
 {
-    if (!aux) return XDP_DROP;
-    // 1. SL must be 0
-    if (srh->segments_left != 0)
-        return XDP_PASS;
+    void *data_end = (void *)(long)ctx->data_end;
+    __u8 off = aux->gtp6e.args_offset & 0x0B;  // per-entry, max 11
+    __u8 *da_ptr = (__u8 *)&ip6h->daddr + off;
+    if ((void *)(da_ptr + 5) > data_end)
+        return -1;
 
-    // 2. Decode Args.Mob.Session from DA (GTP6 format: TEID + QFI/R/U)
-    void *data_end_e = (void *)(long)ctx->data_end;
-    __u8 g6off = aux->gtp6e.args_offset & 0x0B;  // per-entry, max 11
-    __u8 *da_ptr = (__u8 *)&ip6h->daddr + g6off;
-    if ((void *)(da_ptr + 5) > data_end_e)
-        return XDP_DROP;
+    // Single-shot read into a stack buffer to keep the verifier's
+    // packet-pointer tracking happy across subsequent header adjustments
+    // (same rationale as the GTP4.E parser).
+    __u8 args[5];
+    __builtin_memcpy(args, da_ptr, 5);
 
     __be32 teid_be;
-    __builtin_memcpy(&teid_be, da_ptr, 4);
-    __u32 teid = bpf_ntohl(teid_be);
+    __builtin_memcpy(&teid_be, args, 4);
+    out->teid = bpf_ntohl(teid_be);
 
-    __u8 flags_byte = da_ptr[4];
-    __u8 qfi = flags_byte & 0x3F;
-    __u8 rqi = (flags_byte >> 6) & 0x01;
+    out->qfi = args[4] & 0x3F;
+    out->rqi = (args[4] >> 6) & 0x01;
 
-    // 3. Get outer IPv6 addresses from entry
-    // src_addr: outer IPv6 source (from sid_function_entry)
-    // dst_addr: outer IPv6 destination (from sid_function_entry)
+    __builtin_memcpy(out->src_addr, aux->gtp6e.src_addr, 16);
+    __builtin_memcpy(out->dst_addr, aux->gtp6e.dst_addr, 16);
+    return 0;
+}
 
-    // 4. Strip outer IPv6 + SRH
-    __u8 inner_nexthdr = srh->nexthdr;
-    if (inner_nexthdr != IPPROTO_IPIP && inner_nexthdr != IPPROTO_IPV6)
-        return XDP_DROP;
-
-    if (srv6_decap(ctx, srh, inner_nexthdr, l3_offset) != 0)
-        return XDP_DROP;
-
-    // 5. Re-derive pointers
+// Build the outer GTP-U/IPv6 encap on top of [Eth][Inner IP] (post-decap state)
+// and FIB-redirect.
+static __always_inline int gtp6e_build_and_redirect(
+    struct xdp_md *ctx,
+    const struct gtp6e_args *args)
+{
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
@@ -319,8 +331,7 @@ static __always_inline int process_end_m_gtp6_e(
 
     __u16 inner_len = (__u16)(data_end - (void *)(eth + 1));
 
-    // 6. Prepend IPv6 + UDP + GTP-U headers (size depends on QFI)
-    __u16 gtpu_hdr_len = gtpu_encap_hdr_len(qfi, rqi);
+    __u16 gtpu_hdr_len = gtpu_encap_hdr_len(args->qfi, args->rqi);
     int encap_len = (int)(sizeof(struct ipv6hdr) + sizeof(struct udphdr) + gtpu_hdr_len);
 
     if (bpf_xdp_adjust_head(ctx, -encap_len))
@@ -337,10 +348,10 @@ static __always_inline int process_end_m_gtp6_e(
     struct udphdr *udph = (struct udphdr *)((void *)outer_ip6h + sizeof(struct ipv6hdr));
     void *gtpu_start = (void *)(udph + 1);
 
-    // 7. Build Ethernet header
+    // Ethernet: only protocol matters; FIB redirect rewrites MACs.
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    // 8. Build outer IPv6 header
+    // Outer IPv6 header.
     outer_ip6h->version = 6;
     outer_ip6h->priority = 0;
     outer_ip6h->flow_lbl[0] = 0;
@@ -349,26 +360,80 @@ static __always_inline int process_end_m_gtp6_e(
     outer_ip6h->payload_len = bpf_htons(sizeof(struct udphdr) + gtpu_hdr_len + inner_len);
     outer_ip6h->nexthdr = IPPROTO_UDP;
     outer_ip6h->hop_limit = 64;
-    __builtin_memcpy(&outer_ip6h->saddr, aux->gtp6e.src_addr, sizeof(struct in6_addr));
-    __builtin_memcpy(&outer_ip6h->daddr, aux->gtp6e.dst_addr, sizeof(struct in6_addr));
+    __builtin_memcpy(&outer_ip6h->saddr, args->src_addr, sizeof(struct in6_addr));
+    __builtin_memcpy(&outer_ip6h->daddr, args->dst_addr, sizeof(struct in6_addr));
 
-    // 9. Build UDP header
+    // UDP header (checksum 0 per RFC 6935/6936 for tunnel-over-IPv6).
     udph->source = bpf_htons(GTPU_PORT);
     udph->dest = bpf_htons(GTPU_PORT);
     udph->len = bpf_htons(sizeof(struct udphdr) + gtpu_hdr_len + inner_len);
-    // IPv6 UDP checksum: set to 0 per RFC 6935/6936 (zero checksum for
-    // tunneling protocols over IPv6). Computing the full checksum over
-    // variable-length inner payload is not feasible in XDP.
     udph->check = 0;
 
-    // 10. Build GTP-U + PDU Session Container
-    if (gtpu_build_headers(gtpu_start, data_end, teid, qfi, rqi, inner_len) != 0)
+    if (gtpu_build_headers(gtpu_start, data_end, args->teid, args->qfi, args->rqi, inner_len) != 0)
         return XDP_DROP;
 
-    // 11. FIB lookup + redirect
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
     return fib_result_to_xdp_action(fib_result, ifindex);
+}
+
+// SRH-present (RFC 9433 §6.2 nominal) variant.
+static __always_inline int process_end_m_gtp6_e(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    __u16 l3_offset)
+{
+    if (!aux) return XDP_DROP;
+
+    // SL must be 0 (we are the last segment).
+    if (srh->segments_left != 0)
+        return XDP_PASS;
+
+    struct gtp6e_args args;
+    if (gtp6e_parse_args(ctx, ip6h, aux, &args) != 0)
+        return XDP_DROP;
+
+    // Accept either IPIP or IPv6 inner.
+    __u8 inner_nexthdr = srh->nexthdr;
+    if (inner_nexthdr != IPPROTO_IPIP && inner_nexthdr != IPPROTO_IPV6)
+        return XDP_DROP;
+
+    if (srv6_decap(ctx, srh, inner_nexthdr, l3_offset) != 0)
+        return XDP_DROP;
+
+    return gtp6e_build_and_redirect(ctx, &args);
+}
+
+// Reduced-encap variant: outer IPv6 with no SRH (RFC 8986 §4.1.1 single-SID
+// H.Encaps). Same dual-path treatment as End.M.GTP4.E. The inline strip avoids
+// calling srv6_decap_nosrh() because the helper's saved-eth memcpy makes the
+// BPF verifier lose packet-pointer provenance when inlined here; the FIB
+// redirect rewrites MACs so we don't need to preserve them.
+static __always_inline int process_end_m_gtp6_e_nosrh(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    __u8 inner_nexthdr,
+    struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    __u16 l3_offset)
+{
+    if (!aux) return XDP_DROP;
+
+    if (inner_nexthdr != IPPROTO_IPIP && inner_nexthdr != IPPROTO_IPV6)
+        return XDP_DROP;
+
+    struct gtp6e_args args;
+    if (gtp6e_parse_args(ctx, ip6h, aux, &args) != 0)
+        return XDP_DROP;
+
+    int net_strip = (int)l3_offset + (int)sizeof(struct ipv6hdr) - (int)ETH_HLEN;
+    if (bpf_xdp_adjust_head(ctx, net_strip))
+        return XDP_DROP;
+
+    return gtp6e_build_and_redirect(ctx, &args);
 }
 
 #endif // SRV6_GTP_ENDPOINT_H
