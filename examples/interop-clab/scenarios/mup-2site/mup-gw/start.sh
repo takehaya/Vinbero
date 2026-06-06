@@ -55,7 +55,7 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 sleep 6
 /usr/local/bin/vbctl mup create --route-type isd \
     --rd 65100:1 --prefix 172.16.0.0/24 \
-    --sid fd00:a:0:1:: --next-hop 2001:db8:ff::a || true
+    --route-targets 100:2000 --sid fd00:a:0:1:: --next-hop 2001:db8:ff::a || true
 echo "[start.sh] mup-gw originated ISD; local MUP table:"
 /usr/local/bin/vbctl mup list || true
 

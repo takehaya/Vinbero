@@ -42,6 +42,7 @@ sleep 6
 /usr/local/bin/vbctl mup create --route-type t1st \
     --rd 65100:1 --prefix 10.1.0.1/32 \
     --teid 256 --qfi 9 --endpoint 172.16.0.1 \
+    --route-targets 100:2000 \
     --next-hop 2001:db8:ff::a || true
 
 # T2ST (uplink): gNB GTP-U to the N3 endpoint, segment id 1:2. mup-gw resolves
@@ -51,6 +52,7 @@ sleep 6
     --rd 65100:1 --endpoint 172.16.0.254 \
     --teid 256 --teid-len 32 \
     --segment-id2 1 --segment-id4 2 \
+    --route-targets 100:6000 \
     --next-hop 2001:db8:ff::d || true
 
 echo "[start.sh] mup-c (MUP Controller) originated T1ST/T2ST via MupService (SID-less; resolved by gateways); local MUP table:"

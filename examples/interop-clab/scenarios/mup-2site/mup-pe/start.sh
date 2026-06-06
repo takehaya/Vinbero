@@ -61,7 +61,7 @@ sleep 6
 /usr/local/bin/vbctl mup create --route-type dsd \
     --rd 65100:1 --address 10.0.0.1 \
     --segment-id2 1 --segment-id4 2 \
-    --sid fd00:d:0:1:: --next-hop 2001:db8:ff::d || true
+    --route-targets 100:6000 --sid fd00:d:0:1:: --next-hop 2001:db8:ff::d || true
 echo "[start.sh] mup-pe originated DSD; local MUP table:"
 /usr/local/bin/vbctl mup list || true
 

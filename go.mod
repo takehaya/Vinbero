@@ -46,3 +46,11 @@ require (
 	golang.org/x/text v0.32.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 )
+
+// gobgp fork carries the draft-mpmz-bess-mup-safi-01 T1ST framing patch.
+// Some peers only accept draft-01 framing (source-less T1ST routes must
+// omit the trailing SourceAddressLength octet; -03 framing is still
+// accepted on decode). The tag tracks the fork's mup-t1st-source-optional
+// branch on top of upstream master. If the patch lands in upstream
+// gobgp the replace directive can be dropped.
+replace github.com/osrg/gobgp/v4 => github.com/takehaya/gobgp/v4 v4.7.0-mup-draft01

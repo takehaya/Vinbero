@@ -283,30 +283,40 @@ func TestApplyMUP_T2ST_GateRefCount(t *testing.T) {
 // (RFC 9433 §3) -- the draft-faithful model where a controller advertises only
 // session state and the gateways advertise their segments.
 
+// Route-targets shared by the resolution-test helpers so a discovery route and
+// the session it resolves land in the same VPN (resolution is RT-scoped). The
+// interwork pair (ISD <-> T1ST) and the direct pair (DSD <-> T2ST) use distinct
+// RTs; the RDs may differ, mirroring an interworking gateway that advertises
+// under its own RD.
+const (
+	testRTInterwork = "100:2000"
+	testRTDirect    = "100:6000"
+)
+
 func mupT1ST(rd, uePrefix, gnb string, teid uint32, qfi uint8, ownSID string) bgp.RouteEvent {
 	return bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
-		Type: bgp.MUPRouteTypeT1ST, RD: rd, Prefix: uePrefix,
+		Type: bgp.MUPRouteTypeT1ST, RD: rd, Prefix: uePrefix, RTs: []string{testRTInterwork},
 		Endpoint: gnb, TEID: teid, TEIDLen: 32, QFI: qfi, SRv6SID: ownSID,
 	}}
 }
 
 func mupISD(rd, prefix, sid string) bgp.RouteEvent {
 	return bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
-		Type: bgp.MUPRouteTypeISD, RD: rd, Prefix: prefix, SRv6SID: sid,
+		Type: bgp.MUPRouteTypeISD, RD: rd, Prefix: prefix, RTs: []string{testRTInterwork}, SRv6SID: sid,
 	}}
 }
 
 func mupT2ST(rd, endpoint string, teid uint32, teidLen uint8, segID2 uint16, segID4 uint32, ownSID string) bgp.RouteEvent {
 	return bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
 		Type: bgp.MUPRouteTypeT2ST, RD: rd, Endpoint: endpoint, TEID: teid, TEIDLen: teidLen,
-		SegmentID2: segID2, SegmentID4: segID4, SRv6SID: ownSID,
+		RTs: []string{testRTDirect}, SegmentID2: segID2, SegmentID4: segID4, SRv6SID: ownSID,
 	}}
 }
 
 func mupDSD(rd, address string, segID2 uint16, segID4 uint32, sid string) bgp.RouteEvent {
 	return bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
 		Type: bgp.MUPRouteTypeDSD, RD: rd, Address: address,
-		SegmentID2: segID2, SegmentID4: segID4, SRv6SID: sid,
+		RTs: []string{testRTDirect}, SegmentID2: segID2, SegmentID4: segID4, SRv6SID: sid,
 	}}
 }
 
@@ -486,10 +496,13 @@ func TestApplyMUP_SIDChangeReResolution(t *testing.T) {
 	})
 }
 
-// Resolution is scoped to the session's own RD: a discovery route in another RD
-// must NOT resolve a session, even if it would otherwise match (covering prefix
-// / same segment id). This is the cross-VPN-hijack guard.
-func TestApplyMUP_ResolutionIsRDScoped(t *testing.T) {
+// Resolution is scoped to the session's VPN by route-target: a discovery route
+// whose RTs do not intersect the session's must NOT resolve it, even if it would
+// otherwise match (covering prefix / same segment id). This is the cross-VPN-
+// hijack guard, and it is RT-scoped rather than RD-scoped because an interworking
+// gateway (e.g. a third-party MUP gateway) advertises its ISD under its own RD, distinct from the
+// controller's T1ST RD -- an RD-scoped match would never resolve across vendors.
+func TestApplyMUP_ResolutionIsRTScoped(t *testing.T) {
 	const (
 		ue   = "10.1.0.1/32"
 		gnb  = "172.16.0.1"
@@ -498,12 +511,19 @@ func TestApplyMUP_ResolutionIsRDScoped(t *testing.T) {
 	)
 	fh := newFakeHeadend()
 	a := newMUPApplier(t, fh)
-	a.Apply(mupISD("65100:999", isdP, isid)) // ISD in a DIFFERENT RD
-	a.Apply(mupT1ST("65100:1", ue, gnb, 256, 9, ""))
+
+	// ISD with a non-intersecting RT (and a different RD): must not resolve.
+	isdOtherVPN := mupISD("65100:999", isdP, isid)
+	isdOtherVPN.MUP.RTs = []string{"100:9999"}
+	a.Apply(isdOtherVPN)
+	a.Apply(mupT1ST("65100:1", ue, gnb, 256, 9, "")) // RT testRTInterwork
 	if _, ok := fh.v4created[ue]; ok {
-		t.Fatal("T1ST resolved against an ISD in a different RD (cross-VPN hijack not prevented)")
+		t.Fatal("T1ST resolved against an ISD in a different VPN (cross-VPN hijack not prevented)")
 	}
-	a.Apply(mupISD("65100:1", isdP, isid)) // ISD in the SAME RD -> now resolves
+
+	// ISD under yet another RD but an intersecting RT (the interworking-gateway
+	// case): resolves despite the RD mismatch -- the cross-vendor interop path.
+	a.Apply(mupISD("65100:50002", isdP, isid)) // RT testRTInterwork, RD != T1ST RD
 	assertT1STBase(t, fh, ue, isid)
 }
 
