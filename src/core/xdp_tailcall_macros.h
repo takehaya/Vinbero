@@ -123,4 +123,59 @@ int prog_name(struct xdp_md *ctx)                                             \
     TAILCALL_RETURN(ctx, action);                                             \
 }
 
+// Pattern B endpoint: localsid + aux + dual-path (SRH-present or reduced encap)
+//
+// Generates a tailcall body that dispatches the same End.* behavior on either
+// the SRH-present input (RFC 9433 §6.x nominal) or the reduced-encap input
+// (RFC 8986 §4.1.1 H.Encaps with a single SID: outer IPv6 carries the inner
+// protocol in `nexthdr` and no SRH is on the wire).
+//
+// Two process functions are required:
+//   srh_fn(ctx, ip6h, srh, &sid_entry, aux, l3_off)
+//     -- SRH path, identical shape to DEFINE_ENDPOINT_LOCALSID_AUX
+//   nosrh_fn(ctx, ip6h, inner_proto, &sid_entry, aux, l3_off)
+//     -- reduced-encap path; inner_proto is tctx->inner_proto (= ip6h->nexthdr
+//        captured at dispatch time by process_srv6_decap_nosrh). The nosrh_fn
+//        owns the outer-header strip (either via srv6_decap_*_nosrh() or an
+//        inline bpf_xdp_adjust_head()).
+//
+// Use this macro for any End.* function that decapsulates the SR packet — the
+// reduced-encap form lacks an SRH so callers cannot rely on a Routing header
+// being present. Current users: End.DT2, End.DT2M, End.M.GTP4.E, End.M.GTP6.E.
+// For transit/forwarding End.* (e.g. End.M.GTP6.D which advances the SR list
+// and structurally requires `SL > 0` with an SRH), stay on Pattern A
+// (DEFINE_ENDPOINT_LOCALSID_AUX).
+#define DEFINE_ENDPOINT_LOCALSID_AUX_DUAL(prog_name, srh_fn, nosrh_fn)        \
+SEC("xdp")                                                                    \
+int prog_name(struct xdp_md *ctx)                                             \
+{                                                                             \
+    struct tailcall_ctx *tctx = tailcall_ctx_read();                          \
+    if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);                                \
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);                                       \
+                                                                              \
+    TAILCALL_AUX_LOOKUP(tctx, aux);                                           \
+                                                                              \
+    if (tctx->dispatch_type == DISPATCH_NOSRH) {                              \
+        void *_data = (void *)(long)ctx->data;                                \
+        void *_data_end = (void *)(long)ctx->data_end;                        \
+        struct ipv6hdr *ip6h = (struct ipv6hdr *)(_data + l3_off);            \
+        if ((void *)(ip6h + 1) > _data_end)                                   \
+            TAILCALL_RETURN(ctx, XDP_DROP);                                   \
+                                                                              \
+        int action = CALL_WITH_CONST_L3(l3_off, nosrh_fn, ctx, ip6h,          \
+                                        tctx->inner_proto,                    \
+                                        &tctx->sid_entry, aux);               \
+        TAILCALL_RETURN(ctx, action);                                         \
+    }                                                                         \
+                                                                              \
+    struct ethhdr *eth;                                                       \
+    struct ipv6hdr *ip6h;                                                     \
+    struct ipv6_sr_hdr *srh;                                                  \
+    TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);                          \
+                                                                              \
+    int action = CALL_WITH_CONST_L3(l3_off, srh_fn, ctx, ip6h, srh,           \
+                                    &tctx->sid_entry, aux);                   \
+    TAILCALL_RETURN(ctx, action);                                             \
+}
+
 #endif // XDP_TAILCALL_MACROS_H
