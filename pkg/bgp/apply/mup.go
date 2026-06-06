@@ -2,6 +2,7 @@ package apply
 
 import (
 	"net/netip"
+	"slices"
 
 	"go.uber.org/zap"
 
@@ -41,20 +42,23 @@ type (
 	mupDSDKey struct{ rd, address string }
 )
 
-// mupISDEntry is an Interwork Segment Discovery route: the prefix it covers and
-// the interwork SID (locator:function) a T1ST whose gNB endpoint falls inside
-// that prefix resolves to.
+// mupISDEntry is an Interwork Segment Discovery route: the prefix it covers, the
+// interwork SID (locator:function) a T1ST whose gNB endpoint falls inside that
+// prefix resolves to, and the route-targets that scope which sessions it may
+// resolve -- same-VPN membership, see rtsIntersect.
 type mupISDEntry struct {
 	prefix netip.Prefix
 	sid    string
+	rts    []string
 }
 
-// mupDSDEntry is a Direct Segment Discovery route: the MUP segment id it carries
-// and the direct SID (locator:function) a T2ST tagged with that segment id
-// resolves to.
+// mupDSDEntry is a Direct Segment Discovery route: the MUP segment id it carries,
+// the direct SID (locator:function) a T2ST tagged with that segment id resolves
+// to, and the route-targets that scope resolution to the same VPN (rtsIntersect).
 type mupDSDEntry struct {
 	segID uint64
 	sid   string
+	rts   []string
 }
 
 // mupSessionState holds a session route (T1ST or T2ST) plus the SID currently
@@ -103,6 +107,22 @@ const mupSegIDNone uint64 = 0
 // mupSegID packs the two halves of a BGP MUP Extended Community segment id into
 // one comparable key (see mupSegIDNone for the absent case).
 func mupSegID(s2 uint16, s4 uint32) uint64 { return uint64(s2)<<32 | uint64(s4) }
+
+// rtsIntersect reports whether two route-target lists share at least one RT.
+// MUP segment-discovery and session routes resolve against each other only when
+// they belong to the same VPN, and route-target membership -- not RD, which is
+// per-advertiser and so differs between an interworking gateway (e.g. a third-party MUP gateway) and
+// the controller -- is what defines a VPN (RFC 4364 §4.3). Two empty lists do
+// not intersect, so a route carrying no RT resolves nothing and is resolved by
+// nothing. The lists are short (one or a few RTs), so the nested scan is fine.
+func rtsIntersect(a, b []string) bool {
+	for _, x := range a {
+		if slices.Contains(b, x) {
+			return true
+		}
+	}
+	return false
+}
 
 // applyMUP turns a received BGP MUP route (SAFI 85, draft-mpmz-bess-mup-safi)
 // into Vinbero data-plane state.
@@ -155,7 +175,7 @@ func (a *Applier) applyMUPISD(r *bgp.MUPRoute, withdraw bool) {
 				zap.String("rd", r.RD), zap.String("prefix", r.Prefix))
 			return
 		}
-		a.mupISD[key] = mupISDEntry{prefix: prefix, sid: r.SRv6SID}
+		a.mupISD[key] = mupISDEntry{prefix: prefix, sid: r.SRv6SID, rts: append([]string(nil), r.RTs...)}
 	}
 	a.logger.Info("MUP ISD segment discovery",
 		zap.Bool("withdraw", withdraw), zap.String("rd", r.RD),
@@ -185,12 +205,13 @@ func (a *Applier) applyMUPDSD(r *bgp.MUPRoute, withdraw bool) {
 			return
 		}
 		seg := mupSegID(r.SegmentID2, r.SegmentID4)
-		// A same-RD segment-id collision makes a T2ST's direct SID ambiguous.
-		// resolveDirectSID still picks deterministically (the lowest SID), but the
-		// operator should know two DSDs are advertising the same id for different SIDs.
+		// A same-VPN (intersecting-RT) segment-id collision makes a T2ST's direct
+		// SID ambiguous. resolveDirectSID still picks deterministically (the lowest
+		// SID), but the operator should know two DSDs are advertising the same id
+		// for different SIDs.
 		if seg != mupSegIDNone {
 			for ek, ev := range a.mupDSD {
-				if ek.rd == r.RD && ek.address != r.Address && ev.segID == seg && ev.sid != r.SRv6SID {
+				if ek.address != r.Address && rtsIntersect(ev.rts, r.RTs) && ev.segID == seg && ev.sid != r.SRv6SID {
 					a.logger.Warn("MUP DSD segment-id collision; resolution is deterministic but ambiguous",
 						zap.String("rd", r.RD), zap.Uint64("segment_id", seg),
 						zap.String("address", r.Address), zap.String("other_address", ek.address))
@@ -198,7 +219,7 @@ func (a *Applier) applyMUPDSD(r *bgp.MUPRoute, withdraw bool) {
 				}
 			}
 		}
-		a.mupDSD[key] = mupDSDEntry{segID: seg, sid: r.SRv6SID}
+		a.mupDSD[key] = mupDSDEntry{segID: seg, sid: r.SRv6SID, rts: append([]string(nil), r.RTs...)}
 	}
 	a.logger.Info("MUP DSD segment discovery",
 		zap.Bool("withdraw", withdraw), zap.String("rd", r.RD),
@@ -209,24 +230,29 @@ func (a *Applier) applyMUPDSD(r *bgp.MUPRoute, withdraw bool) {
 }
 
 // resolveInterworkSID returns the interwork SID for a T1ST: the longest-match
-// ISD, within the session's own RD, whose prefix contains the gNB endpoint;
-// falling back to the route's own Prefix-SID. "" means unresolvable (defer the
-// session).
+// ISD, within the session's VPN, whose prefix contains the gNB endpoint; falling
+// back to the route's own Prefix-SID. "" means unresolvable (defer the session).
 //
-// Resolution is RD-scoped so a route in another VPN (RD) cannot steer this
-// session — a remote speaker advertising a more-specific covering ISD under a
-// different RD must not hijack the downlink SID. Within one RD the match is
-// deterministic: two prefixes of equal length that both contain the endpoint are
-// necessarily the same prefix (hence the same table key), so longest-match has a
-// unique winner — no map-iteration-order tie is possible.
+// Resolution is RT-scoped (rtsIntersect): only an ISD sharing a route-target
+// with the session can steer it, so a route in another VPN cannot hijack the
+// downlink SID. RT -- not RD -- is the VPN identity, because an interworking
+// gateway (e.g. a third-party MUP gateway) advertises its ISD under its own RD, different from the
+// controller's T1ST RD, so an RD-scoped match would never resolve across
+// vendors. On a longest-prefix tie across RDs the lowest SID wins so the result
+// is deterministic regardless of map iteration order.
 func (a *Applier) resolveInterworkSID(r *bgp.MUPRoute, ep netip.Addr) string {
 	best, bestBits := "", -1
-	for k, e := range a.mupISD {
-		if k.rd != r.RD {
+	for _, e := range a.mupISD {
+		if !rtsIntersect(e.rts, r.RTs) || !e.prefix.Contains(ep) {
 			continue
 		}
-		if e.prefix.Contains(ep) && e.prefix.Bits() > bestBits {
-			best, bestBits = e.sid, e.prefix.Bits()
+		bits := e.prefix.Bits()
+		// Longest prefix wins; on a tie -- the same prefix advertised by two
+		// gateways under different RDs but an intersecting RT -- the
+		// lexicographically lowest SID is chosen so resolution cannot flap with Go
+		// map iteration order.
+		if bits > bestBits || (bits == bestBits && e.sid < best) {
+			best, bestBits = e.sid, bits
 		}
 	}
 	if best != "" {
@@ -236,22 +262,24 @@ func (a *Applier) resolveInterworkSID(r *bgp.MUPRoute, ep netip.Addr) string {
 }
 
 // resolveDirectSID returns the direct SID for a T2ST: the DSD, within the
-// session's own RD, carrying the same MUP segment id; falling back to the
-// route's own Prefix-SID. "" means unresolvable (defer the session).
+// session's VPN, carrying the same MUP segment id; falling back to the route's
+// own Prefix-SID. "" means unresolvable (defer the session).
 //
-// Like resolveInterworkSID it is RD-scoped against cross-VPN hijack. A same-RD
-// segment-id collision (two DSDs, same id, different SID) is logged at insert
-// (applyMUPDSD); here we still pick deterministically — the lexicographically
-// lowest SID — so a benign duplicate cannot make the F-TEID flap between values
-// across reconciles. DSD insert rejects an empty SID, so a match always has one.
+// Like resolveInterworkSID it is RT-scoped (rtsIntersect) against cross-VPN
+// hijack, RT being the VPN identity rather than the per-advertiser RD. A
+// same-VPN segment-id collision (two DSDs, same id, different SID) is logged at
+// insert (applyMUPDSD); here we still pick deterministically -- the
+// lexicographically lowest SID -- so a benign duplicate cannot make the F-TEID
+// flap between values across reconciles. DSD insert rejects an empty SID, so a
+// match always has one.
 func (a *Applier) resolveDirectSID(r *bgp.MUPRoute) string {
 	seg := mupSegID(r.SegmentID2, r.SegmentID4)
 	if seg == mupSegIDNone {
 		return r.SRv6SID
 	}
 	best := ""
-	for k, e := range a.mupDSD {
-		if k.rd != r.RD || e.segID != seg {
+	for _, e := range a.mupDSD {
+		if !rtsIntersect(e.rts, r.RTs) || e.segID != seg {
 			continue
 		}
 		if best == "" || e.sid < best {

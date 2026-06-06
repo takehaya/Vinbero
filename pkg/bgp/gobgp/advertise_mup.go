@@ -97,15 +97,20 @@ func teidToAddr(teid uint32) netip.Addr {
 }
 
 // mupPrefixSID builds the Prefix-SID attribute carrying the segment's SRv6 SID.
-// gobgp v4 has no GTP-specific SRv6 endpoint behavior constant, and the receiver
-// extracts the SID bytes via decodeSRv6SID regardless of the behavior field, so
-// END_DT4 is used as an informational placeholder.
-func mupPrefixSID(sidStr string) (gobgppkt.PathAttributeInterface, error) {
+// The behavior identifies the SRv6 endpoint function the receiver should
+// associate with the SID: ISD carries the GW's interwork-segment behavior
+// (`ENDM_GTP4E` for IPv4 underlay, `ENDM_GTP6E` for IPv6), DSD carries the
+// PE's decap behavior (`END_DT4` / `END_DT6`). Vinbero ignores the field on
+// receive (decodeSRv6SID just extracts the SID bytes), but other MUP-aware
+// implementations key off it to choose an install path,
+// so reporting `END_DT4` for an ISD prevents the PE-side downlink H.Encaps
+// composition from firing.
+func mupPrefixSID(sidStr string, behavior gobgppkt.SRBehavior) (gobgppkt.PathAttributeInterface, error) {
 	sid, err := netip.ParseAddr(sidStr)
 	if err != nil || !sid.Is6() || sid.Is4In6() || sid.IsUnspecified() {
 		return nil, fmt.Errorf("MUP SID must be a usable IPv6 SID: %q", sidStr)
 	}
-	info := gobgppkt.NewSRv6InformationSubTLV(sid, gobgppkt.END_DT4)
+	info := gobgppkt.NewSRv6InformationSubTLV(sid, behavior)
 	svc := gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L3Service, info)
 	return gobgppkt.NewPathAttributePrefixSID(svc), nil
 }
@@ -138,8 +143,9 @@ func mupParseRD(rd string) (gobgppkt.RouteDistinguisherInterface, error) {
 }
 
 // mupFinishPath builds the attribute set common to all four MUP encoders: the
-// Origin, the optional ext-communities, the Prefix-SID, and the MP_REACH_NLRI.
-func mupFinishPath(nlri *gobgppkt.MUPNLRI, r bgp.MUPRoute, withSegmentID bool) (*apiutil.Path, error) {
+// Origin, the optional ext-communities, the Prefix-SID (with the route-type's
+// endpoint behavior), and the MP_REACH_NLRI.
+func mupFinishPath(nlri *gobgppkt.MUPNLRI, r bgp.MUPRoute, withSegmentID bool, sidBehavior gobgppkt.SRBehavior) (*apiutil.Path, error) {
 	attrs := []gobgppkt.PathAttributeInterface{gobgppkt.NewPathAttributeOrigin(0)}
 	ec, err := mupExtComms(r, withSegmentID)
 	if err != nil {
@@ -149,7 +155,7 @@ func mupFinishPath(nlri *gobgppkt.MUPNLRI, r bgp.MUPRoute, withSegmentID bool) (
 		attrs = append(attrs, ec)
 	}
 	if r.SRv6SID != "" {
-		psid, err := mupPrefixSID(r.SRv6SID)
+		psid, err := mupPrefixSID(r.SRv6SID, sidBehavior)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +189,13 @@ func encodeMUPISDPath(r bgp.MUPRoute) (*apiutil.Path, error) {
 		return nil, fmt.Errorf("parse ISD prefix %q: %w", r.Prefix, err)
 	}
 	nlri := gobgppkt.NewMUPInterworkSegmentDiscoveryRoute(rd, prefix)
-	return mupFinishPath(nlri, r, false)
+	// ISD advertises a GW interwork-segment SID -- End.M.GTP4.E for an IPv4 gNB
+	// prefix, End.M.GTP6.E for an IPv6 one. The address family is the prefix's.
+	behavior := gobgppkt.ENDM_GTP4E
+	if prefix.Addr().Is6() {
+		behavior = gobgppkt.ENDM_GTP6E
+	}
+	return mupFinishPath(nlri, r, false, behavior)
 }
 
 func encodeMUPDSDPath(r bgp.MUPRoute) (*apiutil.Path, error) {
@@ -196,7 +208,13 @@ func encodeMUPDSDPath(r bgp.MUPRoute) (*apiutil.Path, error) {
 		return nil, fmt.Errorf("parse DSD address %q: %w", r.Address, err)
 	}
 	nlri := gobgppkt.NewMUPDirectSegmentDiscoveryRoute(rd, addr)
-	return mupFinishPath(nlri, r, true)
+	// DSD advertises the PE's decap SID; mirror the address family with the
+	// matching End.DT* function.
+	behavior := gobgppkt.END_DT4
+	if addr.Is6() {
+		behavior = gobgppkt.END_DT6
+	}
+	return mupFinishPath(nlri, r, true, behavior)
 }
 
 func encodeMUPT1STPath(r bgp.MUPRoute) (*apiutil.Path, error) {
@@ -221,7 +239,14 @@ func encodeMUPT1STPath(r bgp.MUPRoute) (*apiutil.Path, error) {
 		src = &sa
 	}
 	nlri := gobgppkt.NewMUPType1SessionTransformedRoute(rd, prefix, teidToAddr(r.TEID), r.QFI, ep, src)
-	return mupFinishPath(nlri, r, false)
+	// T1ST is SID-less in this stack (the receiving PE resolves the interwork
+	// SID from an ISD), so the behavior never reaches the wire; pick a
+	// family-matched DT* default to keep mupFinishPath consistent.
+	behavior := gobgppkt.END_DT4
+	if prefix.Addr().Is6() {
+		behavior = gobgppkt.END_DT6
+	}
+	return mupFinishPath(nlri, r, false, behavior)
 }
 
 func encodeMUPT2STPath(r bgp.MUPRoute) (*apiutil.Path, error) {
@@ -244,5 +269,12 @@ func encodeMUPT2STPath(r bgp.MUPRoute) (*apiutil.Path, error) {
 	}
 	eaLen := endpointBits + r.TEIDLen
 	nlri := gobgppkt.NewMUPType2SessionTransformedRoute(rd, eaLen, ep, teidToAddr(r.TEID))
-	return mupFinishPath(nlri, r, true)
+	// T2ST is SID-less (the receiving GW resolves the direct SID from a DSD by
+	// segment-id), so the behavior never reaches the wire; pick a family-matched
+	// DT* default to keep mupFinishPath consistent.
+	behavior := gobgppkt.END_DT4
+	if ep.Is6() {
+		behavior = gobgppkt.END_DT6
+	}
+	return mupFinishPath(nlri, r, true, behavior)
 }

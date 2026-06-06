@@ -16,7 +16,9 @@ FROM golang:1.25-bookworm AS build
 
 WORKDIR /src
 
-# Prime the module cache first so source-only edits do not re-download.
+# Prime the module cache first so source-only edits do not re-download. The
+# gobgp fork is pulled from github.com/takehaya/gobgp via the go.mod replace
+# directive (no out-of-band build context needed).
 COPY go.mod go.sum ./
 RUN go mod download
 
