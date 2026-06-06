@@ -239,12 +239,15 @@ func encodeMUPT1STPath(r bgp.MUPRoute) (*apiutil.Path, error) {
 		src = &sa
 	}
 	nlri := gobgppkt.NewMUPType1SessionTransformedRoute(rd, prefix, teidToAddr(r.TEID), r.QFI, ep, src)
-	// T1ST is SID-less in this stack (the receiving PE resolves the interwork
-	// SID from an ISD), so the behavior never reaches the wire; pick a
-	// family-matched DT* default to keep mupFinishPath consistent.
-	behavior := gobgppkt.END_DT4
+	// T1ST is normally SID-less in this stack (the receiving PE resolves the
+	// interwork SID from an ISD). If the operator passes one anyway as a
+	// fallback the SID is an interwork-segment SID, so the endpoint behavior
+	// mirrors the ISD encoder: ENDM_GTP4E for an IPv4 UE prefix, ENDM_GTP6E
+	// for IPv6. Receivers that key off the behavior field would otherwise
+	// misclassify a DT*-flagged interwork SID.
+	behavior := gobgppkt.ENDM_GTP4E
 	if prefix.Addr().Is6() {
-		behavior = gobgppkt.END_DT6
+		behavior = gobgppkt.ENDM_GTP6E
 	}
 	return mupFinishPath(nlri, r, false, behavior)
 }
