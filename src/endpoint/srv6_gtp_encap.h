@@ -186,14 +186,13 @@ static __always_inline int process_end_m_gtp4_e(
 // single-segment encap (e.g. VPP's `sr policy add ... next SID encap` for one
 // SID).
 //
-// Unlike the SRH path, we do the L2+IPv6 strip inline via a single
-// bpf_xdp_adjust_head(net_strip) rather than calling srv6_decap_nosrh(). The
-// helper saves and restores the original Ethernet header, and when the
-// composite (parse args → call helper → build encap) is inlined into the
-// tailcall site the verifier loses packet-pointer provenance across that
-// save/restore. Doing the strip inline (and skipping the eth save since
-// h_proto is rewritten and FIB redirect fills the MACs) keeps provenance
-// tracked.
+// Strip is two-step like srv6_decap_nosrh() so the packet head ends up as
+// [Eth][Inner IP] for gtp4e_build_and_redirect(): (1) drop outer L2 + IPv6
+// (l3_offset + sizeof(ipv6hdr)), then (2) re-expand ETH_HLEN so an Ethernet
+// frame fits in front of the inner IP. The new Ethernet header is left
+// uninitialized -- gtp4e_build_and_redirect() rewrites h_proto and bpf_redirect
+// (via the FIB lookup) populates the MACs, so saving / restoring the original
+// eth (as srv6_decap_nosrh does) is unnecessary.
 static __always_inline int process_end_m_gtp4_e_nosrh(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
@@ -211,9 +210,12 @@ static __always_inline int process_end_m_gtp4_e_nosrh(
     if (gtp4e_parse_args(ctx, ip6h, aux, &args) != 0)
         return XDP_DROP;
 
-    // Strip (l3_offset + IPv6) then re-add ETH_HLEN in a single net adjustment.
-    int net_strip = (int)l3_offset + (int)sizeof(struct ipv6hdr) - (int)ETH_HLEN;
-    if (bpf_xdp_adjust_head(ctx, net_strip))
+    // Two-step strip so the head ends at [Eth][Inner IP], matching what
+    // gtp4e_build_and_redirect() expects (eth = data).
+    int strip_len = (int)l3_offset + (int)sizeof(struct ipv6hdr);
+    if (bpf_xdp_adjust_head(ctx, strip_len))
+        return XDP_DROP;
+    if (bpf_xdp_adjust_head(ctx, -(int)ETH_HLEN))
         return XDP_DROP;
 
     return gtp4e_build_and_redirect(ctx, &args);

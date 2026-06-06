@@ -408,10 +408,12 @@ static __always_inline int process_end_m_gtp6_e(
 }
 
 // Reduced-encap variant: outer IPv6 with no SRH (RFC 8986 §4.1.1 single-SID
-// H.Encaps). Same dual-path treatment as End.M.GTP4.E. The inline strip avoids
-// calling srv6_decap_nosrh() because the helper's saved-eth memcpy makes the
-// BPF verifier lose packet-pointer provenance when inlined here; the FIB
-// redirect rewrites MACs so we don't need to preserve them.
+// H.Encaps). Same dual-path treatment as End.M.GTP4.E. Strip is two-step like
+// srv6_decap_nosrh(): drop outer L2 + IPv6 first, then re-expand ETH_HLEN so
+// the head ends at [Eth][Inner IP] for gtp6e_build_and_redirect(). The new
+// Ethernet header is left uninitialized -- the build helper rewrites h_proto
+// and bpf_redirect (via FIB lookup) populates the MACs, so saving / restoring
+// the original eth is unnecessary.
 static __always_inline int process_end_m_gtp6_e_nosrh(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
@@ -429,8 +431,12 @@ static __always_inline int process_end_m_gtp6_e_nosrh(
     if (gtp6e_parse_args(ctx, ip6h, aux, &args) != 0)
         return XDP_DROP;
 
-    int net_strip = (int)l3_offset + (int)sizeof(struct ipv6hdr) - (int)ETH_HLEN;
-    if (bpf_xdp_adjust_head(ctx, net_strip))
+    // Two-step strip so the head ends at [Eth][Inner IP], matching what
+    // gtp6e_build_and_redirect() expects (eth = data).
+    int strip_len = (int)l3_offset + (int)sizeof(struct ipv6hdr);
+    if (bpf_xdp_adjust_head(ctx, strip_len))
+        return XDP_DROP;
+    if (bpf_xdp_adjust_head(ctx, -(int)ETH_HLEN))
         return XDP_DROP;
 
     return gtp6e_build_and_redirect(ctx, &args);
