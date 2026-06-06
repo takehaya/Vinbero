@@ -196,3 +196,59 @@ func (s *VrfBgpServer) VrfBgpList(
 	}
 	return connect.NewResponse(&v1.VrfBgpListResponse{Bindings: out}), nil
 }
+
+// The handlers below are P0 step 1 stubs for the new families /
+// route-target / batch / update RPCs added to VrfBgpService in
+// docs/plan/rt-rd-unified-design.md. They return Unimplemented until
+// P0 step 7 wires them into the manager. Keeping the *VrfBgpServer
+// interface satisfied here lets the proto + protobuf-gen commit land
+// without the rest of the P0 stack.
+
+func (s *VrfBgpServer) UpdateBinding(
+	_ context.Context,
+	_ *connect.Request[v1.UpdateBindingRequest],
+) (*connect.Response[v1.UpdateBindingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("UpdateBinding: not yet wired in P0 step 1"))
+}
+
+func (s *VrfBgpServer) BatchModifyRouteTargets(
+	_ context.Context,
+	_ *connect.Request[v1.BatchModifyRouteTargetsRequest],
+) (*connect.Response[v1.BatchModifyRouteTargetsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("BatchModifyRouteTargets: not yet wired in P0 step 1"))
+}
+
+func (s *VrfBgpServer) AddRouteTarget(
+	_ context.Context,
+	_ *connect.Request[v1.AddRouteTargetRequest],
+) (*connect.Response[v1.AddRouteTargetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("AddRouteTarget: not yet wired in P0 step 1"))
+}
+
+func (s *VrfBgpServer) RemoveRouteTarget(
+	_ context.Context,
+	_ *connect.Request[v1.RemoveRouteTargetRequest],
+) (*connect.Response[v1.RemoveRouteTargetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("RemoveRouteTarget: not yet wired in P0 step 1"))
+}
+
+func (s *VrfBgpServer) ListRouteTargets(
+	_ context.Context,
+	_ *connect.Request[v1.ListRouteTargetsRequest],
+) (*connect.Response[v1.ListRouteTargetsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("ListRouteTargets: not yet wired in P0 step 1"))
+}
+
+func (s *VrfBgpServer) AddFamily(
+	_ context.Context,
+	_ *connect.Request[v1.AddFamilyRequest],
+) (*connect.Response[v1.AddFamilyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("AddFamily: not yet wired in P0 step 1"))
+}
+
+func (s *VrfBgpServer) RemoveFamily(
+	_ context.Context,
+	_ *connect.Request[v1.RemoveFamilyRequest],
+) (*connect.Response[v1.RemoveFamilyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("RemoveFamily: not yet wired in P0 step 1"))
+}

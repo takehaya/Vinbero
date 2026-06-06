@@ -20,18 +20,52 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	VrfBgpService_VrfBgpBind_FullMethodName   = "/vinbero.v1.VrfBgpService/VrfBgpBind"
-	VrfBgpService_VrfBgpUnbind_FullMethodName = "/vinbero.v1.VrfBgpService/VrfBgpUnbind"
-	VrfBgpService_VrfBgpList_FullMethodName   = "/vinbero.v1.VrfBgpService/VrfBgpList"
+	VrfBgpService_VrfBgpBind_FullMethodName              = "/vinbero.v1.VrfBgpService/VrfBgpBind"
+	VrfBgpService_VrfBgpUnbind_FullMethodName            = "/vinbero.v1.VrfBgpService/VrfBgpUnbind"
+	VrfBgpService_VrfBgpList_FullMethodName              = "/vinbero.v1.VrfBgpService/VrfBgpList"
+	VrfBgpService_UpdateBinding_FullMethodName           = "/vinbero.v1.VrfBgpService/UpdateBinding"
+	VrfBgpService_BatchModifyRouteTargets_FullMethodName = "/vinbero.v1.VrfBgpService/BatchModifyRouteTargets"
+	VrfBgpService_AddRouteTarget_FullMethodName          = "/vinbero.v1.VrfBgpService/AddRouteTarget"
+	VrfBgpService_RemoveRouteTarget_FullMethodName       = "/vinbero.v1.VrfBgpService/RemoveRouteTarget"
+	VrfBgpService_ListRouteTargets_FullMethodName        = "/vinbero.v1.VrfBgpService/ListRouteTargets"
+	VrfBgpService_AddFamily_FullMethodName               = "/vinbero.v1.VrfBgpService/AddFamily"
+	VrfBgpService_RemoveFamily_FullMethodName            = "/vinbero.v1.VrfBgpService/RemoveFamily"
 )
 
 // VrfBgpServiceClient is the client API for VrfBgpService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type VrfBgpServiceClient interface {
+	// Binding-level RPCs (existing).
 	VrfBgpBind(ctx context.Context, in *VrfBgpBindRequest, opts ...grpc.CallOption) (*VrfBgpBindResponse, error)
 	VrfBgpUnbind(ctx context.Context, in *VrfBgpUnbindRequest, opts ...grpc.CallOption) (*VrfBgpUnbindResponse, error)
 	VrfBgpList(ctx context.Context, in *VrfBgpListRequest, opts ...grpc.CallOption) (*VrfBgpListResponse, error)
+	// Full-replace and atomic batch mutation on a single binding.
+	// UpdateBinding overwrites the binding's families and other fields
+	// entirely (client is responsible for read-modify-write); the
+	// expected_version field is reserved for future optimistic
+	// concurrency control (P2) and is ignored when empty in P0.
+	UpdateBinding(ctx context.Context, in *UpdateBindingRequest, opts ...grpc.CallOption) (*UpdateBindingResponse, error)
+	// BatchModifyRouteTargets applies a list of route-target add/remove
+	// operations on a single binding atomically: any op failing rolls
+	// back the whole batch and the binding state is unchanged.
+	BatchModifyRouteTargets(ctx context.Context, in *BatchModifyRouteTargetsRequest, opts ...grpc.CallOption) (*BatchModifyRouteTargetsResponse, error)
+	// Route-target-level RPCs operate on a single (family, rt, direction)
+	// triple within an existing binding. AddRouteTarget is idempotent:
+	// adding the same RT with the same direction is a no-op; with a
+	// different direction the direction bitmask is OR'd. RemoveRouteTarget
+	// with a direction strips that direction bit only; with an empty
+	// direction strips the RT entirely. ListRouteTargets accepts optional
+	// family and direction filters.
+	AddRouteTarget(ctx context.Context, in *AddRouteTargetRequest, opts ...grpc.CallOption) (*AddRouteTargetResponse, error)
+	RemoveRouteTarget(ctx context.Context, in *RemoveRouteTargetRequest, opts ...grpc.CallOption) (*RemoveRouteTargetResponse, error)
+	ListRouteTargets(ctx context.Context, in *ListRouteTargetsRequest, opts ...grpc.CallOption) (*ListRouteTargetsResponse, error)
+	// Family-level RPCs add or remove an entire AF policy on a binding.
+	// AddFamily with an existing family returns AlreadyExists (use
+	// UpdateBinding to overwrite). RemoveFamily strips the AF policy
+	// entry only; the binding itself stays.
+	AddFamily(ctx context.Context, in *AddFamilyRequest, opts ...grpc.CallOption) (*AddFamilyResponse, error)
+	RemoveFamily(ctx context.Context, in *RemoveFamilyRequest, opts ...grpc.CallOption) (*RemoveFamilyResponse, error)
 }
 
 type vrfBgpServiceClient struct {
@@ -69,13 +103,103 @@ func (c *vrfBgpServiceClient) VrfBgpList(ctx context.Context, in *VrfBgpListRequ
 	return out, nil
 }
 
+func (c *vrfBgpServiceClient) UpdateBinding(ctx context.Context, in *UpdateBindingRequest, opts ...grpc.CallOption) (*UpdateBindingResponse, error) {
+	out := new(UpdateBindingResponse)
+	err := c.cc.Invoke(ctx, VrfBgpService_UpdateBinding_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfBgpServiceClient) BatchModifyRouteTargets(ctx context.Context, in *BatchModifyRouteTargetsRequest, opts ...grpc.CallOption) (*BatchModifyRouteTargetsResponse, error) {
+	out := new(BatchModifyRouteTargetsResponse)
+	err := c.cc.Invoke(ctx, VrfBgpService_BatchModifyRouteTargets_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfBgpServiceClient) AddRouteTarget(ctx context.Context, in *AddRouteTargetRequest, opts ...grpc.CallOption) (*AddRouteTargetResponse, error) {
+	out := new(AddRouteTargetResponse)
+	err := c.cc.Invoke(ctx, VrfBgpService_AddRouteTarget_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfBgpServiceClient) RemoveRouteTarget(ctx context.Context, in *RemoveRouteTargetRequest, opts ...grpc.CallOption) (*RemoveRouteTargetResponse, error) {
+	out := new(RemoveRouteTargetResponse)
+	err := c.cc.Invoke(ctx, VrfBgpService_RemoveRouteTarget_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfBgpServiceClient) ListRouteTargets(ctx context.Context, in *ListRouteTargetsRequest, opts ...grpc.CallOption) (*ListRouteTargetsResponse, error) {
+	out := new(ListRouteTargetsResponse)
+	err := c.cc.Invoke(ctx, VrfBgpService_ListRouteTargets_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfBgpServiceClient) AddFamily(ctx context.Context, in *AddFamilyRequest, opts ...grpc.CallOption) (*AddFamilyResponse, error) {
+	out := new(AddFamilyResponse)
+	err := c.cc.Invoke(ctx, VrfBgpService_AddFamily_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfBgpServiceClient) RemoveFamily(ctx context.Context, in *RemoveFamilyRequest, opts ...grpc.CallOption) (*RemoveFamilyResponse, error) {
+	out := new(RemoveFamilyResponse)
+	err := c.cc.Invoke(ctx, VrfBgpService_RemoveFamily_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VrfBgpServiceServer is the server API for VrfBgpService service.
 // All implementations should embed UnimplementedVrfBgpServiceServer
 // for forward compatibility
 type VrfBgpServiceServer interface {
+	// Binding-level RPCs (existing).
 	VrfBgpBind(context.Context, *VrfBgpBindRequest) (*VrfBgpBindResponse, error)
 	VrfBgpUnbind(context.Context, *VrfBgpUnbindRequest) (*VrfBgpUnbindResponse, error)
 	VrfBgpList(context.Context, *VrfBgpListRequest) (*VrfBgpListResponse, error)
+	// Full-replace and atomic batch mutation on a single binding.
+	// UpdateBinding overwrites the binding's families and other fields
+	// entirely (client is responsible for read-modify-write); the
+	// expected_version field is reserved for future optimistic
+	// concurrency control (P2) and is ignored when empty in P0.
+	UpdateBinding(context.Context, *UpdateBindingRequest) (*UpdateBindingResponse, error)
+	// BatchModifyRouteTargets applies a list of route-target add/remove
+	// operations on a single binding atomically: any op failing rolls
+	// back the whole batch and the binding state is unchanged.
+	BatchModifyRouteTargets(context.Context, *BatchModifyRouteTargetsRequest) (*BatchModifyRouteTargetsResponse, error)
+	// Route-target-level RPCs operate on a single (family, rt, direction)
+	// triple within an existing binding. AddRouteTarget is idempotent:
+	// adding the same RT with the same direction is a no-op; with a
+	// different direction the direction bitmask is OR'd. RemoveRouteTarget
+	// with a direction strips that direction bit only; with an empty
+	// direction strips the RT entirely. ListRouteTargets accepts optional
+	// family and direction filters.
+	AddRouteTarget(context.Context, *AddRouteTargetRequest) (*AddRouteTargetResponse, error)
+	RemoveRouteTarget(context.Context, *RemoveRouteTargetRequest) (*RemoveRouteTargetResponse, error)
+	ListRouteTargets(context.Context, *ListRouteTargetsRequest) (*ListRouteTargetsResponse, error)
+	// Family-level RPCs add or remove an entire AF policy on a binding.
+	// AddFamily with an existing family returns AlreadyExists (use
+	// UpdateBinding to overwrite). RemoveFamily strips the AF policy
+	// entry only; the binding itself stays.
+	AddFamily(context.Context, *AddFamilyRequest) (*AddFamilyResponse, error)
+	RemoveFamily(context.Context, *RemoveFamilyRequest) (*RemoveFamilyResponse, error)
 }
 
 // UnimplementedVrfBgpServiceServer should be embedded to have forward compatible implementations.
@@ -90,6 +214,27 @@ func (UnimplementedVrfBgpServiceServer) VrfBgpUnbind(context.Context, *VrfBgpUnb
 }
 func (UnimplementedVrfBgpServiceServer) VrfBgpList(context.Context, *VrfBgpListRequest) (*VrfBgpListResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method VrfBgpList not implemented")
+}
+func (UnimplementedVrfBgpServiceServer) UpdateBinding(context.Context, *UpdateBindingRequest) (*UpdateBindingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateBinding not implemented")
+}
+func (UnimplementedVrfBgpServiceServer) BatchModifyRouteTargets(context.Context, *BatchModifyRouteTargetsRequest) (*BatchModifyRouteTargetsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BatchModifyRouteTargets not implemented")
+}
+func (UnimplementedVrfBgpServiceServer) AddRouteTarget(context.Context, *AddRouteTargetRequest) (*AddRouteTargetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddRouteTarget not implemented")
+}
+func (UnimplementedVrfBgpServiceServer) RemoveRouteTarget(context.Context, *RemoveRouteTargetRequest) (*RemoveRouteTargetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RemoveRouteTarget not implemented")
+}
+func (UnimplementedVrfBgpServiceServer) ListRouteTargets(context.Context, *ListRouteTargetsRequest) (*ListRouteTargetsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListRouteTargets not implemented")
+}
+func (UnimplementedVrfBgpServiceServer) AddFamily(context.Context, *AddFamilyRequest) (*AddFamilyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddFamily not implemented")
+}
+func (UnimplementedVrfBgpServiceServer) RemoveFamily(context.Context, *RemoveFamilyRequest) (*RemoveFamilyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RemoveFamily not implemented")
 }
 
 // UnsafeVrfBgpServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -157,6 +302,132 @@ func _VrfBgpService_VrfBgpList_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VrfBgpService_UpdateBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateBindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfBgpServiceServer).UpdateBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfBgpService_UpdateBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfBgpServiceServer).UpdateBinding(ctx, req.(*UpdateBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfBgpService_BatchModifyRouteTargets_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchModifyRouteTargetsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfBgpServiceServer).BatchModifyRouteTargets(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfBgpService_BatchModifyRouteTargets_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfBgpServiceServer).BatchModifyRouteTargets(ctx, req.(*BatchModifyRouteTargetsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfBgpService_AddRouteTarget_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddRouteTargetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfBgpServiceServer).AddRouteTarget(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfBgpService_AddRouteTarget_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfBgpServiceServer).AddRouteTarget(ctx, req.(*AddRouteTargetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfBgpService_RemoveRouteTarget_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveRouteTargetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfBgpServiceServer).RemoveRouteTarget(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfBgpService_RemoveRouteTarget_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfBgpServiceServer).RemoveRouteTarget(ctx, req.(*RemoveRouteTargetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfBgpService_ListRouteTargets_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRouteTargetsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfBgpServiceServer).ListRouteTargets(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfBgpService_ListRouteTargets_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfBgpServiceServer).ListRouteTargets(ctx, req.(*ListRouteTargetsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfBgpService_AddFamily_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddFamilyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfBgpServiceServer).AddFamily(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfBgpService_AddFamily_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfBgpServiceServer).AddFamily(ctx, req.(*AddFamilyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfBgpService_RemoveFamily_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveFamilyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfBgpServiceServer).RemoveFamily(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfBgpService_RemoveFamily_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfBgpServiceServer).RemoveFamily(ctx, req.(*RemoveFamilyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VrfBgpService_ServiceDesc is the grpc.ServiceDesc for VrfBgpService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -175,6 +446,34 @@ var VrfBgpService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "VrfBgpList",
 			Handler:    _VrfBgpService_VrfBgpList_Handler,
+		},
+		{
+			MethodName: "UpdateBinding",
+			Handler:    _VrfBgpService_UpdateBinding_Handler,
+		},
+		{
+			MethodName: "BatchModifyRouteTargets",
+			Handler:    _VrfBgpService_BatchModifyRouteTargets_Handler,
+		},
+		{
+			MethodName: "AddRouteTarget",
+			Handler:    _VrfBgpService_AddRouteTarget_Handler,
+		},
+		{
+			MethodName: "RemoveRouteTarget",
+			Handler:    _VrfBgpService_RemoveRouteTarget_Handler,
+		},
+		{
+			MethodName: "ListRouteTargets",
+			Handler:    _VrfBgpService_ListRouteTargets_Handler,
+		},
+		{
+			MethodName: "AddFamily",
+			Handler:    _VrfBgpService_AddFamily_Handler,
+		},
+		{
+			MethodName: "RemoveFamily",
+			Handler:    _VrfBgpService_RemoveFamily_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
