@@ -185,6 +185,7 @@ func run(cliCtx *cli.Context) error {
 			cfg.BGP.Global.LocalASN,
 			lg,
 		)
+		applier.SetMUPDefaultAllow(cfg.BGP.Global.MupDefaultAllow)
 		// Auto-advertise (VRF export) is opt-in via bgp.global.auto_advertise.
 		// The exporter shares the locator manager, VRF bindings, and BGP
 		// advertiser with the rest of the daemon and owns its route watcher.
@@ -365,6 +366,9 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 
 // configToBinding converts a config VRF binding into the runtime vrfbgp
 // Binding. The caller is responsible for validating b.BDID's range first.
+// vrfbgp.Binding.Normalize (called from Manager.Bind) expands the legacy
+// ImportRTs / ExportRTs when Families is empty, so a vinbero.yml written
+// before the rt-afi-safi schema keeps working unchanged.
 func configToBinding(b config.VrfBindingConfig) vrfbgp.Binding {
 	return vrfbgp.Binding{
 		VRFName:        b.VRFName,
@@ -375,7 +379,31 @@ func configToBinding(b config.VrfBindingConfig) vrfbgp.Binding {
 		MaxPrefixes:    b.MaxPrefixes,
 		DefaultLocator: b.DefaultLocator,
 		BDID:           uint16(b.BDID),
+		Families:       configFamilies(b.Families),
 	}
+}
+
+// configFamilies converts the YAML families map into the runtime
+// representation. Returns nil when no families are declared so
+// vrfbgp.Binding.Normalize takes the legacy-expansion path.
+//
+// config.Validate has already rejected any unknown direction string, so
+// vrfbgp.ParseDirection here only fails on a validator drift -- the
+// discarded error is the documented signal of that drift.
+func configFamilies(in map[string]config.FamilyConfig) map[bgp.Family]vrfbgp.FamilyPolicy {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[bgp.Family]vrfbgp.FamilyPolicy, len(in))
+	for famStr, fc := range in {
+		rts := make([]vrfbgp.RouteTarget, 0, len(fc.RouteTargets))
+		for _, rt := range fc.RouteTargets {
+			dir, _ := vrfbgp.ParseDirection(rt.Direction)
+			rts = append(rts, vrfbgp.RouteTarget{RT: rt.RT, Direction: dir})
+		}
+		out[bgp.Family(famStr)] = vrfbgp.FamilyPolicy{RouteTargets: rts}
+	}
+	return out
 }
 
 // configToLocator converts a config locator declaration into a locator.Locator.

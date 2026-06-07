@@ -1,11 +1,40 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/mcuadros/go-defaults"
 	"gopkg.in/yaml.v3"
 )
+
+// recognizedFamilyNames / recognizedDirections list the operator-facing
+// strings accepted in vinbero.yml. They mirror pkg/bgp.Family and the
+// pkg/vrfbgp Direction parser so config stays free of those imports; the
+// runtime types remain the source of truth (vrfbgp.Binding.Normalize and
+// vrfbgp.ParseDirection re-validate at the runtime boundary).
+var (
+	recognizedFamilyNames = []string{"vpnv4", "vpnv6", "evpn", "mup_ipv4", "mup_ipv6"}
+	recognizedDirections  = []string{"", "import", "export", "both"}
+)
+
+// Validate rejects a typoed family or direction in vinbero.yml so it fails
+// fast at Load time rather than silently dropping route targets.
+func (b *VrfBindingConfig) Validate() error {
+	for fam, fc := range b.Families {
+		if !slices.Contains(recognizedFamilyNames, fam) {
+			return fmt.Errorf("vrf binding %q: unknown family %q (want one of: %s)", b.VRFName, fam, strings.Join(recognizedFamilyNames, ", "))
+		}
+		for _, rt := range fc.RouteTargets {
+			if !slices.Contains(recognizedDirections, strings.ToLower(rt.Direction)) {
+				return fmt.Errorf("vrf binding %q family %q rt %q: unknown direction %q (want import/export/both, or empty for both)", b.VRFName, fam, rt.RT, rt.Direction)
+			}
+		}
+	}
+	return nil
+}
 
 // Config is the top-level configuration
 type Config struct {
@@ -54,7 +83,11 @@ type LocatorConfig struct {
 // its bridge-domain binding exists and is dropped. bd_id is the bridge domain
 // for EVPN routes matching import_rts (0 for L3VPN-only bindings).
 type VrfBindingConfig struct {
-	VRFName   string   `yaml:"vrf_name,omitempty"`
+	VRFName string `yaml:"vrf_name,omitempty"`
+	// ImportRTs / ExportRTs are the legacy flat route-target form. New
+	// configs should use Families instead; the legacy lists are kept so
+	// existing vinbero.yml files keep working unchanged. Normalize expands
+	// them into Families per the L3VPN / EVPN rule.
 	ImportRTs []string `yaml:"import_rts,omitempty"`
 	ExportRTs []string `yaml:"export_rts,omitempty"`
 	// RD is the route distinguisher used when auto-advertising this VRF's
@@ -72,6 +105,24 @@ type VrfBindingConfig struct {
 	// MaxPrefixes caps how many prefixes auto-advertise originates for this VRF
 	// (0 = unlimited), bounding the blast radius of a VRF-route flood.
 	MaxPrefixes uint32 `yaml:"max_prefixes,omitempty"`
+	// Families is the rt-afi-safi binding map: an AF name -> its per-family
+	// RT policy. Recognized AF keys are "vpnv4" / "vpnv6" / "evpn" /
+	// "mup_ipv4" / "mup_ipv6". When empty, the legacy ImportRTs / ExportRTs
+	// are expanded into Families on Load (L3VPN if bd_id == 0, EVPN otherwise).
+	Families map[string]FamilyConfig `yaml:"families,omitempty"`
+}
+
+// FamilyConfig is one address family's policy under a VRF binding.
+type FamilyConfig struct {
+	RouteTargets []RouteTargetConfig `yaml:"route_targets,omitempty"`
+}
+
+// RouteTargetConfig is one route-target entry under a FamilyConfig.
+// Direction is one of "import" / "export" / "both"; empty is treated as
+// "both" for ergonomics (matches RFC 4364 §4.3 convention).
+type RouteTargetConfig struct {
+	RT        string `yaml:"rt,omitempty"`
+	Direction string `yaml:"direction,omitempty"`
 }
 
 // BGPGlobalConfig is the speaker's own BGP identity.
@@ -120,6 +171,16 @@ type BGPGlobalConfig struct {
 	// bounding SAFI 85 amplification from the unauthenticated surface
 	// (0 = unlimited).
 	MupMaxRoutes uint32 `yaml:"mup_max_routes,omitempty"`
+	// MupDefaultAllow forces every received MUP route through the historical
+	// default-allow path, ignoring whether any binding has declared a mup_ipv*
+	// family. It is the escape hatch for the asymmetric-expansion edge case
+	// (rt-rd-unified-design §7.4): legacy bindings carry no mup_ipv* policy
+	// because legacyToFamilies does not synthesize MUP entries, so adopting
+	// the new mup_ipv* form on ONE binding would otherwise flip the global
+	// filter on and drop every legacy binding's MUP traffic. Setting this
+	// true keeps the legacy behavior while operators migrate every binding.
+	// Defaults to false (per-binding mup filter when any binding opts in).
+	MupDefaultAllow bool `yaml:"mup_default_allow,omitempty" default:"false"`
 }
 
 // BGPPeerConfig describes one BGP neighbor.
@@ -233,6 +294,11 @@ func Load(s string) (*Config, error) {
 	}
 	for i := range cfg.BGP.Locators {
 		defaults.SetDefaults(&cfg.BGP.Locators[i])
+	}
+	for i := range cfg.BGP.VrfBindings {
+		if err := cfg.BGP.VrfBindings[i].Validate(); err != nil {
+			return nil, err
+		}
 	}
 	cfg.Original = s
 	return &cfg, nil

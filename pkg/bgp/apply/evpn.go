@@ -155,6 +155,27 @@ func remoteSrcOrLocal(remoteSrc string, local [bpf.IPv6AddrLen]byte) [bpf.IPv6Ad
 	return local
 }
 
+// matchEVPNBD resolves a received EVPN route's route-targets to a bridge
+// domain. MatchImportForFamily already skips BDID==0 bindings under
+// FamilyEVPN, but the guard stays as belt-and-suspenders so an EVPN install
+// without a real bridge domain is impossible.
+func (a *Applier) matchEVPNBD(rts []string) (uint16, bool) {
+	_, bdID, ok := a.vrfBindings.MatchImportForFamily(rts, bgp.FamilyEVPN)
+	if !ok || bdID == 0 {
+		return 0, false
+	}
+	return bdID, true
+}
+
+// isUsableSRv6SID reports whether sid is a routable IPv6 SID. An unspecified
+// (::), IPv4-mapped, or unparseable address would install a black-hole or
+// wrong-target peer, so callers reject the route. The SR Policy decode
+// applies the same guard to transport SIDs.
+func isUsableSRv6SID(sid string) bool {
+	addr, err := netip.ParseAddr(sid)
+	return err == nil && addr.Is6() && !addr.Is4In6() && !addr.IsUnspecified()
+}
+
 func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
 	switch r.Type {
 	case bgp.EVPNRouteTypeMACIP:
@@ -190,11 +211,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		a.logger.Error("parse EVPN MAC", zap.String("mac", r.MAC), zap.Error(err))
 		return
 	}
-	// An EVPN route installs only into an explicitly bound bridge domain: the
-	// route targets must match a VRF binding that carries a BDID. Unlike the
-	// L3VPN path, an empty binding manager does not accept everything, because
-	// there is no bridge domain to install into without a binding.
-	bdID, ok := a.vrfBindings.MatchImportBD(r.RTs)
+	bdID, ok := a.matchEVPNBD(r.RTs)
 	if !ok {
 		a.logger.Warn("EVPN RT2 matches no bridge-domain binding; dropping",
 			zap.String("mac", r.MAC), zap.Strings("rts", r.RTs))
@@ -205,23 +222,18 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 			zap.String("mac", r.MAC), zap.String("rd", r.RD))
 		return
 	}
-	// The End.DT2U SID must be a usable SRv6 (IPv6) SID. A crafted route with
-	// an unspecified (::) or IPv4-mapped SID would otherwise install a
-	// black-hole / wrong-target bd_peer, so reject it here (the SR Policy
-	// decode applies the same guard to transport SIDs).
-	if sid, err := netip.ParseAddr(r.SRv6SID); err != nil || !sid.Is6() || sid.Is4In6() || sid.IsUnspecified() {
+	// The End.DT2U SID must be a routable IPv6 SID; see isUsableSRv6SID.
+	if !isUsableSRv6SID(r.SRv6SID) {
 		a.logger.Warn("EVPN RT2 SID is not a usable IPv6 SID; skipping",
 			zap.String("mac", r.MAC), zap.String("sid", r.SRv6SID))
 		return
 	}
 	pk := evpnPeerKey{bdID: bdID, sid: r.SRv6SID}
 
-	// Re-advertise / MAC move: this NLRI ({RD, EthernetTag, MAC}) is already
-	// installed. If nothing changed, return without re-referencing the peer --
-	// a second allocIndex would bump refs with no matching withdraw and leak
-	// the bd_peer slot (mirrors steer()'s reverse-index diff). If the MAC moved
-	// to a different PE/BD, tear the old mapping down first so its peer ref and
-	// FDB entry are released before the new one is installed.
+	// Re-advertise / MAC move: an unchanged NLRI returns early so a second
+	// allocIndex would not bump refs and leak the bd_peer slot. A MAC move
+	// (different PE or BD) tears the old mapping down first so its peer
+	// ref and FDB entry release before the new install.
 	if prev, ok := a.evpn.fdb[fk]; ok {
 		if prev.peer == pk && prev.bdID == bdID {
 			return
@@ -306,7 +318,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 		return
 	}
 
-	bdID, ok := a.vrfBindings.MatchImportBD(r.RTs)
+	bdID, ok := a.matchEVPNBD(r.RTs)
 	if !ok {
 		a.logger.Warn("EVPN RT3 matches no bridge-domain binding; dropping",
 			zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
@@ -316,8 +328,8 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 		a.logger.Warn("EVPN RT3 has no SRv6 SID; skipping", zap.String("rd", r.RD))
 		return
 	}
-	// The End.DT2M SID must be a usable SRv6 (IPv6) SID, same guard as RT2.
-	if sid, err := netip.ParseAddr(r.SRv6SID); err != nil || !sid.Is6() || sid.Is4In6() || sid.IsUnspecified() {
+	// The End.DT2M SID must be a routable IPv6 SID, same guard as RT2.
+	if !isUsableSRv6SID(r.SRv6SID) {
 		a.logger.Warn("EVPN RT3 SID is not a usable IPv6 SID; skipping",
 			zap.String("rd", r.RD), zap.String("sid", r.SRv6SID))
 		return
@@ -392,13 +404,12 @@ func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
 		return
 	}
 
-	// Record membership for every ESI, attached or not: an RT4 that arrives
-	// before the operator runs `es create` must still be remembered, so the
-	// later local attach can elect a DF from it (ReelectDF). DF election itself
-	// (electDF) is what gates on local attachment, so an unattached ESI is still
-	// only informational and never writes esi_map. Membership is bounded
-	// (maxTrackedESIs / maxMembersPerESI) so crafted RT4s cannot grow it without
-	// limit. esMu serializes this against ReelectDF on the RPC goroutine.
+	// Record membership for every ESI, attached or not, so a later local
+	// attach can elect a DF from RT4s that arrived first (ReelectDF).
+	// electDF itself gates on local attachment, so an unattached ESI stays
+	// informational. Membership is bounded (maxTrackedESIs /
+	// maxMembersPerESI) so crafted RT4s cannot grow it without limit.
+	// esMu serializes against ReelectDF on the RPC goroutine.
 	a.evpn.esMu.Lock()
 	defer a.evpn.esMu.Unlock()
 

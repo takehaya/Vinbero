@@ -52,10 +52,7 @@ bgp:
       keepalive_sec: 10
       families:
         - evpn
-  # Bind bd 100 to the EVPN import RT before the session receives, so an RT2
-  # that arrives early is not dropped for lack of a bridge-domain binding.
-  vrf_bindings:
-    - vrf_name: evi-100
-      import_rts:
-        - "65000:100"
-      bd_id: 100
+  # bd 100 <-> EVPN import RT 65000:100 is bound from start.sh via
+  # `vbctl vrf-bgp bind`, right after the RPC server is ready and before the
+  # `vbctl bgp advertise-evpn-*` calls. Keeping the binding out of YAML keeps
+  # one source of truth for runtime operators.

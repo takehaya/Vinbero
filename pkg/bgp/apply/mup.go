@@ -108,13 +108,12 @@ const mupSegIDNone uint64 = 0
 // one comparable key (see mupSegIDNone for the absent case).
 func mupSegID(s2 uint16, s4 uint32) uint64 { return uint64(s2)<<32 | uint64(s4) }
 
-// rtsIntersect reports whether two route-target lists share at least one RT.
-// MUP segment-discovery and session routes resolve against each other only when
-// they belong to the same VPN, and route-target membership -- not RD, which is
-// per-advertiser and so differs between an interworking gateway (e.g. a third-party MUP gateway) and
-// the controller -- is what defines a VPN (RFC 4364 §4.3). Two empty lists do
-// not intersect, so a route carrying no RT resolves nothing and is resolved by
-// nothing. The lists are short (one or a few RTs), so the nested scan is fine.
+// rtsIntersect reports whether two route-target lists share at least one
+// RT. MUP segment-discovery and session routes resolve against each other
+// only when they belong to the same VPN, and route-target membership --
+// not RD, which is per-advertiser -- defines a VPN (RFC 4364 §4.3). Two
+// empty lists do not intersect, so a route carrying no RT resolves
+// nothing. The lists are short, so a nested scan is fine.
 func rtsIntersect(a, b []string) bool {
 	for _, x := range a {
 		if slices.Contains(b, x) {
@@ -127,16 +126,32 @@ func rtsIntersect(a, b []string) bool {
 // applyMUP turns a received BGP MUP route (SAFI 85, draft-mpmz-bess-mup-safi)
 // into Vinbero data-plane state.
 //
-// Segment discovery and session transformed routes are resolved against each
-// other (RFC 9433 §3): a T1ST's interwork SID comes from the ISD whose prefix
-// covers its gNB endpoint, and a T2ST's direct SID from the DSD carrying its
-// segment id. When no discovery route resolves, the session falls back to the
-// SID on its own Prefix-SID attribute, so a controller may either reference the
-// gateways' discovery routes or carry the SID inline. Because BGP imposes no
-// arrival order, an ISD/DSD that arrives after its sessions re-resolves and
-// installs the ones that were deferred, and a withdrawal tears down (or re-
-// resolves to a fallback) the ones that depended on it.
-func (a *Applier) applyMUP(r *bgp.MUPRoute, withdraw bool) {
+// Segment discovery and session transformed routes resolve against each
+// other (RFC 9433 §3): a T1ST's interwork SID comes from the ISD whose
+// prefix covers its gNB endpoint, and a T2ST's direct SID from the DSD
+// carrying its segment id. When no discovery route resolves, the session
+// falls back to the SID on its own Prefix-SID attribute. Arrival order
+// does not matter: a discovery route that arrives later re-resolves any
+// deferred sessions, and a withdrawal tears down (or re-resolves) the
+// ones that depended on it.
+//
+// fam scopes the optional import-RT filter: once any VRF binding declares
+// the matching MUP family, a received SESSION route (T1ST/T2ST) must carry
+// an RT some VRF imports. ISD/DSD discovery routes bypass the filter
+// because they carry the controller/gateway's own RTs and feed cross-VRF
+// resolution. Withdraws also bypass it so a route accepted earlier is
+// always torn down. A Manager with no MUP-family binding keeps the
+// historical default-allow.
+func (a *Applier) applyMUP(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
+	sessionRoute := r.Type == bgp.MUPRouteTypeT1ST || r.Type == bgp.MUPRouteTypeT2ST
+	if !withdraw && sessionRoute && !a.mupDefaultAllow && !a.vrfBindings.EmptyForFamily(fam) {
+		if _, _, ok := a.vrfBindings.MatchImportForFamily(r.RTs, fam); !ok {
+			a.logger.Warn("MUP route matches no VRF import RT; dropping",
+				zap.String("type", r.Type.String()),
+				zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
+			return
+		}
+	}
 	switch r.Type {
 	case bgp.MUPRouteTypeISD:
 		a.applyMUPISD(r, withdraw)
@@ -175,7 +190,7 @@ func (a *Applier) applyMUPISD(r *bgp.MUPRoute, withdraw bool) {
 				zap.String("rd", r.RD), zap.String("prefix", r.Prefix))
 			return
 		}
-		a.mupISD[key] = mupISDEntry{prefix: prefix, sid: r.SRv6SID, rts: append([]string(nil), r.RTs...)}
+		a.mupISD[key] = mupISDEntry{prefix: prefix, sid: r.SRv6SID, rts: slices.Clone(r.RTs)}
 	}
 	a.logger.Info("MUP ISD segment discovery",
 		zap.Bool("withdraw", withdraw), zap.String("rd", r.RD),
@@ -205,10 +220,9 @@ func (a *Applier) applyMUPDSD(r *bgp.MUPRoute, withdraw bool) {
 			return
 		}
 		seg := mupSegID(r.SegmentID2, r.SegmentID4)
-		// A same-VPN (intersecting-RT) segment-id collision makes a T2ST's direct
-		// SID ambiguous. resolveDirectSID still picks deterministically (the lowest
-		// SID), but the operator should know two DSDs are advertising the same id
-		// for different SIDs.
+		// A same-VPN segment-id collision (two DSDs, same id, different SID)
+		// still resolves deterministically in resolveDirectSID (lowest SID),
+		// but the operator should know about the ambiguity.
 		if seg != mupSegIDNone {
 			for ek, ev := range a.mupDSD {
 				if ek.address != r.Address && rtsIntersect(ev.rts, r.RTs) && ev.segID == seg && ev.sid != r.SRv6SID {
@@ -219,7 +233,7 @@ func (a *Applier) applyMUPDSD(r *bgp.MUPRoute, withdraw bool) {
 				}
 			}
 		}
-		a.mupDSD[key] = mupDSDEntry{segID: seg, sid: r.SRv6SID, rts: append([]string(nil), r.RTs...)}
+		a.mupDSD[key] = mupDSDEntry{segID: seg, sid: r.SRv6SID, rts: slices.Clone(r.RTs)}
 	}
 	a.logger.Info("MUP DSD segment discovery",
 		zap.Bool("withdraw", withdraw), zap.String("rd", r.RD),
@@ -229,17 +243,12 @@ func (a *Applier) applyMUPDSD(r *bgp.MUPRoute, withdraw bool) {
 	}
 }
 
-// resolveInterworkSID returns the interwork SID for a T1ST: the longest-match
-// ISD, within the session's VPN, whose prefix contains the gNB endpoint; falling
-// back to the route's own Prefix-SID. "" means unresolvable (defer the session).
-//
-// Resolution is RT-scoped (rtsIntersect): only an ISD sharing a route-target
-// with the session can steer it, so a route in another VPN cannot hijack the
-// downlink SID. RT -- not RD -- is the VPN identity, because an interworking
-// gateway (e.g. a third-party MUP gateway) advertises its ISD under its own RD, different from the
-// controller's T1ST RD, so an RD-scoped match would never resolve across
-// vendors. On a longest-prefix tie across RDs the lowest SID wins so the result
-// is deterministic regardless of map iteration order.
+// resolveInterworkSID returns the interwork SID for a T1ST: the
+// longest-match ISD, within the session's VPN (RT-scoped via rtsIntersect),
+// whose prefix contains the gNB endpoint. Falls back to the route's own
+// Prefix-SID; "" means unresolvable (defer the session). On a longest-prefix
+// tie across RDs the lexicographically lowest SID wins, so resolution stays
+// deterministic regardless of map iteration order.
 func (a *Applier) resolveInterworkSID(r *bgp.MUPRoute, ep netip.Addr) string {
 	best, bestBits := "", -1
 	for _, e := range a.mupISD {
@@ -247,10 +256,6 @@ func (a *Applier) resolveInterworkSID(r *bgp.MUPRoute, ep netip.Addr) string {
 			continue
 		}
 		bits := e.prefix.Bits()
-		// Longest prefix wins; on a tie -- the same prefix advertised by two
-		// gateways under different RDs but an intersecting RT -- the
-		// lexicographically lowest SID is chosen so resolution cannot flap with Go
-		// map iteration order.
 		if bits > bestBits || (bits == bestBits && e.sid < best) {
 			best, bestBits = e.sid, bits
 		}
@@ -261,17 +266,12 @@ func (a *Applier) resolveInterworkSID(r *bgp.MUPRoute, ep netip.Addr) string {
 	return r.SRv6SID
 }
 
-// resolveDirectSID returns the direct SID for a T2ST: the DSD, within the
-// session's VPN, carrying the same MUP segment id; falling back to the route's
-// own Prefix-SID. "" means unresolvable (defer the session).
-//
-// Like resolveInterworkSID it is RT-scoped (rtsIntersect) against cross-VPN
-// hijack, RT being the VPN identity rather than the per-advertiser RD. A
-// same-VPN segment-id collision (two DSDs, same id, different SID) is logged at
-// insert (applyMUPDSD); here we still pick deterministically -- the
-// lexicographically lowest SID -- so a benign duplicate cannot make the F-TEID
-// flap between values across reconciles. DSD insert rejects an empty SID, so a
-// match always has one.
+// resolveDirectSID returns the direct SID for a T2ST: the DSD within the
+// session's VPN (RT-scoped) carrying the same MUP segment id. Falls back
+// to the route's own Prefix-SID; "" means unresolvable. A same-VPN
+// segment-id collision is logged at insert (applyMUPDSD); here we still
+// pick deterministically -- the lexicographically lowest SID -- so a
+// benign duplicate cannot make the F-TEID flap across reconciles.
 func (a *Applier) resolveDirectSID(r *bgp.MUPRoute) string {
 	seg := mupSegID(r.SegmentID2, r.SegmentID4)
 	if seg == mupSegIDNone {
@@ -292,13 +292,14 @@ func (a *Applier) resolveDirectSID(r *bgp.MUPRoute) string {
 	return r.SRv6SID
 }
 
-// applyMUPT1ST records (or withdraws) a per-UE downlink session, then reconciles
-// its data-plane install against the current ISD table.
+// applyMUPT1ST records (or withdraws) a per-UE downlink session, then
+// reconciles its data-plane install against the current ISD table.
 //
-// The key is {RD, UE prefix} — NOT keyed on TEID, unlike T2ST — because the
-// headend map is keyed on the UE prefix, so Vinbero holds exactly one downlink
-// transform per UE prefix (last advertise wins). The route's TEID rides in the
-// composed SID, so a re-advertise with a different TEID replaces the install.
+// The key is {RD, UE prefix} -- NOT keyed on TEID, unlike T2ST -- because
+// the headend map is keyed on the UE prefix, so Vinbero holds exactly one
+// downlink transform per UE prefix (last advertise wins). The route's TEID
+// rides in the composed SID, so a re-advertise with a different TEID
+// replaces the install.
 func (a *Applier) applyMUPT1ST(r *bgp.MUPRoute, withdraw bool) {
 	key := mupT1STKey{rd: r.RD, prefix: r.Prefix}
 	if withdraw {
@@ -452,7 +453,17 @@ type mupT2STDataPlane struct {
 }
 
 func (a *Applier) mupT2STDataPlane(endpoint netip.Addr, endpointStr string) mupT2STDataPlane {
-	dp := mupT2STDataPlane{
+	if endpoint.Is6() {
+		return mupT2STDataPlane{
+			uplinkCreate: a.mupUplink.CreateMupUplinkV6,
+			uplinkDelete: a.mupUplink.DeleteMupUplinkV6,
+			gateMode:     uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID),
+			createGate:   a.headend.CreateHeadendV6,
+			deleteGate:   a.headend.DeleteHeadendV6,
+			gatePrefix:   endpointStr + "/128",
+		}
+	}
+	return mupT2STDataPlane{
 		uplinkCreate: a.mupUplink.CreateMupUplinkV4,
 		uplinkDelete: a.mupUplink.DeleteMupUplinkV4,
 		gateMode:     uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID),
@@ -460,15 +471,6 @@ func (a *Applier) mupT2STDataPlane(endpoint netip.Addr, endpointStr string) mupT
 		deleteGate:   a.headend.DeleteHeadendV4,
 		gatePrefix:   endpointStr + "/32",
 	}
-	if endpoint.Is6() {
-		dp.uplinkCreate = a.mupUplink.CreateMupUplinkV6
-		dp.uplinkDelete = a.mupUplink.DeleteMupUplinkV6
-		dp.gateMode = uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID)
-		dp.createGate = a.headend.CreateHeadendV6
-		dp.deleteGate = a.headend.DeleteHeadendV6
-		dp.gatePrefix = endpointStr + "/128"
-	}
-	return dp
 }
 
 // applyMUPT2ST records (or withdraws) an uplink session, then reconciles its

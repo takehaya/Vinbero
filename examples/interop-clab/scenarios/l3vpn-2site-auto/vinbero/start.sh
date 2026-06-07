@@ -87,6 +87,18 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# Bind vrf-cust to its BGP route-target policy. vpnv4 + vpnv6 are listed
+# explicitly so the exporter advertises VPNv4/VPNv6 of 10.1.0.0/24 with RT
+# 65000:200 and the applier accepts FRR's 10.2.0.0/24 under the same RT.
+# `--rt` and `--rd` together replace the deleted YAML vrf_bindings entry.
+/usr/local/bin/vbctl vrf-bgp bind \
+    --vrf vrf-cust \
+    --rd 65100:200 \
+    --rt vpnv4:65000:200:both \
+    --rt vpnv6:65000:200:both \
+    --default-locator LOC1 \
+    --redistribute static || true
+
 # Pre-resolve neighbours so the first XDP BPF FIB lookups never hit
 # BPF_FIB_LKUP_RET_NO_NEIGH on the first packet.
 ping6 -c 1 -W 2 2001:db8:1::2 >/dev/null 2>&1 || true

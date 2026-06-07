@@ -67,16 +67,21 @@ type Applier struct {
 	localASN    uint32
 	srPolicy    *srPolicyTable
 	evpn        *evpnTable
+	// mupDefaultAllow forces every MUP session route through the historical
+	// default-allow path even when some VRF binding has declared a mup_ipv*
+	// family. It is the escape hatch for the asymmetric-expansion case where
+	// adopting the new mup_ipv* form on ONE binding flips the global filter
+	// on and drops every legacy binding's MUP traffic (legacyToFamilies
+	// does not synthesize MUP entries). Set from bgp.global.mup_default_allow.
+	mupDefaultAllow bool
 	// MUP receive state. Touched only from the single GoBGP RouteHandler
-	// goroutine (like steeredRoutes), so it needs no locking. mupT1ST / mupT2ST
-	// hold each session's full route plus the SID currently programmed for it,
-	// so a discovery route arriving or withdrawing can re-resolve and reconcile
-	// the install (a withdraw NLRI may also lack the Prefix-SID/RTs the install
-	// used). mupISD / mupDSD are the segment-discovery tables a session resolves
-	// against (T1ST against its ISD by endpoint, T2ST against its DSD by the MUP
-	// segment id). mupGateRefs counts how many uplink sessions share each
-	// endpoint's H.M.GTP4.D_TEID gate so the gate is removed only when its last
-	// session withdraws.
+	// goroutine (like steeredRoutes), so it needs no locking. mupT1ST /
+	// mupT2ST hold each session's full route plus the SID currently
+	// programmed for it (so an arriving / withdrawn discovery route can
+	// reconcile the install). mupISD / mupDSD are the segment-discovery
+	// tables a session resolves against (T1ST against an ISD by endpoint,
+	// T2ST against a DSD by MUP segment id). mupGateRefs counts how many
+	// uplink sessions share each endpoint's H.M.GTP4.D_TEID gate.
 	mupT1ST     map[mupT1STKey]*mupSessionState
 	mupT2ST     map[mupT2STKey]*mupSessionState
 	mupISD      map[mupISDKey]mupISDEntry
@@ -117,6 +122,11 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 	}
 }
 
+// SetMUPDefaultAllow toggles the MUP receive-side default-allow escape hatch.
+// Set from bgp.global.mup_default_allow before BGP routes start arriving so
+// the toggle is not racing applyMUP on a per-route basis.
+func (a *Applier) SetMUPDefaultAllow(allow bool) { a.mupDefaultAllow = allow }
+
 // CleanupFIB removes every kernel FIB route Vinbero installed for
 // BGP-learned prefixes. It is meant for graceful shutdown so those
 // routes do not outlive the process. Headend map entries are
@@ -147,7 +157,7 @@ func (a *Applier) Apply(ev bgp.RouteEvent) {
 	case ev.EVPN != nil:
 		a.applyEVPN(ev.EVPN, ev.IsWithdraw)
 	case ev.MUP != nil:
-		a.applyMUP(ev.MUP, ev.IsWithdraw)
+		a.applyMUP(ev.Family, ev.MUP, ev.IsWithdraw)
 	}
 }
 
@@ -195,12 +205,12 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 		}
 		return
 	}
-	// Import-RT filter: once any VRF binding is registered, a received
-	// route must carry a route target some VRF imports. An empty
-	// vrfBindings manager accepts every route (BGP works before any
-	// VrfBgpBind call).
-	if !a.vrfBindings.Empty() {
-		if _, ok := a.vrfBindings.MatchImport(vr.RTs); !ok {
+	// Import-RT filter: once any VRF binding declares this family, a
+	// received route must carry an RT some VRF imports. A Manager with no
+	// binding under fam keeps the historical default-allow, so vpnv4 /
+	// vpnv6 gate independently as bindings arrive per family.
+	if !a.vrfBindings.EmptyForFamily(vr.Family) {
+		if _, _, ok := a.vrfBindings.MatchImportForFamily(vr.RTs, vr.Family); !ok {
 			a.logger.Warn("VPN route matches no VRF import RT; dropping",
 				zap.String("prefix", vr.Prefix), zap.Strings("rts", vr.RTs))
 			return
@@ -221,10 +231,9 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 	}
 	// Color-based auto-steering: stamp the SR Policy id for {color, next
 	// hop} so the XDP headend composes this route's service SID onto that
-	// policy's transport. The id is reserved even if the SR Policy has not
-	// arrived yet -- the data plane falls back until it does. reserveID only
-	// resolves the id; the steering reference is committed (steer) after the
-	// headend write succeeds, so a failed write never pins the id.
+	// policy's transport. reserveID only resolves the id; the steering
+	// reference is committed (steer) after the headend write succeeds, so
+	// a failed write never pins the id.
 	var want *policyKey
 	if vr.Color != 0 {
 		endpoint, perr := netip.ParseAddr(vr.NextHop)
@@ -234,10 +243,9 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
 				zap.String("nexthop", vr.NextHop))
 		case !endpoint.Is6():
-			// SR Policy endpoints are always IPv6 (SRv6 over IPv6), so an
-			// IPv4 next hop could never match a policy. Don't steer -- and
-			// don't reserve a policy_id that would never resolve and would
-			// keep a phantom reference alive until withdraw.
+			// SR Policy endpoints are always IPv6, so an IPv4 next hop
+			// could never match. Skip steering and don't reserve a
+			// policy_id that would never resolve.
 			a.logger.Warn("colored VPN route next hop is not IPv6; not steering",
 				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
 				zap.String("nexthop", vr.NextHop))

@@ -184,16 +184,18 @@ func (e *EVPNExporter) disableESLocked(esi [bpf.ESILen]byte) {
 // b and bridgeIfindex would produce the same advertisements and SIDs as the
 // current state st, so EnableBD can skip a needless disable + SID re-mint + RT3
 // re-advertise. It compares only the fields that shape what this exporter
-// originates: the RD and export RTs (RT2/RT3 keys + attributes), the default
-// locator (SID minting + RemoteSrc), the bridge ifindex (the End.DT2 L2 aux), and
-// the RT2 MaxPrefixes cap. Receive-only fields (import RTs, redistribute) do not
-// affect origination, so changing them alone is a no-op here.
+// originates: the RD and export RTs scoped to FamilyEVPN (RT2/RT3 keys +
+// attributes), the default locator (SID minting + RemoteSrc), the bridge ifindex
+// (the End.DT2 L2 aux), and the RT2 MaxPrefixes cap. Per-family scoping keeps a
+// vpnv4-only RT mutation from flapping RT3 + replayFDB. Receive-only fields
+// (import RTs, redistribute) do not affect origination, so changing them alone
+// is a no-op here.
 func bdAdvertiseUnchanged(st *bdState, b vrfbgp.Binding, bridgeIfindex uint32) bool {
 	return st.bridgeIfindex == bridgeIfindex &&
 		st.binding.RD == b.RD &&
 		st.binding.DefaultLocator == b.DefaultLocator &&
 		st.binding.MaxPrefixes == b.MaxPrefixes &&
-		sameStringSet(st.binding.ExportRTs, b.ExportRTs)
+		sameStringSet(st.binding.ExportRTsForFamily(bgp.FamilyEVPN), b.ExportRTsForFamily(bgp.FamilyEVPN))
 }
 
 // sameStringSet reports whether two string lists carry the same set, ignoring
@@ -222,6 +224,10 @@ func sameStringSet(a, b []string) bool {
 // advertisement-affecting fields are unchanged is a no-op (no RT3/SID flap); any
 // real change re-enables cleanly (the prior enablement is torn down first).
 func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
+	// Normalize so the per-AF ExportRTsForFamily(FamilyEVPN) on b returns
+	// the synthesized EVPN RT list when a unit-test or legacy caller hands
+	// a binding whose Families map has not been populated.
+	b = b.Normalize()
 	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
 		return fmt.Errorf("vrf %q: bgp.global.next_hop %w", b.VRFName, err)
 	}
@@ -285,7 +291,7 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	r3 := bgp.EVPNRoute{
 		Type:        bgp.EVPNRouteTypeInclusiveMulticast,
 		RD:          b.RD,
-		RTs:         b.ExportRTs,
+		RTs:         b.ExportRTsForFamily(bgp.FamilyEVPN),
 		EthernetTag: 0,
 		SRv6SID:     st.dt2mSIDStr,
 		NextHop:     e.nextHop,
@@ -399,7 +405,7 @@ func (e *EVPNExporter) OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool)
 		r := bgp.EVPNRoute{
 			Type: bgp.EVPNRouteTypeMACIP,
 			RD:   st.binding.RD,
-			RTs:  st.binding.ExportRTs,
+			RTs:  st.binding.ExportRTsForFamily(bgp.FamilyEVPN),
 			// EthernetTag 0: VLAN-based EVI, one bridge domain = one EVI. ESI is
 			// left zero -- single-homed; multi-homing RT2 ESI is a future
 			// increment that needs the bridge's ES attribute.
