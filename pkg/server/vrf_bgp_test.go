@@ -752,7 +752,11 @@ func TestAddFamily_EmptyDoesNotFlipDefaultAllow(t *testing.T) {
 // everything" filter and must include import-only and export-only RTs.
 // Direction.Has(DirectionBoth) requires both bits set, so the handler
 // translates a "both" filter into "no narrowing".
-func TestListRouteTargets_BothFilterIsUnion(t *testing.T) {
+// direction=both selects only RTs whose direction has BOTH bits set, i.e.
+// the strict bidirectional RTs. Empty direction is the "no filter" (show
+// every RT) path; the import/export filters via bitmask containment include
+// "both" RTs naturally.
+func TestListRouteTargets_BothFilterIsStrict(t *testing.T) {
 	s := bindForRPC(t, "vrf1", map[string]*v1.VrfBgpFamily{
 		"vpnv4": {RouteTargets: []*v1.VrfBgpRouteTarget{
 			{Rt: "65000:1", Direction: "import"},
@@ -764,8 +768,19 @@ func TestListRouteTargets_BothFilterIsUnion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListRouteTargets: %v", err)
 	}
-	if len(resp.Msg.Families) != 1 || len(resp.Msg.Families[0].GetRouteTargets()) != 3 {
-		t.Errorf("direction=both must return every RT regardless of single-direction bits; got %+v", resp.Msg.Families)
+	if len(resp.Msg.Families) != 1 || len(resp.Msg.Families[0].GetRouteTargets()) != 1 {
+		t.Fatalf("direction=both must return only RTs with both bits set; got %+v", resp.Msg.Families)
+	}
+	if got := resp.Msg.Families[0].GetRouteTargets()[0].GetRt(); got != "65000:3" {
+		t.Errorf("direction=both must return only the bidirectional RT 65000:3; got %q", got)
+	}
+	// "everything" is the empty-direction filter.
+	all, err := s.ListRouteTargets(context.Background(), connect.NewRequest(&v1.ListRouteTargetsRequest{VrfName: "vrf1"}))
+	if err != nil {
+		t.Fatalf("ListRouteTargets no filter: %v", err)
+	}
+	if len(all.Msg.Families) != 1 || len(all.Msg.Families[0].GetRouteTargets()) != 3 {
+		t.Errorf("empty direction must return every RT; got %+v", all.Msg.Families)
 	}
 }
 

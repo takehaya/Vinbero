@@ -372,7 +372,11 @@ func (s *VrfBgpServer) UpdateBinding(
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("binding %q not found (use VrfBgpBind to create)", binding.VRFName))
 	}
 	if err := s.commitBinding(binding); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		// commitBinding failures are dominantly input-driven (missing rd /
+		// default_locator, unknown locator) surfaced by the exporter, so
+		// surface as InvalidArgument; rare infrastructure failures still
+		// carry the underlying error message for the operator.
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	stored, _ := s.mgr.Get(binding.VRFName)
 	return connect.NewResponse(&v1.UpdateBindingResponse{Binding: bindingToProto(stored)}), nil
@@ -410,7 +414,8 @@ func (s *VrfBgpServer) BatchModifyRouteTargets(
 		}
 	}
 	if err := s.commitBinding(scratch); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		// Same input-driven failure dominance as UpdateBinding.
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	stored, _ := s.mgr.Get(vrfName)
 	return connect.NewResponse(&v1.BatchModifyRouteTargetsResponse{Binding: bindingToProto(stored)}), nil
@@ -549,7 +554,8 @@ func (s *VrfBgpServer) mutateOne(vrfName string, mutate func(*vrfbgp.Binding) er
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	if err := s.commitBinding(scratch); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		// Same input-driven failure dominance as UpdateBinding.
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	stored, _ := s.mgr.Get(vrfName)
 	return bindingToProto(stored), nil
@@ -721,20 +727,16 @@ func applyRouteTargetOp(b *vrfbgp.Binding, op *v1.RouteTargetOp) error {
 	}
 }
 
-// directionFilter parses a direction string for ListRouteTargets, returning
-// 0 to mean "no narrowing". "both" is treated as 0 because Direction.Has
-// uses bitmask containment, so a literal both filter would drop import-only
-// and export-only RTs the operator naturally expects to see under "everything".
+// directionFilter parses a direction string for ListRouteTargets. An empty
+// string returns 0 ("no narrowing", show every RT). Any explicit direction
+// (import / export / both) returns its bitmask so the caller's filter is
+// applied verbatim. With Direction.Has's bitmask containment, an "import"
+// filter naturally includes RTs declared as "both" (import bit set), and a
+// "both" filter selects only RTs with both bits set -- the strict
+// bidirectional view. Operators wanting "everything" pass no filter.
 func directionFilter(s string) (vrfbgp.Direction, error) {
 	if s == "" {
 		return 0, nil
 	}
-	d, err := vrfbgp.ParseDirection(s)
-	if err != nil {
-		return 0, err
-	}
-	if d == vrfbgp.DirectionBoth {
-		return 0, nil
-	}
-	return d, nil
+	return vrfbgp.ParseDirection(s)
 }
