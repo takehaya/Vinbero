@@ -53,6 +53,14 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# Bind bd 100 to the EVPN import RT before the SID/headend setup so an early
+# RT2/RT3 from pe-tokyo is never dropped for lack of a bridge-domain binding.
+# Replaces the deleted YAML vrf_bindings entry.
+/usr/local/bin/vbctl vrf-bgp bind \
+    --vrf evi-100 \
+    --bd-id 100 \
+    --rt evpn:65000:100:import || true
+
 /usr/local/bin/vbctl locator create \
     --name LOC1 \
     --prefix fd00:200::/48 \
@@ -78,9 +86,6 @@ done
     --src-addr fd00:200:0:2:: \
     --segments fd00:200:0:2:: \
     --bd-id 100 || true
-
-# bd 100 <-> import RT 65000:100 is bound at boot from vinbero.yml
-# (bgp.vrf_bindings), before the session receives.
 
 /usr/local/bin/vbctl bgp advertise-evpn-mac \
     --rd 65100:2 \

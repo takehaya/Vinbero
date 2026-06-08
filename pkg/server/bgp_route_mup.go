@@ -30,10 +30,9 @@ func validateMUPRouteFields(r *v1.BgpMupRoute) error {
 	return nil
 }
 
-// protoToMUPRoute converts a wire BgpMupRoute into the bgpd-agnostic form. The
-// route type is parsed separately so a bad type is reported per-route, and the
-// caller must run validateMUPRouteFields first so the narrowing casts below
-// cannot wrap an out-of-range value.
+// protoToMUPRoute converts a wire BgpMupRoute into the bgpd-agnostic form.
+// The caller must run validateMUPRouteFields first so the narrowing casts
+// below cannot wrap an out-of-range value.
 func protoToMUPRoute(r *v1.BgpMupRoute) bgp.MUPRoute {
 	return bgp.MUPRoute{
 		RD:         r.GetRd(),
@@ -149,6 +148,7 @@ func (s *BgpRouteServer) BgpAdvertiseMup(
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
+		mr.RTs = fillMUPExportRTs(mr, s.vrfBindings)
 		if err := pushMUPRoute(ctx, s.mup, mr); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
@@ -170,9 +170,6 @@ func (s *BgpRouteServer) BgpWithdrawMup(
 		Errors:    make([]*v1.OperationError, 0),
 	}
 	for _, r := range req.Msg.Routes {
-		// parseMUPRoute runs validateMUPRouteFields, guarding the T2ST teid_len
-		// narrowing cast so an out-of-range value cannot wrap to a key that
-		// silently mismatches what was advertised.
 		mr, err := parseMUPRoute(r)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})

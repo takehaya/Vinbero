@@ -62,6 +62,14 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# Bind bd 100 to the EVPN import RT before the SID/headend setup so an early
+# RT2/RT3 from pe-osaka is never dropped for lack of a bridge-domain binding.
+# Replaces the deleted YAML vrf_bindings entry.
+/usr/local/bin/vbctl vrf-bgp bind \
+    --vrf evi-100 \
+    --bd-id 100 \
+    --rt evpn:65000:100:import || true
+
 # Source locator: fd00:100::/48 is pe-tokyo's SRv6 block (encap source).
 /usr/local/bin/vbctl locator create \
     --name LOC1 \
@@ -93,10 +101,6 @@ done
     --src-addr fd00:100:0:2:: \
     --segments fd00:100:0:2:: \
     --bd-id 100 || true
-
-# bd 100 <-> import RT 65000:100 is bound at boot from vinbero.yml
-# (bgp.vrf_bindings), before the session receives, so a peer's RT2 is never
-# dropped for lack of the binding.
 
 # Advertise ce-tokyo's MAC as an EVPN RT2 with our End.DT2U SID. pe-osaka
 # receives it and H.Encaps.L2's its ce-tokyo-bound unicast toward this SID.

@@ -435,6 +435,41 @@ type MUPRoute struct {
 	NextHop string
 }
 
+// Family returns the address family (FamilyMUPIPv4 / FamilyMUPIPv6) the
+// route belongs to, derived from its mobile-user-plane address field:
+// ISD/T1ST use Prefix, DSD uses Address, T2ST uses Endpoint. Returns
+// ok=false for an unparseable / unknown route type so callers can fall
+// back to the route's own RTs rather than misclassify the binding lookup.
+func (mr MUPRoute) Family() (Family, bool) {
+	var s string
+	switch mr.Type {
+	case MUPRouteTypeISD, MUPRouteTypeT1ST:
+		s = mr.Prefix
+	case MUPRouteTypeDSD:
+		s = mr.Address
+	case MUPRouteTypeT2ST:
+		s = mr.Endpoint
+	default:
+		return "", false
+	}
+	var addr netip.Addr
+	if p, err := netip.ParsePrefix(s); err == nil {
+		addr = p.Addr()
+	} else if a, err := netip.ParseAddr(s); err == nil {
+		addr = a
+	} else {
+		return "", false
+	}
+	// Unmap so an IPv4-mapped IPv6 address (::ffff:a.b.c.d) classifies as
+	// FamilyMUPIPv4. netip.Addr.Is4 returns false for the mapped form, so a
+	// 4-in-6 endpoint would otherwise hit the IPv6 binding family and read
+	// the wrong export RTs.
+	if addr.Unmap().Is4() {
+		return FamilyMUPIPv4, true
+	}
+	return FamilyMUPIPv6, true
+}
+
 // MUP withdraw keys identify a previously-advertised MUP route by the subset of
 // NLRI fields that form its BGP route key (draft-mpmz-bess-mup-safi §3.1).
 type (

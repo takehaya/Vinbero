@@ -11,22 +11,27 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
 // BgpRouteServer is the Connect RPC handler for BgpRouteService. It is a
-// thin adapter over bgp.RouteAdvertiser (VPN / unicast) and
-// bgp.SRPolicyController (SR Policy). Both are nil when vinberod runs
-// without --bgp-enabled; every RPC then fails with FailedPrecondition so
-// the operator gets a clear signal rather than a silent no-op.
+// thin adapter over bgp.RouteAdvertiser (VPN / unicast),
+// bgp.SRPolicyController (SR Policy), bgp.EVPNController, and
+// bgp.MUPController. Each is nil when vinberod runs without --bgp-enabled;
+// every RPC then fails with FailedPrecondition.
+//
+// vrfBindings is consulted by BgpAdvertiseMup to auto-fill an empty RTs
+// list from the binding whose RD matches the route. Nil disables auto-fill.
 type BgpRouteServer struct {
-	advertiser bgp.RouteAdvertiser
-	srPolicy   bgp.SRPolicyController
-	evpn       bgp.EVPNController
-	mup        bgp.MUPController
+	advertiser  bgp.RouteAdvertiser
+	srPolicy    bgp.SRPolicyController
+	evpn        bgp.EVPNController
+	mup         bgp.MUPController
+	vrfBindings *vrfbgp.Manager
 }
 
-func NewBgpRouteServer(advertiser bgp.RouteAdvertiser, srPolicy bgp.SRPolicyController, evpn bgp.EVPNController, mup bgp.MUPController) *BgpRouteServer {
-	return &BgpRouteServer{advertiser: advertiser, srPolicy: srPolicy, evpn: evpn, mup: mup}
+func NewBgpRouteServer(advertiser bgp.RouteAdvertiser, srPolicy bgp.SRPolicyController, evpn bgp.EVPNController, mup bgp.MUPController, vrfBindings *vrfbgp.Manager) *BgpRouteServer {
+	return &BgpRouteServer{advertiser: advertiser, srPolicy: srPolicy, evpn: evpn, mup: mup, vrfBindings: vrfBindings}
 }
 
 // errBGPDisabled is returned (as FailedPrecondition) when an advertise /

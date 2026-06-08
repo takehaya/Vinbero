@@ -57,6 +57,14 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# Bind bd 100 to the EVPN import RT before the SID/headend setup so an early
+# RT2/RT3/RT4 from a peer is never dropped for lack of a bridge-domain
+# binding. Replaces the deleted YAML vrf_bindings entry.
+/usr/local/bin/vbctl vrf-bgp bind \
+    --vrf evi-100 \
+    --bd-id 100 \
+    --rt evpn:65000:100:import || true
+
 /usr/local/bin/vbctl locator create \
     --name LOC1 --prefix fd00:200::/48 \
     --block-len 32 --node-len 16 --function-len 16 --argument-len 64 \

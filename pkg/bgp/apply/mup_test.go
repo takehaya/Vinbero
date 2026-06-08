@@ -623,3 +623,116 @@ func TestApplyMUP_T2ST_SharedGateViaDSD(t *testing.T) {
 		t.Errorf("shared gate not released exactly once after DSD withdraw; deleted=%v", fh.v4deleted)
 	}
 }
+
+// TestApplyMUP_ImportRTFilterDefaultAllow pins MUP keeps its historical
+// default-allow when no binding under mup_ipv4 / mup_ipv6 exists.
+func TestApplyMUP_ImportRTFilterDefaultAllow(t *testing.T) {
+	fh := newFakeHeadend()
+	vm := vrfbgp.NewManager()
+	// Bind only a vpnv4 family: the MUP family stays "empty" so default-allow holds.
+	if err := vm.Bind(vrfbgp.Binding{
+		VRFName: "vrf-v4",
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyVPNv4: {RouteTargets: []vrfbgp.RouteTarget{
+				{RT: "65000:1", Direction: vrfbgp.DirectionImport},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a.Apply(mupISD("65000:200", "10.0.0.0/24", "fd00:2:2:b::"))
+	if len(a.mupISD) != 1 {
+		t.Errorf("MUP must stay default-allow when no MUP-family binding exists, got %d ISD entries", len(a.mupISD))
+	}
+}
+
+// TestApplyMUP_ImportRTFilterDropsUnmatched pins that once a MUP-family
+// binding exists, a SESSION route (T1ST/T2ST) whose RT is not imported is
+// dropped before it reaches the resolution tables. ISD/DSD discovery routes
+// bypass the filter because they carry the controller/gateway's own RTs and
+// feed cross-VRF resolution. A re-advertise of the same route under a
+// matched RT is then accepted (the filter does not leave a poison cache).
+func TestApplyMUP_ImportRTFilterDropsUnmatched(t *testing.T) {
+	fh := newFakeHeadend()
+	vm := vrfbgp.NewManager()
+	if err := vm.Bind(vrfbgp.Binding{
+		VRFName: "vrf-mup",
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{
+				{RT: testRTInterwork, Direction: vrfbgp.DirectionImport},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+
+	// ISD with an unmatched RT must STILL be accepted (discovery bypasses the
+	// session-RT filter). This guards against the regression where a narrow
+	// session-RT binding silently dropped the discovery feed that T1ST/T2ST
+	// resolution depends on.
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeISD, RD: "65000:200", Prefix: "10.0.0.0/24",
+		RTs: []string{testRTDirect}, SRv6SID: "fd00:2:2:b::",
+	}})
+	if len(a.mupISD) != 1 {
+		t.Errorf("ISD must bypass the session-RT filter; got %d entries", len(a.mupISD))
+	}
+
+	// T1ST is a SESSION route, so the filter applies: an unmatched RT must
+	// not install a session entry.
+	notImported := mupT1ST("65000:200", "10.1.0.1/32", "192.0.2.1", 256, 9, "")
+	notImported.MUP.RTs = []string{testRTDirect}
+	a.Apply(notImported)
+	if len(a.mupT1ST) != 0 {
+		t.Errorf("T1ST with unmatched RT must not enter mupT1ST; got %v", a.mupT1ST)
+	}
+
+	// Same T1ST re-advertised with the imported RT is accepted.
+	a.Apply(mupT1ST("65000:200", "10.1.0.1/32", "192.0.2.1", 256, 9, ""))
+	if len(a.mupT1ST) != 1 {
+		t.Errorf("T1ST with matched RT must be accepted; got %d entries", len(a.mupT1ST))
+	}
+
+	// Withdraw bypasses the filter even when the RTs no longer match a
+	// binding's import set: a route accepted earlier must still be torn down.
+	wd := mupT1ST("65000:200", "10.1.0.1/32", "192.0.2.1", 256, 9, "")
+	wd.IsWithdraw = true
+	wd.MUP.RTs = []string{testRTDirect} // withdraw NLRI may lose the RT path attr
+	a.Apply(wd)
+	if len(a.mupT1ST) != 0 {
+		t.Errorf("withdraw must bypass the filter and remove the entry; got %v", a.mupT1ST)
+	}
+}
+
+// SetMUPDefaultAllow=true is the escape hatch for the asymmetric-expansion
+// edge case: one binding declares mup_ipv* via the new form, but legacy
+// bindings (whose ImportRTs do not auto-expand into MUP) must keep receiving
+// their MUP traffic. With the knob on, the filter is bypassed even when a
+// MUP-family binding exists.
+func TestApplyMUP_DefaultAllowKnobBypassesFilter(t *testing.T) {
+	fh := newFakeHeadend()
+	vm := vrfbgp.NewManager()
+	if err := vm.Bind(vrfbgp.Binding{
+		VRFName: "vrf-mup",
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{
+				{RT: testRTInterwork, Direction: vrfbgp.DirectionImport},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a.SetMUPDefaultAllow(true)
+
+	// T1ST with an RT the binding does NOT import must still install (the
+	// knob force-allows even though the family-bound filter would drop).
+	notImported := mupT1ST("65000:200", "10.1.0.1/32", "192.0.2.1", 256, 9, "")
+	notImported.MUP.RTs = []string{testRTDirect}
+	a.Apply(notImported)
+	if len(a.mupT1ST) != 1 {
+		t.Errorf("default-allow knob must bypass the filter; got %d T1ST entries", len(a.mupT1ST))
+	}
+}
