@@ -166,7 +166,11 @@ func run(cliCtx *cli.Context) error {
 			if b.BDID > math.MaxUint16 {
 				return fmt.Errorf("bgp.vrf_bindings %q: bd_id %d out of range (max %d)", b.VRFName, b.BDID, math.MaxUint16)
 			}
-			if err := vrfBgpMgr.Bind(configToBinding(b)); err != nil {
+			binding, err := configToBinding(b)
+			if err != nil {
+				return fmt.Errorf("bgp.vrf_bindings %q: %w", b.VRFName, err)
+			}
+			if err := vrfBgpMgr.Bind(binding); err != nil {
 				return fmt.Errorf("bgp.vrf_bindings %q: %w", b.VRFName, err)
 			}
 		}
@@ -369,7 +373,11 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 // vrfbgp.Binding.Normalize (called from Manager.Bind) expands the legacy
 // ImportRTs / ExportRTs when Families is empty, so a vinbero.yml written
 // before the rt-afi-safi schema keeps working unchanged.
-func configToBinding(b config.VrfBindingConfig) vrfbgp.Binding {
+func configToBinding(b config.VrfBindingConfig) (vrfbgp.Binding, error) {
+	fams, err := configFamilies(b.Families)
+	if err != nil {
+		return vrfbgp.Binding{}, err
+	}
 	return vrfbgp.Binding{
 		VRFName:        b.VRFName,
 		RD:             b.RD,
@@ -379,31 +387,35 @@ func configToBinding(b config.VrfBindingConfig) vrfbgp.Binding {
 		MaxPrefixes:    b.MaxPrefixes,
 		DefaultLocator: b.DefaultLocator,
 		BDID:           uint16(b.BDID),
-		Families:       configFamilies(b.Families),
-	}
+		Families:       fams,
+	}, nil
 }
 
 // configFamilies converts the YAML families map into the runtime
 // representation. Returns nil when no families are declared so
 // vrfbgp.Binding.Normalize takes the legacy-expansion path.
 //
-// config.Validate has already rejected any unknown direction string, so
-// vrfbgp.ParseDirection here only fails on a validator drift -- the
-// discarded error is the documented signal of that drift.
-func configFamilies(in map[string]config.FamilyConfig) map[bgp.Family]vrfbgp.FamilyPolicy {
+// config.Validate normally rejects unknown direction strings at Load time,
+// but if the two recognized-direction lists ever drift the daemon must
+// surface the mismatch loudly rather than silently fall back to Direction(0)
+// (which would match no RT).
+func configFamilies(in map[string]config.FamilyConfig) (map[bgp.Family]vrfbgp.FamilyPolicy, error) {
 	if len(in) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make(map[bgp.Family]vrfbgp.FamilyPolicy, len(in))
 	for famStr, fc := range in {
 		rts := make([]vrfbgp.RouteTarget, 0, len(fc.RouteTargets))
 		for _, rt := range fc.RouteTargets {
-			dir, _ := vrfbgp.ParseDirection(rt.Direction)
+			dir, err := vrfbgp.ParseDirection(rt.Direction)
+			if err != nil {
+				return nil, fmt.Errorf("family %q rt %q: %w", famStr, rt.RT, err)
+			}
 			rts = append(rts, vrfbgp.RouteTarget{RT: rt.RT, Direction: dir})
 		}
 		out[bgp.Family(famStr)] = vrfbgp.FamilyPolicy{RouteTargets: rts}
 	}
-	return out
+	return out, nil
 }
 
 // configToLocator converts a config locator declaration into a locator.Locator.
