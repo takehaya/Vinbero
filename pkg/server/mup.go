@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
 // mupLocalKey identifies one locally-originated MUP route. typ is first so an
@@ -45,35 +46,39 @@ func mupKeyFor(mr bgp.MUPRoute) mupLocalKey {
 	return k
 }
 
-// MupServer is the Connect RPC handler for MupService. It originates a node's
-// local BGP MUP routes (SAFI 85) and tracks them in an in-memory table so
-// MupList can report them. advertiser is non-nil exactly when the in-process
-// BGP speaker is up (the same condition gates every RPC with
-// FailedPrecondition); nextHop is the default BGP next hop
+// MupServer is the Connect RPC handler for MupService. It originates a
+// node's local BGP MUP routes (SAFI 85) and tracks them in an in-memory
+// table so MupList can report them. advertiser is non-nil exactly when the
+// in-process BGP speaker is up; nextHop is the default BGP next hop
 // (bgp.global.next_hop) used when a route does not carry its own.
+//
+// mu guards routes + pending only -- it is NOT held across the gobgp
+// Push/Withdraw I/O, so a wedged gobgp management channel cannot block
+// MupList. To keep the cap exact under concurrent creates, a new route
+// reserves a slot (pending++) before Push and finalizes (pending--, store
+// on success) after; the cap counts routes+pending.
+//
+// vrfBindings is the shared VRF<->BGP binding registry. When a Create or
+// Update request carries an empty RTs list and a binding with matching RD
+// declares the route's MUP family with export RTs, those RTs are
+// auto-filled before Push. Nil disables auto-fill.
 type MupServer struct {
-	// mu guards routes + pending only -- it is NOT held across the gobgp
-	// Push/Withdraw I/O (so a wedged gobgp management channel cannot block
-	// MupList or other RPCs). To keep the cap exact under concurrent creates, a
-	// new route reserves a slot (pending++) under mu before its Push and finalizes
-	// (pending--, store on success) under mu after; the cap counts routes+pending.
-	mu      sync.Mutex
-	pending int // NEW routes whose Push is in flight, reserved against the cap
-	// maxRoutes caps how many local MUP routes may be originated (0 = unlimited),
-	// bounding SAFI 85 amplification from the unauthenticated surface; a new route
-	// beyond the cap is a per-item error.
-	maxRoutes  uint32
-	advertiser bgp.MUPController
-	nextHop    string
-	routes     map[mupLocalKey]bgp.MUPRoute
+	mu          sync.Mutex
+	pending     int // NEW routes whose Push is in flight, reserved against the cap
+	maxRoutes   uint32
+	advertiser  bgp.MUPController
+	nextHop     string
+	vrfBindings *vrfbgp.Manager
+	routes      map[mupLocalKey]bgp.MUPRoute
 }
 
-func NewMupServer(advertiser bgp.MUPController, nextHop string, maxRoutes uint32) *MupServer {
+func NewMupServer(advertiser bgp.MUPController, nextHop string, maxRoutes uint32, vrfBindings *vrfbgp.Manager) *MupServer {
 	return &MupServer{
-		advertiser: advertiser,
-		nextHop:    nextHop,
-		maxRoutes:  maxRoutes,
-		routes:     make(map[mupLocalKey]bgp.MUPRoute),
+		advertiser:  advertiser,
+		nextHop:     nextHop,
+		maxRoutes:   maxRoutes,
+		vrfBindings: vrfBindings,
+		routes:      make(map[mupLocalKey]bgp.MUPRoute),
 	}
 }
 
@@ -82,9 +87,40 @@ func (s *MupServer) disabledErr() error {
 		errors.New("MUP service requires the in-process BGP speaker (--bgp-enabled)"))
 }
 
-// upsert handles both Create and Update: each is an idempotent originate of the
-// MUP route keyed by its type + identifying fields. The route is stored only
-// after a successful Push, so MupList never reports a route the encoder rejected.
+// fillMUPExportRTs returns the RTs that should be attached to mr at advertise
+// time. Priority: explicit mr.RTs > binding-derived export RTs > empty. The
+// binding is looked up by RD and the family is derived from the route's
+// mobile-user-plane address. A nil registry, an ambiguous RD (multiple
+// bindings share it), or a binding that does not declare the matching
+// mup_ipv* family all leave mr.RTs unchanged — operators who already pass
+// --route-targets always win.
+func fillMUPExportRTs(mr bgp.MUPRoute, vrfBindings *vrfbgp.Manager) []string {
+	if len(mr.RTs) > 0 || vrfBindings == nil || mr.RD == "" {
+		return mr.RTs
+	}
+	fam, ok := mr.Family()
+	if !ok {
+		return mr.RTs
+	}
+	b, ok := vrfBindings.BindingByRD(mr.RD)
+	if !ok {
+		return mr.RTs
+	}
+	if rts := b.ExportRTsForFamily(fam); len(rts) > 0 {
+		return rts
+	}
+	return mr.RTs
+}
+
+// upsert handles both Create and Update: each is an idempotent originate of
+// the MUP route keyed by its type + identifying fields. The route is stored
+// only after a successful Push, so MupList never reports a route the encoder
+// rejected.
+//
+// The cap-and-reserve dance (pending counter) admits a NEW route under the
+// cap atomically while Push runs outside the lock; an update of an existing
+// key is always allowed. The counter is conservative -- it can over-count
+// but never under-count -- so the cap is never exceeded.
 func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.OperationError {
 	errs := make([]*v1.OperationError, 0)
 	for _, r := range routes {
@@ -93,9 +129,6 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		// Default an empty next hop to the configured bgp.global.next_hop, then
-		// require it to be a routable IPv6 (SRv6 over IPv6); empty / IPv4 / :: would
-		// serialize into a route no PE can forward toward.
 		if mr.NextHop == "" {
 			mr.NextHop = s.nextHop
 		}
@@ -106,11 +139,8 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 			})
 			continue
 		}
-		// Cap + reserve atomically, then Push outside the lock. A NEW route reserves
-		// a slot (pending++) so a concurrent create sees it and cannot also pass an
-		// under-cap check; an update of an existing key is always allowed. The
-		// counter is conservative (it can only over-count, never under-count), so
-		// the cap is never exceeded. The route is stored only after Push succeeds.
+		mr.RTs = fillMUPExportRTs(mr, s.vrfBindings)
+
 		key := mupKeyFor(mr)
 		s.mu.Lock()
 		_, exists := s.routes[key]
@@ -173,17 +203,13 @@ func (s *MupServer) MupDelete(
 	}
 	errs := make([]*v1.OperationError, 0)
 	for _, r := range req.Msg.GetRoutes() {
-		// parseMUPRoute re-runs validateMUPRouteFields so the T2ST teid_len
-		// narrowing cast cannot wrap into a key that mismatches what was pushed.
 		mr, err := parseMUPRoute(r)
 		if err != nil {
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue
 		}
-		// Withdraw outside the lock (the lock never spans gobgp I/O), then drop the
-		// table entry. WithdrawMUP* no-ops for an unadvertised route. A concurrent
-		// same-key create races here, but the RIB is authoritative and the table is
-		// the List view -- the same benign window the create path accepts.
+		// Withdraw outside the lock (it never spans gobgp I/O), then drop
+		// the table entry. WithdrawMUP* no-ops for an unadvertised route.
 		if err := withdrawMUPRoute(ctx, s.advertiser, mr); err != nil {
 			errs = append(errs, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue

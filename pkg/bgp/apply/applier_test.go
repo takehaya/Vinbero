@@ -355,6 +355,64 @@ func TestApplier_ImportRTFilter(t *testing.T) {
 	}
 }
 
+// TestApplier_ImportRTFilterPerFamily confirms the new family-aware filter:
+// a vpnv6-only binding does NOT gate a vpnv4 route (vpnv4 stays
+// default-allow until its own family binding arrives), and a vpnv4 binding
+// only filters the vpnv4 family even when vpnv6 is missing.
+func TestApplier_ImportRTFilterPerFamily(t *testing.T) {
+	fh := newFakeHeadend()
+	vm := vrfbgp.NewManager()
+	// Bind only the vpnv6 family explicitly via the new Families form.
+	if err := vm.Bind(vrfbgp.Binding{
+		VRFName: "vrf-v6only",
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyVPNv6: {RouteTargets: []vrfbgp.RouteTarget{
+				{RT: "65000:600", Direction: vrfbgp.DirectionImport},
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+
+	// vpnv4 carries an RT the vpnv6 binding does NOT import, but vpnv4 has
+	// no binding so default-allow keeps the route.
+	a.Apply(bgp.RouteEvent{
+		Family: bgp.FamilyVPNv4,
+		VPN: &bgp.VPNRoute{
+			Family: bgp.FamilyVPNv4, Prefix: "10.11.0.0/24", RD: "65000:11",
+			SRv6SID: "fd00:1:1:f::", RTs: []string{"65000:999"},
+		},
+	})
+	if _, ok := fh.v4created["10.11.0.0/24"]; !ok {
+		t.Error("vpnv4 must stay default-allow when only vpnv6 has a binding")
+	}
+
+	// vpnv6 with the matching RT is accepted.
+	a.Apply(bgp.RouteEvent{
+		Family: bgp.FamilyVPNv6,
+		VPN: &bgp.VPNRoute{
+			Family: bgp.FamilyVPNv6, Prefix: "2001:db8:6::/64", RD: "65000:12",
+			SRv6SID: "fd00:1:1:10::", RTs: []string{"65000:600"},
+		},
+	})
+	if _, ok := fh.v6created["2001:db8:6::/64"]; !ok {
+		t.Error("vpnv6 must accept a route whose RT the family-bound VRF imports")
+	}
+
+	// vpnv6 with a non-matching RT is dropped (the family has a binding now).
+	a.Apply(bgp.RouteEvent{
+		Family: bgp.FamilyVPNv6,
+		VPN: &bgp.VPNRoute{
+			Family: bgp.FamilyVPNv6, Prefix: "2001:db8:7::/64", RD: "65000:13",
+			SRv6SID: "fd00:1:1:11::", RTs: []string{"65000:999"},
+		},
+	})
+	if _, ok := fh.v6created["2001:db8:7::/64"]; ok {
+		t.Error("vpnv6 route with an unmatched RT must be dropped once the family has a binding")
+	}
+}
+
 // TestApplier_CreateErrorLogged confirms a headend write failure does
 // not panic the handler (errors are logged, not returned).
 func TestApplier_CreateErrorLogged(t *testing.T) {

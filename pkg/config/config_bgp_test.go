@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestLoad_BGPPeerDefaults pins that per-peer timer defaults survive the
 // load path. The defaults live on slice-of-struct fields, which the
@@ -176,5 +179,118 @@ bgp:
 	}
 	if b.MaxPrefixes != 1000 {
 		t.Errorf("binding MaxPrefixes = %d, want 1000", b.MaxPrefixes)
+	}
+}
+
+// TestLoad_VrfBindingFamiliesRoundTrip pins that the new rt-afi-safi
+// families form survives Load: every family is parsed, and each
+// route-target retains the operator-supplied direction string verbatim
+// (translation to the runtime Direction bitmask happens later, in
+// cmd/vinberod/configToBinding).
+func TestLoad_VrfBindingFamiliesRoundTrip(t *testing.T) {
+	const y = `
+bgp:
+  vrf_bindings:
+    - vrf_name: vrf1
+      rd: "65100:200"
+      families:
+        vpnv4:
+          route_targets:
+            - rt: "65000:200"
+              direction: both
+        mup_ipv4:
+          route_targets:
+            - rt: "65000:6000"
+              direction: import
+            - rt: "65000:2000"
+              direction: export
+`
+	cfg, err := Load(y)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.BGP.VrfBindings) != 1 {
+		t.Fatalf("VrfBindings len = %d, want 1", len(cfg.BGP.VrfBindings))
+	}
+	b := cfg.BGP.VrfBindings[0]
+	if len(b.Families) != 2 {
+		t.Fatalf("families len = %d, want 2", len(b.Families))
+	}
+	if vpnv4, ok := b.Families["vpnv4"]; !ok || len(vpnv4.RouteTargets) != 1 || vpnv4.RouteTargets[0].RT != "65000:200" {
+		t.Errorf("vpnv4 round trip = %+v", b.Families["vpnv4"])
+	}
+	mup, ok := b.Families["mup_ipv4"]
+	if !ok || len(mup.RouteTargets) != 2 {
+		t.Fatalf("mup_ipv4 round trip = %+v", mup)
+	}
+	if mup.RouteTargets[0].Direction != "import" || mup.RouteTargets[1].Direction != "export" {
+		t.Errorf("mup directions = %+v", mup.RouteTargets)
+	}
+}
+
+// TestLoad_VrfBindingUnknownFamilyRejected pins that a typoed family name
+// (e.g. "vpnv8") fails Load rather than silently dropping the family.
+func TestLoad_VrfBindingUnknownFamilyRejected(t *testing.T) {
+	const y = `
+bgp:
+  vrf_bindings:
+    - vrf_name: vrf1
+      families:
+        vpnv8:
+          route_targets:
+            - rt: "65000:200"
+`
+	_, err := Load(y)
+	if err == nil {
+		t.Fatal("Load should reject an unknown family name")
+	}
+	if !strings.Contains(err.Error(), "unknown family") {
+		t.Errorf("error %q must mention 'unknown family' to help operators diagnose", err)
+	}
+}
+
+// TestLoad_VrfBindingUnknownDirectionRejected pins that direction "inbound"
+// (a common typo for "import") fails Load.
+func TestLoad_VrfBindingUnknownDirectionRejected(t *testing.T) {
+	const y = `
+bgp:
+  vrf_bindings:
+    - vrf_name: vrf1
+      families:
+        vpnv4:
+          route_targets:
+            - rt: "65000:200"
+              direction: inbound
+`
+	_, err := Load(y)
+	if err == nil {
+		t.Fatal("Load should reject an unknown direction string")
+	}
+	if !strings.Contains(err.Error(), "unknown direction") {
+		t.Errorf("error %q must mention 'unknown direction' to help operators diagnose", err)
+	}
+}
+
+// Mixing the legacy import_rts/export_rts lists with the new families map in
+// the same binding must fail Load: runtime Normalize treats Families as the
+// source of truth so the legacy side would be silently ignored otherwise.
+func TestLoad_VrfBindingFamiliesAndLegacyMutexed(t *testing.T) {
+	const y = `
+bgp:
+  vrf_bindings:
+    - vrf_name: vrf1
+      import_rts: ["65000:1"]
+      families:
+        vpnv4:
+          route_targets:
+            - rt: "65000:2"
+              direction: import
+`
+	_, err := Load(y)
+	if err == nil {
+		t.Fatal("Load must reject a binding that mixes legacy and families forms")
+	}
+	if !strings.Contains(err.Error(), "families and import_rts/export_rts") {
+		t.Errorf("error %q must call out the mutex (legacy vs families) so the operator can fix it", err)
 	}
 }

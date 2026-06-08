@@ -7,6 +7,7 @@ import (
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
 // fakeMUPController records the per-type advertise / withdraw calls so a test
@@ -92,7 +93,7 @@ func mupListRoutes(t *testing.T, s *MupServer) []*v1.BgpMupRoute {
 
 // A nil advertiser (BGP disabled) makes every RPC fail FailedPrecondition.
 func TestMupServer_DisabledWhenNoBGP(t *testing.T) {
-	s := NewMupServer(nil, "", 0)
+	s := NewMupServer(nil, "", 0, nil)
 	if _, err := s.MupList(context.Background(), connect.NewRequest(&v1.MupListRequest{})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("MupList err = %v, want FailedPrecondition", err)
 	}
@@ -111,7 +112,7 @@ func TestMupServer_DisabledWhenNoBGP(t *testing.T) {
 // defaults an empty next hop to the server's configured value.
 func TestMupServer_CreateAdvertisesPerType(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH, 0)
+	s := NewMupServer(adv, mupTestNH, 0, nil)
 	msg := mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24", Srv6Sid: "fd00:a:0:1::"},
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
@@ -139,7 +140,7 @@ func TestMupServer_CreateAdvertisesPerType(t *testing.T) {
 // advertise with no usable next hop is a per-item error: not pushed, not stored.
 func TestMupServer_RequiresIPv6NextHop(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, "", 0) // no configured next hop
+	s := NewMupServer(adv, "", 0, nil) // no configured next hop
 	msg := mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24"},                   // empty + no default
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1", NextHop: "192.0.2.1"}, // IPv4
@@ -159,7 +160,7 @@ func TestMupServer_RequiresIPv6NextHop(t *testing.T) {
 // An out-of-range teid_len is rejected per-item and not stored.
 func TestMupServer_FieldValidation(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH, 0)
+	s := NewMupServer(adv, mupTestNH, 0, nil)
 	msg := mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "t2st", Rd: "65000:1", Endpoint: "2001:db8::9", Teid: 1, TeidLen: 33},
 	)
@@ -175,7 +176,7 @@ func TestMupServer_FieldValidation(t *testing.T) {
 // List never reports a route BGP rejected.
 func TestMupServer_PushFailureNotStored(t *testing.T) {
 	adv := &fakeMUPController{err: context.Canceled}
-	s := NewMupServer(adv, mupTestNH, 0)
+	s := NewMupServer(adv, mupTestNH, 0, nil)
 	msg := mupCreate(t, s, &v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24"})
 	if len(msg.Errors) != 1 {
 		t.Fatalf("a push failure must be a per-item error; errors=%v", msg.Errors)
@@ -190,7 +191,7 @@ func TestMupServer_PushFailureNotStored(t *testing.T) {
 // local table.
 func TestMupServer_DeleteWithdrawsAndDrops(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH, 0)
+	s := NewMupServer(adv, mupTestNH, 0, nil)
 	t2st := &v1.BgpMupRoute{RouteType: "t2st", Rd: "65000:1", Endpoint: "2001:db8::9", Teid: 200, TeidLen: 24}
 	mupCreate(t, s, t2st)
 	resp, err := s.MupDelete(context.Background(), connect.NewRequest(&v1.MupDeleteRequest{Routes: []*v1.BgpMupRoute{t2st}}))
@@ -215,7 +216,7 @@ func TestMupServer_DeleteWithdrawsAndDrops(t *testing.T) {
 // still shows exactly one route.
 func TestMupServer_UpdateReplacesInPlace(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH, 0)
+	s := NewMupServer(adv, mupTestNH, 0, nil)
 	r := &v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24", Srv6Sid: "fd00:a:0:1::"}
 	mupCreate(t, s, r)
 	r.Srv6Sid = "fd00:a:0:2::" // change a non-key field
@@ -238,7 +239,7 @@ func TestMupServer_UpdateReplacesInPlace(t *testing.T) {
 // {rd,prefix,teid=0} with the same rd+prefix are two distinct entries.
 func TestMupServer_TypeDisambiguatesKey(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH, 0)
+	s := NewMupServer(adv, mupTestNH, 0, nil)
 	mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "10.0.0.0/24"},
 		&v1.BgpMupRoute{RouteType: "t1st", Rd: "65000:1", Prefix: "10.0.0.0/24", Teid: 0},
@@ -252,7 +253,7 @@ func TestMupServer_TypeDisambiguatesKey(t *testing.T) {
 // update of an existing route is always allowed.
 func TestMupServer_OriginationCap(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH, 2)
+	s := NewMupServer(adv, mupTestNH, 2, nil)
 	if msg := mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "10.0.0.0/24"},
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
@@ -277,7 +278,7 @@ func TestMupServer_OriginationCap(t *testing.T) {
 // uint32 widening (qfi/rqi/teid_len/segment_id2) and the route_type string.
 func TestMupServer_ListRoundTrips(t *testing.T) {
 	adv := &fakeMUPController{}
-	s := NewMupServer(adv, mupTestNH, 0)
+	s := NewMupServer(adv, mupTestNH, 0, nil)
 	mupCreate(t, s,
 		&v1.BgpMupRoute{RouteType: "isd", Rd: "65000:1", Prefix: "172.16.0.0/24"},
 		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
@@ -302,5 +303,131 @@ func TestMupServer_ListRoundTrips(t *testing.T) {
 	}
 	if r := byType["t2st"]; r != nil && (r.GetTeidLen() != 24 || r.GetSegmentId2() != 7) {
 		t.Errorf("t2st fields did not round-trip: teid_len=%d segment_id2=%d", r.GetTeidLen(), r.GetSegmentId2())
+	}
+}
+
+// mupBindingMgrWithVRF returns a fresh Manager pre-bound with one VRF whose
+// RD and export RTs are supplied. Tests use it to point a Create at a
+// matching binding so the auto-fill path fires.
+func mupBindingMgrWithVRF(t *testing.T, vrfName, rd string, families map[bgp.Family]vrfbgp.FamilyPolicy) *vrfbgp.Manager {
+	t.Helper()
+	m := vrfbgp.NewManager()
+	if err := m.Bind(vrfbgp.Binding{
+		VRFName:  vrfName,
+		RD:       rd,
+		Families: families,
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	return m
+}
+
+// When mr.RTs is empty and a binding with matching RD declares the route's
+// mup_ipv* family with export RTs, MupCreate fills the RTs from the binding
+// before Push. The operator can stop repeating --route-targets on every call.
+func TestMupServer_AutoFillRTsFromBinding(t *testing.T) {
+	adv := &fakeMUPController{}
+	mgr := mupBindingMgrWithVRF(t, "vrf-mup", "65000:1", map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:6000", Direction: vrfbgp.DirectionBoth}}},
+	})
+	s := NewMupServer(adv, mupTestNH, 0, mgr)
+	mupCreate(t, s,
+		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
+	)
+	if len(adv.pushedDSD) != 1 || len(adv.pushedDSD[0].RTs) != 1 || adv.pushedDSD[0].RTs[0] != "100:6000" {
+		t.Errorf("DSD must be advertised with binding-derived RT [100:6000]; got %v", adv.pushedDSD)
+	}
+}
+
+// Explicit RTs on the request win over the binding's export RTs so an operator
+// can still override the binding-driven default on a single call.
+func TestMupServer_ExplicitRTsBeatBinding(t *testing.T) {
+	adv := &fakeMUPController{}
+	mgr := mupBindingMgrWithVRF(t, "vrf-mup", "65000:1", map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:6000", Direction: vrfbgp.DirectionBoth}}},
+	})
+	s := NewMupServer(adv, mupTestNH, 0, mgr)
+	mupCreate(t, s,
+		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1", RouteTargets: []string{"100:9999"}},
+	)
+	if len(adv.pushedDSD) != 1 || len(adv.pushedDSD[0].RTs) != 1 || adv.pushedDSD[0].RTs[0] != "100:9999" {
+		t.Errorf("explicit RT must beat binding-derived RT; got %v", adv.pushedDSD)
+	}
+}
+
+// A binding whose RD does not match the route is not consulted, so the route's
+// empty RTs go on the wire verbatim (matching the legacy behavior).
+func TestMupServer_NoMatchingBindingKeepsEmptyRTs(t *testing.T) {
+	adv := &fakeMUPController{}
+	mgr := mupBindingMgrWithVRF(t, "vrf-mup", "65000:1", map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:6000", Direction: vrfbgp.DirectionBoth}}},
+	})
+	s := NewMupServer(adv, mupTestNH, 0, mgr)
+	mupCreate(t, s,
+		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:999", Address: "10.0.0.1"},
+	)
+	if len(adv.pushedDSD) != 1 || len(adv.pushedDSD[0].RTs) != 0 {
+		t.Errorf("non-matching RD must leave RTs empty; got %v", adv.pushedDSD)
+	}
+}
+
+// Two bindings sharing the same RD is ambiguous; BindingByRD returns ok=false
+// so the auto-fill backs off and leaves the route's RTs untouched. Without
+// this, the route would be advertised under one binding's RTs while the
+// operator believed it was the other's.
+func TestMupServer_AmbiguousRDLeavesRTsEmpty(t *testing.T) {
+	adv := &fakeMUPController{}
+	mgr := vrfbgp.NewManager()
+	for _, name := range []string{"vrf-a", "vrf-b"} {
+		if err := mgr.Bind(vrfbgp.Binding{
+			VRFName: name, RD: "65000:1",
+			Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+				bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:6000", Direction: vrfbgp.DirectionBoth}}},
+			},
+		}); err != nil {
+			t.Fatalf("Bind: %v", err)
+		}
+	}
+	s := NewMupServer(adv, mupTestNH, 0, mgr)
+	mupCreate(t, s,
+		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
+	)
+	if len(adv.pushedDSD) != 1 || len(adv.pushedDSD[0].RTs) != 0 {
+		t.Errorf("ambiguous RD must not auto-fill; got %v", adv.pushedDSD)
+	}
+}
+
+// A binding whose Families map does not declare mup_ipv* leaves the RTs empty
+// even when its RD matches: the auto-fill is family-scoped, so an L3VPN-only
+// binding cannot leak its vpnv4 RTs onto a MUP route.
+func TestMupServer_BindingWithoutMUPFamilyKeepsEmptyRTs(t *testing.T) {
+	adv := &fakeMUPController{}
+	mgr := mupBindingMgrWithVRF(t, "vrf-l3", "65000:1", map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyVPNv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:6000", Direction: vrfbgp.DirectionBoth}}},
+	})
+	s := NewMupServer(adv, mupTestNH, 0, mgr)
+	mupCreate(t, s,
+		&v1.BgpMupRoute{RouteType: "dsd", Rd: "65000:1", Address: "10.0.0.1"},
+	)
+	if len(adv.pushedDSD) != 1 || len(adv.pushedDSD[0].RTs) != 0 {
+		t.Errorf("binding without mup_ipv4 family must not auto-fill from vpnv4 RTs; got %v", adv.pushedDSD)
+	}
+}
+
+// IPv6-family MUP routes (Address / Endpoint / Prefix are v6) auto-fill from
+// the binding's mup_ipv6 family — not mup_ipv4. This guards against the
+// regression where Family() detection is the wrong AF.
+func TestMupServer_AutoFillUsesIPv6FamilyForV6Endpoint(t *testing.T) {
+	adv := &fakeMUPController{}
+	mgr := mupBindingMgrWithVRF(t, "vrf-mup6", "65000:1", map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:4444", Direction: vrfbgp.DirectionBoth}}},
+		bgp.FamilyMUPIPv6: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:6666", Direction: vrfbgp.DirectionBoth}}},
+	})
+	s := NewMupServer(adv, mupTestNH, 0, mgr)
+	mupCreate(t, s,
+		&v1.BgpMupRoute{RouteType: "t2st", Rd: "65000:1", Endpoint: "2001:db8::9", Teid: 1, TeidLen: 24},
+	)
+	if len(adv.pushedT2ST) != 1 || len(adv.pushedT2ST[0].RTs) != 1 || adv.pushedT2ST[0].RTs[0] != "100:6666" {
+		t.Errorf("v6 endpoint must auto-fill from mup_ipv6 (100:6666); got %v", adv.pushedT2ST)
 	}
 }

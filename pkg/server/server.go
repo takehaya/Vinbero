@@ -106,8 +106,10 @@ func (s *Server) Setup() {
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
 
-	// BgpRoute service (operator-explicit BGP advertise / withdraw).
-	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv, s.evpnAdv, s.mupAdv)
+	// BgpRoute service (operator-explicit BGP advertise / withdraw). The
+	// VRF binding registry lets BgpAdvertiseMup auto-fill an empty RTs
+	// list from the binding whose RD matches the route, mirroring MupCreate.
+	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv, s.evpnAdv, s.mupAdv, s.vrfBgpMgr)
 	bgpRoutePath, bgpRouteHandler := vinberov1connect.NewBgpRouteServiceHandler(bgpRouteServer)
 	s.mux.Handle(bgpRoutePath, bgpRouteHandler)
 	s.logger.Info("Registered BgpRouteService", zap.String("path", bgpRoutePath))
@@ -121,9 +123,11 @@ func (s *Server) Setup() {
 	s.mux.Handle(srPolicyPath, srPolicyHandler)
 	s.logger.Info("Registered SrPolicyService", zap.String("path", srPolicyPath))
 
-	// Mup service (local BGP MUP route origination, SAFI 85). s.mupAdv is nil
-	// when BGP is disabled, in which case the RPCs return FailedPrecondition.
-	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.MupMaxRoutes)
+	// Mup service (local BGP MUP route origination, SAFI 85). Nil mupAdv
+	// makes the RPCs return FailedPrecondition. The VRF binding registry
+	// lets MupCreate/Update auto-fill an empty RTs list from the binding
+	// whose RD matches.
+	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.MupMaxRoutes, s.vrfBgpMgr)
 	mupPath, mupHandler := vinberov1connect.NewMupServiceHandler(mupServer)
 	s.mux.Handle(mupPath, mupHandler)
 	s.logger.Info("Registered MupService", zap.String("path", mupPath))

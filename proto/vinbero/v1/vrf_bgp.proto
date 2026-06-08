@@ -6,30 +6,92 @@ import "vinbero/v1/enums.proto";
 
 option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 
-// VrfBgpService binds a VRF to its BGP route-target policy. A VPNv4 /
-// VPNv6 route received over BGP is accepted only when one of its route
-// targets matches some VRF's import_rts; advertised routes carry the
-// VRF's export_rts. default_locator names the locator the VRF's local
-// Endpoint SIDs are allocated from.
+// VrfBgpService binds a VRF to its BGP route-target policy across all
+// supported address families (L3VPN VPNv4 / VPNv6, EVPN, MUP IPv4 /
+// IPv6). A received route is accepted only when one of its route
+// targets matches the binding's per-family import RTs; advertised
+// routes carry the per-family export RTs. default_locator names the
+// locator the VRF's local Endpoint SIDs are allocated from.
 //
 // Depends on: NetworkResourceService (the vrf_name must already exist)
 // and LocatorService (default_locator must be registered).
+//
+// API surface is the primary operator interface. YAML config (in
+// pkg/config/) is a thin bootstrap form; runtime changes go through
+// these RPCs.
 service VrfBgpService {
+  // Binding-level RPCs (existing).
   rpc VrfBgpBind(VrfBgpBindRequest) returns (VrfBgpBindResponse);
   rpc VrfBgpUnbind(VrfBgpUnbindRequest) returns (VrfBgpUnbindResponse);
   rpc VrfBgpList(VrfBgpListRequest) returns (VrfBgpListResponse);
+
+  // Full-replace and atomic batch mutation on a single binding.
+  // UpdateBinding overwrites the binding's families and other fields
+  // entirely (client is responsible for read-modify-write); the
+  // expected_version field is reserved for future optimistic
+  // concurrency control (P2) and is ignored when empty in P0.
+  rpc UpdateBinding(UpdateBindingRequest) returns (UpdateBindingResponse);
+  // BatchModifyRouteTargets applies a list of route-target add/remove
+  // operations on a single binding atomically: any op failing rolls
+  // back the whole batch and the binding state is unchanged.
+  rpc BatchModifyRouteTargets(BatchModifyRouteTargetsRequest) returns (BatchModifyRouteTargetsResponse);
+
+  // Route-target-level RPCs operate on a single (family, rt, direction)
+  // triple within an existing binding. AddRouteTarget is idempotent:
+  // adding the same RT with the same direction is a no-op; with a
+  // different direction the direction bitmask is OR'd. RemoveRouteTarget
+  // with a direction strips that direction bit only; with an empty
+  // direction strips the RT entirely. ListRouteTargets accepts optional
+  // family and direction filters.
+  rpc AddRouteTarget(AddRouteTargetRequest) returns (AddRouteTargetResponse);
+  rpc RemoveRouteTarget(RemoveRouteTargetRequest) returns (RemoveRouteTargetResponse);
+  rpc ListRouteTargets(ListRouteTargetsRequest) returns (ListRouteTargetsResponse);
+
+  // Family-level RPCs add or remove an entire AF policy on a binding.
+  // AddFamily with an existing family returns AlreadyExists (use
+  // UpdateBinding to overwrite). RemoveFamily strips the AF policy
+  // entry only; the binding itself stays.
+  rpc AddFamily(AddFamilyRequest) returns (AddFamilyResponse);
+  rpc RemoveFamily(RemoveFamilyRequest) returns (RemoveFamilyResponse);
 }
 
-// VrfBgpBinding is one VRF's BGP route-target policy.
+// VrfBgpBinding is one VRF's BGP route-target policy across all
+// address families it participates in.
 message VrfBgpBinding {
   string vrf_name = 1;
-  repeated string import_rts = 2; // route targets accepted on receive, "65000:100" form
-  repeated string export_rts = 3; // route targets attached on advertise
+  // Deprecated legacy form. New clients use families instead. Kept for
+  // backward compatibility with existing YAML configs and clients that
+  // were written against the L3VPN-only RT model. Server-side Normalize
+  // expands these into families (vpnv4 + vpnv6 if bd_id == 0, evpn if
+  // bd_id != 0) when families is empty.
+  // TODO: drop in P2 and add `reserved 2, 3;` to prevent reuse.
+  repeated string import_rts = 2;
+  repeated string export_rts = 3;
   string default_locator = 4; // locator name for this VRF's local SIDs
-  uint32 bd_id = 5; // bridge domain EVPN routes matching import_rts install into; 0 = L3VPN-only
+  uint32 bd_id = 5; // bridge domain EVPN routes install into; 0 = L3VPN-only. Server narrows to uint16, rejects >65535.
   string rd = 6; // route distinguisher for auto-advertised local prefixes, "65100:200" form
   repeated string redistribute = 7; // "connected"/"static" protocols auto-advertised; empty = receive-only
   uint32 max_prefixes = 8; // cap on auto-advertised prefixes for this VRF; 0 = unlimited
+
+  // Primary form. Maps family name to its per-family RT policy.
+  // family key is one of: "vpnv4", "vpnv6", "evpn", "mup_ipv4", "mup_ipv6".
+  map<string, VrfBgpFamily> families = 9;
+}
+
+// VrfBgpFamily is one AF's policy under a binding. route_targets is
+// the list of RT entries (each with its own direction). Future
+// AF-specific extensions can be added here without touching the
+// binding root.
+message VrfBgpFamily {
+  repeated VrfBgpRouteTarget route_targets = 1;
+}
+
+// VrfBgpRouteTarget is one route-target entry under one AF.
+// direction is one of "import", "export", "both"; empty direction is
+// treated as "both" for ergonomics (matches RFC 4364 §4.3 convention).
+message VrfBgpRouteTarget {
+  string rt = 1;
+  string direction = 2;
 }
 
 message VrfBgpBindRequest {
@@ -51,4 +113,95 @@ message VrfBgpUnbindResponse {
 message VrfBgpListRequest {}
 message VrfBgpListResponse {
   repeated VrfBgpBinding bindings = 1;
+}
+
+// UpdateBinding overwrites an existing binding's families and other
+// fields entirely. expected_version is reserved for P2 optimistic
+// concurrency control; in P0 it must be empty.
+message UpdateBindingRequest {
+  VrfBgpBinding binding = 1;
+  string expected_version = 2;
+}
+message UpdateBindingResponse {
+  VrfBgpBinding binding = 1;
+  string version = 2; // populated in P2; placeholder in P0
+}
+
+// BatchModifyRouteTargets applies a list of route-target add/remove
+// operations on one binding atomically. The whole batch rolls back on
+// any single op's failure; the binding state is unchanged.
+message BatchModifyRouteTargetsRequest {
+  string vrf_name = 1;
+  repeated RouteTargetOp ops = 2;
+}
+message BatchModifyRouteTargetsResponse {
+  VrfBgpBinding binding = 1;
+}
+
+// RouteTargetOp is one (kind, family, route_target) tuple inside a
+// batch. ADD adds or extends the direction bitmask of the route
+// target; REMOVE strips a direction bit (or the whole RT if direction
+// is empty).
+message RouteTargetOp {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_ADD = 1;
+    KIND_REMOVE = 2;
+  }
+  Kind kind = 1;
+  string family = 2;
+  VrfBgpRouteTarget route_target = 3;
+}
+
+message AddRouteTargetRequest {
+  string vrf_name = 1;
+  string family = 2;
+  VrfBgpRouteTarget route_target = 3;
+}
+message AddRouteTargetResponse {
+  VrfBgpBinding binding = 1;
+}
+
+message RemoveRouteTargetRequest {
+  string vrf_name = 1;
+  string family = 2;
+  string rt = 3;
+  // Empty direction removes the RT from the family entirely.
+  string direction = 4;
+}
+message RemoveRouteTargetResponse {
+  VrfBgpBinding binding = 1;
+}
+
+message ListRouteTargetsRequest {
+  string vrf_name = 1;
+  // Empty family lists every family in the binding.
+  string family = 2;
+  // Empty direction lists every direction.
+  string direction = 3;
+}
+message ListRouteTargetsResponse {
+  repeated FamilyRouteTargets families = 1;
+}
+message FamilyRouteTargets {
+  string family = 1;
+  repeated VrfBgpRouteTarget route_targets = 2;
+}
+
+message AddFamilyRequest {
+  string vrf_name = 1;
+  string family = 2;
+  // Empty config registers the family with no RT entries.
+  VrfBgpFamily config = 3;
+}
+message AddFamilyResponse {
+  VrfBgpBinding binding = 1;
+}
+
+message RemoveFamilyRequest {
+  string vrf_name = 1;
+  string family = 2;
+}
+message RemoveFamilyResponse {
+  VrfBgpBinding binding = 1;
 }

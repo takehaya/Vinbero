@@ -230,15 +230,17 @@ func (e *Exporter) Stop() {
 	e.Close()
 }
 
-// EnableVRF makes b's local prefixes eligible for auto advertise and returns
-// the routing table id the watcher should observe. It resolves the VRF device,
-// mints an End.DT4 and an End.DT6 service SID from the binding's default
-// locator, and installs them into sid_function_map so a remote PE's receive
-// side can decapsulate toward this node. A binding without an RD or a default
-// locator is rejected because it cannot form a VPN route. EnableVRF does not
-// itself advertise anything; advertisements follow from OnRoute as prefixes
-// appear.
+// EnableVRF makes b's local prefixes eligible for auto advertise and
+// returns the routing table id the watcher should observe. It resolves the
+// VRF device, mints an End.DT4 and an End.DT6 service SID from the binding's
+// default locator, and installs them into sid_function_map. A binding
+// without an RD or a default locator is rejected. EnableVRF does not itself
+// advertise anything; advertisements follow from OnRoute as prefixes appear.
+//
+// Normalize runs first so a unit-test or any legacy caller that set only
+// the flat ExportRTs sees populated Families in buildVPNRoute.
 func (e *Exporter) EnableVRF(b vrfbgp.Binding) (uint32, error) {
+	b = b.Normalize()
 	if b.RD == "" {
 		return 0, fmt.Errorf("vrf %q: rd is required for auto advertise", b.VRFName)
 	}
@@ -348,10 +350,14 @@ func (e *Exporter) Close() {
 	}
 }
 
-// AddVRF enables a VRF binding at runtime (e.g. from a VrfBgpBind RPC) after
-// Start has begun watching. A binding with no redistribute set is a no-op.
-// next_hop is assumed already validated by Start.
+// AddVRF enables a VRF binding at runtime (e.g. from a VrfBgpBind RPC)
+// after Start has begun watching. A binding with no redistribute set is a
+// no-op. next_hop is assumed already validated by Start.
+//
+// Normalize runs first so a caller that has not gone through commitBinding
+// (a unit test, the boot path) hands ExportRTsForFamily a populated map.
 func (e *Exporter) AddVRF(b vrfbgp.Binding) error {
+	b = b.Normalize()
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
 	if e.stopped {
@@ -379,19 +385,20 @@ func (e *Exporter) AddVRF(b vrfbgp.Binding) error {
 	return e.enableAndWatch(b, true)
 }
 
-// vrfAdvertiseUnchanged reports whether re-enabling b would produce the same
-// VPNv4/VPNv6 advertisements and SIDs as the current state, so AddVRF can skip a
-// needless flap. It compares the cheap binding fields that shape origination
-// FIRST -- RD and export RTs (route keys + attributes), default locator (SID
-// minting), MaxPrefixes (cap), and the redistribute set (which prefixes export) --
-// so a binding change forces a re-enable without a netlink resolve. Only when the
-// binding matches does it resolve the device, since the one remaining trigger is a
-// VRF netdev recreated under the same name with a new ifindex/table (the
-// End.DT4/DT6 aux and table mapping would be stale). A transient resolve failure
-// on an otherwise-unchanged binding is treated as unchanged: tearing down a
-// working VRF over a momentary netlink error is worse than leaving it, and a later
-// re-bind reconciles once resolve recovers.
+// vrfAdvertiseUnchanged reports whether re-enabling b would produce the
+// same VPNv4/VPNv6 advertisements and SIDs as the current state, so AddVRF
+// can skip a needless flap. It compares the binding fields that shape
+// origination first (RD, export RTs, default locator, MaxPrefixes,
+// redistribute set) and only resolves the device when those match -- the
+// remaining trigger is a VRF netdev recreated under the same name with a
+// new ifindex/table. A transient resolve failure on an otherwise-unchanged
+// binding is treated as unchanged so a momentary netlink error does not
+// tear a working VRF down; a later re-bind reconciles once resolve recovers.
 func (e *Exporter) vrfAdvertiseUnchanged(b vrfbgp.Binding) bool {
+	// Defensive Normalize so a unit-test caller (or a future bypass of
+	// AddVRF's pre-Normalize step) compares the same synthesized per-family
+	// view that st.binding holds.
+	b = b.Normalize()
 	e.mu.Lock()
 	st, ok := e.vrfs[b.VRFName]
 	e.mu.Unlock()
@@ -401,7 +408,8 @@ func (e *Exporter) vrfAdvertiseUnchanged(b vrfbgp.Binding) bool {
 	if st.binding.RD != b.RD ||
 		st.binding.DefaultLocator != b.DefaultLocator ||
 		st.binding.MaxPrefixes != b.MaxPrefixes ||
-		!sameStringSet(st.binding.ExportRTs, b.ExportRTs) ||
+		!sameStringSet(st.binding.ExportRTsForFamily(bgp.FamilyVPNv4), b.ExportRTsForFamily(bgp.FamilyVPNv4)) ||
+		!sameStringSet(st.binding.ExportRTsForFamily(bgp.FamilyVPNv6), b.ExportRTsForFamily(bgp.FamilyVPNv6)) ||
 		!sameStringSet(st.binding.Redistribute, b.Redistribute) {
 		return false
 	}
@@ -428,20 +436,17 @@ func (e *Exporter) enableAndWatch(b vrfbgp.Binding, replay bool) error {
 		return err
 	}
 	if replay {
-		// Replay the table's existing routes on a goroutine so a VrfBgpBind RPC
-		// returns without blocking on a full table walk. The live watch already
+		// Replay the table's existing routes on a goroutine so a VrfBgpBind
+		// RPC returns without blocking on a full table walk. The live watch
 		// covers anything that changes after RegisterTable, so the dump only
-		// backfills pre-existing routes (eventual consistency, like the boot
-		// path's ListExisting). A dump failure is non-fatal; Stop waits on
-		// dumpWG so a late dump cannot outlive Close.
+		// backfills pre-existing routes. A dump failure is non-fatal; Stop
+		// waits on dumpWG so a late dump cannot outlive Close.
 		//
-		// A narrow window remains: a route present in the RouteListFiltered
-		// snapshot but deleted before the dump delivers it can be re-advertised
-		// stale if its live RTM_DELROUTE was processed before the replay add. The
-		// common case is covered -- the live delete withdraws it and OnRoute's
-		// dedup stops a concurrent live add and the replay add from
-		// double-advertising -- so this is left as a benign Low; closing it fully
-		// would need per-route generation tracking, not worth the complexity.
+		// Narrow remaining window: a route in the snapshot but deleted before
+		// the dump delivers it can be re-advertised stale if the live
+		// RTM_DELROUTE processed before the replay add. OnRoute's dedup stops
+		// the obvious double-advertise; closing the rare stale case fully
+		// would need per-route generation tracking.
 		e.dumpWG.Go(func() {
 			if err := e.watcher.DumpTable(table); err != nil {
 				e.logger.Warn("dump existing routes for runtime VRF",
@@ -488,6 +493,16 @@ func (e *Exporter) OnRoute(table uint32, prefix netip.Prefix, added bool) {
 	}
 	vr := e.buildVPNRoute(st, prefix)
 	key := vr.Key()
+	if added && len(vr.RTs) == 0 {
+		// Binding declares no export RTs for vr.Family (e.g. a vpnv4-only
+		// binding handling a v6 prefix in the same VRF table). Originating a
+		// VPN NLRI with no RT extended-communities is unimportable on every
+		// peer, so skip it rather than push wire-unusable advertisement.
+		e.logger.Warn("VRF prefix has no export RTs for its family; skip auto-advertise",
+			zap.String("vrf", st.binding.VRFName), zap.String("prefix", vr.Prefix),
+			zap.String("family", vr.Family.String()))
+		return
+	}
 	if added {
 		if _, dup := st.advertised[key]; dup {
 			// Already advertised (a ListExisting refresh or a duplicate
@@ -605,11 +620,15 @@ func (e *Exporter) buildVPNRoute(st *vrfState, prefix netip.Prefix) bgp.VPNRoute
 	}
 	// Normalize so a 4-in-6 address renders as a plain IPv4 prefix string.
 	norm := netip.PrefixFrom(addr, prefix.Bits())
+	// Per-AF RT lookup avoids attaching cross-family RTs (e.g. an EVPN RT
+	// declared on the same binding ending up on a VPNv4 NLRI); the legacy
+	// st.binding.ExportRTs is the union of every family's RTs.
+	rts := st.binding.ExportRTsForFamily(family)
 	return bgp.VPNRoute{
 		Family:  family,
 		Prefix:  norm.String(),
 		RD:      st.binding.RD,
-		RTs:     st.binding.ExportRTs,
+		RTs:     rts,
 		SRv6SID: sid.String(),
 		NextHop: e.nextHop,
 	}

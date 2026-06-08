@@ -67,19 +67,10 @@ bgp:
       function_len: 16
       argument_len: 64
       behavior: classic
-  vrf_bindings:
-    # vrf-cust's static routes (10.1.0.0/24, proto static) are auto-advertised
-    # as VPNv4 with RT 65000:200 (FRR's vrf-cust import RT) and an End.DT4 SID
-    # minted from LOC1.
-    - vrf_name: vrf-cust
-      rd: "65100:200"
-      # import_rts is required now that a binding exists: with any binding
-      # registered the applier stops accepting every route and filters by
-      # import RT. FRR exports 10.2.0.0/24 with RT 65000:200 (rt vpn both).
-      import_rts: ["65000:200"]
-      export_rts: ["65000:200"]
-      default_locator: LOC1
-      redistribute: [static]
+  # vrf_bindings are bound from start.sh via `vbctl vrf-bgp bind`, after the
+  # RPC server is up but before the first BGP UPDATE arrives. Keeping the
+  # binding out of the YAML keeps a single source of truth for runtime
+  # operators: every binding edit goes through the same RPC surface.
   peers:
     - neighbor: "2001:db8:ff::2"
       peer_asn: 65100

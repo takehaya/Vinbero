@@ -56,8 +56,6 @@ bgp:
       keepalive_sec: 10
       families:
         - evpn
-  vrf_bindings:
-    - vrf_name: evi-100
-      import_rts:
-        - "65000:100"
-      bd_id: 100
+  # bd 100 <-> EVPN import RT 65000:100 is bound from start.sh via
+  # `vbctl vrf-bgp bind`. Keeping the binding out of YAML keeps one source of
+  # truth for runtime operators.

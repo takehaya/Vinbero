@@ -42,21 +42,75 @@ const (
 	// VrfBgpServiceVrfBgpListProcedure is the fully-qualified name of the VrfBgpService's VrfBgpList
 	// RPC.
 	VrfBgpServiceVrfBgpListProcedure = "/vinbero.v1.VrfBgpService/VrfBgpList"
+	// VrfBgpServiceUpdateBindingProcedure is the fully-qualified name of the VrfBgpService's
+	// UpdateBinding RPC.
+	VrfBgpServiceUpdateBindingProcedure = "/vinbero.v1.VrfBgpService/UpdateBinding"
+	// VrfBgpServiceBatchModifyRouteTargetsProcedure is the fully-qualified name of the VrfBgpService's
+	// BatchModifyRouteTargets RPC.
+	VrfBgpServiceBatchModifyRouteTargetsProcedure = "/vinbero.v1.VrfBgpService/BatchModifyRouteTargets"
+	// VrfBgpServiceAddRouteTargetProcedure is the fully-qualified name of the VrfBgpService's
+	// AddRouteTarget RPC.
+	VrfBgpServiceAddRouteTargetProcedure = "/vinbero.v1.VrfBgpService/AddRouteTarget"
+	// VrfBgpServiceRemoveRouteTargetProcedure is the fully-qualified name of the VrfBgpService's
+	// RemoveRouteTarget RPC.
+	VrfBgpServiceRemoveRouteTargetProcedure = "/vinbero.v1.VrfBgpService/RemoveRouteTarget"
+	// VrfBgpServiceListRouteTargetsProcedure is the fully-qualified name of the VrfBgpService's
+	// ListRouteTargets RPC.
+	VrfBgpServiceListRouteTargetsProcedure = "/vinbero.v1.VrfBgpService/ListRouteTargets"
+	// VrfBgpServiceAddFamilyProcedure is the fully-qualified name of the VrfBgpService's AddFamily RPC.
+	VrfBgpServiceAddFamilyProcedure = "/vinbero.v1.VrfBgpService/AddFamily"
+	// VrfBgpServiceRemoveFamilyProcedure is the fully-qualified name of the VrfBgpService's
+	// RemoveFamily RPC.
+	VrfBgpServiceRemoveFamilyProcedure = "/vinbero.v1.VrfBgpService/RemoveFamily"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
 var (
-	vrfBgpServiceServiceDescriptor            = v1.File_vinbero_v1_vrf_bgp_proto.Services().ByName("VrfBgpService")
-	vrfBgpServiceVrfBgpBindMethodDescriptor   = vrfBgpServiceServiceDescriptor.Methods().ByName("VrfBgpBind")
-	vrfBgpServiceVrfBgpUnbindMethodDescriptor = vrfBgpServiceServiceDescriptor.Methods().ByName("VrfBgpUnbind")
-	vrfBgpServiceVrfBgpListMethodDescriptor   = vrfBgpServiceServiceDescriptor.Methods().ByName("VrfBgpList")
+	vrfBgpServiceServiceDescriptor                       = v1.File_vinbero_v1_vrf_bgp_proto.Services().ByName("VrfBgpService")
+	vrfBgpServiceVrfBgpBindMethodDescriptor              = vrfBgpServiceServiceDescriptor.Methods().ByName("VrfBgpBind")
+	vrfBgpServiceVrfBgpUnbindMethodDescriptor            = vrfBgpServiceServiceDescriptor.Methods().ByName("VrfBgpUnbind")
+	vrfBgpServiceVrfBgpListMethodDescriptor              = vrfBgpServiceServiceDescriptor.Methods().ByName("VrfBgpList")
+	vrfBgpServiceUpdateBindingMethodDescriptor           = vrfBgpServiceServiceDescriptor.Methods().ByName("UpdateBinding")
+	vrfBgpServiceBatchModifyRouteTargetsMethodDescriptor = vrfBgpServiceServiceDescriptor.Methods().ByName("BatchModifyRouteTargets")
+	vrfBgpServiceAddRouteTargetMethodDescriptor          = vrfBgpServiceServiceDescriptor.Methods().ByName("AddRouteTarget")
+	vrfBgpServiceRemoveRouteTargetMethodDescriptor       = vrfBgpServiceServiceDescriptor.Methods().ByName("RemoveRouteTarget")
+	vrfBgpServiceListRouteTargetsMethodDescriptor        = vrfBgpServiceServiceDescriptor.Methods().ByName("ListRouteTargets")
+	vrfBgpServiceAddFamilyMethodDescriptor               = vrfBgpServiceServiceDescriptor.Methods().ByName("AddFamily")
+	vrfBgpServiceRemoveFamilyMethodDescriptor            = vrfBgpServiceServiceDescriptor.Methods().ByName("RemoveFamily")
 )
 
 // VrfBgpServiceClient is a client for the vinbero.v1.VrfBgpService service.
 type VrfBgpServiceClient interface {
+	// Binding-level RPCs (existing).
 	VrfBgpBind(context.Context, *connect.Request[v1.VrfBgpBindRequest]) (*connect.Response[v1.VrfBgpBindResponse], error)
 	VrfBgpUnbind(context.Context, *connect.Request[v1.VrfBgpUnbindRequest]) (*connect.Response[v1.VrfBgpUnbindResponse], error)
 	VrfBgpList(context.Context, *connect.Request[v1.VrfBgpListRequest]) (*connect.Response[v1.VrfBgpListResponse], error)
+	// Full-replace and atomic batch mutation on a single binding.
+	// UpdateBinding overwrites the binding's families and other fields
+	// entirely (client is responsible for read-modify-write); the
+	// expected_version field is reserved for future optimistic
+	// concurrency control (P2) and is ignored when empty in P0.
+	UpdateBinding(context.Context, *connect.Request[v1.UpdateBindingRequest]) (*connect.Response[v1.UpdateBindingResponse], error)
+	// BatchModifyRouteTargets applies a list of route-target add/remove
+	// operations on a single binding atomically: any op failing rolls
+	// back the whole batch and the binding state is unchanged.
+	BatchModifyRouteTargets(context.Context, *connect.Request[v1.BatchModifyRouteTargetsRequest]) (*connect.Response[v1.BatchModifyRouteTargetsResponse], error)
+	// Route-target-level RPCs operate on a single (family, rt, direction)
+	// triple within an existing binding. AddRouteTarget is idempotent:
+	// adding the same RT with the same direction is a no-op; with a
+	// different direction the direction bitmask is OR'd. RemoveRouteTarget
+	// with a direction strips that direction bit only; with an empty
+	// direction strips the RT entirely. ListRouteTargets accepts optional
+	// family and direction filters.
+	AddRouteTarget(context.Context, *connect.Request[v1.AddRouteTargetRequest]) (*connect.Response[v1.AddRouteTargetResponse], error)
+	RemoveRouteTarget(context.Context, *connect.Request[v1.RemoveRouteTargetRequest]) (*connect.Response[v1.RemoveRouteTargetResponse], error)
+	ListRouteTargets(context.Context, *connect.Request[v1.ListRouteTargetsRequest]) (*connect.Response[v1.ListRouteTargetsResponse], error)
+	// Family-level RPCs add or remove an entire AF policy on a binding.
+	// AddFamily with an existing family returns AlreadyExists (use
+	// UpdateBinding to overwrite). RemoveFamily strips the AF policy
+	// entry only; the binding itself stays.
+	AddFamily(context.Context, *connect.Request[v1.AddFamilyRequest]) (*connect.Response[v1.AddFamilyResponse], error)
+	RemoveFamily(context.Context, *connect.Request[v1.RemoveFamilyRequest]) (*connect.Response[v1.RemoveFamilyResponse], error)
 }
 
 // NewVrfBgpServiceClient constructs a client for the vinbero.v1.VrfBgpService service. By default,
@@ -87,14 +141,63 @@ func NewVrfBgpServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(vrfBgpServiceVrfBgpListMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		updateBinding: connect.NewClient[v1.UpdateBindingRequest, v1.UpdateBindingResponse](
+			httpClient,
+			baseURL+VrfBgpServiceUpdateBindingProcedure,
+			connect.WithSchema(vrfBgpServiceUpdateBindingMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		batchModifyRouteTargets: connect.NewClient[v1.BatchModifyRouteTargetsRequest, v1.BatchModifyRouteTargetsResponse](
+			httpClient,
+			baseURL+VrfBgpServiceBatchModifyRouteTargetsProcedure,
+			connect.WithSchema(vrfBgpServiceBatchModifyRouteTargetsMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		addRouteTarget: connect.NewClient[v1.AddRouteTargetRequest, v1.AddRouteTargetResponse](
+			httpClient,
+			baseURL+VrfBgpServiceAddRouteTargetProcedure,
+			connect.WithSchema(vrfBgpServiceAddRouteTargetMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		removeRouteTarget: connect.NewClient[v1.RemoveRouteTargetRequest, v1.RemoveRouteTargetResponse](
+			httpClient,
+			baseURL+VrfBgpServiceRemoveRouteTargetProcedure,
+			connect.WithSchema(vrfBgpServiceRemoveRouteTargetMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		listRouteTargets: connect.NewClient[v1.ListRouteTargetsRequest, v1.ListRouteTargetsResponse](
+			httpClient,
+			baseURL+VrfBgpServiceListRouteTargetsProcedure,
+			connect.WithSchema(vrfBgpServiceListRouteTargetsMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		addFamily: connect.NewClient[v1.AddFamilyRequest, v1.AddFamilyResponse](
+			httpClient,
+			baseURL+VrfBgpServiceAddFamilyProcedure,
+			connect.WithSchema(vrfBgpServiceAddFamilyMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		removeFamily: connect.NewClient[v1.RemoveFamilyRequest, v1.RemoveFamilyResponse](
+			httpClient,
+			baseURL+VrfBgpServiceRemoveFamilyProcedure,
+			connect.WithSchema(vrfBgpServiceRemoveFamilyMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // vrfBgpServiceClient implements VrfBgpServiceClient.
 type vrfBgpServiceClient struct {
-	vrfBgpBind   *connect.Client[v1.VrfBgpBindRequest, v1.VrfBgpBindResponse]
-	vrfBgpUnbind *connect.Client[v1.VrfBgpUnbindRequest, v1.VrfBgpUnbindResponse]
-	vrfBgpList   *connect.Client[v1.VrfBgpListRequest, v1.VrfBgpListResponse]
+	vrfBgpBind              *connect.Client[v1.VrfBgpBindRequest, v1.VrfBgpBindResponse]
+	vrfBgpUnbind            *connect.Client[v1.VrfBgpUnbindRequest, v1.VrfBgpUnbindResponse]
+	vrfBgpList              *connect.Client[v1.VrfBgpListRequest, v1.VrfBgpListResponse]
+	updateBinding           *connect.Client[v1.UpdateBindingRequest, v1.UpdateBindingResponse]
+	batchModifyRouteTargets *connect.Client[v1.BatchModifyRouteTargetsRequest, v1.BatchModifyRouteTargetsResponse]
+	addRouteTarget          *connect.Client[v1.AddRouteTargetRequest, v1.AddRouteTargetResponse]
+	removeRouteTarget       *connect.Client[v1.RemoveRouteTargetRequest, v1.RemoveRouteTargetResponse]
+	listRouteTargets        *connect.Client[v1.ListRouteTargetsRequest, v1.ListRouteTargetsResponse]
+	addFamily               *connect.Client[v1.AddFamilyRequest, v1.AddFamilyResponse]
+	removeFamily            *connect.Client[v1.RemoveFamilyRequest, v1.RemoveFamilyResponse]
 }
 
 // VrfBgpBind calls vinbero.v1.VrfBgpService.VrfBgpBind.
@@ -112,11 +215,73 @@ func (c *vrfBgpServiceClient) VrfBgpList(ctx context.Context, req *connect.Reque
 	return c.vrfBgpList.CallUnary(ctx, req)
 }
 
+// UpdateBinding calls vinbero.v1.VrfBgpService.UpdateBinding.
+func (c *vrfBgpServiceClient) UpdateBinding(ctx context.Context, req *connect.Request[v1.UpdateBindingRequest]) (*connect.Response[v1.UpdateBindingResponse], error) {
+	return c.updateBinding.CallUnary(ctx, req)
+}
+
+// BatchModifyRouteTargets calls vinbero.v1.VrfBgpService.BatchModifyRouteTargets.
+func (c *vrfBgpServiceClient) BatchModifyRouteTargets(ctx context.Context, req *connect.Request[v1.BatchModifyRouteTargetsRequest]) (*connect.Response[v1.BatchModifyRouteTargetsResponse], error) {
+	return c.batchModifyRouteTargets.CallUnary(ctx, req)
+}
+
+// AddRouteTarget calls vinbero.v1.VrfBgpService.AddRouteTarget.
+func (c *vrfBgpServiceClient) AddRouteTarget(ctx context.Context, req *connect.Request[v1.AddRouteTargetRequest]) (*connect.Response[v1.AddRouteTargetResponse], error) {
+	return c.addRouteTarget.CallUnary(ctx, req)
+}
+
+// RemoveRouteTarget calls vinbero.v1.VrfBgpService.RemoveRouteTarget.
+func (c *vrfBgpServiceClient) RemoveRouteTarget(ctx context.Context, req *connect.Request[v1.RemoveRouteTargetRequest]) (*connect.Response[v1.RemoveRouteTargetResponse], error) {
+	return c.removeRouteTarget.CallUnary(ctx, req)
+}
+
+// ListRouteTargets calls vinbero.v1.VrfBgpService.ListRouteTargets.
+func (c *vrfBgpServiceClient) ListRouteTargets(ctx context.Context, req *connect.Request[v1.ListRouteTargetsRequest]) (*connect.Response[v1.ListRouteTargetsResponse], error) {
+	return c.listRouteTargets.CallUnary(ctx, req)
+}
+
+// AddFamily calls vinbero.v1.VrfBgpService.AddFamily.
+func (c *vrfBgpServiceClient) AddFamily(ctx context.Context, req *connect.Request[v1.AddFamilyRequest]) (*connect.Response[v1.AddFamilyResponse], error) {
+	return c.addFamily.CallUnary(ctx, req)
+}
+
+// RemoveFamily calls vinbero.v1.VrfBgpService.RemoveFamily.
+func (c *vrfBgpServiceClient) RemoveFamily(ctx context.Context, req *connect.Request[v1.RemoveFamilyRequest]) (*connect.Response[v1.RemoveFamilyResponse], error) {
+	return c.removeFamily.CallUnary(ctx, req)
+}
+
 // VrfBgpServiceHandler is an implementation of the vinbero.v1.VrfBgpService service.
 type VrfBgpServiceHandler interface {
+	// Binding-level RPCs (existing).
 	VrfBgpBind(context.Context, *connect.Request[v1.VrfBgpBindRequest]) (*connect.Response[v1.VrfBgpBindResponse], error)
 	VrfBgpUnbind(context.Context, *connect.Request[v1.VrfBgpUnbindRequest]) (*connect.Response[v1.VrfBgpUnbindResponse], error)
 	VrfBgpList(context.Context, *connect.Request[v1.VrfBgpListRequest]) (*connect.Response[v1.VrfBgpListResponse], error)
+	// Full-replace and atomic batch mutation on a single binding.
+	// UpdateBinding overwrites the binding's families and other fields
+	// entirely (client is responsible for read-modify-write); the
+	// expected_version field is reserved for future optimistic
+	// concurrency control (P2) and is ignored when empty in P0.
+	UpdateBinding(context.Context, *connect.Request[v1.UpdateBindingRequest]) (*connect.Response[v1.UpdateBindingResponse], error)
+	// BatchModifyRouteTargets applies a list of route-target add/remove
+	// operations on a single binding atomically: any op failing rolls
+	// back the whole batch and the binding state is unchanged.
+	BatchModifyRouteTargets(context.Context, *connect.Request[v1.BatchModifyRouteTargetsRequest]) (*connect.Response[v1.BatchModifyRouteTargetsResponse], error)
+	// Route-target-level RPCs operate on a single (family, rt, direction)
+	// triple within an existing binding. AddRouteTarget is idempotent:
+	// adding the same RT with the same direction is a no-op; with a
+	// different direction the direction bitmask is OR'd. RemoveRouteTarget
+	// with a direction strips that direction bit only; with an empty
+	// direction strips the RT entirely. ListRouteTargets accepts optional
+	// family and direction filters.
+	AddRouteTarget(context.Context, *connect.Request[v1.AddRouteTargetRequest]) (*connect.Response[v1.AddRouteTargetResponse], error)
+	RemoveRouteTarget(context.Context, *connect.Request[v1.RemoveRouteTargetRequest]) (*connect.Response[v1.RemoveRouteTargetResponse], error)
+	ListRouteTargets(context.Context, *connect.Request[v1.ListRouteTargetsRequest]) (*connect.Response[v1.ListRouteTargetsResponse], error)
+	// Family-level RPCs add or remove an entire AF policy on a binding.
+	// AddFamily with an existing family returns AlreadyExists (use
+	// UpdateBinding to overwrite). RemoveFamily strips the AF policy
+	// entry only; the binding itself stays.
+	AddFamily(context.Context, *connect.Request[v1.AddFamilyRequest]) (*connect.Response[v1.AddFamilyResponse], error)
+	RemoveFamily(context.Context, *connect.Request[v1.RemoveFamilyRequest]) (*connect.Response[v1.RemoveFamilyResponse], error)
 }
 
 // NewVrfBgpServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -143,6 +308,48 @@ func NewVrfBgpServiceHandler(svc VrfBgpServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(vrfBgpServiceVrfBgpListMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	vrfBgpServiceUpdateBindingHandler := connect.NewUnaryHandler(
+		VrfBgpServiceUpdateBindingProcedure,
+		svc.UpdateBinding,
+		connect.WithSchema(vrfBgpServiceUpdateBindingMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfBgpServiceBatchModifyRouteTargetsHandler := connect.NewUnaryHandler(
+		VrfBgpServiceBatchModifyRouteTargetsProcedure,
+		svc.BatchModifyRouteTargets,
+		connect.WithSchema(vrfBgpServiceBatchModifyRouteTargetsMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfBgpServiceAddRouteTargetHandler := connect.NewUnaryHandler(
+		VrfBgpServiceAddRouteTargetProcedure,
+		svc.AddRouteTarget,
+		connect.WithSchema(vrfBgpServiceAddRouteTargetMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfBgpServiceRemoveRouteTargetHandler := connect.NewUnaryHandler(
+		VrfBgpServiceRemoveRouteTargetProcedure,
+		svc.RemoveRouteTarget,
+		connect.WithSchema(vrfBgpServiceRemoveRouteTargetMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfBgpServiceListRouteTargetsHandler := connect.NewUnaryHandler(
+		VrfBgpServiceListRouteTargetsProcedure,
+		svc.ListRouteTargets,
+		connect.WithSchema(vrfBgpServiceListRouteTargetsMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfBgpServiceAddFamilyHandler := connect.NewUnaryHandler(
+		VrfBgpServiceAddFamilyProcedure,
+		svc.AddFamily,
+		connect.WithSchema(vrfBgpServiceAddFamilyMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfBgpServiceRemoveFamilyHandler := connect.NewUnaryHandler(
+		VrfBgpServiceRemoveFamilyProcedure,
+		svc.RemoveFamily,
+		connect.WithSchema(vrfBgpServiceRemoveFamilyMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.VrfBgpService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case VrfBgpServiceVrfBgpBindProcedure:
@@ -151,6 +358,20 @@ func NewVrfBgpServiceHandler(svc VrfBgpServiceHandler, opts ...connect.HandlerOp
 			vrfBgpServiceVrfBgpUnbindHandler.ServeHTTP(w, r)
 		case VrfBgpServiceVrfBgpListProcedure:
 			vrfBgpServiceVrfBgpListHandler.ServeHTTP(w, r)
+		case VrfBgpServiceUpdateBindingProcedure:
+			vrfBgpServiceUpdateBindingHandler.ServeHTTP(w, r)
+		case VrfBgpServiceBatchModifyRouteTargetsProcedure:
+			vrfBgpServiceBatchModifyRouteTargetsHandler.ServeHTTP(w, r)
+		case VrfBgpServiceAddRouteTargetProcedure:
+			vrfBgpServiceAddRouteTargetHandler.ServeHTTP(w, r)
+		case VrfBgpServiceRemoveRouteTargetProcedure:
+			vrfBgpServiceRemoveRouteTargetHandler.ServeHTTP(w, r)
+		case VrfBgpServiceListRouteTargetsProcedure:
+			vrfBgpServiceListRouteTargetsHandler.ServeHTTP(w, r)
+		case VrfBgpServiceAddFamilyProcedure:
+			vrfBgpServiceAddFamilyHandler.ServeHTTP(w, r)
+		case VrfBgpServiceRemoveFamilyProcedure:
+			vrfBgpServiceRemoveFamilyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -170,4 +391,32 @@ func (UnimplementedVrfBgpServiceHandler) VrfBgpUnbind(context.Context, *connect.
 
 func (UnimplementedVrfBgpServiceHandler) VrfBgpList(context.Context, *connect.Request[v1.VrfBgpListRequest]) (*connect.Response[v1.VrfBgpListResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfBgpService.VrfBgpList is not implemented"))
+}
+
+func (UnimplementedVrfBgpServiceHandler) UpdateBinding(context.Context, *connect.Request[v1.UpdateBindingRequest]) (*connect.Response[v1.UpdateBindingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfBgpService.UpdateBinding is not implemented"))
+}
+
+func (UnimplementedVrfBgpServiceHandler) BatchModifyRouteTargets(context.Context, *connect.Request[v1.BatchModifyRouteTargetsRequest]) (*connect.Response[v1.BatchModifyRouteTargetsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfBgpService.BatchModifyRouteTargets is not implemented"))
+}
+
+func (UnimplementedVrfBgpServiceHandler) AddRouteTarget(context.Context, *connect.Request[v1.AddRouteTargetRequest]) (*connect.Response[v1.AddRouteTargetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfBgpService.AddRouteTarget is not implemented"))
+}
+
+func (UnimplementedVrfBgpServiceHandler) RemoveRouteTarget(context.Context, *connect.Request[v1.RemoveRouteTargetRequest]) (*connect.Response[v1.RemoveRouteTargetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfBgpService.RemoveRouteTarget is not implemented"))
+}
+
+func (UnimplementedVrfBgpServiceHandler) ListRouteTargets(context.Context, *connect.Request[v1.ListRouteTargetsRequest]) (*connect.Response[v1.ListRouteTargetsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfBgpService.ListRouteTargets is not implemented"))
+}
+
+func (UnimplementedVrfBgpServiceHandler) AddFamily(context.Context, *connect.Request[v1.AddFamilyRequest]) (*connect.Response[v1.AddFamilyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfBgpService.AddFamily is not implemented"))
+}
+
+func (UnimplementedVrfBgpServiceHandler) RemoveFamily(context.Context, *connect.Request[v1.RemoveFamilyRequest]) (*connect.Response[v1.RemoveFamilyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfBgpService.RemoveFamily is not implemented"))
 }

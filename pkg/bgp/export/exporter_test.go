@@ -232,6 +232,37 @@ func TestOnRouteAdvertisesV4(t *testing.T) {
 	}
 }
 
+// V4 regression: a binding that declares only FamilyVPNv4 (no vpnv6 RTs)
+// must NOT advertise a VPNv6 NLRI -- ExportRTsForFamily(FamilyVPNv6)
+// returns nil and the wire would carry empty extended-community RTs, which
+// no peer can import. The exporter skips the advertisement and logs a
+// warn instead.
+func TestOnRoute_SkipsVPNv6WithoutVpnv6Family(t *testing.T) {
+	e, adv, _ := newTestExporter(t)
+	b := vrfbgp.Binding{
+		VRFName:        "vrf-v4-only",
+		RD:             "65000:100",
+		DefaultLocator: "LOC1",
+		// Per-family vpnv4 RT only; FamilyVPNv6 absent.
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyVPNv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionExport}}},
+		},
+	}
+	if _, err := e.EnableVRF(b); err != nil {
+		t.Fatalf("EnableVRF: %v", err)
+	}
+	e.OnRoute(testTable, netip.MustParsePrefix("2001:db8::/64"), true)
+	if len(adv.advertised) != 0 {
+		t.Errorf("VPNv6 prefix on a vpnv4-only binding must not be advertised (empty RTs would be unimportable); got %+v", adv.advertised)
+	}
+	// And the same v4 prefix on this binding should still advertise fine
+	// (regression guard so the skip is family-scoped, not blanket).
+	e.OnRoute(testTable, netip.MustParsePrefix("10.0.0.0/24"), true)
+	if len(adv.advertised) != 1 || adv.advertised[0].Family != bgp.FamilyVPNv4 {
+		t.Errorf("vpnv4 prefix on a vpnv4-only binding must still advertise; got %+v", adv.advertised)
+	}
+}
+
 func TestOnRouteAdvertisesV6(t *testing.T) {
 	e, adv, sid := newTestExporter(t)
 	if _, err := e.EnableVRF(testBinding()); err != nil {
