@@ -270,3 +270,27 @@ bgp:
 		t.Errorf("error %q must mention 'unknown direction' to help operators diagnose", err)
 	}
 }
+
+// Mixing the legacy import_rts/export_rts lists with the new families map in
+// the same binding must fail Load: runtime Normalize treats Families as the
+// source of truth so the legacy side would be silently ignored otherwise.
+func TestLoad_VrfBindingFamiliesAndLegacyMutexed(t *testing.T) {
+	const y = `
+bgp:
+  vrf_bindings:
+    - vrf_name: vrf1
+      import_rts: ["65000:1"]
+      families:
+        vpnv4:
+          route_targets:
+            - rt: "65000:2"
+              direction: import
+`
+	_, err := Load(y)
+	if err == nil {
+		t.Fatal("Load must reject a binding that mixes legacy and families forms")
+	}
+	if !strings.Contains(err.Error(), "families and import_rts/export_rts") {
+		t.Errorf("error %q must call out the mutex (legacy vs families) so the operator can fix it", err)
+	}
+}

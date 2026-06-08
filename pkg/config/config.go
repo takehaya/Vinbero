@@ -21,8 +21,16 @@ var (
 )
 
 // Validate rejects a typoed family or direction in vinbero.yml so it fails
-// fast at Load time rather than silently dropping route targets.
+// fast at Load time rather than silently dropping route targets. It also
+// rejects mixing the legacy ImportRTs / ExportRTs lists with the new
+// Families map -- runtime Normalize treats Families as the source of truth
+// when both are set, so a YAML that carries both forms would silently
+// ignore the legacy side. Forcing one or the other at Load surfaces the
+// operator mistake instead of leaking through to a routing oddity.
 func (b *VrfBindingConfig) Validate() error {
+	if len(b.Families) > 0 && (len(b.ImportRTs) > 0 || len(b.ExportRTs) > 0) {
+		return fmt.Errorf("vrf binding %q: families and import_rts/export_rts cannot both be set (the families map is the source of truth at runtime, so the legacy lists would be silently ignored)", b.VRFName)
+	}
 	for fam, fc := range b.Families {
 		if !slices.Contains(recognizedFamilyNames, fam) {
 			return fmt.Errorf("vrf binding %q: unknown family %q (want one of: %s)", b.VRFName, fam, strings.Join(recognizedFamilyNames, ", "))
