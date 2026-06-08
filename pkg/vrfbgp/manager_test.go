@@ -313,6 +313,54 @@ func TestEmptyForFamily(t *testing.T) {
 	}
 }
 
+// MatchImport (legacy wrapper) must still find a binding that declares only
+// the vpnv6 family. The old wrapper hardcoded FamilyVPNv4 and silently
+// missed vpnv6-only bindings constructed via `vbctl vrf-bgp family add`.
+func TestMatchImport_VPNv6OnlyBindingIsFound(t *testing.T) {
+	m := NewManager()
+	if err := m.Bind(Binding{
+		VRFName: "vrf-v6",
+		Families: map[bgp.Family]FamilyPolicy{
+			bgp.FamilyVPNv6: {RouteTargets: []RouteTarget{{RT: "65000:6", Direction: DirectionImport}}},
+		},
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if vrf, ok := m.MatchImport([]string{"65000:6"}); !ok || vrf != "vrf-v6" {
+		t.Errorf("MatchImport on a vpnv6-only binding must hit; got (%q,%v)", vrf, ok)
+	}
+}
+
+// ValidateRouteTarget rejects non-canonical numeric tokens so an operator
+// who types "65000:01" instead of "65000:1" gets an error rather than
+// silently registering a second RT that downstream RT-key lookups treat as
+// distinct from the canonical form.
+func TestValidateRouteTarget_RejectsLeadingZeros(t *testing.T) {
+	cases := []string{"65000:01", "65000:001", "065000:1"}
+	for _, rt := range cases {
+		if err := ValidateRouteTarget(rt); err == nil {
+			t.Errorf("ValidateRouteTarget(%q) must reject leading zeros", rt)
+		}
+	}
+	if err := ValidateRouteTarget("65000:1"); err != nil {
+		t.Errorf("ValidateRouteTarget(canonical) must accept; got %v", err)
+	}
+}
+
+// Direction(0).String() must not render as "" because ParseDirection("")
+// returns DirectionBoth -- so a stray zero would silently round-trip into a
+// both-direction RT. The sentinel "invalid" makes the broken state
+// observable instead.
+func TestDirection_ZeroRendersAsInvalid(t *testing.T) {
+	var d Direction
+	if got := d.String(); got != "invalid" {
+		t.Errorf("Direction(0).String() = %q, want %q", got, "invalid")
+	}
+	if _, err := ParseDirection("invalid"); err == nil {
+		t.Error("ParseDirection(\"invalid\") must reject so the round-trip fails fast")
+	}
+}
+
 func keys[K comparable, V any](m map[K]V) []K {
 	out := make([]K, 0, len(m))
 	for k := range m {

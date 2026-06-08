@@ -40,7 +40,11 @@ const DirectionBoth = DirectionImport | DirectionExport
 func (d Direction) Has(want Direction) bool { return d&want == want }
 
 // String renders d as the canonical operator-facing string ("import" /
-// "export" / "both"). Any non-canonical bitmask returns "".
+// "export" / "both"). A zero bitmask renders as "invalid" so a stray
+// Direction(0) -- which today should never appear in storage -- cannot
+// silently round-trip through ParseDirection("") (= DirectionBoth) and
+// masquerade as a both-direction RT. Any other non-canonical bitmask also
+// renders as "invalid" for the same reason.
 func (d Direction) String() string {
 	switch d {
 	case DirectionImport:
@@ -50,7 +54,7 @@ func (d Direction) String() string {
 	case DirectionBoth:
 		return "both"
 	default:
-		return ""
+		return "invalid"
 	}
 }
 
@@ -80,9 +84,12 @@ var rtBindableFamilies = []bgp.Family{
 // ValidateRouteTarget rejects RT strings the BGP layer cannot encode. Three
 // RFC 4360 / 5668 forms are accepted: "ASN:value" (2-octet AS, 4-octet value
 // or 4-octet AS, 2-octet value) and "IPv4:value". The split is on the LAST
-// colon so an IPv4-form RT round-trips unambiguously. This is a syntax check;
-// the gobgp adapter does the full extended-community encoding at advertise
-// time.
+// colon so an IPv4-form RT round-trips unambiguously. Numeric tokens must be
+// in their canonical decimal form (no leading zeros) so two operator inputs
+// that name the same RT do not survive as two distinct entries downstream
+// (mergeLegacyRTs and the Families maps key on the raw string). This is a
+// syntax check; the gobgp adapter does the full extended-community encoding
+// at advertise time.
 func ValidateRouteTarget(rt string) error {
 	if rt == "" {
 		return fmt.Errorf("route_target is required")
@@ -92,10 +99,17 @@ func ValidateRouteTarget(rt string) error {
 		return fmt.Errorf("route_target %q: want ASN:value or IPv4:value", rt)
 	}
 	left, right := rt[:i], rt[i+1:]
-	if _, err := strconv.ParseUint(right, 10, 32); err != nil {
+	rightVal, err := strconv.ParseUint(right, 10, 32)
+	if err != nil {
 		return fmt.Errorf("route_target %q: value %q must be a non-negative integer", rt, right)
 	}
-	if _, err := strconv.ParseUint(left, 10, 32); err == nil {
+	if strconv.FormatUint(rightVal, 10) != right {
+		return fmt.Errorf("route_target %q: value %q must be canonical decimal (no leading zeros)", rt, right)
+	}
+	if leftVal, err := strconv.ParseUint(left, 10, 32); err == nil {
+		if strconv.FormatUint(leftVal, 10) != left {
+			return fmt.Errorf("route_target %q: ASN %q must be canonical decimal (no leading zeros)", rt, left)
+		}
 		return nil
 	}
 	if ip, err := netip.ParseAddr(left); err == nil && ip.Is4() {
@@ -484,14 +498,19 @@ func (m *Manager) EmptyForFamily(fam bgp.Family) bool {
 }
 
 // MatchImport is the legacy L3VPN helper, retained as a thin wrapper over
-// MatchImportForFamily(rts, FamilyVPNv4). L3VPN bindings populate both
-// VPNv4 and VPNv6 families with the same RT set under the legacy expansion
-// rule, so checking either is equivalent.
+// MatchImportForFamily. It checks VPNv4 then VPNv6 so a binding declared on
+// only one of the two L3VPN families (e.g. via `vbctl vrf-bgp family add
+// --family vpnv6`) still resolves, instead of silently failing because the
+// legacy-expansion assumption (both families share the same RT set) no
+// longer holds for unified-binding callers.
 //
 // Deprecated: use MatchImportForFamily; this wrapper exists for callers
 // that have not migrated yet.
 func (m *Manager) MatchImport(rts []string) (string, bool) {
-	vrf, _, ok := m.MatchImportForFamily(rts, bgp.FamilyVPNv4)
+	if vrf, _, ok := m.MatchImportForFamily(rts, bgp.FamilyVPNv4); ok {
+		return vrf, true
+	}
+	vrf, _, ok := m.MatchImportForFamily(rts, bgp.FamilyVPNv6)
 	return vrf, ok
 }
 
