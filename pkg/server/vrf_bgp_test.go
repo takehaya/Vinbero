@@ -361,6 +361,39 @@ func TestVrfBgpBind_RebindMovingBridgeDomainDisablesOld(t *testing.T) {
 	}
 }
 
+// A binding that declares FamilyEVPN but has no export-direction RT (e.g.
+// `family add --family evpn` with no --rt, or import-only EVPN) must NOT
+// fire EnableForBinding: pushing RT3/RT2 with an empty extended-community
+// RT list is unimportable on every peer.
+func TestVrfBgpBind_NoExportRTsKeepsEvpnGated(t *testing.T) {
+	hook := &fakeEvpnBridge{}
+	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5, 101: 6, 102: 7})
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord)
+
+	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{
+			{VrfName: "evi-empty", Rd: "65100:100", BdId: 100, Families: map[string]*v1.VrfBgpFamily{"evpn": {}}},
+			{VrfName: "evi-imp-only", Rd: "65100:101", BdId: 101, Families: map[string]*v1.VrfBgpFamily{
+				"evpn": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "65000:101", Direction: "import"}}},
+			}},
+			{VrfName: "evi-ok", Rd: "65100:102", BdId: 102, Families: map[string]*v1.VrfBgpFamily{
+				"evpn": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "65000:102", Direction: "export"}}},
+			}},
+		},
+	})); err != nil {
+		t.Fatalf("VrfBgpBind: %v", err)
+	}
+	if hook.enabled[100] {
+		t.Errorf("evpn family with zero RTs must not enable; enabled=%v", hook.enabled)
+	}
+	if hook.enabled[101] {
+		t.Errorf("evpn family with import-only RT must not enable; enabled=%v", hook.enabled)
+	}
+	if !hook.enabled[102] {
+		t.Errorf("evpn family with an export RT must enable; enabled=%v", hook.enabled)
+	}
+}
+
 // bindForRPC sets up a one-binding fixture for the new RPC tests so each test
 // does not re-do the VrfBgpBind boilerplate. Returns the server and the
 // initial families on the binding so the test can assert "post-RPC state vs.

@@ -162,26 +162,26 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 	}
 	if s.evpn != nil {
 		// Disable the prior BD when it is going away -- either because the
-		// new binding moved BD, or because the caller removed the evpn
-		// family explicitly (so EVPN is unwanted even with an unchanged
+		// new binding moved BD, or because the caller dropped the evpn
+		// export RTs explicitly (so EVPN is unwanted even with an unchanged
 		// BDID). EnableForBinding then fires for the current BD when EVPN
 		// is still desired AND something EVPN-relevant actually changed;
 		// otherwise a per-RT mutation on a non-EVPN family (vpnv4 RT add /
 		// remove on a BDID-bound binding) would re-run EnableForBridge ->
 		// replayFDB -> RT2 origination for every learned MAC, an O(N)
 		// BGP storm on an unrelated edit.
-		_, hadEvpn := prev.Families[bgp.FamilyEVPN]
-		_, hasEvpn := updated.Families[bgp.FamilyEVPN]
+		//
+		// "EVPN advertised" requires at least one export-direction RT under
+		// FamilyEVPN: pushing RT3/RT2 with an empty extended-community RT
+		// list (e.g. `family add --family evpn` without --rt, or an
+		// import-only EVPN binding) is unimportable on every peer and
+		// causes churn, so treat such bindings as not-advertised here.
+		hadEvpn := len(prev.ExportRTsForFamily(bgp.FamilyEVPN)) > 0
+		hasEvpn := len(updated.ExportRTsForFamily(bgp.FamilyEVPN)) > 0
 		evpnRemoved := hadEvpn && !hasEvpn
 		if existed && prev.BDID != 0 && (prev.BDID != updated.BDID || evpnRemoved) {
 			s.evpn.Disable(prev.BDID)
 		}
-		// hasEvpn gates EnableForBinding: a binding with bd_id set but no
-		// FamilyEVPN entry (e.g. `bind --bd-id 100 --rt vpnv4:...`, the
-		// operator forgot --rt evpn) would otherwise advertise RT3 with empty
-		// extended-community RTs, which no peer can import. Legacy-form
-		// bindings auto-expand into FamilyEVPN through legacyToFamilies, so
-		// this only filters genuinely RT-less EVPN attempts.
 		if updated.BDID != 0 && hasEvpn && !evpnRemoved && evpnFieldsChanged(existed, prev, updated) {
 			s.evpn.EnableForBinding(updated)
 		}
