@@ -208,17 +208,18 @@ func evpnFieldsChanged(existed bool, prev, updated vrfbgp.Binding) bool {
 	return !sameRouteTargets(prev.Families[bgp.FamilyEVPN].RouteTargets, updated.Families[bgp.FamilyEVPN].RouteTargets)
 }
 
-// sameRouteTargets compares two RT lists as sets (RT + Direction). The slice
-// is operator-supplied via a proto map, whose wire order on the same logical
-// set is not stable across reconcile cycles. An order-sensitive compare would
-// otherwise return false on every reordered re-bind and re-drive EVPN
-// (replayFDB → RT2 storm). Lists are tiny; clone and sort to canonicalize.
+// sameRouteTargets compares two RT lists as sets (RT + Direction). Each list
+// is first DedupeRouteTargets'd so a duplicate RT with split direction bits
+// (e.g. one wire payload carrying "65000:1 import" + "65000:1 export") does
+// not show as a length mismatch against a canonical "65000:1 both"; then the
+// canonical lists are sorted so proto map iteration reorders do not trip
+// EVPN re-enable (replayFDB → RT2 storm).
 func sameRouteTargets(a, b []vrfbgp.RouteTarget) bool {
-	if len(a) != len(b) {
+	ac := vrfbgp.DedupeRouteTargets(append([]vrfbgp.RouteTarget(nil), a...))
+	bc := vrfbgp.DedupeRouteTargets(append([]vrfbgp.RouteTarget(nil), b...))
+	if len(ac) != len(bc) {
 		return false
 	}
-	ac := append([]vrfbgp.RouteTarget(nil), a...)
-	bc := append([]vrfbgp.RouteTarget(nil), b...)
 	less := func(x, y vrfbgp.RouteTarget) int {
 		if x.RT != y.RT {
 			if x.RT < y.RT {
@@ -405,10 +406,13 @@ func (s *VrfBgpServer) BatchModifyRouteTargets(
 		if err := applyRouteTargetOp(&scratch, op); err != nil {
 			// Preserve a mutator's typed connect code so a batch call
 			// returns the same gRPC code the single-call RPC would for the
-			// same failure; wrap a bare error as InvalidArgument.
+			// same failure; wrap a bare error as InvalidArgument. Wrap the
+			// inner *connect.Error's underlying error -- not the connect.Error
+			// itself -- so the outer NewError prepends its code once instead of
+			// rendering "code: op[i]: code: msg".
 			var cerr *connect.Error
 			if errors.As(err, &cerr) {
-				return nil, connect.NewError(cerr.Code(), fmt.Errorf("op[%d]: %w", i, cerr))
+				return nil, connect.NewError(cerr.Code(), fmt.Errorf("op[%d]: %w", i, cerr.Unwrap()))
 			}
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("op[%d]: %w", i, err))
 		}
@@ -679,7 +683,11 @@ func addFamily(b *vrfbgp.Binding, fam string, cfg *v1.VrfBgpFamily) error {
 
 // protoRouteTargets converts a wire RT list into the runtime form, validating
 // each entry's rt and direction string. Returns an empty (non-nil) slice when
-// the input is empty so the caller can always assign the result.
+// the input is empty so the caller can always assign the result. Duplicate
+// RTs are collapsed via OR-direction so a wire payload carrying the same RT
+// twice (intentionally or via re-bind reconcile drift) does not survive as
+// two entries -- AddRouteTarget already has this idempotent contract at the
+// runtime boundary.
 func protoRouteTargets(in []*v1.VrfBgpRouteTarget) ([]vrfbgp.RouteTarget, error) {
 	out := make([]vrfbgp.RouteTarget, 0, len(in))
 	for _, rt := range in {
@@ -692,7 +700,7 @@ func protoRouteTargets(in []*v1.VrfBgpRouteTarget) ([]vrfbgp.RouteTarget, error)
 		}
 		out = append(out, vrfbgp.RouteTarget{RT: rt.GetRt(), Direction: dir})
 	}
-	return out, nil
+	return vrfbgp.DedupeRouteTargets(out), nil
 }
 
 // removeFamily implements RemoveFamily on a binding scratch. NotFound is

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -730,6 +731,12 @@ func TestBatchModifyRouteTargets_PreservesPerOpErrorCode(t *testing.T) {
 	}))
 	if err == nil || connectCode(t, err) != connect.CodeNotFound {
 		t.Errorf("undeclared family op must preserve NotFound from addRouteTarget, got %v", err)
+	}
+	// The outer NewError prepends the code once; the wrapper must not also
+	// embed the inner *connect.Error's "code: " prefix or the operator sees
+	// the code twice in the wire string.
+	if msg := err.Error(); strings.Count(msg, "not_found:") != 1 {
+		t.Errorf("error message must contain the code prefix exactly once, got %q", msg)
 	}
 }
 

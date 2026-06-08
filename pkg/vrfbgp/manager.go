@@ -235,6 +235,32 @@ func mergeLegacyRTs(importRTs, exportRTs []string) []RouteTarget {
 	return out
 }
 
+// DedupeRouteTargets collapses entries that share the same RT string into one,
+// OR-ing their Direction bitmasks. First-seen order is preserved so a caller
+// that fed an operator-supplied list keeps the deterministic ordering
+// consumers (ListRouteTargets, exporter origination) rely on. AddRouteTarget
+// is the runtime-mutation entry point for idempotent OR-direction adds; this
+// helper applies the same invariant at the wire / config boundary so two RT
+// "65000:1" entries with directions "import" and "export" do not survive as
+// separate items only to mislead `sameRouteTargets` len comparison or to
+// double-emit the same extended community on the wire.
+func DedupeRouteTargets(in []RouteTarget) []RouteTarget {
+	if len(in) <= 1 {
+		return in
+	}
+	idx := make(map[string]int, len(in))
+	out := make([]RouteTarget, 0, len(in))
+	for _, rt := range in {
+		if i, ok := idx[rt.RT]; ok {
+			out[i].Direction |= rt.Direction
+			continue
+		}
+		idx[rt.RT] = len(out)
+		out = append(out, rt)
+	}
+	return out
+}
+
 // familiesToLegacy synthesizes the flat ImportRTs / ExportRTs lists from
 // Families. An RT that appears in any family with the given direction is
 // included once. Order is canonical family order then per-RT insertion
