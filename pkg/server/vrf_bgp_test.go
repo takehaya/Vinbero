@@ -738,6 +738,55 @@ func TestBatchModifyRouteTargets_UnknownVRFIsNotFound(t *testing.T) {
 	}
 }
 
+// The RPC boundary must not panic on nil entries the JSON / proto wire can
+// produce (a `{"families":{"vpnv4":null}}` payload, a nil element inside a
+// repeated RT list, a nil op in BatchModifyRouteTargets, a nil cfg on
+// AddFamily). protobuf-go's generated Get methods are nil-safe on the
+// receiver and return zero values, so each path either treats the nil as
+// an empty-but-valid entry or rejects it as InvalidArgument -- never
+// dereferences and panics. Pin that contract here.
+func TestVrfBgp_RPCNilEntriesDoNotPanic(t *testing.T) {
+	// (1) families with a nil VrfBgpFamily value.
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil)
+	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{{
+			VrfName:  "vrf-nil-fam",
+			Rd:       "65100:1",
+			Families: map[string]*v1.VrfBgpFamily{"vpnv4": nil},
+		}},
+	})); err != nil {
+		t.Fatalf("nil family value must not panic; VrfBgpBind err=%v", err)
+	}
+	// (2) nil element in a repeated RT list -- ValidateRouteTarget catches the
+	//     empty rt the nil entry decodes to and surfaces InvalidArgument.
+	s2 := bindForRPC(t, "vrf1", map[string]*v1.VrfBgpFamily{"vpnv4": {}})
+	if _, err := s2.AddFamily(context.Background(), connect.NewRequest(&v1.AddFamilyRequest{
+		VrfName: "vrf1",
+		Family:  "vpnv6",
+		Config:  &v1.VrfBgpFamily{RouteTargets: []*v1.VrfBgpRouteTarget{nil}},
+	})); err == nil || connectCode(t, err) != connect.CodeInvalidArgument {
+		t.Errorf("nil RT element must be InvalidArgument, got %v", err)
+	}
+	// (3) nil op in BatchModifyRouteTargets -- GetKind returns KIND_UNSPECIFIED
+	//     so the switch's default branch fires with "op.kind is required".
+	if _, err := s2.BatchModifyRouteTargets(context.Background(), connect.NewRequest(&v1.BatchModifyRouteTargetsRequest{
+		VrfName: "vrf1",
+		Ops:     []*v1.RouteTargetOp{nil},
+	})); err == nil {
+		t.Error("nil op must surface an error, not panic and not no-op")
+	}
+	// (4) AddFamily with nil Config -- GetRouteTargets returns nil so the
+	//     family is registered with an empty RT list (the existing API contract
+	//     for "register a family without RTs").
+	if _, err := s2.AddFamily(context.Background(), connect.NewRequest(&v1.AddFamilyRequest{
+		VrfName: "vrf1",
+		Family:  "evpn",
+		Config:  nil,
+	})); err != nil {
+		t.Errorf("nil cfg must register an empty family without panic, got %v", err)
+	}
+}
+
 // UpdateBinding on an unknown vrf_name must be NotFound, not a silent create.
 // VrfBgpBind is the only verb that may register a new binding; an Update verb
 // against a typo must surface as NotFound so the operator notices.
