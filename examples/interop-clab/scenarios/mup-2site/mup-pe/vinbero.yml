@@ -35,10 +35,34 @@ bgp:
     router_id: "10.255.0.2"
     listen_port: 179
     source_locator: "LOC1"
-  # The VRF binding (import RTs + the RFC 9433 §6.6 source-embed prefix) is
-  # created at runtime in start.sh via `vbctl vrf-bgp bind`, the operator
-  # surface; a declarative `vrf_bindings:` block here would express the same
-  # policy at boot.
+  # The binding is the MUP service instance on this PE (the DN VRF that
+  # End.DT4 decaps into). Its rd must be the RD the controller stamps on the
+  # T1ST/T2ST session routes (65100:1 in mup-c/start.sh): a received MUP route
+  # resolves its binding, and so mup_gtp4_source_prefix, by RD. Declaring
+  # mup_ipv4 import route targets activates the session-route import filter:
+  # a T1ST/T2ST is accepted only when one of its RTs is imported here, while
+  # ISD/DSD discovery routes bypass the filter. 100:2000 imports the downlink
+  # VPN (T1ST); 100:6000 imports the uplink VPN (T2ST), which this PE needs as
+  # the RFC 9433 §6.6 UPF anchor even though the uplink gate itself lives on
+  # the GW.
+  vrf_bindings:
+    - vrf_name: vrf-cust
+      rd: "65100:1"
+      families:
+        mup_ipv4:
+          route_targets:
+            - rt: "100:2000"
+              direction: import
+            - rt: "100:6000"
+              direction: import
+      # RFC 9433 §6.6: embed the session's UPF N3 anchor (the same-RD T2ST
+      # endpoint, 172.16.0.254) into the downlink outer IPv6 source right
+      # after this prefix, so a GW extracting the source at v4src position 64
+      # emits the GTP-U from that IPv4. Vinbero's own End.M.GTP4.E takes its
+      # GTP-U source from the configured --gtp-v4-src-addr instead of
+      # extracting it, so test.sh asserts the embed on the PE's headend entry
+      # (SRC ADDR fd00:d::ac10:fe:0:0).
+      mup_gtp4_source_prefix: "fd00:d::/64"
   peers:
     - neighbor: "2001:db8:ff::c"   # mup-c (controller dials us)
       peer_asn: 65100

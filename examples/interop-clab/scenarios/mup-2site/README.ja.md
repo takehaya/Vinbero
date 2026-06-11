@@ -52,15 +52,14 @@ controller はセッション状態だけを advertise し SID は載せない�
 - T2ST → DSD (uplink): mup-gw は同じ MUP segment id (`1:2`) を持つ DSD から
   direct SID `fd00:d:0:1::` を解決。
 
-RD と RT の使い分けは次のとおり。RD は per-advertiser (RFC 4364 §4.2) で経路の
-一意化だけを担い、controller のセッションは `65100:1`、mup-gw の ISD は
-`65100:11`、mup-pe の DSD は `65100:12` を使う。VPN の所属は RT だけで決まり (RFC 4364 §4.3)、
+RD / RT layout: RD は per-advertiser (RFC 4364 §4.2) で経路の一意化だけを担い、
+controller のセッションは `65100:1`、mup-gw の ISD は `65100:11`、mup-pe の
+DSD は `65100:12` を使う。VPN の所属は RT だけで決まり (RFC 4364 §4.3)、
 `100:2000` が downlink VPN (T1ST + ISD)、`100:6000` が uplink VPN (T2ST +
-DSD)。したがって上の 2 つの解決はどちらも RD をまたぐ (RT-scoped)。mup-pe は
-`vbctl vrf-bgp bind` で VRF を runtime に bind し、両 RT を `mup_ipv4` の
-import として宣言してセッション経路の import filter を有効にする (discovery
-経路は filter を通らない)。uplink RT の import が T2ST を mup-pe へ届け、
-RFC 9433 §6.6 の UPF anchor になる。
+DSD)。したがって上の 2 つの解決はどちらも RD をまたぐ (RT-scoped)。mup-pe の
+VRF binding は両 RT を `mup_ipv4` の import として宣言し、セッション経路の
+import filter を有効にする (discovery 経路は filter を通らない)。uplink RT の
+import が T2ST を mup-pe へ届け、RFC 9433 §6.6 の UPF anchor になる。
 
 解決は到着順に依存しない。discovery 経路より先に届いたセッションは deferred と
 なり、経路が届いた時点で install する。discovery 経路を withdraw すると依存する
