@@ -25,9 +25,13 @@ type VrfExporter interface {
 // MupSrcReconciler is the runtime hook a binding mutation drives when its
 // MUP GTP4 source prefix (or the RD carrying it) changes: installed T1ST
 // downlinks under that RD re-derive their outer IPv6 source (RFC 9433 §6.6).
-// *pkg/bgp/apply.Applier satisfies it; it is nil when BGP is off.
+// ReconcileMUPUplinkInstances reprograms the uplink instance state (the
+// ifindex -> instance map and the instance each T2ST is keyed under) after
+// any binding mutation that can move it. *pkg/bgp/apply.Applier satisfies
+// both; it is nil when BGP is off.
 type MupSrcReconciler interface {
 	ReconcileMUPGTP4SrcForRD(rd string)
+	ReconcileMUPUplinkInstances()
 }
 
 // VrfBgpServer is the Connect RPC handler for VrfBgpService, a thin
@@ -76,6 +80,7 @@ func protoToBinding(b *v1.VrfBgpBinding) (vrfbgp.Binding, error) {
 		BDID:                uint16(b.GetBdId()),
 		Families:            families,
 		MupGTP4SourcePrefix: mupSrc,
+		MupUplinkInterfaces: b.GetMupUplinkInterfaces(),
 	}, nil
 }
 
@@ -83,15 +88,16 @@ func protoToBinding(b *v1.VrfBgpBinding) (vrfbgp.Binding, error) {
 // mutation RPCs' "updated binding" response.
 func bindingToProto(b vrfbgp.Binding) *v1.VrfBgpBinding {
 	out := &v1.VrfBgpBinding{
-		VrfName:        b.VRFName,
-		Rd:             b.RD,
-		ImportRts:      b.ImportRTs,
-		ExportRts:      b.ExportRTs,
-		Redistribute:   b.Redistribute,
-		MaxPrefixes:    b.MaxPrefixes,
-		DefaultLocator: b.DefaultLocator,
-		BdId:           uint32(b.BDID),
-		Families:       bindingFamiliesToProto(b.Families),
+		VrfName:             b.VRFName,
+		Rd:                  b.RD,
+		ImportRts:           b.ImportRTs,
+		ExportRts:           b.ExportRTs,
+		Redistribute:        b.Redistribute,
+		MaxPrefixes:         b.MaxPrefixes,
+		DefaultLocator:      b.DefaultLocator,
+		BdId:                uint32(b.BDID),
+		Families:            bindingFamiliesToProto(b.Families),
+		MupUplinkInterfaces: b.MupUplinkInterfaces,
 	}
 	// The zero Prefix renders as "invalid Prefix", so only a set prefix is
 	// put on the wire.
@@ -219,7 +225,25 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
 		}
 	}
+	if s.mupSrc != nil && mupUplinkFieldsChanged(existed, prev, updated, len(s.mgr.UplinkInstanceInterfaces()) > 0) {
+		s.mupSrc.ReconcileMUPUplinkInstances()
+	}
 	return nil
+}
+
+// mupUplinkFieldsChanged reports whether a binding mutation can move uplink
+// instance state. Once any binding holds an uplink instance, every mutation
+// can re-scope which instance a T2ST resolves to (an RT edit changes the
+// MatchImportForFamily outcome), so the reconcile fires; it is a bounded
+// no-op-compare walk. With no instances anywhere it fires only on the
+// transitions that create or drop one: the updated binding declaring
+// interfaces, or the previous one having had them (release re-keys its
+// sessions back to the default instance).
+func mupUplinkFieldsChanged(existed bool, prev, updated vrfbgp.Binding, anyInstance bool) bool {
+	if anyInstance || len(updated.MupUplinkInterfaces) > 0 {
+		return true
+	}
+	return existed && len(prev.MupUplinkInterfaces) > 0
 }
 
 // mupGTP4SrcFieldsChanged reports whether a binding mutation affects the MUP
@@ -369,6 +393,13 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 				// The binding is gone, so the reconcile reverts the RD's
 				// installed downlinks to the plain encap source.
 				s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
+			}
+			if s.mupSrc != nil && existed &&
+				(len(prev.MupUplinkInterfaces) > 0 || len(s.mgr.UplinkInstanceInterfaces()) > 0) {
+				// Released (or surviving) uplink instances re-key: sessions
+				// that resolved to the removed binding fall back to another
+				// match or the default instance.
+				s.mupSrc.ReconcileMUPUplinkInstances()
 			}
 		}
 		s.mu.Unlock()

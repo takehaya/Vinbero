@@ -44,6 +44,7 @@ func vrfBgpBindFlags(requireVRF bool) []cli.Flag {
 		&cli.StringFlag{Name: "redistribute", Usage: "Auto-advertise protocols (comma-separated: connected,static)"},
 		&cli.UintFlag{Name: "max-prefixes", Usage: "Cap on auto-advertised prefixes for this VRF (0 = unlimited)"},
 		&cli.StringFlag{Name: "mup-gtp4-source-prefix", Usage: "RFC 9433 6.6 GTP4 downlink source-embed prefix for this VRF's RD (IPv6, /96 or shorter; empty = off, requires --rd)"},
+		&cli.StringFlag{Name: "mup-uplink-interfaces", Usage: "Access interfaces (comma-separated) whose GTP-U uplink belongs to this binding's MUP service instance; empty = default instance 0"},
 	}
 }
 
@@ -75,6 +76,7 @@ func buildBindingFromFlags(c *cli.Context) (*v1.VrfBgpBinding, error) {
 		MaxPrefixes:         uint32(maxPfx),
 		Families:            families,
 		MupGtp4SourcePrefix: c.String("mup-gtp4-source-prefix"),
+		MupUplinkInterfaces: csvFlag(c.String("mup-uplink-interfaces")),
 	}, nil
 }
 

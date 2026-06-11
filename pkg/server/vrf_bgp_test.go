@@ -281,9 +281,13 @@ func TestVrfBgpList_RoundTripsNewFields(t *testing.T) {
 
 // fakeMupSrc records the RDs the binding mutations re-reconciled so the
 // MUP GTP4 source-embed hook tests can pin when (and for which RD) it fires.
-type fakeMupSrc struct{ rds []string }
+type fakeMupSrc struct {
+	rds            []string
+	uplinkRecycles int
+}
 
 func (f *fakeMupSrc) ReconcileMUPGTP4SrcForRD(rd string) { f.rds = append(f.rds, rd) }
+func (f *fakeMupSrc) ReconcileMUPUplinkInstances()       { f.uplinkRecycles++ }
 
 // The MUP source-embed hook fires on a bind that carries a prefix, on a
 // prefix change, and on an RD move (both RDs); it stays silent on an

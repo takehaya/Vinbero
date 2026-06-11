@@ -146,7 +146,7 @@ func TestApplyMUP_T2ST_Uplink_GTP6(t *testing.T) {
 		Endpoint: endpoint, TEID: teid, TEIDLen: teidLen, SRv6SID: "fd00:6:6:c::",
 	}})
 
-	ue, ok := fh.mupUplink[mupUplinkKey{endpoint, teid, teidLen}]
+	ue, ok := fh.mupUplink[mupUplinkKey{0, endpoint, teid, teidLen}]
 	if !ok {
 		t.Fatalf("CreateMupUplinkV6 not called; mupUplink=%v", fh.mupUplink)
 	}
@@ -179,7 +179,7 @@ func TestApplyMUP_T2ST_Uplink(t *testing.T) {
 	}})
 
 	// F-TEID uplink entry.
-	ue, ok := fh.mupUplink[mupUplinkKey{endpoint, teid, teidLen}]
+	ue, ok := fh.mupUplink[mupUplinkKey{0, endpoint, teid, teidLen}]
 	if !ok {
 		t.Fatalf("CreateMupUplinkV4 not called; mupUplink=%v", fh.mupUplink)
 	}
@@ -422,7 +422,7 @@ func TestApplyMUP_T2ST_ResolvesViaDSD(t *testing.T) {
 		a := newMUPApplier(t, fh)
 		a.Apply(mupDSD(rd, dsdAddr, seg2, seg4, direct))
 		a.Apply(mupT2ST(rd, endpoint, 0x100, 32, seg2, seg4, "")) // no own SID
-		ue, ok := fh.mupUplink[mupUplinkKey{endpoint, 0x100, 32}]
+		ue, ok := fh.mupUplink[mupUplinkKey{0, endpoint, 0x100, 32}]
 		if !ok {
 			t.Fatalf("uplink entry not installed; mupUplink=%v", fh.mupUplink)
 		}
@@ -442,7 +442,7 @@ func TestApplyMUP_T2ST_ResolvesViaDSD(t *testing.T) {
 			t.Error("gate installed for a deferred T2ST; gate must wait for resolution")
 		}
 		a.Apply(mupDSD(rd, dsdAddr, seg2, seg4, direct)) // DSD arrives -> install
-		if _, ok := fh.mupUplink[mupUplinkKey{endpoint, 0x100, 32}]; !ok {
+		if _, ok := fh.mupUplink[mupUplinkKey{0, endpoint, 0x100, 32}]; !ok {
 			t.Errorf("uplink not installed after its DSD arrived; mupUplink=%v", fh.mupUplink)
 		}
 		if _, ok := fh.v4created[endpoint+"/32"]; !ok {
@@ -487,12 +487,12 @@ func TestApplyMUP_SIDChangeReResolution(t *testing.T) {
 		a := newMUPApplier(t, fh)
 		a.Apply(mupDSD(rd, dsdAddr, seg2, seg4, sidA))
 		a.Apply(mupT2ST(rd, endpoint, 0x100, 32, seg2, seg4, "")) // installs via sidA
-		if got := netip.AddrFrom16(fh.mupUplink[mupUplinkKey{endpoint, 0x100, 32}].DstAddr); got != netip.MustParseAddr(sidA) {
+		if got := netip.AddrFrom16(fh.mupUplink[mupUplinkKey{0, endpoint, 0x100, 32}].DstAddr); got != netip.MustParseAddr(sidA) {
 			t.Fatalf("initial uplink SID = %s, want %s", got, sidA)
 		}
 		// Same DSD key, new SID -> re-resolution.
 		a.Apply(mupDSD(rd, dsdAddr, seg2, seg4, sidB))
-		if got := netip.AddrFrom16(fh.mupUplink[mupUplinkKey{endpoint, 0x100, 32}].DstAddr); got != netip.MustParseAddr(sidB) {
+		if got := netip.AddrFrom16(fh.mupUplink[mupUplinkKey{0, endpoint, 0x100, 32}].DstAddr); got != netip.MustParseAddr(sidB) {
 			t.Errorf("uplink SID after re-resolution = %s, want %s (re-Put branch)", got, sidB)
 		}
 		if len(fh.v4deleted) != 0 {
@@ -568,7 +568,7 @@ func TestApplyMUP_DSD_SegmentIDCollisionDeterministic(t *testing.T) {
 	a.Apply(mupDSD(rd, "10.0.0.9", seg2, seg4, sidHi))
 	a.Apply(mupDSD(rd, "10.0.0.1", seg2, seg4, sidLo))
 	a.Apply(mupT2ST(rd, endpoint, 0x100, 32, seg2, seg4, ""))
-	if got := netip.AddrFrom16(fh.mupUplink[mupUplinkKey{endpoint, 0x100, 32}].DstAddr); got != netip.MustParseAddr(sidLo) {
+	if got := netip.AddrFrom16(fh.mupUplink[mupUplinkKey{0, endpoint, 0x100, 32}].DstAddr); got != netip.MustParseAddr(sidLo) {
 		t.Errorf("colliding-segment-id resolution = %s, want the deterministic lowest %s", got, sidLo)
 	}
 }
@@ -939,5 +939,70 @@ func TestApplyMUP_GTP4SourceEmbed_RuntimeReconcile(t *testing.T) {
 	if got := fh.v4created["10.1.0.1/32"].SrcAddr; got != plainSrc {
 		t.Errorf("src after prefix removal = %v, want plain encap source %v",
 			netip.AddrFrom16(got), netip.AddrFrom16(plainSrc))
+	}
+}
+
+// A T2ST whose RTs match a binding holding an uplink instance installs its
+// F-TEID entry under that instance, and the binding-mutation reconcile
+// re-keys it when the instance assignment changes (here: unbind back to the
+// default instance 0). The route carries its own SID so resolution does not
+// depend on a DSD.
+func TestApplyMUP_T2ST_UplinkInstanceScoping(t *testing.T) {
+	fh := newFakeHeadend()
+	vm := vrfbgp.NewManager()
+	if err := vm.Bind(vrfbgp.Binding{
+		VRFName: "vrf-a",
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:1", Direction: vrfbgp.DirectionImport}}},
+		},
+		MupUplinkInterfaces: []string{"lo"},
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	inst := vm.UplinkInstanceForVRF("vrf-a")
+	if inst == 0 {
+		t.Fatalf("binding holds no uplink instance")
+	}
+	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+
+	const (
+		endpoint = "192.0.2.100"
+		direct   = "fd00:3:3:c::"
+		teid     = uint32(0x100)
+	)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT2ST, RD: "65000:100", RTs: []string{"100:1"},
+		Endpoint: endpoint, TEID: teid, TEIDLen: 32, SRv6SID: direct,
+	}})
+
+	if _, ok := fh.mupUplink[mupUplinkKey{inst, endpoint, teid, 32}]; !ok {
+		t.Fatalf("uplink entry not keyed under instance %d; mupUplink=%v", inst, fh.mupUplink)
+	}
+
+	// The instance map rewrite resolves lo to the binding's instance.
+	a.ReconcileMUPUplinkInstances()
+	if len(fh.mupIfindexInstances) != 1 {
+		t.Fatalf("ifindex map = %v, want one entry (lo)", fh.mupIfindexInstances)
+	}
+	for _, gotInst := range fh.mupIfindexInstances {
+		if gotInst != inst {
+			t.Errorf("ifindex map instance = %d, want %d", gotInst, inst)
+		}
+	}
+
+	// Unbind releases the instance; the reconcile re-keys the session back to
+	// the default instance 0 and empties the ifindex map.
+	if err := vm.Unbind("vrf-a"); err != nil {
+		t.Fatalf("Unbind: %v", err)
+	}
+	a.ReconcileMUPUplinkInstances()
+	if _, ok := fh.mupUplink[mupUplinkKey{inst, endpoint, teid, 32}]; ok {
+		t.Errorf("old instance key still installed after re-key; mupUplink=%v", fh.mupUplink)
+	}
+	if _, ok := fh.mupUplink[mupUplinkKey{0, endpoint, teid, 32}]; !ok {
+		t.Errorf("session not re-keyed to the default instance; mupUplink=%v", fh.mupUplink)
+	}
+	if len(fh.mupIfindexInstances) != 0 {
+		t.Errorf("ifindex map = %v, want empty after unbind", fh.mupIfindexInstances)
 	}
 }

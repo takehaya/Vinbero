@@ -42,7 +42,8 @@ type fakeHeadend struct {
 	bdPeerDelErr  error
 	esis          map[[bpf.ESILen]byte]*bpf.EsiEntry
 
-	mupUplink map[mupUplinkKey]*bpf.HeadendEntry
+	mupUplink           map[mupUplinkKey]*bpf.HeadendEntry
+	mupIfindexInstances map[uint32]uint32
 }
 
 func newFakeHeadend() *fakeHeadend {
@@ -126,40 +127,47 @@ func (f *fakeHeadend) DeleteSRPolicy(uint32) error               { return nil }
 
 // mupUplinkKey records an mup_uplink_v4_map write in fakeHeadend.
 type mupUplinkKey struct {
+	instance uint32
 	endpoint string
 	teid     uint32
 	teidLen  uint8
 }
 
-func (f *fakeHeadend) CreateMupUplinkV4(endpoint string, teid uint32, teidPrefixBits uint8, e *bpf.HeadendEntry) error {
+func (f *fakeHeadend) CreateMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, e *bpf.HeadendEntry) error {
 	if f.createErr != nil {
 		return f.createErr
 	}
 	if f.mupUplink == nil {
 		f.mupUplink = map[mupUplinkKey]*bpf.HeadendEntry{}
 	}
-	f.mupUplink[mupUplinkKey{endpoint, teid, teidPrefixBits}] = e
+	f.mupUplink[mupUplinkKey{instance, endpoint, teid, teidPrefixBits}] = e
 	return nil
 }
 
-func (f *fakeHeadend) DeleteMupUplinkV4(endpoint string, teid uint32, teidPrefixBits uint8) error {
-	delete(f.mupUplink, mupUplinkKey{endpoint, teid, teidPrefixBits})
+func (f *fakeHeadend) DeleteMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
+	delete(f.mupUplink, mupUplinkKey{instance, endpoint, teid, teidPrefixBits})
 	return nil
 }
 
-func (f *fakeHeadend) CreateMupUplinkV6(endpoint string, teid uint32, teidPrefixBits uint8, e *bpf.HeadendEntry) error {
+func (f *fakeHeadend) CreateMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, e *bpf.HeadendEntry) error {
 	if f.createErr != nil {
 		return f.createErr
 	}
 	if f.mupUplink == nil {
 		f.mupUplink = map[mupUplinkKey]*bpf.HeadendEntry{}
 	}
-	f.mupUplink[mupUplinkKey{endpoint, teid, teidPrefixBits}] = e
+	f.mupUplink[mupUplinkKey{instance, endpoint, teid, teidPrefixBits}] = e
 	return nil
 }
 
-func (f *fakeHeadend) DeleteMupUplinkV6(endpoint string, teid uint32, teidPrefixBits uint8) error {
-	delete(f.mupUplink, mupUplinkKey{endpoint, teid, teidPrefixBits})
+func (f *fakeHeadend) DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
+	delete(f.mupUplink, mupUplinkKey{instance, endpoint, teid, teidPrefixBits})
+	return nil
+}
+
+// mupIfindexInstances records the last SetMupUplinkInstances rewrite.
+func (f *fakeHeadend) SetMupUplinkInstances(mapping map[uint32]uint32) error {
+	f.mupIfindexInstances = mapping
 	return nil
 }
 

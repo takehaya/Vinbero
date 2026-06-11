@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"net"
 	"net/netip"
 	"slices"
 
@@ -76,7 +77,17 @@ type mupSessionState struct {
 	// the T2ST anchor, see mupGTP4DownlinkSrc), so the T1ST reconcile
 	// short-circuit compares both.
 	installedSrc [16]byte
-	deferLogged  bool
+	// fam is the route's MUP family (mup_ipv4 / mup_ipv6), kept so the
+	// binding-mutation reconcile can re-resolve the uplink instance without
+	// the original apply context. T2ST only.
+	fam bgp.Family
+	// instance is the uplink service instance the session's F-TEID entry is
+	// keyed under (0 = default): the instance of the binding whose import RTs
+	// matched the route at apply time. Uninstall must use the same value the
+	// install used, so it lives on the session, not recomputed ad hoc. T2ST
+	// only.
+	instance    uint32
+	deferLogged bool
 }
 
 // mupUpsertSession returns the session state for key, creating it when absent.
@@ -167,7 +178,7 @@ func (a *Applier) applyMUP(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	case bgp.MUPRouteTypeT1ST:
 		a.applyMUPT1ST(r, withdraw)
 	case bgp.MUPRouteTypeT2ST:
-		a.applyMUPT2ST(r, withdraw)
+		a.applyMUPT2ST(fam, r, withdraw)
 	default:
 		a.logger.Warn("unknown MUP route type", zap.String("type", r.Type.String()))
 	}
@@ -547,8 +558,8 @@ type (
 // uplink session: the F-TEID map writers, the gate behavior/prefix, and the gate
 // map writers. GTP4 vs GTP6 is the endpoint's address family.
 type mupT2STDataPlane struct {
-	uplinkCreate func(string, uint32, uint8, *bpf.HeadendEntry) error
-	uplinkDelete func(string, uint32, uint8) error
+	uplinkCreate func(uint32, string, uint32, uint8, *bpf.HeadendEntry) error
+	uplinkDelete func(uint32, string, uint32, uint8) error
 	gateMode     uint8
 	createGate   headendCreateFn
 	deleteGate   headendDeleteFn
@@ -577,8 +588,10 @@ func (a *Applier) mupT2STDataPlane(endpoint netip.Addr, endpointStr string) mupT
 }
 
 // applyMUPT2ST records (or withdraws) an uplink session, then reconciles its
-// data-plane install against the current DSD table.
-func (a *Applier) applyMUPT2ST(r *bgp.MUPRoute, withdraw bool) {
+// data-plane install against the current DSD table. fam scopes the uplink
+// instance resolution: the session installs under the instance of the binding
+// whose import RTs matched it (0 = default).
+func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	key := mupT2STKey{rd: r.RD, endpoint: r.Endpoint, teid: r.TEID, teidLen: r.TEIDLen}
 	if withdraw {
 		st, ok := a.mupT2ST[key]
@@ -605,9 +618,70 @@ func (a *Applier) applyMUPT2ST(r *bgp.MUPRoute, withdraw bool) {
 			zap.Int("max", maxMUPSessions), zap.String("rd", r.RD), zap.String("endpoint", r.Endpoint))
 		return
 	}
+	// A re-advertise can land on a different instance when the bindings moved
+	// underneath it; the old F-TEID key must go before the route is replaced,
+	// since uninstall keys off the stored instance.
+	inst := a.mupUplinkInstanceForRoute(fam, r)
+	if st.installedSID != "" && st.instance != inst {
+		a.uninstallMUPT2ST(st)
+	}
 	st.route = *r
+	st.fam = fam
+	st.instance = inst
 	a.reconcileMUPT2ST(key)
 	a.reconcileMUPT1STForGTP4Src(r.RD)
+}
+
+// mupUplinkInstanceForRoute resolves the uplink instance a T2ST installs
+// under: the instance of the binding whose import RTs match the route for
+// fam. Routes matching no binding — including the default-allow path with no
+// bindings at all — and bindings without mup_uplink_interfaces fall to the
+// default instance 0.
+func (a *Applier) mupUplinkInstanceForRoute(fam bgp.Family, r *bgp.MUPRoute) uint32 {
+	vrfName, _, ok := a.vrfBindings.MatchImportForFamily(r.RTs, fam)
+	if !ok {
+		return 0
+	}
+	return a.vrfBindings.UplinkInstanceForVRF(vrfName)
+}
+
+// ReconcileMUPUplinkInstances reprograms the data plane's uplink instance
+// state after a VRF binding changed at runtime (bind / update / unbind) or at
+// boot once the config bindings are registered. It rewrites
+// mup_ifindex_instance_map from the bindings' mup_uplink_interfaces (names
+// resolved to ifindexes here; unresolvable names are logged and skipped, and
+// a later call re-resolves them), then re-keys every T2ST session whose
+// instance assignment changed. Safe to call from RPC goroutines (mupMu).
+func (a *Applier) ReconcileMUPUplinkInstances() {
+	mapping := make(map[uint32]uint32)
+	for inst, ifnames := range a.vrfBindings.UplinkInstanceInterfaces() {
+		for _, name := range ifnames {
+			ifi, err := net.InterfaceByName(name)
+			if err != nil {
+				a.logger.Warn("resolve MUP uplink interface (skipping; rebind to retry)",
+					zap.String("interface", name), zap.Uint32("instance", inst), zap.Error(err))
+				continue
+			}
+			mapping[uint32(ifi.Index)] = inst
+		}
+	}
+	if err := a.mupUplink.SetMupUplinkInstances(mapping); err != nil {
+		a.logger.Error("program MUP uplink instance map", zap.Error(err))
+	}
+
+	a.mupMu.Lock()
+	defer a.mupMu.Unlock()
+	for k, st := range a.mupT2ST {
+		inst := a.mupUplinkInstanceForRoute(st.fam, &st.route)
+		if inst == st.instance {
+			continue
+		}
+		if st.installedSID != "" {
+			a.uninstallMUPT2ST(st)
+		}
+		st.instance = inst
+		a.reconcileMUPT2ST(k)
+	}
 }
 
 // reconcileMUPT1STForGTP4Src re-reconciles rd's downlink sessions after its
@@ -701,13 +775,13 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 				zap.String("endpoint", r.Endpoint), zap.Error(err))
 			return
 		}
-		if err := dp.uplinkCreate(r.Endpoint, r.TEID, r.TEIDLen, entry); err != nil {
+		if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry); err != nil {
 			a.logger.Error("install MUP T2ST uplink entry",
 				zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
 			a.releaseMUPGate(dp.gatePrefix, gateOwner, dp.deleteGate)
 			return
 		}
-	} else if err := dp.uplinkCreate(r.Endpoint, r.TEID, r.TEIDLen, entry); err != nil {
+	} else if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry); err != nil {
 		// SID changed (a different DSD now resolves): re-Put the F-TEID entry. The
 		// gate already exists and its ref-count is unchanged.
 		a.logger.Error("re-Put MUP T2ST uplink entry",
@@ -717,7 +791,8 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 	st.installedSID = sid
 	a.logger.Info("MUP T2ST uplink installed",
 		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
-		zap.Uint8("teid_len", r.TEIDLen), zap.String("sid", sid))
+		zap.Uint8("teid_len", r.TEIDLen), zap.String("sid", sid),
+		zap.Uint32("instance", st.instance))
 }
 
 // uninstallMUPT2ST removes an uplink session's F-TEID entry and releases its
@@ -727,7 +802,7 @@ func (a *Applier) uninstallMUPT2ST(st *mupSessionState) {
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint)
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
-	if err := dp.uplinkDelete(r.Endpoint, r.TEID, r.TEIDLen); err != nil {
+	if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen); err != nil {
 		a.logger.Error("withdraw MUP T2ST uplink entry (continuing to release gate)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
 	}
