@@ -71,6 +71,11 @@ type mupDSDEntry struct {
 type mupSessionState struct {
 	route        bgp.MUPRoute
 	installedSID string
+	// installedSrc is the outer IPv6 source the installed entry carries. It can
+	// change while installedSID stays the same (the GTP4 source embed follows
+	// the T2ST anchor, see mupGTP4DownlinkSrc), so the T1ST reconcile
+	// short-circuit compares both.
+	installedSrc [16]byte
 	deferLogged  bool
 }
 
@@ -143,6 +148,8 @@ func rtsIntersect(a, b []string) bool {
 // always torn down. A Manager with no MUP-family binding keeps the
 // historical default-allow.
 func (a *Applier) applyMUP(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
+	a.mupMu.Lock()
+	defer a.mupMu.Unlock()
 	sessionRoute := r.Type == bgp.MUPRouteTypeT1ST || r.Type == bgp.MUPRouteTypeT2ST
 	if !withdraw && sessionRoute && !a.mupDefaultAllow && !a.vrfBindings.EmptyForFamily(fam) {
 		if _, _, ok := a.vrfBindings.MatchImportForFamily(r.RTs, fam); !ok {
@@ -387,17 +394,21 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
 			zap.String("endpoint", r.Endpoint), zap.Error(err))
 		return
 	}
-	if st.installedSID == composed {
-		return // already programmed with this SID
-	}
 
-	createHeadend, _ := a.mupT1STHeadendFns(uePrefix)
 	entry, err := a.buildHeadendEntry(composed)
 	if err != nil {
 		a.logger.Error("build MUP T1ST headend entry",
 			zap.String("ue_prefix", r.Prefix), zap.Error(err))
 		return
 	}
+	if src, ok := a.mupGTP4DownlinkSrc(r, endpoint); ok {
+		entry.SrcAddr = src
+	}
+	if st.installedSID == composed && st.installedSrc == entry.SrcAddr {
+		return // already programmed with this SID and source
+	}
+
+	createHeadend, _ := a.mupT1STHeadendFns(uePrefix)
 	owner := bpf.OwnerBGPMUP(a.localASN, r.RD)
 	if err := createHeadend(r.Prefix, entry, owner); err != nil {
 		a.logger.Error("install MUP T1ST headend",
@@ -405,14 +416,105 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
 		return
 	}
 	st.installedSID = composed
+	st.installedSrc = entry.SrcAddr
 	a.logger.Info("MUP T1ST downlink installed",
 		zap.String("ue_prefix", r.Prefix), zap.String("endpoint", r.Endpoint),
-		zap.Uint32("teid", r.TEID), zap.Uint8("qfi", r.QFI), zap.String("sid", composed))
+		zap.Uint32("teid", r.TEID), zap.Uint8("qfi", r.QFI), zap.String("sid", composed),
+		zap.String("src", netip.AddrFrom16(entry.SrcAddr).String()))
+}
+
+// mupGTP4SrcPrefixForRD returns the GTP4 downlink source prefix of the unique
+// VRF binding whose RD is rd. ok=false when no (or an ambiguous) binding
+// matches, or the binding carries no prefix — BindingByRD's refuse-to-guess
+// rule means a duplicated RD silently disables the embed for that RD until
+// the operator resolves the ambiguity.
+func (a *Applier) mupGTP4SrcPrefixForRD(rd string) (netip.Prefix, bool) {
+	b, ok := a.vrfBindings.BindingByRD(rd)
+	if !ok || !b.MupGTP4SourcePrefix.IsValid() {
+		return netip.Prefix{}, false
+	}
+	return b.MupGTP4SourcePrefix, true
+}
+
+// mupGTP4DownlinkSrc synthesizes the outer IPv6 source for a GTP4 downlink
+// session per RFC 9433 §6.6: the source prefix of the session RD's VRF
+// binding with the session's UPF IPv4 anchor embedded immediately after the
+// prefix bits, so the peer GW's End.M.GTP4.E extracts it as the GTP-U outer
+// IPv4 source (v4src_position = prefix length). The anchor is the IPv4
+// endpoint of a same-RD T2ST whose TEID prefix covers this session's TEID —
+// the controller distributes the UPF N3 address as session state, so no
+// extra config names it here. ok=false (the caller keeps the plain
+// locator-derived encap source) when no binding carries a prefix for the RD,
+// the session is not GTP4, or no anchor is known yet; a later T2ST or
+// binding mutation re-reconciles the session (see applyMUPT2ST and
+// ReconcileMUPGTP4SrcForRD).
+func (a *Applier) mupGTP4DownlinkSrc(r *bgp.MUPRoute, endpoint netip.Addr) ([16]byte, bool) {
+	var zero [16]byte
+	if !endpoint.Is4() {
+		return zero, false
+	}
+	pfx, ok := a.mupGTP4SrcPrefixForRD(r.RD)
+	if !ok {
+		return zero, false
+	}
+	anchor, ok := a.mupT2STAnchor(r.RD, r.TEID)
+	if !ok {
+		return zero, false
+	}
+	return embedV4AfterPrefix(pfx, anchor), true
+}
+
+// mupT2STAnchor returns the UPF IPv4 anchor for a downlink session: the IPv4
+// endpoint of a same-RD T2ST whose TEID prefix matches teid. The longest
+// TEID-prefix match wins; among equals the lexicographically smallest endpoint
+// keeps the choice deterministic across map iteration order.
+func (a *Applier) mupT2STAnchor(rd string, teid uint32) (netip.Addr, bool) {
+	var (
+		best    netip.Addr
+		bestLen = -1
+	)
+	for key := range a.mupT2ST {
+		if key.rd != rd || key.teidLen > 32 {
+			continue
+		}
+		ep, err := netip.ParseAddr(key.endpoint)
+		if err != nil || !ep.Is4() {
+			continue
+		}
+		var mask uint32
+		if key.teidLen > 0 {
+			mask = ^uint32(0) << (32 - key.teidLen)
+		}
+		if (teid & mask) != (key.teid & mask) {
+			continue
+		}
+		if int(key.teidLen) > bestLen || (int(key.teidLen) == bestLen && ep.Less(best)) {
+			best, bestLen = ep, int(key.teidLen)
+		}
+	}
+	return best, bestLen >= 0
+}
+
+// embedV4AfterPrefix places the 32 bits of v4 immediately after the prefix
+// bits of p (everything past them is zero): the RFC 9433 §6.6
+// [Source UPF Prefix][IPv4 SA][padding] IPv6 source-address layout.
+func embedV4AfterPrefix(p netip.Prefix, v4 netip.Addr) [16]byte {
+	out := p.Masked().Addr().As16()
+	v4b := v4.As4()
+	off := p.Bits()
+	for i := range 32 {
+		if (v4b[i/8]>>(7-i%8))&1 == 1 {
+			pos := off + i
+			out[pos/8] |= 1 << (7 - pos%8)
+		}
+	}
+	return out
 }
 
 // uninstallMUPT1ST removes a downlink session's headend entry and marks it
-// uninstalled. Clears installedSID even when the BPF delete errors so the index
-// cannot diverge from the (idempotent) map.
+// uninstalled. Clears installedSID (and the source that rode with it) even
+// when the BPF delete errors so the index cannot diverge from the
+// (idempotent) map.
 func (a *Applier) uninstallMUPT1ST(st *mupSessionState) {
 	r := &st.route
 	uePrefix, _ := netip.ParsePrefix(r.Prefix)
@@ -422,6 +524,7 @@ func (a *Applier) uninstallMUPT1ST(st *mupSessionState) {
 			zap.String("ue_prefix", r.Prefix), zap.Error(err))
 	}
 	st.installedSID = ""
+	st.installedSrc = [16]byte{}
 }
 
 // mupT1STHeadendFns selects the headend map writers for the UE prefix's family.
@@ -486,6 +589,7 @@ func (a *Applier) applyMUPT2ST(r *bgp.MUPRoute, withdraw bool) {
 			a.uninstallMUPT2ST(st)
 		}
 		delete(a.mupT2ST, key)
+		a.reconcileMUPT1STForGTP4Src(r.RD)
 		return
 	}
 	if _, err := netip.ParseAddr(r.Endpoint); err != nil {
@@ -503,6 +607,45 @@ func (a *Applier) applyMUPT2ST(r *bgp.MUPRoute, withdraw bool) {
 	}
 	st.route = *r
 	a.reconcileMUPT2ST(key)
+	a.reconcileMUPT1STForGTP4Src(r.RD)
+}
+
+// reconcileMUPT1STForGTP4Src re-reconciles rd's downlink sessions after its
+// T2ST table changed. Only relevant when rd's binding carries a GTP4 source
+// prefix: the embedded source follows the session's same-RD T2ST anchor
+// (mupGTP4DownlinkSrc), so a T2ST arriving after its T1ST upgrades the
+// install, and a withdraw reverts it to the plain encap source. Reconcile
+// no-ops on sessions whose SID and source are unchanged. Gating on the
+// prefix here is safe: an embed-installed session whose prefix later
+// disappears is reverted by ReconcileMUPGTP4SrcForRD (the binding-mutation
+// hook), not by this T2ST-driven path.
+func (a *Applier) reconcileMUPT1STForGTP4Src(rd string) {
+	if _, ok := a.mupGTP4SrcPrefixForRD(rd); !ok {
+		return
+	}
+	for k := range a.mupT1ST {
+		if k.rd == rd {
+			a.reconcileMUPT1ST(k)
+		}
+	}
+}
+
+// ReconcileMUPGTP4SrcForRD re-reconciles every installed T1ST downlink under
+// rd after the binding that owns rd changed at runtime (VrfBgpService bind /
+// update / unbind): a new or changed GTP4 source prefix re-embeds the outer
+// source, a removed prefix (or removed binding) reverts the install to the
+// plain locator-derived encap source. Unlike the T2ST-driven internal path
+// it does NOT gate on a prefix being present — the revert case is exactly a
+// missing prefix. reconcileMUPT1ST no-ops on an unchanged {SID, source}, so
+// a spurious call is cheap. Safe to call from RPC goroutines (mupMu).
+func (a *Applier) ReconcileMUPGTP4SrcForRD(rd string) {
+	a.mupMu.Lock()
+	defer a.mupMu.Unlock()
+	for k := range a.mupT1ST {
+		if k.rd == rd {
+			a.reconcileMUPT1ST(k)
+		}
+	}
 }
 
 // reconcileMUPT2ST (re)programs one uplink session: it resolves the direct SID,

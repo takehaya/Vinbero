@@ -37,6 +37,7 @@ type Server struct {
 	evpnCoord    *EvpnCoordinator           // EVPN RT2/RT3 BD lifecycle (device + binding axes); nil when off
 	evpnES       EvpnEsHook                 // EVPN RT4 auto-advertise ES hook; nil when off
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
+	mupSrc       MupSrcReconciler           // MUP GTP4 source-embed reconcile hook; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
@@ -73,6 +74,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 	if srPolicyApplier != nil {
 		s.srPolicyCtrl = srPolicyApplier
 		s.esReElectDF = srPolicyApplier.ReelectDF
+		s.mupSrc = srPolicyApplier
 	}
 	return s
 }
@@ -101,7 +103,7 @@ func (s *Server) Setup() {
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
 
 	// VrfBgp service (VRF <-> BGP route-target bindings).
-	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord)
+	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc)
 	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))

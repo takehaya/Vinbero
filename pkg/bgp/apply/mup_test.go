@@ -18,6 +18,29 @@ func newMUPApplier(t *testing.T, fh *fakeHeadend) *Applier {
 	return NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
 }
 
+// bindMUPGTP4Src registers a binding carrying rd and the RFC 9433 §6.6 GTP4
+// downlink source prefix on vm. The binding declares no families, so the
+// MUP import filter stays default-allow and only the source embed is bound.
+func bindMUPGTP4Src(t *testing.T, vm *vrfbgp.Manager, vrf, rd, prefix string) {
+	t.Helper()
+	pfx, err := vrfbgp.ParseMUPGTP4SourcePrefix(prefix, rd)
+	if err != nil {
+		t.Fatalf("ParseMUPGTP4SourcePrefix(%q): %v", prefix, err)
+	}
+	if err := vm.Bind(vrfbgp.Binding{VRFName: vrf, RD: rd, MupGTP4SourcePrefix: pfx}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+}
+
+// newMUPApplierWithGTP4Src is newMUPApplier plus a binding that turns on the
+// GTP4 downlink source embed for rd.
+func newMUPApplierWithGTP4Src(t *testing.T, fh *fakeHeadend, rd, prefix string) *Applier {
+	t.Helper()
+	vm := vrfbgp.NewManager()
+	bindMUPGTP4Src(t, vm, "vrf-mup", rd, prefix)
+	return NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+}
+
 // T1ST installs a downlink H.Encaps headend on the UE prefix whose destination
 // SID carries Args.Mob.Session(gNB endpoint, TEID, QFI) at offset 7.
 func TestApplyMUP_T1ST_Downlink(t *testing.T) {
@@ -734,5 +757,187 @@ func TestApplyMUP_DefaultAllowKnobBypassesFilter(t *testing.T) {
 	a.Apply(notImported)
 	if len(a.mupT1ST) != 1 {
 		t.Errorf("default-allow knob must bypass the filter; got %d T1ST entries", len(a.mupT1ST))
+	}
+}
+
+// With a binding carrying mup_gtp4_source_prefix for the session's RD, the
+// downlink outer source embeds the session's UPF IPv4 anchor (the same-RD
+// T2ST endpoint) right after the configured prefix bits (RFC 9433 §6.6),
+// and follows the T2ST through arrive-after-install and withdraw.
+func TestApplyMUP_T1ST_GTP4SourceEmbed(t *testing.T) {
+	fh := newFakeHeadend()
+	const (
+		rd       = "65000:100"
+		uePrefix = "10.1.0.1/32"
+		gnb      = "172.16.0.1"
+		upf      = "172.16.0.254"
+		teid     = uint32(0x100)
+	)
+	t1st := bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT1ST, RD: rd,
+		Prefix: uePrefix, Endpoint: gnb, TEID: teid, TEIDLen: 32, QFI: 9,
+		SRv6SID: "fd00:2:2:b::",
+	}}
+	t2st := bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT2ST, RD: rd,
+		Endpoint: upf, TEID: teid, TEIDLen: 32,
+	}}
+	a := newMUPApplierWithGTP4Src(t, fh, rd, "::/0")
+
+	// T1ST before any T2ST: no anchor known yet, plain encap source (LOC1).
+	a.Apply(t1st)
+	entry := fh.v4created[uePrefix]
+	if entry == nil {
+		t.Fatalf("CreateHeadendV4 not called for UE prefix")
+	}
+	plainSrc := netip.MustParsePrefix("fd00:1:1::/48").Masked().Addr().As16()
+	if entry.SrcAddr != plainSrc {
+		t.Fatalf("src before T2ST = %v, want plain encap source %v",
+			netip.AddrFrom16(entry.SrcAddr), netip.AddrFrom16(plainSrc))
+	}
+
+	// The T2ST arriving re-reconciles the downlink with the embedded source:
+	// prefix ::/0 puts the anchor in the first 32 bits (ac10:fe::).
+	a.Apply(t2st)
+	entry = fh.v4created[uePrefix]
+	embedded := netip.MustParseAddr("ac10:fe::").As16()
+	if entry.SrcAddr != embedded {
+		t.Fatalf("src after T2ST = %v, want embedded %v",
+			netip.AddrFrom16(entry.SrcAddr), netip.AddrFrom16(embedded))
+	}
+
+	// Withdrawing the T2ST reverts the downlink to the plain encap source.
+	w := *t2st.MUP
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, IsWithdraw: true, MUP: &w})
+	entry = fh.v4created[uePrefix]
+	if entry.SrcAddr != plainSrc {
+		t.Errorf("src after T2ST withdraw = %v, want plain encap source %v",
+			netip.AddrFrom16(entry.SrcAddr), netip.AddrFrom16(plainSrc))
+	}
+}
+
+// The embed honors a non-zero source-prefix: with a /64 prefix the anchor
+// occupies bits 64..95 (v4src_position 64 on the peer GW).
+func TestApplyMUP_T1ST_GTP4SourceEmbed_Position64(t *testing.T) {
+	fh := newFakeHeadend()
+	const rd = "65000:100"
+	a := newMUPApplierWithGTP4Src(t, fh, rd, "2001:cafe:0:1::/64")
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT2ST, RD: rd, Endpoint: "172.16.0.254",
+		TEID: 0x100, TEIDLen: 32,
+	}})
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT1ST, RD: rd,
+		Prefix: "10.1.0.1/32", Endpoint: "172.16.0.1", TEID: 0x100, TEIDLen: 32, QFI: 9,
+		SRv6SID: "fd00:2:2:b::",
+	}})
+
+	entry := fh.v4created["10.1.0.1/32"]
+	if entry == nil {
+		t.Fatalf("CreateHeadendV4 not called")
+	}
+	want := netip.MustParseAddr("2001:cafe:0:1:ac10:fe::").As16()
+	if entry.SrcAddr != want {
+		t.Errorf("src = %v, want %v",
+			netip.AddrFrom16(entry.SrcAddr), netip.AddrFrom16(want))
+	}
+}
+
+// A GTP6 downlink (IPv6 endpoint) is exempt from the GTP4 source embed even
+// when the RD's binding carries a prefix and an anchor exists.
+func TestApplyMUP_T1ST_GTP4SourceEmbed_GTP6Exempt(t *testing.T) {
+	fh := newFakeHeadend()
+	const rd = "65000:100"
+	a := newMUPApplierWithGTP4Src(t, fh, rd, "::/0")
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT2ST, RD: rd, Endpoint: "172.16.0.254",
+		TEID: 0x100, TEIDLen: 32,
+	}})
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv6, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT1ST, RD: rd,
+		Prefix: "2001:db8:a::1/128", Endpoint: "2001:db8:b::1",
+		TEID: 0x100, TEIDLen: 32, QFI: 5, SRv6SID: "fd00:6:6:b::",
+	}})
+
+	entry := fh.v6created["2001:db8:a::1/128"]
+	if entry == nil {
+		t.Fatalf("CreateHeadendV6 not called")
+	}
+	plainSrc := netip.MustParsePrefix("fd00:1:1::/48").Masked().Addr().As16()
+	if entry.SrcAddr != plainSrc {
+		t.Errorf("GTP6 src = %v, want plain encap source %v",
+			netip.AddrFrom16(entry.SrcAddr), netip.AddrFrom16(plainSrc))
+	}
+}
+
+// The embed is scoped to the RD whose binding carries the prefix: a session
+// under a different RD keeps the plain encap source even when its own T2ST
+// anchor exists. This pins the per-VRF semantics of mup_gtp4_source_prefix.
+func TestApplyMUP_T1ST_GTP4SourceEmbed_RDScoped(t *testing.T) {
+	fh := newFakeHeadend()
+	a := newMUPApplierWithGTP4Src(t, fh, "65000:100", "::/0")
+
+	const otherRD = "65000:200"
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT2ST, RD: otherRD, Endpoint: "172.16.0.254",
+		TEID: 0x100, TEIDLen: 32,
+	}})
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT1ST, RD: otherRD,
+		Prefix: "10.1.0.1/32", Endpoint: "172.16.0.1", TEID: 0x100, TEIDLen: 32, QFI: 9,
+		SRv6SID: "fd00:2:2:b::",
+	}})
+
+	entry := fh.v4created["10.1.0.1/32"]
+	if entry == nil {
+		t.Fatalf("CreateHeadendV4 not called")
+	}
+	plainSrc := netip.MustParsePrefix("fd00:1:1::/48").Masked().Addr().As16()
+	if entry.SrcAddr != plainSrc {
+		t.Errorf("other-RD src = %v, want plain encap source %v",
+			netip.AddrFrom16(entry.SrcAddr), netip.AddrFrom16(plainSrc))
+	}
+}
+
+// A runtime binding mutation (VrfBgpService) drives ReconcileMUPGTP4SrcForRD:
+// a changed prefix re-embeds the installed downlink's outer source, and a
+// removed prefix reverts it to the plain encap source — the hook does not
+// gate on a prefix being present, unlike the T2ST-driven internal path.
+func TestApplyMUP_GTP4SourceEmbed_RuntimeReconcile(t *testing.T) {
+	fh := newFakeHeadend()
+	const rd = "65000:100"
+	vm := vrfbgp.NewManager()
+	bindMUPGTP4Src(t, vm, "vrf-mup", rd, "::/0")
+	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT2ST, RD: rd, Endpoint: "172.16.0.254",
+		TEID: 0x100, TEIDLen: 32,
+	}})
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeT1ST, RD: rd,
+		Prefix: "10.1.0.1/32", Endpoint: "172.16.0.1", TEID: 0x100, TEIDLen: 32, QFI: 9,
+		SRv6SID: "fd00:2:2:b::",
+	}})
+	if got, want := fh.v4created["10.1.0.1/32"].SrcAddr, netip.MustParseAddr("ac10:fe::").As16(); got != want {
+		t.Fatalf("src = %v, want embedded %v", netip.AddrFrom16(got), netip.AddrFrom16(want))
+	}
+
+	// Re-bind with a different prefix and drive the hook: the install follows.
+	bindMUPGTP4Src(t, vm, "vrf-mup", rd, "2001:cafe:0:1::/64")
+	a.ReconcileMUPGTP4SrcForRD(rd)
+	if got, want := fh.v4created["10.1.0.1/32"].SrcAddr, netip.MustParseAddr("2001:cafe:0:1:ac10:fe::").As16(); got != want {
+		t.Fatalf("src after prefix change = %v, want %v", netip.AddrFrom16(got), netip.AddrFrom16(want))
+	}
+
+	// Re-bind without a prefix and drive the hook: the install reverts.
+	if err := vm.Bind(vrfbgp.Binding{VRFName: "vrf-mup", RD: rd}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	a.ReconcileMUPGTP4SrcForRD(rd)
+	plainSrc := netip.MustParsePrefix("fd00:1:1::/48").Masked().Addr().As16()
+	if got := fh.v4created["10.1.0.1/32"].SrcAddr; got != plainSrc {
+		t.Errorf("src after prefix removal = %v, want plain encap source %v",
+			netip.AddrFrom16(got), netip.AddrFrom16(plainSrc))
 	}
 }

@@ -2,8 +2,8 @@ syntax = "proto3";
 
 package vinbero.v1;
 
-import "vinbero/v1/enums.proto";
 import "vinbero/v1/bgp_route.proto";
+import "vinbero/v1/enums.proto";
 
 option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 
@@ -55,6 +55,7 @@ message MupDeleteResponse {
 }
 
 message MupListRequest {}
+
 // MupList returns the MUP routes this node currently originates (local table);
 // BGP-learned MUP routes are not included.
 message MupListResponse {

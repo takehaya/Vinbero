@@ -22,6 +22,14 @@ type VrfExporter interface {
 	RemoveVRF(vrfName string)
 }
 
+// MupSrcReconciler is the runtime hook a binding mutation drives when its
+// MUP GTP4 source prefix (or the RD carrying it) changes: installed T1ST
+// downlinks under that RD re-derive their outer IPv6 source (RFC 9433 §6.6).
+// *pkg/bgp/apply.Applier satisfies it; it is nil when BGP is off.
+type MupSrcReconciler interface {
+	ReconcileMUPGTP4SrcForRD(rd string)
+}
+
 // VrfBgpServer is the Connect RPC handler for VrfBgpService, a thin
 // adapter over vrfbgp.Manager. When auto-advertise is on it also drives the
 // L3VPN VrfExporter and the EVPN coordinator so a runtime bind/unbind
@@ -31,6 +39,7 @@ type VrfBgpServer struct {
 	mgr      *vrfbgp.Manager
 	exporter VrfExporter      // L3VPN auto-advertise hook; nil when off
 	evpn     *EvpnCoordinator // EVPN BD lifecycle (binding axis); nil when off
+	mupSrc   MupSrcReconciler // MUP GTP4 source-embed reconcile hook; nil when BGP off
 	// mu serializes a bind/unbind's manager + exporter mutations per call so two
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
@@ -38,8 +47,8 @@ type VrfBgpServer struct {
 	mu sync.Mutex
 }
 
-func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator) *VrfBgpServer {
-	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn}
+func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupSrcReconciler) *VrfBgpServer {
+	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc}
 }
 
 // protoToBinding converts a wire VrfBgpBinding into the runtime Binding. The
@@ -52,23 +61,28 @@ func protoToBinding(b *v1.VrfBgpBinding) (vrfbgp.Binding, error) {
 	if err != nil {
 		return vrfbgp.Binding{}, err
 	}
+	mupSrc, err := vrfbgp.ParseMUPGTP4SourcePrefix(b.GetMupGtp4SourcePrefix(), b.GetRd())
+	if err != nil {
+		return vrfbgp.Binding{}, err
+	}
 	return vrfbgp.Binding{
-		VRFName:        b.GetVrfName(),
-		RD:             b.GetRd(),
-		ImportRTs:      b.GetImportRts(),
-		ExportRTs:      b.GetExportRts(),
-		Redistribute:   b.GetRedistribute(),
-		MaxPrefixes:    b.GetMaxPrefixes(),
-		DefaultLocator: b.GetDefaultLocator(),
-		BDID:           uint16(b.GetBdId()),
-		Families:       families,
+		VRFName:             b.GetVrfName(),
+		RD:                  b.GetRd(),
+		ImportRTs:           b.GetImportRts(),
+		ExportRTs:           b.GetExportRts(),
+		Redistribute:        b.GetRedistribute(),
+		MaxPrefixes:         b.GetMaxPrefixes(),
+		DefaultLocator:      b.GetDefaultLocator(),
+		BDID:                uint16(b.GetBdId()),
+		Families:            families,
+		MupGTP4SourcePrefix: mupSrc,
 	}, nil
 }
 
 // bindingToProto is the inverse of protoToBinding for VrfBgpList and the
 // mutation RPCs' "updated binding" response.
 func bindingToProto(b vrfbgp.Binding) *v1.VrfBgpBinding {
-	return &v1.VrfBgpBinding{
+	out := &v1.VrfBgpBinding{
 		VrfName:        b.VRFName,
 		Rd:             b.RD,
 		ImportRts:      b.ImportRTs,
@@ -79,6 +93,12 @@ func bindingToProto(b vrfbgp.Binding) *v1.VrfBgpBinding {
 		BdId:           uint32(b.BDID),
 		Families:       bindingFamiliesToProto(b.Families),
 	}
+	// The zero Prefix renders as "invalid Prefix", so only a set prefix is
+	// put on the wire.
+	if b.MupGTP4SourcePrefix.IsValid() {
+		out.MupGtp4SourcePrefix = b.MupGTP4SourcePrefix.String()
+	}
+	return out
 }
 
 // protoFamiliesToBinding validates the family map and translates it to the
@@ -186,7 +206,39 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			s.evpn.EnableForBinding(updated)
 		}
 	}
+	if s.mupSrc != nil && mupGTP4SrcFieldsChanged(existed, prev, updated) {
+		// The manager already holds the updated binding, so the reconcile
+		// resolves the new prefix; this hook fires only on the success path
+		// (a rolled-back commit leaves prev in place and nothing to redo).
+		if updated.RD != "" {
+			s.mupSrc.ReconcileMUPGTP4SrcForRD(updated.RD)
+		}
+		if existed && prev.RD != updated.RD && prev.RD != "" {
+			// An RD move strands the embed on the old RD's sessions; revert
+			// them to the plain encap source.
+			s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
+		}
+	}
 	return nil
+}
+
+// mupGTP4SrcFieldsChanged reports whether a binding mutation affects the MUP
+// GTP4 downlink source embed, so an unrelated edit (a vpnv4 RT add, a
+// max_prefixes change) does not walk the T1ST table. Unlike
+// evpnFieldsChanged this guards noise, not a replay storm: the walk is local
+// no-op-compare reconciliation with no BGP origination. A binding whose RD
+// duplicates another's can still flip the embed off without tripping this
+// predicate (BindingByRD turns ambiguous); that corner self-heals on the
+// next MUP route event and RD duplication is already documented misuse.
+func mupGTP4SrcFieldsChanged(existed bool, prev, updated vrfbgp.Binding) bool {
+	if !existed {
+		return updated.MupGTP4SourcePrefix.IsValid()
+	}
+	if prev.MupGTP4SourcePrefix != updated.MupGTP4SourcePrefix {
+		return true
+	}
+	// An RD move carries the prefix to a different session set.
+	return updated.MupGTP4SourcePrefix.IsValid() && prev.RD != updated.RD
 }
 
 // evpnFieldsChanged reports whether any EVPN-origination field differs
@@ -312,6 +364,11 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 			}
 			if s.evpn != nil && existed && prev.BDID != 0 {
 				s.evpn.Disable(prev.BDID)
+			}
+			if s.mupSrc != nil && existed && prev.MupGTP4SourcePrefix.IsValid() && prev.RD != "" {
+				// The binding is gone, so the reconcile reverts the RD's
+				// installed downlinks to the plain encap source.
+				s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
 			}
 		}
 		s.mu.Unlock()
