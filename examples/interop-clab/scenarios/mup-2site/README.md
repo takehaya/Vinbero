@@ -58,10 +58,11 @@ RD / RT layout: RDs are per-advertiser (RFC 4364 §4.2) and only make routes
 unique — the controller's sessions carry `65100:1`, mup-gw's ISD `65100:11`,
 mup-pe's DSD `65100:12`. VPN membership is decided by RT alone (RFC 4364
 §4.3): `100:2000` is the downlink VPN (T1ST + ISD), `100:6000` the uplink VPN
-(T2ST + DSD), so both resolutions above cross RDs (RT-scoped). mup-pe's VRF
-binding declares both RTs as `mup_ipv4` imports, which activates the
-session-route import filter (discovery routes bypass it); importing the uplink
-RT is what feeds the T2ST to mup-pe as the RFC 9433 §6.6 UPF anchor.
+(T2ST + DSD), so both resolutions above cross RDs (RT-scoped). mup-pe binds
+its VRF at runtime (`vbctl vrf-bgp bind`) with both RTs as `mup_ipv4` imports,
+which activates the session-route import filter (discovery routes bypass it);
+importing the uplink RT is what feeds the T2ST to mup-pe as the RFC 9433 §6.6
+UPF anchor.
 
 Resolution is order-independent: a session that arrives before its discovery
 route is deferred and installed once the route appears, and withdrawing the
