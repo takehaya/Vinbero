@@ -619,17 +619,57 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 		return
 	}
 	// A re-advertise can land on a different instance when the bindings moved
-	// underneath it; the old F-TEID key must go before the route is replaced,
-	// since uninstall keys off the stored instance.
+	// underneath it. The session key {rd, endpoint, teid, teidLen} is the
+	// F-TEID key minus the instance, so an installed entry can move without
+	// touching the shared gate; a failed move keeps the session on its old
+	// instance until the next reconcile.
 	inst := a.mupUplinkInstanceForRoute(fam, r)
 	if st.installedSID != "" && st.instance != inst {
-		a.uninstallMUPT2ST(st)
+		a.rekeyMUPT2ST(st, inst)
+	} else if st.installedSID == "" {
+		st.instance = inst
 	}
 	st.route = *r
 	st.fam = fam
-	st.instance = inst
 	a.reconcileMUPT2ST(key)
 	a.reconcileMUPT1STForGTP4Src(r.RD)
+}
+
+// rekeyMUPT2ST moves an installed uplink session's F-TEID entry to a new
+// instance without touching the endpoint gate. The gate is instance-agnostic
+// (one per endpoint, shared by every instance), so going through
+// uninstall/reconcile here would delete and recreate it whenever the session
+// is the endpoint's last — a window where GTP-U passes unprocessed, plus
+// avoidable headend map churn. Put-new-then-delete-old, so the F-TEID entry
+// never disappears for the instance it lives in; a failed Put keeps the
+// session fully on its old instance (retried by the next reconcile).
+func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
+	r := &st.route
+	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated at apply time
+	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
+	entry, err := a.buildHeadendEntry(st.installedSID)
+	if err != nil {
+		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
+			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
+		return
+	}
+	entry.ArgsOffset = bpf.MupArgsOffsetNone
+	if err := dp.uplinkCreate(inst, r.Endpoint, r.TEID, r.TEIDLen, entry); err != nil {
+		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
+			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
+			zap.Uint32("instance", inst), zap.Error(err))
+		return
+	}
+	if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen); err != nil {
+		a.logger.Error("remove old-instance MUP T2ST uplink entry (continuing)",
+			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
+			zap.Uint32("instance", st.instance), zap.Error(err))
+	}
+	old := st.instance
+	st.instance = inst
+	a.logger.Info("MUP T2ST uplink re-keyed",
+		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
+		zap.Uint32("from_instance", old), zap.Uint32("instance", inst))
 }
 
 // mupUplinkInstanceForRoute resolves the uplink instance a T2ST installs
@@ -692,16 +732,19 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 		return
 	}
 
-	for k, st := range a.mupT2ST {
+	for _, st := range a.mupT2ST {
 		inst := a.mupUplinkInstanceForRoute(st.fam, &st.route)
 		if inst == st.instance {
 			continue
 		}
-		if st.installedSID != "" {
-			a.uninstallMUPT2ST(st)
+		if st.installedSID == "" {
+			// Deferred session: nothing in the data plane to move, and a
+			// binding change cannot make its SID resolvable (resolution is
+			// RT-scoped between routes), so just adopt the new instance.
+			st.instance = inst
+			continue
 		}
-		st.instance = inst
-		a.reconcileMUPT2ST(k)
+		a.rekeyMUPT2ST(st, inst)
 	}
 }
 
