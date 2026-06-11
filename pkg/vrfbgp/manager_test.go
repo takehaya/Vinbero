@@ -451,7 +451,7 @@ func TestUplinkInstanceLifecycle(t *testing.T) {
 	if got := snap[instA]; len(got) != 2 || got[0] != "eth1" || got[1] != "eth9" {
 		t.Errorf("snapshot[a] = %v, want [eth1 eth9]", got)
 	}
-	if got := snap[instB]; len(got) != 2 || got[0] != "eth2" {
+	if got := snap[instB]; len(got) != 2 || got[0] != "eth2" || got[1] != "eth3" {
 		t.Errorf("snapshot[b] = %v, want [eth2 eth3]", got)
 	}
 
