@@ -254,6 +254,8 @@ func familyToAPI(f bgp.Family) (*gobgpapi.Family, error) {
 		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP, Safi: gobgpapi.Family_SAFI_MPLS_VPN}, nil
 	case bgp.FamilyVPNv6:
 		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP6, Safi: gobgpapi.Family_SAFI_MPLS_VPN}, nil
+	case bgp.FamilyIPv4Unicast:
+		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP, Safi: gobgpapi.Family_SAFI_UNICAST}, nil
 	case bgp.FamilyIPv6Unicast:
 		return &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP6, Safi: gobgpapi.Family_SAFI_UNICAST}, nil
 	case bgp.FamilySRPolicyIPv6:

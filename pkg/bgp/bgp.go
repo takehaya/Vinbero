@@ -65,6 +65,7 @@ type Family string
 const (
 	FamilyVPNv4        Family = "vpnv4"
 	FamilyVPNv6        Family = "vpnv6"
+	FamilyIPv4Unicast  Family = "ipv4_unicast"
 	FamilyIPv6Unicast  Family = "ipv6_unicast"
 	FamilySRPolicyIPv6 Family = "sr_policy_ipv6"
 	FamilyEVPN         Family = "evpn"     // AFI 25 (L2VPN) / SAFI 70 (EVPN)
@@ -78,7 +79,7 @@ func (f Family) String() string { return string(f) }
 // Valid reports whether f is one of the recognized families.
 func (f Family) Valid() bool {
 	switch f {
-	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6, FamilyEVPN, FamilyMUPIPv4, FamilyMUPIPv6:
+	case FamilyVPNv4, FamilyVPNv6, FamilyIPv4Unicast, FamilyIPv6Unicast, FamilySRPolicyIPv6, FamilyEVPN, FamilyMUPIPv4, FamilyMUPIPv6:
 		return true
 	default:
 		return false
@@ -90,7 +91,7 @@ func (f Family) Valid() bool {
 func ParseFamily(s string) (Family, error) {
 	f := Family(s)
 	if !f.Valid() {
-		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6|evpn|mup_ipv4|mup_ipv6)", s)
+		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv4_unicast|ipv6_unicast|sr_policy_ipv6|evpn|mup_ipv4|mup_ipv6)", s)
 	}
 	return f, nil
 }
