@@ -226,7 +226,7 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
 		}
 	}
-	if s.mupSrc != nil && mupUplinkFieldsChanged(prev, updated, len(s.mgr.UplinkInstanceInterfaces()) > 0) {
+	if s.mupSrc != nil && mupUplinkFieldsChanged(prev, updated, s.mgr.HasUplinkInstances()) {
 		s.mupSrc.ReconcileMUPUplinkInstances()
 	}
 	return nil
@@ -249,6 +249,13 @@ func mupImportRTs(b vrfbgp.Binding, fam bgp.Family) []string {
 	return out
 }
 
+// sortedCopy returns a sorted copy of in, leaving the input untouched.
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	slices.Sort(out)
+	return out
+}
+
 // mupUplinkFieldsChanged reports whether a binding mutation can move uplink
 // instance state, so an unrelated edit (max_prefixes, a vpnv4 RT) does not
 // re-run the O(sessions) reconcile. Two things move it: the binding's own
@@ -260,7 +267,9 @@ func mupImportRTs(b vrfbgp.Binding, fam bgp.Family) []string {
 // zero Binding, so declaring interfaces or (with instances present) MUP
 // import RTs fires as a change from empty.
 func mupUplinkFieldsChanged(prev, updated vrfbgp.Binding, anyInstance bool) bool {
-	if !slices.Equal(prev.MupUplinkInterfaces, updated.MupUplinkInterfaces) {
+	// Interface lists compare as sets: their order carries no meaning, so a
+	// reorder must not trigger the walk.
+	if !slices.Equal(sortedCopy(prev.MupUplinkInterfaces), sortedCopy(updated.MupUplinkInterfaces)) {
 		return true
 	}
 	if !anyInstance {
@@ -424,7 +433,7 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 			}
 			if s.mupSrc != nil && existed &&
 				(len(prev.MupUplinkInterfaces) > 0 ||
-					(len(s.mgr.UplinkInstanceInterfaces()) > 0 &&
+					(s.mgr.HasUplinkInstances() &&
 						(len(mupImportRTs(prev, bgp.FamilyMUPIPv4)) > 0 || len(mupImportRTs(prev, bgp.FamilyMUPIPv6)) > 0))) {
 				// The removed binding held an instance (release re-keys its
 				// sessions to the default instance), or it imported MUP RTs

@@ -450,6 +450,15 @@ func (m *Manager) releaseUplinkInstanceLocked(vrfName string) {
 	m.freeInstanceIDs = append(m.freeInstanceIDs, id)
 }
 
+// HasUplinkInstances reports whether any binding currently holds an uplink
+// instance, without building the snapshot UplinkInstanceInterfaces returns.
+// commitBinding-style callers gate per-mutation work on it.
+func (m *Manager) HasUplinkInstances() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.uplinkInstances) > 0
+}
+
 // UplinkInstanceForVRF returns the uplink instance id assigned to vrfName,
 // or 0 (the default instance) when the binding holds no instance.
 func (m *Manager) UplinkInstanceForVRF(vrfName string) uint32 {
@@ -548,18 +557,16 @@ func (m *Manager) List() []Binding {
 // match must be deterministic, not map-iteration order, because the MUP
 // uplink instance a T2ST installs under follows the matched binding and a
 // flapping match would re-key the session's F-TEID entry on every
-// reconcile.
+// reconcile. The minimum is selected in a single allocation-free pass; this
+// sits on the per-route apply path.
 func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName string, bdID uint16, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	names := make([]string, 0, len(m.bindings))
-	for name := range m.bindings {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	for _, name := range names {
-		b := m.bindings[name]
+	for _, b := range m.bindings {
 		if fam == bgp.FamilyEVPN && b.BDID == 0 {
+			continue
+		}
+		if ok && b.VRFName >= vrfName {
 			continue
 		}
 		fp, has := b.Families[fam]
@@ -568,11 +575,12 @@ func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName st
 		}
 		for _, rt := range fp.RouteTargets {
 			if rt.Direction.Has(DirectionImport) && slices.Contains(rts, rt.RT) {
-				return b.VRFName, b.BDID, true
+				vrfName, bdID, ok = b.VRFName, b.BDID, true
+				break
 			}
 		}
 	}
-	return "", 0, false
+	return vrfName, bdID, ok
 }
 
 // ExportRTsForFamily returns the export-direction route targets declared
