@@ -14,6 +14,12 @@ ip link set eth1 up
 ip addr add 10.0.0.254/24 dev eth2 2>/dev/null || true
 ip link set eth2 up
 ip -6 addr add 2001:db8:ff::d/128 dev lo 2>/dev/null || true
+# Dedicated v4 loopback used as the DSD originator address (RFC 9433 §3.2:
+# Address = originator/PE identifier). Kept separate from the N6 interface
+# (10.0.0.254/24) and from the DN host (10.0.0.1) so the DSD originator is not
+# confused with a data-network endpoint. Not routed across the core; the GW
+# resolves the T2ST against the DSD by segment id, not by this address.
+ip addr add 10.0.0.2/32 dev lo 2>/dev/null || true
 ip link set lo up
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
@@ -56,10 +62,15 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 # Originate this PE's Direct Segment Discovery route via MupService (a managed
 # local table auto-advertised into SAFI 85): it hosts the End.DT4 direct segment
 # (SID fd00:d:0:1::) tagged with a MUP Extended Community segment id, which the
-# controller's T2ST resolves against.
+# controller's T2ST resolves against. The address is the dedicated originator
+# loopback above, not a data-network endpoint.
+# The RD is this PE's own (per-advertiser, RFC 4364 §4.2), distinct from the
+# controller's session RD 65100:1; VPN membership is the route target
+# (100:6000, the uplink VPN shared with the T2ST), so the GW's resolution
+# crosses RDs and is RT-scoped.
 sleep 6
 /usr/local/bin/vbctl mup create --route-type dsd \
-    --rd 65100:1 --address 10.0.0.1 \
+    --rd 65100:12 --address 10.0.0.2 \
     --segment-id2 1 --segment-id4 2 \
     --route-targets 100:6000 --sid fd00:d:0:1:: --next-hop 2001:db8:ff::d || true
 echo "[start.sh] mup-pe originated DSD; local MUP table:"

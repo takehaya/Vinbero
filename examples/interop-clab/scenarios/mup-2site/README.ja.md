@@ -52,6 +52,15 @@ controller はセッション状態だけを advertise し SID は載せない�
 - T2ST → DSD (uplink): mup-gw は同じ MUP segment id (`1:2`) を持つ DSD から
   direct SID `fd00:d:0:1::` を解決。
 
+RD / RT layout: RD は per-advertiser (RFC 4364 §4.2) で経路の一意化だけを担い、
+controller のセッションは `65100:1`、mup-gw の ISD は `65100:11`、mup-pe の
+DSD は `65100:12` を使う。VPN の所属は RT だけで決まり (RFC 4364 §4.3)、
+`100:2000` が downlink VPN (T1ST + ISD)、`100:6000` が uplink VPN (T2ST +
+DSD)。したがって上の 2 つの解決はどちらも RD をまたぐ (RT-scoped)。mup-pe の
+VRF binding は両 RT を `mup_ipv4` の import として宣言し、セッション経路の
+import filter を有効にする (discovery 経路は filter を通らない)。uplink RT の
+import が T2ST を mup-pe へ届け、RFC 9433 §6.6 の UPF anchor になる。
+
 解決は到着順に依存しない。discovery 経路より先に届いたセッションは deferred と
 なり、経路が届いた時点で install する。discovery 経路を withdraw すると依存する
 セッションは撤去する。セッションが自分の Prefix-SID を載せる構成も可能で、その
@@ -68,14 +77,21 @@ controller はセッション状態だけを advertise し SID は載せない�
 - downlink `DN → gNB`: DN が UE `10.1.0.1` へ送る。mup-pe の H.Encaps (UE
   prefix → interwork SID `fd00:a:0:1::`、offset 7 に `Args.Mob.Session(gNB,
   TEID, QFI)`) が SRv6 で mup-gw へ。mup-gw の `End.M.GTP4.E` が args を
-  読み GTP-U/IPv4 を gNB へ。gNB が GTP-U (UDP/2152) を受信。
+  読み GTP-U/IPv4 を gNB へ。gNB は UPF N3 anchor (`172.16.0.254`) を送信元と
+  する GTP-U (UDP/2152) を受信。outer IPv6 source には mup-pe の per-VRF
+  `mup_gtp4_source_prefix` (`fd00:d::/64`、RFC 9433 §6.6) の直後にその anchor
+  (同一 RD の T2ST endpoint) を埋め込む (`fd00:d::ac10:fe:0:0`)。v4src
+  position 64 で source を取り出す GW は anchor を GTP-U の送信元にし、
+  Vinbero の `End.M.GTP4.E` は設定済みの `--gtp-v4-src-addr` から同じ送信元を
+  取る。
 
 `test.sh` は各 edge ノードが相手の discovery 経路を受信し、セッションを解決して
 install したこと (apply ログ + `headend_v4` map) を検証します。controller の経路
-が SID を持たないため、これは SID 解決が動いた証明になります。あわせて双方向の
-データ経路 (DN で decap された uplink inner、gNB で downlink GTP-U を tcpdump
-確認) も検証します。uplink の GTP-U は stdlib のみの `send_gtpu.py` (scapy 不要)
-で生成します。
+が SID を持たないため、これは SID 解決が動いた証明になります。downlink headend
+の source が UPF anchor を embed していること (RFC 9433 §6.6) も検証します。
+あわせて双方向のデータ経路 (DN で decap された uplink inner、gNB で UPF anchor
+を送信元とする downlink GTP-U を tcpdump 確認) も検証します。uplink の GTP-U は
+stdlib のみの `send_gtpu.py` (scapy 不要) で生成します。
 
 ## 実行
 

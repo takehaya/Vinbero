@@ -5,11 +5,13 @@
 # and MUP-PE program the SRv6 GTP data plane; emulated gNB / DN drive real traffic.
 # It proves, end to end:
 #   1. control plane: mup-gw installs the T2ST uplink F-TEID gate, mup-pe
-#      installs the T1ST downlink H.Encaps (apply log + headend_v4 map);
+#      installs the T1ST downlink H.Encaps (apply log + headend_v4 map), and
+#      the downlink outer IPv6 source embeds the UPF N3 anchor per
+#      RFC 9433 §6.6 (per-VRF mup_gtp4_source_prefix + same-RD T2ST endpoint);
 #   2. uplink data: gNB GTP-U -> mup-gw (F-TEID) -SRv6-> mup-pe (End.DT4) ->
 #      DN receives the decapped inner packet;
 #   3. downlink data: DN -> mup-pe (H.Encaps) -SRv6-> mup-gw (End.M.GTP4.E)
-#      -> gNB receives GTP-U with the session TEID.
+#      -> gNB receives GTP-U sourced from the UPF anchor.
 set -u
 
 P=clab-mup-2site
@@ -33,6 +35,10 @@ echo "=============================================="
 # --- 1. Control plane: SID resolution then data-plane install ---------------
 # The controller's T1ST/T2ST carry NO SID, so an install can ONLY happen if the
 # edge node resolved the SID from its peer's segment-discovery route (RFC 9433 §3).
+# RDs are per-advertiser (sessions 65100:1, ISD 65100:11, DSD 65100:12) and VPN
+# membership is the RT alone (downlink 100:2000, uplink 100:6000), so both
+# installs below also prove the resolution is RT-scoped across RDs, and the
+# T1ST/T2ST pass mup-pe's mup_ipv4 import-RT filter.
 echo ""; echo "[1] control plane (SID resolution + apply from BGP MUP)"
 if retry bash -c "docker exec $PD grep -q 'MUP ISD segment discovery' /var/log/vinberod.log"; then
     ok "mup-pe received mup-gw's ISD (interwork segment discovery)"
@@ -44,6 +50,15 @@ if retry bash -c "docker exec $PD vbctl headend-v4 list 2>/dev/null | grep -q '$
     ok "mup-pe resolved the T1ST against the ISD and installed the downlink H.Encaps for $UE/32"
 else
     ng "mup-pe did not resolve/install the T1ST downlink"; dexec "$PD" vbctl headend-v4 list || true
+fi
+# RFC 9433 §6.6 source embed: the binding for RD 65100:1 carries
+# mup_gtp4_source_prefix fd00:d::/64 and the same-RD T2ST endpoint
+# ($N3 = ac10:00fe) is the UPF anchor, so the downlink headend SRC ADDR must
+# read fd00:d::ac10:fe:0:0 -- not the plain locator-derived encap source.
+if retry bash -c "docker exec $PD vbctl headend-v4 list 2>/dev/null | grep -qi 'ac10:fe'"; then
+    ok "mup-pe downlink outer source embeds the UPF N3 anchor ($N3 at v4src position 64)"
+else
+    ng "mup-pe downlink outer source does not embed the UPF anchor"; dexec "$PD" vbctl headend-v4 list || true
 fi
 if retry bash -c "docker exec $PA grep -q 'MUP DSD segment discovery' /var/log/vinberod.log"; then
     ok "mup-gw received mup-pe's DSD (direct segment discovery)"
@@ -86,11 +101,15 @@ dpid=$!
 sleep 1
 dexec "$DN" ping -c 5 -i 0.5 -W 2 "$UE" >/dev/null 2>&1 &
 wait "$dpid" 2>/dev/null
-if grep -qi "2152" "$dcap"; then
-    ok "gNB received downlink GTP-U (UDP/2152) for the UE session"
+# The GTP-U must be sourced from the UPF N3 anchor and addressed to the gNB
+# endpoint, not just be any UDP/2152 packet. Match the source IP only, not the
+# UDP source port (the GTP-U source port is implementation-defined).
+if grep -qE "$N3\.[0-9]+ > 172\.16\.0\.1\.2152" "$dcap"; then
+    ok "gNB received downlink GTP-U from the UPF anchor ($N3) for the UE session"
     sed 's/^/      /' "$dcap" | head -2
 else
-    ng "gNB did not receive downlink GTP-U"
+    ng "gNB did not receive downlink GTP-U sourced from the UPF anchor $N3"
+    sed 's/^/      /' "$dcap" | head -4
     echo "      mup-pe headend entries:"; dexec "$PD" vbctl headend-v4 list 2>/dev/null | sed 's/^/      /' || true
 fi
 rm -f "$dcap"
