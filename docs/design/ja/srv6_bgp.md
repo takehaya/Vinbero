@@ -55,7 +55,7 @@ flowchart LR
 
 - BGP speaker: default では gobgp を in-process で動かして実現します。gobgp が peer と VPNv4/VPNv6 を交換し、受信した経路を route handler へ渡します。BGP speaker は差し替え可能な interface で、gobgp はその default 実装です。
 - route handler (applier): 受信経路ごとに RD・prefix・service SID・RT・next hop を取り出します。
-- VRF と RT の対応: VRF ごとの import/export RT は RPC で事前に登録し、VRF 名を鍵にした in-memory の map で保持します。applier は経路の RT をこの map と照合し、どの import RT にも一致しない経路を落とします。
+- VRF と RT の対応: VRF ごとの RT は config か RPC で事前に登録し、VRF 名を鍵にした in-memory の map で保持します。binding は family (vpnv4 / vpnv6 / evpn / mup_ipv4 / mup_ipv6) ごとに RT と import/export の方向を持てます。applier は経路の RT を該当 family の import RT と照合し、どれにも一致しない経路を落とします。
 - encap entry の生成: 一致した経路を H.Encaps の headend エントリ (segments = [service SID]) に変換し、prefix を鍵にした eBPF の LPM trie (headend map) へ書きます。書き込みには owner tag を付け、後で同じ owner の経路だけを正確に withdraw できるようにします。
 - encap source: outer の送信元 IPv6 は、設定したローカル locator の prefix から取ります。
 
@@ -284,7 +284,7 @@ flowchart LR
 
 SRv6 MUP (RFC 9433、draft-mpmz-bess-mup-safi) は、モバイルの GTP-U セッションを SRv6 へマッピングするサービスです。5G では gNB と UPF の間 (N3) を GTP-U で運びますが、これを SRv6 segment に載せ替えると、コアを純粋な IPv6/SRv6 fabric にでき、per-UE のトンネル状態をコアの中間ノードから排除できます。
 
-役割は 3 つに分かれます。MUP Controller (MUP-C) が UE セッション状態を BGP で配り、MUP Gateway (MUP-GW) が access 側で GTP-U と相互接続し、MUP Provider Edge (MUP-PE) が data 側で DN へ届けます。AFI/SAFI は MUP (1/85) を使い、L3VPN/EVPN と同じく RD で経路を一意にし、SID は Prefix-SID で運びます。
+役割は 3 つに分かれます。MUP Controller (MUP-C) が UE セッション状態を BGP で配り、MUP Gateway (MUP-GW) が access 側で GTP-U と相互接続し、MUP Provider Edge (MUP-PE) が data 側で DN へ届けます。AFI/SAFI は MUP (1/85) を使い、L3VPN/EVPN と同じく RD で経路を一意にし、RT で VPN の所属を決め、SID は Prefix-SID で運びます。
 
 ### route type と方向
 
@@ -305,6 +305,12 @@ flowchart LR
     DSD --> FTE["MUP-GW: F-TEID lookup<br/>(direct SID)"]
 ```
 
+### セッション経路の取り込み
+
+T1ST/T2ST のセッション経路は、L3VPN と同じく RT で取り込み可否を決められます。どれかの VRF binding が MUP family (mup_ipv4 / mup_ipv6) を宣言すると、その family のセッション経路は、どれかの binding の import RT に一致するときだけ取り込み、一致しなければ落とします。ISD/DSD の discovery 経路はこのフィルタを通しません。gateway や PE 自身の RT で届き、VRF をまたいだ解決の材料になるためです。withdraw もフィルタを通さず、先に受理した経路を必ず撤去できるようにします。
+
+その family を宣言した binding が 1 つもなければ、従来どおりすべてのセッション経路を受け入れます。bgp.global.mup_default_allow を立てると、宣言があってもこの default-allow を維持できます。
+
 ### SID 解決 (segment discovery)
 
 L3VPN/EVPN は service SID を経路自身の Prefix-SID で運びますが、MUP は加えて、セッション経路が segment discovery 経路から SID を解決できます (RFC 9433 §3)。controller はセッション状態だけを配り、SID は各 gateway/PE が相手の discovery 経路から引きます。
@@ -313,16 +319,28 @@ L3VPN/EVPN は service SID を経路自身の Prefix-SID で運びますが、MU
 - T2ST → DSD: 同じ segment id を持つ DSD から direct SID を解決します。
 - セッション経路が自分の Prefix-SID を載せる構成も可能で、その場合は discovery で解決できないときの fallback になります。
 
-解決は同一 RD 内に限定します。別 VPN の経路がより具体的な prefix や同じ segment id を広報して他セッションの SID を奪うことを防ぐためです。BGP は到着順を保証しないので、discovery 経路が後から届いたら同型の全セッションを再解決し、deferred だったものを install、discovery を withdraw したら依存セッションを撤去します。RD 内では ISD の longest-match と DSD の segment id 解決はどちらも一意に決まるよう実装し (DSD の id 衝突は最小 SID を決定的に選ぶ)、map の反復順でデータプレーンが揺れないようにします。
+解決は同じ VPN の中に限定します。所属の判定は L3VPN と同じく RT で行い、セッション経路と discovery 経路の RT リストが少なくとも 1 つ重なるときだけ解決の候補にします。RD は広報者ごとに経路を一意にする鍵であって VPN の境界ではないので、cross-vendor 構成で同じ VPN の経路が別々の RD で届いても解決できます。別 VPN の経路がより具体的な prefix や同じ segment id を広報して他セッションの SID を奪うことは、RT が重ならない限り起きません。
+
+BGP は到着順を保証しないので、discovery 経路が後から届いたら同型の全セッションを再解決し、deferred だったものを install、discovery を withdraw したら依存セッションを撤去します。解決は一意に決まるよう実装し、ISD の longest-match が同じ長さで並んだときも DSD の segment id が衝突したときも最小の SID を決定的に選び、map の反復順でデータプレーンが揺れないようにします。
+
+### 広報の wire format
+
+ISD/DSD を広報するとき、Prefix-SID には SID とともに endpoint behavior を載せます。ISD なら End.M.GTP4.E / End.M.GTP6.E、DSD なら End.DT4 / End.DT6 です。behavior を見て downlink の合成可否を決める受信実装があるためです。SID が登録済みの locator に属するときは、その locator の構成から SID Structure sub-sub-TLV (RFC 9252) を導いて合わせて載せます。SID の locator block で next hop tracking する受信実装が、構造の分からない SID を unreachable と扱うためです。複数の locator prefix が同じ SID を含むときは longest-match の locator から導き、locator に属さない SID では従来どおり省略します。
+
+T1ST の NLRI framing は draft-mpmz-bess-mup-safi の版で異なります。Vinbero は source 付きの -03 形式と source なしの -01 形式の両方を decode し、source なしの広報は -01 の形式 (末尾の SourceAddressLength を省略した 23 byte) で出します。-01 だけを話す peer との interop のためです。
 
 ### data plane の分担
 
 downlink と uplink で lookup キーが非対称で、これはセッション経路が運ぶ情報に対応します。
 
-- downlink (T1ST): MUP-PE が UE prefix に対し、interwork SID へ Args.Mob.Session (gNB、TEID、QFI) を合成して H.Encaps します。受信側 MUP-GW の End.M.GTP4.E が SID 宛先から gNB/TEID/QFI を実行時に読み、GTP-U を gNB へ送ります。SID がセッション情報を内包するので、End.M.GTP4.E はセッション非依存に一度設置すれば足ります。
+- downlink (T1ST): MUP-PE が UE prefix に対し、interwork SID へ Args.Mob.Session (gNB、TEID、QFI) を合成して H.Encaps します。受信側 MUP-GW の End.M.GTP4.E が SID 宛先から gNB/TEID/QFI を実行時に読み、GTP-U を gNB へ送ります。SID がセッション情報を内包するので、End.M.GTP4.E はセッション非依存に一度設置すれば足ります。GTP6 も同型で、Args.Mob.Session には TEID と QFI だけを載せ、gNB の IPv6 は End.M.GTP6.E 側の aux 設定から取ります。
 - uplink (T2ST): MUP-GW が 2 段で dispatch します。まず endpoint に H.M.GTP4.D_TEID の gate を置いて GTP-U を変換対象と認識させ、次に GTP-U の TEID で mup_uplink_v4_map (LPM) を最長一致 lookup して direct SID へ encap します。T2ST が TEID を可変長 prefix で運ぶため、exact HASH でなく LPM になります。受信側 MUP-PE の End.DT4 が inner IP で DN へ届けます。GTP6 も同型で、H.M.GTP6.D_TEID と mup_uplink_v6_map を使います。
 
-interop の検証構成は `examples/interop-clab/scenarios/mup-2site` を参照してください。MUP-C・MUP-GW・MUP-PE・gNB・DN を模し、controller が SID なしの T1ST/T2ST を、各 gateway/PE が SID 付きの ISD/DSD を広報して、解決だけで双方向の GTP-U ⇄ SRv6 が通ることを検証します。
+GTP4 の downlink では、outer IPv6 の送信元が GTP-U の外側 IPv4 送信元の運び手を兼ねます (RFC 9433 §6.6)。VRF binding に mup_gtp4_source_prefix を設定すると、セッションの RD から binding を引き、その prefix の直後に UPF の IPv4 anchor を埋め込んだアドレスを outer 送信元にします。受信側 MUP-GW の End.M.GTP4.E は prefix 長の位置 (v4src position) から IPv4 を取り出し、gNB へ送る GTP-U の送信元にします。anchor は同じ RD の T2ST のうち TEID prefix がこのセッションの TEID を覆うものの endpoint から取るので、controller が UPF の N3 アドレスをセッション状態として配れば追加の設定はいりません。prefix が VRF binding 単位なので、サービスインスタンスごとに別の source pool と v4src position を使えます。prefix 未設定や anchor 未着のときは locator 由来の encap source に fallback し、binding を変更したらその RD の install 済み downlink を再 reconcile して、embed のやり直しや plain source への復帰を反映します。
+
+egress 側の End.M.GTP4.E / End.M.GTP6.E は、SRH 付きの encap に加えて、SRH を省いた reduced encap (RFC 8986 §4.1.1) の単一 SID パケットも受理します。H.Encaps reduced で出す送信側との interop のためです。
+
+interop の検証構成は `examples/interop-clab/scenarios/mup-2site` を参照してください。MUP-C・MUP-GW・MUP-PE・gNB・DN を模し、controller が SID なしの T1ST/T2ST を、各 gateway/PE が SID 付きの ISD/DSD を広報して、解決だけで双方向の GTP-U ⇄ SRv6 が通ることを検証します。downlink の outer 送信元が per-VRF prefix で UPF anchor を embed していることも、ここで assert します。
 
 ```mermaid
 flowchart LR
@@ -350,6 +368,6 @@ Vinbero は経路や SR Policy を受け取るだけでなく、広報もでき�
 - RFC 9831 — SR Policy の segment type 拡張 (Type C〜K、現状は範囲外)
 - RFC 7432 — BGP MPLS-Based Ethernet VPN (EVPN の route type RT2/RT3/RT4)
 - RFC 8584 — EVPN の default DF election (ordinal modulo)
-- RFC 9433 — SRv6 Mobile User Plane (End.M.GTP4.E / End.DT4 / Args.Mob.Session ほかの GTP behavior)
+- RFC 9433 — SRv6 Mobile User Plane (End.M.GTP4.E / End.DT4 / Args.Mob.Session ほかの GTP behavior、§6.6 の IPv4 source address embed)
 - draft-mpmz-bess-mup-safi — BGP MUP SAFI (85) による MUP route (ISD/DSD/T1ST/T2ST) のシグナリング
 - draft-ietf-dmm-srv6-mobile-uplane 系 — SRv6 MUP のアーキテクチャ
