@@ -112,16 +112,27 @@ func (m *Manager) Get(name string) (Locator, bool) {
 // FindByContaining returns the registered locator whose Prefix covers addr,
 // or ok=false when no locator owns it. Used at BGP advertise time to derive
 // the SRv6 SID Structure Sub-Sub-TLV (RFC 9252 §3.2.1.1) for a SID that
-// originated locally.
+// originated locally. When nested locator prefixes cover addr the longest
+// prefix wins, so the derived structure does not flap with map iteration
+// order across advertises; longest-match alone is deterministic because two
+// same-length prefixes containing the same addr would be the same prefix,
+// which Add rejects.
 func (m *Manager) FindByContaining(addr netip.Addr) (Locator, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	var best *Locator
 	for _, e := range m.entries {
-		if e.loc.Prefix.Contains(addr) {
-			return *e.loc, true
+		if !e.loc.Prefix.Contains(addr) {
+			continue
+		}
+		if best == nil || e.loc.Prefix.Bits() > best.Prefix.Bits() {
+			best = e.loc
 		}
 	}
-	return Locator{}, false
+	if best == nil {
+		return Locator{}, false
+	}
+	return *best, true
 }
 
 // List returns a snapshot of every registered locator.
