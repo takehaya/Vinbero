@@ -676,6 +676,13 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 			mapping[idx] = inst
 		}
 	}
+	// Hold mupMu across the classification rewrite AND the session re-key:
+	// route applies install/uninstall F-TEID entries under the same lock, so
+	// serializing both sides keeps the window where classification and
+	// F-TEID keys disagree from interleaving with concurrent installs. The
+	// interface resolution above stays outside the lock (netlink can block).
+	a.mupMu.Lock()
+	defer a.mupMu.Unlock()
 	if err := a.mupUplink.SetMupUplinkInstances(mapping); err != nil {
 		// Without the classification rewrite, re-keying the F-TEID entries
 		// would split brain the two sides (packets still classify against the
@@ -685,8 +692,6 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 		return
 	}
 
-	a.mupMu.Lock()
-	defer a.mupMu.Unlock()
 	for k, st := range a.mupT2ST {
 		inst := a.mupUplinkInstanceForRoute(st.fam, &st.route)
 		if inst == st.instance {
