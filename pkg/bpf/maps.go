@@ -1447,35 +1447,60 @@ func (m *MapOperations) DeleteMupUplinkV6(instance uint32, endpoint string, teid
 // instance 0), so the rewrite is what re-scopes traffic after a VRF
 // binding's mup_uplink_interfaces change.
 //
-// Make-before-break: the new and changed keys are written FIRST and stale
-// keys removed after, so a failure mid-update never leaves a mapping
-// missing — surviving stale keys keep classifying like the old state did,
-// which still matches the not-yet-re-keyed F-TEID entries (the caller skips
-// the session re-key on error and retries on the next reconcile).
+// All-or-nothing toward the caller: the live mapping is snapshotted first
+// and any partial progress is rolled back to it when a write or delete
+// fails, so an error always leaves the OLD classification fully in place —
+// consistent with the F-TEID sessions the caller keeps un-re-keyed on
+// error. (The rollback writes target keys that exist or just existed, so it
+// cannot fail for capacity reasons; a rollback write failing on a broken
+// map cannot make things worse than the broken map already is.)
 func (m *MapOperations) SetMupUplinkInstances(mapping map[uint32]uint32) error {
-	for k, v := range mapping {
-		if err := m.objs.MupIfindexInstanceMap.Put(&k, &v); err != nil {
-			return fmt.Errorf("failed to put mup ifindex instance entry: %w", err)
-		}
-	}
-	var (
-		key  uint32
-		val  uint32
-		dead []uint32
-	)
+	old := make(map[uint32]uint32)
+	var key, val uint32
 	iter := m.objs.MupIfindexInstanceMap.Iterate()
 	for iter.Next(&key, &val) {
-		if _, keep := mapping[key]; !keep {
-			dead = append(dead, key)
-		}
+		old[key] = val
 	}
 	if err := iter.Err(); err != nil {
 		return fmt.Errorf("failed to iterate mup ifindex instance map: %w", err)
 	}
-	for _, k := range dead {
+
+	// touched records every key this update modified, in order, so a failure
+	// can restore each to its snapshot value (or remove it if it is new).
+	var touched []uint32
+	rollback := func() {
+		for _, k := range touched {
+			k := k
+			if v, had := old[k]; had {
+				v := v
+				_ = m.objs.MupIfindexInstanceMap.Put(&k, &v)
+			} else {
+				_ = deleteMapKey(m.objs.MupIfindexInstanceMap, &k)
+			}
+		}
+	}
+
+	for k, v := range mapping {
+		k, v := k, v
+		if prev, had := old[k]; had && prev == v {
+			continue // unchanged; keep it out of the rollback set
+		}
+		if err := m.objs.MupIfindexInstanceMap.Put(&k, &v); err != nil {
+			rollback()
+			return fmt.Errorf("failed to put mup ifindex instance entry: %w", err)
+		}
+		touched = append(touched, k)
+	}
+	for k := range old {
+		if _, keep := mapping[k]; keep {
+			continue
+		}
+		k := k
 		if err := deleteMapKey(m.objs.MupIfindexInstanceMap, &k); err != nil {
+			rollback()
 			return fmt.Errorf("failed to delete mup ifindex instance entry: %w", err)
 		}
+		touched = append(touched, k)
 	}
 	return nil
 }

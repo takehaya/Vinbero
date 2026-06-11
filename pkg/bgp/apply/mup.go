@@ -658,7 +658,7 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 		for _, name := range ifnames {
 			ifi, err := net.InterfaceByName(name)
 			if err != nil {
-				a.logger.Warn("resolve MUP uplink interface (skipping; rebind to retry)",
+				a.logger.Warn("resolve MUP uplink interface (skipping; retried on the next reconcile)",
 					zap.String("interface", name), zap.Uint32("instance", inst), zap.Error(err))
 				continue
 			}
