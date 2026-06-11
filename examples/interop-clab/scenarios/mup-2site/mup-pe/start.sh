@@ -59,6 +59,25 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 /usr/local/bin/vbctl sid create \
     --trigger-prefix fd00:d:0:1::/128 --action END_DT4 --vrf-name vrf-cust || true
 
+# Bind the MUP service instance (the DN VRF that End.DT4 decaps into) at
+# runtime via the operator surface. The rd must be the RD the controller
+# stamps on the T1ST/T2ST session routes (65100:1 in mup-c/start.sh): a
+# received MUP route resolves its binding, and so the source prefix below, by
+# RD. Declaring mup_ipv4 import RTs activates the session-route import filter
+# (ISD/DSD discovery routes bypass it): 100:2000 imports the downlink VPN
+# (T1ST); 100:6000 imports the uplink VPN (T2ST), which this PE needs as the
+# RFC 9433 §6.6 UPF anchor even though the uplink gate itself lives on the GW.
+# --mup-gtp4-source-prefix embeds that anchor (the same-RD T2ST endpoint,
+# 172.16.0.254) into the downlink outer IPv6 source right after the /64
+# (v4src position 64), asserted by test.sh as SRC ADDR fd00:d::ac10:fe:0:0.
+# Vinbero's own End.M.GTP4.E takes its GTP-U source from the configured
+# --gtp-v4-src-addr instead of extracting it from the outer source. Binding
+# mutations re-reconcile the RD's installed downlinks, so the order of this
+# bind vs. BGP route arrival does not matter.
+/usr/local/bin/vbctl vrf-bgp bind --vrf vrf-cust --rd 65100:1 \
+    --rt mup_ipv4:100:2000:import --rt mup_ipv4:100:6000:import \
+    --mup-gtp4-source-prefix fd00:d::/64 || true
+
 # Originate this PE's Direct Segment Discovery route via MupService (a managed
 # local table auto-advertised into SAFI 85): it hosts the End.DT4 direct segment
 # (SID fd00:d:0:1::) tagged with a MUP Extended Community segment id, which the
