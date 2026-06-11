@@ -434,6 +434,33 @@ type MUPRoute struct {
 	// "" if none.
 	SRv6SID string
 	NextHop string
+
+	// SIDStructure carries the SRv6 SID layout (RFC 9252 §3.2.1.1) for SRv6SID.
+	// Zero means "unset", in which case the SRv6 SID Structure Sub-Sub-TLV is
+	// omitted on advertise. Receivers that need the locator-block length for
+	// next-hop tracking (ArcOS, FRR, vendor MUP-GWs) then fall back to /0 and
+	// the path stays NEXT_HOP_UNREACHABLE.
+	SIDStructure SIDStructure
+}
+
+// SIDStructure is the SRv6 SID layout signalled by the SRv6 SID Structure
+// Sub-Sub-TLV (RFC 9252 §3.2.1.1). All fields are bit lengths except
+// TranspositionOffset (bit position). LocatorBlockLen + LocatorNodeLen +
+// FunctionLen + ArgumentLen must equal 128.
+type SIDStructure struct {
+	LocatorBlockLen     uint8
+	LocatorNodeLen      uint8
+	FunctionLen         uint8
+	ArgumentLen         uint8
+	TranspositionLen    uint8
+	TranspositionOffset uint8
+}
+
+// IsZero reports whether the structure carries no usable layout (all fields
+// zero), in which case advertise paths must omit the sub-sub-TLV rather than
+// emit a /0-locator SID that breaks receiver next-hop tracking.
+func (s SIDStructure) IsZero() bool {
+	return s == SIDStructure{}
 }
 
 // Family returns the address family (FamilyMUPIPv4 / FamilyMUPIPv6) the

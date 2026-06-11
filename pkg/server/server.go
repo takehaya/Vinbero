@@ -109,7 +109,7 @@ func (s *Server) Setup() {
 	// BgpRoute service (operator-explicit BGP advertise / withdraw). The
 	// VRF binding registry lets BgpAdvertiseMup auto-fill an empty RTs
 	// list from the binding whose RD matches the route, mirroring MupCreate.
-	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv, s.evpnAdv, s.mupAdv, s.vrfBgpMgr)
+	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv, s.evpnAdv, s.mupAdv, s.vrfBgpMgr, s.locatorMgr)
 	bgpRoutePath, bgpRouteHandler := vinberov1connect.NewBgpRouteServiceHandler(bgpRouteServer)
 	s.mux.Handle(bgpRoutePath, bgpRouteHandler)
 	s.logger.Info("Registered BgpRouteService", zap.String("path", bgpRoutePath))
@@ -127,7 +127,7 @@ func (s *Server) Setup() {
 	// makes the RPCs return FailedPrecondition. The VRF binding registry
 	// lets MupCreate/Update auto-fill an empty RTs list from the binding
 	// whose RD matches.
-	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.MupMaxRoutes, s.vrfBgpMgr)
+	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.MupMaxRoutes, s.vrfBgpMgr, s.locatorMgr)
 	mupPath, mupHandler := vinberov1connect.NewMupServiceHandler(mupServer)
 	s.mux.Handle(mupPath, mupHandler)
 	s.logger.Info("Registered MupService", zap.String("path", mupPath))

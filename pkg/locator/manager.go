@@ -109,6 +109,21 @@ func (m *Manager) Get(name string) (Locator, bool) {
 	return *e.loc, true
 }
 
+// FindByContaining returns the registered locator whose Prefix covers addr,
+// or ok=false when no locator owns it. Used at BGP advertise time to derive
+// the SRv6 SID Structure Sub-Sub-TLV (RFC 9252 §3.2.1.1) for a SID that
+// originated locally.
+func (m *Manager) FindByContaining(addr netip.Addr) (Locator, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, e := range m.entries {
+		if e.loc.Prefix.Contains(addr) {
+			return *e.loc, true
+		}
+	}
+	return Locator{}, false
+}
+
 // List returns a snapshot of every registered locator.
 func (m *Manager) List() []Locator {
 	m.mu.RLock()
