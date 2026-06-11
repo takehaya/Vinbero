@@ -191,7 +191,8 @@ static __always_inline int do_h_m_gtp6_d(
 
 // do_h_m_gtp6_d_teid: F-TEID-keyed H.M.GTP6.D (BGP MUP T2ST over GTP6). `entry`
 // is the gate from headend_v6_map; its segments are unused. The per-session
-// direct SID is resolved from mup_uplink_v6_map keyed on {outer dst, TEID}.
+// direct SID is resolved from mup_uplink_v6_map keyed on
+// {instance, outer dst, TEID-prefix}.
 static __always_inline int do_h_m_gtp6_d_teid(
     struct xdp_md *ctx,
     struct ethhdr *eth,

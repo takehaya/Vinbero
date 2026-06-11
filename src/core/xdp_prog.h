@@ -146,7 +146,7 @@ struct headend_entry {
 // matched and the TEID is matched as a *prefix*. BGP MUP T2ST carries the TEID
 // as a variable-length prefix (EndpointAddressLength = 32 + TEID-bits for
 // IPv4), so a single route can aggregate a TEID range. prefixlen ranges 64
-// (endpoint only / any TEID) .. 96 (exact TEID). The instance is the uplink
+// (instance + endpoint only / any TEID) .. 96 (exact TEID). The instance is the uplink
 // service instance resolved from the ingress ifindex (mup_ifindex_instance_map;
 // 0 = default instance), so two instances can install the same {endpoint, TEID}
 // without colliding. instance, endpoint and teid bytes are network byte order
@@ -160,8 +160,8 @@ struct mup_uplink_v4_key {
 
 // Key for mup_uplink_v6_map (BGP MUP T2ST / F-TEID uplink lookup over GTP6).
 // IPv6 counterpart of mup_uplink_v4_key: the endpoint is the full /128 GTP-U/IPv6
-// outer destination and prefixlen ranges 160 (endpoint only / any TEID) .. 192
-// (exact TEID). instance, endpoint and teid bytes are network byte order so the
+// outer destination and prefixlen ranges 160 (instance + endpoint only / any
+// TEID) .. 192 (exact TEID). instance, endpoint and teid bytes are network byte order so the
 // on-wire MSB aligns to the start of the matched prefix.
 struct mup_uplink_v6_key {
     __u32 prefixlen;                // 160..192 (instance 32 + endpoint 128 + TEID prefix bits)
