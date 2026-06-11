@@ -79,7 +79,7 @@ fi
 # --- 2. Uplink: gNB GTP-U -> ... -> DN receives the inner packet ------------
 echo ""; echo "[2] uplink data plane (gNB GTP-U -> SRv6 -> End.DT4 -> DN)"
 ucap=$(mktemp)
-dexec "$DN" timeout 10 tcpdump -nli eth1 "icmp and src $UE" >"$ucap" 2>/dev/null &
+dexec "$DN" timeout 10 tcpdump -nnli eth1 "icmp and src $UE" >"$ucap" 2>/dev/null &
 upid=$!
 sleep 1
 for _ in 1 2 3; do
@@ -100,7 +100,7 @@ rm -f "$ucap"
 # --- 3. Downlink: DN -> ... -> gNB receives GTP-U ---------------------------
 echo ""; echo "[3] downlink data plane (DN -> SRv6 -> End.M.GTP4.E -> gNB GTP-U)"
 dcap=$(mktemp)
-dexec "$GNB" timeout 10 tcpdump -nli eth1 "udp port 2152" >"$dcap" 2>/dev/null &
+dexec "$GNB" timeout 10 tcpdump -nnli eth1 "udp port 2152" >"$dcap" 2>/dev/null &
 dpid=$!
 sleep 1
 dexec "$DN" ping -c 5 -i 0.5 -W 2 "$UE" >/dev/null 2>&1 &
