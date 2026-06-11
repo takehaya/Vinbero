@@ -70,10 +70,10 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 # --mup-gtp4-source-prefix embeds that anchor (the same-RD T2ST endpoint,
 # 172.16.0.254) into the downlink outer IPv6 source right after the /64
 # (v4src position 64), asserted by test.sh as SRC ADDR fd00:d::ac10:fe:0:0.
-# Vinbero's own End.M.GTP4.E takes its GTP-U source from the configured
-# --gtp-v4-src-addr instead of extracting it from the outer source. Binding
-# mutations re-reconcile the RD's installed downlinks, so the order of this
-# bind vs. BGP route arrival does not matter.
+# mup-gw's End.M.GTP4.E extracts it back at the same position
+# (--gtp-v4-src-position 64 in mup-gw/start.sh), closing the §6.6
+# embed -> extract chain. Binding mutations re-reconcile the RD's installed
+# downlinks, so the order of this bind vs. BGP route arrival does not matter.
 /usr/local/bin/vbctl vrf-bgp bind --vrf vrf-cust --rd 65100:1 \
     --rt mup_ipv4:100:2000:import --rt mup_ipv4:100:6000:import \
     --mup-gtp4-source-prefix fd00:d::/64 || true

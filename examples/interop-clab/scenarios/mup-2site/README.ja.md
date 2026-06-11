@@ -81,10 +81,9 @@ RFC 9433 §6.6 の UPF anchor になる。
   読み GTP-U/IPv4 を gNB へ。gNB は UPF N3 anchor (`172.16.0.254`) を送信元と
   する GTP-U (UDP/2152) を受信。outer IPv6 source には mup-pe の per-VRF
   `mup_gtp4_source_prefix` (`fd00:d::/64`、RFC 9433 §6.6) の直後にその anchor
-  (同一 RD の T2ST endpoint) を埋め込む (`fd00:d::ac10:fe:0:0`)。v4src
-  position 64 で source を取り出す GW は anchor を GTP-U の送信元にし、
-  Vinbero の `End.M.GTP4.E` は設定済みの `--gtp-v4-src-addr` から同じ送信元を
-  取る。
+  (同一 RD の T2ST endpoint) を埋め込み (`fd00:d::ac10:fe:0:0`)、mup-gw の
+  `End.M.GTP4.E` が同じビット位置 (`--gtp-v4-src-position 64`) から取り出す。
+  anchor は embed → extract の鎖を通しで運ばれる。
 
 `test.sh` は各 edge ノードが相手の discovery 経路を受信し、セッションを解決して
 install したこと (apply ログ + `headend_v4` map) を検証します。controller の経路
