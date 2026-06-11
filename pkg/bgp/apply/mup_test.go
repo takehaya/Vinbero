@@ -1005,4 +1005,11 @@ func TestApplyMUP_T2ST_UplinkInstanceScoping(t *testing.T) {
 	if len(fh.mupIfindexInstances) != 0 {
 		t.Errorf("ifindex map = %v, want empty after unbind", fh.mupIfindexInstances)
 	}
+	// The re-key must move only the F-TEID entry: deleting the shared gate —
+	// even transiently — would let GTP-U pass unprocessed.
+	for _, p := range fh.v4deleted {
+		if p == endpoint+"/32" {
+			t.Errorf("re-key deleted the endpoint gate; v4deleted=%v", fh.v4deleted)
+		}
+	}
 }
