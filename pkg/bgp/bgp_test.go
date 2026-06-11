@@ -40,10 +40,10 @@ func TestParseFamily(t *testing.T) {
 	}{
 		{in: "vpnv4", want: FamilyVPNv4},
 		{in: "vpnv6", want: FamilyVPNv6},
+		{in: "ipv4_unicast", want: FamilyIPv4Unicast},
 		{in: "ipv6_unicast", want: FamilyIPv6Unicast},
 		{in: "sr_policy_ipv6", want: FamilySRPolicyIPv6},
 		{in: "", wantErr: true},
-		{in: "ipv4_unicast", wantErr: true},
 		{in: "VPNV4", wantErr: true}, // case-sensitive on purpose
 	}
 	for _, tc := range tests {

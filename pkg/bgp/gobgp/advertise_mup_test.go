@@ -132,3 +132,100 @@ func TestEncodeDecodeMUP_RoundTrip(t *testing.T) {
 		}
 	})
 }
+
+// TestEncodeMUPDSD_SIDStructureSubSubTLV pins the on-wire SRv6 SID Structure
+// Sub-Sub-TLV (RFC 9252 §3.2.1.1). Without it vendor reads lb_len=0 and
+// registers BGP NHT against ::/0, which was the root cause of the MUP DSD
+// NEXT_HOP_UNREACHABLE / ISD-fallback synthesis we saw in interop.
+func TestEncodeMUPDSD_SIDStructureSubSubTLV(t *testing.T) {
+	in := bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeDSD, RD: "65000:1", Address: "192.0.2.1",
+		SegmentID2: 100, SegmentID4: 100,
+		SRv6SID: "fd00:d:0:1::", NextHop: "fd00:1::1",
+		SIDStructure: bgp.SIDStructure{
+			LocatorBlockLen: 32, LocatorNodeLen: 16, FunctionLen: 16, ArgumentLen: 64,
+		},
+	}
+	p, err := encodeMUPDSDPath(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var psid *gobgppkt.PathAttributePrefixSID
+	for _, a := range p.Attrs {
+		if ps, ok := a.(*gobgppkt.PathAttributePrefixSID); ok {
+			psid = ps
+			break
+		}
+	}
+	if psid == nil {
+		t.Fatal("Prefix-SID attribute missing")
+	}
+	var info *gobgppkt.SRv6InformationSubTLV
+	for _, tlv := range psid.TLVs {
+		svc, ok := tlv.(*gobgppkt.SRv6ServiceTLV)
+		if !ok {
+			continue
+		}
+		for _, st := range svc.SubTLVs {
+			if i, ok := st.(*gobgppkt.SRv6InformationSubTLV); ok {
+				info = i
+				break
+			}
+		}
+	}
+	if info == nil {
+		t.Fatal("SRv6 Information Sub-TLV missing")
+	}
+	var st *gobgppkt.SRv6SIDStructureSubSubTLV
+	for _, ss := range info.SubSubTLVs {
+		if s, ok := ss.(*gobgppkt.SRv6SIDStructureSubSubTLV); ok {
+			st = s
+			break
+		}
+	}
+	if st == nil {
+		t.Fatal("SRv6 SID Structure Sub-Sub-TLV missing")
+	}
+	if st.LocatorBlockLength != 32 || st.LocatorNodeLength != 16 ||
+		st.FunctionLength != 16 || st.ArgumentLength != 64 {
+		t.Errorf("structure = (%d,%d,%d,%d), want (32,16,16,64)",
+			st.LocatorBlockLength, st.LocatorNodeLength, st.FunctionLength, st.ArgumentLength)
+	}
+}
+
+// TestEncodeMUPDSD_NoStructureSubSubTLV pins the legacy behavior: zero-valued
+// SIDStructure omits the sub-sub-TLV. Keeps the encoder backwards-compatible
+// with callers that don't know the locator (e.g. tests).
+func TestEncodeMUPDSD_NoStructureSubSubTLV(t *testing.T) {
+	in := bgp.MUPRoute{
+		Type: bgp.MUPRouteTypeDSD, RD: "65000:1", Address: "192.0.2.1",
+		SRv6SID: "fd00:d:0:1::", NextHop: "fd00:1::1",
+	}
+	p, err := encodeMUPDSDPath(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	for _, a := range p.Attrs {
+		psid, ok := a.(*gobgppkt.PathAttributePrefixSID)
+		if !ok {
+			continue
+		}
+		for _, tlv := range psid.TLVs {
+			svc, ok := tlv.(*gobgppkt.SRv6ServiceTLV)
+			if !ok {
+				continue
+			}
+			for _, st := range svc.SubTLVs {
+				info, ok := st.(*gobgppkt.SRv6InformationSubTLV)
+				if !ok {
+					continue
+				}
+				for _, ss := range info.SubSubTLVs {
+					if _, ok := ss.(*gobgppkt.SRv6SIDStructureSubSubTLV); ok {
+						t.Fatal("unexpected SID Structure Sub-Sub-TLV with zero-valued SIDStructure")
+					}
+				}
+			}
+		}
+	}
+}

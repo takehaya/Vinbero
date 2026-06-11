@@ -105,12 +105,25 @@ func teidToAddr(teid uint32) netip.Addr {
 // implementations key off it to choose an install path,
 // so reporting `END_DT4` for an ISD prevents the PE-side downlink H.Encaps
 // composition from firing.
-func mupPrefixSID(sidStr string, behavior gobgppkt.SRBehavior) (gobgppkt.PathAttributeInterface, error) {
+//
+// When st is non-zero, the SRv6 SID Structure Sub-Sub-TLV (RFC 9252 §3.2.1.1)
+// is attached so the receiver can derive the locator block. Without it third
+// parties default the locator length to 0 and the SID resolves through /0 in
+// their BGP next-hop tracking, which is what kept the vendor MUP-GW dropping
+// the Vinbero PE's DSD as NEXT_HOP_UNREACHABLE during interop.
+func mupPrefixSID(sidStr string, behavior gobgppkt.SRBehavior, st bgp.SIDStructure) (gobgppkt.PathAttributeInterface, error) {
 	sid, err := netip.ParseAddr(sidStr)
 	if err != nil || !sid.Is6() || sid.Is4In6() || sid.IsUnspecified() {
 		return nil, fmt.Errorf("MUP SID must be a usable IPv6 SID: %q", sidStr)
 	}
-	info := gobgppkt.NewSRv6InformationSubTLV(sid, behavior)
+	var subSubs []gobgppkt.PrefixSIDTLVInterface
+	if !st.IsZero() {
+		subSubs = append(subSubs, gobgppkt.NewSRv6SIDStructureSubSubTLV(
+			st.LocatorBlockLen, st.LocatorNodeLen, st.FunctionLen,
+			st.ArgumentLen, st.TranspositionLen, st.TranspositionOffset,
+		))
+	}
+	info := gobgppkt.NewSRv6InformationSubTLV(sid, behavior, subSubs...)
 	svc := gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L3Service, info)
 	return gobgppkt.NewPathAttributePrefixSID(svc), nil
 }
@@ -155,7 +168,7 @@ func mupFinishPath(nlri *gobgppkt.MUPNLRI, r bgp.MUPRoute, withSegmentID bool, s
 		attrs = append(attrs, ec)
 	}
 	if r.SRv6SID != "" {
-		psid, err := mupPrefixSID(r.SRv6SID, sidBehavior)
+		psid, err := mupPrefixSID(r.SRv6SID, sidBehavior, r.SIDStructure)
 		if err != nil {
 			return nil, err
 		}

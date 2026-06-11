@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync"
 
 	"go.uber.org/zap"
 
@@ -74,14 +75,18 @@ type Applier struct {
 	// on and drops every legacy binding's MUP traffic (legacyToFamilies
 	// does not synthesize MUP entries). Set from bgp.global.mup_default_allow.
 	mupDefaultAllow bool
-	// MUP receive state. Touched only from the single GoBGP RouteHandler
-	// goroutine (like steeredRoutes), so it needs no locking. mupT1ST /
-	// mupT2ST hold each session's full route plus the SID currently
-	// programmed for it (so an arriving / withdrawn discovery route can
-	// reconcile the install). mupISD / mupDSD are the segment-discovery
-	// tables a session resolves against (T1ST against an ISD by endpoint,
-	// T2ST against a DSD by MUP segment id). mupGateRefs counts how many
-	// uplink sessions share each endpoint's H.M.GTP4.D_TEID gate.
+	// MUP receive state, guarded by mupMu: the GoBGP RouteHandler goroutine
+	// applies routes (applyMUP), and VrfBgpService mutations re-reconcile
+	// installed downlinks when a binding's GTP4 source prefix changes
+	// (ReconcileMUPGTP4SrcForRD), so unlike steeredRoutes this state is
+	// touched from two goroutines. mupT1ST / mupT2ST hold each session's
+	// full route plus the SID currently programmed for it (so an arriving /
+	// withdrawn discovery route can reconcile the install). mupISD / mupDSD
+	// are the segment-discovery tables a session resolves against (T1ST
+	// against an ISD by endpoint, T2ST against a DSD by MUP segment id).
+	// mupGateRefs counts how many uplink sessions share each endpoint's
+	// H.M.GTP4.D_TEID gate.
+	mupMu       sync.Mutex
 	mupT1ST     map[mupT1STKey]*mupSessionState
 	mupT2ST     map[mupT2STKey]*mupSessionState
 	mupISD      map[mupISDKey]mupISDEntry

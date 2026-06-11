@@ -65,6 +65,7 @@ type Family string
 const (
 	FamilyVPNv4        Family = "vpnv4"
 	FamilyVPNv6        Family = "vpnv6"
+	FamilyIPv4Unicast  Family = "ipv4_unicast"
 	FamilyIPv6Unicast  Family = "ipv6_unicast"
 	FamilySRPolicyIPv6 Family = "sr_policy_ipv6"
 	FamilyEVPN         Family = "evpn"     // AFI 25 (L2VPN) / SAFI 70 (EVPN)
@@ -78,7 +79,7 @@ func (f Family) String() string { return string(f) }
 // Valid reports whether f is one of the recognized families.
 func (f Family) Valid() bool {
 	switch f {
-	case FamilyVPNv4, FamilyVPNv6, FamilyIPv6Unicast, FamilySRPolicyIPv6, FamilyEVPN, FamilyMUPIPv4, FamilyMUPIPv6:
+	case FamilyVPNv4, FamilyVPNv6, FamilyIPv4Unicast, FamilyIPv6Unicast, FamilySRPolicyIPv6, FamilyEVPN, FamilyMUPIPv4, FamilyMUPIPv6:
 		return true
 	default:
 		return false
@@ -90,7 +91,7 @@ func (f Family) Valid() bool {
 func ParseFamily(s string) (Family, error) {
 	f := Family(s)
 	if !f.Valid() {
-		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv6_unicast|sr_policy_ipv6|evpn|mup_ipv4|mup_ipv6)", s)
+		return "", fmt.Errorf("unknown BGP family %q (want vpnv4|vpnv6|ipv4_unicast|ipv6_unicast|sr_policy_ipv6|evpn|mup_ipv4|mup_ipv6)", s)
 	}
 	return f, nil
 }
@@ -433,6 +434,33 @@ type MUPRoute struct {
 	// "" if none.
 	SRv6SID string
 	NextHop string
+
+	// SIDStructure carries the SRv6 SID layout (RFC 9252 §3.2.1.1) for SRv6SID.
+	// Zero means "unset", in which case the SRv6 SID Structure Sub-Sub-TLV is
+	// omitted on advertise. Receivers that need the locator-block length for
+	// next-hop tracking (vendor, FRR, vendor MUP-GWs) then fall back to /0 and
+	// the path stays NEXT_HOP_UNREACHABLE.
+	SIDStructure SIDStructure
+}
+
+// SIDStructure is the SRv6 SID layout signalled by the SRv6 SID Structure
+// Sub-Sub-TLV (RFC 9252 §3.2.1.1). All fields are bit lengths except
+// TranspositionOffset (bit position). LocatorBlockLen + LocatorNodeLen +
+// FunctionLen + ArgumentLen must equal 128.
+type SIDStructure struct {
+	LocatorBlockLen     uint8
+	LocatorNodeLen      uint8
+	FunctionLen         uint8
+	ArgumentLen         uint8
+	TranspositionLen    uint8
+	TranspositionOffset uint8
+}
+
+// IsZero reports whether the structure carries no usable layout (all fields
+// zero), in which case advertise paths must omit the sub-sub-TLV rather than
+// emit a /0-locator SID that breaks receiver next-hop tracking.
+func (s SIDStructure) IsZero() bool {
+	return s == SIDStructure{}
 }
 
 // Family returns the address family (FamilyMUPIPv4 / FamilyMUPIPv6) the

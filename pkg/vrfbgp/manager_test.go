@@ -361,6 +361,51 @@ func TestDirection_ZeroRendersAsInvalid(t *testing.T) {
 	}
 }
 
+func TestParseMUPGTP4SourcePrefix(t *testing.T) {
+	accept := []struct {
+		in   string
+		want string
+	}{
+		{"::/0", "::/0"},
+		{"fd00:d::/64", "fd00:d::/64"},
+		{"2001:db8::/96", "2001:db8::/96"},
+		// Non-zero host bits are masked away so two spellings of the same
+		// prefix compare equal downstream.
+		{"2001:db8::1/64", "2001:db8::/64"},
+	}
+	for _, c := range accept {
+		got, err := ParseMUPGTP4SourcePrefix(c.in, "65000:1")
+		if err != nil {
+			t.Errorf("ParseMUPGTP4SourcePrefix(%q) = %v, want accept", c.in, err)
+			continue
+		}
+		if got.String() != c.want {
+			t.Errorf("ParseMUPGTP4SourcePrefix(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+	// Empty prefix means "embedding off" and needs no RD.
+	if got, err := ParseMUPGTP4SourcePrefix("", ""); err != nil || got.IsValid() {
+		t.Errorf("ParseMUPGTP4SourcePrefix(\"\") = (%v, %v), want zero Prefix (off)", got, err)
+	}
+	reject := []string{
+		"fd00:d::/97",        // no room for the 32-bit IPv4 anchor
+		"10.0.0.0/24",        // IPv4
+		"::ffff:10.0.0.0/96", // 4-in-6 is not IPv6-native
+		"fd00:d::",           // missing prefix length
+		"not-a-prefix",
+	}
+	for _, in := range reject {
+		if _, err := ParseMUPGTP4SourcePrefix(in, "65000:1"); err == nil {
+			t.Errorf("ParseMUPGTP4SourcePrefix(%q) must reject", in)
+		}
+	}
+	// A prefix without rd can never match a route (BindingByRD) and is
+	// rejected so the misconfiguration cannot die silently.
+	if _, err := ParseMUPGTP4SourcePrefix("fd00:d::/64", ""); err == nil {
+		t.Error("ParseMUPGTP4SourcePrefix with empty rd must reject")
+	}
+}
+
 func keys[K comparable, V any](m map[K]V) []K {
 	out := make([]K, 0, len(m))
 	for k := range m {

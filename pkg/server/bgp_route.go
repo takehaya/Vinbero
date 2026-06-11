@@ -11,6 +11,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -28,10 +29,11 @@ type BgpRouteServer struct {
 	evpn        bgp.EVPNController
 	mup         bgp.MUPController
 	vrfBindings *vrfbgp.Manager
+	locators    *locator.Manager
 }
 
-func NewBgpRouteServer(advertiser bgp.RouteAdvertiser, srPolicy bgp.SRPolicyController, evpn bgp.EVPNController, mup bgp.MUPController, vrfBindings *vrfbgp.Manager) *BgpRouteServer {
-	return &BgpRouteServer{advertiser: advertiser, srPolicy: srPolicy, evpn: evpn, mup: mup, vrfBindings: vrfBindings}
+func NewBgpRouteServer(advertiser bgp.RouteAdvertiser, srPolicy bgp.SRPolicyController, evpn bgp.EVPNController, mup bgp.MUPController, vrfBindings *vrfbgp.Manager, locators *locator.Manager) *BgpRouteServer {
+	return &BgpRouteServer{advertiser: advertiser, srPolicy: srPolicy, evpn: evpn, mup: mup, vrfBindings: vrfBindings, locators: locators}
 }
 
 // errBGPDisabled is returned (as FailedPrecondition) when an advertise /

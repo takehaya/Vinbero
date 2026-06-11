@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"sync"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -69,16 +71,43 @@ type MupServer struct {
 	advertiser  bgp.MUPController
 	nextHop     string
 	vrfBindings *vrfbgp.Manager
+	locators    *locator.Manager
 	routes      map[mupLocalKey]bgp.MUPRoute
 }
 
-func NewMupServer(advertiser bgp.MUPController, nextHop string, maxRoutes uint32, vrfBindings *vrfbgp.Manager) *MupServer {
+func NewMupServer(advertiser bgp.MUPController, nextHop string, maxRoutes uint32, vrfBindings *vrfbgp.Manager, locators *locator.Manager) *MupServer {
 	return &MupServer{
 		advertiser:  advertiser,
 		nextHop:     nextHop,
 		maxRoutes:   maxRoutes,
 		vrfBindings: vrfBindings,
+		locators:    locators,
 		routes:      make(map[mupLocalKey]bgp.MUPRoute),
+	}
+}
+
+// fillMUPSIDStructure derives the SRv6 SID Structure (RFC 9252 §3.2.1.1) from
+// the locator that owns mr.SRv6SID. Without this the receiver defaults the
+// locator length to 0, registers BGP NHT under ::/0, and the path stays
+// NEXT_HOP_UNREACHABLE; vendor interop hit this on every Vinbero DSD. Operator-
+// supplied non-zero structures win, so an explicit override is still possible.
+func fillMUPSIDStructure(mr bgp.MUPRoute, locators *locator.Manager) bgp.SIDStructure {
+	if !mr.SIDStructure.IsZero() || locators == nil || mr.SRv6SID == "" {
+		return mr.SIDStructure
+	}
+	sid, err := netip.ParseAddr(mr.SRv6SID)
+	if err != nil {
+		return mr.SIDStructure
+	}
+	loc, ok := locators.FindByContaining(sid)
+	if !ok {
+		return mr.SIDStructure
+	}
+	return bgp.SIDStructure{
+		LocatorBlockLen: loc.BlockLen,
+		LocatorNodeLen:  loc.NodeLen,
+		FunctionLen:     loc.FunctionLen,
+		ArgumentLen:     loc.ArgumentLen,
 	}
 }
 
@@ -140,6 +169,7 @@ func (s *MupServer) upsert(ctx context.Context, routes []*v1.BgpMupRoute) []*v1.
 			continue
 		}
 		mr.RTs = fillMUPExportRTs(mr, s.vrfBindings)
+		mr.SIDStructure = fillMUPSIDStructure(mr, s.locators)
 
 		key := mupKeyFor(mr)
 		s.mu.Lock()
