@@ -543,10 +543,22 @@ func (m *Manager) List() []Binding {
 // EVPN install always needs a bridge domain, so a BDID==0 binding is skipped
 // for FamilyEVPN -- otherwise random map iteration could pick it ahead of a
 // real BD-bound one and silently drop a valid RT2/RT3.
+//
+// When several bindings import the same RT the lowest VRF name wins: the
+// match must be deterministic, not map-iteration order, because the MUP
+// uplink instance a T2ST installs under follows the matched binding and a
+// flapping match would re-key the session's F-TEID entry on every
+// reconcile.
 func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName string, bdID uint16, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for _, b := range m.bindings {
+	names := make([]string, 0, len(m.bindings))
+	for name := range m.bindings {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		b := m.bindings[name]
 		if fam == bgp.FamilyEVPN && b.BDID == 0 {
 			continue
 		}

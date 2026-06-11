@@ -1248,11 +1248,21 @@ func TestVrfBgpBind_DrivesMupUplinkReconcile(t *testing.T) {
 		t.Fatalf("interface bind fired %d times, want 1", hook.uplinkRecycles)
 	}
 
-	// With an instance held, ANY mutation can re-scope a T2ST (an RT edit
-	// changes the import match), so even the unrelated binding fires.
+	// An unrelated mutation (max_prefixes) cannot move uplink state even
+	// while an instance is held: silent.
 	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 7})
+	if hook.uplinkRecycles != 1 {
+		t.Fatalf("unrelated mutation fired %d times, want 1", hook.uplinkRecycles)
+	}
+
+	// A MUP import RT change while an instance is held re-scopes which
+	// binding a T2ST matches: fires.
+	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 7,
+		Families: map[string]*v1.VrfBgpFamily{
+			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "100:5", Direction: "import"}}},
+		}})
 	if hook.uplinkRecycles != 2 {
-		t.Fatalf("mutation with an instance held fired %d times, want 2", hook.uplinkRecycles)
+		t.Fatalf("MUP import RT change fired %d times, want 2", hook.uplinkRecycles)
 	}
 
 	// Dropping the interfaces releases the instance: fires (the release
@@ -1262,8 +1272,12 @@ func TestVrfBgpBind_DrivesMupUplinkReconcile(t *testing.T) {
 		t.Fatalf("interface removal fired %d times, want 3", hook.uplinkRecycles)
 	}
 
-	// All instances gone: an unrelated mutation is silent again.
-	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 9})
+	// All instances gone: even a MUP RT edit cannot move a session (every
+	// match resolves to the default instance), so it is silent.
+	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 9,
+		Families: map[string]*v1.VrfBgpFamily{
+			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "100:6", Direction: "import"}}},
+		}})
 	if hook.uplinkRecycles != 3 {
 		t.Fatalf("mutation with no instances fired %d times, want 3", hook.uplinkRecycles)
 	}

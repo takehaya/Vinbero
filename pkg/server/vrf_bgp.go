@@ -226,25 +226,52 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
 		}
 	}
-	if s.mupSrc != nil && mupUplinkFieldsChanged(existed, prev, updated, len(s.mgr.UplinkInstanceInterfaces()) > 0) {
+	if s.mupSrc != nil && mupUplinkFieldsChanged(prev, updated, len(s.mgr.UplinkInstanceInterfaces()) > 0) {
 		s.mupSrc.ReconcileMUPUplinkInstances()
 	}
 	return nil
 }
 
+// mupImportRTs returns the import-direction route targets a binding declares
+// under fam, sorted so two declarations compare structurally.
+func mupImportRTs(b vrfbgp.Binding, fam bgp.Family) []string {
+	fp, has := b.Families[fam]
+	if !has {
+		return nil
+	}
+	var out []string
+	for _, rt := range fp.RouteTargets {
+		if rt.Direction.Has(vrfbgp.DirectionImport) {
+			out = append(out, rt.RT)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // mupUplinkFieldsChanged reports whether a binding mutation can move uplink
-// instance state. Once any binding holds an uplink instance, every mutation
-// can re-scope which instance a T2ST resolves to (an RT edit changes the
-// MatchImportForFamily outcome), so the reconcile fires; it is a bounded
-// no-op-compare walk. With no instances anywhere it fires only on the
-// transitions that create or drop one: the updated binding declaring
-// interfaces, or the previous one having had them (release re-keys its
-// sessions back to the default instance).
-func mupUplinkFieldsChanged(existed bool, prev, updated vrfbgp.Binding, anyInstance bool) bool {
-	if anyInstance || len(updated.MupUplinkInterfaces) > 0 {
+// instance state, so an unrelated edit (max_prefixes, a vpnv4 RT) does not
+// re-run the O(sessions) reconcile. Two things move it: the binding's own
+// interface list (instance allocation / release / reclassification), and,
+// once any instance exists, its MUP import RT policy, which changes the
+// MatchImportForFamily outcome a T2ST's instance follows. With no instances
+// anywhere an RT edit cannot move a session (every match resolves to the
+// default instance 0), so it stays silent. A first bind compares against the
+// zero Binding, so declaring interfaces or (with instances present) MUP
+// import RTs fires as a change from empty.
+func mupUplinkFieldsChanged(prev, updated vrfbgp.Binding, anyInstance bool) bool {
+	if !slices.Equal(prev.MupUplinkInterfaces, updated.MupUplinkInterfaces) {
 		return true
 	}
-	return existed && len(prev.MupUplinkInterfaces) > 0
+	if !anyInstance {
+		return false
+	}
+	for _, fam := range []bgp.Family{bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6} {
+		if !slices.Equal(mupImportRTs(prev, fam), mupImportRTs(updated, fam)) {
+			return true
+		}
+	}
+	return false
 }
 
 // mupGTP4SrcFieldsChanged reports whether a binding mutation affects the MUP
@@ -396,10 +423,14 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 				s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
 			}
 			if s.mupSrc != nil && existed &&
-				(len(prev.MupUplinkInterfaces) > 0 || len(s.mgr.UplinkInstanceInterfaces()) > 0) {
-				// Released (or surviving) uplink instances re-key: sessions
-				// that resolved to the removed binding fall back to another
-				// match or the default instance.
+				(len(prev.MupUplinkInterfaces) > 0 ||
+					(len(s.mgr.UplinkInstanceInterfaces()) > 0 &&
+						(len(mupImportRTs(prev, bgp.FamilyMUPIPv4)) > 0 || len(mupImportRTs(prev, bgp.FamilyMUPIPv6)) > 0))) {
+				// The removed binding held an instance (release re-keys its
+				// sessions to the default instance), or it imported MUP RTs
+				// while other instances survive (its sessions may now match a
+				// different, instance-holding binding). Anything else cannot
+				// move uplink state.
 				s.mupSrc.ReconcileMUPUplinkInstances()
 			}
 		}
