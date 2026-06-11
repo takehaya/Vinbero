@@ -1063,7 +1063,22 @@ func (h *xdpTestHelper) createSidFunctionGTP4E(prefix string, gtpV4SrcAddr [4]by
 	entry := &SidFunctionEntry{
 		Action: actionEndMGTP4E,
 	}
-	aux := NewSidAuxGtp4e(argsOffset, gtpV4SrcAddr)
+	aux := NewSidAuxGtp4e(argsOffset, gtpV4SrcAddr, false, 0)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux, OwnerRPC); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.M.GTP4.E: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteSidFunction(prefix, OwnerRPC) })
+}
+
+// createSidFunctionGTP4ESrcPos creates a SID function entry for End.M.GTP4.E
+// that extracts the GTP-U IPv4 source from the outer IPv6 SA at bit
+// v4srcPosition (RFC 9433 §6.6) instead of using a static source.
+func (h *xdpTestHelper) createSidFunctionGTP4ESrcPos(prefix string, argsOffset, v4srcPosition uint8) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{
+		Action: actionEndMGTP4E,
+	}
+	aux := NewSidAuxGtp4e(argsOffset, [4]byte{}, true, v4srcPosition)
 	if err := h.mapOps.CreateSidFunction(prefix, entry, aux, OwnerRPC); err != nil {
 		h.t.Fatalf("Failed to create SID function entry for End.M.GTP4.E: %v", err)
 	}

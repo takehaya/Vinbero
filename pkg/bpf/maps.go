@@ -700,11 +700,19 @@ func SidAuxDx2vData(entry *SidAuxEntry) uint16 {
 	return binary.NativeEndian.Uint16(entry.Nexthop.Nexthop[0:2])
 }
 
-// NewSidAuxGtp4e creates an aux entry for End.M.GTP4.E
-func NewSidAuxGtp4e(argsOffset uint8, gtpV4SrcAddr [IPv4AddrLen]uint8) *SidAuxEntry {
+// NewSidAuxGtp4e creates an aux entry for End.M.GTP4.E. When v4srcFromOuter
+// is set the data plane extracts the GTP-U IPv4 source from the outer IPv6
+// source address at bit v4srcPosition (RFC 9433 §6.6) and gtpV4SrcAddr is
+// ignored; otherwise the static gtpV4SrcAddr is used. A separate flag byte
+// (not a zero sentinel) keeps position 0 expressible.
+func NewSidAuxGtp4e(argsOffset uint8, gtpV4SrcAddr [IPv4AddrLen]uint8, v4srcFromOuter bool, v4srcPosition uint8) *SidAuxEntry {
 	entry := &SidAuxEntry{}
 	entry.Nexthop.Nexthop[0] = argsOffset
 	copy(entry.Nexthop.Nexthop[1:5], gtpV4SrcAddr[:])
+	if v4srcFromOuter {
+		entry.Nexthop.Nexthop[5] = 1
+	}
+	entry.Nexthop.Nexthop[6] = v4srcPosition
 	return entry
 }
 
@@ -794,9 +802,11 @@ func SidAuxL2Data(entry *SidAuxEntry) (bdID uint16, bridgeIfindex uint32) {
 }
 
 // SidAuxGtp4eData extracts GTP4.E variant fields from a SidAuxEntry
-func SidAuxGtp4eData(entry *SidAuxEntry) (argsOffset uint8, gtpV4SrcAddr [IPv4AddrLen]uint8) {
+func SidAuxGtp4eData(entry *SidAuxEntry) (argsOffset uint8, gtpV4SrcAddr [IPv4AddrLen]uint8, v4srcFromOuter bool, v4srcPosition uint8) {
 	argsOffset = entry.Nexthop.Nexthop[0]
 	copy(gtpV4SrcAddr[:], entry.Nexthop.Nexthop[1:5])
+	v4srcFromOuter = entry.Nexthop.Nexthop[5] != 0
+	v4srcPosition = entry.Nexthop.Nexthop[6]
 	return
 }
 

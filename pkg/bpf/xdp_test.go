@@ -2381,6 +2381,12 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 				t.Errorf("IPv4 dst mismatch: got %v, want %v", outerDst, tt.ipv4Dst)
 			}
 
+			// Verify outer IPv4 source matches the static aux config
+			outerSrc := outPkt[ethHeaderLen+12 : ethHeaderLen+16]
+			if !bytes.Equal(outerSrc, gtpSrcAddr[:]) {
+				t.Errorf("IPv4 src mismatch: got %v, want %v", outerSrc, gtpSrcAddr)
+			}
+
 			// Verify GTP-U flags (offset: ETH+IPv4+UDP = 14+20+8 = 42)
 			gtpOffset := ethHeaderLen + 20 + 8
 			if len(outPkt) > gtpOffset+8 {
@@ -2402,6 +2408,101 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 				t.Logf("SUCCESS: SRv6 → GTP-U/IPv4 (TEID=0x%08X, QFI=%d, E=%v, pktlen %d→%d)",
 					tt.teid, tt.qfi, hasExt, len(pkt), len(outPkt))
 			}
+		})
+	}
+}
+
+// TestXDPProgEndMGtp4EV4SrcFromOuter exercises the RFC 9433 §6.6 receiver
+// side: the GTP-U outer IPv4 source is extracted from the outer IPv6 SA at
+// the configured bit position (the peer embeds it right after its source
+// prefix) instead of coming from a static aux address. Covers byte-aligned
+// and shifted positions, position 0 (a flag byte carries the presence, so 0
+// is a real setting), and both the SRH and reduced-encap (no-SRH) paths.
+func TestXDPProgEndMGtp4EV4SrcFromOuter(t *testing.T) {
+	wantSrc := [4]byte{172, 16, 0, 254}
+	ipv4Dst := [4]byte{10, 0, 0, 2}
+	teid := uint32(0xDEADBEEF)
+
+	// embedAt returns an outer IPv6 SA with wantSrc's 32 bits placed at bit
+	// position pos (MSB-first), over a fd00:d::/64-style base.
+	embedAt := func(pos uint8) net.IP {
+		sa := net.ParseIP("fd00:d::").To16()
+		b, sh := int(pos/8), pos%8
+		if sh == 0 {
+			copy(sa[b:b+4], wantSrc[:])
+		} else {
+			sa[b] |= wantSrc[0] >> sh
+			sa[b+1] = wantSrc[0]<<(8-sh) | wantSrc[1]>>sh
+			sa[b+2] = wantSrc[1]<<(8-sh) | wantSrc[2]>>sh
+			sa[b+3] = wantSrc[2]<<(8-sh) | wantSrc[3]>>sh
+			sa[b+4] = wantSrc[3] << (8 - sh)
+		}
+		return sa
+	}
+
+	// SID DA with Args.Mob.Session (gNB dst, TEID, QFI) at offset 7, matching
+	// the /56 trigger below.
+	sidDA := func() net.IP {
+		da := net.ParseIP("fc00:1::1").To16()
+		copy(da[7:11], ipv4Dst[:])
+		binary.BigEndian.PutUint32(da[11:15], teid)
+		da[15] = 9 // QFI
+		return da
+	}()
+
+	for _, tt := range []struct {
+		name  string
+		pos   uint8
+		noSRH bool
+	}{
+		{"position 0 (SA head)", 0, false},
+		{"position 60 (shifted)", 60, false},
+		{"position 64 (locator /64)", 64, false},
+		{"position 96 (SA tail)", 96, false},
+		{"position 64 no-SRH (reduced encap)", 64, true},
+		{"position 60 no-SRH (shifted)", 60, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionGTP4ESrcPos("fc00:1::/56", 7, tt.pos)
+
+			outerSrc := embedAt(tt.pos)
+			var pkt []byte
+			var err error
+			if tt.noSRH {
+				pkt, err = buildEncapsulatedPacketNoSRH(outerSrc, sidDA,
+					net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4(), innerTypeIPv4)
+			} else {
+				pkt, err = buildSRv6PacketWithInnerIPv4(outerSrc, sidDA, []net.IP{sidDA}, 0,
+					net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4())
+			}
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+
+			// FIB lookup fails in the test env → XDP_DROP after encap is fine;
+			// the rewritten bytes are still inspectable.
+			if ret != XDP_PASS && ret != XDP_REDIRECT && ret != XDP_DROP {
+				t.Fatalf("Unexpected action %d", ret)
+			}
+			if len(outPkt) < ethHeaderLen+20 {
+				t.Fatalf("Output packet too short for GTP-U verification (%d bytes), action=%d", len(outPkt), ret)
+			}
+			if etherType := binary.BigEndian.Uint16(outPkt[12:14]); etherType != 0x0800 {
+				t.Fatalf("EtherType not IPv4 (0x%04X), action=%d", etherType, ret)
+			}
+
+			gotSrc := outPkt[ethHeaderLen+12 : ethHeaderLen+16]
+			if !bytes.Equal(gotSrc, wantSrc[:]) {
+				t.Errorf("extracted IPv4 src mismatch: got %v, want %v (pos=%d)", gotSrc, wantSrc, tt.pos)
+			}
+			gotDst := outPkt[ethHeaderLen+16 : ethHeaderLen+20]
+			if !bytes.Equal(gotDst, ipv4Dst[:]) {
+				t.Errorf("IPv4 dst mismatch: got %v, want %v", gotDst, ipv4Dst)
+			}
+			t.Logf("SUCCESS: v4src extracted at bit %d (noSRH=%v): %v", tt.pos, tt.noSRH, gotSrc)
 		})
 	}
 }

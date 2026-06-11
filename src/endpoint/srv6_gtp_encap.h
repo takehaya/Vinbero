@@ -41,7 +41,11 @@ struct gtp4e_args {
 };
 
 // Decode Args.Mob.Session (9 bytes) from the IPv6 DA at aux->gtp4e.args_offset,
-// and pull the GTP4 source IPv4 from the auxiliary entry. Returns 0 on success.
+// and resolve the GTP4 source IPv4: extracted from the outer IPv6 SA at
+// aux->gtp4e.v4src_position when v4src_from_outer is set (RFC 9433 §6.6, the
+// peer embeds it right after its source prefix), the static
+// aux->gtp4e.gtp_v4_src_addr otherwise. Returns 0 on success. Callers run this
+// before stripping the outer headers, so the SA is still in the packet.
 //
 // The 9 DA bytes are first copied into a stack buffer in a single memcpy. This
 // matters for the no-SRH path: the verifier can lose packet-pointer provenance
@@ -71,7 +75,38 @@ static __always_inline int gtp4e_parse_args(
     out->qfi = args[8] & 0x3F;
     out->rqi = (args[8] >> 6) & 0x01;
 
-    __builtin_memcpy(out->gtp4_src, aux->gtp4e.gtp_v4_src_addr, IPV4_ADDR_LEN);
+    if (aux->gtp4e.v4src_from_outer) {
+        __u8 pos = aux->gtp4e.v4src_position;
+        if (pos > 96)
+            return -1;
+        if ((void *)(ip6h + 1) > data_end)
+            return -1;
+        // Copy the SA to the stack first: the shifted reads below index it
+        // with a map-derived offset, which the verifier rejects on packet
+        // pointers but accepts on a stack buffer.
+        __u8 sa[IPV6_ADDR_LEN + 1];
+        __builtin_memcpy(sa, &ip6h->saddr, IPV6_ADDR_LEN);
+        // Guard byte: pos <= 96 bounds b at 12, and the verifier's range for
+        // b does not narrow to <= 11 inside the sh != 0 branch (where sa[b+4]
+        // is read), so size the buffer for sa[16] even though pos = 96 always
+        // takes the sh == 0 branch and never actually reads it.
+        sa[IPV6_ADDR_LEN] = 0;
+        __u8 b = pos >> 3;
+        __u8 sh = pos & 0x07;
+        if (sh == 0) {
+            out->gtp4_src[0] = sa[b];
+            out->gtp4_src[1] = sa[b + 1];
+            out->gtp4_src[2] = sa[b + 2];
+            out->gtp4_src[3] = sa[b + 3];
+        } else {
+            out->gtp4_src[0] = (sa[b] << sh) | (sa[b + 1] >> (8 - sh));
+            out->gtp4_src[1] = (sa[b + 1] << sh) | (sa[b + 2] >> (8 - sh));
+            out->gtp4_src[2] = (sa[b + 2] << sh) | (sa[b + 3] >> (8 - sh));
+            out->gtp4_src[3] = (sa[b + 3] << sh) | (sa[b + 4] >> (8 - sh));
+        }
+    } else {
+        __builtin_memcpy(out->gtp4_src, aux->gtp4e.gtp_v4_src_addr, IPV4_ADDR_LEN);
+    }
     return 0;
 }
 
