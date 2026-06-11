@@ -22,14 +22,15 @@ type VrfExporter interface {
 	RemoveVRF(vrfName string)
 }
 
-// MupSrcReconciler is the runtime hook a binding mutation drives when its
-// MUP GTP4 source prefix (or the RD carrying it) changes: installed T1ST
-// downlinks under that RD re-derive their outer IPv6 source (RFC 9433 §6.6).
-// ReconcileMUPUplinkInstances reprograms the uplink instance state (the
-// ifindex -> instance map and the instance each T2ST is keyed under) after
-// any binding mutation that can move it. *pkg/bgp/apply.Applier satisfies
-// both; it is nil when BGP is off.
-type MupSrcReconciler interface {
+// MupBindingReconciler is the runtime hook a binding mutation drives for the
+// MUP state that hangs off bindings. ReconcileMUPGTP4SrcForRD fires when a
+// binding's GTP4 source prefix (or the RD carrying it) changes: installed
+// T1ST downlinks under that RD re-derive their outer IPv6 source
+// (RFC 9433 §6.6). ReconcileMUPUplinkInstances reprograms the uplink
+// instance state (the ifindex -> instance map and the instance each T2ST is
+// keyed under) after any binding mutation that can move it.
+// *pkg/bgp/apply.Applier satisfies both; it is nil when BGP is off.
+type MupBindingReconciler interface {
 	ReconcileMUPGTP4SrcForRD(rd string)
 	ReconcileMUPUplinkInstances()
 }
@@ -43,7 +44,7 @@ type VrfBgpServer struct {
 	mgr      *vrfbgp.Manager
 	exporter VrfExporter      // L3VPN auto-advertise hook; nil when off
 	evpn     *EvpnCoordinator // EVPN BD lifecycle (binding axis); nil when off
-	mupSrc   MupSrcReconciler // MUP GTP4 source-embed reconcile hook; nil when BGP off
+	mupSrc   MupBindingReconciler // MUP binding-state reconcile hook; nil when BGP off
 	// mu serializes a bind/unbind's manager + exporter mutations per call so two
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
@@ -51,7 +52,7 @@ type VrfBgpServer struct {
 	mu sync.Mutex
 }
 
-func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupSrcReconciler) *VrfBgpServer {
+func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupBindingReconciler) *VrfBgpServer {
 	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc}
 }
 
