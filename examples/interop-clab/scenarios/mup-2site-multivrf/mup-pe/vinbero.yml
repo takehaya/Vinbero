@@ -1,0 +1,53 @@
+internal:
+  # eth1 faces the core (SRv6 underlay; End.DT4 uplink delivery); eth2 / eth3
+  # face the two overlapping data networks. All carry XDP.
+  devices:
+    - eth1
+    - eth2
+    - eth3
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+
+# Data-side MUP-PE hosting one End.DT4 direct segment per VPN (vrf-a / vrf-b,
+# created in start.sh). Passive iBGP (SAFI 85) toward the controller and the
+# GW; advertises the per-VPN DSDs the GW resolves the T2STs against.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.2"
+    listen_port: 179
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "2001:db8:ff::c"   # mup-c (controller dials us)
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      passive: true
+      families:
+        - mup_ipv4
+    - neighbor: "2001:db8:ff::a"   # mup-gw (it dials; receives our DSDs)
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      passive: true
+      families:
+        - mup_ipv4

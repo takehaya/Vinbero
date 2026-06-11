@@ -1,0 +1,98 @@
+# containerlab topology for the mup-2site-multivrf interop scenario.
+#
+# Two MUP service instances (VPN-A / VPN-B) share ONE Vinbero MUP-GW and ONE
+# Vinbero MUP-PE, and deliberately overlap everywhere a VPN may overlap: both
+# use the same N3 endpoint (172.16.0.254), the same TEID (256), the same UE
+# (10.1.0.1) and the same DN (10.0.0.1). The only thing separating them is
+# the GW access interface the GTP-U arrives on: the GW's uplink instances
+# (vrf-bgp bind --mup-uplink-interfaces) key the F-TEID lookup by ingress
+# ifindex, steering byte-identical packets to per-VPN direct SIDs, and the
+# PE's End.DT4 delivers each into its own kernel VRF.
+#
+#   gnb-a --N3-A-- mup-gw ===== core ===== mup-pe --N6-A-- dn-a
+#   gnb-b --N3-B--/                 |            \--N6-B-- dn-b
+#                                   | mup-c (MUP Controller, iBGP only)
+#
+# Uplink only: the downlink (End.M.GTP4.E) and PE-side headend instancing are
+# out of scope here and covered by mup-2site.
+name: mup-2site-multivrf
+
+topology:
+  nodes:
+    gnb-a:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - gnb/start.sh:/start.sh
+        - send_gtpu.py:/send_gtpu.py
+      exec:
+        - sh /start.sh
+
+    gnb-b:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - gnb/start.sh:/start.sh
+        - send_gtpu.py:/send_gtpu.py
+      exec:
+        - sh /start.sh
+
+    mup-gw:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - mup-gw/vinbero.yml:/vinbero.yml
+        - mup-gw/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    core:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - core/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    mup-c:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - mup-c/vinbero.yml:/vinbero.yml
+        - mup-c/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    mup-pe:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - mup-pe/vinbero.yml:/vinbero.yml
+        - mup-pe/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    dn-a:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - dn/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    dn-b:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - dn/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+  links:
+    - endpoints: [gnb-a:eth1, mup-gw:eth1]      # N3-A (GTP-U/IPv4, VPN-A)
+    - endpoints: [gnb-b:eth1, mup-gw:eth2]      # N3-B (GTP-U/IPv4, VPN-B; same addressing as N3-A)
+    - endpoints: [mup-gw:eth3, core:eth1]        # SRv6 underlay
+    - endpoints: [core:eth2, mup-pe:eth1]          # SRv6 underlay
+    - endpoints: [core:eth3, mup-c:eth1]            # iBGP transport
+    - endpoints: [mup-pe:eth2, dn-a:eth1]          # N6-A (VPN-A data network)
+    - endpoints: [mup-pe:eth3, dn-b:eth1]          # N6-B (VPN-B data network; same addressing as N6-A)
