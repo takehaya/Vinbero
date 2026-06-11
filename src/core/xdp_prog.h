@@ -141,26 +141,31 @@ struct headend_entry {
 #define MUP_ARGS_OFFSET_NONE 0xFF
 
 // Key for mup_uplink_v4_map (BGP MUP T2ST / F-TEID uplink lookup, draft-mpmz-bess-mup-safi).
-// LPM_TRIE key: prefixlen counts MSB-first across endpoint (32 bits) then the
-// TEID bits, so the endpoint is always fully matched and the TEID is matched as
-// a *prefix*. BGP MUP T2ST carries the TEID as a variable-length prefix
-// (EndpointAddressLength = 32 + TEID-bits for IPv4), so a single route can
-// aggregate a TEID range. prefixlen ranges 32 (endpoint only / any TEID) .. 64
-// (exact TEID). endpoint and teid bytes are network byte order so the on-wire
-// MSB aligns to the start of the matched prefix.
+// LPM_TRIE key: prefixlen counts MSB-first across instance (32 bits), endpoint
+// (32 bits), then the TEID bits, so instance and endpoint are always fully
+// matched and the TEID is matched as a *prefix*. BGP MUP T2ST carries the TEID
+// as a variable-length prefix (EndpointAddressLength = 32 + TEID-bits for
+// IPv4), so a single route can aggregate a TEID range. prefixlen ranges 64
+// (endpoint only / any TEID) .. 96 (exact TEID). The instance is the uplink
+// service instance resolved from the ingress ifindex (mup_ifindex_instance_map;
+// 0 = default instance), so two instances can install the same {endpoint, TEID}
+// without colliding. instance, endpoint and teid bytes are network byte order
+// so the on-wire MSB aligns to the start of the matched prefix.
 struct mup_uplink_v4_key {
-    __u32 prefixlen;                // 32..64 (endpoint 32 bits + TEID prefix bits)
+    __u32 prefixlen;                // 64..96 (instance 32 + endpoint 32 + TEID prefix bits)
+    __u8  instance[4];              // uplink instance id, big-endian, always fully matched (0 = default)
     __u8  endpoint[IPV4_ADDR_LEN];  // outer GTP-U destination (N3 / UPF endpoint), full /32
     __u8  teid[4];                  // GTP-U TEID, network byte order, MSB-aligned prefix
 } __attribute__((packed));
 
 // Key for mup_uplink_v6_map (BGP MUP T2ST / F-TEID uplink lookup over GTP6).
 // IPv6 counterpart of mup_uplink_v4_key: the endpoint is the full /128 GTP-U/IPv6
-// outer destination and prefixlen ranges 128 (endpoint only / any TEID) .. 160
-// (exact TEID). endpoint and teid bytes are network byte order so the on-wire MSB
-// aligns to the start of the matched prefix.
+// outer destination and prefixlen ranges 160 (endpoint only / any TEID) .. 192
+// (exact TEID). instance, endpoint and teid bytes are network byte order so the
+// on-wire MSB aligns to the start of the matched prefix.
 struct mup_uplink_v6_key {
-    __u32 prefixlen;                // 128..160 (endpoint 128 bits + TEID prefix bits)
+    __u32 prefixlen;                // 160..192 (instance 32 + endpoint 128 + TEID prefix bits)
+    __u8  instance[4];              // uplink instance id, big-endian, always fully matched (0 = default)
     __u8  endpoint[IPV6_ADDR_LEN];  // outer GTP-U/IPv6 destination (N3 / UPF endpoint), full /128
     __u8  teid[4];                  // GTP-U TEID, network byte order, MSB-aligned prefix
 } __attribute__((packed));

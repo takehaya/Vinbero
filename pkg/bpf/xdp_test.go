@@ -2163,9 +2163,9 @@ func TestXDPProgHMGtp4DTeid(t *testing.T) {
 	h.createMupUplinkGate("192.0.2.0/24")
 
 	// Direct SIDs for the sessions below.
-	directExact, _ := ParseIPv6("fc00:a::abcd")  // exact /32 TEID match
-	directAgg, _ := ParseIPv6("fc00:b::ef01")    // /8 TEID-prefix aggregate
-	directMore, _ := ParseIPv6("fc00:c::1234")   // /16 inside the aggregate (longest-match wins)
+	directExact, _ := ParseIPv6("fc00:a::abcd") // exact /32 TEID match
+	directAgg, _ := ParseIPv6("fc00:b::ef01")   // /8 TEID-prefix aggregate
+	directMore, _ := ParseIPv6("fc00:c::1234")  // /16 inside the aggregate (longest-match wins)
 	segsExact, nE, _ := ParseSegments([]string{"fc00:a::abcd"})
 	segsAgg, nA, _ := ParseSegments([]string{"fc00:b::ef01"})
 	segsMore, nM, _ := ParseSegments([]string{"fc00:c::1234"})
@@ -2316,6 +2316,90 @@ func TestXDPProgHMGtp6DTeid(t *testing.T) {
 			t.Logf("SUCCESS: GTP-U/IPv6 (TEID=0x%08X) → SRv6 direct SID %s", tt.teid, net.IP(tt.wantDA[:]))
 		})
 	}
+}
+
+// TestXDPProgHMGtp4DTeidUplinkInstance verifies the uplink instance scoping:
+// two service instances install the SAME {endpoint, TEID} with different
+// direct SIDs, and the ingress interface (via mup_ifindex_instance_map)
+// decides which one a packet resolves against. Also verifies that an
+// instance does NOT fall back to another instance's entries on a miss.
+func TestXDPProgHMGtp4DTeidUplinkInstance(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	const n3Endpoint = "192.0.2.100"
+	const teid = uint32(0x12345678)
+	srcAddr, _ := ParseIPv6("fc00::1")
+
+	h.createMupUplinkGate("192.0.2.0/24")
+
+	directDefault, _ := ParseIPv6("fc00:a::1") // default instance 0
+	directInst1, _ := ParseIPv6("fc00:b::2")   // instance 1
+	segsDefault, nD, _ := ParseSegments([]string{"fc00:a::1"})
+	segsInst1, n1, _ := ParseSegments([]string{"fc00:b::2"})
+
+	// The same {endpoint, TEID} in two instances -- the overlap the instance
+	// key exists to allow.
+	h.createMupUplinkSession(n3Endpoint, teid, 32, srcAddr, segsDefault, nD, MupArgsOffsetNone)
+	h.createMupUplinkSessionInstance(1, n3Endpoint, teid, 32, srcAddr, segsInst1, n1, MupArgsOffsetNone)
+
+	pkt, err := buildGTPUv4Packet(
+		net.ParseIP("10.0.0.1").To4(), net.ParseIP(n3Endpoint).To4(),
+		teid, 9,
+		net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to build GTP-U packet: %v", err)
+	}
+
+	wantDA := func(t *testing.T, outPkt []byte, ret uint32, want [16]byte) {
+		t.Helper()
+		if ret != XDP_PASS && ret != XDP_REDIRECT {
+			t.Fatalf("Expected XDP_PASS or XDP_REDIRECT, got %d", ret)
+		}
+		if len(outPkt) < ethHeaderLen+ipv6HeaderLen {
+			t.Fatalf("Output packet too short: %d bytes", len(outPkt))
+		}
+		if etherType := binary.BigEndian.Uint16(outPkt[12:14]); etherType != 0x86DD {
+			t.Fatalf("Expected EtherType 0x86DD (SRv6 encap), got 0x%04X", etherType)
+		}
+		outerDA := outPkt[ethHeaderLen+24 : ethHeaderLen+40]
+		if !bytes.Equal(outerDA, want[:]) {
+			t.Errorf("Outer DA mismatch: got %x, want %x", outerDA, want)
+		}
+	}
+
+	// The test runner backs the packet with loopback's rx queue, so the
+	// program always sees ingress_ifindex 1 (see xdpMdCtx); the subtests
+	// steer the instance by re-mapping what ifindex 1 resolves to.
+	t.Cleanup(func() { _ = h.mapOps.SetMupUplinkInstances(map[uint32]uint32{}) })
+
+	t.Run("unmapped ifindex resolves the default instance", func(t *testing.T) {
+		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{}); err != nil {
+			t.Fatalf("SetMupUplinkInstances: %v", err)
+		}
+		ret, outPkt := h.run(pkt) // ifindex 1 unmapped -> miss -> instance 0
+		wantDA(t, outPkt, ret, directDefault)
+	})
+
+	t.Run("mapped ifindex resolves its instance", func(t *testing.T) {
+		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{1: 1}); err != nil {
+			t.Fatalf("SetMupUplinkInstances: %v", err)
+		}
+		ret, outPkt := h.runOnIfindex(pkt, 1)
+		wantDA(t, outPkt, ret, directInst1)
+	})
+
+	t.Run("instance miss does not fall back across instances", func(t *testing.T) {
+		// Map lo to instance 2, which has no F-TEID entries: the packet must
+		// pass untouched instead of borrowing another instance's session.
+		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{1: 2}); err != nil {
+			t.Fatalf("SetMupUplinkInstances: %v", err)
+		}
+		ret, _ := h.runOnIfindex(pkt, 1)
+		if ret != XDP_PASS {
+			t.Errorf("Expected XDP_PASS (no session in instance 2), got %d", ret)
+		}
+	})
 }
 
 func TestXDPProgEndMGtp4E(t *testing.T) {

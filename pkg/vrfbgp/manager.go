@@ -211,6 +211,15 @@ type Binding struct {
 	// operator input through ParseMUPGTP4SourcePrefix before storing. It is
 	// a comparable value so binding snapshots copy and compare it as-is.
 	MupGTP4SourcePrefix netip.Prefix
+	// MupUplinkInterfaces lists the access interfaces whose GTP-U uplink
+	// belongs to this binding's MUP service instance. A non-empty list makes
+	// the Manager allocate an uplink instance id for the binding: T2ST
+	// sessions whose RTs this binding imports are installed under that
+	// instance, and the data plane classifies packets to it by ingress
+	// ifindex (mup_ifindex_instance_map). Empty keeps the binding's uplink
+	// state in the default instance 0, since packets could not be classified
+	// to it anyway.
+	MupUplinkInterfaces []string
 }
 
 // Normalize returns a copy of b with Families and the legacy ImportRTs /
@@ -362,16 +371,29 @@ func CanonicalFamilyOrder(families map[bgp.Family]FamilyPolicy) []bgp.Family {
 type Manager struct {
 	mu       sync.RWMutex
 	bindings map[string]Binding
+	// uplinkInstances assigns each binding with MupUplinkInterfaces a stable
+	// uplink instance id (1..). Ids are allocated on Bind, kept across
+	// updates, released on Unbind (or when the interface list empties) and
+	// recycled through freeInstanceIDs — the same pattern as SR Policy ids.
+	// Instance 0 is reserved for the default (unbound) instance.
+	uplinkInstances map[string]uint32
+	freeInstanceIDs []uint32
+	nextInstanceID  uint32
 }
 
 // NewManager returns an empty Manager.
 func NewManager() *Manager {
-	return &Manager{bindings: make(map[string]Binding)}
+	return &Manager{
+		bindings:        make(map[string]Binding),
+		uplinkInstances: make(map[string]uint32),
+		nextInstanceID:  1,
+	}
 }
 
 // Bind registers (or replaces) the binding for b.VRFName. The binding is
 // normalized before storage so the new (Families) and legacy (ImportRTs /
-// ExportRTs) surfaces are kept consistent.
+// ExportRTs) surfaces are kept consistent. An uplink instance id is
+// allocated (or released) to follow MupUplinkInterfaces.
 func (m *Manager) Bind(b Binding) error {
 	if b.VRFName == "" {
 		return ErrEmptyVRFName
@@ -379,6 +401,11 @@ func (m *Manager) Bind(b Binding) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.bindings[b.VRFName] = b.Normalize()
+	if len(b.MupUplinkInterfaces) > 0 {
+		m.allocUplinkInstanceLocked(b.VRFName)
+	} else {
+		m.releaseUplinkInstanceLocked(b.VRFName)
+	}
 	return nil
 }
 
@@ -390,7 +417,63 @@ func (m *Manager) Unbind(vrfName string) error {
 		return fmt.Errorf("%w: %q", ErrBindingNotFound, vrfName)
 	}
 	delete(m.bindings, vrfName)
+	m.releaseUplinkInstanceLocked(vrfName)
 	return nil
+}
+
+// allocUplinkInstanceLocked assigns vrfName an uplink instance id if it does
+// not already hold one. Existing ids are kept so a binding update never
+// re-keys its installed sessions for free.
+func (m *Manager) allocUplinkInstanceLocked(vrfName string) {
+	if _, ok := m.uplinkInstances[vrfName]; ok {
+		return
+	}
+	var id uint32
+	if n := len(m.freeInstanceIDs); n > 0 {
+		id = m.freeInstanceIDs[n-1]
+		m.freeInstanceIDs = m.freeInstanceIDs[:n-1]
+	} else {
+		id = m.nextInstanceID
+		m.nextInstanceID++
+	}
+	m.uplinkInstances[vrfName] = id
+}
+
+// releaseUplinkInstanceLocked returns vrfName's uplink instance id to the
+// free list. A no-op when none is held.
+func (m *Manager) releaseUplinkInstanceLocked(vrfName string) {
+	id, ok := m.uplinkInstances[vrfName]
+	if !ok {
+		return
+	}
+	delete(m.uplinkInstances, vrfName)
+	m.freeInstanceIDs = append(m.freeInstanceIDs, id)
+}
+
+// UplinkInstanceForVRF returns the uplink instance id assigned to vrfName,
+// or 0 (the default instance) when the binding holds no instance.
+func (m *Manager) UplinkInstanceForVRF(vrfName string) uint32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.uplinkInstances[vrfName]
+}
+
+// UplinkInstanceInterfaces returns a snapshot of instance id -> interface
+// names for every binding that holds an uplink instance. The caller (the
+// uplink reconciler) resolves the names to ifindexes and programs
+// mup_ifindex_instance_map from it.
+func (m *Manager) UplinkInstanceInterfaces() map[uint32][]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[uint32][]string, len(m.uplinkInstances))
+	for vrfName, id := range m.uplinkInstances {
+		b, ok := m.bindings[vrfName]
+		if !ok || len(b.MupUplinkInterfaces) == 0 {
+			continue
+		}
+		out[id] = append([]string(nil), b.MupUplinkInterfaces...)
+	}
+	return out
 }
 
 // Get returns the binding for vrfName and ok=false if none is registered.
