@@ -662,7 +662,18 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 					zap.String("interface", name), zap.Uint32("instance", inst), zap.Error(err))
 				continue
 			}
-			mapping[uint32(ifi.Index)] = inst
+			idx := uint32(ifi.Index)
+			// An interface claimed by two bindings is operator misconfiguration;
+			// resolve it deterministically (lowest instance id wins) so the
+			// outcome cannot flap with map iteration order across reconciles.
+			if prev, dup := mapping[idx]; dup {
+				a.logger.Warn("MUP uplink interface claimed by multiple instances; lowest instance id wins",
+					zap.String("interface", name), zap.Uint32("instance_a", prev), zap.Uint32("instance_b", inst))
+				if prev <= inst {
+					continue
+				}
+			}
+			mapping[idx] = inst
 		}
 	}
 	if err := a.mupUplink.SetMupUplinkInstances(mapping); err != nil {
