@@ -1442,12 +1442,22 @@ func (m *MapOperations) DeleteMupUplinkV6(instance uint32, endpoint string, teid
 // ===== MUP Uplink Instance Map Operations =====
 
 // SetMupUplinkInstances replaces the ingress-ifindex -> uplink-instance
-// mapping (mup_ifindex_instance_map) with the given one: stale keys are
-// removed, new and changed ones written. The data plane resolves a packet's
-// uplink instance from this map (miss = default instance 0), so the rewrite
-// is what re-scopes traffic after a VRF binding's mup_uplink_interfaces
-// change.
+// mapping (mup_ifindex_instance_map) with the given one. The data plane
+// resolves a packet's uplink instance from this map (miss = default
+// instance 0), so the rewrite is what re-scopes traffic after a VRF
+// binding's mup_uplink_interfaces change.
+//
+// Make-before-break: the new and changed keys are written FIRST and stale
+// keys removed after, so a failure mid-update never leaves a mapping
+// missing — surviving stale keys keep classifying like the old state did,
+// which still matches the not-yet-re-keyed F-TEID entries (the caller skips
+// the session re-key on error and retries on the next reconcile).
 func (m *MapOperations) SetMupUplinkInstances(mapping map[uint32]uint32) error {
+	for k, v := range mapping {
+		if err := m.objs.MupIfindexInstanceMap.Put(&k, &v); err != nil {
+			return fmt.Errorf("failed to put mup ifindex instance entry: %w", err)
+		}
+	}
 	var (
 		key  uint32
 		val  uint32
@@ -1465,11 +1475,6 @@ func (m *MapOperations) SetMupUplinkInstances(mapping map[uint32]uint32) error {
 	for _, k := range dead {
 		if err := deleteMapKey(m.objs.MupIfindexInstanceMap, &k); err != nil {
 			return fmt.Errorf("failed to delete mup ifindex instance entry: %w", err)
-		}
-	}
-	for k, v := range mapping {
-		if err := m.objs.MupIfindexInstanceMap.Put(&k, &v); err != nil {
-			return fmt.Errorf("failed to put mup ifindex instance entry: %w", err)
 		}
 	}
 	return nil
