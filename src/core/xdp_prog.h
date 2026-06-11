@@ -224,7 +224,13 @@ struct sid_aux_entry {
         struct {
             __u8 args_offset;
             __u8 gtp_v4_src_addr[IPV4_ADDR_LEN];
-            __u8 _pad[3];
+            __u8 v4src_from_outer; // 1 = extract the GTP-U IPv4 source from the
+                                   // outer IPv6 SA at v4src_position (RFC 9433
+                                   // §6.6); 0 = use gtp_v4_src_addr. A separate
+                                   // flag (not a zero sentinel) so position 0
+                                   // stays expressible.
+            __u8 v4src_position;   // bit offset 0..96 into the outer IPv6 SA
+            __u8 _pad;
         } gtp4e;                                           // 8 bytes
 
         // End.M.GTP6.D: GTP-U IPv6 decode

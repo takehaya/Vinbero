@@ -258,3 +258,65 @@ func TestProtoToEntry_ActionUint8Range(t *testing.T) {
 		}
 	})
 }
+
+// TestProtoToEntry_Gtp4eSrcConfig verifies the END_M_GTP4_E source rules:
+// exactly one of gtp_v4_src_addr / gtp_v4_src_position must be set, the
+// position is bounded at 96 (32 bits of the outer IPv6 SA must remain), and
+// position 0 is accepted (presence lives in proto3 optional, not in a zero
+// sentinel).
+func TestProtoToEntry_Gtp4eSrcConfig(t *testing.T) {
+	s := newProtoToEntryServer()
+	pos := func(v uint32) *uint32 { return &v }
+
+	cases := []struct {
+		name    string
+		addr    string
+		pos     *uint32
+		wantErr string // substring; empty = expect success
+	}{
+		{name: "addr only", addr: "172.16.0.254"},
+		{name: "position only", pos: pos(64)},
+		{name: "position zero", pos: pos(0)},
+		{name: "position max", pos: pos(96)},
+		{name: "neither", wantErr: "requires gtp_v4_src_addr or gtp_v4_src_position"},
+		{name: "both", addr: "172.16.0.254", pos: pos(64), wantErr: "mutually exclusive"},
+		{name: "position out of range", pos: pos(97), wantErr: "out of range"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sf := &v1.SidFunction{
+				Action:           v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E,
+				TriggerPrefix:    "fc00:1::/56",
+				ArgsOffset:       7,
+				GtpV4SrcAddr:     tc.addr,
+				GtpV4SrcPosition: tc.pos,
+			}
+			_, aux, err := s.protoToEntry(sf)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			gotOff, gotSrc, fromOuter, gotPos := bpf.SidAuxGtp4eData(aux)
+			if gotOff != 7 {
+				t.Errorf("args_offset: got %d, want 7", gotOff)
+			}
+			if tc.pos != nil {
+				if !fromOuter || uint32(gotPos) != *tc.pos {
+					t.Errorf("v4src: got fromOuter=%v pos=%d, want true %d", fromOuter, gotPos, *tc.pos)
+				}
+			} else {
+				if fromOuter {
+					t.Errorf("v4src: got fromOuter=true, want false for static addr")
+				}
+				if got := bpf.FormatIPv4Optional(gotSrc); got != tc.addr {
+					t.Errorf("gtp_v4_src_addr: got %q, want %q", got, tc.addr)
+				}
+			}
+		})
+	}
+}

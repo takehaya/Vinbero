@@ -59,6 +59,15 @@ message SidFunction {
   // trigger_prefix, so List / Get see the same /128 prefix regardless of
   // how the entry was originally created.
   optional LocatorRef locator_ref = 21;
+
+  // End.M.GTP4.E: extract the GTP-U outer IPv4 source from the outer IPv6
+  // source address at this bit position (0..96, RFC 9433 §6.6) instead of
+  // using the static gtp_v4_src_addr. The peer that embeds the source (e.g.
+  // a MUP-PE with mup_gtp4_source_prefix) must use the same position (its
+  // prefix length). Presence-aware so position 0 stays expressible; exactly
+  // one of gtp_v4_src_addr / gtp_v4_src_position must be set for
+  // END_M_GTP4_E.
+  optional uint32 gtp_v4_src_position = 22;
 }
 
 message SidFunctionCreateRequest {
