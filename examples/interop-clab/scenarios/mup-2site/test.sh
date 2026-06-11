@@ -54,11 +54,14 @@ fi
 # RFC 9433 §6.6 source embed: the binding for RD 65100:1 carries
 # mup_gtp4_source_prefix fd00:d::/64 and the same-RD T2ST endpoint
 # ($N3 = ac10:00fe) is the UPF anchor, so the downlink headend SRC ADDR must
-# read fd00:d::ac10:fe:0:0 -- not the plain locator-derived encap source.
-if retry bash -c "docker exec $PD vbctl headend-v4 list 2>/dev/null | grep -qi 'ac10:fe'"; then
-    ok "mup-pe downlink outer source embeds the UPF N3 anchor ($N3 at v4src position 64)"
+# read exactly fd00:d::ac10:fe:0:0 -- not the plain locator-derived encap
+# source.
+EMBED_SRC="fd00:d::ac10:fe:0:0"
+if retry bash -c "docker exec $PD vbctl headend-v4 list 2>/dev/null | grep -qF '$EMBED_SRC'"; then
+    ok "mup-pe downlink outer source embeds the UPF N3 anchor ($N3 at v4src position 64: $EMBED_SRC)"
 else
-    ng "mup-pe downlink outer source does not embed the UPF anchor"; dexec "$PD" vbctl headend-v4 list || true
+    ng "mup-pe downlink outer source does not embed the UPF anchor (expected SRC ADDR $EMBED_SRC)"
+    dexec "$PD" vbctl headend-v4 list || true
 fi
 if retry bash -c "docker exec $PA grep -q 'MUP DSD segment discovery' /var/log/vinberod.log"; then
     ok "mup-gw received mup-pe's DSD (direct segment discovery)"
@@ -103,8 +106,10 @@ dexec "$DN" ping -c 5 -i 0.5 -W 2 "$UE" >/dev/null 2>&1 &
 wait "$dpid" 2>/dev/null
 # The GTP-U must be sourced from the UPF N3 anchor and addressed to the gNB
 # endpoint, not just be any UDP/2152 packet. Match the source IP only, not the
-# UDP source port (the GTP-U source port is implementation-defined).
-if grep -qE "$N3\.[0-9]+ > 172\.16\.0\.1\.2152" "$dcap"; then
+# UDP source port (the GTP-U source port is implementation-defined). Escape
+# the dots so they stay literal in the regex.
+N3_RE=${N3//./\\.}
+if grep -qE "$N3_RE\.[0-9]+ > 172\.16\.0\.1\.2152" "$dcap"; then
     ok "gNB received downlink GTP-U from the UPF anchor ($N3) for the UE session"
     sed 's/^/      /' "$dcap" | head -2
 else
