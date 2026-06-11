@@ -677,7 +677,12 @@ func (a *Applier) ReconcileMUPUplinkInstances() {
 		}
 	}
 	if err := a.mupUplink.SetMupUplinkInstances(mapping); err != nil {
-		a.logger.Error("program MUP uplink instance map", zap.Error(err))
+		// Without the classification rewrite, re-keying the F-TEID entries
+		// would split brain the two sides (packets still classify against the
+		// old instances). Keep the sessions where they are; the next binding
+		// mutation re-runs the whole reconcile.
+		a.logger.Error("program MUP uplink instance map (skipping session re-key)", zap.Error(err))
+		return
 	}
 
 	a.mupMu.Lock()
