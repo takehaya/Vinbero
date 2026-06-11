@@ -216,7 +216,8 @@ static __always_inline int do_h_m_gtp4_d(
 // do_h_m_gtp4_d_teid: F-TEID-keyed H.M.GTP4.D (BGP MUP T2ST,
 // draft-mpmz-bess-mup-safi). `entry` is the gate entry from headend_v4_map on
 // the N3/UPF endpoint prefix; its segment list is unused. The real per-session
-// direct SID is resolved from mup_uplink_v4_map keyed on {outer dst, TEID}.
+// direct SID is resolved from mup_uplink_v4_map keyed on
+// {instance, outer dst, TEID-prefix}.
 // patch_args follows the resolved entry's args_offset sentinel: a plain direct
 // (End.DT4) SID sets MUP_ARGS_OFFSET_NONE and skips Args.Mob.Session patching.
 static __always_inline int do_h_m_gtp4_d_teid(
