@@ -378,16 +378,21 @@ func configToBinding(b config.VrfBindingConfig) (vrfbgp.Binding, error) {
 	if err != nil {
 		return vrfbgp.Binding{}, err
 	}
+	mupSrc, err := vrfbgp.ParseMUPGTP4SourcePrefix(b.MupGTP4SourcePrefix, b.RD)
+	if err != nil {
+		return vrfbgp.Binding{}, err
+	}
 	return vrfbgp.Binding{
-		VRFName:        b.VRFName,
-		RD:             b.RD,
-		ImportRTs:      b.ImportRTs,
-		ExportRTs:      b.ExportRTs,
-		Redistribute:   b.Redistribute,
-		MaxPrefixes:    b.MaxPrefixes,
-		DefaultLocator: b.DefaultLocator,
-		BDID:           uint16(b.BDID),
-		Families:       fams,
+		VRFName:             b.VRFName,
+		RD:                  b.RD,
+		ImportRTs:           b.ImportRTs,
+		ExportRTs:           b.ExportRTs,
+		Redistribute:        b.Redistribute,
+		MaxPrefixes:         b.MaxPrefixes,
+		DefaultLocator:      b.DefaultLocator,
+		BDID:                uint16(b.BDID),
+		Families:            fams,
+		MupGTP4SourcePrefix: mupSrc,
 	}, nil
 }
 

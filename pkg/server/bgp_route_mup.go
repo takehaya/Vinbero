@@ -149,6 +149,7 @@ func (s *BgpRouteServer) BgpAdvertiseMup(
 			continue
 		}
 		mr.RTs = fillMUPExportRTs(mr, s.vrfBindings)
+		mr.SIDStructure = fillMUPSIDStructure(mr, s.locators)
 		if err := pushMUPRoute(ctx, s.mup, mr); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: mupRouteID(r), Reason: err.Error()})
 			continue

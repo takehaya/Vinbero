@@ -228,6 +228,29 @@ bgp:
 	}
 }
 
+// TestLoad_VrfBindingMupGTP4SourcePrefix pins that the per-binding RFC 9433
+// §6.6 source prefix loads from YAML. Load does not validate the prefix
+// syntax (that happens at the vrfbgp boundary on startup, like RT strings).
+func TestLoad_VrfBindingMupGTP4SourcePrefix(t *testing.T) {
+	const y = `
+bgp:
+  vrf_bindings:
+    - vrf_name: mup1
+      rd: "65001:1"
+      mup_gtp4_source_prefix: "fd00:d::/64"
+`
+	cfg, err := Load(y)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.BGP.VrfBindings) != 1 {
+		t.Fatalf("VrfBindings len = %d, want 1", len(cfg.BGP.VrfBindings))
+	}
+	if got := cfg.BGP.VrfBindings[0].MupGTP4SourcePrefix; got != "fd00:d::/64" {
+		t.Errorf("MupGTP4SourcePrefix = %q, want %q", got, "fd00:d::/64")
+	}
+}
+
 // TestLoad_VrfBindingUnknownFamilyRejected pins that a typoed family name
 // (e.g. "vpnv8") fails Load rather than silently dropping the family.
 func TestLoad_VrfBindingUnknownFamilyRejected(t *testing.T) {

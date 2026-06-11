@@ -127,6 +127,36 @@ func ValidateFamily(fam string) error {
 	return fmt.Errorf("unknown family %q (want vpnv4/vpnv6/evpn/mup_ipv4/mup_ipv6)", fam)
 }
 
+// ParseMUPGTP4SourcePrefix parses and validates a binding's GTP4 downlink
+// source prefix (RFC 9433 §6.6). The prefix must be IPv6-native and /96 or
+// shorter so the 32-bit IPv4 anchor fits right after the prefix bits, and it
+// requires the binding's rd to be set: a received MUP route resolves its
+// binding (and so this prefix) by RD, so a prefix on an RD-less binding
+// could never take effect. Empty input returns the zero Prefix (embedding
+// off). The result is Masked() so two spellings of the same prefix compare
+// equal downstream (the applier and the change-detection predicate compare
+// Prefix values directly). Shared by the YAML config loader and the RPC
+// boundary so the constraints cannot drift.
+func ParseMUPGTP4SourcePrefix(s, rd string) (netip.Prefix, error) {
+	if s == "" {
+		return netip.Prefix{}, nil
+	}
+	pfx, err := netip.ParsePrefix(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("mup_gtp4_source_prefix %q: %w", s, err)
+	}
+	if !pfx.Addr().Is6() || pfx.Addr().Is4In6() {
+		return netip.Prefix{}, fmt.Errorf("mup_gtp4_source_prefix %q: must be an IPv6 prefix", s)
+	}
+	if pfx.Bits() > 96 {
+		return netip.Prefix{}, fmt.Errorf("mup_gtp4_source_prefix %q: prefix length %d leaves no room for the 32-bit IPv4 anchor (max /96)", s, pfx.Bits())
+	}
+	if rd == "" {
+		return netip.Prefix{}, fmt.Errorf("mup_gtp4_source_prefix requires rd (MUP routes resolve the binding by RD)")
+	}
+	return pfx.Masked(), nil
+}
+
 // RouteTarget is one route-target entry under one address family.
 type RouteTarget struct {
 	RT        string
@@ -173,6 +203,14 @@ type Binding struct {
 	// derives it from the legacy ImportRTs / ExportRTs when callers do not
 	// set it explicitly (L3VPN-only when BDID == 0, EVPN when BDID != 0).
 	Families map[bgp.Family]FamilyPolicy
+	// MupGTP4SourcePrefix turns on RFC 9433 §6.6 source-address embedding
+	// for GTP4 downlink (T1ST) installs received under this binding's RD:
+	// the downlink outer IPv6 source becomes this prefix with the session's
+	// UPF IPv4 anchor embedded right after the prefix bits. The zero Prefix
+	// means off. Always IPv6-native, /96 or shorter, and Masked(); parse
+	// operator input through ParseMUPGTP4SourcePrefix before storing. It is
+	// a comparable value so binding snapshots copy and compare it as-is.
+	MupGTP4SourcePrefix netip.Prefix
 }
 
 // Normalize returns a copy of b with Families and the legacy ImportRTs /

@@ -35,6 +35,39 @@ func TestManager_AddDuplicateRejected(t *testing.T) {
 	}
 }
 
+// FindByContaining must resolve nested locator prefixes by longest match in
+// either registration order, not by map iteration order: a SID under the
+// /64 belongs to the /64's layout even though the /48 also contains it.
+func TestManager_FindByContaining_LongestMatch(t *testing.T) {
+	wide := makeClassic48(t) // LOC1 fd00:1:1::/48
+	narrow := Locator{
+		Name: "LOC2", Prefix: netip.MustParsePrefix("fd00:1:1:1::/64"),
+		BlockLen: 48, NodeLen: 16, FunctionLen: 16, ArgumentLen: 48,
+		Behavior:          BehaviorClassic,
+		FunctionAutoStart: 0x10, FunctionAutoEnd: 0xFFFE,
+	}
+	sid := netip.MustParseAddr("fd00:1:1:1::100")
+	for _, order := range [][]Locator{{wide, narrow}, {narrow, wide}} {
+		m := NewManager()
+		for i := range order {
+			if err := m.Add(&order[i]); err != nil {
+				t.Fatalf("Add(%s): %v", order[i].Name, err)
+			}
+		}
+		got, ok := m.FindByContaining(sid)
+		if !ok || got.Name != "LOC2" {
+			t.Errorf("FindByContaining(%s) = (%+v, %v), want the /64 LOC2", sid, got, ok)
+		}
+	}
+	m := NewManager()
+	if err := m.Add(&wide); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, ok := m.FindByContaining(netip.MustParseAddr("fd00:2::1")); ok {
+		t.Error("FindByContaining outside every locator must be ok=false")
+	}
+}
+
 func TestManager_DeleteUnknown(t *testing.T) {
 	m := NewManager()
 	if err := m.Delete("nope", false); !errors.Is(err, ErrLocatorNotFound) {

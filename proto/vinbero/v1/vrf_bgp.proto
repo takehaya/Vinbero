@@ -76,6 +76,14 @@ message VrfBgpBinding {
   // Primary form. Maps family name to its per-family RT policy.
   // family key is one of: "vpnv4", "vpnv6", "evpn", "mup_ipv4", "mup_ipv6".
   map<string, VrfBgpFamily> families = 9;
+
+  // RFC 9433 6.6 GTP4 downlink source-embed prefix for MUP T1ST routes
+  // received under this binding's rd: the downlink outer IPv6 source
+  // becomes this prefix with the session's UPF IPv4 anchor embedded
+  // right after the prefix bits. IPv6 prefix, /96 or shorter; empty
+  // keeps the plain locator-derived encap source. Requires rd (MUP
+  // routes resolve the binding by RD).
+  string mup_gtp4_source_prefix = 10;
 }
 
 // VrfBgpFamily is one AF's policy under a binding. route_targets is

@@ -37,6 +37,7 @@ type Server struct {
 	evpnCoord    *EvpnCoordinator           // EVPN RT2/RT3 BD lifecycle (device + binding axes); nil when off
 	evpnES       EvpnEsHook                 // EVPN RT4 auto-advertise ES hook; nil when off
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
+	mupSrc       MupSrcReconciler           // MUP GTP4 source-embed reconcile hook; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
@@ -73,6 +74,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 	if srPolicyApplier != nil {
 		s.srPolicyCtrl = srPolicyApplier
 		s.esReElectDF = srPolicyApplier.ReelectDF
+		s.mupSrc = srPolicyApplier
 	}
 	return s
 }
@@ -101,7 +103,7 @@ func (s *Server) Setup() {
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
 
 	// VrfBgp service (VRF <-> BGP route-target bindings).
-	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord)
+	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc)
 	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
@@ -109,7 +111,7 @@ func (s *Server) Setup() {
 	// BgpRoute service (operator-explicit BGP advertise / withdraw). The
 	// VRF binding registry lets BgpAdvertiseMup auto-fill an empty RTs
 	// list from the binding whose RD matches the route, mirroring MupCreate.
-	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv, s.evpnAdv, s.mupAdv, s.vrfBgpMgr)
+	bgpRouteServer := NewBgpRouteServer(s.advertiser, s.srPolicyAdv, s.evpnAdv, s.mupAdv, s.vrfBgpMgr, s.locatorMgr)
 	bgpRoutePath, bgpRouteHandler := vinberov1connect.NewBgpRouteServiceHandler(bgpRouteServer)
 	s.mux.Handle(bgpRoutePath, bgpRouteHandler)
 	s.logger.Info("Registered BgpRouteService", zap.String("path", bgpRoutePath))
@@ -127,7 +129,7 @@ func (s *Server) Setup() {
 	// makes the RPCs return FailedPrecondition. The VRF binding registry
 	// lets MupCreate/Update auto-fill an empty RTs list from the binding
 	// whose RD matches.
-	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.MupMaxRoutes, s.vrfBgpMgr)
+	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.MupMaxRoutes, s.vrfBgpMgr, s.locatorMgr)
 	mupPath, mupHandler := vinberov1connect.NewMupServiceHandler(mupServer)
 	s.mux.Handle(mupPath, mupHandler)
 	s.logger.Info("Registered MupService", zap.String("path", mupPath))

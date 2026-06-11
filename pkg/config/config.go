@@ -118,6 +118,18 @@ type VrfBindingConfig struct {
 	// "mup_ipv4" / "mup_ipv6". When empty, the legacy ImportRTs / ExportRTs
 	// are expanded into Families on Load (L3VPN if bd_id == 0, EVPN otherwise).
 	Families map[string]FamilyConfig `yaml:"families,omitempty"`
+	// MupGTP4SourcePrefix enables RFC 9433 §6.6 source-address embedding for
+	// MUP GTP4 downlink (T1ST) installs received under this binding's RD:
+	// the downlink outer IPv6 source becomes this prefix with the session's
+	// UPF IPv4 anchor (the same-RD T2ST endpoint) embedded right after the
+	// prefix bits, so the peer GW's End.M.GTP4.E can extract it as the GTP-U
+	// outer IPv4 source (its v4src_position equals this prefix length). The
+	// prefix length must leave room for the 32-bit IPv4 address (<= 96);
+	// "::/0" embeds at position 0. Empty keeps the plain locator-derived
+	// encap source. Requires rd: a received MUP route resolves its binding
+	// (and so this prefix) by RD. Validated at daemon startup via
+	// vrfbgp.ParseMUPGTP4SourcePrefix.
+	MupGTP4SourcePrefix string `yaml:"mup_gtp4_source_prefix,omitempty"`
 }
 
 // FamilyConfig is one address family's policy under a VRF binding.

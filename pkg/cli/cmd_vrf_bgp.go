@@ -43,6 +43,7 @@ func vrfBgpBindFlags(requireVRF bool) []cli.Flag {
 		&cli.StringFlag{Name: "rd", Usage: "Route distinguisher for auto-advertised local prefixes (e.g. 65100:200)"},
 		&cli.StringFlag{Name: "redistribute", Usage: "Auto-advertise protocols (comma-separated: connected,static)"},
 		&cli.UintFlag{Name: "max-prefixes", Usage: "Cap on auto-advertised prefixes for this VRF (0 = unlimited)"},
+		&cli.StringFlag{Name: "mup-gtp4-source-prefix", Usage: "RFC 9433 6.6 GTP4 downlink source-embed prefix for this VRF's RD (IPv6, /96 or shorter; empty = off, requires --rd)"},
 	}
 }
 
@@ -64,15 +65,16 @@ func buildBindingFromFlags(c *cli.Context) (*v1.VrfBgpBinding, error) {
 		return nil, err
 	}
 	return &v1.VrfBgpBinding{
-		VrfName:        c.String("vrf"),
-		ImportRts:      csvFlag(c.String("import-rts")),
-		ExportRts:      csvFlag(c.String("export-rts")),
-		DefaultLocator: c.String("default-locator"),
-		BdId:           uint32(bdID),
-		Rd:             c.String("rd"),
-		Redistribute:   csvFlag(c.String("redistribute")),
-		MaxPrefixes:    uint32(maxPfx),
-		Families:       families,
+		VrfName:             c.String("vrf"),
+		ImportRts:           csvFlag(c.String("import-rts")),
+		ExportRts:           csvFlag(c.String("export-rts")),
+		DefaultLocator:      c.String("default-locator"),
+		BdId:                uint32(bdID),
+		Rd:                  c.String("rd"),
+		Redistribute:        csvFlag(c.String("redistribute")),
+		MaxPrefixes:         uint32(maxPfx),
+		Families:            families,
+		MupGtp4SourcePrefix: c.String("mup-gtp4-source-prefix"),
 	}, nil
 }
 
@@ -228,6 +230,10 @@ func preservePriorBindingFields(c *cli.Context, b *v1.VrfBgpBinding, clients *Cl
 	}
 	if !c.IsSet("max-prefixes") {
 		b.MaxPrefixes = prev.GetMaxPrefixes()
+	}
+	if !c.IsSet("mup-gtp4-source-prefix") {
+		// Explicit clear stays possible: --mup-gtp4-source-prefix "" is IsSet.
+		b.MupGtp4SourcePrefix = prev.GetMupGtp4SourcePrefix()
 	}
 	if !c.IsSet("rt") && !c.IsSet("import-rts") && !c.IsSet("export-rts") {
 		b.Families = prev.GetFamilies()
