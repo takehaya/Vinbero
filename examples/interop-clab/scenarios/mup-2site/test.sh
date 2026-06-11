@@ -58,7 +58,7 @@ fi
 # read exactly fd00:d::ac10:fe:0:0 -- not the plain locator-derived encap
 # source.
 EMBED_SRC="fd00:d::ac10:fe:0:0"
-if retry bash -c "docker exec $PD vbctl headend-v4 list 2>/dev/null | grep -qF '$EMBED_SRC'"; then
+if retry bash -c "docker exec $PD vbctl headend-v4 list 2>/dev/null | grep -F '$UE/32' | grep -qF '$EMBED_SRC'"; then
     ok "mup-pe downlink outer source embeds the UPF N3 anchor ($N3 at v4src position 64: $EMBED_SRC)"
 else
     ng "mup-pe downlink outer source does not embed the UPF anchor (expected SRC ADDR $EMBED_SRC)"
@@ -110,7 +110,8 @@ wait "$dpid" 2>/dev/null
 # UDP source port (the GTP-U source port is implementation-defined). Escape
 # the dots so they stay literal in the regex.
 N3_RE=${N3//./\\.}
-if grep -qE "$N3_RE\.[0-9]+ > 172\.16\.0\.1\.2152" "$dcap"; then
+GNB_RE=${GNB_IP//./\\.}
+if grep -qE "$N3_RE\.[0-9]+ > $GNB_RE\.2152" "$dcap"; then
     ok "gNB received downlink GTP-U from the UPF anchor ($N3) for the UE session"
     sed 's/^/      /' "$dcap" | head -2
 else
