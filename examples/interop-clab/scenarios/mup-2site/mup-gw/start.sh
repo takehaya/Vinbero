@@ -36,13 +36,18 @@ echo $! > /var/run/vinberod.pid
 
 for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && break; sleep 1; done
 
-# Source locator = this PE's SRv6 block (also the interwork segment block).
+# Source locator = this gateway's SRv6 block (also the interwork segment block).
 /usr/local/bin/vbctl locator create --name LOC1 --prefix fd00:a::/48 \
     --block-len 32 --node-len 16 --function-len 16 --argument-len 64 --behavior classic || true
 
 # Interwork segment: End.M.GTP4.E. SRv6 packets to fd00:a::/56 are decapped and
 # re-encapsulated as GTP-U toward the gNB, reading gNB/TEID/QFI from the SID's
 # Args.Mob.Session at offset 7. /56 because bytes 7-15 carry the per-session args.
+# --gtp-v4-src-addr is the GTP-U outer IPv4 source toward the gNB and must be
+# the session's UPF N3 anchor (the T2ST endpoint). Vinbero's End.M.GTP4.E reads
+# the source from this aux config; an RFC 9433 §6.6 receiver would instead
+# extract it from the outer IPv6 source, where mup-pe embeds the same anchor
+# via its per-VRF mup_gtp4_source_prefix (asserted in test.sh).
 /usr/local/bin/vbctl sid create \
     --trigger-prefix fd00:a::/56 --action END_M_GTP4_E \
     --gtp-v4-src-addr 172.16.0.254 --args-offset 7 || true
@@ -52,9 +57,13 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 # End.M.GTP4.E interwork segment (SID fd00:a:0:1::) reachable for the gNB N3
 # block. The controller's (SID-less) T1ST resolves its interwork SID from this
 # ISD by gNB endpoint, so the SID is carried here, not on the T1ST.
+# The RD is this gateway's own (per-advertiser, RFC 4364 §4.2), distinct from
+# the controller's session RD 65100:1; VPN membership is the route target
+# (100:2000, the downlink VPN shared with the T1ST), so the PE's resolution
+# crosses RDs and is RT-scoped.
 sleep 6
 /usr/local/bin/vbctl mup create --route-type isd \
-    --rd 65100:1 --prefix 172.16.0.0/24 \
+    --rd 65100:11 --prefix 172.16.0.0/24 \
     --route-targets 100:2000 --sid fd00:a:0:1:: --next-hop 2001:db8:ff::a || true
 echo "[start.sh] mup-gw originated ISD; local MUP table:"
 /usr/local/bin/vbctl mup list || true
