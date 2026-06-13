@@ -35,6 +35,10 @@ bgp:
     router_id: "10.255.0.2"
     listen_port: 179
     source_locator: "LOC1"
+  # The VRF binding (import RTs + the RFC 9433 §6.6 source-embed prefix) is
+  # created at runtime in start.sh via `vbctl vrf-bgp bind`, the operator
+  # surface; a declarative `vrf_bindings:` block here would express the same
+  # policy at boot.
   peers:
     - neighbor: "2001:db8:ff::c"   # mup-c (controller dials us)
       peer_asn: 65100
