@@ -89,8 +89,8 @@ func NewMupServer(advertiser bgp.MUPController, nextHop string, maxRoutes uint32
 // fillMUPSIDStructure derives the SRv6 SID Structure (RFC 9252 §3.2.1.1) from
 // the locator that owns mr.SRv6SID. Without this the receiver defaults the
 // locator length to 0, registers BGP NHT under ::/0, and the path stays
-// NEXT_HOP_UNREACHABLE; ArcOS interop hit this on every Vinbero DSD. Operator-
-// supplied non-zero structures win, so an explicit override is still possible.
+// NEXT_HOP_UNREACHABLE on every DSD. Operator-supplied non-zero structures win,
+// so an explicit override is still possible.
 func fillMUPSIDStructure(mr bgp.MUPRoute, locators *locator.Manager) bgp.SIDStructure {
 	if !mr.SIDStructure.IsZero() || locators == nil || mr.SRv6SID == "" {
 		return mr.SIDStructure

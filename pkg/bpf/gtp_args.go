@@ -10,12 +10,14 @@ import (
 // byte offset and returns the resulting SRv6 SID string. baseSID supplies the
 // Locator:Function; bytes [offset, offset+9) are overwritten with
 //
-//	[gNB IPv4 (4)] [TEID big-endian (4)] [QFI&0x3F | RQI<<6 (1)]
+//	[gNB IPv4 (4)] [QFI<<2 | RQI<<1 (1)] [TEID big-endian (4)]
 //
-// This is the userspace counterpart of args_mob_encode_gtp4 in
-// src/core/srv6_gtp.h and is byte-for-byte identical to it, so a SID composed
-// here decodes correctly in End.M.GTP4.E (which reads these bytes back from the
-// SID destination address). The BGP MUP downlink applier uses it to turn a
+// RFC 9433 §6.1 lays Args.Mob.Session out QFI-before-TEID with the QFI in the
+// high 6 bits, which is what RFC 9433 implementations emit and expect. This is
+// byte-for-byte identical to the SID layout the BPF data plane reads/writes
+// (src/core/srv6_gtp.h), so a SID composed here decodes correctly in
+// End.M.GTP4.E -- and, crucially, cross-decodes with a peer implementation's
+// End.M.GTP4.E. The BGP MUP downlink applier uses it to turn a
 // received T1ST (UE prefix + TEID + QFI + gNB endpoint) plus the interwork
 // segment's locator:function into the headend's encapsulation SID.
 //
@@ -44,8 +46,8 @@ func ComposeGTP4ArgsSID(baseSID string, offset uint8, gnbIPv4 string, teid uint3
 	sid := base.As16()
 	v4 := gnb.As4()
 	copy(sid[offset:offset+4], v4[:])
-	binary.BigEndian.PutUint32(sid[offset+4:offset+8], teid)
-	sid[offset+8] = (qfi & 0x3F) | ((rqi & 0x01) << 6)
+	sid[offset+4] = ((qfi & 0x3F) << 2) | ((rqi & 0x01) << 1)
+	binary.BigEndian.PutUint32(sid[offset+5:offset+9], teid)
 	return netip.AddrFrom16(sid).String(), nil
 }
 
@@ -53,13 +55,14 @@ func ComposeGTP4ArgsSID(baseSID string, offset uint8, gnbIPv4 string, teid uint3
 // byte offset and returns the resulting SRv6 SID string. baseSID supplies the
 // Locator:Function; bytes [offset, offset+5) are overwritten with
 //
-//	[TEID big-endian (4)] [QFI&0x3F | RQI<<6 (1)]
+//	[QFI<<2 | RQI<<1 (1)] [TEID big-endian (4)]
 //
 // Unlike GTP4 the gNB endpoint is NOT carried in the SID (a 16-byte IPv6 address
 // would not fit the argument space); End.M.GTP6.E reads the outer IPv6 src/dst
-// from its auxiliary entry instead, so the per-session SID encodes only TEID and
-// QFI. This is the userspace counterpart of args_mob_encode_gtp6 in
-// src/core/srv6_gtp.h and byte-for-byte identical to it.
+// from its auxiliary entry instead, so the per-session SID encodes only QFI and
+// TEID, in the RFC 9433 §6.1 order (QFI byte first). This is byte-for-byte
+// identical to the SID layout the BPF data plane reads/writes
+// (src/core/srv6_gtp.h).
 //
 // offset must be <= 11: the 5-byte Args.Mob.Session has to fit within the
 // 16-byte SID. A larger offset or a non-IPv6 base returns an error.
@@ -76,7 +79,7 @@ func ComposeGTP6ArgsSID(baseSID string, offset uint8, teid uint32, qfi, rqi uint
 	}
 
 	sid := base.As16()
-	binary.BigEndian.PutUint32(sid[offset:offset+4], teid)
-	sid[offset+4] = (qfi & 0x3F) | ((rqi & 0x01) << 6)
+	sid[offset] = ((qfi & 0x3F) << 2) | ((rqi & 0x01) << 1)
+	binary.BigEndian.PutUint32(sid[offset+1:offset+5], teid)
 	return netip.AddrFrom16(sid).String(), nil
 }

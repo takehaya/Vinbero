@@ -419,8 +419,8 @@ func TestMupServer_BindingWithoutMUPFamilyKeepsEmptyRTs(t *testing.T) {
 
 // When the SID belongs to a registered locator, MupCreate populates the
 // SRv6 SID Structure on the advertised route so the receiver can derive the
-// locator-block length. Without this third parties (ArcOS) default it to 0
-// and leave the DSD NEXT_HOP_UNREACHABLE through BGP NHT.
+// locator-block length. Without this a receiver defaults it to 0 and leaves
+// the DSD NEXT_HOP_UNREACHABLE through BGP NHT.
 func TestMupServer_FillsSIDStructureFromLocator(t *testing.T) {
 	adv := &fakeMUPController{}
 	locMgr := locator.NewManager()

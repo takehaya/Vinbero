@@ -66,14 +66,16 @@ static __always_inline int gtp4e_parse_args(
     __u8 args[9];
     __builtin_memcpy(args, da_ptr, 9);
 
+    // RFC 9433 GTP4 Args.Mob.Session: [IPv4 DA (4)][QFI|R|U (1)][TEID (4)].
+    // QFI is the high 6 bits of args[4]; the TEID follows it (see srv6_gtp.h).
     __builtin_memcpy(out->gtp4_dst, args, 4);
 
-    __be32 teid_be;
-    __builtin_memcpy(&teid_be, args + 4, 4);
-    out->teid = bpf_ntohl(teid_be);
+    out->qfi = DECODE_QFI(args[4]);
+    out->rqi = DECODE_RQI(args[4]);
 
-    out->qfi = args[8] & 0x3F;
-    out->rqi = (args[8] >> 6) & 0x01;
+    __be32 teid_be;
+    __builtin_memcpy(&teid_be, args + 5, 4);
+    out->teid = bpf_ntohl(teid_be);
 
     if (aux->gtp4e.v4src_from_outer) {
         __u8 pos = aux->gtp4e.v4src_position;

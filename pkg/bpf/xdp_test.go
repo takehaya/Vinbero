@@ -2129,14 +2129,14 @@ func TestXDPProgHMGtp4D(t *testing.T) {
 			daStart := ethHeaderLen + 24 // IPv6 daddr
 			if len(outPkt) >= daStart+16 {
 				da := outPkt[daStart : daStart+16]
-				// At offset 7: [IPv4Dst(4)][TEID(4)][QFI|R|U(1)]
-				gotTEID := binary.BigEndian.Uint32(da[7+4 : 7+8])
-				if gotTEID != tt.teid {
-					t.Errorf("TEID in DA mismatch: expected 0x%08X, got 0x%08X", tt.teid, gotTEID)
-				}
-				gotQFI := da[7+8] & 0x3F
+				// At offset 7 (RFC 9433 §6.1): [IPv4Dst(4)][QFI|R|U(1)][TEID(4)]
+				gotQFI := (da[7+4] >> 2) & 0x3F
 				if gotQFI != tt.qfi {
 					t.Errorf("QFI in DA mismatch: expected %d, got %d", tt.qfi, gotQFI)
+				}
+				gotTEID := binary.BigEndian.Uint32(da[7+5 : 7+9])
+				if gotTEID != tt.teid {
+					t.Errorf("TEID in DA mismatch: expected 0x%08X, got 0x%08X", tt.teid, gotTEID)
 				}
 			}
 
@@ -2426,13 +2426,14 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 			srcIP := net.ParseIP("fc00::1")
 			dstBytes := net.ParseIP("fc00:1::1").To16()
 
-			// Encode Args.Mob.Session at offset 7
+			// Encode Args.Mob.Session at offset 7 (RFC 9433 §6.1):
+			// [IPv4Dst(4)][QFI|R|U(1)][TEID(4)], QFI in the high 6 bits.
 			copy(dstBytes[7:11], tt.ipv4Dst[:])
-			dstBytes[11] = byte(tt.teid >> 24)
-			dstBytes[12] = byte(tt.teid >> 16)
-			dstBytes[13] = byte(tt.teid >> 8)
-			dstBytes[14] = byte(tt.teid)
-			dstBytes[15] = tt.qfi
+			dstBytes[11] = (tt.qfi & 0x3F) << 2
+			dstBytes[12] = byte(tt.teid >> 24)
+			dstBytes[13] = byte(tt.teid >> 16)
+			dstBytes[14] = byte(tt.teid >> 8)
+			dstBytes[15] = byte(tt.teid)
 
 			segments := []net.IP{net.IP(dstBytes)}
 			pkt, err := buildSRv6PacketWithInnerIPv4(srcIP, net.IP(dstBytes), segments, 0,
@@ -2489,6 +2490,16 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 					t.Errorf("TEID mismatch: got 0x%08X, want 0x%08X", gotTEID, tt.teid)
 				}
 
+				// PDU Session Container QFI octet (3GPP TS 38.415: QFI in the low
+				// 6 bits) -- distinct from the SRv6 Args.Mob.Session byte (RFC 9433,
+				// high 6 bits). Layout: GTP-U(8) + opt(4) + PSC[len,flags,qfi,next].
+				if tt.expectExt && len(outPkt) > gtpOffset+15 {
+					gotPSCQFI := outPkt[gtpOffset+14] & 0x3F
+					if gotPSCQFI != tt.qfi {
+						t.Errorf("GTP-U PSC QFI mismatch: got %d (octet 0x%02X), want %d", gotPSCQFI, outPkt[gtpOffset+14], tt.qfi)
+					}
+				}
+
 				t.Logf("SUCCESS: SRv6 → GTP-U/IPv4 (TEID=0x%08X, QFI=%d, E=%v, pktlen %d→%d)",
 					tt.teid, tt.qfi, hasExt, len(pkt), len(outPkt))
 			}
@@ -2524,13 +2535,14 @@ func TestXDPProgEndMGtp4EV4SrcFromOuter(t *testing.T) {
 		return sa
 	}
 
-	// SID DA with Args.Mob.Session (gNB dst, TEID, QFI) at offset 7, matching
-	// the /56 trigger below.
+	// SID DA with Args.Mob.Session (gNB dst, QFI, TEID) at offset 7, matching
+	// the /56 trigger below. RFC 9433 §6.1 order: [IPv4Dst(4)][QFI|R|U(1)][TEID(4)],
+	// QFI in the high 6 bits.
 	sidDA := func() net.IP {
 		da := net.ParseIP("fc00:1::1").To16()
 		copy(da[7:11], ipv4Dst[:])
-		binary.BigEndian.PutUint32(da[11:15], teid)
-		da[15] = 9 // QFI
+		da[11] = (9 & 0x3F) << 2 // QFI = 9
+		binary.BigEndian.PutUint32(da[12:16], teid)
 		return da
 	}()
 
@@ -2639,13 +2651,14 @@ func TestXDPProgEndMGtp6D(t *testing.T) {
 	if len(outPkt) >= daStart+16 {
 		da := outPkt[daStart : daStart+16]
 		off := int(argsOffset)
-		gotTEID := binary.BigEndian.Uint32(da[off : off+4])
-		if gotTEID != teid {
-			t.Errorf("TEID in DA[%d:%d]: got 0x%08X, want 0x%08X", off, off+4, gotTEID, teid)
-		}
-		gotQFI := da[off+4] & 0x3F
+		// RFC 9433 §6.1 GTP6 order: [QFI|R|U(1)][TEID(4)], QFI in the high 6 bits.
+		gotQFI := (da[off] >> 2) & 0x3F
 		if gotQFI != qfi {
-			t.Errorf("QFI in DA[%d]: got %d, want %d", off+4, gotQFI, qfi)
+			t.Errorf("QFI in DA[%d]: got %d, want %d", off, gotQFI, qfi)
+		}
+		gotTEID := binary.BigEndian.Uint32(da[off+1 : off+5])
+		if gotTEID != teid {
+			t.Errorf("TEID in DA[%d:%d]: got 0x%08X, want 0x%08X", off+1, off+5, gotTEID, teid)
 		}
 		t.Logf("SUCCESS: SRv6+GTP-U → SRv6 with Args (TEID=0x%08X, QFI=%d, action=%d)", teid, qfi, ret)
 	}
@@ -2676,12 +2689,13 @@ func TestXDPProgEndMGtp6E(t *testing.T) {
 			srcIP := net.ParseIP("fc00::1")
 			dstBytes := net.ParseIP("fc00:1::").To16()
 
-			// Encode Args.Mob.Session at offset 8: [TEID(4)][QFI|R|U(1)]
-			dstBytes[8] = byte(tt.teid >> 24)
-			dstBytes[9] = byte(tt.teid >> 16)
-			dstBytes[10] = byte(tt.teid >> 8)
-			dstBytes[11] = byte(tt.teid)
-			dstBytes[12] = tt.qfi
+			// Encode Args.Mob.Session at offset 8 (RFC 9433 §6.1): [QFI|R|U(1)][TEID(4)],
+			// QFI in the high 6 bits.
+			dstBytes[8] = (tt.qfi & 0x3F) << 2
+			dstBytes[9] = byte(tt.teid >> 24)
+			dstBytes[10] = byte(tt.teid >> 16)
+			dstBytes[11] = byte(tt.teid >> 8)
+			dstBytes[12] = byte(tt.teid)
 
 			segments := []net.IP{net.IP(dstBytes)}
 			pkt, err := buildSRv6PacketWithInnerIPv4(srcIP, net.IP(dstBytes), segments, 0,

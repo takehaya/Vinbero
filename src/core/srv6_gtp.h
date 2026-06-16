@@ -133,6 +133,9 @@ static __always_inline int gtpu_parse(
         if (ext_ptr + psc_bytes > data_end)
             return -1;
 
+        // 3GPP TS 38.415 PSC: QFI in the low 6 bits, RQI in bit 6 (inverse of
+        // ENCODE_PSC_QFI_RQI). Inline because this site precedes that macro's
+        // definition in this header.
         result->qfi = psc->qfi_flags & 0x3F;
         result->rqi = (psc->qfi_flags >> 6) & 0x01;
         result->hdr_total_len += psc_bytes;
@@ -153,16 +156,35 @@ static __always_inline int gtpu_parse(
 
 // ========== Args.Mob.Session (RFC 9433 Section 6) ==========
 //
-// SID = LOC:FUNCT:Args.Mob.Session
+// SID = LOC:FUNCT:[IPv4 DA]:Args.Mob.Session
 //
-// GTP4 Args layout (9 bytes):
-//   [IPv4 DstAddr (4B)][TEID (4B)][QFI(6b)|R(1b)|U(1b)]
+// RFC 9433 Section 6.1 lays Args.Mob.Session out MSB-first as
+//   [QFI(6b)|R(1b)|U(1b)][PDU Session ID / TEID ...]
+// so the QFI byte is (QFI << 2) | (R << 1) | U and the TEID follows it. The
+// gNB IPv4 DA (GTP4 only) precedes Args.Mob.Session. Concretely:
 //
-// GTP6 Args layout (5 bytes):
-//   [TEID (4B)][QFI(6b)|R(1b)|U(1b)]
+// GTP4 Args layout (9 bytes): [IPv4 DstAddr (4B)][QFI(1B)][TEID (4B)]
+// GTP6 Args layout (5 bytes):                    [QFI(1B)][TEID (4B)]
+//
+// QFI-before-TEID (and QFI in the high 6 bits) is the RFC 9433 wire layout, so an
+// End.M.GTP4.E SID composed by one implementation decodes correctly on another.
+// (Vinbero historically used [TEID][QFI] with QFI in the low 6 bits, which only
+// interoperated with itself.)
 
-// Encode QFI(6bit) + RQI(1bit) + U(1bit) into a single byte
-#define ENCODE_QFI_RQI(qfi, rqi) (((qfi) & 0x3F) | (((rqi) & 0x01) << 6))
+// SRv6 Args.Mob.Session QFI byte (RFC 9433 Section 6.1): QFI occupies the high 6
+// bits (bits 7..2), R is bit 1, U (always 0) is bit 0. Used only for the SID's
+// embedded Args.Mob.Session -- NOT for the GTP-U PDU Session Container, which is
+// a different (3GPP) layout (see ENCODE_PSC_QFI_RQI below).
+#define ENCODE_QFI_RQI(qfi, rqi) ((((qfi) & 0x3F) << 2) | (((rqi) & 0x01) << 1))
+// Decode the QFI / RQI back out of that SRv6 Args.Mob.Session byte.
+#define DECODE_QFI(flags) (((flags) >> 2) & 0x3F)
+#define DECODE_RQI(flags) (((flags) >> 1) & 0x01)
+
+// GTP-U PDU Session Container QFI byte (3GPP TS 38.415): QFI occupies the low 6
+// bits (bits 5..0), RQI is bit 6, PPP is bit 7. This is the on-the-wire GTP-U
+// extension-header layout the gNB/UPF reads, and is distinct from the SRv6
+// Args.Mob.Session byte above -- the two MUST NOT share an encoding.
+#define ENCODE_PSC_QFI_RQI(qfi, rqi) (((qfi) & 0x3F) | (((rqi) & 0x01) << 6))
 
 // Detect inner protocol from first nibble of packet data.
 // Returns 0 on success with inner_proto set, -1 on error.
@@ -180,95 +202,6 @@ static __always_inline int detect_inner_proto(
         *inner_proto = IPPROTO_IPV6;
     else
         return -1;
-    return 0;
-}
-
-// Encode Args.Mob.Session for GTP4 into a SID (16-byte array).
-// offset: byte offset within the SID where Args.Mob.Session starts.
-static __always_inline int args_mob_encode_gtp4(
-    __u8 *sid,
-    __u8 offset,
-    __u8 *dst_v4,
-    __u32 teid,
-    __u8 qfi,
-    __u8 rqi)
-{
-    if (offset + 9 > IPV6_ADDR_LEN)
-        return -1;
-
-    __builtin_memcpy(sid + offset, dst_v4, 4);
-
-    __be32 teid_be = bpf_htonl(teid);
-    __builtin_memcpy(sid + offset + 4, &teid_be, 4);
-
-    sid[offset + 8] = ENCODE_QFI_RQI(qfi, rqi);
-
-    return 0;
-}
-
-// Encode Args.Mob.Session for GTP6 into a SID (16-byte array).
-static __always_inline int args_mob_encode_gtp6(
-    __u8 *sid,
-    __u8 offset,
-    __u32 teid,
-    __u8 qfi,
-    __u8 rqi)
-{
-    if (offset + 5 > IPV6_ADDR_LEN)
-        return -1;
-
-    __be32 teid_be = bpf_htonl(teid);
-    __builtin_memcpy(sid + offset, &teid_be, 4);
-
-    sid[offset + 4] = ENCODE_QFI_RQI(qfi, rqi);
-
-    return 0;
-}
-
-// Decode Args.Mob.Session for GTP4 from a SID.
-static __always_inline int args_mob_decode_gtp4(
-    const __u8 *sid,
-    __u8 offset,
-    __u8 *dst_v4,       // output: 4-byte IPv4 address
-    __u32 *teid,        // output
-    __u8 *qfi,          // output
-    __u8 *rqi)          // output
-{
-    if (offset + 9 > IPV6_ADDR_LEN)
-        return -1;
-
-    __builtin_memcpy(dst_v4, sid + offset, 4);
-
-    __be32 teid_be;
-    __builtin_memcpy(&teid_be, sid + offset + 4, 4);
-    *teid = bpf_ntohl(teid_be);
-
-    __u8 flags = sid[offset + 8];
-    *qfi = flags & 0x3F;
-    *rqi = (flags >> 6) & 0x01;
-
-    return 0;
-}
-
-// Decode Args.Mob.Session for GTP6 from a SID.
-static __always_inline int args_mob_decode_gtp6(
-    const __u8 *sid,
-    __u8 offset,
-    __u32 *teid,
-    __u8 *qfi,
-    __u8 *rqi)
-{
-    if (offset + 5 > IPV6_ADDR_LEN)
-        return -1;
-
-    __be32 teid_be;
-    __builtin_memcpy(&teid_be, sid + offset, 4);
-    *teid = bpf_ntohl(teid_be);
-
-    __u8 flags = sid[offset + 4];
-    *qfi = flags & 0x3F;
-    *rqi = (flags >> 6) & 0x01;
-
     return 0;
 }
 
@@ -321,7 +254,9 @@ static __always_inline int gtpu_build_headers(
         struct pdu_session_container *psc = (struct pdu_session_container *)(opt + 1);
         psc->length = 1;
         psc->pdu_type_flags = 0x00;
-        psc->qfi_flags = ENCODE_QFI_RQI(qfi, rqi);
+        // 3GPP TS 38.415 PSC layout (QFI low 6 bits), NOT the SRv6 Args.Mob.Session
+        // layout -- this octet goes on the wire to the gNB/UPF.
+        psc->qfi_flags = ENCODE_PSC_QFI_RQI(qfi, rqi);
         psc->next_ext_type = 0x00;
     } else {
         gtph->flags = GTPU_V1_FLAGS;  // No E flag

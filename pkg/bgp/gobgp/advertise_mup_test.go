@@ -134,9 +134,9 @@ func TestEncodeDecodeMUP_RoundTrip(t *testing.T) {
 }
 
 // TestEncodeMUPDSD_SIDStructureSubSubTLV pins the on-wire SRv6 SID Structure
-// Sub-Sub-TLV (RFC 9252 §3.2.1.1). Without it ArcOS reads lb_len=0 and
-// registers BGP NHT against ::/0, which was the root cause of the MUP DSD
-// NEXT_HOP_UNREACHABLE / ISD-fallback synthesis we saw in interop.
+// Sub-Sub-TLV (RFC 9252 §3.2.1.1). Without it a receiver reads lb_len=0 and
+// registers BGP NHT against ::/0, the root cause of the MUP DSD
+// NEXT_HOP_UNREACHABLE / ISD-fallback synthesis.
 func TestEncodeMUPDSD_SIDStructureSubSubTLV(t *testing.T) {
 	in := bgp.MUPRoute{
 		Type: bgp.MUPRouteTypeDSD, RD: "65000:1", Address: "192.0.2.1",
