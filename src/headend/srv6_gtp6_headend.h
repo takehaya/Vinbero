@@ -116,9 +116,9 @@ static __always_inline int gtp6_d_build_srv6(
     if (copy_segments_to_srh(srh_segments, data_end, entry->segments, entry->num_segments) != 0)
         return XDP_DROP;
 
-    // Patch GTP6 Args.Mob.Session (5 bytes: TEID + QFI/RQI) into DA and the
-    // first SRH segment. Max valid offset is 11 (offset + 5 <= 16). Skipped for
-    // the F-TEID uplink toward a plain direct (End.DT6) SID.
+    // Patch GTP6 Args.Mob.Session (5 bytes: QFI/RQI + TEID, RFC 9433 §6.1 order)
+    // into DA and the first SRH segment. Max valid offset is 11 (offset + 5 <=
+    // 16). Skipped for the F-TEID uplink toward a plain direct (End.DT6) SID.
     if (patch_args) {
         if (args_offset > 11)
             return XDP_DROP;
@@ -129,8 +129,8 @@ static __always_inline int gtp6_d_build_srv6(
         __u8 *da_ptr = da + args_offset;
         if ((void *)(da_ptr + 5) > data_end)
             return XDP_DROP;
-        __builtin_memcpy(da_ptr, &teid_be, 4);
-        da_ptr[4] = qfi_rqi;
+        da_ptr[0] = qfi_rqi;
+        __builtin_memcpy(da_ptr + 1, &teid_be, 4);
 
         __u8 first_seg = srh->first_segment;
         if (first_seg < MAX_SEGMENTS) {
@@ -138,8 +138,8 @@ static __always_inline int gtp6_d_build_srv6(
             __u8 *seg = (__u8 *)seg_ptr + args_offset;
             if ((void *)(seg + 5) > data_end)
                 return XDP_DROP;
-            __builtin_memcpy(seg, &teid_be, 4);
-            seg[4] = qfi_rqi;
+            seg[0] = qfi_rqi;
+            __builtin_memcpy(seg + 1, &teid_be, 4);
         }
     }
 

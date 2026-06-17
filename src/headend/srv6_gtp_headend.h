@@ -140,12 +140,13 @@ static __always_inline int gtp4_d_build_srv6(
         __u8 *da_ptr = da + args_offset;
         if ((void *)(da_ptr + 9) > data_end)
             return XDP_DROP;
+        // RFC 9433 GTP4 layout: [IPv4 DA (4)][QFI|R|U (1)][TEID (4)].
         da_ptr[0] = ipv4_dst[0];
         da_ptr[1] = ipv4_dst[1];
         da_ptr[2] = ipv4_dst[2];
         da_ptr[3] = ipv4_dst[3];
-        __builtin_memcpy(da_ptr + 4, &teid_be, 4);
-        da_ptr[8] = qfi_rqi;
+        da_ptr[4] = qfi_rqi;
+        __builtin_memcpy(da_ptr + 5, &teid_be, 4);
 
         // Patch first SRH segment
         __u8 first_seg = srh->first_segment;
@@ -158,8 +159,8 @@ static __always_inline int gtp4_d_build_srv6(
             seg[1] = ipv4_dst[1];
             seg[2] = ipv4_dst[2];
             seg[3] = ipv4_dst[3];
-            __builtin_memcpy(seg + 4, &teid_be, 4);
-            seg[8] = qfi_rqi;
+            seg[4] = qfi_rqi;
+            __builtin_memcpy(seg + 5, &teid_be, 4);
         }
     }
 

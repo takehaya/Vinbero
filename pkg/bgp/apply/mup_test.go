@@ -67,17 +67,18 @@ func TestApplyMUP_T1ST_Downlink(t *testing.T) {
 	if entry.Mode != uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS) {
 		t.Errorf("mode = %d, want H_ENCAPS", entry.Mode)
 	}
-	// Args.Mob.Session at offset 7 in the destination SID.
+	// Args.Mob.Session at offset 7 in the destination SID (RFC 9433 §6.1:
+	// [gNB(4)][QFI<<2|RQI<<1(1)][TEID(4)]).
 	da := entry.DstAddr
 	const off = mupDefaultArgsOffset
 	if got := netip.AddrFrom4([4]byte(da[off : off+4])); got != netip.MustParseAddr(gnb) {
 		t.Errorf("gNB in SID = %s, want %s", got, gnb)
 	}
-	if got := binary.BigEndian.Uint32(da[off+4 : off+8]); got != teid {
-		t.Errorf("TEID in SID = 0x%08X, want 0x%08X", got, teid)
-	}
-	if got := da[off+8] & 0x3F; got != qfi {
+	if got := (da[off+4] >> 2) & 0x3F; got != qfi {
 		t.Errorf("QFI in SID = %d, want %d", got, qfi)
+	}
+	if got := binary.BigEndian.Uint32(da[off+5 : off+9]); got != teid {
+		t.Errorf("TEID in SID = 0x%08X, want 0x%08X", got, teid)
 	}
 	// Locator:function (bytes before the args window) preserved from base.
 	wantBase := netip.MustParseAddr(base).As16()
@@ -122,11 +123,12 @@ func TestApplyMUP_T1ST_Downlink_GTP6(t *testing.T) {
 	}
 	da := entry.DstAddr
 	const off = mupDefaultArgsOffset
-	if got := binary.BigEndian.Uint32(da[off : off+4]); got != teid {
-		t.Errorf("TEID in SID = 0x%08X, want 0x%08X", got, teid)
-	}
-	if got := da[off+4] & 0x3F; got != qfi {
+	// GTP6 Args.Mob.Session (RFC 9433 §6.1): [QFI<<2|RQI<<1(1)][TEID(4)].
+	if got := (da[off] >> 2) & 0x3F; got != qfi {
 		t.Errorf("QFI in SID = %d, want %d", got, qfi)
+	}
+	if got := binary.BigEndian.Uint32(da[off+1 : off+5]); got != teid {
+		t.Errorf("TEID in SID = 0x%08X, want 0x%08X", got, teid)
 	}
 }
 
