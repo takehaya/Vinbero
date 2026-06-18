@@ -109,8 +109,8 @@ func teidToAddr(teid uint32) netip.Addr {
 // When st is non-zero, the SRv6 SID Structure Sub-Sub-TLV (RFC 9252 §3.2.1.1)
 // is attached so the receiver can derive the locator block. Without it third
 // parties default the locator length to 0 and the SID resolves through /0 in
-// their BGP next-hop tracking, which is what kept the vendor MUP-GW dropping
-// the Vinbero PE's DSD as NEXT_HOP_UNREACHABLE during interop.
+// their BGP next-hop tracking, which makes a receiving MUP-GW drop the DSD as
+// NEXT_HOP_UNREACHABLE.
 func mupPrefixSID(sidStr string, behavior gobgppkt.SRBehavior, st bgp.SIDStructure) (gobgppkt.PathAttributeInterface, error) {
 	sid, err := netip.ParseAddr(sidStr)
 	if err != nil || !sid.Is6() || sid.Is4In6() || sid.IsUnspecified() {

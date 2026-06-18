@@ -140,12 +140,13 @@ static __always_inline int gtp4_d_build_srv6(
         __u8 *da_ptr = da + args_offset;
         if ((void *)(da_ptr + 9) > data_end)
             return XDP_DROP;
+        // RFC 9433 GTP4 layout: [IPv4 DA (4)][QFI|R|U (1)][TEID (4)].
         da_ptr[0] = ipv4_dst[0];
         da_ptr[1] = ipv4_dst[1];
         da_ptr[2] = ipv4_dst[2];
         da_ptr[3] = ipv4_dst[3];
-        __builtin_memcpy(da_ptr + 4, &teid_be, 4);
-        da_ptr[8] = qfi_rqi;
+        da_ptr[4] = qfi_rqi;
+        __builtin_memcpy(da_ptr + 5, &teid_be, 4);
 
         // Patch first SRH segment
         __u8 first_seg = srh->first_segment;
@@ -158,8 +159,8 @@ static __always_inline int gtp4_d_build_srv6(
             seg[1] = ipv4_dst[1];
             seg[2] = ipv4_dst[2];
             seg[3] = ipv4_dst[3];
-            __builtin_memcpy(seg + 4, &teid_be, 4);
-            seg[8] = qfi_rqi;
+            seg[4] = qfi_rqi;
+            __builtin_memcpy(seg + 5, &teid_be, 4);
         }
     }
 
@@ -216,7 +217,8 @@ static __always_inline int do_h_m_gtp4_d(
 // do_h_m_gtp4_d_teid: F-TEID-keyed H.M.GTP4.D (BGP MUP T2ST,
 // draft-mpmz-bess-mup-safi). `entry` is the gate entry from headend_v4_map on
 // the N3/UPF endpoint prefix; its segment list is unused. The real per-session
-// direct SID is resolved from mup_uplink_v4_map keyed on {outer dst, TEID}.
+// direct SID is resolved from mup_uplink_v4_map keyed on
+// {instance, outer dst, TEID-prefix}.
 // patch_args follows the resolved entry's args_offset sentinel: a plain direct
 // (End.DT4) SID sets MUP_ARGS_OFFSET_NONE and skips Args.Mob.Session patching.
 static __always_inline int do_h_m_gtp4_d_teid(
@@ -234,9 +236,13 @@ static __always_inline int do_h_m_gtp4_d_teid(
         return ret;
 
     // Full-length lookup key: the LPM trie returns the longest installed prefix,
-    // so the endpoint is matched fully (32 bits) and the TEID matched as a prefix.
+    // so the instance and endpoint are matched fully and the TEID as a prefix.
+    // The instance comes from the ingress ifindex (default 0), so overlapping
+    // {endpoint, TEID} spaces stay separated per access interface.
     struct mup_uplink_v4_key key = {};
-    key.prefixlen = 64;
+    key.prefixlen = 96;
+    __be32 inst_be = bpf_htonl(mup_uplink_instance(ctx));
+    __builtin_memcpy(key.instance, &inst_be, 4);
     __builtin_memcpy(key.endpoint, &iph->daddr, IPV4_ADDR_LEN);
     __be32 teid_be = bpf_htonl(gtp_info.teid); // network order so the MSB aligns to the prefix
     __builtin_memcpy(key.teid, &teid_be, 4);

@@ -386,14 +386,31 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		aux = bpf.NewSidAuxL2(uint16(sidFunc.BdId), bridgeIfindex)
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E:
-		if sidFunc.GtpV4SrcAddr == "" {
-			return nil, nil, fmt.Errorf("gtp_v4_src_addr is required for END_M_GTP4_E")
+		// Exactly one source of the GTP-U outer IPv4 source: the static
+		// gtp_v4_src_addr, or extraction from the outer IPv6 SA at
+		// gtp_v4_src_position (RFC 9433 §6.6). Presence-checked (not zero-
+		// checked) so position 0 stays expressible.
+		hasSrcPos := sidFunc.GtpV4SrcPosition != nil
+		switch {
+		case sidFunc.GtpV4SrcAddr == "" && !hasSrcPos:
+			return nil, nil, fmt.Errorf("END_M_GTP4_E requires gtp_v4_src_addr or gtp_v4_src_position")
+		case sidFunc.GtpV4SrcAddr != "" && hasSrcPos:
+			return nil, nil, fmt.Errorf("gtp_v4_src_addr and gtp_v4_src_position are mutually exclusive")
 		}
-		gtpV4Src, err := bpf.ParseIPv4Optional(sidFunc.GtpV4SrcAddr)
-		if err != nil {
-			return nil, nil, err
+		if hasSrcPos {
+			pos := sidFunc.GetGtpV4SrcPosition()
+			// 96 leaves exactly 32 bits of the outer IPv6 SA for the IPv4.
+			if pos > 96 {
+				return nil, nil, fmt.Errorf("gtp_v4_src_position %d out of range (0..96)", pos)
+			}
+			aux = bpf.NewSidAuxGtp4e(uint8(sidFunc.ArgsOffset), [4]uint8{}, true, uint8(pos))
+		} else {
+			gtpV4Src, err := bpf.ParseIPv4Optional(sidFunc.GtpV4SrcAddr)
+			if err != nil {
+				return nil, nil, err
+			}
+			aux = bpf.NewSidAuxGtp4e(uint8(sidFunc.ArgsOffset), gtpV4Src, false, 0)
 		}
-		aux = bpf.NewSidAuxGtp4e(uint8(sidFunc.ArgsOffset), gtpV4Src)
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D_DI:
@@ -521,9 +538,14 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				sf.BridgeName = ifindexToName(bridgeIfindex)
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP4_E:
-				argsOffset, gtpV4Src := bpf.SidAuxGtp4eData(aux)
+				argsOffset, gtpV4Src, fromOuter, srcPos := bpf.SidAuxGtp4eData(aux)
 				sf.ArgsOffset = uint32(argsOffset)
-				sf.GtpV4SrcAddr = bpf.FormatIPv4Optional(gtpV4Src)
+				if fromOuter {
+					pos := uint32(srcPos)
+					sf.GtpV4SrcPosition = &pos
+				} else {
+					sf.GtpV4SrcAddr = bpf.FormatIPv4Optional(gtpV4Src)
+				}
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D,
 				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_M_GTP6_D_DI:

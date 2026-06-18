@@ -155,18 +155,19 @@ static __always_inline int process_end_m_gtp6_d(
         __be32 teid_be = bpf_htonl(teid);
         __u8 qfi_rqi = ENCODE_QFI_RQI(qfi, rqi);
 
-        // Patch DA in scratch (offset 14+24+g6off)
+        // Patch DA in scratch (offset 14+24+g6off). RFC 9433 §6.1 GTP6 order:
+        // [QFI|R|U (1)][TEID (4)].
         __u8 da_off = SCR_IPV6_OFF + 24 + g6off;
         if (da_off + 5 <= SCRATCH_BUF_SIZE) {
-            __builtin_memcpy(scratch->data + da_off, &teid_be, 4);
-            scratch->data[da_off + 4] = qfi_rqi;
+            scratch->data[da_off] = qfi_rqi;
+            __builtin_memcpy(scratch->data + da_off + 1, &teid_be, 4);
         }
 
         // Patch SRH segment[new_sl] in scratch (offset 54+8+new_sl*16+g6off)
         __u16 seg_off = SCR_SRH_OFF + 8 + (__u16)new_sl * 16 + g6off;
         if (seg_off + 5 <= SCRATCH_BUF_SIZE) {
-            __builtin_memcpy(scratch->data + seg_off, &teid_be, 4);
-            scratch->data[seg_off + 4] = qfi_rqi;
+            scratch->data[seg_off] = qfi_rqi;
+            __builtin_memcpy(scratch->data + seg_off + 1, &teid_be, 4);
         }
     }
 
@@ -274,9 +275,10 @@ static __always_inline int process_end_m_gtp6_d_di(
 #define GTP6E_OVERHEAD_MAX 64
 
 // Parsed Args.Mob.Session view shared by both SRH-present and reduced-encap
-// paths. Args layout in the IPv6 DA at aux->gtp6e.args_offset:
-//   bytes 0-3: TEID (big-endian)
-//   byte 4: flags = (RQI << 6) | QFI
+// paths. Args layout in the IPv6 DA at aux->gtp6e.args_offset (RFC 9433 §6.1,
+// QFI before TEID with QFI in the high 6 bits -- see srv6_gtp.h):
+//   byte 0: flags = (QFI << 2) | (R << 1) | U
+//   bytes 1-4: TEID (big-endian)
 // Outer IPv6 src/dst come from the auxiliary entry, not from the SID.
 struct gtp6e_args {
     __u32 teid;
@@ -304,12 +306,12 @@ static __always_inline int gtp6e_parse_args(
     __u8 args[5];
     __builtin_memcpy(args, da_ptr, 5);
 
-    __be32 teid_be;
-    __builtin_memcpy(&teid_be, args, 4);
-    out->teid = bpf_ntohl(teid_be);
+    out->qfi = DECODE_QFI(args[0]);
+    out->rqi = DECODE_RQI(args[0]);
 
-    out->qfi = args[4] & 0x3F;
-    out->rqi = (args[4] >> 6) & 0x01;
+    __be32 teid_be;
+    __builtin_memcpy(&teid_be, args + 1, 4);
+    out->teid = bpf_ntohl(teid_be);
 
     __builtin_memcpy(out->src_addr, aux->gtp6e.src_addr, 16);
     __builtin_memcpy(out->dst_addr, aux->gtp6e.dst_addr, 16);

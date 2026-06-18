@@ -1,0 +1,47 @@
+internal:
+  devices:
+    - eth1
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+
+# MUP Controller. Peers iBGP (SAFI 85) with both edge nodes and advertises the
+# two overlapping T2ST sessions from start.sh. It forwards no data; the
+# locator only lets the speaker start.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.99"
+    listen_port: 179
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "2001:db8:ff::a"   # mup-gw
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - mup_ipv4
+    - neighbor: "2001:db8:ff::d"   # mup-pe
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - mup_ipv4

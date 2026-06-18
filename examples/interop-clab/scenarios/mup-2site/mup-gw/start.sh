@@ -43,14 +43,15 @@ for _ in $(seq 1 30); do /usr/local/bin/vbctl locator list >/dev/null 2>&1 && br
 # Interwork segment: End.M.GTP4.E. SRv6 packets to fd00:a::/56 are decapped and
 # re-encapsulated as GTP-U toward the gNB, reading gNB/TEID/QFI from the SID's
 # Args.Mob.Session at offset 7. /56 because bytes 7-15 carry the per-session args.
-# --gtp-v4-src-addr is the GTP-U outer IPv4 source toward the gNB and must be
-# the session's UPF N3 anchor (the T2ST endpoint). Vinbero's End.M.GTP4.E reads
-# the source from this aux config; an RFC 9433 §6.6 receiver would instead
-# extract it from the outer IPv6 source, where mup-pe embeds the same anchor
-# via its per-VRF mup_gtp4_source_prefix (asserted in test.sh).
+# --gtp-v4-src-position 64 is the RFC 9433 §6.6 receiver side: the GTP-U outer
+# IPv4 source is extracted from the outer IPv6 source at bit 64, where mup-pe
+# embeds the session's UPF N3 anchor right after its per-VRF
+# mup_gtp4_source_prefix (fd00:d::/64 -- the position equals that prefix
+# length). The static --gtp-v4-src-addr alternative remains for senders that
+# do not embed.
 /usr/local/bin/vbctl sid create \
     --trigger-prefix fd00:a::/56 --action END_M_GTP4_E \
-    --gtp-v4-src-addr 172.16.0.254 --args-offset 7 || true
+    --gtp-v4-src-position 64 --args-offset 7 || true
 
 # Originate this gateway's Interwork Segment Discovery route via MupService
 # (a managed local table auto-advertised into SAFI 85): it hosts the

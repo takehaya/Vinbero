@@ -130,6 +130,14 @@ type VrfBindingConfig struct {
 	// (and so this prefix) by RD. Validated at daemon startup via
 	// vrfbgp.ParseMUPGTP4SourcePrefix.
 	MupGTP4SourcePrefix string `yaml:"mup_gtp4_source_prefix,omitempty"`
+	// MupUplinkInterfaces lists the access interfaces whose GTP-U uplink
+	// belongs to this binding's MUP service instance. Non-empty allocates
+	// the binding an uplink instance: T2ST routes whose RTs this binding
+	// imports install their F-TEID entries under it, and packets are
+	// classified to it by ingress ifindex, so two instances can share an
+	// N3 endpoint address space. Empty keeps the binding's uplink state in
+	// the default instance 0.
+	MupUplinkInterfaces []string `yaml:"mup_uplink_interfaces,omitempty"`
 }
 
 // FamilyConfig is one address family's policy under a VRF binding.

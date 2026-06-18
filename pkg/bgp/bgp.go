@@ -438,8 +438,8 @@ type MUPRoute struct {
 	// SIDStructure carries the SRv6 SID layout (RFC 9252 §3.2.1.1) for SRv6SID.
 	// Zero means "unset", in which case the SRv6 SID Structure Sub-Sub-TLV is
 	// omitted on advertise. Receivers that need the locator-block length for
-	// next-hop tracking (vendor, FRR, vendor MUP-GWs) then fall back to /0 and
-	// the path stays NEXT_HOP_UNREACHABLE.
+	// next-hop tracking then fall back to /0 and the path stays
+	// NEXT_HOP_UNREACHABLE.
 	SIDStructure SIDStructure
 }
 

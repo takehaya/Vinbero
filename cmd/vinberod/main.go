@@ -190,6 +190,10 @@ func run(cliCtx *cli.Context) error {
 			lg,
 		)
 		applier.SetMUPDefaultAllow(cfg.BGP.Global.MupDefaultAllow)
+		// The config vrf_bindings were registered before the applier existed,
+		// so program the uplink instance state (ifindex map) once here; later
+		// runtime mutations re-drive it through the VrfBgpService hook.
+		applier.ReconcileMUPUplinkInstances()
 		// Auto-advertise (VRF export) is opt-in via bgp.global.auto_advertise.
 		// The exporter shares the locator manager, VRF bindings, and BGP
 		// advertiser with the rest of the daemon and owns its route watcher.
@@ -393,6 +397,7 @@ func configToBinding(b config.VrfBindingConfig) (vrfbgp.Binding, error) {
 		BDID:                uint16(b.BDID),
 		Families:            fams,
 		MupGTP4SourcePrefix: mupSrc,
+		MupUplinkInterfaces: b.MupUplinkInterfaces,
 	}, nil
 }
 

@@ -37,7 +37,7 @@ type Server struct {
 	evpnCoord    *EvpnCoordinator           // EVPN RT2/RT3 BD lifecycle (device + binding axes); nil when off
 	evpnES       EvpnEsHook                 // EVPN RT4 auto-advertise ES hook; nil when off
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
-	mupSrc       MupSrcReconciler           // MUP GTP4 source-embed reconcile hook; nil when BGP is off
+	mupSrc       MupBindingReconciler       // MUP binding-state reconcile hook; nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server

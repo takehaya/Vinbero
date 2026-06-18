@@ -116,9 +116,9 @@ static __always_inline int gtp6_d_build_srv6(
     if (copy_segments_to_srh(srh_segments, data_end, entry->segments, entry->num_segments) != 0)
         return XDP_DROP;
 
-    // Patch GTP6 Args.Mob.Session (5 bytes: TEID + QFI/RQI) into DA and the
-    // first SRH segment. Max valid offset is 11 (offset + 5 <= 16). Skipped for
-    // the F-TEID uplink toward a plain direct (End.DT6) SID.
+    // Patch GTP6 Args.Mob.Session (5 bytes: QFI/RQI + TEID, RFC 9433 §6.1 order)
+    // into DA and the first SRH segment. Max valid offset is 11 (offset + 5 <=
+    // 16). Skipped for the F-TEID uplink toward a plain direct (End.DT6) SID.
     if (patch_args) {
         if (args_offset > 11)
             return XDP_DROP;
@@ -129,8 +129,8 @@ static __always_inline int gtp6_d_build_srv6(
         __u8 *da_ptr = da + args_offset;
         if ((void *)(da_ptr + 5) > data_end)
             return XDP_DROP;
-        __builtin_memcpy(da_ptr, &teid_be, 4);
-        da_ptr[4] = qfi_rqi;
+        da_ptr[0] = qfi_rqi;
+        __builtin_memcpy(da_ptr + 1, &teid_be, 4);
 
         __u8 first_seg = srh->first_segment;
         if (first_seg < MAX_SEGMENTS) {
@@ -138,8 +138,8 @@ static __always_inline int gtp6_d_build_srv6(
             __u8 *seg = (__u8 *)seg_ptr + args_offset;
             if ((void *)(seg + 5) > data_end)
                 return XDP_DROP;
-            __builtin_memcpy(seg, &teid_be, 4);
-            seg[4] = qfi_rqi;
+            seg[0] = qfi_rqi;
+            __builtin_memcpy(seg + 1, &teid_be, 4);
         }
     }
 
@@ -191,7 +191,8 @@ static __always_inline int do_h_m_gtp6_d(
 
 // do_h_m_gtp6_d_teid: F-TEID-keyed H.M.GTP6.D (BGP MUP T2ST over GTP6). `entry`
 // is the gate from headend_v6_map; its segments are unused. The per-session
-// direct SID is resolved from mup_uplink_v6_map keyed on {outer dst, TEID}.
+// direct SID is resolved from mup_uplink_v6_map keyed on
+// {instance, outer dst, TEID-prefix}.
 static __always_inline int do_h_m_gtp6_d_teid(
     struct xdp_md *ctx,
     struct ethhdr *eth,
@@ -207,9 +208,13 @@ static __always_inline int do_h_m_gtp6_d_teid(
         return ret;
 
     // Full-length lookup key: the LPM trie returns the longest installed prefix,
-    // so the endpoint is matched fully (128 bits) and the TEID matched as a prefix.
+    // so the instance and endpoint are matched fully and the TEID as a prefix.
+    // The instance comes from the ingress ifindex (default 0), so overlapping
+    // {endpoint, TEID} spaces stay separated per access interface.
     struct mup_uplink_v6_key key = {};
-    key.prefixlen = 160;
+    key.prefixlen = 192;
+    __be32 inst_be = bpf_htonl(mup_uplink_instance(ctx));
+    __builtin_memcpy(key.instance, &inst_be, 4);
     __builtin_memcpy(key.endpoint, &ip6h->daddr, IPV6_ADDR_LEN);
     __be32 teid_be = bpf_htonl(gtp_info.teid);
     __builtin_memcpy(key.teid, &teid_be, 4);
