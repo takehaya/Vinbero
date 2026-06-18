@@ -13,7 +13,7 @@ https://github.com/takehaya/Vinbero-legacy/tree/master) has become outdated, so 
 - **eBPF/XDP + TC fast path** — kernel-resident packet forwarding, the only open-source SRv6 stack that does EVPN L2VPN on eBPF.
 - **In-process BGP** — GoBGP v4 inside `vinberod`, no sidecar. VPNv4/VPNv6, EVPN (SRv6), MUP, SR Policy.
 - **Unified VRF binding** — one `vbctl vrf-bgp bind --rt FAMILY:RT:DIRECTION` drives import/export policy and auto-advertise across every AF.
-- **Interop tested** — FRR (L3VPN/EVPN) and Arrcus ArcOS (MUP) in CI under `examples/interop-clab/scenarios/`.
+- **Interop tested** — FRR (L3VPN/EVPN) in CI under `examples/interop-clab/scenarios/`; MUP additionally validated against a third-party commercial router.
 - **Custom XDP plugins** — reserved tail-call slots, runtime register via `vinbero plugin`. SDK in `sdk/`.
 - **Connect RPC + gRPC** — every primitive reachable over HTTP/2.
 
