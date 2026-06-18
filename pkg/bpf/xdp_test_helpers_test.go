@@ -101,6 +101,39 @@ func (h *xdpTestHelper) run(pkt []byte) (uint32, []byte) {
 	return ret, opts.DataOut
 }
 
+// xdpMdCtx mirrors struct xdp_md for BPF_PROG_TEST_RUN's ctx_in. The kernel
+// requires data = 0 and data_end = packet length, resolves ingress_ifindex /
+// rx_queue_index against real devices (tests use lo: ifindex 1, queue 0), and
+// rejects a non-zero egress_ifindex. Note that even WITHOUT a ctx the test
+// runner backs the xdp_buff with loopback's rx queue, so a program reading
+// ctx->ingress_ifindex sees 1, not 0.
+type xdpMdCtx struct {
+	Data           uint32
+	DataEnd        uint32
+	DataMeta       uint32
+	IngressIfindex uint32
+	RxQueueIndex   uint32
+	EgressIfindex  uint32
+}
+
+// runOnIfindex is run with the xdp_md context's ingress_ifindex set, for
+// behaviors keyed on the ingress interface (the MUP uplink instance lookup).
+func (h *xdpTestHelper) runOnIfindex(pkt []byte, ifindex uint32) (uint32, []byte) {
+	h.t.Helper()
+	ctx := xdpMdCtx{DataEnd: uint32(len(pkt)), IngressIfindex: ifindex}
+	opts := ebpf.RunOptions{
+		Data:    pkt,
+		DataOut: make([]byte, 1500),
+		Context: ctx,
+		Repeat:  1,
+	}
+	ret, err := h.objs.VinberoMain.Run(&opts)
+	if err != nil {
+		h.t.Fatalf("Failed to run BPF program with ingress_ifindex=%d: %v", ifindex, err)
+	}
+	return ret, opts.DataOut
+}
+
 // runRepeat drives BPF_PROG_TEST_RUN with Repeat=n in a single syscall.
 // Pair with b.N in benchmarks so Go divides the syscall's wall-clock by n.
 func (h *xdpTestHelper) runRepeat(pkt []byte, n uint32) {
@@ -1028,6 +1061,14 @@ func (h *xdpTestHelper) createMupUplinkGate(prefix string) {
 // leaves Args.Mob.Session unpatched (End.DT4).
 func (h *xdpTestHelper) createMupUplinkSession(endpoint string, teid uint32, teidPrefixBits uint8, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
 	h.t.Helper()
+	h.createMupUplinkSessionInstance(0, endpoint, teid, teidPrefixBits, srcAddr, segments, numSegments, argsOffset)
+}
+
+// createMupUplinkSessionInstance is createMupUplinkSession keyed under an
+// explicit uplink instance (0 = default; non-zero entries are only reachable
+// from interfaces mapped to that instance via mup_ifindex_instance_map).
+func (h *xdpTestHelper) createMupUplinkSessionInstance(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
+	h.t.Helper()
 	entry := &HeadendEntry{
 		Mode:        modeHEncaps,
 		NumSegments: numSegments,
@@ -1035,10 +1076,10 @@ func (h *xdpTestHelper) createMupUplinkSession(endpoint string, teid uint32, tei
 		Segments:    segments,
 		ArgsOffset:  argsOffset,
 	}
-	if err := h.mapOps.CreateMupUplinkV4(endpoint, teid, teidPrefixBits, entry); err != nil {
+	if err := h.mapOps.CreateMupUplinkV4(instance, endpoint, teid, teidPrefixBits, entry); err != nil {
 		h.t.Fatalf("Failed to create MUP uplink session: %v", err)
 	}
-	h.t.Cleanup(func() { _ = h.mapOps.DeleteMupUplinkV4(endpoint, teid, teidPrefixBits) })
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteMupUplinkV4(instance, endpoint, teid, teidPrefixBits) })
 }
 
 // createHeadendEntryGTP creates a headend v4 entry with H.M.GTP4.D mode and args_offset
@@ -1063,7 +1104,22 @@ func (h *xdpTestHelper) createSidFunctionGTP4E(prefix string, gtpV4SrcAddr [4]by
 	entry := &SidFunctionEntry{
 		Action: actionEndMGTP4E,
 	}
-	aux := NewSidAuxGtp4e(argsOffset, gtpV4SrcAddr)
+	aux := NewSidAuxGtp4e(argsOffset, gtpV4SrcAddr, false, 0)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux, OwnerRPC); err != nil {
+		h.t.Fatalf("Failed to create SID function entry for End.M.GTP4.E: %v", err)
+	}
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteSidFunction(prefix, OwnerRPC) })
+}
+
+// createSidFunctionGTP4ESrcPos creates a SID function entry for End.M.GTP4.E
+// that extracts the GTP-U IPv4 source from the outer IPv6 SA at bit
+// v4srcPosition (RFC 9433 §6.6) instead of using a static source.
+func (h *xdpTestHelper) createSidFunctionGTP4ESrcPos(prefix string, argsOffset, v4srcPosition uint8) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{
+		Action: actionEndMGTP4E,
+	}
+	aux := NewSidAuxGtp4e(argsOffset, [4]byte{}, true, v4srcPosition)
 	if err := h.mapOps.CreateSidFunction(prefix, entry, aux, OwnerRPC); err != nil {
 		h.t.Fatalf("Failed to create SID function entry for End.M.GTP4.E: %v", err)
 	}
@@ -1158,10 +1214,10 @@ func (h *xdpTestHelper) createMupUplinkSessionV6(endpoint string, teid uint32, t
 		Segments:    segments,
 		ArgsOffset:  argsOffset,
 	}
-	if err := h.mapOps.CreateMupUplinkV6(endpoint, teid, teidPrefixBits, entry); err != nil {
+	if err := h.mapOps.CreateMupUplinkV6(0, endpoint, teid, teidPrefixBits, entry); err != nil {
 		h.t.Fatalf("Failed to create MUP uplink v6 session: %v", err)
 	}
-	h.t.Cleanup(func() { _ = h.mapOps.DeleteMupUplinkV6(endpoint, teid, teidPrefixBits) })
+	h.t.Cleanup(func() { _ = h.mapOps.DeleteMupUplinkV6(0, endpoint, teid, teidPrefixBits) })
 }
 
 // createSidFunctionGTP6D creates a SID function entry for End.M.GTP6.D

@@ -2129,14 +2129,14 @@ func TestXDPProgHMGtp4D(t *testing.T) {
 			daStart := ethHeaderLen + 24 // IPv6 daddr
 			if len(outPkt) >= daStart+16 {
 				da := outPkt[daStart : daStart+16]
-				// At offset 7: [IPv4Dst(4)][TEID(4)][QFI|R|U(1)]
-				gotTEID := binary.BigEndian.Uint32(da[7+4 : 7+8])
-				if gotTEID != tt.teid {
-					t.Errorf("TEID in DA mismatch: expected 0x%08X, got 0x%08X", tt.teid, gotTEID)
-				}
-				gotQFI := da[7+8] & 0x3F
+				// At offset 7 (RFC 9433 §6.1): [IPv4Dst(4)][QFI|R|U(1)][TEID(4)]
+				gotQFI := (da[7+4] >> 2) & 0x3F
 				if gotQFI != tt.qfi {
 					t.Errorf("QFI in DA mismatch: expected %d, got %d", tt.qfi, gotQFI)
+				}
+				gotTEID := binary.BigEndian.Uint32(da[7+5 : 7+9])
+				if gotTEID != tt.teid {
+					t.Errorf("TEID in DA mismatch: expected 0x%08X, got 0x%08X", tt.teid, gotTEID)
 				}
 			}
 
@@ -2163,9 +2163,9 @@ func TestXDPProgHMGtp4DTeid(t *testing.T) {
 	h.createMupUplinkGate("192.0.2.0/24")
 
 	// Direct SIDs for the sessions below.
-	directExact, _ := ParseIPv6("fc00:a::abcd")  // exact /32 TEID match
-	directAgg, _ := ParseIPv6("fc00:b::ef01")    // /8 TEID-prefix aggregate
-	directMore, _ := ParseIPv6("fc00:c::1234")   // /16 inside the aggregate (longest-match wins)
+	directExact, _ := ParseIPv6("fc00:a::abcd") // exact /32 TEID match
+	directAgg, _ := ParseIPv6("fc00:b::ef01")   // /8 TEID-prefix aggregate
+	directMore, _ := ParseIPv6("fc00:c::1234")  // /16 inside the aggregate (longest-match wins)
 	segsExact, nE, _ := ParseSegments([]string{"fc00:a::abcd"})
 	segsAgg, nA, _ := ParseSegments([]string{"fc00:b::ef01"})
 	segsMore, nM, _ := ParseSegments([]string{"fc00:c::1234"})
@@ -2318,6 +2318,90 @@ func TestXDPProgHMGtp6DTeid(t *testing.T) {
 	}
 }
 
+// TestXDPProgHMGtp4DTeidUplinkInstance verifies the uplink instance scoping:
+// two service instances install the SAME {endpoint, TEID} with different
+// direct SIDs, and the ingress interface (via mup_ifindex_instance_map)
+// decides which one a packet resolves against. Also verifies that an
+// instance does NOT fall back to another instance's entries on a miss.
+func TestXDPProgHMGtp4DTeidUplinkInstance(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	const n3Endpoint = "192.0.2.100"
+	const teid = uint32(0x12345678)
+	srcAddr, _ := ParseIPv6("fc00::1")
+
+	h.createMupUplinkGate("192.0.2.0/24")
+
+	directDefault, _ := ParseIPv6("fc00:a::1") // default instance 0
+	directInst1, _ := ParseIPv6("fc00:b::2")   // instance 1
+	segsDefault, nD, _ := ParseSegments([]string{"fc00:a::1"})
+	segsInst1, n1, _ := ParseSegments([]string{"fc00:b::2"})
+
+	// The same {endpoint, TEID} in two instances -- the overlap the instance
+	// key exists to allow.
+	h.createMupUplinkSession(n3Endpoint, teid, 32, srcAddr, segsDefault, nD, MupArgsOffsetNone)
+	h.createMupUplinkSessionInstance(1, n3Endpoint, teid, 32, srcAddr, segsInst1, n1, MupArgsOffsetNone)
+
+	pkt, err := buildGTPUv4Packet(
+		net.ParseIP("10.0.0.1").To4(), net.ParseIP(n3Endpoint).To4(),
+		teid, 9,
+		net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4(),
+	)
+	if err != nil {
+		t.Fatalf("Failed to build GTP-U packet: %v", err)
+	}
+
+	wantDA := func(t *testing.T, outPkt []byte, ret uint32, want [16]byte) {
+		t.Helper()
+		if ret != XDP_PASS && ret != XDP_REDIRECT {
+			t.Fatalf("Expected XDP_PASS or XDP_REDIRECT, got %d", ret)
+		}
+		if len(outPkt) < ethHeaderLen+ipv6HeaderLen {
+			t.Fatalf("Output packet too short: %d bytes", len(outPkt))
+		}
+		if etherType := binary.BigEndian.Uint16(outPkt[12:14]); etherType != 0x86DD {
+			t.Fatalf("Expected EtherType 0x86DD (SRv6 encap), got 0x%04X", etherType)
+		}
+		outerDA := outPkt[ethHeaderLen+24 : ethHeaderLen+40]
+		if !bytes.Equal(outerDA, want[:]) {
+			t.Errorf("Outer DA mismatch: got %x, want %x", outerDA, want)
+		}
+	}
+
+	// The test runner backs the packet with loopback's rx queue, so the
+	// program always sees ingress_ifindex 1 (see xdpMdCtx); the subtests
+	// steer the instance by re-mapping what ifindex 1 resolves to.
+	t.Cleanup(func() { _ = h.mapOps.SetMupUplinkInstances(map[uint32]uint32{}) })
+
+	t.Run("unmapped ifindex resolves the default instance", func(t *testing.T) {
+		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{}); err != nil {
+			t.Fatalf("SetMupUplinkInstances: %v", err)
+		}
+		ret, outPkt := h.run(pkt) // ifindex 1 unmapped -> miss -> instance 0
+		wantDA(t, outPkt, ret, directDefault)
+	})
+
+	t.Run("mapped ifindex resolves its instance", func(t *testing.T) {
+		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{1: 1}); err != nil {
+			t.Fatalf("SetMupUplinkInstances: %v", err)
+		}
+		ret, outPkt := h.runOnIfindex(pkt, 1)
+		wantDA(t, outPkt, ret, directInst1)
+	})
+
+	t.Run("instance miss does not fall back across instances", func(t *testing.T) {
+		// Map lo to instance 2, which has no F-TEID entries: the packet must
+		// pass untouched instead of borrowing another instance's session.
+		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{1: 2}); err != nil {
+			t.Fatalf("SetMupUplinkInstances: %v", err)
+		}
+		ret, _ := h.runOnIfindex(pkt, 1)
+		if ret != XDP_PASS {
+			t.Errorf("Expected XDP_PASS (no session in instance 2), got %d", ret)
+		}
+	})
+}
+
 func TestXDPProgEndMGtp4E(t *testing.T) {
 	h := newXDPTestHelper(t)
 	gtpSrcAddr := [4]byte{10, 0, 0, 1}
@@ -2342,13 +2426,14 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 			srcIP := net.ParseIP("fc00::1")
 			dstBytes := net.ParseIP("fc00:1::1").To16()
 
-			// Encode Args.Mob.Session at offset 7
+			// Encode Args.Mob.Session at offset 7 (RFC 9433 §6.1):
+			// [IPv4Dst(4)][QFI|R|U(1)][TEID(4)], QFI in the high 6 bits.
 			copy(dstBytes[7:11], tt.ipv4Dst[:])
-			dstBytes[11] = byte(tt.teid >> 24)
-			dstBytes[12] = byte(tt.teid >> 16)
-			dstBytes[13] = byte(tt.teid >> 8)
-			dstBytes[14] = byte(tt.teid)
-			dstBytes[15] = tt.qfi
+			dstBytes[11] = (tt.qfi & 0x3F) << 2
+			dstBytes[12] = byte(tt.teid >> 24)
+			dstBytes[13] = byte(tt.teid >> 16)
+			dstBytes[14] = byte(tt.teid >> 8)
+			dstBytes[15] = byte(tt.teid)
 
 			segments := []net.IP{net.IP(dstBytes)}
 			pkt, err := buildSRv6PacketWithInnerIPv4(srcIP, net.IP(dstBytes), segments, 0,
@@ -2381,6 +2466,12 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 				t.Errorf("IPv4 dst mismatch: got %v, want %v", outerDst, tt.ipv4Dst)
 			}
 
+			// Verify outer IPv4 source matches the static aux config
+			outerSrc := outPkt[ethHeaderLen+12 : ethHeaderLen+16]
+			if !bytes.Equal(outerSrc, gtpSrcAddr[:]) {
+				t.Errorf("IPv4 src mismatch: got %v, want %v", outerSrc, gtpSrcAddr)
+			}
+
 			// Verify GTP-U flags (offset: ETH+IPv4+UDP = 14+20+8 = 42)
 			gtpOffset := ethHeaderLen + 20 + 8
 			if len(outPkt) > gtpOffset+8 {
@@ -2399,9 +2490,115 @@ func TestXDPProgEndMGtp4E(t *testing.T) {
 					t.Errorf("TEID mismatch: got 0x%08X, want 0x%08X", gotTEID, tt.teid)
 				}
 
+				// PDU Session Container QFI octet (3GPP TS 38.415: QFI in the low
+				// 6 bits) -- distinct from the SRv6 Args.Mob.Session byte (RFC 9433,
+				// high 6 bits). Layout: GTP-U(8) + opt(4) + PSC[len,flags,qfi,next].
+				if tt.expectExt && len(outPkt) > gtpOffset+15 {
+					gotPSCQFI := outPkt[gtpOffset+14] & 0x3F
+					if gotPSCQFI != tt.qfi {
+						t.Errorf("GTP-U PSC QFI mismatch: got %d (octet 0x%02X), want %d", gotPSCQFI, outPkt[gtpOffset+14], tt.qfi)
+					}
+				}
+
 				t.Logf("SUCCESS: SRv6 → GTP-U/IPv4 (TEID=0x%08X, QFI=%d, E=%v, pktlen %d→%d)",
 					tt.teid, tt.qfi, hasExt, len(pkt), len(outPkt))
 			}
+		})
+	}
+}
+
+// TestXDPProgEndMGtp4EV4SrcFromOuter exercises the RFC 9433 §6.6 receiver
+// side: the GTP-U outer IPv4 source is extracted from the outer IPv6 SA at
+// the configured bit position (the peer embeds it right after its source
+// prefix) instead of coming from a static aux address. Covers byte-aligned
+// and shifted positions, position 0 (a flag byte carries the presence, so 0
+// is a real setting), and both the SRH and reduced-encap (no-SRH) paths.
+func TestXDPProgEndMGtp4EV4SrcFromOuter(t *testing.T) {
+	wantSrc := [4]byte{172, 16, 0, 254}
+	ipv4Dst := [4]byte{10, 0, 0, 2}
+	teid := uint32(0xDEADBEEF)
+
+	// embedAt returns an outer IPv6 SA with wantSrc's 32 bits placed at bit
+	// position pos (MSB-first), over a fd00:d::/64-style base.
+	embedAt := func(pos uint8) net.IP {
+		sa := net.ParseIP("fd00:d::").To16()
+		b, sh := int(pos/8), pos%8
+		if sh == 0 {
+			copy(sa[b:b+4], wantSrc[:])
+		} else {
+			sa[b] |= wantSrc[0] >> sh
+			sa[b+1] = wantSrc[0]<<(8-sh) | wantSrc[1]>>sh
+			sa[b+2] = wantSrc[1]<<(8-sh) | wantSrc[2]>>sh
+			sa[b+3] = wantSrc[2]<<(8-sh) | wantSrc[3]>>sh
+			sa[b+4] = wantSrc[3] << (8 - sh)
+		}
+		return sa
+	}
+
+	// SID DA with Args.Mob.Session (gNB dst, QFI, TEID) at offset 7, matching
+	// the /56 trigger below. RFC 9433 §6.1 order: [IPv4Dst(4)][QFI|R|U(1)][TEID(4)],
+	// QFI in the high 6 bits.
+	sidDA := func() net.IP {
+		da := net.ParseIP("fc00:1::1").To16()
+		copy(da[7:11], ipv4Dst[:])
+		da[11] = (9 & 0x3F) << 2 // QFI = 9
+		binary.BigEndian.PutUint32(da[12:16], teid)
+		return da
+	}()
+
+	for _, tt := range []struct {
+		name  string
+		pos   uint8
+		noSRH bool
+	}{
+		{"position 0 (SA head)", 0, false},
+		{"position 60 (shifted)", 60, false},
+		{"position 64 (locator /64)", 64, false},
+		{"position 96 (SA tail)", 96, false},
+		{"position 64 no-SRH (reduced encap)", 64, true},
+		{"position 60 no-SRH (shifted)", 60, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			h.createSidFunctionGTP4ESrcPos("fc00:1::/56", 7, tt.pos)
+
+			outerSrc := embedAt(tt.pos)
+			var pkt []byte
+			var err error
+			if tt.noSRH {
+				pkt, err = buildEncapsulatedPacketNoSRH(outerSrc, sidDA,
+					net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4(), innerTypeIPv4)
+			} else {
+				pkt, err = buildSRv6PacketWithInnerIPv4(outerSrc, sidDA, []net.IP{sidDA}, 0,
+					net.ParseIP("172.16.0.1").To4(), net.ParseIP("172.16.0.2").To4())
+			}
+			if err != nil {
+				t.Fatalf("Failed to build packet: %v", err)
+			}
+
+			ret, outPkt := h.run(pkt)
+
+			// FIB lookup fails in the test env → XDP_DROP after encap is fine;
+			// the rewritten bytes are still inspectable.
+			if ret != XDP_PASS && ret != XDP_REDIRECT && ret != XDP_DROP {
+				t.Fatalf("Unexpected action %d", ret)
+			}
+			if len(outPkt) < ethHeaderLen+20 {
+				t.Fatalf("Output packet too short for GTP-U verification (%d bytes), action=%d", len(outPkt), ret)
+			}
+			if etherType := binary.BigEndian.Uint16(outPkt[12:14]); etherType != 0x0800 {
+				t.Fatalf("EtherType not IPv4 (0x%04X), action=%d", etherType, ret)
+			}
+
+			gotSrc := outPkt[ethHeaderLen+12 : ethHeaderLen+16]
+			if !bytes.Equal(gotSrc, wantSrc[:]) {
+				t.Errorf("extracted IPv4 src mismatch: got %v, want %v (pos=%d)", gotSrc, wantSrc, tt.pos)
+			}
+			gotDst := outPkt[ethHeaderLen+16 : ethHeaderLen+20]
+			if !bytes.Equal(gotDst, ipv4Dst[:]) {
+				t.Errorf("IPv4 dst mismatch: got %v, want %v", gotDst, ipv4Dst)
+			}
+			t.Logf("SUCCESS: v4src extracted at bit %d (noSRH=%v): %v", tt.pos, tt.noSRH, gotSrc)
 		})
 	}
 }
@@ -2454,13 +2651,14 @@ func TestXDPProgEndMGtp6D(t *testing.T) {
 	if len(outPkt) >= daStart+16 {
 		da := outPkt[daStart : daStart+16]
 		off := int(argsOffset)
-		gotTEID := binary.BigEndian.Uint32(da[off : off+4])
-		if gotTEID != teid {
-			t.Errorf("TEID in DA[%d:%d]: got 0x%08X, want 0x%08X", off, off+4, gotTEID, teid)
-		}
-		gotQFI := da[off+4] & 0x3F
+		// RFC 9433 §6.1 GTP6 order: [QFI|R|U(1)][TEID(4)], QFI in the high 6 bits.
+		gotQFI := (da[off] >> 2) & 0x3F
 		if gotQFI != qfi {
-			t.Errorf("QFI in DA[%d]: got %d, want %d", off+4, gotQFI, qfi)
+			t.Errorf("QFI in DA[%d]: got %d, want %d", off, gotQFI, qfi)
+		}
+		gotTEID := binary.BigEndian.Uint32(da[off+1 : off+5])
+		if gotTEID != teid {
+			t.Errorf("TEID in DA[%d:%d]: got 0x%08X, want 0x%08X", off+1, off+5, gotTEID, teid)
 		}
 		t.Logf("SUCCESS: SRv6+GTP-U → SRv6 with Args (TEID=0x%08X, QFI=%d, action=%d)", teid, qfi, ret)
 	}
@@ -2491,12 +2689,13 @@ func TestXDPProgEndMGtp6E(t *testing.T) {
 			srcIP := net.ParseIP("fc00::1")
 			dstBytes := net.ParseIP("fc00:1::").To16()
 
-			// Encode Args.Mob.Session at offset 8: [TEID(4)][QFI|R|U(1)]
-			dstBytes[8] = byte(tt.teid >> 24)
-			dstBytes[9] = byte(tt.teid >> 16)
-			dstBytes[10] = byte(tt.teid >> 8)
-			dstBytes[11] = byte(tt.teid)
-			dstBytes[12] = tt.qfi
+			// Encode Args.Mob.Session at offset 8 (RFC 9433 §6.1): [QFI|R|U(1)][TEID(4)],
+			// QFI in the high 6 bits.
+			dstBytes[8] = (tt.qfi & 0x3F) << 2
+			dstBytes[9] = byte(tt.teid >> 24)
+			dstBytes[10] = byte(tt.teid >> 16)
+			dstBytes[11] = byte(tt.teid >> 8)
+			dstBytes[12] = byte(tt.teid)
 
 			segments := []net.IP{net.IP(dstBytes)}
 			pkt, err := buildSRv6PacketWithInnerIPv4(srcIP, net.IP(dstBytes), segments, 0,

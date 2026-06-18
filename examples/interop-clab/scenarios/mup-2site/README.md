@@ -85,9 +85,9 @@ direction it does not face stays deferred or dormant.
   the session TEID, sourced from the UPF N3 anchor (`172.16.0.254`). The outer
   IPv6 source embeds that anchor (the same-RD T2ST endpoint) right after
   mup-pe's per-VRF `mup_gtp4_source_prefix` (`fd00:d::/64`, RFC 9433 §6.6) →
-  `fd00:d::ac10:fe:0:0`; a GW extracting the source at v4src position 64 emits
-  the GTP-U from the anchor, while Vinbero's `End.M.GTP4.E` takes the same
-  source from its configured `--gtp-v4-src-addr`.
+  `fd00:d::ac10:fe:0:0`, and mup-gw's `End.M.GTP4.E` extracts it back at the
+  same bit position (`--gtp-v4-src-position 64`), so the anchor travels the
+  whole embed → extract chain.
 
 `test.sh` asserts each edge node received its peer's discovery route and then
 resolved + installed the session (apply log + `headend_v4` map) — proving SID

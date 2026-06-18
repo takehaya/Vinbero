@@ -170,13 +170,31 @@ func TestSidAuxRoundTrip(t *testing.T) {
 
 	t.Run("Gtp4e", func(t *testing.T) {
 		srcAddr := [IPv4AddrLen]uint8{10, 0, 0, 1}
-		aux := NewSidAuxGtp4e(7, srcAddr)
-		gotOffset, gotSrc := SidAuxGtp4eData(aux)
+		aux := NewSidAuxGtp4e(7, srcAddr, false, 0)
+		gotOffset, gotSrc, gotFromOuter, gotPos := SidAuxGtp4eData(aux)
 		if gotOffset != 7 {
 			t.Errorf("args_offset: got %d, want 7", gotOffset)
 		}
 		if gotSrc != srcAddr {
 			t.Errorf("gtp_v4_src_addr: got %v, want %v", gotSrc, srcAddr)
+		}
+		if gotFromOuter || gotPos != 0 {
+			t.Errorf("v4src: got fromOuter=%v pos=%d, want false 0", gotFromOuter, gotPos)
+		}
+	})
+
+	t.Run("Gtp4eV4SrcFromOuter", func(t *testing.T) {
+		// Position 0 must round-trip with the flag set: presence lives in the
+		// flag byte, not in a zero sentinel on the position.
+		for _, pos := range []uint8{0, 64, 96} {
+			aux := NewSidAuxGtp4e(7, [IPv4AddrLen]uint8{}, true, pos)
+			gotOffset, _, gotFromOuter, gotPos := SidAuxGtp4eData(aux)
+			if gotOffset != 7 {
+				t.Errorf("args_offset: got %d, want 7", gotOffset)
+			}
+			if !gotFromOuter || gotPos != pos {
+				t.Errorf("v4src: got fromOuter=%v pos=%d, want true %d", gotFromOuter, gotPos, pos)
+			}
 		}
 	})
 

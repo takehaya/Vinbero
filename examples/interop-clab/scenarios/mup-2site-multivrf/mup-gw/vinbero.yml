@@ -1,0 +1,54 @@
+internal:
+  # eth1 / eth2 face the two gNBs (N3-A / N3-B, overlapping addressing; the
+  # uplink F-TEID gate runs on both); eth3 faces the core. All carry XDP.
+  devices:
+    - eth1
+    - eth2
+    - eth3
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+
+# Access-side MUP gateway hosting two uplink service instances. The bindings
+# (instance per VPN: import RT + access interface) are created at runtime in
+# start.sh via `vbctl vrf-bgp bind`. Passive iBGP (SAFI 85) toward the
+# controller; the received T2STs install one F-TEID gate + per-instance
+# entries.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    listen_port: 179
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "2001:db8:ff::c"   # mup-c (controller dials us)
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      passive: true
+      families:
+        - mup_ipv4
+    - neighbor: "2001:db8:ff::d"   # mup-pe (we dial; receives the DSDs)
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - mup_ipv4

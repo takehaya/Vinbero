@@ -281,9 +281,13 @@ func TestVrfBgpList_RoundTripsNewFields(t *testing.T) {
 
 // fakeMupSrc records the RDs the binding mutations re-reconciled so the
 // MUP GTP4 source-embed hook tests can pin when (and for which RD) it fires.
-type fakeMupSrc struct{ rds []string }
+type fakeMupSrc struct {
+	rds            []string
+	uplinkRecycles int
+}
 
 func (f *fakeMupSrc) ReconcileMUPGTP4SrcForRD(rd string) { f.rds = append(f.rds, rd) }
+func (f *fakeMupSrc) ReconcileMUPUplinkInstances()       { f.uplinkRecycles++ }
 
 // The MUP source-embed hook fires on a bind that carries a prefix, on a
 // prefix change, and on an RD move (both RDs); it stays silent on an
@@ -1208,5 +1212,113 @@ func TestVrfBgpBind_DoubleAddVRFFailureKeepsManagerPrev(t *testing.T) {
 	got := mgr.List()
 	if len(got) != 1 || got[0].RD != "65100:200" {
 		t.Errorf("double AddVRF failure must NOT Unbind prev; manager should still hold RD 65100:200; got %+v", got)
+	}
+}
+
+// The uplink-instance hook fires on every binding mutation that can move
+// uplink state: declaring or dropping mup_uplink_interfaces, any mutation
+// while some binding holds an instance, and the unbind of an
+// instance-holding binding. It stays silent while no instance exists.
+func TestVrfBgpBind_DrivesMupUplinkReconcile(t *testing.T) {
+	hook := &fakeMupSrc{}
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook)
+
+	bind := func(b *v1.VrfBgpBinding) {
+		t.Helper()
+		resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+			Bindings: []*v1.VrfBgpBinding{b},
+		}))
+		if err != nil {
+			t.Fatalf("VrfBgpBind: %v", err)
+		}
+		if len(resp.Msg.Errors) != 0 {
+			t.Fatalf("VrfBgpBind errors: %v", resp.Msg.Errors)
+		}
+	}
+
+	// A plain binding with no interfaces and no instances anywhere: silent.
+	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9"})
+	if hook.uplinkRecycles != 0 {
+		t.Fatalf("plain bind fired the uplink hook %d times, want 0", hook.uplinkRecycles)
+	}
+
+	// Declaring interfaces allocates an instance: fires.
+	bind(&v1.VrfBgpBinding{VrfName: "mup1", Rd: "65001:1", MupUplinkInterfaces: []string{"eth1"}})
+	if hook.uplinkRecycles != 1 {
+		t.Fatalf("interface bind fired %d times, want 1", hook.uplinkRecycles)
+	}
+
+	// An unrelated mutation (max_prefixes) cannot move uplink state even
+	// while an instance is held: silent.
+	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 7})
+	if hook.uplinkRecycles != 1 {
+		t.Fatalf("unrelated mutation fired %d times, want 1", hook.uplinkRecycles)
+	}
+
+	// A MUP import RT change while an instance is held re-scopes which
+	// binding a T2ST matches: fires.
+	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 7,
+		Families: map[string]*v1.VrfBgpFamily{
+			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "100:5", Direction: "import"}}},
+		}})
+	if hook.uplinkRecycles != 2 {
+		t.Fatalf("MUP import RT change fired %d times, want 2", hook.uplinkRecycles)
+	}
+
+	// Dropping the interfaces releases the instance: fires (the release
+	// itself re-keys sessions back to the default instance).
+	bind(&v1.VrfBgpBinding{VrfName: "mup1", Rd: "65001:1"})
+	if hook.uplinkRecycles != 3 {
+		t.Fatalf("interface removal fired %d times, want 3", hook.uplinkRecycles)
+	}
+
+	// All instances gone: even a MUP RT edit cannot move a session (every
+	// match resolves to the default instance), so it is silent.
+	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 9,
+		Families: map[string]*v1.VrfBgpFamily{
+			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "100:6", Direction: "import"}}},
+		}})
+	if hook.uplinkRecycles != 3 {
+		t.Fatalf("mutation with no instances fired %d times, want 3", hook.uplinkRecycles)
+	}
+}
+
+// Unbinding an instance-holding binding re-keys its sessions; unbinding a
+// plain one while no instance exists stays silent.
+func TestVrfBgpUnbind_DrivesMupUplinkReconcile(t *testing.T) {
+	hook := &fakeMupSrc{}
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook)
+	bindReq := &v1.VrfBgpBindRequest{Bindings: []*v1.VrfBgpBinding{
+		{VrfName: "mup1", Rd: "65001:1", MupUplinkInterfaces: []string{"eth1"}},
+		{VrfName: "plain", Rd: "65001:9"},
+	}}
+	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(bindReq)); err != nil {
+		t.Fatalf("VrfBgpBind: %v", err)
+	}
+	fired := hook.uplinkRecycles
+
+	unbind := func(name string) {
+		t.Helper()
+		resp, err := s.VrfBgpUnbind(context.Background(), connect.NewRequest(&v1.VrfBgpUnbindRequest{
+			VrfNames: []string{name},
+		}))
+		if err != nil {
+			t.Fatalf("VrfBgpUnbind: %v", err)
+		}
+		if len(resp.Msg.Errors) != 0 {
+			t.Fatalf("VrfBgpUnbind errors: %v", resp.Msg.Errors)
+		}
+	}
+
+	// The instance-holding binding goes away: fires once.
+	unbind("mup1")
+	if hook.uplinkRecycles != fired+1 {
+		t.Fatalf("instance unbind fired %d times, want %d", hook.uplinkRecycles, fired+1)
+	}
+
+	// No instances remain: a plain unbind is silent.
+	unbind("plain")
+	if hook.uplinkRecycles != fired+1 {
+		t.Fatalf("plain unbind fired %d times, want %d", hook.uplinkRecycles, fired+1)
 	}
 }

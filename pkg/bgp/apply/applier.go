@@ -35,15 +35,17 @@ type headendOps interface {
 }
 
 // mupOps is the subset of bpf.MapOperations the BGP MUP uplink path needs:
-// the F-TEID map (mup_uplink_v4_map) that the H.M.GTP4.D_TEID behavior reads.
-// The downlink path reuses headendOps (H.Encaps into headend_v4_map), and the
-// uplink gate is an ordinary headend_v4_map entry, so only the F-TEID map is
-// new here.
+// the F-TEID maps (mup_uplink_v4/v6_map) that the H.M.GTP{4,6}.D_TEID
+// behaviors read, and the ifindex -> uplink-instance map that scopes a
+// packet's F-TEID lookup to its access interface's service instance. The
+// downlink path reuses headendOps (H.Encaps into headend_v4_map), and the
+// uplink gate is an ordinary headend_v4_map entry.
 type mupOps interface {
-	CreateMupUplinkV4(endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
-	DeleteMupUplinkV4(endpoint string, teid uint32, teidPrefixBits uint8) error
-	CreateMupUplinkV6(endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
-	DeleteMupUplinkV6(endpoint string, teid uint32, teidPrefixBits uint8) error
+	CreateMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
+	DeleteMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error
+	CreateMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
+	DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error
+	SetMupUplinkInstances(mapping map[uint32]uint32) error
 }
 
 // dataPlane is the BPF map surface the applier writes: headend encap

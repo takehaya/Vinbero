@@ -37,6 +37,7 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "headend-mode", Usage: "Policy mode: H_INSERT, H_INSERT_RED, H_ENCAPS, H_ENCAPS_RED (for End.B6)"},
 					&cli.UintFlag{Name: "args-offset", Usage: "Args.Mob.Session byte offset in SID (for GTP functions)"},
 					&cli.StringFlag{Name: "gtp-v4-src-addr", Usage: "GTP4 outer IPv4 source address (for End.M.GTP4.E)"},
+					&cli.UintFlag{Name: "gtp-v4-src-position", Usage: "Extract the GTP4 outer IPv4 source from the outer IPv6 SA at this bit position 0..96 (RFC 9433 6.6, for End.M.GTP4.E; mutually exclusive with --gtp-v4-src-addr)"},
 					&cli.UintFlag{Name: "table-id", Usage: "VLAN table ID (for End.DX2V)"},
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 196 bytes after decode)"},
 					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
@@ -127,6 +128,12 @@ func sidFunctionCommand() *cli.Command {
 						PluginAuxRaw:   pluginAuxRaw,
 						PluginAuxJson:  pluginAuxJSON,
 						PluginAuxIndex: pluginAuxIndex,
+					}
+					// IsSet, not a zero check: position 0 is a valid setting
+					// (extract from the very start of the outer IPv6 SA).
+					if c.IsSet("gtp-v4-src-position") {
+						pos := uint32(c.Uint("gtp-v4-src-position"))
+						sid.GtpV4SrcPosition = &pos
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),

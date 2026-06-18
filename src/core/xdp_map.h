@@ -68,13 +68,14 @@ struct {
 } headend_v6_map SEC(".maps");
 
 // MUP uplink F-TEID map (LPM Trie) for BGP MUP T2ST (draft-mpmz-bess-mup-safi).
-// Key: {prefixlen, outer GTP-U dst IPv4, TEID}. Value: headend_entry holding the
-// direct SID segment list. The H.M.GTP4.D_TEID behavior, gated by a
+// Key: {prefixlen, instance, outer GTP-U dst IPv4, TEID}. Value: headend_entry
+// holding the direct SID segment list. The H.M.GTP4.D_TEID behavior, gated by a
 // headend_v4_map entry on the N3/UPF endpoint prefix, parses the GTP-U TEID and
 // looks this up to select the per-session direct SID (VPP-style F-TEID lookup).
 // LPM_TRIE (not HASH) because BGP MUP T2ST carries the TEID as a variable-length
-// prefix, so one route can aggregate a TEID range; the endpoint occupies the
-// high 32 bits of the key so it is always fully matched before the TEID prefix.
+// prefix, so one route can aggregate a TEID range; the instance and endpoint
+// occupy the high bits of the key so they are always fully matched before the
+// TEID prefix.
 struct {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
     __type(key, struct mup_uplink_v4_key);
@@ -84,8 +85,9 @@ struct {
 } mup_uplink_v4_map SEC(".maps");
 
 // MUP uplink F-TEID map (LPM Trie) for BGP MUP T2ST over GTP6. IPv6 counterpart
-// of mup_uplink_v4_map: keyed on {prefixlen, GTP-U/IPv6 dst, TEID prefix}, read
-// by the H.M.GTP6.D_TEID behavior to select the per-session direct SID.
+// of mup_uplink_v4_map: keyed on {prefixlen, instance, GTP-U/IPv6 dst, TEID
+// prefix}, read by the H.M.GTP6.D_TEID behavior to select the per-session
+// direct SID.
 struct {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
     __type(key, struct mup_uplink_v6_key);
@@ -93,6 +95,28 @@ struct {
     __uint(max_entries, 4096);
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } mup_uplink_v6_map SEC(".maps");
+
+// MUP uplink instance map: ingress ifindex -> uplink service instance id.
+// Written by the control plane from the VRF bindings' mup_uplink_interfaces;
+// a miss means the default instance 0. Lets two service instances share an
+// N3 endpoint address space: the F-TEID keys above carry the instance, so the
+// same {endpoint, TEID} can be installed once per instance and the access
+// interface decides which one a packet resolves against.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);   // ingress ifindex
+    __type(value, __u32); // instance id (host order; keys embed it big-endian)
+    __uint(max_entries, 256);
+} mup_ifindex_instance_map SEC(".maps");
+
+// Resolve the uplink instance for the current packet from its ingress
+// ifindex; unmapped interfaces fall to the default instance 0.
+static __always_inline __u32 mup_uplink_instance(struct xdp_md *ctx)
+{
+    __u32 ifindex = ctx->ingress_ifindex;
+    __u32 *inst = bpf_map_lookup_elem(&mup_ifindex_instance_map, &ifindex);
+    return inst ? *inst : 0;
+}
 
 // SR Policy map: policy_id (headend_entry.policy_id) -> transport SID list.
 // HASH so a policy update / withdraw is one O(1), atomic-per-value write
