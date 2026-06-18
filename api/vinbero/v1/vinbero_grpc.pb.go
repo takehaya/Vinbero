@@ -2267,3 +2267,202 @@ var StatsService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "vinbero/v1/vinbero.proto",
 }
+
+const (
+	IngressVrfService_IngressVrfBind_FullMethodName      = "/vinbero.v1.IngressVrfService/IngressVrfBind"
+	IngressVrfService_IngressVrfUnbind_FullMethodName    = "/vinbero.v1.IngressVrfService/IngressVrfUnbind"
+	IngressVrfService_IngressVrfList_FullMethodName      = "/vinbero.v1.IngressVrfService/IngressVrfList"
+	IngressVrfService_IngressVrfSetPolicy_FullMethodName = "/vinbero.v1.IngressVrfService/IngressVrfSetPolicy"
+)
+
+// IngressVrfServiceClient is the client API for IngressVrfService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type IngressVrfServiceClient interface {
+	IngressVrfBind(ctx context.Context, in *IngressVrfBindRequest, opts ...grpc.CallOption) (*IngressVrfBindResponse, error)
+	IngressVrfUnbind(ctx context.Context, in *IngressVrfUnbindRequest, opts ...grpc.CallOption) (*IngressVrfUnbindResponse, error)
+	IngressVrfList(ctx context.Context, in *IngressVrfListRequest, opts ...grpc.CallOption) (*IngressVrfListResponse, error)
+	IngressVrfSetPolicy(ctx context.Context, in *IngressVrfSetPolicyRequest, opts ...grpc.CallOption) (*IngressVrfSetPolicyResponse, error)
+}
+
+type ingressVrfServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewIngressVrfServiceClient(cc grpc.ClientConnInterface) IngressVrfServiceClient {
+	return &ingressVrfServiceClient{cc}
+}
+
+func (c *ingressVrfServiceClient) IngressVrfBind(ctx context.Context, in *IngressVrfBindRequest, opts ...grpc.CallOption) (*IngressVrfBindResponse, error) {
+	out := new(IngressVrfBindResponse)
+	err := c.cc.Invoke(ctx, IngressVrfService_IngressVrfBind_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ingressVrfServiceClient) IngressVrfUnbind(ctx context.Context, in *IngressVrfUnbindRequest, opts ...grpc.CallOption) (*IngressVrfUnbindResponse, error) {
+	out := new(IngressVrfUnbindResponse)
+	err := c.cc.Invoke(ctx, IngressVrfService_IngressVrfUnbind_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ingressVrfServiceClient) IngressVrfList(ctx context.Context, in *IngressVrfListRequest, opts ...grpc.CallOption) (*IngressVrfListResponse, error) {
+	out := new(IngressVrfListResponse)
+	err := c.cc.Invoke(ctx, IngressVrfService_IngressVrfList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ingressVrfServiceClient) IngressVrfSetPolicy(ctx context.Context, in *IngressVrfSetPolicyRequest, opts ...grpc.CallOption) (*IngressVrfSetPolicyResponse, error) {
+	out := new(IngressVrfSetPolicyResponse)
+	err := c.cc.Invoke(ctx, IngressVrfService_IngressVrfSetPolicy_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// IngressVrfServiceServer is the server API for IngressVrfService service.
+// All implementations should embed UnimplementedIngressVrfServiceServer
+// for forward compatibility
+type IngressVrfServiceServer interface {
+	IngressVrfBind(context.Context, *IngressVrfBindRequest) (*IngressVrfBindResponse, error)
+	IngressVrfUnbind(context.Context, *IngressVrfUnbindRequest) (*IngressVrfUnbindResponse, error)
+	IngressVrfList(context.Context, *IngressVrfListRequest) (*IngressVrfListResponse, error)
+	IngressVrfSetPolicy(context.Context, *IngressVrfSetPolicyRequest) (*IngressVrfSetPolicyResponse, error)
+}
+
+// UnimplementedIngressVrfServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedIngressVrfServiceServer struct {
+}
+
+func (UnimplementedIngressVrfServiceServer) IngressVrfBind(context.Context, *IngressVrfBindRequest) (*IngressVrfBindResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IngressVrfBind not implemented")
+}
+func (UnimplementedIngressVrfServiceServer) IngressVrfUnbind(context.Context, *IngressVrfUnbindRequest) (*IngressVrfUnbindResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IngressVrfUnbind not implemented")
+}
+func (UnimplementedIngressVrfServiceServer) IngressVrfList(context.Context, *IngressVrfListRequest) (*IngressVrfListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IngressVrfList not implemented")
+}
+func (UnimplementedIngressVrfServiceServer) IngressVrfSetPolicy(context.Context, *IngressVrfSetPolicyRequest) (*IngressVrfSetPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IngressVrfSetPolicy not implemented")
+}
+
+// UnsafeIngressVrfServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to IngressVrfServiceServer will
+// result in compilation errors.
+type UnsafeIngressVrfServiceServer interface {
+	mustEmbedUnimplementedIngressVrfServiceServer()
+}
+
+func RegisterIngressVrfServiceServer(s grpc.ServiceRegistrar, srv IngressVrfServiceServer) {
+	s.RegisterService(&IngressVrfService_ServiceDesc, srv)
+}
+
+func _IngressVrfService_IngressVrfBind_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngressVrfBindRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IngressVrfServiceServer).IngressVrfBind(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IngressVrfService_IngressVrfBind_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IngressVrfServiceServer).IngressVrfBind(ctx, req.(*IngressVrfBindRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IngressVrfService_IngressVrfUnbind_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngressVrfUnbindRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IngressVrfServiceServer).IngressVrfUnbind(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IngressVrfService_IngressVrfUnbind_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IngressVrfServiceServer).IngressVrfUnbind(ctx, req.(*IngressVrfUnbindRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IngressVrfService_IngressVrfList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngressVrfListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IngressVrfServiceServer).IngressVrfList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IngressVrfService_IngressVrfList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IngressVrfServiceServer).IngressVrfList(ctx, req.(*IngressVrfListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IngressVrfService_IngressVrfSetPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngressVrfSetPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IngressVrfServiceServer).IngressVrfSetPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IngressVrfService_IngressVrfSetPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IngressVrfServiceServer).IngressVrfSetPolicy(ctx, req.(*IngressVrfSetPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// IngressVrfService_ServiceDesc is the grpc.ServiceDesc for IngressVrfService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var IngressVrfService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.IngressVrfService",
+	HandlerType: (*IngressVrfServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "IngressVrfBind",
+			Handler:    _IngressVrfService_IngressVrfBind_Handler,
+		},
+		{
+			MethodName: "IngressVrfUnbind",
+			Handler:    _IngressVrfService_IngressVrfUnbind_Handler,
+		},
+		{
+			MethodName: "IngressVrfList",
+			Handler:    _IngressVrfService_IngressVrfList_Handler,
+		},
+		{
+			MethodName: "IngressVrfSetPolicy",
+			Handler:    _IngressVrfService_IngressVrfSetPolicy_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}

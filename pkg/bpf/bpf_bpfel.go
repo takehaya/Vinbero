@@ -128,6 +128,21 @@ type BpfHeadendL2Key struct {
 	Pad     [2]uint8
 }
 
+type BpfIngressAcKey struct {
+	_       structs.HostLayout
+	Ifindex uint32
+	VlanId  uint16
+	Pad     [2]uint8
+}
+
+type BpfIngressPolicy struct {
+	_           structs.HostLayout
+	Enabled     uint8
+	DefaultDeny uint8
+	DenyAction  uint8
+	Pad         uint8
+}
+
 type BpfLpmKeyV4 struct {
 	_         structs.HostLayout
 	Prefixlen uint32
@@ -197,6 +212,7 @@ type BpfTailcallCtx struct {
 	InnerProto   uint8
 	Slot         uint8
 	Pad          [3]uint8
+	VrfId        uint32
 	SidEntry     BpfSidFunctionEntry
 	_            [200]byte
 }
@@ -298,6 +314,8 @@ type BpfMapSpecs struct {
 	HeadendV6Map          *ebpf.MapSpec `ebpf:"headend_v6_map"`
 	HeadendV6OwnerMap     *ebpf.MapSpec `ebpf:"headend_v6_owner_map"`
 	HeadendV6Progs        *ebpf.MapSpec `ebpf:"headend_v6_progs"`
+	IngressPolicyMap      *ebpf.MapSpec `ebpf:"ingress_policy_map"`
+	IngressVrfMap         *ebpf.MapSpec `ebpf:"ingress_vrf_map"`
 	MupIfindexInstanceMap *ebpf.MapSpec `ebpf:"mup_ifindex_instance_map"`
 	MupUplinkV4Map        *ebpf.MapSpec `ebpf:"mup_uplink_v4_map"`
 	MupUplinkV6Map        *ebpf.MapSpec `ebpf:"mup_uplink_v6_map"`
@@ -359,6 +377,8 @@ type BpfMaps struct {
 	HeadendV6Map          *ebpf.Map `ebpf:"headend_v6_map"`
 	HeadendV6OwnerMap     *ebpf.Map `ebpf:"headend_v6_owner_map"`
 	HeadendV6Progs        *ebpf.Map `ebpf:"headend_v6_progs"`
+	IngressPolicyMap      *ebpf.Map `ebpf:"ingress_policy_map"`
+	IngressVrfMap         *ebpf.Map `ebpf:"ingress_vrf_map"`
 	MupIfindexInstanceMap *ebpf.Map `ebpf:"mup_ifindex_instance_map"`
 	MupUplinkV4Map        *ebpf.Map `ebpf:"mup_uplink_v4_map"`
 	MupUplinkV6Map        *ebpf.Map `ebpf:"mup_uplink_v6_map"`
@@ -395,6 +415,8 @@ func (m *BpfMaps) Close() error {
 		m.HeadendV6Map,
 		m.HeadendV6OwnerMap,
 		m.HeadendV6Progs,
+		m.IngressPolicyMap,
+		m.IngressVrfMap,
 		m.MupIfindexInstanceMap,
 		m.MupUplinkV4Map,
 		m.MupUplinkV6Map,

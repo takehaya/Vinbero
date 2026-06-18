@@ -118,6 +118,57 @@ static __always_inline __u32 mup_uplink_instance(struct xdp_md *ctx)
     return inst ? *inst : 0;
 }
 
+// ========== Ingress VRF front door ==========
+//
+// {ifindex, vlan_id} -> vrf_id (ingress classification context). Resolved once
+// at the XDP entry and carried to downstream handlers via tailcall_ctx.vrf_id.
+// vrf_id 0 is the global/default VRF (underlay); tenant VRFs are 1..N. A miss
+// (no entry) is distinguished from an explicit vrf 0 by the lookup returning
+// NULL, so default-deny can drop unmapped ACs while explicit-vrf-0 (underlay)
+// passes.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct ingress_ac_key);
+    __type(value, __u32); // vrf_id
+    __uint(max_entries, 4096);
+} ingress_vrf_map SEC(".maps");
+
+// Global ingress policy (single entry, key 0). Written by the control plane.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct ingress_policy);
+    __uint(max_entries, 1);
+} ingress_policy_map SEC(".maps");
+
+// resolve_ingress_vrf returns INGRESS_VRF_CONTINUE (and sets *vrf_id_out) to let
+// the packet proceed, or an XDP action (XDP_DROP / XDP_PASS) when the AC is
+// unmapped under default-deny. The front-door hash lookup is skipped unless the
+// policy is enabled, so the unconfigured path costs only one ARRAY lookup and
+// does not double the per-packet {ifindex,vlan} hashing that try_l2_headend
+// already does. XDP actions are 0..4, so -1 is an unambiguous "continue".
+#define INGRESS_VRF_CONTINUE (-1)
+static __always_inline int resolve_ingress_vrf(struct xdp_md *ctx, __u16 vlan_id, __u32 *vrf_id_out)
+{
+    *vrf_id_out = 0; // global VRF default; set every packet so tailcall_ctx is never stale
+    __u32 pkey = 0;
+    struct ingress_policy *pol = bpf_map_lookup_elem(&ingress_policy_map, &pkey);
+    if (!pol || !pol->enabled)
+        return INGRESS_VRF_CONTINUE; // front door off: everything is global VRF (back-compat)
+
+    struct ingress_ac_key key = {};
+    key.ifindex = ctx->ingress_ifindex;
+    key.vlan_id = vlan_id;
+    __u32 *vrf = bpf_map_lookup_elem(&ingress_vrf_map, &key);
+    if (vrf) {
+        *vrf_id_out = *vrf; // explicit entry (vrf 0 = global VRF included)
+        return INGRESS_VRF_CONTINUE;
+    }
+    if (pol->default_deny)
+        return pol->deny_action == INGRESS_DENY_PASS ? XDP_PASS : XDP_DROP;
+    return INGRESS_VRF_CONTINUE; // miss, default-deny off: global VRF (vrf 0)
+}
+
 // SR Policy map: policy_id (headend_entry.policy_id) -> transport SID list.
 // HASH so a policy update / withdraw is one O(1), atomic-per-value write
 // regardless of how many routes steer onto it; a missing entry is the

@@ -19,6 +19,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/fib"
+	"github.com/takehaya/vinbero/pkg/ingressvrf"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
 	"github.com/takehaya/vinbero/pkg/server"
@@ -252,6 +253,14 @@ func run(cliCtx *cli.Context) error {
 	}
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, lg)
 
+	// Load the ingress VRF front door from config and program it once at boot
+	// (later runtime mutations go through IngressVrfService). A failed
+	// interface resolution here is fatal: a config-declared AC that does not
+	// exist is a misconfiguration the operator should see at startup.
+	if err := loadIngressVrf(cfg.IngressVrf, srv.IngressVrfManager(), vin.GetMapOperations(), lg); err != nil {
+		return fmt.Errorf("ingress vrf: %w", err)
+	}
+
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
 		// (global up, peers half-added) still gets torn down.
@@ -377,6 +386,32 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 // vrfbgp.Binding.Normalize (called from Manager.Bind) expands the legacy
 // ImportRTs / ExportRTs when Families is empty, so a vinbero.yml written
 // before the rt-afi-safi schema keeps working unchanged.
+// loadIngressVrf programs the ingress VRF front door from config at boot: it
+// sets the global policy, registers each {interface, VLAN} -> vrf_id binding,
+// and reconciles the data-plane maps. A config-declared interface that does
+// not resolve is fatal (surfaced at startup, not silently dropped).
+func loadIngressVrf(cfg config.IngressVrfConfig, mgr *ingressvrf.Manager, prog ingressvrf.Programmer, lg *zap.Logger) error {
+	var action uint8
+	switch cfg.DenyAction {
+	case "", "drop":
+		action = ingressvrf.DenyActionDrop
+	case "pass":
+		action = ingressvrf.DenyActionPass
+	default:
+		return fmt.Errorf("deny_action %q: want \"drop\" or \"pass\"", cfg.DenyAction)
+	}
+	mgr.SetPolicy(ingressvrf.Policy{DefaultDeny: cfg.DefaultDeny, DenyAction: action})
+	for _, e := range cfg.Entries {
+		if err := mgr.Bind(e.Interface, e.VLAN, e.VRFID); err != nil {
+			return err
+		}
+	}
+	if cfg.DefaultDeny {
+		lg.Warn("ingress VRF default-deny enabled: unmapped ACs are dropped at XDP ingress; map every forwarding interface (underlay/control included) to a vrf_id (vrf 0 = global) or host-bound BGP/NDP is black-holed")
+	}
+	return mgr.Reconcile(ingressvrf.ResolveByName, prog)
+}
+
 func configToBinding(b config.VrfBindingConfig) (vrfbgp.Binding, error) {
 	fams, err := configFamilies(b.Families)
 	if err != nil {

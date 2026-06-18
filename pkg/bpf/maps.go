@@ -43,6 +43,8 @@ type (
 	EsiEntry         = BpfEsiEntry
 	MupUplinkV4Key   = BpfMupUplinkV4Key
 	MupUplinkV6Key   = BpfMupUplinkV6Key
+	IngressACKey     = BpfIngressAcKey
+	IngressPolicy    = BpfIngressPolicy
 )
 
 // MupArgsOffsetNone is the headend_entry.args_offset sentinel meaning "do not
@@ -1501,6 +1503,81 @@ func (m *MapOperations) SetMupUplinkInstances(mapping map[uint32]uint32) error {
 			return fmt.Errorf("failed to delete mup ifindex instance entry: %w", err)
 		}
 		touched = append(touched, k)
+	}
+	return nil
+}
+
+// ===== Ingress VRF front door =====
+
+// SetIngressVrf replaces the {ifindex, vlan} -> vrf_id mapping
+// (ingress_vrf_map) with the given one. Same all-or-nothing semantics as
+// SetMupUplinkInstances: the live mapping is snapshotted first and any
+// partial progress is rolled back on a write/delete error, so a failure
+// leaves the old classification fully in place.
+func (m *MapOperations) SetIngressVrf(mapping map[IngressACKey]uint32) error {
+	old := make(map[IngressACKey]uint32)
+	var key IngressACKey
+	var val uint32
+	iter := m.objs.IngressVrfMap.Iterate()
+	for iter.Next(&key, &val) {
+		old[key] = val
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("failed to iterate ingress vrf map: %w", err)
+	}
+
+	var touched []IngressACKey
+	rollback := func() {
+		for _, k := range touched {
+			k := k
+			if v, had := old[k]; had {
+				v := v
+				_ = m.objs.IngressVrfMap.Put(&k, &v)
+			} else {
+				_ = deleteMapKey(m.objs.IngressVrfMap, &k)
+			}
+		}
+	}
+
+	for k, v := range mapping {
+		k, v := k, v
+		if prev, had := old[k]; had && prev == v {
+			continue
+		}
+		if err := m.objs.IngressVrfMap.Put(&k, &v); err != nil {
+			rollback()
+			return fmt.Errorf("failed to put ingress vrf entry: %w", err)
+		}
+		touched = append(touched, k)
+	}
+	for k := range old {
+		if _, keep := mapping[k]; keep {
+			continue
+		}
+		k := k
+		if err := deleteMapKey(m.objs.IngressVrfMap, &k); err != nil {
+			rollback()
+			return fmt.Errorf("failed to delete ingress vrf entry: %w", err)
+		}
+		touched = append(touched, k)
+	}
+	return nil
+}
+
+// SetIngressPolicy writes the global ingress policy (index 0). enabled gates
+// the data-plane front-door lookup; defaultDeny drops (or passes, per
+// denyAction) an unmapped AC instead of falling into the global VRF (vrf 0).
+func (m *MapOperations) SetIngressPolicy(enabled, defaultDeny bool, denyAction uint8) error {
+	var key uint32
+	pol := IngressPolicy{DenyAction: denyAction}
+	if enabled {
+		pol.Enabled = 1
+	}
+	if defaultDeny {
+		pol.DefaultDeny = 1
+	}
+	if err := m.objs.IngressPolicyMap.Put(&key, &pol); err != nil {
+		return fmt.Errorf("failed to put ingress policy: %w", err)
 	}
 	return nil
 }

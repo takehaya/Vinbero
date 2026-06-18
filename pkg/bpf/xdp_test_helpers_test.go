@@ -134,6 +134,27 @@ func (h *xdpTestHelper) runOnIfindex(pkt []byte, ifindex uint32) (uint32, []byte
 	return ret, opts.DataOut
 }
 
+// buildPlainIPv4 builds a plain Ethernet/IPv4/ICMP packet (no VLAN) that
+// matches no SID / headend / L2 entry, so it XDP_PASSes when the ingress VRF
+// front door is off — a clean probe for the default-deny gate.
+func buildPlainIPv4(t *testing.T) []byte {
+	t.Helper()
+	eth := newTestEthernet(layers.EthernetTypeIPv4)
+	ip4 := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolICMPv4,
+		SrcIP:    net.ParseIP("203.0.113.1").To4(),
+		DstIP:    net.ParseIP("203.0.113.2").To4(),
+	}
+	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0), Id: 1, Seq: 1}
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, ip4, icmp, gopacket.Payload(newTestPayload(32))); err != nil {
+		t.Fatalf("serialize plain IPv4: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // runRepeat drives BPF_PROG_TEST_RUN with Repeat=n in a single syscall.
 // Pair with b.N in benchmarks so Go divides the syscall's wall-clock by n.
 func (h *xdpTestHelper) runRepeat(pkt []byte, n uint32) {

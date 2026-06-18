@@ -103,6 +103,27 @@ struct headend_l2_key {
     __u8 _pad[2];
 } __attribute__((packed));
 
+// Key for the ingress VRF front door: {port, VLAN} -> vrf_id. First-class
+// ingress classification context, distinct from headend_l2_key (which resolves
+// straight to an L2 encap entry). vrf_id 0 is the global/default VRF (underlay).
+struct ingress_ac_key {
+    __u32 ifindex;                // Ingress port ifindex
+    __u16 vlan_id;                // VLAN ID (0 = untagged)
+    __u8 _pad[2];
+} __attribute__((packed));
+
+// Global ingress policy (single entry, index 0). enabled gates the front-door
+// lookup so the common unconfigured path skips the hash lookup. default_deny
+// makes an unmapped AC handled per deny_action instead of falling into vrf 0.
+#define INGRESS_DENY_DROP 0
+#define INGRESS_DENY_PASS 1
+struct ingress_policy {
+    __u8 enabled;       // 1 = front door active (>=1 entry or default_deny set)
+    __u8 default_deny;  // 1 = unmapped AC is denied instead of falling to vrf 0
+    __u8 deny_action;   // INGRESS_DENY_DROP / INGRESS_DENY_PASS
+    __u8 _pad;
+} __attribute__((packed));
+
 // Key for VLAN cross-connect table (End.DX2V)
 struct dx2v_key {
     __u16 table_id;    // VLAN table ID (user-configured scope)

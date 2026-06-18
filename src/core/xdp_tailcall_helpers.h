@@ -48,6 +48,19 @@ static __always_inline int tailcall_ctx_write_headend(
     return 0;
 }
 
+// Set the ingress VRF on the per-CPU context. Called once at the XDP entry
+// before any dispatch. The dispatcher's write helpers only touch the scalar
+// header fields and the union, so vrf_id set here survives to the tail-call
+// target. Set every packet (vrf 0 when the front door is off) so the per-CPU
+// entry never carries a stale vrf_id from a previous packet.
+static __always_inline void tailcall_ctx_set_vrf(__u32 vrf_id)
+{
+    __u32 key = TAILCALL_CTX_KEY;
+    struct tailcall_ctx *tctx = bpf_map_lookup_elem(&tailcall_ctx_map, &key);
+    if (tctx)
+        tctx->vrf_id = vrf_id;
+}
+
 // Read context (called by tail call targets)
 static __always_inline struct tailcall_ctx *tailcall_ctx_read(void)
 {

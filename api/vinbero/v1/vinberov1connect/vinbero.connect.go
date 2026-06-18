@@ -41,6 +41,8 @@ const (
 	HeadendL2ServiceName = "vinbero.v1.HeadendL2Service"
 	// StatsServiceName is the fully-qualified name of the StatsService service.
 	StatsServiceName = "vinbero.v1.StatsService"
+	// IngressVrfServiceName is the fully-qualified name of the IngressVrfService service.
+	IngressVrfServiceName = "vinbero.v1.IngressVrfService"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -186,67 +188,84 @@ const (
 	// StatsServiceStatsSlotResetProcedure is the fully-qualified name of the StatsService's
 	// StatsSlotReset RPC.
 	StatsServiceStatsSlotResetProcedure = "/vinbero.v1.StatsService/StatsSlotReset"
+	// IngressVrfServiceIngressVrfBindProcedure is the fully-qualified name of the IngressVrfService's
+	// IngressVrfBind RPC.
+	IngressVrfServiceIngressVrfBindProcedure = "/vinbero.v1.IngressVrfService/IngressVrfBind"
+	// IngressVrfServiceIngressVrfUnbindProcedure is the fully-qualified name of the IngressVrfService's
+	// IngressVrfUnbind RPC.
+	IngressVrfServiceIngressVrfUnbindProcedure = "/vinbero.v1.IngressVrfService/IngressVrfUnbind"
+	// IngressVrfServiceIngressVrfListProcedure is the fully-qualified name of the IngressVrfService's
+	// IngressVrfList RPC.
+	IngressVrfServiceIngressVrfListProcedure = "/vinbero.v1.IngressVrfService/IngressVrfList"
+	// IngressVrfServiceIngressVrfSetPolicyProcedure is the fully-qualified name of the
+	// IngressVrfService's IngressVrfSetPolicy RPC.
+	IngressVrfServiceIngressVrfSetPolicyProcedure = "/vinbero.v1.IngressVrfService/IngressVrfSetPolicy"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
 var (
-	sidFunctionServiceServiceDescriptor                 = v1.File_vinbero_v1_vinbero_proto.Services().ByName("SidFunctionService")
-	sidFunctionServiceSidFunctionCreateMethodDescriptor = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionCreate")
-	sidFunctionServiceSidFunctionDeleteMethodDescriptor = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionDelete")
-	sidFunctionServiceSidFunctionListMethodDescriptor   = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionList")
-	sidFunctionServiceSidFunctionFlushMethodDescriptor  = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionFlush")
-	sidFunctionServiceSidFunctionGetMethodDescriptor    = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionGet")
-	headendv4ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Headendv4Service")
-	headendv4ServiceHeadendv4CreateMethodDescriptor     = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Create")
-	headendv4ServiceHeadendv4DeleteMethodDescriptor     = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Delete")
-	headendv4ServiceHeadendv4ListMethodDescriptor       = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4List")
-	headendv4ServiceHeadendv4FlushMethodDescriptor      = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Flush")
-	headendv4ServiceHeadendv4GetMethodDescriptor        = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Get")
-	headendv6ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Headendv6Service")
-	headendv6ServiceHeadendv6CreateMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Create")
-	headendv6ServiceHeadendv6DeleteMethodDescriptor     = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Delete")
-	headendv6ServiceHeadendv6ListMethodDescriptor       = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6List")
-	headendv6ServiceHeadendv6GetMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
-	headendv6ServiceHeadendv6FlushMethodDescriptor      = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Flush")
-	fdbServiceServiceDescriptor                         = v1.File_vinbero_v1_vinbero_proto.Services().ByName("FdbService")
-	fdbServiceFdbListMethodDescriptor                   = fdbServiceServiceDescriptor.Methods().ByName("FdbList")
-	fdbServiceFdbCreateMethodDescriptor                 = fdbServiceServiceDescriptor.Methods().ByName("FdbCreate")
-	fdbServiceFdbDeleteMethodDescriptor                 = fdbServiceServiceDescriptor.Methods().ByName("FdbDelete")
-	fdbServiceFdbFlushMethodDescriptor                  = fdbServiceServiceDescriptor.Methods().ByName("FdbFlush")
-	vlanTableServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("VlanTableService")
-	vlanTableServiceVlanTableCreateMethodDescriptor     = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableCreate")
-	vlanTableServiceVlanTableDeleteMethodDescriptor     = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableDelete")
-	vlanTableServiceVlanTableListMethodDescriptor       = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableList")
-	vlanTableServiceVlanTableFlushMethodDescriptor      = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableFlush")
-	bdPeerServiceServiceDescriptor                      = v1.File_vinbero_v1_vinbero_proto.Services().ByName("BdPeerService")
-	bdPeerServiceBdPeerCreateMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerCreate")
-	bdPeerServiceBdPeerDeleteMethodDescriptor           = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerDelete")
-	bdPeerServiceBdPeerListMethodDescriptor             = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerList")
-	bdPeerServiceBdPeerFlushMethodDescriptor            = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerFlush")
-	ethernetSegmentServiceServiceDescriptor             = v1.File_vinbero_v1_vinbero_proto.Services().ByName("EthernetSegmentService")
-	ethernetSegmentServiceEsCreateMethodDescriptor      = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsCreate")
-	ethernetSegmentServiceEsDeleteMethodDescriptor      = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsDelete")
-	ethernetSegmentServiceEsListMethodDescriptor        = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsList")
-	ethernetSegmentServiceEsSetDfMethodDescriptor       = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsSetDf")
-	ethernetSegmentServiceEsClearDfMethodDescriptor     = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsClearDf")
-	networkResourceServiceServiceDescriptor             = v1.File_vinbero_v1_vinbero_proto.Services().ByName("NetworkResourceService")
-	networkResourceServiceVrfCreateMethodDescriptor     = networkResourceServiceServiceDescriptor.Methods().ByName("VrfCreate")
-	networkResourceServiceVrfDeleteMethodDescriptor     = networkResourceServiceServiceDescriptor.Methods().ByName("VrfDelete")
-	networkResourceServiceVrfListMethodDescriptor       = networkResourceServiceServiceDescriptor.Methods().ByName("VrfList")
-	networkResourceServiceBridgeCreateMethodDescriptor  = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeCreate")
-	networkResourceServiceBridgeDeleteMethodDescriptor  = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeDelete")
-	networkResourceServiceBridgeListMethodDescriptor    = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeList")
-	headendL2ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("HeadendL2Service")
-	headendL2ServiceHeadendL2CreateMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Create")
-	headendL2ServiceHeadendL2DeleteMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Delete")
-	headendL2ServiceHeadendL2ListMethodDescriptor       = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2List")
-	headendL2ServiceHeadendL2GetMethodDescriptor        = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Get")
-	headendL2ServiceHeadendL2FlushMethodDescriptor      = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Flush")
-	statsServiceServiceDescriptor                       = v1.File_vinbero_v1_vinbero_proto.Services().ByName("StatsService")
-	statsServiceStatsShowMethodDescriptor               = statsServiceServiceDescriptor.Methods().ByName("StatsShow")
-	statsServiceStatsResetMethodDescriptor              = statsServiceServiceDescriptor.Methods().ByName("StatsReset")
-	statsServiceStatsSlotShowMethodDescriptor           = statsServiceServiceDescriptor.Methods().ByName("StatsSlotShow")
-	statsServiceStatsSlotResetMethodDescriptor          = statsServiceServiceDescriptor.Methods().ByName("StatsSlotReset")
+	sidFunctionServiceServiceDescriptor                  = v1.File_vinbero_v1_vinbero_proto.Services().ByName("SidFunctionService")
+	sidFunctionServiceSidFunctionCreateMethodDescriptor  = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionCreate")
+	sidFunctionServiceSidFunctionDeleteMethodDescriptor  = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionDelete")
+	sidFunctionServiceSidFunctionListMethodDescriptor    = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionList")
+	sidFunctionServiceSidFunctionFlushMethodDescriptor   = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionFlush")
+	sidFunctionServiceSidFunctionGetMethodDescriptor     = sidFunctionServiceServiceDescriptor.Methods().ByName("SidFunctionGet")
+	headendv4ServiceServiceDescriptor                    = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Headendv4Service")
+	headendv4ServiceHeadendv4CreateMethodDescriptor      = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Create")
+	headendv4ServiceHeadendv4DeleteMethodDescriptor      = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Delete")
+	headendv4ServiceHeadendv4ListMethodDescriptor        = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4List")
+	headendv4ServiceHeadendv4FlushMethodDescriptor       = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Flush")
+	headendv4ServiceHeadendv4GetMethodDescriptor         = headendv4ServiceServiceDescriptor.Methods().ByName("Headendv4Get")
+	headendv6ServiceServiceDescriptor                    = v1.File_vinbero_v1_vinbero_proto.Services().ByName("Headendv6Service")
+	headendv6ServiceHeadendv6CreateMethodDescriptor      = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Create")
+	headendv6ServiceHeadendv6DeleteMethodDescriptor      = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Delete")
+	headendv6ServiceHeadendv6ListMethodDescriptor        = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6List")
+	headendv6ServiceHeadendv6GetMethodDescriptor         = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Get")
+	headendv6ServiceHeadendv6FlushMethodDescriptor       = headendv6ServiceServiceDescriptor.Methods().ByName("Headendv6Flush")
+	fdbServiceServiceDescriptor                          = v1.File_vinbero_v1_vinbero_proto.Services().ByName("FdbService")
+	fdbServiceFdbListMethodDescriptor                    = fdbServiceServiceDescriptor.Methods().ByName("FdbList")
+	fdbServiceFdbCreateMethodDescriptor                  = fdbServiceServiceDescriptor.Methods().ByName("FdbCreate")
+	fdbServiceFdbDeleteMethodDescriptor                  = fdbServiceServiceDescriptor.Methods().ByName("FdbDelete")
+	fdbServiceFdbFlushMethodDescriptor                   = fdbServiceServiceDescriptor.Methods().ByName("FdbFlush")
+	vlanTableServiceServiceDescriptor                    = v1.File_vinbero_v1_vinbero_proto.Services().ByName("VlanTableService")
+	vlanTableServiceVlanTableCreateMethodDescriptor      = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableCreate")
+	vlanTableServiceVlanTableDeleteMethodDescriptor      = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableDelete")
+	vlanTableServiceVlanTableListMethodDescriptor        = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableList")
+	vlanTableServiceVlanTableFlushMethodDescriptor       = vlanTableServiceServiceDescriptor.Methods().ByName("VlanTableFlush")
+	bdPeerServiceServiceDescriptor                       = v1.File_vinbero_v1_vinbero_proto.Services().ByName("BdPeerService")
+	bdPeerServiceBdPeerCreateMethodDescriptor            = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerCreate")
+	bdPeerServiceBdPeerDeleteMethodDescriptor            = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerDelete")
+	bdPeerServiceBdPeerListMethodDescriptor              = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerList")
+	bdPeerServiceBdPeerFlushMethodDescriptor             = bdPeerServiceServiceDescriptor.Methods().ByName("BdPeerFlush")
+	ethernetSegmentServiceServiceDescriptor              = v1.File_vinbero_v1_vinbero_proto.Services().ByName("EthernetSegmentService")
+	ethernetSegmentServiceEsCreateMethodDescriptor       = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsCreate")
+	ethernetSegmentServiceEsDeleteMethodDescriptor       = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsDelete")
+	ethernetSegmentServiceEsListMethodDescriptor         = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsList")
+	ethernetSegmentServiceEsSetDfMethodDescriptor        = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsSetDf")
+	ethernetSegmentServiceEsClearDfMethodDescriptor      = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsClearDf")
+	networkResourceServiceServiceDescriptor              = v1.File_vinbero_v1_vinbero_proto.Services().ByName("NetworkResourceService")
+	networkResourceServiceVrfCreateMethodDescriptor      = networkResourceServiceServiceDescriptor.Methods().ByName("VrfCreate")
+	networkResourceServiceVrfDeleteMethodDescriptor      = networkResourceServiceServiceDescriptor.Methods().ByName("VrfDelete")
+	networkResourceServiceVrfListMethodDescriptor        = networkResourceServiceServiceDescriptor.Methods().ByName("VrfList")
+	networkResourceServiceBridgeCreateMethodDescriptor   = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeCreate")
+	networkResourceServiceBridgeDeleteMethodDescriptor   = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeDelete")
+	networkResourceServiceBridgeListMethodDescriptor     = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeList")
+	headendL2ServiceServiceDescriptor                    = v1.File_vinbero_v1_vinbero_proto.Services().ByName("HeadendL2Service")
+	headendL2ServiceHeadendL2CreateMethodDescriptor      = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Create")
+	headendL2ServiceHeadendL2DeleteMethodDescriptor      = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Delete")
+	headendL2ServiceHeadendL2ListMethodDescriptor        = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2List")
+	headendL2ServiceHeadendL2GetMethodDescriptor         = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Get")
+	headendL2ServiceHeadendL2FlushMethodDescriptor       = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Flush")
+	statsServiceServiceDescriptor                        = v1.File_vinbero_v1_vinbero_proto.Services().ByName("StatsService")
+	statsServiceStatsShowMethodDescriptor                = statsServiceServiceDescriptor.Methods().ByName("StatsShow")
+	statsServiceStatsResetMethodDescriptor               = statsServiceServiceDescriptor.Methods().ByName("StatsReset")
+	statsServiceStatsSlotShowMethodDescriptor            = statsServiceServiceDescriptor.Methods().ByName("StatsSlotShow")
+	statsServiceStatsSlotResetMethodDescriptor           = statsServiceServiceDescriptor.Methods().ByName("StatsSlotReset")
+	ingressVrfServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("IngressVrfService")
+	ingressVrfServiceIngressVrfBindMethodDescriptor      = ingressVrfServiceServiceDescriptor.Methods().ByName("IngressVrfBind")
+	ingressVrfServiceIngressVrfUnbindMethodDescriptor    = ingressVrfServiceServiceDescriptor.Methods().ByName("IngressVrfUnbind")
+	ingressVrfServiceIngressVrfListMethodDescriptor      = ingressVrfServiceServiceDescriptor.Methods().ByName("IngressVrfList")
+	ingressVrfServiceIngressVrfSetPolicyMethodDescriptor = ingressVrfServiceServiceDescriptor.Methods().ByName("IngressVrfSetPolicy")
 )
 
 // SidFunctionServiceClient is a client for the vinbero.v1.SidFunctionService service.
@@ -1891,4 +1910,150 @@ func (UnimplementedStatsServiceHandler) StatsSlotShow(context.Context, *connect.
 
 func (UnimplementedStatsServiceHandler) StatsSlotReset(context.Context, *connect.Request[v1.StatsSlotResetRequest]) (*connect.Response[v1.StatsSlotResetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsSlotReset is not implemented"))
+}
+
+// IngressVrfServiceClient is a client for the vinbero.v1.IngressVrfService service.
+type IngressVrfServiceClient interface {
+	IngressVrfBind(context.Context, *connect.Request[v1.IngressVrfBindRequest]) (*connect.Response[v1.IngressVrfBindResponse], error)
+	IngressVrfUnbind(context.Context, *connect.Request[v1.IngressVrfUnbindRequest]) (*connect.Response[v1.IngressVrfUnbindResponse], error)
+	IngressVrfList(context.Context, *connect.Request[v1.IngressVrfListRequest]) (*connect.Response[v1.IngressVrfListResponse], error)
+	IngressVrfSetPolicy(context.Context, *connect.Request[v1.IngressVrfSetPolicyRequest]) (*connect.Response[v1.IngressVrfSetPolicyResponse], error)
+}
+
+// NewIngressVrfServiceClient constructs a client for the vinbero.v1.IngressVrfService service. By
+// default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses,
+// and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
+// connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewIngressVrfServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) IngressVrfServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &ingressVrfServiceClient{
+		ingressVrfBind: connect.NewClient[v1.IngressVrfBindRequest, v1.IngressVrfBindResponse](
+			httpClient,
+			baseURL+IngressVrfServiceIngressVrfBindProcedure,
+			connect.WithSchema(ingressVrfServiceIngressVrfBindMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		ingressVrfUnbind: connect.NewClient[v1.IngressVrfUnbindRequest, v1.IngressVrfUnbindResponse](
+			httpClient,
+			baseURL+IngressVrfServiceIngressVrfUnbindProcedure,
+			connect.WithSchema(ingressVrfServiceIngressVrfUnbindMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		ingressVrfList: connect.NewClient[v1.IngressVrfListRequest, v1.IngressVrfListResponse](
+			httpClient,
+			baseURL+IngressVrfServiceIngressVrfListProcedure,
+			connect.WithSchema(ingressVrfServiceIngressVrfListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		ingressVrfSetPolicy: connect.NewClient[v1.IngressVrfSetPolicyRequest, v1.IngressVrfSetPolicyResponse](
+			httpClient,
+			baseURL+IngressVrfServiceIngressVrfSetPolicyProcedure,
+			connect.WithSchema(ingressVrfServiceIngressVrfSetPolicyMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// ingressVrfServiceClient implements IngressVrfServiceClient.
+type ingressVrfServiceClient struct {
+	ingressVrfBind      *connect.Client[v1.IngressVrfBindRequest, v1.IngressVrfBindResponse]
+	ingressVrfUnbind    *connect.Client[v1.IngressVrfUnbindRequest, v1.IngressVrfUnbindResponse]
+	ingressVrfList      *connect.Client[v1.IngressVrfListRequest, v1.IngressVrfListResponse]
+	ingressVrfSetPolicy *connect.Client[v1.IngressVrfSetPolicyRequest, v1.IngressVrfSetPolicyResponse]
+}
+
+// IngressVrfBind calls vinbero.v1.IngressVrfService.IngressVrfBind.
+func (c *ingressVrfServiceClient) IngressVrfBind(ctx context.Context, req *connect.Request[v1.IngressVrfBindRequest]) (*connect.Response[v1.IngressVrfBindResponse], error) {
+	return c.ingressVrfBind.CallUnary(ctx, req)
+}
+
+// IngressVrfUnbind calls vinbero.v1.IngressVrfService.IngressVrfUnbind.
+func (c *ingressVrfServiceClient) IngressVrfUnbind(ctx context.Context, req *connect.Request[v1.IngressVrfUnbindRequest]) (*connect.Response[v1.IngressVrfUnbindResponse], error) {
+	return c.ingressVrfUnbind.CallUnary(ctx, req)
+}
+
+// IngressVrfList calls vinbero.v1.IngressVrfService.IngressVrfList.
+func (c *ingressVrfServiceClient) IngressVrfList(ctx context.Context, req *connect.Request[v1.IngressVrfListRequest]) (*connect.Response[v1.IngressVrfListResponse], error) {
+	return c.ingressVrfList.CallUnary(ctx, req)
+}
+
+// IngressVrfSetPolicy calls vinbero.v1.IngressVrfService.IngressVrfSetPolicy.
+func (c *ingressVrfServiceClient) IngressVrfSetPolicy(ctx context.Context, req *connect.Request[v1.IngressVrfSetPolicyRequest]) (*connect.Response[v1.IngressVrfSetPolicyResponse], error) {
+	return c.ingressVrfSetPolicy.CallUnary(ctx, req)
+}
+
+// IngressVrfServiceHandler is an implementation of the vinbero.v1.IngressVrfService service.
+type IngressVrfServiceHandler interface {
+	IngressVrfBind(context.Context, *connect.Request[v1.IngressVrfBindRequest]) (*connect.Response[v1.IngressVrfBindResponse], error)
+	IngressVrfUnbind(context.Context, *connect.Request[v1.IngressVrfUnbindRequest]) (*connect.Response[v1.IngressVrfUnbindResponse], error)
+	IngressVrfList(context.Context, *connect.Request[v1.IngressVrfListRequest]) (*connect.Response[v1.IngressVrfListResponse], error)
+	IngressVrfSetPolicy(context.Context, *connect.Request[v1.IngressVrfSetPolicyRequest]) (*connect.Response[v1.IngressVrfSetPolicyResponse], error)
+}
+
+// NewIngressVrfServiceHandler builds an HTTP handler from the service implementation. It returns
+// the path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewIngressVrfServiceHandler(svc IngressVrfServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	ingressVrfServiceIngressVrfBindHandler := connect.NewUnaryHandler(
+		IngressVrfServiceIngressVrfBindProcedure,
+		svc.IngressVrfBind,
+		connect.WithSchema(ingressVrfServiceIngressVrfBindMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	ingressVrfServiceIngressVrfUnbindHandler := connect.NewUnaryHandler(
+		IngressVrfServiceIngressVrfUnbindProcedure,
+		svc.IngressVrfUnbind,
+		connect.WithSchema(ingressVrfServiceIngressVrfUnbindMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	ingressVrfServiceIngressVrfListHandler := connect.NewUnaryHandler(
+		IngressVrfServiceIngressVrfListProcedure,
+		svc.IngressVrfList,
+		connect.WithSchema(ingressVrfServiceIngressVrfListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	ingressVrfServiceIngressVrfSetPolicyHandler := connect.NewUnaryHandler(
+		IngressVrfServiceIngressVrfSetPolicyProcedure,
+		svc.IngressVrfSetPolicy,
+		connect.WithSchema(ingressVrfServiceIngressVrfSetPolicyMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.IngressVrfService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case IngressVrfServiceIngressVrfBindProcedure:
+			ingressVrfServiceIngressVrfBindHandler.ServeHTTP(w, r)
+		case IngressVrfServiceIngressVrfUnbindProcedure:
+			ingressVrfServiceIngressVrfUnbindHandler.ServeHTTP(w, r)
+		case IngressVrfServiceIngressVrfListProcedure:
+			ingressVrfServiceIngressVrfListHandler.ServeHTTP(w, r)
+		case IngressVrfServiceIngressVrfSetPolicyProcedure:
+			ingressVrfServiceIngressVrfSetPolicyHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedIngressVrfServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedIngressVrfServiceHandler struct{}
+
+func (UnimplementedIngressVrfServiceHandler) IngressVrfBind(context.Context, *connect.Request[v1.IngressVrfBindRequest]) (*connect.Response[v1.IngressVrfBindResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.IngressVrfService.IngressVrfBind is not implemented"))
+}
+
+func (UnimplementedIngressVrfServiceHandler) IngressVrfUnbind(context.Context, *connect.Request[v1.IngressVrfUnbindRequest]) (*connect.Response[v1.IngressVrfUnbindResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.IngressVrfService.IngressVrfUnbind is not implemented"))
+}
+
+func (UnimplementedIngressVrfServiceHandler) IngressVrfList(context.Context, *connect.Request[v1.IngressVrfListRequest]) (*connect.Response[v1.IngressVrfListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.IngressVrfService.IngressVrfList is not implemented"))
+}
+
+func (UnimplementedIngressVrfServiceHandler) IngressVrfSetPolicy(context.Context, *connect.Request[v1.IngressVrfSetPolicyRequest]) (*connect.Response[v1.IngressVrfSetPolicyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.IngressVrfService.IngressVrfSetPolicy is not implemented"))
 }

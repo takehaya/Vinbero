@@ -46,11 +46,31 @@ func (b *VrfBindingConfig) Validate() error {
 
 // Config is the top-level configuration
 type Config struct {
-	InternalConfig InternalConfig `yaml:"internal,omitempty"`
-	Setting        SettingConfig  `yaml:"settings,omitempty"`
-	BGP            BGPConfig      `yaml:"bgp,omitempty"`
+	InternalConfig InternalConfig   `yaml:"internal,omitempty"`
+	Setting        SettingConfig    `yaml:"settings,omitempty"`
+	BGP            BGPConfig        `yaml:"bgp,omitempty"`
+	IngressVrf     IngressVrfConfig `yaml:"ingress_vrf,omitempty"`
 	Original       string
 	Configpath     string
+}
+
+// IngressVrfConfig configures the ingress VRF front door: {interface, VLAN} ->
+// vrf_id resolved once at the XDP entry. vrf_id 0 is the global/default VRF
+// (underlay). default_deny drops (or passes, per deny_action) an unmapped AC
+// instead of falling into the global VRF; enabling it without mapping the
+// underlay/control interfaces to vrf 0 black-holes host-bound BGP/NDP, so map
+// every interface that must forward.
+type IngressVrfConfig struct {
+	Entries     []IngressVrfEntryConfig `yaml:"entries,omitempty"`
+	DefaultDeny bool                    `yaml:"default_deny,omitempty"`
+	DenyAction  string                  `yaml:"deny_action,omitempty"` // "drop" (default) | "pass"
+}
+
+// IngressVrfEntryConfig is one {interface, VLAN} -> vrf_id binding.
+type IngressVrfEntryConfig struct {
+	Interface string `yaml:"interface,omitempty"`
+	VLAN      uint16 `yaml:"vlan,omitempty"`
+	VRFID     uint32 `yaml:"vrf_id,omitempty"`
 }
 
 // BGPConfig is the optional in-process BGP speaker configuration. It is

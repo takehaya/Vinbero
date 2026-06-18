@@ -2402,6 +2402,53 @@ func TestXDPProgHMGtp4DTeidUplinkInstance(t *testing.T) {
 	})
 }
 
+// TestXDPProgIngressVrfFrontDoor verifies the ingress VRF front door and the
+// opt-in global default-deny: with the policy off a packet passes (back-compat);
+// with default-deny on an unmapped AC is dropped (or passed per deny_action);
+// and an explicit entry (even for vrf 0) keeps the AC forwarding.
+func TestXDPProgIngressVrfFrontDoor(t *testing.T) {
+	h := newXDPTestHelper(t)
+	pkt := buildPlainIPv4(t)
+	const ifidx = 1 // loopback; BPF_PROG_TEST_RUN backs the buffer with it
+
+	// Baseline: front door disabled -> packet passes as before.
+	if ret, _ := h.runOnIfindex(pkt, ifidx); ret != XDP_PASS {
+		t.Fatalf("front door off: ret = %d, want XDP_PASS", ret)
+	}
+
+	// default-deny + drop, no entry for {ifidx, 0} -> dropped.
+	if err := h.mapOps.SetIngressPolicy(true, true, 0 /* drop */); err != nil {
+		t.Fatalf("SetIngressPolicy: %v", err)
+	}
+	t.Cleanup(func() { _ = h.mapOps.SetIngressPolicy(false, false, 0) })
+	if ret, _ := h.runOnIfindex(pkt, ifidx); ret != XDP_DROP {
+		t.Errorf("default-deny/drop, unmapped: ret = %d, want XDP_DROP", ret)
+	}
+
+	// default-deny + pass -> unmapped passes to the kernel instead of dropping.
+	if err := h.mapOps.SetIngressPolicy(true, true, 1 /* pass */); err != nil {
+		t.Fatalf("SetIngressPolicy: %v", err)
+	}
+	if ret, _ := h.runOnIfindex(pkt, ifidx); ret != XDP_PASS {
+		t.Errorf("default-deny/pass, unmapped: ret = %d, want XDP_PASS", ret)
+	}
+
+	// Explicit entry (vrf 0 = global/underlay) under default-deny/drop -> the AC
+	// is mapped, so it forwards (XDP_PASS) instead of being dropped. This is how
+	// the underlay is expressed: map it explicitly to vrf 0.
+	if err := h.mapOps.SetIngressPolicy(true, true, 0 /* drop */); err != nil {
+		t.Fatalf("SetIngressPolicy: %v", err)
+	}
+	mapping := map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 0}: 0}
+	if err := h.mapOps.SetIngressVrf(mapping); err != nil {
+		t.Fatalf("SetIngressVrf: %v", err)
+	}
+	t.Cleanup(func() { _ = h.mapOps.SetIngressVrf(map[IngressACKey]uint32{}) })
+	if ret, _ := h.runOnIfindex(pkt, ifidx); ret != XDP_PASS {
+		t.Errorf("explicit vrf-0 entry under default-deny: ret = %d, want XDP_PASS", ret)
+	}
+}
+
 func TestXDPProgEndMGtp4E(t *testing.T) {
 	h := newXDPTestHelper(t)
 	gtpSrcAddr := [4]byte{10, 0, 0, 1}

@@ -44,7 +44,11 @@ struct tailcall_ctx {
                             // and masked on read in tailcall_epilogue. Denormalized
                             // from sid_entry.action / headend.mode so the epilogue
                             // doesn't need to switch on dispatch_type for union access.
-    __u8  _pad[3];          // Keep 4-byte alignment for the union below
+    __u8  _pad[3];          // Keep 4-byte alignment for vrf_id / union below
+    __u32 vrf_id;           // Ingress VRF (front door), set once at the XDP entry
+                            // (xdp_main) before dispatch. Lives outside the union
+                            // so the dispatcher's union memcpy preserves it; read
+                            // by downstream handlers (e.g. the MUP uplink gate).
     union {
         // Endpoint (localsid/nosrh): 12 bytes. Aux is re-looked up by target.
         struct sid_function_entry sid_entry;

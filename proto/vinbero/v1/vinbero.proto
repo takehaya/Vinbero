@@ -612,3 +612,55 @@ message StatsSlotResetRequest {
   repeated string map_types = 1; // empty = reset all three types
 }
 message StatsSlotResetResponse {}
+
+// IngressVrfService manages the ingress VRF front door: {interface, vlan} ->
+// vrf_id classification resolved once at the XDP entry and carried to all
+// downstream paths. vrf_id 0 is the global/default VRF (underlay); tenant VRFs
+// are 1..N. The global policy gates default-deny (unmapped AC -> drop/pass
+// instead of falling into the global VRF).
+service IngressVrfService {
+  rpc IngressVrfBind(IngressVrfBindRequest) returns (IngressVrfBindResponse);
+  rpc IngressVrfUnbind(IngressVrfUnbindRequest) returns (IngressVrfUnbindResponse);
+  rpc IngressVrfList(IngressVrfListRequest) returns (IngressVrfListResponse);
+  rpc IngressVrfSetPolicy(IngressVrfSetPolicyRequest) returns (IngressVrfSetPolicyResponse);
+}
+
+message IngressVrfEntry {
+  string interface_name = 1; // ingress port (resolved to ifindex by server)
+  uint32 vlan = 2;           // VLAN ID (0 = untagged)
+  uint32 vrf_id = 3;         // ingress VRF context (0 = global/default VRF)
+}
+
+message IngressVrfPolicy {
+  bool default_deny = 1;     // unmapped AC is denied instead of falling to vrf 0
+  string deny_action = 2;    // "drop" (default) | "pass"
+}
+
+message IngressVrfBindRequest {
+  repeated IngressVrfEntry entries = 1;
+}
+message IngressVrfBindResponse {
+  repeated IngressVrfEntry bound = 1;
+  repeated OperationError errors = 2;
+}
+
+message IngressVrfUnbindRequest {
+  repeated IngressVrfEntry entries = 1; // identified by {interface, vlan}
+}
+message IngressVrfUnbindResponse {
+  repeated IngressVrfEntry unbound = 1;
+  repeated OperationError errors = 2;
+}
+
+message IngressVrfListRequest {}
+message IngressVrfListResponse {
+  repeated IngressVrfEntry entries = 1;
+  IngressVrfPolicy policy = 2;
+}
+
+message IngressVrfSetPolicyRequest {
+  IngressVrfPolicy policy = 1;
+}
+message IngressVrfSetPolicyResponse {
+  IngressVrfPolicy policy = 1;
+}
