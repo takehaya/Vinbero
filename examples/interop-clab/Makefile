@@ -32,12 +32,7 @@ TOPO         := $(SCENARIO_DIR)/clab.yml
 VINBERO_IMAGE ?= vinbero-interop:latest
 FRR_IMAGE     ?= frr-interop:10.2.1
 
-# a commercial NOS lives in the manual mup-2site-vendor scenario only. It runs as a
-# KVM VM (generic_vm / vrnetlab vr-ubuntu:noble), provisioned post-boot with the
-# vendor-licensed vendor bits under images/vendor/ (see `provision-vendor`).
-vendor_DIR     := $(LAB_DIR)/images/vendor
-
-.PHONY: all build build-vinbero build-frr provision-vendor deploy destroy reload test \
+.PHONY: all build build-vinbero build-frr provision deploy destroy reload test \
         logs status scenarios
 
 all: build deploy test destroy
@@ -62,18 +57,17 @@ build-frr:
 		-f $(LAB_DIR)/images/frr/Dockerfile \
 		$(LAB_DIR)/images/frr
 
-# Provision the vendor node inside its VM after `make deploy`. Applies to any
-# scenario that ships an `vendor/setup-vendor.sh` (the GW-role mup-2site-vendor
-# and the PE-role mup-2site-vendor-pe). The script pushes the images/vendor/
-# bits into the generic_vm and runs the vendor install (kernel + VPP + the
-# vendor NOS container). Prerequisite: the vr-ubuntu:noble base image must
-# already be built in your vrnetlab checkout (`make build-vr-ubuntu` there).
-# Not part of `build` -- it needs a running lab and the vendor-licensed
-# bits, so it never runs in CI.
-provision-vendor:
-	@if [ ! -f $(SCENARIO_DIR)/vendor/setup-vendor.sh ]; then \
-		echo "provision-vendor: $(SCENARIO_DIR)/vendor/setup-vendor.sh not found for SCENARIO=$(SCENARIO)"; exit 2; fi
-	bash $(SCENARIO_DIR)/vendor/setup-vendor.sh
+# Post-deploy provisioning hook for a scenario whose node needs out-of-band
+# setup after `make deploy` (for example a VM-based NOS that boots from a
+# generic image and is configured over SSH). The scenario must ship a
+# `provision.sh` at its root; this target errors if it is missing. Most
+# scenarios need no provisioning and simply never call it. Not part of
+# `build` and never runs in CI -- it needs a running lab and may pull in
+# artifacts that are not part of this repo.
+provision:
+	@if [ ! -f $(SCENARIO_DIR)/provision.sh ]; then \
+		echo "provision: $(SCENARIO_DIR)/provision.sh not found for SCENARIO=$(SCENARIO)"; exit 2; fi
+	bash $(SCENARIO_DIR)/provision.sh
 
 # `vrf` is loaded on demand: GitHub Actions runners (and some minimal
 # hosts) ship CONFIG_NET_VRF=m unloaded, so `ip link add ... type vrf`
