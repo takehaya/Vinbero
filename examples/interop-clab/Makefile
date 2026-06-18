@@ -57,14 +57,15 @@ build-frr:
 		-f $(LAB_DIR)/images/frr/Dockerfile \
 		$(LAB_DIR)/images/frr
 
-# Post-deploy provisioning hook for scenarios whose node needs out-of-band
+# Post-deploy provisioning hook for a scenario whose node needs out-of-band
 # setup after `make deploy` (for example a VM-based NOS that boots from a
-# generic image and is configured over SSH). A scenario opts in by shipping
-# an executable `provision.sh` at its root; scenarios without one skip this
-# step. Not part of `build` and never runs in CI -- it needs a running lab
-# and may pull in artifacts that are not part of this repo.
+# generic image and is configured over SSH). The scenario must ship a
+# `provision.sh` at its root; this target errors if it is missing. Most
+# scenarios need no provisioning and simply never call it. Not part of
+# `build` and never runs in CI -- it needs a running lab and may pull in
+# artifacts that are not part of this repo.
 provision:
-	@if [ ! -x $(SCENARIO_DIR)/provision.sh ]; then \
+	@if [ ! -f $(SCENARIO_DIR)/provision.sh ]; then \
 		echo "provision: $(SCENARIO_DIR)/provision.sh not found for SCENARIO=$(SCENARIO)"; exit 2; fi
 	bash $(SCENARIO_DIR)/provision.sh
 
