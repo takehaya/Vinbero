@@ -199,11 +199,7 @@ sdk/examples/*/plugin.o
 # containerlab deploy artifacts (generated under each scenario by `clab deploy`)
 examples/interop-clab/scenarios/*/clab-*/
 
-# Private interop overlays. Proprietary, license-restricted vendor labs (VM
-# images, NOS configs, provisioning scripts) live in a separate private repo
-# and are rsync'd in for local runs only. They must never be committed to this
-# public repo; these guards keep an accidental `git add -A` from publishing them.
-/clab_vendor.sh
+# Local-only interop overlays applied on top of this checkout (provisioned out
+# of band; not part of this repo). Kept untracked so they can't be committed.
 /examples/interop-clab/images/vendor/
-/examples/interop-clab/scenarios/mup-2site-vendor/
-/examples/interop-clab/scenarios/mup-2site-vendor-pe/
+/examples/interop-clab/scenarios/vendor/
