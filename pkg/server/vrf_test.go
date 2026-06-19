@@ -227,6 +227,25 @@ func TestVrfServer_UnresolvableInterfaceRollsBack(t *testing.T) {
 	}
 }
 
+// An AC added to the reserved "global" VRF maps to vrf_id 0 (the underlay), so
+// it can be expressed through the same RPC under default-deny.
+func TestVrfServer_GlobalVRFAc(t *testing.T) {
+	s, prog := newTestVrfServer()
+	resp, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{
+		Name: vrf.GlobalVRFName,
+		Ac:   &v1.VrfAc{InterfaceName: "eth0", Vlan: 0},
+	}))
+	if err != nil {
+		t.Fatalf("VrfAcAdd global: %v", err)
+	}
+	if got := resp.Msg.GetVrf().GetVrfId(); got != vrf.GlobalVRFID {
+		t.Errorf("global VRF id = %d, want 0", got)
+	}
+	if v, ok := prog.mapping[bpf.IngressACKey{Ifindex: 10, VlanId: 0}]; !ok || v != vrf.GlobalVRFID {
+		t.Errorf("global AC programmed as (%d, %v), want explicit 0 entry", v, ok)
+	}
+}
+
 // VrfShow lists every VRF (with its id and ACs) plus the global policy.
 func TestVrfServer_Show(t *testing.T) {
 	s, _ := newTestVrfServer()

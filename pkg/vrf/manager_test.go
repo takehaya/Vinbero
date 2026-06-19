@@ -158,6 +158,39 @@ func TestManager_ReturnedACsAreCopies(t *testing.T) {
 	}
 }
 
+// The reserved global VRF name maps ACs to vrf_id 0 (the underlay): under
+// default-deny those ACs get an explicit {ifindex, vlan} -> 0 entry so they
+// pass, while a tenant VRF keeps a non-zero id. The id 0 is never recycled.
+func TestManager_GlobalVRFAC(t *testing.T) {
+	m := NewManager()
+	if added, err := m.AddAC(GlobalVRFName, AC{"eth3", 0}); err != nil || !added {
+		t.Fatalf("AddAC global = (added %v, %v), want (true, nil)", added, err)
+	}
+	if id, ok := m.IDForName(GlobalVRFName); !ok || id != GlobalVRFID {
+		t.Fatalf("IDForName(global) = (%d, %v), want (0, true)", id, ok)
+	}
+	// A tenant VRF still gets a non-zero id, distinct from the global VRF.
+	if _, err := m.AddAC("tenant", AC{"eth1", 100}); err != nil {
+		t.Fatalf("AddAC tenant: %v", err)
+	}
+	if id, _ := m.IDForName("tenant"); id == GlobalVRFID {
+		t.Errorf("tenant VRF got the global id 0")
+	}
+	// Reconcile programs the global AC as an explicit -> 0 entry.
+	fp := &fakeProg{}
+	if err := m.Reconcile(resolver(map[string]uint32{"eth3": 13, "eth1": 11}), fp); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if v, ok := fp.mapping[bpf.IngressACKey{Ifindex: 13, VlanId: 0}]; !ok || v != GlobalVRFID {
+		t.Errorf("global AC eth3 -> (%d, %v), want explicit 0 entry", v, ok)
+	}
+	// The global id must not be recycled to a tenant on delete.
+	m.Delete(GlobalVRFName)
+	if next := m.Ensure("tenant2"); next.ID == GlobalVRFID {
+		t.Errorf("global id 0 was recycled to tenant2")
+	}
+}
+
 // Reconcile is fatal on a duplicate {ifindex, vlan}: AddAC blocks the same
 // {interface, vlan} across VRFs, but two distinct interface names resolving to
 // one ifindex still must not silently flap classification.

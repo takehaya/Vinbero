@@ -19,7 +19,7 @@ func vrfIngressSubcommands() []*cli.Command {
 			Name:  "ac-add",
 			Usage: "Add an ingress access circuit {interface, vlan} to a VRF (creates the VRF)",
 			Flags: []cli.Flag{
-				&cli.StringFlag{Name: "vrf", Required: true, Usage: "VRF name"},
+				&cli.StringFlag{Name: "vrf", Required: true, Usage: "VRF name (reserved name \"global\" maps the AC to the underlay, vrf_id 0)"},
 				&cli.StringFlag{Name: "interface", Required: true, Usage: "Ingress interface name"},
 				&cli.UintFlag{Name: "vlan", Usage: "VLAN ID (0 = untagged)"},
 			},

@@ -29,6 +29,14 @@ const (
 // (or is dropped under default-deny).
 const GlobalVRFID uint32 = 0
 
+// GlobalVRFName is the reserved VRF name that maps to GlobalVRFID. The global/
+// underlay VRF is a real (reserved) VRF: adding an ingress AC to it programs an
+// explicit {ifindex, vlan} -> 0 entry, which under default-deny lets the
+// underlay / control-plane interfaces through (an unmapped AC is dropped). It
+// is reserved — a tenant VRF cannot take this name, and it is never assigned a
+// non-zero id.
+const GlobalVRFName = "global"
+
 // Policy is the global ingress policy.
 type Policy struct {
 	DefaultDeny bool
@@ -107,7 +115,12 @@ func (m *Manager) ensureLocked(name string) *VRF {
 	if v, ok := m.byName[name]; ok {
 		return v
 	}
-	v := &VRF{Name: name, ID: m.allocIDLocked()}
+	// The reserved global VRF keeps id 0; everything else allocates 1..N.
+	id := GlobalVRFID
+	if name != GlobalVRFName {
+		id = m.allocIDLocked()
+	}
+	v := &VRF{Name: name, ID: id}
 	m.byName[name] = v
 	m.byID[v.ID] = name
 	return v
@@ -200,7 +213,8 @@ func (m *Manager) RemoveAC(name string, ac AC) (removed bool) {
 	return removed
 }
 
-// Delete removes a VRF and recycles its id. A no-op when absent.
+// Delete removes a VRF and recycles its id. A no-op when absent. The reserved
+// global VRF's id (0) is never recycled — it must never be handed to a tenant.
 func (m *Manager) Delete(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -210,7 +224,9 @@ func (m *Manager) Delete(name string) {
 	}
 	delete(m.byName, name)
 	delete(m.byID, v.ID)
-	m.freeIDs = append(m.freeIDs, v.ID)
+	if v.ID != GlobalVRFID {
+		m.freeIDs = append(m.freeIDs, v.ID)
+	}
 }
 
 // List returns a snapshot of the VRFs sorted by name, each with ACs sorted by
