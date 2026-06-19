@@ -127,6 +127,30 @@ func TestManager_AC_NoCrossVRFDuplicate(t *testing.T) {
 	}
 }
 
+// Ensure and ByID return ACs that do not alias the manager's internal slice,
+// so a caller mutating the returned ACs cannot corrupt stored state.
+func TestManager_ReturnedACsAreCopies(t *testing.T) {
+	m := NewManager()
+	_ = m.AddAC("v", AC{"eth1", 100})
+
+	got := m.Ensure("v")
+	if len(got.ACs) != 1 {
+		t.Fatalf("Ensure ACs = %+v, want one", got.ACs)
+	}
+	got.ACs[0] = AC{"hacked", 4095} // mutate the returned slice
+
+	id, _ := m.IDForName("v")
+	byID, _ := m.ByID(id)
+	if len(byID.ACs) != 1 || byID.ACs[0] != (AC{"eth1", 100}) {
+		t.Errorf("internal ACs were corrupted via the returned slice: %+v", byID.ACs)
+	}
+	// Mutating ByID's result must likewise not leak back.
+	byID.ACs[0] = AC{"hacked2", 4094}
+	if again, _ := m.ByID(id); again.ACs[0] != (AC{"eth1", 100}) {
+		t.Errorf("ByID result aliases internal state: %+v", again.ACs)
+	}
+}
+
 // Reconcile is fatal on a duplicate {ifindex, vlan}: AddAC blocks the same
 // {interface, vlan} across VRFs, but two distinct interface names resolving to
 // one ifindex still must not silently flap classification.

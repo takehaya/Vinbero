@@ -55,6 +55,15 @@ func (s *VrfServer) VrfAcRemove(
 	req *connect.Request[v1.VrfAcRemoveRequest],
 ) (*connect.Response[v1.VrfAcRemoveResponse], error) {
 	ac := req.Msg.GetAc()
+	// Required fields: RemoveAC is idempotent on a genuinely-absent AC, but an
+	// empty name or interface is an operator typo, not a legitimate remove, so
+	// reject it instead of silently no-op'ing.
+	if req.Msg.GetName() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("vrf name is required"))
+	}
+	if ac.GetInterfaceName() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("ac interface_name is required"))
+	}
 	// Range-check before the uint16 cast: a vlan past 4095 would wrap (e.g.
 	// 4096 -> 0) and delete a different AC than the operator named.
 	if ac.GetVlan() > 4095 {

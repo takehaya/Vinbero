@@ -173,6 +173,21 @@ func TestVrfServer_InvalidInput(t *testing.T) {
 		t.Errorf("AcRemove vlan 4096: code = %v, want InvalidArgument", connect.CodeOf(err))
 	}
 
+	// Empty name / interface on remove is a typo, not a legitimate idempotent
+	// remove: reject rather than silently no-op.
+	_, err = s.VrfAcRemove(context.Background(), connect.NewRequest(&v1.VrfAcRemoveRequest{
+		Name: "", Ac: &v1.VrfAc{InterfaceName: "eth0"},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("AcRemove empty name: code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	_, err = s.VrfAcRemove(context.Background(), connect.NewRequest(&v1.VrfAcRemoveRequest{
+		Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: ""},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("AcRemove empty interface: code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+
 	_, err = s.VrfSetPolicy(context.Background(), connect.NewRequest(&v1.VrfSetPolicyRequest{
 		Policy: &v1.VrfPolicy{DefaultDeny: true, DenyAction: "bogus"},
 	}))

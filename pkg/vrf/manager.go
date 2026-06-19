@@ -86,14 +86,21 @@ func (m *Manager) allocIDLocked() uint32 {
 	return id
 }
 
+// clone returns a copy of v whose ACs slice shares no backing array with the
+// stored VRF, so a caller mutating the returned ACs cannot corrupt internal
+// state (or race a concurrent AddAC/RemoveAC that re-slices it).
+func (v *VRF) clone() VRF {
+	return VRF{Name: v.Name, ID: v.ID, ACs: append([]AC(nil), v.ACs...)}
+}
+
 // Ensure returns the VRF for name, creating it (allocating an id) if absent.
 // Facets (a BGP binding, MUP uplink) call this so a referenced VRF always has
-// a stable id even before any AC is configured.
+// a stable id even before any AC is configured. The returned VRF's ACs are a
+// copy (see clone).
 func (m *Manager) Ensure(name string) VRF {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v := m.ensureLocked(name)
-	return *v
+	return m.ensureLocked(name).clone()
 }
 
 func (m *Manager) ensureLocked(name string) *VRF {
@@ -117,7 +124,7 @@ func (m *Manager) IDForName(name string) (uint32, bool) {
 	return GlobalVRFID, false
 }
 
-// ByID returns the VRF holding id.
+// ByID returns the VRF holding id. The returned VRF's ACs are a copy (see clone).
 func (m *Manager) ByID(id uint32) (VRF, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -125,8 +132,7 @@ func (m *Manager) ByID(id uint32) (VRF, bool) {
 	if !ok {
 		return VRF{}, false
 	}
-	v := m.byName[name]
-	return *v, true
+	return m.byName[name].clone(), true
 }
 
 // AddAC adds an ingress access circuit to a VRF (creating the VRF if absent).
@@ -256,38 +262,51 @@ func (m *Manager) enabledLocked() bool {
 // without colliding with other writers. An unresolvable interface is fatal so
 // a misconfigured AC surfaces rather than silently disappearing.
 func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programmer) error {
+	// Snapshot the VRFs (in name order), their ACs, and the policy under the
+	// read lock, then release it before resolving interface names. resolve is
+	// net.InterfaceByName in production — a netlink/sysfs call that can block —
+	// and holding the lock across it would stall AddAC / RemoveAC / SetPolicy
+	// writers. Name order makes a duplicate-key error name the same pair every
+	// time (map iteration order is otherwise random).
+	type vrfSnapshot struct {
+		name string
+		id   uint32
+		acs  []AC
+	}
 	m.mu.RLock()
-	mapping := make(map[bpf.IngressACKey]uint32)
-	// Iterate VRFs in name order so a duplicate-key error names the same pair
-	// deterministically (map iteration order is otherwise random). AddAC blocks
-	// the same {interface, vlan} across VRFs, but two distinct interface names
-	// can still resolve to one ifindex; surface that as a fatal config error
-	// rather than letting classification depend on iteration order.
 	names := make([]string, 0, len(m.byName))
 	for name := range m.byName {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	snaps := make([]vrfSnapshot, 0, len(names))
 	for _, name := range names {
 		v := m.byName[name]
-		for _, ac := range v.ACs {
-			idx, err := resolve(ac.Interface)
-			if err != nil {
-				m.mu.RUnlock()
-				return fmt.Errorf("vrf %q: resolve %q: %w", v.Name, ac.Interface, err)
-			}
-			key := bpf.IngressACKey{Ifindex: idx, VlanId: ac.VLAN}
-			if owner, dup := mapping[key]; dup && owner != v.ID {
-				m.mu.RUnlock()
-				return fmt.Errorf("vrf %q: ingress {ifindex %d, vlan %d} already claimed by vrf_id %d (two interfaces resolve to the same ifindex)",
-					v.Name, idx, ac.VLAN, owner)
-			}
-			mapping[key] = v.ID
-		}
+		snaps = append(snaps, vrfSnapshot{name: v.Name, id: v.ID, acs: append([]AC(nil), v.ACs...)})
 	}
 	pol := m.policy
 	enabled := m.enabledLocked()
 	m.mu.RUnlock()
+
+	mapping := make(map[bpf.IngressACKey]uint32)
+	for _, s := range snaps {
+		for _, ac := range s.acs {
+			idx, err := resolve(ac.Interface)
+			if err != nil {
+				return fmt.Errorf("vrf %q: resolve %q: %w", s.name, ac.Interface, err)
+			}
+			// AddAC blocks the same {interface, vlan} across VRFs, but two
+			// distinct interface names can still resolve to one ifindex; surface
+			// that as a fatal config error rather than letting classification
+			// depend on iteration order.
+			key := bpf.IngressACKey{Ifindex: idx, VlanId: ac.VLAN}
+			if owner, dup := mapping[key]; dup && owner != s.id {
+				return fmt.Errorf("vrf %q: ingress {ifindex %d, vlan %d} already claimed by vrf_id %d (two interfaces resolve to the same ifindex)",
+					s.name, idx, ac.VLAN, owner)
+			}
+			mapping[key] = s.id
+		}
+	}
 
 	if err := prog.SetIngressVrf(mapping); err != nil {
 		return err
