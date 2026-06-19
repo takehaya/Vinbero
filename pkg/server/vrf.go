@@ -47,7 +47,13 @@ func (s *VrfServer) reconcileOrRollback(undo func() error) error {
 		if uerr := undo(); uerr != nil {
 			return fmt.Errorf("%w; rollback failed (in-memory state may diverge from the data plane): %v", err, uerr)
 		}
-		_ = s.reconcile()
+		// undo restored the prior in-memory state; re-reconcile to converge the
+		// data plane onto it. If that also fails the in-memory and data-plane
+		// state can still diverge, so surface it alongside the original error
+		// rather than swallowing it.
+		if rerr := s.reconcile(); rerr != nil {
+			return fmt.Errorf("%w; data plane could not be reverted after rollback (state may diverge): %v", err, rerr)
+		}
 		return err
 	}
 	return nil
