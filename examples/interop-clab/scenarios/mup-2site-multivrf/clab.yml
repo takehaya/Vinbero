@@ -1,13 +1,13 @@
 # containerlab topology for the mup-2site-multivrf interop scenario.
 #
-# Two MUP service instances (VPN-A / VPN-B) share ONE Vinbero MUP-GW and ONE
-# Vinbero MUP-PE, and deliberately overlap everywhere a VPN may overlap: both
-# use the same N3 endpoint (172.16.0.254), the same TEID (256), the same UE
-# (10.1.0.1) and the same DN (10.0.0.1). The only thing separating them is
-# the GW access interface the GTP-U arrives on: the GW's uplink instances
-# (vrf-bgp bind --mup-uplink-interfaces) key the F-TEID lookup by ingress
-# ifindex, steering byte-identical packets to per-VPN direct SIDs, and the
-# PE's End.DT4 delivers each into its own kernel VRF.
+# Two VRFs (VPN-A / VPN-B) share ONE Vinbero MUP-GW and ONE Vinbero MUP-PE,
+# and deliberately overlap everywhere a VPN may overlap: both use the same N3
+# endpoint (172.16.0.254), the same TEID (256), the same UE (10.1.0.1) and
+# the same DN (10.0.0.1). The only thing separating them is the GW access
+# interface the GTP-U arrives on: the GW's ingress AC membership (vbctl vrf
+# ac-add) classifies each interface to a vrf_id, which keys the F-TEID lookup,
+# steering byte-identical packets to per-VPN direct SIDs, and the PE's End.DT4
+# delivers each into its own kernel VRF.
 #
 #   gnb-a --N3-A-- mup-gw ===== core ===== mup-pe --N6-A-- dn-a
 #   gnb-b --N3-B--/                 |            \--N6-B-- dn-b

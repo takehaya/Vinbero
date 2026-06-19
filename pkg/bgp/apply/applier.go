@@ -45,7 +45,6 @@ type mupOps interface {
 	DeleteMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error
 	CreateMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
 	DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error
-	SetMupUplinkInstances(mapping map[uint32]uint32) error
 }
 
 // dataPlane is the BPF map surface the applier writes: headend encap

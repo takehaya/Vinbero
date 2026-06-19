@@ -96,28 +96,6 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } mup_uplink_v6_map SEC(".maps");
 
-// MUP uplink instance map: ingress ifindex -> uplink service instance id.
-// Written by the control plane from the VRF bindings' mup_uplink_interfaces;
-// a miss means the default instance 0. Lets two service instances share an
-// N3 endpoint address space: the F-TEID keys above carry the instance, so the
-// same {endpoint, TEID} can be installed once per instance and the access
-// interface decides which one a packet resolves against.
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, __u32);   // ingress ifindex
-    __type(value, __u32); // instance id (host order; keys embed it big-endian)
-    __uint(max_entries, 256);
-} mup_ifindex_instance_map SEC(".maps");
-
-// Resolve the uplink instance for the current packet from its ingress
-// ifindex; unmapped interfaces fall to the default instance 0.
-static __always_inline __u32 mup_uplink_instance(struct xdp_md *ctx)
-{
-    __u32 ifindex = ctx->ingress_ifindex;
-    __u32 *inst = bpf_map_lookup_elem(&mup_ifindex_instance_map, &ifindex);
-    return inst ? *inst : 0;
-}
-
 // ========== Ingress VRF front door ==========
 //
 // {ifindex, vlan_id} -> vrf_id (ingress classification context). Resolved once

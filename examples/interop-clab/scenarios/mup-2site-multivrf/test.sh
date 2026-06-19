@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # mup-2site-multivrf interop scenario assertions.
 #
-# Two MUP service instances (VPN-A / VPN-B) overlap everywhere a VPN may
-# overlap: same N3 endpoint, same TEID, same inner UE and DN addressing. The
-# GW's uplink instances (vrf-bgp --mup-uplink-interfaces) key the F-TEID
-# lookup by ingress ifindex; the PE's per-VPN End.DT4 delivers into separate
+# Two VRFs (VPN-A / VPN-B) overlap everywhere a VPN may overlap: same N3
+# endpoint, same TEID, same inner UE and DN addressing. The GW's ingress AC
+# membership (vbctl vrf ac-add) classifies each access interface to a vrf_id,
+# which keys the F-TEID lookup; the PE's per-VPN End.DT4 delivers into separate
 # kernel VRFs. It proves, end to end:
 #   1. control plane: the GW installs BOTH T2STs — identical {endpoint, TEID}
-#      — under distinct uplink instances, behind one shared gate;
+#      — under distinct vrf_ids, behind one shared gate;
 #   2. uplink isolation A: a GTP-U burst from gnb-a reaches dn-a and ONLY
 #      dn-a, even though dn-b would accept the byte-identical inner packet;
 #   3. uplink isolation B: the mirror case from gnb-b.
@@ -31,25 +31,26 @@ echo "=============================================="
 echo " mup-2site-multivrf interop (two VPNs, one GW, overlapping F-TEIDs)"
 echo "=============================================="
 
-# --- 1. Control plane: both T2STs install under distinct instances ----------
-echo ""; echo "[1] control plane (per-instance F-TEID install)"
+# --- 1. Control plane: both T2STs install under distinct VRFs ---------------
+echo ""; echo "[1] control plane (per-VRF F-TEID install)"
 if retry bash -c "docker exec $GW grep -c 'MUP DSD segment discovery' /var/log/vinberod.log | grep -q '^2$'"; then
     ok "mup-gw received both per-VPN DSDs"
 else
     ng "mup-gw did not receive both DSDs"; dexec "$GW" grep 'MUP DSD' /var/log/vinberod.log || true
 fi
-# The two T2STs carry the SAME {endpoint, TEID}; without instances the second
-# install would overwrite the first. The install log carries the instance the
-# F-TEID entry was keyed under (bind order in mup-gw/start.sh: vpn-a=1, vpn-b=2).
-if retry bash -c "docker exec $GW grep 'MUP T2ST uplink installed' /var/log/vinberod.log | grep -q '\"instance\": 1'" \
-   && retry bash -c "docker exec $GW grep 'MUP T2ST uplink installed' /var/log/vinberod.log | grep -q '\"instance\": 2'"; then
-    ok "mup-gw installed both overlapping T2STs under distinct uplink instances (1 and 2)"
+# The two T2STs carry the SAME {endpoint, TEID}; without per-VRF keying the
+# second install would overwrite the first. The install log carries the vrf_id
+# the F-TEID entry was keyed under (ac-add order in mup-gw/start.sh allocates
+# vpn-a=1, vpn-b=2).
+if retry bash -c "docker exec $GW grep 'MUP T2ST uplink installed' /var/log/vinberod.log | grep -q '\"vrf_id\": 1'" \
+   && retry bash -c "docker exec $GW grep 'MUP T2ST uplink installed' /var/log/vinberod.log | grep -q '\"vrf_id\": 2'"; then
+    ok "mup-gw installed both overlapping T2STs under distinct vrf_ids (1 and 2)"
 else
-    ng "mup-gw did not install both T2STs under distinct instances"
+    ng "mup-gw did not install both T2STs under distinct vrf_ids"
     dexec "$GW" grep 'MUP T2ST' /var/log/vinberod.log | sed 's/^/      /' || true
 fi
 if retry bash -c "docker exec $GW vbctl headend-v4 list 2>/dev/null | grep -c '$N3' | grep -q '^1$'"; then
-    ok "the F-TEID gate on $N3/32 is shared (installed once across instances)"
+    ok "the F-TEID gate on $N3/32 is shared (installed once across VRFs)"
 else
     ng "unexpected gate state for $N3"; dexec "$GW" vbctl headend-v4 list || true
 fi
@@ -81,20 +82,20 @@ run_isolation() {
         echo "      mup-gw uplink state:"; dexec "$GW" vbctl headend-v4 list 2>/dev/null | sed 's/^/      /' || true
     fi
     if grep -q "$UE > $DNHOST" "$ocap"; then
-        ng "$lother received traffic that belongs to the other VPN (instance leak)"
+        ng "$lother received traffic that belongs to the other VPN (VRF leak)"
         sed 's/^/      /' "$ocap" | head -4
     else
-        ok "$lother received nothing (no cross-instance leak)"
+        ok "$lother received nothing (no cross-VRF leak)"
     fi
     rm -f "$wcap" "$ocap"
 }
 
 # --- 2. Uplink isolation, VPN-A ----------------------------------------------
-echo ""; echo "[2] uplink isolation VPN-A (gnb-a -> instance 1 -> vrf-a -> dn-a)"
+echo ""; echo "[2] uplink isolation VPN-A (gnb-a -> vrf_id 1 -> vpn-a -> dn-a)"
 run_isolation "$GNBA" "$DNA" "$DNB" "dn-a" "dn-b"
 
 # --- 3. Uplink isolation, VPN-B ----------------------------------------------
-echo ""; echo "[3] uplink isolation VPN-B (gnb-b -> instance 2 -> vrf-b -> dn-b)"
+echo ""; echo "[3] uplink isolation VPN-B (gnb-b -> vrf_id 2 -> vpn-b -> dn-b)"
 run_isolation "$GNBB" "$DNB" "$DNA" "dn-b" "dn-a"
 
 echo ""

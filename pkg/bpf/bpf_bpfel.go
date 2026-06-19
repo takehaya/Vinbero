@@ -297,40 +297,39 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
-	AuxOwnerMap           *ebpf.MapSpec `ebpf:"aux_owner_map"`
-	BdLocalEsiMap         *ebpf.MapSpec `ebpf:"bd_local_esi_map"`
-	BdPeerL2ExtMap        *ebpf.MapSpec `ebpf:"bd_peer_l2_ext_map"`
-	BdPeerMap             *ebpf.MapSpec `ebpf:"bd_peer_map"`
-	BdPeerReverseMap      *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
-	Dx2vMap               *ebpf.MapSpec `ebpf:"dx2v_map"`
-	EsiMap                *ebpf.MapSpec `ebpf:"esi_map"`
-	FdbMap                *ebpf.MapSpec `ebpf:"fdb_map"`
-	HeadendL2ExtMap       *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
-	HeadendL2Map          *ebpf.MapSpec `ebpf:"headend_l2_map"`
-	HeadendL2Progs        *ebpf.MapSpec `ebpf:"headend_l2_progs"`
-	HeadendV4Map          *ebpf.MapSpec `ebpf:"headend_v4_map"`
-	HeadendV4OwnerMap     *ebpf.MapSpec `ebpf:"headend_v4_owner_map"`
-	HeadendV4Progs        *ebpf.MapSpec `ebpf:"headend_v4_progs"`
-	HeadendV6Map          *ebpf.MapSpec `ebpf:"headend_v6_map"`
-	HeadendV6OwnerMap     *ebpf.MapSpec `ebpf:"headend_v6_owner_map"`
-	HeadendV6Progs        *ebpf.MapSpec `ebpf:"headend_v6_progs"`
-	IngressPolicyMap      *ebpf.MapSpec `ebpf:"ingress_policy_map"`
-	IngressVrfMap         *ebpf.MapSpec `ebpf:"ingress_vrf_map"`
-	MupIfindexInstanceMap *ebpf.MapSpec `ebpf:"mup_ifindex_instance_map"`
-	MupUplinkV4Map        *ebpf.MapSpec `ebpf:"mup_uplink_v4_map"`
-	MupUplinkV6Map        *ebpf.MapSpec `ebpf:"mup_uplink_v6_map"`
-	ScratchMap            *ebpf.MapSpec `ebpf:"scratch_map"`
-	SidAuxMap             *ebpf.MapSpec `ebpf:"sid_aux_map"`
-	SidEndpointProgs      *ebpf.MapSpec `ebpf:"sid_endpoint_progs"`
-	SidFunctionMap        *ebpf.MapSpec `ebpf:"sid_function_map"`
-	SidFunctionOwnerMap   *ebpf.MapSpec `ebpf:"sid_function_owner_map"`
-	SlotStatsEndpoint     *ebpf.MapSpec `ebpf:"slot_stats_endpoint"`
-	SlotStatsHeadendL2    *ebpf.MapSpec `ebpf:"slot_stats_headend_l2"`
-	SlotStatsHeadendV4    *ebpf.MapSpec `ebpf:"slot_stats_headend_v4"`
-	SlotStatsHeadendV6    *ebpf.MapSpec `ebpf:"slot_stats_headend_v6"`
-	SrPolicyMap           *ebpf.MapSpec `ebpf:"sr_policy_map"`
-	StatsMap              *ebpf.MapSpec `ebpf:"stats_map"`
-	TailcallCtxMap        *ebpf.MapSpec `ebpf:"tailcall_ctx_map"`
+	AuxOwnerMap         *ebpf.MapSpec `ebpf:"aux_owner_map"`
+	BdLocalEsiMap       *ebpf.MapSpec `ebpf:"bd_local_esi_map"`
+	BdPeerL2ExtMap      *ebpf.MapSpec `ebpf:"bd_peer_l2_ext_map"`
+	BdPeerMap           *ebpf.MapSpec `ebpf:"bd_peer_map"`
+	BdPeerReverseMap    *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
+	Dx2vMap             *ebpf.MapSpec `ebpf:"dx2v_map"`
+	EsiMap              *ebpf.MapSpec `ebpf:"esi_map"`
+	FdbMap              *ebpf.MapSpec `ebpf:"fdb_map"`
+	HeadendL2ExtMap     *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
+	HeadendL2Map        *ebpf.MapSpec `ebpf:"headend_l2_map"`
+	HeadendL2Progs      *ebpf.MapSpec `ebpf:"headend_l2_progs"`
+	HeadendV4Map        *ebpf.MapSpec `ebpf:"headend_v4_map"`
+	HeadendV4OwnerMap   *ebpf.MapSpec `ebpf:"headend_v4_owner_map"`
+	HeadendV4Progs      *ebpf.MapSpec `ebpf:"headend_v4_progs"`
+	HeadendV6Map        *ebpf.MapSpec `ebpf:"headend_v6_map"`
+	HeadendV6OwnerMap   *ebpf.MapSpec `ebpf:"headend_v6_owner_map"`
+	HeadendV6Progs      *ebpf.MapSpec `ebpf:"headend_v6_progs"`
+	IngressPolicyMap    *ebpf.MapSpec `ebpf:"ingress_policy_map"`
+	IngressVrfMap       *ebpf.MapSpec `ebpf:"ingress_vrf_map"`
+	MupUplinkV4Map      *ebpf.MapSpec `ebpf:"mup_uplink_v4_map"`
+	MupUplinkV6Map      *ebpf.MapSpec `ebpf:"mup_uplink_v6_map"`
+	ScratchMap          *ebpf.MapSpec `ebpf:"scratch_map"`
+	SidAuxMap           *ebpf.MapSpec `ebpf:"sid_aux_map"`
+	SidEndpointProgs    *ebpf.MapSpec `ebpf:"sid_endpoint_progs"`
+	SidFunctionMap      *ebpf.MapSpec `ebpf:"sid_function_map"`
+	SidFunctionOwnerMap *ebpf.MapSpec `ebpf:"sid_function_owner_map"`
+	SlotStatsEndpoint   *ebpf.MapSpec `ebpf:"slot_stats_endpoint"`
+	SlotStatsHeadendL2  *ebpf.MapSpec `ebpf:"slot_stats_headend_l2"`
+	SlotStatsHeadendV4  *ebpf.MapSpec `ebpf:"slot_stats_headend_v4"`
+	SlotStatsHeadendV6  *ebpf.MapSpec `ebpf:"slot_stats_headend_v6"`
+	SrPolicyMap         *ebpf.MapSpec `ebpf:"sr_policy_map"`
+	StatsMap            *ebpf.MapSpec `ebpf:"stats_map"`
+	TailcallCtxMap      *ebpf.MapSpec `ebpf:"tailcall_ctx_map"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -360,40 +359,39 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
-	AuxOwnerMap           *ebpf.Map `ebpf:"aux_owner_map"`
-	BdLocalEsiMap         *ebpf.Map `ebpf:"bd_local_esi_map"`
-	BdPeerL2ExtMap        *ebpf.Map `ebpf:"bd_peer_l2_ext_map"`
-	BdPeerMap             *ebpf.Map `ebpf:"bd_peer_map"`
-	BdPeerReverseMap      *ebpf.Map `ebpf:"bd_peer_reverse_map"`
-	Dx2vMap               *ebpf.Map `ebpf:"dx2v_map"`
-	EsiMap                *ebpf.Map `ebpf:"esi_map"`
-	FdbMap                *ebpf.Map `ebpf:"fdb_map"`
-	HeadendL2ExtMap       *ebpf.Map `ebpf:"headend_l2_ext_map"`
-	HeadendL2Map          *ebpf.Map `ebpf:"headend_l2_map"`
-	HeadendL2Progs        *ebpf.Map `ebpf:"headend_l2_progs"`
-	HeadendV4Map          *ebpf.Map `ebpf:"headend_v4_map"`
-	HeadendV4OwnerMap     *ebpf.Map `ebpf:"headend_v4_owner_map"`
-	HeadendV4Progs        *ebpf.Map `ebpf:"headend_v4_progs"`
-	HeadendV6Map          *ebpf.Map `ebpf:"headend_v6_map"`
-	HeadendV6OwnerMap     *ebpf.Map `ebpf:"headend_v6_owner_map"`
-	HeadendV6Progs        *ebpf.Map `ebpf:"headend_v6_progs"`
-	IngressPolicyMap      *ebpf.Map `ebpf:"ingress_policy_map"`
-	IngressVrfMap         *ebpf.Map `ebpf:"ingress_vrf_map"`
-	MupIfindexInstanceMap *ebpf.Map `ebpf:"mup_ifindex_instance_map"`
-	MupUplinkV4Map        *ebpf.Map `ebpf:"mup_uplink_v4_map"`
-	MupUplinkV6Map        *ebpf.Map `ebpf:"mup_uplink_v6_map"`
-	ScratchMap            *ebpf.Map `ebpf:"scratch_map"`
-	SidAuxMap             *ebpf.Map `ebpf:"sid_aux_map"`
-	SidEndpointProgs      *ebpf.Map `ebpf:"sid_endpoint_progs"`
-	SidFunctionMap        *ebpf.Map `ebpf:"sid_function_map"`
-	SidFunctionOwnerMap   *ebpf.Map `ebpf:"sid_function_owner_map"`
-	SlotStatsEndpoint     *ebpf.Map `ebpf:"slot_stats_endpoint"`
-	SlotStatsHeadendL2    *ebpf.Map `ebpf:"slot_stats_headend_l2"`
-	SlotStatsHeadendV4    *ebpf.Map `ebpf:"slot_stats_headend_v4"`
-	SlotStatsHeadendV6    *ebpf.Map `ebpf:"slot_stats_headend_v6"`
-	SrPolicyMap           *ebpf.Map `ebpf:"sr_policy_map"`
-	StatsMap              *ebpf.Map `ebpf:"stats_map"`
-	TailcallCtxMap        *ebpf.Map `ebpf:"tailcall_ctx_map"`
+	AuxOwnerMap         *ebpf.Map `ebpf:"aux_owner_map"`
+	BdLocalEsiMap       *ebpf.Map `ebpf:"bd_local_esi_map"`
+	BdPeerL2ExtMap      *ebpf.Map `ebpf:"bd_peer_l2_ext_map"`
+	BdPeerMap           *ebpf.Map `ebpf:"bd_peer_map"`
+	BdPeerReverseMap    *ebpf.Map `ebpf:"bd_peer_reverse_map"`
+	Dx2vMap             *ebpf.Map `ebpf:"dx2v_map"`
+	EsiMap              *ebpf.Map `ebpf:"esi_map"`
+	FdbMap              *ebpf.Map `ebpf:"fdb_map"`
+	HeadendL2ExtMap     *ebpf.Map `ebpf:"headend_l2_ext_map"`
+	HeadendL2Map        *ebpf.Map `ebpf:"headend_l2_map"`
+	HeadendL2Progs      *ebpf.Map `ebpf:"headend_l2_progs"`
+	HeadendV4Map        *ebpf.Map `ebpf:"headend_v4_map"`
+	HeadendV4OwnerMap   *ebpf.Map `ebpf:"headend_v4_owner_map"`
+	HeadendV4Progs      *ebpf.Map `ebpf:"headend_v4_progs"`
+	HeadendV6Map        *ebpf.Map `ebpf:"headend_v6_map"`
+	HeadendV6OwnerMap   *ebpf.Map `ebpf:"headend_v6_owner_map"`
+	HeadendV6Progs      *ebpf.Map `ebpf:"headend_v6_progs"`
+	IngressPolicyMap    *ebpf.Map `ebpf:"ingress_policy_map"`
+	IngressVrfMap       *ebpf.Map `ebpf:"ingress_vrf_map"`
+	MupUplinkV4Map      *ebpf.Map `ebpf:"mup_uplink_v4_map"`
+	MupUplinkV6Map      *ebpf.Map `ebpf:"mup_uplink_v6_map"`
+	ScratchMap          *ebpf.Map `ebpf:"scratch_map"`
+	SidAuxMap           *ebpf.Map `ebpf:"sid_aux_map"`
+	SidEndpointProgs    *ebpf.Map `ebpf:"sid_endpoint_progs"`
+	SidFunctionMap      *ebpf.Map `ebpf:"sid_function_map"`
+	SidFunctionOwnerMap *ebpf.Map `ebpf:"sid_function_owner_map"`
+	SlotStatsEndpoint   *ebpf.Map `ebpf:"slot_stats_endpoint"`
+	SlotStatsHeadendL2  *ebpf.Map `ebpf:"slot_stats_headend_l2"`
+	SlotStatsHeadendV4  *ebpf.Map `ebpf:"slot_stats_headend_v4"`
+	SlotStatsHeadendV6  *ebpf.Map `ebpf:"slot_stats_headend_v6"`
+	SrPolicyMap         *ebpf.Map `ebpf:"sr_policy_map"`
+	StatsMap            *ebpf.Map `ebpf:"stats_map"`
+	TailcallCtxMap      *ebpf.Map `ebpf:"tailcall_ctx_map"`
 }
 
 func (m *BpfMaps) Close() error {
@@ -417,7 +415,6 @@ func (m *BpfMaps) Close() error {
 		m.HeadendV6Progs,
 		m.IngressPolicyMap,
 		m.IngressVrfMap,
-		m.MupIfindexInstanceMap,
 		m.MupUplinkV4Map,
 		m.MupUplinkV6Map,
 		m.ScratchMap,

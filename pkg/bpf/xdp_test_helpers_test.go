@@ -117,7 +117,7 @@ type xdpMdCtx struct {
 }
 
 // runOnIfindex is run with the xdp_md context's ingress_ifindex set, for
-// behaviors keyed on the ingress interface (the MUP uplink instance lookup).
+// behaviors keyed on the ingress AC (the ingress front door's vrf_id lookup).
 func (h *xdpTestHelper) runOnIfindex(pkt []byte, ifindex uint32) (uint32, []byte) {
 	h.t.Helper()
 	ctx := xdpMdCtx{DataEnd: uint32(len(pkt)), IngressIfindex: ifindex}
@@ -1086,8 +1086,9 @@ func (h *xdpTestHelper) createMupUplinkSession(endpoint string, teid uint32, tei
 }
 
 // createMupUplinkSessionInstance is createMupUplinkSession keyed under an
-// explicit uplink instance (0 = default; non-zero entries are only reachable
-// from interfaces mapped to that instance via mup_ifindex_instance_map).
+// explicit vrf_id (0 = global VRF; non-zero entries are only reachable from
+// ingress ACs mapped to that vrf_id via ingress_vrf_map, resolved into
+// tailcall_ctx.vrf_id at the XDP entry).
 func (h *xdpTestHelper) createMupUplinkSessionInstance(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
 	h.t.Helper()
 	entry := &HeadendEntry{

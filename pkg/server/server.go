@@ -17,7 +17,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
-	"github.com/takehaya/vinbero/pkg/ingressvrf"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -39,7 +39,6 @@ type Server struct {
 	evpnES       EvpnEsHook                 // EVPN RT4 auto-advertise ES hook; nil when off
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	mupSrc       MupBindingReconciler       // MUP binding-state reconcile hook; nil when BGP is off
-	ingressVrf   *ingressvrf.Manager        // ingress VRF front-door table (always present)
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
@@ -70,7 +69,6 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		vrfExporter: vrfExporter,
 		evpnCoord:   evpnCoord,
 		evpnES:      evpnES,
-		ingressVrf:  ingressvrf.NewManager(),
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}
@@ -82,10 +80,12 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 	return s
 }
 
-// IngressVrfManager returns the ingress VRF front-door table so the daemon can
-// load config entries into it and reconcile them at boot, before serving.
-func (s *Server) IngressVrfManager() *ingressvrf.Manager {
-	return s.ingressVrf
+// VrfManager returns the first-class VRF manager (ingress facet) so the daemon
+// can load config VRFs into it and reconcile them at boot, before serving. It
+// is owned by the vrfbgp manager so the BGP facet and the VRF object share one
+// identity space.
+func (s *Server) VrfManager() *vrf.Manager {
+	return s.vrfBgpMgr.VRF()
 }
 
 // Setup registers all service handlers
@@ -205,11 +205,11 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VlanTableService", zap.String("path", path))
 
-	// IngressVrf service (ingress VRF front door: {ifindex,vlan} -> vrf_id)
-	ingressVrfServer := NewIngressVrfServer(s.ingressVrf, s.mapOps)
-	path, handler = vinberov1connect.NewIngressVrfServiceHandler(ingressVrfServer)
+	// Vrf service (VRF ingress facet: AC membership + default-deny policy)
+	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps)
+	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
-	s.logger.Info("Registered IngressVrfService", zap.String("path", path))
+	s.logger.Info("Registered VrfService", zap.String("path", path))
 
 	// Plugin service (dynamic BPF plugin registration). pluginServer was
 	// created at the top of Setup() so SidFunctionServer could hold a

@@ -59,7 +59,6 @@ func NewApp() *cli.App {
 			mupCommand(),
 			fdbCommand(),
 			vlanTableCommand(),
-			ingressVrfCommand(),
 			statsCommand(),
 			pluginCommand(),
 			completion.Command(),

@@ -47,7 +47,7 @@ jobs:
           - evpn-2site           # EVPN RT2 (MAC/IP) L2VPN over BGP (SAFI 70)
           - evpn-multihoming     # EVPN RT4 multi-homing: DF election + split-horizon
           - mup-2site            # BGP MUP (SAFI 85): controller advertises, gateway applies
-          - mup-2site-multivrf   # MUP uplink instances: two VPNs share one N3 endpoint + TEID
+          - mup-2site-multivrf   # per-VRF MUP uplink: two VPNs share one N3 endpoint + TEID
     steps:
       - name: Checkout
         uses: actions/checkout@v5

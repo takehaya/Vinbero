@@ -42,8 +42,7 @@ type fakeHeadend struct {
 	bdPeerDelErr  error
 	esis          map[[bpf.ESILen]byte]*bpf.EsiEntry
 
-	mupUplink           map[mupUplinkKey]*bpf.HeadendEntry
-	mupIfindexInstances map[uint32]uint32
+	mupUplink map[mupUplinkKey]*bpf.HeadendEntry
 }
 
 func newFakeHeadend() *fakeHeadend {
@@ -162,12 +161,6 @@ func (f *fakeHeadend) CreateMupUplinkV6(instance uint32, endpoint string, teid u
 
 func (f *fakeHeadend) DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
 	delete(f.mupUplink, mupUplinkKey{instance, endpoint, teid, teidPrefixBits})
-	return nil
-}
-
-// mupIfindexInstances records the last SetMupUplinkInstances rewrite.
-func (f *fakeHeadend) SetMupUplinkInstances(mapping map[uint32]uint32) error {
-	f.mupIfindexInstances = mapping
 	return nil
 }
 
