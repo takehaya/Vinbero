@@ -46,7 +46,8 @@ func (s *VrfServer) VrfAcAdd(
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	id, _ := s.mgr.IDForName(name)
-	return connect.NewResponse(&v1.VrfAcAddResponse{Vrf: vrfToProto(name, id, s.mgr)}), nil
+	v, _ := s.mgr.ByID(id)
+	return connect.NewResponse(&v1.VrfAcAddResponse{Vrf: vrfToProto(v)}), nil
 }
 
 func (s *VrfServer) VrfAcRemove(
@@ -86,11 +87,7 @@ func (s *VrfServer) VrfShow(
 	vrfs := s.mgr.List()
 	out := make([]*v1.Vrf, 0, len(vrfs))
 	for _, v := range vrfs {
-		acs := make([]*v1.VrfAc, 0, len(v.ACs))
-		for _, ac := range v.ACs {
-			acs = append(acs, &v1.VrfAc{InterfaceName: ac.Interface, Vlan: uint32(ac.VLAN)})
-		}
-		out = append(out, &v1.Vrf{Name: v.Name, VrfId: v.ID, Acs: acs})
+		out = append(out, vrfToProto(v))
 	}
 	pol := s.mgr.Policy()
 	return connect.NewResponse(&v1.VrfShowResponse{
@@ -99,18 +96,13 @@ func (s *VrfServer) VrfShow(
 	}), nil
 }
 
-// vrfToProto renders a single VRF's ingress facet (looked up by name).
-func vrfToProto(name string, id uint32, mgr *vrf.Manager) *v1.Vrf {
-	out := &v1.Vrf{Name: name, VrfId: id}
-	for _, v := range mgr.List() {
-		if v.Name != name {
-			continue
-		}
-		for _, ac := range v.ACs {
-			out.Acs = append(out.Acs, &v1.VrfAc{InterfaceName: ac.Interface, Vlan: uint32(ac.VLAN)})
-		}
+// vrfToProto renders a VRF's ingress facet (name, vrf_id, access circuits).
+func vrfToProto(v vrf.VRF) *v1.Vrf {
+	acs := make([]*v1.VrfAc, 0, len(v.ACs))
+	for _, ac := range v.ACs {
+		acs = append(acs, &v1.VrfAc{InterfaceName: ac.Interface, Vlan: uint32(ac.VLAN)})
 	}
-	return out
+	return &v1.Vrf{Name: v.Name, VrfId: v.ID, Acs: acs}
 }
 
 // parseDenyAction maps the wire string to the data-plane code; empty = drop.

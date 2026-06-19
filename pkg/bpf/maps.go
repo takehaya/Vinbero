@@ -1446,10 +1446,9 @@ func (m *MapOperations) DeleteMupUplinkV6(instance uint32, endpoint string, teid
 // ===== Ingress VRF front door =====
 
 // SetIngressVrf replaces the {ifindex, vlan} -> vrf_id mapping
-// (ingress_vrf_map) with the given one. Same all-or-nothing semantics as
-// SetMupUplinkInstances: the live mapping is snapshotted first and any
-// partial progress is rolled back on a write/delete error, so a failure
-// leaves the old classification fully in place.
+// (ingress_vrf_map) with the given one, all-or-nothing: the live mapping is
+// snapshotted first and any partial progress is rolled back on a write/delete
+// error, so a failure leaves the old classification fully in place.
 func (m *MapOperations) SetIngressVrf(mapping map[IngressACKey]uint32) error {
 	old := make(map[IngressACKey]uint32)
 	var key IngressACKey

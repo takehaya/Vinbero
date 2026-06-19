@@ -381,11 +381,6 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 	return nil
 }
 
-// configToBinding converts a config VRF binding into the runtime vrfbgp
-// Binding. The caller is responsible for validating b.BDID's range first.
-// vrfbgp.Binding.Normalize (called from Manager.Bind) expands the legacy
-// ImportRTs / ExportRTs when Families is empty, so a vinbero.yml written
-// before the rt-afi-safi schema keeps working unchanged.
 // loadVRFs programs the VRFs' ingress facet from config at boot: it sets the
 // global policy, registers each VRF's access circuits, and reconciles the
 // data-plane maps. A config-declared interface that does not resolve is fatal
@@ -414,6 +409,11 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, lg *
 	return mgr.Reconcile(vrf.ResolveByName, prog)
 }
 
+// configToBinding converts a config VRF binding into the runtime vrfbgp
+// Binding. The caller is responsible for validating b.BDID's range first.
+// vrfbgp.Binding.Normalize (called from Manager.Bind) expands the legacy
+// ImportRTs / ExportRTs when Families is empty, so a vinbero.yml written
+// before the rt-afi-safi schema keeps working unchanged.
 func configToBinding(b config.VrfBindingConfig) (vrfbgp.Binding, error) {
 	fams, err := configFamilies(b.Families)
 	if err != nil {

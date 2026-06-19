@@ -68,7 +68,12 @@ func NewManager() *Manager {
 	}
 }
 
-// allocIDLocked returns a recycled or fresh vrf_id (>= 1).
+// allocIDLocked returns a recycled or fresh vrf_id (>= 1). Deleted ids are
+// recycled via the free list, so nextID only advances for genuinely-new VRFs.
+// Wraparound of the uint32 counter is not guarded: reaching it needs ~4 billion
+// concurrently-live VRFs (deletes recycle), which exhausts the byName map's
+// memory — and the data-plane ingress_vrf_map (4096 entries) — long before the
+// counter could overflow.
 func (m *Manager) allocIDLocked() uint32 {
 	if n := len(m.freeIDs); n > 0 {
 		id := m.freeIDs[n-1]
