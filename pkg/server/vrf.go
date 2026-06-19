@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -19,6 +20,12 @@ type VrfServer struct {
 	mgr     *vrf.Manager
 	prog    vrf.Programmer
 	resolve func(string) (uint32, error)
+	// mu serializes the mutation handlers' mutate+reconcile(+rollback)
+	// sequence. SetIngressVrf / SetIngressPolicy replace the maps with a
+	// snapshot-then-rollback strategy (not a kernel-atomic swap), so two
+	// concurrent reconciles could interleave and one rollback could clobber the
+	// other's write. Mirrors VrfBgpServer.mu, which serializes the same way.
+	mu sync.Mutex
 }
 
 func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer) *VrfServer {
@@ -63,6 +70,8 @@ func (s *VrfServer) VrfAcAdd(
 	_ context.Context,
 	req *connect.Request[v1.VrfAcAddRequest],
 ) (*connect.Response[v1.VrfAcAddResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ac := req.Msg.GetAc()
 	if ac.GetVlan() > 4095 {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
@@ -92,6 +101,8 @@ func (s *VrfServer) VrfAcRemove(
 	_ context.Context,
 	req *connect.Request[v1.VrfAcRemoveRequest],
 ) (*connect.Response[v1.VrfAcRemoveResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ac := req.Msg.GetAc()
 	// Required fields: RemoveAC is idempotent on a genuinely-absent AC, but an
 	// empty name or interface is an operator typo, not a legitimate remove, so
@@ -127,6 +138,8 @@ func (s *VrfServer) VrfSetPolicy(
 	_ context.Context,
 	req *connect.Request[v1.VrfSetPolicyRequest],
 ) (*connect.Response[v1.VrfSetPolicyResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	p := req.Msg.GetPolicy()
 	action, err := parseDenyAction(p.GetDenyAction())
 	if err != nil {

@@ -618,16 +618,16 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 			zap.Int("max", maxMUPSessions), zap.String("rd", r.RD), zap.String("endpoint", r.Endpoint))
 		return
 	}
-	// A re-advertise can land on a different instance when the bindings moved
+	// A re-advertise can land on a different vrf_id when the bindings moved
 	// underneath it. The session key {rd, endpoint, teid, teidLen} is the
-	// F-TEID key minus the instance, so an installed entry can move without
+	// F-TEID key minus the vrf_id, so an installed entry can move without
 	// touching the shared gate; a failed move keeps the session on its old
-	// instance until the next reconcile.
-	inst := a.mupVRFForRoute(fam, r)
-	if st.installedSID != "" && st.instance != inst {
-		a.rekeyMUPT2ST(st, inst)
+	// vrf_id until the next reconcile.
+	vrfID := a.mupVRFForRoute(fam, r)
+	if st.installedSID != "" && st.instance != vrfID {
+		a.rekeyMUPT2ST(st, vrfID)
 	} else if st.installedSID == "" {
-		st.instance = inst
+		st.instance = vrfID
 	}
 	st.route = *r
 	st.fam = fam

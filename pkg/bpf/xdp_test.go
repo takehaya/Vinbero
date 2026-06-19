@@ -2318,12 +2318,12 @@ func TestXDPProgHMGtp6DTeid(t *testing.T) {
 	}
 }
 
-// TestXDPProgHMGtp4DTeidUplinkInstance verifies the uplink VRF scoping: two
-// VRFs install the SAME {endpoint, TEID} with different direct SIDs, and the
-// ingress AC (via ingress_vrf_map, resolved into tailcall_ctx.vrf_id at the
-// XDP entry) decides which one a packet resolves against. Also verifies that a
-// VRF does NOT fall back to another VRF's entries on a miss.
-func TestXDPProgHMGtp4DTeidUplinkInstance(t *testing.T) {
+// TestXDPProgHMGtp4DTeidVRFScope verifies the uplink VRF scoping: two VRFs
+// install the SAME {endpoint, TEID} with different direct SIDs, and the ingress
+// AC (via ingress_vrf_map, resolved into tailcall_ctx.vrf_id at the XDP entry)
+// decides which one a packet resolves against. Also verifies that a VRF does
+// NOT fall back to another VRF's entries on a miss.
+func TestXDPProgHMGtp4DTeidVRFScope(t *testing.T) {
 	h := newXDPTestHelper(t)
 
 	const n3Endpoint = "192.0.2.100"
