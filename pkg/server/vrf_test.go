@@ -199,15 +199,31 @@ func TestVrfServer_InvalidInput(t *testing.T) {
 	}
 }
 
-// An unresolvable AC interface fails the reconcile (Internal) so a typo
-// surfaces instead of silently dropping the AC.
-func TestVrfServer_UnresolvableInterfaceIsFatal(t *testing.T) {
-	s, _ := newTestVrfServer()
+// An unresolvable AC interface fails the reconcile (Internal); the failed add
+// is rolled back so the bad AC does not linger and poison every later
+// reconcile, and a subsequent valid add still succeeds.
+func TestVrfServer_UnresolvableInterfaceRollsBack(t *testing.T) {
+	s, prog := newTestVrfServer()
 	_, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{
 		Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: "does-not-exist", Vlan: 0},
 	}))
 	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("unresolvable interface: code = %v, want Internal", connect.CodeOf(err))
+		t.Fatalf("unresolvable interface: code = %v, want Internal", connect.CodeOf(err))
+	}
+	// The bad AC must have been rolled out of the manager.
+	for _, v := range s.mgr.List() {
+		if len(v.ACs) != 0 {
+			t.Errorf("failed add left AC behind on vrf %q: %+v", v.Name, v.ACs)
+		}
+	}
+	// A subsequent valid add must succeed (the manager is not poisoned).
+	if _, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{
+		Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: "eth0", Vlan: 0},
+	})); err != nil {
+		t.Fatalf("valid add after a rolled-back failure: %v", err)
+	}
+	if prog.mapping[bpf.IngressACKey{Ifindex: 10, VlanId: 0}] == 0 {
+		t.Errorf("valid AC not programmed after recovery; mapping=%v", prog.mapping)
 	}
 }
 

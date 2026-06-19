@@ -128,7 +128,7 @@ struct {
 #define INGRESS_VRF_CONTINUE (-1)
 static __always_inline int resolve_ingress_vrf(struct xdp_md *ctx, __u16 vlan_id, __u32 *vrf_id_out)
 {
-    *vrf_id_out = 0; // global VRF default; set every packet so tailcall_ctx is never stale
+    *vrf_id_out = 0; // global VRF default; written on every return path so the caller never propagates a stale vrf_id
     __u32 pkey = 0;
     struct ingress_policy *pol = bpf_map_lookup_elem(&ingress_policy_map, &pkey);
     if (!pol || !pol->enabled)

@@ -29,6 +29,23 @@ func (s *VrfServer) reconcile() error {
 	return s.mgr.Reconcile(s.resolve, s.prog)
 }
 
+// reconcileOrRollback programs the data plane after an in-memory mutation. On
+// failure it invokes undo to revert the mutation and re-reconciles so the data
+// plane converges to the reverted state, then returns the original error. This
+// keeps the RPC atomic: a failed reconcile (an unresolvable AC interface, a
+// transient map-write error) must not leave the in-memory state ahead of the
+// data plane — in particular a bad AC left behind would fail every later
+// reconcile too. The compensating re-reconcile is best-effort; the first error
+// is the one surfaced to the caller.
+func (s *VrfServer) reconcileOrRollback(undo func()) error {
+	if err := s.reconcile(); err != nil {
+		undo()
+		_ = s.reconcile()
+		return err
+	}
+	return nil
+}
+
 func (s *VrfServer) VrfAcAdd(
 	_ context.Context,
 	req *connect.Request[v1.VrfAcAddRequest],
@@ -39,10 +56,11 @@ func (s *VrfServer) VrfAcAdd(
 			fmt.Errorf("vlan %d out of range (0..4095)", ac.GetVlan()))
 	}
 	name := req.Msg.GetName()
-	if err := s.mgr.AddAC(name, vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())}); err != nil {
+	acVal := vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())}
+	if err := s.mgr.AddAC(name, acVal); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if err := s.reconcile(); err != nil {
+	if err := s.reconcileOrRollback(func() { s.mgr.RemoveAC(name, acVal) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	id, _ := s.mgr.IDForName(name)
@@ -70,8 +88,10 @@ func (s *VrfServer) VrfAcRemove(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("vlan %d out of range (0..4095)", ac.GetVlan()))
 	}
-	s.mgr.RemoveAC(req.Msg.GetName(), vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())})
-	if err := s.reconcile(); err != nil {
+	name := req.Msg.GetName()
+	acVal := vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())}
+	s.mgr.RemoveAC(name, acVal)
+	if err := s.reconcileOrRollback(func() { _ = s.mgr.AddAC(name, acVal) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&v1.VrfAcRemoveResponse{}), nil
@@ -86,8 +106,9 @@ func (s *VrfServer) VrfSetPolicy(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	prev := s.mgr.Policy()
 	s.mgr.SetPolicy(vrf.Policy{DefaultDeny: p.GetDefaultDeny(), DenyAction: action})
-	if err := s.reconcile(); err != nil {
+	if err := s.reconcileOrRollback(func() { s.mgr.SetPolicy(prev) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&v1.VrfSetPolicyResponse{
