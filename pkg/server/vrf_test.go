@@ -161,7 +161,16 @@ func TestVrfServer_InvalidInput(t *testing.T) {
 		Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: "eth0", Vlan: 4096},
 	}))
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("vlan 4096: code = %v, want InvalidArgument", connect.CodeOf(err))
+		t.Errorf("AcAdd vlan 4096: code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+
+	// VrfAcRemove must range-check too: a vlan past 4095 would wrap on the
+	// uint16 cast and remove a different AC.
+	_, err = s.VrfAcRemove(context.Background(), connect.NewRequest(&v1.VrfAcRemoveRequest{
+		Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: "eth0", Vlan: 4096},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("AcRemove vlan 4096: code = %v, want InvalidArgument", connect.CodeOf(err))
 	}
 
 	_, err = s.VrfSetPolicy(context.Background(), connect.NewRequest(&v1.VrfSetPolicyRequest{

@@ -385,14 +385,20 @@ func (m *Manager) VRF() *vrf.Manager { return m.vrf }
 // Bind registers (or replaces) the binding for b.VRFName and Ensures the VRF
 // object exists (allocating its vrf_id). The binding is normalized so the new
 // (Families) and legacy (ImportRTs / ExportRTs) surfaces stay consistent.
+//
+// Ensure runs BEFORE the binding is published: a concurrent route apply that
+// resolves an RT to this VRF (MatchImportForFamily -> IDForName) must never see
+// the binding without its vrf_id, or a T2ST would briefly install under the
+// global VRF (id 0). The two locks are independent (Ensure takes vrf.Manager's,
+// not held here), so ordering them this way is free of deadlock.
 func (m *Manager) Bind(b Binding) error {
 	if b.VRFName == "" {
 		return ErrEmptyVRFName
 	}
+	m.vrf.Ensure(b.VRFName) // VRF identity is independent of the binding's lifetime
 	m.mu.Lock()
 	m.bindings[b.VRFName] = b.Normalize()
 	m.mu.Unlock()
-	m.vrf.Ensure(b.VRFName) // VRF identity is independent of the binding's lifetime
 	return nil
 }
 

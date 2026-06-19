@@ -104,6 +104,43 @@ func TestManager_ACValidation(t *testing.T) {
 	}
 }
 
+// An AC belongs to exactly one VRF: re-adding it to the same VRF is idempotent,
+// but adding it to a different VRF is rejected (so Reconcile can never build a
+// colliding {ifindex, vlan} key).
+func TestManager_AC_NoCrossVRFDuplicate(t *testing.T) {
+	m := NewManager()
+	if err := m.AddAC("a", AC{"eth1", 100}); err != nil {
+		t.Fatalf("AddAC a: %v", err)
+	}
+	if err := m.AddAC("a", AC{"eth1", 100}); err != nil {
+		t.Errorf("re-add to same VRF should be idempotent, got %v", err)
+	}
+	if err := m.AddAC("b", AC{"eth1", 100}); err == nil {
+		t.Error("adding an AC owned by another VRF: want error")
+	}
+	// b must not have been mutated by the rejected add.
+	if _, ok := m.IDForName("b"); ok {
+		// Ensure-on-reject would be surprising; b should not exist yet.
+		if got := len(m.List()); got != 1 {
+			t.Errorf("rejected cross-VRF AC created a VRF; List len = %d, want 1", got)
+		}
+	}
+}
+
+// Reconcile is fatal on a duplicate {ifindex, vlan}: AddAC blocks the same
+// {interface, vlan} across VRFs, but two distinct interface names resolving to
+// one ifindex still must not silently flap classification.
+func TestManager_Reconcile_DuplicateIfindexIsFatal(t *testing.T) {
+	m := NewManager()
+	_ = m.AddAC("a", AC{"eth1", 100})
+	_ = m.AddAC("b", AC{"eth2", 100})
+	// eth1 and eth2 both resolve to ifindex 11 -> {11, 100} claimed twice.
+	res := resolver(map[string]uint32{"eth1": 11, "eth2": 11})
+	if err := m.Reconcile(res, &fakeProg{}); err == nil {
+		t.Error("duplicate ifindex/vlan across VRFs: want a fatal Reconcile error")
+	}
+}
+
 func TestManager_Reconcile(t *testing.T) {
 	m := NewManager()
 	_ = m.AddAC("a", AC{"eth1", 100})

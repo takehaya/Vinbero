@@ -55,6 +55,12 @@ func (s *VrfServer) VrfAcRemove(
 	req *connect.Request[v1.VrfAcRemoveRequest],
 ) (*connect.Response[v1.VrfAcRemoveResponse], error) {
 	ac := req.Msg.GetAc()
+	// Range-check before the uint16 cast: a vlan past 4095 would wrap (e.g.
+	// 4096 -> 0) and delete a different AC than the operator named.
+	if ac.GetVlan() > 4095 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("vlan %d out of range (0..4095)", ac.GetVlan()))
+	}
 	s.mgr.RemoveAC(req.Msg.GetName(), vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())})
 	if err := s.reconcile(); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
