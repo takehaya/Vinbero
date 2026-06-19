@@ -2386,6 +2386,8 @@ func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 		"bd_local_esi_map":    m.objs.BdLocalEsiMap,
 		"dx2v_map":            m.objs.Dx2vMap,
 		"tailcall_ctx_map":    m.objs.TailcallCtxMap,
+		"ingress_vrf_map":     m.objs.IngressVrfMap,
+		"ingress_policy_map":  m.objs.IngressPolicyMap,
 	}
 }
 
@@ -2435,6 +2437,8 @@ func SharedReadOnlyMapNames() []string {
 		"bd_local_esi_map",
 		"dx2v_map",
 		"tailcall_ctx_map",
+		"ingress_vrf_map",
+		"ingress_policy_map",
 	}
 }
 
