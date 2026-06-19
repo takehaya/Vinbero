@@ -71,13 +71,15 @@ func TestManager_DeleteRecyclesID(t *testing.T) {
 
 func TestManager_AC(t *testing.T) {
 	m := NewManager()
-	if err := m.AddAC("v", AC{"eth1", 100}); err != nil {
-		t.Fatalf("AddAC: %v", err)
+	if added, err := m.AddAC("v", AC{"eth1", 100}); err != nil || !added {
+		t.Fatalf("AddAC = (added %v, %v), want (true, nil)", added, err)
 	}
-	if err := m.AddAC("v", AC{"eth1", 100}); err != nil { // idempotent
-		t.Fatalf("AddAC idempotent: %v", err)
+	if added, err := m.AddAC("v", AC{"eth1", 100}); err != nil || added { // idempotent
+		t.Fatalf("AddAC idempotent = (added %v, %v), want (false, nil)", added, err)
 	}
-	_ = m.AddAC("v", AC{"eth2", 0})
+	if added, _ := m.AddAC("v", AC{"eth2", 0}); !added {
+		t.Fatalf("AddAC new ac: added = false, want true")
+	}
 	got := m.List()
 	if len(got) != 1 || len(got[0].ACs) != 2 {
 		t.Fatalf("List = %+v, want 1 vrf with 2 acs", got)
@@ -85,7 +87,12 @@ func TestManager_AC(t *testing.T) {
 	if got[0].ACs[0] != (AC{"eth1", 100}) || got[0].ACs[1] != (AC{"eth2", 0}) {
 		t.Errorf("ACs = %+v, want sorted", got[0].ACs)
 	}
-	m.RemoveAC("v", AC{"eth1", 100})
+	if removed := m.RemoveAC("v", AC{"eth1", 100}); !removed {
+		t.Errorf("RemoveAC present ac: removed = false, want true")
+	}
+	if removed := m.RemoveAC("v", AC{"eth1", 100}); removed { // idempotent
+		t.Errorf("RemoveAC absent ac: removed = true, want false")
+	}
 	if got := m.List(); len(got[0].ACs) != 1 || got[0].ACs[0] != (AC{"eth2", 0}) {
 		t.Errorf("after RemoveAC ACs = %+v, want [eth2.0]", got[0].ACs)
 	}
@@ -93,13 +100,13 @@ func TestManager_AC(t *testing.T) {
 
 func TestManager_ACValidation(t *testing.T) {
 	m := NewManager()
-	if err := m.AddAC("", AC{"eth1", 0}); err == nil {
+	if _, err := m.AddAC("", AC{"eth1", 0}); err == nil {
 		t.Error("empty name: want error")
 	}
-	if err := m.AddAC("v", AC{"", 0}); err == nil {
+	if _, err := m.AddAC("v", AC{"", 0}); err == nil {
 		t.Error("empty interface: want error")
 	}
-	if err := m.AddAC("v", AC{"eth1", 4096}); err == nil {
+	if _, err := m.AddAC("v", AC{"eth1", 4096}); err == nil {
 		t.Error("vlan 4096: want error")
 	}
 }
@@ -109,13 +116,13 @@ func TestManager_ACValidation(t *testing.T) {
 // colliding {ifindex, vlan} key).
 func TestManager_AC_NoCrossVRFDuplicate(t *testing.T) {
 	m := NewManager()
-	if err := m.AddAC("a", AC{"eth1", 100}); err != nil {
+	if _, err := m.AddAC("a", AC{"eth1", 100}); err != nil {
 		t.Fatalf("AddAC a: %v", err)
 	}
-	if err := m.AddAC("a", AC{"eth1", 100}); err != nil {
-		t.Errorf("re-add to same VRF should be idempotent, got %v", err)
+	if added, err := m.AddAC("a", AC{"eth1", 100}); err != nil || added {
+		t.Errorf("re-add to same VRF should be idempotent no-op, got (added %v, %v)", added, err)
 	}
-	if err := m.AddAC("b", AC{"eth1", 100}); err == nil {
+	if _, err := m.AddAC("b", AC{"eth1", 100}); err == nil {
 		t.Error("adding an AC owned by another VRF: want error")
 	}
 	// b must not have been mutated by the rejected add.
@@ -131,7 +138,7 @@ func TestManager_AC_NoCrossVRFDuplicate(t *testing.T) {
 // so a caller mutating the returned ACs cannot corrupt stored state.
 func TestManager_ReturnedACsAreCopies(t *testing.T) {
 	m := NewManager()
-	_ = m.AddAC("v", AC{"eth1", 100})
+	_, _ = m.AddAC("v", AC{"eth1", 100})
 
 	got := m.Ensure("v")
 	if len(got.ACs) != 1 {
@@ -156,8 +163,8 @@ func TestManager_ReturnedACsAreCopies(t *testing.T) {
 // one ifindex still must not silently flap classification.
 func TestManager_Reconcile_DuplicateIfindexIsFatal(t *testing.T) {
 	m := NewManager()
-	_ = m.AddAC("a", AC{"eth1", 100})
-	_ = m.AddAC("b", AC{"eth2", 100})
+	_, _ = m.AddAC("a", AC{"eth1", 100})
+	_, _ = m.AddAC("b", AC{"eth2", 100})
 	// eth1 and eth2 both resolve to ifindex 11 -> {11, 100} claimed twice.
 	res := resolver(map[string]uint32{"eth1": 11, "eth2": 11})
 	if err := m.Reconcile(res, &fakeProg{}); err == nil {
@@ -167,8 +174,8 @@ func TestManager_Reconcile_DuplicateIfindexIsFatal(t *testing.T) {
 
 func TestManager_Reconcile(t *testing.T) {
 	m := NewManager()
-	_ = m.AddAC("a", AC{"eth1", 100})
-	_ = m.AddAC("b", AC{"eth2", 0})
+	_, _ = m.AddAC("a", AC{"eth1", 100})
+	_, _ = m.AddAC("b", AC{"eth2", 0})
 	idA, _ := m.IDForName("a")
 	idB, _ := m.IDForName("b")
 	res := resolver(map[string]uint32{"eth1": 11, "eth2": 12})
@@ -190,7 +197,7 @@ func TestManager_Reconcile(t *testing.T) {
 
 func TestManager_Reconcile_UnresolvableIsFatal(t *testing.T) {
 	m := NewManager()
-	_ = m.AddAC("a", AC{"ghost", 0})
+	_, _ = m.AddAC("a", AC{"ghost", 0})
 	if err := m.Reconcile(resolver(map[string]uint32{}), &fakeProg{}); err == nil {
 		t.Error("unresolvable interface: want error")
 	}

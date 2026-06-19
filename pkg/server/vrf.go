@@ -70,10 +70,17 @@ func (s *VrfServer) VrfAcAdd(
 	}
 	name := req.Msg.GetName()
 	acVal := vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())}
-	if err := s.mgr.AddAC(name, acVal); err != nil {
+	added, err := s.mgr.AddAC(name, acVal)
+	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if err := s.reconcileOrRollback(func() error { s.mgr.RemoveAC(name, acVal); return nil }); err != nil {
+	// Roll back only what this call changed: if the AC was already present
+	// (added == false), a reconcile failure must not remove the pre-existing AC.
+	undo := func() error { return nil }
+	if added {
+		undo = func() error { s.mgr.RemoveAC(name, acVal); return nil }
+	}
+	if err := s.reconcileOrRollback(undo); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	id, _ := s.mgr.IDForName(name)
@@ -103,8 +110,14 @@ func (s *VrfServer) VrfAcRemove(
 	}
 	name := req.Msg.GetName()
 	acVal := vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())}
-	s.mgr.RemoveAC(name, acVal)
-	if err := s.reconcileOrRollback(func() error { return s.mgr.AddAC(name, acVal) }); err != nil {
+	removed := s.mgr.RemoveAC(name, acVal)
+	// Roll back only what this call changed: if the AC was already absent
+	// (removed == false), a reconcile failure must not create it via the undo.
+	undo := func() error { return nil }
+	if removed {
+		undo = func() error { _, err := s.mgr.AddAC(name, acVal); return err }
+	}
+	if err := s.reconcileOrRollback(undo); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&v1.VrfAcRemoveResponse{}), nil

@@ -140,15 +140,20 @@ func (m *Manager) ByID(id uint32) (VRF, bool) {
 // is rejected here, the only mutation entry point, so the {ifindex, vlan} ->
 // vrf_id map Reconcile programs can never have a colliding key (which would
 // otherwise resolve by map-iteration order and flap classification).
-func (m *Manager) AddAC(name string, ac AC) error {
+//
+// added reports whether this call actually appended the AC: false (with a nil
+// error) means it was already present (idempotent no-op). Callers that roll
+// back on a later failure must undo only when added is true, or an idempotent
+// re-add whose reconcile fails would remove a pre-existing AC.
+func (m *Manager) AddAC(name string, ac AC) (added bool, err error) {
 	if name == "" {
-		return fmt.Errorf("vrf: name is required")
+		return false, fmt.Errorf("vrf: name is required")
 	}
 	if ac.Interface == "" {
-		return fmt.Errorf("vrf: ac interface is required")
+		return false, fmt.Errorf("vrf: ac interface is required")
 	}
 	if ac.VLAN > 4095 {
-		return fmt.Errorf("vrf: ac vlan %d out of range (0..4095)", ac.VLAN)
+		return false, fmt.Errorf("vrf: ac vlan %d out of range (0..4095)", ac.VLAN)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -157,35 +162,42 @@ func (m *Manager) AddAC(name string, ac AC) error {
 			continue
 		}
 		if slices.Contains(other.ACs, ac) {
-			return fmt.Errorf("vrf %q: ac {interface %q, vlan %d} already belongs to vrf %q",
+			return false, fmt.Errorf("vrf %q: ac {interface %q, vlan %d} already belongs to vrf %q",
 				name, ac.Interface, ac.VLAN, other.Name)
 		}
 	}
 	v := m.ensureLocked(name)
 	for _, e := range v.ACs {
 		if e == ac {
-			return nil // idempotent
+			return false, nil // idempotent: already present, nothing added
 		}
 	}
 	v.ACs = append(v.ACs, ac)
-	return nil
+	return true, nil
 }
 
-// RemoveAC removes an ingress access circuit from a VRF (idempotent).
-func (m *Manager) RemoveAC(name string, ac AC) {
+// RemoveAC removes an ingress access circuit from a VRF and reports whether it
+// actually removed one (idempotent: false when the VRF or AC was already
+// absent). Callers that roll back on a later failure must re-add only when
+// removed is true, or an idempotent no-op whose reconcile fails would create an
+// AC that never existed.
+func (m *Manager) RemoveAC(name string, ac AC) (removed bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	v, ok := m.byName[name]
 	if !ok {
-		return
+		return false
 	}
 	out := v.ACs[:0]
 	for _, e := range v.ACs {
 		if e != ac {
 			out = append(out, e)
+		} else {
+			removed = true
 		}
 	}
 	v.ACs = out
+	return removed
 }
 
 // Delete removes a VRF and recycles its id. A no-op when absent.

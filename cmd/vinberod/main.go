@@ -398,7 +398,7 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, lg *
 	mgr.SetPolicy(vrf.Policy{DefaultDeny: cfg.DefaultDeny, DenyAction: action})
 	for _, v := range cfg.Entries {
 		for _, ac := range v.ACs {
-			if err := mgr.AddAC(v.Name, vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN}); err != nil {
+			if _, err := mgr.AddAC(v.Name, vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN}); err != nil {
 				return err
 			}
 		}
