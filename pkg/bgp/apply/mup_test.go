@@ -10,6 +10,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -944,11 +945,11 @@ func TestApplyMUP_GTP4SourceEmbed_RuntimeReconcile(t *testing.T) {
 	}
 }
 
-// A T2ST whose RTs match a binding holding an uplink instance installs its
-// F-TEID entry under that instance, and the binding-mutation reconcile
-// re-keys it when the instance assignment changes (here: unbind back to the
-// default instance 0). The route carries its own SID so resolution does not
-// depend on a DSD.
+// A T2ST whose RTs match a VRF binding installs its F-TEID entry under that
+// VRF's vrf_id, and the binding-mutation reconcile re-keys it when the
+// resolved VRF changes (here: unbind drops the match, so the session falls
+// back to the global VRF, id 0). The route carries its own SID so resolution
+// does not depend on a DSD.
 func TestApplyMUP_T2ST_UplinkInstanceScoping(t *testing.T) {
 	fh := newFakeHeadend()
 	vm := vrfbgp.NewManager()
@@ -957,13 +958,14 @@ func TestApplyMUP_T2ST_UplinkInstanceScoping(t *testing.T) {
 		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
 			bgp.FamilyMUPIPv4: {RouteTargets: []vrfbgp.RouteTarget{{RT: "100:1", Direction: vrfbgp.DirectionImport}}},
 		},
-		MupUplinkInterfaces: []string{"lo"},
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	inst := vm.UplinkInstanceForVRF("vrf-a")
-	if inst == 0 {
-		t.Fatalf("binding holds no uplink instance")
+	// Bind Ensures the VRF object, which allocates a non-zero vrf_id (0 is the
+	// global VRF). The T2ST's F-TEID entry keys under that id.
+	inst, ok := vm.VRF().IDForName("vrf-a")
+	if !ok || inst == vrf.GlobalVRFID {
+		t.Fatalf("VRF vrf-a got id %d (ok=%v), want a non-global id", inst, ok)
 	}
 	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
 
@@ -978,34 +980,20 @@ func TestApplyMUP_T2ST_UplinkInstanceScoping(t *testing.T) {
 	}})
 
 	if _, ok := fh.mupUplink[mupUplinkKey{inst, endpoint, teid, 32}]; !ok {
-		t.Fatalf("uplink entry not keyed under instance %d; mupUplink=%v", inst, fh.mupUplink)
+		t.Fatalf("uplink entry not keyed under vrf_id %d; mupUplink=%v", inst, fh.mupUplink)
 	}
 
-	// The instance map rewrite resolves lo to the binding's instance.
-	a.ReconcileMUPUplinkInstances()
-	if len(fh.mupIfindexInstances) != 1 {
-		t.Fatalf("ifindex map = %v, want one entry (lo)", fh.mupIfindexInstances)
-	}
-	for _, gotInst := range fh.mupIfindexInstances {
-		if gotInst != inst {
-			t.Errorf("ifindex map instance = %d, want %d", gotInst, inst)
-		}
-	}
-
-	// Unbind releases the instance; the reconcile re-keys the session back to
-	// the default instance 0 and empties the ifindex map.
+	// Unbind drops the RT match; the reconcile re-keys the session back to the
+	// global VRF (id 0), since no binding now claims the route.
 	if err := vm.Unbind("vrf-a"); err != nil {
 		t.Fatalf("Unbind: %v", err)
 	}
 	a.ReconcileMUPUplinkInstances()
 	if _, ok := fh.mupUplink[mupUplinkKey{inst, endpoint, teid, 32}]; ok {
-		t.Errorf("old instance key still installed after re-key; mupUplink=%v", fh.mupUplink)
+		t.Errorf("old vrf_id key still installed after re-key; mupUplink=%v", fh.mupUplink)
 	}
-	if _, ok := fh.mupUplink[mupUplinkKey{0, endpoint, teid, 32}]; !ok {
-		t.Errorf("session not re-keyed to the default instance; mupUplink=%v", fh.mupUplink)
-	}
-	if len(fh.mupIfindexInstances) != 0 {
-		t.Errorf("ifindex map = %v, want empty after unbind", fh.mupIfindexInstances)
+	if _, ok := fh.mupUplink[mupUplinkKey{vrf.GlobalVRFID, endpoint, teid, 32}]; !ok {
+		t.Errorf("session not re-keyed to the global VRF; mupUplink=%v", fh.mupUplink)
 	}
 	// The re-key must move only the F-TEID entry: deleting the shared gate —
 	// even transiently — would let GTP-U pass unprocessed.

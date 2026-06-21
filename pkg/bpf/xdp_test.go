@@ -2318,12 +2318,12 @@ func TestXDPProgHMGtp6DTeid(t *testing.T) {
 	}
 }
 
-// TestXDPProgHMGtp4DTeidUplinkInstance verifies the uplink instance scoping:
-// two service instances install the SAME {endpoint, TEID} with different
-// direct SIDs, and the ingress interface (via mup_ifindex_instance_map)
-// decides which one a packet resolves against. Also verifies that an
-// instance does NOT fall back to another instance's entries on a miss.
-func TestXDPProgHMGtp4DTeidUplinkInstance(t *testing.T) {
+// TestXDPProgHMGtp4DTeidVRFScope verifies the uplink VRF scoping: two VRFs
+// install the SAME {endpoint, TEID} with different direct SIDs, and the ingress
+// AC (via ingress_vrf_map, resolved into tailcall_ctx.vrf_id at the XDP entry)
+// decides which one a packet resolves against. Also verifies that a VRF does
+// NOT fall back to another VRF's entries on a miss.
+func TestXDPProgHMGtp4DTeidVRFScope(t *testing.T) {
 	h := newXDPTestHelper(t)
 
 	const n3Endpoint = "192.0.2.100"
@@ -2332,15 +2332,15 @@ func TestXDPProgHMGtp4DTeidUplinkInstance(t *testing.T) {
 
 	h.createMupUplinkGate("192.0.2.0/24")
 
-	directDefault, _ := ParseIPv6("fc00:a::1") // default instance 0
-	directInst1, _ := ParseIPv6("fc00:b::2")   // instance 1
+	directDefault, _ := ParseIPv6("fc00:a::1") // global VRF (vrf 0)
+	directVrf1, _ := ParseIPv6("fc00:b::2")    // vrf 1
 	segsDefault, nD, _ := ParseSegments([]string{"fc00:a::1"})
-	segsInst1, n1, _ := ParseSegments([]string{"fc00:b::2"})
+	segsVrf1, n1, _ := ParseSegments([]string{"fc00:b::2"})
 
-	// The same {endpoint, TEID} in two instances -- the overlap the instance
-	// key exists to allow.
+	// The same {endpoint, TEID} in two VRFs -- the overlap the vrf_id key
+	// exists to allow.
 	h.createMupUplinkSession(n3Endpoint, teid, 32, srcAddr, segsDefault, nD, MupArgsOffsetNone)
-	h.createMupUplinkSessionInstance(1, n3Endpoint, teid, 32, srcAddr, segsInst1, n1, MupArgsOffsetNone)
+	h.createMupUplinkSessionInstance(1, n3Endpoint, teid, 32, srcAddr, segsVrf1, n1, MupArgsOffsetNone)
 
 	pkt, err := buildGTPUv4Packet(
 		net.ParseIP("10.0.0.1").To4(), net.ParseIP(n3Endpoint).To4(),
@@ -2368,38 +2368,91 @@ func TestXDPProgHMGtp4DTeidUplinkInstance(t *testing.T) {
 		}
 	}
 
-	// The test runner backs the packet with loopback's rx queue, so the
-	// program always sees ingress_ifindex 1 (see xdpMdCtx); the subtests
-	// steer the instance by re-mapping what ifindex 1 resolves to.
-	t.Cleanup(func() { _ = h.mapOps.SetMupUplinkInstances(map[uint32]uint32{}) })
+	// tailcall_ctx.vrf_id is resolved from ingress_vrf_map at the XDP entry,
+	// but only when the global ingress policy is enabled; with it off every
+	// packet is vrf 0 (back-compat). Enable it WITHOUT default-deny so an
+	// unmapped AC still falls into vrf 0 — the F-TEID lookup is what the
+	// subtests steer. The runner backs the buffer with ifindex 1.
+	if err := h.mapOps.SetIngressPolicy(true, false, 0); err != nil {
+		t.Fatalf("SetIngressPolicy: %v", err)
+	}
+	t.Cleanup(func() { _ = h.mapOps.SetIngressPolicy(false, false, 0) })
+	t.Cleanup(func() { _ = h.mapOps.SetIngressVrf(map[IngressACKey]uint32{}) })
 
-	t.Run("unmapped ifindex resolves the default instance", func(t *testing.T) {
-		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{}); err != nil {
-			t.Fatalf("SetMupUplinkInstances: %v", err)
+	t.Run("unmapped AC resolves the global VRF", func(t *testing.T) {
+		if err := h.mapOps.SetIngressVrf(map[IngressACKey]uint32{}); err != nil {
+			t.Fatalf("SetIngressVrf: %v", err)
 		}
-		ret, outPkt := h.run(pkt) // ifindex 1 unmapped -> miss -> instance 0
+		ret, outPkt := h.run(pkt) // ifindex 1 unmapped -> vrf 0
 		wantDA(t, outPkt, ret, directDefault)
 	})
 
-	t.Run("mapped ifindex resolves its instance", func(t *testing.T) {
-		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{1: 1}); err != nil {
-			t.Fatalf("SetMupUplinkInstances: %v", err)
+	t.Run("mapped AC resolves its VRF", func(t *testing.T) {
+		if err := h.mapOps.SetIngressVrf(map[IngressACKey]uint32{{Ifindex: 1, VlanId: 0}: 1}); err != nil {
+			t.Fatalf("SetIngressVrf: %v", err)
 		}
 		ret, outPkt := h.runOnIfindex(pkt, 1)
-		wantDA(t, outPkt, ret, directInst1)
+		wantDA(t, outPkt, ret, directVrf1)
 	})
 
-	t.Run("instance miss does not fall back across instances", func(t *testing.T) {
-		// Map lo to instance 2, which has no F-TEID entries: the packet must
-		// pass untouched instead of borrowing another instance's session.
-		if err := h.mapOps.SetMupUplinkInstances(map[uint32]uint32{1: 2}); err != nil {
-			t.Fatalf("SetMupUplinkInstances: %v", err)
+	t.Run("VRF miss does not fall back across VRFs", func(t *testing.T) {
+		// Map the AC to vrf 2, which has no F-TEID entries: the packet must
+		// pass untouched instead of borrowing another VRF's session.
+		if err := h.mapOps.SetIngressVrf(map[IngressACKey]uint32{{Ifindex: 1, VlanId: 0}: 2}); err != nil {
+			t.Fatalf("SetIngressVrf: %v", err)
 		}
 		ret, _ := h.runOnIfindex(pkt, 1)
 		if ret != XDP_PASS {
-			t.Errorf("Expected XDP_PASS (no session in instance 2), got %d", ret)
+			t.Errorf("Expected XDP_PASS (no session in vrf 2), got %d", ret)
 		}
 	})
+}
+
+// TestXDPProgIngressVrfFrontDoor verifies the ingress VRF front door and the
+// opt-in global default-deny: with the policy off a packet passes (back-compat);
+// with default-deny on an unmapped AC is dropped (or passed per deny_action);
+// and an explicit entry (even for vrf 0) keeps the AC forwarding.
+func TestXDPProgIngressVrfFrontDoor(t *testing.T) {
+	h := newXDPTestHelper(t)
+	pkt := buildPlainIPv4(t)
+	const ifidx = 1 // loopback; BPF_PROG_TEST_RUN backs the buffer with it
+
+	// Baseline: front door disabled -> packet passes as before.
+	if ret, _ := h.runOnIfindex(pkt, ifidx); ret != XDP_PASS {
+		t.Fatalf("front door off: ret = %d, want XDP_PASS", ret)
+	}
+
+	// default-deny + drop, no entry for {ifidx, 0} -> dropped.
+	if err := h.mapOps.SetIngressPolicy(true, true, 0 /* drop */); err != nil {
+		t.Fatalf("SetIngressPolicy: %v", err)
+	}
+	t.Cleanup(func() { _ = h.mapOps.SetIngressPolicy(false, false, 0) })
+	if ret, _ := h.runOnIfindex(pkt, ifidx); ret != XDP_DROP {
+		t.Errorf("default-deny/drop, unmapped: ret = %d, want XDP_DROP", ret)
+	}
+
+	// default-deny + pass -> unmapped passes to the kernel instead of dropping.
+	if err := h.mapOps.SetIngressPolicy(true, true, 1 /* pass */); err != nil {
+		t.Fatalf("SetIngressPolicy: %v", err)
+	}
+	if ret, _ := h.runOnIfindex(pkt, ifidx); ret != XDP_PASS {
+		t.Errorf("default-deny/pass, unmapped: ret = %d, want XDP_PASS", ret)
+	}
+
+	// Explicit entry (vrf 0 = global/underlay) under default-deny/drop -> the AC
+	// is mapped, so it forwards (XDP_PASS) instead of being dropped. This is how
+	// the underlay is expressed: map it explicitly to vrf 0.
+	if err := h.mapOps.SetIngressPolicy(true, true, 0 /* drop */); err != nil {
+		t.Fatalf("SetIngressPolicy: %v", err)
+	}
+	mapping := map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 0}: 0}
+	if err := h.mapOps.SetIngressVrf(mapping); err != nil {
+		t.Fatalf("SetIngressVrf: %v", err)
+	}
+	t.Cleanup(func() { _ = h.mapOps.SetIngressVrf(map[IngressACKey]uint32{}) })
+	if ret, _ := h.runOnIfindex(pkt, ifidx); ret != XDP_PASS {
+		t.Errorf("explicit vrf-0 entry under default-deny: ret = %d, want XDP_PASS", ret)
+	}
 }
 
 func TestXDPProgEndMGtp4E(t *testing.T) {

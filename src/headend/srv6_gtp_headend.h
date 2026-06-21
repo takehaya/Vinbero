@@ -237,11 +237,13 @@ static __always_inline int do_h_m_gtp4_d_teid(
 
     // Full-length lookup key: the LPM trie returns the longest installed prefix,
     // so the instance and endpoint are matched fully and the TEID as a prefix.
-    // The instance comes from the ingress ifindex (default 0), so overlapping
-    // {endpoint, TEID} spaces stay separated per access interface.
+    // The instance is the packet's VRF id, resolved once at the XDP entry and
+    // carried in tailcall_ctx.vrf_id (0 = global VRF), so overlapping
+    // {endpoint, TEID} spaces stay separated per VRF (per ingress AC).
     struct mup_uplink_v4_key key = {};
     key.prefixlen = 96;
-    __be32 inst_be = bpf_htonl(mup_uplink_instance(ctx));
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    __be32 inst_be = bpf_htonl(tctx ? tctx->vrf_id : 0);
     __builtin_memcpy(key.instance, &inst_be, 4);
     __builtin_memcpy(key.endpoint, &iph->daddr, IPV4_ADDR_LEN);
     __be32 teid_be = bpf_htonl(gtp_info.teid); // network order so the MSB aligns to the prefix

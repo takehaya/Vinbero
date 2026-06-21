@@ -17,6 +17,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
 	"github.com/takehaya/vinbero/pkg/netresource"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -77,6 +78,14 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		s.mupSrc = srPolicyApplier
 	}
 	return s
+}
+
+// VrfManager returns the first-class VRF manager (ingress facet) so the daemon
+// can load config VRFs into it and reconcile them at boot, before serving. It
+// is owned by the vrfbgp manager so the BGP facet and the VRF object share one
+// identity space.
+func (s *Server) VrfManager() *vrf.Manager {
+	return s.vrfBgpMgr.VRF()
 }
 
 // Setup registers all service handlers
@@ -195,6 +204,12 @@ func (s *Server) Setup() {
 	path, handler = vinberov1connect.NewVlanTableServiceHandler(vlanTableServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VlanTableService", zap.String("path", path))
+
+	// Vrf service (VRF ingress facet: AC membership + default-deny policy)
+	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps)
+	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered VrfService", zap.String("path", path))
 
 	// Plugin service (dynamic BPF plugin registration). pluginServer was
 	// created at the top of Setup() so SidFunctionServer could hold a

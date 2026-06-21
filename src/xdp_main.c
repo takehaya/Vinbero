@@ -63,6 +63,18 @@ int vinbero_main(struct xdp_md *ctx)
         __u16 vlan_id = bpf_ntohs(vhdr->h_vlan_TCI) & 0x0FFF;
         __u16 inner_proto = vhdr->h_vlan_encapsulated_proto;
 
+        // Ingress VRF front door: resolve {ifindex, vlan} -> vrf_id once, gate
+        // unmapped ACs under default-deny, and stash vrf_id for all downstream
+        // paths (L2 / SID / headend / MUP). Runs before try_l2_headend so the
+        // policy covers every ingress path.
+        __u32 vrf_id;
+        int vrf_verdict = resolve_ingress_vrf(ctx, vlan_id, &vrf_id);
+        if (vrf_verdict != INGRESS_VRF_CONTINUE) {
+            action = vrf_verdict;
+            goto out;
+        }
+        tailcall_ctx_set_vrf(vrf_id);
+
         int l2_action = try_l2_headend(ctx, ctx->ingress_ifindex, vlan_id, pkt_len);
         if (l2_action >= 0) {
             action = l2_action;
@@ -92,6 +104,15 @@ int vinbero_main(struct xdp_md *ctx)
 
     // ========== Non-VLAN packets ==========
     {
+        // Front door with vlan_id 0 (untagged AC).
+        __u32 vrf_id;
+        int vrf_verdict = resolve_ingress_vrf(ctx, 0, &vrf_id);
+        if (vrf_verdict != INGRESS_VRF_CONTINUE) {
+            action = vrf_verdict;
+            goto out;
+        }
+        tailcall_ctx_set_vrf(vrf_id);
+
         int l2_action = try_l2_headend(ctx, ctx->ingress_ifindex, 0, pkt_len);
         if (l2_action >= 0) {
             action = l2_action;

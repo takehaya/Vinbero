@@ -2267,3 +2267,202 @@ var StatsService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "vinbero/v1/vinbero.proto",
 }
+
+const (
+	VrfService_VrfAcAdd_FullMethodName     = "/vinbero.v1.VrfService/VrfAcAdd"
+	VrfService_VrfAcRemove_FullMethodName  = "/vinbero.v1.VrfService/VrfAcRemove"
+	VrfService_VrfSetPolicy_FullMethodName = "/vinbero.v1.VrfService/VrfSetPolicy"
+	VrfService_VrfShow_FullMethodName      = "/vinbero.v1.VrfService/VrfShow"
+)
+
+// VrfServiceClient is the client API for VrfService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type VrfServiceClient interface {
+	VrfAcAdd(ctx context.Context, in *VrfAcAddRequest, opts ...grpc.CallOption) (*VrfAcAddResponse, error)
+	VrfAcRemove(ctx context.Context, in *VrfAcRemoveRequest, opts ...grpc.CallOption) (*VrfAcRemoveResponse, error)
+	VrfSetPolicy(ctx context.Context, in *VrfSetPolicyRequest, opts ...grpc.CallOption) (*VrfSetPolicyResponse, error)
+	VrfShow(ctx context.Context, in *VrfShowRequest, opts ...grpc.CallOption) (*VrfShowResponse, error)
+}
+
+type vrfServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewVrfServiceClient(cc grpc.ClientConnInterface) VrfServiceClient {
+	return &vrfServiceClient{cc}
+}
+
+func (c *vrfServiceClient) VrfAcAdd(ctx context.Context, in *VrfAcAddRequest, opts ...grpc.CallOption) (*VrfAcAddResponse, error) {
+	out := new(VrfAcAddResponse)
+	err := c.cc.Invoke(ctx, VrfService_VrfAcAdd_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfServiceClient) VrfAcRemove(ctx context.Context, in *VrfAcRemoveRequest, opts ...grpc.CallOption) (*VrfAcRemoveResponse, error) {
+	out := new(VrfAcRemoveResponse)
+	err := c.cc.Invoke(ctx, VrfService_VrfAcRemove_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfServiceClient) VrfSetPolicy(ctx context.Context, in *VrfSetPolicyRequest, opts ...grpc.CallOption) (*VrfSetPolicyResponse, error) {
+	out := new(VrfSetPolicyResponse)
+	err := c.cc.Invoke(ctx, VrfService_VrfSetPolicy_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfServiceClient) VrfShow(ctx context.Context, in *VrfShowRequest, opts ...grpc.CallOption) (*VrfShowResponse, error) {
+	out := new(VrfShowResponse)
+	err := c.cc.Invoke(ctx, VrfService_VrfShow_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// VrfServiceServer is the server API for VrfService service.
+// All implementations should embed UnimplementedVrfServiceServer
+// for forward compatibility
+type VrfServiceServer interface {
+	VrfAcAdd(context.Context, *VrfAcAddRequest) (*VrfAcAddResponse, error)
+	VrfAcRemove(context.Context, *VrfAcRemoveRequest) (*VrfAcRemoveResponse, error)
+	VrfSetPolicy(context.Context, *VrfSetPolicyRequest) (*VrfSetPolicyResponse, error)
+	VrfShow(context.Context, *VrfShowRequest) (*VrfShowResponse, error)
+}
+
+// UnimplementedVrfServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedVrfServiceServer struct {
+}
+
+func (UnimplementedVrfServiceServer) VrfAcAdd(context.Context, *VrfAcAddRequest) (*VrfAcAddResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VrfAcAdd not implemented")
+}
+func (UnimplementedVrfServiceServer) VrfAcRemove(context.Context, *VrfAcRemoveRequest) (*VrfAcRemoveResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VrfAcRemove not implemented")
+}
+func (UnimplementedVrfServiceServer) VrfSetPolicy(context.Context, *VrfSetPolicyRequest) (*VrfSetPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VrfSetPolicy not implemented")
+}
+func (UnimplementedVrfServiceServer) VrfShow(context.Context, *VrfShowRequest) (*VrfShowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VrfShow not implemented")
+}
+
+// UnsafeVrfServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to VrfServiceServer will
+// result in compilation errors.
+type UnsafeVrfServiceServer interface {
+	mustEmbedUnimplementedVrfServiceServer()
+}
+
+func RegisterVrfServiceServer(s grpc.ServiceRegistrar, srv VrfServiceServer) {
+	s.RegisterService(&VrfService_ServiceDesc, srv)
+}
+
+func _VrfService_VrfAcAdd_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VrfAcAddRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfServiceServer).VrfAcAdd(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfService_VrfAcAdd_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfServiceServer).VrfAcAdd(ctx, req.(*VrfAcAddRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfService_VrfAcRemove_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VrfAcRemoveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfServiceServer).VrfAcRemove(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfService_VrfAcRemove_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfServiceServer).VrfAcRemove(ctx, req.(*VrfAcRemoveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfService_VrfSetPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VrfSetPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfServiceServer).VrfSetPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfService_VrfSetPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfServiceServer).VrfSetPolicy(ctx, req.(*VrfSetPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfService_VrfShow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VrfShowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfServiceServer).VrfShow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfService_VrfShow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfServiceServer).VrfShow(ctx, req.(*VrfShowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// VrfService_ServiceDesc is the grpc.ServiceDesc for VrfService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var VrfService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.VrfService",
+	HandlerType: (*VrfServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "VrfAcAdd",
+			Handler:    _VrfService_VrfAcAdd_Handler,
+		},
+		{
+			MethodName: "VrfAcRemove",
+			Handler:    _VrfService_VrfAcRemove_Handler,
+		},
+		{
+			MethodName: "VrfSetPolicy",
+			Handler:    _VrfService_VrfSetPolicy_Handler,
+		},
+		{
+			MethodName: "VrfShow",
+			Handler:    _VrfService_VrfShow_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}

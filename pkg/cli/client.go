@@ -24,6 +24,7 @@ type Clients struct {
 	Es       vinberov1connect.EthernetSegmentServiceClient
 	SrPolicy vinberov1connect.SrPolicyServiceClient
 	Mup      vinberov1connect.MupServiceClient
+	Vrf      vinberov1connect.VrfServiceClient
 }
 
 func NewClients(serverURL string) *Clients {
@@ -47,5 +48,6 @@ func NewClients(serverURL string) *Clients {
 		Es:       vinberov1connect.NewEthernetSegmentServiceClient(httpClient, serverURL, opts...),
 		SrPolicy: vinberov1connect.NewSrPolicyServiceClient(httpClient, serverURL, opts...),
 		Mup:      vinberov1connect.NewMupServiceClient(httpClient, serverURL, opts...),
+		Vrf:      vinberov1connect.NewVrfServiceClient(httpClient, serverURL, opts...),
 	}
 }

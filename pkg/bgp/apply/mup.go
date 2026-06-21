@@ -1,7 +1,6 @@
 package apply
 
 import (
-	"net"
 	"net/netip"
 	"slices"
 
@@ -10,6 +9,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vrf"
 )
 
 // mupDefaultArgsOffset is the byte offset within the SID where Args.Mob.Session
@@ -78,14 +78,14 @@ type mupSessionState struct {
 	// short-circuit compares both.
 	installedSrc [16]byte
 	// fam is the route's MUP family (mup_ipv4 / mup_ipv6), kept so the
-	// binding-mutation reconcile can re-resolve the uplink instance without
-	// the original apply context. T2ST only.
+	// binding-mutation reconcile can re-resolve the VRF without the original
+	// apply context. T2ST only.
 	fam bgp.Family
-	// instance is the uplink service instance the session's F-TEID entry is
-	// keyed under (0 = default): the instance of the binding whose import RTs
-	// matched the route at apply time. Uninstall must use the same value the
-	// install used, so it lives on the session, not recomputed ad hoc. T2ST
-	// only.
+	// instance is the vrf_id the session's F-TEID entry is keyed under
+	// (0 = the global VRF): the id of the VRF named by the binding whose
+	// import RTs matched the route at apply time. Uninstall must use the same
+	// value the install used, so it lives on the session, not recomputed ad
+	// hoc. T2ST only.
 	instance    uint32
 	deferLogged bool
 }
@@ -618,16 +618,16 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 			zap.Int("max", maxMUPSessions), zap.String("rd", r.RD), zap.String("endpoint", r.Endpoint))
 		return
 	}
-	// A re-advertise can land on a different instance when the bindings moved
+	// A re-advertise can land on a different vrf_id when the bindings moved
 	// underneath it. The session key {rd, endpoint, teid, teidLen} is the
-	// F-TEID key minus the instance, so an installed entry can move without
+	// F-TEID key minus the vrf_id, so an installed entry can move without
 	// touching the shared gate; a failed move keeps the session on its old
-	// instance until the next reconcile.
-	inst := a.mupUplinkInstanceForRoute(fam, r)
-	if st.installedSID != "" && st.instance != inst {
-		a.rekeyMUPT2ST(st, inst)
+	// vrf_id until the next reconcile.
+	vrfID := a.mupVRFForRoute(fam, r)
+	if st.installedSID != "" && st.instance != vrfID {
+		a.rekeyMUPT2ST(st, vrfID)
 	} else if st.installedSID == "" {
-		st.instance = inst
+		st.instance = vrfID
 	}
 	st.route = *r
 	st.fam = fam
@@ -669,82 +669,46 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	st.instance = inst
 	a.logger.Info("MUP T2ST uplink re-keyed",
 		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
-		zap.Uint32("from_instance", old), zap.Uint32("instance", inst))
+		zap.Uint32("from_vrf_id", old), zap.Uint32("vrf_id", inst))
 }
 
-// mupUplinkInstanceForRoute resolves the uplink instance a T2ST installs
-// under: the instance of the binding whose import RTs match the route for
-// fam. Routes matching no binding — including the default-allow path with no
-// bindings at all — and bindings without mup_uplink_interfaces fall to the
-// default instance 0.
-func (a *Applier) mupUplinkInstanceForRoute(fam bgp.Family, r *bgp.MUPRoute) uint32 {
+// mupVRFForRoute resolves the vrf_id a T2ST installs its F-TEID entry under:
+// the id of the VRF named by the binding whose import RTs match the route for
+// fam. Routes matching no binding — including the default-allow path — fall to
+// the global VRF (id 0). The {ifindex,vlan} -> vrf_id ingress side is owned by
+// vrf.Manager (programmed from the VRF's ACs), so this only resolves the
+// install-side id; the two agree because they reference the same VRF.
+func (a *Applier) mupVRFForRoute(fam bgp.Family, r *bgp.MUPRoute) uint32 {
 	vrfName, _, ok := a.vrfBindings.MatchImportForFamily(r.RTs, fam)
 	if !ok {
-		return 0
+		return vrf.GlobalVRFID
 	}
-	return a.vrfBindings.UplinkInstanceForVRF(vrfName)
+	id, _ := a.vrfBindings.VRF().IDForName(vrfName)
+	return id
 }
 
-// ReconcileMUPUplinkInstances reprograms the data plane's uplink instance
-// state after a VRF binding changed at runtime (bind / update / unbind) or at
-// boot once the config bindings are registered. It rewrites
-// mup_ifindex_instance_map from the bindings' mup_uplink_interfaces (names
-// resolved to ifindexes here; unresolvable names are logged and skipped, and
-// a later call re-resolves them), then re-keys every T2ST session whose
-// instance assignment changed. Safe to call from RPC goroutines (mupMu).
+// ReconcileMUPUplinkInstances re-keys every installed T2ST whose resolved
+// vrf_id changed after a VRF binding mutation (an RT change can move a session
+// to a different VRF, or an unbind back to the global VRF). It does NOT touch
+// ingress_vrf_map — that is owned by vrf.Manager and programmed from the VRFs'
+// ACs (VrfService), independent of which binding a route matches. Safe to call
+// from RPC goroutines (mupMu).
 func (a *Applier) ReconcileMUPUplinkInstances() {
-	mapping := make(map[uint32]uint32)
-	for inst, ifnames := range a.vrfBindings.UplinkInstanceInterfaces() {
-		for _, name := range ifnames {
-			ifi, err := net.InterfaceByName(name)
-			if err != nil {
-				a.logger.Warn("resolve MUP uplink interface (skipping; retried on the next reconcile)",
-					zap.String("interface", name), zap.Uint32("instance", inst), zap.Error(err))
-				continue
-			}
-			idx := uint32(ifi.Index)
-			// An interface claimed by two bindings is operator misconfiguration;
-			// resolve it deterministically (lowest instance id wins) so the
-			// outcome cannot flap with map iteration order across reconciles.
-			if prev, dup := mapping[idx]; dup {
-				a.logger.Warn("MUP uplink interface claimed by multiple instances; lowest instance id wins",
-					zap.String("interface", name), zap.Uint32("instance_a", prev), zap.Uint32("instance_b", inst))
-				if prev <= inst {
-					continue
-				}
-			}
-			mapping[idx] = inst
-		}
-	}
-	// Hold mupMu across the classification rewrite AND the session re-key:
-	// route applies install/uninstall F-TEID entries under the same lock, so
-	// serializing both sides keeps the window where classification and
-	// F-TEID keys disagree from interleaving with concurrent installs. The
-	// interface resolution above stays outside the lock (netlink can block).
 	a.mupMu.Lock()
 	defer a.mupMu.Unlock()
-	if err := a.mupUplink.SetMupUplinkInstances(mapping); err != nil {
-		// Without the classification rewrite, re-keying the F-TEID entries
-		// would split brain the two sides (packets still classify against the
-		// old instances). Keep the sessions where they are; the next binding
-		// mutation re-runs the whole reconcile.
-		a.logger.Error("program MUP uplink instance map (skipping session re-key)", zap.Error(err))
-		return
-	}
-
 	for _, st := range a.mupT2ST {
-		inst := a.mupUplinkInstanceForRoute(st.fam, &st.route)
-		if inst == st.instance {
+		id := a.mupVRFForRoute(st.fam, &st.route)
+		if id == st.instance {
 			continue
 		}
 		if st.installedSID == "" {
 			// Deferred session: nothing in the data plane to move, and a
 			// binding change cannot make its SID resolvable (resolution is
-			// RT-scoped between routes), so just adopt the new instance.
-			st.instance = inst
+			// RT-scoped between routes), so just adopt the new vrf_id.
+			st.instance = id
 			continue
 		}
-		a.rekeyMUPT2ST(st, inst)
+		a.rekeyMUPT2ST(st, id)
 	}
 }
 
@@ -856,7 +820,7 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 	a.logger.Info("MUP T2ST uplink installed",
 		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 		zap.Uint8("teid_len", r.TEIDLen), zap.String("sid", sid),
-		zap.Uint32("instance", st.instance))
+		zap.Uint32("vrf_id", st.instance))
 }
 
 // uninstallMUPT2ST removes an uplink session's F-TEID entry and releases its

@@ -42,8 +42,8 @@ type MupBindingReconciler interface {
 // (RT2/RT3) for a binding with a bridge domain.
 type VrfBgpServer struct {
 	mgr      *vrfbgp.Manager
-	exporter VrfExporter      // L3VPN auto-advertise hook; nil when off
-	evpn     *EvpnCoordinator // EVPN BD lifecycle (binding axis); nil when off
+	exporter VrfExporter          // L3VPN auto-advertise hook; nil when off
+	evpn     *EvpnCoordinator     // EVPN BD lifecycle (binding axis); nil when off
 	mupSrc   MupBindingReconciler // MUP binding-state reconcile hook; nil when BGP off
 	// mu serializes a bind/unbind's manager + exporter mutations per call so two
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
@@ -81,7 +81,6 @@ func protoToBinding(b *v1.VrfBgpBinding) (vrfbgp.Binding, error) {
 		BDID:                uint16(b.GetBdId()),
 		Families:            families,
 		MupGTP4SourcePrefix: mupSrc,
-		MupUplinkInterfaces: b.GetMupUplinkInterfaces(),
 	}, nil
 }
 
@@ -89,16 +88,15 @@ func protoToBinding(b *v1.VrfBgpBinding) (vrfbgp.Binding, error) {
 // mutation RPCs' "updated binding" response.
 func bindingToProto(b vrfbgp.Binding) *v1.VrfBgpBinding {
 	out := &v1.VrfBgpBinding{
-		VrfName:             b.VRFName,
-		Rd:                  b.RD,
-		ImportRts:           b.ImportRTs,
-		ExportRts:           b.ExportRTs,
-		Redistribute:        b.Redistribute,
-		MaxPrefixes:         b.MaxPrefixes,
-		DefaultLocator:      b.DefaultLocator,
-		BdId:                uint32(b.BDID),
-		Families:            bindingFamiliesToProto(b.Families),
-		MupUplinkInterfaces: b.MupUplinkInterfaces,
+		VrfName:        b.VRFName,
+		Rd:             b.RD,
+		ImportRts:      b.ImportRTs,
+		ExportRts:      b.ExportRTs,
+		Redistribute:   b.Redistribute,
+		MaxPrefixes:    b.MaxPrefixes,
+		DefaultLocator: b.DefaultLocator,
+		BdId:           uint32(b.BDID),
+		Families:       bindingFamiliesToProto(b.Families),
 	}
 	// The zero Prefix renders as "invalid Prefix", so only a set prefix is
 	// put on the wire.
@@ -226,7 +224,7 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
 		}
 	}
-	if s.mupSrc != nil && mupUplinkFieldsChanged(prev, updated, s.mgr.HasUplinkInstances()) {
+	if s.mupSrc != nil && mupUplinkFieldsChanged(prev, updated) {
 		s.mupSrc.ReconcileMUPUplinkInstances()
 	}
 	return nil
@@ -249,32 +247,15 @@ func mupImportRTs(b vrfbgp.Binding, fam bgp.Family) []string {
 	return out
 }
 
-// sortedCopy returns a sorted copy of in, leaving the input untouched.
-func sortedCopy(in []string) []string {
-	out := append([]string(nil), in...)
-	slices.Sort(out)
-	return out
-}
-
-// mupUplinkFieldsChanged reports whether a binding mutation can move uplink
-// instance state, so an unrelated edit (max_prefixes, a vpnv4 RT) does not
-// re-run the O(sessions) reconcile. Two things move it: the binding's own
-// interface list (instance allocation / release / reclassification), and,
-// once any instance exists, its MUP import RT policy, which changes the
-// MatchImportForFamily outcome a T2ST's instance follows. With no instances
-// anywhere an RT edit cannot move a session (every match resolves to the
-// default instance 0), so it stays silent. A first bind compares against the
-// zero Binding, so declaring interfaces or (with instances present) MUP
-// import RTs fires as a change from empty.
-func mupUplinkFieldsChanged(prev, updated vrfbgp.Binding, anyInstance bool) bool {
-	// Interface lists compare as sets: their order carries no meaning, so a
-	// reorder must not trigger the walk.
-	if !slices.Equal(sortedCopy(prev.MupUplinkInterfaces), sortedCopy(updated.MupUplinkInterfaces)) {
-		return true
-	}
-	if !anyInstance {
-		return false
-	}
+// mupUplinkFieldsChanged reports whether a binding mutation can move a T2ST's
+// resolved VRF, so an unrelated edit (max_prefixes, a vpnv4 RT) does not re-run
+// the O(sessions) re-key walk. Only the binding's MUP import RT policy matters:
+// it changes the MatchImportForFamily outcome, hence which VRF (and so which
+// vrf_id) a T2ST installs under. A first bind compares against the zero
+// Binding, so declaring MUP import RTs fires as a change from empty. (Ingress
+// AC membership lives on the VRF object, not the binding, so it is not
+// considered here — VrfService drives that reconcile separately.)
+func mupUplinkFieldsChanged(prev, updated vrfbgp.Binding) bool {
 	for _, fam := range []bgp.Family{bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6} {
 		if !slices.Equal(mupImportRTs(prev, fam), mupImportRTs(updated, fam)) {
 			return true
@@ -432,14 +413,12 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 				s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
 			}
 			if s.mupSrc != nil && existed &&
-				(len(prev.MupUplinkInterfaces) > 0 ||
-					(s.mgr.HasUplinkInstances() &&
-						(len(mupImportRTs(prev, bgp.FamilyMUPIPv4)) > 0 || len(mupImportRTs(prev, bgp.FamilyMUPIPv6)) > 0))) {
-				// The removed binding held an instance (release re-keys its
-				// sessions to the default instance), or it imported MUP RTs
-				// while other instances survive (its sessions may now match a
-				// different, instance-holding binding). Anything else cannot
-				// move uplink state.
+				(len(mupImportRTs(prev, bgp.FamilyMUPIPv4)) > 0 || len(mupImportRTs(prev, bgp.FamilyMUPIPv6)) > 0) {
+				// The removed binding imported MUP RTs, so a T2ST it matched may
+				// now match a different binding (different VRF) or none (global
+				// VRF). Re-key the affected sessions. The VRF objects and the
+				// ingress_vrf_map are untouched (a binding unbind does not delete
+				// the VRF).
 				s.mupSrc.ReconcileMUPUplinkInstances()
 			}
 		}

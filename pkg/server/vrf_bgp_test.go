@@ -1215,14 +1215,21 @@ func TestVrfBgpBind_DoubleAddVRFFailureKeepsManagerPrev(t *testing.T) {
 	}
 }
 
-// The uplink-instance hook fires on every binding mutation that can move
-// uplink state: declaring or dropping mup_uplink_interfaces, any mutation
-// while some binding holds an instance, and the unbind of an
-// instance-holding binding. It stays silent while no instance exists.
+// The uplink-reconcile hook fires on a binding mutation that changes the
+// binding's MUP import route targets — the only field that moves which VRF
+// (and so which vrf_id) a received T2ST installs under. Edits that cannot
+// change that (a plain bind, a max_prefixes change, an unchanged RT set) stay
+// silent. Ingress AC membership lives on the VRF object, not the binding, so
+// it never drives this hook (VrfService reconciles ingress separately).
 func TestVrfBgpBind_DrivesMupUplinkReconcile(t *testing.T) {
 	hook := &fakeMupSrc{}
 	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook)
 
+	mupFamily := func(rt string) map[string]*v1.VrfBgpFamily {
+		return map[string]*v1.VrfBgpFamily{
+			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: rt, Direction: "import"}}},
+		}
+	}
 	bind := func(b *v1.VrfBgpBinding) {
 		t.Helper()
 		resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
@@ -1236,60 +1243,55 @@ func TestVrfBgpBind_DrivesMupUplinkReconcile(t *testing.T) {
 		}
 	}
 
-	// A plain binding with no interfaces and no instances anywhere: silent.
+	// A plain binding with no MUP RTs: silent.
 	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9"})
 	if hook.uplinkRecycles != 0 {
 		t.Fatalf("plain bind fired the uplink hook %d times, want 0", hook.uplinkRecycles)
 	}
 
-	// Declaring interfaces allocates an instance: fires.
-	bind(&v1.VrfBgpBinding{VrfName: "mup1", Rd: "65001:1", MupUplinkInterfaces: []string{"eth1"}})
+	// Declaring MUP import RTs: fires (a change from the empty set).
+	bind(&v1.VrfBgpBinding{VrfName: "mup1", Rd: "65001:1", Families: mupFamily("100:1")})
 	if hook.uplinkRecycles != 1 {
-		t.Fatalf("interface bind fired %d times, want 1", hook.uplinkRecycles)
+		t.Fatalf("MUP RT declaration fired %d times, want 1", hook.uplinkRecycles)
 	}
 
-	// An unrelated mutation (max_prefixes) cannot move uplink state even
-	// while an instance is held: silent.
+	// An unrelated mutation (max_prefixes) on a binding with no MUP RTs: silent.
 	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 7})
 	if hook.uplinkRecycles != 1 {
 		t.Fatalf("unrelated mutation fired %d times, want 1", hook.uplinkRecycles)
 	}
 
-	// A MUP import RT change while an instance is held re-scopes which
-	// binding a T2ST matches: fires.
-	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 7,
-		Families: map[string]*v1.VrfBgpFamily{
-			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "100:5", Direction: "import"}}},
-		}})
+	// Adding MUP import RTs to the plain binding re-scopes which binding a
+	// T2ST matches: fires.
+	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 7, Families: mupFamily("100:5")})
 	if hook.uplinkRecycles != 2 {
-		t.Fatalf("MUP import RT change fired %d times, want 2", hook.uplinkRecycles)
+		t.Fatalf("MUP import RT add fired %d times, want 2", hook.uplinkRecycles)
 	}
 
-	// Dropping the interfaces releases the instance: fires (the release
-	// itself re-keys sessions back to the default instance).
+	// Dropping the MUP RTs from mup1 re-scopes its matched sessions: fires.
 	bind(&v1.VrfBgpBinding{VrfName: "mup1", Rd: "65001:1"})
 	if hook.uplinkRecycles != 3 {
-		t.Fatalf("interface removal fired %d times, want 3", hook.uplinkRecycles)
+		t.Fatalf("MUP RT removal fired %d times, want 3", hook.uplinkRecycles)
 	}
 
-	// All instances gone: even a MUP RT edit cannot move a session (every
-	// match resolves to the default instance), so it is silent.
-	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 9,
-		Families: map[string]*v1.VrfBgpFamily{
-			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "100:6", Direction: "import"}}},
-		}})
+	// Re-binding plain with the SAME MUP RT (only max_prefixes differs): the
+	// import RT set is unchanged, so no session can move: silent.
+	bind(&v1.VrfBgpBinding{VrfName: "plain", Rd: "65001:9", MaxPrefixes: 9, Families: mupFamily("100:5")})
 	if hook.uplinkRecycles != 3 {
-		t.Fatalf("mutation with no instances fired %d times, want 3", hook.uplinkRecycles)
+		t.Fatalf("unchanged MUP RT set fired %d times, want 3", hook.uplinkRecycles)
 	}
 }
 
-// Unbinding an instance-holding binding re-keys its sessions; unbinding a
-// plain one while no instance exists stays silent.
+// Unbinding a binding that imported MUP RTs re-keys its sessions (the routes
+// it matched may now match a different VRF or none); unbinding a plain binding
+// is silent.
 func TestVrfBgpUnbind_DrivesMupUplinkReconcile(t *testing.T) {
 	hook := &fakeMupSrc{}
 	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook)
 	bindReq := &v1.VrfBgpBindRequest{Bindings: []*v1.VrfBgpBinding{
-		{VrfName: "mup1", Rd: "65001:1", MupUplinkInterfaces: []string{"eth1"}},
+		{VrfName: "mup1", Rd: "65001:1", Families: map[string]*v1.VrfBgpFamily{
+			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "100:1", Direction: "import"}}},
+		}},
 		{VrfName: "plain", Rd: "65001:9"},
 	}}
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(bindReq)); err != nil {
@@ -1310,13 +1312,13 @@ func TestVrfBgpUnbind_DrivesMupUplinkReconcile(t *testing.T) {
 		}
 	}
 
-	// The instance-holding binding goes away: fires once.
+	// The MUP-importing binding goes away: fires once.
 	unbind("mup1")
 	if hook.uplinkRecycles != fired+1 {
-		t.Fatalf("instance unbind fired %d times, want %d", hook.uplinkRecycles, fired+1)
+		t.Fatalf("MUP-importing unbind fired %d times, want %d", hook.uplinkRecycles, fired+1)
 	}
 
-	// No instances remain: a plain unbind is silent.
+	// A plain unbind (no MUP RTs): silent.
 	unbind("plain")
 	if hook.uplinkRecycles != fired+1 {
 		t.Fatalf("plain unbind fired %d times, want %d", hook.uplinkRecycles, fired+1)

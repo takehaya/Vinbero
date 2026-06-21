@@ -414,66 +414,25 @@ func keys[K comparable, V any](m map[K]V) []K {
 	return out
 }
 
-// Uplink instance ids follow MupUplinkInterfaces: allocated on bind, stable
-// across updates, released on unbind (or when the list empties) and recycled.
-// Instance 0 stays reserved for bindings without interfaces.
-func TestUplinkInstanceLifecycle(t *testing.T) {
+// Bind ensures the binding's VRF exists in the attached vrf.Manager (the VRF
+// identity and its vrf_id are independent of the binding's lifetime).
+func TestBind_EnsuresVRF(t *testing.T) {
 	m := NewManager()
-
-	if err := m.Bind(Binding{VRFName: "plain"}); err != nil {
+	if _, ok := m.VRF().IDForName("a"); ok {
+		t.Fatal("VRF a should not exist before Bind")
+	}
+	if err := m.Bind(Binding{VRFName: "a"}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	if got := m.UplinkInstanceForVRF("plain"); got != 0 {
-		t.Errorf("no-interface binding instance = %d, want 0", got)
+	id, ok := m.VRF().IDForName("a")
+	if !ok || id == 0 {
+		t.Errorf("after Bind, VRF a id = %d,%t want non-zero,true", id, ok)
 	}
-
-	if err := m.Bind(Binding{VRFName: "a", MupUplinkInterfaces: []string{"eth1"}}); err != nil {
-		t.Fatalf("Bind a: %v", err)
+	// Unbind leaves the VRF intact (it may still hold ingress ACs).
+	if err := m.Unbind("a"); err != nil {
+		t.Fatalf("Unbind: %v", err)
 	}
-	if err := m.Bind(Binding{VRFName: "b", MupUplinkInterfaces: []string{"eth2", "eth3"}}); err != nil {
-		t.Fatalf("Bind b: %v", err)
-	}
-	instA, instB := m.UplinkInstanceForVRF("a"), m.UplinkInstanceForVRF("b")
-	if instA == 0 || instB == 0 || instA == instB {
-		t.Fatalf("instances a=%d b=%d, want distinct non-zero", instA, instB)
-	}
-
-	// Update keeps the id (a re-bind with interfaces must not re-key sessions).
-	if err := m.Bind(Binding{VRFName: "a", MupUplinkInterfaces: []string{"eth1", "eth9"}}); err != nil {
-		t.Fatalf("re-Bind a: %v", err)
-	}
-	if got := m.UplinkInstanceForVRF("a"); got != instA {
-		t.Errorf("instance after update = %d, want stable %d", got, instA)
-	}
-
-	// Snapshot maps each instance to its interface list.
-	snap := m.UplinkInstanceInterfaces()
-	if got := snap[instA]; len(got) != 2 || got[0] != "eth1" || got[1] != "eth9" {
-		t.Errorf("snapshot[a] = %v, want [eth1 eth9]", got)
-	}
-	if got := snap[instB]; len(got) != 2 || got[0] != "eth2" || got[1] != "eth3" {
-		t.Errorf("snapshot[b] = %v, want [eth2 eth3]", got)
-	}
-
-	// Emptying the list releases the id; rebinding a fresh holder recycles it.
-	if err := m.Bind(Binding{VRFName: "a"}); err != nil {
-		t.Fatalf("empty re-Bind a: %v", err)
-	}
-	if got := m.UplinkInstanceForVRF("a"); got != 0 {
-		t.Errorf("instance after emptying interfaces = %d, want 0", got)
-	}
-	if err := m.Bind(Binding{VRFName: "c", MupUplinkInterfaces: []string{"eth5"}}); err != nil {
-		t.Fatalf("Bind c: %v", err)
-	}
-	if got := m.UplinkInstanceForVRF("c"); got != instA {
-		t.Errorf("recycled instance = %d, want %d", got, instA)
-	}
-
-	// Unbind releases too, and the snapshot drops the entry.
-	if err := m.Unbind("b"); err != nil {
-		t.Fatalf("Unbind b: %v", err)
-	}
-	if _, ok := m.UplinkInstanceInterfaces()[instB]; ok {
-		t.Errorf("snapshot still holds unbound instance %d", instB)
+	if id2, ok := m.VRF().IDForName("a"); !ok || id2 != id {
+		t.Errorf("after Unbind, VRF a id = %d,%t want stable %d,true", id2, ok, id)
 	}
 }

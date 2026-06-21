@@ -445,13 +445,20 @@ service NetworkResourceService {
   rpc BridgeList(BridgeListRequest) returns (BridgeListResponse);
 }
 
-// Vrf represents a Linux VRF device managed by Vinbero.
-// Used by End.DT4/DT6/DT46 for VRF-aware FIB lookup.
+// Vrf is the VRF object. The kernel-device facet (table_id, members,
+// enable_l3mdev_rule) is managed by NetworkResourceService and used by
+// End.DT4/DT6/DT46 for VRF-aware FIB lookup. The ingress facet (vrf_id, acs)
+// is managed by VrfService: vrf_id is the data-plane id (0 = global/default
+// VRF, the underlay) and acs is the ingress {interface, VLAN} membership. A
+// VRF may have either facet alone — a MUP gateway has an ingress-only VRF with
+// no kernel device. (Merging the two surfaces into one is a follow-up.)
 message Vrf {
-  string name = 1; // VRF device name (e.g., "vrf100")
-  uint32 table_id = 2; // Linux routing table ID
-  repeated string members = 3; // Interfaces to enslave to this VRF
+  string name = 1; // VRF name (e.g., "vrf100")
+  uint32 table_id = 2; // Linux routing table ID (kernel-device facet)
+  repeated string members = 3; // Interfaces to enslave to this VRF (kernel-device facet)
   bool enable_l3mdev_rule = 4; // Add "ip rule add l3mdev" if not already present
+  uint32 vrf_id = 5; // ingress/data-plane id, server-assigned (0 = global/default VRF)
+  repeated VrfAc acs = 6; // ingress access-circuit membership
 }
 
 message VrfCreateRequest {
@@ -612,3 +619,60 @@ message StatsSlotResetRequest {
   repeated string map_types = 1; // empty = reset all three types
 }
 message StatsSlotResetResponse {}
+
+// VrfService manages the VRF's ingress facet: its access-circuit membership
+// ({interface, VLAN}) and the global default-deny policy. A VRF's vrf_id is
+// allocated on first reference. The data plane resolves a packet's VRF once at
+// the XDP entry from its {ifindex, VLAN}. The kernel-device facet lives in
+// NetworkResourceService; merging the two into one VRF surface is a follow-up.
+service VrfService {
+  rpc VrfAcAdd(VrfAcAddRequest) returns (VrfAcAddResponse);          // add an AC (creates the VRF)
+  rpc VrfAcRemove(VrfAcRemoveRequest) returns (VrfAcRemoveResponse);
+  rpc VrfSetPolicy(VrfSetPolicyRequest) returns (VrfSetPolicyResponse);
+  rpc VrfShow(VrfShowRequest) returns (VrfShowResponse);
+}
+
+// VrfAc is an ingress access circuit ({interface, VLAN}) that belongs to a VRF.
+// It is the VRF's ingress membership: the data plane resolves a packet's VRF
+// once at the XDP entry from its {ifindex, VLAN}.
+message VrfAc {
+  string interface_name = 1; // ingress port (resolved to ifindex by server)
+  uint32 vlan = 2;           // VLAN ID (0 = untagged)
+}
+
+// VrfPolicy is the global ingress policy. default_deny drops (or passes, per
+// deny_action) a packet whose AC is unmapped instead of falling into the
+// global/default VRF (vrf_id 0).
+message VrfPolicy {
+  bool default_deny = 1;
+  string deny_action = 2; // "drop" (default) | "pass"
+}
+
+// VrfAcAddRequest / VrfAcRemoveRequest manage a VRF's ingress membership.
+// Adding an AC creates the VRF (allocating its vrf_id) if absent; a VRF needs
+// no Linux device (a MUP gateway classifies ingress without one).
+message VrfAcAddRequest {
+  string name = 1; // VRF name
+  VrfAc ac = 2;
+}
+message VrfAcAddResponse {
+  Vrf vrf = 1; // the VRF after the add (carries the assigned vrf_id)
+}
+message VrfAcRemoveRequest {
+  string name = 1;
+  VrfAc ac = 2;
+}
+message VrfAcRemoveResponse {}
+
+message VrfSetPolicyRequest {
+  VrfPolicy policy = 1;
+}
+message VrfSetPolicyResponse {
+  VrfPolicy policy = 1;
+}
+
+message VrfShowRequest {}
+message VrfShowResponse {
+  repeated Vrf vrfs = 1; // ingress facet only (name, vrf_id, acs)
+  VrfPolicy policy = 2;
+}

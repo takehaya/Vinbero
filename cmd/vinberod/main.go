@@ -23,6 +23,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/logger"
 	"github.com/takehaya/vinbero/pkg/server"
 	"github.com/takehaya/vinbero/pkg/vinbero"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 	"github.com/urfave/cli/v2"
 )
@@ -252,6 +253,14 @@ func run(cliCtx *cli.Context) error {
 	}
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, lg)
 
+	// Load VRFs (ingress facet) from config and program them once at boot
+	// (later runtime mutations go through VrfService). A failed interface
+	// resolution here is fatal: a config-declared AC that does not exist is a
+	// misconfiguration the operator should see at startup.
+	if err := loadVRFs(cfg.VRFs, srv.VrfManager(), vin.GetMapOperations(), lg); err != nil {
+		return fmt.Errorf("vrf: %w", err)
+	}
+
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
 		// (global up, peers half-added) still gets torn down.
@@ -372,6 +381,34 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 	return nil
 }
 
+// loadVRFs programs the VRFs' ingress facet from config at boot: it sets the
+// global policy, registers each VRF's access circuits, and reconciles the
+// data-plane maps. A config-declared interface that does not resolve is fatal
+// (surfaced at startup, not silently dropped).
+func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, lg *zap.Logger) error {
+	var action uint8
+	switch cfg.DenyAction {
+	case "", "drop":
+		action = vrf.DenyActionDrop
+	case "pass":
+		action = vrf.DenyActionPass
+	default:
+		return fmt.Errorf("deny_action %q: want \"drop\" or \"pass\"", cfg.DenyAction)
+	}
+	mgr.SetPolicy(vrf.Policy{DefaultDeny: cfg.DefaultDeny, DenyAction: action})
+	for _, v := range cfg.Entries {
+		for _, ac := range v.ACs {
+			if _, err := mgr.AddAC(v.Name, vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN}); err != nil {
+				return err
+			}
+		}
+	}
+	if cfg.DefaultDeny {
+		lg.Warn("VRF default-deny enabled: unmapped ACs are dropped at XDP ingress; map every forwarding interface (underlay/control included) to a VRF or host-bound BGP/NDP is black-holed")
+	}
+	return mgr.Reconcile(vrf.ResolveByName, prog)
+}
+
 // configToBinding converts a config VRF binding into the runtime vrfbgp
 // Binding. The caller is responsible for validating b.BDID's range first.
 // vrfbgp.Binding.Normalize (called from Manager.Bind) expands the legacy
@@ -397,7 +434,6 @@ func configToBinding(b config.VrfBindingConfig) (vrfbgp.Binding, error) {
 		BDID:                uint16(b.BDID),
 		Families:            fams,
 		MupGTP4SourcePrefix: mupSrc,
-		MupUplinkInterfaces: b.MupUplinkInterfaces,
 	}, nil
 }
 

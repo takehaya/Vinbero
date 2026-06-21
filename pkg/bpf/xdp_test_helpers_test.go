@@ -117,7 +117,7 @@ type xdpMdCtx struct {
 }
 
 // runOnIfindex is run with the xdp_md context's ingress_ifindex set, for
-// behaviors keyed on the ingress interface (the MUP uplink instance lookup).
+// behaviors keyed on the ingress AC (the ingress front door's vrf_id lookup).
 func (h *xdpTestHelper) runOnIfindex(pkt []byte, ifindex uint32) (uint32, []byte) {
 	h.t.Helper()
 	ctx := xdpMdCtx{DataEnd: uint32(len(pkt)), IngressIfindex: ifindex}
@@ -132,6 +132,27 @@ func (h *xdpTestHelper) runOnIfindex(pkt []byte, ifindex uint32) (uint32, []byte
 		h.t.Fatalf("Failed to run BPF program with ingress_ifindex=%d: %v", ifindex, err)
 	}
 	return ret, opts.DataOut
+}
+
+// buildPlainIPv4 builds a plain Ethernet/IPv4/ICMP packet (no VLAN) that
+// matches no SID / headend / L2 entry, so it XDP_PASSes when the ingress VRF
+// front door is off — a clean probe for the default-deny gate.
+func buildPlainIPv4(t *testing.T) []byte {
+	t.Helper()
+	eth := newTestEthernet(layers.EthernetTypeIPv4)
+	ip4 := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolICMPv4,
+		SrcIP:    net.ParseIP("203.0.113.1").To4(),
+		DstIP:    net.ParseIP("203.0.113.2").To4(),
+	}
+	icmp := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0), Id: 1, Seq: 1}
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, ip4, icmp, gopacket.Payload(newTestPayload(32))); err != nil {
+		t.Fatalf("serialize plain IPv4: %v", err)
+	}
+	return buf.Bytes()
 }
 
 // runRepeat drives BPF_PROG_TEST_RUN with Repeat=n in a single syscall.
@@ -1065,8 +1086,9 @@ func (h *xdpTestHelper) createMupUplinkSession(endpoint string, teid uint32, tei
 }
 
 // createMupUplinkSessionInstance is createMupUplinkSession keyed under an
-// explicit uplink instance (0 = default; non-zero entries are only reachable
-// from interfaces mapped to that instance via mup_ifindex_instance_map).
+// explicit vrf_id (0 = global VRF; non-zero entries are only reachable from
+// ingress ACs mapped to that vrf_id via ingress_vrf_map, resolved into
+// tailcall_ctx.vrf_id at the XDP entry).
 func (h *xdpTestHelper) createMupUplinkSessionInstance(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, srcAddr [16]byte, segments [10][16]byte, numSegments uint8, argsOffset uint8) {
 	h.t.Helper()
 	entry := &HeadendEntry{

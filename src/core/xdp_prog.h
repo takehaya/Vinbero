@@ -103,6 +103,27 @@ struct headend_l2_key {
     __u8 _pad[2];
 } __attribute__((packed));
 
+// Key for the ingress VRF front door: {port, VLAN} -> vrf_id. First-class
+// ingress classification context, distinct from headend_l2_key (which resolves
+// straight to an L2 encap entry). vrf_id 0 is the global/default VRF (underlay).
+struct ingress_ac_key {
+    __u32 ifindex;                // Ingress port ifindex
+    __u16 vlan_id;                // VLAN ID (0 = untagged)
+    __u8 _pad[2];
+} __attribute__((packed));
+
+// Global ingress policy (single entry, index 0). enabled gates the front-door
+// lookup so the common unconfigured path skips the hash lookup. default_deny
+// makes an unmapped AC handled per deny_action instead of falling into vrf 0.
+#define INGRESS_DENY_DROP 0
+#define INGRESS_DENY_PASS 1
+struct ingress_policy {
+    __u8 enabled;       // 1 = front door active (>=1 entry or default_deny set)
+    __u8 default_deny;  // 1 = unmapped AC is denied instead of falling to vrf 0
+    __u8 deny_action;   // INGRESS_DENY_DROP / INGRESS_DENY_PASS
+    __u8 _pad;
+} __attribute__((packed));
+
 // Key for VLAN cross-connect table (End.DX2V)
 struct dx2v_key {
     __u16 table_id;    // VLAN table ID (user-configured scope)
@@ -146,14 +167,14 @@ struct headend_entry {
 // matched and the TEID is matched as a *prefix*. BGP MUP T2ST carries the TEID
 // as a variable-length prefix (EndpointAddressLength = 32 + TEID-bits for
 // IPv4), so a single route can aggregate a TEID range. prefixlen ranges 64
-// (instance + endpoint only / any TEID) .. 96 (exact TEID). The instance is the uplink
-// service instance resolved from the ingress ifindex (mup_ifindex_instance_map;
-// 0 = default instance), so two instances can install the same {endpoint, TEID}
-// without colliding. instance, endpoint and teid bytes are network byte order
-// so the on-wire MSB aligns to the start of the matched prefix.
+// (instance + endpoint only / any TEID) .. 96 (exact TEID). The instance is the
+// vrf_id resolved from the ingress AC (ingress_vrf_map, carried in
+// tailcall_ctx.vrf_id; 0 = global VRF), so two VRFs can install the same
+// {endpoint, TEID} without colliding. instance, endpoint and teid bytes are
+// network byte order so the on-wire MSB aligns to the start of the matched prefix.
 struct mup_uplink_v4_key {
     __u32 prefixlen;                // 64..96 (instance 32 + endpoint 32 + TEID prefix bits)
-    __u8  instance[4];              // uplink instance id, big-endian, always fully matched (0 = default)
+    __u8  instance[4];              // vrf_id, big-endian, always fully matched (0 = global VRF)
     __u8  endpoint[IPV4_ADDR_LEN];  // outer GTP-U destination (N3 / UPF endpoint), full /32
     __u8  teid[4];                  // GTP-U TEID, network byte order, MSB-aligned prefix
 } __attribute__((packed));
@@ -165,7 +186,7 @@ struct mup_uplink_v4_key {
 // on-wire MSB aligns to the start of the matched prefix.
 struct mup_uplink_v6_key {
     __u32 prefixlen;                // 160..192 (instance 32 + endpoint 128 + TEID prefix bits)
-    __u8  instance[4];              // uplink instance id, big-endian, always fully matched (0 = default)
+    __u8  instance[4];              // vrf_id, big-endian, always fully matched (0 = global VRF)
     __u8  endpoint[IPV6_ADDR_LEN];  // outer GTP-U/IPv6 destination (N3 / UPF endpoint), full /128
     __u8  teid[4];                  // GTP-U TEID, network byte order, MSB-aligned prefix
 } __attribute__((packed));

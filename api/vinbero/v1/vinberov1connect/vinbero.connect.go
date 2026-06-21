@@ -41,6 +41,8 @@ const (
 	HeadendL2ServiceName = "vinbero.v1.HeadendL2Service"
 	// StatsServiceName is the fully-qualified name of the StatsService service.
 	StatsServiceName = "vinbero.v1.StatsService"
+	// VrfServiceName is the fully-qualified name of the VrfService service.
+	VrfServiceName = "vinbero.v1.VrfService"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -186,6 +188,14 @@ const (
 	// StatsServiceStatsSlotResetProcedure is the fully-qualified name of the StatsService's
 	// StatsSlotReset RPC.
 	StatsServiceStatsSlotResetProcedure = "/vinbero.v1.StatsService/StatsSlotReset"
+	// VrfServiceVrfAcAddProcedure is the fully-qualified name of the VrfService's VrfAcAdd RPC.
+	VrfServiceVrfAcAddProcedure = "/vinbero.v1.VrfService/VrfAcAdd"
+	// VrfServiceVrfAcRemoveProcedure is the fully-qualified name of the VrfService's VrfAcRemove RPC.
+	VrfServiceVrfAcRemoveProcedure = "/vinbero.v1.VrfService/VrfAcRemove"
+	// VrfServiceVrfSetPolicyProcedure is the fully-qualified name of the VrfService's VrfSetPolicy RPC.
+	VrfServiceVrfSetPolicyProcedure = "/vinbero.v1.VrfService/VrfSetPolicy"
+	// VrfServiceVrfShowProcedure is the fully-qualified name of the VrfService's VrfShow RPC.
+	VrfServiceVrfShowProcedure = "/vinbero.v1.VrfService/VrfShow"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -247,6 +257,11 @@ var (
 	statsServiceStatsResetMethodDescriptor              = statsServiceServiceDescriptor.Methods().ByName("StatsReset")
 	statsServiceStatsSlotShowMethodDescriptor           = statsServiceServiceDescriptor.Methods().ByName("StatsSlotShow")
 	statsServiceStatsSlotResetMethodDescriptor          = statsServiceServiceDescriptor.Methods().ByName("StatsSlotReset")
+	vrfServiceServiceDescriptor                         = v1.File_vinbero_v1_vinbero_proto.Services().ByName("VrfService")
+	vrfServiceVrfAcAddMethodDescriptor                  = vrfServiceServiceDescriptor.Methods().ByName("VrfAcAdd")
+	vrfServiceVrfAcRemoveMethodDescriptor               = vrfServiceServiceDescriptor.Methods().ByName("VrfAcRemove")
+	vrfServiceVrfSetPolicyMethodDescriptor              = vrfServiceServiceDescriptor.Methods().ByName("VrfSetPolicy")
+	vrfServiceVrfShowMethodDescriptor                   = vrfServiceServiceDescriptor.Methods().ByName("VrfShow")
 )
 
 // SidFunctionServiceClient is a client for the vinbero.v1.SidFunctionService service.
@@ -1891,4 +1906,150 @@ func (UnimplementedStatsServiceHandler) StatsSlotShow(context.Context, *connect.
 
 func (UnimplementedStatsServiceHandler) StatsSlotReset(context.Context, *connect.Request[v1.StatsSlotResetRequest]) (*connect.Response[v1.StatsSlotResetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsSlotReset is not implemented"))
+}
+
+// VrfServiceClient is a client for the vinbero.v1.VrfService service.
+type VrfServiceClient interface {
+	VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error)
+	VrfAcRemove(context.Context, *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error)
+	VrfSetPolicy(context.Context, *connect.Request[v1.VrfSetPolicyRequest]) (*connect.Response[v1.VrfSetPolicyResponse], error)
+	VrfShow(context.Context, *connect.Request[v1.VrfShowRequest]) (*connect.Response[v1.VrfShowResponse], error)
+}
+
+// NewVrfServiceClient constructs a client for the vinbero.v1.VrfService service. By default, it
+// uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses, and sends
+// uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the connect.WithGRPC() or
+// connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewVrfServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) VrfServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &vrfServiceClient{
+		vrfAcAdd: connect.NewClient[v1.VrfAcAddRequest, v1.VrfAcAddResponse](
+			httpClient,
+			baseURL+VrfServiceVrfAcAddProcedure,
+			connect.WithSchema(vrfServiceVrfAcAddMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		vrfAcRemove: connect.NewClient[v1.VrfAcRemoveRequest, v1.VrfAcRemoveResponse](
+			httpClient,
+			baseURL+VrfServiceVrfAcRemoveProcedure,
+			connect.WithSchema(vrfServiceVrfAcRemoveMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		vrfSetPolicy: connect.NewClient[v1.VrfSetPolicyRequest, v1.VrfSetPolicyResponse](
+			httpClient,
+			baseURL+VrfServiceVrfSetPolicyProcedure,
+			connect.WithSchema(vrfServiceVrfSetPolicyMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		vrfShow: connect.NewClient[v1.VrfShowRequest, v1.VrfShowResponse](
+			httpClient,
+			baseURL+VrfServiceVrfShowProcedure,
+			connect.WithSchema(vrfServiceVrfShowMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// vrfServiceClient implements VrfServiceClient.
+type vrfServiceClient struct {
+	vrfAcAdd     *connect.Client[v1.VrfAcAddRequest, v1.VrfAcAddResponse]
+	vrfAcRemove  *connect.Client[v1.VrfAcRemoveRequest, v1.VrfAcRemoveResponse]
+	vrfSetPolicy *connect.Client[v1.VrfSetPolicyRequest, v1.VrfSetPolicyResponse]
+	vrfShow      *connect.Client[v1.VrfShowRequest, v1.VrfShowResponse]
+}
+
+// VrfAcAdd calls vinbero.v1.VrfService.VrfAcAdd.
+func (c *vrfServiceClient) VrfAcAdd(ctx context.Context, req *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error) {
+	return c.vrfAcAdd.CallUnary(ctx, req)
+}
+
+// VrfAcRemove calls vinbero.v1.VrfService.VrfAcRemove.
+func (c *vrfServiceClient) VrfAcRemove(ctx context.Context, req *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error) {
+	return c.vrfAcRemove.CallUnary(ctx, req)
+}
+
+// VrfSetPolicy calls vinbero.v1.VrfService.VrfSetPolicy.
+func (c *vrfServiceClient) VrfSetPolicy(ctx context.Context, req *connect.Request[v1.VrfSetPolicyRequest]) (*connect.Response[v1.VrfSetPolicyResponse], error) {
+	return c.vrfSetPolicy.CallUnary(ctx, req)
+}
+
+// VrfShow calls vinbero.v1.VrfService.VrfShow.
+func (c *vrfServiceClient) VrfShow(ctx context.Context, req *connect.Request[v1.VrfShowRequest]) (*connect.Response[v1.VrfShowResponse], error) {
+	return c.vrfShow.CallUnary(ctx, req)
+}
+
+// VrfServiceHandler is an implementation of the vinbero.v1.VrfService service.
+type VrfServiceHandler interface {
+	VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error)
+	VrfAcRemove(context.Context, *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error)
+	VrfSetPolicy(context.Context, *connect.Request[v1.VrfSetPolicyRequest]) (*connect.Response[v1.VrfSetPolicyResponse], error)
+	VrfShow(context.Context, *connect.Request[v1.VrfShowRequest]) (*connect.Response[v1.VrfShowResponse], error)
+}
+
+// NewVrfServiceHandler builds an HTTP handler from the service implementation. It returns the path
+// on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewVrfServiceHandler(svc VrfServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	vrfServiceVrfAcAddHandler := connect.NewUnaryHandler(
+		VrfServiceVrfAcAddProcedure,
+		svc.VrfAcAdd,
+		connect.WithSchema(vrfServiceVrfAcAddMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfServiceVrfAcRemoveHandler := connect.NewUnaryHandler(
+		VrfServiceVrfAcRemoveProcedure,
+		svc.VrfAcRemove,
+		connect.WithSchema(vrfServiceVrfAcRemoveMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfServiceVrfSetPolicyHandler := connect.NewUnaryHandler(
+		VrfServiceVrfSetPolicyProcedure,
+		svc.VrfSetPolicy,
+		connect.WithSchema(vrfServiceVrfSetPolicyMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfServiceVrfShowHandler := connect.NewUnaryHandler(
+		VrfServiceVrfShowProcedure,
+		svc.VrfShow,
+		connect.WithSchema(vrfServiceVrfShowMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.VrfService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case VrfServiceVrfAcAddProcedure:
+			vrfServiceVrfAcAddHandler.ServeHTTP(w, r)
+		case VrfServiceVrfAcRemoveProcedure:
+			vrfServiceVrfAcRemoveHandler.ServeHTTP(w, r)
+		case VrfServiceVrfSetPolicyProcedure:
+			vrfServiceVrfSetPolicyHandler.ServeHTTP(w, r)
+		case VrfServiceVrfShowProcedure:
+			vrfServiceVrfShowHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedVrfServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedVrfServiceHandler struct{}
+
+func (UnimplementedVrfServiceHandler) VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfAcAdd is not implemented"))
+}
+
+func (UnimplementedVrfServiceHandler) VrfAcRemove(context.Context, *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfAcRemove is not implemented"))
+}
+
+func (UnimplementedVrfServiceHandler) VrfSetPolicy(context.Context, *connect.Request[v1.VrfSetPolicyRequest]) (*connect.Response[v1.VrfSetPolicyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfSetPolicy is not implemented"))
+}
+
+func (UnimplementedVrfServiceHandler) VrfShow(context.Context, *connect.Request[v1.VrfShowRequest]) (*connect.Response[v1.VrfShowResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfShow is not implemented"))
 }

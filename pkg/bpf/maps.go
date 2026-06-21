@@ -43,6 +43,8 @@ type (
 	EsiEntry         = BpfEsiEntry
 	MupUplinkV4Key   = BpfMupUplinkV4Key
 	MupUplinkV6Key   = BpfMupUplinkV6Key
+	IngressACKey     = BpfIngressAcKey
+	IngressPolicy    = BpfIngressPolicy
 )
 
 // MupArgsOffsetNone is the headend_entry.args_offset sentinel meaning "do not
@@ -1319,9 +1321,9 @@ func (m *MapOperations) ListHeadendV4() (map[string]*HeadendEntry, error) {
 // ===== MUP Uplink V4 Map Operations (BGP MUP T2ST / F-TEID) =====
 
 // buildMupUplinkV4Key assembles the LPM_TRIE key for mup_uplink_v4_map.
-// instance is the uplink service instance the session belongs to (0 = the
-// default instance; the data plane resolves it from the packet's ingress
-// ifindex via mup_ifindex_instance_map), stored big-endian and always fully
+// instance is the vrf_id the session belongs to (0 = the global VRF; the data
+// plane resolves it from the packet's ingress AC via ingress_vrf_map, carried
+// in tailcall_ctx.vrf_id), stored big-endian and always fully
 // matched. endpoint is the GTP-U outer destination (the N3/UPF endpoint,
 // always a full /32); teid is the GTP-U TEID and teidPrefixBits (0..32) is how
 // many of its high-order bits are significant — BGP MUP T2ST carries the TEID
@@ -1441,41 +1443,33 @@ func (m *MapOperations) DeleteMupUplinkV6(instance uint32, endpoint string, teid
 
 // ===== MUP Uplink Instance Map Operations =====
 
-// SetMupUplinkInstances replaces the ingress-ifindex -> uplink-instance
-// mapping (mup_ifindex_instance_map) with the given one. The data plane
-// resolves a packet's uplink instance from this map (miss = default
-// instance 0), so the rewrite is what re-scopes traffic after a VRF
-// binding's mup_uplink_interfaces change.
-//
-// All-or-nothing toward the caller: the live mapping is snapshotted first
-// and any partial progress is rolled back to it when a write or delete
-// fails, so an error always leaves the OLD classification fully in place —
-// consistent with the F-TEID sessions the caller keeps un-re-keyed on
-// error. (The rollback writes target keys that exist or just existed, so it
-// cannot fail for capacity reasons; a rollback write failing on a broken
-// map cannot make things worse than the broken map already is.)
-func (m *MapOperations) SetMupUplinkInstances(mapping map[uint32]uint32) error {
-	old := make(map[uint32]uint32)
-	var key, val uint32
-	iter := m.objs.MupIfindexInstanceMap.Iterate()
+// ===== Ingress VRF front door =====
+
+// SetIngressVrf replaces the {ifindex, vlan} -> vrf_id mapping
+// (ingress_vrf_map) with the given one, all-or-nothing: the live mapping is
+// snapshotted first and any partial progress is rolled back on a write/delete
+// error, so a failure leaves the old classification fully in place.
+func (m *MapOperations) SetIngressVrf(mapping map[IngressACKey]uint32) error {
+	old := make(map[IngressACKey]uint32)
+	var key IngressACKey
+	var val uint32
+	iter := m.objs.IngressVrfMap.Iterate()
 	for iter.Next(&key, &val) {
 		old[key] = val
 	}
 	if err := iter.Err(); err != nil {
-		return fmt.Errorf("failed to iterate mup ifindex instance map: %w", err)
+		return fmt.Errorf("failed to iterate ingress vrf map: %w", err)
 	}
 
-	// touched records every key this update modified, in order, so a failure
-	// can restore each to its snapshot value (or remove it if it is new).
-	var touched []uint32
+	var touched []IngressACKey
 	rollback := func() {
 		for _, k := range touched {
 			k := k
 			if v, had := old[k]; had {
 				v := v
-				_ = m.objs.MupIfindexInstanceMap.Put(&k, &v)
+				_ = m.objs.IngressVrfMap.Put(&k, &v)
 			} else {
-				_ = deleteMapKey(m.objs.MupIfindexInstanceMap, &k)
+				_ = deleteMapKey(m.objs.IngressVrfMap, &k)
 			}
 		}
 	}
@@ -1483,11 +1477,11 @@ func (m *MapOperations) SetMupUplinkInstances(mapping map[uint32]uint32) error {
 	for k, v := range mapping {
 		k, v := k, v
 		if prev, had := old[k]; had && prev == v {
-			continue // unchanged; keep it out of the rollback set
+			continue
 		}
-		if err := m.objs.MupIfindexInstanceMap.Put(&k, &v); err != nil {
+		if err := m.objs.IngressVrfMap.Put(&k, &v); err != nil {
 			rollback()
-			return fmt.Errorf("failed to put mup ifindex instance entry: %w", err)
+			return fmt.Errorf("failed to put ingress vrf entry: %w", err)
 		}
 		touched = append(touched, k)
 	}
@@ -1496,11 +1490,29 @@ func (m *MapOperations) SetMupUplinkInstances(mapping map[uint32]uint32) error {
 			continue
 		}
 		k := k
-		if err := deleteMapKey(m.objs.MupIfindexInstanceMap, &k); err != nil {
+		if err := deleteMapKey(m.objs.IngressVrfMap, &k); err != nil {
 			rollback()
-			return fmt.Errorf("failed to delete mup ifindex instance entry: %w", err)
+			return fmt.Errorf("failed to delete ingress vrf entry: %w", err)
 		}
 		touched = append(touched, k)
+	}
+	return nil
+}
+
+// SetIngressPolicy writes the global ingress policy (index 0). enabled gates
+// the data-plane front-door lookup; defaultDeny drops (or passes, per
+// denyAction) an unmapped AC instead of falling into the global VRF (vrf 0).
+func (m *MapOperations) SetIngressPolicy(enabled, defaultDeny bool, denyAction uint8) error {
+	var key uint32
+	pol := IngressPolicy{DenyAction: denyAction}
+	if enabled {
+		pol.Enabled = 1
+	}
+	if defaultDeny {
+		pol.DefaultDeny = 1
+	}
+	if err := m.objs.IngressPolicyMap.Put(&key, &pol); err != nil {
+		return fmt.Errorf("failed to put ingress policy: %w", err)
 	}
 	return nil
 }
@@ -2358,23 +2370,24 @@ func FormatSegments(segments [MaxSegments][IPv6AddrLen]uint8, numSegments uint8)
 // otherwise the violation is logged and the load proceeds.
 func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 	return map[string]*ebpf.Map{
-		"sid_function_map":         m.objs.SidFunctionMap,
-		"sid_aux_map":              m.objs.SidAuxMap,
-		"headend_v4_map":           m.objs.HeadendV4Map,
-		"headend_v6_map":           m.objs.HeadendV6Map,
-		"mup_uplink_v4_map":        m.objs.MupUplinkV4Map,
-		"mup_uplink_v6_map":        m.objs.MupUplinkV6Map,
-		"mup_ifindex_instance_map": m.objs.MupIfindexInstanceMap,
-		"headend_l2_map":           m.objs.HeadendL2Map,
-		"fdb_map":                  m.objs.FdbMap,
-		"bd_peer_map":              m.objs.BdPeerMap,
-		"bd_peer_reverse_map":      m.objs.BdPeerReverseMap,
-		"esi_map":                  m.objs.EsiMap,
-		"bd_peer_l2_ext_map":       m.objs.BdPeerL2ExtMap,
-		"headend_l2_ext_map":       m.objs.HeadendL2ExtMap,
-		"bd_local_esi_map":         m.objs.BdLocalEsiMap,
-		"dx2v_map":                 m.objs.Dx2vMap,
-		"tailcall_ctx_map":         m.objs.TailcallCtxMap,
+		"sid_function_map":    m.objs.SidFunctionMap,
+		"sid_aux_map":         m.objs.SidAuxMap,
+		"headend_v4_map":      m.objs.HeadendV4Map,
+		"headend_v6_map":      m.objs.HeadendV6Map,
+		"mup_uplink_v4_map":   m.objs.MupUplinkV4Map,
+		"mup_uplink_v6_map":   m.objs.MupUplinkV6Map,
+		"headend_l2_map":      m.objs.HeadendL2Map,
+		"fdb_map":             m.objs.FdbMap,
+		"bd_peer_map":         m.objs.BdPeerMap,
+		"bd_peer_reverse_map": m.objs.BdPeerReverseMap,
+		"esi_map":             m.objs.EsiMap,
+		"bd_peer_l2_ext_map":  m.objs.BdPeerL2ExtMap,
+		"headend_l2_ext_map":  m.objs.HeadendL2ExtMap,
+		"bd_local_esi_map":    m.objs.BdLocalEsiMap,
+		"dx2v_map":            m.objs.Dx2vMap,
+		"tailcall_ctx_map":    m.objs.TailcallCtxMap,
+		"ingress_vrf_map":     m.objs.IngressVrfMap,
+		"ingress_policy_map":  m.objs.IngressPolicyMap,
 	}
 }
 
@@ -2414,7 +2427,6 @@ func SharedReadOnlyMapNames() []string {
 		"headend_v6_map",
 		"mup_uplink_v4_map",
 		"mup_uplink_v6_map",
-		"mup_ifindex_instance_map",
 		"headend_l2_map",
 		"fdb_map",
 		"bd_peer_map",
@@ -2425,6 +2437,8 @@ func SharedReadOnlyMapNames() []string {
 		"bd_local_esi_map",
 		"dx2v_map",
 		"tailcall_ctx_map",
+		"ingress_vrf_map",
+		"ingress_policy_map",
 	}
 }
 
