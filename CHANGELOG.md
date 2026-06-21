@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.10](https://github.com/takehaya/Vinbero/compare/v0.0.9...v0.0.10) (2026-06-21)
+
+
+### 🎉 Features
+
+* **bgp/mup:** land v4src position extraction + uplink service instances into main ([#88](https://github.com/takehaya/Vinbero/issues/88) + [#89](https://github.com/takehaya/Vinbero/issues/89)) ([#90](https://github.com/takehaya/Vinbero/issues/90)) ([911ecad](https://github.com/takehaya/Vinbero/commit/911ecad4fe485fec2c1e830dc99f9afb86179391))
+* **bgp/mup:** per-VRF GTP4 source-embed prefix, locator-derived SID Structure, ipv4_unicast family ([#86](https://github.com/takehaya/Vinbero/issues/86)) ([0e66a0a](https://github.com/takehaya/Vinbero/commit/0e66a0ac30caa03de06bf86aaf71b20e19454c18))
+* **endpoint:** no-SRH dual-path End.M.GTP4.E / End.M.GTP6.E + macro ([#83](https://github.com/takehaya/Vinbero/issues/83)) ([b21b607](https://github.com/takehaya/Vinbero/commit/b21b607d95cc8e6c368607c3da5174608f2453c7))
+* **vrf-bgp:** unified family-scoped binding with per-family RT/RD policy ([#85](https://github.com/takehaya/Vinbero/issues/85)) ([b5975ac](https://github.com/takehaya/Vinbero/commit/b5975ac3888c59066b20e7c7503a34cbc9d4ca82))
+* **vrf:** promote VRF to a first-class object; fold ingress front door + MUP uplink in ([#94](https://github.com/takehaya/Vinbero/issues/94)) ([4b24119](https://github.com/takehaya/Vinbero/commit/4b2411979ce2fe156b3e541fd212c4d080569588))
+
+
+### 🐛 Bug Fixes
+
+* **bgp/mup:** pin gobgp fork tag carrying draft-01 T1ST framing + Prefix-SID behavior ([#82](https://github.com/takehaya/Vinbero/issues/82)) ([0d9407b](https://github.com/takehaya/Vinbero/commit/0d9407b664fe0b9b5062e1bb6ca7fcc66691d3ce))
+* **interop-clab/mup-2site:** per-advertiser RDs, import-RT filter, RFC 9433 §6.6 source embed ([#87](https://github.com/takehaya/Vinbero/issues/87)) ([426300e](https://github.com/takehaya/Vinbero/commit/426300ee2986119b9c3d693bb346c671a51ebdd7))
+
+
+### 🔧 Miscellaneous Chores
+
+* **interop-clab:** keep proprietary MUP interop assets out of the public repo ([#92](https://github.com/takehaya/Vinbero/issues/92)) ([9e07595](https://github.com/takehaya/Vinbero/commit/9e07595216cbcb7e302174973cb8f7dcd26595d6))
+* **interop-clab:** neutral overlay paths in .gitignore ([#93](https://github.com/takehaya/Vinbero/issues/93)) ([1ff91de](https://github.com/takehaya/Vinbero/commit/1ff91de02c5ff05eb81c5947f65e99c48fec29e4))
+
 ## [0.0.9](https://github.com/takehaya/Vinbero/compare/v0.0.8...v0.0.9) (2026-06-03)
 
 
