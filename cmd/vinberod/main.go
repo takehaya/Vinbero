@@ -445,7 +445,7 @@ func seedVrfDevices(resMgr *netresource.ResourceManager, mgr *vrf.Manager) error
 			EnableL3mdevRule: mv.EnableL3mdevRule,
 			Ifindex:          mv.Ifindex,
 		}); err != nil {
-			return fmt.Errorf("seed vrf %q from state: %w", mv.Name, err)
+			return fmt.Errorf("seed vrf %q from state: %w (remove the entry from the netresource state file, settings.state_path, and restart)", mv.Name, err)
 		}
 	}
 	return nil

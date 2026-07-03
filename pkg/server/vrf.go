@@ -104,20 +104,21 @@ func (s *VrfServer) VrfCreate(
 		Errors:  make([]*v1.OperationError, 0),
 	}
 	for _, in := range req.Msg.Vrfs {
-		if opErr := s.createOne(in); opErr != nil {
+		created, opErr := s.createOne(in)
+		if opErr != nil {
 			resp.Errors = append(resp.Errors, opErr)
 			continue
 		}
-		v, _ := s.mgr.Get(in.GetName())
-		resp.Created = append(resp.Created, vrfToProto(v))
+		resp.Created = append(resp.Created, vrfToProto(created))
 	}
 	return connect.NewResponse(resp), nil
 }
 
-// createOne validates and creates one kernel VRF device. Caller holds s.mu.
-func (s *VrfServer) createOne(in *v1.Vrf) *v1.OperationError {
-	fail := func(reason string) *v1.OperationError {
-		return &v1.OperationError{TriggerPrefix: in.GetName(), Reason: reason}
+// createOne validates and creates one kernel VRF device, returning the
+// resulting VRF (both server-assigned ids filled). Caller holds s.mu.
+func (s *VrfServer) createOne(in *v1.Vrf) (vrf.VRF, *v1.OperationError) {
+	fail := func(reason string) (vrf.VRF, *v1.OperationError) {
+		return vrf.VRF{}, &v1.OperationError{TriggerPrefix: in.GetName(), Reason: reason}
 	}
 	// acs / vrf_id / ifindex are server-owned outputs; a request carrying them
 	// is a caller mixing up the facets (or replaying a VrfShow result), so
@@ -128,7 +129,7 @@ func (s *VrfServer) createOne(in *v1.Vrf) *v1.OperationError {
 	if in.GetVrfId() != 0 || in.GetIfindex() != 0 {
 		return fail("vrf_id and ifindex are server-assigned and must be unset")
 	}
-	_, err := s.mgr.CreateDevice(in.GetName(), vrf.Device{
+	created, err := s.mgr.CreateDevice(in.GetName(), vrf.Device{
 		TableID:          in.GetTableId(),
 		Members:          in.GetMembers(),
 		EnableL3mdevRule: in.GetEnableL3MdevRule(),
@@ -136,7 +137,7 @@ func (s *VrfServer) createOne(in *v1.Vrf) *v1.OperationError {
 	if err != nil {
 		return fail(err.Error())
 	}
-	return nil
+	return created, nil
 }
 
 // VrfDelete removes whole VRF objects. It refuses while anything still
@@ -191,7 +192,7 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 	// SID reference check on the device ifindex. A deviceless VRF can still
 	// shadow a same-named raw kernel device that SIDs reference, so fall back
 	// to a best-effort name resolve.
-	ifindex := uint32(0)
+	var ifindex uint32
 	if v.Device != nil {
 		ifindex = v.Device.Ifindex
 	} else if resolved, err := s.resolve(name); err == nil {

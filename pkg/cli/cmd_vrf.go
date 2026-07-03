@@ -47,7 +47,10 @@ func vrfCommand() *cli.Command {
 						fmt.Printf("vrf %s created (vrf_id=%d table_id=%d ifindex=%d)\n",
 							v.GetName(), v.GetVrfId(), v.GetTableId(), v.GetIfindex())
 					}
-					return printOperationResult(resp.Msg.Created, resp.Msg.Errors, "VRF")
+					// The per-VRF lines above are the success output; hand
+					// printOperationResult only the errors so it does not
+					// print a redundant count line.
+					return printOperationResult([]*v1.Vrf(nil), resp.Msg.Errors, "VRF")
 				},
 			},
 			{
@@ -66,7 +69,8 @@ func vrfCommand() *cli.Command {
 					if len(resp.Msg.DeletedNames) > 0 {
 						fmt.Printf("Deleted: %s\n", strings.Join(resp.Msg.DeletedNames, ", "))
 					}
-					return printOperationResult(resp.Msg.DeletedNames, resp.Msg.Errors, "VRF", "deleted")
+					// Same single-success-line convention as create above.
+					return printOperationResult([]string(nil), resp.Msg.Errors, "VRF", "deleted")
 				},
 			},
 			{

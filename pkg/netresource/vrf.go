@@ -23,10 +23,15 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 		if vrfLink.Table != tableID {
 			return 0, fmt.Errorf("VRF %s exists with table %d, requested %d (delete it first to change tables)", name, vrfLink.Table, tableID)
 		}
-		// Converge the adopted device on the request: enslave any members it
-		// is missing (LinkSetMaster is idempotent for already-enslaved links)
-		// and add the l3mdev rule when asked, so an adopt after a config
-		// change is not silently weaker than a fresh create.
+		// Converge the adopted device on the request: bring it up (an
+		// operator-created admin-DOWN device would blackhole End.DT* decap
+		// behind a successful create), enslave any members it is missing
+		// (LinkSetMaster is idempotent for already-enslaved links) and add
+		// the l3mdev rule when asked, so an adopt is not silently weaker
+		// than a fresh create.
+		if err := netlink.LinkSetUp(existing); err != nil {
+			return 0, fmt.Errorf("set VRF %s up: %w", name, err)
+		}
 		for _, member := range members {
 			if err := enslaveInterface(member, existing); err != nil {
 				return 0, err
@@ -50,12 +55,9 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 		return 0, err
 	}
 
-	m.mu.Lock()
-	m.state.VRFs = append(m.state.VRFs, ManagedVrf{
-		Name: name, TableID: tableID, Members: members,
-		EnableL3mdevRule: enableL3mdevRule, Ifindex: ifindex,
-	})
-	m.mu.Unlock()
+	// A fresh create cannot collide with an existing name (createVrfNetlink
+	// would have failed on LinkAdd), so the upsert takes its append branch.
+	m.ensureVrfInState(name, tableID, members, enableL3mdevRule, ifindex)
 
 	if err := saveState(m.statePath, m.state); err != nil {
 		m.logger.Warn("failed to save state after VRF creation", zap.Error(err))
@@ -70,6 +72,15 @@ func (m *ResourceManager) DeleteVrf(name string) error {
 	link, err := netlink.LinkByName(name)
 	switch {
 	case err == nil:
+		// Mirror the adopt path's type check: if the managed VRF vanished
+		// out-of-band and an unrelated link now bears the name, LinkDel would
+		// destroy that interface. Treat it like an absent device instead —
+		// the managed VRF is gone either way, so only the state entry goes.
+		if _, ok := link.(*netlink.Vrf); !ok {
+			m.logger.Warn("link with this name is not a VRF device; removing state entry only",
+				zap.String("name", name), zap.String("type", link.Type()))
+			break
+		}
 		if err := netlink.LinkDel(link); err != nil {
 			return fmt.Errorf("delete VRF %s: %w", name, err)
 		}
