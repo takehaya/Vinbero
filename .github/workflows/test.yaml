@@ -81,6 +81,15 @@ jobs:
           go-version-file: ./go.mod
           cache: true
 
+      # The netresource netns tests create kernel VRF devices; the runner
+      # kernel ships the vrf module in linux-modules-extra, unloaded.
+      - name: Load kernel modules
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends \
+            linux-modules-extra-$(uname -r)
+          sudo modprobe vrf
+
       - name: Run unit tests
         run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v ./...
 

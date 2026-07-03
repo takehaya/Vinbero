@@ -1,6 +1,7 @@
 package netresource
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -99,6 +100,11 @@ func TestCreateDeleteVrf(t *testing.T) {
 
 	ifindex, err := m.CreateVrf("vrf-t", 100, []string{"vrftest0"}, true)
 	if err != nil {
+		// EOPNOTSUPP = the kernel has no vrf module (CI loads it via
+		// modprobe; a minimal dev kernel may not ship it at all).
+		if errors.Is(err, unix.EOPNOTSUPP) {
+			t.Skipf("kernel lacks the vrf module: %v", err)
+		}
 		t.Fatalf("CreateVrf: %v", err)
 	}
 	if ifindex == 0 {
