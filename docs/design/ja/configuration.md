@@ -156,6 +156,38 @@ settings:
     max_segments: 10
 ```
 
+### `vrfs.*`
+
+VRF オブジェクトを boot 時に宣言します (設計は [vrf.md](vrf.md) を参照)。runtime の変更は `vbctl vrf` / `VrfService` で行い、この section は加算的です。entry を消しても作成済みの kernel device は消えません (削除は明示的な `vbctl vrf delete`)。
+
+| キー | 型 | 説明 |
+|---|---|---|
+| `vrfs.default_deny` | bool | どの VRF にも分類されない ingress AC のパケットを drop する (global default-deny) |
+| `vrfs.deny_action` | string | default-deny 時の動作。`drop` (デフォルト) か `pass` |
+| `vrfs.entries[].name` | string | VRF 名。予約名 `global` は vrf_id 0 (underlay) に対応し、AC は持てるが kernel device は持てない |
+| `vrfs.entries[].table_id` | uint32 | 0 以外で kernel VRF device を作成 (既存 device は adopt)。End.DT4/DT6/DT46 の FIB lookup 先 |
+| `vrfs.entries[].members` | []string | device に enslave する interface。`table_id` が必要 |
+| `vrfs.entries[].enable_l3mdev_rule` | bool | l3mdev ip rule (prio 1000) を入れる。`table_id` が必要 |
+| `vrfs.entries[].acs[].interface` | string | この VRF に分類する ingress interface |
+| `vrfs.entries[].acs[].vlan` | uint16 | VLAN ID (0 = untagged) |
+
+```yaml
+vrfs:
+  default_deny: false
+  entries:
+    - name: vrf-cust          # kernel device + ingress 分類の両 facet
+      table_id: 100
+      enable_l3mdev_rule: true
+      acs:
+        - interface: eth1
+          vlan: 100
+    - name: vpn-a             # deviceless (ingress 分類のみ、MUP gateway 等)
+      acs:
+        - interface: eth2
+```
+
+default_deny を有効にする場合、underlay や control plane が使う interface も必ずどこかの VRF (通常は `global`) に map してください。未分類 AC が drop されるため、忘れると host 宛の BGP/NDP が通らなくなります。
+
 ## 最小構成サンプル
 
 ```yaml

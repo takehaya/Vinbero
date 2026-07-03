@@ -139,7 +139,7 @@ vinbero peer create \
 ## L3VPN のセットアップ例
 
 ```bash
-# VRF 作成
+# VRF 作成 (kernel device + vrf_id を持つ一級 VRF オブジェクトになる)
 vinbero vrf create \
   --name vrf100 \
   --table-id 100 \
@@ -151,7 +151,17 @@ vinbero sid create \
   --trigger-prefix fc00:3::3/128 \
   --action END_DT4 \
   --vrf-name vrf100
+
+# 確認 (kernel facet と ingress facet を 1 つの表で表示)
+vinbero vrf show
+
+# 削除は参照が残っている間は拒否される (SID / ingress AC / vrf-bgp binding)
+vinbero vrf delete --name vrf100   # → refused: referenced by SID fc00:3::3/128
+vinbero sid delete --trigger-prefix fc00:3::3/128
+vinbero vrf delete --name vrf100   # → OK (device と identity が消える)
 ```
+
+VRF オブジェクトの設計 (facet、lifecycle、default-deny) は [vrf.md](vrf.md) を参照してください。
 
 ## プラグイン: カスタム XDP 機能の追加
 
