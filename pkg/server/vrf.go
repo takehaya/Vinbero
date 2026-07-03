@@ -241,7 +241,11 @@ func findVrfReference(sids SidLister, ifindex uint32) (string, error) {
 		}
 		aux, err := sids.GetSidAux(uint32(entry.AuxIndex))
 		if err != nil {
-			continue
+			// Fail closed: an unreadable aux might be the reference. Treating
+			// it as "no reference" could delete a device an End.DT* SID still
+			// delivers into (blackholing its decap traffic); surfacing the
+			// error refuses the delete and leaves it retryable.
+			return "", fmt.Errorf("read aux %d of SID %s: %w", entry.AuxIndex, prefix, err)
 		}
 		if bpf.SidAuxL3VrfData(aux) == ifindex {
 			return prefix, nil

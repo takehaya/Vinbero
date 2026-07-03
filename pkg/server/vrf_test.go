@@ -73,9 +73,11 @@ func (f *fakeVrfDeviceOps) DeleteVrf(name string) error {
 }
 
 // fakeSidTable serves findVrfReference: SID prefix -> the vrf_ifindex its
-// l3vrf aux references.
+// l3vrf aux references. auxErr makes every GetSidAux fail (the fail-closed
+// path).
 type fakeSidTable struct {
-	refs map[string]uint32 // prefix -> ifindex
+	refs   map[string]uint32 // prefix -> ifindex
+	auxErr error
 }
 
 func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {
@@ -92,6 +94,9 @@ func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, err
 }
 
 func (f *fakeSidTable) GetSidAux(index uint32) (*bpf.SidAuxEntry, error) {
+	if f.auxErr != nil {
+		return nil, f.auxErr
+	}
 	// Re-derive the same iteration pairing ListSidFunctions used. Map order is
 	// unstable across calls in theory but stable enough within one process for
 	// a single-entry table; tests use at most one referencing SID.
@@ -437,6 +442,14 @@ func TestVrfServer_DeleteRefusals(t *testing.T) {
 	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00::/64": created.Device.Ifindex}}
 	if m := del(); len(m.Errors) != 1 {
 		t.Fatalf("delete with SID ref: want refusal, got %+v", m)
+	}
+
+	// 3b. An unreadable aux fails closed: the reference check cannot prove
+	// the VRF is unreferenced, so the delete is refused (not treated as
+	// "no reference").
+	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00::/64": 12345}, auxErr: fmt.Errorf("aux boom")}
+	if m := del(); len(m.Errors) != 1 {
+		t.Fatalf("delete with unreadable aux: want refusal, got %+v", m)
 	}
 	s.sids = &fakeSidTable{}
 
