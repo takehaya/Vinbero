@@ -10,6 +10,19 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+// splitMembers parses a comma-separated interface list, trimming whitespace
+// and dropping empty elements: "eth1, eth2," must not yield " eth2" (which
+// fails netlink name resolution) or a trailing empty member.
+func splitMembers(s string) []string {
+	var out []string
+	for _, m := range strings.Split(s, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // vrfCommand is the single VRF operator surface, covering both facets of the
 // VRF object: the kernel device (create/delete) and the ingress facet
 // (ac-add/ac-remove/policy). show renders both.
@@ -29,10 +42,7 @@ func vrfCommand() *cli.Command {
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
-					var members []string
-					if m := c.String("members"); m != "" {
-						members = strings.Split(m, ",")
-					}
+					members := splitMembers(c.String("members"))
 					resp, err := clients.Vrf.VrfCreate(context.Background(),
 						connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{
 							Name:             c.String("name"),

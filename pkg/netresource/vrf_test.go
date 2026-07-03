@@ -120,8 +120,15 @@ func TestCreateDeleteVrf(t *testing.T) {
 	}
 
 	// Idempotent re-create adopts (same ifindex); a table mismatch refuses.
+	// An adopt with unspecified members/l3mdev (the CLI defaults) must MERGE
+	// into the tracked entry, not weaken it: the recorded members and l3mdev
+	// flag survive so a post-reboot Reconcile recreates the full device.
 	if again, err := m.CreateVrf("vrf-t", 100, nil, false); err != nil || again != ifindex {
 		t.Errorf("adopt = (%d, %v), want (%d, nil)", again, err, ifindex)
+	}
+	if vrfs := m.ListVrfs(); len(vrfs) != 1 ||
+		len(vrfs[0].Members) != 1 || vrfs[0].Members[0] != "vrftest0" || !vrfs[0].EnableL3mdevRule {
+		t.Errorf("adopt weakened the state entry: %+v", vrfs)
 	}
 	if _, err := m.CreateVrf("vrf-t", 200, nil, false); err == nil ||
 		!strings.Contains(err.Error(), "table") {

@@ -3,6 +3,7 @@ package netresource
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
@@ -119,24 +120,35 @@ func (m *ResourceManager) ListVrfs() []ManagedVrf {
 	return result
 }
 
-// ensureVrfInState upserts the full record: the caller has already verified
-// the request against the live device (adopt type/table check), so a tracked
-// name refreshes every field — updating only Ifindex would keep stale
-// members/l3mdev in the state file after a config change.
+// ensureVrfInState upserts the record. For a tracked name the request is
+// MERGED into the existing entry rather than replacing it: the runtime only
+// ever converges a device upward (enslave missing members, add the l3mdev
+// rule — never unenslave or remove), so the state must record the union or an
+// adopt with unspecified members/l3mdev (the CLI defaults) would silently
+// weaken what Reconcile recreates after a reboot. Shrinking a device is a
+// delete + recreate, same as changing its table.
 func (m *ResourceManager) ensureVrfInState(name string, tableID uint32, members []string, enableL3mdevRule bool, ifindex uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entry := ManagedVrf{
-		Name: name, TableID: tableID, Members: members,
-		EnableL3mdevRule: enableL3mdevRule, Ifindex: ifindex,
-	}
 	for i := range m.state.VRFs {
-		if m.state.VRFs[i].Name == name {
-			m.state.VRFs[i] = entry
-			return
+		if m.state.VRFs[i].Name != name {
+			continue
 		}
+		e := &m.state.VRFs[i]
+		e.TableID = tableID // verified against the live device by the adopt check
+		e.Ifindex = ifindex
+		e.EnableL3mdevRule = e.EnableL3mdevRule || enableL3mdevRule
+		for _, member := range members {
+			if !slices.Contains(e.Members, member) {
+				e.Members = append(e.Members, member)
+			}
+		}
+		return
 	}
-	m.state.VRFs = append(m.state.VRFs, entry)
+	m.state.VRFs = append(m.state.VRFs, ManagedVrf{
+		Name: name, TableID: tableID, Members: slices.Clone(members),
+		EnableL3mdevRule: enableL3mdevRule, Ifindex: ifindex,
+	})
 }
 
 // createVrfNetlink creates a VRF and enslaves members via netlink.
