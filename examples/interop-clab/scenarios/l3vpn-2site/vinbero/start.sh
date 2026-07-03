@@ -52,24 +52,17 @@ ethtool -K eth1 rxvlan off 2>/dev/null || true
 ethtool -K eth2 txvlan off 2>/dev/null || true
 ethtool -K eth2 rxvlan off 2>/dev/null || true
 
-# --- return-path VRF for the End.DT4 endpoint ------------------------------
+# --- return-path routing table for the End.DT4 endpoint --------------------
 # The End.DT4 endpoint decaps FRR's return traffic and does a FIB lookup
-# in a dedicated routing table. eth2 is intentionally NOT enslaved to the
-# VRF: the H.Encaps path (CE -> FRR) leaves the encapsulated IPv6 packet
-# to the *main* table for the fd00:200::/48 underlay route, while the
-# decap path (FRR -> CE) hands the End.DT4 BPF FIB lookup the VRF device
-# so it resolves the customer prefix from table 100 instead.
-if ! ip link show vrf-cust >/dev/null 2>&1; then
-    ip link add vrf-cust type vrf table 100
-fi
-if ! ip link show vrf-cust >/dev/null 2>&1; then
-    echo "ERROR: failed to create VRF vrf-cust -- is the kernel 'vrf' module loaded on the host? (modprobe vrf)" >&2
-    exit 1
-fi
-ip link set vrf-cust up
-ip rule add l3mdev protocol kernel prio 1000 2>/dev/null || true
-# The local customer subnet reachable out eth2. Placed in table 100 so
-# the End.DT4 BPF FIB lookup (keyed by the vrf-cust ifindex) resolves it.
+# in a dedicated routing table. The VRF device itself is created through
+# Vinbero (`vbctl vrf create` below, after the daemon is up) so it is a
+# first-class VRF object with a vrf_id; the route can go into table 100
+# already (tables exist implicitly, no device needed). eth2 is
+# intentionally NOT enslaved to the VRF: the H.Encaps path (CE -> FRR)
+# leaves the encapsulated IPv6 packet to the *main* table for the
+# fd00:200::/48 underlay route, while the decap path (FRR -> CE) hands
+# the End.DT4 BPF FIB lookup the VRF device so it resolves the customer
+# prefix from table 100 instead.
 ip route replace 10.1.0.0/24 dev eth2 table 100
 
 # --- static underlay routes ------------------------------------------------
@@ -110,6 +103,19 @@ done
     --prefix fd00:100::/48 \
     --block-len 32 --node-len 16 --function-len 16 --argument-len 64 \
     --behavior classic || true
+
+# The return-path VRF, as a first-class VRF object: the kernel device on
+# table 100 plus the l3mdev rule, with the vrf_id allocated alongside. The
+# End.DT4 SID below references it by name. Requires the host kernel's `vrf`
+# module (CI loads it via modprobe).
+/usr/local/bin/vbctl vrf create \
+    --name vrf-cust \
+    --table-id 100 \
+    --enable-l3mdev-rule || true
+if ! ip link show vrf-cust >/dev/null 2>&1; then
+    echo "ERROR: failed to create VRF vrf-cust -- is the kernel 'vrf' module loaded on the host? (modprobe vrf)" >&2
+    exit 1
+fi
 
 # --- return-path End.DT4 endpoint ------------------------------------------
 # FRR encaps return traffic towards this SID; Vinbero's XDP decaps it and
