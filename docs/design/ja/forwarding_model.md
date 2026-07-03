@@ -48,7 +48,7 @@ encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。
 
 - global: ノード全体で 1 つ。tenant の次元を持ちません。`sid_function_map`、`headend_v4/v6_map`、`sr_policy_map` がこれです。local SID 空間と headend の prefix はノード共通です。
 - VRF (vrf_id): routing/forwarding instance の identity です。control plane では `pkg/vrf` の一級オブジェクトが name と数値 vrf_id (0 = global/underlay) と ingress membership ({interface, VLAN}) を持ちます。data plane では front door が ingress access circuit を vrf_id に分類し、MUP F-TEID lookup (`mup_uplink_v4/v6_map`) がその vrf_id をキーに含めるので、同じ N3 endpoint と TEID 空間を複数の VRF が共有しても衝突しません。BGP の RT policy (`vrfbgp`)、MUP、EVPN は name で VRF に紐付く facet です。
-- kernel VRF: VRF の L3 facet です。End.DT4/DT6/DT46 が aux の vrf_ifindex で kernel VRF へ渡し、per-VRF の L3 FIB は kernel が持ちます。eBPF 側はどの VRF へ渡すかだけを決めます。現状この kernel VRF の ifindex は ingress/MUP の vrf_id とは別管理で、両者の id 統合は後続の作業です。
+- kernel VRF: VRF の L3 facet です。End.DT4/DT6/DT46 が aux の vrf_ifindex で kernel VRF へ渡し、per-VRF の L3 FIB は kernel が持ちます。eBPF 側はどの VRF へ渡すかだけを決めます。この kernel device は VRF object の facet として `vrf.Manager` が lifecycle を持ち、1 つの VRF が vrf_id と table_id と ifindex を併せ持ちます。作成と削除は `vbctl vrf create` / `vbctl vrf delete` または config の `vrfs.entries[].table_id` で、netlink 操作と JSON state への永続化は `pkg/netresource` が機構レイヤとして担います。削除は SID 参照、ingress AC、vrf-bgp binding のいずれかが残っている間は拒否します。config から entry を消しても device は消えません (config は加算的で、削除は明示的な `vbctl vrf delete` です)。data plane の lookup キーは従来どおり ifindex です (kernel の要求)。
 - bridge domain (bd): L2 の tenant です。`fdb_map` を {bd, MAC} で引き、BUM は bd 単位で flood します。
 
 ## default と explicit という共通パターン

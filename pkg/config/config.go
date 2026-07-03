@@ -54,23 +54,31 @@ type Config struct {
 	Configpath     string
 }
 
-// VRFsConfig configures the VRF objects' ingress facet: each VRF's ingress
-// access-circuit membership ({interface, VLAN}) and the global default-deny
-// policy. A VRF's vrf_id (0 = global/default VRF, the underlay) is assigned by
-// the server. default_deny drops (or passes, per deny_action) a packet whose
-// AC is unmapped instead of falling into the global VRF; enabling it without
-// mapping the underlay/control interfaces to a VRF black-holes host-bound
-// BGP/NDP, so map every interface that must forward.
+// VRFsConfig configures the VRF objects: each VRF's ingress access-circuit
+// membership ({interface, VLAN}), its optional kernel-device facet, and the
+// global default-deny policy. A VRF's vrf_id (0 = global/default VRF, the
+// underlay) is assigned by the server. default_deny drops (or passes, per
+// deny_action) a packet whose AC is unmapped instead of falling into the
+// global VRF; enabling it without mapping the underlay/control interfaces to
+// a VRF black-holes host-bound BGP/NDP, so map every interface that must
+// forward.
 type VRFsConfig struct {
 	Entries     []VRFConfig `yaml:"entries,omitempty"`
 	DefaultDeny bool        `yaml:"default_deny,omitempty"`
 	DenyAction  string      `yaml:"deny_action,omitempty"` // "drop" (default) | "pass"
 }
 
-// VRFConfig is one VRF's ingress membership: its name and access circuits.
+// VRFConfig is one VRF: its name, ingress access circuits, and the optional
+// kernel-device facet. table_id != 0 creates (or adopts) the Linux VRF device
+// at boot; members and enable_l3mdev_rule require it. Removing an entry does
+// NOT delete an already-created device (config is additive; deleting a VRF is
+// an explicit `vbctl vrf delete`).
 type VRFConfig struct {
-	Name string        `yaml:"name,omitempty"`
-	ACs  []VRFACConfig `yaml:"acs,omitempty"`
+	Name             string        `yaml:"name,omitempty"`
+	ACs              []VRFACConfig `yaml:"acs,omitempty"`
+	TableID          uint32        `yaml:"table_id,omitempty"`
+	Members          []string      `yaml:"members,omitempty"`
+	EnableL3mdevRule bool          `yaml:"enable_l3mdev_rule,omitempty"`
 }
 
 // VRFACConfig is one {interface, VLAN} access circuit of a VRF.

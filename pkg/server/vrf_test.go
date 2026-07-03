@@ -9,6 +9,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/vrf"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
 // fakeProgrammer captures the last ingress_vrf_map / policy write so a
@@ -44,11 +45,87 @@ func fakeResolver(name string) (uint32, error) {
 	return 0, fmt.Errorf("no such interface %q", name)
 }
 
+// fakeVrfDeviceOps records device create/delete calls; create hands out
+// sequential ifindexes starting at 100.
+type fakeVrfDeviceOps struct {
+	createErr error
+	deleteErr error
+	created   []string
+	deleted   []string
+	next      uint32
+}
+
+func (f *fakeVrfDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev bool) (uint32, error) {
+	if f.createErr != nil {
+		return 0, f.createErr
+	}
+	f.created = append(f.created, name)
+	f.next++
+	return 99 + f.next, nil
+}
+
+func (f *fakeVrfDeviceOps) DeleteVrf(name string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+// fakeSidTable serves findVrfReference: SID prefix -> the vrf_ifindex its
+// l3vrf aux references.
+type fakeSidTable struct {
+	refs map[string]uint32 // prefix -> ifindex
+}
+
+func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {
+	out := make(map[string]*bpf.SidFunctionEntry, len(f.refs))
+	i := uint16(1)
+	for prefix := range f.refs {
+		out[prefix] = &bpf.SidFunctionEntry{
+			Action:   uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4),
+			AuxIndex: i,
+		}
+		i++
+	}
+	return out, nil
+}
+
+func (f *fakeSidTable) GetSidAux(index uint32) (*bpf.SidAuxEntry, error) {
+	// Re-derive the same iteration pairing ListSidFunctions used. Map order is
+	// unstable across calls in theory but stable enough within one process for
+	// a single-entry table; tests use at most one referencing SID.
+	i := uint32(1)
+	for _, ifindex := range f.refs {
+		if i == index {
+			return bpf.NewSidAuxL3Vrf(ifindex), nil
+		}
+		i++
+	}
+	return nil, fmt.Errorf("no aux %d", index)
+}
+
+// fakeBindings reports a binding for the names it holds.
+type fakeBindings struct{ names map[string]bool }
+
+func (f *fakeBindings) Get(name string) (vrfbgp.Binding, bool) {
+	if f.names[name] {
+		return vrfbgp.Binding{VRFName: name}, true
+	}
+	return vrfbgp.Binding{}, false
+}
+
 func newTestVrfServer() (*VrfServer, *fakeProgrammer) {
-	prog := &fakeProgrammer{}
-	s := NewVrfServer(vrf.NewManager(), prog)
-	s.resolve = fakeResolver
+	s, prog, _ := newTestVrfServerFull()
 	return s, prog
+}
+
+func newTestVrfServerFull() (*VrfServer, *fakeProgrammer, *fakeVrfDeviceOps) {
+	prog := &fakeProgrammer{}
+	dev := &fakeVrfDeviceOps{}
+	s := NewVrfServer(vrf.NewManager(), prog, dev, &fakeSidTable{}, &fakeBindings{})
+	s.resolve = fakeResolver
+	return s, prog, dev
 }
 
 // VrfAcAdd creates the VRF (allocating a non-zero id), and the reconcile
@@ -267,5 +344,191 @@ func TestVrfServer_Show(t *testing.T) {
 	}
 	if resp.Msg.GetPolicy() == nil {
 		t.Errorf("VrfShow returned no policy")
+	}
+}
+
+// VrfCreate drives DeviceOps, allocates a vrf_id, and returns both
+// server-assigned ids; server-owned fields in the request are rejected.
+func TestVrfServer_Create(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	resp, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-cust", TableId: 100, EnableL3MdevRule: true}},
+	}))
+	if err != nil {
+		t.Fatalf("VrfCreate: %v", err)
+	}
+	if len(resp.Msg.Errors) != 0 || len(resp.Msg.Created) != 1 {
+		t.Fatalf("VrfCreate = created %d, errors %v", len(resp.Msg.Created), resp.Msg.Errors)
+	}
+	got := resp.Msg.Created[0]
+	if got.GetVrfId() == 0 || got.GetIfindex() == 0 || got.GetTableId() != 100 {
+		t.Errorf("created = %+v, want non-zero vrf_id/ifindex and table 100", got)
+	}
+	if len(dev.created) != 1 || dev.created[0] != "vrf-cust" {
+		t.Errorf("DeviceOps created = %v, want [vrf-cust]", dev.created)
+	}
+
+	// Server-owned fields and invalid kernel-facet input are per-item errors.
+	for _, bad := range []*v1.Vrf{
+		{Name: "x", TableId: 7, Acs: []*v1.VrfAc{{InterfaceName: "eth0"}}},
+		{Name: "x", TableId: 7, VrfId: 3},
+		{Name: "x", TableId: 7, Ifindex: 9},
+		{Name: "x"},                           // table_id 0
+		{Name: vrf.GlobalVRFName, TableId: 7}, // reserved
+	} {
+		resp, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{bad}}))
+		if err != nil {
+			t.Fatalf("VrfCreate(%+v): %v", bad, err)
+		}
+		if len(resp.Msg.Errors) != 1 {
+			t.Errorf("VrfCreate(%+v): want one per-item error, got %+v", bad, resp.Msg.Errors)
+		}
+	}
+	if len(dev.created) != 1 {
+		t.Errorf("rejected creates still hit DeviceOps: %v", dev.created)
+	}
+}
+
+// VrfDelete refuses while any reference exists, and tears the device down
+// before dropping the identity once clear.
+func TestVrfServer_DeleteRefusals(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	bindings := s.bindings.(*fakeBindings)
+	bindings.names = map[string]bool{}
+	if _, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-cust", TableId: 100}},
+	})); err != nil {
+		t.Fatalf("VrfCreate: %v", err)
+	}
+	created, _ := s.mgr.Get("vrf-cust")
+
+	del := func() *v1.VrfDeleteResponse {
+		t.Helper()
+		resp, err := s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{"vrf-cust"}}))
+		if err != nil {
+			t.Fatalf("VrfDelete: %v", err)
+		}
+		return resp.Msg
+	}
+
+	// 1. Remaining AC refuses.
+	if _, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{
+		Name: "vrf-cust", Ac: &v1.VrfAc{InterfaceName: "eth0"},
+	})); err != nil {
+		t.Fatalf("VrfAcAdd: %v", err)
+	}
+	if m := del(); len(m.Errors) != 1 {
+		t.Fatalf("delete with AC: want refusal, got %+v", m)
+	}
+	if _, err := s.VrfAcRemove(context.Background(), connect.NewRequest(&v1.VrfAcRemoveRequest{
+		Name: "vrf-cust", Ac: &v1.VrfAc{InterfaceName: "eth0"},
+	})); err != nil {
+		t.Fatalf("VrfAcRemove: %v", err)
+	}
+
+	// 2. Binding refuses.
+	bindings.names["vrf-cust"] = true
+	if m := del(); len(m.Errors) != 1 {
+		t.Fatalf("delete with binding: want refusal, got %+v", m)
+	}
+	delete(bindings.names, "vrf-cust")
+
+	// 3. SID referencing the device ifindex refuses.
+	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00::/64": created.Device.Ifindex}}
+	if m := del(); len(m.Errors) != 1 {
+		t.Fatalf("delete with SID ref: want refusal, got %+v", m)
+	}
+	s.sids = &fakeSidTable{}
+
+	// All clear: device torn down, identity gone, DeviceOps hit.
+	if m := del(); len(m.DeletedNames) != 1 {
+		t.Fatalf("clear delete failed: %+v", m)
+	}
+	if len(dev.deleted) != 1 || dev.deleted[0] != "vrf-cust" {
+		t.Errorf("DeviceOps deleted = %v, want [vrf-cust]", dev.deleted)
+	}
+	if _, ok := s.mgr.Get("vrf-cust"); ok {
+		t.Error("identity still present after delete")
+	}
+
+	// Guard rails: unknown name and the reserved global refuse.
+	for _, name := range []string{"ghost", vrf.GlobalVRFName, ""} {
+		resp, err := s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{name}}))
+		if err != nil {
+			t.Fatalf("VrfDelete(%q): %v", name, err)
+		}
+		if len(resp.Msg.Errors) != 1 {
+			t.Errorf("VrfDelete(%q): want per-item error, got %+v", name, resp.Msg)
+		}
+	}
+}
+
+// A deviceless (ingress-only) VRF deletes without touching DeviceOps; a
+// failed device delete leaves the manager untouched so the delete can retry.
+func TestVrfServer_DeleteDevicelessAndFailure(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+
+	// Deviceless: create via an AC, remove the AC, then delete.
+	if _, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{
+		Name: "mup-vrf", Ac: &v1.VrfAc{InterfaceName: "eth0"},
+	})); err != nil {
+		t.Fatalf("VrfAcAdd: %v", err)
+	}
+	if _, err := s.VrfAcRemove(context.Background(), connect.NewRequest(&v1.VrfAcRemoveRequest{
+		Name: "mup-vrf", Ac: &v1.VrfAc{InterfaceName: "eth0"},
+	})); err != nil {
+		t.Fatalf("VrfAcRemove: %v", err)
+	}
+	resp, err := s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{"mup-vrf"}}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Fatalf("deviceless delete: err=%v resp=%+v", err, resp.Msg)
+	}
+	if len(dev.deleted) != 0 {
+		t.Errorf("deviceless delete hit DeviceOps: %v", dev.deleted)
+	}
+
+	// Device delete failure: identity and facet must survive.
+	if _, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-x", TableId: 7}},
+	})); err != nil {
+		t.Fatalf("VrfCreate: %v", err)
+	}
+	dev.deleteErr = fmt.Errorf("netlink boom")
+	resp, err = s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{"vrf-x"}}))
+	if err != nil || len(resp.Msg.Errors) != 1 {
+		t.Fatalf("failing delete: err=%v resp=%+v", err, resp.Msg)
+	}
+	if v, ok := s.mgr.Get("vrf-x"); !ok || v.Device == nil {
+		t.Errorf("failed device delete lost manager state: ok=%v v=%+v", ok, v)
+	}
+	dev.deleteErr = nil
+}
+
+// VrfShow renders the kernel-device facet alongside the ingress facet.
+func TestVrfServer_ShowBothFacets(t *testing.T) {
+	s, _, _ := newTestVrfServerFull()
+	if _, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-cust", TableId: 100, Members: []string{"eth1"}}},
+	})); err != nil {
+		t.Fatalf("VrfCreate: %v", err)
+	}
+	if _, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{
+		Name: "vrf-cust", Ac: &v1.VrfAc{InterfaceName: "eth0", Vlan: 200},
+	})); err != nil {
+		t.Fatalf("VrfAcAdd: %v", err)
+	}
+	resp, err := s.VrfShow(context.Background(), connect.NewRequest(&v1.VrfShowRequest{}))
+	if err != nil {
+		t.Fatalf("VrfShow: %v", err)
+	}
+	if len(resp.Msg.Vrfs) != 1 {
+		t.Fatalf("VrfShow returned %d VRFs, want 1", len(resp.Msg.Vrfs))
+	}
+	v := resp.Msg.Vrfs[0]
+	if v.GetTableId() != 100 || v.GetIfindex() == 0 || len(v.GetMembers()) != 1 {
+		t.Errorf("kernel facet = table %d ifindex %d members %v", v.GetTableId(), v.GetIfindex(), v.GetMembers())
+	}
+	if v.GetVrfId() == 0 || len(v.GetAcs()) != 1 || v.GetAcs()[0].GetVlan() != 200 {
+		t.Errorf("ingress facet = vrf_id %d acs %+v", v.GetVrfId(), v.GetAcs())
 	}
 }

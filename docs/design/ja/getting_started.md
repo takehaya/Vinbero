@@ -182,7 +182,7 @@ vinbero plugin unregister --type endpoint --index 32
 ```bash
 # 管理リソース一覧
 vinbero bridge list
-vinbero vrf list
+vinbero vrf show
 
 # SID / Headend 一覧
 vinbero sid list

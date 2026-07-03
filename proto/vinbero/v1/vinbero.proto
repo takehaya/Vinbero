@@ -430,28 +430,26 @@ message EsClearDfResponse {
   EthernetSegment updated = 1;
 }
 
-// NetworkResourceService manages Linux network resources (VRF, Bridge) via netlink.
-// Resources are persisted to a JSON state file and reconciled on startup.
-// BridgeCreate also registers the bridge with FDBWatcher for dynamic MAC learning.
+// NetworkResourceService manages Linux bridge devices via netlink. Bridges
+// are persisted to a JSON state file and reconciled on startup. BridgeCreate
+// also registers the bridge with FDBWatcher for dynamic MAC learning.
 //
-// This service should be called before SidFunctionService, since SIDs reference
-// VRF/Bridge resources by name.
+// This service should be called before SidFunctionService, since SIDs
+// reference bridge resources by name. (VRFs are managed by VrfService.)
 service NetworkResourceService {
-  rpc VrfCreate(VrfCreateRequest) returns (VrfCreateResponse);
-  rpc VrfDelete(VrfDeleteRequest) returns (VrfDeleteResponse);
-  rpc VrfList(VrfListRequest) returns (VrfListResponse);
   rpc BridgeCreate(BridgeCreateRequest) returns (BridgeCreateResponse);
   rpc BridgeDelete(BridgeDeleteRequest) returns (BridgeDeleteResponse);
   rpc BridgeList(BridgeListRequest) returns (BridgeListResponse);
 }
 
-// Vrf is the VRF object. The kernel-device facet (table_id, members,
-// enable_l3mdev_rule) is managed by NetworkResourceService and used by
-// End.DT4/DT6/DT46 for VRF-aware FIB lookup. The ingress facet (vrf_id, acs)
-// is managed by VrfService: vrf_id is the data-plane id (0 = global/default
-// VRF, the underlay) and acs is the ingress {interface, VLAN} membership. A
-// VRF may have either facet alone — a MUP gateway has an ingress-only VRF with
-// no kernel device. (Merging the two surfaces into one is a follow-up.)
+// Vrf is the VRF object: one identity carrying both facets. The kernel-device
+// facet (table_id, members, enable_l3mdev_rule, ifindex) is the Linux VRF
+// device End.DT4/DT6/DT46 use for VRF-aware FIB lookup. The ingress facet
+// (vrf_id, acs) classifies packets at the XDP entry: vrf_id is the data-plane
+// id (0 = global/default VRF, the underlay) and acs is the ingress
+// {interface, VLAN} membership. A VRF may have either facet alone — a MUP
+// gateway has an ingress-only VRF with no kernel device. Both facets are
+// managed by VrfService.
 message Vrf {
   string name = 1; // VRF name (e.g., "vrf100")
   uint32 table_id = 2; // Linux routing table ID (kernel-device facet)
@@ -459,27 +457,23 @@ message Vrf {
   bool enable_l3mdev_rule = 4; // Add "ip rule add l3mdev" if not already present
   uint32 vrf_id = 5; // ingress/data-plane id, server-assigned (0 = global/default VRF)
   repeated VrfAc acs = 6; // ingress access-circuit membership
+  uint32 ifindex = 7; // kernel VRF device ifindex, server-assigned (0 = deviceless)
 }
 
 message VrfCreateRequest {
-  repeated Vrf vrfs = 1;
+  repeated Vrf vrfs = 1; // kernel-device facet only (name + table_id + members + l3mdev); acs / vrf_id / ifindex must be unset
 }
 message VrfCreateResponse {
-  repeated Vrf created = 1;
+  repeated Vrf created = 1; // server state after the create (carries vrf_id and ifindex)
   repeated OperationError errors = 2;
 }
 
 message VrfDeleteRequest {
-  repeated string names = 1; // VRF names to delete; fails if referenced by a SID
+  repeated string names = 1; // VRF names to delete; fails while a SID, ingress AC or vrf-bgp binding references the VRF
 }
 message VrfDeleteResponse {
   repeated string deleted_names = 1;
   repeated OperationError errors = 2;
-}
-
-message VrfListRequest {}
-message VrfListResponse {
-  repeated Vrf vrfs = 1;
 }
 
 // Bridge represents a Linux bridge device managed by Vinbero.
@@ -620,12 +614,16 @@ message StatsSlotResetRequest {
 }
 message StatsSlotResetResponse {}
 
-// VrfService manages the VRF's ingress facet: its access-circuit membership
+// VrfService is the single VRF surface, managing both facets of the VRF
+// object. The kernel-device facet (VrfCreate/VrfDelete): a Linux VRF device
+// persisted to the JSON state file and reconciled on startup. The ingress
+// facet (VrfAcAdd/VrfAcRemove/VrfSetPolicy): access-circuit membership
 // ({interface, VLAN}) and the global default-deny policy. A VRF's vrf_id is
-// allocated on first reference. The data plane resolves a packet's VRF once at
-// the XDP entry from its {ifindex, VLAN}. The kernel-device facet lives in
-// NetworkResourceService; merging the two into one VRF surface is a follow-up.
+// allocated on first reference; the data plane resolves a packet's VRF once
+// at the XDP entry from its {ifindex, VLAN}. VrfShow returns both facets.
 service VrfService {
+  rpc VrfCreate(VrfCreateRequest) returns (VrfCreateResponse);       // create (or adopt) the kernel VRF device
+  rpc VrfDelete(VrfDeleteRequest) returns (VrfDeleteResponse);       // delete the whole VRF; refuses while referenced
   rpc VrfAcAdd(VrfAcAddRequest) returns (VrfAcAddResponse);          // add an AC (creates the VRF)
   rpc VrfAcRemove(VrfAcRemoveRequest) returns (VrfAcRemoveResponse);
   rpc VrfSetPolicy(VrfSetPolicyRequest) returns (VrfSetPolicyResponse);
@@ -673,6 +671,6 @@ message VrfSetPolicyResponse {
 
 message VrfShowRequest {}
 message VrfShowResponse {
-  repeated Vrf vrfs = 1; // ingress facet only (name, vrf_id, acs)
+  repeated Vrf vrfs = 1; // both facets (kernel device + ingress membership)
   VrfPolicy policy = 2;
 }

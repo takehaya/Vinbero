@@ -158,6 +158,135 @@ func TestManager_ReturnedACsAreCopies(t *testing.T) {
 	}
 }
 
+// fakeDeviceOps records device create/delete calls; create returns a fixed
+// ifindex per name (or an injected error).
+type fakeDeviceOps struct {
+	ifindexes map[string]uint32
+	createErr error
+	deleteErr error
+	created   []string
+	deleted   []string
+}
+
+func (f *fakeDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev bool) (uint32, error) {
+	if f.createErr != nil {
+		return 0, f.createErr
+	}
+	f.created = append(f.created, name)
+	return f.ifindexes[name], nil
+}
+
+func (f *fakeDeviceOps) DeleteVrf(name string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+// CreateDevice drives ops, allocates the identity, and attaches the facet
+// with the returned ifindex; the reserved global name and a zero table are
+// rejected before any netlink call.
+func TestManager_CreateDevice(t *testing.T) {
+	m := NewManager()
+	ops := &fakeDeviceOps{ifindexes: map[string]uint32{"vrf-a": 42}}
+	v, err := m.CreateDevice("vrf-a", Device{TableID: 100, Members: []string{"eth1"}, EnableL3mdevRule: true}, ops)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	if v.ID == GlobalVRFID {
+		t.Errorf("device VRF got the global id 0")
+	}
+	if v.Device == nil || v.Device.Ifindex != 42 || v.Device.TableID != 100 {
+		t.Errorf("Device = %+v, want ifindex 42 / table 100", v.Device)
+	}
+	if len(ops.created) != 1 || ops.created[0] != "vrf-a" {
+		t.Errorf("ops.created = %v, want [vrf-a]", ops.created)
+	}
+
+	if _, err := m.CreateDevice(GlobalVRFName, Device{TableID: 100}, ops); err == nil {
+		t.Error("global device: want error")
+	}
+	if _, err := m.CreateDevice("vrf-b", Device{}, ops); err == nil {
+		t.Error("table_id 0: want error")
+	}
+	if len(ops.created) != 1 {
+		t.Errorf("rejected creates still hit ops: %v", ops.created)
+	}
+}
+
+// An ops failure leaves the manager untouched: no identity, no facet.
+func TestManager_CreateDevice_OpsErrorLeavesNoIdentity(t *testing.T) {
+	m := NewManager()
+	ops := &fakeDeviceOps{createErr: fmt.Errorf("netlink boom")}
+	if _, err := m.CreateDevice("vrf-a", Device{TableID: 100}, ops); err == nil {
+		t.Fatal("want error from ops")
+	}
+	if _, ok := m.IDForName("vrf-a"); ok {
+		t.Error("failed CreateDevice allocated an identity")
+	}
+}
+
+// SetDevice attaches the facet without netlink (boot seeding); an existing
+// ingress-only VRF keeps its id, and the facet appears in Get/List clones
+// without aliasing the stored Members.
+func TestManager_SetDevice(t *testing.T) {
+	m := NewManager()
+	_, _ = m.AddAC("vrf-a", AC{"eth1", 100})
+	idBefore, _ := m.IDForName("vrf-a")
+
+	members := []string{"eth2"}
+	v, err := m.SetDevice("vrf-a", Device{TableID: 200, Members: members, Ifindex: 7})
+	if err != nil {
+		t.Fatalf("SetDevice: %v", err)
+	}
+	if v.ID != idBefore {
+		t.Errorf("SetDevice changed the id: %d -> %d", idBefore, v.ID)
+	}
+	if _, err := m.SetDevice(GlobalVRFName, Device{TableID: 1}); err == nil {
+		t.Error("global SetDevice: want error")
+	}
+
+	// Mutating the caller's slice or the returned clone must not leak in.
+	members[0] = "hacked"
+	v.Device.Members = append(v.Device.Members, "hacked2")
+	got, _ := m.Get("vrf-a")
+	if got.Device == nil || len(got.Device.Members) != 1 || got.Device.Members[0] != "eth2" {
+		t.Errorf("stored Device.Members corrupted: %+v", got.Device)
+	}
+	// Deviceless VRFs stay nil in List; the device VRF carries the facet.
+	_, _ = m.AddAC("vrf-b", AC{"eth3", 0})
+	for _, lv := range m.List() {
+		switch lv.Name {
+		case "vrf-a":
+			if lv.Device == nil || lv.Device.TableID != 200 {
+				t.Errorf("List vrf-a Device = %+v, want table 200", lv.Device)
+			}
+		case "vrf-b":
+			if lv.Device != nil {
+				t.Errorf("List vrf-b Device = %+v, want nil (deviceless)", lv.Device)
+			}
+		}
+	}
+}
+
+// Delete drops the whole object including the facet and recycles the id.
+func TestManager_Delete_DropsDeviceFacet(t *testing.T) {
+	m := NewManager()
+	ops := &fakeDeviceOps{ifindexes: map[string]uint32{"vrf-a": 9}}
+	v, err := m.CreateDevice("vrf-a", Device{TableID: 100}, ops)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	m.Delete("vrf-a")
+	if _, ok := m.Get("vrf-a"); ok {
+		t.Error("Get after Delete: want absent")
+	}
+	if next := m.Ensure("vrf-b"); next.ID != v.ID {
+		t.Errorf("id not recycled: got %d, want %d", next.ID, v.ID)
+	}
+}
+
 // The reserved global VRF name maps ACs to vrf_id 0 (the underlay): under
 // default-deny those ACs get an explicit {ifindex, vlan} -> 0 entry so they
 // pass, while a tenant VRF keeps a non-zero id. The id 0 is never recycled.

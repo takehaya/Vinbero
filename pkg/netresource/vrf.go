@@ -1,6 +1,7 @@
 package netresource
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/vishvananda/netlink"
@@ -9,8 +10,32 @@ import (
 )
 
 func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []string, enableL3mdevRule bool) (uint32, error) {
-	// Idempotent: return existing ifindex if VRF already exists
+	// Idempotent adopt: an existing link is taken over only when it really is
+	// a VRF device on the requested table. A bare name match must not adopt —
+	// otherwise a typo like --name eth1 would put the NIC into the state file
+	// and a later delete would LinkDel it.
 	if existing, err := netlink.LinkByName(name); err == nil {
+		vrfLink, ok := existing.(*netlink.Vrf)
+		if !ok {
+			return 0, fmt.Errorf("link %s exists but is %s, not a VRF device", name, existing.Type())
+		}
+		if vrfLink.Table != tableID {
+			return 0, fmt.Errorf("VRF %s exists with table %d, requested %d (delete it first to change tables)", name, vrfLink.Table, tableID)
+		}
+		// Converge the adopted device on the request: enslave any members it
+		// is missing (LinkSetMaster is idempotent for already-enslaved links)
+		// and add the l3mdev rule when asked, so an adopt after a config
+		// change is not silently weaker than a fresh create.
+		for _, member := range members {
+			if err := enslaveInterface(member, existing); err != nil {
+				return 0, err
+			}
+		}
+		if enableL3mdevRule {
+			if err := ensureL3mdevRule(); err != nil {
+				return 0, fmt.Errorf("add l3mdev rule: %w", err)
+			}
+		}
 		ifindex := uint32(existing.Attrs().Index)
 		m.ensureVrfInState(name, tableID, members, enableL3mdevRule, ifindex)
 		if err := saveState(m.statePath, m.state); err != nil {
@@ -42,12 +67,18 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 
 func (m *ResourceManager) DeleteVrf(name string) error {
 	link, err := netlink.LinkByName(name)
-	if err != nil {
-		return fmt.Errorf("VRF %s not found: %w", name, err)
-	}
-
-	if err := netlink.LinkDel(link); err != nil {
-		return fmt.Errorf("delete VRF %s: %w", name, err)
+	switch {
+	case err == nil:
+		if err := netlink.LinkDel(link); err != nil {
+			return fmt.Errorf("delete VRF %s: %w", name, err)
+		}
+	case errors.As(err, &netlink.LinkNotFoundError{}):
+		// The device is already gone (e.g. removed with raw `ip link del`).
+		// Fall through to drop the state entry, so a vanished device does not
+		// leave an undeletable record behind — delete is idempotent.
+		m.logger.Warn("VRF device already absent; removing state entry only", zap.String("name", name))
+	default:
+		return fmt.Errorf("VRF %s lookup: %w", name, err)
 	}
 
 	m.mu.Lock()
@@ -76,19 +107,24 @@ func (m *ResourceManager) ListVrfs() []ManagedVrf {
 	return result
 }
 
+// ensureVrfInState upserts the full record: the caller has already verified
+// the request against the live device (adopt type/table check), so a tracked
+// name refreshes every field — updating only Ifindex would keep stale
+// members/l3mdev in the state file after a config change.
 func (m *ResourceManager) ensureVrfInState(name string, tableID uint32, members []string, enableL3mdevRule bool, ifindex uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	entry := ManagedVrf{
+		Name: name, TableID: tableID, Members: members,
+		EnableL3mdevRule: enableL3mdevRule, Ifindex: ifindex,
+	}
 	for i := range m.state.VRFs {
 		if m.state.VRFs[i].Name == name {
-			m.state.VRFs[i].Ifindex = ifindex
+			m.state.VRFs[i] = entry
 			return
 		}
 	}
-	m.state.VRFs = append(m.state.VRFs, ManagedVrf{
-		Name: name, TableID: tableID, Members: members,
-		EnableL3mdevRule: enableL3mdevRule, Ifindex: ifindex,
-	})
+	m.state.VRFs = append(m.state.VRFs, entry)
 }
 
 // createVrfNetlink creates a VRF and enslaves members via netlink.

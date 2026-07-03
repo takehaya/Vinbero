@@ -1,11 +1,14 @@
 // Package vrf is the first-class VRF object: one identity that owns a numeric
 // vrf_id (the ingress classification / MUP F-TEID scope; 0 = the global/default
 // VRF, i.e. the underlay), the ingress access-circuit membership
-// ({interface, VLAN} that belong to the VRF), and the global default-deny
-// policy. BGP (pkg/vrfbgp), MUP, EVPN and L3 are facets attached to a VRF by
-// name; ingress classification is just the VRF's membership, not a separate
-// concept. The manager owns the ingress_vrf_map (single writer) and programs
-// it from every VRF's ACs on Reconcile.
+// ({interface, VLAN} that belong to the VRF), the optional kernel-device facet
+// (the Linux VRF device End.DT4/DT6/DT46 deliver into), and the global
+// default-deny policy. BGP (pkg/vrfbgp), MUP and EVPN are facets attached to a
+// VRF by name; ingress classification is just the VRF's membership, not a
+// separate concept. The manager owns the ingress_vrf_map (single writer,
+// programmed from every VRF's ACs on Reconcile) and drives the kernel device
+// lifecycle through DeviceOps (netlink + persistence stay in pkg/netresource,
+// the mechanics layer).
 package vrf
 
 import (
@@ -49,12 +52,25 @@ type AC struct {
 	VLAN      uint16
 }
 
+// Device is the kernel-device facet of a VRF: the Linux VRF device (and its
+// routing table) that End.DT4/DT6/DT46 deliver decapsulated traffic into.
+// Ifindex is filled by the mechanics layer at create/adopt time.
+type Device struct {
+	TableID          uint32
+	Members          []string
+	EnableL3mdevRule bool
+	Ifindex          uint32
+}
+
 // VRF is a routing/forwarding instance identity. ID is its data-plane id
 // (ingress classification + MUP F-TEID scope). ACs is its ingress membership.
+// Device is the kernel-device facet; nil means deviceless (e.g. a MUP gateway
+// VRF that only classifies ingress).
 type VRF struct {
-	Name string
-	ID   uint32
-	ACs  []AC
+	Name   string
+	ID     uint32
+	ACs    []AC
+	Device *Device
 }
 
 // Manager owns the VRF objects, the id allocator (free list; 0 reserved for the
@@ -94,11 +110,18 @@ func (m *Manager) allocIDLocked() uint32 {
 	return id
 }
 
-// clone returns a copy of v whose ACs slice shares no backing array with the
-// stored VRF, so a caller mutating the returned ACs cannot corrupt internal
-// state (or race a concurrent AddAC/RemoveAC that re-slices it).
+// clone returns a copy of v that shares no mutable backing storage with the
+// stored VRF (the ACs slice, the Device struct and its Members slice), so a
+// caller mutating the returned value cannot corrupt internal state (or race a
+// concurrent AddAC/RemoveAC/SetDevice that re-slices it).
 func (v *VRF) clone() VRF {
-	return VRF{Name: v.Name, ID: v.ID, ACs: append([]AC(nil), v.ACs...)}
+	out := VRF{Name: v.Name, ID: v.ID, ACs: append([]AC(nil), v.ACs...)}
+	if v.Device != nil {
+		d := *v.Device
+		d.Members = append([]string(nil), v.Device.Members...)
+		out.Device = &d
+	}
+	return out
 }
 
 // Ensure returns the VRF for name, creating it (allocating an id) if absent.
@@ -146,6 +169,18 @@ func (m *Manager) ByID(id uint32) (VRF, bool) {
 		return VRF{}, false
 	}
 	return m.byName[name].clone(), true
+}
+
+// Get returns the VRF for name without creating it. The delete flow uses it
+// to read the device facet and the AC membership in one atomic snapshot.
+func (m *Manager) Get(name string) (VRF, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.byName[name]
+	if !ok {
+		return VRF{}, false
+	}
+	return v.clone(), true
 }
 
 // AddAC adds an ingress access circuit to a VRF (creating the VRF if absent).
@@ -229,21 +264,83 @@ func (m *Manager) Delete(name string) {
 	}
 }
 
-// List returns a snapshot of the VRFs sorted by name, each with ACs sorted by
-// {interface, vlan} so output and tests are deterministic.
+// DeviceOps is the kernel mechanics + persistence surface the device facet is
+// driven through (netlink device create/delete plus the JSON state file that
+// recreates devices across restarts). *netresource.ResourceManager satisfies
+// it; tests use a fake. Like Reconcile's resolve/prog, ops is passed per call
+// rather than stored so NewManager stays dependency-free.
+type DeviceOps interface {
+	CreateVrf(name string, tableID uint32, members []string, enableL3mdevRule bool) (uint32, error)
+	DeleteVrf(name string) error
+}
+
+// validateDeviceName rejects the names a kernel-device facet may never carry:
+// the reserved global VRF is the main table (no device), and an empty name
+// cannot address a netlink device.
+func validateDeviceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("vrf: name is required")
+	}
+	if name == GlobalVRFName {
+		return fmt.Errorf("vrf: the reserved global VRF is the main table and cannot carry a kernel device")
+	}
+	return nil
+}
+
+// SetDevice attaches (or replaces) the kernel-device facet on a VRF, creating
+// the VRF if absent. Pure state: no netlink happens here — boot seeding uses
+// it to mirror devices the mechanics layer already reconciled from its state
+// file. The stored Device shares no backing storage with d.
+func (m *Manager) SetDevice(name string, d Device) (VRF, error) {
+	if err := validateDeviceName(name); err != nil {
+		return VRF{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v := m.ensureLocked(name)
+	dd := d
+	dd.Members = append([]string(nil), d.Members...)
+	v.Device = &dd
+	return v.clone(), nil
+}
+
+// CreateDevice creates (or adopts) the kernel VRF device through ops and
+// attaches the facet with the resulting ifindex. The netlink call runs before
+// any identity is allocated and outside m.mu (the same rule as Reconcile's
+// resolve: netlink can block and must not stall other mutations), so an ops
+// failure leaves the manager untouched. Callers serialize concurrent device
+// mutations (VrfServer.mu); the manager lock alone does not order two
+// CreateDevice calls' netlink phases.
+func (m *Manager) CreateDevice(name string, d Device, ops DeviceOps) (VRF, error) {
+	if err := validateDeviceName(name); err != nil {
+		return VRF{}, err
+	}
+	if d.TableID == 0 {
+		return VRF{}, fmt.Errorf("vrf %q: device table_id is required", name)
+	}
+	ifindex, err := ops.CreateVrf(name, d.TableID, d.Members, d.EnableL3mdevRule)
+	if err != nil {
+		return VRF{}, fmt.Errorf("vrf %q: create device: %w", name, err)
+	}
+	d.Ifindex = ifindex
+	return m.SetDevice(name, d)
+}
+
+// List returns a snapshot of the VRFs (both facets) sorted by name, each with
+// ACs sorted by {interface, vlan} so output and tests are deterministic.
 func (m *Manager) List() []VRF {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]VRF, 0, len(m.byName))
 	for _, v := range m.byName {
-		acs := append([]AC(nil), v.ACs...)
-		sort.Slice(acs, func(i, j int) bool {
-			if acs[i].Interface != acs[j].Interface {
-				return acs[i].Interface < acs[j].Interface
+		c := v.clone()
+		sort.Slice(c.ACs, func(i, j int) bool {
+			if c.ACs[i].Interface != c.ACs[j].Interface {
+				return c.ACs[i].Interface < c.ACs[j].Interface
 			}
-			return acs[i].VLAN < acs[j].VLAN
+			return c.ACs[i].VLAN < c.ACs[j].VLAN
 		})
-		out = append(out, VRF{Name: v.Name, ID: v.ID, ACs: acs})
+		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
