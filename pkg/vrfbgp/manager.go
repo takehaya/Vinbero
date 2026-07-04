@@ -477,9 +477,11 @@ func (m *Manager) List() []Binding {
 // flapping match would re-key the session's F-TEID entry on every
 // reconcile. This sits on the per-route apply path, so the facet lookup
 // (vrf.Manager.Get clones the VRF) runs only for a binding that matched
-// the RTs and would win the name selection, not for every binding. The
-// lookup takes vrf.Manager's read lock nested inside m.mu; vrf.Manager
-// never calls back into this package, so the order cannot invert.
+// the RTs and improves the current minimum -- not for every binding,
+// though a later smaller name can still supersede an already-resolved
+// candidate. The lookup takes vrf.Manager's read lock nested inside m.mu;
+// vrf.Manager never calls back into this package, so the order cannot
+// invert.
 func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName string, bdID uint16, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
