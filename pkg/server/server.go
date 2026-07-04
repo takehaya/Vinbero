@@ -187,12 +187,6 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered EthernetSegmentService", zap.String("path", path))
 
-	// NetworkResource service (VRF/Bridge management)
-	netResourceServer := NewNetworkResourceServer(s.resMgr, s.fdbWatcher, s.mapOps, s.vrfBgpMgr, s.evpnCoord, s.logger)
-	path, handler = vinberov1connect.NewNetworkResourceServiceHandler(netResourceServer)
-	s.mux.Handle(path, handler)
-	s.logger.Info("Registered NetworkResourceService", zap.String("path", path))
-
 	// FDB service (list, create/delete static entries)
 	fdbServer := NewFdbServer(s.mapOps)
 	path, handler = vinberov1connect.NewFdbServiceHandler(fdbServer)
@@ -205,11 +199,13 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VlanTableService", zap.String("path", path))
 
-	// Vrf service (the single VRF surface: kernel device + AC membership +
-	// default-deny policy). The device mechanics/persistence come from the
-	// resource manager, the SID reference check and the ingress maps from
-	// mapOps, and the binding-reference check from the vrf-bgp manager.
-	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr)
+	// Vrf service (the single VRF surface: kernel device + bridge domain + AC
+	// membership + default-deny policy). The device and bridge mechanics/
+	// persistence come from the resource manager, the SID reference checks and
+	// the ingress maps from mapOps, the binding lookups from the vrf-bgp
+	// manager, and the bridge attach lifecycle drives the FDB watcher and (when
+	// auto-advertise is on) the EVPN coordinator.
+	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord)
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))

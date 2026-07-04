@@ -10,6 +10,7 @@ import (
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 	"go.uber.org/zap"
 )
@@ -1322,5 +1323,40 @@ func TestVrfBgpUnbind_DrivesMupUplinkReconcile(t *testing.T) {
 	unbind("plain")
 	if hook.uplinkRecycles != fired+1 {
 		t.Fatalf("plain unbind fired %d times, want %d", hook.uplinkRecycles, fired+1)
+	}
+}
+
+// A binding whose bd_id mismatches the VRF's attached bridge facet is
+// rejected on every mutation path (all funnel through commitBinding); a
+// matching bd_id and a BDID-0 binding on a facet-carrying VRF pass.
+func TestVrfBgpBind_BridgeFacetConsistency(t *testing.T) {
+	mgr := vrfbgp.NewManager()
+	if _, err := mgr.VRF().SetBridge("evi-100", vrf.Bridge{Name: "br100", BdID: 100, Ifindex: 7}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
+	s := NewVrfBgpServer(mgr, nil, nil, nil)
+
+	bind := func(bdID uint32) []*v1.OperationError {
+		t.Helper()
+		resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+			Bindings: []*v1.VrfBgpBinding{{VrfName: "evi-100", Rd: "65000:100", BdId: bdID}},
+		}))
+		if err != nil {
+			t.Fatalf("VrfBgpBind: %v", err)
+		}
+		return resp.Msg.Errors
+	}
+
+	if errs := bind(200); len(errs) != 1 {
+		t.Fatalf("mismatching bd_id: want per-item error, got %+v", errs)
+	}
+	if _, ok := mgr.Get("evi-100"); ok {
+		t.Fatal("rejected binding was stored")
+	}
+	if errs := bind(100); len(errs) != 0 {
+		t.Fatalf("matching bd_id: want success, got %+v", errs)
+	}
+	if errs := bind(0); len(errs) != 0 {
+		t.Fatalf("BDID-0 binding on facet-carrying VRF: want success, got %+v", errs)
 	}
 }

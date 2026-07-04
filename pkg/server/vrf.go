@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"fmt"
+	"math"
+	"slices"
 	"sync"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
@@ -20,16 +23,27 @@ type SidLister interface {
 }
 
 // BindingGetter reports whether a vrf-bgp binding references a VRF name, so
-// VrfDelete can refuse while the BGP facet is still attached.
+// VrfDelete can refuse while the BGP facet is still attached and the bridge
+// attach can cross-check the binding's bd_id.
 // *vrfbgp.Manager satisfies it; tests use a fake.
 type BindingGetter interface {
 	Get(vrfName string) (vrfbgp.Binding, bool)
 }
 
+// FdbRegistrar is the FDB-watcher surface the bridge facet lifecycle drives:
+// an attached bridge's MAC learning feeds fdb_map (and EVPN RT2 when auto-
+// advertise is on). *netlinkwatch.FDBWatcher satisfies it; tests use a fake.
+type FdbRegistrar interface {
+	RegisterBridge(ifindex int, bdID uint16)
+	UnregisterBridge(ifindex int)
+}
+
 // VrfServer is the Connect RPC handler for VrfService: the single VRF
-// surface. It drives both facets of the VRF object — the kernel device
-// (VrfCreate/VrfDelete via vrf.DeviceOps, which *netresource.ResourceManager
-// satisfies) and the ingress membership + default-deny policy (VrfAc*/
+// surface. It drives every facet of the VRF object — the kernel device
+// (VrfCreate/VrfDelete via vrf.DeviceOps), the L2 bridge domain
+// (VrfBridgeAttach/VrfBridgeDetach via vrf.BridgeOps + FdbRegistrar + the
+// EVPN coordinator; *netresource.ResourceManager satisfies both ops
+// interfaces) and the ingress membership + default-deny policy (VrfAc*/
 // VrfSetPolicy via vrf.Programmer, which *bpf.MapOperations satisfies). Every
 // dependency is an interface (plus the resolve func) so the handlers can be
 // tested without netlink or a live BPF map.
@@ -40,18 +54,21 @@ type VrfServer struct {
 	dev      vrf.DeviceOps
 	sids     SidLister
 	bindings BindingGetter
+	bridges  vrf.BridgeOps
+	fdb      FdbRegistrar
+	evpn     *EvpnCoordinator // nil unless EVPN auto-advertise is on
 	// mu serializes the mutation handlers' mutate+reconcile(+rollback)
-	// sequence and the device create/delete flows. SetIngressVrf /
+	// sequence and the device / bridge create+delete flows. SetIngressVrf /
 	// SetIngressPolicy replace the maps with a snapshot-then-rollback strategy
 	// (not a kernel-atomic swap), so two concurrent reconciles could interleave
-	// and one rollback could clobber the other's write; the delete flow's
-	// check-then-act likewise must not interleave with an AC add. Mirrors
-	// VrfBgpServer.mu, which serializes the same way.
+	// and one rollback could clobber the other's write; the delete flows'
+	// check-then-act likewise must not interleave with an AC add or a bridge
+	// attach. Mirrors VrfBgpServer.mu, which serializes the same way.
 	mu sync.Mutex
 }
 
-func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter) *VrfServer {
-	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings}
+func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator) *VrfServer {
+	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn}
 }
 
 func (s *VrfServer) reconcile() error {
@@ -120,11 +137,14 @@ func (s *VrfServer) createOne(in *v1.Vrf) (vrf.VRF, *v1.OperationError) {
 	fail := func(reason string) (vrf.VRF, *v1.OperationError) {
 		return vrf.VRF{}, &v1.OperationError{TriggerPrefix: in.GetName(), Reason: reason}
 	}
-	// acs / vrf_id / ifindex are server-owned outputs; a request carrying them
-	// is a caller mixing up the facets (or replaying a VrfShow result), so
-	// reject rather than silently ignore.
+	// acs / bridge / vrf_id / ifindex are managed elsewhere or server-owned; a
+	// request carrying them is a caller mixing up the facets (or replaying a
+	// VrfShow result), so reject rather than silently ignore.
 	if len(in.GetAcs()) > 0 {
 		return fail("acs are managed via VrfAcAdd, not VrfCreate")
+	}
+	if in.GetBridge() != nil {
+		return fail("the bridge facet is managed via VrfBridgeAttach, not VrfCreate")
 	}
 	if in.GetVrfId() != 0 || in.GetIfindex() != 0 {
 		return fail("vrf_id and ifindex are server-assigned and must be unset")
@@ -189,6 +209,9 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 	if _, bound := s.bindings.Get(name); bound {
 		return fail("a vrf-bgp binding references this VRF; unbind it first (vrf-bgp unbind)")
 	}
+	if v.Bridge != nil {
+		return fail(fmt.Sprintf("bridge %q is attached; detach it first (vrf bridge-detach)", v.Bridge.Name))
+	}
 	// SID reference check on the device ifindex. A deviceless VRF can still
 	// shadow a same-named raw kernel device that SIDs reference, so fall back
 	// to a best-effort name resolve.
@@ -248,6 +271,147 @@ func findVrfReference(sids SidLister, ifindex uint32) (string, error) {
 			return "", fmt.Errorf("read aux %d of SID %s: %w", entry.AuxIndex, prefix, err)
 		}
 		if bpf.SidAuxL3VrfData(aux) == ifindex {
+			return prefix, nil
+		}
+	}
+	return "", nil
+}
+
+// VrfBridgeAttach attaches the L2 bridge-domain facet: it creates (or adopts)
+// the kernel bridge, records it on the VRF, and registers the bridge with the
+// FDB watcher for MAC learning. When EVPN auto-advertise is on and the VRF's
+// binding declares matching bd_id + EVPN export RTs, the bridge domain is
+// enabled (RT3 + FDB replay as RT2). The binding lookup is direct by VRF name
+// — no ambiguous bd_id join.
+func (s *VrfServer) VrfBridgeAttach(
+	_ context.Context,
+	req *connect.Request[v1.VrfBridgeAttachRequest],
+) (*connect.Response[v1.VrfBridgeAttachResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	vrfName := req.Msg.GetVrfName()
+	br := req.Msg.GetBridge()
+	if vrfName == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("vrf_name is required"))
+	}
+	if br.GetName() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bridge.name is required"))
+	}
+	if br.GetIfindex() != 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bridge.ifindex is server-assigned and must be unset"))
+	}
+	// Range-check before the uint16 cast: bd_id past 65535 would wrap and
+	// scope the FDB to a different bridge domain than the caller asked for.
+	if br.GetBdId() == 0 || br.GetBdId() > math.MaxUint16 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("bridge.bd_id %d out of range (1..%d)", br.GetBdId(), math.MaxUint16))
+	}
+	bdID := uint16(br.GetBdId())
+	// The binding is the BGP facet of the same VRF object; while Binding.BDID
+	// still exists it must agree with the facet, or a received EVPN route
+	// (matched by the binding) would install into a different bd than the
+	// attached bridge decaps from.
+	if b, bound := s.bindings.Get(vrfName); bound && b.BDID != 0 && b.BDID != bdID {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("vrf %q binding declares bd_id %d; bridge bd_id %d mismatches (align them or unbind first)", vrfName, b.BDID, bdID))
+	}
+	attached, err := s.mgr.AttachBridge(vrfName, vrf.Bridge{
+		Name:    br.GetName(),
+		BdID:    bdID,
+		Members: br.GetMembers(),
+	}, s.bridges)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	s.fdb.RegisterBridge(int(attached.Bridge.Ifindex), bdID)
+	// EVPN device axis: enable only when the binding actually advertises EVPN
+	// (export RTs present). The old bridge path enabled without that gate and
+	// could push RT3 with an empty RT list; this aligns with commitBinding.
+	if s.evpn != nil {
+		if b, bound := s.bindings.Get(vrfName); bound && b.BDID == bdID && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
+			s.evpn.EnableForBridge(b, attached.Bridge.Ifindex, attached.Bridge.Name)
+		}
+	}
+	return connect.NewResponse(&v1.VrfBridgeAttachResponse{Vrf: vrfToProto(attached)}), nil
+}
+
+// VrfBridgeDetach removes the L2 facet: it deletes the kernel bridge (refusing
+// while a SID other than the exporter's own lifecycle SIDs references it),
+// unregisters the FDB watcher, disables EVPN auto-advertise for the bd, and
+// clears the facet. Ordering keeps a failed device delete fully retryable —
+// the watcher stays registered and EVPN stays enabled until the delete
+// actually succeeded (the old bridge path unregistered the watcher first and
+// left the bridge unwatched on failure).
+func (s *VrfServer) VrfBridgeDetach(
+	_ context.Context,
+	req *connect.Request[v1.VrfBridgeDetachRequest],
+) (*connect.Response[v1.VrfBridgeDetachResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	vrfName := req.Msg.GetVrfName()
+	if vrfName == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("vrf_name is required"))
+	}
+	v, ok := s.mgr.Get(vrfName)
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown VRF %q", vrfName))
+	}
+	if v.Bridge == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("vrf %q carries no bridge facet", vrfName))
+	}
+	// The exporter's own End.DT2U/DT2M lifecycle SIDs are released by the
+	// Disable below, so they must not block the detach.
+	var selfSIDs []string
+	if s.evpn != nil {
+		selfSIDs = s.evpn.SIDsForBD(v.Bridge.BdID)
+	}
+	ref, err := findBridgeReference(s.sids, v.Bridge.Ifindex, selfSIDs)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to check SID references: %w", err))
+	}
+	if ref != "" {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("bridge is referenced by SID %s", ref))
+	}
+	if err := s.bridges.DeleteBridge(v.Bridge.Name); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("delete bridge: %w", err))
+	}
+	s.fdb.UnregisterBridge(int(v.Bridge.Ifindex))
+	if s.evpn != nil {
+		s.evpn.Disable(v.Bridge.BdID)
+	}
+	s.mgr.RemoveBridge(vrfName)
+	return connect.NewResponse(&v1.VrfBridgeDetachResponse{}), nil
+}
+
+// findBridgeReference returns the prefix of an End.DT2/DT2M SID whose L2 aux
+// references the given bridge ifindex ("" = unreferenced), skipping the
+// exclude prefixes (the EVPN exporter's own lifecycle SIDs, which the detach
+// itself releases). Fail closed on an unreadable aux, same as
+// findVrfReference: deleting a bridge a SID still decaps into would blackhole
+// its traffic.
+func findBridgeReference(sids SidLister, ifindex uint32, exclude []string) (string, error) {
+	entries, err := sids.ListSidFunctions()
+	if err != nil {
+		return "", fmt.Errorf("list SID functions: %w", err)
+	}
+	for prefix, entry := range entries {
+		if slices.Contains(exclude, prefix) {
+			continue
+		}
+		switch v1.Srv6LocalAction(entry.Action) {
+		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2M:
+		default:
+			continue
+		}
+		if entry.AuxIndex == 0 {
+			continue
+		}
+		aux, err := sids.GetSidAux(uint32(entry.AuxIndex))
+		if err != nil {
+			return "", fmt.Errorf("read aux %d of SID %s: %w", entry.AuxIndex, prefix, err)
+		}
+		if _, bridgeIfindex := bpf.SidAuxL2Data(aux); bridgeIfindex == ifindex {
 			return prefix, nil
 		}
 	}
@@ -372,6 +536,14 @@ func vrfToProto(v vrf.VRF) *v1.Vrf {
 		out.Members = v.Device.Members
 		out.EnableL3MdevRule = v.Device.EnableL3mdevRule
 		out.Ifindex = v.Device.Ifindex
+	}
+	if v.Bridge != nil {
+		out.Bridge = &v1.Bridge{
+			Name:    v.Bridge.Name,
+			BdId:    uint32(v.Bridge.BdID),
+			Members: v.Bridge.Members,
+			Ifindex: v.Bridge.Ifindex,
+		}
 	}
 	return out
 }
