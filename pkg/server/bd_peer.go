@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
@@ -33,6 +34,15 @@ func (s *BdPeerServer) BdPeerCreate(
 	bdIndexes := make(map[uint32]uint16)
 
 	for _, peer := range req.Msg.Peers {
+		// Range-check before the uint16 cast: a wrapped bd_id would install
+		// the peer into a different bridge domain than the caller asked for.
+		if peer.BdId > math.MaxUint16 {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("bd_%d", peer.BdId),
+				Reason:        fmt.Sprintf("bd_id %d out of range (max %d)", peer.BdId, math.MaxUint16),
+			})
+			continue
+		}
 		bdID := uint16(peer.BdId)
 
 		// Lazily resolve starting index for this BD on first encounter
@@ -94,6 +104,13 @@ func (s *BdPeerServer) BdPeerDelete(
 	}
 
 	for _, bdID := range req.Msg.BdIds {
+		if bdID > math.MaxUint16 {
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("bd_%d", bdID),
+				Reason:        fmt.Sprintf("bd_id %d out of range (max %d)", bdID, math.MaxUint16),
+			})
+			continue
+		}
 		deleted := false
 		for i := uint16(0); i < bpf.MaxBumNexthops; i++ {
 			err := s.mapOps.DeleteBdPeer(uint16(bdID), i)
@@ -119,6 +136,9 @@ func (s *BdPeerServer) BdPeerFlush(
 	ctx context.Context,
 	req *connect.Request[v1.BdPeerFlushRequest],
 ) (*connect.Response[v1.BdPeerFlushResponse], error) {
+	if err := checkBdIDRange(req.Msg.BdId); err != nil {
+		return nil, err
+	}
 	count, err := s.mapOps.FlushBdPeers(uint16(req.Msg.BdId))
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)

@@ -7,6 +7,7 @@ import (
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
@@ -72,20 +73,26 @@ func (f *fakeVrfDeviceOps) DeleteVrf(name string) error {
 	return nil
 }
 
-// fakeSidTable serves findVrfReference: SID prefix -> the vrf_ifindex its
-// l3vrf aux references. auxErr makes every GetSidAux fail (the fail-closed
-// path).
+// fakeSidTable serves findVrfReference / findBridgeReference: SID prefix ->
+// the ifindex its aux references. l2 switches the entries to End.DT2 with an
+// L2 aux (bridge references); default is End.DT4 with an l3vrf aux. auxErr
+// makes every GetSidAux fail (the fail-closed path).
 type fakeSidTable struct {
 	refs   map[string]uint32 // prefix -> ifindex
+	l2     bool
 	auxErr error
 }
 
 func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {
+	action := uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
+	if f.l2 {
+		action = uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	}
 	out := make(map[string]*bpf.SidFunctionEntry, len(f.refs))
 	i := uint16(1)
 	for prefix := range f.refs {
 		out[prefix] = &bpf.SidFunctionEntry{
-			Action:   uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4),
+			Action:   action,
 			AuxIndex: i,
 		}
 		i++
@@ -103,6 +110,9 @@ func (f *fakeSidTable) GetSidAux(index uint32) (*bpf.SidAuxEntry, error) {
 	i := uint32(1)
 	for _, ifindex := range f.refs {
 		if i == index {
+			if f.l2 {
+				return bpf.NewSidAuxL2(1, ifindex), nil
+			}
 			return bpf.NewSidAuxL3Vrf(ifindex), nil
 		}
 		i++
@@ -110,14 +120,60 @@ func (f *fakeSidTable) GetSidAux(index uint32) (*bpf.SidAuxEntry, error) {
 	return nil, fmt.Errorf("no aux %d", index)
 }
 
-// fakeBindings reports a binding for the names it holds.
-type fakeBindings struct{ names map[string]bool }
+// fakeBindings reports a binding for the names it holds. Full bindings (with
+// BDID / families) take precedence; the names set yields a bare binding.
+type fakeBindings struct {
+	names    map[string]bool
+	bindings map[string]vrfbgp.Binding
+}
 
 func (f *fakeBindings) Get(name string) (vrfbgp.Binding, bool) {
+	if b, ok := f.bindings[name]; ok {
+		return b, true
+	}
 	if f.names[name] {
 		return vrfbgp.Binding{VRFName: name}, true
 	}
 	return vrfbgp.Binding{}, false
+}
+
+// fakeServerBridgeOps records bridge create/delete calls into the shared
+// event log so ordering against the FDB registrar is assertable.
+type fakeServerBridgeOps struct {
+	ifindexes map[string]uint32
+	deleteErr error
+	events    *[]string
+}
+
+func (f *fakeServerBridgeOps) CreateBridge(name string, bdID uint16, members []string, ownerVRF string) (uint32, error) {
+	*f.events = append(*f.events, "create:"+name)
+	return f.ifindexes[name], nil
+}
+
+func (f *fakeServerBridgeOps) DeleteBridge(name string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	*f.events = append(*f.events, "delete:"+name)
+	return nil
+}
+
+// fakeFdbRegistrar records register/unregister into the shared event log.
+type fakeFdbRegistrar struct {
+	events *[]string
+	byBd   map[uint16]int // bd -> last registered ifindex
+}
+
+func (f *fakeFdbRegistrar) RegisterBridge(ifindex int, bdID uint16) {
+	*f.events = append(*f.events, fmt.Sprintf("register:%d:%d", ifindex, bdID))
+	if f.byBd == nil {
+		f.byBd = map[uint16]int{}
+	}
+	f.byBd[bdID] = ifindex
+}
+
+func (f *fakeFdbRegistrar) UnregisterBridge(ifindex int) {
+	*f.events = append(*f.events, fmt.Sprintf("unregister:%d", ifindex))
 }
 
 func newTestVrfServer() (*VrfServer, *fakeProgrammer) {
@@ -128,9 +184,24 @@ func newTestVrfServer() (*VrfServer, *fakeProgrammer) {
 func newTestVrfServerFull() (*VrfServer, *fakeProgrammer, *fakeVrfDeviceOps) {
 	prog := &fakeProgrammer{}
 	dev := &fakeVrfDeviceOps{}
-	s := NewVrfServer(vrf.NewManager(), prog, dev, &fakeSidTable{}, &fakeBindings{})
+	events := []string{}
+	s := NewVrfServer(vrf.NewManager(), prog, dev, &fakeSidTable{}, &fakeBindings{},
+		&fakeServerBridgeOps{ifindexes: map[string]uint32{}, events: &events},
+		&fakeFdbRegistrar{events: &events}, nil, nil)
 	s.resolve = fakeResolver
 	return s, prog, dev
+}
+
+// newTestVrfServerBridge wires the bridge-facet fakes with a shared ordered
+// event log and returns the handles the attach/detach tests assert on.
+func newTestVrfServerBridge(evpn *EvpnCoordinator) (*VrfServer, *fakeServerBridgeOps, *fakeFdbRegistrar, *fakeBindings, *[]string) {
+	events := []string{}
+	bridges := &fakeServerBridgeOps{ifindexes: map[string]uint32{"br100": 42}, events: &events}
+	fdb := &fakeFdbRegistrar{events: &events}
+	bindings := &fakeBindings{bindings: map[string]vrfbgp.Binding{}}
+	s := NewVrfServer(vrf.NewManager(), &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn, nil)
+	s.resolve = fakeResolver
+	return s, bridges, fdb, bindings, &events
 }
 
 // VrfAcAdd creates the VRF (allocating a non-zero id), and the reconcile
@@ -543,5 +614,172 @@ func TestVrfServer_ShowBothFacets(t *testing.T) {
 	}
 	if v.GetVrfId() == 0 || len(v.GetAcs()) != 1 || v.GetAcs()[0].GetVlan() != 200 {
 		t.Errorf("ingress facet = vrf_id %d acs %+v", v.GetVrfId(), v.GetAcs())
+	}
+}
+
+// VrfBridgeAttach validates before any netlink, cross-checks the binding's
+// bd_id, registers the FDB watcher with the assigned ifindex, and fires the
+// EVPN device axis only when the binding actually advertises EVPN.
+func TestVrfServer_BridgeAttach(t *testing.T) {
+	hook := &fakeEvpnBridge{}
+	s, _, fdb, bindings, _ := newTestVrfServerBridge(newEvpnCoordForTest(hook, nil))
+
+	// Binding with a mismatching bd_id refuses the attach.
+	bindings.bindings["evi-100"] = vrfbgp.Binding{VRFName: "evi-100", BDID: 200}
+	_, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
+		VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bd_id mismatch: code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+
+	// Matching bd_id but import-only EVPN (no export RTs): attach succeeds,
+	// FDB registers, EVPN does NOT enable (the export-RT gate).
+	bindings.bindings["evi-100"] = vrfbgp.Binding{VRFName: "evi-100", BDID: 100}
+	resp, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
+		VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100, Members: []string{"eth2"}},
+	}))
+	if err != nil {
+		t.Fatalf("VrfBridgeAttach: %v", err)
+	}
+	got := resp.Msg.GetVrf()
+	if got.GetBridge().GetIfindex() != 42 || got.GetBridge().GetBdId() != 100 {
+		t.Errorf("attached bridge = %+v, want ifindex 42 / bd 100", got.GetBridge())
+	}
+	if fdb.byBd[100] != 42 {
+		t.Errorf("FDB registered ifindex = %d, want 42", fdb.byBd[100])
+	}
+	if len(hook.enabled) != 0 {
+		t.Errorf("EVPN enabled without export RTs: %v", hook.enabled)
+	}
+
+	// Validation guards (fresh server so no facet exists yet).
+	s2, _, _, _, _ := newTestVrfServerBridge(nil)
+	for _, bad := range []*v1.VrfBridgeAttachRequest{
+		{VrfName: "", Bridge: &v1.Bridge{Name: "br1", BdId: 1}},
+		{VrfName: "x", Bridge: &v1.Bridge{BdId: 1}},                            // no device name
+		{VrfName: "x", Bridge: &v1.Bridge{Name: "br1"}},                        // bd_id 0
+		{VrfName: "x", Bridge: &v1.Bridge{Name: "br1", BdId: 65536}},           // wraps to 0
+		{VrfName: "x", Bridge: &v1.Bridge{Name: "br1", BdId: 1, Ifindex: 9}},   // server-owned
+		{VrfName: vrf.GlobalVRFName, Bridge: &v1.Bridge{Name: "br1", BdId: 1}}, // reserved
+	} {
+		if _, err := s2.VrfBridgeAttach(context.Background(), connect.NewRequest(bad)); err == nil {
+			t.Errorf("VrfBridgeAttach(%+v): want error", bad)
+		}
+	}
+}
+
+// With a binding that exports EVPN RTs and matches the bd_id, the attach
+// enables the bridge domain (device axis).
+func TestVrfServer_BridgeAttachEnablesEvpn(t *testing.T) {
+	hook := &fakeEvpnBridge{}
+	s, _, _, bindings, _ := newTestVrfServerBridge(newEvpnCoordForTest(hook, nil))
+	bindings.bindings["evi-100"] = vrfbgp.Binding{
+		VRFName: "evi-100", BDID: 100,
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionBoth}}},
+		},
+	}
+	if _, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
+		VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100},
+	})); err != nil {
+		t.Fatalf("VrfBridgeAttach: %v", err)
+	}
+	if !hook.enabled[100] {
+		t.Errorf("EVPN not enabled on attach with export RTs: %v", hook.enabled)
+	}
+}
+
+// VrfBridgeDetach refuses while a SID references the bridge (excluding the
+// exporter's own lifecycle SIDs), keeps everything intact on a failed device
+// delete, and on success unregisters the watcher only AFTER the delete and
+// disables EVPN.
+func TestVrfServer_BridgeDetach(t *testing.T) {
+	hook := &fakeEvpnBridge{}
+	s, bridges, _, _, events := newTestVrfServerBridge(newEvpnCoordForTest(hook, nil))
+	if _, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
+		VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100},
+	})); err != nil {
+		t.Fatalf("VrfBridgeAttach: %v", err)
+	}
+
+	detach := func() error {
+		_, err := s.VrfBridgeDetach(context.Background(), connect.NewRequest(&v1.VrfBridgeDetachRequest{VrfName: "evi-100"}))
+		return err
+	}
+
+	// 1. A SID referencing the bridge ifindex refuses.
+	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00::/64": 42}, l2: true}
+	if err := detach(); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("detach with SID ref: code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+	// 1b. Unreadable aux fails closed.
+	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00::/64": 12345}, l2: true, auxErr: fmt.Errorf("aux boom")}
+	if err := detach(); connect.CodeOf(err) != connect.CodeInternal {
+		t.Fatalf("detach with unreadable aux: code = %v, want Internal", connect.CodeOf(err))
+	}
+	s.sids = &fakeSidTable{}
+
+	// 2. Device delete failure keeps facet, watcher and EVPN state intact.
+	bridges.deleteErr = fmt.Errorf("netlink boom")
+	if err := detach(); connect.CodeOf(err) != connect.CodeInternal {
+		t.Fatalf("failing delete: code = %v, want Internal", connect.CodeOf(err))
+	}
+	if v, _ := s.mgr.Get("evi-100"); v.Bridge == nil {
+		t.Fatal("failed delete cleared the facet")
+	}
+	for _, e := range *events {
+		if e == "unregister:42" {
+			t.Fatal("failed delete unregistered the FDB watcher")
+		}
+	}
+	bridges.deleteErr = nil
+
+	// 3. Success: delete precedes unregister; EVPN disabled; facet gone.
+	if err := detach(); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	delIdx, unregIdx := -1, -1
+	for i, e := range *events {
+		switch e {
+		case "delete:br100":
+			delIdx = i
+		case "unregister:42":
+			unregIdx = i
+		}
+	}
+	if delIdx == -1 || unregIdx == -1 || delIdx > unregIdx {
+		t.Errorf("ordering events = %v, want delete before unregister", *events)
+	}
+	if len(hook.disabled) != 1 || hook.disabled[0] != 100 {
+		t.Errorf("EVPN disabled = %v, want [100]", hook.disabled)
+	}
+	if v, _ := s.mgr.Get("evi-100"); v.Bridge != nil {
+		t.Error("facet still present after detach")
+	}
+
+	// 4. No facet: FailedPrecondition; unknown VRF: NotFound.
+	if err := detach(); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("re-detach: code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+	if _, err := s.VrfBridgeDetach(context.Background(), connect.NewRequest(&v1.VrfBridgeDetachRequest{VrfName: "ghost"})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("unknown vrf: code = %v, want NotFound", connect.CodeOf(err))
+	}
+}
+
+// VrfDelete refuses while the bridge facet is attached (the 4th gate).
+func TestVrfServer_DeleteRefusesWithBridge(t *testing.T) {
+	s, _, _, _, _ := newTestVrfServerBridge(nil)
+	if _, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
+		VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100},
+	})); err != nil {
+		t.Fatalf("VrfBridgeAttach: %v", err)
+	}
+	resp, err := s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{"evi-100"}}))
+	if err != nil {
+		t.Fatalf("VrfDelete: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 {
+		t.Fatalf("delete with bridge facet: want refusal, got %+v", resp.Msg)
 	}
 }

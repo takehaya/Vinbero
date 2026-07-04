@@ -36,9 +36,9 @@ sequenceDiagram
 
     Note over Op,R3: Phase 1: ネットワークリソース作成
 
-    Op->>R3: BridgeCreate<br/>{name: "br100", bd_id: 100, members: ["eth1"]}
-    R3-->>R3: netlink: bridge作成 + member enslave + FDBWatcher登録
-    R3-->>Op: Created
+    Op->>R3: VrfBridgeAttach<br/>{vrf_name: "evi-100",<br/>bridge: {name: "br100", bd_id: 100, members: ["eth1"]}}
+    R3-->>R3: netlink: bridge作成 + member enslave<br/>+ VRF の L2 facet として記録 + FDBWatcher登録
+    R3-->>Op: Vrf {bridge: {ifindex, ...}}
 
     Note over Op,R3: Phase 2: SID登録
 

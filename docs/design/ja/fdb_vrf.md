@@ -61,7 +61,7 @@ End.DT2 受信側
        └─ miss → bpf_redirect(bridge_ifindex) → bridge flood
 
 FDBウォッチャー（補助）
-  BridgeCreate API呼び出し時に FDBWatcher に動的登録される
+  VrfBridgeAttach API呼び出し時に FDBWatcher に動的登録される
   Netlink RTM_NEWNEIGH → MasterIndex で bridge を特定 → bd_id タグ付きで fdb_map 同期
 ```
 
@@ -106,8 +106,8 @@ XDPがbridgeより先にフレームを処理するため、H.Encaps.L2処理時
 
 ## リソース管理
 
-VRF は `VrfService` API (一級 VRF オブジェクトの kernel facet、[vrf.md](vrf.md) 参照)、Bridge は `NetworkResourceService` API で管理します。どちらも Vinbero が netlink でリソースを作成し、JSON状態ファイルで永続化します。再起動時にはReconcileで状態を復元します。
+VRF device も Bridge も `VrfService` API で、一級 VRF オブジェクトの facet として管理します ([vrf.md](vrf.md) 参照)。Vinbero が netlink でリソースを作成し、JSON状態ファイルで永続化します。再起動時にはReconcileで状態を復元し、boot 時に VRF オブジェクトへ facet として seed されます。
 
-BridgeCreate APIを呼ぶと、FDBWatcherへの登録も同時に行われます。削除時はどちらもSIDが参照していないかを確認し、参照がある場合はエラーを返します (VRF はさらに ingress AC と vrf-bgp binding の残存でも拒否します)。
+VrfBridgeAttach を呼ぶと、FDBWatcherへの登録も同時に行われます。削除・detach 時はどちらもSIDが参照していないかを確認し、参照がある場合はエラーを返します (VRF の削除はさらに ingress AC、vrf-bgp binding、attach 済み bridge の残存でも拒否します)。
 
 API呼び出しの依存関係と利用シーケンスは [api_sequence.md](api_sequence.md) を参照してください。

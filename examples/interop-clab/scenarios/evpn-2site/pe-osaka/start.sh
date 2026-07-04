@@ -28,12 +28,6 @@ ethtool -K eth1 rxvlan off 2>/dev/null || true
 ethtool -K eth2 txvlan off 2>/dev/null || true
 ethtool -K eth2 rxvlan off 2>/dev/null || true
 
-if ! ip link show br100 >/dev/null 2>&1; then
-    ip link add br100 type bridge
-fi
-ip link set br100 up
-ip link set eth2 master br100
-
 ip -6 route replace 2001:db8:ff::1/128 via 2001:db8:2::2 dev eth1 src 2001:db8:ff::2
 ip -6 route replace fd00:100::/48 via 2001:db8:2::2 dev eth1
 
@@ -60,6 +54,13 @@ done
     --vrf evi-100 \
     --bd-id 100 \
     --rt evpn:65000:100:import || true
+
+# The bridge as evi-100's L2 facet (see pe-tokyo/start.sh for the rationale).
+/usr/local/bin/vbctl vrf bridge-attach \
+    --vrf evi-100 \
+    --name br100 \
+    --bd-id 100 \
+    --members eth2 || true
 
 /usr/local/bin/vbctl locator create \
     --name LOC1 \

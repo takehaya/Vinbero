@@ -130,7 +130,7 @@ headend（H.Encaps.L2）側は、顧客ポートで直接XDPが処理するた�
 
 ### bridgeの作成方法
 
-bridgeは `NetworkResourceService/BridgeCreate` APIで作成します。APIを呼ぶとnetlinkでbridgeを作成し、member interfaceをenslaveし、FDBWatcherにも自動登録します。
+bridgeは `VrfService/VrfBridgeAttach` APIで、VRF オブジェクトの L2 facet として作成します ([vrf.md](vrf.md) 参照)。APIを呼ぶとnetlinkでbridgeを作成し、member interfaceをenslaveし、owning VRF に facet として記録し、FDBWatcherにも自動登録します。1 つの bd_id はちょうど 1 つの VRF に属します。
 
 ## MAC学習の仕組み
 
@@ -191,9 +191,10 @@ curl -X POST .../BdPeerCreate -d '{
 
 # === router3（decap側） ===
 
-# Bridge作成（API経由、FDBWatcherにも自動登録される）
-curl -X POST .../NetworkResourceService/BridgeCreate -d '{
-  "bridges": [{"name":"br100", "bd_id":100, "members":["eth1"]}]
+# Bridge を VRF の L2 facet として attach（FDBWatcherにも自動登録される）
+curl -X POST .../VrfService/VrfBridgeAttach -d '{
+  "vrf_name": "evi-100",
+  "bridge": {"name":"br100", "bd_id":100, "members":["eth1"]}
 }'
 
 # End.DT2でdecapし、BD100のFDBで転送する。missの場合はbr100にfloodする

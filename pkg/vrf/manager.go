@@ -62,15 +62,29 @@ type Device struct {
 	Ifindex          uint32
 }
 
+// Bridge is the L2 bridge-domain facet of a VRF: the Linux bridge End.DT2 /
+// End.DT2M deliver decapsulated frames into, plus the bd_id that scopes its
+// FDB and EVPN advertisements. The device name may differ from the VRF name
+// (an EVI named "evi-100" typically carries a bridge named "br100"). Ifindex
+// is filled by the mechanics layer at create/adopt time.
+type Bridge struct {
+	Name    string
+	BdID    uint16
+	Members []string
+	Ifindex uint32
+}
+
 // VRF is a routing/forwarding instance identity. ID is its data-plane id
 // (ingress classification + MUP F-TEID scope). ACs is its ingress membership.
-// Device is the kernel-device facet; nil means deviceless (e.g. a MUP gateway
-// VRF that only classifies ingress).
+// Device is the kernel-device facet and Bridge the L2 bridge-domain facet;
+// either may be nil (e.g. a MUP gateway VRF that only classifies ingress, or
+// an L2-only EVI without an L3 table).
 type VRF struct {
 	Name   string
 	ID     uint32
 	ACs    []AC
 	Device *Device
+	Bridge *Bridge
 }
 
 // Manager owns the VRF objects, the id allocator (free list; 0 reserved for the
@@ -111,15 +125,20 @@ func (m *Manager) allocIDLocked() uint32 {
 }
 
 // clone returns a copy of v that shares no mutable backing storage with the
-// stored VRF (the ACs slice, the Device struct and its Members slice), so a
-// caller mutating the returned value cannot corrupt internal state (or race a
-// concurrent AddAC/RemoveAC/SetDevice that re-slices it).
+// stored VRF (the ACs slice, the Device / Bridge structs and their Members
+// slices), so a caller mutating the returned value cannot corrupt internal
+// state (or race a concurrent mutation that re-slices it).
 func (v *VRF) clone() VRF {
 	out := VRF{Name: v.Name, ID: v.ID, ACs: append([]AC(nil), v.ACs...)}
 	if v.Device != nil {
 		d := *v.Device
 		d.Members = append([]string(nil), v.Device.Members...)
 		out.Device = &d
+	}
+	if v.Bridge != nil {
+		b := *v.Bridge
+		b.Members = append([]string(nil), v.Bridge.Members...)
+		out.Bridge = &b
 	}
 	return out
 }
@@ -324,6 +343,140 @@ func (m *Manager) CreateDevice(name string, d Device, ops DeviceOps) (VRF, error
 	}
 	d.Ifindex = ifindex
 	return m.SetDevice(name, d)
+}
+
+// BridgeOps is the kernel mechanics + persistence surface the bridge facet is
+// driven through (netlink bridge create/delete plus the JSON state file that
+// recreates bridges across restarts and records the owning VRF).
+// *netresource.ResourceManager satisfies it; tests use a fake. Passed per call
+// like DeviceOps.
+type BridgeOps interface {
+	CreateBridge(name string, bdID uint16, members []string, ownerVRF string) (uint32, error)
+	DeleteBridge(name string) error
+}
+
+// validateBridgeFacet rejects what an L2 facet may never carry: the reserved
+// global VRF (the underlay has no bridge domain), an empty VRF name, an empty
+// device name, and bd_id 0 (the data-plane sentinel for "no BD").
+func validateBridgeFacet(name string, b Bridge) error {
+	if name == "" {
+		return fmt.Errorf("vrf: name is required")
+	}
+	if name == GlobalVRFName {
+		return fmt.Errorf("vrf: the reserved global VRF is the underlay and cannot carry a bridge domain")
+	}
+	if b.Name == "" {
+		return fmt.Errorf("vrf %q: bridge device name is required", name)
+	}
+	if b.BdID == 0 {
+		return fmt.Errorf("vrf %q: bridge bd_id must be 1..65535 (0 = no BD)", name)
+	}
+	return nil
+}
+
+// bridgeConflictLocked reports the uniqueness violations an L2 facet must
+// never create: a bridge device or a bd_id belongs to exactly one VRF (a
+// duplicate bd_id would make the EVPN binding-axis resolution ambiguous — the
+// pre-facet code failed closed on it; the facet model prevents it up front),
+// and one VRF carries at most one bridge (1 binding = 1 BD).
+func (m *Manager) bridgeConflictLocked(name string, b Bridge) error {
+	for _, other := range m.byName {
+		if other.Bridge == nil {
+			continue
+		}
+		if other.Name == name {
+			if other.Bridge.Name != b.Name {
+				return fmt.Errorf("vrf %q already carries bridge %q; detach it first", name, other.Bridge.Name)
+			}
+			continue
+		}
+		if other.Bridge.Name == b.Name {
+			return fmt.Errorf("vrf %q: bridge %q already belongs to vrf %q", name, b.Name, other.Name)
+		}
+		if other.Bridge.BdID == b.BdID {
+			return fmt.Errorf("vrf %q: bd_id %d already belongs to vrf %q (bridge %q)", name, b.BdID, other.Name, other.Bridge.Name)
+		}
+	}
+	return nil
+}
+
+// SetBridge attaches (or replaces) the L2 bridge-domain facet on a VRF,
+// creating the VRF if absent. Pure state: no netlink happens here — boot
+// seeding uses it to mirror bridges the mechanics layer already reconciled
+// from its state file. The stored Bridge shares no backing storage with b.
+func (m *Manager) SetBridge(name string, b Bridge) (VRF, error) {
+	if err := validateBridgeFacet(name, b); err != nil {
+		return VRF{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.bridgeConflictLocked(name, b); err != nil {
+		return VRF{}, err
+	}
+	v := m.ensureLocked(name)
+	bb := b
+	bb.Members = append([]string(nil), b.Members...)
+	v.Bridge = &bb
+	return v.clone(), nil
+}
+
+// AttachBridge creates (or adopts) the kernel bridge through ops and attaches
+// the facet with the resulting ifindex. Validation and the uniqueness
+// pre-check run BEFORE the netlink call so a rejected attach creates no
+// device; ops runs outside m.mu (CreateDevice's rule). The uniqueness
+// re-check inside SetBridge cannot fail in practice because VrfServer.mu
+// serializes all facet mutations; if it ever did, CreateBridge's
+// adopt-idempotency makes the attach retryable.
+func (m *Manager) AttachBridge(name string, b Bridge, ops BridgeOps) (VRF, error) {
+	if err := validateBridgeFacet(name, b); err != nil {
+		return VRF{}, err
+	}
+	m.mu.RLock()
+	err := m.bridgeConflictLocked(name, b)
+	m.mu.RUnlock()
+	if err != nil {
+		return VRF{}, err
+	}
+	ifindex, err := ops.CreateBridge(b.Name, b.BdID, b.Members, name)
+	if err != nil {
+		return VRF{}, fmt.Errorf("vrf %q: create bridge: %w", name, err)
+	}
+	b.Ifindex = ifindex
+	return m.SetBridge(name, b)
+}
+
+// RemoveBridge clears the L2 facet and reports whether one was attached
+// (idempotent). Pure state: the caller tears the kernel bridge down through
+// BridgeOps first (device teardown before identity removal).
+func (m *Manager) RemoveBridge(name string) (removed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.byName[name]
+	if !ok || v.Bridge == nil {
+		return false
+	}
+	v.Bridge = nil
+	return true
+}
+
+// BridgeIfindexByBDID resolves a bd_id to its bridge ifindex through the VRF
+// objects. The EVPN auto-advertise binding axis uses it to enable a bridge
+// domain whose bridge already exists; ok=false when no VRF carries the bd_id
+// (attach will enable it when the bridge arrives) or bdID is 0. Uniqueness is
+// enforced at SetBridge, so a match is never ambiguous — this replaces the
+// fail-closed duplicate scan the pre-facet state lookup needed.
+func (m *Manager) BridgeIfindexByBDID(bdID uint16) (uint32, bool) {
+	if bdID == 0 {
+		return 0, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, v := range m.byName {
+		if v.Bridge != nil && v.Bridge.BdID == bdID {
+			return v.Bridge.Ifindex, true
+		}
+	}
+	return 0, false
 }
 
 // List returns a snapshot of the VRFs (both facets) sorted by name, each with

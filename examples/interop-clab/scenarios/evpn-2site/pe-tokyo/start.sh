@@ -31,16 +31,6 @@ ethtool -K eth1 rxvlan off 2>/dev/null || true
 ethtool -K eth2 txvlan off 2>/dev/null || true
 ethtool -K eth2 rxvlan off 2>/dev/null || true
 
-# --- bridge for the End.DT2U decap path ------------------------------------
-# br100 is bd 100's local delivery point: End.DT2U decaps a core-bound frame
-# into br100, which forwards it to ce-tokyo on eth2. The CE port is enslaved
-# for that egress direction; XDP still sees CE->core frames first (ingress).
-if ! ip link show br100 >/dev/null 2>&1; then
-    ip link add br100 type bridge
-fi
-ip link set br100 up
-ip link set eth2 master br100
-
 # --- static underlay routes ------------------------------------------------
 # pe-osaka's loopback (iBGP peer) and locator block (its End.DT2U SID), via core.
 ip -6 route replace 2001:db8:ff::2/128 via 2001:db8:1::2 dev eth1 src 2001:db8:ff::1
@@ -69,6 +59,18 @@ done
     --vrf evi-100 \
     --bd-id 100 \
     --rt evpn:65000:100:import || true
+
+# The bridge as evi-100's L2 facet: br100 is bd 100's local delivery point —
+# End.DT2U decaps a core-bound frame into br100, which forwards it to
+# ce-tokyo on eth2. The CE port is enslaved for that egress direction; XDP
+# still sees CE->core frames first (ingress). Attaching through Vinbero makes
+# it a facet of the same VRF object the binding above references (bd_id must
+# agree) and registers it with the FDB watcher.
+/usr/local/bin/vbctl vrf bridge-attach \
+    --vrf evi-100 \
+    --name br100 \
+    --bd-id 100 \
+    --members eth2 || true
 
 # Source locator: fd00:100::/48 is pe-tokyo's SRv6 block (encap source).
 /usr/local/bin/vbctl locator create \

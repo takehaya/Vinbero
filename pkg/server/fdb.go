@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"math"
 	"net"
 
 	"connectrpc.com/connect"
@@ -50,10 +51,25 @@ func (s *FdbServer) FdbList(
 	return connect.NewResponse(resp), nil
 }
 
+// checkBdIDRange rejects a wire bd_id past uint16 before the narrowing cast:
+// a wrapped value (e.g. 65536 -> 0) would scope the FDB / peer operation to a
+// different bridge domain than the caller asked for. Shared by the fdb and
+// bd_peer handlers.
+func checkBdIDRange(bdID uint32) error {
+	if bdID > math.MaxUint16 {
+		return connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("bd_id %d out of range (max %d)", bdID, math.MaxUint16))
+	}
+	return nil
+}
+
 func (s *FdbServer) FdbCreate(
 	ctx context.Context,
 	req *connect.Request[v1.FdbCreateRequest],
 ) (*connect.Response[v1.FdbCreateResponse], error) {
+	if err := checkBdIDRange(req.Msg.BdId); err != nil {
+		return nil, err
+	}
 	mac, err := net.ParseMAC(req.Msg.Mac)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid MAC: %w", err))
@@ -72,6 +88,9 @@ func (s *FdbServer) FdbDelete(
 	ctx context.Context,
 	req *connect.Request[v1.FdbDeleteRequest],
 ) (*connect.Response[v1.FdbDeleteResponse], error) {
+	if err := checkBdIDRange(req.Msg.BdId); err != nil {
+		return nil, err
+	}
 	mac, err := net.ParseMAC(req.Msg.Mac)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("invalid MAC: %w", err))
@@ -88,6 +107,9 @@ func (s *FdbServer) FdbFlush(
 	ctx context.Context,
 	req *connect.Request[v1.FdbFlushRequest],
 ) (*connect.Response[v1.FdbFlushResponse], error) {
+	if err := checkBdIDRange(req.Msg.BdId); err != nil {
+		return nil, err
+	}
 	count, err := s.mapOps.FlushFdb(uint16(req.Msg.BdId), req.Msg.KeepStatic)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)

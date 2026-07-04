@@ -49,11 +49,21 @@ type VrfBgpServer struct {
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
 	// cannot see the manager, so the agreement must be enforced here).
-	mu sync.Mutex
+	//
+	// SHARED with VrfServer (see its field comment): commitBinding's bridge-
+	// facet bd_id check and VrfBridgeAttach's binding check are check-then-act
+	// across the two managers, so they must run under one mutex or a racing
+	// pair could publish a diverging facet/binding without either erroring.
+	mu *sync.Mutex
 }
 
-func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupBindingReconciler) *VrfBgpServer {
-	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc}
+// NewVrfBgpServer wires the handler. mu is the mutation mutex, shared with
+// VrfServer; nil allocates a private one (tests without a VrfServer).
+func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupBindingReconciler, mu *sync.Mutex) *VrfBgpServer {
+	if mu == nil {
+		mu = &sync.Mutex{}
+	}
+	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc, mu: mu}
 }
 
 // protoToBinding converts a wire VrfBgpBinding into the runtime Binding. The
@@ -152,6 +162,17 @@ func bindingFamiliesToProto(in map[bgp.Family]vrfbgp.FamilyPolicy) map[string]*v
 // would otherwise hand the exporter a half-populated binding.
 func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 	updated = updated.Normalize()
+	// While Binding.BDID exists alongside the VRF object's bridge facet, the
+	// two must agree: a mismatch would install received EVPN routes (matched
+	// by the binding's RTs) into a different bd than the attached bridge
+	// decaps from. VrfBridgeAttach checks the same invariant from the other
+	// direction.
+	if updated.BDID != 0 {
+		if v, ok := s.mgr.VRF().Get(updated.VRFName); ok && v.Bridge != nil && v.Bridge.BdID != updated.BDID {
+			return fmt.Errorf("vrf %q carries bridge %q with bd_id %d; binding bd_id %d mismatches (align them or detach the bridge)",
+				updated.VRFName, v.Bridge.Name, v.Bridge.BdID, updated.BDID)
+		}
+	}
 	prev, existed := s.mgr.Get(updated.VRFName)
 	if s.exporter != nil {
 		if err := s.exporter.AddVRF(updated); err != nil {

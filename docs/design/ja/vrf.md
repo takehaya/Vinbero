@@ -10,6 +10,7 @@ Vinbero の VRF は 1 つの一級オブジェクトです。`pkg/vrf` の Manag
 - vrf_id。data plane の数値 id です。0 は global/default VRF (underlay) に予約され、tenant VRF には 1 以上が割り当てられます。
 - ingress access circuit (AC)。この VRF に属する {interface, VLAN} の集合です。
 - kernel device facet (任意)。End.DT4/DT6/DT46 が decap 後の FIB lookup に使う Linux VRF device です。持たない VRF (deviceless) も正当で、MUP gateway のように ingress 分類だけを使う構成がこれにあたります。
+- bridge facet (任意)。End.DT2/DT2M が decap したフレームを配送する Linux bridge と、FDB / EVPN 広告をスコープする bd_id です。L2 だけの EVI (kernel device なし) も正当です。
 
 ```mermaid
 graph TD
@@ -19,8 +20,11 @@ graph TD
     BGP["BGP facet (pkg/vrfbgp)<br/>RD / RT policy / families"]
     MUP["MUP uplink<br/>F-TEID を vrf_id でキー"]
 
+    BR["bridge facet<br/>bd_id / bridge device<br/>→ FDB / EVPN のスコープ"]
+
     V --- AC
     V --- DEV
+    V --- BR
     BGP -->|"name で Ensure"| V
     MUP -->|"vrf_id を参照"| V
 ```
@@ -31,10 +35,11 @@ vrf_id は `vrf.Manager` が割り当てます。最初に参照された時点�
 
 - `vbctl vrf ac-add` で AC を足す
 - `vbctl vrf create` で kernel device を作る
+- `vbctl vrf bridge-attach` で bridge を attach する
 - `vbctl vrf-bgp bind` で BGP binding を張る (binding の公開前に Ensure が走るので、並行する route apply が vrf_id 未割当ての binding を見ることはありません)
 - config の `vrfs.entries[]`
 
-削除された VRF の id は free list で再利用されます。予約名 `global` は常に id 0 で、tenant には使えず、id 0 が再利用されることもありません。`global` に AC を足すと {ifindex, vlan} → 0 の明示エントリになり、default-deny 下でも underlay/control interface を通せます。`global` は kernel device を持てません (global VRF は main table を指すためです)。
+削除された VRF の id は free list で再利用されます。予約名 `global` は常に id 0 で、tenant には使えず、id 0 が再利用されることもありません。`global` に AC を足すと {ifindex, vlan} → 0 の明示エントリになり、default-deny 下でも underlay/control interface を通せます。`global` は kernel device も bridge も持てません (global VRF は underlay そのものを指すためです)。
 
 ## ingress facet
 
@@ -57,6 +62,18 @@ End.DT4/DT6/DT46 は decap 後に `bpf_fib_lookup(ifindex=VRF device)` で per-V
 
 data plane の lookup キーはあくまで ifindex です (kernel FIB の要求)。vrf_id と ifindex の両方を 1 つの VRF が持つことで、operator からは 1 つのオブジェクトに見えます。
 
+## bridge facet
+
+EVPN / L2VPN の bridge domain も VRF オブジェクトの facet です。End.DT2/DT2M が decap したフレームを配送する Linux bridge (FDB miss 時の flood 先) と、`fdb_map` や `bd_peer_map` をスコープする bd_id (1..65535) を 1 つの VRF が持ちます。
+
+- attach は `VrfService/VrfBridgeAttach` (CLI は `vbctl vrf bridge-attach --vrf X --name brN --bd-id N [--members ...]`)。netlink と JSON state への永続化は device facet と同じく `pkg/netresource` が `BridgeOps` interface 経由で担い、state record は owning VRF 名も持ちます。attach は FDBWatcher への登録 (MAC 学習と EVPN RT2 の供給源) も行います。
+- 一意性は attach 時に強制されます。1 つの VRF が持てる bridge は 1 つ、1 つの bridge device / 1 つの bd_id が属せる VRF も 1 つです。これにより EVPN binding 軸の bd_id → bridge 解決が曖昧になり得ず、旧構成の「重複 bd_id を fail-closed で全拒否する」防御が構造的に不要になります。
+- BGP binding の `bd_id` (Binding.BDID) が同じ VRF に居る場合、facet の bd_id と一致しなければ attach も bind も拒否されます (受信 EVPN route が decap 先と違う bd に install される事故を防ぐ)。
+- adopt のセマンティクスは device facet と同じです。link が本当に bridge であること、state 上の bd_id / owner と矛盾しないことを検証し、up + 不足 member の enslave で収束します。
+- detach (`vbctl vrf bridge-detach --vrf X`) は End.DT2/DT2M の SID が bridge を参照している間は拒否します (EVPN auto-advertise が自分で入れた lifecycle SID は除外)。device の削除に成功してから FDBWatcher を解除し、EVPN auto-advertise を disable し、最後に facet を消します。削除失敗時は facet も watcher も無傷で retry できます。
+
+EVPN auto-advertise が有効な場合、bridge facet と EVPN export RT 付きの binding が両方そろった時点で RT3 広告と FDB replay (RT2) が走ります。attach 側は binding を VRF 名で直接引くので、旧構成の GetByBDID のような数値 join はありません。
+
 ## lifecycle
 
 ### 作成
@@ -69,8 +86,9 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 
 1. ingress AC が残っている → 拒否 (`vrf ac-remove` で先に外す)
 2. vrf-bgp binding が存在する → 拒否 (`vrf-bgp unbind` で先に外す)
-3. End.T/DT4/DT6/DT46 の SID が device ifindex を参照している → 拒否 (`sid delete` で先に外す)。参照チェック中に aux が読めない場合も fail-closed で拒否します (読めない aux が参照かもしれないため)
-4. すべて clear なら device を teardown してから identity を消して id を回収します。device 削除が失敗した場合は identity に触れず、retry できます
+3. bridge facet が付いている → 拒否 (`vrf bridge-detach` で先に外す)
+4. End.T/DT4/DT6/DT46 の SID が device ifindex を参照している → 拒否 (`sid delete` で先に外す)。参照チェック中に aux が読めない場合も fail-closed で拒否します (読めない aux が参照かもしれないため)
+5. すべて clear なら device を teardown してから identity を消して id を回収します。device 削除が失敗した場合は identity に触れず、retry できます
 
 `global` と、Vinbero 管理外の raw な kernel device (先に `vrf create` で adopt すれば管理下に入る) は削除できません。
 
@@ -78,31 +96,34 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 
 kernel device facet は `settings.state_path` の JSON state に永続化され、restart を跨いで生き残ります。boot 順序は次のとおりです。
 
-1. `netresource.Reconcile` が state の device を kernel と突き合わせ、消えていれば再作成します
-2. `seedVrfDevices` が state の device を VRF オブジェクトに mirror します (restart 後も device facet 付きの一級 VRF として見える)
-3. `loadVRFs` が config の `vrfs:` を適用します (device は adopt 冪等、AC、policy、最後に ingress reconcile)
+1. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成します
+2. `seedVrfDevices` / `seedVrfBridges` が state を VRF オブジェクトに mirror します (restart 後も facet 付きの一級 VRF として見える)。facet 化以前の bridge record は owning VRF を持たないので、bridge 名を仮の VRF 名として seed します (state file の `vrf` フィールドを書いて再起動すれば本来の VRF に移せます)
+3. `loadVRFs` が config の `vrfs:` を適用します (device / bridge は adopt 冪等、AC、policy、最後に ingress reconcile と bridge facet の FDBWatcher 登録 sweep)
 
 config は加算的です。`vrfs.entries[]` から entry を消しても device は消えません。削除は明示的な `vbctl vrf delete` だけです。
 
 ## 操作サーフェス
 
-RPC は `VrfService` に集約されています (kernel VRF の RPC が `NetworkResourceService` に居たのは旧構成で、bridge だけが残っています)。
+RPC は `VrfService` に集約されています (旧 `NetworkResourceService` は廃止済みです)。
 
 | 操作 | RPC | CLI |
 |------|-----|-----|
 | kernel device 作成 (adopt 込み) | `VrfCreate` | `vbctl vrf create --name X --table-id N` |
 | VRF 全体の削除 | `VrfDelete` | `vbctl vrf delete --name X` |
+| bridge attach (adopt 込み) | `VrfBridgeAttach` | `vbctl vrf bridge-attach --vrf X --name brN --bd-id N` |
+| bridge detach | `VrfBridgeDetach` | `vbctl vrf bridge-detach --vrf X` |
 | AC 追加 (VRF の遅延作成込み) | `VrfAcAdd` | `vbctl vrf ac-add --vrf X --interface I [--vlan V]` |
 | AC 削除 | `VrfAcRemove` | `vbctl vrf ac-remove --vrf X --interface I [--vlan V]` |
 | default-deny policy | `VrfSetPolicy` | `vbctl vrf policy --default-deny [--deny-action drop\|pass]` |
-| 一覧 (両 facet) | `VrfShow` | `vbctl vrf show` |
+| 一覧 (全 facet) | `VrfShow` | `vbctl vrf show` |
 
-`vrf show` は 1 つの表で両 facet を出します。deviceless の VRF は TABLE_ID / IFINDEX が `-` になります。
+`vrf show` は 1 つの表で全 facet を出します。持たない facet の列は `-` になります。
 
 ```
-VRF       VRF_ID  TABLE_ID  IFINDEX  INTERFACE  VLAN
-vrf-cust  1       100       3        -          -
-vpn-a     2       -         -        eth1       0
+VRF       VRF_ID  TABLE_ID  IFINDEX  BD_ID  BRIDGE  INTERFACE  VLAN
+vrf-cust  1       100       3        -      -       -          -
+evi-100   2       -         -        100    br100   -          -
+vpn-a     3       -         -        -      -       eth1       0
 ```
 
 ## config
@@ -118,13 +139,19 @@ vrfs:
       acs:                 # ingress 分類 (deviceless でも可)
         - interface: eth1
           vlan: 100
+    - name: evi-100
+      bridge:              # L2 facet (adopt 冪等)
+        name: br100
+        bd_id: 100
+        members: [eth2]
 ```
 
-`members` / `enable_l3mdev_rule` は device の設定なので `table_id` なしでは拒否されます。フィールドの一覧は [configuration.md](configuration.md) を参照してください。
+`members` / `enable_l3mdev_rule` は device の設定なので `table_id` なしでは拒否されます。`bridge.bd_id` は同じ VRF 名の `bgp.vrf_bindings[].bd_id` と一致していなければ起動時に拒否されます。フィールドの一覧は [configuration.md](configuration.md) を参照してください。
 
 ## 関連ドキュメント
 
 - [forwarding_model.md](forwarding_model.md) — 転送テーブル全体でのスコープ軸と lookup chain
-- [fdb_vrf.md](fdb_vrf.md) — End.DT* の data plane (この device facet の消費者)
+- [fdb_vrf.md](fdb_vrf.md) — End.DT* の data plane (device / bridge facet の消費者)
+- [bridge_domain.md](bridge_domain.md) — bridge domain の概念と MAC 学習
 - [srv6_bgp.md](srv6_bgp.md) — BGP facet (vrf-bgp binding) と MUP の per-VRF uplink
 - [persistence.md](persistence.md) — state.json の永続化層

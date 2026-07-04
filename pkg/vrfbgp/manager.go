@@ -423,20 +423,10 @@ func (m *Manager) Get(vrfName string) (Binding, bool) {
 	return b, ok
 }
 
-// GetByBDID returns the binding whose BDID matches bdID. bdID 0 (L3VPN-only
-// bindings) never matches. An ambiguous bd_id (two bindings sharing it)
-// returns ok=false: refusing to guess is safer than originating RT2 with a
-// map-iteration-order-dependent VRF/RD/RT.
-func (m *Manager) GetByBDID(bdID uint16) (Binding, bool) {
-	if bdID == 0 {
-		return Binding{}, false
-	}
-	return m.findUnique(func(b Binding) bool { return b.BDID == bdID })
-}
-
 // BindingByRD returns the binding whose RD matches rd, used by the MUP
 // advertise path and EVPN auto-advertise to resolve a route's RD back to
-// its binding. An ambiguous RD returns ok=false (same thinking as GetByBDID).
+// its binding. An ambiguous RD returns ok=false: refusing to guess is safer
+// than originating with a map-iteration-order-dependent VRF/RD/RT.
 func (m *Manager) BindingByRD(rd string) (Binding, bool) {
 	if rd == "" {
 		return Binding{}, false

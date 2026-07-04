@@ -25,9 +25,9 @@ Vinbero が daemon 内部で持つ状態のうち **永続化されるのは Net
 1. 起動時に `state.json` を読み込み、記録されていた Bridge / VRF デバイスを netlink で確認
 2. 欠けていれば再作成 (`ip link add` 相当)
 3. 存在するものは ifindex を state に書き直して更新
-4. 稼働中に `vinbero bridge create` や `vinbero vrf create` で変更があれば都度 disk に flush (VRF は VrfService 経由で、vrf_id を持つ一級 VRF object の kernel-device facet として管理される)
+4. 稼働中に `vinbero vrf create` や `vinbero vrf bridge-attach` で変更があれば都度 disk に flush (VRF device も bridge も VrfService 経由で、vrf_id を持つ一級 VRF object の facet として管理される。bridge の state record は owning VRF 名も持つ)
 
-これにより、`sudo reboot` した後でも `vinbero bridge list` で以前と同じ Bridge が見えます (daemon が自動で restore する)。
+これにより、`sudo reboot` した後でも `vinbero vrf show` の BRIDGE / BD_ID 列に以前と同じ Bridge が見えます (daemon が自動で restore する)。
 
 state.json フォーマットは内部実装扱いで、手編集は非推奨です。`vinbero` CLI 経由で操作してください。
 

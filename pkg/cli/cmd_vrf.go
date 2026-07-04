@@ -84,6 +84,52 @@ func vrfCommand() *cli.Command {
 				},
 			},
 			{
+				Name:  "bridge-attach",
+				Usage: "Attach the L2 bridge-domain facet: create (or adopt) the kernel bridge on a VRF",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "vrf", Required: true, Usage: "VRF name"},
+					&cli.StringFlag{Name: "name", Required: true, Usage: "Bridge device name"},
+					&cli.UintFlag{Name: "bd-id", Required: true, Usage: "Bridge Domain ID (1..65535)"},
+					&cli.StringFlag{Name: "members", Usage: "Member interfaces (comma-separated)"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					resp, err := clients.Vrf.VrfBridgeAttach(context.Background(),
+						connect.NewRequest(&v1.VrfBridgeAttachRequest{
+							VrfName: c.String("vrf"),
+							Bridge: &v1.Bridge{
+								Name:    c.String("name"),
+								BdId:    uint32(c.Uint("bd-id")),
+								Members: splitMembers(c.String("members")),
+							},
+						}))
+					if err != nil {
+						return err
+					}
+					b := resp.Msg.GetVrf().GetBridge()
+					fmt.Printf("vrf %s: bridge %s attached (bd_id=%d ifindex=%d)\n",
+						resp.Msg.GetVrf().GetName(), b.GetName(), b.GetBdId(), b.GetIfindex())
+					return nil
+				},
+			},
+			{
+				Name:  "bridge-detach",
+				Usage: "Detach the L2 facet: delete the kernel bridge (refused while a SID references it)",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "vrf", Required: true, Usage: "VRF name"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					_, err := clients.Vrf.VrfBridgeDetach(context.Background(),
+						connect.NewRequest(&v1.VrfBridgeDetachRequest{VrfName: c.String("vrf")}))
+					if err != nil {
+						return err
+					}
+					fmt.Println("detached")
+					return nil
+				},
+			},
+			{
 				Name:  "ac-add",
 				Usage: "Add an ingress access circuit {interface, vlan} to a VRF (creates the VRF)",
 				Flags: []cli.Flag{
@@ -154,7 +200,7 @@ func vrfCommand() *cli.Command {
 			},
 			{
 				Name:  "show",
-				Usage: "Show VRFs (kernel device + ingress facets) and the global policy",
+				Usage: "Show VRFs (kernel device + bridge + ingress facets) and the global policy",
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Vrf.VrfShow(context.Background(),
@@ -168,22 +214,27 @@ func vrfCommand() *cli.Command {
 					if p := resp.Msg.GetPolicy(); p != nil {
 						fmt.Printf("policy: default_deny=%t deny_action=%s\n", p.GetDefaultDeny(), p.GetDenyAction())
 					}
-					headers := []string{"VRF", "VRF_ID", "TABLE_ID", "IFINDEX", "INTERFACE", "VLAN"}
+					headers := []string{"VRF", "VRF_ID", "TABLE_ID", "IFINDEX", "BD_ID", "BRIDGE", "INTERFACE", "VLAN"}
 					var rows [][]string
 					for _, v := range resp.Msg.Vrfs {
-						// Kernel-facet columns repeat per AC row; "-" = deviceless.
+						// Facet columns repeat per AC row; "-" = the facet is absent.
 						tableID, ifindex := "-", "-"
 						if v.GetIfindex() != 0 {
 							tableID = fmt.Sprintf("%d", v.GetTableId())
 							ifindex = fmt.Sprintf("%d", v.GetIfindex())
 						}
+						bdID, bridge := "-", "-"
+						if b := v.GetBridge(); b != nil {
+							bdID = fmt.Sprintf("%d", b.GetBdId())
+							bridge = b.GetName()
+						}
 						if len(v.Acs) == 0 {
-							rows = append(rows, []string{v.Name, fmt.Sprintf("%d", v.VrfId), tableID, ifindex, "-", "-"})
+							rows = append(rows, []string{v.Name, fmt.Sprintf("%d", v.VrfId), tableID, ifindex, bdID, bridge, "-", "-"})
 							continue
 						}
 						for _, ac := range v.Acs {
 							rows = append(rows, []string{
-								v.Name, fmt.Sprintf("%d", v.VrfId), tableID, ifindex,
+								v.Name, fmt.Sprintf("%d", v.VrfId), tableID, ifindex, bdID, bridge,
 								ac.InterfaceName, fmt.Sprintf("%d", ac.Vlan),
 							})
 						}

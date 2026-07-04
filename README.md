@@ -93,9 +93,10 @@ for what survives a restart with and without `pin_maps`.
 # Set default server address (optional, defaults to http://localhost:8080)
 export VINBERO_SERVER=http://localhost:8080
 
-# Network resources
+# Network resources: vrf100 is an L3 VRF (kernel device facet for End.DT4);
+# evi-100 is a separate L2-only VRF whose bridge facet backs End.DT2 (bd 100).
 vinbero vrf create --name vrf100 --table-id 100 --members eth0 --enable-l3mdev-rule
-vinbero br create --name br100 --bd-id 100 --members eth1
+vinbero vrf bridge-attach --vrf evi-100 --name br100 --bd-id 100 --members eth1
 
 # SRv6 SID functions
 vinbero sid create --trigger-prefix fc00::1/128 --action END_DT4 --vrf-name vrf100
