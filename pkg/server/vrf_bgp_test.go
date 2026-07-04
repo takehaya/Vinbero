@@ -114,7 +114,7 @@ func (f *fakeVrfExporter) RemoveVRF(name string) {
 // A successful bind drives the exporter's AddVRF, and an unbind its RemoveVRF.
 func TestVrfBgpBind_DrivesExporter(t *testing.T) {
 	exp := &fakeVrfExporter{}
-	s := NewVrfBgpServer(vrfbgp.NewManager(), exp, nil, nil, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), exp, nil, nil, nil, nil)
 	resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			{VrfName: "vrf1", Rd: "65100:200", ExportRts: []string{"65000:200"}, DefaultLocator: "LOC1", Redistribute: []string{"static"}},
@@ -141,7 +141,7 @@ func TestVrfBgpBind_DrivesExporter(t *testing.T) {
 // registry and the exporter stay consistent.
 func TestVrfBgpBind_AddVRFFailureRollsBack(t *testing.T) {
 	mgr := vrfbgp.NewManager()
-	s := NewVrfBgpServer(mgr, &fakeVrfExporter{addErr: errors.New("boom")}, nil, nil, nil)
+	s := NewVrfBgpServer(mgr, &fakeVrfExporter{addErr: errors.New("boom")}, nil, nil, nil, nil)
 	resp, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			{VrfName: "vrf1", Rd: "65100:200", DefaultLocator: "LOC1", Redistribute: []string{"static"}},
@@ -163,7 +163,7 @@ func TestVrfBgpBind_AddVRFFailureRollsBack(t *testing.T) {
 func TestVrfBgpBind_RebindFailureRestoresPrior(t *testing.T) {
 	mgr := vrfbgp.NewManager()
 	exp := &fakeVrfExporter{failOnRD: "65100:999"}
-	s := NewVrfBgpServer(mgr, exp, nil, nil, nil)
+	s := NewVrfBgpServer(mgr, exp, nil, nil, nil, nil)
 
 	// Initial bind succeeds.
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
@@ -206,7 +206,7 @@ func TestVrfBgpBind_ConcurrentSameVRFStaysConsistent(t *testing.T) {
 	for i := range 300 {
 		mgr := vrfbgp.NewManager()
 		exp := &fakeVrfExporter{failOnRD: "fail"}
-		s := NewVrfBgpServer(mgr, exp, nil, nil, nil)
+		s := NewVrfBgpServer(mgr, exp, nil, nil, nil, nil)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -233,7 +233,7 @@ func TestVrfBgpBind_ConcurrentSameVRFStaysConsistent(t *testing.T) {
 // The new rd / redistribute / max_prefixes fields survive a bind -> list round
 // trip through protoToBinding and back, and import/export RTs are not swapped.
 func TestVrfBgpList_RoundTripsNewFields(t *testing.T) {
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			{
@@ -293,7 +293,7 @@ func (f *fakeMupSrc) ReconcileMUPUplinkInstances()       { f.uplinkRecycles++ }
 // unrelated mutation of the same binding.
 func TestVrfBgpBind_DrivesMupSrcReconcile(t *testing.T) {
 	hook := &fakeMupSrc{}
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook, nil, nil)
 
 	bind := func(b *v1.VrfBgpBinding) {
 		t.Helper()
@@ -344,7 +344,7 @@ func TestVrfBgpBind_DrivesMupSrcReconcile(t *testing.T) {
 // the installed downlinks revert to the plain encap source.
 func TestVrfBgpUnbind_DrivesMupSrcReconcile(t *testing.T) {
 	hook := &fakeMupSrc{}
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			{VrfName: "mup1", Rd: "65001:1", MupGtp4SourcePrefix: "fd00:d::/64"},
@@ -369,7 +369,7 @@ func TestVrfBgpUnbind_DrivesMupSrcReconcile(t *testing.T) {
 // set without an rd — is a per-item bind error, and UpdateBinding surfaces
 // it as InvalidArgument.
 func TestVrfBgpBind_MupGtp4SourcePrefixValidation(t *testing.T) {
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil, nil)
 	bad := []*v1.VrfBgpBinding{
 		{VrfName: "v1", Rd: "65001:1", MupGtp4SourcePrefix: "not-a-prefix"},
 		{VrfName: "v2", Rd: "65001:2", MupGtp4SourcePrefix: "10.0.0.0/24"},
@@ -399,7 +399,7 @@ func TestVrfBgpBind_EnablesEvpnOnlyWhenBridgeUp(t *testing.T) {
 		"evi-up": {Name: "br100", BdID: 100, Ifindex: 5},
 	})
 	coord := newEvpnCoordForTest(hook, mgr)
-	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil, nil)
 
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
@@ -437,7 +437,7 @@ func TestVrfBgpUnbind_DisablesEvpn(t *testing.T) {
 		"evi": {Name: "br100", BdID: 100, Ifindex: 5},
 	})
 	coord := newEvpnCoordForTest(hook, mgr)
-	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil, nil)
 
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{VrfName: "evi", Rd: "65100:100", Families: map[string]*v1.VrfBgpFamily{
@@ -472,7 +472,7 @@ func TestVrfBgpBind_NoExportRTsKeepsEvpnGated(t *testing.T) {
 		"evi-ok":       {Name: "br102", BdID: 102, Ifindex: 7},
 	})
 	coord := newEvpnCoordForTest(hook, mgr)
-	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil, nil)
 
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
@@ -504,7 +504,7 @@ func TestVrfBgpBind_NoExportRTsKeepsEvpnGated(t *testing.T) {
 // initial state".
 func bindForRPC(t *testing.T, vrfName string, families map[string]*v1.VrfBgpFamily) *VrfBgpServer {
 	t.Helper()
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{VrfName: vrfName, Rd: "65100:1", Families: families}},
 	})); err != nil {
@@ -587,7 +587,7 @@ func TestAddRouteTarget_UndeclaredFamilyIsNotFound(t *testing.T) {
 // AddRouteTarget on an unknown vrf_name returns NotFound per the error code
 // table (the design's "vrf_name 無し" column).
 func TestAddRouteTarget_UnknownVRFIsNotFound(t *testing.T) {
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil, nil)
 	_, err := s.AddRouteTarget(context.Background(), connect.NewRequest(&v1.AddRouteTargetRequest{
 		VrfName:     "missing",
 		Family:      "vpnv4",
@@ -832,7 +832,7 @@ func TestBatchModifyRouteTargets_RollbackOnMidFailure(t *testing.T) {
 // BatchModifyRouteTargets on an unknown vrf_name is NotFound per the error
 // code table.
 func TestBatchModifyRouteTargets_UnknownVRFIsNotFound(t *testing.T) {
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil, nil)
 	_, err := s.BatchModifyRouteTargets(context.Background(), connect.NewRequest(&v1.BatchModifyRouteTargetsRequest{
 		VrfName: "missing",
 		Ops:     []*v1.RouteTargetOp{{Kind: v1.RouteTargetOp_KIND_ADD, Family: "vpnv4", RouteTarget: &v1.VrfBgpRouteTarget{Rt: "65000:1"}}},
@@ -851,7 +851,7 @@ func TestBatchModifyRouteTargets_UnknownVRFIsNotFound(t *testing.T) {
 // dereferences and panics. Pin that contract here.
 func TestVrfBgp_RPCNilEntriesDoNotPanic(t *testing.T) {
 	// (1) families with a nil VrfBgpFamily value.
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName:  "vrf-nil-fam",
@@ -895,7 +895,7 @@ func TestVrfBgp_RPCNilEntriesDoNotPanic(t *testing.T) {
 // VrfBgpBind is the only verb that may register a new binding; an Update verb
 // against a typo must surface as NotFound so the operator notices.
 func TestUpdateBinding_UnknownVRFIsNotFound(t *testing.T) {
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, nil, nil, nil)
 	_, err := s.UpdateBinding(context.Background(), connect.NewRequest(&v1.UpdateBindingRequest{
 		Binding: &v1.VrfBgpBinding{VrfName: "missing", Rd: "65100:1"},
 	}))
@@ -1002,7 +1002,7 @@ func TestRemoveFamily_EVPNDisablesBridgeDomain(t *testing.T) {
 		"evi": {Name: "br100", BdID: 100, Ifindex: 5},
 	})
 	coord := newEvpnCoordForTest(hook, mgr)
-	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi", Rd: "65100:100",
@@ -1036,7 +1036,7 @@ func TestAddRouteTarget_OnVPNv4FamilyDoesNotReFireEVPN(t *testing.T) {
 		"evi-mixed": {Name: "br100", BdID: 100, Ifindex: 5},
 	})
 	coord := newEvpnCoordForTest(hook, mgr)
-	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi-mixed", Rd: "65100:100",
@@ -1068,7 +1068,7 @@ func TestAddRouteTarget_OnEVPNFamilyReFiresEVPN(t *testing.T) {
 		"evi": {Name: "br100", BdID: 100, Ifindex: 5},
 	})
 	coord := newEvpnCoordForTest(hook, mgr)
-	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi", Rd: "65100:100",
@@ -1101,7 +1101,7 @@ func TestVrfBgpBind_FacetWithoutEvpnFamilySkipsEnable(t *testing.T) {
 		"evi-no-evpn-rt": {Name: "br100", BdID: 100, Ifindex: 5},
 	})
 	coord := newEvpnCoordForTest(hook, mgr)
-	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi-no-evpn-rt", Rd: "65100:100",
@@ -1128,7 +1128,7 @@ func TestUpdateBinding_MaxPrefixesAloneSkipsEVPNReFire(t *testing.T) {
 		"evi": {Name: "br100", BdID: 100, Ifindex: 5},
 	})
 	coord := newEvpnCoordForTest(hook, mgr)
-	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi", Rd: "65100:100",
@@ -1194,7 +1194,7 @@ func TestSameRouteTargets_OrderInsensitive(t *testing.T) {
 func TestVrfBgpBind_DoubleAddVRFFailureKeepsManagerPrev(t *testing.T) {
 	mgr := vrfbgp.NewManager()
 	exp := &fakeVrfExporter{}
-	s := NewVrfBgpServer(mgr, exp, nil, nil, nil)
+	s := NewVrfBgpServer(mgr, exp, nil, nil, nil, nil)
 	// Initial bind: prev lands in both manager and exporter.
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{VrfName: "vrf1", Rd: "65100:200", DefaultLocator: "LOC1"}},
@@ -1227,7 +1227,7 @@ func TestVrfBgpBind_DoubleAddVRFFailureKeepsManagerPrev(t *testing.T) {
 // it never drives this hook (VrfService reconciles ingress separately).
 func TestVrfBgpBind_DrivesMupUplinkReconcile(t *testing.T) {
 	hook := &fakeMupSrc{}
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook, nil, nil)
 
 	mupFamily := func(rt string) map[string]*v1.VrfBgpFamily {
 		return map[string]*v1.VrfBgpFamily{
@@ -1291,7 +1291,7 @@ func TestVrfBgpBind_DrivesMupUplinkReconcile(t *testing.T) {
 // is silent.
 func TestVrfBgpUnbind_DrivesMupUplinkReconcile(t *testing.T) {
 	hook := &fakeMupSrc{}
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook, nil)
+	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, nil, hook, nil, nil)
 	bindReq := &v1.VrfBgpBindRequest{Bindings: []*v1.VrfBgpBinding{
 		{VrfName: "mup1", Rd: "65001:1", Families: map[string]*v1.VrfBgpFamily{
 			"mup_ipv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "100:1", Direction: "import"}}},
@@ -1329,3 +1329,82 @@ func TestVrfBgpUnbind_DrivesMupUplinkReconcile(t *testing.T) {
 	}
 }
 
+
+// commitBinding fires the EVPN loc-rib replay only when the mutation widened
+// the binding's import surface AND the VRF carries a bridge facet: a new
+// binding with import RTs replays, an import RT added replays, an unrelated
+// vpnv4 mutation or an export-only change does not, and without a facet the
+// replayed routes would just drop again so nothing fires.
+func TestVrfBgpBind_FiresEvpnReplayOnImportSurface(t *testing.T) {
+	newServer := func(facets map[string]vrf.Bridge) (*VrfBgpServer, *int) {
+		mgr := newEvpnTestMgr(t, facets)
+		replays := 0
+		s := NewVrfBgpServer(mgr, nil, nil, nil, func() { replays++ }, nil)
+		return s, &replays
+	}
+	bind := func(t *testing.T, s *VrfBgpServer, families map[string]*v1.VrfBgpFamily) {
+		t.Helper()
+		if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+			Bindings: []*v1.VrfBgpBinding{{VrfName: "evi", Rd: "65100:100", Families: families}},
+		})); err != nil {
+			t.Fatalf("VrfBgpBind: %v", err)
+		}
+	}
+	// vpnv4 is declared alongside so the later "unrelated vpnv4 RT add" step
+	// mutates an existing family rather than erroring on an undeclared one.
+	evpnImport := map[string]*v1.VrfBgpFamily{
+		"evpn":  {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "65000:100", Direction: "import"}}},
+		"vpnv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "65000:200", Direction: "both"}}},
+	}
+
+	// New binding with an EVPN import RT on a facet-carrying VRF: fires once.
+	s, replays := newServer(map[string]vrf.Bridge{"evi": {Name: "br100", BdID: 100, Ifindex: 5}})
+	bind(t, s, evpnImport)
+	if *replays != 1 {
+		t.Errorf("bind with import RT + facet: replays = %d, want 1", *replays)
+	}
+
+	// Unchanged re-bind: the import surface did not widen.
+	bind(t, s, evpnImport)
+	if *replays != 1 {
+		t.Errorf("unchanged re-bind: replays = %d, want still 1", *replays)
+	}
+
+	// An import RT added via AddRouteTarget on the evpn family: fires again.
+	if _, err := s.AddRouteTarget(context.Background(), connect.NewRequest(&v1.AddRouteTargetRequest{
+		VrfName: "evi", Family: "evpn",
+		RouteTarget: &v1.VrfBgpRouteTarget{Rt: "65000:101", Direction: "import"},
+	})); err != nil {
+		t.Fatalf("AddRouteTarget: %v", err)
+	}
+	if *replays != 2 {
+		t.Errorf("evpn import RT add: replays = %d, want 2", *replays)
+	}
+
+	// An unrelated vpnv4 RT add must not rescan the rib.
+	if _, err := s.AddRouteTarget(context.Background(), connect.NewRequest(&v1.AddRouteTargetRequest{
+		VrfName: "evi", Family: "vpnv4",
+		RouteTarget: &v1.VrfBgpRouteTarget{Rt: "65000:999", Direction: "both"},
+	})); err != nil {
+		t.Fatalf("AddRouteTarget vpnv4: %v", err)
+	}
+	if *replays != 2 {
+		t.Errorf("vpnv4 RT add: replays = %d, want still 2", *replays)
+	}
+
+	// Export-only EVPN binding: no import surface, no replay.
+	s, replays = newServer(map[string]vrf.Bridge{"evi": {Name: "br100", BdID: 100, Ifindex: 5}})
+	bind(t, s, map[string]*v1.VrfBgpFamily{
+		"evpn": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "65000:100", Direction: "export"}}},
+	})
+	if *replays != 0 {
+		t.Errorf("export-only bind: replays = %d, want 0", *replays)
+	}
+
+	// Facet-less VRF: the replayed routes would drop again; no replay.
+	s, replays = newServer(nil)
+	bind(t, s, evpnImport)
+	if *replays != 0 {
+		t.Errorf("bind without a facet: replays = %d, want 0", *replays)
+	}
+}

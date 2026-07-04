@@ -44,6 +44,13 @@ type VrfBgpServer struct {
 	exporter VrfExporter          // L3VPN auto-advertise hook; nil when off
 	evpn     *EvpnCoordinator     // EVPN BD lifecycle (binding axis); nil when off
 	mupSrc   MupBindingReconciler // MUP binding-state reconcile hook; nil when BGP off
+	// evpnReplay re-applies the EVPN loc-rib through the applier
+	// (apply.Applier.ReplayEVPN over bgp.RouteLister); nil when BGP is off.
+	// commitBinding fires it when a binding's EVPN import surface widens, so
+	// routes dropped fail-closed before the binding could match are rescued.
+	// Failures are logged inside the hook (best-effort: the next peer event
+	// re-delivers anyway).
+	evpnReplay func()
 	// mu serializes a bind/unbind's manager + exporter mutations per call so two
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
@@ -59,11 +66,11 @@ type VrfBgpServer struct {
 
 // NewVrfBgpServer wires the handler. mu is the mutation mutex, shared with
 // VrfServer; nil allocates a private one (tests without a VrfServer).
-func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupBindingReconciler, mu *sync.Mutex) *VrfBgpServer {
+func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupBindingReconciler, evpnReplay func(), mu *sync.Mutex) *VrfBgpServer {
 	if mu == nil {
 		mu = &sync.Mutex{}
 	}
-	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc, mu: mu}
+	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc, evpnReplay: evpnReplay, mu: mu}
 }
 
 // protoToBinding converts a wire VrfBgpBinding into the runtime Binding.
@@ -220,6 +227,21 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			s.evpn.Enable(updated)
 		}
 	}
+	// Replay the EVPN loc-rib when this mutation widened the binding's
+	// import surface (a new binding with import RTs, or import RTs added):
+	// routes that arrived while nothing matched them were dropped fail-closed
+	// and the watch stream never re-delivers them. Gated on the bridge facet
+	// -- without it the replayed routes would just drop again -- and on the
+	// import direction, which is independent of the coordinator's export-RT
+	// gate above (a receive-only PE imports without advertising).
+	if s.evpnReplay != nil {
+		imp := importRTsForFamily(updated, bgp.FamilyEVPN)
+		if len(imp) > 0 && (!existed || !slices.Equal(importRTsForFamily(prev, bgp.FamilyEVPN), imp)) {
+			if v, ok := s.mgr.VRF().Get(updated.VRFName); ok && v.Bridge != nil {
+				s.evpnReplay()
+			}
+		}
+	}
 	if s.mupSrc != nil && mupGTP4SrcFieldsChanged(existed, prev, updated) {
 		// The manager already holds the updated binding, so the reconcile
 		// resolves the new prefix; this hook fires only on the success path
@@ -239,9 +261,9 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 	return nil
 }
 
-// mupImportRTs returns the import-direction route targets a binding declares
-// under fam, sorted so two declarations compare structurally.
-func mupImportRTs(b vrfbgp.Binding, fam bgp.Family) []string {
+// importRTsForFamily returns the import-direction route targets a binding
+// declares under fam, sorted so two declarations compare structurally.
+func importRTsForFamily(b vrfbgp.Binding, fam bgp.Family) []string {
 	fp, has := b.Families[fam]
 	if !has {
 		return nil
@@ -266,7 +288,7 @@ func mupImportRTs(b vrfbgp.Binding, fam bgp.Family) []string {
 // considered here — VrfService drives that reconcile separately.)
 func mupUplinkFieldsChanged(prev, updated vrfbgp.Binding) bool {
 	for _, fam := range []bgp.Family{bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6} {
-		if !slices.Equal(mupImportRTs(prev, fam), mupImportRTs(updated, fam)) {
+		if !slices.Equal(importRTsForFamily(prev, fam), importRTsForFamily(updated, fam)) {
 			return true
 		}
 	}
@@ -416,7 +438,7 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 				s.mupSrc.ReconcileMUPGTP4SrcForRD(prev.RD)
 			}
 			if s.mupSrc != nil && existed &&
-				(len(mupImportRTs(prev, bgp.FamilyMUPIPv4)) > 0 || len(mupImportRTs(prev, bgp.FamilyMUPIPv6)) > 0) {
+				(len(importRTsForFamily(prev, bgp.FamilyMUPIPv4)) > 0 || len(importRTsForFamily(prev, bgp.FamilyMUPIPv6)) > 0) {
 				// The removed binding imported MUP RTs, so a T2ST it matched may
 				// now match a different binding (different VRF) or none (global
 				// VRF). Re-key the affected sessions. The VRF objects and the

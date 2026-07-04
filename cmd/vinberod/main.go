@@ -257,7 +257,26 @@ func run(cliCtx *cli.Context) error {
 		)
 		evpnES = evpnExporter
 	}
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, lg)
+	// evpnReplay rescues EVPN routes that arrived before their import surface
+	// (binding + bridge facet) existed: VrfBridgeAttach / commitBinding fire
+	// it after the surface widens, and the applier re-applies the loc-rib
+	// snapshot idempotently. Independent of evpn_auto_advertise -- a
+	// receive-only PE imports without advertising. Best-effort: before the
+	// session starts ListRoutes returns ErrSessionNotStarted (boot loads
+	// bindings and facets before the session, so there is nothing to rescue),
+	// and any later failure self-heals on the next peer event.
+	var evpnReplay func()
+	if bgpSession != nil {
+		evpnReplay = func() {
+			err := applier.ReplayEVPN(func(h bgp.RouteHandler) error {
+				return bgpSession.ListRoutes(bgp.FamilyEVPN, h)
+			})
+			if err != nil {
+				lg.Warn("EVPN loc-rib replay", zap.Error(err))
+			}
+		}
+	}
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, lg)
 
 	// Seed the VRF objects with the kernel devices and bridges the resource
 	// manager reconciled from its state file (InitResourceManager ran before
