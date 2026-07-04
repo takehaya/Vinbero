@@ -107,8 +107,12 @@ func (v *Vinbero) InitResourceManager() error {
 		return fmt.Errorf("init resource manager: %w", err)
 	}
 
+	// Fail-closed: a state entry that cannot be materialized aborts the boot
+	// (the error carries a repair hint). Continuing with a phantom entry
+	// would hand its stale ifindex to the FDB watcher, the EVPN machinery
+	// and the SID-reference delete guards, which then silently mis-key.
 	if err := resMgr.Reconcile(); err != nil {
-		v.logger.Warn("resource reconciliation had issues", zap.Error(err))
+		return fmt.Errorf("reconcile managed resources: %w", err)
 	}
 
 	v.resMgr = resMgr
