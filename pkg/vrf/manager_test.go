@@ -385,3 +385,144 @@ func TestManager_EnabledRules(t *testing.T) {
 		t.Errorf("policy enabled=%t deny=%t action=%d, want true/true/pass", fp.enabled, fp.defaultDeny, fp.denyAction)
 	}
 }
+
+// fakeBridgeOps records bridge create/delete calls; create returns a fixed
+// ifindex per name and captures the ownerVRF handed to the mechanics layer.
+type fakeBridgeOps struct {
+	ifindexes map[string]uint32
+	createErr error
+	created   []string
+	owners    map[string]string
+	deleted   []string
+}
+
+func (f *fakeBridgeOps) CreateBridge(name string, bdID uint16, members []string, ownerVRF string) (uint32, error) {
+	if f.createErr != nil {
+		return 0, f.createErr
+	}
+	f.created = append(f.created, name)
+	if f.owners == nil {
+		f.owners = map[string]string{}
+	}
+	f.owners[name] = ownerVRF
+	return f.ifindexes[name], nil
+}
+
+func (f *fakeBridgeOps) DeleteBridge(name string) error {
+	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+// AttachBridge drives ops with the owning VRF name, attaches the facet with
+// the returned ifindex, and rejects the invalid shapes before any netlink.
+func TestManager_AttachBridge(t *testing.T) {
+	m := NewManager()
+	ops := &fakeBridgeOps{ifindexes: map[string]uint32{"br100": 7}}
+	v, err := m.AttachBridge("evi-100", Bridge{Name: "br100", BdID: 100, Members: []string{"eth2"}}, ops)
+	if err != nil {
+		t.Fatalf("AttachBridge: %v", err)
+	}
+	if v.Bridge == nil || v.Bridge.Ifindex != 7 || v.Bridge.BdID != 100 {
+		t.Errorf("Bridge = %+v, want ifindex 7 / bd 100", v.Bridge)
+	}
+	if ops.owners["br100"] != "evi-100" {
+		t.Errorf("ops owner = %q, want evi-100", ops.owners["br100"])
+	}
+
+	for _, bad := range []struct {
+		vrf string
+		b   Bridge
+	}{
+		{GlobalVRFName, Bridge{Name: "br1", BdID: 1}}, // reserved global
+		{"", Bridge{Name: "br1", BdID: 1}},            // empty vrf
+		{"x", Bridge{BdID: 1}},                        // empty device name
+		{"x", Bridge{Name: "br1"}},                    // bd_id 0
+	} {
+		if _, err := m.AttachBridge(bad.vrf, bad.b, ops); err == nil {
+			t.Errorf("AttachBridge(%q, %+v): want error", bad.vrf, bad.b)
+		}
+	}
+	if len(ops.created) != 1 {
+		t.Errorf("rejected attaches still hit ops: %v", ops.created)
+	}
+}
+
+// The facet is unique on three axes: one bridge per VRF, one VRF per bridge
+// name, one VRF per bd_id.
+func TestManager_AttachBridge_Uniqueness(t *testing.T) {
+	m := NewManager()
+	ops := &fakeBridgeOps{ifindexes: map[string]uint32{"br100": 7, "br200": 8}}
+	if _, err := m.AttachBridge("evi-100", Bridge{Name: "br100", BdID: 100}, ops); err != nil {
+		t.Fatalf("AttachBridge: %v", err)
+	}
+	// Same VRF, different bridge name: refuse (detach first).
+	if _, err := m.AttachBridge("evi-100", Bridge{Name: "br200", BdID: 200}, ops); err == nil {
+		t.Error("second bridge on one VRF: want error")
+	}
+	// Different VRF, same bridge name: refuse.
+	if _, err := m.AttachBridge("evi-200", Bridge{Name: "br100", BdID: 200}, ops); err == nil {
+		t.Error("bridge name owned by another VRF: want error")
+	}
+	// Different VRF, same bd_id: refuse.
+	if _, err := m.AttachBridge("evi-200", Bridge{Name: "br200", BdID: 100}, ops); err == nil {
+		t.Error("bd_id owned by another VRF: want error")
+	}
+	// Same VRF, same bridge re-attach: converges (adopt-idempotent).
+	if _, err := m.AttachBridge("evi-100", Bridge{Name: "br100", BdID: 100}, ops); err != nil {
+		t.Errorf("idempotent re-attach: %v", err)
+	}
+}
+
+// An ops failure leaves no identity and no facet.
+func TestManager_AttachBridge_OpsErrorLeavesNoIdentity(t *testing.T) {
+	m := NewManager()
+	ops := &fakeBridgeOps{createErr: fmt.Errorf("netlink boom")}
+	if _, err := m.AttachBridge("evi-100", Bridge{Name: "br100", BdID: 100}, ops); err == nil {
+		t.Fatal("want error from ops")
+	}
+	if _, ok := m.IDForName("evi-100"); ok {
+		t.Error("failed AttachBridge allocated an identity")
+	}
+}
+
+// SetBridge / RemoveBridge and the BDID resolver; clones do not alias the
+// stored Members.
+func TestManager_BridgeFacetStateAndResolver(t *testing.T) {
+	m := NewManager()
+	members := []string{"eth2"}
+	v, err := m.SetBridge("evi-100", Bridge{Name: "br100", BdID: 100, Members: members, Ifindex: 9})
+	if err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
+	// Mutations of the input slice and the returned clone must not leak in.
+	members[0] = "hacked"
+	v.Bridge.Members = append(v.Bridge.Members, "hacked2")
+	got, _ := m.Get("evi-100")
+	if got.Bridge == nil || len(got.Bridge.Members) != 1 || got.Bridge.Members[0] != "eth2" {
+		t.Errorf("stored Bridge.Members corrupted: %+v", got.Bridge)
+	}
+
+	if ifindex, ok := m.BridgeIfindexByBDID(100); !ok || ifindex != 9 {
+		t.Errorf("BridgeIfindexByBDID(100) = (%d, %v), want (9, true)", ifindex, ok)
+	}
+	if _, ok := m.BridgeIfindexByBDID(999); ok {
+		t.Error("absent bd_id: want ok=false")
+	}
+	if _, ok := m.BridgeIfindexByBDID(0); ok {
+		t.Error("bd_id 0: want ok=false")
+	}
+
+	if removed := m.RemoveBridge("evi-100"); !removed {
+		t.Error("RemoveBridge: removed = false, want true")
+	}
+	if removed := m.RemoveBridge("evi-100"); removed {
+		t.Error("RemoveBridge idempotent: removed = true, want false")
+	}
+	if _, ok := m.BridgeIfindexByBDID(100); ok {
+		t.Error("resolver still hits after RemoveBridge")
+	}
+	// The identity survives a facet removal (deleting a VRF is explicit).
+	if _, ok := m.IDForName("evi-100"); !ok {
+		t.Error("identity gone after RemoveBridge")
+	}
+}
