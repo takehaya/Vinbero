@@ -50,7 +50,6 @@ func NewApp() *cli.App {
 			headendL2Command(),
 			bdPeerCommand(),
 			esCommand(),
-			bridgeCommand(),
 			vrfCommand(),
 			locatorCommand(),
 			vrfBgpCommand(),

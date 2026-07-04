@@ -68,17 +68,30 @@ type VRFsConfig struct {
 	DenyAction  string      `yaml:"deny_action,omitempty"` // "drop" (default) | "pass"
 }
 
-// VRFConfig is one VRF: its name, ingress access circuits, and the optional
-// kernel-device facet. table_id != 0 creates (or adopts) the Linux VRF device
-// at boot; members and enable_l3mdev_rule require it. Removing an entry does
-// NOT delete an already-created device (config is additive; deleting a VRF is
-// an explicit `vbctl vrf delete`).
+// VRFConfig is one VRF: its name, ingress access circuits, the optional
+// kernel-device facet and the optional L2 bridge facet. table_id != 0 creates
+// (or adopts) the Linux VRF device at boot; members and enable_l3mdev_rule
+// require it. bridge creates (or adopts) the Linux bridge as the VRF's bridge
+// domain. Removing an entry does NOT delete an already-created device or
+// bridge (config is additive; deletion is an explicit `vbctl vrf delete` /
+// `vbctl vrf bridge-detach`).
 type VRFConfig struct {
-	Name             string        `yaml:"name,omitempty"`
-	ACs              []VRFACConfig `yaml:"acs,omitempty"`
-	TableID          uint32        `yaml:"table_id,omitempty"`
-	Members          []string      `yaml:"members,omitempty"`
-	EnableL3mdevRule bool          `yaml:"enable_l3mdev_rule,omitempty"`
+	Name             string           `yaml:"name,omitempty"`
+	ACs              []VRFACConfig    `yaml:"acs,omitempty"`
+	TableID          uint32           `yaml:"table_id,omitempty"`
+	Members          []string         `yaml:"members,omitempty"`
+	EnableL3mdevRule bool             `yaml:"enable_l3mdev_rule,omitempty"`
+	Bridge           *VRFBridgeConfig `yaml:"bridge,omitempty"`
+}
+
+// VRFBridgeConfig is a VRF's L2 bridge-domain facet: the Linux bridge device
+// End.DT2/DT2M deliver into and the bd_id (1..65535) scoping its FDB. When a
+// bgp.vrf_bindings entry names the same VRF with a non-zero bd_id, the two
+// must agree (validated at load).
+type VRFBridgeConfig struct {
+	Name    string   `yaml:"name,omitempty"`
+	BdID    uint32   `yaml:"bd_id,omitempty"`
+	Members []string `yaml:"members,omitempty"`
 }
 
 // VRFACConfig is one {interface, VLAN} access circuit of a VRF.
