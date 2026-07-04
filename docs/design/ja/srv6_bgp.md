@@ -196,7 +196,7 @@ flowchart LR
 2. RT で取り込み先の VRF を決め、その VRF の bridge facet から bd を得る。経路の RT が binding の import RT に一致し、かつ binding の VRF に bridge facet が付いているときだけ取り込みます (facet の無い binding は fail-closed で match しません)。
 3. service SID へ向ける install にする。RT2 なら相手の End.DT2U SID を segment に持つ bd_peer を作り、`fdb_map[bd, MAC]` をその peer へ向けます。以後その MAC 宛ての L2 フレームは XDP headend が SID へ H.Encaps.L2 します。RT3 なら相手の End.DT2M SID への flood 用 bd_peer を作り、BUM をそこへ複製します。
 
-RT と VRF の対応は config か RPC で事前に登録し、bd はその VRF の bridge facet (vrf bridge-attach) が唯一の出所です。広報方向も同じ data model で、ローカルの顧客 MAC を End.DT2U SID 付きで RT2、flood 宛先を End.DT2M SID 付きで RT3 として出します。
+RT と VRF の対応は config か RPC で事前に登録し、bd はその VRF の bridge facet (vrf bridge-attach) が唯一の出所です。import 面がそろう前に届いて drop された route は、VrfBridgeAttach / vrf-bgp bind が面を広げた時点で gobgp loc-rib の snapshot から再適用されます (自 node が広告した route は local-origin として skip)。広報方向も同じ data model で、ローカルの顧客 MAC を End.DT2U SID 付きで RT2、flood 宛先を End.DT2M SID 付きで RT3 として出します。
 
 ```mermaid
 flowchart LR

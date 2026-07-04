@@ -48,8 +48,8 @@ for i in $(seq 1 30); do
 done
 
 # The bridge as evi-100's L2 facet, attached BEFORE the bind so a received
-# RT2/RT3 always finds its bridge domain (see pe-tokyo/start.sh for the
-# full rationale).
+# RT2/RT3 immediately finds its bridge domain (a route landing in a gap is
+# rescued by the loc-rib replay; see pe-tokyo/start.sh).
 /usr/local/bin/vbctl vrf bridge-attach \
     --vrf evi-100 \
     --name br100 \
