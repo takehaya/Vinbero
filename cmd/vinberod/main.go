@@ -21,6 +21,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/fib"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
+	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/takehaya/vinbero/pkg/server"
 	"github.com/takehaya/vinbero/pkg/vinbero"
 	"github.com/takehaya/vinbero/pkg/vrf"
@@ -253,11 +254,18 @@ func run(cliCtx *cli.Context) error {
 	}
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, lg)
 
-	// Load VRFs (ingress facet) from config and program them once at boot
-	// (later runtime mutations go through VrfService). A failed interface
-	// resolution here is fatal: a config-declared AC that does not exist is a
-	// misconfiguration the operator should see at startup.
-	if err := loadVRFs(cfg.VRFs, srv.VrfManager(), vin.GetMapOperations(), lg); err != nil {
+	// Seed the VRF objects with the kernel devices the resource manager
+	// reconciled from its state file (InitResourceManager ran before the
+	// manager existed), so a persisted device is a full first-class VRF from
+	// boot. Then load the config: kernel-device facets (adopt-idempotent over
+	// the seed) and the ingress facet, programmed once at boot (later runtime
+	// mutations go through VrfService). Failures are fatal: a config-declared
+	// AC or device that cannot materialize is a misconfiguration the operator
+	// should see at startup.
+	if err := seedVrfDevices(vin.GetResourceManager(), srv.VrfManager()); err != nil {
+		return fmt.Errorf("vrf: %w", err)
+	}
+	if err := loadVRFs(cfg.VRFs, srv.VrfManager(), vin.GetMapOperations(), vin.GetResourceManager(), lg); err != nil {
 		return fmt.Errorf("vrf: %w", err)
 	}
 
@@ -385,7 +393,7 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 // global policy, registers each VRF's access circuits, and reconciles the
 // data-plane maps. A config-declared interface that does not resolve is fatal
 // (surfaced at startup, not silently dropped).
-func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, lg *zap.Logger) error {
+func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, lg *zap.Logger) error {
 	var action uint8
 	switch cfg.DenyAction {
 	case "", "drop":
@@ -397,6 +405,20 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, lg *
 	}
 	mgr.SetPolicy(vrf.Policy{DefaultDeny: cfg.DefaultDeny, DenyAction: action})
 	for _, v := range cfg.Entries {
+		// Kernel-device facet first: table_id != 0 creates (or adopts) the
+		// Linux VRF device. members / enable_l3mdev_rule without a table are a
+		// typo (they configure the device), so reject rather than ignore.
+		if v.TableID != 0 {
+			if _, err := mgr.CreateDevice(v.Name, vrf.Device{
+				TableID:          v.TableID,
+				Members:          v.Members,
+				EnableL3mdevRule: v.EnableL3mdevRule,
+			}, dev); err != nil {
+				return err
+			}
+		} else if len(v.Members) > 0 || v.EnableL3mdevRule {
+			return fmt.Errorf("vrf %q: members / enable_l3mdev_rule require table_id (they configure the kernel device)", v.Name)
+		}
 		for _, ac := range v.ACs {
 			if _, err := mgr.AddAC(v.Name, vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN}); err != nil {
 				return err
@@ -407,6 +429,26 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, lg *
 		lg.Warn("VRF default-deny enabled: unmapped ACs are dropped at XDP ingress; map every forwarding interface (underlay/control included) to a VRF or host-bound BGP/NDP is black-holed")
 	}
 	return mgr.Reconcile(vrf.ResolveByName, prog)
+}
+
+// seedVrfDevices mirrors the kernel VRF devices the resource manager holds in
+// its persisted state into the VRF objects, attaching each as a device facet.
+// It runs after NewServer (the vrf.Manager lives inside the vrf-bgp manager)
+// and before loadVRFs, so a config entry for the same name adopts rather than
+// recreates. A persisted VRF named "global" is a fatal misconfiguration: the
+// reserved global VRF is the main table and can never carry a device.
+func seedVrfDevices(resMgr *netresource.ResourceManager, mgr *vrf.Manager) error {
+	for _, mv := range resMgr.ListVrfs() {
+		if _, err := mgr.SetDevice(mv.Name, vrf.Device{
+			TableID:          mv.TableID,
+			Members:          mv.Members,
+			EnableL3mdevRule: mv.EnableL3mdevRule,
+			Ifindex:          mv.Ifindex,
+		}); err != nil {
+			return fmt.Errorf("seed vrf %q from state: %w (remove the entry from the netresource state file, settings.state_path, and restart)", mv.Name, err)
+		}
+	}
+	return nil
 }
 
 // configToBinding converts a config VRF binding into the runtime vrfbgp

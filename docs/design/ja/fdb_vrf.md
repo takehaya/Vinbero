@@ -10,10 +10,10 @@ XDPのhot-pathでパケット転送を行い、カーネルbridgeをslow-path/�
 ### 仕組み
 
 Linux VRFの `bpf_fib_lookup(params.ifindex=VRF)` を活用します。
-VRFデバイスの作成は `NetworkResourceService/VrfCreate` APIで行います。Vinberoが `netlink` でVRFを作成し、SID登録時に `vrf_name` から ifindex を解決します。
+VRFデバイスの作成は `VrfService/VrfCreate` APIで行います。device は一級 VRF オブジェクトの kernel facet として作られ (vrf_id も同時に割り当てられる)、SID登録時に `vrf_name` から ifindex を解決します。VRF オブジェクトの全体像は [vrf.md](vrf.md) を参照してください。
 
 ```
-VrfCreate API → netlink: VRF作成
+VrfCreate API → netlink: VRF作成 (+ vrf_id 割り当て)
 SidFunctionCreate API → vrf_name → ifindex解決 → BPF map書き込み
 
 パケット処理:
@@ -106,8 +106,8 @@ XDPがbridgeより先にフレームを処理するため、H.Encaps.L2処理時
 
 ## リソース管理
 
-VRFとBridgeは `NetworkResourceService` APIで管理します。Vinberoがnetlinkでリソースを作成し、JSON状態ファイルで永続化します。再起動時にはReconcileで状態を復元します。
+VRF は `VrfService` API (一級 VRF オブジェクトの kernel facet、[vrf.md](vrf.md) 参照)、Bridge は `NetworkResourceService` API で管理します。どちらも Vinbero が netlink でリソースを作成し、JSON状態ファイルで永続化します。再起動時にはReconcileで状態を復元します。
 
-BridgeCreate APIを呼ぶと、FDBWatcherへの登録も同時に行われます。Bridge削除時はSIDが参照していないかを確認し、参照がある場合はエラーを返します。
+BridgeCreate APIを呼ぶと、FDBWatcherへの登録も同時に行われます。削除時はどちらもSIDが参照していないかを確認し、参照がある場合はエラーを返します (VRF はさらに ingress AC と vrf-bgp binding の残存でも拒否します)。
 
 API呼び出しの依存関係と利用シーケンスは [api_sequence.md](api_sequence.md) を参照してください。

@@ -205,8 +205,11 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VlanTableService", zap.String("path", path))
 
-	// Vrf service (VRF ingress facet: AC membership + default-deny policy)
-	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps)
+	// Vrf service (the single VRF surface: kernel device + AC membership +
+	// default-deny policy). The device mechanics/persistence come from the
+	// resource manager, the SID reference check and the ingress maps from
+	// mapOps, and the binding-reference check from the vrf-bgp manager.
+	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr)
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))

@@ -176,99 +176,6 @@ func (s *NetworkResourceServer) BridgeList(
 	return connect.NewResponse(resp), nil
 }
 
-func (s *NetworkResourceServer) VrfCreate(
-	ctx context.Context,
-	req *connect.Request[v1.VrfCreateRequest],
-) (*connect.Response[v1.VrfCreateResponse], error) {
-	resp := &v1.VrfCreateResponse{
-		Created: make([]*v1.Vrf, 0),
-		Errors:  make([]*v1.OperationError, 0),
-	}
-
-	for _, vrf := range req.Msg.Vrfs {
-		_, err := s.resMgr.CreateVrf(vrf.Name, vrf.TableId, vrf.Members, vrf.EnableL3MdevRule)
-		if err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: vrf.Name,
-				Reason:        err.Error(),
-			})
-			continue
-		}
-		resp.Created = append(resp.Created, vrf)
-	}
-
-	return connect.NewResponse(resp), nil
-}
-
-func (s *NetworkResourceServer) VrfDelete(
-	ctx context.Context,
-	req *connect.Request[v1.VrfDeleteRequest],
-) (*connect.Response[v1.VrfDeleteResponse], error) {
-	resp := &v1.VrfDeleteResponse{
-		DeletedNames: make([]string, 0),
-		Errors:       make([]*v1.OperationError, 0),
-	}
-
-	for _, name := range req.Msg.Names {
-		// Resolve ifindex from ResourceManager cache, falling back to netlink
-		var ifindex uint32
-		if vrf, ok := s.resMgr.GetVrfByName(name); ok {
-			ifindex = vrf.Ifindex
-		} else if resolved, err := resolveIfindex(name); err == nil {
-			ifindex = resolved
-		}
-
-		if ifindex != 0 {
-			ref, err := s.findVrfReference(ifindex)
-			if err != nil {
-				resp.Errors = append(resp.Errors, &v1.OperationError{
-					TriggerPrefix: name,
-					Reason:        fmt.Sprintf("failed to check references: %v", err),
-				})
-				continue
-			}
-			if ref != "" {
-				resp.Errors = append(resp.Errors, &v1.OperationError{
-					TriggerPrefix: name,
-					Reason:        fmt.Sprintf("VRF is referenced by SID %s", ref),
-				})
-				continue
-			}
-		}
-
-		if err := s.resMgr.DeleteVrf(name); err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: name,
-				Reason:        err.Error(),
-			})
-			continue
-		}
-
-		resp.DeletedNames = append(resp.DeletedNames, name)
-	}
-
-	return connect.NewResponse(resp), nil
-}
-
-func (s *NetworkResourceServer) VrfList(
-	ctx context.Context,
-	req *connect.Request[v1.VrfListRequest],
-) (*connect.Response[v1.VrfListResponse], error) {
-	vrfs := s.resMgr.ListVrfs()
-	resp := &v1.VrfListResponse{
-		Vrfs: make([]*v1.Vrf, 0, len(vrfs)),
-	}
-	for _, v := range vrfs {
-		resp.Vrfs = append(resp.Vrfs, &v1.Vrf{
-			Name:             v.Name,
-			TableId:          v.TableID,
-			Members:          v.Members,
-			EnableL3MdevRule: v.EnableL3mdevRule,
-		})
-	}
-	return connect.NewResponse(resp), nil
-}
-
 // bdIDForBridge returns the bd_id of an End.DT2/DT2M SID installed for the given
 // bridge ifindex. BridgeDelete uses it to recover the bd_id (and so disable EVPN
 // auto-advertise) when the ResourceManager cache has no record of the bridge.
@@ -330,36 +237,6 @@ func (s *NetworkResourceServer) findBridgeReference(ifindex uint32, exclude []st
 		}
 		_, bridgeIfindex := bpf.SidAuxL2Data(aux)
 		if bridgeIfindex == ifindex {
-			return prefix, nil
-		}
-	}
-	return "", nil
-}
-
-// findVrfReference checks if any End.T/DT4/DT6/DT46 SID entry references the given vrf_ifindex.
-// VRF ifindex is stored in the aux map (l3vrf variant).
-func (s *NetworkResourceServer) findVrfReference(ifindex uint32) (string, error) {
-	entries, err := s.mapOps.ListSidFunctions()
-	if err != nil {
-		return "", fmt.Errorf("list SID functions: %w", err)
-	}
-	for prefix, entry := range entries {
-		switch v1.Srv6LocalAction(entry.Action) {
-		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46:
-		default:
-			continue
-		}
-		if entry.AuxIndex == 0 {
-			continue
-		}
-		aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))
-		if err != nil {
-			continue
-		}
-		if bpf.SidAuxL3VrfData(aux) == ifindex {
 			return prefix, nil
 		}
 	}

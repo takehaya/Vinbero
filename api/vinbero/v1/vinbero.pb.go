@@ -3888,13 +3888,14 @@ func (x *EsClearDfResponse) GetUpdated() *EthernetSegment {
 	return nil
 }
 
-// Vrf is the VRF object. The kernel-device facet (table_id, members,
-// enable_l3mdev_rule) is managed by NetworkResourceService and used by
-// End.DT4/DT6/DT46 for VRF-aware FIB lookup. The ingress facet (vrf_id, acs)
-// is managed by VrfService: vrf_id is the data-plane id (0 = global/default
-// VRF, the underlay) and acs is the ingress {interface, VLAN} membership. A
-// VRF may have either facet alone — a MUP gateway has an ingress-only VRF with
-// no kernel device. (Merging the two surfaces into one is a follow-up.)
+// Vrf is the VRF object: one identity carrying both facets. The kernel-device
+// facet (table_id, members, enable_l3mdev_rule, ifindex) is the Linux VRF
+// device End.DT4/DT6/DT46 use for VRF-aware FIB lookup. The ingress facet
+// (vrf_id, acs) classifies packets at the XDP entry: vrf_id is the data-plane
+// id (0 = global/default VRF, the underlay) and acs is the ingress
+// {interface, VLAN} membership. A VRF may have either facet alone — a MUP
+// gateway has an ingress-only VRF with no kernel device. Both facets are
+// managed by VrfService.
 type Vrf struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -3906,6 +3907,7 @@ type Vrf struct {
 	EnableL3MdevRule bool     `protobuf:"varint,4,opt,name=enable_l3mdev_rule,json=enableL3mdevRule,proto3" json:"enable_l3mdev_rule,omitempty"` // Add "ip rule add l3mdev" if not already present
 	VrfId            uint32   `protobuf:"varint,5,opt,name=vrf_id,json=vrfId,proto3" json:"vrf_id,omitempty"`                                    // ingress/data-plane id, server-assigned (0 = global/default VRF)
 	Acs              []*VrfAc `protobuf:"bytes,6,rep,name=acs,proto3" json:"acs,omitempty"`                                                      // ingress access-circuit membership
+	Ifindex          uint32   `protobuf:"varint,7,opt,name=ifindex,proto3" json:"ifindex,omitempty"`                                             // kernel VRF device ifindex, server-assigned (0 = deviceless)
 }
 
 func (x *Vrf) Reset() {
@@ -3982,12 +3984,19 @@ func (x *Vrf) GetAcs() []*VrfAc {
 	return nil
 }
 
+func (x *Vrf) GetIfindex() uint32 {
+	if x != nil {
+		return x.Ifindex
+	}
+	return 0
+}
+
 type VrfCreateRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Vrfs []*Vrf `protobuf:"bytes,1,rep,name=vrfs,proto3" json:"vrfs,omitempty"`
+	Vrfs []*Vrf `protobuf:"bytes,1,rep,name=vrfs,proto3" json:"vrfs,omitempty"` // kernel-device facet only (name + table_id + members + l3mdev); acs / vrf_id / ifindex must be unset
 }
 
 func (x *VrfCreateRequest) Reset() {
@@ -4034,7 +4043,7 @@ type VrfCreateResponse struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Created []*Vrf            `protobuf:"bytes,1,rep,name=created,proto3" json:"created,omitempty"`
+	Created []*Vrf            `protobuf:"bytes,1,rep,name=created,proto3" json:"created,omitempty"` // server state after the create (carries vrf_id and ifindex)
 	Errors  []*OperationError `protobuf:"bytes,2,rep,name=errors,proto3" json:"errors,omitempty"`
 }
 
@@ -4089,7 +4098,7 @@ type VrfDeleteRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Names []string `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"` // VRF names to delete; fails if referenced by a SID
+	Names []string `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"` // VRF names to delete; fails while a SID, ingress AC or vrf-bgp binding references the VRF
 }
 
 func (x *VrfDeleteRequest) Reset() {
@@ -4186,91 +4195,6 @@ func (x *VrfDeleteResponse) GetErrors() []*OperationError {
 	return nil
 }
 
-type VrfListRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-}
-
-func (x *VrfListRequest) Reset() {
-	*x = VrfListRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[76]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *VrfListRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*VrfListRequest) ProtoMessage() {}
-
-func (x *VrfListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[76]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use VrfListRequest.ProtoReflect.Descriptor instead.
-func (*VrfListRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{76}
-}
-
-type VrfListResponse struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Vrfs []*Vrf `protobuf:"bytes,1,rep,name=vrfs,proto3" json:"vrfs,omitempty"`
-}
-
-func (x *VrfListResponse) Reset() {
-	*x = VrfListResponse{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[77]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *VrfListResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*VrfListResponse) ProtoMessage() {}
-
-func (x *VrfListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[77]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use VrfListResponse.ProtoReflect.Descriptor instead.
-func (*VrfListResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{77}
-}
-
-func (x *VrfListResponse) GetVrfs() []*Vrf {
-	if x != nil {
-		return x.Vrfs
-	}
-	return nil
-}
-
 // Bridge represents a Linux bridge device managed by Vinbero.
 // Used by End.DT2 for FDB miss flooding, and by FDBWatcher for MAC learning sync.
 type Bridge struct {
@@ -4286,7 +4210,7 @@ type Bridge struct {
 func (x *Bridge) Reset() {
 	*x = Bridge{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[78]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[76]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4299,7 +4223,7 @@ func (x *Bridge) String() string {
 func (*Bridge) ProtoMessage() {}
 
 func (x *Bridge) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[78]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[76]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4312,7 +4236,7 @@ func (x *Bridge) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Bridge.ProtoReflect.Descriptor instead.
 func (*Bridge) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{78}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *Bridge) GetName() string {
@@ -4347,7 +4271,7 @@ type BridgeCreateRequest struct {
 func (x *BridgeCreateRequest) Reset() {
 	*x = BridgeCreateRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[79]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[77]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4360,7 +4284,7 @@ func (x *BridgeCreateRequest) String() string {
 func (*BridgeCreateRequest) ProtoMessage() {}
 
 func (x *BridgeCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[79]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[77]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4373,7 +4297,7 @@ func (x *BridgeCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BridgeCreateRequest.ProtoReflect.Descriptor instead.
 func (*BridgeCreateRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{79}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *BridgeCreateRequest) GetBridges() []*Bridge {
@@ -4395,7 +4319,7 @@ type BridgeCreateResponse struct {
 func (x *BridgeCreateResponse) Reset() {
 	*x = BridgeCreateResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[80]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[78]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4408,7 +4332,7 @@ func (x *BridgeCreateResponse) String() string {
 func (*BridgeCreateResponse) ProtoMessage() {}
 
 func (x *BridgeCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[80]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[78]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4421,7 +4345,7 @@ func (x *BridgeCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BridgeCreateResponse.ProtoReflect.Descriptor instead.
 func (*BridgeCreateResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{80}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *BridgeCreateResponse) GetCreated() []*Bridge {
@@ -4449,7 +4373,7 @@ type BridgeDeleteRequest struct {
 func (x *BridgeDeleteRequest) Reset() {
 	*x = BridgeDeleteRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[81]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[79]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4462,7 +4386,7 @@ func (x *BridgeDeleteRequest) String() string {
 func (*BridgeDeleteRequest) ProtoMessage() {}
 
 func (x *BridgeDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[81]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[79]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4475,7 +4399,7 @@ func (x *BridgeDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BridgeDeleteRequest.ProtoReflect.Descriptor instead.
 func (*BridgeDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{81}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *BridgeDeleteRequest) GetNames() []string {
@@ -4497,7 +4421,7 @@ type BridgeDeleteResponse struct {
 func (x *BridgeDeleteResponse) Reset() {
 	*x = BridgeDeleteResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[82]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[80]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4510,7 +4434,7 @@ func (x *BridgeDeleteResponse) String() string {
 func (*BridgeDeleteResponse) ProtoMessage() {}
 
 func (x *BridgeDeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[82]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[80]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4523,7 +4447,7 @@ func (x *BridgeDeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BridgeDeleteResponse.ProtoReflect.Descriptor instead.
 func (*BridgeDeleteResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{82}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *BridgeDeleteResponse) GetDeletedNames() []string {
@@ -4549,7 +4473,7 @@ type BridgeListRequest struct {
 func (x *BridgeListRequest) Reset() {
 	*x = BridgeListRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[83]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[81]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4562,7 +4486,7 @@ func (x *BridgeListRequest) String() string {
 func (*BridgeListRequest) ProtoMessage() {}
 
 func (x *BridgeListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[83]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[81]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4575,7 +4499,7 @@ func (x *BridgeListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BridgeListRequest.ProtoReflect.Descriptor instead.
 func (*BridgeListRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{83}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{81}
 }
 
 type BridgeListResponse struct {
@@ -4589,7 +4513,7 @@ type BridgeListResponse struct {
 func (x *BridgeListResponse) Reset() {
 	*x = BridgeListResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[84]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[82]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4602,7 +4526,7 @@ func (x *BridgeListResponse) String() string {
 func (*BridgeListResponse) ProtoMessage() {}
 
 func (x *BridgeListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[84]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[82]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4615,7 +4539,7 @@ func (x *BridgeListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BridgeListResponse.ProtoReflect.Descriptor instead.
 func (*BridgeListResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{84}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *BridgeListResponse) GetBridges() []*Bridge {
@@ -4645,7 +4569,7 @@ type HeadendL2 struct {
 func (x *HeadendL2) Reset() {
 	*x = HeadendL2{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[85]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[83]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4658,7 +4582,7 @@ func (x *HeadendL2) String() string {
 func (*HeadendL2) ProtoMessage() {}
 
 func (x *HeadendL2) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[85]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[83]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4671,7 +4595,7 @@ func (x *HeadendL2) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2.ProtoReflect.Descriptor instead.
 func (*HeadendL2) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{85}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *HeadendL2) GetVlanId() uint32 {
@@ -4734,7 +4658,7 @@ type HeadendL2CreateRequest struct {
 func (x *HeadendL2CreateRequest) Reset() {
 	*x = HeadendL2CreateRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[86]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[84]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4747,7 +4671,7 @@ func (x *HeadendL2CreateRequest) String() string {
 func (*HeadendL2CreateRequest) ProtoMessage() {}
 
 func (x *HeadendL2CreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[86]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[84]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4760,7 +4684,7 @@ func (x *HeadendL2CreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2CreateRequest.ProtoReflect.Descriptor instead.
 func (*HeadendL2CreateRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{86}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *HeadendL2CreateRequest) GetHeadendL2S() []*HeadendL2 {
@@ -4782,7 +4706,7 @@ type HeadendL2CreateResponse struct {
 func (x *HeadendL2CreateResponse) Reset() {
 	*x = HeadendL2CreateResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[87]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[85]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4795,7 +4719,7 @@ func (x *HeadendL2CreateResponse) String() string {
 func (*HeadendL2CreateResponse) ProtoMessage() {}
 
 func (x *HeadendL2CreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[87]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[85]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4808,7 +4732,7 @@ func (x *HeadendL2CreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2CreateResponse.ProtoReflect.Descriptor instead.
 func (*HeadendL2CreateResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{87}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *HeadendL2CreateResponse) GetCreated() []*HeadendL2 {
@@ -4837,7 +4761,7 @@ type HeadendL2DeleteTarget struct {
 func (x *HeadendL2DeleteTarget) Reset() {
 	*x = HeadendL2DeleteTarget{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[88]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[86]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4850,7 +4774,7 @@ func (x *HeadendL2DeleteTarget) String() string {
 func (*HeadendL2DeleteTarget) ProtoMessage() {}
 
 func (x *HeadendL2DeleteTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[88]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[86]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4863,7 +4787,7 @@ func (x *HeadendL2DeleteTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2DeleteTarget.ProtoReflect.Descriptor instead.
 func (*HeadendL2DeleteTarget) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{88}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *HeadendL2DeleteTarget) GetInterfaceName() string {
@@ -4891,7 +4815,7 @@ type HeadendL2DeleteRequest struct {
 func (x *HeadendL2DeleteRequest) Reset() {
 	*x = HeadendL2DeleteRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[89]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[87]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4904,7 +4828,7 @@ func (x *HeadendL2DeleteRequest) String() string {
 func (*HeadendL2DeleteRequest) ProtoMessage() {}
 
 func (x *HeadendL2DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[89]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[87]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4917,7 +4841,7 @@ func (x *HeadendL2DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2DeleteRequest.ProtoReflect.Descriptor instead.
 func (*HeadendL2DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{89}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *HeadendL2DeleteRequest) GetTargets() []*HeadendL2DeleteTarget {
@@ -4939,7 +4863,7 @@ type HeadendL2DeleteResponse struct {
 func (x *HeadendL2DeleteResponse) Reset() {
 	*x = HeadendL2DeleteResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[90]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[88]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -4952,7 +4876,7 @@ func (x *HeadendL2DeleteResponse) String() string {
 func (*HeadendL2DeleteResponse) ProtoMessage() {}
 
 func (x *HeadendL2DeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[90]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[88]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4965,7 +4889,7 @@ func (x *HeadendL2DeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2DeleteResponse.ProtoReflect.Descriptor instead.
 func (*HeadendL2DeleteResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{90}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *HeadendL2DeleteResponse) GetDeleted() []*HeadendL2DeleteTarget {
@@ -4991,7 +4915,7 @@ type HeadendL2ListRequest struct {
 func (x *HeadendL2ListRequest) Reset() {
 	*x = HeadendL2ListRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[91]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[89]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5004,7 +4928,7 @@ func (x *HeadendL2ListRequest) String() string {
 func (*HeadendL2ListRequest) ProtoMessage() {}
 
 func (x *HeadendL2ListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[91]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[89]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5017,7 +4941,7 @@ func (x *HeadendL2ListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2ListRequest.ProtoReflect.Descriptor instead.
 func (*HeadendL2ListRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{91}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{89}
 }
 
 type HeadendL2ListResponse struct {
@@ -5031,7 +4955,7 @@ type HeadendL2ListResponse struct {
 func (x *HeadendL2ListResponse) Reset() {
 	*x = HeadendL2ListResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[92]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[90]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5044,7 +4968,7 @@ func (x *HeadendL2ListResponse) String() string {
 func (*HeadendL2ListResponse) ProtoMessage() {}
 
 func (x *HeadendL2ListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[92]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[90]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5057,7 +4981,7 @@ func (x *HeadendL2ListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2ListResponse.ProtoReflect.Descriptor instead.
 func (*HeadendL2ListResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{92}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *HeadendL2ListResponse) GetHeadendL2S() []*HeadendL2 {
@@ -5079,7 +5003,7 @@ type HeadendL2GetRequest struct {
 func (x *HeadendL2GetRequest) Reset() {
 	*x = HeadendL2GetRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[93]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[91]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5092,7 +5016,7 @@ func (x *HeadendL2GetRequest) String() string {
 func (*HeadendL2GetRequest) ProtoMessage() {}
 
 func (x *HeadendL2GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[93]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[91]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5105,7 +5029,7 @@ func (x *HeadendL2GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2GetRequest.ProtoReflect.Descriptor instead.
 func (*HeadendL2GetRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{93}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{91}
 }
 
 func (x *HeadendL2GetRequest) GetInterfaceName() string {
@@ -5133,7 +5057,7 @@ type HeadendL2GetResponse struct {
 func (x *HeadendL2GetResponse) Reset() {
 	*x = HeadendL2GetResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[94]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[92]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5146,7 +5070,7 @@ func (x *HeadendL2GetResponse) String() string {
 func (*HeadendL2GetResponse) ProtoMessage() {}
 
 func (x *HeadendL2GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[94]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[92]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5159,7 +5083,7 @@ func (x *HeadendL2GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2GetResponse.ProtoReflect.Descriptor instead.
 func (*HeadendL2GetResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{94}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *HeadendL2GetResponse) GetHeadendL2() *HeadendL2 {
@@ -5178,7 +5102,7 @@ type HeadendL2FlushRequest struct {
 func (x *HeadendL2FlushRequest) Reset() {
 	*x = HeadendL2FlushRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[95]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[93]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5191,7 +5115,7 @@ func (x *HeadendL2FlushRequest) String() string {
 func (*HeadendL2FlushRequest) ProtoMessage() {}
 
 func (x *HeadendL2FlushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[95]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[93]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5204,7 +5128,7 @@ func (x *HeadendL2FlushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2FlushRequest.ProtoReflect.Descriptor instead.
 func (*HeadendL2FlushRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{95}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{93}
 }
 
 type HeadendL2FlushResponse struct {
@@ -5218,7 +5142,7 @@ type HeadendL2FlushResponse struct {
 func (x *HeadendL2FlushResponse) Reset() {
 	*x = HeadendL2FlushResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[96]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[94]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5231,7 +5155,7 @@ func (x *HeadendL2FlushResponse) String() string {
 func (*HeadendL2FlushResponse) ProtoMessage() {}
 
 func (x *HeadendL2FlushResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[96]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[94]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5244,7 +5168,7 @@ func (x *HeadendL2FlushResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeadendL2FlushResponse.ProtoReflect.Descriptor instead.
 func (*HeadendL2FlushResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{96}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *HeadendL2FlushResponse) GetDeletedCount() uint32 {
@@ -5267,7 +5191,7 @@ type StatsCounter struct {
 func (x *StatsCounter) Reset() {
 	*x = StatsCounter{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[97]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[95]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5280,7 +5204,7 @@ func (x *StatsCounter) String() string {
 func (*StatsCounter) ProtoMessage() {}
 
 func (x *StatsCounter) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[97]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[95]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5293,7 +5217,7 @@ func (x *StatsCounter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsCounter.ProtoReflect.Descriptor instead.
 func (*StatsCounter) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{97}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *StatsCounter) GetName() string {
@@ -5326,7 +5250,7 @@ type StatsShowRequest struct {
 func (x *StatsShowRequest) Reset() {
 	*x = StatsShowRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[98]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[96]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5339,7 +5263,7 @@ func (x *StatsShowRequest) String() string {
 func (*StatsShowRequest) ProtoMessage() {}
 
 func (x *StatsShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[98]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[96]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5352,7 +5276,7 @@ func (x *StatsShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsShowRequest.ProtoReflect.Descriptor instead.
 func (*StatsShowRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{98}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{96}
 }
 
 type StatsShowResponse struct {
@@ -5366,7 +5290,7 @@ type StatsShowResponse struct {
 func (x *StatsShowResponse) Reset() {
 	*x = StatsShowResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[99]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[97]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5379,7 +5303,7 @@ func (x *StatsShowResponse) String() string {
 func (*StatsShowResponse) ProtoMessage() {}
 
 func (x *StatsShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[99]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[97]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5392,7 +5316,7 @@ func (x *StatsShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsShowResponse.ProtoReflect.Descriptor instead.
 func (*StatsShowResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{99}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *StatsShowResponse) GetCounters() []*StatsCounter {
@@ -5411,7 +5335,7 @@ type StatsResetRequest struct {
 func (x *StatsResetRequest) Reset() {
 	*x = StatsResetRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[100]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[98]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5424,7 +5348,7 @@ func (x *StatsResetRequest) String() string {
 func (*StatsResetRequest) ProtoMessage() {}
 
 func (x *StatsResetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[100]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[98]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5437,7 +5361,7 @@ func (x *StatsResetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsResetRequest.ProtoReflect.Descriptor instead.
 func (*StatsResetRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{100}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{98}
 }
 
 type StatsResetResponse struct {
@@ -5449,7 +5373,7 @@ type StatsResetResponse struct {
 func (x *StatsResetResponse) Reset() {
 	*x = StatsResetResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[101]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[99]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5462,7 +5386,7 @@ func (x *StatsResetResponse) String() string {
 func (*StatsResetResponse) ProtoMessage() {}
 
 func (x *StatsResetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[101]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[99]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5475,7 +5399,7 @@ func (x *StatsResetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsResetResponse.ProtoReflect.Descriptor instead.
 func (*StatsResetResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{101}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{99}
 }
 
 // Per-slot invocation counter entry (one per PROG_ARRAY slot).
@@ -5495,7 +5419,7 @@ type SlotStatsEntry struct {
 func (x *SlotStatsEntry) Reset() {
 	*x = SlotStatsEntry{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[102]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[100]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5508,7 +5432,7 @@ func (x *SlotStatsEntry) String() string {
 func (*SlotStatsEntry) ProtoMessage() {}
 
 func (x *SlotStatsEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[102]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[100]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5521,7 +5445,7 @@ func (x *SlotStatsEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SlotStatsEntry.ProtoReflect.Descriptor instead.
 func (*SlotStatsEntry) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{102}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *SlotStatsEntry) GetMapType() string {
@@ -5571,7 +5495,7 @@ type StatsSlotShowRequest struct {
 func (x *StatsSlotShowRequest) Reset() {
 	*x = StatsSlotShowRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[103]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[101]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5584,7 +5508,7 @@ func (x *StatsSlotShowRequest) String() string {
 func (*StatsSlotShowRequest) ProtoMessage() {}
 
 func (x *StatsSlotShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[103]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[101]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5597,7 +5521,7 @@ func (x *StatsSlotShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsSlotShowRequest.ProtoReflect.Descriptor instead.
 func (*StatsSlotShowRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{103}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{101}
 }
 
 func (x *StatsSlotShowRequest) GetMapTypes() []string {
@@ -5625,7 +5549,7 @@ type StatsSlotShowResponse struct {
 func (x *StatsSlotShowResponse) Reset() {
 	*x = StatsSlotShowResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[104]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[102]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5638,7 +5562,7 @@ func (x *StatsSlotShowResponse) String() string {
 func (*StatsSlotShowResponse) ProtoMessage() {}
 
 func (x *StatsSlotShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[104]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[102]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5651,7 +5575,7 @@ func (x *StatsSlotShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsSlotShowResponse.ProtoReflect.Descriptor instead.
 func (*StatsSlotShowResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{104}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{102}
 }
 
 func (x *StatsSlotShowResponse) GetEntries() []*SlotStatsEntry {
@@ -5672,7 +5596,7 @@ type StatsSlotResetRequest struct {
 func (x *StatsSlotResetRequest) Reset() {
 	*x = StatsSlotResetRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[105]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[103]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5685,7 +5609,7 @@ func (x *StatsSlotResetRequest) String() string {
 func (*StatsSlotResetRequest) ProtoMessage() {}
 
 func (x *StatsSlotResetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[105]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[103]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5698,7 +5622,7 @@ func (x *StatsSlotResetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsSlotResetRequest.ProtoReflect.Descriptor instead.
 func (*StatsSlotResetRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{105}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{103}
 }
 
 func (x *StatsSlotResetRequest) GetMapTypes() []string {
@@ -5717,7 +5641,7 @@ type StatsSlotResetResponse struct {
 func (x *StatsSlotResetResponse) Reset() {
 	*x = StatsSlotResetResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[106]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[104]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5730,7 +5654,7 @@ func (x *StatsSlotResetResponse) String() string {
 func (*StatsSlotResetResponse) ProtoMessage() {}
 
 func (x *StatsSlotResetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[106]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[104]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5743,7 +5667,7 @@ func (x *StatsSlotResetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsSlotResetResponse.ProtoReflect.Descriptor instead.
 func (*StatsSlotResetResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{106}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{104}
 }
 
 // VrfAc is an ingress access circuit ({interface, VLAN}) that belongs to a VRF.
@@ -5761,7 +5685,7 @@ type VrfAc struct {
 func (x *VrfAc) Reset() {
 	*x = VrfAc{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[107]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[105]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5774,7 +5698,7 @@ func (x *VrfAc) String() string {
 func (*VrfAc) ProtoMessage() {}
 
 func (x *VrfAc) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[107]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[105]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5787,7 +5711,7 @@ func (x *VrfAc) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfAc.ProtoReflect.Descriptor instead.
 func (*VrfAc) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{107}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{105}
 }
 
 func (x *VrfAc) GetInterfaceName() string {
@@ -5819,7 +5743,7 @@ type VrfPolicy struct {
 func (x *VrfPolicy) Reset() {
 	*x = VrfPolicy{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[108]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[106]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5832,7 +5756,7 @@ func (x *VrfPolicy) String() string {
 func (*VrfPolicy) ProtoMessage() {}
 
 func (x *VrfPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[108]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[106]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5845,7 +5769,7 @@ func (x *VrfPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfPolicy.ProtoReflect.Descriptor instead.
 func (*VrfPolicy) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{108}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *VrfPolicy) GetDefaultDeny() bool {
@@ -5877,7 +5801,7 @@ type VrfAcAddRequest struct {
 func (x *VrfAcAddRequest) Reset() {
 	*x = VrfAcAddRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[109]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[107]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5890,7 +5814,7 @@ func (x *VrfAcAddRequest) String() string {
 func (*VrfAcAddRequest) ProtoMessage() {}
 
 func (x *VrfAcAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[109]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[107]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5903,7 +5827,7 @@ func (x *VrfAcAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfAcAddRequest.ProtoReflect.Descriptor instead.
 func (*VrfAcAddRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{109}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{107}
 }
 
 func (x *VrfAcAddRequest) GetName() string {
@@ -5931,7 +5855,7 @@ type VrfAcAddResponse struct {
 func (x *VrfAcAddResponse) Reset() {
 	*x = VrfAcAddResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[110]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[108]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5944,7 +5868,7 @@ func (x *VrfAcAddResponse) String() string {
 func (*VrfAcAddResponse) ProtoMessage() {}
 
 func (x *VrfAcAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[110]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[108]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5957,7 +5881,7 @@ func (x *VrfAcAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfAcAddResponse.ProtoReflect.Descriptor instead.
 func (*VrfAcAddResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{110}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *VrfAcAddResponse) GetVrf() *Vrf {
@@ -5979,7 +5903,7 @@ type VrfAcRemoveRequest struct {
 func (x *VrfAcRemoveRequest) Reset() {
 	*x = VrfAcRemoveRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[111]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[109]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5992,7 +5916,7 @@ func (x *VrfAcRemoveRequest) String() string {
 func (*VrfAcRemoveRequest) ProtoMessage() {}
 
 func (x *VrfAcRemoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[111]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[109]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6005,7 +5929,7 @@ func (x *VrfAcRemoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfAcRemoveRequest.ProtoReflect.Descriptor instead.
 func (*VrfAcRemoveRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{111}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{109}
 }
 
 func (x *VrfAcRemoveRequest) GetName() string {
@@ -6031,7 +5955,7 @@ type VrfAcRemoveResponse struct {
 func (x *VrfAcRemoveResponse) Reset() {
 	*x = VrfAcRemoveResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[112]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[110]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6044,7 +5968,7 @@ func (x *VrfAcRemoveResponse) String() string {
 func (*VrfAcRemoveResponse) ProtoMessage() {}
 
 func (x *VrfAcRemoveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[112]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[110]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6057,7 +5981,7 @@ func (x *VrfAcRemoveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfAcRemoveResponse.ProtoReflect.Descriptor instead.
 func (*VrfAcRemoveResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{112}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{110}
 }
 
 type VrfSetPolicyRequest struct {
@@ -6071,7 +5995,7 @@ type VrfSetPolicyRequest struct {
 func (x *VrfSetPolicyRequest) Reset() {
 	*x = VrfSetPolicyRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[113]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[111]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6084,7 +6008,7 @@ func (x *VrfSetPolicyRequest) String() string {
 func (*VrfSetPolicyRequest) ProtoMessage() {}
 
 func (x *VrfSetPolicyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[113]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[111]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6097,7 +6021,7 @@ func (x *VrfSetPolicyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfSetPolicyRequest.ProtoReflect.Descriptor instead.
 func (*VrfSetPolicyRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{113}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{111}
 }
 
 func (x *VrfSetPolicyRequest) GetPolicy() *VrfPolicy {
@@ -6118,7 +6042,7 @@ type VrfSetPolicyResponse struct {
 func (x *VrfSetPolicyResponse) Reset() {
 	*x = VrfSetPolicyResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[114]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[112]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6131,7 +6055,7 @@ func (x *VrfSetPolicyResponse) String() string {
 func (*VrfSetPolicyResponse) ProtoMessage() {}
 
 func (x *VrfSetPolicyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[114]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[112]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6144,7 +6068,7 @@ func (x *VrfSetPolicyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfSetPolicyResponse.ProtoReflect.Descriptor instead.
 func (*VrfSetPolicyResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{114}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{112}
 }
 
 func (x *VrfSetPolicyResponse) GetPolicy() *VrfPolicy {
@@ -6163,7 +6087,7 @@ type VrfShowRequest struct {
 func (x *VrfShowRequest) Reset() {
 	*x = VrfShowRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[115]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[113]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6176,7 +6100,7 @@ func (x *VrfShowRequest) String() string {
 func (*VrfShowRequest) ProtoMessage() {}
 
 func (x *VrfShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[115]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[113]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6189,7 +6113,7 @@ func (x *VrfShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfShowRequest.ProtoReflect.Descriptor instead.
 func (*VrfShowRequest) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{115}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{113}
 }
 
 type VrfShowResponse struct {
@@ -6197,14 +6121,14 @@ type VrfShowResponse struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Vrfs   []*Vrf     `protobuf:"bytes,1,rep,name=vrfs,proto3" json:"vrfs,omitempty"` // ingress facet only (name, vrf_id, acs)
+	Vrfs   []*Vrf     `protobuf:"bytes,1,rep,name=vrfs,proto3" json:"vrfs,omitempty"` // both facets (kernel device + ingress membership)
 	Policy *VrfPolicy `protobuf:"bytes,2,opt,name=policy,proto3" json:"policy,omitempty"`
 }
 
 func (x *VrfShowResponse) Reset() {
 	*x = VrfShowResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_vinbero_v1_vinbero_proto_msgTypes[116]
+		mi := &file_vinbero_v1_vinbero_proto_msgTypes[114]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6217,7 +6141,7 @@ func (x *VrfShowResponse) String() string {
 func (*VrfShowResponse) ProtoMessage() {}
 
 func (x *VrfShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vinbero_v1_vinbero_proto_msgTypes[116]
+	mi := &file_vinbero_v1_vinbero_proto_msgTypes[114]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6230,7 +6154,7 @@ func (x *VrfShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VrfShowResponse.ProtoReflect.Descriptor instead.
 func (*VrfShowResponse) Descriptor() ([]byte, []int) {
-	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{116}
+	return file_vinbero_v1_vinbero_proto_rawDescGZIP(), []int{114}
 }
 
 func (x *VrfShowResponse) GetVrfs() []*Vrf {
@@ -6670,7 +6594,7 @@ var file_vinbero_v1_vinbero_proto_rawDesc = []byte{
 	0x0a, 0x07, 0x75, 0x70, 0x64, 0x61, 0x74, 0x65, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32,
 	0x1b, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x45, 0x74, 0x68,
 	0x65, 0x72, 0x6e, 0x65, 0x74, 0x53, 0x65, 0x67, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x07, 0x75, 0x70,
-	0x64, 0x61, 0x74, 0x65, 0x64, 0x22, 0xb8, 0x01, 0x0a, 0x03, 0x56, 0x72, 0x66, 0x12, 0x12, 0x0a,
+	0x64, 0x61, 0x74, 0x65, 0x64, 0x22, 0xd2, 0x01, 0x0a, 0x03, 0x56, 0x72, 0x66, 0x12, 0x12, 0x0a,
 	0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d,
 	0x65, 0x12, 0x19, 0x0a, 0x08, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20,
 	0x01, 0x28, 0x0d, 0x52, 0x07, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x49, 0x64, 0x12, 0x18, 0x0a, 0x07,
@@ -6682,31 +6606,28 @@ var file_vinbero_v1_vinbero_proto_rawDesc = []byte{
 	0x20, 0x01, 0x28, 0x0d, 0x52, 0x05, 0x76, 0x72, 0x66, 0x49, 0x64, 0x12, 0x23, 0x0a, 0x03, 0x61,
 	0x63, 0x73, 0x18, 0x06, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x11, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65,
 	0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x41, 0x63, 0x52, 0x03, 0x61, 0x63, 0x73,
-	0x22, 0x37, 0x0a, 0x10, 0x56, 0x72, 0x66, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71,
-	0x75, 0x65, 0x73, 0x74, 0x12, 0x23, 0x0a, 0x04, 0x76, 0x72, 0x66, 0x73, 0x18, 0x01, 0x20, 0x03,
-	0x28, 0x0b, 0x32, 0x0f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e,
-	0x56, 0x72, 0x66, 0x52, 0x04, 0x76, 0x72, 0x66, 0x73, 0x22, 0x72, 0x0a, 0x11, 0x56, 0x72, 0x66,
-	0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x29,
-	0x0a, 0x07, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x64, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32,
-	0x0f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66,
-	0x52, 0x07, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x64, 0x12, 0x32, 0x0a, 0x06, 0x65, 0x72, 0x72,
-	0x6f, 0x72, 0x73, 0x18, 0x02, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x1a, 0x2e, 0x76, 0x69, 0x6e, 0x62,
-	0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x4f, 0x70, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
-	0x45, 0x72, 0x72, 0x6f, 0x72, 0x52, 0x06, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x73, 0x22, 0x28, 0x0a,
-	0x10, 0x56, 0x72, 0x66, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
-	0x74, 0x12, 0x14, 0x0a, 0x05, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x09,
-	0x52, 0x05, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x22, 0x6c, 0x0a, 0x11, 0x56, 0x72, 0x66, 0x44, 0x65,
-	0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x23, 0x0a, 0x0d,
-	0x64, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x64, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x18, 0x01, 0x20,
-	0x03, 0x28, 0x09, 0x52, 0x0c, 0x64, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x64, 0x4e, 0x61, 0x6d, 0x65,
-	0x73, 0x12, 0x32, 0x0a, 0x06, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x73, 0x18, 0x02, 0x20, 0x03, 0x28,
-	0x0b, 0x32, 0x1a, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x4f,
-	0x70, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x45, 0x72, 0x72, 0x6f, 0x72, 0x52, 0x06, 0x65,
-	0x72, 0x72, 0x6f, 0x72, 0x73, 0x22, 0x10, 0x0a, 0x0e, 0x56, 0x72, 0x66, 0x4c, 0x69, 0x73, 0x74,
-	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x22, 0x36, 0x0a, 0x0f, 0x56, 0x72, 0x66, 0x4c, 0x69,
-	0x73, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x23, 0x0a, 0x04, 0x76, 0x72,
-	0x66, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65,
-	0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x52, 0x04, 0x76, 0x72, 0x66, 0x73, 0x22,
+	0x12, 0x18, 0x0a, 0x07, 0x69, 0x66, 0x69, 0x6e, 0x64, 0x65, 0x78, 0x18, 0x07, 0x20, 0x01, 0x28,
+	0x0d, 0x52, 0x07, 0x69, 0x66, 0x69, 0x6e, 0x64, 0x65, 0x78, 0x22, 0x37, 0x0a, 0x10, 0x56, 0x72,
+	0x66, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x23,
+	0x0a, 0x04, 0x76, 0x72, 0x66, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0f, 0x2e, 0x76,
+	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x52, 0x04, 0x76,
+	0x72, 0x66, 0x73, 0x22, 0x72, 0x0a, 0x11, 0x56, 0x72, 0x66, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65,
+	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x29, 0x0a, 0x07, 0x63, 0x72, 0x65, 0x61,
+	0x74, 0x65, 0x64, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0f, 0x2e, 0x76, 0x69, 0x6e, 0x62,
+	0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x52, 0x07, 0x63, 0x72, 0x65, 0x61,
+	0x74, 0x65, 0x64, 0x12, 0x32, 0x0a, 0x06, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x73, 0x18, 0x02, 0x20,
+	0x03, 0x28, 0x0b, 0x32, 0x1a, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31,
+	0x2e, 0x4f, 0x70, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x45, 0x72, 0x72, 0x6f, 0x72, 0x52,
+	0x06, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x73, 0x22, 0x28, 0x0a, 0x10, 0x56, 0x72, 0x66, 0x44, 0x65,
+	0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x14, 0x0a, 0x05, 0x6e,
+	0x61, 0x6d, 0x65, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x09, 0x52, 0x05, 0x6e, 0x61, 0x6d, 0x65,
+	0x73, 0x22, 0x6c, 0x0a, 0x11, 0x56, 0x72, 0x66, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x23, 0x0a, 0x0d, 0x64, 0x65, 0x6c, 0x65, 0x74, 0x65,
+	0x64, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x09, 0x52, 0x0c, 0x64,
+	0x65, 0x6c, 0x65, 0x74, 0x65, 0x64, 0x4e, 0x61, 0x6d, 0x65, 0x73, 0x12, 0x32, 0x0a, 0x06, 0x65,
+	0x72, 0x72, 0x6f, 0x72, 0x73, 0x18, 0x02, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x1a, 0x2e, 0x76, 0x69,
+	0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x4f, 0x70, 0x65, 0x72, 0x61, 0x74, 0x69,
+	0x6f, 0x6e, 0x45, 0x72, 0x72, 0x6f, 0x72, 0x52, 0x06, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x73, 0x22,
 	0x4b, 0x0a, 0x06, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d,
 	0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x13, 0x0a,
 	0x05, 0x62, 0x64, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x62, 0x64,
@@ -7073,118 +6994,114 @@ var file_vinbero_v1_vinbero_proto_rawDesc = []byte{
 	0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x45, 0x73, 0x43, 0x6c, 0x65, 0x61, 0x72, 0x44, 0x66,
 	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72,
 	0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x45, 0x73, 0x43, 0x6c, 0x65, 0x61, 0x72, 0x44, 0x66, 0x52, 0x65,
-	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x32, 0xe3, 0x03, 0x0a, 0x16, 0x4e, 0x65, 0x74, 0x77, 0x6f,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x32, 0x8b, 0x02, 0x0a, 0x16, 0x4e, 0x65, 0x74, 0x77, 0x6f,
 	0x72, 0x6b, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63,
-	0x65, 0x12, 0x48, 0x0a, 0x09, 0x56, 0x72, 0x66, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x12, 0x1c,
-	0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x43,
-	0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1d, 0x2e, 0x76,
-	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x43, 0x72, 0x65,
-	0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x48, 0x0a, 0x09, 0x56,
-	0x72, 0x66, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x12, 0x1c, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65,
-	0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52,
-	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f,
-	0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x73,
-	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x42, 0x0a, 0x07, 0x56, 0x72, 0x66, 0x4c, 0x69, 0x73, 0x74,
-	0x12, 0x1a, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72,
-	0x66, 0x4c, 0x69, 0x73, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1b, 0x2e, 0x76,
-	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x4c, 0x69, 0x73,
-	0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x51, 0x0a, 0x0c, 0x42, 0x72, 0x69,
-	0x64, 0x67, 0x65, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x12, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62,
-	0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x43, 0x72, 0x65,
-	0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x20, 0x2e, 0x76, 0x69, 0x6e,
-	0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x43, 0x72,
-	0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x51, 0x0a, 0x0c,
-	0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x12, 0x1f, 0x2e, 0x76,
-	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65,
-	0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x20, 0x2e,
-	0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67,
-	0x65, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
-	0x4b, 0x0a, 0x0a, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x4c, 0x69, 0x73, 0x74, 0x12, 0x1d, 0x2e,
-	0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67,
-	0x65, 0x4c, 0x69, 0x73, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1e, 0x2e, 0x76,
-	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65,
-	0x4c, 0x69, 0x73, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x32, 0xcc, 0x03, 0x0a,
-	0x10, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63,
-	0x65, 0x12, 0x5a, 0x0a, 0x0f, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x43, 0x72,
-	0x65, 0x61, 0x74, 0x65, 0x12, 0x22, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
-	0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x43, 0x72, 0x65, 0x61, 0x74,
-	0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x23, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65,
-	0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x43,
-	0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x5a, 0x0a,
-	0x0f, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65,
-	0x12, 0x22, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65,
-	0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x71,
-	0x75, 0x65, 0x73, 0x74, 0x1a, 0x23, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
-	0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x44, 0x65, 0x6c, 0x65, 0x74,
-	0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x54, 0x0a, 0x0d, 0x48, 0x65, 0x61,
-	0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x4c, 0x69, 0x73, 0x74, 0x12, 0x20, 0x2e, 0x76, 0x69, 0x6e,
-	0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c,
-	0x32, 0x4c, 0x69, 0x73, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x21, 0x2e, 0x76,
+	0x65, 0x12, 0x51, 0x0a, 0x0c, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x43, 0x72, 0x65, 0x61, 0x74,
+	0x65, 0x12, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x42,
+	0x72, 0x69, 0x64, 0x67, 0x65, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65,
+	0x73, 0x74, 0x1a, 0x20, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e,
+	0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70,
+	0x6f, 0x6e, 0x73, 0x65, 0x12, 0x51, 0x0a, 0x0c, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x44, 0x65,
+	0x6c, 0x65, 0x74, 0x65, 0x12, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
+	0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x20, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e,
+	0x76, 0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x4b, 0x0a, 0x0a, 0x42, 0x72, 0x69, 0x64, 0x67,
+	0x65, 0x4c, 0x69, 0x73, 0x74, 0x12, 0x1d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e,
+	0x76, 0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x4c, 0x69, 0x73, 0x74, 0x52, 0x65, 0x71,
+	0x75, 0x65, 0x73, 0x74, 0x1a, 0x1e, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
+	0x31, 0x2e, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65, 0x4c, 0x69, 0x73, 0x74, 0x52, 0x65, 0x73, 0x70,
+	0x6f, 0x6e, 0x73, 0x65, 0x32, 0xcc, 0x03, 0x0a, 0x10, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64,
+	0x4c, 0x32, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x12, 0x5a, 0x0a, 0x0f, 0x48, 0x65, 0x61,
+	0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x12, 0x22, 0x2e, 0x76,
 	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e,
-	0x64, 0x4c, 0x32, 0x4c, 0x69, 0x73, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
-	0x51, 0x0a, 0x0c, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x47, 0x65, 0x74, 0x12,
-	0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61,
-	0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x47, 0x65, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
-	0x1a, 0x20, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65,
-	0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x47, 0x65, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
-	0x73, 0x65, 0x12, 0x57, 0x0a, 0x0e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x46,
-	0x6c, 0x75, 0x73, 0x68, 0x12, 0x21, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
-	0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x46, 0x6c, 0x75, 0x73, 0x68,
-	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x22, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72,
-	0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x46, 0x6c,
-	0x75, 0x73, 0x68, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x32, 0xd4, 0x02, 0x0a, 0x0c,
-	0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x12, 0x48, 0x0a, 0x09,
-	0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x68, 0x6f, 0x77, 0x12, 0x1c, 0x2e, 0x76, 0x69, 0x6e, 0x62,
-	0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x68, 0x6f, 0x77,
-	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72,
-	0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x68, 0x6f, 0x77, 0x52, 0x65,
-	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x4b, 0x0a, 0x0a, 0x53, 0x74, 0x61, 0x74, 0x73, 0x52,
-	0x65, 0x73, 0x65, 0x74, 0x12, 0x1d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
-	0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x52, 0x65, 0x73, 0x65, 0x74, 0x52, 0x65, 0x71, 0x75,
-	0x65, 0x73, 0x74, 0x1a, 0x1e, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31,
-	0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x52, 0x65, 0x73, 0x65, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f,
-	0x6e, 0x73, 0x65, 0x12, 0x54, 0x0a, 0x0d, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x6c, 0x6f, 0x74,
-	0x53, 0x68, 0x6f, 0x77, 0x12, 0x20, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
-	0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x6c, 0x6f, 0x74, 0x53, 0x68, 0x6f, 0x77, 0x52,
-	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x21, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f,
-	0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x6c, 0x6f, 0x74, 0x53, 0x68, 0x6f,
-	0x77, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x57, 0x0a, 0x0e, 0x53, 0x74, 0x61,
-	0x74, 0x73, 0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65, 0x73, 0x65, 0x74, 0x12, 0x21, 0x2e, 0x76, 0x69,
-	0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x6c,
-	0x6f, 0x74, 0x52, 0x65, 0x73, 0x65, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x22,
+	0x64, 0x4c, 0x32, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
+	0x1a, 0x23, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65,
+	0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73,
+	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x5a, 0x0a, 0x0f, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64,
+	0x4c, 0x32, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x12, 0x22, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65,
+	0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x44,
+	0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x23, 0x2e, 0x76,
+	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e,
+	0x64, 0x4c, 0x32, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73,
+	0x65, 0x12, 0x54, 0x0a, 0x0d, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x4c, 0x69,
+	0x73, 0x74, 0x12, 0x20, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e,
+	0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x4c, 0x69, 0x73, 0x74, 0x52, 0x65, 0x71,
+	0x75, 0x65, 0x73, 0x74, 0x1a, 0x21, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
+	0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x4c, 0x69, 0x73, 0x74, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x51, 0x0a, 0x0c, 0x48, 0x65, 0x61, 0x64, 0x65,
+	0x6e, 0x64, 0x4c, 0x32, 0x47, 0x65, 0x74, 0x12, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72,
+	0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x47, 0x65,
+	0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x20, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65,
+	0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x47,
+	0x65, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x57, 0x0a, 0x0e, 0x48, 0x65,
+	0x61, 0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x46, 0x6c, 0x75, 0x73, 0x68, 0x12, 0x21, 0x2e, 0x76,
+	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61, 0x64, 0x65, 0x6e,
+	0x64, 0x4c, 0x32, 0x46, 0x6c, 0x75, 0x73, 0x68, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a,
+	0x22, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x65, 0x61,
+	0x64, 0x65, 0x6e, 0x64, 0x4c, 0x32, 0x46, 0x6c, 0x75, 0x73, 0x68, 0x52, 0x65, 0x73, 0x70, 0x6f,
+	0x6e, 0x73, 0x65, 0x32, 0xd4, 0x02, 0x0a, 0x0c, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x65, 0x72,
+	0x76, 0x69, 0x63, 0x65, 0x12, 0x48, 0x0a, 0x09, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x68, 0x6f,
+	0x77, 0x12, 0x1c, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53,
+	0x74, 0x61, 0x74, 0x73, 0x53, 0x68, 0x6f, 0x77, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a,
+	0x1d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61,
+	0x74, 0x73, 0x53, 0x68, 0x6f, 0x77, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x4b,
+	0x0a, 0x0a, 0x53, 0x74, 0x61, 0x74, 0x73, 0x52, 0x65, 0x73, 0x65, 0x74, 0x12, 0x1d, 0x2e, 0x76,
+	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x52,
+	0x65, 0x73, 0x65, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1e, 0x2e, 0x76, 0x69,
+	0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x52, 0x65,
+	0x73, 0x65, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x54, 0x0a, 0x0d, 0x53,
+	0x74, 0x61, 0x74, 0x73, 0x53, 0x6c, 0x6f, 0x74, 0x53, 0x68, 0x6f, 0x77, 0x12, 0x20, 0x2e, 0x76,
+	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53,
+	0x6c, 0x6f, 0x74, 0x53, 0x68, 0x6f, 0x77, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x21,
 	0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74,
-	0x73, 0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65, 0x73, 0x65, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
-	0x73, 0x65, 0x32, 0xba, 0x02, 0x0a, 0x0a, 0x56, 0x72, 0x66, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63,
-	0x65, 0x12, 0x45, 0x0a, 0x08, 0x56, 0x72, 0x66, 0x41, 0x63, 0x41, 0x64, 0x64, 0x12, 0x1b, 0x2e,
-	0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x41, 0x63,
-	0x41, 0x64, 0x64, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1c, 0x2e, 0x76, 0x69, 0x6e,
-	0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x41, 0x63, 0x41, 0x64, 0x64,
-	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x4e, 0x0a, 0x0b, 0x56, 0x72, 0x66, 0x41,
-	0x63, 0x52, 0x65, 0x6d, 0x6f, 0x76, 0x65, 0x12, 0x1e, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72,
-	0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x41, 0x63, 0x52, 0x65, 0x6d, 0x6f, 0x76, 0x65,
-	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72,
-	0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x41, 0x63, 0x52, 0x65, 0x6d, 0x6f, 0x76, 0x65,
-	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x51, 0x0a, 0x0c, 0x56, 0x72, 0x66, 0x53,
-	0x65, 0x74, 0x50, 0x6f, 0x6c, 0x69, 0x63, 0x79, 0x12, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65,
-	0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x53, 0x65, 0x74, 0x50, 0x6f, 0x6c, 0x69,
-	0x63, 0x79, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x20, 0x2e, 0x76, 0x69, 0x6e, 0x62,
-	0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x53, 0x65, 0x74, 0x50, 0x6f, 0x6c,
-	0x69, 0x63, 0x79, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x42, 0x0a, 0x07, 0x56,
-	0x72, 0x66, 0x53, 0x68, 0x6f, 0x77, 0x12, 0x1a, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f,
-	0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x53, 0x68, 0x6f, 0x77, 0x52, 0x65, 0x71, 0x75, 0x65,
-	0x73, 0x74, 0x1a, 0x1b, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e,
-	0x56, 0x72, 0x66, 0x53, 0x68, 0x6f, 0x77, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x42,
-	0x9d, 0x01, 0x0a, 0x0e, 0x63, 0x6f, 0x6d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e,
-	0x76, 0x31, 0x42, 0x0c, 0x56, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x50, 0x72, 0x6f, 0x74, 0x6f,
-	0x50, 0x01, 0x5a, 0x34, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x74,
-	0x61, 0x6b, 0x65, 0x68, 0x61, 0x79, 0x61, 0x2f, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2f,
-	0x61, 0x70, 0x69, 0x2f, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2f, 0x76, 0x31, 0x3b, 0x76,
-	0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x76, 0x31, 0xa2, 0x02, 0x03, 0x56, 0x58, 0x58, 0xaa, 0x02,
-	0x0a, 0x56, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x56, 0x31, 0xca, 0x02, 0x0a, 0x56, 0x69,
-	0x6e, 0x62, 0x65, 0x72, 0x6f, 0x5c, 0x56, 0x31, 0xe2, 0x02, 0x16, 0x56, 0x69, 0x6e, 0x62, 0x65,
-	0x72, 0x6f, 0x5c, 0x56, 0x31, 0x5c, 0x47, 0x50, 0x42, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74,
-	0x61, 0xea, 0x02, 0x0b, 0x56, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x3a, 0x3a, 0x56, 0x31, 0x62,
-	0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x73, 0x53, 0x6c, 0x6f, 0x74, 0x53, 0x68, 0x6f, 0x77, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73,
+	0x65, 0x12, 0x57, 0x0a, 0x0e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65,
+	0x73, 0x65, 0x74, 0x12, 0x21, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31,
+	0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65, 0x73, 0x65, 0x74, 0x52,
+	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x22, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f,
+	0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x73, 0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65, 0x73,
+	0x65, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x32, 0xce, 0x03, 0x0a, 0x0a, 0x56,
+	0x72, 0x66, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x12, 0x48, 0x0a, 0x09, 0x56, 0x72, 0x66,
+	0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x12, 0x1c, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f,
+	0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71,
+	0x75, 0x65, 0x73, 0x74, 0x1a, 0x1d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
+	0x31, 0x2e, 0x56, 0x72, 0x66, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f,
+	0x6e, 0x73, 0x65, 0x12, 0x48, 0x0a, 0x09, 0x56, 0x72, 0x66, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65,
+	0x12, 0x1c, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72,
+	0x66, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1d,
+	0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x44,
+	0x65, 0x6c, 0x65, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x45, 0x0a,
+	0x08, 0x56, 0x72, 0x66, 0x41, 0x63, 0x41, 0x64, 0x64, 0x12, 0x1b, 0x2e, 0x76, 0x69, 0x6e, 0x62,
+	0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x41, 0x63, 0x41, 0x64, 0x64, 0x52,
+	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1c, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f,
+	0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x41, 0x63, 0x41, 0x64, 0x64, 0x52, 0x65, 0x73, 0x70,
+	0x6f, 0x6e, 0x73, 0x65, 0x12, 0x4e, 0x0a, 0x0b, 0x56, 0x72, 0x66, 0x41, 0x63, 0x52, 0x65, 0x6d,
+	0x6f, 0x76, 0x65, 0x12, 0x1e, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31,
+	0x2e, 0x56, 0x72, 0x66, 0x41, 0x63, 0x52, 0x65, 0x6d, 0x6f, 0x76, 0x65, 0x52, 0x65, 0x71, 0x75,
+	0x65, 0x73, 0x74, 0x1a, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31,
+	0x2e, 0x56, 0x72, 0x66, 0x41, 0x63, 0x52, 0x65, 0x6d, 0x6f, 0x76, 0x65, 0x52, 0x65, 0x73, 0x70,
+	0x6f, 0x6e, 0x73, 0x65, 0x12, 0x51, 0x0a, 0x0c, 0x56, 0x72, 0x66, 0x53, 0x65, 0x74, 0x50, 0x6f,
+	0x6c, 0x69, 0x63, 0x79, 0x12, 0x1f, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76,
+	0x31, 0x2e, 0x56, 0x72, 0x66, 0x53, 0x65, 0x74, 0x50, 0x6f, 0x6c, 0x69, 0x63, 0x79, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x20, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e,
+	0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x53, 0x65, 0x74, 0x50, 0x6f, 0x6c, 0x69, 0x63, 0x79, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x42, 0x0a, 0x07, 0x56, 0x72, 0x66, 0x53, 0x68,
+	0x6f, 0x77, 0x12, 0x1a, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e,
+	0x56, 0x72, 0x66, 0x53, 0x68, 0x6f, 0x77, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1b,
+	0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x2e, 0x56, 0x72, 0x66, 0x53,
+	0x68, 0x6f, 0x77, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x42, 0x9d, 0x01, 0x0a, 0x0e,
+	0x63, 0x6f, 0x6d, 0x2e, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2e, 0x76, 0x31, 0x42, 0x0c,
+	0x56, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x50, 0x01, 0x5a, 0x34,
+	0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x74, 0x61, 0x6b, 0x65, 0x68,
+	0x61, 0x79, 0x61, 0x2f, 0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2f, 0x61, 0x70, 0x69, 0x2f,
+	0x76, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x2f, 0x76, 0x31, 0x3b, 0x76, 0x69, 0x6e, 0x62, 0x65,
+	0x72, 0x6f, 0x76, 0x31, 0xa2, 0x02, 0x03, 0x56, 0x58, 0x58, 0xaa, 0x02, 0x0a, 0x56, 0x69, 0x6e,
+	0x62, 0x65, 0x72, 0x6f, 0x2e, 0x56, 0x31, 0xca, 0x02, 0x0a, 0x56, 0x69, 0x6e, 0x62, 0x65, 0x72,
+	0x6f, 0x5c, 0x56, 0x31, 0xe2, 0x02, 0x16, 0x56, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x5c, 0x56,
+	0x31, 0x5c, 0x47, 0x50, 0x42, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0xea, 0x02, 0x0b,
+	0x56, 0x69, 0x6e, 0x62, 0x65, 0x72, 0x6f, 0x3a, 0x3a, 0x56, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f,
+	0x74, 0x6f, 0x33,
 }
 
 var (
@@ -7200,7 +7117,7 @@ func file_vinbero_v1_vinbero_proto_rawDescGZIP() []byte {
 }
 
 var file_vinbero_v1_vinbero_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_vinbero_v1_vinbero_proto_msgTypes = make([]protoimpl.MessageInfo, 117)
+var file_vinbero_v1_vinbero_proto_msgTypes = make([]protoimpl.MessageInfo, 115)
 var file_vinbero_v1_vinbero_proto_goTypes = []interface{}{
 	(EsiRedundancyMode)(0),            // 0: vinbero.v1.EsiRedundancyMode
 	(*SidFunction)(nil),               // 1: vinbero.v1.SidFunction
@@ -7279,236 +7196,231 @@ var file_vinbero_v1_vinbero_proto_goTypes = []interface{}{
 	(*VrfCreateResponse)(nil),         // 74: vinbero.v1.VrfCreateResponse
 	(*VrfDeleteRequest)(nil),          // 75: vinbero.v1.VrfDeleteRequest
 	(*VrfDeleteResponse)(nil),         // 76: vinbero.v1.VrfDeleteResponse
-	(*VrfListRequest)(nil),            // 77: vinbero.v1.VrfListRequest
-	(*VrfListResponse)(nil),           // 78: vinbero.v1.VrfListResponse
-	(*Bridge)(nil),                    // 79: vinbero.v1.Bridge
-	(*BridgeCreateRequest)(nil),       // 80: vinbero.v1.BridgeCreateRequest
-	(*BridgeCreateResponse)(nil),      // 81: vinbero.v1.BridgeCreateResponse
-	(*BridgeDeleteRequest)(nil),       // 82: vinbero.v1.BridgeDeleteRequest
-	(*BridgeDeleteResponse)(nil),      // 83: vinbero.v1.BridgeDeleteResponse
-	(*BridgeListRequest)(nil),         // 84: vinbero.v1.BridgeListRequest
-	(*BridgeListResponse)(nil),        // 85: vinbero.v1.BridgeListResponse
-	(*HeadendL2)(nil),                 // 86: vinbero.v1.HeadendL2
-	(*HeadendL2CreateRequest)(nil),    // 87: vinbero.v1.HeadendL2CreateRequest
-	(*HeadendL2CreateResponse)(nil),   // 88: vinbero.v1.HeadendL2CreateResponse
-	(*HeadendL2DeleteTarget)(nil),     // 89: vinbero.v1.HeadendL2DeleteTarget
-	(*HeadendL2DeleteRequest)(nil),    // 90: vinbero.v1.HeadendL2DeleteRequest
-	(*HeadendL2DeleteResponse)(nil),   // 91: vinbero.v1.HeadendL2DeleteResponse
-	(*HeadendL2ListRequest)(nil),      // 92: vinbero.v1.HeadendL2ListRequest
-	(*HeadendL2ListResponse)(nil),     // 93: vinbero.v1.HeadendL2ListResponse
-	(*HeadendL2GetRequest)(nil),       // 94: vinbero.v1.HeadendL2GetRequest
-	(*HeadendL2GetResponse)(nil),      // 95: vinbero.v1.HeadendL2GetResponse
-	(*HeadendL2FlushRequest)(nil),     // 96: vinbero.v1.HeadendL2FlushRequest
-	(*HeadendL2FlushResponse)(nil),    // 97: vinbero.v1.HeadendL2FlushResponse
-	(*StatsCounter)(nil),              // 98: vinbero.v1.StatsCounter
-	(*StatsShowRequest)(nil),          // 99: vinbero.v1.StatsShowRequest
-	(*StatsShowResponse)(nil),         // 100: vinbero.v1.StatsShowResponse
-	(*StatsResetRequest)(nil),         // 101: vinbero.v1.StatsResetRequest
-	(*StatsResetResponse)(nil),        // 102: vinbero.v1.StatsResetResponse
-	(*SlotStatsEntry)(nil),            // 103: vinbero.v1.SlotStatsEntry
-	(*StatsSlotShowRequest)(nil),      // 104: vinbero.v1.StatsSlotShowRequest
-	(*StatsSlotShowResponse)(nil),     // 105: vinbero.v1.StatsSlotShowResponse
-	(*StatsSlotResetRequest)(nil),     // 106: vinbero.v1.StatsSlotResetRequest
-	(*StatsSlotResetResponse)(nil),    // 107: vinbero.v1.StatsSlotResetResponse
-	(*VrfAc)(nil),                     // 108: vinbero.v1.VrfAc
-	(*VrfPolicy)(nil),                 // 109: vinbero.v1.VrfPolicy
-	(*VrfAcAddRequest)(nil),           // 110: vinbero.v1.VrfAcAddRequest
-	(*VrfAcAddResponse)(nil),          // 111: vinbero.v1.VrfAcAddResponse
-	(*VrfAcRemoveRequest)(nil),        // 112: vinbero.v1.VrfAcRemoveRequest
-	(*VrfAcRemoveResponse)(nil),       // 113: vinbero.v1.VrfAcRemoveResponse
-	(*VrfSetPolicyRequest)(nil),       // 114: vinbero.v1.VrfSetPolicyRequest
-	(*VrfSetPolicyResponse)(nil),      // 115: vinbero.v1.VrfSetPolicyResponse
-	(*VrfShowRequest)(nil),            // 116: vinbero.v1.VrfShowRequest
-	(*VrfShowResponse)(nil),           // 117: vinbero.v1.VrfShowResponse
-	(Srv6LocalAction)(0),              // 118: vinbero.v1.Srv6LocalAction
-	(Srv6LocalFlavor)(0),              // 119: vinbero.v1.Srv6LocalFlavor
-	(Srv6HeadendBehavior)(0),          // 120: vinbero.v1.Srv6HeadendBehavior
-	(*LocatorRef)(nil),                // 121: vinbero.v1.LocatorRef
-	(*OperationError)(nil),            // 122: vinbero.v1.OperationError
+	(*Bridge)(nil),                    // 77: vinbero.v1.Bridge
+	(*BridgeCreateRequest)(nil),       // 78: vinbero.v1.BridgeCreateRequest
+	(*BridgeCreateResponse)(nil),      // 79: vinbero.v1.BridgeCreateResponse
+	(*BridgeDeleteRequest)(nil),       // 80: vinbero.v1.BridgeDeleteRequest
+	(*BridgeDeleteResponse)(nil),      // 81: vinbero.v1.BridgeDeleteResponse
+	(*BridgeListRequest)(nil),         // 82: vinbero.v1.BridgeListRequest
+	(*BridgeListResponse)(nil),        // 83: vinbero.v1.BridgeListResponse
+	(*HeadendL2)(nil),                 // 84: vinbero.v1.HeadendL2
+	(*HeadendL2CreateRequest)(nil),    // 85: vinbero.v1.HeadendL2CreateRequest
+	(*HeadendL2CreateResponse)(nil),   // 86: vinbero.v1.HeadendL2CreateResponse
+	(*HeadendL2DeleteTarget)(nil),     // 87: vinbero.v1.HeadendL2DeleteTarget
+	(*HeadendL2DeleteRequest)(nil),    // 88: vinbero.v1.HeadendL2DeleteRequest
+	(*HeadendL2DeleteResponse)(nil),   // 89: vinbero.v1.HeadendL2DeleteResponse
+	(*HeadendL2ListRequest)(nil),      // 90: vinbero.v1.HeadendL2ListRequest
+	(*HeadendL2ListResponse)(nil),     // 91: vinbero.v1.HeadendL2ListResponse
+	(*HeadendL2GetRequest)(nil),       // 92: vinbero.v1.HeadendL2GetRequest
+	(*HeadendL2GetResponse)(nil),      // 93: vinbero.v1.HeadendL2GetResponse
+	(*HeadendL2FlushRequest)(nil),     // 94: vinbero.v1.HeadendL2FlushRequest
+	(*HeadendL2FlushResponse)(nil),    // 95: vinbero.v1.HeadendL2FlushResponse
+	(*StatsCounter)(nil),              // 96: vinbero.v1.StatsCounter
+	(*StatsShowRequest)(nil),          // 97: vinbero.v1.StatsShowRequest
+	(*StatsShowResponse)(nil),         // 98: vinbero.v1.StatsShowResponse
+	(*StatsResetRequest)(nil),         // 99: vinbero.v1.StatsResetRequest
+	(*StatsResetResponse)(nil),        // 100: vinbero.v1.StatsResetResponse
+	(*SlotStatsEntry)(nil),            // 101: vinbero.v1.SlotStatsEntry
+	(*StatsSlotShowRequest)(nil),      // 102: vinbero.v1.StatsSlotShowRequest
+	(*StatsSlotShowResponse)(nil),     // 103: vinbero.v1.StatsSlotShowResponse
+	(*StatsSlotResetRequest)(nil),     // 104: vinbero.v1.StatsSlotResetRequest
+	(*StatsSlotResetResponse)(nil),    // 105: vinbero.v1.StatsSlotResetResponse
+	(*VrfAc)(nil),                     // 106: vinbero.v1.VrfAc
+	(*VrfPolicy)(nil),                 // 107: vinbero.v1.VrfPolicy
+	(*VrfAcAddRequest)(nil),           // 108: vinbero.v1.VrfAcAddRequest
+	(*VrfAcAddResponse)(nil),          // 109: vinbero.v1.VrfAcAddResponse
+	(*VrfAcRemoveRequest)(nil),        // 110: vinbero.v1.VrfAcRemoveRequest
+	(*VrfAcRemoveResponse)(nil),       // 111: vinbero.v1.VrfAcRemoveResponse
+	(*VrfSetPolicyRequest)(nil),       // 112: vinbero.v1.VrfSetPolicyRequest
+	(*VrfSetPolicyResponse)(nil),      // 113: vinbero.v1.VrfSetPolicyResponse
+	(*VrfShowRequest)(nil),            // 114: vinbero.v1.VrfShowRequest
+	(*VrfShowResponse)(nil),           // 115: vinbero.v1.VrfShowResponse
+	(Srv6LocalAction)(0),              // 116: vinbero.v1.Srv6LocalAction
+	(Srv6LocalFlavor)(0),              // 117: vinbero.v1.Srv6LocalFlavor
+	(Srv6HeadendBehavior)(0),          // 118: vinbero.v1.Srv6HeadendBehavior
+	(*LocatorRef)(nil),                // 119: vinbero.v1.LocatorRef
+	(*OperationError)(nil),            // 120: vinbero.v1.OperationError
 }
 var file_vinbero_v1_vinbero_proto_depIdxs = []int32{
-	118, // 0: vinbero.v1.SidFunction.action:type_name -> vinbero.v1.Srv6LocalAction
-	119, // 1: vinbero.v1.SidFunction.flavor:type_name -> vinbero.v1.Srv6LocalFlavor
-	120, // 2: vinbero.v1.SidFunction.headend_mode:type_name -> vinbero.v1.Srv6HeadendBehavior
-	121, // 3: vinbero.v1.SidFunction.locator_ref:type_name -> vinbero.v1.LocatorRef
+	116, // 0: vinbero.v1.SidFunction.action:type_name -> vinbero.v1.Srv6LocalAction
+	117, // 1: vinbero.v1.SidFunction.flavor:type_name -> vinbero.v1.Srv6LocalFlavor
+	118, // 2: vinbero.v1.SidFunction.headend_mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	119, // 3: vinbero.v1.SidFunction.locator_ref:type_name -> vinbero.v1.LocatorRef
 	1,   // 4: vinbero.v1.SidFunctionCreateRequest.sid_functions:type_name -> vinbero.v1.SidFunction
 	1,   // 5: vinbero.v1.SidFunctionCreateResponse.created:type_name -> vinbero.v1.SidFunction
-	122, // 6: vinbero.v1.SidFunctionCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	122, // 7: vinbero.v1.SidFunctionDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 6: vinbero.v1.SidFunctionCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 7: vinbero.v1.SidFunctionDeleteResponse.errors:type_name -> vinbero.v1.OperationError
 	1,   // 8: vinbero.v1.SidFunctionListResponse.sid_functions:type_name -> vinbero.v1.SidFunction
 	1,   // 9: vinbero.v1.SidFunctionGetResponse.sid_function:type_name -> vinbero.v1.SidFunction
-	120, // 10: vinbero.v1.Headendv4.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	118, // 10: vinbero.v1.Headendv4.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
 	12,  // 11: vinbero.v1.Headendv4CreateRequest.headendv4s:type_name -> vinbero.v1.Headendv4
 	12,  // 12: vinbero.v1.Headendv4CreateResponse.created:type_name -> vinbero.v1.Headendv4
-	122, // 13: vinbero.v1.Headendv4CreateResponse.errors:type_name -> vinbero.v1.OperationError
-	122, // 14: vinbero.v1.Headendv4DeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 13: vinbero.v1.Headendv4CreateResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 14: vinbero.v1.Headendv4DeleteResponse.errors:type_name -> vinbero.v1.OperationError
 	12,  // 15: vinbero.v1.Headendv4ListResponse.headendv4s:type_name -> vinbero.v1.Headendv4
 	12,  // 16: vinbero.v1.Headendv4GetResponse.headendv4:type_name -> vinbero.v1.Headendv4
-	120, // 17: vinbero.v1.Headendv6.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	118, // 17: vinbero.v1.Headendv6.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
 	23,  // 18: vinbero.v1.Headendv6CreateRequest.headendv6s:type_name -> vinbero.v1.Headendv6
 	23,  // 19: vinbero.v1.Headendv6CreateResponse.created:type_name -> vinbero.v1.Headendv6
-	122, // 20: vinbero.v1.Headendv6CreateResponse.errors:type_name -> vinbero.v1.OperationError
-	122, // 21: vinbero.v1.Headendv6DeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 20: vinbero.v1.Headendv6CreateResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 21: vinbero.v1.Headendv6DeleteResponse.errors:type_name -> vinbero.v1.OperationError
 	23,  // 22: vinbero.v1.Headendv6ListResponse.headendv6s:type_name -> vinbero.v1.Headendv6
 	23,  // 23: vinbero.v1.Headendv6GetResponse.headendv6:type_name -> vinbero.v1.Headendv6
 	34,  // 24: vinbero.v1.FdbListResponse.entries:type_name -> vinbero.v1.FdbEntry
 	43,  // 25: vinbero.v1.VlanTableCreateRequest.entries:type_name -> vinbero.v1.VlanTableEntry
 	43,  // 26: vinbero.v1.VlanTableCreateResponse.created:type_name -> vinbero.v1.VlanTableEntry
-	122, // 27: vinbero.v1.VlanTableCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 27: vinbero.v1.VlanTableCreateResponse.errors:type_name -> vinbero.v1.OperationError
 	43,  // 28: vinbero.v1.VlanTableDeleteRequest.entries:type_name -> vinbero.v1.VlanTableEntry
 	43,  // 29: vinbero.v1.VlanTableDeleteResponse.deleted:type_name -> vinbero.v1.VlanTableEntry
-	122, // 30: vinbero.v1.VlanTableDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 30: vinbero.v1.VlanTableDeleteResponse.errors:type_name -> vinbero.v1.OperationError
 	43,  // 31: vinbero.v1.VlanTableListResponse.entries:type_name -> vinbero.v1.VlanTableEntry
-	120, // 32: vinbero.v1.BdPeer.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	118, // 32: vinbero.v1.BdPeer.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
 	52,  // 33: vinbero.v1.BdPeerCreateRequest.peers:type_name -> vinbero.v1.BdPeer
 	52,  // 34: vinbero.v1.BdPeerCreateResponse.created:type_name -> vinbero.v1.BdPeer
-	122, // 35: vinbero.v1.BdPeerCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	122, // 36: vinbero.v1.BdPeerDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 35: vinbero.v1.BdPeerCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 36: vinbero.v1.BdPeerDeleteResponse.errors:type_name -> vinbero.v1.OperationError
 	52,  // 37: vinbero.v1.BdPeerListResponse.peers:type_name -> vinbero.v1.BdPeer
 	0,   // 38: vinbero.v1.EthernetSegment.redundancy_mode:type_name -> vinbero.v1.EsiRedundancyMode
 	61,  // 39: vinbero.v1.EsCreateRequest.entries:type_name -> vinbero.v1.EthernetSegment
 	61,  // 40: vinbero.v1.EsCreateResponse.created:type_name -> vinbero.v1.EthernetSegment
-	122, // 41: vinbero.v1.EsCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	122, // 42: vinbero.v1.EsDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 41: vinbero.v1.EsCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 42: vinbero.v1.EsDeleteResponse.errors:type_name -> vinbero.v1.OperationError
 	61,  // 43: vinbero.v1.EsListResponse.entries:type_name -> vinbero.v1.EthernetSegment
 	61,  // 44: vinbero.v1.EsSetDfResponse.updated:type_name -> vinbero.v1.EthernetSegment
 	61,  // 45: vinbero.v1.EsClearDfResponse.updated:type_name -> vinbero.v1.EthernetSegment
-	108, // 46: vinbero.v1.Vrf.acs:type_name -> vinbero.v1.VrfAc
+	106, // 46: vinbero.v1.Vrf.acs:type_name -> vinbero.v1.VrfAc
 	72,  // 47: vinbero.v1.VrfCreateRequest.vrfs:type_name -> vinbero.v1.Vrf
 	72,  // 48: vinbero.v1.VrfCreateResponse.created:type_name -> vinbero.v1.Vrf
-	122, // 49: vinbero.v1.VrfCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	122, // 50: vinbero.v1.VrfDeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	72,  // 51: vinbero.v1.VrfListResponse.vrfs:type_name -> vinbero.v1.Vrf
-	79,  // 52: vinbero.v1.BridgeCreateRequest.bridges:type_name -> vinbero.v1.Bridge
-	79,  // 53: vinbero.v1.BridgeCreateResponse.created:type_name -> vinbero.v1.Bridge
-	122, // 54: vinbero.v1.BridgeCreateResponse.errors:type_name -> vinbero.v1.OperationError
-	122, // 55: vinbero.v1.BridgeDeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	79,  // 56: vinbero.v1.BridgeListResponse.bridges:type_name -> vinbero.v1.Bridge
-	120, // 57: vinbero.v1.HeadendL2.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
-	86,  // 58: vinbero.v1.HeadendL2CreateRequest.headend_l2s:type_name -> vinbero.v1.HeadendL2
-	86,  // 59: vinbero.v1.HeadendL2CreateResponse.created:type_name -> vinbero.v1.HeadendL2
-	122, // 60: vinbero.v1.HeadendL2CreateResponse.errors:type_name -> vinbero.v1.OperationError
-	89,  // 61: vinbero.v1.HeadendL2DeleteRequest.targets:type_name -> vinbero.v1.HeadendL2DeleteTarget
-	89,  // 62: vinbero.v1.HeadendL2DeleteResponse.deleted:type_name -> vinbero.v1.HeadendL2DeleteTarget
-	122, // 63: vinbero.v1.HeadendL2DeleteResponse.errors:type_name -> vinbero.v1.OperationError
-	86,  // 64: vinbero.v1.HeadendL2ListResponse.headend_l2s:type_name -> vinbero.v1.HeadendL2
-	86,  // 65: vinbero.v1.HeadendL2GetResponse.headend_l2:type_name -> vinbero.v1.HeadendL2
-	98,  // 66: vinbero.v1.StatsShowResponse.counters:type_name -> vinbero.v1.StatsCounter
-	103, // 67: vinbero.v1.StatsSlotShowResponse.entries:type_name -> vinbero.v1.SlotStatsEntry
-	108, // 68: vinbero.v1.VrfAcAddRequest.ac:type_name -> vinbero.v1.VrfAc
-	72,  // 69: vinbero.v1.VrfAcAddResponse.vrf:type_name -> vinbero.v1.Vrf
-	108, // 70: vinbero.v1.VrfAcRemoveRequest.ac:type_name -> vinbero.v1.VrfAc
-	109, // 71: vinbero.v1.VrfSetPolicyRequest.policy:type_name -> vinbero.v1.VrfPolicy
-	109, // 72: vinbero.v1.VrfSetPolicyResponse.policy:type_name -> vinbero.v1.VrfPolicy
-	72,  // 73: vinbero.v1.VrfShowResponse.vrfs:type_name -> vinbero.v1.Vrf
-	109, // 74: vinbero.v1.VrfShowResponse.policy:type_name -> vinbero.v1.VrfPolicy
-	2,   // 75: vinbero.v1.SidFunctionService.SidFunctionCreate:input_type -> vinbero.v1.SidFunctionCreateRequest
-	4,   // 76: vinbero.v1.SidFunctionService.SidFunctionDelete:input_type -> vinbero.v1.SidFunctionDeleteRequest
-	6,   // 77: vinbero.v1.SidFunctionService.SidFunctionList:input_type -> vinbero.v1.SidFunctionListRequest
-	10,  // 78: vinbero.v1.SidFunctionService.SidFunctionFlush:input_type -> vinbero.v1.SidFunctionFlushRequest
-	8,   // 79: vinbero.v1.SidFunctionService.SidFunctionGet:input_type -> vinbero.v1.SidFunctionGetRequest
-	13,  // 80: vinbero.v1.Headendv4Service.Headendv4Create:input_type -> vinbero.v1.Headendv4CreateRequest
-	15,  // 81: vinbero.v1.Headendv4Service.Headendv4Delete:input_type -> vinbero.v1.Headendv4DeleteRequest
-	17,  // 82: vinbero.v1.Headendv4Service.Headendv4List:input_type -> vinbero.v1.Headendv4ListRequest
-	21,  // 83: vinbero.v1.Headendv4Service.Headendv4Flush:input_type -> vinbero.v1.Headendv4FlushRequest
-	19,  // 84: vinbero.v1.Headendv4Service.Headendv4Get:input_type -> vinbero.v1.Headendv4GetRequest
-	24,  // 85: vinbero.v1.Headendv6Service.Headendv6Create:input_type -> vinbero.v1.Headendv6CreateRequest
-	26,  // 86: vinbero.v1.Headendv6Service.Headendv6Delete:input_type -> vinbero.v1.Headendv6DeleteRequest
-	28,  // 87: vinbero.v1.Headendv6Service.Headendv6List:input_type -> vinbero.v1.Headendv6ListRequest
-	30,  // 88: vinbero.v1.Headendv6Service.Headendv6Get:input_type -> vinbero.v1.Headendv6GetRequest
-	32,  // 89: vinbero.v1.Headendv6Service.Headendv6Flush:input_type -> vinbero.v1.Headendv6FlushRequest
-	35,  // 90: vinbero.v1.FdbService.FdbList:input_type -> vinbero.v1.FdbListRequest
-	37,  // 91: vinbero.v1.FdbService.FdbCreate:input_type -> vinbero.v1.FdbCreateRequest
-	39,  // 92: vinbero.v1.FdbService.FdbDelete:input_type -> vinbero.v1.FdbDeleteRequest
-	41,  // 93: vinbero.v1.FdbService.FdbFlush:input_type -> vinbero.v1.FdbFlushRequest
-	44,  // 94: vinbero.v1.VlanTableService.VlanTableCreate:input_type -> vinbero.v1.VlanTableCreateRequest
-	46,  // 95: vinbero.v1.VlanTableService.VlanTableDelete:input_type -> vinbero.v1.VlanTableDeleteRequest
-	48,  // 96: vinbero.v1.VlanTableService.VlanTableList:input_type -> vinbero.v1.VlanTableListRequest
-	50,  // 97: vinbero.v1.VlanTableService.VlanTableFlush:input_type -> vinbero.v1.VlanTableFlushRequest
-	53,  // 98: vinbero.v1.BdPeerService.BdPeerCreate:input_type -> vinbero.v1.BdPeerCreateRequest
-	55,  // 99: vinbero.v1.BdPeerService.BdPeerDelete:input_type -> vinbero.v1.BdPeerDeleteRequest
-	57,  // 100: vinbero.v1.BdPeerService.BdPeerList:input_type -> vinbero.v1.BdPeerListRequest
-	59,  // 101: vinbero.v1.BdPeerService.BdPeerFlush:input_type -> vinbero.v1.BdPeerFlushRequest
-	62,  // 102: vinbero.v1.EthernetSegmentService.EsCreate:input_type -> vinbero.v1.EsCreateRequest
-	64,  // 103: vinbero.v1.EthernetSegmentService.EsDelete:input_type -> vinbero.v1.EsDeleteRequest
-	66,  // 104: vinbero.v1.EthernetSegmentService.EsList:input_type -> vinbero.v1.EsListRequest
-	68,  // 105: vinbero.v1.EthernetSegmentService.EsSetDf:input_type -> vinbero.v1.EsSetDfRequest
-	70,  // 106: vinbero.v1.EthernetSegmentService.EsClearDf:input_type -> vinbero.v1.EsClearDfRequest
-	73,  // 107: vinbero.v1.NetworkResourceService.VrfCreate:input_type -> vinbero.v1.VrfCreateRequest
-	75,  // 108: vinbero.v1.NetworkResourceService.VrfDelete:input_type -> vinbero.v1.VrfDeleteRequest
-	77,  // 109: vinbero.v1.NetworkResourceService.VrfList:input_type -> vinbero.v1.VrfListRequest
-	80,  // 110: vinbero.v1.NetworkResourceService.BridgeCreate:input_type -> vinbero.v1.BridgeCreateRequest
-	82,  // 111: vinbero.v1.NetworkResourceService.BridgeDelete:input_type -> vinbero.v1.BridgeDeleteRequest
-	84,  // 112: vinbero.v1.NetworkResourceService.BridgeList:input_type -> vinbero.v1.BridgeListRequest
-	87,  // 113: vinbero.v1.HeadendL2Service.HeadendL2Create:input_type -> vinbero.v1.HeadendL2CreateRequest
-	90,  // 114: vinbero.v1.HeadendL2Service.HeadendL2Delete:input_type -> vinbero.v1.HeadendL2DeleteRequest
-	92,  // 115: vinbero.v1.HeadendL2Service.HeadendL2List:input_type -> vinbero.v1.HeadendL2ListRequest
-	94,  // 116: vinbero.v1.HeadendL2Service.HeadendL2Get:input_type -> vinbero.v1.HeadendL2GetRequest
-	96,  // 117: vinbero.v1.HeadendL2Service.HeadendL2Flush:input_type -> vinbero.v1.HeadendL2FlushRequest
-	99,  // 118: vinbero.v1.StatsService.StatsShow:input_type -> vinbero.v1.StatsShowRequest
-	101, // 119: vinbero.v1.StatsService.StatsReset:input_type -> vinbero.v1.StatsResetRequest
-	104, // 120: vinbero.v1.StatsService.StatsSlotShow:input_type -> vinbero.v1.StatsSlotShowRequest
-	106, // 121: vinbero.v1.StatsService.StatsSlotReset:input_type -> vinbero.v1.StatsSlotResetRequest
-	110, // 122: vinbero.v1.VrfService.VrfAcAdd:input_type -> vinbero.v1.VrfAcAddRequest
-	112, // 123: vinbero.v1.VrfService.VrfAcRemove:input_type -> vinbero.v1.VrfAcRemoveRequest
-	114, // 124: vinbero.v1.VrfService.VrfSetPolicy:input_type -> vinbero.v1.VrfSetPolicyRequest
-	116, // 125: vinbero.v1.VrfService.VrfShow:input_type -> vinbero.v1.VrfShowRequest
-	3,   // 126: vinbero.v1.SidFunctionService.SidFunctionCreate:output_type -> vinbero.v1.SidFunctionCreateResponse
-	5,   // 127: vinbero.v1.SidFunctionService.SidFunctionDelete:output_type -> vinbero.v1.SidFunctionDeleteResponse
-	7,   // 128: vinbero.v1.SidFunctionService.SidFunctionList:output_type -> vinbero.v1.SidFunctionListResponse
-	11,  // 129: vinbero.v1.SidFunctionService.SidFunctionFlush:output_type -> vinbero.v1.SidFunctionFlushResponse
-	9,   // 130: vinbero.v1.SidFunctionService.SidFunctionGet:output_type -> vinbero.v1.SidFunctionGetResponse
-	14,  // 131: vinbero.v1.Headendv4Service.Headendv4Create:output_type -> vinbero.v1.Headendv4CreateResponse
-	16,  // 132: vinbero.v1.Headendv4Service.Headendv4Delete:output_type -> vinbero.v1.Headendv4DeleteResponse
-	18,  // 133: vinbero.v1.Headendv4Service.Headendv4List:output_type -> vinbero.v1.Headendv4ListResponse
-	22,  // 134: vinbero.v1.Headendv4Service.Headendv4Flush:output_type -> vinbero.v1.Headendv4FlushResponse
-	20,  // 135: vinbero.v1.Headendv4Service.Headendv4Get:output_type -> vinbero.v1.Headendv4GetResponse
-	25,  // 136: vinbero.v1.Headendv6Service.Headendv6Create:output_type -> vinbero.v1.Headendv6CreateResponse
-	27,  // 137: vinbero.v1.Headendv6Service.Headendv6Delete:output_type -> vinbero.v1.Headendv6DeleteResponse
-	29,  // 138: vinbero.v1.Headendv6Service.Headendv6List:output_type -> vinbero.v1.Headendv6ListResponse
-	31,  // 139: vinbero.v1.Headendv6Service.Headendv6Get:output_type -> vinbero.v1.Headendv6GetResponse
-	33,  // 140: vinbero.v1.Headendv6Service.Headendv6Flush:output_type -> vinbero.v1.Headendv6FlushResponse
-	36,  // 141: vinbero.v1.FdbService.FdbList:output_type -> vinbero.v1.FdbListResponse
-	38,  // 142: vinbero.v1.FdbService.FdbCreate:output_type -> vinbero.v1.FdbCreateResponse
-	40,  // 143: vinbero.v1.FdbService.FdbDelete:output_type -> vinbero.v1.FdbDeleteResponse
-	42,  // 144: vinbero.v1.FdbService.FdbFlush:output_type -> vinbero.v1.FdbFlushResponse
-	45,  // 145: vinbero.v1.VlanTableService.VlanTableCreate:output_type -> vinbero.v1.VlanTableCreateResponse
-	47,  // 146: vinbero.v1.VlanTableService.VlanTableDelete:output_type -> vinbero.v1.VlanTableDeleteResponse
-	49,  // 147: vinbero.v1.VlanTableService.VlanTableList:output_type -> vinbero.v1.VlanTableListResponse
-	51,  // 148: vinbero.v1.VlanTableService.VlanTableFlush:output_type -> vinbero.v1.VlanTableFlushResponse
-	54,  // 149: vinbero.v1.BdPeerService.BdPeerCreate:output_type -> vinbero.v1.BdPeerCreateResponse
-	56,  // 150: vinbero.v1.BdPeerService.BdPeerDelete:output_type -> vinbero.v1.BdPeerDeleteResponse
-	58,  // 151: vinbero.v1.BdPeerService.BdPeerList:output_type -> vinbero.v1.BdPeerListResponse
-	60,  // 152: vinbero.v1.BdPeerService.BdPeerFlush:output_type -> vinbero.v1.BdPeerFlushResponse
-	63,  // 153: vinbero.v1.EthernetSegmentService.EsCreate:output_type -> vinbero.v1.EsCreateResponse
-	65,  // 154: vinbero.v1.EthernetSegmentService.EsDelete:output_type -> vinbero.v1.EsDeleteResponse
-	67,  // 155: vinbero.v1.EthernetSegmentService.EsList:output_type -> vinbero.v1.EsListResponse
-	69,  // 156: vinbero.v1.EthernetSegmentService.EsSetDf:output_type -> vinbero.v1.EsSetDfResponse
-	71,  // 157: vinbero.v1.EthernetSegmentService.EsClearDf:output_type -> vinbero.v1.EsClearDfResponse
-	74,  // 158: vinbero.v1.NetworkResourceService.VrfCreate:output_type -> vinbero.v1.VrfCreateResponse
-	76,  // 159: vinbero.v1.NetworkResourceService.VrfDelete:output_type -> vinbero.v1.VrfDeleteResponse
-	78,  // 160: vinbero.v1.NetworkResourceService.VrfList:output_type -> vinbero.v1.VrfListResponse
-	81,  // 161: vinbero.v1.NetworkResourceService.BridgeCreate:output_type -> vinbero.v1.BridgeCreateResponse
-	83,  // 162: vinbero.v1.NetworkResourceService.BridgeDelete:output_type -> vinbero.v1.BridgeDeleteResponse
-	85,  // 163: vinbero.v1.NetworkResourceService.BridgeList:output_type -> vinbero.v1.BridgeListResponse
-	88,  // 164: vinbero.v1.HeadendL2Service.HeadendL2Create:output_type -> vinbero.v1.HeadendL2CreateResponse
-	91,  // 165: vinbero.v1.HeadendL2Service.HeadendL2Delete:output_type -> vinbero.v1.HeadendL2DeleteResponse
-	93,  // 166: vinbero.v1.HeadendL2Service.HeadendL2List:output_type -> vinbero.v1.HeadendL2ListResponse
-	95,  // 167: vinbero.v1.HeadendL2Service.HeadendL2Get:output_type -> vinbero.v1.HeadendL2GetResponse
-	97,  // 168: vinbero.v1.HeadendL2Service.HeadendL2Flush:output_type -> vinbero.v1.HeadendL2FlushResponse
-	100, // 169: vinbero.v1.StatsService.StatsShow:output_type -> vinbero.v1.StatsShowResponse
-	102, // 170: vinbero.v1.StatsService.StatsReset:output_type -> vinbero.v1.StatsResetResponse
-	105, // 171: vinbero.v1.StatsService.StatsSlotShow:output_type -> vinbero.v1.StatsSlotShowResponse
-	107, // 172: vinbero.v1.StatsService.StatsSlotReset:output_type -> vinbero.v1.StatsSlotResetResponse
-	111, // 173: vinbero.v1.VrfService.VrfAcAdd:output_type -> vinbero.v1.VrfAcAddResponse
-	113, // 174: vinbero.v1.VrfService.VrfAcRemove:output_type -> vinbero.v1.VrfAcRemoveResponse
-	115, // 175: vinbero.v1.VrfService.VrfSetPolicy:output_type -> vinbero.v1.VrfSetPolicyResponse
-	117, // 176: vinbero.v1.VrfService.VrfShow:output_type -> vinbero.v1.VrfShowResponse
-	126, // [126:177] is the sub-list for method output_type
-	75,  // [75:126] is the sub-list for method input_type
-	75,  // [75:75] is the sub-list for extension type_name
-	75,  // [75:75] is the sub-list for extension extendee
-	0,   // [0:75] is the sub-list for field type_name
+	120, // 49: vinbero.v1.VrfCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 50: vinbero.v1.VrfDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	77,  // 51: vinbero.v1.BridgeCreateRequest.bridges:type_name -> vinbero.v1.Bridge
+	77,  // 52: vinbero.v1.BridgeCreateResponse.created:type_name -> vinbero.v1.Bridge
+	120, // 53: vinbero.v1.BridgeCreateResponse.errors:type_name -> vinbero.v1.OperationError
+	120, // 54: vinbero.v1.BridgeDeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	77,  // 55: vinbero.v1.BridgeListResponse.bridges:type_name -> vinbero.v1.Bridge
+	118, // 56: vinbero.v1.HeadendL2.mode:type_name -> vinbero.v1.Srv6HeadendBehavior
+	84,  // 57: vinbero.v1.HeadendL2CreateRequest.headend_l2s:type_name -> vinbero.v1.HeadendL2
+	84,  // 58: vinbero.v1.HeadendL2CreateResponse.created:type_name -> vinbero.v1.HeadendL2
+	120, // 59: vinbero.v1.HeadendL2CreateResponse.errors:type_name -> vinbero.v1.OperationError
+	87,  // 60: vinbero.v1.HeadendL2DeleteRequest.targets:type_name -> vinbero.v1.HeadendL2DeleteTarget
+	87,  // 61: vinbero.v1.HeadendL2DeleteResponse.deleted:type_name -> vinbero.v1.HeadendL2DeleteTarget
+	120, // 62: vinbero.v1.HeadendL2DeleteResponse.errors:type_name -> vinbero.v1.OperationError
+	84,  // 63: vinbero.v1.HeadendL2ListResponse.headend_l2s:type_name -> vinbero.v1.HeadendL2
+	84,  // 64: vinbero.v1.HeadendL2GetResponse.headend_l2:type_name -> vinbero.v1.HeadendL2
+	96,  // 65: vinbero.v1.StatsShowResponse.counters:type_name -> vinbero.v1.StatsCounter
+	101, // 66: vinbero.v1.StatsSlotShowResponse.entries:type_name -> vinbero.v1.SlotStatsEntry
+	106, // 67: vinbero.v1.VrfAcAddRequest.ac:type_name -> vinbero.v1.VrfAc
+	72,  // 68: vinbero.v1.VrfAcAddResponse.vrf:type_name -> vinbero.v1.Vrf
+	106, // 69: vinbero.v1.VrfAcRemoveRequest.ac:type_name -> vinbero.v1.VrfAc
+	107, // 70: vinbero.v1.VrfSetPolicyRequest.policy:type_name -> vinbero.v1.VrfPolicy
+	107, // 71: vinbero.v1.VrfSetPolicyResponse.policy:type_name -> vinbero.v1.VrfPolicy
+	72,  // 72: vinbero.v1.VrfShowResponse.vrfs:type_name -> vinbero.v1.Vrf
+	107, // 73: vinbero.v1.VrfShowResponse.policy:type_name -> vinbero.v1.VrfPolicy
+	2,   // 74: vinbero.v1.SidFunctionService.SidFunctionCreate:input_type -> vinbero.v1.SidFunctionCreateRequest
+	4,   // 75: vinbero.v1.SidFunctionService.SidFunctionDelete:input_type -> vinbero.v1.SidFunctionDeleteRequest
+	6,   // 76: vinbero.v1.SidFunctionService.SidFunctionList:input_type -> vinbero.v1.SidFunctionListRequest
+	10,  // 77: vinbero.v1.SidFunctionService.SidFunctionFlush:input_type -> vinbero.v1.SidFunctionFlushRequest
+	8,   // 78: vinbero.v1.SidFunctionService.SidFunctionGet:input_type -> vinbero.v1.SidFunctionGetRequest
+	13,  // 79: vinbero.v1.Headendv4Service.Headendv4Create:input_type -> vinbero.v1.Headendv4CreateRequest
+	15,  // 80: vinbero.v1.Headendv4Service.Headendv4Delete:input_type -> vinbero.v1.Headendv4DeleteRequest
+	17,  // 81: vinbero.v1.Headendv4Service.Headendv4List:input_type -> vinbero.v1.Headendv4ListRequest
+	21,  // 82: vinbero.v1.Headendv4Service.Headendv4Flush:input_type -> vinbero.v1.Headendv4FlushRequest
+	19,  // 83: vinbero.v1.Headendv4Service.Headendv4Get:input_type -> vinbero.v1.Headendv4GetRequest
+	24,  // 84: vinbero.v1.Headendv6Service.Headendv6Create:input_type -> vinbero.v1.Headendv6CreateRequest
+	26,  // 85: vinbero.v1.Headendv6Service.Headendv6Delete:input_type -> vinbero.v1.Headendv6DeleteRequest
+	28,  // 86: vinbero.v1.Headendv6Service.Headendv6List:input_type -> vinbero.v1.Headendv6ListRequest
+	30,  // 87: vinbero.v1.Headendv6Service.Headendv6Get:input_type -> vinbero.v1.Headendv6GetRequest
+	32,  // 88: vinbero.v1.Headendv6Service.Headendv6Flush:input_type -> vinbero.v1.Headendv6FlushRequest
+	35,  // 89: vinbero.v1.FdbService.FdbList:input_type -> vinbero.v1.FdbListRequest
+	37,  // 90: vinbero.v1.FdbService.FdbCreate:input_type -> vinbero.v1.FdbCreateRequest
+	39,  // 91: vinbero.v1.FdbService.FdbDelete:input_type -> vinbero.v1.FdbDeleteRequest
+	41,  // 92: vinbero.v1.FdbService.FdbFlush:input_type -> vinbero.v1.FdbFlushRequest
+	44,  // 93: vinbero.v1.VlanTableService.VlanTableCreate:input_type -> vinbero.v1.VlanTableCreateRequest
+	46,  // 94: vinbero.v1.VlanTableService.VlanTableDelete:input_type -> vinbero.v1.VlanTableDeleteRequest
+	48,  // 95: vinbero.v1.VlanTableService.VlanTableList:input_type -> vinbero.v1.VlanTableListRequest
+	50,  // 96: vinbero.v1.VlanTableService.VlanTableFlush:input_type -> vinbero.v1.VlanTableFlushRequest
+	53,  // 97: vinbero.v1.BdPeerService.BdPeerCreate:input_type -> vinbero.v1.BdPeerCreateRequest
+	55,  // 98: vinbero.v1.BdPeerService.BdPeerDelete:input_type -> vinbero.v1.BdPeerDeleteRequest
+	57,  // 99: vinbero.v1.BdPeerService.BdPeerList:input_type -> vinbero.v1.BdPeerListRequest
+	59,  // 100: vinbero.v1.BdPeerService.BdPeerFlush:input_type -> vinbero.v1.BdPeerFlushRequest
+	62,  // 101: vinbero.v1.EthernetSegmentService.EsCreate:input_type -> vinbero.v1.EsCreateRequest
+	64,  // 102: vinbero.v1.EthernetSegmentService.EsDelete:input_type -> vinbero.v1.EsDeleteRequest
+	66,  // 103: vinbero.v1.EthernetSegmentService.EsList:input_type -> vinbero.v1.EsListRequest
+	68,  // 104: vinbero.v1.EthernetSegmentService.EsSetDf:input_type -> vinbero.v1.EsSetDfRequest
+	70,  // 105: vinbero.v1.EthernetSegmentService.EsClearDf:input_type -> vinbero.v1.EsClearDfRequest
+	78,  // 106: vinbero.v1.NetworkResourceService.BridgeCreate:input_type -> vinbero.v1.BridgeCreateRequest
+	80,  // 107: vinbero.v1.NetworkResourceService.BridgeDelete:input_type -> vinbero.v1.BridgeDeleteRequest
+	82,  // 108: vinbero.v1.NetworkResourceService.BridgeList:input_type -> vinbero.v1.BridgeListRequest
+	85,  // 109: vinbero.v1.HeadendL2Service.HeadendL2Create:input_type -> vinbero.v1.HeadendL2CreateRequest
+	88,  // 110: vinbero.v1.HeadendL2Service.HeadendL2Delete:input_type -> vinbero.v1.HeadendL2DeleteRequest
+	90,  // 111: vinbero.v1.HeadendL2Service.HeadendL2List:input_type -> vinbero.v1.HeadendL2ListRequest
+	92,  // 112: vinbero.v1.HeadendL2Service.HeadendL2Get:input_type -> vinbero.v1.HeadendL2GetRequest
+	94,  // 113: vinbero.v1.HeadendL2Service.HeadendL2Flush:input_type -> vinbero.v1.HeadendL2FlushRequest
+	97,  // 114: vinbero.v1.StatsService.StatsShow:input_type -> vinbero.v1.StatsShowRequest
+	99,  // 115: vinbero.v1.StatsService.StatsReset:input_type -> vinbero.v1.StatsResetRequest
+	102, // 116: vinbero.v1.StatsService.StatsSlotShow:input_type -> vinbero.v1.StatsSlotShowRequest
+	104, // 117: vinbero.v1.StatsService.StatsSlotReset:input_type -> vinbero.v1.StatsSlotResetRequest
+	73,  // 118: vinbero.v1.VrfService.VrfCreate:input_type -> vinbero.v1.VrfCreateRequest
+	75,  // 119: vinbero.v1.VrfService.VrfDelete:input_type -> vinbero.v1.VrfDeleteRequest
+	108, // 120: vinbero.v1.VrfService.VrfAcAdd:input_type -> vinbero.v1.VrfAcAddRequest
+	110, // 121: vinbero.v1.VrfService.VrfAcRemove:input_type -> vinbero.v1.VrfAcRemoveRequest
+	112, // 122: vinbero.v1.VrfService.VrfSetPolicy:input_type -> vinbero.v1.VrfSetPolicyRequest
+	114, // 123: vinbero.v1.VrfService.VrfShow:input_type -> vinbero.v1.VrfShowRequest
+	3,   // 124: vinbero.v1.SidFunctionService.SidFunctionCreate:output_type -> vinbero.v1.SidFunctionCreateResponse
+	5,   // 125: vinbero.v1.SidFunctionService.SidFunctionDelete:output_type -> vinbero.v1.SidFunctionDeleteResponse
+	7,   // 126: vinbero.v1.SidFunctionService.SidFunctionList:output_type -> vinbero.v1.SidFunctionListResponse
+	11,  // 127: vinbero.v1.SidFunctionService.SidFunctionFlush:output_type -> vinbero.v1.SidFunctionFlushResponse
+	9,   // 128: vinbero.v1.SidFunctionService.SidFunctionGet:output_type -> vinbero.v1.SidFunctionGetResponse
+	14,  // 129: vinbero.v1.Headendv4Service.Headendv4Create:output_type -> vinbero.v1.Headendv4CreateResponse
+	16,  // 130: vinbero.v1.Headendv4Service.Headendv4Delete:output_type -> vinbero.v1.Headendv4DeleteResponse
+	18,  // 131: vinbero.v1.Headendv4Service.Headendv4List:output_type -> vinbero.v1.Headendv4ListResponse
+	22,  // 132: vinbero.v1.Headendv4Service.Headendv4Flush:output_type -> vinbero.v1.Headendv4FlushResponse
+	20,  // 133: vinbero.v1.Headendv4Service.Headendv4Get:output_type -> vinbero.v1.Headendv4GetResponse
+	25,  // 134: vinbero.v1.Headendv6Service.Headendv6Create:output_type -> vinbero.v1.Headendv6CreateResponse
+	27,  // 135: vinbero.v1.Headendv6Service.Headendv6Delete:output_type -> vinbero.v1.Headendv6DeleteResponse
+	29,  // 136: vinbero.v1.Headendv6Service.Headendv6List:output_type -> vinbero.v1.Headendv6ListResponse
+	31,  // 137: vinbero.v1.Headendv6Service.Headendv6Get:output_type -> vinbero.v1.Headendv6GetResponse
+	33,  // 138: vinbero.v1.Headendv6Service.Headendv6Flush:output_type -> vinbero.v1.Headendv6FlushResponse
+	36,  // 139: vinbero.v1.FdbService.FdbList:output_type -> vinbero.v1.FdbListResponse
+	38,  // 140: vinbero.v1.FdbService.FdbCreate:output_type -> vinbero.v1.FdbCreateResponse
+	40,  // 141: vinbero.v1.FdbService.FdbDelete:output_type -> vinbero.v1.FdbDeleteResponse
+	42,  // 142: vinbero.v1.FdbService.FdbFlush:output_type -> vinbero.v1.FdbFlushResponse
+	45,  // 143: vinbero.v1.VlanTableService.VlanTableCreate:output_type -> vinbero.v1.VlanTableCreateResponse
+	47,  // 144: vinbero.v1.VlanTableService.VlanTableDelete:output_type -> vinbero.v1.VlanTableDeleteResponse
+	49,  // 145: vinbero.v1.VlanTableService.VlanTableList:output_type -> vinbero.v1.VlanTableListResponse
+	51,  // 146: vinbero.v1.VlanTableService.VlanTableFlush:output_type -> vinbero.v1.VlanTableFlushResponse
+	54,  // 147: vinbero.v1.BdPeerService.BdPeerCreate:output_type -> vinbero.v1.BdPeerCreateResponse
+	56,  // 148: vinbero.v1.BdPeerService.BdPeerDelete:output_type -> vinbero.v1.BdPeerDeleteResponse
+	58,  // 149: vinbero.v1.BdPeerService.BdPeerList:output_type -> vinbero.v1.BdPeerListResponse
+	60,  // 150: vinbero.v1.BdPeerService.BdPeerFlush:output_type -> vinbero.v1.BdPeerFlushResponse
+	63,  // 151: vinbero.v1.EthernetSegmentService.EsCreate:output_type -> vinbero.v1.EsCreateResponse
+	65,  // 152: vinbero.v1.EthernetSegmentService.EsDelete:output_type -> vinbero.v1.EsDeleteResponse
+	67,  // 153: vinbero.v1.EthernetSegmentService.EsList:output_type -> vinbero.v1.EsListResponse
+	69,  // 154: vinbero.v1.EthernetSegmentService.EsSetDf:output_type -> vinbero.v1.EsSetDfResponse
+	71,  // 155: vinbero.v1.EthernetSegmentService.EsClearDf:output_type -> vinbero.v1.EsClearDfResponse
+	79,  // 156: vinbero.v1.NetworkResourceService.BridgeCreate:output_type -> vinbero.v1.BridgeCreateResponse
+	81,  // 157: vinbero.v1.NetworkResourceService.BridgeDelete:output_type -> vinbero.v1.BridgeDeleteResponse
+	83,  // 158: vinbero.v1.NetworkResourceService.BridgeList:output_type -> vinbero.v1.BridgeListResponse
+	86,  // 159: vinbero.v1.HeadendL2Service.HeadendL2Create:output_type -> vinbero.v1.HeadendL2CreateResponse
+	89,  // 160: vinbero.v1.HeadendL2Service.HeadendL2Delete:output_type -> vinbero.v1.HeadendL2DeleteResponse
+	91,  // 161: vinbero.v1.HeadendL2Service.HeadendL2List:output_type -> vinbero.v1.HeadendL2ListResponse
+	93,  // 162: vinbero.v1.HeadendL2Service.HeadendL2Get:output_type -> vinbero.v1.HeadendL2GetResponse
+	95,  // 163: vinbero.v1.HeadendL2Service.HeadendL2Flush:output_type -> vinbero.v1.HeadendL2FlushResponse
+	98,  // 164: vinbero.v1.StatsService.StatsShow:output_type -> vinbero.v1.StatsShowResponse
+	100, // 165: vinbero.v1.StatsService.StatsReset:output_type -> vinbero.v1.StatsResetResponse
+	103, // 166: vinbero.v1.StatsService.StatsSlotShow:output_type -> vinbero.v1.StatsSlotShowResponse
+	105, // 167: vinbero.v1.StatsService.StatsSlotReset:output_type -> vinbero.v1.StatsSlotResetResponse
+	74,  // 168: vinbero.v1.VrfService.VrfCreate:output_type -> vinbero.v1.VrfCreateResponse
+	76,  // 169: vinbero.v1.VrfService.VrfDelete:output_type -> vinbero.v1.VrfDeleteResponse
+	109, // 170: vinbero.v1.VrfService.VrfAcAdd:output_type -> vinbero.v1.VrfAcAddResponse
+	111, // 171: vinbero.v1.VrfService.VrfAcRemove:output_type -> vinbero.v1.VrfAcRemoveResponse
+	113, // 172: vinbero.v1.VrfService.VrfSetPolicy:output_type -> vinbero.v1.VrfSetPolicyResponse
+	115, // 173: vinbero.v1.VrfService.VrfShow:output_type -> vinbero.v1.VrfShowResponse
+	124, // [124:174] is the sub-list for method output_type
+	74,  // [74:124] is the sub-list for method input_type
+	74,  // [74:74] is the sub-list for extension type_name
+	74,  // [74:74] is the sub-list for extension extendee
+	0,   // [0:74] is the sub-list for field type_name
 }
 
 func init() { file_vinbero_v1_vinbero_proto_init() }
@@ -8432,30 +8344,6 @@ func file_vinbero_v1_vinbero_proto_init() {
 			}
 		}
 		file_vinbero_v1_vinbero_proto_msgTypes[76].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*VrfListRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_vinbero_v1_vinbero_proto_msgTypes[77].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*VrfListResponse); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_vinbero_v1_vinbero_proto_msgTypes[78].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*Bridge); i {
 			case 0:
 				return &v.state
@@ -8467,7 +8355,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[79].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[77].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*BridgeCreateRequest); i {
 			case 0:
 				return &v.state
@@ -8479,7 +8367,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[80].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[78].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*BridgeCreateResponse); i {
 			case 0:
 				return &v.state
@@ -8491,7 +8379,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[81].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[79].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*BridgeDeleteRequest); i {
 			case 0:
 				return &v.state
@@ -8503,7 +8391,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[82].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[80].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*BridgeDeleteResponse); i {
 			case 0:
 				return &v.state
@@ -8515,7 +8403,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[83].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[81].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*BridgeListRequest); i {
 			case 0:
 				return &v.state
@@ -8527,7 +8415,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[84].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[82].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*BridgeListResponse); i {
 			case 0:
 				return &v.state
@@ -8539,7 +8427,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[85].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[83].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2); i {
 			case 0:
 				return &v.state
@@ -8551,7 +8439,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[86].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[84].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2CreateRequest); i {
 			case 0:
 				return &v.state
@@ -8563,7 +8451,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[87].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[85].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2CreateResponse); i {
 			case 0:
 				return &v.state
@@ -8575,7 +8463,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[88].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[86].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2DeleteTarget); i {
 			case 0:
 				return &v.state
@@ -8587,7 +8475,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[89].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[87].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2DeleteRequest); i {
 			case 0:
 				return &v.state
@@ -8599,7 +8487,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[90].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[88].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2DeleteResponse); i {
 			case 0:
 				return &v.state
@@ -8611,7 +8499,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[91].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[89].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2ListRequest); i {
 			case 0:
 				return &v.state
@@ -8623,7 +8511,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[92].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[90].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2ListResponse); i {
 			case 0:
 				return &v.state
@@ -8635,7 +8523,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[93].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[91].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2GetRequest); i {
 			case 0:
 				return &v.state
@@ -8647,7 +8535,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[94].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[92].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2GetResponse); i {
 			case 0:
 				return &v.state
@@ -8659,7 +8547,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[95].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[93].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2FlushRequest); i {
 			case 0:
 				return &v.state
@@ -8671,7 +8559,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[96].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[94].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*HeadendL2FlushResponse); i {
 			case 0:
 				return &v.state
@@ -8683,7 +8571,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[97].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[95].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsCounter); i {
 			case 0:
 				return &v.state
@@ -8695,7 +8583,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[98].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[96].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsShowRequest); i {
 			case 0:
 				return &v.state
@@ -8707,7 +8595,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[99].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[97].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsShowResponse); i {
 			case 0:
 				return &v.state
@@ -8719,7 +8607,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[100].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[98].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsResetRequest); i {
 			case 0:
 				return &v.state
@@ -8731,7 +8619,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[101].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[99].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsResetResponse); i {
 			case 0:
 				return &v.state
@@ -8743,7 +8631,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[102].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[100].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*SlotStatsEntry); i {
 			case 0:
 				return &v.state
@@ -8755,7 +8643,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[103].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[101].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsSlotShowRequest); i {
 			case 0:
 				return &v.state
@@ -8767,7 +8655,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[104].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[102].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsSlotShowResponse); i {
 			case 0:
 				return &v.state
@@ -8779,7 +8667,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[105].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[103].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsSlotResetRequest); i {
 			case 0:
 				return &v.state
@@ -8791,7 +8679,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[106].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[104].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*StatsSlotResetResponse); i {
 			case 0:
 				return &v.state
@@ -8803,7 +8691,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[107].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[105].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfAc); i {
 			case 0:
 				return &v.state
@@ -8815,7 +8703,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[108].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[106].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfPolicy); i {
 			case 0:
 				return &v.state
@@ -8827,7 +8715,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[109].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[107].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfAcAddRequest); i {
 			case 0:
 				return &v.state
@@ -8839,7 +8727,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[110].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[108].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfAcAddResponse); i {
 			case 0:
 				return &v.state
@@ -8851,7 +8739,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[111].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[109].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfAcRemoveRequest); i {
 			case 0:
 				return &v.state
@@ -8863,7 +8751,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[112].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[110].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfAcRemoveResponse); i {
 			case 0:
 				return &v.state
@@ -8875,7 +8763,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[113].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[111].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfSetPolicyRequest); i {
 			case 0:
 				return &v.state
@@ -8887,7 +8775,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[114].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[112].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfSetPolicyResponse); i {
 			case 0:
 				return &v.state
@@ -8899,7 +8787,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[115].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[113].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfShowRequest); i {
 			case 0:
 				return &v.state
@@ -8911,7 +8799,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 				return nil
 			}
 		}
-		file_vinbero_v1_vinbero_proto_msgTypes[116].Exporter = func(v interface{}, i int) interface{} {
+		file_vinbero_v1_vinbero_proto_msgTypes[114].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*VrfShowResponse); i {
 			case 0:
 				return &v.state
@@ -8931,7 +8819,7 @@ func file_vinbero_v1_vinbero_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_vinbero_v1_vinbero_proto_rawDesc,
 			NumEnums:      1,
-			NumMessages:   117,
+			NumMessages:   115,
 			NumExtensions: 0,
 			NumServices:   11,
 		},

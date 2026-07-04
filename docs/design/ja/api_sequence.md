@@ -115,11 +115,11 @@ sequenceDiagram
     participant Op as Operator
     participant R3 as Router3 (Vinbero)
 
-    Note over Op,R3: Phase 1: VRF作成
+    Note over Op,R3: Phase 1: VRF作成 (VrfService)
 
     Op->>R3: VrfCreate<br/>{name: "vrf100", table_id: 100,<br/>members: ["eth0"], enable_l3mdev_rule: true}
-    R3-->>R3: netlink: VRF作成 + member enslave + l3mdev rule
-    R3-->>Op: Created
+    R3-->>R3: netlink: VRF作成 + member enslave + l3mdev rule<br/>+ vrf_id 割り当て (一級 VRF オブジェクト)
+    R3-->>Op: Created {vrf_id, ifindex}
 
     Note over Op,R3: Phase 2: SID登録
 
@@ -637,6 +637,8 @@ sequenceDiagram
     V-->>V: SID aux map走査: "fc00:3::3/128" が br100 を参照中
     V-->>Op: {errors: [{prefix: "br100",<br/>reason: "bridge is referenced by SID fc00:3::3/128"}]}
 ```
+
+VrfDelete は SID 参照のほかにも、ingress AC の残存と vrf-bgp binding の存在で拒否します。先に `VrfAcRemove` / `VrfBgpUnbind` で外してから削除します ([vrf.md](vrf.md) の lifecycle を参照)。
 
 **エラーレスポンス構造:**
 ```
