@@ -11,7 +11,7 @@ option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 // Each SID is identified by a trigger_prefix (IPv6 CIDR) and maps to an action
 // that determines how matching SRv6 packets are processed.
 //
-// Depends on: NetworkResourceService (vrf_name, bridge_name must exist before use)
+// Depends on: VrfService (vrf_name via VrfCreate, bridge_name via VrfBridgeAttach must exist before use)
 service SidFunctionService {
   rpc SidFunctionCreate(SidFunctionCreateRequest) returns (SidFunctionCreateResponse);
   rpc SidFunctionDelete(SidFunctionDeleteRequest) returns (SidFunctionDeleteResponse);
@@ -430,26 +430,15 @@ message EsClearDfResponse {
   EthernetSegment updated = 1;
 }
 
-// NetworkResourceService manages Linux bridge devices via netlink. Bridges
-// are persisted to a JSON state file and reconciled on startup. BridgeCreate
-// also registers the bridge with FDBWatcher for dynamic MAC learning.
-//
-// This service should be called before SidFunctionService, since SIDs
-// reference bridge resources by name. (VRFs are managed by VrfService.)
-service NetworkResourceService {
-  rpc BridgeCreate(BridgeCreateRequest) returns (BridgeCreateResponse);
-  rpc BridgeDelete(BridgeDeleteRequest) returns (BridgeDeleteResponse);
-  rpc BridgeList(BridgeListRequest) returns (BridgeListResponse);
-}
-
-// Vrf is the VRF object: one identity carrying both facets. The kernel-device
+// Vrf is the VRF object: one identity carrying every facet. The kernel-device
 // facet (table_id, members, enable_l3mdev_rule, ifindex) is the Linux VRF
 // device End.DT4/DT6/DT46 use for VRF-aware FIB lookup. The ingress facet
 // (vrf_id, acs) classifies packets at the XDP entry: vrf_id is the data-plane
 // id (0 = global/default VRF, the underlay) and acs is the ingress
-// {interface, VLAN} membership. A VRF may have either facet alone — a MUP
-// gateway has an ingress-only VRF with no kernel device. Both facets are
-// managed by VrfService.
+// {interface, VLAN} membership. The L2 facet (bridge) is the bridge domain
+// End.DT2/DT2M deliver into. A VRF may carry any subset of facets — a MUP
+// gateway has an ingress-only VRF with no kernel device, an L2-only EVI has
+// just a bridge. All facets are managed by VrfService.
 message Vrf {
   string name = 1; // VRF name (e.g., "vrf100")
   uint32 table_id = 2; // Linux routing table ID (kernel-device facet)
@@ -458,10 +447,11 @@ message Vrf {
   uint32 vrf_id = 5; // ingress/data-plane id, server-assigned (0 = global/default VRF)
   repeated VrfAc acs = 6; // ingress access-circuit membership
   uint32 ifindex = 7; // kernel VRF device ifindex, server-assigned (0 = deviceless)
+  Bridge bridge = 8; // L2 bridge-domain facet; unset = none
 }
 
 message VrfCreateRequest {
-  repeated Vrf vrfs = 1; // kernel-device facet only (name + table_id + members + l3mdev); acs / vrf_id / ifindex must be unset
+  repeated Vrf vrfs = 1; // kernel-device facet only (name + table_id + members + l3mdev); acs / vrf_id / ifindex / bridge must be unset
 }
 message VrfCreateResponse {
   repeated Vrf created = 1; // server state after the create (carries vrf_id and ifindex)
@@ -469,46 +459,44 @@ message VrfCreateResponse {
 }
 
 message VrfDeleteRequest {
-  repeated string names = 1; // VRF names to delete; fails while a SID, ingress AC or vrf-bgp binding references the VRF
+  repeated string names = 1; // VRF names to delete; fails while a SID, ingress AC, vrf-bgp binding or attached bridge references the VRF
 }
 message VrfDeleteResponse {
   repeated string deleted_names = 1;
   repeated OperationError errors = 2;
 }
 
-// Bridge represents a Linux bridge device managed by Vinbero.
-// Used by End.DT2 for FDB miss flooding, and by FDBWatcher for MAC learning sync.
+// Bridge is the VRF's L2 bridge-domain facet: the Linux bridge End.DT2
+// delivers into (FDB miss flooding) and FDBWatcher learns MACs from, plus the
+// bd_id that scopes the FDB and EVPN advertisements. Attached via
+// VrfBridgeAttach; the device name may differ from the VRF name.
 message Bridge {
   string name = 1; // Bridge device name (e.g., "br100")
-  uint32 bd_id = 2; // Bridge Domain ID for FDB scoping and FDBWatcher registration
+  uint32 bd_id = 2; // Bridge Domain ID (1..65535) for FDB scoping and FDBWatcher registration
   repeated string members = 3; // Interfaces to enslave to this bridge
+  uint32 ifindex = 4; // bridge device ifindex, server-assigned; must be unset on requests
 }
 
-message BridgeCreateRequest {
-  repeated Bridge bridges = 1;
+// VrfBridgeAttachRequest attaches the L2 facet: it creates (or adopts) the
+// kernel bridge and records it on the VRF. A VRF carries at most one bridge,
+// and a bridge / bd_id belongs to exactly one VRF.
+message VrfBridgeAttachRequest {
+  string vrf_name = 1;
+  Bridge bridge = 2; // bridge.ifindex must be unset (server-assigned)
 }
-message BridgeCreateResponse {
-  repeated Bridge created = 1;
-  repeated OperationError errors = 2;
-}
-
-message BridgeDeleteRequest {
-  repeated string names = 1; // Bridge names to delete; fails if referenced by a SID
-}
-message BridgeDeleteResponse {
-  repeated string deleted_names = 1;
-  repeated OperationError errors = 2;
+message VrfBridgeAttachResponse {
+  Vrf vrf = 1; // the VRF after the attach
 }
 
-message BridgeListRequest {}
-message BridgeListResponse {
-  repeated Bridge bridges = 1;
+message VrfBridgeDetachRequest {
+  string vrf_name = 1; // deletes the kernel bridge; fails while a SID references it
 }
+message VrfBridgeDetachResponse {}
 
 // HeadendL2Service manages L2 frame SRv6 encapsulation (H.Encaps.L2).
 // Frames arriving on a specific interface+VLAN are encapsulated with SRv6 headers.
 //
-// Depends on: NetworkResourceService (bridge must exist if bd_id > 0)
+// Depends on: VrfService (the bridge must be attached via VrfBridgeAttach if bd_id > 0)
 service HeadendL2Service {
   rpc HeadendL2Create(HeadendL2CreateRequest) returns (HeadendL2CreateResponse);
   rpc HeadendL2Delete(HeadendL2DeleteRequest) returns (HeadendL2DeleteResponse);
@@ -614,16 +602,21 @@ message StatsSlotResetRequest {
 }
 message StatsSlotResetResponse {}
 
-// VrfService is the single VRF surface, managing both facets of the VRF
+// VrfService is the single VRF surface, managing every facet of the VRF
 // object. The kernel-device facet (VrfCreate/VrfDelete): a Linux VRF device
-// persisted to the JSON state file and reconciled on startup. The ingress
-// facet (VrfAcAdd/VrfAcRemove/VrfSetPolicy): access-circuit membership
-// ({interface, VLAN}) and the global default-deny policy. A VRF's vrf_id is
-// allocated on first reference; the data plane resolves a packet's VRF once
-// at the XDP entry from its {ifindex, VLAN}. VrfShow returns both facets.
+// persisted to the JSON state file and reconciled on startup. The L2 facet
+// (VrfBridgeAttach/VrfBridgeDetach): the bridge domain End.DT2/DT2M deliver
+// into, same persistence; attach also registers the bridge with FDBWatcher
+// for MAC learning. The ingress facet (VrfAcAdd/VrfAcRemove/VrfSetPolicy):
+// access-circuit membership ({interface, VLAN}) and the global default-deny
+// policy. A VRF's vrf_id is allocated on first reference; the data plane
+// resolves a packet's VRF once at the XDP entry from its {ifindex, VLAN}.
+// VrfShow returns all facets.
 service VrfService {
   rpc VrfCreate(VrfCreateRequest) returns (VrfCreateResponse);       // create (or adopt) the kernel VRF device
   rpc VrfDelete(VrfDeleteRequest) returns (VrfDeleteResponse);       // delete the whole VRF; refuses while referenced
+  rpc VrfBridgeAttach(VrfBridgeAttachRequest) returns (VrfBridgeAttachResponse); // create (or adopt) the bridge, attach the L2 facet
+  rpc VrfBridgeDetach(VrfBridgeDetachRequest) returns (VrfBridgeDetachResponse); // delete the bridge; refuses while a SID references it
   rpc VrfAcAdd(VrfAcAddRequest) returns (VrfAcAddResponse);          // add an AC (creates the VRF)
   rpc VrfAcRemove(VrfAcRemoveRequest) returns (VrfAcRemoveResponse);
   rpc VrfSetPolicy(VrfSetPolicyRequest) returns (VrfSetPolicyResponse);

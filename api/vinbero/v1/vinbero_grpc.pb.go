@@ -1561,168 +1561,6 @@ var EthernetSegmentService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	NetworkResourceService_BridgeCreate_FullMethodName = "/vinbero.v1.NetworkResourceService/BridgeCreate"
-	NetworkResourceService_BridgeDelete_FullMethodName = "/vinbero.v1.NetworkResourceService/BridgeDelete"
-	NetworkResourceService_BridgeList_FullMethodName   = "/vinbero.v1.NetworkResourceService/BridgeList"
-)
-
-// NetworkResourceServiceClient is the client API for NetworkResourceService service.
-//
-// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type NetworkResourceServiceClient interface {
-	BridgeCreate(ctx context.Context, in *BridgeCreateRequest, opts ...grpc.CallOption) (*BridgeCreateResponse, error)
-	BridgeDelete(ctx context.Context, in *BridgeDeleteRequest, opts ...grpc.CallOption) (*BridgeDeleteResponse, error)
-	BridgeList(ctx context.Context, in *BridgeListRequest, opts ...grpc.CallOption) (*BridgeListResponse, error)
-}
-
-type networkResourceServiceClient struct {
-	cc grpc.ClientConnInterface
-}
-
-func NewNetworkResourceServiceClient(cc grpc.ClientConnInterface) NetworkResourceServiceClient {
-	return &networkResourceServiceClient{cc}
-}
-
-func (c *networkResourceServiceClient) BridgeCreate(ctx context.Context, in *BridgeCreateRequest, opts ...grpc.CallOption) (*BridgeCreateResponse, error) {
-	out := new(BridgeCreateResponse)
-	err := c.cc.Invoke(ctx, NetworkResourceService_BridgeCreate_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *networkResourceServiceClient) BridgeDelete(ctx context.Context, in *BridgeDeleteRequest, opts ...grpc.CallOption) (*BridgeDeleteResponse, error) {
-	out := new(BridgeDeleteResponse)
-	err := c.cc.Invoke(ctx, NetworkResourceService_BridgeDelete_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *networkResourceServiceClient) BridgeList(ctx context.Context, in *BridgeListRequest, opts ...grpc.CallOption) (*BridgeListResponse, error) {
-	out := new(BridgeListResponse)
-	err := c.cc.Invoke(ctx, NetworkResourceService_BridgeList_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// NetworkResourceServiceServer is the server API for NetworkResourceService service.
-// All implementations should embed UnimplementedNetworkResourceServiceServer
-// for forward compatibility
-type NetworkResourceServiceServer interface {
-	BridgeCreate(context.Context, *BridgeCreateRequest) (*BridgeCreateResponse, error)
-	BridgeDelete(context.Context, *BridgeDeleteRequest) (*BridgeDeleteResponse, error)
-	BridgeList(context.Context, *BridgeListRequest) (*BridgeListResponse, error)
-}
-
-// UnimplementedNetworkResourceServiceServer should be embedded to have forward compatible implementations.
-type UnimplementedNetworkResourceServiceServer struct {
-}
-
-func (UnimplementedNetworkResourceServiceServer) BridgeCreate(context.Context, *BridgeCreateRequest) (*BridgeCreateResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method BridgeCreate not implemented")
-}
-func (UnimplementedNetworkResourceServiceServer) BridgeDelete(context.Context, *BridgeDeleteRequest) (*BridgeDeleteResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method BridgeDelete not implemented")
-}
-func (UnimplementedNetworkResourceServiceServer) BridgeList(context.Context, *BridgeListRequest) (*BridgeListResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method BridgeList not implemented")
-}
-
-// UnsafeNetworkResourceServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to NetworkResourceServiceServer will
-// result in compilation errors.
-type UnsafeNetworkResourceServiceServer interface {
-	mustEmbedUnimplementedNetworkResourceServiceServer()
-}
-
-func RegisterNetworkResourceServiceServer(s grpc.ServiceRegistrar, srv NetworkResourceServiceServer) {
-	s.RegisterService(&NetworkResourceService_ServiceDesc, srv)
-}
-
-func _NetworkResourceService_BridgeCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(BridgeCreateRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(NetworkResourceServiceServer).BridgeCreate(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: NetworkResourceService_BridgeCreate_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NetworkResourceServiceServer).BridgeCreate(ctx, req.(*BridgeCreateRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _NetworkResourceService_BridgeDelete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(BridgeDeleteRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(NetworkResourceServiceServer).BridgeDelete(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: NetworkResourceService_BridgeDelete_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NetworkResourceServiceServer).BridgeDelete(ctx, req.(*BridgeDeleteRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _NetworkResourceService_BridgeList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(BridgeListRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(NetworkResourceServiceServer).BridgeList(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: NetworkResourceService_BridgeList_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NetworkResourceServiceServer).BridgeList(ctx, req.(*BridgeListRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-// NetworkResourceService_ServiceDesc is the grpc.ServiceDesc for NetworkResourceService service.
-// It's only intended for direct use with grpc.RegisterService,
-// and not to be introspected or modified (even as a copy)
-var NetworkResourceService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "vinbero.v1.NetworkResourceService",
-	HandlerType: (*NetworkResourceServiceServer)(nil),
-	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "BridgeCreate",
-			Handler:    _NetworkResourceService_BridgeCreate_Handler,
-		},
-		{
-			MethodName: "BridgeDelete",
-			Handler:    _NetworkResourceService_BridgeDelete_Handler,
-		},
-		{
-			MethodName: "BridgeList",
-			Handler:    _NetworkResourceService_BridgeList_Handler,
-		},
-	},
-	Streams:  []grpc.StreamDesc{},
-	Metadata: "vinbero/v1/vinbero.proto",
-}
-
-const (
 	HeadendL2Service_HeadendL2Create_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Create"
 	HeadendL2Service_HeadendL2Delete_FullMethodName = "/vinbero.v1.HeadendL2Service/HeadendL2Delete"
 	HeadendL2Service_HeadendL2List_FullMethodName   = "/vinbero.v1.HeadendL2Service/HeadendL2List"
@@ -2158,12 +1996,14 @@ var StatsService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	VrfService_VrfCreate_FullMethodName    = "/vinbero.v1.VrfService/VrfCreate"
-	VrfService_VrfDelete_FullMethodName    = "/vinbero.v1.VrfService/VrfDelete"
-	VrfService_VrfAcAdd_FullMethodName     = "/vinbero.v1.VrfService/VrfAcAdd"
-	VrfService_VrfAcRemove_FullMethodName  = "/vinbero.v1.VrfService/VrfAcRemove"
-	VrfService_VrfSetPolicy_FullMethodName = "/vinbero.v1.VrfService/VrfSetPolicy"
-	VrfService_VrfShow_FullMethodName      = "/vinbero.v1.VrfService/VrfShow"
+	VrfService_VrfCreate_FullMethodName       = "/vinbero.v1.VrfService/VrfCreate"
+	VrfService_VrfDelete_FullMethodName       = "/vinbero.v1.VrfService/VrfDelete"
+	VrfService_VrfBridgeAttach_FullMethodName = "/vinbero.v1.VrfService/VrfBridgeAttach"
+	VrfService_VrfBridgeDetach_FullMethodName = "/vinbero.v1.VrfService/VrfBridgeDetach"
+	VrfService_VrfAcAdd_FullMethodName        = "/vinbero.v1.VrfService/VrfAcAdd"
+	VrfService_VrfAcRemove_FullMethodName     = "/vinbero.v1.VrfService/VrfAcRemove"
+	VrfService_VrfSetPolicy_FullMethodName    = "/vinbero.v1.VrfService/VrfSetPolicy"
+	VrfService_VrfShow_FullMethodName         = "/vinbero.v1.VrfService/VrfShow"
 )
 
 // VrfServiceClient is the client API for VrfService service.
@@ -2172,6 +2012,8 @@ const (
 type VrfServiceClient interface {
 	VrfCreate(ctx context.Context, in *VrfCreateRequest, opts ...grpc.CallOption) (*VrfCreateResponse, error)
 	VrfDelete(ctx context.Context, in *VrfDeleteRequest, opts ...grpc.CallOption) (*VrfDeleteResponse, error)
+	VrfBridgeAttach(ctx context.Context, in *VrfBridgeAttachRequest, opts ...grpc.CallOption) (*VrfBridgeAttachResponse, error)
+	VrfBridgeDetach(ctx context.Context, in *VrfBridgeDetachRequest, opts ...grpc.CallOption) (*VrfBridgeDetachResponse, error)
 	VrfAcAdd(ctx context.Context, in *VrfAcAddRequest, opts ...grpc.CallOption) (*VrfAcAddResponse, error)
 	VrfAcRemove(ctx context.Context, in *VrfAcRemoveRequest, opts ...grpc.CallOption) (*VrfAcRemoveResponse, error)
 	VrfSetPolicy(ctx context.Context, in *VrfSetPolicyRequest, opts ...grpc.CallOption) (*VrfSetPolicyResponse, error)
@@ -2198,6 +2040,24 @@ func (c *vrfServiceClient) VrfCreate(ctx context.Context, in *VrfCreateRequest, 
 func (c *vrfServiceClient) VrfDelete(ctx context.Context, in *VrfDeleteRequest, opts ...grpc.CallOption) (*VrfDeleteResponse, error) {
 	out := new(VrfDeleteResponse)
 	err := c.cc.Invoke(ctx, VrfService_VrfDelete_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfServiceClient) VrfBridgeAttach(ctx context.Context, in *VrfBridgeAttachRequest, opts ...grpc.CallOption) (*VrfBridgeAttachResponse, error) {
+	out := new(VrfBridgeAttachResponse)
+	err := c.cc.Invoke(ctx, VrfService_VrfBridgeAttach_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vrfServiceClient) VrfBridgeDetach(ctx context.Context, in *VrfBridgeDetachRequest, opts ...grpc.CallOption) (*VrfBridgeDetachResponse, error) {
+	out := new(VrfBridgeDetachResponse)
+	err := c.cc.Invoke(ctx, VrfService_VrfBridgeDetach_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2246,6 +2106,8 @@ func (c *vrfServiceClient) VrfShow(ctx context.Context, in *VrfShowRequest, opts
 type VrfServiceServer interface {
 	VrfCreate(context.Context, *VrfCreateRequest) (*VrfCreateResponse, error)
 	VrfDelete(context.Context, *VrfDeleteRequest) (*VrfDeleteResponse, error)
+	VrfBridgeAttach(context.Context, *VrfBridgeAttachRequest) (*VrfBridgeAttachResponse, error)
+	VrfBridgeDetach(context.Context, *VrfBridgeDetachRequest) (*VrfBridgeDetachResponse, error)
 	VrfAcAdd(context.Context, *VrfAcAddRequest) (*VrfAcAddResponse, error)
 	VrfAcRemove(context.Context, *VrfAcRemoveRequest) (*VrfAcRemoveResponse, error)
 	VrfSetPolicy(context.Context, *VrfSetPolicyRequest) (*VrfSetPolicyResponse, error)
@@ -2261,6 +2123,12 @@ func (UnimplementedVrfServiceServer) VrfCreate(context.Context, *VrfCreateReques
 }
 func (UnimplementedVrfServiceServer) VrfDelete(context.Context, *VrfDeleteRequest) (*VrfDeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method VrfDelete not implemented")
+}
+func (UnimplementedVrfServiceServer) VrfBridgeAttach(context.Context, *VrfBridgeAttachRequest) (*VrfBridgeAttachResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VrfBridgeAttach not implemented")
+}
+func (UnimplementedVrfServiceServer) VrfBridgeDetach(context.Context, *VrfBridgeDetachRequest) (*VrfBridgeDetachResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VrfBridgeDetach not implemented")
 }
 func (UnimplementedVrfServiceServer) VrfAcAdd(context.Context, *VrfAcAddRequest) (*VrfAcAddResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method VrfAcAdd not implemented")
@@ -2318,6 +2186,42 @@ func _VrfService_VrfDelete_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(VrfServiceServer).VrfDelete(ctx, req.(*VrfDeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfService_VrfBridgeAttach_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VrfBridgeAttachRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfServiceServer).VrfBridgeAttach(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfService_VrfBridgeAttach_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfServiceServer).VrfBridgeAttach(ctx, req.(*VrfBridgeAttachRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VrfService_VrfBridgeDetach_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VrfBridgeDetachRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VrfServiceServer).VrfBridgeDetach(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VrfService_VrfBridgeDetach_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VrfServiceServer).VrfBridgeDetach(ctx, req.(*VrfBridgeDetachRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2408,6 +2312,14 @@ var VrfService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "VrfDelete",
 			Handler:    _VrfService_VrfDelete_Handler,
+		},
+		{
+			MethodName: "VrfBridgeAttach",
+			Handler:    _VrfService_VrfBridgeAttach_Handler,
+		},
+		{
+			MethodName: "VrfBridgeDetach",
+			Handler:    _VrfService_VrfBridgeDetach_Handler,
 		},
 		{
 			MethodName: "VrfAcAdd",

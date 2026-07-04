@@ -35,8 +35,6 @@ const (
 	BdPeerServiceName = "vinbero.v1.BdPeerService"
 	// EthernetSegmentServiceName is the fully-qualified name of the EthernetSegmentService service.
 	EthernetSegmentServiceName = "vinbero.v1.EthernetSegmentService"
-	// NetworkResourceServiceName is the fully-qualified name of the NetworkResourceService service.
-	NetworkResourceServiceName = "vinbero.v1.NetworkResourceService"
 	// HeadendL2ServiceName is the fully-qualified name of the HeadendL2Service service.
 	HeadendL2ServiceName = "vinbero.v1.HeadendL2Service"
 	// StatsServiceName is the fully-qualified name of the StatsService service.
@@ -145,15 +143,6 @@ const (
 	// EthernetSegmentServiceEsClearDfProcedure is the fully-qualified name of the
 	// EthernetSegmentService's EsClearDf RPC.
 	EthernetSegmentServiceEsClearDfProcedure = "/vinbero.v1.EthernetSegmentService/EsClearDf"
-	// NetworkResourceServiceBridgeCreateProcedure is the fully-qualified name of the
-	// NetworkResourceService's BridgeCreate RPC.
-	NetworkResourceServiceBridgeCreateProcedure = "/vinbero.v1.NetworkResourceService/BridgeCreate"
-	// NetworkResourceServiceBridgeDeleteProcedure is the fully-qualified name of the
-	// NetworkResourceService's BridgeDelete RPC.
-	NetworkResourceServiceBridgeDeleteProcedure = "/vinbero.v1.NetworkResourceService/BridgeDelete"
-	// NetworkResourceServiceBridgeListProcedure is the fully-qualified name of the
-	// NetworkResourceService's BridgeList RPC.
-	NetworkResourceServiceBridgeListProcedure = "/vinbero.v1.NetworkResourceService/BridgeList"
 	// HeadendL2ServiceHeadendL2CreateProcedure is the fully-qualified name of the HeadendL2Service's
 	// HeadendL2Create RPC.
 	HeadendL2ServiceHeadendL2CreateProcedure = "/vinbero.v1.HeadendL2Service/HeadendL2Create"
@@ -183,6 +172,12 @@ const (
 	VrfServiceVrfCreateProcedure = "/vinbero.v1.VrfService/VrfCreate"
 	// VrfServiceVrfDeleteProcedure is the fully-qualified name of the VrfService's VrfDelete RPC.
 	VrfServiceVrfDeleteProcedure = "/vinbero.v1.VrfService/VrfDelete"
+	// VrfServiceVrfBridgeAttachProcedure is the fully-qualified name of the VrfService's
+	// VrfBridgeAttach RPC.
+	VrfServiceVrfBridgeAttachProcedure = "/vinbero.v1.VrfService/VrfBridgeAttach"
+	// VrfServiceVrfBridgeDetachProcedure is the fully-qualified name of the VrfService's
+	// VrfBridgeDetach RPC.
+	VrfServiceVrfBridgeDetachProcedure = "/vinbero.v1.VrfService/VrfBridgeDetach"
 	// VrfServiceVrfAcAddProcedure is the fully-qualified name of the VrfService's VrfAcAdd RPC.
 	VrfServiceVrfAcAddProcedure = "/vinbero.v1.VrfService/VrfAcAdd"
 	// VrfServiceVrfAcRemoveProcedure is the fully-qualified name of the VrfService's VrfAcRemove RPC.
@@ -234,10 +229,6 @@ var (
 	ethernetSegmentServiceEsListMethodDescriptor        = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsList")
 	ethernetSegmentServiceEsSetDfMethodDescriptor       = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsSetDf")
 	ethernetSegmentServiceEsClearDfMethodDescriptor     = ethernetSegmentServiceServiceDescriptor.Methods().ByName("EsClearDf")
-	networkResourceServiceServiceDescriptor             = v1.File_vinbero_v1_vinbero_proto.Services().ByName("NetworkResourceService")
-	networkResourceServiceBridgeCreateMethodDescriptor  = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeCreate")
-	networkResourceServiceBridgeDeleteMethodDescriptor  = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeDelete")
-	networkResourceServiceBridgeListMethodDescriptor    = networkResourceServiceServiceDescriptor.Methods().ByName("BridgeList")
 	headendL2ServiceServiceDescriptor                   = v1.File_vinbero_v1_vinbero_proto.Services().ByName("HeadendL2Service")
 	headendL2ServiceHeadendL2CreateMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Create")
 	headendL2ServiceHeadendL2DeleteMethodDescriptor     = headendL2ServiceServiceDescriptor.Methods().ByName("HeadendL2Delete")
@@ -252,6 +243,8 @@ var (
 	vrfServiceServiceDescriptor                         = v1.File_vinbero_v1_vinbero_proto.Services().ByName("VrfService")
 	vrfServiceVrfCreateMethodDescriptor                 = vrfServiceServiceDescriptor.Methods().ByName("VrfCreate")
 	vrfServiceVrfDeleteMethodDescriptor                 = vrfServiceServiceDescriptor.Methods().ByName("VrfDelete")
+	vrfServiceVrfBridgeAttachMethodDescriptor           = vrfServiceServiceDescriptor.Methods().ByName("VrfBridgeAttach")
+	vrfServiceVrfBridgeDetachMethodDescriptor           = vrfServiceServiceDescriptor.Methods().ByName("VrfBridgeDetach")
 	vrfServiceVrfAcAddMethodDescriptor                  = vrfServiceServiceDescriptor.Methods().ByName("VrfAcAdd")
 	vrfServiceVrfAcRemoveMethodDescriptor               = vrfServiceServiceDescriptor.Methods().ByName("VrfAcRemove")
 	vrfServiceVrfSetPolicyMethodDescriptor              = vrfServiceServiceDescriptor.Methods().ByName("VrfSetPolicy")
@@ -1385,127 +1378,6 @@ func (UnimplementedEthernetSegmentServiceHandler) EsClearDf(context.Context, *co
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.EthernetSegmentService.EsClearDf is not implemented"))
 }
 
-// NetworkResourceServiceClient is a client for the vinbero.v1.NetworkResourceService service.
-type NetworkResourceServiceClient interface {
-	BridgeCreate(context.Context, *connect.Request[v1.BridgeCreateRequest]) (*connect.Response[v1.BridgeCreateResponse], error)
-	BridgeDelete(context.Context, *connect.Request[v1.BridgeDeleteRequest]) (*connect.Response[v1.BridgeDeleteResponse], error)
-	BridgeList(context.Context, *connect.Request[v1.BridgeListRequest]) (*connect.Response[v1.BridgeListResponse], error)
-}
-
-// NewNetworkResourceServiceClient constructs a client for the vinbero.v1.NetworkResourceService
-// service. By default, it uses the Connect protocol with the binary Protobuf Codec, asks for
-// gzipped responses, and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply
-// the connect.WithGRPC() or connect.WithGRPCWeb() options.
-//
-// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
-// http://api.acme.com or https://acme.com/grpc).
-func NewNetworkResourceServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) NetworkResourceServiceClient {
-	baseURL = strings.TrimRight(baseURL, "/")
-	return &networkResourceServiceClient{
-		bridgeCreate: connect.NewClient[v1.BridgeCreateRequest, v1.BridgeCreateResponse](
-			httpClient,
-			baseURL+NetworkResourceServiceBridgeCreateProcedure,
-			connect.WithSchema(networkResourceServiceBridgeCreateMethodDescriptor),
-			connect.WithClientOptions(opts...),
-		),
-		bridgeDelete: connect.NewClient[v1.BridgeDeleteRequest, v1.BridgeDeleteResponse](
-			httpClient,
-			baseURL+NetworkResourceServiceBridgeDeleteProcedure,
-			connect.WithSchema(networkResourceServiceBridgeDeleteMethodDescriptor),
-			connect.WithClientOptions(opts...),
-		),
-		bridgeList: connect.NewClient[v1.BridgeListRequest, v1.BridgeListResponse](
-			httpClient,
-			baseURL+NetworkResourceServiceBridgeListProcedure,
-			connect.WithSchema(networkResourceServiceBridgeListMethodDescriptor),
-			connect.WithClientOptions(opts...),
-		),
-	}
-}
-
-// networkResourceServiceClient implements NetworkResourceServiceClient.
-type networkResourceServiceClient struct {
-	bridgeCreate *connect.Client[v1.BridgeCreateRequest, v1.BridgeCreateResponse]
-	bridgeDelete *connect.Client[v1.BridgeDeleteRequest, v1.BridgeDeleteResponse]
-	bridgeList   *connect.Client[v1.BridgeListRequest, v1.BridgeListResponse]
-}
-
-// BridgeCreate calls vinbero.v1.NetworkResourceService.BridgeCreate.
-func (c *networkResourceServiceClient) BridgeCreate(ctx context.Context, req *connect.Request[v1.BridgeCreateRequest]) (*connect.Response[v1.BridgeCreateResponse], error) {
-	return c.bridgeCreate.CallUnary(ctx, req)
-}
-
-// BridgeDelete calls vinbero.v1.NetworkResourceService.BridgeDelete.
-func (c *networkResourceServiceClient) BridgeDelete(ctx context.Context, req *connect.Request[v1.BridgeDeleteRequest]) (*connect.Response[v1.BridgeDeleteResponse], error) {
-	return c.bridgeDelete.CallUnary(ctx, req)
-}
-
-// BridgeList calls vinbero.v1.NetworkResourceService.BridgeList.
-func (c *networkResourceServiceClient) BridgeList(ctx context.Context, req *connect.Request[v1.BridgeListRequest]) (*connect.Response[v1.BridgeListResponse], error) {
-	return c.bridgeList.CallUnary(ctx, req)
-}
-
-// NetworkResourceServiceHandler is an implementation of the vinbero.v1.NetworkResourceService
-// service.
-type NetworkResourceServiceHandler interface {
-	BridgeCreate(context.Context, *connect.Request[v1.BridgeCreateRequest]) (*connect.Response[v1.BridgeCreateResponse], error)
-	BridgeDelete(context.Context, *connect.Request[v1.BridgeDeleteRequest]) (*connect.Response[v1.BridgeDeleteResponse], error)
-	BridgeList(context.Context, *connect.Request[v1.BridgeListRequest]) (*connect.Response[v1.BridgeListResponse], error)
-}
-
-// NewNetworkResourceServiceHandler builds an HTTP handler from the service implementation. It
-// returns the path on which to mount the handler and the handler itself.
-//
-// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
-// and JSON codecs. They also support gzip compression.
-func NewNetworkResourceServiceHandler(svc NetworkResourceServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
-	networkResourceServiceBridgeCreateHandler := connect.NewUnaryHandler(
-		NetworkResourceServiceBridgeCreateProcedure,
-		svc.BridgeCreate,
-		connect.WithSchema(networkResourceServiceBridgeCreateMethodDescriptor),
-		connect.WithHandlerOptions(opts...),
-	)
-	networkResourceServiceBridgeDeleteHandler := connect.NewUnaryHandler(
-		NetworkResourceServiceBridgeDeleteProcedure,
-		svc.BridgeDelete,
-		connect.WithSchema(networkResourceServiceBridgeDeleteMethodDescriptor),
-		connect.WithHandlerOptions(opts...),
-	)
-	networkResourceServiceBridgeListHandler := connect.NewUnaryHandler(
-		NetworkResourceServiceBridgeListProcedure,
-		svc.BridgeList,
-		connect.WithSchema(networkResourceServiceBridgeListMethodDescriptor),
-		connect.WithHandlerOptions(opts...),
-	)
-	return "/vinbero.v1.NetworkResourceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case NetworkResourceServiceBridgeCreateProcedure:
-			networkResourceServiceBridgeCreateHandler.ServeHTTP(w, r)
-		case NetworkResourceServiceBridgeDeleteProcedure:
-			networkResourceServiceBridgeDeleteHandler.ServeHTTP(w, r)
-		case NetworkResourceServiceBridgeListProcedure:
-			networkResourceServiceBridgeListHandler.ServeHTTP(w, r)
-		default:
-			http.NotFound(w, r)
-		}
-	})
-}
-
-// UnimplementedNetworkResourceServiceHandler returns CodeUnimplemented from all methods.
-type UnimplementedNetworkResourceServiceHandler struct{}
-
-func (UnimplementedNetworkResourceServiceHandler) BridgeCreate(context.Context, *connect.Request[v1.BridgeCreateRequest]) (*connect.Response[v1.BridgeCreateResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.NetworkResourceService.BridgeCreate is not implemented"))
-}
-
-func (UnimplementedNetworkResourceServiceHandler) BridgeDelete(context.Context, *connect.Request[v1.BridgeDeleteRequest]) (*connect.Response[v1.BridgeDeleteResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.NetworkResourceService.BridgeDelete is not implemented"))
-}
-
-func (UnimplementedNetworkResourceServiceHandler) BridgeList(context.Context, *connect.Request[v1.BridgeListRequest]) (*connect.Response[v1.BridgeListResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.NetworkResourceService.BridgeList is not implemented"))
-}
-
 // HeadendL2ServiceClient is a client for the vinbero.v1.HeadendL2Service service.
 type HeadendL2ServiceClient interface {
 	HeadendL2Create(context.Context, *connect.Request[v1.HeadendL2CreateRequest]) (*connect.Response[v1.HeadendL2CreateResponse], error)
@@ -1828,6 +1700,8 @@ func (UnimplementedStatsServiceHandler) StatsSlotReset(context.Context, *connect
 type VrfServiceClient interface {
 	VrfCreate(context.Context, *connect.Request[v1.VrfCreateRequest]) (*connect.Response[v1.VrfCreateResponse], error)
 	VrfDelete(context.Context, *connect.Request[v1.VrfDeleteRequest]) (*connect.Response[v1.VrfDeleteResponse], error)
+	VrfBridgeAttach(context.Context, *connect.Request[v1.VrfBridgeAttachRequest]) (*connect.Response[v1.VrfBridgeAttachResponse], error)
+	VrfBridgeDetach(context.Context, *connect.Request[v1.VrfBridgeDetachRequest]) (*connect.Response[v1.VrfBridgeDetachResponse], error)
 	VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error)
 	VrfAcRemove(context.Context, *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error)
 	VrfSetPolicy(context.Context, *connect.Request[v1.VrfSetPolicyRequest]) (*connect.Response[v1.VrfSetPolicyResponse], error)
@@ -1854,6 +1728,18 @@ func NewVrfServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			httpClient,
 			baseURL+VrfServiceVrfDeleteProcedure,
 			connect.WithSchema(vrfServiceVrfDeleteMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		vrfBridgeAttach: connect.NewClient[v1.VrfBridgeAttachRequest, v1.VrfBridgeAttachResponse](
+			httpClient,
+			baseURL+VrfServiceVrfBridgeAttachProcedure,
+			connect.WithSchema(vrfServiceVrfBridgeAttachMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		vrfBridgeDetach: connect.NewClient[v1.VrfBridgeDetachRequest, v1.VrfBridgeDetachResponse](
+			httpClient,
+			baseURL+VrfServiceVrfBridgeDetachProcedure,
+			connect.WithSchema(vrfServiceVrfBridgeDetachMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
 		vrfAcAdd: connect.NewClient[v1.VrfAcAddRequest, v1.VrfAcAddResponse](
@@ -1885,12 +1771,14 @@ func NewVrfServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 
 // vrfServiceClient implements VrfServiceClient.
 type vrfServiceClient struct {
-	vrfCreate    *connect.Client[v1.VrfCreateRequest, v1.VrfCreateResponse]
-	vrfDelete    *connect.Client[v1.VrfDeleteRequest, v1.VrfDeleteResponse]
-	vrfAcAdd     *connect.Client[v1.VrfAcAddRequest, v1.VrfAcAddResponse]
-	vrfAcRemove  *connect.Client[v1.VrfAcRemoveRequest, v1.VrfAcRemoveResponse]
-	vrfSetPolicy *connect.Client[v1.VrfSetPolicyRequest, v1.VrfSetPolicyResponse]
-	vrfShow      *connect.Client[v1.VrfShowRequest, v1.VrfShowResponse]
+	vrfCreate       *connect.Client[v1.VrfCreateRequest, v1.VrfCreateResponse]
+	vrfDelete       *connect.Client[v1.VrfDeleteRequest, v1.VrfDeleteResponse]
+	vrfBridgeAttach *connect.Client[v1.VrfBridgeAttachRequest, v1.VrfBridgeAttachResponse]
+	vrfBridgeDetach *connect.Client[v1.VrfBridgeDetachRequest, v1.VrfBridgeDetachResponse]
+	vrfAcAdd        *connect.Client[v1.VrfAcAddRequest, v1.VrfAcAddResponse]
+	vrfAcRemove     *connect.Client[v1.VrfAcRemoveRequest, v1.VrfAcRemoveResponse]
+	vrfSetPolicy    *connect.Client[v1.VrfSetPolicyRequest, v1.VrfSetPolicyResponse]
+	vrfShow         *connect.Client[v1.VrfShowRequest, v1.VrfShowResponse]
 }
 
 // VrfCreate calls vinbero.v1.VrfService.VrfCreate.
@@ -1901,6 +1789,16 @@ func (c *vrfServiceClient) VrfCreate(ctx context.Context, req *connect.Request[v
 // VrfDelete calls vinbero.v1.VrfService.VrfDelete.
 func (c *vrfServiceClient) VrfDelete(ctx context.Context, req *connect.Request[v1.VrfDeleteRequest]) (*connect.Response[v1.VrfDeleteResponse], error) {
 	return c.vrfDelete.CallUnary(ctx, req)
+}
+
+// VrfBridgeAttach calls vinbero.v1.VrfService.VrfBridgeAttach.
+func (c *vrfServiceClient) VrfBridgeAttach(ctx context.Context, req *connect.Request[v1.VrfBridgeAttachRequest]) (*connect.Response[v1.VrfBridgeAttachResponse], error) {
+	return c.vrfBridgeAttach.CallUnary(ctx, req)
+}
+
+// VrfBridgeDetach calls vinbero.v1.VrfService.VrfBridgeDetach.
+func (c *vrfServiceClient) VrfBridgeDetach(ctx context.Context, req *connect.Request[v1.VrfBridgeDetachRequest]) (*connect.Response[v1.VrfBridgeDetachResponse], error) {
+	return c.vrfBridgeDetach.CallUnary(ctx, req)
 }
 
 // VrfAcAdd calls vinbero.v1.VrfService.VrfAcAdd.
@@ -1927,6 +1825,8 @@ func (c *vrfServiceClient) VrfShow(ctx context.Context, req *connect.Request[v1.
 type VrfServiceHandler interface {
 	VrfCreate(context.Context, *connect.Request[v1.VrfCreateRequest]) (*connect.Response[v1.VrfCreateResponse], error)
 	VrfDelete(context.Context, *connect.Request[v1.VrfDeleteRequest]) (*connect.Response[v1.VrfDeleteResponse], error)
+	VrfBridgeAttach(context.Context, *connect.Request[v1.VrfBridgeAttachRequest]) (*connect.Response[v1.VrfBridgeAttachResponse], error)
+	VrfBridgeDetach(context.Context, *connect.Request[v1.VrfBridgeDetachRequest]) (*connect.Response[v1.VrfBridgeDetachResponse], error)
 	VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error)
 	VrfAcRemove(context.Context, *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error)
 	VrfSetPolicy(context.Context, *connect.Request[v1.VrfSetPolicyRequest]) (*connect.Response[v1.VrfSetPolicyResponse], error)
@@ -1949,6 +1849,18 @@ func NewVrfServiceHandler(svc VrfServiceHandler, opts ...connect.HandlerOption) 
 		VrfServiceVrfDeleteProcedure,
 		svc.VrfDelete,
 		connect.WithSchema(vrfServiceVrfDeleteMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfServiceVrfBridgeAttachHandler := connect.NewUnaryHandler(
+		VrfServiceVrfBridgeAttachProcedure,
+		svc.VrfBridgeAttach,
+		connect.WithSchema(vrfServiceVrfBridgeAttachMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfServiceVrfBridgeDetachHandler := connect.NewUnaryHandler(
+		VrfServiceVrfBridgeDetachProcedure,
+		svc.VrfBridgeDetach,
+		connect.WithSchema(vrfServiceVrfBridgeDetachMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
 	vrfServiceVrfAcAddHandler := connect.NewUnaryHandler(
@@ -1981,6 +1893,10 @@ func NewVrfServiceHandler(svc VrfServiceHandler, opts ...connect.HandlerOption) 
 			vrfServiceVrfCreateHandler.ServeHTTP(w, r)
 		case VrfServiceVrfDeleteProcedure:
 			vrfServiceVrfDeleteHandler.ServeHTTP(w, r)
+		case VrfServiceVrfBridgeAttachProcedure:
+			vrfServiceVrfBridgeAttachHandler.ServeHTTP(w, r)
+		case VrfServiceVrfBridgeDetachProcedure:
+			vrfServiceVrfBridgeDetachHandler.ServeHTTP(w, r)
 		case VrfServiceVrfAcAddProcedure:
 			vrfServiceVrfAcAddHandler.ServeHTTP(w, r)
 		case VrfServiceVrfAcRemoveProcedure:
@@ -2004,6 +1920,14 @@ func (UnimplementedVrfServiceHandler) VrfCreate(context.Context, *connect.Reques
 
 func (UnimplementedVrfServiceHandler) VrfDelete(context.Context, *connect.Request[v1.VrfDeleteRequest]) (*connect.Response[v1.VrfDeleteResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfDelete is not implemented"))
+}
+
+func (UnimplementedVrfServiceHandler) VrfBridgeAttach(context.Context, *connect.Request[v1.VrfBridgeAttachRequest]) (*connect.Response[v1.VrfBridgeAttachResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfBridgeAttach is not implemented"))
+}
+
+func (UnimplementedVrfServiceHandler) VrfBridgeDetach(context.Context, *connect.Request[v1.VrfBridgeDetachRequest]) (*connect.Response[v1.VrfBridgeDetachResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfBridgeDetach is not implemented"))
 }
 
 func (UnimplementedVrfServiceHandler) VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error) {
