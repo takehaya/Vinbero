@@ -467,6 +467,12 @@ func TestManager_AttachBridge_Uniqueness(t *testing.T) {
 	if _, err := m.AttachBridge("evi-200", Bridge{Name: "br200", BdID: 100}, ops); err == nil {
 		t.Error("bd_id owned by another VRF: want error")
 	}
+	// Same VRF, same bridge, different bd_id: refuse (the EVPN exporter keys
+	// per-BD state by the bd; changing it under an attached facet would
+	// strand the old bd's advertisements).
+	if _, err := m.AttachBridge("evi-100", Bridge{Name: "br100", BdID: 300}, ops); err == nil {
+		t.Error("bd change under an attached facet: want error")
+	}
 	// Same VRF, same bridge re-attach: converges (adopt-idempotent).
 	if _, err := m.AttachBridge("evi-100", Bridge{Name: "br100", BdID: 100}, ops); err != nil {
 		t.Errorf("idempotent re-attach: %v", err)

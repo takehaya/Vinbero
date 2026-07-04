@@ -31,9 +31,13 @@ func (b *VrfBindingConfig) Validate() error {
 	// bd_id tombstone: the binding no longer carries a bridge domain (it
 	// derives from the VRF's bridge facet). yaml decoding is lenient, so
 	// without this an old config's bd_id would be dropped silently and its
-	// EVPN routes would fail to install with no hint at the cause.
+	// EVPN routes would fail to install with no hint at the cause. The
+	// message also covers the legacy-RT half of the migration: the old
+	// "flat import_rts/export_rts + bd_id" form expanded to the evpn
+	// family, which flat lists no longer do -- dropping only bd_id would
+	// leave an L3VPN-only binding that silently imports no EVPN routes.
 	if b.BDID != 0 {
-		return fmt.Errorf("vrf binding %q: bd_id was removed; declare the bridge on vrfs.entries[].bridge instead (the bridge domain derives from the VRF's bridge facet)", b.VRFName)
+		return fmt.Errorf("vrf binding %q: bd_id was removed; declare the bridge on vrfs.entries[].bridge (the bridge domain derives from the VRF's bridge facet) and declare the EVPN route targets under families.evpn -- the legacy import_rts/export_rts lists now expand to vpnv4+vpnv6 only", b.VRFName)
 	}
 	if len(b.Families) > 0 && (len(b.ImportRTs) > 0 || len(b.ExportRTs) > 0) {
 		return fmt.Errorf("vrf binding %q: families and import_rts/export_rts cannot both be set (the families map is the source of truth at runtime, so the legacy lists would be silently ignored)", b.VRFName)

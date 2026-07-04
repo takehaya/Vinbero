@@ -475,22 +475,15 @@ func (m *Manager) List() []Binding {
 // match must be deterministic, not map-iteration order, because the MUP
 // uplink instance a T2ST installs under follows the matched binding and a
 // flapping match would re-key the session's F-TEID entry on every
-// reconcile. The minimum is selected in a single allocation-free pass; this
-// sits on the per-route apply path. The per-binding facet lookup takes
-// vrf.Manager's read lock nested inside m.mu; vrf.Manager never calls back
-// into this package, so the order cannot invert.
+// reconcile. This sits on the per-route apply path, so the facet lookup
+// (vrf.Manager.Get clones the VRF) runs only for a binding that matched
+// the RTs and would win the name selection, not for every binding. The
+// lookup takes vrf.Manager's read lock nested inside m.mu; vrf.Manager
+// never calls back into this package, so the order cannot invert.
 func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName string, bdID uint16, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, b := range m.bindings {
-		var facetBD uint16
-		if fam == bgp.FamilyEVPN {
-			v, exists := m.vrf.Get(b.VRFName)
-			if !exists || v.Bridge == nil {
-				continue
-			}
-			facetBD = v.Bridge.BdID
-		}
 		if ok && b.VRFName >= vrfName {
 			continue
 		}
@@ -500,6 +493,17 @@ func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName st
 		}
 		for _, rt := range fp.RouteTargets {
 			if rt.Direction.Has(DirectionImport) && slices.Contains(rts, rt.RT) {
+				var facetBD uint16
+				if fam == bgp.FamilyEVPN {
+					v, exists := m.vrf.Get(b.VRFName)
+					if !exists || v.Bridge == nil {
+						// Skip the facet-less candidate entirely (fail-closed):
+						// it must not win the name selection and shadow a
+						// facet-backed binding importing the same RT.
+						break
+					}
+					facetBD = v.Bridge.BdID
+				}
 				vrfName, bdID, ok = b.VRFName, facetBD, true
 				break
 			}

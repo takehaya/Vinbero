@@ -388,6 +388,15 @@ func (m *Manager) bridgeConflictLocked(name string, b Bridge) error {
 			if other.Bridge.Name != b.Name {
 				return fmt.Errorf("vrf %q already carries bridge %q; detach it first", name, other.Bridge.Name)
 			}
+			if other.Bridge.BdID != b.BdID {
+				// A re-attach must not change the bd under an attached facet:
+				// the EVPN exporter keys its per-BD state (advertised RT2s,
+				// the DT2U/DT2M SIDs) by the bd, so a silent change would
+				// strand the old bd's advertisements. The mechanics layer
+				// rejects this via its state record too; this keeps the
+				// invariant self-contained in the facet model.
+				return fmt.Errorf("vrf %q: bridge %q is attached with bd_id %d; detach it before changing the bd (got %d)", name, b.Name, other.Bridge.BdID, b.BdID)
+			}
 			continue
 		}
 		if other.Bridge.Name == b.Name {

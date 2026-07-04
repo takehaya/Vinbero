@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -763,6 +764,49 @@ func TestVrfServer_BridgeDetach(t *testing.T) {
 	}
 	if _, err := s.VrfBridgeDetach(context.Background(), connect.NewRequest(&v1.VrfBridgeDetachRequest{VrfName: "ghost"})); connect.CodeOf(err) != connect.CodeNotFound {
 		t.Errorf("unknown vrf: code = %v, want NotFound", connect.CodeOf(err))
+	}
+}
+
+// Moving a bridge domain to a different bd is detach -> attach: the detach
+// disables the old bd's EVPN state and the re-attach enables the new bd,
+// leaving no residue under the old bd (a direct re-attach with a changed bd
+// is refused by the facet uniqueness check).
+func TestVrfServer_BridgeDetachAttachMovesBd(t *testing.T) {
+	hook := &fakeEvpnBridge{}
+	s, _, _, bindings, _ := newTestVrfServerBridge(hook)
+	bindings.bindings["evi-100"] = vrfbgp.Binding{
+		VRFName: "evi-100",
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionBoth}}},
+		},
+	}
+	attach := func(bd uint32) error {
+		_, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
+			VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: bd},
+		}))
+		return err
+	}
+	if err := attach(100); err != nil {
+		t.Fatalf("attach bd 100: %v", err)
+	}
+	if !hook.enabled[100] {
+		t.Fatalf("precondition: bd 100 enabled after attach; enabled=%v", hook.enabled)
+	}
+	// A direct re-attach with a different bd must refuse.
+	if err := attach(200); err == nil {
+		t.Fatal("re-attach with a changed bd must refuse (detach first)")
+	}
+	if _, err := s.VrfBridgeDetach(context.Background(), connect.NewRequest(&v1.VrfBridgeDetachRequest{VrfName: "evi-100"})); err != nil {
+		t.Fatalf("VrfBridgeDetach: %v", err)
+	}
+	if err := attach(200); err != nil {
+		t.Fatalf("attach bd 200 after detach: %v", err)
+	}
+	if !slices.Contains(hook.disabled, uint16(100)) {
+		t.Errorf("detach must Disable the old bd 100; disabled=%v", hook.disabled)
+	}
+	if hook.enabled[100] || !hook.enabled[200] {
+		t.Errorf("after the move only bd 200 must be enabled; enabled=%v", hook.enabled)
 	}
 }
 
