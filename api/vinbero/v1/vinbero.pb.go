@@ -4389,7 +4389,11 @@ type VrfBridgeDetachRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	VrfName string `protobuf:"bytes,1,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"` // deletes the kernel bridge; fails while a SID references it
+	// Deletes the kernel bridge. Fails while an operator-created SID references
+	// the bridge; the End.DT2U/DT2M SIDs the EVPN auto-advertise exporter
+	// installed for this bd are excluded from that check — the detach itself
+	// tears them down (route withdraw + SID removal) after the bridge delete.
+	VrfName string `protobuf:"bytes,1,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`
 }
 
 func (x *VrfBridgeDetachRequest) Reset() {
