@@ -187,7 +187,7 @@ func newTestVrfServerFull() (*VrfServer, *fakeProgrammer, *fakeVrfDeviceOps) {
 	events := []string{}
 	s := NewVrfServer(vrf.NewManager(), prog, dev, &fakeSidTable{}, &fakeBindings{},
 		&fakeServerBridgeOps{ifindexes: map[string]uint32{}, events: &events},
-		&fakeFdbRegistrar{events: &events}, nil)
+		&fakeFdbRegistrar{events: &events}, nil, nil)
 	s.resolve = fakeResolver
 	return s, prog, dev
 }
@@ -199,7 +199,7 @@ func newTestVrfServerBridge(evpn *EvpnCoordinator) (*VrfServer, *fakeServerBridg
 	bridges := &fakeServerBridgeOps{ifindexes: map[string]uint32{"br100": 42}, events: &events}
 	fdb := &fakeFdbRegistrar{events: &events}
 	bindings := &fakeBindings{bindings: map[string]vrfbgp.Binding{}}
-	s := NewVrfServer(vrf.NewManager(), &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn)
+	s := NewVrfServer(vrf.NewManager(), &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn, nil)
 	s.resolve = fakeResolver
 	return s, bridges, fdb, bindings, &events
 }

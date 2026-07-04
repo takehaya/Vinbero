@@ -268,7 +268,7 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	if err != nil {
 		// Roll the DT2U SID back so a half-enabled BD leaves no orphan. If the
 		// rollback delete itself fails, surface it: the DT2U SID is then stranded
-		// in sid_function_map and would block a later BridgeDelete reference check.
+		// in sid_function_map and would block a later VrfBridgeDetach reference check.
 		if rbErr := e.removeL2SID(dt2uSID); rbErr != nil {
 			return fmt.Errorf("vrf %q: install End.DT2M SID: %w; rolling back the End.DT2U SID failed (%v): it may be stranded in sid_function_map", b.VRFName, err, rbErr)
 		}
@@ -318,7 +318,7 @@ func (e *EVPNExporter) DisableBD(bdID uint16) {
 }
 
 // SIDsForBD returns the sid_function_map keys ("<addr>/128") of the End.DT2U and
-// End.DT2M SIDs the exporter installed for the bridge domain, so BridgeDelete can
+// End.DT2M SIDs the exporter installed for the bridge domain, so VrfBridgeDetach can
 // exclude these lifecycle-owned SIDs from its bridge-reference check. nil for a
 // BD the exporter has not enabled.
 func (e *EVPNExporter) SIDsForBD(bdID uint16) []string {

@@ -220,7 +220,7 @@ func run(cliCtx *cli.Context) error {
 		// EVPN auto-advertise (RT2/RT3/RT4) is opt-in via
 		// bgp.global.evpn_auto_advertise. It shares the locator manager, VRF
 		// bindings, and BGP advertiser; the FDBWatcher feeds it local MACs and both
-		// the bridge-device (BridgeCreate/Delete) and binding (VrfBgpBind/Unbind)
+		// the bridge facet (VrfBridgeAttach/Detach) and binding (VrfBgpBind/Unbind)
 		// lifecycles enable/disable each bound bridge domain.
 		if cfg.BGP.Global.EVPNAutoAdvertise {
 			evpnExporter = export.NewEVPNExporter(
@@ -239,8 +239,8 @@ func run(cliCtx *cli.Context) error {
 	if exporter != nil {
 		vrfExp = exporter
 	}
-	// The EVPN coordinator drives RT2/RT3 across both the bridge-device axis
-	// (BridgeCreate/Delete) and the binding axis (VrfBgpBind/Unbind), resolving a
+	// The EVPN coordinator drives RT2/RT3 across both the bridge facet axis
+	// (VrfBridgeAttach/Detach) and the binding axis (VrfBgpBind/Unbind), resolving a
 	// bridge domain to its bridge ifindex and replaying its FDB on enable. evpnES
 	// is the RT4 (Ethernet Segment) hook. Both stay nil unless EVPN auto-advertise
 	// is on, so the handlers' nil checks hold.
@@ -270,7 +270,7 @@ func run(cliCtx *cli.Context) error {
 	if err := seedVrfDevices(vin.GetResourceManager(), srv.VrfManager()); err != nil {
 		return fmt.Errorf("vrf: %w", err)
 	}
-	if err := seedVrfBridges(vin.GetResourceManager(), srv.VrfManager(), lg); err != nil {
+	if err := seedVrfBridges(vin.GetResourceManager(), srv.VrfManager(), cfg.VRFs, lg); err != nil {
 		return fmt.Errorf("vrf: %w", err)
 	}
 	if err := loadVRFs(cfg.VRFs, srv.VrfManager(), vin.GetMapOperations(), vin.GetResourceManager(), vin.GetResourceManager(), lg); err != nil {
@@ -283,6 +283,32 @@ func run(cliCtx *cli.Context) error {
 	for _, v := range srv.VrfManager().List() {
 		if v.Bridge != nil {
 			vin.GetFDBWatcher().RegisterBridge(int(v.Bridge.Ifindex), v.Bridge.BdID)
+		}
+	}
+	// The config binds ran BEFORE the facets were seeded (they must precede
+	// the BGP session so early routes are not dropped), so commitBinding's
+	// facet<->bd_id check never saw them; validateVrfBridgeBindings covered
+	// config-vs-config only. Cross-check every binding against the now-seeded
+	// facets so a config binding cannot silently diverge from a state-file
+	// bridge.
+	for _, b := range vrfBgpMgr.List() {
+		if b.BDID == 0 {
+			continue
+		}
+		if v, ok := vrfBgpMgr.VRF().Get(b.VRFName); ok && v.Bridge != nil && v.Bridge.BdID != b.BDID {
+			return fmt.Errorf("vrf %q: binding bd_id %d mismatches the bridge facet %q (bd_id %d); fix the config or the state file", b.VRFName, b.BDID, v.Bridge.Name, v.Bridge.BdID)
+		}
+	}
+	// EVPN auto-advertise for boot-provisioned bridge domains: the runtime
+	// axes (VrfBridgeAttach / commitBinding) never ran for facets that came
+	// from the state file or the config, so enable them here. Gated on EVPN
+	// export RTs like both runtime axes (an empty RT list would push
+	// unimportable RT3); EnableForBinding no-ops when no facet carries the bd.
+	if evpnCoord != nil {
+		for _, b := range vrfBgpMgr.List() {
+			if b.BDID != 0 && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
+				evpnCoord.EnableForBinding(b)
+			}
 		}
 	}
 
@@ -328,10 +354,10 @@ func run(cliCtx *cli.Context) error {
 		// EVPN RT2 auto-advertise: feed the FDBWatcher's local MAC events to the
 		// EVPN exporter. The sink is set here, after the FDBWatcher has already
 		// started (StartFDBWatcher, above), so MACs present at that boot
-		// ListExisting replay are NOT captured; a MAC learned after a BridgeCreate
-		// enables its bridge domain is. BridgeCreate / VrfBgpBind replay a bridge's
-		// existing FDB via the coordinator, so a bridge that predates the bind is
-		// still picked up.
+		// ListExisting replay are NOT captured; a MAC learned after a
+		// VrfBridgeAttach enables its bridge domain is. VrfBridgeAttach / VrfBgpBind
+		// replay a bridge's existing FDB via the coordinator, so a bridge that
+		// predates the bind is still picked up.
 		if evpnExporter != nil {
 			vin.GetFDBWatcher().SetMACSink(evpnExporter)
 			// Teardown ordering: detach the sink BEFORE Close so an in-flight FDB
@@ -514,7 +540,17 @@ func seedVrfDevices(resMgr *netresource.ResourceManager, mgr *vrf.Manager) error
 // with bd_id 0 or a duplicated bd_id are skipped with a warning: the facet
 // model requires a unique non-zero bd_id, and the pre-facet lookup failed
 // closed on duplicates, so skipping every claimant preserves that.
-func seedVrfBridges(resMgr *netresource.ResourceManager, mgr *vrf.Manager, lg *zap.Logger) error {
+func seedVrfBridges(resMgr *netresource.ResourceManager, mgr *vrf.Manager, cfgVRFs config.VRFsConfig, lg *zap.Logger) error {
+	// A config entry that declares this bridge names its intended owner: use
+	// it for legacy ownerless records so an upgrade with a persisted bridge
+	// plus a new config bridge: block does not seed a synthetic VRF that the
+	// config attach would then collide with (a boot crash loop).
+	configOwner := make(map[string]string)
+	for _, v := range cfgVRFs.Entries {
+		if v.Bridge != nil {
+			configOwner[v.Bridge.Name] = v.Name
+		}
+	}
 	bridges := resMgr.ListBridges()
 	counts := make(map[uint16]int, len(bridges))
 	for _, mb := range bridges {
@@ -522,7 +558,7 @@ func seedVrfBridges(resMgr *netresource.ResourceManager, mgr *vrf.Manager, lg *z
 	}
 	for _, mb := range bridges {
 		if mb.BdID == 0 {
-			lg.Warn("skipping persisted bridge with bd_id 0 (not seedable as a VRF facet)",
+			lg.Warn("skipping persisted bridge with bd_id 0 (not seedable as a VRF facet; fix the state file)",
 				zap.String("bridge", mb.Name))
 			continue
 		}
@@ -532,6 +568,9 @@ func seedVrfBridges(resMgr *netresource.ResourceManager, mgr *vrf.Manager, lg *z
 			continue
 		}
 		owner := mb.VRF
+		if owner == "" {
+			owner = configOwner[mb.Name]
+		}
 		if owner == "" {
 			owner = mb.Name
 		}

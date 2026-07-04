@@ -63,12 +63,25 @@ type VrfServer struct {
 	// (not a kernel-atomic swap), so two concurrent reconciles could interleave
 	// and one rollback could clobber the other's write; the delete flows'
 	// check-then-act likewise must not interleave with an AC add or a bridge
-	// attach. Mirrors VrfBgpServer.mu, which serializes the same way.
-	mu sync.Mutex
+	// attach.
+	//
+	// The mutex is SHARED with VrfBgpServer (server.go wires the same one into
+	// both): the facet<->binding invariants (a binding's bd_id must match the
+	// VRF's bridge facet; VrfDelete refuses while a binding exists) are
+	// check-then-act across the two managers, so serializing only within each
+	// server would leave a window where an attach and a bind race their
+	// cross-checks and publish a diverging pair without either side erroring.
+	mu *sync.Mutex
 }
 
-func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator) *VrfServer {
-	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn}
+// NewVrfServer wires the handler. mu is the mutation mutex, shared with
+// VrfBgpServer so cross-facet invariants hold (see the field comment); nil
+// allocates a private one (tests without a VrfBgpServer).
+func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator, mu *sync.Mutex) *VrfServer {
+	if mu == nil {
+		mu = &sync.Mutex{}
+	}
+	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, mu: mu}
 }
 
 func (s *VrfServer) reconcile() error {

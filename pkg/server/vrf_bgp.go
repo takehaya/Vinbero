@@ -49,11 +49,21 @@ type VrfBgpServer struct {
 	// concurrent same-VRF RPCs cannot interleave (the manager Bind/Unbind and the
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
 	// cannot see the manager, so the agreement must be enforced here).
-	mu sync.Mutex
+	//
+	// SHARED with VrfServer (see its field comment): commitBinding's bridge-
+	// facet bd_id check and VrfBridgeAttach's binding check are check-then-act
+	// across the two managers, so they must run under one mutex or a racing
+	// pair could publish a diverging facet/binding without either erroring.
+	mu *sync.Mutex
 }
 
-func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupBindingReconciler) *VrfBgpServer {
-	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc}
+// NewVrfBgpServer wires the handler. mu is the mutation mutex, shared with
+// VrfServer; nil allocates a private one (tests without a VrfServer).
+func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordinator, mupSrc MupBindingReconciler, mu *sync.Mutex) *VrfBgpServer {
+	if mu == nil {
+		mu = &sync.Mutex{}
+	}
+	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc, mu: mu}
 }
 
 // protoToBinding converts a wire VrfBgpBinding into the runtime Binding. The

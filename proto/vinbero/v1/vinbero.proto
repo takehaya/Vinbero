@@ -613,11 +613,11 @@ message StatsSlotResetResponse {}
 // resolves a packet's VRF once at the XDP entry from its {ifindex, VLAN}.
 // VrfShow returns all facets.
 service VrfService {
-  rpc VrfCreate(VrfCreateRequest) returns (VrfCreateResponse);       // create (or adopt) the kernel VRF device
-  rpc VrfDelete(VrfDeleteRequest) returns (VrfDeleteResponse);       // delete the whole VRF; refuses while referenced
+  rpc VrfCreate(VrfCreateRequest) returns (VrfCreateResponse); // create (or adopt) the kernel VRF device
+  rpc VrfDelete(VrfDeleteRequest) returns (VrfDeleteResponse); // delete the whole VRF; refuses while referenced
   rpc VrfBridgeAttach(VrfBridgeAttachRequest) returns (VrfBridgeAttachResponse); // create (or adopt) the bridge, attach the L2 facet
   rpc VrfBridgeDetach(VrfBridgeDetachRequest) returns (VrfBridgeDetachResponse); // delete the bridge; refuses while a SID references it
-  rpc VrfAcAdd(VrfAcAddRequest) returns (VrfAcAddResponse);          // add an AC (creates the VRF)
+  rpc VrfAcAdd(VrfAcAddRequest) returns (VrfAcAddResponse); // add an AC (creates the VRF)
   rpc VrfAcRemove(VrfAcRemoveRequest) returns (VrfAcRemoveResponse);
   rpc VrfSetPolicy(VrfSetPolicyRequest) returns (VrfSetPolicyResponse);
   rpc VrfShow(VrfShowRequest) returns (VrfShowResponse);
@@ -628,7 +628,7 @@ service VrfService {
 // once at the XDP entry from its {ifindex, VLAN}.
 message VrfAc {
   string interface_name = 1; // ingress port (resolved to ifindex by server)
-  uint32 vlan = 2;           // VLAN ID (0 = untagged)
+  uint32 vlan = 2; // VLAN ID (0 = untagged)
 }
 
 // VrfPolicy is the global ingress policy. default_deny drops (or passes, per
