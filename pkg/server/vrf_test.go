@@ -122,7 +122,7 @@ func (f *fakeSidTable) GetSidAux(index uint32) (*bpf.SidAuxEntry, error) {
 }
 
 // fakeBindings reports a binding for the names it holds. Full bindings (with
-// BDID / families) take precedence; the names set yields a bare binding.
+// families) take precedence; the names set yields a bare binding.
 type fakeBindings struct {
 	names    map[string]bool
 	bindings map[string]vrfbgp.Binding
@@ -625,25 +625,16 @@ func TestVrfServer_ShowBothFacets(t *testing.T) {
 	}
 }
 
-// VrfBridgeAttach validates before any netlink, cross-checks the binding's
-// bd_id, registers the FDB watcher with the assigned ifindex, and fires the
-// EVPN device axis only when the binding actually advertises EVPN.
+// VrfBridgeAttach validates before any netlink, registers the FDB watcher
+// with the assigned ifindex, and fires the EVPN enable only when the binding
+// actually advertises EVPN.
 func TestVrfServer_BridgeAttach(t *testing.T) {
 	hook := &fakeEvpnBridge{}
 	s, _, fdb, bindings, _ := newTestVrfServerBridge(hook)
 
-	// Binding with a mismatching bd_id refuses the attach.
-	bindings.bindings["evi-100"] = vrfbgp.Binding{VRFName: "evi-100", BDID: 200}
-	_, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
-		VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100},
-	}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("bd_id mismatch: code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
-
-	// Matching bd_id but import-only EVPN (no export RTs): attach succeeds,
-	// FDB registers, EVPN does NOT enable (the export-RT gate).
-	bindings.bindings["evi-100"] = vrfbgp.Binding{VRFName: "evi-100", BDID: 100}
+	// A bound VRF without EVPN export RTs: attach succeeds, FDB registers,
+	// EVPN does NOT enable (the export-RT gate).
+	bindings.bindings["evi-100"] = vrfbgp.Binding{VRFName: "evi-100"}
 	resp, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
 		VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100, Members: []string{"eth2"}},
 	}))
@@ -677,13 +668,13 @@ func TestVrfServer_BridgeAttach(t *testing.T) {
 	}
 }
 
-// With a binding that exports EVPN RTs and matches the bd_id, the attach
-// enables the bridge domain (device axis).
+// With a binding that exports EVPN RTs, the attach enables the bridge domain
+// (the coordinator resolves the just-committed facet by VRF name).
 func TestVrfServer_BridgeAttachEnablesEvpn(t *testing.T) {
 	hook := &fakeEvpnBridge{}
 	s, _, _, bindings, _ := newTestVrfServerBridge(hook)
 	bindings.bindings["evi-100"] = vrfbgp.Binding{
-		VRFName: "evi-100", BDID: 100,
+		VRFName: "evi-100",
 		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
 			bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionBoth}}},
 		},

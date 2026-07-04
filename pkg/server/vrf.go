@@ -24,7 +24,7 @@ type SidLister interface {
 
 // BindingGetter reports whether a vrf-bgp binding references a VRF name, so
 // VrfDelete can refuse while the BGP facet is still attached and the bridge
-// attach can cross-check the binding's bd_id.
+// attach can gate its EVPN enable on the binding's export RTs.
 // *vrfbgp.Manager satisfies it; tests use a fake.
 type BindingGetter interface {
 	Get(vrfName string) (vrfbgp.Binding, bool)
@@ -66,11 +66,11 @@ type VrfServer struct {
 	// attach.
 	//
 	// The mutex is SHARED with VrfBgpServer (server.go wires the same one into
-	// both): the facet<->binding invariants (a binding's bd_id must match the
-	// VRF's bridge facet; VrfDelete refuses while a binding exists) are
-	// check-then-act across the two managers, so serializing only within each
-	// server would leave a window where an attach and a bind race their
-	// cross-checks and publish a diverging pair without either side erroring.
+	// both): the cross-facet flows (VrfDelete refuses while a binding exists;
+	// commitBinding / VrfBgpUnbind read the bridge facet to drive the EVPN
+	// coordinator while attach/detach mutate it) are check-then-act across the
+	// two managers, so serializing only within each server would leave a
+	// window where the check and the act see different states.
 	mu *sync.Mutex
 }
 
@@ -293,9 +293,9 @@ func findVrfReference(sids SidLister, ifindex uint32) (string, error) {
 // VrfBridgeAttach attaches the L2 bridge-domain facet: it creates (or adopts)
 // the kernel bridge, records it on the VRF, and registers the bridge with the
 // FDB watcher for MAC learning. When EVPN auto-advertise is on and the VRF's
-// binding declares matching bd_id + EVPN export RTs, the bridge domain is
-// enabled (RT3 + FDB replay as RT2). The binding lookup is direct by VRF name
-// — no ambiguous bd_id join.
+// binding declares EVPN export RTs, the bridge domain is enabled (RT3 + FDB
+// replay as RT2) — the facet attached here is the bd the coordinator
+// resolves. The binding lookup is direct by VRF name.
 func (s *VrfServer) VrfBridgeAttach(
 	_ context.Context,
 	req *connect.Request[v1.VrfBridgeAttachRequest],
@@ -320,14 +320,6 @@ func (s *VrfServer) VrfBridgeAttach(
 			fmt.Errorf("bridge.bd_id %d out of range (1..%d)", br.GetBdId(), math.MaxUint16))
 	}
 	bdID := uint16(br.GetBdId())
-	// The binding is the BGP facet of the same VRF object; while Binding.BDID
-	// still exists it must agree with the facet, or a received EVPN route
-	// (matched by the binding) would install into a different bd than the
-	// attached bridge decaps from.
-	if b, bound := s.bindings.Get(vrfName); bound && b.BDID != 0 && b.BDID != bdID {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("vrf %q binding declares bd_id %d; bridge bd_id %d mismatches (align them or unbind first)", vrfName, b.BDID, bdID))
-	}
 	attached, err := s.mgr.AttachBridge(vrfName, vrf.Bridge{
 		Name:    br.GetName(),
 		BdID:    bdID,
@@ -338,11 +330,11 @@ func (s *VrfServer) VrfBridgeAttach(
 	}
 	s.fdb.RegisterBridge(int(attached.Bridge.Ifindex), bdID)
 	// EVPN facet side: enable only when the binding actually advertises EVPN
-	// (export RTs present). The old bridge path enabled without that gate and
-	// could push RT3 with an empty RT list; this aligns with commitBinding.
-	// The coordinator resolves the just-attached facet by VRF name.
+	// (export RTs present) -- an ungated enable could push RT3 with an empty
+	// RT list; this aligns with commitBinding. The coordinator resolves the
+	// just-attached facet by VRF name, so the facet IS this bridge.
 	if s.evpn != nil {
-		if b, bound := s.bindings.Get(vrfName); bound && b.BDID == bdID && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
+		if b, bound := s.bindings.Get(vrfName); bound && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
 			s.evpn.Enable(b)
 		}
 	}

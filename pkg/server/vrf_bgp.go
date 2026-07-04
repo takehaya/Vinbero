@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"sync"
 
@@ -50,10 +49,11 @@ type VrfBgpServer struct {
 	// exporter AddVRF/RemoveVRF are separate registries; the exporter's own opMu
 	// cannot see the manager, so the agreement must be enforced here).
 	//
-	// SHARED with VrfServer (see its field comment): commitBinding's bridge-
-	// facet bd_id check and VrfBridgeAttach's binding check are check-then-act
-	// across the two managers, so they must run under one mutex or a racing
-	// pair could publish a diverging facet/binding without either erroring.
+	// SHARED with VrfServer (see its field comment): commitBinding and
+	// VrfBgpUnbind read the VRF's bridge facet to drive the EVPN coordinator
+	// while VrfBridgeAttach/Detach mutate it, so the read and the mutation
+	// must run under one mutex or a racing pair could enable/disable a bd
+	// against a facet that is mid-change.
 	mu *sync.Mutex
 }
 
@@ -66,11 +66,10 @@ func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordi
 	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc, mu: mu}
 }
 
-// protoToBinding converts a wire VrfBgpBinding into the runtime Binding. The
-// caller is responsible for validating bd_id's range first. Families on the
-// wire are translated to the typed runtime form; an unknown family name or
-// direction string yields an error so an InvalidArgument is returned at the
-// RPC boundary rather than a silent drop.
+// protoToBinding converts a wire VrfBgpBinding into the runtime Binding.
+// Families on the wire are translated to the typed runtime form; an unknown
+// family name or direction string yields an error so an InvalidArgument is
+// returned at the RPC boundary rather than a silent drop.
 func protoToBinding(b *v1.VrfBgpBinding) (vrfbgp.Binding, error) {
 	families, err := protoFamiliesToBinding(b.GetFamilies())
 	if err != nil {
@@ -88,7 +87,6 @@ func protoToBinding(b *v1.VrfBgpBinding) (vrfbgp.Binding, error) {
 		Redistribute:        b.GetRedistribute(),
 		MaxPrefixes:         b.GetMaxPrefixes(),
 		DefaultLocator:      b.GetDefaultLocator(),
-		BDID:                uint16(b.GetBdId()),
 		Families:            families,
 		MupGTP4SourcePrefix: mupSrc,
 	}, nil
@@ -105,7 +103,6 @@ func bindingToProto(b vrfbgp.Binding) *v1.VrfBgpBinding {
 		Redistribute:   b.Redistribute,
 		MaxPrefixes:    b.MaxPrefixes,
 		DefaultLocator: b.DefaultLocator,
-		BdId:           uint32(b.BDID),
 		Families:       bindingFamiliesToProto(b.Families),
 	}
 	// The zero Prefix renders as "invalid Prefix", so only a set prefix is
@@ -162,17 +159,6 @@ func bindingFamiliesToProto(in map[bgp.Family]vrfbgp.FamilyPolicy) map[string]*v
 // would otherwise hand the exporter a half-populated binding.
 func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 	updated = updated.Normalize()
-	// While Binding.BDID exists alongside the VRF object's bridge facet, the
-	// two must agree: a mismatch would install received EVPN routes (matched
-	// by the binding's RTs) into a different bd than the attached bridge
-	// decaps from. VrfBridgeAttach checks the same invariant from the other
-	// direction.
-	if updated.BDID != 0 {
-		if v, ok := s.mgr.VRF().Get(updated.VRFName); ok && v.Bridge != nil && v.Bridge.BdID != updated.BDID {
-			return fmt.Errorf("vrf %q carries bridge %q with bd_id %d; binding bd_id %d mismatches (align them or detach the bridge)",
-				updated.VRFName, v.Bridge.Name, v.Bridge.BdID, updated.BDID)
-		}
-	}
 	prev, existed := s.mgr.Get(updated.VRFName)
 	if s.exporter != nil {
 		if err := s.exporter.AddVRF(updated); err != nil {
@@ -207,13 +193,13 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 		return err
 	}
 	if s.evpn != nil {
-		// Disable the prior BD when it is going away -- either because the
-		// new binding moved BD, or because the caller dropped the evpn
-		// export RTs explicitly (so EVPN is unwanted even with an unchanged
-		// BDID). Enable then fires for the current BD when EVPN is still
-		// desired AND something EVPN-relevant actually changed; otherwise a
-		// per-RT mutation on a non-EVPN family (vpnv4 RT add / remove on a
-		// BDID-bound binding) would re-run EnableBD -> replayFDB -> RT2
+		// Disable the bridge domain when the caller dropped the evpn export
+		// RTs explicitly (so EVPN is unwanted even though the facet stays
+		// attached); the bd comes from the VRF's bridge facet, read under
+		// the shared s.mu so a concurrent detach cannot race it. Enable then
+		// fires when EVPN is still desired AND something EVPN-relevant
+		// actually changed; otherwise a per-RT mutation on a non-EVPN family
+		// (vpnv4 RT add / remove) would re-run EnableBD -> replayFDB -> RT2
 		// origination for every learned MAC, an O(N) BGP storm on an
 		// unrelated edit.
 		//
@@ -225,10 +211,12 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 		hadEvpn := len(prev.ExportRTsForFamily(bgp.FamilyEVPN)) > 0
 		hasEvpn := len(updated.ExportRTsForFamily(bgp.FamilyEVPN)) > 0
 		evpnRemoved := hadEvpn && !hasEvpn
-		if existed && prev.BDID != 0 && (prev.BDID != updated.BDID || evpnRemoved) {
-			s.evpn.Disable(prev.BDID)
+		if existed && evpnRemoved {
+			if v, ok := s.mgr.VRF().Get(updated.VRFName); ok && v.Bridge != nil {
+				s.evpn.Disable(v.Bridge.BdID)
+			}
 		}
-		if updated.BDID != 0 && hasEvpn && !evpnRemoved && evpnFieldsChanged(existed, prev, updated) {
+		if hasEvpn && !evpnRemoved && evpnFieldsChanged(existed, prev, updated) {
 			s.evpn.Enable(updated)
 		}
 	}
@@ -306,7 +294,7 @@ func mupGTP4SrcFieldsChanged(existed bool, prev, updated vrfbgp.Binding) bool {
 
 // evpnFieldsChanged reports whether any EVPN-origination field differs
 // between prev and updated, so an unrelated mutation (e.g. AddRouteTarget
-// on vpnv4) does not re-drive EnableForBinding and trigger an FDB replay.
+// on vpnv4) does not re-drive Enable and trigger an FDB replay.
 // MaxPrefixes is excluded: it caps RT2 origination per-event but does not
 // alter the BD's RT3 or the SIDs, so a cap-only update would only flap
 // O(N MACs) for no advertisement change. A first-bind (existed=false)
@@ -315,8 +303,7 @@ func evpnFieldsChanged(existed bool, prev, updated vrfbgp.Binding) bool {
 	if !existed {
 		return true
 	}
-	if prev.BDID != updated.BDID ||
-		prev.RD != updated.RD ||
+	if prev.RD != updated.RD ||
 		prev.DefaultLocator != updated.DefaultLocator {
 		return true
 	}
@@ -369,16 +356,6 @@ func (s *VrfBgpServer) VrfBgpBind(
 		Errors: make([]*v1.OperationError, 0),
 	}
 	for _, b := range req.Msg.Bindings {
-		// bd_id is uint32 on the wire but a uint16 bridge domain in the data
-		// plane; reject out-of-range values rather than silently truncating
-		// (which would bind to a different BD than the caller asked for).
-		if b.GetBdId() > math.MaxUint16 {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: b.GetVrfName(),
-				Reason:        fmt.Sprintf("bd_id %d out of range (max %d)", b.GetBdId(), math.MaxUint16),
-			})
-			continue
-		}
 		if bound, opErr := s.bindOne(b); opErr != nil {
 			resp.Errors = append(resp.Errors, opErr)
 		} else {
@@ -417,16 +394,21 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 	for _, name := range req.Msg.VrfNames {
 		// Hold s.mu across the manager Unbind + exporter/EVPN teardown so
 		// a concurrent same-VRF bind cannot interleave; capture the prior
-		// binding before Unbind so the EVPN axis can disable its BD.
+		// binding (and the VRF's bridge facet, the bd's single source)
+		// before Unbind so the EVPN teardown can disable its BD.
 		s.mu.Lock()
 		prev, existed := s.mgr.Get(name)
+		var facetBD uint16
+		if v, ok := s.mgr.VRF().Get(name); ok && v.Bridge != nil {
+			facetBD = v.Bridge.BdID
+		}
 		err := s.mgr.Unbind(name)
 		if err == nil {
 			if s.exporter != nil {
 				s.exporter.RemoveVRF(name)
 			}
-			if s.evpn != nil && existed && prev.BDID != 0 {
-				s.evpn.Disable(prev.BDID)
+			if s.evpn != nil && existed && facetBD != 0 {
+				s.evpn.Disable(facetBD)
 			}
 			if s.mupSrc != nil && existed && prev.MupGTP4SourcePrefix.IsValid() && prev.RD != "" {
 				// The binding is gone, so the reconcile reverts the RD's
@@ -485,9 +467,6 @@ func (s *VrfBgpServer) UpdateBinding(
 	b := req.Msg.GetBinding()
 	if b == nil || b.GetVrfName() == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("binding.vrf_name is required"))
-	}
-	if b.GetBdId() > math.MaxUint16 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bd_id %d out of range (max %d)", b.GetBdId(), math.MaxUint16))
 	}
 	binding, err := protoToBinding(b)
 	if err != nil {

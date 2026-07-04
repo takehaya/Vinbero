@@ -196,10 +196,6 @@ type Binding struct {
 	// hostile VRF-route writer flooding the VPN.
 	MaxPrefixes    uint32
 	DefaultLocator string
-	// BDID is the bridge domain a received EVPN route (RT2/3/4) installs
-	// into when its route targets match an EVPN family RT. It is 0 for
-	// L3VPN-only bindings; EVPN reception requires a non-zero BDID.
-	BDID uint16
 	// Families is the primary AF -> per-family RT policy map. Normalize
 	// derives it from the legacy ImportRTs / ExportRTs when callers do not
 	// set it explicitly (L3VPN families only; EVPN and MUP policies must be

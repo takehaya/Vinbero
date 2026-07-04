@@ -317,3 +317,23 @@ bgp:
 		t.Errorf("error %q must call out the mutex (legacy vs families) so the operator can fix it", err)
 	}
 }
+
+// TestLoad_VrfBindingBdIdTombstone pins that a config still setting the
+// removed bgp.vrf_bindings[].bd_id fails at Load with a pointer to the
+// bridge facet, instead of the lenient yaml decode silently dropping the
+// key and leaving EVPN routes uninstallable with no hint at the cause.
+func TestLoad_VrfBindingBdIdTombstone(t *testing.T) {
+	const y = `
+bgp:
+  vrf_bindings:
+    - vrf_name: evi-100
+      bd_id: 100
+`
+	_, err := Load(y)
+	if err == nil {
+		t.Fatal("Load with bgp.vrf_bindings[].bd_id must fail")
+	}
+	if !strings.Contains(err.Error(), "vrfs.entries[].bridge") {
+		t.Errorf("error should point at the bridge facet, got: %v", err)
+	}
+}

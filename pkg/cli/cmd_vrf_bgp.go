@@ -39,7 +39,6 @@ func vrfBgpBindFlags(requireVRF bool) []cli.Flag {
 		&cli.StringFlag{Name: "export-rts", Usage: "Export route targets (comma-separated, legacy L3VPN shorthand)"},
 		&cli.StringSliceFlag{Name: "rt", Usage: "Repeatable: FAMILY:RT[:DIRECTION] (e.g. vpnv4:65000:200:both, mup_ipv4:100:6000:import)"},
 		&cli.StringFlag{Name: "default-locator", Usage: "Locator name for this VRF's local SIDs"},
-		&cli.UintFlag{Name: "bd-id", Usage: "Bridge domain for EVPN routes matching import-rts (0 = L3VPN-only)"},
 		&cli.StringFlag{Name: "rd", Usage: "Route distinguisher for auto-advertised local prefixes (e.g. 65100:200)"},
 		&cli.StringFlag{Name: "redistribute", Usage: "Auto-advertise protocols (comma-separated: connected,static)"},
 		&cli.UintFlag{Name: "max-prefixes", Usage: "Cap on auto-advertised prefixes for this VRF (0 = unlimited)"},
@@ -52,10 +51,6 @@ func vrfBgpBindFlags(requireVRF bool) []cli.Flag {
 // --import-rts / --export-rts are passed through unchanged so the server's
 // Normalize step expands them.
 func buildBindingFromFlags(c *cli.Context) (*v1.VrfBgpBinding, error) {
-	bdID := c.Uint("bd-id")
-	if bdID > math.MaxUint16 {
-		return nil, fmt.Errorf("bd-id %d out of range (max %d)", bdID, math.MaxUint16)
-	}
 	maxPfx := c.Uint("max-prefixes")
 	if maxPfx > math.MaxUint32 {
 		return nil, fmt.Errorf("max-prefixes %d out of range (max %d)", maxPfx, uint32(math.MaxUint32))
@@ -69,7 +64,6 @@ func buildBindingFromFlags(c *cli.Context) (*v1.VrfBgpBinding, error) {
 		ImportRts:           csvFlag(c.String("import-rts")),
 		ExportRts:           csvFlag(c.String("export-rts")),
 		DefaultLocator:      c.String("default-locator"),
-		BdId:                uint32(bdID),
 		Rd:                  c.String("rd"),
 		Redistribute:        csvFlag(c.String("redistribute")),
 		MaxPrefixes:         uint32(maxPfx),
@@ -170,10 +164,9 @@ func vrfBgpUpdateCommand() *cli.Command {
 			clients := clientsFromContext(c)
 			// UpdateBinding is full-replace at the proto level, but proto3
 			// scalars cannot distinguish "set to zero" from "not provided",
-			// so a CLI user who forgets --bd-id on an EVPN binding would
-			// silently tear the bridge domain down. Fetch prev and fill
-			// every flag the user did NOT explicitly set from prev, so the
-			// CLI's semantic is "patch what I passed".
+			// so a CLI user who omits --rd on a binding would silently clear
+			// it. Fetch prev and fill every flag the user did NOT explicitly
+			// set from prev, so the CLI's semantic is "patch what I passed".
 			if err := preservePriorBindingFields(c, b, clients); err != nil {
 				return err
 			}
@@ -215,9 +208,6 @@ func preservePriorBindingFields(c *cli.Context, b *v1.VrfBgpBinding, clients *Cl
 		// No prior binding: nothing to preserve. The server returns NotFound
 		// in this case anyway (UpdateBinding requires existing).
 		return nil
-	}
-	if !c.IsSet("bd-id") {
-		b.BdId = prev.GetBdId()
 	}
 	if !c.IsSet("rd") {
 		b.Rd = prev.GetRd()
