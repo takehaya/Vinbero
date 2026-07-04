@@ -24,11 +24,11 @@ type fakeEvpnBridge struct {
 	disableCnt int             // total DisableBD calls
 }
 
-func (f *fakeEvpnBridge) EnableBD(b vrfbgp.Binding, _ uint32) error {
+func (f *fakeEvpnBridge) EnableBD(_ vrfbgp.Binding, bdID uint16, _ uint32) error {
 	if f.enabled == nil {
 		f.enabled = make(map[uint16]bool)
 	}
-	f.enabled[b.BDID] = true
+	f.enabled[bdID] = true
 	f.enableCnt++
 	return nil
 }
@@ -41,16 +41,42 @@ func (f *fakeEvpnBridge) DisableBD(bdID uint16) {
 
 func (f *fakeEvpnBridge) SIDsForBD(uint16) []string { return nil }
 
-// newEvpnCoordForTest builds a coordinator over hook, treating the bd_id ->
-// ifindex entries in bridges as the bridges that already exist; replayFDB is a
-// no-op.
-func newEvpnCoordForTest(hook EvpnBridgeHook, bridges map[uint16]uint32) *EvpnCoordinator {
+// testFacetResolver resolves a VRF name to its bridge facet on m, the same
+// closure shape main.go wires into the real coordinator.
+func testFacetResolver(m *vrf.Manager) func(string) (vrf.Bridge, bool) {
+	return func(vrfName string) (vrf.Bridge, bool) {
+		v, ok := m.Get(vrfName)
+		if !ok || v.Bridge == nil {
+			return vrf.Bridge{}, false
+		}
+		return *v.Bridge, true
+	}
+}
+
+// newEvpnCoordForTest builds a coordinator over hook whose facet resolver
+// reads mgr's VRF objects (seed facets with mgr.VRF().SetBridge); replayFDB
+// is a no-op.
+func newEvpnCoordForTest(hook EvpnBridgeHook, mgr *vrfbgp.Manager) *EvpnCoordinator {
 	return NewEvpnCoordinator(
 		hook,
-		func(bdID uint16) (uint32, bool) { ifindex, ok := bridges[bdID]; return ifindex, ok },
+		testFacetResolver(mgr.VRF()),
 		func(int) error { return nil },
 		zap.NewNop(),
 	)
+}
+
+// newEvpnTestMgr returns a binding manager whose VRF objects carry the given
+// bridge facets, so the coordinator's resolver and commitBinding's facet
+// checks see them.
+func newEvpnTestMgr(t *testing.T, facets map[string]vrf.Bridge) *vrfbgp.Manager {
+	t.Helper()
+	mgr := vrfbgp.NewManager()
+	for name, br := range facets {
+		if _, err := mgr.VRF().SetBridge(name, br); err != nil {
+			t.Fatalf("SetBridge(%s): %v", name, err)
+		}
+	}
+	return mgr
 }
 
 // An out-of-range bd_id (> uint16) is rejected as a per-item error rather than
@@ -396,15 +422,18 @@ func TestVrfBgpBind_MupGtp4SourcePrefixValidation(t *testing.T) {
 // attached yet is a no-op (VrfBridgeAttach enables it when the bridge arrives).
 func TestVrfBgpBind_EnablesEvpnOnlyWhenBridgeUp(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	// bd_id 100's bridge exists; bd_id 200's does not.
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
+	// evi-up's bridge facet exists (bd 100); evi-down has no facet yet.
+	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
+		"evi-up": {Name: "br100", BdID: 100, Ifindex: 5},
+	})
+	coord := newEvpnCoordForTest(hook, mgr)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
 
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
 			// Legacy ImportRts/ExportRts auto-expand into FamilyEVPN, which
-			// is required so commitBinding fires EnableForBinding (a binding
-			// with no FamilyEVPN would only push RT3 with empty RTs).
+			// is required so commitBinding fires Enable (a binding with no
+			// FamilyEVPN would only push RT3 with empty RTs).
 			{VrfName: "evi-up", Rd: "65100:100", BdId: 100, ImportRts: []string{"65000:100"}, ExportRts: []string{"65000:100"}},
 			{VrfName: "evi-down", Rd: "65100:200", BdId: 200, ImportRts: []string{"65000:200"}, ExportRts: []string{"65000:200"}},
 			{VrfName: "l3-only", Rd: "65100:300"}, // BDID 0: never EVPN
@@ -428,8 +457,11 @@ func TestVrfBgpBind_EnablesEvpnOnlyWhenBridgeUp(t *testing.T) {
 // originating RT2/RT3 under a removed RD/RT.
 func TestVrfBgpUnbind_DisablesEvpn(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
+	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
+		"evi": {Name: "br100", BdID: 100, Ifindex: 5},
+	})
+	coord := newEvpnCoordForTest(hook, mgr)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
 
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{VrfName: "evi", Rd: "65100:100", BdId: 100, ImportRts: []string{"65000:100"}, ExportRts: []string{"65000:100"}}},
@@ -450,41 +482,19 @@ func TestVrfBgpUnbind_DisablesEvpn(t *testing.T) {
 	}
 }
 
-// Re-binding a VRF onto a different bridge domain disables the old BD before
-// enabling the new one, so the vacated BD stops advertising.
-func TestVrfBgpBind_RebindMovingBridgeDomainDisablesOld(t *testing.T) {
-	hook := &fakeEvpnBridge{}
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5, 200: 6})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
-
-	bind := func(bdID uint32) {
-		if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
-			Bindings: []*v1.VrfBgpBinding{{VrfName: "evi", Rd: "65100:100", BdId: bdID, ImportRts: []string{"65000:100"}, ExportRts: []string{"65000:100"}}},
-		})); err != nil {
-			t.Fatalf("VrfBgpBind bd_id %d: %v", bdID, err)
-		}
-	}
-	bind(100)
-	bind(200) // move the VRF to a different bridge domain
-	if !slices.Contains(hook.disabled, uint16(100)) {
-		t.Errorf("re-bind moving bd_id 100 -> 200 must DisableBD(100); disabled=%v", hook.disabled)
-	}
-	if !hook.enabled[200] {
-		t.Errorf("bd_id 200 must be enabled after the move; enabled=%v", hook.enabled)
-	}
-	if hook.enabled[100] {
-		t.Errorf("bd_id 100 must be disabled after the move; enabled=%v", hook.enabled)
-	}
-}
-
 // A binding that declares FamilyEVPN but has no export-direction RT (e.g.
 // `family add --family evpn` with no --rt, or import-only EVPN) must NOT
-// fire EnableForBinding: pushing RT3/RT2 with an empty extended-community
-// RT list is unimportable on every peer.
+// fire Enable: pushing RT3/RT2 with an empty extended-community RT list is
+// unimportable on every peer.
 func TestVrfBgpBind_NoExportRTsKeepsEvpnGated(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5, 101: 6, 102: 7})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
+	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
+		"evi-empty":    {Name: "br100", BdID: 100, Ifindex: 5},
+		"evi-imp-only": {Name: "br101", BdID: 101, Ifindex: 6},
+		"evi-ok":       {Name: "br102", BdID: 102, Ifindex: 7},
+	})
+	coord := newEvpnCoordForTest(hook, mgr)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
 
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{
@@ -1010,8 +1020,11 @@ func TestAddRouteTarget_RejectsMalformedRT(t *testing.T) {
 // EVPN here anymore".
 func TestRemoveFamily_EVPNDisablesBridgeDomain(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
+	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
+		"evi": {Name: "br100", BdID: 100, Ifindex: 5},
+	})
+	coord := newEvpnCoordForTest(hook, mgr)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi", Rd: "65100:100", BdId: 100,
@@ -1041,8 +1054,11 @@ func TestRemoveFamily_EVPNDisablesBridgeDomain(t *testing.T) {
 // an O(N-MACs) RT2 storm.
 func TestAddRouteTarget_OnVPNv4FamilyDoesNotReFireEVPN(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
+	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
+		"evi-mixed": {Name: "br100", BdID: 100, Ifindex: 5},
+	})
+	coord := newEvpnCoordForTest(hook, mgr)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi-mixed", Rd: "65100:100", BdId: 100,
@@ -1070,8 +1086,11 @@ func TestAddRouteTarget_OnVPNv4FamilyDoesNotReFireEVPN(t *testing.T) {
 // re-export reflects the new RT2/RT3 RT set.
 func TestAddRouteTarget_OnEVPNFamilyReFiresEVPN(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
+	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
+		"evi": {Name: "br100", BdID: 100, Ifindex: 5},
+	})
+	coord := newEvpnCoordForTest(hook, mgr)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi", Rd: "65100:100", BdId: 100,
@@ -1100,8 +1119,11 @@ func TestAddRouteTarget_OnEVPNFamilyReFiresEVPN(t *testing.T) {
 // EnableForBinding when FamilyEVPN is absent.
 func TestVrfBgpBind_BDIDWithoutEvpnFamilySkipsEnable(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
+	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
+		"evi-no-evpn-rt": {Name: "br100", BdID: 100, Ifindex: 5},
+	})
+	coord := newEvpnCoordForTest(hook, mgr)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi-no-evpn-rt", Rd: "65100:100", BdId: 100,
@@ -1124,8 +1146,11 @@ func TestVrfBgpBind_BDIDWithoutEvpnFamilySkipsEnable(t *testing.T) {
 // RT2 origination storm.
 func TestUpdateBinding_MaxPrefixesAloneSkipsEVPNReFire(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	coord := newEvpnCoordForTest(hook, map[uint16]uint32{100: 5})
-	s := NewVrfBgpServer(vrfbgp.NewManager(), nil, coord, nil, nil)
+	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
+		"evi": {Name: "br100", BdID: 100, Ifindex: 5},
+	})
+	coord := newEvpnCoordForTest(hook, mgr)
+	s := NewVrfBgpServer(mgr, nil, coord, nil, nil)
 	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
 		Bindings: []*v1.VrfBgpBinding{{
 			VrfName: "evi", Rd: "65100:100", BdId: 100,

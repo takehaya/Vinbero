@@ -210,12 +210,12 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 		// Disable the prior BD when it is going away -- either because the
 		// new binding moved BD, or because the caller dropped the evpn
 		// export RTs explicitly (so EVPN is unwanted even with an unchanged
-		// BDID). EnableForBinding then fires for the current BD when EVPN
-		// is still desired AND something EVPN-relevant actually changed;
-		// otherwise a per-RT mutation on a non-EVPN family (vpnv4 RT add /
-		// remove on a BDID-bound binding) would re-run EnableForBridge ->
-		// replayFDB -> RT2 origination for every learned MAC, an O(N)
-		// BGP storm on an unrelated edit.
+		// BDID). Enable then fires for the current BD when EVPN is still
+		// desired AND something EVPN-relevant actually changed; otherwise a
+		// per-RT mutation on a non-EVPN family (vpnv4 RT add / remove on a
+		// BDID-bound binding) would re-run EnableBD -> replayFDB -> RT2
+		// origination for every learned MAC, an O(N) BGP storm on an
+		// unrelated edit.
 		//
 		// "EVPN advertised" requires at least one export-direction RT under
 		// FamilyEVPN: pushing RT3/RT2 with an empty extended-community RT
@@ -229,7 +229,7 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 			s.evpn.Disable(prev.BDID)
 		}
 		if updated.BDID != 0 && hasEvpn && !evpnRemoved && evpnFieldsChanged(existed, prev, updated) {
-			s.evpn.EnableForBinding(updated)
+			s.evpn.Enable(updated)
 		}
 	}
 	if s.mupSrc != nil && mupGTP4SrcFieldsChanged(existed, prev, updated) {

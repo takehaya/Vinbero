@@ -337,12 +337,13 @@ func (s *VrfServer) VrfBridgeAttach(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	s.fdb.RegisterBridge(int(attached.Bridge.Ifindex), bdID)
-	// EVPN device axis: enable only when the binding actually advertises EVPN
+	// EVPN facet side: enable only when the binding actually advertises EVPN
 	// (export RTs present). The old bridge path enabled without that gate and
 	// could push RT3 with an empty RT list; this aligns with commitBinding.
+	// The coordinator resolves the just-attached facet by VRF name.
 	if s.evpn != nil {
 		if b, bound := s.bindings.Get(vrfName); bound && b.BDID == bdID && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
-			s.evpn.EnableForBridge(b, attached.Bridge.Ifindex, attached.Bridge.Name)
+			s.evpn.Enable(b)
 		}
 	}
 	return connect.NewResponse(&v1.VrfBridgeAttachResponse{Vrf: vrfToProto(attached)}), nil

@@ -11,6 +11,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
+	"go.uber.org/zap"
 )
 
 // fakeProgrammer captures the last ingress_vrf_map / policy write so a
@@ -193,13 +194,20 @@ func newTestVrfServerFull() (*VrfServer, *fakeProgrammer, *fakeVrfDeviceOps) {
 }
 
 // newTestVrfServerBridge wires the bridge-facet fakes with a shared ordered
-// event log and returns the handles the attach/detach tests assert on.
-func newTestVrfServerBridge(evpn *EvpnCoordinator) (*VrfServer, *fakeServerBridgeOps, *fakeFdbRegistrar, *fakeBindings, *[]string) {
+// event log and returns the handles the attach/detach tests assert on. The
+// coordinator's facet resolver reads the server's own vrf.Manager, so a facet
+// committed by VrfBridgeAttach is visible to Enable, like the real wiring.
+func newTestVrfServerBridge(hook EvpnBridgeHook) (*VrfServer, *fakeServerBridgeOps, *fakeFdbRegistrar, *fakeBindings, *[]string) {
 	events := []string{}
 	bridges := &fakeServerBridgeOps{ifindexes: map[string]uint32{"br100": 42}, events: &events}
 	fdb := &fakeFdbRegistrar{events: &events}
 	bindings := &fakeBindings{bindings: map[string]vrfbgp.Binding{}}
-	s := NewVrfServer(vrf.NewManager(), &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn, nil)
+	mgr := vrf.NewManager()
+	var evpn *EvpnCoordinator
+	if hook != nil {
+		evpn = NewEvpnCoordinator(hook, testFacetResolver(mgr), func(int) error { return nil }, zap.NewNop())
+	}
+	s := NewVrfServer(mgr, &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn, nil)
 	s.resolve = fakeResolver
 	return s, bridges, fdb, bindings, &events
 }
@@ -622,7 +630,7 @@ func TestVrfServer_ShowBothFacets(t *testing.T) {
 // EVPN device axis only when the binding actually advertises EVPN.
 func TestVrfServer_BridgeAttach(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	s, _, fdb, bindings, _ := newTestVrfServerBridge(newEvpnCoordForTest(hook, nil))
+	s, _, fdb, bindings, _ := newTestVrfServerBridge(hook)
 
 	// Binding with a mismatching bd_id refuses the attach.
 	bindings.bindings["evi-100"] = vrfbgp.Binding{VRFName: "evi-100", BDID: 200}
@@ -673,7 +681,7 @@ func TestVrfServer_BridgeAttach(t *testing.T) {
 // enables the bridge domain (device axis).
 func TestVrfServer_BridgeAttachEnablesEvpn(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	s, _, _, bindings, _ := newTestVrfServerBridge(newEvpnCoordForTest(hook, nil))
+	s, _, _, bindings, _ := newTestVrfServerBridge(hook)
 	bindings.bindings["evi-100"] = vrfbgp.Binding{
 		VRFName: "evi-100", BDID: 100,
 		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
@@ -696,7 +704,7 @@ func TestVrfServer_BridgeAttachEnablesEvpn(t *testing.T) {
 // disables EVPN.
 func TestVrfServer_BridgeDetach(t *testing.T) {
 	hook := &fakeEvpnBridge{}
-	s, bridges, _, _, events := newTestVrfServerBridge(newEvpnCoordForTest(hook, nil))
+	s, bridges, _, _, events := newTestVrfServerBridge(hook)
 	if _, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
 		VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100},
 	})); err != nil {

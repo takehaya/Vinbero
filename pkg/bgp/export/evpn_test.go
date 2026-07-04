@@ -101,7 +101,7 @@ func evpnTestBinding() vrfbgp.Binding {
 
 func TestEnableBDInstallsBothL2SIDs(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	if len(sid.created) != 2 {
@@ -134,7 +134,7 @@ func TestEnableBDRollsBackDT2UWhenDT2MFails(t *testing.T) {
 	e, _, sid := newTestEVPNExporter(t)
 	// DT2U installs (call 1), DT2M (call 2) fails -> the DT2U rollback path runs.
 	sid.failOnCall = 2
-	if err := e.EnableBD(evpnTestBinding(), 10); err == nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err == nil {
 		t.Fatal("EnableBD should fail when the End.DT2M SID install fails")
 	}
 	if len(sid.created) != 1 {
@@ -148,7 +148,7 @@ func TestEnableBDRollsBackDT2UWhenDT2MFails(t *testing.T) {
 	}
 	// Re-enable must work (the DT2U function was returned to the pool).
 	sid.failOnCall = 0
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("re-enable after rollback: %v", err)
 	}
 }
@@ -157,7 +157,7 @@ func TestEnableBDRollbackFailureSurfacesStrandedSID(t *testing.T) {
 	e, _, sid := newTestEVPNExporter(t)
 	sid.failOnCall = 2                       // DT2M install fails
 	sid.deleteErr = errors.New("map locked") // the DT2U rollback delete also fails
-	err := e.EnableBD(evpnTestBinding(), 10)
+	err := e.EnableBD(evpnTestBinding(), 100, 10)
 	if err == nil {
 		t.Fatal("EnableBD should fail when both the DT2M install and the DT2U rollback fail")
 	}
@@ -177,7 +177,7 @@ func TestEnableBDRejectsInvalidNextHop(t *testing.T) {
 	}
 	for _, nh := range []string{"", "10.0.0.1", "not-an-ip"} {
 		e := NewEVPNExporter(&fakeEVPNAdv{}, &fakeSidOps{}, locs, nh, zap.NewNop())
-		if err := e.EnableBD(evpnTestBinding(), 10); err == nil {
+		if err := e.EnableBD(evpnTestBinding(), 100, 10); err == nil {
 			t.Errorf("EnableBD with next_hop %q should fail (must be a valid IPv6)", nh)
 		}
 	}
@@ -185,19 +185,17 @@ func TestEnableBDRejectsInvalidNextHop(t *testing.T) {
 
 func TestEnableBDRejectsMissingFields(t *testing.T) {
 	e, _, _ := newTestEVPNExporter(t)
-	noBD := evpnTestBinding()
-	noBD.BDID = 0
-	if err := e.EnableBD(noBD, 10); err == nil {
-		t.Error("EnableBD without bd_id should fail")
+	if err := e.EnableBD(evpnTestBinding(), 0, 10); err == nil {
+		t.Error("EnableBD with a zero bd_id should fail")
 	}
 	noRD := evpnTestBinding()
 	noRD.RD = ""
-	if err := e.EnableBD(noRD, 10); err == nil {
+	if err := e.EnableBD(noRD, 100, 10); err == nil {
 		t.Error("EnableBD without RD should fail")
 	}
 	badLoc := evpnTestBinding()
 	badLoc.DefaultLocator = "NOPE"
-	if err := e.EnableBD(badLoc, 10); err == nil {
+	if err := e.EnableBD(badLoc, 100, 10); err == nil {
 		t.Error("EnableBD with an unknown locator should fail")
 	}
 }
@@ -207,7 +205,7 @@ func TestSIDsForBD(t *testing.T) {
 	if got := e.SIDsForBD(100); got != nil {
 		t.Errorf("SIDsForBD must be nil before the BD is enabled, got %v", got)
 	}
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	got := e.SIDsForBD(100)
@@ -231,7 +229,7 @@ func TestSIDsForBD(t *testing.T) {
 
 func TestOnLocalMACAdvertisesRT2(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
@@ -267,7 +265,7 @@ func TestOnLocalMACAdvertisesRT2(t *testing.T) {
 
 func TestOnLocalMACWithdrawMirrorsAdvertise(t *testing.T) {
 	e, adv, _ := newTestEVPNExporter(t)
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
@@ -284,7 +282,7 @@ func TestOnLocalMACWithdrawMirrorsAdvertise(t *testing.T) {
 
 func TestOnLocalMACAddIsIdempotent(t *testing.T) {
 	e, adv, _ := newTestEVPNExporter(t)
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
@@ -305,7 +303,7 @@ func TestOnLocalMACIgnoresUnboundBD(t *testing.T) {
 
 func TestOnLocalMACWithdrawUnadvertisedIsNoop(t *testing.T) {
 	e, adv, _ := newTestEVPNExporter(t)
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	// Delete a MAC we never advertised: must not issue a withdraw.
@@ -317,7 +315,7 @@ func TestOnLocalMACWithdrawUnadvertisedIsNoop(t *testing.T) {
 
 func TestDisableBDWithdrawsAllAndReleases(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	e.OnLocalMAC(100, net.HardwareAddr{0xaa, 0, 0, 0, 0, 1}, true)
@@ -335,14 +333,14 @@ func TestDisableBDWithdrawsAllAndReleases(t *testing.T) {
 		t.Errorf("want both L2 SIDs (DT2U + DT2M) released on disable, got %d", len(sid.deleted))
 	}
 	// The BD is gone, so re-enabling must succeed.
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("re-enable after disable: %v", err)
 	}
 }
 
 func TestOnLocalMACPushFailureNotRecorded(t *testing.T) {
 	e, adv, _ := newTestEVPNExporter(t)
-	if err := e.EnableBD(evpnTestBinding(), 10); err != nil {
+	if err := e.EnableBD(evpnTestBinding(), 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	adv.pushErr = errors.New("push failed")
@@ -362,7 +360,7 @@ func TestOnLocalMACPushFailureNotRecorded(t *testing.T) {
 func TestEnableBDIdempotentOnUnchangedReBind(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
 	b := evpnTestBinding()
-	if err := e.EnableBD(b, 10); err != nil {
+	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	mac := net.HardwareAddr{0xaa, 0, 0, 0, 0, 1}
@@ -370,7 +368,7 @@ func TestEnableBDIdempotentOnUnchangedReBind(t *testing.T) {
 	createdBefore, mcastBefore := len(sid.created), len(adv.pushedMcast)
 
 	// Re-bind with an identical binding + ifindex.
-	if err := e.EnableBD(b, 10); err != nil {
+	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("re-EnableBD: %v", err)
 	}
 	if len(sid.created) != createdBefore {
@@ -386,7 +384,7 @@ func TestEnableBDIdempotentOnUnchangedReBind(t *testing.T) {
 	// A change limited to a receive-only field (import RTs) does not affect what
 	// this exporter originates, so it is still a no-op.
 	b.ImportRTs = []string{"65000:999"}
-	if err := e.EnableBD(b, 10); err != nil {
+	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("import-rt-only re-EnableBD: %v", err)
 	}
 	if len(sid.deleted) != 0 || len(adv.withdrawnMcast) != 0 {
@@ -407,12 +405,12 @@ func TestEnableBDReorderedRTsIsNoop(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
 	b := evpnTestBinding()
 	b.ExportRTs = []string{"65000:100", "65000:200"}
-	if err := e.EnableBD(b, 10); err != nil {
+	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	createdBefore := len(sid.created)
 	b.ExportRTs = []string{"65000:200", "65000:100"} // same set, reversed
-	if err := e.EnableBD(b, 10); err != nil {
+	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("reordered-RT re-EnableBD: %v", err)
 	}
 	if len(sid.created) != createdBefore || len(sid.deleted) != 0 || len(adv.withdrawnMcast) != 0 {
@@ -427,10 +425,10 @@ func TestEnableBDReorderedRTsIsNoop(t *testing.T) {
 func TestEnableBDReEnablesOnChange(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
 	b := evpnTestBinding()
-	if err := e.EnableBD(b, 10); err != nil {
+	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
-	if err := e.EnableBD(b, 20); err != nil { // bridge ifindex changed 10 -> 20
+	if err := e.EnableBD(b, 100, 20); err != nil { // bridge ifindex changed 10 -> 20
 		t.Fatalf("changed re-EnableBD: %v", err)
 	}
 	if len(sid.deleted) != 2 {
@@ -591,7 +589,7 @@ func TestOnLocalMACMaxPrefixesCap(t *testing.T) {
 	e, adv, _ := newTestEVPNExporter(t)
 	b := evpnTestBinding()
 	b.MaxPrefixes = 2
-	if err := e.EnableBD(b, 10); err != nil {
+	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	macs := []net.HardwareAddr{

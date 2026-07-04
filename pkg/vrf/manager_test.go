@@ -485,9 +485,9 @@ func TestManager_AttachBridge_OpsErrorLeavesNoIdentity(t *testing.T) {
 	}
 }
 
-// SetBridge / RemoveBridge and the BDID resolver; clones do not alias the
-// stored Members.
-func TestManager_BridgeFacetStateAndResolver(t *testing.T) {
+// SetBridge / RemoveBridge state semantics; clones do not alias the stored
+// Members.
+func TestManager_BridgeFacetState(t *testing.T) {
 	m := NewManager()
 	members := []string{"eth2"}
 	v, err := m.SetBridge("evi-100", Bridge{Name: "br100", BdID: 100, Members: members, Ifindex: 9})
@@ -501,15 +501,8 @@ func TestManager_BridgeFacetStateAndResolver(t *testing.T) {
 	if got.Bridge == nil || len(got.Bridge.Members) != 1 || got.Bridge.Members[0] != "eth2" {
 		t.Errorf("stored Bridge.Members corrupted: %+v", got.Bridge)
 	}
-
-	if ifindex, ok := m.BridgeIfindexByBDID(100); !ok || ifindex != 9 {
-		t.Errorf("BridgeIfindexByBDID(100) = (%d, %v), want (9, true)", ifindex, ok)
-	}
-	if _, ok := m.BridgeIfindexByBDID(999); ok {
-		t.Error("absent bd_id: want ok=false")
-	}
-	if _, ok := m.BridgeIfindexByBDID(0); ok {
-		t.Error("bd_id 0: want ok=false")
+	if got.Bridge.BdID != 100 || got.Bridge.Ifindex != 9 {
+		t.Errorf("stored Bridge identity wrong: %+v", got.Bridge)
 	}
 
 	if removed := m.RemoveBridge("evi-100"); !removed {
@@ -518,8 +511,8 @@ func TestManager_BridgeFacetStateAndResolver(t *testing.T) {
 	if removed := m.RemoveBridge("evi-100"); removed {
 		t.Error("RemoveBridge idempotent: removed = true, want false")
 	}
-	if _, ok := m.BridgeIfindexByBDID(100); ok {
-		t.Error("resolver still hits after RemoveBridge")
+	if got, _ := m.Get("evi-100"); got.Bridge != nil {
+		t.Error("facet still present after RemoveBridge")
 	}
 	// The identity survives a facet removal (deleting a VRF is explicit).
 	if _, ok := m.IDForName("evi-100"); !ok {

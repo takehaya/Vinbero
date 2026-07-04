@@ -249,9 +249,15 @@ func run(cliCtx *cli.Context) error {
 	if evpnExporter != nil {
 		evpnCoord = server.NewEvpnCoordinator(
 			evpnExporter,
-			// The binding axis resolves a bd_id through the VRF objects'
-			// bridge facets (unique by construction), not the raw state file.
-			vrfBgpMgr.VRF().BridgeIfindexByBDID,
+			// The coordinator resolves a binding's bridge domain through the
+			// VRF object's bridge facet, by VRF name.
+			func(vrfName string) (vrf.Bridge, bool) {
+				v, ok := vrfBgpMgr.VRF().Get(vrfName)
+				if !ok || v.Bridge == nil {
+					return vrf.Bridge{}, false
+				}
+				return *v.Bridge, true
+			},
 			vin.GetFDBWatcher().DumpBridge,
 			lg,
 		)
@@ -364,10 +370,10 @@ func run(cliCtx *cli.Context) error {
 			// not retried on failure) and after SetMACSink above (the FDB replay
 			// reaches the exporter only once the sink is wired). Gated on EVPN
 			// export RTs like both runtime axes (an empty RT list would push
-			// unimportable RT3); EnableForBinding no-ops when no facet carries the bd.
+			// unimportable RT3); Enable no-ops when the VRF has no bridge facet.
 			for _, b := range vrfBgpMgr.List() {
 				if b.BDID != 0 && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
-					evpnCoord.EnableForBinding(b)
+					evpnCoord.Enable(b)
 				}
 			}
 		}
