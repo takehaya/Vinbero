@@ -210,6 +210,17 @@ type RouteSubscriber interface {
 	Subscribe(filter Family, handler RouteHandler) (cancel func(), err error)
 }
 
+// RouteLister reads a snapshot of the current loc-rib for one family and
+// hands each peer-learned route to handler, synchronously on the calling
+// goroutine. Locally originated paths (this node's own advertisements) are
+// skipped -- unlike the live Subscribe stream, the rib holds them too, and
+// re-applying an own EVPN RT3 would install a self-pointing BUM peer.
+// Used to re-apply routes that were dropped fail-closed while their
+// import surface (binding / bridge facet) did not exist yet.
+type RouteLister interface {
+	ListRoutes(family Family, handler RouteHandler) error
+}
+
 // Origin identifies what signaled a candidate path (RFC 9256 §2.4
 // Protocol-Origin). The numeric values are the RFC's recommended
 // defaults; the best-path tie-break prefers the HIGHER value, so a

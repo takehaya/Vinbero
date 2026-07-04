@@ -55,6 +55,8 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 	// applier. A node that both advertises and steers would then act on its
 	// own SR Policy / VPN routes. Preserve the single-boot-subscribe ordering,
 	// or filter local-origin paths here, before relaxing this.
+	// (ListRoutes, the on-demand rib snapshot, does NOT depend on this
+	// ordering: it filters local-origin paths explicitly.)
 	if err := srv.WatchEvent(ctx, cbs, gobgpsrv.WatchPostUpdate(true, "", "")); err != nil {
 		cancel()
 		return nil, fmt.Errorf("watch event: %w", err)
