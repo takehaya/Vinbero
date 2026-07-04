@@ -1091,11 +1091,11 @@ func TestAddRouteTarget_OnEVPNFamilyReFiresEVPN(t *testing.T) {
 	}
 }
 
-// V6 regression: a binding with bd_id set but no FamilyEVPN (e.g. operator
-// forgot --rt evpn:...) would otherwise advertise RT3 with empty
-// extended-community RTs, which no peer can import. commitBinding must skip
-// EnableForBinding when FamilyEVPN is absent.
-func TestVrfBgpBind_BDIDWithoutEvpnFamilySkipsEnable(t *testing.T) {
+// V6 regression: a binding on a facet-carrying VRF but without FamilyEVPN
+// (e.g. operator forgot --rt evpn:...) would otherwise advertise RT3 with
+// empty extended-community RTs, which no peer can import. commitBinding
+// must skip Enable when FamilyEVPN is absent.
+func TestVrfBgpBind_FacetWithoutEvpnFamilySkipsEnable(t *testing.T) {
 	hook := &fakeEvpnBridge{}
 	mgr := newEvpnTestMgr(t, map[string]vrf.Bridge{
 		"evi-no-evpn-rt": {Name: "br100", BdID: 100, Ifindex: 5},
@@ -1114,7 +1114,7 @@ func TestVrfBgpBind_BDIDWithoutEvpnFamilySkipsEnable(t *testing.T) {
 		t.Fatalf("VrfBgpBind: %v", err)
 	}
 	if hook.enableCnt != 0 || hook.enabled[100] {
-		t.Errorf("bind with BDID set but no FamilyEVPN must NOT call EnableBD (would push empty-RT RT3); enableCnt=%d enabled=%v", hook.enableCnt, hook.enabled)
+		t.Errorf("bind on a facet-carrying VRF without FamilyEVPN must NOT call EnableBD (would push empty-RT RT3); enableCnt=%d enabled=%v", hook.enableCnt, hook.enabled)
 	}
 }
 
