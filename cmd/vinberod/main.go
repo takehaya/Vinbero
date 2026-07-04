@@ -299,19 +299,6 @@ func run(cliCtx *cli.Context) error {
 			return fmt.Errorf("vrf %q: binding bd_id %d mismatches the bridge facet %q (bd_id %d); fix the config or the state file", b.VRFName, b.BDID, v.Bridge.Name, v.Bridge.BdID)
 		}
 	}
-	// EVPN auto-advertise for boot-provisioned bridge domains: the runtime
-	// axes (VrfBridgeAttach / commitBinding) never ran for facets that came
-	// from the state file or the config, so enable them here. Gated on EVPN
-	// export RTs like both runtime axes (an empty RT list would push
-	// unimportable RT3); EnableForBinding no-ops when no facet carries the bd.
-	if evpnCoord != nil {
-		for _, b := range vrfBgpMgr.List() {
-			if b.BDID != 0 && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
-				evpnCoord.EnableForBinding(b)
-			}
-		}
-	}
-
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
 		// (global up, peers half-added) still gets torn down.
@@ -370,6 +357,19 @@ func run(cliCtx *cli.Context) error {
 				vin.GetFDBWatcher().SetMACSink(nil)
 				evpnExporter.Close()
 			}()
+			// EVPN auto-advertise for boot-provisioned bridge domains: the runtime
+			// axes (VrfBridgeAttach / commitBinding) never ran for facets that came
+			// from the state file or the config, so enable them here. This must run
+			// after startBGPSession (the RT3 push needs a started session -- it is
+			// not retried on failure) and after SetMACSink above (the FDB replay
+			// reaches the exporter only once the sink is wired). Gated on EVPN
+			// export RTs like both runtime axes (an empty RT list would push
+			// unimportable RT3); EnableForBinding no-ops when no facet carries the bd.
+			for _, b := range vrfBgpMgr.List() {
+				if b.BDID != 0 && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
+					evpnCoord.EnableForBinding(b)
+				}
+			}
 		}
 	}
 
