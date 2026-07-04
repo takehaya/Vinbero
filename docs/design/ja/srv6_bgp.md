@@ -193,10 +193,10 @@ flowchart LR
 受信した RT2/RT3 は、L3VPN と同じ流れで bd へ落とします。
 
 1. RD で区別する。同じ MAC でも RD が違えば別経路として共存します。
-2. RT で取り込み先 bd を決める。経路の RT が登録済みの bd binding の import RT に一致したときだけ取り込みます。
+2. RT で取り込み先の VRF を決め、その VRF の bridge facet から bd を得る。経路の RT が binding の import RT に一致し、かつ binding の VRF に bridge facet が付いているときだけ取り込みます (facet の無い binding は fail-closed で match しません)。
 3. service SID へ向ける install にする。RT2 なら相手の End.DT2U SID を segment に持つ bd_peer を作り、`fdb_map[bd, MAC]` をその peer へ向けます。以後その MAC 宛ての L2 フレームは XDP headend が SID へ H.Encaps.L2 します。RT3 なら相手の End.DT2M SID への flood 用 bd_peer を作り、BUM をそこへ複製します。
 
-bd と RT の対応は config か RPC で事前に登録し、VRF↔RT と同じ in-memory の map で保持します。広報方向も同じ data model で、ローカルの顧客 MAC を End.DT2U SID 付きで RT2、flood 宛先を End.DT2M SID 付きで RT3 として出します。
+RT と VRF の対応は config か RPC で事前に登録し、bd はその VRF の bridge facet (vrf bridge-attach) が唯一の出所です。広報方向も同じ data model で、ローカルの顧客 MAC を End.DT2U SID 付きで RT2、flood 宛先を End.DT2M SID 付きで RT3 として出します。
 
 ```mermaid
 flowchart LR
@@ -204,7 +204,7 @@ flowchart LR
     subgraph VB["Vinbero (control plane)"]
         SPK["BGP speaker<br/>(default: gobgp, in-process)"]
         APP["route handler (applier)"]
-        BIND["bd↔RT binding<br/>import RT → bd_id"]
+        BIND["VRF↔RT binding<br/>import RT → VRF → bridge facet の bd"]
     end
     FDB["fdb_map[bd, MAC]<br/>→ bd_peer(End.DT2U SID)"]
     MC["bd_peer(End.DT2M SID)<br/>BUM flood"]
