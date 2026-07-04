@@ -52,25 +52,26 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# Bind bd 100 to the EVPN import RT before the SID/headend setup so an early
-# RT2/RT3 from pe-osaka is never dropped for lack of a bridge-domain binding.
-# Replaces the deleted YAML vrf_bindings entry.
-/usr/local/bin/vbctl vrf-bgp bind \
-    --vrf evi-100 \
-    --bd-id 100 \
-    --rt evpn:65000:100:import || true
-
 # The bridge as evi-100's L2 facet: br100 is bd 100's local delivery point —
 # End.DT2U decaps a core-bound frame into br100, which forwards it to
 # ce-tokyo on eth2. The CE port is enslaved for that egress direction; XDP
-# still sees CE->core frames first (ingress). Attaching through Vinbero makes
-# it a facet of the same VRF object the binding above references (bd_id must
-# agree) and registers it with the FDB watcher.
+# still sees CE->core frames first (ingress). The facet is the bridge
+# domain's single source: it must attach BEFORE the vrf-bgp bind below, so
+# the moment the binding can match a received RT2/RT3 its bd is resolvable
+# (a route landing between bind and attach would be dropped fail-closed and
+# is not re-applied). Attaching also registers br100 with the FDB watcher.
 /usr/local/bin/vbctl vrf bridge-attach \
     --vrf evi-100 \
     --name br100 \
     --bd-id 100 \
     --members eth2 || true
+
+# Bind evi-100 to the EVPN import RT before the SID/headend setup so an early
+# RT2/RT3 from pe-osaka is never dropped for lack of a binding. The bridge
+# domain the routes install into is evi-100's facet (bd 100, attached above).
+/usr/local/bin/vbctl vrf-bgp bind \
+    --vrf evi-100 \
+    --rt evpn:65000:100:import || true
 
 # Source locator: fd00:100::/48 is pe-tokyo's SRv6 block (encap source).
 /usr/local/bin/vbctl locator create \

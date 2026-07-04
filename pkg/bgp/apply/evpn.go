@@ -156,9 +156,10 @@ func remoteSrcOrLocal(remoteSrc string, local [bpf.IPv6AddrLen]byte) [bpf.IPv6Ad
 }
 
 // matchEVPNBD resolves a received EVPN route's route-targets to a bridge
-// domain. MatchImportForFamily already skips BDID==0 bindings under
-// FamilyEVPN, but the guard stays as belt-and-suspenders so an EVPN install
-// without a real bridge domain is impossible.
+// domain: MatchImportForFamily matches the binding and returns the bd_id of
+// the matched VRF's bridge facet, skipping facet-less bindings under
+// FamilyEVPN. The zero-bd guard stays as belt-and-suspenders so an EVPN
+// install without a real bridge domain is impossible.
 func (a *Applier) matchEVPNBD(rts []string) (uint16, bool) {
 	_, bdID, ok := a.vrfBindings.MatchImportForFamily(rts, bgp.FamilyEVPN)
 	if !ok || bdID == 0 {

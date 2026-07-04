@@ -1,16 +1,18 @@
 package server
 
 import (
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 	"go.uber.org/zap"
 )
 
 // EvpnBridgeHook enables or disables EVPN auto-advertise (RT2 + RT3) for a
-// bridge domain as its bridge facet is attached or detached.
+// bridge domain as its bridge facet is attached or detached. bdID and
+// bridgeIfindex come from the VRF's bridge facet.
 // *pkg/bgp/export.EVPNExporter satisfies it; it is nil unless EVPN
 // auto-advertise is on.
 type EvpnBridgeHook interface {
-	EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error
+	EnableBD(b vrfbgp.Binding, bdID uint16, bridgeIfindex uint32) error
 	DisableBD(bdID uint16)
 	// SIDsForBD returns the sid_function_map keys the exporter installed for the
 	// bd (End.DT2U + End.DT2M), so VrfBridgeDetach can exclude these
@@ -19,22 +21,21 @@ type EvpnBridgeHook interface {
 	SIDsForBD(bdID uint16) []string
 }
 
-// EvpnCoordinator drives EVPN auto-advertise (RT2 + RT3) across the two
-// lifecycles that gate a bridge domain: the bridge facet (VrfBridgeAttach /
-// VrfBridgeDetach) and the VRF<->BGP binding (VrfBgpBind / VrfBgpUnbind). A
-// bridge domain may auto-advertise only when BOTH its bridge exists and its
-// binding is present, so whichever arrives second enables it and whichever
-// leaves first disables it. Centralizing both axes here keeps the enable
-// (EnableBD + FDB replay) sequence in one place and closes the asymmetry where
-// an unbind left the device-axis enablement originating routes under a removed
-// RD/RT.
+// EvpnCoordinator drives EVPN auto-advertise (RT2 + RT3) for a VRF's bridge
+// domain. A bridge domain may auto-advertise only when the VRF carries BOTH a
+// bridge facet and a binding with EVPN export RTs, so every mutation that can
+// change either side (VrfBridgeAttach / VrfBridgeDetach, VrfBgpBind /
+// VrfBgpUnbind, RT mutations through commitBinding, and the boot pass) calls
+// Enable or Disable here. Centralizing the enable (EnableBD + FDB replay)
+// sequence in one place keeps the replay ordering and the teardown symmetric
+// regardless of which side of the VRF changed.
 //
 // It is nil unless EVPN auto-advertise is on; callers nil-check before use.
 type EvpnCoordinator struct {
 	exporter EvpnBridgeHook
-	// bridgeIfindex resolves a bridge domain id to its Linux bridge ifindex
-	// (vrf.Manager.BridgeIfindexByBDID); ok=false when no bridge facet exists yet.
-	bridgeIfindex func(bdID uint16) (uint32, bool)
+	// facet resolves a VRF name to its bridge facet (bd_id + bridge ifindex +
+	// device name); ok=false when the VRF has no bridge attached yet.
+	facet func(vrfName string) (vrf.Bridge, bool)
 	// replayFDB re-runs a bridge's existing kernel FDB through the RT2 path
 	// (FDBWatcher.DumpBridge), so a bridge already holding MACs advertises them.
 	replayFDB func(ifindex int) error
@@ -42,77 +43,54 @@ type EvpnCoordinator struct {
 }
 
 // NewEvpnCoordinator wires the coordinator. exporter is the EVPNExporter,
-// bridgeIfindex is vrf.Manager.BridgeIfindexByBDID, replayFDB is
-// FDBWatcher.DumpBridge.
-func NewEvpnCoordinator(exporter EvpnBridgeHook, bridgeIfindex func(bdID uint16) (uint32, bool), replayFDB func(ifindex int) error, logger *zap.Logger) *EvpnCoordinator {
+// facet resolves a VRF name to its bridge facet (a closure over
+// vrf.Manager.Get), replayFDB is FDBWatcher.DumpBridge.
+func NewEvpnCoordinator(exporter EvpnBridgeHook, facet func(vrfName string) (vrf.Bridge, bool), replayFDB func(ifindex int) error, logger *zap.Logger) *EvpnCoordinator {
 	return &EvpnCoordinator{
-		exporter:      exporter,
-		bridgeIfindex: bridgeIfindex,
-		replayFDB:     replayFDB,
-		logger:        logger.Named("evpn.coordinator"),
+		exporter:  exporter,
+		facet:     facet,
+		replayFDB: replayFDB,
+		logger:    logger.Named("evpn.coordinator"),
 	}
 }
 
-// EnableForBridge enables EVPN auto-advertise for a binding whose bridge is at
-// ifindex, and replays the bridge's existing FDB as RT2. Both steps are
-// non-fatal -- the bridge is usable regardless; it just won't auto-originate --
-// so failures are logged, not returned. bridgeName is the Linux bridge device
-// name when the caller knows it (the facet axis, VrfBridgeAttach); the binding
-// axis passes "" since it resolves only the ifindex, so the log omits the
-// bridge field rather than mislabelling another value as the bridge name.
-func (c *EvpnCoordinator) EnableForBridge(b vrfbgp.Binding, ifindex uint32, bridgeName string) {
-	if err := c.exporter.EnableBD(b, ifindex); err != nil {
-		c.logger.Warn("enable EVPN auto-advertise for bridge domain",
-			c.bdFields(b, bridgeName, zap.Error(err))...)
+// Enable turns on EVPN auto-advertise for the binding's bridge domain and
+// replays the bridge's existing FDB as RT2. The bridge domain (bd_id +
+// ifindex) comes from the VRF's bridge facet; when the VRF has no facet yet it
+// is a no-op -- VrfBridgeAttach calls Enable again when the bridge arrives.
+// Both steps are non-fatal: the bridge is usable regardless, it just won't
+// auto-originate, so failures are logged, not returned.
+func (c *EvpnCoordinator) Enable(b vrfbgp.Binding) {
+	br, ok := c.facet(b.VRFName)
+	if !ok {
+		c.logger.Debug("EVPN binding has no bridge facet yet",
+			zap.String("vrf", b.VRFName))
 		return
 	}
-	if err := c.replayFDB(int(ifindex)); err != nil {
+	fields := []zap.Field{
+		zap.String("vrf", b.VRFName), zap.Uint16("bd_id", br.BdID),
+		zap.String("bridge", br.Name),
+	}
+	if err := c.exporter.EnableBD(b, br.BdID, br.Ifindex); err != nil {
+		c.logger.Warn("enable EVPN auto-advertise for bridge domain",
+			append(fields, zap.Error(err))...)
+		return
+	}
+	if err := c.replayFDB(int(br.Ifindex)); err != nil {
 		// Replay MACs already in the bridge's FDB (e.g. a pre-existing bridge) so
 		// they advertise as RT2. Non-fatal: live events still cover anything
 		// learned after this.
 		c.logger.Warn("replay bridge FDB for EVPN RT2 auto-advertise",
-			c.bdFields(b, bridgeName, zap.Error(err))...)
+			append(fields, zap.Error(err))...)
 	}
-}
-
-// bdFields builds the common log fields for a bridge domain: vrf and bd_id
-// always, bridge only when its name is known, plus any extra fields.
-func (c *EvpnCoordinator) bdFields(b vrfbgp.Binding, bridgeName string, extra ...zap.Field) []zap.Field {
-	f := make([]zap.Field, 0, 3+len(extra))
-	f = append(f, zap.String("vrf", b.VRFName), zap.Uint16("bd_id", b.BDID))
-	if bridgeName != "" {
-		f = append(f, zap.String("bridge", bridgeName))
-	}
-	return append(f, extra...)
-}
-
-// EnableForBinding is the binding axis: a VRF was just bound, so enable EVPN
-// auto-advertise for its bridge domain if the bridge already exists. When the
-// bridge has not been attached yet it is a no-op -- VrfBridgeAttach enables it
-// via EnableForBridge when it arrives. A binding without a bridge domain
-// (BDID 0, i.e. L3VPN-only) is ignored.
-func (c *EvpnCoordinator) EnableForBinding(b vrfbgp.Binding) {
-	if b.BDID == 0 {
-		return
-	}
-	ifindex, ok := c.bridgeIfindex(b.BDID)
-	if !ok {
-		// No VRF carries this bd_id as a bridge facet yet; VrfBridgeAttach enables
-		// it when the bridge arrives. (Facet uniqueness means an ambiguous bd_id
-		// cannot exist, unlike the pre-facet state lookup this replaced.)
-		c.logger.Debug("EVPN binding has no bridge facet yet",
-			zap.String("vrf", b.VRFName), zap.Uint16("bd_id", b.BDID))
-		return
-	}
-	// The binding axis resolves only the ifindex, not the bridge device name, so
-	// pass "" -- EnableForBridge omits the bridge log field rather than mislabel.
-	c.EnableForBridge(b, ifindex, "")
 }
 
 // Disable tears down a bridge domain's EVPN auto-advertise (withdraw RT2/RT3,
-// release SIDs). Driven by VrfBridgeDetach (facet gone) and VrfBgpUnbind
-// (binding gone); a no-op for a BD the exporter has not enabled, so calling it
-// from both axes is safe.
+// release SIDs). It takes the bd_id rather than a VRF name because both
+// callers act on pre-mutation state: VrfBridgeDetach captures the facet's bd
+// before removing it, and VrfBgpUnbind captures it before the binding goes. A
+// no-op for a BD the exporter has not enabled, so calling it from either side
+// is safe.
 func (c *EvpnCoordinator) Disable(bdID uint16) {
 	if bdID == 0 {
 		return

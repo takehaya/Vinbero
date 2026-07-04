@@ -12,16 +12,23 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
-// evpnApplier builds an Applier with one VRF binding mapping import RT
-// "65000:100" to bridge domain 100, the setup an RT2 needs to install.
+// evpnApplier builds an Applier with one VRF whose bridge facet carries bd
+// 100 and whose binding imports RT "65000:100" under the evpn family, the
+// setup an RT2 needs to install (the bd resolves from the facet).
 func evpnApplier(t *testing.T) (*Applier, *fakeHeadend) {
 	t.Helper()
 	fh := newFakeHeadend()
 	vm := vrfbgp.NewManager()
-	if err := vm.Bind(vrfbgp.Binding{VRFName: "evi-100", ImportRTs: []string{"65000:100"}, BDID: 100}); err != nil {
+	if _, err := vm.VRF().SetBridge("evi-100", vrf.Bridge{Name: "br100", BdID: 100, Ifindex: 5}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
+	if err := vm.Bind(vrfbgp.Binding{VRFName: "evi-100", Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionImport}}},
+	}}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
 	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())

@@ -67,12 +67,12 @@ data plane の lookup キーはあくまで ifindex です (kernel FIB の要求
 EVPN / L2VPN の bridge domain も VRF オブジェクトの facet です。End.DT2/DT2M が decap したフレームを配送する Linux bridge (FDB miss 時の flood 先) と、`fdb_map` や `bd_peer_map` をスコープする bd_id (1..65535) を 1 つの VRF が持ちます。
 
 - attach は `VrfService/VrfBridgeAttach` (CLI は `vbctl vrf bridge-attach --vrf X --name brN --bd-id N [--members ...]`)。netlink と JSON state への永続化は device facet と同じく `pkg/netresource` が `BridgeOps` interface 経由で担い、state record は owning VRF 名も持ちます。attach は FDBWatcher への登録 (MAC 学習と EVPN RT2 の供給源) も行います。
-- 一意性は attach 時に強制されます。1 つの VRF が持てる bridge は 1 つ、1 つの bridge device / 1 つの bd_id が属せる VRF も 1 つです。これにより EVPN binding 軸の bd_id → bridge 解決が曖昧になり得ず、旧構成の「重複 bd_id を fail-closed で全拒否する」防御が構造的に不要になります。
-- BGP binding の `bd_id` (Binding.BDID) が同じ VRF に居る場合、facet の bd_id と一致しなければ attach も bind も拒否されます (受信 EVPN route が decap 先と違う bd に install される事故を防ぐ)。
+- 一意性は attach 時に強制されます。1 つの VRF が持てる bridge は 1 つ、1 つの bridge device / 1 つの bd_id が属せる VRF も 1 つです。
+- facet が bridge domain の唯一の出所です。BGP binding は bd を持たず、受信した EVPN route (RT2/RT3) は RT が一致した binding の VRF が持つ facet の bd に install されます。facet の無い VRF の binding は EVPN route を import しません (fail-closed)。このため運用では bridge-attach を vrf-bgp bind より先に行います。binding が match 可能になった時点で bd が必ず解決でき、bind と attach の間に届いた route が落ちて再適用されない、という窓が生じません。
 - adopt のセマンティクスは device facet と同じです。link が本当に bridge であること、state 上の bd_id / owner と矛盾しないことを検証し、up + 不足 member の enslave で収束します。
 - detach (`vbctl vrf bridge-detach --vrf X`) は End.DT2/DT2M の SID が bridge を参照している間は拒否します (EVPN auto-advertise が自分で入れた lifecycle SID は除外)。device の削除に成功してから FDBWatcher を解除し、EVPN auto-advertise を disable し、最後に facet を消します。削除失敗時は facet も watcher も無傷で retry できます。
 
-EVPN auto-advertise が有効な場合、bridge facet と EVPN export RT 付きの binding が両方そろった時点で RT3 広告と FDB replay (RT2) が走ります。attach 側は binding を VRF 名で直接引くので、旧構成の GetByBDID のような数値 join はありません。
+EVPN auto-advertise が有効な場合、bridge facet と EVPN export RT 付きの binding が両方そろった時点で RT3 広告と FDB replay (RT2) が走ります。coordinator は binding の VRF 名から facet を引いて bd_id と bridge ifindex を得るので、bd の数値 join はどこにもありません。
 
 ## lifecycle
 
@@ -146,7 +146,7 @@ vrfs:
         members: [eth2]
 ```
 
-`members` / `enable_l3mdev_rule` は device の設定なので `table_id` なしでは拒否されます。`bridge.bd_id` は同じ VRF 名の `bgp.vrf_bindings[].bd_id` と一致していなければ起動時に拒否されます。フィールドの一覧は [configuration.md](configuration.md) を参照してください。
+`members` / `enable_l3mdev_rule` は device の設定なので `table_id` なしでは拒否されます。`bgp.vrf_bindings[]` は bd_id を持ちません (旧 field は tombstone で、非 0 を設定すると Load 時にエラーになります。0 は未設定と同義です)。EVPN の bridge domain はこの `bridge` facet が唯一の出所です。フィールドの一覧は [configuration.md](configuration.md) を参照してください。
 
 ## 関連ドキュメント
 

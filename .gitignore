@@ -203,4 +203,7 @@ examples/interop-clab/scenarios/*/clab-*/
 # of band; not part of this repo). Kept untracked so they can't be committed.
 /examples/interop-clab/images/vendor/
 /examples/interop-clab/scenarios/vendor/
-vinberod
+
+# stray daemon binary from `go build ./cmd/vinberod/` in the repo root
+# (anchored: must not swallow the cmd/vinberod source directory)
+/vinberod

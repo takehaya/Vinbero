@@ -196,13 +196,10 @@ type Binding struct {
 	// hostile VRF-route writer flooding the VPN.
 	MaxPrefixes    uint32
 	DefaultLocator string
-	// BDID is the bridge domain a received EVPN route (RT2/3/4) installs
-	// into when its route targets match an EVPN family RT. It is 0 for
-	// L3VPN-only bindings; EVPN reception requires a non-zero BDID.
-	BDID uint16
 	// Families is the primary AF -> per-family RT policy map. Normalize
 	// derives it from the legacy ImportRTs / ExportRTs when callers do not
-	// set it explicitly (L3VPN-only when BDID == 0, EVPN when BDID != 0).
+	// set it explicitly (L3VPN families only; EVPN and MUP policies must be
+	// declared family-scoped).
 	Families map[bgp.Family]FamilyPolicy
 	// MupGTP4SourcePrefix turns on RFC 9433 §6.6 source-address embedding
 	// for GTP4 downlink (T1ST) installs received under this binding's RD:
@@ -216,18 +213,18 @@ type Binding struct {
 
 // Normalize returns a copy of b with Families and the legacy ImportRTs /
 // ExportRTs reconciled. When Families is nil the legacy lists are expanded
-// into Families using the L3VPN / EVPN rule. Otherwise — including a non-nil
-// empty map, which is how RemoveFamily / RemoveRouteTarget signal "the
-// caller has emptied this binding" — Families is the source of truth and
-// the legacy lists are synthesized from it. The nil-vs-empty distinction
-// keeps RemoveFamily from being silently undone by a stale legacy list.
+// into the L3VPN families. Otherwise — including a non-nil empty map, which
+// is how RemoveFamily / RemoveRouteTarget signal "the caller has emptied
+// this binding" — Families is the source of truth and the legacy lists are
+// synthesized from it. The nil-vs-empty distinction keeps RemoveFamily from
+// being silently undone by a stale legacy list.
 //
 // Families is deep-copied before synthesis so Manager.Bind never stores a
 // map that aliases the caller's input.
 func (b Binding) Normalize() Binding {
 	out := b
 	if out.Families == nil {
-		out.Families = legacyToFamilies(out.BDID, out.ImportRTs, out.ExportRTs)
+		out.Families = legacyToFamilies(out.ImportRTs, out.ExportRTs)
 		return out
 	}
 	out.Families = cloneFamilies(out.Families)
@@ -246,18 +243,17 @@ func cloneFamilies(fams map[bgp.Family]FamilyPolicy) map[bgp.Family]FamilyPolicy
 }
 
 // legacyToFamilies expands the flat ImportRTs / ExportRTs into a Families
-// map per the L3VPN / EVPN convention: bdID == 0 is L3VPN and gets vpnv4 +
-// vpnv6 entries, bdID != 0 is EVPN and gets a single evpn entry. MUP has
-// no representation in the legacy form so legacy bindings never carry a
-// mup_ipv* family (default-allow stays in effect for MUP).
-func legacyToFamilies(bdID uint16, importRTs, exportRTs []string) map[bgp.Family]FamilyPolicy {
+// map covering the L3VPN families (vpnv4 + vpnv6). EVPN has no legacy form:
+// it needs a bridge domain, which only the VRF's bridge facet provides, so
+// an EVPN policy must be declared family-scoped (Families / "evpn:"-prefixed
+// RTs). MUP likewise has no representation in the legacy form, so legacy
+// bindings never carry a mup_ipv* family (default-allow stays in effect for
+// MUP).
+func legacyToFamilies(importRTs, exportRTs []string) map[bgp.Family]FamilyPolicy {
 	if len(importRTs) == 0 && len(exportRTs) == 0 {
 		return nil
 	}
 	families := []bgp.Family{bgp.FamilyVPNv4, bgp.FamilyVPNv6}
-	if bdID != 0 {
-		families = []bgp.Family{bgp.FamilyEVPN}
-	}
 	out := make(map[bgp.Family]FamilyPolicy, len(families))
 	for _, fam := range families {
 		out[fam] = FamilyPolicy{RouteTargets: mergeLegacyRTs(importRTs, exportRTs)}
@@ -465,27 +461,31 @@ func (m *Manager) List() []Binding {
 }
 
 // MatchImportForFamily returns the binding whose Families[fam] contains an
-// import-direction route target that overlaps rts. EVPN callers read bdID
-// from the returned binding; L3VPN / MUP callers ignore it. ok=false means
-// no binding accepts this route under fam.
+// import-direction route target that overlaps rts. For FamilyEVPN it also
+// resolves the matched VRF's bridge facet and returns its bd_id -- the facet
+// is the bridge domain's single source; L3VPN / MUP callers ignore bdID.
+// ok=false means no binding accepts this route under fam.
 //
-// EVPN install always needs a bridge domain, so a BDID==0 binding is skipped
-// for FamilyEVPN -- otherwise random map iteration could pick it ahead of a
-// real BD-bound one and silently drop a valid RT2/RT3.
+// EVPN install always needs a bridge domain, so a binding whose VRF has no
+// bridge facet is skipped for FamilyEVPN (fail-closed) -- otherwise it could
+// win the deterministic-name selection ahead of a facet-backed one and
+// silently drop a valid RT2/RT3.
 //
 // When several bindings import the same RT the lowest VRF name wins: the
 // match must be deterministic, not map-iteration order, because the MUP
 // uplink instance a T2ST installs under follows the matched binding and a
 // flapping match would re-key the session's F-TEID entry on every
-// reconcile. The minimum is selected in a single allocation-free pass; this
-// sits on the per-route apply path.
+// reconcile. This sits on the per-route apply path, so the facet lookup
+// (vrf.Manager.Get clones the VRF) runs only for a binding that matched
+// the RTs and improves the current minimum -- not for every binding,
+// though a later smaller name can still supersede an already-resolved
+// candidate. The lookup takes vrf.Manager's read lock nested inside m.mu;
+// vrf.Manager never calls back into this package, so the order cannot
+// invert.
 func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName string, bdID uint16, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, b := range m.bindings {
-		if fam == bgp.FamilyEVPN && b.BDID == 0 {
-			continue
-		}
 		if ok && b.VRFName >= vrfName {
 			continue
 		}
@@ -495,7 +495,18 @@ func (m *Manager) MatchImportForFamily(rts []string, fam bgp.Family) (vrfName st
 		}
 		for _, rt := range fp.RouteTargets {
 			if rt.Direction.Has(DirectionImport) && slices.Contains(rts, rt.RT) {
-				vrfName, bdID, ok = b.VRFName, b.BDID, true
+				var facetBD uint16
+				if fam == bgp.FamilyEVPN {
+					v, exists := m.vrf.Get(b.VRFName)
+					if !exists || v.Bridge == nil {
+						// Skip the facet-less candidate entirely (fail-closed):
+						// it must not win the name selection and shadow a
+						// facet-backed binding importing the same RT.
+						break
+					}
+					facetBD = v.Bridge.BdID
+				}
+				vrfName, bdID, ok = b.VRFName, facetBD, true
 				break
 			}
 		}
@@ -573,20 +584,6 @@ func (m *Manager) MatchImport(rts []string) (string, bool) {
 	}
 	vrf, _, ok := m.MatchImportForFamily(rts, bgp.FamilyVPNv6)
 	return vrf, ok
-}
-
-// MatchImportBD is the legacy EVPN helper, retained as a thin wrapper over
-// MatchImportForFamily(rts, FamilyEVPN). The returned bd_id is the
-// matching binding's BDID.
-//
-// Deprecated: use MatchImportForFamily; this wrapper exists for callers
-// that have not migrated yet.
-func (m *Manager) MatchImportBD(rts []string) (uint16, bool) {
-	_, bdID, ok := m.MatchImportForFamily(rts, bgp.FamilyEVPN)
-	if !ok || bdID == 0 {
-		return 0, false
-	}
-	return bdID, true
 }
 
 // Empty reports whether no bindings are registered. L3VPN-receive callers

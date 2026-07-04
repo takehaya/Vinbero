@@ -19,6 +19,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/fib"
 	"github.com/takehaya/vinbero/pkg/locator"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -71,10 +72,15 @@ func TestE2E_EVPNRT2ToFdbAndBdPeer(t *testing.T) {
 	}
 
 	// The EVPN RT2 only installs when its route target matches a binding
-	// carrying a bridge domain.
+	// whose VRF carries a bridge facet (the facet supplies the bd).
 	vm := vrfbgp.NewManager()
+	if _, err := vm.VRF().SetBridge("evi-100", vrf.Bridge{Name: "br100", BdID: evpnBDID, Ifindex: 5}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
 	if err := vm.Bind(vrfbgp.Binding{
-		VRFName: "evi-100", ImportRTs: []string{evpnImportRT}, BDID: evpnBDID,
+		VRFName: "evi-100", Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: evpnImportRT, Direction: vrfbgp.DirectionImport}}},
+		},
 	}); err != nil {
 		t.Fatalf("vrf bind: %v", err)
 	}
@@ -236,8 +242,13 @@ func TestE2E_EVPNRT3ToBdPeer(t *testing.T) {
 	}
 
 	vm := vrfbgp.NewManager()
+	if _, err := vm.VRF().SetBridge("evi-200", vrf.Bridge{Name: "br200", BdID: evpnRT3BDID, Ifindex: 6}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
 	if err := vm.Bind(vrfbgp.Binding{
-		VRFName: "evi-200", ImportRTs: []string{evpnRT3ImportRT}, BDID: evpnRT3BDID,
+		VRFName: "evi-200", Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: evpnRT3ImportRT, Direction: vrfbgp.DirectionImport}}},
+		},
 	}); err != nil {
 		t.Fatalf("vrf bind: %v", err)
 	}

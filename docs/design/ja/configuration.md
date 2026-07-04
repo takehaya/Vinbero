@@ -171,7 +171,7 @@ VRF オブジェクトを boot 時に宣言します (設計は [vrf.md](vrf.md)
 | `vrfs.entries[].acs[].interface` | string | この VRF に分類する ingress interface |
 | `vrfs.entries[].acs[].vlan` | uint16 | VLAN ID (0 = untagged) |
 | `vrfs.entries[].bridge.name` | string | L2 facet の bridge device 名。End.DT2/DT2M の配送先 |
-| `vrfs.entries[].bridge.bd_id` | uint16 | Bridge Domain ID (1..65535)。同じ VRF の `bgp.vrf_bindings[].bd_id` と一致必須 |
+| `vrfs.entries[].bridge.bd_id` | uint16 | Bridge Domain ID (1..65535)。EVPN の bridge domain はこの facet が唯一の出所で、同じ VRF の binding が受信した EVPN route はこの bd に install される |
 | `vrfs.entries[].bridge.members` | []string | bridge に enslave する interface |
 
 ```yaml

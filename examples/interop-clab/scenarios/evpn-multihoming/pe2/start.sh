@@ -33,12 +33,6 @@ ethtool -K eth1 rxvlan off 2>/dev/null || true
 ethtool -K eth2 txvlan off 2>/dev/null || true
 ethtool -K eth2 rxvlan off 2>/dev/null || true
 
-if ! ip link show br100 >/dev/null 2>&1; then
-    ip link add br100 type bridge
-fi
-ip link set br100 up
-ip link set eth2 master br100
-
 ip -6 route replace 2001:db8:ff::1/128 via 2001:db8:2::2 dev eth1 src 2001:db8:ff::2
 ip -6 route replace 2001:db8:ff::3/128 via 2001:db8:2::2 dev eth1 src 2001:db8:ff::2
 ip -6 route replace fd00:100::/48 via 2001:db8:2::2 dev eth1
@@ -57,12 +51,22 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# Bind bd 100 to the EVPN import RT before the SID/headend setup so an early
-# RT2/RT3/RT4 from a peer is never dropped for lack of a bridge-domain
-# binding. Replaces the deleted YAML vrf_bindings entry.
+# bd 100 local delivery as evi-100's L2 facet: End.DT2/DT2M decap into br100
+# -> the CE on eth2 (enslaved via --members). The facet is the bridge
+# domain's single source and must attach BEFORE the vrf-bgp bind below, so
+# the moment the binding can match a received RT2/RT3/RT4 its bd is
+# resolvable.
+/usr/local/bin/vbctl vrf bridge-attach \
+    --vrf evi-100 \
+    --name br100 \
+    --bd-id 100 \
+    --members eth2 || true
+
+# Bind evi-100 to the EVPN import RT before the SID/headend setup so an early
+# RT2/RT3/RT4 from a peer is never dropped for lack of a binding; the routes
+# install into the facet's bd 100.
 /usr/local/bin/vbctl vrf-bgp bind \
     --vrf evi-100 \
-    --bd-id 100 \
     --rt evpn:65000:100:import || true
 
 /usr/local/bin/vbctl locator create \

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/vrf"
 )
 
 func TestManager_BindListUnbind(t *testing.T) {
@@ -95,7 +96,8 @@ func TestManager_MatchImport(t *testing.T) {
 
 // TestNormalize_LegacyL3VPNExpansion pins that a binding given only the
 // legacy ImportRTs/ExportRTs (no Families) expands to both vpnv4 and vpnv6
-// when bd_id == 0, matching the L3VPN "RT shared across v4 and v6" convention.
+// and never into evpn: EVPN needs a bridge domain, which only the VRF's
+// bridge facet provides, so an EVPN policy must be declared family-scoped.
 func TestNormalize_LegacyL3VPNExpansion(t *testing.T) {
 	b := Binding{
 		VRFName:   "vrf-a",
@@ -109,28 +111,11 @@ func TestNormalize_LegacyL3VPNExpansion(t *testing.T) {
 		t.Errorf("legacy L3VPN expansion must include vpnv6, got %v", keys(b.Families))
 	}
 	if _, ok := b.Families[bgp.FamilyEVPN]; ok {
-		t.Error("legacy L3VPN expansion must not touch the evpn family")
+		t.Error("legacy expansion must never populate the evpn family")
 	}
 	vpnv4 := b.Families[bgp.FamilyVPNv4].RouteTargets
 	if len(vpnv4) != 1 || vpnv4[0].RT != "65000:1" || !vpnv4[0].Direction.Has(DirectionImport) || !vpnv4[0].Direction.Has(DirectionExport) {
 		t.Errorf("RT shared across import+export must end with DirectionBoth, got %+v", vpnv4)
-	}
-}
-
-// TestNormalize_LegacyEVPNExpansion pins that a binding with bd_id != 0
-// expands its legacy RTs into the evpn family only (not vpnv4/vpnv6).
-func TestNormalize_LegacyEVPNExpansion(t *testing.T) {
-	b := Binding{
-		VRFName:   "evi100",
-		BDID:      100,
-		ImportRTs: []string{"65000:100"},
-		ExportRTs: []string{"65000:100"},
-	}.Normalize()
-	if _, ok := b.Families[bgp.FamilyEVPN]; !ok {
-		t.Errorf("legacy EVPN expansion must include the evpn family, got %v", keys(b.Families))
-	}
-	if _, ok := b.Families[bgp.FamilyVPNv4]; ok {
-		t.Error("legacy EVPN expansion (bd_id != 0) must not populate vpnv4")
 	}
 }
 
@@ -174,9 +159,11 @@ func TestMatchImportForFamily_LegacyBindingsMUPDefaultAllow(t *testing.T) {
 
 func TestMatchImportForFamily_NewFormPerFamilyIsolation(t *testing.T) {
 	m := NewManager()
+	if _, err := m.VRF().SetBridge("vrf-a", vrf.Bridge{Name: "br100", BdID: 100, Ifindex: 5}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
 	if err := m.Bind(Binding{
 		VRFName: "vrf-a",
-		BDID:    100,
 		Families: map[bgp.Family]FamilyPolicy{
 			bgp.FamilyEVPN: {RouteTargets: []RouteTarget{
 				{RT: "65000:100", Direction: DirectionImport},
@@ -188,18 +175,48 @@ func TestMatchImportForFamily_NewFormPerFamilyIsolation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	// EVPN RT only resolves under FamilyEVPN, returning the bd_id.
-	vrf, bdID, ok := m.MatchImportForFamily([]string{"65000:100"}, bgp.FamilyEVPN)
-	if !ok || vrf != "vrf-a" || bdID != 100 {
-		t.Errorf("EVPN lookup = (%q, %d, %v), want (vrf-a, 100, true)", vrf, bdID, ok)
+	// EVPN RT only resolves under FamilyEVPN, returning the facet's bd_id.
+	vrfName, bdID, ok := m.MatchImportForFamily([]string{"65000:100"}, bgp.FamilyEVPN)
+	if !ok || vrfName != "vrf-a" || bdID != 100 {
+		t.Errorf("EVPN lookup = (%q, %d, %v), want (vrf-a, 100, true)", vrfName, bdID, ok)
 	}
 	// The same EVPN RT must NOT resolve under MUP.
 	if _, _, ok := m.MatchImportForFamily([]string{"65000:100"}, bgp.FamilyMUPIPv4); ok {
 		t.Error("EVPN RT must not leak into a MUP_IPv4 lookup")
 	}
 	// MUP RT resolves only under MUP family.
-	if vrf, _, ok := m.MatchImportForFamily([]string{"65000:200"}, bgp.FamilyMUPIPv4); !ok || vrf != "vrf-a" {
-		t.Errorf("MUP lookup = (%q, %v), want (vrf-a, true)", vrf, ok)
+	if vrfName, _, ok := m.MatchImportForFamily([]string{"65000:200"}, bgp.FamilyMUPIPv4); !ok || vrfName != "vrf-a" {
+		t.Errorf("MUP lookup = (%q, %v), want (vrf-a, true)", vrfName, ok)
+	}
+}
+
+// An EVPN import lookup skips a binding whose VRF has no bridge facet
+// (fail-closed), and a facet-less binding must not shadow a facet-backed
+// one that also imports the RT, regardless of name order.
+func TestMatchImportForFamily_EVPNRequiresBridgeFacet(t *testing.T) {
+	m := NewManager()
+	evpnImport := func(rt string) map[bgp.Family]FamilyPolicy {
+		return map[bgp.Family]FamilyPolicy{
+			bgp.FamilyEVPN: {RouteTargets: []RouteTarget{{RT: rt, Direction: DirectionImport}}},
+		}
+	}
+	// "aaa" sorts before "evi-b" and would win the deterministic-name
+	// selection, but it carries no bridge facet.
+	if err := m.Bind(Binding{VRFName: "aaa", Families: evpnImport("65000:100")}); err != nil {
+		t.Fatalf("Bind aaa: %v", err)
+	}
+	if _, _, ok := m.MatchImportForFamily([]string{"65000:100"}, bgp.FamilyEVPN); ok {
+		t.Error("an EVPN binding without a bridge facet must not match (fail-closed)")
+	}
+	if _, err := m.VRF().SetBridge("evi-b", vrf.Bridge{Name: "br200", BdID: 200, Ifindex: 6}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
+	if err := m.Bind(Binding{VRFName: "evi-b", Families: evpnImport("65000:100")}); err != nil {
+		t.Fatalf("Bind evi-b: %v", err)
+	}
+	vrfName, bdID, ok := m.MatchImportForFamily([]string{"65000:100"}, bgp.FamilyEVPN)
+	if !ok || vrfName != "evi-b" || bdID != 200 {
+		t.Errorf("EVPN lookup = (%q, %d, %v), want the facet-backed (evi-b, 200, true)", vrfName, bdID, ok)
 	}
 }
 

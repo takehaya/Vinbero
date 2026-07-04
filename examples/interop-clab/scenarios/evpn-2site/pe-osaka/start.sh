@@ -47,20 +47,21 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# Bind bd 100 to the EVPN import RT before the SID/headend setup so an early
-# RT2/RT3 from pe-tokyo is never dropped for lack of a bridge-domain binding.
-# Replaces the deleted YAML vrf_bindings entry.
-/usr/local/bin/vbctl vrf-bgp bind \
-    --vrf evi-100 \
-    --bd-id 100 \
-    --rt evpn:65000:100:import || true
-
-# The bridge as evi-100's L2 facet (see pe-tokyo/start.sh for the rationale).
+# The bridge as evi-100's L2 facet, attached BEFORE the bind so a received
+# RT2/RT3 always finds its bridge domain (see pe-tokyo/start.sh for the
+# full rationale).
 /usr/local/bin/vbctl vrf bridge-attach \
     --vrf evi-100 \
     --name br100 \
     --bd-id 100 \
     --members eth2 || true
+
+# Bind evi-100 to the EVPN import RT before the SID/headend setup so an early
+# RT2/RT3 from pe-tokyo is never dropped for lack of a binding; the routes
+# install into the facet's bd 100.
+/usr/local/bin/vbctl vrf-bgp bind \
+    --vrf evi-100 \
+    --rt evpn:65000:100:import || true
 
 /usr/local/bin/vbctl locator create \
     --name LOC1 \

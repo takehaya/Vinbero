@@ -28,6 +28,17 @@ var (
 // ignore the legacy side. Forcing one or the other at Load surfaces the
 // operator mistake instead of leaking through to a routing oddity.
 func (b *VrfBindingConfig) Validate() error {
+	// bd_id tombstone: the binding no longer carries a bridge domain (it
+	// derives from the VRF's bridge facet). yaml decoding is lenient, so
+	// without this an old config's bd_id would be dropped silently and its
+	// EVPN routes would fail to install with no hint at the cause. The
+	// message also covers the legacy-RT half of the migration: the old
+	// "flat import_rts/export_rts + bd_id" form expanded to the evpn
+	// family, which flat lists no longer do -- dropping only bd_id would
+	// leave an L3VPN-only binding that silently imports no EVPN routes.
+	if b.BDID != 0 {
+		return fmt.Errorf("vrf binding %q: bd_id was removed; declare the bridge on vrfs.entries[].bridge (the bridge domain derives from the VRF's bridge facet) and declare the EVPN route targets under families.evpn -- the legacy import_rts/export_rts lists now expand to vpnv4+vpnv6 only", b.VRFName)
+	}
 	if len(b.Families) > 0 && (len(b.ImportRTs) > 0 || len(b.ExportRTs) > 0) {
 		return fmt.Errorf("vrf binding %q: families and import_rts/export_rts cannot both be set (the families map is the source of truth at runtime, so the legacy lists would be silently ignored)", b.VRFName)
 	}
@@ -85,9 +96,9 @@ type VRFConfig struct {
 }
 
 // VRFBridgeConfig is a VRF's L2 bridge-domain facet: the Linux bridge device
-// End.DT2/DT2M deliver into and the bd_id (1..65535) scoping its FDB. When a
-// bgp.vrf_bindings entry names the same VRF with a non-zero bd_id, the two
-// must agree (validated at load).
+// End.DT2/DT2M deliver into and the bd_id (1..65535) scoping its FDB. The
+// facet is the bridge domain's single source: an EVPN route received under
+// the same VRF's bgp.vrf_bindings entry installs into this bd.
 type VRFBridgeConfig struct {
 	Name    string   `yaml:"name,omitempty"`
 	BdID    uint32   `yaml:"bd_id,omitempty"`
@@ -135,8 +146,9 @@ type LocatorConfig struct {
 // VrfBindingConfig is a VRF <-> route-target binding applied at startup,
 // before the BGP session begins receiving. Configuring it here (rather than
 // via VrfBgpBind after boot) avoids a race where an EVPN route arrives before
-// its bridge-domain binding exists and is dropped. bd_id is the bridge domain
-// for EVPN routes matching import_rts (0 for L3VPN-only bindings).
+// its binding exists and is dropped. An EVPN binding's bridge domain comes
+// from the same VRF's bridge facet (vrfs.entries[].bridge), which boot seeds
+// before the session starts.
 type VrfBindingConfig struct {
 	VRFName string `yaml:"vrf_name,omitempty"`
 	// ImportRTs / ExportRTs are the legacy flat route-target form. New
@@ -150,7 +162,11 @@ type VrfBindingConfig struct {
 	// leave it empty.
 	RD             string `yaml:"rd,omitempty"`
 	DefaultLocator string `yaml:"default_locator,omitempty"`
-	BDID           uint32 `yaml:"bd_id,omitempty"`
+	// BDID is a tombstone: the binding no longer carries a bridge domain
+	// (it derives from the VRF's bridge facet). The field stays in the
+	// schema so an old YAML that still sets bd_id fails loudly at boot
+	// instead of the lenient yaml decode silently dropping the key.
+	BDID uint32 `yaml:"bd_id,omitempty"`
 	// Redistribute lists the route protocols whose VRF-local prefixes are
 	// auto-advertised as VPNv4/VPNv6 when bgp.global.auto_advertise is on.
 	// Recognized values are "connected" (RTPROT_KERNEL) and "static"
@@ -163,7 +179,8 @@ type VrfBindingConfig struct {
 	// Families is the rt-afi-safi binding map: an AF name -> its per-family
 	// RT policy. Recognized AF keys are "vpnv4" / "vpnv6" / "evpn" /
 	// "mup_ipv4" / "mup_ipv6". When empty, the legacy ImportRTs / ExportRTs
-	// are expanded into Families on Load (L3VPN if bd_id == 0, EVPN otherwise).
+	// are expanded into the L3VPN families (vpnv4 + vpnv6); an EVPN policy
+	// must be declared here explicitly.
 	Families map[string]FamilyConfig `yaml:"families,omitempty"`
 	// MupGTP4SourcePrefix enables RFC 9433 §6.6 source-address embedding for
 	// MUP GTP4 downlink (T1ST) installs received under this binding's RD:

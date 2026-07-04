@@ -388,6 +388,15 @@ func (m *Manager) bridgeConflictLocked(name string, b Bridge) error {
 			if other.Bridge.Name != b.Name {
 				return fmt.Errorf("vrf %q already carries bridge %q; detach it first", name, other.Bridge.Name)
 			}
+			if other.Bridge.BdID != b.BdID {
+				// A re-attach must not change the bd under an attached facet:
+				// the EVPN exporter keys its per-BD state (advertised RT2s,
+				// the DT2U/DT2M SIDs) by the bd, so a silent change would
+				// strand the old bd's advertisements. The mechanics layer
+				// rejects this via its state record too; this keeps the
+				// invariant self-contained in the facet model.
+				return fmt.Errorf("vrf %q: bridge %q is attached with bd_id %d; detach it before changing the bd (got %d)", name, b.Name, other.Bridge.BdID, b.BdID)
+			}
 			continue
 		}
 		if other.Bridge.Name == b.Name {
@@ -457,26 +466,6 @@ func (m *Manager) RemoveBridge(name string) (removed bool) {
 	}
 	v.Bridge = nil
 	return true
-}
-
-// BridgeIfindexByBDID resolves a bd_id to its bridge ifindex through the VRF
-// objects. The EVPN auto-advertise binding axis uses it to enable a bridge
-// domain whose bridge already exists; ok=false when no VRF carries the bd_id
-// (attach will enable it when the bridge arrives) or bdID is 0. Uniqueness is
-// enforced at SetBridge, so a match is never ambiguous — this replaces the
-// fail-closed duplicate scan the pre-facet state lookup needed.
-func (m *Manager) BridgeIfindexByBDID(bdID uint16) (uint32, bool) {
-	if bdID == 0 {
-		return 0, false
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	for _, v := range m.byName {
-		if v.Bridge != nil && v.Bridge.BdID == bdID {
-			return v.Bridge.Ifindex, true
-		}
-	}
-	return 0, false
 }
 
 // List returns a snapshot of the VRFs (both facets) sorted by name, each with

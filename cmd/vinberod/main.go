@@ -74,9 +74,6 @@ func run(cliCtx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := validateVrfBridgeBindings(cfg); err != nil {
-		return err
-	}
 
 	lg, cleanup, err := logger.NewLogger(cfg.InternalConfig.Logger)
 	if err != nil {
@@ -168,9 +165,6 @@ func run(cliCtx *cli.Context) error {
 			}
 		}
 		for _, b := range cfg.BGP.VrfBindings {
-			if b.BDID > math.MaxUint16 {
-				return fmt.Errorf("bgp.vrf_bindings %q: bd_id %d out of range (max %d)", b.VRFName, b.BDID, math.MaxUint16)
-			}
 			binding, err := configToBinding(b)
 			if err != nil {
 				return fmt.Errorf("bgp.vrf_bindings %q: %w", b.VRFName, err)
@@ -249,9 +243,15 @@ func run(cliCtx *cli.Context) error {
 	if evpnExporter != nil {
 		evpnCoord = server.NewEvpnCoordinator(
 			evpnExporter,
-			// The binding axis resolves a bd_id through the VRF objects'
-			// bridge facets (unique by construction), not the raw state file.
-			vrfBgpMgr.VRF().BridgeIfindexByBDID,
+			// The coordinator resolves a binding's bridge domain through the
+			// VRF object's bridge facet, by VRF name.
+			func(vrfName string) (vrf.Bridge, bool) {
+				v, ok := vrfBgpMgr.VRF().Get(vrfName)
+				if !ok || v.Bridge == nil {
+					return vrf.Bridge{}, false
+				}
+				return *v.Bridge, true
+			},
 			vin.GetFDBWatcher().DumpBridge,
 			lg,
 		)
@@ -285,33 +285,6 @@ func run(cliCtx *cli.Context) error {
 			vin.GetFDBWatcher().RegisterBridge(int(v.Bridge.Ifindex), v.Bridge.BdID)
 		}
 	}
-	// The config binds ran BEFORE the facets were seeded (they must precede
-	// the BGP session so early routes are not dropped), so commitBinding's
-	// facet<->bd_id check never saw them; validateVrfBridgeBindings covered
-	// config-vs-config only. Cross-check every binding against the now-seeded
-	// facets so a config binding cannot silently diverge from a state-file
-	// bridge.
-	for _, b := range vrfBgpMgr.List() {
-		if b.BDID == 0 {
-			continue
-		}
-		if v, ok := vrfBgpMgr.VRF().Get(b.VRFName); ok && v.Bridge != nil && v.Bridge.BdID != b.BDID {
-			return fmt.Errorf("vrf %q: binding bd_id %d mismatches the bridge facet %q (bd_id %d); fix the config or the state file", b.VRFName, b.BDID, v.Bridge.Name, v.Bridge.BdID)
-		}
-	}
-	// EVPN auto-advertise for boot-provisioned bridge domains: the runtime
-	// axes (VrfBridgeAttach / commitBinding) never ran for facets that came
-	// from the state file or the config, so enable them here. Gated on EVPN
-	// export RTs like both runtime axes (an empty RT list would push
-	// unimportable RT3); EnableForBinding no-ops when no facet carries the bd.
-	if evpnCoord != nil {
-		for _, b := range vrfBgpMgr.List() {
-			if b.BDID != 0 && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
-				evpnCoord.EnableForBinding(b)
-			}
-		}
-	}
-
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
 		// (global up, peers half-added) still gets torn down.
@@ -370,6 +343,19 @@ func run(cliCtx *cli.Context) error {
 				vin.GetFDBWatcher().SetMACSink(nil)
 				evpnExporter.Close()
 			}()
+			// EVPN auto-advertise for boot-provisioned bridge domains: the runtime
+			// paths (VrfBridgeAttach / commitBinding) never ran for facets that came
+			// from the state file or the config, so enable them here. This must run
+			// after startBGPSession (the RT3 push needs a started session -- it is
+			// not retried on failure) and after SetMACSink above (the FDB replay
+			// reaches the exporter only once the sink is wired). Gated on EVPN
+			// export RTs like both runtime paths (an empty RT list would push
+			// unimportable RT3); Enable no-ops when the VRF has no bridge facet.
+			for _, b := range vrfBgpMgr.List() {
+				if len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
+					evpnCoord.Enable(b)
+				}
+			}
 		}
 	}
 
@@ -489,29 +475,6 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, dev 
 	return mgr.Reconcile(vrf.ResolveByName, prog)
 }
 
-// validateVrfBridgeBindings cross-checks the config's two bd_id declarations
-// for one VRF: vrfs.entries[].bridge.bd_id (the L2 facet) and
-// bgp.vrf_bindings[].bd_id (the BGP facet). The runtime paths validate this
-// in commitBinding / VrfBridgeAttach, but the config bind at boot goes
-// straight to vrfbgp.Manager.Bind, so a config mismatch must fail here.
-func validateVrfBridgeBindings(cfg *config.Config) error {
-	bridgeBd := make(map[string]uint32)
-	for _, v := range cfg.VRFs.Entries {
-		if v.Bridge != nil {
-			bridgeBd[v.Name] = v.Bridge.BdID
-		}
-	}
-	for _, b := range cfg.BGP.VrfBindings {
-		if b.BDID == 0 {
-			continue
-		}
-		if bd, ok := bridgeBd[b.VRFName]; ok && bd != b.BDID {
-			return fmt.Errorf("vrf %q: vrfs.entries bridge bd_id %d and bgp.vrf_bindings bd_id %d mismatch", b.VRFName, bd, b.BDID)
-		}
-	}
-	return nil
-}
-
 // seedVrfDevices mirrors the kernel VRF devices the resource manager holds in
 // its persisted state into the VRF objects, attaching each as a device facet.
 // It runs after NewServer (the vrf.Manager lives inside the vrf-bgp manager)
@@ -587,10 +550,10 @@ func seedVrfBridges(resMgr *netresource.ResourceManager, mgr *vrf.Manager, cfgVR
 }
 
 // configToBinding converts a config VRF binding into the runtime vrfbgp
-// Binding. The caller is responsible for validating b.BDID's range first.
-// vrfbgp.Binding.Normalize (called from Manager.Bind) expands the legacy
-// ImportRTs / ExportRTs when Families is empty, so a vinbero.yml written
-// before the rt-afi-safi schema keeps working unchanged.
+// Binding. vrfbgp.Binding.Normalize (called from Manager.Bind) expands the
+// legacy ImportRTs / ExportRTs into the L3VPN families when Families is
+// empty, so a vinbero.yml written before the rt-afi-safi schema keeps
+// working unchanged; an EVPN policy must be declared under families.
 func configToBinding(b config.VrfBindingConfig) (vrfbgp.Binding, error) {
 	fams, err := configFamilies(b.Families)
 	if err != nil {
@@ -608,7 +571,6 @@ func configToBinding(b config.VrfBindingConfig) (vrfbgp.Binding, error) {
 		Redistribute:        b.Redistribute,
 		MaxPrefixes:         b.MaxPrefixes,
 		DefaultLocator:      b.DefaultLocator,
-		BDID:                uint16(b.BDID),
 		Families:            fams,
 		MupGTP4SourcePrefix: mupSrc,
 	}, nil

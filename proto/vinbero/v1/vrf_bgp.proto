@@ -62,13 +62,21 @@ message VrfBgpBinding {
   // Deprecated legacy form. New clients use families instead. Kept for
   // backward compatibility with existing YAML configs and clients that
   // were written against the L3VPN-only RT model. Server-side Normalize
-  // expands these into families (vpnv4 + vpnv6 if bd_id == 0, evpn if
-  // bd_id != 0) when families is empty.
+  // expands these into the L3VPN families (vpnv4 + vpnv6) when families
+  // is empty; an EVPN policy must be declared under families.
   // TODO: drop in P2 and add `reserved 2, 3;` to prevent reuse.
   repeated string import_rts = 2;
   repeated string export_rts = 3;
   string default_locator = 4; // locator name for this VRF's local SIDs
-  uint32 bd_id = 5; // bridge domain EVPN routes install into; 0 = L3VPN-only. Server narrows to uint16, rejects >65535.
+
+  // 5 was bd_id: the bridge domain EVPN routes install into. The bridge
+  // domain now derives from the VRF's bridge facet (VrfBridgeAttach /
+  // vrfs.entries[].bridge); an EVPN route received under this binding
+  // installs into the facet's bd, and a binding whose VRF has no facet
+  // imports no EVPN routes.
+  reserved 5;
+  reserved "bd_id";
+
   string rd = 6; // route distinguisher for auto-advertised local prefixes, "65100:200" form
   repeated string redistribute = 7; // "connected"/"static" protocols auto-advertised; empty = receive-only
   uint32 max_prefixes = 8; // cap on auto-advertised prefixes for this VRF; 0 = unlimited

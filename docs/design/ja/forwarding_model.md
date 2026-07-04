@@ -78,7 +78,7 @@ encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。
 | bd_peer_map ほか | bd / peer | End.DT2U/DT2M peer、flood、DF | bridge domain | eBPF | BdPeerService / BGP applier (EVPN) |
 | kernel VRF FIB | inner dst | next hop | kernel VRF | kernel | kernel (decap 後) + `pkg/fib` (BGP IPv6 unicast) |
 
-control plane 側の in-memory テーブルが上の data plane を populate します。VRF の identity (name、vrf_id、ingress membership、global default-deny policy) は `vrf.Manager` が持ち、`ingress_vrf_map` の唯一の writer です。VRF↔RT の binding は `vrfbgp.Manager` (family ごとの RT policy と RD、bd_id、MUP の source prefix を保持し、VRF object を Ensure する facet)、SR Policy は {color, endpoint} を鍵にした table、locator プールは `locator.Manager`、MUP の segment discovery とセッションは applier 内のテーブルが持ちます。
+control plane 側の in-memory テーブルが上の data plane を populate します。VRF の identity (name、vrf_id、ingress membership、global default-deny policy) は `vrf.Manager` が持ち、`ingress_vrf_map` の唯一の writer です。VRF↔RT の binding は `vrfbgp.Manager` (family ごとの RT policy と RD、MUP の source prefix を保持し、VRF object を Ensure する facet。EVPN の bridge domain は VRF の bridge facet から導出)、SR Policy は {color, endpoint} を鍵にした table、locator プールは `locator.Manager`、MUP の segment discovery とセッションは applier 内のテーブルが持ちます。
 
 ## 転送決定ではない補助テーブル
 

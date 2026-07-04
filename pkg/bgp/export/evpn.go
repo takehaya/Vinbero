@@ -218,12 +218,14 @@ func sameStringSet(a, b []string) bool {
 // End.DT2U (RT2 unicast) and End.DT2M (RT3 BUM flood) service SIDs from the
 // binding's default locator, installs them into sid_function_map keyed to the
 // bridge, and advertises RT3 so remote PEs flood BUM toward this node; local MACs
-// then advertise as RT2 via OnLocalMAC. bridgeIfindex is the BD's Linux bridge
-// device, needed for the L2 aux entry. A binding with a zero BDID, or without an
-// RD or a default locator, is rejected. It is idempotent: a re-enable whose
-// advertisement-affecting fields are unchanged is a no-op (no RT3/SID flap); any
-// real change re-enables cleanly (the prior enablement is torn down first).
-func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
+// then advertise as RT2 via OnLocalMAC. bdID and bridgeIfindex identify the
+// bridge domain and its Linux bridge device -- both come from the VRF's bridge
+// facet, needed for the L2 aux entry and the exporter's per-BD keying. A zero
+// bdID, or a binding without an RD or a default locator, is rejected. It is
+// idempotent: a re-enable whose advertisement-affecting fields are unchanged is
+// a no-op (no RT3/SID flap); any real change re-enables cleanly (the prior
+// enablement is torn down first).
+func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bdID uint16, bridgeIfindex uint32) error {
 	// Normalize so the per-AF ExportRTsForFamily(FamilyEVPN) on b returns
 	// the synthesized EVPN RT list when a unit-test or legacy caller hands
 	// a binding whose Families map has not been populated.
@@ -231,7 +233,7 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	if _, err := bgp.ValidateIPv6NextHop(e.nextHop); err != nil {
 		return fmt.Errorf("vrf %q: bgp.global.next_hop %w", b.VRFName, err)
 	}
-	if b.BDID == 0 {
+	if bdID == 0 {
 		return fmt.Errorf("vrf %q: bd_id is required for EVPN auto advertise", b.VRFName)
 	}
 	if b.RD == "" {
@@ -254,17 +256,17 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	// VrfBgpBind re-binds the same VRF on every call, so without this an unchanged
 	// re-bind would withdraw and re-originate RT3 + every RT2 and rewrite
 	// sid_function_map each time.
-	if st, ok := e.bds[b.BDID]; ok && bdAdvertiseUnchanged(st, b, bridgeIfindex) {
+	if st, ok := e.bds[bdID]; ok && bdAdvertiseUnchanged(st, b, bridgeIfindex) {
 		return nil
 	}
 	// Replace any existing enablement so a re-enable updates cleanly.
-	e.disableBDLocked(b.BDID)
+	e.disableBDLocked(bdID)
 
-	dt2uSID, err := e.installL2SID(b.DefaultLocator, b.BDID, bridgeIfindex, endpointActionDT2U)
+	dt2uSID, err := e.installL2SID(b.DefaultLocator, bdID, bridgeIfindex, endpointActionDT2U)
 	if err != nil {
 		return fmt.Errorf("vrf %q: install End.DT2U SID: %w", b.VRFName, err)
 	}
-	dt2mSID, err := e.installL2SID(b.DefaultLocator, b.BDID, bridgeIfindex, endpointActionDT2M)
+	dt2mSID, err := e.installL2SID(b.DefaultLocator, bdID, bridgeIfindex, endpointActionDT2M)
 	if err != nil {
 		// Roll the DT2U SID back so a half-enabled BD leaves no orphan. If the
 		// rollback delete itself fails, surface it: the DT2U SID is then stranded
@@ -284,7 +286,7 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 		remoteSrc:     remoteSrc,
 		advertised:    make(map[bgp.EVPNMACKey]struct{}),
 	}
-	e.bds[b.BDID] = st
+	e.bds[bdID] = st
 	// Advertise RT3 (Inclusive Multicast) so remote PEs flood BUM traffic toward
 	// this node's End.DT2M. A failure is non-fatal: RT2 unicast still works, so
 	// log it and leave the BD enabled rather than failing the whole bridge.
@@ -299,12 +301,12 @@ func (e *EVPNExporter) EnableBD(b vrfbgp.Binding, bridgeIfindex uint32) error {
 	}
 	if err := e.evpn.PushEVPNInclusiveMulticast(context.Background(), r3); err != nil {
 		e.logger.Error("advertise RT3 inclusive multicast",
-			zap.String("vrf", b.VRFName), zap.Uint16("bd_id", b.BDID), zap.Error(err))
+			zap.String("vrf", b.VRFName), zap.Uint16("bd_id", bdID), zap.Error(err))
 	} else {
 		st.rt3Advertised = true
 	}
 	e.logger.Info("bridge domain enabled for EVPN auto advertise",
-		zap.String("vrf", b.VRFName), zap.Uint16("bd_id", b.BDID), zap.String("rd", b.RD),
+		zap.String("vrf", b.VRFName), zap.Uint16("bd_id", bdID), zap.String("rd", b.RD),
 		zap.String("dt2u_sid", st.sidStr), zap.String("dt2m_sid", st.dt2mSIDStr))
 	return nil
 }
