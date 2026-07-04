@@ -11,42 +11,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// CreateVrf creates (or idempotently adopts) the kernel VRF device and
+// persists it. On a persist failure the kernel device and the in-memory
+// record are NOT rolled back: the error is returned so the caller sees the
+// divergence, a retry re-adopts and converges, and the next successful
+// persist writes the whole state anyway.
 func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []string, enableL3mdevRule bool) (uint32, error) {
-	// Idempotent adopt: an existing link is taken over only when it really is
-	// a VRF device on the requested table. A bare name match must not adopt —
-	// otherwise a typo like --name eth1 would put the NIC into the state file
-	// and a later delete would LinkDel it.
 	if existing, err := netlink.LinkByName(name); err == nil {
-		vrfLink, ok := existing.(*netlink.Vrf)
-		if !ok {
-			return 0, fmt.Errorf("link %s exists but is %s, not a VRF device", name, existing.Type())
+		ifindex, err := adoptVrfDevice(existing, name, tableID, members, enableL3mdevRule)
+		if err != nil {
+			return 0, err
 		}
-		if vrfLink.Table != tableID {
-			return 0, fmt.Errorf("VRF %s exists with table %d, requested %d (delete it first to change tables)", name, vrfLink.Table, tableID)
-		}
-		// Converge the adopted device on the request: bring it up (an
-		// operator-created admin-DOWN device would blackhole End.DT* decap
-		// behind a successful create), enslave any members it is missing
-		// (LinkSetMaster is idempotent for already-enslaved links) and add
-		// the l3mdev rule when asked, so an adopt is not silently weaker
-		// than a fresh create.
-		if err := netlink.LinkSetUp(existing); err != nil {
-			return 0, fmt.Errorf("set VRF %s up: %w", name, err)
-		}
-		for _, member := range members {
-			if err := enslaveInterface(member, existing); err != nil {
-				return 0, err
-			}
-		}
-		if enableL3mdevRule {
-			if err := ensureL3mdevRule(); err != nil {
-				return 0, fmt.Errorf("add l3mdev rule: %w", err)
-			}
-		}
-		ifindex := uint32(existing.Attrs().Index)
 		m.ensureVrfInState(name, tableID, members, enableL3mdevRule, ifindex)
-		if err := saveState(m.statePath, m.state); err != nil {
-			m.logger.Warn("failed to save state after VRF idempotent update", zap.Error(err))
+		if err := m.persist(); err != nil {
+			return 0, fmt.Errorf("persist state after adopting VRF %s: %w", name, err)
 		}
 		return ifindex, nil
 	}
@@ -60,13 +38,46 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 	// would have failed on LinkAdd), so the upsert takes its append branch.
 	m.ensureVrfInState(name, tableID, members, enableL3mdevRule, ifindex)
 
-	if err := saveState(m.statePath, m.state); err != nil {
-		m.logger.Warn("failed to save state after VRF creation", zap.Error(err))
+	if err := m.persist(); err != nil {
+		return 0, fmt.Errorf("persist state after creating VRF %s: %w", name, err)
 	}
 
 	m.logger.Info("Created VRF",
 		zap.String("name", name), zap.Uint32("table_id", tableID), zap.Uint32("ifindex", ifindex))
 	return ifindex, nil
+}
+
+// adoptVrfDevice takes over an existing link as the managed VRF device. The
+// link is adopted only when it really is a VRF on the requested table -- a
+// bare name match must not adopt, or a typo like --name eth1 would put the
+// NIC into the state file and a later delete would LinkDel it. The adopted
+// device is converged on the request: brought up (an operator-created
+// admin-DOWN device would blackhole End.DT* decap behind a successful
+// create), missing members enslaved (LinkSetMaster is idempotent) and the
+// l3mdev rule added when asked, so an adopt is not silently weaker than a
+// fresh create. Reconcile adopts state entries through the same path.
+func adoptVrfDevice(link netlink.Link, name string, tableID uint32, members []string, enableL3mdevRule bool) (uint32, error) {
+	vrfLink, ok := link.(*netlink.Vrf)
+	if !ok {
+		return 0, fmt.Errorf("link %s exists but is %s, not a VRF device", name, link.Type())
+	}
+	if vrfLink.Table != tableID {
+		return 0, fmt.Errorf("VRF %s exists with table %d, requested %d (delete it first to change tables)", name, vrfLink.Table, tableID)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return 0, fmt.Errorf("set VRF %s up: %w", name, err)
+	}
+	for _, member := range members {
+		if err := enslaveInterface(member, link); err != nil {
+			return 0, err
+		}
+	}
+	if enableL3mdevRule {
+		if err := ensureL3mdevRule(); err != nil {
+			return 0, fmt.Errorf("add l3mdev rule: %w", err)
+		}
+	}
+	return uint32(link.Attrs().Index), nil
 }
 
 func (m *ResourceManager) DeleteVrf(name string) error {
@@ -104,8 +115,11 @@ func (m *ResourceManager) DeleteVrf(name string) error {
 	m.state.VRFs = filtered
 	m.mu.Unlock()
 
-	if err := saveState(m.statePath, m.state); err != nil {
-		m.logger.Warn("failed to save state after VRF deletion", zap.Error(err))
+	if err := m.persist(); err != nil {
+		// The kernel device is gone and the record is removed in memory; the
+		// next successful persist flushes it from disk too. Surface the error
+		// so the operator knows disk state is momentarily behind.
+		return fmt.Errorf("persist state after deleting VRF %s: %w", name, err)
 	}
 
 	m.logger.Info("Deleted VRF", zap.String("name", name))
@@ -117,6 +131,11 @@ func (m *ResourceManager) ListVrfs() []ManagedVrf {
 	defer m.mu.RUnlock()
 	result := make([]ManagedVrf, len(m.state.VRFs))
 	copy(result, m.state.VRFs)
+	for i := range result {
+		// Deep-copy Members: the shallow struct copy would alias the
+		// state-owned backing array, which ensureVrfInState appends to.
+		result[i].Members = slices.Clone(result[i].Members)
+	}
 	return result
 }
 
