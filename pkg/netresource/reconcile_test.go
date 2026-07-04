@@ -3,11 +3,13 @@ package netresource
 import (
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
 	"go.uber.org/zap"
 )
 
@@ -48,10 +50,13 @@ func TestReconcile_RecreatesMissingBridge(t *testing.T) {
 // Reconcile is fail-closed: an entry whose name was stolen by a different
 // link type, or whose recreation fails, aborts with a repair hint and does
 // NOT write a stale ifindex back to disk.
+//
+// withTestNetns runs INSIDE each subtest: t.Run subtests execute on their
+// own goroutines, so a parent-scope netns (which pins only the parent's OS
+// thread) would leave them in the host namespace and leak devices there.
 func TestReconcile_FailsClosed(t *testing.T) {
-	withTestNetns(t)
-
 	t.Run("name stolen by a non-bridge link", func(t *testing.T) {
+		withTestNetns(t)
 		m := newTestManager(t)
 		if _, err := m.CreateBridge("br-stolen", 100, nil, ""); err != nil {
 			t.Fatalf("CreateBridge: %v", err)
@@ -92,6 +97,7 @@ func TestReconcile_FailsClosed(t *testing.T) {
 	})
 
 	t.Run("recreation fails on a missing member", func(t *testing.T) {
+		withTestNetns(t)
 		m := newTestManager(t)
 		// Seed a state entry whose recreation cannot succeed: the member NIC
 		// does not exist in this netns (a renamed/removed NIC after reboot).
@@ -200,21 +206,39 @@ func TestCreateBridge_PersistFailurePropagates(t *testing.T) {
 
 // The manager's own locking keeps concurrent mutation and reads race-free
 // (run with -race); the RPC layer serializes mutations today, but the
-// invariant must hold inside the package that owns the data.
+// invariant must hold inside the package that owns the data. Each spawned
+// goroutine pins its OS thread into the test netns -- netns membership is
+// per-thread, so without the pin the workers would touch the host namespace.
 func TestConcurrentBridgeAccess(t *testing.T) {
 	withTestNetns(t)
+	testNs, err := netns.Get()
+	if err != nil {
+		t.Fatalf("netns.Get: %v", err)
+	}
+	defer func() { _ = testNs.Close() }()
 	m := newTestManager(t)
 	if _, err := m.CreateBridge("br-race", 500, nil, ""); err != nil {
 		t.Fatalf("CreateBridge: %v", err)
+	}
+	inNs := func(work func()) {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		if err := netns.Set(testNs); err != nil {
+			t.Errorf("netns.Set: %v", err)
+			return
+		}
+		work()
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 25; j++ {
-				_, _ = m.CreateBridge("br-race", 500, nil, "") // idempotent adopt
-			}
+			inNs(func() {
+				for j := 0; j < 25; j++ {
+					_, _ = m.CreateBridge("br-race", 500, nil, "") // idempotent adopt
+				}
+			})
 		}()
 		go func() {
 			defer wg.Done()
