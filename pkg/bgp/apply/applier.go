@@ -99,7 +99,12 @@ type Applier struct {
 	// GoBGP RouteHandler goroutine, so it needs no extra locking; the
 	// srPolicyTable it drives is mutex-guarded for the concurrent CRUD path.
 	steeredRoutes map[bgp.RouteKey]policyKey
-	logger        *zap.Logger
+	// evpnMu serializes the EVPN receive state (evpnTable.peers/fdb/mcast)
+	// between the GoBGP RouteHandler goroutine (applyEVPN) and the RPC-driven
+	// ReplayEVPN (VrfBridgeAttach / commitBinding re-pull the loc-rib after
+	// the EVPN import surface widens). Same pattern as mupMu.
+	evpnMu sync.Mutex
+	logger *zap.Logger
 }
 
 // NewApplier wires an Applier. srcLocator names the locator whose prefix
