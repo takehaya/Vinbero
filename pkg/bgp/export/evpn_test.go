@@ -93,9 +93,12 @@ func evpnTestBinding() vrfbgp.Binding {
 	return vrfbgp.Binding{
 		VRFName:        "evi100",
 		RD:             "65000:100",
-		ExportRTs:      []string{"65000:100"},
 		DefaultLocator: "LOC1",
-		BDID:           100,
+		Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{
+				{RT: "65000:100", Direction: vrfbgp.DirectionExport},
+			}},
+		},
 	}
 }
 
@@ -381,9 +384,12 @@ func TestEnableBDIdempotentOnUnchangedReBind(t *testing.T) {
 		t.Errorf("unchanged re-bind must not flap RT3; pushedMcast=%d withdrawnMcast=%d", len(adv.pushedMcast), len(adv.withdrawnMcast))
 	}
 
-	// A change limited to a receive-only field (import RTs) does not affect what
-	// this exporter originates, so it is still a no-op.
-	b.ImportRTs = []string{"65000:999"}
+	// A change limited to a receive-only RT (an import-direction RT added to
+	// the evpn family) does not affect what this exporter originates, so it
+	// is still a no-op.
+	fp := b.Families[bgp.FamilyEVPN]
+	fp.RouteTargets = append(fp.RouteTargets, vrfbgp.RouteTarget{RT: "65000:999", Direction: vrfbgp.DirectionImport})
+	b.Families[bgp.FamilyEVPN] = fp
 	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("import-rt-only re-EnableBD: %v", err)
 	}
@@ -404,12 +410,19 @@ func TestEnableBDIdempotentOnUnchangedReBind(t *testing.T) {
 func TestEnableBDReorderedRTsIsNoop(t *testing.T) {
 	e, adv, sid := newTestEVPNExporter(t)
 	b := evpnTestBinding()
-	b.ExportRTs = []string{"65000:100", "65000:200"}
+	evpnRTs := func(rts ...string) vrfbgp.FamilyPolicy {
+		fp := vrfbgp.FamilyPolicy{}
+		for _, rt := range rts {
+			fp.RouteTargets = append(fp.RouteTargets, vrfbgp.RouteTarget{RT: rt, Direction: vrfbgp.DirectionExport})
+		}
+		return fp
+	}
+	b.Families[bgp.FamilyEVPN] = evpnRTs("65000:100", "65000:200")
 	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("EnableBD: %v", err)
 	}
 	createdBefore := len(sid.created)
-	b.ExportRTs = []string{"65000:200", "65000:100"} // same set, reversed
+	b.Families[bgp.FamilyEVPN] = evpnRTs("65000:200", "65000:100") // same set, reversed
 	if err := e.EnableBD(b, 100, 10); err != nil {
 		t.Fatalf("reordered-RT re-EnableBD: %v", err)
 	}
