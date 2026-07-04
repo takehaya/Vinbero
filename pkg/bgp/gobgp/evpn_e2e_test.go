@@ -362,3 +362,154 @@ func TestE2E_EVPNRT3ToBdPeer(t *testing.T) {
 		t.Errorf("no bd_peer carrying the End.DT2M SID %v", wantSID)
 	}
 }
+
+// Ports for the replay-rescue E2E (distinct so it can run alongside the others).
+const (
+	evpnRescuePE1ListenPort = 10193
+	evpnRescuePE2ListenPort = 10194
+)
+
+// TestE2E_EVPNReplayRescuesEarlyRoute pins the rescue composition the daemon
+// wires in main.go (Session.ListRoutes into Applier.ReplayEVPN): an RT2 that
+// arrives while the binding's VRF has no bridge facet is dropped fail-closed
+// and the watch stream never re-delivers it; once the facet exists, replaying
+// the loc-rib installs it into the real BPF maps without any re-advertise
+// from the peer. Requires root for the BPF collection load.
+func TestE2E_EVPNReplayRescuesEarlyRoute(t *testing.T) {
+	ctx := context.Background()
+
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Fatalf("load BPF collection (needs root): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mapOps := bpf.NewMapOperations(objs)
+
+	locMgr := locator.NewManager()
+	if err := locMgr.Add(&locator.Locator{
+		Name: "LOC1", Prefix: netip.MustParsePrefix("fd00:1:1::/48"),
+		BlockLen: 32, NodeLen: 16, FunctionLen: 16, ArgumentLen: 64,
+		Behavior: locator.BehaviorClassic, FunctionAutoStart: 0x10, FunctionAutoEnd: 0xFFFF,
+	}); err != nil {
+		t.Fatalf("locator Add: %v", err)
+	}
+
+	// Binding with the import RT but NO bridge facet: the import surface is
+	// incomplete, so the live route must be dropped.
+	vm := vrfbgp.NewManager()
+	if err := vm.Bind(vrfbgp.Binding{
+		VRFName: "evi-100", Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+			bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: evpnImportRT, Direction: vrfbgp.DirectionImport}}},
+		},
+	}); err != nil {
+		t.Fatalf("vrf bind: %v", err)
+	}
+	applier := apply.NewApplier(mapOps, locMgr, vm,
+		fib.NewKernelInjector(), "LOC1", 65002, zap.NewNop())
+
+	pe2 := gobgp.NewSession(zap.NewNop())
+	if err := pe2.Start(ctx, bgp.GlobalConfig{
+		LocalASN: 65002, RouterID: "10.0.0.2", ListenPort: evpnRescuePE2ListenPort,
+	}); err != nil {
+		t.Fatalf("PE2 Start: %v", err)
+	}
+	t.Cleanup(func() { _ = pe2.Stop(ctx) })
+	if err := pe2.AddPeer(ctx, bgp.PeerConfig{
+		Neighbor: "127.0.0.1", PeerASN: 65001,
+		HoldTimeSec: 90, KeepaliveSec: 30,
+		Families: []bgp.Family{bgp.FamilyEVPN},
+	}); err != nil {
+		t.Fatalf("PE2 AddPeer: %v", err)
+	}
+	cancelSub, err := pe2.Subscribe("", applier.Apply)
+	if err != nil {
+		t.Fatalf("PE2 Subscribe: %v", err)
+	}
+	t.Cleanup(cancelSub)
+
+	pe1 := gobgpsrv.NewBgpServer()
+	go pe1.Serve()
+	t.Cleanup(func() { pe1.Stop() })
+	if err := pe1.StartBgp(ctx, &gobgpapi.StartBgpRequest{
+		Global: &gobgpapi.Global{Asn: 65001, RouterId: "10.0.0.1", ListenPort: evpnRescuePE1ListenPort},
+	}); err != nil {
+		t.Fatalf("PE1 StartBgp: %v", err)
+	}
+	if err := pe1.AddPeer(ctx, &gobgpapi.AddPeerRequest{Peer: &gobgpapi.Peer{
+		Conf: &gobgpapi.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65002},
+		Transport: &gobgpapi.Transport{
+			RemoteAddress: "127.0.0.1", RemotePort: evpnRescuePE2ListenPort, LocalAddress: "127.0.0.1",
+		},
+		AfiSafis: []*gobgpapi.AfiSafi{{Config: &gobgpapi.AfiSafiConfig{
+			Family: &gobgpapi.Family{Afi: gobgpapi.Family_AFI_L2VPN, Safi: gobgpapi.Family_SAFI_EVPN},
+		}}},
+	}}); err != nil {
+		t.Fatalf("PE1 AddPeer: %v", err)
+	}
+
+	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
+	hw, err := net.ParseMAC(evpnMAC)
+	if err != nil {
+		t.Fatalf("parse MAC: %v", err)
+	}
+	nlri := gobgppkt.NewEVPNNLRI(
+		gobgppkt.EVPN_ROUTE_TYPE_MAC_IP_ADVERTISEMENT,
+		&gobgppkt.EVPNMacIPAdvertisementRoute{
+			RD: rd, ETag: 0, MacAddressLength: 48, MacAddress: hw, Labels: []uint32{0},
+		},
+	)
+	infoSubTLV := gobgppkt.NewSRv6InformationSubTLV(netip.MustParseAddr(evpnDT2USID), gobgppkt.END_DT2U)
+	svcTLV := gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L2Service, infoSubTLV)
+	prefixSID := gobgppkt.NewPathAttributePrefixSID(svcTLV)
+	origin := gobgppkt.NewPathAttributeOrigin(0)
+	rt := gobgppkt.NewTwoOctetAsSpecificExtended(gobgppkt.EC_SUBTYPE_ROUTE_TARGET, 65000, 100, true)
+	extComm := gobgppkt.NewPathAttributeExtendedCommunities([]gobgppkt.ExtendedCommunityInterface{rt})
+	mpReach, err := gobgppkt.NewPathAttributeMpReachNLRI(
+		gobgppkt.RF_EVPN, []gobgppkt.PathNLRI{{NLRI: nlri}}, netip.MustParseAddr("2001:db8::1"))
+	if err != nil {
+		t.Fatalf("build MP_REACH_NLRI: %v", err)
+	}
+	if _, err := pe1.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{{
+		Family: gobgppkt.RF_EVPN,
+		Nlri:   nlri,
+		Attrs:  []gobgppkt.PathAttributeInterface{origin, extComm, prefixSID, mpReach},
+	}}}); err != nil {
+		t.Fatalf("PE1 AddPath: %v", err)
+	}
+
+	// Deterministic drop proof: once the RT2 is visible in PE2's loc-rib the
+	// live watch has already delivered (and dropped) it, yet the fdb_map must
+	// still be empty because no facet supplies a bd.
+	waitFor(t, "RT2 visible in PE2's loc-rib", 30*time.Second, func() bool {
+		seen := false
+		if err := pe2.ListRoutes(bgp.FamilyEVPN, func(ev bgp.RouteEvent) {
+			if ev.EVPN != nil && ev.EVPN.Type == bgp.EVPNRouteTypeMACIP && ev.EVPN.MAC == evpnMAC {
+				seen = true
+			}
+		}); err != nil {
+			return false
+		}
+		return seen
+	})
+	if _, err := mapOps.GetFdb(evpnBDID, hw); err == nil {
+		t.Fatal("RT2 installed without a bridge facet: the fail-closed drop is broken")
+	}
+
+	// The facet arrives (what VrfBridgeAttach commits), then the rescue runs
+	// exactly as main.go wires it. No re-advertise from PE1.
+	if _, err := vm.VRF().SetBridge("evi-100", vrf.Bridge{Name: "br100", BdID: evpnBDID, Ifindex: 5}); err != nil {
+		t.Fatalf("SetBridge: %v", err)
+	}
+	if err := applier.ReplayEVPN(func(h bgp.RouteHandler) error {
+		return pe2.ListRoutes(bgp.FamilyEVPN, h)
+	}); err != nil {
+		t.Fatalf("ReplayEVPN: %v", err)
+	}
+	fdb, err := mapOps.GetFdb(evpnBDID, hw)
+	if err != nil {
+		t.Fatalf("rescued RT2 not in fdb_map after the replay: %v", err)
+	}
+	if fdb.IsRemote != 1 || fdb.BdId != evpnBDID {
+		t.Errorf("rescued fdb entry = %+v, want IsRemote=1 BdId=%d", fdb, evpnBDID)
+	}
+}

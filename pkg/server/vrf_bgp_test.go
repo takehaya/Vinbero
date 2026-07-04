@@ -1381,6 +1381,16 @@ func TestVrfBgpBind_FiresEvpnReplayOnImportSurface(t *testing.T) {
 		t.Errorf("evpn import RT add: replays = %d, want 2", *replays)
 	}
 
+	// An import RT REMOVED shrinks the surface: rescues nothing, no replay.
+	if _, err := s.RemoveRouteTarget(context.Background(), connect.NewRequest(&v1.RemoveRouteTargetRequest{
+		VrfName: "evi", Family: "evpn", Rt: "65000:101",
+	})); err != nil {
+		t.Fatalf("RemoveRouteTarget: %v", err)
+	}
+	if *replays != 2 {
+		t.Errorf("evpn import RT remove: replays = %d, want still 2", *replays)
+	}
+
 	// An unrelated vpnv4 RT add must not rescan the rib.
 	if _, err := s.AddRouteTarget(context.Background(), connect.NewRequest(&v1.AddRouteTargetRequest{
 		VrfName: "evi", Family: "vpnv4",

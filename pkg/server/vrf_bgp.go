@@ -228,18 +228,17 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 		}
 	}
 	// Replay the EVPN loc-rib when this mutation widened the binding's
-	// import surface (a new binding with import RTs, or import RTs added):
+	// import surface (a new binding with import RTs, or an import RT added):
 	// routes that arrived while nothing matched them were dropped fail-closed
-	// and the watch stream never re-delivers them. Gated on the bridge facet
-	// -- without it the replayed routes would just drop again -- and on the
+	// and the watch stream never re-delivers them. Strictly widen-only -- an
+	// import RT removed rescues nothing and would only rescan the rib into
+	// per-route "matches no binding" warns. Gated on the bridge facet
+	// (without it the replayed routes would just drop again) and on the
 	// import direction, which is independent of the coordinator's export-RT
 	// gate above (a receive-only PE imports without advertising).
-	if s.evpnReplay != nil {
-		imp := importRTsForFamily(updated, bgp.FamilyEVPN)
-		if len(imp) > 0 && (!existed || !slices.Equal(importRTsForFamily(prev, bgp.FamilyEVPN), imp)) {
-			if v, ok := s.mgr.VRF().Get(updated.VRFName); ok && v.Bridge != nil {
-				s.evpnReplay()
-			}
+	if s.evpnReplay != nil && hasNewImportRT(prev, updated, bgp.FamilyEVPN) {
+		if v, ok := s.mgr.VRF().Get(updated.VRFName); ok && v.Bridge != nil {
+			s.evpnReplay()
 		}
 	}
 	if s.mupSrc != nil && mupGTP4SrcFieldsChanged(existed, prev, updated) {
@@ -259,6 +258,24 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 		s.mupSrc.ReconcileMUPUplinkInstances()
 	}
 	return nil
+}
+
+// hasNewImportRT reports whether updated declares an import-direction RT
+// under fam that prev did not: the import surface widened, so previously
+// unmatched routes may now match. A removed RT does not count -- shrinking
+// rescues nothing. A brand-new binding (prev is the zero Binding) counts
+// whenever updated imports anything.
+func hasNewImportRT(prev, updated vrfbgp.Binding, fam bgp.Family) bool {
+	had := make(map[string]struct{})
+	for _, rt := range importRTsForFamily(prev, fam) {
+		had[rt] = struct{}{}
+	}
+	for _, rt := range importRTsForFamily(updated, fam) {
+		if _, ok := had[rt]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // importRTsForFamily returns the import-direction route targets a binding
