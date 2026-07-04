@@ -85,9 +85,11 @@ export VINBERO_SERVER=http://localhost:8080
 
 ### 1. Bridge 作成 (decap 側: router3)
 
+VRF オブジェクトの L2 facet として attach します ([vrf.md](vrf.md) 参照)。
+
 ```bash
-vinbero bridge create \
-  --name br100 --bd-id 100 --members eth1
+vinbero vrf bridge-attach \
+  --vrf evi-100 --name br100 --bd-id 100 --members eth1
 ```
 
 ### 2. SID 登録 (decap 側: End.DT2)
