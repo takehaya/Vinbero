@@ -96,7 +96,7 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 
 kernel device facet は `settings.state_path` の JSON state に永続化され、restart を跨いで生き残ります。boot 順序は次のとおりです。
 
-1. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成します
+1. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成し、存在するものは Create と同じ検証と収束で adopt します。実体化できない entry があれば fail-closed で起動を拒否します (stale な ifindex を FDB watcher / EVPN / SID 参照ガードに渡さない。エラーに修復手順が出ます)
 2. `seedVrfDevices` / `seedVrfBridges` が state を VRF オブジェクトに mirror します (restart 後も facet 付きの一級 VRF として見える)。facet 化以前の bridge record は owning VRF を持たないので、bridge 名を仮の VRF 名として seed します (state file の `vrf` フィールドを書いて再起動すれば本来の VRF に移せます)
 3. `loadVRFs` が config の `vrfs:` を適用します (device / bridge は adopt 冪等、AC、policy、最後に ingress reconcile と bridge facet の FDBWatcher 登録 sweep)
 
