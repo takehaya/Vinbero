@@ -160,3 +160,77 @@ func TestCreateDeleteVrf(t *testing.T) {
 		t.Errorf("state file missing: %v", err)
 	}
 }
+
+// CreateBridge creates the device up with members enslaved and persists the
+// owning VRF; the adopt path refuses a non-bridge link, a tracked bd_id
+// mismatch and a foreign owner, and converges (UP + missing members) on a
+// legitimate re-attach without weakening the state record. DeleteBridge is
+// idempotent when the device was removed out-of-band.
+func TestCreateDeleteBridge(t *testing.T) {
+	withTestNetns(t)
+	m := newTestManager(t)
+
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "brtest0"}}); err != nil {
+		t.Fatalf("LinkAdd dummy: %v", err)
+	}
+
+	ifindex, err := m.CreateBridge("br-t", 100, []string{"brtest0"}, "evi-100")
+	if err != nil {
+		t.Fatalf("CreateBridge: %v", err)
+	}
+	link, err := netlink.LinkByName("br-t")
+	if err != nil {
+		t.Fatalf("LinkByName: %v", err)
+	}
+	if _, ok := link.(*netlink.Bridge); !ok {
+		t.Fatalf("created link is %s, want bridge", link.Type())
+	}
+	member, _ := netlink.LinkByName("brtest0")
+	if member.Attrs().MasterIndex != int(ifindex) {
+		t.Errorf("member not enslaved: master %d, want %d", member.Attrs().MasterIndex, ifindex)
+	}
+	if got, ok := m.GetBridgeByName("br-t"); !ok || got.VRF != "evi-100" || got.BdID != 100 {
+		t.Errorf("state = %+v, want owner evi-100 bd 100", got)
+	}
+
+	// Owner round-trips through the state file.
+	m2, err := NewResourceManager(m.statePath, zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewResourceManager reload: %v", err)
+	}
+	if got, ok := m2.GetBridgeByName("br-t"); !ok || got.VRF != "evi-100" {
+		t.Errorf("reloaded state = %+v, want owner evi-100", got)
+	}
+
+	// Adopt refusals: bd_id mismatch, foreign owner, non-bridge link.
+	if _, err := m.CreateBridge("br-t", 200, nil, "evi-100"); err == nil ||
+		!strings.Contains(err.Error(), "bd_id") {
+		t.Errorf("bd_id-mismatch adopt: err = %v, want bd_id error", err)
+	}
+	if _, err := m.CreateBridge("br-t", 100, nil, "other-vrf"); err == nil ||
+		!strings.Contains(err.Error(), "owned") {
+		t.Errorf("foreign-owner adopt: err = %v, want owner error", err)
+	}
+	if _, err := m.CreateBridge("brtest0", 100, nil, "evi-100"); err == nil {
+		t.Error("adopting a dummy link as bridge: want error")
+	}
+
+	// Legitimate adopt converges: same owner/bd, no weakening of members.
+	if again, err := m.CreateBridge("br-t", 100, nil, "evi-100"); err != nil || again != ifindex {
+		t.Errorf("adopt = (%d, %v), want (%d, nil)", again, err, ifindex)
+	}
+	if got, _ := m.GetBridgeByName("br-t"); len(got.Members) != 1 || got.Members[0] != "brtest0" {
+		t.Errorf("adopt weakened the state entry: %+v", got)
+	}
+
+	// Out-of-band removal: DeleteBridge still clears the state entry.
+	if err := netlink.LinkDel(link); err != nil {
+		t.Fatalf("LinkDel: %v", err)
+	}
+	if err := m.DeleteBridge("br-t"); err != nil {
+		t.Fatalf("DeleteBridge after out-of-band removal: %v", err)
+	}
+	if len(m.ListBridges()) != 0 {
+		t.Errorf("state still holds bridges after delete: %+v", m.ListBridges())
+	}
+}

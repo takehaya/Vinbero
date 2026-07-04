@@ -24,6 +24,13 @@ type ManagedBridge struct {
 	BdID    uint16   `json:"bd_id"`
 	Members []string `json:"members"`
 	Ifindex uint32   `json:"ifindex"`
+	// VRF is the name of the VRF object this bridge is attached to as its L2
+	// facet. Empty on records written before the facet existed; boot seeding
+	// then falls back to the bridge's own name as a synthetic VRF. To move
+	// such a bridge under its real VRF, stop the daemon, set this field in
+	// the state file, and restart (detaching instead would delete the kernel
+	// bridge and disrupt traffic).
+	VRF string `json:"vrf,omitempty"`
 }
 
 func loadState(path string) (*ManagedState, error) {
