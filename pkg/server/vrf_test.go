@@ -189,7 +189,7 @@ func newTestVrfServerFull() (*VrfServer, *fakeProgrammer, *fakeVrfDeviceOps) {
 	events := []string{}
 	s := NewVrfServer(vrf.NewManager(), prog, dev, &fakeSidTable{}, &fakeBindings{},
 		&fakeServerBridgeOps{ifindexes: map[string]uint32{}, events: &events},
-		&fakeFdbRegistrar{events: &events}, nil, nil)
+		&fakeFdbRegistrar{events: &events}, nil, nil, nil)
 	s.resolve = fakeResolver
 	return s, prog, dev
 }
@@ -208,7 +208,7 @@ func newTestVrfServerBridge(hook EvpnBridgeHook) (*VrfServer, *fakeServerBridgeO
 	if hook != nil {
 		evpn = NewEvpnCoordinator(hook, testFacetResolver(mgr), func(int) error { return nil }, zap.NewNop())
 	}
-	s := NewVrfServer(mgr, &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn, nil)
+	s := NewVrfServer(mgr, &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn, nil, nil)
 	s.resolve = fakeResolver
 	return s, bridges, fdb, bindings, &events
 }
@@ -824,5 +824,57 @@ func TestVrfServer_DeleteRefusesWithBridge(t *testing.T) {
 	}
 	if len(resp.Msg.Errors) != 1 {
 		t.Fatalf("delete with bridge facet: want refusal, got %+v", resp.Msg)
+	}
+}
+
+// VrfBridgeAttach fires the EVPN loc-rib replay only when the VRF's binding
+// imports EVPN RTs: the attach completes the import surface, so routes
+// dropped fail-closed while the facet was missing get rescued. A binding
+// without EVPN import RTs (or no binding) must not trigger a rib scan.
+func TestVrfServer_BridgeAttachFiresEvpnReplay(t *testing.T) {
+	newServer := func() (*VrfServer, *fakeBindings, *int) {
+		events := []string{}
+		bindings := &fakeBindings{bindings: map[string]vrfbgp.Binding{}}
+		replays := 0
+		s := NewVrfServer(vrf.NewManager(), &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings,
+			&fakeServerBridgeOps{ifindexes: map[string]uint32{"br100": 42}, events: &events},
+			&fakeFdbRegistrar{events: &events}, nil, func() { replays++ }, nil)
+		s.resolve = fakeResolver
+		return s, bindings, &replays
+	}
+	attach := func(t *testing.T, s *VrfServer) {
+		t.Helper()
+		if _, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
+			VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100},
+		})); err != nil {
+			t.Fatalf("VrfBridgeAttach: %v", err)
+		}
+	}
+
+	// Binding with an EVPN import RT: replay fires once.
+	s, bindings, replays := newServer()
+	bindings.bindings["evi-100"] = vrfbgp.Binding{VRFName: "evi-100", Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionImport}}},
+	}}
+	attach(t, s)
+	if *replays != 1 {
+		t.Errorf("attach with an EVPN import RT: replays = %d, want 1", *replays)
+	}
+
+	// Export-only EVPN binding: the receive surface did not widen.
+	s, bindings, replays = newServer()
+	bindings.bindings["evi-100"] = vrfbgp.Binding{VRFName: "evi-100", Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+		bgp.FamilyEVPN: {RouteTargets: []vrfbgp.RouteTarget{{RT: "65000:100", Direction: vrfbgp.DirectionExport}}},
+	}}
+	attach(t, s)
+	if *replays != 0 {
+		t.Errorf("attach with an export-only binding: replays = %d, want 0", *replays)
+	}
+
+	// No binding at all: nothing can match, no replay.
+	s, _, replays = newServer()
+	attach(t, s)
+	if *replays != 0 {
+		t.Errorf("attach without a binding: replays = %d, want 0", *replays)
 	}
 }

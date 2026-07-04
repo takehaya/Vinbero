@@ -40,6 +40,7 @@ type Server struct {
 	evpnES       EvpnEsHook                 // EVPN RT4 auto-advertise ES hook; nil when off
 	esReElectDF  func(esi [bpf.ESILen]byte) // applier DF re-election; nil when BGP is off
 	mupSrc       MupBindingReconciler       // MUP binding-state reconcile hook; nil when BGP is off
+	evpnReplay   func()                     // EVPN loc-rib replay (import-surface widened); nil when BGP is off
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
@@ -55,7 +56,7 @@ type Server struct {
 // enabled, or nil otherwise. Taking the concrete type (not the interface)
 // keeps a typed-nil from leaking into srPolicyCtrl, so the FailedPrecondition
 // guard in SrPolicyServer works.
-func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, mupAdv bgp.MUPController, srPolicyApplier *apply.Applier, vrfExporter VrfExporter, evpnCoord *EvpnCoordinator, evpnES EvpnEsHook, logger *zap.Logger) *Server {
+func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresource.ResourceManager, fdbWatcher *netlinkwatch.FDBWatcher, locatorMgr *locator.Manager, vrfBgpMgr *vrfbgp.Manager, advertiser bgp.RouteAdvertiser, srPolicyAdv bgp.SRPolicyController, evpnAdv bgp.EVPNController, mupAdv bgp.MUPController, srPolicyApplier *apply.Applier, vrfExporter VrfExporter, evpnCoord *EvpnCoordinator, evpnES EvpnEsHook, evpnReplay func(), logger *zap.Logger) *Server {
 	s := &Server{
 		cfg:         cfg,
 		mapOps:      mapOps,
@@ -70,6 +71,7 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 		vrfExporter: vrfExporter,
 		evpnCoord:   evpnCoord,
 		evpnES:      evpnES,
+		evpnReplay:  evpnReplay,
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}
@@ -116,7 +118,7 @@ func (s *Server) Setup() {
 	// One mutation mutex shared by VrfBgpService and VrfService: their
 	// facet<->binding cross-checks are check-then-act across two managers.
 	vrfMu := &sync.Mutex{}
-	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc, vrfMu)
+	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc, s.evpnReplay, vrfMu)
 	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
@@ -209,7 +211,7 @@ func (s *Server) Setup() {
 	// the ingress maps from mapOps, the binding lookups from the vrf-bgp
 	// manager, and the bridge attach lifecycle drives the FDB watcher and (when
 	// auto-advertise is on) the EVPN coordinator.
-	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, vrfMu)
+	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, s.evpnReplay, vrfMu)
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))

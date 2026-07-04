@@ -86,11 +86,13 @@ type evpnMcastState struct {
 	sid   string
 }
 
-// evpnTable holds the EVPN applier's in-memory bookkeeping. peers/fdb/mcast are
-// touched only from the single GoBGP RouteHandler goroutine (like steeredRoutes)
-// and need no locking. esMembers and DF election are the exception: the operator
-// path (es create -> ReelectDF) re-runs election from the RPC goroutine, so
-// esMu serializes esMembers access and electDF across the two goroutines.
+// evpnTable holds the EVPN applier's in-memory bookkeeping. peers/fdb/mcast
+// are touched from the GoBGP RouteHandler goroutine (applyEVPN) and from the
+// RPC-driven ReplayEVPN; both take Applier.evpnMu, and any new accessor must
+// too. esMembers and DF election have their own lock: the operator path
+// (es create -> ReelectDF) re-runs election from the RPC goroutine, so esMu
+// serializes esMembers access and electDF (esMu nests inside evpnMu on the
+// applyEVPN path and is taken alone by ReelectDF -- one direction only).
 type evpnTable struct {
 	peers map[evpnPeerKey]*evpnPeerState
 	fdb   map[evpnFdbKey]evpnFdbState
@@ -178,6 +180,13 @@ func isUsableSRv6SID(sid string) bool {
 }
 
 func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
+	a.evpnMu.Lock()
+	defer a.evpnMu.Unlock()
+	a.applyEVPNLocked(r, withdraw)
+}
+
+// applyEVPNLocked dispatches one EVPN route. Caller holds evpnMu.
+func (a *Applier) applyEVPNLocked(r *bgp.EVPNRoute, withdraw bool) {
 	switch r.Type {
 	case bgp.EVPNRouteTypeMACIP:
 		a.applyEVPNMacIP(r, withdraw)
@@ -188,6 +197,46 @@ func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
 	default:
 		// Unsupported route types (RT1 Ethernet A-D, RT5 IP Prefix) are ignored.
 	}
+}
+
+// ReplayEVPN re-applies the current EVPN loc-rib through the receive path.
+// VrfBridgeAttach / commitBinding call it after the EVPN import surface
+// widens (a bridge facet attached, an import RT added): a route that arrived
+// while no binding+facet could match it was dropped fail-closed and the
+// watch stream never re-delivers it, so the rib snapshot is the only way to
+// rescue it. snapshot is a closure over bgp.RouteLister.ListRoutes; every
+// install it triggers is idempotent, so replaying already-applied routes is
+// a no-op.
+//
+// evpnMu is held across the snapshot AND the re-applies, which makes any
+// interleaving with the live watch goroutine converge: a route withdrawn
+// before the snapshot is not in it, and a withdraw racing the replay blocks
+// on evpnMu and lands after, overwriting the re-install. Holding the mutex
+// across ListRoutes cannot deadlock: gobgp's watch delivery runs on a
+// dedicated goroutine fed by an unbounded queue, so the mgmt loop ListRoutes
+// waits on never blocks on our callback.
+//
+// The snapshot carries every known path per NLRI (best first), so where two
+// peers advertise the same NLRI with different attributes the last replayed
+// path wins -- the same last-write-wins the live stream has.
+func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
+	a.evpnMu.Lock()
+	defer a.evpnMu.Unlock()
+	n := 0
+	err := snapshot(func(ev bgp.RouteEvent) {
+		// Rib-resident paths always carry IsWithdraw=false; the guard keeps a
+		// misbehaving snapshot from turning the rescue into a teardown.
+		if ev.Family != bgp.FamilyEVPN || ev.EVPN == nil || ev.IsWithdraw {
+			return
+		}
+		a.applyEVPNLocked(ev.EVPN, false)
+		n++
+	})
+	if err != nil {
+		return fmt.Errorf("replay EVPN rib: %w", err)
+	}
+	a.logger.Debug("replayed EVPN loc-rib", zap.Int("routes", n))
+	return nil
 }
 
 func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
@@ -275,8 +324,8 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 }
 
 // withdrawEVPNMac removes the FDB entry recorded for fk and releases its peer
-// reference, deleting the bd_peer when the last MAC stops referencing it. The
-// caller holds the only goroutine that touches evpnTable.
+// reference, deleting the bd_peer when the last MAC stops referencing it.
+// Caller holds evpnMu.
 func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 	if err := a.fdbBd.DeleteFdb(st.bdID, st.mac); err != nil {
 		// The FDB entry is still in the map. Keep the reverse index so a

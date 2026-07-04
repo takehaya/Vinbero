@@ -57,6 +57,12 @@ type VrfServer struct {
 	bridges  vrf.BridgeOps
 	fdb      FdbRegistrar
 	evpn     *EvpnCoordinator // nil unless EVPN auto-advertise is on
+	// evpnReplay re-applies the EVPN loc-rib through the applier; nil when
+	// BGP is off. VrfBridgeAttach fires it when the VRF's binding imports
+	// EVPN RTs: the just-attached facet completes the import surface, so
+	// routes dropped fail-closed before the attach are rescued. Failures
+	// are logged inside the hook (best-effort).
+	evpnReplay func()
 	// mu serializes the mutation handlers' mutate+reconcile(+rollback)
 	// sequence and the device / bridge create+delete flows. SetIngressVrf /
 	// SetIngressPolicy replace the maps with a snapshot-then-rollback strategy
@@ -77,11 +83,11 @@ type VrfServer struct {
 // NewVrfServer wires the handler. mu is the mutation mutex, shared with
 // VrfBgpServer so cross-facet invariants hold (see the field comment); nil
 // allocates a private one (tests without a VrfBgpServer).
-func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator, mu *sync.Mutex) *VrfServer {
+func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator, evpnReplay func(), mu *sync.Mutex) *VrfServer {
 	if mu == nil {
 		mu = &sync.Mutex{}
 	}
-	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, mu: mu}
+	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu}
 }
 
 func (s *VrfServer) reconcile() error {
@@ -336,6 +342,16 @@ func (s *VrfServer) VrfBridgeAttach(
 	if s.evpn != nil {
 		if b, bound := s.bindings.Get(vrfName); bound && len(b.ExportRTsForFamily(bgp.FamilyEVPN)) > 0 {
 			s.evpn.Enable(b)
+		}
+	}
+	// Receive side: the attach completed the import surface (binding with
+	// EVPN import RTs + facet), so replay the loc-rib to rescue routes that
+	// were dropped fail-closed while the facet was missing. The import-RT
+	// gate is deliberately separate from the export-RT gate above: a
+	// receive-only PE imports without advertising.
+	if s.evpnReplay != nil {
+		if b, bound := s.bindings.Get(vrfName); bound && len(importRTsForFamily(b, bgp.FamilyEVPN)) > 0 {
+			s.evpnReplay()
 		}
 	}
 	return connect.NewResponse(&v1.VrfBridgeAttachResponse{Vrf: vrfToProto(attached)}), nil

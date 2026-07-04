@@ -45,10 +45,10 @@ for i in $(seq 1 30); do
 done
 
 # bd 100 local delivery as evi-100's L2 facet: End.DT2/DT2M decap into br100
-# -> the CE on eth2 (enslaved via --members). The facet is the bridge
-# domain's single source and must attach BEFORE the vrf-bgp bind below, so
-# the moment the binding can match a received RT2/RT3/RT4 its bd is
-# resolvable.
+# -> the CE on eth2 (enslaved via --members). The facet is the bridge domain's
+# single source; attaching BEFORE the vrf-bgp bind below means a received
+# RT2/RT3/RT4 immediately finds its bd (a route landing in a gap is rescued
+# by the loc-rib replay the attach/bind fires).
 /usr/local/bin/vbctl vrf bridge-attach \
     --vrf evi-100 \
     --name br100 \

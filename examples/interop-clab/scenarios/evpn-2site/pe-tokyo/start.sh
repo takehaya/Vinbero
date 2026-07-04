@@ -56,10 +56,11 @@ done
 # End.DT2U decaps a core-bound frame into br100, which forwards it to
 # ce-tokyo on eth2. The CE port is enslaved for that egress direction; XDP
 # still sees CE->core frames first (ingress). The facet is the bridge
-# domain's single source: it must attach BEFORE the vrf-bgp bind below, so
-# the moment the binding can match a received RT2/RT3 its bd is resolvable
-# (a route landing between bind and attach would be dropped fail-closed and
-# is not re-applied). Attaching also registers br100 with the FDB watcher.
+# domain's single source: attaching BEFORE the vrf-bgp bind below means the
+# moment the binding can match a received RT2/RT3 its bd is resolvable (a
+# route landing in a gap is rescued by the loc-rib replay the attach/bind
+# fires, so the order is a preference, not a correctness requirement).
+# Attaching also registers br100 with the FDB watcher.
 /usr/local/bin/vbctl vrf bridge-attach \
     --vrf evi-100 \
     --name br100 \

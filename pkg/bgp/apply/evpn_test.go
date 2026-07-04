@@ -571,3 +571,73 @@ func TestApplier_EVPNRT4ZeroLocalSkipsElection(t *testing.T) {
 			netip.AddrFrom16(fh.esis[testESI].DfPeSrcAddr))
 	}
 }
+
+// ReplayEVPN re-applies a rib snapshot through the normal EVPN receive
+// path: RT2/RT3 install, withdraw events and non-EVPN events are guarded
+// out, and replaying routes that are already installed stays idempotent.
+func TestApplier_ReplayEVPN(t *testing.T) {
+	a, fh := evpnApplier(t)
+	// One RT2 arrived live before the replay (the idempotency half).
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+
+	snapshot := func(h bgp.RouteHandler) error {
+		h(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+		h(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:02", "fd00:2:2:d2::")})
+		h(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:d3::")})
+		// Guarded out: a withdraw must not tear anything down, and a
+		// non-EVPN event must be ignored.
+		h(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+		h(bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+		return nil
+	}
+	if err := a.ReplayEVPN(snapshot); err != nil {
+		t.Fatalf("ReplayEVPN: %v", err)
+	}
+	if len(fh.fdb) != 2 {
+		t.Errorf("want 2 FDB entries after replay (live + rescued), got %d: %v", len(fh.fdb), fh.fdb)
+	}
+	// Peers: one unicast peer shared by both MACs plus the RT3 flood peer.
+	if len(fh.bdPeers) != 2 {
+		t.Errorf("want 2 bd_peers (shared unicast + flood), got %d: %v", len(fh.bdPeers), fh.bdPeers)
+	}
+	// The replayed duplicate of the live RT2 must not have inflated the
+	// refcount: one withdraw must free the MAC.
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+	if _, ok := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]; ok {
+		t.Error("replay inflated the RT2 state: one withdraw did not free the MAC")
+	}
+}
+
+// ReplayEVPN surfaces a snapshot error without applying half a replay's
+// bookkeeping incorrectly (events delivered before the error still applied,
+// which is fine -- they are real rib routes).
+func TestApplier_ReplayEVPNSnapshotError(t *testing.T) {
+	a, _ := evpnApplier(t)
+	boom := errors.New("rib boom")
+	if err := a.ReplayEVPN(func(bgp.RouteHandler) error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("ReplayEVPN error = %v, want wrapped %v", err, boom)
+	}
+}
+
+// The live watch goroutine (Apply) and an RPC-driven replay may run
+// concurrently; evpnMu must serialize them. Run with -race.
+func TestApplier_ReplayEVPNConcurrentWithApply(t *testing.T) {
+	a, _ := evpnApplier(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+			a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt2("aa:bb:cc:00:00:01", "fd00:2:2:d2::")})
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if err := a.ReplayEVPN(func(h bgp.RouteHandler) error {
+			h(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt2("aa:bb:cc:00:00:02", "fd00:3:3:d2::")})
+			return nil
+		}); err != nil {
+			t.Fatalf("ReplayEVPN: %v", err)
+		}
+	}
+	<-done
+}
