@@ -118,3 +118,32 @@ func TestPersist_FailurePropagates(t *testing.T) {
 		t.Fatal("persist onto a directory must fail")
 	}
 }
+
+// A deployment that uses no VRF/bridge features must keep booting even when
+// the state directory is unwritable: Reconcile skips the persist when there
+// is nothing to protect. With entries present a persist failure IS fatal.
+func TestReconcile_EmptyStateSkipsPersist(t *testing.T) {
+	// Failure injection that root cannot bypass: a directory occupying the
+	// state path makes the atomic write's rename step fail. It also breaks
+	// loadState (ReadFile hits EISDIR), so the manager is created while the
+	// path is free and the blocker is installed afterwards.
+	path := filepath.Join(t.TempDir(), "state.json")
+	m, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewResourceManager: %v", err)
+	}
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatalf("mkdir blocker: %v", err)
+	}
+	if err := m.Reconcile(); err != nil {
+		t.Fatalf("empty-state Reconcile must not require a writable state dir: %v", err)
+	}
+	// With an entry the persist failure is fatal (the refreshed ifindex must
+	// land). The entry uses a device-less seed so no netns/netlink is needed:
+	// the lookup fails, the recreation fails on the missing member, and the
+	// error surfaces before persist -- so drive the persist path directly.
+	m.ensureBridgeInState("br-x", 1, nil, 9, "")
+	if err := m.persist(); err == nil {
+		t.Fatal("persist into an unwritable state dir must fail")
+	}
+}

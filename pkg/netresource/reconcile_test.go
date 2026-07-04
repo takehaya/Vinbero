@@ -221,8 +221,11 @@ func TestConcurrentBridgeAccess(t *testing.T) {
 		t.Fatalf("CreateBridge: %v", err)
 	}
 	inNs := func(work func()) {
+		// Deliberately NO UnlockOSThread: the goroutine exits still locked,
+		// which destroys the thread instead of returning a netns-pinned
+		// (poisoned) thread to the scheduler pool where a later goroutine
+		// could silently run in this dead namespace.
 		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
 		if err := netns.Set(testNs); err != nil {
 			t.Errorf("netns.Set: %v", err)
 			return
