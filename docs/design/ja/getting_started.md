@@ -70,8 +70,7 @@ export VINBERO_SERVER=http://localhost:8080
 | `hv4` / `hv6` (`headend-v4/-v6`) | IPv4/IPv6 trigger の Headend (encap) 管理 |
 | `hl2` (`headend-l2`) | L2 フレームの Headend (H.Encaps.L2) 管理 |
 | `peer` (`bd-peer`) | Bridge Domain のリモート PE (BUM flood 先) 管理 |
-| `bridge` | Linux bridge デバイス管理 |
-| `vrf` | Linux VRF デバイス管理 |
+| `vrf` | VRF 管理 (kernel VRF device / L2 bridge facet / ingress AC) |
 | `fdb` | FDB エントリ管理 (L2VPN の MAC テーブル) |
 | `vt` (`vlan-table`) | VLAN cross-connect (End.DX2V) テーブル |
 | `stats` | XDP 統計表示 (global + per-slot) |
@@ -192,8 +191,7 @@ vinbero plugin unregister --type endpoint --index 32
 ## 動作確認
 
 ```bash
-# 管理リソース一覧
-vinbero bridge list
+# 管理リソース一覧 (VRF device / bridge facet / AC を 1 テーブルで表示)
 vinbero vrf show
 
 # SID / Headend 一覧
