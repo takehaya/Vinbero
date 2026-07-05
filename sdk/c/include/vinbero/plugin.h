@@ -52,8 +52,9 @@
  *       v3 or older headers declare the old value sizes and fail the
  *       MapReplacements compatibility check at PluginRegister —
  *       recompile against the v4 headers. Adds the shared
- *       ecmp_group_map / ecmp_path_map (read-only) and ecmp_live_map
- *       (read-write) declarations.
+ *       ecmp_group_map / ecmp_path_map / ecmp_live_map declarations
+ *       (all read-only for plugins; ecmp_live_map is written by the
+ *       userspace prober only).
  *
  * Version bumps are additive unless a bump note above says BREAKING.
  * Plugins compiled against an older SDK remain valid across additive

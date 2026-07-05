@@ -1741,9 +1741,17 @@ func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []EcmpPath, owner Own
 			return fmt.Errorf("put ecmp_path_map[%d,%d]: %w", groupID, i, err)
 		}
 	}
-	cleanup := func() {
-		for i := range n {
-			_ = deleteMapKey(m.objs.EcmpPathMap, EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)})
+	// Roll the path slots back only on a fresh create: during a replace the
+	// old group info is still installed (and still referenced), so deleting
+	// the just-written slots would leave a live group with missing paths.
+	// A failed replace instead leaves a mixed-generation path set that the
+	// next PutEcmpGroup or DeleteEcmpGroup converges.
+	var cleanup func()
+	if !alreadyOwned {
+		cleanup = func() {
+			for i := range n {
+				_ = deleteMapKey(m.objs.EcmpPathMap, EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)})
+			}
 		}
 	}
 	if err := putMainAndOwner(m.objs.EcmpGroupMap, m.ecmpGroupOwners, groupID, &info,
