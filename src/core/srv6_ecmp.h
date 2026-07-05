@@ -107,9 +107,13 @@ static __always_inline __u32 ecmp_flow_hash_v4(
                 __builtin_memcpy(&ports, l4, 4);
         }
     }
-    return ecmp_jhash_3words(iph->saddr, iph->daddr,
-                             ports ^ ((__u32)iph->protocol << 24),
-                             ECMP_JHASH_SEED);
+    __u32 hash = ecmp_jhash_3words(iph->saddr, iph->daddr,
+                                   ports ^ ((__u32)iph->protocol << 24),
+                                   ECMP_JHASH_SEED);
+    // 0 is the "no hash computed" sentinel (endpoint/L2 dispatch), but
+    // jhash can legitimately produce it; round to 1 so a hashed flow is
+    // never mistaken for an unhashed one.
+    return hash ? hash : 1;
 }
 
 // Hash an IPv6 flow. ip6h must already be bounds-checked by the caller.
@@ -131,7 +135,9 @@ static __always_inline __u32 ecmp_flow_hash_v6(
     __u32 addrs = ecmp_jhash_addrs6(ip6h->saddr.in6_u.u6_addr32,
                                     ip6h->daddr.in6_u.u6_addr32,
                                     ECMP_JHASH_SEED);
-    return ecmp_jhash_3words(addrs, ports, nh, ECMP_JHASH_SEED);
+    __u32 hash = ecmp_jhash_3words(addrs, ports, nh, ECMP_JHASH_SEED);
+    // Same sentinel rounding as ecmp_flow_hash_v4.
+    return hash ? hash : 1;
 }
 
 // Fold a 32-bit flow hash into a 20-bit IPv6 flow label (RFC 6437). A
