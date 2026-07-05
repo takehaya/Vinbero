@@ -12,6 +12,7 @@
 #include "core/srv6.h"
 #include "core/srv6_gtp.h"
 #include "headend/srv6_headend_utils.h"
+#include "core/srv6_ecmp.h" // ecmp_flow_label (outer flow-label entropy)
 #include "core/srv6_fib.h"
 
 // ========== H.M.GTP6.D: GTP-U/IPv6 → SRv6 (RFC 9433) ==========
@@ -94,9 +95,12 @@ static __always_inline int gtp6_d_build_srv6(
     // Build outer IPv6 header
     outer_ip6h->version = 6;
     outer_ip6h->priority = 0;
-    outer_ip6h->flow_lbl[0] = 0;
-    outer_ip6h->flow_lbl[1] = 0;
-    outer_ip6h->flow_lbl[2] = 0;
+    // Flow label from the dispatcher's flow hash (RFC 6437): keeps the
+    // underlay's ECMP from polarizing on the shared outer {src, dst}.
+    {
+        struct tailcall_ctx *fl_tctx = tailcall_ctx_read();
+        ipv6_set_flow_label(outer_ip6h, ecmp_flow_label(fl_tctx ? fl_tctx->flow_hash : 0));
+    }
     outer_ip6h->payload_len = bpf_htons(srh_len + inner_total_len);
     outer_ip6h->nexthdr = IPPROTO_ROUTING;
     outer_ip6h->hop_limit = 64;

@@ -12,20 +12,30 @@
 // IPv6 Header Builder
 // ========================================================================
 
+// Write a 20-bit flow label (host order) into an IPv6 header's flow_lbl
+// bytes. Label 0 keeps the header's "no label" state.
+static __always_inline void ipv6_set_flow_label(struct ipv6hdr *ip6h, __u32 label)
+{
+    ip6h->flow_lbl[0] = (label >> 16) & 0x0F;
+    ip6h->flow_lbl[1] = (label >> 8) & 0xFF;
+    ip6h->flow_lbl[2] = label & 0xFF;
+}
+
 // Build outer IPv6 header for SRv6 encapsulation/insertion.
-// Sets version=6, traffic class=0, flow label=0, hop limit=64.
+// Sets version=6, traffic class=0, hop limit=64. flow_label carries the
+// inner flow's hash (RFC 6437) so the underlay's ECMP can spread flows that
+// share this PE pair's outer {src, dst}; 0 means unlabeled.
 static __always_inline void build_outer_ipv6(
     struct ipv6hdr *ip6h,
     __u8 nexthdr,
     __u16 payload_len,
     const void *src_addr,
-    const void *dst_addr)
+    const void *dst_addr,
+    __u32 flow_label)
 {
     ip6h->version = 6;
     ip6h->priority = 0;
-    ip6h->flow_lbl[0] = 0;
-    ip6h->flow_lbl[1] = 0;
-    ip6h->flow_lbl[2] = 0;
+    ipv6_set_flow_label(ip6h, flow_label);
     ip6h->payload_len = bpf_htons(payload_len);
     ip6h->nexthdr = nexthdr;
     ip6h->hop_limit = 64;

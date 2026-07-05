@@ -10,6 +10,7 @@
 
 #include "core/xdp_prog.h"
 #include "core/xdp_map.h" // sr_policy_map, used by resolve_sr_policy (explicit, not include-order dependent)
+#include "core/srv6_ecmp.h" // ecmp_flow_label (outer flow-label entropy)
 #include "core/srv6.h"
 #include "headend/srv6_headend_utils.h"
 #include <linux/ip.h>
@@ -115,11 +116,14 @@ static __always_inline int do_h_encaps_impl(
     struct ipv6hdr *outer_ip6h = (struct ipv6hdr *)(new_eth + 1);
     CHECK_BOUND(outer_ip6h, data_end, sizeof(*outer_ip6h));
 
-    // Build outer IPv6 header
+    // Build outer IPv6 header. The flow label carries the dispatcher's
+    // inner flow hash (0 for End.B6.Encaps, whose dispatch does not hash).
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
     build_outer_ipv6(outer_ip6h,
                      no_srh ? inner_proto : IPPROTO_ROUTING,
                      srh_len + inner_total_len,
-                     entry->src_addr, &entry->segments[0]);
+                     entry->src_addr, &entry->segments[0],
+                     ecmp_flow_label(tctx ? tctx->flow_hash : 0));
 
     // Build SRH (if present)
     if (!no_srh) {

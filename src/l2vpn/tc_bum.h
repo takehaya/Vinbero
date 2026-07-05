@@ -140,10 +140,12 @@ static __noinline int tc_do_single_pe_encap_impl(
 
     if (no_srh) {
         build_outer_ipv6(outer_ip6h, IPPROTO_ETHERNET, l2_frame_len,
-                         entry->src_addr, &entry->segments[0]);
+                         entry->src_addr, &entry->segments[0],
+                         0 /* L2 dispatch does not hash; label 0 */);
     } else {
         build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
-                         entry->src_addr, &entry->segments[0]);
+                         entry->src_addr, &entry->segments[0],
+                         0 /* L2 dispatch does not hash; label 0 */);
 
         // SRH
         struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)(outer_ip6h + 1);

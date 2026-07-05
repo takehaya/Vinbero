@@ -67,6 +67,20 @@ type BpfDx2vKey struct {
 	VlanId  uint16
 }
 
+type BpfEcmpGroupInfo struct {
+	_        structs.HostLayout
+	NumPaths uint8
+	Flags    uint8
+	Pad      uint16
+	Weight   [8]uint16
+}
+
+type BpfEcmpPathKey struct {
+	_         structs.HostLayout
+	GroupId   uint32
+	PathIndex uint32
+}
+
 type BpfEsiEntry struct {
 	_              structs.HostLayout
 	LocalAttached  uint8
@@ -113,6 +127,7 @@ type BpfHeadendEntry struct {
 	BdId         uint16
 	ArgsOffset   uint8
 	FloodExclude uint8
+	GroupId      uint32
 }
 
 type BpfHeadendL2ExtVal struct {
@@ -213,8 +228,9 @@ type BpfTailcallCtx struct {
 	Slot         uint8
 	Pad          [3]uint8
 	VrfId        uint32
+	FlowHash     uint32
 	SidEntry     BpfSidFunctionEntry
-	_            [200]byte
+	_            [204]byte
 }
 
 // LoadBpf returns the embedded CollectionSpec for Bpf.
@@ -303,6 +319,10 @@ type BpfMapSpecs struct {
 	BdPeerMap           *ebpf.MapSpec `ebpf:"bd_peer_map"`
 	BdPeerReverseMap    *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
 	Dx2vMap             *ebpf.MapSpec `ebpf:"dx2v_map"`
+	EcmpGroupMap        *ebpf.MapSpec `ebpf:"ecmp_group_map"`
+	EcmpGroupOwnerMap   *ebpf.MapSpec `ebpf:"ecmp_group_owner_map"`
+	EcmpLiveMap         *ebpf.MapSpec `ebpf:"ecmp_live_map"`
+	EcmpPathMap         *ebpf.MapSpec `ebpf:"ecmp_path_map"`
 	EsiMap              *ebpf.MapSpec `ebpf:"esi_map"`
 	FdbMap              *ebpf.MapSpec `ebpf:"fdb_map"`
 	HeadendL2ExtMap     *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
@@ -365,6 +385,10 @@ type BpfMaps struct {
 	BdPeerMap           *ebpf.Map `ebpf:"bd_peer_map"`
 	BdPeerReverseMap    *ebpf.Map `ebpf:"bd_peer_reverse_map"`
 	Dx2vMap             *ebpf.Map `ebpf:"dx2v_map"`
+	EcmpGroupMap        *ebpf.Map `ebpf:"ecmp_group_map"`
+	EcmpGroupOwnerMap   *ebpf.Map `ebpf:"ecmp_group_owner_map"`
+	EcmpLiveMap         *ebpf.Map `ebpf:"ecmp_live_map"`
+	EcmpPathMap         *ebpf.Map `ebpf:"ecmp_path_map"`
 	EsiMap              *ebpf.Map `ebpf:"esi_map"`
 	FdbMap              *ebpf.Map `ebpf:"fdb_map"`
 	HeadendL2ExtMap     *ebpf.Map `ebpf:"headend_l2_ext_map"`
@@ -402,6 +426,10 @@ func (m *BpfMaps) Close() error {
 		m.BdPeerMap,
 		m.BdPeerReverseMap,
 		m.Dx2vMap,
+		m.EcmpGroupMap,
+		m.EcmpGroupOwnerMap,
+		m.EcmpLiveMap,
+		m.EcmpPathMap,
 		m.EsiMap,
 		m.FdbMap,
 		m.HeadendL2ExtMap,

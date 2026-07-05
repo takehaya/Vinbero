@@ -17,6 +17,7 @@
 #include "core/xdp_prog.h"
 #include "core/xdp_map.h"
 #include "core/srv6.h"
+#include "core/srv6_ecmp.h"
 #include "headend/srv6_headend_utils.h"
 #include "headend/srv6_headend.h"
 #include "headend/srv6_encaps.h"

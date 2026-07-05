@@ -336,6 +336,10 @@ type EntriesConfig struct {
 	BdPeer      EntryCapacityConfig `yaml:"bd_peer,omitempty"`
 	VlanTable   EntryCapacityConfig `yaml:"vlan_table,omitempty"`
 	SrPolicy    EntryCapacityConfig `yaml:"sr_policy,omitempty"`
+	// EcmpGroup sizes the ECMP group tables: ecmp_group_map / owner / live
+	// get this capacity directly, ecmp_path_map gets capacity x 8 (one slot
+	// per possible path).
+	EcmpGroup   EntryCapacityConfig `yaml:"ecmp_group,omitempty"`
 	MaxSegments int                 `yaml:"max_segments,omitempty" default:"10"`
 }
 
