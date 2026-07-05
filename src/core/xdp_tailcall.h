@@ -54,9 +54,10 @@ struct tailcall_ctx {
                             // outer IPv6 flow label for underlay ECMP entropy and
                             // later per-policy weighted segment-list selection.
     union {
-        // Endpoint (localsid/nosrh): 12 bytes. Aux is re-looked up by target.
+        // Endpoint (localsid/nosrh). Aux is re-looked up by target.
         struct sid_function_entry sid_entry;
-        // Headend: 208 bytes. Copied because LPM trie re-lookup is expensive.
+        // Headend (the union's size anchor). Copied because LPM trie
+        // re-lookup is expensive.
         struct headend_entry headend;
     };
 } __attribute__((packed));

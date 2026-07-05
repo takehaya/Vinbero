@@ -1730,6 +1730,19 @@ func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []EcmpPath, owner Own
 		return err
 	}
 
+	// Roll written path slots back only on a fresh create: during a replace
+	// the old group info is still installed (and still referenced), so
+	// deleting the just-written slots would leave a live group with missing
+	// paths. A failed replace instead leaves a mixed-generation path set
+	// that the next PutEcmpGroup or DeleteEcmpGroup converges.
+	var cleanup func()
+	if !alreadyOwned {
+		cleanup = func() {
+			for i := range n {
+				_ = deleteMapKey(m.objs.EcmpPathMap, EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)})
+			}
+		}
+	}
 	var info EcmpGroupInfo
 	info.NumPaths = uint8(n)
 	for i, p := range paths {
@@ -1738,20 +1751,10 @@ func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []EcmpPath, owner Own
 		pe.GroupId = EcmpGroupNone // a path is terminal; the dispatcher never re-resolves
 		pk := EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)}
 		if err := m.objs.EcmpPathMap.Put(pk, &pe); err != nil {
-			return fmt.Errorf("put ecmp_path_map[%d,%d]: %w", groupID, i, err)
-		}
-	}
-	// Roll the path slots back only on a fresh create: during a replace the
-	// old group info is still installed (and still referenced), so deleting
-	// the just-written slots would leave a live group with missing paths.
-	// A failed replace instead leaves a mixed-generation path set that the
-	// next PutEcmpGroup or DeleteEcmpGroup converges.
-	var cleanup func()
-	if !alreadyOwned {
-		cleanup = func() {
-			for i := range n {
-				_ = deleteMapKey(m.objs.EcmpPathMap, EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)})
+			if cleanup != nil {
+				cleanup()
 			}
+			return fmt.Errorf("put ecmp_path_map[%d,%d]: %w", groupID, i, err)
 		}
 	}
 	if err := putMainAndOwner(m.objs.EcmpGroupMap, m.ecmpGroupOwners, groupID, &info,
