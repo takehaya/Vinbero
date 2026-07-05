@@ -91,7 +91,9 @@ jobs:
           sudo modprobe vrf
 
       - name: Run unit tests
-        run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v ./...
+        # pkg/bpf reloads the BPF collection per test and sits near go test's
+        # default 10m per-package timeout under -race; give it headroom.
+        run: go test -exec "sudo -E" -race -covermode=atomic -coverprofile=coverage.out -v -timeout 20m ./...
 
   sdk-archive-verify:
     name: SDK Archive Verify

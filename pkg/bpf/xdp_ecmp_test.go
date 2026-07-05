@@ -72,23 +72,27 @@ func outerFlowLabel(t *testing.T, pkt []byte) uint32 {
 	return uint32(pkt[ethHeaderLen+1]&0x0F)<<16 | uint32(pkt[ethHeaderLen+2])<<8 | uint32(pkt[ethHeaderLen+3])
 }
 
-// ecmpTestFixture installs a v4 headend entry on 192.0.2.0/24 that is a pure
-// group reference (no fallback segments) to group 42, whose paths encap to
-// one distinct SID each with the given weights.
+// ecmpTestFixture installs a v4 headend entry that is a pure group
+// reference (no fallback segments) to a group whose paths encap to one
+// distinct SID each with the given weights. Fixtures share one loaded
+// collection (helper) and stay isolated through distinct group ids and
+// trigger prefixes: loading the collection is the expensive part of these
+// tests, and one load per subtest pushed the CI suite over its timeout.
 type ecmpTestFixture struct {
-	h    *xdpTestHelper
-	sids [][16]byte
+	h       *xdpTestHelper
+	groupID uint32
+	dst     net.IP
+	sids    [][16]byte
 }
 
-func newEcmpFixture(t *testing.T, weights []uint16) *ecmpTestFixture {
+func newEcmpFixture(t *testing.T, h *xdpTestHelper, groupID uint32, prefix, dst string, weights []uint16) *ecmpTestFixture {
 	t.Helper()
-	h := newXDPTestHelper(t)
 	srcAddr, _ := ParseIPv6("fc00::1")
 
 	sids := make([][16]byte, len(weights))
 	paths := make([]EcmpPath, len(weights))
 	for i, w := range weights {
-		sid, _ := ParseIPv6(fmt.Sprintf("fd00:e0%d::1", i))
+		sid, _ := ParseIPv6(fmt.Sprintf("fd00:e%02x%d::1", groupID, i))
 		sids[i] = sid
 		var segs [MaxSegments][IPv6AddrLen]uint8
 		segs[0] = sid
@@ -102,7 +106,6 @@ func newEcmpFixture(t *testing.T, weights []uint16) *ecmpTestFixture {
 			Weight: w,
 		}
 	}
-	const groupID = 42
 	if err := h.mapOps.PutEcmpGroup(groupID, paths, OwnerRPC); err != nil {
 		t.Fatalf("PutEcmpGroup: %v", err)
 	}
@@ -113,10 +116,10 @@ func newEcmpFixture(t *testing.T, weights []uint16) *ecmpTestFixture {
 		SrcAddr: srcAddr,
 		GroupId: groupID,
 	}
-	if err := h.mapOps.CreateHeadendV4("192.0.2.0/24", parent, OwnerRPC); err != nil {
+	if err := h.mapOps.CreateHeadendV4(prefix, parent, OwnerRPC); err != nil {
 		t.Fatalf("CreateHeadendV4: %v", err)
 	}
-	return &ecmpTestFixture{h: h, sids: sids}
+	return &ecmpTestFixture{h: h, groupID: groupID, dst: net.ParseIP(dst).To4(), sids: sids}
 }
 
 // classify runs the packet and returns which path SID the outer DA matches,
@@ -136,19 +139,23 @@ func (f *ecmpTestFixture) classify(t *testing.T, pkt []byte) int {
 	return -1
 }
 
+// flowPkt builds one UDP flow toward the fixture's destination.
+func (f *ecmpTestFixture) flowPkt(t *testing.T, srcPort uint16) []byte {
+	t.Helper()
+	pkt, err := buildUDPIPv4Packet(net.ParseIP("10.0.0.1").To4(), f.dst, srcPort, 443)
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
+	}
+	return pkt
+}
+
 // spread pushes nFlows UDP flows (varying source port) through the fixture
 // and returns the per-path hit counts.
 func (f *ecmpTestFixture) spread(t *testing.T, nFlows int) []int {
 	t.Helper()
-	src := net.ParseIP("10.0.0.1").To4()
-	dst := net.ParseIP("192.0.2.100").To4()
 	counts := make([]int, len(f.sids))
 	for i := range nFlows {
-		pkt, err := buildUDPIPv4Packet(src, dst, uint16(20000+i), 443)
-		if err != nil {
-			t.Fatalf("build packet: %v", err)
-		}
-		sel := f.classify(t, pkt)
+		sel := f.classify(t, f.flowPkt(t, uint16(20000+i)))
 		if sel < 0 {
 			t.Fatalf("flow %d: outer DA matches no path SID", i)
 		}
@@ -162,8 +169,12 @@ func (f *ecmpTestFixture) spread(t *testing.T, nFlows int) []int {
 // reroute, fail-open on an all-dead bitmap, and the parent-entry fallback on
 // group misses.
 func TestXDPProgECMPGroup(t *testing.T) {
+	// One collection load shared by every subtest; isolation comes from
+	// distinct group ids and trigger prefixes.
+	h := newXDPTestHelper(t)
+
 	t.Run("spreads flows across equal-weight paths", func(t *testing.T) {
-		f := newEcmpFixture(t, []uint16{1, 1})
+		f := newEcmpFixture(t, h, 42, "192.0.2.0/24", "192.0.2.100", []uint16{1, 1})
 		counts := f.spread(t, 128)
 		t.Logf("distribution: %v", counts)
 		for i, c := range counts {
@@ -177,13 +188,8 @@ func TestXDPProgECMPGroup(t *testing.T) {
 	})
 
 	t.Run("same flow always picks the same path", func(t *testing.T) {
-		f := newEcmpFixture(t, []uint16{1, 1})
-		src := net.ParseIP("10.0.0.1").To4()
-		dst := net.ParseIP("192.0.2.100").To4()
-		pkt, err := buildUDPIPv4Packet(src, dst, 33333, 443)
-		if err != nil {
-			t.Fatalf("build packet: %v", err)
-		}
+		f := newEcmpFixture(t, h, 44, "198.51.100.0/24", "198.51.100.100", []uint16{1, 1})
+		pkt := f.flowPkt(t, 33333)
 		first := f.classify(t, pkt)
 		for range 16 {
 			if got := f.classify(t, pkt); got != first {
@@ -193,7 +199,7 @@ func TestXDPProgECMPGroup(t *testing.T) {
 	})
 
 	t.Run("weights skew the distribution", func(t *testing.T) {
-		f := newEcmpFixture(t, []uint16{7, 1})
+		f := newEcmpFixture(t, h, 45, "203.0.113.0/24", "203.0.113.100", []uint16{7, 1})
 		counts := f.spread(t, 128)
 		t.Logf("distribution: %v", counts)
 		if counts[0] <= counts[1] {
@@ -206,11 +212,10 @@ func TestXDPProgECMPGroup(t *testing.T) {
 	})
 
 	t.Run("liveness flip reroutes and restores", func(t *testing.T) {
-		f := newEcmpFixture(t, []uint16{1, 1})
-		const groupID = 42
+		f := newEcmpFixture(t, h, 46, "192.0.2.128/25", "192.0.2.200", []uint16{1, 1})
 
 		// Kill path 0: everything must land on path 1.
-		if err := f.h.mapOps.SetEcmpLive(groupID, 0b10); err != nil {
+		if err := f.h.mapOps.SetEcmpLive(f.groupID, 0b10); err != nil {
 			t.Fatalf("SetEcmpLive: %v", err)
 		}
 		counts := f.spread(t, 64)
@@ -219,7 +224,7 @@ func TestXDPProgECMPGroup(t *testing.T) {
 		}
 
 		// Recover: both paths carry traffic again.
-		if err := f.h.mapOps.SetEcmpLive(groupID, 0b11); err != nil {
+		if err := f.h.mapOps.SetEcmpLive(f.groupID, 0b11); err != nil {
 			t.Fatalf("SetEcmpLive: %v", err)
 		}
 		counts = f.spread(t, 128)
@@ -228,7 +233,7 @@ func TestXDPProgECMPGroup(t *testing.T) {
 		}
 
 		// Removing the bitmap restores the fail-open default.
-		if err := f.h.mapOps.DeleteEcmpLive(groupID); err != nil {
+		if err := f.h.mapOps.DeleteEcmpLive(f.groupID); err != nil {
 			t.Fatalf("DeleteEcmpLive: %v", err)
 		}
 		counts = f.spread(t, 128)
@@ -238,8 +243,8 @@ func TestXDPProgECMPGroup(t *testing.T) {
 	})
 
 	t.Run("all-dead bitmap fails open", func(t *testing.T) {
-		f := newEcmpFixture(t, []uint16{1, 1})
-		if err := f.h.mapOps.SetEcmpLive(42, 0); err != nil {
+		f := newEcmpFixture(t, h, 47, "100.64.0.0/24", "100.64.0.100", []uint16{1, 1})
+		if err := f.h.mapOps.SetEcmpLive(f.groupID, 0); err != nil {
 			t.Fatalf("SetEcmpLive: %v", err)
 		}
 		counts := f.spread(t, 128)
@@ -251,7 +256,6 @@ func TestXDPProgECMPGroup(t *testing.T) {
 	})
 
 	t.Run("group miss falls back to parent segments", func(t *testing.T) {
-		h := newXDPTestHelper(t)
 		srcAddr, _ := ParseIPv6("fc00::1")
 		fallbackSID, _ := ParseIPv6("fd00:ff::1")
 		var segs [MaxSegments][IPv6AddrLen]uint8
@@ -263,10 +267,10 @@ func TestXDPProgECMPGroup(t *testing.T) {
 			Segments:    segs,
 			GroupId:     999, // never installed
 		}
-		if err := h.mapOps.CreateHeadendV4("192.0.2.0/24", parent, OwnerRPC); err != nil {
+		if err := h.mapOps.CreateHeadendV4("198.18.0.0/24", parent, OwnerRPC); err != nil {
 			t.Fatalf("CreateHeadendV4: %v", err)
 		}
-		pkt, err := buildUDPIPv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), 1234, 80)
+		pkt, err := buildUDPIPv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("198.18.0.100").To4(), 1234, 80)
 		if err != nil {
 			t.Fatalf("build packet: %v", err)
 		}
@@ -280,17 +284,16 @@ func TestXDPProgECMPGroup(t *testing.T) {
 	})
 
 	t.Run("pure group ref with dead group drops", func(t *testing.T) {
-		h := newXDPTestHelper(t)
 		srcAddr, _ := ParseIPv6("fc00::1")
 		parent := &HeadendEntry{
 			Mode:    uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
 			SrcAddr: srcAddr,
 			GroupId: 999, // never installed, and no fallback segments
 		}
-		if err := h.mapOps.CreateHeadendV4("192.0.2.0/24", parent, OwnerRPC); err != nil {
+		if err := h.mapOps.CreateHeadendV4("192.88.99.0/24", parent, OwnerRPC); err != nil {
 			t.Fatalf("CreateHeadendV4: %v", err)
 		}
-		pkt, err := buildUDPIPv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), 1234, 80)
+		pkt, err := buildUDPIPv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.88.99.100").To4(), 1234, 80)
 		if err != nil {
 			t.Fatalf("build packet: %v", err)
 		}
@@ -301,7 +304,6 @@ func TestXDPProgECMPGroup(t *testing.T) {
 	})
 
 	t.Run("ipv6 flows spread too", func(t *testing.T) {
-		h := newXDPTestHelper(t)
 		srcAddr, _ := ParseIPv6("fc00::1")
 		sidA, _ := ParseIPv6("fd00:e00::1")
 		sidB, _ := ParseIPv6("fd00:e01::1")
