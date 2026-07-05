@@ -118,12 +118,11 @@ static __always_inline int do_h_encaps_impl(
 
     // Build outer IPv6 header. The flow label carries the dispatcher's
     // inner flow hash (0 for End.B6.Encaps, whose dispatch does not hash).
-    struct tailcall_ctx *tctx = tailcall_ctx_read();
     build_outer_ipv6(outer_ip6h,
                      no_srh ? inner_proto : IPPROTO_ROUTING,
                      srh_len + inner_total_len,
                      entry->src_addr, &entry->segments[0],
-                     ecmp_flow_label(tctx ? tctx->flow_hash : 0));
+                     headend_ctx_flow_label(0));
 
     // Build SRH (if present)
     if (!no_srh) {

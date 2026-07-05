@@ -231,7 +231,12 @@ struct sr_policy_value {
 // value (HASH map), so num_paths and weights always change together.
 struct ecmp_group_info {
     __u8  num_paths;               // 1..ECMP_MAX_PATHS
-    __u8  flags;                   // reserved (future: selection algorithm)
+    __u8  flags;                   // reserved. bit0 is earmarked FAIL_CLOSED
+                                   // (an all-dead liveness bitmap drops
+                                   // instead of failing open -- needed for
+                                   // single-active EVPN aliasing); flag 0
+                                   // means fail-open. Other bits: future
+                                   // selection algorithms.
     __u16 _pad;
     __u16 weight[ECMP_MAX_PATHS];  // per-path UCMP weight
 } __attribute__((packed));

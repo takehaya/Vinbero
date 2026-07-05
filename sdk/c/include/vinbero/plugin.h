@@ -44,11 +44,22 @@
  *       vinbero/headend_l2_helpers.h with VLAN / ESI / DF observation
  *       helpers; tctx->headend carries the chosen encap target for L2
  *       dispatch (existing union variant, re-used).
+ *   v4: ECMP path groups. struct headend_entry gains group_id (204 ->
+ *       208 bytes) and struct tailcall_ctx gains flow_hash before the
+ *       union (216 -> 224 bytes), so the value sizes of the shared
+ *       headend_v4/v6/l2_map, bd_peer_map, mup_uplink_* and
+ *       tailcall_ctx_map change. BREAKING: plugin ELFs compiled against
+ *       v3 or older headers declare the old value sizes and fail the
+ *       MapReplacements compatibility check at PluginRegister —
+ *       recompile against the v4 headers. Adds the shared
+ *       ecmp_group_map / ecmp_path_map (read-only) and ecmp_live_map
+ *       (read-write) declarations.
  *
- * Version bumps are additive. Plugins compiled against an older SDK
- * remain valid against newer vinbero.
+ * Version bumps are additive unless a bump note above says BREAKING.
+ * Plugins compiled against an older SDK remain valid across additive
+ * bumps only.
  */
-#define VINBERO_SDK_VERSION 3
+#define VINBERO_SDK_VERSION 4
 
 /*
  * VINBERO_PLUGIN(name) — recommended entry macro for plugin authors.

@@ -25,15 +25,17 @@ path が `headend_entry` そのものを値に持つため、path ごとに異�
 
 dispatcher (`process_headend_v4/v6`) は headend map に hit したパケットの inner flow を jhash で hash します。入力は 5-tuple で、fragment や未知の protocol、extension header 付きの IPv6 は {src, dst, proto} の 3-tuple に落とします。TCP、UDP、UDP-Lite、SCTP、DCCP は先頭 4 byte が {sport, dport} なので同じ読み方で済みます。
 
-path の選択は live bitmap でマスクした weight の累積に対する hash % total です。weight を変えれば UCMP になります。`ecmp_live_map` の lookup miss は「prober がいない」という意味で全 path live に fail open します。bitmap が全滅 (live な weight 合計が 0) の場合も全 path へ fail open します。BGP がまだその path 集合を保持している以上、劣化した可能性のある path に分散する方が drop より良い、という判断です。
+path の選択は live bitmap でマスクした weight の累積に対する hash % total です。weight を変えれば UCMP になります。`ecmp_live_map` の lookup miss は prober がいないという意味で全 path live に fail open します。bitmap が全滅 (live な weight 合計が 0) の場合も全 path へ fail open します。BGP がまだその path 集合を保持している以上、劣化した可能性のある path に分散する方が drop より良い、という判断です。single-active な EVPN multihoming のように fail open が許されないケースのために、`ecmp_group_info.flags` の bit0 を fail-closed 用に予約してあります。
 
-group が解決できないとき (group_id はあるが `ecmp_group_map` に無い、または path slot が無い) は親エントリ自身の segment list に fallback します。親が segment を持たない純粋な group 参照であれば drop します。
+group の解決は `ecmp_resolve_headend` に集約しています。group が解決できないとき (group_id はあるが `ecmp_group_map` に無い、または path slot が無い) は親エントリ自身の segment list に fallback し、親が segment を持たない純粋な group 参照であれば NULL を返して呼び出し元が drop します。この契約を resolver 側に持たせているので、後続の呼び出し元 (EVPN aliasing など) が drop 判定を書き忘れることはありません。
 
 ## outer flow label entropy
 
 同じ PE ペア間の encap トラフィックは outer の {src, dst} が全フローで同一になるため、underlay の途中ノードの ECMP が 1 本の経路に張り付きます。これを避けるため、dispatcher が計算した inner flow hash を RFC 6437 に従って outer IPv6 の flow label (20 bit) に書き込みます。Linux の IPv6 multipath hash は既定で flow label を含むので、途中ノードは設定なしで分散します。
 
-flow hash は group の有無に関わらず headend を通る全パケットで計算し、H.Encaps 系と GTP 系の headend が flow label に反映します。L2 headend (H.Encaps.L2) と TC の BUM 複製は hash を計算しないため label 0 のままです。hash が非ゼロなら label も必ず非ゼロになるよう折り畳むので、ラベル付きフローと未ラベルフローを途中ノードが混同することはありません。
+flow hash は group の有無に関わらず headend を通る全パケットで計算し、H.Encaps 系と GTP 系の headend が `headend_ctx_flow_label` を通して flow label に反映します。GTP 系は TEID も混ぜます。GTP-U の port が固定の運用では outer 5-tuple が eNB と UPF のペアごとに 1 つの定数になり per-session の entropy が消えるためです。L2 headend (H.Encaps.L2) と TC の BUM 複製は hash を計算しないため label 0 のままです。hash が非ゼロなら label も必ず非ゼロになるよう折り畳むので、ラベル付きフローと未ラベルフローを途中ノードが混同することはありません。
+
+これはアップグレード時の wire 挙動の変更です。従来 outer flow label は常に 0 でしたが、この版から L3 と GTP の encap は非ゼロの label を持ちます。label のバイト一致を前提にした外部の検査やテストは更新が必要です。
 
 ## 更新の atomicity
 
@@ -44,6 +46,8 @@ double buffer は使わず、書き込み順序の規約で更新中の不整合
 - group の縮小は `ecmp_group_info` を先に更新してから余った path slot を消します。
 - 更新の隙間で path lookup が miss しても、dispatcher は親エントリへ fallback するので数パケットが fallback path を通るだけで済みます。
 - liveness の反映は `ecmp_live_map` の 8 byte value 1 つの差し替えです。prober と control plane が同じ要素を書くことはありません。
+- `PutEcmpGroup` で group を再定義すると liveness bitmap は削除され fail-open の既定に戻ります。bitmap の bit 位置は旧 path 集合を指しているので、残すと新しい path を prober の次の書き込みまで飢えさせます。prober は group 変更後に再登録します。
+- group の削除は、その group を参照する headend エントリを先に消すか group 無しに書き換えてから行います。fallback segment を持たない純粋な group 参照は group が消えると設計どおり drop になり、この層は逆参照を追跡しません。
 
 ## 永続化と restart
 
@@ -51,7 +55,7 @@ double buffer は使わず、書き込み順序の規約で更新中の不整合
 
 ## pkg/bpf API
 
-- `PutEcmpGroup(groupID, paths, weights, owner)` は group 全体の install と更新を行います。group_id 0 は拒否し、weight 0 の path も拒否します (0 は未使用 slot の印)。
+- `PutEcmpGroup(groupID, paths []EcmpPath, owner)` は group 全体の install と更新を行います。`EcmpPath` は path の encap 定義と weight を 1 つの構造体で束ねるので、並行する slice の index ずれが起きません。group_id 0 は拒否し、weight 0 の path も拒否します (0 は未使用 slot の印)。
 - `SetEcmpPath(groupID, pathIndex, entry, owner)` は既存 group の path 1 本を atomic に差し替えます。num_paths の範囲外は拒否します。
 - `SetEcmpLive(groupID, bitmap)` / `GetEcmpLive` / `DeleteEcmpLive` は prober の fast reroute 用で、owner 管理の対象外です。
 - `DeleteEcmpGroup` は owner を検証して group info、path、liveness、owner を順に消します。`ForceDeleteEcmpGroup` は owner を無視します。
@@ -65,11 +69,13 @@ config の `settings.entries.ecmp_group.capacity` が `ecmp_group_map`、`ecmp_g
 
 ## plugin との共有
 
-plugin の shared map partition では `ecmp_group_map` と `ecmp_path_map` を read-only、`ecmp_live_map` を read-write に分類しています。将来 BPF 側 (たとえば TX エラー起点) で liveness bit を落とす実装が入っても、この分類のまま `__sync` 系の atomic 操作で書けます。
+plugin の shared map partition では `ecmp_group_map`、`ecmp_path_map`、`ecmp_live_map` の 3 つとも read-only に分類しています。liveness は userspace の prober だけが書く control plane 所有の状態で、plugin に書かせると prober が指示していない reroute を強制できてしまいます。将来 BPF 側 (たとえば TX エラー起点) で liveness bit を落とす実装が入る時点で `ecmp_live_map` を read-write へ再分類します。
+
+`headend_entry` と `tailcall_ctx` のサイズが変わるため、この変更は plugin ABI break です。plugin SDK は v4 に bump し、旧 SDK でコンパイル済みの plugin ELF は `PluginRegister` の MapReplacements 互換チェックで弾かれるので、v4 ヘッダで再コンパイルしてください。
 
 ## 制約と今後
 
-- `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。この経路の `group_id` は 0 のままにします。
+- `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。
 - L2 headend (FDB → bd_peer) の aliasing は EVPN RT1 の対応と同時に入れます。ESI から group_id を引く side table を足し、この group 機構をそのまま使う予定です。
 - SR Policy の weighted segment list (RFC 9256 の複数 Segment List sub-TLV) は `sr_policy_value` に group_id を足し、`tailcall_ctx.flow_hash` で選択する形で拡張できます。tailcall_ctx に flow_hash を先に載せてあるのはこのためです。
 - hash の seed は固定です。path 選択はノード内で per-flow に安定していればよく、固定 seed は BPF_PROG_TEST_RUN のテストを再現可能にします。

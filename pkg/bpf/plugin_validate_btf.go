@@ -27,6 +27,8 @@ var expectedMapValueTypes = map[string]string{
 	"dx2v_map":              "dx2v_entry",
 	"scratch_map":           "scratch_buf",
 	"tailcall_ctx_map":      "tailcall_ctx",
+	"ecmp_group_map":        "ecmp_group_info",
+	"ecmp_path_map":         "headend_entry",
 }
 
 // validatePluginMapTypes checks that every shared map declared by the plugin

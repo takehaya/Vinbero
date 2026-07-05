@@ -52,34 +52,32 @@ func buildUDPIPv6Packet(srcIP, dstIP net.IP, srcPort, dstPort uint16) ([]byte, e
 }
 
 // outerIPv6DA extracts the outer IPv6 destination address of an encapsulated
-// output packet (Ethernet at 0, IPv6 at 14).
+// output packet (Ethernet, then IPv6).
 func outerIPv6DA(t *testing.T, pkt []byte) [16]byte {
 	t.Helper()
 	var da [16]byte
-	if len(pkt) < 14+40 {
+	if len(pkt) < ethHeaderLen+ipv6HeaderLen {
 		t.Fatalf("packet too short for outer IPv6: %d bytes", len(pkt))
 	}
-	copy(da[:], pkt[14+24:14+40])
+	copy(da[:], pkt[ethHeaderLen+24:ethHeaderLen+40])
 	return da
 }
 
 // outerFlowLabel extracts the outer IPv6 flow label.
 func outerFlowLabel(t *testing.T, pkt []byte) uint32 {
 	t.Helper()
-	if len(pkt) < 14+4 {
+	if len(pkt) < ethHeaderLen+4 {
 		t.Fatalf("packet too short for outer IPv6: %d bytes", len(pkt))
 	}
-	return uint32(pkt[14+1]&0x0F)<<16 | uint32(pkt[14+2])<<8 | uint32(pkt[14+3])
+	return uint32(pkt[ethHeaderLen+1]&0x0F)<<16 | uint32(pkt[ethHeaderLen+2])<<8 | uint32(pkt[ethHeaderLen+3])
 }
 
-// ecmpTestGroup installs a headend entry on prefix that references an ECMP
-// group whose paths encap to the given SIDs (one segment each, equal or
-// custom weights). The parent entry carries fallback segments pointing at
-// fallbackSID when non-zero.
+// ecmpTestFixture installs a v4 headend entry on 192.0.2.0/24 that is a pure
+// group reference (no fallback segments) to group 42, whose paths encap to
+// one distinct SID each with the given weights.
 type ecmpTestFixture struct {
-	h       *xdpTestHelper
-	srcAddr [16]byte
-	sids    [][16]byte
+	h    *xdpTestHelper
+	sids [][16]byte
 }
 
 func newEcmpFixture(t *testing.T, weights []uint16) *ecmpTestFixture {
@@ -88,21 +86,24 @@ func newEcmpFixture(t *testing.T, weights []uint16) *ecmpTestFixture {
 	srcAddr, _ := ParseIPv6("fc00::1")
 
 	sids := make([][16]byte, len(weights))
-	paths := make([]*HeadendEntry, len(weights))
-	for i := range weights {
+	paths := make([]EcmpPath, len(weights))
+	for i, w := range weights {
 		sid, _ := ParseIPv6(fmt.Sprintf("fd00:e0%d::1", i))
 		sids[i] = sid
 		var segs [MaxSegments][IPv6AddrLen]uint8
 		segs[0] = sid
-		paths[i] = &HeadendEntry{
-			Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
-			NumSegments: 1,
-			SrcAddr:     srcAddr,
-			Segments:    segs,
+		paths[i] = EcmpPath{
+			Entry: &HeadendEntry{
+				Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+				NumSegments: 1,
+				SrcAddr:     srcAddr,
+				Segments:    segs,
+			},
+			Weight: w,
 		}
 	}
 	const groupID = 42
-	if err := h.mapOps.PutEcmpGroup(groupID, paths, weights, OwnerRPC); err != nil {
+	if err := h.mapOps.PutEcmpGroup(groupID, paths, OwnerRPC); err != nil {
 		t.Fatalf("PutEcmpGroup: %v", err)
 	}
 
@@ -115,7 +116,7 @@ func newEcmpFixture(t *testing.T, weights []uint16) *ecmpTestFixture {
 	if err := h.mapOps.CreateHeadendV4("192.0.2.0/24", parent, OwnerRPC); err != nil {
 		t.Fatalf("CreateHeadendV4: %v", err)
 	}
-	return &ecmpTestFixture{h: h, srcAddr: srcAddr, sids: sids}
+	return &ecmpTestFixture{h: h, sids: sids}
 }
 
 // classify runs the packet and returns which path SID the outer DA matches,
@@ -304,18 +305,21 @@ func TestXDPProgECMPGroup(t *testing.T) {
 		srcAddr, _ := ParseIPv6("fc00::1")
 		sidA, _ := ParseIPv6("fd00:e00::1")
 		sidB, _ := ParseIPv6("fd00:e01::1")
-		paths := make([]*HeadendEntry, 2)
+		paths := make([]EcmpPath, 2)
 		for i, sid := range [][16]byte{sidA, sidB} {
 			var segs [MaxSegments][IPv6AddrLen]uint8
 			segs[0] = sid
-			paths[i] = &HeadendEntry{
-				Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
-				NumSegments: 1,
-				SrcAddr:     srcAddr,
-				Segments:    segs,
+			paths[i] = EcmpPath{
+				Entry: &HeadendEntry{
+					Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+					NumSegments: 1,
+					SrcAddr:     srcAddr,
+					Segments:    segs,
+				},
+				Weight: 1,
 			}
 		}
-		if err := h.mapOps.PutEcmpGroup(43, paths, []uint16{1, 1}, OwnerRPC); err != nil {
+		if err := h.mapOps.PutEcmpGroup(43, paths, OwnerRPC); err != nil {
 			t.Fatalf("PutEcmpGroup: %v", err)
 		}
 		parent := &HeadendEntry{
@@ -404,46 +408,45 @@ func TestXDPProgECMPFlowLabel(t *testing.T) {
 func TestEcmpGroupCRUD(t *testing.T) {
 	h := newXDPTestHelper(t)
 	srcAddr, _ := ParseIPv6("fc00::1")
-	newPath := func(sidStr string) *HeadendEntry {
+	newPath := func(sidStr string, weight uint16) EcmpPath {
 		sid, _ := ParseIPv6(sidStr)
 		var segs [MaxSegments][IPv6AddrLen]uint8
 		segs[0] = sid
-		return &HeadendEntry{
-			Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
-			NumSegments: 1,
-			SrcAddr:     srcAddr,
-			Segments:    segs,
+		return EcmpPath{
+			Entry: &HeadendEntry{
+				Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+				NumSegments: 1,
+				SrcAddr:     srcAddr,
+				Segments:    segs,
+			},
+			Weight: weight,
 		}
 	}
 
 	t.Run("validation", func(t *testing.T) {
-		p := newPath("fd00::1")
-		if err := h.mapOps.PutEcmpGroup(0, []*HeadendEntry{p}, []uint16{1}, OwnerRPC); err == nil {
+		p := newPath("fd00::1", 1)
+		if err := h.mapOps.PutEcmpGroup(0, []EcmpPath{p}, OwnerRPC); err == nil {
 			t.Error("group id 0 must be rejected (sentinel)")
 		}
-		if err := h.mapOps.PutEcmpGroup(1, nil, nil, OwnerRPC); err == nil {
+		if err := h.mapOps.PutEcmpGroup(1, nil, OwnerRPC); err == nil {
 			t.Error("empty path list must be rejected")
 		}
-		if err := h.mapOps.PutEcmpGroup(1, []*HeadendEntry{p}, []uint16{0}, OwnerRPC); err == nil {
+		if err := h.mapOps.PutEcmpGroup(1, []EcmpPath{newPath("fd00::1", 0)}, OwnerRPC); err == nil {
 			t.Error("zero weight must be rejected")
 		}
-		if err := h.mapOps.PutEcmpGroup(1, []*HeadendEntry{p}, []uint16{1, 2}, OwnerRPC); err == nil {
-			t.Error("weights/paths length mismatch must be rejected")
-		}
-		many := make([]*HeadendEntry, EcmpMaxPaths+1)
-		w := make([]uint16, EcmpMaxPaths+1)
+		many := make([]EcmpPath, EcmpMaxPaths+1)
 		for i := range many {
-			many[i], w[i] = p, 1
+			many[i] = p
 		}
-		if err := h.mapOps.PutEcmpGroup(1, many, w, OwnerRPC); err == nil {
+		if err := h.mapOps.PutEcmpGroup(1, many, OwnerRPC); err == nil {
 			t.Errorf("more than %d paths must be rejected", EcmpMaxPaths)
 		}
 	})
 
 	t.Run("round trip, shrink, and delete", func(t *testing.T) {
 		const id = 7
-		paths := []*HeadendEntry{newPath("fd00:a::1"), newPath("fd00:b::1"), newPath("fd00:c::1")}
-		if err := h.mapOps.PutEcmpGroup(id, paths, []uint16{2, 1, 1}, OwnerRPC); err != nil {
+		paths := []EcmpPath{newPath("fd00:a::1", 2), newPath("fd00:b::1", 1), newPath("fd00:c::1", 1)}
+		if err := h.mapOps.PutEcmpGroup(id, paths, OwnerRPC); err != nil {
 			t.Fatalf("PutEcmpGroup: %v", err)
 		}
 		info, got, err := h.mapOps.GetEcmpGroup(id)
@@ -453,7 +456,7 @@ func TestEcmpGroupCRUD(t *testing.T) {
 		if info == nil || info.NumPaths != 3 || info.Weight[0] != 2 || info.Weight[1] != 1 {
 			t.Fatalf("group info = %+v, want 3 paths weights [2 1 1]", info)
 		}
-		if len(got) != 3 || got[0] == nil || got[0].Segments[0] != paths[0].Segments[0] {
+		if len(got) != 3 || got[0] == nil || got[0].Segments[0] != paths[0].Entry.Segments[0] {
 			t.Fatalf("paths round trip mismatch")
 		}
 		// Paths are forced terminal.
@@ -461,9 +464,18 @@ func TestEcmpGroupCRUD(t *testing.T) {
 			t.Errorf("stored path GroupId = %d, want 0", got[0].GroupId)
 		}
 
+		// A liveness bitmap written for this generation must not survive a
+		// redefinition (its bits index the old path set).
+		if err := h.mapOps.SetEcmpLive(id, 0b010); err != nil {
+			t.Fatalf("SetEcmpLive: %v", err)
+		}
+
 		// Shrink to 1: stale tail slots must disappear.
-		if err := h.mapOps.PutEcmpGroup(id, paths[:1], []uint16{1}, OwnerRPC); err != nil {
+		if err := h.mapOps.PutEcmpGroup(id, paths[:1], OwnerRPC); err != nil {
 			t.Fatalf("PutEcmpGroup shrink: %v", err)
+		}
+		if _, ok, _ := h.mapOps.GetEcmpLive(id); ok {
+			t.Error("stale liveness bitmap survived group redefinition")
 		}
 		info, got, err = h.mapOps.GetEcmpGroup(id)
 		if err != nil || info == nil || info.NumPaths != 1 || len(got) != 1 {
@@ -491,33 +503,33 @@ func TestEcmpGroupCRUD(t *testing.T) {
 
 	t.Run("SetEcmpPath replaces in place", func(t *testing.T) {
 		const id = 8
-		if err := h.mapOps.PutEcmpGroup(id, []*HeadendEntry{newPath("fd00:a::1"), newPath("fd00:b::1")}, []uint16{1, 1}, OwnerRPC); err != nil {
+		if err := h.mapOps.PutEcmpGroup(id, []EcmpPath{newPath("fd00:a::1", 1), newPath("fd00:b::1", 1)}, OwnerRPC); err != nil {
 			t.Fatalf("PutEcmpGroup: %v", err)
 		}
-		repl := newPath("fd00:bb::1")
-		if err := h.mapOps.SetEcmpPath(id, 1, repl, OwnerRPC); err != nil {
+		repl := newPath("fd00:bb::1", 1)
+		if err := h.mapOps.SetEcmpPath(id, 1, repl.Entry, OwnerRPC); err != nil {
 			t.Fatalf("SetEcmpPath: %v", err)
 		}
 		_, got, err := h.mapOps.GetEcmpGroup(id)
 		if err != nil || len(got) != 2 || got[1] == nil {
 			t.Fatalf("GetEcmpGroup after replace: %v", err)
 		}
-		if got[1].Segments[0] != repl.Segments[0] {
+		if got[1].Segments[0] != repl.Entry.Segments[0] {
 			t.Error("path 1 was not replaced")
 		}
 		// Out-of-coverage index must be rejected.
-		if err := h.mapOps.SetEcmpPath(id, 5, repl, OwnerRPC); err == nil {
+		if err := h.mapOps.SetEcmpPath(id, 5, repl.Entry, OwnerRPC); err == nil {
 			t.Error("index beyond num_paths must be rejected")
 		}
 	})
 
 	t.Run("owner enforcement", func(t *testing.T) {
 		const id = 9
-		if err := h.mapOps.PutEcmpGroup(id, []*HeadendEntry{newPath("fd00:a::1")}, []uint16{1}, OwnerRPC); err != nil {
+		if err := h.mapOps.PutEcmpGroup(id, []EcmpPath{newPath("fd00:a::1", 1)}, OwnerRPC); err != nil {
 			t.Fatalf("PutEcmpGroup: %v", err)
 		}
 		other := OwnerTag("bgp:v1:asn=65000:ecmp")
-		if err := h.mapOps.PutEcmpGroup(id, []*HeadendEntry{newPath("fd00:b::1")}, []uint16{1}, other); err == nil {
+		if err := h.mapOps.PutEcmpGroup(id, []EcmpPath{newPath("fd00:b::1", 1)}, other); err == nil {
 			t.Error("cross-owner overwrite must be rejected")
 		}
 		if err := h.mapOps.DeleteEcmpGroup(id, other); err == nil {

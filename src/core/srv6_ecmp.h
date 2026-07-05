@@ -173,20 +173,20 @@ static __noinline int ecmp_select_path(__u32 group_id, __u32 hash)
     if (lv)
         live = *lv;
 
-    __u32 total = 0;
+    __u32 total_live = 0, total_all = 0;
 #pragma unroll
     for (int i = 0; i < ECMP_MAX_PATHS; i++) {
-        if (i < n && ((live >> i) & 1))
-            total += gi->weight[i];
+        if (i < n) {
+            total_all += gi->weight[i];
+            if ((live >> i) & 1)
+                total_live += gi->weight[i];
+        }
     }
+    __u32 total = total_live;
     if (total == 0) {
         // All paths probed dead (or all live weights zero): fail open.
         live = ~0ULL;
-#pragma unroll
-        for (int i = 0; i < ECMP_MAX_PATHS; i++) {
-            if (i < n)
-                total += gi->weight[i];
-        }
+        total = total_all;
     }
     if (total == 0)
         return -1; // guard: the modulus below must be non-zero
@@ -203,6 +203,48 @@ static __noinline int ecmp_select_path(__u32 group_id, __u32 hash)
         }
     }
     return sel;
+}
+
+// Resolve a headend entry's ECMP group reference into the selected path's
+// entry (a map-value pointer, valid for the caller's lifetime). Returns the
+// entry itself when it carries no group, or as the fallback when the group
+// is unresolvable mid-update and the entry has its own segments. Returns
+// NULL when the packet must be dropped: a pure group reference (no fallback
+// segments) whose group cannot be resolved -- encapping a zero-segment
+// entry would emit garbage. Selected paths are terminal (the control plane
+// forces their group_id to 0), so resolution never recurses.
+static __always_inline struct headend_entry *ecmp_resolve_headend(
+    struct headend_entry *entry, __u32 flow_hash)
+{
+    if (entry->group_id == ECMP_GROUP_NONE)
+        return entry;
+    int sel = ecmp_select_path(entry->group_id, flow_hash);
+    if (sel >= 0) {
+        struct ecmp_path_key pk = {
+            .group_id = entry->group_id,
+            .path_index = (__u32)sel,
+        };
+        struct headend_entry *path = bpf_map_lookup_elem(&ecmp_path_map, &pk);
+        if (path)
+            return path;
+    }
+    if (entry->num_segments < 1)
+        return NULL;
+    return entry;
+}
+
+// Flow label for the current headend encap: the dispatcher's flow hash
+// folded per RFC 6437, with an optional extra entropy word mixed in (the
+// GTP headends pass the TEID, whose per-session entropy the outer GTP-U
+// 5-tuple lacks under fixed ports). Returns 0 (unlabeled) when the
+// dispatch did not hash, e.g. endpoint or L2 dispatch.
+static __always_inline __u32 headend_ctx_flow_label(__u32 extra)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    __u32 hash = tctx ? tctx->flow_hash : 0;
+    if (hash != 0 && extra != 0)
+        hash = ecmp_jhash_3words(hash, extra, 0, ECMP_JHASH_SEED);
+    return ecmp_flow_label(hash);
 }
 
 #endif // SRV6_ECMP_H

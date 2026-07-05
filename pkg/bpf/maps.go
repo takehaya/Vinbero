@@ -1371,7 +1371,12 @@ func (m *MapOperations) CreateMupUplinkV4(instance uint32, endpoint string, teid
 	if err != nil {
 		return err
 	}
-	if err := m.objs.MupUplinkV4Map.Put(key, entry); err != nil {
+	// F-TEID lookups happen inside behavior programs, which bypass the
+	// dispatcher's ECMP group resolution, so a group reference here would
+	// silently never resolve. Force the entry terminal.
+	pe := *entry
+	pe.GroupId = EcmpGroupNone
+	if err := m.objs.MupUplinkV4Map.Put(key, &pe); err != nil {
 		return fmt.Errorf("failed to put mup uplink v4 entry: %w", err)
 	}
 	return nil
@@ -1428,7 +1433,11 @@ func (m *MapOperations) CreateMupUplinkV6(instance uint32, endpoint string, teid
 	if err != nil {
 		return err
 	}
-	if err := m.objs.MupUplinkV6Map.Put(key, entry); err != nil {
+	// Same terminal forcing as CreateMupUplinkV4: F-TEID lookups bypass
+	// the dispatcher's ECMP group resolution.
+	pe := *entry
+	pe.GroupId = EcmpGroupNone
+	if err := m.objs.MupUplinkV6Map.Put(key, &pe); err != nil {
 		return fmt.Errorf("failed to put mup uplink v6 entry: %w", err)
 	}
 	return nil
@@ -1677,15 +1686,26 @@ func (m *MapOperations) GetSRPolicy(policyID uint32) ([]net.IP, error) {
 
 // ===== ECMP Path Group Operations =====
 
-// PutEcmpGroup installs or replaces a whole ECMP path group: one
-// headend_entry per path plus the weight vector. Write order follows the
-// update discipline the data plane relies on: path entries land before the
-// group info (so a reader that sees the new num_paths never misses a path),
-// and stale tail slots are deleted after (a shrink briefly leaves orphan
-// path entries the old info no longer references, which is harmless).
-// Every path is forced terminal (GroupId 0) so a group can never reference
-// another group.
-func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []*HeadendEntry, weights []uint16, owner OwnerTag) error {
+// EcmpPath binds one path's encap definition to its UCMP weight so the two
+// cannot skew against each other the way parallel slices would.
+type EcmpPath struct {
+	Entry  *HeadendEntry
+	Weight uint16
+}
+
+// PutEcmpGroup installs or replaces a whole ECMP path group. Write order
+// follows the update discipline the data plane relies on: path entries land
+// before the group info (so a reader that sees the new num_paths never
+// misses a path), and stale tail slots are deleted after (a shrink briefly
+// leaves orphan path entries the old info no longer references, which is
+// harmless). Every path is forced terminal (GroupId 0) so a group can never
+// reference another group.
+//
+// Redefining an existing group resets its liveness bitmap to the fail-open
+// default: the old bitmap's bit positions refer to the old path set, and
+// letting them mask freshly installed paths would starve those paths until
+// the prober's next write. The prober re-registers after a group change.
+func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []EcmpPath, owner OwnerTag) error {
 	if groupID == EcmpGroupNone {
 		return fmt.Errorf("ecmp group id 0 is the no-group sentinel")
 	}
@@ -1693,18 +1713,15 @@ func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []*HeadendEntry, weig
 	if n < 1 || n > EcmpMaxPaths {
 		return fmt.Errorf("ecmp group %d: %d paths out of range 1..%d", groupID, n, EcmpMaxPaths)
 	}
-	if len(weights) != n {
-		return fmt.Errorf("ecmp group %d: %d weights for %d paths", groupID, len(weights), n)
-	}
 	for i, p := range paths {
-		if p == nil {
+		if p.Entry == nil {
 			return fmt.Errorf("ecmp group %d: path %d is nil", groupID, i)
 		}
-		if p.NumSegments < 1 || p.NumSegments > MaxSegments {
+		if p.Entry.NumSegments < 1 || p.Entry.NumSegments > MaxSegments {
 			return fmt.Errorf("ecmp group %d: path %d has %d segments, want 1..%d",
-				groupID, i, p.NumSegments, MaxSegments)
+				groupID, i, p.Entry.NumSegments, MaxSegments)
 		}
-		if weights[i] == 0 {
+		if p.Weight == 0 {
 			return fmt.Errorf("ecmp group %d: path %d has zero weight (marks an unused slot)", groupID, i)
 		}
 	}
@@ -1713,35 +1730,37 @@ func (m *MapOperations) PutEcmpGroup(groupID uint32, paths []*HeadendEntry, weig
 		return err
 	}
 
-	for i := range n {
-		pe := *paths[i]
+	var info EcmpGroupInfo
+	info.NumPaths = uint8(n)
+	for i, p := range paths {
+		info.Weight[i] = p.Weight
+		pe := *p.Entry
 		pe.GroupId = EcmpGroupNone // a path is terminal; the dispatcher never re-resolves
 		pk := EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)}
 		if err := m.objs.EcmpPathMap.Put(pk, &pe); err != nil {
 			return fmt.Errorf("put ecmp_path_map[%d,%d]: %w", groupID, i, err)
 		}
 	}
-	var info EcmpGroupInfo
-	info.NumPaths = uint8(n)
-	copy(info.Weight[:], weights)
-	if err := m.objs.EcmpGroupMap.Put(groupID, &info); err != nil {
-		return fmt.Errorf("put ecmp_group_map[%d]: %w", groupID, err)
-	}
-	for i := n; i < EcmpMaxPaths; i++ {
-		pk := EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)}
-		if err := deleteMapKey(m.objs.EcmpPathMap, pk); err != nil {
-			return fmt.Errorf("delete stale ecmp_path_map[%d,%d]: %w", groupID, i, err)
+	cleanup := func() {
+		for i := range n {
+			_ = deleteMapKey(m.objs.EcmpPathMap, EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)})
 		}
 	}
-	if !alreadyOwned {
-		if err := m.ecmpGroupOwners.Put(groupID, owner); err != nil {
-			// Keep the "group entry => owner entry" invariant: tear the
-			// group back down rather than leaving it unowned.
-			_ = deleteMapKey(m.objs.EcmpGroupMap, groupID)
-			for i := range EcmpMaxPaths {
-				_ = deleteMapKey(m.objs.EcmpPathMap, EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)})
+	if err := putMainAndOwner(m.objs.EcmpGroupMap, m.ecmpGroupOwners, groupID, &info,
+		owner, alreadyOwned, "ecmp group", cleanup); err != nil {
+		return err
+	}
+	if alreadyOwned {
+		// Replace: drop tail slots the new definition no longer covers and
+		// reset the liveness bitmap (its bits indexed the old path set).
+		for i := n; i < EcmpMaxPaths; i++ {
+			pk := EcmpPathKey{GroupId: groupID, PathIndex: uint32(i)}
+			if err := deleteMapKey(m.objs.EcmpPathMap, pk); err != nil {
+				return fmt.Errorf("delete stale ecmp_path_map[%d,%d]: %w", groupID, i, err)
 			}
-			return fmt.Errorf("put ecmp group owner: %w", err)
+		}
+		if err := deleteMapKey(m.objs.EcmpLiveMap, groupID); err != nil {
+			return fmt.Errorf("reset ecmp_live_map[%d]: %w", groupID, err)
 		}
 	}
 	return nil
@@ -1783,6 +1802,12 @@ func (m *MapOperations) SetEcmpPath(groupID, pathIndex uint32, entry *HeadendEnt
 // DeleteEcmpGroup removes a group after verifying the caller owns it. The
 // info entry goes first so the data plane stops resolving before the paths
 // disappear; the liveness bitmap goes last.
+//
+// Ordering contract: delete (or rewrite to group-less) every headend entry
+// referencing this group BEFORE deleting the group. A pure group reference
+// (an entry with no fallback segments) whose group is gone drops all
+// traffic by design -- there is nothing to fall back to -- and this layer
+// does not track back-references.
 func (m *MapOperations) DeleteEcmpGroup(groupID uint32, requester OwnerTag) error {
 	return m.deleteEcmpGroupInternal(groupID, requester, false)
 }
@@ -2618,6 +2643,11 @@ func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 		"ingress_policy_map":  m.objs.IngressPolicyMap,
 		"ecmp_group_map":      m.objs.EcmpGroupMap,
 		"ecmp_path_map":       m.objs.EcmpPathMap,
+		// Written by the userspace prober only; the data plane and plugins
+		// just read it, so it is control-plane-owned and read-only for
+		// plugins. Reclassify to read-write if a BPF-side liveness writer
+		// (e.g. TX-error-driven bit clearing) ever lands.
+		"ecmp_live_map": m.objs.EcmpLiveMap,
 	}
 }
 
@@ -2630,7 +2660,6 @@ func (m *MapOperations) GetSharedReadWriteMaps() map[string]*ebpf.Map {
 	return map[string]*ebpf.Map{
 		"scratch_map":           m.objs.ScratchMap,
 		"stats_map":             m.objs.StatsMap,
-		"ecmp_live_map":         m.objs.EcmpLiveMap,
 		"slot_stats_endpoint":   m.objs.SlotStatsEndpoint,
 		"slot_stats_headend_v4": m.objs.SlotStatsHeadendV4,
 		"slot_stats_headend_v6": m.objs.SlotStatsHeadendV6,
@@ -2672,6 +2701,7 @@ func SharedReadOnlyMapNames() []string {
 		"ingress_policy_map",
 		"ecmp_group_map",
 		"ecmp_path_map",
+		"ecmp_live_map",
 	}
 }
 
@@ -2682,7 +2712,6 @@ func SharedReadWriteMapNames() []string {
 	return []string{
 		"scratch_map",
 		"stats_map",
-		"ecmp_live_map",
 		"slot_stats_endpoint",
 		"slot_stats_headend_v4",
 		"slot_stats_headend_v6",

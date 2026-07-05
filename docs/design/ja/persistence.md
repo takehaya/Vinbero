@@ -33,7 +33,7 @@ state.json フォーマットは内部実装扱いで、手編集は非推奨で
 
 ## BPF マップ: in-memory vs pinned
 
-SRv6 制御状態 (`sid_function_map`, `sid_aux_map`, `headend_*_map`, `fdb_map`, `bd_peer_map`, `bd_peer_reverse_map`, `dx2v_map`) は daemon が所有する eBPF マップです。`settings.pin_maps.enabled` で挙動が切り替わります。
+SRv6 制御状態 (`sid_function_map`, `sid_aux_map`, `headend_*_map`, `fdb_map`, `bd_peer_map`, `bd_peer_reverse_map`, `dx2v_map`, `sr_policy_map`, `ecmp_group_map`, `ecmp_path_map`, `ecmp_group_owner_map`) は daemon が所有する eBPF マップです。`settings.pin_maps.enabled` で挙動が切り替わります。
 
 ### `pin_maps.enabled: false` (default)
 
@@ -46,7 +46,7 @@ SRv6 制御状態 (`sid_function_map`, `sid_aux_map`, `headend_*_map`, `fdb_map`
 
 ### `pin_maps.enabled: true`
 
-cilium/ebpf の `PinByName` で、対象 9 マップを `/sys/fs/bpf/<path>/<map_name>` に pin します (`path` はデフォルト `/sys/fs/bpf/vinbero`)。
+cilium/ebpf の `PinByName` で、対象の制御マップ (`pkg/bpf/bpf.go` の `pinnedControlMaps`) を `/sys/fs/bpf/<path>/<map_name>` に pin します (`path` はデフォルト `/sys/fs/bpf/vinbero`)。
 
 挙動:
 - **daemon 起動時**: pin dir に map が無ければ新規作成して pin、既にあれば既存 map を reuse
@@ -68,6 +68,7 @@ settings:
 - `stats_map`, `slot_stats_*` (3 本): カウンタは再起動でリセットするのが自然
 - `scratch_map`, `tailcall_ctx_map`: per-CPU の ephemeral 一時領域
 - `sid_endpoint_progs`, `headend_v4_progs`, `headend_v6_progs` (PROG_ARRAY): プログラム FD が毎回異なるので pin しても意味がない
+- `ecmp_live_map`: prober の生死判定は意図的に pin しません。restart 前の古い判定が path を blackhole しないよう、prober が再登録するまでは miss = 全 path live に倒します
 
 ### 破壊的変更時の注意
 
@@ -81,8 +82,10 @@ sudo systemctl start vinberod
 
 典型的にハマる場面:
 - `settings.entries.*.capacity` を変更した
-- Vinbero をアップグレードして BPF struct layout が変わった (例: plugin SDK v2 で `sid_function_entry` が 12B → 4B)
+- Vinbero をアップグレードして BPF struct layout が変わった (例: plugin SDK v2 で `sid_function_entry` が 12B → 4B、SDK v4 で `headend_entry` が 204B → 208B)
 - マップ名が変わった
+
+ECMP path group の導入 (plugin SDK v4) で `headend_entry` のサイズが変わったため、pin_maps を有効にしたまま v4 より前の Vinbero から in-place upgrade すると headend 系と `bd_peer_map` の pin が不一致で load に失敗します。上の手順で pin dir を削除してから起動してください。
 
 ### Aux index の allocator recovery
 
