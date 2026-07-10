@@ -14,7 +14,15 @@ static __always_inline int process_headend_v4(
     if (!entry)
         return XDP_PASS;
 
-    if (tailcall_ctx_write_headend(entry, l3_offset, DISPATCH_HEADEND_V4, entry->mode) == 0)
+    // Hashed for every headend packet (not only grouped ones): the hash also
+    // becomes the outer flow-label entropy that keeps the underlay's ECMP
+    // from polarizing on the identical outer {src, dst} of a PE pair.
+    __u32 flow_hash = ecmp_flow_hash_v4(ctx, iph, l3_offset);
+    entry = ecmp_resolve_headend(entry, flow_hash);
+    if (!entry)
+        return XDP_DROP; // pure group reference with a dead group: no fallback
+
+    if (tailcall_ctx_write_headend(entry, l3_offset, DISPATCH_HEADEND_V4, entry->mode, flow_hash) == 0)
         bpf_tail_call(ctx, &headend_v4_progs, entry->mode);
 
     return XDP_PASS;
@@ -33,7 +41,12 @@ static __always_inline int process_headend_v6(
     if (!entry)
         return XDP_PASS;
 
-    if (tailcall_ctx_write_headend(entry, l3_offset, DISPATCH_HEADEND_V6, entry->mode) == 0)
+    __u32 flow_hash = ecmp_flow_hash_v6(ctx, ip6h, l3_offset);
+    entry = ecmp_resolve_headend(entry, flow_hash);
+    if (!entry)
+        return XDP_DROP;
+
+    if (tailcall_ctx_write_headend(entry, l3_offset, DISPATCH_HEADEND_V6, entry->mode, flow_hash) == 0)
         bpf_tail_call(ctx, &headend_v6_progs, entry->mode);
 
     return XDP_PASS;

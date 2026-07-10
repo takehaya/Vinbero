@@ -28,6 +28,13 @@ var pinnedControlMaps = []string{
 	"bd_peer_reverse_map",
 	"dx2v_map",
 	"sr_policy_map", // headend policy_id refs persist here, so pin it alongside the headend maps
+	// headend group_id refs persist in the pinned headend maps, so the group
+	// tables pin with them. ecmp_live_map stays unpinned on purpose: a stale
+	// pre-restart liveness verdict must not blackhole paths, and a miss fails
+	// open until the prober re-registers.
+	"ecmp_group_map",
+	"ecmp_path_map",
+	"ecmp_group_owner_map",
 }
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ../../src -I /usr/include/x86_64-linux-gnu
@@ -58,17 +65,21 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 	if cfg != nil {
 		entries := cfg.Setting.Entries
 		mapSizes := map[string]int{
-			"sid_function_map":    entries.SidFunction.Capacity,
-			"sid_aux_map":         entries.SidFunction.Capacity,
-			"aux_owner_map":       entries.SidFunction.Capacity, // paired with sid_aux_map keyspace
-			"headend_v4_map":      entries.Headendv4.Capacity,
-			"headend_v6_map":      entries.Headendv6.Capacity,
-			"headend_l2_map":      entries.HeadendL2.Capacity,
-			"fdb_map":             entries.Fdb.Capacity,
-			"bd_peer_map":         entries.BdPeer.Capacity,
-			"bd_peer_reverse_map": entries.BdPeer.Capacity,
-			"dx2v_map":            entries.VlanTable.Capacity,
-			"sr_policy_map":       entries.SrPolicy.Capacity,
+			"sid_function_map":     entries.SidFunction.Capacity,
+			"sid_aux_map":          entries.SidFunction.Capacity,
+			"aux_owner_map":        entries.SidFunction.Capacity, // paired with sid_aux_map keyspace
+			"headend_v4_map":       entries.Headendv4.Capacity,
+			"headend_v6_map":       entries.Headendv6.Capacity,
+			"headend_l2_map":       entries.HeadendL2.Capacity,
+			"fdb_map":              entries.Fdb.Capacity,
+			"bd_peer_map":          entries.BdPeer.Capacity,
+			"bd_peer_reverse_map":  entries.BdPeer.Capacity,
+			"dx2v_map":             entries.VlanTable.Capacity,
+			"sr_policy_map":        entries.SrPolicy.Capacity,
+			"ecmp_group_map":       entries.EcmpGroup.Capacity,
+			"ecmp_group_owner_map": entries.EcmpGroup.Capacity,
+			"ecmp_live_map":        entries.EcmpGroup.Capacity,
+			"ecmp_path_map":        entries.EcmpGroup.Capacity * EcmpMaxPaths,
 		}
 		for name, size := range mapSizes {
 			if ms, ok := spec.Maps[name]; ok && size > 0 {

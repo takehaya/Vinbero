@@ -2,7 +2,7 @@
 
 ## 概要
 
-このドキュメントは、Vinbero がパケットを転送するときにどのテーブルをどの順で引き、それぞれのテーブルが何で分かれているか、というメンタルモデルを整理します。個々のマップの実装詳細ではなく、テーブル同士の関係とスコープに焦点を当てます。SRv6 サービスを BGP でどう運ぶかは [srv6_bgp.md](./srv6_bgp.md)、L2VPN/L3VPN のデータプレーンは [fdb_vrf.md](./fdb_vrf.md) を参照してください。
+このドキュメントは、Vinbero がパケットを転送するときにどのテーブルをどの順で引き、それぞれのテーブルが何で分かれているか、というメンタルモデルを整理します。個々のマップの実装詳細ではなく、テーブル同士の関係とスコープに焦点を当てます。SRv6 サービスを BGP でどう運ぶかは [srv6_bgp.md](./srv6_bgp.md)、L2VPN/L3VPN のデータプレーンは [fdb_vrf.md](./fdb_vrf.md)、headend の複数 path 分散は [ecmp.md](./ecmp.md) を参照してください。
 
 まず押さえたいことが 2 つあります。テーブルは control plane と data plane の 2 層に分かれること、そして転送テーブルの持ち主が kernel と eBPF の 2 つに分かれることです。
 
@@ -70,7 +70,9 @@ encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。
 |------|------|------|------|------|------|
 | sid_function_map | IPv6 SID prefix (LPM) | behavior + aux_index | global | eBPF | SidFunctionService |
 | sid_aux_map | aux_index | behavior パラメータ (vrf_ifindex / bd / GTP args ほか) | global | eBPF | SidFunctionService |
-| headend_v4/v6_map | IP prefix (LPM) | H.Encaps エントリ / gate / policy_id | global | eBPF | Headend*Service / BGP applier |
+| headend_v4/v6_map | IP prefix (LPM) | H.Encaps エントリ / gate / policy_id / group_id | global | eBPF | Headend*Service / BGP applier |
+| ecmp_group_map / ecmp_path_map | group_id / {group_id, path_index} | weight 付き path 集合 (headend_entry) | global | eBPF | control plane (ECMP group) |
+| ecmp_live_map | group_id | liveness bitmap | global | eBPF | prober |
 | sr_policy_map | policy_id | transport SID list | global | eBPF | SrPolicyService / BGP applier |
 | ingress_vrf_map | {ifindex, vlan} | vrf_id | VRF (vrf_id) | eBPF | VrfService / config (`vrf.Manager`) |
 | mup_uplink_v4/v6_map | {vrf_id, endpoint, TEID prefix} (LPM) | direct SID | VRF (vrf_id) | eBPF | BGP applier (MUP T2ST) |

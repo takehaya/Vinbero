@@ -49,10 +49,15 @@ struct tailcall_ctx {
                             // (xdp_main) before dispatch. Lives outside the union
                             // so the dispatcher's union memcpy preserves it; read
                             // by downstream handlers (e.g. the MUP uplink gate).
+    __u32 flow_hash;        // Inner 5-tuple flow hash, computed by the headend
+                            // dispatchers (0 for L2/endpoint dispatch). Feeds the
+                            // outer IPv6 flow label for underlay ECMP entropy and
+                            // later per-policy weighted segment-list selection.
     union {
-        // Endpoint (localsid/nosrh): 12 bytes. Aux is re-looked up by target.
+        // Endpoint (localsid/nosrh). Aux is re-looked up by target.
         struct sid_function_entry sid_entry;
-        // Headend: 200 bytes. Copied because LPM trie re-lookup is expensive.
+        // Headend (the union's size anchor). Copied because LPM trie
+        // re-lookup is expensive.
         struct headend_entry headend;
     };
 } __attribute__((packed));

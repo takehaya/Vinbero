@@ -102,7 +102,7 @@ static __noinline int try_l2_headend(
             return bd_action; // BUM / pass / etc. handled by the lookup helper
     }
 
-    if (tailcall_ctx_write_headend(encap, 0, DISPATCH_HEADEND_L2, encap->mode) == 0)
+    if (tailcall_ctx_write_headend(encap, 0, DISPATCH_HEADEND_L2, encap->mode, 0) == 0)
         bpf_tail_call(ctx, &headend_l2_progs, encap->mode);
     return XDP_DROP;
 }

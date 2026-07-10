@@ -160,6 +160,42 @@ struct {
     __uint(max_entries, 1024);
 } sr_policy_map SEC(".maps");
 
+// ========== ECMP path groups ==========
+//
+// See the struct comments in xdp_prog.h for the three-map split. Defaults
+// are overridable from config via settings.entries (pkg/bpf/bpf.go).
+
+// group_id -> path count + weights. HASH so an update is one atomic
+// whole-value replace and a withdrawn group is a clean miss.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, struct ecmp_group_info);
+    __uint(max_entries, 4096);
+} ecmp_group_map SEC(".maps");
+
+// {group_id, path_index} -> one full path. Per-path values so the control
+// plane can replace a single path atomically (RCU) without touching its
+// siblings.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct ecmp_path_key);
+    __type(value, struct headend_entry);
+    __uint(max_entries, 32768);
+} ecmp_path_map SEC(".maps");
+
+// group_id -> liveness bitmap (bit i = path i up). Written only by the
+// userspace prober; a miss means "no prober configured" and fails open to
+// all-paths-live. Kept separate from ecmp_group_map so the prober's writes
+// never race the control plane's group rewrites, and HASH (not ARRAY) so a
+// userspace update is a contractually atomic value replace.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, 4096);
+} ecmp_live_map SEC(".maps");
+
 // Per-entry owner-tag tables, paired with sid_function_map / headend_v4_map /
 // headend_v6_map. The keys match the corresponding main map's key type so
 // userspace can read/write the owner alongside each entry. HASH (not
@@ -188,6 +224,16 @@ struct {
     __type(value, struct aux_owner);
     __uint(max_entries, 1024);
 } headend_v6_owner_map SEC(".maps");
+
+// Owner tags for ECMP groups, keyed by group_id. Same userspace-only role
+// as the other owner maps: conflict detection, owner-scoped flush, and
+// group-id allocator persistence across daemon restart.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 4096);
+} ecmp_group_owner_map SEC(".maps");
 
 // End.B6 policy: stored in sid_aux_map (b6_policy variant), no separate map needed.
 

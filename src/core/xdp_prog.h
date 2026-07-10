@@ -152,6 +152,14 @@ struct headend_entry {
     __u16 bd_id;                            // Bridge Domain ID (for H.Encaps.L2)
     __u8 args_offset;                       // Args byte offset within SID (RFC 9433 Args.Mob.Session)
     __u8 flood_exclude;                     // 1 = skip this peer in the BUM flood (RT2 unicast End.DT2U); 0 = flooded (default: manual bd_peer / RT3 End.DT2M)
+    // ECMP group escape (0 = single-path entry, exactly the pre-ECMP
+    // behavior). When set, the dispatcher hashes the inner flow and swaps
+    // this entry for ecmp_path_map[{group_id, selected}] before the tail
+    // call; this entry's own segments then serve as the fallback path when
+    // the group is momentarily unresolvable (update skew). Placed last at
+    // offset 204 so the field is 4-byte aligned (see _pad_policy comment)
+    // and every existing zero-initialized entry stays single-path.
+    __u32 group_id;
 } __attribute__((packed));
 
 // Sentinel for headend_entry.args_offset meaning "do not patch Args.Mob.Session".
@@ -202,9 +210,46 @@ struct sr_policy_value {
     __u8 segs[MAX_SEGMENTS][IPV6_ADDR_LEN];    // transport SIDs (active candidate)
 } __attribute__((packed));
 
+// ========== ECMP path groups ==========
+//
+// A headend_entry whose group_id is non-zero resolves to one of up to
+// ECMP_MAX_PATHS alternative paths. The group definition is split across
+// three maps so each writer touches its own value atomically:
+//   ecmp_group_map: group_id -> ecmp_group_info (path count + weights)
+//   ecmp_path_map:  {group_id, path_index} -> headend_entry (one full path)
+//   ecmp_live_map:  group_id -> __u64 liveness bitmap (prober owned)
+// The dispatcher hashes the inner flow, picks a live path by weighted
+// hash-modulo (UCMP-capable), and feeds the chosen entry into the ordinary
+// tail-call path. A liveness flip is a single 8-byte value replace, so the
+// prober reroutes flows without rewriting the group.
+
+#define ECMP_MAX_PATHS 8
+#define ECMP_GROUP_NONE 0          // headend_entry.group_id sentinel
+
+// Group definition (control-plane owned). weight[i] == 0 marks an unused
+// slot; equal weights degenerate to plain ECMP. Updates replace the whole
+// value (HASH map), so num_paths and weights always change together.
+struct ecmp_group_info {
+    __u8  num_paths;               // 1..ECMP_MAX_PATHS
+    __u8  flags;                   // reserved. bit0 is earmarked FAIL_CLOSED
+                                   // (an all-dead liveness bitmap drops
+                                   // instead of failing open -- needed for
+                                   // single-active EVPN aliasing); flag 0
+                                   // means fail-open. Other bits: future
+                                   // selection algorithms.
+    __u16 _pad;
+    __u16 weight[ECMP_MAX_PATHS];  // per-path UCMP weight
+} __attribute__((packed));
+
+// Per-path key, same {id, index} idiom as bd_peer_key.
+struct ecmp_path_key {
+    __u32 group_id;
+    __u32 path_index;              // 0..ECMP_MAX_PATHS-1
+} __attribute__((packed));
+
 // Capacity of the plugin_raw variant in sid_aux_entry, and the pinned size
 // of the whole union. Chosen larger than every behavior variant (the
-// biggest is headend_entry / b6_policy, 204 bytes) so plugin_raw is the
+// biggest is headend_entry / b6_policy, 208 bytes) so plugin_raw is the
 // layout anchor: the union stays a fixed 256 bytes and behavior variants
 // can grow (up to this cap) without rippling the map value size or the
 // plugin ABI. A _Static_assert below guards the invariant. Mirrored on the
@@ -275,7 +320,7 @@ struct sid_aux_entry {
 
         // End.B6/End.B6.Encaps: policy headend configuration
         // Replaces the former end_b6_policy_map (LPM trie).
-        struct headend_entry b6_policy;                    // 204 bytes
+        struct headend_entry b6_policy;                    // 208 bytes
 
         // End.T/DT4/DT6/DT46: VRF-aware FIB lookup target.
         struct {

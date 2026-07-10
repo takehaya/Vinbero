@@ -25,18 +25,21 @@ static __always_inline int tailcall_ctx_write_sid(
     tctx->dispatch_type = dispatch_type;
     tctx->inner_proto = inner_proto;
     tctx->slot = slot;
+    tctx->flow_hash = 0; // never carry a previous packet's hash into an endpoint
     __builtin_memcpy(&tctx->sid_entry, entry, sizeof(*entry));
     return 0;
 }
 
-// Write headend context. Caller must pass DISPATCH_HEADEND_V4 or
-// DISPATCH_HEADEND_V6 so the epilogue can select the right stats map.
-// `slot` is the tail-call index (= entry->mode).
+// Write headend context. Caller must pass DISPATCH_HEADEND_V4/V6/L2 so the
+// epilogue can select the right stats map. `slot` is the tail-call index
+// (= entry->mode). `flow_hash` is the inner flow hash for outer flow-label
+// entropy (0 when the dispatcher does not hash, e.g. L2).
 static __always_inline int tailcall_ctx_write_headend(
     struct headend_entry *entry,
     __u16 l3_offset,
     __u8 dispatch_type,
-    __u8 slot)
+    __u8 slot,
+    __u32 flow_hash)
 {
     __u32 key = TAILCALL_CTX_KEY;
     struct tailcall_ctx *tctx = bpf_map_lookup_elem(&tailcall_ctx_map, &key);
@@ -44,6 +47,7 @@ static __always_inline int tailcall_ctx_write_headend(
     tctx->l3_offset = l3_offset;
     tctx->dispatch_type = dispatch_type;
     tctx->slot = slot;
+    tctx->flow_hash = flow_hash;
     __builtin_memcpy(&tctx->headend, entry, sizeof(*entry));
     return 0;
 }
