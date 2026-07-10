@@ -207,3 +207,6 @@ examples/interop-clab/scenarios/*/clab-*/
 # stray daemon binary from `go build ./cmd/vinberod/` in the repo root
 # (anchored: must not swallow the cmd/vinberod source directory)
 /vinberod
+
+# benchmark run artifacts
+/benchmark/results/
