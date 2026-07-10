@@ -117,8 +117,8 @@ wait_vinbero_ready "$ns_router1" "127.0.0.1:8082" 10
 # Resolve NDP towards both next hops first: bpf_fib_lookup returns NO_NEIGH
 # for unresolved neighbors and the headend would drop the first flows.
 print_info "Pre-resolving NDP to both next hops..."
-ip netns exec "$ns_router1" ping6 -c 2 -W 2 fc00:12a::2 > /dev/null
-ip netns exec "$ns_router1" ping6 -c 2 -W 2 fc00:12b::2 > /dev/null
+ip netns exec "$ns_router1" ping6 -c 2 -W 2 fc00:12a::2 > /dev/null || true
+ip netns exec "$ns_router1" ping6 -c 2 -W 2 fc00:12b::2 > /dev/null || true
 
 print_info "Registering HeadendV4 trigger entry (path A as its segment list)..."
 ip netns exec "$ns_router1" ${VINBERO_BIN} -s http://127.0.0.1:8082 hv4 create \

@@ -109,8 +109,14 @@ func parsePathSpec(spec string) ([]string, uint16, error) {
 		segsPart = spec[:at]
 	}
 	segs := strings.Split(segsPart, "+")
-	if len(segs) == 0 || segs[0] == "" {
-		return nil, 0, fmt.Errorf("path %q: at least one segment required", spec)
+	for i, s := range segs {
+		// Reject empty segments explicitly: ParseIPv6("") yields the
+		// all-zero address instead of an error, which would silently
+		// program :: as a SID.
+		segs[i] = strings.TrimSpace(s)
+		if segs[i] == "" {
+			return nil, 0, fmt.Errorf("path %q: empty segment", spec)
+		}
 	}
 	return segs, weight, nil
 }
