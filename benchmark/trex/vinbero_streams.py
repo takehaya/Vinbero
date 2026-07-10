@@ -159,8 +159,15 @@ def main():
     tx = stats[0]
     rx = stats[1]
 
-    opackets = tx.get("opackets", 0)
-    ipackets = rx.get("ipackets", 0)
+    def unwrap(v):
+        # The port counters come from 32-bit hardware registers; when
+        # the raw counter crosses 2^32 during the run the delta against
+        # the clear_stats reference goes negative by exactly 2^32. A
+        # 30s run at 100G wraps at most once, so one correction is exact.
+        return v + 2**32 if v < 0 else v
+
+    opackets = unwrap(tx.get("opackets", 0))
+    ipackets = unwrap(rx.get("ipackets", 0))
     expected = opackets * (args.peers if args.scenario == "bum" else 1)
     print(json.dumps({
         "scenario":     args.scenario,
