@@ -24,12 +24,18 @@ Vinbero が daemon 内部で持つ状態のうち **永続化されるのは Net
 `pkg/netresource/manager.go` の ResourceManager が:
 1. 起動時に `state.json` を読み込み、記録されていた Bridge / VRF デバイスを netlink で確認
 2. 欠けていれば再作成 (`ip link add` 相当)
-3. 存在するものは ifindex を state に書き直して更新
+3. 存在するものは Create と同じ検証と収束で adopt する (link 種別の確認、up、不足 member の enslave、ifindex の更新)
 4. 稼働中に `vinbero vrf create` や `vinbero vrf bridge-attach` で変更があれば都度 disk に flush (VRF device も bridge も VrfService 経由で、vrf_id を持つ一級 VRF object の facet として管理される。bridge の state record は owning VRF 名も持つ)
 
 これにより、`sudo reboot` した後でも `vinbero vrf show` の BRIDGE / BD_ID 列に以前と同じ Bridge が見えます (daemon が自動で restore する)。
 
-state.json フォーマットは内部実装扱いで、手編集は非推奨です。`vinbero` CLI 経由で操作してください。
+堅牢性は次の 3 点で担保します。
+
+- 書き込みは atomic です。同一ディレクトリの temp file に書いて fsync してから rename するので、書き込み途中の crash や ENOSPC でも直前の state.json が無傷で残ります。
+- 保存の失敗は RPC エラーとして返ります (旧実装は warn に落として成功を返していた)。kernel device とメモリ上の記録は巻き戻さず、次に成功した保存が全量を書き直して収束します。
+- boot の reconcile は fail-closed です。state の entry が実体化できない場合 (member NIC の消失、名前を別種の link に取られた等) は、entry 名と修復手順 (デバイスの復旧か entry の削除) を示すエラーで起動を拒否します。stale な ifindex のまま続行すると FDB watcher / EVPN / SID 参照ガードが誤った index で動くためです。parse できない state.json も同様に起動を拒否します (空 state で始めると管理下のデバイスを黙って放棄することになるため)。
+
+state.json フォーマットは内部実装扱いで、手編集は非推奨です。`vinbero` CLI 経由で操作してください (例外は上記の修復手順と、bridge record の owning VRF 付け替え)。
 
 ## BPF マップ: in-memory vs pinned
 

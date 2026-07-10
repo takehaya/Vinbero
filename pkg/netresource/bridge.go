@@ -9,15 +9,13 @@ import (
 	"go.uber.org/zap"
 )
 
+// CreateBridge creates (or idempotently adopts) the kernel bridge and
+// persists it. On a persist failure the kernel device and the in-memory
+// record are NOT rolled back: the error is returned so the caller sees the
+// divergence, a retry re-adopts and converges, and the next successful
+// persist writes the whole state anyway.
 func (m *ResourceManager) CreateBridge(name string, bdID uint16, members []string, ownerVRF string) (uint32, error) {
-	// Idempotent adopt: an existing link is taken over only when it really is
-	// a bridge device. A bare name match must not adopt — otherwise a typo
-	// like --name eth1 would put the NIC into the state file and a later
-	// detach would LinkDel it.
 	if existing, err := netlink.LinkByName(name); err == nil {
-		if _, ok := existing.(*netlink.Bridge); !ok {
-			return 0, fmt.Errorf("link %s exists but is %s, not a bridge device", name, existing.Type())
-		}
 		// bd_id and the owning VRF are not kernel attributes, so identity is
 		// verified against the state entry: a tracked bridge cannot silently
 		// change bd_id (the data-plane FDB scope) or move to another VRF.
@@ -29,23 +27,13 @@ func (m *ResourceManager) CreateBridge(name string, bdID uint16, members []strin
 				return 0, fmt.Errorf("bridge %s is owned by vrf %q, requested %q", name, tracked.VRF, ownerVRF)
 			}
 		}
-		// Converge the adopted device on the request: bring it up (an
-		// operator-created admin-DOWN bridge would blackhole End.DT2 decap
-		// behind a successful attach) and enslave any members it is missing
-		// (LinkSetMaster is idempotent for already-enslaved links), so an
-		// adopt is not silently weaker than a fresh create.
-		if err := netlink.LinkSetUp(existing); err != nil {
-			return 0, fmt.Errorf("set bridge %s up: %w", name, err)
+		ifindex, err := adoptBridgeDevice(existing, name, members)
+		if err != nil {
+			return 0, err
 		}
-		for _, member := range members {
-			if err := enslaveInterface(member, existing); err != nil {
-				return 0, err
-			}
-		}
-		ifindex := uint32(existing.Attrs().Index)
 		m.ensureBridgeInState(name, bdID, members, ifindex, ownerVRF)
-		if err := saveState(m.statePath, m.state); err != nil {
-			m.logger.Warn("failed to save state after bridge idempotent update", zap.Error(err))
+		if err := m.persist(); err != nil {
+			return 0, fmt.Errorf("persist state after adopting bridge %s: %w", name, err)
 		}
 		return ifindex, nil
 	}
@@ -59,14 +47,39 @@ func (m *ResourceManager) CreateBridge(name string, bdID uint16, members []strin
 	// would have failed on LinkAdd), so the upsert takes its append branch.
 	m.ensureBridgeInState(name, bdID, members, ifindex, ownerVRF)
 
-	if err := saveState(m.statePath, m.state); err != nil {
-		m.logger.Warn("failed to save state after bridge creation", zap.Error(err))
+	if err := m.persist(); err != nil {
+		return 0, fmt.Errorf("persist state after creating bridge %s: %w", name, err)
 	}
 
 	m.logger.Info("Created bridge",
 		zap.String("name", name), zap.Uint16("bd_id", bdID), zap.Uint32("ifindex", ifindex),
 		zap.String("vrf", ownerVRF))
 	return ifindex, nil
+}
+
+// adoptBridgeDevice takes over an existing link as the managed bridge. The
+// link is adopted only when it really is a bridge device -- a bare name
+// match must not adopt, or a typo like --name eth1 would put the NIC into
+// the state file and a later detach would LinkDel it. The adopted device is
+// converged on the request: brought up (an operator-created admin-DOWN
+// bridge would blackhole End.DT2 decap behind a successful attach) and
+// missing members enslaved (LinkSetMaster is idempotent), so an adopt is
+// not silently weaker than a fresh create. Reconcile adopts state entries
+// through the same path; identity (bd_id / owner VRF) is checked by the
+// caller against the tracked entry, since it is not a kernel attribute.
+func adoptBridgeDevice(link netlink.Link, name string, members []string) (uint32, error) {
+	if _, ok := link.(*netlink.Bridge); !ok {
+		return 0, fmt.Errorf("link %s exists but is %s, not a bridge device", name, link.Type())
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return 0, fmt.Errorf("set bridge %s up: %w", name, err)
+	}
+	for _, member := range members {
+		if err := enslaveInterface(member, link); err != nil {
+			return 0, err
+		}
+	}
+	return uint32(link.Attrs().Index), nil
 }
 
 func (m *ResourceManager) DeleteBridge(name string) error {
@@ -104,8 +117,11 @@ func (m *ResourceManager) DeleteBridge(name string) error {
 	m.state.Bridges = filtered
 	m.mu.Unlock()
 
-	if err := saveState(m.statePath, m.state); err != nil {
-		m.logger.Warn("failed to save state after bridge deletion", zap.Error(err))
+	if err := m.persist(); err != nil {
+		// The kernel device is gone and the record is removed in memory; the
+		// next successful persist flushes it from disk too. Surface the error
+		// so the operator knows disk state is momentarily behind.
+		return fmt.Errorf("persist state after deleting bridge %s: %w", name, err)
 	}
 
 	m.logger.Info("Deleted bridge", zap.String("name", name))
@@ -117,6 +133,11 @@ func (m *ResourceManager) ListBridges() []ManagedBridge {
 	defer m.mu.RUnlock()
 	result := make([]ManagedBridge, len(m.state.Bridges))
 	copy(result, m.state.Bridges)
+	for i := range result {
+		// Deep-copy Members: the shallow struct copy would alias the
+		// state-owned backing array, which ensureBridgeInState appends to.
+		result[i].Members = slices.Clone(result[i].Members)
+	}
 	return result
 }
 
