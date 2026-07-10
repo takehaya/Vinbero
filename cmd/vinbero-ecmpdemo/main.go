@@ -252,8 +252,9 @@ func main() {
 	groupFlag := &cli.UintFlag{Name: "group-id", Usage: "ECMP group id (non-zero)", Required: true}
 
 	app := &cli.App{
-		Name:  "vinbero-ecmpdemo",
-		Usage: "demo/test writer for the vinberod ECMP path-group maps",
+		Name:    "vinbero-ecmpdemo",
+		Usage:   "demo/test writer for the vinberod ECMP path-group maps",
+		Version: "dev", // enables -v, which `make test-runnable` probes on every cmd binary
 		Commands: []*cli.Command{
 			{
 				Name:  "group-put",
