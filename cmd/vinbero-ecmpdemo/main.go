@@ -115,11 +115,21 @@ func parsePathSpec(spec string) ([]string, uint16, error) {
 	return segs, weight, nil
 }
 
-func groupPut(c *cli.Context) error {
-	pid := c.Int("pid")
+// groupIDArg validates the shared --group-id flag: 0 is the no-group
+// sentinel (ECMP_GROUP_NONE) and never a legal operation target.
+func groupIDArg(c *cli.Context) (uint32, error) {
 	groupID := uint32(c.Uint("group-id"))
 	if groupID == bpf.EcmpGroupNone {
-		return fmt.Errorf("group-id 0 is the no-group sentinel")
+		return 0, fmt.Errorf("group-id 0 is the no-group sentinel")
+	}
+	return groupID, nil
+}
+
+func groupPut(c *cli.Context) error {
+	pid := c.Int("pid")
+	groupID, err := groupIDArg(c)
+	if err != nil {
+		return err
 	}
 	pathSpecs := c.StringSlice("path")
 	if len(pathSpecs) < 1 || len(pathSpecs) > bpf.EcmpMaxPaths {
@@ -177,7 +187,10 @@ func groupPut(c *cli.Context) error {
 }
 
 func attach(c *cli.Context) error {
-	groupID := uint32(c.Uint("group-id"))
+	groupID, err := groupIDArg(c)
+	if err != nil {
+		return err
+	}
 	maps, err := daemonMaps(c.Int("pid"), mapHeadendV4)
 	if err != nil {
 		return err
@@ -199,7 +212,10 @@ func attach(c *cli.Context) error {
 }
 
 func liveSet(c *cli.Context) error {
-	groupID := uint32(c.Uint("group-id"))
+	groupID, err := groupIDArg(c)
+	if err != nil {
+		return err
+	}
 	bitmap, err := strconv.ParseUint(c.String("bitmap"), 0, 64)
 	if err != nil {
 		return fmt.Errorf("parse bitmap %q: %w", c.String("bitmap"), err)
@@ -216,7 +232,10 @@ func liveSet(c *cli.Context) error {
 }
 
 func liveClear(c *cli.Context) error {
-	groupID := uint32(c.Uint("group-id"))
+	groupID, err := groupIDArg(c)
+	if err != nil {
+		return err
+	}
 	maps, err := daemonMaps(c.Int("pid"), mapEcmpLive)
 	if err != nil {
 		return err
