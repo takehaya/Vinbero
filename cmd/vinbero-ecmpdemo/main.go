@@ -8,6 +8,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -168,7 +169,7 @@ func groupPut(c *cli.Context) error {
 	if err := maps[mapEcmpGroup].Put(&groupID, &info); err != nil {
 		return fmt.Errorf("put ecmp_group_map[%d]: %w", groupID, err)
 	}
-	if err := maps[mapEcmpLive].Delete(&groupID); err != nil && !strings.Contains(err.Error(), "key does not exist") {
+	if err := maps[mapEcmpLive].Delete(&groupID); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("reset ecmp_live_map[%d]: %w", groupID, err)
 	}
 	fmt.Printf("group %d installed with %d paths\n", groupID, len(pathSpecs))
@@ -220,7 +221,7 @@ func liveClear(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := maps[mapEcmpLive].Delete(&groupID); err != nil && !strings.Contains(err.Error(), "key does not exist") {
+	if err := maps[mapEcmpLive].Delete(&groupID); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return fmt.Errorf("delete ecmp_live_map[%d]: %w", groupID, err)
 	}
 	fmt.Printf("group %d liveness cleared (fail-open: all paths live)\n", groupID)
