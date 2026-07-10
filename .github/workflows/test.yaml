@@ -144,6 +144,7 @@ jobs:
           - headend-v4
           - headend-v6
           - headend-l2
+          - headend-ecmp
           - gtp4-encap
           - gtp6-encap
           - gtp6-drop-in
