@@ -13,7 +13,10 @@
 // ========================================================================
 
 // Write a 20-bit flow label (host order) into an IPv6 header's flow_lbl
-// bytes. Label 0 keeps the header's "no label" state.
+// bytes. Label 0 keeps the header's "no label" state. Note flow_lbl[0]'s
+// high nibble is the low half of the Traffic Class, which this helper
+// zeroes -- fine for freshly built outer headers (TC is 0 anyway), but do
+// not call it on a header whose Traffic Class must survive.
 static __always_inline void ipv6_set_flow_label(struct ipv6hdr *ip6h, __u32 label)
 {
     ip6h->flow_lbl[0] = (label >> 16) & 0x0F;
