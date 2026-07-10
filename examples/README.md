@@ -78,6 +78,7 @@ sudo ./teardown.sh # クリーンアップ
 | `headend-v4/` | H.Encaps (IPv4) | IPv4パケットのSRv6カプセル化 |
 | `headend-v6/` | H.Encaps (IPv6) | IPv6パケットのSRv6カプセル化 |
 | `headend-l2/` | H.Encaps.L2 | L2フレームのSRv6カプセル化 |
+| `headend-ecmp/` | H.Encaps + ECMP | headend ECMP path group と liveness fast reroute |
 
 ### Mobile (GTP-U)
 | ディレクトリ | 機能 | 説明 |
