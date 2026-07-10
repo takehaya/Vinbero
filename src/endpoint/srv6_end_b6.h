@@ -26,11 +26,18 @@
 // Policy headend_entry.mode selects the variant:
 //   H_INSERT     -> do_h_insert_core
 //   H_INSERT_RED -> do_h_insert_red_core
-static __noinline int process_end_b6_insert(
+// The __noinline body takes at most 5 parameters on purpose: BPF passes
+// subprogram arguments 6+ on the caller's stack, which only kernels with
+// stack-argument support verify. The former 6-parameter form loaded on
+// older kernels only because clang dead-argument-eliminated `entry`
+// (End.B6 takes everything it needs from aux) -- keeping the boundary at 5
+// register arguments makes that ABI explicit instead of an optimizer
+// artifact. The 6-argument process_end_b6_* shims below preserve the
+// DEFINE_ENDPOINT_LOCALSID_AUX call shape.
+static __noinline int end_b6_insert_core(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry,
     struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
@@ -38,8 +45,11 @@ static __noinline int process_end_b6_insert(
     struct headend_entry *policy = &aux->b6_policy;
 
     // --- Phase 1: Endpoint processing ---
+    // entry is NULL: End.B6 never reads ectx->entry (the policy lives in
+    // aux), and the helpers it calls (endpoint_update_da, do_h_insert_*)
+    // do not touch it either.
     struct endpoint_ctx ectx;
-    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
+    int ret = endpoint_init(&ectx, ctx, ip6h, srh, NULL, l3_offset);
 
     if (ret == -1) {
         DEBUG_PRINT("End.B6.Insert: SL=0, pass to upper layer\n");
@@ -92,6 +102,18 @@ static __noinline int process_end_b6_insert(
     return do_h_insert_core(ctx, &saved_eth, saved_vlan, &saved_ip6h, policy, l3_offset);
 }
 
+static __always_inline int process_end_b6_insert(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    __u16 l3_offset)
+{
+    (void)entry; // unused: End.B6 parameters come from aux (see core comment)
+    return end_b6_insert_core(ctx, ip6h, srh, aux, l3_offset);
+}
+
 // End.B6.Encaps / End.B6.Encaps.Red (RFC 8986 Section 4.13)
 //
 // 1. Lookup policy from end_b6_policy_map
@@ -101,11 +123,12 @@ static __noinline int process_end_b6_insert(
 // Policy headend_entry.mode selects the variant:
 //   H_ENCAPS     -> do_h_encaps_core
 //   H_ENCAPS_RED -> do_h_encaps_red_core
-static __noinline int process_end_b6_encaps(
+// Same 5-parameter __noinline boundary as end_b6_insert_core; see the
+// comment there.
+static __noinline int end_b6_encaps_core(
     struct xdp_md *ctx,
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
-    struct sid_function_entry *entry,
     struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
@@ -114,7 +137,7 @@ static __noinline int process_end_b6_encaps(
 
     // --- Phase 1: Endpoint processing ---
     struct endpoint_ctx ectx;
-    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
+    int ret = endpoint_init(&ectx, ctx, ip6h, srh, NULL, l3_offset);
 
     if (ret == -1) {
         DEBUG_PRINT("End.B6.Encaps: SL=0, pass to upper layer\n");
@@ -163,6 +186,18 @@ static __noinline int process_end_b6_encaps(
 
     DEBUG_PRINT("End.B6.Encaps: Encapsulating with outer IPv6+SRH\n");
     return do_h_encaps_core(ctx, &saved_eth, policy, IPPROTO_IPV6, inner_total_len, l3_offset);
+}
+
+static __always_inline int process_end_b6_encaps(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    __u16 l3_offset)
+{
+    (void)entry; // unused: End.B6 parameters come from aux (see core comment)
+    return end_b6_encaps_core(ctx, ip6h, srh, aux, l3_offset);
 }
 
 #endif // SRV6_END_B6_H
