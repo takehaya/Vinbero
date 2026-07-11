@@ -45,7 +45,7 @@ for rep in $(seq 1 "$REPS"); do
         trex_json=$(ssh "$TREX_HOST" \
             "python3 ~/$TREX_DRIVER_DIR/vinbero_streams.py \
              --scenario $SCENARIO --duration $DURATION --size $size \
-             --pps $PPS --peers $PEERS")
+             --pps $PPS --peers $PEERS --flows $FLOWS")
 
         rx_after=$(nic_pkts "$IN_IF" rx)
         tx_after=$(nic_pkts "$OUT_IF" tx)

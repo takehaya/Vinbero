@@ -38,6 +38,7 @@ DURATION=${DURATION:-30}
 REPS=${REPS:-5}
 PPS=${PPS:-0}          # 0 = line rate (mult=100%)
 PEERS=${PEERS:-1}
+FLOWS=${FLOWS:-32}
 RESULT_DIR=${RESULT_DIR:-$REPO_ROOT/benchmark/results}
 
 vbctl() {

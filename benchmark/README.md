@@ -54,6 +54,10 @@ TRex port 0 が DUT の ingress NIC へ送信し、Vinbero が処理した packe
 ```bash
 cd benchmark/pipelines
 
+# 0. 任意: RX queue を物理 core へ 1:1 pin する (集計値が約 1 割伸びる)
+#    channel 数の変更は XDP attach 前に行う必要があるため setup より先に実行する
+./tune_dut.sh apply        # 戻すときは ./tune_dut.sh revert
+
 # 1. シナリオをセットアップ (NIC 準備 + vinberod 起動 + map entry 投入)
 sudo -v && ./setup_dut.sh encaps-v4
 
@@ -72,6 +76,7 @@ python3 ../analysis/stats.py ../results/encaps-v4_rep*.csv
 ```bash
 DURATION=30 REPS=5 PPS=50000000 ./run_bench.sh encaps-v4 64 512
 PEERS=4 ./setup_dut.sh bum --peers 4 && PEERS=4 PPS=5000000 ./run_bench.sh bum
+FLOWS=256 ./run_bench.sh encaps-v4 64   # flow 数を増やして全 RSS queue に当てる
 ```
 
 ## smoke 確認 (計測前のデータプレーン疎通)
