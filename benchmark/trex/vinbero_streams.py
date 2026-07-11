@@ -74,7 +74,7 @@ def pad(frame, size):
 
 
 def frame(scenario, i, size):
-    src4 = "10.%d.0.2" % (8 + i)
+    src4 = "10.%d.0.%d" % (8 + i % 200, 2 + i // 200)
     if scenario in ("encaps-v4", "ecmp"):
         return pad(bytes(
             Ether(src=SRC_MAC, dst=DST_MAC)
@@ -114,11 +114,11 @@ def frame(scenario, i, size):
     raise ValueError("unknown scenario: %s" % scenario)
 
 
-def build_streams(scenario, size, per_stream_pps):
+def build_streams(scenario, size, per_stream_pps, flows):
     return [
         STLStream(packet=STLPktBuilder(pkt_buffer=frame(scenario, i, size)),
                   mode=STLTXCont(pps=per_stream_pps))
-        for i in range(N_FLOWS)
+        for i in range(flows)
     ]
 
 
@@ -134,6 +134,9 @@ def main():
     ap.add_argument("--pps", type=float, default=0,
                     help="total offered pps across all flows; 0 (default) "
                          "offers 100%% of line rate")
+    ap.add_argument("--flows", type=int, default=N_FLOWS,
+                    help="number of static streams; more flows engage "
+                         "more RSS queues (and DUT cores)")
     ap.add_argument("--peers", type=int, default=1,
                     help="bum only: configured bd peer count, recorded as "
                          "the expected amplification factor")
@@ -145,9 +148,10 @@ def main():
     c.reset(ports=[0, 1])
     # mult scales the stream pps: "100%" normalizes the total to line
     # rate (ignoring the per-stream pps), while "1" honors --pps as-is.
-    per_stream = (args.pps or 1e6) / N_FLOWS
+    per_stream = (args.pps or 1e6) / args.flows
     mult = "1" if args.pps else "100%"
-    c.add_streams(build_streams(args.scenario, args.size, per_stream),
+    c.add_streams(build_streams(args.scenario, args.size, per_stream,
+                                args.flows),
                   ports=[0])
     c.clear_stats()
     c.start(ports=[0], mult=mult)
@@ -174,6 +178,7 @@ def main():
         "size":         args.size,
         "duration_s":   args.duration,
         "peers":        args.peers,
+        "flows":        args.flows,
         "tx_opackets":  opackets,
         "tx_oerrors":   tx.get("oerrors", 0),
         "rx_ipackets":  ipackets,

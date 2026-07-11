@@ -90,7 +90,8 @@ REDIRECT カウンタが送信 packet 数と一致し、`rx_ipackets` が `tx_op
 
 ## 測定方法の詳細
 
-- flow 分散は 32 本の静的 stream (source address 可変) で行います。TRex の field-engine VM は SRH を再パースできず frame を壊すため、SRH 入り frame は必ず scapy + raw `pkt_buffer` の静的 stream で組みます
+- flow 分散は既定で 32 本の静的 stream (source address 可変) で行います。TRex の field-engine VM は SRH を再パースできず frame を壊すため、SRH 入り frame は必ず scapy + raw `pkt_buffer` の静的 stream で組みます
+- 集計 throughput は flow 数と RSS の当たり方に強く依存します。実測では 32 flow は hash 衝突で 64 queue 中 25 queue にしか当たらず、飽和 core あたり約 1.8 Mpps (64B encaps-v4) の積み上げが装置全体の数字になります。driver の `--flows 256` で全 queue に当てると集計値は約 15% 伸びますが、hyperthread 兄弟まで使うため線形には伸びません。集計値を比較するときは flow 数を固定し、per-core の実力は queue counter (`ethtool -S` の `rx_queue_N_packets`) の delta で確認してください
 - `bpf_fib_lookup` は neighbor 未解決だと packet を落とすため、TRex port 1 へ向く next-hop は static neighbor entry を投入します (TRex port は ND/ARP に応答しません)。同じ理由で forwarding sysctl も setup が有効化します
 - L2 シナリオの frame は customer MAC 宛で NIC の MAC と一致しないため、setup が ingress NIC を promiscuous mode にします。これがないと hardware の MAC filter が落とし、wire counter には乗るのに XDP に届かないという形で 100% loss になります
 - offered load は既定で line rate (`mult=100%`) です。`PPS` に非ゼロを与えるとその合計 pps で送ります
