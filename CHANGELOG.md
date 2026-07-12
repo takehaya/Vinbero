@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.1.0](https://github.com/takehaya/Vinbero/compare/v0.0.10...v0.1.0) (2026-07-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **vrfbgp:** derive the EVPN bridge domain from the VRF bridge facet ([#98](https://github.com/takehaya/Vinbero/issues/98))
+
+### 🎉 Features
+
+* **bgp/evpn:** rescue early EVPN routes with an attach/bind-time loc-rib replay ([#99](https://github.com/takehaya/Vinbero/issues/99)) ([4dd96b3](https://github.com/takehaya/Vinbero/commit/4dd96b3c8807c5fe445d37e3bbd13cb9a2244a9c))
+* **bpf/ecmp:** weighted ECMP path groups in the headend data plane ([#101](https://github.com/takehaya/Vinbero/issues/101)) ([54fab68](https://github.com/takehaya/Vinbero/commit/54fab689c7d198773eb090ae52876c9e58bc355b))
+* **examples:** headend ECMP path-group netns example with fast-reroute demo ([#103](https://github.com/takehaya/Vinbero/issues/103)) ([84992ea](https://github.com/takehaya/Vinbero/commit/84992ea83bc7cf8f7a1a569a3f41eff16225a248))
+* **vrf:** absorb the EVPN bridge-domain lifecycle into the VRF object ([#97](https://github.com/takehaya/Vinbero/issues/97)) ([7bbb672](https://github.com/takehaya/Vinbero/commit/7bbb6728850efa9808ed7b88e2b69855d7e464c3))
+* **vrf:** absorb the kernel-VRF device lifecycle into the VRF object ([#95](https://github.com/takehaya/Vinbero/issues/95)) ([53f9cb2](https://github.com/takehaya/Vinbero/commit/53f9cb262a8e3b7fbce5edb3139f57575caa948d))
+* **vrfbgp:** derive the EVPN bridge domain from the VRF bridge facet ([#98](https://github.com/takehaya/Vinbero/issues/98)) ([fdc0274](https://github.com/takehaya/Vinbero/commit/fdc0274ab08e5d9b9fe1aae8e1f6d81e55180726))
+
+
+### 🐛 Bug Fixes
+
+* **bpf/endpoint:** keep the End.B6 noinline boundary at five register args ([#102](https://github.com/takehaya/Vinbero/issues/102)) ([42b549b](https://github.com/takehaya/Vinbero/commit/42b549b9fdec68c88969137ea6b246d0c3915ecc))
+* **netresource:** atomic state writes, error propagation, fail-closed reconcile ([#100](https://github.com/takehaya/Vinbero/issues/100)) ([21a02db](https://github.com/takehaya/Vinbero/commit/21a02db931d0cab778bcdeb249f11ecd93350006))
+
 ## [0.0.10](https://github.com/takehaya/Vinbero/compare/v0.0.9...v0.0.10) (2026-06-21)
 
 
