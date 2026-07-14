@@ -42,7 +42,7 @@
 
 ### 🔧 Miscellaneous Chores
 
-* **interop-clab:** keep proprietary MUP interop assets out of the public repo ([#92](https://github.com/takehaya/Vinbero/issues/92)) ([9e07595](https://github.com/takehaya/Vinbero/commit/9e07595216cbcb7e302174973cb8f7dcd26595d6))
+* **interop-clab:** move the license-restricted interop assets to a private overlay repo ([#92](https://github.com/takehaya/Vinbero/issues/92)) ([9e07595](https://github.com/takehaya/Vinbero/commit/9e07595216cbcb7e302174973cb8f7dcd26595d6))
 * **interop-clab:** neutral overlay paths in .gitignore ([#93](https://github.com/takehaya/Vinbero/issues/93)) ([1ff91de](https://github.com/takehaya/Vinbero/commit/1ff91de02c5ff05eb81c5947f65e99c48fec29e4))
 
 ## [0.0.9](https://github.com/takehaya/Vinbero/compare/v0.0.8...v0.0.9) (2026-06-03)
