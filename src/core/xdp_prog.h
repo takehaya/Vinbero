@@ -210,6 +210,64 @@ struct sr_policy_value {
     __u8 segs[MAX_SEGMENTS][IPV6_ADDR_LEN];    // transport SIDs (active candidate)
 } __attribute__((packed));
 
+// ========== Service programming (draft-ietf-spring-srv6-service-programming) ==========
+//
+// SR-unaware service proxies (End.AS / End.AD / End.AM) split each proxy
+// segment into two directions: the forward direction rides the ordinary
+// sid_endpoint_progs dispatch, while the return direction (service ->
+// SRv6) enters through service_ingress_map keyed on the IFACE-IN
+// attachment circuit. The return-side tail call uses a dedicated
+// service_return_progs PROG_ARRAY indexed by the constants below, so the
+// endpoint slot space and its plugin partition stay untouched.
+
+#define SVC_RET_AS 0   // End.AS return: re-encap from the static entry below
+#define SVC_RET_AD 1   // End.AD return: re-encap from ad_cache_map
+#define SVC_RET_AM 2   // End.AM return: de-masquerade from the in-packet SRH
+#define SERVICE_RETURN_PROG_MAX 8
+
+// inner_type_mask bits (which payloads the IFACE-IN may carry)
+#define SVC_INNER_IPV4     (1 << 0)
+#define SVC_INNER_IPV6     (1 << 1)
+#define SVC_INNER_ETHERNET (1 << 2)
+
+// Key for service_ingress_map: the IFACE-IN attachment circuit. Same shape
+// as headend_l2_key / ingress_ac_key but a distinct type: a proxy IFACE-IN
+// is a dedicated point-to-point circuit owned by exactly one proxy segment.
+struct service_ingress_key {
+    __u32 ifindex;                // IFACE-IN ifindex
+    __u16 vlan_id;                // VLAN ID (0 = untagged)
+    __u8 _pad[2];
+} __attribute__((packed));
+
+// Value for service_ingress_map. behavior selects the service_return_progs
+// slot; inner_type_mask gates which ethertypes the circuit accepts (a
+// mismatch is a drop -- the IFACE-IN is a dedicated circuit, not a trunk).
+// encap holds the End.AS static CACHE (outer src + segment list) embedded
+// directly so the return path resolves everything in one lookup and can
+// hand &entry->encap straight to tailcall_ctx_write_headend; End.AD / AM
+// leave it zeroed. sid records the owning proxy SID for control-plane
+// cleanup and List/Get display consistency.
+struct service_ingress_entry {
+    __u8  behavior;               // SVC_RET_AS / SVC_RET_AD / SVC_RET_AM
+    __u8  inner_type_mask;        // SVC_INNER_* bits
+    __u16 _pad;
+    __u8  sid[IPV6_ADDR_LEN];     // owning proxy SID
+    struct headend_entry encap;   // End.AS static CACHE (offset 20, 4-byte aligned)
+} __attribute__((packed));
+
+// End.AD dynamic cache: the forward direction stores the outer IPv6 + SRH
+// here (already SL-decremented and DA-updated, i.e. ready to prepend
+// verbatim) and the return direction restores it. Keyed by the IFACE-IN
+// circuit per the draft: the cache tracks the chain position of the one
+// proxy segment bound to that circuit, not per-flow state.
+#define AD_CACHE_HDR_MAX (40 + 8 + MAX_SEGMENTS * 16)  // outer IPv6 + max SRH = 208
+struct ad_cache_val {
+    __u16 hdr_len;                // valid bytes in hdr (48..AD_CACHE_HDR_MAX)
+    __u8  hop_limit;              // outer hop limit at cache time (update-margin check)
+    __u8  valid;                  // 0 until the first forward packet seeds the cache
+    __u8  hdr[AD_CACHE_HDR_MAX];  // outer IPv6 header + SRH, flow label zeroed
+} __attribute__((packed));
+
 // ========== ECMP path groups ==========
 //
 // A headend_entry whose group_id is non-zero resolves to one of up to

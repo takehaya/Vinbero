@@ -323,6 +323,31 @@ struct {
     __uint(max_entries, 512);
 } bd_local_esi_map SEC(".maps");
 
+// ========== Service programming (proxy return path) ==========
+//
+// {IFACE-IN ifindex, vlan} -> proxy return config. Written only by the
+// control plane (SidFunctionService); read by try_service_return at the
+// XDP front door. A miss falls through to the ordinary pipeline, so the
+// cost on unrelated traffic is one hash lookup.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct service_ingress_key);
+    __type(value, struct service_ingress_entry);
+    __uint(max_entries, 1024);
+} service_ingress_map SEC(".maps");
+
+// End.AD dynamic cache, keyed by the same IFACE-IN circuit. Written by the
+// BPF forward path (cache seed/update) and read by the return path, so this
+// map lives in the read-write shared partition. Plain HASH, not PERCPU: the
+// forward and return directions of one circuit can land on different CPUs,
+// and last-writer-wins is safe because the cached header is idempotent.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct service_ingress_key);
+    __type(value, struct ad_cache_val);
+    __uint(max_entries, 1024);
+} ad_cache_map SEC(".maps");
+
 // Per-CPU scratch buffer for mid-packet editing (e.g., End.M.GTP6.D header save/restore).
 // Used to work around BPF stack limit (512 bytes) by storing temporary data in map memory.
 // Max size covers ETH(14) + IPv6(40) + SRH(8 + MAX_SEGMENTS*16 = 168) = 222 bytes.
@@ -384,6 +409,18 @@ struct {
     __uint(value_size, sizeof(__u32));
     __uint(max_entries, HEADEND_PROG_MAX);
 } headend_l2_progs SEC(".maps");
+
+// Service-programming return-path PROG_ARRAY (indexed by SVC_RET_*).
+// Dedicated array so the endpoint/headend slot spaces and their plugin
+// partitions are untouched, and so the single bpf_tail_call site in
+// try_service_return stays the only lexical site referencing it (multiple
+// sites into one PROG_ARRAY silently break XDP_REDIRECT).
+struct {
+    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, SERVICE_RETURN_PROG_MAX);
+} service_return_progs SEC(".maps");
 
 // Tail call helpers (must come after map definitions they reference)
 #include "core/xdp_tailcall_helpers.h"

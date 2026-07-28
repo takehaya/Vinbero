@@ -13,6 +13,14 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type BpfAdCacheVal struct {
+	_        structs.HostLayout
+	HdrLen   uint16
+	HopLimit uint8
+	Valid    uint8
+	Hdr      [208]uint8
+}
+
 type BpfAuxOwner struct {
 	_   structs.HostLayout
 	Tag [64]int8
@@ -191,6 +199,22 @@ type BpfScratchBuf struct {
 	Data [224]uint8
 }
 
+type BpfServiceIngressEntry struct {
+	_             structs.HostLayout
+	Behavior      uint8
+	InnerTypeMask uint8
+	Pad           uint16
+	Sid           [16]uint8
+	Encap         BpfHeadendEntry
+}
+
+type BpfServiceIngressKey struct {
+	_       structs.HostLayout
+	Ifindex uint32
+	VlanId  uint16
+	Pad     [2]uint8
+}
+
 type BpfSidAuxEntry struct {
 	_       structs.HostLayout
 	Nexthop struct {
@@ -313,6 +337,7 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
+	AdCacheMap          *ebpf.MapSpec `ebpf:"ad_cache_map"`
 	AuxOwnerMap         *ebpf.MapSpec `ebpf:"aux_owner_map"`
 	BdLocalEsiMap       *ebpf.MapSpec `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap      *ebpf.MapSpec `ebpf:"bd_peer_l2_ext_map"`
@@ -339,6 +364,8 @@ type BpfMapSpecs struct {
 	MupUplinkV4Map      *ebpf.MapSpec `ebpf:"mup_uplink_v4_map"`
 	MupUplinkV6Map      *ebpf.MapSpec `ebpf:"mup_uplink_v6_map"`
 	ScratchMap          *ebpf.MapSpec `ebpf:"scratch_map"`
+	ServiceIngressMap   *ebpf.MapSpec `ebpf:"service_ingress_map"`
+	ServiceReturnProgs  *ebpf.MapSpec `ebpf:"service_return_progs"`
 	SidAuxMap           *ebpf.MapSpec `ebpf:"sid_aux_map"`
 	SidEndpointProgs    *ebpf.MapSpec `ebpf:"sid_endpoint_progs"`
 	SidFunctionMap      *ebpf.MapSpec `ebpf:"sid_function_map"`
@@ -379,6 +406,7 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
+	AdCacheMap          *ebpf.Map `ebpf:"ad_cache_map"`
 	AuxOwnerMap         *ebpf.Map `ebpf:"aux_owner_map"`
 	BdLocalEsiMap       *ebpf.Map `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap      *ebpf.Map `ebpf:"bd_peer_l2_ext_map"`
@@ -405,6 +433,8 @@ type BpfMaps struct {
 	MupUplinkV4Map      *ebpf.Map `ebpf:"mup_uplink_v4_map"`
 	MupUplinkV6Map      *ebpf.Map `ebpf:"mup_uplink_v6_map"`
 	ScratchMap          *ebpf.Map `ebpf:"scratch_map"`
+	ServiceIngressMap   *ebpf.Map `ebpf:"service_ingress_map"`
+	ServiceReturnProgs  *ebpf.Map `ebpf:"service_return_progs"`
 	SidAuxMap           *ebpf.Map `ebpf:"sid_aux_map"`
 	SidEndpointProgs    *ebpf.Map `ebpf:"sid_endpoint_progs"`
 	SidFunctionMap      *ebpf.Map `ebpf:"sid_function_map"`
@@ -420,6 +450,7 @@ type BpfMaps struct {
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.AdCacheMap,
 		m.AuxOwnerMap,
 		m.BdLocalEsiMap,
 		m.BdPeerL2ExtMap,
@@ -446,6 +477,8 @@ func (m *BpfMaps) Close() error {
 		m.MupUplinkV4Map,
 		m.MupUplinkV6Map,
 		m.ScratchMap,
+		m.ServiceIngressMap,
+		m.ServiceReturnProgs,
 		m.SidAuxMap,
 		m.SidEndpointProgs,
 		m.SidFunctionMap,

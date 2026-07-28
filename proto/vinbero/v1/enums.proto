@@ -39,6 +39,8 @@ enum Srv6LocalAction {
   SRV6_LOCAL_ACTION_END_M_GTP4_E = 21; // End.M.GTP4.E (SRv6 => GTP-U/IPv4)
   SRV6_LOCAL_ACTION_END_DX2V = 22; // End.DX2V (VLAN L2 cross-connect)
   SRV6_LOCAL_ACTION_END_DT2M = 23; // End.DT2M (L2 table flooding for BUM, RFC 8986 Sec.4.12)
+  SRV6_LOCAL_ACTION_END_AD = 24; // End.AD (dynamic proxy, draft-ietf-spring-srv6-service-programming)
+  SRV6_LOCAL_ACTION_END_AN = 25; // End.AN (SR-aware service, draft-ietf-spring-srv6-service-programming)
 }
 
 // Srv6HeadendBehavior represents SRv6 Headend behavior types

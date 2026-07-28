@@ -340,7 +340,11 @@ type EntriesConfig struct {
 	// get this capacity directly, ecmp_path_map gets capacity x 8 (one slot
 	// per possible path).
 	EcmpGroup   EntryCapacityConfig `yaml:"ecmp_group,omitempty"`
-	MaxSegments int                 `yaml:"max_segments,omitempty" default:"10"`
+	// ServiceIngress sizes the service-programming proxy tables: both the
+	// IFACE-IN return map (service_ingress_map) and the End.AD dynamic
+	// cache (ad_cache_map) are keyed by the proxy attachment circuit.
+	ServiceIngress EntryCapacityConfig `yaml:"service_ingress,omitempty"`
+	MaxSegments    int                 `yaml:"max_segments,omitempty" default:"10"`
 }
 
 // EntryCapacityConfig holds capacity setting for a single entry type
