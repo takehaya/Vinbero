@@ -50,6 +50,12 @@ static __noinline int try_service_return(
     if (!svc_inner_type_ok(entry->inner_type_mask, eth_proto))
         return XDP_DROP;
 
+    // Ethernet-typed circuit: the whole frame (offset 0) is the payload to
+    // re-encapsulate, so l3_offset must not point the return program at an
+    // L3 header it would strip. L3-typed circuits keep the real offset.
+    if (entry->inner_type_mask & SVC_INNER_ETHERNET)
+        l3_offset = 0;
+
     if (tailcall_ctx_write_headend(&entry->encap, l3_offset,
                                    DISPATCH_SERVICE_RETURN, entry->behavior,
                                    0) == 0)

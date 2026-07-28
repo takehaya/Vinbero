@@ -31,7 +31,10 @@
 #define DISPATCH_HEADEND_L2  4   // Headend L2 (H.Encaps.L2 / H.Encaps.L2.Red)
 #define DISPATCH_SERVICE_RETURN 5 // Service-proxy return path (via try_service_return);
                                   // reuses the headend variant of tailcall_ctx (End.AS
-                                  // carries its static CACHE as a headend_entry)
+                                  // carries its static CACHE as a headend_entry).
+                                  // l3_offset contract: L3-typed circuits carry the
+                                  // real L3 offset; Ethernet-typed circuits carry 0
+                                  // (the whole frame is the payload to re-encapsulate)
 
 // ========== Tail Call Context ==========
 
