@@ -818,15 +818,41 @@ func SidAuxB6PolicyData(entry *SidAuxEntry) *HeadendEntry {
 
 // CreateServiceIngress binds a proxy return circuit {ifindex, vlan} to its
 // service_ingress_map entry. ebpf.UpdateNoExist makes the draft's
-// one-proxy-segment-per-IFACE-IN rule an atomic kernel-side check: a
-// second Create on the same circuit fails instead of silently stealing it.
-func (m *MapOperations) CreateServiceIngress(ifindex uint32, vlanID uint16, entry *ServiceIngressEntry) error {
+// one-proxy-segment-per-IFACE-IN rule an atomic kernel-side check; a
+// re-bind by the SAME owning SID (idempotent re-apply / CACHE update) is
+// allowed and replaces the entry, returning the previous value so the
+// caller can restore it if a later step of its transaction fails. A bind
+// attempt by a different SID is a conflict.
+func (m *MapOperations) CreateServiceIngress(ifindex uint32, vlanID uint16, entry *ServiceIngressEntry) (*ServiceIngressEntry, error) {
 	key := ServiceIngressKey{Ifindex: ifindex, VlanId: vlanID}
-	if err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateNoExist); err != nil {
-		if errors.Is(err, ebpf.ErrKeyExist) {
-			return fmt.Errorf("iface_in %d vlan %d is already bound to another proxy segment", ifindex, vlanID)
-		}
-		return fmt.Errorf("failed to put service ingress entry: %w", err)
+	err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateNoExist)
+	if err == nil {
+		return nil, nil
+	}
+	if !errors.Is(err, ebpf.ErrKeyExist) {
+		return nil, fmt.Errorf("failed to put service ingress entry: %w", err)
+	}
+	var existing ServiceIngressEntry
+	if err := m.objs.ServiceIngressMap.Lookup(&key, &existing); err != nil {
+		// Raced with a concurrent unbind; surface the conflict rather
+		// than retrying into someone else's window.
+		return nil, fmt.Errorf("iface_in %d vlan %d is already bound to another proxy segment", ifindex, vlanID)
+	}
+	if existing.Sid != entry.Sid {
+		return nil, fmt.Errorf("iface_in %d vlan %d is already bound to another proxy segment", ifindex, vlanID)
+	}
+	if err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateAny); err != nil {
+		return nil, fmt.Errorf("failed to update service ingress entry: %w", err)
+	}
+	return &existing, nil
+}
+
+// RestoreServiceIngress puts back a previously captured binding (rollback
+// path of CreateServiceIngress's same-SID update).
+func (m *MapOperations) RestoreServiceIngress(ifindex uint32, vlanID uint16, entry *ServiceIngressEntry) error {
+	key := ServiceIngressKey{Ifindex: ifindex, VlanId: vlanID}
+	if err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("failed to restore service ingress entry: %w", err)
 	}
 	return nil
 }

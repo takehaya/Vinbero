@@ -10,7 +10,7 @@
 - [RFC 9800: Compressed SRv6 Segment List Encoding](https://datatracker.ietf.org/doc/rfc9800/)
 - [RFC 9524: Segment Routing Replication for Multicast](https://datatracker.ietf.org/doc/rfc9524/)
 - [RFC 9491: Integration of the NSH and SRv6](https://datatracker.ietf.org/doc/rfc9491/)
-- [draft-ietf-spring-sr-service-programming](https://datatracker.ietf.org/doc/draft-ietf-spring-sr-service-programming/)
+- [draft-ietf-spring-srv6-service-programming](https://datatracker.ietf.org/doc/draft-ietf-spring-srv6-service-programming/)
 
 ### Headend behaviors
 
@@ -74,10 +74,10 @@
 
 | Function             | Status      | Description                                                 | Reference |
 |----------------------|-------------|-------------------------------------------------------------|-----------|
-| End.AN               |             | SR-aware function (native SRv6 service)                     | draft-ietf-spring-sr-service-programming |
+| End.AN               |             | SR-aware function (native SRv6 service)                     | draft-ietf-spring-srv6-service-programming |
 | End.AS               | Supported   | Static proxy (SR-unaware service, static config)            | draft-ietf-spring-srv6-service-programming |
-| End.AD               |             | Dynamic proxy (SR-unaware service, dynamic detection)       | draft-ietf-spring-sr-service-programming |
-| End.AM               |             | Masquerading proxy (SR-unaware service, masquerade SRH)     | draft-ietf-spring-sr-service-programming |
+| End.AD               |             | Dynamic proxy (SR-unaware service, dynamic detection)       | draft-ietf-spring-srv6-service-programming |
+| End.AM               |             | Masquerading proxy (SR-unaware service, masquerade SRH)     | draft-ietf-spring-srv6-service-programming |
 
 ### Flavours
 

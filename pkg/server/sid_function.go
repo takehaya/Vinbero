@@ -136,12 +136,20 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		}
 		ifaceIn := sidFunc.GetIfaceIn()
 		vlanIn := uint16(sidFunc.GetVlanIn())
-		if err := s.mapOps.CreateServiceIngress(ifaceIn, vlanIn, ingress); err != nil {
+		prev, err := s.mapOps.CreateServiceIngress(ifaceIn, vlanIn, ingress)
+		if err != nil {
 			return err
 		}
 		defer func() {
-			if !committed {
+			if committed {
+				return
+			}
+			// Fresh bind: unbind. Same-SID re-bind: restore the previous
+			// binding instead of leaving the circuit half-updated.
+			if prev == nil {
 				_ = s.mapOps.DeleteServiceIngress(ifaceIn, vlanIn)
+			} else {
+				_ = s.mapOps.RestoreServiceIngress(ifaceIn, vlanIn, prev)
 			}
 		}()
 	}

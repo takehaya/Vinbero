@@ -3039,7 +3039,7 @@ func TestXDPProgEndASReturn(t *testing.T) {
 
 	t.Run("IPv4 re-encapsulation", func(t *testing.T) {
 		h := newXDPTestHelper(t)
-		if err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
 			t.Fatalf("create service ingress: %v", err)
 		}
 		innerSrc := net.ParseIP("10.0.0.9")
@@ -3074,7 +3074,7 @@ func TestXDPProgEndASReturn(t *testing.T) {
 
 	t.Run("IPv4 multicast passes to kernel", func(t *testing.T) {
 		h := newXDPTestHelper(t)
-		if err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
 			t.Fatalf("create service ingress: %v", err)
 		}
 		pkt, err := buildSimpleIPv4Packet(net.ParseIP("10.0.0.9").To4(), net.ParseIP("224.0.0.1").To4())
@@ -3092,7 +3092,7 @@ func TestXDPProgEndASReturn(t *testing.T) {
 
 	t.Run("IPv6 ND passes to kernel", func(t *testing.T) {
 		h := newXDPTestHelper(t)
-		if err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv6)); err != nil {
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv6)); err != nil {
 			t.Fatalf("create service ingress: %v", err)
 		}
 		for _, dst := range []string{"ff02::1:ff00:1", "fe80::1"} {
@@ -3109,7 +3109,7 @@ func TestXDPProgEndASReturn(t *testing.T) {
 
 	t.Run("Ethernet circuit wraps the whole frame", func(t *testing.T) {
 		h := newXDPTestHelper(t)
-		if err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerEthernet)); err != nil {
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerEthernet)); err != nil {
 			t.Fatalf("create service ingress: %v", err)
 		}
 		pkt := buildPlainIPv4(t)
@@ -3145,11 +3145,26 @@ func TestServiceIngressLifecycle(t *testing.T) {
 	h := newXDPTestHelper(t)
 	entry := &ServiceIngressEntry{Behavior: SvcRetAS, InnerTypeMask: SvcInnerIPv4}
 
-	if err := h.mapOps.CreateServiceIngress(41, 7, entry); err != nil {
+	entry.Sid[15] = 0x01
+	if _, err := h.mapOps.CreateServiceIngress(41, 7, entry); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := h.mapOps.CreateServiceIngress(41, 7, entry); err == nil {
-		t.Fatalf("duplicate create must fail (one proxy segment per IFACE-IN)")
+	// Same owning SID: idempotent re-bind succeeds and reports the
+	// previous value (rollback handle).
+	updated := *entry
+	updated.InnerTypeMask = SvcInnerIPv6
+	prev, err := h.mapOps.CreateServiceIngress(41, 7, &updated)
+	if err != nil {
+		t.Fatalf("same-SID re-bind: %v", err)
+	}
+	if prev == nil || prev.InnerTypeMask != SvcInnerIPv4 {
+		t.Fatalf("same-SID re-bind did not report the previous binding: %+v", prev)
+	}
+	// Different owning SID: conflict.
+	other := *entry
+	other.Sid[15] = 0x02
+	if _, err := h.mapOps.CreateServiceIngress(41, 7, &other); err == nil {
+		t.Fatalf("bind by a different SID must fail (one proxy segment per IFACE-IN)")
 	}
 	if _, err := h.mapOps.GetServiceIngress(41, 7); err != nil {
 		t.Fatalf("get: %v", err)
@@ -3167,7 +3182,7 @@ func TestServiceIngressLifecycle(t *testing.T) {
 	if err := h.objs.AdCacheMap.Lookup(&key, &stale); err == nil {
 		t.Fatalf("ad cache row survived the circuit unbind")
 	}
-	if err := h.mapOps.CreateServiceIngress(41, 7, entry); err != nil {
+	if _, err := h.mapOps.CreateServiceIngress(41, 7, entry); err != nil {
 		t.Fatalf("re-create after delete: %v", err)
 	}
 }
