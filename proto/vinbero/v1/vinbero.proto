@@ -68,6 +68,20 @@ message SidFunction {
   // one of gtp_v4_src_addr / gtp_v4_src_position must be set for
   // END_M_GTP4_E.
   optional uint32 gtp_v4_src_position = 22;
+
+  // Service programming proxies (End.AS, draft-ietf-spring-srv6-service-programming).
+  // The forward direction reuses oif (IFACE-OUT) and, for End.AS, src_addr +
+  // segments as the static CACHE the return direction re-encapsulates with.
+  // iface_in / vlan_in name the dedicated return circuit; exactly one proxy
+  // segment may own a given {iface_in, vlan_in}.
+  optional uint32 iface_in = 23; // IFACE-IN ifindex (required for proxy actions)
+  optional uint32 vlan_in = 24; // IFACE-IN VLAN (omitted/0 = untagged)
+  Srv6ProxyInnerType inner_type = 25; // proxy INNER-TYPE (required for proxy actions)
+  // Service MAC (the draft's NH-ADDR) for L3 inner types. When set, the
+  // forward path rewrites the Ethernet header statically (source MAC is
+  // taken from the IFACE-OUT device); when omitted, the inner destination
+  // is resolved through the FIB (route it via IFACE-OUT).
+  optional string service_mac = 26;
 }
 
 message SidFunctionCreateRequest {

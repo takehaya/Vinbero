@@ -328,7 +328,6 @@ func TestProtoToEntry_Gtp4eSrcConfig(t *testing.T) {
 func TestProtoToEntry_ServiceProgrammingNotImplemented(t *testing.T) {
 	s := newProtoToEntryServer()
 	for _, action := range []v1.Srv6LocalAction{
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
@@ -345,4 +344,136 @@ func TestProtoToEntry_ServiceProgrammingNotImplemented(t *testing.T) {
 			t.Errorf("%s: unexpected error: %v", action, err)
 		}
 	}
+}
+
+// TestProtoToEntry_EndASValidation covers the proxy forward-direction
+// validation and the aux layout round trip for END_AS.
+func TestProtoToEntry_EndASValidation(t *testing.T) {
+	s := newProtoToEntryServer()
+	ifaceIn := uint32(42)
+	base := func() *v1.SidFunction {
+		in := ifaceIn
+		return &v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
+			TriggerPrefix: "fc00:2::100/128",
+			Oif:           7,
+			IfaceIn:       &in,
+			InnerType:     v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4,
+		}
+	}
+
+	t.Run("valid FIB mode", func(t *testing.T) {
+		entry, aux, err := s.protoToEntry(base())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if entry.Action != uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS) {
+			t.Fatalf("action = %d", entry.Action)
+		}
+		svc := bpf.SidAuxServiceData(aux)
+		if svc.IfaceOut != 7 || svc.IfaceIn != 42 || svc.InnerType != bpf.SvcInnerIPv4 || svc.Flags != 0 {
+			t.Fatalf("aux round trip mismatch: %+v", svc)
+		}
+	})
+
+	t.Run("missing oif", func(t *testing.T) {
+		sf := base()
+		sf.Oif = 0
+		if _, _, err := s.protoToEntry(sf); err == nil {
+			t.Fatal("expected error for missing oif")
+		}
+	})
+
+	t.Run("missing iface_in", func(t *testing.T) {
+		sf := base()
+		sf.IfaceIn = nil
+		if _, _, err := s.protoToEntry(sf); err == nil {
+			t.Fatal("expected error for missing iface_in")
+		}
+	})
+
+	t.Run("missing inner_type", func(t *testing.T) {
+		sf := base()
+		sf.InnerType = v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_UNSPECIFIED
+		if _, _, err := s.protoToEntry(sf); err == nil {
+			t.Fatal("expected error for missing inner_type")
+		}
+	})
+
+	t.Run("service_mac on Ethernet inner", func(t *testing.T) {
+		sf := base()
+		sf.InnerType = v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET
+		mac := "02:00:00:00:00:01"
+		sf.ServiceMac = &mac
+		if _, _, err := s.protoToEntry(sf); err == nil {
+			t.Fatal("expected error for service_mac with Ethernet inner")
+		}
+	})
+
+	t.Run("invalid service_mac", func(t *testing.T) {
+		sf := base()
+		mac := "not-a-mac"
+		sf.ServiceMac = &mac
+		if _, _, err := s.protoToEntry(sf); err == nil {
+			t.Fatal("expected error for invalid service_mac")
+		}
+	})
+}
+
+// TestBuildServiceIngress_EndAS covers the static CACHE validation.
+func TestBuildServiceIngress_EndAS(t *testing.T) {
+	s := newProtoToEntryServer()
+	ifaceIn := uint32(42)
+	base := func() *v1.SidFunction {
+		in := ifaceIn
+		return &v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
+			TriggerPrefix: "fc00:2::100/128",
+			Oif:           7,
+			IfaceIn:       &in,
+			InnerType:     v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4,
+			SrcAddr:       "fc00:2::1",
+			Segments:      []string{"fc00:3::3", "fc00:4::4"},
+		}
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		ing, err := s.buildServiceIngress(base())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ing.Behavior != bpf.SvcRetAS || ing.InnerTypeMask != bpf.SvcInnerIPv4 {
+			t.Fatalf("unexpected entry: %+v", ing)
+		}
+		if ing.Encap.NumSegments != 2 {
+			t.Fatalf("num segments = %d", ing.Encap.NumSegments)
+		}
+		if ing.Sid[0] != 0xfc {
+			t.Fatalf("owning sid not captured: % x", ing.Sid)
+		}
+	})
+
+	t.Run("missing segments", func(t *testing.T) {
+		sf := base()
+		sf.Segments = nil
+		if _, err := s.buildServiceIngress(sf); err == nil {
+			t.Fatal("expected error for missing segments")
+		}
+	})
+
+	t.Run("missing src_addr", func(t *testing.T) {
+		sf := base()
+		sf.SrcAddr = ""
+		if _, err := s.buildServiceIngress(sf); err == nil {
+			t.Fatal("expected error for missing src_addr")
+		}
+	})
+
+	t.Run("non-/128 trigger prefix", func(t *testing.T) {
+		sf := base()
+		sf.TriggerPrefix = "fc00:2::/64"
+		if _, err := s.buildServiceIngress(sf); err == nil {
+			t.Fatal("expected error for non-/128 prefix")
+		}
+	})
 }

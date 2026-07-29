@@ -77,3 +77,13 @@ func formatMode(mode v1.Srv6HeadendBehavior) string {
 func formatFlavor(flavor v1.Srv6LocalFlavor) string {
 	return formatProtoEnum(flavor, "SRV6_LOCAL_FLAVOR_")
 }
+
+// resolveProxyInnerType accepts the short forms used on the CLI (ipv4 /
+// ipv6 / l2) as well as the proto enum spellings.
+func resolveProxyInnerType(input string) (v1.Srv6ProxyInnerType, error) {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "l2", "ethernet", "eth":
+		return v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET, nil
+	}
+	return resolveProtoEnum[v1.Srv6ProxyInnerType](input, "SRV6_PROXY_INNER_TYPE_", v1.Srv6ProxyInnerType_value)
+}

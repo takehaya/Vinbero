@@ -141,6 +141,7 @@ jobs:
           - end-dt2-p2mp
           - end-dt2m-multihomed
           - end-dx2v
+          - end-as
           - headend-v4
           - headend-v6
           - headend-l2

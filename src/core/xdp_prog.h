@@ -230,6 +230,9 @@ struct sr_policy_value {
 #define SVC_INNER_IPV6     (1 << 1)
 #define SVC_INNER_ETHERNET (1 << 2)
 
+// sid_aux_entry.service.flags bits (forward direction)
+#define SVC_AUX_F_STATIC_MAC (1 << 0)  // dmac/smac pre-resolved; else FIB on inner DA
+
 // Key for service_ingress_map: the IFACE-IN attachment circuit. Same shape
 // as headend_l2_key / ingress_ac_key but a distinct type: a proxy IFACE-IN
 // is a dedicated point-to-point circuit owned by exactly one proxy segment.
@@ -384,6 +387,27 @@ struct sid_aux_entry {
         struct {
             __u32 vrf_ifindex;
         } l3vrf;                                           // 4 bytes
+
+        // End.AS/AD forward direction (service programming proxy).
+        // inner_type is a single SVC_INNER_* bit: the one payload type the
+        // proxy segment carries (the draft's INNER-TYPE, not a mask).
+        // With SVC_AUX_F_STATIC_MAC the control plane pre-resolved the
+        // service MAC (draft NH-ADDR) and the IFACE-OUT source MAC, so the
+        // forward path rewrites both and redirects; without it the inner
+        // DA is resolved through the FIB (the operator routes it via
+        // IFACE-OUT). iface_in mirrors the paired return circuit for
+        // cleanup and display only — the forward path never reads it.
+        struct {
+            __u32 iface_out;         // OIF towards the service
+            __u32 iface_in;          // paired IFACE-IN (control plane only)
+            __u16 vlan_in;           // paired IFACE-IN VLAN (control plane only)
+            __u8  inner_type;        // SVC_INNER_IPV4 / _IPV6 / _ETHERNET
+            __u8  flags;             // SVC_AUX_F_*
+            __u8  dmac[ETH_ALEN];    // service MAC, valid with STATIC_MAC
+            __u8  smac[ETH_ALEN];    // IFACE-OUT source MAC, valid with STATIC_MAC
+            __u8  hop_limit_margin;  // End.AD cache update margin (AS: unused)
+            __u8  _pad;
+        } service;                                         // 26 bytes
 
         // Plugin-defined raw payload. Sized larger than every behavior
         // variant so it is the union's layout anchor (pins the union size).
