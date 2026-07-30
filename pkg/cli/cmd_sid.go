@@ -43,6 +43,7 @@ func sidFunctionCommand() *cli.Command {
 					&cli.UintFlag{Name: "vlan-in", Usage: "Return circuit VLAN, 0 = untagged (for proxy actions)"},
 					&cli.StringFlag{Name: "inner-type", Usage: "Proxy INNER-TYPE: ipv4, ipv6, or l2 (for proxy actions)"},
 					&cli.StringFlag{Name: "service-mac", Usage: "Service MAC for static rewrite towards IFACE-OUT; omit to resolve the inner destination via FIB (for proxy actions, L3 inner only)"},
+					&cli.UintFlag{Name: "hop-limit-margin", Usage: "Tolerated outer hop-limit drift before the dynamic cache refreshes (for End.AD)"},
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 196 bytes after decode)"},
 					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
 					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},
@@ -156,6 +157,10 @@ func sidFunctionCommand() *cli.Command {
 					}
 					if mac := c.String("service-mac"); mac != "" {
 						sid.ServiceMac = &mac
+					}
+					if c.IsSet("hop-limit-margin") {
+						margin := uint32(c.Uint("hop-limit-margin"))
+						sid.HopLimitMargin = &margin
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),

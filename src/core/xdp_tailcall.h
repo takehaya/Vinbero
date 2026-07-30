@@ -50,7 +50,13 @@ struct tailcall_ctx {
                             // and masked on read in tailcall_epilogue. Denormalized
                             // from sid_entry.action / headend.mode so the epilogue
                             // doesn't need to switch on dispatch_type for union access.
-    __u8  _pad[3];          // Keep 4-byte alignment for vrf_id / union below
+    __u8  _pad;             // Keep 4-byte alignment for vrf_id / union below
+    __u16 svc_vlan_id;      // DISPATCH_SERVICE_RETURN only: the circuit VLAN the
+                            // front door matched (needed by the End.AD return
+                            // target to key ad_cache_map; the Ethernet-circuit
+                            // l3_offset=0 contract erases it from the offsets).
+                            // Set by tailcall_ctx_set_svc_vlan on every service
+                            // dispatch; stale for other dispatch types.
     __u32 vrf_id;           // Ingress VRF (front door), set once at the XDP entry
                             // (xdp_main) before dispatch. Lives outside the union
                             // so the dispatcher's union memcpy preserves it; read

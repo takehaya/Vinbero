@@ -250,7 +250,8 @@ type BpfTailcallCtx struct {
 	DispatchType uint8
 	InnerProto   uint8
 	Slot         uint8
-	Pad          [3]uint8
+	Pad          uint8
+	SvcVlanId    uint16
 	VrfId        uint32
 	FlowHash     uint32
 	SidEntry     BpfSidFunctionEntry
@@ -300,6 +301,7 @@ type BpfSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfProgramSpecs struct {
 	TailcallEndpointEnd            *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end"`
+	TailcallEndpointEndAd          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_ad"`
 	TailcallEndpointEndAs          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_as"`
 	TailcallEndpointEndB6          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6"`
 	TailcallEndpointEndB6Encaps    *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6_encaps"`
@@ -330,6 +332,7 @@ type BpfProgramSpecs struct {
 	TailcallHeadendV6H_insertRed   *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_insert_red"`
 	TailcallHeadendV6H_mGtp6D      *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_m_gtp6_d"`
 	TailcallHeadendV6H_mGtp6D_teid *ebpf.ProgramSpec `ebpf:"tailcall_headend_v6_h_m_gtp6_d_teid"`
+	TailcallServiceReturnAd        *ebpf.ProgramSpec `ebpf:"tailcall_service_return_ad"`
 	TailcallServiceReturnAs        *ebpf.ProgramSpec `ebpf:"tailcall_service_return_as"`
 	VinberoMain                    *ebpf.ProgramSpec `ebpf:"vinbero_main"`
 	VinberoTcIngress               *ebpf.ProgramSpec `ebpf:"vinbero_tc_ingress"`
@@ -507,6 +510,7 @@ type BpfVariables struct {
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfPrograms struct {
 	TailcallEndpointEnd            *ebpf.Program `ebpf:"tailcall_endpoint_end"`
+	TailcallEndpointEndAd          *ebpf.Program `ebpf:"tailcall_endpoint_end_ad"`
 	TailcallEndpointEndAs          *ebpf.Program `ebpf:"tailcall_endpoint_end_as"`
 	TailcallEndpointEndB6          *ebpf.Program `ebpf:"tailcall_endpoint_end_b6"`
 	TailcallEndpointEndB6Encaps    *ebpf.Program `ebpf:"tailcall_endpoint_end_b6_encaps"`
@@ -537,6 +541,7 @@ type BpfPrograms struct {
 	TailcallHeadendV6H_insertRed   *ebpf.Program `ebpf:"tailcall_headend_v6_h_insert_red"`
 	TailcallHeadendV6H_mGtp6D      *ebpf.Program `ebpf:"tailcall_headend_v6_h_m_gtp6_d"`
 	TailcallHeadendV6H_mGtp6D_teid *ebpf.Program `ebpf:"tailcall_headend_v6_h_m_gtp6_d_teid"`
+	TailcallServiceReturnAd        *ebpf.Program `ebpf:"tailcall_service_return_ad"`
 	TailcallServiceReturnAs        *ebpf.Program `ebpf:"tailcall_service_return_as"`
 	VinberoMain                    *ebpf.Program `ebpf:"vinbero_main"`
 	VinberoTcIngress               *ebpf.Program `ebpf:"vinbero_tc_ingress"`
@@ -545,6 +550,7 @@ type BpfPrograms struct {
 func (p *BpfPrograms) Close() error {
 	return _BpfClose(
 		p.TailcallEndpointEnd,
+		p.TailcallEndpointEndAd,
 		p.TailcallEndpointEndAs,
 		p.TailcallEndpointEndB6,
 		p.TailcallEndpointEndB6Encaps,
@@ -575,6 +581,7 @@ func (p *BpfPrograms) Close() error {
 		p.TailcallHeadendV6H_insertRed,
 		p.TailcallHeadendV6H_mGtp6D,
 		p.TailcallHeadendV6H_mGtp6D_teid,
+		p.TailcallServiceReturnAd,
 		p.TailcallServiceReturnAs,
 		p.VinberoMain,
 		p.VinberoTcIngress,
