@@ -1348,3 +1348,24 @@ func convertReducedSegmentsToBytes(segments [10][16]byte, numSegments int) [][16
 	}
 	return result
 }
+
+// buildPlainIPv6To builds a bare Ethernet + IPv6 + ICMPv6 packet towards
+// dst (used by the End.AS return-path link maintenance tests).
+func buildPlainIPv6To(t *testing.T, dst string) []byte {
+	t.Helper()
+	eth := newTestEthernet(layers.EthernetTypeIPv6)
+	ip6 := &layers.IPv6{
+		Version: 6, HopLimit: 64,
+		NextHeader: layers.IPProtocolICMPv6,
+		SrcIP:      net.ParseIP("2001:db8::1"),
+		DstIP:      net.ParseIP(dst),
+	}
+	icmp, icmpEcho := newTestICMPv6Echo()
+	_ = icmp.SetNetworkLayerForChecksum(ip6)
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, ip6, icmp, icmpEcho, gopacket.Payload(newTestPayload(32))); err != nil {
+		t.Fatalf("serialize plain IPv6: %v", err)
+	}
+	return buf.Bytes()
+}

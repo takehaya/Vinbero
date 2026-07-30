@@ -43,6 +43,16 @@ enum Srv6LocalAction {
   SRV6_LOCAL_ACTION_END_AN = 25; // End.AN (SR-aware service, draft-ietf-spring-srv6-service-programming)
 }
 
+// Srv6ProxyInnerType is the service-programming proxy INNER-TYPE
+// (draft-ietf-spring-srv6-service-programming): the one payload type the
+// proxy segment carries between the SR domain and the SR-unaware service.
+enum Srv6ProxyInnerType {
+  SRV6_PROXY_INNER_TYPE_UNSPECIFIED = 0;
+  SRV6_PROXY_INNER_TYPE_IPV4 = 1;
+  SRV6_PROXY_INNER_TYPE_IPV6 = 2;
+  SRV6_PROXY_INNER_TYPE_ETHERNET = 3;
+}
+
 // Srv6HeadendBehavior represents SRv6 Headend behavior types
 enum Srv6HeadendBehavior {
   SRV6_HEADEND_BEHAVIOR_UNSPECIFIED = 0;

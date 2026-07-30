@@ -67,6 +67,9 @@ const (
 	SvcInnerIPv4     = 1 << 0
 	SvcInnerIPv6     = 1 << 1
 	SvcInnerEthernet = 1 << 2
+
+	// sid_aux_entry.service.flags bits (SVC_AUX_F_* in src/core/xdp_prog.h)
+	SvcAuxFStaticMac = 1 << 0
 )
 
 // MupArgsOffsetNone is the headend_entry.args_offset sentinel meaning "do not
@@ -807,6 +810,106 @@ func SidAuxB6PolicyData(entry *SidAuxEntry) *HeadendEntry {
 	n := unsafe.Sizeof(*result)
 	src := (*[256]byte)(unsafe.Pointer(entry))[:n]
 	dst := (*[256]byte)(unsafe.Pointer(result))[:n]
+	copy(dst, src)
+	return result
+}
+
+// ========== Service programming (proxy return circuits) ==========
+
+// CreateServiceIngress binds a proxy return circuit {ifindex, vlan} to its
+// service_ingress_map entry. ebpf.UpdateNoExist makes the draft's
+// one-proxy-segment-per-IFACE-IN rule an atomic kernel-side check; a
+// re-bind by the SAME owning SID (idempotent re-apply / CACHE update) is
+// allowed and replaces the entry, returning the previous value so the
+// caller can restore it if a later step of its transaction fails. A bind
+// attempt by a different SID is a conflict.
+func (m *MapOperations) CreateServiceIngress(ifindex uint32, vlanID uint16, entry *ServiceIngressEntry) (*ServiceIngressEntry, error) {
+	key := ServiceIngressKey{Ifindex: ifindex, VlanId: vlanID}
+	err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateNoExist)
+	if err == nil {
+		return nil, nil
+	}
+	if !errors.Is(err, ebpf.ErrKeyExist) {
+		return nil, fmt.Errorf("failed to put service ingress entry: %w", err)
+	}
+	var existing ServiceIngressEntry
+	if err := m.objs.ServiceIngressMap.Lookup(&key, &existing); err != nil {
+		// Raced with a concurrent unbind; surface the conflict rather
+		// than retrying into someone else's window.
+		return nil, fmt.Errorf("iface_in %d vlan %d is already bound to another proxy segment", ifindex, vlanID)
+	}
+	if existing.Sid != entry.Sid {
+		return nil, fmt.Errorf("iface_in %d vlan %d is already bound to another proxy segment", ifindex, vlanID)
+	}
+	if err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateAny); err != nil {
+		return nil, fmt.Errorf("failed to update service ingress entry: %w", err)
+	}
+	return &existing, nil
+}
+
+// RestoreServiceIngress puts back a previously captured binding (rollback
+// path of CreateServiceIngress's same-SID update).
+func (m *MapOperations) RestoreServiceIngress(ifindex uint32, vlanID uint16, entry *ServiceIngressEntry) error {
+	key := ServiceIngressKey{Ifindex: ifindex, VlanId: vlanID}
+	if err := m.objs.ServiceIngressMap.Update(&key, entry, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("failed to restore service ingress entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteServiceIngress unbinds a proxy return circuit and drops any End.AD
+// cache learned on it (stale cached headers must not survive a rebind).
+func (m *MapOperations) DeleteServiceIngress(ifindex uint32, vlanID uint16) error {
+	key := ServiceIngressKey{Ifindex: ifindex, VlanId: vlanID}
+	if err := m.objs.ServiceIngressMap.Delete(&key); err != nil {
+		return fmt.Errorf("failed to delete service ingress entry: %w", err)
+	}
+	_ = m.objs.AdCacheMap.Delete(&key)
+	return nil
+}
+
+// GetServiceIngress reads one proxy return circuit binding.
+func (m *MapOperations) GetServiceIngress(ifindex uint32, vlanID uint16) (*ServiceIngressEntry, error) {
+	key := ServiceIngressKey{Ifindex: ifindex, VlanId: vlanID}
+	var entry ServiceIngressEntry
+	if err := m.objs.ServiceIngressMap.Lookup(&key, &entry); err != nil {
+		return nil, fmt.Errorf("service ingress entry not found for ifindex %d vlan %d: %w", ifindex, vlanID, err)
+	}
+	return &entry, nil
+}
+
+// SidAuxService mirrors the C union's service variant (End.AS/AD forward
+// direction). Field order and packing must match struct sid_aux_entry's
+// service member in src/core/xdp_prog.h byte-for-byte.
+type SidAuxService struct {
+	IfaceOut       uint32
+	IfaceIn        uint32
+	VlanIn         uint16
+	InnerType      uint8
+	Flags          uint8
+	Dmac           [6]byte
+	Smac           [6]byte
+	HopLimitMargin uint8
+	_              byte
+}
+
+// NewSidAuxService creates an aux entry for the service-programming
+// forward direction.
+func NewSidAuxService(svc *SidAuxService) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	n := unsafe.Sizeof(*svc)
+	src := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(svc))[:n]
+	dst := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(entry))[:n]
+	copy(dst, src)
+	return entry
+}
+
+// SidAuxServiceData extracts the service variant from a SidAuxEntry.
+func SidAuxServiceData(entry *SidAuxEntry) *SidAuxService {
+	result := &SidAuxService{}
+	n := unsafe.Sizeof(*result)
+	src := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(entry))[:n]
+	dst := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(result))[:n]
 	copy(dst, src)
 	return result
 }

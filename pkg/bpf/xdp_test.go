@@ -2885,14 +2885,16 @@ func TestXDPProgServiceReturnFrontDoor(t *testing.T) {
 		t.Fatalf("configured circuit, empty prog slot: expected XDP_DROP, got %d", ret)
 	}
 
-	// Inner type mismatch (circuit accepts IPv6 only): fail closed.
+	// Inner type mismatch (circuit accepts IPv6 only): the frame is link
+	// maintenance from the proxy's point of view (like ARP on an IPv4
+	// circuit) and goes to the kernel.
 	entry.InnerTypeMask = SvcInnerIPv6
 	if err := h.objs.ServiceIngressMap.Update(&loKey, &entry, 0); err != nil {
 		t.Fatalf("update service_ingress_map: %v", err)
 	}
 	ret, _ = h.runOnIfindex(pkt, 1)
-	if ret != XDP_DROP {
-		t.Fatalf("inner type mismatch: expected XDP_DROP, got %d", ret)
+	if ret != XDP_PASS {
+		t.Fatalf("inner type mismatch: expected XDP_PASS, got %d", ret)
 	}
 
 	// Ethernet-typed circuit accepts any frame (still drops on the empty
@@ -2904,5 +2906,283 @@ func TestXDPProgServiceReturnFrontDoor(t *testing.T) {
 	ret, _ = h.runOnIfindex(pkt, 1)
 	if ret != XDP_DROP {
 		t.Fatalf("ethernet circuit, empty prog slot: expected XDP_DROP, got %d", ret)
+	}
+}
+
+// ========== End.AS (service programming static proxy) ==========
+
+const actionEndAS = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS)
+
+func (h *xdpTestHelper) createSidFunctionEndAS(prefix string, svc *SidAuxService) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: actionEndAS}
+	if err := h.mapOps.CreateSidFunction(prefix, entry, NewSidAuxService(svc), OwnerRPC); err != nil {
+		h.t.Fatalf("Failed to create End.AS SID function: %v", err)
+	}
+}
+
+// TestXDPProgEndASForward covers the forward direction: strip the SR
+// encapsulation (regardless of SL — the chain state lives out of band)
+// and hand the payload to the service with a static MAC rewrite.
+func TestXDPProgEndASForward(t *testing.T) {
+	dmac := [6]byte{0x02, 0, 0, 0, 0, 0x01}
+	smac := [6]byte{0x02, 0, 0, 0, 0, 0x02}
+	svcV4 := &SidAuxService{
+		IfaceOut: 1, IfaceIn: 999, InnerType: SvcInnerIPv4,
+		Flags: SvcAuxFStaticMac, Dmac: dmac, Smac: smac,
+	}
+	innerSrc := net.ParseIP("10.0.0.1")
+	innerDst := net.ParseIP("172.0.2.1")
+
+	t.Run("SRH inner IPv4 mid-chain", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		h.createSidFunctionEndAS("fc00:aaaa::1/128", svcV4)
+		segments := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:aaaa::1")}
+		pkt, err := buildSRv6PacketWithInnerIPv4(
+			net.ParseIP("fc00::1"), net.ParseIP("fc00:aaaa::1"), segments, 1, innerSrc, innerDst)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT, got %d", ret)
+		}
+		if !verifyEtherType(t, out, 0x0800) {
+			return
+		}
+		if !bytes.Equal(out[0:6], dmac[:]) || !bytes.Equal(out[6:12], smac[:]) {
+			t.Fatalf("static MAC rewrite missing: dst=% x src=% x", out[0:6], out[6:12])
+		}
+		if !verifyDecapsulated(t, out, innerSrc, innerDst, true) {
+			return
+		}
+	})
+
+	t.Run("SRH inner type mismatch drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		svcV6 := *svcV4
+		svcV6.InnerType = SvcInnerIPv6
+		h.createSidFunctionEndAS("fc00:aaaa::2/128", &svcV6)
+		segments := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:aaaa::2")}
+		pkt, err := buildSRv6PacketWithInnerIPv4(
+			net.ParseIP("fc00::1"), net.ParseIP("fc00:aaaa::2"), segments, 1, innerSrc, innerDst)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, _ := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP on inner type mismatch, got %d", ret)
+		}
+	})
+
+	t.Run("reduced encap inner IPv4", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		h.createSidFunctionEndAS("fc00:aaaa::3/128", svcV4)
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			net.ParseIP("fc00::1"), net.ParseIP("fc00:aaaa::3"), innerSrc, innerDst, innerTypeIPv4)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT, got %d", ret)
+		}
+		if !verifyEtherType(t, out, 0x0800) {
+			return
+		}
+		if !verifyDecapsulated(t, out, innerSrc, innerDst, true) {
+			return
+		}
+	})
+
+	t.Run("reduced encap inner Ethernet", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		svcL2 := *svcV4
+		svcL2.InnerType = SvcInnerEthernet
+		svcL2.Flags = 0
+		h.createSidFunctionEndAS("fc00:aaaa::4/128", &svcL2)
+		pkt, err := buildL2EncapsulatedPacketNoSRH(
+			net.ParseIP("fc00::1"), net.ParseIP("fc00:aaaa::4"), 100, innerSrc, innerDst, true)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT, got %d", ret)
+		}
+		// The whole inner frame (VLAN tagged) is exposed as-is.
+		if !verifyInnerVlanFrame(t, out, 0, 100) {
+			return
+		}
+	})
+}
+
+// TestXDPProgEndASReturn covers the return direction: frames from the
+// IFACE-IN circuit are re-encapsulated from the static CACHE, while link
+// maintenance traffic keeps flowing to the kernel.
+func TestXDPProgEndASReturn(t *testing.T) {
+	srcAddr, _ := ParseIPv6("fc00:2::100")
+	segStrs := []string{"fc00:3::3"}
+	segments, numSegments, _ := ParseSegments(segStrs)
+	baseEntry := func(mask uint8) *ServiceIngressEntry {
+		return &ServiceIngressEntry{
+			Behavior:      SvcRetAS,
+			InnerTypeMask: mask,
+			Encap: HeadendEntry{
+				Mode:        modeHEncaps,
+				NumSegments: numSegments,
+				SrcAddr:     srcAddr,
+				Segments:    segments,
+			},
+		}
+	}
+
+	t.Run("IPv4 re-encapsulation", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		innerSrc := net.ParseIP("10.0.0.9")
+		innerDst := net.ParseIP("172.0.2.1")
+		pkt, err := buildSimpleIPv4Packet(innerSrc.To4(), innerDst.To4())
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, out := h.runOnIfindex(pkt, 1)
+		// FIB lookup for fc00:3::3 fails in the test environment, so the
+		// encapsulated packet is handed to the kernel (XDP_PASS), same as
+		// the H.Encaps headend tests.
+		if ret != XDP_PASS {
+			t.Fatalf("expected XDP_PASS, got %d", ret)
+		}
+		if !verifyEtherType(t, out, 0x86DD) {
+			return
+		}
+		var wantDst [16]byte
+		copy(wantDst[:], net.ParseIP("fc00:3::3").To16())
+		if !verifyOuterIPv6Header(t, out, srcAddr, wantDst) {
+			return
+		}
+		expectedSegs := [][16]byte{wantDst}
+		if !verifySRHStructure(t, out, 1, expectedSegs) {
+			return
+		}
+		if !verifyInnerPacket(t, out, 1, innerSrc, innerDst, true) {
+			return
+		}
+	})
+
+	t.Run("IPv4 multicast passes to kernel", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		pkt, err := buildSimpleIPv4Packet(net.ParseIP("10.0.0.9").To4(), net.ParseIP("224.0.0.1").To4())
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, out := h.runOnIfindex(pkt, 1)
+		if ret != XDP_PASS {
+			t.Fatalf("expected XDP_PASS, got %d", ret)
+		}
+		if !bytes.Equal(out[:len(pkt)], pkt) {
+			t.Fatalf("multicast frame was modified")
+		}
+	})
+
+	t.Run("IPv6 ND passes to kernel", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv6)); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		for _, dst := range []string{"ff02::1:ff00:1", "fe80::1"} {
+			pkt := buildPlainIPv6To(t, dst)
+			ret, out := h.runOnIfindex(pkt, 1)
+			if ret != XDP_PASS {
+				t.Fatalf("dst %s: expected XDP_PASS, got %d", dst, ret)
+			}
+			if !bytes.Equal(out[:len(pkt)], pkt) {
+				t.Fatalf("dst %s: link maintenance frame was modified", dst)
+			}
+		}
+	})
+
+	t.Run("Ethernet circuit wraps the whole frame", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerEthernet)); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		pkt := buildPlainIPv4(t)
+		ret, out := h.runOnIfindex(pkt, 1)
+		// do_h_encaps_l2 converts a FIB miss to XDP_DROP (an L2-wrapped
+		// frame must never be handed to the kernel with stale pointers),
+		// and the test environment has no route for the segment. The
+		// encapsulation itself is still visible in the output buffer.
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP (L2 encap FIB miss), got %d", ret)
+		}
+		if !verifyEtherType(t, out, 0x86DD) {
+			return
+		}
+		// SRH nexthdr must be Ethernet (143): the payload is the frame.
+		ip6Start := 14
+		srhStart := ip6Start + 40
+		if len(out) < srhStart+8 {
+			t.Fatalf("output too short for SRH")
+		}
+		if out[ip6Start+6] != 43 {
+			t.Fatalf("outer nexthdr = %d, want 43 (routing)", out[ip6Start+6])
+		}
+		if out[srhStart] != 143 {
+			t.Fatalf("SRH nexthdr = %d, want 143 (Ethernet)", out[srhStart])
+		}
+	})
+}
+
+// TestServiceIngressLifecycle exercises the control-plane invariants of
+// the return-circuit binding: atomic uniqueness and AD-cache cleanup.
+func TestServiceIngressLifecycle(t *testing.T) {
+	h := newXDPTestHelper(t)
+	entry := &ServiceIngressEntry{Behavior: SvcRetAS, InnerTypeMask: SvcInnerIPv4}
+
+	entry.Sid[15] = 0x01
+	if _, err := h.mapOps.CreateServiceIngress(41, 7, entry); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Same owning SID: idempotent re-bind succeeds and reports the
+	// previous value (rollback handle).
+	updated := *entry
+	updated.InnerTypeMask = SvcInnerIPv6
+	prev, err := h.mapOps.CreateServiceIngress(41, 7, &updated)
+	if err != nil {
+		t.Fatalf("same-SID re-bind: %v", err)
+	}
+	if prev == nil || prev.InnerTypeMask != SvcInnerIPv4 {
+		t.Fatalf("same-SID re-bind did not report the previous binding: %+v", prev)
+	}
+	// Different owning SID: conflict.
+	other := *entry
+	other.Sid[15] = 0x02
+	if _, err := h.mapOps.CreateServiceIngress(41, 7, &other); err == nil {
+		t.Fatalf("bind by a different SID must fail (one proxy segment per IFACE-IN)")
+	}
+	if _, err := h.mapOps.GetServiceIngress(41, 7); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	// Seed a fake AD cache row; Delete must clear it alongside the binding.
+	key := ServiceIngressKey{Ifindex: 41, VlanId: 7}
+	if err := h.objs.AdCacheMap.Update(&key, &AdCacheVal{Valid: 1, HdrLen: 48}, 0); err != nil {
+		t.Fatalf("seed ad cache: %v", err)
+	}
+	if err := h.mapOps.DeleteServiceIngress(41, 7); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	var stale AdCacheVal
+	if err := h.objs.AdCacheMap.Lookup(&key, &stale); err == nil {
+		t.Fatalf("ad cache row survived the circuit unbind")
+	}
+	if _, err := h.mapOps.CreateServiceIngress(41, 7, entry); err != nil {
+		t.Fatalf("re-create after delete: %v", err)
 	}
 }

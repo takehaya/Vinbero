@@ -39,6 +39,10 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "gtp-v4-src-addr", Usage: "GTP4 outer IPv4 source address (for End.M.GTP4.E)"},
 					&cli.UintFlag{Name: "gtp-v4-src-position", Usage: "Extract the GTP4 outer IPv4 source from the outer IPv6 SA at this bit position 0..96 (RFC 9433 6.6, for End.M.GTP4.E; mutually exclusive with --gtp-v4-src-addr)"},
 					&cli.UintFlag{Name: "table-id", Usage: "VLAN table ID (for End.DX2V)"},
+					&cli.UintFlag{Name: "iface-in", Usage: "Return circuit ifindex (IFACE-IN, for proxy actions like End.AS)"},
+					&cli.UintFlag{Name: "vlan-in", Usage: "Return circuit VLAN, 0 = untagged (for proxy actions)"},
+					&cli.StringFlag{Name: "inner-type", Usage: "Proxy INNER-TYPE: ipv4, ipv6, or l2 (for proxy actions)"},
+					&cli.StringFlag{Name: "service-mac", Usage: "Service MAC for static rewrite towards IFACE-OUT; omit to resolve the inner destination via FIB (for proxy actions, L3 inner only)"},
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 196 bytes after decode)"},
 					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
 					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},
@@ -134,6 +138,24 @@ func sidFunctionCommand() *cli.Command {
 					if c.IsSet("gtp-v4-src-position") {
 						pos := uint32(c.Uint("gtp-v4-src-position"))
 						sid.GtpV4SrcPosition = &pos
+					}
+					if c.IsSet("iface-in") {
+						ifaceIn := uint32(c.Uint("iface-in"))
+						sid.IfaceIn = &ifaceIn
+					}
+					if c.IsSet("vlan-in") {
+						vlanIn := uint32(c.Uint("vlan-in"))
+						sid.VlanIn = &vlanIn
+					}
+					if it := c.String("inner-type"); it != "" {
+						innerType, err := resolveProxyInnerType(it)
+						if err != nil {
+							return err
+						}
+						sid.InnerType = innerType
+					}
+					if mac := c.String("service-mac"); mac != "" {
+						sid.ServiceMac = &mac
 					}
 
 					resp, err := clients.Sid.SidFunctionCreate(context.Background(),

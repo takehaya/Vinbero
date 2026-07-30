@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 
@@ -124,6 +125,35 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		return err
 	}
 
+	// Proxy SIDs bind their return circuit before the SID goes live so the
+	// draft's one-proxy-per-IFACE-IN rule is enforced atomically
+	// (CreateServiceIngress uses a no-exist update). The defer unbinds it
+	// again when any later step fails.
+	if v1.Srv6LocalAction(entry.Action) == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS {
+		ingress, err := s.buildServiceIngress(sidFunc)
+		if err != nil {
+			return err
+		}
+		ifaceIn := sidFunc.GetIfaceIn()
+		vlanIn := uint16(sidFunc.GetVlanIn())
+		prev, err := s.mapOps.CreateServiceIngress(ifaceIn, vlanIn, ingress)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if committed {
+				return
+			}
+			// Fresh bind: unbind. Same-SID re-bind: restore the previous
+			// binding instead of leaving the circuit half-updated.
+			if prev == nil {
+				_ = s.mapOps.DeleteServiceIngress(ifaceIn, vlanIn)
+			} else {
+				_ = s.mapOps.RestoreServiceIngress(ifaceIn, vlanIn, prev)
+			}
+		}()
+	}
+
 	// plugin_aux_index path: aux already owned by the PluginAux RPC
 	// lifecycle. CreateSidFunctionWithAuxIndex verifies the owner tag
 	// atomically with the bind so a racing Free cannot reassign the idx.
@@ -212,6 +242,9 @@ func (s *SidFunctionServer) SidFunctionDelete(
 	}
 
 	for _, prefix := range req.Msg.TriggerPrefixes {
+		// Capture the proxy return circuit before the SID (and its aux)
+		// disappears; unbind it only after the delete succeeds.
+		circuitIf, circuitVlan, hasCircuit := s.captureProxyCircuit(prefix)
 		if err := s.mapOps.DeleteSidFunction(prefix, bpf.OwnerRPC); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: prefix,
@@ -228,6 +261,9 @@ func (s *SidFunctionServer) SidFunctionDelete(
 			}
 		}
 		// End.B6 policy is cleaned up automatically with aux entry
+		if hasCircuit {
+			_ = s.mapOps.DeleteServiceIngress(circuitIf, circuitVlan)
+		}
 		resp.DeletedTriggerPrefixes = append(resp.DeletedTriggerPrefixes, prefix)
 	}
 
@@ -278,9 +314,27 @@ func (s *SidFunctionServer) SidFunctionFlush(
 	ctx context.Context,
 	req *connect.Request[v1.SidFunctionFlushRequest],
 ) (*connect.Response[v1.SidFunctionFlushResponse], error) {
+	// Collect proxy return circuits before the SIDs (and their aux
+	// entries) are gone, then unbind them after the flush.
+	type circuit struct {
+		ifaceIn uint32
+		vlanIn  uint16
+	}
+	var circuits []circuit
+	if entries, err := s.mapOps.ListSidFunctions(); err == nil {
+		for prefix := range entries {
+			if ifaceIn, vlanIn, ok := s.captureProxyCircuit(prefix); ok {
+				circuits = append(circuits, circuit{ifaceIn, vlanIn})
+			}
+		}
+	}
+
 	count, err := s.mapOps.FlushSidFunctions(bpf.OwnerRPC)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	for _, c := range circuits {
+		_ = s.mapOps.DeleteServiceIngress(c.ifaceIn, c.vlanIn)
 	}
 	return connect.NewResponse(&v1.SidFunctionFlushResponse{DeletedCount: count}), nil
 }
@@ -437,14 +491,20 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			aux = bpf.NewSidAuxB6Policy(policyEntry)
 		}
 
-	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS:
+		svc, err := s.buildServiceAux(sidFunc)
+		if err != nil {
+			return nil, nil, err
+		}
+		aux = bpf.NewSidAuxService(svc)
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN:
-		// Service-programming behaviors land per-behavior on top of the
-		// shared return-path base. Until a behavior's forward/return
-		// programs are registered, accepting the SID would install a
-		// silent no-op (empty tail-call slot), so reject explicitly.
+		// These land per-behavior on top of the shared return-path base.
+		// Until a behavior's forward/return programs are registered,
+		// accepting the SID would install a silent no-op (empty
+		// tail-call slot), so reject explicitly.
 		return nil, nil, fmt.Errorf("action %s is not implemented yet", action)
 	}
 
@@ -474,6 +534,129 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	}
 
 	return entry, aux, nil
+}
+
+// svcInnerBit maps the proto INNER-TYPE to the dataplane SVC_INNER_* bit.
+func svcInnerBit(t v1.Srv6ProxyInnerType) (uint8, error) {
+	switch t {
+	case v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4:
+		return bpf.SvcInnerIPv4, nil
+	case v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV6:
+		return bpf.SvcInnerIPv6, nil
+	case v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET:
+		return bpf.SvcInnerEthernet, nil
+	default:
+		return 0, fmt.Errorf("proxy actions require inner_type (IPV4 / IPV6 / ETHERNET)")
+	}
+}
+
+// buildServiceAux validates the proxy forward-direction config and builds
+// the service aux variant. The IFACE-OUT source MAC is resolved here (from
+// the oif device) so the data plane never needs neighbour state in static
+// MAC mode.
+func (s *SidFunctionServer) buildServiceAux(sidFunc *v1.SidFunction) (*bpf.SidAuxService, error) {
+	if sidFunc.Oif == 0 {
+		return nil, fmt.Errorf("proxy actions require oif (IFACE-OUT ifindex)")
+	}
+	if sidFunc.GetIfaceIn() == 0 {
+		return nil, fmt.Errorf("proxy actions require iface_in (return circuit ifindex)")
+	}
+	if sidFunc.GetVlanIn() > 4095 {
+		return nil, fmt.Errorf("vlan_in %d out of range (0..4095)", sidFunc.GetVlanIn())
+	}
+	innerBit, err := svcInnerBit(sidFunc.InnerType)
+	if err != nil {
+		return nil, err
+	}
+
+	svc := &bpf.SidAuxService{
+		IfaceOut:  sidFunc.Oif,
+		IfaceIn:   sidFunc.GetIfaceIn(),
+		VlanIn:    uint16(sidFunc.GetVlanIn()),
+		InnerType: innerBit,
+	}
+
+	if mac := sidFunc.GetServiceMac(); mac != "" {
+		if innerBit == bpf.SvcInnerEthernet {
+			return nil, fmt.Errorf("service_mac is only valid for L3 inner types (the L2 frame is forwarded untouched)")
+		}
+		hw, err := net.ParseMAC(mac)
+		if err != nil || len(hw) != 6 {
+			return nil, fmt.Errorf("invalid service_mac %q", mac)
+		}
+		oifDev, err := net.InterfaceByIndex(int(sidFunc.Oif))
+		if err != nil {
+			return nil, fmt.Errorf("resolve oif %d: %w", sidFunc.Oif, err)
+		}
+		if len(oifDev.HardwareAddr) != 6 {
+			return nil, fmt.Errorf("oif %d (%s) has no usable MAC for static rewrite", sidFunc.Oif, oifDev.Name)
+		}
+		svc.Flags |= bpf.SvcAuxFStaticMac
+		copy(svc.Dmac[:], hw)
+		copy(svc.Smac[:], oifDev.HardwareAddr)
+	}
+
+	return svc, nil
+}
+
+// buildServiceIngress builds the return-circuit binding for a proxy SID.
+// For End.AS the static CACHE (outer source + segment list) is embedded so
+// the return path re-encapsulates in one lookup.
+func (s *SidFunctionServer) buildServiceIngress(sidFunc *v1.SidFunction) (*bpf.ServiceIngressEntry, error) {
+	innerBit, err := svcInnerBit(sidFunc.InnerType)
+	if err != nil {
+		return nil, err
+	}
+	if len(sidFunc.Segments) == 0 {
+		return nil, fmt.Errorf("END_AS requires segments (the static CACHE the return path re-encapsulates with)")
+	}
+	if sidFunc.SrcAddr == "" {
+		return nil, fmt.Errorf("END_AS requires src_addr (outer IPv6 source of the re-encapsulation)")
+	}
+	srcAddr, err := bpf.ParseIPv6(sidFunc.SrcAddr)
+	if err != nil {
+		return nil, err
+	}
+	segments, numSegments, err := bpf.ParseSegments(sidFunc.Segments)
+	if err != nil {
+		return nil, err
+	}
+	sid, err := parseLocatorSID(sidFunc.TriggerPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("proxy trigger_prefix must be a /128 SID: %w", err)
+	}
+
+	entry := &bpf.ServiceIngressEntry{
+		Behavior:      bpf.SvcRetAS,
+		InnerTypeMask: innerBit,
+		Sid:           sid.As16(),
+		Encap: bpf.HeadendEntry{
+			Mode:        uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+			NumSegments: numSegments,
+			SrcAddr:     srcAddr,
+			Segments:    segments,
+		},
+	}
+	return entry, nil
+}
+
+// captureProxyCircuit returns the return circuit bound to prefix when it
+// names a proxy SID, so delete/flush can clean service_ingress_map after
+// the SID entry goes away.
+func (s *SidFunctionServer) captureProxyCircuit(prefix string) (ifaceIn uint32, vlanIn uint16, ok bool) {
+	entry, err := s.mapOps.GetSidFunction(prefix)
+	if err != nil || entry == nil || entry.AuxIndex == 0 {
+		return 0, 0, false
+	}
+	if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS {
+		return 0, 0, false
+	}
+	aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))
+	if err != nil || aux == nil {
+		return 0, 0, false
+	}
+	svc := bpf.SidAuxServiceData(aux)
+	return svc.IfaceIn, svc.VlanIn, svc.IfaceIn != 0
 }
 
 // encodePluginAuxJSON resolves the plugin's BTF aux type and asks the
@@ -573,6 +756,33 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				sf.Segments = bpf.FormatSegments(policy.Segments, policy.NumSegments)
 				sf.HeadendMode = v1.Srv6HeadendBehavior(policy.Mode)
 				sf.SrcAddr = bpf.FormatIPv6(policy.SrcAddr)
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS:
+				svc := bpf.SidAuxServiceData(aux)
+				sf.Oif = svc.IfaceOut
+				ifaceIn := svc.IfaceIn
+				sf.IfaceIn = &ifaceIn
+				if svc.VlanIn != 0 {
+					vlanIn := uint32(svc.VlanIn)
+					sf.VlanIn = &vlanIn
+				}
+				switch svc.InnerType {
+				case bpf.SvcInnerIPv4:
+					sf.InnerType = v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4
+				case bpf.SvcInnerIPv6:
+					sf.InnerType = v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV6
+				case bpf.SvcInnerEthernet:
+					sf.InnerType = v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET
+				}
+				if svc.Flags&bpf.SvcAuxFStaticMac != 0 {
+					mac := net.HardwareAddr(svc.Dmac[:]).String()
+					sf.ServiceMac = &mac
+				}
+				// The static CACHE lives in the return-circuit binding.
+				if ing, err := s.mapOps.GetServiceIngress(svc.IfaceIn, svc.VlanIn); err == nil {
+					sf.Segments = bpf.FormatSegments(ing.Encap.Segments, ing.Encap.NumSegments)
+					sf.SrcAddr = bpf.FormatIPv6(ing.Encap.SrcAddr)
+				}
 			}
 		}
 	}

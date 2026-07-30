@@ -154,6 +154,7 @@ func populateProgArrays(objs *BpfObjects) error {
 		19: objs.TailcallEndpointEndM_gtp6D_di,
 		20: objs.TailcallEndpointEndM_gtp6E,
 		21: objs.TailcallEndpointEndM_gtp4E,
+		14: objs.TailcallEndpointEndAs,
 		22: objs.TailcallEndpointEndDx2v,
 		23: objs.TailcallEndpointEndDt2m,
 	}
@@ -205,10 +206,17 @@ func populateProgArrays(objs *BpfObjects) error {
 		}
 	}
 
-	// service_return_progs (indexed by SVC_RET_*) has no targets yet: the
-	// proxy behaviors land per-behavior (End.AS / End.AD / End.AM), each
-	// registering its return program here. Until then try_service_return
-	// fails closed (drops) on any configured circuit.
+	// Service-return PROG_ARRAY (indexed by SVC_RET_*). Behaviors without
+	// an entry here (End.AD / End.AM until they land) fail closed in
+	// try_service_return.
+	serviceReturnProgs := map[uint32]*ebpf.Program{
+		SvcRetAS: objs.TailcallServiceReturnAs,
+	}
+	for idx, prog := range serviceReturnProgs {
+		if err := objs.ServiceReturnProgs.Update(idx, prog, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("service_return_progs[%d]: %w", idx, err)
+		}
+	}
 
 	return nil
 }

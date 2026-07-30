@@ -1,4 +1,4 @@
-// Endpoint tail call targets (18 SEC("xdp") programs).
+// Endpoint tail call targets (19 SEC("xdp") programs).
 // Included from xdp_prog.c — not compiled standalone.
 
 // ========== Helpers shared by tail call targets (nosrh path) ==========
@@ -234,6 +234,53 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_dt46, ctx, ip6h, srh, &tctx->sid_entry, aux);
+    TAILCALL_RETURN(ctx,action);
+}
+
+// End.AS: same handwritten shape as End.DX4/DX6 — the nosrh branch calls
+// srv6_decap*_nosrh directly with a constant expected proto per family and
+// must NOT pre-derive ip6h (the DUAL macro's ip6h bounds check lets clang
+// elide the decap helper's own eth check, which the verifier then rejects
+// on the merged path).
+SEC("xdp")
+int tailcall_endpoint_end_as(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
+    __u8 inner_type = aux->service.inner_type;
+
+    if (tctx->dispatch_type == DISPATCH_NOSRH) {
+        if (inner_type == SVC_INNER_ETHERNET) {
+            if (aux->service.iface_out == 0)
+                TAILCALL_RETURN(ctx,XDP_DROP);
+            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_l2_nosrh, ctx, tctx->inner_proto) != 0)
+                TAILCALL_RETURN(ctx,XDP_DROP);
+            TAILCALL_RETURN(ctx,bpf_redirect(aux->service.iface_out, 0));
+        }
+        if (inner_type == SVC_INNER_IPV4) {
+            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)
+                TAILCALL_RETURN(ctx,XDP_DROP);
+            TAILCALL_RETURN(ctx,svc_fwd_l3_out(ctx, aux, SVC_INNER_IPV4));
+        }
+        if (inner_type == SVC_INNER_IPV6) {
+            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, tctx->inner_proto) != 0)
+                TAILCALL_RETURN(ctx,XDP_DROP);
+            TAILCALL_RETURN(ctx,svc_fwd_l3_out(ctx, aux, SVC_INNER_IPV6));
+        }
+        TAILCALL_RETURN(ctx,XDP_DROP);
+    }
+
+    struct ethhdr *eth;
+    struct ipv6hdr *ip6h;
+    struct ipv6_sr_hdr *srh;
+    TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_as, ctx, ip6h, srh,
+                                    &tctx->sid_entry, aux);
     TAILCALL_RETURN(ctx,action);
 }
 
