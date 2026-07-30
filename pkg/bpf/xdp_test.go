@@ -3186,3 +3186,209 @@ func TestServiceIngressLifecycle(t *testing.T) {
 		t.Fatalf("re-create after delete: %v", err)
 	}
 }
+
+// ========== End.AD (service programming dynamic proxy) ==========
+
+const actionEndAD = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD)
+
+func (h *xdpTestHelper) createSidFunctionEndAD(prefix string, svc *SidAuxService) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: actionEndAD}
+	if err := h.mapOps.CreateSidFunction(prefix, entry, NewSidAuxService(svc), OwnerRPC); err != nil {
+		h.t.Fatalf("Failed to create End.AD SID function: %v", err)
+	}
+}
+
+// TestXDPProgEndADForwardAndReplay drives the full dynamic-proxy cycle:
+// the forward direction seeds ad_cache_map with the ready-to-prepend
+// outer (SL decremented, DA = next segment, flow label zeroed), and the
+// return direction replays it with a per-packet payload length.
+func TestXDPProgEndADForwardAndReplay(t *testing.T) {
+	h := newXDPTestHelper(t)
+	dmac := [6]byte{0x02, 0, 0, 0, 0, 0x11}
+	smac := [6]byte{0x02, 0, 0, 0, 0, 0x12}
+	// The return circuit lives on {lo, VLAN 7}: BPF_PROG_TEST_RUN pins
+	// ingress_ifindex to lo (1) for every run, so an untagged circuit
+	// would swallow the forward SRv6 packet at the front door before the
+	// endpoint dispatch ever sees it.
+	svc := &SidAuxService{
+		IfaceOut: 1, IfaceIn: 1, VlanIn: 7, InnerType: SvcInnerIPv4,
+		Flags: SvcAuxFStaticMac, Dmac: dmac, Smac: smac,
+		HopLimitMargin: 2,
+	}
+	h.createSidFunctionEndAD("fc00:adad::1/128", svc)
+	if _, err := h.mapOps.CreateServiceIngress(1, 7, &ServiceIngressEntry{
+		Behavior: SvcRetAD, InnerTypeMask: SvcInnerIPv4,
+	}); err != nil {
+		t.Fatalf("create service ingress: %v", err)
+	}
+
+	innerSrc := net.ParseIP("10.0.0.1")
+	innerDst := net.ParseIP("172.0.2.1")
+	outerSrc := net.ParseIP("fc00::1")
+	segments := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:adad::1")}
+	fwd, err := buildSRv6PacketWithInnerIPv4(outerSrc, net.ParseIP("fc00:adad::1"), segments, 1, innerSrc, innerDst)
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
+	}
+
+	ret, out := h.run(fwd)
+	if ret != XDP_REDIRECT {
+		t.Fatalf("forward: expected XDP_REDIRECT, got %d", ret)
+	}
+	if !verifyEtherType(t, out, 0x0800) {
+		return
+	}
+	if !verifyDecapsulated(t, out, innerSrc, innerDst, true) {
+		return
+	}
+
+	// The cache row must hold outer(40) + SRH(8 + 2*16) with the chain
+	// state advanced and the flow label zeroed.
+	key := ServiceIngressKey{Ifindex: 1, VlanId: 7}
+	var val AdCacheVal
+	if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil {
+		t.Fatalf("ad cache row missing: %v", err)
+	}
+	if val.Valid != 1 || val.HdrLen != 40+8+2*16 {
+		t.Fatalf("cache row: valid=%d hdr_len=%d", val.Valid, val.HdrLen)
+	}
+	if !bytes.Equal(val.Hdr[24:40], net.ParseIP("fc00:3::3").To16()) {
+		t.Fatalf("cached DA is not the next segment: % x", val.Hdr[24:40])
+	}
+	if val.Hdr[40+3] != 0 {
+		t.Fatalf("cached SRH SL = %d, want 0", val.Hdr[40+3])
+	}
+	if val.Hdr[1]&0x0f != 0 || val.Hdr[2] != 0 || val.Hdr[3] != 0 {
+		t.Fatalf("cached flow label not zeroed: % x", val.Hdr[0:4])
+	}
+
+	// Replay: a bare IPv4 frame from the circuit comes back wearing the
+	// cached outer with a recomputed payload length.
+	back, err := buildVlanTaggedIPv4Packet(7, innerDst.To4(), innerSrc.To4())
+	if err != nil {
+		t.Fatalf("build return packet: %v", err)
+	}
+	ret, out = h.runOnIfindex(back, 1)
+	if ret != XDP_PASS {
+		t.Fatalf("replay: expected XDP_PASS (FIB miss in test env), got %d", ret)
+	}
+	if !verifyEtherType(t, out, 0x86DD) {
+		return
+	}
+	var wantSrc, wantDst [16]byte
+	copy(wantSrc[:], outerSrc.To16())
+	copy(wantDst[:], net.ParseIP("fc00:3::3").To16())
+	if !verifyOuterIPv6Header(t, out, wantSrc, wantDst) {
+		return
+	}
+	innerLen := len(back) - 18 // Ethernet + VLAN tag are both consumed
+	wantPayload := int(val.HdrLen) - 40 + innerLen
+	gotPayload := int(binary.BigEndian.Uint16(out[14+4 : 14+6]))
+	if gotPayload != wantPayload {
+		t.Fatalf("outer payload_len = %d, want %d", gotPayload, wantPayload)
+	}
+	if !verifyInnerPacket(t, out, 2, innerDst, innerSrc, true) {
+		return
+	}
+
+	// Hop-limit wobble within the margin must not rewrite the cache;
+	// beyond the margin it must.
+	seedHop := val.Hdr[7]
+	within := make([]byte, len(fwd))
+	copy(within, fwd)
+	within[14+7] = seedHop - 1 // outer hop limit, margin is 2
+	if ret, _ := h.run(within); ret != XDP_REDIRECT {
+		t.Fatalf("within-margin forward: expected XDP_REDIRECT, got %d", ret)
+	}
+	if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil {
+		t.Fatalf("ad cache row missing: %v", err)
+	}
+	if val.HopLimit != seedHop {
+		t.Fatalf("cache rewritten within margin: hop %d -> %d", seedHop, val.HopLimit)
+	}
+	// A chain change behind an unchanged next segment (deep segment
+	// byte flips, DA stays the same) must refresh the cache even though
+	// the hop limit is untouched.
+	deep := make([]byte, len(fwd))
+	copy(deep, fwd)
+	deep[14+40+8+16+15] ^= 0xff // last byte of segment[1]
+	if ret, _ := h.run(deep); ret != XDP_REDIRECT {
+		t.Fatalf("deep-segment forward: expected XDP_REDIRECT, got %d", ret)
+	}
+	if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil {
+		t.Fatalf("ad cache row missing: %v", err)
+	}
+	if val.Hdr[40+8+16+15] != deep[14+40+8+16+15] {
+		t.Fatalf("cache not refreshed on deep segment change")
+	}
+	if ret, _ := h.run(fwd); ret != XDP_REDIRECT { // restore for the margin checks
+		t.Fatalf("restore forward: expected XDP_REDIRECT, got %d", ret)
+	}
+	if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil {
+		t.Fatalf("ad cache row missing: %v", err)
+	}
+
+	beyond := make([]byte, len(fwd))
+	copy(beyond, fwd)
+	beyond[14+7] = seedHop - 10
+	if ret, _ := h.run(beyond); ret != XDP_REDIRECT {
+		t.Fatalf("beyond-margin forward: expected XDP_REDIRECT, got %d", ret)
+	}
+	if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil {
+		t.Fatalf("ad cache row missing: %v", err)
+	}
+	if val.HopLimit != seedHop-10 {
+		t.Fatalf("cache not refreshed beyond margin: hop %d", val.HopLimit)
+	}
+}
+
+// TestXDPProgEndADNegative covers the fail-closed edges of the dynamic
+// proxy: replay before any seed, SL=0, and the reduced-encap form (which
+// cannot produce a valid return state).
+func TestXDPProgEndADNegative(t *testing.T) {
+	innerSrc := net.ParseIP("10.0.0.1")
+	innerDst := net.ParseIP("172.0.2.1")
+	svc := &SidAuxService{IfaceOut: 1, IfaceIn: 1, InnerType: SvcInnerIPv4}
+
+	t.Run("replay before seed drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, &ServiceIngressEntry{
+			Behavior: SvcRetAD, InnerTypeMask: SvcInnerIPv4,
+		}); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		pkt, _ := buildSimpleIPv4Packet(innerDst.To4(), innerSrc.To4())
+		ret, _ := h.runOnIfindex(pkt, 1)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP before seed, got %d", ret)
+		}
+	})
+
+	t.Run("SL=0 drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		h.createSidFunctionEndAD("fc00:adad::2/128", svc)
+		segments := []net.IP{net.ParseIP("fc00:adad::2")}
+		pkt, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:adad::2"), segments, 0, innerSrc, innerDst)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, _ := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP at SL=0, got %d", ret)
+		}
+	})
+
+	t.Run("reduced encap drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		h.createSidFunctionEndAD("fc00:adad::3/128", svc)
+		pkt, err := buildEncapsulatedPacketNoSRH(net.ParseIP("fc00::1"), net.ParseIP("fc00:adad::3"), innerSrc, innerDst, innerTypeIPv4)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, _ := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP for reduced encap, got %d", ret)
+		}
+	})
+}

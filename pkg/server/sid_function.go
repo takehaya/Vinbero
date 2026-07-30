@@ -129,7 +129,7 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 	// draft's one-proxy-per-IFACE-IN rule is enforced atomically
 	// (CreateServiceIngress uses a no-exist update). The defer unbinds it
 	// again when any later step fails.
-	if v1.Srv6LocalAction(entry.Action) == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS {
+	if isProxyAction(v1.Srv6LocalAction(entry.Action)) {
 		ingress, err := s.buildServiceIngress(sidFunc)
 		if err != nil {
 			return err
@@ -491,15 +491,15 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			aux = bpf.NewSidAuxB6Policy(policyEntry)
 		}
 
-	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS:
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
 		svc, err := s.buildServiceAux(sidFunc)
 		if err != nil {
 			return nil, nil, err
 		}
 		aux = bpf.NewSidAuxService(svc)
 
-	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN:
 		// These land per-behavior on top of the shared return-path base.
 		// Until a behavior's forward/return programs are registered,
@@ -536,6 +536,18 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	return entry, aux, nil
 }
 
+// isProxyAction reports whether the action is a service-programming proxy
+// that owns a return circuit in service_ingress_map.
+func isProxyAction(action v1.Srv6LocalAction) bool {
+	switch action {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
+		return true
+	default:
+		return false
+	}
+}
+
 // svcInnerBit maps the proto INNER-TYPE to the dataplane SVC_INNER_* bit.
 func svcInnerBit(t v1.Srv6ProxyInnerType) (uint8, error) {
 	switch t {
@@ -569,11 +581,16 @@ func (s *SidFunctionServer) buildServiceAux(sidFunc *v1.SidFunction) (*bpf.SidAu
 		return nil, err
 	}
 
+	if sidFunc.GetHopLimitMargin() > 255 {
+		return nil, fmt.Errorf("hop_limit_margin %d out of range (0..255)", sidFunc.GetHopLimitMargin())
+	}
+
 	svc := &bpf.SidAuxService{
-		IfaceOut:  sidFunc.Oif,
-		IfaceIn:   sidFunc.GetIfaceIn(),
-		VlanIn:    uint16(sidFunc.GetVlanIn()),
-		InnerType: innerBit,
+		IfaceOut:       sidFunc.Oif,
+		IfaceIn:        sidFunc.GetIfaceIn(),
+		VlanIn:         uint16(sidFunc.GetVlanIn()),
+		InnerType:      innerBit,
+		HopLimitMargin: uint8(sidFunc.GetHopLimitMargin()),
 	}
 
 	if mac := sidFunc.GetServiceMac(); mac != "" {
@@ -600,24 +617,11 @@ func (s *SidFunctionServer) buildServiceAux(sidFunc *v1.SidFunction) (*bpf.SidAu
 }
 
 // buildServiceIngress builds the return-circuit binding for a proxy SID.
-// For End.AS the static CACHE (outer source + segment list) is embedded so
-// the return path re-encapsulates in one lookup.
+// End.AS embeds the static CACHE (outer source + segment list) so the
+// return path re-encapsulates in one lookup; End.AD learns it dynamically
+// and leaves the embedded encap zeroed.
 func (s *SidFunctionServer) buildServiceIngress(sidFunc *v1.SidFunction) (*bpf.ServiceIngressEntry, error) {
 	innerBit, err := svcInnerBit(sidFunc.InnerType)
-	if err != nil {
-		return nil, err
-	}
-	if len(sidFunc.Segments) == 0 {
-		return nil, fmt.Errorf("END_AS requires segments (the static CACHE the return path re-encapsulates with)")
-	}
-	if sidFunc.SrcAddr == "" {
-		return nil, fmt.Errorf("END_AS requires src_addr (outer IPv6 source of the re-encapsulation)")
-	}
-	srcAddr, err := bpf.ParseIPv6(sidFunc.SrcAddr)
-	if err != nil {
-		return nil, err
-	}
-	segments, numSegments, err := bpf.ParseSegments(sidFunc.Segments)
 	if err != nil {
 		return nil, err
 	}
@@ -627,17 +631,42 @@ func (s *SidFunctionServer) buildServiceIngress(sidFunc *v1.SidFunction) (*bpf.S
 	}
 
 	entry := &bpf.ServiceIngressEntry{
-		Behavior:      bpf.SvcRetAS,
 		InnerTypeMask: innerBit,
 		Sid:           sid.As16(),
-		Encap: bpf.HeadendEntry{
+	}
+
+	switch v1.Srv6LocalAction(sidFunc.Action) {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
+		if len(sidFunc.Segments) > 0 || sidFunc.SrcAddr != "" {
+			return nil, fmt.Errorf("END_AD learns the encapsulation dynamically; segments / src_addr are not accepted")
+		}
+		entry.Behavior = bpf.SvcRetAD
+		return entry, nil
+
+	default: // END_AS
+		if len(sidFunc.Segments) == 0 {
+			return nil, fmt.Errorf("END_AS requires segments (the static CACHE the return path re-encapsulates with)")
+		}
+		if sidFunc.SrcAddr == "" {
+			return nil, fmt.Errorf("END_AS requires src_addr (outer IPv6 source of the re-encapsulation)")
+		}
+		srcAddr, err := bpf.ParseIPv6(sidFunc.SrcAddr)
+		if err != nil {
+			return nil, err
+		}
+		segments, numSegments, err := bpf.ParseSegments(sidFunc.Segments)
+		if err != nil {
+			return nil, err
+		}
+		entry.Behavior = bpf.SvcRetAS
+		entry.Encap = bpf.HeadendEntry{
 			Mode:        uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
 			NumSegments: numSegments,
 			SrcAddr:     srcAddr,
 			Segments:    segments,
-		},
+		}
+		return entry, nil
 	}
-	return entry, nil
 }
 
 // captureProxyCircuit returns the return circuit bound to prefix when it
@@ -648,7 +677,7 @@ func (s *SidFunctionServer) captureProxyCircuit(prefix string) (ifaceIn uint32, 
 	if err != nil || entry == nil || entry.AuxIndex == 0 {
 		return 0, 0, false
 	}
-	if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS {
+	if !isProxyAction(v1.Srv6LocalAction(entry.Action)) {
 		return 0, 0, false
 	}
 	aux, err := s.mapOps.GetSidAux(uint32(entry.AuxIndex))
@@ -757,7 +786,8 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				sf.HeadendMode = v1.Srv6HeadendBehavior(policy.Mode)
 				sf.SrcAddr = bpf.FormatIPv6(policy.SrcAddr)
 
-			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS:
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
 				svc := bpf.SidAuxServiceData(aux)
 				sf.Oif = svc.IfaceOut
 				ifaceIn := svc.IfaceIn
@@ -778,8 +808,14 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 					mac := net.HardwareAddr(svc.Dmac[:]).String()
 					sf.ServiceMac = &mac
 				}
-				// The static CACHE lives in the return-circuit binding.
-				if ing, err := s.mapOps.GetServiceIngress(svc.IfaceIn, svc.VlanIn); err == nil {
+				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD {
+					if svc.HopLimitMargin != 0 {
+						margin := uint32(svc.HopLimitMargin)
+						sf.HopLimitMargin = &margin
+					}
+				} else if ing, err := s.mapOps.GetServiceIngress(svc.IfaceIn, svc.VlanIn); err == nil {
+					// End.AS: the static CACHE lives in the return-circuit
+					// binding (End.AD learns it per-chain, nothing to show).
 					sf.Segments = bpf.FormatSegments(ing.Encap.Segments, ing.Encap.NumSegments)
 					sf.SrcAddr = bpf.FormatIPv6(ing.Encap.SrcAddr)
 				}

@@ -90,6 +90,94 @@ int tailcall_service_return_as(struct xdp_md *ctx)
     TAILCALL_RETURN(ctx, action);
 }
 
+// SVC_RET_AD: prepend the dynamically cached outer IPv6 + SRH. The cache
+// was seeded by the forward direction in the ready-to-prepend form
+// (SL decremented, DA = next segment, flow label zeroed); only the
+// payload length needs recomputing per packet. A miss or an invalid row
+// drops: the chain has not taught us where this circuit's traffic goes.
+SEC("xdp")
+int tailcall_service_return_ad(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);
+
+    struct service_ingress_key key = {
+        .ifindex = ctx->ingress_ifindex,
+        .vlan_id = tctx->svc_vlan_id,
+    };
+    struct ad_cache_val *val = bpf_map_lookup_elem(&ad_cache_map, &key);
+    if (!val || !val->valid)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+    __u32 hdr_len = val->hdr_len;
+    if (hdr_len < sizeof(struct ipv6hdr) + 8 || hdr_len > AD_CACHE_HDR_MAX)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+
+    __u16 l3_off = tctx->l3_offset; // 0 = Ethernet circuit (whole frame is payload)
+    if (l3_off > 22)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    __u16 frame_len = (__u16)(data_end - data);
+    if (l3_off >= frame_len)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+    __u16 payload_total = frame_len - l3_off; // Ethernet circuit: the whole frame
+
+    struct ethhdr saved_eth = {};
+    if (l3_off != 0) {
+        struct ethhdr *eth = data;
+        if ((void *)(eth + 1) > data_end)
+            TAILCALL_RETURN(ctx, XDP_DROP);
+        __builtin_memcpy(&saved_eth, eth, sizeof(saved_eth));
+    }
+    saved_eth.h_proto = bpf_htons(ETH_P_IPV6);
+
+    // Grow headroom for [Eth][cached outer], consuming the original L2
+    // bytes (l3_off; zero on an Ethernet circuit where the frame itself
+    // is the payload).
+    if (bpf_xdp_adjust_head(ctx, -(int)(ETH_HLEN + hdr_len - l3_off)))
+        TAILCALL_RETURN(ctx, XDP_DROP);
+
+    data = (void *)(long)ctx->data;
+    data_end = (void *)(long)ctx->data_end;
+    struct ethhdr *new_eth = data;
+    if ((void *)(new_eth + 1) > data_end)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+    __builtin_memcpy(new_eth, &saved_eth, sizeof(saved_eth));
+
+    // Constant-size store per possible header length (see the matching
+    // switch in svc_ad_cache_seed for why a variable length is rejected).
+    switch (hdr_len) {
+#define AD_REPLAY_CASE(n)                                            \
+    case (n):                                                        \
+        if (bpf_xdp_store_bytes(ctx, ETH_HLEN, val->hdr, (n)))       \
+            TAILCALL_RETURN(ctx, XDP_DROP);                          \
+        break;
+    AD_REPLAY_CASE(48)  AD_REPLAY_CASE(64)  AD_REPLAY_CASE(80)
+    AD_REPLAY_CASE(96)  AD_REPLAY_CASE(112) AD_REPLAY_CASE(128)
+    AD_REPLAY_CASE(144) AD_REPLAY_CASE(160) AD_REPLAY_CASE(176)
+    AD_REPLAY_CASE(192) AD_REPLAY_CASE(208)
+#undef AD_REPLAY_CASE
+    default:
+        TAILCALL_RETURN(ctx, XDP_DROP);
+    }
+
+    // The cached payload_len is from the seeding packet; recompute for
+    // this one: SRH (hdr_len - 40) + the payload behind it.
+    data = (void *)(long)ctx->data;
+    data_end = (void *)(long)ctx->data_end;
+    struct ipv6hdr *outer = (struct ipv6hdr *)(data + ETH_HLEN);
+    if ((void *)(outer + 1) > data_end)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+    outer->payload_len = bpf_htons((__u16)(hdr_len - sizeof(struct ipv6hdr)) + payload_total);
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+    int action = srv6_fib_redirect(ctx, outer, eth, ctx->ingress_ifindex);
+    TAILCALL_RETURN(ctx, action);
+}
+
 // Return-path front door. Returns -1 when {ifindex, vlan} is not a proxy
 // IFACE-IN (caller continues the normal pipeline) or an XDP action.
 // eth_proto is the ethertype at l3_offset (inner proto for VLAN frames).
@@ -147,8 +235,10 @@ static __noinline int try_service_return(
 
     if (tailcall_ctx_write_headend(&entry->encap, l3_offset,
                                    DISPATCH_SERVICE_RETURN, entry->behavior,
-                                   0) == 0)
+                                   0) == 0) {
+        tailcall_ctx_set_svc_vlan(vlan_id);
         bpf_tail_call(ctx, &service_return_progs, entry->behavior);
+    }
     // Unpopulated slot (behavior not implemented yet) or ctx write failure:
     // the circuit is dedicated, so fail closed rather than leaking the raw
     // service frame into the normal pipeline.

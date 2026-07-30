@@ -1,4 +1,4 @@
-// Endpoint tail call targets (19 SEC("xdp") programs).
+// Endpoint tail call targets (20 SEC("xdp") programs).
 // Included from xdp_prog.c — not compiled standalone.
 
 // ========== Helpers shared by tail call targets (nosrh path) ==========
@@ -280,6 +280,33 @@ int tailcall_endpoint_end_as(struct xdp_md *ctx)
     TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_as, ctx, ip6h, srh,
+                                    &tctx->sid_entry, aux);
+    TAILCALL_RETURN(ctx,action);
+}
+
+// End.AD: SRH-only (reduced encap carries no next segment, so there is no
+// valid return state to cache — the front door would loop the return
+// traffic back to this very SID). Cache seeding and delivery live in
+// process_end_ad / svc_ad_cache_seed.
+SEC("xdp")
+int tailcall_endpoint_end_ad(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
+
+    if (tctx->dispatch_type == DISPATCH_NOSRH)
+        TAILCALL_RETURN(ctx,XDP_DROP);
+
+    struct ethhdr *eth;
+    struct ipv6hdr *ip6h;
+    struct ipv6_sr_hdr *srh;
+    TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_ad, ctx, ip6h, srh,
                                     &tctx->sid_entry, aux);
     TAILCALL_RETURN(ctx,action);
 }

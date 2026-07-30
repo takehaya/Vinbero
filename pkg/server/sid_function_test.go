@@ -328,7 +328,6 @@ func TestProtoToEntry_Gtp4eSrcConfig(t *testing.T) {
 func TestProtoToEntry_ServiceProgrammingNotImplemented(t *testing.T) {
 	s := newProtoToEntryServer()
 	for _, action := range []v1.Srv6LocalAction{
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
 	} {
@@ -474,6 +473,66 @@ func TestBuildServiceIngress_EndAS(t *testing.T) {
 		sf.TriggerPrefix = "fc00:2::/64"
 		if _, err := s.buildServiceIngress(sf); err == nil {
 			t.Fatal("expected error for non-/128 prefix")
+		}
+	})
+}
+
+// TestBuildServiceIngress_EndAD covers the dynamic-proxy variant: no
+// static CACHE is accepted, and the binding carries the AD behavior.
+func TestBuildServiceIngress_EndAD(t *testing.T) {
+	s := newProtoToEntryServer()
+	ifaceIn := uint32(42)
+	base := func() *v1.SidFunction {
+		in := ifaceIn
+		return &v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
+			TriggerPrefix: "fc00:2::200/128",
+			Oif:           7,
+			IfaceIn:       &in,
+			InnerType:     v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4,
+		}
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		ing, err := s.buildServiceIngress(base())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ing.Behavior != bpf.SvcRetAD {
+			t.Fatalf("behavior = %d, want SvcRetAD", ing.Behavior)
+		}
+		if ing.Encap.NumSegments != 0 {
+			t.Fatalf("dynamic proxy must not embed a static CACHE: %+v", ing.Encap)
+		}
+	})
+
+	t.Run("static CACHE rejected", func(t *testing.T) {
+		sf := base()
+		sf.Segments = []string{"fc00:3::3"}
+		if _, err := s.buildServiceIngress(sf); err == nil {
+			t.Fatal("expected error for segments on END_AD")
+		}
+	})
+
+	t.Run("hop_limit_margin round trip", func(t *testing.T) {
+		sf := base()
+		margin := uint32(4)
+		sf.HopLimitMargin = &margin
+		_, aux, err := s.protoToEntry(sf)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := bpf.SidAuxServiceData(aux).HopLimitMargin; got != 4 {
+			t.Fatalf("hop_limit_margin = %d, want 4", got)
+		}
+	})
+
+	t.Run("hop_limit_margin out of range", func(t *testing.T) {
+		sf := base()
+		margin := uint32(300)
+		sf.HopLimitMargin = &margin
+		if _, _, err := s.protoToEntry(sf); err == nil {
+			t.Fatal("expected error for margin > 255")
 		}
 	})
 }

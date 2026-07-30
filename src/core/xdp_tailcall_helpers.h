@@ -65,6 +65,16 @@ static __always_inline void tailcall_ctx_set_vrf(__u32 vrf_id)
         tctx->vrf_id = vrf_id;
 }
 
+// Set the service-return circuit VLAN. Called by try_service_return before
+// the tail call; only DISPATCH_SERVICE_RETURN targets read it.
+static __always_inline void tailcall_ctx_set_svc_vlan(__u16 vlan_id)
+{
+    __u32 key = TAILCALL_CTX_KEY;
+    struct tailcall_ctx *tctx = bpf_map_lookup_elem(&tailcall_ctx_map, &key);
+    if (tctx)
+        tctx->svc_vlan_id = vlan_id;
+}
+
 // Read context (called by tail call targets)
 static __always_inline struct tailcall_ctx *tailcall_ctx_read(void)
 {
