@@ -33,6 +33,8 @@ settings:
       capacity: 1024
     sr_policy:
       capacity: 1024
+    service_ingress:
+      capacity: 1024
 
 # In-process BGP speaker. Only consulted when vinberod runs with
 # --bgp-enabled; otherwise this whole section is ignored.

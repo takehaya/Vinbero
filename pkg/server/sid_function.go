@@ -436,6 +436,16 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			}
 			aux = bpf.NewSidAuxB6Policy(policyEntry)
 		}
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN:
+		// Service-programming behaviors land per-behavior on top of the
+		// shared return-path base. Until a behavior's forward/return
+		// programs are registered, accepting the SID would install a
+		// silent no-op (empty tail-call slot), so reject explicitly.
+		return nil, nil, fmt.Errorf("action %s is not implemented yet", action)
 	}
 
 	// Plugin-defined auxiliary payload. Only populated for plugin actions

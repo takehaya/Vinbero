@@ -2847,3 +2847,62 @@ func TestXDPProgEndMGtp6DDI(t *testing.T) {
 		t.Log("SUCCESS: GTP6.D.DI passed packet to kernel unmodified")
 	}
 }
+
+// TestXDPProgServiceReturnFrontDoor covers the service-programming return
+// path front door (try_service_return) in its PR1 skeleton state: the
+// service_ingress_map gate must be invisible to unrelated traffic, and a
+// configured circuit must fail closed (its behaviors' return programs are
+// not registered yet, and an IFACE-IN is a dedicated circuit).
+func TestXDPProgServiceReturnFrontDoor(t *testing.T) {
+	h := newXDPTestHelper(t)
+	pkt := buildPlainIPv4(t)
+
+	// Empty map: plain IPv4 on lo flows down the ordinary pipeline.
+	ret, _ := h.runOnIfindex(pkt, 1)
+	if ret != XDP_PASS {
+		t.Fatalf("empty service_ingress_map: expected XDP_PASS, got %d", ret)
+	}
+
+	// Entry bound to another ifindex: still a miss for lo.
+	otherKey := ServiceIngressKey{Ifindex: 999}
+	entry := ServiceIngressEntry{Behavior: SvcRetAS, InnerTypeMask: SvcInnerIPv4}
+	if err := h.objs.ServiceIngressMap.Update(&otherKey, &entry, 0); err != nil {
+		t.Fatalf("update service_ingress_map: %v", err)
+	}
+	ret, _ = h.runOnIfindex(pkt, 1)
+	if ret != XDP_PASS {
+		t.Fatalf("foreign circuit entry: expected XDP_PASS, got %d", ret)
+	}
+
+	// Circuit on lo, matching inner type: the AS return slot is not
+	// populated in PR1, so the tail call fails and the packet drops.
+	loKey := ServiceIngressKey{Ifindex: 1}
+	if err := h.objs.ServiceIngressMap.Update(&loKey, &entry, 0); err != nil {
+		t.Fatalf("update service_ingress_map: %v", err)
+	}
+	ret, _ = h.runOnIfindex(pkt, 1)
+	if ret != XDP_DROP {
+		t.Fatalf("configured circuit, empty prog slot: expected XDP_DROP, got %d", ret)
+	}
+
+	// Inner type mismatch (circuit accepts IPv6 only): fail closed.
+	entry.InnerTypeMask = SvcInnerIPv6
+	if err := h.objs.ServiceIngressMap.Update(&loKey, &entry, 0); err != nil {
+		t.Fatalf("update service_ingress_map: %v", err)
+	}
+	ret, _ = h.runOnIfindex(pkt, 1)
+	if ret != XDP_DROP {
+		t.Fatalf("inner type mismatch: expected XDP_DROP, got %d", ret)
+	}
+
+	// Ethernet-typed circuit accepts any frame (still drops on the empty
+	// slot, exercising the mask short-circuit rather than the L3 match).
+	entry.InnerTypeMask = SvcInnerEthernet
+	if err := h.objs.ServiceIngressMap.Update(&loKey, &entry, 0); err != nil {
+		t.Fatalf("update service_ingress_map: %v", err)
+	}
+	ret, _ = h.runOnIfindex(pkt, 1)
+	if ret != XDP_DROP {
+		t.Fatalf("ethernet circuit, empty prog slot: expected XDP_DROP, got %d", ret)
+	}
+}

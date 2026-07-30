@@ -320,3 +320,29 @@ func TestProtoToEntry_Gtp4eSrcConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestProtoToEntry_ServiceProgrammingNotImplemented verifies the explicit
+// rejection of the service-programming actions while their forward/return
+// programs are not registered: accepting them would install a SID whose
+// tail-call slot is empty, i.e. a silent no-op.
+func TestProtoToEntry_ServiceProgrammingNotImplemented(t *testing.T) {
+	s := newProtoToEntryServer()
+	for _, action := range []v1.Srv6LocalAction{
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
+	} {
+		_, _, err := s.protoToEntry(&v1.SidFunction{
+			Action:        action,
+			TriggerPrefix: "fc00:1::1/128",
+		})
+		if err == nil {
+			t.Errorf("%s: expected not-implemented error, got nil", action)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not implemented") {
+			t.Errorf("%s: unexpected error: %v", action, err)
+		}
+	}
+}

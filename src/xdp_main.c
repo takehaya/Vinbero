@@ -75,6 +75,16 @@ int vinbero_main(struct xdp_md *ctx)
         }
         tailcall_ctx_set_vrf(vrf_id);
 
+        // Service-proxy return path. Before try_l2_headend: a proxy
+        // IFACE-IN is a dedicated circuit, so a hit preempts every other
+        // ingress role of the port; a miss costs one hash lookup.
+        int svc_action = try_service_return(ctx, ctx->ingress_ifindex, vlan_id,
+                                            18, inner_proto);
+        if (svc_action >= 0) {
+            action = svc_action;
+            goto out;
+        }
+
         int l2_action = try_l2_headend(ctx, ctx->ingress_ifindex, vlan_id, pkt_len);
         if (l2_action >= 0) {
             action = l2_action;
@@ -112,6 +122,15 @@ int vinbero_main(struct xdp_md *ctx)
             goto out;
         }
         tailcall_ctx_set_vrf(vrf_id);
+
+        // Service-proxy return path (untagged circuit). Same ordering
+        // rationale as the VLAN branch above.
+        int svc_action = try_service_return(ctx, ctx->ingress_ifindex, 0,
+                                            14, eth_proto);
+        if (svc_action >= 0) {
+            action = svc_action;
+            goto out;
+        }
 
         int l2_action = try_l2_headend(ctx, ctx->ingress_ifindex, 0, pkt_len);
         if (l2_action >= 0) {

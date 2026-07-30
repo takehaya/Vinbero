@@ -35,6 +35,11 @@ var pinnedControlMaps = []string{
 	"ecmp_group_map",
 	"ecmp_path_map",
 	"ecmp_group_owner_map",
+	// ad_cache_map stays unpinned on purpose: it is a dataplane-learned
+	// cache that the first forward packet re-seeds, and a stale pre-restart
+	// header must not be replayed onto a chain that changed while vinberod
+	// was down.
+	"service_ingress_map",
 }
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ../../src -I /usr/include/x86_64-linux-gnu
@@ -80,6 +85,8 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 			"ecmp_group_owner_map": entries.EcmpGroup.Capacity,
 			"ecmp_live_map":        entries.EcmpGroup.Capacity,
 			"ecmp_path_map":        entries.EcmpGroup.Capacity * EcmpMaxPaths,
+			"service_ingress_map":  entries.ServiceIngress.Capacity,
+			"ad_cache_map":         entries.ServiceIngress.Capacity, // same keyspace (IFACE-IN circuits)
 		}
 		for name, size := range mapSizes {
 			if ms, ok := spec.Maps[name]; ok && size > 0 {
@@ -197,6 +204,11 @@ func populateProgArrays(objs *BpfObjects) error {
 			return fmt.Errorf("headend_l2_progs[%d]: %w", idx, err)
 		}
 	}
+
+	// service_return_progs (indexed by SVC_RET_*) has no targets yet: the
+	// proxy behaviors land per-behavior (End.AS / End.AD / End.AM), each
+	// registering its return program here. Until then try_service_return
+	// fails closed (drops) on any configured circuit.
 
 	return nil
 }

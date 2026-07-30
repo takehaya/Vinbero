@@ -49,6 +49,24 @@ type (
 	IngressPolicy    = BpfIngressPolicy
 	EcmpGroupInfo    = BpfEcmpGroupInfo
 	EcmpPathKey      = BpfEcmpPathKey
+
+	ServiceIngressKey   = BpfServiceIngressKey
+	ServiceIngressEntry = BpfServiceIngressEntry
+	AdCacheVal          = BpfAdCacheVal
+)
+
+// Service-programming return-path slot indices in service_return_progs and
+// inner-type capability bits. Must match SVC_RET_* / SVC_INNER_* in
+// src/core/xdp_prog.h.
+const (
+	SvcRetAS             = 0
+	SvcRetAD             = 1
+	SvcRetAM             = 2
+	ServiceReturnProgMax = 8
+
+	SvcInnerIPv4     = 1 << 0
+	SvcInnerIPv6     = 1 << 1
+	SvcInnerEthernet = 1 << 2
 )
 
 // MupArgsOffsetNone is the headend_entry.args_offset sentinel meaning "do not
@@ -2659,6 +2677,9 @@ func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 		// plugins. Reclassify to read-write if a BPF-side liveness writer
 		// (e.g. TX-error-driven bit clearing) ever lands.
 		"ecmp_live_map": m.objs.EcmpLiveMap,
+		// Written only by SidFunctionService (proxy IFACE-IN bindings);
+		// the return-path dispatcher and plugins just read it.
+		"service_ingress_map": m.objs.ServiceIngressMap,
 	}
 }
 
@@ -2679,6 +2700,9 @@ func (m *MapOperations) GetSharedReadWriteMaps() map[string]*ebpf.Map {
 		MapNameHeadendV4Progs:   m.objs.HeadendV4Progs,
 		MapNameHeadendV6Progs:   m.objs.HeadendV6Progs,
 		MapNameHeadendL2Progs:   m.objs.HeadendL2Progs,
+		// The End.AD forward path seeds/updates the cache from BPF.
+		"ad_cache_map":            m.objs.AdCacheMap,
+		MapNameServiceReturnProgs: m.objs.ServiceReturnProgs,
 	}
 }
 
@@ -2713,6 +2737,7 @@ func SharedReadOnlyMapNames() []string {
 		"ecmp_group_map",
 		"ecmp_path_map",
 		"ecmp_live_map",
+		"service_ingress_map",
 	}
 }
 
@@ -2731,6 +2756,8 @@ func SharedReadWriteMapNames() []string {
 		MapNameHeadendV4Progs,
 		MapNameHeadendV6Progs,
 		MapNameHeadendL2Progs,
+		"ad_cache_map",
+		MapNameServiceReturnProgs,
 	}
 }
 
@@ -2769,6 +2796,12 @@ const (
 	MapNameHeadendV4Progs   = "headend_v4_progs"
 	MapNameHeadendV6Progs   = "headend_v6_progs"
 	MapNameHeadendL2Progs   = "headend_l2_progs"
+	// Service-programming return-path dispatch. Not plugin-registrable
+	// (no PluginSlotRange entry) and deliberately absent from
+	// ValidTailCallMaps: plugins may not dispatch into the proxy return
+	// path. Listed in the shared read-write partition only so the plugin
+	// ELF's copy of the map resolves to the real one.
+	MapNameServiceReturnProgs = "service_return_progs"
 )
 
 var (
