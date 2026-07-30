@@ -507,6 +507,14 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			if len(name) > bpf.SidAuxServiceNameMax {
 				return nil, nil, fmt.Errorf("service_name exceeds %d characters", bpf.SidAuxServiceNameMax)
 			}
+			// The aux stores the name as null-terminated ASCII, so an
+			// embedded NUL or a multi-byte character would be silently
+			// truncated or mangled on read-back. Reject up front.
+			for i := 0; i < len(name); i++ {
+				if name[i] < 0x20 || name[i] > 0x7e {
+					return nil, nil, fmt.Errorf("service_name must be printable ASCII")
+				}
+			}
 			aux = bpf.NewSidAuxServiceName(name)
 		}
 	}

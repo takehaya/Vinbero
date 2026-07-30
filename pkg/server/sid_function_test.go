@@ -606,6 +606,20 @@ func TestProtoToEntry_EndAN(t *testing.T) {
 		}
 	})
 
+	t.Run("non-ASCII and NUL rejected", func(t *testing.T) {
+		for _, bad := range []string{"demo\x00fw", "デモfw", "demo\tfw"} {
+			name := bad
+			_, _, err := s.protoToEntry(&v1.SidFunction{
+				Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
+				TriggerPrefix: "fc00:a1::4/128",
+				ServiceName:   &name,
+			})
+			if err == nil || !strings.Contains(err.Error(), "printable ASCII") {
+				t.Fatalf("%q: expected the printable-ASCII error, got %v", bad, err)
+			}
+		}
+	})
+
 	t.Run("name too long", func(t *testing.T) {
 		name := strings.Repeat("x", 64)
 		_, _, err := s.protoToEntry(&v1.SidFunction{
