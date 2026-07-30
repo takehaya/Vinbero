@@ -280,4 +280,51 @@ static __always_inline int process_end_ad(
     return process_end_as(ctx, ip6h, srh, entry, aux, l3_offset);
 }
 
+// ========== End.AM (masquerading proxy) forward direction ==========
+
+// End.AM forward: decrement SL, masquerade the destination as the final
+// segment (Segment List[0]) and hand the packet — SRH and all — to the
+// service. The service must ignore extension headers; the return path
+// de-masquerades from the in-packet SRH, so unlike AS/AD there is no
+// out-of-band state. L3 payloads only (the draft defines no L2 form) and
+// the delivery is always the pre-resolved static MAC: after masquerading
+// the DA names the chain's final destination, so a FIB lookup would route
+// straight past the service.
+static __always_inline int process_end_am(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    __u16 l3_offset)
+{
+    if (!aux)
+        return XDP_DROP;
+    if (!(aux->service.flags & SVC_AUX_F_STATIC_MAC) ||
+        aux->service.iface_out == 0)
+        return XDP_DROP;
+    if (srh->nexthdr == IPPROTO_ETHERNET)
+        return XDP_DROP;
+
+    struct endpoint_ctx ectx;
+    int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
+    if (ret != 0)
+        return XDP_DROP; // SL == 0 (the draft drops) or malformed SL
+
+    // Masquerade: SL consumed, DA = Segment List[0] (the final segment).
+    srh->segments_left = ectx.new_sl;
+    void *seg_base = (void *)srh + 8;
+    if (copy_segment_by_index(&ip6h->daddr, seg_base, ectx.data_end, 0) != 0)
+        return XDP_DROP;
+
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_DROP;
+    __builtin_memcpy(eth->h_dest, aux->service.dmac, ETH_ALEN);
+    __builtin_memcpy(eth->h_source, aux->service.smac, ETH_ALEN);
+    return bpf_redirect(aux->service.iface_out, 0);
+}
+
 #endif // SRV6_ENDPOINT_PROXY_H

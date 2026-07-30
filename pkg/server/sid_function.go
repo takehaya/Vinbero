@@ -492,15 +492,15 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		}
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM:
 		svc, err := s.buildServiceAux(sidFunc)
 		if err != nil {
 			return nil, nil, err
 		}
 		aux = bpf.NewSidAuxService(svc)
 
-	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN:
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN:
 		// These land per-behavior on top of the shared return-path base.
 		// Until a behavior's forward/return programs are registered,
 		// accepting the SID would install a silent no-op (empty
@@ -541,7 +541,8 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 func isProxyAction(action v1.Srv6LocalAction) bool {
 	switch action {
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM:
 		return true
 	default:
 		return false
@@ -579,6 +580,22 @@ func (s *SidFunctionServer) buildServiceAux(sidFunc *v1.SidFunction) (*bpf.SidAu
 	innerBit, err := svcInnerBit(sidFunc.InnerType)
 	if err != nil {
 		return nil, err
+	}
+
+	// End.AM specifics, checked before the MAC resolution below so the
+	// operator sees the behavioral error, not an interface lookup one.
+	// The masqueraded DA names the chain's final destination, so the FIB
+	// fallback would route straight past the service — the static MAC is
+	// the only sound delivery. And the frames on an AM circuit are the SR
+	// packets themselves (IPv6 with the SRH still attached), whatever the
+	// chain's payload is.
+	if v1.Srv6LocalAction(sidFunc.Action) == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM {
+		if sidFunc.GetServiceMac() == "" {
+			return nil, fmt.Errorf("END_AM requires service_mac (the masqueraded destination cannot be FIB-resolved towards the service)")
+		}
+		if innerBit != bpf.SvcInnerIPv6 {
+			return nil, fmt.Errorf("END_AM requires inner_type IPV6 (the service sees the SR packet itself)")
+		}
 	}
 
 	if sidFunc.GetHopLimitMargin() > 255 {
@@ -641,6 +658,13 @@ func (s *SidFunctionServer) buildServiceIngress(sidFunc *v1.SidFunction) (*bpf.S
 			return nil, fmt.Errorf("END_AD learns the encapsulation dynamically; segments / src_addr are not accepted")
 		}
 		entry.Behavior = bpf.SvcRetAD
+		return entry, nil
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM:
+		if len(sidFunc.Segments) > 0 || sidFunc.SrcAddr != "" {
+			return nil, fmt.Errorf("END_AM carries the chain state inside the packet; segments / src_addr are not accepted")
+		}
+		entry.Behavior = bpf.SvcRetAM
 		return entry, nil
 
 	default: // END_AS
@@ -787,7 +811,8 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				sf.SrcAddr = bpf.FormatIPv6(policy.SrcAddr)
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS,
-				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM:
 				svc := bpf.SidAuxServiceData(aux)
 				sf.Oif = svc.IfaceOut
 				ifaceIn := svc.IfaceIn
@@ -808,16 +833,20 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 					mac := net.HardwareAddr(svc.Dmac[:]).String()
 					sf.ServiceMac = &mac
 				}
-				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD {
+				switch action {
+				case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
 					if svc.HopLimitMargin != 0 {
 						margin := uint32(svc.HopLimitMargin)
 						sf.HopLimitMargin = &margin
 					}
-				} else if ing, err := s.mapOps.GetServiceIngress(svc.IfaceIn, svc.VlanIn); err == nil {
-					// End.AS: the static CACHE lives in the return-circuit
-					// binding (End.AD learns it per-chain, nothing to show).
-					sf.Segments = bpf.FormatSegments(ing.Encap.Segments, ing.Encap.NumSegments)
-					sf.SrcAddr = bpf.FormatIPv6(ing.Encap.SrcAddr)
+				case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS:
+					// End.AS only: the static CACHE lives in the return-
+					// circuit binding (AD learns it per-chain, AM carries
+					// the state inside the packet — nothing to show).
+					if ing, err := s.mapOps.GetServiceIngress(svc.IfaceIn, svc.VlanIn); err == nil {
+						sf.Segments = bpf.FormatSegments(ing.Encap.Segments, ing.Encap.NumSegments)
+						sf.SrcAddr = bpf.FormatIPv6(ing.Encap.SrcAddr)
+					}
 				}
 			}
 		}

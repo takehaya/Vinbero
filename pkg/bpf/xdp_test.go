@@ -3431,3 +3431,140 @@ func TestXDPProgEndADNegative(t *testing.T) {
 		}
 	})
 }
+
+// ========== End.AM (service programming masquerading proxy) ==========
+
+const actionEndAM = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM)
+
+// TestXDPProgEndAMForwardAndReturn drives the masquerade cycle: forward
+// consumes the SL position and disguises the DA as the final segment
+// (SRH kept on the wire), the return de-masquerades from the in-packet
+// SRH — no out-of-band state at all.
+func TestXDPProgEndAMForwardAndReturn(t *testing.T) {
+	h := newXDPTestHelper(t)
+	dmac := [6]byte{0x02, 0, 0, 0, 0, 0x21}
+	smac := [6]byte{0x02, 0, 0, 0, 0, 0x22}
+	svc := &SidAuxService{
+		IfaceOut: 1, IfaceIn: 1, VlanIn: 7, InnerType: SvcInnerIPv6,
+		Flags: SvcAuxFStaticMac, Dmac: dmac, Smac: smac,
+	}
+	entry := &SidFunctionEntry{Action: actionEndAM}
+	if err := h.mapOps.CreateSidFunction("fc00:a15a::1/128", entry, NewSidAuxService(svc), OwnerRPC); err != nil {
+		t.Fatalf("create End.AM SID: %v", err)
+	}
+	if _, err := h.mapOps.CreateServiceIngress(1, 7, &ServiceIngressEntry{
+		Behavior: SvcRetAM, InnerTypeMask: SvcInnerIPv6,
+	}); err != nil {
+		t.Fatalf("create service ingress: %v", err)
+	}
+
+	innerSrc := net.ParseIP("10.0.0.1")
+	innerDst := net.ParseIP("172.0.2.1")
+	// Chain: [final fc00:3::3, next fc00:4::4, AM SID], SL=2 at the proxy.
+	segments := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:4::4"), net.ParseIP("fc00:a15a::1")}
+	fwd, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:a15a::1"), segments, 2, innerSrc, innerDst)
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
+	}
+
+	ret, out := h.run(fwd)
+	if ret != XDP_REDIRECT {
+		t.Fatalf("forward: expected XDP_REDIRECT, got %d", ret)
+	}
+	if !verifyEtherType(t, out, 0x86DD) {
+		return
+	}
+	if !bytes.Equal(out[0:6], dmac[:]) || !bytes.Equal(out[6:12], smac[:]) {
+		t.Fatalf("static MAC rewrite missing")
+	}
+	// Masqueraded DA = Segment List[0] (the final segment), SL 2 -> 1,
+	// SRH still on the wire.
+	if !bytes.Equal(out[14+24:14+40], net.ParseIP("fc00:3::3").To16()) {
+		t.Fatalf("DA not masqueraded to the final segment: % x", out[14+24:14+40])
+	}
+	if out[14+40+3] != 1 {
+		t.Fatalf("SL = %d, want 1", out[14+40+3])
+	}
+	if out[14+6] != 43 {
+		t.Fatalf("SRH stripped: nexthdr = %d", out[14+6])
+	}
+
+	// Return: the service hands the same packet back on the circuit.
+	// De-masquerading restores DA = Segment List[SL=1] = fc00:4::4.
+	back := make([]byte, 0, len(out)+4)
+	back = append(back, out[0:12]...)
+	back = append(back, 0x81, 0x00, 0x00, 0x07) // VLAN 7 towards the circuit
+	back = append(back, 0x86, 0xDD)
+	back = append(back, out[14:]...)
+	ret, out2 := h.runOnIfindex(back, 1)
+	if ret != XDP_PASS {
+		t.Fatalf("return: expected XDP_PASS (FIB miss in test env), got %d", ret)
+	}
+	// De-masquerading edits in place; the VLAN tag stays, so L3 sits at 18.
+	if !bytes.Equal(out2[18+24:18+40], net.ParseIP("fc00:4::4").To16()) {
+		t.Fatalf("DA not de-masqueraded to segments[SL]: % x", out2[18+24:18+40])
+	}
+	if out2[18+40+3] != 1 {
+		t.Fatalf("return must not consume SL: got %d", out2[18+40+3])
+	}
+}
+
+// TestXDPProgEndAMNegative covers the fail-closed edges: SL=0 at the
+// proxy, a reduced-encap arrival, and a returned packet without an SRH
+// (the base behavior has no cache to restore from).
+func TestXDPProgEndAMNegative(t *testing.T) {
+	innerSrc := net.ParseIP("10.0.0.1")
+	innerDst := net.ParseIP("172.0.2.1")
+	svc := &SidAuxService{
+		IfaceOut: 1, IfaceIn: 1, InnerType: SvcInnerIPv6,
+		Flags: SvcAuxFStaticMac, Dmac: [6]byte{2, 0, 0, 0, 0, 1}, Smac: [6]byte{2, 0, 0, 0, 0, 2},
+	}
+	newAM := func(t *testing.T, h *xdpTestHelper, prefix string) {
+		t.Helper()
+		entry := &SidFunctionEntry{Action: actionEndAM}
+		if err := h.mapOps.CreateSidFunction(prefix, entry, NewSidAuxService(svc), OwnerRPC); err != nil {
+			t.Fatalf("create End.AM SID: %v", err)
+		}
+	}
+
+	t.Run("SL=0 drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		newAM(t, h, "fc00:a15a::2/128")
+		segments := []net.IP{net.ParseIP("fc00:a15a::2")}
+		pkt, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:a15a::2"), segments, 0, innerSrc, innerDst)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, _ := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP at SL=0, got %d", ret)
+		}
+	})
+
+	t.Run("reduced encap drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		newAM(t, h, "fc00:a15a::3/128")
+		pkt, err := buildEncapsulatedPacketNoSRH(net.ParseIP("fc00::1"), net.ParseIP("fc00:a15a::3"), innerSrc, innerDst, innerTypeIPv4)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		ret, _ := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP for reduced encap, got %d", ret)
+		}
+	})
+
+	t.Run("return without SRH drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, &ServiceIngressEntry{
+			Behavior: SvcRetAM, InnerTypeMask: SvcInnerIPv6,
+		}); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		pkt := buildPlainIPv6To(t, "fc00:3::3")
+		ret, _ := h.runOnIfindex(pkt, 1)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP for SRH-less return, got %d", ret)
+		}
+	})
+}

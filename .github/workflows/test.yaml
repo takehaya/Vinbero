@@ -143,6 +143,7 @@ jobs:
           - end-dx2v
           - end-as
           - end-ad
+          - end-am
           - headend-v4
           - headend-v6
           - headend-l2

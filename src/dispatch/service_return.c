@@ -184,6 +184,40 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
     TAILCALL_RETURN(ctx, action);
 }
 
+// SVC_RET_AM: de-masquerade. The chain state rides inside the packet —
+// restore the destination from Segment List[SL] (for SL == 0 this
+// rewrites the already-masqueraded final destination, a no-op) and let
+// the FIB carry it onward. No SRH means a packet this base behavior
+// cannot restore (the draft's Caching flavor covers it), so drop.
+SEC("xdp")
+int tailcall_service_return_am(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+    if (l3_off == 0)
+        TAILCALL_RETURN(ctx, XDP_DROP); // AM circuits are L3-only
+
+    struct ethhdr *eth;
+    struct ipv6hdr *ip6h;
+    struct ipv6_sr_hdr *srh;
+    TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
+    if (ip6h->nexthdr != IPPROTO_ROUTING || srh->type != IPV6_SRCRT_TYPE_4)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+
+    __u8 sl = srh->segments_left;
+    if (sl > srh->first_segment || sl > 9)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+
+    void *data_end = (void *)(long)ctx->data_end;
+    void *seg_base = (void *)srh + 8;
+    if (copy_segment_by_index(&ip6h->daddr, seg_base, data_end, sl) != 0)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+
+    int action = srv6_fib_redirect(ctx, ip6h, eth, ctx->ingress_ifindex);
+    TAILCALL_RETURN(ctx, action);
+}
+
 // Return-path front door. Returns -1 when {ifindex, vlan} is not a proxy
 // IFACE-IN (caller continues the normal pipeline) or an XDP action.
 // eth_proto is the ethertype at l3_offset (inner proto for VLAN frames).
