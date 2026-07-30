@@ -1,6 +1,6 @@
 #!/bin/bash
 # examples/end-ad/setup.sh
-# Setup End.AD (static proxy, draft-ietf-spring-srv6-service-programming)
+# Setup End.AD (dynamic proxy, draft-ietf-spring-srv6-service-programming)
 # demonstration environment.
 #
 # Topology (three_router + a service namespace hanging off router2):
@@ -10,9 +10,10 @@
 #                           svc   (SR-unaware service: plain IPv4 forwarder)
 #
 # Forward direction: router1 H.Encaps [fc00:2::100, fc00:3::3]. The End.AD
-# SID fc00:2::100 on router2 strips the SR encapsulation and hands the bare
-# IPv4 packet to svc; svc routes it straight back, and the return circuit
-# re-encapsulates towards fc00:3::3 from the static CACHE.
+# SID fc00:2::100 on router2 learns the SR encapsulation from the forward
+# packet, strips it, and hands the bare IPv4 packet to svc; svc routes it
+# straight back, and the return circuit replays the learned encapsulation
+# towards fc00:3::3.
 
 set -eu
 

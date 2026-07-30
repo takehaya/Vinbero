@@ -187,7 +187,15 @@ static __noinline int svc_ad_cache_seed(
         }
     }
 
-    val->valid = 0; // readers fail closed while the row is being rewritten
+    // Publish protocol for concurrent return-path readers: valid drops to
+    // 0 before the bytes change and comes back to 1 only after they are
+    // complete. The compiler barriers pin the order at the instruction
+    // level; BPF has no portable release/acquire fence on our oldest
+    // supported kernels, so on weakly-ordered CPUs a reader may still
+    // catch a transiently inconsistent row — the result is one malformed
+    // (droppable) packet, never a stale chain.
+    val->valid = 0;
+    asm volatile("" ::: "memory");
     // Constant-size copy per possible header length: a variable length
     // reaches the helper with its verifier lower bound destroyed (clang
     // range-checks a derived register, so the refinement never propagates
@@ -214,6 +222,7 @@ static __noinline int svc_ad_cache_seed(
     val->hdr[3] = 0;
     val->hdr_len = hdr_len;
     val->hop_limit = hop_limit;
+    asm volatile("" ::: "memory");
     val->valid = 1;
     return 0;
 }

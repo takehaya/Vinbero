@@ -1,6 +1,6 @@
 #!/bin/bash
 # examples/end-ad/test.sh
-# Test End.AD (static proxy) with Vinbero XDP
+# Test End.AD (dynamic proxy) with Vinbero XDP
 
 set -e
 
@@ -38,7 +38,7 @@ svc_rx_packets() {
 }
 
 echo "=========================================="
-echo "SRv6 End.AD (static proxy) Test"
+echo "SRv6 End.AD (dynamic proxy) Test"
 echo "=========================================="
 echo ""
 

@@ -175,6 +175,12 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         TAILCALL_RETURN(ctx, XDP_DROP);
     int action = srv6_fib_redirect(ctx, outer, eth, ctx->ingress_ifindex);
+    // Ethernet circuit: fail closed on a FIB miss like H.Encaps.L2 —
+    // handing the freshly assembled L2-in-SRv6 frame to the service-side
+    // kernel stack is never the intended path. L3 circuits keep the
+    // headend convention (the kernel can still route the outer packet).
+    if (l3_off == 0 && action == XDP_PASS)
+        action = XDP_DROP;
     TAILCALL_RETURN(ctx, action);
 }
 
