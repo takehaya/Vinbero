@@ -167,27 +167,41 @@ static __noinline int svc_ad_cache_seed(
         __u8 diff = val->hop_limit > hop_limit ? val->hop_limit - hop_limit
                                                : hop_limit - val->hop_limit;
         if (diff <= margin) {
+            // Constant trip count per possible length: a loop bound by
+            // the variable hdr_len leaves the &val->hdr[off] access
+            // unprovable on kernel 6.1 (its verifier does not refine off
+            // from the break comparison the way newer ones do).
             int same = 1;
-            for (int off = 0; off < AD_CACHE_HDR_MAX; off += 16) {
-                if ((__u32)off >= hdr_len)
-                    break;
-                __u8 chunk[16];
-                if (bpf_xdp_load_bytes(ctx, l3_offset + off, chunk, sizeof(chunk))) {
-                    same = 0;
-                    break;
-                }
-                if (off == 0) {
-                    chunk[1] &= 0xf0; // flow label, zeroed in the cache
-                    chunk[2] = 0;
-                    chunk[3] = 0;
-                    chunk[4] = val->hdr[4]; // payload_len: per-packet
-                    chunk[5] = val->hdr[5];
-                    chunk[7] = val->hdr[7]; // hop_limit: margin-checked above
-                }
-                if (__builtin_memcmp(chunk, &val->hdr[off], 16) != 0) {
-                    same = 0;
-                    break;
-                }
+            switch (hdr_len) {
+#define AD_CMP_CHUNKS(n)                                                   \
+    case (n):                                                              \
+        for (int off = 0; off < (n); off += 16) {                          \
+            __u8 chunk[16];                                                \
+            if (bpf_xdp_load_bytes(ctx, l3_offset + off, chunk, 16)) {     \
+                same = 0;                                                  \
+                break;                                                     \
+            }                                                              \
+            if (off == 0) {                                                \
+                chunk[1] &= 0xf0; /* flow label, zeroed in the cache */    \
+                chunk[2] = 0;                                              \
+                chunk[3] = 0;                                              \
+                chunk[4] = val->hdr[4]; /* payload_len: per-packet */      \
+                chunk[5] = val->hdr[5];                                    \
+                chunk[7] = val->hdr[7]; /* hop_limit: margin-checked */    \
+            }                                                              \
+            if (__builtin_memcmp(chunk, &val->hdr[off], 16) != 0) {        \
+                same = 0;                                                  \
+                break;                                                     \
+            }                                                              \
+        }                                                                  \
+        break;
+            AD_CMP_CHUNKS(48)  AD_CMP_CHUNKS(64)  AD_CMP_CHUNKS(80)
+            AD_CMP_CHUNKS(96)  AD_CMP_CHUNKS(112) AD_CMP_CHUNKS(128)
+            AD_CMP_CHUNKS(144) AD_CMP_CHUNKS(160) AD_CMP_CHUNKS(176)
+            AD_CMP_CHUNKS(192) AD_CMP_CHUNKS(208)
+#undef AD_CMP_CHUNKS
+            default:
+                same = 0;
             }
             if (same)
                 return 0;
