@@ -501,11 +501,14 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		aux = bpf.NewSidAuxService(svc)
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN:
-		// These land per-behavior on top of the shared return-path base.
-		// Until a behavior's forward/return programs are registered,
-		// accepting the SID would install a silent no-op (empty
-		// tail-call slot), so reject explicitly.
-		return nil, nil, fmt.Errorf("action %s is not implemented yet", action)
+		// SR-aware service: the packet processing is plain End; the aux
+		// only carries NF-catalog metadata for discovery.
+		if name := sidFunc.GetServiceName(); name != "" {
+			if len(name) > bpf.SidAuxServiceNameMax {
+				return nil, nil, fmt.Errorf("service_name exceeds %d characters", bpf.SidAuxServiceNameMax)
+			}
+			aux = bpf.NewSidAuxServiceName(name)
+		}
 	}
 
 	// Plugin-defined auxiliary payload. Only populated for plugin actions
@@ -847,6 +850,11 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 						sf.Segments = bpf.FormatSegments(ing.Encap.Segments, ing.Encap.NumSegments)
 						sf.SrcAddr = bpf.FormatIPv6(ing.Encap.SrcAddr)
 					}
+				}
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN:
+				if name := bpf.SidAuxServiceNameData(aux); name != "" {
+					sf.ServiceName = &name
 				}
 			}
 		}

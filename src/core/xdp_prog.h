@@ -409,6 +409,14 @@ struct sid_aux_entry {
             __u8  _pad;
         } service;                                         // 26 bytes
 
+        // End.AN: NF-catalog metadata for the SR-aware service behind
+        // this SID. The data plane never reads it (End.AN forwards
+        // exactly like End); it exists so SidFunctionList doubles as the
+        // service registration point for NF discovery.
+        struct {
+            char service_name[64];   // null-terminated ASCII
+        } an_meta;                                         // 64 bytes
+
         // Plugin-defined raw payload. Sized larger than every behavior
         // variant so it is the union's layout anchor (pins the union size).
         // Plugin code interprets this via VINBERO_PLUGIN_AUX_CAST after

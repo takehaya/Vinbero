@@ -3568,3 +3568,41 @@ func TestXDPProgEndAMNegative(t *testing.T) {
 		}
 	})
 }
+
+// ========== End.AN (service programming, SR-aware native) ==========
+
+// TestXDPProgEndAN asserts the End.AN slot forwards exactly like End
+// (SL decrement + DA update; SL=0 passes to the kernel) — the dedicated
+// slot exists for per-SID accounting, not for different processing.
+func TestXDPProgEndAN(t *testing.T) {
+	h := newXDPTestHelper(t)
+	entry := &SidFunctionEntry{Action: uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN)}
+	if err := h.mapOps.CreateSidFunction("fc00:a1::1/128", entry, NewSidAuxServiceName("demo-fw"), OwnerRPC); err != nil {
+		t.Fatalf("create End.AN SID: %v", err)
+	}
+
+	pkt, err := buildSRv6Packet(net.ParseIP("fd00::1"), net.ParseIP("fc00:a1::1"),
+		[]net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:a1::1")}, 1)
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
+	}
+	ret, out := h.run(pkt)
+	if ret != XDP_PASS {
+		t.Fatalf("expected XDP_PASS (FIB miss in test env), got %d", ret)
+	}
+	verifyDAAndSL(t, out, "fc00:3::3", 1)
+
+	// SL=0: like End, hand to the kernel untouched.
+	pkt0, err := buildSRv6Packet(net.ParseIP("fd00::1"), net.ParseIP("fc00:a1::1"),
+		[]net.IP{net.ParseIP("fc00:a1::1")}, 0)
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
+	}
+	ret, out = h.run(pkt0)
+	if ret != XDP_PASS {
+		t.Fatalf("SL=0: expected XDP_PASS, got %d", ret)
+	}
+	if !bytes.Equal(out[:len(pkt0)], pkt0) {
+		t.Fatalf("SL=0 packet was modified")
+	}
+}

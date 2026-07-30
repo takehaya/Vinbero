@@ -85,6 +85,10 @@ message SidFunction {
   // End.AD: tolerated outer hop-limit drift before the dynamic cache is
   // rewritten (0 = any hop-limit change refreshes the cache).
   optional uint32 hop_limit_margin = 27;
+  // End.AN: NF-catalog metadata for the SR-aware service behind this SID
+  // (up to 63 ASCII characters). SidFunctionList then doubles as the
+  // service registration point for NF discovery.
+  optional string service_name = 28;
 }
 
 message SidFunctionCreateRequest {

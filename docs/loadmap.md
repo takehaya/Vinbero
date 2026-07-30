@@ -74,7 +74,7 @@
 
 | Function             | Status      | Description                                                 | Reference |
 |----------------------|-------------|-------------------------------------------------------------|-----------|
-| End.AN               |             | SR-aware function (native SRv6 service)                     | draft-ietf-spring-srv6-service-programming |
+| End.AN               | Supported   | SR-aware function (native SRv6 service)                     | draft-ietf-spring-srv6-service-programming |
 | End.AS               | Supported   | Static proxy (SR-unaware service, static config)            | draft-ietf-spring-srv6-service-programming |
 | End.AD               | Supported   | Dynamic proxy (SR-unaware service, dynamic detection)       | draft-ietf-spring-srv6-service-programming |
 | End.AM               | Supported   | Masquerading proxy (SR-unaware service, masquerade SRH)     | draft-ietf-spring-srv6-service-programming |

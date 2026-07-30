@@ -321,29 +321,6 @@ func TestProtoToEntry_Gtp4eSrcConfig(t *testing.T) {
 	}
 }
 
-// TestProtoToEntry_ServiceProgrammingNotImplemented verifies the explicit
-// rejection of the service-programming actions while their forward/return
-// programs are not registered: accepting them would install a SID whose
-// tail-call slot is empty, i.e. a silent no-op.
-func TestProtoToEntry_ServiceProgrammingNotImplemented(t *testing.T) {
-	s := newProtoToEntryServer()
-	for _, action := range []v1.Srv6LocalAction{
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
-	} {
-		_, _, err := s.protoToEntry(&v1.SidFunction{
-			Action:        action,
-			TriggerPrefix: "fc00:1::1/128",
-		})
-		if err == nil {
-			t.Errorf("%s: expected not-implemented error, got nil", action)
-			continue
-		}
-		if !strings.Contains(err.Error(), "not implemented") {
-			t.Errorf("%s: unexpected error: %v", action, err)
-		}
-	}
-}
-
 // TestProtoToEntry_EndASValidation covers the proxy forward-direction
 // validation and the aux layout round trip for END_AS.
 func TestProtoToEntry_EndASValidation(t *testing.T) {
@@ -589,6 +566,55 @@ func TestProtoToEntry_EndAMValidation(t *testing.T) {
 		}
 		if ing.Behavior != bpf.SvcRetAM || ing.InnerTypeMask != bpf.SvcInnerIPv6 {
 			t.Fatalf("unexpected binding: %+v", ing)
+		}
+	})
+}
+
+// TestProtoToEntry_EndAN covers the SR-aware native behavior: plain End
+// processing with optional NF-catalog metadata in the aux.
+func TestProtoToEntry_EndAN(t *testing.T) {
+	s := newProtoToEntryServer()
+
+	t.Run("name round trip", func(t *testing.T) {
+		name := "demo-fw"
+		entry, aux, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
+			TriggerPrefix: "fc00:a1::1/128",
+			ServiceName:   &name,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if entry.Action != uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN) {
+			t.Fatalf("action = %d", entry.Action)
+		}
+		if got := bpf.SidAuxServiceNameData(aux); got != "demo-fw" {
+			t.Fatalf("service_name round trip: %q", got)
+		}
+	})
+
+	t.Run("no metadata means no aux", func(t *testing.T) {
+		_, aux, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
+			TriggerPrefix: "fc00:a1::2/128",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if aux != nil {
+			t.Fatalf("expected no aux without metadata, got %+v", aux)
+		}
+	})
+
+	t.Run("name too long", func(t *testing.T) {
+		name := strings.Repeat("x", 64)
+		_, _, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
+			TriggerPrefix: "fc00:a1::3/128",
+			ServiceName:   &name,
+		})
+		if err == nil || !strings.Contains(err.Error(), "service_name") {
+			t.Fatalf("expected the service_name length error, got %v", err)
 		}
 	})
 }
