@@ -559,16 +559,18 @@ func TestProtoToEntry_EndAMValidation(t *testing.T) {
 	t.Run("service_mac required", func(t *testing.T) {
 		sf := base()
 		sf.ServiceMac = nil
-		if _, _, err := s.protoToEntry(sf); err == nil {
-			t.Fatal("expected error for missing service_mac")
+		_, _, err := s.protoToEntry(sf)
+		if err == nil || !strings.Contains(err.Error(), "requires service_mac") {
+			t.Fatalf("expected the service_mac validation error, got %v", err)
 		}
 	})
 
 	t.Run("inner_type must be IPV6", func(t *testing.T) {
 		sf := base()
 		sf.InnerType = v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4
-		if _, _, err := s.protoToEntry(sf); err == nil {
-			t.Fatal("expected error for non-IPv6 inner_type")
+		_, _, err := s.protoToEntry(sf)
+		if err == nil || !strings.Contains(err.Error(), "requires inner_type IPV6") {
+			t.Fatalf("expected the inner_type validation error, got %v", err)
 		}
 	})
 

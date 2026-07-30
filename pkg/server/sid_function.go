@@ -498,19 +498,6 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		if err != nil {
 			return nil, nil, err
 		}
-		if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM {
-			// The masqueraded DA names the chain's final destination, so
-			// the FIB fallback would route straight past the service —
-			// the static MAC is the only sound delivery. And the frames
-			// on an AM circuit are the SR packets themselves (IPv6 with
-			// the SRH still attached), whatever the chain's payload is.
-			if svc.Flags&bpf.SvcAuxFStaticMac == 0 {
-				return nil, nil, fmt.Errorf("END_AM requires service_mac (the masqueraded destination cannot be FIB-resolved towards the service)")
-			}
-			if svc.InnerType != bpf.SvcInnerIPv6 {
-				return nil, nil, fmt.Errorf("END_AM requires inner_type IPV6 (the service sees the SR packet itself)")
-			}
-		}
 		aux = bpf.NewSidAuxService(svc)
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN:
@@ -593,6 +580,22 @@ func (s *SidFunctionServer) buildServiceAux(sidFunc *v1.SidFunction) (*bpf.SidAu
 	innerBit, err := svcInnerBit(sidFunc.InnerType)
 	if err != nil {
 		return nil, err
+	}
+
+	// End.AM specifics, checked before the MAC resolution below so the
+	// operator sees the behavioral error, not an interface lookup one.
+	// The masqueraded DA names the chain's final destination, so the FIB
+	// fallback would route straight past the service — the static MAC is
+	// the only sound delivery. And the frames on an AM circuit are the SR
+	// packets themselves (IPv6 with the SRH still attached), whatever the
+	// chain's payload is.
+	if v1.Srv6LocalAction(sidFunc.Action) == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM {
+		if sidFunc.GetServiceMac() == "" {
+			return nil, fmt.Errorf("END_AM requires service_mac (the masqueraded destination cannot be FIB-resolved towards the service)")
+		}
+		if innerBit != bpf.SvcInnerIPv6 {
+			return nil, fmt.Errorf("END_AM requires inner_type IPV6 (the service sees the SR packet itself)")
+		}
 	}
 
 	if sidFunc.GetHopLimitMargin() > 255 {
@@ -830,12 +833,13 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 					mac := net.HardwareAddr(svc.Dmac[:]).String()
 					sf.ServiceMac = &mac
 				}
-				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD {
+				switch action {
+				case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD:
 					if svc.HopLimitMargin != 0 {
 						margin := uint32(svc.HopLimitMargin)
 						sf.HopLimitMargin = &margin
 					}
-				} else if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS {
+				case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS:
 					// End.AS only: the static CACHE lives in the return-
 					// circuit binding (AD learns it per-chain, AM carries
 					// the state inside the packet — nothing to show).
