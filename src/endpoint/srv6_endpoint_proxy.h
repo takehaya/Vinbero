@@ -137,6 +137,13 @@ static __noinline int svc_ad_cache_seed(
     struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + l3_offset);
     if ((void *)(ip6h + 1) > data_end)
         return -1;
+    // The whole header we are about to capture must actually be on the
+    // wire BEFORE the existing row is invalidated: a truncated packet
+    // with an inflated SRH hdrlen would otherwise flip valid to 0, fail
+    // the copy, and leave a previously good cache row dead — a one-packet
+    // denial of service against the return path.
+    if (data + l3_offset + hdr_len > data_end)
+        return -1;
     __u8 hop_limit = ip6h->hop_limit;
 
     struct ad_cache_val *val = bpf_map_lookup_elem(&ad_cache_map, &key);

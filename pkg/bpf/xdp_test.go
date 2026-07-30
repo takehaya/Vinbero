@@ -3379,6 +3379,45 @@ func TestXDPProgEndADNegative(t *testing.T) {
 		}
 	})
 
+	t.Run("truncated inflated SRH must not kill a good cache", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		svcVlan := *svc
+		svcVlan.VlanIn = 7
+		h.createSidFunctionEndAD("fc00:adad::4/128", &svcVlan)
+		if _, err := h.mapOps.CreateServiceIngress(1, 7, &ServiceIngressEntry{
+			Behavior: SvcRetAD, InnerTypeMask: SvcInnerIPv4,
+		}); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		segments := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:adad::4")}
+		good, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:adad::4"), segments, 1, innerSrc, innerDst)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		if ret, _ := h.run(good); ret != XDP_REDIRECT {
+			t.Fatalf("seed forward: expected XDP_REDIRECT, got %d", ret)
+		}
+		key := ServiceIngressKey{Ifindex: 1, VlanId: 7}
+		var val AdCacheVal
+		if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil || val.Valid != 1 {
+			t.Fatalf("cache not seeded: err=%v valid=%d", err, val.Valid)
+		}
+
+		// Inflate the SRH hdrlen (claim 4 segments, carry 2) without
+		// adding bytes: the seed must reject it up front and leave the
+		// good row untouched.
+		bad := make([]byte, len(good))
+		copy(bad, good)
+		bad[14+40+1] = 20 // srh->hdrlen: claims 10 segments (208B header total)
+		bad[14+40+4] = 9  // srh->first_segment, keeps SL bounds plausible
+		if ret, _ := h.run(bad); ret != XDP_DROP {
+			t.Fatalf("inflated SRH: expected XDP_DROP, got %d", ret)
+		}
+		if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil || val.Valid != 1 {
+			t.Fatalf("good cache row was killed by the malformed packet: err=%v valid=%d", err, val.Valid)
+		}
+	})
+
 	t.Run("reduced encap drops", func(t *testing.T) {
 		h := newXDPTestHelper(t)
 		h.createSidFunctionEndAD("fc00:adad::3/128", svc)
