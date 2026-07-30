@@ -328,7 +328,6 @@ func TestProtoToEntry_Gtp4eSrcConfig(t *testing.T) {
 func TestProtoToEntry_ServiceProgrammingNotImplemented(t *testing.T) {
 	s := newProtoToEntryServer()
 	for _, action := range []v1.Srv6LocalAction{
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN,
 	} {
 		_, _, err := s.protoToEntry(&v1.SidFunction{
@@ -533,6 +532,61 @@ func TestBuildServiceIngress_EndAD(t *testing.T) {
 		sf.HopLimitMargin = &margin
 		if _, _, err := s.protoToEntry(sf); err == nil {
 			t.Fatal("expected error for margin > 255")
+		}
+	})
+}
+
+// TestProtoToEntry_EndAMValidation covers the masquerading-proxy rules:
+// static MAC delivery is mandatory and the circuit carries the SR packet
+// itself (inner_type IPV6).
+func TestProtoToEntry_EndAMValidation(t *testing.T) {
+	s := newProtoToEntryServer()
+	ifaceIn := uint32(42)
+	mac := "02:00:00:00:00:01"
+	base := func() *v1.SidFunction {
+		in := ifaceIn
+		m := mac
+		return &v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM,
+			TriggerPrefix: "fc00:2::150/128",
+			Oif:           1, // lo: has no MAC, so swap in a MAC-bearing oif when needed
+			IfaceIn:       &in,
+			InnerType:     v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV6,
+			ServiceMac:    &m,
+		}
+	}
+
+	t.Run("service_mac required", func(t *testing.T) {
+		sf := base()
+		sf.ServiceMac = nil
+		if _, _, err := s.protoToEntry(sf); err == nil {
+			t.Fatal("expected error for missing service_mac")
+		}
+	})
+
+	t.Run("inner_type must be IPV6", func(t *testing.T) {
+		sf := base()
+		sf.InnerType = v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4
+		if _, _, err := s.protoToEntry(sf); err == nil {
+			t.Fatal("expected error for non-IPv6 inner_type")
+		}
+	})
+
+	t.Run("static CACHE rejected", func(t *testing.T) {
+		sf := base()
+		sf.Segments = []string{"fc00:3::3"}
+		if _, err := s.buildServiceIngress(sf); err == nil {
+			t.Fatal("expected error for segments on END_AM")
+		}
+	})
+
+	t.Run("ingress binding carries AM behavior", func(t *testing.T) {
+		ing, err := s.buildServiceIngress(base())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ing.Behavior != bpf.SvcRetAM || ing.InnerTypeMask != bpf.SvcInnerIPv6 {
+			t.Fatalf("unexpected binding: %+v", ing)
 		}
 	})
 }

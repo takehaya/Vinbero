@@ -155,6 +155,7 @@ func populateProgArrays(objs *BpfObjects) error {
 		20: objs.TailcallEndpointEndM_gtp6E,
 		21: objs.TailcallEndpointEndM_gtp4E,
 		14: objs.TailcallEndpointEndAs,
+		15: objs.TailcallEndpointEndAm,
 		22: objs.TailcallEndpointEndDx2v,
 		23: objs.TailcallEndpointEndDt2m,
 		24: objs.TailcallEndpointEndAd,
@@ -213,6 +214,7 @@ func populateProgArrays(objs *BpfObjects) error {
 	serviceReturnProgs := map[uint32]*ebpf.Program{
 		SvcRetAS: objs.TailcallServiceReturnAs,
 		SvcRetAD: objs.TailcallServiceReturnAd,
+		SvcRetAM: objs.TailcallServiceReturnAm,
 	}
 	for idx, prog := range serviceReturnProgs {
 		if err := objs.ServiceReturnProgs.Update(idx, prog, ebpf.UpdateAny); err != nil {
