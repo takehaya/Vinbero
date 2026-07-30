@@ -1,4 +1,4 @@
-// Endpoint tail call targets (21 SEC("xdp") programs).
+// Endpoint tail call targets (22 SEC("xdp") programs).
 // Included from xdp_prog.c — not compiled standalone.
 
 // ========== Helpers shared by tail call targets (nosrh path) ==========
@@ -51,6 +51,12 @@ static __always_inline int nosrh_fib_v6(
 
 DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end, process_end)
 DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end_m_gtp6_d_di, process_end_m_gtp6_d_di)
+// End.AN (service programming, SR-aware service): the packet processing
+// is exactly End — the co-located service understands the SRH itself.
+// The dedicated slot exists for per-SID accounting and as the anchor for
+// future service-liveness wiring; the aux carries catalog metadata the
+// data plane never reads.
+DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end_an, process_end)
 
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_t, process_end_t)
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_x, process_end_x)

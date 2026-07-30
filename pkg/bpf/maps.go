@@ -914,6 +914,29 @@ func SidAuxServiceData(entry *SidAuxEntry) *SidAuxService {
 	return result
 }
 
+// SidAuxServiceNameMax bounds the End.AN catalog name (an_meta variant,
+// null-terminated in a 64-byte field).
+const SidAuxServiceNameMax = 63
+
+// NewSidAuxServiceName creates an End.AN aux entry carrying the NF-catalog
+// service name. Callers must enforce len(name) <= SidAuxServiceNameMax.
+func NewSidAuxServiceName(name string) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	dst := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(entry))[:SidAuxServiceNameMax]
+	copy(dst, name)
+	return entry
+}
+
+// SidAuxServiceNameData extracts the End.AN service name.
+func SidAuxServiceNameData(entry *SidAuxEntry) string {
+	raw := (*[SidAuxPluginRawMax]byte)(unsafe.Pointer(entry))[:SidAuxServiceNameMax+1]
+	end := 0
+	for end < len(raw) && raw[end] != 0 {
+		end++
+	}
+	return string(raw[:end])
+}
+
 // SidAuxGtp6eData extracts GTP6.E variant fields from a SidAuxEntry
 func SidAuxGtp6eData(entry *SidAuxEntry) (argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) {
 	raw := (*[200]byte)(unsafe.Pointer(entry))

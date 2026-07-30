@@ -303,6 +303,7 @@ type BpfProgramSpecs struct {
 	TailcallEndpointEnd            *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end"`
 	TailcallEndpointEndAd          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_ad"`
 	TailcallEndpointEndAm          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_am"`
+	TailcallEndpointEndAn          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_an"`
 	TailcallEndpointEndAs          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_as"`
 	TailcallEndpointEndB6          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6"`
 	TailcallEndpointEndB6Encaps    *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_b6_encaps"`
@@ -514,6 +515,7 @@ type BpfPrograms struct {
 	TailcallEndpointEnd            *ebpf.Program `ebpf:"tailcall_endpoint_end"`
 	TailcallEndpointEndAd          *ebpf.Program `ebpf:"tailcall_endpoint_end_ad"`
 	TailcallEndpointEndAm          *ebpf.Program `ebpf:"tailcall_endpoint_end_am"`
+	TailcallEndpointEndAn          *ebpf.Program `ebpf:"tailcall_endpoint_end_an"`
 	TailcallEndpointEndAs          *ebpf.Program `ebpf:"tailcall_endpoint_end_as"`
 	TailcallEndpointEndB6          *ebpf.Program `ebpf:"tailcall_endpoint_end_b6"`
 	TailcallEndpointEndB6Encaps    *ebpf.Program `ebpf:"tailcall_endpoint_end_b6_encaps"`
@@ -556,6 +558,7 @@ func (p *BpfPrograms) Close() error {
 		p.TailcallEndpointEnd,
 		p.TailcallEndpointEndAd,
 		p.TailcallEndpointEndAm,
+		p.TailcallEndpointEndAn,
 		p.TailcallEndpointEndAs,
 		p.TailcallEndpointEndB6,
 		p.TailcallEndpointEndB6Encaps,

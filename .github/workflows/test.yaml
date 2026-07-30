@@ -144,6 +144,7 @@ jobs:
           - end-as
           - end-ad
           - end-am
+          - end-an
           - headend-v4
           - headend-v6
           - headend-l2
