@@ -3416,6 +3416,25 @@ func TestXDPProgEndADNegative(t *testing.T) {
 		if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil || val.Valid != 1 {
 			t.Fatalf("good cache row was killed by the malformed packet: err=%v valid=%d", err, val.Valid)
 		}
+
+		// Odd hdrlen (a full-length packet, so the on-wire-length guard
+		// does NOT catch it) yields hdr_len = 40+8+3*8 = 72, which is not a
+		// multiple of 16. Before the alignment guard this passed the range
+		// check, flipped valid to 0, then fell into the seed switch's
+		// default and left the good row dead — a one-packet DoS. It must
+		// drop up front and leave the seeded row intact.
+		odd, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:adad::4"), segments, 1, innerSrc, innerDst)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		odd[14+40+1] = 3 // srh->hdrlen: 3 (odd) → SRH len 32, hdr_len 72
+		odd[14+40+4] = 2 // srh->first_segment
+		if ret, _ := h.run(odd); ret != XDP_DROP {
+			t.Fatalf("odd hdrlen: expected XDP_DROP, got %d", ret)
+		}
+		if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil || val.Valid != 1 {
+			t.Fatalf("good cache row was killed by the odd-hdrlen packet: err=%v valid=%d", err, val.Valid)
+		}
 	})
 
 	t.Run("reduced encap drops", func(t *testing.T) {
@@ -3565,6 +3584,37 @@ func TestXDPProgEndAMNegative(t *testing.T) {
 		ret, _ := h.runOnIfindex(pkt, 1)
 		if ret != XDP_DROP {
 			t.Fatalf("expected XDP_DROP for SRH-less return, got %d", ret)
+		}
+	})
+
+	t.Run("return with a DA the proxy never masqueraded drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 7, &ServiceIngressEntry{
+			Behavior: SvcRetAM, InnerTypeMask: SvcInnerIPv6,
+		}); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		// A well-formed SRv6 packet whose DA is NOT Segment List[0] — i.e.
+		// one this proxy never masqueraded. De-masquerade must refuse it,
+		// otherwise the return path is an arbitrary-redirect primitive for
+		// anything that can put a frame on the IFACE-IN circuit.
+		segments := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:4::4"), net.ParseIP("fc00:aaaa::9")}
+		// buildSRv6Packet sets DA = the given dst; use a victim DA that is
+		// none of the segments (no masquerade produced this).
+		pkt, err := buildSRv6Packet(net.ParseIP("fc00::1"), net.ParseIP("2001:db8::dead"), segments, 1)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		// Wrap in VLAN 7 to reach the {lo,7} circuit (the front door keys
+		// on the tagged circuit; TEST_RUN pins ingress to lo).
+		back := make([]byte, 0, len(pkt)+4)
+		back = append(back, pkt[0:12]...)
+		back = append(back, 0x81, 0x00, 0x00, 0x07)
+		back = append(back, 0x86, 0xDD)
+		back = append(back, pkt[14:]...)
+		ret, _ := h.runOnIfindex(back, 1)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP for a non-masqueraded DA, got %d", ret)
 		}
 	})
 }

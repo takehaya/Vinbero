@@ -124,7 +124,16 @@ static __noinline int svc_ad_cache_seed(
     // helper call, which resets the verifier's lower bound and turns the
     // range into [0, N] ("invalid zero-sized read").
     __u32 hdr_len = sizeof(struct ipv6hdr) + (__u32)srh_len;
-    if (hdr_len < sizeof(struct ipv6hdr) + 8 || hdr_len > AD_CACHE_HDR_MAX)
+    // Reject anything the constant-size copy switches below cannot handle
+    // (only 40 + 8 + n*16, i.e. a segments-only SRH) BEFORE the row is
+    // invalidated. An SRH carrying TLVs / padding — a legitimate HMAC TLV
+    // makes hdrlen odd, or a crafted value — otherwise passes the range
+    // check, flips valid to 0, then falls into the seed switch's default:
+    // and leaves a previously good cache row dead: a one-packet denial of
+    // service against the return path. End.AD does not support TLV-bearing
+    // SRH; such chains are dropped here without touching the cache.
+    if (hdr_len < sizeof(struct ipv6hdr) + 8 || hdr_len > AD_CACHE_HDR_MAX ||
+        (hdr_len & 15) != 0)
         return -1;
 
     struct service_ingress_key key = {
@@ -182,7 +191,12 @@ static __noinline int svc_ad_cache_seed(
                 break;                                                     \
             }                                                              \
             if (off == 0) {                                                \
-                chunk[1] &= 0xf0; /* flow label, zeroed in the cache */    \
+                /* byte0 = version|TC-high, byte1 = TC-low|FL-high; keep  */\
+                /* the version nibble, drop the whole Traffic Class and   */\
+                /* Flow Label (all per-packet) so DSCP churn does not      */\
+                /* force a re-seed.                                        */\
+                chunk[0] &= 0xf0;                                          \
+                chunk[1] = 0;                                              \
                 chunk[2] = 0;                                              \
                 chunk[3] = 0;                                              \
                 chunk[4] = val->hdr[4]; /* payload_len: per-packet */      \
@@ -236,9 +250,13 @@ static __noinline int svc_ad_cache_seed(
     default:
         return -1;
     }
-    // Zero the flow label: per-flow entropy must not fossilize into the
-    // cache (the return path re-derives nothing; the label rides as 0).
-    val->hdr[1] &= 0xf0;
+    // Normalize the per-packet fields so the update-skip comparison above
+    // matches a stable chain regardless of DSCP / flow-label churn. byte0
+    // = version|TC-high, byte1 = TC-low|FL-high: keep the version nibble,
+    // zero the whole Traffic Class and Flow Label. Without this, DSCP-mixed
+    // traffic on one circuit would re-seed the 208-byte row every packet.
+    val->hdr[0] &= 0xf0;
+    val->hdr[1] = 0;
     val->hdr[2] = 0;
     val->hdr[3] = 0;
     val->hdr_len = hdr_len;

@@ -211,6 +211,19 @@ int tailcall_service_return_am(struct xdp_md *ctx)
 
     void *data_end = (void *)(long)ctx->data_end;
     void *seg_base = (void *)srh + 8;
+
+    // De-masquerade only frames this proxy actually masqueraded. Forward
+    // masquerading always writes DA = Segment List[0]; a frame whose DA is
+    // anything else never traversed this proxy, so refuse to rewrite it —
+    // otherwise a compromised (or misconfigured) service NIC could hand us
+    // an arbitrary SRH and turn de-masquerade into an unauthenticated
+    // "set DA = segments[SL], redirect" primitive into the SR domain.
+    struct in6_addr expect;
+    if (copy_segment_by_index(&expect, seg_base, data_end, 0) != 0)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+    if (__builtin_memcmp(&ip6h->daddr, &expect, sizeof(expect)) != 0)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+
     if (copy_segment_by_index(&ip6h->daddr, seg_base, data_end, sl) != 0)
         TAILCALL_RETURN(ctx, XDP_DROP);
 
