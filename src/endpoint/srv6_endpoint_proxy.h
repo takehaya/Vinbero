@@ -287,6 +287,18 @@ static __always_inline int process_end_ad(
     int ret = endpoint_init(&ectx, ctx, ip6h, srh, entry, l3_offset);
     if (ret != 0)
         return XDP_DROP; // SL == 0 (-1) or malformed SL (-2)
+
+    // The dynamic cache stores the outer IPv6 + SRH verbatim and replays it,
+    // so End.AD only supports a segments-only SRH. hdrlen counts 8-byte
+    // units; a segments-only header is exactly (first_segment + 1) segments
+    // of 16 bytes = (first_segment + 1) * 2 units. Any other value means a
+    // TLV or padding is present (a 16-byte-aligned TLV would otherwise slip
+    // past the length guard in svc_ad_cache_seed) — reject it here, before
+    // endpoint_update_da mutates the header, so such chains drop cleanly
+    // instead of being cached as an unreplayable shape.
+    if (srh->hdrlen != (__u16)(srh->first_segment + 1) * 2)
+        return XDP_DROP;
+
     if (endpoint_update_da(&ectx) != 0)
         return XDP_DROP;
 

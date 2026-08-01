@@ -3435,6 +3435,26 @@ func TestXDPProgEndADNegative(t *testing.T) {
 		if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil || val.Valid != 1 {
 			t.Fatalf("good cache row was killed by the odd-hdrlen packet: err=%v valid=%d", err, val.Valid)
 		}
+
+		// A 16-byte-aligned TLV: 2 segments (first_segment=1) but hdrlen
+		// claims 6 units (a 16-byte TLV past the segments). hdr_len = 40 +
+		// 8 + 6*8 = 96 IS a multiple of 16, so the alignment guard alone
+		// would let it through; the segments-only check (hdrlen ==
+		// (first_segment+1)*2) rejects it. Build a 3-segment packet (hdrlen
+		// 6, first_segment 2) and rewrite first_segment to 1 so the header
+		// is physically 3 segments long but claims to be segments-only for 2.
+		tlv, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:adad::4"),
+			[]net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:4::4"), net.ParseIP("fc00:adad::4")}, 2, innerSrc, innerDst)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		tlv[14+40+4] = 1 // first_segment=1 while hdrlen stays 6 → not segments-only
+		if ret, _ := h.run(tlv); ret != XDP_DROP {
+			t.Fatalf("16-aligned TLV: expected XDP_DROP, got %d", ret)
+		}
+		if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil || val.Valid != 1 {
+			t.Fatalf("good cache row was killed by the TLV packet: err=%v valid=%d", err, val.Valid)
+		}
 	})
 
 	t.Run("reduced encap drops", func(t *testing.T) {
