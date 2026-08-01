@@ -158,7 +158,7 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered LocatorService", zap.String("path", path))
 
 	// SidFunction service
-	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr)
+	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr, s.logger.Named("sid_function"))
 	path, handler = vinberov1connect.NewSidFunctionServiceHandler(sidFunctionServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered SidFunctionService", zap.String("path", path))
