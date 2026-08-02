@@ -1323,7 +1323,7 @@ func (m *MapOperations) ResetStats() error {
 
 // ===== Per-slot Stats Map Operations =====
 
-// SlotStatsEndpointMax / SlotStatsHeadendMax mirror the BPF-side maps in
+// SlotStats*Max mirror the BPF-side slot_stats_* maps in
 // src/core/xdp_stats.h. Must match the C constants.
 const (
 	SlotStatsEndpointMax  = 64

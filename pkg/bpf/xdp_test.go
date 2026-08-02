@@ -3162,7 +3162,8 @@ func TestXDPProgEndASReturn(t *testing.T) {
 }
 
 // slotStatPackets returns the aggregated packet count for one slot of a
-// slot_stats_* map, or 0 if the slot is absent.
+// slot_stats_* map. ReadSlotStats returns every slot in range, so a slot
+// that was never hit reads back as 0.
 func slotStatPackets(t *testing.T, m *MapOperations, mapType string, slot uint32) uint64 {
 	t.Helper()
 	entries, err := m.ReadSlotStats(mapType)
