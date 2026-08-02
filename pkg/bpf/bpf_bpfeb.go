@@ -15,6 +15,7 @@ import (
 
 type BpfAdCacheVal struct {
 	_        structs.HostLayout
+	Seq      uint32
 	HdrLen   uint16
 	HopLimit uint8
 	Valid    uint8

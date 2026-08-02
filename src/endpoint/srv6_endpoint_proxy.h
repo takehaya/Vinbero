@@ -222,14 +222,18 @@ static __noinline int svc_ad_cache_seed(
         }
     }
 
-    // Publish protocol for concurrent return-path readers: valid drops to
-    // 0 before the bytes change and comes back to 1 only after they are
-    // complete. The compiler barriers pin the order at the instruction
-    // level; BPF has no portable release/acquire fence on our oldest
-    // supported kernels, so on weakly-ordered CPUs a reader may still
-    // catch a transiently inconsistent row — the result is one malformed
-    // (droppable) packet, never a stale chain.
+    // Seqlock publish protocol for concurrent return-path readers: bump
+    // seq to an odd value before the bytes change and back to even after.
+    // valid stays as the "seeded at least once" flag. A reader that sees
+    // an even seq, copies the row, and re-reads the same seq observed a
+    // consistent header; if seq moved (or is odd) it drops the packet
+    // rather than replaying a torn — but still syntactically valid, hence
+    // silently mis-delivered — header. The compiler barriers pin the
+    // store order; BPF has no portable release/acquire fence on our oldest
+    // kernels, so on weakly-ordered CPUs the guarantee is "a torn read is
+    // caught and dropped", not "never observed".
     val->valid = 0;
+    val->seq++; // now odd: writer in progress
     asm volatile("" ::: "memory");
     // Constant-size copy per possible header length: a variable length
     // reaches the helper with its verifier lower bound destroyed (clang
@@ -263,6 +267,7 @@ static __noinline int svc_ad_cache_seed(
     val->hop_limit = hop_limit;
     asm volatile("" ::: "memory");
     val->valid = 1;
+    val->seq++; // back to even: update complete
     return 0;
 }
 

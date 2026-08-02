@@ -3049,11 +3049,13 @@ func TestXDPProgEndASReturn(t *testing.T) {
 			t.Fatalf("build packet: %v", err)
 		}
 		ret, out := h.runOnIfindex(pkt, 1)
-		// FIB lookup for fc00:3::3 fails in the test environment, so the
-		// encapsulated packet is handed to the kernel (XDP_PASS), same as
-		// the H.Encaps headend tests.
-		if ret != XDP_PASS {
-			t.Fatalf("expected XDP_PASS, got %d", ret)
+		// FIB lookup for fc00:3::3 fails in the test environment. The AS
+		// return fails closed on a FIB miss (a dedicated proxy circuit
+		// must not leak an assembled SR packet to the host stack), so the
+		// verdict is XDP_DROP — but the re-encapsulation is already in the
+		// output buffer and is asserted below.
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP (FIB miss, fail-closed), got %d", ret)
 		}
 		if !verifyEtherType(t, out, 0x86DD) {
 			return
@@ -3104,6 +3106,26 @@ func TestXDPProgEndASReturn(t *testing.T) {
 			if !bytes.Equal(out[:len(pkt)], pkt) {
 				t.Fatalf("dst %s: link maintenance frame was modified", dst)
 			}
+		}
+	})
+
+	t.Run("over-claimed inner length drops", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, baseEntry(SvcInnerIPv4)); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		pkt, err := buildSimpleIPv4Packet(net.ParseIP("10.0.0.9").To4(), net.ParseIP("172.0.2.1").To4())
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		// The service (untrusted) claims a tot_len far larger than the
+		// frame. The AS return must clamp/reject rather than build an
+		// outer payload_len that exceeds the wire, which would inject a
+		// malformed SR packet into the domain.
+		binary.BigEndian.PutUint16(pkt[14+2:14+4], 0xffff) // iph->tot_len
+		ret, _ := h.runOnIfindex(pkt, 1)
+		if ret != XDP_DROP {
+			t.Fatalf("over-claimed tot_len: expected XDP_DROP, got %d", ret)
 		}
 	})
 
@@ -3270,8 +3292,11 @@ func TestXDPProgEndADForwardAndReplay(t *testing.T) {
 		t.Fatalf("build return packet: %v", err)
 	}
 	ret, out = h.runOnIfindex(back, 1)
-	if ret != XDP_PASS {
-		t.Fatalf("replay: expected XDP_PASS (FIB miss in test env), got %d", ret)
+	// FIB miss in the test env; the AD return fails closed (dedicated
+	// circuit) so the verdict is XDP_DROP, with the replayed encapsulation
+	// still in the output buffer and asserted below.
+	if ret != XDP_DROP {
+		t.Fatalf("replay: expected XDP_DROP (FIB miss, fail-closed), got %d", ret)
 	}
 	if !verifyEtherType(t, out, 0x86DD) {
 		return
@@ -3362,6 +3387,44 @@ func TestXDPProgEndADNegative(t *testing.T) {
 		ret, _ := h.runOnIfindex(pkt, 1)
 		if ret != XDP_DROP {
 			t.Fatalf("expected XDP_DROP before seed, got %d", ret)
+		}
+	})
+
+	t.Run("odd seqlock (writer mid-update) drops the replay", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		svcVlan := *svc
+		svcVlan.VlanIn = 7
+		h.createSidFunctionEndAD("fc00:adad::9/128", &svcVlan)
+		if _, err := h.mapOps.CreateServiceIngress(1, 7, &ServiceIngressEntry{
+			Behavior: SvcRetAD, InnerTypeMask: SvcInnerIPv4,
+		}); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		segments := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:adad::9")}
+		fwd, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:adad::9"), segments, 1, innerSrc, innerDst)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		if ret, _ := h.run(fwd); ret != XDP_REDIRECT {
+			t.Fatalf("seed forward: expected XDP_REDIRECT, got %d", ret)
+		}
+		// Force an odd seq (a writer is notionally mid-update). The return
+		// path must drop rather than replay a possibly-torn header.
+		key := ServiceIngressKey{Ifindex: 1, VlanId: 7}
+		var val AdCacheVal
+		if err := h.objs.AdCacheMap.Lookup(&key, &val); err != nil {
+			t.Fatalf("lookup ad cache: %v", err)
+		}
+		val.Seq |= 1
+		if err := h.objs.AdCacheMap.Update(&key, &val, 0); err != nil {
+			t.Fatalf("update ad cache: %v", err)
+		}
+		back, err := buildVlanTaggedIPv4Packet(7, innerDst.To4(), innerSrc.To4())
+		if err != nil {
+			t.Fatalf("build return packet: %v", err)
+		}
+		if ret, _ := h.runOnIfindex(back, 1); ret != XDP_DROP {
+			t.Fatalf("odd seq: expected XDP_DROP, got %d", ret)
 		}
 	})
 

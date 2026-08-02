@@ -265,6 +265,16 @@ struct service_ingress_entry {
 // proxy segment bound to that circuit, not per-flow state.
 #define AD_CACHE_HDR_MAX (40 + 8 + MAX_SEGMENTS * 16)  // outer IPv6 + max SRH = 208
 struct ad_cache_val {
+    __u32 seq;                    // seqlock: odd = a writer is mid-update.
+                                  // The forward (writer) and return (reader)
+                                  // directions of one circuit can run on
+                                  // different CPUs, and the 208-byte hdr copy
+                                  // is not atomic; a reader that observes an
+                                  // even seq, copies, then re-reads the same
+                                  // seq saw a consistent row, otherwise it
+                                  // drops the packet instead of replaying a
+                                  // torn (but still well-formed, hence
+                                  // mis-delivered) header.
     __u16 hdr_len;                // valid bytes in hdr (48..AD_CACHE_HDR_MAX)
     __u8  hop_limit;              // outer hop limit at cache time (update-margin check)
     __u8  valid;                  // 0 until the first forward packet seeds the cache
