@@ -68,25 +68,44 @@ int tailcall_service_return_as(struct xdp_md *ctx)
         TAILCALL_RETURN(ctx, XDP_DROP);
     __u8 ver = (*(__u8 *)l3) >> 4;
 
+    // The inner length that becomes the outer IPv6 payload_len must come
+    // from the wire, not from the service's claimed header length: the NF
+    // on the IFACE-IN circuit is outside the trust boundary, so a bug or
+    // malice claiming a tot_len larger than the frame would inject a
+    // malformed SR packet into the domain (and a smaller one truncates).
+    // Clamp to the on-wire L3 length.
+    __u16 wire_len = (__u16)((char *)data_end - (char *)l3);
+
     int action;
     if (ver == 4) {
         struct iphdr *iph = (struct iphdr *)l3;
         if ((void *)(iph + 1) > data_end)
             TAILCALL_RETURN(ctx, XDP_DROP);
+        __u16 claimed = bpf_ntohs(iph->tot_len);
+        if (claimed < sizeof(struct iphdr) || claimed > wire_len)
+            TAILCALL_RETURN(ctx, XDP_DROP);
         action = CALL_WITH_CONST_L3(l3_off, do_h_encaps_core, ctx,
-                                    &saved_eth, entry, IPPROTO_IPIP,
-                                    bpf_ntohs(iph->tot_len));
+                                    &saved_eth, entry, IPPROTO_IPIP, claimed);
     } else if (ver == 6) {
         struct ipv6hdr *inner_ip6h = (struct ipv6hdr *)l3;
         if ((void *)(inner_ip6h + 1) > data_end)
             TAILCALL_RETURN(ctx, XDP_DROP);
+        __u16 claimed = bpf_ntohs(inner_ip6h->payload_len) +
+                        (__u16)sizeof(struct ipv6hdr);
+        if (claimed < sizeof(struct ipv6hdr) || claimed > wire_len)
+            TAILCALL_RETURN(ctx, XDP_DROP);
         action = CALL_WITH_CONST_L3(l3_off, do_h_encaps_core, ctx,
-                                    &saved_eth, entry, IPPROTO_IPV6,
-                                    bpf_ntohs(inner_ip6h->payload_len) +
-                                        (__u16)sizeof(struct ipv6hdr));
+                                    &saved_eth, entry, IPPROTO_IPV6, claimed);
     } else {
         action = XDP_DROP;
     }
+    // do_h_encaps_core returns XDP_PASS on a FIB miss (the headend
+    // convention: the kernel can still route the outer packet). On a
+    // dedicated proxy circuit the only destination is the chain's next
+    // segment, so leaking an SR-encapsulated packet to the host stack is
+    // never intended — fail closed, matching the AD Ethernet path.
+    if (action == XDP_PASS)
+        action = XDP_DROP;
     TAILCALL_RETURN(ctx, action);
 }
 
@@ -108,6 +127,12 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
     struct ad_cache_val *val = bpf_map_lookup_elem(&ad_cache_map, &key);
     if (!val || !val->valid)
         TAILCALL_RETURN(ctx, XDP_DROP);
+    // Seqlock read: snapshot seq before the copy; an odd value means a
+    // writer is mid-update. After the copy we re-check it (see below).
+    __u64 seq0 = val->seq;
+    if (seq0 & 1)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+    asm volatile("" ::: "memory");
     __u32 hdr_len = val->hdr_len;
     if (hdr_len < sizeof(struct ipv6hdr) + 8 || hdr_len > AD_CACHE_HDR_MAX)
         TAILCALL_RETURN(ctx, XDP_DROP);
@@ -162,6 +187,15 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
         TAILCALL_RETURN(ctx, XDP_DROP);
     }
 
+    // Seqlock re-check: if a writer touched the row while we copied it, the
+    // bytes just prepended may mix two chains. Drop rather than emit a
+    // torn (well-formed, so silently mis-delivered) header. hdr_len and
+    // hop_limit were read under the same snapshot, so re-reading seq alone
+    // covers the whole read.
+    asm volatile("" ::: "memory");
+    if (val->seq != seq0)
+        TAILCALL_RETURN(ctx, XDP_DROP);
+
     // The cached payload_len is from the seeding packet; recompute for
     // this one: SRH (hdr_len - 40) + the payload behind it.
     data = (void *)(long)ctx->data;
@@ -175,11 +209,12 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         TAILCALL_RETURN(ctx, XDP_DROP);
     int action = srv6_fib_redirect(ctx, outer, eth, ctx->ingress_ifindex);
-    // Ethernet circuit: fail closed on a FIB miss like H.Encaps.L2 —
-    // handing the freshly assembled L2-in-SRv6 frame to the service-side
-    // kernel stack is never the intended path. L3 circuits keep the
-    // headend convention (the kernel can still route the outer packet).
-    if (l3_off == 0 && action == XDP_PASS)
+    // Fail closed on a FIB miss. A proxy IFACE-IN is a dedicated circuit
+    // whose only destination is the chain's next segment, so handing a
+    // freshly assembled SR-encapsulated packet to the service-side kernel
+    // stack is never intended — same rationale as the AS return and the
+    // H.Encaps.L2 path, applied uniformly to L3 and Ethernet circuits.
+    if (action == XDP_PASS)
         action = XDP_DROP;
     TAILCALL_RETURN(ctx, action);
 }

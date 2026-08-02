@@ -265,11 +265,28 @@ struct service_ingress_entry {
 // proxy segment bound to that circuit, not per-flow state.
 #define AD_CACHE_HDR_MAX (40 + 8 + MAX_SEGMENTS * 16)  // outer IPv6 + max SRH = 208
 struct ad_cache_val {
+    __u64 seq;                    // seqlock: odd = a writer is mid-update.
+                                  // 64-bit because the BPF v1 ISA only has
+                                  // 64-bit atomic compare-and-swap.
+                                  // The forward (writer) and return (reader)
+                                  // directions of one circuit can run on
+                                  // different CPUs, and the 208-byte hdr copy
+                                  // is not atomic; a reader that observes an
+                                  // even seq, copies, then re-reads the same
+                                  // seq saw a consistent row, otherwise it
+                                  // drops the packet instead of replaying a
+                                  // torn (but still well-formed, hence
+                                  // mis-delivered) header.
     __u16 hdr_len;                // valid bytes in hdr (48..AD_CACHE_HDR_MAX)
     __u8  hop_limit;              // outer hop limit at cache time (update-margin check)
     __u8  valid;                  // 0 until the first forward packet seeds the cache
     __u8  hdr[AD_CACHE_HDR_MAX];  // outer IPv6 header + SRH, flow label zeroed
-} __attribute__((packed));
+    // Deliberately NOT packed: seq must be naturally aligned for the
+    // atomic compare-and-swap in svc_ad_cache_seed. The field order
+    // (u32, u16, u8, u8, then the byte array) already packs to 8 bytes of
+    // header with no padding, so dropping packed does not change the
+    // layout — it only lets the compiler see seq as 4-byte aligned.
+};
 
 // ========== ECMP path groups ==========
 //
