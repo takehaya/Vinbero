@@ -8,14 +8,30 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
 
-// SlotStatsMapTypes enumerates the three slot_stats_* PROG_ARRAY map types
-// in a stable order. Tests, server handlers, and CLI help all derive the
-// set of valid --type values from here to avoid drift.
+// SlotStatsMapTypes enumerates the slot_stats_* map types in a stable
+// order. Tests, server handlers, and CLI help all derive the set of valid
+// --type values from here to avoid drift.
 var SlotStatsMapTypes = []string{
 	MapTypeEndpoint,
 	MapTypeHeadendV4,
 	MapTypeHeadendV6,
 	MapTypeHeadendL2,
+	MapTypeServiceReturn,
+}
+
+// svcReturnSlotNames labels the service-return PROG_ARRAY slots. They are
+// not a proto enum (the SVC_RET_* constants are C-side only), so the names
+// are spelled out here.
+var svcReturnSlotNames = map[uint32]string{
+	SvcRetAS: "End.AS",
+	SvcRetAD: "End.AD",
+	SvcRetAM: "End.AM",
+}
+
+// FormatServiceReturnName returns the pretty name for a service-return
+// slot, or "" for an unassigned one.
+func FormatServiceReturnName(slot uint32) string {
+	return svcReturnSlotNames[slot]
 }
 
 // ValidateSlotStatsMapType returns an error if mapType is not one of

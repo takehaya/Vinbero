@@ -121,6 +121,9 @@ int tailcall_epilogue(struct xdp_md *ctx, int action)
         case DISPATCH_HEADEND_L2:
             slot_stats_inc(&slot_stats_headend_l2, slot & (SLOT_STATS_HEADEND_MAX - 1), pkt_len);
             break;
+        case DISPATCH_SERVICE_RETURN:
+            slot_stats_inc(&slot_stats_service_return, slot & (SLOT_STATS_SVC_RETURN_MAX - 1), pkt_len);
+            break;
         default:
             break;
         }

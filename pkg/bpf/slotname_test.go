@@ -9,11 +9,11 @@ func TestFormatEndpointBuiltinName(t *testing.T) {
 		slot uint32
 		want string
 	}{
-		{0, ""},          // UNSPECIFIED
-		{1, "End"},       // SRV6_LOCAL_ACTION_END
-		{2, "End.X"},     // SRV6_LOCAL_ACTION_END_X
-		{8, "End.DT4"},   // SRV6_LOCAL_ACTION_END_DT4
-		{9, "End.DT46"},  // SRV6_LOCAL_ACTION_END_DT46 (digit-bearing token)
+		{0, ""},         // UNSPECIFIED
+		{1, "End"},      // SRV6_LOCAL_ACTION_END
+		{2, "End.X"},    // SRV6_LOCAL_ACTION_END_X
+		{8, "End.DT4"},  // SRV6_LOCAL_ACTION_END_DT4
+		{9, "End.DT46"}, // SRV6_LOCAL_ACTION_END_DT46 (digit-bearing token)
 		{11, "End.B6.Encaps"},
 		{EndpointPluginBase, ""},  // plugin range returns empty
 		{EndpointProgMax - 1, ""}, // last plugin slot
@@ -43,6 +43,24 @@ func TestFormatHeadendBuiltinName(t *testing.T) {
 	}
 }
 
+func TestFormatServiceReturnName(t *testing.T) {
+	cases := []struct {
+		slot uint32
+		want string
+	}{
+		{SvcRetAS, "End.AS"},
+		{SvcRetAD, "End.AD"},
+		{SvcRetAM, "End.AM"},
+		{SlotStatsSvcReturnMax - 1, ""}, // unassigned slot
+	}
+	for _, tc := range cases {
+		got := FormatServiceReturnName(tc.slot)
+		if got != tc.want {
+			t.Errorf("FormatServiceReturnName(%d) = %q, want %q", tc.slot, got, tc.want)
+		}
+	}
+}
+
 func TestPrettyEnumName(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -51,9 +69,9 @@ func TestPrettyEnumName(t *testing.T) {
 		{"", ""},
 		{"UNSPECIFIED", ""},
 		{"END", "End"},
-		{"END_X", "End.X"},             // short token stays upper
-		{"END_DT4", "End.DT4"},         // digit token stays upper
-		{"END_DT46", "End.DT46"},       // multi-digit token stays upper
+		{"END_X", "End.X"},       // short token stays upper
+		{"END_DT4", "End.DT4"},   // digit token stays upper
+		{"END_DT46", "End.DT46"}, // multi-digit token stays upper
 		{"END_B6_ENCAPS", "End.B6.Encaps"},
 		{"H_ENCAPS", "H.Encaps"},
 		{"H_ENCAPS_RED", "H.Encaps.Red"}, // len=3 "Red" stays upper: want "H.Encaps.Red"
