@@ -144,6 +144,9 @@ settings:
 | `fdb.capacity` | `1024` | `fdb_map` |
 | `bd_peer.capacity` | `1024` | `bd_peer_map` |
 | `vlan_table.capacity` | `1024` | `dx2v_map` |
+| `sr_policy.capacity` | `1024` | `sr_policy_map` |
+| `ecmp_group.capacity` | `1024` | `ecmp_group_map` / owner / live (`ecmp_path_map` はこの 8 倍) |
+| `service_ingress.capacity` | `1024` | `service_ingress_map` と `ad_cache_map` (どちらも proxy circuit がキー) |
 | `max_segments` | `10` | SRv6 segment list の最大長 |
 
 ```yaml

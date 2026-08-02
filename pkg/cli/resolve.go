@@ -87,3 +87,19 @@ func resolveProxyInnerType(input string) (v1.Srv6ProxyInnerType, error) {
 	}
 	return resolveProtoEnum[v1.Srv6ProxyInnerType](input, "SRV6_PROXY_INNER_TYPE_", v1.Srv6ProxyInnerType_value)
 }
+
+// formatProxyInnerType renders the proxy INNER-TYPE for the sid list
+// table: the short CLI spelling for a proxy SID, empty for a non-proxy one
+// (whose inner_type is UNSPECIFIED).
+func formatProxyInnerType(t v1.Srv6ProxyInnerType) string {
+	switch t {
+	case v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4:
+		return "ipv4"
+	case v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV6:
+		return "ipv6"
+	case v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET:
+		return "l2"
+	default:
+		return ""
+	}
+}
