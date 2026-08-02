@@ -39,12 +39,12 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "gtp-v4-src-addr", Usage: "GTP4 outer IPv4 source address (for End.M.GTP4.E)"},
 					&cli.UintFlag{Name: "gtp-v4-src-position", Usage: "Extract the GTP4 outer IPv4 source from the outer IPv6 SA at this bit position 0..96 (RFC 9433 6.6, for End.M.GTP4.E; mutually exclusive with --gtp-v4-src-addr)"},
 					&cli.UintFlag{Name: "table-id", Usage: "VLAN table ID (for End.DX2V)"},
-					&cli.UintFlag{Name: "iface-in", Usage: "Return circuit ifindex (IFACE-IN, for proxy actions like End.AS)"},
-					&cli.UintFlag{Name: "vlan-in", Usage: "Return circuit VLAN, 0 = untagged (for proxy actions)"},
-					&cli.StringFlag{Name: "inner-type", Usage: "Proxy INNER-TYPE: ipv4, ipv6, or l2 (for proxy actions)"},
-					&cli.StringFlag{Name: "service-mac", Usage: "Service MAC for static rewrite towards IFACE-OUT; omit to resolve the inner destination via FIB (for proxy actions, L3 inner only)"},
-					&cli.UintFlag{Name: "hop-limit-margin", Usage: "Tolerated outer hop-limit drift before the dynamic cache refreshes (for End.AD)"},
-					&cli.StringFlag{Name: "service-name", Usage: "NF-catalog name of the SR-aware service behind this SID (for End.AN)"},
+					&cli.UintFlag{Name: "iface-in", Usage: "Return circuit ifindex (IFACE-IN; required for END_AS/END_AD/END_AM)"},
+					&cli.UintFlag{Name: "vlan-in", Usage: "Return circuit VLAN, 0 = untagged (for END_AS/END_AD/END_AM)"},
+					&cli.StringFlag{Name: "inner-type", Usage: "Proxy INNER-TYPE: ipv4, ipv6, or l2 (required for END_AS/END_AD/END_AM; END_AM requires ipv6)"},
+					&cli.StringFlag{Name: "service-mac", Usage: "Service MAC for static rewrite towards IFACE-OUT; omit to resolve the inner destination via FIB (END_AS/END_AD L3 inner; required for END_AM)"},
+					&cli.UintFlag{Name: "hop-limit-margin", Usage: "Tolerated outer hop-limit drift before the dynamic cache refreshes (END_AD only)"},
+					&cli.StringFlag{Name: "service-name", Usage: "NF-catalog name of the SR-aware service behind this SID (END_AN only)"},
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 196 bytes after decode)"},
 					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
 					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},
@@ -225,9 +225,13 @@ func sidFunctionCommand() *cli.Command {
 					if useJSON(c) {
 						return printJSON(resp.Msg.SidFunctions)
 					}
-					headers := []string{"TRIGGER PREFIX", "ACTION", "FLAVOR", "VRF", "BD_ID", "BRIDGE", "OIF", "TABLE_ID"}
+					headers := []string{"TRIGGER PREFIX", "ACTION", "FLAVOR", "VRF", "BD_ID", "BRIDGE", "OIF", "TABLE_ID", "IFACE_IN", "INNER"}
 					var rows [][]string
 					for _, s := range resp.Msg.SidFunctions {
+						ifaceIn := ""
+						if s.IfaceIn != nil {
+							ifaceIn = fmt.Sprintf("%d", s.GetIfaceIn())
+						}
 						rows = append(rows, []string{
 							s.TriggerPrefix,
 							formatAction(s.Action),
@@ -237,6 +241,8 @@ func sidFunctionCommand() *cli.Command {
 							s.BridgeName,
 							fmt.Sprintf("%d", s.Oif),
 							fmt.Sprintf("%d", s.TableId),
+							ifaceIn,
+							formatProxyInnerType(s.InnerType),
 						})
 					}
 					printTable(headers, rows)

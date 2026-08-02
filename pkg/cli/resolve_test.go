@@ -174,3 +174,52 @@ func TestFormatMode(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveProxyInnerType(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    v1.Srv6ProxyInnerType
+		wantErr bool
+	}{
+		{"ipv4", v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4, false},
+		{"IPV6", v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV6, false},
+		{"l2", v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET, false},
+		{"ethernet", v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET, false},
+		{" eth ", v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET, false},
+		{"SRV6_PROXY_INNER_TYPE_IPV4", v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4, false},
+		{"garbage", 0, true},
+	}
+	for _, tc := range cases {
+		got, err := resolveProxyInnerType(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("resolveProxyInnerType(%q): expected error, got %v", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("resolveProxyInnerType(%q): unexpected error: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("resolveProxyInnerType(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestFormatProxyInnerType(t *testing.T) {
+	cases := []struct {
+		in   v1.Srv6ProxyInnerType
+		want string
+	}{
+		{v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_UNSPECIFIED, ""},
+		{v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4, "ipv4"},
+		{v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV6, "ipv6"},
+		{v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_ETHERNET, "l2"},
+	}
+	for _, tc := range cases {
+		if got := formatProxyInnerType(tc.in); got != tc.want {
+			t.Errorf("formatProxyInnerType(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
