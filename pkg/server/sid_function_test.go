@@ -13,7 +13,7 @@ import (
 // s.mapOps; tests that exercise raw / index / range-check paths can therefore
 // share this minimal server without spinning up real BPF maps.
 func newProtoToEntryServer() *SidFunctionServer {
-	return NewSidFunctionServer(nil, nil, nil)
+	return NewSidFunctionServer(nil, nil, nil, nil)
 }
 
 // pluginAction returns a v1.Srv6LocalAction value inside the endpoint plugin
@@ -629,6 +629,63 @@ func TestProtoToEntry_EndAN(t *testing.T) {
 		})
 		if err == nil || !strings.Contains(err.Error(), "service_name") {
 			t.Fatalf("expected the service_name length error, got %v", err)
+		}
+	})
+}
+
+// TestProtoToEntry_ProxyFieldScope covers validateProxyFieldScope: a
+// behavior-specific field set on the wrong action must be rejected, not
+// silently accepted and dropped (the protoToEntry/entryToProto asymmetry
+// the project forbids).
+func TestProtoToEntry_ProxyFieldScope(t *testing.T) {
+	s := newProtoToEntryServer()
+
+	t.Run("hop_limit_margin on non-AD rejected", func(t *testing.T) {
+		margin := uint32(4)
+		_, _, err := s.protoToEntry(&v1.SidFunction{
+			Action:         v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
+			TriggerPrefix:  "fc00:1::1/128",
+			HopLimitMargin: &margin,
+		})
+		if err == nil || !strings.Contains(err.Error(), "hop_limit_margin applies to END_AD only") {
+			t.Fatalf("expected the hop_limit_margin scope error, got %v", err)
+		}
+	})
+
+	t.Run("service_name on non-AN rejected", func(t *testing.T) {
+		name := "demo"
+		_, _, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+			TriggerPrefix: "fc00:1::1/128",
+			ServiceName:   &name,
+		})
+		if err == nil || !strings.Contains(err.Error(), "service_name applies to END_AN only") {
+			t.Fatalf("expected the service_name scope error, got %v", err)
+		}
+	})
+
+	t.Run("inner_type on non-proxy rejected", func(t *testing.T) {
+		_, _, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
+			TriggerPrefix: "fc00:1::1/128",
+			InnerType:     v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4,
+		})
+		if err == nil || !strings.Contains(err.Error(), "inner_type applies to the proxy actions") {
+			t.Fatalf("expected the inner_type scope error, got %v", err)
+		}
+	})
+
+	t.Run("inner_type on a proxy action is allowed", func(t *testing.T) {
+		in := uint32(1)
+		_, _, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD,
+			TriggerPrefix: "fc00:2::1/128",
+			Oif:           1,
+			IfaceIn:       &in,
+			InnerType:     v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_IPV4,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error for a valid END_AD: %v", err)
 		}
 	})
 }

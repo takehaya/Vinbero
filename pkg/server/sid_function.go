@@ -9,9 +9,11 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf/btf"
+	"go.uber.org/zap"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
@@ -61,15 +63,25 @@ type SidFunctionServer struct {
 	mapOps     *bpf.MapOperations
 	pluginAux  AuxTypeLookup
 	locatorMgr *locator.Manager
+	logger     *zap.Logger
+	// mu serializes the create/delete/flush mutation handlers so the
+	// proxy return-circuit lifecycle stays consistent: the same-SID
+	// re-bind in CreateServiceIngress is a read-then-write, and the
+	// capture-then-delete / capture-then-flush ordering would otherwise
+	// race a concurrent unbind. Zero value is usable.
+	mu sync.Mutex
 }
 
 // NewSidFunctionServer creates a new SidFunctionServer. pluginAux may be
 // nil (plugin_aux_json then fails loudly). locatorMgr may also be nil,
 // in which case any SidFunctionCreate carrying a locator_ref is rejected
 // with a clear error -- legacy direct trigger_prefix requests still go
-// through.
-func NewSidFunctionServer(mapOps *bpf.MapOperations, pluginAux AuxTypeLookup, locatorMgr *locator.Manager) *SidFunctionServer {
-	return &SidFunctionServer{mapOps: mapOps, pluginAux: pluginAux, locatorMgr: locatorMgr}
+// through. logger may be nil (a no-op logger is used).
+func NewSidFunctionServer(mapOps *bpf.MapOperations, pluginAux AuxTypeLookup, locatorMgr *locator.Manager, logger *zap.Logger) *SidFunctionServer {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return &SidFunctionServer{mapOps: mapOps, pluginAux: pluginAux, locatorMgr: locatorMgr, logger: logger}
 }
 
 // SidFunctionCreate creates SID function entries
@@ -81,6 +93,9 @@ func (s *SidFunctionServer) SidFunctionCreate(
 		Created: make([]*v1.SidFunction, 0),
 		Errors:  make([]*v1.OperationError, 0),
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	for _, sidFunc := range req.Msg.SidFunctions {
 		if err := s.createOneSidFunction(sidFunc); err != nil {
@@ -124,6 +139,14 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 	if err != nil {
 		return err
 	}
+
+	// Capture the circuit the existing entry for this trigger_prefix (if
+	// any) already owns. CreateSidFunction is an upsert, so a re-create
+	// that moves the SID to a different circuit — or turns it into a
+	// non-proxy action — must unbind the old circuit or it is orphaned
+	// forever (a permanent black-hole on that port, surviving restart via
+	// the pinned map).
+	oldIf, oldVlan, hadOldCircuit := s.captureProxyCircuit(sidFunc.TriggerPrefix)
 
 	// Proxy SIDs bind their return circuit before the SID goes live so the
 	// draft's one-proxy-per-IFACE-IN rule is enforced atomically
@@ -172,6 +195,24 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		}
 	}
 	committed = true
+
+	// The SID is live on its new circuit. If it previously owned a
+	// different circuit (moved, or became a non-proxy action), drop the
+	// stale binding now. Skip when the circuit is unchanged: the bind
+	// above already replaced it (same-SID re-bind).
+	if hadOldCircuit {
+		newProxy := isProxyAction(v1.Srv6LocalAction(entry.Action))
+		newIf := sidFunc.GetIfaceIn()
+		newVlan := uint16(sidFunc.GetVlanIn())
+		if !newProxy || oldIf != newIf || oldVlan != newVlan {
+			if err := s.mapOps.DeleteServiceIngress(oldIf, oldVlan); err != nil {
+				s.logger.Warn("failed to unbind the superseded proxy return circuit",
+					zap.String("trigger_prefix", sidFunc.TriggerPrefix),
+					zap.Uint32("iface_in", oldIf), zap.Uint32("vlan_in", uint32(oldVlan)),
+					zap.Error(err))
+			}
+		}
+	}
 	return nil
 }
 
@@ -241,33 +282,51 @@ func (s *SidFunctionServer) SidFunctionDelete(
 		Errors:                 make([]*v1.OperationError, 0),
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	for _, prefix := range req.Msg.TriggerPrefixes {
-		// Capture the proxy return circuit before the SID (and its aux)
-		// disappears; unbind it only after the delete succeeds.
-		circuitIf, circuitVlan, hasCircuit := s.captureProxyCircuit(prefix)
-		if err := s.mapOps.DeleteSidFunction(prefix, bpf.OwnerRPC); err != nil {
+		if err := s.deleteOneSidFunction(prefix); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: prefix,
 				Reason:        err.Error(),
 			})
 			continue
 		}
-		// Locator-minted SIDs return their function value to the pool.
-		// Bindings for direct trigger_prefix SIDs simply miss the lookup
-		// (Manager.ReleaseSID is a no-op for unknown sids).
-		if s.locatorMgr != nil {
-			if sid, err := parseLocatorSID(prefix); err == nil {
-				s.locatorMgr.ReleaseSID(sid)
-			}
-		}
-		// End.B6 policy is cleaned up automatically with aux entry
-		if hasCircuit {
-			_ = s.mapOps.DeleteServiceIngress(circuitIf, circuitVlan)
-		}
 		resp.DeletedTriggerPrefixes = append(resp.DeletedTriggerPrefixes, prefix)
 	}
 
 	return connect.NewResponse(resp), nil
+}
+
+// deleteOneSidFunction removes one SID and unbinds its proxy return
+// circuit. The circuit is captured before the delete (the aux that holds
+// iface_in/vlan_in is gone afterwards) and unbound only after the delete
+// succeeds, so a non-RPC-owned SID (which DeleteSidFunction refuses) keeps
+// its circuit. Caller holds s.mu.
+func (s *SidFunctionServer) deleteOneSidFunction(prefix string) error {
+	circuitIf, circuitVlan, hasCircuit := s.captureProxyCircuit(prefix)
+	if err := s.mapOps.DeleteSidFunction(prefix, bpf.OwnerRPC); err != nil {
+		return err
+	}
+	// Locator-minted SIDs return their function value to the pool.
+	// Bindings for direct trigger_prefix SIDs simply miss the lookup
+	// (Manager.ReleaseSID is a no-op for unknown sids).
+	if s.locatorMgr != nil {
+		if sid, err := parseLocatorSID(prefix); err == nil {
+			s.locatorMgr.ReleaseSID(sid)
+		}
+	}
+	// End.B6 policy is cleaned up automatically with the aux entry.
+	if hasCircuit {
+		if err := s.mapOps.DeleteServiceIngress(circuitIf, circuitVlan); err != nil {
+			s.logger.Warn("failed to unbind the proxy return circuit on delete",
+				zap.String("trigger_prefix", prefix),
+				zap.Uint32("iface_in", circuitIf), zap.Uint32("vlan_in", uint32(circuitVlan)),
+				zap.Error(err))
+		}
+	}
+	return nil
 }
 
 // SidFunctionList lists all SID function entries
@@ -314,27 +373,31 @@ func (s *SidFunctionServer) SidFunctionFlush(
 	ctx context.Context,
 	req *connect.Request[v1.SidFunctionFlushRequest],
 ) (*connect.Response[v1.SidFunctionFlushResponse], error) {
-	// Collect proxy return circuits before the SIDs (and their aux
-	// entries) are gone, then unbind them after the flush.
-	type circuit struct {
-		ifaceIn uint32
-		vlanIn  uint16
-	}
-	var circuits []circuit
-	if entries, err := s.mapOps.ListSidFunctions(); err == nil {
-		for prefix := range entries {
-			if ifaceIn, vlanIn, ok := s.captureProxyCircuit(prefix); ok {
-				circuits = append(circuits, circuit{ifaceIn, vlanIn})
-			}
-		}
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	count, err := s.mapOps.FlushSidFunctions(bpf.OwnerRPC)
+	// Flush per-prefix through the same owner-scoped delete the Delete RPC
+	// uses, so a circuit is unbound only for a SID actually flushed. The
+	// previous implementation collected circuits from every owner's SIDs
+	// and unbound them all, which orphaned nothing but stole the return
+	// circuit of a still-live BGP-owned proxy SID (a plaintext-leaking
+	// fail-open). It also swallowed a ListSidFunctions failure, silently
+	// leaking every circuit; that is now a hard error.
+	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	for _, c := range circuits {
-		_ = s.mapOps.DeleteServiceIngress(c.ifaceIn, c.vlanIn)
+	var count uint32
+	for prefix := range entries {
+		err := s.deleteOneSidFunction(prefix)
+		if err == nil {
+			count++
+			continue
+		}
+		if errors.Is(err, bpf.ErrEntryOwnerMismatch) {
+			continue // not RPC-owned: leave the SID and its circuit alone
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&v1.SidFunctionFlushResponse{DeletedCount: count}), nil
 }
@@ -346,6 +409,9 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	// with the action used to derive the plugin owner tag. Reject up front.
 	if sidFunc.Action < 0 || sidFunc.Action > 255 {
 		return nil, nil, fmt.Errorf("action %d out of uint8 range [0, 255]", sidFunc.Action)
+	}
+	if err := validateProxyFieldScope(sidFunc); err != nil {
+		return nil, nil, err
 	}
 	entry := &bpf.SidFunctionEntry{
 		Action: uint8(sidFunc.Action),
@@ -547,6 +613,28 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	return entry, aux, nil
 }
 
+// validateProxyFieldScope rejects behavior-specific fields set on the
+// wrong action, instead of silently accepting and dropping them. The
+// nearby buildServiceIngress already rejects segments / src_addr on the
+// dynamic behaviors with a teaching message; these three fields were the
+// remaining ones that a caller could set with no effect and no error
+// (hop_limit_margin is echoed only for AD, service_name only for AN, so a
+// Get→Create round-trip would silently lose them — the exact
+// protoToEntry/entryToProto asymmetry the project forbids).
+func validateProxyFieldScope(sidFunc *v1.SidFunction) error {
+	action := v1.Srv6LocalAction(sidFunc.Action)
+	if sidFunc.HopLimitMargin != nil && action != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD {
+		return fmt.Errorf("hop_limit_margin applies to END_AD only (the dynamic cache refresh threshold)")
+	}
+	if sidFunc.ServiceName != nil && action != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN {
+		return fmt.Errorf("service_name applies to END_AN only (the NF-catalog metadata)")
+	}
+	if sidFunc.InnerType != v1.Srv6ProxyInnerType_SRV6_PROXY_INNER_TYPE_UNSPECIFIED && !isProxyAction(action) {
+		return fmt.Errorf("inner_type applies to the proxy actions (END_AS / END_AD / END_AM) only")
+	}
+	return nil
+}
+
 // isProxyAction reports whether the action is a service-programming proxy
 // that owns a return circuit in service_ingress_map.
 func isProxyAction(action v1.Srv6LocalAction) bool {
@@ -678,7 +766,7 @@ func (s *SidFunctionServer) buildServiceIngress(sidFunc *v1.SidFunction) (*bpf.S
 		entry.Behavior = bpf.SvcRetAM
 		return entry, nil
 
-	default: // END_AS
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS:
 		if len(sidFunc.Segments) == 0 {
 			return nil, fmt.Errorf("END_AS requires segments (the static CACHE the return path re-encapsulates with)")
 		}
@@ -701,6 +789,12 @@ func (s *SidFunctionServer) buildServiceIngress(sidFunc *v1.SidFunction) (*bpf.S
 			Segments:    segments,
 		}
 		return entry, nil
+
+	default:
+		// isProxyAction gates the call to exactly AS/AD/AM today; a new
+		// proxy behavior added there but not here must fail loudly, not
+		// fall through to an AS-shaped binding with a wrong-slot tail call.
+		return nil, fmt.Errorf("action %s is not a service-programming proxy", v1.Srv6LocalAction(sidFunc.Action))
 	}
 }
 
@@ -853,10 +947,20 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AS:
 					// End.AS only: the static CACHE lives in the return-
 					// circuit binding (AD learns it per-chain, AM carries
-					// the state inside the packet — nothing to show).
+					// the state inside the packet — nothing to show). A
+					// live End.AS SID always has a binding with segments
+					// (buildServiceIngress requires them), so a lookup
+					// failure here is an inconsistency, not empty data —
+					// log it rather than returning a SID that reads as
+					// "no segments".
 					if ing, err := s.mapOps.GetServiceIngress(svc.IfaceIn, svc.VlanIn); err == nil {
 						sf.Segments = bpf.FormatSegments(ing.Encap.Segments, ing.Encap.NumSegments)
 						sf.SrcAddr = bpf.FormatIPv6(ing.Encap.SrcAddr)
+					} else {
+						s.logger.Warn("END_AS SID has no return-circuit binding (its static CACHE is unreadable)",
+							zap.String("trigger_prefix", prefix),
+							zap.Uint32("iface_in", svc.IfaceIn), zap.Uint32("vlan_in", uint32(svc.VlanIn)),
+							zap.Error(err))
 					}
 				}
 
