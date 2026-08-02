@@ -19,9 +19,9 @@ var SlotStatsMapTypes = []string{
 	MapTypeServiceReturn,
 }
 
-// svcReturnSlotNames labels the service-return PROG_ARRAY slots. They are
-// not a proto enum (the SVC_RET_* constants are C-side only), so the names
-// are spelled out here.
+// svcReturnSlotNames labels the service-return PROG_ARRAY slots. Unlike
+// endpoint / headend names, these do not come from a proto enum, so the
+// names are spelled out here keyed by the SvcRet* slot constants.
 var svcReturnSlotNames = map[uint32]string{
 	SvcRetAS: "End.AS",
 	SvcRetAD: "End.AD",
