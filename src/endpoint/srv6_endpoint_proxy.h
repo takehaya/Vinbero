@@ -157,11 +157,12 @@ static __noinline int svc_ad_cache_seed(
 
     struct ad_cache_val *val = bpf_map_lookup_elem(&ad_cache_map, &key);
     if (!val) {
-        // First packet on this circuit: materialize the row, then fill
-        // it in place (the value is far too large for the BPF stack).
+        // First packet on this circuit: materialize the row, then fill it
+        // in place (the value is far too large for the BPF stack).
+        // BPF_NOEXIST so two racing first-packets do not clobber each
+        // other's row; the loser just re-looks-up the winner's row.
         struct ad_cache_val zero = {};
-        if (bpf_map_update_elem(&ad_cache_map, &key, &zero, BPF_ANY))
-            return -1;
+        (void)bpf_map_update_elem(&ad_cache_map, &key, &zero, BPF_NOEXIST);
         val = bpf_map_lookup_elem(&ad_cache_map, &key);
         if (!val)
             return -1;
@@ -222,29 +223,40 @@ static __noinline int svc_ad_cache_seed(
         }
     }
 
-    // Seqlock publish protocol for concurrent return-path readers: bump
-    // seq to an odd value before the bytes change and back to even after.
-    // valid stays as the "seeded at least once" flag. A reader that sees
-    // an even seq, copies the row, and re-reads the same seq observed a
-    // consistent header; if seq moved (or is odd) it drops the packet
-    // rather than replaying a torn — but still syntactically valid, hence
-    // silently mis-delivered — header. The compiler barriers pin the
-    // store order; BPF has no portable release/acquire fence on our oldest
-    // kernels, so on weakly-ordered CPUs the guarantee is "a torn read is
-    // caught and dropped", not "never observed".
-    val->valid = 0;
-    val->seq++; // now odd: writer in progress
+    // Seqlock publish protocol, single-writer via an atomic claim. seq is
+    // even when the row is stable and odd while a writer owns it. ad_cache
+    // is a plain HASH, so the forward direction can update one row from
+    // several CPUs at once; a non-atomic seq++ could lose the increment
+    // and leave seq even mid-write, which the return-side re-check could
+    // not catch. Claim the row with a compare-and-swap that flips seq
+    // even -> odd: exactly one writer wins, the rest skip this update
+    // (the winner's write lands, and the cache is re-seeded by the next
+    // packet anyway). A reader that observes an even seq, copies the row,
+    // and re-reads the same even seq saw a consistent header; otherwise it
+    // drops rather than replay a torn (but syntactically valid, hence
+    // silently mis-delivered) header. Compiler barriers pin the store
+    // order; BPF has no portable release/acquire fence on kernel 6.1, so
+    // on weakly-ordered CPUs the guarantee is "a torn read is caught and
+    // dropped", not "never observed".
+    __u64 s = val->seq;
+    if (s & 1)
+        return 0; // another writer owns the row; deliver, skip our update
+    if (__sync_val_compare_and_swap(&val->seq, s, s + 1) != s)
+        return 0; // lost the claim race; skip
+    // We own the row now (seq = s+1, odd). Readers bail on the odd seq
+    // until we publish an even value below.
     asm volatile("" ::: "memory");
+
     // Constant-size copy per possible header length: a variable length
     // reaches the helper with its verifier lower bound destroyed (clang
     // range-checks a derived register, so the refinement never propagates
     // back — "invalid zero-sized read"). A well-formed SRH holds 0..10
     // 16-byte segments, so hdr_len has exactly 11 possible values.
+    int copied = 0;
     switch (hdr_len) {
-#define AD_SEED_CASE(n)                                            \
-    case (n):                                                      \
-        if (bpf_xdp_load_bytes(ctx, l3_offset, val->hdr, (n)))     \
-            return -1;                                             \
+#define AD_SEED_CASE(n)                                                       \
+    case (n):                                                                 \
+        copied = (bpf_xdp_load_bytes(ctx, l3_offset, val->hdr, (n)) == 0);    \
         break;
     AD_SEED_CASE(48)  AD_SEED_CASE(64)  AD_SEED_CASE(80)
     AD_SEED_CASE(96)  AD_SEED_CASE(112) AD_SEED_CASE(128)
@@ -252,23 +264,29 @@ static __noinline int svc_ad_cache_seed(
     AD_SEED_CASE(192) AD_SEED_CASE(208)
 #undef AD_SEED_CASE
     default:
-        return -1;
+        copied = 0;
     }
-    // Normalize the per-packet fields so the update-skip comparison above
-    // matches a stable chain regardless of DSCP / flow-label churn. byte0
-    // = version|TC-high, byte1 = TC-low|FL-high: keep the version nibble,
-    // zero the whole Traffic Class and Flow Label. Without this, DSCP-mixed
-    // traffic on one circuit would re-seed the 208-byte row every packet.
-    val->hdr[0] &= 0xf0;
-    val->hdr[1] = 0;
-    val->hdr[2] = 0;
-    val->hdr[3] = 0;
-    val->hdr_len = hdr_len;
-    val->hop_limit = hop_limit;
+    if (copied) {
+        // Normalize the per-packet fields so the update-skip comparison
+        // above matches a stable chain regardless of DSCP / flow-label
+        // churn. byte0 = version|TC-high, byte1 = TC-low|FL-high: keep the
+        // version nibble, zero the whole Traffic Class and Flow Label.
+        val->hdr[0] &= 0xf0;
+        val->hdr[1] = 0;
+        val->hdr[2] = 0;
+        val->hdr[3] = 0;
+        val->hdr_len = hdr_len;
+        val->hop_limit = hop_limit;
+        val->valid = 1;
+    } else {
+        // Unreachable for input that passed the bounds check above, but a
+        // partial load would have torn hdr — mark the row invalid so
+        // readers drop rather than replay it.
+        val->valid = 0;
+    }
     asm volatile("" ::: "memory");
-    val->valid = 1;
-    val->seq++; // back to even: update complete
-    return 0;
+    val->seq = s + 2; // release: back to even (we are the sole owner)
+    return copied ? 0 : -1;
 }
 
 // End.AD forward, SRH present. Standard End processing (SL--, DA update)

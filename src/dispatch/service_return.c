@@ -129,7 +129,7 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
         TAILCALL_RETURN(ctx, XDP_DROP);
     // Seqlock read: snapshot seq before the copy; an odd value means a
     // writer is mid-update. After the copy we re-check it (see below).
-    __u32 seq0 = val->seq;
+    __u64 seq0 = val->seq;
     if (seq0 & 1)
         TAILCALL_RETURN(ctx, XDP_DROP);
     asm volatile("" ::: "memory");
