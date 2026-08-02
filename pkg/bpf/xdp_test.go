@@ -3161,6 +3161,67 @@ func TestXDPProgEndASReturn(t *testing.T) {
 	})
 }
 
+// slotStatPackets returns the aggregated packet count for one slot of a
+// slot_stats_* map. ReadSlotStats returns every slot in range, so a slot
+// that was never hit reads back as 0.
+func slotStatPackets(t *testing.T, m *MapOperations, mapType string, slot uint32) uint64 {
+	t.Helper()
+	entries, err := m.ReadSlotStats(mapType)
+	if err != nil {
+		t.Fatalf("read slot stats %s: %v", mapType, err)
+	}
+	for _, e := range entries {
+		if e.Slot == slot {
+			return e.Packets
+		}
+	}
+	return 0
+}
+
+// TestXDPProgServiceReturnSlotStats verifies that the DISPATCH_SERVICE_RETURN
+// epilogue increments slot_stats_service_return at the behavior's slot when
+// enable_stats is on, and that reset clears it. The AS return re-encapsulates
+// even on a FIB miss (fail-closed drop), so a single forwarded packet is
+// enough to arm the counter regardless of the final verdict.
+func TestXDPProgServiceReturnSlotStats(t *testing.T) {
+	h := newXDPTestHelperWithStats(t)
+	srcAddr, _ := ParseIPv6("fc00:2::100")
+	segments, numSegments, _ := ParseSegments([]string{"fc00:3::3"})
+	if _, err := h.mapOps.CreateServiceIngress(1, 0, &ServiceIngressEntry{
+		Behavior:      SvcRetAS,
+		InnerTypeMask: SvcInnerIPv4,
+		Encap: HeadendEntry{
+			Mode:        modeHEncaps,
+			NumSegments: numSegments,
+			SrcAddr:     srcAddr,
+			Segments:    segments,
+		},
+	}); err != nil {
+		t.Fatalf("create service ingress: %v", err)
+	}
+
+	pkt, err := buildSimpleIPv4Packet(net.ParseIP("10.0.0.9").To4(), net.ParseIP("172.0.2.1").To4())
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
+	}
+	h.runOnIfindex(pkt, 1)
+
+	if got := slotStatPackets(t, h.mapOps, MapTypeServiceReturn, SvcRetAS); got != 1 {
+		t.Fatalf("slot_stats_service_return[SVC_RET_AS] = %d, want 1", got)
+	}
+	// A behavior the packet never hit must stay untouched.
+	if got := slotStatPackets(t, h.mapOps, MapTypeServiceReturn, SvcRetAD); got != 0 {
+		t.Fatalf("slot_stats_service_return[SVC_RET_AD] = %d, want 0", got)
+	}
+
+	if err := h.mapOps.ResetSlotStats(MapTypeServiceReturn); err != nil {
+		t.Fatalf("reset slot stats: %v", err)
+	}
+	if got := slotStatPackets(t, h.mapOps, MapTypeServiceReturn, SvcRetAS); got != 0 {
+		t.Fatalf("after reset slot_stats_service_return[SVC_RET_AS] = %d, want 0", got)
+	}
+}
+
 // TestServiceIngressLifecycle exercises the control-plane invariants of
 // the return-circuit binding: atomic uniqueness and AD-cache cleanup.
 func TestServiceIngressLifecycle(t *testing.T) {

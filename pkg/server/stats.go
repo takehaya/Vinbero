@@ -35,8 +35,10 @@ func resolveSlotName(mapType string, slot uint32, plugins map[uint32]string) str
 	switch mapType {
 	case bpf.MapTypeEndpoint:
 		return bpf.FormatEndpointBuiltinName(slot)
-	case bpf.MapTypeHeadendV4, bpf.MapTypeHeadendV6:
+	case bpf.MapTypeHeadendV4, bpf.MapTypeHeadendV6, bpf.MapTypeHeadendL2:
 		return bpf.FormatHeadendBuiltinName(slot)
+	case bpf.MapTypeServiceReturn:
+		return bpf.FormatServiceReturnName(slot)
 	}
 	return ""
 }

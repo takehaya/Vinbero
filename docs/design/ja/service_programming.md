@@ -89,6 +89,10 @@ IFACE-IN のサービスは信頼境界の外側として扱います。復路�
 
 SR-aware なサービスは SRH を自分で理解するため、パケット処理は End と同一です。専用 slot 25 は per-SID の統計と、将来の service liveness 連動の anchor として置きます。aux には NF catalog の metadata (`service_name`、printable ASCII 63 文字まで) を持たせ、SidFunctionList / Get を NF discovery の service registration point にします。往復の circuit も proxy 状態も持ちません。
 
+## 復路 slot 統計
+
+復路の behavior 別呼び出し回数は `slot_stats_service_return` PERCPU_ARRAY に記録します。index は復路 slot 番号 (`SVC_RET_AS`=0 / `SVC_RET_AD`=1 / `SVC_RET_AM`=2) で、tail call の epilogue が `DISPATCH_SERVICE_RETURN` を検出したときに 1 加算します。endpoint / headend の per-slot 統計と同じく `enable_stats` で gate し、無効時は verifier が加算コードを削ります。`vbctl stats slot show --type service_return` で behavior 名つきに整形して表示し、`vbctl stats slot reset --type service_return` で clear します。service_return は builtin slot 専用なので plugin の `--type` 候補には出しません。
+
 ## テスト
 
 BPF_PROG_TEST_RUN は ingress_ifindex を loopback (1) に固定するので、往路の SRv6 パケットが front door に吸われないよう、circuit は VLAN で分離してテストします。往路は decap / DA 書き換えの byte 検証、復路は encap 出力の byte 検証を行います。負系は inner type 不一致、AD cache 未 seed、AD の TLV / 奇数 hdrlen、AD の odd seq、AM の SL=0 / SRH 無し / foreign DA、AS の過大申告長を drop で確認します。server は circuit lifecycle (orphan cleanup、owner-scoped flush、delete unbind) と field scope の検証を live map で行います。E2E は `examples/end-{as,ad,am,an}/` にあり、SR-unaware なサービス役を netns で立てて chain を通します。

@@ -15,11 +15,12 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// pluginMapTypesCSV joins bpf.SlotStatsMapTypes with ", " so --type help
-// strings stay in sync with the canonical list (one place to add new map
-// types when more plugin slots open up).
+// pluginMapTypesCSV joins bpf.PluginRegistrableMapTypes with ", " so --type
+// help strings stay in sync with the set of PROG_ARRAYs a plugin may
+// register into (one place to add new map types when more plugin slots
+// open up).
 func pluginMapTypesCSV() string {
-	return strings.Join(bpf.SlotStatsMapTypes, ", ")
+	return strings.Join(bpf.PluginRegistrableMapTypes, ", ")
 }
 
 func pluginCommand() *cli.Command {

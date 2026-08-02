@@ -1323,11 +1323,13 @@ func (m *MapOperations) ResetStats() error {
 
 // ===== Per-slot Stats Map Operations =====
 
-// SlotStatsEndpointMax / SlotStatsHeadendMax mirror the BPF-side maps in
+// SlotStats*Max mirror the BPF-side slot_stats_* maps in
 // src/core/xdp_stats.h. Must match the C constants.
 const (
-	SlotStatsEndpointMax = 64
-	SlotStatsHeadendMax  = 32
+	SlotStatsEndpointMax  = 64
+	SlotStatsHeadendMax   = 32
+	SlotStatsSvcReturnMax = 8
+	MapTypeServiceReturn  = "service_return" // slot-stats map type (not plugin-registrable)
 )
 
 // SlotStatsEntry is a per-slot invocation counter record.
@@ -1346,6 +1348,10 @@ func (m *MapOperations) slotStatsTarget(mapType string) (ebpfMap *ebpf.Map, max 
 		return m.objs.SlotStatsHeadendV4, SlotStatsHeadendMax, nil
 	case MapTypeHeadendV6:
 		return m.objs.SlotStatsHeadendV6, SlotStatsHeadendMax, nil
+	case MapTypeHeadendL2:
+		return m.objs.SlotStatsHeadendL2, SlotStatsHeadendMax, nil
+	case MapTypeServiceReturn:
+		return m.objs.SlotStatsServiceReturn, SlotStatsSvcReturnMax, nil
 	default:
 		return nil, 0, fmt.Errorf("unknown slot stats map type: %s", mapType)
 	}
@@ -2816,16 +2822,17 @@ func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 // they need to appear writable to the plugin ELF at verification time.
 func (m *MapOperations) GetSharedReadWriteMaps() map[string]*ebpf.Map {
 	return map[string]*ebpf.Map{
-		"scratch_map":           m.objs.ScratchMap,
-		"stats_map":             m.objs.StatsMap,
-		"slot_stats_endpoint":   m.objs.SlotStatsEndpoint,
-		"slot_stats_headend_v4": m.objs.SlotStatsHeadendV4,
-		"slot_stats_headend_v6": m.objs.SlotStatsHeadendV6,
-		"slot_stats_headend_l2": m.objs.SlotStatsHeadendL2,
-		MapNameSidEndpointProgs: m.objs.SidEndpointProgs,
-		MapNameHeadendV4Progs:   m.objs.HeadendV4Progs,
-		MapNameHeadendV6Progs:   m.objs.HeadendV6Progs,
-		MapNameHeadendL2Progs:   m.objs.HeadendL2Progs,
+		"scratch_map":               m.objs.ScratchMap,
+		"stats_map":                 m.objs.StatsMap,
+		"slot_stats_endpoint":       m.objs.SlotStatsEndpoint,
+		"slot_stats_headend_v4":     m.objs.SlotStatsHeadendV4,
+		"slot_stats_headend_v6":     m.objs.SlotStatsHeadendV6,
+		"slot_stats_headend_l2":     m.objs.SlotStatsHeadendL2,
+		"slot_stats_service_return": m.objs.SlotStatsServiceReturn,
+		MapNameSidEndpointProgs:     m.objs.SidEndpointProgs,
+		MapNameHeadendV4Progs:       m.objs.HeadendV4Progs,
+		MapNameHeadendV6Progs:       m.objs.HeadendV6Progs,
+		MapNameHeadendL2Progs:       m.objs.HeadendL2Progs,
 		// The End.AD forward path seeds/updates the cache from BPF.
 		"ad_cache_map":            m.objs.AdCacheMap,
 		MapNameServiceReturnProgs: m.objs.ServiceReturnProgs,
@@ -2878,6 +2885,7 @@ func SharedReadWriteMapNames() []string {
 		"slot_stats_headend_v4",
 		"slot_stats_headend_v6",
 		"slot_stats_headend_l2",
+		"slot_stats_service_return",
 		MapNameSidEndpointProgs,
 		MapNameHeadendV4Progs,
 		MapNameHeadendV6Progs,
@@ -2914,6 +2922,17 @@ const (
 	MapTypeHeadendV6 = "headend_v6"
 	MapTypeHeadendL2 = "headend_l2"
 )
+
+// PluginRegistrableMapTypes lists the PROG_ARRAY map types a plugin may
+// register into (see PluginSlotRange). service_return is excluded because
+// its slots are builtin-only; the CLI --type help derives from this list
+// so it never advertises a non-registrable target.
+var PluginRegistrableMapTypes = []string{
+	MapTypeEndpoint,
+	MapTypeHeadendV4,
+	MapTypeHeadendV6,
+	MapTypeHeadendL2,
+}
 
 // BPF map names for vinbero-managed PROG_ARRAYs. Referenced by the shared-map
 // getters, resolvePluginMap, and the plugin validator's tail-call whitelist.
