@@ -26,41 +26,14 @@ static __always_inline int svc_inner_type_ok(__u8 mask, __u16 eth_proto)
     return 0;
 }
 
-// Re-derive the inner flow's ECMP hash from the service's output packet so
-// the return-path outer header can carry per-flow entropy instead of a
-// constant-zero flow label. Without it every flow a proxy returns collapses
-// onto one underlay ECMP path: the outer {src, dst} is fixed per circuit, so
-// the flow label is the only field a transit router can spread on. L3
-// circuits only, matching the headend, which does not hash an L2 payload.
-// Returns 0 (the "no hash" sentinel) when the inner cannot be parsed — the
-// frame still forwards, just without the added entropy. The inner is read at
-// its pre-encap offset, so callers must invoke this before any
-// bpf_xdp_adjust_head. __noinline to cap verifier state growth in the
-// already-large return targets.
-static __noinline __u32 svc_return_inner_flow_hash(struct xdp_md *ctx, __u16 l3_off)
-{
-    if (l3_off == 0 || l3_off > 22)
-        return 0; // Ethernet circuit (whole-frame payload) or out of range
-    void *data = (void *)(long)ctx->data;
-    void *data_end = (void *)(long)ctx->data_end;
-    void *l3 = data + l3_off;
-    if (l3 + 1 > data_end)
-        return 0;
-    __u8 ver = (*(__u8 *)l3) >> 4;
-    if (ver == 4) {
-        struct iphdr *iph = l3;
-        if ((void *)(iph + 1) > data_end)
-            return 0;
-        return ecmp_flow_hash_v4(ctx, iph, l3_off);
-    }
-    if (ver == 6) {
-        struct ipv6hdr *ip6h = l3;
-        if ((void *)(ip6h + 1) > data_end)
-            return 0;
-        return ecmp_flow_hash_v6(ctx, ip6h, l3_off);
-    }
-    return 0;
-}
+// The return paths re-derive the inner flow's ECMP hash with
+// ecmp_flow_hash_l3 (core/srv6_ecmp.h) so the outer header carries per-flow
+// entropy instead of a constant-zero flow label. Without it every flow a proxy
+// returns collapses onto one underlay ECMP path: the outer {src, dst} is fixed
+// per circuit, so the flow label is the only field a transit router can spread
+// on. An Ethernet circuit passes l3_off 0 and stays unlabeled, matching the
+// headend, which does not hash an L2 payload. End.AM needs none of this: it
+// forwards the packet's original outer header, label included.
 
 // ========== Return tail-call targets ==========
 
@@ -112,12 +85,14 @@ int tailcall_service_return_as(struct xdp_md *ctx)
     // Clamp to the on-wire L3 length.
     __u16 wire_len = (__u16)((char *)data_end - (char *)l3);
 
-    // Carry the inner flow's entropy into the outer flow label. do_h_encaps_*
-    // build the outer header from headend_ctx_flow_label(0), which reads
-    // tctx->flow_hash (0 from the return front door); seed it here so the
-    // re-encapsulated packet spreads over the underlay's ECMP like a headend
-    // encap would. Set before the encap adjusts headroom.
-    tctx->flow_hash = svc_return_inner_flow_hash(ctx, l3_off);
+    // Carry the inner flow's entropy into the outer flow label. The L3 encap
+    // path (do_h_encaps_core, reached below) builds the outer header from
+    // headend_ctx_flow_label(0), which reads tctx->flow_hash (0 from the return
+    // front door); seed it here so the re-encapsulated packet spreads over the
+    // underlay's ECMP like a headend encap would. Set before the encap adjusts
+    // headroom. The Ethernet branch returned above and is unaffected:
+    // do_h_encaps_l2 hardcodes an unlabeled outer.
+    tctx->flow_hash = ecmp_flow_hash_l3(ctx, l3_off);
 
     int action;
     if (ver == 4) {
@@ -194,7 +169,10 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
     // Re-derive the outer flow label from the inner flow before the header is
     // prepended (the cached outer carries a zeroed flow label). Computed here
     // while the inner still sits at l3_off, ahead of the headroom grow below.
-    __u32 flow_label = ecmp_flow_label(svc_return_inner_flow_hash(ctx, l3_off));
+    // AD folds the hash locally instead of seeding tctx->flow_hash because it
+    // prepends the cached header itself rather than going through the headend
+    // encap path that reads that field.
+    __u32 flow_label = ecmp_flow_label(ecmp_flow_hash_l3(ctx, l3_off));
 
     struct ethhdr saved_eth = {};
     if (l3_off != 0) {
@@ -252,9 +230,12 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
     if ((void *)(outer + 1) > data_end)
         TAILCALL_RETURN(ctx, XDP_DROP);
     outer->payload_len = bpf_htons((__u16)(hdr_len - sizeof(struct ipv6hdr)) + payload_total);
-    // The cached outer was stored with a zeroed flow label (and TC), so
-    // stamping the re-derived label here does not disturb any preserved
-    // field. 0 (unparseable inner / Ethernet circuit) leaves it unlabeled.
+    // ipv6_set_flow_label also zeroes the low nibble of the Traffic Class
+    // (see the note on it in srv6_headend_utils.h). That is safe here only
+    // because svc_ad_cache_seed normalizes the cached header's Traffic Class
+    // to 0 alongside the flow label, so there is no DSCP or ECN value to lose.
+    // A flow_label of 0 (unparseable inner / Ethernet circuit) leaves the
+    // outer unlabeled.
     ipv6_set_flow_label(outer, flow_label);
 
     struct ethhdr *eth = data;

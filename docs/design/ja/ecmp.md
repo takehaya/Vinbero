@@ -35,7 +35,9 @@ group の解決は `ecmp_resolve_headend` に集約しています。group が�
 
 flow hash は group の有無に関わらず headend を通る全パケットで計算し、H.Encaps 系と GTP 系の headend が `headend_ctx_flow_label` を通して flow label に反映します。GTP 系は TEID も混ぜます。GTP-U の port が固定の運用では outer 5-tuple が eNB と UPF のペアごとに 1 つの定数になり per-session の entropy が消えるためです。L2 headend (H.Encaps.L2) と TC の BUM 複製は hash を計算しないため label 0 のままです。hash が非ゼロなら label も必ず非ゼロになるよう折り畳むので、ラベル付きフローと未ラベルフローを途中ノードが混同することはありません。
 
-これはアップグレード時の wire 挙動の変更です。従来 outer flow label は常に 0 でしたが、この版から L3 と GTP の encap は非ゼロの label を持ちます。label のバイト一致を前提にした外部の検査やテストは更新が必要です。
+service programming の復路も同じ理由で label を持ちます。End.AS と End.AD の復路は proxy circuit の outer が {src, dst} 固定なので、`ecmp_flow_hash_l3` で inner flow から hash を再導出して label に載せます。End.AM の復路はパケット自身の outer header をそのまま転送するため再導出しません。Ethernet circuit は inner が L2 フレームで hash を計算しないため label 0 のままです。詳細は [service programming](service_programming.md) を参照してください。
+
+これはアップグレード時の wire 挙動の変更です。従来 outer flow label は常に 0 でしたが、この版から L3 と GTP の encap、および End.AS と End.AD の復路は非ゼロの label を持ちます。label のバイト一致を前提にした外部の検査やテストは更新が必要です。
 
 ## 更新の atomicity
 

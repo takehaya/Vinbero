@@ -401,6 +401,53 @@ func buildVlanTaggedIPv4Packet(vlanID uint16, srcIP, dstIP net.IP) ([]byte, erro
 	return buf.Bytes(), nil
 }
 
+// buildVlanTaggedUDPIPv4Packet is buildUDPIPv4Packet with a VLAN tag, for
+// service-programming return circuits (which are separated by VLAN because
+// BPF_PROG_TEST_RUN pins ingress_ifindex to loopback). A UDP inner exercises
+// the L4 port read, which is the part of the ECMP hash that depends on the
+// L3 offset being passed correctly.
+func buildVlanTaggedUDPIPv4Packet(vlanID uint16, srcIP, dstIP net.IP, srcPort, dstPort uint16) ([]byte, error) {
+	eth := newTestEthernet(layers.EthernetTypeDot1Q)
+	vlan := &layers.Dot1Q{VLANIdentifier: vlanID, Type: layers.EthernetTypeIPv4}
+	ip4 := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64,
+		Protocol: layers.IPProtocolUDP, SrcIP: srcIP, DstIP: dstIP,
+	}
+	udp := &layers.UDP{SrcPort: layers.UDPPort(srcPort), DstPort: layers.UDPPort(dstPort)}
+	if err := udp.SetNetworkLayerForChecksum(ip4); err != nil {
+		return nil, err
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, vlan, ip4, udp, gopacket.Payload(newTestPayload(32))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// buildVlanTaggedUDPIPv6Packet is the IPv6 counterpart of
+// buildVlanTaggedUDPIPv4Packet.
+func buildVlanTaggedUDPIPv6Packet(vlanID uint16, srcIP, dstIP net.IP, srcPort, dstPort uint16) ([]byte, error) {
+	eth := newTestEthernet(layers.EthernetTypeDot1Q)
+	vlan := &layers.Dot1Q{VLANIdentifier: vlanID, Type: layers.EthernetTypeIPv6}
+	ip6 := &layers.IPv6{
+		Version: 6, SrcIP: srcIP, DstIP: dstIP,
+		NextHeader: layers.IPProtocolUDP, HopLimit: 64,
+	}
+	udp := &layers.UDP{SrcPort: layers.UDPPort(srcPort), DstPort: layers.UDPPort(dstPort)}
+	if err := udp.SetNetworkLayerForChecksum(ip6); err != nil {
+		return nil, err
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, vlan, ip6, udp, gopacket.Payload(newTestPayload(32))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // buildVlanTaggedIPv6Packet constructs a VLAN-tagged IPv6 packet
 func buildVlanTaggedIPv6Packet(vlanID uint16, srcIP, dstIP net.IP) ([]byte, error) {
 	eth := newTestEthernet(layers.EthernetTypeDot1Q)

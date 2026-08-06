@@ -152,6 +152,47 @@ static __always_inline __u32 ecmp_flow_label(__u32 hash)
     return label;
 }
 
+// Hash whatever L3 packet sits at `l3_off`, dispatching on the IP version
+// nibble. Unlike ecmp_flow_hash_v4/v6 this takes no pre-parsed header, so it
+// suits callers that hold only an offset (the service-programming return
+// paths, whose payload family is a per-circuit property rather than a
+// dispatch-time fact).
+//
+// Returns 0 — the established "no hash computed" sentinel, which
+// ecmp_flow_label folds to an unlabeled 0 — when no L3 header can be hashed:
+// `l3_off` is 0 (callers use 0 to mean "no L3 header located", e.g. a payload
+// that is a whole Ethernet frame), out of range, or the header is truncated or
+// carries a version this node does not hash. Callers that need the packet
+// dropped in those cases must check separately; this helper never drops.
+//
+// The offset is read at its current position, so callers must invoke this
+// BEFORE any bpf_xdp_adjust_head. __noinline caps verifier state growth in the
+// already-large programs that call it (same reasoning as ecmp_select_path).
+static __noinline __u32 ecmp_flow_hash_l3(struct xdp_md *ctx, __u16 l3_off)
+{
+    if (l3_off == 0 || l3_off > 22)
+        return 0;
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    void *l3 = data + l3_off;
+    if (l3 + 1 > data_end)
+        return 0;
+    __u8 ver = (*(__u8 *)l3) >> 4;
+    if (ver == 4) {
+        struct iphdr *iph = l3;
+        if ((void *)(iph + 1) > data_end)
+            return 0;
+        return ecmp_flow_hash_v4(ctx, iph, l3_off);
+    }
+    if (ver == 6) {
+        struct ipv6hdr *ip6h = l3;
+        if ((void *)(ip6h + 1) > data_end)
+            return 0;
+        return ecmp_flow_hash_v6(ctx, ip6h, l3_off);
+    }
+    return 0;
+}
+
 // ========================================================================
 // Path selection
 // ========================================================================
