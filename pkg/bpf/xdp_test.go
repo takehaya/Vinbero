@@ -3595,6 +3595,99 @@ func TestXDPProgEndADNegative(t *testing.T) {
 	})
 }
 
+// TestXDPProgServiceReturnFlowLabel checks that the AS and AD return paths
+// stamp the outer IPv6 flow label with entropy re-derived from the inner
+// flow. A proxy circuit has a fixed outer {src, dst}, so without this the
+// flow label is the only field a transit router can spread on and every
+// returned flow would collapse onto one ECMP path. Distinct inner flows
+// must yield distinct non-zero labels.
+func TestXDPProgServiceReturnFlowLabel(t *testing.T) {
+	srcAddr, _ := ParseIPv6("fc00:2::100")
+	segments, numSegments, _ := ParseSegments([]string{"fc00:3::3"})
+
+	t.Run("AS return derives per-flow label", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if _, err := h.mapOps.CreateServiceIngress(1, 0, &ServiceIngressEntry{
+			Behavior:      SvcRetAS,
+			InnerTypeMask: SvcInnerIPv4,
+			Encap: HeadendEntry{
+				Mode:        modeHEncaps,
+				NumSegments: numSegments,
+				SrcAddr:     srcAddr,
+				Segments:    segments,
+			},
+		}); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		labelFor := func(src, dst string) uint32 {
+			pkt, err := buildSimpleIPv4Packet(net.ParseIP(src).To4(), net.ParseIP(dst).To4())
+			if err != nil {
+				t.Fatalf("build packet: %v", err)
+			}
+			// FIB miss drops (fail-closed), but the re-encapsulation with the
+			// stamped flow label is already in the output buffer.
+			_, out := h.runOnIfindex(pkt, 1)
+			if !verifyEtherType(t, out, 0x86DD) {
+				t.Fatal("expected IPv6 outer in output")
+			}
+			return outerFlowLabel(t, out)
+		}
+		l1 := labelFor("10.0.0.9", "172.0.2.1")
+		l2 := labelFor("10.0.0.9", "172.0.2.2")
+		if l1 == 0 || l2 == 0 {
+			t.Fatalf("flow label 0; entropy missing (l1=%d l2=%d)", l1, l2)
+		}
+		if l1 == l2 {
+			t.Fatalf("distinct inner flows share flow label %d", l1)
+		}
+	})
+
+	t.Run("AD return derives per-flow label", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		dmac := [6]byte{0x02, 0, 0, 0, 0, 0x11}
+		smac := [6]byte{0x02, 0, 0, 0, 0, 0x12}
+		svc := &SidAuxService{
+			IfaceOut: 1, IfaceIn: 1, VlanIn: 7, InnerType: SvcInnerIPv4,
+			Flags: SvcAuxFStaticMac, Dmac: dmac, Smac: smac, HopLimitMargin: 2,
+		}
+		h.createSidFunctionEndAD("fc00:adad::1/128", svc)
+		if _, err := h.mapOps.CreateServiceIngress(1, 7, &ServiceIngressEntry{
+			Behavior: SvcRetAD, InnerTypeMask: SvcInnerIPv4,
+		}); err != nil {
+			t.Fatalf("create service ingress: %v", err)
+		}
+		// Seed the cache from the forward direction.
+		fseg := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:adad::1")}
+		fwd, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:adad::1"),
+			fseg, 1, net.ParseIP("10.0.0.1"), net.ParseIP("172.0.2.1"))
+		if err != nil {
+			t.Fatalf("build forward: %v", err)
+		}
+		if ret, _ := h.run(fwd); ret != XDP_REDIRECT {
+			t.Fatalf("forward seed: expected XDP_REDIRECT, got %d", ret)
+		}
+		labelFor := func(src, dst string) uint32 {
+			back, err := buildVlanTaggedIPv4Packet(7, net.ParseIP(src).To4(), net.ParseIP(dst).To4())
+			if err != nil {
+				t.Fatalf("build return: %v", err)
+			}
+			_, out := h.runOnIfindex(back, 1)
+			if !verifyEtherType(t, out, 0x86DD) {
+				t.Fatal("expected IPv6 outer in output")
+			}
+			return outerFlowLabel(t, out)
+		}
+		l1 := labelFor("172.0.2.1", "10.0.0.1")
+		l2 := labelFor("172.0.2.9", "10.0.0.1")
+		if l1 == 0 || l2 == 0 {
+			t.Fatalf("flow label 0; entropy missing (l1=%d l2=%d)", l1, l2)
+		}
+		if l1 == l2 {
+			t.Fatalf("distinct inner flows share flow label %d", l1)
+		}
+	})
+}
+
 // ========== End.AM (service programming masquerading proxy) ==========
 
 const actionEndAM = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM)
