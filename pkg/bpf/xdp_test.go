@@ -3595,6 +3595,201 @@ func TestXDPProgEndADNegative(t *testing.T) {
 	})
 }
 
+// TestXDPProgServiceReturnFlowLabel checks that the AS and AD return paths
+// stamp the outer IPv6 flow label with entropy re-derived from the inner
+// flow. A proxy circuit has a fixed outer {src, dst}, so without this the
+// flow label is the only field a transit router can spread on and every
+// returned flow would collapse onto one ECMP path.
+//
+// The properties asserted, in the order they matter for ECMP: a flow's label
+// is STABLE across its packets (an unstable label reorders the flow, which is
+// worse than the unlabeled behavior this replaces), DISTINCT flows get
+// distinct labels, and a circuit that cannot be hashed stays UNLABELED.
+//
+// All circuits live on one loaded collection, separated by VLAN: the untagged
+// {lo, 0} key is deliberately left free so the End.AD forward SRv6 packet
+// reaches the endpoint dispatch instead of being swallowed by the return
+// front door.
+func TestXDPProgServiceReturnFlowLabel(t *testing.T) {
+	const (
+		vlanASv4  = 5
+		vlanASv6  = 6
+		vlanAD    = 7
+		vlanASEth = 8
+	)
+	srcAddr, err := ParseIPv6("fc00:2::100")
+	if err != nil {
+		t.Fatalf("parse src addr: %v", err)
+	}
+	segments, numSegments, err := ParseSegments([]string{"fc00:3::3"})
+	if err != nil {
+		t.Fatalf("parse segments: %v", err)
+	}
+
+	h := newXDPTestHelper(t)
+	asEntry := func(mask uint8) *ServiceIngressEntry {
+		return &ServiceIngressEntry{
+			Behavior:      SvcRetAS,
+			InnerTypeMask: mask,
+			Encap: HeadendEntry{
+				Mode:        modeHEncaps,
+				NumSegments: numSegments,
+				SrcAddr:     srcAddr,
+				Segments:    segments,
+			},
+		}
+	}
+	for _, c := range []struct {
+		vlan  uint16
+		entry *ServiceIngressEntry
+	}{
+		{vlanASv4, asEntry(SvcInnerIPv4)},
+		{vlanASv6, asEntry(SvcInnerIPv6)},
+		{vlanASEth, asEntry(SvcInnerEthernet)},
+		{vlanAD, &ServiceIngressEntry{Behavior: SvcRetAD, InnerTypeMask: SvcInnerIPv4}},
+	} {
+		if _, err := h.mapOps.CreateServiceIngress(1, c.vlan, c.entry); err != nil {
+			t.Fatalf("create service ingress vlan %d: %v", c.vlan, err)
+		}
+	}
+
+	// Both return paths fail closed on the test environment's FIB miss; the
+	// stamped encapsulation is still in the output buffer. Asserting the
+	// verdict here keeps a fail-closed -> XDP_PASS regression visible.
+	runReturn := func(t *testing.T, pkt []byte) []byte {
+		t.Helper()
+		ret, out := h.runOnIfindex(pkt, 1)
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP (FIB miss, fail-closed), got %d", ret)
+		}
+		return out
+	}
+	labelOf := func(t *testing.T, pkt []byte) uint32 {
+		t.Helper()
+		out := runReturn(t, pkt)
+		if !verifyEtherType(t, out, 0x86DD) {
+			t.Fatal("expected IPv6 outer in output")
+		}
+		return outerFlowLabel(t, out)
+	}
+
+	// Seed the AD cache from the forward direction (untagged, so the return
+	// front door does not intercept it).
+	dmac := [6]byte{0x02, 0, 0, 0, 0, 0x11}
+	smac := [6]byte{0x02, 0, 0, 0, 0, 0x12}
+	h.createSidFunctionEndAD("fc00:adad::1/128", &SidAuxService{
+		IfaceOut: 1, IfaceIn: 1, VlanIn: vlanAD, InnerType: SvcInnerIPv4,
+		Flags: SvcAuxFStaticMac, Dmac: dmac, Smac: smac, HopLimitMargin: 2,
+	})
+	fseg := []net.IP{net.ParseIP("fc00:3::3"), net.ParseIP("fc00:adad::1")}
+	fwd, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fc00::1"), net.ParseIP("fc00:adad::1"),
+		fseg, 1, net.ParseIP("10.0.0.1"), net.ParseIP("172.0.2.1"))
+	if err != nil {
+		t.Fatalf("build forward: %v", err)
+	}
+	if ret, _ := h.run(fwd); ret != XDP_REDIRECT {
+		t.Fatalf("forward seed: expected XDP_REDIRECT, got %d", ret)
+	}
+
+	v4Return := func(t *testing.T, vlan uint16, src, dst string, sport uint16) []byte {
+		t.Helper()
+		pkt, err := buildVlanTaggedUDPIPv4Packet(vlan, net.ParseIP(src).To4(), net.ParseIP(dst).To4(), sport, 53)
+		if err != nil {
+			t.Fatalf("build return: %v", err)
+		}
+		return pkt
+	}
+
+	t.Run("AS IPv4 inner", func(t *testing.T) {
+		l1 := labelOf(t, v4Return(t, vlanASv4, "172.0.2.1", "10.0.0.1", 1000))
+		again := labelOf(t, v4Return(t, vlanASv4, "172.0.2.1", "10.0.0.1", 1000))
+		l2 := labelOf(t, v4Return(t, vlanASv4, "172.0.2.1", "10.0.0.1", 2000))
+		if l1 == 0 || l2 == 0 {
+			t.Fatalf("flow label 0; entropy missing (l1=%d l2=%d)", l1, l2)
+		}
+		if l1 != again {
+			t.Fatalf("same flow produced unstable labels %d then %d", l1, again)
+		}
+		if l1 == l2 {
+			t.Fatalf("distinct inner flows share flow label %d", l1)
+		}
+	})
+
+	// Exercises ecmp_flow_hash_l3's ver == 6 branch, which no other test
+	// reaches: the pre-existing IPv6 cases are link maintenance and get
+	// XDP_PASS at the front door before the helper runs.
+	t.Run("AS IPv6 inner", func(t *testing.T) {
+		v6Return := func(src, dst string, sport uint16) []byte {
+			pkt, err := buildVlanTaggedUDPIPv6Packet(vlanASv6, net.ParseIP(src), net.ParseIP(dst), sport, 53)
+			if err != nil {
+				t.Fatalf("build return: %v", err)
+			}
+			return pkt
+		}
+		l1 := labelOf(t, v6Return("fd00:a::1", "fd00:b::1", 1000))
+		again := labelOf(t, v6Return("fd00:a::1", "fd00:b::1", 1000))
+		l2 := labelOf(t, v6Return("fd00:a::1", "fd00:b::1", 2000))
+		if l1 == 0 || l2 == 0 {
+			t.Fatalf("flow label 0; entropy missing (l1=%d l2=%d)", l1, l2)
+		}
+		if l1 != again {
+			t.Fatalf("same flow produced unstable labels %d then %d", l1, again)
+		}
+		if l1 == l2 {
+			t.Fatalf("distinct inner flows share flow label %d", l1)
+		}
+	})
+
+	t.Run("AD IPv4 inner", func(t *testing.T) {
+		l1 := labelOf(t, v4Return(t, vlanAD, "172.0.2.1", "10.0.0.1", 1000))
+		again := labelOf(t, v4Return(t, vlanAD, "172.0.2.1", "10.0.0.1", 1000))
+		l2 := labelOf(t, v4Return(t, vlanAD, "172.0.2.1", "10.0.0.1", 2000))
+		if l1 == 0 || l2 == 0 {
+			t.Fatalf("flow label 0; entropy missing (l1=%d l2=%d)", l1, l2)
+		}
+		if l1 != again {
+			t.Fatalf("same flow produced unstable labels %d then %d", l1, again)
+		}
+		if l1 == l2 {
+			t.Fatalf("distinct inner flows share flow label %d", l1)
+		}
+	})
+
+	// AS folds the hash through tctx->flow_hash and the shared headend encap;
+	// AD folds it locally and stamps the prepended header. Two code paths, one
+	// contract: the same inner flow must land on the same label. A wrong L3
+	// offset on either side shifts the UDP port read and breaks this.
+	t.Run("AS and AD agree for one flow", func(t *testing.T) {
+		as := labelOf(t, v4Return(t, vlanASv4, "172.0.2.1", "10.0.0.1", 1000))
+		ad := labelOf(t, v4Return(t, vlanAD, "172.0.2.1", "10.0.0.1", 1000))
+		if as == 0 || ad == 0 {
+			t.Fatalf("flow label 0; agreement would be vacuous (as=%d ad=%d)", as, ad)
+		}
+		if as != ad {
+			t.Fatalf("AS label %d != AD label %d for the same inner flow", as, ad)
+		}
+	})
+
+	// The documented 0 sentinel: an Ethernet circuit carries an L2 frame as its
+	// payload, which the headend does not hash either, so the outer stays
+	// unlabeled rather than picking up entropy from bytes that are not an L3
+	// header.
+	t.Run("Ethernet circuit stays unlabeled", func(t *testing.T) {
+		pkt, err := buildVlanTaggedUDPIPv4Packet(vlanASEth, net.ParseIP("172.0.2.1").To4(),
+			net.ParseIP("10.0.0.1").To4(), 1000, 53)
+		if err != nil {
+			t.Fatalf("build return: %v", err)
+		}
+		out := runReturn(t, pkt)
+		if !verifyEtherType(t, out, 0x86DD) {
+			t.Fatal("expected IPv6 outer in output")
+		}
+		if got := outerFlowLabel(t, out); got != 0 {
+			t.Fatalf("Ethernet circuit flow label = %d, want 0 (unlabeled)", got)
+		}
+	})
+}
+
 // ========== End.AM (service programming masquerading proxy) ==========
 
 const actionEndAM = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_AM)

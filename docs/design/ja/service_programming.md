@@ -67,6 +67,16 @@ SL == 0 と reduced encap (SRH 無し) は drop します。次 segment が無�
 
 reader は copy の前に seq を読み、奇数なら drop、copy のあと seq を読み直して変化していれば drop します。compiler barrier で store 順序を固定します。BPF は最古サポート kernel に portable な release/acquire fence を持たないので、weakly-ordered CPU での保証は torn read を検知して drop することであり、torn read を観測しないことではありません。
 
+## 復路の flow label 再導出
+
+proxy circuit の outer は {src, dst} が固定です。復路の outer flow label を 0 のままにすると、下流の transit router が flow label でしか経路を分散できないため、その circuit が返す全フローが単一の ECMP 経路に潰れます。これを避けるため、復路でサービスの出力パケットの inner flow から entropy を再導出し、headend の encap と同じ jhash と RFC 6437 の 20 bit fold で outer flow label に載せます。共通の helper は `core/srv6_ecmp.h` の `ecmp_flow_hash_l3` です。
+
+再導出の目的は underlay での分散であり、往路と復路で同じ経路を通す symmetry ではありません。jhash は src と dst について対称ではないので、同一の通信でも往路と復路は別の値になります。
+
+再導出は L3 circuit だけを対象にします。headend も L2 payload は hash しないためです。Ethernet circuit や inner を parse できない場合は 0 のままにして unlabeled で転送します。inner の読み取りは encap で headroom を伸ばす前に行います。AD は復路 target で folding して前置後の outer に書きます。cache した outer header を自分で前置するため、headend の encap 経路を通らないからです。AS は共有の headend encap が読む `tctx->flow_hash` に seed します。End.AM はパケット自身の outer header を label ごとそのまま転送するので再導出しません。
+
+inner はサービス由来で信頼境界の外側です。この変更前は label が常に 0 だったので、サービスは自分の復路の underlay 経路に影響を与えられませんでした。再導出後は自分の 5-tuple で自分の復路経路を選べます。これは headend 配下の利用者トラフィックと同じ立場であり、影響範囲は自分のトラフィックだけなので許容します。読み取り自体は ECMP entropy の計算だけで、bounds check は hash helper が行います。
+
 ## End.AM masquerading proxy
 
 往路は SL を減算して DA を Segment List[0] (最終 segment) に書き換え、SRH を残したままサービスへ渡します。inner は L3 のみです。配送は静的 MAC 必須です。masquerade 後の DA は chain の最終宛先を指すため、FIB lookup するとサービスを素通りするためです。
