@@ -1,6 +1,9 @@
 package bgp
 
-import "testing"
+import (
+	"net/netip"
+	"testing"
+)
 
 // N3 regression: MUPRoute.Family classifies an IPv4-mapped IPv6 endpoint
 // (::ffff:a.b.c.d) as FamilyMUPIPv4. Without Addr.Unmap, netip.Addr.Is4
@@ -95,4 +98,55 @@ func TestValidateIPv6NextHop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPathSource covers the identity ECMP aggregation keys on. The zero
+// value must read as "locally originated", because that is what gobgp
+// hands back for this node's own advertisements and ListRoutes uses it to
+// skip them.
+func TestPathSource(t *testing.T) {
+	peer := netip.MustParseAddr("fd00::1")
+
+	t.Run("zero value is local", func(t *testing.T) {
+		var s PathSource
+		if !s.IsLocal() {
+			t.Error("zero PathSource must report IsLocal")
+		}
+		if got := s.String(); got != "local" {
+			t.Errorf("String() = %q, want %q", got, "local")
+		}
+	})
+
+	t.Run("peer without add-path", func(t *testing.T) {
+		s := PathSource{Peer: peer}
+		if s.IsLocal() {
+			t.Error("a path from a peer must not report IsLocal")
+		}
+		if got, want := s.String(), "fd00::1"; got != want {
+			t.Errorf("String() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("peer with add-path id", func(t *testing.T) {
+		s := PathSource{Peer: peer, PathID: 3}
+		if got, want := s.String(), "fd00::1#3"; got != want {
+			t.Errorf("String() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("comparable and usable as a map key", func(t *testing.T) {
+		// The accumulator keys per-path state on this struct, so it must be
+		// comparable and must not collide across peers or path ids.
+		seen := map[PathSource]int{}
+		seen[PathSource{Peer: peer, PathID: 1}]++
+		seen[PathSource{Peer: peer, PathID: 2}]++
+		seen[PathSource{Peer: netip.MustParseAddr("fd00::2"), PathID: 1}]++
+		seen[PathSource{Peer: peer, PathID: 1}]++
+		if len(seen) != 3 {
+			t.Fatalf("distinct sources collapsed: got %d keys, want 3", len(seen))
+		}
+		if n := seen[PathSource{Peer: peer, PathID: 1}]; n != 2 {
+			t.Errorf("repeat of one source counted %d times, want 2", n)
+		}
+	})
 }

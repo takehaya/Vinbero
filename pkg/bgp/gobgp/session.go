@@ -170,7 +170,7 @@ func (s *Session) AddPeer(ctx context.Context, p bgp.PeerConfig) error {
 	if srv == nil {
 		return bgp.ErrSessionNotStarted
 	}
-	afiSafis, err := familiesToAfiSafis(p.Families)
+	afiSafis, err := familiesToAfiSafis(p.Families, p.AddPathsReceive)
 	if err != nil {
 		return fmt.Errorf("add peer %s: %w", p.Neighbor, err)
 	}
@@ -271,16 +271,31 @@ func familyToAPI(f bgp.Family) (*gobgpapi.Family, error) {
 	}
 }
 
-func familiesToAfiSafis(fs []bgp.Family) ([]*gobgpapi.AfiSafi, error) {
+// familiesToAfiSafis builds the per-family capability set for a neighbor.
+// addPathsReceive applies to every family: ADD-PATH is negotiated per
+// AFI/SAFI, and a peer that reflects multiple paths for one family
+// generally does so for all of them, so Vinbero does not expose a
+// per-family knob for it.
+//
+// Only the receive direction is enabled. SendMax is left 0 (send
+// disabled): Vinbero originates one path per NLRI, so advertising ADD-PATH
+// send would negotiate a capability it never exercises.
+func familiesToAfiSafis(fs []bgp.Family, addPathsReceive bool) ([]*gobgpapi.AfiSafi, error) {
 	out := make([]*gobgpapi.AfiSafi, 0, len(fs))
 	for _, f := range fs {
 		fam, err := familyToAPI(f)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, &gobgpapi.AfiSafi{
+		as := &gobgpapi.AfiSafi{
 			Config: &gobgpapi.AfiSafiConfig{Family: fam, Enabled: true},
-		})
+		}
+		if addPathsReceive {
+			as.AddPaths = &gobgpapi.AddPaths{
+				Config: &gobgpapi.AddPathsConfig{Receive: true},
+			}
+		}
+		out = append(out, as)
 	}
 	return out, nil
 }

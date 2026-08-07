@@ -282,6 +282,12 @@ type BGPPeerConfig struct {
 	// 5 (gobgp's own default is 120) so a peer unreachable at startup
 	// reconnects within seconds.
 	ConnectRetrySec uint32 `yaml:"connect_retry_sec,omitempty" default:"5"`
+	// AddPathsReceive negotiates ADD-PATH receive (RFC 7911) with this
+	// neighbor, so it may send several paths for one prefix. Set it on a
+	// route reflector session: a reflector sends only its best path per
+	// prefix by default, which hides the other PEs' paths from ECMP. An
+	// iBGP full mesh does not need it, since every PE sends its own path.
+	AddPathsReceive bool `yaml:"add_paths_receive,omitempty"`
 }
 
 // BpfConstants returns the set of read-only constants rewritten into every
@@ -339,7 +345,7 @@ type EntriesConfig struct {
 	// EcmpGroup sizes the ECMP group tables: ecmp_group_map / owner / live
 	// get this capacity directly, ecmp_path_map gets capacity x 8 (one slot
 	// per possible path).
-	EcmpGroup   EntryCapacityConfig `yaml:"ecmp_group,omitempty"`
+	EcmpGroup EntryCapacityConfig `yaml:"ecmp_group,omitempty"`
 	// ServiceIngress sizes the service-programming proxy tables: both the
 	// IFACE-IN return map (service_ingress_map) and the End.AD dynamic
 	// cache (ad_cache_map) are keyed by the proxy attachment circuit.

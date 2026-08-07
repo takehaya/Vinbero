@@ -67,12 +67,20 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 // pathToRouteEvent converts a gobgp received Path into a Vinbero
 // RouteEvent. VPN families are fully decoded (RD / prefix / SRv6 SID /
 // route targets / next hop); IPv6 unicast carries prefix and next hop.
+//
+// This is the single conversion point for both the live subscription and
+// the loc-rib snapshot, so the path identity it attaches below reaches
+// every consumer of either.
 func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 	fam, ok := apiFamilyToVinbero(p.Family)
 	if !ok {
 		return bgp.RouteEvent{}, false
 	}
-	ev := bgp.RouteEvent{Family: fam, IsWithdraw: p.Withdrawal}
+	ev := bgp.RouteEvent{
+		Family:     fam,
+		Source:     pathSource(p),
+		IsWithdraw: p.Withdrawal,
+	}
 	switch fam {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
 		ev.VPN = decodeVPNRoute(p, fam)
@@ -89,6 +97,18 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 		ev.MUP = decodeMUPRoute(p)
 	}
 	return ev, true
+}
+
+// pathSource extracts the path's identity: which neighbor sent it and,
+// when ADD-PATH receive is negotiated, which of that neighbor's paths it
+// is. gobgp names the received ADD-PATH identifier RemoteID (LocalID is
+// the id gobgp would use when re-advertising, which is not this path's
+// identity on the wire we learned it from).
+//
+// A locally originated path has no source address, which leaves Peer as
+// the zero Addr and makes PathSource.IsLocal report true.
+func pathSource(p *apiutil.Path) bgp.PathSource {
+	return bgp.PathSource{Peer: p.PeerAddress, PathID: p.RemoteID}
 }
 
 // apiFamilyToVinbero maps a gobgp route family to a Vinbero Family.

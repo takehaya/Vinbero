@@ -126,6 +126,19 @@ type PeerConfig struct {
 	// default is 120s; a smaller value reconnects faster after a startup or
 	// transient failure. Governs the pre-establishment dial only.
 	ConnectRetrySec uint32
+	// AddPathsReceive negotiates ADD-PATH receive (RFC 7911) for every
+	// family of this neighbor, so the peer may send several paths for one
+	// NLRI and each arrives with its own PathID.
+	//
+	// It matters behind a route reflector, which by default reflects only
+	// its best path per NLRI: without ADD-PATH the client simply never sees
+	// the other PEs' paths and no amount of receiver-side work recovers
+	// them. In an iBGP full mesh every PE already sends its own path
+	// directly, so this is not needed there.
+	//
+	// This is receive-only. Vinbero does not advertise multiple paths for
+	// its own NLRIs, so the send direction stays off.
+	AddPathsReceive bool
 }
 
 // PeerState is a read-only snapshot of a neighbor's session.
@@ -187,11 +200,51 @@ type RouteAdvertiser interface {
 	Withdraw(ctx context.Context, key RouteKey) error
 }
 
+// PathSource identifies which BGP path an update came from, so a consumer
+// can hold several paths for one NLRI instead of collapsing them.
+//
+// Without it a receiver can only key on the NLRI, and a second PE
+// advertising the same prefix is indistinguishable from an update to the
+// first PE's route. That is what blocks ECMP: the paths are all present on
+// the wire and gobgp delivers each one, but the receiver has nowhere to put
+// the second.
+//
+// Peer is the neighbor the path was learned from, and is the zero Addr for
+// a locally originated path (which is how ListRoutes tells the two apart).
+// PathID is the ADD-PATH identifier (RFC 7911) as sent by that peer; it is
+// 0 unless ADD-PATH receive is negotiated, and is only unique within a
+// peer, so a path is identified by the pair and never by PathID alone.
+type PathSource struct {
+	Peer   netip.Addr
+	PathID uint32
+}
+
+// IsLocal reports whether the path was originated by this node rather than
+// learned from a neighbor.
+func (s PathSource) IsLocal() bool { return !s.Peer.IsValid() }
+
+// String renders the source for logs: "local" for a locally originated
+// path, the bare peer address when no ADD-PATH id applies, and
+// "<peer address>#<path id>" otherwise.
+func (s PathSource) String() string {
+	if s.IsLocal() {
+		return "local"
+	}
+	if s.PathID == 0 {
+		return s.Peer.String()
+	}
+	return fmt.Sprintf("%s#%d", s.Peer, s.PathID)
+}
+
 // RouteEvent is a single received BGP route update delivered to a
 // RouteHandler. IsWithdraw distinguishes a withdrawal from an
 // advertisement.
 type RouteEvent struct {
-	Family     Family
+	Family Family
+	// Source identifies the path this update belongs to. Consumers that
+	// keep per-path state must include it in their key; consumers that
+	// only track the NLRI can ignore it.
+	Source     PathSource
 	VPN        *VPNRoute
 	Unicast    *UnicastRoute
 	SRPolicy   *SRPolicy
