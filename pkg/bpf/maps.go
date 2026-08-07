@@ -1832,33 +1832,44 @@ func (m *MapOperations) DeleteSRPolicy(policyID uint32) error {
 // one that no entry happens to reference yet.
 func (m *MapOperations) HighestSRPolicyIDInUse() (uint32, error) {
 	var highest uint32
+	raise := func(id uint32) {
+		if id > highest {
+			highest = id
+		}
+	}
 
 	var policyID uint32
 	var val BpfSrPolicyValue
 	iter := m.objs.SrPolicyMap.Iterate()
 	for iter.Next(&policyID, &val) {
-		if policyID > highest {
-			highest = policyID
-		}
+		raise(policyID)
 	}
 	if err := iter.Err(); err != nil {
 		return 0, fmt.Errorf("iterate sr_policy_map: %w", err)
 	}
 
-	v4, err := m.ListHeadendV4()
-	if err != nil {
-		return 0, err
+	// Iterate the headend maps directly rather than through ListHeadendV*:
+	// this runs at startup against maps that may be large and pinned, and
+	// only one number is wanted, so materializing every entry into a
+	// string-keyed map would be pure waste.
+	var entry HeadendEntry
+
+	var k4 LpmKeyV4
+	iter = m.objs.HeadendV4Map.Iterate()
+	for iter.Next(&k4, &entry) {
+		raise(entry.PolicyId)
 	}
-	v6, err := m.ListHeadendV6()
-	if err != nil {
-		return 0, err
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("iterate headend v4 map: %w", err)
 	}
-	for _, entries := range []map[string]*HeadendEntry{v4, v6} {
-		for _, e := range entries {
-			if e.PolicyId > highest {
-				highest = e.PolicyId
-			}
-		}
+
+	var k6 LpmKeyV6
+	iter = m.objs.HeadendV6Map.Iterate()
+	for iter.Next(&k6, &entry) {
+		raise(entry.PolicyId)
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("iterate headend v6 map: %w", err)
 	}
 	return highest, nil
 }
