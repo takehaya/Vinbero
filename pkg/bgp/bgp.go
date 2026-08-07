@@ -224,7 +224,8 @@ type PathSource struct {
 func (s PathSource) IsLocal() bool { return !s.Peer.IsValid() }
 
 // String renders the source for logs: "local" for a locally originated
-// path, "peer" when no ADD-PATH id applies, and "peer#pathid" otherwise.
+// path, the bare peer address when no ADD-PATH id applies, and
+// "<peer address>#<path id>" otherwise.
 func (s PathSource) String() string {
 	if s.IsLocal() {
 		return "local"
