@@ -20,6 +20,10 @@ type fakePolicyMap struct {
 	deletes   []uint32
 	current   map[uint32][]netip.Addr // id -> last transport written (nil = deleted)
 	deleteErr error
+	// highestInUse models what a restart would find still referenced in the
+	// pinned maps; highestErr models that read failing.
+	highestInUse uint32
+	highestErr   error
 }
 
 type upsertCall struct {
@@ -35,6 +39,10 @@ func (f *fakePolicyMap) UpsertSRPolicy(id uint32, transport []netip.Addr) error 
 	f.upserts = append(f.upserts, upsertCall{id, transport})
 	f.current[id] = transport
 	return nil
+}
+
+func (f *fakePolicyMap) HighestSRPolicyIDInUse() (uint32, error) {
+	return f.highestInUse, f.highestErr
 }
 
 func (f *fakePolicyMap) DeleteSRPolicy(id uint32) error {
@@ -367,4 +375,59 @@ func TestSRPolicyTable_LocalCap(t *testing.T) {
 	if err := tbl.applyLocalCapped(mk(9, "2001:db8::9"), 0); err != nil {
 		t.Errorf("max=0 must be unlimited, got %v", err)
 	}
+}
+
+// TestSRPolicyTable_IDsSurviveRestart covers the pinned-map restart hazard.
+// sr_policy_map and the headend maps persist across a vinberod restart, but
+// the id allocator does not: if it restarted from zero it would hand a new
+// policy an id that a surviving headend entry still points at, steering that
+// prefix onto an unrelated transport until BGP re-advertised it.
+func TestSRPolicyTable_IDsSurviveRestart(t *testing.T) {
+	t.Run("allocation starts above surviving ids", func(t *testing.T) {
+		fm := newFakePolicyMap()
+		fm.highestInUse = 7 // a pre-restart entry still references id 7
+		tbl := newSRPolicyTable(fm, zap.NewNop())
+
+		id := tbl.reserveID(10, netip.MustParseAddr("2001:db8::1"))
+		if id <= 7 {
+			t.Fatalf("first id after restart = %d, want > 7 (would collide with a surviving entry)", id)
+		}
+	})
+
+	t.Run("no surviving state starts from one", func(t *testing.T) {
+		tbl, _ := newTestTable()
+		if id := tbl.reserveID(10, netip.MustParseAddr("2001:db8::1")); id != 1 {
+			t.Errorf("first id on a clean start = %d, want 1", id)
+		}
+	})
+
+	t.Run("distinct policies never share an id after restart", func(t *testing.T) {
+		fm := newFakePolicyMap()
+		fm.highestInUse = 3
+		tbl := newSRPolicyTable(fm, zap.NewNop())
+
+		seen := map[uint32]bool{}
+		for i := range 5 {
+			id := tbl.reserveID(uint32(100+i), netip.MustParseAddr("2001:db8::1"))
+			if id <= 3 {
+				t.Fatalf("policy %d got id %d, which a surviving entry may reference", i, id)
+			}
+			if seen[id] {
+				t.Fatalf("id %d handed out twice", id)
+			}
+			seen[id] = true
+		}
+	})
+
+	t.Run("a failed read degrades instead of blocking startup", func(t *testing.T) {
+		fm := newFakePolicyMap()
+		fm.highestErr = errors.New("map iterate failed")
+		tbl := newSRPolicyTable(fm, zap.NewNop())
+		if tbl == nil {
+			t.Fatal("newSRPolicyTable must still build a usable table")
+		}
+		if id := tbl.reserveID(10, netip.MustParseAddr("2001:db8::1")); id == 0 {
+			t.Error("table must still allocate ids after a failed read")
+		}
+	})
 }

@@ -123,6 +123,7 @@ func (f *fakeHeadend) SetEsiDfPe(esi [bpf.ESILen]byte, dfAddr [bpf.IPv6AddrLen]b
 // interface; the SR Policy table is unit-tested separately (srpolicy_test).
 func (f *fakeHeadend) UpsertSRPolicy(uint32, []netip.Addr) error { return nil }
 func (f *fakeHeadend) DeleteSRPolicy(uint32) error               { return nil }
+func (f *fakeHeadend) HighestSRPolicyIDInUse() (uint32, error)   { return 0, nil }
 
 // mupUplinkKey records an mup_uplink_v4_map write in fakeHeadend.
 type mupUplinkKey struct {
