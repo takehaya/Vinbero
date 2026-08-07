@@ -223,7 +223,8 @@ type PathSource struct {
 // learned from a neighbor.
 func (s PathSource) IsLocal() bool { return !s.Peer.IsValid() }
 
-// String renders the source as "peer[#pathid]" for logs and map keys.
+// String renders the source for logs: "local" for a locally originated
+// path, "peer" when no ADD-PATH id applies, and "peer#pathid" otherwise.
 func (s PathSource) String() string {
 	if s.IsLocal() {
 		return "local"
