@@ -145,3 +145,102 @@ func TestUpsertSRPolicyRejectsZeroID(t *testing.T) {
 		t.Fatal("UpsertSRPolicy(0, ...) must be rejected (policy_id 0 = no steering)")
 	}
 }
+
+// TestHighestSRPolicyIDInUse covers the value the id allocator seeds itself
+// from after a restart. Both sources must count: sr_policy_map holds the
+// installed transports, and the headend maps hold the references, which are
+// what make a reassignment mis-steer live traffic.
+func TestHighestSRPolicyIDInUse(t *testing.T) {
+	const hEncaps = uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
+	srcAddr, _ := ParseIPv6("fc00::1")
+	serviceSID, _ := ParseIPv6("fd00:5fc::1")
+	entryWith := func(policyID uint32) *HeadendEntry {
+		var segs [MaxSegments][IPv6AddrLen]uint8
+		segs[0] = serviceSID
+		return &HeadendEntry{
+			Mode: hEncaps, NumSegments: 1, PolicyId: policyID,
+			SrcAddr: srcAddr, Segments: segs,
+		}
+	}
+	transport := []netip.Addr{netip.MustParseAddr("fd00:7::1")}
+
+	t.Run("empty maps report zero", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		got, err := h.mapOps.HighestSRPolicyIDInUse()
+		if err != nil {
+			t.Fatalf("HighestSRPolicyIDInUse: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("got %d, want 0 on a clean data plane", got)
+		}
+	})
+
+	t.Run("installed policies count", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		for _, id := range []uint32{2, 9, 4} {
+			if err := h.mapOps.UpsertSRPolicy(id, transport); err != nil {
+				t.Fatalf("UpsertSRPolicy(%d): %v", id, err)
+			}
+		}
+		got, err := h.mapOps.HighestSRPolicyIDInUse()
+		if err != nil {
+			t.Fatalf("HighestSRPolicyIDInUse: %v", err)
+		}
+		if got != 9 {
+			t.Errorf("got %d, want 9", got)
+		}
+	})
+
+	t.Run("a reference with no installed policy still counts", func(t *testing.T) {
+		// The dangerous case: the policy was withdrawn before the restart but
+		// a headend entry still points at its id. Reassigning that id would
+		// steer this prefix onto whatever policy takes it next.
+		h := newXDPTestHelper(t)
+		if err := h.mapOps.CreateHeadendV4("192.0.2.0/24", entryWith(21), OwnerRPC); err != nil {
+			t.Fatalf("CreateHeadendV4: %v", err)
+		}
+		got, err := h.mapOps.HighestSRPolicyIDInUse()
+		if err != nil {
+			t.Fatalf("HighestSRPolicyIDInUse: %v", err)
+		}
+		if got != 21 {
+			t.Errorf("got %d, want 21 (an unreferenced-but-installed id is not the only hazard)", got)
+		}
+	})
+
+	t.Run("v6 references count and the maximum wins", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		if err := h.mapOps.UpsertSRPolicy(3, transport); err != nil {
+			t.Fatalf("UpsertSRPolicy: %v", err)
+		}
+		if err := h.mapOps.CreateHeadendV4("192.0.2.0/24", entryWith(11), OwnerRPC); err != nil {
+			t.Fatalf("CreateHeadendV4: %v", err)
+		}
+		if err := h.mapOps.CreateHeadendV6("2001:db8::/32", entryWith(37), OwnerRPC); err != nil {
+			t.Fatalf("CreateHeadendV6: %v", err)
+		}
+		got, err := h.mapOps.HighestSRPolicyIDInUse()
+		if err != nil {
+			t.Fatalf("HighestSRPolicyIDInUse: %v", err)
+		}
+		if got != 37 {
+			t.Errorf("got %d, want 37", got)
+		}
+	})
+
+	t.Run("unsteered entries do not raise the floor", func(t *testing.T) {
+		// policy_id 0 means "not steered"; it must not be mistaken for a
+		// reference, or every plain VPN route would inflate the id space.
+		h := newXDPTestHelper(t)
+		if err := h.mapOps.CreateHeadendV4("192.0.2.0/24", entryWith(0), OwnerRPC); err != nil {
+			t.Fatalf("CreateHeadendV4: %v", err)
+		}
+		got, err := h.mapOps.HighestSRPolicyIDInUse()
+		if err != nil {
+			t.Fatalf("HighestSRPolicyIDInUse: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("got %d, want 0", got)
+		}
+	})
+}

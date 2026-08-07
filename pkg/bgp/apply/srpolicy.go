@@ -44,6 +44,11 @@ func LocalSRPolicy(color uint32, endpoint netip.Addr, segments []netip.Addr, pre
 type policyMapOps interface {
 	UpsertSRPolicy(policyID uint32, transport []netip.Addr) error
 	DeleteSRPolicy(policyID uint32) error
+	// HighestSRPolicyIDInUse reports the largest policy_id the persisted
+	// data plane still refers to, so the allocator can start above it after
+	// a restart instead of reusing an id a surviving headend entry points
+	// at. Returns 0 when the maps are empty or unpinned.
+	HighestSRPolicyIDInUse() (uint32, error)
 }
 
 // policyKey is the SR Policy identity (RFC 9256 §2.1). Color and endpoint
@@ -95,11 +100,34 @@ type srPolicyTable struct {
 }
 
 func newSRPolicyTable(mapOps policyMapOps, logger *zap.Logger) *srPolicyTable {
-	return &srPolicyTable{
+	t := &srPolicyTable{
 		mapOps: mapOps,
 		byKey:  make(map[policyKey]*policyState),
 		logger: logger.Named("srpolicy"),
 	}
+	// Start the id space above anything the pinned data plane still refers
+	// to. Without this a restart hands a fresh policy an id that a surviving
+	// headend entry already points at, and that prefix steers onto the wrong
+	// transport until BGP re-advertises it. Allocation at this point is
+	// purely nextID++ (freeIDs is empty until the first gc), so raising
+	// nextID is enough to keep the two disjoint.
+	//
+	// A failure here is not fatal: with pinning off there is nothing to
+	// collide with, and with pinning on the pre-restart entries keep
+	// forwarding correctly on their own ids. Log and continue from zero
+	// rather than refuse to build the applier.
+	highest, err := mapOps.HighestSRPolicyIDInUse()
+	if err != nil {
+		t.logger.Error("read policy ids in use; id allocation starts from zero "+
+			"and may collide with entries that survived a restart", zap.Error(err))
+		return t
+	}
+	if highest > 0 {
+		t.nextID = highest
+		t.logger.Info("resuming SR Policy id allocation above surviving entries",
+			zap.Uint32("highest_in_use", highest))
+	}
+	return t
 }
 
 // reserveID returns the stable policy_id for {color, endpoint}, allocating

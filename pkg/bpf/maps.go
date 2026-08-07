@@ -1813,6 +1813,56 @@ func (m *MapOperations) DeleteSRPolicy(policyID uint32) error {
 	return nil
 }
 
+// HighestSRPolicyIDInUse returns the largest policy_id the persisted data
+// plane still refers to, or 0 when nothing does.
+//
+// It exists for restart. sr_policy_map and the headend maps are pinned, so
+// after vinberod restarts the old entries keep forwarding while the control
+// plane rebuilds from BGP. The id allocator, however, lives only in memory
+// and would restart from zero and hand a fresh policy an id that a
+// surviving headend entry already points at -- silently steering that
+// prefix onto an unrelated policy's transport until BGP re-advertises it.
+// Seeding the allocator above this value keeps ids disjoint from whatever
+// survived.
+//
+// Both sources matter. The headend maps give the ids that are actually
+// referenced, which is the correctness requirement: reassigning one of them
+// mis-steers live traffic. sr_policy_map adds the ids that hold an
+// installed transport list, so a new policy does not overwrite a surviving
+// one that no entry happens to reference yet.
+func (m *MapOperations) HighestSRPolicyIDInUse() (uint32, error) {
+	var highest uint32
+
+	var policyID uint32
+	var val BpfSrPolicyValue
+	iter := m.objs.SrPolicyMap.Iterate()
+	for iter.Next(&policyID, &val) {
+		if policyID > highest {
+			highest = policyID
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("iterate sr_policy_map: %w", err)
+	}
+
+	v4, err := m.ListHeadendV4()
+	if err != nil {
+		return 0, err
+	}
+	v6, err := m.ListHeadendV6()
+	if err != nil {
+		return 0, err
+	}
+	for _, entries := range []map[string]*HeadendEntry{v4, v6} {
+		for _, e := range entries {
+			if e.PolicyId > highest {
+				highest = e.PolicyId
+			}
+		}
+	}
+	return highest, nil
+}
+
 // GetSRPolicy returns the transport SID list installed for policyID, or
 // nil when no entry exists. Intended for tests and introspection.
 func (m *MapOperations) GetSRPolicy(policyID uint32) ([]net.IP, error) {

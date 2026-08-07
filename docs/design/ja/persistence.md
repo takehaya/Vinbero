@@ -76,6 +76,14 @@ settings:
 - `sid_endpoint_progs`, `headend_v4_progs`, `headend_v6_progs` (PROG_ARRAY): プログラム FD が毎回異なるので pin しても意味がない
 - `ecmp_live_map`: prober の生死判定は意図的に pin しません。restart 前の古い判定が path を blackhole しないよう、prober が再登録するまでは miss = 全 path live に倒します
 
+### in-memory の採番と pin された参照
+
+pin されるのはマップだけで、control plane 側の採番状態は再起動で消えます。`sr_policy_map` の policy_id は applier が in-memory に採番しますが、その id を参照する `headend_*_map` のエントリは pin で生き残ります。素朴に 0 から採番し直すと、生き残ったエントリが指す id を新しい policy に割り当ててしまい、その prefix が無関係な policy の transport SID list に steer されます。BGP が再広告してエントリを上書きするまで誤転送が続きます。
+
+そこで applier は起動時に `HighestSRPolicyIDInUse` で、pin された状態がまだ参照している最大の policy_id を調べ、その上から採番を再開します。参照元は 2 つあります。`sr_policy_map` の key は install 済み policy を示し、`headend_v4/v6_map` のエントリが持つ policy_id は実際の参照を示します。誤転送を防ぐうえで本質的なのは後者です。policy が withdraw 済みで `sr_policy_map` に entry が無くても、headend 側が id を指したままなら再利用は危険だからです。
+
+生き残った id は使い切りで、対応する policy が再広告されると新しい id を取ります。id は uint32 なので枯渇は実質問題になりません。
+
 ### 破壊的変更時の注意
 
 **schema / capacity を変えたときは pin dir を削除**してください。BPF map の `max_entries` や value サイズは作成後に変更不可なので、cilium/ebpf は pin された既存 map と spec の不一致を見ると load エラーを返します。
