@@ -70,6 +70,23 @@ func OwnerBGPVPNGroup(asn uint32) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:vpngroup", OwnerTagVersion, asn))
 }
 
+// IsLegacyBGPVPNOwner reports whether tag is a pre-aggregation VPN owner
+// belonging to this node: the RD-scoped form OwnerBGPVPN produced when each
+// prefix was written per RD.
+//
+// It exists for the upgrade. Those entries persist in the pinned headend
+// maps, and the aggregating writer uses an RD-independent owner, so every
+// previously installed prefix would fail the cross-owner check and never
+// reinstall. Recognising the old shape lets the writer clear exactly its
+// own leftovers, and nothing else -- an operator's RPC-installed entry for
+// the same prefix must survive.
+func IsLegacyBGPVPNOwner(asn uint32, tag OwnerTag) bool {
+	prefix := fmt.Sprintf("bgp:%s:asn=%d:rd=", OwnerTagVersion, asn)
+	rd, ok := strings.CutPrefix(string(tag), prefix)
+	// An empty RD is the aggregating writer's own owner, not a legacy one.
+	return ok && rd != ""
+}
+
 // OwnerBGPMUP is the entry owner for a downlink H.Encaps headend installed from
 // a BGP MUP T1ST route (SAFI 85). Distinct from OwnerBGPVPN so MUP-owned entries
 // are attributed to MUP and not to an L3VPN route that may share the same RD.

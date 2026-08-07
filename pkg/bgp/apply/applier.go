@@ -32,6 +32,12 @@ type headendOps interface {
 	CreateHeadendV6(triggerPrefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error
 	DeleteHeadendV4(triggerPrefix string, requester bpf.OwnerTag) error
 	DeleteHeadendV6(triggerPrefix string, requester bpf.OwnerTag) error
+	// The rest support the upgrade off the pre-aggregation per-RD owner;
+	// see clearLegacyVPNHeadend.
+	GetHeadendV4Owner(triggerPrefix string) (bpf.OwnerTag, bool, error)
+	GetHeadendV6Owner(triggerPrefix string) (bpf.OwnerTag, bool, error)
+	ForceDeleteHeadendV4(triggerPrefix string) error
+	ForceDeleteHeadendV6(triggerPrefix string) error
 }
 
 // mupOps is the subset of bpf.MapOperations the BGP MUP uplink path needs:
@@ -84,8 +90,7 @@ type Applier struct {
 	// MUP receive state, guarded by mupMu: the GoBGP RouteHandler goroutine
 	// applies routes (applyMUP), and VrfBgpService mutations re-reconcile
 	// installed downlinks when a binding's GTP4 source prefix changes
-	// (ReconcileMUPGTP4SrcForRD), so unlike the single-goroutine VPN state
-	// this is
+	// (ReconcileMUPGTP4SrcForRD), so unlike the single-goroutine VPN state this is
 	// touched from two goroutines. mupT1ST / mupT2ST hold each session's
 	// full route plus the SID currently programmed for it (so an arriving /
 	// withdrawn discovery route can reconcile the install). mupISD / mupDSD
@@ -223,7 +228,7 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 			// a withdraw arriving before the route is re-advertised is the
 			// only chance to remove it. Delete unconditionally; it is a
 			// no-op when the entry is already absent.
-			if err := a.deleteHeadend(vr.Family, vr.Prefix, bpf.OwnerBGPVPN(a.localASN, "")); err != nil {
+			if err := a.deleteTrigger(vr.Family, vr.Prefix); err != nil {
 				a.logger.Error("withdraw untracked VPN prefix",
 					zap.String("prefix", vr.Prefix), zap.Error(err))
 			}

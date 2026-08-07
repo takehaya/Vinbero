@@ -2,6 +2,7 @@ package apply
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -223,11 +224,35 @@ func (t *vpnGroupTable) remove(dk vpnDestKey, pk vpnPathKey) (*vpnDest, *policyK
 // (typically one PE re-advertised under a second RD), so they are deduped:
 // programming both would silently double that PE's share of the traffic.
 func (d *vpnDest) members() []*vpnPath {
-	out := make([]*vpnPath, 0, len(d.paths))
-	for _, p := range d.paths {
-		out = append(out, p)
+	type keyed struct {
+		key vpnPathKey
+		p   *vpnPath
 	}
-	slices.SortFunc(out, func(a, b *vpnPath) int { return cmp.Compare(a.sid, b.sid) })
+	all := make([]keyed, 0, len(d.paths))
+	for k, p := range d.paths {
+		all = append(all, keyed{k, p})
+	}
+	// SID orders the members, but SortFunc is not stable and two paths can
+	// share a SID, so the key breaks the tie. Without it the survivor of the
+	// dedupe below would depend on map iteration order -- and since the paths
+	// sharing a SID can carry different colors, the programmed policy id
+	// would flip between reconciles and defeat the unchanged-set skip.
+	slices.SortFunc(all, func(a, b keyed) int {
+		if c := cmp.Compare(a.p.sid, b.p.sid); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.key.rd, b.key.rd); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.key.source.Peer.String(), b.key.source.Peer.String()); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.key.source.PathID, b.key.source.PathID)
+	})
+	out := make([]*vpnPath, 0, len(all))
+	for _, k := range all {
+		out = append(out, k.p)
+	}
 	out = slices.CompactFunc(out, func(a, b *vpnPath) bool { return a.sid == b.sid })
 	if len(out) > bpf.EcmpMaxPaths {
 		out = out[:bpf.EcmpMaxPaths]
@@ -308,7 +333,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 		trigger.PolicyId = a.srPolicy.idOf(ms[0].steer.color, ms[0].steer.endpoint)
 	}
 	trigger.GroupId = d.groupID
-	if err := a.createHeadend(dk.family, dk.prefix, trigger, bpf.OwnerBGPVPN(a.localASN, "")); err != nil {
+	if err := a.createTrigger(dk.family, dk.prefix, trigger); err != nil {
 		a.logger.Error("install ECMP trigger",
 			zap.String("prefix", dk.prefix), zap.Error(err))
 		return
@@ -323,7 +348,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 // returns its group id for reuse.
 func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 	owner := a.vpnGroups.groupOwner()
-	if err := a.deleteHeadend(dk.family, dk.prefix, bpf.OwnerBGPVPN(a.localASN, "")); err != nil {
+	if err := a.deleteTrigger(dk.family, dk.prefix); err != nil {
 		a.logger.Error("withdraw VPN trigger",
 			zap.String("prefix", dk.prefix), zap.Error(err))
 	}
@@ -339,4 +364,78 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 	a.vpnGroups.freeIDs = append(a.vpnGroups.freeIDs, d.groupID)
 	a.logger.Info("VPN prefix withdrawn",
 		zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID))
+}
+
+// clearLegacyVPNHeadend removes a trigger left by the pre-aggregation
+// writer, which owned each prefix per RD.
+//
+// Those entries survive in the pinned headend maps across an upgrade, and
+// the aggregating writer's owner is RD-independent, so without this every
+// previously installed prefix fails the cross-owner check and never comes
+// back -- and a withdraw arriving for one cannot remove it either.
+//
+// The owner is read first and force-deleted only when it is this node's own
+// legacy shape. An unconditional force would also destroy an entry an
+// operator installed for the same prefix over RPC.
+//
+// Reports whether anything was cleared, so the caller knows a retry is
+// worth attempting.
+func (a *Applier) clearLegacyVPNHeadend(fam bgp.Family, prefix string) bool {
+	var (
+		owner bpf.OwnerTag
+		found bool
+		err   error
+	)
+	switch fam {
+	case bgp.FamilyVPNv4:
+		owner, found, err = a.headend.GetHeadendV4Owner(prefix)
+	case bgp.FamilyVPNv6:
+		owner, found, err = a.headend.GetHeadendV6Owner(prefix)
+	default:
+		return false
+	}
+	if err != nil || !found || !bpf.IsLegacyBGPVPNOwner(a.localASN, owner) {
+		return false
+	}
+	switch fam {
+	case bgp.FamilyVPNv4:
+		err = a.headend.ForceDeleteHeadendV4(prefix)
+	case bgp.FamilyVPNv6:
+		err = a.headend.ForceDeleteHeadendV6(prefix)
+	}
+	if err != nil {
+		a.logger.Error("clear pre-aggregation VPN trigger",
+			zap.String("prefix", prefix), zap.String("owner", string(owner)), zap.Error(err))
+		return false
+	}
+	a.logger.Info("cleared pre-aggregation VPN trigger",
+		zap.String("prefix", prefix), zap.String("owner", string(owner)))
+	return true
+}
+
+// createTrigger writes the trigger entry, migrating off a pre-aggregation
+// owner if one is in the way.
+func (a *Applier) createTrigger(fam bgp.Family, prefix string, entry *bpf.HeadendEntry) error {
+	owner := bpf.OwnerBGPVPN(a.localASN, "")
+	err := a.createHeadend(fam, prefix, entry, owner)
+	if !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
+		return err
+	}
+	if !a.clearLegacyVPNHeadend(fam, prefix) {
+		return err
+	}
+	return a.createHeadend(fam, prefix, entry, owner)
+}
+
+// deleteTrigger removes the trigger entry, including one left by the
+// pre-aggregation writer.
+func (a *Applier) deleteTrigger(fam bgp.Family, prefix string) error {
+	err := a.deleteHeadend(fam, prefix, bpf.OwnerBGPVPN(a.localASN, ""))
+	if !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
+		return err
+	}
+	if a.clearLegacyVPNHeadend(fam, prefix) {
+		return nil
+	}
+	return err
 }

@@ -2094,13 +2094,32 @@ func (m *MapOperations) GetEcmpGroup(groupID uint32) (*EcmpGroupInfo, []*Headend
 	return &info, paths, nil
 }
 
-// ListEcmpGroups returns every installed group info keyed by group id.
+// GetHeadendV4Owner returns the owner recorded for a v4 trigger prefix, or
+// ("", false) when the entry or its owner is absent.
+func (m *MapOperations) GetHeadendV4Owner(triggerPrefix string) (OwnerTag, bool, error) {
+	key, err := buildLpmKeyV4(triggerPrefix)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
+	}
+	return m.headendV4Owners.Lookup(key)
+}
+
+// GetHeadendV6Owner is the v6 counterpart of GetHeadendV4Owner.
+func (m *MapOperations) GetHeadendV6Owner(triggerPrefix string) (OwnerTag, bool, error) {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
+	}
+	return m.headendV6Owners.Lookup(key)
+}
+
 // ListEcmpGroupOwners returns the owner tag recorded for every ECMP group.
 //
 // ecmp_group_owner_map is pinned, so this is what a restarted daemon reads
 // to find out which groups survived and who they belong to. A group present
-// in ecmp_group_map with no owner recorded is omitted; the caller should
-// treat its id as taken (see ListEcmpGroups) but must not assume ownership.
+// in ecmp_group_map with no owner recorded is omitted: the caller should
+// still treat its id as taken (ListEcmpGroups reports it) but must not
+// assume it owns it.
 func (m *MapOperations) ListEcmpGroupOwners() (map[uint32]OwnerTag, error) {
 	owners, err := m.ecmpGroupOwners.IterateU32()
 	if err != nil {
@@ -2109,6 +2128,7 @@ func (m *MapOperations) ListEcmpGroupOwners() (map[uint32]OwnerTag, error) {
 	return owners, nil
 }
 
+// ListEcmpGroups returns every installed group info keyed by group id.
 func (m *MapOperations) ListEcmpGroups() (map[uint32]*EcmpGroupInfo, error) {
 	result := make(map[uint32]*EcmpGroupInfo)
 	var key uint32
