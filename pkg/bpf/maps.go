@@ -2095,6 +2095,20 @@ func (m *MapOperations) GetEcmpGroup(groupID uint32) (*EcmpGroupInfo, []*Headend
 }
 
 // ListEcmpGroups returns every installed group info keyed by group id.
+// ListEcmpGroupOwners returns the owner tag recorded for every ECMP group.
+//
+// ecmp_group_owner_map is pinned, so this is what a restarted daemon reads
+// to find out which groups survived and who they belong to. A group present
+// in ecmp_group_map with no owner recorded is omitted; the caller should
+// treat its id as taken (see ListEcmpGroups) but must not assume ownership.
+func (m *MapOperations) ListEcmpGroupOwners() (map[uint32]OwnerTag, error) {
+	owners, err := m.ecmpGroupOwners.IterateU32()
+	if err != nil {
+		return nil, fmt.Errorf("ecmp group owners: %w", err)
+	}
+	return owners, nil
+}
+
 func (m *MapOperations) ListEcmpGroups() (map[uint32]*EcmpGroupInfo, error) {
 	result := make(map[uint32]*EcmpGroupInfo)
 	var key uint32

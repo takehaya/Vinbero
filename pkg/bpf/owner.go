@@ -48,6 +48,28 @@ func OwnerBGPVPN(asn uint32, rd string) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:rd=%s", OwnerTagVersion, asn, rd))
 }
 
+// OwnerBGPVPNGroup owns the ECMP groups holding the paths learned for VPN
+// prefixes.
+//
+// It is deliberately scoped by neither RD nor prefix. Not by RD, because a
+// prefix reachable through several PEs arrives under a different RD per PE
+// and an RD-scoped owner would make the second PE's path fail the
+// cross-owner check -- the very defect this aggregation removes (same
+// reasoning as OwnerBGPMUPGate). Not by prefix, because owner tags persist
+// into a 64-byte buffer and "asn + vpngroup + family + an expanded IPv6
+// prefix" runs to ~80 bytes, which would truncate silently and take both
+// the ownership check and any tag-derived bookkeeping down with it.
+//
+// One consequence is that the tag cannot say WHICH prefix a surviving group
+// belonged to. Group ids are therefore not resumed across a restart: the
+// applier sweeps the groups under this owner at startup and rebuilds them
+// as BGP re-advertises. Trigger entries carry fallback segments so a
+// briefly unresolvable group degrades to single-path forwarding rather than
+// dropping.
+func OwnerBGPVPNGroup(asn uint32) OwnerTag {
+	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:vpngroup", OwnerTagVersion, asn))
+}
+
 // OwnerBGPMUP is the entry owner for a downlink H.Encaps headend installed from
 // a BGP MUP T1ST route (SAFI 85). Distinct from OwnerBGPVPN so MUP-owned entries
 // are attributed to MUP and not to an L3VPN route that may share the same RD.
@@ -187,6 +209,30 @@ func (o *entryOwnerMap) Delete(key any) error {
 		return err
 	}
 	return nil
+}
+
+// IterateU32 returns every (key, tag) pair in an owner map keyed by
+// uint32. Entries whose tag does not decode are skipped rather than
+// reported: an undecodable tag means the entry predates owner tracking or
+// was written by an incompatible build, and neither is worth failing a
+// startup scan over.
+func (o *entryOwnerMap) IterateU32() (map[uint32]OwnerTag, error) {
+	out := make(map[uint32]OwnerTag)
+	if o == nil {
+		return out, nil
+	}
+	var key uint32
+	var v [auxOwnerTagBytes]byte
+	iter := o.m.Iterate()
+	for iter.Next(&key, &v) {
+		if s, ok := decodeOwnerTag(v[:]); ok {
+			out[key] = OwnerTag(s)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("iterate owner map: %w", err)
+	}
+	return out, nil
 }
 
 // Lookup returns ("", false, nil) when no owner is recorded (the entry
