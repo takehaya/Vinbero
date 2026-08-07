@@ -114,11 +114,11 @@ func newSRPolicyTable(mapOps policyMapOps, logger *zap.Logger) *srPolicyTable {
 	//
 	// A failure here is not fatal: with pinning off there is nothing to
 	// collide with, and with pinning on the pre-restart entries keep
-	// forwarding correctly on their own ids. Log and continue from zero
-	// rather than refuse to build the applier.
+	// forwarding correctly on their own ids. Log and continue with an
+	// unseeded allocator rather than refuse to build the applier.
 	highest, err := mapOps.HighestSRPolicyIDInUse()
 	if err != nil {
-		t.logger.Error("read policy ids in use; id allocation starts from zero "+
+		t.logger.Error("read policy ids in use; id allocation restarts from 1 "+
 			"and may collide with entries that survived a restart", zap.Error(err))
 		return t
 	}
