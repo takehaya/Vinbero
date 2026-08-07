@@ -75,6 +75,16 @@ plugin の shared map partition では `ecmp_group_map`、`ecmp_path_map`、`ecm
 
 `headend_entry` と `tailcall_ctx` のサイズが変わるため、この変更は plugin ABI break です。plugin SDK は v4 に bump し、旧 SDK でコンパイル済みの plugin ELF は `PluginRegister` の MapReplacements 互換チェックで弾かれるので、v4 ヘッダで再コンパイルしてください。
 
+## BGP path identity
+
+data plane が複数 path を持てても、受信側が path を区別できなければ group を組めません。gobgp は同一 NLRI に対する複数 PE の path をそれぞれ配送していますが、Vinbero の変換は送信元を捨てていたため、2 本目の PE の広告が 1 本目の更新と区別できませんでした。
+
+そこで `RouteEvent` に `PathSource{Peer, PathID}` を載せます。`Peer` は学習元の neighbor で、自ノード発の path では zero 値になります。`PathID` は RFC 7911 の ADD-PATH 識別子で、ADD-PATH を negotiate していなければ 0 です。peer 内でのみ一意なので、path の識別は必ず 2 つ組で行い `PathID` 単体では行いません。
+
+変換は `pathToRouteEvent` の 1 箇所に集約されていて、live の subscription と loc-rib snapshot の両方がここを通ります。したがって path identity は watch と `ListRoutes` と replay のすべてに同時に反映されます。
+
+peer 設定の `add_paths_receive` で ADD-PATH の receive を negotiate します。route reflector 配下では必要です。reflector は既定で prefix ごとに best path だけを reflect するので、これを有効にしないと他の PE の path はそもそも届かず、受信側で何をしても復元できません。iBGP full mesh では各 PE が自分の path を直接送るため不要です。送信方向は有効にしません。Vinbero は自分の NLRI について複数 path を広告しないので、使わない capability を negotiate しないためです。
+
 ## 制約と今後
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。

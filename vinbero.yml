@@ -54,3 +54,8 @@ settings:
 #         - vpnv6
 #         - ipv6_unicast
 #         - sr_policy_ipv6
+#       # Negotiate ADD-PATH receive (RFC 7911) so this neighbor may send
+#       # several paths for one prefix. Set it on a route reflector session:
+#       # a reflector sends only its best path per prefix by default, which
+#       # hides the other PEs' paths. An iBGP full mesh does not need it.
+#       add_paths_receive: false

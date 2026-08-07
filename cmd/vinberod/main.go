@@ -430,6 +430,7 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 			Families:        families,
 			Passive:         p.Passive,
 			ConnectRetrySec: p.ConnectRetrySec,
+			AddPathsReceive: p.AddPathsReceive,
 		}); err != nil {
 			return err
 		}
