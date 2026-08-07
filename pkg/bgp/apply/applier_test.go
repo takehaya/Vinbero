@@ -33,6 +33,11 @@ type fakeHeadend struct {
 	v6deleted []string
 	createErr error
 
+	ecmpGroups  map[uint32][]bpf.EcmpPath
+	ecmpOwners  map[uint32]bpf.OwnerTag
+	ecmpDeletes []uint32
+	putEcmpErr  error
+
 	fdb           map[fdbKey]*bpf.FdbEntry
 	bdPeers       map[bdPeerKey]*bpf.HeadendEntry
 	bdPeerReverse map[bdPeerKey]bool // writeReverse flag passed per peer
@@ -53,6 +58,8 @@ func newFakeHeadend() *fakeHeadend {
 		bdPeers:       map[bdPeerKey]*bpf.HeadendEntry{},
 		bdPeerReverse: map[bdPeerKey]bool{},
 		esis:          map[[bpf.ESILen]byte]*bpf.EsiEntry{},
+		ecmpGroups:    map[uint32][]bpf.EcmpPath{},
+		ecmpOwners:    map[uint32]bpf.OwnerTag{},
 	}
 }
 
@@ -124,6 +131,44 @@ func (f *fakeHeadend) SetEsiDfPe(esi [bpf.ESILen]byte, dfAddr [bpf.IPv6AddrLen]b
 func (f *fakeHeadend) UpsertSRPolicy(uint32, []netip.Addr) error { return nil }
 func (f *fakeHeadend) DeleteSRPolicy(uint32) error               { return nil }
 func (f *fakeHeadend) HighestSRPolicyIDInUse() (uint32, error)   { return 0, nil }
+
+// ECMP group surface. ecmpGroups records the last member set written per
+// group id so tests can assert on aggregation, and survivingOwners seeds
+// what a restart would find already installed.
+func (f *fakeHeadend) PutEcmpGroup(groupID uint32, paths []bpf.EcmpPath, owner bpf.OwnerTag) error {
+	if f.putEcmpErr != nil {
+		return f.putEcmpErr
+	}
+	if f.ecmpGroups == nil {
+		f.ecmpGroups = map[uint32][]bpf.EcmpPath{}
+	}
+	f.ecmpGroups[groupID] = paths
+	f.ecmpOwners[groupID] = owner
+	return nil
+}
+
+func (f *fakeHeadend) DeleteEcmpGroup(groupID uint32, requester bpf.OwnerTag) error {
+	f.ecmpDeletes = append(f.ecmpDeletes, groupID)
+	delete(f.ecmpGroups, groupID)
+	delete(f.ecmpOwners, groupID)
+	return nil
+}
+
+func (f *fakeHeadend) ListEcmpGroups() (map[uint32]*bpf.EcmpGroupInfo, error) {
+	out := map[uint32]*bpf.EcmpGroupInfo{}
+	for id := range f.ecmpOwners {
+		out[id] = &bpf.EcmpGroupInfo{}
+	}
+	return out, nil
+}
+
+func (f *fakeHeadend) ListEcmpGroupOwners() (map[uint32]bpf.OwnerTag, error) {
+	out := map[uint32]bpf.OwnerTag{}
+	for id, o := range f.ecmpOwners {
+		out[id] = o
+	}
+	return out, nil
+}
 
 // mupUplinkKey records an mup_uplink_v4_map write in fakeHeadend.
 type mupUplinkKey struct {
