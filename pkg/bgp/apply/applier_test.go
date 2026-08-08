@@ -181,15 +181,21 @@ func (f *fakeHeadend) PutEcmpGroup(groupID uint32, paths []bpf.EcmpPath, owner b
 }
 
 func (f *fakeHeadend) DeleteEcmpGroup(groupID uint32, requester bpf.OwnerTag) error {
+	if cur, ok := f.ecmpOwners[groupID]; ok && cur != requester {
+		return bpf.ErrEntryOwnerMismatch
+	}
 	f.ecmpDeletes = append(f.ecmpDeletes, groupID)
 	delete(f.ecmpGroups, groupID)
 	delete(f.ecmpOwners, groupID)
 	return nil
 }
 
+// Enumerates the group table, not the owner table: an id is occupied by the
+// group existing, whether or not an owner was recorded for it. Deriving this
+// from ecmpOwners would make the ownerless case untestable.
 func (f *fakeHeadend) ListEcmpGroups() (map[uint32]*bpf.EcmpGroupInfo, error) {
 	out := map[uint32]*bpf.EcmpGroupInfo{}
-	for id := range f.ecmpOwners {
+	for id := range f.ecmpGroups {
 		out[id] = &bpf.EcmpGroupInfo{}
 	}
 	return out, nil

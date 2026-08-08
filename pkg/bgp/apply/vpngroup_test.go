@@ -189,6 +189,26 @@ func TestVPNGroup_ResetSweepsOwnGroupsAndSkipsOthers(t *testing.T) {
 	}
 }
 
+// A group can exist with no owner recorded -- written by a build that
+// predates owner tracking, or one whose owner write was lost. It is not ours
+// to sweep, but its id is still occupied, so allocation must step over it.
+func TestVPNGroup_ResetSkipsUnownedGroupIDs(t *testing.T) {
+	fh := newFakeHeadend()
+	fh.ecmpGroups[7] = nil // present in the group table, absent from the owner table
+
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+
+	// Not ours to sweep: destroying a group we cannot attribute could take
+	// out one another component installed.
+	if _, present := fh.ecmpGroups[7]; !present {
+		t.Error("swept a group with no recorded owner")
+	}
+	a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "fd00:1:1:a::", "fd00::1", false))
+	if got := fh.v4created["10.0.0.0/24"].GroupId; got == 7 {
+		t.Errorf("allocated group id 7, which an unowned group already occupies")
+	}
+}
+
 // A rolling upgrade finds the pinned headend maps holding entries written by
 // the pre-aggregation code, which owned each prefix per RD. The aggregating
 // writer's owner is RD-independent, so without a migration path every one of
