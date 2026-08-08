@@ -129,6 +129,16 @@ segment を 1 つも指さない list も使えないものとして落としま
 
 program されるのは今のところ先頭の list だけです。data plane 側の weighted 選択は後続の変更です。
 
+## EVPN RT1 の decode
+
+RT1 Ethernet A-D を decode します。従来は decode 自体が無く、applier の default 分岐で捨てられていました。
+
+1 つの NLRI 型が 2 つの異なる主張を運び、Ethernet Tag で区別します。per-ES (tag = MAX-ET) は segment 全体についての主張で、その withdraw が mass withdraw の signal になります。MAC を 1 つずつ withdraw するのを待たずに、障害リンクから収束できます (RFC 7432 8.2)。per-EVI (それ以外の tag) は 1 つの broadcast domain についての主張で、その SRv6 SID が aliasing を可能にします。他の PE からしか学習していない MAC 宛のトラフィックの送り先になるためです。
+
+Single-Active bit は per-ES 経路の ESI Label extended community から読みます。これが立っていると aliasing は禁止です。single-active では DF だけが転送するので、ES を広告している PE 群に分散させると non-DF に届いた分が black-hole します。
+
+現時点では decode までで、applier はまだ RT1 を消費しません。aliasing と mass withdraw は data plane 側の変更を伴うため後続にしています。
+
 ## 制約と今後
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。

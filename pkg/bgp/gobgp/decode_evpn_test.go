@@ -63,13 +63,16 @@ func TestDecodeEVPN_RT2(t *testing.T) {
 
 // An unsupported EVPN route type (here RT1 Ethernet A-D) decodes to nil; the
 // Applier treats nil as a no-op until that type's phase lands (RT4 in E3).
-func TestDecodeEVPN_NonRT2IsNil(t *testing.T) {
+// A route type Vinbero does not decode must come back nil so the applier is
+// never handed a half-populated route. RT5 IP Prefix is the remaining one;
+// RT1 used to sit here too and now decodes.
+func TestDecodeEVPN_UndecodedTypeIsNil(t *testing.T) {
 	nlri := &gobgppkt.EVPNNLRI{
-		RouteType:     gobgppkt.EVPN_ROUTE_TYPE_ETHERNET_AUTO_DISCOVERY,
-		RouteTypeData: &gobgppkt.EVPNEthernetAutoDiscoveryRoute{},
+		RouteType:     gobgppkt.EVPN_IP_PREFIX,
+		RouteTypeData: &gobgppkt.EVPNIPPrefixRoute{},
 	}
 	if r := decodeEVPNRoute(&apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri}); r != nil {
-		t.Errorf("unsupported EVPN route decoded to %+v, want nil", r)
+		t.Errorf("undecoded EVPN route decoded to %+v, want nil", r)
 	}
 }
 
@@ -218,4 +221,94 @@ func TestDecodeEVPN_RT2RemoteSrc(t *testing.T) {
 	if r == nil || r.RemoteSrc != "fd00:200::" {
 		t.Errorf("RemoteSrc = %q, want fd00:200:: (/48 fallback)", r.RemoteSrc)
 	}
+}
+
+// rt1Path builds a received EVPN RT1 (Ethernet A-D) path. etag selects the
+// per-ES form (MAX-ET) or a per-EVI one; singleActive attaches the ESI Label
+// extended community with the Single-Active bit set.
+func rt1Path(t *testing.T, etag uint32, sid string, singleActive bool) *apiutil.Path {
+	t.Helper()
+	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
+	esi := gobgppkt.EthernetSegmentIdentifier{
+		Type:  gobgppkt.ESI_ARBITRARY,
+		Value: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9},
+	}
+	nlri := &gobgppkt.EVPNNLRI{
+		RouteType: gobgppkt.EVPN_ROUTE_TYPE_ETHERNET_AUTO_DISCOVERY,
+		RouteTypeData: &gobgppkt.EVPNEthernetAutoDiscoveryRoute{
+			RD: rd, ESI: esi, ETag: etag,
+		},
+	}
+	rt, _ := gobgppkt.ParseExtendedCommunity(gobgppkt.EC_SUBTYPE_ROUTE_TARGET, "65000:100")
+	ecs := []gobgppkt.ExtendedCommunityInterface{rt}
+	if singleActive {
+		ecs = append(ecs, gobgppkt.NewESILabelExtended(0, true))
+	}
+	attrs := []gobgppkt.PathAttributeInterface{
+		gobgppkt.NewPathAttributeExtendedCommunities(ecs),
+	}
+	if sid != "" {
+		attrs = append(attrs, gobgppkt.NewPathAttributePrefixSID(
+			gobgppkt.NewSRv6ServiceTLV(
+				gobgppkt.TLVTypeSRv6L2Service,
+				gobgppkt.NewSRv6InformationSubTLV(netip.MustParseAddr(sid), gobgppkt.END_DT2U),
+			),
+		))
+	}
+	return &apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri, Attrs: attrs}
+}
+
+func TestDecodeEVPN_RT1(t *testing.T) {
+	// One NLRI type carries two statements, told apart by the Ethernet Tag.
+	// Confusing them would be serious: treating a per-ES withdraw as per-EVI
+	// loses the mass-withdraw signal, and treating per-EVI as per-ES would
+	// apply one broadcast domain's SID to the whole segment.
+	t.Run("per-EVI carries the aliasing SID", func(t *testing.T) {
+		r := decodeEVPNRoute(rt1Path(t, 100, "fd00:1:1:2::", false))
+		if r == nil {
+			t.Fatal("RT1 did not decode")
+		}
+		if r.Type != bgp.EVPNRouteTypeEthernetAD {
+			t.Errorf("type = %d, want RT1", r.Type)
+		}
+		if r.IsPerES() {
+			t.Error("a per-EVI route must not report IsPerES")
+		}
+		if r.EthernetTag != 100 {
+			t.Errorf("ethernet tag = %d, want 100", r.EthernetTag)
+		}
+		if r.SRv6SID != "fd00:1:1:2::" {
+			t.Errorf("SID = %q, want the aliasing SID", r.SRv6SID)
+		}
+		if r.ESI != [10]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9} {
+			t.Errorf("ESI = %v", r.ESI)
+		}
+	})
+
+	t.Run("per-ES is identified by MAX-ET", func(t *testing.T) {
+		r := decodeEVPNRoute(rt1Path(t, bgp.EVPNMaxEthernetTag, "", false))
+		if r == nil {
+			t.Fatal("RT1 did not decode")
+		}
+		if !r.IsPerES() {
+			t.Errorf("ethernet tag %#x should mark a per-ES route", r.EthernetTag)
+		}
+	})
+
+	t.Run("single-active is read from the ESI Label community", func(t *testing.T) {
+		// Single-active forbids aliasing: only the DF forwards, so spreading
+		// traffic over the PEs advertising the ES would black-hole whatever
+		// reached a non-DF.
+		r := decodeEVPNRoute(rt1Path(t, bgp.EVPNMaxEthernetTag, "", true))
+		if !r.SingleActive {
+			t.Error("Single-Active bit was not decoded")
+		}
+	})
+
+	t.Run("absent community means all-active", func(t *testing.T) {
+		r := decodeEVPNRoute(rt1Path(t, bgp.EVPNMaxEthernetTag, "", false))
+		if r.SingleActive {
+			t.Error("no ESI Label community must read as all-active")
+		}
+	})
 }
