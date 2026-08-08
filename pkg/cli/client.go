@@ -24,6 +24,7 @@ type Clients struct {
 	SrPolicy vinberov1connect.SrPolicyServiceClient
 	Mup      vinberov1connect.MupServiceClient
 	Vrf      vinberov1connect.VrfServiceClient
+	HGroup   vinberov1connect.HeadendGroupServiceClient
 }
 
 func NewClients(serverURL string) *Clients {
@@ -47,5 +48,6 @@ func NewClients(serverURL string) *Clients {
 		SrPolicy: vinberov1connect.NewSrPolicyServiceClient(httpClient, serverURL, opts...),
 		Mup:      vinberov1connect.NewMupServiceClient(httpClient, serverURL, opts...),
 		Vrf:      vinberov1connect.NewVrfServiceClient(httpClient, serverURL, opts...),
+		HGroup:   vinberov1connect.NewHeadendGroupServiceClient(httpClient, serverURL, opts...),
 	}
 }

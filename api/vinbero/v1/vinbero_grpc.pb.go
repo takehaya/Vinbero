@@ -1996,6 +1996,131 @@ var StatsService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	HeadendGroupService_HeadendGroupList_FullMethodName = "/vinbero.v1.HeadendGroupService/HeadendGroupList"
+	HeadendGroupService_HeadendGroupGet_FullMethodName  = "/vinbero.v1.HeadendGroupService/HeadendGroupGet"
+)
+
+// HeadendGroupServiceClient is the client API for HeadendGroupService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type HeadendGroupServiceClient interface {
+	HeadendGroupList(ctx context.Context, in *HeadendGroupListRequest, opts ...grpc.CallOption) (*HeadendGroupListResponse, error)
+	HeadendGroupGet(ctx context.Context, in *HeadendGroupGetRequest, opts ...grpc.CallOption) (*HeadendGroupGetResponse, error)
+}
+
+type headendGroupServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewHeadendGroupServiceClient(cc grpc.ClientConnInterface) HeadendGroupServiceClient {
+	return &headendGroupServiceClient{cc}
+}
+
+func (c *headendGroupServiceClient) HeadendGroupList(ctx context.Context, in *HeadendGroupListRequest, opts ...grpc.CallOption) (*HeadendGroupListResponse, error) {
+	out := new(HeadendGroupListResponse)
+	err := c.cc.Invoke(ctx, HeadendGroupService_HeadendGroupList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *headendGroupServiceClient) HeadendGroupGet(ctx context.Context, in *HeadendGroupGetRequest, opts ...grpc.CallOption) (*HeadendGroupGetResponse, error) {
+	out := new(HeadendGroupGetResponse)
+	err := c.cc.Invoke(ctx, HeadendGroupService_HeadendGroupGet_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// HeadendGroupServiceServer is the server API for HeadendGroupService service.
+// All implementations should embed UnimplementedHeadendGroupServiceServer
+// for forward compatibility
+type HeadendGroupServiceServer interface {
+	HeadendGroupList(context.Context, *HeadendGroupListRequest) (*HeadendGroupListResponse, error)
+	HeadendGroupGet(context.Context, *HeadendGroupGetRequest) (*HeadendGroupGetResponse, error)
+}
+
+// UnimplementedHeadendGroupServiceServer should be embedded to have forward compatible implementations.
+type UnimplementedHeadendGroupServiceServer struct {
+}
+
+func (UnimplementedHeadendGroupServiceServer) HeadendGroupList(context.Context, *HeadendGroupListRequest) (*HeadendGroupListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HeadendGroupList not implemented")
+}
+func (UnimplementedHeadendGroupServiceServer) HeadendGroupGet(context.Context, *HeadendGroupGetRequest) (*HeadendGroupGetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HeadendGroupGet not implemented")
+}
+
+// UnsafeHeadendGroupServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to HeadendGroupServiceServer will
+// result in compilation errors.
+type UnsafeHeadendGroupServiceServer interface {
+	mustEmbedUnimplementedHeadendGroupServiceServer()
+}
+
+func RegisterHeadendGroupServiceServer(s grpc.ServiceRegistrar, srv HeadendGroupServiceServer) {
+	s.RegisterService(&HeadendGroupService_ServiceDesc, srv)
+}
+
+func _HeadendGroupService_HeadendGroupList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeadendGroupListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadendGroupServiceServer).HeadendGroupList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadendGroupService_HeadendGroupList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadendGroupServiceServer).HeadendGroupList(ctx, req.(*HeadendGroupListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HeadendGroupService_HeadendGroupGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeadendGroupGetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HeadendGroupServiceServer).HeadendGroupGet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HeadendGroupService_HeadendGroupGet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HeadendGroupServiceServer).HeadendGroupGet(ctx, req.(*HeadendGroupGetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// HeadendGroupService_ServiceDesc is the grpc.ServiceDesc for HeadendGroupService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var HeadendGroupService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "vinbero.v1.HeadendGroupService",
+	HandlerType: (*HeadendGroupServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "HeadendGroupList",
+			Handler:    _HeadendGroupService_HeadendGroupList_Handler,
+		},
+		{
+			MethodName: "HeadendGroupGet",
+			Handler:    _HeadendGroupService_HeadendGroupGet_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "vinbero/v1/vinbero.proto",
+}
+
+const (
 	VrfService_VrfCreate_FullMethodName       = "/vinbero.v1.VrfService/VrfCreate"
 	VrfService_VrfDelete_FullMethodName       = "/vinbero.v1.VrfService/VrfDelete"
 	VrfService_VrfBridgeAttach_FullMethodName = "/vinbero.v1.VrfService/VrfBridgeAttach"

@@ -39,6 +39,8 @@ const (
 	HeadendL2ServiceName = "vinbero.v1.HeadendL2Service"
 	// StatsServiceName is the fully-qualified name of the StatsService service.
 	StatsServiceName = "vinbero.v1.StatsService"
+	// HeadendGroupServiceName is the fully-qualified name of the HeadendGroupService service.
+	HeadendGroupServiceName = "vinbero.v1.HeadendGroupService"
 	// VrfServiceName is the fully-qualified name of the VrfService service.
 	VrfServiceName = "vinbero.v1.VrfService"
 )
@@ -168,6 +170,12 @@ const (
 	// StatsServiceStatsSlotResetProcedure is the fully-qualified name of the StatsService's
 	// StatsSlotReset RPC.
 	StatsServiceStatsSlotResetProcedure = "/vinbero.v1.StatsService/StatsSlotReset"
+	// HeadendGroupServiceHeadendGroupListProcedure is the fully-qualified name of the
+	// HeadendGroupService's HeadendGroupList RPC.
+	HeadendGroupServiceHeadendGroupListProcedure = "/vinbero.v1.HeadendGroupService/HeadendGroupList"
+	// HeadendGroupServiceHeadendGroupGetProcedure is the fully-qualified name of the
+	// HeadendGroupService's HeadendGroupGet RPC.
+	HeadendGroupServiceHeadendGroupGetProcedure = "/vinbero.v1.HeadendGroupService/HeadendGroupGet"
 	// VrfServiceVrfCreateProcedure is the fully-qualified name of the VrfService's VrfCreate RPC.
 	VrfServiceVrfCreateProcedure = "/vinbero.v1.VrfService/VrfCreate"
 	// VrfServiceVrfDeleteProcedure is the fully-qualified name of the VrfService's VrfDelete RPC.
@@ -240,6 +248,9 @@ var (
 	statsServiceStatsResetMethodDescriptor              = statsServiceServiceDescriptor.Methods().ByName("StatsReset")
 	statsServiceStatsSlotShowMethodDescriptor           = statsServiceServiceDescriptor.Methods().ByName("StatsSlotShow")
 	statsServiceStatsSlotResetMethodDescriptor          = statsServiceServiceDescriptor.Methods().ByName("StatsSlotReset")
+	headendGroupServiceServiceDescriptor                = v1.File_vinbero_v1_vinbero_proto.Services().ByName("HeadendGroupService")
+	headendGroupServiceHeadendGroupListMethodDescriptor = headendGroupServiceServiceDescriptor.Methods().ByName("HeadendGroupList")
+	headendGroupServiceHeadendGroupGetMethodDescriptor  = headendGroupServiceServiceDescriptor.Methods().ByName("HeadendGroupGet")
 	vrfServiceServiceDescriptor                         = v1.File_vinbero_v1_vinbero_proto.Services().ByName("VrfService")
 	vrfServiceVrfCreateMethodDescriptor                 = vrfServiceServiceDescriptor.Methods().ByName("VrfCreate")
 	vrfServiceVrfDeleteMethodDescriptor                 = vrfServiceServiceDescriptor.Methods().ByName("VrfDelete")
@@ -1694,6 +1705,100 @@ func (UnimplementedStatsServiceHandler) StatsSlotShow(context.Context, *connect.
 
 func (UnimplementedStatsServiceHandler) StatsSlotReset(context.Context, *connect.Request[v1.StatsSlotResetRequest]) (*connect.Response[v1.StatsSlotResetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.StatsService.StatsSlotReset is not implemented"))
+}
+
+// HeadendGroupServiceClient is a client for the vinbero.v1.HeadendGroupService service.
+type HeadendGroupServiceClient interface {
+	HeadendGroupList(context.Context, *connect.Request[v1.HeadendGroupListRequest]) (*connect.Response[v1.HeadendGroupListResponse], error)
+	HeadendGroupGet(context.Context, *connect.Request[v1.HeadendGroupGetRequest]) (*connect.Response[v1.HeadendGroupGetResponse], error)
+}
+
+// NewHeadendGroupServiceClient constructs a client for the vinbero.v1.HeadendGroupService service.
+// By default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped
+// responses, and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
+// connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewHeadendGroupServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) HeadendGroupServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &headendGroupServiceClient{
+		headendGroupList: connect.NewClient[v1.HeadendGroupListRequest, v1.HeadendGroupListResponse](
+			httpClient,
+			baseURL+HeadendGroupServiceHeadendGroupListProcedure,
+			connect.WithSchema(headendGroupServiceHeadendGroupListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		headendGroupGet: connect.NewClient[v1.HeadendGroupGetRequest, v1.HeadendGroupGetResponse](
+			httpClient,
+			baseURL+HeadendGroupServiceHeadendGroupGetProcedure,
+			connect.WithSchema(headendGroupServiceHeadendGroupGetMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// headendGroupServiceClient implements HeadendGroupServiceClient.
+type headendGroupServiceClient struct {
+	headendGroupList *connect.Client[v1.HeadendGroupListRequest, v1.HeadendGroupListResponse]
+	headendGroupGet  *connect.Client[v1.HeadendGroupGetRequest, v1.HeadendGroupGetResponse]
+}
+
+// HeadendGroupList calls vinbero.v1.HeadendGroupService.HeadendGroupList.
+func (c *headendGroupServiceClient) HeadendGroupList(ctx context.Context, req *connect.Request[v1.HeadendGroupListRequest]) (*connect.Response[v1.HeadendGroupListResponse], error) {
+	return c.headendGroupList.CallUnary(ctx, req)
+}
+
+// HeadendGroupGet calls vinbero.v1.HeadendGroupService.HeadendGroupGet.
+func (c *headendGroupServiceClient) HeadendGroupGet(ctx context.Context, req *connect.Request[v1.HeadendGroupGetRequest]) (*connect.Response[v1.HeadendGroupGetResponse], error) {
+	return c.headendGroupGet.CallUnary(ctx, req)
+}
+
+// HeadendGroupServiceHandler is an implementation of the vinbero.v1.HeadendGroupService service.
+type HeadendGroupServiceHandler interface {
+	HeadendGroupList(context.Context, *connect.Request[v1.HeadendGroupListRequest]) (*connect.Response[v1.HeadendGroupListResponse], error)
+	HeadendGroupGet(context.Context, *connect.Request[v1.HeadendGroupGetRequest]) (*connect.Response[v1.HeadendGroupGetResponse], error)
+}
+
+// NewHeadendGroupServiceHandler builds an HTTP handler from the service implementation. It returns
+// the path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewHeadendGroupServiceHandler(svc HeadendGroupServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	headendGroupServiceHeadendGroupListHandler := connect.NewUnaryHandler(
+		HeadendGroupServiceHeadendGroupListProcedure,
+		svc.HeadendGroupList,
+		connect.WithSchema(headendGroupServiceHeadendGroupListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	headendGroupServiceHeadendGroupGetHandler := connect.NewUnaryHandler(
+		HeadendGroupServiceHeadendGroupGetProcedure,
+		svc.HeadendGroupGet,
+		connect.WithSchema(headendGroupServiceHeadendGroupGetMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/vinbero.v1.HeadendGroupService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case HeadendGroupServiceHeadendGroupListProcedure:
+			headendGroupServiceHeadendGroupListHandler.ServeHTTP(w, r)
+		case HeadendGroupServiceHeadendGroupGetProcedure:
+			headendGroupServiceHeadendGroupGetHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedHeadendGroupServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedHeadendGroupServiceHandler struct{}
+
+func (UnimplementedHeadendGroupServiceHandler) HeadendGroupList(context.Context, *connect.Request[v1.HeadendGroupListRequest]) (*connect.Response[v1.HeadendGroupListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendGroupService.HeadendGroupList is not implemented"))
+}
+
+func (UnimplementedHeadendGroupServiceHandler) HeadendGroupGet(context.Context, *connect.Request[v1.HeadendGroupGetRequest]) (*connect.Response[v1.HeadendGroupGetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.HeadendGroupService.HeadendGroupGet is not implemented"))
 }
 
 // VrfServiceClient is a client for the vinbero.v1.VrfService service.
