@@ -130,7 +130,6 @@ func TestDecodeSRPolicy_RejectsNonIPv6SID(t *testing.T) {
 	}
 }
 
-// Multiple Segment List sub-TLVs (weighted ECMP): only the first wins.
 // The single-list view is the FIRST list, not an arbitrary one: it is what
 // gets programmed today, so which list it names is observable. The other
 // lists are no longer discarded (see the weighted tests below) -- this pins

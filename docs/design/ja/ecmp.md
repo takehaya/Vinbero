@@ -133,5 +133,5 @@ program されるのは今のところ先頭の list だけです。data plane �
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。
 - L2 headend (FDB → bd_peer) の aliasing は EVPN RT1 の対応と同時に入れます。ESI から group_id を引く side table を足し、この group 機構をそのまま使う予定です。
-- SR Policy の weighted segment list は受信側の decode が済んでいます (下記)。data plane 側は `sr_policy_value` に group_id を足し、`tailcall_ctx.flow_hash` で選択する形で拡張します。tailcall_ctx に flow_hash を先に載せてあるのはこのためです。
+- SR Policy の weighted segment list は受信側の decode が済んでいます (上記)。data plane 側は `sr_policy_value` に group_id を足し、`tailcall_ctx.flow_hash` で選択する形で拡張します。tailcall_ctx に flow_hash を先に載せてあるのはこのためです。
 - hash の seed は固定です。path 選択はノード内で per-flow に安定していればよく、固定 seed は BPF_PROG_TEST_RUN のテストを再現可能にします。
