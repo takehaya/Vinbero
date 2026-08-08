@@ -8,9 +8,11 @@ import (
 )
 
 // decodeEVPNRoute builds Vinbero's EVPNRoute view of a received EVPN NLRI
-// (AFI 25 / SAFI 70). RT2 (MAC/IP), RT3 (Inclusive Multicast), and RT4
-// (Ethernet Segment) are decoded; other route types return nil, which the
-// Applier treats as a no-op.
+// (AFI 25 / SAFI 70). RT1 (Ethernet A-D), RT2 (MAC/IP), RT3 (Inclusive
+// Multicast) and RT4 (Ethernet Segment) are decoded; RT5 (IP Prefix) is not,
+// and returns nil, which the Applier treats as a no-op. Decoding a type is
+// not the same as acting on it: RT1 currently reaches the Applier and falls
+// through, since aliasing and mass withdraw are not implemented yet.
 func decodeEVPNRoute(p *apiutil.Path) *bgp.EVPNRoute {
 	nlri, ok := p.Nlri.(*gobgppkt.EVPNNLRI)
 	if !ok {

@@ -61,8 +61,6 @@ func TestDecodeEVPN_RT2(t *testing.T) {
 	}
 }
 
-// An unsupported EVPN route type (here RT1 Ethernet A-D) decodes to nil; the
-// Applier treats nil as a no-op until that type's phase lands (RT4 in E3).
 // A route type Vinbero does not decode must come back nil so the applier is
 // never handed a half-populated route. RT5 IP Prefix is the remaining one;
 // RT1 used to sit here too and now decodes.
