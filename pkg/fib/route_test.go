@@ -252,3 +252,37 @@ func TestKernelInjector_SingleNextHopIsNotMultipath(t *testing.T) {
 		t.Error("single next hop must set Gw")
 	}
 }
+
+// A next hop with neither a gateway nor an interface has nothing for the
+// kernel to resolve against. The old single-address field could not express
+// it; the list can, so it has to be rejected rather than turned into an
+// opaque netlink failure or a route that installs and blackholes.
+func TestToNetlinkRouteRejectsUnresolvableNextHop(t *testing.T) {
+	prefix := netip.MustParsePrefix("2001:db8:1::/64")
+	gw := netip.MustParseAddr("fd00:f1b::2")
+
+	cases := []struct {
+		name    string
+		hops    []NextHop
+		wantErr bool
+	}{
+		{"empty single", []NextHop{{}}, true},
+		{"empty among several", []NextHop{{Gw: gw}, {}}, true},
+		{"gateway only", []NextHop{{Gw: gw}}, false},
+		{"interface only", []NextHop{{Ifindex: 1}}, false},
+		// No next hop at all is a directly connected route, which is a
+		// different thing and stays legal.
+		{"none", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := toNetlinkRoute(Route{Prefix: prefix, NextHops: c.hops})
+			if c.wantErr && err == nil {
+				t.Error("unresolvable next hop was accepted")
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("valid next hop rejected: %v", err)
+			}
+		})
+	}
+}

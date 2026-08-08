@@ -24,7 +24,10 @@ import (
 // routeProtocol marks every FIB entry Vinbero installs as BGP-originated.
 const routeProtocol = netlink.RouteProtocol(unix.RTPROT_BGP)
 
-// NextHop is one way out for a prefix.
+// NextHop is one way out for a prefix. At least one of Gw and Ifindex must
+// be set: with neither there is nothing for the kernel to resolve the hop
+// against. (A route with no next hop at all is a different thing and is
+// expressed by leaving Route.NextHops empty.)
 //
 // Weight is the natural 1-based share the kernel documents, NOT the
 // rtnh_hops value carried on the wire, which is one less. The conversion
@@ -32,9 +35,19 @@ const routeProtocol = netlink.RouteProtocol(unix.RTPROT_BGP)
 // a weight of 1 is encoded as 0. Weight 0 is read as 1: a zero-weight
 // next hop would take no traffic, which no caller means by "unset".
 type NextHop struct {
-	Gw      netip.Addr // zero value => directly connected
-	Ifindex int        // 0 = let the kernel resolve it from Gw
+	Gw      netip.Addr // zero value => on-link via Ifindex, which is then required
+	Ifindex int        // 0 = let the kernel resolve it from Gw, which is then required
 	Weight  int        // 0 or 1 = an equal share
+}
+
+// validate rejects a next hop the kernel could not resolve. Catching it here
+// turns a caller's mistake into an error naming the hop, rather than an
+// opaque netlink failure or, worse, a route that installs and blackholes.
+func (nh NextHop) validate(i int) error {
+	if !nh.Gw.IsValid() && nh.Ifindex == 0 {
+		return fmt.Errorf("fib: next hop %d has neither a gateway nor an interface", i)
+	}
+	return nil
 }
 
 // Route is a kernel FIB entry Vinbero manages for a BGP-learned prefix.
@@ -143,13 +156,19 @@ func toNetlinkRoute(r Route) (*netlink.Route, error) {
 	case 0:
 	case 1:
 		nh := r.NextHops[0]
+		if err := nh.validate(0); err != nil {
+			return nil, err
+		}
 		if nh.Gw.IsValid() {
 			nl.Gw = net.IP(nh.Gw.AsSlice())
 		}
 		nl.LinkIndex = nh.Ifindex
 	default:
 		nl.MultiPath = make([]*netlink.NexthopInfo, 0, len(r.NextHops))
-		for _, nh := range r.NextHops {
+		for i, nh := range r.NextHops {
+			if err := nh.validate(i); err != nil {
+				return nil, err
+			}
 			info := &netlink.NexthopInfo{
 				LinkIndex: nh.Ifindex,
 				Hops:      weightToHops(nh.Weight),
