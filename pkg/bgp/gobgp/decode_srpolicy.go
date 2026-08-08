@@ -134,7 +134,10 @@ func decodeSegmentList(v *gobgppkt.TunnelEncapSubTLVSRSegmentList) ([]netip.Addr
 // thing, and conflating them overrides what the advertiser asked for. RFC
 // 9256 sets the default weight to 1 when none is given, but declares a
 // segment list invalid when "its weight is 0" -- an explicit 0 withdraws
-// that list from the ECMP set. Reading it as 1 would put a list the sender
+// that list from the ECMP set. The distinction is safe to rely on: gobgp
+// only allocates Weight when a Weight sub-TLV is actually present on the
+// wire, and Vinbero's own advertise path leaves it unset, so a peer that
+// omits the weight is never mistaken for one that disabled the list. Reading it as 1 would put a list the sender
 // disabled back into service, and if it were the first list it would become
 // the one actually programmed.
 func segmentListWeight(v *gobgppkt.TunnelEncapSubTLVSRSegmentList) (uint32, bool) {
