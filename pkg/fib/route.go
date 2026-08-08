@@ -24,12 +24,55 @@ import (
 // routeProtocol marks every FIB entry Vinbero installs as BGP-originated.
 const routeProtocol = netlink.RouteProtocol(unix.RTPROT_BGP)
 
+// NextHop is one way out for a prefix. At least one of Gw and Ifindex must
+// be set: with neither there is nothing for the kernel to resolve the hop
+// against. (A route with no next hop at all is a different thing and is
+// expressed by leaving Route.NextHops empty.)
+//
+// Weight is the natural 1-based share the kernel documents, NOT the
+// rtnh_hops value carried on the wire, which is one less. The conversion
+// happens at the netlink boundary so nothing above it has to remember that
+// a weight of 1 is encoded as 0. Any weight at or below 1 is read as an
+// equal share: a zero weight would mean a next hop that takes no traffic,
+// which no caller means by leaving the field unset, and clamping a negative
+// one is safer than letting it underflow into an enormous share.
+type NextHop struct {
+	Gw      netip.Addr // zero value => on-link via Ifindex, which is then required
+	Ifindex int        // 0 = let the kernel resolve it from Gw, which is then required
+	Weight  int        // <= 1 = an equal share
+}
+
+// validate rejects a next hop the kernel could not resolve. Catching it here
+// turns a caller's mistake into an error naming the hop, rather than an
+// opaque netlink failure or, worse, a route that installs and blackholes.
+func (nh NextHop) validate(i int) error {
+	if !nh.Gw.IsValid() && nh.Ifindex == 0 {
+		return fmt.Errorf("fib: next hop %d has neither a gateway nor an interface", i)
+	}
+	return nil
+}
+
 // Route is a kernel FIB entry Vinbero manages for a BGP-learned prefix.
 type Route struct {
-	Prefix  netip.Prefix
-	NextHop netip.Addr // zero value => no gateway (directly connected)
-	Table   int        // 0 = main table
-	Metric  int        // route priority; 0 = kernel default
+	Prefix netip.Prefix
+	// NextHops is empty for a directly connected route, one element for an
+	// ordinary route, and several for a multipath one. A single next hop is
+	// deliberately encoded as a plain gateway rather than a one-element
+	// multipath: that is the form the kernel hands back, so encoding it any
+	// other way would make a route stop comparing equal to itself after a
+	// round trip.
+	NextHops []NextHop
+	Table    int // 0 = main table
+	Metric   int // route priority; 0 = kernel default
+}
+
+// weightToHops converts a natural 1-based weight to the rtnh_hops value the
+// kernel expects.
+func weightToHops(weight int) int {
+	if weight <= 1 {
+		return 0
+	}
+	return weight - 1
 }
 
 // Injector installs and removes routes in the kernel FIB. Implementations
@@ -111,8 +154,32 @@ func toNetlinkRoute(r Route) (*netlink.Route, error) {
 		Table:    r.Table,
 		Priority: r.Metric,
 	}
-	if r.NextHop.IsValid() {
-		nl.Gw = net.IP(r.NextHop.AsSlice())
+	switch len(r.NextHops) {
+	case 0:
+	case 1:
+		nh := r.NextHops[0]
+		if err := nh.validate(0); err != nil {
+			return nil, err
+		}
+		if nh.Gw.IsValid() {
+			nl.Gw = net.IP(nh.Gw.AsSlice())
+		}
+		nl.LinkIndex = nh.Ifindex
+	default:
+		nl.MultiPath = make([]*netlink.NexthopInfo, 0, len(r.NextHops))
+		for i, nh := range r.NextHops {
+			if err := nh.validate(i); err != nil {
+				return nil, err
+			}
+			info := &netlink.NexthopInfo{
+				LinkIndex: nh.Ifindex,
+				Hops:      weightToHops(nh.Weight),
+			}
+			if nh.Gw.IsValid() {
+				info.Gw = net.IP(nh.Gw.AsSlice())
+			}
+			nl.MultiPath = append(nl.MultiPath, info)
+		}
 	}
 	return nl, nil
 }
@@ -128,10 +195,22 @@ func fromNetlinkRoute(nl *netlink.Route) (Route, bool) {
 		return Route{}, false
 	}
 	r := Route{Prefix: prefix, Table: nl.Table, Metric: nl.Priority}
-	if len(nl.Gw) > 0 {
-		if nh, ok := netip.AddrFromSlice(nl.Gw); ok {
-			r.NextHop = nh.Unmap()
+	if len(nl.MultiPath) > 0 {
+		for _, info := range nl.MultiPath {
+			nh := NextHop{Ifindex: info.LinkIndex, Weight: info.Hops + 1}
+			if gw, ok := netip.AddrFromSlice(info.Gw); ok && len(info.Gw) > 0 {
+				nh.Gw = gw.Unmap()
+			}
+			r.NextHops = append(r.NextHops, nh)
 		}
+		return r, true
+	}
+	if len(nl.Gw) > 0 || nl.LinkIndex > 0 {
+		nh := NextHop{Ifindex: nl.LinkIndex, Weight: 1}
+		if gw, ok := netip.AddrFromSlice(nl.Gw); ok && len(nl.Gw) > 0 {
+			nh.Gw = gw.Unmap()
+		}
+		r.NextHops = []NextHop{nh}
 	}
 	return r, true
 }
