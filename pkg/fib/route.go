@@ -32,12 +32,14 @@ const routeProtocol = netlink.RouteProtocol(unix.RTPROT_BGP)
 // Weight is the natural 1-based share the kernel documents, NOT the
 // rtnh_hops value carried on the wire, which is one less. The conversion
 // happens at the netlink boundary so nothing above it has to remember that
-// a weight of 1 is encoded as 0. Weight 0 is read as 1: a zero-weight
-// next hop would take no traffic, which no caller means by "unset".
+// a weight of 1 is encoded as 0. Any weight at or below 1 is read as an
+// equal share: a zero weight would mean a next hop that takes no traffic,
+// which no caller means by leaving the field unset, and clamping a negative
+// one is safer than letting it underflow into an enormous share.
 type NextHop struct {
 	Gw      netip.Addr // zero value => on-link via Ifindex, which is then required
 	Ifindex int        // 0 = let the kernel resolve it from Gw, which is then required
-	Weight  int        // 0 or 1 = an equal share
+	Weight  int        // <= 1 = an equal share
 }
 
 // validate rejects a next hop the kernel could not resolve. Catching it here
