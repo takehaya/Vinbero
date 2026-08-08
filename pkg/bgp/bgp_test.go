@@ -150,3 +150,46 @@ func TestPathSource(t *testing.T) {
 		}
 	})
 }
+
+// SegmentList and SegmentLists are two views of one thing, and only the BGP
+// decoder fills both. Lists() is what keeps a locally configured path -- which
+// carries just SegmentList -- from looking empty to a weighted consumer.
+func TestCandidatePathLists(t *testing.T) {
+	a := netip.MustParseAddr("fd00:1::1")
+	b := netip.MustParseAddr("fd00:2::1")
+
+	t.Run("decoder-populated set is returned as is", func(t *testing.T) {
+		cp := CandidatePath{
+			SegmentList: []netip.Addr{a},
+			SegmentLists: []WeightedSegmentList{
+				{Segments: []netip.Addr{a}, Weight: 1},
+				{Segments: []netip.Addr{b}, Weight: 4},
+			},
+		}
+		got := cp.Lists()
+		if len(got) != 2 || got[1].Weight != 4 {
+			t.Fatalf("Lists() = %v, want both weighted lists", got)
+		}
+	})
+
+	t.Run("single-list producer is normalized to one equal share", func(t *testing.T) {
+		// This is the shape LocalSRPolicy and the advertise API produce.
+		cp := CandidatePath{SegmentList: []netip.Addr{a, b}}
+		got := cp.Lists()
+		if len(got) != 1 {
+			t.Fatalf("Lists() = %v, want one synthesized list", got)
+		}
+		if got[0].Weight != SRPolicyDefaultWeight {
+			t.Errorf("weight = %d, want the default %d", got[0].Weight, SRPolicyDefaultWeight)
+		}
+		if len(got[0].Segments) != 2 {
+			t.Errorf("segments = %v, want both carried through", got[0].Segments)
+		}
+	})
+
+	t.Run("an ineligible candidate has no lists", func(t *testing.T) {
+		if got := (CandidatePath{}).Lists(); got != nil {
+			t.Errorf("Lists() = %v, want nil for a candidate with no segments", got)
+		}
+	})
+}

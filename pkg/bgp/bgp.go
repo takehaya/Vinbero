@@ -318,9 +318,6 @@ type SRPolicy struct {
 // none is signaled (RFC 9256 §2.7).
 const SRPolicyDefaultPreference = 100
 
-// CandidatePath is one segment-list option for an SRPolicy. The active
-// path is chosen per RFC 9256 §2.9: highest Preference, then highest
-// Origin, then lowest Distinguisher.
 // WeightedSegmentList is one Segment List of a candidate path with the
 // share it takes (RFC 9256 §2.2). A candidate path may carry several, which
 // together form a weighted ECMP set.
@@ -334,7 +331,9 @@ type WeightedSegmentList struct {
 	Weight   uint32
 }
 
-// CandidatePath is one candidate path of an SR Policy (RFC 9256 §2.4).
+// CandidatePath is one segment-list option for an SRPolicy. The active
+// path is chosen per RFC 9256 §2.9: highest Preference, then highest
+// Origin, then lowest Distinguisher.
 type CandidatePath struct {
 	Origin        Origin
 	Distinguisher uint32
@@ -344,9 +343,33 @@ type CandidatePath struct {
 	// view every existing consumer uses.
 	SegmentList []netip.Addr
 	// SegmentLists holds every usable Segment List with its weight, in wire
-	// order. It is what weighted ECMP selects over; SegmentList is its first
-	// element's segments.
+	// order, and is only populated by the BGP decoder. Read it through
+	// Lists() rather than directly: a locally configured path carries just
+	// the single SegmentList, and a consumer reading this field raw would
+	// see such a path as having none.
 	SegmentLists []WeightedSegmentList
+}
+
+// Lists returns the candidate path's Segment Lists as the weighted set to
+// select over, whatever shape the producer filled in.
+//
+// SegmentList and SegmentLists are two views of the same thing, and only the
+// BGP decoder sets both. Locally configured paths and the advertise API set
+// only SegmentList, so a weighted consumer reading SegmentLists directly
+// would treat a perfectly valid single-list path as empty and stop steering
+// it. Going through here means a new producer cannot introduce that bug by
+// omission.
+func (c CandidatePath) Lists() []WeightedSegmentList {
+	if len(c.SegmentLists) > 0 {
+		return c.SegmentLists
+	}
+	if len(c.SegmentList) == 0 {
+		return nil
+	}
+	return []WeightedSegmentList{{
+		Segments: c.SegmentList,
+		Weight:   SRPolicyDefaultWeight,
+	}}
 }
 
 // SRPolicyDefaultWeight is the share a Segment List takes when it carries
