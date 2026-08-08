@@ -36,68 +36,118 @@ func decodeSRPolicy(p *apiutil.Path) *bgp.SRPolicy {
 	if !ok || !endpoint.Is6() {
 		return nil
 	}
-	preference, segments := decodeSRPolicyTunnel(p.Attrs)
+	preference, lists := decodeSRPolicyTunnel(p.Attrs)
+	cand := bgp.CandidatePath{
+		Origin:        bgp.OriginBGP,
+		Distinguisher: nlri.Distinguisher,
+		Preference:    preference,
+		SegmentLists:  lists,
+	}
+	// SegmentList is the single-list view every current consumer reads: the
+	// first usable list, which is also what gets programmed until weighted
+	// selection lands in the data plane.
+	if len(lists) > 0 {
+		cand.SegmentList = lists[0].Segments
+	}
 	return &bgp.SRPolicy{
-		Color:    nlri.Color,
-		Endpoint: endpoint,
-		Candidates: []bgp.CandidatePath{{
-			Origin:        bgp.OriginBGP,
-			Distinguisher: nlri.Distinguisher,
-			Preference:    preference,
-			SegmentList:   segments,
-		}},
+		Color:      nlri.Color,
+		Endpoint:   endpoint,
+		Candidates: []bgp.CandidatePath{cand},
 	}
 }
 
 // decodeSRPolicyTunnel walks the SR Policy tunnel sub-TLVs once and returns
-// the candidate path's preference and transport SID list:
+// the candidate path's preference and its Segment Lists:
 //   - Preference sub-TLV (RFC 9830 type 12); RFC 9256 default when absent.
-//   - the FIRST Segment List sub-TLV (type 128); additional ones (weighted
-//     ECMP) are ignored in Phase 1e-c. Only Type B (SRv6 SID) segments are
-//     understood -- Type I/J/K (RFC 9831) carry node/adjacency descriptors
-//     needing a SID/topology DB Vinbero lacks, so they are skipped.
+//   - every Segment List sub-TLV (type 128), each with the share from its
+//     nested Weight sub-TLV, or SRPolicyDefaultWeight when it carries none.
+//     Only Type B (SRv6 SID) segments are understood -- Type I/J/K
+//     (RFC 9831) carry node/adjacency descriptors needing a SID/topology DB
+//     Vinbero lacks, so they are skipped.
 //
-// Without ECMP there is exactly one usable list, so we deliberately take the
-// first one and do not fall through to later lists when it is malformed: an
-// invalid first list yields empty segments and an ineligible candidate,
-// rather than silently steering onto a lower-preference alternate. Picking
-// the first *valid* list is a weighted-ECMP concern deferred with it.
-func decodeSRPolicyTunnel(attrs []gobgppkt.PathAttributeInterface) (uint32, []netip.Addr) {
+// A malformed list is dropped on its own rather than taking the candidate
+// with it. That is the opposite of what a single-list decoder should do: with
+// one list, discarding it and leaving the candidate ineligible is right,
+// because steering onto a lower-preference alternate is safer than steering
+// along a path built from a list we could not read. With several, the other
+// lists are independent statements about how to reach the same endpoint, and
+// dropping them all because one was bad would take down a policy that is
+// still perfectly usable. A candidate whose lists are ALL unusable still ends
+// up ineligible, which preserves the original behaviour for the single-list
+// case.
+func decodeSRPolicyTunnel(attrs []gobgppkt.PathAttributeInterface) (uint32, []bgp.WeightedSegmentList) {
 	preference := uint32(bgp.SRPolicyDefaultPreference)
-	var segments []netip.Addr
-	haveSegments := false
+	var lists []bgp.WeightedSegmentList
 	for _, tlv := range srPolicyTunnelSubTLVs(attrs) {
 		switch v := tlv.(type) {
 		case *gobgppkt.TunnelEncapSubTLVSRPreference:
 			preference = v.Preference
 		case *gobgppkt.TunnelEncapSubTLVSRSegmentList:
-			if haveSegments {
-				continue // first Segment List sub-TLV wins
+			weight, ok := segmentListWeight(v)
+			if !ok {
+				continue
 			}
-			haveSegments = true
-			valid := true
-			for _, seg := range v.Segments {
-				b, ok := seg.(*gobgppkt.SegmentTypeB)
-				if !ok {
-					continue // Type I/J/K etc.: unsupported, skip
-				}
-				addr, ok := netip.AddrFromSlice(b.SID)
-				// A transport SID must be an SRv6 (IPv6) SID. A malformed or
-				// IPv4 SID makes the whole list unusable -- dropping just this
-				// SID would steer along a wrong path, so discard the list and
-				// let the candidate fall out as ineligible (empty segments).
-				if !ok || !addr.Is6() {
-					valid = false
-					break
-				}
-				segments = append(segments, addr)
+			segments, ok := decodeSegmentList(v)
+			if !ok {
+				continue
 			}
-			if !valid {
-				segments = nil
-			}
+			lists = append(lists, bgp.WeightedSegmentList{
+				Segments: segments,
+				Weight:   weight,
+			})
 		}
 	}
-	return preference, segments
+	return preference, lists
+}
+
+// decodeSegmentList extracts one Segment List's transport SIDs. ok is false
+// when the list cannot be used as written.
+func decodeSegmentList(v *gobgppkt.TunnelEncapSubTLVSRSegmentList) ([]netip.Addr, bool) {
+	var segments []netip.Addr
+	for _, seg := range v.Segments {
+		b, ok := seg.(*gobgppkt.SegmentTypeB)
+		if !ok {
+			continue // Type I/J/K etc.: unsupported, skip
+		}
+		addr, ok := netip.AddrFromSlice(b.SID)
+		// A transport SID must be an SRv6 (IPv6) SID. A malformed or IPv4
+		// SID makes this whole list unusable -- dropping just that SID
+		// would steer along a path the advertiser never described.
+		if !ok || !addr.Is6() {
+			return nil, false
+		}
+		segments = append(segments, addr)
+	}
+	// A list that named no usable segment carries no path; treating it as
+	// an empty-but-valid list would install a policy that encapsulates to
+	// nothing.
+	if len(segments) == 0 {
+		return nil, false
+	}
+	return segments, true
+}
+
+// segmentListWeight reads a list's share. ok is false when the list must not
+// be used.
+//
+// An absent Weight sub-TLV and an explicit weight of 0 are NOT the same
+// thing, and conflating them overrides what the advertiser asked for. RFC
+// 9256 sets the default weight to 1 when none is given, but declares a
+// segment list invalid when "its weight is 0" -- an explicit 0 withdraws
+// that list from the ECMP set. The distinction is safe to rely on: gobgp
+// only allocates Weight when a Weight sub-TLV is actually present on the
+// wire, and Vinbero's own advertise path leaves it unset, so a peer that
+// omits the weight is never mistaken for one that disabled the list. Reading it as 1 would put a list the sender
+// disabled back into service, and if it were the first list it would become
+// the one actually programmed.
+func segmentListWeight(v *gobgppkt.TunnelEncapSubTLVSRSegmentList) (uint32, bool) {
+	if v.Weight == nil {
+		return bgp.SRPolicyDefaultWeight, true
+	}
+	if v.Weight.Weight == 0 {
+		return 0, false
+	}
+	return v.Weight.Weight, true
 }
 
 // srPolicyTunnelSubTLVs returns the sub-TLVs of the SR Policy tunnel

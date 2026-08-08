@@ -318,6 +318,19 @@ type SRPolicy struct {
 // none is signaled (RFC 9256 §2.7).
 const SRPolicyDefaultPreference = 100
 
+// WeightedSegmentList is one Segment List of a candidate path with the
+// share it takes (RFC 9256 §2.2). A candidate path may carry several, which
+// together form a weighted ECMP set.
+//
+// Weight is the value from the Weight sub-TLV, or SRPolicyDefaultWeight
+// when the sub-TLV is absent (RFC 9256: "The default weight is 1"). It is
+// never 0: the RFC declares a segment list whose weight is 0 invalid, so
+// such a list never reaches this type.
+type WeightedSegmentList struct {
+	Segments []netip.Addr
+	Weight   uint32
+}
+
 // CandidatePath is one segment-list option for an SRPolicy. The active
 // path is chosen per RFC 9256 §2.9: highest Preference, then highest
 // Origin, then lowest Distinguisher.
@@ -325,11 +338,43 @@ type CandidatePath struct {
 	Origin        Origin
 	Distinguisher uint32
 	Preference    uint32
-	// SegmentList is the SR Policy transport SID list (RFC 9830/9831
-	// Type B SRv6 SIDs). The VPN service SID is composed onto the tail
-	// in the data plane, not stored here.
+	// SegmentList is the transport SID list actually programmed: the first
+	// usable Segment List of this candidate path. Kept as the single-list
+	// view every existing consumer uses.
 	SegmentList []netip.Addr
+	// SegmentLists holds every usable Segment List with its weight, in wire
+	// order, and is only populated by the BGP decoder. Read it through
+	// Lists() rather than directly: a locally configured path carries just
+	// the single SegmentList, and a consumer reading this field raw would
+	// see such a path as having none.
+	SegmentLists []WeightedSegmentList
 }
+
+// Lists returns the candidate path's Segment Lists as the weighted set to
+// select over, whatever shape the producer filled in.
+//
+// SegmentList and SegmentLists are two views of the same thing, and only the
+// BGP decoder sets both. Locally configured paths and the advertise API set
+// only SegmentList, so a weighted consumer reading SegmentLists directly
+// would treat a perfectly valid single-list path as empty and stop steering
+// it. Going through here means a new producer cannot introduce that bug by
+// omission.
+func (c CandidatePath) Lists() []WeightedSegmentList {
+	if len(c.SegmentLists) > 0 {
+		return c.SegmentLists
+	}
+	if len(c.SegmentList) == 0 {
+		return nil
+	}
+	return []WeightedSegmentList{{
+		Segments: c.SegmentList,
+		Weight:   SRPolicyDefaultWeight,
+	}}
+}
+
+// SRPolicyDefaultWeight is the share a Segment List takes when it carries
+// no Weight sub-TLV: RFC 9256 states "The default weight is 1".
+const SRPolicyDefaultWeight = 1
 
 // SRPolicyKey identifies a previously-advertised SR Policy for
 // withdrawal: the {Distinguisher, Color, Endpoint} tuple of the NLRI
