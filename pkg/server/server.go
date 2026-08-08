@@ -175,6 +175,12 @@ func (s *Server) Setup() {
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered Headendv6Service", zap.String("path", path))
 
+	// HeadendGroup service (read-only view of the ECMP path groups)
+	headendGroupServer := NewHeadendGroupServer(s.mapOps)
+	path, handler = vinberov1connect.NewHeadendGroupServiceHandler(headendGroupServer)
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered HeadendGroupService", zap.String("path", path))
+
 	// HeadendL2 service
 	headendL2Server := NewHeadendL2Server(s.mapOps)
 	path, handler = vinberov1connect.NewHeadendL2ServiceHandler(headendL2Server)

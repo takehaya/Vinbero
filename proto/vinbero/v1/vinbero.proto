@@ -627,6 +627,54 @@ message StatsSlotResetRequest {
 }
 message StatsSlotResetResponse {}
 
+// HeadendGroupService exposes the ECMP path groups the headend resolves
+// through. It is read-only: groups are written by the BGP receive path as
+// routes arrive, so there is no operator-facing create. Reading them is what
+// answers "is this prefix actually load-balancing, and over what".
+service HeadendGroupService {
+  rpc HeadendGroupList(HeadendGroupListRequest) returns (HeadendGroupListResponse);
+  rpc HeadendGroupGet(HeadendGroupGetRequest) returns (HeadendGroupGetResponse);
+}
+
+// One member of a group: the encapsulation a flow selecting this path takes.
+message HeadendGroupMember {
+  uint32 index = 1; // position in the group; the liveness bit that covers it
+  repeated string segments = 2; // the SRv6 segment list this path encapsulates to
+  uint32 weight = 3; // relative share; equal weights mean an equal split
+  uint32 policy_id = 4; // SR Policy this member composes onto, 0 = none
+  // live reflects ecmp_live_map. It is true when no prober has reported on
+  // the group, since a group with no liveness information is used in full
+  // rather than treated as entirely down.
+  bool live = 5;
+}
+
+message HeadendGroup {
+  uint32 group_id = 1;
+  // prefixes are the trigger entries pointing at this group. Normally one,
+  // but the group table does not itself record which prefix it serves, so
+  // this is derived by scanning the headend maps and can legitimately be
+  // empty for a group whose trigger has not been written yet.
+  repeated string prefixes = 2;
+  repeated HeadendGroupMember members = 3;
+  string owner = 4;
+  // live_bitmap is the raw ecmp_live_map value; live_known is false when the
+  // group has no entry, meaning every path is treated as up.
+  uint64 live_bitmap = 5;
+  bool live_known = 6;
+}
+
+message HeadendGroupListRequest {}
+message HeadendGroupListResponse {
+  repeated HeadendGroup groups = 1;
+}
+
+message HeadendGroupGetRequest {
+  uint32 group_id = 1;
+}
+message HeadendGroupGetResponse {
+  HeadendGroup group = 1;
+}
+
 // VrfService is the single VRF surface, managing every facet of the VRF
 // object. The kernel-device facet (VrfCreate/VrfDelete): a Linux VRF device
 // persisted to the JSON state file and reconciled on startup. The L2 facet

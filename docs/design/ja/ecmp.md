@@ -107,6 +107,14 @@ next hop が 1 本のときは multipath でなく通常の gateway 経路とし
 
 weight は 1 始まりの自然な値で扱い、netlink の境界で変換します。wire 上の `rtnh_hops` は weight より 1 小さいので、そのまま渡すと全 next hop の取り分が 1 つずつ増えてしまいます。境界で吸収しているので、上位のコードはこの差を意識しません。weight 0 は 1 と読みます。取り分ゼロの next hop を意図する呼び出し元は無いためです。
 
+## 観測 API
+
+`HeadendGroupService` で group を読めます。`vbctl headend-group list` が group 一覧、`vbctl headend-group get <group-id>` が member の segment list と weight と policy と生死を返します。書き込み API はありません。group は BGP 受信経路が経路の到着に応じて書くので、operator が作るものではないためです。
+
+prefix は group 側に記録されていないため、headend map を走査して `group_id` が一致する trigger エントリから引きます。applier の in-memory 状態に依存しないので、group を誰が書いたかに関わらず同じ答えになり、再起動で applier の状態が消えても引けます。逆に trigger がまだ書かれていない group では prefix が空になり得ます。
+
+liveness は「prober の報告がまだ無い」状態と「実際に全 path が生きている」状態を区別して出します。data plane はどちらも全 path を使うので挙動は同じですが、なぜトラフィックが動いたのかを調べるときに意味が違うためです。
+
 ## 制約と今後
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。

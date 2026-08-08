@@ -2113,6 +2113,13 @@ func (m *MapOperations) GetHeadendV6Owner(triggerPrefix string) (OwnerTag, bool,
 	return m.headendV6Owners.Lookup(key)
 }
 
+// EcmpGroupOwner returns the owner recorded for one group, or ("", false)
+// when the group has no owner recorded. A group can exist without one, so
+// callers must not read absence as "no such group".
+func (m *MapOperations) EcmpGroupOwner(groupID uint32) (OwnerTag, bool, error) {
+	return m.ecmpGroupOwners.Lookup(groupID)
+}
+
 // ListEcmpGroupOwners returns the owner tag recorded for every ECMP group.
 //
 // ecmp_group_owner_map is pinned, so this is what a restarted daemon reads
