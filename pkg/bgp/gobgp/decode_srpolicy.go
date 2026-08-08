@@ -83,13 +83,17 @@ func decodeSRPolicyTunnel(attrs []gobgppkt.PathAttributeInterface) (uint32, []bg
 		case *gobgppkt.TunnelEncapSubTLVSRPreference:
 			preference = v.Preference
 		case *gobgppkt.TunnelEncapSubTLVSRSegmentList:
+			weight, ok := segmentListWeight(v)
+			if !ok {
+				continue
+			}
 			segments, ok := decodeSegmentList(v)
 			if !ok {
 				continue
 			}
 			lists = append(lists, bgp.WeightedSegmentList{
 				Segments: segments,
-				Weight:   segmentListWeight(v),
+				Weight:   weight,
 			})
 		}
 	}
@@ -123,14 +127,24 @@ func decodeSegmentList(v *gobgppkt.TunnelEncapSubTLVSRSegmentList) ([]netip.Addr
 	return segments, true
 }
 
-// segmentListWeight reads a list's share. RFC 9256 leaves an absent Weight
-// sub-TLV to the implementation; an equal share is what deployments assume,
-// and reading absence as zero would silently retire the list.
-func segmentListWeight(v *gobgppkt.TunnelEncapSubTLVSRSegmentList) uint32 {
-	if v.Weight == nil || v.Weight.Weight == 0 {
-		return bgp.SRPolicyDefaultWeight
+// segmentListWeight reads a list's share. ok is false when the list must not
+// be used.
+//
+// An absent Weight sub-TLV and an explicit weight of 0 are NOT the same
+// thing, and conflating them overrides what the advertiser asked for. RFC
+// 9256 sets the default weight to 1 when none is given, but declares a
+// segment list invalid when "its weight is 0" -- an explicit 0 withdraws
+// that list from the ECMP set. Reading it as 1 would put a list the sender
+// disabled back into service, and if it were the first list it would become
+// the one actually programmed.
+func segmentListWeight(v *gobgppkt.TunnelEncapSubTLVSRSegmentList) (uint32, bool) {
+	if v.Weight == nil {
+		return bgp.SRPolicyDefaultWeight, true
 	}
-	return v.Weight.Weight
+	if v.Weight.Weight == 0 {
+		return 0, false
+	}
+	return v.Weight.Weight, true
 }
 
 // srPolicyTunnelSubTLVs returns the sub-TLVs of the SR Policy tunnel

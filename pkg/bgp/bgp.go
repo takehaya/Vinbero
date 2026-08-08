@@ -326,14 +326,15 @@ const SRPolicyDefaultPreference = 100
 // together form a weighted ECMP set.
 //
 // Weight is the value from the Weight sub-TLV, or SRPolicyDefaultWeight
-// when the sub-TLV is absent. RFC 9256 leaves the absent case to the
-// implementation and every deployment treats it as an equal share, so a
-// list without a weight must not be read as taking no traffic.
+// when the sub-TLV is absent (RFC 9256: "The default weight is 1"). It is
+// never 0: the RFC declares a segment list whose weight is 0 invalid, so
+// such a list never reaches this type.
 type WeightedSegmentList struct {
 	Segments []netip.Addr
 	Weight   uint32
 }
 
+// CandidatePath is one candidate path of an SR Policy (RFC 9256 §2.4).
 type CandidatePath struct {
 	Origin        Origin
 	Distinguisher uint32
@@ -349,7 +350,7 @@ type CandidatePath struct {
 }
 
 // SRPolicyDefaultWeight is the share a Segment List takes when it carries
-// no Weight sub-TLV.
+// no Weight sub-TLV: RFC 9256 states "The default weight is 1".
 const SRPolicyDefaultWeight = 1
 
 // SRPolicyKey identifies a previously-advertised SR Policy for

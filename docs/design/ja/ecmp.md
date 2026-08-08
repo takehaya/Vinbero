@@ -119,7 +119,9 @@ liveness は「prober の報告がまだ無い」状態と「実際に全 path �
 
 candidate path は Segment List を複数持てて、まとめて weighted ECMP の集合になります (RFC 9256 2.2)。受信側はこれを全部 decode し、各 list の weight とともに `CandidatePath.SegmentLists` に載せます。従来は最初の 1 本だけ残して捨てていました。
 
-Weight sub-TLV が無い場合は等分として扱います。RFC 9256 は実装依存としていますが、0 と読むとその list を ECMP 集合から外すことになり、省略の意図と正反対になるためです。
+Weight sub-TLV が無い場合は等分として扱います。RFC 9256 が既定値を 1 と定めているためです。
+
+Weight sub-TLV があって値が 0 の場合は、その list を落とします。省略と明示的な 0 は別物で、同一視すると広告側の意図を上書きします。RFC 9256 は weight が 0 の segment list を invalid と規定しており、明示的な 0 は送信側がその list を ECMP 集合から外す意思表示です。既定値として読むと、送信側が無効化した list を復活させることになり、それが先頭なら実際に program される list になってしまいます。
 
 壊れた list は、その list だけを落とします。list が 1 本しか無い前提なら、壊れていたら candidate ごと ineligible にするのが正しい判断でした。より低い preference の代替に steer するより、読めなかった list から組んだ経路に流す方が危険だからです。複数ある場合、他の list は同じ endpoint への独立した記述なので、1 本の破損で全部落とすとまだ使える policy を落とすことになります。全 list が使えない candidate は従来どおり ineligible になります。
 

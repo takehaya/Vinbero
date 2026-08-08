@@ -196,6 +196,9 @@ func TestDecodeSRPolicy_Withdraw(t *testing.T) {
 	}
 }
 
+// segList builds a Segment List sub-TLV. weight 0 means "no Weight sub-TLV
+// at all"; use segListExplicitWeight to emit one carrying a given value,
+// including 0, which is a different thing on the wire.
 func segList(t *testing.T, weight uint32, sids ...string) *gobgppkt.TunnelEncapSubTLVSRSegmentList {
 	t.Helper()
 	sl := &gobgppkt.TunnelEncapSubTLVSRSegmentList{}
@@ -205,6 +208,13 @@ func segList(t *testing.T, weight uint32, sids ...string) *gobgppkt.TunnelEncapS
 	if weight != 0 {
 		sl.Weight = &gobgppkt.SegmentListWeight{Weight: weight}
 	}
+	return sl
+}
+
+func segListExplicitWeight(t *testing.T, weight uint32, sids ...string) *gobgppkt.TunnelEncapSubTLVSRSegmentList {
+	t.Helper()
+	sl := segList(t, 0, sids...)
+	sl.Weight = &gobgppkt.SegmentListWeight{Weight: weight}
 	return sl
 }
 
@@ -303,4 +313,51 @@ func TestDecodeSRPolicy_EmptyListIsNotUsable(t *testing.T) {
 	if len(cp.SegmentLists) != 1 {
 		t.Fatalf("decoded %d lists, want only the non-empty one", len(cp.SegmentLists))
 	}
+}
+
+// RFC 9256 declares a segment list invalid when "its weight is 0", which is
+// the advertiser withdrawing that list from the ECMP set. It is NOT the same
+// as omitting the Weight sub-TLV, where the default of 1 applies. Reading an
+// explicit 0 as the default would put a list the sender disabled back into
+// service -- and if it came first, that is the list actually programmed.
+func TestDecodeSRPolicy_ExplicitZeroWeightInvalidatesTheList(t *testing.T) {
+	t.Run("zero-weight list is dropped", func(t *testing.T) {
+		p := srPolicyPath(t, 1, 100, "2001:db8::2",
+			segListExplicitWeight(t, 0, "fd00:1::1"),
+			segList(t, 2, "fd00:2::1"),
+		)
+		cp := decodeSRPolicy(p).Candidates[0]
+		if len(cp.SegmentLists) != 1 {
+			t.Fatalf("decoded %d lists, want only the non-zero-weight one", len(cp.SegmentLists))
+		}
+		if cp.SegmentLists[0].Weight != 2 {
+			t.Errorf("surviving weight = %d, want 2", cp.SegmentLists[0].Weight)
+		}
+		// The disabled list came first, so this is what would have been
+		// programmed had the zero been read as a default.
+		if len(cp.SegmentList) != 1 || cp.SegmentList[0].String() != "fd00:2::1" {
+			t.Errorf("SegmentList = %v, want the enabled list", cp.SegmentList)
+		}
+	})
+
+	t.Run("an absent sub-TLV still means an equal share", func(t *testing.T) {
+		cp := decodeSRPolicy(srPolicyPath(t, 1, 100, "2001:db8::2",
+			segList(t, 0, "fd00:1::1"))).Candidates[0]
+		if len(cp.SegmentLists) != 1 {
+			t.Fatalf("decoded %d lists, want the list kept", len(cp.SegmentLists))
+		}
+		if cp.SegmentLists[0].Weight != bgp.SRPolicyDefaultWeight {
+			t.Errorf("weight = %d, want the default %d",
+				cp.SegmentLists[0].Weight, bgp.SRPolicyDefaultWeight)
+		}
+	})
+
+	t.Run("every list disabled leaves the candidate ineligible", func(t *testing.T) {
+		cp := decodeSRPolicy(srPolicyPath(t, 1, 100, "2001:db8::2",
+			segListExplicitWeight(t, 0, "fd00:1::1"))).Candidates[0]
+		if len(cp.SegmentLists) != 0 || len(cp.SegmentList) != 0 {
+			t.Errorf("expected no usable segments, got lists=%v single=%v",
+				cp.SegmentLists, cp.SegmentList)
+		}
+	})
 }
