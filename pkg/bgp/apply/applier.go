@@ -32,6 +32,12 @@ type headendOps interface {
 	CreateHeadendV6(triggerPrefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error
 	DeleteHeadendV4(triggerPrefix string, requester bpf.OwnerTag) error
 	DeleteHeadendV6(triggerPrefix string, requester bpf.OwnerTag) error
+	// The rest support the upgrade off the pre-aggregation per-RD owner;
+	// see clearLegacyVPNHeadend.
+	GetHeadendV4Owner(triggerPrefix string) (bpf.OwnerTag, bool, error)
+	GetHeadendV6Owner(triggerPrefix string) (bpf.OwnerTag, bool, error)
+	ForceDeleteHeadendV4(triggerPrefix string) error
+	ForceDeleteHeadendV6(triggerPrefix string) error
 }
 
 // mupOps is the subset of bpf.MapOperations the BGP MUP uplink path needs:
@@ -55,6 +61,7 @@ type dataPlane interface {
 	policyMapOps
 	fdbBdOps
 	mupOps
+	ecmpOps
 }
 
 // Applier applies received BGP routes to the Vinbero data plane.
@@ -69,6 +76,10 @@ type Applier struct {
 	localASN    uint32
 	srPolicy    *srPolicyTable
 	evpn        *evpnTable
+	// vpnGroups aggregates the paths learned for each VPN prefix into one
+	// ECMP group. Touched only from the route-handler goroutine and from
+	// NewApplier's startup reset, which runs before any route arrives.
+	vpnGroups *vpnGroupTable
 	// mupDefaultAllow forces every MUP session route through the historical
 	// default-allow path even when some VRF binding has declared a mup_ipv*
 	// family. It is the escape hatch for the asymmetric-expansion case where
@@ -79,7 +90,7 @@ type Applier struct {
 	// MUP receive state, guarded by mupMu: the GoBGP RouteHandler goroutine
 	// applies routes (applyMUP), and VrfBgpService mutations re-reconcile
 	// installed downlinks when a binding's GTP4 source prefix changes
-	// (ReconcileMUPGTP4SrcForRD), so unlike steeredRoutes this state is
+	// (ReconcileMUPGTP4SrcForRD), so unlike the single-goroutine VPN state this is
 	// touched from two goroutines. mupT1ST / mupT2ST hold each session's
 	// full route plus the SID currently programmed for it (so an arriving /
 	// withdrawn discovery route can reconcile the install). mupISD / mupDSD
@@ -93,12 +104,6 @@ type Applier struct {
 	mupISD      map[mupISDKey]mupISDEntry
 	mupDSD      map[mupDSDKey]mupDSDEntry
 	mupGateRefs map[string]int
-	// steeredRoutes maps a steered VPN route to the SR Policy key it
-	// references, so a withdraw (which carries no color/next-hop) can unref
-	// the right policy. Touched only from applyVPN, which runs on the single
-	// GoBGP RouteHandler goroutine, so it needs no extra locking; the
-	// srPolicyTable it drives is mutex-guarded for the concurrent CRUD path.
-	steeredRoutes map[bgp.RouteKey]policyKey
 	// evpnMu serializes the EVPN receive state (evpnTable.peers/fdb/mcast)
 	// between the GoBGP RouteHandler goroutine (applyEVPN) and the RPC-driven
 	// ReplayEVPN (VrfBridgeAttach / commitBinding re-pull the loc-rib after
@@ -112,25 +117,28 @@ type Applier struct {
 // vrfBindings supplies the route-target import filter; an empty manager
 // accepts every received route.
 func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
-	return &Applier{
-		headend:       dp,
-		fdbBd:         dp,
-		mupUplink:     dp,
-		locators:      locators,
-		vrfBindings:   vrfBindings,
-		fib:           fibInjector,
-		srcLocator:    srcLocator,
-		localASN:      localASN,
-		srPolicy:      newSRPolicyTable(dp, logger),
-		evpn:          newEVPNTable(),
-		steeredRoutes: make(map[bgp.RouteKey]policyKey),
-		mupT1ST:       make(map[mupT1STKey]*mupSessionState),
-		mupT2ST:       make(map[mupT2STKey]*mupSessionState),
-		mupISD:        make(map[mupISDKey]mupISDEntry),
-		mupDSD:        make(map[mupDSDKey]mupDSDEntry),
-		mupGateRefs:   make(map[string]int),
-		logger:        logger.Named("bgp.apply"),
+	a := &Applier{
+		headend:     dp,
+		fdbBd:       dp,
+		mupUplink:   dp,
+		locators:    locators,
+		vrfBindings: vrfBindings,
+		fib:         fibInjector,
+		srcLocator:  srcLocator,
+		localASN:    localASN,
+		srPolicy:    newSRPolicyTable(dp, logger),
+		vpnGroups:   newVPNGroupTable(dp, localASN, logger),
+		evpn:        newEVPNTable(),
+		mupT1ST:     make(map[mupT1STKey]*mupSessionState),
+		mupT2ST:     make(map[mupT2STKey]*mupSessionState),
+		mupISD:      make(map[mupISDKey]mupISDEntry),
+		mupDSD:      make(map[mupDSDKey]mupDSDEntry),
+		mupGateRefs: make(map[string]int),
+		logger:      logger.Named("bgp.apply"),
 	}
+	// Runs before the BGP session starts, so it cannot race a route event.
+	a.vpnGroups.reset()
+	return a
 }
 
 // SetMUPDefaultAllow toggles the MUP receive-side default-allow escape hatch.
@@ -162,7 +170,7 @@ func (a *Applier) Apply(ev bgp.RouteEvent) {
 	case ev.SRPolicy != nil:
 		a.srPolicy.apply(*ev.SRPolicy, ev.IsWithdraw)
 	case ev.VPN != nil:
-		a.applyVPN(ev.VPN, ev.IsWithdraw)
+		a.applyVPN(ev.VPN, ev.Source, ev.IsWithdraw)
 	case ev.Unicast != nil:
 		a.applyUnicast(ev.Unicast, ev.IsWithdraw)
 	case ev.EVPN != nil:
@@ -199,21 +207,34 @@ func (a *Applier) ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error {
 	return a.srPolicy.applyLocalCapped(p, max)
 }
 
-func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
-	owner := bpf.OwnerBGPVPN(a.localASN, vr.RD)
-	rk := vr.Key()
+func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) {
+	dk := vpnDestKey{family: vr.Family, prefix: vr.Prefix}
+	pk := vpnPathKey{rd: vr.RD, source: src}
 	if withdraw {
-		// Release any SR Policy reference this route held. The withdraw
-		// event carries no color/next-hop, so the reverse index is the only
-		// way to know which policy to unref.
-		a.steer(rk, nil)
 		// Withdraw bypasses the import-RT filter so a route accepted
-		// earlier is always torn down (deleteHeadend is a no-op when the
-		// entry is already absent).
-		if err := a.deleteHeadend(vr.Family, vr.Prefix, owner); err != nil {
-			a.logger.Error("withdraw VPN route",
-				zap.String("prefix", vr.Prefix), zap.Error(err))
+		// earlier is always torn down, and drops only this path: the prefix
+		// survives on whatever other PEs still advertise it.
+		d, released := a.vpnGroups.remove(dk, pk)
+		if released != nil {
+			// The withdraw carries no color or next hop, so the reference
+			// recorded against the path is the only way to know which
+			// policy to release.
+			a.srPolicy.unref(released.color, released.endpoint)
 		}
+		if d == nil {
+			// Nothing tracked for this prefix, but the data plane may still
+			// hold an entry this process never saw: with pinned maps an
+			// entry installed before a restart outlives the accumulator, and
+			// a withdraw arriving before the route is re-advertised is the
+			// only chance to remove it. Delete unconditionally; it is a
+			// no-op when the entry is already absent.
+			if err := a.deleteTrigger(vr.Family, vr.Prefix); err != nil {
+				a.logger.Error("withdraw untracked VPN prefix",
+					zap.String("prefix", vr.Prefix), zap.Error(err))
+			}
+			return
+		}
+		a.reconcileVPNGroup(dk, d)
 		return
 	}
 	// Import-RT filter: once any VRF binding declares this family, a
@@ -234,17 +255,9 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 			zap.String("prefix", vr.Prefix), zap.String("rd", vr.RD))
 		return
 	}
-	entry, err := a.buildHeadendEntry(vr.SRv6SID)
-	if err != nil {
-		a.logger.Error("build headend entry",
-			zap.String("prefix", vr.Prefix), zap.Error(err))
-		return
-	}
-	// Color-based auto-steering: stamp the SR Policy id for {color, next
-	// hop} so the XDP headend composes this route's service SID onto that
-	// policy's transport. reserveID only resolves the id; the steering
-	// reference is committed (steer) after the headend write succeeds, so
-	// a failed write never pins the id.
+	// Color-based auto-steering is decided per path: the paths aggregated
+	// onto one prefix can carry different colors, so each contributes its
+	// own SR Policy reference rather than the prefix holding a single one.
 	var want *policyKey
 	if vr.Color != 0 {
 		endpoint, perr := netip.ParseAddr(vr.NextHop)
@@ -262,43 +275,35 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, withdraw bool) {
 				zap.String("nexthop", vr.NextHop))
 		default:
 			want = &policyKey{color: vr.Color, endpoint: endpoint}
-			entry.PolicyId = a.srPolicy.reserveID(want.color, want.endpoint)
 		}
 	}
-	if err := a.createHeadend(vr.Family, vr.Prefix, entry, owner); err != nil {
-		a.logger.Error("install VPN route",
-			zap.String("prefix", vr.Prefix), zap.Error(err))
+
+	// Take the new reference before releasing the old one so a re-advertise
+	// that keeps the same target never drops the refcount to zero and lets
+	// the policy be garbage-collected between the two calls.
+	// remove is only for the reference the previous advertisement of THIS
+	// path held; upsert below re-adds it, so the destination it returns is
+	// deliberately ignored.
+	_, replaced := a.vpnGroups.remove(dk, pk)
+	if want != nil {
+		a.srPolicy.ref(want.color, want.endpoint)
+	}
+	if replaced != nil {
+		a.srPolicy.unref(replaced.color, replaced.endpoint)
+	}
+	d, ok := a.vpnGroups.upsert(dk, pk, &vpnPath{sid: vr.SRv6SID, steer: want})
+	if !ok {
+		// Refused by a bound. The reference just taken would otherwise pin
+		// a policy no path holds.
+		if want != nil {
+			a.srPolicy.unref(want.color, want.endpoint)
+		}
+		if d != nil {
+			a.reconcileVPNGroup(dk, d)
+		}
 		return
 	}
-	// The entry is installed -- commit the steering reference (or release a
-	// stale one when the route is no longer steered).
-	a.steer(rk, want)
-	a.logger.Info("VPN route installed",
-		zap.String("prefix", vr.Prefix), zap.String("sid", vr.SRv6SID))
-}
-
-// steer reconciles a route's SR Policy reference against its desired target
-// (want == nil means "not steered") and returns the policy_id to stamp (0
-// when unsteered). It diffs against the recorded reference so a re-advertise
-// with an unchanged target neither leaks nor double-counts a reference.
-func (a *Applier) steer(rk bgp.RouteKey, want *policyKey) uint32 {
-	old, had := a.steeredRoutes[rk]
-	switch {
-	case want == nil:
-		if had {
-			a.srPolicy.unref(old.color, old.endpoint)
-			delete(a.steeredRoutes, rk)
-		}
-		return 0
-	case had && old == *want:
-		return a.srPolicy.idOf(want.color, want.endpoint)
-	default:
-		if had {
-			a.srPolicy.unref(old.color, old.endpoint)
-		}
-		a.steeredRoutes[rk] = *want
-		return a.srPolicy.ref(want.color, want.endpoint)
-	}
+	a.reconcileVPNGroup(dk, d)
 }
 
 func (a *Applier) applyUnicast(ur *bgp.UnicastRoute, withdraw bool) {

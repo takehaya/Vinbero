@@ -69,6 +69,7 @@ func TestOwnerTagWireFitsAuxBuffer(t *testing.T) {
 		OwnerBuiltin,
 		OwnerBGPVPN(4294967295, strings.Repeat("X", 8)),
 		OwnerBGPUnicast(4294967295),
+		OwnerBGPVPNGroup(4294967295),
 	}
 	for _, tag := range cases {
 		if l := len(tag); l > auxOwnerTagBytes-1 {
@@ -97,5 +98,23 @@ func TestCheckEntryOwnerEmptyCallerRejected(t *testing.T) {
 	// sentinel; checkEntryOwner must reject it up front.
 	if _, err := checkEntryOwner(nil, "any-key", ""); err != ErrEmptyOwner {
 		t.Errorf("empty caller: got %v, want ErrEmptyOwner", err)
+	}
+}
+
+// TestOwnerBGPVPNGroup covers the one job this owner has: being shared by
+// every path that contributes to a prefix's group. An RD- or prefix-scoped
+// owner would either reject the second PE's path as a cross-owner write or
+// overflow the 64-byte tag buffer (see TestOwnerTagWireFitsAuxBuffer).
+func TestOwnerBGPVPNGroup(t *testing.T) {
+	const asn = 65000
+	if a, b := OwnerBGPVPNGroup(asn), OwnerBGPVPNGroup(asn); a != b {
+		t.Fatalf("owner is not stable: %q vs %q", a, b)
+	}
+	if OwnerBGPVPNGroup(asn) == OwnerBGPVPNGroup(asn+1) {
+		t.Error("different ASNs must not share an owner")
+	}
+	// Must not collide with the per-RD owner used for the trigger entries.
+	if OwnerBGPVPNGroup(asn) == OwnerBGPVPN(asn, "65000:1") {
+		t.Error("group owner collides with the plain VPN owner")
 	}
 }

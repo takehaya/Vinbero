@@ -85,6 +85,20 @@ data plane が複数 path を持てても、受信側が path を区別できな
 
 peer 設定の `add_paths_receive` で ADD-PATH の receive を negotiate します。route reflector 配下では必要です。reflector は既定で prefix ごとに best path だけを reflect するので、これを有効にしないと他の PE の path はそもそも届かず、受信側で何をしても復元できません。iBGP full mesh では各 PE が自分の path を直接送るため不要です。送信方向は有効にしません。Vinbero は自分の NLRI について複数 path を広告しないので、使わない capability を negotiate しないためです。
 
+## L3VPN の path 集約
+
+受信した VPN 経路は `{family, prefix}` 単位で 1 つの ECMP group に集約します。RD は key に含めません。同じ prefix を広告する PE はそれぞれ自分の RD を使うので、RD を key に入れると 2 台目の PE の経路が別エントリになり、1 台目を上書きしてしまうためです。
+
+集約前は prefix をそのまま headend map に書き、owner を RD 込みにしていました。このため 2 台目の PE の書き込みは cross-owner チェックに掛かって失敗し、経路は単に捨てられていました。さらに 1 台目が withdraw すると、生き残っている PE の経路は再広告されるまで復活せず、その prefix は blackhole していました。集約と RD 非依存の owner でこの両方が解消します。
+
+path の識別は `{rd, PathSource}` です。RD が PE を、`PathSource` が peer 内の path を区別するので、2 台の PE からの広告も、ADD-PATH で 1 peer から届く複数 path も、別々の path として保持できます。
+
+program する member は SID で dedupe して SID 順に並べ、8 本で打ち切ります。並び順を固定するのは見た目のためではありません。data plane は member 数の剰余で path を選ぶので、Go の map 反復順に依存すると同じ path 集合でも reconcile のたびに flow の分散先が変わってしまいます。同じ SID に解決する path は転送結果が同じなので dedupe します。両方 program すると、その PE の取り分だけが黙って倍になります。
+
+trigger エントリには group_id に加えて先頭 member の segments も入れます。data plane は group を解決できないとき trigger 自身の segments に fallback するので、reconcile の途中や再起動直後の窓で drop でなく単一 path 転送に degrade します。
+
+group id は再起動を跨げません。owner tag は 64 バイトに収まる必要があり、prefix を入れると IPv6 で溢れるため、どの group がどの prefix のものだったかを記録できないからです。そこで起動時に自分が owner の group を sweep して世代ごとの orphan が積み上がるのを防ぎ、他の owner が持つ group と衝突しないよう、残っている id の上から採番を再開します。
+
 ## 制約と今後
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。

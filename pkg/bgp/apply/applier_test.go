@@ -33,6 +33,18 @@ type fakeHeadend struct {
 	v6deleted []string
 	createErr error
 
+	// v4owners / v6owners model the persisted owner table so the upgrade off
+	// the pre-aggregation per-RD owner can be exercised.
+	v4owners map[string]bpf.OwnerTag
+	v6owners map[string]bpf.OwnerTag
+	v4forced []string
+	v6forced []string
+
+	ecmpGroups  map[uint32][]bpf.EcmpPath
+	ecmpOwners  map[uint32]bpf.OwnerTag
+	ecmpDeletes []uint32
+	putEcmpErr  error
+
 	fdb           map[fdbKey]*bpf.FdbEntry
 	bdPeers       map[bdPeerKey]*bpf.HeadendEntry
 	bdPeerReverse map[bdPeerKey]bool // writeReverse flag passed per peer
@@ -53,6 +65,10 @@ func newFakeHeadend() *fakeHeadend {
 		bdPeers:       map[bdPeerKey]*bpf.HeadendEntry{},
 		bdPeerReverse: map[bdPeerKey]bool{},
 		esis:          map[[bpf.ESILen]byte]*bpf.EsiEntry{},
+		v4owners:      map[string]bpf.OwnerTag{},
+		v6owners:      map[string]bpf.OwnerTag{},
+		ecmpGroups:    map[uint32][]bpf.EcmpPath{},
+		ecmpOwners:    map[uint32]bpf.OwnerTag{},
 	}
 }
 
@@ -125,6 +141,74 @@ func (f *fakeHeadend) UpsertSRPolicy(uint32, []netip.Addr) error { return nil }
 func (f *fakeHeadend) DeleteSRPolicy(uint32) error               { return nil }
 func (f *fakeHeadend) HighestSRPolicyIDInUse() (uint32, error)   { return 0, nil }
 
+func (f *fakeHeadend) GetHeadendV4Owner(prefix string) (bpf.OwnerTag, bool, error) {
+	o, ok := f.v4owners[prefix]
+	return o, ok, nil
+}
+
+func (f *fakeHeadend) GetHeadendV6Owner(prefix string) (bpf.OwnerTag, bool, error) {
+	o, ok := f.v6owners[prefix]
+	return o, ok, nil
+}
+
+func (f *fakeHeadend) ForceDeleteHeadendV4(prefix string) error {
+	delete(f.v4owners, prefix)
+	delete(f.v4created, prefix)
+	f.v4forced = append(f.v4forced, prefix)
+	return nil
+}
+
+func (f *fakeHeadend) ForceDeleteHeadendV6(prefix string) error {
+	delete(f.v6owners, prefix)
+	delete(f.v6created, prefix)
+	f.v6forced = append(f.v6forced, prefix)
+	return nil
+}
+
+// ECMP group surface. ecmpGroups records the last member set written per
+// group id so tests can assert on aggregation, and survivingOwners seeds
+// what a restart would find already installed.
+func (f *fakeHeadend) PutEcmpGroup(groupID uint32, paths []bpf.EcmpPath, owner bpf.OwnerTag) error {
+	if f.putEcmpErr != nil {
+		return f.putEcmpErr
+	}
+	if f.ecmpGroups == nil {
+		f.ecmpGroups = map[uint32][]bpf.EcmpPath{}
+	}
+	f.ecmpGroups[groupID] = paths
+	f.ecmpOwners[groupID] = owner
+	return nil
+}
+
+func (f *fakeHeadend) DeleteEcmpGroup(groupID uint32, requester bpf.OwnerTag) error {
+	if cur, ok := f.ecmpOwners[groupID]; ok && cur != requester {
+		return bpf.ErrEntryOwnerMismatch
+	}
+	f.ecmpDeletes = append(f.ecmpDeletes, groupID)
+	delete(f.ecmpGroups, groupID)
+	delete(f.ecmpOwners, groupID)
+	return nil
+}
+
+// Enumerates the group table, not the owner table: an id is occupied by the
+// group existing, whether or not an owner was recorded for it. Deriving this
+// from ecmpOwners would make the ownerless case untestable.
+func (f *fakeHeadend) ListEcmpGroups() (map[uint32]*bpf.EcmpGroupInfo, error) {
+	out := map[uint32]*bpf.EcmpGroupInfo{}
+	for id := range f.ecmpGroups {
+		out[id] = &bpf.EcmpGroupInfo{}
+	}
+	return out, nil
+}
+
+func (f *fakeHeadend) ListEcmpGroupOwners() (map[uint32]bpf.OwnerTag, error) {
+	out := map[uint32]bpf.OwnerTag{}
+	for id, o := range f.ecmpOwners {
+		out[id] = o
+	}
+	return out, nil
+}
+
 // mupUplinkKey records an mup_uplink_v4_map write in fakeHeadend.
 type mupUplinkKey struct {
 	instance uint32
@@ -165,28 +249,49 @@ func (f *fakeHeadend) DeleteMupUplinkV6(instance uint32, endpoint string, teid u
 	return nil
 }
 
-func (f *fakeHeadend) CreateHeadendV4(p string, e *bpf.HeadendEntry, _ bpf.OwnerTag) error {
+// Create / Delete honour the recorded owner the way bpf.MapOperations does,
+// so tests can exercise the cross-owner paths (the pre-aggregation per-RD
+// owner in particular) rather than assuming every write lands.
+func (f *fakeHeadend) CreateHeadendV4(p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
 	if f.createErr != nil {
 		return f.createErr
+	}
+	if cur, ok := f.v4owners[p]; ok && cur != owner {
+		return bpf.ErrEntryOwnerMismatch
 	}
 	f.v4created[p] = e
+	f.v4owners[p] = owner
 	return nil
 }
 
-func (f *fakeHeadend) CreateHeadendV6(p string, e *bpf.HeadendEntry, _ bpf.OwnerTag) error {
+func (f *fakeHeadend) CreateHeadendV6(p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
 	if f.createErr != nil {
 		return f.createErr
 	}
+	if cur, ok := f.v6owners[p]; ok && cur != owner {
+		return bpf.ErrEntryOwnerMismatch
+	}
 	f.v6created[p] = e
+	f.v6owners[p] = owner
 	return nil
 }
 
-func (f *fakeHeadend) DeleteHeadendV4(p string, _ bpf.OwnerTag) error {
+func (f *fakeHeadend) DeleteHeadendV4(p string, requester bpf.OwnerTag) error {
+	if cur, ok := f.v4owners[p]; ok && cur != requester {
+		return bpf.ErrEntryOwnerMismatch
+	}
+	delete(f.v4owners, p)
+	delete(f.v4created, p)
 	f.v4deleted = append(f.v4deleted, p)
 	return nil
 }
 
-func (f *fakeHeadend) DeleteHeadendV6(p string, _ bpf.OwnerTag) error {
+func (f *fakeHeadend) DeleteHeadendV6(p string, requester bpf.OwnerTag) error {
+	if cur, ok := f.v6owners[p]; ok && cur != requester {
+		return bpf.ErrEntryOwnerMismatch
+	}
+	delete(f.v6owners, p)
+	delete(f.v6created, p)
 	f.v6deleted = append(f.v6deleted, p)
 	return nil
 }
