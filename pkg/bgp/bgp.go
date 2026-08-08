@@ -321,15 +321,36 @@ const SRPolicyDefaultPreference = 100
 // CandidatePath is one segment-list option for an SRPolicy. The active
 // path is chosen per RFC 9256 §2.9: highest Preference, then highest
 // Origin, then lowest Distinguisher.
+// WeightedSegmentList is one Segment List of a candidate path with the
+// share it takes (RFC 9256 §2.2). A candidate path may carry several, which
+// together form a weighted ECMP set.
+//
+// Weight is the value from the Weight sub-TLV, or SRPolicyDefaultWeight
+// when the sub-TLV is absent. RFC 9256 leaves the absent case to the
+// implementation and every deployment treats it as an equal share, so a
+// list without a weight must not be read as taking no traffic.
+type WeightedSegmentList struct {
+	Segments []netip.Addr
+	Weight   uint32
+}
+
 type CandidatePath struct {
 	Origin        Origin
 	Distinguisher uint32
 	Preference    uint32
-	// SegmentList is the SR Policy transport SID list (RFC 9830/9831
-	// Type B SRv6 SIDs). The VPN service SID is composed onto the tail
-	// in the data plane, not stored here.
+	// SegmentList is the transport SID list actually programmed: the first
+	// usable Segment List of this candidate path. Kept as the single-list
+	// view every existing consumer uses.
 	SegmentList []netip.Addr
+	// SegmentLists holds every usable Segment List with its weight, in wire
+	// order. It is what weighted ECMP selects over; SegmentList is its first
+	// element's segments.
+	SegmentLists []WeightedSegmentList
 }
+
+// SRPolicyDefaultWeight is the share a Segment List takes when it carries
+// no Weight sub-TLV.
+const SRPolicyDefaultWeight = 1
 
 // SRPolicyKey identifies a previously-advertised SR Policy for
 // withdrawal: the {Distinguisher, Color, Endpoint} tuple of the NLRI

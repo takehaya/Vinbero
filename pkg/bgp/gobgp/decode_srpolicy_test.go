@@ -131,7 +131,11 @@ func TestDecodeSRPolicy_RejectsNonIPv6SID(t *testing.T) {
 }
 
 // Multiple Segment List sub-TLVs (weighted ECMP): only the first wins.
-func TestDecodeSRPolicy_FirstSegmentListWins(t *testing.T) {
+// The single-list view is the FIRST list, not an arbitrary one: it is what
+// gets programmed today, so which list it names is observable. The other
+// lists are no longer discarded (see the weighted tests below) -- this pins
+// only which one leads.
+func TestDecodeSRPolicy_FirstSegmentListLeads(t *testing.T) {
 	p := srPolicyPath(t, 1, 100, "2001:db8::2",
 		&gobgppkt.TunnelEncapSubTLVSRSegmentList{
 			Segments: []gobgppkt.TunnelEncapSubTLVInterface{typeB(t, "fd00:200:0:1::")},
@@ -146,7 +150,10 @@ func TestDecodeSRPolicy_FirstSegmentListWins(t *testing.T) {
 	}
 	segs := got.Candidates[0].SegmentList
 	if len(segs) != 1 || segs[0] != netip.MustParseAddr("fd00:200:0:1::") {
-		t.Errorf("segments = %v, want first list only [fd00:200:0:1::]", segs)
+		t.Errorf("segments = %v, want the first list [fd00:200:0:1::]", segs)
+	}
+	if n := len(got.Candidates[0].SegmentLists); n != 2 {
+		t.Errorf("decoded %d lists, want both retained", n)
 	}
 }
 
@@ -186,5 +193,114 @@ func TestDecodeSRPolicy_Withdraw(t *testing.T) {
 	}
 	if got.Candidates[0].Distinguisher != 3 || len(got.Candidates[0].SegmentList) != 0 {
 		t.Errorf("withdraw candidate = %+v, want dist 3 and no segments", got.Candidates[0])
+	}
+}
+
+func segList(t *testing.T, weight uint32, sids ...string) *gobgppkt.TunnelEncapSubTLVSRSegmentList {
+	t.Helper()
+	sl := &gobgppkt.TunnelEncapSubTLVSRSegmentList{}
+	for _, sid := range sids {
+		sl.Segments = append(sl.Segments, typeB(t, sid))
+	}
+	if weight != 0 {
+		sl.Weight = &gobgppkt.SegmentListWeight{Weight: weight}
+	}
+	return sl
+}
+
+// A candidate path may carry several Segment Lists, which together form a
+// weighted ECMP set (RFC 9256 2.2). The decoder used to keep only the first
+// and discard the rest.
+func TestDecodeSRPolicy_MultipleWeightedSegmentLists(t *testing.T) {
+	p := srPolicyPath(t, 1, 100, "2001:db8::2",
+		segList(t, 1, "fd00:1::1"),
+		segList(t, 3, "fd00:2::1", "fd00:2::2"),
+	)
+	got := decodeSRPolicy(p)
+	if got == nil {
+		t.Fatal("decodeSRPolicy returned nil")
+	}
+	cp := got.Candidates[0]
+	if len(cp.SegmentLists) != 2 {
+		t.Fatalf("decoded %d lists, want 2", len(cp.SegmentLists))
+	}
+	if cp.SegmentLists[0].Weight != 1 || cp.SegmentLists[1].Weight != 3 {
+		t.Errorf("weights = %d,%d want 1,3",
+			cp.SegmentLists[0].Weight, cp.SegmentLists[1].Weight)
+	}
+	if len(cp.SegmentLists[1].Segments) != 2 {
+		t.Errorf("second list segments = %v", cp.SegmentLists[1].Segments)
+	}
+	// The single-list view stays the first list, which is what is programmed
+	// until the data plane selects over the set.
+	if len(cp.SegmentList) != 1 || cp.SegmentList[0].String() != "fd00:1::1" {
+		t.Errorf("SegmentList = %v, want the first list", cp.SegmentList)
+	}
+}
+
+// RFC 9256 leaves an absent Weight sub-TLV to the implementation. Reading it
+// as zero would retire the list from the ECMP set, which is the opposite of
+// what every deployment means by omitting it.
+func TestDecodeSRPolicy_AbsentWeightIsAnEqualShare(t *testing.T) {
+	p := srPolicyPath(t, 1, 100, "2001:db8::2",
+		segList(t, 0, "fd00:1::1"),
+		segList(t, 0, "fd00:2::1"),
+	)
+	cp := decodeSRPolicy(p).Candidates[0]
+	if len(cp.SegmentLists) != 2 {
+		t.Fatalf("decoded %d lists, want 2", len(cp.SegmentLists))
+	}
+	for i, l := range cp.SegmentLists {
+		if l.Weight != bgp.SRPolicyDefaultWeight {
+			t.Errorf("list %d weight = %d, want the default %d",
+				i, l.Weight, bgp.SRPolicyDefaultWeight)
+		}
+	}
+}
+
+// One bad list must not take the usable ones with it: they are independent
+// statements about how to reach the same endpoint.
+func TestDecodeSRPolicy_MalformedListDropsOnlyItself(t *testing.T) {
+	bad := &gobgppkt.TunnelEncapSubTLVSRSegmentList{
+		Segments: []gobgppkt.TunnelEncapSubTLVInterface{
+			// An IPv4 SID cannot be an SRv6 transport SID.
+			&gobgppkt.SegmentTypeB{SID: netip.MustParseAddr("10.0.0.1").AsSlice()},
+		},
+	}
+	p := srPolicyPath(t, 1, 100, "2001:db8::2", bad, segList(t, 2, "fd00:2::1"))
+	cp := decodeSRPolicy(p).Candidates[0]
+	if len(cp.SegmentLists) != 1 {
+		t.Fatalf("decoded %d lists, want only the usable one", len(cp.SegmentLists))
+	}
+	if cp.SegmentLists[0].Weight != 2 {
+		t.Errorf("surviving list weight = %d, want 2", cp.SegmentLists[0].Weight)
+	}
+	if len(cp.SegmentList) != 1 {
+		t.Errorf("SegmentList = %v, want the surviving list", cp.SegmentList)
+	}
+}
+
+// With every list unusable the candidate must still come out ineligible,
+// which is the behaviour the single-list decoder had.
+func TestDecodeSRPolicy_AllListsUnusableLeavesNoSegments(t *testing.T) {
+	bad := &gobgppkt.TunnelEncapSubTLVSRSegmentList{
+		Segments: []gobgppkt.TunnelEncapSubTLVInterface{
+			&gobgppkt.SegmentTypeB{SID: netip.MustParseAddr("10.0.0.1").AsSlice()},
+		},
+	}
+	cp := decodeSRPolicy(srPolicyPath(t, 1, 100, "2001:db8::2", bad)).Candidates[0]
+	if len(cp.SegmentLists) != 0 || len(cp.SegmentList) != 0 {
+		t.Errorf("expected no usable segments, got lists=%v single=%v",
+			cp.SegmentLists, cp.SegmentList)
+	}
+}
+
+// A list naming no usable segment carries no path. Treating it as an
+// empty-but-valid list would install a policy that encapsulates to nothing.
+func TestDecodeSRPolicy_EmptyListIsNotUsable(t *testing.T) {
+	empty := &gobgppkt.TunnelEncapSubTLVSRSegmentList{}
+	cp := decodeSRPolicy(srPolicyPath(t, 1, 100, "2001:db8::2", empty, segList(t, 1, "fd00:2::1"))).Candidates[0]
+	if len(cp.SegmentLists) != 1 {
+		t.Fatalf("decoded %d lists, want only the non-empty one", len(cp.SegmentLists))
 	}
 }

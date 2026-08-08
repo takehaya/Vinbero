@@ -115,9 +115,21 @@ prefix は group 側に記録されていないため、headend map を走査し
 
 liveness は「prober の報告がまだ無い」状態と「実際に全 path が生きている」状態を区別して出します。data plane はどちらも全 path を使うので挙動は同じですが、なぜトラフィックが動いたのかを調べるときに意味が違うためです。
 
+## SR Policy の weighted segment list
+
+candidate path は Segment List を複数持てて、まとめて weighted ECMP の集合になります (RFC 9256 2.2)。受信側はこれを全部 decode し、各 list の weight とともに `CandidatePath.SegmentLists` に載せます。従来は最初の 1 本だけ残して捨てていました。
+
+Weight sub-TLV が無い場合は等分として扱います。RFC 9256 は実装依存としていますが、0 と読むとその list を ECMP 集合から外すことになり、省略の意図と正反対になるためです。
+
+壊れた list は、その list だけを落とします。list が 1 本しか無い前提なら、壊れていたら candidate ごと ineligible にするのが正しい判断でした。より低い preference の代替に steer するより、読めなかった list から組んだ経路に流す方が危険だからです。複数ある場合、他の list は同じ endpoint への独立した記述なので、1 本の破損で全部落とすとまだ使える policy を落とすことになります。全 list が使えない candidate は従来どおり ineligible になります。
+
+segment を 1 つも指さない list も使えないものとして落とします。空のまま有効として扱うと、どこにも encap しない policy を install することになるためです。
+
+program されるのは今のところ先頭の list だけです。data plane 側の weighted 選択は後続の変更です。
+
 ## 制約と今後
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。
 - L2 headend (FDB → bd_peer) の aliasing は EVPN RT1 の対応と同時に入れます。ESI から group_id を引く side table を足し、この group 機構をそのまま使う予定です。
-- SR Policy の weighted segment list (RFC 9256 の複数 Segment List sub-TLV) は `sr_policy_value` に group_id を足し、`tailcall_ctx.flow_hash` で選択する形で拡張できます。tailcall_ctx に flow_hash を先に載せてあるのはこのためです。
+- SR Policy の weighted segment list は受信側の decode が済んでいます (下記)。data plane 側は `sr_policy_value` に group_id を足し、`tailcall_ctx.flow_hash` で選択する形で拡張します。tailcall_ctx に flow_hash を先に載せてあるのはこのためです。
 - hash の seed は固定です。path 選択はノード内で per-flow に安定していればよく、固定 seed は BPF_PROG_TEST_RUN のテストを再現可能にします。
