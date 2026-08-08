@@ -99,6 +99,14 @@ trigger エントリには group_id に加えて先頭 member の segments も�
 
 group id は再起動を跨げません。owner tag は 64 バイトに収まる必要があり、prefix を入れると IPv6 で溢れるため、どの group がどの prefix のものだったかを記録できないからです。そこで起動時に自分が owner の group を sweep して世代ごとの orphan が積み上がるのを防ぎ、他の owner が持つ group と衝突しないよう、残っている id の上から採番を再開します。
 
+## kernel FIB の multipath
+
+BGP で学習した IPv6 unicast 経路は `pkg/fib` から kernel FIB に注入します。`Route` は next hop を複数持てるようになり、2 本以上あるとき netlink の `MultiPath` として渡します。
+
+next hop が 1 本のときは multipath でなく通常の gateway 経路として書きます。kernel は要素 1 つの multipath を通常経路に正規化して返すので、multipath で書くと同じ経路が round trip 後に自分自身と一致しなくなるためです。
+
+weight は 1 始まりの自然な値で扱い、netlink の境界で変換します。wire 上の `rtnh_hops` は weight より 1 小さいので、そのまま渡すと全 next hop の取り分が 1 つずつ増えてしまいます。境界で吸収しているので、上位のコードはこの差を意識しません。weight 0 は 1 と読みます。取り分ゼロの next hop を意図する呼び出し元は無いためです。
+
 ## 制約と今後
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。

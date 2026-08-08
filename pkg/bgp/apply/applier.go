@@ -328,7 +328,7 @@ func (a *Applier) applyUnicast(ur *bgp.UnicastRoute, withdraw bool) {
 				zap.String("nexthop", ur.NextHop), zap.Error(err))
 			return
 		}
-		r.NextHop = nh
+		r.NextHops = []fib.NextHop{{Gw: nh}}
 	}
 	if err := a.fib.Add(r); err != nil {
 		a.logger.Error("install unicast route",
