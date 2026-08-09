@@ -58,6 +58,16 @@ static __always_inline void fdb_learn_remote_mac(
             existing->last_seen = bpf_ktime_get_ns();
         return;
     }
+    // An entry pointing above the flood range is the control plane's EVPN
+    // aliasing pointer (synthetic ES peer). The frame's sender is one member
+    // PE of that segment; rewriting the entry to the sender's own peer would
+    // pin every flow to whichever PE delivered the last frame and erase the
+    // split-horizon ESI. Refresh liveness only.
+    if (existing && existing->is_remote && existing->peer_index >= MAX_BUM_NEXTHOPS) {
+        if (!existing->is_static)
+            existing->last_seen = bpf_ktime_get_ns();
+        return;
+    }
 
     struct fdb_entry learn_val = {
         .is_remote = 1,

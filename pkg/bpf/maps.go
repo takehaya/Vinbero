@@ -24,6 +24,14 @@ const (
 	MaxBumNexthops = 8 // Must match MAX_BUM_NEXTHOPS in xdp_prog.h
 	EcmpMaxPaths   = 8 // Must match ECMP_MAX_PATHS in xdp_prog.h
 	EcmpGroupNone  = 0 // headend_entry.group_id sentinel (ECMP_GROUP_NONE)
+
+	// EVPN aliasing places its synthetic Ethernet Segment peers above the
+	// flood range: the TC BUM loop scans bd_peer indices [0, MaxBumNexthops)
+	// only, so an ES peer parked at [EsPeerIndexBase, EsPeerIndexBase +
+	// MaxEsPeersPerBd) can never be replicated to, and it does not consume
+	// one of the eight flood-capable slots either.
+	EsPeerIndexBase = MaxBumNexthops
+	MaxEsPeersPerBd = 32
 )
 
 // Type aliases for BPF generated types
@@ -2528,6 +2536,22 @@ func (m *MapOperations) FindFreeBdPeerIndex(bdID uint16) uint16 {
 		}
 	}
 	return MaxBumNexthops
+}
+
+// FindFreeBdPeerEsIndex returns the lowest free bd_peer index in the ES-peer
+// range [EsPeerIndexBase, EsPeerIndexBase+MaxEsPeersPerBd), scanning the real
+// map like FindFreeBdPeerIndex does so an allocation never collides with an
+// entry a previous run left pinned. Returns EsPeerIndexBase+MaxEsPeersPerBd
+// when the range is full.
+func (m *MapOperations) FindFreeBdPeerEsIndex(bdID uint16) uint16 {
+	var entry HeadendEntry
+	for i := uint16(EsPeerIndexBase); i < EsPeerIndexBase+MaxEsPeersPerBd; i++ {
+		key := &BdPeerKey{BdId: bdID, Index: i}
+		if err := m.objs.BdPeerMap.Lookup(key, &entry); err != nil {
+			return i
+		}
+	}
+	return EsPeerIndexBase + MaxEsPeersPerBd
 }
 
 // ListBdPeers returns all BD peer entries

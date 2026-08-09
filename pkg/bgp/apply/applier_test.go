@@ -116,6 +116,27 @@ func (f *fakeHeadend) FindFreeBdPeerIndex(bdID uint16) uint16 {
 	return bpf.MaxBumNexthops
 }
 
+// ListBdPeers renders the fake's bd_peer table in the real map's key type,
+// for the startup ES-peer sweep.
+func (f *fakeHeadend) ListBdPeers() (map[bpf.BdPeerKey]*bpf.HeadendEntry, error) {
+	out := make(map[bpf.BdPeerKey]*bpf.HeadendEntry, len(f.bdPeers))
+	for k, v := range f.bdPeers {
+		out[bpf.BdPeerKey{BdId: k.bdID, Index: k.index}] = v
+	}
+	return out, nil
+}
+
+// FindFreeBdPeerEsIndex mirrors the ES-peer range scan above the flood
+// indices.
+func (f *fakeHeadend) FindFreeBdPeerEsIndex(bdID uint16) uint16 {
+	for i := uint16(bpf.EsPeerIndexBase); i < bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd; i++ {
+		if _, ok := f.bdPeers[bdPeerKey{bdID, i}]; !ok {
+			return i
+		}
+	}
+	return bpf.EsPeerIndexBase + bpf.MaxEsPeersPerBd
+}
+
 // GetEsi / SetEsiDfPe model the esi_map for DF election tests. A test seeds an
 // ESI (local-attached or not) into f.esis; SetEsiDfPe records the elected DF.
 func (f *fakeHeadend) GetEsi(esi [bpf.ESILen]byte) (*bpf.EsiEntry, error) {

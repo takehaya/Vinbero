@@ -70,6 +70,17 @@ func OwnerBGPVPNGroup(asn uint32) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:vpngroup", OwnerTagVersion, asn))
 }
 
+// OwnerBGPEVPNGroup owns the ECMP groups an EVPN multi-homed Ethernet
+// Segment aliases over: one group per {bridge domain, ESI}, holding one
+// member per all-active PE that advertised a per-EVI Ethernet A-D route.
+// Scoped like OwnerBGPVPNGroup and for the same reasons: the members arrive
+// under per-PE RDs, and the segment identity would overflow the tag buffer.
+// The applier sweeps this owner's groups at startup and rebuilds them from
+// the replayed rib.
+func OwnerBGPEVPNGroup(asn uint32) OwnerTag {
+	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:evpngroup", OwnerTagVersion, asn))
+}
+
 // IsLegacyBGPVPNOwner reports whether tag is a pre-aggregation VPN owner
 // belonging to this node: the RD-scoped form OwnerBGPVPN produced when each
 // prefix was written per RD.

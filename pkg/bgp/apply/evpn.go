@@ -33,6 +33,13 @@ type fdbBdOps interface {
 	// real map, so a BGP-allocated peer never collides with an operator-created
 	// or restart-pinned entry.
 	FindFreeBdPeerIndex(bdID uint16) uint16
+	// FindFreeBdPeerEsIndex is the same scan over the ES-peer range above the
+	// BUM flood indices, where the aliasing path parks its synthetic
+	// segment peers.
+	FindFreeBdPeerEsIndex(bdID uint16) uint16
+	// ListBdPeers backs the startup sweep of ES peers a previous run left
+	// in the pinned map.
+	ListBdPeers() (map[bpf.BdPeerKey]*bpf.HeadendEntry, error)
 	// GetEsi / SetEsiDfPe drive DF election: GetEsi reports whether this PE
 	// locally attaches the segment (and its local source), SetEsiDfPe writes
 	// the elected DF's source address. RT4 never creates an ES locally; the
@@ -120,15 +127,39 @@ type evpnTable struct {
 	// waiting for a withdrawal per MAC would keep blackholing traffic for as
 	// long as that takes. Guarded by evpnMu, like fdb itself.
 	macsByES map[esMemberKey]map[evpnFdbKey]struct{}
+
+	// Aliasing state (see evpn_alias.go), guarded by evpnMu like fdb.
+	// esAD records each PE's per-ES Ethernet A-D (value: the Single-Active
+	// bit -- true forbids aliasing), eviAD each per-EVI A-D contribution,
+	// esDests the programmed group per {bd, ESI}, and macContribs the RT2
+	// ledger entries sharing one data-plane {bd, MAC} key.
+	esAD        map[esMemberKey]bool
+	eviAD       map[evpnEviADKey]eviADState
+	esDests     map[esDestKey]*esDest
+	macContribs map[macDPKey]map[evpnFdbKey]struct{}
+	// esWithdrawn marks a {ESI, PE} whose per-ES A-D was withdrawn while an
+	// aliasing group still covered its MACs, so a later dissolve knows to
+	// finish the mass withdraw for them instead of pointing them back at
+	// the departed PE. Cleared when the PE re-advertises the per-ES route
+	// or its last indexed MAC drains.
+	esWithdrawn map[esMemberKey]struct{}
+	// Segment group id allocation, in the partition above esGroupIDBase.
+	nextGroupID  uint32
+	freeGroupIDs []uint32
 }
 
 func newEVPNTable() *evpnTable {
 	return &evpnTable{
-		peers:     make(map[evpnPeerKey]*evpnPeerState),
-		fdb:       make(map[evpnFdbKey]evpnFdbState),
-		mcast:     make(map[evpnMcastKey]evpnMcastState),
-		macsByES:  make(map[esMemberKey]map[evpnFdbKey]struct{}),
-		esMembers: make(map[[bpf.ESILen]byte]map[string]struct{}),
+		peers:       make(map[evpnPeerKey]*evpnPeerState),
+		fdb:         make(map[evpnFdbKey]evpnFdbState),
+		mcast:       make(map[evpnMcastKey]evpnMcastState),
+		macsByES:    make(map[esMemberKey]map[evpnFdbKey]struct{}),
+		esMembers:   make(map[[bpf.ESILen]byte]map[string]struct{}),
+		esAD:        make(map[esMemberKey]bool),
+		eviAD:       make(map[evpnEviADKey]eviADState),
+		esDests:     make(map[esDestKey]*esDest),
+		macContribs: make(map[macDPKey]map[evpnFdbKey]struct{}),
+		esWithdrawn: make(map[esMemberKey]struct{}),
 	}
 }
 
@@ -220,52 +251,17 @@ func (a *Applier) applyEVPNLocked(r *bgp.EVPNRoute, withdraw bool) {
 	}
 }
 
-// applyEVPNEthernetAD handles RT1 Ethernet A-D. Only the per-ES form is acted
-// on today, and only its withdrawal: that is the mass-withdraw signal of RFC
-// 7432 §8.2.
-//
-// A PE withdrawing its per-ES route is saying the whole segment is gone from
-// it. The per-MAC withdrawals follow, but a segment can hold thousands of
-// MACs and every one of them keeps blackholing traffic until its own
-// withdrawal arrives. Acting on the single per-ES route converges the lot at
-// once. Re-advertisement needs no special handling: the MACs come back as
-// ordinary RT2s.
-//
-// The per-EVI form carries the aliasing SID and is not consumed yet; aliasing
-// needs the data-plane group lookup.
-//
+// applyEVPNEthernetAD handles RT1 Ethernet A-D in both its forms (RFC 7432
+// §8.2, §8.4). The per-ES route declares a PE's attachment to the segment
+// and, on withdrawal, is the mass-withdraw signal; the per-EVI route carries
+// the aliasing SID. Both feed the segment ECMP groups in evpn_alias.go.
 // Caller holds evpnMu.
 func (a *Applier) applyEVPNEthernetAD(r *bgp.EVPNRoute, withdraw bool) {
-	if !withdraw || !r.IsPerES() {
+	if r.IsPerES() {
+		a.applyEVPNPerESAD(r, withdraw)
 		return
 	}
-	var zeroESI [bpf.ESILen]byte
-	if r.ESI == zeroESI || r.NextHop == "" {
-		// Without both we cannot say whose contribution to drop, and
-		// guessing would tear down MACs that are still reachable.
-		return
-	}
-	k := esMemberKey{esi: r.ESI, pe: r.NextHop}
-	macs := a.evpn.macsByES[k]
-	if len(macs) == 0 {
-		return
-	}
-	// Snapshot the keys: withdrawEVPNMac mutates the index through
-	// unindexMACByES, and iterating a map while deleting from it would skip
-	// entries.
-	fks := make([]evpnFdbKey, 0, len(macs))
-	for fk := range macs {
-		fks = append(fks, fk)
-	}
-	for _, fk := range fks {
-		st, ok := a.evpn.fdb[fk]
-		if !ok {
-			continue
-		}
-		a.withdrawEVPNMac(fk, st)
-	}
-	a.logger.Info("EVPN mass withdraw", zap.String("pe", r.NextHop),
-		zap.Int("macs", len(fks)))
+	a.applyEVPNPerEVIAD(r, withdraw)
 }
 
 // ReplayEVPN re-applies the current EVPN loc-rib through the receive path.
@@ -350,11 +346,15 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 	pk := evpnPeerKey{bdID: bdID, sid: r.SRv6SID}
 
 	// Re-advertise / MAC move: an unchanged NLRI returns early so a second
-	// allocIndex would not bump refs and leak the bd_peer slot. A MAC move
-	// (different PE or BD) tears the old mapping down first so its peer
-	// ref and FDB entry release before the new install.
+	// allocIndex would not bump refs and leak the bd_peer slot. Any changed
+	// dimension tears the old mapping down first so its peer ref, FDB entry
+	// and segment index release before the new install. ESI and PE are part
+	// of the comparison: an RT2 re-advertised with a different ESI is how a
+	// host joins or leaves a multi-homed segment (the ESI is not in the
+	// route key), and skipping it would leave the MAC in the wrong segment
+	// index -- missed by that segment's mass withdraw, kept in one it left.
 	if prev, ok := a.evpn.fdb[fk]; ok {
-		if prev.peer == pk && prev.bdID == bdID {
+		if prev.peer == pk && prev.bdID == bdID && prev.esi == r.ESI && prev.pe == r.NextHop {
 			return
 		}
 		a.withdrawEVPNMac(fk, prev)
@@ -379,7 +379,16 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		a.evpn.releaseIndex(pk)
 		return
 	}
-	fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: idx, BdId: bdID, Esi: r.ESI}
+	// A MAC behind an aliased segment points at the segment's ES peer, so
+	// every all-active PE forwards for it; otherwise at the advertising PE's
+	// own peer. The per-PE peer is allocated either way: the RX path needs
+	// its reverse-map entry, and it is the fallback target when aliasing
+	// dissolves.
+	fdbIdx := idx
+	if d := a.evpn.esDests[esDestKey{bdID: bdID, esi: r.ESI}]; d != nil && d.active {
+		fdbIdx = d.peerIdx
+	}
+	fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: fdbIdx, BdId: bdID, Esi: r.ESI}
 	if err := a.fdbBd.CreateFdb(bdID, mac, fdb); err != nil {
 		a.logger.Error("install EVPN FDB", zap.String("mac", r.MAC), zap.Error(err))
 		if rIdx, gone := a.evpn.releaseIndex(pk); gone {
@@ -390,13 +399,15 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 	st := evpnFdbState{bdID: bdID, mac: mac, peer: pk, esi: r.ESI, pe: r.NextHop}
 	a.evpn.fdb[fk] = st
 	a.indexMACByES(fk, st)
+	mk := macDPKey{bdID: bdID, mac: mac.String()}
+	if a.evpn.macContribs[mk] == nil {
+		a.evpn.macContribs[mk] = make(map[evpnFdbKey]struct{})
+	}
+	a.evpn.macContribs[mk][fk] = struct{}{}
 	a.logger.Info("EVPN MAC installed",
 		zap.String("mac", r.MAC), zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 }
 
-// withdrawEVPNMac removes the FDB entry recorded for fk and releases its peer
-// reference, deleting the bd_peer when the last MAC stops referencing it.
-// Caller holds evpnMu.
 // indexMACByES records that one PE taught this MAC on a multi-homed segment,
 // so a per-ES withdraw can find it. A single-homed MAC (all-zero ESI) or one
 // with no identifiable PE is not indexed: neither can be converged off a
@@ -434,11 +445,41 @@ func (a *Applier) unindexMACByES(fk evpnFdbKey, st evpnFdbState) {
 	delete(macs, fk)
 	if len(macs) == 0 {
 		delete(a.evpn.macsByES, k)
+		// Nothing left for a deferred mass withdraw to finish.
+		delete(a.evpn.esWithdrawn, k)
 	}
 }
 
+// withdrawEVPNMac removes one RT2's contribution to the FDB and releases its
+// peer reference, deleting the bd_peer when the last MAC stops referencing
+// it.
+//
+// The data-plane key {bd, MAC} is shared: with all-active multi-homing every
+// attached PE advertises the MAC under its own RD, so several fdb-ledger
+// entries stand behind one FDB entry. The entry is deleted only with the
+// last contribution; while others survive it is re-installed from one of
+// them, so a single PE's withdrawal can no longer tear down a MAC the
+// remaining PEs still back. Caller holds evpnMu.
 func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
-	if err := a.fdbBd.DeleteFdb(st.bdID, st.mac); err != nil {
+	mk := macDPKey{bdID: st.bdID, mac: st.mac.String()}
+	if sfk, sst, ok := a.survivingContrib(mk, fk); ok {
+		if idx, resolvable := a.fdbTargetIndex(sst); resolvable {
+			fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: idx, BdId: sst.bdID, Esi: sst.esi}
+			if err := a.fdbBd.CreateFdb(sst.bdID, sst.mac, fdb); err != nil {
+				// The FDB entry still points at the withdrawn contribution's
+				// target. Keep every ledger so a later retry can hand off.
+				a.logger.Error("hand EVPN MAC to surviving PE",
+					zap.String("mac", st.mac.String()), zap.Error(err))
+				return
+			}
+		} else {
+			// The ledgers disagree (no peer to point at); leave the entry as
+			// is rather than black-hole it, and still drop this
+			// contribution.
+			a.logger.Error("EVPN MAC survivor has no resolvable peer",
+				zap.String("mac", st.mac.String()), zap.String("rd", sfk.rd))
+		}
+	} else if err := a.fdbBd.DeleteFdb(st.bdID, st.mac); err != nil {
 		// The FDB entry is still in the map. Keep the reverse index so a
 		// later retry can find and remove it; dropping it here would orphan
 		// the map entry and the peer reference it holds.
@@ -447,6 +488,12 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 		return
 	}
 	delete(a.evpn.fdb, fk)
+	if contribs := a.evpn.macContribs[mk]; contribs != nil {
+		delete(contribs, fk)
+		if len(contribs) == 0 {
+			delete(a.evpn.macContribs, mk)
+		}
+	}
 	a.unindexMACByES(fk, st)
 	if idx, gone := a.evpn.releaseIndex(st.peer); gone {
 		if err := a.fdbBd.DeleteBdPeer(st.bdID, idx); err != nil {

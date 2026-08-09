@@ -102,7 +102,17 @@ static __noinline int try_l2_headend(
             return bd_action; // BUM / pass / etc. handled by the lookup helper
     }
 
-    if (tailcall_ctx_write_headend(encap, 0, DISPATCH_HEADEND_L2, encap->mode, 0) == 0)
+    // EVPN aliasing: a bd_peer that fronts a multi-homed segment carries an
+    // ECMP group of the member PEs' entries; resolve it here so the single
+    // bpf_tail_call site below stays the only one (see the invariant note on
+    // try_bd_peer_lookup). An entry without a group resolves to itself, and
+    // the hash also feeds the outer flow label for underlay entropy.
+    __u32 flow_hash = ecmp_flow_hash_l2(ctx);
+    encap = ecmp_resolve_headend(encap, flow_hash);
+    if (!encap)
+        return XDP_DROP;
+
+    if (tailcall_ctx_write_headend(encap, 0, DISPATCH_HEADEND_L2, encap->mode, flow_hash) == 0)
         bpf_tail_call(ctx, &headend_l2_progs, encap->mode);
     return XDP_DROP;
 }

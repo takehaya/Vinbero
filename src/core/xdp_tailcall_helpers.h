@@ -33,7 +33,7 @@ static __always_inline int tailcall_ctx_write_sid(
 // Write headend context. Caller must pass DISPATCH_HEADEND_V4/V6/L2 so the
 // epilogue can select the right stats map. `slot` is the tail-call index
 // (= entry->mode). `flow_hash` is the inner flow hash for outer flow-label
-// entropy (0 when the dispatcher does not hash, e.g. L2).
+// entropy (0 when the dispatcher does not hash, e.g. endpoint dispatch).
 static __always_inline int tailcall_ctx_write_headend(
     struct headend_entry *entry,
     __u16 l3_offset,

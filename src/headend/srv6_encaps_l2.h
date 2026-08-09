@@ -49,7 +49,7 @@ static __noinline int do_h_encaps_l2(
 
     build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
                      entry->src_addr, &entry->segments[0],
-                     0 /* L2 dispatch does not hash; label 0 */);
+                     headend_ctx_flow_label(0));
 
     srh->nexthdr = IPPROTO_ETHERNET;
     srh->hdrlen = (srh_len >> 3) - 1;
@@ -97,7 +97,7 @@ static __always_inline int do_h_encaps_l2_red_1seg(
 
     build_outer_ipv6(outer_ip6h, IPPROTO_ETHERNET, l2_frame_len,
                      entry->src_addr, &entry->segments[0],
-                     0 /* L2 dispatch does not hash; label 0 */);
+                     headend_ctx_flow_label(0));
 
     __u32 ifindex;
     int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
@@ -145,7 +145,7 @@ static __always_inline int do_h_encaps_l2_red_multi(
 
     build_outer_ipv6(outer_ip6h, IPPROTO_ROUTING, srh_len + l2_frame_len,
                      entry->src_addr, &entry->segments[0],
-                     0 /* L2 dispatch does not hash; label 0 */);
+                     headend_ctx_flow_label(0));
 
     srh->nexthdr = IPPROTO_ETHERNET;
     srh->hdrlen = (srh_len >> 3) - 1;
