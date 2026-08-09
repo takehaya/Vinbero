@@ -454,9 +454,9 @@ type EVPNController interface {
 
 // EVPNRoute is a decoded BGP EVPN NLRI (AFI 25 / SAFI 70). One envelope
 // carries every route type; the fields a type does not use stay zero.
-// The SRv6 service SID (End.DT2U for RT2 and for a per-EVI RT1, End.DT2M
-// for RT3) is decoded from the BGP Prefix-SID attribute's SRv6 L2 Service
-// TLV (RFC 9252 §6); RT4 and a per-ES RT1 carry no SID. The route targets resolve the local bridge domain
+// The SRv6 service SID is decoded from the BGP Prefix-SID attribute's SRv6
+// L2 Service TLV (RFC 9252 §6): End.DT2U for RT2 and a per-EVI RT1, End.DT2M
+// for RT3 and a per-ES RT1. Only RT4 carries no SID. The route targets resolve the local bridge domain
 // through the same import-RT filter the L3VPN path uses.
 type EVPNRoute struct {
 	Type        EVPNRouteType
@@ -466,7 +466,7 @@ type EVPNRoute struct {
 	EthernetTag uint32
 	MAC         string // RT2: "aa:bb:cc:dd:ee:ff"
 	IPAddr      string // RT2: optional host IP (IRB); "" when MAC-only
-	SRv6SID     string // End.DT2U (RT2, per-EVI RT1) / End.DT2M (RT3); "" if none
+	SRv6SID     string // End.DT2U (RT2, per-EVI RT1) / End.DT2M (RT3, per-ES RT1); "" if none
 	NextHop     string
 	ESImportRT  string // RT4: ES-Import route target ("aa:bb:cc:dd:ee:ff"); "" otherwise
 	// SingleActive is the ESI Label extended community's Single-Active bit
@@ -475,7 +475,7 @@ type EVPNRoute struct {
 	// be aliased across PEs. Meaningless on other route types.
 	SingleActive bool
 	// RemoteSrc is the advertising PE's SRv6 encap source (the SID's locator
-	// base) for any route carrying a SID -- RT2, RT3 and a per-EVI RT1 --
+	// base) for any route carrying a SID -- RT2, RT3 and either RT1 form --
 	// used as the RX reverse-map key for split-horizon and remote-MAC
 	// learning, distinct from the local TX encap source. "" if not derivable.
 	RemoteSrc string

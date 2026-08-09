@@ -256,6 +256,76 @@ func rt1Path(t *testing.T, etag uint32, sid string, singleActive bool) *apiutil.
 	return &apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri, Attrs: attrs}
 }
 
+// rt1TransposedPath builds an RT1 whose SID has its Argument bits transposed
+// out into a label, so the decoded SID depends on which label the decoder
+// reads. nlriLabel goes in the NLRI, esiLabel in the ESI Label extended
+// community.
+func rt1TransposedPath(t *testing.T, etag, nlriLabel, esiLabel uint32) *apiutil.Path {
+	t.Helper()
+	rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 100)
+	esi := gobgppkt.EthernetSegmentIdentifier{
+		Type:  gobgppkt.ESI_ARBITRARY,
+		Value: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9},
+	}
+	nlri := &gobgppkt.EVPNNLRI{
+		RouteType: gobgppkt.EVPN_ROUTE_TYPE_ETHERNET_AUTO_DISCOVERY,
+		RouteTypeData: &gobgppkt.EVPNEthernetAutoDiscoveryRoute{
+			RD: rd, ESI: esi, ETag: etag, Label: nlriLabel,
+		},
+	}
+	info := gobgppkt.NewSRv6InformationSubTLV(
+		netip.MustParseAddr("fd00:1:1::"), gobgppkt.END_DT2M)
+	// block 32 / node 16 / function 16, argument transposed out: 16 bits at
+	// offset 64.
+	info.SubSubTLVs = append(info.SubSubTLVs,
+		gobgppkt.NewSRv6SIDStructureSubSubTLV(32, 16, 16, 16, 16, 64))
+	rt, _ := gobgppkt.ParseExtendedCommunity(gobgppkt.EC_SUBTYPE_ROUTE_TARGET, "65000:100")
+	attrs := []gobgppkt.PathAttributeInterface{
+		gobgppkt.NewPathAttributeExtendedCommunities([]gobgppkt.ExtendedCommunityInterface{
+			rt, gobgppkt.NewESILabelExtended(esiLabel, false),
+		}),
+		gobgppkt.NewPathAttributePrefixSID(
+			gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L2Service, info)),
+	}
+	return &apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri, Attrs: attrs}
+}
+
+// RFC 9252 puts the transposed Argument bits in different places for the two
+// RT1 forms: a per-EVI route uses the NLRI's MPLS label, a per-ES route sets
+// that label to 0 and uses the 24-bit ESI Label extended community instead.
+// Reading the wrong one composes a SID pointing somewhere else entirely, and
+// nothing downstream would notice.
+func TestDecodeEVPN_RT1TranspositionSource(t *testing.T) {
+	t.Run("per-EVI transposes from the NLRI label", func(t *testing.T) {
+		// The ESI Label differs between the two paths; only the NLRI label
+		// may move the SID.
+		a := decodeEVPNRoute(rt1TransposedPath(t, 100, 0x11000, 0))
+		b := decodeEVPNRoute(rt1TransposedPath(t, 100, 0x11000, 0x99000))
+		if a.SRv6SID != b.SRv6SID {
+			t.Errorf("per-EVI SID moved with the ESI Label: %q vs %q", a.SRv6SID, b.SRv6SID)
+		}
+		c := decodeEVPNRoute(rt1TransposedPath(t, 100, 0x22000, 0))
+		if a.SRv6SID == c.SRv6SID {
+			t.Errorf("per-EVI SID did not follow the NLRI label: both %q", a.SRv6SID)
+		}
+	})
+
+	t.Run("per-ES transposes from the ESI Label community", func(t *testing.T) {
+		et := bgp.EVPNMaxEthernetTag
+		// A per-ES route carries NLRI label 0 on the wire; vary it anyway to
+		// prove the decoder is not reading it.
+		a := decodeEVPNRoute(rt1TransposedPath(t, et, 0, 0x11000))
+		b := decodeEVPNRoute(rt1TransposedPath(t, et, 0x77000, 0x11000))
+		if a.SRv6SID != b.SRv6SID {
+			t.Errorf("per-ES SID moved with the NLRI label: %q vs %q", a.SRv6SID, b.SRv6SID)
+		}
+		c := decodeEVPNRoute(rt1TransposedPath(t, et, 0, 0x22000))
+		if a.SRv6SID == c.SRv6SID {
+			t.Errorf("per-ES SID did not follow the ESI Label: both %q", a.SRv6SID)
+		}
+	})
+}
+
 func TestDecodeEVPN_RT1(t *testing.T) {
 	// One NLRI type carries two statements, told apart by the Ethernet Tag.
 	// Confusing them would be serious: treating a per-ES withdraw as per-EVI

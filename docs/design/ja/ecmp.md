@@ -137,6 +137,8 @@ RT1 Ethernet A-D を decode します。従来は decode 自体が無く、appli
 
 Single-Active bit は per-ES 経路の ESI Label extended community から読みます。これが立っていると aliasing は禁止です。single-active では DF だけが転送するので、ES を広告している PE 群に分散させると non-DF に届いた分が black-hole します。
 
+transposition の取り出し元も 2 形式で違います。per-EVI は RT2/RT3 と同じく NLRI の MPLS label から取りますが、per-ES はその label を 0 にして、ESI Label extended community の 24-bit label に Argument を載せます (RFC 9252)。per-ES で NLRI label を読むと transposed bits が落ち、まったく別の場所を指す SID を組み立てます。gobgp は両者とも 3 バイトの raw 値として decode するので単位は揃っています。
+
 現時点では decode までで、applier はまだ RT1 を消費しません。aliasing と mass withdraw は data plane 側の変更を伴うため後続にしています。
 
 ## 制約と今後

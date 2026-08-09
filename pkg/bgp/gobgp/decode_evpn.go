@@ -58,29 +58,43 @@ func decodeEVPNEthernetAD(p *apiutil.Path, rt *gobgppkt.EVPNEthernetAutoDiscover
 	if rt.RD != nil {
 		r.RD = rt.RD.String()
 	}
+	// Where the transposed Argument bits live differs between the two forms.
+	// A per-EVI route transposes into the NLRI's MPLS label like RT2/RT3 do,
+	// but a per-ES route sets that label to 0 and carries the bits in the
+	// 24-bit label of the ESI Label extended community instead (RFC 9252:
+	// "The 24-bit ESI Label field of the ESI Label extended community
+	// carries the whole or a portion of the Argument part of the SRv6 SID
+	// when the ESI filtering approach is used along with the Transposition
+	// Scheme"). Reading the NLRI label for a per-ES route would drop the
+	// transposed bits and compose a SID that points somewhere else.
+	esiLabel, singleActive := decodeESILabel(p.Attrs)
 	label := rt.Label
+	if r.IsPerES() {
+		label = esiLabel
+	}
 	r.SRv6SID = decodeSRv6SID(p.Attrs, label)
 	r.RemoteSrc = decodeRemoteSrc(p.Attrs, label, defaultLocatorPrefixLen)
-	r.SingleActive = decodeSingleActive(p.Attrs)
+	r.SingleActive = singleActive
 	return r
 }
 
-// decodeSingleActive reads the Single-Active bit from the ESI Label extended
-// community (RFC 7432 §7.5). Absent community means all-active, which is the
-// mode that permits aliasing.
-func decodeSingleActive(attrs []gobgppkt.PathAttributeInterface) bool {
+// decodeESILabel reads the ESI Label extended community (RFC 7432 §7.5),
+// returning its 24-bit label and the Single-Active bit. An absent community
+// yields (0, false): all-active, which is the mode that permits aliasing,
+// and no transposed bits.
+func decodeESILabel(attrs []gobgppkt.PathAttributeInterface) (uint32, bool) {
 	for _, a := range attrs {
 		ec, ok := a.(*gobgppkt.PathAttributeExtendedCommunities)
 		if !ok {
 			continue
 		}
 		for _, c := range ec.Value {
-			if esi, ok := c.(*gobgppkt.ESILabelExtended); ok && esi.IsSingleActive {
-				return true
+			if esi, ok := c.(*gobgppkt.ESILabelExtended); ok {
+				return esi.Label, esi.IsSingleActive
 			}
 		}
 	}
-	return false
+	return 0, false
 }
 
 // decodeEVPNEthernetSegment decodes an RT4 Ethernet Segment route (RFC 7432
