@@ -364,9 +364,19 @@ func (a *Applier) reconcileESDestsForESI(esi [bpf.ESILen]byte) {
 		seen[st.bdID] = struct{}{}
 		a.reconcileESKey(esDestKey{bdID: st.bdID, esi: esi})
 	}
-	// A bd whose last eviAD is already gone keeps its dest until its own
-	// reconcile dissolves it; eviAD withdrawal reconciles directly, so
-	// nothing is left dangling here.
+	// Also visit dests whose eviAD state is already gone: a dissolve that
+	// had to stop halfway (sweep failure) survives with no per-EVI entry
+	// left to find it, and this is its retry path.
+	for dk := range a.evpn.esDests {
+		if dk.esi != esi {
+			continue
+		}
+		if _, dup := seen[dk.bdID]; dup {
+			continue
+		}
+		seen[dk.bdID] = struct{}{}
+		a.reconcileESKey(dk)
+	}
 }
 
 // reconcileESKey brings one {bd, ESI}'s programmed state in line with the
@@ -411,21 +421,30 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		return
 	}
 
-	// fail unwinds a half-done reconcile. An active dest is kept but its
-	// fingerprint is cleared: the programmed member set is now unknown, so
-	// no later fingerprint match may mask the retry, and mass withdraw
-	// treats the segment as uncovered instead of trusting a group that may
-	// still list a withdrawn PE. A never-active dest is rolled back
-	// entirely -- keeping it would park a ledger reservation on an index
-	// the allocator's map scan cannot see, and a second segment could be
-	// handed the same slot before the retry lands.
+	// fail unwinds a half-done reconcile back to per-PE forwarding. The
+	// programmed state cannot be trusted after a failed write -- a failed
+	// CreateBdPeer even removes the forward entry as its own rollback, so
+	// an FDB entry left aimed at the ES peer might point at nothing. The
+	// dest is dropped entirely: keeping it would park a ledger reservation
+	// on an index the allocator's map scan cannot see, and a second
+	// segment could be handed the same slot before the retry lands. The
+	// next route event for this key rebuilds from scratch.
 	fail := func(groupWritten bool) {
-		if d.active {
-			d.installed = nil
-			return
+		wasActive := d.active
+		if wasActive {
+			// Deactivate before the sweep so the survivor hand-off inside
+			// withdrawEVPNMac resolves to the per-PE peers.
+			d.active = false
+			a.sweepSegmentMacs(dk)
+			if err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil {
+				// Possibly already gone via CreateBdPeer's own rollback;
+				// nothing points at it after the sweep either way.
+				a.logger.Warn("unwind EVPN ES peer",
+					zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
+			}
 		}
 		freeID := true
-		if groupWritten {
+		if groupWritten || wasActive {
 			if err := a.ecmp.DeleteEcmpGroup(d.groupID, a.esGroupOwner()); err != nil {
 				a.logger.Error("unwind EVPN aliasing group",
 					zap.Uint32("group_id", d.groupID), zap.Error(err))
@@ -480,7 +499,13 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	d.installed = fingerprint
 	if !d.active {
 		d.active = true
-		a.repointSegmentMacs(dk, d.peerIdx)
+		if !a.repointSegmentMacs(dk, d.peerIdx) {
+			// A MAC whose repoint failed still forwards through its per-PE
+			// peer, so nothing is broken -- but clear the fingerprint so
+			// the next event for this key rewrites and retries instead of
+			// early-returning on an unchanged member set.
+			d.installed = nil
+		}
 	}
 	a.logger.Info("EVPN segment aliased",
 		zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID),
@@ -498,7 +523,18 @@ func (a *Applier) dissolveESDest(dk esDestKey, d *esDest) {
 	d.active = false
 	freeID := true
 	if wasActive {
-		a.sweepSegmentMacs(dk)
+		if !a.sweepSegmentMacs(dk) {
+			// Some FDB entries still aim at the ES peer; deleting it now
+			// would cut them over to nothing. Keep the programmed state --
+			// the stale group still forwards -- and let a future event for
+			// this key retry the dissolve (the cleared fingerprint keeps
+			// it from being masked as unchanged).
+			d.active = true
+			d.installed = nil
+			a.logger.Error("EVPN segment dissolve incomplete; keeping ES peer for retry",
+				zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
+			return
+		}
 		if err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil {
 			// Nothing points at the entry anymore, and no future route
 			// event is guaranteed to revisit this key (its eviAD state may
@@ -530,15 +566,18 @@ func (a *Applier) dissolveESDest(dk esDestKey, d *esDest) {
 // repointSegmentMacs points every learned MAC on {bd, ESI} at the ES peer.
 // Runs at formation, so MACs that arrived before the A-D routes join the
 // group; a MAC arriving after formation targets the ES peer directly in
-// applyEVPNMacIP.
-func (a *Applier) repointSegmentMacs(dk esDestKey, toIdx uint16) {
+// applyEVPNMacIP. Reports whether every write landed.
+func (a *Applier) repointSegmentMacs(dk esDestKey, toIdx uint16) bool {
+	ok := true
 	a.forEachSegmentMac(dk, func(fk evpnFdbKey, st evpnFdbState) {
 		fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: toIdx, BdId: st.bdID, Esi: st.esi}
 		if err := a.fdbBd.CreateFdb(st.bdID, st.mac, fdb); err != nil {
 			a.logger.Error("repoint EVPN MAC to ES peer",
 				zap.String("mac", st.mac.String()), zap.Error(err))
+			ok = false
 		}
 	})
+	return ok
 }
 
 // sweepSegmentMacs hands every learned MAC on a dissolving {bd, ESI} its
@@ -546,27 +585,38 @@ func (a *Applier) repointSegmentMacs(dk esDestKey, toIdx uint16) {
 // (retained because the group still covered it) is withdrawn outright: the
 // PE declared the segment gone, and pointing it back at the departed PE
 // would re-create the blackhole the mass withdraw removed. Every other MAC
-// falls back to its advertising PE's own bd_peer.
-func (a *Applier) sweepSegmentMacs(dk esDestKey) {
+// falls back to its advertising PE's own bd_peer. Reports whether every MAC
+// reached its terminal state -- a false return means some FDB entry still
+// aims at the ES peer.
+func (a *Applier) sweepSegmentMacs(dk esDestKey) bool {
+	ok := true
 	a.forEachSegmentMac(dk, func(fk evpnFdbKey, st evpnFdbState) {
 		if _, gone := a.evpn.esWithdrawn[esMemberKey{esi: st.esi, pe: st.pe}]; gone {
 			a.withdrawEVPNMac(fk, st)
+			if _, still := a.evpn.fdb[fk]; still {
+				// The withdraw kept the ledger because a map write failed;
+				// the shared entry may still point at the ES peer.
+				ok = false
+			}
 			return
 		}
-		ps, ok := a.evpn.peers[st.peer]
-		if !ok {
+		ps, resolvable := a.evpn.peers[st.peer]
+		if !resolvable {
 			// The per-PE peer should exist for as long as the fdb ledger
 			// holds the MAC; a miss means the ledgers disagree.
 			a.logger.Error("EVPN MAC has no per-PE peer to fall back to",
 				zap.String("mac", st.mac.String()))
+			ok = false
 			return
 		}
 		fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: ps.index, BdId: st.bdID, Esi: st.esi}
 		if err := a.fdbBd.CreateFdb(st.bdID, st.mac, fdb); err != nil {
 			a.logger.Error("repoint EVPN MAC to per-PE peer",
 				zap.String("mac", st.mac.String()), zap.Error(err))
+			ok = false
 		}
 	})
+	return ok
 }
 
 // survivingContrib picks the contribution that re-installs a shared {bd,

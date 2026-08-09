@@ -320,6 +320,38 @@ func TestApplier_EVPNRT2ESIChangeReindexes(t *testing.T) {
 	}
 }
 
+func TestApplier_EVPNDissolveKeepsESPeerWhenSweepFails(t *testing.T) {
+	// If a MAC cannot be moved off the ES peer, tearing the peer down would
+	// leave its FDB entry pointing at nothing. The dissolve must stop and
+	// keep the programmed state for a retry.
+	esi := [10]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	a, fh := aliasSegment(t, esi)
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+		EVPN: rt2From("65000:100:2", "aa:bb:cc:00:00:01", "fd00:2:2:d2::", "fd00::2", esi)})
+	idx, _ := esPeerOf(t, fh)
+
+	fh.fdbErr = fmt.Errorf("injected")
+	a.Apply(withdrawn(perEVIAD("65000:100:2", "fd00::2", "fd00:2:2:ad::", esi)))
+	a.Apply(withdrawn(perEVIAD("65000:100:3", "fd00::3", "fd00:3:3:ad::", esi)))
+
+	if _, ok := fh.bdPeers[bdPeerKey{100, idx}]; !ok {
+		t.Fatalf("ES peer deleted while a MAC still points at it")
+	}
+	if fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]; fdb == nil || fdb.PeerIndex != idx {
+		t.Fatalf("FDB entry = %+v, want left on ES peer %d", fdb, idx)
+	}
+
+	// The fault clears and any event for the key retries the dissolve.
+	fh.fdbErr = nil
+	a.Apply(withdrawn(perESAD("fd00::3", esi, false)))
+	if _, ok := fh.bdPeers[bdPeerKey{100, idx}]; ok {
+		t.Errorf("ES peer survived the retried dissolve")
+	}
+	if fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]; fdb == nil || fdb.PeerIndex >= bpf.EsPeerIndexBase {
+		t.Errorf("FDB entry = %+v, want repointed to a per-PE peer", fdb)
+	}
+}
+
 func TestApplier_EVPNAliasingMemberCapAndDedupe(t *testing.T) {
 	esi := [10]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 	a, fh := evpnApplier(t)
