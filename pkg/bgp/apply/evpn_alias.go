@@ -156,8 +156,10 @@ func (a *Applier) resetEVPNGroups() {
 	// they too survive a restart, and a MAC that the replayed rib no
 	// longer carries would keep aiming at an index a different segment may
 	// be handed later.
+	sweepOK := true
 	if fdbs, err := a.fdbBd.ListFdb(); err != nil {
 		a.logger.Error("list fdb; stale EVPN aliasing pointers may be left behind", zap.Error(err))
+		sweepOK = false
 	} else {
 		for k, e := range fdbs {
 			if e.IsRemote == 0 || e.PeerIndex < bpf.EsPeerIndexBase ||
@@ -167,12 +169,14 @@ func (a *Applier) resetEVPNGroups() {
 			if derr := a.fdbBd.DeleteFdb(k.BdId, net.HardwareAddr(k.Mac[:])); derr != nil {
 				a.logger.Error("sweep stale EVPN aliasing FDB entry",
 					zap.Uint16("bd_id", k.BdId), zap.Error(derr))
+				sweepOK = false
 			}
 		}
 	}
 
 	if peers, err := a.fdbBd.ListBdPeers(); err != nil {
 		a.logger.Error("list bd_peers; stale EVPN ES peers may be left behind", zap.Error(err))
+		sweepOK = false
 	} else {
 		for k := range peers {
 			// Only the reserved ES range: an index above it is not ours
@@ -184,11 +188,22 @@ func (a *Applier) resetEVPNGroups() {
 			if derr := a.fdbBd.DeleteBdPeer(k.BdId, k.Index); derr != nil {
 				a.logger.Error("sweep stale EVPN ES peer",
 					zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index), zap.Error(derr))
+				sweepOK = false
 				continue
 			}
 			a.logger.Info("swept EVPN ES peer left by a previous run",
 				zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index))
 		}
+	}
+
+	if !sweepOK {
+		// Some stale FDB entry or ES peer survived, and it may reference a
+		// group under this owner. Deleting the groups now and reseeding
+		// would let their ids be re-handed to different segments while the
+		// stale state still points at them; leave the whole generation in
+		// place instead -- id allocation seeds above the survivors below,
+		// so nothing collides, and the next restart retries the sweep.
+		a.logger.Error("EVPN startup sweep incomplete; leaving previous run's groups installed")
 	}
 
 	owners, err := a.ecmp.ListEcmpGroupOwners()
@@ -198,7 +213,7 @@ func (a *Applier) resetEVPNGroups() {
 	}
 	mine := a.esGroupOwner()
 	for id, owner := range owners {
-		if owner != mine {
+		if owner != mine || !sweepOK {
 			continue
 		}
 		if err := a.ecmp.DeleteEcmpGroup(id, mine); err != nil {
@@ -650,6 +665,7 @@ func (a *Applier) repointSegmentMacs(dk esDestKey, toIdx uint16) bool {
 // aims at the ES peer.
 func (a *Applier) sweepSegmentMacs(dk esDestKey) bool {
 	ok := true
+	handled := make(map[macDPKey]struct{})
 	a.forEachSegmentMac(dk, func(fk evpnFdbKey, st evpnFdbState) {
 		if _, gone := a.evpn.esWithdrawn[esMemberKey{esi: st.esi, pe: st.pe}]; gone {
 			a.withdrawEVPNMac(fk, st)
@@ -660,19 +676,34 @@ func (a *Applier) sweepSegmentMacs(dk esDestKey) bool {
 			}
 			return
 		}
-		ps, resolvable := a.evpn.peers[st.peer]
+		// The data-plane key is shared across the MAC's contributions;
+		// write it once, from the deterministic representative, so the
+		// post-dissolve target does not depend on map iteration order.
+		mk := macDPKey{bdID: st.bdID, mac: st.mac.String()}
+		if _, done := handled[mk]; done {
+			return
+		}
+		handled[mk] = struct{}{}
+		_, repSt, found := a.pickContrib(mk, func(_ evpnFdbKey, cst evpnFdbState) bool {
+			_, w := a.evpn.esWithdrawn[esMemberKey{esi: cst.esi, pe: cst.pe}]
+			return w
+		})
+		if !found {
+			repSt = st
+		}
+		ps, resolvable := a.evpn.peers[repSt.peer]
 		if !resolvable {
 			// The per-PE peer should exist for as long as the fdb ledger
 			// holds the MAC; a miss means the ledgers disagree.
 			a.logger.Error("EVPN MAC has no per-PE peer to fall back to",
-				zap.String("mac", st.mac.String()))
+				zap.String("mac", repSt.mac.String()))
 			ok = false
 			return
 		}
-		fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: ps.index, BdId: st.bdID, Esi: st.esi}
-		if err := a.fdbBd.CreateFdb(st.bdID, st.mac, fdb); err != nil {
+		fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: ps.index, BdId: repSt.bdID, Esi: repSt.esi}
+		if err := a.fdbBd.CreateFdb(repSt.bdID, repSt.mac, fdb); err != nil {
 			a.logger.Error("repoint EVPN MAC to per-PE peer",
-				zap.String("mac", st.mac.String()), zap.Error(err))
+				zap.String("mac", repSt.mac.String()), zap.Error(err))
 			ok = false
 		}
 	})
@@ -710,22 +741,19 @@ func (a *Applier) freeESPeerIndex(bdID uint16) uint16 {
 	return bpf.EsPeerIndexBase + bpf.MaxEsPeersPerBd
 }
 
-// survivingContrib picks the contribution that re-installs a shared {bd,
-// MAC} FDB entry after another contribution withdraws. The pick is
-// deterministic (lowest {rd, etag}) so repeated withdrawals converge on the
-// same survivor regardless of map iteration order.
-func (a *Applier) survivingContrib(mk macDPKey, withdrawn evpnFdbKey) (evpnFdbKey, evpnFdbState, bool) {
+// pickContrib selects a contribution of the shared {bd, MAC} data-plane
+// key, deterministically (lowest {rd, etag}) so every caller converges on
+// the same one regardless of map iteration order. Contributions for which
+// skip returns true are not considered.
+func (a *Applier) pickContrib(mk macDPKey, skip func(evpnFdbKey, evpnFdbState) bool) (evpnFdbKey, evpnFdbState, bool) {
 	var (
 		best   evpnFdbKey
 		bestSt evpnFdbState
 		found  bool
 	)
 	for fk := range a.evpn.macContribs[mk] {
-		if fk == withdrawn {
-			continue
-		}
 		st, ok := a.evpn.fdb[fk]
-		if !ok {
+		if !ok || skip(fk, st) {
 			continue
 		}
 		if !found || fk.rd < best.rd || (fk.rd == best.rd && fk.etag < best.etag) {
@@ -733,6 +761,12 @@ func (a *Applier) survivingContrib(mk macDPKey, withdrawn evpnFdbKey) (evpnFdbKe
 		}
 	}
 	return best, bestSt, found
+}
+
+// survivingContrib picks the contribution that re-installs a shared {bd,
+// MAC} FDB entry after another contribution withdraws.
+func (a *Applier) survivingContrib(mk macDPKey, withdrawn evpnFdbKey) (evpnFdbKey, evpnFdbState, bool) {
+	return a.pickContrib(mk, func(fk evpnFdbKey, _ evpnFdbState) bool { return fk == withdrawn })
 }
 
 // fdbTargetIndex resolves where a contribution's FDB entry should point: the

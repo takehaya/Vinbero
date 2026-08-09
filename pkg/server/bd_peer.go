@@ -112,10 +112,13 @@ func (s *BdPeerServer) BdPeerDelete(
 			continue
 		}
 		deleted := false
-		// Covers both the flood range and the ES-peer range above it, where
-		// the BGP applier parks the EVPN aliasing entries; a BD teardown
-		// must not strand those.
-		for i := uint16(0); i < bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd; i++ {
+		// Only the operator-managed flood range. The ES-peer range above it
+		// belongs to the BGP applier's EVPN aliasing state: deleting those
+		// entries here would leave the applier's ledger, the FDB pointers
+		// and the ECMP group referencing a peer that no longer exists, with
+		// nothing to trigger a repair. Leftovers in that range are swept by
+		// the applier itself at startup.
+		for i := uint16(0); i < bpf.MaxBumNexthops; i++ {
 			err := s.mapOps.DeleteBdPeer(uint16(bdID), i)
 			if err == nil {
 				deleted = true

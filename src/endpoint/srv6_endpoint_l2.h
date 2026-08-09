@@ -62,12 +62,12 @@ static __always_inline void fdb_learn_remote_mac(
     // aliasing pointer (synthetic ES peer). The frame's sender is one member
     // PE of that segment; rewriting the entry to the sender's own peer would
     // pin every flow to whichever PE delivered the last frame and erase the
-    // split-horizon ESI. Refresh liveness only.
-    if (existing && existing->is_remote && existing->peer_index >= MAX_BUM_NEXTHOPS) {
-        if (!existing->is_static)
-            existing->last_seen = bpf_ktime_get_ns();
+    // split-horizon ESI. last_seen stays untouched too: the control plane
+    // writes it as 0 (never aged), and stamping a timestamp here would turn
+    // the entry dynamic and let aging remove it behind the BGP ledger's
+    // back, where an unchanged RT2 re-apply would never re-install it.
+    if (existing && existing->is_remote && existing->peer_index >= MAX_BUM_NEXTHOPS)
         return;
-    }
 
     struct fdb_entry learn_val = {
         .is_remote = 1,
