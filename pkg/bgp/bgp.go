@@ -403,6 +403,7 @@ type SRPolicyController interface {
 type EVPNRouteType uint8
 
 const (
+	EVPNRouteTypeEthernetAD         EVPNRouteType = 1 // RT1: Ethernet A-D -> aliasing / mass withdraw
 	EVPNRouteTypeMACIP              EVPNRouteType = 2 // RT2: MAC/IP -> fdb_map + bd_peer_map
 	EVPNRouteTypeInclusiveMulticast EVPNRouteType = 3 // RT3: Inclusive Multicast -> bd_peer_map (BUM)
 	EVPNRouteTypeEthernetSegment    EVPNRouteType = 4 // RT4: Ethernet Segment -> esi_map (DF election)
@@ -453,9 +454,9 @@ type EVPNController interface {
 
 // EVPNRoute is a decoded BGP EVPN NLRI (AFI 25 / SAFI 70). One envelope
 // carries every route type; the fields a type does not use stay zero.
-// The SRv6 service SID (End.DT2U for RT2, End.DT2M for RT3) is decoded
-// from the BGP Prefix-SID attribute's SRv6 L2 Service TLV (RFC 9252 §6);
-// RT4 carries no SID. The route targets resolve the local bridge domain
+// The SRv6 service SID is decoded from the BGP Prefix-SID attribute's SRv6
+// L2 Service TLV (RFC 9252 §6): End.DT2U for RT2 and a per-EVI RT1, End.DT2M
+// for RT3 and a per-ES RT1. Only RT4 carries no SID. The route targets resolve the local bridge domain
 // through the same import-RT filter the L3VPN path uses.
 type EVPNRoute struct {
 	Type        EVPNRouteType
@@ -465,14 +466,34 @@ type EVPNRoute struct {
 	EthernetTag uint32
 	MAC         string // RT2: "aa:bb:cc:dd:ee:ff"
 	IPAddr      string // RT2: optional host IP (IRB); "" when MAC-only
-	SRv6SID     string // End.DT2U (RT2) / End.DT2M (RT3); "" if none
+	SRv6SID     string // End.DT2U (RT2, per-EVI RT1) / End.DT2M (RT3, per-ES RT1); "" if none
 	NextHop     string
 	ESImportRT  string // RT4: ES-Import route target ("aa:bb:cc:dd:ee:ff"); "" otherwise
+	// SingleActive is the ESI Label extended community's Single-Active bit
+	// (RFC 7432 §7.5), carried on a per-ES RT1. It says the segment is
+	// single-active, so only the DF forwards for it and the segment must NOT
+	// be aliased across PEs. It also reads true when a per-ES route omits
+	// that community altogether: RFC 7432 makes it mandatory there, so an
+	// absent one is a malformed advertisement, and refusing to alias is the
+	// safe reading. Meaningless on other route types.
+	SingleActive bool
 	// RemoteSrc is the advertising PE's SRv6 encap source (the SID's locator
-	// base) for RT2/RT3, used as the RX reverse-map key for split-horizon and
-	// remote-MAC learning -- distinct from the local TX encap source. "" if not
-	// derivable.
+	// base) for any route carrying a SID -- RT2, RT3 and either RT1 form --
+	// used as the RX reverse-map key for split-horizon and remote-MAC
+	// learning, distinct from the local TX encap source. "" if not derivable.
 	RemoteSrc string
+}
+
+// EVPNMaxEthernetTag is the reserved Ethernet Tag (MAX-ET) that marks a
+// per-ES Ethernet A-D route, as opposed to a per-EVI one (RFC 7432 §8.2).
+// The two carry different meaning: per-ES is the segment-wide statement used
+// for mass withdraw, per-EVI is the per-broadcast-domain statement that
+// enables aliasing.
+const EVPNMaxEthernetTag uint32 = 0xFFFFFFFF
+
+// IsPerES reports whether an Ethernet A-D route is the per-ES form.
+func (r EVPNRoute) IsPerES() bool {
+	return r.Type == EVPNRouteTypeEthernetAD && r.EthernetTag == EVPNMaxEthernetTag
 }
 
 // MUPRouteType enumerates the BGP MUP SAFI (85) route types Vinbero consumes

@@ -195,7 +195,9 @@ func (a *Applier) applyEVPNLocked(r *bgp.EVPNRoute, withdraw bool) {
 	case bgp.EVPNRouteTypeEthernetSegment:
 		a.applyEVPNEthernetSegment(r, withdraw)
 	default:
-		// Unsupported route types (RT1 Ethernet A-D, RT5 IP Prefix) are ignored.
+		// RT1 Ethernet A-D now decodes, but nothing consumes it yet: aliasing
+		// and mass withdraw are the data-plane half of that work. RT5 IP
+		// Prefix is not decoded at all. Both are ignored here.
 	}
 }
 
