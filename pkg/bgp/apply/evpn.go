@@ -133,8 +133,12 @@ type evpnTable struct {
 	// bit -- true forbids aliasing), eviAD each per-EVI A-D contribution,
 	// esDests the programmed group per {bd, ESI}, and macContribs the RT2
 	// ledger entries sharing one data-plane {bd, MAC} key.
-	esAD        map[esMemberKey]bool
-	eviAD       map[evpnEviADKey]eviADState
+	esAD map[esMemberKey]bool
+	// esADByNLRI maps a per-ES NLRI ({RD, ESI}) to the PE it last named,
+	// so a re-advertisement under a new next hop -- an implicit replace,
+	// the NLRI identity carries no PE -- drops the old PE's contribution.
+	esADByNLRI map[esNLRIKey]string
+	eviAD      map[evpnEviADKey]eviADState
 	esDests     map[esDestKey]*esDest
 	macContribs map[macDPKey]map[evpnFdbKey]struct{}
 	// esWithdrawn marks a {ESI, PE} whose per-ES A-D was withdrawn while an
@@ -156,6 +160,7 @@ func newEVPNTable() *evpnTable {
 		macsByES:    make(map[esMemberKey]map[evpnFdbKey]struct{}),
 		esMembers:   make(map[[bpf.ESILen]byte]map[string]struct{}),
 		esAD:        make(map[esMemberKey]bool),
+		esADByNLRI:  make(map[esNLRIKey]string),
 		eviAD:       make(map[evpnEviADKey]eviADState),
 		esDests:     make(map[esDestKey]*esDest),
 		macContribs: make(map[macDPKey]map[evpnFdbKey]struct{}),

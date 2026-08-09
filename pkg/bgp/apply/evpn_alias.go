@@ -73,6 +73,13 @@ type esDest struct {
 	installed []string
 }
 
+// esNLRIKey is the stable identity of a per-ES Ethernet A-D NLRI
+// ({RD, ESI}; the Ethernet Tag is fixed at MAX-ET).
+type esNLRIKey struct {
+	rd  string
+	esi [bpf.ESILen]byte
+}
+
 // evpnEviADKey is the stable identity of a per-EVI Ethernet A-D NLRI
 // ({RD, ESI, EthernetTag}), the reverse index a withdrawal -- which may
 // carry no route targets -- recovers the bridge domain from.
@@ -207,22 +214,23 @@ func (a *Applier) applyEVPNPerESAD(r *bgp.EVPNRoute, withdraw bool) {
 		return
 	}
 	k := esMemberKey{esi: r.ESI, pe: r.NextHop}
+	nk := esNLRIKey{rd: r.RD, esi: r.ESI}
 
 	if withdraw {
+		delete(a.evpn.esADByNLRI, nk)
 		// Not gated on having seen the advertisement: the segment's MACs
 		// may all have been learned from RT2s alone (the per-ES route can
 		// predate this process), and the withdrawal is a statement about
 		// the segment either way.
-		delete(a.evpn.esAD, k)
-		a.reconcileESDestsForESI(r.ESI)
-		a.massWithdrawUncovered(k)
-		if len(a.evpn.macsByES[k]) > 0 {
-			// Covered MACs were retained above. Remember the withdrawal so
-			// a later dissolve finishes the sweep for them instead of
-			// pointing them back at the departed PE.
-			a.evpn.esWithdrawn[k] = struct{}{}
-		}
+		a.dropESContribution(k)
 		return
+	}
+
+	// A re-advertisement of the same NLRI under a new next hop is an
+	// implicit replace of the old PE's contribution -- the NLRI identity
+	// carries no PE, so no withdrawal will ever name it.
+	if oldPE, known := a.evpn.esADByNLRI[nk]; known && oldPE != r.NextHop {
+		a.dropESContribution(esMemberKey{esi: r.ESI, pe: oldPE})
 	}
 
 	if _, known := a.evpn.esAD[k]; !known && len(a.evpn.esAD) >= maxTrackedESADs {
@@ -230,9 +238,22 @@ func (a *Applier) applyEVPNPerESAD(r *bgp.EVPNRoute, withdraw bool) {
 			zap.String("pe", r.NextHop), zap.Int("max", maxTrackedESADs))
 		return
 	}
+	a.evpn.esADByNLRI[nk] = r.NextHop
 	a.evpn.esAD[k] = r.SingleActive
 	delete(a.evpn.esWithdrawn, k) // the segment is back on this PE
 	a.reconcileESDestsForESI(r.ESI)
+}
+
+// dropESContribution runs the per-ES withdrawal semantics for one {ESI, PE}:
+// the segment's groups shrink first, uncovered MACs are mass-withdrawn, and
+// covered ones are marked for the sweep a later dissolve finishes.
+func (a *Applier) dropESContribution(k esMemberKey) {
+	delete(a.evpn.esAD, k)
+	a.reconcileESDestsForESI(k.esi)
+	a.massWithdrawUncovered(k)
+	if len(a.evpn.macsByES[k]) > 0 {
+		a.evpn.esWithdrawn[k] = struct{}{}
+	}
 }
 
 // massWithdrawUncovered withdraws every MAC the departed PE taught on the
@@ -291,6 +312,14 @@ func (a *Applier) applyEVPNPerEVIAD(r *bgp.EVPNRoute, withdraw bool) {
 	}
 	bdID, ok := a.matchEVPNBD(r.RTs)
 	if !ok {
+		// Fail closed for a tracked NLRI too: a re-advertisement whose RTs
+		// no longer import here is an implicit replace, and keeping the old
+		// contribution would leave the PE in a group its route no longer
+		// backs.
+		if old, known := a.evpn.eviAD[ak]; known {
+			delete(a.evpn.eviAD, ak)
+			a.reconcileESKey(esDestKey{bdID: old.bdID, esi: r.ESI})
+		}
 		a.logger.Warn("EVPN per-EVI A-D matches no bridge-domain binding; dropping",
 			zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
 		return
@@ -409,7 +438,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 			a.logger.Error("allocate EVPN ecmp group id", zap.Error(err))
 			return
 		}
-		idx := a.fdbBd.FindFreeBdPeerEsIndex(dk.bdID)
+		idx := a.freeESPeerIndex(dk.bdID)
 		if idx >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
 			a.logger.Error("EVPN ES peer range full in bridge domain; not aliasing",
 				zap.Uint16("bd_id", dk.bdID))
@@ -443,13 +472,15 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 			// withdrawEVPNMac resolves to the per-PE peers.
 			d.active = false
 			if !a.sweepSegmentMacs(dk) {
-				// Same contract as the dissolve: while any FDB entry still
-				// aims at the ES peer, the peer and group stay (whatever
-				// of them the failed write left standing), and the kept
-				// dest with a cleared fingerprint is the retry path.
-				d.active = true
+				// Unlike the dissolve, active is NOT restored: a failed
+				// CreateBdPeer rolls its own forward entry away, so the ES
+				// peer may no longer exist and claiming it does would aim
+				// new RT2s at nothing. The kept inactive dest (fingerprint
+				// cleared) makes the next event rebuild group, peer and
+				// repoint from scratch; until then a straggling FDB entry
+				// degrades to the kernel path rather than a silent drop.
 				d.installed = nil
-				a.logger.Error("EVPN aliasing unwind incomplete; keeping dest for retry",
+				a.logger.Error("EVPN aliasing unwind incomplete; keeping dest for rebuild",
 					zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
 				return
 			}
@@ -635,6 +666,37 @@ func (a *Applier) sweepSegmentMacs(dk esDestKey) bool {
 		}
 	})
 	return ok
+}
+
+// freeESPeerIndex picks the lowest ES-range bd_peer index that neither the
+// real map nor the dest ledger holds for this bridge domain. The ledger
+// matters because a dest kept for a rebuild after a failed reconcile may
+// reserve an index whose map entry was rolled away -- a pure map scan would
+// hand that slot to a second segment. Falls back to the map-only scan when
+// the map cannot be listed.
+func (a *Applier) freeESPeerIndex(bdID uint16) uint16 {
+	used := make(map[uint16]struct{})
+	for k, d := range a.evpn.esDests {
+		if k.bdID == bdID {
+			used[d.peerIdx] = struct{}{}
+		}
+	}
+	peers, err := a.fdbBd.ListBdPeers()
+	if err != nil {
+		a.logger.Error("list bd_peers for ES index allocation; using map scan only", zap.Error(err))
+		return a.fdbBd.FindFreeBdPeerEsIndex(bdID)
+	}
+	for k := range peers {
+		if k.BdId == bdID {
+			used[k.Index] = struct{}{}
+		}
+	}
+	for i := uint16(bpf.EsPeerIndexBase); i < bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd; i++ {
+		if _, taken := used[i]; !taken {
+			return i
+		}
+	}
+	return bpf.EsPeerIndexBase + bpf.MaxEsPeersPerBd
 }
 
 // survivingContrib picks the contribution that re-installs a shared {bd,

@@ -10,13 +10,16 @@ import (
 )
 
 // perESAD builds a per-ES Ethernet A-D advertisement: the PE's declaration
-// that it attaches the segment, carrying the Single-Active bit.
+// that it attaches the segment, carrying the Single-Active bit. The RD is
+// derived from the PE, as in RFC 7432 each PE originates the per-ES route
+// under its own RD (an identical RD across PEs would be one NLRI, and a
+// second advertisement an implicit replace of the first).
 func perESAD(pe string, esi [10]byte, singleActive bool) bgp.RouteEvent {
 	return bgp.RouteEvent{
 		Family: bgp.FamilyEVPN,
 		EVPN: &bgp.EVPNRoute{
 			Type:         bgp.EVPNRouteTypeEthernetAD,
-			RD:           "65000:100",
+			RD:           fmt.Sprintf("rd-of-%s", pe),
 			ESI:          esi,
 			EthernetTag:  bgp.EVPNMaxEthernetTag,
 			NextHop:      pe,
@@ -349,6 +352,37 @@ func TestApplier_EVPNDissolveKeepsESPeerWhenSweepFails(t *testing.T) {
 	}
 	if fdb := fh.fdb[fdbKey{100, "aa:bb:cc:00:00:01"}]; fdb == nil || fdb.PeerIndex >= bpf.EsPeerIndexBase {
 		t.Errorf("FDB entry = %+v, want repointed to a per-PE peer", fdb)
+	}
+}
+
+func TestApplier_EVPNPerESNLRIReplaceDropsOldPE(t *testing.T) {
+	// A per-ES NLRI ({RD, ESI}) re-advertised under a new next hop names
+	// no old PE anywhere, so the replace must drop the previous PE's
+	// contribution or it stays in the aliasing group forever.
+	esi := [10]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	a, fh := evpnApplier(t)
+	ev := perESAD("fd00::2", esi, false)
+	a.Apply(ev)
+	a.Apply(perESAD("fd00::9", esi, false))
+	a.Apply(perEVIAD("65000:100:2", "fd00::2", "fd00:2:2:ad::", esi))
+	a.Apply(perEVIAD("65000:100:9", "fd00::9", "fd00:9:9:ad::", esi))
+	_, es := esPeerOf(t, fh)
+	if got := len(fh.ecmpGroups[es.GroupId]); got != 2 {
+		t.Fatalf("setup group holds %d members, want 2", got)
+	}
+
+	// The same NLRI as fd00::2's route now points at fd00::7.
+	moved := perESAD("fd00::7", esi, false)
+	moved.EVPN.RD = ev.EVPN.RD
+	a.Apply(moved)
+
+	paths := fh.ecmpGroups[es.GroupId]
+	if len(paths) != 1 {
+		t.Fatalf("group holds %d members after the replace, want only fd00::9's", len(paths))
+	}
+	want := netip.MustParseAddr("fd00:9:9:ad::").As16()
+	if paths[0].Entry.Segments[0] != want {
+		t.Errorf("surviving member SID = %v, want fd00:9:9:ad::", paths[0].Entry.Segments[0])
 	}
 }
 
