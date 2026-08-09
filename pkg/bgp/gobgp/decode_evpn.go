@@ -67,7 +67,16 @@ func decodeEVPNEthernetAD(p *apiutil.Path, rt *gobgppkt.EVPNEthernetAutoDiscover
 	// when the ESI filtering approach is used along with the Transposition
 	// Scheme"). Reading the NLRI label for a per-ES route would drop the
 	// transposed bits and compose a SID that points somewhere else.
-	esiLabel, singleActive := decodeESILabel(p.Attrs)
+	esiLabel, singleActive, haveESILabel := decodeESILabel(p.Attrs)
+	if r.IsPerES() && !haveESILabel {
+		// RFC 7432 §8.2.1 makes the ESI Label extended community mandatory on
+		// a per-ES route, so its absence is a malformed advertisement rather
+		// than a statement of all-active. Fail closed: the only decision that
+		// turns on this bit is whether the segment may be aliased, and
+		// aliasing a segment whose redundancy mode we do not actually know
+		// would black-hole traffic landing on a non-DF.
+		singleActive = true
+	}
 	label := rt.Label
 	if r.IsPerES() {
 		label = esiLabel
@@ -79,10 +88,12 @@ func decodeEVPNEthernetAD(p *apiutil.Path, rt *gobgppkt.EVPNEthernetAutoDiscover
 }
 
 // decodeESILabel reads the ESI Label extended community (RFC 7432 §7.5),
-// returning its 24-bit label and the Single-Active bit. An absent community
-// yields (0, false): all-active, which is the mode that permits aliasing,
-// and no transposed bits.
-func decodeESILabel(attrs []gobgppkt.PathAttributeInterface) (uint32, bool) {
+// returning its 24-bit label, the Single-Active bit, and whether the
+// community was there at all. Callers need the third value because absence
+// is not the same as a cleared bit: the community is mandatory on a per-ES
+// route, so a missing one means the advertisement is malformed, not that the
+// segment is all-active.
+func decodeESILabel(attrs []gobgppkt.PathAttributeInterface) (uint32, bool, bool) {
 	for _, a := range attrs {
 		ec, ok := a.(*gobgppkt.PathAttributeExtendedCommunities)
 		if !ok {
@@ -90,11 +101,11 @@ func decodeESILabel(attrs []gobgppkt.PathAttributeInterface) (uint32, bool) {
 		}
 		for _, c := range ec.Value {
 			if esi, ok := c.(*gobgppkt.ESILabelExtended); ok {
-				return esi.Label, esi.IsSingleActive
+				return esi.Label, esi.IsSingleActive, true
 			}
 		}
 	}
-	return 0, false
+	return 0, false, false
 }
 
 // decodeEVPNEthernetSegment decodes an RT4 Ethernet Segment route (RFC 7432

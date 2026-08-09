@@ -373,10 +373,26 @@ func TestDecodeEVPN_RT1(t *testing.T) {
 		}
 	})
 
-	t.Run("absent community means all-active", func(t *testing.T) {
+	t.Run("a per-ES route missing the mandatory community refuses aliasing", func(t *testing.T) {
+		// RFC 7432 §8.2.1: "The ESI Label extended community MUST be included
+		// in the route." Absence is a malformed advertisement, not a
+		// statement of all-active, and reading it as all-active would let a
+		// segment whose redundancy mode we do not know be aliased.
 		r := decodeEVPNRoute(rt1Path(t, bgp.EVPNMaxEthernetTag, "", false))
-		if r.SingleActive {
-			t.Error("no ESI Label community must read as all-active")
+		if !r.SingleActive {
+			t.Error("a per-ES route with no ESI Label community must not be treated as aliasable")
+		}
+	})
+
+	t.Run("an all-active per-ES route is aliasable", func(t *testing.T) {
+		// The community present with the bit clear is the real all-active
+		// signal, and must stay distinguishable from the missing-community
+		// case above.
+		p := rt1Path(t, bgp.EVPNMaxEthernetTag, "", false)
+		attrs := p.Attrs[0].(*gobgppkt.PathAttributeExtendedCommunities)
+		attrs.Value = append(attrs.Value, gobgppkt.NewESILabelExtended(0, false))
+		if r := decodeEVPNRoute(p); r.SingleActive {
+			t.Error("an explicit all-active per-ES route must be aliasable")
 		}
 	})
 }

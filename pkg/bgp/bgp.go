@@ -472,7 +472,10 @@ type EVPNRoute struct {
 	// SingleActive is the ESI Label extended community's Single-Active bit
 	// (RFC 7432 §7.5), carried on a per-ES RT1. It says the segment is
 	// single-active, so only the DF forwards for it and the segment must NOT
-	// be aliased across PEs. Meaningless on other route types.
+	// be aliased across PEs. It also reads true when a per-ES route omits
+	// that community altogether: RFC 7432 makes it mandatory there, so an
+	// absent one is a malformed advertisement, and refusing to alias is the
+	// safe reading. Meaningless on other route types.
 	SingleActive bool
 	// RemoteSrc is the advertising PE's SRv6 encap source (the SID's locator
 	// base) for any route carrying a SID -- RT2, RT3 and either RT1 form --
