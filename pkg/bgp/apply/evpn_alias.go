@@ -64,6 +64,10 @@ type esDest struct {
 	// entries may point at peerIdx. It flips on the first successful
 	// reconcile; formation repoints the segment's MACs exactly once.
 	active bool
+	// needRepoint remembers that some MAC could not be moved onto the ES
+	// peer at formation, so a later reconcile re-runs the repoint (active
+	// alone would skip it).
+	needRepoint bool
 	// installed is the member SID list last written (see memberFingerprint's
 	// role in vpngroup.go).
 	installed []string
@@ -139,7 +143,10 @@ func (a *Applier) resetEVPNGroups() {
 		a.logger.Error("list bd_peers; stale EVPN ES peers may be left behind", zap.Error(err))
 	} else {
 		for k := range peers {
-			if k.Index < bpf.EsPeerIndexBase {
+			// Only the reserved ES range: an index above it is not ours
+			// (a future use, or something injected into the map directly)
+			// and must survive the sweep.
+			if k.Index < bpf.EsPeerIndexBase || k.Index >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
 				continue
 			}
 			if derr := a.fdbBd.DeleteBdPeer(k.BdId, k.Index); derr != nil {
@@ -435,7 +442,17 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 			// Deactivate before the sweep so the survivor hand-off inside
 			// withdrawEVPNMac resolves to the per-PE peers.
 			d.active = false
-			a.sweepSegmentMacs(dk)
+			if !a.sweepSegmentMacs(dk) {
+				// Same contract as the dissolve: while any FDB entry still
+				// aims at the ES peer, the peer and group stay (whatever
+				// of them the failed write left standing), and the kept
+				// dest with a cleared fingerprint is the retry path.
+				d.active = true
+				d.installed = nil
+				a.logger.Error("EVPN aliasing unwind incomplete; keeping dest for retry",
+					zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
+				return
+			}
 			if err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil {
 				// Possibly already gone via CreateBdPeer's own rollback;
 				// nothing points at it after the sweep either way.
@@ -497,13 +514,14 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		return
 	}
 	d.installed = fingerprint
-	if !d.active {
+	if !d.active || d.needRepoint {
 		d.active = true
-		if !a.repointSegmentMacs(dk, d.peerIdx) {
-			// A MAC whose repoint failed still forwards through its per-PE
-			// peer, so nothing is broken -- but clear the fingerprint so
-			// the next event for this key rewrites and retries instead of
-			// early-returning on an unchanged member set.
+		// A MAC whose repoint failed still forwards through its per-PE
+		// peer, so nothing is broken -- but remember the debt and clear
+		// the fingerprint, so the next event for this key re-runs the
+		// repoint instead of early-returning on an unchanged member set.
+		d.needRepoint = !a.repointSegmentMacs(dk, d.peerIdx)
+		if d.needRepoint {
 			d.installed = nil
 		}
 	}
