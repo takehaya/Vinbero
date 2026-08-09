@@ -3,6 +3,7 @@ package apply
 import (
 	"cmp"
 	"fmt"
+	"net"
 	"slices"
 
 	"go.uber.org/zap"
@@ -68,6 +69,11 @@ type esDest struct {
 	// peer at formation, so a later reconcile re-runs the repoint (active
 	// alone would skip it).
 	needRepoint bool
+	// programmed reports that map state (the group, and possibly the ES
+	// peer) exists for this dest and must be torn down before the dest --
+	// and its group id -- may be released. It outlives active: a failed
+	// reconcile can leave a dest inactive but still programmed.
+	programmed bool
 	// installed is the member SID list last written (see memberFingerprint's
 	// role in vpngroup.go).
 	installed []string
@@ -146,6 +152,25 @@ func (a *Applier) resetEVPNGroups() {
 	// restart would otherwise leak one slot per generation, and a stale
 	// entry keeps referencing a group id this reset is about to delete and
 	// re-hand out to a different segment.
+	// FDB entries pointing into the ES range go first: with pinned maps
+	// they too survive a restart, and a MAC that the replayed rib no
+	// longer carries would keep aiming at an index a different segment may
+	// be handed later.
+	if fdbs, err := a.fdbBd.ListFdb(); err != nil {
+		a.logger.Error("list fdb; stale EVPN aliasing pointers may be left behind", zap.Error(err))
+	} else {
+		for k, e := range fdbs {
+			if e.IsRemote == 0 || e.PeerIndex < bpf.EsPeerIndexBase ||
+				e.PeerIndex >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
+				continue
+			}
+			if derr := a.fdbBd.DeleteFdb(k.BdId, net.HardwareAddr(k.Mac[:])); derr != nil {
+				a.logger.Error("sweep stale EVPN aliasing FDB entry",
+					zap.Uint16("bd_id", k.BdId), zap.Error(derr))
+			}
+		}
+	}
+
 	if peers, err := a.fdbBd.ListBdPeers(); err != nil {
 		a.logger.Error("list bd_peers; stale EVPN ES peers may be left behind", zap.Error(err))
 	} else {
@@ -304,27 +329,33 @@ func (a *Applier) applyEVPNPerEVIAD(r *bgp.EVPNRoute, withdraw bool) {
 		return
 	}
 
+	// dropTracked fails closed for an unusable re-advertisement of a
+	// tracked NLRI: it is an implicit replace of the old path, so keeping
+	// the old contribution would leave the PE in a group its route no
+	// longer backs.
+	dropTracked := func() {
+		if old, known := a.evpn.eviAD[ak]; known {
+			delete(a.evpn.eviAD, ak)
+			a.reconcileESKey(esDestKey{bdID: old.bdID, esi: ak.esi})
+		}
+	}
+
 	var zeroESI [bpf.ESILen]byte
 	if r.ESI == zeroESI || r.NextHop == "" {
+		dropTracked()
 		a.logger.Warn("EVPN per-EVI A-D without ESI or next hop; skipping",
 			zap.String("rd", r.RD))
 		return
 	}
 	bdID, ok := a.matchEVPNBD(r.RTs)
 	if !ok {
-		// Fail closed for a tracked NLRI too: a re-advertisement whose RTs
-		// no longer import here is an implicit replace, and keeping the old
-		// contribution would leave the PE in a group its route no longer
-		// backs.
-		if old, known := a.evpn.eviAD[ak]; known {
-			delete(a.evpn.eviAD, ak)
-			a.reconcileESKey(esDestKey{bdID: old.bdID, esi: r.ESI})
-		}
+		dropTracked()
 		a.logger.Warn("EVPN per-EVI A-D matches no bridge-domain binding; dropping",
 			zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
 		return
 	}
 	if !isUsableSRv6SID(r.SRv6SID) {
+		dropTracked()
 		a.logger.Warn("EVPN per-EVI A-D SID is not a usable IPv6 SID; skipping",
 			zap.String("rd", r.RD), zap.String("sid", r.SRv6SID))
 		return
@@ -460,49 +491,21 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	// fail unwinds a half-done reconcile back to per-PE forwarding. The
 	// programmed state cannot be trusted after a failed write -- a failed
 	// CreateBdPeer even removes the forward entry as its own rollback, so
-	// an FDB entry left aimed at the ES peer might point at nothing. The
-	// dest is dropped entirely: keeping it would park a ledger reservation
-	// on an index the allocator's map scan cannot see, and a second
-	// segment could be handed the same slot before the retry lands. The
-	// next route event for this key rebuilds from scratch.
-	fail := func(groupWritten bool) {
-		wasActive := d.active
-		if wasActive {
-			// Deactivate before the sweep so the survivor hand-off inside
-			// withdrawEVPNMac resolves to the per-PE peers.
-			d.active = false
-			if !a.sweepSegmentMacs(dk) {
-				// Unlike the dissolve, active is NOT restored: a failed
-				// CreateBdPeer rolls its own forward entry away, so the ES
-				// peer may no longer exist and claiming it does would aim
-				// new RT2s at nothing. The kept inactive dest (fingerprint
-				// cleared) makes the next event rebuild group, peer and
-				// repoint from scratch; until then a straggling FDB entry
-				// degrades to the kernel path rather than a silent drop.
-				d.installed = nil
-				a.logger.Error("EVPN aliasing unwind incomplete; keeping dest for rebuild",
-					zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
-				return
-			}
-			if err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil {
-				// Possibly already gone via CreateBdPeer's own rollback;
-				// nothing points at it after the sweep either way.
-				a.logger.Warn("unwind EVPN ES peer",
-					zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
-			}
-		}
-		freeID := true
-		if groupWritten || wasActive {
-			if err := a.ecmp.DeleteEcmpGroup(d.groupID, a.esGroupOwner()); err != nil {
-				a.logger.Error("unwind EVPN aliasing group",
-					zap.Uint32("group_id", d.groupID), zap.Error(err))
-				freeID = false // still installed; reusing the id would collide
-			}
+	// an FDB entry left aimed at the ES peer might point at nothing. When
+	// the teardown completes the dest is dropped and rebuilt from scratch
+	// by the next event; while any of its state resists removal the dest
+	// -- and its group id -- stay reserved (fingerprint cleared), so
+	// nothing else can be handed its index or id in the meantime.
+	fail := func() {
+		d.active = false
+		if !a.teardownESDest(dk, d) {
+			d.installed = nil
+			a.logger.Error("EVPN aliasing unwind incomplete; keeping dest for rebuild",
+				zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
+			return
 		}
 		delete(a.evpn.esDests, dk)
-		if freeID {
-			a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
-		}
+		a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
 	}
 
 	paths := make([]bpf.EcmpPath, 0, len(members))
@@ -511,7 +514,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		if err != nil {
 			a.logger.Error("build EVPN aliasing member",
 				zap.Uint16("bd_id", dk.bdID), zap.String("sid", m.sid), zap.Error(err))
-			fail(false)
+			fail()
 			return
 		}
 		// Equal weights, like the VPN groups: BGP has no notion of relative
@@ -521,9 +524,10 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	if err := a.ecmp.PutEcmpGroup(d.groupID, paths, a.esGroupOwner()); err != nil {
 		a.logger.Error("install EVPN aliasing group",
 			zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID), zap.Error(err))
-		fail(false)
+		fail()
 		return
 	}
+	d.programmed = true
 
 	// The ES peer mirrors the first member so the group-unresolvable
 	// fallback forwards the way the first path would (same shape as the VPN
@@ -533,7 +537,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	if err != nil {
 		a.logger.Error("build EVPN ES peer entry",
 			zap.Uint16("bd_id", dk.bdID), zap.Error(err))
-		fail(true)
+		fail()
 		return
 	}
 	trigger.GroupId = d.groupID
@@ -541,7 +545,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	if err := a.fdbBd.CreateBdPeer(dk.bdID, d.peerIdx, trigger, dk.esi, noRemoteSrc, false); err != nil {
 		a.logger.Error("install EVPN ES peer",
 			zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
-		fail(true)
+		fail()
 		return
 	}
 	d.installed = fingerprint
@@ -563,53 +567,60 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 
 // dissolveESDest tears one {bd, ESI} back down to per-PE forwarding: the
 // segment's MACs get their terminal state (see sweepSegmentMacs), then the
-// ES peer and the group go. Caller holds evpnMu.
+// ES peer and the group go. While anything resists removal the dest -- and
+// its group id -- stay reserved, so a later event retries the dissolve
+// (reconcileESDestsForESI visits leftover dests exactly for this).
+// Caller holds evpnMu.
 func (a *Applier) dissolveESDest(dk esDestKey, d *esDest) {
-	wasActive := d.active
 	// Deactivate before the sweep: withdrawEVPNMac's survivor hand-off
 	// re-installs shared FDB entries through fdbTargetIndex, which must
 	// already resolve to the per-PE peers, not the ES peer being removed.
 	d.active = false
-	freeID := true
-	if wasActive {
-		if !a.sweepSegmentMacs(dk) {
-			// Some FDB entries still aim at the ES peer; deleting it now
-			// would cut them over to nothing. Keep the programmed state --
-			// the stale group still forwards -- and let a future event for
-			// this key retry the dissolve (the cleared fingerprint keeps
-			// it from being masked as unchanged).
-			d.active = true
-			d.installed = nil
-			a.logger.Error("EVPN segment dissolve incomplete; keeping ES peer for retry",
-				zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
-			return
-		}
-		if err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil {
-			// Nothing points at the entry anymore, and no future route
-			// event is guaranteed to revisit this key (its eviAD state may
-			// already be gone), so carry on rather than strand the dest.
-			// The slot stays occupied, which the allocator's map scan
-			// skips; keep the group installed for it and do not reuse the
-			// id, so the stale entry can never resolve through some other
-			// segment's future group.
-			a.logger.Error("delete EVPN ES peer; leaving its group installed",
-				zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
-			freeID = false
-		} else if err := a.ecmp.DeleteEcmpGroup(d.groupID, a.esGroupOwner()); err != nil {
-			a.logger.Error("delete EVPN aliasing group",
-				zap.Uint32("group_id", d.groupID), zap.Error(err))
-			// Still installed under our owner; reusing the id would hand a
-			// future segment a group that already exists. Leave it to the
-			// next restart sweep.
-			freeID = false
-		}
+	if !a.teardownESDest(dk, d) {
+		d.installed = nil
+		a.logger.Error("EVPN segment dissolve incomplete; keeping dest for retry",
+			zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
+		return
 	}
 	delete(a.evpn.esDests, dk)
-	if freeID {
-		a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
-	}
+	a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
 	a.logger.Info("EVPN segment aliasing dissolved",
 		zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
+}
+
+// teardownESDest removes whatever programmed state the dest still holds:
+// the segment's MACs are swept off the ES peer, then the peer (if it still
+// exists -- a failed CreateBdPeer rolls its own entry away) and the group
+// go. Returns false when something could not be removed; the caller must
+// then keep the dest so its index and group id stay reserved and a later
+// call can finish the job. Caller holds evpnMu and has cleared d.active.
+func (a *Applier) teardownESDest(dk esDestKey, d *esDest) bool {
+	if !d.programmed {
+		return true
+	}
+	if !a.sweepSegmentMacs(dk) {
+		// Some FDB entry still aims at the ES peer; removing the peer now
+		// would cut it over to nothing.
+		return false
+	}
+	exists := true
+	if peers, err := a.fdbBd.ListBdPeers(); err == nil {
+		_, exists = peers[bpf.BdPeerKey{BdId: dk.bdID, Index: d.peerIdx}]
+	}
+	if exists {
+		if err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil {
+			a.logger.Error("delete EVPN ES peer",
+				zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
+			return false
+		}
+	}
+	if err := a.ecmp.DeleteEcmpGroup(d.groupID, a.esGroupOwner()); err != nil {
+		a.logger.Error("delete EVPN aliasing group",
+			zap.Uint32("group_id", d.groupID), zap.Error(err))
+		return false
+	}
+	d.programmed = false
+	return true
 }
 
 // repointSegmentMacs points every learned MAC on {bd, ESI} at the ES peer.

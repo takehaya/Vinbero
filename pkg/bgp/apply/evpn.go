@@ -37,9 +37,11 @@ type fdbBdOps interface {
 	// BUM flood indices, where the aliasing path parks its synthetic
 	// segment peers.
 	FindFreeBdPeerEsIndex(bdID uint16) uint16
-	// ListBdPeers backs the startup sweep of ES peers a previous run left
-	// in the pinned map.
+	// ListBdPeers / ListFdb back the startup sweep of the ES peers -- and
+	// the FDB entries pointing at them -- that a previous run left in the
+	// pinned maps.
 	ListBdPeers() (map[bpf.BdPeerKey]*bpf.HeadendEntry, error)
+	ListFdb() (map[bpf.FdbKey]*bpf.FdbEntry, error)
 	// GetEsi / SetEsiDfPe drive DF election: GetEsi reports whether this PE
 	// locally attaches the segment (and its local source), SetEsiDfPe writes
 	// the elected DF's source address. RT4 never creates an ES locally; the
