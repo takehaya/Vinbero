@@ -641,3 +641,117 @@ func TestApplier_ReplayEVPNConcurrentWithApply(t *testing.T) {
 	}
 	<-done
 }
+
+// rt2FromES is an RT2 learned over a multi-homed Ethernet Segment from a
+// named PE, which is what mass withdraw keys on.
+func rt2FromES(mac, sid, pe string, esi [10]byte) *bgp.EVPNRoute {
+	r := rt2(mac, sid)
+	r.ESI = esi
+	r.NextHop = pe
+	return r
+}
+
+func perESWithdraw(pe string, esi [10]byte) bgp.RouteEvent {
+	return bgp.RouteEvent{
+		Family:     bgp.FamilyEVPN,
+		IsWithdraw: true,
+		EVPN: &bgp.EVPNRoute{
+			Type:        bgp.EVPNRouteTypeEthernetAD,
+			RD:          "65000:100",
+			ESI:         esi,
+			EthernetTag: bgp.EVPNMaxEthernetTag,
+			NextHop:     pe,
+		},
+	}
+}
+
+// A PE withdrawing its per-ES Ethernet A-D route says the whole segment is
+// gone from it (RFC 7432 §8.2). Waiting for a withdrawal per MAC would keep
+// blackholing traffic for as long as that takes, which on a segment holding
+// thousands of MACs is the difference the signal exists to remove.
+func TestApplier_EVPNMassWithdraw(t *testing.T) {
+	esi := [10]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	other := [10]byte{0, 9, 9, 9, 9, 9, 9, 9, 9, 9}
+
+	t.Run("drops every MAC that PE taught on the segment", func(t *testing.T) {
+		a, fh := evpnApplier(t)
+		for _, mac := range []string{"aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"} {
+			a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+				EVPN: rt2FromES(mac, "fd00:2:2:d2::", "fd00::2", esi)})
+		}
+		if len(fh.fdb) != 2 {
+			t.Fatalf("setup installed %d MACs, want 2", len(fh.fdb))
+		}
+		a.Apply(perESWithdraw("fd00::2", esi))
+		if len(fh.fdb) != 0 {
+			t.Errorf("mass withdraw left %d MACs installed", len(fh.fdb))
+		}
+	})
+
+	t.Run("leaves the other PEs on the segment alone", func(t *testing.T) {
+		// All-active multi-homing means several PEs advertise the same
+		// segment; one going away must not take the survivors' MACs with it.
+		a, fh := evpnApplier(t)
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+			EVPN: rt2FromES("aa:bb:cc:00:00:01", "fd00:2:2:d2::", "fd00::2", esi)})
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+			EVPN: rt2FromES("aa:bb:cc:00:00:02", "fd00:3:3:d2::", "fd00::3", esi)})
+
+		a.Apply(perESWithdraw("fd00::2", esi))
+		if len(fh.fdb) != 1 {
+			t.Fatalf("after withdraw %d MACs remain, want the other PE's one", len(fh.fdb))
+		}
+	})
+
+	t.Run("leaves other segments alone", func(t *testing.T) {
+		a, fh := evpnApplier(t)
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+			EVPN: rt2FromES("aa:bb:cc:00:00:01", "fd00:2:2:d2::", "fd00::2", esi)})
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+			EVPN: rt2FromES("aa:bb:cc:00:00:02", "fd00:2:2:d2::", "fd00::2", other)})
+
+		a.Apply(perESWithdraw("fd00::2", esi))
+		if len(fh.fdb) != 1 {
+			t.Fatalf("after withdraw %d MACs remain, want the other segment's one", len(fh.fdb))
+		}
+	})
+
+	t.Run("single-homed MACs are untouched", func(t *testing.T) {
+		// A MAC with no ESI belongs to no segment, so no per-ES withdrawal
+		// can be a statement about it.
+		a, fh := evpnApplier(t)
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+			EVPN: rt2("aa:bb:cc:00:00:09", "fd00:2:2:d2::")})
+		a.Apply(perESWithdraw("fd00::2", esi))
+		if len(fh.fdb) != 1 {
+			t.Errorf("a single-homed MAC was swept: %d remain", len(fh.fdb))
+		}
+	})
+
+	t.Run("a per-EVI withdraw is not a mass withdraw", func(t *testing.T) {
+		// Only the per-ES form carries the segment-wide meaning; treating a
+		// per-EVI withdrawal the same way would tear down MACs still reachable
+		// through the other broadcast domains.
+		a, fh := evpnApplier(t)
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+			EVPN: rt2FromES("aa:bb:cc:00:00:01", "fd00:2:2:d2::", "fd00::2", esi)})
+		ev := perESWithdraw("fd00::2", esi)
+		ev.EVPN.EthernetTag = 100 // per-EVI
+		a.Apply(ev)
+		if len(fh.fdb) != 1 {
+			t.Errorf("a per-EVI withdraw swept the segment: %d MACs remain", len(fh.fdb))
+		}
+	})
+
+	t.Run("advertising a per-ES route changes nothing", func(t *testing.T) {
+		a, fh := evpnApplier(t)
+		a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN,
+			EVPN: rt2FromES("aa:bb:cc:00:00:01", "fd00:2:2:d2::", "fd00::2", esi)})
+		ev := perESWithdraw("fd00::2", esi)
+		ev.IsWithdraw = false
+		a.Apply(ev)
+		if len(fh.fdb) != 1 {
+			t.Errorf("an advertisement disturbed the FDB: %d MACs remain", len(fh.fdb))
+		}
+	})
+}

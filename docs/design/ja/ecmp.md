@@ -139,7 +139,17 @@ Single-Active bit は per-ES 経路の ESI Label extended community から読み
 
 transposition の取り出し元も 2 形式で違います。per-EVI は RT2/RT3 と同じく NLRI の MPLS label から取りますが、per-ES はその label を 0 にして、ESI Label extended community の 24-bit label に Argument を載せます (RFC 9252)。per-ES で NLRI label を読むと transposed bits が落ち、まったく別の場所を指す SID を組み立てます。gobgp は両者とも 3 バイトの raw 値として decode するので単位は揃っています。
 
-現時点では decode までで、applier はまだ RT1 を消費しません。aliasing と mass withdraw は data plane 側の変更を伴うため後続にしています。
+### mass withdraw
+
+per-ES A-D の withdraw を受けると、その PE がその segment 上で教えた MAC をまとめて撤去します。PE が per-ES 経路を引くのは segment 全体が自分から失われたという主張なので、MAC ごとの withdraw を待つ必要がありません。segment が数千の MAC を抱えていると、待つ間ずっと black-hole が続きます。この signal が存在する理由がそこにあります。
+
+`{ESI, PE}` から FDB エントリを引く逆引き index を持ちます。single-homed の MAC (ESI が全ゼロ) は index しません。属する segment が無いので、per-ES の withdraw がその MAC についての主張になり得ないためです。per-EVI の withdraw も mass withdraw として扱いません。segment 全体の意味を持つのは per-ES の形だけで、混同すると他の broadcast domain 経由でまだ到達できる MAC を落とします。
+
+再広告に特別な処理は要りません。MAC は通常の RT2 として戻ってきます。
+
+### aliasing (未実装)
+
+per-EVI A-D が運ぶ SID を使った aliasing は、ESI から group_id を引く side table と `l2_headend.c` の参照が要るため後続です。
 
 ## 制約と今後
 
