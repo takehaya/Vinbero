@@ -33,10 +33,6 @@ type fdbBdOps interface {
 	// real map, so a BGP-allocated peer never collides with an operator-created
 	// or restart-pinned entry.
 	FindFreeBdPeerIndex(bdID uint16) uint16
-	// FindFreeBdPeerEsIndex is the same scan over the ES-peer range above the
-	// BUM flood indices, where the aliasing path parks its synthetic
-	// segment peers.
-	FindFreeBdPeerEsIndex(bdID uint16) uint16
 	// ListBdPeers / ListFdb back the startup sweep of the ES peers -- and
 	// the FDB entries pointing at them -- that a previous run left in the
 	// pinned maps.

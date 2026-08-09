@@ -2538,22 +2538,6 @@ func (m *MapOperations) FindFreeBdPeerIndex(bdID uint16) uint16 {
 	return MaxBumNexthops
 }
 
-// FindFreeBdPeerEsIndex returns the lowest free bd_peer index in the ES-peer
-// range [EsPeerIndexBase, EsPeerIndexBase+MaxEsPeersPerBd), scanning the real
-// map like FindFreeBdPeerIndex does so an allocation never collides with an
-// entry a previous run left pinned. Returns EsPeerIndexBase+MaxEsPeersPerBd
-// when the range is full.
-func (m *MapOperations) FindFreeBdPeerEsIndex(bdID uint16) uint16 {
-	var entry HeadendEntry
-	for i := uint16(EsPeerIndexBase); i < EsPeerIndexBase+MaxEsPeersPerBd; i++ {
-		key := &BdPeerKey{BdId: bdID, Index: i}
-		if err := m.objs.BdPeerMap.Lookup(key, &entry); err != nil {
-			return i
-		}
-	}
-	return EsPeerIndexBase + MaxEsPeersPerBd
-}
-
 // ListBdPeers returns all BD peer entries
 func (m *MapOperations) ListBdPeers() (map[BdPeerKey]*HeadendEntry, error) {
 	result := make(map[BdPeerKey]*HeadendEntry)
@@ -2749,6 +2733,13 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 	var count uint32
 	for key := range entries {
 		if bdID != 0 && key.BdId != bdID {
+			continue
+		}
+		// The reserved ES range belongs to the BGP applier's EVPN aliasing
+		// state (see EsPeerIndexBase); flushing it here would leave the
+		// applier's ledger, the FDB pointers and the ECMP group referencing
+		// a peer that no longer exists, with nothing to trigger a repair.
+		if key.Index >= EsPeerIndexBase {
 			continue
 		}
 		if err := m.DeleteBdPeer(key.BdId, key.Index); err != nil {

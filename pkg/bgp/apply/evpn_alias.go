@@ -174,7 +174,14 @@ func (a *Applier) resetEVPNGroups() {
 		}
 	}
 
-	if peers, err := a.fdbBd.ListBdPeers(); err != nil {
+	// The ES peers come out only after every stale FDB pointer did: a
+	// surviving FDB entry may aim at one of these peers, and removing the
+	// peer would break that entry's forwarding from boot. Group deletion
+	// below is gated the same way; id allocation still seeds above the
+	// retained generation, so nothing collides.
+	if !sweepOK {
+		a.logger.Error("EVPN startup sweep incomplete; leaving previous run's ES peers and groups installed")
+	} else if peers, err := a.fdbBd.ListBdPeers(); err != nil {
 		a.logger.Error("list bd_peers; stale EVPN ES peers may be left behind", zap.Error(err))
 		sweepOK = false
 	} else {
@@ -194,16 +201,6 @@ func (a *Applier) resetEVPNGroups() {
 			a.logger.Info("swept EVPN ES peer left by a previous run",
 				zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index))
 		}
-	}
-
-	if !sweepOK {
-		// Some stale FDB entry or ES peer survived, and it may reference a
-		// group under this owner. Deleting the groups now and reseeding
-		// would let their ids be re-handed to different segments while the
-		// stale state still points at them; leave the whole generation in
-		// place instead -- id allocation seeds above the survivors below,
-		// so nothing collides, and the next restart retries the sweep.
-		a.logger.Error("EVPN startup sweep incomplete; leaving previous run's groups installed")
 	}
 
 	owners, err := a.ecmp.ListEcmpGroupOwners()
@@ -276,6 +273,14 @@ func (a *Applier) applyEVPNPerESAD(r *bgp.EVPNRoute, withdraw bool) {
 	if _, known := a.evpn.esAD[k]; !known && len(a.evpn.esAD) >= maxTrackedESADs {
 		a.logger.Warn("EVPN per-ES A-D table full; ignoring route",
 			zap.String("pe", r.NextHop), zap.Int("max", maxTrackedESADs))
+		return
+	}
+	// The NLRI ledger has its own bound: the aggregated esAD count above
+	// does not grow when one {ESI, PE} is re-advertised under ever-new RDs,
+	// but this ledger would.
+	if _, known := a.evpn.esADByNLRI[nk]; !known && len(a.evpn.esADByNLRI) >= maxTrackedESADs {
+		a.logger.Warn("EVPN per-ES A-D NLRI ledger full; ignoring route",
+			zap.String("rd", r.RD), zap.Int("max", maxTrackedESADs))
 		return
 	}
 	a.evpn.esADByNLRI[nk] = r.NextHop
@@ -725,8 +730,11 @@ func (a *Applier) freeESPeerIndex(bdID uint16) uint16 {
 	}
 	peers, err := a.fdbBd.ListBdPeers()
 	if err != nil {
-		a.logger.Error("list bd_peers for ES index allocation; using map scan only", zap.Error(err))
-		return a.fdbBd.FindFreeBdPeerEsIndex(bdID)
+		// Fail closed: a map-only scan cannot see a ledgered index whose
+		// map entry was rolled away, and handing that slot out would let
+		// two segments overwrite each other's ES peer on retry.
+		a.logger.Error("list bd_peers for ES index allocation; deferring aliasing", zap.Error(err))
+		return bpf.EsPeerIndexBase + bpf.MaxEsPeersPerBd
 	}
 	for k := range peers {
 		if k.BdId == bdID {
