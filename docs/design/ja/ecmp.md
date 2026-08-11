@@ -177,6 +177,8 @@ applier は group を書き込むたびに `Register(groupID, targets)` で memb
 
 steered path (SR Policy 合成) の probe は transport 部分のみで、policy が prepend する経路は検証しません。policy 経路の liveness は後続です。
 
+probe の宛先は PE の loopback であり、service SID (locator 配下) そのものではありません。L3VPN と EVPN の member entry は service SID 1 個なので、probe は素の echo に縮退します。したがって underlay で loopback への経路は生きているのに locator prefix への経路だけが失われる障害は検出できません。この shared-fate 前提 (loopback と locator は同じ underlay 経路を辿る) は一般的な PE 設計では成り立ちますが、意図的に分けている網では prober の保証が弱まります。locator 配下の routable address を probe する拡張は後続です。
+
 ## 制約と今後
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。

@@ -520,6 +520,11 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	// nothing else can be handed its index or id in the meantime.
 	fail := func() {
 		d.active = false
+		// The registration describes the member layout this reconcile just
+		// tried to replace; against whatever half-written state remains,
+		// its bitmap would mask the wrong members. Drop to fail-open first,
+		// whatever else the teardown manages.
+		a.prober.Unregister(d.groupID)
 		if !a.teardownESDest(dk, d) {
 			d.installed = nil
 			a.logger.Error("EVPN aliasing unwind incomplete; keeping dest for rebuild",
@@ -551,6 +556,14 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		return
 	}
 	d.programmed = true
+	// Register as soon as the group is written, mirroring the VPN side:
+	// PutEcmpGroup reset the liveness bitmap, and carrying the per-target
+	// down-states back in must not wait for the rest of the reconcile.
+	dsts := make([]string, len(members))
+	for i, m := range members {
+		dsts[i] = m.pe
+	}
+	a.prober.Register(d.groupID, probeTargets(paths, dsts))
 
 	// The ES peer mirrors the first member so the group-unresolvable
 	// fallback forwards the way the first path would (same shape as the VPN
@@ -571,11 +584,6 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		fail()
 		return
 	}
-	dsts := make([]string, len(members))
-	for i, m := range members {
-		dsts[i] = m.pe
-	}
-	a.prober.Register(d.groupID, probeTargets(paths, dsts))
 	d.installed = fingerprint
 	if !d.active || d.needRepoint {
 		d.active = true

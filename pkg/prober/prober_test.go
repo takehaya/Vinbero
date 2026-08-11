@@ -29,7 +29,8 @@ func (f *fakeWire) send(t Target, token, seq uint16, cookie uint64) error {
 func (f *fakeWire) recv() (uint16, uint16, uint64, netip.Addr, bool) {
 	return 0, 0, 0, netip.Addr{}, false
 }
-func (f *fakeWire) close() {}
+func (f *fakeWire) close()   {}
+func (f *fakeWire) release() {}
 
 // reply answers one recorded probe as its destination would.
 func reply(p *Prober, s sentProbe, now time.Time) {

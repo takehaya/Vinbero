@@ -329,8 +329,19 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 	if err := a.vpnGroups.ecmp.PutEcmpGroup(d.groupID, paths, owner); err != nil {
 		a.logger.Error("install ECMP group",
 			zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
+		// A failed replace can leave mixed-generation path slots behind (the
+		// bpf layer does not roll back). The prober's registration -- and any
+		// bitmap it wrote -- describes the OLD layout; over mixed slots its
+		// bit positions mask the wrong members. Unregister drops the bitmap
+		// and returns the group to fail-open until a retry rebuilds it.
+		a.prober.Unregister(d.groupID)
 		return
 	}
+	// Registered immediately after the group write: PutEcmpGroup resets the
+	// liveness bitmap (bit positions refer to the new member set), and this
+	// Register -- with per-target state carried over -- is what re-imposes
+	// the known down-states, so the fail-open window is these few
+	// statements, not a probe interval.
 	dsts := make([]string, len(ms))
 	for i, m := range ms {
 		dsts[i] = m.nh

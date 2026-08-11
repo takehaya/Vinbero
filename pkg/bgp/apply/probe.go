@@ -29,8 +29,13 @@ func probeTargets(paths []bpf.EcmpPath, dsts []string) []prober.Target {
 	out := make([]prober.Target, 0, len(paths))
 	for i, p := range paths {
 		t := prober.Target{PathIndex: uint8(i)}
-		if addr, err := netip.ParseAddr(dsts[i]); err == nil && addr.Is6() && !addr.Is4In6() {
-			t.Dst = addr
+		// The two slices are built pairwise by every caller; a future
+		// producer that filters one but not the other must degrade to an
+		// unprobeable (pinned-up) path, not panic or probe the wrong PE.
+		if i < len(dsts) {
+			if addr, err := netip.ParseAddr(dsts[i]); err == nil && addr.Is6() && !addr.Is4In6() {
+				t.Dst = addr
+			}
 		}
 		n := int(p.Entry.NumSegments)
 		for s := 0; s < n-1; s++ {

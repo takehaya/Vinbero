@@ -79,6 +79,9 @@ func newRawWire(src netip.Addr) (*rawWire, error) {
 }
 
 func (w *rawWire) send(t Target, token uint16, seq uint16, cookie uint64) error {
+	if w.closed.Load() {
+		return fmt.Errorf("prober wire is closed")
+	}
 	pkt, firstHop := buildEchoRequest(w.src, t, token, seq, cookie)
 	sa := &unix.SockaddrInet6{Addr: firstHop.As16()}
 	if err := unix.Sendto(w.sendFD, pkt, 0, sa); err != nil {
@@ -124,8 +127,16 @@ func (w *rawWire) recv() (token, seq uint16, cookie uint64, from netip.Addr, ok 
 	}
 }
 
+// close only flags the wire: the receive loop wakes on its socket
+// timeout within 500ms and the send path refuses new work, so both
+// loops drain without the descriptors going away under them.
 func (w *rawWire) close() {
 	w.closed.Store(true)
+}
+
+// release frees the descriptors. Only safe once every loop using them
+// has returned.
+func (w *rawWire) release() {
 	_ = unix.Close(w.sendFD)
 	_ = unix.Close(w.recvFD)
 }

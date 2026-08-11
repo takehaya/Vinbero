@@ -66,7 +66,13 @@ type wire interface {
 	send(t Target, token uint16, seq uint16, cookie uint64) error
 	// recv blocks for the next echo reply; ok is false once closed.
 	recv() (token, seq uint16, cookie uint64, from netip.Addr, ok bool)
+	// close makes send/recv return without touching the descriptors;
+	// release frees them. Split so the descriptors outlive every
+	// in-flight syscall: closing a raw fd under a blocked Sendto would
+	// let a concurrently opened descriptor reuse the number and receive
+	// the probe bytes.
 	close()
+	release()
 }
 
 // Config tunes the prober.
@@ -131,8 +137,9 @@ type Prober struct {
 	// a predictable cookie would let a forged reply keep a dead path up.
 	rng *rand.ChaCha8
 
-	stopCh chan struct{}
-	doneCh chan struct{}
+	stopCh     chan struct{}
+	doneCh     chan struct{}
+	readDoneCh chan struct{}
 }
 
 // New builds a Prober probing from src. It opens the raw sockets
@@ -284,6 +291,7 @@ func (p *Prober) allocTokenLocked(ps *pathState) (uint16, bool) {
 func (p *Prober) Start() {
 	p.stopCh = make(chan struct{})
 	p.doneCh = make(chan struct{})
+	p.readDoneCh = make(chan struct{})
 	go p.readLoop()
 	go func() {
 		defer close(p.doneCh)
@@ -308,13 +316,15 @@ func (p *Prober) Start() {
 // run's sweep) owns them, and yanking them here would flip the data plane
 // to fail-open mid-flight for no reason.
 func (p *Prober) Stop() {
+	p.wire.close()
 	if p.stopCh != nil {
 		close(p.stopCh)
-		p.wire.close()
 		<-p.doneCh
-	} else {
-		p.wire.close()
+		<-p.readDoneCh
 	}
+	// Both loops have returned: no syscall can be in flight on the
+	// descriptors any more, so freeing them cannot race an fd reuse.
+	p.wire.release()
 }
 
 // tick runs one probe round: for every probeable path, first judge the
@@ -479,6 +489,7 @@ func (p *Prober) Status() []PathStatus {
 // readLoop feeds echo replies from the wire into the state machine until
 // the wire is closed.
 func (p *Prober) readLoop() {
+	defer close(p.readDoneCh)
 	for {
 		token, seq, cookie, from, ok := p.wire.recv()
 		if !ok {
