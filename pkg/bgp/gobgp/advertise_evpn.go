@@ -331,6 +331,112 @@ func encodeEVPNEthernetSegmentPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
 	return &apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri, Attrs: attrs}, nil
 }
 
+// PushEVPNEthernetAD advertises a local EVPN RT1 (Ethernet A-D) into the BGP
+// RIB. The EthernetTag selects the form: MAX-ET emits the per-ES route, any
+// other tag the per-EVI route. The path UUID is tracked under
+// {RD, ESI, EthernetTag} for a later withdraw.
+func (s *Session) PushEVPNEthernetAD(_ context.Context, r bgp.EVPNRoute) error {
+	srv := s.bgpServer()
+	if srv == nil {
+		return bgp.ErrSessionNotStarted
+	}
+	path, err := encodeEVPNEthernetADPath(r)
+	if err != nil {
+		return err
+	}
+	return s.addAndTrack(srv, path, evpnAdKey(r.RD, r.ESI, r.EthernetTag))
+}
+
+// WithdrawEVPNEthernetAD removes a previously advertised RT1. Withdrawing one
+// never advertised is a no-op.
+func (s *Session) WithdrawEVPNEthernetAD(_ context.Context, key bgp.EVPNADKey) error {
+	srv := s.bgpServer()
+	if srv == nil {
+		return bgp.ErrSessionNotStarted
+	}
+	rk := evpnAdKey(key.RD, key.ESI, key.EthernetTag)
+	s.advMu.Lock()
+	id, ok := s.advertised[rk]
+	s.advMu.Unlock()
+	if !ok {
+		return nil
+	}
+	if err := srv.DeletePath(apiutil.DeletePathRequest{UUIDs: []uuid.UUID{id}}); err != nil {
+		return fmt.Errorf("withdraw EVPN RT1 {rd=%s, esi=%x, etag=%d}: %w",
+			key.RD, key.ESI, key.EthernetTag, err)
+	}
+	s.advMu.Lock()
+	delete(s.advertised, rk)
+	s.advMu.Unlock()
+	return nil
+}
+
+// evpnAdKey synthesizes the advertised-path tracking key for an RT1. RD goes
+// in the dedicated RD field; Prefix holds the EthernetTag (digits) and the
+// fixed-width hex ESI, which cannot collide across distinct tuples.
+func evpnAdKey(rd string, esi [10]byte, etag uint32) bgp.RouteKey {
+	return bgp.RouteKey{
+		Family: bgp.FamilyEVPN,
+		RD:     rd,
+		Prefix: fmt.Sprintf("evpn-rt1:%d:%x", etag, esi),
+	}
+}
+
+// encodeEVPNEthernetADPath builds the gobgp Path for an RT1 advertisement,
+// the inverse of decodeEVPNEthernetAD. Both forms share the
+// {RD, ESI, EthernetTag} NLRI (label 0) and the route targets; what differs
+// is the payload. The per-ES form (ETag = MAX-ET) carries the ESI Label
+// extended community, mandatory per RFC 7432 §8.2.1, whose Single-Active bit
+// tells peers whether the segment may be aliased; it needs no SRv6 SID
+// because the receive side only reads the bit. The per-EVI form carries the
+// PE's own End.DT2U SID in the SRv6 L2 Service TLV (RFC 9252 §6.1), the
+// address a peer sends aliased traffic to, so the SID is required there.
+func encodeEVPNEthernetADPath(r bgp.EVPNRoute) (*apiutil.Path, error) {
+	var zeroESI [10]byte
+	if r.ESI == zeroESI {
+		return nil, fmt.Errorf("EVPN RT1 ESI must be non-zero")
+	}
+	nh, err := netip.ParseAddr(r.NextHop)
+	if err != nil || !nh.Is6() || nh.Is4In6() || nh.IsUnspecified() {
+		return nil, fmt.Errorf("EVPN RT1 next hop must be IPv6: %q", r.NextHop)
+	}
+	rd, err := gobgppkt.ParseRouteDistinguisher(r.RD)
+	if err != nil {
+		return nil, fmt.Errorf("parse RD %q: %w", r.RD, err)
+	}
+
+	nlri := gobgppkt.NewEVPNEthernetAutoDiscoveryRoute(rd, arrayToESI(r.ESI), r.EthernetTag, 0)
+
+	attrs := []gobgppkt.PathAttributeInterface{gobgppkt.NewPathAttributeOrigin(0)}
+	ecs, err := parseRouteTargets(r.RTs)
+	if err != nil {
+		return nil, err
+	}
+	if r.IsPerES() {
+		ecs = append(ecs, gobgppkt.NewESILabelExtended(0, r.SingleActive))
+	}
+	if len(ecs) > 0 {
+		attrs = append(attrs, gobgppkt.NewPathAttributeExtendedCommunities(ecs))
+	}
+	if !r.IsPerES() {
+		sid, err := netip.ParseAddr(r.SRv6SID)
+		if err != nil || !sid.Is6() || sid.Is4In6() || sid.IsUnspecified() {
+			return nil, fmt.Errorf("EVPN per-EVI RT1 SID must be a usable IPv6 SID: %q", r.SRv6SID)
+		}
+		infoSubTLV := gobgppkt.NewSRv6InformationSubTLV(sid, gobgppkt.END_DT2U)
+		svcTLV := gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L2Service, infoSubTLV)
+		attrs = append(attrs, gobgppkt.NewPathAttributePrefixSID(svcTLV))
+	}
+
+	mpReach, err := gobgppkt.NewPathAttributeMpReachNLRI(
+		gobgppkt.RF_EVPN, []gobgppkt.PathNLRI{{NLRI: nlri}}, nh)
+	if err != nil {
+		return nil, fmt.Errorf("build MP_REACH_NLRI: %w", err)
+	}
+	attrs = append(attrs, mpReach)
+	return &apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri, Attrs: attrs}, nil
+}
+
 // arrayToESI is the inverse of esiToArray: it splits the RFC 7432 10-byte
 // identifier back into gobgp's {Type, 9-byte Value} form.
 func arrayToESI(esi [10]byte) gobgppkt.EthernetSegmentIdentifier {

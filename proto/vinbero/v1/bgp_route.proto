@@ -27,6 +27,8 @@ service BgpRouteService {
   rpc BgpWithdrawEvpnImet(BgpWithdrawEvpnImetRequest) returns (BgpWithdrawEvpnImetResponse);
   rpc BgpAdvertiseEvpnEs(BgpAdvertiseEvpnEsRequest) returns (BgpAdvertiseEvpnEsResponse);
   rpc BgpWithdrawEvpnEs(BgpWithdrawEvpnEsRequest) returns (BgpWithdrawEvpnEsResponse);
+  rpc BgpAdvertiseEvpnAd(BgpAdvertiseEvpnAdRequest) returns (BgpAdvertiseEvpnAdResponse);
+  rpc BgpWithdrawEvpnAd(BgpWithdrawEvpnAdRequest) returns (BgpWithdrawEvpnAdResponse);
   rpc BgpAdvertiseMup(BgpAdvertiseMupRequest) returns (BgpAdvertiseMupResponse);
   rpc BgpWithdrawMup(BgpWithdrawMupRequest) returns (BgpWithdrawMupResponse);
 }
@@ -212,6 +214,45 @@ message BgpWithdrawEvpnEsRequest {
 }
 message BgpWithdrawEvpnEsResponse {
   repeated BgpEvpnEsKey withdrawn = 1;
+  repeated OperationError errors = 2;
+}
+
+// BgpEvpnAd is a local EVPN RT1 (Ethernet A-D) to advertise. The
+// ethernet_tag selects the form: 0xFFFFFFFF (MAX-ET) is the per-ES route,
+// the mass-withdraw signal whose single_active bit rides the ESI Label
+// extended community and forbids aliasing when set; any other tag is the
+// per-EVI route, whose sid is this PE's End.DT2U service SID that remote
+// peers alias traffic to. A PE enabling aliasing advertises both forms.
+message BgpEvpnAd {
+  string rd = 1;
+  repeated string route_targets = 2;
+  string esi = 3; // 10-octet ESI, "00:11:22:..." form
+  uint32 ethernet_tag = 4; // 0xFFFFFFFF = per-ES, else per-EVI
+  string sid = 5; // per-EVI: local End.DT2U SID (IPv6); ignored for per-ES
+  string next_hop = 6; // IPv6 BGP next hop
+  bool single_active = 7; // per-ES: Single-Active bit; ignored for per-EVI
+}
+
+// BgpEvpnAdKey identifies a previously advertised RT1 for withdrawal.
+message BgpEvpnAdKey {
+  string rd = 1;
+  string esi = 2;
+  uint32 ethernet_tag = 3;
+}
+
+message BgpAdvertiseEvpnAdRequest {
+  repeated BgpEvpnAd routes = 1;
+}
+message BgpAdvertiseEvpnAdResponse {
+  repeated BgpEvpnAd advertised = 1;
+  repeated OperationError errors = 2;
+}
+
+message BgpWithdrawEvpnAdRequest {
+  repeated BgpEvpnAdKey keys = 1;
+}
+message BgpWithdrawEvpnAdResponse {
+  repeated BgpEvpnAdKey withdrawn = 1;
   repeated OperationError errors = 2;
 }
 

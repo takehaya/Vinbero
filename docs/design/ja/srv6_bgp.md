@@ -175,8 +175,9 @@ L3VPN と同じく RD で経路を一意にし、RT で取り込み先を決め�
 
 ### route type と service SID
 
-EVPN は経路の種類 (route type) で役割が分かれます。Vinbero が扱うのは次の 3 つです。
+EVPN は経路の種類 (route type) で役割が分かれます。Vinbero が扱うのは次の 4 つです。
 
+- RT1 (Ethernet A-D): multi-homed segment についての集合的な主張を配ります。per-ES 形式 (Ethernet Tag = MAX-ET) は mass withdraw の signal と Single-Active bit を、per-EVI 形式は aliasing の着地先になる End.DT2U SID を運びます。詳細は [ecmp.md](./ecmp.md) の EVPN RT1 の節を参照してください。広報は `vbctl bgp advertise-evpn-ad` で、per-ES と per-EVI を対で出します。
 - RT2 (MAC/IP advertisement): 1 つの顧客 MAC の所在を配ります。End.DT2U service SID に紐付け、その MAC 宛ての unicast フレームを SID へ encap します。
 - RT3 (Inclusive Multicast): BUM (broadcast / unknown-unicast / multicast) の flood 宛先を配ります。End.DT2M SID に紐付け、PMSI 属性で Ingress Replication を示します。
 - RT4 (Ethernet Segment): multi-homing で、1 つの顧客が複数 PE に接続していることを配ります。service SID は載せず、ES-Import RT で同じ segment に接続する PE 同士を結びます。

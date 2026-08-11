@@ -1,4 +1,4 @@
-# evpn-multihoming — SRv6 EVPN multi-homing (RT4 DF election + split-horizon)
+# evpn-multihoming — SRv6 EVPN multi-homing (RT4 DF election + split-horizon + RT1 aliasing)
 
 *(English: [README.md](./README.md))*
 
@@ -31,10 +31,12 @@ graph LR
 2. RT2 による MAC 交換。`pe3` は `ce-mh` の MAC を、`pe1` と `pe2` は `ce-remote` の MAC を RT2 で学習する (相手の End.DT2U SID へ向かう `fdb_map` の remote エントリ)。
 3. データプレーンの双方向通信。`ce-mh` と `ce-remote` が SRv6 コアをまたいで stretched L2 domain 越しに ping できる。
 4. BUM の単一配送。`pe3` から `pe1` と `pe2` の両 End.DT2M へ flood された BUM フレームが multi-home された `ce-mh` にちょうど 1 回だけ届く。DF (`pe1`) が転送し、non-DF (`pe2`) は `dt2m_non_df_drop` で drop する。さらに split-horizon が、一方の PE が他方の BUM を共有 CE へ再 flood するのを防ぐ。このため `ce-remote` は重複した (`DUP!`) 応答を受け取らない。
+5. RT1 aliasing。`pe1` と `pe2` は ES-1 の Ethernet A-D route を 2 形式とも広告する。per-ES 形式 (MAX-ET、Single-Active bit を落とした ESI Label extended community) と per-EVI 形式 (自分の End.DT2U SID) を受けて、`pe3` はこの segment を PE ごとに 1 member を持つ 1 つの EVPN ECMP group (group id は 0x80000000 以上の EVPN partition) に畳み込み、`ce-mh` の MAC を group に向ける。multi-home された CE への known-unicast は RT2 の広告元だけでなく両 PE に分散する (RFC 7432 8.4 節)。
+6. RT1 mass withdraw。`pe2` の per-ES route を withdraw するだけで、`pe3` の group は 1 回の BGP update で `pe1` のみに縮む (MAC ごとの withdraw は不要)。その間もユニキャストは流れ続け、再広告すると group は 2 member に戻る (RFC 7432 8.2 節)。
 
 ## スコープ
 
-RT4 (Ethernet Segment) と RFC 8584 DF election、Local-Bias / static-DF の split-horizon を、[evpn-2site](../evpn-2site/) の RT2 (ユニキャスト) + RT3 (Inclusive Multicast / BUM flood) コアの上に重ねる。redundancy は `SINGLE_ACTIVE` で、customer host は flood 越しに ARP を動的解決する。各 PE は自分の customer MAC と flood 宛先を、multi-home する PE はさらに Ethernet Segment を、起動時に明示的に広告する。
+RT1 (Ethernet A-D: aliasing + mass withdraw) と RT4 (Ethernet Segment)、RFC 8584 DF election、Local-Bias / static-DF の split-horizon を、[evpn-2site](../evpn-2site/) の RT2 (ユニキャスト) + RT3 (Inclusive Multicast / BUM flood) コアの上に重ねる。redundancy は aliasing に必要な `ALL_ACTIVE` とし、BUM は引き続き DF で gate する。customer host は flood 越しに ARP を動的解決する。各 PE は自分の customer MAC と flood 宛先を、multi-home する PE はさらに Ethernet Segment と両 A-D 形式を、起動時に明示的に広告する。
 
 ## 実行
 
@@ -54,11 +56,12 @@ Docker、containerlab、sudo が必要。`vrf` カーネルモジュールは不
 
 multi-home する PE (`pe1` / `pe2`、`pe*/start.sh` と `pe*/vinbero.yml` を参照):
 
-- ES 側の customer ポート (`eth2`) を bd 100 に bridge し、`vbctl es create --esi <ESI> --local-attached --mode SINGLE_ACTIVE` で Ethernet Segment を登録する。あわせて `hl2` headend に同じ ESI を付けて TX/RX split-horizon に使う。
+- ES 側の customer ポート (`eth2`) を bd 100 に bridge し、`vbctl es create --esi <ESI> --local-attached --mode ALL_ACTIVE` で Ethernet Segment を登録する。あわせて `hl2` headend に同じ ESI を付けて TX/RX split-horizon に使う。
 - core からのフレームを `br100` に届ける `END_DT2` SID (ユニキャスト decap) と `END_DT2M` SID (BUM flood decap) を登録する。
 - customer MAC を `advertise-evpn-mac` (End.DT2U SID) で、flood 宛先を `advertise-evpn-imet` (End.DT2M SID) で、Ethernet Segment を `advertise-evpn-es` (ES-Import RT、next hop は local encap source) で広告する。local に attach した ESI に対する RT4 を受信すると DF election を再実行し、勝者を `esi_map` に書く。non-DF の PE は End.DT2M で decap した BUM を CE へ drop する。
+- RT1 を `advertise-evpn-ad` で 2 形式とも広告する。`--per-es` は segment が all-active であることを ESI Label extended community で伝える MAX-ET route (mass withdraw の handle) を、`--ethernet-tag 0 --sid <End.DT2U>` は alias された traffic の着地先 SID を運ぶ per-EVI route を出す。
 
-`pe3` は single-home で、`ce-remote` を ESI も RT4 もなく通常どおり収容し、`ce-mh` を RT2 で学習して `pe1` / `pe2` の両 End.DT2M へ flood する。
+`pe3` は single-home で、`ce-remote` を ESI も RT4 もなく通常どおり収容し、`ce-mh` を RT2 で学習して `pe1` / `pe2` の両 End.DT2M へ flood する。受信した A-D のペアからは ES 全体を表す合成 bd_peer (peer index 8 以上、flood range の外) と EVPN ECMP group (group id 0x80000000 以上) を作り、`ce-mh` の FDB entry をそこへ付け替える。この group が `vbctl headend-group list` に現れ、aliasing と mass withdraw の assertion が読む対象になる。
 
 ESI は type 0 (arbitrary) を使う。先頭バイトが ESI type なので、先頭が `01` だと最終オクテットが `0x00` でなければならない LACP ESI として parse されて reject される。type 0 にはそうした構造上の制約がない。
 

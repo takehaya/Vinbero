@@ -3,8 +3,10 @@
 #
 # pe1 attaches the dual-homed CE's Ethernet Segment (ES-1) and is one of two
 # candidates for Designated Forwarder. It advertises ce-mh's MAC (RT2), its BUM
-# flood endpoint (RT3 End.DT2M), and its ES-1 attachment (RT4 ES-Import), then
-# DF election against pe2 decides which PE forwards BUM toward ce-mh.
+# flood endpoint (RT3 End.DT2M), its ES-1 attachment (RT4 ES-Import), and both
+# RT1 Ethernet A-D forms (per-ES + per-EVI) that let pe3 alias known-unicast
+# for the segment across pe1/pe2. DF election against pe2 decides which PE
+# forwards BUM toward ce-mh.
 #
 # Interfaces:
 #   eth1  pe1 <-> core      underlay 2001:db8:1::/64 (pe1 = ::1)
@@ -91,10 +93,12 @@ done
     --src-addr fd00:100:0:2:: --segments fd00:100:0:2:: --bd-id 100 \
     --esi "$ESI" || true
 
-# Locally attach ES-1 (single-active). DF is left unset; election fills it once
+# Locally attach ES-1 (all-active). DF is left unset; election fills it once
 # pe1/pe2 exchange RT4. local-pe is the encap source = the DF-election identity.
+# All-active means both PEs may carry known-unicast for the segment, which is
+# what lets pe3 alias the CE's MAC across pe1 and pe2; BUM stays DF-gated.
 /usr/local/bin/vbctl es create --esi "$ESI" --local-attached \
-    --local-pe "$LOCAL_PE" --mode SINGLE_ACTIVE || true
+    --local-pe "$LOCAL_PE" --mode ALL_ACTIVE || true
 
 # Advertise ce-mh's MAC (RT2), the BUM flood endpoint (RT3), and ES-1 (RT4).
 /usr/local/bin/vbctl bgp advertise-evpn-mac --rd 65100:1 \
@@ -104,6 +108,16 @@ done
     --route-targets 65000:100 --sid fd00:100:0:3:: --next-hop 2001:db8:ff::1 || true
 /usr/local/bin/vbctl bgp advertise-evpn-es --rd 65100:1 --esi "$ESI" \
     --es-import-rt "$ES_IMPORT_RT" --next-hop "$LOCAL_PE" || true
+
+# Advertise both RT1 Ethernet A-D forms for ES-1 so remote PEs can alias the
+# segment: the per-ES form (MAX-ET, Single-Active bit clear) says the segment
+# is all-active and is the mass-withdraw handle, the per-EVI form carries this
+# PE's End.DT2U SID that aliased traffic lands on.
+/usr/local/bin/vbctl bgp advertise-evpn-ad --rd 65100:1 --esi "$ESI" \
+    --route-targets 65000:100 --per-es --next-hop 2001:db8:ff::1 || true
+/usr/local/bin/vbctl bgp advertise-evpn-ad --rd 65100:1 --esi "$ESI" \
+    --route-targets 65000:100 --ethernet-tag 0 --sid fd00:100:0:2:: \
+    --next-hop 2001:db8:ff::1 || true
 
 ping6 -c 1 -W 2 2001:db8:1::2 >/dev/null 2>&1 || true
 echo "[start.sh] pe1 (Vinbero) EVPN multi-homing PE ready (ES-1 local)"

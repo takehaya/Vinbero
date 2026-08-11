@@ -139,6 +139,10 @@ Single-Active bit は per-ES 経路の ESI Label extended community から読み
 
 transposition の取り出し元も 2 形式で違います。per-EVI は RT2/RT3 と同じく NLRI の MPLS label から取りますが、per-ES はその label を 0 にして、ESI Label extended community の 24-bit label に Argument を載せます (RFC 9252)。per-ES で NLRI label を読むと transposed bits が落ち、まったく別の場所を指す SID を組み立てます。gobgp は両者とも 3 バイトの raw 値として decode するので単位は揃っています。
 
+### advertise
+
+送出側は `EVPNController` の `PushEVPNEthernetAD` / `WithdrawEVPNEthernetAD` で、RT2/RT3/RT4 と同じ operator-explicit の流儀です (`BgpRouteService` の `BgpAdvertiseEvpnAd`、`vbctl bgp advertise-evpn-ad`)。Ethernet Tag が形式を選び、MAX-ET なら per-ES として ESI Label extended community (Single-Active bit は `--single-active`) を付け、それ以外なら per-EVI として自 PE の End.DT2U SID を SRv6 L2 Service TLV に載せます。受信側が aliasing を組むには同一 PE から両形式が要るので、all-active の PE は 2 本を対で広告します。transposition は使わず label 0 + フル 128bit SID で出します (RT2/RT3 と同じ判断)。ローカル ES 状態からの自動送出は per-EVI に「この ESI がどの bd に属するか」の対応が要るため後続で、exporter にはまだ載せていません。
+
 ### aliasing
 
 per-EVI A-D が運ぶ SID を使い、multi-homed segment への転送を PE 群への ECMP group にします (RFC 7432 8.4)。
@@ -156,6 +160,8 @@ L2 経路は従来 flow hash を計算していなかったので、`try_l2_head
 per-ES A-D の withdraw は segment 全体が当該 PE から失われたという主張です (RFC 7432 8.2)。MAC ごとの withdraw を待つと、segment が数千の MAC を抱えている間ずっと black-hole が続きます。この signal が存在する理由がそこにあります。
 
 aliasing が効いている segment では、withdraw はまず group から当該 PE の member を外します。収束は group の 1 回の書き換えで済み、MAC の FDB エントリは ES peer を指したまま残ります。生存 PE がまだ転送できるからです。当該 PE の RT2 台帳は、後続の RT2 withdraw が到着するたびに contribution として drain されます。group が残らない場合 (aliasing が組めていない、または最後の PE だった場合) は従来どおり、`{ESI, PE}` の逆引き index からその PE が教えた MAC をまとめて撤去します。
+
+withdraw が名指しする PE は NLRI 台帳 (`esADByNLRI`) から引きます。実際の BGP withdraw は MP_UNREACH で NLRI (`{RD, ESI}`) だけを運び、next hop 属性を持たないためです。当初の実装は event の next hop に依存していて、unit test の合成 event (next hop 入り) では通るのに wire の withdraw は黙って落ちる、という形で evpn-multihoming の interop 検証が見つけた欠陥でした。台帳に無い NLRI の withdraw は、誰の contribution か言えないので no-op にします。
 
 single-homed の MAC (ESI が全ゼロ) は index しません。属する segment が無いので、per-ES の withdraw がその MAC についての主張になり得ないためです。per-EVI の withdraw は mass withdraw として扱わず、group の member を 1 つ外すだけです。member が尽きたら group と ES peer を畳み、FDB エントリを広告元 PE の bd_peer に戻します。
 
