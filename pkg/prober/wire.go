@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	ipv6HeaderLen   = 40
-	srhFixedLen     = 8
+	ipv6HeaderLen = 40
+	srhFixedLen   = 8
 	// ICMPv6 echo header plus the 8-byte cookie payload.
 	icmpv6EchoLen   = 16
 	protoRouting    = 43

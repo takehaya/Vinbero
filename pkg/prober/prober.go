@@ -50,7 +50,7 @@ type Registry interface {
 type Noop struct{}
 
 func (Noop) Register(uint32, []Target) {}
-func (Noop) Unregister(uint32)        {}
+func (Noop) Unregister(uint32)         {}
 
 // liveWriter is the pkg/bpf surface the prober writes.
 type liveWriter interface {
