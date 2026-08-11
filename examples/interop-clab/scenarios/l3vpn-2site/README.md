@@ -90,8 +90,8 @@ precondition before pinging — a slow settle cannot cause a spurious
   `fd00:200:0:1::`. `test.sh` step 2 asserts this.
 - XDP attaches in **generic** mode — containerlab veth links have no
   native XDP.
-- The `core/`, `frr/` and `vinbero/` `start.sh` scripts carry the
-  remaining setup glue — VRF creation order, source-locator
-  registration, loopback-sourced iBGP, the static route FRR validates
-  the SRv6 service SID against, `net.vrf.strict_mode` — documented in
-  their inline comments.
+- The `core/`, `frr/` and `vinbero/` `start.sh` scripts and `frr/frr.conf`
+  carry the remaining setup glue — VRF creation order, source-locator
+  registration, loopback-sourced iBGP, the static `fd00:100::/48` route
+  (in `frr.conf`) that FRR validates the SRv6 service SID against,
+  `net.vrf.strict_mode` — documented in their inline comments.
