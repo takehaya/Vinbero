@@ -61,4 +61,4 @@ make all                        # build + deploy + test + destroy
 - **FRR は固定** — `quay.io/frrouting/frr:10.2.1`。SRv6 L3VPN 構文はバージョン依存が大きいので、更新は `frr.conf` のレビューとセットで。
 - **transposition** — FRR は SID の function bits を VPN label に転置するため wire 上の SID は bare locator `fd00:200::`。Vinbero のデコーダ (`pkg/bgp/gobgp/decode.go`) がこれを畳み戻してフル SID `fd00:200:0:1::` を復元する。`test.sh` step 2 がアサートする。
 - XDP は **generic** モードで attach — containerlab の veth は native XDP に非対応。
-- `core/`・`frr/`・`vinbero/` の `start.sh` が残りのセットアップ（VRF 作成順、source locator 登録、loopback ソースの iBGP、FRR の SRv6 nexthop validation 用 connected 経路、`net.vrf.strict_mode`）を担う — 詳細は各スクリプトのインラインコメント参照。
+- `core/`・`frr/`・`vinbero/` の `start.sh` が残りのセットアップ（VRF 作成順、source locator 登録、loopback ソースの iBGP、FRR が SRv6 nexthop validation に使う static 経路、`net.vrf.strict_mode`）を担う — 詳細は各スクリプトのインラインコメント参照。

@@ -92,6 +92,6 @@ precondition before pinging — a slow settle cannot cause a spurious
   native XDP.
 - The `core/`, `frr/` and `vinbero/` `start.sh` scripts carry the
   remaining setup glue — VRF creation order, source-locator
-  registration, loopback-sourced iBGP, FRR's connected-route requirement
-  for SRv6 nexthop validation, `net.vrf.strict_mode` — documented in
+  registration, loopback-sourced iBGP, the static route FRR validates
+  the SRv6 service SID against, `net.vrf.strict_mode` — documented in
   their inline comments.
