@@ -41,6 +41,12 @@ func newRawWire(src netip.Addr) (*rawWire, error) {
 	if err != nil {
 		return nil, fmt.Errorf("send socket: %w", err)
 	}
+	// A send must never wedge the probe loop (or shutdown) indefinitely.
+	stv := unix.Timeval{Sec: 1}
+	if err := unix.SetsockoptTimeval(sendFD, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &stv); err != nil {
+		_ = unix.Close(sendFD)
+		return nil, fmt.Errorf("send timeout: %w", err)
+	}
 	recvFD, err := unix.Socket(unix.AF_INET6, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.IPPROTO_ICMPV6)
 	if err != nil {
 		_ = unix.Close(sendFD)

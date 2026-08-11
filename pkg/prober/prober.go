@@ -15,6 +15,7 @@
 package prober
 
 import (
+	crand "crypto/rand"
 	"fmt"
 	"math/rand/v2"
 	"net/netip"
@@ -105,6 +106,10 @@ type pathState struct {
 
 type groupState struct {
 	paths []*pathState
+	// dirty is set when the last bitmap write failed, so the next tick
+	// retries it: a lost down-transition would otherwise keep a dead path
+	// in the forwarding set until the next state flip.
+	dirty bool
 }
 
 // Prober drives the probe schedule and owns the liveness bitmaps.
@@ -118,6 +123,9 @@ type Prober struct {
 	groups map[uint32]*groupState
 	tokens map[uint16]*pathState // ICMPv6 identifier -> path
 	nextTk uint16
+	// rng feeds the reply-authentication cookies. Seeded from crypto/rand:
+	// a predictable cookie would let a forged reply keep a dead path up.
+	rng *rand.ChaCha8
 
 	stopCh chan struct{}
 	doneCh chan struct{}
@@ -143,6 +151,12 @@ func New(live liveWriter, src netip.Addr, cfg Config, logger *zap.Logger) (*Prob
 
 // newWithWire is the injectable constructor the tests use.
 func newWithWire(live liveWriter, w wire, cfg Config, logger *zap.Logger) *Prober {
+	var seed [32]byte
+	if _, err := crand.Read(seed[:]); err != nil {
+		// crypto/rand failing is a broken system; a zero seed still leaves
+		// source-address matching in place.
+		logger.Error("seed prober cookie generator", zap.Error(err))
+	}
 	return &Prober{
 		live:   live,
 		wire:   w,
@@ -150,6 +164,7 @@ func newWithWire(live liveWriter, w wire, cfg Config, logger *zap.Logger) *Probe
 		logger: logger.Named("prober"),
 		groups: make(map[uint32]*groupState),
 		tokens: make(map[uint16]*pathState),
+		rng:    rand.NewChaCha8(seed),
 	}
 }
 
@@ -183,6 +198,11 @@ func (p *Prober) Register(groupID uint32, targets []Target) {
 			target:    t,
 			up:        true,
 			probeable: probeable(t.Dst),
+			// Random from birth: an all-zero cookie pair would make the
+			// first round's previous-probe branch accept a forged
+			// {seq 0, cookie 0} reply.
+			cookie:     p.rng.Uint64(),
+			prevCookie: p.rng.Uint64(),
 		}
 		if ps.probeable {
 			tk, ok := p.allocTokenLocked(ps)
@@ -206,6 +226,7 @@ func (p *Prober) Register(groupID uint32, targets []Target) {
 	if err := p.live.SetEcmpLive(groupID, bitmapOf(gs)); err != nil {
 		p.logger.Error("write initial liveness bitmap",
 			zap.Uint32("group_id", groupID), zap.Error(err))
+		gs.dirty = true
 	}
 }
 
@@ -268,16 +289,21 @@ func (p *Prober) Start() {
 	}()
 }
 
-// Stop halts probing and closes the sockets. Registered bitmaps are left
-// in place: on shutdown the daemon's map cleanup (or the next run's sweep)
-// owns them, and yanking them here would flip the data plane to fail-open
-// mid-flight for no reason.
+// Stop halts probing and closes the sockets. The wire is closed BEFORE
+// waiting for the scheduler: a send blocked in the kernel would otherwise
+// keep the loop from ever observing the stop signal (the sockets also
+// carry timeouts, this is the second line of defence). Registered bitmaps
+// are left in place: on shutdown the daemon's map cleanup (or the next
+// run's sweep) owns them, and yanking them here would flip the data plane
+// to fail-open mid-flight for no reason.
 func (p *Prober) Stop() {
 	if p.stopCh != nil {
 		close(p.stopCh)
+		p.wire.close()
 		<-p.doneCh
+	} else {
+		p.wire.close()
 	}
-	p.wire.close()
 }
 
 // tick runs one probe round: for every probeable path, first judge the
@@ -317,13 +343,16 @@ func (p *Prober) tick(now time.Time) {
 			ps.sentAt = now
 			ps.replySeen = false
 			ps.prevCookie = ps.cookie
-			ps.cookie = rand.Uint64()
+			ps.cookie = p.rng.Uint64()
 			toSend = append(toSend, outProbe{ps.target, ps.token, ps.seq, ps.cookie})
 		}
-		if changed {
+		if changed || gs.dirty {
 			if err := p.live.SetEcmpLive(groupID, bitmapOf(gs)); err != nil {
 				p.logger.Error("write liveness bitmap",
 					zap.Uint32("group_id", groupID), zap.Error(err))
+				gs.dirty = true
+			} else {
+				gs.dirty = false
 			}
 		}
 	}
@@ -378,7 +407,8 @@ func (p *Prober) handleReply(token, seq uint16, cookie uint64, from netip.Addr, 
 		ps.replySeen = true
 		ps.lastReply = now
 		ps.rtt = now.Sub(ps.sentAt)
-	case seq == ps.seq-1 && cookie == ps.prevCookie:
+	case ps.seq >= 2 && seq == ps.seq-1 && cookie == ps.prevCookie:
+		// ps.seq >= 2: round one has no previous probe to be late.
 		ps.replySeen = true
 		ps.lastReply = now
 	}
@@ -444,12 +474,16 @@ func (p *Prober) readLoop() {
 	}
 }
 
-// probeable reports whether dst can be the final destination of a probe. A
-// link-local next hop is excluded: sending to it needs a zone the target
-// does not carry, so every probe would fail at the socket and take a
-// perfectly healthy path down.
+// probeable reports whether dst can be the final destination of a probe:
+// a global-scope unicast IPv6 address. Link-local needs a zone the target
+// cannot carry (every probe would fail at the socket), loopback is
+// answered by the local kernel (a dead path would look alive), and a
+// multicast destination can never source a matching reply -- each of
+// those would turn an address quirk into a wrong liveness verdict, so
+// such a path is pinned up instead.
 func probeable(dst netip.Addr) bool {
-	return dst.Is6() && !dst.Is4In6() && !dst.IsUnspecified() && !dst.IsLinkLocalUnicast()
+	return dst.Is6() && !dst.Is4In6() && !dst.IsUnspecified() &&
+		!dst.IsLinkLocalUnicast() && !dst.IsLoopback() && !dst.IsMulticast()
 }
 
 // targetKey is the identity a path keeps across re-registrations.

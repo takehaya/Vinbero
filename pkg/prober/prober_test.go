@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net/netip"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -335,18 +336,35 @@ func TestBuildEchoRequest_NoSegments(t *testing.T) {
 	}
 }
 
-// TestProber_LoopbackE2E exercises the real sockets: a plain probe to ::1
-// must be answered by the local kernel. Needs CAP_NET_RAW.
+// TestProber_LoopbackE2E exercises the real sockets: a probe to an
+// address this host owns must be answered by the local kernel. ::1 is
+// deliberately unprobeable (the local kernel answering is exactly the
+// false-positive probeable() exists to reject), so the test parks a ULA
+// on a dummy interface. Needs root.
 func TestProber_LoopbackE2E(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root for raw sockets")
 	}
+	const testAddr = "fd00:9999:cafe::1"
+	if err := exec.Command("ip", "link", "add", "prober-e2e", "type", "dummy").Run(); err != nil {
+		t.Skipf("cannot create dummy interface: %v", err)
+	}
+	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", "prober-e2e").Run() })
+	for _, args := range [][]string{
+		{"addr", "add", testAddr + "/128", "dev", "prober-e2e"},
+		{"link", "set", "prober-e2e", "up"},
+	} {
+		if err := exec.Command("ip", args...).Run(); err != nil {
+			t.Fatalf("ip %v: %v", args, err)
+		}
+	}
+
 	fl := newFakeLive()
-	p, err := New(fl, netip.MustParseAddr("::1"), Config{Interval: 50 * time.Millisecond, Multiplier: 3}, zap.NewNop())
+	p, err := New(fl, netip.MustParseAddr(testAddr), Config{Interval: 50 * time.Millisecond, Multiplier: 3}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	p.Register(1, []Target{target(0, "::1")})
+	p.Register(1, []Target{target(0, testAddr)})
 	p.Start()
 	defer p.Stop()
 
@@ -354,7 +372,7 @@ func TestProber_LoopbackE2E(t *testing.T) {
 	for {
 		select {
 		case <-deadline:
-			t.Fatalf("no probe reply from ::1; status=%+v", p.Status())
+			t.Fatalf("no probe reply from %s; status=%+v", testAddr, p.Status())
 		default:
 		}
 		st := p.Status()
