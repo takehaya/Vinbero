@@ -1,0 +1,77 @@
+internal:
+  # eth1 faces the core (SRv6 underlay): End.DT4 decap of return traffic.
+  # eth2 faces ce-tokyo: H.Encaps of plaintext customer traffic, resolved
+  # per flow through the ECMP group the two FRR paths aggregate into.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    # generic mode: veth links in containerlab do not support native XDP.
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+
+# In-process BGP speaker (vinberod runs with --bgp-enabled). One provider
+# AS 65100; Vinbero peers iBGP with BOTH FRR PEs over loopbacks, multihop
+# past the core. Each FRR PE advertises the same customer prefix under
+# its own RD, and the receive-side aggregation folds the two paths into
+# one ECMP group.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    listen_port: 179
+    source_locator: "LOC1"
+    # Our loopback: the next hop of advertised routes AND the source the
+    # prober's echo probes originate from (replies must come back to an
+    # address the kernel owns and delivers locally).
+    next_hop: "2001:db8:ff::1"
+  peers:
+    - neighbor: "2001:db8:ff::2"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - vpnv4
+        - vpnv6
+    - neighbor: "2001:db8:ff::3"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - vpnv4
+        - vpnv6
+
+# The liveness prober: each ECMP group member is probed over its actual
+# SRv6 path towards the advertising PE's loopback. Three lost probes at
+# 100ms mask the path in ecmp_live_map -- the failover test cuts one FRR
+# PE's underlay and expects traffic to converge on this signal, not on
+# BGP (hold time 30s here, exactly to prove the point).
+prober:
+  enable: true
+  interval_ms: 100
+  multiplier: 3
