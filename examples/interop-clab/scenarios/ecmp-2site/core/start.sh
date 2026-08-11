@@ -2,9 +2,10 @@
 # Provider backbone router for the ecmp-2site interop scenario: a plain
 # IPv6 router with static routes towards the three PEs (no IGP, no
 # convergence race). This is also where the failover test cuts one FRR
-# PE off (eth3 down), so the loss is a mid-path underlay failure -- the
-# kind BGP takes its hold time to notice and the prober catches in
-# hundreds of milliseconds.
+# PE off, by removing the routes towards it (not by downing the link,
+# which would flush the IPv6 addresses on both veth ends): a mid-path
+# underlay failure, the kind BGP takes its hold time to notice and the
+# prober catches in hundreds of milliseconds.
 #
 # Underlay links:
 #   eth1  pe-tokyo   <-> core  2001:db8:1::/64  (core = ::2, pe = ::1)
