@@ -48,6 +48,9 @@ type vpnPathKey struct {
 type vpnPath struct {
 	sid   string
 	steer *policyKey
+	// nh is the advertising PE's BGP next hop, the destination the
+	// liveness prober terminates this path's probe at.
+	nh string
 }
 
 type vpnDest struct {
@@ -275,10 +278,10 @@ func memberFingerprint(ms []*vpnPath) []string {
 	out := make([]string, len(ms))
 	for i, m := range ms {
 		if m.steer == nil {
-			out[i] = m.sid
+			out[i] = fmt.Sprintf("%s>%s", m.sid, m.nh)
 			continue
 		}
-		out[i] = fmt.Sprintf("%s@%d/%s", m.sid, m.steer.color, m.steer.endpoint)
+		out[i] = fmt.Sprintf("%s@%d/%s>%s", m.sid, m.steer.color, m.steer.endpoint, m.nh)
 	}
 	return out
 }
@@ -326,8 +329,24 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 	if err := a.vpnGroups.ecmp.PutEcmpGroup(d.groupID, paths, owner); err != nil {
 		a.logger.Error("install ECMP group",
 			zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
+		// A failed replace can leave mixed-generation path slots behind (the
+		// bpf layer does not roll back). The prober's registration -- and any
+		// bitmap it wrote -- describes the OLD layout; over mixed slots its
+		// bit positions mask the wrong members. Unregister drops the bitmap
+		// and returns the group to fail-open until a retry rebuilds it.
+		a.prober.Unregister(d.groupID)
 		return
 	}
+	// Registered immediately after the group write: PutEcmpGroup resets the
+	// liveness bitmap (bit positions refer to the new member set), and this
+	// Register -- with per-target state carried over -- is what re-imposes
+	// the known down-states, so the fail-open window is these few
+	// statements, not a probe interval.
+	dsts := make([]string, len(ms))
+	for i, m := range ms {
+		dsts[i] = m.nh
+	}
+	a.prober.Register(d.groupID, probeTargets(paths, dsts))
 
 	// The trigger mirrors the first member so the fallback forwards the same
 	// way the group's first path would, steering included.
@@ -362,12 +381,15 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 	}
 	// The trigger goes first: while the group still exists a stale trigger
 	// forwards correctly, whereas deleting the group first would leave the
-	// trigger resolving to its fallback segments for no reason.
+	// trigger resolving to its fallback segments for no reason. The prober
+	// registration outlives the group delete attempt: if the delete fails
+	// the group keeps forwarding, and it should keep its liveness guard.
 	if err := a.vpnGroups.ecmp.DeleteEcmpGroup(d.groupID, owner); err != nil {
 		a.logger.Error("delete ECMP group",
 			zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
 		return
 	}
+	a.prober.Unregister(d.groupID)
 	delete(a.vpnGroups.dests, dk)
 	a.vpnGroups.freeIDs = append(a.vpnGroups.freeIDs, d.groupID)
 	a.logger.Info("VPN prefix withdrawn",

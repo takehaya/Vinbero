@@ -59,6 +59,7 @@ func NewApp() *cli.App {
 			fdbCommand(),
 			vlanTableCommand(),
 			headendGroupCommand(),
+			proberCommand(),
 			statsCommand(),
 			pluginCommand(),
 			completion.Command(),

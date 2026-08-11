@@ -4,7 +4,7 @@
 
 このドキュメントは、headend の転送先を複数 path に分散する ECMP path group のデータプレーン設計を説明します。同一 VPN prefix を複数の PE が広告したとき、従来の headend map は 1 prefix に 1 つの segment list しか持てず、後から適用された経路が前の経路を上書きしていました。ECMP path group はこれを最大 8 path の weighted な集合に拡張し、あわせて userspace の prober が path 単位の生死を 1 word の書き込みで反映できる仕組みを用意します。
 
-この文書が対象にするのはデータプレーン (eBPF マップと XDP の選択ロジック、`pkg/bpf` の API) と、その上に載る BGP からの path 集約および EVPN aliasing です。prober 本体は後続の変更で入ります。
+この文書が対象にするのはデータプレーン (eBPF マップと XDP の選択ロジック、`pkg/bpf` の API) と、その上に載る BGP からの path 集約、EVPN aliasing、そして path 単位の生死を検知する prober です。
 
 ## マップ構成
 
@@ -160,6 +160,24 @@ aliasing が効いている segment では、withdraw はまず group から当�
 single-homed の MAC (ESI が全ゼロ) は index しません。属する segment が無いので、per-ES の withdraw がその MAC についての主張になり得ないためです。per-EVI の withdraw は mass withdraw として扱わず、group の member を 1 つ外すだけです。member が尽きたら group と ES peer を畳み、FDB エントリを広告元 PE の bd_peer に戻します。
 
 再広告に特別な処理は要りません。MAC は通常の RT2 として戻ってきます。
+
+## prober
+
+`pkg/prober` が group member ごとの生死を検知し、`ecmp_live_map` へ 8 byte の bitmap を書きます。prober は速いマスク、BGP withdraw は遅い真実、という分担です。既定 (interval 100ms、multiplier 3) では検知まで約 300ms で、BGP の hold time より 2 桁速く劣化 path を外せます。
+
+probe は SRv6 self-probe です。member の segment list の transport 部分を SRH に載せた ICMPv6 echo request を、広告元 PE の routable address (BGP next hop) を最終宛先として送ります。remote 側に必要なのは kernel の ICMPv6 応答だけで、BFD のような相手側実装を要求しません。member の終端 segment は remote の service SID なので probe の経路に含めません。service SID は End ではないため、segments left が残った SRH 付き packet はそこで drop され、probe が成立しないからです。next hop が取れない member は unprobeable として常に up に固定します。probe できないことを理由に path を落とすと、単なる情報不足が reroute に化けるためです。
+
+送信は IPPROTO_RAW socket で IPv6 + SRH + ICMPv6 を自前で組みます (checksum は RFC 8200 に従い最終宛先で計算)。受信は ICMPv6 raw socket に echo reply だけを通す kernel filter を掛けます。reply は送信元 address と、probe ごとの乱数 cookie (echo payload) の一致で照合するので、無関係な process の ping や偽装 reply が dead path を up に保てません。判定は送信時に前回 round の応答有無を畳む方式で、直前 round の probe への遅延応答も生存として数えるため、RTT が 2 interval 未満の path まで扱えます。multiplier 回連続の無応答で down、同じ回数の連続応答で up に戻るヒステリシスを持ちます。
+
+probe の送信元は `bgp.global.next_hop` (PE の loopback) を優先します。echo reply は SRv6 を通らず素の IPv6 で戻るので、kernel が実際に所有して local 配達する address が要るためです。locator base (encap source) は通常どのインターフェースにも付与されないので fallback に留めます。link-local の next hop は zone を運べないため unprobeable として up に固定します。
+
+applier は group を書き込むたびに `Register(groupID, targets)` で member 集合を差し替え、group を畳むときに `Unregister` します。差し替えでは同じ target (宛先と transport segments が一致する path) の状態を引き継ぐので、membership の churn が dead path を蘇生させることはありません。新規 path は up で登録し、以後は状態変化のときだけ bitmap を書き換えます。L3VPN 側は next hop を `vpnPath` に載せて member から引き、EVPN 側は per-EVI A-D の広告元 PE を使います。next hop の変化は fingerprint に含めているので、SID が同じままでも再登録されます。
+
+設定は `prober: {enable, interval_ms, multiplier}` で、BGP applier と encap source が前提です。状態は `ProberService` / `vbctl prober status` で per-path の up/down、miss streak、RTT を見られます。
+
+steered path (SR Policy 合成) の probe は transport 部分のみで、policy が prepend する経路は検証しません。policy 経路の liveness は後続です。
+
+probe の宛先は PE の loopback であり、service SID (locator 配下) そのものではありません。L3VPN と EVPN の member entry は service SID 1 個なので、probe は素の echo に縮退します。したがって underlay で loopback への経路は生きているのに locator prefix への経路だけが失われる障害は検出できません。この shared-fate 前提 (loopback と locator は同じ underlay 経路を辿る) は一般的な PE 設計では成り立ちますが、意図的に分けている網では prober の保証が弱まります。locator 配下の routable address を probe する拡張は後続です。
 
 ## 制約と今後
 

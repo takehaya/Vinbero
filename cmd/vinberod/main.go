@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
 	"github.com/takehaya/vinbero/pkg/netresource"
+	"github.com/takehaya/vinbero/pkg/prober"
 	"github.com/takehaya/vinbero/pkg/server"
 	"github.com/takehaya/vinbero/pkg/vinbero"
 	"github.com/takehaya/vinbero/pkg/vrf"
@@ -276,7 +278,51 @@ func run(cliCtx *cli.Context) error {
 			}
 		}
 	}
+	// SRv6 liveness prober: probes every ECMP group member over its actual
+	// segment list and masks dead paths in ecmp_live_map ahead of BGP
+	// convergence. Needs the BGP applier (it feeds the group memberships)
+	// and a resolvable encap source for the probe packets.
+	var liveProber *prober.Prober
+	// Effective values, normalized once so New, the log line, and the
+	// status RPC all report the same thing (New would otherwise correct a
+	// zero internally while the RPC echoed the raw config).
+	proberIntervalMs := cfg.Prober.IntervalMs
+	if proberIntervalMs == 0 {
+		proberIntervalMs = 100
+	}
+	proberMultiplier := cfg.Prober.Multiplier
+	if proberMultiplier == 0 {
+		proberMultiplier = 3
+	}
+	if cfg.Prober.Enable {
+		if applier == nil {
+			lg.Warn("prober.enable requires --bgp-enabled; prober stays off")
+		} else if src, perr := proberSource(cfg, applier); perr != nil {
+			lg.Warn("prober disabled: cannot resolve probe source", zap.Error(perr))
+		} else {
+			p, perr := prober.New(vin.GetMapOperations(), src, prober.Config{
+				Interval:   time.Duration(proberIntervalMs) * time.Millisecond,
+				Multiplier: int(proberMultiplier),
+			}, lg)
+			if perr != nil {
+				lg.Warn("prober disabled", zap.Error(perr))
+			} else {
+				liveProber = p
+				applier.SetProber(liveProber)
+				liveProber.Start()
+				defer liveProber.Stop()
+				lg.Info("prober started",
+					zap.Stringer("source", src),
+					zap.Uint32("interval_ms", proberIntervalMs),
+					zap.Uint32("multiplier", proberMultiplier))
+			}
+		}
+	}
+
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, lg)
+	if liveProber != nil {
+		srv.SetProber(liveProber, proberIntervalMs, proberMultiplier)
+	}
 
 	// Seed the VRF objects with the kernel devices and bridges the resource
 	// manager reconciled from its state file (InitResourceManager ran before
@@ -672,4 +718,62 @@ func shutdown(srv *server.Server, lg *zap.Logger) error {
 	}
 	lg.Info("Shutdown completed")
 	return nil
+}
+
+// proberSource picks the address probe packets originate from. Echo
+// replies come back to it natively (no SRv6), so it must be an address the
+// kernel actually owns and delivers locally. bgp.global.next_hop is
+// exactly that -- the loopback the PE advertises as its BGP next hop --
+// while the encap source (the locator base) is usually not assigned to any
+// interface and would silently blackhole every reply, judging all paths
+// down. The locator base remains the fallback for setups without next_hop.
+func proberSource(cfg *config.Config, applier *apply.Applier) (netip.Addr, error) {
+	var candidate netip.Addr
+	if nh := cfg.BGP.Global.NextHop; nh != "" {
+		addr, err := netip.ParseAddr(nh)
+		if err != nil || !addr.Is6() || addr.Is4In6() {
+			return netip.Addr{}, fmt.Errorf("bgp.global.next_hop %q is not a usable IPv6 address", nh)
+		}
+		candidate = addr
+	} else {
+		addr, err := applier.EncapSourceAddr()
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		candidate = addr
+	}
+	// The candidate must actually be assigned to an interface: replies come
+	// back as plain IPv6 addressed to it, and an unowned source (the
+	// locator base often is) would silently blackhole every reply and take
+	// every healthy path down. Better no prober than a lying one.
+	owned, err := localAddrOwned(candidate)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("enumerate local addresses: %w", err)
+	}
+	if !owned {
+		return netip.Addr{}, fmt.Errorf("probe source %s is not assigned to any interface; assign it (or set bgp.global.next_hop to an owned loopback)", candidate)
+	}
+	return candidate, nil
+}
+
+// localAddrOwned reports whether the kernel owns addr on some interface.
+func localAddrOwned(addr netip.Addr) (bool, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false, err
+	}
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		got, ok := netip.AddrFromSlice(ipn.IP)
+		if !ok {
+			continue
+		}
+		if got.Unmap() == addr {
+			return true, nil
+		}
+	}
+	return false, nil
 }

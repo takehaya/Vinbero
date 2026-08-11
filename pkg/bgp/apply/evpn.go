@@ -135,8 +135,8 @@ type evpnTable struct {
 	// esADByNLRI maps a per-ES NLRI ({RD, ESI}) to the PE it last named,
 	// so a re-advertisement under a new next hop -- an implicit replace,
 	// the NLRI identity carries no PE -- drops the old PE's contribution.
-	esADByNLRI map[esNLRIKey]string
-	eviAD      map[evpnEviADKey]eviADState
+	esADByNLRI  map[esNLRIKey]string
+	eviAD       map[evpnEviADKey]eviADState
 	esDests     map[esDestKey]*esDest
 	macContribs map[macDPKey]map[evpnFdbKey]struct{}
 	// esWithdrawn marks a {ESI, PE} whose per-ES A-D was withdrawn while an

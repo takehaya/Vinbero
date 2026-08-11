@@ -502,7 +502,9 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 
 	fingerprint := make([]string, len(members))
 	for i, m := range members {
-		fingerprint[i] = m.sid
+		// The PE is part of it: with an anycast SID the surviving member's
+		// probe destination changes even when the SID does not.
+		fingerprint[i] = m.sid + ">" + m.pe
 	}
 	if d.active && slices.Equal(fingerprint, d.installed) {
 		return
@@ -518,12 +520,18 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	// nothing else can be handed its index or id in the meantime.
 	fail := func() {
 		d.active = false
+		// The registration describes the member layout this reconcile just
+		// tried to replace; against whatever half-written state remains,
+		// its bitmap would mask the wrong members. Drop to fail-open first,
+		// whatever else the teardown manages.
+		a.prober.Unregister(d.groupID)
 		if !a.teardownESDest(dk, d) {
 			d.installed = nil
 			a.logger.Error("EVPN aliasing unwind incomplete; keeping dest for rebuild",
 				zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
 			return
 		}
+		a.prober.Unregister(d.groupID)
 		delete(a.evpn.esDests, dk)
 		a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
 	}
@@ -548,6 +556,14 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		return
 	}
 	d.programmed = true
+	// Register as soon as the group is written, mirroring the VPN side:
+	// PutEcmpGroup reset the liveness bitmap, and carrying the per-target
+	// down-states back in must not wait for the rest of the reconcile.
+	dsts := make([]string, len(members))
+	for i, m := range members {
+		dsts[i] = m.pe
+	}
+	a.prober.Register(d.groupID, probeTargets(paths, dsts))
 
 	// The ES peer mirrors the first member so the group-unresolvable
 	// fallback forwards the way the first path would (same shape as the VPN
@@ -602,6 +618,7 @@ func (a *Applier) dissolveESDest(dk esDestKey, d *esDest) {
 			zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
 		return
 	}
+	a.prober.Unregister(d.groupID)
 	delete(a.evpn.esDests, dk)
 	a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
 	a.logger.Info("EVPN segment aliasing dissolved",

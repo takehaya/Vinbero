@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// ProberService exposes the SRv6 liveness prober's view of the ECMP path
+// groups: per-path up/down state, probe destination, and round-trip time.
+// The prober is configured on the daemon (config `prober:`); when it is
+// disabled the status reports enabled=false with no paths.
+service ProberService {
+  rpc ProberStatus(ProberStatusRequest) returns (ProberStatusResponse);
+}
+
+message ProberStatusRequest {}
+
+// ProbePathStatus is one probed path of one ECMP group.
+message ProbePathStatus {
+  uint32 group_id = 1;
+  uint32 path_index = 2;
+  // The probe's final destination (the advertising PE). Empty when the
+  // path is unprobeable (no usable next hop) and therefore pinned up.
+  string dst = 3;
+  bool probeable = 4;
+  bool up = 5;
+  // Consecutive unanswered probes (resets on a reply).
+  uint32 miss_streak = 6;
+  // Up/down state changes since registration.
+  uint64 transitions = 7;
+  // Last measured round-trip time in microseconds (0 before any reply).
+  int64 rtt_usec = 8;
+  // Unix nanoseconds of the last reply (0 before any reply).
+  int64 last_reply_unix_nano = 9;
+}
+
+message ProberStatusResponse {
+  bool enabled = 1;
+  uint32 interval_ms = 2;
+  uint32 multiplier = 3;
+  repeated ProbePathStatus paths = 4;
+}
