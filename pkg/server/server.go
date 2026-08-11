@@ -44,6 +44,11 @@ type Server struct {
 	logger       *zap.Logger
 	mux          *http.ServeMux
 	server       *http.Server
+	// Prober status surface (nil when the prober is disabled) and its
+	// config echo for the status RPC.
+	proberSrc        ProberStatusSource
+	proberIntervalMs uint32
+	proberMultiplier uint32
 }
 
 // NewServer creates a new Server instance. locatorMgr and vrfBgpMgr are
@@ -89,6 +94,14 @@ func NewServer(cfg *config.Config, mapOps *bpf.MapOperations, resMgr *netresourc
 // identity space.
 func (s *Server) VrfManager() *vrf.Manager {
 	return s.vrfBgpMgr.VRF()
+}
+
+// SetProber hands the server the prober's status surface. Call before
+// Setup; a nil source keeps the ProberService reporting disabled.
+func (s *Server) SetProber(source ProberStatusSource, intervalMs, multiplier uint32) {
+	s.proberSrc = source
+	s.proberIntervalMs = intervalMs
+	s.proberMultiplier = multiplier
 }
 
 // Setup registers all service handlers
@@ -145,6 +158,11 @@ func (s *Server) Setup() {
 	// lets MupCreate/Update auto-fill an empty RTs list from the binding
 	// whose RD matches.
 	mupServer := NewMupServer(s.mupAdv, s.cfg.BGP.Global.NextHop, s.cfg.BGP.Global.MupMaxRoutes, s.vrfBgpMgr, s.locatorMgr)
+	proberServer := NewProberServer(s.proberSrc, s.proberIntervalMs, s.proberMultiplier)
+	proberPath, proberHandler := vinberov1connect.NewProberServiceHandler(proberServer)
+	s.mux.Handle(proberPath, proberHandler)
+	s.logger.Info("Registered ProberService", zap.String("path", proberPath))
+
 	mupPath, mupHandler := vinberov1connect.NewMupServiceHandler(mupServer)
 	s.mux.Handle(mupPath, mupHandler)
 	s.logger.Info("Registered MupService", zap.String("path", mupPath))

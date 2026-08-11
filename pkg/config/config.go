@@ -61,8 +61,22 @@ type Config struct {
 	Setting        SettingConfig  `yaml:"settings,omitempty"`
 	BGP            BGPConfig      `yaml:"bgp,omitempty"`
 	VRFs           VRFsConfig     `yaml:"vrfs,omitempty"`
+	Prober         ProberConfig   `yaml:"prober,omitempty"`
 	Original       string
 	Configpath     string
+}
+
+// ProberConfig tunes the SRv6 liveness prober for ECMP path groups. The
+// prober needs the BGP applier (--bgp-enabled) and a resolvable encap
+// source; enabling it without either logs a warning and stays off.
+type ProberConfig struct {
+	Enable bool `yaml:"enable,omitempty"`
+	// IntervalMs is the per-path probe interval in milliseconds (default
+	// 100). A path fails after multiplier consecutive unanswered probes,
+	// so detection takes roughly interval_ms * multiplier.
+	IntervalMs uint32 `yaml:"interval_ms,omitempty" default:"100"`
+	// Multiplier is the loss/recovery hysteresis (default 3).
+	Multiplier uint32 `yaml:"multiplier,omitempty" default:"3"`
 }
 
 // VRFsConfig configures the VRF objects: each VRF's ingress access-circuit

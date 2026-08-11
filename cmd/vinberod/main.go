@@ -21,6 +21,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/fib"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
+	"github.com/takehaya/vinbero/pkg/prober"
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/takehaya/vinbero/pkg/server"
 	"github.com/takehaya/vinbero/pkg/vinbero"
@@ -276,7 +277,39 @@ func run(cliCtx *cli.Context) error {
 			}
 		}
 	}
+	// SRv6 liveness prober: probes every ECMP group member over its actual
+	// segment list and masks dead paths in ecmp_live_map ahead of BGP
+	// convergence. Needs the BGP applier (it feeds the group memberships)
+	// and a resolvable encap source for the probe packets.
+	var liveProber *prober.Prober
+	if cfg.Prober.Enable {
+		if applier == nil {
+			lg.Warn("prober.enable requires --bgp-enabled; prober stays off")
+		} else if src, perr := applier.EncapSourceAddr(); perr != nil {
+			lg.Warn("prober disabled: cannot resolve probe source", zap.Error(perr))
+		} else {
+			p, perr := prober.New(vin.GetMapOperations(), src, prober.Config{
+				Interval:   time.Duration(cfg.Prober.IntervalMs) * time.Millisecond,
+				Multiplier: int(cfg.Prober.Multiplier),
+			}, lg)
+			if perr != nil {
+				lg.Warn("prober disabled", zap.Error(perr))
+			} else {
+				liveProber = p
+				applier.SetProber(liveProber)
+				liveProber.Start()
+				defer liveProber.Stop()
+				lg.Info("prober started",
+					zap.Uint32("interval_ms", cfg.Prober.IntervalMs),
+					zap.Uint32("multiplier", cfg.Prober.Multiplier))
+			}
+		}
+	}
+
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, lg)
+	if liveProber != nil {
+		srv.SetProber(liveProber, cfg.Prober.IntervalMs, cfg.Prober.Multiplier)
+	}
 
 	// Seed the VRF objects with the kernel devices and bridges the resource
 	// manager reconciled from its state file (InitResourceManager ran before

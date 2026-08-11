@@ -18,6 +18,7 @@ func vpnEvent(prefix, rd, sid, peer string, withdraw bool) bgp.RouteEvent {
 		IsWithdraw: withdraw,
 		VPN: &bgp.VPNRoute{
 			Family: bgp.FamilyVPNv4, Prefix: prefix, RD: rd, SRv6SID: sid,
+			NextHop: peer,
 		},
 	}
 }

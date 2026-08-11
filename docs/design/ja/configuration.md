@@ -194,6 +194,17 @@ vrfs:
 
 default_deny を有効にする場合、underlay や control plane が使う interface も必ずどこかの VRF (通常は `global`) に map してください。未分類 AC が drop されるため、忘れると host 宛の BGP/NDP が通らなくなります。
 
+### `prober.*`
+
+ECMP path group の SRv6 liveness prober を設定します。有効にすると group member ごとに ICMPv6 echo の self-probe を送り、応答が途絶えた path を `ecmp_live_map` でマスクします。BGP applier (`--bgp-enabled`) と `bgp.global.source_locator` の解決が前提で、満たせない場合は warning を出して無効のまま起動します。詳細は ecmp.md の prober 節を参照してください。
+
+```yaml
+prober:
+  enable: true
+  interval_ms: 100   # per-path の probe 間隔 (既定 100)
+  multiplier: 3      # down/up 判定の連続回数 (既定 3)
+```
+
 ## 最小構成サンプル
 
 ```yaml

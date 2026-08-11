@@ -502,7 +502,9 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 
 	fingerprint := make([]string, len(members))
 	for i, m := range members {
-		fingerprint[i] = m.sid
+		// The PE is part of it: with an anycast SID the surviving member's
+		// probe destination changes even when the SID does not.
+		fingerprint[i] = m.sid + ">" + m.pe
 	}
 	if d.active && slices.Equal(fingerprint, d.installed) {
 		return
@@ -524,6 +526,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 				zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
 			return
 		}
+		a.prober.Unregister(d.groupID)
 		delete(a.evpn.esDests, dk)
 		a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
 	}
@@ -568,6 +571,11 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		fail()
 		return
 	}
+	dsts := make([]string, len(members))
+	for i, m := range members {
+		dsts[i] = m.pe
+	}
+	a.prober.Register(d.groupID, probeTargets(paths, dsts))
 	d.installed = fingerprint
 	if !d.active || d.needRepoint {
 		d.active = true
@@ -602,6 +610,7 @@ func (a *Applier) dissolveESDest(dk esDestKey, d *esDest) {
 			zap.Uint16("bd_id", dk.bdID), zap.Uint32("group_id", d.groupID))
 		return
 	}
+	a.prober.Unregister(d.groupID)
 	delete(a.evpn.esDests, dk)
 	a.evpn.freeGroupIDs = append(a.evpn.freeGroupIDs, d.groupID)
 	a.logger.Info("EVPN segment aliasing dissolved",

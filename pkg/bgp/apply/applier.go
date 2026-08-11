@@ -21,6 +21,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/fib"
 	"github.com/takehaya/vinbero/pkg/locator"
+	"github.com/takehaya/vinbero/pkg/prober"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -77,6 +78,9 @@ type Applier struct {
 	localASN    uint32
 	srPolicy    *srPolicyTable
 	evpn        *evpnTable
+	// prober mirrors the programmed ECMP groups into the liveness prober
+	// (default: no-op). Swapped in via SetProber before the session starts.
+	prober prober.Registry
 	// vpnGroups aggregates the paths learned for each VPN prefix into one
 	// ECMP group. Touched only from the route-handler goroutine and from
 	// NewApplier's startup reset, which runs before any route arrives.
@@ -129,6 +133,7 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 		srcLocator:  srcLocator,
 		localASN:    localASN,
 		srPolicy:    newSRPolicyTable(dp, logger),
+		prober:      prober.Noop{},
 		vpnGroups:   newVPNGroupTable(dp, localASN, logger),
 		evpn:        newEVPNTable(),
 		mupT1ST:     make(map[mupT1STKey]*mupSessionState),
@@ -296,7 +301,7 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 	if replaced != nil {
 		a.srPolicy.unref(replaced.color, replaced.endpoint)
 	}
-	d, ok := a.vpnGroups.upsert(dk, pk, &vpnPath{sid: vr.SRv6SID, steer: want})
+	d, ok := a.vpnGroups.upsert(dk, pk, &vpnPath{sid: vr.SRv6SID, steer: want, nh: vr.NextHop})
 	if !ok {
 		// Refused by a bound. The reference just taken would otherwise pin
 		// a policy no path holds.
