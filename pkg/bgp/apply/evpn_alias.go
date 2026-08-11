@@ -245,23 +245,38 @@ func (a *Applier) resetEVPNGroups() {
 // of thousands. Caller holds evpnMu.
 func (a *Applier) applyEVPNPerESAD(r *bgp.EVPNRoute, withdraw bool) {
 	var zeroESI [bpf.ESILen]byte
-	if r.ESI == zeroESI || r.NextHop == "" {
-		// Without both we cannot say whose contribution this is, and
-		// guessing would tear down state that is still backed.
+	if r.ESI == zeroESI {
 		return
 	}
-	k := esMemberKey{esi: r.ESI, pe: r.NextHop}
 	nk := esNLRIKey{rd: r.RD, esi: r.ESI}
 
 	if withdraw {
+		// A withdrawal arrives as MP_UNREACH: just the NLRI, no next hop
+		// attribute. The PE it names is resolved through the NLRI ledger the
+		// advertisement filled -- the same reverse-index shape the per-EVI
+		// withdraw path uses -- with the event's next hop (a synthetic local
+		// withdraw, say) taking precedence when present.
+		pe := r.NextHop
+		if pe == "" {
+			pe = a.evpn.esADByNLRI[nk]
+		}
+		if pe == "" {
+			// An NLRI this process never saw advertised: there is no way to
+			// say whose contribution it was, and guessing would tear down
+			// state that is still backed.
+			return
+		}
 		delete(a.evpn.esADByNLRI, nk)
-		// Not gated on having seen the advertisement: the segment's MACs
-		// may all have been learned from RT2s alone (the per-ES route can
-		// predate this process), and the withdrawal is a statement about
-		// the segment either way.
-		a.dropESContribution(k)
+		a.dropESContribution(esMemberKey{esi: r.ESI, pe: pe})
 		return
 	}
+
+	if r.NextHop == "" {
+		// An advertisement without a next hop names no PE; without one we
+		// cannot say whose contribution this is.
+		return
+	}
+	k := esMemberKey{esi: r.ESI, pe: r.NextHop}
 
 	// A re-advertisement of the same NLRI under a new next hop is an
 	// implicit replace of the old PE's contribution -- the NLRI identity

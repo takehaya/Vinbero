@@ -377,6 +377,79 @@ func evpnEsTrigger(rd, esi string) string {
 	return fmt.Sprintf("rd=%s esi=%s", rd, esi)
 }
 
+func (s *BgpRouteServer) BgpAdvertiseEvpnAd(
+	ctx context.Context,
+	req *connect.Request[v1.BgpAdvertiseEvpnAdRequest],
+) (*connect.Response[v1.BgpAdvertiseEvpnAdResponse], error) {
+	if s.evpn == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errBGPDisabled)
+	}
+	resp := &v1.BgpAdvertiseEvpnAdResponse{
+		Advertised: make([]*v1.BgpEvpnAd, 0),
+		Errors:     make([]*v1.OperationError, 0),
+	}
+	for _, m := range req.Msg.Routes {
+		esi, err := bpf.ParseESI(m.GetEsi())
+		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnAdTrigger(m.GetRd(), m.GetEsi(), m.GetEthernetTag()), Reason: fmt.Sprintf("invalid ESI: %v", err)})
+			continue
+		}
+		// SID / next-hop / RD are validated in the encoder, so a bad request
+		// surfaces as a per-item error rather than a controller failure.
+		route := bgp.EVPNRoute{
+			Type:         bgp.EVPNRouteTypeEthernetAD,
+			RD:           m.GetRd(),
+			RTs:          m.GetRouteTargets(),
+			ESI:          esi,
+			EthernetTag:  m.GetEthernetTag(),
+			SRv6SID:      m.GetSid(),
+			NextHop:      m.GetNextHop(),
+			SingleActive: m.GetSingleActive(),
+		}
+		if err := s.evpn.PushEVPNEthernetAD(ctx, route); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnAdTrigger(m.GetRd(), m.GetEsi(), m.GetEthernetTag()), Reason: err.Error()})
+			continue
+		}
+		resp.Advertised = append(resp.Advertised, m)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *BgpRouteServer) BgpWithdrawEvpnAd(
+	ctx context.Context,
+	req *connect.Request[v1.BgpWithdrawEvpnAdRequest],
+) (*connect.Response[v1.BgpWithdrawEvpnAdResponse], error) {
+	if s.evpn == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errBGPDisabled)
+	}
+	resp := &v1.BgpWithdrawEvpnAdResponse{
+		Withdrawn: make([]*v1.BgpEvpnAdKey, 0),
+		Errors:    make([]*v1.OperationError, 0),
+	}
+	for _, k := range req.Msg.Keys {
+		esi, err := bpf.ParseESI(k.GetEsi())
+		if err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnAdTrigger(k.GetRd(), k.GetEsi(), k.GetEthernetTag()), Reason: fmt.Sprintf("invalid ESI: %v", err)})
+			continue
+		}
+		if err := s.evpn.WithdrawEVPNEthernetAD(ctx, bgp.EVPNADKey{
+			RD:          k.GetRd(),
+			ESI:         esi,
+			EthernetTag: k.GetEthernetTag(),
+		}); err != nil {
+			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: evpnAdTrigger(k.GetRd(), k.GetEsi(), k.GetEthernetTag()), Reason: err.Error()})
+			continue
+		}
+		resp.Withdrawn = append(resp.Withdrawn, k)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// evpnAdTrigger names the RT1 identity for an OperationError.
+func evpnAdTrigger(rd, esi string, etag uint32) string {
+	return fmt.Sprintf("rd=%s esi=%s etag=%d", rd, esi, etag)
+}
+
 // protoToAdvertiseEvpnMac validates a BgpEvpnMac advertise request and
 // converts it to a bgp.EVPNRoute. The SID / next-hop IPv6 checks happen in the
 // encoder; the MAC and optional ESI are validated here so a bad request is a

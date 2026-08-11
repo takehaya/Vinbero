@@ -83,8 +83,10 @@ done
     --src-addr fd00:200:0:2:: --segments fd00:200:0:2:: --bd-id 100 \
     --esi "$ESI" || true
 
+# All-active, mirroring pe1: both PEs may carry known-unicast for ES-1, which
+# is what lets pe3 alias the CE's MAC across pe1 and pe2; BUM stays DF-gated.
 /usr/local/bin/vbctl es create --esi "$ESI" --local-attached \
-    --local-pe "$LOCAL_PE" --mode SINGLE_ACTIVE || true
+    --local-pe "$LOCAL_PE" --mode ALL_ACTIVE || true
 
 /usr/local/bin/vbctl bgp advertise-evpn-mac --rd 65100:2 \
     --route-targets 65000:100 --mac aa:bb:cc:00:00:10 \
@@ -93,6 +95,14 @@ done
     --route-targets 65000:100 --sid fd00:200:0:3:: --next-hop 2001:db8:ff::2 || true
 /usr/local/bin/vbctl bgp advertise-evpn-es --rd 65100:2 --esi "$ESI" \
     --es-import-rt "$ES_IMPORT_RT" --next-hop "$LOCAL_PE" || true
+
+# Both RT1 forms for ES-1 (see pe1/start.sh): per-ES = all-active statement +
+# mass-withdraw handle, per-EVI = this PE's End.DT2U SID for aliased traffic.
+/usr/local/bin/vbctl bgp advertise-evpn-ad --rd 65100:2 --esi "$ESI" \
+    --route-targets 65000:100 --per-es --next-hop 2001:db8:ff::2 || true
+/usr/local/bin/vbctl bgp advertise-evpn-ad --rd 65100:2 --esi "$ESI" \
+    --route-targets 65000:100 --ethernet-tag 0 --sid fd00:200:0:2:: \
+    --next-hop 2001:db8:ff::2 || true
 
 ping6 -c 1 -W 2 2001:db8:2::2 >/dev/null 2>&1 || true
 echo "[start.sh] pe2 (Vinbero) EVPN multi-homing PE ready (ES-1 local)"

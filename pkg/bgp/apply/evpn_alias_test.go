@@ -208,6 +208,36 @@ func TestApplier_EVPNMassWithdrawShrinksGroupKeepsMacs(t *testing.T) {
 	}
 }
 
+func TestApplier_EVPNMassWithdrawResolvesPEFromNLRILedger(t *testing.T) {
+	// A real BGP withdrawal is MP_UNREACH: it names the {RD, ESI} NLRI and
+	// carries NO next hop attribute. The departed PE must be resolved from
+	// the ledger the advertisement filled, or the wire-shaped withdraw is
+	// silently dropped and the group never shrinks (the unit-shaped events
+	// elsewhere in this file carry a synthetic next hop and would mask that).
+	esi := [10]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	a, fh := aliasSegment(t, esi)
+
+	ev := withdrawn(perESAD("fd00::2", esi, false))
+	ev.EVPN.NextHop = ""
+	a.Apply(ev)
+
+	_, es := esPeerOf(t, fh)
+	paths := fh.ecmpGroups[es.GroupId]
+	if len(paths) != 1 {
+		t.Fatalf("group holds %d members after the attribute-less withdraw, want 1", len(paths))
+	}
+
+	// An attribute-less withdraw for an NLRI never seen advertised must be
+	// a no-op, not a guess.
+	unknown := withdrawn(perESAD("fd00::3", esi, false))
+	unknown.EVPN.RD = "rd-never-advertised"
+	unknown.EVPN.NextHop = ""
+	a.Apply(unknown)
+	if got := len(fh.ecmpGroups[es.GroupId]); got != 1 {
+		t.Fatalf("unknown-NLRI withdraw changed the group to %d members", got)
+	}
+}
+
 func TestApplier_EVPNAliasingDissolveRepointsMacs(t *testing.T) {
 	esi := [10]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 	a, fh := aliasSegment(t, esi)

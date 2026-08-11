@@ -1,4 +1,4 @@
-# evpn-multihoming — SRv6 EVPN multi-homing (RT4 DF election + split-horizon)
+# evpn-multihoming — SRv6 EVPN multi-homing (RT4 DF election + split-horizon + RT1 aliasing)
 
 *(日本語: [README.ja.md](./README.ja.md))*
 
@@ -59,15 +59,27 @@ the outer header.
    (`pe1`) forwards while the non-DF (`pe2`) drops at `dt2m_non_df_drop`, and
    split-horizon prevents either PE re-flooding the other's BUM back to the
    shared CE. `ce-remote` therefore sees no duplicate (`DUP!`) replies.
+5. **RT1 aliasing.** `pe1` and `pe2` both advertise the two Ethernet A-D forms
+   for ES-1 — per-ES (MAX-ET, ESI Label extended community with the
+   Single-Active bit clear) and per-EVI (their own End.DT2U SID) — so `pe3`
+   folds the segment into **one EVPN ECMP group** with a member per PE and
+   points `ce-mh`'s MAC at the group. Known-unicast toward the dual-homed CE
+   spreads across both PEs instead of following only the RT2 advertiser
+   (RFC 7432 §8.4).
+6. **RT1 mass withdraw.** Withdrawing `pe2`'s **per-ES** route alone shrinks
+   `pe3`'s group to `pe1` in one BGP update — no per-MAC withdraws — while
+   unicast keeps flowing; re-advertising heals the group back to two members
+   (RFC 7432 §8.2).
 
 ## Scope
 
-RT4 (Ethernet Segment) + RFC 8584 DF election + Local-Bias / static-DF
-split-horizon, layered on the RT2 (unicast) + RT3 (Inclusive Multicast / BUM
-flood) core from [evpn-2site](../evpn-2site/). `SINGLE_ACTIVE` redundancy; the
-customer hosts resolve ARP dynamically over the flood. Each PE advertises its
-customer MAC, flood endpoint, and (on the multi-homed PEs) Ethernet Segment
-explicitly at boot.
+RT1 (Ethernet A-D: aliasing + mass withdraw) + RT4 (Ethernet Segment) +
+RFC 8584 DF election + Local-Bias / static-DF split-horizon, layered on the RT2
+(unicast) + RT3 (Inclusive Multicast / BUM flood) core from
+[evpn-2site](../evpn-2site/). `ALL_ACTIVE` redundancy — required for aliasing;
+BUM stays DF-gated. The customer hosts resolve ARP dynamically over the flood.
+Each PE advertises its customer MAC, flood endpoint, and (on the multi-homed
+PEs) Ethernet Segment and both A-D forms explicitly at boot.
 
 ## Run
 
@@ -90,7 +102,7 @@ The multi-homed PEs (`pe1` / `pe2`, see `pe*/start.sh` and `pe*/vinbero.yml`):
 
 - bridge the ES-facing customer port (`eth2`) into bd 100 and register the
   Ethernet Segment with `vbctl es create --esi <ESI> --local-attached
-  --mode SINGLE_ACTIVE`, then tag the `hl2` headend with the same ESI for TX/RX
+  --mode ALL_ACTIVE`, then tag the `hl2` headend with the same ESI for TX/RX
   split-horizon;
 - register `END_DT2` (unicast decap) and `END_DT2M` (BUM flood decap) SIDs that
   deliver a core-bound frame into `br100`;
@@ -98,10 +110,18 @@ The multi-homed PEs (`pe1` / `pe2`, see `pe*/start.sh` and `pe*/vinbero.yml`):
   endpoint (`advertise-evpn-imet`, End.DT2M SID), and the Ethernet Segment
   (`advertise-evpn-es`, ES-Import RT, next hop = local encap source). A received
   RT4 for a locally attached ESI re-runs the DF election and writes the winner to
-  `esi_map`; the non-DF PE then drops End.DT2M-decapped BUM toward the CE.
+  `esi_map`; the non-DF PE then drops End.DT2M-decapped BUM toward the CE;
+- advertise both RT1 forms (`advertise-evpn-ad`): `--per-es` emits the MAX-ET
+  route whose ESI Label extended community says the segment is all-active (the
+  mass-withdraw handle), and `--ethernet-tag 0 --sid <End.DT2U>` emits the
+  per-EVI route carrying the SID that aliased traffic lands on.
 
 `pe3` is single-homed: it attaches `ce-remote` normally with no ESI and no RT4,
-learns `ce-mh` via RT2, and floods toward both `pe1`/`pe2`'s End.DT2M.
+learns `ce-mh` via RT2, and floods toward both `pe1`/`pe2`'s End.DT2M. From the
+received A-D pairs it synthesizes an ES-wide bd_peer (peer index ≥ 8, outside
+the flood range) backed by an EVPN ECMP group (group id ≥ 0x80000000) and
+repoints `ce-mh`'s FDB entry at it — that group is what `vbctl headend-group
+list` shows and the aliasing/mass-withdraw assertions read.
 
 The ESI uses **type 0 (arbitrary)**: the leading byte is the ESI type, so a
 leading `01` would be parsed as a LACP ESI whose last octet must be `0x00` and

@@ -8,6 +8,10 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+// evpnMaxEthernetTag is the reserved MAX-ET Ethernet Tag that marks the
+// per-ES form of an RT1 Ethernet A-D route (RFC 7432 §8.2).
+const evpnMaxEthernetTag uint32 = 0xFFFFFFFF
+
 func bgpCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "bgp",
@@ -286,6 +290,70 @@ func bgpCommand() *cli.Command {
 						return err
 					}
 					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnEsKey", "withdrawn")
+				},
+			},
+			{
+				Name:  "advertise-evpn-ad",
+				Usage: "Advertise a local EVPN RT1 (Ethernet A-D); --per-es for the per-ES form, --sid for the per-EVI form",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher, e.g. 65000:100"},
+					&cli.StringFlag{Name: "route-targets", Required: true, Usage: "Export route targets (comma-separated)"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: "Ethernet Segment Identifier (10-octet, e.g. 00:11:...)"},
+					&cli.BoolFlag{Name: "per-es", Usage: "Emit the per-ES form (Ethernet Tag = MAX-ET)"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID (per-EVI form)"},
+					&cli.StringFlag{Name: "sid", Usage: "Local End.DT2U SID (IPv6); required for the per-EVI form"},
+					&cli.StringFlag{Name: "next-hop", Required: true, Usage: "BGP next hop (IPv6)"},
+					&cli.BoolFlag{Name: "single-active", Usage: "Set the Single-Active bit on the per-ES form (forbids aliasing)"},
+				},
+				Action: func(c *cli.Context) error {
+					etag := uint32(c.Uint("ethernet-tag"))
+					if c.Bool("per-es") {
+						etag = evpnMaxEthernetTag
+					}
+					m := &v1.BgpEvpnAd{
+						Rd:           c.String("rd"),
+						RouteTargets: csvFlag(c.String("route-targets")),
+						Esi:          c.String("esi"),
+						EthernetTag:  etag,
+						Sid:          c.String("sid"),
+						NextHop:      c.String("next-hop"),
+						SingleActive: c.Bool("single-active"),
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpAdvertiseEvpnAd(context.Background(),
+						connect.NewRequest(&v1.BgpAdvertiseEvpnAdRequest{Routes: []*v1.BgpEvpnAd{m}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Advertised, resp.Msg.Errors, "BgpEvpnAd", "advertised")
+				},
+			},
+			{
+				Name:  "withdraw-evpn-ad",
+				Usage: "Withdraw a previously advertised EVPN RT1",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "rd", Required: true, Usage: "Route distinguisher"},
+					&cli.StringFlag{Name: "esi", Required: true, Usage: "Ethernet Segment Identifier (10-octet)"},
+					&cli.BoolFlag{Name: "per-es", Usage: "Withdraw the per-ES form (Ethernet Tag = MAX-ET)"},
+					&cli.UintFlag{Name: "ethernet-tag", Usage: "EVPN Ethernet Tag ID (per-EVI form)"},
+				},
+				Action: func(c *cli.Context) error {
+					etag := uint32(c.Uint("ethernet-tag"))
+					if c.Bool("per-es") {
+						etag = evpnMaxEthernetTag
+					}
+					k := &v1.BgpEvpnAdKey{
+						Rd:          c.String("rd"),
+						Esi:         c.String("esi"),
+						EthernetTag: etag,
+					}
+					clients := clientsFromContext(c)
+					resp, err := clients.BgpRoute.BgpWithdrawEvpnAd(context.Background(),
+						connect.NewRequest(&v1.BgpWithdrawEvpnAdRequest{Keys: []*v1.BgpEvpnAdKey{k}}))
+					if err != nil {
+						return err
+					}
+					return printOperationResult(resp.Msg.Withdrawn, resp.Msg.Errors, "BgpEvpnAdKey", "withdrawn")
 				},
 			},
 			{

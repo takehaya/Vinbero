@@ -9,7 +9,11 @@
 #   3. data plane both directions: ce-mh <-> ce-remote over SRv6 EVPN;
 #   4. BUM reaches ce-mh exactly once -- the DF forwards, the non-DF drops
 #      (dt2m_non_df_drop), and split-horizon stops a PE re-flooding the other's
-#      BUM back to the shared CE -- so ce-remote sees no duplicate replies.
+#      BUM back to the shared CE -- so ce-remote sees no duplicate replies;
+#   5. RT1 aliasing: both PEs advertise per-ES (all-active) + per-EVI A-D, so
+#      pe3 folds ES-1 into one EVPN ECMP group with a member per PE;
+#   6. RT1 mass withdraw: withdrawing pe2's per-ES route shrinks the group to
+#      pe1 in one update, traffic survives, and re-advertising heals it.
 set -u
 
 PE1=clab-evpn-multihoming-pe1
@@ -134,6 +138,91 @@ else
     else
         ng "ce-remote -> ce-mh: $dup duplicate reply/replies (multi-homing double-delivery)"
     fi
+fi
+
+# --- 5. RT1 aliasing: pe3 aggregates ES-1 into one ECMP group ---------------
+echo ""
+echo "[5] RT1 aliasing (pe3 spreads ES-1 unicast across pe1+pe2)"
+# pe1 and pe2 both advertise the two RT1 forms for ES-1 (per-ES all-active +
+# per-EVI with their own End.DT2U SID), so pe3 must fold them into one EVPN
+# ECMP group -- group ids at or above 0x80000000 are the EVPN partition -- with
+# one member per PE, and point ce-mh's MAC at that group instead of a single PE.
+EVPN_GROUP_BASE=2147483648
+
+es_group_json() { docker exec "$PE3" vbctl --json headend-group list 2>/dev/null; }
+es_group_members() {
+    es_group_json | python3 -c "
+import sys, json
+groups = json.load(sys.stdin) or []
+for g in groups:
+    if (g.get('group_id') or 0) >= $EVPN_GROUP_BASE:
+        print(len(g.get('members') or []))
+        sys.exit(0)
+print(0)"
+}
+es_group_member_count_is() { [ "$(es_group_members)" = "$1" ]; }
+
+if retry es_group_member_count_is 2; then
+    ok "pe3 built the EVPN ES group with one member per PE (pe1+pe2)"
+else
+    ng "pe3 has no two-member EVPN ES group (members=$(es_group_members))"
+    es_group_json || true
+fi
+
+es_group_sids() {
+    es_group_json | python3 -c "
+import sys, json
+groups = json.load(sys.stdin) or []
+for g in groups:
+    if (g.get('group_id') or 0) >= $EVPN_GROUP_BASE:
+        for m in g.get('members') or []:
+            print((m.get('segments') or [''])[0])
+"
+}
+sids=$(es_group_sids)
+if echo "$sids" | grep -q "fd00:100:" && echo "$sids" | grep -q "fd00:200:"; then
+    ok "group members carry one End.DT2U SID per PE (fd00:100:: / fd00:200::)"
+else
+    ng "group member SIDs do not span both PEs: $sids"
+fi
+
+# Aliased unicast must still deliver (whichever member the flow hashes to).
+if retry_n 10 bash -c "docker exec $CE_REMOTE ping -c 2 -W 2 $CE_MH_ADDR >/dev/null 2>&1"; then
+    ok "ce-remote -> ce-mh unicast works over the aliased group"
+else
+    ng "ce-remote -> ce-mh unicast broken after aliasing"
+fi
+
+# --- 6. RT1 mass withdraw: dropping pe2's per-ES shrinks the group ----------
+echo ""
+echo "[6] RT1 mass withdraw (pe2 leaves, traffic survives, pe2 returns)"
+# Withdrawing pe2's per-ES route is the RFC 7432 §8.2 mass-withdraw signal:
+# pe3 must drop pe2 from the ES group in one update -- no per-MAC withdraws --
+# while unicast keeps flowing through pe1.
+docker exec "$PE2" vbctl bgp withdraw-evpn-ad --rd 65100:2 \
+    --esi "$ESI" --per-es >/dev/null 2>&1 || true
+
+if retry_n 15 es_group_member_count_is 1; then
+    ok "pe3 shrank the ES group to pe1 only on pe2's per-ES withdraw"
+else
+    ng "pe3 did not converge to one member (members=$(es_group_members))"
+    es_group_json || true
+fi
+if retry_n 10 bash -c "docker exec $CE_REMOTE ping -c 2 -W 2 $CE_MH_ADDR >/dev/null 2>&1"; then
+    ok "ce-remote -> ce-mh unicast survives the mass withdraw"
+else
+    ng "ce-remote -> ce-mh unicast broken after the mass withdraw"
+fi
+
+# Re-advertise and the group must heal back to two members.
+docker exec "$PE2" vbctl bgp advertise-evpn-ad --rd 65100:2 --esi "$ESI" \
+    --route-targets 65000:100 --per-es --next-hop 2001:db8:ff::2 >/dev/null 2>&1 || true
+
+if retry_n 15 es_group_member_count_is 2; then
+    ok "pe3 restored the two-member group on pe2's re-advertise"
+else
+    ng "pe3 did not restore two members (members=$(es_group_members))"
+    es_group_json || true
 fi
 
 echo ""

@@ -431,6 +431,16 @@ type EVPNESKey struct {
 	ESI [10]byte
 }
 
+// EVPNADKey identifies a previously-advertised RT1 (Ethernet A-D) for
+// withdrawal: the {RD, ESI, EthernetTag} tuple of the NLRI. The tag
+// distinguishes the two forms — EVPNMaxEthernetTag for per-ES, the bridge
+// domain's tag for per-EVI — so one PE can withdraw either independently.
+type EVPNADKey struct {
+	RD          string
+	ESI         [10]byte
+	EthernetTag uint32
+}
+
 // EVPNController advertises Vinbero's local EVPN state into BGP (AFI 25 /
 // SAFI 70). Reception is delivered through RouteSubscriber as
 // RouteEvent.EVPN; PushEVPNMac / WithdrawEVPNMac are the advertise direction
@@ -450,6 +460,15 @@ type EVPNController interface {
 	// so peers learn this PE attaches to the segment (DF election input).
 	PushEVPNEthernetSegment(ctx context.Context, r EVPNRoute) error
 	WithdrawEVPNEthernetSegment(ctx context.Context, key EVPNESKey) error
+	// PushEVPNEthernetAD / WithdrawEVPNEthernetAD are the advertise direction
+	// for RT1 (Ethernet A-D). The EthernetTag picks the form: MAX-ET emits the
+	// per-ES route (mass-withdraw signal, ESI Label extended community with the
+	// Single-Active bit), any other tag emits the per-EVI route (aliasing
+	// signal, End.DT2U SID in the SRv6 L2 Service TLV). A receiving PE aliases
+	// a segment only when it holds both forms from the same peer, so a PE
+	// enabling aliasing pushes them in pairs.
+	PushEVPNEthernetAD(ctx context.Context, r EVPNRoute) error
+	WithdrawEVPNEthernetAD(ctx context.Context, key EVPNADKey) error
 }
 
 // EVPNRoute is a decoded BGP EVPN NLRI (AFI 25 / SAFI 70). One envelope

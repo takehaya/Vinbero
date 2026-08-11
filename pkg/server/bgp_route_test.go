@@ -77,6 +77,8 @@ type fakeEvpnAdv struct {
 	mcastWithdrawn []bgp.EVPNMcastKey
 	esPushed       []bgp.EVPNRoute
 	esWithdrawn    []bgp.EVPNESKey
+	adPushed       []bgp.EVPNRoute
+	adWithdrawn    []bgp.EVPNADKey
 	err            error
 }
 
@@ -127,6 +129,22 @@ func (f *fakeEvpnAdv) WithdrawEVPNEthernetSegment(_ context.Context, k bgp.EVPNE
 		return f.err
 	}
 	f.esWithdrawn = append(f.esWithdrawn, k)
+	return nil
+}
+
+func (f *fakeEvpnAdv) PushEVPNEthernetAD(_ context.Context, r bgp.EVPNRoute) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.adPushed = append(f.adPushed, r)
+	return nil
+}
+
+func (f *fakeEvpnAdv) WithdrawEVPNEthernetAD(_ context.Context, k bgp.EVPNADKey) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.adWithdrawn = append(f.adWithdrawn, k)
 	return nil
 }
 
@@ -312,6 +330,70 @@ func TestBgpRoute_WithdrawEvpnEs(t *testing.T) {
 	}
 	if fe.esWithdrawn[0].RD != "65000:1" {
 		t.Errorf("forwarded key = %+v", fe.esWithdrawn[0])
+	}
+}
+
+func TestBgpRoute_AdvertiseEvpnAd(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe, nil, nil, nil)
+	resp, err := s.BgpAdvertiseEvpnAd(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnAdRequest{Routes: []*v1.BgpEvpnAd{
+			{
+				Rd: "65000:100", RouteTargets: []string{"65000:100"},
+				Esi: "00:11:22:33:44:55:66:77:88:99", EthernetTag: 0xFFFFFFFF,
+				NextHop: "2001:db8::1",
+			},
+			{
+				Rd: "65000:100", RouteTargets: []string{"65000:100"},
+				Esi: "00:11:22:33:44:55:66:77:88:99", EthernetTag: 0,
+				Sid: "fd00:100:0:2::", NextHop: "2001:db8::1",
+			},
+		}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseEvpnAd: %v", err)
+	}
+	if len(resp.Msg.Advertised) != 2 || len(fe.adPushed) != 2 {
+		t.Fatalf("advertised=%d pushed=%d, want 2/2", len(resp.Msg.Advertised), len(fe.adPushed))
+	}
+	if !fe.adPushed[0].IsPerES() || fe.adPushed[0].SingleActive {
+		t.Errorf("forwarded per-ES RT1 = %+v", fe.adPushed[0])
+	}
+	if fe.adPushed[1].IsPerES() || fe.adPushed[1].SRv6SID != "fd00:100:0:2::" {
+		t.Errorf("forwarded per-EVI RT1 = %+v", fe.adPushed[1])
+	}
+}
+
+// An invalid ESI is a per-item error and never reaches the controller.
+func TestBgpRoute_AdvertiseEvpnAd_BadEsiIsPerItemError(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe, nil, nil, nil)
+	resp, err := s.BgpAdvertiseEvpnAd(context.Background(),
+		connect.NewRequest(&v1.BgpAdvertiseEvpnAdRequest{Routes: []*v1.BgpEvpnAd{{
+			Rd: "65000:100", Esi: "zz", NextHop: "2001:db8::1",
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpAdvertiseEvpnAd: %v", err)
+	}
+	if len(resp.Msg.Errors) != 1 || len(fe.adPushed) != 0 {
+		t.Errorf("a bad ESI must be a per-item error and not reach the controller")
+	}
+}
+
+func TestBgpRoute_WithdrawEvpnAd(t *testing.T) {
+	fe := &fakeEvpnAdv{}
+	s := NewBgpRouteServer(nil, nil, fe, nil, nil, nil)
+	resp, err := s.BgpWithdrawEvpnAd(context.Background(),
+		connect.NewRequest(&v1.BgpWithdrawEvpnAdRequest{Keys: []*v1.BgpEvpnAdKey{{
+			Rd: "65000:100", Esi: "00:11:22:33:44:55:66:77:88:99", EthernetTag: 0xFFFFFFFF,
+		}}}))
+	if err != nil {
+		t.Fatalf("BgpWithdrawEvpnAd: %v", err)
+	}
+	if len(resp.Msg.Withdrawn) != 1 || len(fe.adWithdrawn) != 1 {
+		t.Fatalf("withdrawn=%d fake=%d, want 1/1", len(resp.Msg.Withdrawn), len(fe.adWithdrawn))
+	}
+	if fe.adWithdrawn[0].RD != "65000:100" || fe.adWithdrawn[0].EthernetTag != 0xFFFFFFFF {
+		t.Errorf("forwarded key = %+v", fe.adWithdrawn[0])
 	}
 }
 
