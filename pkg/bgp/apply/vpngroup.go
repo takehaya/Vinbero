@@ -370,13 +370,15 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 	}
 	// The trigger goes first: while the group still exists a stale trigger
 	// forwards correctly, whereas deleting the group first would leave the
-	// trigger resolving to its fallback segments for no reason.
-	a.prober.Unregister(d.groupID)
+	// trigger resolving to its fallback segments for no reason. The prober
+	// registration outlives the group delete attempt: if the delete fails
+	// the group keeps forwarding, and it should keep its liveness guard.
 	if err := a.vpnGroups.ecmp.DeleteEcmpGroup(d.groupID, owner); err != nil {
 		a.logger.Error("delete ECMP group",
 			zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
 		return
 	}
+	a.prober.Unregister(d.groupID)
 	delete(a.vpnGroups.dests, dk)
 	a.vpnGroups.freeIDs = append(a.vpnGroups.freeIDs, d.groupID)
 	a.logger.Info("VPN prefix withdrawn",

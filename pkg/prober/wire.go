@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -11,7 +13,8 @@ import (
 const (
 	ipv6HeaderLen   = 40
 	srhFixedLen     = 8
-	icmpv6EchoLen   = 8
+	// ICMPv6 echo header plus the 8-byte cookie payload.
+	icmpv6EchoLen   = 16
 	protoRouting    = 43
 	protoICMPv6     = 58
 	icmpv6EchoReq   = 128
@@ -27,6 +30,7 @@ type rawWire struct {
 	sendFD int
 	recvFD int
 	src    netip.Addr
+	closed atomic.Bool
 }
 
 func newRawWire(src netip.Addr) (*rawWire, error) {
@@ -53,11 +57,20 @@ func newRawWire(src netip.Addr) (*rawWire, error) {
 		_ = unix.Close(recvFD)
 		return nil, fmt.Errorf("icmp6 filter: %w", err)
 	}
+	// A receive timeout lets the read loop notice close(): a raw fd blocked
+	// in Recvfrom is outside the runtime netpoller, so closing the fd would
+	// not reliably wake it.
+	tv := unix.Timeval{Usec: 500000}
+	if err := unix.SetsockoptTimeval(recvFD, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+		_ = unix.Close(sendFD)
+		_ = unix.Close(recvFD)
+		return nil, fmt.Errorf("recv timeout: %w", err)
+	}
 	return &rawWire{sendFD: sendFD, recvFD: recvFD, src: src}, nil
 }
 
-func (w *rawWire) send(t Target, token uint16, seq uint16) error {
-	pkt, firstHop := buildEchoRequest(w.src, t, token, seq)
+func (w *rawWire) send(t Target, token uint16, seq uint16, cookie uint64) error {
+	pkt, firstHop := buildEchoRequest(w.src, t, token, seq, cookie)
 	sa := &unix.SockaddrInet6{Addr: firstHop.As16()}
 	if err := unix.Sendto(w.sendFD, pkt, 0, sa); err != nil {
 		return fmt.Errorf("sendto %s: %w", firstHop, err)
@@ -65,27 +78,45 @@ func (w *rawWire) send(t Target, token uint16, seq uint16) error {
 	return nil
 }
 
-// recv blocks for the next echo reply and returns its identifier and
-// sequence. ok is false once the socket is closed.
-func (w *rawWire) recv() (token, seq uint16, ok bool) {
-	buf := make([]byte, 128)
+// recv blocks for the next echo reply and returns its identifier,
+// sequence, cookie, and source address. ok is false once the socket is
+// closed; transient errors are absorbed.
+func (w *rawWire) recv() (token, seq uint16, cookie uint64, from netip.Addr, ok bool) {
+	buf := make([]byte, 256)
 	for {
-		n, _, err := unix.Recvfrom(w.recvFD, buf, 0)
+		if w.closed.Load() {
+			return 0, 0, 0, netip.Addr{}, false
+		}
+		n, sa, err := unix.Recvfrom(w.recvFD, buf, 0)
 		if err != nil {
-			if err == unix.EINTR {
+			switch err {
+			case unix.EINTR, unix.EAGAIN:
+				continue
+			default:
+				if w.closed.Load() {
+					return 0, 0, 0, netip.Addr{}, false
+				}
+				// Unexpected but survivable; do not burn a core on a
+				// persistent error.
+				time.Sleep(50 * time.Millisecond)
 				continue
 			}
-			return 0, 0, false
 		}
 		// An ICMPv6 raw socket delivers the ICMPv6 header onward.
 		if n < icmpv6EchoLen || buf[0] != icmpv6EchoReply {
 			continue
 		}
-		return binary.BigEndian.Uint16(buf[4:6]), binary.BigEndian.Uint16(buf[6:8]), true
+		src := netip.Addr{}
+		if in6, isV6 := sa.(*unix.SockaddrInet6); isV6 {
+			src = netip.AddrFrom16(in6.Addr)
+		}
+		return binary.BigEndian.Uint16(buf[4:6]), binary.BigEndian.Uint16(buf[6:8]),
+			binary.BigEndian.Uint64(buf[8:16]), src, true
 	}
 }
 
 func (w *rawWire) close() {
+	w.closed.Store(true)
 	_ = unix.Close(w.sendFD)
 	_ = unix.Close(w.recvFD)
 }
@@ -99,7 +130,7 @@ func (w *rawWire) close() {
 // target). Without segments it degrades to a plain echo straight to the
 // target. The ICMPv6 checksum's pseudo-header uses the FINAL destination,
 // as RFC 8200 requires in the presence of a routing header.
-func buildEchoRequest(src netip.Addr, t Target, token, seq uint16) ([]byte, netip.Addr) {
+func buildEchoRequest(src netip.Addr, t Target, token, seq uint16, cookie uint64) ([]byte, netip.Addr) {
 	journey := append(append([]netip.Addr{}, t.Segments...), t.Dst)
 	firstHop := journey[0]
 
@@ -139,11 +170,12 @@ func buildEchoRequest(src netip.Addr, t Target, token, seq uint16) ([]byte, neti
 		off += srhLen
 	}
 
-	// ICMPv6 echo request.
+	// ICMPv6 echo request with the round's cookie as payload.
 	echo := pkt[off:]
 	echo[0] = icmpv6EchoReq
 	binary.BigEndian.PutUint16(echo[4:6], token)
 	binary.BigEndian.PutUint16(echo[6:8], seq)
+	binary.BigEndian.PutUint64(echo[8:16], cookie)
 	binary.BigEndian.PutUint16(echo[2:4], icmpv6Checksum(src, t.Dst, echo))
 
 	return pkt, firstHop

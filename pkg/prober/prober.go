@@ -16,6 +16,7 @@ package prober
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"net/netip"
 	"sync"
 	"time"
@@ -60,10 +61,10 @@ type liveWriter interface {
 // without raw sockets.
 type wire interface {
 	// send emits one echo request for the target, stamped with the token
-	// (ICMPv6 identifier) and sequence number.
-	send(t Target, token uint16, seq uint16) error
+	// (ICMPv6 identifier), sequence number, and payload cookie.
+	send(t Target, token uint16, seq uint16, cookie uint64) error
 	// recv blocks for the next echo reply; ok is false once closed.
-	recv() (token, seq uint16, ok bool)
+	recv() (token, seq uint16, cookie uint64, from netip.Addr, ok bool)
 	close()
 }
 
@@ -95,6 +96,11 @@ type pathState struct {
 	replySeen bool
 	lastReply time.Time
 	rtt       time.Duration
+	// cookie / prevCookie are the random payloads of the current and
+	// previous rounds' probes; a reply must echo one of them, so a stray
+	// process's pings or an off-path guess cannot keep a dead path up.
+	cookie     uint64
+	prevCookie uint64
 }
 
 type groupState struct {
@@ -155,15 +161,28 @@ func (p *Prober) Register(groupID uint32, targets []Target) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// State carries over for a target that survives the re-registration
+	// (same destination and segments): a reconcile that merely re-writes
+	// the group -- or shuffles path indexes -- must not resurrect a path
+	// the probes just declared dead.
+	carried := make(map[string]*pathState)
 	if old, ok := p.groups[groupID]; ok {
-		p.releaseLocked(old)
+		for _, ps := range old.paths {
+			carried[targetKey(ps.target)] = ps
+		}
 	}
 	gs := &groupState{}
 	for _, t := range targets {
+		if prev, ok := carried[targetKey(t)]; ok && prev.probeable {
+			prev.target = t // adopt the (possibly moved) path index
+			gs.paths = append(gs.paths, prev)
+			delete(carried, targetKey(t))
+			continue
+		}
 		ps := &pathState{
 			target:    t,
 			up:        true,
-			probeable: t.Dst.Is6() && !t.Dst.Is4In6() && !t.Dst.IsUnspecified(),
+			probeable: probeable(t.Dst),
 		}
 		if ps.probeable {
 			tk, ok := p.allocTokenLocked(ps)
@@ -176,6 +195,12 @@ func (p *Prober) Register(groupID uint32, targets []Target) {
 			}
 		}
 		gs.paths = append(gs.paths, ps)
+	}
+	// Tokens of paths that did not survive are released.
+	for _, ps := range carried {
+		if ps.probeable {
+			delete(p.tokens, ps.token)
+		}
 	}
 	p.groups[groupID] = gs
 	if err := p.live.SetEcmpLive(groupID, bitmapOf(gs)); err != nil {
@@ -258,9 +283,20 @@ func (p *Prober) Stop() {
 // tick runs one probe round: for every probeable path, first judge the
 // previous round (reply seen or not), then emit the next probe. Judging at
 // send time gives every probe exactly one interval to be answered.
+//
+// The sends happen after the mutex is released: a raw-socket send can
+// block, and the applier's route goroutines call Register under the same
+// mutex, so a stall here must not back-pressure BGP convergence.
 func (p *Prober) tick(now time.Time) {
+	type outProbe struct {
+		target Target
+		token  uint16
+		seq    uint16
+		cookie uint64
+	}
+	var toSend []outProbe
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	for groupID, gs := range p.groups {
 		changed := false
 		for _, ps := range gs.paths {
@@ -280,17 +316,24 @@ func (p *Prober) tick(now time.Time) {
 			ps.seq++
 			ps.sentAt = now
 			ps.replySeen = false
-			if err := p.wire.send(ps.target, ps.token, ps.seq); err != nil {
-				// A send failure is indistinguishable from a lost probe for
-				// the state machine; just log it.
-				p.logger.Debug("probe send", zap.Error(err))
-			}
+			ps.prevCookie = ps.cookie
+			ps.cookie = rand.Uint64()
+			toSend = append(toSend, outProbe{ps.target, ps.token, ps.seq, ps.cookie})
 		}
 		if changed {
 			if err := p.live.SetEcmpLive(groupID, bitmapOf(gs)); err != nil {
 				p.logger.Error("write liveness bitmap",
 					zap.Uint32("group_id", groupID), zap.Error(err))
 			}
+		}
+	}
+	p.mu.Unlock()
+
+	for _, s := range toSend {
+		if err := p.wire.send(s.target, s.token, s.seq, s.cookie); err != nil {
+			// A send failure is indistinguishable from a lost probe for the
+			// state machine; just log it.
+			p.logger.Debug("probe send", zap.Error(err))
 		}
 	}
 }
@@ -318,19 +361,27 @@ func (ps *pathState) judgeLocked(multiplier int) bool {
 	return false
 }
 
-// handleReply matches one echo reply to its path. Only the current
-// sequence counts: a straggler from an earlier round says nothing about
-// the round being judged.
-func (p *Prober) handleReply(token, seq uint16, now time.Time) {
+// handleReply matches one echo reply to its path. The reply must come from
+// the probed destination and echo the round's random cookie; the previous
+// round's probe is also accepted (without an RTT sample), so a path whose
+// RTT exceeds one interval is still provably alive rather than permanently
+// judged down on always-stale replies.
+func (p *Prober) handleReply(token, seq uint16, cookie uint64, from netip.Addr, now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ps, ok := p.tokens[token]
-	if !ok || seq != ps.seq {
+	if !ok || from != ps.target.Dst {
 		return
 	}
-	ps.replySeen = true
-	ps.lastReply = now
-	ps.rtt = now.Sub(ps.sentAt)
+	switch {
+	case seq == ps.seq && cookie == ps.cookie:
+		ps.replySeen = true
+		ps.lastReply = now
+		ps.rtt = now.Sub(ps.sentAt)
+	case seq == ps.seq-1 && cookie == ps.prevCookie:
+		ps.replySeen = true
+		ps.lastReply = now
+	}
 }
 
 // bitmapOf renders the group's up-bits, indexed by the data plane's path
@@ -385,10 +436,27 @@ func (p *Prober) Status() []PathStatus {
 // the wire is closed.
 func (p *Prober) readLoop() {
 	for {
-		token, seq, ok := p.wire.recv()
+		token, seq, cookie, from, ok := p.wire.recv()
 		if !ok {
 			return
 		}
-		p.handleReply(token, seq, time.Now())
+		p.handleReply(token, seq, cookie, from, time.Now())
 	}
+}
+
+// probeable reports whether dst can be the final destination of a probe. A
+// link-local next hop is excluded: sending to it needs a zone the target
+// does not carry, so every probe would fail at the socket and take a
+// perfectly healthy path down.
+func probeable(dst netip.Addr) bool {
+	return dst.Is6() && !dst.Is4In6() && !dst.IsUnspecified() && !dst.IsLinkLocalUnicast()
+}
+
+// targetKey is the identity a path keeps across re-registrations.
+func targetKey(t Target) string {
+	k := t.Dst.String()
+	for _, s := range t.Segments {
+		k += "|" + s.String()
+	}
+	return k
 }

@@ -167,9 +167,11 @@ single-homed の MAC (ESI が全ゼロ) は index しません。属する segme
 
 probe は SRv6 self-probe です。member の segment list の transport 部分を SRH に載せた ICMPv6 echo request を、広告元 PE の routable address (BGP next hop) を最終宛先として送ります。remote 側に必要なのは kernel の ICMPv6 応答だけで、BFD のような相手側実装を要求しません。member の終端 segment は remote の service SID なので probe の経路に含めません。service SID は End ではないため、segments left が残った SRH 付き packet はそこで drop され、probe が成立しないからです。next hop が取れない member は unprobeable として常に up に固定します。probe できないことを理由に path を落とすと、単なる情報不足が reroute に化けるためです。
 
-送信は IPPROTO_RAW socket で IPv6 + SRH + ICMPv6 を自前で組みます (checksum は RFC 8200 に従い最終宛先で計算)。受信は ICMPv6 raw socket に echo reply だけを通す kernel filter を掛けます。判定は送信時に前回 round の応答有無を畳む方式で、応答窓はちょうど 1 interval です。multiplier 回連続の無応答で down、同じ回数の連続応答で up に戻るヒステリシスを持ちます。
+送信は IPPROTO_RAW socket で IPv6 + SRH + ICMPv6 を自前で組みます (checksum は RFC 8200 に従い最終宛先で計算)。受信は ICMPv6 raw socket に echo reply だけを通す kernel filter を掛けます。reply は送信元 address と、probe ごとの乱数 cookie (echo payload) の一致で照合するので、無関係な process の ping や偽装 reply が dead path を up に保てません。判定は送信時に前回 round の応答有無を畳む方式で、直前 round の probe への遅延応答も生存として数えるため、RTT が 2 interval 未満の path まで扱えます。multiplier 回連続の無応答で down、同じ回数の連続応答で up に戻るヒステリシスを持ちます。
 
-applier は group を書き込むたびに `Register(groupID, targets)` で member 集合を差し替え、group を畳むときに `Unregister` します。登録時点で全 path up の bitmap を書き、以後は状態変化のときだけ書き換えます。L3VPN 側は next hop を `vpnPath` に載せて member から引き、EVPN 側は per-EVI A-D の広告元 PE を使います。next hop の変化は fingerprint に含めているので、SID が同じままでも再登録されます。
+probe の送信元は `bgp.global.next_hop` (PE の loopback) を優先します。echo reply は SRv6 を通らず素の IPv6 で戻るので、kernel が実際に所有して local 配達する address が要るためです。locator base (encap source) は通常どのインターフェースにも付与されないので fallback に留めます。link-local の next hop は zone を運べないため unprobeable として up に固定します。
+
+applier は group を書き込むたびに `Register(groupID, targets)` で member 集合を差し替え、group を畳むときに `Unregister` します。差し替えでは同じ target (宛先と transport segments が一致する path) の状態を引き継ぐので、membership の churn が dead path を蘇生させることはありません。新規 path は up で登録し、以後は状態変化のときだけ bitmap を書き換えます。L3VPN 側は next hop を `vpnPath` に載せて member から引き、EVPN 側は per-EVI A-D の広告元 PE を使います。next hop の変化は fingerprint に含めているので、SID が同じままでも再登録されます。
 
 設定は `prober: {enable, interval_ms, multiplier}` で、BGP applier と encap source が前提です。状態は `ProberService` / `vbctl prober status` で per-path の up/down、miss streak、RTT を見られます。
 

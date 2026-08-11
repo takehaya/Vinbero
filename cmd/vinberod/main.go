@@ -285,7 +285,7 @@ func run(cliCtx *cli.Context) error {
 	if cfg.Prober.Enable {
 		if applier == nil {
 			lg.Warn("prober.enable requires --bgp-enabled; prober stays off")
-		} else if src, perr := applier.EncapSourceAddr(); perr != nil {
+		} else if src, perr := proberSource(cfg, applier); perr != nil {
 			lg.Warn("prober disabled: cannot resolve probe source", zap.Error(perr))
 		} else {
 			p, perr := prober.New(vin.GetMapOperations(), src, prober.Config{
@@ -705,4 +705,22 @@ func shutdown(srv *server.Server, lg *zap.Logger) error {
 	}
 	lg.Info("Shutdown completed")
 	return nil
+}
+
+// proberSource picks the address probe packets originate from. Echo
+// replies come back to it natively (no SRv6), so it must be an address the
+// kernel actually owns and delivers locally. bgp.global.next_hop is
+// exactly that -- the loopback the PE advertises as its BGP next hop --
+// while the encap source (the locator base) is usually not assigned to any
+// interface and would silently blackhole every reply, judging all paths
+// down. The locator base remains the fallback for setups without next_hop.
+func proberSource(cfg *config.Config, applier *apply.Applier) (netip.Addr, error) {
+	if nh := cfg.BGP.Global.NextHop; nh != "" {
+		addr, err := netip.ParseAddr(nh)
+		if err != nil || !addr.Is6() || addr.Is4In6() {
+			return netip.Addr{}, fmt.Errorf("bgp.global.next_hop %q is not a usable IPv6 address", nh)
+		}
+		return addr, nil
+	}
+	return applier.EncapSourceAddr()
 }
