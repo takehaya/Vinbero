@@ -97,6 +97,12 @@ type srPolicyTable struct {
 	freeIDs []uint32 // ids freed by gc, handed out before nextID grows
 	byKey   map[policyKey]*policyState
 	logger  *zap.Logger
+	// onTransportChange, when set, is invoked -- outside the table lock --
+	// after a reconcile changes the transport installed for a key. Steered
+	// data-plane entries reference the policy by id and need no rewrite, but
+	// the liveness prober's registrations embed the transport itself, so the
+	// applier uses this hook to re-register the affected groups.
+	onTransportChange func(policyKey)
 }
 
 func newSRPolicyTable(mapOps policyMapOps, logger *zap.Logger) *srPolicyTable {
@@ -185,19 +191,23 @@ func (t *srPolicyTable) idOf(color uint32, endpoint netip.Addr) uint32 {
 // reconciles the data plane. The same path serves BGP reception and local
 // CRUD; withdraw removes the candidate.
 func (t *srPolicyTable) apply(p bgp.SRPolicy, withdraw bool) {
+	key := policyKey{color: p.Color, endpoint: p.Endpoint}
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.applyLocked(p, withdraw)
+	changed := t.applyLocked(p, withdraw)
+	t.mu.Unlock()
+	t.notifyTransportChange(changed, key)
 }
 
 // applyLocked is apply with t.mu already held, so a caller that must decide and
 // mutate atomically (applyLocalCapped) can do so under one lock acquisition.
-func (t *srPolicyTable) applyLocked(p bgp.SRPolicy, withdraw bool) {
+// It reports whether the installed transport changed; the caller owes a
+// notifyTransportChange AFTER releasing t.mu (the hook re-enters the table).
+func (t *srPolicyTable) applyLocked(p bgp.SRPolicy, withdraw bool) bool {
 	key := policyKey{color: p.Color, endpoint: p.Endpoint}
 	st := t.byKey[key]
 	if st == nil {
 		if withdraw {
-			return // nothing to remove
+			return false // nothing to remove
 		}
 		st = t.ensureState(key)
 	}
@@ -209,11 +219,21 @@ func (t *srPolicyTable) applyLocked(p bgp.SRPolicy, withdraw bool) {
 			st.candidates[cid] = cp
 		}
 	}
-	t.reconcile(key, st)
+	changed := t.reconcile(key, st)
 	if withdraw {
 		// Reap the policy if that removed its last candidate and no route
 		// references it; reconcile has already dropped the map entry.
 		t.gc(key, st)
+	}
+	return changed
+}
+
+// notifyTransportChange fires the transport-change hook. Must be called
+// without t.mu held: the hook rebuilds probe registrations, which reads the
+// table back (idOf / transportOf).
+func (t *srPolicyTable) notifyTransportChange(changed bool, key policyKey) {
+	if changed && t.onTransportChange != nil {
+		t.onTransportChange(key)
 	}
 }
 
@@ -227,7 +247,6 @@ var ErrSRPolicyLimitReached = errors.New("local SR Policy limit reached")
 // cannot both pass an under-cap check and exceed the limit.
 func (t *srPolicyTable) applyLocalCapped(p bgp.SRPolicy, max uint32) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if max > 0 && !t.hasLocalLocked(p.Color, p.Endpoint) {
 		n := 0
 		for _, st := range t.byKey {
@@ -236,10 +255,13 @@ func (t *srPolicyTable) applyLocalCapped(p bgp.SRPolicy, max uint32) error {
 			}
 		}
 		if uint32(n) >= max {
+			t.mu.Unlock()
 			return ErrSRPolicyLimitReached
 		}
 	}
-	t.applyLocked(p, false)
+	changed := t.applyLocked(p, false)
+	t.mu.Unlock()
+	t.notifyTransportChange(changed, policyKey{color: p.Color, endpoint: p.Endpoint})
 	return nil
 }
 
@@ -308,8 +330,10 @@ func (t *srPolicyTable) gc(key policyKey, st *policyState) {
 }
 
 // reconcile recomputes the active candidate and writes it to the data
-// plane only when the installed transport list changed. Caller holds t.mu.
-func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
+// plane only when the installed transport list changed, reporting whether it
+// did. Caller holds t.mu and owes a notifyTransportChange after releasing it
+// when the result is true.
+func (t *srPolicyTable) reconcile(key policyKey, st *policyState) bool {
 	best, ok := bestCandidate(st.candidates)
 	if !ok {
 		// No usable candidate: drop the map entry so referencing routes
@@ -318,19 +342,20 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 			if err := t.mapOps.DeleteSRPolicy(st.id); err != nil {
 				t.logger.Error("delete sr_policy_map entry",
 					zap.Uint32("policy_id", st.id), zap.Error(err))
-				return
+				return false
 			}
 			st.installed = nil
+			return true
 		}
-		return
+		return false
 	}
 	if slices.Equal(st.installed, best.SegmentList) {
-		return // active path unchanged; skip a redundant write
+		return false // active path unchanged; skip a redundant write
 	}
 	if err := t.mapOps.UpsertSRPolicy(st.id, best.SegmentList); err != nil {
 		t.logger.Error("upsert sr_policy_map entry",
 			zap.Uint32("policy_id", st.id), zap.Error(err))
-		return
+		return false
 	}
 	// Clone so `installed` does not alias the candidate's slice: the
 	// diff-skip above must compare against a stable snapshot.
@@ -338,6 +363,25 @@ func (t *srPolicyTable) reconcile(key policyKey, st *policyState) {
 	t.logger.Info("SR Policy active path installed",
 		zap.Uint32("color", key.color), zap.Stringer("endpoint", key.endpoint),
 		zap.Uint32("policy_id", st.id), zap.Int("segments", len(best.SegmentList)))
+	return true
+}
+
+// transportOf returns (a copy of) the transport list currently installed for
+// policyID, or nil when the id is unknown or nothing is installed. The prober
+// path uses it to embed a steered member's real forwarding journey into its
+// probe.
+func (t *srPolicyTable) transportOf(policyID uint32) []netip.Addr {
+	if policyID == 0 {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, st := range t.byKey {
+		if st.id == policyID {
+			return slices.Clone(st.installed)
+		}
+	}
+	return nil
 }
 
 // bestCandidate selects the active candidate path (RFC 9256 §2.9 subset).

@@ -578,7 +578,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	for i, m := range members {
 		dsts[i] = m.pe
 	}
-	a.prober.Register(d.groupID, probeTargets(paths, dsts))
+	a.prober.Register(d.groupID, a.probeTargets(paths, dsts))
 
 	// The ES peer mirrors the first member so the group-unresolvable
 	// fallback forwards the way the first path would (same shape as the VPN

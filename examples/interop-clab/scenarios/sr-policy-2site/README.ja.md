@@ -51,8 +51,9 @@ make all SCENARIO=sr-policy-2site     # build + deploy + test + destroy
 4. color 経路が policy に解決します。FRR の `10.2.0.0/24`（color 100）が Vinbero の `headend_v4` map に入り、SR Policy に active candidate が付きます。
 5. steered チェインのデータ面を確認します。`ce-tokyo → ce-osaka` の ping が通り、tokyo→core では outer DA が core の End `fd00:300:0:ee::1`、core→osaka では FRR の End `fd00:200:0:ee::1` に書き換わります。outer DA がホップごとに変わることが、セグメントを 1 つずつ辿るサービスチェインの証明になります。
 6. negative を確認します。color を持たず policy にマッチしない逆方向（`ce-osaka → ce-tokyo`）も通常の L3VPN として転送されます。color steering が無 color トラフィックを壊しません。
+7. prober の probe が steered チェインを辿ることを確認します。SRv6 self-probe は policy の非終端 transport（core End）を埋め込んでから FRR の loopback に到達するので、core の waypoint End SID を消すと、PE 自体への疎通は完全に生きているのに数 probe 間隔で path が down になります。SID を戻すと path と steered データ面が復旧します。PE へ直行する probe ではこの故障は観測できません。transport の終端 segment（FRR 自身の End）は probe に含めません。endpoint ノードに着地する segment であり、Linux の End は自ノードが所有する address への転送を拒否するため、そこを通り抜けて loopback へ届く probe は成立しないからです。
 
-pass すると `RESULT: 9 passed, 0 failed` が出ます。
+pass すると `RESULT: 13 passed, 0 failed` が出ます。
 
 ## 注記
 

@@ -47,6 +47,16 @@ settings:
 # the core router (which is NOT in BGP). iBGP imposes no TTL=1 limit, so
 # the loopback-to-loopback session crosses the core cleanly. The loopback
 # nexthop is reachable via the static underlay routes from start.sh.
+# Liveness prober: each ECMP path member is probed with an SRv6 self-probe
+# that embeds the SR Policy's transport chain (core End -> FRR End) before
+# terminating at the advertising PE's loopback. Killing a waypoint End SID
+# is therefore detected here even while plain PE-to-PE reachability is fine
+# -- the property the test's failure-injection step asserts.
+prober:
+  enable: true
+  interval_ms: 100
+  multiplier: 3
+
 bgp:
   global:
     local_asn: 65100
@@ -57,6 +67,11 @@ bgp:
     # FRR. Registered over RPC by start.sh before the session settles
     # (the applier needs it present to materialise headend entries).
     source_locator: "LOC1"
+    # The prober's probe source. It must be an address the kernel owns
+    # and delivers locally (the echo reply returns as plain IPv6), so the
+    # loopback is used; the locator base is registered over RPC only
+    # after boot and is not a kernel-owned address anyway.
+    next_hop: "2001:db8:ff::1"
   peers:
     # pe-osaka's loopback. Multihop iBGP session via the IPv6 core.
     - neighbor: "2001:db8:ff::2"

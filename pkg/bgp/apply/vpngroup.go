@@ -346,7 +346,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 	for i, m := range ms {
 		dsts[i] = m.nh
 	}
-	a.prober.Register(d.groupID, probeTargets(paths, dsts))
+	a.prober.Register(d.groupID, a.probeTargets(paths, dsts))
 
 	// The trigger mirrors the first member so the fallback forwards the same
 	// way the group's first path would, steering included.
