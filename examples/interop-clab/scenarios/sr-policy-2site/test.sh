@@ -15,7 +15,10 @@
 #      (core End fd00:300:0:ee::1 -> FRR End fd00:200:0:ee::1 -> End.DT4
 #      service SID), proven by the outer DA changing per hop on the wire;
 #   5. negative: the return direction (ce-osaka -> ce-tokyo), which carries
-#      no color and matches no policy, still forwards as a plain L3VPN.
+#      no color and matches no policy, still forwards as a plain L3VPN;
+#   6. the prober's probe rides the policy's transport chain: removing the
+#      core waypoint's End SID flips the path down (while the PE itself
+#      stays reachable), and restoring it brings the path back up.
 #
 # The data plane settles asynchronously, so every ping is gated on its
 # preconditions and retried generously -- a slow settle cannot flake it.
@@ -212,6 +215,75 @@ if retry_n 45 ce_osaka_to_tokyo; then
 else
     ng "ce-osaka -> ce-tokyo ping failed"
     dexec "$CE_OSAKA" ping -c 3 -W 2 "$CE_TOKYO_ADDR" 2>&1 | sed 's/^/      /' || true
+fi
+
+# --- 6. prober walks the policy transport chain ----------------------------
+echo ""
+echo "[6] prober probes THROUGH the steered transport chain"
+# The probe embeds the policy's non-terminal transport (core's End) ahead
+# of its terminal destination (FRR's loopback), mirroring the waypoints the
+# XDP program composes for steered traffic. The transport's own terminal
+# segment (FRR's End) is excluded: it lands on the endpoint node, whose
+# Linux End refuses to forward to its own loopback, so keeping it would
+# fail a healthy path forever. This is what makes a dead waypoint visible:
+# plain PE-to-PE reachability stays perfect when core's End SID goes away,
+# so a probe that went straight to the PE would keep reporting up while the
+# steered traffic blackholes.
+prober_json() {
+    dexec "$PE_TOKYO" vbctl --json prober status 2>/dev/null
+}
+steered_path_state() {
+    # $1 = "up" or "down": the state the FRR-loopback path must be in.
+    prober_json | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if not d.get('enabled'):
+    sys.exit(1)
+paths = [p for p in d.get('paths') or [] if p.get('dst') == '$FRR_LOOPBACK']
+if len(paths) != 1:
+    sys.exit(1)
+# A false 'up' is omitted from the JSON entirely (proto3 zero-value), so
+# fold the absent key and false together before comparing.
+sys.exit(0 if bool(paths[0].get('up')) == ('$1' == 'up') else 1)"
+}
+if retry steered_path_state up; then
+    ok "prober reports the steered path up (probe rides the transport chain)"
+else
+    ng "prober does not report an up path toward $FRR_LOOPBACK"
+    prober_json || true
+fi
+
+# Failure injection: remove the core waypoint's End SID. The underlay and
+# the PE loopbacks stay reachable; only the segment chain is broken.
+dexec "$CORE" ip -6 route del "$CORE_SID/128" >/dev/null 2>&1 || true
+if retry_n 10 steered_path_state down; then
+    ok "prober detects the dead waypoint (path down)"
+else
+    ng "prober kept the path up with the waypoint End SID removed"
+    prober_json || true
+fi
+# The claim is transport-awareness, so prove the PE itself is STILL
+# reachable while the path is down: a full underlay outage would flip the
+# path down too, but then this plain loopback-to-loopback ping (which does
+# not ride the segment chain) would fail with it.
+if retry_n 5 gate_underlay; then
+    ok "PE loopback stays reachable during the outage (only the chain is dead)"
+else
+    ng "PE loopback unreachable during the outage; the down state proves nothing"
+fi
+
+# Restore the waypoint and the path must come back.
+dexec "$CORE" ip -6 route replace "$CORE_SID/128" encap seg6local action End dev eth2 >/dev/null 2>&1 || true
+if retry_n 10 steered_path_state up; then
+    ok "prober recovers the path after the waypoint returns"
+else
+    ng "path did not recover after restoring the waypoint End SID"
+    prober_json || true
+fi
+if retry_n 15 ce_tokyo_to_osaka; then
+    ok "steered data plane works again after recovery"
+else
+    ng "steered data plane broken after recovery"
 fi
 
 echo ""

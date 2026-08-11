@@ -93,8 +93,18 @@ state. Shared images live in `../../images/`.
 6. Negative — the return direction (`ce-osaka → ce-tokyo`), which carries no
    color and matches no policy, still forwards as a plain L3VPN: color
    steering must not break un-colored traffic.
+7. The prober rides the steered chain — the SRv6 self-probe embeds the
+   policy's non-terminal transport (`core End`) before terminating at FRR's
+   loopback, so removing the core waypoint's End SID flips the path down
+   within a few probe intervals even though the PE itself stays perfectly
+   reachable; restoring the SID brings the path (and the steered data
+   plane) back. A probe that went straight to the PE could never see this
+   failure. The transport's terminal segment (FRR's own End) is excluded
+   from the probe: it lands on the endpoint node, and a Linux End refuses
+   to forward to an address the node itself owns, so probing "through" it
+   to the loopback could never succeed.
 
-A pass prints `RESULT: 9 passed, 0 failed`.
+A pass prints `RESULT: 13 passed, 0 failed`.
 
 ## Notes
 

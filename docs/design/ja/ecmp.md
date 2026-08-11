@@ -181,7 +181,11 @@ applier は group を書き込むたびに `Register(groupID, targets)` で memb
 
 設定は `prober: {enable, interval_ms, multiplier}` で、BGP applier と encap source が前提です。状態は `ProberService` / `vbctl prober status` で per-path の up/down、miss streak、RTT を見られます。
 
-steered path (SR Policy 合成) の probe は transport 部分のみで、policy が prepend する経路は検証しません。policy 経路の liveness は後続です。
+steered path (SR Policy 合成) の probe は、member が参照する policy の installed transport を journey の先頭に埋め込みます。XDP が service SID の前に prepend するのと同じ waypoint 列を probe も辿るので、waypoint の End が死ぬと、PE 自体への疎通が生きていても path が down になります。policy の transport が入れ替わったとき (candidate の交代、withdraw、local CRUD) は `srPolicyTable` の transport-change hook が該当 group の probe target を再登録します。data plane のエントリは policy を id で参照するので書き換え不要ですが、probe の登録は transport そのものを含むため、放置すると traffic が通らない旧経路を probe し続けるからです。
+
+transport 自身の終端 segment は journey に含めません。SR Policy の最終 segment は endpoint に着地する segment で、Linux endpoint の End はループ防止として自ノードが所有する address への転送を拒否します (post-End の経路 lookup が local route を除外し、packet は discard dst に落ちます。実 traffic は End の後に service SID という route へ進むので踏みません)。終端 End を journey に残すと、その次 hop が同一ノードの loopback (Dst) になる probe が恒久的に drop され、健全な path を false-down させます。Dst で journey を終えれば同じノードに同じ生死の質問を届けられます。代償として、endpoint 以外のノードに置かれた終端 transport segment は probe の対象外になります。
+
+interop 検証は sr-policy-2site の failure-injection (waypoint End SID の削除で down、復元で up) が担います。
 
 probe の宛先は PE の loopback であり、service SID (locator 配下) そのものではありません。L3VPN と EVPN の member entry は service SID 1 個なので、probe は素の echo に縮退します。したがって underlay で loopback への経路は生きているのに locator prefix への経路だけが失われる障害は検出できません。この shared-fate 前提 (loopback と locator は同じ underlay 経路を辿る) は一般的な PE 設計では成り立ちますが、意図的に分けている網では prober の保証が弱まります。locator 配下の routable address を probe する拡張は後続です。
 

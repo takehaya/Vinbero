@@ -82,8 +82,13 @@ type Applier struct {
 	// (default: no-op). Swapped in via SetProber before the session starts.
 	prober prober.Registry
 	// vpnGroups aggregates the paths learned for each VPN prefix into one
-	// ECMP group. Touched only from the route-handler goroutine and from
-	// NewApplier's startup reset, which runs before any route arrives.
+	// ECMP group, guarded by vpnMu: the GoBGP RouteHandler goroutine applies
+	// routes (applyVPN), and an SR Policy transport change re-registers the
+	// affected groups' probe targets (reprobeSRPolicy) -- which the
+	// SRPolicyService CRUD handlers can trigger from an RPC goroutine. Same
+	// pattern as mupMu / evpnMu. NewApplier's startup reset runs before any
+	// of that and needs no lock.
+	vpnMu     sync.Mutex
 	vpnGroups *vpnGroupTable
 	// mupDefaultAllow forces every MUP session route through the historical
 	// default-allow path even when some VRF binding has declared a mup_ipv*
@@ -143,6 +148,9 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 		mupGateRefs: make(map[string]int),
 		logger:      logger.Named("bgp.apply"),
 	}
+	// A policy's installed transport changing invalidates the probe journeys
+	// registered for the groups steered onto it; the hook re-registers them.
+	a.srPolicy.onTransportChange = a.reprobeSRPolicy
 	// Runs before the BGP session starts, so it cannot race a route event.
 	// The EVPN sweep goes first: it clears the high-partition group ids so
 	// the VPN table's high-water seed below is not inflated by them.
@@ -218,6 +226,8 @@ func (a *Applier) ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error {
 }
 
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) {
+	a.vpnMu.Lock()
+	defer a.vpnMu.Unlock()
 	dk := vpnDestKey{family: vr.Family, prefix: vr.Prefix}
 	pk := vpnPathKey{rd: vr.RD, source: src}
 	if withdraw {

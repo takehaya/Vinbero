@@ -27,6 +27,12 @@ ip link set eth2 up
 ip -6 addr add 2001:db8:2::2/64 dev eth2 2>/dev/null || true
 
 # --- IPv6 forwarding + SRv6 dataplane --------------------------------------
+# A router must not learn routes from neighbors' RAs: an RA-carried
+# on-link prefix (FRR advertises its connected prefixes) would install a
+# kernel route that outranks the static underlay routes below.
+sysctl -w net.ipv6.conf.all.accept_ra=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv6.conf.eth1.accept_ra=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv6.conf.eth2.accept_ra=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf.eth1.forwarding=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf.eth2.forwarding=1 >/dev/null 2>&1 || true
