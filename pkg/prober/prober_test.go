@@ -276,6 +276,61 @@ func TestProber_ReRegisterReplacesAndUnregisterDeletes(t *testing.T) {
 	}
 }
 
+func TestProber_DuplicateTargetsKeepDistinctState(t *testing.T) {
+	// Two members probing the same destination (two service SIDs from one
+	// PE) are distinct paths; re-registration must not collapse them onto
+	// one carried state and leak the other's token.
+	p, _, _ := testProber(t)
+	dup := []Target{target(0, "fd00::2"), target(1, "fd00::2")}
+	p.Register(11, dup)
+	p.mu.Lock()
+	n := len(p.tokens)
+	p.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("registered %d tokens, want 2", n)
+	}
+	for i := 0; i < 5; i++ {
+		p.Register(11, dup)
+	}
+	p.mu.Lock()
+	n = len(p.tokens)
+	p.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("%d tokens after churn, want 2 (leak)", n)
+	}
+	p.Unregister(11)
+	p.mu.Lock()
+	n = len(p.tokens)
+	p.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d tokens leaked after Unregister", n)
+	}
+}
+
+func TestProber_PreviousRoundSurvivesSeqWrap(t *testing.T) {
+	// The previous-round window must hold across the uint16 sequence wrap:
+	// a slow path answering every probe one round late stays up.
+	p, fw, fl := testProber(t)
+	p.Register(12, []Target{target(0, "fd00::2")})
+	p.mu.Lock()
+	for _, ps := range p.groups[12].paths {
+		ps.seq = 65534 // two rounds before the wrap
+		ps.rounds = 65534
+	}
+	p.mu.Unlock()
+	now := time.Unix(0, 0)
+	for i := 0; i < 6; i++ {
+		p.tick(now)
+		if n := len(fw.sent); n >= 2 {
+			reply(p, fw.sent[n-2], now) // previous round only
+		}
+		now = now.Add(100 * time.Millisecond)
+	}
+	if got := fl.bitmaps[12]; got != 0b1 {
+		t.Fatalf("bitmap = %b; the wrap broke the previous-round window", got)
+	}
+}
+
 func TestBuildEchoRequest_SRHLayout(t *testing.T) {
 	src := netip.MustParseAddr("fd00::1")
 	tgt := target(0, "fd00::d", "fd00::a", "fd00::b")

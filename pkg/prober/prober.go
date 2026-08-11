@@ -84,6 +84,10 @@ type pathState struct {
 	target Target
 	token  uint16
 	seq    uint16
+	// rounds counts probes sent on this path; unlike seq it does not
+	// wrap, so "is there a previous round" stays answerable at the
+	// uint16 wrap boundary.
+	rounds uint64
 	// probeable is false when the target carries no valid destination;
 	// such a path is never probed and never taken down.
 	probeable bool
@@ -180,18 +184,23 @@ func (p *Prober) Register(groupID uint32, targets []Target) {
 	// (same destination and segments): a reconcile that merely re-writes
 	// the group -- or shuffles path indexes -- must not resurrect a path
 	// the probes just declared dead.
-	carried := make(map[string]*pathState)
+	// A key can repeat (two service SIDs from one PE probe the same
+	// destination), so each key holds a queue and every target pops one --
+	// a plain map would overwrite and leak the shadowed path's token.
+	carried := make(map[string][]*pathState)
 	if old, ok := p.groups[groupID]; ok {
 		for _, ps := range old.paths {
-			carried[targetKey(ps.target)] = ps
+			k := targetKey(ps.target)
+			carried[k] = append(carried[k], ps)
 		}
 	}
 	gs := &groupState{}
 	for _, t := range targets {
-		if prev, ok := carried[targetKey(t)]; ok && prev.probeable {
+		if q := carried[targetKey(t)]; len(q) > 0 && q[0].probeable {
+			prev := q[0]
+			carried[targetKey(t)] = q[1:]
 			prev.target = t // adopt the (possibly moved) path index
 			gs.paths = append(gs.paths, prev)
-			delete(carried, targetKey(t))
 			continue
 		}
 		ps := &pathState{
@@ -217,9 +226,11 @@ func (p *Prober) Register(groupID uint32, targets []Target) {
 		gs.paths = append(gs.paths, ps)
 	}
 	// Tokens of paths that did not survive are released.
-	for _, ps := range carried {
-		if ps.probeable {
-			delete(p.tokens, ps.token)
+	for _, q := range carried {
+		for _, ps := range q {
+			if ps.probeable {
+				delete(p.tokens, ps.token)
+			}
 		}
 	}
 	p.groups[groupID] = gs
@@ -340,6 +351,7 @@ func (p *Prober) tick(now time.Time) {
 				}
 			}
 			ps.seq++
+			ps.rounds++
 			ps.sentAt = now
 			ps.replySeen = false
 			ps.prevCookie = ps.cookie
@@ -407,8 +419,10 @@ func (p *Prober) handleReply(token, seq uint16, cookie uint64, from netip.Addr, 
 		ps.replySeen = true
 		ps.lastReply = now
 		ps.rtt = now.Sub(ps.sentAt)
-	case ps.seq >= 2 && seq == ps.seq-1 && cookie == ps.prevCookie:
-		// ps.seq >= 2: round one has no previous probe to be late.
+	case ps.rounds >= 2 && seq == ps.seq-1 && cookie == ps.prevCookie:
+		// rounds >= 2: round one has no previous probe to be late. The
+		// uint16 subtraction wraps with seq, so the window stays intact
+		// across the wrap boundary.
 		ps.replySeen = true
 		ps.lastReply = now
 	}

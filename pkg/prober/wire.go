@@ -34,8 +34,11 @@ type rawWire struct {
 }
 
 func newRawWire(src netip.Addr) (*rawWire, error) {
-	if !src.Is6() || src.Is4In6() || src.IsUnspecified() {
-		return nil, fmt.Errorf("probe source %q is not a usable IPv6 address", src)
+	// The same global-unicast bar as probe destinations: replies must come
+	// back as plain routable IPv6, which a link-local, loopback or
+	// multicast source can never receive from a remote PE.
+	if !probeable(src) {
+		return nil, fmt.Errorf("probe source %q is not a routable IPv6 unicast address", src)
 	}
 	sendFD, err := unix.Socket(unix.AF_INET6, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.IPPROTO_RAW)
 	if err != nil {
