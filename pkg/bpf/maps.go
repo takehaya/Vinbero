@@ -24,6 +24,14 @@ const (
 	MaxBumNexthops = 8 // Must match MAX_BUM_NEXTHOPS in xdp_prog.h
 	EcmpMaxPaths   = 8 // Must match ECMP_MAX_PATHS in xdp_prog.h
 	EcmpGroupNone  = 0 // headend_entry.group_id sentinel (ECMP_GROUP_NONE)
+
+	// EVPN aliasing places its synthetic Ethernet Segment peers above the
+	// flood range: the TC BUM loop scans bd_peer indices [0, MaxBumNexthops)
+	// only, so an ES peer parked at [EsPeerIndexBase, EsPeerIndexBase +
+	// MaxEsPeersPerBd) can never be replicated to, and it does not consume
+	// one of the eight flood-capable slots either.
+	EsPeerIndexBase = MaxBumNexthops
+	MaxEsPeersPerBd = 32
 )
 
 // Type aliases for BPF generated types
@@ -2725,6 +2733,13 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 	var count uint32
 	for key := range entries {
 		if bdID != 0 && key.BdId != bdID {
+			continue
+		}
+		// The reserved ES range belongs to the BGP applier's EVPN aliasing
+		// state (see EsPeerIndexBase); flushing it here would leave the
+		// applier's ledger, the FDB pointers and the ECMP group referencing
+		// a peer that no longer exists, with nothing to trigger a repair.
+		if key.Index >= EsPeerIndexBase {
 			continue
 		}
 		if err := m.DeleteBdPeer(key.BdId, key.Index); err != nil {

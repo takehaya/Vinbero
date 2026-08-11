@@ -144,6 +144,12 @@ func (t *vpnGroupTable) reset() {
 		return
 	}
 	for id := range groups {
+		// The partition at esGroupIDBase belongs to the EVPN segment groups
+		// (see evpn_alias.go); a survivor there must not drag this
+		// allocator into it, or the two would collide on their next ids.
+		if id >= esGroupIDBase {
+			continue
+		}
 		if id > t.nextID {
 			t.nextID = id
 		}
@@ -160,7 +166,9 @@ func (t *vpnGroupTable) allocID() (uint32, error) {
 		t.freeIDs = t.freeIDs[:n-1]
 		return id, nil
 	}
-	if t.nextID == ^uint32(0) {
+	if t.nextID+1 >= esGroupIDBase {
+		// The ids at and above esGroupIDBase belong to the EVPN segment
+		// groups; crossing over would collide with their allocator.
 		return 0, fmt.Errorf("ecmp group id space exhausted")
 	}
 	t.nextID++

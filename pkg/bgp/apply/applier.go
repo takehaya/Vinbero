@@ -69,6 +69,7 @@ type Applier struct {
 	headend     headendOps
 	fdbBd       fdbBdOps
 	mupUplink   mupOps
+	ecmp        ecmpOps
 	locators    *locator.Manager
 	vrfBindings *vrfbgp.Manager
 	fib         fib.Injector
@@ -121,6 +122,7 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 		headend:     dp,
 		fdbBd:       dp,
 		mupUplink:   dp,
+		ecmp:        dp,
 		locators:    locators,
 		vrfBindings: vrfBindings,
 		fib:         fibInjector,
@@ -137,6 +139,9 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 		logger:      logger.Named("bgp.apply"),
 	}
 	// Runs before the BGP session starts, so it cannot race a route event.
+	// The EVPN sweep goes first: it clears the high-partition group ids so
+	// the VPN table's high-water seed below is not inflated by them.
+	a.resetEVPNGroups()
 	a.vpnGroups.reset()
 	return a
 }

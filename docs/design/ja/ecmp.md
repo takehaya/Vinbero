@@ -4,7 +4,7 @@
 
 このドキュメントは、headend の転送先を複数 path に分散する ECMP path group のデータプレーン設計を説明します。同一 VPN prefix を複数の PE が広告したとき、従来の headend map は 1 prefix に 1 つの segment list しか持てず、後から適用された経路が前の経路を上書きしていました。ECMP path group はこれを最大 8 path の weighted な集合に拡張し、あわせて userspace の prober が path 単位の生死を 1 word の書き込みで反映できる仕組みを用意します。
 
-この文書が対象にするのはデータプレーン (eBPF マップと XDP の選択ロジック、`pkg/bpf` の API) です。BGP からの path 集約、EVPN aliasing、prober 本体は後続の変更で入ります。
+この文書が対象にするのはデータプレーン (eBPF マップと XDP の選択ロジック、`pkg/bpf` の API) と、その上に載る BGP からの path 集約および EVPN aliasing です。prober 本体は後続の変更で入ります。
 
 ## マップ構成
 
@@ -139,11 +139,30 @@ Single-Active bit は per-ES 経路の ESI Label extended community から読み
 
 transposition の取り出し元も 2 形式で違います。per-EVI は RT2/RT3 と同じく NLRI の MPLS label から取りますが、per-ES はその label を 0 にして、ESI Label extended community の 24-bit label に Argument を載せます (RFC 9252)。per-ES で NLRI label を読むと transposed bits が落ち、まったく別の場所を指す SID を組み立てます。gobgp は両者とも 3 バイトの raw 値として decode するので単位は揃っています。
 
-現時点では decode までで、applier はまだ RT1 を消費しません。aliasing と mass withdraw は data plane 側の変更を伴うため後続にしています。
+### aliasing
+
+per-EVI A-D が運ぶ SID を使い、multi-homed segment への転送を PE 群への ECMP group にします (RFC 7432 8.4)。
+
+group の置き場所は既存の bd_peer 機構を再利用します。`{bridge domain, ESI}` ごとに合成の ES peer を 1 つ作り、その `headend_entry` に group_id を持たせます。segment 上で学習した MAC の FDB エントリは、広告元 PE の bd_peer ではなくこの ES peer を指します。`l2_headend.c` の FDB hit 側は `ecmp_resolve_headend` を通してから tail_call するだけなので、side table も新規マップも増えません。ES peer は flood index 域 (`0..MAX_BUM_NEXTHOPS-1`) の上、index 8 以降の予約域に置き、あわせて flood-exclude を立てるので、TC の BUM 複製から構造的に見えません。
+
+group の member は、per-EVI A-D を広告している PE のうち、per-ES A-D で all-active を宣言している PE の per-EVI SID です。member 集合は経路 state (`eviAD` / `esAD` の台帳) から reconcile のたびに導出し、SID で決定的に sort、同一 SID (anycast) は dedupe、データプレーンの上限 8 で cap します。L3VPN の `vpngroup` と同じ判断です。group_id は `0x80000000` 以上を EVPN 用に区切り、L3VPN 側の allocator と衝突しないようにします。owner は `OwnerBGPEVPNGroup` で、再起動時に前世代の group を sweep してから rib replay で再構築します。
+
+FDB が特定の PE でなく segment を指すことは、multi-PE same-MAC の withdraw 欠陥の修正でもあります。all-active では複数 PE が同じ MAC を各自の RD で広告しますが、データプレーンの key `{bd, MAC}` は 1 つしかありません。従来は最初の 1 PE の withdraw が共有エントリごと消していました。今は contribution を `{bd, MAC}` ごとに数え、最後の contribution が消えたときだけ FDB を削除します。aliasing が無い形 (ESI ゼロや A-D 不在) で複数 PE が同じ MAC を広告していた場合は、生き残った contribution から決定的に選んだ 1 つで FDB を再 install します。
+
+L2 経路は従来 flow hash を計算していなかったので、`try_l2_headend` に `ecmp_flow_hash_l2` を足しました。payload が IP なら inner の 5-tuple を hash し (VLAN は 2 段まで剥いで L3 offset を出します)、ARP のような非 IP frame は MAC pair + ethertype に fallback します。この hash は path 選択と outer flow label の両方に使うため、H.Encaps.L2 の encap も outer flow label を刻むようになり、underlay の ECMP が PE ペア間で分散できます。
+
+### mass withdraw
+
+per-ES A-D の withdraw は segment 全体が当該 PE から失われたという主張です (RFC 7432 8.2)。MAC ごとの withdraw を待つと、segment が数千の MAC を抱えている間ずっと black-hole が続きます。この signal が存在する理由がそこにあります。
+
+aliasing が効いている segment では、withdraw はまず group から当該 PE の member を外します。収束は group の 1 回の書き換えで済み、MAC の FDB エントリは ES peer を指したまま残ります。生存 PE がまだ転送できるからです。当該 PE の RT2 台帳は、後続の RT2 withdraw が到着するたびに contribution として drain されます。group が残らない場合 (aliasing が組めていない、または最後の PE だった場合) は従来どおり、`{ESI, PE}` の逆引き index からその PE が教えた MAC をまとめて撤去します。
+
+single-homed の MAC (ESI が全ゼロ) は index しません。属する segment が無いので、per-ES の withdraw がその MAC についての主張になり得ないためです。per-EVI の withdraw は mass withdraw として扱わず、group の member を 1 つ外すだけです。member が尽きたら group と ES peer を畳み、FDB エントリを広告元 PE の bd_peer に戻します。
+
+再広告に特別な処理は要りません。MAC は通常の RT2 として戻ってきます。
 
 ## 制約と今後
 
 - `mup_uplink_v4/v6_map` の値も `headend_entry` ですが、behavior プログラム内で lookup されるため group 解決を通りません。`CreateMupUplinkV4/V6` が書き込み時に `group_id` を 0 に強制します。
-- L2 headend (FDB → bd_peer) の aliasing は EVPN RT1 の対応と同時に入れます。ESI から group_id を引く side table を足し、この group 機構をそのまま使う予定です。
 - SR Policy の weighted segment list は受信側の decode が済んでいます (上記)。data plane 側は `sr_policy_value` に group_id を足し、`tailcall_ctx.flow_hash` で選択する形で拡張します。tailcall_ctx に flow_hash を先に載せてあるのはこのためです。
 - hash の seed は固定です。path 選択はノード内で per-flow に安定していればよく、固定 seed は BPF_PROG_TEST_RUN のテストを再現可能にします。

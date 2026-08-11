@@ -193,6 +193,56 @@ static __noinline __u32 ecmp_flow_hash_l3(struct xdp_md *ctx, __u16 l3_off)
     return 0;
 }
 
+// Hash an L2 frame for path selection (EVPN aliasing). The inner L3 flow is
+// hashed when the payload is IP -- same 5-tuple spread the L3 dispatchers
+// get -- and any other payload (ARP, LLDP, ...) falls back to the MAC pair
+// plus ethertype, so non-IP frames still spread across the group while each
+// station pair keeps one path. Up to two VLAN tags are skipped to find the
+// payload, matching the QinQ depth xdp_main parses.
+//
+// The MAC words and payload offset are captured before the
+// ecmp_flow_hash_l3 call: it is __noinline, and packet pointers do not
+// survive a BPF-to-BPF call, so nothing derived from data may be reused
+// afterwards. Returns a non-zero hash on any parseable frame; 0 only when
+// even the Ethernet header is truncated.
+static __noinline __u32 ecmp_flow_hash_l2(struct xdp_md *ctx)
+{
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return 0;
+
+    // dst(6) + src(6) are contiguous at the start of the Ethernet header.
+    __u32 macs[3];
+    __builtin_memcpy(macs, eth->h_dest, sizeof(macs));
+
+    __u16 proto = eth->h_proto;
+    __u16 l3_off = sizeof(*eth);
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+        if (proto != bpf_htons(ETH_P_8021Q) && proto != bpf_htons(ETH_P_8021AD))
+            break;
+        struct vlan_hdr *vh = data + l3_off;
+        if ((void *)(vh + 1) > data_end)
+            break;
+        proto = vh->h_vlan_encapsulated_proto;
+        l3_off += sizeof(*vh);
+    }
+
+    if (proto == bpf_htons(ETH_P_IP) || proto == bpf_htons(ETH_P_IPV6)) {
+        __u32 hash = ecmp_flow_hash_l3(ctx, l3_off);
+        if (hash)
+            return hash;
+    }
+    __u32 hash = ecmp_jhash_3words(macs[0], macs[1],
+                                   macs[2] ^ ((__u32)proto << 16),
+                                   ECMP_JHASH_SEED);
+    // Same sentinel rounding as ecmp_flow_hash_v4.
+    return hash ? hash : 1;
+}
+
 // ========================================================================
 // Path selection
 // ========================================================================

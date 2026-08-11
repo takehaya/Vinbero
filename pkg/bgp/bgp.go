@@ -398,8 +398,8 @@ type SRPolicyController interface {
 }
 
 // EVPNRouteType enumerates the RFC 7432 / RFC 9252 EVPN NLRI types
-// Vinbero consumes. RT1 (Ethernet A-D), RT5 (IP Prefix), and RT6/7
-// (multicast) are out of scope (see docs/dev/bgp_evpn_integration.md).
+// Vinbero consumes. RT5 (IP Prefix) and RT6/7 (multicast) are out of
+// scope.
 type EVPNRouteType uint8
 
 const (
