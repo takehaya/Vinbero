@@ -47,11 +47,13 @@ shared site LAN under its own RD (`65200:200` / `65300:200`) and locator
    encapsulated traffic.
 3. **Prober liveness.** `vbctl prober status` shows one probe per path,
    terminating at each FRR PE's loopback, both up.
-4. **Fast reroute.** `core` drops the pe-osaka-b link. The prober masks the
-   path (three lost 100ms probes) and every flow keeps flowing through
+4. **Fast reroute.** `core` removes its routes towards pe-osaka-b (an
+   admin link-down would flush the veth pair's IPv6 addresses and break
+   the lab beyond what a path failure means). The prober masks the path
+   (three lost 100ms probes) and every flow keeps flowing through
    pe-osaka-a while BGP still believes both paths exist.
-5. **Recovery.** Restoring the link brings the path back (three answered
-   probes) and traffic spreads again.
+5. **Recovery.** Restoring the routes brings the path back (three
+   answered probes) and traffic spreads again.
 
 ## Running
 

@@ -13,6 +13,7 @@ on:
     paths:
       - 'examples/interop-clab/**'
       - 'pkg/bgp/**'
+      - 'pkg/prober/**'
       - 'pkg/config/config.go'
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
@@ -22,6 +23,7 @@ on:
     paths:
       - 'examples/interop-clab/**'
       - 'pkg/bgp/**'
+      - 'pkg/prober/**'
       - 'pkg/config/config.go'
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'

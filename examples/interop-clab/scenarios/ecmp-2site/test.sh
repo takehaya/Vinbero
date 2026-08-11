@@ -208,12 +208,21 @@ echo "[5] fast reroute (cut pe-osaka-b's underlay)"
 # the prober exists to catch, and is cleanly reversible.
 dexec "$CORE" ip -6 route del 2001:db8:ff::3/128 2>/dev/null || true
 dexec "$CORE" ip -6 route del fd00:300::/48 2>/dev/null || true
-# The prober must notice within a few hundred ms; the retry allows for
-# the slower assertion plumbing, not the detection itself.
-if retry_n 10 prober_paths_up 1; then
-    ok "prober masked the dead path"
+# The prober must notice within a few hundred ms. The assertion polls
+# fast and bounds the total elapsed time at 5 seconds -- generous for
+# the docker-exec plumbing, still far under the 30s BGP hold time, so a
+# BGP withdraw can never be what passes this check.
+mask_start=$(date +%s%N)
+masked=""
+for i in $(seq 1 25); do
+    if prober_paths_up 1 >/dev/null 2>&1; then masked=yes; break; fi
+    sleep 0.2
+done
+mask_ms=$(( ($(date +%s%N) - mask_start) / 1000000 ))
+if [ -n "$masked" ] && [ "$mask_ms" -lt 5000 ]; then
+    ok "prober masked the dead path in ${mask_ms}ms"
 else
-    ng "prober did not mask the dead path"
+    ng "prober did not mask the dead path within 5s (${mask_ms}ms)"
     prober_json || true
 fi
 if burst; then
@@ -242,11 +251,12 @@ if burst; then
 else
     ng "some sources cannot ping after recovery"
 fi
-b1=$(rx_bytes "$PE_OSAKA_B")
-if [ $((b1 - b0)) -gt 40000 ]; then
-    ok "traffic returned to the recovered PE (+$((b1 - b0))B)"
+a1=$(rx_bytes "$PE_OSAKA_A"); b1=$(rx_bytes "$PE_OSAKA_B")
+da=$((a1 - a0)); db=$((b1 - b0))
+if [ "$da" -gt 40000 ] && [ "$db" -gt 40000 ]; then
+    ok "traffic spreads over both PEs again (pe-a +${da}B, pe-b +${db}B)"
 else
-    ng "no traffic on the recovered PE (+$((b1 - b0))B)"
+    ng "spread did not return (pe-a +${da}B, pe-b +${db}B)"
 fi
 
 # --- summary ----------------------------------------------------------------

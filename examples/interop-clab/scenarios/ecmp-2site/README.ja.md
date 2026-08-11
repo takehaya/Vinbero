@@ -32,8 +32,8 @@ graph LR
 1. 受信側の ECMP 集約を確認します。RD も SID も異なる同一 prefix の 2 広告が、last-write-wins ではなく member 2 本の 1 group に載ります
 2. per-flow の分散を確認します。inner source が異なる 12 本の ping flow が両 member に hash され、両 FRR PE が実際に encap 済みトラフィックを受け取ることを assert します
 3. prober の生存監視を確認します。`vbctl prober status` に path ごとの probe (宛先は各 FRR PE の loopback) が up で並びます
-4. fast reroute を確認します。`core` が pe-osaka-b への link を落とすと、prober が path をマスクし (100ms probe を 3 回喪失)、BGP がまだ両 path を信じている間に全 flow が pe-osaka-a 経由で流れ続けます
-5. 復旧を確認します。link を戻すと path が復帰し (3 回連続応答)、分散が再開します
+4. fast reroute を確認します。`core` が pe-osaka-b 向けの経路を削除すると (admin link down は veth 両端の IPv6 address を flush してラボを path 障害以上に壊すため使いません)、prober が path をマスクし (100ms probe を 3 回喪失)、BGP がまだ両 path を信じている間に全 flow が pe-osaka-a 経由で流れ続けます
+5. 復旧を確認します。経路を戻すと path が復帰し (3 回連続応答)、分散が再開します
 
 ## 実行方法
 
