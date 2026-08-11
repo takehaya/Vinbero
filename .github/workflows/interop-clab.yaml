@@ -42,6 +42,7 @@ jobs:
         scenario:
           - l3vpn-2site          # SRv6 L3VPN (transposition)
           - l3vpn-2site-auto     # SRv6 L3VPN via VRF-export auto-advertise (no vbctl)
+          - ecmp-2site           # two FRR PEs, one prefix: ECMP spread + prober fast reroute
           - sr-policy-2site      # color-based SR Policy steering (local + multi-hop chain)
           - sr-policy-bgp-2site  # SR Policy learned over BGP (SAFI 73)
           - evpn-2site           # EVPN RT2 (MAC/IP) L2VPN over BGP (SAFI 70)

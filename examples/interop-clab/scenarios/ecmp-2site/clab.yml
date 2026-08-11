@@ -1,0 +1,115 @@
+# containerlab topology for the ecmp-2site interop scenario.
+#
+# The l3vpn-2site design with the far site dual-homed: TWO independent
+# FRR PEs advertise the same customer prefix, so the Vinbero headend
+# aggregates their paths into one ECMP group and spreads flows across
+# both -- and, with the prober enabled, masks a dead path within a few
+# hundred milliseconds, long before BGP notices.
+#
+#                             ┌── pe-osaka-a (FRR) ──┐
+#   ce-tokyo --- pe-tokyo --- core                  lan-osaka --- ce-osaka
+#  10.1.0.0/24  (Vinbero PE)  └── pe-osaka-b (FRR) ──┘          10.2.0.0/24
+#
+# All three PEs are in provider AS 65100 and peer iBGP over loopbacks
+# (Vinbero to each FRR PE; the FRR PEs do not need to peer with each
+# other for this test). `core` is a plain IPv6 router with static
+# underlay routes; `lan-osaka` is a plain L2 bridge for the dual-homed
+# customer site.
+name: ecmp-2site
+
+topology:
+  nodes:
+    # --- ce-tokyo: customer host behind the Vinbero PE ----------------------
+    # Extra addresses 10.1.0.11-21 give the spread test twelve distinct
+    # inner sources: the headend hashes ICMP on {src, dst, proto}, so
+    # varying the source is what exercises both ECMP paths (and keeps
+    # the odds of every flow hashing onto one path negligible).
+    ce-tokyo:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.1.0.10/24 dev eth1
+        - ip addr add 10.1.0.11/24 dev eth1
+        - ip addr add 10.1.0.12/24 dev eth1
+        - ip addr add 10.1.0.13/24 dev eth1
+        - ip addr add 10.1.0.14/24 dev eth1
+        - ip addr add 10.1.0.15/24 dev eth1
+        - ip addr add 10.1.0.16/24 dev eth1
+        - ip addr add 10.1.0.17/24 dev eth1
+        - ip addr add 10.1.0.18/24 dev eth1
+        - ip addr add 10.1.0.19/24 dev eth1
+        - ip addr add 10.1.0.20/24 dev eth1
+        - ip addr add 10.1.0.21/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace 10.2.0.0/24 via 10.1.0.1
+
+    # --- pe-tokyo: the Vinbero PE under test --------------------------------
+    pe-tokyo:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - vinbero/vinbero.yml:/vinbero.yml
+        - vinbero/start.sh:/start.sh
+      exec:
+        - bash /start.sh
+
+    # --- core: provider backbone, plain IPv6 router -------------------------
+    core:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - core/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    # --- pe-osaka-a / pe-osaka-b: the two FRR PEs ---------------------------
+    # Each owns its own loopback, SRv6 locator and RD, and advertises the
+    # same vrf-cust prefix under the shared import/export RT -- the
+    # textbook all-active dual-homing the ECMP aggregation exists for.
+    pe-osaka-a:
+      kind: linux
+      image: frr-interop:10.2.1
+      binds:
+        - frr/frr-a.conf:/etc/frr/frr.conf
+        - frr/start.sh:/start.sh
+      exec:
+        - sh /start.sh 2001:db8:ff::2 2001:db8:2::1 10.2.0.1
+
+    pe-osaka-b:
+      kind: linux
+      image: frr-interop:10.2.1
+      binds:
+        - frr/frr-b.conf:/etc/frr/frr.conf
+        - frr/start.sh:/start.sh
+      exec:
+        - sh /start.sh 2001:db8:ff::3 2001:db8:3::1 10.2.0.2
+
+    # --- lan-osaka: the dual-homed customer site's L2 segment ---------------
+    lan-osaka:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - lan/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    # --- ce-osaka: customer host, default gateway via pe-osaka-a ------------
+    ce-osaka:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.2.0.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace 10.1.0.0/24 via 10.2.0.1
+
+  links:
+    # CE <-> PE customer-facing ports.
+    - endpoints: [ce-tokyo:eth1, pe-tokyo:eth2]
+    # Provider underlay: pe-tokyo <-> core <-> {pe-osaka-a, pe-osaka-b}.
+    - endpoints: [pe-tokyo:eth1, core:eth1]
+    - endpoints: [core:eth2, pe-osaka-a:eth2]
+    - endpoints: [core:eth3, pe-osaka-b:eth2]
+    # Dual-homed site LAN: both FRR PEs and the CE on one L2 segment.
+    - endpoints: [pe-osaka-a:eth1, lan-osaka:eth1]
+    - endpoints: [pe-osaka-b:eth1, lan-osaka:eth2]
+    - endpoints: [ce-osaka:eth1, lan-osaka:eth3]

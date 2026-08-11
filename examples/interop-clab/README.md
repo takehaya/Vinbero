@@ -30,6 +30,7 @@ Each row links to the scenario's own README.
 |----------|------|----------------|
 | [`l3vpn-2site`](scenarios/l3vpn-2site/README.md) | FRR 10.2.1 | 2-site SRv6 L3VPN — VPNv4/VPNv6 Service TLV encode+decode (RFC 9252 §4 transposition) and a bidirectional SRv6 data-plane ping. |
 | [`l3vpn-2site-auto`](scenarios/l3vpn-2site-auto/README.md) | FRR 10.2.1 | The same L3VPN, but Vinbero originates its VRF route automatically from config (`auto_advertise` + `vrf_bindings`) via the `pkg/bgp/export` exporter — no `vbctl` advertise call. |
+| [`ecmp-2site`](scenarios/ecmp-2site/README.md) | FRR 10.2.1 ×2 | A dual-homed far site: two FRR PEs advertise one prefix, Vinbero aggregates them into an ECMP group, spreads flows over both, and the SRv6 prober masks a cut path in hundreds of milliseconds. |
 | [`sr-policy-2site`](scenarios/sr-policy-2site/README.md) | FRR 10.2.1 | Color-based SR Policy steering (RFC 9256 / RFC 9252 §8): FRR tags a route with a Color Extended Community and Vinbero steers it onto an operator-defined SR Policy carrying a two-segment service chain. |
 | [`sr-policy-bgp-2site`](scenarios/sr-policy-bgp-2site/README.md) | Vinbero | Edge-to-edge SR Policy exchange over BGP (SAFI 73): both PEs advertise and receive SR Policies and steer their L3VPN traffic through a shared TE waypoint — exercises the SR Policy receive/decode path. |
 | [`evpn-2site`](scenarios/evpn-2site/README.md) | Vinbero | SRv6 EVPN L2VPN (ELAN): RT2 (MAC/IP) unicast + RT3 (Inclusive Multicast) BUM flood, a stretched broadcast domain signalled entirely by BGP EVPN. |
