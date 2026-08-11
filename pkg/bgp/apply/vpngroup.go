@@ -59,6 +59,14 @@ type vpnDest struct {
 	// installed is the member SID list last written, used to skip
 	// reconciles that would rewrite an unchanged group.
 	installed []string // memberFingerprint of the last write
+	// probed reports whether the prober currently holds a registration
+	// that matches the group's actual data-plane layout. It turns false
+	// when a group write fails (reconcile unregisters and the group is
+	// fail-open over mixed-generation slots) and true again only after a
+	// successful write + Register. reprobeSRPolicy keys on it: a non-nil
+	// `installed` alone only says a write once succeeded, and re-imposing
+	// a bitmap over a group whose last write failed would break fail-open.
+	probed bool
 }
 
 // ecmpOps is the subset of bpf.MapOperations the VPN group path needs.
@@ -335,6 +343,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 		// bit positions mask the wrong members. Unregister drops the bitmap
 		// and returns the group to fail-open until a retry rebuilds it.
 		a.prober.Unregister(d.groupID)
+		d.probed = false
 		return
 	}
 	// Registered immediately after the group write: PutEcmpGroup resets the
@@ -347,6 +356,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 		dsts[i] = m.nh
 	}
 	a.prober.Register(d.groupID, a.probeTargets(paths, dsts))
+	d.probed = true
 
 	// The trigger mirrors the first member so the fallback forwards the same
 	// way the group's first path would, steering included.

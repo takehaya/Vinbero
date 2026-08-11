@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"errors"
 	"net/netip"
 	"slices"
 	"testing"
@@ -180,6 +181,55 @@ func TestProberWiring_PolicyTransportChangeReprobes(t *testing.T) {
 	}})
 	if got := fp.registered[trigger.GroupId]; len(got) != 1 || len(got[0].Segments) != 0 {
 		t.Fatalf("post-withdraw registration = %+v, want one bare target", got)
+	}
+}
+
+// A group whose last write FAILED is fail-open over mixed-generation slots
+// and its registration was dropped. A later policy transport change must not
+// re-register it from the desired member set: those bit positions do not
+// match the data plane, and re-imposing a bitmap would break fail-open.
+func TestProberWiring_ReprobeSkipsGroupWhoseWriteFailed(t *testing.T) {
+	fh := newFakeHeadend()
+	a := NewApplier(fh, testLocatorManager(t), vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	fp := newFakeProber()
+	a.SetProber(fp)
+
+	endpoint := netip.MustParseAddr("fd00::2")
+	a.Apply(coloredVPNEvent("10.0.0.0/24", "65000:1", "fd00:1:1:a::", "fd00::2", 100))
+	trigger := fh.v4created["10.0.0.0/24"]
+	if _, ok := fp.registered[trigger.GroupId]; !ok {
+		t.Fatalf("initial registration missing")
+	}
+
+	// A member update whose group write fails: reconcile unregisters and
+	// the group is left fail-open.
+	fh.putEcmpErr = errors.New("boom")
+	a.Apply(coloredVPNEvent("10.0.0.0/24", "65000:2", "fd00:1:1:b::", "fd00::2", 100))
+	if _, ok := fp.registered[trigger.GroupId]; ok {
+		t.Fatalf("failed group write must drop the registration")
+	}
+
+	// The policy arriving now must NOT resurrect a registration for the
+	// broken group.
+	a.Apply(bgp.RouteEvent{SRPolicy: &bgp.SRPolicy{
+		Color: 100, Endpoint: endpoint,
+		Candidates: []bgp.CandidatePath{{
+			Origin: bgp.OriginBGP, Distinguisher: 1,
+			Preference: bgp.SRPolicyDefaultPreference,
+			SegmentList: []netip.Addr{
+				netip.MustParseAddr("fd00:ee::1"), netip.MustParseAddr("fd00:ee::2"),
+			},
+		}},
+	}})
+	if got, ok := fp.registered[trigger.GroupId]; ok {
+		t.Fatalf("policy change re-registered a group whose write failed: %+v", got)
+	}
+
+	// Once a reconcile succeeds again, the registration comes back.
+	fh.putEcmpErr = nil
+	a.Apply(coloredVPNEvent("10.0.0.0/24", "65000:2", "fd00:1:1:b::", "fd00::2", 100))
+	if got := fp.registered[trigger.GroupId]; len(got) != 2 {
+		t.Fatalf("recovered group registration = %+v, want both members", got)
 	}
 }
 

@@ -257,10 +257,19 @@ fi
 # the PE loopbacks stay reachable; only the segment chain is broken.
 dexec "$CORE" ip -6 route del "$CORE_SID/128" >/dev/null 2>&1 || true
 if retry_n 10 steered_path_state down; then
-    ok "prober detects the dead waypoint (path down; PE itself still reachable)"
+    ok "prober detects the dead waypoint (path down)"
 else
     ng "prober kept the path up with the waypoint End SID removed"
     prober_json || true
+fi
+# The claim is transport-awareness, so prove the PE itself is STILL
+# reachable while the path is down: a full underlay outage would flip the
+# path down too, but then this plain loopback-to-loopback ping (which does
+# not ride the segment chain) would fail with it.
+if retry_n 5 gate_underlay; then
+    ok "PE loopback stays reachable during the outage (only the chain is dead)"
+else
+    ng "PE loopback unreachable during the outage; the down state proves nothing"
 fi
 
 # Restore the waypoint and the path must come back.

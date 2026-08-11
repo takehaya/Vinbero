@@ -2,6 +2,7 @@ package apply
 
 import (
 	"net/netip"
+	"slices"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/prober"
@@ -82,9 +83,13 @@ func (a *Applier) reprobeSRPolicy(key policyKey) {
 	a.vpnMu.Lock()
 	defer a.vpnMu.Unlock()
 	for dk, d := range a.vpnGroups.dests {
-		if d.installed == nil {
-			// Never programmed (or the last write failed): there is no
-			// registration to refresh and reconcile owns the retry.
+		if !d.probed {
+			// No live registration to refresh: the group was never
+			// programmed, or its last write failed and reconcile already
+			// dropped the registration to keep the mixed-generation group
+			// fail-open. Re-registering here from the desired member set
+			// would impose a bitmap whose bit positions do not match the
+			// data plane; reconcile owns the retry.
 			continue
 		}
 		ms := d.members()
@@ -96,6 +101,17 @@ func (a *Applier) reprobeSRPolicy(key policyKey) {
 			}
 		}
 		if !steered {
+			continue
+		}
+		if !slices.Equal(memberFingerprint(ms), d.installed) {
+			// The desired members have drifted from what the data plane
+			// holds (a reconcile retry is owed, e.g. an earlier reconcile
+			// bailed before writing). The standing registration matches the
+			// installed layout but its journey now embeds a dead transport,
+			// and the installed member set can no longer be rebuilt from
+			// state -- fail open rather than probe either wrong shape.
+			a.prober.Unregister(d.groupID)
+			d.probed = false
 			continue
 		}
 		paths := make([]bpf.EcmpPath, 0, len(ms))
@@ -117,6 +133,7 @@ func (a *Applier) reprobeSRPolicy(key policyKey) {
 			// A registration that cannot be refreshed describes the old
 			// journey; failing open beats failing a healthy member on it.
 			a.prober.Unregister(d.groupID)
+			d.probed = false
 			continue
 		}
 		dsts := make([]string, len(ms))
