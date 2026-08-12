@@ -42,12 +42,14 @@ ip link set eth1 up
 # --- underlay link towards the core ----------------------------------------
 ip link set eth2 up 2>/dev/null || true
 
-# Vinbero's locator block as a *connected* prefix on eth2, added before
-# FRR starts so it is already present when the first VPN route arrives.
-# FRR's SRv6 nexthop validation rejects a service SID reachable only via
-# a gateway ("Must be Connected"); without this the 10.1.0.0/24 route
-# Vinbero advertises stays `invalid` and never installs into vrf-cust.
-ip -6 addr add fd00:100::ffff/48 dev eth2 nodad 2>/dev/null || true
+# Vinbero's locator block is deliberately NOT configured as a connected
+# prefix here. FRR 10.2.1 validates the service SID against the static
+# fd00:100::/48 route in frr.conf just fine, and a connected /48 is
+# actively harmful: it makes the whole locator on-link for FRR (the SID
+# gets NDPed on eth2 instead of routed) and leaks into FRR's router
+# advertisements as an on-link prefix, teaching the core a poisonous
+# fd00:100::/48-on-eth2 route that beats its static toward pe-tokyo --
+# a nondeterministic (RA-timing-dependent) blackhole of the return path.
 
 # FRR ships an entrypoint that starts the daemons selected in
 # /etc/frr/daemons. watchfrr then keeps them alive.
@@ -63,12 +65,8 @@ vtysh -b || true
 # static glue the data plane needs.
 sleep 4
 
-# More-specific forwarding route for Vinbero's End.DT4 SID. The
-# connected /48 above would otherwise make FRR treat the SID as on-link
-# and NDP for it on eth2; this /128 sends the encapsulated return
-# traffic to the core (2001:db8:2::2), which routes it on to pe-tokyo.
-# fd00:100:0:1:: == the SID Vinbero advertises with 10.1.0.0/24.
-ip -6 route replace fd00:100:0:1::/128 via 2001:db8:2::2 dev eth2
+# The encapsulated return traffic follows the static fd00:100::/48 route
+# from frr.conf via the core; no per-SID /128 override is needed.
 
 # FRR auto-installs its End.DT4 localsid at the transposed full SID
 # (fd00:200:0:0:1::). Vinbero applies RFC 9252 §4 transposition when it
