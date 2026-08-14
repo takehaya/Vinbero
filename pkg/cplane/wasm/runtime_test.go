@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-
-	"github.com/takehaya/vinbero/pkg/cplane"
 )
 
 // The fixtures are checked-in WebAssembly built from the .wat sources
@@ -380,11 +378,19 @@ func TestInstantiateRejectsEmptyModuleAndName(t *testing.T) {
 	}
 }
 
+// deniedError stands in for a capability-layer refusal (a key another
+// owner holds). The runtime recognizes it by behavior, not by identity,
+// which is what keeps this package independent of the layer above it.
+type deniedError struct{}
+
+func (deniedError) Error() string { return "denied by policy" }
+func (deniedError) Denied() bool  { return true }
+
 // A commit refused because another owner holds the key is something the
 // plugin can act on, so it must be distinguishable from a host failure.
 func TestCommitDeniedIsDistinctFromInternal(t *testing.T) {
-	if got := commitStatus(fmt.Errorf("wrapped: %w", cplane.ErrLeaseHeld)); got != StatusDenied {
-		t.Errorf("lease conflict mapped to %d, want StatusDenied (%d)", got, StatusDenied)
+	if got := commitStatus(fmt.Errorf("wrapped: %w", deniedError{})); got != StatusDenied {
+		t.Errorf("policy refusal mapped to %d, want StatusDenied (%d)", got, StatusDenied)
 	}
 	if got := commitStatus(errors.New("map write failed")); got != StatusInternal {
 		t.Errorf("host failure mapped to %d, want StatusInternal (%d)", got, StatusInternal)
