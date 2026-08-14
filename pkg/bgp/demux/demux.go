@@ -43,6 +43,11 @@ type consumer struct {
 	name     string
 	families map[bgp.Family]struct{}
 	handler  bgp.RouteHandler
+	// builtin marks a consumer that implements Vinbero's own behaviors, and
+	// so must not see routes whose endpoint behavior a plugin has claimed.
+	// A plugin consumer sees everything its families cover, claimed or not:
+	// it may well need the unclaimed routes for context.
+	builtin bool
 }
 
 // wants reports whether this consumer subscribed to fam.
@@ -60,6 +65,10 @@ type Demux struct {
 	sub    bgp.RouteSubscriber
 	lister bgp.RouteLister
 	logger *zap.Logger
+	// claims decides which endpoint behaviors belong to a plugin rather
+	// than to the built-in appliers. Nil until SetClaimRegistry is called,
+	// in which case nothing is claimed.
+	claims *ClaimRegistry
 
 	mu        sync.RWMutex
 	consumers []*consumer
@@ -79,18 +88,41 @@ func New(sub bgp.RouteSubscriber, lister bgp.RouteLister, logger *zap.Logger) *D
 	return &Demux{sub: sub, lister: lister, logger: logger}
 }
 
-// Register adds a consumer. families restricts delivery; passing none
+// SetClaimRegistry installs the registry that decides which endpoint
+// behaviors belong to a plugin. Call before Start; a demux with no registry
+// treats every behavior as the built-in appliers'.
+func (d *Demux) SetClaimRegistry(claims *ClaimRegistry) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.claims = claims
+}
+
+// Register adds a plugin consumer. See RegisterBuiltin for Vinbero's own
+// appliers, which are additionally shielded from plugin-claimed routes.
+func (d *Demux) Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
+	return d.register(name, families, handler, false)
+}
+
+// RegisterBuiltin adds a consumer implementing Vinbero's own behaviors. It
+// is delivered every route except those whose endpoint behavior a plugin
+// has claimed: acting on a claimed route would install an entry with the
+// wrong semantics and collide with the plugin's own write to that prefix.
+func (d *Demux) RegisterBuiltin(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
+	return d.register(name, families, handler, true)
+}
+
+// register adds a consumer. families restricts delivery; passing none
 // delivers every family. The returned cancel removes the consumer and is
 // safe to call more than once.
 //
 // Registering after Start replays the loc-rib for the declared families
 // (every family the lister knows, when none were declared) so the consumer
 // converges on routes that arrived before it existed.
-func (d *Demux) Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
+func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHandler, builtin bool) (func(), error) {
 	if handler == nil {
 		return nil, fmt.Errorf("demux: register %q: nil handler", name)
 	}
-	c := &consumer{name: name, handler: handler}
+	c := &consumer{name: name, handler: handler, builtin: builtin}
 	if len(families) > 0 {
 		c.families = make(map[bgp.Family]struct{}, len(families))
 		for _, f := range families {
@@ -193,11 +225,19 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 		return
 	}
 	d.mu.RLock()
+	claimed := d.claims.IsClaimed(ev.EndpointBehavior)
 	targets := make([]*consumer, 0, len(d.consumers))
 	for _, c := range d.consumers {
-		if c.wants(ev.Family) {
-			targets = append(targets, c)
+		if !c.wants(ev.Family) {
+			continue
 		}
+		// A route whose behavior a plugin claimed is the plugin's to
+		// interpret; the built-in appliers would read the codepoint as an
+		// ordinary service SID and install the wrong thing.
+		if claimed && c.builtin {
+			continue
+		}
+		targets = append(targets, c)
 	}
 	d.mu.RUnlock()
 
@@ -222,6 +262,15 @@ func (d *Demux) replay(c *consumer, families []bgp.Family) {
 		err := d.lister.ListRoutes(fam, func(ev bgp.RouteEvent) {
 			if ev.Source.IsLocal() {
 				return // defense in depth; ListRoutes already skips these
+			}
+			// The snapshot applies the same claim rule as the live stream:
+			// a built-in consumer registering after a plugin claimed a
+			// behavior must not pick those routes up from the replay.
+			d.mu.RLock()
+			claimed := d.claims.IsClaimed(ev.EndpointBehavior)
+			d.mu.RUnlock()
+			if claimed && c.builtin {
+				return
 			}
 			c.handler(ev)
 		})

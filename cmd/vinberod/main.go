@@ -379,7 +379,11 @@ func run(cliCtx *cli.Context) error {
 		// local-origin paths on both the replay and the live stream, so this
 		// node's own advertisements never reach the applier.
 		routeDemux := demux.New(bgpSession, bgpSession, lg)
-		if _, err := routeDemux.Register("applier", nil, applier.Apply); err != nil {
+		// Behaviors a plugin claims are withheld from the built-in applier,
+		// which would otherwise read an unrecognized codepoint as an
+		// ordinary service SID. Vinbero's own behaviors are not claimable.
+		routeDemux.SetClaimRegistry(demux.NewClaimRegistry(gobgp.BuiltinEndpointBehaviors()))
+		if _, err := routeDemux.RegisterBuiltin("applier", nil, applier.Apply); err != nil {
 			return fmt.Errorf("register BGP applier: %w", err)
 		}
 		if err := routeDemux.Start(); err != nil {
