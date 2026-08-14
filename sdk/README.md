@@ -87,7 +87,7 @@ This installs the same files from the working tree without producing a tarball.
 ## Plugin aux: passing config per SID
 
 Plugins can read per-SID configuration from `sid_aux_entry.plugin_raw`
-(196 bytes). Declare a matching struct in the plugin source and anchor
+(256 bytes). Declare a matching struct in the plugin source and anchor
 it so clang keeps the type in BTF:
 
 ```c

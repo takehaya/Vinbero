@@ -521,7 +521,7 @@ type PluginAuxAllocRequest_Json struct {
 }
 
 type PluginAuxAllocRequest_Raw struct {
-	Raw []byte `protobuf:"bytes,4,opt,name=raw,proto3,oneof"` // Raw bytes, <= SidAuxPluginRawMax (196).
+	Raw []byte `protobuf:"bytes,4,opt,name=raw,proto3,oneof"` // Raw bytes, <= SidAuxPluginRawMax (256).
 }
 
 func (*PluginAuxAllocRequest_Json) isPluginAuxAllocRequest_Payload() {}

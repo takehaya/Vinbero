@@ -77,7 +77,7 @@ message PluginAuxAllocRequest {
   uint32 slot = 2;
   oneof payload {
     string json = 3; // Encoded by the server via the plugin's BTF-declared <program>_aux type.
-    bytes raw = 4; // Raw bytes, <= SidAuxPluginRawMax (196).
+    bytes raw = 4; // Raw bytes, <= SidAuxPluginRawMax (256).
   }
 }
 message PluginAuxAllocResponse {

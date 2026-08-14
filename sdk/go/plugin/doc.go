@@ -23,7 +23,7 @@
 //   - Match the C struct field order exactly.
 //   - Use JSON tags (`json:"..."`) that match the BTF field names.
 //   - Pack naturally without padding surprises (use [N]byte for fixed arrays).
-//   - Have unsafe.Sizeof(T) <= 196 (SidAuxPluginRawMax). NewPluginAux
+//   - Have unsafe.Sizeof(T) <= 256 (SidAuxPluginRawMax). NewPluginAux
 //     panics at construction time if this is violated.
 //
 // Plugins that cannot meet these constraints should use the raw-bytes

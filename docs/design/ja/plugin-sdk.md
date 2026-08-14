@@ -132,7 +132,7 @@ ELF 内で `BPF_MAP_TYPE_HASH` / `PERCPU_ARRAY` などを独自に宣言する�
 
 ### プラグイン aux (SID 単位の設定値)
 
-SID ごとに異なる設定値をプラグインへ渡したい場合、`sid_aux_entry.plugin_raw` (196 バイト) に任意の構造体を置けます。共有マップを増やさず、SID と 1:1 で構成を持てるのが利点です。
+SID ごとに異なる設定値をプラグインへ渡したい場合、`sid_aux_entry.plugin_raw` (256 バイト) に任意の構造体を置けます。共有マップを増やさず、SID と 1:1 で構成を持てるのが利点です。
 
 プラグイン作者は `struct <program>_aux` という名前で構造体を宣言し、`VINBERO_PLUGIN_AUX_TYPE` マクロで BTF に残します:
 
@@ -163,7 +163,7 @@ CLI からは aux の払い出し経路が 3 つあり、SID 1 件あたりで *
 | フラグ | 挙動 | 用途 |
 |---|---|---|
 | `--plugin-aux-json '<json>'` | サーバが BTF レイアウトに encode して SID の aux index を自動払い出し。SID 削除で aux も解放 | 一番シンプル。SID と aux を 1:1 で扱う場合 |
-| `--plugin-aux-raw <hex>` | 作者自身が encode した 196 バイト以下の byte 列を直接渡す | BTF に `*_aux` 型が無いプラグイン、テスト用途 |
+| `--plugin-aux-raw <hex>` | 作者自身が encode した 256 バイト以下の byte 列を直接渡す | BTF に `*_aux` 型が無いプラグイン、テスト用途 |
 | `--plugin-aux-index <idx>` | 事前に `vbctl plugin aux alloc` で払い出した index を参照。SID 削除で aux は消えない | 複数の SID で同じ aux を共有する / aux を長寿命にしたい |
 
 ```bash
