@@ -24,10 +24,19 @@ type EventSource interface {
 	Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error)
 }
 
+// SnapshotSource can replay the current rib to one consumer. The demux
+// implements it. It is separate from EventSource because a source that
+// only streams live updates is still usable -- the plugin just cannot have
+// its view rebuilt, which is worth knowing rather than assuming.
+type SnapshotSource interface {
+	SnapshotTo(families []bgp.Family, handler bgp.RouteHandler) error
+}
+
 // BehaviorClaims is the registry that records which SRv6 endpoint
 // behaviors belong to a plugin. The demux's ClaimRegistry satisfies it.
 type BehaviorClaims interface {
-	Claim(plugin string, codepoints []uint16) error
+	// Replace sets a plugin's claims to exactly codepoints, atomically.
+	Replace(plugin string, codepoints []uint16) error
 	Release(plugin string)
 	Claims(plugin string) []uint16
 }
@@ -69,6 +78,7 @@ type Registration struct {
 // Manager owns the running control-plane plugins.
 type Manager struct {
 	source     EventSource
+	snapshots  SnapshotSource
 	claims     BehaviorClaims
 	headend    HeadendMapOps
 	leases     *Leases
@@ -121,8 +131,10 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	snapshots, _ := cfg.Source.(SnapshotSource)
 	return &Manager{
 		source:     cfg.Source,
+		snapshots:  snapshots,
 		claims:     cfg.Claims,
 		headend:    cfg.Headend,
 		leases:     NewLeases(),
@@ -153,14 +165,12 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	var previousClaims []uint16
 	if m.claims != nil {
 		previousClaims = m.claims.Claims(reg.Name)
-		// Release before claiming so an upgrade that drops a behavior
-		// actually gives it up; Claim only ever adds.
-		m.claims.Release(reg.Name)
-		if len(reg.Behaviors) > 0 {
-			if err := m.claims.Claim(reg.Name, reg.Behaviors); err != nil {
-				m.restoreClaims(reg.Name, previousClaims)
-				return err
-			}
+		// Replace rather than release-then-claim: an upgrade that drops a
+		// behavior must give it up, and doing that as two steps leaves a
+		// window where another plugin can take a codepoint this one still
+		// holds, which restoreClaims could then not put back.
+		if err := m.claims.Replace(reg.Name, reg.Behaviors); err != nil {
+			return err
 		}
 	} else if len(reg.Behaviors) > 0 {
 		return fmt.Errorf("cplane: plugin %q claims behaviors but no claim registry is configured", reg.Name)
@@ -186,7 +196,18 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if m.source != nil {
 		cancel, err := m.source.Register(reg.Name, reg.Families, m.handlerFor(reg.Name))
 		if err != nil {
-			_ = m.Unregister(ctx, reg.Name)
+			// Undo without flushing: the operator asked for a plugin, not
+			// for its predecessor's entries to be deleted. On an upgrade
+			// the state under this owner belongs to the version that was
+			// running a moment ago, and blackholing it because the new
+			// one could not subscribe would be worse than the failure.
+			m.mu.Lock()
+			if current, ok := m.plugins[reg.Name]; ok && current == p {
+				delete(m.plugins, reg.Name)
+			}
+			m.mu.Unlock()
+			m.teardown(ctx, p)
+			m.restoreClaims(reg.Name, previousClaims)
 			return fmt.Errorf("cplane: subscribe plugin %q: %w", reg.Name, err)
 		}
 		// The plugin may already have been unregistered while we were
@@ -238,7 +259,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops}
 	p.worker = newWorker(reg.Name, m.logger, inst.HandleEvents,
 		func(err error) { m.instanceFailed(p, err) },
-		func(status *v1.PluginEventStatus) { m.reportStatus(p, status) })
+		func(status *v1.PluginEventStatus) { m.delivered(p, status) })
 	return p, nil
 }
 
@@ -248,11 +269,7 @@ func (m *Manager) restoreClaims(name string, behaviors []uint16) {
 	if m.claims == nil {
 		return
 	}
-	m.claims.Release(name)
-	if len(behaviors) == 0 {
-		return
-	}
-	if err := m.claims.Claim(name, behaviors); err != nil {
+	if err := m.claims.Replace(name, behaviors); err != nil {
 		// Nothing else can hold them -- they were this plugin's a moment
 		// ago -- so this should not happen; say so loudly if it does,
 		// because the running instance is now unprotected.
@@ -412,6 +429,96 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	if err := old.Close(ctx); err != nil {
 		m.logger.Debug("closing the failed instance", zap.String("plugin", p.name), zap.Error(err))
 	}
+
+	// The replacement remembers nothing, so it has to be told what the
+	// network looks like. Without this its first declaration describes
+	// only the events that happened to arrive after the restart, and the
+	// reconcile prunes everything else the plugin owned.
+	//
+	// It runs on a goroutine of its own because this is the worker
+	// goroutine: the snapshot is delivered through the same queue and
+	// would deadlock against itself.
+	go m.snapshot(p)
+}
+
+// snapshot rebuilds a plugin's view from the rib.
+//
+// A plugin that declares desired sets cannot work from a partial view: its
+// next declaration is a statement about the whole set, so a route it never
+// saw is a route it prunes. Anything that leaves a hole -- a restart, a
+// dropped batch -- therefore has to be followed by this rather than by the
+// next live update.
+//
+// Delivery blocks rather than dropping, which is safe because this does
+// not run on the BGP watch goroutine.
+func (m *Manager) snapshot(p *plugin) {
+	if m.snapshots == nil {
+		// Without a rib to read there is nothing to rebuild from. Say so:
+		// the plugin's view stays incomplete and that is worth knowing.
+		m.logger.Warn("cannot rebuild a plugin's view: the event source serves no snapshot",
+			zap.String("plugin", p.name))
+		return
+	}
+	var count int
+	err := m.snapshots.SnapshotTo(p.reg.Families, func(ev bgp.RouteEvent) {
+		if p.worker.submitBlocking(m.routeBatch(ev)) {
+			count++
+		}
+	})
+	if err != nil {
+		// The view is still incomplete; ask for another one on the next
+		// opportunity rather than leaving the plugin to prune what it
+		// could not see.
+		p.worker.owe()
+		m.logger.Warn("replaying the rib to a plugin failed",
+			zap.String("plugin", p.name), zap.Error(err))
+		return
+	}
+	m.logger.Info("replayed the rib to a plugin",
+		zap.String("plugin", p.name), zap.Int("routes", count))
+}
+
+// snapshotFor rebuilds one plugin's view on the calling goroutine,
+// reporting why it could not when it could not.
+//
+// The background paths log and move on -- there is nobody to return an
+// error to on a worker goroutine -- so this exists for a caller that can
+// act on the outcome.
+func (m *Manager) snapshotFor(name string) error {
+	m.mu.Lock()
+	p, ok := m.plugins[name]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("cplane: plugin %q is not registered", name)
+	}
+	if m.snapshots == nil {
+		return fmt.Errorf("cplane: the event source serves no snapshot")
+	}
+	return m.snapshots.SnapshotTo(p.reg.Families, func(ev bgp.RouteEvent) {
+		p.worker.submitBlocking(m.routeBatch(ev))
+	})
+}
+
+// routeBatch wraps one route event as a batch for delivery.
+func (m *Manager) routeBatch(ev bgp.RouteEvent) *v1.PluginEventBatch {
+	return &v1.PluginEventBatch{Events: []*v1.PluginEvent{{
+		Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE,
+		Sequence: m.seq.Add(1),
+		Route:    EncodeRouteEvent(ev),
+	}}}
+}
+
+// delivered runs after a batch the plugin handled without failing.
+//
+// It resets the restart counter, so maxRestarts bounds consecutive
+// failures rather than a plugin's lifetime total: a plugin that recovers
+// and then fails again months later should not be treated as one that
+// cannot start.
+func (m *Manager) delivered(p *plugin, status *v1.PluginEventStatus) {
+	m.mu.Lock()
+	p.restarts = 0
+	m.mu.Unlock()
+	m.reportStatus(p, status)
 }
 
 // reportStatus records what a plugin said about the events it was given.
@@ -444,11 +551,15 @@ func (m *Manager) handlerFor(name string) bgp.RouteHandler {
 		if !ok || dead {
 			return
 		}
-		p.worker.submit(&v1.PluginEventBatch{Events: []*v1.PluginEvent{{
-			Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE,
-			Sequence: m.seq.Add(1),
-			Route:    EncodeRouteEvent(ev),
-		}}})
+		p.worker.submit(m.routeBatch(ev))
+
+		// A drop leaves the plugin's view with a hole. Rebuild it rather
+		// than letting the next declaration prune what it never saw. This
+		// runs on the BGP watch goroutine, so the snapshot itself is
+		// handed to a goroutine of its own.
+		if p.worker.takeSnapshotDebt() {
+			go m.snapshot(p)
+		}
 	}
 }
 

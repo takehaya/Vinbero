@@ -251,6 +251,46 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	}
 }
 
+// SnapshotTo replays the loc-rib for the given families to h, applying the
+// same local-origin rule as live delivery. Passing no families replays
+// every family the lister knows.
+//
+// A consumer needs this when its view has to be rebuilt rather than
+// updated: a plugin that was restarted has no memory of anything, and one
+// whose events were dropped has a view with holes in it. Both are wrong in
+// the same way, and a snapshot is what makes them right again -- which
+// matters most for a consumer that declares desired sets, where a partial
+// view does not merely delay convergence but actively prunes the state it
+// cannot see.
+//
+// Unlike the replay Register performs, this delivers on the calling
+// goroutine and returns when it is done, so the caller knows the view is
+// complete.
+func (d *Demux) SnapshotTo(families []bgp.Family, h bgp.RouteHandler) error {
+	if d == nil || h == nil {
+		return nil
+	}
+	if d.lister == nil {
+		return nil
+	}
+	want := families
+	if len(want) == 0 {
+		want = allFamilies()
+	}
+	for _, fam := range want {
+		err := d.lister.ListRoutes(fam, func(ev bgp.RouteEvent) {
+			if ev.Source.IsLocal() {
+				return
+			}
+			h(ev)
+		})
+		if err != nil {
+			return fmt.Errorf("demux: snapshot %s: %w", fam, err)
+		}
+	}
+	return nil
+}
+
 // BuiltinSnapshotHandler wraps h with the same rules the demux applies to
 // its own delivery, for a snapshot a built-in consumer pulls on demand
 // rather than receiving through the demux.

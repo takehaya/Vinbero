@@ -30,11 +30,14 @@ func declareModule(t *testing.T) []byte {
 
 // fakeSource stands in for the demux.
 type fakeSource struct {
-	mu       sync.Mutex
-	handlers map[string]bgp.RouteHandler
-	families map[string][]bgp.Family
-	regErr   error
-	cancels  int
+	mu          sync.Mutex
+	handlers    map[string]bgp.RouteHandler
+	families    map[string][]bgp.Family
+	regErr      error
+	cancels     int
+	rib         []bgp.RouteEvent
+	snapshots   int
+	snapshotErr error
 }
 
 func newFakeSource() *fakeSource {
@@ -71,6 +74,39 @@ func (f *fakeSource) emit(name string, ev bgp.RouteEvent) bool {
 	return true
 }
 
+// SnapshotTo replays what the fake source is holding, standing in for the
+// demux's loc-rib snapshot.
+func (f *fakeSource) SnapshotTo(_ []bgp.Family, h bgp.RouteHandler) error {
+	f.mu.Lock()
+	if f.snapshotErr != nil {
+		err := f.snapshotErr
+		f.mu.Unlock()
+		return err
+	}
+	rib := append([]bgp.RouteEvent(nil), f.rib...)
+	f.mu.Unlock()
+	f.mu.Lock()
+	f.snapshots++
+	f.mu.Unlock()
+	for _, ev := range rib {
+		h(ev)
+	}
+	return nil
+}
+
+// seedRib makes a route part of what a snapshot replays.
+func (f *fakeSource) seedRib(events ...bgp.RouteEvent) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rib = append(f.rib, events...)
+}
+
+func (f *fakeSource) snapshotCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snapshots
+}
+
 func (f *fakeSource) registered(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -90,11 +126,15 @@ func newFakeClaims() *fakeClaims {
 	return &fakeClaims{held: map[string][]uint16{}}
 }
 
-func (c *fakeClaims) Claim(plugin string, codepoints []uint16) error {
+func (c *fakeClaims) Replace(plugin string, codepoints []uint16) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.claimErr != nil {
 		return c.claimErr
+	}
+	if len(codepoints) == 0 {
+		delete(c.held, plugin)
+		return nil
 	}
 	c.held[plugin] = codepoints
 	return nil
@@ -588,4 +628,114 @@ func TestDroppedEventsAreCounted(t *testing.T) {
 	if m.DroppedEvents("declare") == 0 {
 		t.Skip("delivery kept up with the burst; the drop path is exercised by the queue depth, not the timing")
 	}
+}
+
+// trapModule is a plugin whose handle_events always traps, so a test can
+// drive the failure-and-restart path.
+func trapModule(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "cplane", "wasm", "testdata", "trap.wasm"))
+	if err != nil {
+		t.Fatalf("read trap fixture: %v", err)
+	}
+	return b
+}
+
+// A restarted instance remembers nothing, so it has to be told what the
+// network looks like. Without a replay its first declaration describes
+// only the events that arrived after the restart, and because a
+// declaration is a whole desired set, the reconcile prunes everything else
+// the plugin owned. This is the test that says the replay happens.
+func TestRestartReplaysTheRib(t *testing.T) {
+	src := newFakeSource()
+	m, _ := newTestManager(t, src, newFakeClaims())
+	src.seedRib(bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+
+	if err := m.Register(context.Background(), Registration{
+		Name: "trap", Module: trapModule(t),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	before := src.snapshotCount()
+
+	// The guest traps on this, which costs the instance.
+	src.emit("trap", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "trap")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for src.snapshotCount() == before {
+		if time.Now().After(deadline) {
+			t.Fatal("the restarted plugin was never replayed the rib")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// maxRestarts bounds consecutive failures, not a plugin's lifetime total:
+// a plugin that recovers and later fails again must not be treated as one
+// that cannot start.
+func TestRestartCounterResetsOnSuccess(t *testing.T) {
+	src := newFakeSource()
+	m, ops := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// Deliver more batches than maxRestarts; all succeed, so the plugin
+	// must still be alive and declaring at the end.
+	for i := 0; i < maxRestarts+3; i++ {
+		src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+		waitDelivered(t, m, "declare")
+	}
+	if len(ops.v4) != 1 {
+		t.Fatalf("the plugin stopped declaring: %v", sortedV4(ops))
+	}
+}
+
+// A snapshot must reach the plugin whole. Dropping part of it would leave
+// the plugin declaring a set that prunes the routes it never saw, so the
+// replay path blocks rather than dropping.
+func TestSnapshotIsNotDropped(t *testing.T) {
+	src := newFakeSource()
+	m, _ := newTestManager(t, src, newFakeClaims())
+	// Far more routes than the delivery queue holds.
+	for i := 0; i < deliveryQueueDepth*3; i++ {
+		src.seedRib(bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	}
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := m.snapshotFor("declare"); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	waitDelivered(t, m, "declare")
+	if got := m.DroppedEvents("declare"); got != 0 {
+		t.Fatalf("the snapshot dropped %d batches; a partial view prunes what the plugin cannot see", got)
+	}
+}
+
+// A source that serves no snapshot cannot rebuild a view; the manager must
+// say so rather than pretending the plugin is up to date.
+func TestSnapshotWithoutASourceIsReported(t *testing.T) {
+	// eventOnlySource deliberately does not implement SnapshotSource.
+	src := &eventOnlySource{inner: newFakeSource()}
+	m, _ := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := m.snapshotFor("declare"); err == nil {
+		t.Fatal("a manager with no snapshot source reported a successful replay")
+	}
+}
+
+// eventOnlySource streams live events but serves no snapshot.
+type eventOnlySource struct{ inner *fakeSource }
+
+func (s *eventOnlySource) Register(name string, families []bgp.Family, h bgp.RouteHandler) (func(), error) {
+	return s.inner.Register(name, families, h)
 }

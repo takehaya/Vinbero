@@ -62,6 +62,50 @@ func (r *ClaimRegistry) Claim(plugin string, codepoints []uint16) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.checkLocked(plugin, codepoints); err != nil {
+		return err
+	}
+	for _, cp := range codepoints {
+		r.byCodepoint[cp] = plugin
+	}
+	return nil
+}
+
+// Replace sets a plugin's claims to exactly codepoints, atomically.
+//
+// An upgrade that narrows a plugin's behaviors has to give the dropped
+// ones up, and doing that as a release followed by a claim opens a window
+// in which another plugin can take a codepoint the first one still holds
+// and is still acting on. Under one lock there is no such window.
+func (r *ClaimRegistry) Replace(plugin string, codepoints []uint16) error {
+	if r == nil {
+		if len(codepoints) == 0 {
+			return nil
+		}
+		return fmt.Errorf("claim: no claim registry (behavior claims need BGP enabled)")
+	}
+	if plugin == "" {
+		return fmt.Errorf("claim: empty plugin name")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.checkLocked(plugin, codepoints); err != nil {
+		return err
+	}
+	for cp, holder := range r.byCodepoint {
+		if holder == plugin {
+			delete(r.byCodepoint, cp)
+		}
+	}
+	for _, cp := range codepoints {
+		r.byCodepoint[cp] = plugin
+	}
+	return nil
+}
+
+// checkLocked validates a claim set without applying it. Caller holds
+// r.mu.
+func (r *ClaimRegistry) checkLocked(plugin string, codepoints []uint16) error {
 	for _, cp := range codepoints {
 		if cp == 0 {
 			return fmt.Errorf("claim: codepoint 0 means \"no behavior\" and cannot be claimed")
@@ -72,9 +116,6 @@ func (r *ClaimRegistry) Claim(plugin string, codepoints []uint16) error {
 		if holder, taken := r.byCodepoint[cp]; taken && holder != plugin {
 			return fmt.Errorf("claim: codepoint %#x is already claimed by plugin %q", cp, holder)
 		}
-	}
-	for _, cp := range codepoints {
-		r.byCodepoint[cp] = plugin
 	}
 	return nil
 }

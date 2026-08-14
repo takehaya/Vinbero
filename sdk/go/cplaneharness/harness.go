@@ -40,6 +40,7 @@ type Declaration struct {
 type Harness struct {
 	tb     testing.TB
 	module []byte
+	config []byte
 	limits wasm.Limits
 
 	mu sync.Mutex
@@ -67,7 +68,7 @@ type Options struct {
 // up in first.
 func New(tb testing.TB, module []byte, opts Options) *Harness {
 	tb.Helper()
-	h := &Harness{tb: tb, module: module, limits: opts.Limits}
+	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits}
 	h.ops = &recorder{denyCommits: opts.DenyCommits}
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
 		Name:       "harness",
@@ -148,9 +149,14 @@ func (h *Harness) Restart() {
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
 		Name:   "harness",
 		Module: h.module,
-		Limits: h.limits,
-		Ops:    h.ops,
-		Logger: zap.NewNop(),
+		// The config goes back in: the daemon re-instantiates with it too,
+		// and a harness that dropped it would model a restart the daemon
+		// never performs -- a plugin coming back on defaults, or refusing
+		// an empty blob it never received the first time.
+		ConfigBlob: h.config,
+		Limits:     h.limits,
+		Ops:        h.ops,
+		Logger:     zap.NewNop(),
 	})
 	if err != nil {
 		h.tb.Fatalf("plugin could not be restarted: %v", err)
