@@ -237,6 +237,23 @@ plugin は memory 上限に到達します。harness の churn test は live set
 だけです。この test を leaking build は途中で落ち、conservative build は
 1 MiB のまま完走します。
 
+## まだ無いもの
+
+EVPN と MUP の desired set は実装していません。用途が先に無いという理由
+だけでなく、前提が揃っていないためです。
+
+MUP の uplink map (`mup_uplink_v{4,6}_map`) の entry は owner tag を持ち
+ません。packet が運ぶ F-TEID が key なので、そういう設計になっています。
+owner が無い store では、どの entry が誰のものかを reconcile が判定でき
+ません。plugin に触らせる前に owner 追跡を足す必要があります。
+
+EVPN は owner の問題は無いものの、bd_peer と FDB の状態は DF election、
+split-horizon、ESI の不変条件と組で成り立っています。plugin が entry を
+直接宣言できるようにすると、その不変条件を壊す形の宣言が書けてしまいます。
+DF election のような判断ロジックそのものの差し替えは本設計の非目標に置いて
+あり、EVPN の desired set はその判断と不可分です。用途が具体化したときに、
+何を宣言させるのが安全かを決めてから足します。
+
 ## 参照
 
 - 設計の経緯と検討: `docs/plan/cplane-plugin.md`
