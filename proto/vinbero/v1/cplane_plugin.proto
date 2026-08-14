@@ -32,6 +32,10 @@ enum PluginEventKind {
   PLUGIN_EVENT_KIND_END_OF_REPLAY = 3;
   // The periodic tick, carrying the host's monotonic clock.
   PLUGIN_EVENT_KIND_TICK = 4;
+  // A local SID the plugin declared now exists, and this is the address
+  // it was given. It arrives after the declaration is applied, which is
+  // the point at which the plugin can advertise it.
+  PLUGIN_EVENT_KIND_LOCAL_SID = 5;
 }
 
 // PluginUnknownAttribute is a BGP path attribute Vinbero does not
@@ -114,6 +118,19 @@ message PluginEvent {
   string replay_source = 5;
   // NowNs is the host's monotonic clock, set on a tick.
   int64 now_ns = 6;
+  // LocalSid reports the address allocated for a declared local SID.
+  PluginLocalSidAllocated local_sid = 7;
+}
+
+// PluginLocalSidAllocated tells a plugin the address one of its declared
+// local SIDs was given.
+message PluginLocalSidAllocated {
+  // Name is the plugin's own name for this SID.
+  string name = 1;
+  // Sid is the allocated address.
+  string sid = 2;
+  // Locator it came from.
+  string locator = 3;
 }
 
 // PluginEventBatch is what the host hands to handle_events.
@@ -160,6 +177,14 @@ enum PluginApplyKind {
   PLUGIN_APPLY_KIND_HEADEND_V4 = 1;
   // The plugin's headend_v6_map entries.
   PLUGIN_APPLY_KIND_HEADEND_V6 = 2;
+  // The local SIDs the plugin wants allocated and pointed at its
+  // data-plane half.
+  //
+  // The host chooses the SID value, so the plugin names each one and is
+  // told the address it got in a local-SID event. Naming rather than
+  // requesting a value is what lets the allocation survive a restart: the
+  // plugin declares the same names and gets the same SIDs back.
+  PLUGIN_APPLY_KIND_LOCAL_SID = 4;
   // The routes the plugin wants advertised to BGP peers.
   //
   // Advertising is a desired set like any other: the plugin states which
@@ -213,6 +238,23 @@ message PluginAdvertisedRoute {
   string next_hop = 7;
 }
 
+// PluginLocalSid is one local SID the plugin wants to exist.
+message PluginLocalSid {
+  // Name identifies this SID within the plugin. It is how the plugin
+  // recognizes the address it was given, and how the host knows across a
+  // restart that a redeclared SID is the same one.
+  string name = 1;
+  // Locator is the SRv6 locator to allocate from, by the name it was
+  // configured under.
+  string locator = 2;
+  // Slot is the endpoint PROG_ARRAY slot the SID dispatches to: the
+  // plugin's own data-plane half. Valid plugin slots are 32-63.
+  uint32 slot = 3;
+  // AuxRaw is the per-SID configuration the data-plane half reads, in the
+  // layout its BTF declares.
+  bytes aux_raw = 4;
+}
+
 // PluginApplyChunk is one instalment of a declared set.
 //
 // A set is chunked because it may not fit in one call, and because a
@@ -222,6 +264,7 @@ message PluginAdvertisedRoute {
 message PluginApplyChunk {
   repeated PluginHeadendEntry headend_entries = 1;
   repeated PluginAdvertisedRoute advertised_routes = 2;
+  repeated PluginLocalSid local_sids = 3;
 }
 
 // PluginConfig is the operator's configuration for a plugin instance,

@@ -20,12 +20,14 @@ import (
 // registered. A plugin cannot name an owner in a call, which is what keeps
 // one plugin from writing as another.
 type PluginOps struct {
-	owner      bpf.OwnerTag
-	headend    HeadendMapOps
-	leases     *Leases
-	advertise  *AdvertiseSet
-	defaultSrc netip.Addr
-	logger     *zap.Logger
+	owner       bpf.OwnerTag
+	headend     HeadendMapOps
+	leases      *Leases
+	advertise   *AdvertiseSet
+	localSIDs   *LocalSIDSet
+	onLocalSIDs func([]AllocatedSID)
+	defaultSrc  netip.Addr
+	logger      *zap.Logger
 	// applyMu is shared by every plugin under one manager, and is held for
 	// the whole of a reconcile.
 	//
@@ -56,6 +58,7 @@ type applyTxn struct {
 	kind    v1.PluginApplyKind
 	entries []HeadendDesired
 	routes  []AdvertisedRoute
+	sids    []LocalSID
 }
 
 // PluginOpsConfig builds a PluginOps.
@@ -69,6 +72,11 @@ type PluginOpsConfig struct {
 	// Advertise is the send side. Nil leaves a plugin unable to originate,
 	// which is what a daemon without BGP can honestly offer.
 	Advertise *AdvertiseSet
+	// LocalSIDs allocates the SIDs a plugin points at its data-plane half.
+	LocalSIDs *LocalSIDSet
+	// OnLocalSIDs is called with what a local-SID declaration resolved to,
+	// so the plugin can be told the addresses it was given.
+	OnLocalSIDs func([]AllocatedSID)
 	// DefaultEncapSource fills in a declared entry that names no source.
 	DefaultEncapSource netip.Addr
 	// Logger receives the plugin's own log lines.
@@ -108,16 +116,18 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 		applyMu = &sync.Mutex{}
 	}
 	return &PluginOps{
-		owner:      cfg.Owner,
-		applyMu:    applyMu,
-		advertise:  cfg.Advertise,
-		headend:    cfg.Headend,
-		leases:     cfg.Leases,
-		defaultSrc: cfg.DefaultEncapSource,
-		logger:     logger,
-		open:       make(map[uint64]*applyTxn),
-		maxOpen:    maxOpen,
-		maxEntries: maxEntries,
+		owner:       cfg.Owner,
+		applyMu:     applyMu,
+		advertise:   cfg.Advertise,
+		localSIDs:   cfg.LocalSIDs,
+		onLocalSIDs: cfg.OnLocalSIDs,
+		headend:     cfg.Headend,
+		leases:      cfg.Leases,
+		defaultSrc:  cfg.DefaultEncapSource,
+		logger:      logger,
+		open:        make(map[uint64]*applyTxn),
+		maxOpen:     maxOpen,
+		maxEntries:  maxEntries,
 	}, nil
 }
 
@@ -150,6 +160,10 @@ func (p *PluginOps) ApplyBegin(kind uint32) (uint64, error) {
 		if p.advertise == nil {
 			return 0, fmt.Errorf("apply begin: this daemon cannot originate routes")
 		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		if p.localSIDs == nil {
+			return 0, fmt.Errorf("apply begin: this daemon cannot allocate SIDs")
+		}
 	default:
 		return 0, fmt.Errorf("apply begin: unknown kind %d", kind)
 	}
@@ -180,10 +194,10 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	if !ok {
 		return fmt.Errorf("apply put: no open transaction %d", generation)
 	}
-	declared := len(msg.GetHeadendEntries()) + len(msg.GetAdvertisedRoutes())
-	if len(txn.entries)+len(txn.routes)+declared > p.maxEntries {
+	declared := len(msg.GetHeadendEntries()) + len(msg.GetAdvertisedRoutes()) + len(msg.GetLocalSids())
+	if len(txn.entries)+len(txn.routes)+len(txn.sids)+declared > p.maxEntries {
 		return fmt.Errorf("apply put: transaction %d would hold %d entries, limit %d",
-			generation, len(txn.entries)+len(txn.routes)+declared, p.maxEntries)
+			generation, len(txn.entries)+len(txn.routes)+len(txn.sids)+declared, p.maxEntries)
 	}
 	for _, e := range msg.GetHeadendEntries() {
 		prefix, entry, err := DecodeHeadendEntry(e, p.defaultSrc)
@@ -198,6 +212,13 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 			return fmt.Errorf("apply put: %w", err)
 		}
 		txn.routes = append(txn.routes, route)
+	}
+	for _, s := range msg.GetLocalSids() {
+		sid, err := DecodeLocalSID(s)
+		if err != nil {
+			return fmt.Errorf("apply put: %w", err)
+		}
+		txn.sids = append(txn.sids, sid)
 	}
 	return nil
 }
@@ -217,6 +238,26 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 	p.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("apply commit: no open transaction %d", generation)
+	}
+
+	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		p.applyMu.Lock()
+		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids)
+		p.applyMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
+		p.logger.Info("plugin local SID set applied",
+			zap.Int("declared", len(txn.sids)),
+			zap.Int("allocated", res.Created),
+			zap.Int("kept", res.Updated),
+			zap.Int("released", res.Pruned))
+		// The plugin picked the names; the host picked the addresses. It
+		// cannot advertise what it has not been told.
+		if p.onLocalSIDs != nil && len(allocated) > 0 {
+			p.onLocalSIDs(allocated)
+		}
+		return nil
 	}
 
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
@@ -290,6 +331,11 @@ func (p *PluginOps) Flush() error {
 		// advertised for state that is gone is a blackhole its peers keep
 		// sending into.
 		if err := p.advertise.WithdrawOwner(context.Background(), p.owner); err != nil {
+			firstErr = err
+		}
+	}
+	if p.localSIDs != nil {
+		if err := p.localSIDs.ReleaseOwner(p.owner); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

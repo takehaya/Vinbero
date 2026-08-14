@@ -420,6 +420,8 @@ func run(cliCtx *cli.Context) error {
 			Claims:             claimRegistry,
 			Headend:            vin.GetMapOperations(),
 			Advertiser:         bgpSession,
+			Locators:           locatorMgr,
+			SIDFunctions:       vin.GetMapOperations(),
 			DefaultEncapSource: encapSrc,
 			Logger:             lg.Named("cplane"),
 		})

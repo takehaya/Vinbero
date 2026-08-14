@@ -104,6 +104,7 @@ type Manager struct {
 	headend    HeadendMapOps
 	leases     *Leases
 	advertise  *AdvertiseSet
+	localSIDs  *LocalSIDSet
 	defaultSrc netip.Addr
 	logger     *zap.Logger
 
@@ -151,6 +152,10 @@ type ManagerConfig struct {
 	// plugins unable to advertise, which is honest on a daemon with no
 	// BGP session.
 	Advertiser Advertiser
+	// Locators allocates the SIDs a plugin points at its data-plane half.
+	Locators SIDAllocator
+	// SIDFunctions installs the dispatch entries for those SIDs.
+	SIDFunctions SIDFunctionOps
 	// DefaultEncapSource fills in declared entries that name no source.
 	DefaultEncapSource netip.Addr
 	Logger             *zap.Logger
@@ -169,6 +174,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	return &Manager{
 		advertise:  NewAdvertiseSet(cfg.Advertiser, leases),
+		localSIDs:  NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions),
 		source:     cfg.Source,
 		snapshots:  snapshots,
 		claims:     cfg.Claims,
@@ -294,6 +300,8 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		Logger:             m.logger.Named("plugin." + reg.Name),
 		ApplyMutex:         &m.applyMu,
 		Advertise:          m.advertise,
+		LocalSIDs:          m.localSIDs,
+		OnLocalSIDs:        func(sids []AllocatedSID) { m.reportLocalSIDs(reg.Name, sids) },
 	})
 	if err != nil {
 		return nil, err
@@ -594,6 +602,41 @@ func (m *Manager) endOfReplayBatch(source string) *v1.PluginEventBatch {
 		Sequence:     m.seq.Add(1),
 		ReplaySource: source,
 	}}}
+}
+
+// reportLocalSIDs tells a plugin the addresses its declared local SIDs
+// were given.
+//
+// The plugin chose the names and the host chose the addresses, so this is
+// the only way it learns what to advertise. Delivery is queued like any
+// other event, which keeps it in order behind whatever else the plugin is
+// being told.
+func (m *Manager) reportLocalSIDs(name string, sids []AllocatedSID) {
+	m.mu.Lock()
+	p, ok := m.plugins[name]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	events := make([]*v1.PluginEvent, 0, len(sids))
+	for _, s := range sids {
+		events = append(events, &v1.PluginEvent{
+			Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_LOCAL_SID,
+			Sequence: m.seq.Add(1),
+			LocalSid: &v1.PluginLocalSidAllocated{
+				Name:    s.Name,
+				Sid:     s.SID.String(),
+				Locator: s.Locator,
+			},
+		})
+	}
+	if len(events) == 0 {
+		return
+	}
+	// Queued without blocking: this runs inside the guest call that
+	// declared the set, and waiting on the queue the same worker drains
+	// would deadlock.
+	p.worker.submit(&v1.PluginEventBatch{Events: events})
 }
 
 // routeBatch wraps one route event as a batch for delivery.
