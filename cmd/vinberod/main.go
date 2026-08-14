@@ -419,6 +419,7 @@ func run(cliCtx *cli.Context) error {
 			Source:             routeDemux,
 			Claims:             claimRegistry,
 			Headend:            vin.GetMapOperations(),
+			Advertiser:         bgpSession,
 			DefaultEncapSource: encapSrc,
 			Logger:             lg.Named("cplane"),
 		})

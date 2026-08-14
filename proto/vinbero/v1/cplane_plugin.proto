@@ -160,6 +160,14 @@ enum PluginApplyKind {
   PLUGIN_APPLY_KIND_HEADEND_V4 = 1;
   // The plugin's headend_v6_map entries.
   PLUGIN_APPLY_KIND_HEADEND_V6 = 2;
+  // The routes the plugin wants advertised to BGP peers.
+  //
+  // Advertising is a desired set like any other: the plugin states which
+  // routes it wants originated, and one it stops declaring is withdrawn.
+  // There is no separate withdraw call, because a plugin that has to
+  // remember which routes it previously advertised in order to retract
+  // them is a plugin that gets it wrong after a restart.
+  PLUGIN_APPLY_KIND_ADVERTISE = 3;
 }
 
 // PluginHeadendEntry is one declared headend encap entry.
@@ -181,6 +189,30 @@ message PluginHeadendEntry {
   uint32 mode = 4;
 }
 
+// PluginAdvertisedRoute is one route the plugin wants originated.
+//
+// Only VPN and IPv6 unicast are expressible today, which is what vinbero's
+// advertiser originates. A plugin's own SRv6 behavior rides on those:
+// the behavior is a codepoint inside the SID TLV, not a family of its own.
+message PluginAdvertisedRoute {
+  // Family is the operator-facing name: "vpnv4", "vpnv6", "ipv6_unicast".
+  string family = 1;
+  // RouteDistinguisher, required for the VPN families.
+  string rd = 2;
+  // Prefix in CIDR form.
+  string prefix = 3;
+  // Srv6Sid is the service SID to advertise with the route.
+  string srv6_sid = 4;
+  // EndpointBehavior is the SRv6 endpoint behavior codepoint to put in the
+  // SID TLV. A plugin advertising its own behavior sets the codepoint it
+  // claimed; 0 leaves vinbero's default for the family.
+  uint32 endpoint_behavior = 5;
+  // RouteTargets to attach.
+  repeated string route_targets = 6;
+  // NextHop to advertise. Empty uses the daemon's own.
+  string next_hop = 7;
+}
+
 // PluginApplyChunk is one instalment of a declared set.
 //
 // A set is chunked because it may not fit in one call, and because a
@@ -189,6 +221,7 @@ message PluginHeadendEntry {
 // committed.
 message PluginApplyChunk {
   repeated PluginHeadendEntry headend_entries = 1;
+  repeated PluginAdvertisedRoute advertised_routes = 2;
 }
 
 // PluginConfig is the operator's configuration for a plugin instance,

@@ -1,6 +1,7 @@
 package cplane
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"sync"
@@ -22,6 +23,7 @@ type PluginOps struct {
 	owner      bpf.OwnerTag
 	headend    HeadendMapOps
 	leases     *Leases
+	advertise  *AdvertiseSet
 	defaultSrc netip.Addr
 	logger     *zap.Logger
 	// applyMu is shared by every plugin under one manager, and is held for
@@ -53,6 +55,7 @@ type PluginOps struct {
 type applyTxn struct {
 	kind    v1.PluginApplyKind
 	entries []HeadendDesired
+	routes  []AdvertisedRoute
 }
 
 // PluginOpsConfig builds a PluginOps.
@@ -63,6 +66,9 @@ type PluginOpsConfig struct {
 	Headend HeadendMapOps
 	// Leases arbitrates keys across owners.
 	Leases *Leases
+	// Advertise is the send side. Nil leaves a plugin unable to originate,
+	// which is what a daemon without BGP can honestly offer.
+	Advertise *AdvertiseSet
 	// DefaultEncapSource fills in a declared entry that names no source.
 	DefaultEncapSource netip.Addr
 	// Logger receives the plugin's own log lines.
@@ -104,6 +110,7 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 	return &PluginOps{
 		owner:      cfg.Owner,
 		applyMu:    applyMu,
+		advertise:  cfg.Advertise,
 		headend:    cfg.Headend,
 		leases:     cfg.Leases,
 		defaultSrc: cfg.DefaultEncapSource,
@@ -139,6 +146,10 @@ func (p *PluginOps) ApplyBegin(kind uint32) (uint64, error) {
 	switch applyKind {
 	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
 		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		if p.advertise == nil {
+			return 0, fmt.Errorf("apply begin: this daemon cannot originate routes")
+		}
 	default:
 		return 0, fmt.Errorf("apply begin: unknown kind %d", kind)
 	}
@@ -169,9 +180,10 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	if !ok {
 		return fmt.Errorf("apply put: no open transaction %d", generation)
 	}
-	if len(txn.entries)+len(msg.GetHeadendEntries()) > p.maxEntries {
+	declared := len(msg.GetHeadendEntries()) + len(msg.GetAdvertisedRoutes())
+	if len(txn.entries)+len(txn.routes)+declared > p.maxEntries {
 		return fmt.Errorf("apply put: transaction %d would hold %d entries, limit %d",
-			generation, len(txn.entries)+len(msg.GetHeadendEntries()), p.maxEntries)
+			generation, len(txn.entries)+len(txn.routes)+declared, p.maxEntries)
 	}
 	for _, e := range msg.GetHeadendEntries() {
 		prefix, entry, err := DecodeHeadendEntry(e, p.defaultSrc)
@@ -179,6 +191,13 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 			return fmt.Errorf("apply put: %w", err)
 		}
 		txn.entries = append(txn.entries, HeadendDesired{TriggerPrefix: prefix, Entry: entry})
+	}
+	for _, r := range msg.GetAdvertisedRoutes() {
+		route, err := DecodeAdvertisedRoute(r)
+		if err != nil {
+			return fmt.Errorf("apply put: %w", err)
+		}
+		txn.routes = append(txn.routes, route)
 	}
 	return nil
 }
@@ -198,6 +217,21 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 	p.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("apply commit: no open transaction %d", generation)
+	}
+
+	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
+		p.applyMu.Lock()
+		res, err := p.advertise.Apply(context.Background(), p.owner, txn.routes)
+		p.applyMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
+		p.logger.Info("plugin advertisement set applied",
+			zap.Int("declared", len(txn.routes)),
+			zap.Int("created", res.Created),
+			zap.Int("updated", res.Updated),
+			zap.Int("withdrawn", res.Pruned))
+		return nil
 	}
 
 	af := AFv4
@@ -251,6 +285,14 @@ func (p *PluginOps) Flush() error {
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
 	var firstErr error
+	if p.advertise != nil {
+		// Withdraw before removing the data plane behind it: a route left
+		// advertised for state that is gone is a blackhole its peers keep
+		// sending into.
+		if err := p.advertise.WithdrawOwner(context.Background(), p.owner); err != nil {
+			firstErr = err
+		}
+	}
 	for _, af := range []AddressFamily{AFv4, AFv6} {
 		if _, err := PruneHeadendOwner(p.headend, p.leases, p.owner, af); err != nil && firstErr == nil {
 			firstErr = err

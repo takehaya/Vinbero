@@ -103,6 +103,7 @@ type Manager struct {
 	claims     BehaviorClaims
 	headend    HeadendMapOps
 	leases     *Leases
+	advertise  *AdvertiseSet
 	defaultSrc netip.Addr
 	logger     *zap.Logger
 
@@ -146,6 +147,10 @@ type ManagerConfig struct {
 	Claims BehaviorClaims
 	// Headend is the map surface plugin declarations reconcile into.
 	Headend HeadendMapOps
+	// Advertiser is the send side a plugin originates through. Nil leaves
+	// plugins unable to advertise, which is honest on a daemon with no
+	// BGP session.
+	Advertiser Advertiser
 	// DefaultEncapSource fills in declared entries that name no source.
 	DefaultEncapSource netip.Addr
 	Logger             *zap.Logger
@@ -160,13 +165,15 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	leases := NewLeases()
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	return &Manager{
+		advertise:  NewAdvertiseSet(cfg.Advertiser, leases),
 		source:     cfg.Source,
 		snapshots:  snapshots,
 		claims:     cfg.Claims,
 		headend:    cfg.Headend,
-		leases:     NewLeases(),
+		leases:     leases,
 		defaultSrc: cfg.DefaultEncapSource,
 		logger:     logger,
 		started:    time.Now(),
@@ -286,6 +293,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		DefaultEncapSource: m.defaultSrc,
 		Logger:             m.logger.Named("plugin." + reg.Name),
 		ApplyMutex:         &m.applyMu,
+		Advertise:          m.advertise,
 	})
 	if err != nil {
 		return nil, err

@@ -126,9 +126,17 @@ func parseRouteTargets(rts []string) ([]gobgppkt.ExtendedCommunityInterface, err
 }
 
 // vpnEndpointBehavior is the SRv6 endpoint behavior advertised with a
-// VPN route: End.DT4 for VPNv4, End.DT6 for VPNv6.
-func vpnEndpointBehavior(f bgp.Family) gobgppkt.SRBehavior {
-	if f == bgp.FamilyVPNv6 {
+// VPN route: End.DT4 for VPNv4, End.DT6 for VPNv6, unless the route names
+// one of its own.
+//
+// The override is for a plugin advertising a behavior it implements
+// itself. The codepoint is not validated against the behaviors vinbero
+// knows, because an unrecognized one is exactly the point.
+func vpnEndpointBehavior(r bgp.VPNRoute) gobgppkt.SRBehavior {
+	if r.EndpointBehavior != 0 {
+		return gobgppkt.SRBehavior(r.EndpointBehavior)
+	}
+	if r.Family == bgp.FamilyVPNv6 {
 		return gobgppkt.END_DT6
 	}
 	return gobgppkt.END_DT4
@@ -172,7 +180,7 @@ func encodeVPNPath(r bgp.VPNRoute) (*apiutil.Path, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse SRv6 SID %q: %w", r.SRv6SID, err)
 		}
-		infoSubTLV := gobgppkt.NewSRv6InformationSubTLV(sid, vpnEndpointBehavior(r.Family))
+		infoSubTLV := gobgppkt.NewSRv6InformationSubTLV(sid, vpnEndpointBehavior(r))
 		svcTLV := gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L3Service, infoSubTLV)
 		attrs = append(attrs, gobgppkt.NewPathAttributePrefixSID(svcTLV))
 	}

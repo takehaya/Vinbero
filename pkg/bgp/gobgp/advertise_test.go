@@ -46,10 +46,10 @@ func TestEncodeVPNPath_RoundTrip(t *testing.T) {
 
 func TestEncodeVPNPath_VPNv6Behavior(t *testing.T) {
 	// VPNv6 must advertise End.DT6, VPNv4 End.DT4.
-	if got := vpnEndpointBehavior(bgp.FamilyVPNv6); got != gobgppkt.END_DT6 {
+	if got := vpnEndpointBehavior(bgp.VPNRoute{Family: bgp.FamilyVPNv6}); got != gobgppkt.END_DT6 {
 		t.Errorf("VPNv6 behavior = %v, want END_DT6", got)
 	}
-	if got := vpnEndpointBehavior(bgp.FamilyVPNv4); got != gobgppkt.END_DT4 {
+	if got := vpnEndpointBehavior(bgp.VPNRoute{Family: bgp.FamilyVPNv4}); got != gobgppkt.END_DT4 {
 		t.Errorf("VPNv4 behavior = %v, want END_DT4", got)
 	}
 }
@@ -175,5 +175,20 @@ func TestAdvertiseUnicast(t *testing.T) {
 		Prefix: "2001:db8:dead::/64", NextHop: "fd00:f1b::2",
 	}); err != nil {
 		t.Fatalf("AdvertiseUnicast: %v", err)
+	}
+}
+
+// A plugin advertising a behavior it implements itself names the codepoint
+// on the route. It is not checked against the behaviors vinbero knows,
+// because an unrecognized one is exactly the point.
+func TestVPNEndpointBehaviorOverride(t *testing.T) {
+	r := bgp.VPNRoute{Family: bgp.FamilyVPNv4, EndpointBehavior: 0xFE01}
+	if got := vpnEndpointBehavior(r); uint16(got) != 0xFE01 {
+		t.Fatalf("behavior = %#x, want the route's own %#x", uint16(got), 0xFE01)
+	}
+	// Zero still means the family default, so ordinary routes are
+	// unaffected.
+	if got := vpnEndpointBehavior(bgp.VPNRoute{Family: bgp.FamilyVPNv4}); got != gobgppkt.END_DT4 {
+		t.Fatalf("behavior = %v, want End.DT4 for a route naming none", got)
 	}
 }
