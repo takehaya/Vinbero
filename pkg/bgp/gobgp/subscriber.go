@@ -97,7 +97,65 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 	case bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6:
 		ev.MUP = decodeMUPRoute(p)
 	}
+	ev.EndpointBehavior = decodeEndpointBehavior(p.Attrs)
+	ev.UnknownAttrs = decodeUnknownAttrs(p.Attrs)
 	return ev, true
+}
+
+// decodeEndpointBehavior returns the SRv6 Endpoint Behavior codepoint of
+// the path's service SID, or 0 when it carries none.
+//
+// It reads the codepoint straight off the wire without checking it against
+// the behaviors Vinbero implements: an unrecognized value is the whole
+// point, since that is what an operator's own behavior looks like here and
+// what a plugin claims. Transposition does not apply -- only the SID bytes
+// are transposed, never the behavior field -- so this needs no label.
+func decodeEndpointBehavior(attrs []gobgppkt.PathAttributeInterface) uint16 {
+	for _, a := range attrs {
+		psid, ok := a.(*gobgppkt.PathAttributePrefixSID)
+		if !ok {
+			continue
+		}
+		for _, tlv := range psid.TLVs {
+			svc, ok := tlv.(*gobgppkt.SRv6ServiceTLV)
+			if !ok {
+				continue
+			}
+			for _, st := range svc.SubTLVs {
+				info, ok := st.(*gobgppkt.SRv6InformationSubTLV)
+				if !ok || len(info.SID) != 16 {
+					continue
+				}
+				// First SID wins, matching srv6L2ServiceSIDBytes so the
+				// behavior always describes the SID the rest of the decode
+				// settled on.
+				return info.EndpointBehavior
+			}
+		}
+	}
+	return 0
+}
+
+// decodeUnknownAttrs carries through the path attributes gobgp could not
+// type, so a consumer that understands one can read it. Returns nil for the
+// common case of a path with no unknown attribute.
+//
+// The bytes are copied: gobgp owns the decoded path and a consumer may keep
+// the event past this call.
+func decodeUnknownAttrs(attrs []gobgppkt.PathAttributeInterface) []bgp.UnknownAttribute {
+	var out []bgp.UnknownAttribute
+	for _, a := range attrs {
+		u, ok := a.(*gobgppkt.PathAttributeUnknown)
+		if !ok {
+			continue
+		}
+		out = append(out, bgp.UnknownAttribute{
+			Type:  uint8(u.GetType()),
+			Flags: uint8(u.GetFlags()),
+			Value: append([]byte(nil), u.Value...),
+		})
+	}
+	return out
 }
 
 // pathSource extracts the path's identity: which neighbor sent it and,
