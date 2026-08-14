@@ -69,6 +69,10 @@ type Demux struct {
 	// than to the built-in appliers. Nil until SetClaimRegistry is called,
 	// in which case nothing is claimed.
 	claims *ClaimRegistry
+	// ledger remembers which NLRIs were advertised under a claimed
+	// behavior, so a withdraw -- which carries no attributes to decide
+	// from -- inherits the decision its advertise made.
+	ledger *claimLedger
 
 	mu        sync.RWMutex
 	consumers []*consumer
@@ -85,7 +89,7 @@ func New(sub bgp.RouteSubscriber, lister bgp.RouteLister, logger *zap.Logger) *D
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Demux{sub: sub, lister: lister, logger: logger}
+	return &Demux{sub: sub, lister: lister, logger: logger, ledger: newClaimLedger()}
 }
 
 // SetClaimRegistry installs the registry that decides which endpoint
@@ -224,8 +228,9 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	if ev.Source.IsLocal() {
 		return
 	}
+	claimed := d.isClaimed(ev)
+
 	d.mu.RLock()
-	claimed := d.claims.IsClaimed(ev.EndpointBehavior)
 	targets := make([]*consumer, 0, len(d.consumers))
 	for _, c := range d.consumers {
 		if !c.wants(ev.Family) {
@@ -244,6 +249,64 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	for _, c := range targets {
 		c.handler(ev)
 	}
+}
+
+// BuiltinSnapshotHandler wraps h with the same rules the demux applies to
+// its own delivery, for a snapshot a built-in consumer pulls on demand
+// rather than receiving through the demux.
+//
+// Such a replay would otherwise be a hole in the claim rule: the applier's
+// EVPN rescue re-reads the loc-rib directly when an import surface widens,
+// and without this it would pick up exactly the routes dispatch withheld
+// from it. A nil demux returns h unchanged, so a daemon with no demux
+// behaves as it did before.
+func (d *Demux) BuiltinSnapshotHandler(h bgp.RouteHandler) bgp.RouteHandler {
+	if d == nil || h == nil {
+		return h
+	}
+	return func(ev bgp.RouteEvent) {
+		if ev.Source.IsLocal() {
+			return
+		}
+		if d.isClaimed(ev) {
+			return
+		}
+		h(ev)
+	}
+}
+
+// isClaimed decides whether a route belongs to a plugin rather than to the
+// built-in appliers.
+//
+// An advertise is decided by its endpoint behavior and the answer is
+// recorded against its NLRI. A withdraw carries no attributes at all -- BGP
+// sends only the NLRI being removed -- so its behavior always decodes as 0
+// and the question can only be answered from what the advertise recorded.
+// Without that, every withdraw of a claimed route would reach the built-in
+// applier as a delete for state it never installed.
+func (d *Demux) isClaimed(ev bgp.RouteEvent) bool {
+	key := nlriKey(ev)
+	if ev.IsWithdraw {
+		if d.ledger.isClaimed(key) {
+			// The route is going away; stop tracking it so the ledger
+			// follows the live routes rather than growing forever.
+			d.ledger.forget(key)
+			return true
+		}
+		return false
+	}
+
+	d.mu.RLock()
+	claims := d.claims
+	d.mu.RUnlock()
+	if claims.IsClaimed(ev.EndpointBehavior) {
+		d.ledger.recordAdvertise(key)
+		return true
+	}
+	// A prefix can be re-advertised under a different behavior; drop any
+	// stale record so a later withdraw is not diverted on old information.
+	d.ledger.forget(key)
+	return false
 }
 
 // replay feeds c a loc-rib snapshot of the given families, or of every
@@ -266,10 +329,7 @@ func (d *Demux) replay(c *consumer, families []bgp.Family) {
 			// The snapshot applies the same claim rule as the live stream:
 			// a built-in consumer registering after a plugin claimed a
 			// behavior must not pick those routes up from the replay.
-			d.mu.RLock()
-			claimed := d.claims.IsClaimed(ev.EndpointBehavior)
-			d.mu.RUnlock()
-			if claimed && c.builtin {
+			if d.isClaimed(ev) && c.builtin {
 				return
 			}
 			c.handler(ev)

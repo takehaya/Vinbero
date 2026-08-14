@@ -97,9 +97,19 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 	case bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6:
 		ev.MUP = decodeMUPRoute(p)
 	}
-	ev.EndpointBehavior = decodeEndpointBehavior(p.Attrs)
+	ev.EndpointBehavior = decodeEndpointBehavior(p.Attrs, vpnLabel(p))
 	ev.UnknownAttrs = decodeUnknownAttrs(p.Attrs)
 	return ev, true
+}
+
+// vpnLabel returns the path's first MPLS label, or 0 when the NLRI carries
+// none. Only the transposition check needs it.
+func vpnLabel(p *apiutil.Path) uint32 {
+	vpn, ok := p.Nlri.(*gobgppkt.LabeledVPNIPAddrPrefix)
+	if !ok || len(vpn.Labels.Labels) == 0 {
+		return 0
+	}
+	return vpn.Labels.Labels[0]
 }
 
 // decodeEndpointBehavior returns the SRv6 Endpoint Behavior codepoint of
@@ -108,9 +118,15 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 // It reads the codepoint straight off the wire without checking it against
 // the behaviors Vinbero implements: an unrecognized value is the whole
 // point, since that is what an operator's own behavior looks like here and
-// what a plugin claims. Transposition does not apply -- only the SID bytes
-// are transposed, never the behavior field -- so this needs no label.
-func decodeEndpointBehavior(attrs []gobgppkt.PathAttributeInterface) uint16 {
+// what a plugin claims. Transposition does not apply to the codepoint --
+// only SID bytes are transposed, never the behavior field.
+//
+// It must name the same sub-TLV srv6L2ServiceSIDBytes settles on, or an
+// event could carry one SID's bytes with another's behavior, so it skips a
+// malformed-transposition sub-TLV exactly as that function does. label is
+// the route's VPN label, needed only to make that skip decision the same
+// way; the codepoint itself never depends on it.
+func decodeEndpointBehavior(attrs []gobgppkt.PathAttributeInterface, label uint32) uint16 {
 	for _, a := range attrs {
 		psid, ok := a.(*gobgppkt.PathAttributePrefixSID)
 		if !ok {
@@ -126,9 +142,15 @@ func decodeEndpointBehavior(attrs []gobgppkt.PathAttributeInterface) uint16 {
 				if !ok || len(info.SID) != 16 {
 					continue
 				}
-				// First SID wins, matching srv6L2ServiceSIDBytes so the
-				// behavior always describes the SID the rest of the decode
-				// settled on.
+				if length, offset, ok := transpositionParams(info); ok {
+					folded := make([]byte, 16)
+					copy(folded, info.SID)
+					if !foldTransposedLabel(folded, label, length, offset) {
+						// The SID decode skips this sub-TLV, so its
+						// behavior must be skipped with it.
+						continue
+					}
+				}
 				return info.EndpointBehavior
 			}
 		}

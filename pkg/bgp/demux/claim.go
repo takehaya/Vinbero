@@ -50,6 +50,13 @@ func NewClaimRegistry(reserved []uint16) *ClaimRegistry {
 // Re-claiming the exact same set under the same plugin name succeeds, which
 // is what an in-place upgrade of a plugin does.
 func (r *ClaimRegistry) Claim(plugin string, codepoints []uint16) error {
+	if r == nil {
+		// A daemon started without BGP has no registry, and a plugin
+		// asking to claim a behavior there cannot be served. Refusing is
+		// the honest answer; the alternative is a nil dereference in the
+		// registration path.
+		return fmt.Errorf("claim: no claim registry (behavior claims need BGP enabled)")
+	}
 	if plugin == "" {
 		return fmt.Errorf("claim: empty plugin name")
 	}
@@ -75,6 +82,9 @@ func (r *ClaimRegistry) Claim(plugin string, codepoints []uint16) error {
 // Release drops every codepoint held by plugin. Safe to call for a plugin
 // that holds none.
 func (r *ClaimRegistry) Release(plugin string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for cp, holder := range r.byCodepoint {
@@ -105,6 +115,9 @@ func (r *ClaimRegistry) IsClaimed(codepoint uint16) bool {
 
 // Claims returns the codepoints held by plugin.
 func (r *ClaimRegistry) Claims(plugin string) []uint16 {
+	if r == nil {
+		return nil
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []uint16
