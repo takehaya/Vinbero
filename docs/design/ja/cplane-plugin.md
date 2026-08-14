@@ -215,10 +215,20 @@ daemon と同じ runtime を回し、capability 面だけ記録用に差し替�
 replay、restart、commit 拒否といった本番で耐える必要のある流れを method
 として提供します。
 
-TinyGo はまだ正式 toolchain ではありません。WASI を link しない target の
-既定が `gc=leaking` で、長寿命の plugin では memory 上限に到達します。
-`gc=conservative` が SDK と protobuf codec の soak test を通ることが公式化
-の条件です。
+TinyGo は次の flag で使えます。
+
+```sh
+tinygo build -o plugin.wasm -target=wasm-unknown \
+    -scheduler=none -gc=conservative -panic=trap .
+```
+
+`gc=conservative` は必須です。WASI を link しない target の既定は
+`gc=leaking` で memory を一切回収しません。control plane plugin は daemon
+と同じ寿命で走り、ネットワークの経路変化を全部見るので、回収しない
+plugin は memory 上限に到達します。harness の churn test は live set を
+一定に保ったまま advertise と withdraw を繰り返すので、増える分は garbage
+だけです。この test を leaking build は途中で落ち、conservative build は
+1 MiB のまま完走します。
 
 ## 参照
 

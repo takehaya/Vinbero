@@ -44,19 +44,25 @@ or directly:
 
 ```sh
 tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=leaking -panic=trap .
+    -scheduler=none -gc=conservative -panic=trap .
 ```
 
-The flags are not incidental. `wasm-unknown` is the target without WASI,
-which the daemon does not link; `scheduler=none` because the plugin has no
-goroutines and the daemon calls it one event batch at a time; `panic=trap`
-because a panic is a bug rather than a control-flow tool, and the daemon
-treats a trap as a failed instance to restart.
+The flags are not incidental.
 
-`gc=leaking` never reclaims memory, which is fine for an example and wrong
-for a long-running plugin: a real one should use `-gc=conservative` and be
-soak-tested against the instance memory limit. That is why TinyGo is not
-yet a fully supported toolchain for this SDK.
+`wasm-unknown` is the target without WASI, which the daemon does not link.
+
+`scheduler=none` because the plugin has no goroutines and the daemon calls
+it one event batch at a time.
+
+`panic=trap` because a panic is a bug rather than a control-flow tool, and
+the daemon treats a trap as a failed instance to restart.
+
+`gc=conservative` because a control-plane plugin runs for the life of the
+daemon and sees every route change in the network. TinyGo's default for
+this target is `gc=leaking`, which never reclaims: built that way this
+example dies partway through the SDK's churn test, while the conservative
+build runs indefinitely in a megabyte. See
+`TestPluginSurvivesSustainedChurn` in `sdk/go/cplaneharness`.
 
 ## Run
 

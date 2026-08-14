@@ -238,4 +238,4 @@ cplane-wasm-testdata: ## rebuild the control-plane plugin wasm test fixtures (re
 cplane-example: ## build the control-plane plugin example (requires tinygo)
 	cd sdk/examples/cplane-custom-behavior && \
 		tinygo build -o plugin.wasm -target=wasm-unknown \
-			-scheduler=none -gc=leaking -panic=trap .
+			-scheduler=none -gc=conservative -panic=trap .
