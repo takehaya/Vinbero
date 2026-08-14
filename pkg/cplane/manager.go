@@ -24,6 +24,15 @@ type EventSource interface {
 	Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error)
 }
 
+// QuietSource can add a consumer without replaying to it, for a consumer
+// that takes its own snapshot instead. The manager prefers it: the replay
+// a source performs on registration goes through the live path, where a
+// plugin that is behind drops events, and a dropped snapshot leaves it
+// declaring a set that prunes the routes it never saw.
+type QuietSource interface {
+	RegisterQuiet(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error)
+}
+
 // SnapshotSource can replay the current rib to one consumer. The demux
 // implements it. It is separate from EventSource because a source that
 // only streams live updates is still usable -- the plugin just cannot have
@@ -73,7 +82,19 @@ type Registration struct {
 	Behaviors []uint16
 	// Limits bound the instance; zero fields take defaults.
 	Limits wasm.Limits
+	// TickInterval asks for the plugin's periodic callback to be driven at
+	// this rate. Zero leaves it undriven, which is right for a purely
+	// event-driven plugin. The manager clamps it up to MinTickInterval: a
+	// plugin cannot ask to be woken faster than the daemon is willing to
+	// call into a sandbox.
+	TickInterval time.Duration
 }
+
+// MinTickInterval is the fastest a plugin's periodic callback is driven.
+// A tick is a call into the guest under the same budget as an event, so a
+// plugin asking for a millisecond would spend the daemon's time rather
+// than its own.
+const MinTickInterval = 100 * time.Millisecond
 
 // Manager owns the running control-plane plugins.
 type Manager struct {
@@ -84,6 +105,14 @@ type Manager struct {
 	leases     *Leases
 	defaultSrc netip.Addr
 	logger     *zap.Logger
+
+	// applyMu serializes reconciles across every plugin this manager runs.
+	applyMu sync.Mutex
+
+	// started is the epoch the monotonic clock a plugin sees counts from.
+	// It is per daemon rather than per instance so a plugin's readings
+	// stay comparable across a restart.
+	started time.Time
 
 	mu      sync.Mutex
 	plugins map[string]*plugin
@@ -140,6 +169,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		leases:     NewLeases(),
 		defaultSrc: cfg.DefaultEncapSource,
 		logger:     logger,
+		started:    time.Now(),
 		plugins:    make(map[string]*plugin),
 	}, nil
 }
@@ -194,7 +224,13 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	}
 
 	if m.source != nil {
-		cancel, err := m.source.Register(reg.Name, reg.Families, m.handlerFor(reg.Name))
+		subscribe := m.source.Register
+		quiet := false
+		if qs, ok := m.source.(QuietSource); ok {
+			subscribe = qs.RegisterQuiet
+			quiet = true
+		}
+		cancel, err := subscribe(reg.Name, reg.Families, m.handlerFor(reg.Name))
 		if err != nil {
 			// Undo without flushing: the operator asked for a plugin, not
 			// for its predecessor's entries to be deleted. On an upgrade
@@ -223,6 +259,14 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		if cancel != nil {
 			cancel()
 		}
+
+		// Take the snapshot here rather than letting the source replay
+		// through the live path, so nothing of it can be dropped. A
+		// source that cannot register quietly has already replayed, and
+		// this repairs whatever that dropped.
+		if quiet || p.worker.takeSnapshotDebt() {
+			m.snapshot(p)
+		}
 	}
 
 	m.logger.Info("control-plane plugin registered",
@@ -241,6 +285,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		Leases:             m.leases,
 		DefaultEncapSource: m.defaultSrc,
 		Logger:             m.logger.Named("plugin." + reg.Name),
+		ApplyMutex:         &m.applyMu,
 	})
 	if err != nil {
 		return nil, err
@@ -257,9 +302,15 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		return nil, err
 	}
 	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops}
+	interval := reg.TickInterval
+	if interval > 0 && interval < MinTickInterval {
+		interval = MinTickInterval
+	}
 	p.worker = newWorker(reg.Name, m.logger, inst.HandleEvents,
 		func(err error) { m.instanceFailed(p, err) },
-		func(status *v1.PluginEventStatus) { m.delivered(p, status) })
+		func(status *v1.PluginEventStatus) { m.delivered(p, status) },
+		func() error { return m.tick(p) },
+		interval)
 	return p, nil
 }
 
@@ -474,6 +525,7 @@ func (m *Manager) snapshot(p *plugin) {
 			zap.String("plugin", p.name), zap.Error(err))
 		return
 	}
+	p.worker.submitBlocking(m.endOfReplayBatch(ReplaySourceBGP))
 	m.logger.Info("replayed the rib to a plugin",
 		zap.String("plugin", p.name), zap.Int("routes", count))
 }
@@ -494,9 +546,46 @@ func (m *Manager) snapshotFor(name string) error {
 	if m.snapshots == nil {
 		return fmt.Errorf("cplane: the event source serves no snapshot")
 	}
-	return m.snapshots.SnapshotTo(p.reg.Families, func(ev bgp.RouteEvent) {
+	if err := m.snapshots.SnapshotTo(p.reg.Families, func(ev bgp.RouteEvent) {
 		p.worker.submitBlocking(m.routeBatch(ev))
-	})
+	}); err != nil {
+		return err
+	}
+	p.worker.submitBlocking(m.endOfReplayBatch(ReplaySourceBGP))
+	return nil
+}
+
+// tick fires the plugin's periodic callback with the host's monotonic
+// clock, reading the instance under the lock because a restart may have
+// replaced it since the worker started.
+func (m *Manager) tick(p *plugin) error {
+	m.mu.Lock()
+	inst := p.inst
+	dead := p.dead
+	m.mu.Unlock()
+	if dead {
+		return nil
+	}
+	return inst.Tick(context.Background(), int64(time.Since(m.started)))
+}
+
+// ReplaySourceBGP names the BGP rib in an end-of-replay event. Sources are
+// named rather than counted so a plugin subscribing to more of them later
+// does not have to guess which one finished.
+const ReplaySourceBGP = "bgp"
+
+// endOfReplayBatch tells a plugin that one source has finished replaying.
+//
+// A plugin that makes aggregate decisions -- composing a SID list from
+// several routes, withdrawing on a health signal -- has to know when it
+// has seen enough to decide. Without this it draws its first conclusions
+// from a partial view, and the churn is visible to its peers.
+func (m *Manager) endOfReplayBatch(source string) *v1.PluginEventBatch {
+	return &v1.PluginEventBatch{Events: []*v1.PluginEvent{{
+		Kind:         v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY,
+		Sequence:     m.seq.Add(1),
+		ReplaySource: source,
+	}}}
 }
 
 // routeBatch wraps one route event as a batch for delivery.

@@ -67,10 +67,10 @@ func TestExamplePluginSteersItsOwnBehavior(t *testing.T) {
 	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
 	waitDelivered(t, m, "custom-behavior")
 
-	if len(ops.v4) != 1 {
-		t.Fatalf("data plane holds %d entries, want the one the plugin declared", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("data plane holds %d entries, want the one the plugin declared", ops.countV4())
 	}
-	entry, ok := ops.v4["10.0.0.0/24"]
+	entry, ok := ops.getV4("10.0.0.0/24")
 	if !ok {
 		t.Fatalf("entries are keyed %v, want the advertised prefix", sortedV4(ops))
 	}
@@ -93,8 +93,8 @@ func TestExamplePluginHandlesWithdrawWithoutAttributes(t *testing.T) {
 	m, src, ops := exampleManager(t)
 	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
 	waitDelivered(t, m, "custom-behavior")
-	if len(ops.v4) != 1 {
-		t.Fatalf("setup: %d entries, want 1", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("setup: %d entries, want 1", ops.countV4())
 	}
 
 	withdraw := customBehaviorRoute("10.0.0.0/24", "")
@@ -103,8 +103,8 @@ func TestExamplePluginHandlesWithdrawWithoutAttributes(t *testing.T) {
 	src.emit("custom-behavior", withdraw)
 	waitDelivered(t, m, "custom-behavior")
 
-	if len(ops.v4) != 0 {
-		t.Fatalf("withdraw left %d entries behind", len(ops.v4))
+	if ops.countV4() != 0 {
+		t.Fatalf("withdraw left %d entries behind", ops.countV4())
 	}
 }
 
@@ -115,7 +115,7 @@ func TestExamplePluginIgnoresOtherBehaviors(t *testing.T) {
 	other.EndpointBehavior = 0x0013 // End.DT4
 	src.emit("custom-behavior", other)
 	waitDelivered(t, m, "custom-behavior")
-	if len(ops.v4) != 0 {
+	if ops.countV4() != 0 {
 		t.Fatalf("the plugin acted on a behavior it does not own: %v", sortedV4(ops))
 	}
 }
@@ -128,7 +128,7 @@ func TestExamplePluginDeclaresTheWholeSet(t *testing.T) {
 	waitDelivered(t, m, "custom-behavior")
 	src.emit("custom-behavior", customBehaviorRoute("10.0.2.0/24", "fd00:2::2"))
 	waitDelivered(t, m, "custom-behavior")
-	if len(ops.v4) != 2 {
+	if ops.countV4() != 2 {
 		t.Fatalf("data plane holds %v, want both prefixes", sortedV4(ops))
 	}
 
@@ -151,8 +151,8 @@ func TestExamplePluginConvergesAfterRestart(t *testing.T) {
 	m, src, ops := exampleManager(t)
 	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
 	waitDelivered(t, m, "custom-behavior")
-	if len(ops.v4) != 1 {
-		t.Fatalf("setup: %d entries, want 1", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("setup: %d entries, want 1", ops.countV4())
 	}
 
 	// Re-registering is the upgrade path and stands in for a restart: a
@@ -165,13 +165,13 @@ func TestExamplePluginConvergesAfterRestart(t *testing.T) {
 		t.Fatalf("re-register: %v", err)
 	}
 	// The state is still there across the swap.
-	if len(ops.v4) != 1 {
+	if ops.countV4() != 1 {
 		t.Fatalf("the restart disturbed the data plane: %v", sortedV4(ops))
 	}
 	// The new instance knows nothing yet; the replay is what tells it.
 	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
 	waitDelivered(t, m, "custom-behavior")
-	if len(ops.v4) != 1 {
+	if ops.countV4() != 1 {
 		t.Fatalf("after replay the data plane holds %v, want the same single entry", sortedV4(ops))
 	}
 }
@@ -207,7 +207,7 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	// The codepoint it was built with is no longer the one it claims.
 	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
 	waitDelivered(t, m, "custom-behavior")
-	if len(ops.v4) != 0 {
+	if ops.countV4() != 0 {
 		t.Fatalf("the plugin acted on its compiled-in behavior after being reconfigured: %v", sortedV4(ops))
 	}
 
@@ -215,7 +215,7 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	configured.EndpointBehavior = 0xFE02
 	src.emit("custom-behavior", configured)
 	waitDelivered(t, m, "custom-behavior")
-	if len(ops.v4) != 1 {
+	if ops.countV4() != 1 {
 		t.Fatalf("the plugin ignored its configured behavior: %v", sortedV4(ops))
 	}
 }

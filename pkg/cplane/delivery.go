@@ -3,6 +3,7 @@ package cplane
 import (
 	"context"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -39,6 +40,11 @@ type worker struct {
 	handler  func(ctx context.Context, batch []byte) ([]byte, error)
 	onFail   func(err error)
 	onStatus func(*v1.PluginEventStatus)
+	// tick fires the plugin's periodic callback. It runs on this
+	// goroutine like everything else, so a tick can never overlap an event
+	// batch inside the guest.
+	tick     func() error
+	interval time.Duration
 
 	mu      sync.Mutex
 	dropped uint64
@@ -60,6 +66,8 @@ func newWorker(
 	handler func(ctx context.Context, batch []byte) ([]byte, error),
 	onFail func(err error),
 	onStatus func(*v1.PluginEventStatus),
+	tick func() error,
+	interval time.Duration,
 ) *worker {
 	w := &worker{
 		name:     name,
@@ -70,6 +78,8 @@ func newWorker(
 		handler:  handler,
 		onFail:   onFail,
 		onStatus: onStatus,
+		tick:     tick,
+		interval: interval,
 	}
 	go w.run()
 	return w
@@ -109,9 +119,17 @@ func (w *worker) submit(batch *v1.PluginEventBatch) {
 	}
 }
 
-// run consumes the queue until stopped.
+// run consumes the queue, and fires the periodic callback, until stopped.
 func (w *worker) run() {
 	defer close(w.done)
+
+	var ticks <-chan time.Time
+	if w.tick != nil && w.interval > 0 {
+		t := time.NewTicker(w.interval)
+		defer t.Stop()
+		ticks = t.C
+	}
+
 	for {
 		select {
 		case <-w.stop:
@@ -121,6 +139,12 @@ func (w *worker) run() {
 			w.mu.Lock()
 			w.processed++
 			w.mu.Unlock()
+		case <-ticks:
+			// A tick that fails costs the instance, like any other call
+			// into the guest, so it goes through the same handler.
+			if err := w.tick(); err != nil {
+				w.onFail(err)
+			}
 		}
 	}
 }

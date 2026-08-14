@@ -24,6 +24,16 @@ type PluginOps struct {
 	leases     *Leases
 	defaultSrc netip.Addr
 	logger     *zap.Logger
+	// applyMu is shared by every plugin under one manager, and is held for
+	// the whole of a reconcile.
+	//
+	// A reconcile is a read-then-write sequence: it lists the map to work
+	// out what this owner holds, diffs, and writes. Two plugins doing that
+	// at once would have one of them list a map the other is halfway
+	// through changing. Leases keep them off each other's keys, but not
+	// out of each other's view of the map, and commits are rare enough
+	// that serializing them costs nothing worth measuring.
+	applyMu *sync.Mutex
 
 	mu sync.Mutex
 	// open holds the transactions the plugin has begun but not finished.
@@ -61,6 +71,10 @@ type PluginOpsConfig struct {
 	// plugin can accumulate; zero takes a default.
 	MaxOpenTransactions      int
 	MaxEntriesPerTransaction int
+	// ApplyMutex serializes reconciles across the plugins that share a
+	// data plane. Nil gives this plugin one of its own, which is only
+	// right when it is the sole writer.
+	ApplyMutex *sync.Mutex
 }
 
 // NewPluginOps builds the capability surface for one plugin.
@@ -83,8 +97,13 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 	if maxEntries <= 0 {
 		maxEntries = 4096
 	}
+	applyMu := cfg.ApplyMutex
+	if applyMu == nil {
+		applyMu = &sync.Mutex{}
+	}
 	return &PluginOps{
 		owner:      cfg.Owner,
+		applyMu:    applyMu,
 		headend:    cfg.Headend,
 		leases:     cfg.Leases,
 		defaultSrc: cfg.DefaultEncapSource,
@@ -185,7 +204,9 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
 		af = AFv6
 	}
+	p.applyMu.Lock()
 	res, err := ApplyHeadendSet(p.headend, p.leases, p.owner, af, txn.entries)
+	p.applyMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("apply commit: %w", err)
 	}
@@ -227,6 +248,8 @@ func (p *PluginOps) DiscardTransactions() {
 // a plugin that dies is restarted and re-declares, so flushing there would
 // blackhole traffic for the length of a restart.
 func (p *PluginOps) Flush() error {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
 	var firstErr error
 	for _, af := range []AddressFamily{AFv4, AFv6} {
 		if _, err := PruneHeadendOwner(p.headend, p.leases, p.owner, af); err != nil && firstErr == nil {

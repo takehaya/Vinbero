@@ -104,7 +104,19 @@ func (d *Demux) SetClaimRegistry(claims *ClaimRegistry) {
 // Register adds a plugin consumer. See RegisterBuiltin for Vinbero's own
 // appliers, which are additionally shielded from plugin-claimed routes.
 func (d *Demux) Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
-	return d.register(name, families, handler, false)
+	return d.register(name, families, handler, false, true)
+}
+
+// RegisterQuiet adds a consumer without replaying the rib to it.
+//
+// It is for a consumer that pulls its own snapshot through SnapshotTo. The
+// replay Register performs delivers through the same handler as a live
+// update, which a consumer that queues and drops would treat the same way
+// -- and a dropped snapshot is worse than a dropped update, because a
+// consumer declaring desired sets prunes what it never saw. Such a
+// consumer takes the snapshot itself, where it can afford to block.
+func (d *Demux) RegisterQuiet(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
+	return d.register(name, families, handler, false, false)
 }
 
 // RegisterBuiltin adds a consumer implementing Vinbero's own behaviors. It
@@ -112,7 +124,7 @@ func (d *Demux) Register(name string, families []bgp.Family, handler bgp.RouteHa
 // has claimed: acting on a claimed route would install an entry with the
 // wrong semantics and collide with the plugin's own write to that prefix.
 func (d *Demux) RegisterBuiltin(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
-	return d.register(name, families, handler, true)
+	return d.register(name, families, handler, true, true)
 }
 
 // register adds a consumer. families restricts delivery; passing none
@@ -122,7 +134,7 @@ func (d *Demux) RegisterBuiltin(name string, families []bgp.Family, handler bgp.
 // Registering after Start replays the loc-rib for the declared families
 // (every family the lister knows, when none were declared) so the consumer
 // converges on routes that arrived before it existed.
-func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHandler, builtin bool) (func(), error) {
+func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHandler, builtin, wantReplay bool) (func(), error) {
 	if handler == nil {
 		return nil, fmt.Errorf("demux: register %q: nil handler", name)
 	}
@@ -142,7 +154,7 @@ func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHa
 	d.nextID++
 	d.consumers = append(d.consumers, c)
 	d.ids = append(d.ids, id)
-	replay := d.started
+	replay := d.started && wantReplay
 	d.mu.Unlock()
 
 	d.logger.Info("BGP demux consumer registered",

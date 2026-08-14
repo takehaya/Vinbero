@@ -74,6 +74,12 @@ func (f *fakeSource) emit(name string, ev bgp.RouteEvent) bool {
 	return true
 }
 
+// RegisterQuiet adds a consumer without replaying, like the demux does for
+// a consumer that takes its own snapshot.
+func (f *fakeSource) RegisterQuiet(name string, families []bgp.Family, h bgp.RouteHandler) (func(), error) {
+	return f.Register(name, families, h)
+}
+
 // SnapshotTo replays what the fake source is holding, standing in for the
 // demux's loc-rib snapshot.
 func (f *fakeSource) SnapshotTo(_ []bgp.Family, h bgp.RouteHandler) error {
@@ -203,10 +209,10 @@ func TestRegisterRunsPluginAndDeliversEvents(t *testing.T) {
 	}
 	waitDelivered(t, m, "declare")
 	// The fixture declares one headend entry per event it sees.
-	if len(ops.v4) != 1 {
-		t.Fatalf("data plane holds %d entries, want the one the plugin declared", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("data plane holds %d entries, want the one the plugin declared", ops.countV4())
 	}
-	for prefix, entry := range ops.v4 {
+	for prefix, entry := range ops.snapshotV4() {
 		if prefix != "10.99.0.0/24" {
 			t.Errorf("declared prefix = %q, want 10.99.0.0/24", prefix)
 		}
@@ -216,7 +222,7 @@ func TestRegisterRunsPluginAndDeliversEvents(t *testing.T) {
 	}
 	// Everything the plugin wrote carries its own owner tag.
 	want := bpf.OwnerPluginBundle("declare")
-	for prefix, owner := range ops.owner4 {
+	for prefix, owner := range ops.v4Owners() {
 		if owner != want {
 			t.Errorf("entry %q is owned by %q, want %q", prefix, owner, want)
 		}
@@ -234,15 +240,15 @@ func TestUnregisterFlushesOwnedState(t *testing.T) {
 	}
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
 	waitDelivered(t, m, "declare")
-	if len(ops.v4) != 1 {
-		t.Fatalf("setup: data plane holds %d entries, want 1", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("setup: data plane holds %d entries, want 1", ops.countV4())
 	}
 
 	if err := m.Unregister(context.Background(), "declare"); err != nil {
 		t.Fatalf("unregister: %v", err)
 	}
-	if len(ops.v4) != 0 {
-		t.Fatalf("unregister left %d entries behind", len(ops.v4))
+	if ops.countV4() != 0 {
+		t.Fatalf("unregister left %d entries behind", ops.countV4())
 	}
 	if claims.holds("declare") {
 		t.Error("unregister did not release the behavior claim")
@@ -267,15 +273,15 @@ func TestReregisterIsANonDisruptiveUpgrade(t *testing.T) {
 	}
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
 	waitDelivered(t, m, "declare")
-	if len(ops.v4) != 1 {
-		t.Fatalf("setup: data plane holds %d entries, want 1", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("setup: data plane holds %d entries, want 1", ops.countV4())
 	}
 
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
-	if len(ops.v4) != 1 {
-		t.Fatalf("the upgrade disturbed the data plane: %d entries", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("the upgrade disturbed the data plane: %d entries", ops.countV4())
 	}
 	if names := m.List(); len(names) != 1 {
 		t.Fatalf("manager lists %v, want one plugin", names)
@@ -283,8 +289,8 @@ func TestReregisterIsANonDisruptiveUpgrade(t *testing.T) {
 	// The replacement is the instance receiving events now.
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
 	waitDelivered(t, m, "declare")
-	if len(ops.v4) != 1 {
-		t.Fatalf("after the upgrade the plugin declared %d entries, want its usual 1", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("after the upgrade the plugin declared %d entries, want its usual 1", ops.countV4())
 	}
 }
 
@@ -364,13 +370,13 @@ func TestCloseDoesNotFlush(t *testing.T) {
 	}
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
 	waitDelivered(t, m, "declare")
-	if len(ops.v4) != 1 {
-		t.Fatalf("setup: %d entries, want 1", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("setup: %d entries, want 1", ops.countV4())
 	}
 
 	m.Close(context.Background())
-	if len(ops.v4) != 1 {
-		t.Fatalf("close flushed the data plane: %d entries left", len(ops.v4))
+	if ops.countV4() != 1 {
+		t.Fatalf("close flushed the data plane: %d entries left", ops.countV4())
 	}
 	if names := m.List(); len(names) != 0 {
 		t.Errorf("close left %v registered", names)
@@ -503,14 +509,14 @@ func TestPluginOpsTransactionLifecycle(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	// Nothing reaches the data plane before the commit.
-	if len(headend.v4) != 0 {
-		t.Fatalf("a chunk was applied before commit: %d entries", len(headend.v4))
+	if headend.countV4() != 0 {
+		t.Fatalf("a chunk was applied before commit: %d entries", headend.countV4())
 	}
 	if err := ops.ApplyCommit(gen); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	if len(headend.v4) != 1 {
-		t.Fatalf("commit applied %d entries, want 1", len(headend.v4))
+	if headend.countV4() != 1 {
+		t.Fatalf("commit applied %d entries, want 1", headend.countV4())
 	}
 	if ops.OpenTransactions() != 0 {
 		t.Errorf("commit left %d transactions open", ops.OpenTransactions())
@@ -538,8 +544,8 @@ func TestPluginOpsAbortDiscards(t *testing.T) {
 	if err := ops.ApplyCommit(gen); err == nil {
 		t.Error("committing an aborted transaction was accepted")
 	}
-	if len(headend.v4) != 0 {
-		t.Errorf("an aborted transaction reached the data plane: %d entries", len(headend.v4))
+	if headend.countV4() != 0 {
+		t.Errorf("an aborted transaction reached the data plane: %d entries", headend.countV4())
 	}
 }
 
@@ -592,10 +598,10 @@ func TestPluginOpsFlushRemovesOwnedState(t *testing.T) {
 	if err := ops.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	if _, ok := headend.v4["10.0.1.0/24"]; ok {
+	if _, ok := headend.getV4("10.0.1.0/24"); ok {
 		t.Error("flush left the plugin's own entry behind")
 	}
-	if _, ok := headend.v4["10.9.9.0/24"]; !ok {
+	if _, ok := headend.getV4("10.9.9.0/24"); !ok {
 		t.Error("flush removed another owner's entry")
 	}
 }
@@ -688,7 +694,7 @@ func TestRestartCounterResetsOnSuccess(t *testing.T) {
 		src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
 		waitDelivered(t, m, "declare")
 	}
-	if len(ops.v4) != 1 {
+	if ops.countV4() != 1 {
 		t.Fatalf("the plugin stopped declaring: %v", sortedV4(ops))
 	}
 }
@@ -738,4 +744,116 @@ type eventOnlySource struct{ inner *fakeSource }
 
 func (s *eventOnlySource) Register(name string, families []bgp.Family, h bgp.RouteHandler) (func(), error) {
 	return s.inner.Register(name, families, h)
+}
+
+// tickModule counts the ticks it receives, so a test can tell whether the
+// periodic callback is actually driven.
+func tickModule(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "tick.wasm"))
+	if err != nil {
+		t.Fatalf("read tick fixture: %v", err)
+	}
+	return b
+}
+
+// The ABI has a periodic callback; nothing drove it until the worker did.
+// A plugin that withdraws on a timeout cannot be written without it.
+//
+// The fixture declares its set from the tick alone, so a declaration
+// reaching the data plane with no event ever delivered is the observable
+// fact that the tick fired.
+func TestTickIsDriven(t *testing.T) {
+	src := newFakeSource()
+	m, ops := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name:         "tick",
+		Module:       tickModule(t),
+		TickInterval: MinTickInterval,
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for ops.countV4() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the periodic callback was never driven")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, ok := ops.getV4("10.99.0.0/24"); !ok {
+		t.Fatalf("the tick declared %v, want the fixture's prefix", sortedV4(ops))
+	}
+}
+
+// A plugin asking to be woken faster than the daemon is willing to call
+// into a sandbox is clamped rather than obeyed.
+func TestTickIntervalIsClamped(t *testing.T) {
+	src := newFakeSource()
+	m, _ := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name:         "tick",
+		Module:       tickModule(t),
+		TickInterval: time.Millisecond,
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	m.mu.Lock()
+	got := m.plugins["tick"].worker.interval
+	m.mu.Unlock()
+	if got != MinTickInterval {
+		t.Fatalf("tick interval = %s, want it clamped to %s", got, MinTickInterval)
+	}
+}
+
+// Zero means undriven, which is right for a purely event-driven plugin.
+func TestTickNotDrivenByDefault(t *testing.T) {
+	src := newFakeSource()
+	m, _ := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name: "tick", Module: tickModule(t),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	m.mu.Lock()
+	got := m.plugins["tick"].worker.interval
+	m.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("tick interval = %s, want it undriven", got)
+	}
+}
+
+// A plugin that decides from several routes has to know when it has seen
+// enough, or its first conclusions come from a partial view.
+func TestEndOfReplayFollowsTheSnapshot(t *testing.T) {
+	src := newFakeSource()
+	m, _ := newTestManager(t, src, newFakeClaims())
+	src.seedRib(bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+
+	var seen []*v1.PluginEvent
+	var mu sync.Mutex
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// Inspect what the manager builds rather than what the guest sees:
+	// the batch shape is the contract, and the guest is free to ignore it.
+	mu.Lock()
+	seen = append(seen, m.endOfReplayBatch(ReplaySourceBGP).GetEvents()...)
+	mu.Unlock()
+
+	if len(seen) != 1 {
+		t.Fatalf("built %d events, want one", len(seen))
+	}
+	ev := seen[0]
+	if ev.GetKind() != v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY {
+		t.Errorf("kind = %v, want end-of-replay", ev.GetKind())
+	}
+	if ev.GetReplaySource() != ReplaySourceBGP {
+		t.Errorf("source = %q, want %q", ev.GetReplaySource(), ReplaySourceBGP)
+	}
+	if ev.GetSequence() == 0 {
+		t.Error("the event carries no sequence number")
+	}
 }
