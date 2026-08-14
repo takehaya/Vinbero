@@ -72,6 +72,13 @@ watch goroutine で走り、そこは block してはいけない契約です。
 止まるので、handler は queue に積んで返ります。queue が溢れた分は drop
 して数えます。`Manager.DroppedEvents` で確認できます。
 
+drop は plugin の view に穴を空けます。desired set を宣言する consumer に
+とってこれは遅延より悪く、次の宣言が見えていない状態を prune します。
+そこで drop は snapshot debt として記録し、rib から view を作り直します。
+snapshot の配送は drop せず block します。replay は BGP watch goroutine
+ではないので block してよく、一部を落とすと目的そのものを損ねるためです。
+snapshot も live と同じ queue を通すので、両者の順序は保たれます。
+
 ## behavior の claim
 
 plugin は登録時に claim する codepoint を宣言します。claim 済みの経路は
@@ -172,8 +179,11 @@ module は allowlist で検証します。
   module が宣言し直して差分が吸収されます。
 - unregister は意図的な撤去なので owner の状態ごと消します。順序は配送
   停止、instance close、状態削除です。
-- trap や budget 超過では状態を消しません。instance を作り直して replay
-  で収束させます。連続失敗が上限を超えたら状態を残して止めます。
+- trap や budget 超過では状態を消しません。instance を作り直し、rib の
+  snapshot を配ってから収束させます。新しい instance は何も覚えていない
+  ので、replay しないと最初の宣言が restart 後に届いた event だけの集合に
+  なり、それ以外の entry を全部 prune します。連続失敗が上限を超えたら
+  状態を残して止めます。上限は連続失敗の数で、成功配送でリセットします。
 - daemon の shutdown では flush しません。
 
 wazero に fuel metering はありません。走っている guest を止める手段は
