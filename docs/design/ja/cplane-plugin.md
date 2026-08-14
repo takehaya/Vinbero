@@ -82,6 +82,11 @@ watch goroutine で走り、そこは block してはいけない契約です。
 drop は plugin の view に穴を空けます。desired set を宣言する consumer に
 とってこれは遅延より悪く、次の宣言が見えていない状態を prune します。
 そこで drop は snapshot debt として記録し、rib から view を作り直します。
+replay は plugin ごとに 1 本だけ走らせます。2 本が 1 つの queue に押し込む
+と順序が無く、古い copy が新しい copy の後に届いて plugin が古い値を持ち
+続けます。drop している plugin は定義上遅いので、drop ごとに replay を
+起動すると積み上がりもします。実行中に来た要求は debt を立て直し、完了後に
+返します。
 snapshot の配送は drop せず block します。replay は BGP watch goroutine
 ではないので block してよく、一部を落とすと目的そのものを損ねるためです。
 snapshot も live と同じ queue を通すので、両者の順序は保たれます。
@@ -184,6 +189,11 @@ module は allowlist で検証します。
 - 同名での再登録は in-place upgrade です。古い instance を止めて新しい
   ものを同じ owner tag で始めるので、古いものが書いた状態は残り、新しい
   module が宣言し直して差分が吸収されます。
+- plugin が configure から宣言した内容は、登録が成立するまで保留します。
+  configure は instantiate の途中で走るので、そこで適用すると instantiate
+  が失敗したときに誰も消せない state が残ります。upgrade では更に悪く、
+  失敗した新 instance は走行中の旧 instance と同じ owner tag を持つので、
+  その宣言が生きている plugin の entry を prune します。
 - unregister は意図的な撤去なので owner の状態ごと消します。順序は配送
   停止、instance close、状態削除です。
 - trap や budget 超過では状態を消しません。instance を作り直し、rib の
@@ -236,6 +246,17 @@ plugin は memory 上限に到達します。harness の churn test は live set
 一定に保ったまま advertise と withdraw を繰り返すので、増える分は garbage
 だけです。この test を leaking build は途中で落ち、conservative build は
 1 MiB のまま完走します。
+
+## local SID と daemon 再起動
+
+local SID の名前は host の memory にしかありません。pin された map では
+前回起動の entry が残りますが、どの宣言がその address を入れたのかを
+辿る手段がありません。同じ名前を宣言し直した plugin は別の address を
+貰うので、古い entry は誰も dispatch せず誰も消せないまま残ります。
+
+そこで owner ごとに 1 回だけ sweep します。その owner のもので、今回の
+run が入れたのではない entry を消します。address の安定性は 1 回の daemon
+実行の中では保たれ、再起動を跨ぐと新しい address になります。
 
 ## まだ無いもの
 
