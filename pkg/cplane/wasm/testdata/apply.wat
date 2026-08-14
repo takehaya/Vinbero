@@ -29,4 +29,7 @@
     (i64.const 0))
 
   ;; Opens a transaction and walks away, for the abort-on-drop test.
-  (func (export "begin_only") (result i64) (call $begin (i32.const 0))))
+  (func (export "begin_only") (result i64) (call $begin (i32.const 0)))
+  ;; The ABI this module was built against; the host refuses a mismatch.
+  (func (export "vinbero_abi_version") (result i32) (i32.const 1))
+)

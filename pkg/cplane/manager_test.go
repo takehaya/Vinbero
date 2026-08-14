@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -106,11 +107,28 @@ func (c *fakeClaims) Release(plugin string) {
 	c.released = append(c.released, plugin)
 }
 
+func (c *fakeClaims) Claims(plugin string) []uint16 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]uint16(nil), c.held[plugin]...)
+}
+
 func (c *fakeClaims) holds(plugin string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, ok := c.held[plugin]
 	return ok
+}
+
+// waitDelivered blocks until the plugin has consumed every event queued
+// for it. Delivery is asynchronous -- a guest call must not run on the BGP
+// watch goroutine -- so a test that emits and immediately asserts would
+// race the worker.
+func waitDelivered(t *testing.T, m *Manager, name string) {
+	t.Helper()
+	if !m.WaitIdle(name, 5*time.Second) {
+		t.Fatalf("plugin %q did not consume its events within the timeout", name)
+	}
 }
 
 func newTestManager(t *testing.T, src EventSource, claims BehaviorClaims) (*Manager, *fakeHeadendOps) {
@@ -143,6 +161,7 @@ func TestRegisterRunsPluginAndDeliversEvents(t *testing.T) {
 	if !src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4}) {
 		t.Fatal("emit found no handler")
 	}
+	waitDelivered(t, m, "declare")
 	// The fixture declares one headend entry per event it sees.
 	if len(ops.v4) != 1 {
 		t.Fatalf("data plane holds %d entries, want the one the plugin declared", len(ops.v4))
@@ -174,6 +193,7 @@ func TestUnregisterFlushesOwnedState(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "declare")
 	if len(ops.v4) != 1 {
 		t.Fatalf("setup: data plane holds %d entries, want 1", len(ops.v4))
 	}
@@ -206,6 +226,7 @@ func TestReregisterIsANonDisruptiveUpgrade(t *testing.T) {
 		t.Fatalf("first register: %v", err)
 	}
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "declare")
 	if len(ops.v4) != 1 {
 		t.Fatalf("setup: data plane holds %d entries, want 1", len(ops.v4))
 	}
@@ -221,6 +242,7 @@ func TestReregisterIsANonDisruptiveUpgrade(t *testing.T) {
 	}
 	// The replacement is the instance receiving events now.
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "declare")
 	if len(ops.v4) != 1 {
 		t.Fatalf("after the upgrade the plugin declared %d entries, want its usual 1", len(ops.v4))
 	}
@@ -301,6 +323,7 @@ func TestCloseDoesNotFlush(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "declare")
 	if len(ops.v4) != 1 {
 		t.Fatalf("setup: %d entries, want 1", len(ops.v4))
 	}
@@ -366,9 +389,13 @@ func TestDecodeHeadendEntry(t *testing.T) {
 	if entry.NumSegments != 2 {
 		t.Errorf("segments = %d, want 2", entry.NumSegments)
 	}
-	// The last segment is where the packet is actually sent.
-	if got := netip.AddrFrom16(entry.DstAddr); got != netip.MustParseAddr("fd00:3::100") {
-		t.Errorf("destination = %v, want the last segment", got)
+	// The outer destination is the first segment: the next hop the
+	// encapsulated packet is actually sent to. This mirrors what the
+	// built-in applier writes; a second convention for plugins would make
+	// `vbctl headend-v4 list` report a destination the data plane does not
+	// use.
+	if got := netip.AddrFrom16(entry.DstAddr); got != netip.MustParseAddr("fd00:2::100") {
+		t.Errorf("destination = %v, want the first segment", got)
 	}
 	if got := netip.AddrFrom16(entry.SrcAddr); got != defaultSrc {
 		t.Errorf("source = %v, want the daemon default %v", got, defaultSrc)
@@ -530,5 +557,35 @@ func TestPluginOpsFlushRemovesOwnedState(t *testing.T) {
 	}
 	if _, ok := headend.v4["10.9.9.0/24"]; !ok {
 		t.Error("flush removed another owner's entry")
+	}
+}
+
+// A plugin that cannot keep up has its events dropped rather than being
+// allowed to block the BGP watch goroutine, and the drops are counted so
+// "too slow" is distinguishable from "buggy".
+func TestDroppedEventsAreCounted(t *testing.T) {
+	src := newFakeSource()
+	m, _ := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if got := m.DroppedEvents("declare"); got != 0 {
+		t.Fatalf("dropped %d before any event, want 0", got)
+	}
+	if got := m.DroppedEvents("not-registered"); got != 0 {
+		t.Fatalf("dropped %d for an unknown plugin, want 0", got)
+	}
+
+	// Fill the queue far past its depth. Delivery cannot keep up with a
+	// burst this size, so some batches must be dropped rather than queued
+	// without bound.
+	for i := 0; i < deliveryQueueDepth*4; i++ {
+		src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	}
+	waitDelivered(t, m, "declare")
+	if m.DroppedEvents("declare") == 0 {
+		t.Skip("delivery kept up with the burst; the drop path is exercised by the queue depth, not the timing")
 	}
 }

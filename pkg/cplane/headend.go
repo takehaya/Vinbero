@@ -152,8 +152,18 @@ func ApplyHeadendSet(
 	}
 
 	sort.Strings(keys)
-	for _, prefix := range keys {
+	for i, prefix := range keys {
 		if err := createHeadend(ops, af, prefix, byPrefix[prefix], owner); err != nil {
+			// Release the leases of the keys that were never written,
+			// including this one. They hold no map entry, so a later
+			// reconcile would not prune them either -- the lease would
+			// outlive the declaration and block another owner from a key
+			// this one does not actually hold.
+			if leases != nil {
+				for _, unwritten := range keys[i:] {
+					leases.Release(af.leaseKind(), unwritten, owner)
+				}
+			}
 			return res, fmt.Errorf("apply %s set: write %q: %w", af, prefix, err)
 		}
 		if _, existed := current[prefix]; existed {

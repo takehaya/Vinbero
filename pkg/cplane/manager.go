@@ -7,9 +7,9 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -29,12 +29,23 @@ type EventSource interface {
 type BehaviorClaims interface {
 	Claim(plugin string, codepoints []uint16) error
 	Release(plugin string)
+	Claims(plugin string) []uint16
 }
 
 // ErrAlreadyRegistered is returned when a name is taken. A plugin is
 // replaced through Register with the same name, which is an upgrade; two
 // different bundles cannot share one name.
 var ErrAlreadyRegistered = errors.New("cplane: plugin already registered")
+
+// maxRestarts bounds how many times a plugin is re-instantiated before it
+// is left stopped.
+//
+// A plugin whose instance dies is restarted rather than flushed: it comes
+// back and re-declares, which is cheaper than blackholing traffic for the
+// length of a restart. But a module that dies on every event would restart
+// forever, so after this many consecutive failures it is left alone with
+// its state intact, for an operator to look at.
+const maxRestarts = 5
 
 // Registration describes a plugin to run.
 type Registration struct {
@@ -70,11 +81,21 @@ type Manager struct {
 }
 
 // plugin is one registered and running module.
+//
+// Everything mutable on it is guarded by the manager's lock: registration,
+// unregistration and a restart can all touch the same plugin from
+// different goroutines.
 type plugin struct {
-	name      string
-	inst      *wasm.Instance
-	ops       *PluginOps
-	unsubscri func()
+	name     string
+	reg      Registration
+	inst     *wasm.Instance
+	ops      *PluginOps
+	worker   *worker
+	cancel   func()
+	restarts int
+	// dead marks an instance that failed and was not restarted, so events
+	// stop being handed to a module that cannot take them.
+	dead bool
 }
 
 // ManagerConfig builds a Manager.
@@ -123,76 +144,64 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
 		return err
 	}
-	owner := bpf.OwnerPluginBundle(reg.Name)
 
-	// Claim first: a behavior another plugin holds must stop the
-	// registration before anything is instantiated.
-	if len(reg.Behaviors) > 0 {
-		if m.claims == nil {
-			return fmt.Errorf("cplane: plugin %q claims behaviors but no claim registry is configured", reg.Name)
+	// Claims are set before anything is instantiated, so a behavior another
+	// plugin holds stops the registration early. The previous set is kept
+	// so a failure can put it back: releasing the claims of a plugin that
+	// is still running would hand its routes straight to the built-in
+	// appliers, which is worse than the failed upgrade.
+	var previousClaims []uint16
+	if m.claims != nil {
+		previousClaims = m.claims.Claims(reg.Name)
+		// Release before claiming so an upgrade that drops a behavior
+		// actually gives it up; Claim only ever adds.
+		m.claims.Release(reg.Name)
+		if len(reg.Behaviors) > 0 {
+			if err := m.claims.Claim(reg.Name, reg.Behaviors); err != nil {
+				m.restoreClaims(reg.Name, previousClaims)
+				return err
+			}
 		}
-		if err := m.claims.Claim(reg.Name, reg.Behaviors); err != nil {
-			return err
-		}
+	} else if len(reg.Behaviors) > 0 {
+		return fmt.Errorf("cplane: plugin %q claims behaviors but no claim registry is configured", reg.Name)
 	}
 
-	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner:              owner,
-		Headend:            m.headend,
-		Leases:             m.leases,
-		DefaultEncapSource: m.defaultSrc,
-		Logger:             m.logger.Named("plugin." + reg.Name),
-	})
+	p, err := m.build(ctx, reg)
 	if err != nil {
+		m.restoreClaims(reg.Name, previousClaims)
 		return err
 	}
 
-	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		Name:       reg.Name,
-		Module:     reg.Module,
-		ConfigBlob: reg.Config,
-		Limits:     reg.Limits,
-		Ops:        ops,
-		Logger:     m.logger,
-	})
-	if err != nil {
-		if len(reg.Behaviors) > 0 && m.claims != nil {
-			// The claim was taken for a plugin that never started.
-			m.claims.Release(reg.Name)
-		}
-		return err
-	}
-
-	// Swap under the lock so two registrations of one name cannot both
-	// think they won.
 	m.mu.Lock()
 	old, existed := m.plugins[reg.Name]
-	m.plugins[reg.Name] = &plugin{name: reg.Name, inst: inst, ops: ops}
+	m.plugins[reg.Name] = p
 	m.mu.Unlock()
 
 	if existed {
 		// Stop the old instance without flushing: the new one inherits the
 		// owner tag and re-declares over the same state.
-		old.stopDelivery()
-		if err := old.inst.Close(ctx); err != nil {
-			m.logger.Warn("closing the replaced plugin instance",
-				zap.String("plugin", reg.Name), zap.Error(err))
-		}
-		old.ops.DiscardTransactions()
+		m.teardown(ctx, old)
 	}
 
 	if m.source != nil {
 		cancel, err := m.source.Register(reg.Name, reg.Families, m.handlerFor(reg.Name))
 		if err != nil {
-			// Undo: the plugin cannot do its job without events.
 			_ = m.Unregister(ctx, reg.Name)
 			return fmt.Errorf("cplane: subscribe plugin %q: %w", reg.Name, err)
 		}
+		// The plugin may already have been unregistered while we were
+		// subscribing. Cancel immediately in that case, or the demux keeps
+		// dispatching to a name that no longer resolves.
 		m.mu.Lock()
-		if p, ok := m.plugins[reg.Name]; ok {
-			p.unsubscri = cancel
+		current, stillThere := m.plugins[reg.Name]
+		if stillThere && current == p {
+			p.cancel = cancel
+			cancel = nil
 		}
 		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 	}
 
 	m.logger.Info("control-plane plugin registered",
@@ -202,9 +211,59 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	return nil
 }
 
+// build instantiates a plugin and its delivery worker without publishing
+// it.
+func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) {
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:              bpf.OwnerPluginBundle(reg.Name),
+		Headend:            m.headend,
+		Leases:             m.leases,
+		DefaultEncapSource: m.defaultSrc,
+		Logger:             m.logger.Named("plugin." + reg.Name),
+	})
+	if err != nil {
+		return nil, err
+	}
+	inst, err := wasm.Instantiate(ctx, wasm.Config{
+		Name:       reg.Name,
+		Module:     reg.Module,
+		ConfigBlob: reg.Config,
+		Limits:     reg.Limits,
+		Ops:        ops,
+		Logger:     m.logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops}
+	p.worker = newWorker(reg.Name, m.logger, inst.HandleEvents,
+		func(err error) { m.instanceFailed(p, err) },
+		func(status *v1.PluginEventStatus) { m.reportStatus(p, status) })
+	return p, nil
+}
+
+// restoreClaims puts a plugin's previous behaviors back after a failed
+// registration.
+func (m *Manager) restoreClaims(name string, behaviors []uint16) {
+	if m.claims == nil {
+		return
+	}
+	m.claims.Release(name)
+	if len(behaviors) == 0 {
+		return
+	}
+	if err := m.claims.Claim(name, behaviors); err != nil {
+		// Nothing else can hold them -- they were this plugin's a moment
+		// ago -- so this should not happen; say so loudly if it does,
+		// because the running instance is now unprotected.
+		m.logger.Error("could not restore the behavior claims of a running plugin",
+			zap.String("plugin", name), zap.Error(err))
+	}
+}
+
 // Unregister stops a plugin and removes the state it owns.
 //
-// Unlike a trap, this is deliberate: the operator is taking the plugin
+// Unlike a crash, this is deliberate: the operator is taking the plugin
 // away, so its entries go with it rather than being left for a restart to
 // reclaim.
 func (m *Manager) Unregister(ctx context.Context, name string) error {
@@ -220,11 +279,7 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 	// close the instance, then remove what it owns. Removing state while
 	// the plugin can still write would race with a declaration already in
 	// flight.
-	p.stopDelivery()
-	if err := p.inst.Close(ctx); err != nil {
-		m.logger.Warn("closing plugin instance", zap.String("plugin", name), zap.Error(err))
-	}
-	p.ops.DiscardTransactions()
+	m.teardown(ctx, p)
 	if m.claims != nil {
 		m.claims.Release(name)
 	}
@@ -233,6 +288,27 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 	}
 	m.logger.Info("control-plane plugin unregistered", zap.String("plugin", name))
 	return nil
+}
+
+// teardown stops delivery and closes an instance without touching the
+// state it wrote.
+func (m *Manager) teardown(ctx context.Context, p *plugin) {
+	m.mu.Lock()
+	cancel := p.cancel
+	p.cancel = nil
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if p.worker != nil {
+		// Waits for the batch already inside the guest, so the instance is
+		// not closed out from under a running call.
+		p.worker.close()
+	}
+	if err := p.inst.Close(ctx); err != nil {
+		m.logger.Warn("closing plugin instance", zap.String("plugin", p.name), zap.Error(err))
+	}
+	p.ops.DiscardTransactions()
 }
 
 // Close stops every plugin. It does not flush: a daemon shutting down
@@ -248,10 +324,7 @@ func (m *Manager) Close(ctx context.Context) {
 	m.mu.Unlock()
 
 	for _, p := range plugins {
-		p.stopDelivery()
-		if err := p.inst.Close(ctx); err != nil {
-			m.logger.Warn("closing plugin instance", zap.String("plugin", p.name), zap.Error(err))
-		}
+		m.teardown(ctx, p)
 	}
 }
 
@@ -266,55 +339,84 @@ func (m *Manager) List() []string {
 	return out
 }
 
-// handlerFor builds the demux handler that carries route events to one
-// plugin.
-func (m *Manager) handlerFor(name string) bgp.RouteHandler {
-	return func(ev bgp.RouteEvent) {
-		m.mu.Lock()
-		p, ok := m.plugins[name]
+// instanceFailed handles a call into the guest that did not return
+// normally: a trap, or a budget overrun.
+//
+// Either way the instance is gone -- wazero closes the module when its
+// context is cancelled, and a trap leaves it unusable -- so the plugin is
+// re-instantiated rather than left in place. Its state is kept: the
+// replacement re-declares over it, which is why a crash costs nothing but
+// the events in flight.
+func (m *Manager) instanceFailed(p *plugin, cause error) {
+	m.mu.Lock()
+	current, ok := m.plugins[p.name]
+	if !ok || current != p || p.dead {
+		// Already replaced or removed; nothing to restart.
 		m.mu.Unlock()
-		if !ok {
-			return
-		}
-		batch := &v1.PluginEventBatch{Events: []*v1.PluginEvent{{
-			Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE,
-			Sequence: m.seq.Add(1),
-			Route:    EncodeRouteEvent(ev),
-		}}}
-		m.deliver(p, batch)
+		return
+	}
+	p.restarts++
+	restarts := p.restarts
+	reg := p.reg
+	m.mu.Unlock()
+
+	p.ops.DiscardTransactions()
+
+	if restarts > maxRestarts {
+		m.mu.Lock()
+		p.dead = true
+		m.mu.Unlock()
+		m.logger.Error("control-plane plugin stopped after repeated failures; "+
+			"its data-plane state is left in place for inspection",
+			zap.String("plugin", p.name),
+			zap.Int("restarts", restarts-1),
+			zap.Error(cause))
+		return
+	}
+
+	m.logger.Warn("restarting a control-plane plugin after a failed call",
+		zap.String("plugin", p.name),
+		zap.Int("restart", restarts),
+		zap.Error(cause))
+
+	ctx := context.Background()
+	inst, err := wasm.Instantiate(ctx, wasm.Config{
+		Name:       reg.Name,
+		Module:     reg.Module,
+		ConfigBlob: reg.Config,
+		Limits:     reg.Limits,
+		Ops:        p.ops,
+		Logger:     m.logger,
+	})
+	if err != nil {
+		m.mu.Lock()
+		p.dead = true
+		m.mu.Unlock()
+		m.logger.Error("could not re-instantiate a control-plane plugin",
+			zap.String("plugin", p.name), zap.Error(err))
+		return
+	}
+
+	m.mu.Lock()
+	if current, ok := m.plugins[p.name]; !ok || current != p {
+		// Replaced while we were rebuilding; drop what we just made.
+		m.mu.Unlock()
+		_ = inst.Close(ctx)
+		return
+	}
+	old := p.inst
+	p.inst = inst
+	p.worker.handler = inst.HandleEvents
+	m.mu.Unlock()
+
+	if err := old.Close(ctx); err != nil {
+		m.logger.Debug("closing the failed instance", zap.String("plugin", p.name), zap.Error(err))
 	}
 }
 
-// deliver hands a batch to a plugin and acts on what it reports.
-//
-// A failure here is the instance's problem, not the daemon's: the error is
-// logged and the plugin's open transactions are discarded, so a
-// half-declared set cannot be committed later by a call that thinks it is
-// still in the same conversation.
-func (m *Manager) deliver(p *plugin, batch *v1.PluginEventBatch) {
-	raw, err := proto.Marshal(batch)
-	if err != nil {
-		m.logger.Error("encoding plugin event batch",
-			zap.String("plugin", p.name), zap.Error(err))
-		return
-	}
-	status, err := p.inst.HandleEvents(context.Background(), raw)
-	if err != nil {
-		p.ops.DiscardTransactions()
-		m.logger.Warn("plugin failed to handle events",
-			zap.String("plugin", p.name), zap.Error(err))
-		return
-	}
-	if len(status) == 0 {
-		return
-	}
-	var msg v1.PluginEventStatus
-	if err := proto.Unmarshal(status, &msg); err != nil {
-		m.logger.Warn("plugin returned an undecodable status",
-			zap.String("plugin", p.name), zap.Error(err))
-		return
-	}
-	for _, r := range msg.GetResults() {
+// reportStatus records what a plugin said about the events it was given.
+func (m *Manager) reportStatus(p *plugin, status *v1.PluginEventStatus) {
+	for _, r := range status.GetResults() {
 		if r.GetDisposition() == v1.PluginEventDisposition_PLUGIN_EVENT_DISPOSITION_QUARANTINE {
 			// The plugin declined this event on purpose. Recording it is
 			// the whole value of having a polite refusal: the alternative
@@ -327,10 +429,68 @@ func (m *Manager) deliver(p *plugin, batch *v1.PluginEventBatch) {
 	}
 }
 
-// stopDelivery detaches the plugin from the event source.
-func (p *plugin) stopDelivery() {
-	if p.unsubscri != nil {
-		p.unsubscri()
-		p.unsubscri = nil
+// handlerFor builds the demux handler that carries route events to one
+// plugin.
+//
+// It only queues: the call into the guest happens on the plugin's own
+// worker. This handler runs on the BGP watch goroutine, which must never
+// block.
+func (m *Manager) handlerFor(name string) bgp.RouteHandler {
+	return func(ev bgp.RouteEvent) {
+		m.mu.Lock()
+		p, ok := m.plugins[name]
+		dead := ok && p.dead
+		m.mu.Unlock()
+		if !ok || dead {
+			return
+		}
+		p.worker.submit(&v1.PluginEventBatch{Events: []*v1.PluginEvent{{
+			Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE,
+			Sequence: m.seq.Add(1),
+			Route:    EncodeRouteEvent(ev),
+		}}})
 	}
+}
+
+// WaitIdle blocks until every event accepted for the named plugin has been
+// delivered, or the timeout elapses. It reports whether delivery caught up.
+//
+// Delivery is asynchronous -- a plugin call must not run on the BGP watch
+// goroutine -- which leaves callers that need to observe the result of an
+// event with no moment to look at. Tests are the obvious user; an operator
+// tool that pushes a config and then reads back the data plane is another.
+func (m *Manager) WaitIdle(name string, timeout time.Duration) bool {
+	m.mu.Lock()
+	p, ok := m.plugins[name]
+	m.mu.Unlock()
+	if !ok {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if p.worker.caughtUp() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// DroppedEvents is how many event batches were discarded because the named
+// plugin could not keep up.
+//
+// A plugin falling behind is otherwise invisible: its declarations simply
+// stop reflecting the routes it never saw, which looks like a plugin bug
+// rather than a plugin that is too slow. Reporting the count is what tells
+// the two apart.
+func (m *Manager) DroppedEvents(name string) uint64 {
+	m.mu.Lock()
+	p, ok := m.plugins[name]
+	m.mu.Unlock()
+	if !ok {
+		return 0
+	}
+	return p.worker.droppedCount()
 }

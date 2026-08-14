@@ -288,9 +288,11 @@ func (d *Demux) isClaimed(ev bgp.RouteEvent) bool {
 	key := nlriKey(ev)
 	if ev.IsWithdraw {
 		if d.ledger.isClaimed(key) {
-			// The route is going away; stop tracking it so the ledger
-			// follows the live routes rather than growing forever.
-			d.ledger.forget(key)
+			// This path is going away; stop tracking it so the ledger
+			// follows the live routes rather than growing forever. The
+			// NLRI stays claimed while another peer still advertises it,
+			// so that peer's own withdraw is recognized too.
+			d.ledger.forget(key, ev.Source)
 			return true
 		}
 		return false
@@ -300,12 +302,12 @@ func (d *Demux) isClaimed(ev bgp.RouteEvent) bool {
 	claims := d.claims
 	d.mu.RUnlock()
 	if claims.IsClaimed(ev.EndpointBehavior) {
-		d.ledger.recordAdvertise(key)
+		d.ledger.recordAdvertise(key, ev.Source)
 		return true
 	}
-	// A prefix can be re-advertised under a different behavior; drop any
+	// A path can be re-advertised under a different behavior; drop any
 	// stale record so a later withdraw is not diverted on old information.
-	d.ledger.forget(key)
+	d.ledger.forget(key, ev.Source)
 	return false
 }
 

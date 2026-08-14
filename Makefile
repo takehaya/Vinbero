@@ -233,3 +233,9 @@ cplane-wasm-testdata: ## rebuild the control-plane plugin wasm test fixtures (re
 		echo "[wat2wasm] $$f"; \
 		wat2wasm $$f -o $${f%.wat}.wasm || exit 1; \
 	done
+
+.PHONY: cplane-example
+cplane-example: ## build the control-plane plugin example (requires tinygo)
+	cd sdk/examples/cplane-custom-behavior && \
+		tinygo build -o plugin.wasm -target=wasm-unknown \
+			-scheduler=none -gc=leaking -panic=trap .

@@ -219,3 +219,62 @@ func TestNilRegistryMutatorsAreSafe(t *testing.T) {
 		t.Fatalf("Claims on a nil registry = %v, want nil", got)
 	}
 }
+
+// vpnEventFrom is an advertise of one NLRI by a named peer, so a test can
+// build the several paths a route reflector pair produces.
+func vpnEventFrom(peer, rd, prefix string, behavior uint16) bgp.RouteEvent {
+	ev := peerEvent(bgp.FamilyVPNv4, peer)
+	ev.EndpointBehavior = behavior
+	ev.VPN = &bgp.VPNRoute{Family: bgp.FamilyVPNv4, RD: rd, Prefix: prefix}
+	return ev
+}
+
+// vpnWithdrawFrom is that peer's withdraw of the same NLRI.
+func vpnWithdrawFrom(peer, rd, prefix string) bgp.RouteEvent {
+	ev := peerEvent(bgp.FamilyVPNv4, peer)
+	ev.IsWithdraw = true
+	ev.VPN = &bgp.VPNRoute{Family: bgp.FamilyVPNv4, RD: rd, Prefix: prefix}
+	return ev
+}
+
+// One NLRI advertised by two route reflectors is withdrawn twice. The
+// first withdraw must not consume the claim for the second: that second
+// withdraw carries no attributes either, and letting it through would hand
+// the built-in applier a delete for state it never installed.
+func TestLedgerTracksEachPathSeparately(t *testing.T) {
+	src := &fakeSource{}
+	d := claimedDemux(t, src)
+	var builtin, plug collector
+	if _, err := d.RegisterBuiltin("applier", nil, builtin.handle); err != nil {
+		t.Fatalf("register builtin: %v", err)
+	}
+	if _, err := d.Register("acl-prefix", nil, plug.handle); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	src.emit(vpnEventFrom("192.0.2.1", "65000:1", "10.0.0.0/24", 0xFE01))
+	src.emit(vpnEventFrom("192.0.2.2", "65000:1", "10.0.0.0/24", 0xFE01))
+	// One NLRI, so one ledger key, holding two paths.
+	if got := d.ledger.size(); got != 1 {
+		t.Fatalf("ledger holds %d NLRIs, want 1", got)
+	}
+
+	src.emit(vpnWithdrawFrom("192.0.2.1", "65000:1", "10.0.0.0/24"))
+	if got := d.ledger.size(); got != 1 {
+		t.Fatalf("the first withdraw dropped the NLRI while another peer still advertises it")
+	}
+	src.emit(vpnWithdrawFrom("192.0.2.2", "65000:1", "10.0.0.0/24"))
+	if got := d.ledger.size(); got != 0 {
+		t.Fatalf("ledger holds %d NLRIs after the last withdraw, want 0", got)
+	}
+
+	if builtin.len() != 0 {
+		t.Fatalf("built-in consumer saw %d events, want none of the claimed route", builtin.len())
+	}
+	if plug.len() != 4 {
+		t.Fatalf("plugin consumer saw %d events, want both advertises and both withdraws", plug.len())
+	}
+}

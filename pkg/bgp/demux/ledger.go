@@ -25,55 +25,73 @@ import (
 // withdraw for a recorded NLRI is treated as claimed and consumes the
 // record. Keying on NLRI works because that is the one thing a withdraw
 // does carry.
+// The record is per path, not per NLRI. Behind a pair of route reflectors,
+// or with ADD-PATH, one NLRI arrives as several paths and is withdrawn
+// several times; a single record consumed by the first withdraw would let
+// the second escape to the built-in appliers with behavior 0, which is the
+// very failure this exists to prevent. So each path is tracked separately
+// and the NLRI stays claimed until the last one is gone.
 type claimLedger struct {
 	mu sync.Mutex
-	// claimed holds the NLRI keys currently advertised under a claimed
-	// behavior. Entries are removed by the matching withdraw, so the
+	// paths holds, per NLRI key, the paths currently advertised under a
+	// claimed behavior. An NLRI with no paths left is removed, so the
 	// ledger tracks live routes rather than growing without bound.
-	claimed map[string]struct{}
+	paths map[string]map[bgp.PathSource]struct{}
 }
 
 func newClaimLedger() *claimLedger {
-	return &claimLedger{claimed: make(map[string]struct{})}
+	return &claimLedger{paths: make(map[string]map[bgp.PathSource]struct{})}
 }
 
-// recordAdvertise marks an NLRI as claimed.
-func (l *claimLedger) recordAdvertise(key string) {
+// recordAdvertise marks one path of an NLRI as claimed.
+func (l *claimLedger) recordAdvertise(key string, src bgp.PathSource) {
 	if key == "" {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.claimed[key] = struct{}{}
+	byPath, ok := l.paths[key]
+	if !ok {
+		byPath = make(map[bgp.PathSource]struct{})
+		l.paths[key] = byPath
+	}
+	byPath[src] = struct{}{}
 }
 
-// forget drops an NLRI, whether or not it was recorded.
-func (l *claimLedger) forget(key string) {
+// forget drops one path. The NLRI stops being claimed only once no path
+// under it remains.
+func (l *claimLedger) forget(key string, src bgp.PathSource) {
 	if key == "" {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.claimed, key)
+	byPath, ok := l.paths[key]
+	if !ok {
+		return
+	}
+	delete(byPath, src)
+	if len(byPath) == 0 {
+		delete(l.paths, key)
+	}
 }
 
-// isClaimed reports whether an NLRI was last advertised under a claimed
-// behavior.
+// isClaimed reports whether any path of an NLRI is advertised under a
+// claimed behavior.
 func (l *claimLedger) isClaimed(key string) bool {
 	if key == "" {
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, ok := l.claimed[key]
-	return ok
+	return len(l.paths[key]) > 0
 }
 
 // size is the number of live claimed NLRIs, for tests and diagnostics.
 func (l *claimLedger) size() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.claimed)
+	return len(l.paths)
 }
 
 // nlriKey identifies the route an event is about, stably across the

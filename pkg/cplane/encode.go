@@ -112,10 +112,13 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 		}
 		entry.Segments[i] = addr.As16()
 	}
-	// The last segment is the packet's immediate destination: an SRH with
-	// one segment left is written as a plain destination, so the data
-	// plane needs it in DstAddr as well as in the list.
-	entry.DstAddr = entry.Segments[len(segments)-1]
+	// The outer destination is the FIRST segment: that is the next hop the
+	// encapsulated packet is sent to, and the rest of the list is what the
+	// SRH carries for the hops after it. The data plane reads
+	// segments[0] for the outer daddr and treats dst_addr as reserved, so
+	// this mirrors what the built-in applier writes rather than inventing
+	// a second convention for plugins.
+	entry.DstAddr = entry.Segments[0]
 
 	src := defaultSrc
 	if in.GetSrcAddr() != "" {

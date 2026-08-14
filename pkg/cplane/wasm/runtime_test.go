@@ -409,3 +409,21 @@ func TestPackUnpackPtrLen(t *testing.T) {
 		}
 	}
 }
+
+// A module built against a different ABI is refused at registration. The
+// alternative is discovering the mismatch when a call into a function
+// whose signature moved traps, which is far harder to read.
+func TestABIVersionMismatchIsRejected(t *testing.T) {
+	for _, name := range []string{"oldabi", "noabi"} {
+		t.Run(name, func(t *testing.T) {
+			inst, err := instantiate(t, name, Config{})
+			if err == nil {
+				_ = inst.Close(context.Background())
+				t.Fatal("a module with the wrong ABI version was admitted")
+			}
+			if !errors.Is(err, ErrAdmission) {
+				t.Fatalf("error = %v, want ErrAdmission", err)
+			}
+		})
+	}
+}

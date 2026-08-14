@@ -52,4 +52,7 @@
   (func (export "emit_log") (param $ptr i32) (param $len i32)
     (call $log (i32.const 1) (local.get $ptr) (local.get $len)))
   (func (export "read_clock") (result i64) (call $now))
-  (func (export "config_len") (result i32) (global.get $config_len)))
+  (func (export "config_len") (result i32) (global.get $config_len))
+  ;; The ABI this module was built against; the host refuses a mismatch.
+  (func (export "vinbero_abi_version") (result i32) (i32.const 1))
+)

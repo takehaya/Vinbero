@@ -112,6 +112,9 @@ var requiredExports = map[string]struct {
 	params  []api.ValueType
 	results []api.ValueType
 }{
+	ExportABIVersion: {
+		results: []api.ValueType{api.ValueTypeI32},
+	},
 	ExportAlloc: {
 		params:  []api.ValueType{api.ValueTypeI32},
 		results: []api.ValueType{api.ValueTypeI32},
