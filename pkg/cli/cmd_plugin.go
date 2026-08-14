@@ -28,6 +28,7 @@ func pluginCommand() *cli.Command {
 		Name:  "plugin",
 		Usage: "Manage BPF plugins",
 		Subcommands: []*cli.Command{
+			cplaneSubcommand(),
 			{
 				Name:  "validate",
 				Usage: "Validate a plugin ELF locally (no server contact)",

@@ -24,8 +24,11 @@ import (
 
 // Server represents the Connect RPC server
 type Server struct {
-	cfg          *config.Config
-	mapOps       *bpf.MapOperations
+	cfg    *config.Config
+	mapOps *bpf.MapOperations
+	// cplaneMgr runs the control-plane (WebAssembly) plugins. Nil when
+	// they are not enabled, in which case those RPCs report Unimplemented.
+	cplaneMgr    CplaneManager
 	resMgr       *netresource.ResourceManager
 	fdbWatcher   *netlinkwatch.FDBWatcher
 	locatorMgr   *locator.Manager
@@ -104,6 +107,14 @@ func (s *Server) SetProber(source ProberStatusSource, intervalMs, multiplier uin
 	s.proberMultiplier = multiplier
 }
 
+// SetCplaneManager installs the control-plane plugin manager. Like
+// SetProber, it is an optional dependency injected after construction and
+// before Setup: a daemon without BGP has no event source to give a plugin,
+// so the manager is only built where it can actually work.
+func (s *Server) SetCplaneManager(m CplaneManager) {
+	s.cplaneMgr = m
+}
+
 // Setup registers all service handlers
 func (s *Server) Setup() {
 	// Plugin service is constructed first so SidFunctionServer can resolve
@@ -126,6 +137,9 @@ func (s *Server) Setup() {
 		zap.String("mode", roEnforce.String()),
 	)
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
+	// Installed before the handler is mounted so the RPCs never see a
+	// half-built server.
+	pluginServer.SetCplaneManager(s.cplaneMgr)
 
 	// VrfBgp service (VRF <-> BGP route-target bindings).
 	// One mutation mutex shared by VrfBgpService and VrfService: their

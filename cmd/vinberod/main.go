@@ -20,6 +20,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp/export"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/pkg/fib"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
@@ -389,7 +390,8 @@ func run(cliCtx *cli.Context) error {
 		// Behaviors a plugin claims are withheld from the built-in applier,
 		// which would otherwise read an unrecognized codepoint as an
 		// ordinary service SID. Vinbero's own behaviors are not claimable.
-		routeDemux.SetClaimRegistry(demux.NewClaimRegistry(gobgp.BuiltinEndpointBehaviors()))
+		claimRegistry := demux.NewClaimRegistry(gobgp.BuiltinEndpointBehaviors())
+		routeDemux.SetClaimRegistry(claimRegistry)
 		if _, err := routeDemux.RegisterBuiltin("applier", nil, applier.Apply); err != nil {
 			return fmt.Errorf("register BGP applier: %w", err)
 		}
@@ -397,6 +399,37 @@ func run(cliCtx *cli.Context) error {
 			return fmt.Errorf("subscribe BGP routes: %w", err)
 		}
 		defer routeDemux.Stop()
+
+		// Control-plane plugins. They are only built where BGP is running:
+		// a plugin with no event source could declare state but never react
+		// to anything, which is not a mode worth supporting quietly.
+		//
+		// The encap source is resolved once here and handed to the manager
+		// as the default for plugin-declared entries that name none. A
+		// failure to resolve is not fatal: a plugin that names its own
+		// source still works, and the alternative is refusing to start the
+		// daemon over a plugin feature that may go unused.
+		encapSrc, err := applier.EncapSourceAddr()
+		if err != nil {
+			lg.Warn("resolving the encap source for control-plane plugins; "+
+				"plugin entries must name their own source",
+				zap.Error(err))
+		}
+		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
+			Source:             routeDemux,
+			Claims:             claimRegistry,
+			Headend:            vin.GetMapOperations(),
+			DefaultEncapSource: encapSrc,
+			Logger:             lg.Named("cplane"),
+		})
+		if err != nil {
+			return fmt.Errorf("build control-plane plugin manager: %w", err)
+		}
+		// Plugins are stopped, not flushed, on shutdown: the daemon going
+		// away is not the operator taking a plugin away, and its entries
+		// should still be there when it comes back.
+		defer cplaneMgr.Close(context.Background())
+		srv.SetCplaneManager(cplaneMgr)
 
 		// Auto-advertise: the exporter enables each VRF binding with a
 		// redistribute set and starts watching. Starting after the demux means
