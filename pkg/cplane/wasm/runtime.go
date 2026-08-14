@@ -338,6 +338,10 @@ func (i *Instance) HandleEvents(ctx context.Context, batch []byte) ([]byte, erro
 		return nil, nil
 	}
 	if int(length) > i.limits.MaxBufferBytes {
+		// Give the region back even though the call failed: a plugin that
+		// keeps returning an oversized status would otherwise leak its own
+		// linear memory once per batch until its allocator gives up.
+		i.freeGuest(ctx, ptr, length)
 		return nil, fmt.Errorf("wasm: %s returned %d bytes, limit %d",
 			ExportHandleEvents, length, i.limits.MaxBufferBytes)
 	}

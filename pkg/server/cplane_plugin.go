@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"connectrpc.com/connect"
 	"go.uber.org/zap"
@@ -63,11 +64,12 @@ func (s *PluginServer) CplanePluginRegister(
 	}
 
 	reg := cplane.Registration{
-		Name:      msg.GetName(),
-		Module:    msg.GetWasm(),
-		Config:    msg.GetConfig(),
-		Families:  families,
-		Behaviors: behaviors,
+		Name:         msg.GetName(),
+		Module:       msg.GetWasm(),
+		Config:       msg.GetConfig(),
+		Families:     families,
+		Behaviors:    behaviors,
+		TickInterval: time.Duration(msg.GetTickIntervalMs()) * time.Millisecond,
 	}
 	if err := s.cplane.Register(ctx, reg); err != nil {
 		return nil, cplaneRPCError(err)

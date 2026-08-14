@@ -110,6 +110,13 @@ type Manager struct {
 
 	// applyMu serializes reconciles across every plugin this manager runs.
 	applyMu sync.Mutex
+	// registerMu serializes registration against unregistration.
+	//
+	// The two touch the same owner tag from opposite ends: unregister
+	// flushes everything under it after removing the plugin, and a
+	// registration landing in that window would publish a new instance
+	// whose state the older call then wipes.
+	registerMu sync.Mutex
 
 	// started is the epoch the monotonic clock a plugin sees counts from.
 	// It is per daemon rather than per instance so a plugin's readings
@@ -137,6 +144,14 @@ type plugin struct {
 	// dead marks an instance that failed and was not restarted, so events
 	// stop being handed to a module that cannot take them.
 	dead bool
+	// snapshotting is set while a rib replay is in flight for this plugin.
+	//
+	// Replays must not overlap. Two of them push into one queue with no
+	// order between them, so an older copy of a route can land after the
+	// newer one and leave the plugin holding the stale value -- and a
+	// plugin that is dropping events is by definition slow, so a replay
+	// per drop would pile up without bound.
+	snapshotting bool
 }
 
 // ManagerConfig builds a Manager.
@@ -199,6 +214,8 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
 		return err
 	}
+	m.registerMu.Lock()
+	defer m.registerMu.Unlock()
 
 	// Claims are set before anything is instantiated, so a behavior another
 	// plugin holds stops the registration early. The previous set is kept
@@ -234,6 +251,14 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		// Stop the old instance without flushing: the new one inherits the
 		// owner tag and re-declares over the same state.
 		m.teardown(ctx, old)
+	}
+
+	// Anything the plugin declared from configure was held until now, so a
+	// failed instantiation could not leave state behind. It is live, so
+	// let it through.
+	if err := p.ops.Publish(); err != nil {
+		m.logger.Warn("applying what a plugin declared before it was live",
+			zap.String("plugin", reg.Name), zap.Error(err))
 	}
 
 	if m.source != nil {
@@ -383,6 +408,8 @@ func (m *Manager) restoreClaims(name string, behaviors []uint16) {
 // away, so its entries go with it rather than being left for a restart to
 // reclaim.
 func (m *Manager) Unregister(ctx context.Context, name string) error {
+	m.registerMu.Lock()
+	defer m.registerMu.Unlock()
 	m.mu.Lock()
 	p, ok := m.plugins[name]
 	delete(m.plugins, name)
@@ -551,6 +578,28 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 // Delivery blocks rather than dropping, which is safe because this does
 // not run on the BGP watch goroutine.
 func (m *Manager) snapshot(p *plugin) {
+	m.mu.Lock()
+	if p.snapshotting {
+		// One is already running. Ask for another afterwards rather than
+		// starting a second alongside it.
+		m.mu.Unlock()
+		p.worker.owe()
+		return
+	}
+	p.snapshotting = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		p.snapshotting = false
+		m.mu.Unlock()
+		// A drop while this one was running left the view incomplete
+		// again. Repay it now rather than waiting for an event that may
+		// not come.
+		if p.worker.takeSnapshotDebt() {
+			go m.snapshot(p)
+		}
+	}()
+
 	if m.snapshots == nil {
 		// Without a rib to read there is nothing to rebuild from. Say so:
 		// the plugin's view stays incomplete and that is worth knowing.

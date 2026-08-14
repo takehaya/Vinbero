@@ -128,10 +128,10 @@ func ApplyHeadendSet(
 
 	current, err := ownedPrefixes(ops, owner, af)
 	if err != nil {
-		// The declaration never reached the data plane, so the leases it
-		// took describe nothing. Holding them would deny another owner a
-		// key this one does not have, and no later reconcile would free
-		// them: prune only walks what the map says this owner holds.
+		// Nothing was written, so every lease this call took describes
+		// nothing. There is no live set to consult here, which is exactly
+		// why this releases all of them: the read that would have told us
+		// which keys the owner already holds is the one that failed.
 		releaseAll(leases, af, keys, owner)
 		return res, err
 	}
@@ -148,9 +148,11 @@ func ApplyHeadendSet(
 	sort.Strings(stale)
 	for _, prefix := range stale {
 		if err := deleteHeadend(ops, af, prefix, owner); err != nil {
-			// Nothing declared was written, so those leases describe
-			// nothing either.
-			releaseAll(leases, af, keys, owner)
+			// Release only the declared keys this owner has no entry for.
+			// A key it already holds from an earlier apply is still live
+			// in the map, and dropping its lease would let another owner
+			// take a key whose entry this one still owns.
+			releaseUnwritten(leases, af, keys, current, owner)
 			return res, fmt.Errorf("apply %s set: prune %q: %w", af, prefix, err)
 		}
 		if leases != nil {
@@ -167,7 +169,7 @@ func ApplyHeadendSet(
 			// reconcile would not prune them either -- the lease would
 			// outlive the declaration and block another owner from a key
 			// this one does not actually hold.
-			releaseAll(leases, af, keys[i:], owner)
+			releaseUnwritten(leases, af, keys[i:], current, owner)
 			return res, fmt.Errorf("apply %s set: write %q: %w", af, prefix, err)
 		}
 		if _, existed := current[prefix]; existed {
@@ -215,6 +217,22 @@ func releaseAll(leases *Leases, af AddressFamily, keys []string, owner bpf.Owner
 		return
 	}
 	for _, key := range keys {
+		leases.Release(af.leaseKind(), key, owner)
+	}
+}
+
+// releaseUnwritten frees the leases on declared keys the owner has no
+// entry for, leaving alone the ones it already holds from an earlier
+// apply. A lease dropped for a key whose entry is still installed would
+// let another owner take a key it cannot actually write.
+func releaseUnwritten(leases *Leases, af AddressFamily, keys []string, current map[string]struct{}, owner bpf.OwnerTag) {
+	if leases == nil {
+		return
+	}
+	for _, key := range keys {
+		if _, live := current[key]; live {
+			continue
+		}
 		leases.Release(af.leaseKind(), key, owner)
 	}
 }

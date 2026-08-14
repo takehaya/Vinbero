@@ -354,3 +354,67 @@ func TestDecodeLocalSID(t *testing.T) {
 		t.Error("a declaration with no name was accepted")
 	}
 }
+
+// With pinned maps a previous daemon run's dispatch entries survive, and
+// the names that produced them do not. A plugin redeclaring the same names
+// is handed new addresses, so the old entries would sit in the map with
+// nothing dispatching to them and nothing able to remove them.
+func TestLocalSIDSweepsLeftoversFromAPreviousRun(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	// As if a previous run had installed these under the same owner.
+	if err := sids.CreateSidFunction("fd00:9::1/128", &bpf.SidFunctionEntry{Action: 33}, nil, ownerA); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := sids.CreateSidFunction("fd00:9::2/128", &bpf.SidFunctionEntry{Action: 33}, nil, ownerA); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Another owner's entry must survive the sweep.
+	if err := sids.CreateSidFunction("fd00:9::9/128", &bpf.SidFunctionEntry{Action: 34}, nil, ownerB); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	set := NewLocalSIDSet(alloc, sids)
+	got, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if _, ok := sids.entryFor("fd00:9::1/128"); ok {
+		t.Error("a leftover entry from a previous run survived")
+	}
+	if _, ok := sids.entryFor("fd00:9::2/128"); ok {
+		t.Error("a leftover entry from a previous run survived")
+	}
+	if _, ok := sids.entryFor("fd00:9::9/128"); !ok {
+		t.Error("the sweep removed another owner's entry")
+	}
+	if _, ok := sids.entryFor(got[0].SID.String() + "/128"); !ok {
+		t.Error("the newly declared SID was not installed")
+	}
+}
+
+// The sweep runs once. A later apply must not go looking again, or a
+// plugin's own entries would be at risk every time it declares.
+func TestLocalSIDSweepsOnlyOnce(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	set := NewLocalSIDSet(alloc, sids)
+
+	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	// A second declaration adding a name must leave the first alone.
+	if _, _, err := set.Apply(ownerA, []LocalSID{
+		{Name: "svc-a", Locator: "main", Slot: 33},
+		{Name: "svc-b", Locator: "main", Slot: 34},
+	}); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if _, ok := sids.entryFor(first[0].SID.String() + "/128"); !ok {
+		t.Fatal("the plugin's own entry was swept by a later apply")
+	}
+	if sids.count() != 2 {
+		t.Fatalf("%d entries installed, want both declared SIDs", sids.count())
+	}
+}

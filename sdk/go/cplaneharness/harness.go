@@ -27,13 +27,18 @@ import (
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
-// Declaration is one desired set a plugin committed.
+// Declaration is one desired set a plugin committed. Which field is
+// populated follows from Kind.
 type Declaration struct {
 	// Kind says which set was declared.
 	Kind v1.PluginApplyKind
 	// Entries are the headend entries the plugin asked for, in the order
 	// it declared them.
 	Entries []*v1.PluginHeadendEntry
+	// Routes are the routes it asked to have originated.
+	Routes []*v1.PluginAdvertisedRoute
+	// LocalSIDs are the SIDs it asked the host to allocate.
+	LocalSIDs []*v1.PluginLocalSid
 }
 
 // Harness runs one plugin instance.
@@ -83,6 +88,12 @@ func New(tb testing.TB, module []byte, opts Options) *Harness {
 	}
 	h.inst = inst
 	tb.Cleanup(func() { _ = inst.Close(context.Background()) })
+	// A plugin may declare local SIDs from configure. Answer those before
+	// the test does anything else, as the daemon does once the plugin is
+	// live.
+	if err := h.flushAllocated(); err != nil {
+		tb.Fatalf("plugin declared local SIDs during configure: %v", err)
+	}
 	return h
 }
 
@@ -107,6 +118,9 @@ func (h *Harness) Deliver(events ...*v1.PluginEvent) (*v1.PluginEventStatus, err
 	if err != nil {
 		return nil, err
 	}
+	if err := h.flushAllocated(); err != nil {
+		return nil, err
+	}
 	if len(out) == 0 {
 		return &v1.PluginEventStatus{}, nil
 	}
@@ -115,6 +129,41 @@ func (h *Harness) Deliver(events ...*v1.PluginEvent) (*v1.PluginEventStatus, err
 		return nil, fmt.Errorf("plugin returned an undecodable status: %w", err)
 	}
 	return &status, nil
+}
+
+// flushAllocated delivers the addresses the host chose for local SIDs the
+// plugin declared, as an event, which is how the daemon answers too.
+func (h *Harness) flushAllocated() error {
+	for {
+		allocated := h.ops.takeAllocated()
+		if len(allocated) == 0 {
+			return nil
+		}
+		events := make([]*v1.PluginEvent, 0, len(allocated))
+		for _, a := range allocated {
+			h.mu.Lock()
+			h.seq++
+			seq := h.seq
+			inst := h.inst
+			h.mu.Unlock()
+			events = append(events, &v1.PluginEvent{
+				Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_LOCAL_SID,
+				Sequence: seq,
+				LocalSid: a,
+			})
+			_ = inst
+		}
+		raw, err := proto.Marshal(&v1.PluginEventBatch{Events: events})
+		if err != nil {
+			return fmt.Errorf("encode local-SID batch: %w", err)
+		}
+		h.mu.Lock()
+		inst := h.inst
+		h.mu.Unlock()
+		if _, err := inst.HandleEvents(context.Background(), raw); err != nil {
+			return fmt.Errorf("delivering local-SID answers: %w", err)
+		}
+	}
 }
 
 // Route is shorthand for delivering one route event.
@@ -167,6 +216,9 @@ func (h *Harness) Restart() {
 	h.inst = inst
 	h.mu.Unlock()
 	h.tb.Cleanup(func() { _ = inst.Close(context.Background()) })
+	if err := h.flushAllocated(); err != nil {
+		h.tb.Fatalf("plugin declared local SIDs during configure: %v", err)
+	}
 }
 
 // Declarations returns every set the plugin has committed, oldest first.
@@ -204,6 +256,10 @@ type recorder struct {
 	committed []Declaration
 	aborts    int
 	nextGen   uint64
+	// allocated holds the local-SID answers a commit produced, waiting to
+	// be handed to the plugin.
+	allocated []*v1.PluginLocalSidAllocated
+	nextSID   int
 }
 
 func (r *recorder) Log(level int32, msg string) {
@@ -216,7 +272,9 @@ func (r *recorder) ApplyBegin(kind uint32) (uint64, error) {
 	applyKind := v1.PluginApplyKind(kind)
 	switch applyKind {
 	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
-		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6,
+		v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE,
+		v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
 	default:
 		return 0, fmt.Errorf("unknown apply kind %d", kind)
 	}
@@ -244,6 +302,8 @@ func (r *recorder) ApplyPut(generation uint64, chunk []byte) error {
 		return fmt.Errorf("no open transaction %d", generation)
 	}
 	acc.HeadendEntries = append(acc.HeadendEntries, msg.GetHeadendEntries()...)
+	acc.AdvertisedRoutes = append(acc.AdvertisedRoutes, msg.GetAdvertisedRoutes()...)
+	acc.LocalSids = append(acc.LocalSids, msg.GetLocalSids()...)
 	return nil
 }
 
@@ -260,8 +320,38 @@ func (r *recorder) ApplyCommit(generation uint64) error {
 	if r.denyCommits {
 		return deniedError{}
 	}
-	r.committed = append(r.committed, Declaration{Kind: kind, Entries: acc.GetHeadendEntries()})
+	decl := Declaration{
+		Kind:      kind,
+		Entries:   acc.GetHeadendEntries(),
+		Routes:    acc.GetAdvertisedRoutes(),
+		LocalSIDs: acc.GetLocalSids(),
+	}
+	r.committed = append(r.committed, decl)
+
+	// A declared local SID is answered with an address, as the daemon
+	// does: the plugin named it, the host chose the value, and a plugin
+	// that is never told cannot advertise it. Without this the harness
+	// could not exercise the half of a plugin that originates anything.
+	if kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		for _, sid := range acc.GetLocalSids() {
+			r.nextSID++
+			r.allocated = append(r.allocated, &v1.PluginLocalSidAllocated{
+				Name:    sid.GetName(),
+				Sid:     fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID),
+				Locator: sid.GetLocator(),
+			})
+		}
+	}
 	return nil
+}
+
+// takeAllocated returns the local-SID answers owed to the plugin.
+func (r *recorder) takeAllocated() []*v1.PluginLocalSidAllocated {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.allocated
+	r.allocated = nil
+	return out
 }
 
 func (r *recorder) ApplyAbort(generation uint64) {

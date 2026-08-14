@@ -59,9 +59,17 @@ type AllocatedSID struct {
 //
 // Allocation is the one part of the capability surface that is not purely
 // declarative -- an address has to come from somewhere and be remembered.
-// Naming each SID is what keeps even that idempotent: a plugin that comes
-// back with no memory declares the same names and is handed the same
-// addresses, because the host never forgot them.
+// Naming each SID is what keeps even that idempotent within a daemon run:
+// a plugin instance that comes back with no memory declares the same names
+// and is handed the same addresses, because the host still holds them.
+//
+// A daemon restart is different. The names live only here, in memory, so
+// nothing can map a surviving pinned entry back to the name it was
+// installed for. What the host does instead is sweep: the first time an
+// owner declares anything, entries under that owner which this run did not
+// install are removed, and the plugin is handed fresh addresses. Leaving
+// them would be worse -- nothing dispatches to them and nothing can ever
+// remove them again.
 type LocalSIDSet struct {
 	alloc SIDAllocator
 	sids  SIDFunctionOps
@@ -69,6 +77,9 @@ type LocalSIDSet struct {
 	mu sync.Mutex
 	// live maps owner -> name -> what was allocated for it.
 	live map[bpf.OwnerTag]map[string]AllocatedSID
+	// swept records the owners whose leftovers from a previous daemon run
+	// have already been cleared.
+	swept map[bpf.OwnerTag]bool
 }
 
 // NewLocalSIDSet builds the tracker. Either dependency may be nil, in
@@ -79,6 +90,7 @@ func NewLocalSIDSet(alloc SIDAllocator, sids SIDFunctionOps) *LocalSIDSet {
 		alloc: alloc,
 		sids:  sids,
 		live:  make(map[bpf.OwnerTag]map[string]AllocatedSID),
+		swept: make(map[bpf.OwnerTag]bool),
 	}
 }
 
@@ -108,6 +120,10 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID) ([]Allocated
 		}
 		byName[s.Name] = s
 		names = append(names, s.Name)
+	}
+
+	if err := l.sweepLeftovers(owner); err != nil {
+		return nil, res, err
 	}
 
 	l.mu.Lock()
@@ -185,6 +201,59 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID) ([]Allocated
 		res.Created++
 	}
 	return out, res, nil
+}
+
+// sweepLeftovers removes dispatch entries under an owner that this daemon
+// run did not install, once per owner.
+//
+// With pinned maps a previous run's entries survive, and their names do
+// not: nothing here can tell which declaration installed a given address.
+// A plugin redeclaring the same names is therefore handed new addresses,
+// and the old entries would sit in the map with nothing dispatching to
+// them and nothing able to remove them.
+func (l *LocalSIDSet) sweepLeftovers(owner bpf.OwnerTag) error {
+	if l.sids == nil {
+		// A daemon that cannot install entries has none to sweep.
+		return nil
+	}
+	l.mu.Lock()
+	if l.swept[owner] {
+		l.mu.Unlock()
+		return nil
+	}
+	l.swept[owner] = true
+	held := make(map[string]struct{}, len(l.live[owner]))
+	for _, got := range l.live[owner] {
+		held[got.SID.String()+"/128"] = struct{}{}
+	}
+	l.mu.Unlock()
+
+	entries, err := l.sids.ListSidFunctions()
+	if err != nil {
+		return fmt.Errorf("local sid: list existing entries: %w", err)
+	}
+	prefixes := make([]string, 0, len(entries))
+	for prefix := range entries {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+
+	for _, prefix := range prefixes {
+		if _, ours := held[prefix]; ours {
+			continue
+		}
+		got, ok, err := l.sids.GetSidFunctionOwner(prefix)
+		if err != nil {
+			return fmt.Errorf("local sid: read owner of %s: %w", prefix, err)
+		}
+		if !ok || got != owner {
+			continue
+		}
+		if err := l.sids.DeleteSidFunction(prefix, owner); err != nil {
+			return fmt.Errorf("local sid: sweep %s: %w", prefix, err)
+		}
+	}
+	return nil
 }
 
 // ReleaseOwner removes every local SID an owner holds. It is what

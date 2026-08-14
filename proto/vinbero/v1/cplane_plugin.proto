@@ -30,8 +30,10 @@ enum PluginEventKind {
   // before acting, or its first conclusions are drawn from a partial view
   // and the churn is visible to its peers.
   PLUGIN_EVENT_KIND_END_OF_REPLAY = 3;
-  // The periodic tick, carrying the host's monotonic clock.
-  PLUGIN_EVENT_KIND_TICK = 4;
+  // 4 was a tick event. The periodic callback is the on_tick export
+  // instead, so a tick never arrives as an event and reserving the number
+  // keeps a plugin author from waiting for one.
+  reserved 4;
   // A local SID the plugin declared now exists, and this is the address
   // it was given. It arrives after the declaration is applied, which is
   // the point at which the plugin can advertise it.
@@ -107,6 +109,7 @@ message PluginMacEvent {
 
 // PluginEvent is one item in a batch.
 message PluginEvent {
+  reserved 6;
   PluginEventKind kind = 1;
   // Sequence increases across a plugin's lifetime and identifies the event
   // in a status reply, so a plugin can point at which one it could not
@@ -116,8 +119,7 @@ message PluginEvent {
   PluginMacEvent mac = 4;
   // Source names which replay finished, for an end-of-replay event.
   string replay_source = 5;
-  // NowNs is the host's monotonic clock, set on a tick.
-  int64 now_ns = 6;
+  // 6 was a tick timestamp. on_tick carries it as an argument instead.
   // LocalSid reports the address allocated for a declared local SID.
   PluginLocalSidAllocated local_sid = 7;
 }

@@ -72,8 +72,9 @@ const (
 
 // PluginEventKind values this plugin acts on.
 const (
-	eventKindRoute    = 1
-	eventKindLocalSID = 5
+	eventKindRoute       = 1
+	eventKindEndOfReplay = 3
+	eventKindLocalSID    = 5
 )
 
 // PluginApplyKind values.
@@ -295,6 +296,17 @@ func applyEvent(body []byte) bool {
 			return false
 		}
 		return applyRoute(route)
+	case eventKindEndOfReplay:
+		// The host has finished telling this instance what the network
+		// looks like. Declare unconditionally, even if nothing changed.
+		//
+		// After a restart the host keeps the entries the previous
+		// instance installed, and this instance knows nothing about them.
+		// If the replay brings back no matching route -- everything was
+		// withdrawn while it was down, or this node simply has none --
+		// then without declaring here the stale entries are never pruned
+		// and blackhole until an unrelated route happens to arrive.
+		return true
 	case eventKindLocalSID:
 		if localSID == nil {
 			return false

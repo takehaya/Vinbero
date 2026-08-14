@@ -51,6 +51,18 @@ type PluginOps struct {
 	maxOpen int
 	// maxEntries caps how much one transaction may accumulate.
 	maxEntries int
+	// staged holds commits made before the plugin is published.
+	//
+	// A plugin may declare state from configure, which runs during
+	// instantiation. Applying it there would be wrong twice over: an
+	// instantiation that then fails would leave state behind that no
+	// registered plugin can remove, and on an upgrade the failed new
+	// instance shares its owner tag with the old one that is still
+	// running, so its declaration would prune the live plugin's entries.
+	// So commits are held until the manager publishes the plugin, and
+	// discarded if it never does.
+	staged    []*applyTxn
+	published bool
 }
 
 // applyTxn is one open desired-set declaration.
@@ -223,6 +235,30 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	return nil
 }
 
+// Publish applies whatever the plugin declared before it was registered,
+// and lets later commits through directly.
+//
+// The manager calls it once the plugin is live. Until then a declaration
+// is only recorded: see the staged field.
+func (p *PluginOps) Publish() error {
+	p.mu.Lock()
+	if p.published {
+		p.mu.Unlock()
+		return nil
+	}
+	p.published = true
+	staged := p.staged
+	p.staged = nil
+	p.mu.Unlock()
+
+	for _, txn := range staged {
+		if err := p.applyTransaction(txn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ApplyCommit reconciles what the transaction accumulated. This is the
 // only point at which a plugin's declaration reaches the data plane.
 //
@@ -235,11 +271,25 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 	if ok {
 		delete(p.open, generation)
 	}
+	published := p.published
+	if ok && !published {
+		// Declared before the plugin is live: hold it rather than apply
+		// it, so an instantiation that fails leaves nothing behind.
+		p.staged = append(p.staged, txn)
+	}
 	p.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("apply commit: no open transaction %d", generation)
 	}
+	if !published {
+		return nil
+	}
+	return p.applyTransaction(txn)
+}
 
+// applyTransaction is the reconcile itself, shared by a live commit and by
+// one replayed at publication.
+func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
 		p.applyMu.Lock()
 		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids)

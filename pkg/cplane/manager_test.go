@@ -493,6 +493,13 @@ func TestPluginOpsTransactionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
 	}
+	// Commits are held until the plugin is published, so that an
+	// instantiation which fails cannot leave state behind. The manager
+	// does this once the plugin is live; a test driving the ops directly
+	// has to do it too.
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
 
 	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
 	if err != nil {
@@ -532,6 +539,9 @@ func TestPluginOpsAbortDiscards(t *testing.T) {
 	ops, err := NewPluginOps(PluginOpsConfig{Owner: ownerA, Headend: headend, Leases: NewLeases()})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
 	}
 	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
 	if err != nil {
@@ -855,5 +865,102 @@ func TestEndOfReplayFollowsTheSnapshot(t *testing.T) {
 	}
 	if ev.GetSequence() == 0 {
 		t.Error("the event carries no sequence number")
+	}
+}
+
+// A plugin may declare state from configure, which runs during
+// instantiation. Applying it there would leave state behind when the
+// instantiation then fails -- and on an upgrade that state carries the
+// same owner tag as the instance still running, so the failed newcomer's
+// declaration would prune the live plugin's entries.
+func TestFailedInstantiationLeavesNoState(t *testing.T) {
+	src := newFakeSource()
+	headend := newFakeHeadendOps()
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	adv := &fakeAdvertiser{}
+	m, err := NewManager(ManagerConfig{
+		Source: src, Claims: newFakeClaims(), Headend: headend,
+		Advertiser: adv, Locators: alloc, SIDFunctions: sids,
+		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	defer m.Close(context.Background())
+
+	// The example declares a local SID from configure, then refuses the
+	// config: an instantiation that declares and then fails.
+	err = m.Register(context.Background(), Registration{
+		Name:   "custom-behavior",
+		Module: examplePlugin(t),
+		Config: append(exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+			// A trailing byte that cannot be parsed, so configure returns
+			// non-zero after it has already declared.
+			0xff),
+	})
+	if err == nil {
+		t.Fatal("a module whose configure failed was registered")
+	}
+	if sids.count() != 0 {
+		t.Errorf("%d dispatch entries left behind by a failed registration", sids.count())
+	}
+	if alloc.releasedCount() != 0 && sids.count() == 0 {
+		// Releasing is fine; leaking an installed entry is not.
+		t.Logf("allocator released %d addresses", alloc.releasedCount())
+	}
+	if names := m.List(); len(names) != 0 {
+		t.Errorf("a failed registration left %v registered", names)
+	}
+}
+
+// An upgrade whose new module fails must not disturb the instance still
+// running under the same owner tag.
+func TestFailedUpgradeLeavesTheRunningPluginAlone(t *testing.T) {
+	src := newFakeSource()
+	headend := newFakeHeadendOps()
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	adv := &fakeAdvertiser{}
+	m, err := NewManager(ManagerConfig{
+		Source: src, Claims: newFakeClaims(), Headend: headend,
+		Advertiser: adv, Locators: alloc, SIDFunctions: sids,
+		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	defer m.Close(context.Background())
+
+	good := Registration{
+		Name:      "custom-behavior",
+		Module:    examplePlugin(t),
+		Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Behaviors: []uint16{0xFE01},
+	}
+	if err := m.Register(context.Background(), good); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	waitDelivered(t, m, "custom-behavior")
+	if sids.count() != 1 {
+		t.Fatalf("setup: %d dispatch entries, want 1", sids.count())
+	}
+	advertisedBefore, _ := adv.counts()
+
+	// A v2 that is not a module at all.
+	bad := good
+	bad.Module = []byte("not wasm")
+	if err := m.Register(context.Background(), bad); err == nil {
+		t.Fatal("a malformed upgrade was accepted")
+	}
+
+	if sids.count() != 1 {
+		t.Errorf("the failed upgrade disturbed the running plugin's SIDs: %d left", sids.count())
+	}
+	if got, _ := adv.counts(); got != advertisedBefore {
+		t.Errorf("the failed upgrade changed what was advertised: %d then %d", advertisedBefore, got)
+	}
+	if names := m.List(); len(names) != 1 {
+		t.Errorf("the running plugin was dropped: %v", names)
 	}
 }
