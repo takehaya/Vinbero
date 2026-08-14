@@ -1,0 +1,262 @@
+// Package demux fans a single BGP route subscription out to several
+// consumers.
+//
+// gobgp's watch may only be opened once per daemon: each Subscribe opens
+// its own WatchEvent with current=true, so a second one would replay the
+// loc-rib -- including this node's own advertisements -- into whoever
+// attached late. The daemon therefore owns exactly one subscription and
+// every consumer registers here instead.
+//
+// Two rules make that safe, and both are this package's responsibility
+// rather than each consumer's:
+//
+//   - Local-origin paths are dropped, on the live stream as well as on the
+//     snapshot replay. Once anything in the process advertises (the
+//     auto-advertise exporter today, a plugin later), the post-policy
+//     stream carries the node's own paths back; a consumer acting on them
+//     would install self-pointing state.
+//   - A consumer only sees the families it declared, so an unrelated
+//     family never reaches it.
+//
+// Delivery is level-triggered: a consumer that registers after Start gets
+// a loc-rib snapshot before it starts seeing live updates, and may see the
+// same route from both. Consumers must be idempotent per NLRI.
+package demux
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+
+	"go.uber.org/zap"
+
+	"github.com/takehaya/vinbero/pkg/bgp"
+)
+
+// ErrAlreadyStarted is returned by Start when the demux is already
+// subscribed.
+var ErrAlreadyStarted = errors.New("demux: already started")
+
+// consumer is one registered handler and the families it asked for. A nil
+// families map means every family.
+type consumer struct {
+	name     string
+	families map[bgp.Family]struct{}
+	handler  bgp.RouteHandler
+}
+
+// wants reports whether this consumer subscribed to fam.
+func (c *consumer) wants(fam bgp.Family) bool {
+	if c.families == nil {
+		return true
+	}
+	_, ok := c.families[fam]
+	return ok
+}
+
+// Demux owns the daemon's single BGP subscription and dispatches each
+// received route to the registered consumers.
+type Demux struct {
+	sub    bgp.RouteSubscriber
+	lister bgp.RouteLister
+	logger *zap.Logger
+
+	mu        sync.RWMutex
+	consumers []*consumer
+	nextID    uint64
+	ids       []uint64
+	cancelSub func()
+	started   bool
+}
+
+// New builds a demux over sub. lister supplies the loc-rib snapshot for
+// consumers that register after Start; it may be nil, in which case such
+// consumers only see live updates. Both are usually the same *gobgp.Session.
+func New(sub bgp.RouteSubscriber, lister bgp.RouteLister, logger *zap.Logger) *Demux {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return &Demux{sub: sub, lister: lister, logger: logger}
+}
+
+// Register adds a consumer. families restricts delivery; passing none
+// delivers every family. The returned cancel removes the consumer and is
+// safe to call more than once.
+//
+// Registering after Start replays the loc-rib for the declared families
+// (every family the lister knows, when none were declared) so the consumer
+// converges on routes that arrived before it existed.
+func (d *Demux) Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
+	if handler == nil {
+		return nil, fmt.Errorf("demux: register %q: nil handler", name)
+	}
+	c := &consumer{name: name, handler: handler}
+	if len(families) > 0 {
+		c.families = make(map[bgp.Family]struct{}, len(families))
+		for _, f := range families {
+			if !f.Valid() {
+				return nil, fmt.Errorf("demux: register %q: unknown family %q", name, f)
+			}
+			c.families[f] = struct{}{}
+		}
+	}
+
+	d.mu.Lock()
+	id := d.nextID
+	d.nextID++
+	d.consumers = append(d.consumers, c)
+	d.ids = append(d.ids, id)
+	replay := d.started
+	d.mu.Unlock()
+
+	d.logger.Info("BGP demux consumer registered",
+		zap.String("consumer", name),
+		zap.Strings("families", familyNames(families)),
+		zap.Bool("replay", replay))
+
+	// Replay after the consumer is live so an update between the two is
+	// seen rather than lost; the overlap is a duplicate, which
+	// level-triggered consumers absorb.
+	if replay {
+		d.replay(c, families)
+	}
+
+	var once sync.Once
+	return func() { once.Do(func() { d.remove(id) }) }, nil
+}
+
+// remove drops the consumer registered under id.
+func (d *Demux) remove(id uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i, got := range d.ids {
+		if got != id {
+			continue
+		}
+		name := d.consumers[i].name
+		d.consumers = append(d.consumers[:i], d.consumers[i+1:]...)
+		d.ids = append(d.ids[:i], d.ids[i+1:]...)
+		d.logger.Info("BGP demux consumer removed", zap.String("consumer", name))
+		return
+	}
+}
+
+// Start opens the single underlying subscription. Consumers registered
+// beforehand see the current=true replay of peer-learned routes; the
+// daemon calls this once, after the applier is registered and before
+// anything advertises.
+func (d *Demux) Start() error {
+	d.mu.Lock()
+	if d.started {
+		d.mu.Unlock()
+		return ErrAlreadyStarted
+	}
+	d.started = true
+	d.mu.Unlock()
+
+	cancel, err := d.sub.Subscribe("", d.dispatch)
+	if err != nil {
+		d.mu.Lock()
+		d.started = false
+		d.mu.Unlock()
+		return fmt.Errorf("demux: subscribe: %w", err)
+	}
+	d.mu.Lock()
+	d.cancelSub = cancel
+	d.mu.Unlock()
+	return nil
+}
+
+// Stop tears the underlying subscription down. Registered consumers are
+// left in place, so a later Start resumes delivery to them.
+func (d *Demux) Stop() {
+	d.mu.Lock()
+	cancel := d.cancelSub
+	d.cancelSub = nil
+	d.started = false
+	d.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// dispatch is the single RouteHandler handed to the subscriber. It runs on
+// a gobgp-internal goroutine, so it must not block: it only filters and
+// calls the consumers, which carry the same no-blocking contract.
+func (d *Demux) dispatch(ev bgp.RouteEvent) {
+	// Drop this node's own advertisements. The post-policy stream carries
+	// them once anything in the process advertises, and a consumer acting
+	// on its own route would install self-pointing state (an own EVPN RT3
+	// becomes a BUM peer pointing back at this node). ListRoutes applies
+	// the same rule to the snapshot.
+	if ev.Source.IsLocal() {
+		return
+	}
+	d.mu.RLock()
+	targets := make([]*consumer, 0, len(d.consumers))
+	for _, c := range d.consumers {
+		if c.wants(ev.Family) {
+			targets = append(targets, c)
+		}
+	}
+	d.mu.RUnlock()
+
+	for _, c := range targets {
+		c.handler(ev)
+	}
+}
+
+// replay feeds c a loc-rib snapshot of the given families, or of every
+// family c subscribed to when the list is empty. Failures are logged, not
+// returned: a consumer that misses the snapshot still converges from live
+// updates, and before the session is up there is nothing to replay.
+func (d *Demux) replay(c *consumer, families []bgp.Family) {
+	if d.lister == nil {
+		return
+	}
+	want := families
+	if len(want) == 0 {
+		want = allFamilies()
+	}
+	for _, fam := range want {
+		err := d.lister.ListRoutes(fam, func(ev bgp.RouteEvent) {
+			if ev.Source.IsLocal() {
+				return // defense in depth; ListRoutes already skips these
+			}
+			c.handler(ev)
+		})
+		if err != nil {
+			d.logger.Warn("BGP demux replay failed",
+				zap.String("consumer", c.name),
+				zap.String("family", fam.String()),
+				zap.Error(err))
+		}
+	}
+}
+
+// allFamilies lists the families a snapshot replay covers when a consumer
+// did not narrow its subscription.
+func allFamilies() []bgp.Family {
+	return []bgp.Family{
+		bgp.FamilyVPNv4,
+		bgp.FamilyVPNv6,
+		bgp.FamilyIPv6Unicast,
+		bgp.FamilySRPolicyIPv6,
+		bgp.FamilyEVPN,
+		bgp.FamilyMUPIPv4,
+		bgp.FamilyMUPIPv6,
+	}
+}
+
+// familyNames renders families for a log field, reporting the empty list
+// as "all".
+func familyNames(families []bgp.Family) []string {
+	if len(families) == 0 {
+		return []string{"all"}
+	}
+	out := make([]string, 0, len(families))
+	for _, f := range families {
+		out = append(out, f.String())
+	}
+	return out
+}

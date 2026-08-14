@@ -16,6 +16,7 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bgp/apply"
+	"github.com/takehaya/vinbero/pkg/bgp/demux"
 	"github.com/takehaya/vinbero/pkg/bgp/export"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
@@ -372,14 +373,22 @@ func run(cliCtx *cli.Context) error {
 				lg.Warn("BGP FIB cleanup failed", zap.Error(err))
 			}
 		}()
-		cancelSub, err := bgpSession.Subscribe("", applier.Apply)
-		if err != nil {
+		// One subscription per daemon, fanned out by the demux. The applier
+		// is consumer zero; later consumers (plugins) register with the same
+		// demux rather than opening their own watch. The demux drops
+		// local-origin paths on both the replay and the live stream, so this
+		// node's own advertisements never reach the applier.
+		routeDemux := demux.New(bgpSession, bgpSession, lg)
+		if _, err := routeDemux.Register("applier", nil, applier.Apply); err != nil {
+			return fmt.Errorf("register BGP applier: %w", err)
+		}
+		if err := routeDemux.Start(); err != nil {
 			return fmt.Errorf("subscribe BGP routes: %w", err)
 		}
-		defer cancelSub()
+		defer routeDemux.Stop()
 
 		// Auto-advertise: the exporter enables each VRF binding with a
-		// redistribute set and starts watching. Starting after Subscribe means
+		// redistribute set and starts watching. Starting after the demux means
 		// its ListExisting replay advertises boot-time prefixes through an
 		// already-running advertiser; the deferred Stop withdraws them before
 		// the session drops.
