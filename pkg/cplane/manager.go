@@ -292,6 +292,29 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 // build instantiates a plugin and its delivery worker without publishing
 // it.
 func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) {
+	// A plugin may declare local SIDs from configure, which runs during
+	// instantiation -- before there is a worker to deliver the reply
+	// through. Buffer those until there is one rather than dropping them:
+	// a plugin that is never told the address it was given cannot
+	// advertise it, and would sit there waiting for an event that already
+	// happened.
+	var (
+		pendingMu   sync.Mutex
+		pendingSIDs []AllocatedSID
+		built       *plugin
+	)
+	onLocalSIDs := func(sids []AllocatedSID) {
+		pendingMu.Lock()
+		if built == nil {
+			pendingSIDs = append(pendingSIDs, sids...)
+			pendingMu.Unlock()
+			return
+		}
+		p := built
+		pendingMu.Unlock()
+		m.deliverLocalSIDs(p, sids)
+	}
+
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner:              bpf.OwnerPluginBundle(reg.Name),
 		Headend:            m.headend,
@@ -301,7 +324,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		ApplyMutex:         &m.applyMu,
 		Advertise:          m.advertise,
 		LocalSIDs:          m.localSIDs,
-		OnLocalSIDs:        func(sids []AllocatedSID) { m.reportLocalSIDs(reg.Name, sids) },
+		OnLocalSIDs:        onLocalSIDs,
 	})
 	if err != nil {
 		return nil, err
@@ -327,6 +350,15 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		func(status *v1.PluginEventStatus) { m.delivered(p, status) },
 		func() error { return m.tick(p) },
 		interval)
+
+	pendingMu.Lock()
+	built = p
+	held := pendingSIDs
+	pendingSIDs = nil
+	pendingMu.Unlock()
+	if len(held) > 0 {
+		m.deliverLocalSIDs(p, held)
+	}
 	return p, nil
 }
 
@@ -604,20 +636,14 @@ func (m *Manager) endOfReplayBatch(source string) *v1.PluginEventBatch {
 	}}}
 }
 
-// reportLocalSIDs tells a plugin the addresses its declared local SIDs
+// deliverLocalSIDs tells a plugin the addresses its declared local SIDs
 // were given.
 //
 // The plugin chose the names and the host chose the addresses, so this is
 // the only way it learns what to advertise. Delivery is queued like any
 // other event, which keeps it in order behind whatever else the plugin is
 // being told.
-func (m *Manager) reportLocalSIDs(name string, sids []AllocatedSID) {
-	m.mu.Lock()
-	p, ok := m.plugins[name]
-	m.mu.Unlock()
-	if !ok {
-		return
-	}
+func (m *Manager) deliverLocalSIDs(p *plugin, sids []AllocatedSID) {
 	events := make([]*v1.PluginEvent, 0, len(sids))
 	for _, s := range sids {
 		events = append(events, &v1.PluginEvent{

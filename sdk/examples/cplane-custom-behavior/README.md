@@ -16,12 +16,25 @@ to the same prefix. The claim is what keeps the two apart.
 
 ## What it does
 
-On every batch of events it receives:
+It runs both halves of the case.
+
+Sending: at startup it asks the daemon for a local SID from a configured
+locator, pointing at the eBPF slot its data-plane half occupies. The daemon
+allocates the address, installs the dispatch entry and tells the plugin
+which address it got -- the plugin names the SID, the daemon chooses the
+value, which is what lets a restarted plugin declare the same name and be
+handed the same address. It then advertises the configured prefix behind
+that SID, naming its own behavior codepoint in the SID TLV.
+
+Receiving, on every batch of events:
 
 - an advertisement carrying the claimed behavior and an SRv6 SID adds a
   headend entry for its prefix, steering into that SID
 - a withdrawal removes it
 - anything else is ignored
+
+Two nodes running this plugin therefore reach each other over a behavior
+neither vinbero nor BGP knows anything about.
 
 It then declares the whole set, not a delta. The daemon diffs the
 declaration against what this plugin already owns and applies the
@@ -83,17 +96,21 @@ is the deliberate removal and takes the plugin's entries with it.
 
 ## Configuration
 
-The config blob is a bare varint holding the codepoint to claim, so one
-build serves deployments that numbered their behavior differently:
+The config blob is this plugin's own protobuf message, which the daemon
+does not interpret. It carries everything that differs between
+deployments, so one build serves all of them:
 
-```sh
-printf '\202\374\003' > behavior.bin   # 0xFE02
-vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
-    --config behavior.bin --behavior 0xFE02
-```
+| field | meaning |
+|---|---|
+| 1 | the endpoint behavior codepoint to claim |
+| 2 | the locator to take a local SID from |
+| 3 | the prefix to advertise behind that SID |
+| 4 | the route distinguisher to advertise it with |
+| 5 | the eBPF slot the SID dispatches to |
 
-A plugin with more than one knob would define a protobuf message and encode
-that; a whole message for a single number would be ceremony.
+Leaving the locator or the slot unset makes the plugin receive-only, which
+is a perfectly ordinary way to run it: a node that consumes the behavior
+without originating anything.
 
 ## Notes on the code
 

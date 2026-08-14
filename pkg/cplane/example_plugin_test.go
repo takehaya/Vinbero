@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
 // examplePlugin is the TinyGo plugin under sdk/examples. Unlike the
@@ -192,9 +193,9 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	}
 	defer m.Close(context.Background())
 
-	// The example's config is a bare varint: the codepoint to claim.
-	// 0xFE02 encodes as two continuation-marked bytes.
-	config := []byte{0x82, 0xfc, 0x03}
+	// The example's own config message, asking it to claim a different
+	// codepoint than the one it was built with.
+	config := exampleConfig(0xFE02, "", "", "", 0)
 	if err := m.Register(context.Background(), Registration{
 		Name:      "custom-behavior",
 		Module:    examplePlugin(t),
@@ -217,5 +218,180 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	waitDelivered(t, m, "custom-behavior")
 	if ops.countV4() != 1 {
 		t.Fatalf("the plugin ignored its configured behavior: %v", sortedV4(ops))
+	}
+}
+
+// exampleConfig encodes the example plugin's own config message: the
+// behavior codepoint to claim, the locator to take a SID from, the prefix
+// to advertise behind it, its RD, and the data-plane slot the SID
+// dispatches to.
+func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64) []byte {
+	var w exampleWriter
+	w.varintField(1, behavior)
+	w.stringField(2, locator)
+	w.stringField(3, prefix)
+	w.stringField(4, rd)
+	w.varintField(5, slot)
+	return w.buf
+}
+
+// exampleWriter is a minimal protobuf encoder for building that config.
+type exampleWriter struct{ buf []byte }
+
+func (w *exampleWriter) varint(v uint64) {
+	for v >= 0x80 {
+		w.buf = append(w.buf, byte(v)|0x80)
+		v >>= 7
+	}
+	w.buf = append(w.buf, byte(v))
+}
+
+// wireVarint and wireBytes are the protobuf wire types these fields use.
+const (
+	wireVarint = 0
+	wireBytes  = 2
+)
+
+func (w *exampleWriter) varintField(field int, v uint64) {
+	w.varint(uint64(field)<<3 | wireVarint)
+	w.varint(v)
+}
+
+func (w *exampleWriter) stringField(field int, s string) {
+	w.varint(uint64(field)<<3 | wireBytes)
+	w.varint(uint64(len(s)))
+	w.buf = append(w.buf, s...)
+}
+
+// The whole point of the mechanism, driven end to end by a real plugin:
+// it asks for a SID of its own, is told the address, points it at its
+// data-plane slot, and advertises a prefix behind it naming its own
+// behavior codepoint.
+//
+// A far-end vinbero receiving that advertisement hands it to the plugin
+// that claimed the codepoint rather than to its own appliers, which is the
+// receive half this same example implements.
+func TestExamplePluginCompletesTheLoop(t *testing.T) {
+	src := newFakeSource()
+	headend := newFakeHeadendOps()
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	adv := &fakeAdvertiser{}
+
+	m, err := NewManager(ManagerConfig{
+		Source:             src,
+		Claims:             newFakeClaims(),
+		Headend:            headend,
+		Advertiser:         adv,
+		Locators:           alloc,
+		SIDFunctions:       sids,
+		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	defer m.Close(context.Background())
+
+	if err := m.Register(context.Background(), Registration{
+		Name:      "custom-behavior",
+		Module:    examplePlugin(t),
+		Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Behaviors: []uint16{0xFE01},
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	waitDelivered(t, m, "custom-behavior")
+
+	// It asked for a SID and the host installed the dispatch entry.
+	if sids.count() != 1 {
+		t.Fatalf("%d dispatch entries installed, want the plugin's own", sids.count())
+	}
+	for prefix, entry := range mustEntries(t, sids) {
+		if entry.Action != 33 {
+			t.Errorf("SID %s dispatches to slot %d, want the plugin's 33", prefix, entry.Action)
+		}
+	}
+
+	// Being told the address is what let it advertise.
+	adv.mu.Lock()
+	advertised := append([]bgp.VPNRoute(nil), adv.advertise...)
+	adv.mu.Unlock()
+	if len(advertised) != 1 {
+		t.Fatalf("advertised %d routes, want the configured prefix", len(advertised))
+	}
+	got := advertised[0]
+	if got.Prefix != "10.7.0.0/24" || got.RD != "65000:7" {
+		t.Errorf("advertised %+v, want the configured prefix and RD", got)
+	}
+	if got.EndpointBehavior != 0xFE01 {
+		t.Errorf("advertised behavior = %#x, want the plugin's own", got.EndpointBehavior)
+	}
+	if got.SRv6SID == "" {
+		t.Error("advertised no SID")
+	}
+	// The SID it advertised is the one the dispatch entry was installed
+	// for, not some other address.
+	if _, ok := sids.entryFor(got.SRv6SID + "/128"); !ok {
+		t.Errorf("advertised SID %s has no dispatch entry", got.SRv6SID)
+	}
+
+	// The receive half still works alongside all of that.
+	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
+	waitDelivered(t, m, "custom-behavior")
+	if headend.countV4() != 1 {
+		t.Fatalf("the receive half stopped working: %v", sortedV4(headend))
+	}
+}
+
+// mustEntries reads the installed dispatch entries.
+func mustEntries(t *testing.T, sids *fakeSIDOps) map[string]*bpf.SidFunctionEntry {
+	t.Helper()
+	got, err := sids.ListSidFunctions()
+	if err != nil {
+		t.Fatalf("list sid functions: %v", err)
+	}
+	return got
+}
+
+// Unregistering takes the plugin's advertisement and its SID with it: an
+// address nobody dispatches on, still advertised, is a blackhole.
+func TestExamplePluginUnregisterRetractsEverything(t *testing.T) {
+	src := newFakeSource()
+	headend := newFakeHeadendOps()
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	adv := &fakeAdvertiser{}
+
+	m, err := NewManager(ManagerConfig{
+		Source: src, Claims: newFakeClaims(), Headend: headend,
+		Advertiser: adv, Locators: alloc, SIDFunctions: sids,
+		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	defer m.Close(context.Background())
+
+	if err := m.Register(context.Background(), Registration{
+		Name:      "custom-behavior",
+		Module:    examplePlugin(t),
+		Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Behaviors: []uint16{0xFE01},
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	waitDelivered(t, m, "custom-behavior")
+
+	if err := m.Unregister(context.Background(), "custom-behavior"); err != nil {
+		t.Fatalf("unregister: %v", err)
+	}
+	if _, withdrawn := adv.counts(); withdrawn != 1 {
+		t.Errorf("withdrew %d routes, want the plugin's advertisement", withdrawn)
+	}
+	if sids.count() != 0 {
+		t.Errorf("%d dispatch entries left behind", sids.count())
+	}
+	if alloc.releasedCount() != 1 {
+		t.Errorf("released %d addresses, want the plugin's SID back", alloc.releasedCount())
 	}
 }

@@ -13,11 +13,18 @@ WebAssembly module を受け取ります。どちらも daemon に upload され
 1. 転送は data plane plugin が endpoint slot に実装します。これは既存の
    plugin SDK でできます。
 2. control plane plugin がその behavior codepoint を claim します。
-3. その codepoint を名乗る経路が届くと、plugin が headend の状態を宣言し
-   ます。
-4. Vinbero 自身の applier はその経路を見ません。codepoint を見ずに service
+3. plugin が local SID を要求します。host が locator から address を確保
+   し、plugin の slot を指す dispatch entry を書き、address を event で
+   plugin に返します。名前は plugin が付け、値は host が選びます。記憶を
+   失って戻ってきた plugin が同じ名前を宣言すると同じ address が返ります。
+4. plugin がその SID を SID TLV に自分の codepoint を載せて広告します。
+5. 対向でその経路を受けた plugin が headend の状態を宣言します。
+6. Vinbero 自身の applier はその経路を見ません。codepoint を見ずに service
    SID から entry を作るので、知らない codepoint を素の SID と誤読して
    しまうためです。
+
+これで両ノードは Vinbero も BGP も知らない behavior で通信します。実例は
+`sdk/examples/cplane-custom-behavior` にあり、この 6 段を実装しています。
 
 新しい AFI/SAFI は要りません。endpoint behavior は SID TLV の中の 16bit
 codepoint なので、独自 codepoint の広告は vpnv4 や EVPN といった既存
@@ -151,7 +158,7 @@ host が提供するもの。すべて `vinbero` module から import します�
 |---|---|
 | `log(level, ptr, len)` | daemon log へ出力 |
 | `now_monotonic() -> i64` | 単調増加の ns |
-| `apply_begin(kind) -> i64` | desired-set transaction を開く |
+| `apply_begin(kind) -> i64` | desired-set transaction を開く (headend v4/v6、advertise、local SID) |
 | `apply_put(gen, ptr, len) -> i32` | 宣言の chunk を積む |
 | `apply_commit(gen) -> i32` | 差分を適用する |
 | `apply_abort(gen)` | transaction を捨てる |
