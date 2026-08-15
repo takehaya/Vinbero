@@ -210,9 +210,9 @@ message PluginHeadendEntry {
   // SrcAddr is the outer IPv6 source address for the encapsulation. Empty
   // means the daemon's configured encap source.
   string src_addr = 3;
-  // Mode selects the headend behavior slot. Leave it 0 for the ordinary
-  // H.Encaps; a plugin pairing with its own data-plane half sets the slot
-  // its eBPF program occupies.
+  // Mode selects the headend behavior slot. Leave it 0 and the daemon
+  // uses the ordinary H.Encaps; a plugin pairing with its own data-plane
+  // half sets the slot its eBPF program occupies (16-31).
   uint32 mode = 4;
 }
 

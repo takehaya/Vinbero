@@ -102,15 +102,15 @@ const MinTickInterval = 100 * time.Millisecond
 
 // Manager owns the running control-plane plugins.
 type Manager struct {
-	source     EventSource
-	snapshots  SnapshotSource
-	claims     BehaviorClaims
-	headend    HeadendMapOps
-	leases     *Leases
-	advertise  *AdvertiseSet
-	localSIDs  *LocalSIDSet
-	defaultSrc netip.Addr
-	logger     *zap.Logger
+	source      EventSource
+	snapshots   SnapshotSource
+	claims      BehaviorClaims
+	headend     HeadendMapOps
+	leases      *Leases
+	advertise   *AdvertiseSet
+	localSIDs   *LocalSIDSet
+	encapSource func() (netip.Addr, error)
+	logger      *zap.Logger
 
 	// applyMu serializes reconciles across every plugin this manager runs.
 	applyMu sync.Mutex
@@ -175,9 +175,11 @@ type ManagerConfig struct {
 	Locators SIDAllocator
 	// SIDFunctions installs the dispatch entries for those SIDs.
 	SIDFunctions SIDFunctionOps
-	// DefaultEncapSource fills in declared entries that name no source.
-	DefaultEncapSource netip.Addr
-	Logger             *zap.Logger
+	// EncapSource resolves the daemon's encap source when a plugin
+	// declares an entry that names none. Called at apply time, because a
+	// locator registered over RPC after startup is the common case.
+	EncapSource func() (netip.Addr, error)
+	Logger      *zap.Logger
 }
 
 // NewManager builds an empty manager.
@@ -192,17 +194,17 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	leases := NewLeases()
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	return &Manager{
-		advertise:  NewAdvertiseSet(cfg.Advertiser, leases),
-		localSIDs:  NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions),
-		source:     cfg.Source,
-		snapshots:  snapshots,
-		claims:     cfg.Claims,
-		headend:    cfg.Headend,
-		leases:     leases,
-		defaultSrc: cfg.DefaultEncapSource,
-		logger:     logger,
-		started:    time.Now(),
-		plugins:    make(map[string]*plugin),
+		advertise:   NewAdvertiseSet(cfg.Advertiser, leases),
+		localSIDs:   NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions),
+		source:      cfg.Source,
+		snapshots:   snapshots,
+		claims:      cfg.Claims,
+		headend:     cfg.Headend,
+		leases:      leases,
+		encapSource: cfg.EncapSource,
+		logger:      logger,
+		started:     time.Now(),
+		plugins:     make(map[string]*plugin),
 	}, nil
 }
 
@@ -346,16 +348,16 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	}
 
 	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner:              bpf.OwnerPluginBundle(reg.Name),
-		Headend:            m.headend,
-		Leases:             m.leases,
-		DefaultEncapSource: m.defaultSrc,
-		Logger:             m.logger.Named("plugin." + reg.Name),
-		ApplyMutex:         &m.applyMu,
-		Capabilities:       reg.Capabilities,
-		Advertise:          m.advertise,
-		LocalSIDs:          m.localSIDs,
-		OnLocalSIDs:        onLocalSIDs,
+		Owner:        bpf.OwnerPluginBundle(reg.Name),
+		Headend:      m.headend,
+		Leases:       m.leases,
+		EncapSource:  m.encapSource,
+		Logger:       m.logger.Named("plugin." + reg.Name),
+		ApplyMutex:   &m.applyMu,
+		Capabilities: reg.Capabilities,
+		Advertise:    m.advertise,
+		LocalSIDs:    m.localSIDs,
+		OnLocalSIDs:  onLocalSIDs,
 	})
 	if err != nil {
 		return nil, err

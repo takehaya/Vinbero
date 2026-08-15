@@ -891,9 +891,9 @@ type PluginHeadendEntry struct {
 	// SrcAddr is the outer IPv6 source address for the encapsulation. Empty
 	// means the daemon's configured encap source.
 	SrcAddr string `protobuf:"bytes,3,opt,name=src_addr,json=srcAddr,proto3" json:"src_addr,omitempty"`
-	// Mode selects the headend behavior slot. Leave it 0 for the ordinary
-	// H.Encaps; a plugin pairing with its own data-plane half sets the slot
-	// its eBPF program occupies.
+	// Mode selects the headend behavior slot. Leave it 0 and the daemon
+	// uses the ordinary H.Encaps; a plugin pairing with its own data-plane
+	// half sets the slot its eBPF program occupies (16-31).
 	Mode uint32 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
 }
 

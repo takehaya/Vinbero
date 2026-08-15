@@ -41,10 +41,10 @@ func exampleManager(t *testing.T) (*Manager, *fakeSource, *fakeHeadendOps) {
 	src := newFakeSource()
 	ops := newFakeHeadendOps()
 	m, err := NewManager(ManagerConfig{
-		Source:             src,
-		Claims:             newFakeClaims(),
-		Headend:            ops,
-		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+		Source:      src,
+		Claims:      newFakeClaims(),
+		Headend:     ops,
+		EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -185,10 +185,10 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	src := newFakeSource()
 	ops := newFakeHeadendOps()
 	m, err := NewManager(ManagerConfig{
-		Source:             src,
-		Claims:             newFakeClaims(),
-		Headend:            ops,
-		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+		Source:      src,
+		Claims:      newFakeClaims(),
+		Headend:     ops,
+		EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -197,7 +197,7 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 
 	// The example's own config message, asking it to claim a different
 	// codepoint than the one it was built with.
-	config := exampleConfig(0xFE02, "", "", "", 0)
+	config := exampleConfig(0xFE02, "", "", "", 0, "")
 	if err := m.Register(context.Background(), Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
@@ -228,13 +228,14 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 // behavior codepoint to claim, the locator to take a SID from, the prefix
 // to advertise behind it, its RD, and the data-plane slot the SID
 // dispatches to.
-func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64) []byte {
+func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64, nextHop string) []byte {
 	var w exampleWriter
 	w.varintField(1, behavior)
 	w.stringField(2, locator)
 	w.stringField(3, prefix)
 	w.stringField(4, rd)
 	w.varintField(5, slot)
+	w.stringField(7, nextHop)
 	return w.buf
 }
 
@@ -282,13 +283,13 @@ func TestExamplePluginCompletesTheLoop(t *testing.T) {
 	adv := &fakeAdvertiser{}
 
 	m, err := NewManager(ManagerConfig{
-		Source:             src,
-		Claims:             newFakeClaims(),
-		Headend:            headend,
-		Advertiser:         adv,
-		Locators:           alloc,
-		SIDFunctions:       sids,
-		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+		Source:       src,
+		Claims:       newFakeClaims(),
+		Headend:      headend,
+		Advertiser:   adv,
+		Locators:     alloc,
+		SIDFunctions: sids,
+		EncapSource:  testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -298,7 +299,7 @@ func TestExamplePluginCompletesTheLoop(t *testing.T) {
 	if err := m.Register(context.Background(), Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
-		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(),
 	}); err != nil {
@@ -369,7 +370,7 @@ func TestExamplePluginUnregisterRetractsEverything(t *testing.T) {
 	m, err := NewManager(ManagerConfig{
 		Source: src, Claims: newFakeClaims(), Headend: headend,
 		Advertiser: adv, Locators: alloc, SIDFunctions: sids,
-		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+		EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -379,7 +380,7 @@ func TestExamplePluginUnregisterRetractsEverything(t *testing.T) {
 	if err := m.Register(context.Background(), Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
-		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(),
 	}); err != nil {

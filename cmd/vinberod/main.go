@@ -404,26 +404,20 @@ func run(cliCtx *cli.Context) error {
 		// a plugin with no event source could declare state but never react
 		// to anything, which is not a mode worth supporting quietly.
 		//
-		// The encap source is resolved once here and handed to the manager
-		// as the default for plugin-declared entries that name none. A
-		// failure to resolve is not fatal: a plugin that names its own
-		// source still works, and the alternative is refusing to start the
-		// daemon over a plugin feature that may go unused.
-		encapSrc, err := applier.EncapSourceAddr()
-		if err != nil {
-			lg.Warn("resolving the encap source for control-plane plugins; "+
-				"plugin entries must name their own source",
-				zap.Error(err))
-		}
+		// The encap source is resolved when a plugin actually declares an
+		// entry, not here: locators are registered over RPC after the
+		// daemon starts, so an address captured now is usually the one
+		// that did not exist yet, and an entry written with a zero source
+		// blackholes without saying so.
 		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
-			Source:             routeDemux,
-			Claims:             claimRegistry,
-			Headend:            vin.GetMapOperations(),
-			Advertiser:         bgpSession,
-			Locators:           locatorMgr,
-			SIDFunctions:       vin.GetMapOperations(),
-			DefaultEncapSource: encapSrc,
-			Logger:             lg.Named("cplane"),
+			Source:       routeDemux,
+			Claims:       claimRegistry,
+			Headend:      vin.GetMapOperations(),
+			Advertiser:   bgpSession,
+			Locators:     locatorMgr,
+			SIDFunctions: vin.GetMapOperations(),
+			EncapSource:  applier.EncapSourceAddr,
+			Logger:       lg.Named("cplane"),
 		})
 		if err != nil {
 			return fmt.Errorf("build control-plane plugin manager: %w", err)

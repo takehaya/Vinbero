@@ -262,6 +262,14 @@ func validateAdvertised(r AdvertisedRoute) error {
 	default:
 		return fmt.Errorf("advertise: family %s cannot be originated by a plugin", r.Family)
 	}
+	// The next hop is where a peer is told to send the traffic, and the
+	// daemon has no defensible guess at it: the encap source is a locator
+	// address, not necessarily the BGP transport address, and picking one
+	// silently would advertise a route peers cannot follow. Say so here
+	// rather than letting it surface as a parse error deep in the encoder.
+	if r.NextHop == "" {
+		return fmt.Errorf("advertise: %s %s has no next hop", r.Family, r.Prefix)
+	}
 	return nil
 }
 

@@ -55,6 +55,7 @@ func vpnRoute(prefix, sid string) AdvertisedRoute {
 		RD:           "65000:1",
 		Prefix:       prefix,
 		SRv6SID:      sid,
+		NextHop:      "2001:db8::1",
 		RouteTargets: nil,
 	}
 }
@@ -199,7 +200,12 @@ func TestAdvertiseSetRejectsMalformed(t *testing.T) {
 	}{
 		{name: "unknown family", route: AdvertisedRoute{Family: "nonsense", Prefix: "10.0.0.0/24"}},
 		{name: "no prefix", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, RD: "65000:1"}},
-		{name: "vpn without rd", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24"}},
+		{name: "vpn without rd", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", NextHop: "2001:db8::1"}},
+		// The daemon has no defensible guess at a next hop: the encap
+		// source is a locator address, not necessarily the node's BGP
+		// transport address, and picking one silently would advertise a
+		// route peers cannot follow.
+		{name: "no next hop", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, RD: "65000:1", Prefix: "10.0.0.0/24"}},
 		{name: "family a plugin cannot originate", route: AdvertisedRoute{Family: bgp.FamilyEVPN, Prefix: "10.0.0.0/24"}},
 	}
 	for _, tt := range tests {
@@ -267,11 +273,14 @@ func TestDecodeAdvertisedRouteRejectsBadInput(t *testing.T) {
 	if _, err := DecodeAdvertisedRoute(nil); err == nil {
 		t.Error("nil was accepted")
 	}
-	if _, err := DecodeAdvertisedRoute(&v1.PluginAdvertisedRoute{Family: "nonsense", Prefix: "10.0.0.0/24"}); err == nil {
+	if _, err := DecodeAdvertisedRoute(&v1.PluginAdvertisedRoute{
+		Family: "nonsense", Prefix: "10.0.0.0/24", NextHop: "2001:db8::1",
+	}); err == nil {
 		t.Error("an unknown family was accepted")
 	}
 	if _, err := DecodeAdvertisedRoute(&v1.PluginAdvertisedRoute{
-		Family: "vpnv4", Rd: "65000:1", Prefix: "10.0.0.0/24", EndpointBehavior: 0x10000,
+		Family: "vpnv4", Rd: "65000:1", Prefix: "10.0.0.0/24",
+		NextHop: "2001:db8::1", EndpointBehavior: 0x10000,
 	}); err == nil {
 		t.Error("a behavior codepoint wider than 16 bits was accepted")
 	}

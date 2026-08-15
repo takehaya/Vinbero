@@ -72,8 +72,12 @@ func EncodeRouteEvent(ev bgp.RouteEvent) *v1.PluginRoute {
 // A plugin never sees the map layout: it declares segments and a source
 // address, and the layout stays the host's business, so a change to the
 // BPF struct does not break every plugin built against it. defaultSrc is
-// the daemon's configured encap source, used when the plugin leaves the
-// source empty.
+// the daemon's encap source, used when the plugin leaves the source empty.
+//
+// An entry with no usable source is refused rather than written with a
+// zero one. A zero source produces packets that go nowhere, and a
+// blackhole that reports success is far harder to diagnose than a
+// declaration that was refused.
 func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (string, *bpf.HeadendEntry, error) {
 	if in == nil {
 		return "", nil, fmt.Errorf("nil headend entry")
@@ -98,8 +102,18 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 			in.GetTriggerPrefix(), in.GetMode())
 	}
 
+	// Mode 0 means "the ordinary encapsulation" to a plugin, which is not
+	// the same number the data plane uses: 0 is UNSPECIFIED there, and an
+	// entry carrying it is written but never acted on -- a blackhole that
+	// looks installed. The plugin-facing default stays 0 because a plugin
+	// pairing with its own data-plane half is the only one that should
+	// have to name a mode at all.
+	mode := uint8(in.GetMode())
+	if mode == 0 {
+		mode = uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
+	}
 	entry := &bpf.HeadendEntry{
-		Mode:        uint8(in.GetMode()),
+		Mode:        mode,
 		NumSegments: uint8(len(segments)),
 	}
 	for i, s := range segments {
@@ -128,11 +142,13 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 		}
 		src = parsed
 	}
-	if src.IsValid() {
-		if !src.Is6() {
-			return "", nil, fmt.Errorf("source address of %q is not IPv6", in.GetTriggerPrefix())
-		}
-		entry.SrcAddr = src.As16()
+	if !src.IsValid() {
+		return "", nil, fmt.Errorf("headend entry for %q has no source address and the daemon has no encap source to lend it",
+			in.GetTriggerPrefix())
 	}
+	if !src.Is6() {
+		return "", nil, fmt.Errorf("source address of %q is not IPv6", in.GetTriggerPrefix())
+	}
+	entry.SrcAddr = src.As16()
 	return in.GetTriggerPrefix(), entry, nil
 }

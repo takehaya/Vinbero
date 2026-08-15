@@ -58,6 +58,7 @@ const (
 	fieldAdvPrefix   = 3
 	fieldAdvSID      = 4
 	fieldAdvBehavior = 5
+	fieldAdvNextHop  = 7
 	// PluginLocalSid
 	fieldLocalSidName    = 1
 	fieldLocalSidLocator = 2
@@ -68,6 +69,8 @@ const (
 	fieldConfigPrefix   = 3
 	fieldConfigRD       = 4
 	fieldConfigSlot     = 5
+	fieldConfigAdvSID   = 6
+	fieldConfigNextHop  = 7
 )
 
 // PluginEventKind values this plugin acts on.
@@ -101,6 +104,25 @@ var (
 	// allocatedSID is the address the host gave this plugin, empty until
 	// the local-SID event arrives.
 	allocatedSID string
+	// configuredSID is a SID an operator provisioned outside the plugin.
+	//
+	// A plugin that ships its own data-plane half asks the host for a SID
+	// and is told the address. One that fronts a behavior the operator
+	// provisioned -- an existing endpoint on this node -- is simply told
+	// which address to advertise. Both are real deployments, and a plugin
+	// that only supported the first could not be used for the second.
+	configuredSID string
+	// advertiseNextHop is where peers are told to send the traffic. The
+	// daemon cannot guess it -- the encap source is a locator address, not
+	// necessarily this node's BGP transport address -- so the operator
+	// supplies it.
+	advertiseNextHop string
+	// headendRefused records that the host would not open a headend
+	// transaction, which is how a plugin discovers it was not granted that
+	// capability: there is nothing to ask, only a refusal to notice. An
+	// advertise-only deployment of this plugin would otherwise try once
+	// per replay and log every time.
+	headendRefused bool
 )
 
 // Log levels, matching the host's.
@@ -208,6 +230,14 @@ func configure(ptr, length int32) int32 {
 			advertiseRD = string(b)
 		case field == fieldConfigSlot && wire == wireVarint:
 			dataPlaneSlot, ok = r.varint()
+		case field == fieldConfigAdvSID && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			configuredSID = string(b)
+		case field == fieldConfigNextHop && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			advertiseNextHop = string(b)
 		default:
 			ok = r.skip(wire)
 		}
@@ -217,6 +247,13 @@ func configure(ptr, length int32) int32 {
 		}
 	}
 	logf(logInfo, "configured")
+	if configuredSID != "" {
+		// The address was given rather than allocated, so there is nothing
+		// to wait for.
+		allocatedSID = configuredSID
+		advertiseSelf()
+		return 0
+	}
 	// Asking for the local SID here is what starts the sequence: the host
 	// allocates it, tells this plugin the address, and only then can it
 	// advertise anything.
@@ -391,6 +428,7 @@ func advertiseSelf() {
 	route.putString(fieldAdvSID, allocatedSID)
 	route.putTag(fieldAdvBehavior, wireVarint)
 	route.putVarint(claimedBehavior)
+	route.putString(fieldAdvNextHop, advertiseNextHop)
 
 	var chunk writer
 	chunk.putMessage(fieldChunkAdvertisedRoute, route.buf)
@@ -401,6 +439,14 @@ func advertiseSelf() {
 func commit(kind int32, chunk []byte) {
 	gen := hostApplyBegin(kind)
 	if gen == 0 {
+		if kind == applyKindHeadendV4 && !headendRefused {
+			// Not granted the capability. There is nothing to ask for it,
+			// so the refusal is how a plugin learns what it may do; note
+			// it and stop trying rather than logging once per replay.
+			headendRefused = true
+			logf(logInfo, "not granted headend; running advertise-only")
+			return
+		}
 		logf(logWarn, "the host refused to open a transaction")
 		return
 	}
@@ -490,6 +536,9 @@ func applyRoute(body []byte) bool {
 // An empty set is still committed: that is how the last prefix is pruned
 // when everything has been withdrawn.
 func declare() {
+	if headendRefused {
+		return
+	}
 	commit(applyKindHeadendV4, encodeChunk())
 }
 

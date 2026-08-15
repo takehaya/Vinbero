@@ -152,7 +152,7 @@ func TestHarnessCapturesPluginLogs(t *testing.T) {
 // exampleConfig builds the example plugin's own config message: its
 // behavior codepoint, and optionally the locator, prefix, RD and slot that
 // make it originate as well as receive.
-func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64) []byte {
+func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64, nextHop string) []byte {
 	var buf []byte
 	putVarint := func(v uint64) {
 		for v >= 0x80 {
@@ -179,13 +179,14 @@ func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64) []b
 		field(5, 0)
 		putVarint(slot)
 	}
+	str(7, nextHop)
 	return buf
 }
 
 // The config blob retunes the plugin without rebuilding it.
 func TestHarnessAppliesConfig(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
-		Config: exampleConfig(0xFE02, "", "", "", 0),
+		Config: exampleConfig(0xFE02, "", "", "", 0, ""),
 	})
 	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
 		t.Fatalf("deliver: %v", err)
@@ -217,7 +218,7 @@ func TestHarnessTickIsCallable(t *testing.T) {
 // its own behavior codepoint.
 func TestHarnessDrivesTheOriginatingHalf(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
-		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
 	})
 
 	var sidDecl, advDecl *cplaneharness.Declaration
@@ -259,7 +260,7 @@ func TestHarnessDrivesTheOriginatingHalf(t *testing.T) {
 // originating anything.
 func TestHarnessReceiveOnlyPluginOriginatesNothing(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
-		Config: exampleConfig(0xFE01, "", "", "", 0),
+		Config: exampleConfig(0xFE01, "", "", "", 0, ""),
 	})
 	for _, d := range h.Declarations() {
 		if d.Kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE && len(d.Routes) > 0 {
@@ -274,7 +275,7 @@ func TestHarnessReceiveOnlyPluginOriginatesNothing(t *testing.T) {
 // never pruned and blackhole traffic until an unrelated route arrives.
 func TestPluginPrunesStaleEntriesAtEndOfReplay(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
-		Config: exampleConfig(0xFE01, "", "", "", 0),
+		Config: exampleConfig(0xFE01, "", "", "", 0, ""),
 	})
 	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
 		t.Fatalf("advertise: %v", err)

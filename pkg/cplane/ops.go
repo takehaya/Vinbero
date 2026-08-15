@@ -28,7 +28,7 @@ type PluginOps struct {
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
 	onLocalSIDs func([]AllocatedSID)
-	defaultSrc  netip.Addr
+	encapSource func() (netip.Addr, error)
 	logger      *zap.Logger
 	// applyMu is shared by every plugin under one manager, and is held for
 	// the whole of a reconcile.
@@ -95,8 +95,14 @@ type PluginOpsConfig struct {
 	// OnLocalSIDs is called with what a local-SID declaration resolved to,
 	// so the plugin can be told the addresses it was given.
 	OnLocalSIDs func([]AllocatedSID)
-	// DefaultEncapSource fills in a declared entry that names no source.
-	DefaultEncapSource netip.Addr
+	// EncapSource resolves the daemon's encap source for a declared entry
+	// that names none.
+	//
+	// It is a function rather than a value because locators are registered
+	// over RPC after the daemon starts: an address captured at startup is
+	// usually the one that did not exist yet, and an entry written with a
+	// zero source blackholes silently.
+	EncapSource func() (netip.Addr, error)
 	// Logger receives the plugin's own log lines.
 	Logger *zap.Logger
 	// MaxOpenTransactions and MaxEntriesPerTransaction bound what one
@@ -140,9 +146,9 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 		advertise:   cfg.Advertise,
 		localSIDs:   cfg.LocalSIDs,
 		onLocalSIDs: cfg.OnLocalSIDs,
+		encapSource: cfg.EncapSource,
 		headend:     cfg.Headend,
 		leases:      cfg.Leases,
-		defaultSrc:  cfg.DefaultEncapSource,
 		logger:      logger,
 		open:        make(map[uint64]*applyTxn),
 		maxOpen:     maxOpen,
@@ -230,12 +236,26 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 		return fmt.Errorf("apply put: transaction %d would hold %d entries, limit %d",
 			generation, len(txn.entries)+len(txn.routes)+len(txn.sids)+declared, p.maxEntries)
 	}
-	for _, e := range msg.GetHeadendEntries() {
-		prefix, entry, err := DecodeHeadendEntry(e, p.defaultSrc)
-		if err != nil {
-			return fmt.Errorf("apply put: %w", err)
+	if len(msg.GetHeadendEntries()) > 0 {
+		// Resolved here, not at startup: a locator registered over RPC
+		// after the daemon came up is the common case, and an address
+		// captured before that is the one that did not exist yet.
+		var src netip.Addr
+		if p.encapSource != nil {
+			resolved, err := p.encapSource()
+			if err != nil {
+				p.logger.Debug("resolving the encap source for a plugin declaration", zap.Error(err))
+			} else {
+				src = resolved
+			}
 		}
-		txn.entries = append(txn.entries, HeadendDesired{TriggerPrefix: prefix, Entry: entry})
+		for _, e := range msg.GetHeadendEntries() {
+			prefix, entry, err := DecodeHeadendEntry(e, src)
+			if err != nil {
+				return fmt.Errorf("apply put: %w", err)
+			}
+			txn.entries = append(txn.entries, HeadendDesired{TriggerPrefix: prefix, Entry: entry})
+		}
 	}
 	for _, r := range msg.GetAdvertisedRoutes() {
 		route, err := DecodeAdvertisedRoute(r)

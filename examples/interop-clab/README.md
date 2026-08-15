@@ -35,6 +35,7 @@ Each row links to the scenario's own README.
 | [`sr-policy-bgp-2site`](scenarios/sr-policy-bgp-2site/README.md) | Vinbero | Edge-to-edge SR Policy exchange over BGP (SAFI 73): both PEs advertise and receive SR Policies and steer their L3VPN traffic through a shared TE waypoint — exercises the SR Policy receive/decode path. |
 | [`evpn-2site`](scenarios/evpn-2site/README.md) | Vinbero | SRv6 EVPN L2VPN (ELAN): RT2 (MAC/IP) unicast + RT3 (Inclusive Multicast) BUM flood, a stretched broadcast domain signalled entirely by BGP EVPN. |
 | [`evpn-multihoming`](scenarios/evpn-multihoming/README.md) | Vinbero | SRv6 EVPN multi-homing: RT4 (Ethernet Segment) with RFC 8584 DF election + split-horizon for a dual-homed CE. |
+| [`cplane-plugin-2site`](scenarios/cplane-plugin-2site/README.md) | Vinbero | An operator's own SRv6 endpoint behavior, end to end: one node's control-plane plugin advertises a route carrying a codepoint no standard assigns, the other's plugin claims it and declares the forwarding state, and traffic rides state that exists only because a plugin put it there. |
 | [`mup-2site`](scenarios/mup-2site/README.md) | Vinbero | SRv6 MUP (SAFI 85, `draft-mpmz-bess-mup-safi` / RFC 9433): a MUP controller signals UE-session state over iBGP, GW/PE nodes program the SRv6 GTP data plane, and emulated gNB/DN endpoints drive real GTP-U ⇄ SRv6 traffic. |
 
 ## Layout

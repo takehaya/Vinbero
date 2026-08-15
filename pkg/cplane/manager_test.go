@@ -167,6 +167,12 @@ func (c *fakeClaims) holds(plugin string) bool {
 	return ok
 }
 
+// testEncapSource stands in for the daemon's locator lookup, which in a
+// live daemon resolves only after an operator registers one.
+func testEncapSource() (netip.Addr, error) {
+	return netip.MustParseAddr("fd00:1::1"), nil
+}
+
 // testCaps grants everything the example and the fixtures declare. A test
 // that is about the gate itself grants a narrower set explicitly.
 func testCaps() wasm.Capabilities {
@@ -194,10 +200,10 @@ func newTestManager(t *testing.T, src EventSource, claims BehaviorClaims) (*Mana
 	t.Helper()
 	ops := newFakeHeadendOps()
 	m, err := NewManager(ManagerConfig{
-		Source:             src,
-		Claims:             claims,
-		Headend:            ops,
-		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+		Source:      src,
+		Claims:      claims,
+		Headend:     ops,
+		EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
@@ -500,11 +506,11 @@ func TestDecodeHeadendEntryRejectsTooManySegments(t *testing.T) {
 func TestPluginOpsTransactionLifecycle(t *testing.T) {
 	headend := newFakeHeadendOps()
 	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner:              ownerA,
-		Headend:            headend,
-		Leases:             NewLeases(),
-		Capabilities:       testCaps(),
-		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+		Owner:        ownerA,
+		Headend:      headend,
+		Leases:       NewLeases(),
+		Capabilities: testCaps(),
+		EncapSource:  testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -913,7 +919,7 @@ func TestFailedInstantiationLeavesNoState(t *testing.T) {
 	m, err := NewManager(ManagerConfig{
 		Source: src, Claims: newFakeClaims(), Headend: headend,
 		Advertiser: adv, Locators: alloc, SIDFunctions: sids,
-		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+		EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -925,7 +931,7 @@ func TestFailedInstantiationLeavesNoState(t *testing.T) {
 	err = m.Register(context.Background(), Registration{
 		Name:   "custom-behavior",
 		Module: examplePlugin(t),
-		Config: append(exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Config: append(exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
 			// A trailing byte that cannot be parsed, so configure returns
 			// non-zero after it has already declared.
 			0xff),
@@ -957,7 +963,7 @@ func TestFailedUpgradeLeavesTheRunningPluginAlone(t *testing.T) {
 	m, err := NewManager(ManagerConfig{
 		Source: src, Claims: newFakeClaims(), Headend: headend,
 		Advertiser: adv, Locators: alloc, SIDFunctions: sids,
-		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
+		EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -967,7 +973,7 @@ func TestFailedUpgradeLeavesTheRunningPluginAlone(t *testing.T) {
 	good := Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
-		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(),
 	}
@@ -1058,4 +1064,39 @@ func fixtureModule(t *testing.T, name string) []byte {
 		t.Fatalf("read fixture %s: %v", name, err)
 	}
 	return b
+}
+
+// A plugin leaving the mode unset means "the ordinary encapsulation",
+// which is not the number the data plane uses for that: zero is
+// UNSPECIFIED there, and an entry carrying it is written but never acted
+// on. The host translates rather than passing the zero through, because a
+// blackhole that looks installed is the worst failure this path has.
+func TestDecodeHeadendEntryDefaultsToEncaps(t *testing.T) {
+	_, entry, err := DecodeHeadendEntry(&v1.PluginHeadendEntry{
+		TriggerPrefix: "10.0.0.0/24",
+		Segments:      []string{"fd00:2::100"},
+	}, netip.MustParseAddr("fd00:1::1"))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
+	if entry.Mode != want {
+		t.Fatalf("mode = %d, want H_ENCAPS (%d)", entry.Mode, want)
+	}
+}
+
+// A plugin that names its own slot keeps it: that is how the two halves
+// of one plugin are wired together.
+func TestDecodeHeadendEntryKeepsAnExplicitMode(t *testing.T) {
+	_, entry, err := DecodeHeadendEntry(&v1.PluginHeadendEntry{
+		TriggerPrefix: "10.0.0.0/24",
+		Segments:      []string{"fd00:2::100"},
+		Mode:          20,
+	}, netip.MustParseAddr("fd00:1::1"))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if entry.Mode != 20 {
+		t.Fatalf("mode = %d, want the plugin's own slot 20", entry.Mode)
+	}
 }
