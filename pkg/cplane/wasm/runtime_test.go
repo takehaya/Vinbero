@@ -91,6 +91,17 @@ func (r *recordingOps) snapshot() ([]string, [][]byte, []uint64, []uint64) {
 func instantiate(t *testing.T, name string, cfg Config) (*Instance, error) {
 	t.Helper()
 	cfg.Module = fixture(t, name)
+	if cfg.Capabilities == nil {
+		// Most tests are not about the gate, so they run with everything
+		// granted. The ones that are about it pass a set explicitly.
+		caps, err := ParseCapabilities([]string{
+			string(CapHeadend), string(CapAdvertise), string(CapLocalSID),
+		})
+		if err != nil {
+			t.Fatalf("default capabilities: %v", err)
+		}
+		cfg.Capabilities = caps
+	}
 	if cfg.Name == "" {
 		cfg.Name = name
 	}

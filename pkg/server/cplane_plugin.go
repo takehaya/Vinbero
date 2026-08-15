@@ -62,6 +62,10 @@ func (s *PluginServer) CplanePluginRegister(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	caps, err := wasm.ParseCapabilities(msg.GetCapabilities())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
 
 	reg := cplane.Registration{
 		Name:         msg.GetName(),
@@ -69,6 +73,7 @@ func (s *PluginServer) CplanePluginRegister(
 		Config:       msg.GetConfig(),
 		Families:     families,
 		Behaviors:    behaviors,
+		Capabilities: caps,
 		TickInterval: time.Duration(msg.GetTickIntervalMs()) * time.Millisecond,
 	}
 	if err := s.cplane.Register(ctx, reg); err != nil {

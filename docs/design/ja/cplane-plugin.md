@@ -173,6 +173,31 @@ stdout も filesystem も無いので log が無いと plugin 作者に調査手
 ません。clock が無いと liveness 系のロジックが書けません。それ以外の
 非決定入力は必要になるまで足しません。
 
+## capability
+
+plugin は登録時に何をしてよいかを宣言し、host はそれが覆う host function
+だけを link します。granted でない capability は「呼ぶと失敗する」のでは
+なく、module から到達できない関数になります。permission check は 1 箇所
+書き忘れると抜けますが、link されていない関数はどこからも呼べません。
+
+| capability | 許すこと |
+|---|---|
+| `headend` | headend の encap entry を宣言する |
+| `advertise` | BGP 経路を originate する |
+| `local_sid` | locator から SID を確保し自分の slot に向ける |
+
+`log` と `now_monotonic` は常に link します。どちらも状態を変えず、無いと
+plugin 作者が何も調べられなくなるためです。
+
+desired-set の apply 関数は宣言の種類をまたいで共有なので、link は「何か
+1 つでも書ける capability があるか」で決まります。種類ごとの判定は
+transaction を開くところで再度行います。これが無いと advertise だけを
+granted された plugin が同じ扉から headend の transaction を開けます。
+
+何も granted されていない plugin も登録できます。観測と log だけをする
+plugin は実際に有用で、それが capability を宣言しなかった plugin の安全な
+既定です。
+
 ## 登録時の検証
 
 module は allowlist で検証します。

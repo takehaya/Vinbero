@@ -84,11 +84,19 @@ vbctl plugin cplane register \
     --name custom-behavior \
     --wasm plugin.wasm \
     --behavior 0xFE01 \
-    --family vpnv4
+    --family vpnv4 \
+    --capability headend \
+    --capability advertise \
+    --capability local_sid
 
 vbctl plugin cplane list
 vbctl plugin cplane unregister --name custom-behavior
 ```
+
+The capabilities are what this plugin is allowed to do, and the daemon
+links only the host functions they cover: one it was not granted is not a
+call that fails but a function the module cannot reach. A receive-only
+deployment of this same plugin needs `--capability headend` alone.
 
 Registering the same name again upgrades in place: the entries the running
 instance wrote stay, and the new module reconciles over them. Unregistering

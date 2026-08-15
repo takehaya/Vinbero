@@ -184,6 +184,13 @@ message CplanePluginRegisterRequest {
   // appliers, which would otherwise read an unrecognized codepoint as an
   // ordinary service SID. Standardized codepoints cannot be claimed.
   repeated uint32 endpoint_behaviors = 5;
+  // Capabilities are what this plugin is allowed to do, by name:
+  // "headend", "advertise", "local_sid". The daemon links only the host
+  // functions they cover, so a capability that was not granted is not a
+  // call that fails but a function the module cannot reach. An empty list
+  // leaves the plugin able to observe and to log, which is a real way to
+  // run one.
+  repeated string capabilities = 7;
   // TickIntervalMs asks for the plugin's on_tick export to be called at
   // this rate. Zero leaves it undriven, which is right for a purely
   // event-driven plugin. The daemon clamps it up to its own minimum: a

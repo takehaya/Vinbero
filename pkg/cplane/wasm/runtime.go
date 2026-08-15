@@ -103,6 +103,7 @@ type HostOps interface {
 // identity is not a parameter it can forge, it is bound at link time.
 type Instance struct {
 	name     string
+	caps     Capabilities
 	limits   Limits
 	logger   *zap.Logger
 	ops      HostOps
@@ -141,6 +142,10 @@ type Config struct {
 	Limits Limits
 	// Ops is the capability surface host functions call into.
 	Ops HostOps
+	// Capabilities are what this plugin was granted. Only the host
+	// functions they cover are linked, so an ungranted one is not a call
+	// that fails but a function the module cannot reach.
+	Capabilities Capabilities
 	// Logger receives the runtime's own messages and the plugin's.
 	Logger *zap.Logger
 }
@@ -179,6 +184,7 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 
 	inst := &Instance{
 		name:    cfg.Name,
+		caps:    cfg.Capabilities,
 		limits:  limits,
 		logger:  logger,
 		ops:     cfg.Ops,
@@ -193,7 +199,7 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	}
 	inst.compiled = compiled
 
-	if err := admit(compiled); err != nil {
+	if err := admit(compiled, cfg.Capabilities); err != nil {
 		_ = rt.Close(ctx)
 		return nil, err
 	}
@@ -239,12 +245,16 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	}
 	logger.Info("control-plane plugin instantiated",
 		zap.Int("module_bytes", len(cfg.Module)),
-		zap.Int("config_bytes", len(cfg.ConfigBlob)))
+		zap.Int("config_bytes", len(cfg.ConfigBlob)),
+		zap.Strings("capabilities", cfg.Capabilities.Names()))
 	return inst, nil
 }
 
 // Name is the plugin's identity.
 func (i *Instance) Name() string { return i.name }
+
+// Capabilities are what this plugin was granted.
+func (i *Instance) Capabilities() Capabilities { return i.caps }
 
 // Close tears the instance and its runtime down. Safe to call twice.
 func (i *Instance) Close(ctx context.Context) error {

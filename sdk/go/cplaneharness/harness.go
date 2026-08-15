@@ -47,6 +47,7 @@ type Harness struct {
 	module []byte
 	config []byte
 	limits wasm.Limits
+	caps   wasm.Capabilities
 
 	mu sync.Mutex
 	// inst is replaced by Restart, so a test can check that a plugin
@@ -66,6 +67,11 @@ type Options struct {
 	// declared key, so a test can check what the plugin does when the host
 	// refuses it.
 	DenyCommits bool
+	// Capabilities are what the plugin is granted. Empty grants everything
+	// the host defines, which is what a plugin author testing their own
+	// module wants by default; narrow it to check that a plugin degrades
+	// the way it should when an operator grants it less.
+	Capabilities []string
 }
 
 // New starts a plugin from a compiled module. It fails the test if the
@@ -73,15 +79,20 @@ type Options struct {
 // up in first.
 func New(tb testing.TB, module []byte, opts Options) *Harness {
 	tb.Helper()
-	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits}
+	caps, err := capabilitiesFor(opts.Capabilities)
+	if err != nil {
+		tb.Fatalf("capabilities: %v", err)
+	}
+	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps}
 	h.ops = &recorder{denyCommits: opts.DenyCommits}
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
-		Name:       "harness",
-		Module:     module,
-		ConfigBlob: opts.Config,
-		Limits:     opts.Limits,
-		Ops:        h.ops,
-		Logger:     zap.NewNop(),
+		Name:         "harness",
+		Module:       module,
+		ConfigBlob:   opts.Config,
+		Limits:       opts.Limits,
+		Ops:          h.ops,
+		Capabilities: caps,
+		Logger:       zap.NewNop(),
 	})
 	if err != nil {
 		tb.Fatalf("plugin was refused: %v", err)
@@ -196,8 +207,9 @@ func (h *Harness) Restart() {
 	h.mu.Unlock()
 
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
-		Name:   "harness",
-		Module: h.module,
+		Name:         "harness",
+		Capabilities: h.caps,
+		Module:       h.module,
 		// The config goes back in: the daemon re-instantiates with it too,
 		// and a harness that dropped it would model a restart the daemon
 		// never performs -- a plugin coming back on defaults, or refusing
@@ -243,6 +255,17 @@ func (h *Harness) Logs() []string { return h.ops.logLines() }
 // A plugin that aborts when the host refuses a chunk is behaving well; one
 // that leaves transactions open is leaking them.
 func (h *Harness) Aborted() int { return h.ops.abortCount() }
+
+// capabilitiesFor turns the option into a granted set, defaulting to
+// everything the host defines.
+func capabilitiesFor(names []string) (wasm.Capabilities, error) {
+	if len(names) == 0 {
+		return wasm.ParseCapabilities([]string{
+			string(wasm.CapHeadend), string(wasm.CapAdvertise), string(wasm.CapLocalSID),
+		})
+	}
+	return wasm.ParseCapabilities(names)
+}
 
 // recorder stands in for the daemon's capability surface, keeping what the
 // plugin asked for instead of applying it.

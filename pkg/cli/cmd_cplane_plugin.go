@@ -36,6 +36,11 @@ func cplaneSubcommand() *cli.Command {
 					&cli.StringFlag{Name: "wasm", Required: true, Usage: "Path to the WebAssembly module"},
 					&cli.StringFlag{Name: "config", Usage: "Path to the operator config blob handed to the module (optional)"},
 					&cli.StringSliceFlag{Name: "family", Usage: "BGP family to deliver (repeatable); omit for every family"},
+					&cli.StringSliceFlag{
+						Name: "capability",
+						Usage: "What the plugin may do (repeatable): headend, advertise, local_sid. " +
+							"Omit to run it able only to observe and to log",
+					},
 					&cli.UintFlag{
 						Name: "tick-ms",
 						Usage: "Drive the plugin's periodic callback every N milliseconds; " +
@@ -71,6 +76,7 @@ func cplaneSubcommand() *cli.Command {
 							Config:            config,
 							Families:          c.StringSlice("family"),
 							EndpointBehaviors: behaviors,
+							Capabilities:      c.StringSlice("capability"),
 							TickIntervalMs:    uint32(c.Uint("tick-ms")),
 						}))
 					if err != nil {

@@ -15,6 +15,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
 // declareModule is a WebAssembly plugin that declares a fixed desired set
@@ -166,6 +167,18 @@ func (c *fakeClaims) holds(plugin string) bool {
 	return ok
 }
 
+// testCaps grants everything the example and the fixtures declare. A test
+// that is about the gate itself grants a narrower set explicitly.
+func testCaps() wasm.Capabilities {
+	caps, err := wasm.ParseCapabilities([]string{
+		string(wasm.CapHeadend), string(wasm.CapAdvertise), string(wasm.CapLocalSID),
+	})
+	if err != nil {
+		panic(err)
+	}
+	return caps
+}
+
 // waitDelivered blocks until the plugin has consumed every event queued
 // for it. Delivery is asynchronous -- a guest call must not run on the BGP
 // watch goroutine -- so a test that emits and immediately asserts would
@@ -196,7 +209,7 @@ func newTestManager(t *testing.T, src EventSource, claims BehaviorClaims) (*Mana
 func TestRegisterRunsPluginAndDeliversEvents(t *testing.T) {
 	src := newFakeSource()
 	m, ops := newTestManager(t, src, newFakeClaims())
-	reg := Registration{Name: "declare", Module: declareModule(t)}
+	reg := Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps()}
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -234,7 +247,7 @@ func TestUnregisterFlushesOwnedState(t *testing.T) {
 	src := newFakeSource()
 	claims := newFakeClaims()
 	m, ops := newTestManager(t, src, claims)
-	reg := Registration{Name: "declare", Module: declareModule(t), Behaviors: []uint16{0xFE01}}
+	reg := Registration{Name: "declare", Module: declareModule(t), Behaviors: []uint16{0xFE01}, Capabilities: testCaps()}
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -267,7 +280,7 @@ func TestUnregisterFlushesOwnedState(t *testing.T) {
 func TestReregisterIsANonDisruptiveUpgrade(t *testing.T) {
 	src := newFakeSource()
 	m, ops := newTestManager(t, src, newFakeClaims())
-	reg := Registration{Name: "declare", Module: declareModule(t)}
+	reg := Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps()}
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
@@ -302,9 +315,10 @@ func TestRegisterRejectedWhenClaimFails(t *testing.T) {
 	claims.claimErr = errors.New("codepoint already claimed")
 	m, _ := newTestManager(t, src, claims)
 	err := m.Register(context.Background(), Registration{
-		Name:      "declare",
-		Module:    declareModule(t),
-		Behaviors: []uint16{0xFE01},
+		Name:         "declare",
+		Module:       declareModule(t),
+		Behaviors:    []uint16{0xFE01},
+		Capabilities: testCaps(),
 	})
 	if err == nil {
 		t.Fatal("registration succeeded despite the claim being refused")
@@ -338,7 +352,7 @@ func TestFailedInstantiationReleasesClaim(t *testing.T) {
 func TestRegisterRejectsUnusableName(t *testing.T) {
 	m, _ := newTestManager(t, newFakeSource(), newFakeClaims())
 	for _, name := range []string{"", "has:colon"} {
-		if err := m.Register(context.Background(), Registration{Name: name, Module: declareModule(t)}); err == nil {
+		if err := m.Register(context.Background(), Registration{Name: name, Module: declareModule(t), Capabilities: testCaps()}); err == nil {
 			t.Errorf("name %q was accepted", name)
 		}
 	}
@@ -351,9 +365,10 @@ func TestClaimWithoutRegistryIsRefused(t *testing.T) {
 	src := newFakeSource()
 	m, _ := newTestManager(t, src, nil)
 	err := m.Register(context.Background(), Registration{
-		Name:      "declare",
-		Module:    declareModule(t),
-		Behaviors: []uint16{0xFE01},
+		Name:         "declare",
+		Module:       declareModule(t),
+		Behaviors:    []uint16{0xFE01},
+		Capabilities: testCaps(),
 	})
 	if err == nil {
 		t.Fatal("a behavior claim was accepted with no claim registry")
@@ -365,7 +380,7 @@ func TestClaimWithoutRegistryIsRefused(t *testing.T) {
 func TestCloseDoesNotFlush(t *testing.T) {
 	src := newFakeSource()
 	m, ops := newTestManager(t, src, newFakeClaims())
-	if err := m.Register(context.Background(), Registration{Name: "declare", Module: declareModule(t)}); err != nil {
+	if err := m.Register(context.Background(), Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps()}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
@@ -488,6 +503,7 @@ func TestPluginOpsTransactionLifecycle(t *testing.T) {
 		Owner:              ownerA,
 		Headend:            headend,
 		Leases:             NewLeases(),
+		Capabilities:       testCaps(),
 		DefaultEncapSource: netip.MustParseAddr("fd00:1::1"),
 	})
 	if err != nil {
@@ -536,7 +552,9 @@ func TestPluginOpsTransactionLifecycle(t *testing.T) {
 
 func TestPluginOpsAbortDiscards(t *testing.T) {
 	headend := newFakeHeadendOps()
-	ops, err := NewPluginOps(PluginOpsConfig{Owner: ownerA, Headend: headend, Leases: NewLeases()})
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: ownerA, Headend: headend, Leases: NewLeases(), Capabilities: testCaps(),
+	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
 	}
@@ -564,7 +582,7 @@ func TestPluginOpsAbortDiscards(t *testing.T) {
 func TestPluginOpsBoundsOpenTransactions(t *testing.T) {
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(),
-		MaxOpenTransactions: 2,
+		Capabilities: testCaps(), MaxOpenTransactions: 2,
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -581,7 +599,9 @@ func TestPluginOpsBoundsOpenTransactions(t *testing.T) {
 }
 
 func TestPluginOpsRejectsUnknownKindAndGeneration(t *testing.T) {
-	ops, err := NewPluginOps(PluginOpsConfig{Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases()})
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(), Capabilities: testCaps(),
+	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
 	}
@@ -596,7 +616,9 @@ func TestPluginOpsRejectsUnknownKindAndGeneration(t *testing.T) {
 func TestPluginOpsFlushRemovesOwnedState(t *testing.T) {
 	headend := newFakeHeadendOps()
 	leases := NewLeases()
-	ops, err := NewPluginOps(PluginOpsConfig{Owner: ownerA, Headend: headend, Leases: leases})
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: ownerA, Headend: headend, Leases: leases, Capabilities: testCaps(),
+	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
 	}
@@ -624,6 +646,7 @@ func TestDroppedEventsAreCounted(t *testing.T) {
 	m, _ := newTestManager(t, src, newFakeClaims())
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -669,6 +692,7 @@ func TestRestartReplaysTheRib(t *testing.T) {
 
 	if err := m.Register(context.Background(), Registration{
 		Name: "trap", Module: trapModule(t),
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -695,6 +719,7 @@ func TestRestartCounterResetsOnSuccess(t *testing.T) {
 	m, ops := newTestManager(t, src, newFakeClaims())
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -721,6 +746,7 @@ func TestSnapshotIsNotDropped(t *testing.T) {
 	}
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -741,6 +767,7 @@ func TestSnapshotWithoutASourceIsReported(t *testing.T) {
 	m, _ := newTestManager(t, src, newFakeClaims())
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -780,6 +807,7 @@ func TestTickIsDriven(t *testing.T) {
 		Name:         "tick",
 		Module:       tickModule(t),
 		TickInterval: MinTickInterval,
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -805,6 +833,7 @@ func TestTickIntervalIsClamped(t *testing.T) {
 		Name:         "tick",
 		Module:       tickModule(t),
 		TickInterval: time.Millisecond,
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -822,6 +851,7 @@ func TestTickNotDrivenByDefault(t *testing.T) {
 	m, _ := newTestManager(t, src, newFakeClaims())
 	if err := m.Register(context.Background(), Registration{
 		Name: "tick", Module: tickModule(t),
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -844,6 +874,7 @@ func TestEndOfReplayFollowsTheSnapshot(t *testing.T) {
 	var mu sync.Mutex
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -898,6 +929,7 @@ func TestFailedInstantiationLeavesNoState(t *testing.T) {
 			// A trailing byte that cannot be parsed, so configure returns
 			// non-zero after it has already declared.
 			0xff),
+		Capabilities: testCaps(),
 	})
 	if err == nil {
 		t.Fatal("a module whose configure failed was registered")
@@ -933,10 +965,11 @@ func TestFailedUpgradeLeavesTheRunningPluginAlone(t *testing.T) {
 	defer m.Close(context.Background())
 
 	good := Registration{
-		Name:      "custom-behavior",
-		Module:    examplePlugin(t),
-		Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
-		Behaviors: []uint16{0xFE01},
+		Name:         "custom-behavior",
+		Module:       examplePlugin(t),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Behaviors:    []uint16{0xFE01},
+		Capabilities: testCaps(),
 	}
 	if err := m.Register(context.Background(), good); err != nil {
 		t.Fatalf("register: %v", err)
@@ -963,4 +996,66 @@ func TestFailedUpgradeLeavesTheRunningPluginAlone(t *testing.T) {
 	if names := m.List(); len(names) != 1 {
 		t.Errorf("the running plugin was dropped: %v", names)
 	}
+}
+
+// One apply_begin serves every kind of declaration, so linking alone
+// cannot separate them: a plugin granted only advertise would otherwise
+// open a headend transaction through the same door.
+func TestApplyKindIsCheckedAgainstCapabilities(t *testing.T) {
+	advertiseOnly, err := wasm.ParseCapabilities([]string{string(wasm.CapAdvertise)})
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Capabilities: advertiseOnly,
+		Advertise:    NewAdvertiseSet(&fakeAdvertiser{}, NewLeases()),
+		LocalSIDs:    NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps()),
+	})
+	if err != nil {
+		t.Fatalf("new plugin ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	if _, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4)); err == nil {
+		t.Error("a plugin granted only advertise opened a headend transaction")
+	}
+	if _, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID)); err == nil {
+		t.Error("a plugin granted only advertise opened a local-SID transaction")
+	}
+	if _, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE)); err != nil {
+		t.Errorf("the granted kind was refused: %v", err)
+	}
+}
+
+// A plugin granted nothing can still be registered and delivered events:
+// observing is a real way to run one.
+func TestObserveOnlyPluginRegisters(t *testing.T) {
+	src := newFakeSource()
+	m, ops := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name:   "observer",
+		Module: fixtureModule(t, "echo"),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	src.emit("observer", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "observer")
+	if ops.countV4() != 0 {
+		t.Fatalf("an observe-only plugin wrote %d entries", ops.countV4())
+	}
+}
+
+// fixtureModule reads one of the wasm runtime's hand-written fixtures.
+func fixtureModule(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("wasm", "testdata", name+".wasm"))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	return b
 }

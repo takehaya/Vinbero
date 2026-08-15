@@ -51,9 +51,10 @@ func exampleManager(t *testing.T) (*Manager, *fakeSource, *fakeHeadendOps) {
 	}
 	t.Cleanup(func() { m.Close(context.Background()) })
 	if err := m.Register(context.Background(), Registration{
-		Name:      "custom-behavior",
-		Module:    examplePlugin(t),
-		Behaviors: []uint16{0xFE01},
+		Name:         "custom-behavior",
+		Module:       examplePlugin(t),
+		Behaviors:    []uint16{0xFE01},
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -159,9 +160,10 @@ func TestExamplePluginConvergesAfterRestart(t *testing.T) {
 	// Re-registering is the upgrade path and stands in for a restart: a
 	// fresh instance over the same owner tag.
 	if err := m.Register(context.Background(), Registration{
-		Name:      "custom-behavior",
-		Module:    examplePlugin(t),
-		Behaviors: []uint16{0xFE01},
+		Name:         "custom-behavior",
+		Module:       examplePlugin(t),
+		Behaviors:    []uint16{0xFE01},
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
@@ -197,10 +199,11 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	// codepoint than the one it was built with.
 	config := exampleConfig(0xFE02, "", "", "", 0)
 	if err := m.Register(context.Background(), Registration{
-		Name:      "custom-behavior",
-		Module:    examplePlugin(t),
-		Config:    config,
-		Behaviors: []uint16{0xFE02},
+		Name:         "custom-behavior",
+		Module:       examplePlugin(t),
+		Config:       config,
+		Behaviors:    []uint16{0xFE02},
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -293,10 +296,11 @@ func TestExamplePluginCompletesTheLoop(t *testing.T) {
 	defer m.Close(context.Background())
 
 	if err := m.Register(context.Background(), Registration{
-		Name:      "custom-behavior",
-		Module:    examplePlugin(t),
-		Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
-		Behaviors: []uint16{0xFE01},
+		Name:         "custom-behavior",
+		Module:       examplePlugin(t),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Behaviors:    []uint16{0xFE01},
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -373,10 +377,11 @@ func TestExamplePluginUnregisterRetractsEverything(t *testing.T) {
 	defer m.Close(context.Background())
 
 	if err := m.Register(context.Background(), Registration{
-		Name:      "custom-behavior",
-		Module:    examplePlugin(t),
-		Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
-		Behaviors: []uint16{0xFE01},
+		Name:         "custom-behavior",
+		Module:       examplePlugin(t),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33),
+		Behaviors:    []uint16{0xFE01},
+		Capabilities: testCaps(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}

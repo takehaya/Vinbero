@@ -32,6 +32,8 @@ const (
 func (i *Instance) linkHost(ctx context.Context) error {
 	b := i.runtime.NewHostModuleBuilder(HostModule)
 
+	// Always linked: both are diagnostics rather than authority, and a
+	// plugin with neither cannot be debugged at all.
 	b.NewFunctionBuilder().
 		WithFunc(i.hostLog).
 		Export(HostLog)
@@ -40,21 +42,27 @@ func (i *Instance) linkHost(ctx context.Context) error {
 		WithFunc(i.hostNowMonotonic).
 		Export(HostNowMonotonic)
 
-	b.NewFunctionBuilder().
-		WithFunc(i.hostApplyBegin).
-		Export(HostApplyBegin)
+	// The desired-set surface exists only for a plugin allowed to declare
+	// something. A plugin granted nothing cannot import these at all,
+	// which is the point of a capability: not a check it might get past,
+	// but a function that is not there.
+	if i.caps.grantsAnyWrite() {
+		b.NewFunctionBuilder().
+			WithFunc(i.hostApplyBegin).
+			Export(HostApplyBegin)
 
-	b.NewFunctionBuilder().
-		WithFunc(i.hostApplyPut).
-		Export(HostApplyPut)
+		b.NewFunctionBuilder().
+			WithFunc(i.hostApplyPut).
+			Export(HostApplyPut)
 
-	b.NewFunctionBuilder().
-		WithFunc(i.hostApplyCommit).
-		Export(HostApplyCommit)
+		b.NewFunctionBuilder().
+			WithFunc(i.hostApplyCommit).
+			Export(HostApplyCommit)
 
-	b.NewFunctionBuilder().
-		WithFunc(i.hostApplyAbort).
-		Export(HostApplyAbort)
+		b.NewFunctionBuilder().
+			WithFunc(i.hostApplyAbort).
+			Export(HostApplyAbort)
+	}
 
 	if _, err := b.Instantiate(ctx); err != nil {
 		return fmt.Errorf("wasm: link host module: %w", err)

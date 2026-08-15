@@ -11,6 +11,7 @@ import (
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
 // PluginOps is the capability surface behind one plugin's host functions.
@@ -22,6 +23,7 @@ import (
 type PluginOps struct {
 	owner       bpf.OwnerTag
 	headend     HeadendMapOps
+	caps        wasm.Capabilities
 	leases      *Leases
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
@@ -81,6 +83,10 @@ type PluginOpsConfig struct {
 	Headend HeadendMapOps
 	// Leases arbitrates keys across owners.
 	Leases *Leases
+	// Capabilities are what this plugin was granted. The apply functions
+	// are shared by every kind of declaration, so linking cannot separate
+	// them: the kind is checked here instead.
+	Capabilities wasm.Capabilities
 	// Advertise is the send side. Nil leaves a plugin unable to originate,
 	// which is what a daemon without BGP can honestly offer.
 	Advertise *AdvertiseSet
@@ -130,6 +136,7 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 	return &PluginOps{
 		owner:       cfg.Owner,
 		applyMu:     applyMu,
+		caps:        cfg.Capabilities,
 		advertise:   cfg.Advertise,
 		localSIDs:   cfg.LocalSIDs,
 		onLocalSIDs: cfg.OnLocalSIDs,
@@ -165,14 +172,26 @@ func (p *PluginOps) Log(level int32, msg string) {
 // ApplyBegin opens a desired-set transaction.
 func (p *PluginOps) ApplyBegin(kind uint32) (uint64, error) {
 	applyKind := v1.PluginApplyKind(kind)
+	// The kind is checked against the granted capabilities here because
+	// one apply_begin serves them all: a plugin granted only advertise
+	// would otherwise open a headend transaction through the same door.
 	switch applyKind {
 	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
 		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+		if !p.caps.Has(wasm.CapHeadend) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapHeadend)
+		}
 	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		if !p.caps.Has(wasm.CapAdvertise) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapAdvertise)
+		}
 		if p.advertise == nil {
 			return 0, fmt.Errorf("apply begin: this daemon cannot originate routes")
 		}
 	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		if !p.caps.Has(wasm.CapLocalSID) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapLocalSID)
+		}
 		if p.localSIDs == nil {
 			return 0, fmt.Errorf("apply begin: this daemon cannot allocate SIDs")
 		}

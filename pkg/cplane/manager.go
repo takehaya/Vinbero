@@ -80,6 +80,10 @@ type Registration struct {
 	// Behaviors are the SRv6 endpoint behavior codepoints the plugin
 	// claims. Routes naming one are withheld from the built-in appliers.
 	Behaviors []uint16
+	// Capabilities are what the plugin is allowed to do. An empty set
+	// leaves it able to observe and to log, which is a real way to run a
+	// plugin and the safe default for one that asked for nothing.
+	Capabilities wasm.Capabilities
 	// Limits bound the instance; zero fields take defaults.
 	Limits wasm.Limits
 	// TickInterval asks for the plugin's periodic callback to be driven at
@@ -310,7 +314,8 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	m.logger.Info("control-plane plugin registered",
 		zap.String("plugin", reg.Name),
 		zap.Bool("replaced", existed),
-		zap.Int("behaviors", len(reg.Behaviors)))
+		zap.Int("behaviors", len(reg.Behaviors)),
+		zap.Strings("capabilities", reg.Capabilities.Names()))
 	return nil
 }
 
@@ -347,6 +352,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		DefaultEncapSource: m.defaultSrc,
 		Logger:             m.logger.Named("plugin." + reg.Name),
 		ApplyMutex:         &m.applyMu,
+		Capabilities:       reg.Capabilities,
 		Advertise:          m.advertise,
 		LocalSIDs:          m.localSIDs,
 		OnLocalSIDs:        onLocalSIDs,
@@ -355,12 +361,13 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		return nil, err
 	}
 	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		Name:       reg.Name,
-		Module:     reg.Module,
-		ConfigBlob: reg.Config,
-		Limits:     reg.Limits,
-		Ops:        ops,
-		Logger:     m.logger,
+		Name:         reg.Name,
+		Module:       reg.Module,
+		ConfigBlob:   reg.Config,
+		Limits:       reg.Limits,
+		Ops:          ops,
+		Capabilities: reg.Capabilities,
+		Logger:       m.logger,
 	})
 	if err != nil {
 		return nil, err
@@ -524,12 +531,13 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 
 	ctx := context.Background()
 	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		Name:       reg.Name,
-		Module:     reg.Module,
-		ConfigBlob: reg.Config,
-		Limits:     reg.Limits,
-		Ops:        p.ops,
-		Logger:     m.logger,
+		Name:         reg.Name,
+		Module:       reg.Module,
+		ConfigBlob:   reg.Config,
+		Limits:       reg.Limits,
+		Ops:          p.ops,
+		Capabilities: reg.Capabilities,
+		Logger:       m.logger,
 	})
 	if err != nil {
 		m.mu.Lock()

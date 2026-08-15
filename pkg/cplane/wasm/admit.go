@@ -20,8 +20,11 @@ import (
 // with the wrong signature -- is refused with a message naming what was
 // wrong, because the alternative is a trap on the first call whose cause
 // is far less obvious.
-func admit(compiled wazero.CompiledModule) error {
+func admit(compiled wazero.CompiledModule, caps Capabilities) error {
 	if err := admitImports(compiled); err != nil {
+		return err
+	}
+	if err := admitCapabilities(compiled, caps); err != nil {
 		return err
 	}
 	if err := admitMemory(compiled); err != nil {
@@ -82,6 +85,24 @@ func admitImports(compiled wazero.CompiledModule) error {
 		return fmt.Errorf("%w: module imports its memory; it must define and export its own", ErrAdmission)
 	}
 	return nil
+}
+
+// admitCapabilities refuses a module that imports a host function its
+// granted capabilities do not cover.
+//
+// The link step would refuse it too, by simply not providing the function,
+// but the error an operator sees then is about a missing import rather
+// than about a capability they forgot to grant.
+func admitCapabilities(compiled wazero.CompiledModule, caps Capabilities) error {
+	var imported []string
+	for _, imp := range compiled.ImportedFunctions() {
+		module, name, ok := imp.Import()
+		if !ok || module != HostModule {
+			continue
+		}
+		imported = append(imported, name)
+	}
+	return caps.checkImports(imported)
 }
 
 // admitMemory requires the guest to define and export exactly the memory
