@@ -252,8 +252,11 @@ session は auto-advertise の exporter や operator の RPC と共有で、gobg
 session 側で producer を記録し、withdraw は自分が出した経路にしか効かない
 ようにしています。これが無いと、後から届いた withdraw が別の producer の
 生きた経路を消し、消された側は広告し続けているつもりのままになります。
-重複した advertise 自体は防げません。1 NLRI に 1 path しか無いので両立の
-しようがなく、warning に両方の producer 名を出して気付けるようにしています。
+
+重複した advertise も拒否します。1 NLRI に 1 path しか無いので、上書きは
+先に出した producer の UUID を捨てることになり、後から出した側が withdraw
+すると経路自体が消えるのに、先に出した側は広告中のつもりで戻しません。
+先に出した方が保持し、拒否された側には理由を返します。
 
 ## 登録時の検証
 

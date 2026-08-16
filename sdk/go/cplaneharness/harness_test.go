@@ -299,3 +299,20 @@ func TestPluginPrunesStaleEntriesAtEndOfReplay(t *testing.T) {
 		t.Fatalf("declared %+v, want the empty set that prunes what it no longer knows about", decl.Entries)
 	}
 }
+
+// The harness has to refuse what the daemon refuses. A plugin granted only
+// advertise cannot open a headend transaction there, so one that tries
+// must not pass conformance here and fail in production.
+func TestHarnessRefusesADeclarationTheCapabilitiesDoNotCover(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Capabilities: []string{"advertise"},
+	})
+	// The example declares headend entries, which this grant does not
+	// cover. Delivering a route makes it try.
+	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if _, ok := h.LastDeclaration(); ok {
+		t.Fatal("a headend declaration was accepted from a plugin granted only advertise")
+	}
+}

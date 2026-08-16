@@ -149,15 +149,16 @@ func (s *Session) addAndTrackAs(srv *gobgpsrv.BgpServer, path *apiutil.Path, key
 	_, tracked := s.advertised[key]
 	s.advMu.Unlock()
 	if tracked && holder != producer {
-		// gobgp will supersede the other producer's path, and there is no
-		// way to keep both: one NLRI, one local path. Say so rather than
-		// letting a route disappear from the RIB with nothing in the log.
-		s.logger.Warn("a route is being advertised by a second producer; the first one's path is superseded",
-			zap.String("prefix", key.Prefix),
-			zap.String("rd", key.RD),
-			zap.String("holder", producerName(holder)),
-			zap.String("caller", producerName(producer)))
+		// Refused rather than superseded. There is one local path per
+		// NLRI, so taking it over discards the first producer's UUID: the
+		// second producer's withdraw then removes the route outright,
+		// while the first goes on believing it is advertising and never
+		// puts it back. Whoever got there first keeps it, and the one
+		// refused is told why, which is a conflict it can act on.
 		_ = taken
+		return fmt.Errorf("advertise %s: already advertised by %s; %s cannot originate the same route "+
+			"because BGP carries one local path per NLRI",
+			key.Prefix, producerName(holder), producerName(producer))
 	}
 	resps, err := srv.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{path}})
 	if err != nil {

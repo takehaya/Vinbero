@@ -85,7 +85,12 @@ func New(tb testing.TB, module []byte, opts Options) *Harness {
 		tb.Fatalf("capabilities: %v", err)
 	}
 	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps}
-	h.ops = &recorder{denyCommits: opts.DenyCommits}
+	// The recorder is given the same capabilities as the instance, because
+	// the daemon checks the declaration kind against them when a
+	// transaction is opened. Without that here, a plugin granted only
+	// advertise could open a headend transaction, pass conformance, and
+	// be refused in production.
+	h.ops = &recorder{denyCommits: opts.DenyCommits, caps: caps}
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
 		Name:         "harness",
 		Module:       module,
@@ -290,6 +295,7 @@ type recorder struct {
 	// daemon, advertise an address that had moved under it.
 	sidByName map[string]string
 	nextSID   int
+	caps      wasm.Capabilities
 }
 
 func (r *recorder) Log(level int32, msg string) {
@@ -300,11 +306,24 @@ func (r *recorder) Log(level int32, msg string) {
 
 func (r *recorder) ApplyBegin(kind uint32) (uint64, error) {
 	applyKind := v1.PluginApplyKind(kind)
+	// One apply_begin serves every kind, so the capability that covers the
+	// kind is checked here -- exactly as the daemon does, or a plugin
+	// declaring something it was not granted passes conformance and is
+	// refused in production.
 	switch applyKind {
 	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
-		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6,
-		v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE,
-		v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+		if !r.caps.Has(wasm.CapHeadend) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapHeadend)
+		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		if !r.caps.Has(wasm.CapAdvertise) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapAdvertise)
+		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		if !r.caps.Has(wasm.CapLocalSID) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapLocalSID)
+		}
 	default:
 		return 0, fmt.Errorf("unknown apply kind %d", kind)
 	}

@@ -387,3 +387,81 @@ func TestClaimsAreReservedEvenWhenTheModuleIsGone(t *testing.T) {
 		t.Fatalf("ListClaims returned %v, want the broken plugin's behavior", claims)
 	}
 }
+
+// The module name comes off disk, and a path is not a name. A manifest
+// pointing outside the store would have the daemon read a file it should
+// not, and delete it on the next upgrade.
+func TestManifestCannotNameAModuleOutsideTheStore(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if err := s.Save(Registration{Name: "p", Module: []byte("real")}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// A file the store has no business touching, beside its directory.
+	outside := filepath.Join(filepath.Dir(dir), "elsewhere.wasm")
+	if err := os.WriteFile(outside, []byte("not ours"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	m, err := s.readManifest("p")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	m.Module = "../elsewhere.wasm"
+	body, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := os.WriteFile(s.manifestPath("p"), body, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	if _, err := s.load("p"); err == nil {
+		t.Fatal("a manifest naming a module outside the store was loaded")
+	}
+	// Saving over it must not take the outside file with it.
+	if err := s.Save(Registration{Name: "p", Module: []byte("new")}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("the save deleted a file outside the store: %v", err)
+	}
+}
+
+// A module belonging to another plugin is refused too: the name is part of
+// what makes the file this registration's.
+func TestManifestCannotNameAnotherPluginsModule(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	for _, name := range []string{"a", "b"} {
+		if err := s.Save(Registration{Name: name, Module: []byte(name)}); err != nil {
+			t.Fatalf("save %s: %v", name, err)
+		}
+	}
+	bManifest, err := s.readManifest("b")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	aManifest, err := s.readManifest("a")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	aManifest.Module = bManifest.Module
+	body, err := json.Marshal(aManifest)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := os.WriteFile(s.manifestPath("a"), body, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if _, err := s.load("a"); err == nil {
+		t.Fatal("a manifest naming another plugin's module was loaded")
+	}
+}

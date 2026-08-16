@@ -240,3 +240,43 @@ func TestWithdraw_LeavesAnotherProducersRouteAlone(t *testing.T) {
 		t.Error("a plugin could not withdraw the route it advertised")
 	}
 }
+
+// One NLRI carries one local path, so a second producer cannot take a
+// route over: doing so discards the first producer's UUID, and the second
+// one's withdraw would then remove a route the first still believes it is
+// advertising.
+func TestAdvertise_RefusesAnotherProducersRoute(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+
+	vr := bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", NextHop: "2001:db8::1",
+	}
+	if err := s.Advertise(context.Background(), vr); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	key := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100"}
+	s.advMu.Lock()
+	first := s.advertised[key]
+	s.advMu.Unlock()
+
+	plugin := s.AsProducer("cplane-plugins")
+	if err := plugin.Advertise(context.Background(), vr); err == nil {
+		t.Fatal("a second producer took over a route another one advertises")
+	}
+	s.advMu.Lock()
+	after, still := s.advertised[key]
+	holder := s.producers[key]
+	s.advMu.Unlock()
+	if !still || after != first {
+		t.Error("the refused advertise disturbed the route it could not take")
+	}
+	if holder != "" {
+		t.Errorf("the route is recorded against %q, want the producer that advertised it", holder)
+	}
+	// The original producer can still withdraw its own route.
+	if err := s.Withdraw(context.Background(), key); err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+}

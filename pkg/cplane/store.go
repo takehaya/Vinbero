@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -99,8 +101,13 @@ func (s *Store) Save(reg Registration) error {
 	// The previous module is read before anything is written, so it can be
 	// removed once the manifest no longer refers to it.
 	var previous string
-	if old, err := s.readManifest(reg.Name); err == nil {
-		previous = old.Module
+	if old, err := s.readManifest(reg.Name); err == nil && old.Module != "" {
+		// Resolved through the same check as any other read: a manifest
+		// naming a path rather than a name must not send this remove
+		// outside the store.
+		if path, err := s.modulePathFor(reg.Name, old); err == nil {
+			previous = path
+		}
 	}
 	moduleFile := moduleFileName(reg.Name, reg.Module)
 	if err := writeFileAtomic(filepath.Join(s.dir, moduleFile), reg.Module); err != nil {
@@ -133,8 +140,8 @@ func (s *Store) Save(reg Registration) error {
 	}
 	// Nothing refers to the old module now. Failing to remove it costs
 	// disk, not correctness, so it is not worth failing the save over.
-	if previous != "" && previous != moduleFile {
-		_ = os.Remove(filepath.Join(s.dir, previous))
+	if previous != "" && previous != filepath.Join(s.dir, moduleFile) {
+		_ = os.Remove(previous)
 	}
 	return nil
 }
@@ -180,6 +187,36 @@ func writeFileAtomic(path string, body []byte) error {
 	return syncDir(filepath.Dir(path))
 }
 
+// modulePathFor resolves the module a manifest names, refusing anything
+// that is not a name this store could have written.
+//
+// The value comes off disk, and a path is not a name: a manifest saying
+// "../../etc/something" would send the join outside the store, where the
+// daemon then reads it and, on the next upgrade, deletes it. Requiring the
+// exact shape Save produces means nothing else is reachable, whatever the
+// file says.
+func (s *Store) modulePathFor(name string, m manifest) (string, error) {
+	if m.Module == "" {
+		// Written before the store named its module: the single file it
+		// used to keep, whose name this store builds itself.
+		return s.modulePath(name), nil
+	}
+	if !moduleNamePattern.MatchString(m.Module) {
+		return "", fmt.Errorf("cplane store: manifest for %q names module %q, which is not a name this store writes",
+			name, m.Module)
+	}
+	if !strings.HasPrefix(m.Module, name+"-") {
+		return "", fmt.Errorf("cplane store: manifest for %q names module %q, which belongs to another plugin",
+			name, m.Module)
+	}
+	return filepath.Join(s.dir, m.Module), nil
+}
+
+// moduleNamePattern is the shape moduleFileName produces: a bundle name, a
+// dash, the content hash, and the extension. No separators, so it cannot
+// leave the directory.
+var moduleNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+-[0-9a-f]{16}\.wasm$`)
+
 // moduleFileName names a module after its content, so an upgrade writes a
 // new file rather than overwriting the one the current manifest names.
 func moduleFileName(name string, module []byte) string {
@@ -199,8 +236,10 @@ func (s *Store) Remove(name string) error {
 	// The module is located before the manifest goes, since the manifest
 	// is what names it.
 	module := s.modulePath(name)
-	if m, err := s.readManifest(name); err == nil && m.Module != "" {
-		module = filepath.Join(s.dir, m.Module)
+	if m, err := s.readManifest(name); err == nil {
+		if path, err := s.modulePathFor(name, m); err == nil {
+			module = path
+		}
 	}
 	// Manifest first: it is what List reads, so removing it makes the
 	// plugin gone even if the module removal then fails.
@@ -354,9 +393,9 @@ func (s *Store) load(name string) (Registration, error) {
 		return Registration{}, fmt.Errorf("cplane store: manifest for %q is version %d, this daemon writes %d",
 			name, m.Version, storeManifestVersion)
 	}
-	modulePath := s.modulePath(name)
-	if m.Module != "" {
-		modulePath = filepath.Join(s.dir, m.Module)
+	modulePath, err := s.modulePathFor(name, m)
+	if err != nil {
+		return Registration{}, err
 	}
 	module, err := os.ReadFile(modulePath)
 	if err != nil {
