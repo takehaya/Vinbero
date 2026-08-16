@@ -186,7 +186,19 @@ type ManagerConfig struct {
 	// Advertiser is the send side a plugin originates through. Nil leaves
 	// plugins unable to advertise, which is honest on a daemon with no
 	// BGP session.
+	//
 	Advertiser Advertiser
+	// AdvertiserFor names each plugin's send side, so the BGP session can
+	// tell one plugin's routes from another's. Optional: without it every
+	// plugin shares one identity.
+	//
+	// The lease is the first barrier between two plugins originating one
+	// NLRI; the producer name is the second, and the two fail differently.
+	// A lease conflict is refused before anything is sent. A producer
+	// conflict is what stops one plugin's withdraw from deleting a route
+	// another plugin still wants -- which matters exactly when the lease
+	// has been given up by mistake.
+	AdvertiserFor func(producer string) Advertiser
 	// Locators allocates the SIDs a plugin points at its data-plane half.
 	Locators SIDAllocator
 	// SIDFunctions installs the dispatch entries for those SIDs.
@@ -218,7 +230,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	leases := NewLeases()
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	return &Manager{
-		advertise:   NewAdvertiseSet(cfg.Advertiser, leases),
+		advertise:   newNamedAdvertiseSet(cfg, leases),
 		localSIDs:   NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions),
 		source:      cfg.Source,
 		snapshots:   snapshots,
@@ -232,6 +244,16 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		started:     time.Now(),
 		plugins:     make(map[string]*plugin),
 	}, nil
+}
+
+// newNamedAdvertiseSet builds the advertise tracker, naming each owner's
+// send side when the daemon supplied a way to.
+func newNamedAdvertiseSet(cfg ManagerConfig, leases *Leases) *AdvertiseSet {
+	set := NewAdvertiseSet(cfg.Advertiser, leases)
+	if cfg.AdvertiserFor != nil {
+		set.NameProducers(cfg.AdvertiserFor)
+	}
+	return set
 }
 
 // Register starts a plugin.

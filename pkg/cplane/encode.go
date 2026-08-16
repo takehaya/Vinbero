@@ -78,16 +78,43 @@ func EncodeRouteEvent(ev bgp.RouteEvent) *v1.PluginRoute {
 // zero one. A zero source produces packets that go nowhere, and a
 // blackhole that reports success is far harder to diagnose than a
 // declaration that was refused.
-func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (string, *bpf.HeadendEntry, error) {
+func DecodeHeadendEntry(in *v1.PluginHeadendEntry, af AddressFamily, defaultSrc netip.Addr) (string, *bpf.HeadendEntry, error) {
 	if in == nil {
 		return "", nil, fmt.Errorf("nil headend entry")
 	}
 	if in.GetTriggerPrefix() == "" {
 		return "", nil, fmt.Errorf("headend entry has no trigger prefix")
 	}
-	if _, err := netip.ParsePrefix(in.GetTriggerPrefix()); err != nil {
+	pfx, err := netip.ParsePrefix(in.GetTriggerPrefix())
+	if err != nil {
 		return "", nil, fmt.Errorf("trigger prefix %q: %w", in.GetTriggerPrefix(), err)
 	}
+	// Normalized before it becomes a key. The map is an LPM trie and stores
+	// the masked network, so a declaration spelled 10.0.0.7/24 is written
+	// as 10.0.0.0/24 and read back that way. Leasing and diffing the
+	// unmasked spelling would leave the lease under a key the map never
+	// reports: the owner's own next declaration would not recognize the
+	// entry it just wrote, prune it, write it again, and never release the
+	// lease -- and a second owner spelling it differently would slip past
+	// the lease the first one holds.
+	//
+	// The advertise path does the same thing for the same reason; this is
+	// its counterpart.
+	// The family has to match the map the transaction is for. The caller
+	// picks the map from the transaction's kind, so a prefix of the other
+	// family is an entry that cannot be written -- and the reconcile prunes
+	// before it writes, so the owner's whole set in that family goes first
+	// and the write then fails. It repeats identically on every
+	// declaration, so nothing recovers it.
+	if af == AFv4 && !pfx.Addr().Is4() {
+		return "", nil, fmt.Errorf("trigger prefix %q is not IPv4, and this is a %s declaration",
+			in.GetTriggerPrefix(), af)
+	}
+	if af == AFv6 && pfx.Addr().Is4() {
+		return "", nil, fmt.Errorf("trigger prefix %q is not IPv6, and this is a %s declaration",
+			in.GetTriggerPrefix(), af)
+	}
+	trigger := pfx.Masked().String()
 
 	segments := in.GetSegments()
 	if len(segments) == 0 {
@@ -107,7 +134,7 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 	if declared == 0 {
 		declared = uint32(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
 	}
-	if err := validateHeadendMode(declared); err != nil {
+	if err := validateHeadendMode(declared, af); err != nil {
 		return "", nil, fmt.Errorf("headend entry for %q: %w", in.GetTriggerPrefix(), err)
 	}
 	mode := uint8(declared)
@@ -149,7 +176,7 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 		return "", nil, fmt.Errorf("source address of %q is not IPv6", in.GetTriggerPrefix())
 	}
 	entry.SrcAddr = src.As16()
-	return in.GetTriggerPrefix(), entry, nil
+	return trigger, entry, nil
 }
 
 // validateHeadendMode refuses a mode the data plane has nothing behind.
@@ -160,12 +187,16 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 // of vinbero's own behaviors -- ordinary encapsulation is the common case
 // -- or one of the slots reserved for plugins, where its own data-plane
 // half lives. Anything else is a mistake worth refusing at the boundary.
-func validateHeadendMode(mode uint32) error {
+func validateHeadendMode(mode uint32, af AddressFamily) error {
 	if _, known := v1.Srv6HeadendBehavior_name[int32(mode)]; known &&
 		mode != uint32(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_UNSPECIFIED) {
 		return nil
 	}
-	if err := bpf.ValidatePluginSlot(bpf.MapTypeHeadendV4, mode); err != nil {
+	mapType := bpf.MapTypeHeadendV4
+	if af == AFv6 {
+		mapType = bpf.MapTypeHeadendV6
+	}
+	if err := bpf.ValidatePluginSlot(mapType, mode); err != nil {
 		return fmt.Errorf("mode %d is neither a behavior vinbero implements nor a headend plugin slot: %w",
 			mode, err)
 	}

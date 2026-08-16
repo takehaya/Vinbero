@@ -91,6 +91,13 @@ type AdvertiseSet struct {
 	// live maps owner -> key -> route, the routes each owner has
 	// originated and not withdrawn.
 	live map[bpf.OwnerTag]map[string]AdvertisedRoute
+
+	// producerMu guards the per-owner advertiser views, which are built on
+	// first use and kept because the session tracks paths by the name they
+	// were advertised under.
+	producerMu sync.Mutex
+	namer      func(producer string) Advertiser
+	producers  map[bpf.OwnerTag]Advertiser
 }
 
 // NewAdvertiseSet builds the tracker. adv may be nil, in which case
@@ -123,6 +130,7 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 	// route found later would take the live routes with it and leave the
 	// plugin advertising nothing -- a typo in one declaration is not a
 	// reason to retract the rest.
+	adv := a.advertiserFor(owner)
 	byKey := make(map[string]AdvertisedRoute, len(desired))
 	keys := make([]string, 0, len(desired))
 	for _, r := range desired {
@@ -177,7 +185,7 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 		a.mu.Lock()
 		route := current[k]
 		a.mu.Unlock()
-		if err := a.adv.Withdraw(ctx, route.routeKey()); err != nil {
+		if err := adv.Withdraw(ctx, route.routeKey()); err != nil {
 			// Nothing declared was originated yet, so those leases
 			// describe NLRIs this owner does not advertise. Holding them
 			// would deny another plugin a route this one never took.
@@ -196,7 +204,7 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 	sort.Strings(keys)
 	for _, k := range keys {
 		route := byKey[k]
-		if err := a.originate(ctx, route); err != nil {
+		if err := a.originate(ctx, adv, route); err != nil {
 			// Release the leases of what was not advertised, so a key this
 			// owner does not hold cannot deny another one.
 			a.releaseUnoriginated(keys[indexOf(keys, k):], current, owner)
@@ -255,8 +263,8 @@ func (a *AdvertiseSet) WithdrawOwner(ctx context.Context, owner bpf.OwnerTag) er
 		if !ok {
 			continue
 		}
-		if a.adv != nil {
-			if err := a.adv.Withdraw(ctx, route.routeKey()); err != nil {
+		if adv := a.advertiserFor(owner); adv != nil {
+			if err := adv.Withdraw(ctx, route.routeKey()); err != nil {
 				// Still advertised, so it is still this owner's. Forgetting
 				// it here would leave a route on the wire that nothing
 				// tracks, with the state behind it about to be removed --
@@ -288,6 +296,46 @@ func (a *AdvertiseSet) LiveCount(owner bpf.OwnerTag) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.live[owner])
+}
+
+// advertiserFor returns the send side this owner originates through.
+//
+// Each owner gets a view naming itself when the advertiser can provide
+// one. The session keeps one local path per NLRI and refuses a takeover
+// between different producers, so naming them apart is what stops one
+// plugin's withdraw from deleting a route another plugin still wants --
+// the barrier under the lease, which matters exactly when the lease has
+// been given up by mistake.
+func (a *AdvertiseSet) advertiserFor(owner bpf.OwnerTag) Advertiser {
+	if a.namer == nil {
+		return a.adv
+	}
+	a.producerMu.Lock()
+	defer a.producerMu.Unlock()
+	if named, held := a.producers[owner]; held {
+		return named
+	}
+	if a.producers == nil {
+		a.producers = make(map[bpf.OwnerTag]Advertiser)
+	}
+	named := a.namer(string(owner))
+	if named == nil {
+		named = a.adv
+	}
+	a.producers[owner] = named
+	return named
+}
+
+// NameProducers makes each owner originate through a view of its own.
+//
+// The daemon supplies it because only the daemon knows what its BGP
+// session can do. Without it every owner shares one identity and the
+// session cannot tell their routes apart.
+func (a *AdvertiseSet) NameProducers(namer func(producer string) Advertiser) {
+	a.producerMu.Lock()
+	defer a.producerMu.Unlock()
+	a.namer = namer
+	a.producers = nil
 }
 
 // canonicalize puts a route in the form the wire has it and asks the
@@ -327,10 +375,10 @@ func (a *AdvertiseSet) canonicalize(r AdvertisedRoute) (AdvertisedRoute, error) 
 
 // originate pushes one route out, choosing the call that matches its
 // family.
-func (a *AdvertiseSet) originate(ctx context.Context, r AdvertisedRoute) error {
+func (a *AdvertiseSet) originate(ctx context.Context, adv Advertiser, r AdvertisedRoute) error {
 	switch r.Family {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
-		return a.adv.Advertise(ctx, bgp.VPNRoute{
+		return adv.Advertise(ctx, bgp.VPNRoute{
 			Family:           r.Family,
 			RD:               r.RD,
 			Prefix:           r.Prefix,
@@ -340,7 +388,7 @@ func (a *AdvertiseSet) originate(ctx context.Context, r AdvertisedRoute) error {
 			EndpointBehavior: r.EndpointBehavior,
 		})
 	case bgp.FamilyIPv6Unicast:
-		return a.adv.AdvertiseUnicast(ctx, bgp.UnicastRoute{
+		return adv.AdvertiseUnicast(ctx, bgp.UnicastRoute{
 			Prefix:  r.Prefix,
 			NextHop: r.NextHop,
 		})

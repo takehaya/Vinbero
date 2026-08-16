@@ -56,8 +56,10 @@ type PluginOps struct {
 	// maxOpen caps concurrent transactions so a plugin that begins without
 	// ever committing cannot grow the host's memory without bound.
 	maxOpen int
-	// maxEntries caps how much one transaction may accumulate.
+	// maxEntries caps how many entries one transaction may accumulate, and
+	// maxBytes caps how large they may be between them.
 	maxEntries int
+	maxBytes   int
 	// staged holds commits made before the plugin is published.
 	//
 	// A plugin may declare state from configure, which runs during
@@ -92,7 +94,10 @@ type applyTxn struct {
 	// an older one after a newer one of the same kind puts back a set the
 	// plugin has already replaced -- which is what a retry, or a staged
 	// declaration draining alongside a live commit, would otherwise do.
-	seq     uint64
+	seq uint64
+	// bytes is what this transaction is holding, so the cap is on the
+	// memory rather than only on the number of things in it.
+	bytes   int
 	entries []HeadendDesired
 	routes  []AdvertisedRoute
 	sids    []LocalSID
@@ -131,10 +136,17 @@ type PluginOpsConfig struct {
 	EncapSource func() (netip.Addr, error)
 	// Logger receives the plugin's own log lines.
 	Logger *zap.Logger
-	// MaxOpenTransactions and MaxEntriesPerTransaction bound what one
-	// plugin can accumulate; zero takes a default.
+	// MaxOpenTransactions, MaxEntriesPerTransaction and
+	// MaxBytesPerTransaction bound what one plugin can accumulate; zero
+	// takes a default.
+	//
+	// The byte cap exists because the entry count bounds nothing on its
+	// own: the repeated and string fields inside an entry have no length
+	// of their own, so a guest can respect every other limit and still
+	// make the host hold gigabytes by never committing.
 	MaxOpenTransactions      int
 	MaxEntriesPerTransaction int
+	MaxBytesPerTransaction   int
 	// ApplyMutex serializes reconciles across the plugins that share a
 	// data plane. Nil gives this plugin one of its own, which is only
 	// right when it is the sole writer.
@@ -161,6 +173,14 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 	if maxEntries <= 0 {
 		maxEntries = 4096
 	}
+	// A transaction's memory is capped as well as its entry count. The
+	// default is generous next to any real desired set -- a few thousand
+	// routes with their attributes -- and small next to what an unbounded
+	// one costs a daemon that must not be restarted to recover.
+	maxBytes := cfg.MaxBytesPerTransaction
+	if maxBytes <= 0 {
+		maxBytes = 16 << 20
+	}
 	applyMu := cfg.ApplyMutex
 	if applyMu == nil {
 		applyMu = &sync.Mutex{}
@@ -181,6 +201,7 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 		open:         make(map[uint64]*applyTxn),
 		maxOpen:      maxOpen,
 		maxEntries:   maxEntries,
+		maxBytes:     maxBytes,
 	}, nil
 }
 
@@ -264,6 +285,16 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 		return fmt.Errorf("apply put: transaction %d would hold %d entries, limit %d",
 			generation, len(txn.entries)+len(txn.routes)+len(txn.sids)+declared, p.maxEntries)
 	}
+	// Entries are counted, and so are the bytes inside them. A count alone
+	// bounds nothing: the repeated and string fields of one entry have no
+	// length of their own, so a guest can stay under both the entry limit
+	// and the per-chunk buffer limit and still make the host hold gigabytes
+	// -- by never committing, which is also why nothing here reclaims it.
+	size := chunkSize(&msg)
+	if txn.bytes+size > p.maxBytes {
+		return fmt.Errorf("apply put: transaction %d would hold %d bytes, limit %d",
+			generation, txn.bytes+size, p.maxBytes)
+	}
 	// A transaction is opened for one kind, and the apply reads only the
 	// field that kind names. A chunk carrying any other field is a
 	// declaration the plugin believes it made and the host would drop in
@@ -294,8 +325,12 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 				src = resolved
 			}
 		}
+		af := AFv4
+		if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+			af = AFv6
+		}
 		for _, e := range msg.GetHeadendEntries() {
-			prefix, entry, err := DecodeHeadendEntry(e, src)
+			prefix, entry, err := DecodeHeadendEntry(e, af, src)
 			if err != nil {
 				return fmt.Errorf("apply put: %w", err)
 			}
@@ -316,6 +351,7 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 		}
 		sids = append(sids, sid)
 	}
+	txn.bytes += size
 	txn.entries = append(txn.entries, entries...)
 	txn.routes = append(txn.routes, routes...)
 	txn.sids = append(txn.sids, sids...)
@@ -564,6 +600,15 @@ func kindName(kind v1.PluginApplyKind) string {
 	}
 }
 
+// chunkSize is what one chunk costs the host to keep.
+//
+// The wire size is the right measure: it is what the guest actually sent,
+// it covers every field including the repeated and string ones a count
+// ignores, and it does not depend on how the decoded form is laid out.
+func chunkSize(msg *v1.PluginApplyChunk) int {
+	return proto.Size(msg)
+}
+
 // stale reports whether a newer declaration of this kind has already been
 // applied, and otherwise records this one as the newest.
 //
@@ -690,6 +735,15 @@ func (p *PluginOps) Flush() error {
 		}
 	}
 	if p.leases != nil {
+		if firstErr != nil {
+			// Something is still installed. The steps above each keep the
+			// lease on whatever they could not remove, and releasing the
+			// owner wholesale here would undo exactly that: a route still
+			// advertised, or an entry still in the map, would be left with
+			// no lease, and the next plugin to declare that key would take
+			// it and overwrite state that is still live.
+			return firstErr
+		}
 		p.leases.ReleaseOwner(p.owner)
 	}
 	return firstErr

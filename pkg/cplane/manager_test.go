@@ -512,7 +512,7 @@ func TestDecodeHeadendEntry(t *testing.T) {
 		TriggerPrefix: "10.0.0.0/24",
 		Segments:      []string{"fd00:2::100", "fd00:3::100"},
 	}
-	prefix, entry, err := DecodeHeadendEntry(in, defaultSrc)
+	prefix, entry, err := DecodeHeadendEntry(in, AFv4, defaultSrc)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestDecodeHeadendEntryRejectsMalformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, _, err := DecodeHeadendEntry(tt.in, src); err == nil {
+			if _, _, err := DecodeHeadendEntry(tt.in, AFv4, src); err == nil {
 				t.Fatal("malformed entry was accepted")
 			}
 		})
@@ -564,7 +564,7 @@ func TestDecodeHeadendEntryRejectsTooManySegments(t *testing.T) {
 		segments[i] = "fd00:2::1"
 	}
 	in := &v1.PluginHeadendEntry{TriggerPrefix: "10.0.0.0/24", Segments: segments}
-	if _, _, err := DecodeHeadendEntry(in, netip.MustParseAddr("fd00:1::1")); err == nil {
+	if _, _, err := DecodeHeadendEntry(in, AFv4, netip.MustParseAddr("fd00:1::1")); err == nil {
 		t.Fatal("a segment list longer than the map holds was accepted")
 	}
 }
@@ -1141,7 +1141,7 @@ func TestDecodeHeadendEntryDefaultsToEncaps(t *testing.T) {
 	_, entry, err := DecodeHeadendEntry(&v1.PluginHeadendEntry{
 		TriggerPrefix: "10.0.0.0/24",
 		Segments:      []string{"fd00:2::100"},
-	}, netip.MustParseAddr("fd00:1::1"))
+	}, AFv4, netip.MustParseAddr("fd00:1::1"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1158,7 +1158,7 @@ func TestDecodeHeadendEntryKeepsAnExplicitMode(t *testing.T) {
 		TriggerPrefix: "10.0.0.0/24",
 		Segments:      []string{"fd00:2::100"},
 		Mode:          20,
-	}, netip.MustParseAddr("fd00:1::1"))
+	}, AFv4, netip.MustParseAddr("fd00:1::1"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1448,5 +1448,60 @@ func TestUnregisterDoesNotHandTheRoutesToTheBuiltins(t *testing.T) {
 	}
 	if got := src.snapshotCount() - replaysBefore; got != 0 {
 		t.Errorf("unregistering replayed the rib %d times; it must replay to nobody", got)
+	}
+}
+
+// A flush that could not finish leaves state installed. The steps inside
+// it keep the lease on whatever they could not remove, and releasing the
+// owner wholesale would undo exactly that: the next plugin to declare that
+// key would take it and overwrite state that is still live.
+func TestFailedFlushKeepsTheLeasesOnWhatRemains(t *testing.T) {
+	headend := newFakeHeadendOps()
+	leases := NewLeases()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: ownerA, Headend: headend, Leases: leases,
+		Capabilities: testCaps(), EncapSource: testEncapSource,
+	})
+	if err != nil {
+		t.Fatalf("new plugin ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	chunk, err := proto.Marshal(&v1.PluginApplyChunk{
+		HeadendEntries: []*v1.PluginHeadendEntry{{
+			TriggerPrefix: "10.0.1.0/24", Segments: []string{"fd00:2::1"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ops.ApplyPut(gen, chunk); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := ops.ApplyCommit(gen); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if headend.countV4() != 1 {
+		t.Fatalf("setup: %d entries, want 1", headend.countV4())
+	}
+
+	// The map refuses the delete, so the entry survives the flush.
+	headend.failDelete("10.0.1.0/24")
+	if err := ops.Flush(); err == nil {
+		t.Fatal("a flush that could not remove an entry reported success")
+	}
+	if headend.countV4() != 1 {
+		t.Fatalf("the entry went away after all: %d", headend.countV4())
+	}
+
+	// The lease on it is still held, so nobody else can take the key.
+	if _, err := leases.AcquireAll(LeaseHeadendV4, []string{"10.0.1.0/24"}, ownerB); err == nil {
+		t.Error("another owner took the lease on an entry that is still installed")
 	}
 }

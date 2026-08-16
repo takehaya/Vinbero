@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 )
 
@@ -196,5 +199,56 @@ func TestQuotaErrorReadsAsAPolicyRefusal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "quota 4") {
 		t.Errorf("error does not say what the quota was: %v", err)
+	}
+}
+
+// The entry count bounds nothing on its own: the repeated and string
+// fields inside an entry have no length of their own, so a guest can
+// respect every other limit and still make the host hold gigabytes -- by
+// never committing, which is also why nothing reclaims it.
+func TestTransactionMemoryIsCapped(t *testing.T) {
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(),
+		Capabilities: testCaps(), EncapSource: testEncapSource,
+		MaxBytesPerTransaction: 4096,
+	})
+	if err != nil {
+		t.Fatalf("new plugin ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	// One entry, well under the entry limit, carrying a payload that is
+	// not. The count would let this through; the byte budget must not.
+	fat := &v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{
+		TriggerPrefix: "10.0.0.0/24",
+		Segments:      []string{"fd00:2::1"},
+	}}}
+	chunk, err := proto.Marshal(fat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Feed the same small chunk until the budget is spent. It must stop,
+	// rather than accumulating without bound.
+	var accepted int
+	for i := 0; i < 10000; i++ {
+		if err := ops.ApplyPut(gen, chunk); err != nil {
+			break
+		}
+		accepted++
+	}
+	if accepted == 0 {
+		t.Fatal("the first chunk was refused; the budget is too small to be meaningful")
+	}
+	if accepted >= 10000 {
+		t.Fatal("the transaction accepted chunks without bound")
+	}
+	if got := accepted * len(chunk); got > 4096+len(chunk) {
+		t.Errorf("accepted %d bytes against a 4096 byte budget", got)
 	}
 }
