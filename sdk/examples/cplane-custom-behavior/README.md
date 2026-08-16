@@ -57,7 +57,7 @@ or directly:
 
 ```sh
 tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=conservative -panic=trap .
+    -scheduler=none -gc=conservative -panic=trap -no-debug .
 ```
 
 The flags are not incidental.
@@ -69,6 +69,12 @@ it one event batch at a time.
 
 `panic=trap` because a panic is a bug rather than a control-flow tool, and
 the daemon treats a trap as a failed instance to restart.
+
+`no-debug` because TinyGo otherwise embeds the absolute build path in
+DWARF, which makes the committed artifact differ on every machine; with it
+the build is reproducible and the module drops from ~83 KB to ~14 KB. A
+trap then carries no stack info, which costs little: the daemon reports
+the trap either way and a plugin's own diagnostics go through `log`.
 
 `gc=conservative` because a control-plane plugin runs for the life of the
 daemon and sees every route change in the network. TinyGo's default for

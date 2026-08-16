@@ -50,8 +50,12 @@ test-runnable: ## check no panic at init()
 	done
 
 .PHONY: test
+# pkg/bpf reloads the BPF collection per test and runs well past go test's
+# default 10m per-package timeout (about 14m on a fast machine, longer
+# under -race). Without an explicit timeout the package is killed mid-run
+# and reports failures that are only the clock.
 test: ## Run the tests of the project
-	$(GOTEST) -v -exec sudo -race ./... $(OUTPUT_OPTIONS)
+	$(GOTEST) -v -exec sudo -race -timeout 35m ./... $(OUTPUT_OPTIONS)
 
 VIMTO_KERNEL ?= 6.6
 .PHONY: test-bpf-load
@@ -235,7 +239,14 @@ cplane-wasm-testdata: ## rebuild the control-plane plugin wasm test fixtures (re
 	done
 
 .PHONY: cplane-example
+# -no-debug is what makes the artifact reproducible: without it TinyGo
+# embeds the absolute build path (and its own cache path) in DWARF, so the
+# committed .wasm would differ on every machine and the CI drift check
+# could never pass. It also cuts the module from ~83 KB to ~14 KB. A trap
+# therefore carries no stack info, which costs little: the host reports
+# the trap either way, and a plugin's own diagnostics go through the log
+# host function.
 cplane-example: ## build the control-plane plugin example (requires tinygo)
 	cd sdk/examples/cplane-custom-behavior && \
 		tinygo build -o plugin.wasm -target=wasm-unknown \
-			-scheduler=none -gc=conservative -panic=trap .
+			-scheduler=none -gc=conservative -panic=trap -no-debug .
