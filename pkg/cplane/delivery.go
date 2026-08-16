@@ -19,6 +19,15 @@ import (
 // consumer recovers on the next snapshot rather than from the backlog.
 const deliveryQueueDepth = 256
 
+// retryInterval is how often a worker repeats the work owed to its plugin
+// when no event is arriving to carry it.
+//
+// Slow on purpose: it does nothing at all in the ordinary case, and what
+// it repairs -- a declaration whose locator did not exist yet -- is
+// something an operator has just created by hand. Seconds of delay there
+// are not worth a busy timer on every plugin.
+const retryInterval = 15 * time.Second
+
 // worker owns all delivery to one plugin.
 //
 // It exists because guest calls must not happen on the BGP watch
@@ -70,9 +79,14 @@ type worker struct {
 	holding bool
 	pending []*v1.PluginEventBatch
 
-	// beforeBatch runs on this goroutine ahead of each delivery. It is
-	// where work that has to happen off the BGP watch goroutine, but
-	// before the plugin declares anything, goes.
+	// beforeBatch runs on this goroutine ahead of each delivery, and on a
+	// slow timer of its own. It is where work that has to happen off the
+	// BGP watch goroutine, but before the plugin declares anything, goes.
+	//
+	// The timer matters because a plugin may legitimately receive nothing:
+	// one that only allocates a local SID and advertises it has no route
+	// to wait for, so work deferred to "the next event" would wait
+	// forever.
 	beforeBatch func()
 }
 
@@ -165,6 +179,13 @@ func (w *worker) run() {
 		ticks = t.C
 	}
 
+	var retries <-chan time.Time
+	if w.beforeBatch != nil {
+		t := time.NewTicker(retryInterval)
+		defer t.Stop()
+		retries = t.C
+	}
+
 	for {
 		select {
 		case <-w.stop:
@@ -177,6 +198,10 @@ func (w *worker) run() {
 			w.mu.Lock()
 			w.processed++
 			w.mu.Unlock()
+		case <-retries:
+			// Nothing to do in the ordinary case; this exists for the
+			// plugin that is owed work and has no traffic to carry it.
+			w.beforeBatch()
 		case <-ticks:
 			// A tick that fails costs the instance, like any other call
 			// into the guest, so it goes through the same handler.
@@ -268,19 +293,30 @@ func (w *worker) beginSnapshot() {
 // endSnapshot releases the live events that arrived during the snapshot,
 // in the order they arrived.
 func (w *worker) endSnapshot() {
-	w.mu.Lock()
-	held := w.pending
-	w.pending = nil
-	w.holding = false
-	w.mu.Unlock()
-
-	for _, batch := range held {
-		select {
-		case w.queue <- batch:
-		case <-w.stop:
-			w.mu.Lock()
-			w.processed++
+	// Held events are drained while holding is still set, and it is
+	// cleared only once there is nothing left to drain. Clearing it first
+	// would let an event arriving mid-drain go straight to the queue and
+	// overtake the ones already waiting: holding A and B, a C arriving
+	// then would be delivered A, C, B.
+	for {
+		w.mu.Lock()
+		if len(w.pending) == 0 {
+			w.holding = false
 			w.mu.Unlock()
+			return
+		}
+		held := w.pending
+		w.pending = nil
+		w.mu.Unlock()
+
+		for _, batch := range held {
+			select {
+			case w.queue <- batch:
+			case <-w.stop:
+				w.mu.Lock()
+				w.processed++
+				w.mu.Unlock()
+			}
 		}
 	}
 }

@@ -99,10 +99,12 @@ vbctl plugin cplane list
 vbctl plugin cplane unregister --name custom-behavior
 ```
 
-The capabilities are what this plugin is allowed to do, and the daemon
-links only the host functions they cover: one it was not granted is not a
-call that fails but a function the module cannot reach. A receive-only
-deployment of this same plugin needs `--capability headend` alone.
+The capabilities are what this plugin is allowed to do. The daemon links
+only the host functions they cover, so a plugin granted nothing that writes
+cannot reach the apply functions at all; between the kinds of declaration
+the check happens where the transaction is opened, because those functions
+are shared. A receive-only deployment of this same plugin needs
+`--capability headend` alone.
 
 Registering the same name again upgrades in place: the entries the running
 instance wrote stay, and the new module reconciles over them. Unregistering

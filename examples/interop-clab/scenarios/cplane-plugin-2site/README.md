@@ -66,6 +66,15 @@ allocated. Both are real deployments; this scenario uses the first, so the
 customer ping completes through a decap vinbero already implements and the
 assertions stay about the control plane.
 
+That is a limit worth stating plainly: the codepoint is exercised on the
+steering side, where the entry carrying the traffic is the plugin's own and
+step 5 proves it by taking the traffic away with the plugin. The endpoint
+side is a behavior vinbero implements, so a break in SID allocation or in
+dispatch to a plugin's own slot would not show up here. Those paths are
+covered by `pkg/cplane` and by `sdk/go/cplaneharness`, not by this lab; a
+lab covering them has to build and load an eBPF half as well, which is the
+data-plane SDK's territory rather than this scenario's.
+
 ## Run
 
 ```sh

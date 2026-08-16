@@ -375,6 +375,16 @@ func normalizeAdvertised(r AdvertisedRoute) (AdvertisedRoute, error) {
 				r.Family, r.Prefix, r.EndpointBehavior)
 		}
 	case bgp.FamilyIPv6Unicast:
+		// An IPv6 unicast advertisement carries neither, so accepting them
+		// would drop what the plugin asked for while reporting success.
+		if r.SRv6SID != "" {
+			return r, fmt.Errorf("advertise: %s %s carries no SRv6 SID; %s cannot be advertised with it",
+				r.Family, r.Prefix, r.SRv6SID)
+		}
+		if r.EndpointBehavior != 0 {
+			return r, fmt.Errorf("advertise: %s %s carries no SID TLV, so endpoint behavior %d cannot be advertised with it",
+				r.Family, r.Prefix, r.EndpointBehavior)
+		}
 	default:
 		return r, fmt.Errorf("advertise: family %s cannot be originated by a plugin", r.Family)
 	}

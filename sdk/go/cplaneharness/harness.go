@@ -377,13 +377,17 @@ func (r *recorder) ApplyCommit(generation uint64) error {
 				delete(r.sidByName, name)
 			}
 		}
+		// Only new allocations produce an event, as the daemon does. A
+		// plugin that redeclares its set in response to a local-SID event
+		// -- which the desired-set model invites -- would otherwise be
+		// answered with another event, redeclare again, and never stop.
 		for _, sid := range acc.GetLocalSids() {
-			addr, held := r.sidByName[sid.GetName()]
-			if !held {
-				r.nextSID++
-				addr = fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID)
-				r.sidByName[sid.GetName()] = addr
+			if _, held := r.sidByName[sid.GetName()]; held {
+				continue
 			}
+			r.nextSID++
+			addr := fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID)
+			r.sidByName[sid.GetName()] = addr
 			r.allocated = append(r.allocated, &v1.PluginLocalSidAllocated{
 				Name:    sid.GetName(),
 				Sid:     addr,

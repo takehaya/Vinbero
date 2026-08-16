@@ -185,9 +185,10 @@ stdout も filesystem も無いので log が無いと plugin 作者に調査手
 ## capability
 
 plugin は登録時に何をしてよいかを宣言し、host はそれが覆う host function
-だけを link します。granted でない capability は「呼ぶと失敗する」のでは
-なく、module から到達できない関数になります。permission check は 1 箇所
-書き忘れると抜けますが、link されていない関数はどこからも呼べません。
+だけを link します。link は 2 段のうちの粗い方です。何も書けない plugin に
+は apply 関数がそもそも link されず、呼ぶと失敗するのではなく到達できない
+関数になります。書ける plugin に対しては、apply 関数が宣言の種類をまたいで
+共有なので、種類ごとの判定を transaction を開くところで行います。
 
 | capability | 許すこと |
 |---|---|

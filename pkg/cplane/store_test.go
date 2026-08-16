@@ -317,3 +317,35 @@ func TestLegacyManifestWithoutAModuleNameStillLoads(t *testing.T) {
 		t.Fatalf("module = %q, want the legacy file's contents", got.Module)
 	}
 }
+
+// One unreadable manifest must not take the rest with it. Stopping at the
+// first would leave every plugin later in the order unregistered while the
+// state it wrote is still pinned in the maps, owned by nobody.
+func TestListReturnsWhatItCouldReadAlongsideTheError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	for _, name := range []string{"aaa", "zzz"} {
+		if err := s.Save(Registration{Name: name, Module: []byte(name)}); err != nil {
+			t.Fatalf("save %s: %v", name, err)
+		}
+	}
+	// "mmm" sorts between them, so a scan that stops at it would drop zzz.
+	if err := os.WriteFile(filepath.Join(dir, "mmm.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write bad manifest: %v", err)
+	}
+
+	regs, err := s.List()
+	if err == nil {
+		t.Fatal("a corrupt manifest was not reported")
+	}
+	var names []string
+	for _, reg := range regs {
+		names = append(names, reg.Name)
+	}
+	if len(names) != 2 || names[0] != "aaa" || names[1] != "zzz" {
+		t.Fatalf("List returned %v, want both readable plugins", names)
+	}
+}

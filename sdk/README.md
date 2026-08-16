@@ -244,10 +244,17 @@ language you write the plugin in.
 
 The module exports a small ABI -- `alloc`, `free`, `handle_events`, and
 optionally `configure` and `on_tick` -- and imports host functions from
-the `vinbero` module. Which host functions are linked depends on the
-capabilities the plugin was granted: one it was not granted is not a call
-that fails but a function it cannot reach. `docs/design/ja/cplane-plugin.md`
-documents the ABI and the lifecycle in full.
+the `vinbero` module.
+
+Which host functions are linked depends on the capabilities the plugin was
+granted. That is the coarse half of the gate: a plugin granted nothing that
+writes cannot reach the apply functions at all -- they are not calls that
+fail but functions it cannot import. The apply functions are shared across
+the kinds of declaration, so which kind a plugin may declare is checked
+where it opens the transaction instead: one granted `advertise` alone is
+refused when it opens a headend transaction.
+`docs/design/ja/cplane-plugin.md` documents the ABI and the lifecycle in
+full.
 
 ### Writing one
 

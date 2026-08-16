@@ -3,6 +3,7 @@ package cplane
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -169,7 +170,21 @@ func writeFileAtomic(path string, body []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	// The directory entry the rename created is itself buffered. Without
+	// this the rename can be lost on a crash even though the bytes it
+	// points at are safely on disk, which is the half of the guarantee
+	// that matters here: the manifest is what says the plugin exists.
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	// Opened read-only for the sync; nothing was written through it, so a
+	// close failure has nothing to report.
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
 }
 
 // moduleFileName names a module after its content, so an upgrade writes a
@@ -241,15 +256,22 @@ func (s *Store) List() ([]Registration, error) {
 	}
 	sort.Strings(names)
 
+	// Every manifest is attempted, and the failures are collected rather
+	// than returned at the first one. Stopping there would leave every
+	// plugin later in the order unregistered while the state it wrote is
+	// still pinned in the maps, owned by nobody -- one unreadable file
+	// would take the rest down with it.
 	out := make([]Registration, 0, len(names))
+	var errs []error
 	for _, name := range names {
 		reg, err := s.load(name)
 		if err != nil {
-			return out, err
+			errs = append(errs, err)
+			continue
 		}
 		out = append(out, reg)
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 // load reads one stored registration.

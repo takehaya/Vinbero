@@ -988,7 +988,9 @@ type PluginAdvertisedRoute struct {
 	// Prefix in CIDR form. It is normalized before use, so 10.0.0.1/24 and
 	// 10.0.0.0/24 are the same route rather than two.
 	Prefix string `protobuf:"bytes,3,opt,name=prefix,proto3" json:"prefix,omitempty"`
-	// Srv6Sid is the service SID to advertise with the route.
+	// Srv6Sid is the service SID to advertise with the route. It travels in
+	// the SID TLV, which only the VPN families carry, so setting it on an
+	// ipv6_unicast route is refused rather than quietly dropped.
 	Srv6Sid string `protobuf:"bytes,4,opt,name=srv6_sid,json=srv6Sid,proto3" json:"srv6_sid,omitempty"`
 	// EndpointBehavior is the SRv6 endpoint behavior codepoint to put in the
 	// SID TLV. A plugin advertising its own behavior sets the codepoint it
