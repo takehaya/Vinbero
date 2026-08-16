@@ -144,35 +144,52 @@ func (s *Session) addAndTrack(srv *gobgpsrv.BgpServer, path *apiutil.Path, key b
 
 // addAndTrackAs is addAndTrack on behalf of a named producer.
 func (s *Session) addAndTrackAs(srv *gobgpsrv.BgpServer, path *apiutil.Path, key bgp.RouteKey, producer string) error {
+	// The key is claimed under the lock, before AddPath, and given back if
+	// AddPath fails. Checking and then claiming afterwards would let two
+	// producers advertising the same new NLRI both pass the check and the
+	// second overwrite the first, which is the outcome this exists to
+	// prevent.
 	s.advMu.Lock()
 	holder, taken := s.producers[key]
-	_, tracked := s.advertised[key]
-	s.advMu.Unlock()
-	if tracked && holder != producer {
+	if taken && holder != producer {
+		s.advMu.Unlock()
 		// Refused rather than superseded. There is one local path per
 		// NLRI, so taking it over discards the first producer's UUID: the
 		// second producer's withdraw then removes the route outright,
 		// while the first goes on believing it is advertising and never
 		// puts it back. Whoever got there first keeps it, and the one
 		// refused is told why, which is a conflict it can act on.
-		_ = taken
 		return fmt.Errorf("advertise %s: already advertised by %s; %s cannot originate the same route "+
 			"because BGP carries one local path per NLRI",
 			key.Prefix, producerName(holder), producerName(producer))
 	}
+	s.producers[key] = producer
+	s.advMu.Unlock()
+
 	resps, err := srv.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{path}})
+	// The claim is released on every failure path, or a route that was
+	// never advertised would keep the key from anyone else forever.
+	release := func() {
+		s.advMu.Lock()
+		if _, live := s.advertised[key]; !live && !taken {
+			delete(s.producers, key)
+		}
+		s.advMu.Unlock()
+	}
 	if err != nil {
+		release()
 		return fmt.Errorf("advertise %s: %w", key.Prefix, err)
 	}
 	if len(resps) == 0 {
+		release()
 		return fmt.Errorf("advertise %s: gobgp returned no response", key.Prefix)
 	}
 	if resps[0].Error != nil {
+		release()
 		return fmt.Errorf("advertise %s: %w", key.Prefix, resps[0].Error)
 	}
 	s.advMu.Lock()
 	s.advertised[key] = resps[0].UUID
-	s.producers[key] = producer
 	s.advMu.Unlock()
 	return nil
 }

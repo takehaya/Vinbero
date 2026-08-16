@@ -465,3 +465,28 @@ func TestManifestCannotNameAnotherPluginsModule(t *testing.T) {
 		t.Fatal("a manifest naming another plugin's module was loaded")
 	}
 }
+
+// Bundle names may contain a dot, so a store that rejected one when
+// resolving the module would let a plugin register and then fail to come
+// back -- which is the one thing the store exists to prevent.
+func TestAModuleForADottedPluginNameRoundTrips(t *testing.T) {
+	s := newTestStore(t)
+	reg := Registration{Name: "acl.v2", Module: []byte("module"), Behaviors: []uint16{0xFE01}}
+	if err := s.Save(reg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := s.load("acl.v2")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if string(got.Module) != "module" {
+		t.Fatalf("module = %q, want what was saved", got.Module)
+	}
+	claims, err := s.ListClaims()
+	if err != nil {
+		t.Fatalf("ListClaims: %v", err)
+	}
+	if len(claims) != 1 || claims[0].Name != "acl.v2" {
+		t.Fatalf("ListClaims returned %v, want the dotted plugin", claims)
+	}
+}

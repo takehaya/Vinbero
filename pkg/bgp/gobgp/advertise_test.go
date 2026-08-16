@@ -280,3 +280,49 @@ func TestAdvertise_RefusesAnotherProducersRoute(t *testing.T) {
 		t.Fatalf("Withdraw: %v", err)
 	}
 }
+
+// Two producers advertising the same new NLRI at once must not both get
+// through: the second would overwrite the first's path and UUID, and the
+// first would go on believing it is advertising.
+func TestAdvertise_ConcurrentProducersCannotBothClaimAKey(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+
+	vr := bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", NextHop: "2001:db8::1",
+	}
+	plugin := s.AsProducer("cplane-plugins")
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, adv := range []interface {
+		Advertise(context.Context, bgp.VPNRoute) error
+	}{s, plugin} {
+		go func(a interface {
+			Advertise(context.Context, bgp.VPNRoute) error
+		}) {
+			<-start
+			errs <- a.Advertise(context.Background(), vr)
+		}(adv)
+	}
+	close(start)
+
+	var failures int
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			failures++
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("%d of 2 concurrent advertises failed, want exactly 1 refused", failures)
+	}
+
+	key := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100"}
+	s.advMu.Lock()
+	_, live := s.advertised[key]
+	s.advMu.Unlock()
+	if !live {
+		t.Error("the winner's route is not tracked")
+	}
+}

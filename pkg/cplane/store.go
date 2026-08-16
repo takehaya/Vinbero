@@ -201,21 +201,27 @@ func (s *Store) modulePathFor(name string, m manifest) (string, error) {
 		// used to keep, whose name this store builds itself.
 		return s.modulePath(name), nil
 	}
-	if !moduleNamePattern.MatchString(m.Module) {
-		return "", fmt.Errorf("cplane store: manifest for %q names module %q, which is not a name this store writes",
+	// Checked against what this plugin's file would be named rather than
+	// against a pattern of its own: the bundle name's allowed characters
+	// live in one place, and a second spelling of them here would let a
+	// name that registers fail to restore.
+	digest, ok := strings.CutPrefix(m.Module, name+"-")
+	if !ok {
+		return "", fmt.Errorf("cplane store: manifest for %q names module %q, which belongs to another plugin",
 			name, m.Module)
 	}
-	if !strings.HasPrefix(m.Module, name+"-") {
-		return "", fmt.Errorf("cplane store: manifest for %q names module %q, which belongs to another plugin",
+	digest, ok = strings.CutSuffix(digest, ".wasm")
+	if !ok || !moduleDigestPattern.MatchString(digest) {
+		return "", fmt.Errorf("cplane store: manifest for %q names module %q, which is not a name this store writes",
 			name, m.Module)
 	}
 	return filepath.Join(s.dir, m.Module), nil
 }
 
-// moduleNamePattern is the shape moduleFileName produces: a bundle name, a
-// dash, the content hash, and the extension. No separators, so it cannot
-// leave the directory.
-var moduleNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+-[0-9a-f]{16}\.wasm$`)
+// moduleDigestPattern is the content hash moduleFileName appends. Fixed
+// length and hex only, so nothing between the plugin's name and the
+// extension can be a path separator.
+var moduleDigestPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // moduleFileName names a module after its content, so an upgrade writes a
 // new file rather than overwriting the one the current manifest names.

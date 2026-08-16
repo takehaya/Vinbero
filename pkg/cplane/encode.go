@@ -97,21 +97,20 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 		return "", nil, fmt.Errorf("headend entry for %q declares %d segments, limit %d",
 			in.GetTriggerPrefix(), len(segments), bpf.MaxSegments)
 	}
-	if in.GetMode() > 0xFF {
-		return "", nil, fmt.Errorf("headend entry for %q: mode %d does not fit a byte",
-			in.GetTriggerPrefix(), in.GetMode())
-	}
-
 	// Mode 0 means "the ordinary encapsulation" to a plugin, which is not
 	// the same number the data plane uses: 0 is UNSPECIFIED there, and an
 	// entry carrying it is written but never acted on -- a blackhole that
 	// looks installed. The plugin-facing default stays 0 because a plugin
 	// pairing with its own data-plane half is the only one that should
 	// have to name a mode at all.
-	mode := uint8(in.GetMode())
-	if mode == 0 {
-		mode = uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
+	declared := in.GetMode()
+	if declared == 0 {
+		declared = uint32(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
 	}
+	if err := validateHeadendMode(declared); err != nil {
+		return "", nil, fmt.Errorf("headend entry for %q: %w", in.GetTriggerPrefix(), err)
+	}
+	mode := uint8(declared)
 	entry := &bpf.HeadendEntry{
 		Mode:        mode,
 		NumSegments: uint8(len(segments)),
@@ -151,4 +150,24 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 	}
 	entry.SrcAddr = src.As16()
 	return in.GetTriggerPrefix(), entry, nil
+}
+
+// validateHeadendMode refuses a mode the data plane has nothing behind.
+//
+// The mode indexes the headend PROG_ARRAY, so a number outside what is
+// there is an entry that looks installed and tail-calls into an empty
+// slot: the packet is dropped and nothing says why. A plugin may name one
+// of vinbero's own behaviors -- ordinary encapsulation is the common case
+// -- or one of the slots reserved for plugins, where its own data-plane
+// half lives. Anything else is a mistake worth refusing at the boundary.
+func validateHeadendMode(mode uint32) error {
+	if _, known := v1.Srv6HeadendBehavior_name[int32(mode)]; known &&
+		mode != uint32(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_UNSPECIFIED) {
+		return nil
+	}
+	if err := bpf.ValidatePluginSlot(bpf.MapTypeHeadendV4, mode); err != nil {
+		return fmt.Errorf("mode %d is neither a behavior vinbero implements nor a headend plugin slot: %w",
+			mode, err)
+	}
+	return nil
 }
