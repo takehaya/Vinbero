@@ -1,6 +1,7 @@
 package cplane
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,7 +52,17 @@ type manifest struct {
 	MaxMemoryPages uint32 `json:"max_memory_pages,omitempty"`
 	CallTimeoutMs  int64  `json:"call_timeout_ms,omitempty"`
 	MaxBufferBytes int    `json:"max_buffer_bytes,omitempty"`
-	SavedAt        string `json:"saved_at"`
+	// Module is the file holding this registration's WebAssembly, named
+	// after its content. The manifest naming the file is what makes an
+	// upgrade atomic: a new registration writes a new file and only then
+	// replaces the manifest, so a crash at any point leaves a manifest
+	// beside the module it was saved with, never the old settings paired
+	// with the new bytes.
+	//
+	// Empty in manifests written before this field existed; those refer to
+	// the single <name>.wasm the store used to keep.
+	Module  string `json:"module,omitempty"`
+	SavedAt string `json:"saved_at"`
 }
 
 // NewStore opens (creating if needed) the directory a store lives in.
@@ -70,9 +81,13 @@ func (s *Store) Dir() string { return s.dir }
 
 // Save records a registration so a restart can bring it back.
 //
-// The module is written first and the manifest second, because the
-// manifest is what List looks for: a crash between the two leaves an
-// orphan module rather than a manifest promising one that is not there.
+// The module goes to a file named after its content, and the manifest that
+// names that file is replaced last and atomically. Every intermediate
+// state is therefore a readable one: the old manifest still points at the
+// old module until the moment the new manifest lands. Writing the module
+// in place instead would leave an upgrade that died between the two with
+// the previous registration's capabilities and config paired with the new
+// module's bytes.
 func (s *Store) Save(reg Registration) error {
 	if s == nil {
 		return nil
@@ -80,7 +95,14 @@ func (s *Store) Save(reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.modulePath(reg.Name), reg.Module, 0o600); err != nil {
+	// The previous module is read before anything is written, so it can be
+	// removed once the manifest no longer refers to it.
+	var previous string
+	if old, err := s.readManifest(reg.Name); err == nil {
+		previous = old.Module
+	}
+	moduleFile := moduleFileName(reg.Name, reg.Module)
+	if err := writeFileAtomic(filepath.Join(s.dir, moduleFile), reg.Module); err != nil {
 		return fmt.Errorf("cplane store: write module for %q: %w", reg.Name, err)
 	}
 
@@ -95,6 +117,7 @@ func (s *Store) Save(reg Registration) error {
 		MaxMemoryPages: reg.Limits.MaxMemoryPages,
 		CallTimeoutMs:  reg.Limits.CallTimeout.Milliseconds(),
 		MaxBufferBytes: reg.Limits.MaxBufferBytes,
+		Module:         moduleFile,
 		SavedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	for _, f := range reg.Families {
@@ -104,10 +127,56 @@ func (s *Store) Save(reg Registration) error {
 	if err != nil {
 		return fmt.Errorf("cplane store: encode manifest for %q: %w", reg.Name, err)
 	}
-	if err := os.WriteFile(s.manifestPath(reg.Name), body, 0o600); err != nil {
+	if err := writeFileAtomic(s.manifestPath(reg.Name), body); err != nil {
 		return fmt.Errorf("cplane store: write manifest for %q: %w", reg.Name, err)
 	}
+	// Nothing refers to the old module now. Failing to remove it costs
+	// disk, not correctness, so it is not worth failing the save over.
+	if previous != "" && previous != moduleFile {
+		_ = os.Remove(filepath.Join(s.dir, previous))
+	}
 	return nil
+}
+
+// writeFileAtomic writes a file so a reader sees either the whole new
+// content or the whole old one, never a partial write.
+//
+// The temporary file is fsynced before the rename: without that, a crash
+// can leave the rename durable and the bytes it points at not, which is
+// exactly the inconsistency the rename is there to prevent.
+func writeFileAtomic(path string, body []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	// Both are cleanup after a successful rename has already moved the
+	// file away, or after an error that is being returned: there is
+	// nothing a failure here would add.
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(body); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+// moduleFileName names a module after its content, so an upgrade writes a
+// new file rather than overwriting the one the current manifest names.
+func moduleFileName(name string, module []byte) string {
+	sum := sha256.Sum256(module)
+	return fmt.Sprintf("%s-%x.wasm", name, sum[:8])
 }
 
 // Remove drops a plugin from the store. Missing files are not an error:
@@ -119,15 +188,34 @@ func (s *Store) Remove(name string) error {
 	if err := bpf.ValidatePluginBundleName(name); err != nil {
 		return err
 	}
+	// The module is located before the manifest goes, since the manifest
+	// is what names it.
+	module := s.modulePath(name)
+	if m, err := s.readManifest(name); err == nil && m.Module != "" {
+		module = filepath.Join(s.dir, m.Module)
+	}
 	// Manifest first: it is what List reads, so removing it makes the
 	// plugin gone even if the module removal then fails.
 	if err := os.Remove(s.manifestPath(name)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("cplane store: remove manifest for %q: %w", name, err)
 	}
-	if err := os.Remove(s.modulePath(name)); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(module); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("cplane store: remove module for %q: %w", name, err)
 	}
 	return nil
+}
+
+// readManifest reads and decodes one manifest without touching its module.
+func (s *Store) readManifest(name string) (manifest, error) {
+	body, err := os.ReadFile(s.manifestPath(name))
+	if err != nil {
+		return manifest{}, err
+	}
+	var m manifest
+	if err := json.Unmarshal(body, &m); err != nil {
+		return manifest{}, err
+	}
+	return m, nil
 }
 
 // List returns every stored registration, sorted by name so a boot
@@ -181,7 +269,11 @@ func (s *Store) load(name string) (Registration, error) {
 		return Registration{}, fmt.Errorf("cplane store: manifest for %q is version %d, this daemon writes %d",
 			name, m.Version, storeManifestVersion)
 	}
-	module, err := os.ReadFile(s.modulePath(name))
+	modulePath := s.modulePath(name)
+	if m.Module != "" {
+		modulePath = filepath.Join(s.dir, m.Module)
+	}
+	module, err := os.ReadFile(modulePath)
 	if err != nil {
 		return Registration{}, fmt.Errorf("cplane store: read module for %q: %w", name, err)
 	}

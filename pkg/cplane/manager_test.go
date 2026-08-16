@@ -101,6 +101,14 @@ func (f *fakeSource) SnapshotTo(_ []bgp.Family, h bgp.RouteHandler) error {
 	return nil
 }
 
+// setRib replaces what a snapshot replays, which is how a test says a
+// route went away while nobody was listening.
+func (f *fakeSource) setRib(events ...bgp.RouteEvent) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rib = append([]bgp.RouteEvent(nil), events...)
+}
+
 // seedRib makes a route part of what a snapshot replays.
 func (f *fakeSource) seedRib(events ...bgp.RouteEvent) {
 	f.mu.Lock()
@@ -1117,5 +1125,71 @@ func TestDecodeHeadendEntryKeepsAnExplicitMode(t *testing.T) {
 	}
 	if entry.Mode != 20 {
 		t.Fatalf("mode = %d, want the plugin's own slot 20", entry.Mode)
+	}
+}
+
+// A restored plugin declares from configure, while the daemon is still
+// coming up. A local SID naming a locator an operator registers a moment
+// later fails then -- and the plugin has already said everything it means
+// to say, so without a retry the SIDs never come back from a restart.
+func TestDeclarationHeldFromBeforeLiveIsRetried(t *testing.T) {
+	alloc := &fakeAllocator{failOn: "late"}
+	sids := newFakeSIDOps()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Capabilities: testCaps(),
+		LocalSIDs:    NewLocalSIDSet(alloc, sids),
+	})
+	if err != nil {
+		t.Fatalf("new plugin ops: %v", err)
+	}
+
+	// Declared before publication, as configure does.
+	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID))
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	chunk, err := proto.Marshal(&v1.PluginApplyChunk{
+		LocalSids: []*v1.PluginLocalSid{{Name: "svc", Locator: "late", Slot: 33}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ops.ApplyPut(gen, chunk); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := ops.ApplyCommit(gen); err != nil {
+		t.Fatalf("commit before publication should be held, not applied: %v", err)
+	}
+
+	// The locator does not exist yet, so publication cannot apply it.
+	if err := ops.Publish(); err == nil {
+		t.Fatal("publishing a declaration naming a missing locator succeeded")
+	}
+	if got := sids.count(); got != 0 {
+		t.Fatalf("%d SIDs were installed against a locator that does not exist", got)
+	}
+
+	// Retrying now changes nothing: the locator is still missing.
+	ops.RetryPending()
+	if got := sids.count(); got != 0 {
+		t.Fatalf("%d SIDs installed while the locator was still missing", got)
+	}
+
+	// The operator registers it, and the next delivery repairs the gap.
+	alloc.mu.Lock()
+	alloc.failOn = ""
+	alloc.mu.Unlock()
+	ops.RetryPending()
+	if got := sids.count(); got != 1 {
+		t.Fatalf("%d SIDs installed after the locator appeared, want 1", got)
+	}
+
+	// And it is not applied a second time.
+	ops.RetryPending()
+	if got := sids.count(); got != 1 {
+		t.Fatalf("the retried declaration was applied again: %d SIDs", got)
 	}
 }

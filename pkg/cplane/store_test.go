@@ -3,6 +3,7 @@ package cplane
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -230,5 +231,89 @@ func TestCloseKeepsTheStore(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("close left %d registrations in the store, want 1", len(got))
+	}
+}
+
+// An upgrade must never leave one registration's settings paired with
+// another's module. The manifest names the module file, so replacing the
+// manifest is what switches versions -- and until it does, the old pair is
+// still intact on disk.
+func TestUpgradeKeepsManifestAndModuleTogether(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	first := Registration{Name: "p", Module: []byte("module-v1"), Config: []byte("v1")}
+	if err := s.Save(first); err != nil {
+		t.Fatalf("save v1: %v", err)
+	}
+	v1Manifest, err := s.readManifest("p")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+
+	second := Registration{Name: "p", Module: []byte("module-v2"), Config: []byte("v2")}
+	if err := s.Save(second); err != nil {
+		t.Fatalf("save v2: %v", err)
+	}
+	v2Manifest, err := s.readManifest("p")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if v1Manifest.Module == v2Manifest.Module {
+		t.Fatal("the upgrade wrote over the module the old manifest named")
+	}
+	// The superseded file is gone, so an upgrade does not accumulate one
+	// module per version forever.
+	if _, err := os.Stat(filepath.Join(dir, v1Manifest.Module)); !os.IsNotExist(err) {
+		t.Errorf("the superseded module is still on disk: %v", err)
+	}
+
+	got, err := s.load("p")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if string(got.Module) != "module-v2" || string(got.Config) != "v2" {
+		t.Fatalf("loaded module %q with config %q, want the v2 pair",
+			got.Module, got.Config)
+	}
+}
+
+// A manifest written before the store named its module still resolves: it
+// refers to the single <name>.wasm the store used to keep.
+func TestLegacyManifestWithoutAModuleNameStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if err := s.Save(Registration{Name: "p", Module: []byte("legacy")}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	m, err := s.readManifest("p")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	// Rewrite it the way the older store did: module beside the manifest
+	// under the plugin's own name, and no module field.
+	if err := os.Rename(filepath.Join(dir, m.Module), s.modulePath("p")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	m.Module = ""
+	body, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := os.WriteFile(s.manifestPath("p"), body, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	got, err := s.load("p")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if string(got.Module) != "legacy" {
+		t.Fatalf("module = %q, want the legacy file's contents", got.Module)
 	}
 }

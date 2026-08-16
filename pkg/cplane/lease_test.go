@@ -72,7 +72,7 @@ func TestAcquireAllIsAllOrNothing(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 	keys := []string{"10.0.1.0/24", "10.0.2.0/24"}
-	if err := l.AcquireAll(LeaseHeadendV4, keys, ownerA); err == nil {
+	if _, err := l.AcquireAll(LeaseHeadendV4, keys, ownerA); err == nil {
 		t.Fatal("a set containing a contested key must be rejected whole")
 	}
 	if _, ok := l.HolderOf(LeaseHeadendV4, "10.0.1.0/24"); ok {
@@ -83,10 +83,10 @@ func TestAcquireAllIsAllOrNothing(t *testing.T) {
 func TestAcquireAllSucceedsAndIsRepeatable(t *testing.T) {
 	l := NewLeases()
 	keys := []string{"10.0.1.0/24", "10.0.2.0/24"}
-	if err := l.AcquireAll(LeaseHeadendV4, keys, ownerA); err != nil {
+	if _, err := l.AcquireAll(LeaseHeadendV4, keys, ownerA); err != nil {
 		t.Fatalf("acquire all: %v", err)
 	}
-	if err := l.AcquireAll(LeaseHeadendV4, keys, ownerA); err != nil {
+	if _, err := l.AcquireAll(LeaseHeadendV4, keys, ownerA); err != nil {
 		t.Fatalf("re-declaring the same set: %v", err)
 	}
 	got := l.KeysOf(LeaseHeadendV4, ownerA)
@@ -140,7 +140,25 @@ func TestEmptyOwnerRejected(t *testing.T) {
 	if err := l.Acquire(LeaseHeadendV4, "10.0.0.0/24", ""); !errors.Is(err, bpf.ErrEmptyOwner) {
 		t.Fatalf("Acquire with an empty owner = %v, want ErrEmptyOwner", err)
 	}
-	if err := l.AcquireAll(LeaseHeadendV4, []string{"10.0.0.0/24"}, ""); !errors.Is(err, bpf.ErrEmptyOwner) {
+	if _, err := l.AcquireAll(LeaseHeadendV4, []string{"10.0.0.0/24"}, ""); !errors.Is(err, bpf.ErrEmptyOwner) {
 		t.Fatalf("AcquireAll with an empty owner = %v, want ErrEmptyOwner", err)
+	}
+}
+
+// AcquireAll reports only what it took. A caller rolling back a failed
+// apply uses that list, and a key the owner already held must not be in
+// it: that lease belongs to an entry still in the map, and giving it back
+// would let another owner take the entry over.
+func TestAcquireAllReportsOnlyNewlyTakenKeys(t *testing.T) {
+	l := NewLeases()
+	if _, err := l.AcquireAll(LeaseHeadendV4, []string{"10.0.0.0/24"}, ownerA); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	taken, err := l.AcquireAll(LeaseHeadendV4, []string{"10.0.0.0/24", "10.0.1.0/24"}, ownerA)
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	if len(taken) != 1 || taken[0] != "10.0.1.0/24" {
+		t.Fatalf("took %v, want only the key that was not already held", taken)
 	}
 }

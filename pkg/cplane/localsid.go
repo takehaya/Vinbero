@@ -266,7 +266,6 @@ func (l *LocalSIDSet) sweepLeftovers(owner bpf.OwnerTag) error {
 		l.mu.Unlock()
 		return nil
 	}
-	l.swept[owner] = true
 	held := make(map[string]struct{}, len(l.live[owner]))
 	for _, got := range l.live[owner] {
 		held[got.SID.String()+"/128"] = struct{}{}
@@ -298,6 +297,14 @@ func (l *LocalSIDSet) sweepLeftovers(owner bpf.OwnerTag) error {
 			return fmt.Errorf("local sid: sweep %s: %w", prefix, err)
 		}
 	}
+
+	// Marked done only now. Setting it up front would turn one transient
+	// map error into a permanent one: the sweep would be skipped from then
+	// on, and the previous run's pinned entries would sit there for the
+	// life of the daemon with nothing able to remove them.
+	l.mu.Lock()
+	l.swept[owner] = true
+	l.mu.Unlock()
 	return nil
 }
 
@@ -321,15 +328,24 @@ func (l *LocalSIDSet) ReleaseOwner(owner bpf.OwnerTag) error {
 		if !ok {
 			continue
 		}
-		if err := l.remove(owner, got); err != nil && firstErr == nil {
-			firstErr = err
+		if err := l.remove(owner, got); err != nil {
+			// Kept, not forgotten. The address and the name are what a
+			// retry needs, and dropping them here would leave a dispatch
+			// entry in the map that nothing knows about and nothing can
+			// remove.
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		l.mu.Lock()
 		delete(current, name)
 		l.mu.Unlock()
 	}
 	l.mu.Lock()
-	delete(l.live, owner)
+	if len(current) == 0 {
+		delete(l.live, owner)
+	}
 	l.mu.Unlock()
 	return firstErr
 }

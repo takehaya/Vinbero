@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +21,23 @@ type Advertiser interface {
 	Advertise(ctx context.Context, r bgp.VPNRoute) error
 	AdvertiseUnicast(ctx context.Context, r bgp.UnicastRoute) error
 	Withdraw(ctx context.Context, key bgp.RouteKey) error
+}
+
+// RouteValidator is an Advertiser that can tell whether it could encode a
+// route without sending it.
+//
+// Apply withdraws before it advertises, so a route that only fails inside
+// the encoder has already cost the plugin its other routes by the time
+// anyone finds out. Asking the encoder up front is what makes a bad
+// declaration refuse the whole set instead of applying half of it, and
+// asking the encoder rather than reimplementing its rules is what keeps
+// the answer the same as the one the send path will give.
+//
+// It is optional: an Advertiser without it is used as before, and the
+// checks in normalizeAdvertised still apply.
+type RouteValidator interface {
+	ValidateVPNRoute(r bgp.VPNRoute) error
+	ValidateUnicastRoute(r bgp.UnicastRoute) error
 }
 
 // AdvertisedRoute is one route an owner wants originated.
@@ -94,15 +112,24 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 		return res, errors.New("advertise: this daemon has no BGP session to originate through")
 	}
 
+	// Every route is validated and normalized before anything is
+	// withdrawn. The withdraw phase runs first, so a single malformed
+	// route found later would take the live routes with it and leave the
+	// plugin advertising nothing -- a typo in one declaration is not a
+	// reason to retract the rest.
 	byKey := make(map[string]AdvertisedRoute, len(desired))
 	keys := make([]string, 0, len(desired))
 	for _, r := range desired {
-		if err := validateAdvertised(r); err != nil {
+		r, err := normalizeAdvertised(r)
+		if err != nil {
 			return res, err
 		}
 		k := r.key()
 		if _, dup := byKey[k]; dup {
 			return res, fmt.Errorf("advertise: %s %s declared twice", r.Family, r.Prefix)
+		}
+		if err := a.validateEncodable(r); err != nil {
+			return res, err
 		}
 		byKey[k] = r
 		keys = append(keys, k)
@@ -116,7 +143,7 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 	// the same NLRI: gobgp's AddPath silently supersedes, so the second
 	// advertisement would replace the first with no error anywhere.
 	if a.leases != nil {
-		if err := a.leases.AcquireAll(LeaseAdvertise, keys, owner); err != nil {
+		if _, err := a.leases.AcquireAll(LeaseAdvertise, keys, owner); err != nil {
 			return res, err
 		}
 	}
@@ -243,6 +270,34 @@ func (a *AdvertiseSet) LiveCount(owner bpf.OwnerTag) int {
 	return len(a.live[owner])
 }
 
+// validateEncodable asks the advertiser whether it could encode this
+// route, when it is able to answer.
+func (a *AdvertiseSet) validateEncodable(r AdvertisedRoute) error {
+	v, ok := a.adv.(RouteValidator)
+	if !ok {
+		return nil
+	}
+	var err error
+	switch r.Family {
+	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
+		err = v.ValidateVPNRoute(bgp.VPNRoute{
+			Family:           r.Family,
+			RD:               r.RD,
+			Prefix:           r.Prefix,
+			SRv6SID:          r.SRv6SID,
+			RTs:              r.RouteTargets,
+			NextHop:          r.NextHop,
+			EndpointBehavior: r.EndpointBehavior,
+		})
+	case bgp.FamilyIPv6Unicast:
+		err = v.ValidateUnicastRoute(bgp.UnicastRoute{Prefix: r.Prefix, NextHop: r.NextHop})
+	}
+	if err != nil {
+		return fmt.Errorf("advertise: %s %s cannot be originated: %w", r.Family, r.Prefix, err)
+	}
+	return nil
+}
+
 // originate pushes one route out, choosing the call that matches its
 // family.
 func (a *AdvertiseSet) originate(ctx context.Context, r AdvertisedRoute) error {
@@ -267,22 +322,61 @@ func (a *AdvertiseSet) originate(ctx context.Context, r AdvertisedRoute) error {
 	}
 }
 
-// validateAdvertised rejects a declaration the advertiser could not send.
-func validateAdvertised(r AdvertisedRoute) error {
+// normalizeAdvertised rejects a declaration the advertiser could not send,
+// and returns it in the canonical form the lease and the diff use.
+//
+// Everything the encoder will parse is parsed here instead, because the
+// encoder runs after the withdraw phase: a value that only fails there
+// turns one bad route into a partial apply.
+func normalizeAdvertised(r AdvertisedRoute) (AdvertisedRoute, error) {
 	if !r.Family.Valid() {
-		return fmt.Errorf("advertise: unknown family %q", r.Family)
+		return r, fmt.Errorf("advertise: unknown family %q", r.Family)
 	}
 	if r.Prefix == "" {
-		return fmt.Errorf("advertise: %s route has no prefix", r.Family)
+		return r, fmt.Errorf("advertise: %s route has no prefix", r.Family)
+	}
+	// The lease key is the NLRI, so it has to be the NLRI as it goes on
+	// the wire. 10.0.0.1/24 and 10.0.0.0/24 are the same route to BGP but
+	// different strings, and leasing the string would let a second plugin
+	// take a lease on a route the first is already originating and
+	// supersede it with no error anywhere.
+	pfx, err := netip.ParsePrefix(r.Prefix)
+	if err != nil {
+		return r, fmt.Errorf("advertise: %s prefix %q: %w", r.Family, r.Prefix, err)
+	}
+	r.Prefix = pfx.Masked().String()
+	switch r.Family {
+	case bgp.FamilyVPNv4:
+		if !pfx.Addr().Is4() {
+			return r, fmt.Errorf("advertise: %s prefix %s is not IPv4", r.Family, r.Prefix)
+		}
+	case bgp.FamilyVPNv6, bgp.FamilyIPv6Unicast:
+		if pfx.Addr().Is4() {
+			return r, fmt.Errorf("advertise: %s prefix %s is not IPv6", r.Family, r.Prefix)
+		}
 	}
 	switch r.Family {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
 		if r.RD == "" {
-			return fmt.Errorf("advertise: %s %s has no route distinguisher", r.Family, r.Prefix)
+			return r, fmt.Errorf("advertise: %s %s has no route distinguisher", r.Family, r.Prefix)
+		}
+		if r.SRv6SID != "" {
+			sid, err := netip.ParseAddr(r.SRv6SID)
+			if err != nil || !sid.Is6() {
+				return r, fmt.Errorf("advertise: %s %s SRv6 SID %q is not an IPv6 address", r.Family, r.Prefix, r.SRv6SID)
+			}
+			r.SRv6SID = sid.String()
+		}
+		// A behavior with no SID has nowhere to go: the encoder builds the
+		// SID TLV only when there is a SID, so the codepoint the plugin
+		// asked for would be dropped and the commit would still succeed.
+		if r.EndpointBehavior != 0 && r.SRv6SID == "" {
+			return r, fmt.Errorf("advertise: %s %s declares endpoint behavior %d but no SRv6 SID to carry it",
+				r.Family, r.Prefix, r.EndpointBehavior)
 		}
 	case bgp.FamilyIPv6Unicast:
 	default:
-		return fmt.Errorf("advertise: family %s cannot be originated by a plugin", r.Family)
+		return r, fmt.Errorf("advertise: family %s cannot be originated by a plugin", r.Family)
 	}
 	// The next hop is where a peer is told to send the traffic, and the
 	// daemon has no defensible guess at it: the encap source is a locator
@@ -290,9 +384,14 @@ func validateAdvertised(r AdvertisedRoute) error {
 	// silently would advertise a route peers cannot follow. Say so here
 	// rather than letting it surface as a parse error deep in the encoder.
 	if r.NextHop == "" {
-		return fmt.Errorf("advertise: %s %s has no next hop", r.Family, r.Prefix)
+		return r, fmt.Errorf("advertise: %s %s has no next hop", r.Family, r.Prefix)
 	}
-	return nil
+	nh, err := netip.ParseAddr(r.NextHop)
+	if err != nil {
+		return r, fmt.Errorf("advertise: %s %s next hop %q: %w", r.Family, r.Prefix, r.NextHop, err)
+	}
+	r.NextHop = nh.String()
+	return r, nil
 }
 
 // indexOf finds a key's position in a sorted slice.
@@ -328,5 +427,5 @@ func DecodeAdvertisedRoute(in *v1.PluginAdvertisedRoute) (AdvertisedRoute, error
 		RouteTargets:     append([]string(nil), in.GetRouteTargets()...),
 		NextHop:          in.GetNextHop(),
 	}
-	return out, validateAdvertised(out)
+	return normalizeAdvertised(out)
 }

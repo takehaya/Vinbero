@@ -211,10 +211,18 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	// WithStartFunctions() clears the default _start: a reactor-style
 	// plugin has no main, and running one before the host is ready would
 	// execute guest code outside any call budget.
+	//
+	// It does not cover the WebAssembly start section, which the spec has
+	// the runtime invoke during instantiation itself. That is guest code
+	// too, so instantiation runs under the same call budget as any other
+	// call: without it a module whose start section loops forever hangs
+	// registration, and the operator's RPC never returns.
 	modCfg := wazero.NewModuleConfig().
 		WithName(cfg.Name).
 		WithStartFunctions()
-	mod, err := rt.InstantiateModule(ctx, compiled, modCfg)
+	instCtx, cancelInst := inst.callContext(ctx)
+	mod, err := rt.InstantiateModule(instCtx, compiled, modCfg)
+	cancelInst()
 	if err != nil {
 		_ = rt.Close(ctx)
 		return nil, fmt.Errorf("wasm: instantiate %q: %w", cfg.Name, err)

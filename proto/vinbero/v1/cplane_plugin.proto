@@ -38,6 +38,18 @@ enum PluginEventKind {
   // it was given. It arrives after the declaration is applied, which is
   // the point at which the plugin can advertise it.
   PLUGIN_EVENT_KIND_LOCAL_SID = 5;
+  // A full replay of one source is about to be delivered, and everything
+  // the plugin knows from that source is now stale. It must discard its
+  // view of that source and rebuild it from the events that follow, up to
+  // the matching end of replay.
+  //
+  // A replay says what exists, and can therefore add and correct; it
+  // cannot say what stopped existing. A plugin whose view outlives one --
+  // after a restart, or after the host dropped a batch it could not keep
+  // up with -- would keep declaring a route that was withdrawn while it
+  // was not listening, and no later event would ever remove it. Resetting
+  // on this is what makes the replay a repair rather than a merge.
+  PLUGIN_EVENT_KIND_START_OF_REPLAY = 6;
 }
 
 // PluginUnknownAttribute is a BGP path attribute Vinbero does not
@@ -226,17 +238,24 @@ message PluginAdvertisedRoute {
   string family = 1;
   // RouteDistinguisher, required for the VPN families.
   string rd = 2;
-  // Prefix in CIDR form.
+  // Prefix in CIDR form. It is normalized before use, so 10.0.0.1/24 and
+  // 10.0.0.0/24 are the same route rather than two.
   string prefix = 3;
   // Srv6Sid is the service SID to advertise with the route.
   string srv6_sid = 4;
   // EndpointBehavior is the SRv6 endpoint behavior codepoint to put in the
   // SID TLV. A plugin advertising its own behavior sets the codepoint it
   // claimed; 0 leaves vinbero's default for the family.
+  //
+  // The codepoint travels in the SID TLV, so setting it without a
+  // srv6_sid is refused rather than quietly dropped.
   uint32 endpoint_behavior = 5;
   // RouteTargets to attach.
   repeated string route_targets = 6;
-  // NextHop to advertise. Empty uses the daemon's own.
+  // NextHop to advertise. Required: the daemon has no defensible guess at
+  // it, because its encap source is a locator address and not necessarily
+  // an address peers can route to, and picking one silently would
+  // advertise a route they cannot follow.
   string next_hop = 7;
 }
 

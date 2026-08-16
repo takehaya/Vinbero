@@ -282,6 +282,12 @@ type recorder struct {
 	// allocated holds the local-SID answers a commit produced, waiting to
 	// be handed to the plugin.
 	allocated []*v1.PluginLocalSidAllocated
+	// sidByName is the address each declared name holds, so a name keeps
+	// the address it was given. The daemon answers a redeclaration with the
+	// address it already allocated; a harness that handed out a new one
+	// every time would let a plugin pass here and then, against the real
+	// daemon, advertise an address that had moved under it.
+	sidByName map[string]string
 	nextSID   int
 }
 
@@ -356,11 +362,31 @@ func (r *recorder) ApplyCommit(generation uint64) error {
 	// that is never told cannot advertise it. Without this the harness
 	// could not exercise the half of a plugin that originates anything.
 	if kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		if r.sidByName == nil {
+			r.sidByName = map[string]string{}
+		}
+		// A declaration is the whole set, so a name it stopped naming has
+		// been given up and its address goes back -- exactly as the daemon
+		// releases a SID the owner no longer declares.
+		declared := make(map[string]struct{}, len(acc.GetLocalSids()))
 		for _, sid := range acc.GetLocalSids() {
-			r.nextSID++
+			declared[sid.GetName()] = struct{}{}
+		}
+		for name := range r.sidByName {
+			if _, still := declared[name]; !still {
+				delete(r.sidByName, name)
+			}
+		}
+		for _, sid := range acc.GetLocalSids() {
+			addr, held := r.sidByName[sid.GetName()]
+			if !held {
+				r.nextSID++
+				addr = fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID)
+				r.sidByName[sid.GetName()] = addr
+			}
 			r.allocated = append(r.allocated, &v1.PluginLocalSidAllocated{
 				Name:    sid.GetName(),
-				Sid:     fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID),
+				Sid:     addr,
 				Locator: sid.GetLocator(),
 			})
 		}

@@ -433,7 +433,13 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		func(err error) { m.instanceFailed(p, err) },
 		func(status *v1.PluginEventStatus) { m.delivered(p, status) },
 		func() error { return m.tick(p) },
-		interval)
+		interval,
+		// Declarations that could not be applied when the plugin went live
+		// are retried here, on the worker rather than the watch goroutine.
+		// A restored plugin declares from configure, before an operator
+		// has registered the locator it names; this is what lets the first
+		// event afterwards repair that instead of leaving it lost.
+		ops.RetryPending)
 
 	pendingMu.Lock()
 	built = p
@@ -677,6 +683,11 @@ func (m *Manager) snapshot(p *plugin) {
 			zap.String("plugin", p.name))
 		return
 	}
+	// The reset goes first. What follows is the whole of the source, so
+	// anything the plugin still holds from before is either restated here
+	// or was withdrawn while it was not listening -- and a replay cannot
+	// tell it about the second kind.
+	p.worker.submitBlocking(m.startOfReplayBatch(ReplaySourceBGP))
 	var count int
 	err := m.snapshots.SnapshotTo(p.reg.Families, func(ev bgp.RouteEvent) {
 		if p.worker.submitBlocking(m.routeBatch(ev)) {
@@ -714,6 +725,7 @@ func (m *Manager) snapshotFor(name string) error {
 	if m.snapshots == nil {
 		return fmt.Errorf("cplane: the event source serves no snapshot")
 	}
+	p.worker.submitBlocking(m.startOfReplayBatch(ReplaySourceBGP))
 	if err := m.snapshots.SnapshotTo(p.reg.Families, func(ev bgp.RouteEvent) {
 		p.worker.submitBlocking(m.routeBatch(ev))
 	}); err != nil {
@@ -748,6 +760,16 @@ const ReplaySourceBGP = "bgp"
 // several routes, withdrawing on a health signal -- has to know when it
 // has seen enough to decide. Without this it draws its first conclusions
 // from a partial view, and the churn is visible to its peers.
+// startOfReplayBatch tells a plugin to discard what it knows from one
+// source, because a full replay of it follows.
+func (m *Manager) startOfReplayBatch(source string) *v1.PluginEventBatch {
+	return &v1.PluginEventBatch{Events: []*v1.PluginEvent{{
+		Kind:         v1.PluginEventKind_PLUGIN_EVENT_KIND_START_OF_REPLAY,
+		Sequence:     m.seq.Add(1),
+		ReplaySource: source,
+	}}}
+}
+
 func (m *Manager) endOfReplayBatch(source string) *v1.PluginEventBatch {
 	return &v1.PluginEventBatch{Events: []*v1.PluginEvent{{
 		Kind:         v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY,

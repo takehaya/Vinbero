@@ -91,6 +91,15 @@ snapshot の配送は drop せず block します。replay は BGP watch gorouti
 ではないので block してよく、一部を落とすと目的そのものを損ねるためです。
 snapshot も live と同じ queue を通すので、両者の順序は保たれます。
 
+replay の先頭には start of replay の event を置きます。replay は何が在る
+かを述べる手段であって、何が無くなったかは述べられません。plugin が聞いて
+いない間に withdraw された経路は replay に現れないので、view を持ち越すと
+その経路を宣言し続け、以後どの event でも消えません。start of replay を
+受けた plugin はその source について知っていることを捨て、続く event から
+組み立て直します。これで replay が merge ではなく修復になります。宣言は
+end of replay まで待ちます。replay の最中に空集合を宣言すると、その間だけ
+転送が落ちるためです。
+
 ## behavior の claim
 
 plugin は登録時に claim する codepoint を宣言します。claim 済みの経路は
@@ -227,11 +236,21 @@ module は allowlist で検証します。
   なり、それ以外の entry を全部 prune します。連続失敗が上限を超えたら
   状態を残して止めます。上限は連続失敗の数で、成功配送でリセットします。
 - daemon の shutdown では flush しません。
+- 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
+  次の配送の前に再試行します。restore された plugin は daemon の起動途中に
+  configure から宣言するので、operator が後から RPC で登録する locator を
+  名指しした宣言はその時点では失敗します。plugin は言うべきことを既に言い
+  終えているため、再試行が無いと SID と広告が restart から戻りません。
 
 wazero に fuel metering はありません。走っている guest を止める手段は
 context の cancel だけで、それは module を閉じます。よって budget 超過は
 call ではなく instance を失います。budget を call 単位にしているのはその
 ためです。
+
+instantiate 自体も同じ budget の下で走らせます。WebAssembly の start
+section は spec 上 instantiate 中に実行されるので、これも guest の code
+です。budget を掛けないと、start section で無限 loop する module が登録を
+永久に止め、operator の RPC が返りません。
 
 ## 運用
 

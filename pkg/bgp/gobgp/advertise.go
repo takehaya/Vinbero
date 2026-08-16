@@ -41,6 +41,26 @@ func (s *Session) AdvertiseUnicast(_ context.Context, r bgp.UnicastRoute) error 
 	return s.addAndTrack(srv, path, bgp.RouteKey{Family: bgp.FamilyIPv6Unicast, Prefix: r.Prefix})
 }
 
+// ValidateVPNRoute reports whether this route could be encoded, without
+// sending it.
+//
+// It exists for callers that reconcile a set of routes: they withdraw
+// before they advertise, so a route that only fails inside the encoder has
+// already cost the caller its other routes by the time the failure
+// surfaces. Running the same encoder up front gives the same verdict
+// without that cost, and without a second copy of its rules that could
+// drift from it.
+func (s *Session) ValidateVPNRoute(r bgp.VPNRoute) error {
+	_, err := encodeVPNPath(r)
+	return err
+}
+
+// ValidateUnicastRoute is ValidateVPNRoute for IPv6 unicast.
+func (s *Session) ValidateUnicastRoute(r bgp.UnicastRoute) error {
+	_, err := encodeUnicastPath(r)
+	return err
+}
+
 // Withdraw removes a previously advertised route. Withdrawing a route
 // that was never advertised is a no-op so callers can withdraw
 // idempotently.

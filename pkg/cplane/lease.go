@@ -107,25 +107,34 @@ func (l *Leases) acquireLocked(kind LeaseKind, key string, owner bpf.OwnerTag) e
 // AcquireAll takes the leases on every key or none of them. A desired set
 // is applied as a unit, so a partial acquisition would leave the owner
 // holding keys for a declaration that was rejected.
-func (l *Leases) AcquireAll(kind LeaseKind, keys []string, owner bpf.OwnerTag) error {
+// The keys it returns are the ones this call took, excluding those the
+// owner already held. Only those may be rolled back: releasing a key the
+// owner held from an earlier apply would drop the lease on an entry that
+// is still in the map, and let another owner take it.
+func (l *Leases) AcquireAll(kind LeaseKind, keys []string, owner bpf.OwnerTag) ([]string, error) {
 	if owner == "" {
-		return bpf.ErrEmptyOwner
+		return nil, bpf.ErrEmptyOwner
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	byKey := l.held[kind]
 	for _, key := range keys {
 		if holder, taken := byKey[key]; taken && holder != owner {
-			return &LeaseError{Kind: kind, Key: key, Holder: holder}
+			return nil, &LeaseError{Kind: kind, Key: key, Holder: holder}
 		}
 	}
+	var taken []string
 	for _, key := range keys {
+		if holder, held := l.held[kind][key]; held && holder == owner {
+			continue
+		}
 		if err := l.acquireLocked(kind, key, owner); err != nil {
 			// Unreachable: the loop above already cleared every key.
-			return err
+			return taken, err
 		}
+		taken = append(taken, key)
 	}
-	return nil
+	return taken, nil
 }
 
 // Release drops one key if owner holds it. Releasing a key held by someone

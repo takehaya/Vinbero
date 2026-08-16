@@ -133,19 +133,23 @@ func ApplyHeadendSet(
 		}
 	}
 
+	var taken []string
 	if leases != nil {
-		if err := leases.AcquireAll(af.leaseKind(), keys, owner); err != nil {
+		var err error
+		taken, err = leases.AcquireAll(af.leaseKind(), keys, owner)
+		if err != nil {
 			return res, err
 		}
 	}
 
 	current, err := ownedPrefixes(ops, owner, af)
 	if err != nil {
-		// Nothing was written, so every lease this call took describes
-		// nothing. There is no live set to consult here, which is exactly
-		// why this releases all of them: the read that would have told us
-		// which keys the owner already holds is the one that failed.
-		releaseAll(leases, af, keys, owner)
+		// Nothing was written, so the leases this call took describe
+		// nothing and are given back. Only the ones it took: a key the
+		// owner already held belongs to an entry that is still in the map,
+		// and releasing that would let another owner take it and overwrite
+		// an entry this one is still responsible for.
+		releaseAll(leases, af, taken, owner)
 		return res, err
 	}
 

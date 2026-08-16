@@ -121,10 +121,23 @@ deployments, so one build serves all of them:
 | 3 | the prefix to advertise behind that SID |
 | 4 | the route distinguisher to advertise it with |
 | 5 | the eBPF slot the SID dispatches to |
+| 6 | a SID to advertise as given, instead of allocating one |
+| 7 | the next hop to advertise the prefix with |
 
-Leaving the locator or the slot unset makes the plugin receive-only, which
-is a perfectly ordinary way to run it: a node that consumes the behavior
-without originating anything.
+There are three ways to run it, and the config picks between them:
+
+- **Allocating.** Set the locator and the slot. The plugin asks the host
+  for a SID, is told the address, and advertises the prefix behind it.
+- **Advertising a SID it was given.** Set field 6 instead. Nothing is
+  allocated and the locator and the slot are not needed: the address
+  already exists, and something else put it in the data plane.
+- **Receive-only.** Set neither field 6 nor a locator and slot. The plugin
+  originates nothing and only acts on routes carrying its behavior, which
+  is a perfectly ordinary way to run it.
+
+Fields 3, 4 and 7 are what the advertisement is made of, so the two
+advertising modes need all three. The daemon refuses an advertisement with
+no next hop rather than guessing one.
 
 ## Notes on the code
 

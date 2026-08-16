@@ -39,6 +39,8 @@ const (
 	fieldEventLocalSid = 7
 	// PluginRoute
 	fieldRouteIsWithdraw       = 2
+	fieldRoutePeer             = 3
+	fieldRoutePathID           = 4
 	fieldRouteEndpointBehavior = 5
 	fieldRoutePrefix           = 7
 	fieldRouteSrv6Sid          = 8
@@ -75,9 +77,10 @@ const (
 
 // PluginEventKind values this plugin acts on.
 const (
-	eventKindRoute       = 1
-	eventKindEndOfReplay = 3
-	eventKindLocalSID    = 5
+	eventKindRoute         = 1
+	eventKindEndOfReplay   = 3
+	eventKindLocalSID      = 5
+	eventKindStartOfReplay = 6
 )
 
 // PluginApplyKind values.
@@ -155,11 +158,40 @@ func hostApplyAbort(generation int64)
 // numbered their behavior differently.
 var claimedBehavior uint64 = 0xFE01
 
-// steered is the set this plugin currently wants installed: prefix to the
-// SID traffic for it should be steered into. It is the plugin's whole
-// state, and it is rebuilt from replayed routes after a restart rather
-// than persisted.
-var steered = map[string]string{}
+// steered is the set this plugin currently wants installed: for each
+// prefix, the SID each path offering it was advertised with. It is the
+// plugin's whole state, and it is rebuilt from replayed routes after a
+// restart rather than persisted.
+//
+// The inner key is the path, not just the prefix. Behind a pair of route
+// reflectors, or with ADD-PATH, one prefix arrives as several paths and is
+// withdrawn several times; collapsing them onto the prefix would let the
+// first withdrawal delete a prefix the other path still offers, and the
+// traffic for it would stop with nothing left to say why. The prefix is
+// steered while any path for it remains.
+var steered = map[string]map[string]string{}
+
+// pathKey identifies one path of an NLRI. A withdrawal carries the peer
+// and path id, which is what makes this usable as the key.
+func pathKey(peer string, pathID uint64) string {
+	return peer + "#" + itoa(pathID)
+}
+
+// itoa renders a small unsigned number without pulling in strconv, which
+// the -no-debug TinyGo build would rather not carry.
+func itoa(v uint64) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
+}
 
 // allocations keeps host-owned buffers alive.
 //
@@ -333,6 +365,19 @@ func applyEvent(body []byte) bool {
 			return false
 		}
 		return applyRoute(route)
+	case eventKindStartOfReplay:
+		// Everything known from this source is stale: a replay says what
+		// exists and cannot say what stopped existing, so a route
+		// withdrawn while this plugin was not listening would otherwise
+		// stay declared forever. Dropping the view here makes the replay
+		// that follows a repair rather than a merge.
+		//
+		// Nothing is declared yet -- the empty set would blackhole the
+		// traffic for the moment the replay takes. The declaration comes
+		// at the end of it.
+		steered = map[string]map[string]string{}
+		logf(logInfo, "replay starting; dropped what was known")
+		return false
 	case eventKindEndOfReplay:
 		// The host has finished telling this instance what the network
 		// looks like. Declare unconditionally, even if nothing changed.
@@ -470,6 +515,8 @@ func applyRoute(body []byte) bool {
 		behavior uint64
 		prefix   string
 		sid      string
+		peer     string
+		pathID   uint64
 	)
 	for !r.eof() {
 		field, wire, ok := r.tag()
@@ -481,6 +528,12 @@ func applyRoute(body []byte) bool {
 			var v uint64
 			v, ok = r.varint()
 			withdraw = v != 0
+		case field == fieldRoutePeer && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			peer = string(b)
+		case field == fieldRoutePathID && wire == wireVarint:
+			pathID, ok = r.varint()
 		case field == fieldRouteEndpointBehavior && wire == wireVarint:
 			behavior, ok = r.varint()
 		case field == fieldRoutePrefix && wire == wireBytes:
@@ -502,14 +555,25 @@ func applyRoute(body []byte) bool {
 		return false
 	}
 
+	key := pathKey(peer, pathID)
 	if withdraw {
 		// A withdrawal carries no attributes, so its behavior is always
 		// zero and cannot be matched against the claim. Matching on the
-		// prefix this plugin is holding is the only thing that works --
-		// and if it is not holding one, the withdrawal is not its
-		// business.
-		if _, held := steered[prefix]; !held {
+		// path this plugin is holding is the only thing that works -- and
+		// if it is not holding one, the withdrawal is not its business.
+		paths, held := steered[prefix]
+		if !held {
 			return false
+		}
+		if _, mine := paths[key]; !mine {
+			return false
+		}
+		delete(paths, key)
+		if len(paths) > 0 {
+			// Another path still offers this prefix. What is steered may
+			// have changed, so redeclare, but the prefix stays.
+			logf(logInfo, "dropped one path for "+prefix)
+			return true
 		}
 		delete(steered, prefix)
 		logf(logInfo, "withdrew "+prefix)
@@ -519,10 +583,15 @@ func applyRoute(body []byte) bool {
 	if behavior != claimedBehavior || sid == "" {
 		return false
 	}
-	if steered[prefix] == sid {
+	paths, held := steered[prefix]
+	if !held {
+		paths = map[string]string{}
+		steered[prefix] = paths
+	}
+	if paths[key] == sid {
 		return false // already declared exactly this
 	}
-	steered[prefix] = sid
+	paths[key] = sid
 	logf(logInfo, "steering "+prefix)
 	return true
 }
@@ -545,10 +614,23 @@ func declare() {
 // encodeChunk serializes the desired set as a PluginApplyChunk.
 func encodeChunk() []byte {
 	var w writer
-	for prefix, sid := range steered {
+	for prefix, paths := range steered {
+		// One entry per prefix: the data plane steers a prefix into one
+		// SID. Several paths for it are several ways to reach the same
+		// service, and this example takes the lowest-keyed one so the
+		// choice does not flap with map iteration order.
+		var chosenKey, chosenSID string
+		for key, sid := range paths {
+			if chosenKey == "" || key < chosenKey {
+				chosenKey, chosenSID = key, sid
+			}
+		}
+		if chosenSID == "" {
+			continue
+		}
 		var entry writer
 		entry.putString(fieldEntryTriggerPrefix, prefix)
-		entry.putString(fieldEntrySegments, sid)
+		entry.putString(fieldEntrySegments, chosenSID)
 		w.putMessage(fieldChunkHeadendEntries, entry.buf)
 	}
 	return w.buf

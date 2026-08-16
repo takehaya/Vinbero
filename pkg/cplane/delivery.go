@@ -69,6 +69,11 @@ type worker struct {
 	// is the order the plugin is entitled to assume.
 	holding bool
 	pending []*v1.PluginEventBatch
+
+	// beforeBatch runs on this goroutine ahead of each delivery. It is
+	// where work that has to happen off the BGP watch goroutine, but
+	// before the plugin declares anything, goes.
+	beforeBatch func()
 }
 
 // newWorker starts the delivery goroutine for one plugin.
@@ -80,18 +85,20 @@ func newWorker(
 	onStatus func(*v1.PluginEventStatus),
 	tick func() error,
 	interval time.Duration,
+	beforeBatch func(),
 ) *worker {
 	w := &worker{
-		name:     name,
-		logger:   logger,
-		queue:    make(chan *v1.PluginEventBatch, deliveryQueueDepth),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
-		handler:  handler,
-		onFail:   onFail,
-		onStatus: onStatus,
-		tick:     tick,
-		interval: interval,
+		name:        name,
+		logger:      logger,
+		queue:       make(chan *v1.PluginEventBatch, deliveryQueueDepth),
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
+		handler:     handler,
+		onFail:      onFail,
+		onStatus:    onStatus,
+		tick:        tick,
+		interval:    interval,
+		beforeBatch: beforeBatch,
 	}
 	go w.run()
 	return w
@@ -163,6 +170,9 @@ func (w *worker) run() {
 		case <-w.stop:
 			return
 		case batch := <-w.queue:
+			if w.beforeBatch != nil {
+				w.beforeBatch()
+			}
 			w.deliver(batch)
 			w.mu.Lock()
 			w.processed++

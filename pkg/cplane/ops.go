@@ -29,6 +29,12 @@ type PluginOps struct {
 	localSIDs   *LocalSIDSet
 	quotas      Quotas
 	onLocalSIDs func([]AllocatedSID)
+	// notifiedSIDs remembers which allocations this instance has already
+	// been told about, keyed by name and carrying the address it was given.
+	notifiedSIDs map[string]netip.Addr
+	// pending holds declarations that failed at publication and are worth
+	// retrying, because what they depended on may not have existed yet.
+	pending     []*applyTxn
 	encapSource func() (netip.Addr, error)
 	logger      *zap.Logger
 	// applyMu is shared by every plugin under one manager, and is held for
@@ -144,20 +150,21 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 		applyMu = &sync.Mutex{}
 	}
 	return &PluginOps{
-		owner:       cfg.Owner,
-		applyMu:     applyMu,
-		caps:        cfg.Capabilities,
-		advertise:   cfg.Advertise,
-		localSIDs:   cfg.LocalSIDs,
-		quotas:      cfg.Quotas.withDefaults(),
-		onLocalSIDs: cfg.OnLocalSIDs,
-		encapSource: cfg.EncapSource,
-		headend:     cfg.Headend,
-		leases:      cfg.Leases,
-		logger:      logger,
-		open:        make(map[uint64]*applyTxn),
-		maxOpen:     maxOpen,
-		maxEntries:  maxEntries,
+		owner:        cfg.Owner,
+		applyMu:      applyMu,
+		caps:         cfg.Capabilities,
+		advertise:    cfg.Advertise,
+		localSIDs:    cfg.LocalSIDs,
+		quotas:       cfg.Quotas.withDefaults(),
+		onLocalSIDs:  cfg.OnLocalSIDs,
+		notifiedSIDs: make(map[string]netip.Addr),
+		encapSource:  cfg.EncapSource,
+		headend:      cfg.Headend,
+		leases:       cfg.Leases,
+		logger:       logger,
+		open:         make(map[uint64]*applyTxn),
+		maxOpen:      maxOpen,
+		maxEntries:   maxEntries,
 	}, nil
 }
 
@@ -241,6 +248,15 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 		return fmt.Errorf("apply put: transaction %d would hold %d entries, limit %d",
 			generation, len(txn.entries)+len(txn.routes)+len(txn.sids)+declared, p.maxEntries)
 	}
+	// Decoded into locals first, and merged into the transaction only
+	// once the whole chunk decodes. A guest that ignores the error this
+	// returns and commits anyway would otherwise apply the surviving half
+	// of a chunk the host said it had refused.
+	var (
+		entries []HeadendDesired
+		routes  []AdvertisedRoute
+		sids    []LocalSID
+	)
 	if len(msg.GetHeadendEntries()) > 0 {
 		// Resolved here, not at startup: a locator registered over RPC
 		// after the daemon came up is the common case, and an address
@@ -259,7 +275,7 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 			if err != nil {
 				return fmt.Errorf("apply put: %w", err)
 			}
-			txn.entries = append(txn.entries, HeadendDesired{TriggerPrefix: prefix, Entry: entry})
+			entries = append(entries, HeadendDesired{TriggerPrefix: prefix, Entry: entry})
 		}
 	}
 	for _, r := range msg.GetAdvertisedRoutes() {
@@ -267,15 +283,18 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 		if err != nil {
 			return fmt.Errorf("apply put: %w", err)
 		}
-		txn.routes = append(txn.routes, route)
+		routes = append(routes, route)
 	}
 	for _, s := range msg.GetLocalSids() {
 		sid, err := DecodeLocalSID(s)
 		if err != nil {
 			return fmt.Errorf("apply put: %w", err)
 		}
-		txn.sids = append(txn.sids, sid)
+		sids = append(sids, sid)
 	}
+	txn.entries = append(txn.entries, entries...)
+	txn.routes = append(txn.routes, routes...)
+	txn.sids = append(txn.sids, sids...)
 	return nil
 }
 
@@ -299,13 +318,60 @@ func (p *PluginOps) Publish() error {
 	// failure: they are separate statements about separate sets, and
 	// dropping the rest would leave a plugin live with part of what it
 	// declared never applied and nothing to retry it.
-	var firstErr error
+	var (
+		firstErr error
+		failed   []*applyTxn
+	)
 	for _, txn := range staged {
-		if err := p.applyTransaction(txn); err != nil && firstErr == nil {
-			firstErr = err
+		if err := p.applyTransaction(txn); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			failed = append(failed, txn)
 		}
 	}
+	if len(failed) > 0 {
+		p.mu.Lock()
+		p.pending = append(p.pending, failed...)
+		p.mu.Unlock()
+	}
 	return firstErr
+}
+
+// RetryPending reapplies declarations that could not be applied when the
+// plugin went live.
+//
+// A plugin declares from configure, and a restored plugin does that while
+// the daemon is still coming up: a local SID naming a locator an operator
+// registers over RPC a moment later fails, and the plugin has already said
+// everything it intends to say. Nothing would retry it, and the SIDs and
+// the routes behind them would simply never come back from a restart.
+//
+// Retried before each batch, so the first event after the missing piece
+// arrives is what repairs it.
+func (p *PluginOps) RetryPending() {
+	p.mu.Lock()
+	pending := p.pending
+	p.pending = nil
+	p.mu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	var stillFailing []*applyTxn
+	for _, txn := range pending {
+		if err := p.applyTransaction(txn); err != nil {
+			stillFailing = append(stillFailing, txn)
+			p.logger.Debug("a declaration held from before the plugin was live still cannot be applied",
+				zap.Error(err))
+			continue
+		}
+		p.logger.Info("applied a declaration that was held from before the plugin was live")
+	}
+	if len(stillFailing) > 0 {
+		p.mu.Lock()
+		p.pending = append(stillFailing, p.pending...)
+		p.mu.Unlock()
+	}
 }
 
 // ApplyCommit reconciles what the transaction accumulated. This is the
@@ -333,7 +399,28 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 	if !published {
 		return nil
 	}
-	return p.applyTransaction(txn)
+	if err := p.applyTransaction(txn); err != nil {
+		return err
+	}
+	// This declaration supersedes anything of the same kind still waiting
+	// to be retried. Retrying it afterwards would put back a set the
+	// plugin has since replaced.
+	p.dropPending(txn.kind)
+	return nil
+}
+
+// dropPending discards held declarations of one kind, because a newer
+// declaration of that kind has been applied.
+func (p *PluginOps) dropPending(kind v1.PluginApplyKind) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	kept := p.pending[:0]
+	for _, txn := range p.pending {
+		if txn.kind != kind {
+			kept = append(kept, txn)
+		}
+	}
+	p.pending = kept
 }
 
 // applyTransaction is the reconcile itself, shared by a live commit and by
@@ -353,8 +440,17 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 			zap.Int("released", res.Pruned))
 		// The plugin picked the names; the host picked the addresses. It
 		// cannot advertise what it has not been told.
-		if p.onLocalSIDs != nil && len(allocated) > 0 {
-			p.onLocalSIDs(allocated)
+		//
+		// Only what this instance has not already been told is sent. Apply
+		// returns the whole live set, and a plugin that redeclares its set
+		// on every event -- which is the model this asks for -- would
+		// otherwise be handed an event for each redeclaration, redeclare in
+		// response, and never stop. A fresh instance has an empty record,
+		// so a restart still learns every address it holds.
+		if p.onLocalSIDs != nil {
+			if fresh := p.unnotified(allocated); len(fresh) > 0 {
+				p.onLocalSIDs(fresh)
+			}
 		}
 		return nil
 	}
@@ -391,6 +487,34 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 		zap.Int("updated", res.Updated),
 		zap.Int("pruned", res.Pruned))
 	return nil
+}
+
+// unnotified returns the allocations this instance has not been told about
+// yet, and records them as told.
+//
+// An address that changed under a name counts as new: the plugin is
+// advertising the old one and has to hear about the replacement.
+func (p *PluginOps) unnotified(allocated []AllocatedSID) []AllocatedSID {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	live := make(map[string]struct{}, len(allocated))
+	fresh := make([]AllocatedSID, 0, len(allocated))
+	for _, got := range allocated {
+		live[got.Name] = struct{}{}
+		if was, told := p.notifiedSIDs[got.Name]; told && was == got.SID {
+			continue
+		}
+		p.notifiedSIDs[got.Name] = got.SID
+		fresh = append(fresh, got)
+	}
+	// A name the plugin stopped declaring is forgotten, so declaring it
+	// again later is reported rather than silently swallowed.
+	for name := range p.notifiedSIDs {
+		if _, still := live[name]; !still {
+			delete(p.notifiedSIDs, name)
+		}
+	}
+	return fresh
 }
 
 // ApplyAbort discards an open transaction.

@@ -37,13 +37,32 @@ func admit(compiled wazero.CompiledModule, caps Capabilities) error {
 // the parameter and result counts the host defines. Signature is checked
 // as well as name: a module importing "log" with different arity was built
 // against a different ABI, and linking it anyway would corrupt the stack.
-var hostFunctionSignatures = map[string]struct{ params, results int }{
-	HostLog:          {params: 3, results: 0}, // level, ptr, len
-	HostNowMonotonic: {params: 0, results: 1}, // -> ns
-	HostApplyBegin:   {params: 1, results: 1}, // kind -> generation
-	HostApplyPut:     {params: 3, results: 1}, // generation, ptr, len -> status
-	HostApplyCommit:  {params: 1, results: 1}, // generation -> status
-	HostApplyAbort:   {params: 1, results: 0}, // generation
+// The types are compared, not just the counts. wazero would refuse a
+// mismatched import at link time anyway, but the error it raises then is
+// not an ErrAdmission, so a module the caller can fix would be reported as
+// a host failure instead of a bad module.
+var hostFunctionSignatures = map[string]struct{ params, results []api.ValueType }{
+	HostLog: { // level, ptr, len
+		params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
+	},
+	HostNowMonotonic: { // -> ns
+		results: []api.ValueType{api.ValueTypeI64},
+	},
+	HostApplyBegin: { // kind -> generation
+		params:  []api.ValueType{api.ValueTypeI32},
+		results: []api.ValueType{api.ValueTypeI64},
+	},
+	HostApplyPut: { // generation, ptr, len -> status
+		params:  []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32},
+		results: []api.ValueType{api.ValueTypeI32},
+	},
+	HostApplyCommit: { // generation -> status
+		params:  []api.ValueType{api.ValueTypeI64},
+		results: []api.ValueType{api.ValueTypeI32},
+	},
+	HostApplyAbort: { // generation
+		params: []api.ValueType{api.ValueTypeI64},
+	},
 }
 
 // admitImports refuses anything the guest asks for that the host does not
@@ -66,13 +85,13 @@ func admitImports(compiled wazero.CompiledModule) error {
 			foreign = append(foreign, module+"."+name)
 			continue
 		}
-		if got := len(imp.ParamTypes()); got != want.params {
-			return fmt.Errorf("%w: host function %q imported with %d parameters, host defines %d",
-				ErrAdmission, name, got, want.params)
+		if !valueTypesEqual(imp.ParamTypes(), want.params) {
+			return fmt.Errorf("%w: host function %q imported as taking %s, host defines %s",
+				ErrAdmission, name, renderTypes(imp.ParamTypes()), renderTypes(want.params))
 		}
-		if got := len(imp.ResultTypes()); got != want.results {
-			return fmt.Errorf("%w: host function %q imported with %d results, host defines %d",
-				ErrAdmission, name, got, want.results)
+		if !valueTypesEqual(imp.ResultTypes(), want.results) {
+			return fmt.Errorf("%w: host function %q imported as returning %s, host defines %s",
+				ErrAdmission, name, renderTypes(imp.ResultTypes()), renderTypes(want.results))
 		}
 	}
 	if len(foreign) > 0 {
@@ -161,6 +180,11 @@ var optionalExports = map[string]struct {
 	ExportOnTick: {
 		params: []api.ValueType{api.ValueTypeI64},
 	},
+	// The host calls the reactor initializer with no arguments. Without an
+	// entry here a module exporting it under a different shape passes
+	// admission and then fails at instantiation, which reports a caller's
+	// bad module as an internal error.
+	ExportInitialize: {},
 }
 
 // admitExports checks that the required entry points exist with the

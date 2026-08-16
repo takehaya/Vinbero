@@ -3,6 +3,7 @@ package cplane
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -286,5 +287,73 @@ func TestDecodeAdvertisedRouteRejectsBadInput(t *testing.T) {
 		NextHop: "2001:db8::1", EndpointBehavior: 0x10000,
 	}); err == nil {
 		t.Error("a behavior codepoint wider than 16 bits was accepted")
+	}
+}
+
+// One malformed route must not cost the plugin the routes it already has.
+// Apply withdraws before it advertises, so a declaration validated only at
+// send time retracts the live set and then fails.
+func TestOneBadRouteLeavesTheLiveSetAlone(t *testing.T) {
+	ctx := context.Background()
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+
+	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}, unlimited); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	advertised, withdrawn := adv.counts()
+	if advertised != 1 {
+		t.Fatalf("advertised %d routes, want 1", advertised)
+	}
+
+	// The second route is nonsense. The first is unchanged and must stay.
+	_, err := set.Apply(ctx, ownerA, []AdvertisedRoute{
+		vpnRoute("10.0.1.0/24", "fd00:2::1"),
+		vpnRoute("not-a-prefix", "fd00:2::2"),
+	}, unlimited)
+	if err == nil {
+		t.Fatal("a declaration containing a malformed prefix was accepted")
+	}
+	if _, nowWithdrawn := adv.counts(); nowWithdrawn != withdrawn {
+		t.Errorf("the failed declaration withdrew %d routes; it must withdraw none",
+			nowWithdrawn-withdrawn)
+	}
+}
+
+// The lease key has to be the NLRI as it goes on the wire. Two spellings
+// of one prefix leasing separately would let a second plugin originate a
+// route the first already holds, and gobgp's AddPath supersedes silently.
+func TestPrefixIsNormalizedBeforeLeasing(t *testing.T) {
+	ctx := context.Background()
+	adv := &fakeAdvertiser{}
+	leases := NewLeases()
+	set := NewAdvertiseSet(adv, leases)
+
+	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}, unlimited); err != nil {
+		t.Fatalf("owner A: %v", err)
+	}
+	// Same route, spelled with a host bit set.
+	_, err := set.Apply(ctx, ownerB, []AdvertisedRoute{vpnRoute("10.0.1.7/24", "fd00:2::9")}, unlimited)
+	if err == nil {
+		t.Fatal("a second owner took the same NLRI spelled differently")
+	}
+	var le *LeaseError
+	if !errors.As(err, &le) {
+		t.Fatalf("error = %v, want a lease conflict", err)
+	}
+}
+
+// An endpoint behavior travels in the SID TLV, and the encoder builds that
+// TLV only when there is a SID. Accepting the pair silently drops the
+// codepoint the plugin asked for.
+func TestBehaviorWithoutSIDIsRefused(t *testing.T) {
+	r := vpnRoute("10.0.1.0/24", "")
+	r.EndpointBehavior = 0xFE01
+	_, err := normalizeAdvertised(r)
+	if err == nil {
+		t.Fatal("a behavior with no SID to carry it was accepted")
+	}
+	if !strings.Contains(err.Error(), "no SRv6 SID") {
+		t.Errorf("error does not explain the missing SID: %v", err)
 	}
 }

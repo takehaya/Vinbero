@@ -401,3 +401,69 @@ func TestExamplePluginUnregisterRetractsEverything(t *testing.T) {
 		t.Errorf("released %d addresses, want the plugin's SID back", alloc.releasedCount())
 	}
 }
+
+// Two route reflectors advertise the same prefix, so it arrives as two
+// paths and is withdrawn twice. The first withdrawal must not take the
+// prefix down while the other path still offers it -- traffic would stop
+// with nothing left in the plugin's state to explain why.
+func TestExamplePluginKeepsAPrefixWhileAnyPathRemains(t *testing.T) {
+	m, src, ops := exampleManager(t)
+
+	viaA := customBehaviorRoute("10.0.0.0/24", "fd00:2::100")
+	viaB := customBehaviorRoute("10.0.0.0/24", "fd00:2::200")
+	viaB.Source = bgp.PathSource{Peer: netip.MustParseAddr("192.0.2.2")}
+	src.emit("custom-behavior", viaA)
+	waitDelivered(t, m, "custom-behavior")
+	src.emit("custom-behavior", viaB)
+	waitDelivered(t, m, "custom-behavior")
+	if ops.countV4() != 1 {
+		t.Fatalf("two paths for one prefix produced %d entries, want 1", ops.countV4())
+	}
+
+	// The first reflector withdraws. The prefix is still reachable.
+	withdrawA := customBehaviorRoute("10.0.0.0/24", "")
+	withdrawA.IsWithdraw = true
+	withdrawA.EndpointBehavior = 0 // as it arrives on the wire
+	src.emit("custom-behavior", withdrawA)
+	waitDelivered(t, m, "custom-behavior")
+	if ops.countV4() != 1 {
+		t.Fatalf("withdrawing one of two paths removed the prefix: %v", sortedV4(ops))
+	}
+
+	// The second withdraws too, and now there is nothing left.
+	withdrawB := withdrawA
+	withdrawB.Source = viaB.Source
+	src.emit("custom-behavior", withdrawB)
+	waitDelivered(t, m, "custom-behavior")
+	if ops.countV4() != 0 {
+		t.Fatalf("the last path went away but %v is still steered", sortedV4(ops))
+	}
+}
+
+// A replay says what exists and cannot say what stopped existing. A plugin
+// whose view outlives one would keep declaring a route withdrawn while it
+// was not listening, and no later event would remove it -- so the host
+// tells it to drop that view first.
+func TestExamplePluginDropsItsViewOnReplay(t *testing.T) {
+	m, src, ops := exampleManager(t)
+	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
+	src.emit("custom-behavior", customBehaviorRoute("10.0.1.0/24", "fd00:2::200"))
+	waitDelivered(t, m, "custom-behavior")
+	if ops.countV4() != 2 {
+		t.Fatalf("setup: %v, want two entries", sortedV4(ops))
+	}
+
+	// One of them is withdrawn behind the plugin's back: the rib now holds
+	// only the other, which is exactly what a route withdrawn during a
+	// disconnect looks like.
+	src.setRib(customBehaviorRoute("10.0.1.0/24", "fd00:2::200"))
+	if err := m.snapshotFor("custom-behavior"); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	waitDelivered(t, m, "custom-behavior")
+
+	got := sortedV4(ops)
+	if len(got) != 1 || got[0] != "10.0.1.0/24" {
+		t.Fatalf("after the replay the data plane holds %v, want only the route the rib still has", got)
+	}
+}
