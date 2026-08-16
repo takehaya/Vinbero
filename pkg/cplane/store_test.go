@@ -349,3 +349,41 @@ func TestListReturnsWhatItCouldReadAlongsideTheError(t *testing.T) {
 		t.Fatalf("List returned %v, want both readable plugins", names)
 	}
 }
+
+// A registration whose module is gone will fail to restore, and its
+// codepoints are exactly the ones that must stay claimed: nothing
+// implements them, so the built-in appliers must not be handed those
+// routes. Reserving through List would read the modules, drop this
+// registration from the list, and reserve nothing for it.
+func TestClaimsAreReservedEvenWhenTheModuleIsGone(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if err := s.Save(Registration{
+		Name: "broken", Module: []byte("module"), Behaviors: []uint16{0xFE01},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	m, err := s.readManifest("broken")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, m.Module)); err != nil {
+		t.Fatalf("remove module: %v", err)
+	}
+
+	// The registration is unusable, and List says so.
+	if regs, err := s.List(); err == nil || len(regs) != 0 {
+		t.Fatalf("List returned %d registrations and error %v, want none and an error", len(regs), err)
+	}
+
+	claims, err := s.ListClaims()
+	if err != nil {
+		t.Fatalf("ListClaims: %v", err)
+	}
+	if len(claims) != 1 || claims[0].Name != "broken" || len(claims[0].Behaviors) != 1 {
+		t.Fatalf("ListClaims returned %v, want the broken plugin's behavior", claims)
+	}
+}

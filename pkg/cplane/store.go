@@ -252,18 +252,10 @@ func (s *Store) List() ([]Registration, error) {
 	if s == nil {
 		return nil, nil
 	}
-	entries, err := os.ReadDir(s.dir)
+	names, err := s.names()
 	if err != nil {
-		return nil, fmt.Errorf("cplane store: read %s: %w", s.dir, err)
+		return nil, err
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		names = append(names, e.Name()[:len(e.Name())-len(".json")])
-	}
-	sort.Strings(names)
 
 	// Every manifest is attempted, and the failures are collected rather
 	// than returned at the first one. Stopping there would leave every
@@ -279,6 +271,68 @@ func (s *Store) List() ([]Registration, error) {
 			continue
 		}
 		out = append(out, reg)
+	}
+	return out, errors.Join(errs...)
+}
+
+// names lists the stored plugins, sorted so a boot sequence is
+// reproducible.
+func (s *Store) names() ([]string, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("cplane store: read %s: %w", s.dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		names = append(names, e.Name()[:len(e.Name())-len(".json")])
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// StoredClaim is what a stored plugin claims, without its module.
+type StoredClaim struct {
+	Name      string
+	Behaviors []uint16
+}
+
+// ListClaims returns the behaviors every stored plugin claims.
+//
+// It deliberately does not read the modules. A registration whose module
+// is missing or corrupt is one that will fail to restore, and its
+// codepoints are exactly the ones that must stay claimed: a private
+// behavior nothing implements has to be withheld from the built-in
+// appliers, which would otherwise install those routes as ordinary
+// service SIDs. Reading through List would drop such a registration from
+// the list entirely and reserve nothing for it.
+func (s *Store) ListClaims() ([]StoredClaim, error) {
+	if s == nil {
+		return nil, nil
+	}
+	names, err := s.names()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StoredClaim, 0, len(names))
+	var errs []error
+	for _, name := range names {
+		m, err := s.readManifest(name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("cplane store: read manifest for %q: %w", name, err))
+			continue
+		}
+		if m.Version != storeManifestVersion {
+			errs = append(errs, fmt.Errorf("cplane store: manifest for %q is version %d, this daemon writes %d",
+				name, m.Version, storeManifestVersion))
+			continue
+		}
+		if len(m.Behaviors) == 0 {
+			continue
+		}
+		out = append(out, StoredClaim{Name: m.Name, Behaviors: m.Behaviors})
 	}
 	return out, errors.Join(errs...)
 }

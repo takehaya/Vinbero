@@ -368,14 +368,15 @@ func ReserveStoredClaims(store *Store, claims BehaviorClaims, logger *zap.Logger
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	regs, listErr := store.List()
-	for _, reg := range regs {
-		if len(reg.Behaviors) == 0 {
-			continue
-		}
-		if err := claims.Replace(reg.Name, reg.Behaviors); err != nil {
+	// Read from the manifests alone. A registration whose module is
+	// missing or corrupt will fail to restore, and its codepoints are
+	// precisely the ones that must stay claimed -- reading the modules
+	// here would drop it from the list and reserve nothing for it.
+	stored, listErr := store.ListClaims()
+	for _, claim := range stored {
+		if err := claims.Replace(claim.Name, claim.Behaviors); err != nil {
 			logger.Error("could not reserve the behaviors of a stored plugin",
-				zap.String("plugin", reg.Name), zap.Error(err))
+				zap.String("plugin", claim.Name), zap.Error(err))
 		}
 	}
 	return listErr
