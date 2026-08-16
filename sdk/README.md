@@ -124,8 +124,8 @@ vinbero sid create --action 32 \
                       "match_mac": "aa:bb:cc:dd:ee:ff",
                       "source": "fc00:1::/64"}'
 
-# B) raw bytes — bypass BTF, caller pre-encodes
-vinbero sid create --action 32 --plugin-aux-raw <hex>
+# B) hex bytes — bypass BTF, caller pre-encodes
+vinbero sid create --action 32 --plugin-aux-hex <hex>
 
 # C) reference a standalone aux allocated separately
 IDX=$(vinbero plugin aux alloc --map-type endpoint --slot 32 \

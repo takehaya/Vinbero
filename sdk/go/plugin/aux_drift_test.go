@@ -80,8 +80,11 @@ func TestNoDocumentationStillQuotesTheOldAuxLimit(t *testing.T) {
 		"docs/design/ja/plugin-sdk.md",
 		"docs/design/ja/api_sequence.md",
 	}
-	// The old value, as it appears when it is talking about this limit.
-	stale := regexp.MustCompile(`196\s*(bytes|B\b|バイト)`)
+	// The old value in any form. Matching it only next to a unit missed
+	// the two files that write it as "SidAuxPluginRawMax (196)", which is
+	// most of the point: these files are the ones that quote the limit, so
+	// the number appearing in them at all is the drift.
+	stale := regexp.MustCompile(`\b196\b`)
 	for _, rel := range files {
 		body, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
