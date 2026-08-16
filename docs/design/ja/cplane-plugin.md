@@ -231,12 +231,16 @@ service SID として自分の owner で install します。plugin が同じ pr
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
   claim を保持したことは warning に出します。
 
-残る限界として、運用中に register した plugin が、既に built-in の入れた
-state がある codepoint を claim した場合、その state は撤去されません。
-built-in applier は差分適用なので replay では消せず、撤去には合成した
-withdraw を流し込む必要があります。plugin は config で登録して再起動を
-跨ぐ運用が前提なので、この窓は起動時の予約で塞がる方が本筋だと判断して
-います。
+- claim を取った時点で、rib の中にその behavior を持つ経路があれば、
+  built-in applier に withdraw として配り直します。claim は本来これから
+  届く経路の行き先しか決めませんが、先に届いた経路は既に built-in が
+  service SID として自分の owner で install しており、plugin が同じ prefix
+  に書こうとしても owner が衝突して弾かれます。残るのは誤った意味の entry で、
+  それがトラフィックを運びます。withdraw は applier が普段から扱う経路なので、
+  それぞれが何をどう保持しているかを demux 側が知る必要はありません。claim は
+  plugin を build する前に取るので、最初の宣言時には prefix が空いています。
+  この配り直しは withdrawal ledger には記録しません。記録すると後から来る
+  本物の withdraw を処理済みと誤判定します。
 
 ## 登録時の検証
 

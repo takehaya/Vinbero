@@ -24,6 +24,18 @@ type EventSource interface {
 	Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error)
 }
 
+// BuiltinRetractor is a source that can tell Vinbero's own appliers to let
+// go of routes whose behavior a plugin has claimed. *demux.Demux provides
+// it.
+//
+// A claim only decides where later routes go. One that arrived first has
+// already been installed by the built-in appliers as an ordinary service
+// SID, under their owner, so the plugin's write to that prefix is refused
+// and the entry with the wrong meaning is the one carrying traffic.
+type BuiltinRetractor interface {
+	RetractClaimedFromBuiltins()
+}
+
 // QuietSource can add a consumer without replaying to it, for a consumer
 // that takes its own snapshot instead. The manager prefers it: the replay
 // a source performs on registration goes through the live path, where a
@@ -251,6 +263,13 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		// holds, which restoreClaims could then not put back.
 		if err := m.claims.Replace(reg.Name, reg.Behaviors); err != nil {
 			return err
+		}
+		// The claim has to reach back over routes that arrived before it.
+		// Done before the plugin is built, so its first declaration finds
+		// the prefixes free rather than owned by an applier that installed
+		// them with the wrong meaning.
+		if r, ok := m.source.(BuiltinRetractor); ok && len(reg.Behaviors) > 0 {
+			r.RetractClaimedFromBuiltins()
 		}
 	} else if len(reg.Behaviors) > 0 {
 		return fmt.Errorf("cplane: plugin %q claims behaviors but no claim registry is configured", reg.Name)

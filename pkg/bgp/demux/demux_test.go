@@ -267,3 +267,98 @@ func TestStartFailurePermitsRetry(t *testing.T) {
 		t.Fatalf("retry after failed Start: %v", err)
 	}
 }
+
+// A claim decides where later routes go, but a route that arrived before
+// it was already handed to the built-in appliers, which install a
+// codepoint they do not implement as an ordinary service SID under their
+// own owner. The plugin's write to that prefix is then refused, and the
+// entry with the wrong meaning is the one carrying traffic. Claiming has
+// to reach back and tell them to let go.
+func TestClaimingRetractsRoutesTheBuiltinsAlreadyTook(t *testing.T) {
+	src := &fakeSource{rib: map[bgp.Family][]bgp.RouteEvent{}}
+	claimed := peerEvent(bgp.FamilyVPNv4, "192.0.2.1")
+	claimed.EndpointBehavior = 0xFE01
+	claimed.VPN = &bgp.VPNRoute{RD: "65000:1", Prefix: "10.2.0.0/24"}
+	ordinary := peerEvent(bgp.FamilyVPNv4, "192.0.2.1")
+	ordinary.EndpointBehavior = 0x0013 // End.DT4
+	ordinary.VPN = &bgp.VPNRoute{RD: "65000:1", Prefix: "10.3.0.0/24"}
+	src.rib[bgp.FamilyVPNv4] = []bgp.RouteEvent{claimed, ordinary}
+
+	d := New(src, src, nil)
+	claims := NewClaimRegistry(nil)
+	d.SetClaimRegistry(claims)
+
+	builtin := &collector{}
+	if _, err := d.RegisterBuiltin("applier", nil, builtin.handle); err != nil {
+		t.Fatalf("register builtin: %v", err)
+	}
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	// They arrive on the live stream, which is how the applier sees the
+	// routes already in the session when it comes up.
+	src.emit(claimed)
+	src.emit(ordinary)
+
+	// Both reached the applier: nothing was claimed yet.
+	if got := builtin.len(); got != 2 {
+		t.Fatalf("the applier saw %d routes before any claim, want both", got)
+	}
+
+	if err := claims.Claim("custom", []uint16{0xFE01}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	d.RetractClaimedFromBuiltins()
+
+	builtin.mu.Lock()
+	defer builtin.mu.Unlock()
+	var withdrawn []string
+	for _, ev := range builtin.got {
+		if ev.IsWithdraw && ev.VPN != nil {
+			withdrawn = append(withdrawn, ev.VPN.Prefix)
+		}
+	}
+	if len(withdrawn) != 1 || withdrawn[0] != "10.2.0.0/24" {
+		t.Fatalf("the applier was told to drop %v, want only the newly claimed route", withdrawn)
+	}
+}
+
+// Retracting must not disturb the withdrawal ledger. Recording those
+// routes as claimed paths would make the demux treat a later real
+// withdrawal as already accounted for.
+func TestRetractingDoesNotRecordPathsInTheLedger(t *testing.T) {
+	src := &fakeSource{rib: map[bgp.Family][]bgp.RouteEvent{}}
+	claimed := peerEvent(bgp.FamilyVPNv4, "192.0.2.1")
+	claimed.EndpointBehavior = 0xFE01
+	claimed.VPN = &bgp.VPNRoute{RD: "65000:1", Prefix: "10.2.0.0/24"}
+	src.rib[bgp.FamilyVPNv4] = []bgp.RouteEvent{claimed}
+
+	d := New(src, src, nil)
+	claims := NewClaimRegistry(nil)
+	d.SetClaimRegistry(claims)
+	builtin := &collector{}
+	if _, err := d.RegisterBuiltin("applier", nil, builtin.handle); err != nil {
+		t.Fatalf("register builtin: %v", err)
+	}
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	if err := claims.Claim("custom", []uint16{0xFE01}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	d.RetractClaimedFromBuiltins()
+
+	// The ledger holds nothing for it, so a withdrawal arriving now is
+	// judged on what the ledger actually recorded rather than on the
+	// retraction.
+	gone := claimed
+	gone.IsWithdraw = true
+	gone.EndpointBehavior = 0 // as it arrives on the wire
+	if d.isClaimed(gone) {
+		t.Error("the retraction left the path recorded as a claimed advertisement")
+	}
+}
