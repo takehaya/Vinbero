@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
@@ -64,35 +65,58 @@ func TestOwnerMatchesRejectsAnotherSlot(t *testing.T) {
 
 // The limit is quoted to users in several places, and a number quoted in
 // prose drifts silently: the code was corrected once already while the
-// proto comment, the CLI help and the design doc went on saying 196. Users
-// read those, so a stale one turns a payload the daemon accepts into one
-// they never try.
-func TestNoDocumentationStillQuotesTheOldAuxLimit(t *testing.T) {
-	root := repoRoot(t)
-	// Everything a user could read the limit from.
-	files := []string{
-		"proto/vinbero/v1/vinbero.proto",
-		"proto/vinbero/v1/plugin.proto",
-		"pkg/cli/cmd_sid.go",
-		"pkg/cli/cmd_plugin.go",
-		"sdk/README.md",
-		"sdk/go/plugin/doc.go",
-		"docs/design/ja/plugin-sdk.md",
-		"docs/design/ja/api_sequence.md",
+// proto comment, the CLI help and the design doc went on saying the old
+// value. Users read those, so a stale one turns a payload the daemon
+// accepts into one they never try.
+//
+// Each figure is extracted and compared against the real constant rather
+// than checked against the value it used to be. Banning the old number
+// would pass the next time the limit moves, and would fail on an unrelated
+// number that happened to match.
+func TestEveryDocumentedAuxLimitMatchesTheConstant(t *testing.T) {
+	// Each place a user can read the limit, with the shape it is written
+	// in. The pattern captures the figure; a file that stops mentioning it
+	// fails too, because a limit nobody documents is its own problem.
+	quoted := []struct {
+		file    string
+		pattern string
+	}{
+		{"proto/vinbero/v1/vinbero.proto", `<= (\d+) bytes, cast by plugin`},
+		{"proto/vinbero/v1/plugin.proto", `SidAuxPluginRawMax \((\d+)\)`},
+		{"pkg/cli/cmd_sid.go", `<= (\d+) bytes after decode`},
+		{"pkg/cli/cmd_plugin.go", `Raw payload as hex \(<= (\d+) bytes\)`},
+		{"sdk/README.md", `\((\d+) bytes\)`},
+		{"sdk/go/plugin/doc.go", `<= (\d+) \(SidAuxPluginRawMax\)`},
+		// Anchored on the aux payload: this document also states the BPF
+		// stack limit in the same words, and that one is not this one.
+		{"docs/design/ja/plugin-sdk.md", "plugin_raw` \\((\\d+) バイト\\)"},
+		{"docs/design/ja/plugin-sdk.md", `(\d+) バイト以下の byte 列`},
+		{"docs/design/ja/api_sequence.md", `bytes \((\d+)B 以内\)`},
 	}
-	// The old value in any form. Matching it only next to a unit missed
-	// the two files that write it as "SidAuxPluginRawMax (196)", which is
-	// most of the point: these files are the ones that quote the limit, so
-	// the number appearing in them at all is the drift.
-	stale := regexp.MustCompile(`\b196\b`)
-	for _, rel := range files {
-		body, err := os.ReadFile(filepath.Join(root, rel))
+	root := repoRoot(t)
+	for _, q := range quoted {
+		body, err := os.ReadFile(filepath.Join(root, q.file))
 		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
+			t.Errorf("read %s: %v", q.file, err)
+			continue
 		}
-		if loc := stale.FindIndex(body); loc != nil {
-			t.Errorf("%s still quotes the old aux limit at byte %d; it is %d",
-				rel, loc[0], bpf.SidAuxPluginRawMax)
+		re := regexp.MustCompile(q.pattern)
+		found := re.FindAllStringSubmatch(string(body), -1)
+		if len(found) == 0 {
+			t.Errorf("%s no longer states the aux limit; it should say %d",
+				q.file, bpf.SidAuxPluginRawMax)
+			continue
+		}
+		for _, m := range found {
+			got, err := strconv.Atoi(m[1])
+			if err != nil {
+				t.Errorf("%s: %q is not a number", q.file, m[1])
+				continue
+			}
+			if got != bpf.SidAuxPluginRawMax {
+				t.Errorf("%s says the aux limit is %d; it is %d",
+					q.file, got, bpf.SidAuxPluginRawMax)
+			}
 		}
 	}
 }
