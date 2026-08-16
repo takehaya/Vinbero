@@ -390,6 +390,26 @@ DF election のような判断ロジックそのものの差し替えは本設�
 あり、EVPN の desired set はその判断と不可分です。用途が具体化したときに、
 何を宣言させるのが安全かを決めてから足します。
 
+## 開発の進め方
+
+この機構は `feature/cplane-plugin` に積んで育てます。main には直接入れず、
+まとまった時点で feature branch から main への PR を別に立てて判断します。
+
+初回投入は 3 本の stack に割ってあります。1 本にすると 18.8k 行になり、
+Copilot が行数上限でレビューできないためです。以後の追加も、レビューを
+受けられる大きさに割って feature branch を base にします。
+
+| branch | 内容 |
+|---|---|
+| `cplane-plugin-1-foundation` | BGP demux と behavior claim の土台 |
+| `cplane-plugin-2-runtime` | WASM runtime と desired-set apply |
+| `cplane-plugin-phase-a` | advertise / local SID / capability / quota / interop |
+
+次に足す候補は、EVPN と MUP の desired set (上記の前提を揃えてから)、Rust の
+SDK shim、そして interop lab の拡張です。lab は現状 far end が built-in の
+End.DT4 で終端するので、SID 確保と plugin 自身の slot への dispatch は
+覆っていません。eBPF half を持つ lab にすると一周を実機で確認できます。
+
 ## 参照
 
 - 設計の経緯と検討: `docs/plan/cplane-plugin.md`
