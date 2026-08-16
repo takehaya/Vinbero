@@ -316,3 +316,48 @@ func TestHarnessRefusesADeclarationTheCapabilitiesDoNotCover(t *testing.T) {
 		t.Fatal("a headend declaration was accepted from a plugin granted only advertise")
 	}
 }
+
+// A replacement instance holds the SIDs its predecessor was given but has
+// been told nothing, so the daemon tells it again and the plugin can
+// advertise behind them. A harness that carried the notification over
+// would let a plugin that goes quiet after a restart pass, which is
+// exactly the failure this exists to catch.
+func TestHarnessTellsARestartedPluginItsLocalSIDsAgain(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+	})
+
+	// Being told the address is what lets it advertise, so the
+	// advertisement is the observable proof it was told.
+	advertisedBefore := advertisedPrefixes(h)
+	if len(advertisedBefore) == 0 {
+		t.Fatal("the plugin advertised nothing after being given its SID")
+	}
+
+	h.Restart()
+
+	advertisedAfter := advertisedPrefixes(h)
+	if len(advertisedAfter) <= len(advertisedBefore) {
+		t.Fatalf("the restarted instance advertised nothing new: %d declarations before, %d after",
+			len(advertisedBefore), len(advertisedAfter))
+	}
+	last := advertisedAfter[len(advertisedAfter)-1]
+	if last != advertisedBefore[0] {
+		t.Errorf("after the restart it advertised %q, want the same prefix as before (%q)",
+			last, advertisedBefore[0])
+	}
+}
+
+// advertisedPrefixes is every prefix the plugin has declared, in order.
+func advertisedPrefixes(h *cplaneharness.Harness) []string {
+	var out []string
+	for _, d := range h.Declarations() {
+		if d.Kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
+			continue
+		}
+		for _, r := range d.Routes {
+			out = append(out, r.GetPrefix())
+		}
+	}
+	return out
+}

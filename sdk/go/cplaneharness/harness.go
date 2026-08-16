@@ -212,6 +212,11 @@ func (h *Harness) Restart() {
 	old := h.inst
 	h.mu.Unlock()
 
+	// The addresses it holds survive the restart; being told about them
+	// does not, which is what the daemon does when it replaces an
+	// instance.
+	h.ops.beginInstance()
+
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
 		Name:         "harness",
 		Capabilities: h.caps,
@@ -294,8 +299,22 @@ type recorder struct {
 	// every time would let a plugin pass here and then, against the real
 	// daemon, advertise an address that had moved under it.
 	sidByName map[string]string
-	nextSID   int
-	caps      wasm.Capabilities
+	// notifiedSIDs is which allocations the running instance has been told
+	// about. The addresses outlive an instance; being told does not. The
+	// daemon resets this when it replaces an instance, so a harness that
+	// carried it over would let a plugin that cannot re-advertise after a
+	// restart pass -- which is the failure this harness exists to catch.
+	notifiedSIDs map[string]struct{}
+	nextSID      int
+	caps         wasm.Capabilities
+}
+
+// beginInstance puts the recorder back into the state a fresh instance
+// starts from, matching the daemon.
+func (r *recorder) beginInstance() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifiedSIDs = nil
 }
 
 func (r *recorder) Log(level int32, msg string) {
@@ -426,19 +445,29 @@ func (r *recorder) ApplyCommit(generation uint64) error {
 				delete(r.sidByName, name)
 			}
 		}
-		// Only new allocations produce an event, as the daemon does. A
-		// plugin that redeclares its set in response to a local-SID event
-		// -- which the desired-set model invites -- would otherwise be
-		// answered with another event, redeclare again, and never stop.
+		// Only what this instance has not been told produces an event, as
+		// the daemon does. A plugin that redeclares its set in response to
+		// a local-SID event -- which the desired-set model invites --
+		// would otherwise be answered with another event, redeclare again,
+		// and never stop. A replacement instance has been told nothing, so
+		// it hears every address it holds.
+		if r.notifiedSIDs == nil {
+			r.notifiedSIDs = map[string]struct{}{}
+		}
 		for _, sid := range acc.GetLocalSids() {
-			if _, held := r.sidByName[sid.GetName()]; held {
+			name := sid.GetName()
+			addr, held := r.sidByName[name]
+			if !held {
+				r.nextSID++
+				addr = fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID)
+				r.sidByName[name] = addr
+			}
+			if _, told := r.notifiedSIDs[name]; told {
 				continue
 			}
-			r.nextSID++
-			addr := fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID)
-			r.sidByName[sid.GetName()] = addr
+			r.notifiedSIDs[name] = struct{}{}
 			r.allocated = append(r.allocated, &v1.PluginLocalSidAllocated{
-				Name:    sid.GetName(),
+				Name:    name,
 				Sid:     addr,
 				Locator: sid.GetLocator(),
 			})

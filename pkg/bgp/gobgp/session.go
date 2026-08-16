@@ -50,13 +50,17 @@ type Session struct {
 	//
 	// gobgp keeps one local path per NLRI, so the session keeps one UUID
 	// per key -- and everything that originates through this session
-	// shares it: the auto-advertise exporter, the operator's RPC, and any
-	// control-plane plugin. Without knowing who put a key there, one
-	// producer's withdraw deletes another's live route and the producer
-	// that lost it still believes it is advertising.
+	// shares it. Without knowing who put a key there, one producer's
+	// withdraw deletes another's live route and the producer that lost it
+	// still believes it is advertising.
 	//
-	// The empty producer is vinbero's own machinery, which named nothing
-	// because it was the only writer when it was built.
+	// The empty producer is vinbero's own machinery: the auto-advertise
+	// exporter and the operator's RPC both hold the bare session, so they
+	// are one producer here and can still take each other's keys. That is
+	// the behavior they have always had, and separating them is a change
+	// to their contract rather than to this one. What the naming settles
+	// is the boundary that is new: a plugin cannot touch what vinbero
+	// itself advertises, or the reverse.
 	producers map[bgp.RouteKey]string
 }
 

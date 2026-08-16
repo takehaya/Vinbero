@@ -405,10 +405,17 @@ Copilot が行数上限でレビューできないためです。以後の追加
 | `cplane-plugin-2-runtime` | WASM runtime と desired-set apply |
 | `cplane-plugin-phase-a` | advertise / local SID / capability / quota / interop |
 
-次に足す候補は、EVPN と MUP の desired set (上記の前提を揃えてから)、Rust の
-SDK shim、そして interop lab の拡張です。lab は現状 far end が built-in の
-End.DT4 で終端するので、SID 確保と plugin 自身の slot への dispatch は
-覆っていません。eBPF half を持つ lab にすると一周を実機で確認できます。
+次に足す候補は次のとおりです。
+
+- EVPN と MUP の desired set (上記の前提を揃えてから)。
+- Rust の SDK shim。
+- interop lab の拡張。lab は現状 far end が built-in の End.DT4 で終端するので、
+  SID 確保と plugin 自身の slot への dispatch は覆っていません。eBPF half を
+  持つ lab にすると一周を実機で確認できます。
+- vinbero 自身の広告元の分離。auto-advertise の exporter と operator の RPC は
+  bare session を共有しているので、producer としては 1 つです。互いの経路を
+  取り合える点は以前からの挙動で、分けると衝突時の振る舞いが変わるため、
+  この機構とは別の変更として扱います。
 
 ## 参照
 

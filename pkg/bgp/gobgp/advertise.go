@@ -337,6 +337,11 @@ func encodeUnicastPath(r bgp.UnicastRoute) (*apiutil.Path, error) {
 // producers both advertise is one route, and the second withdraw to
 // arrive would otherwise delete what the first still wants. Naming the
 // producer is what lets the session tell those apart.
+//
+// Callers holding the bare session are one producer between them. Giving
+// each of vinbero's own originators a name of its own would separate them
+// too, and is worth doing; it changes what those paths do on a conflict,
+// so it is its own change rather than a side effect of this one.
 type ProducerSession struct {
 	*Session
 	producer string
