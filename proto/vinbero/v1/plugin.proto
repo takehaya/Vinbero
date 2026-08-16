@@ -55,6 +55,11 @@ service PluginService {
   // behind, one restarting in a loop and one with nothing to do all look
   // the same from outside. These counters are what tell them apart.
   rpc CplanePluginStats(CplanePluginStatsRequest) returns (CplanePluginStatsResponse);
+  // CplanePluginForget drops a plugin the store held that would not start:
+  // it releases the behaviors still claimed on its behalf and removes it
+  // from the store. The state it left in the maps is not touched, because
+  // nothing here knows what that state was for.
+  rpc CplanePluginForget(CplanePluginForgetRequest) returns (CplanePluginForgetResponse);
 }
 
 message PluginRegisterRequest {
@@ -263,8 +268,38 @@ message CplanePluginStat {
   uint32 max_local_sids = 14;
   // Since is when the running instance started, which a restart resets.
   google.protobuf.Timestamp since = 15;
+  // PendingDeclarations is how many of its declarations are waiting on
+  // something that does not exist yet -- a locator registered later, say --
+  // and are being retried in the background. A plugin stuck this way looks
+  // idle in every other counter here.
+  uint32 pending_declarations = 16;
+}
+
+// UnrestoredCplanePlugin is a plugin the store held that would not start.
+//
+// The daemon is still holding something of theirs: the state they wrote is
+// pinned in the maps, and their behaviors stay claimed so nothing installs
+// those routes with the wrong meaning. Neither shows up in the running
+// set, so without this an operator sees a plugin that is simply absent,
+// with routes going nowhere and nothing saying why.
+message UnrestoredCplanePlugin {
+  string name = 1;
+  // EndpointBehaviors are the codepoints still claimed on its behalf.
+  repeated uint32 endpoint_behaviors = 2;
+  // Reason is why it would not start.
+  string reason = 3;
+  // Since is when the attempt failed.
+  google.protobuf.Timestamp since = 4;
 }
 
 message CplanePluginStatsResponse {
   repeated CplanePluginStat plugins = 1;
+  // Unrestored are the plugins the store held that would not start.
+  repeated UnrestoredCplanePlugin unrestored = 2;
 }
+
+message CplanePluginForgetRequest {
+  string name = 1;
+}
+
+message CplanePluginForgetResponse {}

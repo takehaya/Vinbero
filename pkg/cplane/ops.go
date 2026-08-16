@@ -84,6 +84,9 @@ type PluginOps struct {
 	// do.
 	commits     uint64
 	lastApplied map[v1.PluginApplyKind]uint64
+	// reportedPending remembers which kinds have already been reported as
+	// stuck, so the log says it once instead of every retry.
+	reportedPending map[v1.PluginApplyKind]struct{}
 }
 
 // applyTxn is one open desired-set declaration.
@@ -430,12 +433,50 @@ func (p *PluginOps) RetryPending() {
 	for _, txn := range pending {
 		if err := p.applyTransaction(txn); err != nil {
 			p.holdForRetry(txn)
-			p.logger.Debug("a declaration held from before the plugin was live still cannot be applied",
-				zap.Error(err))
+			// Said once at a level an operator watches, then quietly.
+			// A declaration naming something that does not exist retries
+			// forever; the first line is what connects the missing thing
+			// to the plugin waiting on it, and repeating it every interval
+			// would bury the log.
+			if p.notePendingFailure(txn.kind) {
+				p.logger.Warn("a plugin's declaration cannot be applied and will keep being retried",
+					zap.String("kind", kindName(txn.kind)), zap.Error(err))
+			} else {
+				p.logger.Debug("a declaration held from before the plugin was live still cannot be applied",
+					zap.Error(err))
+			}
 			continue
 		}
-		p.logger.Info("applied a declaration that was held from before the plugin was live")
+		p.logger.Info("applied a declaration that was held from before the plugin was live",
+			zap.String("kind", kindName(txn.kind)))
 	}
+}
+
+// notePendingFailure reports whether this is the first failure of its kind
+// since one last succeeded, so the log says it once rather than forever.
+func (p *PluginOps) notePendingFailure(kind v1.PluginApplyKind) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reportedPending == nil {
+		p.reportedPending = make(map[v1.PluginApplyKind]struct{})
+	}
+	if _, said := p.reportedPending[kind]; said {
+		return false
+	}
+	p.reportedPending[kind] = struct{}{}
+	return true
+}
+
+// PendingDeclarations is how many declarations are waiting on something
+// that does not exist yet.
+//
+// It is what tells an operator that a plugin is not idle but stuck: the
+// counters that describe delivery all look healthy while a declaration
+// naming a missing locator retries in the background forever.
+func (p *PluginOps) PendingDeclarations() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending)
 }
 
 // ApplyCommit reconciles what the transaction accumulated. This is the
@@ -484,6 +525,8 @@ func (p *PluginOps) dropPending(kind v1.PluginApplyKind) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.pending, kind)
+	// It applied, so the next time it does not is worth saying again.
+	delete(p.reportedPending, kind)
 }
 
 // applyTransaction is the reconcile itself, shared by a live commit and by

@@ -72,6 +72,9 @@ const (
 	// PluginServiceCplanePluginStatsProcedure is the fully-qualified name of the PluginService's
 	// CplanePluginStats RPC.
 	PluginServiceCplanePluginStatsProcedure = "/vinbero.v1.PluginService/CplanePluginStats"
+	// PluginServiceCplanePluginForgetProcedure is the fully-qualified name of the PluginService's
+	// CplanePluginForget RPC.
+	PluginServiceCplanePluginForgetProcedure = "/vinbero.v1.PluginService/CplanePluginForget"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -90,6 +93,7 @@ var (
 	pluginServiceCplanePluginUnregisterMethodDescriptor = pluginServiceServiceDescriptor.Methods().ByName("CplanePluginUnregister")
 	pluginServiceCplanePluginListMethodDescriptor       = pluginServiceServiceDescriptor.Methods().ByName("CplanePluginList")
 	pluginServiceCplanePluginStatsMethodDescriptor      = pluginServiceServiceDescriptor.Methods().ByName("CplanePluginStats")
+	pluginServiceCplanePluginForgetMethodDescriptor     = pluginServiceServiceDescriptor.Methods().ByName("CplanePluginForget")
 )
 
 // PluginServiceClient is a client for the vinbero.v1.PluginService service.
@@ -137,6 +141,11 @@ type PluginServiceClient interface {
 	// behind, one restarting in a loop and one with nothing to do all look
 	// the same from outside. These counters are what tell them apart.
 	CplanePluginStats(context.Context, *connect.Request[v1.CplanePluginStatsRequest]) (*connect.Response[v1.CplanePluginStatsResponse], error)
+	// CplanePluginForget drops a plugin the store held that would not start:
+	// it releases the behaviors still claimed on its behalf and removes it
+	// from the store. The state it left in the maps is not touched, because
+	// nothing here knows what that state was for.
+	CplanePluginForget(context.Context, *connect.Request[v1.CplanePluginForgetRequest]) (*connect.Response[v1.CplanePluginForgetResponse], error)
 }
 
 // NewPluginServiceClient constructs a client for the vinbero.v1.PluginService service. By default,
@@ -227,6 +236,12 @@ func NewPluginServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(pluginServiceCplanePluginStatsMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		cplanePluginForget: connect.NewClient[v1.CplanePluginForgetRequest, v1.CplanePluginForgetResponse](
+			httpClient,
+			baseURL+PluginServiceCplanePluginForgetProcedure,
+			connect.WithSchema(pluginServiceCplanePluginForgetMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -245,6 +260,7 @@ type pluginServiceClient struct {
 	cplanePluginUnregister *connect.Client[v1.CplanePluginUnregisterRequest, v1.CplanePluginUnregisterResponse]
 	cplanePluginList       *connect.Client[v1.CplanePluginListRequest, v1.CplanePluginListResponse]
 	cplanePluginStats      *connect.Client[v1.CplanePluginStatsRequest, v1.CplanePluginStatsResponse]
+	cplanePluginForget     *connect.Client[v1.CplanePluginForgetRequest, v1.CplanePluginForgetResponse]
 }
 
 // PluginRegister calls vinbero.v1.PluginService.PluginRegister.
@@ -312,6 +328,11 @@ func (c *pluginServiceClient) CplanePluginStats(ctx context.Context, req *connec
 	return c.cplanePluginStats.CallUnary(ctx, req)
 }
 
+// CplanePluginForget calls vinbero.v1.PluginService.CplanePluginForget.
+func (c *pluginServiceClient) CplanePluginForget(ctx context.Context, req *connect.Request[v1.CplanePluginForgetRequest]) (*connect.Response[v1.CplanePluginForgetResponse], error) {
+	return c.cplanePluginForget.CallUnary(ctx, req)
+}
+
 // PluginServiceHandler is an implementation of the vinbero.v1.PluginService service.
 type PluginServiceHandler interface {
 	PluginRegister(context.Context, *connect.Request[v1.PluginRegisterRequest]) (*connect.Response[v1.PluginRegisterResponse], error)
@@ -357,6 +378,11 @@ type PluginServiceHandler interface {
 	// behind, one restarting in a loop and one with nothing to do all look
 	// the same from outside. These counters are what tell them apart.
 	CplanePluginStats(context.Context, *connect.Request[v1.CplanePluginStatsRequest]) (*connect.Response[v1.CplanePluginStatsResponse], error)
+	// CplanePluginForget drops a plugin the store held that would not start:
+	// it releases the behaviors still claimed on its behalf and removes it
+	// from the store. The state it left in the maps is not touched, because
+	// nothing here knows what that state was for.
+	CplanePluginForget(context.Context, *connect.Request[v1.CplanePluginForgetRequest]) (*connect.Response[v1.CplanePluginForgetResponse], error)
 }
 
 // NewPluginServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -443,6 +469,12 @@ func NewPluginServiceHandler(svc PluginServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(pluginServiceCplanePluginStatsMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	pluginServiceCplanePluginForgetHandler := connect.NewUnaryHandler(
+		PluginServiceCplanePluginForgetProcedure,
+		svc.CplanePluginForget,
+		connect.WithSchema(pluginServiceCplanePluginForgetMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/vinbero.v1.PluginService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case PluginServicePluginRegisterProcedure:
@@ -471,6 +503,8 @@ func NewPluginServiceHandler(svc PluginServiceHandler, opts ...connect.HandlerOp
 			pluginServiceCplanePluginListHandler.ServeHTTP(w, r)
 		case PluginServiceCplanePluginStatsProcedure:
 			pluginServiceCplanePluginStatsHandler.ServeHTTP(w, r)
+		case PluginServiceCplanePluginForgetProcedure:
+			pluginServiceCplanePluginForgetHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -530,4 +564,8 @@ func (UnimplementedPluginServiceHandler) CplanePluginList(context.Context, *conn
 
 func (UnimplementedPluginServiceHandler) CplanePluginStats(context.Context, *connect.Request[v1.CplanePluginStatsRequest]) (*connect.Response[v1.CplanePluginStatsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.CplanePluginStats is not implemented"))
+}
+
+func (UnimplementedPluginServiceHandler) CplanePluginForget(context.Context, *connect.Request[v1.CplanePluginForgetRequest]) (*connect.Response[v1.CplanePluginForgetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.PluginService.CplanePluginForget is not implemented"))
 }

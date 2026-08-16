@@ -112,6 +112,10 @@ type PluginStats struct {
 	// Dead reports a plugin left stopped after repeated failures. Its
 	// state is still installed; it is simply no longer being fed.
 	Dead bool
+	// PendingDeclarations is how many of its declarations are waiting on
+	// something that does not exist yet, retried in the background. A
+	// plugin stuck this way looks idle in every other counter.
+	PendingDeclarations int
 	// HeadendEntries, AdvertisedRoutes and LocalSIDs are what it holds
 	// right now, against the quota that bounds each.
 	HeadendEntries   int
@@ -204,18 +208,19 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 	quarantined, snapshots, since := p.counters.snapshot()
 	owner := p.ops.Owner()
 	return PluginStats{
-		Name:             p.name,
-		Capabilities:     reg.Capabilities.Names(),
-		Behaviors:        reg.Behaviors,
-		DroppedEvents:    p.worker.droppedCount(),
-		Restarts:         restarts,
-		Quarantined:      quarantined,
-		Snapshots:        snapshots,
-		Dead:             dead,
-		HeadendEntries:   m.leases.CountOf(LeaseHeadendV4, owner) + m.leases.CountOf(LeaseHeadendV6, owner),
-		AdvertisedRoutes: m.advertise.LiveCount(owner),
-		LocalSIDs:        m.localSIDs.LiveCount(owner),
-		Quotas:           m.quotas,
-		Since:            since,
+		Name:                p.name,
+		Capabilities:        reg.Capabilities.Names(),
+		Behaviors:           reg.Behaviors,
+		DroppedEvents:       p.worker.droppedCount(),
+		Restarts:            restarts,
+		Quarantined:         quarantined,
+		Snapshots:           snapshots,
+		Dead:                dead,
+		PendingDeclarations: p.ops.PendingDeclarations(),
+		HeadendEntries:      m.leases.CountOf(LeaseHeadendV4, owner) + m.leases.CountOf(LeaseHeadendV6, owner),
+		AdvertisedRoutes:    m.advertise.LiveCount(owner),
+		LocalSIDs:           m.localSIDs.LiveCount(owner),
+		Quotas:              m.quotas,
+		Since:               since,
 	}
 }

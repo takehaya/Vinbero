@@ -27,6 +27,11 @@ type CplaneManager interface {
 	List() []string
 	Stats() []cplane.PluginStats
 	StatsFor(name string) (cplane.PluginStats, bool)
+	// Unrestored and Forget cover the plugins the store held that would
+	// not start: they are not running, so nothing else here reports them,
+	// yet the daemon still holds their state and their claims.
+	Unrestored() []cplane.UnrestoredPlugin
+	Forget(name string) error
 }
 
 // SetCplaneManager installs the manager. Call before Setup, like the other
@@ -167,9 +172,48 @@ func (s *PluginServer) CplanePluginStats(
 			MaxAdvertisedRoutes: uint32(st.Quotas.MaxAdvertisedRoutes),
 			MaxLocalSids:        uint32(st.Quotas.MaxLocalSIDs),
 			Since:               timestamppb.New(st.Since),
+			PendingDeclarations: uint32(st.PendingDeclarations),
 		})
 	}
-	return connect.NewResponse(&v1.CplanePluginStatsResponse{Plugins: out}), nil
+
+	// The plugins that would not start go out alongside the running ones.
+	// The daemon is still holding their state and their claims, and a
+	// response that showed only what is running would let an operator
+	// conclude they are simply gone.
+	var unrestored []*v1.UnrestoredCplanePlugin
+	if req.Msg.GetName() == "" {
+		for _, u := range s.cplane.Unrestored() {
+			behaviors := make([]uint32, 0, len(u.Behaviors))
+			for _, b := range u.Behaviors {
+				behaviors = append(behaviors, uint32(b))
+			}
+			unrestored = append(unrestored, &v1.UnrestoredCplanePlugin{
+				Name:              u.Name,
+				EndpointBehaviors: behaviors,
+				Reason:            u.Reason,
+				Since:             timestamppb.New(u.Since),
+			})
+		}
+	}
+	return connect.NewResponse(&v1.CplanePluginStatsResponse{
+		Plugins:    out,
+		Unrestored: unrestored,
+	}), nil
+}
+
+// CplanePluginForget drops a plugin the store held that would not start.
+func (s *PluginServer) CplanePluginForget(
+	_ context.Context,
+	req *connect.Request[v1.CplanePluginForgetRequest],
+) (*connect.Response[v1.CplanePluginForgetResponse], error) {
+	if s.cplane == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented,
+			errors.New("control-plane plugins are not enabled on this daemon"))
+	}
+	if err := s.cplane.Forget(req.Msg.GetName()); err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, err)
+	}
+	return connect.NewResponse(&v1.CplanePluginForgetResponse{}), nil
 }
 
 // parseFamilies validates the operator-facing family names.

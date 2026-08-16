@@ -161,6 +161,30 @@ func (f *fakeSource) registered(name string) bool {
 	return false
 }
 
+// fakeRetractingSource is a fakeSource that also counts how often the
+// manager asked it to retract claimed routes from the built-in appliers.
+type fakeRetractingSource struct {
+	*fakeSource
+	mu       sync.Mutex
+	retracts int
+}
+
+func newFakeRetractingSource() *fakeRetractingSource {
+	return &fakeRetractingSource{fakeSource: newFakeSource()}
+}
+
+func (f *fakeRetractingSource) RetractClaimedFromBuiltins() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retracts++
+}
+
+func (f *fakeRetractingSource) retractions() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.retracts
+}
+
 // fakeClaims records behavior claims.
 type fakeClaims struct {
 	mu       sync.Mutex
@@ -245,6 +269,25 @@ func waitDelivered(t *testing.T, m *Manager, name string) {
 
 // newTestManagerWithStore builds a manager backed by a persistence store,
 // for the tests about surviving a restart.
+// newTestManagerWithStoreAndClaims is newTestManagerWithStore for a test
+// that needs to inspect what stays claimed.
+func newTestManagerWithStoreAndClaims(t *testing.T, src EventSource, store *Store, claims BehaviorClaims) (*Manager, *fakeHeadendOps) {
+	t.Helper()
+	ops := newFakeHeadendOps()
+	m, err := NewManager(ManagerConfig{
+		Source:      src,
+		Claims:      claims,
+		Headend:     ops,
+		Store:       store,
+		EncapSource: testEncapSource,
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	t.Cleanup(func() { m.Close(context.Background()) })
+	return m, ops
+}
+
 func newTestManagerWithStore(t *testing.T, src EventSource, store *Store) (*Manager, *fakeHeadendOps) {
 	t.Helper()
 	ops := newFakeHeadendOps()
@@ -1503,5 +1546,198 @@ func TestFailedFlushKeepsTheLeasesOnWhatRemains(t *testing.T) {
 	// The lease on it is still held, so nobody else can take the key.
 	if _, err := leases.AcquireAll(LeaseHeadendV4, []string{"10.0.1.0/24"}, ownerB); err == nil {
 		t.Error("another owner took the lease on an entry that is still installed")
+	}
+}
+
+// A plugin the store held that will not start is not simply absent: the
+// daemon still holds the state it wrote and the behaviors claimed on its
+// behalf, so routes carrying those reach nothing. An operator who cannot
+// see it has no way to connect the two.
+func TestAPluginThatCannotBeRestoredIsVisibleAndCanBeForgotten(t *testing.T) {
+	store := newTestStore(t)
+	broken := Registration{
+		Name: "broken", Module: []byte("not a wasm module"),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(),
+	}
+	if err := store.Save(broken); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	src := newFakeSource()
+	claims := newFakeClaims()
+	m, _ := newTestManagerWithStoreAndClaims(t, src, store, claims)
+	if err := m.Restore(context.Background()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	// It is not running.
+	if _, ok := m.StatsFor("broken"); ok {
+		t.Fatal("a plugin that never started is reported as running")
+	}
+	// But it is reported, with why and with what it is still holding.
+	unrestored := m.Unrestored()
+	if len(unrestored) != 1 || unrestored[0].Name != "broken" {
+		t.Fatalf("Unrestored() = %+v, want the plugin that failed", unrestored)
+	}
+	if unrestored[0].Reason == "" {
+		t.Error("nothing says why it would not start")
+	}
+	if len(unrestored[0].Behaviors) != 1 || unrestored[0].Behaviors[0] != 0xFE01 {
+		t.Errorf("behaviors = %v, want the codepoint still claimed on its behalf", unrestored[0].Behaviors)
+	}
+	// The claim really is still held, which is why this matters.
+	if !claims.claimed("broken") {
+		t.Error("the behavior was released, so routes carrying it reach the built-in appliers")
+	}
+
+	// And the operator can decide it is not coming back.
+	if err := m.Forget("broken"); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if claims.claimed("broken") {
+		t.Error("forgetting it left the behavior claimed")
+	}
+	if len(m.Unrestored()) != 0 {
+		t.Error("it is still reported after being forgotten")
+	}
+	if regs, _ := store.List(); len(regs) != 0 {
+		t.Errorf("the store still holds %d registrations", len(regs))
+	}
+	// Forgetting something that is not in that state is an error, not a
+	// silent success: it would otherwise look like a way to remove a
+	// running plugin.
+	if err := m.Forget("broken"); err == nil {
+		t.Error("forgetting an unknown plugin reported success")
+	}
+}
+
+// A declaration waiting on something that does not exist retries forever.
+// Every delivery counter looks healthy meanwhile, so the count of what is
+// stuck is the only thing that distinguishes it from an idle plugin.
+func TestStuckDeclarationsAreCounted(t *testing.T) {
+	alloc := &fakeAllocator{failOn: "late"}
+	sids := newFakeSIDOps()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(),
+		Capabilities: testCaps(), LocalSIDs: NewLocalSIDSet(alloc, sids),
+	})
+	if err != nil {
+		t.Fatalf("new plugin ops: %v", err)
+	}
+	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID))
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	chunk, err := proto.Marshal(&v1.PluginApplyChunk{
+		LocalSids: []*v1.PluginLocalSid{{Name: "svc", Locator: "late", Slot: 33}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ops.ApplyPut(gen, chunk); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := ops.ApplyCommit(gen); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if got := ops.PendingDeclarations(); got != 0 {
+		t.Fatalf("%d declarations pending before publication", got)
+	}
+
+	if err := ops.Publish(); err == nil {
+		t.Fatal("publishing a declaration naming a missing locator succeeded")
+	}
+	if got := ops.PendingDeclarations(); got != 1 {
+		t.Fatalf("PendingDeclarations() = %d, want the one that is stuck", got)
+	}
+
+	// It stops being stuck once what it named turns up.
+	alloc.mu.Lock()
+	alloc.failOn = ""
+	alloc.mu.Unlock()
+	ops.RetryPending()
+	if got := ops.PendingDeclarations(); got != 0 {
+		t.Fatalf("PendingDeclarations() = %d after the locator appeared, want 0", got)
+	}
+}
+
+// Retracting routes from the built-in appliers cannot be undone, so it has
+// to wait until the plugin meant to take them over is running. A module
+// refused at admission would otherwise leave those routes removed from the
+// appliers with nothing left implementing them.
+func TestAFailedRegistrationDoesNotRetractFromTheBuiltins(t *testing.T) {
+	src := newFakeRetractingSource()
+	claims := newFakeClaims()
+	m, _ := newTestManager(t, src, claims)
+
+	err := m.Register(context.Background(), Registration{
+		Name:         "broken",
+		Module:       []byte("not a wasm module"),
+		Behaviors:    []uint16{0xFE01},
+		Capabilities: testCaps(),
+	})
+	if err == nil {
+		t.Fatal("a module that is not wasm was registered")
+	}
+	if got := src.retractions(); got != 0 {
+		t.Errorf("a failed registration retracted from the built-in appliers %d times", got)
+	}
+	if claims.claimed("broken") {
+		t.Error("a failed registration left the behavior claimed")
+	}
+
+	// A registration that succeeds does retract, since that is the point.
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+		Behaviors: []uint16{0xFE02}, Capabilities: testCaps(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if got := src.retractions(); got != 1 {
+		t.Errorf("a successful registration retracted %d times, want 1", got)
+	}
+}
+
+// A plugin whose flush could not finish is back in the registry only so
+// the operator can see it and retry. Nothing about it is running, so it
+// must not be reported as though it were.
+func TestAPluginLeftAfterAFailedFlushIsNotReportedRunning(t *testing.T) {
+	src := newFakeSource()
+	ops := newFakeHeadendOps()
+	m, err := NewManager(ManagerConfig{
+		Source: src, Claims: newFakeClaims(), Headend: ops,
+		EncapSource: testEncapSource,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	t.Cleanup(func() { m.Close(context.Background()) })
+
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t), Capabilities: testCaps(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "declare")
+	if ops.countV4() != 1 {
+		t.Fatalf("setup: %d entries, want 1", ops.countV4())
+	}
+
+	// Whatever the fixture declared is what the map must refuse to remove.
+	installed := sortedV4(ops)
+	if len(installed) != 1 {
+		t.Fatalf("setup: entries = %v, want exactly one", installed)
+	}
+	ops.failDelete(installed[0])
+	if err := m.Unregister(context.Background(), "declare"); err == nil {
+		t.Fatal("an unregister that could not remove the entry reported success")
+	}
+	st, ok := m.StatsFor("declare")
+	if !ok {
+		t.Fatal("the plugin is not reported at all, so its leftover state is invisible")
+	}
+	if !st.Dead {
+		t.Error("a plugin with no instance and no worker is reported as running")
 	}
 }

@@ -220,7 +220,15 @@ service SID として自分の owner で install します。plugin が同じ pr
 
 - 起動時は、store にある plugin の behavior を demux の start より前に予約
   します。start は rib の replay を伴うので、予約が後だと必ずこの窓に入り
-  ます。予約した plugin の restore が失敗したら claim を解放します。
+  ます。restore に失敗した plugin の claim は保持します。Register 自身は
+  失敗時に claim を巻き戻しますが、これは operator の登録に対して正しい
+  挙動で、restore は事情が違います。予約は「実装するものが無い codepoint の
+  経路を built-in に渡さない」ために取ったものなので、巻き戻しをそのままに
+  すると誤った意味での install に戻ります。
+- claim 取得後の retract は、plugin が build されて subscribe まで済んでから
+  行います。retract は元に戻せない副作用なので、admission で弾かれた module の
+  ために既存の経路を built-in から消してしまうと、実装するものが無いまま
+  取り残されます。
 - unregister では claim を解放しますが、その経路を built-in に流し直すこと
   はしません。plugin が実装していた behavior を実装できるものはここには無く、
   built-in にとって private codepoint はただの service SID なので、渡せば
@@ -229,7 +237,13 @@ service SID として自分の owner で install します。plugin が同じ pr
 - restore に失敗した plugin の claim は解放しません。解放すると built-in が
   実装できない codepoint の経路を service SID として install してしまいます。
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
-  claim を保持したことは warning に出します。
+  claim を保持したことは warning に出します。restore に失敗した plugin は
+  `vbctl plugin cplane stats` に別枠で出します。動いていないのに daemon は
+  その state と claim を持ち続けるので、running な plugin だけを見せると
+  「単に居ない」ようにしか見えません。戻ってこないと判断したら
+  `vbctl plugin cplane forget` で claim と store の登録を落とせます。map に
+  残った state には触れません。それが何のためのものかを daemon は知らない
+  ためです。
 
 - claim を取った時点で、rib の中にその behavior を持つ経路があれば、
   built-in applier に withdraw として配り直します。claim は本来これから
@@ -244,10 +258,13 @@ service SID として自分の owner で install します。plugin が同じ pr
 
 ## 広告の所有権
 
-lease は plugin どうしの所有権しか調停しません。実際に経路を出す gobgp
-session は auto-advertise の exporter や operator の RPC と共有で、gobgp は
-1 つの NLRI につき local path を 1 本しか持ちません。したがって plugin が
-他の producer と同じ NLRI を宣言すると、その path は置き換わります。
+lease は plugin どうしの所有権を調停します。その下にもう 1 枚あり、gobgp
+session は 1 つの NLRI につき local path を 1 本しか持たないので、経路を
+出した producer を記録します。plugin ごとに別の producer 名を与えるので、
+lease と producer は失敗の仕方が違います。lease 衝突は何も送る前に拒否され、
+producer 衝突は誤って lease を手放したときに他の plugin の経路を守ります。
+
+session は auto-advertise の exporter や operator の RPC とも共有です。
 
 session 側で producer を記録し、withdraw は自分が出した経路にしか効かない
 ようにしています。これが無いと、後から届いた withdraw が別の producer の
@@ -307,8 +324,20 @@ module は allowlist で検証します。
 - 宣言には commit 順の番号を振り、同じ kind でより新しい宣言が適用済みなら
   古い方は適用しません。宣言は集合そのものの宣言なので、retry や staged の
   drain で古い集合が新しい集合を上書きするのを防ぎます。
+- publication は snapshot の後に行います。宣言はそれまで保留されるので、
+  最初に適用される宣言は queue にたまたま入っていた event ではなく network
+  全体を述べたものになります。desired set を宣言する plugin にとって、この
+  違いは収束するか自分の持ち物を全部 prune するかの違いです。
+- publication は snapshot の後に行います。宣言はそれまで保留されるので、
+  最初に適用される宣言は queue にたまたま入っていた event ではなく network
+  全体を述べたものになります。desired set を宣言する plugin にとって、この
+  違いは収束するか自分の持ち物を全部 prune するかの違いです。
 - 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
-  次の配送の前に再試行します。restore された plugin は daemon の起動途中に
+  次の配送の前に再試行します。保留されている数は stats に出し、最初の失敗は
+  warning に出します。何かを待っている plugin は、配送の counter だけ見ると
+  暇な plugin と区別が付きません。保留されている数は stats に出し、最初の失敗は
+  warning に出します。何かを待っている plugin は、配送の counter だけ見ると
+  暇な plugin と区別が付きません。restore された plugin は daemon の起動途中に
   configure から宣言するので、operator が後から RPC で登録する locator を
   名指しした宣言はその時点では失敗します。plugin は言うべきことを既に言い
   終えているため、再試行が無いと SID と広告が restart から戻りません。

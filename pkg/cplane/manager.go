@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -126,6 +127,18 @@ type Manager struct {
 	encapSource func() (netip.Addr, error)
 	logger      *zap.Logger
 
+	// unrestored holds the plugins the store had but that would not come
+	// back, keyed by name.
+	//
+	// They are kept because the daemon is still holding something of
+	// theirs: the state they wrote is pinned in the maps, and their
+	// behaviors stay claimed so nothing installs those routes with the
+	// wrong meaning. Neither is visible from the running set, so without
+	// this an operator sees a plugin that is simply absent, with routes
+	// going nowhere and nothing saying why.
+	unrestoredMu sync.Mutex
+	unrestored   map[string]UnrestoredPlugin
+
 	// applyMu serializes reconciles across every plugin this manager runs.
 	applyMu sync.Mutex
 	// registerMu serializes registration against unregistration.
@@ -243,6 +256,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		logger:      logger,
 		started:     time.Now(),
 		plugins:     make(map[string]*plugin),
+		unrestored:  make(map[string]UnrestoredPlugin),
 	}, nil
 }
 
@@ -285,13 +299,6 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		// holds, which restoreClaims could then not put back.
 		if err := m.claims.Replace(reg.Name, reg.Behaviors); err != nil {
 			return err
-		}
-		// The claim has to reach back over routes that arrived before it.
-		// Done before the plugin is built, so its first declaration finds
-		// the prefixes free rather than owned by an applier that installed
-		// them with the wrong meaning.
-		if r, ok := m.source.(BuiltinRetractor); ok && len(reg.Behaviors) > 0 {
-			r.RetractClaimedFromBuiltins()
 		}
 	} else if len(reg.Behaviors) > 0 {
 		return fmt.Errorf("cplane: plugin %q claims behaviors but no claim registry is configured", reg.Name)
@@ -348,22 +355,37 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		m.teardown(ctx, old)
 	}
 
-	// Anything the plugin declared from configure was held until now, so a
-	// failed instantiation could not leave state behind. It is live, so
-	// let it through.
-	if err := p.ops.Publish(); err != nil {
-		m.logger.Warn("applying what a plugin declared before it was live",
-			zap.String("plugin", reg.Name), zap.Error(err))
+	// The claim reaches back over routes that arrived before it, now that
+	// nothing else can fail. Retracting them from the built-in appliers is
+	// not undoable, so it waits until the plugin that is meant to take
+	// them over is built and subscribed: a module refused at admission
+	// would otherwise leave those routes removed from the appliers with
+	// nothing left implementing them.
+	if m.claims != nil && len(reg.Behaviors) > 0 {
+		if r, ok := m.source.(BuiltinRetractor); ok {
+			r.RetractClaimedFromBuiltins()
+		}
 	}
 
 	if m.source != nil {
-		// Take the snapshot here rather than letting the source replay
-		// through the live path, so nothing of it can be dropped. A
-		// source that cannot register quietly has already replayed, and
+		// The snapshot comes before publication. What the plugin declared
+		// from configure is held either way, and holding it across the
+		// replay means its first applied declaration describes the whole
+		// network rather than the events that happened to be in the queue
+		// -- which, on a plugin that declares a desired set, is the
+		// difference between converging and pruning everything it owns.
+		//
+		// A source that cannot register quietly has already replayed, and
 		// this repairs whatever that dropped.
 		if quiet || p.worker.takeSnapshotDebt() {
 			m.snapshot(p)
 		}
+	}
+
+	// It has seen the network, so what it declared is applied.
+	if err := p.ops.Publish(); err != nil {
+		m.logger.Warn("applying what a plugin declared before it was live",
+			zap.String("plugin", reg.Name), zap.Error(err))
 	}
 
 	// Recorded only once it is actually running, so a module that could
@@ -443,22 +465,109 @@ func (m *Manager) Restore(ctx context.Context) error {
 		if err := m.Register(ctx, reg); err != nil {
 			m.logger.Error("could not restore a plugin from the store",
 				zap.String("plugin", reg.Name), zap.Error(err))
-			// Its behaviors stay reserved. Releasing them would let the
-			// built-in appliers install routes carrying a codepoint they
-			// cannot implement, as ordinary service SIDs -- forwarding
-			// that is silently wrong, which is worse than forwarding that
-			// is visibly absent while the operator fixes the plugin.
-			if len(reg.Behaviors) > 0 {
-				m.logger.Warn("keeping the behaviors of a plugin that could not be restored; "+
-					"routes carrying them are not installed until it is registered again",
-					zap.String("plugin", reg.Name), zap.Uint16s("behaviors", reg.Behaviors))
+			// Its behaviors are re-reserved. Register rolls its own claim
+			// back when it fails -- which is right for an operator's
+			// registration, where nothing was reserved before it -- but a
+			// restore is the other case: the reservation was taken before
+			// the demux started, precisely so routes carrying a codepoint
+			// nothing implements are withheld from the built-in appliers.
+			// Letting the rollback stand would hand them over to be
+			// installed as ordinary service SIDs, which is forwarding that
+			// is silently wrong rather than visibly absent.
+			if len(reg.Behaviors) > 0 && m.claims != nil {
+				if err := m.claims.Replace(reg.Name, reg.Behaviors); err != nil {
+					m.logger.Error("could not keep the behaviors of a plugin that failed to restore; "+
+						"routes carrying them will be installed with the wrong meaning",
+						zap.String("plugin", reg.Name), zap.Error(err))
+				} else {
+					m.logger.Warn("keeping the behaviors of a plugin that could not be restored; "+
+						"routes carrying them are not installed until it is registered again",
+						zap.String("plugin", reg.Name), zap.Uint16s("behaviors", reg.Behaviors))
+				}
 			}
+			// Recorded so it is visible. The daemon is still holding its
+			// state and its claim; an operator who cannot see that has no
+			// way to connect the routes going nowhere to the plugin that
+			// failed to start.
+			m.recordUnrestored(reg, err)
 			continue
 		}
+		m.clearUnrestored(reg.Name)
 		m.logger.Info("restored a control-plane plugin from the store",
 			zap.String("plugin", reg.Name))
 	}
 	return listErr
+}
+
+// UnrestoredPlugin is a plugin the store held that would not start.
+type UnrestoredPlugin struct {
+	Name string
+	// Behaviors are the codepoints still claimed on its behalf, which is
+	// why routes carrying them reach nothing.
+	Behaviors []uint16
+	// Reason is why it would not start, in the operator's words.
+	Reason string
+	// Since is when the attempt failed.
+	Since time.Time
+}
+
+func (m *Manager) recordUnrestored(reg Registration, cause error) {
+	m.unrestoredMu.Lock()
+	defer m.unrestoredMu.Unlock()
+	m.unrestored[reg.Name] = UnrestoredPlugin{
+		Name:      reg.Name,
+		Behaviors: append([]uint16(nil), reg.Behaviors...),
+		Reason:    cause.Error(),
+		Since:     time.Now(),
+	}
+}
+
+func (m *Manager) clearUnrestored(name string) {
+	m.unrestoredMu.Lock()
+	defer m.unrestoredMu.Unlock()
+	delete(m.unrestored, name)
+}
+
+// Unrestored lists the plugins the store held that would not start,
+// sorted by name.
+func (m *Manager) Unrestored() []UnrestoredPlugin {
+	m.unrestoredMu.Lock()
+	out := make([]UnrestoredPlugin, 0, len(m.unrestored))
+	for _, u := range m.unrestored {
+		out = append(out, u)
+	}
+	m.unrestoredMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Forget removes a plugin that would not start: it releases the claim it
+// was holding, drops it from the store, and stops reporting it.
+//
+// It is the counterpart of Unregister for something that never ran. The
+// state it left in the maps is not touched, because nothing here knows
+// what that state was for; releasing the claim is what an operator does
+// once they have decided the plugin is not coming back.
+func (m *Manager) Forget(name string) error {
+	m.registerMu.Lock()
+	defer m.registerMu.Unlock()
+
+	m.unrestoredMu.Lock()
+	_, held := m.unrestored[name]
+	m.unrestoredMu.Unlock()
+	if !held {
+		return fmt.Errorf("cplane: plugin %q is not one that failed to restore", name)
+	}
+	if m.claims != nil {
+		m.claims.Release(name)
+	}
+	if err := m.store.Remove(name); err != nil {
+		return fmt.Errorf("cplane: remove plugin %q from the store: %w", name, err)
+	}
+	m.clearUnrestored(name)
+	m.logger.Info("forgot a control-plane plugin that could not be restored",
+		zap.String("plugin", name))
+	return nil
 }
 
 // build instantiates a plugin and its delivery worker without publishing
@@ -592,6 +701,11 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 		// to deal with. Put it back so the operator can retry.
 		m.mu.Lock()
 		if _, taken := m.plugins[name]; !taken {
+			// Marked dead: the instance is closed and the worker stopped,
+			// so nothing about it is running. It is back in the registry
+			// only so the operator can see the state it could not remove
+			// and retry the removal.
+			p.dead = true
 			m.plugins[name] = p
 		}
 		m.mu.Unlock()
@@ -755,21 +869,23 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 		m.logger.Debug("closing the failed instance", zap.String("plugin", p.name), zap.Error(err))
 	}
 
-	// It is running now, so what it declared while being built is applied.
-	if err := p.ops.Publish(); err != nil {
-		m.logger.Warn("applying what a restarted plugin declared before it was live",
-			zap.String("plugin", p.name), zap.Error(err))
-	}
-
 	// The replacement remembers nothing, so it has to be told what the
-	// network looks like. Without this its first declaration describes
-	// only the events that happened to arrive after the restart, and the
-	// reconcile prunes everything else the plugin owned.
+	// network looks like before anything it declares is applied. Its
+	// declarations stay held until then: the queue still holds events
+	// meant for the instance that died, and a set built from those alone
+	// would prune everything else this plugin owns before the replay could
+	// restate it.
 	//
 	// It runs on a goroutine of its own because this is the worker
 	// goroutine: the snapshot is delivered through the same queue and
 	// would deadlock against itself.
-	go m.snapshot(p)
+	go func() {
+		m.snapshot(p)
+		if err := p.ops.Publish(); err != nil {
+			m.logger.Warn("applying what a restarted plugin declared before it was live",
+				zap.String("plugin", p.name), zap.Error(err))
+		}
+	}()
 }
 
 // snapshot rebuilds a plugin's view from the rib.
