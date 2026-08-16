@@ -38,6 +38,12 @@ type Advertiser interface {
 type RouteValidator interface {
 	ValidateVPNRoute(r bgp.VPNRoute) error
 	ValidateUnicastRoute(r bgp.UnicastRoute) error
+	// CanonicalRD renders a route distinguisher the one way the wire has
+	// it. The lease key contains the RD, so two spellings of one RD --
+	// 65000:1 and 065000:0001 are the same on the wire -- would lease
+	// separately and let a second plugin originate an NLRI the first
+	// already holds, which AddPath then supersedes with no error anywhere.
+	CanonicalRD(rd string) (string, error)
 }
 
 // AdvertisedRoute is one route an owner wants originated.
@@ -124,12 +130,16 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 		if err != nil {
 			return res, err
 		}
+		// Canonicalized and checked by the encoder before the key is
+		// built, so the key is the NLRI as it goes on the wire and a route
+		// the encoder would refuse is refused here, before the withdraw
+		// phase has touched anything.
+		if r, err = a.canonicalize(r); err != nil {
+			return res, err
+		}
 		k := r.key()
 		if _, dup := byKey[k]; dup {
 			return res, fmt.Errorf("advertise: %s %s declared twice", r.Family, r.Prefix)
-		}
-		if err := a.validateEncodable(r); err != nil {
-			return res, err
 		}
 		byKey[k] = r
 		keys = append(keys, k)
@@ -246,8 +256,16 @@ func (a *AdvertiseSet) WithdrawOwner(ctx context.Context, owner bpf.OwnerTag) er
 			continue
 		}
 		if a.adv != nil {
-			if err := a.adv.Withdraw(ctx, route.routeKey()); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("advertise: withdraw %s %s: %w", route.Family, route.Prefix, err)
+			if err := a.adv.Withdraw(ctx, route.routeKey()); err != nil {
+				// Still advertised, so it is still this owner's. Forgetting
+				// it here would leave a route on the wire that nothing
+				// tracks, with the state behind it about to be removed --
+				// a blackhole -- and would free the lease for another
+				// plugin to originate the same NLRI over the top of it.
+				if firstErr == nil {
+					firstErr = fmt.Errorf("advertise: withdraw %s %s: %w", route.Family, route.Prefix, err)
+				}
+				continue
 			}
 		}
 		a.mu.Lock()
@@ -258,7 +276,9 @@ func (a *AdvertiseSet) WithdrawOwner(ctx context.Context, owner bpf.OwnerTag) er
 		}
 	}
 	a.mu.Lock()
-	delete(a.live, owner)
+	if len(current) == 0 {
+		delete(a.live, owner)
+	}
 	a.mu.Unlock()
 	return firstErr
 }
@@ -270,12 +290,19 @@ func (a *AdvertiseSet) LiveCount(owner bpf.OwnerTag) int {
 	return len(a.live[owner])
 }
 
-// validateEncodable asks the advertiser whether it could encode this
-// route, when it is able to answer.
-func (a *AdvertiseSet) validateEncodable(r AdvertisedRoute) error {
+// canonicalize puts a route in the form the wire has it and asks the
+// advertiser whether it could encode it, when it is able to answer.
+func (a *AdvertiseSet) canonicalize(r AdvertisedRoute) (AdvertisedRoute, error) {
 	v, ok := a.adv.(RouteValidator)
 	if !ok {
-		return nil
+		return r, nil
+	}
+	if r.RD != "" {
+		rd, err := v.CanonicalRD(r.RD)
+		if err != nil {
+			return r, fmt.Errorf("advertise: %s %s route distinguisher %q: %w", r.Family, r.Prefix, r.RD, err)
+		}
+		r.RD = rd
 	}
 	var err error
 	switch r.Family {
@@ -293,9 +320,9 @@ func (a *AdvertiseSet) validateEncodable(r AdvertisedRoute) error {
 		err = v.ValidateUnicastRoute(bgp.UnicastRoute{Prefix: r.Prefix, NextHop: r.NextHop})
 	}
 	if err != nil {
-		return fmt.Errorf("advertise: %s %s cannot be originated: %w", r.Family, r.Prefix, err)
+		return r, fmt.Errorf("advertise: %s %s cannot be originated: %w", r.Family, r.Prefix, err)
 	}
-	return nil
+	return r, nil
 }
 
 // originate pushes one route out, choosing the call that matches its
@@ -384,6 +411,14 @@ func normalizeAdvertised(r AdvertisedRoute) (AdvertisedRoute, error) {
 		if r.EndpointBehavior != 0 {
 			return r, fmt.Errorf("advertise: %s %s carries no SID TLV, so endpoint behavior %d cannot be advertised with it",
 				r.Family, r.Prefix, r.EndpointBehavior)
+		}
+		if r.RD != "" {
+			return r, fmt.Errorf("advertise: %s %s is not a VPN route, so it cannot carry route distinguisher %q",
+				r.Family, r.Prefix, r.RD)
+		}
+		if len(r.RouteTargets) > 0 {
+			return r, fmt.Errorf("advertise: %s %s is not a VPN route, so it cannot carry route targets",
+				r.Family, r.Prefix)
 		}
 	default:
 		return r, fmt.Errorf("advertise: family %s cannot be originated by a plugin", r.Family)

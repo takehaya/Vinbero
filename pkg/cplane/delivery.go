@@ -28,6 +28,10 @@ const deliveryQueueDepth = 256
 // are not worth a busy timer on every plugin.
 const retryInterval = 15 * time.Second
 
+// maxDrainRounds bounds how long releasing a snapshot's hold will chase
+// events that keep arriving before it forces the hold shut.
+const maxDrainRounds = 8
+
 // worker owns all delivery to one plugin.
 //
 // It exists because guest calls must not happen on the BGP watch
@@ -128,7 +132,10 @@ func newWorker(
 // prunes the state it can no longer see. So a drop is recorded as owing a
 // snapshot, and the manager rebuilds the view from the rib rather than
 // letting the plugin act on a partial one.
-func (w *worker) submit(batch *v1.PluginEventBatch) {
+// It reports whether the batch was accepted. Most callers have nothing to
+// do with the answer -- a dropped route is repaired by the snapshot the
+// drop owes -- but an event the snapshot cannot regenerate has to know.
+func (w *worker) submit(batch *v1.PluginEventBatch) bool {
 	w.mu.Lock()
 	w.submitted++
 	if w.holding {
@@ -137,7 +144,7 @@ func (w *worker) submit(batch *v1.PluginEventBatch) {
 		if len(w.pending) < deliveryQueueDepth {
 			w.pending = append(w.pending, batch)
 			w.mu.Unlock()
-			return
+			return true
 		}
 		// Too far behind to hold any more. Drop, and owe another
 		// snapshot: the view this one is building is already stale.
@@ -145,11 +152,12 @@ func (w *worker) submit(batch *v1.PluginEventBatch) {
 		w.processed++
 		w.owesSnapshot = true
 		w.mu.Unlock()
-		return
+		return false
 	}
 	w.mu.Unlock()
 	select {
 	case w.queue <- batch:
+		return true
 	default:
 		w.mu.Lock()
 		w.dropped++
@@ -165,6 +173,7 @@ func (w *worker) submit(batch *v1.PluginEventBatch) {
 				zap.String("plugin", w.name),
 				zap.Uint64("dropped_total", dropped))
 		}
+		return false
 	}
 }
 
@@ -293,12 +302,15 @@ func (w *worker) beginSnapshot() {
 // endSnapshot releases the live events that arrived during the snapshot,
 // in the order they arrived.
 func (w *worker) endSnapshot() {
-	// Held events are drained while holding is still set, and it is
-	// cleared only once there is nothing left to drain. Clearing it first
-	// would let an event arriving mid-drain go straight to the queue and
-	// overtake the ones already waiting: holding A and B, a C arriving
-	// then would be delivered A, C, B.
-	for {
+	// Held events are drained while holding is still set, so an event
+	// arriving mid-drain queues behind them rather than overtaking them:
+	// holding A and B, a C arriving then must not be delivered A, C, B.
+	//
+	// The rounds are bounded because arrivals do not stop. A plugin slower
+	// than its traffic would keep the hold populated forever, and the hold
+	// is released by whoever took the snapshot -- on a register, that is
+	// the RPC, which would never return.
+	for round := 0; round < maxDrainRounds; round++ {
 		w.mu.Lock()
 		if len(w.pending) == 0 {
 			w.holding = false
@@ -319,6 +331,25 @@ func (w *worker) endSnapshot() {
 			}
 		}
 	}
+
+	// The last round runs under the lock, so nothing can arrive between
+	// the final hand-off and the release. That means the sends cannot
+	// block, so what does not fit is dropped -- which is the same thing
+	// that happens to a live event when the queue is full, and it owes the
+	// same snapshot.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, batch := range w.pending {
+		select {
+		case w.queue <- batch:
+		default:
+			w.dropped++
+			w.processed++
+			w.owesSnapshot = true
+		}
+	}
+	w.pending = nil
+	w.holding = false
 }
 
 // submitBlocking queues a batch, waiting for room rather than dropping.

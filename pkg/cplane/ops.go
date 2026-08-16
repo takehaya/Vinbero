@@ -28,15 +28,12 @@ type PluginOps struct {
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
 	quotas      Quotas
-	onLocalSIDs func([]AllocatedSID)
+	onLocalSIDs func([]AllocatedSID) bool
 	// notifiedSIDs remembers which allocations this instance has already
 	// been told about, keyed by name and carrying the address it was given.
 	notifiedSIDs map[string]netip.Addr
-	// pending holds declarations that failed at publication and are worth
-	// retrying, because what they depended on may not have existed yet.
-	pending     []*applyTxn
-	encapSource func() (netip.Addr, error)
-	logger      *zap.Logger
+	encapSource  func() (netip.Addr, error)
+	logger       *zap.Logger
 	// applyMu is shared by every plugin under one manager, and is held for
 	// the whole of a reconcile.
 	//
@@ -72,11 +69,29 @@ type PluginOps struct {
 	// discarded if it never does.
 	staged    []*applyTxn
 	published bool
+	// pending holds the declaration of each kind that failed at
+	// publication and is worth retrying, because what it depended on may
+	// not have existed yet. One per kind: a newer declaration replaces the
+	// one it supersedes rather than queueing behind it.
+	pending map[v1.PluginApplyKind]*applyTxn
+	// commits numbers transactions in commit order, and lastApplied is the
+	// highest number reconciled for each kind. Together they stop an older
+	// declaration from overwriting a newer one -- which a retry, or a
+	// staged declaration draining alongside a live commit, would otherwise
+	// do.
+	commits     uint64
+	lastApplied map[v1.PluginApplyKind]uint64
 }
 
 // applyTxn is one open desired-set declaration.
 type applyTxn struct {
-	kind    v1.PluginApplyKind
+	kind v1.PluginApplyKind
+	// seq is this transaction's position in commit order, stamped at
+	// commit. A declaration is a statement about a whole set, so applying
+	// an older one after a newer one of the same kind puts back a set the
+	// plugin has already replaced -- which is what a retry, or a staged
+	// declaration draining alongside a live commit, would otherwise do.
+	seq     uint64
 	entries []HeadendDesired
 	routes  []AdvertisedRoute
 	sids    []LocalSID
@@ -104,7 +119,7 @@ type PluginOpsConfig struct {
 	Quotas Quotas
 	// OnLocalSIDs is called with what a local-SID declaration resolved to,
 	// so the plugin can be told the addresses it was given.
-	OnLocalSIDs func([]AllocatedSID)
+	OnLocalSIDs func([]AllocatedSID) bool
 	// EncapSource resolves the daemon's encap source for a declared entry
 	// that names none.
 	//
@@ -318,24 +333,37 @@ func (p *PluginOps) Publish() error {
 	// failure: they are separate statements about separate sets, and
 	// dropping the rest would leave a plugin live with part of what it
 	// declared never applied and nothing to retry it.
-	var (
-		firstErr error
-		failed   []*applyTxn
-	)
+	//
+	// Only the newest failure of each kind is kept for retry. Two staged
+	// declarations of one kind are two statements about the same set, so
+	// retrying the older one after the newer succeeded would put back the
+	// set the plugin had already replaced.
+	var firstErr error
 	for _, txn := range staged {
 		if err := p.applyTransaction(txn); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
-			failed = append(failed, txn)
+			p.holdForRetry(txn)
+			continue
 		}
-	}
-	if len(failed) > 0 {
-		p.mu.Lock()
-		p.pending = append(p.pending, failed...)
-		p.mu.Unlock()
+		p.dropPending(txn.kind)
 	}
 	return firstErr
+}
+
+// holdForRetry keeps one failed declaration, replacing any older one of
+// the same kind.
+func (p *PluginOps) holdForRetry(txn *applyTxn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pending == nil {
+		p.pending = make(map[v1.PluginApplyKind]*applyTxn)
+	}
+	if held, ok := p.pending[txn.kind]; ok && held.seq > txn.seq {
+		return
+	}
+	p.pending[txn.kind] = txn
 }
 
 // RetryPending reapplies declarations that could not be applied when the
@@ -354,23 +382,14 @@ func (p *PluginOps) RetryPending() {
 	pending := p.pending
 	p.pending = nil
 	p.mu.Unlock()
-	if len(pending) == 0 {
-		return
-	}
-	var stillFailing []*applyTxn
 	for _, txn := range pending {
 		if err := p.applyTransaction(txn); err != nil {
-			stillFailing = append(stillFailing, txn)
+			p.holdForRetry(txn)
 			p.logger.Debug("a declaration held from before the plugin was live still cannot be applied",
 				zap.Error(err))
 			continue
 		}
 		p.logger.Info("applied a declaration that was held from before the plugin was live")
-	}
-	if len(stillFailing) > 0 {
-		p.mu.Lock()
-		p.pending = append(stillFailing, p.pending...)
-		p.mu.Unlock()
 	}
 }
 
@@ -385,6 +404,11 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 	txn, ok := p.open[generation]
 	if ok {
 		delete(p.open, generation)
+		// Numbered in commit order, which is the order the plugin meant.
+		// Everything downstream -- staged drains, retries -- compares this
+		// rather than trusting the order it happens to run in.
+		p.commits++
+		txn.seq = p.commits
 	}
 	published := p.published
 	if ok && !published {
@@ -414,22 +438,25 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 func (p *PluginOps) dropPending(kind v1.PluginApplyKind) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	kept := p.pending[:0]
-	for _, txn := range p.pending {
-		if txn.kind != kind {
-			kept = append(kept, txn)
-		}
-	}
-	p.pending = kept
+	delete(p.pending, kind)
 }
 
 // applyTransaction is the reconcile itself, shared by a live commit and by
 // one replayed at publication.
 func (p *PluginOps) applyTransaction(txn *applyTxn) error {
+	// The whole reconcile runs under applyMu, and the staleness check runs
+	// inside it. Checking outside would let two applies of one kind pass
+	// the check together and then land in either order.
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+	if p.stale(txn) {
+		// A newer declaration of this kind has already been applied, so
+		// this one describes a set the plugin has moved on from.
+		return nil
+	}
+
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
-		p.applyMu.Lock()
 		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids, p.quotas.MaxLocalSIDs)
-		p.applyMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("apply commit: %w", err)
 		}
@@ -448,17 +475,21 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 		// response, and never stop. A fresh instance has an empty record,
 		// so a restart still learns every address it holds.
 		if p.onLocalSIDs != nil {
-			if fresh := p.unnotified(allocated); len(fresh) > 0 {
-				p.onLocalSIDs(fresh)
+			// Recorded only once the event is queued. A dropped batch is
+			// unrecoverable here: the BGP snapshot replays routes, not SID
+			// allocations, so a plugin suppressed on the strength of an
+			// event it never received would never hear the address again.
+			if fresh := p.freshAllocations(allocated); len(fresh) > 0 {
+				if p.onLocalSIDs(fresh) {
+					p.recordNotified(fresh)
+				}
 			}
 		}
 		return nil
 	}
 
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
-		p.applyMu.Lock()
 		res, err := p.advertise.Apply(context.Background(), p.owner, txn.routes, p.quotas.MaxAdvertisedRoutes)
-		p.applyMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("apply commit: %w", err)
 		}
@@ -474,9 +505,7 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
 		af = AFv6
 	}
-	p.applyMu.Lock()
 	res, err := ApplyHeadendSet(p.headend, p.leases, p.owner, af, txn.entries, p.quotas.MaxHeadendEntries)
-	p.applyMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("apply commit: %w", err)
 	}
@@ -489,12 +518,31 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	return nil
 }
 
+// stale reports whether a newer declaration of this kind has already been
+// applied, and otherwise records this one as the newest.
+//
+// Called with applyMu held.
+func (p *PluginOps) stale(txn *applyTxn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lastApplied == nil {
+		p.lastApplied = make(map[v1.PluginApplyKind]uint64)
+	}
+	if txn.seq != 0 && txn.seq < p.lastApplied[txn.kind] {
+		return true
+	}
+	if txn.seq > p.lastApplied[txn.kind] {
+		p.lastApplied[txn.kind] = txn.seq
+	}
+	return false
+}
+
 // unnotified returns the allocations this instance has not been told about
 // yet, and records them as told.
 //
 // An address that changed under a name counts as new: the plugin is
 // advertising the old one and has to hear about the replacement.
-func (p *PluginOps) unnotified(allocated []AllocatedSID) []AllocatedSID {
+func (p *PluginOps) freshAllocations(allocated []AllocatedSID) []AllocatedSID {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	live := make(map[string]struct{}, len(allocated))
@@ -504,7 +552,6 @@ func (p *PluginOps) unnotified(allocated []AllocatedSID) []AllocatedSID {
 		if was, told := p.notifiedSIDs[got.Name]; told && was == got.SID {
 			continue
 		}
-		p.notifiedSIDs[got.Name] = got.SID
 		fresh = append(fresh, got)
 	}
 	// A name the plugin stopped declaring is forgotten, so declaring it
@@ -515,6 +562,15 @@ func (p *PluginOps) unnotified(allocated []AllocatedSID) []AllocatedSID {
 		}
 	}
 	return fresh
+}
+
+// recordNotified marks allocations as told, once they have been queued.
+func (p *PluginOps) recordNotified(fresh []AllocatedSID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, got := range fresh {
+		p.notifiedSIDs[got.Name] = got.SID
+	}
 }
 
 // ApplyAbort discards an open transaction.
@@ -530,6 +586,26 @@ func (p *PluginOps) OpenTransactions() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.open)
+}
+
+// BeginInstance puts the ops back into the state a fresh instance starts
+// from, and must be called before that instance runs.
+//
+// Two things belong to the instance rather than to the registration. The
+// record of which SID addresses it has been told is one: an instance that
+// replaced a trapped one knows nothing, and suppressing the notification
+// because its predecessor had it would leave it holding SIDs it cannot
+// advertise. The other is publication: declarations made while the
+// instance is being built are held, so an instantiation that then fails
+// leaves the state its predecessor wrote untouched instead of pruning it
+// on the way out.
+func (p *PluginOps) BeginInstance() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.open = make(map[uint64]*applyTxn)
+	p.staged = nil
+	p.notifiedSIDs = make(map[string]netip.Addr)
+	p.published = false
 }
 
 // DiscardTransactions drops every open transaction. The instance running

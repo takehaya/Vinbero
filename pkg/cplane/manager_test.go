@@ -30,10 +30,19 @@ func declareModule(t *testing.T) []byte {
 }
 
 // fakeSource stands in for the demux.
+//
+// Consumers are keyed by an id, not by name, because that is what the
+// demux does: an upgrade subscribes its replacement before cancelling the
+// version it replaces, so for a moment one name has two subscriptions. A
+// name-keyed fake makes the second registration erase the first, and the
+// cancel that follows then removes the wrong one -- which looks like a bug
+// in the manager and is not.
 type fakeSource struct {
 	mu          sync.Mutex
-	handlers    map[string]bgp.RouteHandler
-	families    map[string][]bgp.Family
+	handlers    map[int]bgp.RouteHandler
+	names       map[int]string
+	families    map[int][]bgp.Family
+	nextID      int
 	regErr      error
 	cancels     int
 	rib         []bgp.RouteEvent
@@ -43,8 +52,9 @@ type fakeSource struct {
 
 func newFakeSource() *fakeSource {
 	return &fakeSource{
-		handlers: map[string]bgp.RouteHandler{},
-		families: map[string][]bgp.Family{},
+		handlers: map[int]bgp.RouteHandler{},
+		names:    map[int]string{},
+		families: map[int][]bgp.Family{},
 	}
 }
 
@@ -53,20 +63,38 @@ func (f *fakeSource) Register(name string, families []bgp.Family, h bgp.RouteHan
 		return nil, f.regErr
 	}
 	f.mu.Lock()
-	f.handlers[name] = h
-	f.families[name] = families
+	id := f.nextID
+	f.nextID++
+	f.handlers[id] = h
+	f.names[id] = name
+	f.families[id] = families
 	f.mu.Unlock()
+	var once sync.Once
 	return func() {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.cancels++
-		delete(f.handlers, name)
+		once.Do(func() {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.cancels++
+			delete(f.handlers, id)
+			delete(f.names, id)
+			delete(f.families, id)
+		})
 	}, nil
 }
 
+// emit delivers to the newest subscription under a name, as the demux
+// would deliver to whichever consumer is live.
 func (f *fakeSource) emit(name string, ev bgp.RouteEvent) bool {
 	f.mu.Lock()
-	h := f.handlers[name]
+	var (
+		h      bgp.RouteHandler
+		newest = -1
+	)
+	for id, got := range f.names {
+		if got == name && id > newest {
+			newest, h = id, f.handlers[id]
+		}
+	}
 	f.mu.Unlock()
 	if h == nil {
 		return false
@@ -125,8 +153,12 @@ func (f *fakeSource) snapshotCount() int {
 func (f *fakeSource) registered(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, ok := f.handlers[name]
-	return ok
+	for _, got := range f.names {
+		if got == name {
+			return true
+		}
+	}
+	return false
 }
 
 // fakeClaims records behavior claims.
@@ -139,6 +171,13 @@ type fakeClaims struct {
 
 func newFakeClaims() *fakeClaims {
 	return &fakeClaims{held: map[string][]uint16{}}
+}
+
+// claimed reports whether a plugin currently holds any codepoint.
+func (c *fakeClaims) claimed(plugin string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.held[plugin]) > 0
 }
 
 func (c *fakeClaims) Replace(plugin string, codepoints []uint16) error {
@@ -1191,5 +1230,223 @@ func TestDeclarationHeldFromBeforeLiveIsRetried(t *testing.T) {
 	ops.RetryPending()
 	if got := sids.count(); got != 1 {
 		t.Fatalf("the retried declaration was applied again: %d SIDs", got)
+	}
+}
+
+// A replacement instance knows nothing, including which addresses its
+// predecessor was given. Suppressing the notification because the previous
+// instance had heard it leaves the new one holding SIDs it cannot
+// advertise, which is the whole point of being told.
+func TestRestartedInstanceIsToldItsLocalSIDsAgain(t *testing.T) {
+	sids := newFakeSIDOps()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Capabilities: testCaps(),
+		LocalSIDs:    NewLocalSIDSet(&fakeAllocator{}, sids),
+		OnLocalSIDs:  func([]AllocatedSID) bool { return true },
+	})
+	if err != nil {
+		t.Fatalf("new plugin ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	declare := func() []AllocatedSID {
+		t.Helper()
+		var told []AllocatedSID
+		ops.onLocalSIDs = func(sids []AllocatedSID) bool {
+			told = append(told, sids...)
+			return true
+		}
+		gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID))
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		chunk, err := proto.Marshal(&v1.PluginApplyChunk{
+			LocalSids: []*v1.PluginLocalSid{{Name: "svc", Locator: "main", Slot: 33}},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := ops.ApplyPut(gen, chunk); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		if err := ops.ApplyCommit(gen); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		return told
+	}
+
+	first := declare()
+	if len(first) != 1 {
+		t.Fatalf("the first declaration produced %d notifications, want 1", len(first))
+	}
+	// Redeclaring the same set within one instance says nothing new.
+	if again := declare(); len(again) != 0 {
+		t.Fatalf("redeclaring told the same instance again: %v", again)
+	}
+
+	// The instance traps and is replaced.
+	ops.BeginInstance()
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish after restart: %v", err)
+	}
+	after := declare()
+	if len(after) != 1 || after[0].SID != first[0].SID {
+		t.Fatalf("the replacement was told %v, want the same address as before (%v)", after, first[0].SID)
+	}
+}
+
+// A replacement that fails to start must not take the state its
+// predecessor left behind with it. What it declares while being built is
+// held, exactly as it is for a first registration.
+func TestDeclarationsFromAFailedRestartAreNotApplied(t *testing.T) {
+	headend := newFakeHeadendOps()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: ownerA, Headend: headend, Leases: NewLeases(),
+		Capabilities: testCaps(), EncapSource: testEncapSource,
+	})
+	if err != nil {
+		t.Fatalf("new plugin ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	declareEntries := func(prefixes ...string) {
+		t.Helper()
+		gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		chunk := &v1.PluginApplyChunk{}
+		for _, prefix := range prefixes {
+			chunk.HeadendEntries = append(chunk.HeadendEntries, &v1.PluginHeadendEntry{
+				TriggerPrefix: prefix, Segments: []string{"fd00:2::1"},
+			})
+		}
+		body, err := proto.Marshal(chunk)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := ops.ApplyPut(gen, body); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		if err := ops.ApplyCommit(gen); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	declareEntries("10.0.0.0/24")
+	if headend.countV4() != 1 {
+		t.Fatalf("setup: %d entries, want 1", headend.countV4())
+	}
+
+	// The replacement is being built, and declares an empty set before it
+	// fails. Nothing is published, so nothing is applied.
+	ops.BeginInstance()
+	declareEntries()
+	if headend.countV4() != 1 {
+		t.Fatalf("a declaration from an instance that never started pruned the live state: %d entries",
+			headend.countV4())
+	}
+}
+
+// Two declarations of one kind are two statements about the same set. If
+// the older one failed and is retried after the newer one succeeded, it
+// must not put back the set the plugin has already replaced.
+func TestARetryDoesNotUndoANewerDeclaration(t *testing.T) {
+	alloc := &fakeAllocator{failOn: "late"}
+	sids := newFakeSIDOps()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Capabilities: testCaps(),
+		LocalSIDs:    NewLocalSIDSet(alloc, sids),
+	})
+	if err != nil {
+		t.Fatalf("new plugin ops: %v", err)
+	}
+	declare := func(locator string) {
+		t.Helper()
+		gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID))
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		chunk, err := proto.Marshal(&v1.PluginApplyChunk{
+			LocalSids: []*v1.PluginLocalSid{{Name: "svc", Locator: locator, Slot: 33}},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := ops.ApplyPut(gen, chunk); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		if err := ops.ApplyCommit(gen); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// Both are declared before the plugin is live: the first names a
+	// locator that does not exist, the second corrects it.
+	declare("late")
+	declare("main")
+	if err := ops.Publish(); err == nil {
+		t.Fatal("publishing a declaration naming a missing locator succeeded")
+	}
+	if got := sids.count(); got != 1 {
+		t.Fatalf("%d SIDs installed after publication, want the corrected one", got)
+	}
+
+	// The missing locator turns up. Retrying the superseded declaration
+	// must not move the plugin back onto it.
+	alloc.mu.Lock()
+	alloc.failOn = ""
+	alloc.mu.Unlock()
+	ops.RetryPending()
+	if got := sids.count(); got != 1 {
+		t.Fatalf("the retry left %d SIDs installed, want the corrected one only", got)
+	}
+}
+
+// Removing a plugin does not hand its routes to the built-in appliers.
+// Nothing else implements the behavior it implemented, and to the built-in
+// a private codepoint is just a service SID -- installing it as one is the
+// wrong-meaning install the claim existed to prevent.
+func TestUnregisterDoesNotHandTheRoutesToTheBuiltins(t *testing.T) {
+	src := newFakeSource()
+	claims := newFakeClaims()
+	m, ops := newTestManager(t, src, claims)
+
+	reg := Registration{
+		Name: "declare", Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(),
+	}
+	if err := m.Register(context.Background(), reg); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "declare")
+	if ops.countV4() != 1 {
+		t.Fatalf("setup: %d entries, want 1", ops.countV4())
+	}
+
+	replaysBefore := src.snapshotCount()
+	if err := m.Unregister(context.Background(), "declare"); err != nil {
+		t.Fatalf("unregister: %v", err)
+	}
+	if got := ops.countV4(); got != 0 {
+		t.Fatalf("the data plane still holds %d entries after unregistration", got)
+	}
+	// The claim is given back, so the codepoint is free for another
+	// plugin -- but nothing replayed those routes to anyone.
+	if claims.claimed("declare") {
+		t.Error("unregistering left the behavior claimed")
+	}
+	if got := src.snapshotCount() - replaysBefore; got != 0 {
+		t.Errorf("unregistering replayed the rib %d times; it must replay to nobody", got)
 	}
 }

@@ -395,6 +395,27 @@ func run(cliCtx *cli.Context) error {
 		if _, err := routeDemux.RegisterBuiltin("applier", nil, applier.Apply); err != nil {
 			return fmt.Errorf("register BGP applier: %w", err)
 		}
+
+		// Plugins are kept across a restart unless the operator turned it
+		// off. A daemon that forgot them would come back holding the
+		// entries they wrote -- pinned maps outlive the process -- under
+		// an owner nothing can reconcile any more.
+		var cplaneStore *cplane.Store
+		if cfg.Setting.CplanePlugins.Enabled {
+			cplaneStore, err = cplane.NewStore(cfg.Setting.CplanePlugins.Path)
+			if err != nil {
+				return fmt.Errorf("open control-plane plugin store: %w", err)
+			}
+			// Their behaviors are claimed before the first route moves.
+			// Starting the demux replays everything already in the rib, so
+			// a route carrying a stored plugin's codepoint would otherwise
+			// reach the built-in appliers first and be installed as an
+			// ordinary service SID, under their owner, in the plugin's way.
+			if err := cplane.ReserveStoredClaims(cplaneStore, claimRegistry, lg.Named("cplane")); err != nil {
+				lg.Warn("reserving the behaviors of stored control-plane plugins", zap.Error(err))
+			}
+		}
+
 		if err := routeDemux.Start(); err != nil {
 			return fmt.Errorf("subscribe BGP routes: %w", err)
 		}
@@ -409,17 +430,6 @@ func run(cliCtx *cli.Context) error {
 		// daemon starts, so an address captured now is usually the one
 		// that did not exist yet, and an entry written with a zero source
 		// blackholes without saying so.
-		// Plugins are kept across a restart unless the operator turned it
-		// off. A daemon that forgot them would come back holding the
-		// entries they wrote -- pinned maps outlive the process -- under
-		// an owner nothing can reconcile any more.
-		var cplaneStore *cplane.Store
-		if cfg.Setting.CplanePlugins.Enabled {
-			cplaneStore, err = cplane.NewStore(cfg.Setting.CplanePlugins.Path)
-			if err != nil {
-				return fmt.Errorf("open control-plane plugin store: %w", err)
-			}
-		}
 		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
 			Source:       routeDemux,
 			Claims:       claimRegistry,

@@ -177,14 +177,7 @@ func writeFileAtomic(path string, body []byte) error {
 	// this the rename can be lost on a crash even though the bytes it
 	// points at are safely on disk, which is the half of the guarantee
 	// that matters here: the manifest is what says the plugin exists.
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	// Opened read-only for the sync; nothing was written through it, so a
-	// close failure has nothing to report.
-	defer func() { _ = dir.Close() }()
-	return dir.Sync()
+	return syncDir(filepath.Dir(path))
 }
 
 // moduleFileName names a module after its content, so an upgrade writes a
@@ -217,7 +210,23 @@ func (s *Store) Remove(name string) error {
 	if err := os.Remove(module); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("cplane store: remove module for %q: %w", name, err)
 	}
-	return nil
+	// The unlinks are directory entries like any other, and buffered like
+	// any other. Without this a power loss just after a successful
+	// unregister can bring the plugin back on the next boot.
+	return syncDir(s.dir)
+}
+
+// syncDir flushes a directory's own entries, so a create or an unlink in
+// it survives a crash.
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	// Opened read-only for the sync; nothing was written through it, so a
+	// close failure has nothing to report.
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
 }
 
 // readManifest reads and decodes one manifest without touching its module.

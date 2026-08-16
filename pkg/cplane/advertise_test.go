@@ -13,11 +13,12 @@ import (
 
 // fakeAdvertiser records what was originated and withdrawn.
 type fakeAdvertiser struct {
-	mu        sync.Mutex
-	advertise []bgp.VPNRoute
-	unicast   []bgp.UnicastRoute
-	withdrawn []bgp.RouteKey
-	failOn    string // prefix whose advertise fails
+	mu           sync.Mutex
+	advertise    []bgp.VPNRoute
+	unicast      []bgp.UnicastRoute
+	withdrawn    []bgp.RouteKey
+	failOn       string // prefix whose advertise fails
+	failWithdraw string // prefix whose withdraw fails
 }
 
 func (f *fakeAdvertiser) Advertise(_ context.Context, r bgp.VPNRoute) error {
@@ -40,8 +41,35 @@ func (f *fakeAdvertiser) AdvertiseUnicast(_ context.Context, r bgp.UnicastRoute)
 func (f *fakeAdvertiser) Withdraw(_ context.Context, key bgp.RouteKey) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if key.Prefix == f.failWithdraw {
+		return errors.New("simulated withdraw failure")
+	}
 	f.withdrawn = append(f.withdrawn, key)
 	return nil
+}
+
+// ValidateVPNRoute and CanonicalRD make this a RouteValidator, as the real
+// session is: the set asks the encoder rather than reimplementing its
+// rules. The canonical form here collapses leading zeros, which is enough
+// to stand in for the wire form.
+func (f *fakeAdvertiser) ValidateVPNRoute(bgp.VPNRoute) error { return nil }
+
+func (f *fakeAdvertiser) ValidateUnicastRoute(bgp.UnicastRoute) error { return nil }
+
+func (f *fakeAdvertiser) CanonicalRD(rd string) (string, error) {
+	parts := strings.SplitN(rd, ":", 2)
+	if len(parts) != 2 {
+		return "", errors.New("not an RD")
+	}
+	out := make([]string, 0, 2)
+	for _, part := range parts {
+		trimmed := strings.TrimLeft(part, "0")
+		if trimmed == "" {
+			trimmed = "0"
+		}
+		out = append(out, trimmed)
+	}
+	return strings.Join(out, ":"), nil
 }
 
 func (f *fakeAdvertiser) counts() (int, int) {
@@ -355,5 +383,54 @@ func TestBehaviorWithoutSIDIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no SRv6 SID") {
 		t.Errorf("error does not explain the missing SID: %v", err)
+	}
+}
+
+// Two spellings of one RD are one route on the wire. Leasing the string
+// would let a second plugin take an NLRI the first already originates, and
+// AddPath supersedes it with no error anywhere.
+func TestRouteDistinguisherIsCanonicalizedBeforeLeasing(t *testing.T) {
+	ctx := context.Background()
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+
+	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}, unlimited); err != nil {
+		t.Fatalf("owner A: %v", err)
+	}
+	padded := vpnRoute("10.0.1.0/24", "fd00:2::9")
+	padded.RD = "065000:0001"
+	_, err := set.Apply(ctx, ownerB, []AdvertisedRoute{padded}, unlimited)
+	if err == nil {
+		t.Fatal("a second owner took the same NLRI with the RD spelled differently")
+	}
+	var le *LeaseError
+	if !errors.As(err, &le) {
+		t.Fatalf("error = %v, want a lease conflict", err)
+	}
+}
+
+// A withdrawal that failed leaves the route on the wire. Forgetting it
+// would leave a route nothing tracks, with the state behind it about to be
+// removed, and hand its lease to whoever asks next.
+func TestFailedWithdrawKeepsTheRouteAndItsLease(t *testing.T) {
+	ctx := context.Background()
+	adv := &fakeAdvertiser{failWithdraw: "10.0.1.0/24"}
+	leases := NewLeases()
+	set := NewAdvertiseSet(adv, leases)
+
+	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}, unlimited); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := set.WithdrawOwner(ctx, ownerA); err == nil {
+		t.Fatal("a failed withdrawal was reported as success")
+	}
+	if got := set.LiveCount(ownerA); got != 1 {
+		t.Fatalf("the set holds %d routes after a failed withdrawal, want the one still advertised", got)
+	}
+	// The lease is still held, so nobody else can originate over it.
+	if _, err := leases.AcquireAll(LeaseAdvertise, []string{
+		vpnRoute("10.0.1.0/24", "fd00:2::1").key(),
+	}, ownerB); err == nil {
+		t.Error("another owner took the lease on a route that is still advertised")
 	}
 }

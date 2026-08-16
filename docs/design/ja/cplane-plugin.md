@@ -208,6 +208,36 @@ granted された plugin が同じ扉から headend の transaction を開けま
 plugin は実際に有用で、それが capability を宣言しなかった plugin の安全な
 既定です。
 
+## claim と built-in state の関係
+
+claim は demux が経路を配る先を決める述語なので、claim が立つ前に届いた
+経路は built-in applier が処理してしまいます。built-in は service SID を
+behavior を読まずに解釈するため、plugin 用の codepoint を持つ経路も普通の
+service SID として自分の owner で install します。plugin が同じ prefix に
+書こうとすると owner が衝突して弾かれます。
+
+そこで claim の取得と解放を、経路の流れと突き合わせます。
+
+- 起動時は、store にある plugin の behavior を demux の start より前に予約
+  します。start は rib の replay を伴うので、予約が後だと必ずこの窓に入り
+  ます。予約した plugin の restore が失敗したら claim を解放します。
+- unregister では claim を解放しますが、その経路を built-in に流し直すこと
+  はしません。plugin が実装していた behavior を実装できるものはここには無く、
+  built-in にとって private codepoint はただの service SID なので、渡せば
+  claim が防いでいたはずの誤った意味での install になります。理解していた
+  唯一のものを外した以上、それらの経路が転送されなくなるのが正しい帰結です。
+- restore に失敗した plugin の claim は解放しません。解放すると built-in が
+  実装できない codepoint の経路を service SID として install してしまいます。
+  黙って誤った転送をするより、operator が直すまで転送されない方がましです。
+  claim を保持したことは warning に出します。
+
+残る限界として、運用中に register した plugin が、既に built-in の入れた
+state がある codepoint を claim した場合、その state は撤去されません。
+built-in applier は差分適用なので replay では消せず、撤去には合成した
+withdraw を流し込む必要があります。plugin は config で登録して再起動を
+跨ぐ運用が前提なので、この窓は起動時の予約で塞がる方が本筋だと判断して
+います。
+
 ## 登録時の検証
 
 module は allowlist で検証します。
@@ -237,6 +267,26 @@ module は allowlist で検証します。
   なり、それ以外の entry を全部 prune します。連続失敗が上限を超えたら
   状態を残して止めます。上限は連続失敗の数で、成功配送でリセットします。
 - daemon の shutdown では flush しません。
+- unregister は flush が成功してから claim と store を手放します。先に
+  手放すと、flush が失敗したときに retry する手段が無くなります。claim を
+  先に返せば plugin の state が残ったまま経路が built-in に戻り、store を
+  先に消せば再起動しても後始末をする plugin 自体が居なくなります。flush が
+  失敗した plugin は registry に戻すので、operator が retry できます。
+- upgrade は、走っている plugin に触る前に subscribe まで済ませます。
+  subscribe が失敗する可能性がある間に旧 instance を止めると、demux に
+  断られただけでどちらの版も登録されていない状態になり、閉じた旧
+  instance は復元できません。subscribe から旧 instance の停止までの間は
+  同じ名前に 2 つの subscription がありますが、handler は名前で plugin を
+  引くので配送先は 1 つで、重複した event は desired set が吸収します。
+- instance の入れ替えでは、instance に属する状態を作り直します。宣言した
+  SID の address を伝えたかどうかの記録がそれで、引き継ぐと交代した
+  instance は自分の持つ SID を知らないまま広告できなくなります。publication
+  も同じで、交代中の宣言は保留し、instantiate が失敗したら適用しません。
+  これが無いと、起動に失敗した instance の空宣言が前の instance の state を
+  prune したまま残ります。
+- 宣言には commit 順の番号を振り、同じ kind でより新しい宣言が適用済みなら
+  古い方は適用しません。宣言は集合そのものの宣言なので、retry や staged の
+  drain で古い集合が新しい集合を上書きするのを防ぎます。
 - 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
   次の配送の前に再試行します。restore された plugin は daemon の起動途中に
   configure から宣言するので、operator が後から RPC で登録する locator を

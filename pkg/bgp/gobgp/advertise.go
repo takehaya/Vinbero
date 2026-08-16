@@ -61,6 +61,20 @@ func (s *Session) ValidateUnicastRoute(r bgp.UnicastRoute) error {
 	return err
 }
 
+// CanonicalRD renders a route distinguisher the one way the wire has it.
+//
+// 65000:1 and 065000:0001 are the same RD on the wire and different
+// strings, so a caller keying anything on the string it was handed -- a
+// lease, a diff -- has to canonicalize first or it will treat one route as
+// two.
+func (s *Session) CanonicalRD(rd string) (string, error) {
+	parsed, err := gobgppkt.ParseRouteDistinguisher(rd)
+	if err != nil {
+		return "", err
+	}
+	return parsed.String(), nil
+}
+
 // Withdraw removes a previously advertised route. Withdrawing a route
 // that was never advertised is a no-op so callers can withdraw
 // idempotently.
