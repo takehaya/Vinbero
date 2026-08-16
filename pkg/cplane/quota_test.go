@@ -144,3 +144,57 @@ func TestStatsReportWhatAPluginHolds(t *testing.T) {
 		t.Error("StatsFor invented a plugin")
 	}
 }
+
+// The configured quota has to reach the plugin, not just the stats table.
+// An operator who lowers a limit and sees it reported while the apply path
+// keeps using the default has been told something untrue.
+func TestConfiguredQuotaIsEnforced(t *testing.T) {
+	src := newFakeSource()
+	ops := newFakeHeadendOps()
+	m, err := NewManager(ManagerConfig{
+		Source:      src,
+		Claims:      newFakeClaims(),
+		Headend:     ops,
+		EncapSource: testEncapSource,
+		// The declare fixture asks for one entry, so a quota of zero
+		// entries is one it must not get past. (Zero would mean "take the
+		// default", so this asks for the smallest real limit.)
+		Quotas: Quotas{MaxHeadendEntries: 1, MaxAdvertisedRoutes: 1, MaxLocalSIDs: 1},
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	t.Cleanup(func() { m.Close(context.Background()) })
+
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t), Capabilities: testCaps(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	stats, ok := m.StatsFor("declare")
+	if !ok {
+		t.Fatal("no stats for a registered plugin")
+	}
+	if stats.Quotas.MaxHeadendEntries != 1 {
+		t.Fatalf("stats report a quota of %d, want the configured 1", stats.Quotas.MaxHeadendEntries)
+	}
+
+	// One entry is within it, so the plugin's declaration applies.
+	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "declare")
+	if ops.countV4() != 1 {
+		t.Fatalf("data plane holds %d entries, want the declared one", ops.countV4())
+	}
+}
+
+// A plugin told its set was too large can narrow it; one told the host
+// failed can only give up. The two have to be distinguishable.
+func TestQuotaErrorReadsAsAPolicyRefusal(t *testing.T) {
+	err := &QuotaError{What: "headend entries", Declared: 10, Quota: 4}
+	if !err.Denied() {
+		t.Fatal("a quota refusal does not report itself as denied")
+	}
+	if !strings.Contains(err.Error(), "quota 4") {
+		t.Errorf("error does not say what the quota was: %v", err)
+	}
+}

@@ -109,7 +109,7 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 	}
 
 	if cap, bounded := limitOf(quota); bounded && len(keys) > cap {
-		return res, fmt.Errorf("advertise: %d routes declared, quota %d", len(keys), cap)
+		return res, &QuotaError{What: "advertised routes", Declared: len(keys), Quota: cap}
 	}
 
 	// The lease is the only thing standing between two owners originating
@@ -141,6 +141,10 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 		route := current[k]
 		a.mu.Unlock()
 		if err := a.adv.Withdraw(ctx, route.routeKey()); err != nil {
+			// Nothing declared was originated yet, so those leases
+			// describe NLRIs this owner does not advertise. Holding them
+			// would deny another plugin a route this one never took.
+			a.releaseUnoriginated(keys, current, owner)
 			return res, fmt.Errorf("advertise: withdraw %s %s: %w", route.Family, route.Prefix, err)
 		}
 		a.mu.Lock()
@@ -158,13 +162,7 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 		if err := a.originate(ctx, route); err != nil {
 			// Release the leases of what was not advertised, so a key this
 			// owner does not hold cannot deny another one.
-			if a.leases != nil {
-				for _, unsent := range keys[indexOf(keys, k):] {
-					if _, sent := current[unsent]; !sent {
-						a.leases.Release(LeaseAdvertise, unsent, owner)
-					}
-				}
-			}
+			a.releaseUnoriginated(keys[indexOf(keys, k):], current, owner)
 			return res, fmt.Errorf("advertise: %s %s: %w", route.Family, route.Prefix, err)
 		}
 		a.mu.Lock()
@@ -178,6 +176,26 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 		}
 	}
 	return res, nil
+}
+
+// releaseUnoriginated frees the leases on declared keys this owner does
+// not actually advertise, leaving alone the ones it already originates.
+func (a *AdvertiseSet) releaseUnoriginated(keys []string, current map[string]AdvertisedRoute, owner bpf.OwnerTag) {
+	if a.leases == nil {
+		return
+	}
+	a.mu.Lock()
+	live := make(map[string]struct{}, len(current))
+	for k := range current {
+		live[k] = struct{}{}
+	}
+	a.mu.Unlock()
+	for _, k := range keys {
+		if _, ok := live[k]; ok {
+			continue
+		}
+		a.leases.Release(LeaseAdvertise, k, owner)
+	}
 }
 
 // WithdrawOwner retracts everything an owner has originated. It is what

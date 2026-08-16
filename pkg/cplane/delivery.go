@@ -57,6 +57,18 @@ type worker struct {
 	processed uint64
 	// owesSnapshot records that a drop left the plugin's view incomplete.
 	owesSnapshot bool
+	// holding is set while a snapshot is being delivered, and pending
+	// holds the live events that arrived meanwhile.
+	//
+	// Both go into one queue, so without this a live update can land
+	// between two snapshot events and be overtaken by the stale copy that
+	// follows it: a withdraw delivered first and the snapshot's older
+	// advertise for the same NLRI second leaves the plugin holding a
+	// route that no longer exists. Holding the live events until the
+	// snapshot finishes makes the snapshot a prefix of the stream, which
+	// is the order the plugin is entitled to assume.
+	holding bool
+	pending []*v1.PluginEventBatch
 }
 
 // newWorker starts the delivery goroutine for one plugin.
@@ -98,6 +110,22 @@ func newWorker(
 func (w *worker) submit(batch *v1.PluginEventBatch) {
 	w.mu.Lock()
 	w.submitted++
+	if w.holding {
+		// A snapshot is in flight. Hold this until it finishes rather
+		// than letting it be overtaken by an older copy of the same NLRI.
+		if len(w.pending) < deliveryQueueDepth {
+			w.pending = append(w.pending, batch)
+			w.mu.Unlock()
+			return
+		}
+		// Too far behind to hold any more. Drop, and owe another
+		// snapshot: the view this one is building is already stale.
+		w.dropped++
+		w.processed++
+		w.owesSnapshot = true
+		w.mu.Unlock()
+		return
+	}
 	w.mu.Unlock()
 	select {
 	case w.queue <- batch:
@@ -219,6 +247,34 @@ func (w *worker) owe() {
 	w.owesSnapshot = true
 }
 
+// beginSnapshot starts holding live events, so a snapshot is delivered as
+// an uninterrupted prefix of the stream.
+func (w *worker) beginSnapshot() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.holding = true
+}
+
+// endSnapshot releases the live events that arrived during the snapshot,
+// in the order they arrived.
+func (w *worker) endSnapshot() {
+	w.mu.Lock()
+	held := w.pending
+	w.pending = nil
+	w.holding = false
+	w.mu.Unlock()
+
+	for _, batch := range held {
+		select {
+		case w.queue <- batch:
+		case <-w.stop:
+			w.mu.Lock()
+			w.processed++
+			w.mu.Unlock()
+		}
+	}
+}
+
 // submitBlocking queues a batch, waiting for room rather than dropping.
 //
 // It is for a snapshot, where the caller is rebuilding the plugin's whole
@@ -227,8 +283,9 @@ func (w *worker) owe() {
 // snapshot runs on whoever asked for it.
 //
 // Going through the queue rather than calling the guest directly keeps
-// snapshot and live events in one order, so a plugin cannot see a route
-// from the snapshot after the update that superseded it.
+// the guest's calls serialized. Live events are held while a snapshot is
+// in flight (see beginSnapshot), so a plugin cannot see a route from the
+// snapshot after the update that superseded it.
 //
 // It reports false if the worker stopped before the batch was accepted.
 func (w *worker) submitBlocking(batch *v1.PluginEventBatch) bool {

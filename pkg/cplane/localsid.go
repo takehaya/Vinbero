@@ -1,6 +1,7 @@
 package cplane
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -48,6 +49,16 @@ type AllocatedSID struct {
 	Name    string
 	SID     netip.Addr
 	Locator string
+	// slot and auxRaw record what was installed for it, so a redeclaration
+	// that changes nothing can be recognised and skipped.
+	slot   uint32
+	auxRaw []byte
+}
+
+// matches reports whether an installed SID already carries what a
+// declaration asks for.
+func (a AllocatedSID) matches(want LocalSID) bool {
+	return a.Locator == want.Locator && a.slot == want.Slot && bytes.Equal(a.auxRaw, want.AuxRaw)
 }
 
 // LocalSIDSet reconciles the local SIDs one owner has declared.
@@ -123,7 +134,7 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 	}
 
 	if cap, bounded := limitOf(quota); bounded && len(names) > cap {
-		return nil, res, fmt.Errorf("local sid: %d SIDs declared, quota %d", len(names), cap)
+		return nil, res, &QuotaError{What: "local SIDs", Declared: len(names), Quota: cap}
 	}
 
 	if err := l.sweepLeftovers(owner); err != nil {
@@ -166,14 +177,41 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 		got, held := current[name]
 		l.mu.Unlock()
 
+		if held && got.matches(want) {
+			// Nothing about it changed, so nothing is written. Rewriting
+			// would not be free: installing an entry with aux allocates a
+			// fresh aux index every time and never frees the previous one,
+			// so a plugin redeclaring its set on every event -- which is
+			// exactly what the desired-set model asks for -- would leak an
+			// index per apply until the allocator gave out.
+			out = append(out, got)
+			res.Updated++
+			continue
+		}
 		if held && got.Locator == want.Locator {
-			// The address is already this plugin's. Rewrite the dispatch
-			// entry anyway: the slot or the aux may have changed, and the
-			// write is idempotent when they have not.
-			if err := l.install(owner, got.SID, want); err != nil {
+			// Same address, different contents. The entry is removed
+			// before the new one is written so the aux index the old one
+			// held is freed rather than orphaned by the rebind -- but the
+			// address itself stays, because it is still this plugin's and
+			// may already have been advertised.
+			if err := l.removeEntry(owner, got); err != nil {
 				return nil, res, err
 			}
-			out = append(out, got)
+			if err := l.install(owner, got.SID, want); err != nil {
+				l.alloc.ReleaseSID(got.SID)
+				l.mu.Lock()
+				delete(current, name)
+				l.mu.Unlock()
+				return nil, res, err
+			}
+			updated := AllocatedSID{
+				Name: name, SID: got.SID, Locator: want.Locator,
+				slot: want.Slot, auxRaw: append([]byte(nil), want.AuxRaw...),
+			}
+			l.mu.Lock()
+			current[name] = updated
+			l.mu.Unlock()
+			out = append(out, updated)
 			res.Updated++
 			continue
 		}
@@ -197,7 +235,10 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 			l.alloc.ReleaseSID(sid)
 			return nil, res, err
 		}
-		allocated := AllocatedSID{Name: name, SID: sid, Locator: want.Locator}
+		allocated := AllocatedSID{
+			Name: name, SID: sid, Locator: want.Locator,
+			slot: want.Slot, auxRaw: append([]byte(nil), want.AuxRaw...),
+		}
 		l.mu.Lock()
 		current[name] = allocated
 		l.mu.Unlock()
@@ -315,15 +356,26 @@ func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID)
 	return nil
 }
 
+// removeEntry deletes the dispatch entry and keeps the address.
+//
+// Deleting the entry is what frees the aux index bound to it: the map
+// layer allocates one per install and releases it only on delete.
+func (l *LocalSIDSet) removeEntry(owner bpf.OwnerTag, got AllocatedSID) error {
+	prefix := got.SID.String() + "/128"
+	if err := l.sids.DeleteSidFunction(prefix, owner); err != nil {
+		return fmt.Errorf("local sid %q: remove %s: %w", got.Name, prefix, err)
+	}
+	return nil
+}
+
 // remove deletes the dispatch entry and returns the address to its pool.
 //
 // The entry goes first: releasing the address while the data plane still
 // dispatches on it would let the next allocation hand the same address to
 // someone else while packets are still arriving for this one.
 func (l *LocalSIDSet) remove(owner bpf.OwnerTag, got AllocatedSID) error {
-	prefix := got.SID.String() + "/128"
-	if err := l.sids.DeleteSidFunction(prefix, owner); err != nil {
-		return fmt.Errorf("local sid %q: remove %s: %w", got.Name, prefix, err)
+	if err := l.removeEntry(owner, got); err != nil {
+		return err
 	}
 	l.alloc.ReleaseSID(got.SID)
 	return nil

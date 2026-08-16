@@ -129,7 +129,7 @@ func ApplyHeadendSet(
 			other = LeaseHeadendV4
 		}
 		if total := len(keys) + leases.CountOf(other, owner); total > cap {
-			return res, fmt.Errorf("apply %s set: %d headend entries declared, quota %d", af, total, cap)
+			return res, &QuotaError{What: "headend entries", Declared: total, Quota: cap}
 		}
 	}
 

@@ -45,7 +45,13 @@ type manifest struct {
 	Behaviors    []uint16 `json:"behaviors,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
 	TickMillis   int64    `json:"tick_millis,omitempty"`
-	SavedAt      string   `json:"saved_at"`
+	// Limits are persisted too, so a plugin registered with a budget of
+	// its own comes back with it rather than silently on the defaults.
+	MaxModuleBytes int    `json:"max_module_bytes,omitempty"`
+	MaxMemoryPages uint32 `json:"max_memory_pages,omitempty"`
+	CallTimeoutMs  int64  `json:"call_timeout_ms,omitempty"`
+	MaxBufferBytes int    `json:"max_buffer_bytes,omitempty"`
+	SavedAt        string `json:"saved_at"`
 }
 
 // NewStore opens (creating if needed) the directory a store lives in.
@@ -79,13 +85,17 @@ func (s *Store) Save(reg Registration) error {
 	}
 
 	m := manifest{
-		Version:      storeManifestVersion,
-		Name:         reg.Name,
-		Config:       reg.Config,
-		Behaviors:    reg.Behaviors,
-		Capabilities: reg.Capabilities.Names(),
-		TickMillis:   reg.TickInterval.Milliseconds(),
-		SavedAt:      time.Now().UTC().Format(time.RFC3339),
+		Version:        storeManifestVersion,
+		Name:           reg.Name,
+		Config:         reg.Config,
+		Behaviors:      reg.Behaviors,
+		Capabilities:   reg.Capabilities.Names(),
+		TickMillis:     reg.TickInterval.Milliseconds(),
+		MaxModuleBytes: reg.Limits.MaxModuleBytes,
+		MaxMemoryPages: reg.Limits.MaxMemoryPages,
+		CallTimeoutMs:  reg.Limits.CallTimeout.Milliseconds(),
+		MaxBufferBytes: reg.Limits.MaxBufferBytes,
+		SavedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	for _, f := range reg.Families {
 		m.Families = append(m.Families, string(f))
@@ -182,6 +192,12 @@ func (s *Store) load(name string) (Registration, error) {
 		Config:       m.Config,
 		Behaviors:    m.Behaviors,
 		TickInterval: time.Duration(m.TickMillis) * time.Millisecond,
+		Limits: wasm.Limits{
+			MaxModuleBytes: m.MaxModuleBytes,
+			MaxMemoryPages: m.MaxMemoryPages,
+			CallTimeout:    time.Duration(m.CallTimeoutMs) * time.Millisecond,
+			MaxBufferBytes: m.MaxBufferBytes,
+		},
 	}
 	for _, f := range m.Families {
 		fam, err := bgp.ParseFamily(f)

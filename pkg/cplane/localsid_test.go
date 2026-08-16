@@ -56,10 +56,12 @@ func locatorSuffix(name string) string {
 
 // fakeSIDOps records the dispatch entries a reconcile installs.
 type fakeSIDOps struct {
-	mu      sync.Mutex
-	entries map[string]*bpf.SidFunctionEntry
-	owners  map[string]bpf.OwnerTag
-	failOn  string // prefix whose install fails
+	mu       sync.Mutex
+	entries  map[string]*bpf.SidFunctionEntry
+	owners   map[string]bpf.OwnerTag
+	failOn   string // prefix whose install fails
+	installs int
+	ops      []string
 }
 
 func newFakeSIDOps() *fakeSIDOps {
@@ -80,6 +82,8 @@ func (f *fakeSIDOps) CreateSidFunction(prefix string, e *bpf.SidFunctionEntry, _
 	}
 	f.entries[prefix] = e
 	f.owners[prefix] = owner
+	f.installs++
+	f.ops = append(f.ops, "create "+prefix)
 	return nil
 }
 
@@ -91,6 +95,7 @@ func (f *fakeSIDOps) DeleteSidFunction(prefix string, requester bpf.OwnerTag) er
 	}
 	delete(f.entries, prefix)
 	delete(f.owners, prefix)
+	f.ops = append(f.ops, "delete "+prefix)
 	return nil
 }
 
@@ -109,6 +114,26 @@ func (f *fakeSIDOps) GetSidFunctionOwner(prefix string) (bpf.OwnerTag, bool, err
 	defer f.mu.Unlock()
 	o, ok := f.owners[prefix]
 	return o, ok, nil
+}
+
+// installCount and log record what was actually written, so a test can
+// tell a rewrite from a no-op.
+func (f *fakeSIDOps) installCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.installs
+}
+
+func (f *fakeSIDOps) log() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ops...)
+}
+
+func (f *fakeSIDOps) resetLog() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = nil
 }
 
 func (f *fakeSIDOps) count() int {
@@ -416,5 +441,62 @@ func TestLocalSIDSweepsOnlyOnce(t *testing.T) {
 	}
 	if sids.count() != 2 {
 		t.Fatalf("%d entries installed, want both declared SIDs", sids.count())
+	}
+}
+
+// Installing an entry with aux allocates a fresh aux index every time and
+// frees the previous one only on delete. A plugin redeclaring its set on
+// every event -- which is what the desired-set model asks for -- would
+// therefore leak an index per apply, so an unchanged declaration must not
+// be rewritten at all.
+func TestLocalSIDRedeclarationWithAuxDoesNotRewrite(t *testing.T) {
+	sids := newFakeSIDOps()
+	set := NewLocalSIDSet(&fakeAllocator{}, sids)
+	declared := []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33, AuxRaw: []byte{1, 2, 3}}}
+
+	if _, _, err := set.Apply(ownerA, declared, unlimited); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	installs := sids.installCount()
+
+	for i := 0; i < 5; i++ {
+		if _, _, err := set.Apply(ownerA, declared, unlimited); err != nil {
+			t.Fatalf("redeclaration %d: %v", i, err)
+		}
+	}
+	if got := sids.installCount(); got != installs {
+		t.Fatalf("%d installs after redeclaring an unchanged set, want the original %d", got, installs)
+	}
+}
+
+// A changed aux is written, and the old entry is removed first so the aux
+// index it held is freed rather than orphaned by the rebind.
+func TestLocalSIDChangedAuxRemovesBeforeInstalling(t *testing.T) {
+	sids := newFakeSIDOps()
+	alloc := &fakeAllocator{}
+	set := NewLocalSIDSet(alloc, sids)
+	first, _, err := set.Apply(ownerA, []LocalSID{
+		{Name: "svc-a", Locator: "main", Slot: 33, AuxRaw: []byte{1}},
+	}, unlimited)
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	sids.resetLog()
+
+	second, _, err := set.Apply(ownerA, []LocalSID{
+		{Name: "svc-a", Locator: "main", Slot: 33, AuxRaw: []byte{2}},
+	}, unlimited)
+	if err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if first[0].SID != second[0].SID {
+		t.Fatal("changing the aux moved the address")
+	}
+	if got := sids.log(); len(got) != 2 || got[0][:6] != "delete" || got[1][:6] != "create" {
+		t.Fatalf("operations = %v, want a delete then a create", got)
+	}
+	// The address stayed, so nothing was released back to the pool.
+	if alloc.releasedCount() != 0 {
+		t.Errorf("released %d addresses for an in-place change", alloc.releasedCount())
 	}
 }

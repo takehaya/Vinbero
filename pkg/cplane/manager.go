@@ -352,10 +352,12 @@ func (m *Manager) Restore(ctx context.Context) error {
 	if m.store == nil {
 		return nil
 	}
-	regs, err := m.store.List()
-	if err != nil {
-		return err
-	}
+	// List returns what it could read alongside the error, and that
+	// partial list is the point: one unreadable manifest must not stop
+	// every other plugin from coming back, or a single bad file leaves
+	// the daemon holding their pinned state under owners nothing can
+	// reconcile.
+	regs, listErr := m.store.List()
 	for _, reg := range regs {
 		if err := m.Register(ctx, reg); err != nil {
 			m.logger.Error("could not restore a plugin from the store",
@@ -365,7 +367,7 @@ func (m *Manager) Restore(ctx context.Context) error {
 		m.logger.Info("restored a control-plane plugin from the store",
 			zap.String("plugin", reg.Name))
 	}
-	return nil
+	return listErr
 }
 
 // build instantiates a plugin and its delivery worker without publishing
@@ -402,6 +404,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		Logger:       m.logger.Named("plugin." + reg.Name),
 		ApplyMutex:   &m.applyMu,
 		Capabilities: reg.Capabilities,
+		Quotas:       m.quotas,
 		Advertise:    m.advertise,
 		LocalSIDs:    m.localSIDs,
 		OnLocalSIDs:  onLocalSIDs,
@@ -650,7 +653,12 @@ func (m *Manager) snapshot(p *plugin) {
 	}
 	p.snapshotting = true
 	m.mu.Unlock()
+	// Live events are held until this finishes, so the snapshot arrives as
+	// an uninterrupted prefix rather than interleaved with updates that
+	// supersede parts of it.
+	p.worker.beginSnapshot()
 	defer func() {
+		p.worker.endSnapshot()
 		m.mu.Lock()
 		p.snapshotting = false
 		m.mu.Unlock()

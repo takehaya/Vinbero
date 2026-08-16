@@ -295,12 +295,17 @@ func (p *PluginOps) Publish() error {
 	p.staged = nil
 	p.mu.Unlock()
 
+	// Every staged declaration is applied, not just up to the first
+	// failure: they are separate statements about separate sets, and
+	// dropping the rest would leave a plugin live with part of what it
+	// declared never applied and nothing to retry it.
+	var firstErr error
 	for _, txn := range staged {
-		if err := p.applyTransaction(txn); err != nil {
-			return err
+		if err := p.applyTransaction(txn); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // ApplyCommit reconciles what the transaction accumulated. This is the
