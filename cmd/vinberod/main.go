@@ -431,10 +431,15 @@ func run(cliCtx *cli.Context) error {
 		// that did not exist yet, and an entry written with a zero source
 		// blackholes without saying so.
 		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
-			Source:       routeDemux,
-			Claims:       claimRegistry,
-			Headend:      vin.GetMapOperations(),
-			Advertiser:   bgpSession,
+			Source:  routeDemux,
+			Claims:  claimRegistry,
+			Headend: vin.GetMapOperations(),
+			// Named, so the session can tell a plugin's routes from the
+			// exporter's and the operator's. gobgp keeps one local path
+			// per NLRI, and without a name the withdraw of whichever
+			// producer declared it last would delete a route another one
+			// still wants, leaving that producer sure it is advertising.
+			Advertiser:   bgpSession.AsProducer("cplane-plugins"),
 			Locators:     locatorMgr,
 			SIDFunctions: vin.GetMapOperations(),
 			EncapSource:  applier.EncapSourceAddr,

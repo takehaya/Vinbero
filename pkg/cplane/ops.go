@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -263,6 +264,14 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 		return fmt.Errorf("apply put: transaction %d would hold %d entries, limit %d",
 			generation, len(txn.entries)+len(txn.routes)+len(txn.sids)+declared, p.maxEntries)
 	}
+	// A transaction is opened for one kind, and the apply reads only the
+	// field that kind names. A chunk carrying any other field is a
+	// declaration the plugin believes it made and the host would drop in
+	// silence, so it is refused instead.
+	if err := checkChunkKind(txn.kind, &msg); err != nil {
+		return fmt.Errorf("apply put: %w", err)
+	}
+
 	// Decoded into locals first, and merged into the transaction only
 	// once the whole chunk decodes. A guest that ignores the error this
 	// returns and commits anyway would otherwise apply the surviving half
@@ -516,6 +525,43 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 		zap.Int("updated", res.Updated),
 		zap.Int("pruned", res.Pruned))
 	return nil
+}
+
+// checkChunkKind refuses a chunk whose contents do not match the kind the
+// transaction was opened for.
+func checkChunkKind(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
+	var unexpected []string
+	if len(msg.GetHeadendEntries()) > 0 &&
+		kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4 &&
+		kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+		unexpected = append(unexpected, "headend entries")
+	}
+	if len(msg.GetAdvertisedRoutes()) > 0 && kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
+		unexpected = append(unexpected, "advertised routes")
+	}
+	if len(msg.GetLocalSids()) > 0 && kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		unexpected = append(unexpected, "local SIDs")
+	}
+	if len(unexpected) > 0 {
+		return fmt.Errorf("a %s transaction cannot carry %s", kindName(kind), strings.Join(unexpected, " or "))
+	}
+	return nil
+}
+
+// kindName renders an apply kind the way a plugin author names it.
+func kindName(kind v1.PluginApplyKind) string {
+	switch kind {
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4:
+		return "headend_v4"
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+		return "headend_v6"
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		return "advertise"
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		return "local_sid"
+	default:
+		return kind.String()
+	}
 }
 
 // stale reports whether a newer declaration of this kind has already been

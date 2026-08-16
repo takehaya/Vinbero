@@ -16,6 +16,7 @@ package cplaneharness
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -330,9 +331,38 @@ func (r *recorder) ApplyPut(generation uint64, chunk []byte) error {
 	if !ok {
 		return fmt.Errorf("no open transaction %d", generation)
 	}
+	// The daemon reads only the field the transaction's kind names, so a
+	// chunk carrying any other one has part of its declaration dropped in
+	// silence. Refusing it here is what makes the harness say so: a plugin
+	// that mixes kinds would otherwise pass conformance and then quietly
+	// lose half its desired set in production.
+	if err := checkChunkKind(r.openKinds[generation], &msg); err != nil {
+		return err
+	}
 	acc.HeadendEntries = append(acc.HeadendEntries, msg.GetHeadendEntries()...)
 	acc.AdvertisedRoutes = append(acc.AdvertisedRoutes, msg.GetAdvertisedRoutes()...)
 	acc.LocalSids = append(acc.LocalSids, msg.GetLocalSids()...)
+	return nil
+}
+
+// checkChunkKind refuses a chunk whose contents do not match the kind the
+// transaction was opened for, matching the daemon.
+func checkChunkKind(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
+	var unexpected []string
+	if len(msg.GetHeadendEntries()) > 0 &&
+		kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4 &&
+		kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+		unexpected = append(unexpected, "headend entries")
+	}
+	if len(msg.GetAdvertisedRoutes()) > 0 && kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
+		unexpected = append(unexpected, "advertised routes")
+	}
+	if len(msg.GetLocalSids()) > 0 && kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		unexpected = append(unexpected, "local SIDs")
+	}
+	if len(unexpected) > 0 {
+		return fmt.Errorf("a %v transaction cannot carry %s", kind, strings.Join(unexpected, " or "))
+	}
 	return nil
 }
 

@@ -192,3 +192,51 @@ func TestVPNEndpointBehaviorOverride(t *testing.T) {
 		t.Fatalf("behavior = %v, want End.DT4 for a route naming none", got)
 	}
 }
+
+// gobgp keeps one local path per NLRI, so everything originating through
+// one session shares it: the exporter, the operator's RPC and any
+// control-plane plugin. A plugin withdrawing a route it did not advertise
+// would delete one that is still wanted, and the producer that owns it
+// would go on believing it is advertised.
+func TestWithdraw_LeavesAnotherProducersRouteAlone(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+
+	vr := bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", NextHop: "2001:db8::1",
+	}
+	// Advertised by vinbero's own machinery, which names nothing.
+	if err := s.Advertise(context.Background(), vr); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	key := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100"}
+
+	plugin := s.AsProducer("cplane-plugins")
+	if err := plugin.Withdraw(context.Background(), key); err != nil {
+		t.Fatalf("Withdraw by another producer: %v", err)
+	}
+	s.advMu.Lock()
+	_, still := s.advertised[key]
+	s.advMu.Unlock()
+	if !still {
+		t.Fatal("a plugin's withdraw deleted a route vinbero advertised")
+	}
+
+	// Its own route it may withdraw.
+	plugged := vr
+	plugged.Prefix = "10.9.0.0/24"
+	if err := plugin.Advertise(context.Background(), plugged); err != nil {
+		t.Fatalf("plugin Advertise: %v", err)
+	}
+	ownKey := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.9.0.0/24", RD: "65000:100"}
+	if err := plugin.Withdraw(context.Background(), ownKey); err != nil {
+		t.Fatalf("plugin Withdraw: %v", err)
+	}
+	s.advMu.Lock()
+	_, gone := s.advertised[ownKey]
+	s.advMu.Unlock()
+	if gone {
+		t.Error("a plugin could not withdraw the route it advertised")
+	}
+}

@@ -242,6 +242,19 @@ service SID として自分の owner で install します。plugin が同じ pr
   この配り直しは withdrawal ledger には記録しません。記録すると後から来る
   本物の withdraw を処理済みと誤判定します。
 
+## 広告の所有権
+
+lease は plugin どうしの所有権しか調停しません。実際に経路を出す gobgp
+session は auto-advertise の exporter や operator の RPC と共有で、gobgp は
+1 つの NLRI につき local path を 1 本しか持ちません。したがって plugin が
+他の producer と同じ NLRI を宣言すると、その path は置き換わります。
+
+session 側で producer を記録し、withdraw は自分が出した経路にしか効かない
+ようにしています。これが無いと、後から届いた withdraw が別の producer の
+生きた経路を消し、消された側は広告し続けているつもりのままになります。
+重複した advertise 自体は防げません。1 NLRI に 1 path しか無いので両立の
+しようがなく、warning に両方の producer 名を出して気付けるようにしています。
+
 ## 登録時の検証
 
 module は allowlist で検証します。

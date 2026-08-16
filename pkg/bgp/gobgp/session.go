@@ -45,6 +45,19 @@ type Session struct {
 
 	advMu      sync.Mutex
 	advertised map[bgp.RouteKey]uuid.UUID
+	// producers records who advertised each key, for the keys advertised
+	// by someone that named itself.
+	//
+	// gobgp keeps one local path per NLRI, so the session keeps one UUID
+	// per key -- and everything that originates through this session
+	// shares it: the auto-advertise exporter, the operator's RPC, and any
+	// control-plane plugin. Without knowing who put a key there, one
+	// producer's withdraw deletes another's live route and the producer
+	// that lost it still believes it is advertising.
+	//
+	// The empty producer is vinbero's own machinery, which named nothing
+	// because it was the only writer when it was built.
+	producers map[bgp.RouteKey]string
 }
 
 // bgpServer returns the running BgpServer, or nil when the session is
@@ -67,6 +80,7 @@ func NewSession(logger *zap.Logger) *Session {
 	return &Session{
 		logger:     logger.Named("bgp.gobgp"),
 		advertised: make(map[bgp.RouteKey]uuid.UUID),
+		producers:  make(map[bgp.RouteKey]string),
 	}
 }
 
