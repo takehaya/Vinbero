@@ -52,6 +52,7 @@ func (s *Session) WithdrawEVPNMac(_ context.Context, key bgp.EVPNMACKey) error {
 	}
 	s.advMu.Lock()
 	delete(s.advertised, rk)
+	delete(s.producers, rk)
 	s.advMu.Unlock()
 	return nil
 }
@@ -105,6 +106,7 @@ func (s *Session) WithdrawEVPNInclusiveMulticast(_ context.Context, key bgp.EVPN
 	}
 	s.advMu.Lock()
 	delete(s.advertised, rk)
+	delete(s.producers, rk)
 	s.advMu.Unlock()
 	return nil
 }
@@ -270,6 +272,7 @@ func (s *Session) WithdrawEVPNEthernetSegment(_ context.Context, key bgp.EVPNESK
 	}
 	s.advMu.Lock()
 	delete(s.advertised, rk)
+	delete(s.producers, rk)
 	s.advMu.Unlock()
 	return nil
 }
@@ -367,6 +370,7 @@ func (s *Session) WithdrawEVPNEthernetAD(_ context.Context, key bgp.EVPNADKey) e
 	}
 	s.advMu.Lock()
 	delete(s.advertised, rk)
+	delete(s.producers, rk)
 	s.advMu.Unlock()
 	return nil
 }
