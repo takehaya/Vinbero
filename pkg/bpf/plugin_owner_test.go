@@ -16,6 +16,12 @@ func TestValidatePluginBundleName(t *testing.T) {
 		{name: "longest that fits", bundle: strings.Repeat("a", MaxPluginBundleName)},
 		{name: "empty", bundle: "", wantErr: ErrBundleNameInvalid},
 		{name: "colon is reserved", bundle: "acl:prefix", wantErr: ErrBundleNameInvalid},
+		// A bundle name is also the file name its bundle is persisted
+		// under, so anything that could leave the directory is refused.
+		{name: "path separator", bundle: "../etc/passwd", wantErr: ErrBundleNameInvalid},
+		{name: "leading dot", bundle: ".hidden", wantErr: ErrBundleNameInvalid},
+		{name: "space", bundle: "acl prefix", wantErr: ErrBundleNameInvalid},
+		{name: "dots inside are fine", bundle: "acl.v2_prefix-1"},
 		{name: "one byte too long", bundle: strings.Repeat("a", MaxPluginBundleName+1), wantErr: ErrBundleNameTooLong},
 	}
 	for _, tt := range tests {

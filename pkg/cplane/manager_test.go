@@ -196,6 +196,25 @@ func waitDelivered(t *testing.T, m *Manager, name string) {
 	}
 }
 
+// newTestManagerWithStore builds a manager backed by a persistence store,
+// for the tests about surviving a restart.
+func newTestManagerWithStore(t *testing.T, src EventSource, store *Store) (*Manager, *fakeHeadendOps) {
+	t.Helper()
+	ops := newFakeHeadendOps()
+	m, err := NewManager(ManagerConfig{
+		Source:      src,
+		Claims:      newFakeClaims(),
+		Headend:     ops,
+		Store:       store,
+		EncapSource: testEncapSource,
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	t.Cleanup(func() { m.Close(context.Background()) })
+	return m, ops
+}
+
 func newTestManager(t *testing.T, src EventSource, claims BehaviorClaims) (*Manager, *fakeHeadendOps) {
 	t.Helper()
 	ops := newFakeHeadendOps()

@@ -409,6 +409,17 @@ func run(cliCtx *cli.Context) error {
 		// daemon starts, so an address captured now is usually the one
 		// that did not exist yet, and an entry written with a zero source
 		// blackholes without saying so.
+		// Plugins are kept across a restart unless the operator turned it
+		// off. A daemon that forgot them would come back holding the
+		// entries they wrote -- pinned maps outlive the process -- under
+		// an owner nothing can reconcile any more.
+		var cplaneStore *cplane.Store
+		if cfg.Setting.CplanePlugins.Enabled {
+			cplaneStore, err = cplane.NewStore(cfg.Setting.CplanePlugins.Path)
+			if err != nil {
+				return fmt.Errorf("open control-plane plugin store: %w", err)
+			}
+		}
 		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
 			Source:       routeDemux,
 			Claims:       claimRegistry,
@@ -417,6 +428,7 @@ func run(cliCtx *cli.Context) error {
 			Locators:     locatorMgr,
 			SIDFunctions: vin.GetMapOperations(),
 			EncapSource:  applier.EncapSourceAddr,
+			Store:        cplaneStore,
 			Logger:       lg.Named("cplane"),
 		})
 		if err != nil {
@@ -427,6 +439,14 @@ func run(cliCtx *cli.Context) error {
 		// should still be there when it comes back.
 		defer cplaneMgr.Close(context.Background())
 		srv.SetCplaneManager(cplaneMgr)
+
+		// Bring back what a previous run was running. A plugin that fails
+		// to restore is logged and skipped inside Restore: refusing to
+		// finish starting because one plugin is broken would turn a plugin
+		// problem into an outage.
+		if err := cplaneMgr.Restore(ctx); err != nil {
+			lg.Warn("restoring control-plane plugins", zap.Error(err))
+		}
 
 		// Auto-advertise: the exporter enables each VRF binding with a
 		// redistribute set and starts watching. Starting after the demux means

@@ -316,12 +316,30 @@ func (c *Config) BpfConstants() map[string]any {
 }
 
 type SettingConfig struct {
-	Entries         EntriesConfig  `yaml:"entries,omitempty"`
-	EnableStats     bool           `yaml:"enable_stats,omitempty" default:"false"`
-	StatePath       string         `yaml:"state_path,omitempty"`                      // Path for resource state file (default: /var/lib/vinbero/state.json)
-	FdbAgingSeconds int            `yaml:"fdb_aging_seconds,omitempty" default:"300"` // FDB entry aging timeout (0=disabled)
-	PinMaps         PinMapsConfig  `yaml:"pin_maps,omitempty"`                        // Pin control-state BPF maps under /sys/fs/bpf so they survive a vinberod restart.
-	Validate        ValidateConfig `yaml:"validate,omitempty"`                        // Plugin validator policy knobs.
+	Entries         EntriesConfig       `yaml:"entries,omitempty"`
+	EnableStats     bool                `yaml:"enable_stats,omitempty" default:"false"`
+	StatePath       string              `yaml:"state_path,omitempty"`                      // Path for resource state file (default: /var/lib/vinbero/state.json)
+	FdbAgingSeconds int                 `yaml:"fdb_aging_seconds,omitempty" default:"300"` // FDB entry aging timeout (0=disabled)
+	PinMaps         PinMapsConfig       `yaml:"pin_maps,omitempty"`                        // Pin control-state BPF maps under /sys/fs/bpf so they survive a vinberod restart.
+	Validate        ValidateConfig      `yaml:"validate,omitempty"`                        // Plugin validator policy knobs.
+	CplanePlugins   CplanePluginsConfig `yaml:"cplane_plugins,omitempty"`                  // Where registered control-plane plugins are kept across a restart.
+}
+
+// CplanePluginsConfig governs whether registered control-plane plugins
+// survive a daemon restart.
+//
+// It is on by default, unlike the map pinning above, because a plugin is
+// not state an external controller can re-push: the plugin IS the
+// controller, and the reason to load one is that the logic lives in the
+// daemon. Meanwhile the state a plugin writes does outlive the process
+// whenever maps are pinned, so a daemon that forgot its plugins would come
+// back holding entries under an owner that no longer exists.
+//
+// Set enabled to false to keep the other model, where something outside
+// re-registers every plugin after a restart.
+type CplanePluginsConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty" default:"true"`
+	Path    string `yaml:"path,omitempty" default:"/var/lib/vinbero/cplane-plugins"`
 }
 
 // ValidateConfig knobs the plugin validator enforces on the server side.

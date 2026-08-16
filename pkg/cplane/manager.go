@@ -106,6 +106,7 @@ type Manager struct {
 	snapshots   SnapshotSource
 	claims      BehaviorClaims
 	headend     HeadendMapOps
+	store       *Store
 	leases      *Leases
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
@@ -175,6 +176,11 @@ type ManagerConfig struct {
 	Locators SIDAllocator
 	// SIDFunctions installs the dispatch entries for those SIDs.
 	SIDFunctions SIDFunctionOps
+	// Store keeps registrations across a daemon restart. Nil runs the
+	// daemon without one, which means every plugin has to be registered
+	// again after a restart -- and the state a plugin wrote outlives the
+	// process, so that state comes back owned by nobody until it does.
+	Store *Store
 	// EncapSource resolves the daemon's encap source when a plugin
 	// declares an entry that names none. Called at apply time, because a
 	// locator registered over RPC after startup is the common case.
@@ -200,6 +206,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		snapshots:   snapshots,
 		claims:      cfg.Claims,
 		headend:     cfg.Headend,
+		store:       cfg.Store,
 		leases:      leases,
 		encapSource: cfg.EncapSource,
 		logger:      logger,
@@ -313,11 +320,44 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		}
 	}
 
+	// Recorded only once it is actually running, so a module that could
+	// not start is not something a restart tries again forever.
+	if err := m.store.Save(reg); err != nil {
+		m.logger.Warn("could not persist a plugin registration; it will not survive a restart",
+			zap.String("plugin", reg.Name), zap.Error(err))
+	}
+
 	m.logger.Info("control-plane plugin registered",
 		zap.String("plugin", reg.Name),
 		zap.Bool("replaced", existed),
 		zap.Int("behaviors", len(reg.Behaviors)),
 		zap.Strings("capabilities", reg.Capabilities.Names()))
+	return nil
+}
+
+// Restore brings back the plugins a previous run registered.
+//
+// It is deliberately not fatal when one fails: a daemon that refuses to
+// finish starting because a plugin is broken has turned a plugin problem
+// into an outage. The failure is logged with the name, and the rest come
+// up.
+func (m *Manager) Restore(ctx context.Context) error {
+	if m.store == nil {
+		return nil
+	}
+	regs, err := m.store.List()
+	if err != nil {
+		return err
+	}
+	for _, reg := range regs {
+		if err := m.Register(ctx, reg); err != nil {
+			m.logger.Error("could not restore a plugin from the store",
+				zap.String("plugin", reg.Name), zap.Error(err))
+			continue
+		}
+		m.logger.Info("restored a control-plane plugin from the store",
+			zap.String("plugin", reg.Name))
+	}
 	return nil
 }
 
@@ -434,6 +474,10 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 	m.teardown(ctx, p)
 	if m.claims != nil {
 		m.claims.Release(name)
+	}
+	if err := m.store.Remove(name); err != nil {
+		m.logger.Warn("could not remove a plugin from the store; a restart would bring it back",
+			zap.String("plugin", name), zap.Error(err))
 	}
 	if err := p.ops.Flush(); err != nil {
 		return fmt.Errorf("cplane: flush plugin %q: %w", name, err)
