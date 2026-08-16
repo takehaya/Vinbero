@@ -106,6 +106,7 @@ type Manager struct {
 	snapshots   SnapshotSource
 	claims      BehaviorClaims
 	headend     HeadendMapOps
+	quotas      Quotas
 	store       *Store
 	leases      *Leases
 	advertise   *AdvertiseSet
@@ -149,6 +150,8 @@ type plugin struct {
 	// dead marks an instance that failed and was not restarted, so events
 	// stop being handed to a module that cannot take them.
 	dead bool
+	// counters holds this plugin's observable statistics.
+	counters *counters
 	// snapshotting is set while a rib replay is in flight for this plugin.
 	//
 	// Replays must not overlap. Two of them push into one queue with no
@@ -176,6 +179,9 @@ type ManagerConfig struct {
 	Locators SIDAllocator
 	// SIDFunctions installs the dispatch entries for those SIDs.
 	SIDFunctions SIDFunctionOps
+	// Quotas bound how much any one plugin may hold. Zero fields take the
+	// defaults.
+	Quotas Quotas
 	// Store keeps registrations across a daemon restart. Nil runs the
 	// daemon without one, which means every plugin has to be registered
 	// again after a restart -- and the state a plugin wrote outlives the
@@ -206,6 +212,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		snapshots:   snapshots,
 		claims:      cfg.Claims,
 		headend:     cfg.Headend,
+		quotas:      cfg.Quotas.withDefaults(),
 		store:       cfg.Store,
 		leases:      leases,
 		encapSource: cfg.EncapSource,
@@ -414,7 +421,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	if err != nil {
 		return nil, err
 	}
-	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops}
+	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops, counters: newCounters()}
 	interval := reg.TickInterval
 	if interval > 0 && interval < MinTickInterval {
 		interval = MinTickInterval
@@ -605,6 +612,7 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	p.inst = inst
 	p.worker.handler = inst.HandleEvents
 	m.mu.Unlock()
+	p.counters.restarted()
 
 	if err := old.Close(ctx); err != nil {
 		m.logger.Debug("closing the failed instance", zap.String("plugin", p.name), zap.Error(err))
@@ -677,6 +685,7 @@ func (m *Manager) snapshot(p *plugin) {
 		return
 	}
 	p.worker.submitBlocking(m.endOfReplayBatch(ReplaySourceBGP))
+	p.counters.addSnapshot()
 	m.logger.Info("replayed the rib to a plugin",
 		zap.String("plugin", p.name), zap.Int("routes", count))
 }
@@ -797,6 +806,7 @@ func (m *Manager) reportStatus(p *plugin, status *v1.PluginEventStatus) {
 			// The plugin declined this event on purpose. Recording it is
 			// the whole value of having a polite refusal: the alternative
 			// signal is a trap, which costs the instance and repeats.
+			p.counters.addQuarantined(1)
 			m.logger.Warn("plugin quarantined an event",
 				zap.String("plugin", p.name),
 				zap.Uint64("sequence", r.GetSequence()),

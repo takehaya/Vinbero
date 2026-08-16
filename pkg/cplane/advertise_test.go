@@ -49,6 +49,9 @@ func (f *fakeAdvertiser) counts() (int, int) {
 	return len(f.advertise), len(f.withdrawn)
 }
 
+// unlimited turns the quota off for tests that are about something else.
+const unlimited = -1
+
 func vpnRoute(prefix, sid string) AdvertisedRoute {
 	return AdvertisedRoute{
 		Family:       bgp.FamilyVPNv4,
@@ -66,7 +69,7 @@ func TestAdvertiseSetOriginates(t *testing.T) {
 	res, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{
 		vpnRoute("10.0.1.0/24", "fd00:2::1"),
 		vpnRoute("10.0.2.0/24", "fd00:2::2"),
-	})
+	}, unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -88,10 +91,10 @@ func TestAdvertiseSetWithdrawsWhatIsNoLongerDeclared(t *testing.T) {
 	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{
 		vpnRoute("10.0.1.0/24", "fd00:2::1"),
 		vpnRoute("10.0.2.0/24", "fd00:2::2"),
-	}); err != nil {
+	}, unlimited); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	res, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")})
+	res, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}, unlimited)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
@@ -115,10 +118,10 @@ func TestAdvertiseSetRefusesAnotherOwnersNLRI(t *testing.T) {
 	leases := NewLeases()
 	set := NewAdvertiseSet(adv, leases)
 	ctx := context.Background()
-	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}); err != nil {
+	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}, unlimited); err != nil {
 		t.Fatalf("first owner: %v", err)
 	}
-	_, err := set.Apply(ctx, ownerB, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::9")})
+	_, err := set.Apply(ctx, ownerB, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::9")}, unlimited)
 	if !errors.Is(err, ErrLeaseHeld) {
 		t.Fatalf("second owner got %v, want ErrLeaseHeld", err)
 	}
@@ -133,12 +136,12 @@ func TestAdvertiseSetWithdrawsBeforeAdvertising(t *testing.T) {
 	adv := &fakeAdvertiser{}
 	set := NewAdvertiseSet(adv, NewLeases())
 	ctx := context.Background()
-	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}); err != nil {
+	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}, unlimited); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	moved := vpnRoute("10.0.1.0/24", "fd00:2::1")
 	moved.RD = "65000:2"
-	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{moved}); err != nil {
+	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{moved}, unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	adv.mu.Lock()
@@ -159,7 +162,7 @@ func TestAdvertiseSetWithdrawOwnerRetractsEverything(t *testing.T) {
 	if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{
 		vpnRoute("10.0.1.0/24", "fd00:2::1"),
 		vpnRoute("10.0.2.0/24", "fd00:2::2"),
-	}); err != nil {
+	}, unlimited); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	if err := set.WithdrawOwner(ctx, ownerA); err != nil {
@@ -181,12 +184,12 @@ func TestAdvertiseSetWithdrawOwnerRetractsEverything(t *testing.T) {
 // accepting a declaration it will never send.
 func TestAdvertiseSetWithoutASession(t *testing.T) {
 	set := NewAdvertiseSet(nil, NewLeases())
-	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}); err == nil {
+	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{vpnRoute("10.0.1.0/24", "fd00:2::1")}, unlimited); err == nil {
 		t.Fatal("a declaration was accepted with no advertiser")
 	}
 	// Declaring nothing is still fine: it is how a plugin says it wants
 	// nothing originated.
-	if _, err := set.Apply(context.Background(), ownerA, nil); err != nil {
+	if _, err := set.Apply(context.Background(), ownerA, nil, unlimited); err != nil {
 		t.Fatalf("empty declaration: %v", err)
 	}
 }
@@ -210,7 +213,7 @@ func TestAdvertiseSetRejectsMalformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{tt.route}); err == nil {
+			if _, err := set.Apply(ctx, ownerA, []AdvertisedRoute{tt.route}, unlimited); err == nil {
 				t.Fatal("a malformed declaration was accepted")
 			}
 		})
@@ -222,7 +225,7 @@ func TestAdvertiseSetRejectsDuplicateNLRI(t *testing.T) {
 	_, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{
 		vpnRoute("10.0.1.0/24", "fd00:2::1"),
 		vpnRoute("10.0.1.0/24", "fd00:2::2"),
-	})
+	}, unlimited)
 	if err == nil {
 		t.Fatal("the same NLRI declared twice was accepted")
 	}
@@ -235,7 +238,7 @@ func TestAdvertiseSetCarriesTheBehaviorCodepoint(t *testing.T) {
 	set := NewAdvertiseSet(adv, NewLeases())
 	route := vpnRoute("10.0.1.0/24", "fd00:2::1")
 	route.EndpointBehavior = 0xFE01
-	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{route}); err != nil {
+	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{route}, unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	adv.mu.Lock()

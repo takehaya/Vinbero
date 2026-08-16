@@ -95,6 +95,7 @@ func ApplyHeadendSet(
 	owner bpf.OwnerTag,
 	af AddressFamily,
 	desired []HeadendDesired,
+	quota int,
 ) (ApplyResult, error) {
 	var res ApplyResult
 	if owner == "" {
@@ -118,6 +119,18 @@ func ApplyHeadendSet(
 		}
 		byPrefix[d.TriggerPrefix] = d.Entry
 		keys = append(keys, d.TriggerPrefix)
+	}
+
+	// The quota counts both families together: a plugin's share of the
+	// data plane is what it holds, not what it holds per map.
+	if cap, bounded := limitOf(quota); bounded && leases != nil {
+		other := LeaseHeadendV6
+		if af == AFv6 {
+			other = LeaseHeadendV4
+		}
+		if total := len(keys) + leases.CountOf(other, owner); total > cap {
+			return res, fmt.Errorf("apply %s set: %d headend entries declared, quota %d", af, total, cap)
+		}
 	}
 
 	if leases != nil {

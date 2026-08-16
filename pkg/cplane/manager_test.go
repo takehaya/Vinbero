@@ -647,7 +647,7 @@ func TestPluginOpsFlushRemovesOwnedState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
 	}
-	if _, err := ApplyHeadendSet(headend, leases, ownerA, AFv4, desire("10.0.1.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(headend, leases, ownerA, AFv4, desire("10.0.1.0/24"), unlimited); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	headend.seedV4("10.9.9.0/24", ownerB)

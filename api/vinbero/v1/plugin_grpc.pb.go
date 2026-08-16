@@ -32,6 +32,7 @@ const (
 	PluginService_CplanePluginRegister_FullMethodName   = "/vinbero.v1.PluginService/CplanePluginRegister"
 	PluginService_CplanePluginUnregister_FullMethodName = "/vinbero.v1.PluginService/CplanePluginUnregister"
 	PluginService_CplanePluginList_FullMethodName       = "/vinbero.v1.PluginService/CplanePluginList"
+	PluginService_CplanePluginStats_FullMethodName      = "/vinbero.v1.PluginService/CplanePluginStats"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -75,6 +76,12 @@ type PluginServiceClient interface {
 	CplanePluginUnregister(ctx context.Context, in *CplanePluginUnregisterRequest, opts ...grpc.CallOption) (*CplanePluginUnregisterResponse, error)
 	// Enumerate running control-plane plugins.
 	CplanePluginList(ctx context.Context, in *CplanePluginListRequest, opts ...grpc.CallOption) (*CplanePluginListResponse, error)
+	// Report what each running plugin is doing and holding.
+	//
+	// A sandboxed plugin is otherwise unobservable: one that has fallen
+	// behind, one restarting in a loop and one with nothing to do all look
+	// the same from outside. These counters are what tell them apart.
+	CplanePluginStats(ctx context.Context, in *CplanePluginStatsRequest, opts ...grpc.CallOption) (*CplanePluginStatsResponse, error)
 }
 
 type pluginServiceClient struct {
@@ -193,6 +200,15 @@ func (c *pluginServiceClient) CplanePluginList(ctx context.Context, in *CplanePl
 	return out, nil
 }
 
+func (c *pluginServiceClient) CplanePluginStats(ctx context.Context, in *CplanePluginStatsRequest, opts ...grpc.CallOption) (*CplanePluginStatsResponse, error) {
+	out := new(CplanePluginStatsResponse)
+	err := c.cc.Invoke(ctx, PluginService_CplanePluginStats_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PluginServiceServer is the server API for PluginService service.
 // All implementations should embed UnimplementedPluginServiceServer
 // for forward compatibility
@@ -234,6 +250,12 @@ type PluginServiceServer interface {
 	CplanePluginUnregister(context.Context, *CplanePluginUnregisterRequest) (*CplanePluginUnregisterResponse, error)
 	// Enumerate running control-plane plugins.
 	CplanePluginList(context.Context, *CplanePluginListRequest) (*CplanePluginListResponse, error)
+	// Report what each running plugin is doing and holding.
+	//
+	// A sandboxed plugin is otherwise unobservable: one that has fallen
+	// behind, one restarting in a loop and one with nothing to do all look
+	// the same from outside. These counters are what tell them apart.
+	CplanePluginStats(context.Context, *CplanePluginStatsRequest) (*CplanePluginStatsResponse, error)
 }
 
 // UnimplementedPluginServiceServer should be embedded to have forward compatible implementations.
@@ -275,6 +297,9 @@ func (UnimplementedPluginServiceServer) CplanePluginUnregister(context.Context, 
 }
 func (UnimplementedPluginServiceServer) CplanePluginList(context.Context, *CplanePluginListRequest) (*CplanePluginListResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CplanePluginList not implemented")
+}
+func (UnimplementedPluginServiceServer) CplanePluginStats(context.Context, *CplanePluginStatsRequest) (*CplanePluginStatsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CplanePluginStats not implemented")
 }
 
 // UnsafePluginServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -504,6 +529,24 @@ func _PluginService_CplanePluginList_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_CplanePluginStats_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CplanePluginStatsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).CplanePluginStats(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_CplanePluginStats_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).CplanePluginStats(ctx, req.(*CplanePluginStatsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PluginService_ServiceDesc is the grpc.ServiceDesc for PluginService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -558,6 +601,10 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CplanePluginList",
 			Handler:    _PluginService_CplanePluginList_Handler,
+		},
+		{
+			MethodName: "CplanePluginStats",
+			Handler:    _PluginService_CplanePluginStats_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

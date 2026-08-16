@@ -9,6 +9,7 @@ import (
 
 	"connectrpc.com/connect"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -24,6 +25,8 @@ type CplaneManager interface {
 	Register(ctx context.Context, reg cplane.Registration) error
 	Unregister(ctx context.Context, name string) error
 	List() []string
+	Stats() []cplane.PluginStats
+	StatsFor(name string) (cplane.PluginStats, bool)
 }
 
 // SetCplaneManager installs the manager. Call before Setup, like the other
@@ -118,6 +121,55 @@ func (s *PluginServer) CplanePluginList(
 		out = append(out, &v1.CplanePluginInfo{Name: name})
 	}
 	return connect.NewResponse(&v1.CplanePluginListResponse{Plugins: out}), nil
+}
+
+// CplanePluginStats reports what each running plugin is doing and
+// holding.
+func (s *PluginServer) CplanePluginStats(
+	_ context.Context,
+	req *connect.Request[v1.CplanePluginStatsRequest],
+) (*connect.Response[v1.CplanePluginStatsResponse], error) {
+	if s.cplane == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented,
+			errors.New("control-plane plugins are not enabled on this daemon"))
+	}
+	var stats []cplane.PluginStats
+	if name := req.Msg.GetName(); name != "" {
+		one, ok := s.cplane.StatsFor(name)
+		if !ok {
+			return nil, connect.NewError(connect.CodeNotFound,
+				fmt.Errorf("plugin %q is not registered", name))
+		}
+		stats = []cplane.PluginStats{one}
+	} else {
+		stats = s.cplane.Stats()
+	}
+
+	out := make([]*v1.CplanePluginStat, 0, len(stats))
+	for _, st := range stats {
+		behaviors := make([]uint32, 0, len(st.Behaviors))
+		for _, b := range st.Behaviors {
+			behaviors = append(behaviors, uint32(b))
+		}
+		out = append(out, &v1.CplanePluginStat{
+			Name:                st.Name,
+			Capabilities:        st.Capabilities,
+			EndpointBehaviors:   behaviors,
+			DroppedEvents:       st.DroppedEvents,
+			Restarts:            uint32(st.Restarts),
+			QuarantinedEvents:   st.Quarantined,
+			Snapshots:           st.Snapshots,
+			Dead:                st.Dead,
+			HeadendEntries:      uint32(st.HeadendEntries),
+			AdvertisedRoutes:    uint32(st.AdvertisedRoutes),
+			LocalSids:           uint32(st.LocalSIDs),
+			MaxHeadendEntries:   uint32(st.Quotas.MaxHeadendEntries),
+			MaxAdvertisedRoutes: uint32(st.Quotas.MaxAdvertisedRoutes),
+			MaxLocalSids:        uint32(st.Quotas.MaxLocalSIDs),
+			Since:               timestamppb.New(st.Since),
+		})
+	}
+	return connect.NewResponse(&v1.CplanePluginStatsResponse{Plugins: out}), nil
 }
 
 // parseFamilies validates the operator-facing family names.

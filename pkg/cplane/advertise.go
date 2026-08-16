@@ -85,7 +85,7 @@ func NewAdvertiseSet(adv Advertiser, leases *Leases) *AdvertiseSet {
 // Withdrawals run before advertisements, so a route moving between RDs is
 // never briefly present twice, and both phases run in a stable order so a
 // retry repeats the same sequence.
-func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []AdvertisedRoute) (ApplyResult, error) {
+func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []AdvertisedRoute, quota int) (ApplyResult, error) {
 	var res ApplyResult
 	if owner == "" {
 		return res, bpf.ErrEmptyOwner
@@ -106,6 +106,10 @@ func (a *AdvertiseSet) Apply(ctx context.Context, owner bpf.OwnerTag, desired []
 		}
 		byKey[k] = r
 		keys = append(keys, k)
+	}
+
+	if cap, bounded := limitOf(quota); bounded && len(keys) > cap {
+		return res, fmt.Errorf("advertise: %d routes declared, quota %d", len(keys), cap)
 	}
 
 	// The lease is the only thing standing between two owners originating

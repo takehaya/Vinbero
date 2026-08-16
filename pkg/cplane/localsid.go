@@ -100,7 +100,7 @@ func NewLocalSIDSet(alloc SIDAllocator, sids SIDFunctionOps) *LocalSIDSet {
 // Releases run first: a name dropped from the set gives its address back
 // before any new one is taken, so a plugin cycling through names does not
 // hold two allocations for one purpose.
-func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID) ([]AllocatedSID, ApplyResult, error) {
+func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) ([]AllocatedSID, ApplyResult, error) {
 	var res ApplyResult
 	if owner == "" {
 		return nil, res, bpf.ErrEmptyOwner
@@ -120,6 +120,10 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID) ([]Allocated
 		}
 		byName[s.Name] = s
 		names = append(names, s.Name)
+	}
+
+	if cap, bounded := limitOf(quota); bounded && len(names) > cap {
+		return nil, res, fmt.Errorf("local sid: %d SIDs declared, quota %d", len(names), cap)
 	}
 
 	if err := l.sweepLeftovers(owner); err != nil {

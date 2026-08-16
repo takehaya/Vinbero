@@ -132,7 +132,7 @@ func TestLocalSIDAllocatesAndInstalls(t *testing.T) {
 	sids := newFakeSIDOps()
 	set := NewLocalSIDSet(alloc, sids)
 
-	got, res, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	got, res, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -157,11 +157,11 @@ func TestLocalSIDAllocatesAndInstalls(t *testing.T) {
 func TestLocalSIDRedeclarationKeepsTheAddress(t *testing.T) {
 	alloc := &fakeAllocator{}
 	set := NewLocalSIDSet(alloc, newFakeSIDOps())
-	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	second, res, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	second, res, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
@@ -184,10 +184,10 @@ func TestLocalSIDReleasesWhatIsNoLongerDeclared(t *testing.T) {
 	if _, _, err := set.Apply(ownerA, []LocalSID{
 		{Name: "svc-a", Locator: "main", Slot: 33},
 		{Name: "svc-b", Locator: "main", Slot: 34},
-	}); err != nil {
+	}, unlimited); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	_, res, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	_, res, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -208,11 +208,11 @@ func TestLocalSIDSlotChangeKeepsTheAddress(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()
 	set := NewLocalSIDSet(alloc, sids)
-	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	second, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 40}})
+	second, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 40}}, unlimited)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
@@ -230,11 +230,11 @@ func TestLocalSIDSlotChangeKeepsTheAddress(t *testing.T) {
 func TestLocalSIDLocatorChangeReallocates(t *testing.T) {
 	alloc := &fakeAllocator{}
 	set := NewLocalSIDSet(alloc, newFakeSIDOps())
-	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	second, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "second", Slot: 33}})
+	second, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "second", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestLocalSIDReleasesOnFailedInstall(t *testing.T) {
 	sids := newFakeSIDOps()
 	sids.failOn = "fd00:1::1/128"
 	set := NewLocalSIDSet(alloc, sids)
-	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}); err == nil {
+	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited); err == nil {
 		t.Fatal("a failed install was reported as success")
 	}
 	if alloc.releasedCount() != 1 {
@@ -268,7 +268,7 @@ func TestLocalSIDReleaseOwner(t *testing.T) {
 	if _, _, err := set.Apply(ownerA, []LocalSID{
 		{Name: "svc-a", Locator: "main", Slot: 33},
 		{Name: "svc-b", Locator: "main", Slot: 34},
-	}); err != nil {
+	}, unlimited); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	if err := set.ReleaseOwner(ownerA); err != nil {
@@ -289,7 +289,7 @@ func TestLocalSIDReleaseOwner(t *testing.T) {
 // vinbero's forwarding under its own address.
 func TestLocalSIDRejectsNonPluginSlot(t *testing.T) {
 	set := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
-	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 1}}); err == nil {
+	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 1}}, unlimited); err == nil {
 		t.Fatal("a SID pointing at a built-in slot was accepted")
 	}
 }
@@ -309,7 +309,7 @@ func TestLocalSIDRejectsMalformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, _, err := set.Apply(ownerA, []LocalSID{tt.sid}); err == nil {
+			if _, _, err := set.Apply(ownerA, []LocalSID{tt.sid}, unlimited); err == nil {
 				t.Fatal("a malformed declaration was accepted")
 			}
 		})
@@ -317,7 +317,7 @@ func TestLocalSIDRejectsMalformed(t *testing.T) {
 	if _, _, err := set.Apply(ownerA, []LocalSID{
 		{Name: "svc-a", Locator: "main", Slot: 33},
 		{Name: "svc-a", Locator: "main", Slot: 34},
-	}); err == nil {
+	}, unlimited); err == nil {
 		t.Fatal("the same name declared twice was accepted")
 	}
 }
@@ -326,10 +326,10 @@ func TestLocalSIDRejectsMalformed(t *testing.T) {
 // declaration it cannot serve.
 func TestLocalSIDWithoutAnAllocator(t *testing.T) {
 	set := NewLocalSIDSet(nil, nil)
-	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}); err == nil {
+	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited); err == nil {
 		t.Fatal("a declaration was accepted with no allocator")
 	}
-	if _, _, err := set.Apply(ownerA, nil); err != nil {
+	if _, _, err := set.Apply(ownerA, nil, unlimited); err != nil {
 		t.Fatalf("an empty declaration should still be fine: %v", err)
 	}
 }
@@ -375,7 +375,7 @@ func TestLocalSIDSweepsLeftoversFromAPreviousRun(t *testing.T) {
 	}
 
 	set := NewLocalSIDSet(alloc, sids)
-	got, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	got, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestLocalSIDSweepsOnlyOnce(t *testing.T) {
 	sids := newFakeSIDOps()
 	set := NewLocalSIDSet(alloc, sids)
 
-	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}})
+	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestLocalSIDSweepsOnlyOnce(t *testing.T) {
 	if _, _, err := set.Apply(ownerA, []LocalSID{
 		{Name: "svc-a", Locator: "main", Slot: 33},
 		{Name: "svc-b", Locator: "main", Slot: 34},
-	}); err != nil {
+	}, unlimited); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
 	if _, ok := sids.entryFor(first[0].SID.String() + "/128"); !ok {

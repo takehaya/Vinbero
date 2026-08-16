@@ -162,6 +162,19 @@ func (l *Leases) HolderOf(kind LeaseKind, key string) (bpf.OwnerTag, bool) {
 	return holder, ok
 }
 
+// CountOf is how many keys owner holds in one kind.
+func (l *Leases) CountOf(kind LeaseKind, owner bpf.OwnerTag) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var n int
+	for _, holder := range l.held[kind] {
+		if holder == owner {
+			n++
+		}
+	}
+	return n
+}
+
 // KeysOf returns the keys owner holds in one kind. The order is
 // unspecified.
 func (l *Leases) KeysOf(kind LeaseKind, owner bpf.OwnerTag) []string {

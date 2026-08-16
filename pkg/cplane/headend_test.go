@@ -183,7 +183,7 @@ func sortedV4(f *fakeHeadendOps) []string {
 
 func TestApplyHeadendSetCreates(t *testing.T) {
 	ops := newFakeHeadendOps()
-	res, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"))
+	res, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -200,10 +200,10 @@ func TestApplyHeadendSetCreates(t *testing.T) {
 func TestApplyHeadendSetPrunesWhatIsNoLongerDeclared(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24"))
+	res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24"), unlimited)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestApplyHeadendSetPrunesWhatIsNoLongerDeclared(t *testing.T) {
 func TestApplyHeadendSetIgnoresOtherOwnersEntries(t *testing.T) {
 	ops := newFakeHeadendOps()
 	ops.seedV4("10.9.9.0/24", ownerB)
-	if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, desire("10.0.1.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, desire("10.0.1.0/24"), unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	if _, ok := ops.v4["10.9.9.0/24"]; !ok {
@@ -237,7 +237,7 @@ func TestApplyHeadendSetIgnoresOtherOwnersEntries(t *testing.T) {
 func TestApplyHeadendSetIgnoresUnownedEntries(t *testing.T) {
 	ops := newFakeHeadendOps()
 	ops.v4["10.9.9.0/24"] = &bpf.HeadendEntry{} // present, no owner recorded
-	if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, nil); err != nil {
+	if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, nil, unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	if _, ok := ops.v4["10.9.9.0/24"]; !ok {
@@ -253,7 +253,7 @@ func TestApplyHeadendSetRejectsLeasedKeyBeforeWriting(t *testing.T) {
 	if err := leases.Acquire(LeaseHeadendV4, "10.0.2.0/24", ownerB); err != nil {
 		t.Fatalf("setup lease: %v", err)
 	}
-	_, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"))
+	_, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited)
 	if !errors.Is(err, ErrLeaseHeld) {
 		t.Fatalf("apply = %v, want ErrLeaseHeld", err)
 	}
@@ -268,11 +268,11 @@ func TestApplyHeadendSetRejectsLeasedKeyBeforeWriting(t *testing.T) {
 func TestApplyHeadendSetOrdersPrunesBeforeWrites(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.8.0/24", "10.0.9.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.8.0/24", "10.0.9.0/24"), unlimited); err != nil {
 		t.Fatalf("seed apply: %v", err)
 	}
 	ops.writes = nil
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	want := []string{
@@ -298,7 +298,7 @@ func TestApplyHeadendSetIsRetryableAfterPartialFailure(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
 	ops.failOn = "10.0.2.0/24"
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24")); err == nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited); err == nil {
 		t.Fatal("apply should have failed on the seeded write failure")
 	}
 	if _, ok := ops.v4["10.0.1.0/24"]; !ok {
@@ -306,7 +306,7 @@ func TestApplyHeadendSetIsRetryableAfterPartialFailure(t *testing.T) {
 	}
 
 	ops.failOn = ""
-	res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"))
+	res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestApplyHeadendSetRejectsMalformedDeclarations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, tt.desired); err == nil {
+			if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, tt.desired, unlimited); err == nil {
 				t.Fatal("malformed declaration was accepted")
 			}
 			if len(ops.writes) != 0 {
@@ -339,14 +339,14 @@ func TestApplyHeadendSetRejectsMalformedDeclarations(t *testing.T) {
 
 func TestApplyHeadendSetRejectsEmptyOwner(t *testing.T) {
 	ops := newFakeHeadendOps()
-	if _, err := ApplyHeadendSet(ops, NewLeases(), "", AFv4, desire("10.0.1.0/24")); !errors.Is(err, bpf.ErrEmptyOwner) {
+	if _, err := ApplyHeadendSet(ops, NewLeases(), "", AFv4, desire("10.0.1.0/24"), unlimited); !errors.Is(err, bpf.ErrEmptyOwner) {
 		t.Fatalf("apply with an empty owner = %v, want ErrEmptyOwner", err)
 	}
 }
 
 func TestApplyHeadendSetV6(t *testing.T) {
 	ops := newFakeHeadendOps()
-	res, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv6, desire("2001:db8:1::/48"))
+	res, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv6, desire("2001:db8:1::/48"), unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestApplyHeadendSetV6(t *testing.T) {
 func TestPruneHeadendOwnerRemovesOnlyItsOwn(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	ops.seedV4("10.9.9.0/24", ownerB)

@@ -49,6 +49,12 @@ service PluginService {
   rpc CplanePluginUnregister(CplanePluginUnregisterRequest) returns (CplanePluginUnregisterResponse);
   // Enumerate running control-plane plugins.
   rpc CplanePluginList(CplanePluginListRequest) returns (CplanePluginListResponse);
+  // Report what each running plugin is doing and holding.
+  //
+  // A sandboxed plugin is otherwise unobservable: one that has fallen
+  // behind, one restarting in a loop and one with nothing to do all look
+  // the same from outside. These counters are what tell them apart.
+  rpc CplanePluginStats(CplanePluginStatsRequest) returns (CplanePluginStatsResponse);
 }
 
 message PluginRegisterRequest {
@@ -219,4 +225,46 @@ message CplanePluginInfo {
 
 message CplanePluginListResponse {
   repeated CplanePluginInfo plugins = 1;
+}
+
+message CplanePluginStatsRequest {
+  // Name restricts the report to one plugin. Empty reports all of them.
+  string name = 1;
+}
+
+// CplanePluginStat is one plugin's observable state.
+message CplanePluginStat {
+  string name = 1;
+  // Capabilities granted and endpoint behaviors claimed, so a deployment
+  // can be checked without reading the registration back.
+  repeated string capabilities = 2;
+  repeated uint32 endpoint_behaviors = 3;
+  // DroppedEvents counts event batches discarded because the plugin could
+  // not keep up. A plugin falling behind is otherwise invisible: its
+  // declarations simply stop reflecting routes it never saw.
+  uint64 dropped_events = 4;
+  // Restarts counts instances lost to a trap or an overrun budget since
+  // the last successful delivery.
+  uint32 restarts = 5;
+  // Quarantined counts events the plugin asked the host to stop
+  // redelivering.
+  uint64 quarantined_events = 6;
+  // Snapshots counts rib replays delivered to it.
+  uint64 snapshots = 7;
+  // Dead reports a plugin left stopped after repeated failures. The state
+  // it wrote is still installed; it is simply no longer being fed.
+  bool dead = 8;
+  // What it holds now, and the quota each is measured against.
+  uint32 headend_entries = 9;
+  uint32 advertised_routes = 10;
+  uint32 local_sids = 11;
+  uint32 max_headend_entries = 12;
+  uint32 max_advertised_routes = 13;
+  uint32 max_local_sids = 14;
+  // Since is when the running instance started, which a restart resets.
+  google.protobuf.Timestamp since = 15;
+}
+
+message CplanePluginStatsResponse {
+  repeated CplanePluginStat plugins = 1;
 }

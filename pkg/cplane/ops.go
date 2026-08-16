@@ -27,6 +27,7 @@ type PluginOps struct {
 	leases      *Leases
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
+	quotas      Quotas
 	onLocalSIDs func([]AllocatedSID)
 	encapSource func() (netip.Addr, error)
 	logger      *zap.Logger
@@ -92,6 +93,9 @@ type PluginOpsConfig struct {
 	Advertise *AdvertiseSet
 	// LocalSIDs allocates the SIDs a plugin points at its data-plane half.
 	LocalSIDs *LocalSIDSet
+	// Quotas bound how much this plugin may hold. Zero fields take the
+	// defaults.
+	Quotas Quotas
 	// OnLocalSIDs is called with what a local-SID declaration resolved to,
 	// so the plugin can be told the addresses it was given.
 	OnLocalSIDs func([]AllocatedSID)
@@ -145,6 +149,7 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 		caps:        cfg.Capabilities,
 		advertise:   cfg.Advertise,
 		localSIDs:   cfg.LocalSIDs,
+		quotas:      cfg.Quotas.withDefaults(),
 		onLocalSIDs: cfg.OnLocalSIDs,
 		encapSource: cfg.EncapSource,
 		headend:     cfg.Headend,
@@ -331,7 +336,7 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
 		p.applyMu.Lock()
-		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids)
+		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids, p.quotas.MaxLocalSIDs)
 		p.applyMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("apply commit: %w", err)
@@ -351,7 +356,7 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
 		p.applyMu.Lock()
-		res, err := p.advertise.Apply(context.Background(), p.owner, txn.routes)
+		res, err := p.advertise.Apply(context.Background(), p.owner, txn.routes, p.quotas.MaxAdvertisedRoutes)
 		p.applyMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("apply commit: %w", err)
@@ -369,7 +374,7 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 		af = AFv6
 	}
 	p.applyMu.Lock()
-	res, err := ApplyHeadendSet(p.headend, p.leases, p.owner, af, txn.entries)
+	res, err := ApplyHeadendSet(p.headend, p.leases, p.owner, af, txn.entries, p.quotas.MaxHeadendEntries)
 	p.applyMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("apply commit: %w", err)

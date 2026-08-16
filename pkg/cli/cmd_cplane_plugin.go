@@ -108,6 +108,56 @@ func cplaneSubcommand() *cli.Command {
 				},
 			},
 			{
+				Name:  "stats",
+				Usage: "Report what each plugin is doing and holding",
+				Description: "A sandboxed plugin is otherwise unobservable: one that has fallen\n" +
+					"behind, one restarting in a loop and one with nothing to do all look\n" +
+					"the same from outside. DROPPED, RESTARTS and QUARANTINED are what tell\n" +
+					"them apart; the HELD columns show what it owns against its quota.",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "name", Usage: "Report one plugin instead of all of them"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					resp, err := clients.Plugin.CplanePluginStats(c.Context,
+						connect.NewRequest(&v1.CplanePluginStatsRequest{Name: c.String("name")}))
+					if err != nil {
+						return err
+					}
+					plugins := resp.Msg.GetPlugins()
+					if len(plugins) == 0 {
+						fmt.Println("No control-plane plugins registered")
+						return nil
+					}
+					w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+					if _, err := fmt.Fprintln(w,
+						"NAME\tCAPABILITIES\tSTATE\tDROPPED\tRESTARTS\tQUARANTINED\tSNAPSHOTS\tHEADEND\tADVERTISED\tSIDS"); err != nil {
+						return err
+					}
+					for _, p := range plugins {
+						state := "running"
+						if p.GetDead() {
+							// Its state is still installed; it is simply
+							// no longer being fed.
+							state = "stopped"
+						}
+						caps := strings.Join(p.GetCapabilities(), ",")
+						if caps == "" {
+							caps = "-"
+						}
+						if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d/%d\t%d/%d\t%d/%d\n",
+							p.GetName(), caps, state,
+							p.GetDroppedEvents(), p.GetRestarts(), p.GetQuarantinedEvents(), p.GetSnapshots(),
+							p.GetHeadendEntries(), p.GetMaxHeadendEntries(),
+							p.GetAdvertisedRoutes(), p.GetMaxAdvertisedRoutes(),
+							p.GetLocalSids(), p.GetMaxLocalSids()); err != nil {
+							return err
+						}
+					}
+					return w.Flush()
+				},
+			},
+			{
 				Name:  "list",
 				Usage: "List running control-plane plugins",
 				Action: func(c *cli.Context) error {
