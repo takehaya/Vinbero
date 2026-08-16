@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplaneharness"
 )
 
@@ -360,4 +361,59 @@ func advertisedPrefixes(h *cplaneharness.Harness) []string {
 		}
 	}
 	return out
+}
+
+// The harness runs the daemon's own checks, not a second copy of them. A
+// harness more forgiving than the daemon passes plugins that then go
+// silent in production, which is the one thing it exists to prevent.
+func TestHarnessRefusesWhatTheDaemonWouldRefuse(t *testing.T) {
+	cases := []struct {
+		name  string
+		chunk *v1.PluginApplyChunk
+		kind  v1.PluginApplyKind
+	}{
+		{
+			name: "an advertisement with no next hop",
+			kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE,
+			chunk: &v1.PluginApplyChunk{AdvertisedRoutes: []*v1.PluginAdvertisedRoute{{
+				Family: "vpnv4", Rd: "65000:1", Prefix: "10.0.0.0/24", Srv6Sid: "fd00:2::1",
+			}}},
+		},
+		{
+			name: "a headend mode with nothing behind it",
+			kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
+			chunk: &v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{
+				TriggerPrefix: "10.0.0.0/24", Segments: []string{"fd00:2::1"}, Mode: 200,
+			}}},
+		},
+		{
+			name: "a prefix in the wrong family",
+			kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
+			chunk: &v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{
+				TriggerPrefix: "2001:db8::/32", Segments: []string{"fd00:2::1"},
+			}}},
+		},
+		{
+			name: "a local SID pointing at a built-in slot",
+			kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID,
+			chunk: &v1.PluginApplyChunk{LocalSids: []*v1.PluginLocalSid{{
+				Name: "svc", Locator: "main", Slot: 1,
+			}}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := cplane.ValidateChunk(tc.kind, tc.chunk); err == nil {
+				t.Fatal("the harness accepted a declaration the daemon refuses")
+			}
+		})
+	}
+
+	// And what the daemon accepts still passes.
+	ok := &v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{
+		TriggerPrefix: "10.0.0.0/24", Segments: []string{"fd00:2::1"},
+	}}}
+	if err := cplane.ValidateChunk(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4, ok); err != nil {
+		t.Errorf("a valid declaration was refused: %v", err)
+	}
 }

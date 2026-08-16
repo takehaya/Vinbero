@@ -3,6 +3,7 @@ package cplane
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,5 +77,45 @@ func TestHeldEventsKeepTheirOrderWhenReleased(t *testing.T) {
 	defer mu.Unlock()
 	if seen[0] != "A" || seen[1] != "B" {
 		t.Fatalf("delivery order %v; the held events were overtaken", seen)
+	}
+}
+
+// A dropped batch leaves the plugin's view with a hole, and a plugin that
+// declares a desired set prunes what it never saw. The drop therefore has
+// to owe a rib replay -- without that, the hole becomes a deletion at the
+// plugin's next declaration.
+func TestADroppedBatchOwesASnapshot(t *testing.T) {
+	release := make(chan struct{})
+	var delivered atomic.Int64
+	w := newWorker("slow", zap.NewNop(),
+		func(_ context.Context, _ []byte) ([]byte, error) {
+			delivered.Add(1)
+			<-release
+			return nil, nil
+		},
+		func(error) {}, func(*v1.PluginEventStatus) {}, nil, 0, nil)
+	defer func() {
+		close(release)
+		w.close()
+	}()
+
+	// Nothing is owed while it keeps up.
+	if w.takeSnapshotDebt() {
+		t.Fatal("a snapshot was owed before anything was dropped")
+	}
+
+	// Fill the queue past its depth while the guest is blocked.
+	for i := 0; i < deliveryQueueDepth*2; i++ {
+		w.submit(testBatch(t, "x"))
+	}
+	if w.droppedCount() == 0 {
+		t.Fatal("nothing was dropped, so the test proves nothing")
+	}
+	if !w.takeSnapshotDebt() {
+		t.Fatal("batches were dropped and no rib replay is owed; the plugin's next declaration would prune what it never saw")
+	}
+	// The debt is taken once: whoever repays it is the one that took it.
+	if w.takeSnapshotDebt() {
+		t.Error("the same debt was handed out twice")
 	}
 }

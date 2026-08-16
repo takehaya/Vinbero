@@ -1,6 +1,8 @@
 package wasm
 
 import (
+	"time"
+
 	"context"
 	"fmt"
 
@@ -74,13 +76,21 @@ func (i *Instance) linkHost(ctx context.Context) error {
 //
 // A sandboxed module has no stdout, no filesystem, and no network, so
 // without this a plugin author debugging a quarantined event has nothing
-// to look at. The message is read out of guest memory and bounded by the
-// same buffer limit as everything else, so a plugin cannot log its way
-// through the host's memory.
+// to look at.
+//
+// The message is bounded twice over. Its length is capped well below the
+// buffer limit, because a log line is a sentence and not a payload, and
+// the rate is capped as well: the memory a message costs is transient,
+// but what it is written into is a disk somebody else is sharing, and a
+// plugin that logs on every event can fill it without ever exceeding a
+// per-message limit.
 func (i *Instance) hostLog(_ context.Context, mod api.Module, level, ptr, length int32) {
-	if length < 0 || int(length) > i.limits.MaxBufferBytes {
-		i.logger.Warn("plugin log rejected: length out of range",
-			zap.Int32("length", length))
+	if length < 0 || int(length) > maxLogMessageBytes {
+		i.logger.Warn("plugin log rejected: message too long",
+			zap.Int32("length", length), zap.Int("limit", maxLogMessageBytes))
+		return
+	}
+	if !i.logAllowed() {
 		return
 	}
 	msg := ""
@@ -94,6 +104,44 @@ func (i *Instance) hostLog(_ context.Context, mod api.Module, level, ptr, length
 		msg = string(raw)
 	}
 	i.ops.Log(level, msg)
+}
+
+// maxLogMessageBytes bounds one line a plugin writes. A log line is a
+// sentence; anything longer is a payload going somewhere it should not.
+const maxLogMessageBytes = 4096
+
+// logBurst and logInterval bound how often a plugin may write.
+//
+// The burst is what a plugin needs to explain one event; the refill is
+// what keeps a plugin logging on every route from filling a disk it
+// shares with the daemon's own log.
+const (
+	logBurst    = 64
+	logInterval = time.Second
+)
+
+// logAllowed reports whether this plugin may write another line now, and
+// says once when it starts dropping them -- silence about the silence
+// would be worse than the flood.
+func (i *Instance) logAllowed() bool {
+	i.logMu.Lock()
+	defer i.logMu.Unlock()
+	now := time.Now()
+	if now.Sub(i.logWindow) >= logInterval {
+		if i.logDropped > 0 {
+			i.logger.Warn("dropped log lines from a plugin writing faster than the limit",
+				zap.String("plugin", i.name), zap.Int("dropped", i.logDropped))
+		}
+		i.logWindow = now
+		i.logCount = 0
+		i.logDropped = 0
+	}
+	if i.logCount >= logBurst {
+		i.logDropped++
+		return false
+	}
+	i.logCount++
+	return true
 }
 
 // hostNowMonotonic gives the guest a clock.

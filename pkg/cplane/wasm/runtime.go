@@ -115,6 +115,14 @@ type Instance struct {
 	mod    api.Module
 	closed bool
 
+	// logMu guards the log rate limiter below. The guest can write from
+	// any call, and calls are serialized, but the tick and the event path
+	// reach this through different goroutines over an instance's life.
+	logMu      sync.Mutex
+	logWindow  time.Time
+	logCount   int
+	logDropped int
+
 	// callMu serializes every call into the guest.
 	//
 	// wazero's Function.Call is not goroutine-safe, and a plugin has one
@@ -148,6 +156,25 @@ type Config struct {
 	Capabilities Capabilities
 	// Logger receives the runtime's own messages and the plugin's.
 	Logger *zap.Logger
+}
+
+// Merge fills this limit set's zero fields from other, so a daemon-wide
+// default can stand behind a per-plugin one without either having to know
+// about the other.
+func (l Limits) Merge(over Limits) Limits {
+	if over.MaxModuleBytes != 0 {
+		l.MaxModuleBytes = over.MaxModuleBytes
+	}
+	if over.MaxMemoryPages != 0 {
+		l.MaxMemoryPages = over.MaxMemoryPages
+	}
+	if over.CallTimeout != 0 {
+		l.CallTimeout = over.CallTimeout
+	}
+	if over.MaxBufferBytes != 0 {
+		l.MaxBufferBytes = over.MaxBufferBytes
+	}
+	return l
 }
 
 // Instantiate compiles, admits, and starts a plugin module.

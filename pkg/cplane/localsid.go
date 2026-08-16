@@ -402,6 +402,13 @@ func validateLocalSID(s LocalSID) error {
 	if s.Name == "" {
 		return errors.New("local sid: declaration has no name")
 	}
+	if len(s.Name) > maxLocalSIDNameLen {
+		return fmt.Errorf("local sid: name is %d bytes, limit %d", len(s.Name), maxLocalSIDNameLen)
+	}
+	if len(s.Locator) > maxLocalSIDNameLen {
+		return fmt.Errorf("local sid %q: locator name is %d bytes, limit %d",
+			s.Name, len(s.Locator), maxLocalSIDNameLen)
+	}
 	if s.Locator == "" {
 		return fmt.Errorf("local sid %q: no locator", s.Name)
 	}
@@ -417,6 +424,14 @@ func validateLocalSID(s LocalSID) error {
 	}
 	return nil
 }
+
+// maxLocalSIDNameLen bounds the name a plugin gives a SID.
+//
+// The name is the plugin's own key for the allocation, kept for as long as
+// it holds the SID. Nothing downstream reads it, so its only cost is the
+// memory it occupies -- which is exactly why it needs a limit: without one
+// a plugin can spend the host's memory on names for SIDs it never uses.
+const maxLocalSIDNameLen = 256
 
 // DecodeLocalSID converts a plugin's declaration into the internal form.
 func DecodeLocalSID(in *v1.PluginLocalSid) (LocalSID, error) {

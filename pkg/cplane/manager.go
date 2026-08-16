@@ -125,7 +125,10 @@ type Manager struct {
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
 	encapSource func() (netip.Addr, error)
-	logger      *zap.Logger
+	// limits are what a plugin costs to run when its registration is
+	// silent about it.
+	limits wasm.Limits
+	logger *zap.Logger
 
 	// unrestored holds the plugins the store had but that would not come
 	// back, keyed by name.
@@ -219,6 +222,10 @@ type ManagerConfig struct {
 	// Quotas bound how much any one plugin may hold. Zero fields take the
 	// defaults.
 	Quotas Quotas
+	// DefaultLimits bound what a plugin costs to run when its registration
+	// does not say. The registration wins where it sets a field, so an
+	// operator can raise one plugin without loosening the rest.
+	DefaultLimits wasm.Limits
 	// Store keeps registrations across a daemon restart. Nil runs the
 	// daemon without one, which means every plugin has to be registered
 	// again after a restart -- and the state a plugin wrote outlives the
@@ -250,6 +257,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		claims:      cfg.Claims,
 		headend:     cfg.Headend,
 		quotas:      cfg.Quotas.withDefaults(),
+		limits:      cfg.DefaultLimits,
 		store:       cfg.Store,
 		leases:      leases,
 		encapSource: cfg.EncapSource,
@@ -269,6 +277,10 @@ func newNamedAdvertiseSet(cfg ManagerConfig, leases *Leases) *AdvertiseSet {
 	}
 	return set
 }
+
+// ErrPluginNotRegistered is a name the manager does not hold. It is the
+// caller's to fix, so callers can tell it from a daemon failure.
+var ErrPluginNotRegistered = errors.New("plugin is not registered")
 
 // Register starts a plugin.
 //
@@ -303,6 +315,8 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	} else if len(reg.Behaviors) > 0 {
 		return fmt.Errorf("cplane: plugin %q claims behaviors but no claim registry is configured", reg.Name)
 	}
+
+	reg.Limits = m.limits.Merge(reg.Limits)
 
 	p, err := m.build(ctx, reg)
 	if err != nil {
@@ -390,9 +404,17 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 
 	// Recorded only once it is actually running, so a module that could
 	// not start is not something a restart tries again forever.
+	//
+	// A failure here is reported rather than logged past. The plugin is
+	// running, so it is not undone, but "registered" means it survives a
+	// restart: an operator told it succeeded would find it gone, or find
+	// the version it replaced, with nothing having said so.
 	if err := m.store.Save(reg); err != nil {
-		m.logger.Warn("could not persist a plugin registration; it will not survive a restart",
+		m.logger.Error("a plugin is running but could not be persisted; "+
+			"it will not survive a restart",
 			zap.String("plugin", reg.Name), zap.Error(err))
+		return fmt.Errorf("cplane: plugin %q is running but could not be persisted, "+
+			"so it will not survive a restart: %w", reg.Name, err)
 	}
 
 	m.logger.Info("control-plane plugin registered",
@@ -556,7 +578,8 @@ func (m *Manager) Forget(name string) error {
 	_, held := m.unrestored[name]
 	m.unrestoredMu.Unlock()
 	if !held {
-		return fmt.Errorf("cplane: plugin %q is not one that failed to restore", name)
+		return fmt.Errorf("cplane: %w: %q is not one that failed to restore",
+			ErrPluginNotRegistered, name)
 	}
 	if m.claims != nil {
 		m.claims.Release(name)
@@ -573,27 +596,17 @@ func (m *Manager) Forget(name string) error {
 // build instantiates a plugin and its delivery worker without publishing
 // it.
 func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) {
-	// A plugin may declare local SIDs from configure, which runs during
-	// instantiation -- before there is a worker to deliver the reply
-	// through. Buffer those until there is one rather than dropping them:
-	// a plugin that is never told the address it was given cannot
-	// advertise it, and would sit there waiting for an event that already
-	// happened.
-	var (
-		pendingMu   sync.Mutex
-		pendingSIDs []AllocatedSID
-		built       *plugin
-	)
+	// Local SIDs declared from configure are answered through the worker
+	// like any other event. configure runs during instantiation, before
+	// there is a worker, but nothing it declares is applied until
+	// publication -- which happens after the worker exists -- so the reply
+	// is queued rather than lost.
+	var built *plugin
 	onLocalSIDs := func(sids []AllocatedSID) bool {
-		pendingMu.Lock()
 		if built == nil {
-			pendingSIDs = append(pendingSIDs, sids...)
-			pendingMu.Unlock()
-			return true
+			return false
 		}
-		p := built
-		pendingMu.Unlock()
-		return m.deliverLocalSIDs(p, sids)
+		return m.deliverLocalSIDs(built, sids)
 	}
 
 	ops, err := NewPluginOps(PluginOpsConfig{
@@ -641,14 +654,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		// event afterwards repair that instead of leaving it lost.
 		ops.RetryPending)
 
-	pendingMu.Lock()
 	built = p
-	held := pendingSIDs
-	pendingSIDs = nil
-	pendingMu.Unlock()
-	if len(held) > 0 {
-		m.deliverLocalSIDs(p, held)
-	}
 	return p, nil
 }
 
@@ -680,7 +686,7 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 	delete(m.plugins, name)
 	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("cplane: plugin %q is not registered", name)
+		return fmt.Errorf("cplane: %w: %q", ErrPluginNotRegistered, name)
 	}
 
 	// Order matters. Delivery stops first so nothing new is declared, then
@@ -970,7 +976,7 @@ func (m *Manager) snapshotFor(name string) error {
 	p, ok := m.plugins[name]
 	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("cplane: plugin %q is not registered", name)
+		return fmt.Errorf("cplane: %w: %q", ErrPluginNotRegistered, name)
 	}
 	if m.snapshots == nil {
 		return fmt.Errorf("cplane: the event source serves no snapshot")

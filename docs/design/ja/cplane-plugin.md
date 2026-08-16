@@ -275,6 +275,22 @@ session 側で producer を記録し、withdraw は自分が出した経路に�
 すると経路自体が消えるのに、先に出した側は広告中のつもりで戻しません。
 先に出した方が保持し、拒否された側には理由を返します。
 
+## 既知の限界
+
+reconcile は owner の現在の集合を map の全走査で求めます。lease 表は同じ
+情報を持っているので置き換えられますが、置き換えていません。全走査は
+lease と entry がずれたときにそれを捕まえる唯一の場所でもあり、本設計の
+review で実際に見つかった不具合はどれもそのずれでした。速さのために backstop
+を外す判断は、いまの証拠と逆を向いています。
+
+その結果、reconcile の時間は map の大きさに比例します。reconcile は plugin
+をまたいで applyMu で直列化され、guest の call budget は host を待つ時間も
+数えるので、大きな map と多数の plugin が揃うと、隣の plugin の reconcile を
+待つ間に自分の budget が尽きて instance を失うことがあります。budget 超過は
+instance を作り直して収束するので転送は保たれますが、隔離としては不完全です。
+map が大きい環境で plugin を多数動かす場合は、call budget を map の規模に
+見合う値に上げてください。
+
 ## 登録時の検証
 
 module は allowlist で検証します。
@@ -356,10 +372,16 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 
 ```sh
 vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
-    --behavior 0xFE01 --family vpnv4
+    --behavior 0xFE01 --family vpnv4 --capability headend
 vbctl plugin cplane list
+vbctl plugin cplane stats
 vbctl plugin cplane unregister --name custom-behavior
 ```
+
+capability は省略できますが、省略した plugin は何も宣言できません。observe と
+log しかしない plugin はそれで正しく、宣言する plugin には必要なものを与えます。
+`stats` は動いている plugin と、restore に失敗して claim だけ残っている plugin の
+両方を出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
 
 behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint を hex で
 振っているので、0x0013 を 10 進の 13 と読むと別の behavior を claim して
@@ -380,8 +402,12 @@ TinyGo は次の flag で使えます。
 
 ```sh
 tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=conservative -panic=trap .
+    -scheduler=none -gc=conservative -panic=trap -no-debug .
 ```
+
+`-no-debug` は artifact を再現可能にします。付けないと TinyGo が絶対 path を
+DWARF に埋めるので、同じ source から作った .wasm が machine ごとに変わり、
+committed の artifact と source が一致しているかを CI で見られなくなります。
 
 `gc=conservative` は必須です。WASI を link しない target の既定は
 `gc=leaking` で memory を一切回収しません。control plane plugin は daemon
@@ -448,6 +474,5 @@ Copilot が行数上限でレビューできないためです。以後の追加
 
 ## 参照
 
-- 設計の経緯と検討: `docs/plan/cplane-plugin.md`
 - data plane plugin SDK: `docs/design/ja/plugin-sdk.md`
 - 永続化の既定モデル: `docs/design/ja/persistence.md`

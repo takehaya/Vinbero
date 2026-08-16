@@ -242,9 +242,13 @@ Everything crossing the boundary is protobuf, defined in
 `share/vinbero-sdk/proto/`). Generate bindings from it in whatever
 language you write the plugin in.
 
-The module exports a small ABI -- `alloc`, `free`, `handle_events`, and
-optionally `configure` and `on_tick` -- and imports host functions from
-the `vinbero` module.
+The module exports a small ABI -- `alloc`, `free`, `handle_events`,
+`vinbero_abi_version`, and optionally `configure`, `on_tick` and the
+reactor initializer `_initialize` -- and imports host functions from the
+`vinbero` module. A module missing `vinbero_abi_version` is refused at
+registration: it is what lets the daemon turn away a plugin built against
+an ABI it no longer implements, rather than letting it trap on the first
+call into a function whose signature moved.
 
 Which host functions are linked depends on the capabilities the plugin was
 granted. That is the coarse half of the gate: a plugin granted nothing that

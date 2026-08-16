@@ -46,6 +46,14 @@ type RouteValidator interface {
 	CanonicalRD(rd string) (string, error)
 }
 
+// maxRouteTargets bounds the route targets on one route.
+//
+// They travel in a single extended communities attribute, whose length
+// field is 16 bits and whose members are 8 bytes each; a peer will refuse
+// an update that overruns it, and refusing an update is how a session ends.
+// Real VPN routes carry a handful.
+const maxRouteTargets = 128
+
 // AdvertisedRoute is one route an owner wants originated.
 type AdvertisedRoute struct {
 	Family  bgp.Family
@@ -434,6 +442,14 @@ func normalizeAdvertised(r AdvertisedRoute) (AdvertisedRoute, error) {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
 		if r.RD == "" {
 			return r, fmt.Errorf("advertise: %s %s has no route distinguisher", r.Family, r.Prefix)
+		}
+		// Route targets go out as one extended communities attribute, and
+		// a BGP attribute is not unbounded: enough of them and the update
+		// this node sends is one its peers refuse, which costs the session
+		// rather than the route. The limit is far above any real VPN.
+		if len(r.RouteTargets) > maxRouteTargets {
+			return r, fmt.Errorf("advertise: %s %s declares %d route targets, limit %d",
+				r.Family, r.Prefix, len(r.RouteTargets), maxRouteTargets)
 		}
 		if r.SRv6SID != "" {
 			sid, err := netip.ParseAddr(r.SRv6SID)

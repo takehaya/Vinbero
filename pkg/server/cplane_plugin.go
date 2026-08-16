@@ -13,6 +13,8 @@ import (
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bgp/demux"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
@@ -254,10 +256,20 @@ func parseBehaviors(codepoints []uint32) ([]uint16, error) {
 // everything else is the daemon's.
 func cplaneRPCError(err error) error {
 	switch {
-	case errors.Is(err, wasm.ErrAdmission):
+	case errors.Is(err, wasm.ErrAdmission),
+		errors.Is(err, demux.ErrUnclaimable),
+		errors.Is(err, bpf.ErrBundleNameInvalid),
+		errors.Is(err, bpf.ErrBundleNameTooLong):
+		// The module, the codepoint or the name is wrong, and the caller
+		// is holding all three.
 		return connect.NewError(connect.CodeInvalidArgument, err)
-	case errors.Is(err, cplane.ErrLeaseHeld):
+	case errors.Is(err, cplane.ErrLeaseHeld),
+		errors.Is(err, demux.ErrBehaviorHeld):
+		// Nothing is wrong with the request; something else holds what it
+		// asked for, and the caller decides what gives.
 		return connect.NewError(connect.CodeFailedPrecondition, err)
+	case errors.Is(err, cplane.ErrPluginNotRegistered):
+		return connect.NewError(connect.CodeNotFound, err)
 	default:
 		return connect.NewError(connect.CodeInternal, err)
 	}

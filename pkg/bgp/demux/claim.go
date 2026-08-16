@@ -1,6 +1,7 @@
 package demux
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -49,6 +50,15 @@ func NewClaimRegistry(reserved []uint16) *ClaimRegistry {
 //
 // Re-claiming the exact same set under the same plugin name succeeds, which
 // is what an in-place upgrade of a plugin does.
+// ErrUnclaimable is a codepoint no plugin may take: zero, which means "no
+// behavior", and the ones vinbero implements itself. It is the caller's
+// mistake, not the daemon's, so callers can tell it apart.
+var ErrUnclaimable = errors.New("codepoint cannot be claimed")
+
+// ErrBehaviorHeld is a codepoint another plugin already holds. Also the
+// caller's to resolve: something has to give it up first.
+var ErrBehaviorHeld = errors.New("behavior is claimed by another plugin")
+
 func (r *ClaimRegistry) Claim(plugin string, codepoints []uint16) error {
 	if r == nil {
 		// A daemon started without BGP has no registry, and a plugin
@@ -108,13 +118,13 @@ func (r *ClaimRegistry) Replace(plugin string, codepoints []uint16) error {
 func (r *ClaimRegistry) checkLocked(plugin string, codepoints []uint16) error {
 	for _, cp := range codepoints {
 		if cp == 0 {
-			return fmt.Errorf("claim: codepoint 0 means \"no behavior\" and cannot be claimed")
+			return fmt.Errorf("claim: %w: codepoint 0 means \"no behavior\"", ErrUnclaimable)
 		}
 		if _, isReserved := r.reserved[cp]; isReserved {
-			return fmt.Errorf("claim: codepoint %#x is implemented by vinbero and cannot be claimed", cp)
+			return fmt.Errorf("claim: %w: codepoint %#x is implemented by vinbero", ErrUnclaimable, cp)
 		}
 		if holder, taken := r.byCodepoint[cp]; taken && holder != plugin {
-			return fmt.Errorf("claim: codepoint %#x is already claimed by plugin %q", cp, holder)
+			return fmt.Errorf("claim: %w: codepoint %#x is held by plugin %q", ErrBehaviorHeld, cp, holder)
 		}
 	}
 	return nil

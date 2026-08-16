@@ -21,6 +21,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/cplane"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/fib"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
@@ -448,7 +449,23 @@ func run(cliCtx *cli.Context) error {
 			SIDFunctions: vin.GetMapOperations(),
 			EncapSource:  applier.EncapSourceAddr,
 			Store:        cplaneStore,
-			Logger:       lg.Named("cplane"),
+			// What one plugin may hold and what it may cost to run, from
+			// the operator's config. Without these the daemon ran on the
+			// built-in defaults whatever the file said, and reported the
+			// configured value back as though it were in force.
+			Quotas: cplane.Quotas{
+				MaxHeadendEntries:   cfg.Setting.CplanePlugins.Quotas.MaxHeadendEntries,
+				MaxAdvertisedRoutes: cfg.Setting.CplanePlugins.Quotas.MaxAdvertisedRoutes,
+				MaxLocalSIDs:        cfg.Setting.CplanePlugins.Quotas.MaxLocalSIDs,
+			},
+			DefaultLimits: wasm.Limits{
+				MaxModuleBytes: cfg.Setting.CplanePlugins.Limits.MaxModuleBytes,
+				MaxMemoryPages: cfg.Setting.CplanePlugins.Limits.MaxMemoryPages,
+				CallTimeout: time.Duration(cfg.Setting.CplanePlugins.Limits.CallTimeoutMs) *
+					time.Millisecond,
+				MaxBufferBytes: cfg.Setting.CplanePlugins.Limits.MaxBufferBytes,
+			},
+			Logger: lg.Named("cplane"),
 		})
 		if err != nil {
 			return fmt.Errorf("build control-plane plugin manager: %w", err)

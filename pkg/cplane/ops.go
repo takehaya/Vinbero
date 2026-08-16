@@ -606,6 +606,43 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	return nil
 }
 
+// ValidateChunk refuses a chunk the host would not apply.
+//
+// It is exported because the conformance harness runs it too: a harness
+// that accepted what the daemon refuses would pass a plugin and let it go
+// silent in production, and a second copy of these rules would drift from
+// this one. Everything a declaration is checked against before it reaches
+// a map or a peer belongs here.
+func ValidateChunk(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
+	if err := checkChunkKind(kind, msg); err != nil {
+		return err
+	}
+	af := AFv4
+	if kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+		af = AFv6
+	}
+	// A source address the daemon would lend is not known here, so one is
+	// supplied: the entry's own source is what is being checked, and a
+	// declaration that names none is valid either way.
+	lent := netip.MustParseAddr("fd00::1")
+	for _, e := range msg.GetHeadendEntries() {
+		if _, _, err := DecodeHeadendEntry(e, af, lent); err != nil {
+			return err
+		}
+	}
+	for _, r := range msg.GetAdvertisedRoutes() {
+		if _, err := DecodeAdvertisedRoute(r); err != nil {
+			return err
+		}
+	}
+	for _, sid := range msg.GetLocalSids() {
+		if _, err := DecodeLocalSID(sid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // checkChunkKind refuses a chunk whose contents do not match the kind the
 // transaction was opened for.
 func checkChunkKind(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
@@ -671,8 +708,9 @@ func (p *PluginOps) stale(txn *applyTxn) bool {
 	return false
 }
 
-// unnotified returns the allocations this instance has not been told about
-// yet, and records them as told.
+// freshAllocations returns the allocations this instance has not been told
+// about yet. It does not record them: that happens in recordNotified, once
+// the event carrying them has actually been queued.
 //
 // An address that changed under a name counts as new: the plugin is
 // advertising the old one and has to hear about the replacement.

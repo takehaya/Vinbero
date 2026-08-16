@@ -340,6 +340,41 @@ type SettingConfig struct {
 type CplanePluginsConfig struct {
 	Enabled bool   `yaml:"enabled,omitempty" default:"true"`
 	Path    string `yaml:"path,omitempty" default:"/var/lib/vinbero/cplane-plugins"`
+	// Quotas bound what any one plugin may hold. Zero fields take the
+	// defaults, which are generous next to an ordinary plugin and small
+	// next to what a runaway one costs.
+	Quotas CplanePluginQuotas `yaml:"quotas,omitempty"`
+	// Limits bound what any one plugin may cost to run. Zero fields take
+	// the defaults.
+	Limits CplanePluginLimits `yaml:"limits,omitempty"`
+}
+
+// CplanePluginQuotas is how much state one plugin may hold.
+type CplanePluginQuotas struct {
+	// MaxHeadendEntries counts v4 and v6 together. Negative means
+	// unbounded, which is a deliberate escape hatch rather than a value
+	// anyone should reach for.
+	MaxHeadendEntries int `yaml:"max_headend_entries,omitempty"`
+	// MaxAdvertisedRoutes is the quota that reaches other routers: a
+	// plugin advertising without bound spends its peers' memory too.
+	MaxAdvertisedRoutes int `yaml:"max_advertised_routes,omitempty"`
+	// MaxLocalSIDs bounds what one plugin takes from a locator, which is
+	// finite and shared with vinbero's own allocations.
+	MaxLocalSIDs int `yaml:"max_local_sids,omitempty"`
+}
+
+// CplanePluginLimits is what one plugin may cost to run.
+type CplanePluginLimits struct {
+	// MaxModuleBytes caps the size of a module the daemon will load.
+	MaxModuleBytes int `yaml:"max_module_bytes,omitempty"`
+	// MaxMemoryPages caps the guest's linear memory, in 64 KiB pages.
+	MaxMemoryPages uint32 `yaml:"max_memory_pages,omitempty"`
+	// CallTimeoutMs bounds a single call into the guest. Exceeding it
+	// costs the instance, not just the call: wazero cannot preempt, so the
+	// only way to stop a running guest is to close the module.
+	CallTimeoutMs int64 `yaml:"call_timeout_ms,omitempty"`
+	// MaxBufferBytes caps one event batch or reply crossing the boundary.
+	MaxBufferBytes int `yaml:"max_buffer_bytes,omitempty"`
 }
 
 // ValidateConfig knobs the plugin validator enforces on the server side.
