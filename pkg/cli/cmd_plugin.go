@@ -177,7 +177,7 @@ func pluginAuxCommand() *cli.Command {
 	typeFlag := &cli.StringFlag{Name: "map-type", Required: true, Usage: "Plugin map type: " + pluginMapTypesCSV()}
 	slotFlag := &cli.UintFlag{Name: "slot", Required: true, Usage: "Plugin PROG_ARRAY slot (endpoint >= 32, headend >= 16)"}
 	jsonFlag := &cli.StringFlag{Name: "json", Usage: "JSON payload encoded via the plugin's <program>_aux BTF type"}
-	rawFlag := &cli.StringFlag{Name: "raw", Usage: "Raw payload as hex (<= 196 bytes). Mutually exclusive with --json"}
+	rawFlag := &cli.StringFlag{Name: "raw", Usage: "Raw payload as hex (<= 256 bytes). Mutually exclusive with --json"}
 	indexFlag := &cli.UintFlag{Name: "index", Required: true, Usage: "Aux index previously returned by PluginAuxAlloc"}
 
 	parsePayload := func(c *cli.Context) (jsonStr string, rawBytes []byte, err error) {

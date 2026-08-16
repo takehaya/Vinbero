@@ -569,7 +569,7 @@ sequenceDiagram
 
     Op->>V: SidFunctionCreate<br/>{action: 32, plugin_aux_json: '{"limit": 100, "src_mac": "aa:bb:cc:dd:ee:ff"}'}
     V->>PS: AuxType(slot=32) → *btf.Struct
-    V-->>V: BTF walk → bytes (196B 以内)
+    V-->>V: BTF walk → bytes (256B 以内)
     V->>AM: sid_aux_map[idx] = bytes (plugin_raw variant)
     V-->>Op: Created
 ```
