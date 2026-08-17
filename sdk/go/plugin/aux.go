@@ -14,8 +14,9 @@ import (
 )
 
 // SidAuxPluginRawMax mirrors pkg/bpf.SidAuxPluginRawMax. Duplicated to
-// keep sdk/go/plugin importable without pulling in the BPF stack.
-const SidAuxPluginRawMax = 196
+// keep sdk/go/plugin importable without pulling in the BPF stack; the
+// duplication is pinned against the real constant by a test.
+const SidAuxPluginRawMax = 256
 
 // PluginAux is a typed client for the four PluginAux RPCs, parameterized by
 // the Go struct T that mirrors the plugin's <program>_aux BTF type. See the
@@ -40,13 +41,28 @@ func NewPluginAux[T any](client vinberov1connect.PluginServiceClient, mapType st
 	return &PluginAux[T]{client: client, mapType: mapType, slot: slot}
 }
 
-// expectedOwner mirrors the server-side AuxOwnerPluginTag format. SDK
-// callers don't import pkg/bpf to keep the dependency surface minimal,
-// so we duplicate the format string and pin it with a test (see the
-// server-side TestOwnerTagFor). A drift here would surface as an Owner
-// mismatch on Get; cheap to detect.
+// expectedOwner renders the owner tag this helper's (map_type, slot) pair
+// is expected to carry, in the server's current versioned form. SDK callers
+// don't import pkg/bpf to keep the dependency surface minimal, so the format
+// is duplicated here and pinned against the real one by a test.
 func (p *PluginAux[T]) expectedOwner() string {
-	return fmt.Sprintf("plugin:%s:%d", p.mapType, p.slot)
+	return fmt.Sprintf("plugin:%s:%s:%d", auxOwnerVersion, p.mapType, p.slot)
+}
+
+// auxOwnerVersion mirrors pkg/bpf.AuxOwnerVersion.
+const auxOwnerVersion = "v1"
+
+// ownerMatches reports whether the tag the server returned names this
+// helper's slot. Both the versioned form ("plugin:v1:<map_type>:<slot>")
+// and the unversioned legacy form ("plugin:<map_type>:<slot>") are
+// accepted: an aux index allocated by an older daemon keeps its original
+// tag in the pinned map, and rejecting it would make an otherwise valid
+// entry unreadable after an upgrade.
+func (p *PluginAux[T]) ownerMatches(got string) bool {
+	if got == p.expectedOwner() {
+		return true
+	}
+	return got == fmt.Sprintf("plugin:%s:%d", p.mapType, p.slot)
 }
 
 // Alloc encodes v as JSON (so the server can translate via BTF), asks the
@@ -99,9 +115,9 @@ func (p *PluginAux[T]) Get(ctx context.Context, idx uint32) (T, error) {
 	if err != nil {
 		return zero, err
 	}
-	if want := p.expectedOwner(); resp.Msg.Owner != want {
+	if !p.ownerMatches(resp.Msg.Owner) {
 		return zero, fmt.Errorf("aux at idx %d is owned by %q, expected %q",
-			idx, resp.Msg.Owner, want)
+			idx, resp.Msg.Owner, p.expectedOwner())
 	}
 	var out T
 	if err := binary.Read(bytes.NewReader(resp.Msg.Raw), binary.NativeEndian, &out); err != nil {

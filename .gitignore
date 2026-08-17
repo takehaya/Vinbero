@@ -190,7 +190,11 @@ dmypy.json
 objdump
 *.log
 
-out/bin
+# The whole build output directory, not just out/bin: `make sdk-archive`
+# stages the SDK tree into out/sdk-stage and writes the tarball beside it,
+# and an ignore naming only out/bin lets a `git add -A` sweep those into a
+# commit.
+out/
 
 # Working notes that must never be committed. docs/plan holds drafts and
 # private memos; ignoring it keeps a broad `git add docs/` from sweeping them
