@@ -13,11 +13,18 @@ WebAssembly module を受け取ります。どちらも daemon に upload され
 1. 転送は data plane plugin が endpoint slot に実装します。これは既存の
    plugin SDK でできます。
 2. control plane plugin がその behavior codepoint を claim します。
-3. その codepoint を名乗る経路が届くと、plugin が headend の状態を宣言し
-   ます。
-4. Vinbero 自身の applier はその経路を見ません。codepoint を見ずに service
+3. plugin が local SID を要求します。host が locator から address を確保
+   し、plugin の slot を指す dispatch entry を書き、address を event で
+   plugin に返します。名前は plugin が付け、値は host が選びます。記憶を
+   失って戻ってきた plugin が同じ名前を宣言すると同じ address が返ります。
+4. plugin がその SID を SID TLV に自分の codepoint を載せて広告します。
+5. 対向でその経路を受けた plugin が headend の状態を宣言します。
+6. Vinbero 自身の applier はその経路を見ません。codepoint を見ずに service
    SID から entry を作るので、知らない codepoint を素の SID と誤読して
    しまうためです。
+
+これで両ノードは Vinbero も BGP も知らない behavior で通信します。実例は
+`sdk/examples/cplane-custom-behavior` にあり、この 6 段を実装しています。
 
 新しい AFI/SAFI は要りません。endpoint behavior は SID TLV の中の 16bit
 codepoint なので、独自 codepoint の広告は vpnv4 や EVPN といった既存
@@ -75,9 +82,23 @@ watch goroutine で走り、そこは block してはいけない契約です。
 drop は plugin の view に穴を空けます。desired set を宣言する consumer に
 とってこれは遅延より悪く、次の宣言が見えていない状態を prune します。
 そこで drop は snapshot debt として記録し、rib から view を作り直します。
+replay は plugin ごとに 1 本だけ走らせます。2 本が 1 つの queue に押し込む
+と順序が無く、古い copy が新しい copy の後に届いて plugin が古い値を持ち
+続けます。drop している plugin は定義上遅いので、drop ごとに replay を
+起動すると積み上がりもします。実行中に来た要求は debt を立て直し、完了後に
+返します。
 snapshot の配送は drop せず block します。replay は BGP watch goroutine
 ではないので block してよく、一部を落とすと目的そのものを損ねるためです。
 snapshot も live と同じ queue を通すので、両者の順序は保たれます。
+
+replay の先頭には start of replay の event を置きます。replay は何が在る
+かを述べる手段であって、何が無くなったかは述べられません。plugin が聞いて
+いない間に withdraw された経路は replay に現れないので、view を持ち越すと
+その経路を宣言し続け、以後どの event でも消えません。start of replay を
+受けた plugin はその source について知っていることを捨て、続く event から
+組み立て直します。これで replay が merge ではなく修復になります。宣言は
+end of replay まで待ちます。replay の最中に空集合を宣言すると、その間だけ
+転送が落ちるためです。
 
 ## behavior の claim
 
@@ -151,7 +172,7 @@ host が提供するもの。すべて `vinbero` module から import します�
 |---|---|
 | `log(level, ptr, len)` | daemon log へ出力 |
 | `now_monotonic() -> i64` | 単調増加の ns |
-| `apply_begin(kind) -> i64` | desired-set transaction を開く |
+| `apply_begin(kind) -> i64` | desired-set transaction を開く (headend v4/v6、advertise、local SID) |
 | `apply_put(gen, ptr, len) -> i32` | 宣言の chunk を積む |
 | `apply_commit(gen) -> i32` | 差分を適用する |
 | `apply_abort(gen)` | transaction を捨てる |
@@ -160,6 +181,115 @@ host が提供するもの。すべて `vinbero` module から import します�
 stdout も filesystem も無いので log が無いと plugin 作者に調査手段があり
 ません。clock が無いと liveness 系のロジックが書けません。それ以外の
 非決定入力は必要になるまで足しません。
+
+## capability
+
+plugin は登録時に何をしてよいかを宣言し、host はそれが覆う host function
+だけを link します。link は 2 段のうちの粗い方です。何も書けない plugin に
+は apply 関数がそもそも link されず、呼ぶと失敗するのではなく到達できない
+関数になります。書ける plugin に対しては、apply 関数が宣言の種類をまたいで
+共有なので、種類ごとの判定を transaction を開くところで行います。
+
+| capability | 許すこと |
+|---|---|
+| `headend` | headend の encap entry を宣言する |
+| `advertise` | BGP 経路を originate する |
+| `local_sid` | locator から SID を確保し自分の slot に向ける |
+
+`log` と `now_monotonic` は常に link します。どちらも状態を変えず、無いと
+plugin 作者が何も調べられなくなるためです。
+
+desired-set の apply 関数は宣言の種類をまたいで共有なので、link は「何か
+1 つでも書ける capability があるか」で決まります。種類ごとの判定は
+transaction を開くところで再度行います。これが無いと advertise だけを
+granted された plugin が同じ扉から headend の transaction を開けます。
+
+何も granted されていない plugin も登録できます。観測と log だけをする
+plugin は実際に有用で、それが capability を宣言しなかった plugin の安全な
+既定です。
+
+## claim と built-in state の関係
+
+claim は demux が経路を配る先を決める述語なので、claim が立つ前に届いた
+経路は built-in applier が処理してしまいます。built-in は service SID を
+behavior を読まずに解釈するため、plugin 用の codepoint を持つ経路も普通の
+service SID として自分の owner で install します。plugin が同じ prefix に
+書こうとすると owner が衝突して弾かれます。
+
+そこで claim の取得と解放を、経路の流れと突き合わせます。
+
+- 起動時は、store にある plugin の behavior を demux の start より前に予約
+  します。start は rib の replay を伴うので、予約が後だと必ずこの窓に入り
+  ます。restore に失敗した plugin の claim は保持します。Register 自身は
+  失敗時に claim を巻き戻しますが、これは operator の登録に対して正しい
+  挙動で、restore は事情が違います。予約は「実装するものが無い codepoint の
+  経路を built-in に渡さない」ために取ったものなので、巻き戻しをそのままに
+  すると誤った意味での install に戻ります。
+- claim 取得後の retract は、plugin が build されて subscribe まで済んでから
+  行います。retract は元に戻せない副作用なので、admission で弾かれた module の
+  ために既存の経路を built-in から消してしまうと、実装するものが無いまま
+  取り残されます。
+- unregister では claim を解放しますが、その経路を built-in に流し直すこと
+  はしません。plugin が実装していた behavior を実装できるものはここには無く、
+  built-in にとって private codepoint はただの service SID なので、渡せば
+  claim が防いでいたはずの誤った意味での install になります。理解していた
+  唯一のものを外した以上、それらの経路が転送されなくなるのが正しい帰結です。
+- restore に失敗した plugin の claim は解放しません。解放すると built-in が
+  実装できない codepoint の経路を service SID として install してしまいます。
+  黙って誤った転送をするより、operator が直すまで転送されない方がましです。
+  claim を保持したことは warning に出します。restore に失敗した plugin は
+  `vbctl plugin cplane stats` に別枠で出します。動いていないのに daemon は
+  その state と claim を持ち続けるので、running な plugin だけを見せると
+  「単に居ない」ようにしか見えません。戻ってこないと判断したら
+  `vbctl plugin cplane forget` で claim と store の登録を落とせます。map に
+  残った state には触れません。それが何のためのものかを daemon は知らない
+  ためです。
+
+- claim を取った時点で、rib の中にその behavior を持つ経路があれば、
+  built-in applier に withdraw として配り直します。claim は本来これから
+  届く経路の行き先しか決めませんが、先に届いた経路は既に built-in が
+  service SID として自分の owner で install しており、plugin が同じ prefix
+  に書こうとしても owner が衝突して弾かれます。残るのは誤った意味の entry で、
+  それがトラフィックを運びます。withdraw は applier が普段から扱う経路なので、
+  それぞれが何をどう保持しているかを demux 側が知る必要はありません。claim は
+  plugin を build する前に取るので、最初の宣言時には prefix が空いています。
+  この配り直しは withdrawal ledger には記録しません。記録すると後から来る
+  本物の withdraw を処理済みと誤判定します。
+
+## 広告の所有権
+
+lease は plugin どうしの所有権を調停します。その下にもう 1 枚あり、gobgp
+session は 1 つの NLRI につき local path を 1 本しか持たないので、経路を
+出した producer を記録します。plugin ごとに別の producer 名を与えるので、
+lease と producer は失敗の仕方が違います。lease 衝突は何も送る前に拒否され、
+producer 衝突は誤って lease を手放したときに他の plugin の経路を守ります。
+
+session は auto-advertise の exporter や operator の RPC とも共有です。
+
+session 側で producer を記録し、withdraw は自分が出した経路にしか効かない
+ようにしています。これが無いと、後から届いた withdraw が別の producer の
+生きた経路を消し、消された側は広告し続けているつもりのままになります。
+
+重複した advertise も拒否します。1 NLRI に 1 path しか無いので、上書きは
+先に出した producer の UUID を捨てることになり、後から出した側が withdraw
+すると経路自体が消えるのに、先に出した側は広告中のつもりで戻しません。
+先に出した方が保持し、拒否された側には理由を返します。
+
+## 既知の限界
+
+reconcile は owner の現在の集合を map の全走査で求めます。lease 表は同じ
+情報を持っているので置き換えられますが、置き換えていません。全走査は
+lease と entry がずれたときにそれを捕まえる唯一の場所でもあり、本設計の
+review で実際に見つかった不具合はどれもそのずれでした。速さのために backstop
+を外す判断は、いまの証拠と逆を向いています。
+
+その結果、reconcile の時間は map の大きさに比例します。reconcile は plugin
+をまたいで applyMu で直列化され、guest の call budget は host を待つ時間も
+数えるので、大きな map と多数の plugin が揃うと、隣の plugin の reconcile を
+待つ間に自分の budget が尽きて instance を失うことがあります。budget 超過は
+instance を作り直して収束するので転送は保たれますが、隔離としては不完全です。
+map が大きい環境で plugin を多数動かす場合は、call budget を map の規模に
+見合う値に上げてください。
 
 ## 登録時の検証
 
@@ -177,6 +307,11 @@ module は allowlist で検証します。
 - 同名での再登録は in-place upgrade です。古い instance を止めて新しい
   ものを同じ owner tag で始めるので、古いものが書いた状態は残り、新しい
   module が宣言し直して差分が吸収されます。
+- plugin が configure から宣言した内容は、登録が成立するまで保留します。
+  configure は instantiate の途中で走るので、そこで適用すると instantiate
+  が失敗したときに誰も消せない state が残ります。upgrade では更に悪く、
+  失敗した新 instance は走行中の旧 instance と同じ owner tag を持つので、
+  その宣言が生きている plugin の entry を prune します。
 - unregister は意図的な撤去なので owner の状態ごと消します。順序は配送
   停止、instance close、状態削除です。
 - trap や budget 超過では状態を消しません。instance を作り直し、rib の
@@ -185,20 +320,68 @@ module は allowlist で検証します。
   なり、それ以外の entry を全部 prune します。連続失敗が上限を超えたら
   状態を残して止めます。上限は連続失敗の数で、成功配送でリセットします。
 - daemon の shutdown では flush しません。
+- unregister は flush が成功してから claim と store を手放します。先に
+  手放すと、flush が失敗したときに retry する手段が無くなります。claim を
+  先に返せば plugin の state が残ったまま経路が built-in に戻り、store を
+  先に消せば再起動しても後始末をする plugin 自体が居なくなります。flush が
+  失敗した plugin は registry に戻すので、operator が retry できます。
+- upgrade は、走っている plugin に触る前に subscribe まで済ませます。
+  subscribe が失敗する可能性がある間に旧 instance を止めると、demux に
+  断られただけでどちらの版も登録されていない状態になり、閉じた旧
+  instance は復元できません。subscribe から旧 instance の停止までの間は
+  同じ名前に 2 つの subscription がありますが、handler は名前で plugin を
+  引くので配送先は 1 つで、重複した event は desired set が吸収します。
+- instance の入れ替えでは、instance に属する状態を作り直します。宣言した
+  SID の address を伝えたかどうかの記録がそれで、引き継ぐと交代した
+  instance は自分の持つ SID を知らないまま広告できなくなります。publication
+  も同じで、交代中の宣言は保留し、instantiate が失敗したら適用しません。
+  これが無いと、起動に失敗した instance の空宣言が前の instance の state を
+  prune したまま残ります。
+- 宣言には commit 順の番号を振り、同じ kind でより新しい宣言が適用済みなら
+  古い方は適用しません。宣言は集合そのものの宣言なので、retry や staged の
+  drain で古い集合が新しい集合を上書きするのを防ぎます。
+- publication は snapshot の後に行います。宣言はそれまで保留されるので、
+  最初に適用される宣言は queue にたまたま入っていた event ではなく network
+  全体を述べたものになります。desired set を宣言する plugin にとって、この
+  違いは収束するか自分の持ち物を全部 prune するかの違いです。
+- publication は snapshot の後に行います。宣言はそれまで保留されるので、
+  最初に適用される宣言は queue にたまたま入っていた event ではなく network
+  全体を述べたものになります。desired set を宣言する plugin にとって、この
+  違いは収束するか自分の持ち物を全部 prune するかの違いです。
+- 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
+  次の配送の前に再試行します。保留されている数は stats に出し、最初の失敗は
+  warning に出します。何かを待っている plugin は、配送の counter だけ見ると
+  暇な plugin と区別が付きません。保留されている数は stats に出し、最初の失敗は
+  warning に出します。何かを待っている plugin は、配送の counter だけ見ると
+  暇な plugin と区別が付きません。restore された plugin は daemon の起動途中に
+  configure から宣言するので、operator が後から RPC で登録する locator を
+  名指しした宣言はその時点では失敗します。plugin は言うべきことを既に言い
+  終えているため、再試行が無いと SID と広告が restart から戻りません。
 
 wazero に fuel metering はありません。走っている guest を止める手段は
 context の cancel だけで、それは module を閉じます。よって budget 超過は
 call ではなく instance を失います。budget を call 単位にしているのはその
 ためです。
 
+instantiate 自体も同じ budget の下で走らせます。WebAssembly の start
+section は spec 上 instantiate 中に実行されるので、これも guest の code
+です。budget を掛けないと、start section で無限 loop する module が登録を
+永久に止め、operator の RPC が返りません。
+
 ## 運用
 
 ```sh
 vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
-    --behavior 0xFE01 --family vpnv4
+    --behavior 0xFE01 --family vpnv4 --capability headend
 vbctl plugin cplane list
+vbctl plugin cplane stats
 vbctl plugin cplane unregister --name custom-behavior
 ```
+
+capability は省略できますが、省略した plugin は何も宣言できません。observe と
+log しかしない plugin はそれで正しく、宣言する plugin には必要なものを与えます。
+`stats` は動いている plugin と、restore に失敗して claim だけ残っている plugin の
+両方を出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
 
 behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint を hex で
 振っているので、0x0013 を 10 進の 13 と読むと別の behavior を claim して
@@ -219,8 +402,12 @@ TinyGo は次の flag で使えます。
 
 ```sh
 tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=conservative -panic=trap .
+    -scheduler=none -gc=conservative -panic=trap -no-debug .
 ```
+
+`-no-debug` は artifact を再現可能にします。付けないと TinyGo が絶対 path を
+DWARF に埋めるので、同じ source から作った .wasm が machine ごとに変わり、
+committed の artifact と source が一致しているかを CI で見られなくなります。
 
 `gc=conservative` は必須です。WASI を link しない target の既定は
 `gc=leaking` で memory を一切回収しません。control plane plugin は daemon
@@ -230,8 +417,62 @@ plugin は memory 上限に到達します。harness の churn test は live set
 だけです。この test を leaking build は途中で落ち、conservative build は
 1 MiB のまま完走します。
 
+## local SID と daemon 再起動
+
+local SID の名前は host の memory にしかありません。pin された map では
+前回起動の entry が残りますが、どの宣言がその address を入れたのかを
+辿る手段がありません。同じ名前を宣言し直した plugin は別の address を
+貰うので、古い entry は誰も dispatch せず誰も消せないまま残ります。
+
+そこで owner ごとに 1 回だけ sweep します。その owner のもので、今回の
+run が入れたのではない entry を消します。address の安定性は 1 回の daemon
+実行の中では保たれ、再起動を跨ぐと新しい address になります。
+
+## まだ無いもの
+
+EVPN と MUP の desired set は実装していません。用途が先に無いという理由
+だけでなく、前提が揃っていないためです。
+
+MUP の uplink map (`mup_uplink_v{4,6}_map`) の entry は owner tag を持ち
+ません。packet が運ぶ F-TEID が key なので、そういう設計になっています。
+owner が無い store では、どの entry が誰のものかを reconcile が判定でき
+ません。plugin に触らせる前に owner 追跡を足す必要があります。
+
+EVPN は owner の問題は無いものの、bd_peer と FDB の状態は DF election、
+split-horizon、ESI の不変条件と組で成り立っています。plugin が entry を
+直接宣言できるようにすると、その不変条件を壊す形の宣言が書けてしまいます。
+DF election のような判断ロジックそのものの差し替えは本設計の非目標に置いて
+あり、EVPN の desired set はその判断と不可分です。用途が具体化したときに、
+何を宣言させるのが安全かを決めてから足します。
+
+## 開発の進め方
+
+この機構は `feature/cplane-plugin` に積んで育てます。main には直接入れず、
+まとまった時点で feature branch から main への PR を別に立てて判断します。
+
+初回投入は 3 本の stack に割ってあります。1 本にすると 18.8k 行になり、
+Copilot が行数上限でレビューできないためです。以後の追加も、レビューを
+受けられる大きさに割って feature branch を base にします。
+
+| branch | 内容 |
+|---|---|
+| `cplane-plugin-1-foundation` | BGP demux と behavior claim の土台 |
+| `cplane-plugin-2-runtime` | WASM runtime と desired-set apply |
+| `cplane-plugin-phase-a` | advertise / local SID / capability / quota / interop |
+
+次に足す候補は次のとおりです。
+
+- EVPN と MUP の desired set (上記の前提を揃えてから)。
+- Rust の SDK shim。
+- interop lab の拡張。lab は現状 far end が built-in の End.DT4 で終端するので、
+  SID 確保と plugin 自身の slot への dispatch は覆っていません。eBPF half を
+  持つ lab にすると一周を実機で確認できます。
+- vinbero 自身の広告元の分離。auto-advertise の exporter と operator の RPC は
+  bare session を共有しているので、producer としては 1 つです。互いの経路を
+  取り合える点は以前からの挙動で、分けると衝突時の振る舞いが変わるため、
+  この機構とは別の変更として扱います。
+
 ## 参照
 
-- 設計の経緯と検討: `docs/plan/cplane-plugin.md`
 - data plane plugin SDK: `docs/design/ja/plugin-sdk.md`
 - 永続化の既定モデル: `docs/design/ja/persistence.md`

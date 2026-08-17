@@ -46,10 +46,10 @@ func TestEncodeVPNPath_RoundTrip(t *testing.T) {
 
 func TestEncodeVPNPath_VPNv6Behavior(t *testing.T) {
 	// VPNv6 must advertise End.DT6, VPNv4 End.DT4.
-	if got := vpnEndpointBehavior(bgp.FamilyVPNv6); got != gobgppkt.END_DT6 {
+	if got := vpnEndpointBehavior(bgp.VPNRoute{Family: bgp.FamilyVPNv6}); got != gobgppkt.END_DT6 {
 		t.Errorf("VPNv6 behavior = %v, want END_DT6", got)
 	}
-	if got := vpnEndpointBehavior(bgp.FamilyVPNv4); got != gobgppkt.END_DT4 {
+	if got := vpnEndpointBehavior(bgp.VPNRoute{Family: bgp.FamilyVPNv4}); got != gobgppkt.END_DT4 {
 		t.Errorf("VPNv4 behavior = %v, want END_DT4", got)
 	}
 }
@@ -175,5 +175,154 @@ func TestAdvertiseUnicast(t *testing.T) {
 		Prefix: "2001:db8:dead::/64", NextHop: "fd00:f1b::2",
 	}); err != nil {
 		t.Fatalf("AdvertiseUnicast: %v", err)
+	}
+}
+
+// A plugin advertising a behavior it implements itself names the codepoint
+// on the route. It is not checked against the behaviors vinbero knows,
+// because an unrecognized one is exactly the point.
+func TestVPNEndpointBehaviorOverride(t *testing.T) {
+	r := bgp.VPNRoute{Family: bgp.FamilyVPNv4, EndpointBehavior: 0xFE01}
+	if got := vpnEndpointBehavior(r); uint16(got) != 0xFE01 {
+		t.Fatalf("behavior = %#x, want the route's own %#x", uint16(got), 0xFE01)
+	}
+	// Zero still means the family default, so ordinary routes are
+	// unaffected.
+	if got := vpnEndpointBehavior(bgp.VPNRoute{Family: bgp.FamilyVPNv4}); got != gobgppkt.END_DT4 {
+		t.Fatalf("behavior = %v, want End.DT4 for a route naming none", got)
+	}
+}
+
+// gobgp keeps one local path per NLRI, so everything originating through
+// one session shares it: the exporter, the operator's RPC and any
+// control-plane plugin. A plugin withdrawing a route it did not advertise
+// would delete one that is still wanted, and the producer that owns it
+// would go on believing it is advertised.
+func TestWithdraw_LeavesAnotherProducersRouteAlone(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+
+	vr := bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", NextHop: "2001:db8::1",
+	}
+	// Advertised by vinbero's own machinery, which names nothing.
+	if err := s.Advertise(context.Background(), vr); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	key := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100"}
+
+	plugin := s.AsProducer("cplane-plugins")
+	if err := plugin.Withdraw(context.Background(), key); err != nil {
+		t.Fatalf("Withdraw by another producer: %v", err)
+	}
+	s.advMu.Lock()
+	_, still := s.advertised[key]
+	s.advMu.Unlock()
+	if !still {
+		t.Fatal("a plugin's withdraw deleted a route vinbero advertised")
+	}
+
+	// Its own route it may withdraw.
+	plugged := vr
+	plugged.Prefix = "10.9.0.0/24"
+	if err := plugin.Advertise(context.Background(), plugged); err != nil {
+		t.Fatalf("plugin Advertise: %v", err)
+	}
+	ownKey := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.9.0.0/24", RD: "65000:100"}
+	if err := plugin.Withdraw(context.Background(), ownKey); err != nil {
+		t.Fatalf("plugin Withdraw: %v", err)
+	}
+	s.advMu.Lock()
+	_, gone := s.advertised[ownKey]
+	s.advMu.Unlock()
+	if gone {
+		t.Error("a plugin could not withdraw the route it advertised")
+	}
+}
+
+// One NLRI carries one local path, so a second producer cannot take a
+// route over: doing so discards the first producer's UUID, and the second
+// one's withdraw would then remove a route the first still believes it is
+// advertising.
+func TestAdvertise_RefusesAnotherProducersRoute(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+
+	vr := bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", NextHop: "2001:db8::1",
+	}
+	if err := s.Advertise(context.Background(), vr); err != nil {
+		t.Fatalf("Advertise: %v", err)
+	}
+	key := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100"}
+	s.advMu.Lock()
+	first := s.advertised[key]
+	s.advMu.Unlock()
+
+	plugin := s.AsProducer("cplane-plugins")
+	if err := plugin.Advertise(context.Background(), vr); err == nil {
+		t.Fatal("a second producer took over a route another one advertises")
+	}
+	s.advMu.Lock()
+	after, still := s.advertised[key]
+	holder := s.producers[key]
+	s.advMu.Unlock()
+	if !still || after != first {
+		t.Error("the refused advertise disturbed the route it could not take")
+	}
+	if holder != "" {
+		t.Errorf("the route is recorded against %q, want the producer that advertised it", holder)
+	}
+	// The original producer can still withdraw its own route.
+	if err := s.Withdraw(context.Background(), key); err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+}
+
+// Two producers advertising the same new NLRI at once must not both get
+// through: the second would overwrite the first's path and UUID, and the
+// first would go on believing it is advertising.
+func TestAdvertise_ConcurrentProducersCannotBothClaimAKey(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+
+	vr := bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", NextHop: "2001:db8::1",
+	}
+	plugin := s.AsProducer("cplane-plugins")
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, adv := range []interface {
+		Advertise(context.Context, bgp.VPNRoute) error
+	}{s, plugin} {
+		go func(a interface {
+			Advertise(context.Context, bgp.VPNRoute) error
+		}) {
+			<-start
+			errs <- a.Advertise(context.Background(), vr)
+		}(adv)
+	}
+	close(start)
+
+	var failures int
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			failures++
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("%d of 2 concurrent advertises failed, want exactly 1 refused", failures)
+	}
+
+	key := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100"}
+	s.advMu.Lock()
+	_, live := s.advertised[key]
+	s.advMu.Unlock()
+	if !live {
+		t.Error("the winner's route is not tracked")
 	}
 }

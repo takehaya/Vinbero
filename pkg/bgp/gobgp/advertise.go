@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/netip"
 
+	"go.uber.org/zap"
+
 	"github.com/google/uuid"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	gobgppkt "github.com/osrg/gobgp/v4/pkg/packet/bgp"
@@ -41,18 +43,74 @@ func (s *Session) AdvertiseUnicast(_ context.Context, r bgp.UnicastRoute) error 
 	return s.addAndTrack(srv, path, bgp.RouteKey{Family: bgp.FamilyIPv6Unicast, Prefix: r.Prefix})
 }
 
+// ValidateVPNRoute reports whether this route could be encoded, without
+// sending it.
+//
+// It exists for callers that reconcile a set of routes: they withdraw
+// before they advertise, so a route that only fails inside the encoder has
+// already cost the caller its other routes by the time the failure
+// surfaces. Running the same encoder up front gives the same verdict
+// without that cost, and without a second copy of its rules that could
+// drift from it.
+func (s *Session) ValidateVPNRoute(r bgp.VPNRoute) error {
+	_, err := encodeVPNPath(r)
+	return err
+}
+
+// ValidateUnicastRoute is ValidateVPNRoute for IPv6 unicast.
+func (s *Session) ValidateUnicastRoute(r bgp.UnicastRoute) error {
+	_, err := encodeUnicastPath(r)
+	return err
+}
+
+// CanonicalRD renders a route distinguisher the one way the wire has it.
+//
+// 65000:1 and 065000:0001 are the same RD on the wire and different
+// strings, so a caller keying anything on the string it was handed -- a
+// lease, a diff -- has to canonicalize first or it will treat one route as
+// two.
+func (s *Session) CanonicalRD(rd string) (string, error) {
+	parsed, err := gobgppkt.ParseRouteDistinguisher(rd)
+	if err != nil {
+		return "", err
+	}
+	return parsed.String(), nil
+}
+
 // Withdraw removes a previously advertised route. Withdrawing a route
 // that was never advertised is a no-op so callers can withdraw
 // idempotently.
-func (s *Session) Withdraw(_ context.Context, key bgp.RouteKey) error {
+func (s *Session) Withdraw(ctx context.Context, key bgp.RouteKey) error {
+	return s.withdrawAs(ctx, key, "")
+}
+
+// withdrawAs removes a route on behalf of one producer.
+//
+// A key another producer put there is left alone. gobgp keeps one local
+// path per NLRI, so two producers advertising one NLRI share the entry:
+// deleting it on the strength of the wrong one's withdraw removes a route
+// that is still wanted, and the producer that owns it goes on believing it
+// is advertised. Refusing is not a fix for the overlap, which is a
+// configuration problem, but it keeps the overlap from turning into a
+// route that nothing will bring back.
+func (s *Session) withdrawAs(_ context.Context, key bgp.RouteKey, producer string) error {
 	srv := s.bgpServer()
 	if srv == nil {
 		return bgp.ErrSessionNotStarted
 	}
 	s.advMu.Lock()
 	id, ok := s.advertised[key]
+	holder := s.producers[key]
 	s.advMu.Unlock()
 	if !ok {
+		return nil
+	}
+	if holder != producer {
+		s.logger.Warn("not withdrawing a route another producer advertised",
+			zap.String("prefix", key.Prefix),
+			zap.String("rd", key.RD),
+			zap.String("holder", producerName(holder)),
+			zap.String("caller", producerName(producer)))
 		return nil
 	}
 	// Drop the tracking entry only after gobgp confirms the delete, so a
@@ -62,8 +120,17 @@ func (s *Session) Withdraw(_ context.Context, key bgp.RouteKey) error {
 	}
 	s.advMu.Lock()
 	delete(s.advertised, key)
+	delete(s.producers, key)
 	s.advMu.Unlock()
 	return nil
+}
+
+// producerName renders a producer for a log line.
+func producerName(p string) string {
+	if p == "" {
+		return "vinbero"
+	}
+	return p
 }
 
 // addAndTrack adds path to the RIB and records its UUID under key so
@@ -72,14 +139,53 @@ func (s *Session) Withdraw(_ context.Context, key bgp.RouteKey) error {
 // NLRI on AddPath, so the prior UUID is already invalid and is simply
 // overwritten here -- no orphan path is left in the RIB.
 func (s *Session) addAndTrack(srv *gobgpsrv.BgpServer, path *apiutil.Path, key bgp.RouteKey) error {
+	return s.addAndTrackAs(srv, path, key, "")
+}
+
+// addAndTrackAs is addAndTrack on behalf of a named producer.
+func (s *Session) addAndTrackAs(srv *gobgpsrv.BgpServer, path *apiutil.Path, key bgp.RouteKey, producer string) error {
+	// The key is claimed under the lock, before AddPath, and given back if
+	// AddPath fails. Checking and then claiming afterwards would let two
+	// producers advertising the same new NLRI both pass the check and the
+	// second overwrite the first, which is the outcome this exists to
+	// prevent.
+	s.advMu.Lock()
+	holder, taken := s.producers[key]
+	if taken && holder != producer {
+		s.advMu.Unlock()
+		// Refused rather than superseded. There is one local path per
+		// NLRI, so taking it over discards the first producer's UUID: the
+		// second producer's withdraw then removes the route outright,
+		// while the first goes on believing it is advertising and never
+		// puts it back. Whoever got there first keeps it, and the one
+		// refused is told why, which is a conflict it can act on.
+		return fmt.Errorf("advertise %s: already advertised by %s; %s cannot originate the same route "+
+			"because BGP carries one local path per NLRI",
+			key.Prefix, producerName(holder), producerName(producer))
+	}
+	s.producers[key] = producer
+	s.advMu.Unlock()
+
 	resps, err := srv.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{path}})
+	// The claim is released on every failure path, or a route that was
+	// never advertised would keep the key from anyone else forever.
+	release := func() {
+		s.advMu.Lock()
+		if _, live := s.advertised[key]; !live && !taken {
+			delete(s.producers, key)
+		}
+		s.advMu.Unlock()
+	}
 	if err != nil {
+		release()
 		return fmt.Errorf("advertise %s: %w", key.Prefix, err)
 	}
 	if len(resps) == 0 {
+		release()
 		return fmt.Errorf("advertise %s: gobgp returned no response", key.Prefix)
 	}
 	if resps[0].Error != nil {
+		release()
 		return fmt.Errorf("advertise %s: %w", key.Prefix, resps[0].Error)
 	}
 	s.advMu.Lock()
@@ -126,9 +232,17 @@ func parseRouteTargets(rts []string) ([]gobgppkt.ExtendedCommunityInterface, err
 }
 
 // vpnEndpointBehavior is the SRv6 endpoint behavior advertised with a
-// VPN route: End.DT4 for VPNv4, End.DT6 for VPNv6.
-func vpnEndpointBehavior(f bgp.Family) gobgppkt.SRBehavior {
-	if f == bgp.FamilyVPNv6 {
+// VPN route: End.DT4 for VPNv4, End.DT6 for VPNv6, unless the route names
+// one of its own.
+//
+// The override is for a plugin advertising a behavior it implements
+// itself. The codepoint is not validated against the behaviors vinbero
+// knows, because an unrecognized one is exactly the point.
+func vpnEndpointBehavior(r bgp.VPNRoute) gobgppkt.SRBehavior {
+	if r.EndpointBehavior != 0 {
+		return gobgppkt.SRBehavior(r.EndpointBehavior)
+	}
+	if r.Family == bgp.FamilyVPNv6 {
 		return gobgppkt.END_DT6
 	}
 	return gobgppkt.END_DT4
@@ -172,7 +286,7 @@ func encodeVPNPath(r bgp.VPNRoute) (*apiutil.Path, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse SRv6 SID %q: %w", r.SRv6SID, err)
 		}
-		infoSubTLV := gobgppkt.NewSRv6InformationSubTLV(sid, vpnEndpointBehavior(r.Family))
+		infoSubTLV := gobgppkt.NewSRv6InformationSubTLV(sid, vpnEndpointBehavior(r))
 		svcTLV := gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L3Service, infoSubTLV)
 		attrs = append(attrs, gobgppkt.NewPathAttributePrefixSID(svcTLV))
 	}
@@ -213,4 +327,61 @@ func encodeUnicastPath(r bgp.UnicastRoute) (*apiutil.Path, error) {
 		Nlri:   nlri,
 		Attrs:  []gobgppkt.PathAttributeInterface{gobgppkt.NewPathAttributeOrigin(0), mpReach},
 	}, nil
+}
+
+// ProducerSession is a Session that names itself on everything it
+// originates.
+//
+// It exists because gobgp keeps one local path per NLRI: everything
+// originating through one session shares that path, so a route two
+// producers both advertise is one route, and the second withdraw to
+// arrive would otherwise delete what the first still wants. Naming the
+// producer is what lets the session tell those apart.
+//
+// Callers holding the bare session are one producer between them. Giving
+// each of vinbero's own originators a name of its own would separate them
+// too, and is worth doing; it changes what those paths do on a conflict,
+// so it is its own change rather than a side effect of this one.
+type ProducerSession struct {
+	*Session
+	producer string
+}
+
+// AsProducer returns a view of this session that names producer on
+// everything it advertises, and withdraws only what it advertised.
+func (s *Session) AsProducer(producer string) *ProducerSession {
+	return &ProducerSession{Session: s, producer: producer}
+}
+
+// Advertise injects a VPN route on behalf of this producer.
+func (p *ProducerSession) Advertise(_ context.Context, r bgp.VPNRoute) error {
+	srv := p.bgpServer()
+	if srv == nil {
+		return bgp.ErrSessionNotStarted
+	}
+	path, err := encodeVPNPath(r)
+	if err != nil {
+		return err
+	}
+	return p.addAndTrackAs(srv, path, r.Key(), p.producer)
+}
+
+// AdvertiseUnicast injects an IPv6 unicast route on behalf of this
+// producer.
+func (p *ProducerSession) AdvertiseUnicast(_ context.Context, r bgp.UnicastRoute) error {
+	srv := p.bgpServer()
+	if srv == nil {
+		return bgp.ErrSessionNotStarted
+	}
+	path, err := encodeUnicastPath(r)
+	if err != nil {
+		return err
+	}
+	return p.addAndTrackAs(srv, path, bgp.RouteKey{Family: bgp.FamilyIPv6Unicast, Prefix: r.Prefix}, p.producer)
+}
+
+// Withdraw removes a route this producer advertised, and leaves one
+// another producer advertised alone.
+func (p *ProducerSession) Withdraw(ctx context.Context, key bgp.RouteKey) error {
+	return p.withdrawAs(ctx, key, p.producer)
 }

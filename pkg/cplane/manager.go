@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +23,18 @@ import (
 // session.
 type EventSource interface {
 	Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error)
+}
+
+// BuiltinRetractor is a source that can tell Vinbero's own appliers to let
+// go of routes whose behavior a plugin has claimed. *demux.Demux provides
+// it.
+//
+// A claim only decides where later routes go. One that arrived first has
+// already been installed by the built-in appliers as an ordinary service
+// SID, under their owner, so the plugin's write to that prefix is refused
+// and the entry with the wrong meaning is the one carrying traffic.
+type BuiltinRetractor interface {
+	RetractClaimedFromBuiltins()
 }
 
 // QuietSource can add a consumer without replaying to it, for a consumer
@@ -80,6 +93,10 @@ type Registration struct {
 	// Behaviors are the SRv6 endpoint behavior codepoints the plugin
 	// claims. Routes naming one are withheld from the built-in appliers.
 	Behaviors []uint16
+	// Capabilities are what the plugin is allowed to do. An empty set
+	// leaves it able to observe and to log, which is a real way to run a
+	// plugin and the safe default for one that asked for nothing.
+	Capabilities wasm.Capabilities
 	// Limits bound the instance; zero fields take defaults.
 	Limits wasm.Limits
 	// TickInterval asks for the plugin's periodic callback to be driven at
@@ -98,16 +115,42 @@ const MinTickInterval = 100 * time.Millisecond
 
 // Manager owns the running control-plane plugins.
 type Manager struct {
-	source     EventSource
-	snapshots  SnapshotSource
-	claims     BehaviorClaims
-	headend    HeadendMapOps
-	leases     *Leases
-	defaultSrc netip.Addr
-	logger     *zap.Logger
+	source      EventSource
+	snapshots   SnapshotSource
+	claims      BehaviorClaims
+	headend     HeadendMapOps
+	quotas      Quotas
+	store       *Store
+	leases      *Leases
+	advertise   *AdvertiseSet
+	localSIDs   *LocalSIDSet
+	encapSource func() (netip.Addr, error)
+	// limits are what a plugin costs to run when its registration is
+	// silent about it.
+	limits wasm.Limits
+	logger *zap.Logger
+
+	// unrestored holds the plugins the store had but that would not come
+	// back, keyed by name.
+	//
+	// They are kept because the daemon is still holding something of
+	// theirs: the state they wrote is pinned in the maps, and their
+	// behaviors stay claimed so nothing installs those routes with the
+	// wrong meaning. Neither is visible from the running set, so without
+	// this an operator sees a plugin that is simply absent, with routes
+	// going nowhere and nothing saying why.
+	unrestoredMu sync.Mutex
+	unrestored   map[string]UnrestoredPlugin
 
 	// applyMu serializes reconciles across every plugin this manager runs.
 	applyMu sync.Mutex
+	// registerMu serializes registration against unregistration.
+	//
+	// The two touch the same owner tag from opposite ends: unregister
+	// flushes everything under it after removing the plugin, and a
+	// registration landing in that window would publish a new instance
+	// whose state the older call then wipes.
+	registerMu sync.Mutex
 
 	// started is the epoch the monotonic clock a plugin sees counts from.
 	// It is per daemon rather than per instance so a plugin's readings
@@ -135,6 +178,16 @@ type plugin struct {
 	// dead marks an instance that failed and was not restarted, so events
 	// stop being handed to a module that cannot take them.
 	dead bool
+	// counters holds this plugin's observable statistics.
+	counters *counters
+	// snapshotting is set while a rib replay is in flight for this plugin.
+	//
+	// Replays must not overlap. Two of them push into one queue with no
+	// order between them, so an older copy of a route can land after the
+	// newer one and leave the plugin holding the stale value -- and a
+	// plugin that is dropping events is by definition slow, so a replay
+	// per drop would pile up without bound.
+	snapshotting bool
 }
 
 // ManagerConfig builds a Manager.
@@ -146,9 +199,43 @@ type ManagerConfig struct {
 	Claims BehaviorClaims
 	// Headend is the map surface plugin declarations reconcile into.
 	Headend HeadendMapOps
-	// DefaultEncapSource fills in declared entries that name no source.
-	DefaultEncapSource netip.Addr
-	Logger             *zap.Logger
+	// Advertiser is the send side a plugin originates through. Nil leaves
+	// plugins unable to advertise, which is honest on a daemon with no
+	// BGP session.
+	//
+	Advertiser Advertiser
+	// AdvertiserFor names each plugin's send side, so the BGP session can
+	// tell one plugin's routes from another's. Optional: without it every
+	// plugin shares one identity.
+	//
+	// The lease is the first barrier between two plugins originating one
+	// NLRI; the producer name is the second, and the two fail differently.
+	// A lease conflict is refused before anything is sent. A producer
+	// conflict is what stops one plugin's withdraw from deleting a route
+	// another plugin still wants -- which matters exactly when the lease
+	// has been given up by mistake.
+	AdvertiserFor func(producer string) Advertiser
+	// Locators allocates the SIDs a plugin points at its data-plane half.
+	Locators SIDAllocator
+	// SIDFunctions installs the dispatch entries for those SIDs.
+	SIDFunctions SIDFunctionOps
+	// Quotas bound how much any one plugin may hold. Zero fields take the
+	// defaults.
+	Quotas Quotas
+	// DefaultLimits bound what a plugin costs to run when its registration
+	// does not say. The registration wins where it sets a field, so an
+	// operator can raise one plugin without loosening the rest.
+	DefaultLimits wasm.Limits
+	// Store keeps registrations across a daemon restart. Nil runs the
+	// daemon without one, which means every plugin has to be registered
+	// again after a restart -- and the state a plugin wrote outlives the
+	// process, so that state comes back owned by nobody until it does.
+	Store *Store
+	// EncapSource resolves the daemon's encap source when a plugin
+	// declares an entry that names none. Called at apply time, because a
+	// locator registered over RPC after startup is the common case.
+	EncapSource func() (netip.Addr, error)
+	Logger      *zap.Logger
 }
 
 // NewManager builds an empty manager.
@@ -160,19 +247,40 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	leases := NewLeases()
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	return &Manager{
-		source:     cfg.Source,
-		snapshots:  snapshots,
-		claims:     cfg.Claims,
-		headend:    cfg.Headend,
-		leases:     NewLeases(),
-		defaultSrc: cfg.DefaultEncapSource,
-		logger:     logger,
-		started:    time.Now(),
-		plugins:    make(map[string]*plugin),
+		advertise:   newNamedAdvertiseSet(cfg, leases),
+		localSIDs:   NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions),
+		source:      cfg.Source,
+		snapshots:   snapshots,
+		claims:      cfg.Claims,
+		headend:     cfg.Headend,
+		quotas:      cfg.Quotas.withDefaults(),
+		limits:      cfg.DefaultLimits,
+		store:       cfg.Store,
+		leases:      leases,
+		encapSource: cfg.EncapSource,
+		logger:      logger,
+		started:     time.Now(),
+		plugins:     make(map[string]*plugin),
+		unrestored:  make(map[string]UnrestoredPlugin),
 	}, nil
 }
+
+// newNamedAdvertiseSet builds the advertise tracker, naming each owner's
+// send side when the daemon supplied a way to.
+func newNamedAdvertiseSet(cfg ManagerConfig, leases *Leases) *AdvertiseSet {
+	set := NewAdvertiseSet(cfg.Advertiser, leases)
+	if cfg.AdvertiserFor != nil {
+		set.NameProducers(cfg.AdvertiserFor)
+	}
+	return set
+}
+
+// ErrPluginNotRegistered is a name the manager does not hold. It is the
+// caller's to fix, so callers can tell it from a daemon failure.
+var ErrPluginNotRegistered = errors.New("plugin is not registered")
 
 // Register starts a plugin.
 //
@@ -186,6 +294,8 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
 		return err
 	}
+	m.registerMu.Lock()
+	defer m.registerMu.Unlock()
 
 	// Claims are set before anything is instantiated, so a behavior another
 	// plugin holds stops the registration early. The previous set is kept
@@ -206,102 +316,328 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		return fmt.Errorf("cplane: plugin %q claims behaviors but no claim registry is configured", reg.Name)
 	}
 
+	reg.Limits = m.limits.Merge(reg.Limits)
+
 	p, err := m.build(ctx, reg)
 	if err != nil {
 		m.restoreClaims(reg.Name, previousClaims)
 		return err
 	}
 
-	m.mu.Lock()
-	old, existed := m.plugins[reg.Name]
-	m.plugins[reg.Name] = p
-	m.mu.Unlock()
-
-	if existed {
-		// Stop the old instance without flushing: the new one inherits the
-		// owner tag and re-declares over the same state.
-		m.teardown(ctx, old)
-	}
-
+	// Everything that can still fail happens before the running plugin is
+	// touched. Subscribing is the last of those, and on an upgrade it used
+	// to run after the old instance had already been stopped -- so a
+	// subscription the demux refused left the operator with neither
+	// version registered, the old one closed and unrecoverable, and its
+	// state sitting in the maps.
+	var (
+		cancel func()
+		quiet  bool
+	)
 	if m.source != nil {
 		subscribe := m.source.Register
-		quiet := false
 		if qs, ok := m.source.(QuietSource); ok {
 			subscribe = qs.RegisterQuiet
 			quiet = true
 		}
-		cancel, err := subscribe(reg.Name, reg.Families, m.handlerFor(reg.Name))
+		var err error
+		// The handler resolves the plugin by name at delivery time, so
+		// until the swap below it still reaches the version that is
+		// running. The overlap costs a duplicate event, which a consumer
+		// declaring desired sets absorbs.
+		cancel, err = subscribe(reg.Name, reg.Families, m.handlerFor(reg.Name))
 		if err != nil {
-			// Undo without flushing: the operator asked for a plugin, not
-			// for its predecessor's entries to be deleted. On an upgrade
-			// the state under this owner belongs to the version that was
-			// running a moment ago, and blackholing it because the new
-			// one could not subscribe would be worse than the failure.
-			m.mu.Lock()
-			if current, ok := m.plugins[reg.Name]; ok && current == p {
-				delete(m.plugins, reg.Name)
-			}
-			m.mu.Unlock()
+			// Nothing has been published, so tearing the new one down
+			// leaves no trace of it, and the version that was running is
+			// still running.
 			m.teardown(ctx, p)
 			m.restoreClaims(reg.Name, previousClaims)
 			return fmt.Errorf("cplane: subscribe plugin %q: %w", reg.Name, err)
 		}
-		// The plugin may already have been unregistered while we were
-		// subscribing. Cancel immediately in that case, or the demux keeps
-		// dispatching to a name that no longer resolves.
-		m.mu.Lock()
-		current, stillThere := m.plugins[reg.Name]
-		if stillThere && current == p {
-			p.cancel = cancel
-			cancel = nil
-		}
-		m.mu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
+	}
 
-		// Take the snapshot here rather than letting the source replay
-		// through the live path, so nothing of it can be dropped. A
-		// source that cannot register quietly has already replayed, and
+	m.mu.Lock()
+	old, existed := m.plugins[reg.Name]
+	m.plugins[reg.Name] = p
+	p.cancel = cancel
+	m.mu.Unlock()
+
+	if existed {
+		// Stop the old instance without flushing: the new one inherits the
+		// owner tag and re-declares over the same state. This also cancels
+		// its subscription, ending the overlap.
+		m.teardown(ctx, old)
+	}
+
+	// The claim reaches back over routes that arrived before it, now that
+	// nothing else can fail. Retracting them from the built-in appliers is
+	// not undoable, so it waits until the plugin that is meant to take
+	// them over is built and subscribed: a module refused at admission
+	// would otherwise leave those routes removed from the appliers with
+	// nothing left implementing them.
+	if m.claims != nil && len(reg.Behaviors) > 0 {
+		if r, ok := m.source.(BuiltinRetractor); ok {
+			r.RetractClaimedFromBuiltins()
+		}
+	}
+
+	if m.source != nil {
+		// The snapshot comes before publication. What the plugin declared
+		// from configure is held either way, and holding it across the
+		// replay means its first applied declaration describes the whole
+		// network rather than the events that happened to be in the queue
+		// -- which, on a plugin that declares a desired set, is the
+		// difference between converging and pruning everything it owns.
+		//
+		// A source that cannot register quietly has already replayed, and
 		// this repairs whatever that dropped.
 		if quiet || p.worker.takeSnapshotDebt() {
 			m.snapshot(p)
 		}
 	}
 
+	// It has seen the network, so what it declared is applied.
+	if err := p.ops.Publish(); err != nil {
+		m.logger.Warn("applying what a plugin declared before it was live",
+			zap.String("plugin", reg.Name), zap.Error(err))
+	}
+
+	// Recorded only once it is actually running, so a module that could
+	// not start is not something a restart tries again forever.
+	//
+	// A failure here is reported rather than logged past. The plugin is
+	// running, so it is not undone, but "registered" means it survives a
+	// restart: an operator told it succeeded would find it gone, or find
+	// the version it replaced, with nothing having said so.
+	if err := m.store.Save(reg); err != nil {
+		m.logger.Error("a plugin is running but could not be persisted; "+
+			"it will not survive a restart",
+			zap.String("plugin", reg.Name), zap.Error(err))
+		return fmt.Errorf("cplane: plugin %q is running but could not be persisted, "+
+			"so it will not survive a restart: %w", reg.Name, err)
+	}
+
 	m.logger.Info("control-plane plugin registered",
 		zap.String("plugin", reg.Name),
 		zap.Bool("replaced", existed),
-		zap.Int("behaviors", len(reg.Behaviors)))
+		zap.Int("behaviors", len(reg.Behaviors)),
+		zap.Strings("capabilities", reg.Capabilities.Names()))
+	return nil
+}
+
+// ReserveClaims takes the behavior claims of every stored plugin, before
+// any route has been delivered.
+//
+// The daemon starts the demux -- and with it the built-in appliers and the
+// replay of everything already in the rib -- before it restores plugins.
+// A route carrying a stored plugin's behavior would therefore reach the
+// built-in appliers first, which read a codepoint they do not know as an
+// ordinary service SID and install an entry with the wrong meaning under
+// their own owner; the plugin's own write to that prefix then collides
+// with it. Claiming first closes that window, because the claim is what
+// the demux consults, not the plugin's existence.
+//
+// A plugin that then fails to restore has its reservation released, in
+// Restore.
+func (m *Manager) ReserveClaims() error {
+	return ReserveStoredClaims(m.store, m.claims, m.logger)
+}
+
+// ReserveStoredClaims is ReserveClaims for a daemon that has not built its
+// manager yet, which is the ordering that matters: the reservation has to
+// happen before the demux starts, and the manager is built after it.
+func ReserveStoredClaims(store *Store, claims BehaviorClaims, logger *zap.Logger) error {
+	if store == nil || claims == nil {
+		return nil
+	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	// Read from the manifests alone. A registration whose module is
+	// missing or corrupt will fail to restore, and its codepoints are
+	// precisely the ones that must stay claimed -- reading the modules
+	// here would drop it from the list and reserve nothing for it.
+	stored, listErr := store.ListClaims()
+	for _, claim := range stored {
+		if err := claims.Replace(claim.Name, claim.Behaviors); err != nil {
+			logger.Error("could not reserve the behaviors of a stored plugin",
+				zap.String("plugin", claim.Name), zap.Error(err))
+		}
+	}
+	return listErr
+}
+
+// Restore brings back the plugins a previous run registered.
+//
+// It is deliberately not fatal when one fails: a daemon that refuses to
+// finish starting because a plugin is broken has turned a plugin problem
+// into an outage. The failure is logged with the name, and the rest come
+// up.
+func (m *Manager) Restore(ctx context.Context) error {
+	if m.store == nil {
+		return nil
+	}
+	// List returns what it could read alongside the error, and that
+	// partial list is the point: one unreadable manifest must not stop
+	// every other plugin from coming back, or a single bad file leaves
+	// the daemon holding their pinned state under owners nothing can
+	// reconcile.
+	regs, listErr := m.store.List()
+	for _, reg := range regs {
+		if err := m.Register(ctx, reg); err != nil {
+			m.logger.Error("could not restore a plugin from the store",
+				zap.String("plugin", reg.Name), zap.Error(err))
+			// Its behaviors are re-reserved. Register rolls its own claim
+			// back when it fails -- which is right for an operator's
+			// registration, where nothing was reserved before it -- but a
+			// restore is the other case: the reservation was taken before
+			// the demux started, precisely so routes carrying a codepoint
+			// nothing implements are withheld from the built-in appliers.
+			// Letting the rollback stand would hand them over to be
+			// installed as ordinary service SIDs, which is forwarding that
+			// is silently wrong rather than visibly absent.
+			if len(reg.Behaviors) > 0 && m.claims != nil {
+				if err := m.claims.Replace(reg.Name, reg.Behaviors); err != nil {
+					m.logger.Error("could not keep the behaviors of a plugin that failed to restore; "+
+						"routes carrying them will be installed with the wrong meaning",
+						zap.String("plugin", reg.Name), zap.Error(err))
+				} else {
+					m.logger.Warn("keeping the behaviors of a plugin that could not be restored; "+
+						"routes carrying them are not installed until it is registered again",
+						zap.String("plugin", reg.Name), zap.Uint16s("behaviors", reg.Behaviors))
+				}
+			}
+			// Recorded so it is visible. The daemon is still holding its
+			// state and its claim; an operator who cannot see that has no
+			// way to connect the routes going nowhere to the plugin that
+			// failed to start.
+			m.recordUnrestored(reg, err)
+			continue
+		}
+		m.clearUnrestored(reg.Name)
+		m.logger.Info("restored a control-plane plugin from the store",
+			zap.String("plugin", reg.Name))
+	}
+	return listErr
+}
+
+// UnrestoredPlugin is a plugin the store held that would not start.
+type UnrestoredPlugin struct {
+	Name string
+	// Behaviors are the codepoints still claimed on its behalf, which is
+	// why routes carrying them reach nothing.
+	Behaviors []uint16
+	// Reason is why it would not start, in the operator's words.
+	Reason string
+	// Since is when the attempt failed.
+	Since time.Time
+}
+
+func (m *Manager) recordUnrestored(reg Registration, cause error) {
+	m.unrestoredMu.Lock()
+	defer m.unrestoredMu.Unlock()
+	m.unrestored[reg.Name] = UnrestoredPlugin{
+		Name:      reg.Name,
+		Behaviors: append([]uint16(nil), reg.Behaviors...),
+		Reason:    cause.Error(),
+		Since:     time.Now(),
+	}
+}
+
+func (m *Manager) clearUnrestored(name string) {
+	m.unrestoredMu.Lock()
+	defer m.unrestoredMu.Unlock()
+	delete(m.unrestored, name)
+}
+
+// Unrestored lists the plugins the store held that would not start,
+// sorted by name.
+func (m *Manager) Unrestored() []UnrestoredPlugin {
+	m.unrestoredMu.Lock()
+	out := make([]UnrestoredPlugin, 0, len(m.unrestored))
+	for _, u := range m.unrestored {
+		out = append(out, u)
+	}
+	m.unrestoredMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Forget removes a plugin that would not start: it releases the claim it
+// was holding, drops it from the store, and stops reporting it.
+//
+// It is the counterpart of Unregister for something that never ran. The
+// state it left in the maps is not touched, because nothing here knows
+// what that state was for; releasing the claim is what an operator does
+// once they have decided the plugin is not coming back.
+func (m *Manager) Forget(name string) error {
+	m.registerMu.Lock()
+	defer m.registerMu.Unlock()
+
+	m.unrestoredMu.Lock()
+	_, held := m.unrestored[name]
+	m.unrestoredMu.Unlock()
+	if !held {
+		return fmt.Errorf("cplane: %w: %q is not one that failed to restore",
+			ErrPluginNotRegistered, name)
+	}
+	if m.claims != nil {
+		m.claims.Release(name)
+	}
+	if err := m.store.Remove(name); err != nil {
+		return fmt.Errorf("cplane: remove plugin %q from the store: %w", name, err)
+	}
+	m.clearUnrestored(name)
+	m.logger.Info("forgot a control-plane plugin that could not be restored",
+		zap.String("plugin", name))
 	return nil
 }
 
 // build instantiates a plugin and its delivery worker without publishing
 // it.
 func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) {
+	// Local SIDs declared from configure are answered through the worker
+	// like any other event. configure runs during instantiation, before
+	// there is a worker, but nothing it declares is applied until
+	// publication -- which happens after the worker exists -- so the reply
+	// is queued rather than lost.
+	var built *plugin
+	onLocalSIDs := func(sids []AllocatedSID) bool {
+		if built == nil {
+			return false
+		}
+		return m.deliverLocalSIDs(built, sids)
+	}
+
 	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner:              bpf.OwnerPluginBundle(reg.Name),
-		Headend:            m.headend,
-		Leases:             m.leases,
-		DefaultEncapSource: m.defaultSrc,
-		Logger:             m.logger.Named("plugin." + reg.Name),
-		ApplyMutex:         &m.applyMu,
+		Owner:        bpf.OwnerPluginBundle(reg.Name),
+		Headend:      m.headend,
+		Leases:       m.leases,
+		EncapSource:  m.encapSource,
+		Logger:       m.logger.Named("plugin." + reg.Name),
+		ApplyMutex:   &m.applyMu,
+		Capabilities: reg.Capabilities,
+		Quotas:       m.quotas,
+		Advertise:    m.advertise,
+		LocalSIDs:    m.localSIDs,
+		OnLocalSIDs:  onLocalSIDs,
 	})
 	if err != nil {
 		return nil, err
 	}
 	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		Name:       reg.Name,
-		Module:     reg.Module,
-		ConfigBlob: reg.Config,
-		Limits:     reg.Limits,
-		Ops:        ops,
-		Logger:     m.logger,
+		Name:         reg.Name,
+		Module:       reg.Module,
+		ConfigBlob:   reg.Config,
+		Limits:       reg.Limits,
+		Ops:          ops,
+		Capabilities: reg.Capabilities,
+		Logger:       m.logger,
 	})
 	if err != nil {
 		return nil, err
 	}
-	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops}
+	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops, counters: newCounters()}
 	interval := reg.TickInterval
 	if interval > 0 && interval < MinTickInterval {
 		interval = MinTickInterval
@@ -310,7 +646,15 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		func(err error) { m.instanceFailed(p, err) },
 		func(status *v1.PluginEventStatus) { m.delivered(p, status) },
 		func() error { return m.tick(p) },
-		interval)
+		interval,
+		// Declarations that could not be applied when the plugin went live
+		// are retried here, on the worker rather than the watch goroutine.
+		// A restored plugin declares from configure, before an operator
+		// has registered the locator it names; this is what lets the first
+		// event afterwards repair that instead of leaving it lost.
+		ops.RetryPending)
+
+	built = p
 	return p, nil
 }
 
@@ -335,24 +679,59 @@ func (m *Manager) restoreClaims(name string, behaviors []uint16) {
 // away, so its entries go with it rather than being left for a restart to
 // reclaim.
 func (m *Manager) Unregister(ctx context.Context, name string) error {
+	m.registerMu.Lock()
+	defer m.registerMu.Unlock()
 	m.mu.Lock()
 	p, ok := m.plugins[name]
 	delete(m.plugins, name)
 	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("cplane: plugin %q is not registered", name)
+		return fmt.Errorf("cplane: %w: %q", ErrPluginNotRegistered, name)
 	}
 
-	// Order matters. Stop delivery first so nothing new is declared, then
-	// close the instance, then remove what it owns. Removing state while
-	// the plugin can still write would race with a declaration already in
-	// flight.
+	// Order matters. Delivery stops first so nothing new is declared, then
+	// the instance closes, then what it owns is removed. Removing state
+	// while the plugin can still write would race with a declaration
+	// already in flight.
 	m.teardown(ctx, p)
+
+	// The flush comes before anything is given up, because a failed flush
+	// has to stay retryable. Releasing the claim first would hand the
+	// routes back to the built-in appliers while the plugin's state is
+	// still installed, and removing it from the store first would mean a
+	// restart does not even bring back the plugin whose state was left
+	// behind.
+	if err := p.ops.Flush(); err != nil {
+		// It is out of the registry and its instance is closed, so it is
+		// no longer running; the state it could not remove is what is left
+		// to deal with. Put it back so the operator can retry.
+		m.mu.Lock()
+		if _, taken := m.plugins[name]; !taken {
+			// Marked dead: the instance is closed and the worker stopped,
+			// so nothing about it is running. It is back in the registry
+			// only so the operator can see the state it could not remove
+			// and retry the removal.
+			p.dead = true
+			m.plugins[name] = p
+		}
+		m.mu.Unlock()
+		return fmt.Errorf("cplane: flush plugin %q: %w", name, err)
+	}
+
 	if m.claims != nil {
+		// The claim goes, but the routes are not handed to the built-in
+		// appliers. Nothing here can implement the behavior the plugin
+		// implemented: to the built-in a private codepoint is just a
+		// service SID, and installing it as one is the wrong-meaning
+		// install the claim existed to prevent. Those routes stop being
+		// forwarded, which is the honest outcome of removing the only
+		// thing that understood them, and they will be picked up with
+		// built-in semantics only if their originator readvertises.
 		m.claims.Release(name)
 	}
-	if err := p.ops.Flush(); err != nil {
-		return fmt.Errorf("cplane: flush plugin %q: %w", name, err)
+	if err := m.store.Remove(name); err != nil {
+		m.logger.Warn("could not remove a plugin from the store; a restart would bring it back",
+			zap.String("plugin", name), zap.Error(err))
 	}
 	m.logger.Info("control-plane plugin unregistered", zap.String("plugin", name))
 	return nil
@@ -447,14 +826,28 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 		zap.Int("restart", restarts),
 		zap.Error(cause))
 
+	// The ops outlive the instance -- the owner tag and the state under it
+	// belong to the registration -- but two things do not, and this is
+	// where they are reset.
+	//
+	// The record of which SID addresses the plugin has been told is one:
+	// the replacement knows nothing, and suppressing the notification
+	// because its predecessor had it would leave it holding SIDs it cannot
+	// advertise. Publication is the other: what the replacement declares
+	// from configure is held until it is running, so an instantiation that
+	// fails halfway cannot prune the state its predecessor left behind on
+	// its way out.
+	p.ops.BeginInstance()
+
 	ctx := context.Background()
 	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		Name:       reg.Name,
-		Module:     reg.Module,
-		ConfigBlob: reg.Config,
-		Limits:     reg.Limits,
-		Ops:        p.ops,
-		Logger:     m.logger,
+		Name:         reg.Name,
+		Module:       reg.Module,
+		ConfigBlob:   reg.Config,
+		Limits:       reg.Limits,
+		Ops:          p.ops,
+		Capabilities: reg.Capabilities,
+		Logger:       m.logger,
 	})
 	if err != nil {
 		m.mu.Lock()
@@ -476,20 +869,29 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	p.inst = inst
 	p.worker.handler = inst.HandleEvents
 	m.mu.Unlock()
+	p.counters.restarted()
 
 	if err := old.Close(ctx); err != nil {
 		m.logger.Debug("closing the failed instance", zap.String("plugin", p.name), zap.Error(err))
 	}
 
 	// The replacement remembers nothing, so it has to be told what the
-	// network looks like. Without this its first declaration describes
-	// only the events that happened to arrive after the restart, and the
-	// reconcile prunes everything else the plugin owned.
+	// network looks like before anything it declares is applied. Its
+	// declarations stay held until then: the queue still holds events
+	// meant for the instance that died, and a set built from those alone
+	// would prune everything else this plugin owns before the replay could
+	// restate it.
 	//
 	// It runs on a goroutine of its own because this is the worker
 	// goroutine: the snapshot is delivered through the same queue and
 	// would deadlock against itself.
-	go m.snapshot(p)
+	go func() {
+		m.snapshot(p)
+		if err := p.ops.Publish(); err != nil {
+			m.logger.Warn("applying what a restarted plugin declared before it was live",
+				zap.String("plugin", p.name), zap.Error(err))
+		}
+	}()
 }
 
 // snapshot rebuilds a plugin's view from the rib.
@@ -503,6 +905,33 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 // Delivery blocks rather than dropping, which is safe because this does
 // not run on the BGP watch goroutine.
 func (m *Manager) snapshot(p *plugin) {
+	m.mu.Lock()
+	if p.snapshotting {
+		// One is already running. Ask for another afterwards rather than
+		// starting a second alongside it.
+		m.mu.Unlock()
+		p.worker.owe()
+		return
+	}
+	p.snapshotting = true
+	m.mu.Unlock()
+	// Live events are held until this finishes, so the snapshot arrives as
+	// an uninterrupted prefix rather than interleaved with updates that
+	// supersede parts of it.
+	p.worker.beginSnapshot()
+	defer func() {
+		p.worker.endSnapshot()
+		m.mu.Lock()
+		p.snapshotting = false
+		m.mu.Unlock()
+		// A drop while this one was running left the view incomplete
+		// again. Repay it now rather than waiting for an event that may
+		// not come.
+		if p.worker.takeSnapshotDebt() {
+			go m.snapshot(p)
+		}
+	}()
+
 	if m.snapshots == nil {
 		// Without a rib to read there is nothing to rebuild from. Say so:
 		// the plugin's view stays incomplete and that is worth knowing.
@@ -510,6 +939,11 @@ func (m *Manager) snapshot(p *plugin) {
 			zap.String("plugin", p.name))
 		return
 	}
+	// The reset goes first. What follows is the whole of the source, so
+	// anything the plugin still holds from before is either restated here
+	// or was withdrawn while it was not listening -- and a replay cannot
+	// tell it about the second kind.
+	p.worker.submitBlocking(m.startOfReplayBatch(ReplaySourceBGP))
 	var count int
 	err := m.snapshots.SnapshotTo(p.reg.Families, func(ev bgp.RouteEvent) {
 		if p.worker.submitBlocking(m.routeBatch(ev)) {
@@ -526,6 +960,7 @@ func (m *Manager) snapshot(p *plugin) {
 		return
 	}
 	p.worker.submitBlocking(m.endOfReplayBatch(ReplaySourceBGP))
+	p.counters.addSnapshot()
 	m.logger.Info("replayed the rib to a plugin",
 		zap.String("plugin", p.name), zap.Int("routes", count))
 }
@@ -541,11 +976,12 @@ func (m *Manager) snapshotFor(name string) error {
 	p, ok := m.plugins[name]
 	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("cplane: plugin %q is not registered", name)
+		return fmt.Errorf("cplane: %w: %q", ErrPluginNotRegistered, name)
 	}
 	if m.snapshots == nil {
 		return fmt.Errorf("cplane: the event source serves no snapshot")
 	}
+	p.worker.submitBlocking(m.startOfReplayBatch(ReplaySourceBGP))
 	if err := m.snapshots.SnapshotTo(p.reg.Families, func(ev bgp.RouteEvent) {
 		p.worker.submitBlocking(m.routeBatch(ev))
 	}); err != nil {
@@ -580,12 +1016,54 @@ const ReplaySourceBGP = "bgp"
 // several routes, withdrawing on a health signal -- has to know when it
 // has seen enough to decide. Without this it draws its first conclusions
 // from a partial view, and the churn is visible to its peers.
+// startOfReplayBatch tells a plugin to discard what it knows from one
+// source, because a full replay of it follows.
+func (m *Manager) startOfReplayBatch(source string) *v1.PluginEventBatch {
+	return &v1.PluginEventBatch{Events: []*v1.PluginEvent{{
+		Kind:         v1.PluginEventKind_PLUGIN_EVENT_KIND_START_OF_REPLAY,
+		Sequence:     m.seq.Add(1),
+		ReplaySource: source,
+	}}}
+}
+
 func (m *Manager) endOfReplayBatch(source string) *v1.PluginEventBatch {
 	return &v1.PluginEventBatch{Events: []*v1.PluginEvent{{
 		Kind:         v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY,
 		Sequence:     m.seq.Add(1),
 		ReplaySource: source,
 	}}}
+}
+
+// deliverLocalSIDs tells a plugin the addresses its declared local SIDs
+// were given.
+//
+// The plugin chose the names and the host chose the addresses, so this is
+// the only way it learns what to advertise. Delivery is queued like any
+// other event, which keeps it in order behind whatever else the plugin is
+// being told.
+// It reports whether the batch was queued. A dropped one is not repaired
+// by a later snapshot -- the rib replays routes, not SID allocations -- so
+// the caller has to know not to record these as delivered.
+func (m *Manager) deliverLocalSIDs(p *plugin, sids []AllocatedSID) bool {
+	events := make([]*v1.PluginEvent, 0, len(sids))
+	for _, s := range sids {
+		events = append(events, &v1.PluginEvent{
+			Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_LOCAL_SID,
+			Sequence: m.seq.Add(1),
+			LocalSid: &v1.PluginLocalSidAllocated{
+				Name:    s.Name,
+				Sid:     s.SID.String(),
+				Locator: s.Locator,
+			},
+		})
+	}
+	if len(events) == 0 {
+		return true
+	}
+	// Queued without blocking: this runs inside the guest call that
+	// declared the set, and waiting on the queue the same worker drains
+	// would deadlock.
+	return p.worker.submit(&v1.PluginEventBatch{Events: events})
 }
 
 // routeBatch wraps one route event as a batch for delivery.
@@ -617,6 +1095,7 @@ func (m *Manager) reportStatus(p *plugin, status *v1.PluginEventStatus) {
 			// The plugin declined this event on purpose. Recording it is
 			// the whole value of having a polite refusal: the alternative
 			// signal is a trap, which costs the instance and repeats.
+			p.counters.addQuarantined(1)
 			m.logger.Warn("plugin quarantined an event",
 				zap.String("plugin", p.name),
 				zap.Uint64("sequence", r.GetSequence()),

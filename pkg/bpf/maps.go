@@ -2112,6 +2112,20 @@ func (m *MapOperations) GetHeadendV4Owner(triggerPrefix string) (OwnerTag, bool,
 	return m.headendV4Owners.Lookup(key)
 }
 
+// GetSidFunctionOwner returns the owner recorded for a SID function
+// entry, or ("", false) when none is recorded.
+//
+// It is the sid_function counterpart of GetHeadendV4Owner, and exists for
+// the same reason: a caller reconciling the entries it owns has to be able
+// to tell which of the map's entries are its own.
+func (m *MapOperations) GetSidFunctionOwner(triggerPrefix string) (OwnerTag, bool, error) {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
+	}
+	return m.sidFunctionOwners.Lookup(key)
+}
+
 // GetHeadendV6Owner is the v6 counterpart of GetHeadendV4Owner.
 func (m *MapOperations) GetHeadendV6Owner(triggerPrefix string) (OwnerTag, bool, error) {
 	key, err := buildLpmKeyV6(triggerPrefix)

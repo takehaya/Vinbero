@@ -28,7 +28,7 @@
 //   - free(ptr i32, size i32)    -- release a region alloc returned
 //   - configure(ptr, len i32) -> i32  -- apply operator config, 0 on success
 //   - handle_events(ptr, len i32) -> i64 -- consume an event batch
-//   - on_tick(now_ns i64) -> i32 -- periodic callback
+//   - on_tick(now_ns i64)       -- periodic callback
 //
 // handle_events returns a (pointer, length) pair packed into an i64, high
 // word first, addressing a serialized status message. Returning 0 means

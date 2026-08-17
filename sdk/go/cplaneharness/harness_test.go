@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplaneharness"
 )
 
@@ -149,11 +150,44 @@ func TestHarnessCapturesPluginLogs(t *testing.T) {
 	}
 }
 
+// exampleConfig builds the example plugin's own config message: its
+// behavior codepoint, and optionally the locator, prefix, RD and slot that
+// make it originate as well as receive.
+func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64, nextHop string) []byte {
+	var buf []byte
+	putVarint := func(v uint64) {
+		for v >= 0x80 {
+			buf = append(buf, byte(v)|0x80)
+			v >>= 7
+		}
+		buf = append(buf, byte(v))
+	}
+	field := func(n int, wire int) { putVarint(uint64(n)<<3 | uint64(wire)) }
+	str := func(n int, s string) {
+		if s == "" {
+			return
+		}
+		field(n, 2)
+		putVarint(uint64(len(s)))
+		buf = append(buf, s...)
+	}
+	field(1, 0)
+	putVarint(behavior)
+	str(2, locator)
+	str(3, prefix)
+	str(4, rd)
+	if slot != 0 {
+		field(5, 0)
+		putVarint(slot)
+	}
+	str(7, nextHop)
+	return buf
+}
+
 // The config blob retunes the plugin without rebuilding it.
 func TestHarnessAppliesConfig(t *testing.T) {
-	// A bare varint holding 0xFE02, the codepoint to claim instead.
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
-		Config: []byte{0x82, 0xfc, 0x03},
+		Config: exampleConfig(0xFE02, "", "", "", 0, ""),
 	})
 	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
 		t.Fatalf("deliver: %v", err)
@@ -177,5 +211,209 @@ func TestHarnessTickIsCallable(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{})
 	if err := h.Tick(0); err != nil {
 		t.Fatalf("tick: %v", err)
+	}
+}
+
+// The originating half of a plugin, driven without a daemon: it asks for a
+// local SID, is told the address, and advertises a prefix behind it naming
+// its own behavior codepoint.
+func TestHarnessDrivesTheOriginatingHalf(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+	})
+
+	var sidDecl, advDecl *cplaneharness.Declaration
+	for i := range h.Declarations() {
+		d := h.Declarations()[i]
+		switch d.Kind {
+		case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+			sidDecl = &d
+		case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+			advDecl = &d
+		}
+	}
+	if sidDecl == nil {
+		t.Fatal("the plugin never asked for a local SID")
+	}
+	if len(sidDecl.LocalSIDs) != 1 || sidDecl.LocalSIDs[0].GetSlot() != 33 {
+		t.Fatalf("declared local SIDs = %+v, want one pointing at slot 33", sidDecl.LocalSIDs)
+	}
+	if advDecl == nil {
+		t.Fatal("the plugin never advertised anything after being given its SID")
+	}
+	if len(advDecl.Routes) != 1 {
+		t.Fatalf("advertised %d routes, want the configured prefix", len(advDecl.Routes))
+	}
+	route := advDecl.Routes[0]
+	if route.GetPrefix() != "10.7.0.0/24" || route.GetRd() != "65000:7" {
+		t.Errorf("advertised %+v, want the configured prefix and RD", route)
+	}
+	if route.GetEndpointBehavior() != 0xFE01 {
+		t.Errorf("advertised behavior = %#x, want the plugin's own", route.GetEndpointBehavior())
+	}
+	if route.GetSrv6Sid() == "" {
+		t.Error("advertised no SID, so it never learned the address it was given")
+	}
+}
+
+// A plugin configured with no locator is receive-only, which is an
+// ordinary way to run one: a node that consumes a behavior without
+// originating anything.
+func TestHarnessReceiveOnlyPluginOriginatesNothing(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Config: exampleConfig(0xFE01, "", "", "", 0, ""),
+	})
+	for _, d := range h.Declarations() {
+		if d.Kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE && len(d.Routes) > 0 {
+			t.Fatalf("a receive-only plugin advertised %+v", d.Routes)
+		}
+	}
+}
+
+// After a restart the host keeps what the previous instance installed and
+// replays the rib. If the replay brings back no matching route, the plugin
+// still has to declare -- an empty set -- or the entries the host kept are
+// never pruned and blackhole traffic until an unrelated route arrives.
+func TestPluginPrunesStaleEntriesAtEndOfReplay(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Config: exampleConfig(0xFE01, "", "", "", 0, ""),
+	})
+	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
+		t.Fatalf("advertise: %v", err)
+	}
+	h.Restart()
+
+	// The replay brings nothing back: everything was withdrawn while the
+	// plugin was down.
+	before := len(h.Declarations())
+	if _, err := h.Deliver(&v1.PluginEvent{
+		Kind:         v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY,
+		ReplaySource: "bgp",
+	}); err != nil {
+		t.Fatalf("end of replay: %v", err)
+	}
+	if len(h.Declarations()) == before {
+		t.Fatal("the plugin declared nothing at end of replay, so stale entries would never be pruned")
+	}
+	decl, _ := h.LastDeclaration()
+	if len(decl.Entries) != 0 {
+		t.Fatalf("declared %+v, want the empty set that prunes what it no longer knows about", decl.Entries)
+	}
+}
+
+// The harness has to refuse what the daemon refuses. A plugin granted only
+// advertise cannot open a headend transaction there, so one that tries
+// must not pass conformance here and fail in production.
+func TestHarnessRefusesADeclarationTheCapabilitiesDoNotCover(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Capabilities: []string{"advertise"},
+	})
+	// The example declares headend entries, which this grant does not
+	// cover. Delivering a route makes it try.
+	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if _, ok := h.LastDeclaration(); ok {
+		t.Fatal("a headend declaration was accepted from a plugin granted only advertise")
+	}
+}
+
+// A replacement instance holds the SIDs its predecessor was given but has
+// been told nothing, so the daemon tells it again and the plugin can
+// advertise behind them. A harness that carried the notification over
+// would let a plugin that goes quiet after a restart pass, which is
+// exactly the failure this exists to catch.
+func TestHarnessTellsARestartedPluginItsLocalSIDsAgain(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+	})
+
+	// Being told the address is what lets it advertise, so the
+	// advertisement is the observable proof it was told.
+	advertisedBefore := advertisedPrefixes(h)
+	if len(advertisedBefore) == 0 {
+		t.Fatal("the plugin advertised nothing after being given its SID")
+	}
+
+	h.Restart()
+
+	advertisedAfter := advertisedPrefixes(h)
+	if len(advertisedAfter) <= len(advertisedBefore) {
+		t.Fatalf("the restarted instance advertised nothing new: %d declarations before, %d after",
+			len(advertisedBefore), len(advertisedAfter))
+	}
+	last := advertisedAfter[len(advertisedAfter)-1]
+	if last != advertisedBefore[0] {
+		t.Errorf("after the restart it advertised %q, want the same prefix as before (%q)",
+			last, advertisedBefore[0])
+	}
+}
+
+// advertisedPrefixes is every prefix the plugin has declared, in order.
+func advertisedPrefixes(h *cplaneharness.Harness) []string {
+	var out []string
+	for _, d := range h.Declarations() {
+		if d.Kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
+			continue
+		}
+		for _, r := range d.Routes {
+			out = append(out, r.GetPrefix())
+		}
+	}
+	return out
+}
+
+// The harness runs the daemon's own checks, not a second copy of them. A
+// harness more forgiving than the daemon passes plugins that then go
+// silent in production, which is the one thing it exists to prevent.
+func TestHarnessRefusesWhatTheDaemonWouldRefuse(t *testing.T) {
+	cases := []struct {
+		name  string
+		chunk *v1.PluginApplyChunk
+		kind  v1.PluginApplyKind
+	}{
+		{
+			name: "an advertisement with no next hop",
+			kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE,
+			chunk: &v1.PluginApplyChunk{AdvertisedRoutes: []*v1.PluginAdvertisedRoute{{
+				Family: "vpnv4", Rd: "65000:1", Prefix: "10.0.0.0/24", Srv6Sid: "fd00:2::1",
+			}}},
+		},
+		{
+			name: "a headend mode with nothing behind it",
+			kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
+			chunk: &v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{
+				TriggerPrefix: "10.0.0.0/24", Segments: []string{"fd00:2::1"}, Mode: 200,
+			}}},
+		},
+		{
+			name: "a prefix in the wrong family",
+			kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
+			chunk: &v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{
+				TriggerPrefix: "2001:db8::/32", Segments: []string{"fd00:2::1"},
+			}}},
+		},
+		{
+			name: "a local SID pointing at a built-in slot",
+			kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID,
+			chunk: &v1.PluginApplyChunk{LocalSids: []*v1.PluginLocalSid{{
+				Name: "svc", Locator: "main", Slot: 1,
+			}}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := cplane.ValidateChunk(tc.kind, tc.chunk); err == nil {
+				t.Fatal("the harness accepted a declaration the daemon refuses")
+			}
+		})
+	}
+
+	// And what the daemon accepts still passes.
+	ok := &v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{
+		TriggerPrefix: "10.0.0.0/24", Segments: []string{"fd00:2::1"},
+	}}}
+	if err := cplane.ValidateChunk(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4, ok); err != nil {
+		t.Errorf("a valid declaration was refused: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/urfave/cli/v2"
@@ -37,6 +38,16 @@ func cplaneSubcommand() *cli.Command {
 					&cli.StringFlag{Name: "config", Usage: "Path to the operator config blob handed to the module (optional)"},
 					&cli.StringSliceFlag{Name: "family", Usage: "BGP family to deliver (repeatable); omit for every family"},
 					&cli.StringSliceFlag{
+						Name: "capability",
+						Usage: "What the plugin may do (repeatable): headend, advertise, local_sid. " +
+							"Omit to run it able only to observe and to log",
+					},
+					&cli.UintFlag{
+						Name: "tick-ms",
+						Usage: "Drive the plugin's periodic callback every N milliseconds; " +
+							"omit to leave it undriven, which suits a purely event-driven plugin",
+					},
+					&cli.StringSliceFlag{
 						Name: "behavior",
 						Usage: "SRv6 endpoint behavior codepoint this plugin claims (repeatable, decimal or 0x-prefixed). " +
 							"Routes naming one are withheld from vinbero's own appliers",
@@ -66,6 +77,8 @@ func cplaneSubcommand() *cli.Command {
 							Config:            config,
 							Families:          c.StringSlice("family"),
 							EndpointBehaviors: behaviors,
+							Capabilities:      c.StringSlice("capability"),
+							TickIntervalMs:    uint32(c.Uint("tick-ms")),
 						}))
 					if err != nil {
 						return err
@@ -92,6 +105,111 @@ func cplaneSubcommand() *cli.Command {
 						return err
 					}
 					fmt.Printf("Unregistered control-plane plugin %q\n", c.String("name"))
+					return nil
+				},
+			},
+			{
+				Name:  "stats",
+				Usage: "Report what each plugin is doing and holding",
+				Description: "A sandboxed plugin is otherwise unobservable: one that has fallen\n" +
+					"behind, one restarting in a loop and one with nothing to do all look\n" +
+					"the same from outside. DROPPED, RESTARTS and QUARANTINED are what tell\n" +
+					"them apart; PENDING counts declarations stuck on something that does\n" +
+					"not exist yet, and SINCE is when the running instance started -- a\n" +
+					"plugin restarting in a loop is one whose SINCE keeps moving. The last\n" +
+					"columns show what it owns against its quota.\n\n" +
+					"Plugins the store held that would not start are listed separately:\n" +
+					"they are not running, but the daemon still holds their state and the\n" +
+					"behaviors claimed on their behalf, so routes carrying those reach\n" +
+					"nothing. Use 'forget' once you have decided one is not coming back.",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "name", Usage: "Report one plugin instead of all of them"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					resp, err := clients.Plugin.CplanePluginStats(c.Context,
+						connect.NewRequest(&v1.CplanePluginStatsRequest{Name: c.String("name")}))
+					if err != nil {
+						return err
+					}
+					plugins := resp.Msg.GetPlugins()
+					unrestored := resp.Msg.GetUnrestored()
+					if len(plugins) == 0 && len(unrestored) == 0 {
+						fmt.Println("No control-plane plugins registered")
+						return nil
+					}
+					w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+					if len(plugins) > 0 {
+						if _, err := fmt.Fprintln(w,
+							"NAME\tCAPABILITIES\tBEHAVIORS\tSTATE\tSINCE\tDROPPED\tRESTARTS\tQUARANTINED\tSNAPSHOTS\tPENDING\tHEADEND\tADVERTISED\tSIDS"); err != nil {
+							return err
+						}
+					}
+					for _, p := range plugins {
+						state := "running"
+						if p.GetDead() {
+							// Its state is still installed; it is simply
+							// no longer being fed.
+							state = "stopped"
+						}
+						caps := strings.Join(p.GetCapabilities(), ",")
+						if caps == "" {
+							caps = "-"
+						}
+						if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%d/%d\t%d/%d\n",
+							p.GetName(), caps, formatBehaviors(p.GetEndpointBehaviors()), state,
+							formatSince(p.GetSince().AsTime(), p.GetSince() != nil),
+							p.GetDroppedEvents(), p.GetRestarts(), p.GetQuarantinedEvents(), p.GetSnapshots(),
+							p.GetPendingDeclarations(),
+							p.GetHeadendEntries(), p.GetMaxHeadendEntries(),
+							p.GetAdvertisedRoutes(), p.GetMaxAdvertisedRoutes(),
+							p.GetLocalSids(), p.GetMaxLocalSids()); err != nil {
+							return err
+						}
+					}
+					if err := w.Flush(); err != nil {
+						return err
+					}
+					if len(unrestored) == 0 {
+						return nil
+					}
+					fmt.Println()
+					fmt.Println("Plugins that could not be restored (state and claims still held):")
+					u := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+					if _, err := fmt.Fprintln(u, "NAME\tBEHAVIORS\tSINCE\tREASON"); err != nil {
+						return err
+					}
+					for _, p := range unrestored {
+						if _, err := fmt.Fprintf(u, "%s\t%s\t%s\t%s\n",
+							p.GetName(), formatBehaviors(p.GetEndpointBehaviors()),
+							formatSince(p.GetSince().AsTime(), p.GetSince() != nil),
+							p.GetReason()); err != nil {
+							return err
+						}
+					}
+					return u.Flush()
+				},
+			},
+			{
+				Name:      "forget",
+				Usage:     "Drop a plugin that could not be restored",
+				ArgsUsage: "--name <plugin>",
+				Description: "Releases the endpoint behaviors still claimed on its behalf and\n" +
+					"removes it from the store, so a plugin that will not start stops\n" +
+					"withholding routes from everything else.\n\n" +
+					"The state it left in the maps is not touched: nothing here knows\n" +
+					"what that state was for. Register a working version of the plugin if\n" +
+					"you want it reconciled, or remove the entries by hand.",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "name", Required: true, Usage: "Plugin to forget"},
+				},
+				Action: func(c *cli.Context) error {
+					clients := clientsFromContext(c)
+					if _, err := clients.Plugin.CplanePluginForget(c.Context,
+						connect.NewRequest(&v1.CplanePluginForgetRequest{Name: c.String("name")})); err != nil {
+						return err
+					}
+					fmt.Printf("Forgot control-plane plugin %q\n", c.String("name"))
 					return nil
 				},
 			},
@@ -148,4 +266,34 @@ func parseBehaviorFlags(values []string) ([]uint32, error) {
 		out = append(out, uint32(n))
 	}
 	return out, nil
+}
+
+// formatBehaviors renders claimed codepoints the way an operator writes
+// them, which is hex: they are SID TLV values, and the private range an
+// operator picks from is only recognizable in that base.
+func formatBehaviors(behaviors []uint32) string {
+	if len(behaviors) == 0 {
+		return "-"
+	}
+	out := make([]string, 0, len(behaviors))
+	for _, b := range behaviors {
+		out = append(out, fmt.Sprintf("0x%04X", b))
+	}
+	return strings.Join(out, ",")
+}
+
+// formatSince renders how long the current instance has been up.
+//
+// The age matters more than the timestamp: a plugin restarting in a loop
+// is one whose age keeps resetting, and that is visible at a glance in a
+// column of durations where it is not in a column of clock times.
+func formatSince(t time.Time, ok bool) string {
+	if !ok || t.IsZero() {
+		return "-"
+	}
+	d := time.Since(t).Round(time.Second)
+	if d < 0 {
+		d = 0
+	}
+	return d.String()
 }

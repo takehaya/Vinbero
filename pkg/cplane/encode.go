@@ -72,18 +72,49 @@ func EncodeRouteEvent(ev bgp.RouteEvent) *v1.PluginRoute {
 // A plugin never sees the map layout: it declares segments and a source
 // address, and the layout stays the host's business, so a change to the
 // BPF struct does not break every plugin built against it. defaultSrc is
-// the daemon's configured encap source, used when the plugin leaves the
-// source empty.
-func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (string, *bpf.HeadendEntry, error) {
+// the daemon's encap source, used when the plugin leaves the source empty.
+//
+// An entry with no usable source is refused rather than written with a
+// zero one. A zero source produces packets that go nowhere, and a
+// blackhole that reports success is far harder to diagnose than a
+// declaration that was refused.
+func DecodeHeadendEntry(in *v1.PluginHeadendEntry, af AddressFamily, defaultSrc netip.Addr) (string, *bpf.HeadendEntry, error) {
 	if in == nil {
 		return "", nil, fmt.Errorf("nil headend entry")
 	}
 	if in.GetTriggerPrefix() == "" {
 		return "", nil, fmt.Errorf("headend entry has no trigger prefix")
 	}
-	if _, err := netip.ParsePrefix(in.GetTriggerPrefix()); err != nil {
+	pfx, err := netip.ParsePrefix(in.GetTriggerPrefix())
+	if err != nil {
 		return "", nil, fmt.Errorf("trigger prefix %q: %w", in.GetTriggerPrefix(), err)
 	}
+	// Normalized before it becomes a key. The map is an LPM trie and stores
+	// the masked network, so a declaration spelled 10.0.0.7/24 is written
+	// as 10.0.0.0/24 and read back that way. Leasing and diffing the
+	// unmasked spelling would leave the lease under a key the map never
+	// reports: the owner's own next declaration would not recognize the
+	// entry it just wrote, prune it, write it again, and never release the
+	// lease -- and a second owner spelling it differently would slip past
+	// the lease the first one holds.
+	//
+	// The advertise path does the same thing for the same reason; this is
+	// its counterpart.
+	// The family has to match the map the transaction is for. The caller
+	// picks the map from the transaction's kind, so a prefix of the other
+	// family is an entry that cannot be written -- and the reconcile prunes
+	// before it writes, so the owner's whole set in that family goes first
+	// and the write then fails. It repeats identically on every
+	// declaration, so nothing recovers it.
+	if af == AFv4 && !pfx.Addr().Is4() {
+		return "", nil, fmt.Errorf("trigger prefix %q is not IPv4, and this is a %s declaration",
+			in.GetTriggerPrefix(), af)
+	}
+	if af == AFv6 && pfx.Addr().Is4() {
+		return "", nil, fmt.Errorf("trigger prefix %q is not IPv6, and this is a %s declaration",
+			in.GetTriggerPrefix(), af)
+	}
+	trigger := pfx.Masked().String()
 
 	segments := in.GetSegments()
 	if len(segments) == 0 {
@@ -93,13 +124,22 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 		return "", nil, fmt.Errorf("headend entry for %q declares %d segments, limit %d",
 			in.GetTriggerPrefix(), len(segments), bpf.MaxSegments)
 	}
-	if in.GetMode() > 0xFF {
-		return "", nil, fmt.Errorf("headend entry for %q: mode %d does not fit a byte",
-			in.GetTriggerPrefix(), in.GetMode())
+	// Mode 0 means "the ordinary encapsulation" to a plugin, which is not
+	// the same number the data plane uses: 0 is UNSPECIFIED there, and an
+	// entry carrying it is written but never acted on -- a blackhole that
+	// looks installed. The plugin-facing default stays 0 because a plugin
+	// pairing with its own data-plane half is the only one that should
+	// have to name a mode at all.
+	declared := in.GetMode()
+	if declared == 0 {
+		declared = uint32(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS)
 	}
-
+	if err := validateHeadendMode(declared, af); err != nil {
+		return "", nil, fmt.Errorf("headend entry for %q: %w", in.GetTriggerPrefix(), err)
+	}
+	mode := uint8(declared)
 	entry := &bpf.HeadendEntry{
-		Mode:        uint8(in.GetMode()),
+		Mode:        mode,
 		NumSegments: uint8(len(segments)),
 	}
 	for i, s := range segments {
@@ -128,11 +168,37 @@ func DecodeHeadendEntry(in *v1.PluginHeadendEntry, defaultSrc netip.Addr) (strin
 		}
 		src = parsed
 	}
-	if src.IsValid() {
-		if !src.Is6() {
-			return "", nil, fmt.Errorf("source address of %q is not IPv6", in.GetTriggerPrefix())
-		}
-		entry.SrcAddr = src.As16()
+	if !src.IsValid() {
+		return "", nil, fmt.Errorf("headend entry for %q has no source address and the daemon has no encap source to lend it",
+			in.GetTriggerPrefix())
 	}
-	return in.GetTriggerPrefix(), entry, nil
+	if !src.Is6() {
+		return "", nil, fmt.Errorf("source address of %q is not IPv6", in.GetTriggerPrefix())
+	}
+	entry.SrcAddr = src.As16()
+	return trigger, entry, nil
+}
+
+// validateHeadendMode refuses a mode the data plane has nothing behind.
+//
+// The mode indexes the headend PROG_ARRAY, so a number outside what is
+// there is an entry that looks installed and tail-calls into an empty
+// slot: the packet is dropped and nothing says why. A plugin may name one
+// of vinbero's own behaviors -- ordinary encapsulation is the common case
+// -- or one of the slots reserved for plugins, where its own data-plane
+// half lives. Anything else is a mistake worth refusing at the boundary.
+func validateHeadendMode(mode uint32, af AddressFamily) error {
+	if _, known := v1.Srv6HeadendBehavior_name[int32(mode)]; known &&
+		mode != uint32(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_UNSPECIFIED) {
+		return nil
+	}
+	mapType := bpf.MapTypeHeadendV4
+	if af == AFv6 {
+		mapType = bpf.MapTypeHeadendV6
+	}
+	if err := bpf.ValidatePluginSlot(mapType, mode); err != nil {
+		return fmt.Errorf("mode %d is neither a behavior vinbero implements nor a headend plugin slot: %w",
+			mode, err)
+	}
+	return nil
 }

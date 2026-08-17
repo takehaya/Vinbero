@@ -16,12 +16,25 @@ to the same prefix. The claim is what keeps the two apart.
 
 ## What it does
 
-On every batch of events it receives:
+It runs both halves of the case.
+
+Sending: at startup it asks the daemon for a local SID from a configured
+locator, pointing at the eBPF slot its data-plane half occupies. The daemon
+allocates the address, installs the dispatch entry and tells the plugin
+which address it got -- the plugin names the SID, the daemon chooses the
+value, which is what lets a restarted plugin declare the same name and be
+handed the same address. It then advertises the configured prefix behind
+that SID, naming its own behavior codepoint in the SID TLV.
+
+Receiving, on every batch of events:
 
 - an advertisement carrying the claimed behavior and an SRv6 SID adds a
   headend entry for its prefix, steering into that SID
 - a withdrawal removes it
 - anything else is ignored
+
+Two nodes running this plugin therefore reach each other over a behavior
+neither vinbero nor BGP knows anything about.
 
 It then declares the whole set, not a delta. The daemon diffs the
 declaration against what this plugin already owns and applies the
@@ -44,7 +57,7 @@ or directly:
 
 ```sh
 tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=conservative -panic=trap .
+    -scheduler=none -gc=conservative -panic=trap -no-debug .
 ```
 
 The flags are not incidental.
@@ -56,6 +69,12 @@ it one event batch at a time.
 
 `panic=trap` because a panic is a bug rather than a control-flow tool, and
 the daemon treats a trap as a failed instance to restart.
+
+`no-debug` because TinyGo otherwise embeds the absolute build path in
+DWARF, which makes the committed artifact differ on every machine; with it
+the build is reproducible and the module drops from ~83 KB to ~14 KB. A
+trap then carries no stack info, which costs little: the daemon reports
+the trap either way and a plugin's own diagnostics go through `log`.
 
 `gc=conservative` because a control-plane plugin runs for the life of the
 daemon and sees every route change in the network. TinyGo's default for
@@ -71,11 +90,21 @@ vbctl plugin cplane register \
     --name custom-behavior \
     --wasm plugin.wasm \
     --behavior 0xFE01 \
-    --family vpnv4
+    --family vpnv4 \
+    --capability headend \
+    --capability advertise \
+    --capability local_sid
 
 vbctl plugin cplane list
 vbctl plugin cplane unregister --name custom-behavior
 ```
+
+The capabilities are what this plugin is allowed to do. The daemon links
+only the host functions they cover, so a plugin granted nothing that writes
+cannot reach the apply functions at all; between the kinds of declaration
+the check happens where the transaction is opened, because those functions
+are shared. A receive-only deployment of this same plugin needs
+`--capability headend` alone.
 
 Registering the same name again upgrades in place: the entries the running
 instance wrote stay, and the new module reconciles over them. Unregistering
@@ -83,17 +112,34 @@ is the deliberate removal and takes the plugin's entries with it.
 
 ## Configuration
 
-The config blob is a bare varint holding the codepoint to claim, so one
-build serves deployments that numbered their behavior differently:
+The config blob is this plugin's own protobuf message, which the daemon
+does not interpret. It carries everything that differs between
+deployments, so one build serves all of them:
 
-```sh
-printf '\202\374\003' > behavior.bin   # 0xFE02
-vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
-    --config behavior.bin --behavior 0xFE02
-```
+| field | meaning |
+|---|---|
+| 1 | the endpoint behavior codepoint to claim |
+| 2 | the locator to take a local SID from |
+| 3 | the prefix to advertise behind that SID |
+| 4 | the route distinguisher to advertise it with |
+| 5 | the eBPF slot the SID dispatches to |
+| 6 | a SID to advertise as given, instead of allocating one |
+| 7 | the next hop to advertise the prefix with |
 
-A plugin with more than one knob would define a protobuf message and encode
-that; a whole message for a single number would be ceremony.
+There are three ways to run it, and the config picks between them:
+
+- **Allocating.** Set the locator and the slot. The plugin asks the host
+  for a SID, is told the address, and advertises the prefix behind it.
+- **Advertising a SID it was given.** Set field 6 instead. Nothing is
+  allocated and the locator and the slot are not needed: the address
+  already exists, and something else put it in the data plane.
+- **Receive-only.** Set neither field 6 nor a locator and slot. The plugin
+  originates nothing and only acts on routes carrying its behavior, which
+  is a perfectly ordinary way to run it.
+
+Fields 3, 4 and 7 are what the advertisement is made of, so the two
+advertising modes need all three. The daemon refuses an advertisement with
+no next hop rather than guessing one.
 
 ## Notes on the code
 

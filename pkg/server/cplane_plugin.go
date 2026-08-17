@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"connectrpc.com/connect"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bgp/demux"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
@@ -23,6 +27,13 @@ type CplaneManager interface {
 	Register(ctx context.Context, reg cplane.Registration) error
 	Unregister(ctx context.Context, name string) error
 	List() []string
+	Stats() []cplane.PluginStats
+	StatsFor(name string) (cplane.PluginStats, bool)
+	// Unrestored and Forget cover the plugins the store held that would
+	// not start: they are not running, so nothing else here reports them,
+	// yet the daemon still holds their state and their claims.
+	Unrestored() []cplane.UnrestoredPlugin
+	Forget(name string) error
 }
 
 // SetCplaneManager installs the manager. Call before Setup, like the other
@@ -61,13 +72,19 @@ func (s *PluginServer) CplanePluginRegister(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	caps, err := wasm.ParseCapabilities(msg.GetCapabilities())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
 
 	reg := cplane.Registration{
-		Name:      msg.GetName(),
-		Module:    msg.GetWasm(),
-		Config:    msg.GetConfig(),
-		Families:  families,
-		Behaviors: behaviors,
+		Name:         msg.GetName(),
+		Module:       msg.GetWasm(),
+		Config:       msg.GetConfig(),
+		Families:     families,
+		Behaviors:    behaviors,
+		Capabilities: caps,
+		TickInterval: time.Duration(msg.GetTickIntervalMs()) * time.Millisecond,
 	}
 	if err := s.cplane.Register(ctx, reg); err != nil {
 		return nil, cplaneRPCError(err)
@@ -113,6 +130,94 @@ func (s *PluginServer) CplanePluginList(
 	return connect.NewResponse(&v1.CplanePluginListResponse{Plugins: out}), nil
 }
 
+// CplanePluginStats reports what each running plugin is doing and
+// holding.
+func (s *PluginServer) CplanePluginStats(
+	_ context.Context,
+	req *connect.Request[v1.CplanePluginStatsRequest],
+) (*connect.Response[v1.CplanePluginStatsResponse], error) {
+	if s.cplane == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented,
+			errors.New("control-plane plugins are not enabled on this daemon"))
+	}
+	var stats []cplane.PluginStats
+	if name := req.Msg.GetName(); name != "" {
+		one, ok := s.cplane.StatsFor(name)
+		if !ok {
+			return nil, connect.NewError(connect.CodeNotFound,
+				fmt.Errorf("plugin %q is not registered", name))
+		}
+		stats = []cplane.PluginStats{one}
+	} else {
+		stats = s.cplane.Stats()
+	}
+
+	out := make([]*v1.CplanePluginStat, 0, len(stats))
+	for _, st := range stats {
+		behaviors := make([]uint32, 0, len(st.Behaviors))
+		for _, b := range st.Behaviors {
+			behaviors = append(behaviors, uint32(b))
+		}
+		out = append(out, &v1.CplanePluginStat{
+			Name:                st.Name,
+			Capabilities:        st.Capabilities,
+			EndpointBehaviors:   behaviors,
+			DroppedEvents:       st.DroppedEvents,
+			Restarts:            uint32(st.Restarts),
+			QuarantinedEvents:   st.Quarantined,
+			Snapshots:           st.Snapshots,
+			Dead:                st.Dead,
+			HeadendEntries:      uint32(st.HeadendEntries),
+			AdvertisedRoutes:    uint32(st.AdvertisedRoutes),
+			LocalSids:           uint32(st.LocalSIDs),
+			MaxHeadendEntries:   uint32(st.Quotas.MaxHeadendEntries),
+			MaxAdvertisedRoutes: uint32(st.Quotas.MaxAdvertisedRoutes),
+			MaxLocalSids:        uint32(st.Quotas.MaxLocalSIDs),
+			Since:               timestamppb.New(st.Since),
+			PendingDeclarations: uint32(st.PendingDeclarations),
+		})
+	}
+
+	// The plugins that would not start go out alongside the running ones.
+	// The daemon is still holding their state and their claims, and a
+	// response that showed only what is running would let an operator
+	// conclude they are simply gone.
+	var unrestored []*v1.UnrestoredCplanePlugin
+	if req.Msg.GetName() == "" {
+		for _, u := range s.cplane.Unrestored() {
+			behaviors := make([]uint32, 0, len(u.Behaviors))
+			for _, b := range u.Behaviors {
+				behaviors = append(behaviors, uint32(b))
+			}
+			unrestored = append(unrestored, &v1.UnrestoredCplanePlugin{
+				Name:              u.Name,
+				EndpointBehaviors: behaviors,
+				Reason:            u.Reason,
+				Since:             timestamppb.New(u.Since),
+			})
+		}
+	}
+	return connect.NewResponse(&v1.CplanePluginStatsResponse{
+		Plugins:    out,
+		Unrestored: unrestored,
+	}), nil
+}
+
+// CplanePluginForget drops a plugin the store held that would not start.
+func (s *PluginServer) CplanePluginForget(
+	_ context.Context,
+	req *connect.Request[v1.CplanePluginForgetRequest],
+) (*connect.Response[v1.CplanePluginForgetResponse], error) {
+	if s.cplane == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented,
+			errors.New("control-plane plugins are not enabled on this daemon"))
+	}
+	if err := s.cplane.Forget(req.Msg.GetName()); err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, err)
+	}
+	return connect.NewResponse(&v1.CplanePluginForgetResponse{}), nil
+}
+
 // parseFamilies validates the operator-facing family names.
 func parseFamilies(names []string) ([]bgp.Family, error) {
 	if len(names) == 0 {
@@ -151,10 +256,20 @@ func parseBehaviors(codepoints []uint32) ([]uint16, error) {
 // everything else is the daemon's.
 func cplaneRPCError(err error) error {
 	switch {
-	case errors.Is(err, wasm.ErrAdmission):
+	case errors.Is(err, wasm.ErrAdmission),
+		errors.Is(err, demux.ErrUnclaimable),
+		errors.Is(err, bpf.ErrBundleNameInvalid),
+		errors.Is(err, bpf.ErrBundleNameTooLong):
+		// The module, the codepoint or the name is wrong, and the caller
+		// is holding all three.
 		return connect.NewError(connect.CodeInvalidArgument, err)
-	case errors.Is(err, cplane.ErrLeaseHeld):
+	case errors.Is(err, cplane.ErrLeaseHeld),
+		errors.Is(err, demux.ErrBehaviorHeld):
+		// Nothing is wrong with the request; something else holds what it
+		// asked for, and the caller decides what gives.
 		return connect.NewError(connect.CodeFailedPrecondition, err)
+	case errors.Is(err, cplane.ErrPluginNotRegistered):
+		return connect.NewError(connect.CodeNotFound, err)
 	default:
 		return connect.NewError(connect.CodeInternal, err)
 	}

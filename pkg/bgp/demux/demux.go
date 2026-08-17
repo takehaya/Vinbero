@@ -303,6 +303,77 @@ func (d *Demux) SnapshotTo(families []bgp.Family, h bgp.RouteHandler) error {
 	return nil
 }
 
+// RetractClaimedFromBuiltins tells Vinbero's own appliers to drop every
+// route in the rib whose behavior is now claimed.
+//
+// A claim only decides where later routes go. A route that arrived before
+// the claim existed has already been handed to the built-in appliers,
+// which read a codepoint they do not implement as an ordinary service SID
+// and install it under their own owner -- so the plugin's write to that
+// same prefix is then refused for owner mismatch, and the entry with the
+// wrong meaning is the one left carrying traffic. The claim has to reach
+// back over what already happened, and a withdrawal is how the appliers
+// are told to let go: it is the same path an ordinary withdraw takes, so
+// nothing here needs to know how each of them stores what it installed.
+//
+// Withdrawing what an applier does not hold is a no-op, so this is safe to
+// call whenever the claimed set grows, including when it changes nothing.
+func (d *Demux) RetractClaimedFromBuiltins() {
+	d.mu.RLock()
+	claims := d.claims
+	d.mu.RUnlock()
+	if d.lister == nil || claims == nil {
+		return
+	}
+
+	d.mu.Lock()
+	builtins := make([]*consumer, 0, len(d.consumers))
+	for _, c := range d.consumers {
+		if c.builtin {
+			builtins = append(builtins, c)
+		}
+	}
+	started := d.started
+	d.mu.Unlock()
+	if !started || len(builtins) == 0 {
+		return
+	}
+
+	var retracted int
+	for _, fam := range allFamilies() {
+		err := d.lister.ListRoutes(fam, func(ev bgp.RouteEvent) {
+			if ev.Source.IsLocal() || ev.IsWithdraw {
+				return
+			}
+			// Read the registry rather than isClaimed: this is not a
+			// delivery, and recording it in the withdrawal ledger would
+			// claim a path the appliers are being told to forget.
+			if !claims.IsClaimed(ev.EndpointBehavior) {
+				return
+			}
+			gone := ev
+			gone.IsWithdraw = true
+			for _, c := range builtins {
+				if len(c.families) > 0 {
+					if _, want := c.families[ev.Family]; !want {
+						continue
+					}
+				}
+				c.handler(gone)
+			}
+			retracted++
+		})
+		if err != nil {
+			d.logger.Warn("listing routes to retract from the built-in appliers",
+				zap.String("family", string(fam)), zap.Error(err))
+		}
+	}
+	if retracted > 0 {
+		d.logger.Info("retracted routes from the built-in appliers because their behavior is now claimed",
+			zap.Int("routes", retracted))
+	}
+}
+
 // BuiltinSnapshotHandler wraps h with the same rules the demux applies to
 // its own delivery, for a snapshot a built-in consumer pulls on demand
 // rather than receiving through the demux.

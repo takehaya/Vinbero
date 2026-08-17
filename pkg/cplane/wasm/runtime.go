@@ -103,6 +103,7 @@ type HostOps interface {
 // identity is not a parameter it can forge, it is bound at link time.
 type Instance struct {
 	name     string
+	caps     Capabilities
 	limits   Limits
 	logger   *zap.Logger
 	ops      HostOps
@@ -113,6 +114,14 @@ type Instance struct {
 	mu     sync.Mutex
 	mod    api.Module
 	closed bool
+
+	// logMu guards the log rate limiter below. The guest can write from
+	// any call, and calls are serialized, but the tick and the event path
+	// reach this through different goroutines over an instance's life.
+	logMu      sync.Mutex
+	logWindow  time.Time
+	logCount   int
+	logDropped int
 
 	// callMu serializes every call into the guest.
 	//
@@ -141,8 +150,31 @@ type Config struct {
 	Limits Limits
 	// Ops is the capability surface host functions call into.
 	Ops HostOps
+	// Capabilities are what this plugin was granted. Only the host
+	// functions they cover are linked, so an ungranted one is not a call
+	// that fails but a function the module cannot reach.
+	Capabilities Capabilities
 	// Logger receives the runtime's own messages and the plugin's.
 	Logger *zap.Logger
+}
+
+// Merge fills this limit set's zero fields from other, so a daemon-wide
+// default can stand behind a per-plugin one without either having to know
+// about the other.
+func (l Limits) Merge(over Limits) Limits {
+	if over.MaxModuleBytes != 0 {
+		l.MaxModuleBytes = over.MaxModuleBytes
+	}
+	if over.MaxMemoryPages != 0 {
+		l.MaxMemoryPages = over.MaxMemoryPages
+	}
+	if over.CallTimeout != 0 {
+		l.CallTimeout = over.CallTimeout
+	}
+	if over.MaxBufferBytes != 0 {
+		l.MaxBufferBytes = over.MaxBufferBytes
+	}
+	return l
 }
 
 // Instantiate compiles, admits, and starts a plugin module.
@@ -179,6 +211,7 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 
 	inst := &Instance{
 		name:    cfg.Name,
+		caps:    cfg.Capabilities,
 		limits:  limits,
 		logger:  logger,
 		ops:     cfg.Ops,
@@ -193,7 +226,7 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	}
 	inst.compiled = compiled
 
-	if err := admit(compiled); err != nil {
+	if err := admit(compiled, cfg.Capabilities); err != nil {
 		_ = rt.Close(ctx)
 		return nil, err
 	}
@@ -205,10 +238,18 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	// WithStartFunctions() clears the default _start: a reactor-style
 	// plugin has no main, and running one before the host is ready would
 	// execute guest code outside any call budget.
+	//
+	// It does not cover the WebAssembly start section, which the spec has
+	// the runtime invoke during instantiation itself. That is guest code
+	// too, so instantiation runs under the same call budget as any other
+	// call: without it a module whose start section loops forever hangs
+	// registration, and the operator's RPC never returns.
 	modCfg := wazero.NewModuleConfig().
 		WithName(cfg.Name).
 		WithStartFunctions()
-	mod, err := rt.InstantiateModule(ctx, compiled, modCfg)
+	instCtx, cancelInst := inst.callContext(ctx)
+	mod, err := rt.InstantiateModule(instCtx, compiled, modCfg)
+	cancelInst()
 	if err != nil {
 		_ = rt.Close(ctx)
 		return nil, fmt.Errorf("wasm: instantiate %q: %w", cfg.Name, err)
@@ -239,12 +280,16 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	}
 	logger.Info("control-plane plugin instantiated",
 		zap.Int("module_bytes", len(cfg.Module)),
-		zap.Int("config_bytes", len(cfg.ConfigBlob)))
+		zap.Int("config_bytes", len(cfg.ConfigBlob)),
+		zap.Strings("capabilities", cfg.Capabilities.Names()))
 	return inst, nil
 }
 
 // Name is the plugin's identity.
 func (i *Instance) Name() string { return i.name }
+
+// Capabilities are what this plugin was granted.
+func (i *Instance) Capabilities() Capabilities { return i.caps }
 
 // Close tears the instance and its runtime down. Safe to call twice.
 func (i *Instance) Close(ctx context.Context) error {
@@ -338,6 +383,10 @@ func (i *Instance) HandleEvents(ctx context.Context, batch []byte) ([]byte, erro
 		return nil, nil
 	}
 	if int(length) > i.limits.MaxBufferBytes {
+		// Give the region back even though the call failed: a plugin that
+		// keeps returning an oversized status would otherwise leak its own
+		// linear memory once per batch until its allocator gives up.
+		i.freeGuest(ctx, ptr, length)
 		return nil, fmt.Errorf("wasm: %s returned %d bytes, limit %d",
 			ExportHandleEvents, length, i.limits.MaxBufferBytes)
 	}

@@ -179,6 +179,16 @@ type VPNRoute struct {
 	// or 0 when the route carries none. A non-zero color requests
 	// auto-steering onto the SR Policy keyed by {Color, NextHop}.
 	Color uint32
+	// EndpointBehavior overrides the SRv6 endpoint behavior codepoint put
+	// in the SID TLV when advertising. Zero takes the family's default,
+	// which is what vinbero's own advertisements use: End.DT4 for VPNv4
+	// and End.DT6 for VPNv6.
+	//
+	// It exists for a plugin advertising a behavior of its own. Such a
+	// behavior is a codepoint inside the SID TLV rather than a family, so
+	// this one field is all that stands between an operator's own
+	// behavior and having to extend BGP.
+	EndpointBehavior uint16
 }
 
 // Key returns the RouteKey that identifies this VPN route for withdrawal.

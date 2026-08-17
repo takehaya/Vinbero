@@ -91,6 +91,17 @@ func (r *recordingOps) snapshot() ([]string, [][]byte, []uint64, []uint64) {
 func instantiate(t *testing.T, name string, cfg Config) (*Instance, error) {
 	t.Helper()
 	cfg.Module = fixture(t, name)
+	if cfg.Capabilities == nil {
+		// Most tests are not about the gate, so they run with everything
+		// granted. The ones that are about it pass a set explicitly.
+		caps, err := ParseCapabilities([]string{
+			string(CapHeadend), string(CapAdvertise), string(CapLocalSID),
+		})
+		if err != nil {
+			t.Fatalf("default capabilities: %v", err)
+		}
+		cfg.Capabilities = caps
+	}
 	if cfg.Name == "" {
 		cfg.Name = name
 	}
@@ -425,5 +436,61 @@ func TestABIVersionMismatchIsRejected(t *testing.T) {
 				t.Fatalf("error = %v, want ErrAdmission", err)
 			}
 		})
+	}
+}
+
+// The WebAssembly start section runs during instantiation, before the host
+// has called anything. WithStartFunctions() does not cover it, so without
+// a budget on instantiation itself a module that loops there hangs the
+// registration RPC forever rather than being refused.
+func TestStartSectionCannotHangRegistration(t *testing.T) {
+	start := time.Now()
+	inst, err := Instantiate(context.Background(), Config{
+		Name:   "spinstart",
+		Module: fixture(t, "spinstart"),
+		Limits: Limits{CallTimeout: 50 * time.Millisecond},
+		Ops:    &recordingOps{},
+	})
+	if err == nil {
+		_ = inst.Close(context.Background())
+		t.Fatal("a module whose start section loops forever was instantiated")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("instantiation took %s to give up; the start section is running unbudgeted", elapsed)
+	}
+}
+
+// A host function imported with the right arity but the wrong types has to
+// be refused as a bad module. wazero's linker would refuse it too, but as
+// a link failure -- and the caller who can fix it would be told the host
+// broke instead.
+func TestImportWithWrongTypesIsRefusedAsAdmission(t *testing.T) {
+	_, err := Instantiate(context.Background(), Config{
+		Name:         "badimport",
+		Module:       fixture(t, "badimport"),
+		Capabilities: Capabilities{CapHeadend: {}},
+		Ops:          &recordingOps{},
+	})
+	if err == nil {
+		t.Fatal("a module importing apply_begin with the wrong types was admitted")
+	}
+	if !errors.Is(err, ErrAdmission) {
+		t.Fatalf("error = %v, want ErrAdmission", err)
+	}
+}
+
+// The reactor initializer is called with no arguments, so one exported
+// under any other shape is a module defect, catchable before it runs.
+func TestInitializerWithArgumentsIsRefused(t *testing.T) {
+	_, err := Instantiate(context.Background(), Config{
+		Name:   "badinit",
+		Module: fixture(t, "badinit"),
+		Ops:    &recordingOps{},
+	})
+	if err == nil {
+		t.Fatal("a module exporting _initialize with a parameter was admitted")
+	}
+	if !errors.Is(err, ErrAdmission) {
+		t.Fatalf("error = %v, want ErrAdmission", err)
 	}
 }

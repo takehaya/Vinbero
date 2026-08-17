@@ -1,0 +1,91 @@
+# containerlab topology for the cplane-plugin-2site scenario.
+#
+# What is under test is a control-plane plugin: a WebAssembly module an
+# operator loads into vinberod, which claims an SRv6 endpoint behavior of
+# its own and turns routes carrying it into forwarding state.
+#
+#   ce-tokyo --- pe-tokyo ===== core ===== pe-osaka --- ce-osaka
+#  10.1.0.0/24  (receiving   (IPv6 core)  (advertising  10.2.0.0/24
+#                 plugin)                    plugin)
+#
+# Both PEs run Vinbero, unlike the other scenarios here, because a plugin
+# has to be present at both ends of the conversation it is having: one
+# side originates a route carrying its own behavior codepoint, and the
+# other side's plugin is what gives that codepoint meaning. There is no
+# third-party implementation to interoperate with, because no such
+# codepoint exists outside this pair -- that is the point of it.
+#
+# The direction under test is ce-tokyo -> ce-osaka:
+#
+#   * pe-osaka's plugin advertises 10.2.0.0/24 with the SID
+#     fd00:200:0:1:: and the behavior codepoint 0xFE01 in the SID TLV.
+#   * pe-tokyo's plugin claims 0xFE01, so vinbero's own applier never
+#     sees that route; the plugin declares the headend entry instead.
+#   * traffic from ce-tokyo is therefore steered by state that exists
+#     only because a plugin put it there.
+#
+# The return direction is a plain L3VPN route with no plugin involved, so
+# a failure in one direction points at the plugin and a failure in both
+# points at the lab.
+name: cplane-plugin-2site
+
+topology:
+  nodes:
+    # --- ce-tokyo: customer host behind the receiving PE --------------------
+    ce-tokyo:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.1.0.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace 10.2.0.0/24 via 10.1.0.1
+
+    # --- pe-tokyo: Vinbero PE whose plugin receives the behavior ------------
+    pe-tokyo:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - vinbero-tokyo/vinbero.yml:/vinbero.yml
+        - vinbero-tokyo/start.sh:/start.sh
+        # The plugin is the committed build artifact from the SDK example,
+        # so the lab runs exactly what `make cplane-example` produces.
+        - ../../../../sdk/examples/cplane-custom-behavior/plugin.wasm:/plugin.wasm
+      exec:
+        - bash /start.sh
+
+    # --- core: provider backbone, plain IPv6 router -------------------------
+    core:
+      kind: linux
+      image: alpine:3.20
+      binds:
+        - core/start.sh:/start.sh
+      exec:
+        - sh /start.sh
+
+    # --- pe-osaka: Vinbero PE whose plugin advertises the behavior ----------
+    pe-osaka:
+      kind: linux
+      image: vinbero-interop:latest
+      binds:
+        - vinbero-osaka/vinbero.yml:/vinbero.yml
+        - vinbero-osaka/start.sh:/start.sh
+        - ../../../../sdk/examples/cplane-custom-behavior/plugin.wasm:/plugin.wasm
+      exec:
+        - bash /start.sh
+
+    # --- ce-osaka: customer host behind the advertising PE -----------------
+    ce-osaka:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.2.0.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace 10.1.0.0/24 via 10.2.0.1
+
+  links:
+    # CE <-> PE customer-facing ports.
+    - endpoints: [ce-tokyo:eth1, pe-tokyo:eth2]
+    - endpoints: [ce-osaka:eth1, pe-osaka:eth2]
+    # Provider underlay: pe-tokyo <-> core <-> pe-osaka.
+    - endpoints: [pe-tokyo:eth1, core:eth1]
+    - endpoints: [core:eth2, pe-osaka:eth1]

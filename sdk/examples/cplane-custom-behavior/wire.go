@@ -56,9 +56,15 @@ func (r *reader) tag() (field int, wire int, ok bool) {
 }
 
 // bytes reads a length-delimited field.
+//
+// The length is compared before it is narrowed to int. This target is
+// 32-bit, so a length near 2^31 would wrap negative on conversion, pass a
+// bounds check written the other way round, and then trap in the slice
+// expression -- turning a malformed message from the host, or an
+// operator's mistyped config blob, into a dead instance.
 func (r *reader) bytes() ([]byte, bool) {
 	n, ok := r.varint()
-	if !ok || r.pos+int(n) > len(r.buf) {
+	if !ok || n > uint64(len(r.buf)-r.pos) {
 		return nil, false
 	}
 	out := r.buf[r.pos : r.pos+int(n)]

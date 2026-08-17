@@ -34,25 +34,99 @@ const (
 	// PluginEventBatch
 	fieldBatchEvents = 1
 	// PluginEvent
-	fieldEventKind  = 1
-	fieldEventRoute = 3
+	fieldEventKind     = 1
+	fieldEventRoute    = 3
+	fieldEventLocalSid = 7
 	// PluginRoute
 	fieldRouteIsWithdraw       = 2
+	fieldRoutePeer             = 3
+	fieldRoutePathID           = 4
 	fieldRouteEndpointBehavior = 5
 	fieldRoutePrefix           = 7
 	fieldRouteSrv6Sid          = 8
+	// PluginLocalSidAllocated
+	fieldAllocatedName = 1
+	fieldAllocatedSid  = 2
 	// PluginApplyChunk
-	fieldChunkHeadendEntries = 1
+	fieldChunkHeadendEntries  = 1
+	fieldChunkAdvertisedRoute = 2
+	fieldChunkLocalSids       = 3
 	// PluginHeadendEntry
 	fieldEntryTriggerPrefix = 1
 	fieldEntrySegments      = 2
+	// PluginAdvertisedRoute
+	fieldAdvFamily   = 1
+	fieldAdvRD       = 2
+	fieldAdvPrefix   = 3
+	fieldAdvSID      = 4
+	fieldAdvBehavior = 5
+	fieldAdvNextHop  = 7
+	// PluginLocalSid
+	fieldLocalSidName    = 1
+	fieldLocalSidLocator = 2
+	fieldLocalSidSlot    = 3
+	// The example's own config message.
+	fieldConfigBehavior = 1
+	fieldConfigLocator  = 2
+	fieldConfigPrefix   = 3
+	fieldConfigRD       = 4
+	fieldConfigSlot     = 5
+	fieldConfigAdvSID   = 6
+	fieldConfigNextHop  = 7
 )
 
 // PluginEventKind values this plugin acts on.
-const eventKindRoute = 1
+const (
+	eventKindRoute         = 1
+	eventKindEndOfReplay   = 3
+	eventKindLocalSID      = 5
+	eventKindStartOfReplay = 6
+)
 
 // PluginApplyKind values.
-const applyKindHeadendV4 = 1
+const (
+	applyKindHeadendV4 = 1
+	applyKindAdvertise = 3
+	applyKindLocalSID  = 4
+)
+
+// localSIDName is what this plugin calls the SID it asks for. The host
+// picks the address; the name is how this plugin recognizes it, and how a
+// redeclaration after a restart is known to mean the same one.
+const localSIDName = "self"
+
+// The deployment-specific half of what this plugin does: which locator to
+// take its SID from, which prefix to advertise behind it, and which slot
+// its data-plane half occupies. All of it comes from the config blob, so
+// one build serves every deployment.
+var (
+	locatorName   string
+	advertiseRD   string
+	advertisePfx  string
+	dataPlaneSlot uint64
+	// allocatedSID is the address the host gave this plugin, empty until
+	// the local-SID event arrives.
+	allocatedSID string
+	// configuredSID is a SID an operator provisioned outside the plugin.
+	//
+	// A plugin that ships its own data-plane half asks the host for a SID
+	// and is told the address. One that fronts a behavior the operator
+	// provisioned -- an existing endpoint on this node -- is simply told
+	// which address to advertise. Both are real deployments, and a plugin
+	// that only supported the first could not be used for the second.
+	configuredSID string
+	// advertiseNextHop is where peers are told to send the traffic. The
+	// daemon cannot guess it -- the encap source is a locator address, not
+	// necessarily this node's BGP transport address -- so the operator
+	// supplies it.
+	advertiseNextHop string
+	// headendRefused records that the host would not open a headend
+	// transaction, which is how a plugin discovers it was not granted that
+	// capability: there is nothing to ask, only a refusal to notice. An
+	// advertise-only deployment of this plugin would otherwise try once
+	// per replay and log every time.
+	headendRefused bool
+)
 
 // Log levels, matching the host's.
 const (
@@ -84,11 +158,40 @@ func hostApplyAbort(generation int64)
 // numbered their behavior differently.
 var claimedBehavior uint64 = 0xFE01
 
-// steered is the set this plugin currently wants installed: prefix to the
-// SID traffic for it should be steered into. It is the plugin's whole
-// state, and it is rebuilt from replayed routes after a restart rather
-// than persisted.
-var steered = map[string]string{}
+// steered is the set this plugin currently wants installed: for each
+// prefix, the SID each path offering it was advertised with. It is the
+// plugin's whole state, and it is rebuilt from replayed routes after a
+// restart rather than persisted.
+//
+// The inner key is the path, not just the prefix. Behind a pair of route
+// reflectors, or with ADD-PATH, one prefix arrives as several paths and is
+// withdrawn several times; collapsing them onto the prefix would let the
+// first withdrawal delete a prefix the other path still offers, and the
+// traffic for it would stop with nothing left to say why. The prefix is
+// steered while any path for it remains.
+var steered = map[string]map[string]string{}
+
+// pathKey identifies one path of an NLRI. A withdrawal carries the peer
+// and path id, which is what makes this usable as the key.
+func pathKey(peer string, pathID uint64) string {
+	return peer + "#" + itoa(pathID)
+}
+
+// itoa renders a small unsigned number without pulling in strconv, which
+// the -no-debug TinyGo build would rather not carry.
+func itoa(v uint64) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
+}
 
 // allocations keeps host-owned buffers alive.
 //
@@ -128,17 +231,65 @@ func configure(ptr, length int32) int32 {
 	if length == 0 {
 		return 0
 	}
-	// The config is a bare varint: the behavior codepoint to claim. A
-	// plugin with more to configure would define its own message; this one
-	// has exactly one knob and a whole message for it would be ceremony.
+	// The config is this plugin's own protobuf message. The host does not
+	// interpret it: a plugin defines whatever shape it needs and the
+	// operator supplies the encoded bytes.
 	r := &reader{buf: view(ptr, length)}
-	v, ok := r.varint()
-	if !ok || v == 0 || v > 0xFFFF {
-		logf(logWarn, "ignoring an unusable config blob")
-		return 1
+	for !r.eof() {
+		field, wire, ok := r.tag()
+		if !ok {
+			logf(logWarn, "ignoring an unusable config blob")
+			return 1
+		}
+		switch {
+		case field == fieldConfigBehavior && wire == wireVarint:
+			var v uint64
+			v, ok = r.varint()
+			if ok && v > 0 && v <= 0xFFFF {
+				claimedBehavior = v
+			}
+		case field == fieldConfigLocator && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			locatorName = string(b)
+		case field == fieldConfigPrefix && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			advertisePfx = string(b)
+		case field == fieldConfigRD && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			advertiseRD = string(b)
+		case field == fieldConfigSlot && wire == wireVarint:
+			dataPlaneSlot, ok = r.varint()
+		case field == fieldConfigAdvSID && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			configuredSID = string(b)
+		case field == fieldConfigNextHop && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			advertiseNextHop = string(b)
+		default:
+			ok = r.skip(wire)
+		}
+		if !ok {
+			logf(logWarn, "ignoring an unusable config blob")
+			return 1
+		}
 	}
-	claimedBehavior = v
-	logf(logInfo, "claiming behavior from config")
+	logf(logInfo, "configured")
+	if configuredSID != "" {
+		// The address was given rather than allocated, so there is nothing
+		// to wait for.
+		allocatedSID = configuredSID
+		advertiseSelf()
+		return 0
+	}
+	// Asking for the local SID here is what starts the sequence: the host
+	// allocates it, tells this plugin the address, and only then can it
+	// advertise anything.
+	declareLocalSID()
 	return 0
 }
 
@@ -185,8 +336,9 @@ func onTick(nowNs int64) {}
 func applyEvent(body []byte) bool {
 	r := &reader{buf: body}
 	var (
-		kind  uint64
-		route []byte
+		kind     uint64
+		route    []byte
+		localSID []byte
 	)
 	for !r.eof() {
 		field, wire, ok := r.tag()
@@ -198,6 +350,8 @@ func applyEvent(body []byte) bool {
 			kind, ok = r.varint()
 		case field == fieldEventRoute && wire == wireBytes:
 			route, ok = r.bytes()
+		case field == fieldEventLocalSid && wire == wireBytes:
+			localSID, ok = r.bytes()
 		default:
 			ok = r.skip(wire)
 		}
@@ -205,10 +359,152 @@ func applyEvent(body []byte) bool {
 			return false
 		}
 	}
-	if kind != eventKindRoute || route == nil {
+	switch kind {
+	case eventKindRoute:
+		if route == nil {
+			return false
+		}
+		return applyRoute(route)
+	case eventKindStartOfReplay:
+		// Everything known from this source is stale: a replay says what
+		// exists and cannot say what stopped existing, so a route
+		// withdrawn while this plugin was not listening would otherwise
+		// stay declared forever. Dropping the view here makes the replay
+		// that follows a repair rather than a merge.
+		//
+		// Nothing is declared yet -- the empty set would blackhole the
+		// traffic for the moment the replay takes. The declaration comes
+		// at the end of it.
+		steered = map[string]map[string]string{}
+		logf(logInfo, "replay starting; dropped what was known")
+		return false
+	case eventKindEndOfReplay:
+		// The host has finished telling this instance what the network
+		// looks like. Declare unconditionally, even if nothing changed.
+		//
+		// After a restart the host keeps the entries the previous
+		// instance installed, and this instance knows nothing about them.
+		// If the replay brings back no matching route -- everything was
+		// withdrawn while it was down, or this node simply has none --
+		// then without declaring here the stale entries are never pruned
+		// and blackhole until an unrelated route happens to arrive.
+		return true
+	case eventKindLocalSID:
+		if localSID == nil {
+			return false
+		}
+		applyLocalSID(localSID)
+		return false // it changes what is advertised, not what is steered
+	default:
 		return false
 	}
-	return applyRoute(route)
+}
+
+// applyLocalSID records the address the host allocated and advertises the
+// prefix behind it.
+//
+// This is the point the whole sequence was for: the plugin now has an
+// address of its own, pointing at its own data-plane half, and can tell
+// its peers to send traffic for the configured prefix to it -- naming its
+// own behavior codepoint in the SID TLV, which is what makes the far end
+// hand the route to the plugin there rather than to vinbero's appliers.
+func applyLocalSID(body []byte) {
+	r := &reader{buf: body}
+	var name, sid string
+	for !r.eof() {
+		field, wire, ok := r.tag()
+		if !ok {
+			return
+		}
+		switch {
+		case field == fieldAllocatedName && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			name = string(b)
+		case field == fieldAllocatedSid && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			sid = string(b)
+		default:
+			ok = r.skip(wire)
+		}
+		if !ok {
+			return
+		}
+	}
+	if name != localSIDName || sid == "" {
+		return
+	}
+	allocatedSID = sid
+	logf(logInfo, "allocated local SID "+sid)
+	advertiseSelf()
+}
+
+// declareLocalSID asks the host for an address pointing at this plugin's
+// data-plane slot.
+func declareLocalSID() {
+	if locatorName == "" || dataPlaneSlot == 0 {
+		// Nothing was configured, so this deployment only wants the
+		// receive side. That is a perfectly ordinary way to run.
+		return
+	}
+	var entry writer
+	entry.putString(fieldLocalSidName, localSIDName)
+	entry.putString(fieldLocalSidLocator, locatorName)
+	entry.putTag(fieldLocalSidSlot, wireVarint)
+	entry.putVarint(dataPlaneSlot)
+
+	var chunk writer
+	chunk.putMessage(fieldChunkLocalSids, entry.buf)
+	commit(applyKindLocalSID, chunk.buf)
+}
+
+// advertiseSelf declares the routes this plugin wants originated: the
+// configured prefix, reachable at the SID it was given, named with its own
+// behavior codepoint.
+func advertiseSelf() {
+	if allocatedSID == "" || advertisePfx == "" || advertiseRD == "" {
+		return
+	}
+	var route writer
+	route.putString(fieldAdvFamily, "vpnv4")
+	route.putString(fieldAdvRD, advertiseRD)
+	route.putString(fieldAdvPrefix, advertisePfx)
+	route.putString(fieldAdvSID, allocatedSID)
+	route.putTag(fieldAdvBehavior, wireVarint)
+	route.putVarint(claimedBehavior)
+	route.putString(fieldAdvNextHop, advertiseNextHop)
+
+	var chunk writer
+	chunk.putMessage(fieldChunkAdvertisedRoute, route.buf)
+	commit(applyKindAdvertise, chunk.buf)
+}
+
+// commit runs one desired-set transaction with a single chunk.
+func commit(kind int32, chunk []byte) {
+	gen := hostApplyBegin(kind)
+	if gen == 0 {
+		if kind == applyKindHeadendV4 && !headendRefused {
+			// Not granted the capability. There is nothing to ask for it,
+			// so the refusal is how a plugin learns what it may do; note
+			// it and stop trying rather than logging once per replay.
+			headendRefused = true
+			logf(logInfo, "not granted headend; running advertise-only")
+			return
+		}
+		logf(logWarn, "the host refused to open a transaction")
+		return
+	}
+	if len(chunk) > 0 {
+		if hostApplyPut(gen, bytesPtr(chunk), int32(len(chunk))) != 0 {
+			logf(logWarn, "the host rejected the declared set")
+			hostApplyAbort(gen)
+			return
+		}
+	}
+	if hostApplyCommit(gen) != 0 {
+		logf(logWarn, "the host refused to commit the declared set")
+	}
 }
 
 // applyRoute adds or removes one prefix from the desired set.
@@ -219,6 +515,8 @@ func applyRoute(body []byte) bool {
 		behavior uint64
 		prefix   string
 		sid      string
+		peer     string
+		pathID   uint64
 	)
 	for !r.eof() {
 		field, wire, ok := r.tag()
@@ -230,6 +528,12 @@ func applyRoute(body []byte) bool {
 			var v uint64
 			v, ok = r.varint()
 			withdraw = v != 0
+		case field == fieldRoutePeer && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			peer = string(b)
+		case field == fieldRoutePathID && wire == wireVarint:
+			pathID, ok = r.varint()
 		case field == fieldRouteEndpointBehavior && wire == wireVarint:
 			behavior, ok = r.varint()
 		case field == fieldRoutePrefix && wire == wireBytes:
@@ -251,14 +555,25 @@ func applyRoute(body []byte) bool {
 		return false
 	}
 
+	key := pathKey(peer, pathID)
 	if withdraw {
 		// A withdrawal carries no attributes, so its behavior is always
 		// zero and cannot be matched against the claim. Matching on the
-		// prefix this plugin is holding is the only thing that works --
-		// and if it is not holding one, the withdrawal is not its
-		// business.
-		if _, held := steered[prefix]; !held {
+		// path this plugin is holding is the only thing that works -- and
+		// if it is not holding one, the withdrawal is not its business.
+		paths, held := steered[prefix]
+		if !held {
 			return false
+		}
+		if _, mine := paths[key]; !mine {
+			return false
+		}
+		delete(paths, key)
+		if len(paths) > 0 {
+			// Another path still offers this prefix. What is steered may
+			// have changed, so redeclare, but the prefix stays.
+			logf(logInfo, "dropped one path for "+prefix)
+			return true
 		}
 		delete(steered, prefix)
 		logf(logInfo, "withdrew "+prefix)
@@ -268,10 +583,15 @@ func applyRoute(body []byte) bool {
 	if behavior != claimedBehavior || sid == "" {
 		return false
 	}
-	if steered[prefix] == sid {
+	paths, held := steered[prefix]
+	if !held {
+		paths = map[string]string{}
+		steered[prefix] = paths
+	}
+	if paths[key] == sid {
 		return false // already declared exactly this
 	}
-	steered[prefix] = sid
+	paths[key] = sid
 	logf(logInfo, "steering "+prefix)
 	return true
 }
@@ -282,34 +602,35 @@ func applyRoute(body []byte) bool {
 // what this plugin already owns, so a declaration is a statement of intent
 // that is correct whatever state the data plane was left in by a previous
 // instance.
+// An empty set is still committed: that is how the last prefix is pruned
+// when everything has been withdrawn.
 func declare() {
-	gen := hostApplyBegin(applyKindHeadendV4)
-	if gen == 0 {
-		logf(logWarn, "the host refused to open a transaction")
+	if headendRefused {
 		return
 	}
-	chunk := encodeChunk()
-	if len(chunk) > 0 {
-		if hostApplyPut(gen, bytesPtr(chunk), int32(len(chunk))) != 0 {
-			logf(logWarn, "the host rejected the declared set")
-			hostApplyAbort(gen)
-			return
-		}
-	}
-	// An empty set is still committed: that is how the last prefix is
-	// pruned when everything has been withdrawn.
-	if hostApplyCommit(gen) != 0 {
-		logf(logWarn, "the host refused to commit the declared set")
-	}
+	commit(applyKindHeadendV4, encodeChunk())
 }
 
 // encodeChunk serializes the desired set as a PluginApplyChunk.
 func encodeChunk() []byte {
 	var w writer
-	for prefix, sid := range steered {
+	for prefix, paths := range steered {
+		// One entry per prefix: the data plane steers a prefix into one
+		// SID. Several paths for it are several ways to reach the same
+		// service, and this example takes the lowest-keyed one so the
+		// choice does not flap with map iteration order.
+		var chosenKey, chosenSID string
+		for key, sid := range paths {
+			if chosenKey == "" || key < chosenKey {
+				chosenKey, chosenSID = key, sid
+			}
+		}
+		if chosenSID == "" {
+			continue
+		}
 		var entry writer
 		entry.putString(fieldEntryTriggerPrefix, prefix)
-		entry.putString(fieldEntrySegments, sid)
+		entry.putString(fieldEntrySegments, chosenSID)
 		w.putMessage(fieldChunkHeadendEntries, entry.buf)
 	}
 	return w.buf

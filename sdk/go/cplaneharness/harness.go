@@ -24,16 +24,22 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
-// Declaration is one desired set a plugin committed.
+// Declaration is one desired set a plugin committed. Which field is
+// populated follows from Kind.
 type Declaration struct {
 	// Kind says which set was declared.
 	Kind v1.PluginApplyKind
 	// Entries are the headend entries the plugin asked for, in the order
 	// it declared them.
 	Entries []*v1.PluginHeadendEntry
+	// Routes are the routes it asked to have originated.
+	Routes []*v1.PluginAdvertisedRoute
+	// LocalSIDs are the SIDs it asked the host to allocate.
+	LocalSIDs []*v1.PluginLocalSid
 }
 
 // Harness runs one plugin instance.
@@ -42,6 +48,7 @@ type Harness struct {
 	module []byte
 	config []byte
 	limits wasm.Limits
+	caps   wasm.Capabilities
 
 	mu sync.Mutex
 	// inst is replaced by Restart, so a test can check that a plugin
@@ -61,6 +68,11 @@ type Options struct {
 	// declared key, so a test can check what the plugin does when the host
 	// refuses it.
 	DenyCommits bool
+	// Capabilities are what the plugin is granted. Empty grants everything
+	// the host defines, which is what a plugin author testing their own
+	// module wants by default; narrow it to check that a plugin degrades
+	// the way it should when an operator grants it less.
+	Capabilities []string
 }
 
 // New starts a plugin from a compiled module. It fails the test if the
@@ -68,21 +80,37 @@ type Options struct {
 // up in first.
 func New(tb testing.TB, module []byte, opts Options) *Harness {
 	tb.Helper()
-	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits}
-	h.ops = &recorder{denyCommits: opts.DenyCommits}
+	caps, err := capabilitiesFor(opts.Capabilities)
+	if err != nil {
+		tb.Fatalf("capabilities: %v", err)
+	}
+	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps}
+	// The recorder is given the same capabilities as the instance, because
+	// the daemon checks the declaration kind against them when a
+	// transaction is opened. Without that here, a plugin granted only
+	// advertise could open a headend transaction, pass conformance, and
+	// be refused in production.
+	h.ops = &recorder{denyCommits: opts.DenyCommits, caps: caps}
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
-		Name:       "harness",
-		Module:     module,
-		ConfigBlob: opts.Config,
-		Limits:     opts.Limits,
-		Ops:        h.ops,
-		Logger:     zap.NewNop(),
+		Name:         "harness",
+		Module:       module,
+		ConfigBlob:   opts.Config,
+		Limits:       opts.Limits,
+		Ops:          h.ops,
+		Capabilities: caps,
+		Logger:       zap.NewNop(),
 	})
 	if err != nil {
 		tb.Fatalf("plugin was refused: %v", err)
 	}
 	h.inst = inst
 	tb.Cleanup(func() { _ = inst.Close(context.Background()) })
+	// A plugin may declare local SIDs from configure. Answer those before
+	// the test does anything else, as the daemon does once the plugin is
+	// live.
+	if err := h.flushAllocated(); err != nil {
+		tb.Fatalf("plugin declared local SIDs during configure: %v", err)
+	}
 	return h
 }
 
@@ -107,6 +135,9 @@ func (h *Harness) Deliver(events ...*v1.PluginEvent) (*v1.PluginEventStatus, err
 	if err != nil {
 		return nil, err
 	}
+	if err := h.flushAllocated(); err != nil {
+		return nil, err
+	}
 	if len(out) == 0 {
 		return &v1.PluginEventStatus{}, nil
 	}
@@ -115,6 +146,41 @@ func (h *Harness) Deliver(events ...*v1.PluginEvent) (*v1.PluginEventStatus, err
 		return nil, fmt.Errorf("plugin returned an undecodable status: %w", err)
 	}
 	return &status, nil
+}
+
+// flushAllocated delivers the addresses the host chose for local SIDs the
+// plugin declared, as an event, which is how the daemon answers too.
+func (h *Harness) flushAllocated() error {
+	for {
+		allocated := h.ops.takeAllocated()
+		if len(allocated) == 0 {
+			return nil
+		}
+		events := make([]*v1.PluginEvent, 0, len(allocated))
+		for _, a := range allocated {
+			h.mu.Lock()
+			h.seq++
+			seq := h.seq
+			inst := h.inst
+			h.mu.Unlock()
+			events = append(events, &v1.PluginEvent{
+				Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_LOCAL_SID,
+				Sequence: seq,
+				LocalSid: a,
+			})
+			_ = inst
+		}
+		raw, err := proto.Marshal(&v1.PluginEventBatch{Events: events})
+		if err != nil {
+			return fmt.Errorf("encode local-SID batch: %w", err)
+		}
+		h.mu.Lock()
+		inst := h.inst
+		h.mu.Unlock()
+		if _, err := inst.HandleEvents(context.Background(), raw); err != nil {
+			return fmt.Errorf("delivering local-SID answers: %w", err)
+		}
+	}
 }
 
 // Route is shorthand for delivering one route event.
@@ -146,9 +212,15 @@ func (h *Harness) Restart() {
 	old := h.inst
 	h.mu.Unlock()
 
+	// The addresses it holds survive the restart; being told about them
+	// does not, which is what the daemon does when it replaces an
+	// instance.
+	h.ops.beginInstance()
+
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
-		Name:   "harness",
-		Module: h.module,
+		Name:         "harness",
+		Capabilities: h.caps,
+		Module:       h.module,
 		// The config goes back in: the daemon re-instantiates with it too,
 		// and a harness that dropped it would model a restart the daemon
 		// never performs -- a plugin coming back on defaults, or refusing
@@ -167,6 +239,9 @@ func (h *Harness) Restart() {
 	h.inst = inst
 	h.mu.Unlock()
 	h.tb.Cleanup(func() { _ = inst.Close(context.Background()) })
+	if err := h.flushAllocated(); err != nil {
+		h.tb.Fatalf("plugin declared local SIDs during configure: %v", err)
+	}
 }
 
 // Declarations returns every set the plugin has committed, oldest first.
@@ -192,6 +267,17 @@ func (h *Harness) Logs() []string { return h.ops.logLines() }
 // that leaves transactions open is leaking them.
 func (h *Harness) Aborted() int { return h.ops.abortCount() }
 
+// capabilitiesFor turns the option into a granted set, defaulting to
+// everything the host defines.
+func capabilitiesFor(names []string) (wasm.Capabilities, error) {
+	if len(names) == 0 {
+		return wasm.ParseCapabilities([]string{
+			string(wasm.CapHeadend), string(wasm.CapAdvertise), string(wasm.CapLocalSID),
+		})
+	}
+	return wasm.ParseCapabilities(names)
+}
+
 // recorder stands in for the daemon's capability surface, keeping what the
 // plugin asked for instead of applying it.
 type recorder struct {
@@ -204,6 +290,31 @@ type recorder struct {
 	committed []Declaration
 	aborts    int
 	nextGen   uint64
+	// allocated holds the local-SID answers a commit produced, waiting to
+	// be handed to the plugin.
+	allocated []*v1.PluginLocalSidAllocated
+	// sidByName is the address each declared name holds, so a name keeps
+	// the address it was given. The daemon answers a redeclaration with the
+	// address it already allocated; a harness that handed out a new one
+	// every time would let a plugin pass here and then, against the real
+	// daemon, advertise an address that had moved under it.
+	sidByName map[string]string
+	// notifiedSIDs is which allocations the running instance has been told
+	// about. The addresses outlive an instance; being told does not. The
+	// daemon resets this when it replaces an instance, so a harness that
+	// carried it over would let a plugin that cannot re-advertise after a
+	// restart pass -- which is the failure this harness exists to catch.
+	notifiedSIDs map[string]struct{}
+	nextSID      int
+	caps         wasm.Capabilities
+}
+
+// beginInstance puts the recorder back into the state a fresh instance
+// starts from, matching the daemon.
+func (r *recorder) beginInstance() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifiedSIDs = nil
 }
 
 func (r *recorder) Log(level int32, msg string) {
@@ -214,9 +325,24 @@ func (r *recorder) Log(level int32, msg string) {
 
 func (r *recorder) ApplyBegin(kind uint32) (uint64, error) {
 	applyKind := v1.PluginApplyKind(kind)
+	// One apply_begin serves every kind, so the capability that covers the
+	// kind is checked here -- exactly as the daemon does, or a plugin
+	// declaring something it was not granted passes conformance and is
+	// refused in production.
 	switch applyKind {
 	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
 		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+		if !r.caps.Has(wasm.CapHeadend) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapHeadend)
+		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		if !r.caps.Has(wasm.CapAdvertise) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapAdvertise)
+		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		if !r.caps.Has(wasm.CapLocalSID) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapLocalSID)
+		}
 	default:
 		return 0, fmt.Errorf("unknown apply kind %d", kind)
 	}
@@ -243,7 +369,19 @@ func (r *recorder) ApplyPut(generation uint64, chunk []byte) error {
 	if !ok {
 		return fmt.Errorf("no open transaction %d", generation)
 	}
+	// The daemon's own checks, not a second copy of them. What a plugin
+	// declares is refused here for the same reasons and with the same
+	// words it would be refused in production -- a missing next hop, a
+	// mode with nothing behind it, a prefix in the wrong family. A harness
+	// more forgiving than the daemon passes plugins that then go silent,
+	// which is the one thing it exists to prevent.
+	kind := r.openKinds[generation]
+	if err := cplane.ValidateChunk(kind, &msg); err != nil {
+		return err
+	}
 	acc.HeadendEntries = append(acc.HeadendEntries, msg.GetHeadendEntries()...)
+	acc.AdvertisedRoutes = append(acc.AdvertisedRoutes, msg.GetAdvertisedRoutes()...)
+	acc.LocalSids = append(acc.LocalSids, msg.GetLocalSids()...)
 	return nil
 }
 
@@ -260,8 +398,72 @@ func (r *recorder) ApplyCommit(generation uint64) error {
 	if r.denyCommits {
 		return deniedError{}
 	}
-	r.committed = append(r.committed, Declaration{Kind: kind, Entries: acc.GetHeadendEntries()})
+	decl := Declaration{
+		Kind:      kind,
+		Entries:   acc.GetHeadendEntries(),
+		Routes:    acc.GetAdvertisedRoutes(),
+		LocalSIDs: acc.GetLocalSids(),
+	}
+	r.committed = append(r.committed, decl)
+
+	// A declared local SID is answered with an address, as the daemon
+	// does: the plugin named it, the host chose the value, and a plugin
+	// that is never told cannot advertise it. Without this the harness
+	// could not exercise the half of a plugin that originates anything.
+	if kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		if r.sidByName == nil {
+			r.sidByName = map[string]string{}
+		}
+		// A declaration is the whole set, so a name it stopped naming has
+		// been given up and its address goes back -- exactly as the daemon
+		// releases a SID the owner no longer declares.
+		declared := make(map[string]struct{}, len(acc.GetLocalSids()))
+		for _, sid := range acc.GetLocalSids() {
+			declared[sid.GetName()] = struct{}{}
+		}
+		for name := range r.sidByName {
+			if _, still := declared[name]; !still {
+				delete(r.sidByName, name)
+			}
+		}
+		// Only what this instance has not been told produces an event, as
+		// the daemon does. A plugin that redeclares its set in response to
+		// a local-SID event -- which the desired-set model invites --
+		// would otherwise be answered with another event, redeclare again,
+		// and never stop. A replacement instance has been told nothing, so
+		// it hears every address it holds.
+		if r.notifiedSIDs == nil {
+			r.notifiedSIDs = map[string]struct{}{}
+		}
+		for _, sid := range acc.GetLocalSids() {
+			name := sid.GetName()
+			addr, held := r.sidByName[name]
+			if !held {
+				r.nextSID++
+				addr = fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID)
+				r.sidByName[name] = addr
+			}
+			if _, told := r.notifiedSIDs[name]; told {
+				continue
+			}
+			r.notifiedSIDs[name] = struct{}{}
+			r.allocated = append(r.allocated, &v1.PluginLocalSidAllocated{
+				Name:    name,
+				Sid:     addr,
+				Locator: sid.GetLocator(),
+			})
+		}
+	}
 	return nil
+}
+
+// takeAllocated returns the local-SID answers owed to the plugin.
+func (r *recorder) takeAllocated() []*v1.PluginLocalSidAllocated {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.allocated
+	r.allocated = nil
+	return out
 }
 
 func (r *recorder) ApplyAbort(generation uint64) {

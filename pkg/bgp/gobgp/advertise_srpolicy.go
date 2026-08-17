@@ -54,6 +54,7 @@ func (s *Session) WithdrawPolicy(_ context.Context, key bgp.SRPolicyKey) error {
 	}
 	s.advMu.Lock()
 	delete(s.advertised, rk)
+	delete(s.producers, rk)
 	s.advMu.Unlock()
 	return nil
 }

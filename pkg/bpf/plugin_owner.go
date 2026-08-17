@@ -43,17 +43,34 @@ var ErrBundleNameTooLong = errors.New("plugin bundle name too long for owner tag
 var ErrBundleNameInvalid = errors.New("invalid plugin bundle name")
 
 // ValidatePluginBundleName checks that name can be rendered into an owner
-// tag and read back unchanged. Colons are rejected because they separate
-// tag fields, and an empty name would collide with "no recorded owner".
+// tag and read back unchanged, and that it is safe to use as a file name.
+//
+// The alphabet is an allowlist rather than a list of rejections. A bundle
+// name is both a field inside a colon-separated owner tag and the name of
+// the file a bundle is persisted under, so anything outside this set is
+// either ambiguous in the tag or an escape from the directory: a name of
+// "../../etc/cron.d/x" would otherwise write wherever it liked. A leading
+// dot is refused for the same reason.
 func ValidatePluginBundleName(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: empty", ErrBundleNameInvalid)
 	}
-	if strings.ContainsAny(name, ":\x00") {
-		return fmt.Errorf("%w: %q contains a reserved character", ErrBundleNameInvalid, name)
-	}
 	if len(name) > MaxPluginBundleName {
 		return fmt.Errorf("%w: %q is %d bytes, limit %d", ErrBundleNameTooLong, name, len(name), MaxPluginBundleName)
+	}
+	if name[0] == '.' {
+		return fmt.Errorf("%w: %q starts with a dot", ErrBundleNameInvalid, name)
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+		default:
+			return fmt.Errorf("%w: %q may use only letters, digits, '-', '_' and '.'",
+				ErrBundleNameInvalid, name)
+		}
 	}
 	return nil
 }

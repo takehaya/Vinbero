@@ -3,10 +3,12 @@ package cplane
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"sync"
 	"testing"
 
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
@@ -23,7 +25,23 @@ type fakeHeadendOps struct {
 	owner6  map[string]bpf.OwnerTag
 	writes  []string // "create v4 <prefix>" / "delete v4 <prefix>", in order
 	failOn  string   // prefix whose create fails
+	failDel string   // prefix whose delete fails
 	listErr error
+}
+
+// maskKey is what the real map does to a prefix before it becomes a key.
+//
+// The BPF headend maps are LPM tries: they store the masked network and
+// report it back that way, so 10.0.0.7/24 goes in and 10.0.0.0/24 comes
+// out. A fake keyed on the raw string would accept an unmasked spelling
+// and hand it straight back, hiding exactly the mismatch that leaks leases
+// in production.
+func maskKey(prefix string) string {
+	pfx, err := netip.ParsePrefix(prefix)
+	if err != nil {
+		return prefix // the caller is testing the rejection; leave it alone
+	}
+	return pfx.Masked().String()
 }
 
 func newFakeHeadendOps() *fakeHeadendOps {
@@ -53,20 +71,23 @@ func (f *fakeHeadendOps) ListHeadendV6() (map[string]*bpf.HeadendEntry, error) {
 	}
 	return out, f.listErr
 }
-func (f *fakeHeadendOps) GetHeadendV4Owner(p string) (bpf.OwnerTag, bool, error) {
+func (f *fakeHeadendOps) GetHeadendV4Owner(rawPrefix string) (bpf.OwnerTag, bool, error) {
+	p := maskKey(rawPrefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	o, ok := f.owner4[p]
 	return o, ok, nil
 }
-func (f *fakeHeadendOps) GetHeadendV6Owner(p string) (bpf.OwnerTag, bool, error) {
+func (f *fakeHeadendOps) GetHeadendV6Owner(rawPrefix string) (bpf.OwnerTag, bool, error) {
+	p := maskKey(rawPrefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	o, ok := f.owner6[p]
 	return o, ok, nil
 }
 
-func (f *fakeHeadendOps) CreateHeadendV4(p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+func (f *fakeHeadendOps) CreateHeadendV4(rawPrefix string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	p := maskKey(rawPrefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if p == f.failOn {
@@ -81,7 +102,8 @@ func (f *fakeHeadendOps) CreateHeadendV4(p string, e *bpf.HeadendEntry, owner bp
 	return nil
 }
 
-func (f *fakeHeadendOps) CreateHeadendV6(p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+func (f *fakeHeadendOps) CreateHeadendV6(rawPrefix string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	p := maskKey(rawPrefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if cur, ok := f.owner6[p]; ok && cur != owner {
@@ -93,9 +115,21 @@ func (f *fakeHeadendOps) CreateHeadendV6(p string, e *bpf.HeadendEntry, owner bp
 	return nil
 }
 
-func (f *fakeHeadendOps) DeleteHeadendV4(p string, requester bpf.OwnerTag) error {
+// failDelete makes the map refuse to remove one prefix, which is how the
+// flush and prune failure paths are reached at all.
+func (f *fakeHeadendOps) failDelete(prefix string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.failDel = maskKey(prefix)
+}
+
+func (f *fakeHeadendOps) DeleteHeadendV4(rawPrefix string, requester bpf.OwnerTag) error {
+	p := maskKey(rawPrefix)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p == f.failDel {
+		return fmt.Errorf("simulated delete failure for %q", p)
+	}
 	if cur, ok := f.owner4[p]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}
@@ -105,7 +139,8 @@ func (f *fakeHeadendOps) DeleteHeadendV4(p string, requester bpf.OwnerTag) error
 	return nil
 }
 
-func (f *fakeHeadendOps) DeleteHeadendV6(p string, requester bpf.OwnerTag) error {
+func (f *fakeHeadendOps) DeleteHeadendV6(rawPrefix string, requester bpf.OwnerTag) error {
+	p := maskKey(rawPrefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if cur, ok := f.owner6[p]; ok && cur != requester {
@@ -119,7 +154,8 @@ func (f *fakeHeadendOps) DeleteHeadendV6(p string, requester bpf.OwnerTag) error
 
 // seedV4 puts an entry in the v4 map under the given owner, as if a
 // previous apply had written it.
-func (f *fakeHeadendOps) seedV4(prefix string, owner bpf.OwnerTag) {
+func (f *fakeHeadendOps) seedV4(rawPrefix string, owner bpf.OwnerTag) {
+	prefix := maskKey(rawPrefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.v4[prefix] = &bpf.HeadendEntry{}
@@ -183,7 +219,7 @@ func sortedV4(f *fakeHeadendOps) []string {
 
 func TestApplyHeadendSetCreates(t *testing.T) {
 	ops := newFakeHeadendOps()
-	res, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"))
+	res, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -200,10 +236,10 @@ func TestApplyHeadendSetCreates(t *testing.T) {
 func TestApplyHeadendSetPrunesWhatIsNoLongerDeclared(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24"))
+	res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24"), unlimited)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
@@ -224,7 +260,7 @@ func TestApplyHeadendSetPrunesWhatIsNoLongerDeclared(t *testing.T) {
 func TestApplyHeadendSetIgnoresOtherOwnersEntries(t *testing.T) {
 	ops := newFakeHeadendOps()
 	ops.seedV4("10.9.9.0/24", ownerB)
-	if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, desire("10.0.1.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, desire("10.0.1.0/24"), unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	if _, ok := ops.v4["10.9.9.0/24"]; !ok {
@@ -237,7 +273,7 @@ func TestApplyHeadendSetIgnoresOtherOwnersEntries(t *testing.T) {
 func TestApplyHeadendSetIgnoresUnownedEntries(t *testing.T) {
 	ops := newFakeHeadendOps()
 	ops.v4["10.9.9.0/24"] = &bpf.HeadendEntry{} // present, no owner recorded
-	if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, nil); err != nil {
+	if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, nil, unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	if _, ok := ops.v4["10.9.9.0/24"]; !ok {
@@ -253,7 +289,7 @@ func TestApplyHeadendSetRejectsLeasedKeyBeforeWriting(t *testing.T) {
 	if err := leases.Acquire(LeaseHeadendV4, "10.0.2.0/24", ownerB); err != nil {
 		t.Fatalf("setup lease: %v", err)
 	}
-	_, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"))
+	_, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited)
 	if !errors.Is(err, ErrLeaseHeld) {
 		t.Fatalf("apply = %v, want ErrLeaseHeld", err)
 	}
@@ -268,11 +304,11 @@ func TestApplyHeadendSetRejectsLeasedKeyBeforeWriting(t *testing.T) {
 func TestApplyHeadendSetOrdersPrunesBeforeWrites(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.8.0/24", "10.0.9.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.8.0/24", "10.0.9.0/24"), unlimited); err != nil {
 		t.Fatalf("seed apply: %v", err)
 	}
 	ops.writes = nil
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	want := []string{
@@ -298,7 +334,7 @@ func TestApplyHeadendSetIsRetryableAfterPartialFailure(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
 	ops.failOn = "10.0.2.0/24"
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24")); err == nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited); err == nil {
 		t.Fatal("apply should have failed on the seeded write failure")
 	}
 	if _, ok := ops.v4["10.0.1.0/24"]; !ok {
@@ -306,7 +342,7 @@ func TestApplyHeadendSetIsRetryableAfterPartialFailure(t *testing.T) {
 	}
 
 	ops.failOn = ""
-	res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"))
+	res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -327,7 +363,7 @@ func TestApplyHeadendSetRejectsMalformedDeclarations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, tt.desired); err == nil {
+			if _, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv4, tt.desired, unlimited); err == nil {
 				t.Fatal("malformed declaration was accepted")
 			}
 			if len(ops.writes) != 0 {
@@ -339,14 +375,14 @@ func TestApplyHeadendSetRejectsMalformedDeclarations(t *testing.T) {
 
 func TestApplyHeadendSetRejectsEmptyOwner(t *testing.T) {
 	ops := newFakeHeadendOps()
-	if _, err := ApplyHeadendSet(ops, NewLeases(), "", AFv4, desire("10.0.1.0/24")); !errors.Is(err, bpf.ErrEmptyOwner) {
+	if _, err := ApplyHeadendSet(ops, NewLeases(), "", AFv4, desire("10.0.1.0/24"), unlimited); !errors.Is(err, bpf.ErrEmptyOwner) {
 		t.Fatalf("apply with an empty owner = %v, want ErrEmptyOwner", err)
 	}
 }
 
 func TestApplyHeadendSetV6(t *testing.T) {
 	ops := newFakeHeadendOps()
-	res, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv6, desire("2001:db8:1::/48"))
+	res, err := ApplyHeadendSet(ops, NewLeases(), ownerA, AFv6, desire("2001:db8:1::/48"), unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -364,7 +400,7 @@ func TestApplyHeadendSetV6(t *testing.T) {
 func TestPruneHeadendOwnerRemovesOnlyItsOwn(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
-	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24")); err != nil {
+	if _, err := ApplyHeadendSet(ops, leases, ownerA, AFv4, desire("10.0.1.0/24", "10.0.2.0/24"), unlimited); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	ops.seedV4("10.9.9.0/24", ownerB)
@@ -381,5 +417,69 @@ func TestPruneHeadendOwnerRemovesOnlyItsOwn(t *testing.T) {
 	}
 	if len(leases.KeysOf(LeaseHeadendV4, ownerA)) != 0 {
 		t.Error("prune left leases behind")
+	}
+}
+
+// A second owner must not be able to take a prefix the first one holds by
+// spelling it with host bits set. The lease key and the map key have to be
+// the same string, which is what canonicalizing at decode time gives.
+func TestUnmaskedSpellingCannotEvadeTheLease(t *testing.T) {
+	ops := newFakeHeadendOps()
+	leases := NewLeases()
+	src := netip.MustParseAddr("fd00:1::1")
+
+	declare := func(owner bpf.OwnerTag, spelling string) error {
+		prefix, entry, err := DecodeHeadendEntry(&v1.PluginHeadendEntry{
+			TriggerPrefix: spelling,
+			Segments:      []string{"fd00:2::1"},
+		}, AFv4, src)
+		if err != nil {
+			return err
+		}
+		_, err = ApplyHeadendSet(ops, leases, owner, AFv4,
+			[]HeadendDesired{{TriggerPrefix: prefix, Entry: entry}}, unlimited)
+		return err
+	}
+
+	if err := declare(ownerA, "10.0.1.0/24"); err != nil {
+		t.Fatalf("owner A: %v", err)
+	}
+	if err := declare(ownerB, "10.0.1.9/24"); err == nil {
+		t.Fatal("a second owner took the prefix by spelling it with host bits")
+	}
+}
+
+// Redeclaring the same set must not churn. With the raw spelling as the
+// key, the owner would fail to recognize the entry it just wrote and would
+// prune and rewrite it on every apply.
+func TestRedeclaringAnUnmaskedPrefixDoesNotChurn(t *testing.T) {
+	ops := newFakeHeadendOps()
+	leases := NewLeases()
+	src := netip.MustParseAddr("fd00:1::1")
+
+	apply := func() ApplyResult {
+		t.Helper()
+		prefix, entry, err := DecodeHeadendEntry(&v1.PluginHeadendEntry{
+			TriggerPrefix: "10.0.1.7/24",
+			Segments:      []string{"fd00:2::1"},
+		}, AFv4, src)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		res, err := ApplyHeadendSet(ops, leases, ownerA, AFv4,
+			[]HeadendDesired{{TriggerPrefix: prefix, Entry: entry}}, unlimited)
+		if err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+		return res
+	}
+
+	apply()
+	second := apply()
+	if second.Pruned != 0 {
+		t.Errorf("redeclaring the same set pruned %d entries", second.Pruned)
+	}
+	if second.Created != 0 {
+		t.Errorf("redeclaring the same set created %d entries again", second.Created)
 	}
 }

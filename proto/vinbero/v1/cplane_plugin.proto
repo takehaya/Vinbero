@@ -30,8 +30,26 @@ enum PluginEventKind {
   // before acting, or its first conclusions are drawn from a partial view
   // and the churn is visible to its peers.
   PLUGIN_EVENT_KIND_END_OF_REPLAY = 3;
-  // The periodic tick, carrying the host's monotonic clock.
-  PLUGIN_EVENT_KIND_TICK = 4;
+  // 4 was a tick event. The periodic callback is the on_tick export
+  // instead, so a tick never arrives as an event and reserving the number
+  // keeps a plugin author from waiting for one.
+  reserved 4;
+  // A local SID the plugin declared now exists, and this is the address
+  // it was given. It arrives after the declaration is applied, which is
+  // the point at which the plugin can advertise it.
+  PLUGIN_EVENT_KIND_LOCAL_SID = 5;
+  // A full replay of one source is about to be delivered, and everything
+  // the plugin knows from that source is now stale. It must discard its
+  // view of that source and rebuild it from the events that follow, up to
+  // the matching end of replay.
+  //
+  // A replay says what exists, and can therefore add and correct; it
+  // cannot say what stopped existing. A plugin whose view outlives one --
+  // after a restart, or after the host dropped a batch it could not keep
+  // up with -- would keep declaring a route that was withdrawn while it
+  // was not listening, and no later event would ever remove it. Resetting
+  // on this is what makes the replay a repair rather than a merge.
+  PLUGIN_EVENT_KIND_START_OF_REPLAY = 6;
 }
 
 // PluginUnknownAttribute is a BGP path attribute Vinbero does not
@@ -103,6 +121,7 @@ message PluginMacEvent {
 
 // PluginEvent is one item in a batch.
 message PluginEvent {
+  reserved 6;
   PluginEventKind kind = 1;
   // Sequence increases across a plugin's lifetime and identifies the event
   // in a status reply, so a plugin can point at which one it could not
@@ -112,8 +131,20 @@ message PluginEvent {
   PluginMacEvent mac = 4;
   // Source names which replay finished, for an end-of-replay event.
   string replay_source = 5;
-  // NowNs is the host's monotonic clock, set on a tick.
-  int64 now_ns = 6;
+  // 6 was a tick timestamp. on_tick carries it as an argument instead.
+  // LocalSid reports the address allocated for a declared local SID.
+  PluginLocalSidAllocated local_sid = 7;
+}
+
+// PluginLocalSidAllocated tells a plugin the address one of its declared
+// local SIDs was given.
+message PluginLocalSidAllocated {
+  // Name is the plugin's own name for this SID.
+  string name = 1;
+  // Sid is the allocated address.
+  string sid = 2;
+  // Locator it came from.
+  string locator = 3;
 }
 
 // PluginEventBatch is what the host hands to handle_events.
@@ -160,6 +191,22 @@ enum PluginApplyKind {
   PLUGIN_APPLY_KIND_HEADEND_V4 = 1;
   // The plugin's headend_v6_map entries.
   PLUGIN_APPLY_KIND_HEADEND_V6 = 2;
+  // The local SIDs the plugin wants allocated and pointed at its
+  // data-plane half.
+  //
+  // The host chooses the SID value, so the plugin names each one and is
+  // told the address it got in a local-SID event. Naming rather than
+  // requesting a value is what lets the allocation survive a restart: the
+  // plugin declares the same names and gets the same SIDs back.
+  PLUGIN_APPLY_KIND_LOCAL_SID = 4;
+  // The routes the plugin wants advertised to BGP peers.
+  //
+  // Advertising is a desired set like any other: the plugin states which
+  // routes it wants originated, and one it stops declaring is withdrawn.
+  // There is no separate withdraw call, because a plugin that has to
+  // remember which routes it previously advertised in order to retract
+  // them is a plugin that gets it wrong after a restart.
+  PLUGIN_APPLY_KIND_ADVERTISE = 3;
 }
 
 // PluginHeadendEntry is one declared headend encap entry.
@@ -175,10 +222,60 @@ message PluginHeadendEntry {
   // SrcAddr is the outer IPv6 source address for the encapsulation. Empty
   // means the daemon's configured encap source.
   string src_addr = 3;
-  // Mode selects the headend behavior slot. Leave it 0 for the ordinary
-  // H.Encaps; a plugin pairing with its own data-plane half sets the slot
-  // its eBPF program occupies.
+  // Mode selects the headend behavior slot. Leave it 0 and the daemon
+  // uses the ordinary H.Encaps; a plugin pairing with its own data-plane
+  // half sets the slot its eBPF program occupies (16-31).
   uint32 mode = 4;
+}
+
+// PluginAdvertisedRoute is one route the plugin wants originated.
+//
+// Only VPN and IPv6 unicast are expressible today, which is what vinbero's
+// advertiser originates. A plugin's own SRv6 behavior rides on those:
+// the behavior is a codepoint inside the SID TLV, not a family of its own.
+message PluginAdvertisedRoute {
+  // Family is the operator-facing name: "vpnv4", "vpnv6", "ipv6_unicast".
+  string family = 1;
+  // RouteDistinguisher, required for the VPN families.
+  string rd = 2;
+  // Prefix in CIDR form. It is normalized before use, so 10.0.0.1/24 and
+  // 10.0.0.0/24 are the same route rather than two.
+  string prefix = 3;
+  // Srv6Sid is the service SID to advertise with the route. It travels in
+  // the SID TLV, which only the VPN families carry, so setting it on an
+  // ipv6_unicast route is refused rather than quietly dropped.
+  string srv6_sid = 4;
+  // EndpointBehavior is the SRv6 endpoint behavior codepoint to put in the
+  // SID TLV. A plugin advertising its own behavior sets the codepoint it
+  // claimed; 0 leaves vinbero's default for the family.
+  //
+  // The codepoint travels in the SID TLV, so setting it without a
+  // srv6_sid is refused rather than quietly dropped.
+  uint32 endpoint_behavior = 5;
+  // RouteTargets to attach.
+  repeated string route_targets = 6;
+  // NextHop to advertise. Required: the daemon has no defensible guess at
+  // it, because its encap source is a locator address and not necessarily
+  // an address peers can route to, and picking one silently would
+  // advertise a route they cannot follow.
+  string next_hop = 7;
+}
+
+// PluginLocalSid is one local SID the plugin wants to exist.
+message PluginLocalSid {
+  // Name identifies this SID within the plugin. It is how the plugin
+  // recognizes the address it was given, and how the host knows across a
+  // restart that a redeclared SID is the same one.
+  string name = 1;
+  // Locator is the SRv6 locator to allocate from, by the name it was
+  // configured under.
+  string locator = 2;
+  // Slot is the endpoint PROG_ARRAY slot the SID dispatches to: the
+  // plugin's own data-plane half. Valid plugin slots are 32-63.
+  uint32 slot = 3;
+  // AuxRaw is the per-SID configuration the data-plane half reads, in the
+  // layout its BTF declares.
+  bytes aux_raw = 4;
 }
 
 // PluginApplyChunk is one instalment of a declared set.
@@ -189,6 +286,8 @@ message PluginHeadendEntry {
 // committed.
 message PluginApplyChunk {
   repeated PluginHeadendEntry headend_entries = 1;
+  repeated PluginAdvertisedRoute advertised_routes = 2;
+  repeated PluginLocalSid local_sids = 3;
 }
 
 // PluginConfig is the operator's configuration for a plugin instance,

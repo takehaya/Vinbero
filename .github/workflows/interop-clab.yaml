@@ -18,6 +18,10 @@ on:
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
       - 'pkg/bpf/*.o'
+      # The cplane-plugin scenario runs the committed SDK example, so a
+      # change to the plugin or to the runtime under it must re-run these.
+      - 'pkg/cplane/**'
+      - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/interop-clab.yaml'
   pull_request:
     paths:
@@ -28,6 +32,8 @@ on:
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
       - 'pkg/bpf/*.o'
+      - 'pkg/cplane/**'
+      - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/interop-clab.yaml'
   workflow_dispatch:
 
@@ -51,6 +57,7 @@ jobs:
           - evpn-multihoming     # EVPN RT4 multi-homing: DF election + split-horizon
           - mup-2site            # BGP MUP (SAFI 85): controller advertises, gateway applies
           - mup-2site-multivrf   # per-VRF MUP uplink: two VPNs share one N3 endpoint + TEID
+          - cplane-plugin-2site  # an operator's own SRv6 behavior, carried by a control-plane plugin
     steps:
       - name: Checkout
         uses: actions/checkout@v5

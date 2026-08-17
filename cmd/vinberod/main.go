@@ -21,6 +21,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/cplane"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/fib"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
@@ -395,6 +396,27 @@ func run(cliCtx *cli.Context) error {
 		if _, err := routeDemux.RegisterBuiltin("applier", nil, applier.Apply); err != nil {
 			return fmt.Errorf("register BGP applier: %w", err)
 		}
+
+		// Plugins are kept across a restart unless the operator turned it
+		// off. A daemon that forgot them would come back holding the
+		// entries they wrote -- pinned maps outlive the process -- under
+		// an owner nothing can reconcile any more.
+		var cplaneStore *cplane.Store
+		if cfg.Setting.CplanePlugins.Enabled {
+			cplaneStore, err = cplane.NewStore(cfg.Setting.CplanePlugins.Path)
+			if err != nil {
+				return fmt.Errorf("open control-plane plugin store: %w", err)
+			}
+			// Their behaviors are claimed before the first route moves.
+			// Starting the demux replays everything already in the rib, so
+			// a route carrying a stored plugin's codepoint would otherwise
+			// reach the built-in appliers first and be installed as an
+			// ordinary service SID, under their owner, in the plugin's way.
+			if err := cplane.ReserveStoredClaims(cplaneStore, claimRegistry, lg.Named("cplane")); err != nil {
+				lg.Warn("reserving the behaviors of stored control-plane plugins", zap.Error(err))
+			}
+		}
+
 		if err := routeDemux.Start(); err != nil {
 			return fmt.Errorf("subscribe BGP routes: %w", err)
 		}
@@ -404,23 +426,46 @@ func run(cliCtx *cli.Context) error {
 		// a plugin with no event source could declare state but never react
 		// to anything, which is not a mode worth supporting quietly.
 		//
-		// The encap source is resolved once here and handed to the manager
-		// as the default for plugin-declared entries that name none. A
-		// failure to resolve is not fatal: a plugin that names its own
-		// source still works, and the alternative is refusing to start the
-		// daemon over a plugin feature that may go unused.
-		encapSrc, err := applier.EncapSourceAddr()
-		if err != nil {
-			lg.Warn("resolving the encap source for control-plane plugins; "+
-				"plugin entries must name their own source",
-				zap.Error(err))
-		}
+		// The encap source is resolved when a plugin actually declares an
+		// entry, not here: locators are registered over RPC after the
+		// daemon starts, so an address captured now is usually the one
+		// that did not exist yet, and an entry written with a zero source
+		// blackholes without saying so.
 		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
-			Source:             routeDemux,
-			Claims:             claimRegistry,
-			Headend:            vin.GetMapOperations(),
-			DefaultEncapSource: encapSrc,
-			Logger:             lg.Named("cplane"),
+			Source:     routeDemux,
+			Claims:     claimRegistry,
+			Headend:    vin.GetMapOperations(),
+			Advertiser: bgpSession,
+			// Each plugin originates under its own name, so the session
+			// can tell their routes apart -- from each other and from
+			// vinbero's own. gobgp keeps one local path per NLRI, and
+			// without distinct names the withdraw of whichever producer
+			// declared it last would delete a route another one still
+			// wants, leaving that producer sure it is advertising.
+			AdvertiserFor: func(producer string) cplane.Advertiser {
+				return bgpSession.AsProducer(producer)
+			},
+			Locators:     locatorMgr,
+			SIDFunctions: vin.GetMapOperations(),
+			EncapSource:  applier.EncapSourceAddr,
+			Store:        cplaneStore,
+			// What one plugin may hold and what it may cost to run, from
+			// the operator's config. Without these the daemon ran on the
+			// built-in defaults whatever the file said, and reported the
+			// configured value back as though it were in force.
+			Quotas: cplane.Quotas{
+				MaxHeadendEntries:   cfg.Setting.CplanePlugins.Quotas.MaxHeadendEntries,
+				MaxAdvertisedRoutes: cfg.Setting.CplanePlugins.Quotas.MaxAdvertisedRoutes,
+				MaxLocalSIDs:        cfg.Setting.CplanePlugins.Quotas.MaxLocalSIDs,
+			},
+			DefaultLimits: wasm.Limits{
+				MaxModuleBytes: cfg.Setting.CplanePlugins.Limits.MaxModuleBytes,
+				MaxMemoryPages: cfg.Setting.CplanePlugins.Limits.MaxMemoryPages,
+				CallTimeout: time.Duration(cfg.Setting.CplanePlugins.Limits.CallTimeoutMs) *
+					time.Millisecond,
+				MaxBufferBytes: cfg.Setting.CplanePlugins.Limits.MaxBufferBytes,
+			},
+			Logger: lg.Named("cplane"),
 		})
 		if err != nil {
 			return fmt.Errorf("build control-plane plugin manager: %w", err)
@@ -430,6 +475,14 @@ func run(cliCtx *cli.Context) error {
 		// should still be there when it comes back.
 		defer cplaneMgr.Close(context.Background())
 		srv.SetCplaneManager(cplaneMgr)
+
+		// Bring back what a previous run was running. A plugin that fails
+		// to restore is logged and skipped inside Restore: refusing to
+		// finish starting because one plugin is broken would turn a plugin
+		// problem into an outage.
+		if err := cplaneMgr.Restore(ctx); err != nil {
+			lg.Warn("restoring control-plane plugins", zap.Error(err))
+		}
 
 		// Auto-advertise: the exporter enables each VRF binding with a
 		// redistribute set and starts watching. Starting after the demux means
