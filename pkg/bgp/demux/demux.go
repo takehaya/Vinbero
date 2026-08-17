@@ -104,7 +104,19 @@ func (d *Demux) SetClaimRegistry(claims *ClaimRegistry) {
 // Register adds a plugin consumer. See RegisterBuiltin for Vinbero's own
 // appliers, which are additionally shielded from plugin-claimed routes.
 func (d *Demux) Register(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
-	return d.register(name, families, handler, false)
+	return d.register(name, families, handler, false, true)
+}
+
+// RegisterQuiet adds a consumer without replaying the rib to it.
+//
+// It is for a consumer that pulls its own snapshot through SnapshotTo. The
+// replay Register performs delivers through the same handler as a live
+// update, which a consumer that queues and drops would treat the same way
+// -- and a dropped snapshot is worse than a dropped update, because a
+// consumer declaring desired sets prunes what it never saw. Such a
+// consumer takes the snapshot itself, where it can afford to block.
+func (d *Demux) RegisterQuiet(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
+	return d.register(name, families, handler, false, false)
 }
 
 // RegisterBuiltin adds a consumer implementing Vinbero's own behaviors. It
@@ -112,7 +124,7 @@ func (d *Demux) Register(name string, families []bgp.Family, handler bgp.RouteHa
 // has claimed: acting on a claimed route would install an entry with the
 // wrong semantics and collide with the plugin's own write to that prefix.
 func (d *Demux) RegisterBuiltin(name string, families []bgp.Family, handler bgp.RouteHandler) (func(), error) {
-	return d.register(name, families, handler, true)
+	return d.register(name, families, handler, true, true)
 }
 
 // register adds a consumer. families restricts delivery; passing none
@@ -122,7 +134,7 @@ func (d *Demux) RegisterBuiltin(name string, families []bgp.Family, handler bgp.
 // Registering after Start replays the loc-rib for the declared families
 // (every family the lister knows, when none were declared) so the consumer
 // converges on routes that arrived before it existed.
-func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHandler, builtin bool) (func(), error) {
+func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHandler, builtin, wantReplay bool) (func(), error) {
 	if handler == nil {
 		return nil, fmt.Errorf("demux: register %q: nil handler", name)
 	}
@@ -142,7 +154,7 @@ func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHa
 	d.nextID++
 	d.consumers = append(d.consumers, c)
 	d.ids = append(d.ids, id)
-	replay := d.started
+	replay := d.started && wantReplay
 	d.mu.Unlock()
 
 	d.logger.Info("BGP demux consumer registered",
@@ -251,6 +263,46 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	}
 }
 
+// SnapshotTo replays the loc-rib for the given families to h, applying the
+// same local-origin rule as live delivery. Passing no families replays
+// every family the lister knows.
+//
+// A consumer needs this when its view has to be rebuilt rather than
+// updated: a plugin that was restarted has no memory of anything, and one
+// whose events were dropped has a view with holes in it. Both are wrong in
+// the same way, and a snapshot is what makes them right again -- which
+// matters most for a consumer that declares desired sets, where a partial
+// view does not merely delay convergence but actively prunes the state it
+// cannot see.
+//
+// Unlike the replay Register performs, this delivers on the calling
+// goroutine and returns when it is done, so the caller knows the view is
+// complete.
+func (d *Demux) SnapshotTo(families []bgp.Family, h bgp.RouteHandler) error {
+	if d == nil || h == nil {
+		return nil
+	}
+	if d.lister == nil {
+		return nil
+	}
+	want := families
+	if len(want) == 0 {
+		want = allFamilies()
+	}
+	for _, fam := range want {
+		err := d.lister.ListRoutes(fam, func(ev bgp.RouteEvent) {
+			if ev.Source.IsLocal() {
+				return
+			}
+			h(ev)
+		})
+		if err != nil {
+			return fmt.Errorf("demux: snapshot %s: %w", fam, err)
+		}
+	}
+	return nil
+}
+
 // BuiltinSnapshotHandler wraps h with the same rules the demux applies to
 // its own delivery, for a snapshot a built-in consumer pulls on demand
 // rather than receiving through the demux.
@@ -288,9 +340,11 @@ func (d *Demux) isClaimed(ev bgp.RouteEvent) bool {
 	key := nlriKey(ev)
 	if ev.IsWithdraw {
 		if d.ledger.isClaimed(key) {
-			// The route is going away; stop tracking it so the ledger
-			// follows the live routes rather than growing forever.
-			d.ledger.forget(key)
+			// This path is going away; stop tracking it so the ledger
+			// follows the live routes rather than growing forever. The
+			// NLRI stays claimed while another peer still advertises it,
+			// so that peer's own withdraw is recognized too.
+			d.ledger.forget(key, ev.Source)
 			return true
 		}
 		return false
@@ -300,12 +354,12 @@ func (d *Demux) isClaimed(ev bgp.RouteEvent) bool {
 	claims := d.claims
 	d.mu.RUnlock()
 	if claims.IsClaimed(ev.EndpointBehavior) {
-		d.ledger.recordAdvertise(key)
+		d.ledger.recordAdvertise(key, ev.Source)
 		return true
 	}
-	// A prefix can be re-advertised under a different behavior; drop any
+	// A path can be re-advertised under a different behavior; drop any
 	// stale record so a later withdraw is not diverted on old information.
-	d.ledger.forget(key)
+	d.ledger.forget(key, ev.Source)
 	return false
 }
 

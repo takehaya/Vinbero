@@ -20,15 +20,18 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	PluginService_PluginRegister_FullMethodName   = "/vinbero.v1.PluginService/PluginRegister"
-	PluginService_PluginUnregister_FullMethodName = "/vinbero.v1.PluginService/PluginUnregister"
-	PluginService_PluginList_FullMethodName       = "/vinbero.v1.PluginService/PluginList"
-	PluginService_PluginAuxAlloc_FullMethodName   = "/vinbero.v1.PluginService/PluginAuxAlloc"
-	PluginService_PluginAuxUpdate_FullMethodName  = "/vinbero.v1.PluginService/PluginAuxUpdate"
-	PluginService_PluginAuxGet_FullMethodName     = "/vinbero.v1.PluginService/PluginAuxGet"
-	PluginService_PluginAuxFree_FullMethodName    = "/vinbero.v1.PluginService/PluginAuxFree"
-	PluginService_PluginAuxPurge_FullMethodName   = "/vinbero.v1.PluginService/PluginAuxPurge"
-	PluginService_PluginAuxList_FullMethodName    = "/vinbero.v1.PluginService/PluginAuxList"
+	PluginService_PluginRegister_FullMethodName         = "/vinbero.v1.PluginService/PluginRegister"
+	PluginService_PluginUnregister_FullMethodName       = "/vinbero.v1.PluginService/PluginUnregister"
+	PluginService_PluginList_FullMethodName             = "/vinbero.v1.PluginService/PluginList"
+	PluginService_PluginAuxAlloc_FullMethodName         = "/vinbero.v1.PluginService/PluginAuxAlloc"
+	PluginService_PluginAuxUpdate_FullMethodName        = "/vinbero.v1.PluginService/PluginAuxUpdate"
+	PluginService_PluginAuxGet_FullMethodName           = "/vinbero.v1.PluginService/PluginAuxGet"
+	PluginService_PluginAuxFree_FullMethodName          = "/vinbero.v1.PluginService/PluginAuxFree"
+	PluginService_PluginAuxPurge_FullMethodName         = "/vinbero.v1.PluginService/PluginAuxPurge"
+	PluginService_PluginAuxList_FullMethodName          = "/vinbero.v1.PluginService/PluginAuxList"
+	PluginService_CplanePluginRegister_FullMethodName   = "/vinbero.v1.PluginService/CplanePluginRegister"
+	PluginService_CplanePluginUnregister_FullMethodName = "/vinbero.v1.PluginService/CplanePluginUnregister"
+	PluginService_CplanePluginList_FullMethodName       = "/vinbero.v1.PluginService/CplanePluginList"
 )
 
 // PluginServiceClient is the client API for PluginService service.
@@ -56,6 +59,22 @@ type PluginServiceClient interface {
 	// Enumerate aux indices currently owned by the given filter. Empty
 	// filter returns all live indices.
 	PluginAuxList(ctx context.Context, in *PluginAuxListRequest, opts ...grpc.CallOption) (*PluginAuxListResponse, error)
+	// Control-plane plugins are registered separately from data-plane ones.
+	// The two halves of a plugin are different artifacts with different
+	// lifecycles -- an eBPF object occupies a PROG_ARRAY slot, a WebAssembly
+	// module runs in the daemon -- so they get their own calls rather than
+	// one overloaded request whose fields are half-ignored either way.
+	//
+	// Registering a name that is already running replaces it in place: the
+	// state the old instance wrote is kept and the new module reconciles
+	// over it, so an upgrade does not empty the data plane in between.
+	CplanePluginRegister(ctx context.Context, in *CplanePluginRegisterRequest, opts ...grpc.CallOption) (*CplanePluginRegisterResponse, error)
+	// Stop a control-plane plugin and remove the state it owns. This is the
+	// deliberate removal; a plugin that merely crashes is restarted and
+	// keeps its entries.
+	CplanePluginUnregister(ctx context.Context, in *CplanePluginUnregisterRequest, opts ...grpc.CallOption) (*CplanePluginUnregisterResponse, error)
+	// Enumerate running control-plane plugins.
+	CplanePluginList(ctx context.Context, in *CplanePluginListRequest, opts ...grpc.CallOption) (*CplanePluginListResponse, error)
 }
 
 type pluginServiceClient struct {
@@ -147,6 +166,33 @@ func (c *pluginServiceClient) PluginAuxList(ctx context.Context, in *PluginAuxLi
 	return out, nil
 }
 
+func (c *pluginServiceClient) CplanePluginRegister(ctx context.Context, in *CplanePluginRegisterRequest, opts ...grpc.CallOption) (*CplanePluginRegisterResponse, error) {
+	out := new(CplanePluginRegisterResponse)
+	err := c.cc.Invoke(ctx, PluginService_CplanePluginRegister_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *pluginServiceClient) CplanePluginUnregister(ctx context.Context, in *CplanePluginUnregisterRequest, opts ...grpc.CallOption) (*CplanePluginUnregisterResponse, error) {
+	out := new(CplanePluginUnregisterResponse)
+	err := c.cc.Invoke(ctx, PluginService_CplanePluginUnregister_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *pluginServiceClient) CplanePluginList(ctx context.Context, in *CplanePluginListRequest, opts ...grpc.CallOption) (*CplanePluginListResponse, error) {
+	out := new(CplanePluginListResponse)
+	err := c.cc.Invoke(ctx, PluginService_CplanePluginList_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PluginServiceServer is the server API for PluginService service.
 // All implementations should embed UnimplementedPluginServiceServer
 // for forward compatibility
@@ -172,6 +218,22 @@ type PluginServiceServer interface {
 	// Enumerate aux indices currently owned by the given filter. Empty
 	// filter returns all live indices.
 	PluginAuxList(context.Context, *PluginAuxListRequest) (*PluginAuxListResponse, error)
+	// Control-plane plugins are registered separately from data-plane ones.
+	// The two halves of a plugin are different artifacts with different
+	// lifecycles -- an eBPF object occupies a PROG_ARRAY slot, a WebAssembly
+	// module runs in the daemon -- so they get their own calls rather than
+	// one overloaded request whose fields are half-ignored either way.
+	//
+	// Registering a name that is already running replaces it in place: the
+	// state the old instance wrote is kept and the new module reconciles
+	// over it, so an upgrade does not empty the data plane in between.
+	CplanePluginRegister(context.Context, *CplanePluginRegisterRequest) (*CplanePluginRegisterResponse, error)
+	// Stop a control-plane plugin and remove the state it owns. This is the
+	// deliberate removal; a plugin that merely crashes is restarted and
+	// keeps its entries.
+	CplanePluginUnregister(context.Context, *CplanePluginUnregisterRequest) (*CplanePluginUnregisterResponse, error)
+	// Enumerate running control-plane plugins.
+	CplanePluginList(context.Context, *CplanePluginListRequest) (*CplanePluginListResponse, error)
 }
 
 // UnimplementedPluginServiceServer should be embedded to have forward compatible implementations.
@@ -204,6 +266,15 @@ func (UnimplementedPluginServiceServer) PluginAuxPurge(context.Context, *PluginA
 }
 func (UnimplementedPluginServiceServer) PluginAuxList(context.Context, *PluginAuxListRequest) (*PluginAuxListResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PluginAuxList not implemented")
+}
+func (UnimplementedPluginServiceServer) CplanePluginRegister(context.Context, *CplanePluginRegisterRequest) (*CplanePluginRegisterResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CplanePluginRegister not implemented")
+}
+func (UnimplementedPluginServiceServer) CplanePluginUnregister(context.Context, *CplanePluginUnregisterRequest) (*CplanePluginUnregisterResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CplanePluginUnregister not implemented")
+}
+func (UnimplementedPluginServiceServer) CplanePluginList(context.Context, *CplanePluginListRequest) (*CplanePluginListResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CplanePluginList not implemented")
 }
 
 // UnsafePluginServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -379,6 +450,60 @@ func _PluginService_PluginAuxList_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PluginService_CplanePluginRegister_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CplanePluginRegisterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).CplanePluginRegister(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_CplanePluginRegister_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).CplanePluginRegister(ctx, req.(*CplanePluginRegisterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PluginService_CplanePluginUnregister_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CplanePluginUnregisterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).CplanePluginUnregister(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_CplanePluginUnregister_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).CplanePluginUnregister(ctx, req.(*CplanePluginUnregisterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PluginService_CplanePluginList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CplanePluginListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PluginServiceServer).CplanePluginList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PluginService_CplanePluginList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PluginServiceServer).CplanePluginList(ctx, req.(*CplanePluginListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PluginService_ServiceDesc is the grpc.ServiceDesc for PluginService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -421,6 +546,18 @@ var PluginService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PluginAuxList",
 			Handler:    _PluginService_PluginAuxList_Handler,
+		},
+		{
+			MethodName: "CplanePluginRegister",
+			Handler:    _PluginService_CplanePluginRegister_Handler,
+		},
+		{
+			MethodName: "CplanePluginUnregister",
+			Handler:    _PluginService_CplanePluginUnregister_Handler,
+		},
+		{
+			MethodName: "CplanePluginList",
+			Handler:    _PluginService_CplanePluginList_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

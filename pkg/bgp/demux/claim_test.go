@@ -213,3 +213,82 @@ func TestPeerEventIsNotLocal(t *testing.T) {
 		t.Fatalf("peer = %v, want 192.0.2.1", ev.Source.Peer)
 	}
 }
+
+// Replace sets a plugin's claims to exactly what it declares, so an
+// upgrade that narrows the set actually gives the dropped codepoints up.
+func TestReplaceNarrowsTheClaimSet(t *testing.T) {
+	r := NewClaimRegistry(reservedForTest)
+	if err := r.Replace("acl-prefix", []uint16{0xFE01, 0xFE02}); err != nil {
+		t.Fatalf("first replace: %v", err)
+	}
+	if err := r.Replace("acl-prefix", []uint16{0xFE01}); err != nil {
+		t.Fatalf("narrowing replace: %v", err)
+	}
+	if r.IsClaimed(0xFE02) {
+		t.Fatal("a dropped codepoint stayed claimed")
+	}
+	// Which means another plugin can take it.
+	if err := r.Replace("successor", []uint16{0xFE02}); err != nil {
+		t.Fatalf("claiming the released codepoint: %v", err)
+	}
+}
+
+// A rejected Replace leaves the plugin's existing claims untouched: a
+// running plugin must not lose its behaviors because a later registration
+// asked for something impossible.
+func TestReplaceRejectionKeepsTheOldSet(t *testing.T) {
+	r := NewClaimRegistry(reservedForTest)
+	if err := r.Replace("holder", []uint16{0xFE01}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := r.Replace("newcomer", []uint16{0xFE02}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// newcomer tries to take a codepoint holder owns.
+	if err := r.Replace("newcomer", []uint16{0xFE01, 0xFE03}); err == nil {
+		t.Fatal("a conflicting replace was accepted")
+	}
+	if holder, _ := r.HolderOf(0xFE01); holder != "holder" {
+		t.Errorf("0xFE01 moved to %q", holder)
+	}
+	if holder, _ := r.HolderOf(0xFE02); holder != "newcomer" {
+		t.Error("the rejected replace dropped the plugin's existing claim")
+	}
+	if r.IsClaimed(0xFE03) {
+		t.Error("a rejected replace took one of the codepoints anyway")
+	}
+}
+
+// An empty set releases everything, which is what registering a plugin
+// with no behaviors means.
+func TestReplaceWithNothingReleases(t *testing.T) {
+	r := NewClaimRegistry(reservedForTest)
+	if err := r.Replace("acl-prefix", []uint16{0xFE01}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := r.Replace("acl-prefix", nil); err != nil {
+		t.Fatalf("empty replace: %v", err)
+	}
+	if r.IsClaimed(0xFE01) {
+		t.Fatal("an empty replace left a claim behind")
+	}
+}
+
+func TestReplaceRejectsReserved(t *testing.T) {
+	r := NewClaimRegistry(reservedForTest)
+	if err := r.Replace("greedy", []uint16{0x0013}); err == nil {
+		t.Fatal("replacing with a reserved codepoint was accepted")
+	}
+}
+
+// A nil registry accepts an empty set (nothing to record) and refuses a
+// real one, rather than panicking.
+func TestNilRegistryReplace(t *testing.T) {
+	var r *ClaimRegistry
+	if err := r.Replace("acl-prefix", nil); err != nil {
+		t.Fatalf("empty replace on a nil registry: %v", err)
+	}
+	if err := r.Replace("acl-prefix", []uint16{0xFE01}); err == nil {
+		t.Fatal("a nil registry accepted a claim")
+	}
+}

@@ -32,6 +32,23 @@ service PluginService {
   // Enumerate aux indices currently owned by the given filter. Empty
   // filter returns all live indices.
   rpc PluginAuxList(PluginAuxListRequest) returns (PluginAuxListResponse);
+
+  // Control-plane plugins are registered separately from data-plane ones.
+  // The two halves of a plugin are different artifacts with different
+  // lifecycles -- an eBPF object occupies a PROG_ARRAY slot, a WebAssembly
+  // module runs in the daemon -- so they get their own calls rather than
+  // one overloaded request whose fields are half-ignored either way.
+  //
+  // Registering a name that is already running replaces it in place: the
+  // state the old instance wrote is kept and the new module reconciles
+  // over it, so an upgrade does not empty the data plane in between.
+  rpc CplanePluginRegister(CplanePluginRegisterRequest) returns (CplanePluginRegisterResponse);
+  // Stop a control-plane plugin and remove the state it owns. This is the
+  // deliberate removal; a plugin that merely crashes is restarted and
+  // keeps its entries.
+  rpc CplanePluginUnregister(CplanePluginUnregisterRequest) returns (CplanePluginUnregisterResponse);
+  // Enumerate running control-plane plugins.
+  rpc CplanePluginList(CplanePluginListRequest) returns (CplanePluginListResponse);
 }
 
 message PluginRegisterRequest {
@@ -146,4 +163,47 @@ message AuxIndexInfo {
 
 message PluginAuxListResponse {
   repeated AuxIndexInfo entries = 1;
+}
+
+message CplanePluginRegisterRequest {
+  // Name identifies the plugin and becomes the owner tag its writes
+  // carry, so it must fit the fixed-width owner buffer and hold no colon.
+  string name = 1;
+  // Wasm is the WebAssembly module.
+  bytes wasm = 2;
+  // Config is the operator's configuration for this deployment, handed to
+  // the module's configure export. It is opaque to the daemon: the plugin
+  // defines its own message. Keeping it out of the module means changing
+  // a threshold does not mean rebuilding and re-shipping the plugin.
+  bytes config = 3;
+  // Families restricts which BGP families the plugin is delivered, by the
+  // operator-facing name ("vpnv4", "evpn", ...). Empty means every family.
+  repeated string families = 4;
+  // EndpointBehaviors are the SRv6 endpoint behavior codepoints this
+  // plugin claims. Routes naming one are withheld from vinbero's own
+  // appliers, which would otherwise read an unrecognized codepoint as an
+  // ordinary service SID. Standardized codepoints cannot be claimed.
+  repeated uint32 endpoint_behaviors = 5;
+}
+
+message CplanePluginRegisterResponse {
+  // Replaced is true when this registration upgraded a running plugin of
+  // the same name rather than starting a new one.
+  bool replaced = 1;
+}
+
+message CplanePluginUnregisterRequest {
+  string name = 1;
+}
+
+message CplanePluginUnregisterResponse {}
+
+message CplanePluginListRequest {}
+
+message CplanePluginInfo {
+  string name = 1;
+}
+
+message CplanePluginListResponse {
+  repeated CplanePluginInfo plugins = 1;
 }

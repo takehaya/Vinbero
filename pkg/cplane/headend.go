@@ -128,6 +128,11 @@ func ApplyHeadendSet(
 
 	current, err := ownedPrefixes(ops, owner, af)
 	if err != nil {
+		// The declaration never reached the data plane, so the leases it
+		// took describe nothing. Holding them would deny another owner a
+		// key this one does not have, and no later reconcile would free
+		// them: prune only walks what the map says this owner holds.
+		releaseAll(leases, af, keys, owner)
 		return res, err
 	}
 
@@ -143,6 +148,9 @@ func ApplyHeadendSet(
 	sort.Strings(stale)
 	for _, prefix := range stale {
 		if err := deleteHeadend(ops, af, prefix, owner); err != nil {
+			// Nothing declared was written, so those leases describe
+			// nothing either.
+			releaseAll(leases, af, keys, owner)
 			return res, fmt.Errorf("apply %s set: prune %q: %w", af, prefix, err)
 		}
 		if leases != nil {
@@ -152,8 +160,14 @@ func ApplyHeadendSet(
 	}
 
 	sort.Strings(keys)
-	for _, prefix := range keys {
+	for i, prefix := range keys {
 		if err := createHeadend(ops, af, prefix, byPrefix[prefix], owner); err != nil {
+			// Release the leases of the keys that were never written,
+			// including this one. They hold no map entry, so a later
+			// reconcile would not prune them either -- the lease would
+			// outlive the declaration and block another owner from a key
+			// this one does not actually hold.
+			releaseAll(leases, af, keys[i:], owner)
 			return res, fmt.Errorf("apply %s set: write %q: %w", af, prefix, err)
 		}
 		if _, existed := current[prefix]; existed {
@@ -192,6 +206,17 @@ func PruneHeadendOwner(ops HeadendMapOps, leases *Leases, owner bpf.OwnerTag, af
 		pruned++
 	}
 	return pruned, nil
+}
+
+// releaseAll frees the leases on keys that were never written, so a lease
+// never outlives the entry it was taken for.
+func releaseAll(leases *Leases, af AddressFamily, keys []string, owner bpf.OwnerTag) {
+	if leases == nil {
+		return
+	}
+	for _, key := range keys {
+		leases.Release(af.leaseKind(), key, owner)
+	}
 }
 
 // ownedPrefixes returns the trigger prefixes owner currently holds in one

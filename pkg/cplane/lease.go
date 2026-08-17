@@ -48,6 +48,12 @@ func (e *LeaseError) Error() string {
 
 func (e *LeaseError) Unwrap() error { return ErrLeaseHeld }
 
+// Denied marks this as a policy refusal rather than a host failure, so a
+// caller can tell a plugin "narrow your set" instead of "something broke".
+// The plugin runtime tests for this behaviourally, which keeps it from
+// having to import this package.
+func (e *LeaseError) Denied() bool { return true }
+
 // Leases records which owner holds each writable key.
 //
 // It exists because a desired set is reconciled per owner: the core diffs

@@ -113,6 +113,17 @@ type Instance struct {
 	mu     sync.Mutex
 	mod    api.Module
 	closed bool
+
+	// callMu serializes every call into the guest.
+	//
+	// wazero's Function.Call is not goroutine-safe, and a plugin has one
+	// linear memory and one allocator behind it: two concurrent calls
+	// would have alloc hand out the same offset twice and let one event
+	// batch overwrite another. Concurrency is real here rather than
+	// theoretical -- a snapshot replay runs on the goroutine that
+	// registered the plugin while live updates arrive on the BGP watch
+	// goroutine -- so the lock is what makes the instance safe to share.
+	callMu sync.Mutex
 }
 
 // Config describes one plugin to instantiate.
@@ -204,6 +215,24 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	}
 	inst.mod = mod
 
+	// Language runtimes that need to initialize do it here. TinyGo and
+	// Rust both emit a reactor initializer, and calling an exported
+	// function before it has run finds uninitialized globals and traps --
+	// which is exactly what a plugin author sees if the host forgets this.
+	if err := inst.initialize(ctx); err != nil {
+		_ = inst.Close(ctx)
+		return nil, err
+	}
+
+	// The version is read after initialization, because a language runtime
+	// may compute it, and before anything else, so a module built against
+	// a different ABI is refused rather than left to trap on the first
+	// call into a function whose signature moved.
+	if err := inst.checkABIVersion(ctx); err != nil {
+		_ = inst.Close(ctx)
+		return nil, err
+	}
+
 	if err := inst.configure(ctx, cfg.ConfigBlob); err != nil {
 		_ = inst.Close(ctx)
 		return nil, err
@@ -227,6 +256,46 @@ func (i *Instance) Close(ctx context.Context) error {
 	i.closed = true
 	i.mu.Unlock()
 	return i.runtime.Close(ctx)
+}
+
+// initialize runs the guest's reactor initializer, if it has one.
+//
+// A module without it is fine: a hand-written module with no runtime to
+// set up has nothing to do here.
+func (i *Instance) initialize(ctx context.Context) error {
+	fn := i.mod.ExportedFunction(ExportInitialize)
+	if fn == nil {
+		return nil
+	}
+	callCtx, cancel := i.callContext(ctx)
+	defer cancel()
+	if _, err := fn.Call(callCtx); err != nil {
+		return fmt.Errorf("wasm: %s: %w", ExportInitialize, i.classify(callCtx, err))
+	}
+	return nil
+}
+
+// checkABIVersion refuses a module built against an ABI this host does not
+// implement.
+func (i *Instance) checkABIVersion(ctx context.Context) error {
+	fn := i.mod.ExportedFunction(ExportABIVersion)
+	if fn == nil {
+		return fmt.Errorf("%w: module exports no %q", ErrAdmission, ExportABIVersion)
+	}
+	callCtx, cancel := i.callContext(ctx)
+	defer cancel()
+	res, err := fn.Call(callCtx)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrAdmission, ExportABIVersion, i.classify(callCtx, err))
+	}
+	if len(res) == 0 {
+		return fmt.Errorf("%w: %s returned nothing", ErrAdmission, ExportABIVersion)
+	}
+	if got := int32(res[0]); got != ABIVersion {
+		return fmt.Errorf("%w: module declares ABI version %d, this daemon implements %d",
+			ErrAdmission, got, ABIVersion)
+	}
+	return nil
 }
 
 // configure hands the operator's config blob to the guest before any event
@@ -254,6 +323,8 @@ func (i *Instance) configure(ctx context.Context, blob []byte) error {
 // HandleEvents delivers a serialized event batch and returns the guest's
 // serialized status, which is nil when the guest reported nothing.
 func (i *Instance) HandleEvents(ctx context.Context, batch []byte) ([]byte, error) {
+	i.callMu.Lock()
+	defer i.callMu.Unlock()
 	fn := i.mod.ExportedFunction(ExportHandleEvents)
 	if fn == nil {
 		return nil, fmt.Errorf("wasm: module exports no %s", ExportHandleEvents)
@@ -286,6 +357,8 @@ func (i *Instance) HandleEvents(ctx context.Context, batch []byte) ([]byte, erro
 // without the export is a no-op, so a purely event-driven plugin need not
 // define one.
 func (i *Instance) Tick(ctx context.Context, nowNs int64) error {
+	i.callMu.Lock()
+	defer i.callMu.Unlock()
 	fn := i.mod.ExportedFunction(ExportOnTick)
 	if fn == nil {
 		return nil

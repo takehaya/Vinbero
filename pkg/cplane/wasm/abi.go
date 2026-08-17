@@ -55,8 +55,11 @@ const HostModule = "vinbero"
 
 // Guest export names the host calls.
 const (
-	// ExportABIVersion is a global (not a function) the guest exports to
-	// declare which ABI it was built against.
+	// ExportABIVersion is a function returning the ABI version the guest
+	// was built against. It is a function rather than a global because a
+	// global is awkward to export from most languages that target
+	// WebAssembly, and a plugin that cannot declare its version cannot be
+	// checked.
 	ExportABIVersion = "vinbero_abi_version"
 	// ExportAlloc reserves guest memory for a host-supplied buffer.
 	ExportAlloc = "alloc"
@@ -69,6 +72,15 @@ const (
 	// ExportOnTick is the periodic callback, carrying a monotonic
 	// timestamp so a plugin needs no clock of its own for the common case.
 	ExportOnTick = "on_tick"
+	// ExportInitialize is the reactor initializer, by the name the WASI
+	// reactor ABI gives it. A language runtime that needs to set up before
+	// any exported function runs -- zeroing globals, building the
+	// allocator, wiring up map hashing -- puts that work here.
+	//
+	// The host calls it explicitly rather than letting the module declare
+	// a start function, so initialization happens under a call budget and
+	// after the host is ready, not as a side effect of instantiation.
+	ExportInitialize = "_initialize"
 )
 
 // GuestMemory is the name of the memory a guest must export. Exactly one,

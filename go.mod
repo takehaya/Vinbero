@@ -10,6 +10,7 @@ require (
 	github.com/mcuadros/go-defaults v1.2.0
 	github.com/osrg/gobgp/v4 v4.5.0
 	github.com/pkg/errors v0.9.1
+	github.com/tetratelabs/wazero v1.12.0
 	github.com/urfave/cli/v2 v2.27.7
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
@@ -41,7 +42,6 @@ require (
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/spf13/viper v1.20.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/text v0.32.0 // indirect

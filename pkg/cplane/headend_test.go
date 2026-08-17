@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
@@ -13,6 +14,9 @@ import (
 // the entry and its owner per prefix so cross-owner rules can be exercised
 // without a live BPF collection.
 type fakeHeadendOps struct {
+	// mu guards everything below: the manager tests drive this from a
+	// plugin's worker goroutine while the test itself reads it.
+	mu      sync.Mutex
 	v4      map[string]*bpf.HeadendEntry
 	v6      map[string]*bpf.HeadendEntry
 	owner4  map[string]bpf.OwnerTag
@@ -32,21 +36,39 @@ func newFakeHeadendOps() *fakeHeadendOps {
 }
 
 func (f *fakeHeadendOps) ListHeadendV4() (map[string]*bpf.HeadendEntry, error) {
-	return f.v4, f.listErr
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]*bpf.HeadendEntry, len(f.v4))
+	for k, v := range f.v4 {
+		out[k] = v
+	}
+	return out, f.listErr
 }
 func (f *fakeHeadendOps) ListHeadendV6() (map[string]*bpf.HeadendEntry, error) {
-	return f.v6, f.listErr
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]*bpf.HeadendEntry, len(f.v6))
+	for k, v := range f.v6 {
+		out[k] = v
+	}
+	return out, f.listErr
 }
 func (f *fakeHeadendOps) GetHeadendV4Owner(p string) (bpf.OwnerTag, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	o, ok := f.owner4[p]
 	return o, ok, nil
 }
 func (f *fakeHeadendOps) GetHeadendV6Owner(p string) (bpf.OwnerTag, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	o, ok := f.owner6[p]
 	return o, ok, nil
 }
 
 func (f *fakeHeadendOps) CreateHeadendV4(p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if p == f.failOn {
 		return fmt.Errorf("simulated write failure for %q", p)
 	}
@@ -60,6 +82,8 @@ func (f *fakeHeadendOps) CreateHeadendV4(p string, e *bpf.HeadendEntry, owner bp
 }
 
 func (f *fakeHeadendOps) CreateHeadendV6(p string, e *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if cur, ok := f.owner6[p]; ok && cur != owner {
 		return bpf.ErrEntryOwnerMismatch
 	}
@@ -70,6 +94,8 @@ func (f *fakeHeadendOps) CreateHeadendV6(p string, e *bpf.HeadendEntry, owner bp
 }
 
 func (f *fakeHeadendOps) DeleteHeadendV4(p string, requester bpf.OwnerTag) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if cur, ok := f.owner4[p]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}
@@ -80,6 +106,8 @@ func (f *fakeHeadendOps) DeleteHeadendV4(p string, requester bpf.OwnerTag) error
 }
 
 func (f *fakeHeadendOps) DeleteHeadendV6(p string, requester bpf.OwnerTag) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if cur, ok := f.owner6[p]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}
@@ -92,6 +120,8 @@ func (f *fakeHeadendOps) DeleteHeadendV6(p string, requester bpf.OwnerTag) error
 // seedV4 puts an entry in the v4 map under the given owner, as if a
 // previous apply had written it.
 func (f *fakeHeadendOps) seedV4(prefix string, owner bpf.OwnerTag) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.v4[prefix] = &bpf.HeadendEntry{}
 	f.owner4[prefix] = owner
 }
@@ -105,7 +135,44 @@ func desire(prefixes ...string) []HeadendDesired {
 	return out
 }
 
+// countV4 and getV4 exist because the manager tests read this fake while a
+// plugin's worker goroutine writes it.
+func (f *fakeHeadendOps) countV4() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.v4)
+}
+
+func (f *fakeHeadendOps) getV4(prefix string) (*bpf.HeadendEntry, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.v4[prefix]
+	return e, ok
+}
+
+func (f *fakeHeadendOps) snapshotV4() map[string]*bpf.HeadendEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]*bpf.HeadendEntry, len(f.v4))
+	for k, v := range f.v4 {
+		out[k] = v
+	}
+	return out
+}
+
+func (f *fakeHeadendOps) v4Owners() map[string]bpf.OwnerTag {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]bpf.OwnerTag, len(f.owner4))
+	for k, v := range f.owner4 {
+		out[k] = v
+	}
+	return out
+}
+
 func sortedV4(f *fakeHeadendOps) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	out := make([]string, 0, len(f.v4))
 	for p := range f.v4 {
 		out = append(out, p)

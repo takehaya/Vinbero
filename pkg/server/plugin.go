@@ -72,6 +72,11 @@ type PluginServer struct {
 
 	mu       sync.RWMutex
 	registry map[pluginSlotKey]*pluginEntry
+
+	// cplane runs the control-plane (WebAssembly) plugins. Nil when the
+	// daemon was built without them, in which case those RPCs answer
+	// Unimplemented rather than pretending to work.
+	cplane CplaneManager
 }
 
 func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any, roEnforce bpf.ROEnforceMode, logger *zap.Logger) *PluginServer {

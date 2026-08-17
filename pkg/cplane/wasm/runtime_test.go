@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-
-	"github.com/takehaya/vinbero/pkg/cplane"
 )
 
 // The fixtures are checked-in WebAssembly built from the .wat sources
@@ -380,11 +378,19 @@ func TestInstantiateRejectsEmptyModuleAndName(t *testing.T) {
 	}
 }
 
+// deniedError stands in for a capability-layer refusal (a key another
+// owner holds). The runtime recognizes it by behavior, not by identity,
+// which is what keeps this package independent of the layer above it.
+type deniedError struct{}
+
+func (deniedError) Error() string { return "denied by policy" }
+func (deniedError) Denied() bool  { return true }
+
 // A commit refused because another owner holds the key is something the
 // plugin can act on, so it must be distinguishable from a host failure.
 func TestCommitDeniedIsDistinctFromInternal(t *testing.T) {
-	if got := commitStatus(fmt.Errorf("wrapped: %w", cplane.ErrLeaseHeld)); got != StatusDenied {
-		t.Errorf("lease conflict mapped to %d, want StatusDenied (%d)", got, StatusDenied)
+	if got := commitStatus(fmt.Errorf("wrapped: %w", deniedError{})); got != StatusDenied {
+		t.Errorf("policy refusal mapped to %d, want StatusDenied (%d)", got, StatusDenied)
 	}
 	if got := commitStatus(errors.New("map write failed")); got != StatusInternal {
 		t.Errorf("host failure mapped to %d, want StatusInternal (%d)", got, StatusInternal)
@@ -401,5 +407,23 @@ func TestPackUnpackPtrLen(t *testing.T) {
 		if ptr != tc.ptr || length != tc.length {
 			t.Errorf("round trip of (%d, %d) gave (%d, %d)", tc.ptr, tc.length, ptr, length)
 		}
+	}
+}
+
+// A module built against a different ABI is refused at registration. The
+// alternative is discovering the mismatch when a call into a function
+// whose signature moved traps, which is far harder to read.
+func TestABIVersionMismatchIsRejected(t *testing.T) {
+	for _, name := range []string{"oldabi", "noabi"} {
+		t.Run(name, func(t *testing.T) {
+			inst, err := instantiate(t, name, Config{})
+			if err == nil {
+				_ = inst.Close(context.Background())
+				t.Fatal("a module with the wrong ABI version was admitted")
+			}
+			if !errors.Is(err, ErrAdmission) {
+				t.Fatalf("error = %v, want ErrAdmission", err)
+			}
+		})
 	}
 }

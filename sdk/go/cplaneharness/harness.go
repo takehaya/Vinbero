@@ -1,0 +1,300 @@
+// Package cplaneharness runs a control-plane plugin without a daemon.
+//
+// A plugin author otherwise has to deploy into a live vinberod with BGP
+// peers to find out whether their module works at all, and the failures
+// that matter most -- a runtime that traps before it is initialized, a
+// declaration the host refuses, a module that dies on one poisoned event
+// -- are exactly the ones that are painful to reproduce that way.
+//
+// So this drives the same runtime the daemon uses, with a recording stand
+// -in for the capability surface. What a plugin declares comes back as
+// ordinary Go values to assert on, and the sequences a plugin has to
+// survive in production (a replay, a restart, a refused commit) are
+// methods here rather than situations to engineer.
+package cplaneharness
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
+
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
+)
+
+// Declaration is one desired set a plugin committed.
+type Declaration struct {
+	// Kind says which set was declared.
+	Kind v1.PluginApplyKind
+	// Entries are the headend entries the plugin asked for, in the order
+	// it declared them.
+	Entries []*v1.PluginHeadendEntry
+}
+
+// Harness runs one plugin instance.
+type Harness struct {
+	tb     testing.TB
+	module []byte
+	config []byte
+	limits wasm.Limits
+
+	mu sync.Mutex
+	// inst is replaced by Restart, so a test can check that a plugin
+	// converges after losing its memory.
+	inst *wasm.Instance
+	ops  *recorder
+	seq  uint64
+}
+
+// Options configure a harness.
+type Options struct {
+	// Config is the operator config blob handed to the plugin.
+	Config []byte
+	// Limits bound the instance; zero fields take the runtime's defaults.
+	Limits wasm.Limits
+	// DenyCommits makes every commit fail as though another owner held a
+	// declared key, so a test can check what the plugin does when the host
+	// refuses it.
+	DenyCommits bool
+}
+
+// New starts a plugin from a compiled module. It fails the test if the
+// module does not pass admission, which is the check most plugin bugs show
+// up in first.
+func New(tb testing.TB, module []byte, opts Options) *Harness {
+	tb.Helper()
+	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits}
+	h.ops = &recorder{denyCommits: opts.DenyCommits}
+	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
+		Name:       "harness",
+		Module:     module,
+		ConfigBlob: opts.Config,
+		Limits:     opts.Limits,
+		Ops:        h.ops,
+		Logger:     zap.NewNop(),
+	})
+	if err != nil {
+		tb.Fatalf("plugin was refused: %v", err)
+	}
+	h.inst = inst
+	tb.Cleanup(func() { _ = inst.Close(context.Background()) })
+	return h
+}
+
+// Deliver hands the plugin a batch of events and returns what it reported.
+func (h *Harness) Deliver(events ...*v1.PluginEvent) (*v1.PluginEventStatus, error) {
+	h.tb.Helper()
+	h.mu.Lock()
+	for _, ev := range events {
+		if ev.GetSequence() == 0 {
+			h.seq++
+			ev.Sequence = h.seq
+		}
+	}
+	inst := h.inst
+	h.mu.Unlock()
+
+	raw, err := proto.Marshal(&v1.PluginEventBatch{Events: events})
+	if err != nil {
+		return nil, fmt.Errorf("encode batch: %w", err)
+	}
+	out, err := inst.HandleEvents(context.Background(), raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return &v1.PluginEventStatus{}, nil
+	}
+	var status v1.PluginEventStatus
+	if err := proto.Unmarshal(out, &status); err != nil {
+		return nil, fmt.Errorf("plugin returned an undecodable status: %w", err)
+	}
+	return &status, nil
+}
+
+// Route is shorthand for delivering one route event.
+func (h *Harness) Route(route *v1.PluginRoute) (*v1.PluginEventStatus, error) {
+	return h.Deliver(&v1.PluginEvent{
+		Kind:  v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE,
+		Route: route,
+	})
+}
+
+// Tick invokes the plugin's periodic callback.
+func (h *Harness) Tick(elapsed time.Duration) error {
+	h.mu.Lock()
+	inst := h.inst
+	h.mu.Unlock()
+	return inst.Tick(context.Background(), int64(elapsed))
+}
+
+// Restart replaces the instance with a fresh one, as the daemon does after
+// a plugin traps or overruns its budget.
+//
+// It is the sequence worth testing most: the new instance has no memory of
+// anything, so whatever the plugin declares afterwards has to come from
+// the events it is replayed. A plugin that quietly depends on state from
+// before the restart passes every other test and fails here.
+func (h *Harness) Restart() {
+	h.tb.Helper()
+	h.mu.Lock()
+	old := h.inst
+	h.mu.Unlock()
+
+	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
+		Name:   "harness",
+		Module: h.module,
+		// The config goes back in: the daemon re-instantiates with it too,
+		// and a harness that dropped it would model a restart the daemon
+		// never performs -- a plugin coming back on defaults, or refusing
+		// an empty blob it never received the first time.
+		ConfigBlob: h.config,
+		Limits:     h.limits,
+		Ops:        h.ops,
+		Logger:     zap.NewNop(),
+	})
+	if err != nil {
+		h.tb.Fatalf("plugin could not be restarted: %v", err)
+	}
+	_ = old.Close(context.Background())
+
+	h.mu.Lock()
+	h.inst = inst
+	h.mu.Unlock()
+	h.tb.Cleanup(func() { _ = inst.Close(context.Background()) })
+}
+
+// Declarations returns every set the plugin has committed, oldest first.
+func (h *Harness) Declarations() []Declaration {
+	return h.ops.declarations()
+}
+
+// LastDeclaration returns the most recent committed set, and whether there
+// was one.
+func (h *Harness) LastDeclaration() (Declaration, bool) {
+	all := h.ops.declarations()
+	if len(all) == 0 {
+		return Declaration{}, false
+	}
+	return all[len(all)-1], true
+}
+
+// Logs returns the lines the plugin wrote through the log host function.
+func (h *Harness) Logs() []string { return h.ops.logLines() }
+
+// Aborted is how many transactions the plugin opened and then abandoned.
+// A plugin that aborts when the host refuses a chunk is behaving well; one
+// that leaves transactions open is leaking them.
+func (h *Harness) Aborted() int { return h.ops.abortCount() }
+
+// recorder stands in for the daemon's capability surface, keeping what the
+// plugin asked for instead of applying it.
+type recorder struct {
+	denyCommits bool
+
+	mu        sync.Mutex
+	logs      []string
+	open      map[uint64]*v1.PluginApplyChunk
+	openKinds map[uint64]v1.PluginApplyKind
+	committed []Declaration
+	aborts    int
+	nextGen   uint64
+}
+
+func (r *recorder) Log(level int32, msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logs = append(r.logs, fmt.Sprintf("%d: %s", level, msg))
+}
+
+func (r *recorder) ApplyBegin(kind uint32) (uint64, error) {
+	applyKind := v1.PluginApplyKind(kind)
+	switch applyKind {
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
+		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+	default:
+		return 0, fmt.Errorf("unknown apply kind %d", kind)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.open == nil {
+		r.open = map[uint64]*v1.PluginApplyChunk{}
+		r.openKinds = map[uint64]v1.PluginApplyKind{}
+	}
+	r.nextGen++
+	r.open[r.nextGen] = &v1.PluginApplyChunk{}
+	r.openKinds[r.nextGen] = applyKind
+	return r.nextGen, nil
+}
+
+func (r *recorder) ApplyPut(generation uint64, chunk []byte) error {
+	var msg v1.PluginApplyChunk
+	if err := proto.Unmarshal(chunk, &msg); err != nil {
+		return fmt.Errorf("undecodable chunk: %w", err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	acc, ok := r.open[generation]
+	if !ok {
+		return fmt.Errorf("no open transaction %d", generation)
+	}
+	acc.HeadendEntries = append(acc.HeadendEntries, msg.GetHeadendEntries()...)
+	return nil
+}
+
+func (r *recorder) ApplyCommit(generation uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	acc, ok := r.open[generation]
+	if !ok {
+		return fmt.Errorf("no open transaction %d", generation)
+	}
+	delete(r.open, generation)
+	kind := r.openKinds[generation]
+	delete(r.openKinds, generation)
+	if r.denyCommits {
+		return deniedError{}
+	}
+	r.committed = append(r.committed, Declaration{Kind: kind, Entries: acc.GetHeadendEntries()})
+	return nil
+}
+
+func (r *recorder) ApplyAbort(generation uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.open[generation]; ok {
+		r.aborts++
+	}
+	delete(r.open, generation)
+	delete(r.openKinds, generation)
+}
+
+func (r *recorder) declarations() []Declaration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Declaration(nil), r.committed...)
+}
+
+func (r *recorder) logLines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.logs...)
+}
+
+func (r *recorder) abortCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.aborts
+}
+
+// deniedError is a policy refusal, which the runtime distinguishes from a
+// host failure by behavior rather than by identity.
+type deniedError struct{}
+
+func (deniedError) Error() string { return "denied: a key is held by another owner" }
+func (deniedError) Denied() bool  { return true }
