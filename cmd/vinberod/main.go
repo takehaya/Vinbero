@@ -16,6 +16,7 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bgp/apply"
+	"github.com/takehaya/vinbero/pkg/bgp/demux"
 	"github.com/takehaya/vinbero/pkg/bgp/export"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
@@ -267,11 +268,18 @@ func run(cliCtx *cli.Context) error {
 	// session starts ListRoutes returns ErrSessionNotStarted (boot loads
 	// bindings and facets before the session, so there is nothing to rescue),
 	// and any later failure self-heals on the next peer event.
+	//
+	// The snapshot goes through the demux's built-in filter rather than
+	// straight to the lister: this replay feeds the built-in applier, so it
+	// must withhold plugin-claimed routes exactly as live delivery does.
+	// routeDemux is built further down, and the closure reads it when it
+	// runs, by which time it is set.
+	var routeDemux *demux.Demux
 	var evpnReplay func()
 	if bgpSession != nil {
 		evpnReplay = func() {
 			err := applier.ReplayEVPN(func(h bgp.RouteHandler) error {
-				return bgpSession.ListRoutes(bgp.FamilyEVPN, h)
+				return bgpSession.ListRoutes(bgp.FamilyEVPN, routeDemux.BuiltinSnapshotHandler(h))
 			})
 			if err != nil {
 				lg.Warn("EVPN loc-rib replay", zap.Error(err))
@@ -372,14 +380,26 @@ func run(cliCtx *cli.Context) error {
 				lg.Warn("BGP FIB cleanup failed", zap.Error(err))
 			}
 		}()
-		cancelSub, err := bgpSession.Subscribe("", applier.Apply)
-		if err != nil {
+		// One subscription per daemon, fanned out by the demux. The applier
+		// is consumer zero; later consumers (plugins) register with the same
+		// demux rather than opening their own watch. The demux drops
+		// local-origin paths on both the replay and the live stream, so this
+		// node's own advertisements never reach the applier.
+		routeDemux = demux.New(bgpSession, bgpSession, lg)
+		// Behaviors a plugin claims are withheld from the built-in applier,
+		// which would otherwise read an unrecognized codepoint as an
+		// ordinary service SID. Vinbero's own behaviors are not claimable.
+		routeDemux.SetClaimRegistry(demux.NewClaimRegistry(gobgp.BuiltinEndpointBehaviors()))
+		if _, err := routeDemux.RegisterBuiltin("applier", nil, applier.Apply); err != nil {
+			return fmt.Errorf("register BGP applier: %w", err)
+		}
+		if err := routeDemux.Start(); err != nil {
 			return fmt.Errorf("subscribe BGP routes: %w", err)
 		}
-		defer cancelSub()
+		defer routeDemux.Stop()
 
 		// Auto-advertise: the exporter enables each VRF binding with a
-		// redistribute set and starts watching. Starting after Subscribe means
+		// redistribute set and starts watching. Starting after the demux means
 		// its ListExisting replay advertises boot-time prefixes through an
 		// already-running advertiser; the deferred Stop withdraws them before
 		// the session drops.

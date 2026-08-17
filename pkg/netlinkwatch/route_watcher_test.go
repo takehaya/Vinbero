@@ -153,3 +153,58 @@ func TestHandleRouteDelMapsToWithdraw(t *testing.T) {
 		t.Errorf("prefix = %q", c.prefix.String())
 	}
 }
+
+// A sink added with AddSink receives route changes alongside the one the
+// watcher was built with, and stops once its remove func runs.
+func TestAddSinkFansOutAndRemoves(t *testing.T) {
+	primary := &fakeSink{}
+	w := NewRouteWatcher(primary, zap.NewNop())
+	if err := w.RegisterTable(100, []string{"connected"}); err != nil {
+		t.Fatalf("register table: %v", err)
+	}
+	extra := &fakeSink{}
+	remove := w.AddSink(extra)
+
+	route := newRoute(100, unix.RTPROT_KERNEL, mustIPNet(t, "192.0.2.0/24"))
+	w.handleRouteUpdate(netlink.RouteUpdate{Type: unix.RTM_NEWROUTE, Route: route})
+	if len(primary.calls) != 1 || len(extra.calls) != 1 {
+		t.Fatalf("fan-out incomplete: primary=%d extra=%d, want 1 each", len(primary.calls), len(extra.calls))
+	}
+
+	remove()
+	remove() // idempotent
+	w.handleRouteUpdate(netlink.RouteUpdate{Type: unix.RTM_NEWROUTE, Route: route})
+	if len(primary.calls) != 2 {
+		t.Errorf("primary sink stopped after the extra was removed: got %d, want 2", len(primary.calls))
+	}
+	if len(extra.calls) != 1 {
+		t.Errorf("removed sink still received routes: got %d, want 1", len(extra.calls))
+	}
+}
+
+// A watcher built with no sink still filters correctly and delivers to sinks
+// attached later.
+func TestNilPrimarySinkStillDeliversToAddedSink(t *testing.T) {
+	w := NewRouteWatcher(nil, zap.NewNop())
+	if err := w.RegisterTable(100, []string{"connected"}); err != nil {
+		t.Fatalf("register table: %v", err)
+	}
+	extra := &fakeSink{}
+	w.AddSink(extra)
+
+	w.handleRouteUpdate(netlink.RouteUpdate{
+		Type:  unix.RTM_NEWROUTE,
+		Route: newRoute(100, unix.RTPROT_KERNEL, mustIPNet(t, "192.0.2.0/24")),
+	})
+	if len(extra.calls) != 1 {
+		t.Fatalf("added sink received %d routes, want 1", len(extra.calls))
+	}
+	// The protocol allowlist still applies with no primary sink.
+	w.handleRouteUpdate(netlink.RouteUpdate{
+		Type:  unix.RTM_NEWROUTE,
+		Route: newRoute(100, unix.RTPROT_BGP, mustIPNet(t, "198.51.100.0/24")),
+	})
+	if len(extra.calls) != 1 {
+		t.Errorf("BGP-protocol route leaked to sink: got %d calls, want 1", len(extra.calls))
+	}
+}
