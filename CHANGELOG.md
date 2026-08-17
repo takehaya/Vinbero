@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.1.1](https://github.com/takehaya/Vinbero/compare/v0.1.0...v0.1.1) (2026-08-17)
+
+
+### 🎉 Features
+
+* **api:** expose the ECMP path groups over RPC and vbctl ([#123](https://github.com/takehaya/Vinbero/issues/123)) ([bf01efa](https://github.com/takehaya/Vinbero/commit/bf01efa257e8dc258e49c879bda2ab323458aa1b))
+* **bgp:** aggregate a VPN prefix's paths into one ECMP group ([#121](https://github.com/takehaya/Vinbero/issues/121)) ([135e362](https://github.com/takehaya/Vinbero/commit/135e362e297eb56fe761df8a7fa8b1b62df558e7))
+* **bgp:** carry per-path identity on received routes ([#119](https://github.com/takehaya/Vinbero/issues/119)) ([ec61332](https://github.com/takehaya/Vinbero/commit/ec613324c27cf26db77e22be0327dc618089965d))
+* **bpf:** End.AD dynamic proxy (service programming) ([#109](https://github.com/takehaya/Vinbero/issues/109)) ([f333baa](https://github.com/takehaya/Vinbero/commit/f333baabf1c381a2d989ca065199bb1e7b04ac72))
+* **bpf:** End.AM masquerading proxy (service programming) ([#110](https://github.com/takehaya/Vinbero/issues/110)) ([30f1fed](https://github.com/takehaya/Vinbero/commit/30f1fed9c9547c4ef1a9a4663419c192f313cba6))
+* **bpf:** End.AN for SR-aware services (service programming) ([#111](https://github.com/takehaya/Vinbero/issues/111)) ([e28e5db](https://github.com/takehaya/Vinbero/commit/e28e5dbcfb11fb0fab9fe8ed9a79f62f797a7e33))
+* **bpf:** End.AS static proxy (service programming) ([#108](https://github.com/takehaya/Vinbero/issues/108)) ([91b5565](https://github.com/takehaya/Vinbero/commit/91b55652401e50bdbdf50f2cc0c2b26b038ae330))
+* **bpf:** service programming return-path base (End.AS/AD/AM/AN groundwork) ([#107](https://github.com/takehaya/Vinbero/issues/107)) ([b851fa1](https://github.com/takehaya/Vinbero/commit/b851fa17d42fc2e6f71259dcd86299f71f1df053))
+* **evpn:** decode RT1 Ethernet A-D routes ([#125](https://github.com/takehaya/Vinbero/issues/125)) ([8526d74](https://github.com/takehaya/Vinbero/commit/8526d745afd00d9797c61886a94704035022e913))
+* **evpn:** RT1 aliasing で multi-homed segment を ECMP group に集約する ([#127](https://github.com/takehaya/Vinbero/issues/127)) ([005e1a5](https://github.com/takehaya/Vinbero/commit/005e1a56da7bc36aa6e089de10ae9324dc4d4093))
+* **evpn:** RT1 Ethernet A-D を advertise し aliasing を interop 検証する ([#130](https://github.com/takehaya/Vinbero/issues/130)) ([12f11bb](https://github.com/takehaya/Vinbero/commit/12f11bbd0d95435b2647ba86a2d3a973ee412574))
+* **fib:** install multipath kernel routes ([#122](https://github.com/takehaya/Vinbero/issues/122)) ([4077c9d](https://github.com/takehaya/Vinbero/commit/4077c9dbc952ad128e99a3fd01fb560bdc84cb66))
+* **interop:** ecmp-2site シナリオで path group と prober を E2E 検証する ([#129](https://github.com/takehaya/Vinbero/issues/129)) ([fbb9a8a](https://github.com/takehaya/Vinbero/commit/fbb9a8a9f622d02efa8189417413422c25807a7f))
+* **prober:** SR Policy transport を probe の journey に反映する ([#131](https://github.com/takehaya/Vinbero/issues/131)) ([1312f3f](https://github.com/takehaya/Vinbero/commit/1312f3fbd15abe314d2df4a91105684ffdecfdf4))
+* **prober:** SRv6 self-probe で ECMP path の生死を検知し fast reroute する ([#128](https://github.com/takehaya/Vinbero/issues/128)) ([11f87a4](https://github.com/takehaya/Vinbero/commit/11f87a441c4a37bbfe35b7b6c37fb1f1783d6b76))
+* **service-programming:** re-derive return-path outer flow label from inner flow ([#117](https://github.com/takehaya/Vinbero/issues/117)) ([55d1d7c](https://github.com/takehaya/Vinbero/commit/55d1d7cd251f164db0b57eaa12872e1a88c0259d))
+* **srpolicy:** decode every weighted Segment List ([#124](https://github.com/takehaya/Vinbero/issues/124)) ([9a0be0c](https://github.com/takehaya/Vinbero/commit/9a0be0cc558d3b793ff66e629e81af1a8f784eab))
+* **stats:** per-slot invocation counters for service-return behaviors ([#116](https://github.com/takehaya/Vinbero/issues/116)) ([b00a1b6](https://github.com/takehaya/Vinbero/commit/b00a1b6baf54935e0144595acb85a487e617ffc8))
+
+
+### 🐛 Bug Fixes
+
+* **bpf:** harden service programming (OCR review follow-up) ([#112](https://github.com/takehaya/Vinbero/issues/112)) ([f8f050f](https://github.com/takehaya/Vinbero/commit/f8f050f7a0ea76ad26b2e92b29ed5323a2a28c80))
+* **bpf:** service programming return-path dataplane correctness (review follow-up 3) ([#114](https://github.com/takehaya/Vinbero/issues/114)) ([5337b5d](https://github.com/takehaya/Vinbero/commit/5337b5d2812ec7e82d84872d3b734026b032d32f))
+* **interop:** l3vpn-2site の connected locator hack による RA 毒経路を除去する ([#132](https://github.com/takehaya/Vinbero/issues/132)) ([6b349ee](https://github.com/takehaya/Vinbero/commit/6b349ee07cfc4a3a3b29a9629badb7e83c5b4804))
+* **sdk:** Go SDK の aux helper が使えない drift を直す ([#136](https://github.com/takehaya/Vinbero/issues/136)) ([e0b9f15](https://github.com/takehaya/Vinbero/commit/e0b9f15eac2188f66084035ac74b65234d6a5cf2))
+* **server:** close proxy circuit lifecycle gaps from the review ([#113](https://github.com/takehaya/Vinbero/issues/113)) ([a888631](https://github.com/takehaya/Vinbero/commit/a88863109f23d7ed59129c5e8fddc39c23f47531))
+* **srpolicy:** do not reuse policy ids a restart left referenced ([#120](https://github.com/takehaya/Vinbero/issues/120)) ([e63aa03](https://github.com/takehaya/Vinbero/commit/e63aa0311e1f20a68af351a2f9f27daf716aa11c))
+
+
+### 📝 Documentation
+
+* **readme:** scope the interop bullet to the CI scenarios ([#105](https://github.com/takehaya/Vinbero/issues/105)) ([748d637](https://github.com/takehaya/Vinbero/commit/748d63783e00a3c2e33030a891d67a72ab49dd22))
+
+
+### 🔧 Miscellaneous Chores
+
+* gitignore docs/plan so working notes cannot be committed ([#118](https://github.com/takehaya/Vinbero/issues/118)) ([b5fb952](https://github.com/takehaya/Vinbero/commit/b5fb952bb23172345a1870faf6c0206225b36012))
+
 ## [0.1.0](https://github.com/takehaya/Vinbero/compare/v0.0.10...v0.1.0) (2026-07-12)
 
 
