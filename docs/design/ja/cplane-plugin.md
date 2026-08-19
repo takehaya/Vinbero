@@ -565,18 +565,15 @@ Copilot が行数上限でレビューできないためです。以後の追加
 | `cplane-plugin-1-foundation` | BGP demux と behavior claim の土台 |
 | `cplane-plugin-2-runtime` | WASM runtime と desired-set apply |
 | `cplane-plugin-phase-a` | advertise / local SID / capability / quota / interop |
+| `cplane-plugin-b1` | scope / vinbero 自身の producer 分離 / eBPF half を持つ interop |
 
 次に足す候補は次のとおりです。
 
 - EVPN と MUP の desired set (上記の前提を揃えてから)。
 - Rust の SDK shim。
-- interop lab の拡張。lab は現状 far end が built-in の End.DT4 で終端するので、
-  SID 確保と plugin 自身の slot への dispatch は覆っていません。eBPF half を
-  持つ lab にすると一周を実機で確認できます。
-- vinbero 自身の広告元の分離。auto-advertise の exporter と operator の RPC は
-  bare session を共有しているので、producer としては 1 つです。互いの経路を
-  取り合える点は以前からの挙動で、分けると衝突時の振る舞いが変わるため、
-  この機構とは別の変更として扱います。
+- EVPN advertise の producer 分離。exporter と operator の RPC の 2 つの書き手が
+  あるのに無名の producer を共有しています。EVPN の withdraw は producer を
+  見ずに path を消すので、名前を付けるだけでは足りません。
 
 ## 参照
 

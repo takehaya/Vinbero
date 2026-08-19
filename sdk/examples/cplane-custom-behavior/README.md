@@ -129,7 +129,10 @@ deployments, so one build serves all of them:
 There are three ways to run it, and the config picks between them:
 
 - **Allocating.** Set the locator and the slot. The plugin asks the host
-  for a SID, is told the address, and advertises the prefix behind it.
+  for a SID, is told the address, and advertises the prefix behind it. The
+  slot is where its eBPF half lives; [`../plugin-custom-behavior`](../plugin-custom-behavior)
+  is that half, and the two are exercised together by the
+  `cplane-plugin-2site` interop scenario.
 - **Advertising a SID it was given.** Set field 6 instead. Nothing is
   allocated and the locator and the slot are not needed: the address
   already exists, and something else put it in the data plane.

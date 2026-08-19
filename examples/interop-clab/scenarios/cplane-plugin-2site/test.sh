@@ -39,11 +39,18 @@ CE_OSAKA_ADDR=10.2.0.10
 TOKYO_LOOPBACK=2001:db8:ff::1
 OSAKA_LOOPBACK=2001:db8:ff::2
 
-# The SID pe-osaka's plugin advertises, and the behavior codepoint it
-# stamps into the SID TLV. 0xFE01 is outside the standardized space on
-# purpose: vinbero refuses a claim on any behavior it implements itself.
-PLUGIN_SID=fd00:200:0:1::
+# The behavior codepoint pe-osaka's plugin stamps into the SID TLV.
+# 0xFE01 is outside the standardized space on purpose: vinbero refuses a
+# claim on any behavior it implements itself.
 PLUGIN_BEHAVIOR=0xFE01
+
+# The block the plugin allocates its SID from, and the eBPF slot that SID
+# dispatches to. The address itself is not spelled here: the plugin asks
+# for one and the daemon picks it, which is the half of the mechanism this
+# scenario exists to exercise. Asserting a fixed address would quietly
+# turn into asserting the allocator's first choice.
+PLUGIN_LOCATOR_BLOCK=fd00:200:
+PLUGIN_SLOT=32
 
 pass=0
 fail=0
@@ -139,14 +146,19 @@ else
     dexec "$PE_TOKYO" grep -i "plugin" /var/log/vinberod.log | tail -20 || true
 fi
 
-# It must steer into the SID the plugin advertised, not somewhere else.
-seg=$(dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
+# It must steer into the SID the plugin advertised, which is the address
+# pe-osaka's daemon allocated for it. This is where the two halves meet, so
+# the rest of the checks are written against what the wire actually says.
+PLUGIN_SID=$(dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
     | awk -v p="$OSAKA_PREFIX" '$1==p {print $NF}')
-if [ "$seg" = "$PLUGIN_SID" ]; then
-    ok "it steers into the advertised SID $PLUGIN_SID"
-else
-    ng "it steers into '$seg', want $PLUGIN_SID"
-fi
+case "$PLUGIN_SID" in
+    "$PLUGIN_LOCATOR_BLOCK"*)
+        ok "it steers into $PLUGIN_SID, an address out of the plugin's locator"
+        ;;
+    *)
+        ng "it steers into '$PLUGIN_SID', want an address in $PLUGIN_LOCATOR_BLOCK"
+        ;;
+esac
 
 # And the plugin is what put it there. The daemon logs the reconcile of a
 # plugin's declared set separately from anything its own appliers do.
@@ -156,6 +168,41 @@ if dexec "$PE_TOKYO" grep -q "plugin desired set applied" /var/log/vinberod.log 
 else
     ng "no plugin declaration was applied on pe-tokyo"
     dexec "$PE_TOKYO" grep -i "plugin" /var/log/vinberod.log | tail -20 || true
+fi
+
+# --- 3b. pe-osaka: the plugin's own SID dispatches to its own slot ---------
+echo ""
+echo "[3b] pe-osaka: the SID the plugin was given dispatches to its eBPF half"
+
+# The daemon allocated the address, so nothing in the config names it. What
+# is asserted is the chain: the plugin asked for a SID from its locator,
+# the daemon installed a dispatch entry for it, and that entry points at
+# the slot the plugin's own eBPF program occupies.
+if retry bash -c "docker exec $PE_OSAKA vbctl sid list 2>/dev/null | grep -q '${PLUGIN_SID}/128'"; then
+    ok "pe-osaka installed a dispatch entry for ${PLUGIN_SID}"
+    dexec "$PE_OSAKA" vbctl sid list | sed 's/^/      /'
+else
+    ng "pe-osaka has no dispatch entry for ${PLUGIN_SID}"
+    dexec "$PE_OSAKA" vbctl sid list || true
+    dexec "$PE_OSAKA" grep -i "local sid\|plugin" /var/log/vinberod.log | tail -20 || true
+fi
+
+action=$(dexec "$PE_OSAKA" vbctl sid list 2>/dev/null \
+    | awk -v p="${PLUGIN_SID}/128" '$1==p {print $2}')
+if [ "$action" = "$PLUGIN_SLOT" ]; then
+    ok "it dispatches to endpoint slot $PLUGIN_SLOT, the plugin's own"
+else
+    ng "it dispatches to '$action', want slot $PLUGIN_SLOT"
+fi
+
+# The eBPF half is loaded in that slot, so the dispatch has somewhere to
+# land. Without it the SID would be an address that drops what reaches it.
+if dexec "$PE_OSAKA" vbctl plugin list 2>/dev/null | grep -q "plugin_custom_behavior"; then
+    ok "the plugin's eBPF half occupies the slot"
+    dexec "$PE_OSAKA" vbctl plugin list | sed 's/^/      /'
+else
+    ng "no eBPF plugin is loaded on pe-osaka"
+    dexec "$PE_OSAKA" vbctl plugin list || true
 fi
 
 # The claim is what kept vinbero's own applier off it. An applier that had
@@ -182,9 +229,9 @@ else
 fi
 
 if retry bash -c "docker exec $PE_OSAKA vbctl sid list 2>/dev/null | grep -q '${PLUGIN_SID}/128'"; then
-    echo "  gate: pe-osaka End.DT4 endpoint present"
+    echo "  gate: pe-osaka holds the SID its plugin was given"
 else
-    ng "gate: pe-osaka End.DT4 endpoint missing"
+    ng "gate: pe-osaka does not hold ${PLUGIN_SID}"
     dexec "$PE_OSAKA" vbctl sid list || true
 fi
 
@@ -216,6 +263,19 @@ else
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" || true
     dexec "$PE_TOKYO" vbctl headend-v4 list || true
     dexec "$PE_OSAKA" vbctl sid list || true
+fi
+
+# The packets got there through the plugin's own slot, not by some other
+# path that happens to reach ce-osaka. The per-slot invocation counter is
+# bumped for the slot the dispatcher chose, so a non-zero count for slot
+# 32 is the data plane saying it ran the plugin's program.
+slot_pkts=$(dexec "$PE_OSAKA" vbctl stats slot show --type endpoint --plugin-only 2>/dev/null \
+    | awk -v s="$PLUGIN_SLOT" '$2==s {print $4}')
+if [ -n "$slot_pkts" ] && [ "$slot_pkts" -gt 0 ] 2>/dev/null; then
+    ok "endpoint slot $PLUGIN_SLOT forwarded $slot_pkts packets"
+else
+    ng "endpoint slot $PLUGIN_SLOT forwarded nothing, so the ping took another path"
+    dexec "$PE_OSAKA" vbctl stats slot show --type endpoint --plugin-only || true
 fi
 
 # --- 5. unregistering takes the plugin's state with it ---------------------

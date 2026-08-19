@@ -70,6 +70,11 @@ topology:
         - vinbero-osaka/vinbero.yml:/vinbero.yml
         - vinbero-osaka/start.sh:/start.sh
         - ../../../../sdk/examples/cplane-custom-behavior/plugin.wasm:/plugin.wasm
+        # The eBPF half of the same behavior. The control-plane plugin
+        # allocates a SID pointing at the slot this object occupies, so
+        # this is where a packet steered into that SID ends up. Built by
+        # the scenario's build.sh, which `make build` runs.
+        - ../../../../sdk/examples/plugin-custom-behavior/plugin.o:/plugin.o
       exec:
         - bash /start.sh
 
