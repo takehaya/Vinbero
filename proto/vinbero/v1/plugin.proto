@@ -208,6 +208,45 @@ message CplanePluginRegisterRequest {
   // tick is a call into a sandbox under the same budget as an event, so a
   // plugin cannot ask to be woken faster than the daemon will oblige.
   uint32 tick_interval_ms = 6;
+  // Scope is the region of each key space this plugin may name. A
+  // capability says what kind of thing it may declare; the scope says
+  // which ones. Both are required to write anything: an unset scope
+  // leaves a plugin that can observe and log, whatever it was granted.
+  CplanePluginScope scope = 8;
+}
+
+// CplanePluginScope bounds what a plugin may name.
+//
+// Owner tags and leases stop one writer from taking a key another holds,
+// but every surface here is one where a new key can outrank an existing
+// one: a longer trigger prefix wins the LPM lookup, a more specific route
+// wins at the receiving PE. Ownership is per object and cannot express
+// that, so the region a plugin may write into is stated separately.
+message CplanePluginScope {
+  // Locators are the SRv6 locators this plugin may allocate local SIDs
+  // from, by the name they were configured under. They also bound which
+  // IPv6 unicast prefixes it may advertise: what a plugin legitimately
+  // originates there is its own SID space.
+  repeated string locators = 1;
+  // Vrfs are the VRFs this plugin may originate VPN routes into, by name.
+  // The route distinguisher and the route targets come from the VRF's
+  // binding rather than from the plugin, so a plugin cannot name a VPN it
+  // was not given.
+  repeated string vrfs = 2;
+  // HeadendPrefixes bound the trigger prefixes this plugin may install
+  // headend entries for, in CIDR form. A declared prefix must be
+  // contained in one of them.
+  //
+  // This is the one surface with no name to bind to: the headend maps are
+  // keyed on the destination prefix alone, with no VRF and no locator in
+  // the key, so the region has to be spelled out.
+  repeated string headend_prefixes = 3;
+  // HeadendSlots and EndpointSlots are the plugin PROG_ARRAY slots this
+  // plugin's own data-plane half occupies (16-31 and 32-63). A plugin
+  // pointing an entry at another plugin's slot would have its aux bytes
+  // read under a layout that does not describe them.
+  repeated uint32 headend_slots = 4;
+  repeated uint32 endpoint_slots = 5;
 }
 
 message CplanePluginRegisterResponse {
@@ -273,6 +312,11 @@ message CplanePluginStat {
   // and are being retried in the background. A plugin stuck this way looks
   // idle in every other counter here.
   uint32 pending_declarations = 16;
+  // Scope is the region of each key space it may name. It is reported
+  // beside the capabilities for the same reason they are: what a plugin
+  // is allowed to do should be readable without fetching the
+  // registration back.
+  CplanePluginScope scope = 17;
 }
 
 // UnrestoredCplanePlugin is a plugin the store held that would not start.

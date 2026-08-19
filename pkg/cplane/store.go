@@ -48,7 +48,17 @@ type manifest struct {
 	Families     []string `json:"families,omitempty"`
 	Behaviors    []uint16 `json:"behaviors,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
-	TickMillis   int64    `json:"tick_millis,omitempty"`
+	// Scope is persisted with the capabilities because it is half of the
+	// same statement: a plugin restored with its capabilities and without
+	// its scope would come back able to declare nothing, and one restored
+	// the other way round would come back able to write where it was
+	// never allowed.
+	Locators        []string `json:"locators,omitempty"`
+	VRFs            []string `json:"vrfs,omitempty"`
+	HeadendPrefixes []string `json:"headend_prefixes,omitempty"`
+	HeadendSlots    []uint32 `json:"headend_slots,omitempty"`
+	EndpointSlots   []uint32 `json:"endpoint_slots,omitempty"`
+	TickMillis      int64    `json:"tick_millis,omitempty"`
 	// Limits are persisted too, so a plugin registered with a budget of
 	// its own comes back with it rather than silently on the defaults.
 	MaxModuleBytes int    `json:"max_module_bytes,omitempty"`
@@ -115,18 +125,23 @@ func (s *Store) Save(reg Registration) error {
 	}
 
 	m := manifest{
-		Version:        storeManifestVersion,
-		Name:           reg.Name,
-		Config:         reg.Config,
-		Behaviors:      reg.Behaviors,
-		Capabilities:   reg.Capabilities.Names(),
-		TickMillis:     reg.TickInterval.Milliseconds(),
-		MaxModuleBytes: reg.Limits.MaxModuleBytes,
-		MaxMemoryPages: reg.Limits.MaxMemoryPages,
-		CallTimeoutMs:  reg.Limits.CallTimeout.Milliseconds(),
-		MaxBufferBytes: reg.Limits.MaxBufferBytes,
-		Module:         moduleFile,
-		SavedAt:        time.Now().UTC().Format(time.RFC3339),
+		Version:         storeManifestVersion,
+		Name:            reg.Name,
+		Config:          reg.Config,
+		Behaviors:       reg.Behaviors,
+		Capabilities:    reg.Capabilities.Names(),
+		Locators:        reg.Scope.Locators,
+		VRFs:            reg.Scope.VRFs,
+		HeadendPrefixes: reg.Scope.HeadendPrefixStrings(),
+		HeadendSlots:    reg.Scope.HeadendSlots,
+		EndpointSlots:   reg.Scope.EndpointSlots,
+		TickMillis:      reg.TickInterval.Milliseconds(),
+		MaxModuleBytes:  reg.Limits.MaxModuleBytes,
+		MaxMemoryPages:  reg.Limits.MaxMemoryPages,
+		CallTimeoutMs:   reg.Limits.CallTimeout.Milliseconds(),
+		MaxBufferBytes:  reg.Limits.MaxBufferBytes,
+		Module:          moduleFile,
+		SavedAt:         time.Now().UTC().Format(time.RFC3339),
 	}
 	for _, f := range reg.Families {
 		m.Families = append(m.Families, string(f))
@@ -433,6 +448,11 @@ func (s *Store) load(name string) (Registration, error) {
 		return Registration{}, fmt.Errorf("cplane store: manifest for %q: %w", name, err)
 	}
 	reg.Capabilities = caps
+	scope, err := ParseScope(m.Locators, m.VRFs, m.HeadendPrefixes, m.HeadendSlots, m.EndpointSlots)
+	if err != nil {
+		return Registration{}, fmt.Errorf("cplane store: manifest for %q: %w", name, err)
+	}
+	reg.Scope = scope
 	return reg, nil
 }
 

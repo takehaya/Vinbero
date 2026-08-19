@@ -121,7 +121,7 @@ deployments, so one build serves all of them:
 | 1 | the endpoint behavior codepoint to claim |
 | 2 | the locator to take a local SID from |
 | 3 | the prefix to advertise behind that SID |
-| 4 | the route distinguisher to advertise it with |
+| 4 | the VRF to advertise it into |
 | 5 | the eBPF slot the SID dispatches to |
 | 6 | a SID to advertise as given, instead of allocating one |
 | 7 | the next hop to advertise the prefix with |
@@ -140,6 +140,11 @@ There are three ways to run it, and the config picks between them:
 Fields 3, 4 and 7 are what the advertisement is made of, so the two
 advertising modes need all three. The daemon refuses an advertisement with
 no next hop rather than guessing one.
+
+The VRF has to be one the plugin's registration lists in its scope, and the
+route distinguisher and route targets come from that VRF's binding rather
+than from this config. A plugin cannot name them: they are what decides
+which VPN a peer imports the route into.
 
 ## Notes on the code
 

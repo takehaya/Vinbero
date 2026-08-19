@@ -56,11 +56,11 @@ const (
 	fieldEntrySegments      = 2
 	// PluginAdvertisedRoute
 	fieldAdvFamily   = 1
-	fieldAdvRD       = 2
 	fieldAdvPrefix   = 3
 	fieldAdvSID      = 4
 	fieldAdvBehavior = 5
 	fieldAdvNextHop  = 7
+	fieldAdvVRF      = 8
 	// PluginLocalSid
 	fieldLocalSidName    = 1
 	fieldLocalSidLocator = 2
@@ -69,7 +69,7 @@ const (
 	fieldConfigBehavior = 1
 	fieldConfigLocator  = 2
 	fieldConfigPrefix   = 3
-	fieldConfigRD       = 4
+	fieldConfigVRF      = 4
 	fieldConfigSlot     = 5
 	fieldConfigAdvSID   = 6
 	fieldConfigNextHop  = 7
@@ -96,12 +96,12 @@ const (
 const localSIDName = "self"
 
 // The deployment-specific half of what this plugin does: which locator to
-// take its SID from, which prefix to advertise behind it, and which slot
-// its data-plane half occupies. All of it comes from the config blob, so
+// take its SID from, which VRF and prefix to advertise behind it, and
+// which slot its data-plane half occupies. All of it comes from the config blob, so
 // one build serves every deployment.
 var (
 	locatorName   string
-	advertiseRD   string
+	advertiseVRF  string
 	advertisePfx  string
 	dataPlaneSlot uint64
 	// allocatedSID is the address the host gave this plugin, empty until
@@ -256,10 +256,10 @@ func configure(ptr, length int32) int32 {
 			var b []byte
 			b, ok = r.bytes()
 			advertisePfx = string(b)
-		case field == fieldConfigRD && wire == wireBytes:
+		case field == fieldConfigVRF && wire == wireBytes:
 			var b []byte
 			b, ok = r.bytes()
-			advertiseRD = string(b)
+			advertiseVRF = string(b)
 		case field == fieldConfigSlot && wire == wireVarint:
 			dataPlaneSlot, ok = r.varint()
 		case field == fieldConfigAdvSID && wire == wireBytes:
@@ -463,12 +463,12 @@ func declareLocalSID() {
 // configured prefix, reachable at the SID it was given, named with its own
 // behavior codepoint.
 func advertiseSelf() {
-	if allocatedSID == "" || advertisePfx == "" || advertiseRD == "" {
+	if allocatedSID == "" || advertisePfx == "" || advertiseVRF == "" {
 		return
 	}
 	var route writer
 	route.putString(fieldAdvFamily, "vpnv4")
-	route.putString(fieldAdvRD, advertiseRD)
+	route.putString(fieldAdvVRF, advertiseVRF)
 	route.putString(fieldAdvPrefix, advertisePfx)
 	route.putString(fieldAdvSID, allocatedSID)
 	route.putTag(fieldAdvBehavior, wireVarint)

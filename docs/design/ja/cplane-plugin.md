@@ -3,7 +3,7 @@
 Vinbero の control plane を第三者が拡張するための機構です。data plane
 plugin が eBPF bytecode を受け取るのに対し、control plane plugin は
 WebAssembly module を受け取ります。どちらも daemon に upload され、登録時
-に検証され、宣言した capability の範囲でだけ動きます。
+に検証され、宣言した capability と scope の範囲でだけ動きます。
 
 ## 何のためにあるか
 
@@ -146,6 +146,9 @@ set は owner ごとに差分を取るので、2 owner が同じ key を宣言�
 ます。BPF map については per-entry owner map が最終的な enforcement で、
 lease は早期に、相手の名前を添えて落とすための前線です。
 
+owner と lease が扱うのは同じ key の奪い合いだけです。他人の key に触れずに
+それより強い key を作る形は別の問題で、scope の章で扱います。
+
 ## ABI
 
 境界を渡るのは linear memory 上の byte buffer で、構造は protobuf が持ち
@@ -207,6 +210,74 @@ granted された plugin が同じ扉から headend の transaction を開けま
 何も granted されていない plugin も登録できます。観測と log だけをする
 plugin は実際に有用で、それが capability を宣言しなかった plugin の安全な
 既定です。
+
+## scope
+
+capability は種類しか絞りません。どこに書いてよいかを決めるのが scope で、
+両方が揃わないと plugin は何も書けません。scope を宣言しなかった登録は、
+capability が何であれ観測と log だけをする plugin になります。
+
+scope が必要なのは、owner tag と lease が守るのが「他人が持っている鍵を
+上書きしないこと」だけだからです。この 3 面はどれも、他人の鍵に触れずに
+それより強い鍵を新しく作れます。headend map は LPM trie なので長い prefix が
+lookup に勝ち、VPN 経路は受信側の PE で more specific が勝ちます。所有は
+object 単位の性質なので、この形は表現できません。
+
+| 宣言 | 範囲 | 理由 |
+|---|---|---|
+| `local_sid` | locator 名の集合 | 宣言が locator 名を持ち、割り当ては `pkg/locator` が管理する |
+| advertise の vpnv4 と vpnv6 | VRF 名の集合 | RD と RT を binding から導出する |
+| advertise の ipv6_unicast | 許可された locator の配下 | plugin がここで広告する正当なものは自分の SID である |
+| `headend` | trigger prefix の list | 縛れる名前が存在しない |
+
+加えて、plugin が所有する PROG_ARRAY slot を headend と endpoint それぞれ
+について宣言します。plugin A が plugin B の slot に entry を向けると、B の
+program は A の aux bytes を自分の layout として読むためです。
+
+### VPN 広告は照合ではなく導出
+
+plugin は VRF 名だけを宣言し、RD と RT は host が binding から埋めます。
+輸入を決めるのは RD ではなく RT なので、RD だけを照合しても余分な RT を
+付ければ束縛されていない VRF に経路を注入できます。導出にすると、その経路が
+構造として消え、RD の表記揺れを scope 側で正規化する必要も無くなります。
+宣言に RD や RT が入っていたら、黙って無視せず拒否します。
+
+binding が受信専用で RD を持たない場合は、その VRF への広告を拒否します。
+operator が選んでいない RD で経路を出すことになるためです。
+
+binding の `MaxPrefixes` は plugin の広告にも適用します。VRF を渡すことが
+無制限の VRF を渡すことにならないようにするためです。
+
+### headend だけ prefix で縛る
+
+`headend_v4_map` の key は `lpm_key_v4` で prefixlen と addr しか持たず、
+VRF も locator も key に入りません。名前で縛れる対象が無いので、operator が
+prefix を並べます。未指定なら headend の宣言を拒否するので、`::/0` の
+catch-all は書けません。
+
+将来は「claim した behavior で自分に配送された経路の prefix」を scope の
+要素として並べられるようにする余地を残しています。いまは採っていません。
+demux の絞り込みが family と claim だけで import RT を見ないため配送集合が
+built-in の処理対象より広く、withdraw で縮み restart で作り直す派生状態でも
+あるからです。
+
+### 検査する場所
+
+scope は chunk を decode した時点ではなく、集合を apply する時点で検査します。
+scope が参照する locator と VRF binding は daemon 起動後に RPC で登録される
+ので、restore された plugin がそれらより先に宣言するのは普通に起きます。
+apply 時に失敗させれば、既存の retry 機構がそのまま修復に使えます。
+
+範囲外の要素が 1 つでもあれば集合ごと拒否します。宣言は集合についての表明
+なので、残りを適用すると plugin が求めていない状態を入れることになります。
+
+### scope を狭めたとき
+
+狭める操作だけは desired-set の模型では直りません。plugin が同じ宣言を
+続けると集合ごと拒否されるので reconcile が走らず、広い scope の下で書いた
+状態が残ります。そこで再登録の時点で host が範囲外の状態を prune します。
+実装は「まだ許される部分集合を desired set として apply する」形で、残りは
+既存の reconcile が落とします。
 
 ## claim と built-in state の関係
 
@@ -291,6 +362,14 @@ instance を作り直して収束するので転送は保たれますが、隔�
 map が大きい環境で plugin を多数動かす場合は、call budget を map の規模に
 見合う値に上げてください。
 
+binding の `MaxPrefixes` は、plugin の広告と auto-advertise の広告を別々に
+数えます。exporter の経路数は `pkg/bgp/export` の側にあってここからは見えない
+ためで、両方が動く VRF はそれぞれの上限まで持てます。
+
+conformance harness は scope のうち daemon 無しで判定できる部分だけを見ます。
+prefix が locator に含まれるかと、VRF に binding があるかは daemon の状態に
+依存するので harness では判定しません。
+
 ## 登録時の検証
 
 module は allowlist で検証します。
@@ -301,6 +380,11 @@ module は allowlist で検証します。
 - ABI version が一致すること。
 - `_start` の自動実行は無効化し、reactor initializer だけを host が明示的
   に呼びます。
+
+capability と scope の食い違いも登録時に弾きます。`headend` を granted しな
+がら headend prefix を並べていない登録は、plugin が動いて宣言し、その宣言が
+全部拒否されるという形で失敗します。壊れた plugin のように見えるので、
+operator の手元で断ります。
 
 ## lifecycle
 
@@ -372,16 +456,20 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 
 ```sh
 vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
-    --behavior 0xFE01 --family vpnv4 --capability headend
+    --behavior 0xFE01 --family vpnv4 \
+    --capability headend --capability advertise --capability local_sid \
+    --locator main --vrf vpn-a \
+    --headend-prefix 10.7.0.0/16 --endpoint-slot 33
 vbctl plugin cplane list
 vbctl plugin cplane stats
 vbctl plugin cplane unregister --name custom-behavior
 ```
 
-capability は省略できますが、省略した plugin は何も宣言できません。observe と
-log しかしない plugin はそれで正しく、宣言する plugin には必要なものを与えます。
-`stats` は動いている plugin と、restore に失敗して claim だけ残っている plugin の
-両方を出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
+capability と scope はどちらも省略できますが、片方でも欠けた plugin は何も
+宣言できません。observe と log しかしない plugin はそれで正しく、宣言する
+plugin には両方を与えます。`stats` は動いている plugin と、restore に失敗して
+claim だけ残っている plugin の両方を出し、scope は本体の表とは別の block に
+出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
 
 behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint を hex で
 振っているので、0x0013 を 10 進の 13 と読むと別の behavior を claim して

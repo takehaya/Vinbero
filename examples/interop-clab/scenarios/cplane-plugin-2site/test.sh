@@ -92,6 +92,27 @@ else
     dexec "$PE_TOKYO" grep -i "capabilit" /var/log/vinberod.log | tail -5 || true
 fi
 
+# The capability says what it may do; the scope says where. pe-tokyo's
+# plugin may install headend entries only inside 10.2.0.0/16, so it cannot
+# write a longer prefix over traffic this node already forwards -- which
+# would win on longest match without ever touching the entry it shadows.
+if dexec "$PE_TOKYO" vbctl plugin cplane stats 2>/dev/null | grep -q '10.2.0.0/16'; then
+    ok "pe-tokyo's plugin is scoped to 10.2.0.0/16"
+else
+    ng "pe-tokyo's plugin scope is not reported"
+    dexec "$PE_TOKYO" vbctl plugin cplane stats || true
+fi
+
+# pe-osaka's plugin may originate only into vrf-cust, and it never names
+# the route distinguisher: that comes from the VRF's binding, because the
+# route targets are what decide which VRF a peer imports the route into.
+if dexec "$PE_OSAKA" vbctl plugin cplane stats 2>/dev/null | grep -q 'vrf-cust'; then
+    ok "pe-osaka's plugin is scoped to vrf-cust"
+else
+    ng "pe-osaka's plugin scope is not reported"
+    dexec "$PE_OSAKA" vbctl plugin cplane stats || true
+fi
+
 # --- 2. the plugin originated a route with its own behavior ----------------
 echo ""
 echo "[2] pe-osaka: the plugin originated $OSAKA_PREFIX"

@@ -44,6 +44,16 @@ a route and pe-osaka's cannot write forwarding state -- not as a check
 they might get past, but because the host functions for what they were not
 granted are never linked into their modules.
 
+Each is also given a scope, which says where that capability may be
+exercised. pe-tokyo's plugin may install headend entries only inside
+10.2.0.0/16, so it cannot write a longer prefix over traffic this node
+already forwards -- the headend maps are keyed on the destination alone, so
+that would win on longest match without ever touching the entry it shadows.
+pe-osaka's plugin may originate only into `vrf-cust`, and the route
+distinguisher and route targets come from that VRF's binding rather than
+from the plugin: the route targets are what decide which VRF a peer imports
+the route into.
+
 ## Why both ends are Vinbero
 
 Every other scenario here peers vinbero against an independent

@@ -236,7 +236,12 @@ message PluginHeadendEntry {
 message PluginAdvertisedRoute {
   // Family is the operator-facing name: "vpnv4", "vpnv6", "ipv6_unicast".
   string family = 1;
-  // RouteDistinguisher, required for the VPN families.
+  // Rd is no longer declared by the plugin. The route distinguisher and
+  // the route targets are derived from the binding of the VRF named
+  // below, because the route targets are what decide which VRF a peer
+  // imports the route into: a plugin able to name them could put a route
+  // in a VPN it was never given. Setting either is refused rather than
+  // ignored, so a plugin built against the older shape is told.
   string rd = 2;
   // Prefix in CIDR form. It is normalized before use, so 10.0.0.1/24 and
   // 10.0.0.0/24 are the same route rather than two.
@@ -252,13 +257,18 @@ message PluginAdvertisedRoute {
   // The codepoint travels in the SID TLV, so setting it without a
   // srv6_sid is refused rather than quietly dropped.
   uint32 endpoint_behavior = 5;
-  // RouteTargets to attach.
+  // RouteTargets are derived from the VRF binding; see rd above.
   repeated string route_targets = 6;
   // NextHop to advertise. Required: the daemon has no defensible guess at
   // it, because its encap source is a locator address and not necessarily
   // an address peers can route to, and picking one silently would
   // advertise a route they cannot follow.
   string next_hop = 7;
+  // Vrf names the VRF a VPN route is originated into, and must be one the
+  // plugin's scope lists. The RD and the route targets come from that
+  // VRF's binding. An ipv6_unicast route belongs to no VRF, so naming one
+  // there is refused.
+  string vrf = 8;
 }
 
 // PluginLocalSid is one local SID the plugin wants to exist.

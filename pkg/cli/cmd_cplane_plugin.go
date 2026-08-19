@@ -42,6 +42,30 @@ func cplaneSubcommand() *cli.Command {
 						Usage: "What the plugin may do (repeatable): headend, advertise, local_sid. " +
 							"Omit to run it able only to observe and to log",
 					},
+					&cli.StringSliceFlag{
+						Name: "locator",
+						Usage: "Locator the plugin may allocate local SIDs from (repeatable). " +
+							"It also bounds the IPv6 unicast prefixes it may advertise",
+					},
+					&cli.StringSliceFlag{
+						Name: "vrf",
+						Usage: "VRF the plugin may originate VPN routes into (repeatable). " +
+							"The route distinguisher and route targets come from that VRF's binding",
+					},
+					&cli.StringSliceFlag{
+						Name: "headend-prefix",
+						Usage: "Prefix the plugin may install headend entries inside (repeatable, CIDR). " +
+							"The headend maps are keyed on the destination alone, so this is the only " +
+							"thing holding a plugin off another writer's traffic",
+					},
+					&cli.UintSliceFlag{
+						Name:  "headend-slot",
+						Usage: "Headend PROG_ARRAY slot this plugin's data-plane half occupies (repeatable, 16-31)",
+					},
+					&cli.UintSliceFlag{
+						Name:  "endpoint-slot",
+						Usage: "Endpoint PROG_ARRAY slot this plugin's data-plane half occupies (repeatable, 32-63)",
+					},
 					&cli.UintFlag{
 						Name: "tick-ms",
 						Usage: "Drive the plugin's periodic callback every N milliseconds; " +
@@ -79,6 +103,13 @@ func cplaneSubcommand() *cli.Command {
 							EndpointBehaviors: behaviors,
 							Capabilities:      c.StringSlice("capability"),
 							TickIntervalMs:    uint32(c.Uint("tick-ms")),
+							Scope: &v1.CplanePluginScope{
+								Locators:        c.StringSlice("locator"),
+								Vrfs:            c.StringSlice("vrf"),
+								HeadendPrefixes: c.StringSlice("headend-prefix"),
+								HeadendSlots:    uintSliceToUint32(c.UintSlice("headend-slot")),
+								EndpointSlots:   uintSliceToUint32(c.UintSlice("endpoint-slot")),
+							},
 						}))
 					if err != nil {
 						return err
@@ -170,6 +201,15 @@ func cplaneSubcommand() *cli.Command {
 					if err := w.Flush(); err != nil {
 						return err
 					}
+					// The scope is reported in its own block rather than as
+					// more columns. It is what a capability may be
+					// exercised on, so it is read when checking a grant
+					// rather than when watching a plugin run, and four more
+					// list-valued columns would push the table past a
+					// terminal.
+					if err := printCplaneScopes(plugins); err != nil {
+						return err
+					}
 					if len(unrestored) == 0 {
 						return nil
 					}
@@ -242,6 +282,61 @@ func cplaneSubcommand() *cli.Command {
 			},
 		},
 	}
+}
+
+// printCplaneScopes reports what each plugin may name, for the plugins
+// that may name anything.
+func printCplaneScopes(plugins []*v1.CplanePluginStat) error {
+	var scoped []*v1.CplanePluginStat
+	for _, p := range plugins {
+		s := p.GetScope()
+		if len(s.GetLocators()) > 0 || len(s.GetVrfs()) > 0 || len(s.GetHeadendPrefixes()) > 0 ||
+			len(s.GetHeadendSlots()) > 0 || len(s.GetEndpointSlots()) > 0 {
+			scoped = append(scoped, p)
+		}
+	}
+	if len(scoped) == 0 {
+		return nil
+	}
+	fmt.Println()
+	fmt.Println("Scopes:")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "NAME\tLOCATORS\tVRFS\tHEADEND PREFIXES\tHEADEND SLOTS\tENDPOINT SLOTS"); err != nil {
+		return err
+	}
+	for _, p := range scoped {
+		s := p.GetScope()
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.GetName(),
+			joinOrDash(s.GetLocators()),
+			joinOrDash(s.GetVrfs()),
+			joinOrDash(s.GetHeadendPrefixes()),
+			joinOrDash(formatSlots(s.GetHeadendSlots())),
+			joinOrDash(formatSlots(s.GetEndpointSlots()))); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
+// formatSlots renders slot numbers for the scope table.
+func formatSlots(slots []uint32) []string {
+	out := make([]string, 0, len(slots))
+	for _, s := range slots {
+		out = append(out, strconv.FormatUint(uint64(s), 10))
+	}
+	return out
+}
+
+// uintSliceToUint32 narrows the slot flags to what the request carries.
+// A slot outside the plugin range is refused by the daemon, which is where
+// the ranges are defined, so nothing is checked here.
+func uintSliceToUint32(in []uint) []uint32 {
+	out := make([]uint32, 0, len(in))
+	for _, v := range in {
+		out = append(out, uint32(v))
+	}
+	return out
 }
 
 // parseBehaviorFlags accepts decimal or 0x-prefixed codepoints. A behavior

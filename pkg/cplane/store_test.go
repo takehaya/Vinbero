@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func storedRegistration(t *testing.T) Registration {
 		Module:       declareModule(t),
 		Families:     []bgp.Family{bgp.FamilyVPNv4},
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 		TickInterval: 250 * time.Millisecond,
 	}
 }
@@ -66,6 +67,24 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if r.TickInterval != 250*time.Millisecond {
 		t.Errorf("tick interval = %s, want 250ms", r.TickInterval)
+	}
+	// The scope is half of the grant. A plugin restored with its
+	// capabilities and without its scope comes back able to declare
+	// nothing; restored the other way round it comes back able to write
+	// where it was never allowed.
+	if strings.Join(r.Scope.Locators, ",") != strings.Join(want.Scope.Locators, ",") {
+		t.Errorf("locators = %v, want %v", r.Scope.Locators, want.Scope.Locators)
+	}
+	if strings.Join(r.Scope.VRFs, ",") != strings.Join(want.Scope.VRFs, ",") {
+		t.Errorf("VRFs = %v, want %v", r.Scope.VRFs, want.Scope.VRFs)
+	}
+	if strings.Join(r.Scope.HeadendPrefixStrings(), ",") !=
+		strings.Join(want.Scope.HeadendPrefixStrings(), ",") {
+		t.Errorf("headend prefixes = %v, want %v",
+			r.Scope.HeadendPrefixStrings(), want.Scope.HeadendPrefixStrings())
+	}
+	if len(r.Scope.EndpointSlots) != len(want.Scope.EndpointSlots) {
+		t.Errorf("endpoint slots = %v, want %v", r.Scope.EndpointSlots, want.Scope.EndpointSlots)
 	}
 }
 

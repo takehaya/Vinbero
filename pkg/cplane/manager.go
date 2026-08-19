@@ -97,6 +97,11 @@ type Registration struct {
 	// leaves it able to observe and to log, which is a real way to run a
 	// plugin and the safe default for one that asked for nothing.
 	Capabilities wasm.Capabilities
+	// Scope bounds which keys those capabilities may be exercised on. A
+	// capability says what kind of thing may be declared and the scope
+	// says which ones, and both are needed to write anything: the zero
+	// value permits nothing.
+	Scope Scope
 	// Limits bound the instance; zero fields take defaults.
 	Limits wasm.Limits
 	// TickInterval asks for the plugin's periodic callback to be driven at
@@ -125,6 +130,9 @@ type Manager struct {
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
 	encapSource func() (netip.Addr, error)
+	// locatorInfo and vrfBindings are what a scope is stated in terms of.
+	locatorInfo LocatorSource
+	vrfBindings VRFBindingSource
 	// limits are what a plugin costs to run when its registration is
 	// silent about it.
 	limits wasm.Limits
@@ -217,6 +225,13 @@ type ManagerConfig struct {
 	AdvertiserFor func(producer string) Advertiser
 	// Locators allocates the SIDs a plugin points at its data-plane half.
 	Locators SIDAllocator
+	// LocatorInfo and VRFBindings are what a plugin's scope is stated in
+	// terms of. Both are resolved when a declaration is applied rather
+	// than captured here, because an operator registers locators and VRF
+	// bindings over RPC after the daemon is up. Nil leaves declarations
+	// that would need them refused rather than waved through.
+	LocatorInfo LocatorSource
+	VRFBindings VRFBindingSource
 	// SIDFunctions installs the dispatch entries for those SIDs.
 	SIDFunctions SIDFunctionOps
 	// Quotas bound how much any one plugin may hold. Zero fields take the
@@ -261,6 +276,8 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		store:       cfg.Store,
 		leases:      leases,
 		encapSource: cfg.EncapSource,
+		locatorInfo: cfg.LocatorInfo,
+		vrfBindings: cfg.VRFBindings,
 		logger:      logger,
 		started:     time.Now(),
 		plugins:     make(map[string]*plugin),
@@ -367,6 +384,19 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		// owner tag and re-declares over the same state. This also cancels
 		// its subscription, ending the overlap.
 		m.teardown(ctx, old)
+		// The state it wrote is inherited too, and a registration that
+		// narrows the scope must not inherit the part of it the new scope
+		// does not cover. The plugin cannot do this itself: its own
+		// declaration of that state is now refused, and refused whole, so
+		// it would simply stop reconciling with the old entries still
+		// installed.
+		if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
+			m.logger.Error("could not remove the state a plugin held outside its new scope",
+				zap.String("plugin", reg.Name), zap.Int("removed", removed), zap.Error(err))
+		} else if removed > 0 {
+			m.logger.Info("removed the state a plugin held outside its new scope",
+				zap.String("plugin", reg.Name), zap.Int("removed", removed))
+		}
 	}
 
 	// The claim reaches back over routes that arrived before it, now that
@@ -617,6 +647,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		Logger:       m.logger.Named("plugin." + reg.Name),
 		ApplyMutex:   &m.applyMu,
 		Capabilities: reg.Capabilities,
+		Guard:        NewGuard(reg.Scope, m.locatorInfo, m.vrfBindings),
 		Quotas:       m.quotas,
 		Advertise:    m.advertise,
 		LocalSIDs:    m.localSIDs,

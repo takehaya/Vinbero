@@ -22,9 +22,14 @@ import (
 // registered. A plugin cannot name an owner in a call, which is what keeps
 // one plugin from writing as another.
 type PluginOps struct {
-	owner       bpf.OwnerTag
-	headend     HeadendMapOps
-	caps        wasm.Capabilities
+	owner   bpf.OwnerTag
+	headend HeadendMapOps
+	caps    wasm.Capabilities
+	// guard bounds which keys this plugin may name, and derives the parts
+	// of an advertisement that are not the plugin's to spell. A nil guard
+	// permits nothing: a plugin whose operator said nothing about where it
+	// may write is one that observes and logs.
+	guard       *Guard
 	leases      *Leases
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
@@ -118,6 +123,9 @@ type PluginOpsConfig struct {
 	// are shared by every kind of declaration, so linking cannot separate
 	// them: the kind is checked here instead.
 	Capabilities wasm.Capabilities
+	// Guard bounds which keys the plugin may name. Nil permits nothing,
+	// which is the right default for a registration that named no scope.
+	Guard *Guard
 	// Advertise is the send side. Nil leaves a plugin unable to originate,
 	// which is what a daemon without BGP can honestly offer.
 	Advertise *AdvertiseSet
@@ -192,6 +200,7 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 		owner:        cfg.Owner,
 		applyMu:      applyMu,
 		caps:         cfg.Capabilities,
+		guard:        cfg.Guard,
 		advertise:    cfg.Advertise,
 		localSIDs:    cfg.LocalSIDs,
 		quotas:       cfg.Quotas.withDefaults(),
@@ -543,6 +552,16 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 		return nil
 	}
 
+	// The scope is checked here rather than where the chunk was decoded,
+	// because part of what it is stated in terms of is registered over RPC
+	// after the daemon starts. A restored plugin declaring before its
+	// locator or its VRF binding exists fails, and this is the point the
+	// retry machinery covers; failing at decode time would leave that
+	// declaration with nothing to repair it.
+	if err := p.checkScope(txn); err != nil {
+		return err
+	}
+
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
 		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids, p.quotas.MaxLocalSIDs)
 		if err != nil {
@@ -606,6 +625,55 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	return nil
 }
 
+// checkScope refuses a declaration naming something outside what this
+// plugin was given, and fills in the parts of an advertisement that are
+// derived rather than declared.
+//
+// The whole set is refused rather than the offending member dropped. A
+// declaration is a statement about a set, so applying the rest of it would
+// install something the plugin did not ask for -- and silently narrowing
+// what a plugin declared is how a plugin ends up believing it holds state
+// it does not.
+//
+// Called with applyMu held, so a resolved route cannot be overtaken by the
+// reconcile that consumes it.
+func (p *PluginOps) checkScope(txn *applyTxn) error {
+	switch txn.kind {
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		for _, sid := range txn.sids {
+			if err := p.guard.checkLocalSID(sid); err != nil {
+				return fmt.Errorf("apply commit: %w", err)
+			}
+		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		// Resolved in a copy first. A failure partway would otherwise
+		// leave the transaction half derived, and the retry would apply a
+		// set built from two different readings of the bindings.
+		resolved := make([]AdvertisedRoute, 0, len(txn.routes))
+		for _, r := range txn.routes {
+			out, err := p.guard.resolveAdvertised(r)
+			if err != nil {
+				return fmt.Errorf("apply commit: %w", err)
+			}
+			resolved = append(resolved, out)
+		}
+		if err := p.guard.checkAdvertiseSet(resolved); err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
+		txn.routes = resolved
+	default:
+		for _, e := range txn.entries {
+			if e.Entry == nil {
+				continue
+			}
+			if err := p.guard.checkHeadend(e.TriggerPrefix, e.Entry.Mode); err != nil {
+				return fmt.Errorf("apply commit: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
 // ValidateChunk refuses a chunk the host would not apply.
 //
 // It is exported because the conformance harness runs it too: a harness
@@ -637,6 +705,53 @@ func ValidateChunk(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
 	}
 	for _, sid := range msg.GetLocalSids() {
 		if _, err := DecodeLocalSID(sid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateChunkInScope is ValidateChunk plus the parts of a scope that can
+// be decided without a daemon.
+//
+// The conformance harness runs it so a plugin declaring outside the scope
+// it will be registered with fails there rather than in production.
+// Containment in a locator and the existence of a VRF binding are not
+// decidable outside a daemon, so those stay the daemon's; naming a locator,
+// a VRF or a slot the plugin was not given is decidable here.
+func ValidateChunkInScope(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk, scope Scope) error {
+	if err := ValidateChunk(kind, msg); err != nil {
+		return err
+	}
+	af := AFv4
+	if kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+		af = AFv6
+	}
+	lent := netip.MustParseAddr("fd00::1")
+	for _, e := range msg.GetHeadendEntries() {
+		trigger, entry, err := DecodeHeadendEntry(e, af, lent)
+		if err != nil {
+			return err
+		}
+		if err := scope.CheckHeadend(trigger, entry.Mode); err != nil {
+			return err
+		}
+	}
+	for _, r := range msg.GetAdvertisedRoutes() {
+		route, err := DecodeAdvertisedRoute(r)
+		if err != nil {
+			return err
+		}
+		if err := scope.CheckAdvertised(route); err != nil {
+			return err
+		}
+	}
+	for _, s := range msg.GetLocalSids() {
+		sid, err := DecodeLocalSID(s)
+		if err != nil {
+			return err
+		}
+		if err := scope.CheckLocalSID(sid); err != nil {
 			return err
 		}
 	}
@@ -787,6 +902,94 @@ func (p *PluginOps) DiscardTransactions() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.open = make(map[uint64]*applyTxn)
+}
+
+// PruneOutOfScope removes the state this owner holds that its scope no
+// longer covers, and reports how much it removed.
+//
+// Narrowing a scope is the one case the desired-set model cannot repair on
+// its own. The apply path refuses a declaration naming anything outside
+// the scope, and refuses it whole -- so a plugin that goes on declaring
+// what it declared before the change never reconciles, and what it wrote
+// under the wider scope stays installed. Withdrawing that here is what
+// makes the narrowing mean something immediately, rather than at the mercy
+// of a plugin that may never be updated.
+//
+// It is expressed as a reconcile of the subset that is still allowed,
+// because that is the operation the sets already implement: what is not
+// declared is pruned.
+func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+
+	var (
+		removed  int
+		firstErr error
+	)
+	for _, af := range []AddressFamily{AFv4, AFv6} {
+		held, err := OwnedHeadendEntries(p.headend, p.owner, af)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		keep := make([]HeadendDesired, 0, len(held))
+		for _, e := range held {
+			if e.Entry == nil {
+				continue
+			}
+			if p.guard.checkHeadend(e.TriggerPrefix, e.Entry.Mode) == nil {
+				keep = append(keep, e)
+			}
+		}
+		if len(keep) == len(held) {
+			continue
+		}
+		res, err := ApplyHeadendSet(p.headend, p.leases, p.owner, af, keep, p.quotas.MaxHeadendEntries)
+		removed += res.Pruned
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	if p.localSIDs != nil {
+		held := p.localSIDs.LiveSIDs(p.owner)
+		keep := make([]LocalSID, 0, len(held))
+		for _, s := range held {
+			if p.guard.checkLocalSID(s) == nil {
+				keep = append(keep, s)
+			}
+		}
+		if len(keep) != len(held) {
+			_, res, err := p.localSIDs.Apply(p.owner, keep, p.quotas.MaxLocalSIDs)
+			removed += res.Pruned
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+
+	if p.advertise != nil {
+		held := p.advertise.LiveRoutes(p.owner)
+		keep := make([]AdvertisedRoute, 0, len(held))
+		for _, r := range held {
+			// Resolved again rather than trusted: a route stays only if the
+			// VRF it names is still in scope and still has a binding, which
+			// is the same question the apply path asks.
+			if _, err := p.guard.resolveAdvertised(r); err == nil {
+				keep = append(keep, r)
+			}
+		}
+		if len(keep) != len(held) {
+			res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
+			removed += res.Pruned
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return removed, firstErr
 }
 
 // Flush removes every entry this plugin owns and releases its leases. It

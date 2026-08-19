@@ -151,9 +151,9 @@ func TestHarnessCapturesPluginLogs(t *testing.T) {
 }
 
 // exampleConfig builds the example plugin's own config message: its
-// behavior codepoint, and optionally the locator, prefix, RD and slot that
-// make it originate as well as receive.
-func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64, nextHop string) []byte {
+// behavior codepoint, and optionally the locator, prefix, VRF and slot
+// that make it originate as well as receive.
+func exampleConfig(behavior uint64, locator, prefix, vrf string, slot uint64, nextHop string) []byte {
 	var buf []byte
 	putVarint := func(v uint64) {
 		for v >= 0x80 {
@@ -175,7 +175,7 @@ func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64, nex
 	putVarint(behavior)
 	str(2, locator)
 	str(3, prefix)
-	str(4, rd)
+	str(4, vrf)
 	if slot != 0 {
 		field(5, 0)
 		putVarint(slot)
@@ -219,7 +219,7 @@ func TestHarnessTickIsCallable(t *testing.T) {
 // its own behavior codepoint.
 func TestHarnessDrivesTheOriginatingHalf(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
-		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "vpn-a", 33, "2001:db8::1"),
 	})
 
 	var sidDecl, advDecl *cplaneharness.Declaration
@@ -245,8 +245,10 @@ func TestHarnessDrivesTheOriginatingHalf(t *testing.T) {
 		t.Fatalf("advertised %d routes, want the configured prefix", len(advDecl.Routes))
 	}
 	route := advDecl.Routes[0]
-	if route.GetPrefix() != "10.7.0.0/24" || route.GetRd() != "65000:7" {
-		t.Errorf("advertised %+v, want the configured prefix and RD", route)
+	// The VRF is what a plugin names; the route distinguisher comes from
+	// that VRF's binding in the daemon, so nothing declares it here.
+	if route.GetPrefix() != "10.7.0.0/24" || route.GetVrf() != "vpn-a" {
+		t.Errorf("advertised %+v, want the configured prefix and VRF", route)
 	}
 	if route.GetEndpointBehavior() != 0xFE01 {
 		t.Errorf("advertised behavior = %#x, want the plugin's own", route.GetEndpointBehavior())
@@ -325,7 +327,7 @@ func TestHarnessRefusesADeclarationTheCapabilitiesDoNotCover(t *testing.T) {
 // exactly the failure this exists to catch.
 func TestHarnessTellsARestartedPluginItsLocalSIDsAgain(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
-		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "vpn-a", 33, "2001:db8::1"),
 	})
 
 	// Being told the address is what lets it advertise, so the

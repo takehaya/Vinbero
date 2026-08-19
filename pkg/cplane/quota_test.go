@@ -109,7 +109,7 @@ func TestStatsReportWhatAPluginHolds(t *testing.T) {
 		Name:         "declare",
 		Module:       declareModule(t),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestConfiguredQuotaIsEnforced(t *testing.T) {
 	t.Cleanup(func() { m.Close(context.Background()) })
 
 	if err := m.Register(context.Background(), Registration{
-		Name: "declare", Module: declareModule(t), Capabilities: testCaps(),
+		Name: "declare", Module: declareModule(t), Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestQuotaErrorReadsAsAPolicyRefusal(t *testing.T) {
 func TestTransactionMemoryIsCapped(t *testing.T) {
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(),
-		Capabilities: testCaps(), EncapSource: testEncapSource,
+		Capabilities: testCaps(), Guard: testGuard(), EncapSource: testEncapSource,
 		MaxBytesPerTransaction: 4096,
 	})
 	if err != nil {

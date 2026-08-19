@@ -77,6 +77,24 @@ func (s *PluginServer) CplanePluginRegister(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
+	scope, err := cplane.ParseScope(
+		msg.GetScope().GetLocators(),
+		msg.GetScope().GetVrfs(),
+		msg.GetScope().GetHeadendPrefixes(),
+		msg.GetScope().GetHeadendSlots(),
+		msg.GetScope().GetEndpointSlots(),
+	)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	// A capability with nothing to exercise it on is a registration that
+	// cannot do what the operator asked for, and it fails silently: the
+	// plugin runs, declares, and every declaration is refused. Say so at
+	// the boundary instead.
+	if err := checkScopeCoversCapabilities(caps, scope); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
 	reg := cplane.Registration{
 		Name:         msg.GetName(),
 		Module:       msg.GetWasm(),
@@ -84,6 +102,7 @@ func (s *PluginServer) CplanePluginRegister(
 		Families:     families,
 		Behaviors:    behaviors,
 		Capabilities: caps,
+		Scope:        scope,
 		TickInterval: time.Duration(msg.GetTickIntervalMs()) * time.Millisecond,
 	}
 	if err := s.cplane.Register(ctx, reg); err != nil {
@@ -175,6 +194,13 @@ func (s *PluginServer) CplanePluginStats(
 			MaxLocalSids:        uint32(st.Quotas.MaxLocalSIDs),
 			Since:               timestamppb.New(st.Since),
 			PendingDeclarations: uint32(st.PendingDeclarations),
+			Scope: &v1.CplanePluginScope{
+				Locators:        st.Scope.Locators,
+				Vrfs:            st.Scope.VRFs,
+				HeadendPrefixes: st.Scope.HeadendPrefixStrings(),
+				HeadendSlots:    st.Scope.HeadendSlots,
+				EndpointSlots:   st.Scope.EndpointSlots,
+			},
 		})
 	}
 
@@ -249,6 +275,38 @@ func parseBehaviors(codepoints []uint32) ([]uint16, error) {
 		out = append(out, uint16(cp))
 	}
 	return out, nil
+}
+
+// checkScopeCoversCapabilities refuses a registration whose scope has
+// nothing for one of its capabilities to be exercised on.
+//
+// Both are needed to write anything, so the combination is not a smaller
+// grant but an inert one: the plugin runs, declares, and has every
+// declaration refused. That looks like a broken plugin rather than an
+// incomplete registration, so it is caught where the operator is.
+func checkScopeCoversCapabilities(caps wasm.Capabilities, scope cplane.Scope) error {
+	if caps.Has(wasm.CapHeadend) && len(scope.HeadendPrefixes) == 0 {
+		return fmt.Errorf("capability %q was granted but the scope names no headend prefixes, "+
+			"so every headend declaration would be refused", wasm.CapHeadend)
+	}
+	if caps.Has(wasm.CapLocalSID) {
+		if len(scope.Locators) == 0 {
+			return fmt.Errorf("capability %q was granted but the scope names no locators, "+
+				"so every local SID declaration would be refused", wasm.CapLocalSID)
+		}
+		if len(scope.EndpointSlots) == 0 {
+			return fmt.Errorf("capability %q was granted but the scope names no endpoint slots, "+
+				"so every local SID declaration would be refused", wasm.CapLocalSID)
+		}
+	}
+	// An advertising plugin needs one of the two: a VRF to originate VPN
+	// routes into, or a locator whose space it may advertise in IPv6
+	// unicast. Which of them it uses is the plugin's business.
+	if caps.Has(wasm.CapAdvertise) && len(scope.VRFs) == 0 && len(scope.Locators) == 0 {
+		return fmt.Errorf("capability %q was granted but the scope names neither a VRF nor a locator, "+
+			"so every advertisement would be refused", wasm.CapAdvertise)
+	}
+	return nil
 }
 
 // cplaneRPCError maps a manager failure onto a Connect code an operator can

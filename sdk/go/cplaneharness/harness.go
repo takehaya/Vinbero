@@ -49,6 +49,7 @@ type Harness struct {
 	config []byte
 	limits wasm.Limits
 	caps   wasm.Capabilities
+	scope  cplane.Scope
 
 	mu sync.Mutex
 	// inst is replaced by Restart, so a test can check that a plugin
@@ -73,6 +74,23 @@ type Options struct {
 	// module wants by default; narrow it to check that a plugin degrades
 	// the way it should when an operator grants it less.
 	Capabilities []string
+	// Scope is where those capabilities may be exercised, as the
+	// registration will state it: which locators, VRFs, headend prefixes
+	// and slots the plugin may name. Set it and a declaration naming
+	// anything outside it fails here rather than in production.
+	//
+	// The zero value skips the check rather than denying everything, which
+	// is the one place this harness is deliberately more forgiving than
+	// the daemon: the scope is the operator's decision and a plugin author
+	// writing a module does not always know it yet. A daemon registration
+	// with no scope refuses every declaration, so a plugin that is meant
+	// to write anything should be exercised here with the scope it will be
+	// given.
+	//
+	// The parts that need a running daemon -- whether a locator actually
+	// contains a prefix, whether a VRF has a binding -- stay the daemon's
+	// either way.
+	Scope cplane.Scope
 }
 
 // New starts a plugin from a compiled module. It fails the test if the
@@ -84,13 +102,13 @@ func New(tb testing.TB, module []byte, opts Options) *Harness {
 	if err != nil {
 		tb.Fatalf("capabilities: %v", err)
 	}
-	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps}
+	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps, scope: opts.Scope}
 	// The recorder is given the same capabilities as the instance, because
 	// the daemon checks the declaration kind against them when a
 	// transaction is opened. Without that here, a plugin granted only
 	// advertise could open a headend transaction, pass conformance, and
 	// be refused in production.
-	h.ops = &recorder{denyCommits: opts.DenyCommits, caps: caps}
+	h.ops = &recorder{denyCommits: opts.DenyCommits, caps: caps, scope: opts.Scope}
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
 		Name:         "harness",
 		Module:       module,
@@ -307,6 +325,7 @@ type recorder struct {
 	notifiedSIDs map[string]struct{}
 	nextSID      int
 	caps         wasm.Capabilities
+	scope        cplane.Scope
 }
 
 // beginInstance puts the recorder back into the state a fresh instance
@@ -376,7 +395,13 @@ func (r *recorder) ApplyPut(generation uint64, chunk []byte) error {
 	// more forgiving than the daemon passes plugins that then go silent,
 	// which is the one thing it exists to prevent.
 	kind := r.openKinds[generation]
-	if err := cplane.ValidateChunk(kind, &msg); err != nil {
+	validate := cplane.ValidateChunk
+	if !r.scope.Empty() {
+		validate = func(k v1.PluginApplyKind, m *v1.PluginApplyChunk) error {
+			return cplane.ValidateChunkInScope(k, m, r.scope)
+		}
+	}
+	if err := validate(kind, &msg); err != nil {
 		return err
 	}
 	acc.HeadendEntries = append(acc.HeadendEntries, msg.GetHeadendEntries()...)

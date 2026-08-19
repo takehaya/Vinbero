@@ -16,6 +16,8 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
+	"github.com/takehaya/vinbero/pkg/locator"
+	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
 // declareModule is a WebAssembly plugin that declares a fixed desired set
@@ -256,6 +258,83 @@ func testCaps() wasm.Capabilities {
 	return caps
 }
 
+// testScope covers everything the fixtures declare, the way testCaps
+// grants everything they call. A test about the scope itself states a
+// narrower one explicitly.
+func testScope() Scope {
+	slots := func(from, to uint32) []uint32 {
+		out := make([]uint32, 0, to-from+1)
+		for s := from; s <= to; s++ {
+			out = append(out, s)
+		}
+		return out
+	}
+	scope, err := ParseScope(
+		// "late" is the locator a fixture names before an operator has
+		// registered it: in scope, but not yet resolvable.
+		[]string{"main", "second", "late"},
+		[]string{testVRF},
+		[]string{"10.0.0.0/8", "fd00::/16"},
+		slots(16, 31),
+		slots(32, 63),
+	)
+	if err != nil {
+		panic(err)
+	}
+	return scope
+}
+
+// testVRF is the VRF the fixtures originate into, and testRD is the route
+// distinguisher its binding lends them.
+const (
+	testVRF = "vpn-a"
+	testRD  = "65000:1"
+)
+
+// testGuard is the guard the fixtures run under, resolving against the
+// locators and the binding they name.
+func testGuard() *Guard {
+	return NewGuard(testScope(), testLocators(), testBindings())
+}
+
+// fakeLocatorSource stands in for the locator manager.
+type fakeLocatorSource struct {
+	byName map[string]locator.Locator
+}
+
+func (f *fakeLocatorSource) Get(name string) (locator.Locator, bool) {
+	loc, ok := f.byName[name]
+	return loc, ok
+}
+
+func testLocators() *fakeLocatorSource {
+	return &fakeLocatorSource{byName: map[string]locator.Locator{
+		"main":   {Name: "main", Prefix: netip.MustParsePrefix("fd00:1::/48")},
+		"second": {Name: "second", Prefix: netip.MustParsePrefix("fd00:2::/48")},
+	}}
+}
+
+// fakeBindingSource stands in for the VRF-to-BGP bindings.
+type fakeBindingSource struct {
+	byName map[string]vrfbgp.Binding
+}
+
+func (f *fakeBindingSource) Get(name string) (vrfbgp.Binding, bool) {
+	b, ok := f.byName[name]
+	return b, ok
+}
+
+func testBindings() *fakeBindingSource {
+	return &fakeBindingSource{byName: map[string]vrfbgp.Binding{
+		testVRF: vrfbgp.Binding{
+			VRFName:   testVRF,
+			RD:        testRD,
+			ImportRTs: []string{testRD},
+			ExportRTs: []string{testRD},
+		}.Normalize(),
+	}}
+}
+
 // waitDelivered blocks until the plugin has consumed every event queued
 // for it. Delivery is asynchronous -- a guest call must not run on the BGP
 // watch goroutine -- so a test that emits and immediately asserts would
@@ -280,6 +359,8 @@ func newTestManagerWithStoreAndClaims(t *testing.T, src EventSource, store *Stor
 		Headend:     ops,
 		Store:       store,
 		EncapSource: testEncapSource,
+		LocatorInfo: testLocators(),
+		VRFBindings: testBindings(),
 	})
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
@@ -324,7 +405,7 @@ func newTestManager(t *testing.T, src EventSource, claims BehaviorClaims) (*Mana
 func TestRegisterRunsPluginAndDeliversEvents(t *testing.T) {
 	src := newFakeSource()
 	m, ops := newTestManager(t, src, newFakeClaims())
-	reg := Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps()}
+	reg := Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps(), Scope: testScope()}
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -362,7 +443,7 @@ func TestUnregisterFlushesOwnedState(t *testing.T) {
 	src := newFakeSource()
 	claims := newFakeClaims()
 	m, ops := newTestManager(t, src, claims)
-	reg := Registration{Name: "declare", Module: declareModule(t), Behaviors: []uint16{0xFE01}, Capabilities: testCaps()}
+	reg := Registration{Name: "declare", Module: declareModule(t), Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope()}
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -395,7 +476,7 @@ func TestUnregisterFlushesOwnedState(t *testing.T) {
 func TestReregisterIsANonDisruptiveUpgrade(t *testing.T) {
 	src := newFakeSource()
 	m, ops := newTestManager(t, src, newFakeClaims())
-	reg := Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps()}
+	reg := Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps(), Scope: testScope()}
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
@@ -433,7 +514,7 @@ func TestRegisterRejectedWhenClaimFails(t *testing.T) {
 		Name:         "declare",
 		Module:       declareModule(t),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	})
 	if err == nil {
 		t.Fatal("registration succeeded despite the claim being refused")
@@ -467,7 +548,7 @@ func TestFailedInstantiationReleasesClaim(t *testing.T) {
 func TestRegisterRejectsUnusableName(t *testing.T) {
 	m, _ := newTestManager(t, newFakeSource(), newFakeClaims())
 	for _, name := range []string{"", "has:colon"} {
-		if err := m.Register(context.Background(), Registration{Name: name, Module: declareModule(t), Capabilities: testCaps()}); err == nil {
+		if err := m.Register(context.Background(), Registration{Name: name, Module: declareModule(t), Capabilities: testCaps(), Scope: testScope()}); err == nil {
 			t.Errorf("name %q was accepted", name)
 		}
 	}
@@ -483,7 +564,7 @@ func TestClaimWithoutRegistryIsRefused(t *testing.T) {
 		Name:         "declare",
 		Module:       declareModule(t),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	})
 	if err == nil {
 		t.Fatal("a behavior claim was accepted with no claim registry")
@@ -495,7 +576,7 @@ func TestClaimWithoutRegistryIsRefused(t *testing.T) {
 func TestCloseDoesNotFlush(t *testing.T) {
 	src := newFakeSource()
 	m, ops := newTestManager(t, src, newFakeClaims())
-	if err := m.Register(context.Background(), Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps()}); err != nil {
+	if err := m.Register(context.Background(), Registration{Name: "declare", Module: declareModule(t), Capabilities: testCaps(), Scope: testScope()}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
@@ -618,8 +699,8 @@ func TestPluginOpsTransactionLifecycle(t *testing.T) {
 		Owner:        ownerA,
 		Headend:      headend,
 		Leases:       NewLeases(),
-		Capabilities: testCaps(),
-		EncapSource:  testEncapSource,
+		Capabilities: testCaps(), Guard: testGuard(),
+		EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -668,7 +749,7 @@ func TestPluginOpsTransactionLifecycle(t *testing.T) {
 func TestPluginOpsAbortDiscards(t *testing.T) {
 	headend := newFakeHeadendOps()
 	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner: ownerA, Headend: headend, Leases: NewLeases(), Capabilities: testCaps(),
+		Owner: ownerA, Headend: headend, Leases: NewLeases(), Capabilities: testCaps(), Guard: testGuard(),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -697,7 +778,7 @@ func TestPluginOpsAbortDiscards(t *testing.T) {
 func TestPluginOpsBoundsOpenTransactions(t *testing.T) {
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(),
-		Capabilities: testCaps(), MaxOpenTransactions: 2,
+		Capabilities: testCaps(), Guard: testGuard(), MaxOpenTransactions: 2,
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -715,7 +796,7 @@ func TestPluginOpsBoundsOpenTransactions(t *testing.T) {
 
 func TestPluginOpsRejectsUnknownKindAndGeneration(t *testing.T) {
 	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(), Capabilities: testCaps(),
+		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(), Capabilities: testCaps(), Guard: testGuard(),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -732,7 +813,7 @@ func TestPluginOpsFlushRemovesOwnedState(t *testing.T) {
 	headend := newFakeHeadendOps()
 	leases := NewLeases()
 	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner: ownerA, Headend: headend, Leases: leases, Capabilities: testCaps(),
+		Owner: ownerA, Headend: headend, Leases: leases, Capabilities: testCaps(), Guard: testGuard(),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -761,7 +842,7 @@ func TestDroppedEventsAreCounted(t *testing.T) {
 	m, _ := newTestManager(t, src, newFakeClaims())
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -807,7 +888,7 @@ func TestRestartReplaysTheRib(t *testing.T) {
 
 	if err := m.Register(context.Background(), Registration{
 		Name: "trap", Module: trapModule(t),
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -834,7 +915,7 @@ func TestRestartCounterResetsOnSuccess(t *testing.T) {
 	m, ops := newTestManager(t, src, newFakeClaims())
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -861,7 +942,7 @@ func TestSnapshotIsNotDropped(t *testing.T) {
 	}
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -882,7 +963,7 @@ func TestSnapshotWithoutASourceIsReported(t *testing.T) {
 	m, _ := newTestManager(t, src, newFakeClaims())
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -922,7 +1003,7 @@ func TestTickIsDriven(t *testing.T) {
 		Name:         "tick",
 		Module:       tickModule(t),
 		TickInterval: MinTickInterval,
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -948,7 +1029,7 @@ func TestTickIntervalIsClamped(t *testing.T) {
 		Name:         "tick",
 		Module:       tickModule(t),
 		TickInterval: time.Millisecond,
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -966,7 +1047,7 @@ func TestTickNotDrivenByDefault(t *testing.T) {
 	m, _ := newTestManager(t, src, newFakeClaims())
 	if err := m.Register(context.Background(), Registration{
 		Name: "tick", Module: tickModule(t),
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -989,7 +1070,7 @@ func TestEndOfReplayFollowsTheSnapshot(t *testing.T) {
 	var mu sync.Mutex
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -1044,7 +1125,7 @@ func TestFailedInstantiationLeavesNoState(t *testing.T) {
 			// A trailing byte that cannot be parsed, so configure returns
 			// non-zero after it has already declared.
 			0xff),
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	})
 	if err == nil {
 		t.Fatal("a module whose configure failed was registered")
@@ -1084,7 +1165,7 @@ func TestFailedUpgradeLeavesTheRunningPluginAlone(t *testing.T) {
 		Module:       examplePlugin(t),
 		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}
 	if err := m.Register(context.Background(), good); err != nil {
 		t.Fatalf("register: %v", err)
@@ -1221,8 +1302,8 @@ func TestDeclarationHeldFromBeforeLiveIsRetried(t *testing.T) {
 		Owner:        ownerA,
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
-		Capabilities: testCaps(),
-		LocalSIDs:    NewLocalSIDSet(alloc, sids),
+		Capabilities: testCaps(), Guard: testGuard(),
+		LocalSIDs: NewLocalSIDSet(alloc, sids),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1286,9 +1367,9 @@ func TestRestartedInstanceIsToldItsLocalSIDsAgain(t *testing.T) {
 		Owner:        ownerA,
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
-		Capabilities: testCaps(),
-		LocalSIDs:    NewLocalSIDSet(&fakeAllocator{}, sids),
-		OnLocalSIDs:  func([]AllocatedSID) bool { return true },
+		Capabilities: testCaps(), Guard: testGuard(),
+		LocalSIDs:   NewLocalSIDSet(&fakeAllocator{}, sids),
+		OnLocalSIDs: func([]AllocatedSID) bool { return true },
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1350,7 +1431,7 @@ func TestDeclarationsFromAFailedRestartAreNotApplied(t *testing.T) {
 	headend := newFakeHeadendOps()
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner: ownerA, Headend: headend, Leases: NewLeases(),
-		Capabilities: testCaps(), EncapSource: testEncapSource,
+		Capabilities: testCaps(), Guard: testGuard(), EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1407,8 +1488,8 @@ func TestARetryDoesNotUndoANewerDeclaration(t *testing.T) {
 		Owner:        ownerA,
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
-		Capabilities: testCaps(),
-		LocalSIDs:    NewLocalSIDSet(alloc, sids),
+		Capabilities: testCaps(), Guard: testGuard(),
+		LocalSIDs: NewLocalSIDSet(alloc, sids),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1466,7 +1547,7 @@ func TestUnregisterDoesNotHandTheRoutesToTheBuiltins(t *testing.T) {
 
 	reg := Registration{
 		Name: "declare", Module: declareModule(t),
-		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
 	}
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatalf("register: %v", err)
@@ -1503,7 +1584,7 @@ func TestFailedFlushKeepsTheLeasesOnWhatRemains(t *testing.T) {
 	leases := NewLeases()
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner: ownerA, Headend: headend, Leases: leases,
-		Capabilities: testCaps(), EncapSource: testEncapSource,
+		Capabilities: testCaps(), Guard: testGuard(), EncapSource: testEncapSource,
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1557,7 +1638,7 @@ func TestAPluginThatCannotBeRestoredIsVisibleAndCanBeForgotten(t *testing.T) {
 	store := newTestStore(t)
 	broken := Registration{
 		Name: "broken", Module: []byte("not a wasm module"),
-		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
 	}
 	if err := store.Save(broken); err != nil {
 		t.Fatalf("save: %v", err)
@@ -1619,7 +1700,7 @@ func TestStuckDeclarationsAreCounted(t *testing.T) {
 	sids := newFakeSIDOps()
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(),
-		Capabilities: testCaps(), LocalSIDs: NewLocalSIDSet(alloc, sids),
+		Capabilities: testCaps(), Guard: testGuard(), LocalSIDs: NewLocalSIDSet(alloc, sids),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1674,7 +1755,7 @@ func TestAFailedRegistrationDoesNotRetractFromTheBuiltins(t *testing.T) {
 		Name:         "broken",
 		Module:       []byte("not a wasm module"),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	})
 	if err == nil {
 		t.Fatal("a module that is not wasm was registered")
@@ -1689,7 +1770,7 @@ func TestAFailedRegistrationDoesNotRetractFromTheBuiltins(t *testing.T) {
 	// A registration that succeeds does retract, since that is the point.
 	if err := m.Register(context.Background(), Registration{
 		Name: "declare", Module: declareModule(t),
-		Behaviors: []uint16{0xFE02}, Capabilities: testCaps(),
+		Behaviors: []uint16{0xFE02}, Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -1714,7 +1795,7 @@ func TestAPluginLeftAfterAFailedFlushIsNotReportedRunning(t *testing.T) {
 	t.Cleanup(func() { m.Close(context.Background()) })
 
 	if err := m.Register(context.Background(), Registration{
-		Name: "declare", Module: declareModule(t), Capabilities: testCaps(),
+		Name: "declare", Module: declareModule(t), Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}

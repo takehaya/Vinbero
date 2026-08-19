@@ -449,6 +449,12 @@ func run(cliCtx *cli.Context) error {
 			SIDFunctions: vin.GetMapOperations(),
 			EncapSource:  applier.EncapSourceAddr,
 			Store:        cplaneStore,
+			// What a plugin's scope is stated in terms of. Both are
+			// consulted when a declaration is applied rather than now,
+			// because an operator registers locators and VRF bindings
+			// over RPC after the daemon is up.
+			LocatorInfo: locatorMgr,
+			VRFBindings: vrfBgpMgr,
 			// What one plugin may hold and what it may cost to run, from
 			// the operator's config. Without these the daemon ran on the
 			// built-in defaults whatever the file said, and reported the

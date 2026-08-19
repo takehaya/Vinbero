@@ -95,27 +95,45 @@ fi
     --action END_DT4 \
     --vrf-name vrf-cust || true
 
+# The VRF the plugin originates into. It names the VRF and nothing else:
+# the route distinguisher and the route targets come from this binding,
+# because the route targets are what decide which VRF a peer imports the
+# route into. A plugin able to spell them could put a route in a VPN it was
+# never given.
+#
+# The import RT has to be here too. Once any binding declares a family,
+# the built-in applier stops default-allowing received routes of it and
+# requires an RT some VRF imports; binding this VRF for export alone would
+# therefore drop the far end's 10.1.0.0/24 on the floor.
+/usr/local/bin/vbctl vrf-bgp bind \
+    --vrf vrf-cust \
+    --rd 65100:200 \
+    --export-rts 65000:200 \
+    --import-rts 65000:200 || true
+
 # --- the control-plane plugin ----------------------------------------------
 # Config blob, in the plugin's own protobuf message (see the example's
 # README for the field numbers):
 #   1 behavior       0xFE01
 #   3 prefix         10.2.0.0/24
-#   4 RD             65100:200
+#   4 VRF            vrf-cust
 #   6 advertise SID  fd00:200:0:1::
 #   7 next hop       2001:db8:ff::2   (this node's loopback)
-printf '\010\201\374\003\032\013\061\060\056\062\056\060\056\060\057\062\064\042\011\066\065\061\060\060\072\062\060\060\062\016\146\144\060\060\072\062\060\060\072\060\072\061\072\072\072\016\062\060\060\061\072\144\142\070\072\146\146\072\072\062' \
+printf '\010\201\374\003\032\013\061\060\056\062\056\060\056\060\057\062\064\042\010\166\162\146\055\143\165\163\164\062\016\146\144\060\060\072\062\060\060\072\060\072\061\072\072\072\016\062\060\060\061\072\144\142\070\072\146\146\072\072\062' \
     > /tmp/plugin-config.bin
 
-# Granted `advertise` only. It has no business writing forwarding state on
-# this node, and a capability it was not granted is not a call that fails
-# but a host function its module cannot reach.
+# Granted `advertise` only, and only into vrf-cust. The capability says it
+# may originate; the scope says where. It has no business writing
+# forwarding state on this node, and a capability it was not granted is not
+# a call that fails but a host function its module cannot reach.
 /usr/local/bin/vbctl plugin cplane register \
     --name custom-behavior \
     --wasm /plugin.wasm \
     --config /tmp/plugin-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 \
-    --capability advertise || true
+    --capability advertise \
+    --vrf vrf-cust || true
 
 # Pre-resolve neighbours so the first packet is not queued behind NDP/ARP.
 ping6 -c 1 -W 2 2001:db8:2::2 >/dev/null 2>&1 || true
