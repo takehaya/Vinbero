@@ -295,6 +295,41 @@ func newNamedAdvertiseSet(cfg ManagerConfig, leases *Leases) *AdvertiseSet {
 	return set
 }
 
+// ReconcileAdvertised re-derives what every plugin originates.
+//
+// A plugin names a VRF and the host fills in the route distinguisher, the
+// route targets and the cap from that VRF's binding. Those are stamped
+// when the declaration is applied, so an operator editing a binding
+// afterwards would otherwise leave the plugin's paths on the wire carrying
+// what the binding used to say -- until the plugin next happened to
+// redeclare, which an event-driven plugin may not do for a long time.
+//
+// The daemon calls it after a binding changes. Failures are logged per
+// plugin rather than returned: one plugin that cannot reconcile must not
+// stop the others from following the edit.
+func (m *Manager) ReconcileAdvertised(ctx context.Context) {
+	m.mu.Lock()
+	plugins := make([]*plugin, 0, len(m.plugins))
+	for _, p := range m.plugins {
+		plugins = append(plugins, p)
+	}
+	m.mu.Unlock()
+	sort.Slice(plugins, func(i, j int) bool { return plugins[i].name < plugins[j].name })
+
+	for _, p := range plugins {
+		withdrawn, err := p.ops.ReconcileAdvertised(ctx)
+		if err != nil {
+			m.logger.Error("could not re-derive what a plugin advertises after a VRF binding changed",
+				zap.String("plugin", p.name), zap.Error(err))
+			continue
+		}
+		if withdrawn > 0 {
+			m.logger.Info("withdrew plugin routes a changed VRF binding no longer covers",
+				zap.String("plugin", p.name), zap.Int("withdrawn", withdrawn))
+		}
+	}
+}
+
 // ErrPluginNotRegistered is a name the manager does not hold. It is the
 // caller's to fix, so callers can tell it from a daemon failure.
 var ErrPluginNotRegistered = errors.New("plugin is not registered")
@@ -391,8 +426,25 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		// it would simply stop reconciling with the old entries still
 		// installed.
 		if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
-			m.logger.Error("could not remove the state a plugin held outside its new scope",
+			// The narrowing did not take. What the old scope allowed is
+			// still installed, and the plugin cannot clear it itself: its
+			// own declaration of that state is refused now, and refused
+			// whole. Reporting success here would say an authorization
+			// boundary is in force when it is not.
+			//
+			// The plugin is stopped rather than left running, so nothing
+			// adds to what could not be removed, and it stays in the
+			// registry so an operator can see the leftovers and retry.
+			m.mu.Lock()
+			p.dead = true
+			m.mu.Unlock()
+			m.teardown(ctx, p)
+			m.logger.Error("could not remove the state a plugin held outside its new scope; "+
+				"the plugin is stopped and that state is still installed",
 				zap.String("plugin", reg.Name), zap.Int("removed", removed), zap.Error(err))
+			return fmt.Errorf("cplane: plugin %q holds state outside its new scope that could not be removed, "+
+				"so the plugin was stopped rather than run under a scope that is not in force: %w",
+				reg.Name, err)
 		} else if removed > 0 {
 			m.logger.Info("removed the state a plugin held outside its new scope",
 				zap.String("plugin", reg.Name), zap.Int("removed", removed))

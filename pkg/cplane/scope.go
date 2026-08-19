@@ -383,6 +383,38 @@ func (g *Guard) checkAdvertiseSet(routes []AdvertisedRoute) error {
 	return nil
 }
 
+// trimToVRFCaps drops the routes that overrun a VRF's prefix cap, keeping
+// the first ones in a stable order.
+//
+// It exists for the one case where refusing is worse than trimming: an
+// operator lowering a binding's cap while a plugin already holds more than
+// the new one allows. Refusing there would leave every route in place,
+// which is the opposite of what the operator asked for. On the declaration
+// path the whole set is still refused, with the reason, because that is
+// the plugin asking for something it may not have.
+func (g *Guard) trimToVRFCaps(routes []AdvertisedRoute) []AdvertisedRoute {
+	if g == nil || g.bindings == nil || len(routes) == 0 {
+		return routes
+	}
+	// Stable across calls so a repeated reconcile keeps the same routes
+	// rather than rotating which ones survive.
+	sorted := append([]AdvertisedRoute(nil), routes...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].key() < sorted[j].key() })
+	kept := make([]AdvertisedRoute, 0, len(sorted))
+	seen := make(map[string]int)
+	for _, r := range sorted {
+		if r.VRF != "" {
+			b, ok := g.bindings.Get(r.VRF)
+			if ok && b.MaxPrefixes > 0 && seen[r.VRF] >= int(b.MaxPrefixes) {
+				continue
+			}
+			seen[r.VRF]++
+		}
+		kept = append(kept, r)
+	}
+	return kept
+}
+
 // describe renders a list for an error message, or says it is empty.
 func describe(items []string, empty string) string {
 	if len(items) == 0 {

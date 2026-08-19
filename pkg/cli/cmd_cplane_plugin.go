@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -93,6 +94,14 @@ func cplaneSubcommand() *cli.Command {
 					if err != nil {
 						return err
 					}
+					headendSlots, err := uintSliceToUint32("headend-slot", c.UintSlice("headend-slot"))
+					if err != nil {
+						return err
+					}
+					endpointSlots, err := uintSliceToUint32("endpoint-slot", c.UintSlice("endpoint-slot"))
+					if err != nil {
+						return err
+					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Plugin.CplanePluginRegister(c.Context,
 						connect.NewRequest(&v1.CplanePluginRegisterRequest{
@@ -107,8 +116,8 @@ func cplaneSubcommand() *cli.Command {
 								Locators:        c.StringSlice("locator"),
 								Vrfs:            c.StringSlice("vrf"),
 								HeadendPrefixes: c.StringSlice("headend-prefix"),
-								HeadendSlots:    uintSliceToUint32(c.UintSlice("headend-slot")),
-								EndpointSlots:   uintSliceToUint32(c.UintSlice("endpoint-slot")),
+								HeadendSlots:    headendSlots,
+								EndpointSlots:   endpointSlots,
 							},
 						}))
 					if err != nil {
@@ -329,14 +338,21 @@ func formatSlots(slots []uint32) []string {
 }
 
 // uintSliceToUint32 narrows the slot flags to what the request carries.
-// A slot outside the plugin range is refused by the daemon, which is where
-// the ranges are defined, so nothing is checked here.
-func uintSliceToUint32(in []uint) []uint32 {
+//
+// Which slots a plugin may occupy is the daemon's to decide, so the ranges
+// are not repeated here. What is checked is that the number survives the
+// narrowing: uint is 64 bits on the platforms this runs on, so
+// --endpoint-slot 4294967328 would wrap to 32 and be granted as a slot the
+// operator never named.
+func uintSliceToUint32(flag string, in []uint) ([]uint32, error) {
 	out := make([]uint32, 0, len(in))
 	for _, v := range in {
+		if uint64(v) > math.MaxUint32 {
+			return nil, fmt.Errorf("--%s %d does not fit a slot number", flag, v)
+		}
 		out = append(out, uint32(v))
 	}
-	return out
+	return out, nil
 }
 
 // parseBehaviorFlags accepts decimal or 0x-prefixed codepoints. A behavior

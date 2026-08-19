@@ -34,6 +34,12 @@ type CplaneManager interface {
 	// yet the daemon still holds their state and their claims.
 	Unrestored() []cplane.UnrestoredPlugin
 	Forget(name string) error
+	// ReconcileAdvertised re-derives what every plugin originates. A
+	// plugin names a VRF and the host fills in the route distinguisher,
+	// the route targets and the cap from that VRF's binding, so an
+	// operator editing a binding has to reach the plugins that took
+	// values from it.
+	ReconcileAdvertised(ctx context.Context)
 }
 
 // SetCplaneManager installs the manager. Call before Setup, like the other

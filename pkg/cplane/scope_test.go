@@ -339,3 +339,165 @@ func TestPruneRemovesWhatANarrowedScopeNoLongerCovers(t *testing.T) {
 		t.Errorf("the pruned key is still leased: %v", err)
 	}
 }
+
+// A binding is a thing an operator edits while plugins are running. The
+// route distinguisher, the route targets and the cap all come from it, and
+// they are stamped when the declaration is applied -- so without a
+// re-derivation the paths on the wire keep carrying what the binding used
+// to say until the plugin next happens to redeclare.
+func TestChangedBindingRedrivesWhatAPluginAdvertises(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+	bindings := testBindings()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Advertise:    set,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), bindings),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, RD: testRD, Prefix: "10.7.0.0/24",
+		NextHop: "2001:db8::1", RouteTargets: []string{testRD},
+	}}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// The operator re-targets the VPN.
+	bindings.byName[testVRF] = vrfbgp.Binding{
+		VRFName: testVRF, RD: testRD, ExportRTs: []string{"65000:999"},
+	}.Normalize()
+	if _, err := ops.ReconcileAdvertised(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	adv.mu.Lock()
+	last := adv.advertise[len(adv.advertise)-1]
+	adv.mu.Unlock()
+	if len(last.RTs) != 1 || last.RTs[0] != "65000:999" {
+		t.Fatalf("re-advertised with route targets %v, want the binding's new set", last.RTs)
+	}
+}
+
+// Lowering the cap has to take effect on what is already originated.
+// Refusing the set would leave every route in place, which is the opposite
+// of what the operator asked for, so the overflow is withdrawn instead.
+func TestLoweredCapWithdrawsWhatNoLongerFits(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+	bindings := testBindings()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Advertise:    set,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), bindings),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	desired := []AdvertisedRoute{
+		{Family: bgp.FamilyVPNv4, VRF: testVRF, RD: testRD, Prefix: "10.7.0.0/24", NextHop: "2001:db8::1"},
+		{Family: bgp.FamilyVPNv4, VRF: testVRF, RD: testRD, Prefix: "10.7.1.0/24", NextHop: "2001:db8::1"},
+	}
+	if _, err := set.Apply(context.Background(), ownerA, desired, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	bindings.byName[testVRF] = vrfbgp.Binding{
+		VRFName: testVRF, RD: testRD, ExportRTs: []string{testRD}, MaxPrefixes: 1,
+	}.Normalize()
+	withdrawn, err := ops.ReconcileAdvertised(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if withdrawn != 1 {
+		t.Fatalf("withdrew %d routes, want the one over the new cap", withdrawn)
+	}
+	if set.LiveCount(ownerA) != 1 {
+		t.Fatalf("owner still originates %d routes, want the cap", set.LiveCount(ownerA))
+	}
+}
+
+// A binding the operator removed leaves nothing for the plugin's routes to
+// derive from, so they come off the wire rather than staying under an RD
+// that no longer describes anything.
+func TestRemovedBindingWithdrawsThePluginsRoutes(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+	bindings := testBindings()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Advertise:    set,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), bindings),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, RD: testRD, Prefix: "10.7.0.0/24",
+		NextHop: "2001:db8::1",
+	}}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	delete(bindings.byName, testVRF)
+	if _, err := ops.ReconcileAdvertised(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if set.LiveCount(ownerA) != 0 {
+		t.Fatal("the plugin still originates a route into a VRF with no binding")
+	}
+}
+
+// If the narrowing does not take, saying the registration succeeded would
+// claim an authorization boundary is in force when what the old scope
+// allowed is still installed -- and the plugin cannot clear it itself,
+// because its own declaration of that state is refused now.
+func TestARegistrationIsRefusedWhenTheNarrowingCannotBeApplied(t *testing.T) {
+	ops := newFakeHeadendOps()
+	leases := NewLeases()
+	owner := bpf.OwnerTag("plugin:v1:bundle=wide")
+	entry := func(prefix string) HeadendDesired {
+		return HeadendDesired{
+			TriggerPrefix: prefix,
+			Entry:         &bpf.HeadendEntry{Mode: 1, NumSegments: 1},
+		}
+	}
+	if _, err := ApplyHeadendSet(ops, leases, owner, AFv4, []HeadendDesired{
+		entry("10.7.0.0/24"),
+		entry("10.9.0.0/24"),
+	}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// The entry the new scope excludes is the one the map will not remove.
+	ops.failDelete("10.9.0.0/24")
+
+	pluginOps, err := NewPluginOps(PluginOpsConfig{
+		Owner:   owner,
+		Headend: ops,
+		Leases:  leases,
+		Guard:   NewGuard(narrowScope(t), testLocators(), testBindings()),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	if _, err := pluginOps.PruneOutOfScope(context.Background()); err == nil {
+		t.Fatal("a prune that could not remove the out-of-scope entry reported success")
+	}
+	held, err := OwnedHeadendEntries(ops, owner, AFv4)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(held) != 2 {
+		t.Fatalf("held %+v, want both entries still installed", held)
+	}
+}

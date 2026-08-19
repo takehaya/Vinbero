@@ -970,26 +970,71 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 		}
 	}
 
-	if p.advertise != nil {
-		held := p.advertise.LiveRoutes(p.owner)
-		keep := make([]AdvertisedRoute, 0, len(held))
-		for _, r := range held {
-			// Resolved again rather than trusted: a route stays only if the
-			// VRF it names is still in scope and still has a binding, which
-			// is the same question the apply path asks.
-			if _, err := p.guard.resolveAdvertised(r); err == nil {
-				keep = append(keep, r)
-			}
+	if pruned, err := p.reconcileAdvertisedLocked(ctx); err != nil {
+		if firstErr == nil {
+			firstErr = err
 		}
-		if len(keep) != len(held) {
-			res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
-			removed += res.Pruned
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
+	} else {
+		removed += pruned
 	}
 	return removed, firstErr
+}
+
+// ReconcileAdvertised re-derives what this plugin originates and applies
+// the result, reporting how many routes it withdrew.
+//
+// A VPN route's route distinguisher, its route targets and the cap it is
+// measured against all come from the binding of the VRF it names, and a
+// binding is a thing an operator edits while plugins are running. Nothing
+// re-reads it on its own: the values were stamped when the declaration was
+// applied, so an export RT changed afterwards would leave the plugin's
+// paths on the wire carrying the old one until the plugin next happened to
+// redeclare -- which an event-driven plugin may not do for a long time,
+// and a quiet one may never do.
+//
+// It is called when a binding changes, so the derived values follow the
+// operator's edit rather than the plugin's schedule.
+func (p *PluginOps) ReconcileAdvertised(ctx context.Context) (int, error) {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+	return p.reconcileAdvertisedLocked(ctx)
+}
+
+// reconcileAdvertisedLocked re-resolves the owner's live routes and applies
+// what still resolves. Called with applyMu held.
+//
+// The re-resolved routes are what is applied, not the ones that were held:
+// re-deriving and then applying the old values would answer the question
+// and throw the answer away.
+func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) {
+	if p.advertise == nil {
+		return 0, nil
+	}
+	held := p.advertise.LiveRoutes(p.owner)
+	if len(held) == 0 {
+		return 0, nil
+	}
+	keep := make([]AdvertisedRoute, 0, len(held))
+	for _, r := range held {
+		// A route stays only if the VRF it names is still in scope and
+		// still has a binding, which is the same question the apply path
+		// asks. What comes back carries the binding's current RD and route
+		// targets.
+		resolved, err := p.guard.resolveAdvertised(r)
+		if err != nil {
+			continue
+		}
+		keep = append(keep, resolved)
+	}
+	// The cap is the binding's, so a binding that lowered it makes the set
+	// the plugin already holds too large. Refusing here would leave every
+	// route in place, which is the opposite of what the operator asked
+	// for, so the set is trimmed to the cap instead and what that drops is
+	// withdrawn. The plugin's own next declaration is refused with the
+	// reason, which is where it learns.
+	keep = p.guard.trimToVRFCaps(keep)
+	res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
+	return res.Pruned, err
 }
 
 // Flush removes every entry this plugin owns and releases its leases. It

@@ -248,6 +248,14 @@ operator が選んでいない RD で経路を出すことになるためです�
 binding の `MaxPrefixes` は plugin の広告にも適用します。VRF を渡すことが
 無制限の VRF を渡すことにならないようにするためです。
 
+binding は plugin が動いている間に operator が編集するものなので、導出した値は
+binding が変わった時点で再導出します。RD と RT と上限は宣言を適用した時点で
+刻まれるため、これが無いと export RT を変えても plugin が次に宣言し直すまで
+古い RT を載せた path が wire に残ります。event 駆動の plugin は長く宣言し直さ
+ないことがあります。宣言経路では範囲外を集合ごと拒否しますが、この再導出では
+上限を超えた分を withdraw します。operator が上限を下げたときに拒否すると経路が
+全部残り、頼んだことと逆になるためです。
+
 ### headend だけ prefix で縛る
 
 `headend_v4_map` の key は `lpm_key_v4` で prefixlen と addr しか持たず、
@@ -278,6 +286,11 @@ apply 時に失敗させれば、既存の retry 機構がそのまま修復に�
 状態が残ります。そこで再登録の時点で host が範囲外の状態を prune します。
 実装は「まだ許される部分集合を desired set として apply する」形で、残りは
 既存の reconcile が落とします。
+
+prune に失敗したら登録も失敗させ、plugin を止めます。成功を返すと、実際には
+効いていない認可境界が効いていると言うことになるためです。plugin は自力でも
+直せません。範囲外の状態についての宣言は今や集合ごと拒否されるからです。止めた
+plugin は registry には残すので、operator は残った状態を見て retry できます。
 
 ## claim と built-in state の関係
 

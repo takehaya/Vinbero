@@ -62,6 +62,12 @@ type VrfBgpServer struct {
 	// must run under one mutex or a racing pair could enable/disable a bd
 	// against a facet that is mid-change.
 	mu *sync.Mutex
+	// cplane re-derives what control-plane plugins advertise. A plugin
+	// names a VRF and the host fills in the route distinguisher, the route
+	// targets and the cap from this binding, so an edit here has to reach
+	// the paths that took their values from it. Nil where no plugin
+	// manager was built, which is every daemon without BGP.
+	cplane CplaneManager
 }
 
 // NewVrfBgpServer wires the handler. mu is the mutation mutex, shared with
@@ -72,6 +78,11 @@ func NewVrfBgpServer(mgr *vrfbgp.Manager, exporter VrfExporter, evpn *EvpnCoordi
 	}
 	return &VrfBgpServer{mgr: mgr, exporter: exporter, evpn: evpn, mupSrc: mupSrc, evpnReplay: evpnReplay, mu: mu}
 }
+
+// SetCplaneManager installs the plugin manager whose advertisements follow
+// this server's bindings. Call before serving, like the other optional
+// dependencies.
+func (s *VrfBgpServer) SetCplaneManager(m CplaneManager) { s.cplane = m }
 
 // protoToBinding converts a wire VrfBgpBinding into the runtime Binding.
 // Families on the wire are translated to the typed runtime form; an unknown
@@ -256,6 +267,19 @@ func (s *VrfBgpServer) commitBinding(updated vrfbgp.Binding) error {
 	}
 	if s.mupSrc != nil && mupUplinkFieldsChanged(prev, updated) {
 		s.mupSrc.ReconcileMUPUplinkInstances()
+	}
+	// A plugin that originates into this VRF took its route distinguisher,
+	// its route targets and its prefix cap from the binding that just
+	// changed. Nothing re-reads them on its own, so without this the paths
+	// on the wire would keep carrying what the binding used to say until
+	// the plugin next happened to redeclare -- which an event-driven plugin
+	// may not do for a long time.
+	//
+	// Unconditional rather than gated on which fields moved: every field a
+	// plugin route derives from lives here, and a gate that missed one
+	// would fail silently in the direction that matters.
+	if s.cplane != nil {
+		s.cplane.ReconcileAdvertised(context.Background())
 	}
 	return nil
 }
