@@ -335,7 +335,18 @@ session は 1 つの NLRI につき local path を 1 本しか持たないので
 lease と producer は失敗の仕方が違います。lease 衝突は何も送る前に拒否され、
 producer 衝突は誤って lease を手放したときに他の plugin の経路を守ります。
 
-session は auto-advertise の exporter や operator の RPC とも共有です。
+session は auto-advertise の exporter や operator の RPC とも共有なので、
+vinbero 自身の originator にも producer 名を与えています。exporter は
+`vinbero:export`、operator の RPC は `vinbero:operator` です。片方が routing
+table に従って出す経路で、もう片方は operator が明示的に頼んだ経路なので、
+同じ名前にすると後から出した方が黙って上書きし、上書きされた側は広告中の
+つもりのまま残ります。plugin の producer 名は owner tag なので、`vinbero:`
+前置と衝突しません。
+
+producer 名を持つ view は、名前を載せられる surface だけを提供します。
+session を embed すると EVPN と MUP と SR Policy の interface も満たして
+しまい、それらの method は producer を運ばないので無名で書きます。compiler
+は黙って通すので、embed しない形にしています。
 
 session 側で producer を記録し、withdraw は自分が出した経路にしか効かない
 ようにしています。これが無いと、後から届いた withdraw が別の producer の
@@ -365,6 +376,13 @@ map が大きい環境で plugin を多数動かす場合は、call budget を m
 binding の `MaxPrefixes` は、plugin の広告と auto-advertise の広告を別々に
 数えます。exporter の経路数は `pkg/bgp/export` の側にあってここからは見えない
 ためで、両方が動く VRF はそれぞれの上限まで持てます。
+
+EVPN と MUP と SR Policy の advertise は producer 名を持ちません。SR Policy と
+MUP は書き手が 1 つしか無いので分けるものがありませんが、EVPN は
+auto-advertise の exporter と operator の RPC の 2 つがあり、いまは同じ無名の
+producer です。さらに EVPN の withdraw は producer を見ずに path を消すので、
+名前を付けるだけでは足りず withdraw 側の作り直しが要ります。別の変更として
+残しています。
 
 conformance harness は scope のうち daemon 無しで判定できる部分だけを見ます。
 prefix が locator に含まれるかと、VRF に binding があるかは daemon の状態に
