@@ -256,8 +256,19 @@ func TestE2E_VPNv4BgpToXdpEncap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BPF_PROG_TEST_RUN: %v", err)
 	}
-	if ret != bpf.XDP_PASS {
-		t.Fatalf("XDP action = %d, want XDP_PASS (%d) after H.Encaps", ret, bpf.XDP_PASS)
+	// Either action means the encapsulation happened, and which one comes
+	// out is a property of the host rather than of the route under test.
+	// H.Encaps ends in bpf_fib_lookup on the outer destination: a host with
+	// no route to the SID gets BPF_FIB_LKUP_RET_NOT_FWDED and the program
+	// hands the packet to the stack, while a host with a default IPv6 route
+	// -- a developer machine on a network with RA, say -- resolves it and
+	// redirects. Asserting XDP_PASS made this test pass or fail on the
+	// routing table of whoever ran it. What it is actually proving is that
+	// a route learned over BGP drives the data plane, and that is what the
+	// encapsulated bytes below show.
+	if ret != bpf.XDP_PASS && ret != bpf.XDP_REDIRECT {
+		t.Fatalf("XDP action = %d, want XDP_PASS (%d) or XDP_REDIRECT (%d) after H.Encaps",
+			ret, bpf.XDP_PASS, bpf.XDP_REDIRECT)
 	}
 
 	outerSrc := netip.MustParseAddr(e2eLocatorPfx).As16()
