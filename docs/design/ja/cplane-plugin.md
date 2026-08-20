@@ -242,9 +242,19 @@ claim と同じく登録時に拒否します。locator も同じく排他にし
 ipv6_unicast の広告で SID を locator 配下に閉じ込める抑えが安全なのは、その
 locator が 1 つの plugin だけのものであるときだけで、共有した locator では別の
 plugin や built-in service SID の配下を指す広告を止められないためです。slot と
-locator の排他はどちらも登録時に拒否します。prefix scope は排他にしません。
+locator の排他はどちらも登録時に拒否します。prune や restore に失敗した plugin は
+running registry から外れますが、state と claim を map に残したままなので、その
+slot と locator も forget されるまで予約し続けます。そうしないと別名の plugin が
+同じ grant を取り、残存 state と衝突するためです。prefix scope は排他にしません。
 operator が意図的に重ねることがあり、実際の衝突は per-entry の owner と lease が
 調停します。
+
+locator の排他は名前で見ます。別名で prefix を入れ子にした locator を別々の
+plugin に渡すと、広い locator を持つ plugin が狭い locator 配下の SID も
+`Contains` 判定で広告できてしまいます。prefix の重なりの調停は locator の登録側
+(`pkg/locator`) の領分で、scope が名前しか持たない登録時には実 prefix が未登録の
+こともあるため、ここでは名前の排他に留めます。operator は入れ子の locator を
+別々の plugin に割り当てないことを前提とします。
 
 ### VPN 広告は照合ではなく導出
 

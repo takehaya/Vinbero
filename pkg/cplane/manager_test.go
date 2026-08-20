@@ -2069,3 +2069,141 @@ func TestARegistrationWhosePruneFailsIsStoppedButPersisted(t *testing.T) {
 		t.Error("forgetting it left the behavior claimed")
 	}
 }
+
+// makeUnrestoredViaFailedPrune registers the declare fixture, installs its
+// entry, then re-registers with a scope that no longer covers the entry while
+// the map refuses to delete it -- so the re-registration fails its prune and
+// the plugin is left unrestored, holding its state, its claim and its grant.
+// It returns the narrowed scope the unrestored record now holds.
+func makeUnrestoredViaFailedPrune(t *testing.T, m *Manager, src *fakeSource, ops *fakeHeadendOps, name string) Scope {
+	t.Helper()
+	if err := m.Register(context.Background(), Registration{
+		Name: name, Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
+	}); err != nil {
+		t.Fatalf("register wide: %v", err)
+	}
+	if !src.emit(name, bgp.RouteEvent{Family: bgp.FamilyVPNv4}) {
+		t.Fatal("emit found no handler")
+	}
+	waitDelivered(t, m, name)
+	if _, ok := ops.getV4("10.99.0.0/24"); !ok {
+		t.Fatalf("the fixture's entry was not installed; nothing to prune")
+	}
+	ops.failDelete("10.99.0.0/24")
+	slots := func(from, to uint32) []uint32 {
+		out := make([]uint32, 0, to-from+1)
+		for s := from; s <= to; s++ {
+			out = append(out, s)
+		}
+		return out
+	}
+	narrow, err := ParseScope(ScopeSpec{
+		Locators:        []string{"main", "second", "late"},
+		VRFs:            []string{testVRF},
+		HeadendPrefixes: []string{"10.0.0.0/16"},
+		HeadendV4Slots:  slots(16, 31),
+		HeadendV6Slots:  slots(16, 31),
+		EndpointSlots:   slots(32, 63),
+	})
+	if err != nil {
+		t.Fatalf("narrow scope: %v", err)
+	}
+	if err := m.Register(context.Background(), Registration{
+		Name: name, Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: narrow,
+	}); err == nil {
+		t.Fatal("re-register reported success while state outside the new scope is still installed")
+	}
+	if len(m.Unrestored()) != 1 {
+		t.Fatalf("plugin %q was not left unrestored", name)
+	}
+	return narrow
+}
+
+// A plugin that failed its prune keeps its state and claim in the maps until
+// an operator forgets it, so its slots and locators stay reserved: another
+// plugin must not be able to take the same grant and collide with that
+// residual state.
+func TestAnUnrestoredPluginStillReservesItsGrant(t *testing.T) {
+	store := newTestStore(t)
+	src := newFakeSource()
+	m, ops := newTestManagerWithStoreAndClaims(t, src, store, newFakeClaims())
+	makeUnrestoredViaFailedPrune(t, m, src, ops, "declare")
+
+	// A different plugin asking for a slot the unrestored one holds is refused.
+	err := m.Register(context.Background(), Registration{
+		Name: "other", Module: declareModule(t), Capabilities: testCaps(),
+		Scope: mustScope(t, ScopeSpec{
+			Locators: []string{"other-loc"}, VRFs: []string{testVRF},
+			HeadendPrefixes: []string{"10.0.0.0/16"},
+			HeadendV4Slots:  []uint32{16}, HeadendV6Slots: []uint32{16},
+			EndpointSlots: []uint32{32}, // held by the unrestored declare
+		}),
+	})
+	if err == nil || !errors.Is(err, ErrGrantHeld) {
+		t.Fatalf("a slot held by an unrestored plugin was granted to another: %v", err)
+	}
+
+	// And a locator it holds is refused too.
+	err = m.Register(context.Background(), Registration{
+		Name: "other", Module: declareModule(t), Capabilities: testCaps(),
+		Scope: mustScope(t, ScopeSpec{
+			Locators: []string{"second"}, VRFs: []string{testVRF}, // held by declare
+			HeadendPrefixes: []string{"10.0.0.0/16"},
+			HeadendV4Slots:  []uint32{16}, HeadendV6Slots: []uint32{16},
+			EndpointSlots: []uint32{40},
+		}),
+	})
+	if err == nil || !errors.Is(err, ErrGrantHeld) {
+		t.Fatalf("a locator held by an unrestored plugin was granted to another: %v", err)
+	}
+}
+
+// Re-registering a plugin that had failed its prune, this time successfully,
+// clears the unrestored record, so a later Forget cannot delete the now
+// running plugin from the registry without tearing it down.
+func TestASuccessfulReRegisterClearsTheUnrestoredRecord(t *testing.T) {
+	store := newTestStore(t)
+	src := newFakeSource()
+	claims := newFakeClaims()
+	m, ops := newTestManagerWithStoreAndClaims(t, src, store, claims)
+	narrow := makeUnrestoredViaFailedPrune(t, m, src, ops, "declare")
+
+	// The operator re-registers with a scope that covers what is installed,
+	// so the prune has nothing to remove and the stuck delete is never
+	// reached.
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
+	}); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	_ = narrow
+
+	// It is running and no longer reported unrestored.
+	if names := m.List(); len(names) != 1 || names[0] != "declare" {
+		t.Fatalf("List() = %v, want the re-registered plugin running", names)
+	}
+	if len(m.Unrestored()) != 0 {
+		t.Fatalf("the stale unrestored record survived a successful re-register: %+v", m.Unrestored())
+	}
+	// Forget must refuse to touch a running plugin.
+	if err := m.Forget("declare"); err == nil || !errors.Is(err, ErrPluginNotRegistered) {
+		t.Fatalf("Forget acted on a running plugin: %v", err)
+	}
+	// The running plugin still owns its state.
+	if _, ok := ops.getV4("10.99.0.0/24"); !ok {
+		t.Fatal("Forget or the re-register dropped the running plugin's entry")
+	}
+}
+
+// mustScope parses a scope or fails the test.
+func mustScope(t *testing.T, spec ScopeSpec) Scope {
+	t.Helper()
+	s, err := ParseScope(spec)
+	if err != nil {
+		t.Fatalf("scope: %v", err)
+	}
+	return s
+}

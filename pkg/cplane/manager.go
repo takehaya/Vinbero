@@ -354,21 +354,38 @@ func (m *Manager) checkGrantsExclusive(name string, scope Scope) error {
 		ep       map[uint32]struct{}
 		locators map[string]struct{}
 	}
+	grantsOf := func(owner string, s Scope) heldGrants {
+		return heldGrants{
+			owner:    owner,
+			v4:       slotSet(s.HeadendV4Slots),
+			v6:       slotSet(s.HeadendV6Slots),
+			ep:       slotSet(s.EndpointSlots),
+			locators: stringSet(s.Locators),
+		}
+	}
 	m.mu.Lock()
 	held := make([]heldGrants, 0, len(m.plugins))
 	for other, p := range m.plugins {
 		if other == name {
 			continue
 		}
-		held = append(held, heldGrants{
-			owner:    other,
-			v4:       slotSet(p.reg.Scope.HeadendV4Slots),
-			v6:       slotSet(p.reg.Scope.HeadendV6Slots),
-			ep:       slotSet(p.reg.Scope.EndpointSlots),
-			locators: stringSet(p.reg.Scope.Locators),
-		})
+		held = append(held, grantsOf(other, p.reg.Scope))
 	}
 	m.mu.Unlock()
+
+	// A plugin whose prune or restore failed is out of m.plugins but still
+	// holds its state and claim in the maps until an operator forgets it, so
+	// its slots and locators stay reserved. Otherwise another plugin could
+	// take the same grant and collide with that residual state. Reusing the
+	// same name is the upgrade path and does not conflict with itself.
+	m.unrestoredMu.Lock()
+	for other, u := range m.unrestored {
+		if other == name {
+			continue
+		}
+		held = append(held, grantsOf(other+" (unrestored)", u.scope))
+	}
+	m.unrestoredMu.Unlock()
 
 	for _, h := range held {
 		for _, s := range scope.HeadendV4Slots {
@@ -585,6 +602,12 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 			"so it will not survive a restart: %w", reg.Name, err)
 	}
 
+	// A successful registration is, by definition, not unrestored. Clearing
+	// any stale record here is what keeps Forget from later deleting this now
+	// running plugin from the registry without tearing it down: Forget acts
+	// only on names still recorded unrestored.
+	m.clearUnrestored(reg.Name)
+
 	m.logger.Info("control-plane plugin registered",
 		zap.String("plugin", reg.Name),
 		zap.Bool("replaced", existed),
@@ -762,6 +785,11 @@ type UnrestoredPlugin struct {
 	Reason string
 	// Since is when the attempt failed.
 	Since time.Time
+	// scope is the grant the failed registration held. Its slots and
+	// locators stay reserved against another plugin taking them while this
+	// one's state is still pinned in the maps. Empty for a manifest that
+	// would not even load, since its scope was never parsed.
+	scope Scope
 }
 
 func (m *Manager) recordUnrestored(reg Registration, cause error) {
@@ -772,6 +800,7 @@ func (m *Manager) recordUnrestored(reg Registration, cause error) {
 		Behaviors: append([]uint16(nil), reg.Behaviors...),
 		Reason:    cause.Error(),
 		Since:     time.Now(),
+		scope:     reg.Scope,
 	}
 }
 
