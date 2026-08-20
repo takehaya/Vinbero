@@ -2943,6 +2943,11 @@ func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 		// Written only by SidFunctionService (proxy IFACE-IN bindings);
 		// the return-path dispatcher and plugins just read it.
 		"service_ingress_map": m.objs.ServiceIngressMap,
+		// Written only by the control plane from a plugin's VRF scope; the
+		// built-in End.DT4/DT6/DT46 read it after a plugin handoff. It is also
+		// BPF_F_RDONLY_PROG, so the kernel refuses a plugin write structurally,
+		// not only the validator.
+		"plugin_endt_vrf_map": m.objs.PluginEndtVrfMap,
 	}
 }
 
@@ -3002,6 +3007,7 @@ func SharedReadOnlyMapNames() []string {
 		"ecmp_path_map",
 		"ecmp_live_map",
 		"service_ingress_map",
+		"plugin_endt_vrf_map",
 	}
 }
 

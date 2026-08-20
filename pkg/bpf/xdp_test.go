@@ -4065,3 +4065,94 @@ func TestXDPProgPluginAuxNotReadByBuiltin(t *testing.T) {
 		}
 	})
 }
+
+// grantPluginEndtVrf writes a plugin End.DT VRF grant, as the control plane
+// does when a plugin's scope-checked local SID declares a decap VRF. The grant
+// is keyed by the SID's aux_index, which the built-in reads from tailcall_ctx.
+func (h *xdpTestHelper) grantPluginEndtVrf(auxIndex, ifindex uint32) {
+	h.t.Helper()
+	val := BpfPluginEndtVrf{VrfIfindex: ifindex, Generation: 1}
+	if err := h.objs.PluginEndtVrfMap.Update(auxIndex, val, ebpf.UpdateAny); err != nil {
+		h.t.Fatalf("write plugin End.DT VRF grant: %v", err)
+	}
+}
+
+// createPluginDT4Sid installs a plugin-slot End.DT4 SID (action = plugin slot,
+// with an aux so it gets a non-zero aux_index) and returns that aux_index.
+func (h *xdpTestHelper) createPluginDT4Sid(prefix string, slot uint32) uint32 {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: uint8(slot)}
+	aux := NewSidAuxL3Vrf(0)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux, OwnerRPC); err != nil {
+		h.t.Fatalf("create plugin SID: %v", err)
+	}
+	if entry.AuxIndex == 0 {
+		h.t.Fatalf("plugin SID got aux_index 0; the grant cannot be keyed")
+	}
+	return uint32(entry.AuxIndex)
+}
+
+// TestXDPProgPluginEndDT4VrfGrant covers the plugin End.DT4 VRF grant: a plugin
+// that tail-calls the built-in End.DT4 has its aux nulled by the discriminator
+// (so it cannot pick a VRF from the plugin_raw bytes), and the built-in reads
+// the trusted VRF from plugin_endt_vrf_map instead. Without a grant it must
+// drop rather than fall back to the ingress table.
+//
+// The FIB-level outcome (a granted packet actually forwarded via the VRF
+// table) is not observable in the unit env -- bpf_fib_lookup runs against the
+// host and declines -- so that is verified in the cplane-plugin-2site interop
+// with a VRF-enslaved customer interface. Here the contract is pinned: no
+// grant drops, and a grant makes the plugin path take the same FIB decision a
+// built-in End.DT4 would.
+func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
+	const pluginSlot = uint32(32) // an endpoint plugin slot (>= ENDPOINT_PLUGIN_BASE)
+	sid := "fd00:1:700::10"
+	buildPkt := func(t *testing.T) []byte {
+		t.Helper()
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP(sid),
+			net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		return pkt
+	}
+
+	loadDT4IntoPluginSlot := func(t *testing.T, h *xdpTestHelper) {
+		t.Helper()
+		if err := h.objs.SidEndpointProgs.Update(pluginSlot, h.objs.TailcallEndpointEndDt4, ebpf.UpdateAny); err != nil {
+			t.Fatalf("load End.DT4 into plugin slot: %v", err)
+		}
+		t.Cleanup(func() { _ = h.objs.SidEndpointProgs.Delete(pluginSlot) })
+	}
+
+	t.Run("a plugin End.DT4 with no VRF grant drops rather than using the ingress table", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		loadDT4IntoPluginSlot(t, h)
+		h.createPluginDT4Sid(sid+"/128", pluginSlot)
+		ret, _ := h.run(buildPkt(t))
+		if ret != XDP_DROP {
+			t.Fatalf("a plugin End.DT4 with no VRF grant returned %d, want XDP_DROP; it must not fall back to the ingress table", ret)
+		}
+	})
+
+	t.Run("a plugin End.DT4 with a grant takes the same FIB decision as a built-in End.DT4", func(t *testing.T) {
+		const vrfIfindex = uint32(1) // loopback: present in the test env
+		// Built-in reference: an ordinary End.DT4 into the same VRF ifindex.
+		hb := newXDPTestHelper(t)
+		hb.createSidFunctionWithVRF(sid+"/128", actionEndDT4, vrfIfindex)
+		builtinRet, _ := hb.run(buildPkt(t))
+
+		// Plugin path: End.DT4 in a plugin slot, aux nulled, VRF from the grant.
+		h := newXDPTestHelper(t)
+		loadDT4IntoPluginSlot(t, h)
+		auxIdx := h.createPluginDT4Sid(sid+"/128", pluginSlot)
+		h.grantPluginEndtVrf(auxIdx, vrfIfindex)
+		pluginRet, _ := h.run(buildPkt(t))
+
+		if pluginRet != builtinRet {
+			t.Fatalf("plugin End.DT4 with a grant returned %d, want the built-in path's %d; "+
+				"the grant should route it to the same FIB decision, not the gate drop", pluginRet, builtinRet)
+		}
+	})
+}
