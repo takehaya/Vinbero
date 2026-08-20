@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2207,3 +2208,38 @@ func mustScope(t *testing.T, spec ScopeSpec) Scope {
 	}
 	return s
 }
+
+// A plugin can be both running and recorded unrestored for a moment: a
+// re-registration that published the new instance but failed to persist it
+// returns before clearing the old unrestored record. Forget must refuse to
+// act on it then, or it would release the claim and store entry and drop the
+// entry from the registry while the worker keeps running.
+func TestForgetRefusesAPluginThatIsRunning(t *testing.T) {
+	src := newFakeSource()
+	claims := newFakeClaims()
+	m, _ := newTestManager(t, src, claims)
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// Simulate the window: the plugin is running and also recorded unrestored.
+	m.recordUnrestored(Registration{Name: "declare", Behaviors: []uint16{0xFE01}}, errContext("persist failed"))
+
+	if err := m.Forget("declare"); err == nil || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("Forget acted on a running plugin: %v", err)
+	}
+	// It is still running and still claimed.
+	if names := m.List(); len(names) != 1 || names[0] != "declare" {
+		t.Fatalf("List() = %v, want the plugin still running", names)
+	}
+	if !claims.claimed("declare") {
+		t.Error("Forget released the claim of a running plugin")
+	}
+}
+
+// errContext is a tiny error for the test above.
+type errContext string
+
+func (e errContext) Error() string { return string(e) }

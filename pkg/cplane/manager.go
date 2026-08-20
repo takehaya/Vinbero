@@ -841,6 +841,18 @@ func (m *Manager) Forget(name string) error {
 		return fmt.Errorf("cplane: %w: %q is not one that failed to restore",
 			ErrPluginNotRegistered, name)
 	}
+	// A plugin can be both unrestored and running: a re-registration that
+	// published the new instance but then failed to persist it returns before
+	// clearing the old unrestored record. Forgetting it here would release its
+	// claim and store entry and drop it from the registry without tearing the
+	// worker down, leaking a running instance. Refuse and send the operator to
+	// Unregister, which stops it cleanly.
+	m.mu.Lock()
+	_, running := m.plugins[name]
+	m.mu.Unlock()
+	if running {
+		return fmt.Errorf("cplane: plugin %q is running; Unregister it rather than Forget", name)
+	}
 	if m.claims != nil {
 		m.claims.Release(name)
 	}
@@ -848,10 +860,10 @@ func (m *Manager) Forget(name string) error {
 		return fmt.Errorf("cplane: remove plugin %q from the store: %w", name, err)
 	}
 	m.clearUnrestored(name)
-	// A plugin recorded as unrestored should not also be in the running
-	// registry; failPrune removes it before recording. This guards against
-	// any path that leaves a dead entry behind, so Forget cannot release
-	// the claims and the store while a dead registry entry keeps reporting
+	// Belt and suspenders: a plugin recorded as unrestored should not also be
+	// in the running registry (the guard above refuses that), and failPrune
+	// removes the dead entry before recording. This delete covers any residual
+	// path that left a dead entry behind, so Forget cannot leave one reporting
 	// the plugin through List.
 	m.mu.Lock()
 	delete(m.plugins, name)

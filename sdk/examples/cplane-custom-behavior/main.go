@@ -71,8 +71,9 @@ const (
 	fieldConfigPrefix   = 3
 	fieldConfigVRF      = 4
 	fieldConfigSlot     = 5
-	fieldConfigAdvSID   = 6
-	fieldConfigNextHop  = 7
+	// field 6 (an operator-provisioned SID to advertise) was removed: a
+	// plugin may advertise only a SID it was itself allocated.
+	fieldConfigNextHop = 7
 )
 
 // PluginEventKind values this plugin acts on.
@@ -105,16 +106,13 @@ var (
 	advertisePfx  string
 	dataPlaneSlot uint64
 	// allocatedSID is the address the host gave this plugin, empty until
-	// the local-SID event arrives.
+	// the local-SID event arrives. A plugin may advertise only a SID it was
+	// itself allocated -- the daemon refuses a route pointing at any other
+	// SID, since one it did not allocate could belong to another VRF -- so
+	// there is no "advertise an operator-provisioned SID" path here. Fronting
+	// a SID allocated outside the plugin would need an explicit operator grant
+	// the scope model does not yet carry.
 	allocatedSID string
-	// configuredSID is a SID an operator provisioned outside the plugin.
-	//
-	// A plugin that ships its own data-plane half asks the host for a SID
-	// and is told the address. One that fronts a behavior the operator
-	// provisioned -- an existing endpoint on this node -- is simply told
-	// which address to advertise. Both are real deployments, and a plugin
-	// that only supported the first could not be used for the second.
-	configuredSID string
 	// advertiseNextHop is where peers are told to send the traffic. The
 	// daemon cannot guess it -- the encap source is a locator address, not
 	// necessarily this node's BGP transport address -- so the operator
@@ -262,10 +260,6 @@ func configure(ptr, length int32) int32 {
 			advertiseVRF = string(b)
 		case field == fieldConfigSlot && wire == wireVarint:
 			dataPlaneSlot, ok = r.varint()
-		case field == fieldConfigAdvSID && wire == wireBytes:
-			var b []byte
-			b, ok = r.bytes()
-			configuredSID = string(b)
 		case field == fieldConfigNextHop && wire == wireBytes:
 			var b []byte
 			b, ok = r.bytes()
@@ -279,16 +273,9 @@ func configure(ptr, length int32) int32 {
 		}
 	}
 	logf(logInfo, "configured")
-	if configuredSID != "" {
-		// The address was given rather than allocated, so there is nothing
-		// to wait for.
-		allocatedSID = configuredSID
-		advertiseSelf()
-		return 0
-	}
 	// Asking for the local SID here is what starts the sequence: the host
 	// allocates it, tells this plugin the address, and only then can it
-	// advertise anything.
+	// advertise anything -- a plugin advertises only the SID it was handed.
 	declareLocalSID()
 	return 0
 }
