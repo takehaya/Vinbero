@@ -362,6 +362,12 @@ type UnloadableManifest struct {
 	Name      string
 	Behaviors []uint16
 	Reason    error
+	// Scope is the grant the manifest declared, when it is a current-version
+	// manifest that parsed but whose module would not load (a missing .wasm,
+	// say). Its slots and locators must stay reserved against another plugin
+	// while its state is pinned, the same as a plugin that failed its prune.
+	// Zero for a manifest too old to carry a scope.
+	Scope Scope
 }
 
 // Unloadable reports the manifests that fail to load, so a restore can make
@@ -384,10 +390,28 @@ func (s *Store) Unloadable() []UnloadableManifest {
 		} else {
 			m, mErr := s.readManifest(name)
 			behaviors := []uint16(nil)
+			var scope Scope
 			if mErr == nil {
 				behaviors = m.Behaviors
+				// A current-version manifest that parsed still carries its
+				// scope even when the module will not load, so the grant can
+				// be reserved. A version too old to have a scope leaves it
+				// zero. A malformed scope is left zero rather than failing the
+				// whole listing -- the plugin is unrestored either way.
+				if m.Version == storeManifestVersion && m.Scope != nil {
+					if sc, sErr := ParseScope(ScopeSpec{
+						Locators:        m.Scope.Locators,
+						VRFs:            m.Scope.VRFs,
+						HeadendPrefixes: m.Scope.HeadendPrefixes,
+						HeadendV4Slots:  m.Scope.HeadendV4Slots,
+						HeadendV6Slots:  m.Scope.HeadendV6Slots,
+						EndpointSlots:   m.Scope.EndpointSlots,
+					}); sErr == nil {
+						scope = sc
+					}
+				}
 			}
-			out = append(out, UnloadableManifest{Name: name, Behaviors: behaviors, Reason: err})
+			out = append(out, UnloadableManifest{Name: name, Behaviors: behaviors, Reason: err, Scope: scope})
 		}
 	}
 	return out

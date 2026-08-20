@@ -638,3 +638,44 @@ func writePreScopeManifest(t *testing.T, store *Store, name string, module []byt
 		t.Fatalf("write manifest: %v", err)
 	}
 }
+
+// A current-version manifest that parses but whose module will not load must
+// still surface its scope, so the grant it holds stays reserved against
+// another plugin while its state is pinned. Deleting the module file after a
+// Save reproduces the missing-.wasm case.
+func TestUnloadableManifestCarriesItsScope(t *testing.T) {
+	store := newTestStore(t)
+	scope := mustScope(t, ScopeSpec{
+		Locators: []string{"main"}, VRFs: []string{testVRF},
+		HeadendPrefixes: []string{"10.0.0.0/16"},
+		HeadendV4Slots:  []uint32{16}, HeadendV6Slots: []uint32{16},
+		EndpointSlots: []uint32{32},
+	})
+	if err := store.Save(Registration{
+		Name: "declare", Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: scope,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Remove the module so load fails after the manifest (and its scope) parse.
+	entries, _ := os.ReadDir(store.Dir())
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".wasm") {
+			if err := os.Remove(filepath.Join(store.Dir(), e.Name())); err != nil {
+				t.Fatalf("remove module: %v", err)
+			}
+		}
+	}
+
+	un := store.Unloadable()
+	if len(un) != 1 || un[0].Name != "declare" {
+		t.Fatalf("Unloadable() = %+v, want the plugin whose module is gone", un)
+	}
+	// The scope came through, so its grant can be reserved.
+	if err := un[0].Scope.CheckHeadend(AFv4, "10.0.7.0/24", 16); err != nil {
+		t.Errorf("the unloadable manifest lost its headend grant: %v", err)
+	}
+	if len(un[0].Scope.Locators) != 1 || un[0].Scope.Locators[0] != "main" {
+		t.Errorf("the unloadable manifest lost its locators: %v", un[0].Scope.Locators)
+	}
+}

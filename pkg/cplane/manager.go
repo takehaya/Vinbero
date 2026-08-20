@@ -770,7 +770,7 @@ func (m *Manager) Restore(ctx context.Context) error {
 	for _, u := range m.store.Unloadable() {
 		m.logger.Warn("a stored plugin could not be restored; its state is left in place",
 			zap.String("plugin", u.Name), zap.Error(u.Reason))
-		m.recordUnrestored(Registration{Name: u.Name, Behaviors: u.Behaviors}, u.Reason)
+		m.recordUnrestored(Registration{Name: u.Name, Behaviors: u.Behaviors, Scope: u.Scope}, u.Reason)
 	}
 	return listErr
 }

@@ -419,19 +419,41 @@ func knownSubprogNames(ins asm.Instructions) map[string]struct{} {
 type roViolation struct {
 	insIdx  int
 	mapName string
+	// fatal marks a violation that must never be warn-downgraded: an
+	// integrity-map write, or a main-body store whose target could not be
+	// resolved (fail-closed, since a lost provenance cannot be proven to
+	// miss an integrity map).
+	fatal bool
 }
 
-// checkROWrites scans the main program (subprograms excluded) for stores
-// whose target is a vinbero shared RO map, or whose target cannot be
-// statically resolved. The check is a no-op when roMaps is empty, for
+// checkROWrites scans the program -- the entry body and every subprogram --
+// for stores whose target is a vinbero shared RO map, or whose target cannot
+// be statically resolved. The check is a no-op when roMaps is empty, for
 // back-compat with callers that don't yet supply the set (notably tests).
 //
-// Subprogram exclusion mirrors checkExitProximity. Plugin ELFs that pull
-// in tailcall_epilogue end up with the epilogue body appended after the
-// main program; that body legitimately writes to slot_stats_* (currently
-// RW, but we don't want to lock out the epilogue if/when it migrates to
-// RO), so scanning past the first sub-program would risk false positives
-// on every plugin.
+// Provenance is tracked per register: a store is attributed to the map its
+// destination pointer was loaded from, following LoadMapPtr, register MOVs,
+// map-lookup returns, and constant/register pointer arithmetic (p += off
+// still points into the same map's value, so laundering a write through an
+// offset does not erase the map identity). The register table is reset at
+// each subprogram boundary, where the callee's registers start fresh.
+//
+// A resolved write to an RO map is flagged anywhere it occurs, so an
+// integrity-map write hidden in a noinline helper is caught, not only one in
+// the entry body. An unresolved store is flagged fail-closed in the entry
+// body (it cannot be proven to miss an integrity map) but not inside a
+// subprogram, where a helper legitimately stores through a map pointer passed
+// as an argument (the epilogue's slot_stats_inc is exactly this) that the
+// intra-procedural tracker cannot resolve. The residual this leaves -- a
+// write whose map pointer is passed as a call argument and stored in the
+// callee -- needs inter-procedural argument propagation and is a known limit.
+//
+// Historically this scanned only the entry body: the epilogue body appended
+// after it stores to slot_stats_* through a map pointer passed as an argument,
+// which the tracker cannot resolve and would have flagged. That false positive
+// is now avoided by not flagging unresolved stores inside a subprogram, rather
+// than by stopping at the first one -- so a resolved integrity-map write in a
+// helper is no longer invisible.
 func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	if len(roMaps) == 0 {
 		return nil
@@ -445,14 +467,23 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	var violations []roViolation
 	ins := spec.Instructions
 	subprogs := knownSubprogNames(ins)
+	mainBody := true
 	for i, in := range ins {
-		// Stop at the start of a real subprogram (one something actually
-		// calls). A bare Symbol() with no caller is metadata noise — or
-		// an injected fake — and must not terminate the scan.
+		// At the start of a real subprogram (one something actually calls),
+		// the callee's registers start fresh: reset the tracker rather than
+		// carrying stale identities across the boundary, and stop treating
+		// unresolved stores as fatal (a helper legitimately stores through a
+		// map-pointer argument). Do not stop the scan -- a resolved
+		// integrity-map write in a helper must still be caught. A bare
+		// Symbol() with no caller is metadata noise or an injected fake and
+		// does not begin a subprogram.
 		if i > 0 {
 			if sym := in.Symbol(); sym != "" {
 				if _, ok := subprogs[sym]; ok {
-					break
+					for r := range lastMap {
+						lastMap[r] = ""
+					}
+					mainBody = false
 				}
 			}
 		}
@@ -467,9 +498,17 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 					mapName = lastMap[dst]
 				}
 				if mapName == "" {
-					violations = append(violations, roViolation{insIdx: i})
+					// Unresolved. In the entry body this is fail-closed
+					// fatal: a laundered pointer cannot be proven to miss an
+					// integrity map. In a subprogram it is not flagged, since
+					// a helper storing through a map-pointer argument is the
+					// legitimate shape the tracker cannot resolve.
+					if mainBody {
+						violations = append(violations, roViolation{insIdx: i, fatal: true})
+					}
 				} else if _, ro := roMaps[mapName]; ro {
-					violations = append(violations, roViolation{insIdx: i, mapName: mapName})
+					_, integrity := integrityMapNames[mapName]
+					violations = append(violations, roViolation{insIdx: i, mapName: mapName, fatal: integrity})
 				}
 			}
 		}
@@ -549,6 +588,16 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 		}
 		if in.IsLoadFromMap() {
 			lastMap[dst] = in.Reference()
+		} else if (cls == asm.ALUClass || cls == asm.ALU64Class) &&
+			(in.OpCode.ALUOp() == asm.Add || in.OpCode.ALUOp() == asm.Sub) {
+			// Pointer arithmetic keeps the map identity: `p += off` (or
+			// `p -= off`) still points into the same map's value, so a store
+			// through the result is a store into that map. Leaving lastMap[dst]
+			// intact is what stops a plugin from erasing the identity with an
+			// offset and slipping an integrity-map write into the unresolved
+			// (entry-body-fatal, subprogram-ignored) bucket. It only ever adds
+			// detections on the map already tracked, so a write to a
+			// plugin-owned RW map stays unflagged.
 		} else {
 			lastMap[dst] = ""
 		}
@@ -559,15 +608,16 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 	details := make([]string, 0, len(violations))
 	integrity := false
 	for _, v := range violations {
+		if v.fatal {
+			integrity = true
+		}
 		if v.mapName == "" {
 			details = append(details, fmt.Sprintf(
 				"instruction #%d: store target could not be resolved to a "+
-					"known map; route writes through scratch_map / stats_map "+
-					"or a plugin-owned map", v.insIdx))
+					"known map; a plugin-owned RW map write resolves to its "+
+					"map, so an unresolved store in the entry body is refused "+
+					"fail-closed rather than assumed safe", v.insIdx))
 		} else {
-			if _, ok := integrityMapNames[v.mapName]; ok {
-				integrity = true
-			}
 			details = append(details, fmt.Sprintf(
 				"instruction #%d: store into read-only map %q",
 				v.insIdx, v.mapName))
@@ -581,11 +631,13 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 		// An integrity-map write IS a read-only-map write, so the error
 		// satisfies errors.Is(ErrPluginROWrite) too; the extra
 		// ErrPluginIntegrityMapWrite is what the warn-mode caller checks to
-		// refuse the downgrade for exactly these maps.
+		// refuse the downgrade. It also covers an entry-body store whose
+		// target could not be resolved: that cannot be proven to miss an
+		// integrity map, so it is refused fail-closed rather than downgraded.
 		return fmt.Errorf(
 			"%w: %w: plugin program %q has %d disallowed map write(s); at least one targets a "+
-				"dispatch/aux integrity map, which no plugin may write under any ro_enforce setting. "+
-				"Violations:\n  - %s",
+				"dispatch/aux integrity map or an unresolved entry-body address, which no plugin may "+
+				"write under any ro_enforce setting. Violations:\n  - %s",
 			ErrPluginIntegrityMapWrite, ErrPluginROWrite, spec.Name, len(violations), strings.Join(details, "\n  - "),
 		)
 	}

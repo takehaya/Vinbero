@@ -372,6 +372,19 @@ handoff で built-in に入ったときは aux を読まず、aux 無しと同�
 ingress ifindex) に落ちます。plugin が自分の program で自分の aux を読む経路は
 そのままなので、plugin の aux は plugin だけが解釈します。
 
+この判別は `tailcall_ctx_map` の `sid_entry.action` を読むので、plugin がその map を
+書けると action を偽造して判別を欺けます。共有 map は MapReplacements で plugin に
+渡す都合上 kernel から見れば RW で、`tailcall_ctx_map` は vinbero 自身が packet ごと
+書くため `BPF_F_RDONLY_PROG` にもできません。よって plugin の書き込みを止めるのは
+ELF の静的検査 (`checkROWrites`) です。判別と scope が信頼する map (`tailcall_ctx_map`
+`sid_aux_map` `sid_function_map` と dispatch PROG_ARRAY) への書き込みは、migration 対象の
+RO map と違って `ro_enforce=warn` でも downgrade せず常に fatal にします。検査は entry
+body だけでなく到達する subprogram も走査し、map pointer への定数・register 加算でも
+map identity を保つので、offset や noinline helper で書き込みを隠せません。entry body で
+解決できない書き込みは integrity map でないと証明できないため fail-closed で fatal に
+します。残る穴は、map value pointer を call 引数として渡し callee で書く形で、これは
+inter-procedural な引数追跡が要る既知の限界です。
+
 ## claim と built-in state の関係
 
 claim は demux が経路を配る先を決める述語なので、claim が立つ前に届いた

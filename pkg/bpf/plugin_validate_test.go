@@ -599,24 +599,18 @@ func TestValidatePluginROWrites_MovPropagatesRO(t *testing.T) {
 // after the entry point) must NOT be scanned. Otherwise legitimate
 // epilogue writes to slot_stats_* would trip the check the moment we
 // re-classify those maps as RO.
-func TestValidatePluginROWrites_SubprogramSkipped(t *testing.T) {
-	// Real subprograms in compiled BPF show up in FunctionReferences()
-	// because something in main calls them. Without a matching call,
-	// the scanner now ignores the Symbol() boundary on purpose (see
-	// ForgedSymbolDoesNotBypass below). Plant a real call so this test
-	// keeps exercising the legitimate-subprogram path.
+func TestValidatePluginROWrites_ResolvedSubprogramWriteIsCaught(t *testing.T) {
+	// A plugin can no longer hide a read-only-map write in a noinline helper.
+	// The subprogram here resolves the map itself (LoadMapPtr + store), so the
+	// write is attributed and refused even though it is not in the entry body.
 	main := asm.Instructions{
 		asm.Mov.Imm(asm.R0, 2),
 		callToSymbol("subprogram_body"),
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	}
-	// Subprogram boundary: an instruction with a non-empty Symbol().
-	// We simulate `slot_stats_endpoint` (currently RW, classified as
-	// such; for the purposes of the test we treat it as RO via the set
-	// override below) being written from inside the subprogram.
 	subStart := asm.LoadMapPtr(asm.R1, 0).
-		WithReference("slot_stats_endpoint").
+		WithReference("sid_function_map").
 		WithSymbol("subprogram_body")
 	sub := asm.Instructions{
 		subStart,
@@ -625,11 +619,41 @@ func TestValidatePluginROWrites_SubprogramSkipped(t *testing.T) {
 	}
 	prog := buildSpec("with_sub", ebpf.XDP, append(main, sub...))
 
-	// Force "slot_stats_endpoint" into the RO set so the test can prove
-	// the scope guard wins even when the map name would otherwise match.
+	ro := map[string]struct{}{"sid_function_map": {}}
+	err := ValidatePluginProgram(prog, ro)
+	if err == nil {
+		t.Fatal("a resolved integrity-map write in a subprogram was not caught")
+	}
+	if !errors.Is(err, ErrPluginIntegrityMapWrite) {
+		t.Fatalf("subprogram integrity write is not fatal: %v", err)
+	}
+}
+
+func TestValidatePluginROWrites_UnresolvedSubprogramWriteIsSkipped(t *testing.T) {
+	// A helper that stores through a map pointer passed as an argument -- the
+	// epilogue's slot_stats_inc is exactly this shape -- cannot be resolved by
+	// the intra-procedural tracker, and must not be flagged: the argument was
+	// established (and, if it were an RO map, caught) in the caller. Only the
+	// resolved case above is a real bypass.
+	main := asm.Instructions{
+		asm.Mov.Imm(asm.R0, 2),
+		callToSymbol("subprogram_body"),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	}
+	// Subprogram stores through R1 (an argument) with no LoadMapPtr of its
+	// own, so the target is unresolved inside the subprogram.
+	subStart := asm.Mov.Imm(asm.R0, 0).WithSymbol("subprogram_body")
+	sub := asm.Instructions{
+		subStart,
+		asm.StoreImm(asm.R1, 0, 1, asm.Word),
+		asm.Return(),
+	}
+	prog := buildSpec("with_sub", ebpf.XDP, append(main, sub...))
+
 	ro := map[string]struct{}{"slot_stats_endpoint": {}}
 	if err := ValidatePluginProgram(prog, ro); err != nil {
-		t.Fatalf("subprogram writes must be skipped, got: %v", err)
+		t.Fatalf("an unresolved store through a subprogram argument must be skipped, got: %v", err)
 	}
 }
 
@@ -863,5 +887,76 @@ func TestValidatePluginROWrites_MigrationMapStaysDowngradable(t *testing.T) {
 	}
 	if errors.Is(err, ErrPluginIntegrityMapWrite) {
 		t.Errorf("fdb_map is not an integrity map; it must stay warn-downgradable, got %v", err)
+	}
+}
+
+func TestValidatePluginROWrites_PointerArithmeticDoesNotEraseMapIdentity(t *testing.T) {
+	// Offsetting a map pointer must not launder an integrity-map write into
+	// the unresolved bucket: `p = &map; p += 8; *p = x` still writes the map.
+	prog := buildSpec("arith", ebpf.XDP, asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("tailcall_ctx_map"),
+		asm.Add.Imm(asm.R1, 8),
+		asm.StoreImm(asm.R1, 0, 1, asm.Word),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	ro := map[string]struct{}{"tailcall_ctx_map": {}}
+	err := ValidatePluginProgram(prog, ro)
+	if err == nil {
+		t.Fatal("an integrity-map write via pointer arithmetic was not caught")
+	}
+	if !errors.Is(err, ErrPluginIntegrityMapWrite) {
+		t.Fatalf("the offset write is not fatal: %v", err)
+	}
+}
+
+func TestValidatePluginROWrites_UnresolvedEntryBodyWriteIsFatal(t *testing.T) {
+	// A store in the entry body whose target cannot be resolved is refused
+	// fail-closed and not warn-downgradable: it cannot be proven to miss an
+	// integrity map. A plugin-owned RW write resolves to its map, so this only
+	// bites a laundered pointer.
+	prog := buildSpec("dyn", ebpf.XDP, asm.Instructions{
+		// R1 is never loaded from a map, so the store target is unresolved.
+		asm.Mov.Reg(asm.R1, asm.R2),
+		asm.StoreImm(asm.R1, 0, 1, asm.Word),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	ro := map[string]struct{}{"tailcall_ctx_map": {}}
+	err := ValidatePluginProgram(prog, ro)
+	if err == nil {
+		t.Fatal("an unresolved entry-body store was accepted")
+	}
+	if !errors.Is(err, ErrPluginIntegrityMapWrite) {
+		t.Fatalf("an unresolved entry-body store must be fail-closed fatal: %v", err)
+	}
+}
+
+// TestValidateRealInteropPluginPasses guards the subprogram-scanning change
+// against a false positive on legitimate plugins. The interop example's object
+// pulls in tailcall_epilogue, whose slot_stats_inc stores through a map pointer
+// passed as an argument -- the exact unresolved-in-a-subprogram shape the
+// scanner must not flag. Validating the real compiled object against the
+// production RO set is what proves the guard added no regression. Skips when
+// the object has not been built (make -C sdk/examples/plugin-custom-behavior).
+func TestValidateRealInteropPluginPasses(t *testing.T) {
+	const obj = "../../sdk/examples/plugin-custom-behavior/plugin.o"
+	spec, err := ebpf.LoadCollectionSpec(obj)
+	if err != nil {
+		t.Skipf("plugin object not built (%v); run make -C sdk/examples/plugin-custom-behavior", err)
+	}
+	ro := SharedReadOnlyMapNamesSet()
+	var progName string
+	for name, p := range spec.Programs {
+		if p.Type == ebpf.XDP {
+			progName = name
+			break
+		}
+	}
+	if progName == "" {
+		t.Fatal("no XDP program in the plugin object")
+	}
+	if _, err := ValidatePluginCollection(spec, progName, ro); err != nil {
+		t.Fatalf("the real interop plugin was rejected by the RO-write scan: %v", err)
 	}
 }
