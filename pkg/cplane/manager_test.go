@@ -1941,14 +1941,22 @@ func TestScopeCoversCapabilities(t *testing.T) {
 		scope   Scope
 		wantErr bool
 	}{
-		{"headend without prefixes", caps("headend"), Scope{}, true},
+		// The empty scope is deny-all and startable per the wire contract, so
+		// a capability with no scope at all is allowed, not refused.
+		{"headend with empty scope", caps("headend"), Scope{}, false},
+		{"advertise with empty scope", caps("advertise"), Scope{}, false},
+		{"local_sid with empty scope", caps("local_sid"), Scope{}, false},
 		{"headend with prefixes", caps("headend"), mustScope(ScopeSpec{HeadendPrefixes: []string{"10.0.0.0/8"}}), false},
-		{"local_sid without locators", caps("local_sid"), mustScope(ScopeSpec{EndpointSlots: []uint32{32}}), true},
-		{"local_sid without endpoint slots", caps("local_sid"), mustScope(ScopeSpec{Locators: []string{"main"}}), true},
+		// A partial scope -- one that names something but not what the granted
+		// capability needs -- is the misconfiguration this refuses.
+		{"local_sid, partial scope without locators", caps("local_sid"), mustScope(ScopeSpec{EndpointSlots: []uint32{32}}), true},
+		{"local_sid, partial scope without endpoint slots", caps("local_sid"), mustScope(ScopeSpec{Locators: []string{"main"}}), true},
 		{"local_sid with both", caps("local_sid"), mustScope(ScopeSpec{Locators: []string{"main"}, EndpointSlots: []uint32{32}}), false},
 		{"advertise with VRF only", caps("advertise"), mustScope(ScopeSpec{VRFs: []string{"v"}}), false},
 		{"advertise with locator only", caps("advertise"), mustScope(ScopeSpec{Locators: []string{"main"}}), false},
-		{"advertise with neither", caps("advertise"), Scope{}, true},
+		// A non-empty scope that gives advertise neither a VRF nor a locator
+		// (only, say, an endpoint slot) is a partial misconfiguration.
+		{"advertise, partial scope with neither", caps("advertise"), mustScope(ScopeSpec{EndpointSlots: []uint32{32}}), true},
 		{"no capability, no scope", caps(), Scope{}, false},
 	}
 	for _, tt := range tests {
@@ -2243,3 +2251,21 @@ func TestForgetRefusesAPluginThatIsRunning(t *testing.T) {
 type errContext string
 
 func (e errContext) Error() string { return string(e) }
+
+// The wire contract is that a plugin with no scope still starts: it can
+// observe and log whatever capabilities it was granted, and every write is
+// refused at declaration time. So a capability with an empty scope registers
+// rather than being refused as an inert combination.
+func TestAPluginWithCapabilitiesAndNoScopeStillRegisters(t *testing.T) {
+	src := newFakeSource()
+	m, _ := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name: "observer", Module: declareModule(t),
+		Capabilities: testCaps(), Scope: Scope{}, // granted, but scoped to nothing
+	}); err != nil {
+		t.Fatalf("a deny-all plugin (capabilities, empty scope) was refused: %v", err)
+	}
+	if names := m.List(); len(names) != 1 || names[0] != "observer" {
+		t.Fatalf("List() = %v, want the deny-all plugin running", names)
+	}
+}

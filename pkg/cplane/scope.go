@@ -77,6 +77,16 @@ var ErrScopeDoesNotCoverCapabilities = errors.New("scope does not cover the gran
 // gone incoherent is refused rather than restored into the silently inert
 // state this is written to prevent.
 func ScopeCoversCapabilities(caps wasm.Capabilities, scope Scope) error {
+	// The empty scope is the deny-all case, and the wire contract
+	// (plugin.proto) is that a plugin with no scope still starts: it can
+	// observe and log whatever it was granted, and every write is refused at
+	// declaration time. So an unset scope with any capability is allowed. What
+	// this refuses is a *partial* scope: one that names something but not what
+	// a granted capability needs, which is a misconfiguration rather than an
+	// intentional deny-all.
+	if scope.Empty() {
+		return nil
+	}
 	if caps.Has(wasm.CapHeadend) && len(scope.HeadendPrefixes) == 0 {
 		return fmt.Errorf("%w: capability %q was granted but the scope names no headend prefixes, "+
 			"so every headend declaration would be refused", ErrScopeDoesNotCoverCapabilities, wasm.CapHeadend)

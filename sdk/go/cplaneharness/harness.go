@@ -109,15 +109,13 @@ func New(tb testing.TB, module []byte, opts Options) *Harness {
 	if err != nil {
 		tb.Fatalf("scope: %v", err)
 	}
-	// A non-empty scope must cover the capabilities, the same check the
-	// daemon's Register makes: a plugin granted a capability whose scope
-	// names nothing it can act on would start here but be refused in
-	// production. The zero scope stays allowed so a "permits nothing" plugin
-	// can still be exercised.
-	if !scope.Empty() {
-		if err := cplane.ScopeCoversCapabilities(caps, scope); err != nil {
-			tb.Fatalf("scope does not cover the capabilities: %v", err)
-		}
+	// The scope must cover the capabilities, the same check the daemon's
+	// Register makes: a plugin whose non-empty scope names nothing a granted
+	// capability can act on would start here but be refused in production. The
+	// check itself exempts the empty scope (the startable deny-all case), so
+	// this is unconditional.
+	if err := cplane.ScopeCoversCapabilities(caps, scope); err != nil {
+		tb.Fatalf("scope does not cover the capabilities: %v", err)
 	}
 	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps}
 	// The recorder is given the same capabilities as the instance, because
