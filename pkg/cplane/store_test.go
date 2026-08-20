@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
@@ -507,5 +508,41 @@ func TestAModuleForADottedPluginNameRoundTrips(t *testing.T) {
 	}
 	if len(claims) != 1 || claims[0].Name != "acl.v2" {
 		t.Fatalf("ListClaims returned %v, want the dotted plugin", claims)
+	}
+}
+
+// A restore inherits the state its predecessor pinned in the maps, so a
+// stored scope that no longer covers all of it has to prune on the way
+// back -- including a manifest written before scopes existed, which comes
+// back permitting nothing.
+func TestRestoreRemovesStateTheStoredScopeDoesNotCover(t *testing.T) {
+	src := newFakeSource()
+	store := newTestStore(t)
+	m, ops := newTestManagerWithStore(t, src, store)
+
+	// State a previous run left behind under this plugin's owner.
+	owner := bpf.OwnerPluginBundle("declare")
+	if _, err := ApplyHeadendSet(ops, m.leases, owner, AFv4, []HeadendDesired{{
+		TriggerPrefix: "10.9.0.0/24",
+		Entry:         &bpf.HeadendEntry{Mode: 1, NumSegments: 1},
+	}}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	reg := storedRegistration(t)
+	// A manifest from before scopes existed restores permitting nothing.
+	reg.Scope = Scope{}
+	if err := store.Save(reg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := m.Restore(context.Background()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	held, err := OwnedHeadendEntries(ops, owner, AFv4)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(held) != 0 {
+		t.Fatalf("held %+v after a restore whose scope covers none of it", held)
 	}
 }

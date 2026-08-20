@@ -454,6 +454,11 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 		UnboundVrfNames: make([]string, 0),
 		Errors:          make([]*v1.OperationError, 0),
 	}
+	// A binding that is gone leaves the plugin routes derived from it with
+	// nothing to derive from, so they come off the wire. Done once after
+	// the batch rather than per VRF: the reconcile walks every plugin's
+	// whole set either way.
+	unbound := false
 	for _, name := range req.Msg.VrfNames {
 		// Hold s.mu across the manager Unbind + exporter/EVPN teardown so
 		// a concurrent same-VRF bind cannot interleave; capture the prior
@@ -489,6 +494,9 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 			}
 		}
 		s.mu.Unlock()
+		if err == nil {
+			unbound = true
+		}
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: name,
@@ -497,6 +505,9 @@ func (s *VrfBgpServer) VrfBgpUnbind(
 			continue
 		}
 		resp.UnboundVrfNames = append(resp.UnboundVrfNames, name)
+	}
+	if unbound && s.cplane != nil {
+		s.cplane.ReconcileAdvertised(context.Background())
 	}
 	return connect.NewResponse(resp), nil
 }

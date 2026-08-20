@@ -249,7 +249,8 @@ binding の `MaxPrefixes` は plugin の広告にも適用します。VRF を渡
 無制限の VRF を渡すことにならないようにするためです。
 
 binding は plugin が動いている間に operator が編集するものなので、導出した値は
-binding が変わった時点で再導出します。RD と RT と上限は宣言を適用した時点で
+binding が変わった時点で再導出します。unbind も同じで、binding が消えた VRF の
+経路は wire から降ろします。RD と RT と上限は宣言を適用した時点で
 刻まれるため、これが無いと export RT を変えても plugin が次に宣言し直すまで
 古い RT を載せた path が wire に残ります。event 駆動の plugin は長く宣言し直さ
 ないことがあります。宣言経路では範囲外を集合ごと拒否しますが、この再導出では
@@ -283,7 +284,9 @@ apply 時に失敗させれば、既存の retry 機構がそのまま修復に�
 
 狭める操作だけは desired-set の模型では直りません。plugin が同じ宣言を
 続けると集合ごと拒否されるので reconcile が走らず、広い scope の下で書いた
-状態が残ります。そこで再登録の時点で host が範囲外の状態を prune します。
+状態が残ります。そこで登録の時点で host が範囲外の状態を prune します。再登録に限らず restore でも
+走らせます。daemon 再起動をまたいだ状態は pinned map に残っており、scope を持たない
+古い manifest から戻した plugin はそれを 1 つも触れないためです。
 実装は「まだ許される部分集合を desired set として apply する」形で、残りは
 既存の reconcile が落とします。
 

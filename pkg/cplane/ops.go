@@ -1014,6 +1014,10 @@ func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) 
 	if len(held) == 0 {
 		return 0, nil
 	}
+	live := make(map[string]struct{}, len(held))
+	for _, r := range held {
+		live[r.key()] = struct{}{}
+	}
 	keep := make([]AdvertisedRoute, 0, len(held))
 	for _, r := range held {
 		// A route stays only if the VRF it names is still in scope and
@@ -1033,8 +1037,31 @@ func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) 
 	// withdrawn. The plugin's own next declaration is refused with the
 	// reason, which is where it learns.
 	keep = p.guard.trimToVRFCaps(keep)
+
+	// A changed route distinguisher moves the NLRI, so the route has a new
+	// lease key. Apply takes every declared key before it withdraws
+	// anything, so if another producer holds the new one it fails with the
+	// old route still on the wire under an RD the binding no longer says.
+	//
+	// Declaring only what did not move retires those old keys first, which
+	// is the same reconcile doing the withdrawing rather than a second way
+	// to withdraw. A set where nothing moved skips it.
+	var pruned int
+	settled := make([]AdvertisedRoute, 0, len(keep))
+	for _, r := range keep {
+		if _, held := live[r.key()]; held {
+			settled = append(settled, r)
+		}
+	}
+	if len(settled) != len(held) {
+		res, err := p.advertise.Apply(ctx, p.owner, settled, p.quotas.MaxAdvertisedRoutes)
+		pruned += res.Pruned
+		if err != nil {
+			return pruned, err
+		}
+	}
 	res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
-	return res.Pruned, err
+	return pruned + res.Pruned, err
 }
 
 // Flush removes every entry this plugin owns and releases its leases. It

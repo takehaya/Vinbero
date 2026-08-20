@@ -501,3 +501,56 @@ func TestARegistrationIsRefusedWhenTheNarrowingCannotBeApplied(t *testing.T) {
 		t.Fatalf("held %+v, want both entries still installed", held)
 	}
 }
+
+// A changed route distinguisher moves the NLRI. Apply takes every declared
+// key before it withdraws anything, so a new key another producer holds
+// would fail with the old route still on the wire under an RD the binding
+// no longer says.
+func TestARDChangeRetiresTheOldKeyEvenWhenTheNewOneIsTaken(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	leases := NewLeases()
+	set := NewAdvertiseSet(adv, leases)
+	bindings := testBindings()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Advertise:    set,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), bindings),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	route := AdvertisedRoute{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, RD: testRD, Prefix: "10.7.0.0/24",
+		NextHop: "2001:db8::1",
+	}
+	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{route}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// The operator moves the VPN to another RD, and someone else already
+	// originates the NLRI it moves onto.
+	moved := route
+	moved.RD = "65000:2"
+	if err := leases.Acquire(LeaseAdvertise, moved.key(), ownerB); err != nil {
+		t.Fatalf("taking the new key: %v", err)
+	}
+	bindings.byName[testVRF] = vrfbgp.Binding{
+		VRFName: testVRF, RD: "65000:2", ExportRTs: []string{testRD},
+	}.Normalize()
+
+	if _, err := ops.ReconcileAdvertised(context.Background()); err == nil {
+		t.Fatal("a reconcile onto a key another producer holds reported success")
+	}
+	if set.LiveCount(ownerA) != 0 {
+		t.Fatal("the route is still originated under the RD the binding no longer says")
+	}
+	adv.mu.Lock()
+	withdrawn := len(adv.withdrawn)
+	adv.mu.Unlock()
+	if withdrawn != 1 {
+		t.Fatalf("withdrew %d routes, want the one whose RD moved", withdrawn)
+	}
+}

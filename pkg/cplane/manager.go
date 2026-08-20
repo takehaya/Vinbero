@@ -419,36 +419,41 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		// owner tag and re-declares over the same state. This also cancels
 		// its subscription, ending the overlap.
 		m.teardown(ctx, old)
-		// The state it wrote is inherited too, and a registration that
-		// narrows the scope must not inherit the part of it the new scope
-		// does not cover. The plugin cannot do this itself: its own
-		// declaration of that state is now refused, and refused whole, so
-		// it would simply stop reconciling with the old entries still
-		// installed.
-		if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
-			// The narrowing did not take. What the old scope allowed is
-			// still installed, and the plugin cannot clear it itself: its
-			// own declaration of that state is refused now, and refused
-			// whole. Reporting success here would say an authorization
-			// boundary is in force when it is not.
-			//
-			// The plugin is stopped rather than left running, so nothing
-			// adds to what could not be removed, and it stays in the
-			// registry so an operator can see the leftovers and retry.
-			m.mu.Lock()
-			p.dead = true
-			m.mu.Unlock()
-			m.teardown(ctx, p)
-			m.logger.Error("could not remove the state a plugin held outside its new scope; "+
-				"the plugin is stopped and that state is still installed",
-				zap.String("plugin", reg.Name), zap.Int("removed", removed), zap.Error(err))
-			return fmt.Errorf("cplane: plugin %q holds state outside its new scope that could not be removed, "+
-				"so the plugin was stopped rather than run under a scope that is not in force: %w",
-				reg.Name, err)
-		} else if removed > 0 {
-			m.logger.Info("removed the state a plugin held outside its new scope",
-				zap.String("plugin", reg.Name), zap.Int("removed", removed))
-		}
+	}
+
+	// The state under this owner is inherited whether it came from the
+	// instance just torn down or from before a daemon restart, and a
+	// registration whose scope does not cover all of it must not keep the
+	// rest. The plugin cannot do this itself: its own declaration of that
+	// state is now refused, and refused whole, so it would simply stop
+	// reconciling with the old entries still installed.
+	//
+	// Not gated on having replaced something: a restore goes through here
+	// with nothing in the registry and its predecessor's writes still
+	// pinned in the maps, which is the same situation.
+	if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
+		// The narrowing did not take. What the old scope allowed is
+		// still installed, and the plugin cannot clear it itself: its
+		// own declaration of that state is refused now, and refused
+		// whole. Reporting success here would say an authorization
+		// boundary is in force when it is not.
+		//
+		// The plugin is stopped rather than left running, so nothing
+		// adds to what could not be removed, and it stays in the
+		// registry so an operator can see the leftovers and retry.
+		m.mu.Lock()
+		p.dead = true
+		m.mu.Unlock()
+		m.teardown(ctx, p)
+		m.logger.Error("could not remove the state a plugin held outside its new scope; "+
+			"the plugin is stopped and that state is still installed",
+			zap.String("plugin", reg.Name), zap.Int("removed", removed), zap.Error(err))
+		return fmt.Errorf("cplane: plugin %q holds state outside its new scope that could not be removed, "+
+			"so the plugin was stopped rather than run under a scope that is not in force: %w",
+			reg.Name, err)
+	} else if removed > 0 {
+		m.logger.Info("removed the state a plugin held outside its new scope",
+			zap.String("plugin", reg.Name), zap.Int("removed", removed))
 	}
 
 	// The claim reaches back over routes that arrived before it, now that
