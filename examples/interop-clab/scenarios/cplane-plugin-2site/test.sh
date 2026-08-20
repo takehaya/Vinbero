@@ -230,6 +230,17 @@ fi
 echo ""
 echo "[4] data plane: ce-tokyo -> ce-osaka over plugin-installed state"
 
+# What this validates, and what it does not. The forward path steers into the
+# plugin's SID, which on pe-osaka tail-calls the built-in End.DT4. Because the
+# SID is a plugin slot, the aux discriminator nulls the aux (the B4 boundary),
+# so End.DT4 has no VRF ifindex and decaps against pe-osaka's main routing
+# table. ce-osaka's subnet is a connected route on that table here, so the
+# packet is delivered. This exercises the plugin -> End.DT4 handoff, not
+# VRF-scoped decap: a config that enslaved the customer interface to vrf-cust
+# would have no such main-table route and the packet would miss the VRF table.
+# Passing a granted VRF safely into End.DT4 is a separate feature (see
+# docs/design/ja/cplane-plugin.md, "既知の限界").
+
 # Gate on every precondition before pinging, so a slow data plane cannot
 # produce a spurious failure.
 echo "  gating on readiness..."
@@ -268,7 +279,7 @@ ping_ok() {
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1
 }
 if retry_n 20 ping_ok; then
-    ok "ce-tokyo ($CE_TOKYO_ADDR) -> ce-osaka ($CE_OSAKA_ADDR) over the plugin's SRv6 path"
+    ok "ce-tokyo ($CE_TOKYO_ADDR) -> ce-osaka ($CE_OSAKA_ADDR) over the plugin's SRv6 path (decap via pe-osaka main table)"
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" | tail -3 | sed 's/^/      /'
 else
     ng "ce-tokyo cannot reach ce-osaka"

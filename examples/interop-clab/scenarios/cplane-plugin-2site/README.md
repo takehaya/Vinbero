@@ -94,6 +94,16 @@ slot is how a plugin completes a packet's journey, not a shortcut around
 writing one. The per-slot invocation counter is what the test reads to
 show the packets really went through slot 32.
 
+What this exercises, and what it does not. Because the SID is a plugin
+slot, the aux discriminator nulls the aux the built-in `End.DT4` would read
+(the B4 boundary), so `End.DT4` decaps against pe-osaka's main routing
+table rather than a VRF table. ce-osaka's subnet is a connected route on
+that main table here, so the packet is delivered and the plugin-to-`End.DT4`
+handoff is validated end to end. VRF-scoped decap is not: a config that
+enslaved the customer interface to `vrf-cust` would have no such main-table
+route. Passing a granted VRF safely into `End.DT4` is a separate feature,
+tracked in `docs/design/ja/cplane-plugin.md` under the known limitations.
+
 ## Run
 
 ```sh

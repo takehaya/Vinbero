@@ -385,10 +385,21 @@ ELF の静的検査 (`checkROWrites`) です。判別と scope が信頼する m
 `sid_aux_map` `sid_function_map` と dispatch PROG_ARRAY) への書き込みは、migration 対象の
 RO map と違って `ro_enforce=warn` でも downgrade せず常に fatal にします。検査は entry
 body だけでなく到達する subprogram も走査し、map pointer への定数・register 加算でも
-map identity を保つので、offset や noinline helper で書き込みを隠せません。entry body で
-解決できない書き込みは integrity map でないと証明できないため fail-closed で fatal に
-します。残る穴は、map value pointer を call 引数として渡し callee で書く形で、これは
-inter-procedural な引数追跡が要る既知の限界です。
+map identity を保つので、offset や noinline helper で書き込みを隠せません。map を書くのは
+store 命令だけではないので、`bpf_map_update_elem` / `bpf_map_delete_elem` などの map 変更
+helper も第一引数の map provenance で検査します。entry body で解決できない書き込みは
+integrity map でないと証明できないため fail-closed で fatal にします。
+
+ここで plugin ELF の trust model を明示します。plugin ELF は operator が install し
+review する semi-trusted な artifact として扱い、`checkROWrites` は accidental な誤用の
+検出であって、敵対的 ELF に対する sandbox ではありません。map value pointer を stack に
+spill して reload する、あるいは call 引数として渡し callee 内で書く形は register
+provenance が切れ、subprogram 内では正当な helper (epilogue の slot_stats_inc が引数の
+map pointer を書く) との誤検知を避けるため素通ります。これを完全に塞ぐには
+inter-procedural / stack-slot の provenance 追跡が要り、既知の限界として別途扱います。
+つまり scope 認可のうち、WASM の desired set 側は host が強制しますが、ELF data plane 側は
+semi-trusted 前提の best-effort です。第三者や tenant 提供の ELF を許す運用に広げる場合は、
+integrity map を plugin から参照させない host-owned な grant map など構造的な隔離が要ります。
 
 ## claim と built-in state の関係
 
@@ -494,6 +505,20 @@ auto-advertise の exporter と operator の RPC の 2 つがあり、いまは�
 producer です。さらに EVPN の withdraw は producer を見ずに path を消すので、
 名前を付けるだけでは足りず withdraw 側の作り直しが要ります。別の変更として
 残しています。
+
+plugin dispatch の End.DT4 は VRF scoped な decap ができません。built-in の aux
+lookup が plugin slot の SID で aux を NULL にする (data plane 境界の節) ので、
+built-in End.DT4 は aux の VRF ifindex を受け取れず、core の ingress ifindex の
+routing table を使います。ingress table に一致する経路があれば転送され、無ければ
+落ちるので、customer interface を実際に VRF へ enslave した構成では VRF table を
+迂回します。安全に許可済み VRF を End.DT4 へ渡すには、plugin が制御する aux を
+再び信頼する形ではなく、host が書き全 program から read-only な grant map
+(SID・plugin slot・action・lease generation を key にする) を別に用意する必要が
+あり、これは別の feature として残しています。それまでの間、grant を持たない
+plugin-origin の End.DT4 を暗黙で ingress table に fallback させるのは、意図しない
+routing domain へ転送しうる曖昧な挙動なので、明示的に drop する方向で検討します。
+`cplane-plugin-2site` interop はこの handoff を main table の connected route 経由で
+検証しており、VRF scoped forwarding そのものは覆っていません。
 
 conformance harness は scope のうち daemon 無しで判定できる部分だけを見ます。
 prefix が locator に含まれるかと、VRF に binding があるかは daemon の状態に
