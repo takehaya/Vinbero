@@ -334,54 +334,74 @@ func (m *Manager) ReconcileAdvertised(ctx context.Context) {
 // caller's to fix, so callers can tell it from a daemon failure.
 var ErrPluginNotRegistered = errors.New("plugin is not registered")
 
-// ErrSlotHeld is a data-plane slot another plugin already holds. Like a
-// behavior claim, it is the caller's to resolve, so the RPC boundary maps
-// it to a failed-precondition code.
-var ErrSlotHeld = errors.New("data-plane slot is held by another plugin")
+// ErrGrantHeld is a data-plane slot or a locator another plugin already
+// holds. Like a behavior claim, it is the caller's to resolve, so the RPC
+// boundary maps it to a failed-precondition code.
+var ErrGrantHeld = errors.New("scope grant is held by another plugin")
 
-// checkSlotsExclusive refuses reg's headend and endpoint slots if another
-// registered plugin already holds any of them. Registering the same name
-// again is an upgrade and does not conflict with itself. Called with
+// checkGrantsExclusive refuses reg's slots and locators if another
+// registered plugin already holds any of them. Slots must be exclusive
+// because one PROG_ARRAY slot is one program; locators must be exclusive
+// because a locator is the plugin's SID space, and advertising a SID is
+// bounded to it -- two plugins sharing a locator would let one advertise a
+// prefix pointing at a SID the other allocated there. Registering the same
+// name again is an upgrade and does not conflict with itself. Called with
 // registerMu held.
-func (m *Manager) checkSlotsExclusive(name string, scope Scope) error {
+func (m *Manager) checkGrantsExclusive(name string, scope Scope) error {
+	type heldGrants struct {
+		owner    string
+		v4, v6   map[uint32]struct{}
+		ep       map[uint32]struct{}
+		locators map[string]struct{}
+	}
 	m.mu.Lock()
-	held := make([]struct {
-		owner string
-		v4    map[uint32]struct{}
-		v6    map[uint32]struct{}
-		ep    map[uint32]struct{}
-	}, 0, len(m.plugins))
+	held := make([]heldGrants, 0, len(m.plugins))
 	for other, p := range m.plugins {
 		if other == name {
 			continue
 		}
-		held = append(held, struct {
-			owner string
-			v4    map[uint32]struct{}
-			v6    map[uint32]struct{}
-			ep    map[uint32]struct{}
-		}{other, slotSet(p.reg.Scope.HeadendV4Slots), slotSet(p.reg.Scope.HeadendV6Slots), slotSet(p.reg.Scope.EndpointSlots)})
+		held = append(held, heldGrants{
+			owner:    other,
+			v4:       slotSet(p.reg.Scope.HeadendV4Slots),
+			v6:       slotSet(p.reg.Scope.HeadendV6Slots),
+			ep:       slotSet(p.reg.Scope.EndpointSlots),
+			locators: stringSet(p.reg.Scope.Locators),
+		})
 	}
 	m.mu.Unlock()
 
 	for _, h := range held {
 		for _, s := range scope.HeadendV4Slots {
 			if _, ok := h.v4[s]; ok {
-				return fmt.Errorf("cplane: %w: headend v4 slot %d is held by plugin %q", ErrSlotHeld, s, h.owner)
+				return fmt.Errorf("cplane: %w: headend v4 slot %d is held by plugin %q", ErrGrantHeld, s, h.owner)
 			}
 		}
 		for _, s := range scope.HeadendV6Slots {
 			if _, ok := h.v6[s]; ok {
-				return fmt.Errorf("cplane: %w: headend v6 slot %d is held by plugin %q", ErrSlotHeld, s, h.owner)
+				return fmt.Errorf("cplane: %w: headend v6 slot %d is held by plugin %q", ErrGrantHeld, s, h.owner)
 			}
 		}
 		for _, s := range scope.EndpointSlots {
 			if _, ok := h.ep[s]; ok {
-				return fmt.Errorf("cplane: %w: endpoint slot %d is held by plugin %q", ErrSlotHeld, s, h.owner)
+				return fmt.Errorf("cplane: %w: endpoint slot %d is held by plugin %q", ErrGrantHeld, s, h.owner)
+			}
+		}
+		for _, loc := range scope.Locators {
+			if _, ok := h.locators[loc]; ok {
+				return fmt.Errorf("cplane: %w: locator %q is held by plugin %q", ErrGrantHeld, loc, h.owner)
 			}
 		}
 	}
 	return nil
+}
+
+// stringSet indexes a string list for membership tests.
+func stringSet(items []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(items))
+	for _, s := range items {
+		out[s] = struct{}{}
+	}
+	return out
 }
 
 // slotSet indexes a slot list for membership tests.
@@ -416,14 +436,15 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	m.registerMu.Lock()
 	defer m.registerMu.Unlock()
 
-	// A PROG_ARRAY slot holds one program, so two plugins granted the same
-	// slot means one plugin's SID dispatches into the other's program, which
-	// then reads the first plugin's aux under a layout that does not
-	// describe it -- the exact confusion the slot scope exists to prevent,
-	// between two plugins rather than between a plugin and vinbero. Refused
-	// here, the same way a behavior claim another plugin holds is, so a
-	// region granted twice is caught before anything is installed.
-	if err := m.checkSlotsExclusive(reg.Name, reg.Scope); err != nil {
+	// Slots and locators are exclusive across plugins. A slot holds one
+	// program, so two plugins granted one slot would have one's SID dispatch
+	// into the other's program and read its aux under the wrong layout. A
+	// locator is a plugin's SID space, and advertising a SID is bounded to
+	// it, so two plugins sharing a locator would let one advertise a prefix
+	// pointing at the other's SID. Refused here, the same way a behavior
+	// claim another plugin holds is, so a region granted twice is caught
+	// before anything is installed.
+	if err := m.checkGrantsExclusive(reg.Name, reg.Scope); err != nil {
 		return err
 	}
 

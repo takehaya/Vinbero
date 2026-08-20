@@ -238,8 +238,13 @@ layout として読むためです。
 
 slot は plugin をまたいで排他にします。同じ slot を 2 つの plugin に渡すと、
 一方の SID がもう一方の program に dispatch して aux を取り違えるので、behavior
-claim と同じく登録時に拒否します。prefix scope は排他にしません。operator が
-意図的に重ねることがあり、実際の衝突は per-entry の owner と lease が調停します。
+claim と同じく登録時に拒否します。locator も同じく排他にします。VPN や
+ipv6_unicast の広告で SID を locator 配下に閉じ込める抑えが安全なのは、その
+locator が 1 つの plugin だけのものであるときだけで、共有した locator では別の
+plugin や built-in service SID の配下を指す広告を止められないためです。slot と
+locator の排他はどちらも登録時に拒否します。prefix scope は排他にしません。
+operator が意図的に重ねることがあり、実際の衝突は per-entry の owner と lease が
+調停します。
 
 ### VPN 広告は照合ではなく導出
 
@@ -259,8 +264,26 @@ prefix-SID TLV の SRv6 SID が決めます。導出だけでは、VRF blue に 
 plugin が blue の prefix を VRF red の service SID の裏に広告して blue の traffic を
 red へ流せます。そこで VPN 経路の SID も、plugin に渡した locator の配下に
 限ります。ipv6_unicast の prefix を locator に閉じ込めるのと同じ抑え方です。
-next hop は依然として自由です。encap source は locator address で BGP transport
-とは限らず、daemon に妥当な推測が無いためで、この点は元の挙動のままです。
+next hop や grant 内の segment を縛らない理由は、次の節でまとめます。
+
+### scope が縛る軸と grant 内の自由
+
+scope が縛るのはどの traffic を扱えるかで、grant の中で経路がどこへ向かうかは
+縛りません。この線引きは意図したもので、境界を跨げる値だけを scope で抑えます。
+
+next hop はこの grant 内の自由に当たります。VPN 経路の next hop は import した
+peer が到達性を解決するためのもので、encap source は locator address であって
+BGP transport とは限らず、daemon に妥当な推測がありません。next hop を locator に
+縛ると正当な interop 構成を壊すため、元の挙動のまま自由にします。VPN SID を
+locator に閉じ込めたのは、SID が別 VRF の decap の裏へ逃げて scope の VRF grant を
+跨げるからで、next hop にはその跨ぎがありません。
+
+同じ理由で、plugin が渡された locator の配下に組む segment list の中身も grant 内の
+自由です。segment はすべて自分の locator に属し、他人の VRF や locator へ抜ける
+出口が無いので、個々の segment を scope で照合しません。segment list が built-in
+state の layout を跨いで別 VRF の decap を起こせるのは data plane half の話で、
+これは scope ではなく shared map の partition と aux discriminator で抑えます
+(後述の data plane 境界の節)。
 
 binding の `MaxPrefixes` は plugin の広告にも適用します。VRF を渡すことが
 無制限の VRF を渡すことにならないようにするためです。

@@ -820,3 +820,48 @@ func TestValidatePluginCollection_BTF_MissingOK(t *testing.T) {
 		t.Fatalf("expected stripped-BTF plugin to pass, got: %v", err)
 	}
 }
+
+// A write to a dispatch/aux integrity map (tailcall_ctx_map, sid_aux_map,
+// sid_function_map, or a PROG_ARRAY) is an RO write that additionally
+// carries ErrPluginIntegrityMapWrite, so the warn-mode caller cannot
+// downgrade it: a plugin that writes these forges the action the aux
+// discriminator reads.
+func TestValidatePluginROWrites_IntegrityMapWriteIsAlwaysFatal(t *testing.T) {
+	for _, m := range []string{"tailcall_ctx_map", "sid_aux_map", "sid_function_map"} {
+		lead := asm.Instructions{
+			asm.LoadMapPtr(asm.R1, 0).WithReference(m),
+			asm.StoreImm(asm.R1, 0, 99, asm.Word),
+		}
+		err := ValidatePluginProgram(roSpec("evil_integrity", lead), roSet())
+		if err == nil {
+			t.Fatalf("%s: expected the write to be rejected", m)
+		}
+		if !errors.Is(err, ErrPluginROWrite) {
+			t.Errorf("%s: an integrity write is still an RO write; want errors.Is(ErrPluginROWrite), got %v", m, err)
+		}
+		if !errors.Is(err, ErrPluginIntegrityMapWrite) {
+			t.Errorf("%s: want errors.Is(ErrPluginIntegrityMapWrite) so the warn downgrade is refused, got %v", m, err)
+		}
+	}
+}
+
+// A write to a migration RO map (not an integrity map) carries only
+// ErrPluginROWrite, so the warn-mode caller may still downgrade it. This is
+// the boundary that keeps the integrity sentinel from swallowing the whole
+// warn rollout.
+func TestValidatePluginROWrites_MigrationMapStaysDowngradable(t *testing.T) {
+	lead := asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("fdb_map"),
+		asm.StoreImm(asm.R1, 0, 99, asm.Word),
+	}
+	err := ValidatePluginProgram(roSpec("writes_fdb", lead), roSet())
+	if err == nil {
+		t.Fatal("expected the write to be rejected in strict mode")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Errorf("want errors.Is(ErrPluginROWrite), got %v", err)
+	}
+	if errors.Is(err, ErrPluginIntegrityMapWrite) {
+		t.Errorf("fdb_map is not an integrity map; it must stay warn-downgradable, got %v", err)
+	}
+}

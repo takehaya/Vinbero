@@ -1852,45 +1852,68 @@ func TestAPluginLeftAfterAFailedFlushIsNotReportedRunning(t *testing.T) {
 // would have one's SID dispatch into the other's program. The grant is
 // refused across plugins, the way a behavior claim is.
 func TestTwoPluginsCannotHoldTheSameSlot(t *testing.T) {
-	src := newFakeSource()
-	m, _ := newTestManager(t, src, newFakeClaims())
-
-	// Both plugins own endpoint slot 32. Only headend cap-scope coherence
-	// is required, so give each a headend prefix and the shared slot.
-	scopeWithSlot := func() Scope {
-		s, err := ParseScope(ScopeSpec{
-			HeadendPrefixes: []string{"10.0.0.0/8"},
-			EndpointSlots:   []uint32{32},
-			Locators:        []string{"main"},
-		})
+	caps, err := wasm.ParseCapabilities([]string{string(wasm.CapHeadend)})
+	if err != nil {
+		t.Fatalf("caps: %v", err)
+	}
+	mustScope := func(t *testing.T, spec ScopeSpec) Scope {
+		spec.HeadendPrefixes = append(spec.HeadendPrefixes, "10.0.0.0/8")
+		s, err := ParseScope(spec)
 		if err != nil {
 			t.Fatalf("scope: %v", err)
 		}
 		return s
 	}
-	caps, err := wasm.ParseCapabilities([]string{string(wasm.CapHeadend)})
-	if err != nil {
-		t.Fatalf("caps: %v", err)
+
+	// Each grant kind collides independently; v4 slot 16 and v6 slot 16 are
+	// separate programs and must NOT collide.
+	for _, tt := range []struct {
+		name    string
+		a, b    ScopeSpec
+		collide bool
+	}{
+		{"endpoint slot", ScopeSpec{EndpointSlots: []uint32{32}}, ScopeSpec{EndpointSlots: []uint32{32}}, true},
+		{"headend v4 slot", ScopeSpec{HeadendV4Slots: []uint32{16}}, ScopeSpec{HeadendV4Slots: []uint32{16}}, true},
+		{"headend v6 slot", ScopeSpec{HeadendV6Slots: []uint32{16}}, ScopeSpec{HeadendV6Slots: []uint32{16}}, true},
+		{"locator", ScopeSpec{Locators: []string{"main"}}, ScopeSpec{Locators: []string{"main"}}, true},
+		{"v4-16 vs v6-16 do not collide", ScopeSpec{HeadendV4Slots: []uint32{16}}, ScopeSpec{HeadendV6Slots: []uint32{16}}, false},
+		{"different endpoint slots", ScopeSpec{EndpointSlots: []uint32{32}}, ScopeSpec{EndpointSlots: []uint32{33}}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			src := newFakeSource()
+			m, _ := newTestManager(t, src, newFakeClaims())
+			if err := m.Register(context.Background(), Registration{
+				Name: "a", Module: declareModule(t), Capabilities: caps, Scope: mustScope(t, tt.a),
+			}); err != nil {
+				t.Fatalf("register a: %v", err)
+			}
+			err := m.Register(context.Background(), Registration{
+				Name: "b", Module: declareModule(t), Capabilities: caps, Scope: mustScope(t, tt.b),
+			})
+			if tt.collide {
+				if !errors.Is(err, ErrGrantHeld) {
+					t.Fatalf("register b: %v, want ErrGrantHeld", err)
+				}
+			} else if err != nil {
+				t.Fatalf("register b (should not collide): %v", err)
+			}
+		})
 	}
 
-	if err := m.Register(context.Background(), Registration{
-		Name: "a", Module: declareModule(t), Capabilities: caps, Scope: scopeWithSlot(),
-	}); err != nil {
-		t.Fatalf("register a: %v", err)
-	}
-	err = m.Register(context.Background(), Registration{
-		Name: "b", Module: declareModule(t), Capabilities: caps, Scope: scopeWithSlot(),
-	})
-	if !errors.Is(err, ErrSlotHeld) {
-		t.Fatalf("register b: %v, want ErrSlotHeld", err)
-	}
-	// Re-registering the same name with the same slot is an upgrade, not a
+	// Re-registering the same name with the same grant is an upgrade, not a
 	// conflict with itself.
-	if err := m.Register(context.Background(), Registration{
-		Name: "a", Module: declareModule(t), Capabilities: caps, Scope: scopeWithSlot(),
-	}); err != nil {
-		t.Fatalf("re-register a: %v", err)
-	}
+	t.Run("same-name upgrade does not self-conflict", func(t *testing.T) {
+		src := newFakeSource()
+		m, _ := newTestManager(t, src, newFakeClaims())
+		reg := Registration{Name: "a", Module: declareModule(t), Capabilities: caps,
+			Scope: mustScope(t, ScopeSpec{EndpointSlots: []uint32{32}, Locators: []string{"main"}})}
+		if err := m.Register(context.Background(), reg); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		if err := m.Register(context.Background(), reg); err != nil {
+			t.Fatalf("re-register: %v", err)
+		}
+	})
 }
 
 // checkScopeCoversCapabilities' logic, exercised through the exported
@@ -1940,5 +1963,109 @@ func TestScopeCoversCapabilities(t *testing.T) {
 				t.Errorf("error is not ErrScopeDoesNotCoverCapabilities: %v", err)
 			}
 		})
+	}
+}
+
+// A re-registration that narrows the scope must remove the state the new
+// scope no longer covers. When that removal cannot be applied -- the map
+// refuses the delete -- Register does not report success: the plugin is
+// stopped and persisted with the narrowed scope so a restart retries the
+// prune, its claim stays held so routes carrying its codepoint keep being
+// withheld from the built-in appliers, and it is reported as unrestored
+// rather than as running. This is manager.failPrune, reached through the
+// operator-facing path.
+func TestARegistrationWhosePruneFailsIsStoppedButPersisted(t *testing.T) {
+	store := newTestStore(t)
+	src := newFakeSource()
+	claims := newFakeClaims()
+	m, ops := newTestManagerWithStoreAndClaims(t, src, store, claims)
+
+	// First registration installs the fixture's declared entry.
+	wide := Registration{
+		Name: "declare", Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
+	}
+	if err := m.Register(context.Background(), wide); err != nil {
+		t.Fatalf("register wide: %v", err)
+	}
+	if !src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4}) {
+		t.Fatal("emit found no handler")
+	}
+	waitDelivered(t, m, "declare")
+	if _, ok := ops.getV4("10.99.0.0/24"); !ok {
+		t.Fatalf("the fixture's entry was not installed; nothing to prune")
+	}
+
+	// The map will refuse to delete that entry, so the narrowing cannot be
+	// applied.
+	ops.failDelete("10.99.0.0/24")
+
+	// Re-register with a scope that still covers every capability but no
+	// longer covers the fixture's declared prefix, so the prune must remove
+	// it -- and fails.
+	slots := func(from, to uint32) []uint32 {
+		out := make([]uint32, 0, to-from+1)
+		for s := from; s <= to; s++ {
+			out = append(out, s)
+		}
+		return out
+	}
+	narrow, err := ParseScope(ScopeSpec{
+		Locators:        []string{"main", "second", "late"},
+		VRFs:            []string{testVRF},
+		HeadendPrefixes: []string{"10.0.0.0/16"}, // excludes 10.99.0.0/24
+		HeadendV4Slots:  slots(16, 31),
+		HeadendV6Slots:  slots(16, 31),
+		EndpointSlots:   slots(32, 63),
+	})
+	if err != nil {
+		t.Fatalf("narrow scope: %v", err)
+	}
+	err = m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: narrow,
+	})
+	if err == nil {
+		t.Fatal("re-register reported success while state outside the new scope is still installed")
+	}
+
+	// It is not running.
+	if names := m.List(); len(names) != 0 {
+		t.Fatalf("List() = %v, want the failed re-registration not to be running", names)
+	}
+	// It is reported as unrestored, with a reason.
+	unrestored := m.Unrestored()
+	if len(unrestored) != 1 || unrestored[0].Name != "declare" {
+		t.Fatalf("Unrestored() = %+v, want the plugin whose prune failed", unrestored)
+	}
+	if unrestored[0].Reason == "" {
+		t.Error("nothing says why it stopped")
+	}
+	// The claim stays held so routes carrying its codepoint keep being
+	// withheld.
+	if !claims.claimed("declare") {
+		t.Error("the behavior was released, so routes carrying it reach the built-in appliers over leftover state")
+	}
+	// The narrowed scope is persisted, so a restart retries the prune rather
+	// than bringing back the wider scope.
+	regs, err := store.List()
+	if err != nil {
+		t.Fatalf("store list: %v", err)
+	}
+	if len(regs) != 1 || regs[0].Name != "declare" {
+		t.Fatalf("store holds %+v, want the narrowed registration", regs)
+	}
+	// The slot is in the narrow scope, so a nil error here would mean the
+	// prefix is still covered -- i.e. the wider scope was kept.
+	if err := regs[0].Scope.CheckHeadend(AFv4, "10.99.0.0/24", 16); err == nil {
+		t.Error("the store kept the wider scope; a restart would not retry the prune")
+	}
+
+	// The operator can give up on it, which releases the claim.
+	if err := m.Forget("declare"); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if claims.claimed("declare") {
+		t.Error("forgetting it left the behavior claimed")
 	}
 }

@@ -570,7 +570,8 @@ func TestRestoreRemovesStateTheStoredScopeDoesNotCover(t *testing.T) {
 func TestRestoreRefusesAPreScopeManifest(t *testing.T) {
 	src := newFakeSource()
 	store := newTestStore(t)
-	m, ops := newTestManagerWithStore(t, src, store)
+	claims := newFakeClaims()
+	m, ops := newTestManagerWithStoreAndClaims(t, src, store, claims)
 
 	owner := bpf.OwnerPluginBundle("declare")
 	if _, err := ApplyHeadendSet(ops, m.leases, owner, AFv4, []HeadendDesired{{
@@ -583,6 +584,17 @@ func TestRestoreRefusesAPreScopeManifest(t *testing.T) {
 	// Write a manifest at the previous version, with no scope block, the
 	// way the pre-scope build did.
 	writePreScopeManifest(t, store, "declare", declareModule(t))
+
+	// The daemon reserves stored behaviors before it builds anything, so a
+	// route carrying one is withheld from the built-in appliers even for a
+	// plugin that never starts. A refused manifest whose behaviors are still
+	// listed must keep that reservation, not release it.
+	if err := m.ReserveClaims(); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if !claims.claimed("declare") {
+		t.Fatalf("the stored behavior was not reserved before restore")
+	}
 
 	// Restore returns the aggregated load error, but does not treat it as
 	// fatal: the state stays pinned and the plugin is recorded unrestored.
@@ -599,6 +611,16 @@ func TestRestoreRefusesAPreScopeManifest(t *testing.T) {
 	unrestored := m.Unrestored()
 	if len(unrestored) != 1 || unrestored[0].Name != "declare" {
 		t.Fatalf("unrestored = %+v, want the refused plugin", unrestored)
+	}
+	// The behaviors carry through so an operator can see which codepoints are
+	// held on behalf of a plugin that will not start.
+	if len(unrestored[0].Behaviors) != 1 || unrestored[0].Behaviors[0] != 0xFE01 {
+		t.Errorf("unrestored behaviors = %v, want the reserved codepoint", unrestored[0].Behaviors)
+	}
+	// The reservation survives the refused restore: releasing it would let a
+	// route carrying the codepoint reach the built-in appliers.
+	if !claims.claimed("declare") {
+		t.Error("the refused manifest released its behavior reservation")
 	}
 }
 

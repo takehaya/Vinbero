@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -826,5 +827,176 @@ func TestAFailedApplyDoesNotVoidAPendingOne(t *testing.T) {
 	ops.RetryPending()
 	if got := sids.installs; got == 0 {
 		t.Fatal("the pending declaration was lost: nothing installed after the locator recovered")
+	}
+}
+
+// The headend slot grant is per family: the v4 and v6 PROG_ARRAYs share slot
+// numbers but are separate programs, so a v4 grant must not authorize a v6
+// slot of the same number.
+func TestHeadendSlotGrantIsPerFamily(t *testing.T) {
+	scope, err := ParseScope(ScopeSpec{
+		HeadendPrefixes: []string{"10.7.0.0/16"},
+		HeadendV4Slots:  []uint32{16},
+		HeadendV6Slots:  []uint32{17},
+	})
+	if err != nil {
+		t.Fatalf("scope: %v", err)
+	}
+	// v4 slot 16 is granted for v4, refused for v6.
+	if err := scope.CheckHeadend(AFv4, "10.7.1.0/24", 16); err != nil {
+		t.Errorf("v4 slot 16 refused on the v4 map: %v", err)
+	}
+	if err := scope.CheckHeadend(AFv6, "10.7.1.0/24", 16); err == nil {
+		t.Error("v4 slot 16 was accepted on the v6 map")
+	}
+	// v6 slot 17 is granted for v6, refused for v4.
+	if err := scope.CheckHeadend(AFv6, "10.7.1.0/24", 17); err != nil {
+		t.Errorf("v6 slot 17 refused on the v6 map: %v", err)
+	}
+	if err := scope.CheckHeadend(AFv4, "10.7.1.0/24", 17); err == nil {
+		t.Error("v6 slot 17 was accepted on the v4 map")
+	}
+}
+
+// A binding whose RD is spelled non-canonically must not make every route
+// flap withdraw/re-advertise on each reconcile: the resolved RD is
+// canonicalized to match the live keys, so a reconcile with nothing changed
+// withdraws nothing.
+func TestANonCanonicalBindingRDDoesNotFlapOnReconcile(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+	bindings := testBindings()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Advertise:    set,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), bindings),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, RD: testRD, Prefix: "10.7.0.0/24",
+		SRv6SID: "fd00:1::1", NextHop: "2001:db8::1",
+	}}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	adv.mu.Lock()
+	withdrawnBefore := len(adv.withdrawn)
+	adv.mu.Unlock()
+
+	// The operator re-states the binding with the RD spelled non-canonically
+	// (the fake's CanonicalRD collapses leading zeros, as the real one does).
+	bindings.set(testVRF, vrfbgp.Binding{
+		VRFName: testVRF, RD: "065000:0001", ImportRTs: []string{testRD}, ExportRTs: []string{testRD},
+	}.Normalize())
+
+	withdrawn, err := ops.ReconcileAdvertised(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if withdrawn != 0 {
+		t.Fatalf("reconcile reported %d withdrawn for an RD that only changed spelling", withdrawn)
+	}
+	adv.mu.Lock()
+	defer adv.mu.Unlock()
+	if len(adv.withdrawn) != withdrawnBefore {
+		t.Fatalf("a non-canonical RD flapped the route: %d withdrawals", len(adv.withdrawn)-withdrawnBefore)
+	}
+}
+
+// The VPN advertise path, like the unicast one, must say which locator is
+// missing when a plugin names a SID in a locator the operator has not
+// registered yet, so the retry machinery repairs it rather than failing
+// permanently.
+func TestVPNAdvertiseSaysWhichLocatorIsMissing(t *testing.T) {
+	g := NewGuard(narrowScope(t), &fakeLocatorSource{}, testBindings())
+	_, err := g.resolveAdvertised(AdvertisedRoute{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, Prefix: "10.7.0.0/24",
+		SRv6SID: "fd00:1::1", NextHop: "2001:db8::1",
+	})
+	if err == nil {
+		t.Fatal("a SID was accepted against a locator that does not exist")
+	}
+	if !strings.Contains(err.Error(), "main") {
+		t.Errorf("error does not name the missing locator: %v", err)
+	}
+}
+
+// A malformed SID is refused with a parse error, not passed through.
+func TestVPNAdvertiseRefusesAMalformedSID(t *testing.T) {
+	g := NewGuard(narrowScope(t), testLocators(), testBindings())
+	if _, err := g.resolveAdvertised(AdvertisedRoute{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, Prefix: "10.7.0.0/24",
+		SRv6SID: "not-an-address", NextHop: "2001:db8::1",
+	}); err == nil {
+		t.Fatal("a malformed SID was accepted")
+	}
+}
+
+// The reconcile claims it runs under applyMu so a resolved route cannot be
+// overtaken by a concurrent binding edit. Run a worker reconciling while
+// another goroutine flips the binding, under -race, and assert the final
+// route always carries one of the two RT sets, never a mix or an empty one.
+func TestReconcileIsConsistentUnderAConcurrentBindingEdit(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+	bindings := testBindings()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Advertise:    set,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), bindings),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	if _, err := set.Apply(context.Background(), ownerA, []AdvertisedRoute{{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, RD: testRD, Prefix: "10.7.0.0/24",
+		SRv6SID: "fd00:1::1", NextHop: "2001:db8::1",
+	}}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	rtA, rtB := "65000:1", "65000:2"
+	mk := func(rt string) vrfbgp.Binding {
+		return vrfbgp.Binding{VRFName: testVRF, RD: testRD, ImportRTs: []string{rt}, ExportRTs: []string{rt}}.Normalize()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if i%2 == 0 {
+				bindings.set(testVRF, mk(rtA))
+			} else {
+				bindings.set(testVRF, mk(rtB))
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if _, err := ops.ReconcileAdvertised(context.Background()); err != nil {
+				t.Errorf("reconcile: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	// One final reconcile against a known binding pins the end state.
+	bindings.set(testVRF, mk(rtA))
+	if _, err := ops.ReconcileAdvertised(context.Background()); err != nil {
+		t.Fatalf("final reconcile: %v", err)
+	}
+	for _, r := range set.LiveRoutes(ownerA) {
+		if len(r.RouteTargets) != 1 || r.RouteTargets[0] != rtA {
+			t.Fatalf("route RTs = %v, want the last binding's %q; a mix or empty means the reconcile was overtaken", r.RouteTargets, rtA)
+		}
 	}
 }

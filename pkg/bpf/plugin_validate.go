@@ -18,6 +18,33 @@ import (
 // warn-only rollout applies; CLI shift-left always rejects.
 var ErrPluginROWrite = errors.New("plugin RO map write")
 
+// ErrPluginIntegrityMapWrite is returned when a plugin writes to a map the
+// dispatch and scope integrity depend on: the per-CPU tail-call context,
+// the SID aux table, or the SID function table. Unlike ErrPluginROWrite it
+// is NOT warn-downgradable -- a plugin that can write these maps can forge
+// the action a built-in reads to gate a plugin-owned aux (defeating the
+// aux discriminator) or install a SID function outside its scope, so no
+// deployment may run such a plugin regardless of ro_enforce. No legitimate
+// plugin ever writes them.
+var ErrPluginIntegrityMapWrite = errors.New("plugin integrity map write")
+
+// integrityMapNames are the shared RO maps whose plugin-write must be fatal
+// even under ro_enforce=warn, because the dispatch/aux/scope machinery
+// trusts their contents: the tail-call context carries the SID action the
+// aux discriminator reads, the aux table holds behavior parameters, and the
+// SID function table maps SIDs to actions. A plugin that writes any of them
+// forges the scope. The PROG_ARRAYs are included so a plugin cannot swap
+// the program a slot dispatches to.
+var integrityMapNames = map[string]struct{}{
+	"tailcall_ctx_map":      {},
+	"sid_aux_map":           {},
+	"sid_function_map":      {},
+	MapNameSidEndpointProgs: {},
+	MapNameHeadendV4Progs:   {},
+	MapNameHeadendV6Progs:   {},
+	MapNameHeadendL2Progs:   {},
+}
+
 // SymTailcallEpilogue is the BPF subprogram every plugin must call before
 // returning an XDP action so per-action stats are recorded.
 const SymTailcallEpilogue = "tailcall_epilogue"
@@ -530,6 +557,7 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 		return nil
 	}
 	details := make([]string, 0, len(violations))
+	integrity := false
 	for _, v := range violations {
 		if v.mapName == "" {
 			details = append(details, fmt.Sprintf(
@@ -537,10 +565,29 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 					"known map; route writes through scratch_map / stats_map "+
 					"or a plugin-owned map", v.insIdx))
 		} else {
+			if _, ok := integrityMapNames[v.mapName]; ok {
+				integrity = true
+			}
 			details = append(details, fmt.Sprintf(
 				"instruction #%d: store into read-only map %q",
 				v.insIdx, v.mapName))
 		}
+	}
+	// A write to a dispatch/aux/scope integrity map is fatal even under
+	// ro_enforce=warn: it lets the plugin forge the very state the scope and
+	// the aux discriminator trust. The warn downgrade is for the migration
+	// maps, not these.
+	if integrity {
+		// An integrity-map write IS a read-only-map write, so the error
+		// satisfies errors.Is(ErrPluginROWrite) too; the extra
+		// ErrPluginIntegrityMapWrite is what the warn-mode caller checks to
+		// refuse the downgrade for exactly these maps.
+		return fmt.Errorf(
+			"%w: %w: plugin program %q has %d disallowed map write(s); at least one targets a "+
+				"dispatch/aux integrity map, which no plugin may write under any ro_enforce setting. "+
+				"Violations:\n  - %s",
+			ErrPluginIntegrityMapWrite, ErrPluginROWrite, spec.Name, len(violations), strings.Join(details, "\n  - "),
+		)
 	}
 	return fmt.Errorf(
 		"%w: plugin program %q has %d disallowed map write(s); shared RO "+

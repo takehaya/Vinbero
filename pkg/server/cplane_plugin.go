@@ -296,7 +296,7 @@ func cplaneRPCError(err error) error {
 		// combination is wrong, and the caller is holding all of them.
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	case errors.Is(err, cplane.ErrLeaseHeld),
-		errors.Is(err, cplane.ErrSlotHeld),
+		errors.Is(err, cplane.ErrGrantHeld),
 		errors.Is(err, demux.ErrBehaviorHeld):
 		// Nothing is wrong with the request; something else holds what it
 		// asked for, and the caller decides what gives.
