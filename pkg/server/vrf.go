@@ -20,6 +20,11 @@ import (
 type SidLister interface {
 	ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error)
 	GetSidAux(index uint32) (*bpf.SidAuxEntry, error)
+	// EndtVRFGrantReferences reports whether a plugin-dispatched End.DT* grant
+	// points at this VRF's device ifindex. A plugin handoff keeps its decap
+	// VRF in a host-owned grant map rather than in l3vrf aux, so the aux scan
+	// above cannot see it.
+	EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool, error)
 }
 
 // BindingGetter reports whether a vrf-bgp binding references a VRF name, so
@@ -247,6 +252,18 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 		}
 		if ref != "" {
 			return fail(fmt.Sprintf("VRF is referenced by SID %s", ref))
+		}
+		// A plugin-dispatched End.DT* keeps its decap VRF in a host-owned grant
+		// map, not in l3vrf aux, so the scan above cannot see it. Refuse the
+		// delete while a grant still points at this device: dropping it would
+		// dangle the grant, and a reused ifindex would send that plugin's decap
+		// into another routing domain.
+		auxIdx, granted, err := s.sids.EndtVRFGrantReferences(ifindex)
+		if err != nil {
+			return fail(fmt.Sprintf("failed to check plugin decap-VRF grants: %v", err))
+		}
+		if granted {
+			return fail(fmt.Sprintf("VRF is referenced by a plugin decap-VRF grant (aux index %d)", auxIdx))
 		}
 	}
 	// Device teardown before identity removal: a failed netlink delete leaves

@@ -4101,9 +4101,12 @@ func (h *xdpTestHelper) createPluginDT4Sid(prefix string, slot uint32) uint32 {
 // The FIB-level outcome (a granted packet actually forwarded via the VRF
 // table) is not observable in the unit env -- bpf_fib_lookup runs against the
 // host and declines -- so that is verified in the cplane-plugin-2site interop
-// with a VRF-enslaved customer interface. Here the contract is pinned: no
-// grant drops, and a grant makes the plugin path take the same FIB decision a
-// built-in End.DT4 would.
+// with a VRF-enslaved customer interface. Both subtests here return XDP_DROP,
+// so the return code alone cannot tell a working grant from an always-drop
+// regression. The distinguisher is where the drop happens: with no grant,
+// resolve_decap_vrf drops before decap, so the packet is unchanged; with a
+// grant, the packet is decapped (the outer IPv6 header stripped) and only then
+// does the host FIB decline. The output length is asserted for exactly that.
 func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
 	const pluginSlot = uint32(32) // an endpoint plugin slot (>= ENDPOINT_PLUGIN_BASE)
 	sid := "fd00:1:700::10"
@@ -4126,17 +4129,23 @@ func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
 		t.Cleanup(func() { _ = h.objs.SidEndpointProgs.Delete(pluginSlot) })
 	}
 
-	t.Run("a plugin End.DT4 with no VRF grant drops rather than using the ingress table", func(t *testing.T) {
+	t.Run("a plugin End.DT4 with no VRF grant drops before decap rather than using the ingress table", func(t *testing.T) {
 		h := newXDPTestHelper(t)
 		loadDT4IntoPluginSlot(t, h)
 		h.createPluginDT4Sid(sid+"/128", pluginSlot)
-		ret, _ := h.run(buildPkt(t))
+		pkt := buildPkt(t)
+		ret, out := h.run(pkt)
 		if ret != XDP_DROP {
 			t.Fatalf("a plugin End.DT4 with no VRF grant returned %d, want XDP_DROP; it must not fall back to the ingress table", ret)
 		}
+		// The drop is at resolve_decap_vrf, before any decap, so the packet is
+		// untouched. If it were decapped the grant gate had let it through.
+		if len(out) != len(pkt) {
+			t.Fatalf("no-grant packet was modified (in %d bytes, out %d): the gate should drop it before decap", len(pkt), len(out))
+		}
 	})
 
-	t.Run("a plugin End.DT4 with a grant takes the same FIB decision as a built-in End.DT4", func(t *testing.T) {
+	t.Run("a plugin End.DT4 with a grant decaps and takes the same FIB decision as a built-in End.DT4", func(t *testing.T) {
 		const vrfIfindex = uint32(1) // loopback: present in the test env
 		// Built-in reference: an ordinary End.DT4 into the same VRF ifindex.
 		hb := newXDPTestHelper(t)
@@ -4148,11 +4157,19 @@ func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
 		loadDT4IntoPluginSlot(t, h)
 		auxIdx := h.createPluginDT4Sid(sid+"/128", pluginSlot)
 		h.grantPluginEndtVrf(auxIdx, vrfIfindex)
-		pluginRet, _ := h.run(buildPkt(t))
+		pkt := buildPkt(t)
+		pluginRet, out := h.run(pkt)
 
 		if pluginRet != builtinRet {
 			t.Fatalf("plugin End.DT4 with a grant returned %d, want the built-in path's %d; "+
 				"the grant should route it to the same FIB decision, not the gate drop", pluginRet, builtinRet)
+		}
+		// The grant let it past resolve_decap_vrf into the decap: the outer IPv6
+		// header is stripped, so the output is shorter than the input. This is
+		// what an always-drop-at-the-gate regression would fail, since both
+		// paths return XDP_DROP once the host FIB declines.
+		if len(out) >= len(pkt) {
+			t.Fatalf("granted packet was not decapped (in %d bytes, out %d): the grant did not gate through to decap", len(pkt), len(out))
 		}
 	})
 }

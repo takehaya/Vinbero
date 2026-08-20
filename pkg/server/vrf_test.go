@@ -80,9 +80,10 @@ func (f *fakeVrfDeviceOps) DeleteVrf(name string) error {
 // L2 aux (bridge references); default is End.DT4 with an l3vrf aux. auxErr
 // makes every GetSidAux fail (the fail-closed path).
 type fakeSidTable struct {
-	refs   map[string]uint32 // prefix -> ifindex
-	l2     bool
-	auxErr error
+	refs      map[string]uint32 // prefix -> ifindex
+	l2        bool
+	auxErr    error
+	grantRefs map[uint32]uint32 // aux index -> granted ifindex
 }
 
 func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {
@@ -120,6 +121,15 @@ func (f *fakeSidTable) GetSidAux(index uint32) (*bpf.SidAuxEntry, error) {
 		i++
 	}
 	return nil, fmt.Errorf("no aux %d", index)
+}
+
+func (f *fakeSidTable) EndtVRFGrantReferences(ifindex uint32) (uint32, bool, error) {
+	for aux, granted := range f.grantRefs {
+		if granted == ifindex {
+			return aux, true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 // fakeBindings reports a binding for the names it holds. Full bindings (with
@@ -530,6 +540,14 @@ func TestVrfServer_DeleteRefusals(t *testing.T) {
 	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00::/64": 12345}, auxErr: fmt.Errorf("aux boom")}
 	if m := del(); len(m.Errors) != 1 {
 		t.Fatalf("delete with unreadable aux: want refusal, got %+v", m)
+	}
+
+	// 3c. A plugin decap-VRF grant pointing at the device ifindex refuses:
+	// a plugin handoff keeps its VRF in the grant map, not in l3vrf aux, so
+	// deleting the device would dangle the grant.
+	s.sids = &fakeSidTable{grantRefs: map[uint32]uint32{7: created.Device.Ifindex}}
+	if m := del(); len(m.Errors) != 1 {
+		t.Fatalf("delete with plugin decap-VRF grant: want refusal, got %+v", m)
 	}
 	s.sids = &fakeSidTable{}
 

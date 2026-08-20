@@ -1259,6 +1259,32 @@ func (m *MapOperations) PutEndtVRFGrant(auxIndex, vrfIfindex uint32) error {
 	return nil
 }
 
+// EndtVRFGrantReferences reports whether any decap-VRF grant points at
+// vrfIfindex, returning one referencing aux index for the message. It is the
+// VRF-delete guard for plugin-dispatched decap: a built-in End.DT* SID keeps
+// its VRF in l3vrf aux, but a plugin handoff keeps it here, so deleting a VRF
+// device with a live grant would dangle it and, once the ifindex is reused,
+// send that plugin's decap into another routing domain.
+func (m *MapOperations) EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool, error) {
+	if vrfIfindex == 0 {
+		return 0, false, nil
+	}
+	var (
+		auxIndex uint32
+		val      BpfPluginEndtVrf
+	)
+	iter := m.objs.PluginEndtVrfMap.Iterate()
+	for iter.Next(&auxIndex, &val) {
+		if val.VrfIfindex == vrfIfindex {
+			return auxIndex, true, nil
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, false, fmt.Errorf("iterate endt vrf grants: %w", err)
+	}
+	return 0, false, nil
+}
+
 // DeleteEndtVRFGrant removes the grant for auxIndex. A missing key is not an
 // error: the caller deletes the grant before it frees the aux index, so a
 // re-run over a set that never carried a grant is a no-op.
