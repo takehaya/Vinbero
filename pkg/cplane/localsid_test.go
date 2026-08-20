@@ -310,15 +310,33 @@ func TestLocalSIDDecapVRFStrandedEntryKeepsAddress(t *testing.T) {
 	if alloc.releasedCount() != 0 {
 		t.Fatalf("released %d addresses; a stranded entry's address must be kept", alloc.releasedCount())
 	}
-	// The entry is still in the map and still tracked, so a later reconcile
-	// can remove it. Redeclaring an empty set removes it (the delete now
-	// succeeds).
+
+	// Redeclaring the SAME set must not be mistaken for already-installed: the
+	// stranded entry has no grant, so the reconcile has to remove and reinstall
+	// it. With the failures cleared it now converges, grant and all.
 	sids.delFailOn = ""
+	grants.putErr = nil
+	out, _, err := set.Apply(owner, decl, -1)
+	if err != nil {
+		t.Fatalf("re-apply after strand: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("re-apply produced %d SIDs, want 1", len(out))
+	}
+	entry, ok := sids.entryFor(out[0].SID.String() + "/128")
+	if !ok {
+		t.Fatal("re-apply left no dispatch entry")
+	}
+	if grants.grants[uint32(entry.AuxIndex)] != 9 {
+		t.Fatalf("re-apply did not write the grant; a stranded entry was mistaken for up to date: %v", grants.ops)
+	}
+
+	// And it can still be cleaned up.
 	if _, _, err := set.Apply(owner, nil, -1); err != nil {
 		t.Fatalf("cleanup apply: %v", err)
 	}
 	if sids.count() != 0 {
-		t.Fatalf("stranded entry not cleaned up: %d entries remain", sids.count())
+		t.Fatalf("entry not cleaned up: %d entries remain", sids.count())
 	}
 }
 

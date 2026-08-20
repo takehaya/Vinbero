@@ -1192,6 +1192,25 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	var entry SidFunctionEntry
 	hasEntry := m.objs.SidFunctionMap.Lookup(key, &entry) == nil
 
+	// Withdraw any decap-VRF grant keyed by this aux index first, while the SID
+	// entry and its owner are still present. The grant is keyed by aux index,
+	// so a freed-then-reused index would otherwise let a stale grant apply to
+	// an unrelated SID; this is the catch-all for every delete path
+	// (ForceDeleteSidFunction and any direct DeleteSidFunction), not just the
+	// control-plane's own grant-aware release. A SID that never carried a grant
+	// is a no-op here.
+	//
+	// It runs before the entry is deleted so a failure is retriable: returning
+	// now leaves the entry, its owner and the aux index intact, so the next
+	// delete re-enters this path. Deleting the entry first and failing here
+	// would strand the grant and the index forever, because hasEntry would then
+	// be false on every retry.
+	if hasEntry && entry.AuxIndex != 0 {
+		if err := m.DeleteEndtVRFGrant(uint32(entry.AuxIndex)); err != nil {
+			return fmt.Errorf("withdraw decap-VRF grant for aux %d: %w", entry.AuxIndex, err)
+		}
+	}
+
 	if err := deleteMapKey(m.objs.SidFunctionMap, key); err != nil {
 		return fmt.Errorf("failed to delete SID function entry: %w", err)
 	}
@@ -1206,21 +1225,6 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	// owner check and the map op.
 	if hasEntry && entry.AuxIndex != 0 {
 		idx := uint32(entry.AuxIndex)
-		// Withdraw any decap-VRF grant keyed by this aux index before the index
-		// is freed. The grant is keyed by aux index, so a freed-then-reused
-		// index would otherwise let a stale grant apply to an unrelated SID.
-		// This is the catch-all for every delete path -- ForceDeleteSidFunction
-		// and any direct DeleteSidFunction -- not just the control-plane's own
-		// grant-aware release. A SID that never carried a grant is a no-op here.
-		//
-		// If the grant delete fails, the index is NOT freed: leaving the grant
-		// in place while returning the index to the allocator would let the
-		// next SID to take it inherit a VRF it never declared. Keeping the
-		// index reserved quarantines the grant, and the error is surfaced so
-		// the caller knows the delete did not fully complete.
-		if err := m.DeleteEndtVRFGrant(idx); err != nil {
-			return fmt.Errorf("withdraw decap-VRF grant for aux %d: %w", idx, err)
-		}
 		_ = m.auxAlloc.WithOwnerLocked(idx, AuxOwnerBuiltin, func() error {
 			var zero SidAuxEntry
 			_ = m.objs.SidAuxMap.Put(idx, &zero)

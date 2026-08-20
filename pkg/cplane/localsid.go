@@ -83,11 +83,21 @@ type AllocatedSID struct {
 	// redeclaration is diffed against.
 	decapVRF string
 	auxIndex uint32
+	// stranded marks a record whose install did not complete: the dispatch
+	// entry is in the map but its grant was never written and the rollback
+	// failed. It must never satisfy a redeclaration -- otherwise the same
+	// declaration coming back would be seen as already-installed and the
+	// grant-less entry would drop forever -- so matches always fails for it
+	// and the next reconcile removes the entry by prefix and reinstalls.
+	stranded bool
 }
 
 // matches reports whether an installed SID already carries what a
 // declaration asks for.
 func (a AllocatedSID) matches(want LocalSID) bool {
+	if a.stranded {
+		return false
+	}
 	return a.Locator == want.Locator && a.slot == want.Slot &&
 		a.decapVRF == want.DecapVRF && bytes.Equal(a.auxRaw, want.AuxRaw)
 }
@@ -241,11 +251,16 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 			auxIndex, err := l.install(owner, got.SID, want)
 			if err != nil {
 				if errors.Is(err, errInstallEntryStranded) {
-					// The dispatch entry is still live at got.SID. Keep the
-					// address and leave current[name] pointing at the old
-					// record so a later reconcile removes the entry by prefix
-					// and retries, rather than releasing an address the map
-					// still uses.
+					// The dispatch entry is still live at got.SID but has no
+					// grant. Keep the address and mark the record stranded so
+					// the next reconcile cannot mistake it for up to date --
+					// it removes the entry by prefix and reinstalls -- rather
+					// than releasing an address the map still uses.
+					strandedGot := got
+					strandedGot.stranded = true
+					l.mu.Lock()
+					current[name] = strandedGot
+					l.mu.Unlock()
 					return nil, res, err
 				}
 				l.alloc.ReleaseSID(got.SID)
@@ -283,15 +298,16 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 		auxIndex, err := l.install(owner, sid, want)
 		if err != nil {
 			if errors.Is(err, errInstallEntryStranded) {
-				// The dispatch entry is live at sid but the rollback failed.
-				// Track it (auxIndex unknown, so 0 -- the map-layer delete
-				// withdraws any grant regardless) so a later reconcile removes
-				// it by prefix; releasing the address would collide with the
-				// still-live entry.
+				// The dispatch entry is live at sid but the rollback failed, so
+				// it has no grant. Track it as stranded (auxIndex unknown, so 0
+				// -- the map-layer delete withdraws any grant regardless) so a
+				// later reconcile always removes it by prefix and reinstalls
+				// rather than mistaking it for up to date; releasing the address
+				// would collide with the still-live entry.
 				l.mu.Lock()
 				current[name] = AllocatedSID{
 					Name: name, SID: sid, Locator: want.Locator,
-					slot: want.Slot, decapVRF: want.DecapVRF,
+					slot: want.Slot, decapVRF: want.DecapVRF, stranded: true,
 				}
 				l.mu.Unlock()
 				return nil, res, err
