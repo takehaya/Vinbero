@@ -1320,6 +1320,24 @@ func (m *MapOperations) DeleteEndtVRFGrantsByIfindex(vrfIfindex uint32) (int, er
 	}
 	removed := 0
 	for _, idx := range stale {
+		// Re-read and compare before deleting. Between the scan and here the
+		// index could have been freed and reused for a grant pointing at a
+		// different (live) VRF; deleting it by key alone would then break that
+		// legitimate grant. Delete only while it still points at the ifindex
+		// being torn down. The lookup and the delete are not atomic -- BPF maps
+		// have no compare-and-delete -- so this narrows the window rather than
+		// closing it; a full close needs the sweep and the install to share a
+		// lock.
+		var cur BpfPluginEndtVrf
+		if err := m.objs.PluginEndtVrfMap.Lookup(idx, &cur); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				continue
+			}
+			return removed, fmt.Errorf("re-read endt vrf grant %d: %w", idx, err)
+		}
+		if cur.VrfIfindex != vrfIfindex {
+			continue
+		}
 		if err := m.DeleteEndtVRFGrant(idx); err != nil {
 			return removed, err
 		}

@@ -471,6 +471,18 @@ func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID)
 		return 0, fmt.Errorf("local sid %q: install %s: %w", want.Name, prefix, err)
 	}
 	if want.DecapVRF != "" {
+		// ponytail: the ifindex resolved above and written here is not
+		// serialized against a concurrent VrfDelete. If the VRF is deleted
+		// between the resolve and this write, the grant records a freed
+		// ifindex. VrfDelete refuses while a grant is live and sweeps the
+		// ifindex after teardown, so a grant that raced that far ends up on a
+		// dead ifindex and fails closed (fib-lookup miss -> drop) -- the same
+		// property every ifindex-keyed VRF reference in the tree has, since
+		// Linux does not promptly reuse an ifindex. A full close (so a grant
+		// can never outlive its VRF even for an instant) needs this resolve+Put
+		// and VrfDelete's check+teardown to share a leaf lease acquired under
+		// applyMu / the VRF mutation mutex; deferred as a design decision
+		// rather than plumbed across the cplane/server boundary here.
 		if err := l.grants.PutEndtVRFGrant(uint32(entry.AuxIndex), vrfIfindex); err != nil {
 			// Undo the dispatch entry so nothing is left pointing at a decap
 			// with no grant, which the data plane would drop on.
