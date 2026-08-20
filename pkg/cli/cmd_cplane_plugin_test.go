@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // A behavior is conventionally written in hex (RFC 8986 numbers them that
 // way), so reading 0x0013 as decimal 13 would claim a different one.
@@ -42,5 +45,22 @@ func TestParseBehaviorFlagsRejectsBadValues(t *testing.T) {
 		if _, err := parseBehaviorFlags([]string{in}); err == nil {
 			t.Errorf("value %q was accepted", in)
 		}
+	}
+}
+
+// uint is 64 bits on the platforms this runs on, so a slot number wider
+// than the request field wraps silently. --endpoint-slot 4294967328 would
+// arrive at the daemon as 32, pass its range check, and grant a slot the
+// operator never named.
+func TestSlotFlagsThatDoNotFitAreRefused(t *testing.T) {
+	if _, err := uintSliceToUint32("endpoint-slot", []uint{math.MaxUint32 + 1}); err == nil {
+		t.Fatal("a slot number wider than 32 bits was accepted")
+	}
+	got, err := uintSliceToUint32("endpoint-slot", []uint{32, 33})
+	if err != nil {
+		t.Fatalf("ordinary slots were refused: %v", err)
+	}
+	if len(got) != 2 || got[0] != 32 || got[1] != 33 {
+		t.Fatalf("converted %v, want the slots as given", got)
 	}
 }

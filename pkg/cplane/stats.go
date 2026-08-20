@@ -98,6 +98,9 @@ type PluginStats struct {
 	// the registration.
 	Capabilities []string
 	Behaviors    []uint16
+	// Scope is where those capabilities may be exercised. It is reported
+	// beside them because neither half describes the grant on its own.
+	Scope Scope
 	// DroppedEvents counts event batches discarded because the plugin
 	// could not keep up.
 	DroppedEvents uint64
@@ -210,6 +213,7 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 	return PluginStats{
 		Name:                p.name,
 		Capabilities:        reg.Capabilities.Names(),
+		Scope:               reg.Scope,
 		Behaviors:           reg.Behaviors,
 		DroppedEvents:       p.worker.droppedCount(),
 		Restarts:            restarts,

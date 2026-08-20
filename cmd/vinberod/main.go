@@ -180,7 +180,11 @@ func run(cliCtx *cli.Context) error {
 		}
 
 		bgpSession = gobgp.NewSession(lg)
-		advertiser = bgpSession
+		// The operator's own advertisements, made over RPC, originate
+		// under a producer name of their own. The SR Policy, EVPN and MUP
+		// controllers stay on the bare session: each has a single writer
+		// today, so there is nothing for a name to separate them from.
+		advertiser = bgpSession.AsProducer(gobgp.ProducerOperator)
 		srPolicyAdvertiser = bgpSession
 		evpnAdvertiser = bgpSession
 		mupAdvertiser = bgpSession
@@ -202,8 +206,14 @@ func run(cliCtx *cli.Context) error {
 		// The exporter shares the locator manager, VRF bindings, and BGP
 		// advertiser with the rest of the daemon and owns its route watcher.
 		if cfg.BGP.Global.AutoAdvertise {
+			// Under its own producer name. The exporter follows the
+			// routing table and the operator's RPC is what an operator
+			// asked for; sharing one name makes them one producer, and
+			// gobgp keeps a single local path per NLRI, so whichever
+			// spoke last would silently replace the other's route and
+			// then withdraw it out from under them.
 			exporter = export.New(
-				advertiser,
+				bgpSession.AsProducer(gobgp.ProducerExport),
 				vin.GetMapOperations(),
 				locatorMgr,
 				vrfBgpMgr,
@@ -449,6 +459,12 @@ func run(cliCtx *cli.Context) error {
 			SIDFunctions: vin.GetMapOperations(),
 			EncapSource:  applier.EncapSourceAddr,
 			Store:        cplaneStore,
+			// What a plugin's scope is stated in terms of. Both are
+			// consulted when a declaration is applied rather than now,
+			// because an operator registers locators and VRF bindings
+			// over RPC after the daemon is up.
+			LocatorInfo: locatorMgr,
+			VRFBindings: vrfBgpMgr,
 			// What one plugin may hold and what it may cost to run, from
 			// the operator's config. Without these the daemon ran on the
 			// built-in defaults whatever the file said, and reported the

@@ -121,25 +121,36 @@ deployments, so one build serves all of them:
 | 1 | the endpoint behavior codepoint to claim |
 | 2 | the locator to take a local SID from |
 | 3 | the prefix to advertise behind that SID |
-| 4 | the route distinguisher to advertise it with |
+| 4 | the VRF to advertise it into |
 | 5 | the eBPF slot the SID dispatches to |
 | 6 | a SID to advertise as given, instead of allocating one |
 | 7 | the next hop to advertise the prefix with |
 
-There are three ways to run it, and the config picks between them:
+There are two ways to run it, and the config picks between them:
 
 - **Allocating.** Set the locator and the slot. The plugin asks the host
-  for a SID, is told the address, and advertises the prefix behind it.
-- **Advertising a SID it was given.** Set field 6 instead. Nothing is
-  allocated and the locator and the slot are not needed: the address
-  already exists, and something else put it in the data plane.
-- **Receive-only.** Set neither field 6 nor a locator and slot. The plugin
-  originates nothing and only acts on routes carrying its behavior, which
-  is a perfectly ordinary way to run it.
+  for a SID, is told the address, and advertises the prefix behind it. The
+  slot is where its eBPF half lives; [`../plugin-custom-behavior`](../plugin-custom-behavior)
+  is that half, and the two are exercised together by the
+  `cplane-plugin-2site` interop scenario.
+- **Receive-only.** Set neither a locator nor a slot. The plugin originates
+  nothing and only acts on routes carrying its behavior, which is a
+  perfectly ordinary way to run it.
 
-Fields 3, 4 and 7 are what the advertisement is made of, so the two
-advertising modes need all three. The daemon refuses an advertisement with
-no next hop rather than guessing one.
+A plugin may advertise only a SID it was itself allocated: the daemon
+refuses a route pointing at any other SID, since one the plugin did not
+allocate could belong to another VRF. Fronting a SID an operator
+provisioned outside the plugin would need an explicit operator grant the
+scope model does not yet carry, so there is no "advertise a given SID" mode.
+
+Fields 3, 4 and 7 are what the advertisement is made of, so the allocating
+mode needs all three. The daemon refuses an advertisement with no next hop
+rather than guessing one.
+
+The VRF has to be one the plugin's registration lists in its scope, and the
+route distinguisher and route targets come from that VRF's binding rather
+than from this config. A plugin cannot name them: they are what decides
+which VPN a peer imports the route into.
 
 ## Notes on the code
 

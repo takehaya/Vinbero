@@ -3,7 +3,7 @@
 Vinbero の control plane を第三者が拡張するための機構です。data plane
 plugin が eBPF bytecode を受け取るのに対し、control plane plugin は
 WebAssembly module を受け取ります。どちらも daemon に upload され、登録時
-に検証され、宣言した capability の範囲でだけ動きます。
+に検証され、宣言した capability と scope の範囲でだけ動きます。
 
 ## 何のためにあるか
 
@@ -146,6 +146,9 @@ set は owner ごとに差分を取るので、2 owner が同じ key を宣言�
 ます。BPF map については per-entry owner map が最終的な enforcement で、
 lease は早期に、相手の名前を添えて落とすための前線です。
 
+owner と lease が扱うのは同じ key の奪い合いだけです。他人の key に触れずに
+それより強い key を作る形は別の問題で、scope の章で扱います。
+
 ## ABI
 
 境界を渡るのは linear memory 上の byte buffer で、構造は protobuf が持ち
@@ -208,6 +211,196 @@ granted された plugin が同じ扉から headend の transaction を開けま
 plugin は実際に有用で、それが capability を宣言しなかった plugin の安全な
 既定です。
 
+## scope
+
+capability は種類しか絞りません。どこに書いてよいかを決めるのが scope で、
+両方が揃わないと plugin は何も書けません。scope を宣言しなかった登録は、
+capability が何であれ観測と log だけをする plugin になります。
+
+scope が必要なのは、owner tag と lease が守るのが「他人が持っている鍵を
+上書きしないこと」だけだからです。この 3 面はどれも、他人の鍵に触れずに
+それより強い鍵を新しく作れます。headend map は LPM trie なので長い prefix が
+lookup に勝ち、VPN 経路は受信側の PE で more specific が勝ちます。所有は
+object 単位の性質なので、この形は表現できません。
+
+| 宣言 | 範囲 | 理由 |
+|---|---|---|
+| `local_sid` | locator 名の集合 | 宣言が locator 名を持ち、割り当ては `pkg/locator` が管理する |
+| advertise の vpnv4 と vpnv6 | VRF 名の集合 | RD と RT を binding から導出する |
+| advertise の ipv6_unicast | 許可された locator の配下 | plugin がここで広告する正当なものは自分の SID である |
+| `headend` | trigger prefix の list | 縛れる名前が存在しない |
+
+加えて、plugin が所有する PROG_ARRAY slot を宣言します。headend は v4 と v6 の
+map が別の PROG_ARRAY で slot 番号を共有するので、grant も別にします。v4 の
+slot 16 を渡しても v6 の slot 16 は渡しません。endpoint は 1 つです。plugin A が
+plugin B の slot に entry を向けると、B の program は A の aux bytes を自分の
+layout として読むためです。
+
+slot は plugin をまたいで排他にします。同じ slot を 2 つの plugin に渡すと、
+一方の SID がもう一方の program に dispatch して aux を取り違えるので、behavior
+claim と同じく登録時に拒否します。locator も同じく排他にします。VPN や
+ipv6_unicast の広告で SID を locator 配下に閉じ込める抑えが安全なのは、その
+locator が 1 つの plugin だけのものであるときだけで、共有した locator では別の
+plugin や built-in service SID の配下を指す広告を止められないためです。slot と
+locator の排他はどちらも登録時に拒否します。prune や restore に失敗した plugin は
+running registry から外れますが、state と claim を map に残したままなので、その
+slot と locator も forget されるまで予約し続けます。そうしないと別名の plugin が
+同じ grant を取り、残存 state と衝突するためです。prefix scope は排他にしません。
+operator が意図的に重ねることがあり、実際の衝突は per-entry の owner と lease が
+調停します。
+
+locator の排他は名前で見ます。別名で prefix を入れ子にした locator を別々の
+plugin に渡すと、広い locator を持つ plugin が狭い locator 配下の SID も
+`Contains` 判定で広告できてしまいます。prefix の重なりの調停は locator の登録側
+(`pkg/locator`) の領分で、scope が名前しか持たない登録時には実 prefix が未登録の
+こともあるため、ここでは名前の排他に留めます。operator は入れ子の locator を
+別々の plugin に割り当てないことを前提とします。
+
+### VPN 広告は照合ではなく導出
+
+plugin は VRF 名だけを宣言し、RD と RT は host が binding から埋めます。
+輸入を決めるのは RD ではなく RT なので、RD だけを照合しても余分な RT を
+付ければ束縛されていない VRF に経路を注入できます。導出にすると、その経路が
+構造として消え、RD の表記揺れを scope 側で正規化する必要も無くなります。
+宣言に RD や RT が入っていたら、黙って無視せず拒否します。
+
+binding が受信専用で RD を持たない場合は、その VRF への広告を拒否します。
+operator が選んでいない RD で経路を出すことになるためです。同じく、binding が
+その family の export RT を 1 つも持たない場合も拒否します。RT が空だと誰も
+import しない経路になり、成功したように見えて誰にも届かないためです。
+
+RT の導出が決めるのは経路を誰が import するかで、経路が実際にどこへ向かうかは
+prefix-SID TLV の SRv6 SID が決めます。導出だけでは、VRF blue に scope された
+plugin が blue の prefix を VRF red の service SID の裏に広告して blue の traffic を
+red へ流せます。そこで VPN 経路の SID は、plugin が自分で確保した SID
+(`LocalSIDSet.LiveSIDs`) に限ります。同じ `locator.Manager` から built-in の
+auto-exporter や operator の service SID も同一 locator 内に確保されるため、locator の
+配下という照合だけでは他人の SID を裏に広告できてしまい、locator 名の plugin 間排他
+だけでは built-in や operator の確保を止められないためです。確保した SID の address を
+持つのは host なので、この照合は owner の live SID 集合を知る apply 経路で行います。
+まだ確保していない SID は失敗し、local SID の宣言が適用された後の reconcile が
+やり直します。next hop や grant 内の segment を縛らない理由は、次の節でまとめます。
+
+### scope が縛る軸と grant 内の自由
+
+scope が縛るのはどの traffic を扱えるかで、grant の中で経路がどこへ向かうかは
+縛りません。この線引きは意図したもので、境界を跨げる値だけを scope で抑えます。
+
+next hop はこの grant 内の自由に当たります。VPN 経路の next hop は import した
+peer が到達性を解決するためのもので、encap source は locator address であって
+BGP transport とは限らず、daemon に妥当な推測がありません。next hop を locator に
+縛ると正当な interop 構成を壊すため、元の挙動のまま自由にします。VPN SID を
+locator に閉じ込めたのは、SID が別 VRF の decap の裏へ逃げて scope の VRF grant を
+跨げるからで、next hop にはその跨ぎがありません。
+
+同じ理由で、plugin が渡された locator の配下に組む segment list の中身も grant 内の
+自由です。segment はすべて自分の locator に属し、他人の VRF や locator へ抜ける
+出口が無いので、個々の segment を scope で照合しません。segment list が built-in
+state の layout を跨いで別 VRF の decap を起こせるのは data plane half の話で、
+これは scope ではなく shared map の partition と aux discriminator で抑えます
+(後述の data plane 境界の節)。
+
+binding の `MaxPrefixes` は plugin の広告にも適用します。VRF を渡すことが
+無制限の VRF を渡すことにならないようにするためです。
+
+binding は plugin が動いている間に operator が編集するものなので、導出した値は
+binding が変わった時点で再導出します。unbind も同じで、binding が消えた VRF の
+経路は wire から降ろします。RD と RT と上限は宣言を適用した時点で
+刻まれるため、これが無いと export RT を変えても plugin が次に宣言し直すまで
+古い RT を載せた path が wire に残ります。event 駆動の plugin は長く宣言し直さ
+ないことがあります。宣言経路では範囲外を集合ごと拒否しますが、この再導出では
+上限を超えた分を withdraw します。operator が上限を下げたときに拒否すると経路が
+全部残り、頼んだことと逆になるためです。
+
+### headend だけ prefix で縛る
+
+`headend_v4_map` の key は `lpm_key_v4` で prefixlen と addr しか持たず、
+VRF も locator も key に入りません。名前で縛れる対象が無いので、operator が
+prefix を並べます。未指定なら headend の宣言を拒否するので、`::/0` の
+catch-all は書けません。
+
+将来は「claim した behavior で自分に配送された経路の prefix」を scope の
+要素として並べられるようにする余地を残しています。いまは採っていません。
+demux の絞り込みが family と claim だけで import RT を見ないため配送集合が
+built-in の処理対象より広く、withdraw で縮み restart で作り直す派生状態でも
+あるからです。
+
+### 検査する場所
+
+scope は chunk を decode した時点ではなく、集合を apply する時点で検査します。
+scope が参照する locator と VRF binding は daemon 起動後に RPC で登録される
+ので、restore された plugin がそれらより先に宣言するのは普通に起きます。
+apply 時に失敗させれば、既存の retry 機構がそのまま修復に使えます。
+
+範囲外の要素が 1 つでもあれば集合ごと拒否します。宣言は集合についての表明
+なので、残りを適用すると plugin が求めていない状態を入れることになります。
+
+### scope を狭めたとき
+
+狭める操作だけは desired-set の模型では直りません。plugin が同じ宣言を
+続けると集合ごと拒否されるので reconcile が走らず、広い scope の下で書いた
+状態が残ります。そこで登録の時点で host が範囲外の状態を prune します。再登録に
+限らず restore でも走らせます。daemon 再起動をまたいだ状態は pinned map に残って
+おり、狭い scope で restore した plugin はそれを 1 つも触れないためです。
+実装は「まだ許される部分集合を desired set として apply する」形で、残りは
+既存の reconcile が落とします。
+
+manifest の format version は 2 です。scope は認可情報なので、scope を持たない
+version 1 の manifest (scope 導入前の build が書いたもの) を空 scope で restore
+すると、その plugin が書いた転送状態を boot 時に消してしまいます。そこで version 1 は
+restore を拒否し、状態を pinned のまま残して plugin を unrestored に落とします。
+この機構は未リリースなので migration は用意せず、plugin store をクリーンにしての
+起動を upgrade の前提とします。behavior claim は version に関係なく予約するので、
+その codepoint の経路は built-in に渡らず withhold されます。
+
+prune に失敗したら登録も失敗させます。成功を返すと、実際には効いていない認可
+境界が効いていると言うことになるためです。このとき store と claim と registry が
+食い違わないよう、1 つの結末に揃えます。新しい登録を persist するので、再起動時の
+restore が prune を再試行し、広い scope へ戻りません。behavior claim は新しい集合の
+まま残します。plugin は死んでも書いた状態は map に残るので、その codepoint の
+経路は built-in applier へ渡さず withhold し続けます。plugin は running registry から
+外して unrestored に記録するので、running と unrestored に二重に載らず、operator は
+`forget` で諦められます。
+
+### data plane 境界と aux
+
+plugin の local SID の aux (`aux_raw`) は plugin が並べた bytes で、`sid_aux_entry`
+という union に載ります。この union は SID の action で判別され、built-in behavior は
+自分の variant として読みます。End.DT4 は先頭 4 byte を VRF ifindex として読み、
+End.B6 は segment list 全体を読みます。plugin の data plane half は任意の built-in
+slot へ tail call できるので、そのまま渡すと built-in が plugin の bytes を自分の
+layout として解釈し、scope の VRF grant を破って任意の VRF へ decap できます。
+
+そこで built-in の aux 参照を分けます。built-in 用の lookup は、処理中の SID の
+action が plugin slot 域 (endpoint なら 32 以上) なら aux を NULL にします。plugin の
+handoff で built-in に入ったときは aux を読まず、aux 無しと同じ fallback (End.DT4 なら
+ingress ifindex) に落ちます。plugin が自分の program で自分の aux を読む経路は
+そのままなので、plugin の aux は plugin だけが解釈します。
+
+この判別は `tailcall_ctx_map` の `sid_entry.action` を読むので、plugin がその map を
+書けると action を偽造して判別を欺けます。共有 map は MapReplacements で plugin に
+渡す都合上 kernel から見れば RW で、`tailcall_ctx_map` は vinbero 自身が packet ごと
+書くため `BPF_F_RDONLY_PROG` にもできません。よって plugin の書き込みを止めるのは
+ELF の静的検査 (`checkROWrites`) です。判別と scope が信頼する map (`tailcall_ctx_map`
+`sid_aux_map` `sid_function_map` と dispatch PROG_ARRAY) への書き込みは、migration 対象の
+RO map と違って `ro_enforce=warn` でも downgrade せず常に fatal にします。検査は entry
+body だけでなく到達する subprogram も走査し、map pointer への定数・register 加算でも
+map identity を保つので、offset や noinline helper で書き込みを隠せません。map を書くのは
+store 命令だけではないので、`bpf_map_update_elem` / `bpf_map_delete_elem` などの map 変更
+helper も第一引数の map provenance で検査します。entry body で解決できない書き込みは
+integrity map でないと証明できないため fail-closed で fatal にします。
+
+ここで plugin ELF の trust model を明示します。plugin ELF は operator が install し
+review する semi-trusted な artifact として扱い、`checkROWrites` は accidental な誤用の
+検出であって、敵対的 ELF に対する sandbox ではありません。map value pointer を stack に
+spill して reload する、あるいは call 引数として渡し callee 内で書く形は register
+provenance が切れ、subprogram 内では正当な helper (epilogue の slot_stats_inc が引数の
+map pointer を書く) との誤検知を避けるため素通ります。これを完全に塞ぐには
+inter-procedural / stack-slot の provenance 追跡が要り、既知の限界として別途扱います。
+つまり scope 認可のうち、WASM の desired set 側は host が強制しますが、ELF data plane 側は
+semi-trusted 前提の best-effort です。第三者や tenant 提供の ELF を許す運用に広げる場合は、
+integrity map を plugin から参照させない host-owned な grant map など構造的な隔離が要ります。
+
 ## claim と built-in state の関係
 
 claim は demux が経路を配る先を決める述語なので、claim が立つ前に届いた
@@ -264,7 +457,18 @@ session は 1 つの NLRI につき local path を 1 本しか持たないので
 lease と producer は失敗の仕方が違います。lease 衝突は何も送る前に拒否され、
 producer 衝突は誤って lease を手放したときに他の plugin の経路を守ります。
 
-session は auto-advertise の exporter や operator の RPC とも共有です。
+session は auto-advertise の exporter や operator の RPC とも共有なので、
+vinbero 自身の originator にも producer 名を与えています。exporter は
+`vinbero:export`、operator の RPC は `vinbero:operator` です。片方が routing
+table に従って出す経路で、もう片方は operator が明示的に頼んだ経路なので、
+同じ名前にすると後から出した方が黙って上書きし、上書きされた側は広告中の
+つもりのまま残ります。plugin の producer 名は owner tag なので、`vinbero:`
+前置と衝突しません。
+
+producer 名を持つ view は、名前を載せられる surface だけを提供します。
+session を embed すると EVPN と MUP と SR Policy の interface も満たして
+しまい、それらの method は producer を運ばないので無名で書きます。compiler
+は黙って通すので、embed しない形にしています。
 
 session 側で producer を記録し、withdraw は自分が出した経路にしか効かない
 ようにしています。これが無いと、後から届いた withdraw が別の producer の
@@ -291,6 +495,45 @@ instance を作り直して収束するので転送は保たれますが、隔�
 map が大きい環境で plugin を多数動かす場合は、call budget を map の規模に
 見合う値に上げてください。
 
+binding の `MaxPrefixes` は、plugin の広告と auto-advertise の広告を別々に
+数えます。exporter の経路数は `pkg/bgp/export` の側にあってここからは見えない
+ためで、両方が動く VRF はそれぞれの上限まで持てます。
+
+EVPN と MUP と SR Policy の advertise は producer 名を持ちません。SR Policy と
+MUP は書き手が 1 つしか無いので分けるものがありませんが、EVPN は
+auto-advertise の exporter と operator の RPC の 2 つがあり、いまは同じ無名の
+producer です。さらに EVPN の withdraw は producer を見ずに path を消すので、
+名前を付けるだけでは足りず withdraw 側の作り直しが要ります。別の変更として
+残しています。
+
+plugin dispatch の End.DT4 は VRF scoped な decap ができません。built-in の aux
+lookup が plugin slot の SID で aux を NULL にする (data plane 境界の節) ので、
+built-in End.DT4 は aux の VRF ifindex を受け取れず、core の ingress ifindex の
+routing table を使います。ingress table に一致する経路があれば転送され、無ければ
+落ちるので、customer interface を実際に VRF へ enslave した構成では VRF table を
+迂回します。安全に許可済み VRF を End.DT4 へ渡すには、plugin が制御する aux を
+再び信頼する形ではなく、host が書き全 program から read-only な grant map
+(SID・plugin slot・action・lease generation を key にする) を別に用意する必要が
+あり、これは別の feature として残しています。それまでの間、grant を持たない
+plugin-origin の End.DT4 を暗黙で ingress table に fallback させるのは、意図しない
+routing domain へ転送しうる曖昧な挙動なので、明示的に drop する方向で検討します。
+`cplane-plugin-2site` interop はこの handoff を main table の connected route 経由で
+検証しており、VRF scoped forwarding そのものは覆っていません。
+
+conformance harness は scope のうち daemon 無しで判定できる部分だけを見ます。
+prefix が locator に含まれるかと、VRF に binding があるかは daemon の状態に
+依存するので harness では判定しません。harness には scope を operator と同じ
+文字列の形で渡し、`ParseScope` を通します。daemon が拒否する scope (4-in-6 の
+prefix や範囲外の slot) は harness でも拒否され、harness が daemon より緩くなる
+のを防ぎます。
+
+restore-time の prune は headend map しか読みません。`LiveSIDs` と `LiveRoutes` は
+in-memory の集合を読むので、再起動直後は空で、前の run が確保した local SID や
+広告経路は prune の視界に入らず orphan になります。local SID は plugin が次に
+local SID を宣言したときの sweep で片付きますが、scope を狭められた plugin は
+その宣言をしなくなるので、それまで残ります。map から owner ごとに読む形へ広げるのは
+繰越しです。
+
 ## 登録時の検証
 
 module は allowlist で検証します。
@@ -301,6 +544,11 @@ module は allowlist で検証します。
 - ABI version が一致すること。
 - `_start` の自動実行は無効化し、reactor initializer だけを host が明示的
   に呼びます。
+
+capability と scope の食い違いも登録時に弾きます。`headend` を granted しな
+がら headend prefix を並べていない登録は、plugin が動いて宣言し、その宣言が
+全部拒否されるという形で失敗します。壊れた plugin のように見えるので、
+operator の手元で断ります。
 
 ## lifecycle
 
@@ -372,16 +620,20 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 
 ```sh
 vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
-    --behavior 0xFE01 --family vpnv4 --capability headend
+    --behavior 0xFE01 --family vpnv4 \
+    --capability headend --capability advertise --capability local_sid \
+    --locator main --vrf vpn-a \
+    --headend-prefix 10.7.0.0/16 --endpoint-slot 33
 vbctl plugin cplane list
 vbctl plugin cplane stats
 vbctl plugin cplane unregister --name custom-behavior
 ```
 
-capability は省略できますが、省略した plugin は何も宣言できません。observe と
-log しかしない plugin はそれで正しく、宣言する plugin には必要なものを与えます。
-`stats` は動いている plugin と、restore に失敗して claim だけ残っている plugin の
-両方を出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
+capability と scope はどちらも省略できますが、片方でも欠けた plugin は何も
+宣言できません。observe と log しかしない plugin はそれで正しく、宣言する
+plugin には両方を与えます。`stats` は動いている plugin と、restore に失敗して
+claim だけ残っている plugin の両方を出し、scope は本体の表とは別の block に
+出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
 
 behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint を hex で
 振っているので、0x0013 を 10 進の 13 と読むと別の behavior を claim して
@@ -459,18 +711,20 @@ Copilot が行数上限でレビューできないためです。以後の追加
 | `cplane-plugin-1-foundation` | BGP demux と behavior claim の土台 |
 | `cplane-plugin-2-runtime` | WASM runtime と desired-set apply |
 | `cplane-plugin-phase-a` | advertise / local SID / capability / quota / interop |
+| `cplane-plugin-b1` | scope / vinbero 自身の producer 分離 / eBPF half を持つ interop |
 
 次に足す候補は次のとおりです。
 
 - EVPN と MUP の desired set (上記の前提を揃えてから)。
 - Rust の SDK shim。
-- interop lab の拡張。lab は現状 far end が built-in の End.DT4 で終端するので、
-  SID 確保と plugin 自身の slot への dispatch は覆っていません。eBPF half を
-  持つ lab にすると一周を実機で確認できます。
-- vinbero 自身の広告元の分離。auto-advertise の exporter と operator の RPC は
-  bare session を共有しているので、producer としては 1 つです。互いの経路を
-  取り合える点は以前からの挙動で、分けると衝突時の振る舞いが変わるため、
-  この機構とは別の変更として扱います。
+- EVPN advertise の producer 分離。exporter と operator の RPC の 2 つの書き手が
+  あるのに無名の producer を共有しています。EVPN の withdraw は producer を
+  見ずに path を消すので、名前を付けるだけでは足りません。
+- restore-time prune の local SID / 広告への拡張。いまは map から読める headend
+  しか片付けられません。
+- binding 再導出を RPC の critical section の外へ出し、retry と counter を足す。
+  いま commitBinding は共有 mutex を握ったまま全 plugin の経路を再広告し、失敗は
+  log するだけです。
 
 ## 参照
 

@@ -258,6 +258,52 @@ func releaseUnwritten(leases *Leases, af AddressFamily, keys []string, current m
 // family. Entries with no recorded owner predate owner tracking and are
 // left alone: they belong to nobody, and claiming them here would let a
 // plugin prune state it never wrote.
+// OwnedHeadendEntries returns what one owner holds in a family, in the
+// form a declaration has.
+//
+// It is what lets the host re-state an owner's own entries as a desired
+// set: narrowing a plugin's scope means applying the subset that is still
+// inside it, and the reconcile prunes the rest.
+func OwnedHeadendEntries(ops HeadendMapOps, owner bpf.OwnerTag, af AddressFamily) ([]HeadendDesired, error) {
+	if owner == "" {
+		return nil, bpf.ErrEmptyOwner
+	}
+	if ops == nil {
+		return nil, errors.New("owned headend entries: nil map ops")
+	}
+	var (
+		entries map[string]*bpf.HeadendEntry
+		err     error
+	)
+	if af == AFv6 {
+		entries, err = ops.ListHeadendV6()
+	} else {
+		entries, err = ops.ListHeadendV4()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", af, err)
+	}
+	owned, err := ownedPrefixes(ops, owner, af)
+	if err != nil {
+		return nil, err
+	}
+	prefixes := make([]string, 0, len(owned))
+	for prefix := range owned {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+	out := make([]HeadendDesired, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		entry, ok := entries[prefix]
+		if !ok || entry == nil {
+			continue
+		}
+		copied := *entry
+		out = append(out, HeadendDesired{TriggerPrefix: prefix, Entry: &copied})
+	}
+	return out, nil
+}
+
 func ownedPrefixes(ops HeadendMapOps, owner bpf.OwnerTag, af AddressFamily) (map[string]struct{}, error) {
 	var (
 		entries map[string]*bpf.HeadendEntry

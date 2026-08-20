@@ -81,6 +81,17 @@ jobs:
           test -d /sys/module/vrf
           echo "vrf module loaded"
 
+      - name: Install the BPF toolchain when the scenario compiles a plugin
+        # A scenario that ships build.sh builds an eBPF object against the
+        # SDK headers, which needs libbpf's bpf_helpers.h. The runner image
+        # does not carry it, and the other scenarios do not need it, so the
+        # apt cost is paid only where the hook exists.
+        run: |
+          if [ -f examples/interop-clab/scenarios/${{ matrix.scenario }}/build.sh ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends clang libelf-dev libbpf-dev
+          fi
+
       - name: Build images
         working-directory: examples/interop-clab
         run: make build SCENARIO=${{ matrix.scenario }}

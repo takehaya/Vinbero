@@ -6,6 +6,8 @@ import (
 	"net"
 	"testing"
 
+	"github.com/cilium/ebpf"
+
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
 
@@ -3994,4 +3996,72 @@ func TestXDPProgEndAN(t *testing.T) {
 	if !bytes.Equal(out[:len(pkt0)], pkt0) {
 		t.Fatalf("SL=0 packet was modified")
 	}
+}
+
+// TestXDPProgPluginAuxNotReadByBuiltin is the regression for the aux/union
+// escape: a plugin's sid_aux is plugin_raw bytes it chose, and a built-in
+// behavior reached by the plugin's own tail-call must not interpret those
+// bytes as its own union variant.
+//
+// The exploit shape: a plugin allocates a local SID (endpoint slot >= 32),
+// sets its aux to bytes that, read as End.DX2's nexthop variant, are an OIF
+// of the attacker's choosing, and its data-plane half tail-calls the built-in
+// DX2 slot. Before the fix DX2 would bpf_redirect to that OIF; the built-in
+// aux lookup now refuses a plugin-owned SID's aux (sid_entry.action is a
+// plugin slot), so DX2 sees no aux and drops instead of redirecting.
+//
+// End.DX2 is used because its outcome is observable: with the aux it
+// redirects (XDP_REDIRECT), without it it returns XDP_DROP ("OIF not
+// configured"). The companion assertion below is that DX2 at its own slot
+// still reads its aux, so the fix did not break the legitimate path.
+func TestXDPProgPluginAuxNotReadByBuiltin(t *testing.T) {
+	const pluginSlot = uint32(32) // an endpoint plugin slot (>= ENDPOINT_PLUGIN_BASE)
+	oif := uint32(1)
+
+	segments := []net.IP{net.ParseIP("fd00:1:100::10")}
+	buildPkt := func(t *testing.T) []byte {
+		t.Helper()
+		pkt, err := buildL2EncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::10"),
+			segments, 0, 100, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		return pkt
+	}
+
+	t.Run("plugin aux is not read by the built-in it tail-calls into", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		// Stand in for the plugin's data-plane half by loading the real DX2
+		// program into the plugin slot: the point under test is what DX2
+		// does with the aux, not what a hostile plugin body computes. The
+		// SID carries the plugin-slot action, which is what marks its aux
+		// as plugin-owned.
+		if err := h.objs.SidEndpointProgs.Update(pluginSlot, h.objs.TailcallEndpointEndDx2, ebpf.UpdateAny); err != nil {
+			t.Fatalf("load DX2 into plugin slot: %v", err)
+		}
+		t.Cleanup(func() { _ = h.objs.SidEndpointProgs.Delete(pluginSlot) })
+
+		h.createSidFunctionWithOIF("fd00:1:100::10/128", uint8(pluginSlot), oif)
+
+		ret, _ := h.run(buildPkt(t))
+		if ret == XDP_REDIRECT {
+			t.Fatalf("a built-in read a plugin-owned SID's aux and redirected to the plugin's chosen OIF; " +
+				"the aux discriminator did not hold (got XDP_REDIRECT)")
+		}
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP (no aux, so DX2 has no OIF), got %d", ret)
+		}
+	})
+
+	t.Run("a built-in still reads its own SID's aux", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		// The same aux under the real DX2 action redirects, proving the
+		// discriminator refuses only a plugin-owned aux, not every aux.
+		h.createSidFunctionWithOIF("fd00:1:100::10/128", actionEndDX2, oif)
+		ret, _ := h.run(buildPkt(t))
+		if ret != XDP_REDIRECT {
+			t.Fatalf("a legitimate End.DX2 no longer reads its aux; expected XDP_REDIRECT, got %d", ret)
+		}
+	})
 }

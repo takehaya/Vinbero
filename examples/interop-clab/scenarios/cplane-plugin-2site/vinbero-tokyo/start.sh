@@ -104,13 +104,21 @@ printf '\010\201\374\003' > /tmp/plugin-config.bin
 # Granted `headend` only: it declares forwarding state and nothing else.
 # It cannot originate a route or allocate a SID, and the host functions
 # for those are not linked into its module at all.
+#
+# The scope says where that capability may be exercised. The headend maps
+# are keyed on the destination prefix alone, so without it the plugin could
+# install a longer prefix over anything this node forwards -- including the
+# operator's own VPN traffic, which wins on longest match without ever
+# touching the entry it shadows. 10.2.0.0/16 covers the far end's customer
+# subnet and nothing else here.
 /usr/local/bin/vbctl plugin cplane register \
     --name custom-behavior \
     --wasm /plugin.wasm \
     --config /tmp/plugin-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 \
-    --capability headend || true
+    --capability headend \
+    --headend-prefix 10.2.0.0/16 || true
 
 ping6 -c 1 -W 2 2001:db8:1::2 >/dev/null 2>&1 || true
 ping -c 1 -W 2 10.1.0.10 >/dev/null 2>&1 || true

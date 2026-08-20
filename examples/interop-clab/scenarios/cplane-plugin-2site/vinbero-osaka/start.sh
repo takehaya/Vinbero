@@ -88,34 +88,68 @@ if ! ip link show vrf-cust >/dev/null 2>&1; then
     exit 1
 fi
 
-# The endpoint the advertised SID resolves to. Traffic the far end steers
-# into fd00:200:0:1:: lands here, is decapped, and leaves towards ce-osaka.
-/usr/local/bin/vbctl sid create \
-    --trigger-prefix fd00:200:0:1::/128 \
-    --action END_DT4 \
-    --vrf-name vrf-cust || true
+# The eBPF half of the custom behavior, in endpoint slot 32. The
+# control-plane plugin allocates a SID pointing at this slot, so traffic
+# the far end steers into that SID lands in this program, which counts it
+# and hands it to End.DT4 to be decapped towards ce-osaka.
+#
+# The operator provisions no SID here: the plugin asks for one and the
+# daemon picks the address. That is the half of the mechanism the lab did
+# not previously exercise.
+/usr/local/bin/vbctl plugin register \
+    --type endpoint --index 32 \
+    --prog /plugin.o --program plugin_custom_behavior || true
+
+# The VRF the plugin originates into. It names the VRF and nothing else:
+# the route distinguisher and the route targets come from this binding,
+# because the route targets are what decide which VRF a peer imports the
+# route into. A plugin able to spell them could put a route in a VPN it was
+# never given.
+#
+# The import RT has to be here too. Once any binding declares a family,
+# the built-in applier stops default-allowing received routes of it and
+# requires an RT some VRF imports; binding this VRF for export alone would
+# therefore drop the far end's 10.1.0.0/24 on the floor.
+/usr/local/bin/vbctl vrf-bgp bind \
+    --vrf vrf-cust \
+    --rd 65100:200 \
+    --export-rts 65000:200 \
+    --import-rts 65000:200 || true
 
 # --- the control-plane plugin ----------------------------------------------
 # Config blob, in the plugin's own protobuf message (see the example's
 # README for the field numbers):
 #   1 behavior       0xFE01
+#   2 locator        LOC2             (allocate a SID from this block)
 #   3 prefix         10.2.0.0/24
-#   4 RD             65100:200
-#   6 advertise SID  fd00:200:0:1::
+#   4 VRF            vrf-cust
+#   5 slot           32               (its own eBPF half, registered above)
 #   7 next hop       2001:db8:ff::2   (this node's loopback)
-printf '\010\201\374\003\032\013\061\060\056\062\056\060\056\060\057\062\064\042\011\066\065\061\060\060\072\062\060\060\062\016\146\144\060\060\072\062\060\060\072\060\072\061\072\072\072\016\062\060\060\061\072\144\142\070\072\146\146\072\072\062' \
+#
+# No field 6: the plugin allocates its SID rather than advertising one an
+# operator provisioned. That is what makes this the whole loop -- the
+# address in the SID TLV on the wire is one the daemon handed the plugin.
+printf '\010\201\374\003\022\004\114\117\103\062\032\013\061\060\056\062\056\060\056\060\057\062\064\042\010\166\162\146\055\143\165\163\164\050\040\072\016\062\060\060\061\072\144\142\070\072\146\146\072\072\062' \
     > /tmp/plugin-config.bin
 
-# Granted `advertise` only. It has no business writing forwarding state on
-# this node, and a capability it was not granted is not a call that fails
-# but a host function its module cannot reach.
+# Granted `advertise` and `local_sid`, and no more. The capability says
+# what it may do; the scope says where: it may originate only into
+# vrf-cust, may allocate only from LOC2, and may point a SID only at slot
+# 32, which is the one its own eBPF half occupies. Pointing at another
+# plugin's slot would have that plugin read this one's aux bytes under a
+# layout that does not describe them.
+#
+# It still cannot write forwarding state on this node: `headend` was not
+# granted, and a capability it was not granted is not a call that fails but
+# a host function its module cannot reach.
 /usr/local/bin/vbctl plugin cplane register \
     --name custom-behavior \
     --wasm /plugin.wasm \
     --config /tmp/plugin-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 \
-    --capability advertise || true
+    --capability advertise --capability local_sid \
+    --vrf vrf-cust --locator LOC2 --endpoint-slot 32 || true
 
 # Pre-resolve neighbours so the first packet is not queued behind NDP/ARP.
 ping6 -c 1 -W 2 2001:db8:2::2 >/dev/null 2>&1 || true

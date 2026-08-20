@@ -38,7 +38,27 @@ type Store struct {
 
 // storeManifestVersion is stamped into every manifest so a future format
 // change can be recognised rather than misread.
-const storeManifestVersion = 1
+//
+// Version 2 added the scope, which is an authorization field: a plugin
+// restored without one comes back permitting nothing, and the registration
+// path prunes the state it can no longer cover. A version-1 manifest
+// (written before scopes existed) has no scope to restore, so restoring it
+// under an empty scope would delete the forwarding state it wrote at boot.
+// load refuses a version it does not write, which turns that into a visible
+// restore failure that keeps the state pinned and the claims held rather
+// than a silent prune -- see Store.load and Manager.Restore.
+const storeManifestVersion = 2
+
+// manifestScope is the persisted form of a Scope: the five lists nested so
+// they travel as a unit.
+type manifestScope struct {
+	Locators        []string `json:"locators,omitempty"`
+	VRFs            []string `json:"vrfs,omitempty"`
+	HeadendPrefixes []string `json:"headend_prefixes,omitempty"`
+	HeadendV4Slots  []uint32 `json:"headend_v4_slots,omitempty"`
+	HeadendV6Slots  []uint32 `json:"headend_v6_slots,omitempty"`
+	EndpointSlots   []uint32 `json:"endpoint_slots,omitempty"`
+}
 
 // manifest is what is written beside a plugin's module.
 type manifest struct {
@@ -48,7 +68,15 @@ type manifest struct {
 	Families     []string `json:"families,omitempty"`
 	Behaviors    []uint16 `json:"behaviors,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
-	TickMillis   int64    `json:"tick_millis,omitempty"`
+	// Scope is persisted with the capabilities because it is half of the
+	// same statement: a plugin restored with its capabilities and without
+	// its scope would come back able to declare nothing, and one restored
+	// the other way round would come back able to write where it was
+	// never allowed. It nests so the five lists travel as a unit and a
+	// later field cannot claim a generic top-level name (locators, vrfs)
+	// that the scope also wants.
+	Scope      *manifestScope `json:"scope,omitempty"`
+	TickMillis int64          `json:"tick_millis,omitempty"`
 	// Limits are persisted too, so a plugin registered with a budget of
 	// its own comes back with it rather than silently on the defaults.
 	MaxModuleBytes int    `json:"max_module_bytes,omitempty"`
@@ -115,11 +143,19 @@ func (s *Store) Save(reg Registration) error {
 	}
 
 	m := manifest{
-		Version:        storeManifestVersion,
-		Name:           reg.Name,
-		Config:         reg.Config,
-		Behaviors:      reg.Behaviors,
-		Capabilities:   reg.Capabilities.Names(),
+		Version:      storeManifestVersion,
+		Name:         reg.Name,
+		Config:       reg.Config,
+		Behaviors:    reg.Behaviors,
+		Capabilities: reg.Capabilities.Names(),
+		Scope: &manifestScope{
+			Locators:        reg.Scope.Locators,
+			VRFs:            reg.Scope.VRFs,
+			HeadendPrefixes: reg.Scope.HeadendPrefixStrings(),
+			HeadendV4Slots:  reg.Scope.HeadendV4Slots,
+			HeadendV6Slots:  reg.Scope.HeadendV6Slots,
+			EndpointSlots:   reg.Scope.EndpointSlots,
+		},
 		TickMillis:     reg.TickInterval.Milliseconds(),
 		MaxModuleBytes: reg.Limits.MaxModuleBytes,
 		MaxMemoryPages: reg.Limits.MaxMemoryPages,
@@ -320,6 +356,67 @@ func (s *Store) List() ([]Registration, error) {
 	return out, errors.Join(errs...)
 }
 
+// UnloadableManifest is a stored plugin whose manifest this daemon cannot
+// turn into a registration -- most often one written in an older format.
+type UnloadableManifest struct {
+	Name      string
+	Behaviors []uint16
+	Reason    error
+	// Scope is the grant the manifest declared, when it is a current-version
+	// manifest that parsed but whose module would not load (a missing .wasm,
+	// say). Its slots and locators must stay reserved against another plugin
+	// while its state is pinned, the same as a plugin that failed its prune.
+	// Zero for a manifest too old to carry a scope.
+	Scope Scope
+}
+
+// Unloadable reports the manifests that fail to load, so a restore can make
+// them visible as unrestored rather than lose them to a startup log line.
+// It reads the behaviors even when the rest of the manifest is not honoured
+// (they are top-level and present in every version), so the reserved claims
+// can be reported alongside.
+func (s *Store) Unloadable() []UnloadableManifest {
+	if s == nil {
+		return nil
+	}
+	names, err := s.names()
+	if err != nil {
+		return nil
+	}
+	var out []UnloadableManifest
+	for _, name := range names {
+		if _, err := s.load(name); err == nil {
+			continue
+		} else {
+			m, mErr := s.readManifest(name)
+			behaviors := []uint16(nil)
+			var scope Scope
+			if mErr == nil {
+				behaviors = m.Behaviors
+				// A current-version manifest that parsed still carries its
+				// scope even when the module will not load, so the grant can
+				// be reserved. A version too old to have a scope leaves it
+				// zero. A malformed scope is left zero rather than failing the
+				// whole listing -- the plugin is unrestored either way.
+				if m.Version == storeManifestVersion && m.Scope != nil {
+					if sc, sErr := ParseScope(ScopeSpec{
+						Locators:        m.Scope.Locators,
+						VRFs:            m.Scope.VRFs,
+						HeadendPrefixes: m.Scope.HeadendPrefixes,
+						HeadendV4Slots:  m.Scope.HeadendV4Slots,
+						HeadendV6Slots:  m.Scope.HeadendV6Slots,
+						EndpointSlots:   m.Scope.EndpointSlots,
+					}); sErr == nil {
+						scope = sc
+					}
+				}
+			}
+			out = append(out, UnloadableManifest{Name: name, Behaviors: behaviors, Reason: err, Scope: scope})
+		}
+	}
+	return out
+}
+
 // names lists the stored plugins, sorted so a boot sequence is
 // reproducible.
 func (s *Store) names() ([]string, error) {
@@ -369,11 +466,13 @@ func (s *Store) ListClaims() ([]StoredClaim, error) {
 			errs = append(errs, fmt.Errorf("cplane store: read manifest for %q: %w", name, err))
 			continue
 		}
-		if m.Version != storeManifestVersion {
-			errs = append(errs, fmt.Errorf("cplane store: manifest for %q is version %d, this daemon writes %d",
-				name, m.Version, storeManifestVersion))
-			continue
-		}
+		// The version is NOT checked here, on purpose. A manifest this
+		// daemon will refuse to restore (an older version) is precisely the
+		// one whose behaviors must stay reserved: a route carrying its
+		// codepoint would otherwise reach the built-in appliers and be
+		// installed as an ordinary service SID with the wrong meaning. The
+		// Behaviors field is top-level and present in every version, so it
+		// is readable even when the rest of the manifest is not honoured.
 		if len(m.Behaviors) == 0 {
 			continue
 		}
@@ -396,7 +495,16 @@ func (s *Store) load(name string) (Registration, error) {
 		return Registration{}, fmt.Errorf("cplane store: decode manifest for %q: %w", name, err)
 	}
 	if m.Version != storeManifestVersion {
-		return Registration{}, fmt.Errorf("cplane store: manifest for %q is version %d, this daemon writes %d",
+		// A version this daemon does not write is refused rather than
+		// coerced. For a version-1 manifest (pre-scope) that is deliberate:
+		// it has no scope, and restoring it under an empty one would prune
+		// the forwarding state it wrote. Refusing keeps that state pinned
+		// and lands the plugin in Unrestored with this reason, so an
+		// operator re-registers it with a scope rather than finding it
+		// silently emptied. This mechanism is unreleased, so no migration
+		// is provided -- a clean plugin store is the supported upgrade.
+		return Registration{}, fmt.Errorf("cplane store: manifest for %q is version %d and this daemon writes version %d; "+
+			"re-register the plugin (with a scope) to store it in the current format",
 			name, m.Version, storeManifestVersion)
 	}
 	modulePath, err := s.modulePathFor(name, m)
@@ -433,6 +541,22 @@ func (s *Store) load(name string) (Registration, error) {
 		return Registration{}, fmt.Errorf("cplane store: manifest for %q: %w", name, err)
 	}
 	reg.Capabilities = caps
+	sc := m.Scope
+	if sc == nil {
+		sc = &manifestScope{}
+	}
+	scope, err := ParseScope(ScopeSpec{
+		Locators:        sc.Locators,
+		VRFs:            sc.VRFs,
+		HeadendPrefixes: sc.HeadendPrefixes,
+		HeadendV4Slots:  sc.HeadendV4Slots,
+		HeadendV6Slots:  sc.HeadendV6Slots,
+		EndpointSlots:   sc.EndpointSlots,
+	})
+	if err != nil {
+		return Registration{}, fmt.Errorf("cplane store: manifest for %q: %w", name, err)
+	}
+	reg.Scope = scope
 	return reg, nil
 }
 

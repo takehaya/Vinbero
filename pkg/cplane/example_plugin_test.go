@@ -45,6 +45,8 @@ func exampleManager(t *testing.T) (*Manager, *fakeSource, *fakeHeadendOps) {
 		Claims:      newFakeClaims(),
 		Headend:     ops,
 		EncapSource: testEncapSource,
+		LocatorInfo: testLocators(),
+		VRFBindings: testBindings(),
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -54,7 +56,7 @@ func exampleManager(t *testing.T) (*Manager, *fakeSource, *fakeHeadendOps) {
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -163,7 +165,7 @@ func TestExamplePluginConvergesAfterRestart(t *testing.T) {
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
@@ -189,6 +191,8 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 		Claims:      newFakeClaims(),
 		Headend:     ops,
 		EncapSource: testEncapSource,
+		LocatorInfo: testLocators(),
+		VRFBindings: testBindings(),
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -203,7 +207,7 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 		Module:       examplePlugin(t),
 		Config:       config,
 		Behaviors:    []uint16{0xFE02},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -226,14 +230,14 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 
 // exampleConfig encodes the example plugin's own config message: the
 // behavior codepoint to claim, the locator to take a SID from, the prefix
-// to advertise behind it, its RD, and the data-plane slot the SID
-// dispatches to.
-func exampleConfig(behavior uint64, locator, prefix, rd string, slot uint64, nextHop string) []byte {
+// to advertise behind it, the VRF to advertise it into, and the data-plane
+// slot the SID dispatches to.
+func exampleConfig(behavior uint64, locator, prefix, vrf string, slot uint64, nextHop string) []byte {
 	var w exampleWriter
 	w.varintField(1, behavior)
 	w.stringField(2, locator)
 	w.stringField(3, prefix)
-	w.stringField(4, rd)
+	w.stringField(4, vrf)
 	w.varintField(5, slot)
 	w.stringField(7, nextHop)
 	return w.buf
@@ -290,6 +294,8 @@ func TestExamplePluginCompletesTheLoop(t *testing.T) {
 		Locators:     alloc,
 		SIDFunctions: sids,
 		EncapSource:  testEncapSource,
+		LocatorInfo:  testLocators(),
+		VRFBindings:  testBindings(),
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -299,9 +305,9 @@ func TestExamplePluginCompletesTheLoop(t *testing.T) {
 	if err := m.Register(context.Background(), Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
-		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -325,8 +331,10 @@ func TestExamplePluginCompletesTheLoop(t *testing.T) {
 		t.Fatalf("advertised %d routes, want the configured prefix", len(advertised))
 	}
 	got := advertised[0]
-	if got.Prefix != "10.7.0.0/24" || got.RD != "65000:7" {
-		t.Errorf("advertised %+v, want the configured prefix and RD", got)
+	// The RD is the binding's, not the plugin's: it named the VRF and the
+	// host filled the rest in.
+	if got.Prefix != "10.7.0.0/24" || got.RD != testRD {
+		t.Errorf("advertised %+v, want the configured prefix and the VRF's RD", got)
 	}
 	if got.EndpointBehavior != 0xFE01 {
 		t.Errorf("advertised behavior = %#x, want the plugin's own", got.EndpointBehavior)
@@ -371,6 +379,7 @@ func TestExamplePluginUnregisterRetractsEverything(t *testing.T) {
 		Source: src, Claims: newFakeClaims(), Headend: headend,
 		Advertiser: adv, Locators: alloc, SIDFunctions: sids,
 		EncapSource: testEncapSource,
+		LocatorInfo: testLocators(), VRFBindings: testBindings(),
 	})
 	if err != nil {
 		t.Fatalf("manager: %v", err)
@@ -380,9 +389,9 @@ func TestExamplePluginUnregisterRetractsEverything(t *testing.T) {
 	if err := m.Register(context.Background(), Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
-		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}

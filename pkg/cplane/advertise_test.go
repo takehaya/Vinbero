@@ -82,9 +82,13 @@ func (f *fakeAdvertiser) counts() (int, int) {
 const unlimited = -1
 
 func vpnRoute(prefix, sid string) AdvertisedRoute {
+	// The RD is filled in as the guard would have: these tests are about
+	// the tracker, which sees a route after the VRF it names has been
+	// resolved.
 	return AdvertisedRoute{
 		Family:       bgp.FamilyVPNv4,
-		RD:           "65000:1",
+		VRF:          testVRF,
+		RD:           testRD,
 		Prefix:       prefix,
 		SRv6SID:      sid,
 		NextHop:      "2001:db8::1",
@@ -231,13 +235,13 @@ func TestAdvertiseSetRejectsMalformed(t *testing.T) {
 		route AdvertisedRoute
 	}{
 		{name: "unknown family", route: AdvertisedRoute{Family: "nonsense", Prefix: "10.0.0.0/24"}},
-		{name: "no prefix", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, RD: "65000:1"}},
-		{name: "vpn without rd", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", NextHop: "2001:db8::1"}},
+		{name: "no prefix", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, VRF: testVRF}},
+		{name: "vpn without a vrf", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", NextHop: "2001:db8::1"}},
 		// The daemon has no defensible guess at a next hop: the encap
 		// source is a locator address, not necessarily the node's BGP
 		// transport address, and picking one silently would advertise a
 		// route peers cannot follow.
-		{name: "no next hop", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, RD: "65000:1", Prefix: "10.0.0.0/24"}},
+		{name: "no next hop", route: AdvertisedRoute{Family: bgp.FamilyVPNv4, VRF: testVRF, Prefix: "10.0.0.0/24"}},
 		{name: "family a plugin cannot originate", route: AdvertisedRoute{Family: bgp.FamilyEVPN, Prefix: "10.0.0.0/24"}},
 	}
 	for _, tt := range tests {
@@ -280,24 +284,43 @@ func TestAdvertiseSetCarriesTheBehaviorCodepoint(t *testing.T) {
 func TestDecodeAdvertisedRoute(t *testing.T) {
 	got, err := DecodeAdvertisedRoute(&v1.PluginAdvertisedRoute{
 		Family:           "vpnv4",
-		Rd:               "65000:1",
+		Vrf:              testVRF,
 		Prefix:           "10.0.0.0/24",
 		Srv6Sid:          "fd00:2::100",
 		EndpointBehavior: 0xFE01,
-		RouteTargets:     []string{"65000:1"},
 		NextHop:          "2001:db8::1",
 	})
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Family != bgp.FamilyVPNv4 || got.RD != "65000:1" || got.Prefix != "10.0.0.0/24" {
+	if got.Family != bgp.FamilyVPNv4 || got.VRF != testVRF || got.Prefix != "10.0.0.0/24" {
 		t.Fatalf("decoded %+v", got)
 	}
 	if got.EndpointBehavior != 0xFE01 {
 		t.Errorf("behavior = %#x, want 0xFE01", got.EndpointBehavior)
 	}
-	if len(got.RouteTargets) != 1 {
-		t.Errorf("route targets = %v", got.RouteTargets)
+	// The route distinguisher and the route targets are the host's to
+	// derive, so decoding leaves them empty rather than carrying anything
+	// the plugin said.
+	if got.RD != "" || len(got.RouteTargets) != 0 {
+		t.Errorf("decoded RD %q and route targets %v, want neither", got.RD, got.RouteTargets)
+	}
+}
+
+// A plugin built against the shape that let it name the VPN is told what
+// changed, rather than having those fields quietly ignored and its routes
+// originated somewhere else.
+func TestDecodeAdvertisedRouteRefusesADeclaredVPN(t *testing.T) {
+	if _, err := DecodeAdvertisedRoute(&v1.PluginAdvertisedRoute{
+		Family: "vpnv4", Rd: testRD, Vrf: testVRF, Prefix: "10.0.0.0/24", NextHop: "2001:db8::1",
+	}); err == nil {
+		t.Error("a declared route distinguisher was accepted")
+	}
+	if _, err := DecodeAdvertisedRoute(&v1.PluginAdvertisedRoute{
+		Family: "vpnv4", Vrf: testVRF, RouteTargets: []string{testRD},
+		Prefix: "10.0.0.0/24", NextHop: "2001:db8::1",
+	}); err == nil {
+		t.Error("declared route targets were accepted")
 	}
 }
 
@@ -311,7 +334,7 @@ func TestDecodeAdvertisedRouteRejectsBadInput(t *testing.T) {
 		t.Error("an unknown family was accepted")
 	}
 	if _, err := DecodeAdvertisedRoute(&v1.PluginAdvertisedRoute{
-		Family: "vpnv4", Rd: "65000:1", Prefix: "10.0.0.0/24",
+		Family: "vpnv4", Vrf: testVRF, Prefix: "10.0.0.0/24",
 		NextHop: "2001:db8::1", EndpointBehavior: 0x10000,
 	}); err == nil {
 		t.Error("a behavior codepoint wider than 16 bits was accepted")

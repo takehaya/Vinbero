@@ -19,7 +19,10 @@ internal:
     add_caller: false
 
 settings:
-  enable_stats: false
+  # On, so the lab can read the per-slot invocation counter and show that
+  # customer packets actually traversed the plugin's endpoint slot rather
+  # than reaching ce-osaka some other way.
+  enable_stats: true
   fdb_aging_seconds: 300
   entries:
     sid_function:

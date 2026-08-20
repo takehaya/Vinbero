@@ -32,12 +32,22 @@ TOPO         := $(SCENARIO_DIR)/clab.yml
 VINBERO_IMAGE ?= vinbero-interop:latest
 FRR_IMAGE     ?= frr-interop:10.2.1
 
-.PHONY: all build build-vinbero build-frr provision deploy destroy reload test \
+.PHONY: all build build-vinbero build-frr build-scenario provision deploy destroy reload test \
         logs status scenarios
 
 all: build deploy test destroy
 
-build: build-vinbero build-frr
+build: build-vinbero build-frr build-scenario
+
+# Per-scenario artifacts that are built rather than committed -- an eBPF
+# plugin object, say, which has to be compiled against the SDK headers of
+# the checkout it runs with. A scenario opts in by shipping a `build.sh` at
+# its root; most ship none and this is a no-op for them.
+build-scenario:
+	@if [ -f $(SCENARIO_DIR)/build.sh ]; then \
+		echo "building $(SCENARIO) artifacts"; \
+		bash $(SCENARIO_DIR)/build.sh; \
+	fi
 
 # Vinbero runtime image. Build context = repo root; the BPF objects are
 # committed + embedded, so no `make bpf-gen` is needed. The gobgp fork that

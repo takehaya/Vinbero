@@ -146,6 +146,7 @@ func (s *Server) Setup() {
 	// facet<->binding cross-checks are check-then-act across two managers.
 	vrfMu := &sync.Mutex{}
 	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc, s.evpnReplay, vrfMu)
+	vrfBgpServer.SetCplaneManager(s.cplaneMgr)
 	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))

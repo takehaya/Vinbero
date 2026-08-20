@@ -97,6 +97,11 @@ type Registration struct {
 	// leaves it able to observe and to log, which is a real way to run a
 	// plugin and the safe default for one that asked for nothing.
 	Capabilities wasm.Capabilities
+	// Scope bounds which keys those capabilities may be exercised on. A
+	// capability says what kind of thing may be declared and the scope
+	// says which ones, and both are needed to write anything: the zero
+	// value permits nothing.
+	Scope Scope
 	// Limits bound the instance; zero fields take defaults.
 	Limits wasm.Limits
 	// TickInterval asks for the plugin's periodic callback to be driven at
@@ -125,6 +130,9 @@ type Manager struct {
 	advertise   *AdvertiseSet
 	localSIDs   *LocalSIDSet
 	encapSource func() (netip.Addr, error)
+	// locatorInfo and vrfBindings are what a scope is stated in terms of.
+	locatorInfo LocatorSource
+	vrfBindings VRFBindingSource
 	// limits are what a plugin costs to run when its registration is
 	// silent about it.
 	limits wasm.Limits
@@ -217,6 +225,13 @@ type ManagerConfig struct {
 	AdvertiserFor func(producer string) Advertiser
 	// Locators allocates the SIDs a plugin points at its data-plane half.
 	Locators SIDAllocator
+	// LocatorInfo and VRFBindings are what a plugin's scope is stated in
+	// terms of. Both are resolved when a declaration is applied rather
+	// than captured here, because an operator registers locators and VRF
+	// bindings over RPC after the daemon is up. Nil leaves declarations
+	// that would need them refused rather than waved through.
+	LocatorInfo LocatorSource
+	VRFBindings VRFBindingSource
 	// SIDFunctions installs the dispatch entries for those SIDs.
 	SIDFunctions SIDFunctionOps
 	// Quotas bound how much any one plugin may hold. Zero fields take the
@@ -261,6 +276,8 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		store:       cfg.Store,
 		leases:      leases,
 		encapSource: cfg.EncapSource,
+		locatorInfo: cfg.LocatorInfo,
+		vrfBindings: cfg.VRFBindings,
 		logger:      logger,
 		started:     time.Now(),
 		plugins:     make(map[string]*plugin),
@@ -278,9 +295,140 @@ func newNamedAdvertiseSet(cfg ManagerConfig, leases *Leases) *AdvertiseSet {
 	return set
 }
 
+// ReconcileAdvertised re-derives what every plugin originates.
+//
+// A plugin names a VRF and the host fills in the route distinguisher, the
+// route targets and the cap from that VRF's binding. Those are stamped
+// when the declaration is applied, so an operator editing a binding
+// afterwards would otherwise leave the plugin's paths on the wire carrying
+// what the binding used to say -- until the plugin next happened to
+// redeclare, which an event-driven plugin may not do for a long time.
+//
+// The daemon calls it after a binding changes. Failures are logged per
+// plugin rather than returned: one plugin that cannot reconcile must not
+// stop the others from following the edit.
+func (m *Manager) ReconcileAdvertised(ctx context.Context) {
+	m.mu.Lock()
+	plugins := make([]*plugin, 0, len(m.plugins))
+	for _, p := range m.plugins {
+		plugins = append(plugins, p)
+	}
+	m.mu.Unlock()
+	sort.Slice(plugins, func(i, j int) bool { return plugins[i].name < plugins[j].name })
+
+	for _, p := range plugins {
+		withdrawn, err := p.ops.ReconcileAdvertised(ctx)
+		if err != nil {
+			m.logger.Error("could not re-derive what a plugin advertises after a VRF binding changed",
+				zap.String("plugin", p.name), zap.Error(err))
+			continue
+		}
+		if withdrawn > 0 {
+			m.logger.Info("withdrew plugin routes a changed VRF binding no longer covers",
+				zap.String("plugin", p.name), zap.Int("withdrawn", withdrawn))
+		}
+	}
+}
+
 // ErrPluginNotRegistered is a name the manager does not hold. It is the
 // caller's to fix, so callers can tell it from a daemon failure.
 var ErrPluginNotRegistered = errors.New("plugin is not registered")
+
+// ErrGrantHeld is a data-plane slot or a locator another plugin already
+// holds. Like a behavior claim, it is the caller's to resolve, so the RPC
+// boundary maps it to a failed-precondition code.
+var ErrGrantHeld = errors.New("scope grant is held by another plugin")
+
+// checkGrantsExclusive refuses reg's slots and locators if another
+// registered plugin already holds any of them. Slots must be exclusive
+// because one PROG_ARRAY slot is one program; locators must be exclusive
+// because a locator is the plugin's SID space, and advertising a SID is
+// bounded to it -- two plugins sharing a locator would let one advertise a
+// prefix pointing at a SID the other allocated there. Registering the same
+// name again is an upgrade and does not conflict with itself. Called with
+// registerMu held.
+func (m *Manager) checkGrantsExclusive(name string, scope Scope) error {
+	type heldGrants struct {
+		owner    string
+		v4, v6   map[uint32]struct{}
+		ep       map[uint32]struct{}
+		locators map[string]struct{}
+	}
+	grantsOf := func(owner string, s Scope) heldGrants {
+		return heldGrants{
+			owner:    owner,
+			v4:       slotSet(s.HeadendV4Slots),
+			v6:       slotSet(s.HeadendV6Slots),
+			ep:       slotSet(s.EndpointSlots),
+			locators: stringSet(s.Locators),
+		}
+	}
+	m.mu.Lock()
+	held := make([]heldGrants, 0, len(m.plugins))
+	for other, p := range m.plugins {
+		if other == name {
+			continue
+		}
+		held = append(held, grantsOf(other, p.reg.Scope))
+	}
+	m.mu.Unlock()
+
+	// A plugin whose prune or restore failed is out of m.plugins but still
+	// holds its state and claim in the maps until an operator forgets it, so
+	// its slots and locators stay reserved. Otherwise another plugin could
+	// take the same grant and collide with that residual state. Reusing the
+	// same name is the upgrade path and does not conflict with itself.
+	m.unrestoredMu.Lock()
+	for other, u := range m.unrestored {
+		if other == name {
+			continue
+		}
+		held = append(held, grantsOf(other+" (unrestored)", u.scope))
+	}
+	m.unrestoredMu.Unlock()
+
+	for _, h := range held {
+		for _, s := range scope.HeadendV4Slots {
+			if _, ok := h.v4[s]; ok {
+				return fmt.Errorf("cplane: %w: headend v4 slot %d is held by plugin %q", ErrGrantHeld, s, h.owner)
+			}
+		}
+		for _, s := range scope.HeadendV6Slots {
+			if _, ok := h.v6[s]; ok {
+				return fmt.Errorf("cplane: %w: headend v6 slot %d is held by plugin %q", ErrGrantHeld, s, h.owner)
+			}
+		}
+		for _, s := range scope.EndpointSlots {
+			if _, ok := h.ep[s]; ok {
+				return fmt.Errorf("cplane: %w: endpoint slot %d is held by plugin %q", ErrGrantHeld, s, h.owner)
+			}
+		}
+		for _, loc := range scope.Locators {
+			if _, ok := h.locators[loc]; ok {
+				return fmt.Errorf("cplane: %w: locator %q is held by plugin %q", ErrGrantHeld, loc, h.owner)
+			}
+		}
+	}
+	return nil
+}
+
+// stringSet indexes a string list for membership tests.
+func stringSet(items []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(items))
+	for _, s := range items {
+		out[s] = struct{}{}
+	}
+	return out
+}
+
+// slotSet indexes a slot list for membership tests.
+func slotSet(slots []uint32) map[uint32]struct{} {
+	out := make(map[uint32]struct{}, len(slots))
+	for _, s := range slots {
+		out[s] = struct{}{}
+	}
+	return out
+}
 
 // Register starts a plugin.
 //
@@ -294,8 +442,28 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
 		return err
 	}
+	// A capability with nothing in the scope to exercise it on is an inert
+	// registration: it runs, declares, and has every declaration refused,
+	// which reads as a broken plugin. Refused here rather than at the RPC
+	// so the restore path is held to it too -- a stored registration gone
+	// incoherent is refused instead of restored into that state.
+	if err := ScopeCoversCapabilities(reg.Capabilities, reg.Scope); err != nil {
+		return err
+	}
 	m.registerMu.Lock()
 	defer m.registerMu.Unlock()
+
+	// Slots and locators are exclusive across plugins. A slot holds one
+	// program, so two plugins granted one slot would have one's SID dispatch
+	// into the other's program and read its aux under the wrong layout. A
+	// locator is a plugin's SID space, and advertising a SID is bounded to
+	// it, so two plugins sharing a locator would let one advertise a prefix
+	// pointing at the other's SID. Refused here, the same way a behavior
+	// claim another plugin holds is, so a region granted twice is caught
+	// before anything is installed.
+	if err := m.checkGrantsExclusive(reg.Name, reg.Scope); err != nil {
+		return err
+	}
 
 	// Claims are set before anything is instantiated, so a behavior another
 	// plugin holds stops the registration early. The previous set is kept
@@ -369,6 +537,23 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		m.teardown(ctx, old)
 	}
 
+	// The state under this owner is inherited whether it came from the
+	// instance just torn down or from before a daemon restart, and a
+	// registration whose scope does not cover all of it must not keep the
+	// rest. The plugin cannot do this itself: its own declaration of that
+	// state is now refused, and refused whole, so it would simply stop
+	// reconciling with the old entries still installed.
+	//
+	// Not gated on having replaced something: a restore goes through here
+	// with nothing in the registry and its predecessor's writes still
+	// pinned in the maps, which is the same situation.
+	if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
+		return m.failPrune(ctx, reg, p, removed, err)
+	} else if removed > 0 {
+		m.logger.Info("removed the state a plugin held outside its new scope",
+			zap.String("plugin", reg.Name), zap.Int("removed", removed))
+	}
+
 	// The claim reaches back over routes that arrived before it, now that
 	// nothing else can fail. Retracting them from the built-in appliers is
 	// not undoable, so it waits until the plugin that is meant to take
@@ -417,12 +602,69 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 			"so it will not survive a restart: %w", reg.Name, err)
 	}
 
+	// A successful registration is, by definition, not unrestored. Clearing
+	// any stale record here is what keeps Forget from later deleting this now
+	// running plugin from the registry without tearing it down: Forget acts
+	// only on names still recorded unrestored.
+	m.clearUnrestored(reg.Name)
+
 	m.logger.Info("control-plane plugin registered",
 		zap.String("plugin", reg.Name),
 		zap.Bool("replaced", existed),
 		zap.Int("behaviors", len(reg.Behaviors)),
 		zap.Strings("capabilities", reg.Capabilities.Names()))
 	return nil
+}
+
+// failPrune handles a registration whose out-of-scope prune could not be
+// applied: some state the new scope forbids is still installed and the
+// plugin cannot clear it itself, because its own declaration of that state
+// is now refused whole.
+//
+// Reporting success here would claim an authorization boundary is in force
+// when it is not, so it returns an error. But it first makes the store, the
+// claims and the registry agree on one outcome rather than three, which the
+// earlier version did not:
+//
+//   - The new registration is persisted. It is what the operator asked for,
+//     and a restore replays it and re-runs the prune, so a
+//     persisted-but-not-pruned scope self-repairs on the next boot instead
+//     of reverting to the old wider one.
+//   - The behavior claims stay as the new set. The plugin is dead but its
+//     leftover state is still in the maps, so routes carrying its codepoint
+//     must keep being withheld from the built-in appliers rather than
+//     installed over that state with the wrong meaning.
+//   - The plugin is removed from the running registry and recorded as
+//     unrestored with this reason, so it is reported once, not as both
+//     running and unrestored, and Forget is the operator's way to give up
+//     on it.
+func (m *Manager) failPrune(ctx context.Context, reg Registration, p *plugin, removed int, cause error) error {
+	m.teardown(ctx, p)
+	m.mu.Lock()
+	// Only drop the entry this call installed; a concurrent re-register
+	// that already replaced it must win.
+	if cur, ok := m.plugins[reg.Name]; ok && cur == p {
+		delete(m.plugins, reg.Name)
+	}
+	m.mu.Unlock()
+
+	// Persist the narrowing so a restart retries the prune rather than
+	// bringing back the wider scope. A store failure here is logged, not
+	// returned over the prune error: the prune failure is the one the
+	// operator has to act on.
+	if err := m.store.Save(reg); err != nil {
+		m.logger.Error("could not persist the narrowed scope of a plugin whose prune failed; "+
+			"a restart may bring back the wider scope",
+			zap.String("plugin", reg.Name), zap.Error(err))
+	}
+
+	m.recordUnrestored(reg, fmt.Errorf("scope narrowing could not be applied: %w", cause))
+	m.logger.Error("could not remove the state a plugin held outside its new scope; "+
+		"the plugin is stopped and that state is still installed",
+		zap.String("plugin", reg.Name), zap.Int("removed", removed), zap.Error(cause))
+	return fmt.Errorf("cplane: plugin %q holds state outside its new scope that could not be removed, "+
+		"so the plugin was stopped rather than run under a scope that is not in force: %w",
+		reg.Name, cause)
 }
 
 // ReserveClaims takes the behavior claims of every stored plugin, before
@@ -518,6 +760,18 @@ func (m *Manager) Restore(ctx context.Context) error {
 		m.logger.Info("restored a control-plane plugin from the store",
 			zap.String("plugin", reg.Name))
 	}
+
+	// A manifest that would not even load -- an older format, most often --
+	// is recorded as unrestored too, so it is visible in stats rather than
+	// only in a startup log line, and its state stays pinned. Its claims
+	// were already reserved by ListClaims, which reads behaviors regardless
+	// of version, so routes carrying its codepoint are still withheld from
+	// the built-in appliers.
+	for _, u := range m.store.Unloadable() {
+		m.logger.Warn("a stored plugin could not be restored; its state is left in place",
+			zap.String("plugin", u.Name), zap.Error(u.Reason))
+		m.recordUnrestored(Registration{Name: u.Name, Behaviors: u.Behaviors, Scope: u.Scope}, u.Reason)
+	}
 	return listErr
 }
 
@@ -531,6 +785,11 @@ type UnrestoredPlugin struct {
 	Reason string
 	// Since is when the attempt failed.
 	Since time.Time
+	// scope is the grant the failed registration held. Its slots and
+	// locators stay reserved against another plugin taking them while this
+	// one's state is still pinned in the maps. Empty for a manifest that
+	// would not even load, since its scope was never parsed.
+	scope Scope
 }
 
 func (m *Manager) recordUnrestored(reg Registration, cause error) {
@@ -541,6 +800,7 @@ func (m *Manager) recordUnrestored(reg Registration, cause error) {
 		Behaviors: append([]uint16(nil), reg.Behaviors...),
 		Reason:    cause.Error(),
 		Since:     time.Now(),
+		scope:     reg.Scope,
 	}
 }
 
@@ -581,6 +841,18 @@ func (m *Manager) Forget(name string) error {
 		return fmt.Errorf("cplane: %w: %q is not one that failed to restore",
 			ErrPluginNotRegistered, name)
 	}
+	// A plugin can be both unrestored and running: a re-registration that
+	// published the new instance but then failed to persist it returns before
+	// clearing the old unrestored record. Forgetting it here would release its
+	// claim and store entry and drop it from the registry without tearing the
+	// worker down, leaking a running instance. Refuse and send the operator to
+	// Unregister, which stops it cleanly.
+	m.mu.Lock()
+	_, running := m.plugins[name]
+	m.mu.Unlock()
+	if running {
+		return fmt.Errorf("cplane: plugin %q is running; Unregister it rather than Forget", name)
+	}
 	if m.claims != nil {
 		m.claims.Release(name)
 	}
@@ -588,6 +860,14 @@ func (m *Manager) Forget(name string) error {
 		return fmt.Errorf("cplane: remove plugin %q from the store: %w", name, err)
 	}
 	m.clearUnrestored(name)
+	// Belt and suspenders: a plugin recorded as unrestored should not also be
+	// in the running registry (the guard above refuses that), and failPrune
+	// removes the dead entry before recording. This delete covers any residual
+	// path that left a dead entry behind, so Forget cannot leave one reporting
+	// the plugin through List.
+	m.mu.Lock()
+	delete(m.plugins, name)
+	m.mu.Unlock()
 	m.logger.Info("forgot a control-plane plugin that could not be restored",
 		zap.String("plugin", name))
 	return nil
@@ -617,6 +897,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		Logger:       m.logger.Named("plugin." + reg.Name),
 		ApplyMutex:   &m.applyMu,
 		Capabilities: reg.Capabilities,
+		Guard:        NewGuard(reg.Scope, m.locatorInfo, m.vrfBindings),
 		Quotas:       m.quotas,
 		Advertise:    m.advertise,
 		LocalSIDs:    m.localSIDs,

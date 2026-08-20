@@ -329,8 +329,25 @@ func encodeUnicastPath(r bgp.UnicastRoute) (*apiutil.Path, error) {
 	}, nil
 }
 
-// ProducerSession is a Session that names itself on everything it
-// originates.
+// The names vinbero's own originators advertise under.
+//
+// They are distinct so the session can tell them apart, and prefixed so
+// they cannot collide with a plugin's owner tag, which is what a plugin's
+// producer name is.
+const (
+	// ProducerExport is the VRF auto-advertise path (pkg/bgp/export): the
+	// routes vinbero originates because a VRF's own prefixes changed.
+	ProducerExport = "vinbero:export"
+	// ProducerOperator is the operator's own advertisements, made over
+	// RPC. They are a separate producer from the exporter because they are
+	// a separate intent: one follows the routing table, the other is what
+	// an operator asked for, and one silently replacing the other is how a
+	// route ends up advertised by nobody.
+	ProducerOperator = "vinbero:operator"
+)
+
+// ProducerSession is a view of a Session that names itself on everything
+// it originates.
 //
 // It exists because gobgp keeps one local path per NLRI: everything
 // originating through one session shares that path, so a route two
@@ -338,24 +355,31 @@ func encodeUnicastPath(r bgp.UnicastRoute) (*apiutil.Path, error) {
 // arrive would otherwise delete what the first still wants. Naming the
 // producer is what lets the session tell those apart.
 //
-// Callers holding the bare session are one producer between them. Giving
-// each of vinbero's own originators a name of its own would separate them
-// too, and is worth doing; it changes what those paths do on a conflict,
-// so it is its own change rather than a side effect of this one.
+// It holds the session rather than embedding it, so it offers only the
+// surfaces it actually names. Embedding would have it satisfy the EVPN,
+// MUP and SR Policy interfaces through methods that write as the unnamed
+// producer, and the compiler would accept it silently -- which is the
+// failure this type exists to prevent, in the one form it would not be
+// visible.
 type ProducerSession struct {
-	*Session
+	session  *Session
 	producer string
 }
+
+var _ bgp.RouteAdvertiser = (*ProducerSession)(nil)
 
 // AsProducer returns a view of this session that names producer on
 // everything it advertises, and withdraws only what it advertised.
 func (s *Session) AsProducer(producer string) *ProducerSession {
-	return &ProducerSession{Session: s, producer: producer}
+	return &ProducerSession{session: s, producer: producer}
 }
+
+// Producer is the name this view advertises under.
+func (p *ProducerSession) Producer() string { return p.producer }
 
 // Advertise injects a VPN route on behalf of this producer.
 func (p *ProducerSession) Advertise(_ context.Context, r bgp.VPNRoute) error {
-	srv := p.bgpServer()
+	srv := p.session.bgpServer()
 	if srv == nil {
 		return bgp.ErrSessionNotStarted
 	}
@@ -363,13 +387,13 @@ func (p *ProducerSession) Advertise(_ context.Context, r bgp.VPNRoute) error {
 	if err != nil {
 		return err
 	}
-	return p.addAndTrackAs(srv, path, r.Key(), p.producer)
+	return p.session.addAndTrackAs(srv, path, r.Key(), p.producer)
 }
 
 // AdvertiseUnicast injects an IPv6 unicast route on behalf of this
 // producer.
 func (p *ProducerSession) AdvertiseUnicast(_ context.Context, r bgp.UnicastRoute) error {
-	srv := p.bgpServer()
+	srv := p.session.bgpServer()
 	if srv == nil {
 		return bgp.ErrSessionNotStarted
 	}
@@ -377,11 +401,28 @@ func (p *ProducerSession) AdvertiseUnicast(_ context.Context, r bgp.UnicastRoute
 	if err != nil {
 		return err
 	}
-	return p.addAndTrackAs(srv, path, bgp.RouteKey{Family: bgp.FamilyIPv6Unicast, Prefix: r.Prefix}, p.producer)
+	return p.session.addAndTrackAs(srv, path,
+		bgp.RouteKey{Family: bgp.FamilyIPv6Unicast, Prefix: r.Prefix}, p.producer)
 }
 
 // Withdraw removes a route this producer advertised, and leaves one
 // another producer advertised alone.
 func (p *ProducerSession) Withdraw(ctx context.Context, key bgp.RouteKey) error {
-	return p.withdrawAs(ctx, key, p.producer)
+	return p.session.withdrawAs(ctx, key, p.producer)
+}
+
+// ValidateVPNRoute, ValidateUnicastRoute and CanonicalRD ask the encoder
+// the same questions the session would. They carry no producer: whether a
+// route can be encoded does not depend on who is originating it, and a
+// caller reconciling a set needs the answer before it withdraws anything.
+func (p *ProducerSession) ValidateVPNRoute(r bgp.VPNRoute) error {
+	return p.session.ValidateVPNRoute(r)
+}
+
+func (p *ProducerSession) ValidateUnicastRoute(r bgp.UnicastRoute) error {
+	return p.session.ValidateUnicastRoute(r)
+}
+
+func (p *ProducerSession) CanonicalRD(rd string) (string, error) {
+	return p.session.CanonicalRD(rd)
 }

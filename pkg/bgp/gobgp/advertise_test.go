@@ -3,6 +3,7 @@ package gobgp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	gobgppkt "github.com/osrg/gobgp/v4/pkg/packet/bgp"
@@ -324,5 +325,76 @@ func TestAdvertise_ConcurrentProducersCannotBothClaimAKey(t *testing.T) {
 	s.advMu.Unlock()
 	if !live {
 		t.Error("the winner's route is not tracked")
+	}
+}
+
+// The exporter follows the routing table and the operator's RPC is what an
+// operator asked for. Sharing one producer name made them one producer, so
+// whichever spoke last silently replaced the other's route and could then
+// withdraw it out from under them.
+func TestVinberosOwnProducersDoNotOverwriteEachOther(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+
+	vr := bgp.VPNRoute{
+		Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100",
+		SRv6SID: "fd00:1:1:a::", NextHop: "2001:db8::1",
+	}
+	exporter := s.AsProducer(ProducerExport)
+	operator := s.AsProducer(ProducerOperator)
+	if err := exporter.Advertise(context.Background(), vr); err != nil {
+		t.Fatalf("exporter Advertise: %v", err)
+	}
+	key := bgp.RouteKey{Family: bgp.FamilyVPNv4, Prefix: "10.0.0.0/24", RD: "65000:100"}
+	s.advMu.Lock()
+	first := s.advertised[key]
+	s.advMu.Unlock()
+
+	err := operator.Advertise(context.Background(), vr)
+	if err == nil {
+		t.Fatal("the operator's RPC took over a route the exporter advertises")
+	}
+	if !strings.Contains(err.Error(), ProducerExport) {
+		t.Errorf("error does not name the producer holding the route: %v", err)
+	}
+	s.advMu.Lock()
+	after, still := s.advertised[key]
+	holder := s.producers[key]
+	s.advMu.Unlock()
+	if !still || after != first {
+		t.Error("the refused advertise disturbed the route it could not take")
+	}
+	if holder != ProducerExport {
+		t.Errorf("the route is recorded against %q, want %q", holder, ProducerExport)
+	}
+
+	// And the operator's withdraw leaves it alone rather than deleting a
+	// route the exporter still wants.
+	if err := operator.Withdraw(context.Background(), key); err != nil {
+		t.Fatalf("operator Withdraw: %v", err)
+	}
+	s.advMu.Lock()
+	_, kept := s.advertised[key]
+	s.advMu.Unlock()
+	if !kept {
+		t.Error("the operator's withdraw deleted the exporter's route")
+	}
+}
+
+// A producer view offers only the surfaces it actually names. Embedding
+// the session would have it satisfy these through methods that write as
+// the unnamed producer, and the compiler would accept it silently -- which
+// is the failure the type exists to prevent, in the one form that would
+// not be visible.
+func TestProducerSessionDoesNotOfferWhatItCannotName(t *testing.T) {
+	var view any = (&Session{}).AsProducer("someone")
+	if _, ok := view.(bgp.EVPNController); ok {
+		t.Error("a producer view satisfies EVPNController, whose methods do not carry the producer")
+	}
+	if _, ok := view.(bgp.MUPController); ok {
+		t.Error("a producer view satisfies MUPController, whose methods do not carry the producer")
+	}
+	if _, ok := view.(bgp.SRPolicyController); ok {
+		t.Error("a producer view satisfies SRPolicyController, whose methods do not carry the producer")
 	}
 }

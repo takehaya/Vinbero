@@ -56,7 +56,11 @@ const maxRouteTargets = 128
 
 // AdvertisedRoute is one route an owner wants originated.
 type AdvertisedRoute struct {
-	Family  bgp.Family
+	Family bgp.Family
+	// VRF is the VRF a VPN route is originated into. It is what the plugin
+	// declares; RD and RouteTargets are derived from that VRF's binding
+	// and are not the plugin's to spell.
+	VRF     string
 	RD      string
 	Prefix  string
 	SRv6SID string
@@ -299,6 +303,21 @@ func (a *AdvertiseSet) WithdrawOwner(ctx context.Context, owner bpf.OwnerTag) er
 	return firstErr
 }
 
+// LiveRoutes is what an owner currently originates, in the form a
+// declaration has. It is what lets the host re-state an owner's own set
+// when its scope narrows.
+func (a *AdvertiseSet) LiveRoutes(owner bpf.OwnerTag) []AdvertisedRoute {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	current := a.live[owner]
+	out := make([]AdvertisedRoute, 0, len(current))
+	for _, r := range current {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].key() < out[j].key() })
+	return out
+}
+
 // LiveCount is how many routes an owner currently originates.
 func (a *AdvertiseSet) LiveCount(owner bpf.OwnerTag) int {
 	a.mu.Lock()
@@ -440,8 +459,14 @@ func normalizeAdvertised(r AdvertisedRoute) (AdvertisedRoute, error) {
 	}
 	switch r.Family {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
-		if r.RD == "" {
-			return r, fmt.Errorf("advertise: %s %s has no route distinguisher", r.Family, r.Prefix)
+		// The VRF is what the plugin declares; the route distinguisher is
+		// derived from that VRF's binding and is empty until it has been.
+		// This runs on both sides of that step -- once when the
+		// declaration is decoded, once when the set is applied -- so the
+		// VRF is what is required here.
+		if r.VRF == "" {
+			return r, fmt.Errorf("advertise: %s %s names no VRF, and a VPN route takes its route distinguisher from one",
+				r.Family, r.Prefix)
 		}
 		// Route targets go out as one extended communities attribute, and
 		// a BGP attribute is not unbounded: enough of them and the update
@@ -479,6 +504,10 @@ func normalizeAdvertised(r AdvertisedRoute) (AdvertisedRoute, error) {
 		if r.RD != "" {
 			return r, fmt.Errorf("advertise: %s %s is not a VPN route, so it cannot carry route distinguisher %q",
 				r.Family, r.Prefix, r.RD)
+		}
+		if r.VRF != "" {
+			return r, fmt.Errorf("advertise: %s %s is not a VPN route, so it belongs to no VRF and cannot name %q",
+				r.Family, r.Prefix, r.VRF)
 		}
 		if len(r.RouteTargets) > 0 {
 			return r, fmt.Errorf("advertise: %s %s is not a VPN route, so it cannot carry route targets",
@@ -527,13 +556,26 @@ func DecodeAdvertisedRoute(in *v1.PluginAdvertisedRoute) (AdvertisedRoute, error
 		return AdvertisedRoute{}, fmt.Errorf("advertise: endpoint behavior %d does not fit 16 bits",
 			in.GetEndpointBehavior())
 	}
+	// The route distinguisher and the route targets are the host's to
+	// derive from the VRF binding, not the plugin's to spell. Refusing a
+	// declaration that sets them tells a plugin built against the older
+	// shape what changed; ignoring them would send a route the plugin
+	// believes it targeted somewhere else entirely.
+	if in.GetRd() != "" {
+		return AdvertisedRoute{}, fmt.Errorf(
+			"advertise: route distinguisher %q was declared, but it is derived from the VRF; name the VRF instead",
+			in.GetRd())
+	}
+	if len(in.GetRouteTargets()) > 0 {
+		return AdvertisedRoute{}, errors.New(
+			"advertise: route targets were declared, but they are derived from the VRF; name the VRF instead")
+	}
 	out := AdvertisedRoute{
 		Family:           fam,
-		RD:               in.GetRd(),
+		VRF:              in.GetVrf(),
 		Prefix:           in.GetPrefix(),
 		SRv6SID:          in.GetSrv6Sid(),
 		EndpointBehavior: uint16(in.GetEndpointBehavior()),
-		RouteTargets:     append([]string(nil), in.GetRouteTargets()...),
 		NextHop:          in.GetNextHop(),
 	}
 	return normalizeAdvertised(out)

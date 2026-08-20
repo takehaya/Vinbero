@@ -34,6 +34,12 @@ type CplaneManager interface {
 	// yet the daemon still holds their state and their claims.
 	Unrestored() []cplane.UnrestoredPlugin
 	Forget(name string) error
+	// ReconcileAdvertised re-derives what every plugin originates. A
+	// plugin names a VRF and the host fills in the route distinguisher,
+	// the route targets and the cap from that VRF's binding, so an
+	// operator editing a binding has to reach the plugins that took
+	// values from it.
+	ReconcileAdvertised(ctx context.Context)
 }
 
 // SetCplaneManager installs the manager. Call before Setup, like the other
@@ -77,6 +83,22 @@ func (s *PluginServer) CplanePluginRegister(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
+	// The wire form is parsed into the canonical Scope here, at the
+	// transport boundary; whether the scope covers the capabilities is a
+	// domain rule checked inside Manager.Register, so it holds on the
+	// restore path too and not only for an operator's RPC.
+	scope, err := cplane.ParseScope(cplane.ScopeSpec{
+		Locators:        msg.GetScope().GetLocators(),
+		VRFs:            msg.GetScope().GetVrfs(),
+		HeadendPrefixes: msg.GetScope().GetHeadendPrefixes(),
+		HeadendV4Slots:  msg.GetScope().GetHeadendV4Slots(),
+		HeadendV6Slots:  msg.GetScope().GetHeadendV6Slots(),
+		EndpointSlots:   msg.GetScope().GetEndpointSlots(),
+	})
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
 	reg := cplane.Registration{
 		Name:         msg.GetName(),
 		Module:       msg.GetWasm(),
@@ -84,6 +106,7 @@ func (s *PluginServer) CplanePluginRegister(
 		Families:     families,
 		Behaviors:    behaviors,
 		Capabilities: caps,
+		Scope:        scope,
 		TickInterval: time.Duration(msg.GetTickIntervalMs()) * time.Millisecond,
 	}
 	if err := s.cplane.Register(ctx, reg); err != nil {
@@ -175,6 +198,14 @@ func (s *PluginServer) CplanePluginStats(
 			MaxLocalSids:        uint32(st.Quotas.MaxLocalSIDs),
 			Since:               timestamppb.New(st.Since),
 			PendingDeclarations: uint32(st.PendingDeclarations),
+			Scope: &v1.CplanePluginScope{
+				Locators:        st.Scope.Locators,
+				Vrfs:            st.Scope.VRFs,
+				HeadendPrefixes: st.Scope.HeadendPrefixStrings(),
+				HeadendV4Slots:  st.Scope.HeadendV4Slots,
+				HeadendV6Slots:  st.Scope.HeadendV6Slots,
+				EndpointSlots:   st.Scope.EndpointSlots,
+			},
 		})
 	}
 
@@ -258,12 +289,14 @@ func cplaneRPCError(err error) error {
 	switch {
 	case errors.Is(err, wasm.ErrAdmission),
 		errors.Is(err, demux.ErrUnclaimable),
+		errors.Is(err, cplane.ErrScopeDoesNotCoverCapabilities),
 		errors.Is(err, bpf.ErrBundleNameInvalid),
 		errors.Is(err, bpf.ErrBundleNameTooLong):
-		// The module, the codepoint or the name is wrong, and the caller
-		// is holding all three.
+		// The module, the codepoint, the name or the scope/capability
+		// combination is wrong, and the caller is holding all of them.
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	case errors.Is(err, cplane.ErrLeaseHeld),
+		errors.Is(err, cplane.ErrGrantHeld),
 		errors.Is(err, demux.ErrBehaviorHeld):
 		// Nothing is wrong with the request; something else holds what it
 		// asked for, and the caller decides what gives.

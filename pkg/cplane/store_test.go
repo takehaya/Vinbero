@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
@@ -29,7 +32,7 @@ func storedRegistration(t *testing.T) Registration {
 		Module:       declareModule(t),
 		Families:     []bgp.Family{bgp.FamilyVPNv4},
 		Behaviors:    []uint16{0xFE01},
-		Capabilities: testCaps(),
+		Capabilities: testCaps(), Scope: testScope(),
 		TickInterval: 250 * time.Millisecond,
 	}
 }
@@ -66,6 +69,24 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if r.TickInterval != 250*time.Millisecond {
 		t.Errorf("tick interval = %s, want 250ms", r.TickInterval)
+	}
+	// The scope is half of the grant. A plugin restored with its
+	// capabilities and without its scope comes back able to declare
+	// nothing; restored the other way round it comes back able to write
+	// where it was never allowed.
+	if strings.Join(r.Scope.Locators, ",") != strings.Join(want.Scope.Locators, ",") {
+		t.Errorf("locators = %v, want %v", r.Scope.Locators, want.Scope.Locators)
+	}
+	if strings.Join(r.Scope.VRFs, ",") != strings.Join(want.Scope.VRFs, ",") {
+		t.Errorf("VRFs = %v, want %v", r.Scope.VRFs, want.Scope.VRFs)
+	}
+	if strings.Join(r.Scope.HeadendPrefixStrings(), ",") !=
+		strings.Join(want.Scope.HeadendPrefixStrings(), ",") {
+		t.Errorf("headend prefixes = %v, want %v",
+			r.Scope.HeadendPrefixStrings(), want.Scope.HeadendPrefixStrings())
+	}
+	if len(r.Scope.EndpointSlots) != len(want.Scope.EndpointSlots) {
+		t.Errorf("endpoint slots = %v, want %v", r.Scope.EndpointSlots, want.Scope.EndpointSlots)
 	}
 }
 
@@ -138,7 +159,7 @@ func TestStoreRefusesAnUnknownManifestVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	bumped := bytes.Replace(body, []byte(`"version": 1`), []byte(`"version": 99`), 1)
+	bumped := bytes.Replace(body, []byte(`"version": 2`), []byte(`"version": 99`), 1)
 	if bytes.Equal(bumped, body) {
 		t.Fatalf("could not find the version field in %s", body)
 	}
@@ -488,5 +509,173 @@ func TestAModuleForADottedPluginNameRoundTrips(t *testing.T) {
 	}
 	if len(claims) != 1 || claims[0].Name != "acl.v2" {
 		t.Fatalf("ListClaims returned %v, want the dotted plugin", claims)
+	}
+}
+
+// A restore inherits the state its predecessor pinned in the maps, so a
+// stored scope that no longer covers all of it has to prune on the way
+// back, not only on an in-process re-register.
+func TestRestoreRemovesStateTheStoredScopeDoesNotCover(t *testing.T) {
+	src := newFakeSource()
+	store := newTestStore(t)
+	m, ops := newTestManagerWithStore(t, src, store)
+
+	// State a previous run left behind under this plugin's owner. One
+	// prefix the stored scope will cover, one it will not.
+	owner := bpf.OwnerPluginBundle("declare")
+	if _, err := ApplyHeadendSet(ops, m.leases, owner, AFv4, []HeadendDesired{
+		{TriggerPrefix: "10.7.0.0/24", Entry: &bpf.HeadendEntry{Mode: 1, NumSegments: 1}},
+		{TriggerPrefix: "10.9.0.0/24", Entry: &bpf.HeadendEntry{Mode: 1, NumSegments: 1}},
+	}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// A coherent stored registration -- headend only, scoped to a prefix
+	// that covers one of the two entries. checkScopeCoversCapabilities
+	// would refuse an empty scope with a capability, so the scope has to
+	// actually name what the capability needs.
+	caps, err := wasm.ParseCapabilities([]string{string(wasm.CapHeadend)})
+	if err != nil {
+		t.Fatalf("caps: %v", err)
+	}
+	scope, err := ParseScope(ScopeSpec{HeadendPrefixes: []string{"10.7.0.0/16"}})
+	if err != nil {
+		t.Fatalf("scope: %v", err)
+	}
+	reg := Registration{
+		Name:         "declare",
+		Module:       declareModule(t),
+		Capabilities: caps,
+		Scope:        scope,
+	}
+	if err := store.Save(reg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := m.Restore(context.Background()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	held, err := OwnedHeadendEntries(ops, owner, AFv4)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(held) != 1 || held[0].TriggerPrefix != "10.7.0.0/24" {
+		t.Fatalf("held %+v, want only the prefix the stored scope covers", held)
+	}
+}
+
+// A manifest written before scopes existed is a version this daemon does
+// not write, so restoring it is refused rather than run under an empty
+// scope that would prune the forwarding state it wrote. The state stays
+// pinned and the plugin lands in the unrestored set.
+func TestRestoreRefusesAPreScopeManifest(t *testing.T) {
+	src := newFakeSource()
+	store := newTestStore(t)
+	claims := newFakeClaims()
+	m, ops := newTestManagerWithStoreAndClaims(t, src, store, claims)
+
+	owner := bpf.OwnerPluginBundle("declare")
+	if _, err := ApplyHeadendSet(ops, m.leases, owner, AFv4, []HeadendDesired{{
+		TriggerPrefix: "10.9.0.0/24",
+		Entry:         &bpf.HeadendEntry{Mode: 1, NumSegments: 1},
+	}}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// Write a manifest at the previous version, with no scope block, the
+	// way the pre-scope build did.
+	writePreScopeManifest(t, store, "declare", declareModule(t))
+
+	// The daemon reserves stored behaviors before it builds anything, so a
+	// route carrying one is withheld from the built-in appliers even for a
+	// plugin that never starts. A refused manifest whose behaviors are still
+	// listed must keep that reservation, not release it.
+	if err := m.ReserveClaims(); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if !claims.claimed("declare") {
+		t.Fatalf("the stored behavior was not reserved before restore")
+	}
+
+	// Restore returns the aggregated load error, but does not treat it as
+	// fatal: the state stays pinned and the plugin is recorded unrestored.
+	if err := m.Restore(context.Background()); err == nil {
+		t.Fatal("restore did not report the unloadable manifest")
+	}
+	held, err := OwnedHeadendEntries(ops, owner, AFv4)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(held) != 1 {
+		t.Fatalf("held %+v, want the pinned entry left in place", held)
+	}
+	unrestored := m.Unrestored()
+	if len(unrestored) != 1 || unrestored[0].Name != "declare" {
+		t.Fatalf("unrestored = %+v, want the refused plugin", unrestored)
+	}
+	// The behaviors carry through so an operator can see which codepoints are
+	// held on behalf of a plugin that will not start.
+	if len(unrestored[0].Behaviors) != 1 || unrestored[0].Behaviors[0] != 0xFE01 {
+		t.Errorf("unrestored behaviors = %v, want the reserved codepoint", unrestored[0].Behaviors)
+	}
+	// The reservation survives the refused restore: releasing it would let a
+	// route carrying the codepoint reach the built-in appliers.
+	if !claims.claimed("declare") {
+		t.Error("the refused manifest released its behavior reservation")
+	}
+}
+
+// writePreScopeManifest writes a version-1 manifest (no scope block) and its
+// module, mimicking what the build before this change left on disk.
+func writePreScopeManifest(t *testing.T, store *Store, name string, module []byte) {
+	t.Helper()
+	moduleFile := name + "-preScope.wasm"
+	if err := os.WriteFile(filepath.Join(store.Dir(), moduleFile), module, 0o600); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	body := fmt.Sprintf(`{"version":1,"name":%q,"behaviors":[65025],"capabilities":["headend"],"module":%q,"saved_at":"2026-01-01T00:00:00Z"}`,
+		name, moduleFile)
+	if err := os.WriteFile(filepath.Join(store.Dir(), name+".json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+}
+
+// A current-version manifest that parses but whose module will not load must
+// still surface its scope, so the grant it holds stays reserved against
+// another plugin while its state is pinned. Deleting the module file after a
+// Save reproduces the missing-.wasm case.
+func TestUnloadableManifestCarriesItsScope(t *testing.T) {
+	store := newTestStore(t)
+	scope := mustScope(t, ScopeSpec{
+		Locators: []string{"main"}, VRFs: []string{testVRF},
+		HeadendPrefixes: []string{"10.0.0.0/16"},
+		HeadendV4Slots:  []uint32{16}, HeadendV6Slots: []uint32{16},
+		EndpointSlots: []uint32{32},
+	})
+	if err := store.Save(Registration{
+		Name: "declare", Module: declareModule(t),
+		Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: scope,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Remove the module so load fails after the manifest (and its scope) parse.
+	entries, _ := os.ReadDir(store.Dir())
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".wasm") {
+			if err := os.Remove(filepath.Join(store.Dir(), e.Name())); err != nil {
+				t.Fatalf("remove module: %v", err)
+			}
+		}
+	}
+
+	un := store.Unloadable()
+	if len(un) != 1 || un[0].Name != "declare" {
+		t.Fatalf("Unloadable() = %+v, want the plugin whose module is gone", un)
+	}
+	// The scope came through, so its grant can be reserved.
+	if err := un[0].Scope.CheckHeadend(AFv4, "10.0.7.0/24", 16); err != nil {
+		t.Errorf("the unloadable manifest lost its headend grant: %v", err)
+	}
+	if len(un[0].Scope.Locators) != 1 || un[0].Scope.Locators[0] != "main" {
+		t.Errorf("the unloadable manifest lost its locators: %v", un[0].Scope.Locators)
 	}
 }

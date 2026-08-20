@@ -39,11 +39,18 @@ CE_OSAKA_ADDR=10.2.0.10
 TOKYO_LOOPBACK=2001:db8:ff::1
 OSAKA_LOOPBACK=2001:db8:ff::2
 
-# The SID pe-osaka's plugin advertises, and the behavior codepoint it
-# stamps into the SID TLV. 0xFE01 is outside the standardized space on
-# purpose: vinbero refuses a claim on any behavior it implements itself.
-PLUGIN_SID=fd00:200:0:1::
+# The behavior codepoint pe-osaka's plugin stamps into the SID TLV.
+# 0xFE01 is outside the standardized space on purpose: vinbero refuses a
+# claim on any behavior it implements itself.
 PLUGIN_BEHAVIOR=0xFE01
+
+# The block the plugin allocates its SID from, and the eBPF slot that SID
+# dispatches to. The address itself is not spelled here: the plugin asks
+# for one and the daemon picks it, which is the half of the mechanism this
+# scenario exists to exercise. Asserting a fixed address would quietly
+# turn into asserting the allocator's first choice.
+PLUGIN_LOCATOR_BLOCK=fd00:200:
+PLUGIN_SLOT=32
 
 pass=0
 fail=0
@@ -92,6 +99,27 @@ else
     dexec "$PE_TOKYO" grep -i "capabilit" /var/log/vinberod.log | tail -5 || true
 fi
 
+# The capability says what it may do; the scope says where. pe-tokyo's
+# plugin may install headend entries only inside 10.2.0.0/16, so it cannot
+# write a longer prefix over traffic this node already forwards -- which
+# would win on longest match without ever touching the entry it shadows.
+if dexec "$PE_TOKYO" vbctl plugin cplane stats 2>/dev/null | grep -q '10.2.0.0/16'; then
+    ok "pe-tokyo's plugin is scoped to 10.2.0.0/16"
+else
+    ng "pe-tokyo's plugin scope is not reported"
+    dexec "$PE_TOKYO" vbctl plugin cplane stats || true
+fi
+
+# pe-osaka's plugin may originate only into vrf-cust, and it never names
+# the route distinguisher: that comes from the VRF's binding, because the
+# route targets are what decide which VRF a peer imports the route into.
+if dexec "$PE_OSAKA" vbctl plugin cplane stats 2>/dev/null | grep -q 'vrf-cust'; then
+    ok "pe-osaka's plugin is scoped to vrf-cust"
+else
+    ng "pe-osaka's plugin scope is not reported"
+    dexec "$PE_OSAKA" vbctl plugin cplane stats || true
+fi
+
 # --- 2. the plugin originated a route with its own behavior ----------------
 echo ""
 echo "[2] pe-osaka: the plugin originated $OSAKA_PREFIX"
@@ -118,14 +146,31 @@ else
     dexec "$PE_TOKYO" grep -i "plugin" /var/log/vinberod.log | tail -20 || true
 fi
 
-# It must steer into the SID the plugin advertised, not somewhere else.
-seg=$(dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
+# It must steer into the SID the plugin advertised, which is the address
+# pe-osaka's daemon allocated for it. This is where the two halves meet, so
+# the rest of the checks are written against what the wire actually says.
+PLUGIN_SID=$(dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
     | awk -v p="$OSAKA_PREFIX" '$1==p {print $NF}')
-if [ "$seg" = "$PLUGIN_SID" ]; then
-    ok "it steers into the advertised SID $PLUGIN_SID"
-else
-    ng "it steers into '$seg', want $PLUGIN_SID"
+# An empty extraction must fail hard, not fall through: a later
+# grep -q "${PLUGIN_SID}/128" would otherwise become grep -q "/128" and
+# match any SID on the box, hiding the very failure this scenario exists to
+# catch (the daemon not allocating the SID).
+if [ -z "$PLUGIN_SID" ]; then
+    ng "pe-tokyo installed no headend entry for $OSAKA_PREFIX; the SID-dependent checks cannot run"
+    echo ""
+    echo "=============================================="
+    echo " RESULT: $pass passed, $fail failed"
+    echo "=============================================="
+    exit 1
 fi
+case "$PLUGIN_SID" in
+    "$PLUGIN_LOCATOR_BLOCK"*)
+        ok "it steers into $PLUGIN_SID, an address out of the plugin's locator"
+        ;;
+    *)
+        ng "it steers into '$PLUGIN_SID', want an address in $PLUGIN_LOCATOR_BLOCK"
+        ;;
+esac
 
 # And the plugin is what put it there. The daemon logs the reconcile of a
 # plugin's declared set separately from anything its own appliers do.
@@ -135,6 +180,41 @@ if dexec "$PE_TOKYO" grep -q "plugin desired set applied" /var/log/vinberod.log 
 else
     ng "no plugin declaration was applied on pe-tokyo"
     dexec "$PE_TOKYO" grep -i "plugin" /var/log/vinberod.log | tail -20 || true
+fi
+
+# --- 3b. pe-osaka: the plugin's own SID dispatches to its own slot ---------
+echo ""
+echo "[3b] pe-osaka: the SID the plugin was given dispatches to its eBPF half"
+
+# The daemon allocated the address, so nothing in the config names it. What
+# is asserted is the chain: the plugin asked for a SID from its locator,
+# the daemon installed a dispatch entry for it, and that entry points at
+# the slot the plugin's own eBPF program occupies.
+if retry bash -c "docker exec $PE_OSAKA vbctl sid list 2>/dev/null | grep -q '${PLUGIN_SID}/128'"; then
+    ok "pe-osaka installed a dispatch entry for ${PLUGIN_SID}"
+    dexec "$PE_OSAKA" vbctl sid list | sed 's/^/      /'
+else
+    ng "pe-osaka has no dispatch entry for ${PLUGIN_SID}"
+    dexec "$PE_OSAKA" vbctl sid list || true
+    dexec "$PE_OSAKA" grep -i "local sid\|plugin" /var/log/vinberod.log | tail -20 || true
+fi
+
+action=$(dexec "$PE_OSAKA" vbctl sid list 2>/dev/null \
+    | awk -v p="${PLUGIN_SID}/128" '$1==p {print $2}')
+if [ "$action" = "$PLUGIN_SLOT" ]; then
+    ok "it dispatches to endpoint slot $PLUGIN_SLOT, the plugin's own"
+else
+    ng "it dispatches to '$action', want slot $PLUGIN_SLOT"
+fi
+
+# The eBPF half is loaded in that slot, so the dispatch has somewhere to
+# land. Without it the SID would be an address that drops what reaches it.
+if dexec "$PE_OSAKA" vbctl plugin list 2>/dev/null | grep -q "plugin_custom_behavior"; then
+    ok "the plugin's eBPF half occupies the slot"
+    dexec "$PE_OSAKA" vbctl plugin list | sed 's/^/      /'
+else
+    ng "no eBPF plugin is loaded on pe-osaka"
+    dexec "$PE_OSAKA" vbctl plugin list || true
 fi
 
 # The claim is what kept vinbero's own applier off it. An applier that had
@@ -150,6 +230,17 @@ fi
 echo ""
 echo "[4] data plane: ce-tokyo -> ce-osaka over plugin-installed state"
 
+# What this validates, and what it does not. The forward path steers into the
+# plugin's SID, which on pe-osaka tail-calls the built-in End.DT4. Because the
+# SID is a plugin slot, the aux discriminator nulls the aux (the B4 boundary),
+# so End.DT4 has no VRF ifindex and decaps against pe-osaka's main routing
+# table. ce-osaka's subnet is a connected route on that table here, so the
+# packet is delivered. This exercises the plugin -> End.DT4 handoff, not
+# VRF-scoped decap: a config that enslaved the customer interface to vrf-cust
+# would have no such main-table route and the packet would miss the VRF table.
+# Passing a granted VRF safely into End.DT4 is a separate feature (see
+# docs/design/ja/cplane-plugin.md, "既知の限界").
+
 # Gate on every precondition before pinging, so a slow data plane cannot
 # produce a spurious failure.
 echo "  gating on readiness..."
@@ -161,9 +252,9 @@ else
 fi
 
 if retry bash -c "docker exec $PE_OSAKA vbctl sid list 2>/dev/null | grep -q '${PLUGIN_SID}/128'"; then
-    echo "  gate: pe-osaka End.DT4 endpoint present"
+    echo "  gate: pe-osaka holds the SID its plugin was given"
 else
-    ng "gate: pe-osaka End.DT4 endpoint missing"
+    ng "gate: pe-osaka does not hold ${PLUGIN_SID}"
     dexec "$PE_OSAKA" vbctl sid list || true
 fi
 
@@ -188,13 +279,26 @@ ping_ok() {
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1
 }
 if retry_n 20 ping_ok; then
-    ok "ce-tokyo ($CE_TOKYO_ADDR) -> ce-osaka ($CE_OSAKA_ADDR) over the plugin's SRv6 path"
+    ok "ce-tokyo ($CE_TOKYO_ADDR) -> ce-osaka ($CE_OSAKA_ADDR) over the plugin's SRv6 path (decap via pe-osaka main table)"
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" | tail -3 | sed 's/^/      /'
 else
     ng "ce-tokyo cannot reach ce-osaka"
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" || true
     dexec "$PE_TOKYO" vbctl headend-v4 list || true
     dexec "$PE_OSAKA" vbctl sid list || true
+fi
+
+# The packets got there through the plugin's own slot, not by some other
+# path that happens to reach ce-osaka. The per-slot invocation counter is
+# bumped for the slot the dispatcher chose, so a non-zero count for slot
+# 32 is the data plane saying it ran the plugin's program.
+slot_pkts=$(dexec "$PE_OSAKA" vbctl stats slot show --type endpoint --plugin-only 2>/dev/null \
+    | awk -v s="$PLUGIN_SLOT" '$2==s {print $4}')
+if [ -n "$slot_pkts" ] && [ "$slot_pkts" -gt 0 ] 2>/dev/null; then
+    ok "endpoint slot $PLUGIN_SLOT forwarded $slot_pkts packets"
+else
+    ng "endpoint slot $PLUGIN_SLOT forwarded nothing, so the ping took another path"
+    dexec "$PE_OSAKA" vbctl stats slot show --type endpoint --plugin-only || true
 fi
 
 # --- 5. unregistering takes the plugin's state with it ---------------------
@@ -210,6 +314,51 @@ if dexec "$PE_TOKYO" vbctl plugin cplane unregister --name custom-behavior >/dev
     fi
 else
     ng "could not unregister the plugin"
+fi
+
+# --- 6. the scope is enforced, not just reported ---------------------------
+echo ""
+echo "[6] pe-tokyo: a plugin scoped away from the prefix cannot install it"
+
+# The plugin is unregistered (step 5). Re-register it with a headend prefix
+# that does NOT cover 10.2.0.0/24, and assert the entry does not come back
+# and the daemon logged the refusal. This is the check that would fail if
+# checkScope were a no-op -- the stats-based assertions in step 1 would not.
+dexec "$PE_TOKYO" sh -c 'printf "\010\201\374\003" > /tmp/plugin-config.bin' || true
+if dexec "$PE_TOKYO" vbctl plugin cplane register \
+    --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
+    --behavior 0xFE01 --family vpnv4 \
+    --capability headend --headend-prefix 10.99.0.0/16 >/dev/null 2>&1; then
+    if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+        ok "$OSAKA_PREFIX was not installed under a scope that does not cover it"
+    else
+        ng "the plugin installed $OSAKA_PREFIX outside its scope"
+        dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    fi
+    if dexec "$PE_TOKYO" grep -q "outside this plugin's scope" /var/log/vinberod.log 2>/dev/null; then
+        ok "the daemon logged the out-of-scope refusal"
+    else
+        ng "no out-of-scope refusal in the daemon log"
+        dexec "$PE_TOKYO" grep -i "scope" /var/log/vinberod.log | tail -5 || true
+    fi
+else
+    ng "could not re-register the plugin with a narrow scope"
+fi
+
+# Re-register correctly and assert the entry comes back, so the refusal
+# above was the scope and not a broken plugin.
+if dexec "$PE_TOKYO" vbctl plugin cplane register \
+    --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
+    --behavior 0xFE01 --family vpnv4 \
+    --capability headend --headend-prefix 10.2.0.0/16 >/dev/null 2>&1; then
+    if retry_n 10 bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+        ok "$OSAKA_PREFIX came back once the scope covered it"
+    else
+        ng "$OSAKA_PREFIX did not return under a covering scope"
+        dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    fi
+else
+    ng "could not re-register the plugin with a covering scope"
 fi
 
 echo ""
