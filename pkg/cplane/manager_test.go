@@ -1234,7 +1234,7 @@ func TestApplyKindIsCheckedAgainstCapabilities(t *testing.T) {
 		Leases:       NewLeases(),
 		Capabilities: advertiseOnly,
 		Advertise:    NewAdvertiseSet(&fakeAdvertiser{}, NewLeases()),
-		LocalSIDs:    NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps()),
+		LocalSIDs:    NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps(), nil, nil),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1329,7 +1329,7 @@ func TestDeclarationHeldFromBeforeLiveIsRetried(t *testing.T) {
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
 		Capabilities: testCaps(), Guard: testGuard(),
-		LocalSIDs: NewLocalSIDSet(alloc, sids),
+		LocalSIDs: NewLocalSIDSet(alloc, sids, nil, nil),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1394,7 +1394,7 @@ func TestRestartedInstanceIsToldItsLocalSIDsAgain(t *testing.T) {
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
 		Capabilities: testCaps(), Guard: testGuard(),
-		LocalSIDs:   NewLocalSIDSet(&fakeAllocator{}, sids),
+		LocalSIDs:   NewLocalSIDSet(&fakeAllocator{}, sids, nil, nil),
 		OnLocalSIDs: func([]AllocatedSID) bool { return true },
 	})
 	if err != nil {
@@ -1515,7 +1515,7 @@ func TestARetryDoesNotUndoANewerDeclaration(t *testing.T) {
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
 		Capabilities: testCaps(), Guard: testGuard(),
-		LocalSIDs: NewLocalSIDSet(alloc, sids),
+		LocalSIDs: NewLocalSIDSet(alloc, sids, nil, nil),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)
@@ -1726,7 +1726,7 @@ func TestStuckDeclarationsAreCounted(t *testing.T) {
 	sids := newFakeSIDOps()
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner: ownerA, Headend: newFakeHeadendOps(), Leases: NewLeases(),
-		Capabilities: testCaps(), Guard: testGuard(), LocalSIDs: NewLocalSIDSet(alloc, sids),
+		Capabilities: testCaps(), Guard: testGuard(), LocalSIDs: NewLocalSIDSet(alloc, sids, nil, nil),
 	})
 	if err != nil {
 		t.Fatalf("new plugin ops: %v", err)

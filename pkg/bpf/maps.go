@@ -1239,6 +1239,39 @@ func (m *MapOperations) GetSidAux(index uint32) (*SidAuxEntry, error) {
 	return &aux, nil
 }
 
+// PutEndtVRFGrant records that the plugin-dispatched SID whose dispatch
+// entry carries auxIndex may decapsulate End.DT4/DT6/DT46 into vrfIfindex.
+//
+// The built-in End.DT behaviors read this map after a plugin handoff, when
+// the discriminator has nulled the SID's own aux (its plugin_raw bytes must
+// not be reinterpreted as a VRF ifindex). The map is host-written and
+// BPF_F_RDONLY_PROG, so a plugin cannot forge a grant even in its own ELF.
+// The control plane writes one per DecapVRF SID at install and deletes it at
+// release; a SID with no grant fails closed (drop) in the data plane.
+func (m *MapOperations) PutEndtVRFGrant(auxIndex, vrfIfindex uint32) error {
+	if auxIndex == 0 {
+		return fmt.Errorf("endt vrf grant: aux index must be non-zero")
+	}
+	val := BpfPluginEndtVrf{VrfIfindex: vrfIfindex}
+	if err := m.objs.PluginEndtVrfMap.Put(auxIndex, &val); err != nil {
+		return fmt.Errorf("failed to put endt vrf grant: %w", err)
+	}
+	return nil
+}
+
+// DeleteEndtVRFGrant removes the grant for auxIndex. A missing key is not an
+// error: the caller deletes the grant before it frees the aux index, so a
+// re-run over a set that never carried a grant is a no-op.
+func (m *MapOperations) DeleteEndtVRFGrant(auxIndex uint32) error {
+	if err := m.objs.PluginEndtVrfMap.Delete(auxIndex); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete endt vrf grant: %w", err)
+	}
+	return nil
+}
+
 // ListSidFunctions returns all SID function entries
 func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error) {
 	result := make(map[string]*SidFunctionEntry)

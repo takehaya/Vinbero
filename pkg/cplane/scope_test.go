@@ -142,6 +142,13 @@ func TestLocalSIDScope(t *testing.T) {
 	if err := scope.CheckLocalSID(LocalSID{Name: "svc", Locator: "main", Slot: 34}); err == nil {
 		t.Error("another plugin's endpoint slot was allowed")
 	}
+	// A decap VRF is bound to the same VRF set VPN routes are.
+	if err := scope.CheckLocalSID(LocalSID{Name: "svc", Locator: "main", Slot: 33, DecapVRF: testVRF}); err != nil {
+		t.Errorf("a decap VRF inside the scope was refused: %v", err)
+	}
+	if err := scope.CheckLocalSID(LocalSID{Name: "svc", Locator: "main", Slot: 33, DecapVRF: "vrf-other"}); err == nil {
+		t.Error("a decap VRF outside the scope was allowed")
+	}
 }
 
 // The route targets decide which VRF a peer imports the route into, so a
@@ -568,7 +575,7 @@ func TestOutOfScopeLocalSIDRefusesAtCommit(t *testing.T) {
 		Owner:        ownerA,
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
-		LocalSIDs:    NewLocalSIDSet(alloc, sids),
+		LocalSIDs:    NewLocalSIDSet(alloc, sids, nil, nil),
 		Capabilities: testCaps(),
 		Guard:        NewGuard(narrowScope(t), testLocators(), testBindings()),
 	})
@@ -609,7 +616,7 @@ func TestOutOfScopeAdvertiseRefusesAtCommitAndDerivesOnSuccess(t *testing.T) {
 	// The plugin may advertise only a SID it was allocated. Allocate one in
 	// "main" (fd00:1::/48), which the fake hands out as fd00:1::1 -- the SID
 	// the in-scope route below advertises.
-	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps(), nil, nil)
 	if _, _, err := sids.Apply(ownerA, []LocalSID{{Name: "s", Locator: "main", Slot: 32}}, unlimited); err != nil {
 		t.Fatalf("allocate sid: %v", err)
 	}
@@ -721,7 +728,7 @@ func TestAdvertiseRefusesWhenTheBindingHasNoRTForTheFamily(t *testing.T) {
 func TestPruneRemovesLocalSIDsOutsideANarrowedScope(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 	owner := ownerA
 
 	// Two SIDs under a wide scope: one in "main" slot 33, one in "second"
@@ -781,7 +788,7 @@ func TestPruneRemovesLocalSIDsOutsideANarrowedScope(t *testing.T) {
 func TestAFailedApplyDoesNotVoidAPendingOne(t *testing.T) {
 	alloc := &fakeAllocator{failOn: "late"}
 	sids := newFakeSIDOps()
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner:        ownerA,
 		Headend:      newFakeHeadendOps(),
@@ -875,7 +882,7 @@ func TestHeadendSlotGrantIsPerFamily(t *testing.T) {
 // carries that SID and must be recognised as the plugin's own.
 func ownedSIDs(t *testing.T) *LocalSIDSet {
 	t.Helper()
-	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps(), nil, nil)
 	if _, _, err := sids.Apply(ownerA, []LocalSID{{Name: "s", Locator: "main", Slot: 32}}, unlimited); err != nil {
 		t.Fatalf("allocate sid: %v", err)
 	}
@@ -1029,7 +1036,7 @@ func TestReconcileIsConsistentUnderAConcurrentBindingEdit(t *testing.T) {
 func TestAdvertiseRefusesAnInLocatorSIDThePluginDidNotAllocate(t *testing.T) {
 	adv := &fakeAdvertiser{}
 	set := NewAdvertiseSet(adv, NewLeases())
-	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps(), nil, nil)
 	// Allocate one SID in "main"; the fake hands out fd00:1::1.
 	if _, _, err := sids.Apply(ownerA, []LocalSID{{Name: "s", Locator: "main", Slot: 32}}, unlimited); err != nil {
 		t.Fatalf("allocate: %v", err)

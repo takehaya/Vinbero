@@ -302,6 +302,14 @@ func (s Scope) CheckLocalSID(sid LocalSID) error {
 		return fmt.Errorf("local sid %q: endpoint slot %d is not one this plugin owns (%s)",
 			sid.Name, sid.Slot, describeSlots(s.EndpointSlots))
 	}
+	// A decap VRF is the VRF a plugin-dispatched End.DT4/DT6/DT46 delivers
+	// into, so it must be one the plugin was granted -- the same set VPN
+	// advertisements are bound to. Otherwise a plugin scoped to VRF blue
+	// could decapsulate traffic into VRF red.
+	if sid.DecapVRF != "" && !s.allowsVRF(sid.DecapVRF) {
+		return fmt.Errorf("local sid %q: decap VRF %q is outside this plugin's scope (%s)",
+			sid.Name, sid.DecapVRF, describe(s.VRFs, "no VRFs"))
+	}
 	return nil
 }
 
