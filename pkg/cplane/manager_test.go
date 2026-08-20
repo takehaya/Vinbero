@@ -269,15 +269,16 @@ func testScope() Scope {
 		}
 		return out
 	}
-	scope, err := ParseScope(
+	scope, err := ParseScope(ScopeSpec{
 		// "late" is the locator a fixture names before an operator has
 		// registered it: in scope, but not yet resolvable.
-		[]string{"main", "second", "late"},
-		[]string{testVRF},
-		[]string{"10.0.0.0/8", "fd00::/16"},
-		slots(16, 31),
-		slots(32, 63),
-	)
+		Locators:        []string{"main", "second", "late"},
+		VRFs:            []string{testVRF},
+		HeadendPrefixes: []string{"10.0.0.0/8", "fd00::/16"},
+		HeadendV4Slots:  slots(16, 31),
+		HeadendV6Slots:  slots(16, 31),
+		EndpointSlots:   slots(32, 63),
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -315,13 +316,37 @@ func testLocators() *fakeLocatorSource {
 }
 
 // fakeBindingSource stands in for the VRF-to-BGP bindings.
+//
+// It is locked because the real vrfbgp.Manager.Get takes an RLock, and a
+// concurrency test flips a binding from one goroutine while a plugin worker
+// resolves it from another. An unsynchronised fake would produce a race
+// report pointing at the fixture, which is how a real race gets dismissed
+// as a test bug.
 type fakeBindingSource struct {
+	mu     sync.RWMutex
 	byName map[string]vrfbgp.Binding
 }
 
 func (f *fakeBindingSource) Get(name string) (vrfbgp.Binding, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	b, ok := f.byName[name]
 	return b, ok
+}
+
+// set replaces a binding under the lock, for tests that mutate one while a
+// worker may be reading it.
+func (f *fakeBindingSource) set(name string, b vrfbgp.Binding) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.byName[name] = b
+}
+
+// remove deletes a binding under the lock.
+func (f *fakeBindingSource) remove(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.byName, name)
 }
 
 func testBindings() *fakeBindingSource {
@@ -1820,5 +1845,100 @@ func TestAPluginLeftAfterAFailedFlushIsNotReportedRunning(t *testing.T) {
 	}
 	if !st.Dead {
 		t.Error("a plugin with no instance and no worker is reported as running")
+	}
+}
+
+// A PROG_ARRAY slot holds one program, so two plugins granted the same slot
+// would have one's SID dispatch into the other's program. The grant is
+// refused across plugins, the way a behavior claim is.
+func TestTwoPluginsCannotHoldTheSameSlot(t *testing.T) {
+	src := newFakeSource()
+	m, _ := newTestManager(t, src, newFakeClaims())
+
+	// Both plugins own endpoint slot 32. Only headend cap-scope coherence
+	// is required, so give each a headend prefix and the shared slot.
+	scopeWithSlot := func() Scope {
+		s, err := ParseScope(ScopeSpec{
+			HeadendPrefixes: []string{"10.0.0.0/8"},
+			EndpointSlots:   []uint32{32},
+			Locators:        []string{"main"},
+		})
+		if err != nil {
+			t.Fatalf("scope: %v", err)
+		}
+		return s
+	}
+	caps, err := wasm.ParseCapabilities([]string{string(wasm.CapHeadend)})
+	if err != nil {
+		t.Fatalf("caps: %v", err)
+	}
+
+	if err := m.Register(context.Background(), Registration{
+		Name: "a", Module: declareModule(t), Capabilities: caps, Scope: scopeWithSlot(),
+	}); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	err = m.Register(context.Background(), Registration{
+		Name: "b", Module: declareModule(t), Capabilities: caps, Scope: scopeWithSlot(),
+	})
+	if !errors.Is(err, ErrSlotHeld) {
+		t.Fatalf("register b: %v, want ErrSlotHeld", err)
+	}
+	// Re-registering the same name with the same slot is an upgrade, not a
+	// conflict with itself.
+	if err := m.Register(context.Background(), Registration{
+		Name: "a", Module: declareModule(t), Capabilities: caps, Scope: scopeWithSlot(),
+	}); err != nil {
+		t.Fatalf("re-register a: %v", err)
+	}
+}
+
+// checkScopeCoversCapabilities' logic, exercised through the exported
+// function so the CapAdvertise "VRF or locator" branch is pinned against a
+// &&/|| slip.
+func TestScopeCoversCapabilities(t *testing.T) {
+	caps := func(names ...string) wasm.Capabilities {
+		c, err := wasm.ParseCapabilities(names)
+		if err != nil {
+			t.Fatalf("caps: %v", err)
+		}
+		return c
+	}
+	mustScope := func(spec ScopeSpec) Scope {
+		s, err := ParseScope(spec)
+		if err != nil {
+			t.Fatalf("scope: %v", err)
+		}
+		return s
+	}
+	tests := []struct {
+		name    string
+		caps    wasm.Capabilities
+		scope   Scope
+		wantErr bool
+	}{
+		{"headend without prefixes", caps("headend"), Scope{}, true},
+		{"headend with prefixes", caps("headend"), mustScope(ScopeSpec{HeadendPrefixes: []string{"10.0.0.0/8"}}), false},
+		{"local_sid without locators", caps("local_sid"), mustScope(ScopeSpec{EndpointSlots: []uint32{32}}), true},
+		{"local_sid without endpoint slots", caps("local_sid"), mustScope(ScopeSpec{Locators: []string{"main"}}), true},
+		{"local_sid with both", caps("local_sid"), mustScope(ScopeSpec{Locators: []string{"main"}, EndpointSlots: []uint32{32}}), false},
+		{"advertise with VRF only", caps("advertise"), mustScope(ScopeSpec{VRFs: []string{"v"}}), false},
+		{"advertise with locator only", caps("advertise"), mustScope(ScopeSpec{Locators: []string{"main"}}), false},
+		{"advertise with neither", caps("advertise"), Scope{}, true},
+		{"no capability, no scope", caps(), Scope{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ScopeCoversCapabilities(tt.caps, tt.scope)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected an error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err != nil && !errors.Is(err, ErrScopeDoesNotCoverCapabilities) {
+				t.Errorf("error is not ErrScopeDoesNotCoverCapabilities: %v", err)
+			}
+		})
 	}
 }

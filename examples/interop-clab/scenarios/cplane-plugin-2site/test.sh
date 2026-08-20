@@ -151,6 +151,18 @@ fi
 # the rest of the checks are written against what the wire actually says.
 PLUGIN_SID=$(dexec "$PE_TOKYO" vbctl headend-v4 list 2>/dev/null \
     | awk -v p="$OSAKA_PREFIX" '$1==p {print $NF}')
+# An empty extraction must fail hard, not fall through: a later
+# grep -q "${PLUGIN_SID}/128" would otherwise become grep -q "/128" and
+# match any SID on the box, hiding the very failure this scenario exists to
+# catch (the daemon not allocating the SID).
+if [ -z "$PLUGIN_SID" ]; then
+    ng "pe-tokyo installed no headend entry for $OSAKA_PREFIX; the SID-dependent checks cannot run"
+    echo ""
+    echo "=============================================="
+    echo " RESULT: $pass passed, $fail failed"
+    echo "=============================================="
+    exit 1
+fi
 case "$PLUGIN_SID" in
     "$PLUGIN_LOCATOR_BLOCK"*)
         ok "it steers into $PLUGIN_SID, an address out of the plugin's locator"
@@ -291,6 +303,51 @@ if dexec "$PE_TOKYO" vbctl plugin cplane unregister --name custom-behavior >/dev
     fi
 else
     ng "could not unregister the plugin"
+fi
+
+# --- 6. the scope is enforced, not just reported ---------------------------
+echo ""
+echo "[6] pe-tokyo: a plugin scoped away from the prefix cannot install it"
+
+# The plugin is unregistered (step 5). Re-register it with a headend prefix
+# that does NOT cover 10.2.0.0/24, and assert the entry does not come back
+# and the daemon logged the refusal. This is the check that would fail if
+# checkScope were a no-op -- the stats-based assertions in step 1 would not.
+dexec "$PE_TOKYO" sh -c 'printf "\010\201\374\003" > /tmp/plugin-config.bin' || true
+if dexec "$PE_TOKYO" vbctl plugin cplane register \
+    --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
+    --behavior 0xFE01 --family vpnv4 \
+    --capability headend --headend-prefix 10.99.0.0/16 >/dev/null 2>&1; then
+    if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+        ok "$OSAKA_PREFIX was not installed under a scope that does not cover it"
+    else
+        ng "the plugin installed $OSAKA_PREFIX outside its scope"
+        dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    fi
+    if dexec "$PE_TOKYO" grep -q "outside this plugin's scope" /var/log/vinberod.log 2>/dev/null; then
+        ok "the daemon logged the out-of-scope refusal"
+    else
+        ng "no out-of-scope refusal in the daemon log"
+        dexec "$PE_TOKYO" grep -i "scope" /var/log/vinberod.log | tail -5 || true
+    fi
+else
+    ng "could not re-register the plugin with a narrow scope"
+fi
+
+# Re-register correctly and assert the entry comes back, so the refusal
+# above was the scope and not a broken plugin.
+if dexec "$PE_TOKYO" vbctl plugin cplane register \
+    --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
+    --behavior 0xFE01 --family vpnv4 \
+    --capability headend --headend-prefix 10.2.0.0/16 >/dev/null 2>&1; then
+    if retry_n 10 bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
+        ok "$OSAKA_PREFIX came back once the scope covered it"
+    else
+        ng "$OSAKA_PREFIX did not return under a covering scope"
+        dexec "$PE_TOKYO" vbctl headend-v4 list || true
+    fi
+else
+    ng "could not re-register the plugin with a covering scope"
 fi
 
 echo ""

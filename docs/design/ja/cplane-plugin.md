@@ -230,9 +230,16 @@ object 単位の性質なので、この形は表現できません。
 | advertise の ipv6_unicast | 許可された locator の配下 | plugin がここで広告する正当なものは自分の SID である |
 | `headend` | trigger prefix の list | 縛れる名前が存在しない |
 
-加えて、plugin が所有する PROG_ARRAY slot を headend と endpoint それぞれ
-について宣言します。plugin A が plugin B の slot に entry を向けると、B の
-program は A の aux bytes を自分の layout として読むためです。
+加えて、plugin が所有する PROG_ARRAY slot を宣言します。headend は v4 と v6 の
+map が別の PROG_ARRAY で slot 番号を共有するので、grant も別にします。v4 の
+slot 16 を渡しても v6 の slot 16 は渡しません。endpoint は 1 つです。plugin A が
+plugin B の slot に entry を向けると、B の program は A の aux bytes を自分の
+layout として読むためです。
+
+slot は plugin をまたいで排他にします。同じ slot を 2 つの plugin に渡すと、
+一方の SID がもう一方の program に dispatch して aux を取り違えるので、behavior
+claim と同じく登録時に拒否します。prefix scope は排他にしません。operator が
+意図的に重ねることがあり、実際の衝突は per-entry の owner と lease が調停します。
 
 ### VPN 広告は照合ではなく導出
 
@@ -243,7 +250,17 @@ plugin は VRF 名だけを宣言し、RD と RT は host が binding から埋�
 宣言に RD や RT が入っていたら、黙って無視せず拒否します。
 
 binding が受信専用で RD を持たない場合は、その VRF への広告を拒否します。
-operator が選んでいない RD で経路を出すことになるためです。
+operator が選んでいない RD で経路を出すことになるためです。同じく、binding が
+その family の export RT を 1 つも持たない場合も拒否します。RT が空だと誰も
+import しない経路になり、成功したように見えて誰にも届かないためです。
+
+RT の導出が決めるのは経路を誰が import するかで、経路が実際にどこへ向かうかは
+prefix-SID TLV の SRv6 SID が決めます。導出だけでは、VRF blue に scope された
+plugin が blue の prefix を VRF red の service SID の裏に広告して blue の traffic を
+red へ流せます。そこで VPN 経路の SID も、plugin に渡した locator の配下に
+限ります。ipv6_unicast の prefix を locator に閉じ込めるのと同じ抑え方です。
+next hop は依然として自由です。encap source は locator address で BGP transport
+とは限らず、daemon に妥当な推測が無いためで、この点は元の挙動のままです。
 
 binding の `MaxPrefixes` は plugin の広告にも適用します。VRF を渡すことが
 無制限の VRF を渡すことにならないようにするためです。
@@ -284,16 +301,43 @@ apply 時に失敗させれば、既存の retry 機構がそのまま修復に�
 
 狭める操作だけは desired-set の模型では直りません。plugin が同じ宣言を
 続けると集合ごと拒否されるので reconcile が走らず、広い scope の下で書いた
-状態が残ります。そこで登録の時点で host が範囲外の状態を prune します。再登録に限らず restore でも
-走らせます。daemon 再起動をまたいだ状態は pinned map に残っており、scope を持たない
-古い manifest から戻した plugin はそれを 1 つも触れないためです。
+状態が残ります。そこで登録の時点で host が範囲外の状態を prune します。再登録に
+限らず restore でも走らせます。daemon 再起動をまたいだ状態は pinned map に残って
+おり、狭い scope で restore した plugin はそれを 1 つも触れないためです。
 実装は「まだ許される部分集合を desired set として apply する」形で、残りは
 既存の reconcile が落とします。
 
-prune に失敗したら登録も失敗させ、plugin を止めます。成功を返すと、実際には
-効いていない認可境界が効いていると言うことになるためです。plugin は自力でも
-直せません。範囲外の状態についての宣言は今や集合ごと拒否されるからです。止めた
-plugin は registry には残すので、operator は残った状態を見て retry できます。
+manifest の format version は 2 です。scope は認可情報なので、scope を持たない
+version 1 の manifest (scope 導入前の build が書いたもの) を空 scope で restore
+すると、その plugin が書いた転送状態を boot 時に消してしまいます。そこで version 1 は
+restore を拒否し、状態を pinned のまま残して plugin を unrestored に落とします。
+この機構は未リリースなので migration は用意せず、plugin store をクリーンにしての
+起動を upgrade の前提とします。behavior claim は version に関係なく予約するので、
+その codepoint の経路は built-in に渡らず withhold されます。
+
+prune に失敗したら登録も失敗させます。成功を返すと、実際には効いていない認可
+境界が効いていると言うことになるためです。このとき store と claim と registry が
+食い違わないよう、1 つの結末に揃えます。新しい登録を persist するので、再起動時の
+restore が prune を再試行し、広い scope へ戻りません。behavior claim は新しい集合の
+まま残します。plugin は死んでも書いた状態は map に残るので、その codepoint の
+経路は built-in applier へ渡さず withhold し続けます。plugin は running registry から
+外して unrestored に記録するので、running と unrestored に二重に載らず、operator は
+`forget` で諦められます。
+
+### data plane 境界と aux
+
+plugin の local SID の aux (`aux_raw`) は plugin が並べた bytes で、`sid_aux_entry`
+という union に載ります。この union は SID の action で判別され、built-in behavior は
+自分の variant として読みます。End.DT4 は先頭 4 byte を VRF ifindex として読み、
+End.B6 は segment list 全体を読みます。plugin の data plane half は任意の built-in
+slot へ tail call できるので、そのまま渡すと built-in が plugin の bytes を自分の
+layout として解釈し、scope の VRF grant を破って任意の VRF へ decap できます。
+
+そこで built-in の aux 参照を分けます。built-in 用の lookup は、処理中の SID の
+action が plugin slot 域 (endpoint なら 32 以上) なら aux を NULL にします。plugin の
+handoff で built-in に入ったときは aux を読まず、aux 無しと同じ fallback (End.DT4 なら
+ingress ifindex) に落ちます。plugin が自分の program で自分の aux を読む経路は
+そのままなので、plugin の aux は plugin だけが解釈します。
 
 ## claim と built-in state の関係
 
@@ -402,7 +446,17 @@ producer です。さらに EVPN の withdraw は producer を見ずに path を
 
 conformance harness は scope のうち daemon 無しで判定できる部分だけを見ます。
 prefix が locator に含まれるかと、VRF に binding があるかは daemon の状態に
-依存するので harness では判定しません。
+依存するので harness では判定しません。harness には scope を operator と同じ
+文字列の形で渡し、`ParseScope` を通します。daemon が拒否する scope (4-in-6 の
+prefix や範囲外の slot) は harness でも拒否され、harness が daemon より緩くなる
+のを防ぎます。
+
+restore-time の prune は headend map しか読みません。`LiveSIDs` と `LiveRoutes` は
+in-memory の集合を読むので、再起動直後は空で、前の run が確保した local SID や
+広告経路は prune の視界に入らず orphan になります。local SID は plugin が次に
+local SID を宣言したときの sweep で片付きますが、scope を狭められた plugin は
+その宣言をしなくなるので、それまで残ります。map から owner ごとに読む形へ広げるのは
+繰越しです。
 
 ## 登録時の検証
 
@@ -590,6 +644,11 @@ Copilot が行数上限でレビューできないためです。以後の追加
 - EVPN advertise の producer 分離。exporter と operator の RPC の 2 つの書き手が
   あるのに無名の producer を共有しています。EVPN の withdraw は producer を
   見ずに path を消すので、名前を付けるだけでは足りません。
+- restore-time prune の local SID / 広告への拡張。いまは map から読める headend
+  しか片付けられません。
+- binding 再導出を RPC の critical section の外へ出し、retry と counter を足す。
+  いま commitBinding は共有 mutex を握ったまま全 plugin の経路を再広告し、失敗は
+  log するだけです。
 
 ## 参照
 

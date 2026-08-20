@@ -546,7 +546,7 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	// the check together and then land in either order.
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
-	if p.stale(txn) {
+	if p.isStale(txn) {
 		// A newer declaration of this kind has already been applied, so
 		// this one describes a set the plugin has moved on from.
 		return nil
@@ -592,6 +592,7 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 				}
 			}
 		}
+		p.markApplied(txn)
 		return nil
 	}
 
@@ -605,6 +606,7 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 			zap.Int("created", res.Created),
 			zap.Int("updated", res.Updated),
 			zap.Int("withdrawn", res.Pruned))
+		p.markApplied(txn)
 		return nil
 	}
 
@@ -622,6 +624,7 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 		zap.Int("created", res.Created),
 		zap.Int("updated", res.Updated),
 		zap.Int("pruned", res.Pruned))
+	p.markApplied(txn)
 	return nil
 }
 
@@ -662,11 +665,19 @@ func (p *PluginOps) checkScope(txn *applyTxn) error {
 		}
 		txn.routes = resolved
 	default:
+		af := AFv4
+		if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+			af = AFv6
+		}
 		for _, e := range txn.entries {
 			if e.Entry == nil {
-				continue
+				// A nil entry is unreachable on the apply path -- decode
+				// never returns one and ApplyHeadendSet refuses it -- but an
+				// authorization function must not have a branch that means
+				// "could not check, so it passes". Refuse it.
+				return fmt.Errorf("apply commit: headend entry with no encap for %q", e.TriggerPrefix)
 			}
-			if err := p.guard.checkHeadend(e.TriggerPrefix, e.Entry.Mode); err != nil {
+			if err := p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode); err != nil {
 				return fmt.Errorf("apply commit: %w", err)
 			}
 		}
@@ -733,7 +744,7 @@ func ValidateChunkInScope(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk, sco
 		if err != nil {
 			return err
 		}
-		if err := scope.CheckHeadend(trigger, entry.Mode); err != nil {
+		if err := scope.CheckHeadend(af, trigger, entry.Mode); err != nil {
 			return err
 		}
 	}
@@ -804,23 +815,36 @@ func chunkSize(msg *v1.PluginApplyChunk) int {
 	return proto.Size(msg)
 }
 
-// stale reports whether a newer declaration of this kind has already been
-// applied, and otherwise records this one as the newest.
+// isStale reports whether a newer declaration of this kind has already been
+// applied. It only reads: the high-water mark is advanced by markApplied,
+// after the reconcile succeeds.
+//
+// Recording the mark here, before the apply, was a silent-loss bug: a
+// transaction that then failed -- a scope refusal, a missing binding --
+// still raised the mark, so an older declaration of the same kind sitting
+// in pending became stale and was dropped on the next retry as though it
+// had been applied. The read and the mark are separate for exactly that
+// reason.
 //
 // Called with applyMu held.
-func (p *PluginOps) stale(txn *applyTxn) bool {
+func (p *PluginOps) isStale(txn *applyTxn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return txn.seq != 0 && txn.seq < p.lastApplied[txn.kind]
+}
+
+// markApplied records this transaction as the newest of its kind, once its
+// reconcile has actually succeeded. Called with applyMu held, so the
+// read in isStale and this write cannot interleave for one kind.
+func (p *PluginOps) markApplied(txn *applyTxn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.lastApplied == nil {
 		p.lastApplied = make(map[v1.PluginApplyKind]uint64)
 	}
-	if txn.seq != 0 && txn.seq < p.lastApplied[txn.kind] {
-		return true
-	}
 	if txn.seq > p.lastApplied[txn.kind] {
 		p.lastApplied[txn.kind] = txn.seq
 	}
-	return false
 }
 
 // freshAllocations returns the allocations this instance has not been told
@@ -939,7 +963,7 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 			if e.Entry == nil {
 				continue
 			}
-			if p.guard.checkHeadend(e.TriggerPrefix, e.Entry.Mode) == nil {
+			if p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode) == nil {
 				keep = append(keep, e)
 			}
 		}
@@ -1028,6 +1052,18 @@ func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) 
 		if err != nil {
 			continue
 		}
+		// The RD comes off the binding verbatim, but the live keys were
+		// built from routes Apply had already canonicalized. An operator
+		// who spelled the binding's RD non-canonically (065000:0001 for
+		// 65000:1) would otherwise make every resolved key miss its live
+		// counterpart, so every route would look moved and flap on every
+		// reconcile. Canonicalize here, the same way Apply will, so the
+		// keys agree and only a route that actually moved is treated as
+		// moved.
+		resolved, err = p.advertise.canonicalize(resolved)
+		if err != nil {
+			continue
+		}
 		keep = append(keep, resolved)
 	}
 	// The cap is the binding's, so a binding that lowered it makes the set
@@ -1045,23 +1081,41 @@ func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) 
 	//
 	// Declaring only what did not move retires those old keys first, which
 	// is the same reconcile doing the withdrawing rather than a second way
-	// to withdraw. A set where nothing moved skips it.
+	// to withdraw. A route that moved is in keep but not in settled, so the
+	// phase runs exactly when some kept route has a new key; a set where
+	// nothing moved has settled == keep and skips it. A route that was
+	// dropped (out of scope, binding gone, over the cap) is in neither and
+	// is withdrawn by the phase-2 apply below.
 	var pruned int
 	settled := make([]AdvertisedRoute, 0, len(keep))
 	for _, r := range keep {
-		if _, held := live[r.key()]; held {
+		if _, live := live[r.key()]; live {
 			settled = append(settled, r)
 		}
 	}
-	if len(settled) != len(held) {
-		res, err := p.advertise.Apply(ctx, p.owner, settled, p.quotas.MaxAdvertisedRoutes)
-		pruned += res.Pruned
-		if err != nil {
-			return pruned, err
+	if len(settled) != len(keep) {
+		if _, err := p.advertise.Apply(ctx, p.owner, settled, p.quotas.MaxAdvertisedRoutes); err != nil {
+			return 0, err
 		}
 	}
-	res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
-	return pruned + res.Pruned, err
+	if _, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes); err != nil {
+		return 0, err
+	}
+	// What was withdrawn is what the plugin no longer originates at all, by
+	// NLRI regardless of RD: a route that only moved RD is re-advertised in
+	// phase 2 and must not count. So the removed set is the held NLRIs
+	// absent from keep, not the phase-1 prune total, which would double-count
+	// every move.
+	kept := make(map[string]struct{}, len(keep))
+	for _, r := range keep {
+		kept[r.Family.String()+"\x1f"+r.Prefix] = struct{}{}
+	}
+	for _, r := range held {
+		if _, ok := kept[r.Family.String()+"\x1f"+r.Prefix]; !ok {
+			pruned++
+		}
+	}
+	return pruned, nil
 }
 
 // Flush removes every entry this plugin owns and releases its leases. It

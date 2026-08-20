@@ -2,6 +2,7 @@ package cplane
 
 import (
 	"context"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -17,13 +18,14 @@ import (
 // falls outside it.
 func narrowScope(t *testing.T) Scope {
 	t.Helper()
-	scope, err := ParseScope(
-		[]string{"main"},
-		[]string{testVRF},
-		[]string{"10.7.0.0/16"},
-		[]uint32{16},
-		[]uint32{33},
-	)
+	scope, err := ParseScope(ScopeSpec{
+		Locators:        []string{"main"},
+		VRFs:            []string{testVRF},
+		HeadendPrefixes: []string{"10.7.0.0/16"},
+		HeadendV4Slots:  []uint32{16},
+		HeadendV6Slots:  []uint32{16},
+		EndpointSlots:   []uint32{33},
+	})
 	if err != nil {
 		t.Fatalf("parse scope: %v", err)
 	}
@@ -31,15 +33,13 @@ func narrowScope(t *testing.T) Scope {
 }
 
 func TestParseScopeCanonicalizes(t *testing.T) {
-	scope, err := ParseScope(
-		[]string{"b", "a", "a"},
-		nil,
+	scope, err := ParseScope(ScopeSpec{
+		Locators: []string{"b", "a", "a"},
 		// Unmasked, and out of order. The trigger prefixes it is compared
 		// against are masked, so a scope holding the unmasked spelling
 		// would compare against something the map never contains.
-		[]string{"fd00::/16", "10.7.0.1/16"},
-		nil, nil,
-	)
+		HeadendPrefixes: []string{"fd00::/16", "10.7.0.1/16"},
+	})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -54,16 +54,19 @@ func TestParseScopeCanonicalizes(t *testing.T) {
 // A scope written with a 4-in-6 spelling compares false against every IPv4
 // trigger prefix, so it would silently permit nothing.
 func TestParseScopeRefusesFourInSix(t *testing.T) {
-	if _, err := ParseScope(nil, nil, []string{"::ffff:10.7.0.0/112"}, nil, nil); err == nil {
+	if _, err := ParseScope(ScopeSpec{HeadendPrefixes: []string{"::ffff:10.7.0.0/112"}}); err == nil {
 		t.Fatal("an IPv4 prefix in IPv6 form was accepted")
 	}
 }
 
 func TestParseScopeRefusesASlotOutsideThePluginRange(t *testing.T) {
-	if _, err := ParseScope(nil, nil, nil, []uint32{1}, nil); err == nil {
-		t.Error("a headend slot outside the plugin range was accepted")
+	if _, err := ParseScope(ScopeSpec{HeadendV4Slots: []uint32{1}}); err == nil {
+		t.Error("a headend v4 slot outside the plugin range was accepted")
 	}
-	if _, err := ParseScope(nil, nil, nil, nil, []uint32{1}); err == nil {
+	if _, err := ParseScope(ScopeSpec{HeadendV6Slots: []uint32{1}}); err == nil {
+		t.Error("a headend v6 slot outside the plugin range was accepted")
+	}
+	if _, err := ParseScope(ScopeSpec{EndpointSlots: []uint32{1}}); err == nil {
 		t.Error("an endpoint slot outside the plugin range was accepted")
 	}
 }
@@ -76,7 +79,7 @@ func TestTheZeroScopePermitsNothing(t *testing.T) {
 	if !scope.Empty() {
 		t.Fatal("the zero scope reports itself as holding something")
 	}
-	if err := scope.CheckHeadend("10.7.0.0/24", 1); err == nil {
+	if err := scope.CheckHeadend(AFv4, "10.7.0.0/24", 1); err == nil {
 		t.Error("a headend entry was allowed with no scope")
 	}
 	if err := scope.CheckLocalSID(LocalSID{Name: "svc", Locator: "main", Slot: 33}); err == nil {
@@ -95,15 +98,15 @@ func TestTheZeroScopePermitsNothing(t *testing.T) {
 // writer's traffic.
 func TestHeadendScopeContains(t *testing.T) {
 	scope := narrowScope(t)
-	if err := scope.CheckHeadend("10.7.1.0/24", 1); err != nil {
+	if err := scope.CheckHeadend(AFv4, "10.7.1.0/24", 1); err != nil {
 		t.Errorf("a prefix inside the scope was refused: %v", err)
 	}
 	// The scope's own prefix is inside itself.
-	if err := scope.CheckHeadend("10.7.0.0/16", 1); err != nil {
+	if err := scope.CheckHeadend(AFv4, "10.7.0.0/16", 1); err != nil {
 		t.Errorf("the scope's own prefix was refused: %v", err)
 	}
 	for _, outside := range []string{"10.8.0.0/24", "0.0.0.0/0", "10.0.0.0/8", "fd00::/64"} {
-		if err := scope.CheckHeadend(outside, 1); err == nil {
+		if err := scope.CheckHeadend(AFv4, outside, 1); err == nil {
 			t.Errorf("%s was allowed, and it is outside the scope", outside)
 		}
 	}
@@ -113,16 +116,16 @@ func TestHeadendScopeContains(t *testing.T) {
 // bytes read under a layout that does not describe them.
 func TestHeadendScopeChecksThePluginSlot(t *testing.T) {
 	scope := narrowScope(t)
-	if err := scope.CheckHeadend("10.7.1.0/24", 16); err != nil {
+	if err := scope.CheckHeadend(AFv4, "10.7.1.0/24", 16); err != nil {
 		t.Errorf("the plugin's own slot was refused: %v", err)
 	}
-	if err := scope.CheckHeadend("10.7.1.0/24", 17); err == nil {
+	if err := scope.CheckHeadend(AFv4, "10.7.1.0/24", 17); err == nil {
 		t.Error("another plugin's headend slot was allowed")
 	}
 	// A mode naming one of vinbero's own behaviors is ordinary
 	// encapsulation, which a control-plane-only plugin uses and which
 	// belongs to nobody.
-	if err := scope.CheckHeadend("10.7.1.0/24", 1); err != nil {
+	if err := scope.CheckHeadend(AFv4, "10.7.1.0/24", 1); err != nil {
 		t.Errorf("ordinary encapsulation was refused: %v", err)
 	}
 }
@@ -368,9 +371,9 @@ func TestChangedBindingRedrivesWhatAPluginAdvertises(t *testing.T) {
 	}
 
 	// The operator re-targets the VPN.
-	bindings.byName[testVRF] = vrfbgp.Binding{
+	bindings.set(testVRF, vrfbgp.Binding{
 		VRFName: testVRF, RD: testRD, ExportRTs: []string{"65000:999"},
-	}.Normalize()
+	}.Normalize())
 	if _, err := ops.ReconcileAdvertised(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -409,9 +412,9 @@ func TestLoweredCapWithdrawsWhatNoLongerFits(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	bindings.byName[testVRF] = vrfbgp.Binding{
+	bindings.set(testVRF, vrfbgp.Binding{
 		VRFName: testVRF, RD: testRD, ExportRTs: []string{testRD}, MaxPrefixes: 1,
-	}.Normalize()
+	}.Normalize())
 	withdrawn, err := ops.ReconcileAdvertised(context.Background())
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -449,7 +452,7 @@ func TestRemovedBindingWithdrawsThePluginsRoutes(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	delete(bindings.byName, testVRF)
+	bindings.remove(testVRF)
 	if _, err := ops.ReconcileAdvertised(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -537,9 +540,9 @@ func TestARDChangeRetiresTheOldKeyEvenWhenTheNewOneIsTaken(t *testing.T) {
 	if err := leases.Acquire(LeaseAdvertise, moved.key(), ownerB); err != nil {
 		t.Fatalf("taking the new key: %v", err)
 	}
-	bindings.byName[testVRF] = vrfbgp.Binding{
+	bindings.set(testVRF, vrfbgp.Binding{
 		VRFName: testVRF, RD: "65000:2", ExportRTs: []string{testRD},
-	}.Normalize()
+	}.Normalize())
 
 	if _, err := ops.ReconcileAdvertised(context.Background()); err == nil {
 		t.Fatal("a reconcile onto a key another producer holds reported success")
@@ -552,5 +555,276 @@ func TestARDChangeRetiresTheOldKeyEvenWhenTheNewOneIsTaken(t *testing.T) {
 	adv.mu.Unlock()
 	if withdrawn != 1 {
 		t.Fatalf("withdrew %d routes, want the one whose RD moved", withdrawn)
+	}
+}
+
+// The apply-path scope check must reach ApplyCommit for every declaration
+// kind, not only headend. This is the local-SID arm.
+func TestOutOfScopeLocalSIDRefusesAtCommit(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		LocalSIDs:    NewLocalSIDSet(alloc, sids),
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), testBindings()),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID))
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// narrowScope allows locator "main" slot 33; "second" is out of scope.
+	chunk, err := proto.Marshal(&v1.PluginApplyChunk{LocalSids: []*v1.PluginLocalSid{
+		{Name: "ok", Locator: "main", Slot: 33},
+		{Name: "bad", Locator: "second", Slot: 33},
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ops.ApplyPut(gen, chunk); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := ops.ApplyCommit(gen); err == nil {
+		t.Fatal("a set holding a local SID outside the scope was applied")
+	}
+	if got := sids.installs; got != 0 {
+		t.Fatalf("%d dispatch entries installed from a refused set, want none", got)
+	}
+}
+
+// The advertise arm of the apply-path check, and the assertion that the
+// derived RD and route targets are what actually reach the advertiser.
+func TestOutOfScopeAdvertiseRefusesAtCommitAndDerivesOnSuccess(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Advertise:    set,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), testBindings()),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// A set with one in-scope and one out-of-scope VRF is refused whole.
+	badGen, _ := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE))
+	badChunk, _ := proto.Marshal(&v1.PluginApplyChunk{AdvertisedRoutes: []*v1.PluginAdvertisedRoute{
+		{Family: "vpnv4", Vrf: testVRF, Prefix: "10.7.0.0/24", Srv6Sid: "fd00:1::1", NextHop: "2001:db8::1"},
+		{Family: "vpnv4", Vrf: "someone-elses", Prefix: "10.7.1.0/24", Srv6Sid: "fd00:1::2", NextHop: "2001:db8::1"},
+	}})
+	if err := ops.ApplyPut(badGen, badChunk); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := ops.ApplyCommit(badGen); err == nil {
+		t.Fatal("a set naming a VRF outside the scope was applied")
+	}
+	if set.LiveCount(ownerA) != 0 {
+		t.Fatal("a refused advertise set left routes live")
+	}
+
+	// An in-scope route is applied, and the RD and RTs the advertiser sees
+	// are the binding's -- which is what pins txn.routes = resolved.
+	okGen, _ := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE))
+	okChunk, _ := proto.Marshal(&v1.PluginApplyChunk{AdvertisedRoutes: []*v1.PluginAdvertisedRoute{
+		{Family: "vpnv4", Vrf: testVRF, Prefix: "10.7.0.0/24", Srv6Sid: "fd00:1::1", NextHop: "2001:db8::1"},
+	}})
+	if err := ops.ApplyPut(okGen, okChunk); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := ops.ApplyCommit(okGen); err != nil {
+		t.Fatalf("an in-scope route was refused: %v", err)
+	}
+	adv.mu.Lock()
+	defer adv.mu.Unlock()
+	if len(adv.advertise) != 1 {
+		t.Fatalf("advertiser saw %d routes, want 1", len(adv.advertise))
+	}
+	if adv.advertise[0].RD != testRD {
+		t.Errorf("advertised RD %q, want the binding's %q", adv.advertise[0].RD, testRD)
+	}
+	if len(adv.advertise[0].RTs) != 1 || adv.advertise[0].RTs[0] != testRD {
+		t.Errorf("advertised RTs %v, want the binding's export set", adv.advertise[0].RTs)
+	}
+}
+
+// A VPN route whose SRv6 SID is not inside one of the plugin's locators is
+// refused: deriving the route targets fixes who imports the route, and this
+// fixes where the traffic goes.
+func TestAdvertiseRefusesASIDOutsideTheLocators(t *testing.T) {
+	g := NewGuard(narrowScope(t), testLocators(), testBindings())
+	// narrowScope's locator "main" is fd00:1::/48. A SID in it passes.
+	if _, err := g.resolveAdvertised(AdvertisedRoute{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, Prefix: "10.7.0.0/24",
+		SRv6SID: "fd00:1::100", NextHop: "2001:db8::1",
+	}); err != nil {
+		t.Errorf("a SID inside the plugin's locator was refused: %v", err)
+	}
+	// A SID in another VRF's locator space is refused even though the VRF
+	// name is in scope.
+	if _, err := g.resolveAdvertised(AdvertisedRoute{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, Prefix: "10.7.0.0/24",
+		SRv6SID: "fd00:9::100", NextHop: "2001:db8::1",
+	}); err == nil {
+		t.Fatal("a SID outside every scoped locator was accepted")
+	}
+}
+
+// A binding that declares no export route targets for the route's family
+// yields none, and the route would be unimportable. resolveVPN refuses it
+// rather than originating a route no peer takes.
+func TestAdvertiseRefusesWhenTheBindingHasNoRTForTheFamily(t *testing.T) {
+	// A binding family-scoped to vpnv6 only: ExportRTsForFamily(vpnv4) is nil.
+	bindings := &fakeBindingSource{byName: map[string]vrfbgp.Binding{
+		testVRF: {
+			VRFName: testVRF, RD: testRD,
+			Families: map[bgp.Family]vrfbgp.FamilyPolicy{
+				bgp.FamilyVPNv6: {RouteTargets: []vrfbgp.RouteTarget{
+					{RT: testRD, Direction: vrfbgp.DirectionBoth},
+				}},
+			},
+		},
+	}}
+	g := NewGuard(narrowScope(t), testLocators(), bindings)
+	if _, err := g.resolveAdvertised(AdvertisedRoute{
+		Family: bgp.FamilyVPNv4, VRF: testVRF, Prefix: "10.7.0.0/24",
+		SRv6SID: "fd00:1::1", NextHop: "2001:db8::1",
+	}); err == nil {
+		t.Fatal("a vpnv4 route into a vpnv6-only binding was originated with no route targets")
+	}
+}
+
+// PruneOutOfScope must reach the local-SID branch, and a surviving SID must
+// keep the exact address it already holds rather than being reallocated.
+func TestPruneRemovesLocalSIDsOutsideANarrowedScope(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	set := NewLocalSIDSet(alloc, sids)
+	owner := ownerA
+
+	// Two SIDs under a wide scope: one in "main" slot 33, one in "second"
+	// slot 34.
+	allocated, _, err := set.Apply(owner, []LocalSID{
+		{Name: "keep", Locator: "main", Slot: 33},
+		{Name: "drop", Locator: "second", Slot: 34},
+	}, unlimited)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	var keepAddr netip.Addr
+	for _, a := range allocated {
+		if a.Name == "keep" {
+			keepAddr = a.SID
+		}
+	}
+
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:     owner,
+		Headend:   newFakeHeadendOps(),
+		Leases:    NewLeases(),
+		LocalSIDs: set,
+		// narrowScope: locator "main", endpoint slot 33 only.
+		Guard: NewGuard(narrowScope(t), testLocators(), testBindings()),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	before := alloc.releasedCount()
+	removed, err := ops.PruneOutOfScope(context.Background())
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed %d SIDs, want the one outside the new scope", removed)
+	}
+	live := set.LiveSIDs(owner)
+	if len(live) != 1 || live[0].Name != "keep" {
+		t.Fatalf("live SIDs = %+v, want only the in-scope one", live)
+	}
+	// The surviving SID kept its address: its dispatch entry is still
+	// installed at the address it was first given, and it was not released.
+	// A broken LiveSIDs that lost Slot or AuxRaw would have released and
+	// reallocated it -- releasing keepAddr and installing a new one.
+	if _, ok := sids.entries[keepAddr.String()+"/128"]; !ok {
+		t.Fatalf("the kept SID's dispatch entry at %v is gone; it was reallocated", keepAddr)
+	}
+	if alloc.releasedCount() != before+1 {
+		t.Fatalf("released %d SIDs, want exactly the pruned one", alloc.releasedCount()-before)
+	}
+}
+
+// B3: a declaration that fails must not raise the applied-sequence mark, or
+// an older declaration of the same kind still waiting to be retried is
+// silently dropped as stale.
+func TestAFailedApplyDoesNotVoidAPendingOne(t *testing.T) {
+	alloc := &fakeAllocator{failOn: "late"}
+	sids := newFakeSIDOps()
+	set := NewLocalSIDSet(alloc, sids)
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		LocalSIDs:    set,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(testScope(), testLocators(), testBindings()),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+
+	// A declaration staged before publication, naming a locator whose
+	// allocation fails, is held for retry.
+	gen1, _ := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID))
+	chunk1, _ := proto.Marshal(&v1.PluginApplyChunk{LocalSids: []*v1.PluginLocalSid{
+		{Name: "svc", Locator: "late", Slot: 33},
+	}})
+	if err := ops.ApplyPut(gen1, chunk1); err != nil {
+		t.Fatalf("put 1: %v", err)
+	}
+	if err := ops.ApplyCommit(gen1); err != nil {
+		t.Fatalf("commit before publication should be held: %v", err)
+	}
+	if err := ops.Publish(); err == nil {
+		t.Fatal("publishing a declaration naming a failing locator succeeded")
+	}
+	if ops.PendingDeclarations() != 1 {
+		t.Fatalf("pending = %d, want the held declaration", ops.PendingDeclarations())
+	}
+
+	// A later declaration of the same kind fails too (its allocation also
+	// names the failing locator). Before the fix this stamped the sequence
+	// mark and voided the pending one.
+	gen2, _ := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID))
+	chunk2, _ := proto.Marshal(&v1.PluginApplyChunk{LocalSids: []*v1.PluginLocalSid{
+		{Name: "svc", Locator: "late", Slot: 34},
+	}})
+	if err := ops.ApplyPut(gen2, chunk2); err != nil {
+		t.Fatalf("put 2: %v", err)
+	}
+	if err := ops.ApplyCommit(gen2); err == nil {
+		t.Fatal("a second failing declaration reported success")
+	}
+
+	// The locator starts working; the retry must now apply the pending
+	// declaration rather than treat it as stale.
+	alloc.mu.Lock()
+	alloc.failOn = ""
+	alloc.mu.Unlock()
+	ops.RetryPending()
+	if got := sids.installs; got == 0 {
+		t.Fatal("the pending declaration was lost: nothing installed after the locator recovered")
 	}
 }

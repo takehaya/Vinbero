@@ -241,11 +241,19 @@ message CplanePluginScope {
   // keyed on the destination prefix alone, with no VRF and no locator in
   // the key, so the region has to be spelled out.
   repeated string headend_prefixes = 3;
-  // HeadendSlots and EndpointSlots are the plugin PROG_ARRAY slots this
-  // plugin's own data-plane half occupies (16-31 and 32-63). A plugin
-  // pointing an entry at another plugin's slot would have its aux bytes
-  // read under a layout that does not describe them.
-  repeated uint32 headend_slots = 4;
+  // HeadendV4Slots, HeadendV6Slots and EndpointSlots are the plugin
+  // PROG_ARRAY slots this plugin's own data-plane half occupies (16-31 for
+  // the headend maps, 32-63 for the endpoint map). A plugin pointing an
+  // entry at another plugin's slot would have its aux bytes read under a
+  // layout that does not describe them.
+  //
+  // The two headend arrays are separate PROG_ARRAYs that share the slot
+  // range, so a grant of v4 slot 16 must not imply v6 slot 16: a plugin
+  // with a v4 half in slot 16 and a different plugin with a v6 half there
+  // are distinct, and one must not be able to point a v6 entry at the
+  // other's program.
+  repeated uint32 headend_v4_slots = 4;
+  repeated uint32 headend_v6_slots = 6;
   repeated uint32 endpoint_slots = 5;
 }
 

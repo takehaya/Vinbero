@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,7 +159,7 @@ func TestStoreRefusesAnUnknownManifestVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	bumped := bytes.Replace(body, []byte(`"version": 1`), []byte(`"version": 99`), 1)
+	bumped := bytes.Replace(body, []byte(`"version": 2`), []byte(`"version": 99`), 1)
 	if bytes.Equal(bumped, body) {
 		t.Fatalf("could not find the version field in %s", body)
 	}
@@ -513,25 +514,40 @@ func TestAModuleForADottedPluginNameRoundTrips(t *testing.T) {
 
 // A restore inherits the state its predecessor pinned in the maps, so a
 // stored scope that no longer covers all of it has to prune on the way
-// back -- including a manifest written before scopes existed, which comes
-// back permitting nothing.
+// back, not only on an in-process re-register.
 func TestRestoreRemovesStateTheStoredScopeDoesNotCover(t *testing.T) {
 	src := newFakeSource()
 	store := newTestStore(t)
 	m, ops := newTestManagerWithStore(t, src, store)
 
-	// State a previous run left behind under this plugin's owner.
+	// State a previous run left behind under this plugin's owner. One
+	// prefix the stored scope will cover, one it will not.
 	owner := bpf.OwnerPluginBundle("declare")
-	if _, err := ApplyHeadendSet(ops, m.leases, owner, AFv4, []HeadendDesired{{
-		TriggerPrefix: "10.9.0.0/24",
-		Entry:         &bpf.HeadendEntry{Mode: 1, NumSegments: 1},
-	}}, unlimited); err != nil {
+	if _, err := ApplyHeadendSet(ops, m.leases, owner, AFv4, []HeadendDesired{
+		{TriggerPrefix: "10.7.0.0/24", Entry: &bpf.HeadendEntry{Mode: 1, NumSegments: 1}},
+		{TriggerPrefix: "10.9.0.0/24", Entry: &bpf.HeadendEntry{Mode: 1, NumSegments: 1}},
+	}, unlimited); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
-	reg := storedRegistration(t)
-	// A manifest from before scopes existed restores permitting nothing.
-	reg.Scope = Scope{}
+	// A coherent stored registration -- headend only, scoped to a prefix
+	// that covers one of the two entries. checkScopeCoversCapabilities
+	// would refuse an empty scope with a capability, so the scope has to
+	// actually name what the capability needs.
+	caps, err := wasm.ParseCapabilities([]string{string(wasm.CapHeadend)})
+	if err != nil {
+		t.Fatalf("caps: %v", err)
+	}
+	scope, err := ParseScope(ScopeSpec{HeadendPrefixes: []string{"10.7.0.0/16"}})
+	if err != nil {
+		t.Fatalf("scope: %v", err)
+	}
+	reg := Registration{
+		Name:         "declare",
+		Module:       declareModule(t),
+		Capabilities: caps,
+		Scope:        scope,
+	}
 	if err := store.Save(reg); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -542,7 +558,61 @@ func TestRestoreRemovesStateTheStoredScopeDoesNotCover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if len(held) != 0 {
-		t.Fatalf("held %+v after a restore whose scope covers none of it", held)
+	if len(held) != 1 || held[0].TriggerPrefix != "10.7.0.0/24" {
+		t.Fatalf("held %+v, want only the prefix the stored scope covers", held)
+	}
+}
+
+// A manifest written before scopes existed is a version this daemon does
+// not write, so restoring it is refused rather than run under an empty
+// scope that would prune the forwarding state it wrote. The state stays
+// pinned and the plugin lands in the unrestored set.
+func TestRestoreRefusesAPreScopeManifest(t *testing.T) {
+	src := newFakeSource()
+	store := newTestStore(t)
+	m, ops := newTestManagerWithStore(t, src, store)
+
+	owner := bpf.OwnerPluginBundle("declare")
+	if _, err := ApplyHeadendSet(ops, m.leases, owner, AFv4, []HeadendDesired{{
+		TriggerPrefix: "10.9.0.0/24",
+		Entry:         &bpf.HeadendEntry{Mode: 1, NumSegments: 1},
+	}}, unlimited); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// Write a manifest at the previous version, with no scope block, the
+	// way the pre-scope build did.
+	writePreScopeManifest(t, store, "declare", declareModule(t))
+
+	// Restore returns the aggregated load error, but does not treat it as
+	// fatal: the state stays pinned and the plugin is recorded unrestored.
+	if err := m.Restore(context.Background()); err == nil {
+		t.Fatal("restore did not report the unloadable manifest")
+	}
+	held, err := OwnedHeadendEntries(ops, owner, AFv4)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(held) != 1 {
+		t.Fatalf("held %+v, want the pinned entry left in place", held)
+	}
+	unrestored := m.Unrestored()
+	if len(unrestored) != 1 || unrestored[0].Name != "declare" {
+		t.Fatalf("unrestored = %+v, want the refused plugin", unrestored)
+	}
+}
+
+// writePreScopeManifest writes a version-1 manifest (no scope block) and its
+// module, mimicking what the build before this change left on disk.
+func writePreScopeManifest(t *testing.T, store *Store, name string, module []byte) {
+	t.Helper()
+	moduleFile := name + "-preScope.wasm"
+	if err := os.WriteFile(filepath.Join(store.Dir(), moduleFile), module, 0o600); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+	body := fmt.Sprintf(`{"version":1,"name":%q,"behaviors":[65025],"capabilities":["headend"],"module":%q,"saved_at":"2026-01-01T00:00:00Z"}`,
+		name, moduleFile)
+	if err := os.WriteFile(filepath.Join(store.Dir(), name+".json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
 	}
 }

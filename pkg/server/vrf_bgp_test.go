@@ -1329,7 +1329,6 @@ func TestVrfBgpUnbind_DrivesMupUplinkReconcile(t *testing.T) {
 	}
 }
 
-
 // commitBinding fires the EVPN loc-rib replay only when the mutation widened
 // the binding's import surface AND the VRF carries a bridge facet: a new
 // binding with import RTs replays, an import RT added replays, an unrelated

@@ -49,7 +49,6 @@ type Harness struct {
 	config []byte
 	limits wasm.Limits
 	caps   wasm.Capabilities
-	scope  cplane.Scope
 
 	mu sync.Mutex
 	// inst is replaced by Restart, so a test can check that a plugin
@@ -75,9 +74,13 @@ type Options struct {
 	// the way it should when an operator grants it less.
 	Capabilities []string
 	// Scope is where those capabilities may be exercised, as the
-	// registration will state it: which locators, VRFs, headend prefixes
-	// and slots the plugin may name. Set it and a declaration naming
-	// anything outside it fails here rather than in production.
+	// registration will state it. It is given in the operator-facing form
+	// -- the same strings the CLI and the wire carry -- and parsed through
+	// ParseScope, so a scope the daemon would refuse (a 4-in-6 prefix, a
+	// slot outside the plugin range) is refused here too. Taking a raw
+	// cplane.Scope would let a plugin pass conformance under a scope that
+	// cannot be registered, which is the divergence this harness exists to
+	// close.
 	//
 	// The zero value skips the check rather than denying everything, which
 	// is the one place this harness is deliberately more forgiving than
@@ -90,7 +93,7 @@ type Options struct {
 	// The parts that need a running daemon -- whether a locator actually
 	// contains a prefix, whether a VRF has a binding -- stay the daemon's
 	// either way.
-	Scope cplane.Scope
+	Scope cplane.ScopeSpec
 }
 
 // New starts a plugin from a compiled module. It fails the test if the
@@ -102,13 +105,17 @@ func New(tb testing.TB, module []byte, opts Options) *Harness {
 	if err != nil {
 		tb.Fatalf("capabilities: %v", err)
 	}
-	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps, scope: opts.Scope}
+	scope, err := cplane.ParseScope(opts.Scope)
+	if err != nil {
+		tb.Fatalf("scope: %v", err)
+	}
+	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps}
 	// The recorder is given the same capabilities as the instance, because
 	// the daemon checks the declaration kind against them when a
 	// transaction is opened. Without that here, a plugin granted only
 	// advertise could open a headend transaction, pass conformance, and
 	// be refused in production.
-	h.ops = &recorder{denyCommits: opts.DenyCommits, caps: caps, scope: opts.Scope}
+	h.ops = &recorder{denyCommits: opts.DenyCommits, caps: caps, scope: scope}
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
 		Name:         "harness",
 		Module:       module,

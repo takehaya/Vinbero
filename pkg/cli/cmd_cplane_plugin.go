@@ -60,8 +60,14 @@ func cplaneSubcommand() *cli.Command {
 							"thing holding a plugin off another writer's traffic",
 					},
 					&cli.UintSliceFlag{
-						Name:  "headend-slot",
-						Usage: "Headend PROG_ARRAY slot this plugin's data-plane half occupies (repeatable, 16-31)",
+						Name: "headend-v4-slot",
+						Usage: "headend_v4 PROG_ARRAY slot this plugin's data-plane half occupies (repeatable, 16-31). " +
+							"The v4 and v6 headend arrays share slot numbers but are separate programs, so this grant " +
+							"does not imply the v6 slot of the same number",
+					},
+					&cli.UintSliceFlag{
+						Name:  "headend-v6-slot",
+						Usage: "headend_v6 PROG_ARRAY slot this plugin's data-plane half occupies (repeatable, 16-31)",
 					},
 					&cli.UintSliceFlag{
 						Name:  "endpoint-slot",
@@ -94,7 +100,11 @@ func cplaneSubcommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					headendSlots, err := uintSliceToUint32("headend-slot", c.UintSlice("headend-slot"))
+					headendV4Slots, err := uintSliceToUint32("headend-v4-slot", c.UintSlice("headend-v4-slot"))
+					if err != nil {
+						return err
+					}
+					headendV6Slots, err := uintSliceToUint32("headend-v6-slot", c.UintSlice("headend-v6-slot"))
 					if err != nil {
 						return err
 					}
@@ -116,7 +126,8 @@ func cplaneSubcommand() *cli.Command {
 								Locators:        c.StringSlice("locator"),
 								Vrfs:            c.StringSlice("vrf"),
 								HeadendPrefixes: c.StringSlice("headend-prefix"),
-								HeadendSlots:    headendSlots,
+								HeadendV4Slots:  headendV4Slots,
+								HeadendV6Slots:  headendV6Slots,
 								EndpointSlots:   endpointSlots,
 							},
 						}))
@@ -300,7 +311,7 @@ func printCplaneScopes(plugins []*v1.CplanePluginStat) error {
 	for _, p := range plugins {
 		s := p.GetScope()
 		if len(s.GetLocators()) > 0 || len(s.GetVrfs()) > 0 || len(s.GetHeadendPrefixes()) > 0 ||
-			len(s.GetHeadendSlots()) > 0 || len(s.GetEndpointSlots()) > 0 {
+			len(s.GetHeadendV4Slots()) > 0 || len(s.GetHeadendV6Slots()) > 0 || len(s.GetEndpointSlots()) > 0 {
 			scoped = append(scoped, p)
 		}
 	}
@@ -310,17 +321,18 @@ func printCplaneScopes(plugins []*v1.CplanePluginStat) error {
 	fmt.Println()
 	fmt.Println("Scopes:")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "NAME\tLOCATORS\tVRFS\tHEADEND PREFIXES\tHEADEND SLOTS\tENDPOINT SLOTS"); err != nil {
+	if _, err := fmt.Fprintln(w, "NAME\tLOCATORS\tVRFS\tHEADEND PREFIXES\tHEADEND V4 SLOTS\tHEADEND V6 SLOTS\tENDPOINT SLOTS"); err != nil {
 		return err
 	}
 	for _, p := range scoped {
 		s := p.GetScope()
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.GetName(),
 			joinOrDash(s.GetLocators()),
 			joinOrDash(s.GetVrfs()),
 			joinOrDash(s.GetHeadendPrefixes()),
-			joinOrDash(formatSlots(s.GetHeadendSlots())),
+			joinOrDash(formatSlots(s.GetHeadendV4Slots())),
+			joinOrDash(formatSlots(s.GetHeadendV6Slots())),
 			joinOrDash(formatSlots(s.GetEndpointSlots()))); err != nil {
 			return err
 		}
