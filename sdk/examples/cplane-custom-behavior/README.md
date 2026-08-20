@@ -123,8 +123,8 @@ deployments, so one build serves all of them:
 | 3 | the prefix to advertise behind that SID |
 | 4 | the VRF to advertise it into |
 | 5 | the eBPF slot the SID dispatches to |
-| 6 | a SID to advertise as given, instead of allocating one |
 | 7 | the next hop to advertise the prefix with |
+| 8 | the VRF a plugin-dispatched End.DT4 decapsulates into |
 
 There are two ways to run it, and the config picks between them:
 
@@ -151,6 +151,14 @@ The VRF has to be one the plugin's registration lists in its scope, and the
 route distinguisher and route targets come from that VRF's binding rather
 than from this config. A plugin cannot name them: they are what decides
 which VPN a peer imports the route into.
+
+Field 8 is the return direction. When the eBPF half hands decapsulated
+traffic to a built-in End.DT4, the handoff nulls the SID's own aux so the
+plugin cannot spell an arbitrary VRF there. Naming the VRF here makes the
+host record it in a grant it owns, and the built-in decap reads the VRF from
+the grant. It must be a VRF in the plugin's scope, the same set the
+advertisement is bound to. Leave it unset for a half that forwards on its
+own without a built-in handoff; the built-in decap drops with no grant.
 
 ## Notes on the code
 

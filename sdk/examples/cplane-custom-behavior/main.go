@@ -62,9 +62,10 @@ const (
 	fieldAdvNextHop  = 7
 	fieldAdvVRF      = 8
 	// PluginLocalSid
-	fieldLocalSidName    = 1
-	fieldLocalSidLocator = 2
-	fieldLocalSidSlot    = 3
+	fieldLocalSidName     = 1
+	fieldLocalSidLocator  = 2
+	fieldLocalSidSlot     = 3
+	fieldLocalSidDecapVRF = 5
 	// The example's own config message.
 	fieldConfigBehavior = 1
 	fieldConfigLocator  = 2
@@ -73,7 +74,8 @@ const (
 	fieldConfigSlot     = 5
 	// field 6 (an operator-provisioned SID to advertise) was removed: a
 	// plugin may advertise only a SID it was itself allocated.
-	fieldConfigNextHop = 7
+	fieldConfigNextHop  = 7
+	fieldConfigDecapVRF = 8
 )
 
 // PluginEventKind values this plugin acts on.
@@ -104,6 +106,7 @@ var (
 	locatorName   string
 	advertiseVRF  string
 	advertisePfx  string
+	decapVRF      string
 	dataPlaneSlot uint64
 	// allocatedSID is the address the host gave this plugin, empty until
 	// the local-SID event arrives. A plugin may advertise only a SID it was
@@ -264,6 +267,10 @@ func configure(ptr, length int32) int32 {
 			var b []byte
 			b, ok = r.bytes()
 			advertiseNextHop = string(b)
+		case field == fieldConfigDecapVRF && wire == wireBytes:
+			var b []byte
+			b, ok = r.bytes()
+			decapVRF = string(b)
 		default:
 			ok = r.skip(wire)
 		}
@@ -440,6 +447,14 @@ func declareLocalSID() {
 	entry.putString(fieldLocalSidLocator, locatorName)
 	entry.putTag(fieldLocalSidSlot, wireVarint)
 	entry.putVarint(dataPlaneSlot)
+	// When the data-plane half hands decapsulated traffic to a built-in
+	// End.DT4, it names the VRF that decap lands in. The host reads the VRF
+	// from a grant it owns rather than from the plugin's aux, so the
+	// declaration only names it; without a grant the built-in decap drops.
+	// A plugin whose half completes on its own leaves this unset.
+	if decapVRF != "" {
+		entry.putString(fieldLocalSidDecapVRF, decapVRF)
+	}
 
 	var chunk writer
 	chunk.putMessage(fieldChunkLocalSids, entry.buf)
