@@ -94,15 +94,18 @@ slot is how a plugin completes a packet's journey, not a shortcut around
 writing one. The per-slot invocation counter is what the test reads to
 show the packets really went through slot 32.
 
-What this exercises, and what it does not. Because the SID is a plugin
-slot, the aux discriminator nulls the aux the built-in `End.DT4` would read
-(the B4 boundary), so `End.DT4` decaps against pe-osaka's main routing
-table rather than a VRF table. ce-osaka's subnet is a connected route on
-that main table here, so the packet is delivered and the plugin-to-`End.DT4`
-handoff is validated end to end. VRF-scoped decap is not: a config that
-enslaved the customer interface to `vrf-cust` would have no such main-table
-route. Passing a granted VRF safely into `End.DT4` is a separate feature,
-tracked in `docs/design/ja/cplane-plugin.md` under the known limitations.
+The decap is VRF-scoped. Because the SID is a plugin slot, the aux
+discriminator nulls the aux the built-in `End.DT4` would read (the B4
+boundary), so `End.DT4` cannot take a VRF ifindex from the plugin's own
+aux. The plugin's local-SID declaration names a `decap_vrf` instead, and
+the host records the VRF's ifindex in a grant it owns and the plugin cannot
+write; `End.DT4` reads the VRF from there. Here that VRF is `vrf-cust`, and
+pe-osaka's customer interface is enslaved to it, so ce-osaka's subnet is a
+connected route in the VRF's table and absent from the main table. A decap
+that fell back to the main table -- what a plugin handoff did before the
+grant existed -- would find nothing and drop. The test asserts that split
+directly, so the customer ping completing proves the grant is what carried
+the traffic into the VRF.
 
 ## Run
 
@@ -128,6 +131,8 @@ why.
    SID, and the daemon log attributes it to the plugin's declared set;
 4. pe-osaka installed a dispatch entry for that SID pointing at endpoint
    slot 32, and the plugin's eBPF half occupies it;
-5. a real `ping` from ce-tokyo reaches ce-osaka through it, and slot 32's
-   invocation counter shows the packets went through the plugin's program;
+5. a real `ping` from ce-tokyo reaches ce-osaka through it, decapsulating
+   into `vrf-cust` (whose table holds ce-osaka's subnet while the main table
+   does not), and slot 32's invocation counter shows the packets went
+   through the plugin's program;
 6. unregistering the plugin takes its entry with it.
