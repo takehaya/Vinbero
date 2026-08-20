@@ -1206,6 +1206,13 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	// owner check and the map op.
 	if hasEntry && entry.AuxIndex != 0 {
 		idx := uint32(entry.AuxIndex)
+		// Withdraw any decap-VRF grant keyed by this aux index before the index
+		// is freed. The grant is keyed by aux index, so a freed-then-reused
+		// index would otherwise let a stale grant apply to an unrelated SID.
+		// This is the catch-all for every delete path -- ForceDeleteSidFunction
+		// and any direct DeleteSidFunction -- not just the control-plane's own
+		// grant-aware release. A SID that never carried a grant is a no-op here.
+		_ = m.DeleteEndtVRFGrant(idx)
 		_ = m.auxAlloc.WithOwnerLocked(idx, AuxOwnerBuiltin, func() error {
 			var zero SidAuxEntry
 			_ = m.objs.SidAuxMap.Put(idx, &zero)
@@ -1283,6 +1290,42 @@ func (m *MapOperations) EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool,
 		return 0, false, fmt.Errorf("iterate endt vrf grants: %w", err)
 	}
 	return 0, false, nil
+}
+
+// DeleteEndtVRFGrantsByIfindex removes every grant pointing at vrfIfindex and
+// returns how many it removed. It is the VRF-delete backstop: the pre-delete
+// EndtVRFGrantReferences check refuses while a grant is live, but a grant that
+// a concurrent install writes between that check and the device teardown would
+// otherwise dangle at a freed ifindex. Sweeping after the device is gone -- at
+// which point resolving the VRF fails, so no further grant can be written for
+// it -- makes any grant that raced the check fail closed on a dead ifindex
+// rather than following the number to a different device.
+func (m *MapOperations) DeleteEndtVRFGrantsByIfindex(vrfIfindex uint32) (int, error) {
+	if vrfIfindex == 0 {
+		return 0, nil
+	}
+	var (
+		auxIndex uint32
+		val      BpfPluginEndtVrf
+		stale    []uint32
+	)
+	iter := m.objs.PluginEndtVrfMap.Iterate()
+	for iter.Next(&auxIndex, &val) {
+		if val.VrfIfindex == vrfIfindex {
+			stale = append(stale, auxIndex)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("iterate endt vrf grants: %w", err)
+	}
+	removed := 0
+	for _, idx := range stale {
+		if err := m.DeleteEndtVRFGrant(idx); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // DeleteEndtVRFGrant removes the grant for auxIndex. A missing key is not an

@@ -132,6 +132,17 @@ func (f *fakeSidTable) EndtVRFGrantReferences(ifindex uint32) (uint32, bool, err
 	return 0, false, nil
 }
 
+func (f *fakeSidTable) DeleteEndtVRFGrantsByIfindex(ifindex uint32) (int, error) {
+	removed := 0
+	for aux, granted := range f.grantRefs {
+		if granted == ifindex {
+			delete(f.grantRefs, aux)
+			removed++
+		}
+	}
+	return removed, nil
+}
+
 // fakeBindings reports a binding for the names it holds. Full bindings (with
 // families) take precedence; the names set yields a bare binding.
 type fakeBindings struct {

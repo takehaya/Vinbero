@@ -3,6 +3,7 @@ package bpf
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
 
@@ -4172,4 +4173,33 @@ func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
 			t.Fatalf("granted packet was not decapped (in %d bytes, out %d): the grant did not gate through to decap", len(pkt), len(out))
 		}
 	})
+}
+
+// TestForceDeleteSidFunctionRemovesEndtVRFGrant pins the catch-all: every path
+// that frees a dispatch entry's aux index must withdraw the decap-VRF grant
+// keyed by it, or a freed-then-reused index would let a stale grant apply to
+// an unrelated SID. The control plane's own release deletes the grant, but the
+// operator escape hatch (ForceDeleteSidFunction) and any direct delete bypass
+// it, so the guarantee lives in deleteSidFunctionInternal.
+func TestForceDeleteSidFunctionRemovesEndtVRFGrant(t *testing.T) {
+	h := newXDPTestHelper(t)
+	const pluginSlot = uint32(32)
+	prefix := "fd00:1:701::10/128"
+	auxIdx := h.createPluginDT4Sid(prefix, pluginSlot)
+	h.grantPluginEndtVrf(auxIdx, 1)
+
+	// It is there before the delete.
+	var val BpfPluginEndtVrf
+	if err := h.objs.PluginEndtVrfMap.Lookup(auxIdx, &val); err != nil {
+		t.Fatalf("grant missing before delete: %v", err)
+	}
+
+	if err := h.mapOps.ForceDeleteSidFunction(prefix); err != nil {
+		t.Fatalf("force delete: %v", err)
+	}
+
+	// The force delete freed the aux index, so the grant must be gone too.
+	if err := h.objs.PluginEndtVrfMap.Lookup(auxIdx, &val); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("grant survived ForceDeleteSidFunction (err=%v); a reused aux index would inherit a stale VRF", err)
+	}
 }

@@ -25,6 +25,10 @@ type SidLister interface {
 	// VRF in a host-owned grant map rather than in l3vrf aux, so the aux scan
 	// above cannot see it.
 	EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool, error)
+	// DeleteEndtVRFGrantsByIfindex sweeps grants that point at a just-deleted
+	// VRF device ifindex, the backstop for a grant that raced the reference
+	// check above.
+	DeleteEndtVRFGrantsByIfindex(vrfIfindex uint32) (int, error)
 }
 
 // BindingGetter reports whether a vrf-bgp binding references a VRF name, so
@@ -273,6 +277,18 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 		if err := s.dev.DeleteVrf(name); err != nil {
 			return fail(fmt.Sprintf("delete kernel device: %v", err))
 		}
+	}
+	// Backstop the TOCTOU between the grant check above and this teardown: an
+	// install that wrote a grant for this ifindex in that window would dangle
+	// it at a now-freed number. The device is gone, so resolving this VRF fails
+	// and no further grant can be written for it; sweeping any that raced makes
+	// them fail closed on a dead ifindex rather than following the number to a
+	// different device. The device is already deleted, so a sweep error cannot
+	// fail the delete -- it is retried on the next delete of a VRF that reuses
+	// the number. A full close of the window needs the install and the delete
+	// to share a lock, which crosses the cplane/VRF boundary.
+	if ifindex != 0 {
+		_, _ = s.sids.DeleteEndtVRFGrantsByIfindex(ifindex)
 	}
 	s.mgr.Delete(name)
 	return nil
