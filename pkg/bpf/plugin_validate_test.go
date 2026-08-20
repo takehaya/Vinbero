@@ -960,3 +960,64 @@ func TestValidateRealInteropPluginPasses(t *testing.T) {
 		t.Fatalf("the real interop plugin was rejected by the RO-write scan: %v", err)
 	}
 }
+
+func TestValidatePluginROWrites_MapUpdateHelperOnIntegrityMapIsFatal(t *testing.T) {
+	// bpf_map_update_elem(&sid_function_map, ...) forges a SID function with no
+	// store instruction. It must be caught the same as a store.
+	prog := buildSpec("upd", ebpf.XDP, asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("sid_function_map"),
+		asm.Mov.Reg(asm.R2, asm.R10),
+		asm.Mov.Reg(asm.R3, asm.R10),
+		asm.Mov.Imm(asm.R4, 0),
+		asm.FnMapUpdateElem.Call(),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	ro := map[string]struct{}{"sid_function_map": {}}
+	err := ValidatePluginProgram(prog, ro)
+	if err == nil {
+		t.Fatal("bpf_map_update_elem on an integrity map was not caught")
+	}
+	if !errors.Is(err, ErrPluginIntegrityMapWrite) {
+		t.Fatalf("map-update forge is not fatal: %v", err)
+	}
+}
+
+func TestValidatePluginROWrites_MapDeleteHelperOnROMapIsFlagged(t *testing.T) {
+	// bpf_map_delete_elem on a shared RO map is a write and is refused; on a
+	// non-integrity RO map it is a plain RO violation (warn-downgradable).
+	prog := buildSpec("del", ebpf.XDP, asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("fdb_map"),
+		asm.Mov.Reg(asm.R2, asm.R10),
+		asm.FnMapDeleteElem.Call(),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	ro := map[string]struct{}{"fdb_map": {}}
+	err := ValidatePluginProgram(prog, ro)
+	if err == nil {
+		t.Fatal("bpf_map_delete_elem on an RO map was not caught")
+	}
+	if !errors.Is(err, ErrPluginROWrite) {
+		t.Fatalf("map-delete on RO map should be an RO write: %v", err)
+	}
+	if errors.Is(err, ErrPluginIntegrityMapWrite) {
+		t.Fatalf("a non-integrity RO map delete must stay warn-downgradable: %v", err)
+	}
+}
+
+func TestValidatePluginROWrites_MapLookupOnROMapIsAllowed(t *testing.T) {
+	// Reading a shared RO map is fine: bpf_map_lookup_elem(&tailcall_ctx_map)
+	// is exactly what tailcall_ctx_read does.
+	prog := buildSpec("look", ebpf.XDP, asm.Instructions{
+		asm.LoadMapPtr(asm.R1, 0).WithReference("tailcall_ctx_map"),
+		asm.Mov.Reg(asm.R2, asm.R10),
+		asm.FnMapLookupElem.Call(),
+		callToSymbol(SymTailcallEpilogue),
+		asm.Return(),
+	})
+	ro := map[string]struct{}{"tailcall_ctx_map": {}}
+	if err := ValidatePluginProgram(prog, ro); err != nil {
+		t.Fatalf("reading a shared RO map was rejected: %v", err)
+	}
+}

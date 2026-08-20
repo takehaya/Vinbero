@@ -383,6 +383,19 @@ func isMapWrite(ins asm.Instruction) bool {
 	return false
 }
 
+// isMapMutateHelper reports whether a BPF helper writes the map passed as its
+// first argument. These forge map state without a store instruction, so the
+// RO-write scan checks them the same way it checks ST/STX. Read helpers
+// (bpf_map_lookup_elem, bpf_map_peek_elem) are excluded: a plugin may read a
+// shared RO map, only not write it.
+func isMapMutateHelper(fn asm.BuiltinFunc) bool {
+	switch fn {
+	case asm.FnMapUpdateElem, asm.FnMapDeleteElem, asm.FnMapPushElem, asm.FnMapPopElem:
+		return true
+	}
+	return false
+}
+
 // isStackStore reports whether the store targets the BPF stack frame
 // (R10 / RFP). R10 is the read-only frame pointer; clang lowers C local
 // variables (including the `struct foo key;` pattern feeding
@@ -546,6 +559,25 @@ func checkROWrites(spec *ebpf.ProgramSpec, roMaps map[string]struct{}) error {
 		if in.OpCode.JumpOp() == asm.Call {
 			fn := asm.BuiltinFunc(in.Constant)
 			r1Map := lastMap[1]
+			// A map-mutating helper writes the map named by its first
+			// argument, which the ABI passes in R1. A store instruction is
+			// not the only way to write a map: bpf_map_update_elem /
+			// bpf_map_delete_elem on a hash map (sid_function_map,
+			// sid_aux_map) forge state without ever emitting a ST/STX, so
+			// they are checked here on the same footing. The map is a
+			// LoadMapPtr constant tracked in lastMap[1]; an integrity map is
+			// fatal, an unresolved argument in the entry body is fail-closed
+			// fatal (a subprogram may receive the map as an argument).
+			if isMapMutateHelper(fn) {
+				if r1Map != "" {
+					if _, ro := roMaps[r1Map]; ro {
+						_, integrity := integrityMapNames[r1Map]
+						violations = append(violations, roViolation{insIdx: i, mapName: r1Map, fatal: integrity})
+					}
+				} else if mainBody {
+					violations = append(violations, roViolation{insIdx: i, fatal: true})
+				}
+			}
 			for r := 1; r <= 5; r++ {
 				lastMap[r] = ""
 			}

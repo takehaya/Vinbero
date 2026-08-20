@@ -606,11 +606,19 @@ func TestOutOfScopeLocalSIDRefusesAtCommit(t *testing.T) {
 func TestOutOfScopeAdvertiseRefusesAtCommitAndDerivesOnSuccess(t *testing.T) {
 	adv := &fakeAdvertiser{}
 	set := NewAdvertiseSet(adv, NewLeases())
+	// The plugin may advertise only a SID it was allocated. Allocate one in
+	// "main" (fd00:1::/48), which the fake hands out as fd00:1::1 -- the SID
+	// the in-scope route below advertises.
+	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	if _, _, err := sids.Apply(ownerA, []LocalSID{{Name: "s", Locator: "main", Slot: 32}}, unlimited); err != nil {
+		t.Fatalf("allocate sid: %v", err)
+	}
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner:        ownerA,
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
 		Advertise:    set,
+		LocalSIDs:    sids,
 		Capabilities: testCaps(),
 		Guard:        NewGuard(narrowScope(t), testLocators(), testBindings()),
 	})
@@ -862,6 +870,18 @@ func TestHeadendSlotGrantIsPerFamily(t *testing.T) {
 // flap withdraw/re-advertise on each reconcile: the resolved RD is
 // canonicalized to match the live keys, so a reconcile with nothing changed
 // withdraws nothing.
+// ownedSIDs is a LocalSIDSet with fd00:1::1 (locator "main", first allocation)
+// already allocated to ownerA, for reconcile tests whose live advertisement
+// carries that SID and must be recognised as the plugin's own.
+func ownedSIDs(t *testing.T) *LocalSIDSet {
+	t.Helper()
+	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	if _, _, err := sids.Apply(ownerA, []LocalSID{{Name: "s", Locator: "main", Slot: 32}}, unlimited); err != nil {
+		t.Fatalf("allocate sid: %v", err)
+	}
+	return sids
+}
+
 func TestANonCanonicalBindingRDDoesNotFlapOnReconcile(t *testing.T) {
 	adv := &fakeAdvertiser{}
 	set := NewAdvertiseSet(adv, NewLeases())
@@ -871,6 +891,7 @@ func TestANonCanonicalBindingRDDoesNotFlapOnReconcile(t *testing.T) {
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
 		Advertise:    set,
+		LocalSIDs:    ownedSIDs(t),
 		Capabilities: testCaps(),
 		Guard:        NewGuard(narrowScope(t), testLocators(), bindings),
 	})
@@ -949,6 +970,7 @@ func TestReconcileIsConsistentUnderAConcurrentBindingEdit(t *testing.T) {
 		Headend:      newFakeHeadendOps(),
 		Leases:       NewLeases(),
 		Advertise:    set,
+		LocalSIDs:    ownedSIDs(t),
 		Capabilities: testCaps(),
 		Guard:        NewGuard(narrowScope(t), testLocators(), bindings),
 	})
@@ -998,5 +1020,59 @@ func TestReconcileIsConsistentUnderAConcurrentBindingEdit(t *testing.T) {
 		if len(r.RouteTargets) != 1 || r.RouteTargets[0] != rtA {
 			t.Fatalf("route RTs = %v, want the last binding's %q; a mix or empty means the reconcile was overtaken", r.RouteTargets, rtA)
 		}
+	}
+}
+
+// A plugin may advertise only a SID it was itself allocated, not another
+// party's SID that happens to fall inside one of its granted locators (the
+// built-in exporter and operators allocate from the same locator manager).
+func TestAdvertiseRefusesAnInLocatorSIDThePluginDidNotAllocate(t *testing.T) {
+	adv := &fakeAdvertiser{}
+	set := NewAdvertiseSet(adv, NewLeases())
+	sids := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	// Allocate one SID in "main"; the fake hands out fd00:1::1.
+	if _, _, err := sids.Apply(ownerA, []LocalSID{{Name: "s", Locator: "main", Slot: 32}}, unlimited); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner:        ownerA,
+		Headend:      newFakeHeadendOps(),
+		Leases:       NewLeases(),
+		Advertise:    set,
+		LocalSIDs:    sids,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), testBindings()),
+	})
+	if err != nil {
+		t.Fatalf("ops: %v", err)
+	}
+	if err := ops.Publish(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	apply := func(sid string) error {
+		gen, _ := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE))
+		chunk, _ := proto.Marshal(&v1.PluginApplyChunk{AdvertisedRoutes: []*v1.PluginAdvertisedRoute{
+			{Family: "vpnv4", Vrf: testVRF, Prefix: "10.7.0.0/24", Srv6Sid: sid, NextHop: "2001:db8::1"},
+		}})
+		if err := ops.ApplyPut(gen, chunk); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		return ops.ApplyCommit(gen)
+	}
+
+	// fd00:1::2 is inside "main" but was never allocated to this plugin.
+	if err := apply("fd00:1::2"); err == nil {
+		t.Fatal("a plugin advertised an in-locator SID it never allocated")
+	}
+	if set.LiveCount(ownerA) != 0 {
+		t.Fatal("the refused advertisement left a route live")
+	}
+	// The SID it holds is accepted.
+	if err := apply("fd00:1::1"); err != nil {
+		t.Fatalf("the plugin's own SID was refused: %v", err)
+	}
+	if set.LiveCount(ownerA) != 1 {
+		t.Fatal("the plugin's own SID did not advertise")
 	}
 }

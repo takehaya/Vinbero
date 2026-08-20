@@ -272,9 +272,14 @@ import しない経路になり、成功したように見えて誰にも届か�
 RT の導出が決めるのは経路を誰が import するかで、経路が実際にどこへ向かうかは
 prefix-SID TLV の SRv6 SID が決めます。導出だけでは、VRF blue に scope された
 plugin が blue の prefix を VRF red の service SID の裏に広告して blue の traffic を
-red へ流せます。そこで VPN 経路の SID も、plugin に渡した locator の配下に
-限ります。ipv6_unicast の prefix を locator に閉じ込めるのと同じ抑え方です。
-next hop や grant 内の segment を縛らない理由は、次の節でまとめます。
+red へ流せます。そこで VPN 経路の SID は、plugin が自分で確保した SID
+(`LocalSIDSet.LiveSIDs`) に限ります。同じ `locator.Manager` から built-in の
+auto-exporter や operator の service SID も同一 locator 内に確保されるため、locator の
+配下という照合だけでは他人の SID を裏に広告できてしまい、locator 名の plugin 間排他
+だけでは built-in や operator の確保を止められないためです。確保した SID の address を
+持つのは host なので、この照合は owner の live SID 集合を知る apply 経路で行います。
+まだ確保していない SID は失敗し、local SID の宣言が適用された後の reconcile が
+やり直します。next hop や grant 内の segment を縛らない理由は、次の節でまとめます。
 
 ### scope が縛る軸と grant 内の自由
 

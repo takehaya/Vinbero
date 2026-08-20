@@ -658,6 +658,16 @@ func (p *PluginOps) checkScope(txn *applyTxn) error {
 			if err != nil {
 				return fmt.Errorf("apply commit: %w", err)
 			}
+			// The guard held the SID inside a granted locator, but a locator
+			// can also hold the built-in exporter's or an operator's service
+			// SIDs. A plugin may advertise only a SID it was itself allocated,
+			// so it cannot point a prefix at another party's SID that happens
+			// to share its locator. Checked here, where the owner's live SID
+			// set is known; a SID not yet allocated fails and the reconcile
+			// retries once the local-SID declaration has been applied.
+			if err := p.sidIsOwned(out); err != nil {
+				return fmt.Errorf("apply commit: %w", err)
+			}
 			resolved = append(resolved, out)
 		}
 		if err := p.guard.checkAdvertiseSet(resolved); err != nil {
@@ -681,6 +691,26 @@ func (p *PluginOps) checkScope(txn *applyTxn) error {
 				return fmt.Errorf("apply commit: %w", err)
 			}
 		}
+	}
+	return nil
+}
+
+// sidIsOwned refuses a VPN advertisement whose SRv6 SID is not one this
+// plugin was allocated. A route with no SID (an ipv6-unicast advertisement)
+// carries none to check.
+func (p *PluginOps) sidIsOwned(r AdvertisedRoute) error {
+	if r.SRv6SID == "" {
+		return nil
+	}
+	sid, err := netip.ParseAddr(r.SRv6SID)
+	if err != nil {
+		// resolveAdvertised already parsed it; a failure here is defensive.
+		return fmt.Errorf("advertise: %s %s SRv6 SID %q: %w", r.Family, r.Prefix, r.SRv6SID, err)
+	}
+	if p.localSIDs == nil || !p.localSIDs.OwnsSID(p.owner, sid) {
+		return fmt.Errorf("advertise: %s %s SRv6 SID %s is not one this plugin was allocated; "+
+			"a plugin may advertise only its own SIDs, not another party's SID that shares its locator",
+			r.Family, r.Prefix, r.SRv6SID)
 	}
 	return nil
 }
@@ -1050,6 +1080,12 @@ func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) 
 		// targets.
 		resolved, err := p.guard.resolveAdvertised(r)
 		if err != nil {
+			continue
+		}
+		// The SID must still be one this plugin holds: a plugin that released
+		// its local SID while leaving the advertisement live stops advertising
+		// it on the next reconcile, the same bound the apply path applies.
+		if err := p.sidIsOwned(resolved); err != nil {
 			continue
 		}
 		// The RD comes off the binding verbatim, but the live keys were

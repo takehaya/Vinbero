@@ -380,6 +380,22 @@ func (l *LocalSIDSet) LiveCount(owner bpf.OwnerTag) int {
 	return len(l.live[owner])
 }
 
+// OwnsSID reports whether the owner was allocated this exact address. It is
+// how the advertise path bounds a VPN route's SID to the plugin's own SID
+// space rather than to its locators: a granted locator can also hold the
+// built-in exporter's or an operator's service SIDs, so locator containment
+// alone would let a plugin advertise another party's SID inside it.
+func (l *LocalSIDSet) OwnsSID(owner bpf.OwnerTag, sid netip.Addr) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, got := range l.live[owner] {
+		if got.SID == sid {
+			return true
+		}
+	}
+	return false
+}
+
 // install writes the dispatch entry that points a SID at the plugin's
 // data-plane slot.
 func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID) error {
