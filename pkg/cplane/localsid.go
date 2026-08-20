@@ -13,6 +13,13 @@ import (
 	"github.com/takehaya/vinbero/pkg/locator"
 )
 
+// errInstallEntryStranded reports that install wrote a dispatch entry it then
+// could not roll back, so the entry is still live in the map. The caller must
+// not release the SID address: the live entry still dispatches on it, and
+// returning it to the pool would let a later allocation hand the same address
+// out and collide with the entry nothing is tracking.
+var errInstallEntryStranded = errors.New("local sid: dispatch entry stranded after a failed rollback")
+
 // SIDAllocator hands out SRv6 SIDs from the configured locators.
 // *locator.Manager satisfies it.
 type SIDAllocator interface {
@@ -233,6 +240,14 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 			}
 			auxIndex, err := l.install(owner, got.SID, want)
 			if err != nil {
+				if errors.Is(err, errInstallEntryStranded) {
+					// The dispatch entry is still live at got.SID. Keep the
+					// address and leave current[name] pointing at the old
+					// record so a later reconcile removes the entry by prefix
+					// and retries, rather than releasing an address the map
+					// still uses.
+					return nil, res, err
+				}
 				l.alloc.ReleaseSID(got.SID)
 				l.mu.Lock()
 				delete(current, name)
@@ -267,6 +282,20 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 		}
 		auxIndex, err := l.install(owner, sid, want)
 		if err != nil {
+			if errors.Is(err, errInstallEntryStranded) {
+				// The dispatch entry is live at sid but the rollback failed.
+				// Track it (auxIndex unknown, so 0 -- the map-layer delete
+				// withdraws any grant regardless) so a later reconcile removes
+				// it by prefix; releasing the address would collide with the
+				// still-live entry.
+				l.mu.Lock()
+				current[name] = AllocatedSID{
+					Name: name, SID: sid, Locator: want.Locator,
+					slot: want.Slot, decapVRF: want.DecapVRF,
+				}
+				l.mu.Unlock()
+				return nil, res, err
+			}
 			// Give the address back rather than leaking it: nothing points
 			// at it, and the pool is finite.
 			l.alloc.ReleaseSID(sid)
@@ -485,8 +514,13 @@ func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID)
 		// rather than plumbed across the cplane/server boundary here.
 		if err := l.grants.PutEndtVRFGrant(uint32(entry.AuxIndex), vrfIfindex); err != nil {
 			// Undo the dispatch entry so nothing is left pointing at a decap
-			// with no grant, which the data plane would drop on.
-			_ = l.sids.DeleteSidFunction(prefix, owner)
+			// with no grant, which the data plane would drop on. If the undo
+			// itself fails the entry is still live: signal that so the caller
+			// keeps the address rather than releasing one the map still uses.
+			if derr := l.sids.DeleteSidFunction(prefix, owner); derr != nil {
+				return 0, fmt.Errorf("%w: local sid %q: grant decap VRF %q failed (%v) and rollback failed (%v)",
+					errInstallEntryStranded, want.Name, want.DecapVRF, err, derr)
+			}
 			return 0, fmt.Errorf("local sid %q: grant decap VRF %q: %w", want.Name, want.DecapVRF, err)
 		}
 	}

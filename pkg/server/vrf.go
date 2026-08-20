@@ -283,10 +283,14 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 	// it at a now-freed number. The device is gone, so resolving this VRF fails
 	// and no further grant can be written for it; sweeping any that raced makes
 	// them fail closed on a dead ifindex rather than following the number to a
-	// different device. The device is already deleted, so a sweep error cannot
-	// fail the delete -- it is retried on the next delete of a VRF that reuses
-	// the number. A full close of the window needs the install and the delete
-	// to share a lock, which crosses the cplane/VRF boundary.
+	// different device. The device is already deleted, so the delete cannot be
+	// failed here without leaving the manager and the kernel inconsistent; the
+	// sweep is best-effort. If it errors, the near-impossible residual is a
+	// grant left on the freed ifindex until that number is reused -- there is
+	// no self-healing retry, because a VRF that later reuses the number is
+	// itself refused deletion by the grant check above. A full close of the
+	// window (and the elimination of this sweep) needs the install and the
+	// delete to share a lock, which crosses the cplane/VRF boundary.
 	if ifindex != 0 {
 		_, _ = s.sids.DeleteEndtVRFGrantsByIfindex(ifindex)
 	}

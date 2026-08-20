@@ -56,13 +56,14 @@ func locatorSuffix(name string) string {
 
 // fakeSIDOps records the dispatch entries a reconcile installs.
 type fakeSIDOps struct {
-	mu       sync.Mutex
-	entries  map[string]*bpf.SidFunctionEntry
-	owners   map[string]bpf.OwnerTag
-	failOn   string // prefix whose install fails
-	installs int
-	auxNext  uint16 // next aux index to stamp when an entry carries aux
-	ops      []string
+	mu        sync.Mutex
+	entries   map[string]*bpf.SidFunctionEntry
+	owners    map[string]bpf.OwnerTag
+	failOn    string // prefix whose install fails
+	delFailOn string // prefix whose delete fails
+	installs  int
+	auxNext   uint16 // next aux index to stamp when an entry carries aux
+	ops       []string
 }
 
 func newFakeSIDOps() *fakeSIDOps {
@@ -97,6 +98,9 @@ func (f *fakeSIDOps) CreateSidFunction(prefix string, e *bpf.SidFunctionEntry, a
 func (f *fakeSIDOps) DeleteSidFunction(prefix string, requester bpf.OwnerTag) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if prefix == f.delFailOn {
+		return errors.New("simulated delete failure")
+	}
 	if cur, ok := f.owners[prefix]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}
@@ -161,6 +165,7 @@ func (f *fakeSIDOps) entryFor(prefix string) (*bpf.SidFunctionEntry, bool) {
 type fakeGrantOps struct {
 	mu     sync.Mutex
 	grants map[uint32]uint32 // auxIndex -> vrfIfindex
+	putErr error             // when set, PutEndtVRFGrant fails
 	ops    []string
 }
 
@@ -171,6 +176,9 @@ func newFakeGrantOps() *fakeGrantOps {
 func (f *fakeGrantOps) PutEndtVRFGrant(auxIndex, vrfIfindex uint32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.putErr != nil {
+		return f.putErr
+	}
 	if auxIndex == 0 {
 		return errors.New("aux index must be non-zero")
 	}
@@ -270,6 +278,47 @@ func TestLocalSIDDecapVRFUnsupported(t *testing.T) {
 	}}, -1)
 	if err == nil {
 		t.Fatal("want error for decap VRF with no grant support, got nil")
+	}
+}
+
+// When the grant write fails and the rollback of the dispatch entry also
+// fails, the entry is still live in the map. The address must not be released
+// -- a later allocation would collide with the entry nothing else tracks --
+// and the SID stays tracked so a later reconcile removes it by prefix.
+func TestLocalSIDDecapVRFStrandedEntryKeepsAddress(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	grants := newFakeGrantOps()
+	grants.putErr = errors.New("grant map full")
+	set := NewLocalSIDSet(alloc, sids, grants, func(string) (uint32, error) { return 9, nil })
+	owner := bpf.OwnerTag("plugin:demo")
+
+	// The rollback delete of the just-created entry also fails, so the entry
+	// is stranded.
+	decl := []LocalSID{{Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-cust"}}
+	// The address the allocator will hand out, so the delete of its prefix can
+	// be made to fail.
+	sids.delFailOn = "fd00:1::1/128"
+
+	_, _, err := set.Apply(owner, decl, -1)
+	if err == nil {
+		t.Fatal("want an error when the grant write and its rollback both fail")
+	}
+	if !errors.Is(err, errInstallEntryStranded) {
+		t.Fatalf("want errInstallEntryStranded, got %v", err)
+	}
+	if alloc.releasedCount() != 0 {
+		t.Fatalf("released %d addresses; a stranded entry's address must be kept", alloc.releasedCount())
+	}
+	// The entry is still in the map and still tracked, so a later reconcile
+	// can remove it. Redeclaring an empty set removes it (the delete now
+	// succeeds).
+	sids.delFailOn = ""
+	if _, _, err := set.Apply(owner, nil, -1); err != nil {
+		t.Fatalf("cleanup apply: %v", err)
+	}
+	if sids.count() != 0 {
+		t.Fatalf("stranded entry not cleaned up: %d entries remain", sids.count())
 	}
 }
 
