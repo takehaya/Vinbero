@@ -29,10 +29,14 @@ QUEUES=${QUEUES:-32}
 COALESCE_US=${COALESCE_US:-}
 MODE="${1:-apply}"
 
-if pgrep -x vinberod > /dev/null; then
-    echo "vinberod is running; run teardown_dut.sh first (channel changes need XDP detached)" >&2
+for pid in $(pgrep -x vinberod); do
+    # A defunct vinberod (e.g. inside a stale lab container) holds no NIC
+    # resources; only a live process blocks the channel change.
+    state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null || echo "")
+    [ "$state" = "Z" ] && continue
+    echo "vinberod is running (pid $pid); run teardown_dut.sh first (channel changes need XDP detached)" >&2
     exit 1
-fi
+done
 if systemctl is-active --quiet irqbalance; then
     echo "stopping irqbalance (it would rewrite the pinned affinities)"
     sudo systemctl stop irqbalance
@@ -40,6 +44,17 @@ fi
 
 case "$MODE" in
     apply)
+        # The irdma auxiliary driver pins the queue layout of ice ports it is
+        # bound to, and ethtool -L then fails with "Device or resource busy".
+        # Unbind the RoCE aux devices (module removal would take ice down with
+        # it). Rebind manually via .../bind if RDMA on these ports is needed.
+        if [ -d /sys/bus/auxiliary/drivers/irdma.gen_2 ]; then
+            for aux in /sys/bus/auxiliary/drivers/irdma.gen_2/ice.roce.*; do
+                [ -e "$aux" ] || continue
+                basename "$aux" | sudo tee /sys/bus/auxiliary/drivers/irdma.gen_2/unbind > /dev/null
+                echo "unbound $(basename "$aux") from irdma (was pinning the queue layout)"
+            done
+        fi
         sudo ethtool -L "$IN_IF" combined "$QUEUES"
         sleep 2
         i=0

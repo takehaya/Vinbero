@@ -1,6 +1,6 @@
 internal:
   devices:
-    - enp138s0f0
+    - enp138s0f0np0
     - enp138s0f1np1
   bpf:
     device_mode: "driver"
