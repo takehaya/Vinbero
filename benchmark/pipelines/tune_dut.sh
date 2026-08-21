@@ -46,7 +46,7 @@ case "$MODE" in
         # The irdma auxiliary driver pins the queue layout of ice ports it is
         # bound to, and ethtool -L then fails with "Device or resource busy".
         # Unbind the RoCE aux devices (module removal would take ice down with
-        # it). Rebind manually via .../bind if RDMA on these ports is needed.
+        # it); revert rebinds them.
         if [ -d /sys/bus/auxiliary/drivers/irdma.gen_2 ]; then
             for aux in /sys/bus/auxiliary/drivers/irdma.gen_2/ice.roce.*; do
                 [ -e "$aux" ] || continue
@@ -72,6 +72,17 @@ case "$MODE" in
         sudo ethtool -L "$IN_IF" combined 64
         sudo ethtool -C "$IN_IF" adaptive-rx on adaptive-tx on \
             rx-usecs 50 tx-usecs 50 2>/dev/null || true
+        # Rebind the RoCE aux devices that apply unbound from irdma —
+        # after the channel restore, since a bound irdma pins the queue
+        # layout again. Binding an already-bound device just fails, so
+        # no state file is needed.
+        if [ -d /sys/bus/auxiliary/drivers/irdma.gen_2 ]; then
+            for aux in /sys/bus/auxiliary/devices/ice.roce.*; do
+                [ -e "$aux" ] || continue
+                basename "$aux" | sudo tee /sys/bus/auxiliary/drivers/irdma.gen_2/bind > /dev/null 2>&1 \
+                    && echo "rebound $(basename "$aux") to irdma" || true
+            done
+        fi
         # apply stops irqbalance so it cannot rewrite the pinned
         # affinities; bring it back so the host returns to normal
         # IRQ spreading.

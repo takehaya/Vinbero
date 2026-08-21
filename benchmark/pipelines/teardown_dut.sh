@@ -11,7 +11,16 @@ if [ -f "$PID_FILE" ]; then
     sleep 1
     sudo rm -f "$PID_FILE"
 fi
-sudo pkill -x vinberod 2>/dev/null || true
+# Catch strays from a setup that died before writing the PID file, but
+# only ones running this repo's binary; an unrelated vinberod on the
+# host is not ours to kill. The prefix match keeps covering a binary
+# rebuilt since start (/proc exe then reads "... (deleted)").
+for pid in $(pgrep -x vinberod); do
+    exe=$(sudo readlink "/proc/$pid/exe" 2>/dev/null || echo "")
+    case "$exe" in
+        "$VINBEROD_BIN"*) sudo kill "$pid" 2>/dev/null || true ;;
+    esac
+done
 sleep 1
 
 echo "=== clear XDP / restore NICs ==="

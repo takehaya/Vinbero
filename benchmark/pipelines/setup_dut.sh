@@ -32,6 +32,16 @@ for bin in "$VINBEROD_BIN" "$VINBERO_BIN"; do
     [ -x "$bin" ] || { echo "$bin not found; run 'make build' first" >&2; exit 1; }
 done
 
+# Any live vinberod holds an XDP attachment on these NICs, so bail out
+# before the force-detach below cuts its dataplane. Catch processes
+# without a PID file too (a previous setup that died before writing it).
+for pid in $(pgrep -x vinberod); do
+    state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null || echo "")
+    [ "$state" = "Z" ] && continue
+    echo "vinberod is running (pid $pid); run teardown_dut.sh first" >&2
+    exit 1
+done
+
 echo "=== NIC preparation ==="
 # Clear any stale XDP attachment (a crashed vinberod leaves its
 # bpf_link attached and blocks re-attachment).
@@ -71,10 +81,6 @@ case "$SCENARIO" in
 esac
 
 echo "=== start vinberod ==="
-if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null 2>&1; then
-    echo "vinberod already running (pid $(cat "$PID_FILE")); run teardown_dut.sh first" >&2
-    exit 1
-fi
 sudo setsid "$VINBEROD_BIN" -c "$CONFIG" > "$LOG_FILE" 2>&1 &
 wait_health 15 || { cat "$LOG_FILE" >&2; exit 1; }
 # $! is the sudo wrapper; vinbero-ecmpdemo reads the daemon's map fds

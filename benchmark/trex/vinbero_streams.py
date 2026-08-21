@@ -149,31 +149,39 @@ def main():
     # unwrap() below corrects at most one 2^32 wrap of the 32-bit port
     # counters; at 64B line rate a second wrap becomes possible past
     # ~57s, so refuse durations where it would go undetected.
-    if args.duration > 55:
-        sys.exit("--duration > 55 can wrap the 32-bit port counters "
-                 "twice; split into shorter runs")
+    if not 0 < args.duration <= 55:
+        sys.exit("--duration must be 1..55: longer runs can wrap the "
+                 "32-bit port counters twice; split into shorter runs")
 
     frames = build_frames(args.scenario, args.size, args.flows)
     wire_len = len(frames[0])
 
     c = STLClient(server="127.0.0.1")
     c.connect()
-    c.acquire(ports=[0, 1], force=True)
-    c.reset(ports=[0, 1])
-    # mult scales the stream pps: "100%" normalizes the total to line
-    # rate (ignoring the per-stream pps), while "1" honors --pps as-is.
-    per_stream = (args.pps or 1e6) / args.flows
-    mult = "1" if args.pps else "100%"
-    c.add_streams(build_streams(frames, per_stream), ports=[0])
-    c.clear_stats()
-    c.start(ports=[0], mult=mult)
-    time.sleep(args.duration)
-    c.stop(ports=[0])
-    # Let in-flight frames drain into port 1 before the final read.
-    time.sleep(1)
-    stats = c.get_stats()
-    tx = stats[0]
-    rx = stats[1]
+    try:
+        c.acquire(ports=[0, 1], force=True)
+        c.reset(ports=[0, 1])
+        # mult scales the stream pps: "100%" normalizes the total to line
+        # rate (ignoring the per-stream pps), while "1" honors --pps as-is.
+        per_stream = (args.pps or 1e6) / args.flows
+        mult = "1" if args.pps else "100%"
+        c.add_streams(build_streams(frames, per_stream), ports=[0])
+        c.clear_stats()
+        c.start(ports=[0], mult=mult)
+        time.sleep(args.duration)
+        c.stop(ports=[0])
+        # Let in-flight frames drain into port 1 before the final read.
+        time.sleep(1)
+        stats = c.get_stats()
+        tx = stats[0]
+        rx = stats[1]
+    finally:
+        # An exception mid-run must not leave line-rate traffic running
+        # or the ports acquired. stop() on an already-stopped port is a
+        # no-op.
+        c.stop(ports=[0])
+        c.release(ports=[0, 1])
+        c.disconnect()
 
     def unwrap(v):
         # The port counters come from 32-bit hardware registers; when
@@ -207,8 +215,6 @@ def main():
         "loss_pct":     round((1.0 - ipackets / expected) * 100.0, 4)
                         if expected else 0.0,
     }))
-    c.release(ports=[0, 1])
-    c.disconnect()
 
 
 if __name__ == "__main__":

@@ -27,6 +27,9 @@ else
 fi
 
 mkdir -p "$RESULT_DIR"
+# Drop rep files from a previous sweep so the aggregation glob at the
+# end never mixes in stale reps (e.g. REPS=5 followed by REPS=3).
+rm -f "$RESULT_DIR/${SCENARIO}"_rep*.csv
 
 echo "=== deploy TRex driver to $TREX_HOST ==="
 ssh "$TREX_HOST" "mkdir -p ~/$TREX_DRIVER_DIR"
