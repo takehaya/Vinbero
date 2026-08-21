@@ -81,7 +81,7 @@ FLOWS=256 ./run_bench.sh encaps-v4 64   # flow 数を増やして全 RSS queue �
 
 ## smoke 確認 (計測前のデータプレーン疎通)
 
-計測用 config は `enable_stats: false` です。経路がただしく通っているかは stats を有効にした config で低レートを流して確認します。
+計測用 config は `enable_stats: false` です。経路が正しく通っているかは stats を有効にした config で低レートを流して確認します。
 
 ```bash
 ./setup_dut.sh encaps-v4 --stats

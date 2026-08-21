@@ -37,7 +37,8 @@ def main(argv):
     reps = [load(p) for p in paths]
     keys = sorted(set().union(*[set(r) for r in reps]))
 
-    print(f"# n={len(reps)} reps from: {', '.join(paths)}")
+    # Keep stdout pure CSV so it can be piped into other tools.
+    print(f"n={len(reps)} reps from: {', '.join(paths)}", file=sys.stderr)
     print("scenario,size,n,"
           "rx_mpps_mean,rx_mpps_sd,tx_mpps_mean,tx_mpps_sd,"
           "loss_pct_mean,loss_pct_sd")

@@ -15,8 +15,8 @@ internal:
     add_caller: false
 
 settings:
-  # Keep stats off for measurement runs; the smoke phase flips this to
-  # true via configs/vinbero-bench-stats.yml to verify the datapath.
+  # Smoke/debug config: stats stay on so the datapath can be verified
+  # at low rate; measurement runs use vinbero-bench.yml (stats off).
   enable_stats: true
   fdb_aging_seconds: 0
   entries:

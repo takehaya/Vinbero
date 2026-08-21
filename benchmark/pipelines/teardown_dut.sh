@@ -6,15 +6,13 @@ cd "$(dirname "$0")"
 . ./common.sh
 
 echo "=== stop vinberod ==="
-if [ -f "$PID_FILE" ]; then
-    sudo pkill -F "$PID_FILE" 2>/dev/null || true
-    sleep 1
-    sudo rm -f "$PID_FILE"
-fi
-# Catch strays from a setup that died before writing the PID file, but
-# only ones running this repo's binary; an unrelated vinberod on the
-# host is not ours to kill. The prefix match keeps covering a binary
-# rebuilt since start (/proc exe then reads "... (deleted)").
+# The PID file is only bookkeeping: a stale PID may have been reused by
+# an unrelated process, so never kill by it. The exe-verified loop
+# below stops every vinberod that is actually ours — including strays
+# from a setup that died before writing the PID file — and skips any
+# unrelated vinberod on the host. The prefix match keeps covering a
+# binary rebuilt since start (/proc exe then reads "... (deleted)").
+sudo rm -f "$PID_FILE"
 for pid in $(pgrep -x vinberod); do
     exe=$(sudo readlink "/proc/$pid/exe" 2>/dev/null || echo "")
     case "$exe" in
