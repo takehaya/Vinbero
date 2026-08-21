@@ -256,8 +256,15 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 					// the next reconcile cannot mistake it for up to date --
 					// it removes the entry by prefix and reinstalls -- rather
 					// than releasing an address the map still uses.
+					//
+					// auxIndex is cleared: removeEntry earlier freed got's old
+					// index, so keeping it would make the next removeEntry delete
+					// a grant at an index the allocator may have reassigned to
+					// another SID. The map-layer delete withdraws the live
+					// entry's grant by its real index regardless.
 					strandedGot := got
 					strandedGot.stranded = true
+					strandedGot.auxIndex = 0
 					l.mu.Lock()
 					current[name] = strandedGot
 					l.mu.Unlock()
@@ -516,18 +523,17 @@ func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID)
 		return 0, fmt.Errorf("local sid %q: install %s: %w", want.Name, prefix, err)
 	}
 	if want.DecapVRF != "" {
-		// ponytail: the ifindex resolved above and written here is not
-		// serialized against a concurrent VrfDelete. If the VRF is deleted
-		// between the resolve and this write, the grant records a freed
-		// ifindex. VrfDelete refuses while a grant is live and sweeps the
-		// ifindex after teardown, so a grant that raced that far ends up on a
-		// dead ifindex and fails closed (fib-lookup miss -> drop) -- the same
-		// property every ifindex-keyed VRF reference in the tree has, since
-		// Linux does not promptly reuse an ifindex. A full close (so a grant
-		// can never outlive its VRF even for an instant) needs this resolve+Put
-		// and VrfDelete's check+teardown to share a leaf lease acquired under
-		// applyMu / the VRF mutation mutex; deferred as a design decision
-		// rather than plumbed across the cplane/server boundary here.
+		// The ifindex resolved above and written here is not serialized against
+		// a concurrent VrfDelete. If the VRF is deleted between the resolve and
+		// this write, the grant records a freed ifindex. VrfDelete refuses while
+		// a grant is live and sweeps the ifindex after teardown, so a grant that
+		// raced that far ends up on a dead ifindex and fails closed (fib-lookup
+		// miss -> drop) -- the same property every ifindex-keyed VRF reference
+		// in the tree has, since Linux does not promptly reuse an ifindex. A
+		// full close (so a grant can never outlive its VRF even for an instant)
+		// would need this resolve+Put and VrfDelete's check+teardown to share a
+		// leaf lease acquired under applyMu / the VRF mutation mutex; that is
+		// left out here rather than plumbed across the cplane/server boundary.
 		if err := l.grants.PutEndtVRFGrant(uint32(entry.AuxIndex), vrfIfindex); err != nil {
 			// Undo the dispatch entry so nothing is left pointing at a decap
 			// with no grant, which the data plane would drop on. If the undo
@@ -548,10 +554,13 @@ func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID)
 // Deleting the entry is what frees the aux index bound to it: the map
 // layer allocates one per install and releases it only on delete.
 //
-// The grant is withdrawn first, while the aux index is still bound to this
-// SID and so cannot be handed to another install: deleting the SID entry
-// frees the index, and a grant deleted after that could race a concurrent
-// install that reused the index and wrote its own grant there.
+// The grant is withdrawn here too, keyed by the tracked index. This is
+// belt-and-suspenders: DeleteSidFunction's map layer already withdraws the
+// grant by the entry's real aux index on every delete path. Doing it here as
+// well keeps the withdrawal observable at this layer and orders it before the
+// index is freed. It relies on got.auxIndex being the current index, so a
+// record whose index is unknown or stale carries auxIndex 0 and defers wholly
+// to the map layer (see the stranded paths in Apply).
 func (l *LocalSIDSet) removeEntry(owner bpf.OwnerTag, got AllocatedSID) error {
 	if got.decapVRF != "" && got.auxIndex != 0 && l.grants != nil {
 		if err := l.grants.DeleteEndtVRFGrant(got.auxIndex); err != nil {

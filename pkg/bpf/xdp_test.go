@@ -4072,7 +4072,7 @@ func TestXDPProgPluginAuxNotReadByBuiltin(t *testing.T) {
 // is keyed by the SID's aux_index, which the built-in reads from tailcall_ctx.
 func (h *xdpTestHelper) grantPluginEndtVrf(auxIndex, ifindex uint32) {
 	h.t.Helper()
-	val := BpfPluginEndtVrf{VrfIfindex: ifindex, Generation: 1}
+	val := BpfPluginEndtVrf{VrfIfindex: ifindex}
 	if err := h.objs.PluginEndtVrfMap.Update(auxIndex, val, ebpf.UpdateAny); err != nil {
 		h.t.Fatalf("write plugin End.DT VRF grant: %v", err)
 	}
@@ -4111,15 +4111,36 @@ func (h *xdpTestHelper) createPluginDT4Sid(prefix string, slot uint32) uint32 {
 func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
 	const pluginSlot = uint32(32) // an endpoint plugin slot (>= ENDPOINT_PLUGIN_BASE)
 	sid := "fd00:1:700::10"
-	buildPkt := func(t *testing.T) []byte {
-		t.Helper()
-		pkt, err := buildEncapsulatedPacketNoSRH(
-			net.ParseIP("fd00:1:1::1"), net.ParseIP(sid),
-			net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
-		if err != nil {
-			t.Fatalf("build packet: %v", err)
-		}
-		return pkt
+
+	// The grant is resolved on two distinct dispatch paths: the SRH path
+	// (process_end_dt4, packet carries an SRH with SL=0) and the reduced-encap
+	// path (the DISPATCH_NOSRH branch, no SRH). Both must gate on the grant, so
+	// the whole contract is run against each builder.
+	paths := []struct {
+		name  string
+		build func(t *testing.T) []byte
+	}{
+		{"srh", func(t *testing.T) []byte {
+			t.Helper()
+			pkt, err := buildEncapsulatedPacket(
+				net.ParseIP("fd00:1:1::1"), net.ParseIP(sid),
+				[]net.IP{net.ParseIP(sid)}, 0,
+				net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
+			if err != nil {
+				t.Fatalf("build SRH packet: %v", err)
+			}
+			return pkt
+		}},
+		{"nosrh", func(t *testing.T) []byte {
+			t.Helper()
+			pkt, err := buildEncapsulatedPacketNoSRH(
+				net.ParseIP("fd00:1:1::1"), net.ParseIP(sid),
+				net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
+			if err != nil {
+				t.Fatalf("build no-SRH packet: %v", err)
+			}
+			return pkt
+		}},
 	}
 
 	loadDT4IntoPluginSlot := func(t *testing.T, h *xdpTestHelper) {
@@ -4130,49 +4151,100 @@ func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
 		t.Cleanup(func() { _ = h.objs.SidEndpointProgs.Delete(pluginSlot) })
 	}
 
-	t.Run("a plugin End.DT4 with no VRF grant drops before decap rather than using the ingress table", func(t *testing.T) {
-		h := newXDPTestHelper(t)
-		loadDT4IntoPluginSlot(t, h)
-		h.createPluginDT4Sid(sid+"/128", pluginSlot)
-		pkt := buildPkt(t)
-		ret, out := h.run(pkt)
-		if ret != XDP_DROP {
-			t.Fatalf("a plugin End.DT4 with no VRF grant returned %d, want XDP_DROP; it must not fall back to the ingress table", ret)
-		}
-		// The drop is at resolve_decap_vrf, before any decap, so the packet is
-		// untouched. If it were decapped the grant gate had let it through.
-		if len(out) != len(pkt) {
-			t.Fatalf("no-grant packet was modified (in %d bytes, out %d): the gate should drop it before decap", len(pkt), len(out))
-		}
-	})
+	for _, p := range paths {
+		buildPkt := p.build
+		t.Run(p.name+"/no VRF grant drops before decap rather than using the ingress table", func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			loadDT4IntoPluginSlot(t, h)
+			h.createPluginDT4Sid(sid+"/128", pluginSlot)
+			pkt := buildPkt(t)
+			ret, out := h.run(pkt)
+			if ret != XDP_DROP {
+				t.Fatalf("a plugin End.DT4 with no VRF grant returned %d, want XDP_DROP; it must not fall back to the ingress table", ret)
+			}
+			// The drop is at resolve_decap_vrf, before any decap, so the packet
+			// is untouched. If it were decapped the grant gate had let it through.
+			if len(out) != len(pkt) {
+				t.Fatalf("no-grant packet was modified (in %d bytes, out %d): the gate should drop it before decap", len(pkt), len(out))
+			}
+		})
 
-	t.Run("a plugin End.DT4 with a grant decaps and takes the same FIB decision as a built-in End.DT4", func(t *testing.T) {
-		const vrfIfindex = uint32(1) // loopback: present in the test env
-		// Built-in reference: an ordinary End.DT4 into the same VRF ifindex.
-		hb := newXDPTestHelper(t)
-		hb.createSidFunctionWithVRF(sid+"/128", actionEndDT4, vrfIfindex)
-		builtinRet, _ := hb.run(buildPkt(t))
+		t.Run(p.name+"/a grant decaps and takes the same FIB decision as a built-in End.DT4", func(t *testing.T) {
+			const vrfIfindex = uint32(1) // loopback: present in the test env
+			// Built-in reference: an ordinary End.DT4 into the same VRF ifindex.
+			hb := newXDPTestHelper(t)
+			hb.createSidFunctionWithVRF(sid+"/128", actionEndDT4, vrfIfindex)
+			builtinRet, _ := hb.run(buildPkt(t))
 
-		// Plugin path: End.DT4 in a plugin slot, aux nulled, VRF from the grant.
-		h := newXDPTestHelper(t)
-		loadDT4IntoPluginSlot(t, h)
-		auxIdx := h.createPluginDT4Sid(sid+"/128", pluginSlot)
-		h.grantPluginEndtVrf(auxIdx, vrfIfindex)
-		pkt := buildPkt(t)
-		pluginRet, out := h.run(pkt)
+			// Plugin path: End.DT4 in a plugin slot, aux nulled, VRF from the grant.
+			h := newXDPTestHelper(t)
+			loadDT4IntoPluginSlot(t, h)
+			auxIdx := h.createPluginDT4Sid(sid+"/128", pluginSlot)
+			h.grantPluginEndtVrf(auxIdx, vrfIfindex)
+			pkt := buildPkt(t)
+			pluginRet, out := h.run(pkt)
 
-		if pluginRet != builtinRet {
-			t.Fatalf("plugin End.DT4 with a grant returned %d, want the built-in path's %d; "+
-				"the grant should route it to the same FIB decision, not the gate drop", pluginRet, builtinRet)
+			if pluginRet != builtinRet {
+				t.Fatalf("plugin End.DT4 with a grant returned %d, want the built-in path's %d; "+
+					"the grant should route it to the same FIB decision, not the gate drop", pluginRet, builtinRet)
+			}
+			// The grant let it past resolve_decap_vrf into the decap: the outer
+			// IPv6 (and SRH, if present) is stripped, so the output is shorter
+			// than the input. An always-drop-at-the-gate regression would fail
+			// this, since both paths return XDP_DROP once the host FIB declines.
+			if len(out) >= len(pkt) {
+				t.Fatalf("granted packet was not decapped (in %d bytes, out %d): the grant did not gate through to decap", len(pkt), len(out))
+			}
+		})
+	}
+}
+
+// TestEndtVRFGrantReferencesAndSweep exercises the grant map's reference lookup
+// and ifindex sweep against a real BPF map. The VRF-delete guard and its
+// post-teardown sweep drive these; the server unit test reimplements them in a
+// fake, so the actual iteration and value-compare have no coverage there.
+func TestEndtVRFGrantReferencesAndSweep(t *testing.T) {
+	h := newXDPTestHelper(t)
+	m := h.mapOps
+
+	// Two grants on ifindex 5, one on ifindex 7.
+	for idx, ifindex := range map[uint32]uint32{1: 5, 2: 7, 3: 5} {
+		if err := m.PutEndtVRFGrant(idx, ifindex); err != nil {
+			t.Fatalf("put grant %d: %v", idx, err)
 		}
-		// The grant let it past resolve_decap_vrf into the decap: the outer IPv6
-		// header is stripped, so the output is shorter than the input. This is
-		// what an always-drop-at-the-gate regression would fail, since both
-		// paths return XDP_DROP once the host FIB declines.
-		if len(out) >= len(pkt) {
-			t.Fatalf("granted packet was not decapped (in %d bytes, out %d): the grant did not gate through to decap", len(pkt), len(out))
-		}
-	})
+	}
+	if err := m.PutEndtVRFGrant(0, 5); err == nil {
+		t.Fatal("PutEndtVRFGrant with aux index 0 must be refused")
+	}
+
+	// A live grant is found; an ifindex with no grant is not.
+	if aux, ok, err := m.EndtVRFGrantReferences(5); err != nil || !ok || (aux != 1 && aux != 3) {
+		t.Fatalf("EndtVRFGrantReferences(5) = (%d, %v, %v), want a matching aux index", aux, ok, err)
+	}
+	if _, ok, err := m.EndtVRFGrantReferences(9); err != nil || ok {
+		t.Fatalf("EndtVRFGrantReferences(9) = (_, %v, %v), want no reference", ok, err)
+	}
+
+	// Sweeping ifindex 5 removes exactly the two grants pointing at it, and
+	// re-reads each index before deleting so a value that no longer matches is
+	// left alone; the ifindex-7 grant survives.
+	removed, err := m.DeleteEndtVRFGrantsByIfindex(5)
+	if err != nil || removed != 2 {
+		t.Fatalf("DeleteEndtVRFGrantsByIfindex(5) = (%d, %v), want (2, nil)", removed, err)
+	}
+	if _, ok, _ := m.EndtVRFGrantReferences(5); ok {
+		t.Fatal("ifindex 5 grants survived the sweep")
+	}
+	if _, ok, _ := m.EndtVRFGrantReferences(7); !ok {
+		t.Fatal("the sweep of ifindex 5 wrongly removed the ifindex-7 grant")
+	}
+	// The sweep is idempotent and a missing-key delete is not an error.
+	if removed, err := m.DeleteEndtVRFGrantsByIfindex(5); err != nil || removed != 0 {
+		t.Fatalf("second sweep = (%d, %v), want (0, nil)", removed, err)
+	}
+	if err := m.DeleteEndtVRFGrant(999); err != nil {
+		t.Fatalf("DeleteEndtVRFGrant of a missing key must be nil, got %v", err)
+	}
 }
 
 // TestForceDeleteSidFunctionRemovesEndtVRFGrant pins the catch-all: every path

@@ -60,7 +60,9 @@ type fakeSIDOps struct {
 	entries   map[string]*bpf.SidFunctionEntry
 	owners    map[string]bpf.OwnerTag
 	failOn    string // prefix whose install fails
-	delFailOn string // prefix whose delete fails
+	delFailOn string // prefix whose delete fails (every time)
+	delSkip   int    // number of successful deletes of delFailOn before it starts failing
+	delSeen   int    // deletes of delFailOn observed so far
 	installs  int
 	auxNext   uint16 // next aux index to stamp when an entry carries aux
 	ops       []string
@@ -99,7 +101,10 @@ func (f *fakeSIDOps) DeleteSidFunction(prefix string, requester bpf.OwnerTag) er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if prefix == f.delFailOn {
-		return errors.New("simulated delete failure")
+		if f.delSeen >= f.delSkip {
+			return errors.New("simulated delete failure")
+		}
+		f.delSeen++
 	}
 	if cur, ok := f.owners[prefix]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
@@ -278,6 +283,64 @@ func TestLocalSIDDecapVRFUnsupported(t *testing.T) {
 	}}, -1)
 	if err == nil {
 		t.Fatal("want error for decap VRF with no grant support, got nil")
+	}
+}
+
+// A rebind that strands must not carry the old, already-freed aux index into
+// its tracking record. If it did, the next reconcile's removeEntry would
+// delete a grant at that index -- which the allocator may have handed to
+// another SID -- wrongly withdrawing an unrelated plugin's live grant. The
+// stranded record must record auxIndex 0 (like the fresh-install strand) and
+// defer grant cleanup to the map layer.
+func TestLocalSIDRebindStrandDoesNotDeleteReusedGrant(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	grants := newFakeGrantOps()
+	resolve := func(name string) (uint32, error) {
+		if name == "vrf-a" {
+			return 11, nil
+		}
+		return 22, nil
+	}
+	set := NewLocalSIDSet(alloc, sids, grants, resolve)
+	owner := bpf.OwnerTag("plugin:demo")
+
+	// 1. Install "a" with decap vrf-a: grant lands at aux index 1.
+	if _, _, err := set.Apply(owner, []LocalSID{{Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-a"}}, -1); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	// 2. Redeclare "a" with a different decap VRF (a rebind: same locator,
+	// changed contents). The rebind removes the old entry (freeing index 1),
+	// then the reinstall strands -- grant write and its rollback both fail.
+	grants.putErr = errors.New("grant map full")
+	// The rebind deletes the old entry (1st delete of this prefix, succeeds)
+	// then the reinstall's rollback deletes it again (2nd, fails) -> stranded.
+	sids.delFailOn = "fd00:1::1/128"
+	sids.delSkip = 1
+	_, _, err := set.Apply(owner, []LocalSID{{Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-b"}}, -1)
+	if !errors.Is(err, errInstallEntryStranded) {
+		t.Fatalf("want errInstallEntryStranded from the rebind, got %v", err)
+	}
+
+	// 3. Simulate the freed index 1 being handed to another plugin's live
+	// decap-VRF SID: a foreign grant now occupies index 1.
+	grants.mu.Lock()
+	grants.grants[1] = 9999
+	grants.mu.Unlock()
+
+	// 4. The plugin drops the set. The stranded "a" is pruned; its removeEntry
+	// must NOT delete the foreign grant at index 1.
+	grants.putErr = nil
+	sids.delFailOn = ""
+	if _, _, err := set.Apply(owner, nil, -1); err != nil {
+		t.Fatalf("cleanup apply: %v", err)
+	}
+	grants.mu.Lock()
+	_, foreignSurvives := grants.grants[1]
+	grants.mu.Unlock()
+	if !foreignSurvives {
+		t.Fatal("the rebind-strand removeEntry deleted a foreign grant at the reused aux index")
 	}
 }
 

@@ -199,7 +199,6 @@ type BpfMupUplinkV6Key struct {
 type BpfPluginEndtVrf struct {
 	_          structs.HostLayout
 	VrfIfindex uint32
-	Generation uint32
 }
 
 type BpfScratchBuf struct {

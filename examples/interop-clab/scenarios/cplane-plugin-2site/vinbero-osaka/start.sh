@@ -139,6 +139,11 @@ ip route replace 10.2.0.0/24 dev eth2 table 100
 # operator provisioned. That is what makes this the whole loop -- the
 # address in the SID TLV on the wire is one the daemon handed the plugin.
 #
+# Field 8's wire bytes, so the blob can be checked without decoding by hand:
+# tag \102 = (field 8 << 3) | wire-type 2 (length-delimited), \010 = length 8,
+# then "vrf-cust" (\166\162\146\055\143\165\163\164). The same eight name bytes
+# appear after field 4's tag \042 above.
+#
 # Field 8 is the return direction: the eBPF half hands decapsulated traffic
 # to a built-in End.DT4, and naming the VRF here makes the host record a
 # grant so that decap lands in vrf-cust's table rather than dropping.

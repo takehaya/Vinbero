@@ -47,7 +47,6 @@ struct {
 // sentinel) always means "no grant".
 struct plugin_endt_vrf {
     __u32 vrf_ifindex;
-    __u32 generation;
 };
 
 struct {
