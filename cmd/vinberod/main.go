@@ -488,7 +488,7 @@ func run(cliCtx *cli.Context) error {
 				return v.Device.Ifindex, nil
 			},
 			EncapSource: applier.EncapSourceAddr,
-			Store:        cplaneStore,
+			Store:       cplaneStore,
 			// What a plugin's scope is stated in terms of. Both are
 			// consulted when a declaration is applied rather than now,
 			// because an operator registers locators and VRF bindings
