@@ -403,6 +403,15 @@ applyMu や VRF mutation mutex と deadlock しません。VRF mutation mutex �
 mutation mutex を取る (applyMu から mutation mutex) ので、この 2 経路が逆順になるからです。
 VrfDelete 自身は applyMu を取りませんが mutation mutex を binding 側と共有するため、流用すれば
 同じ輪に巻き込まれます。専用の leaf lock はこの逆転に関与しないので安全に閉じられます。
+install 側の resolve は manager の記録に加えて kernel の device 実在も照合します。teardown が
+netlink まで済んで state の persist だけ失敗した VrfDelete は error を返して manager に旧記録を
+残すので、manager だけを信じると解放済み ifindex へ grant を書けてしまうためです。
+
+この lock が閉じるのは 1 つの daemon run の中の窓です。daemon 再起動をまたぐと pinned map の
+grant は残り、再起動後に VRF device が作り直されて ifindex が変わっていれば古い grant は stale な
+番号を指します。これは owner plugin の最初の Apply の sweep で dispatch entry ごと回収されるまで
+続き、その間は ifindex-keyed な参照が持つ従来どおりの残余 (dead ifindex への fib-lookup miss で
+drop) に留まります。起動時に grant map を kernel と突き合わせて刈る reconcile は今後の課題です。
 
 この判別は `tailcall_ctx_map` の `sid_entry.action` を読むので、plugin がその map を
 書けると action を偽造して判別を欺けます。共有 map は MapReplacements で plugin に

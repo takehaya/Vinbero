@@ -252,7 +252,10 @@ func (s *Server) Setup() {
 	// auto-advertise is on) the EVPN coordinator.
 	// The grant lease is the cplane manager's: VrfDelete and a plugin's decap-
 	// grant install take the same lock so a grant can never outlive its VRF.
-	// Nil when control-plane plugins are disabled -- no plugin, no grant.
+	// Nil when control-plane plugins are disabled: pinned grants from an
+	// earlier run can still exist then, but no install can race the delete,
+	// and the grant-reference check (which runs regardless of the lease) still
+	// refuses a delete while one is live.
 	var grantLease *sync.Mutex
 	if s.cplaneMgr != nil {
 		grantLease = s.cplaneMgr.EndtVRFGrantLease()

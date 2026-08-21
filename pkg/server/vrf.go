@@ -90,9 +90,11 @@ type VrfServer struct {
 	// be written for an ifindex a delete is freeing: the delete either sees the
 	// grant and refuses, or the install's resolve fails because the device is
 	// gone. It is the cplane manager's lock, shared here; nil when control-
-	// plane plugins are disabled, in which case no grant can exist to race. It
-	// is a leaf lock, always taken under s.mu and releasing nothing else, so it
-	// cannot deadlock with applyMu (which the delete never takes).
+	// plane plugins are disabled -- pinned grants from an earlier run can
+	// still exist then, but no install can race the delete, and the reference
+	// check below still refuses while one is live. It is a leaf lock, always
+	// taken under s.mu and releasing nothing else, so it cannot deadlock with
+	// applyMu (which the delete never takes).
 	grantLease *sync.Mutex
 }
 
@@ -263,7 +265,8 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 	// unresolvable: the install either wrote the grant before this check (which
 	// then refuses) or resolves after the device is gone (and fails). It is a
 	// leaf held only here; nil when control-plane plugins are off, where no
-	// grant can exist.
+	// install exists to race (the reference check below still guards pinned
+	// grants a previous run left behind).
 	if s.grantLease != nil {
 		s.grantLease.Lock()
 		defer s.grantLease.Unlock()

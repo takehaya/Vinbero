@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -593,7 +595,13 @@ func TestVrfServer_DeleteHoldsGrantLease(t *testing.T) {
 	s.grantLease = &lease
 
 	// The lease must be held while the grant-reference check runs and while the
-	// device is torn down. A TryLock from inside either step must fail.
+	// device is torn down. A TryLock from inside either step must fail, and a
+	// competitor goroutine started during the check (standing in for a plugin
+	// install) must not acquire the lease before the whole delete -- check,
+	// teardown, manager removal -- has returned; an implementation that
+	// released and re-took the lock between the steps would let it in.
+	var competitorAcquired atomic.Bool
+	competitorDone := make(chan struct{})
 	checkHeld, teardownHeld := false, false
 	sids := &fakeSidTable{grantRefHook: func() {
 		checkHeld = true
@@ -601,6 +609,12 @@ func TestVrfServer_DeleteHoldsGrantLease(t *testing.T) {
 			lease.Unlock()
 			t.Error("grant lease not held during the grant-reference check")
 		}
+		go func() {
+			lease.Lock()
+			competitorAcquired.Store(true)
+			lease.Unlock()
+			close(competitorDone)
+		}()
 	}}
 	s.sids = sids
 	dev.deleteHook = func() {
@@ -608,6 +622,9 @@ func TestVrfServer_DeleteHoldsGrantLease(t *testing.T) {
 		if lease.TryLock() {
 			lease.Unlock()
 			t.Error("grant lease not held during device teardown")
+		}
+		if competitorAcquired.Load() {
+			t.Error("a competitor acquired the grant lease between the check and the teardown")
 		}
 	}
 
@@ -626,11 +643,13 @@ func TestVrfServer_DeleteHoldsGrantLease(t *testing.T) {
 	if !checkHeld || !teardownHeld {
 		t.Fatalf("hooks did not both run: check=%v teardown=%v", checkHeld, teardownHeld)
 	}
-	// Released once the delete returned.
-	if !lease.TryLock() {
-		t.Fatal("grant lease still held after VrfDelete returned")
+	// Released once the delete returned: the competitor that was blocked for
+	// the whole critical section now gets through.
+	select {
+	case <-competitorDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("grant lease still held after VrfDelete returned (competitor never acquired it)")
 	}
-	lease.Unlock()
 }
 
 // A deviceless (ingress-only) VRF deletes without touching DeviceOps; a
