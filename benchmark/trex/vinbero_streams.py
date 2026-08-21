@@ -21,7 +21,8 @@ Scenarios (ingress frame the DUT sees):
 
 --size is the ingress wire frame length in bytes (without FCS); frames
 are padded with zero payload up to it. Each scenario has a minimum
-below which the value is clamped up.
+below which the value is clamped up; the effective wire length is what
+gets reported as "size" in the output.
 
 Flow spread: NO STLScVmRaw randomization. TRex's field-engine VM
 re-parses the frame, fails on the SRH (routing type 4), and silently
@@ -114,11 +115,15 @@ def frame(scenario, i, size):
     raise ValueError("unknown scenario: %s" % scenario)
 
 
-def build_streams(scenario, size, per_stream_pps, flows):
+def build_frames(scenario, size, flows):
+    return [frame(scenario, i, size) for i in range(flows)]
+
+
+def build_streams(frames, per_stream_pps):
     return [
-        STLStream(packet=STLPktBuilder(pkt_buffer=frame(scenario, i, size)),
+        STLStream(packet=STLPktBuilder(pkt_buffer=f),
                   mode=STLTXCont(pps=per_stream_pps))
-        for i in range(flows)
+        for f in frames
     ]
 
 
@@ -141,6 +146,15 @@ def main():
                     help="bum only: configured bd peer count, recorded as "
                          "the expected amplification factor")
     args = ap.parse_args()
+    # unwrap() below corrects at most one 2^32 wrap of the 32-bit port
+    # counters; at 64B line rate a second wrap becomes possible past
+    # ~57s, so refuse durations where it would go undetected.
+    if args.duration > 55:
+        sys.exit("--duration > 55 can wrap the 32-bit port counters "
+                 "twice; split into shorter runs")
+
+    frames = build_frames(args.scenario, args.size, args.flows)
+    wire_len = len(frames[0])
 
     c = STLClient(server="127.0.0.1")
     c.connect()
@@ -150,9 +164,7 @@ def main():
     # rate (ignoring the per-stream pps), while "1" honors --pps as-is.
     per_stream = (args.pps or 1e6) / args.flows
     mult = "1" if args.pps else "100%"
-    c.add_streams(build_streams(args.scenario, args.size, per_stream,
-                                args.flows),
-                  ports=[0])
+    c.add_streams(build_streams(frames, per_stream), ports=[0])
     c.clear_stats()
     c.start(ports=[0], mult=mult)
     time.sleep(args.duration)
@@ -166,8 +178,9 @@ def main():
     def unwrap(v):
         # The port counters come from 32-bit hardware registers; when
         # the raw counter crosses 2^32 during the run the delta against
-        # the clear_stats reference goes negative by exactly 2^32. A
-        # 30s run at 100G wraps at most once, so one correction is exact.
+        # the clear_stats reference goes negative by exactly 2^32.
+        # Within the 55s duration cap the counter wraps at most once,
+        # so one correction is exact.
         return v + 2**32 if v < 0 else v
 
     opackets = unwrap(tx.get("opackets", 0))
@@ -175,7 +188,9 @@ def main():
     expected = opackets * (args.peers if args.scenario == "bum" else 1)
     print(json.dumps({
         "scenario":     args.scenario,
-        "size":         args.size,
+        # Effective wire length: pad() only grows frames, so a --size
+        # below the scenario minimum ends up larger than requested.
+        "size":         wire_len,
         "duration_s":   args.duration,
         "peers":        args.peers,
         "flows":        args.flows,
@@ -185,7 +200,10 @@ def main():
         "rx_ibytes":    rx.get("ibytes", 0),
         "tx_mpps":      round(opackets / args.duration / 1e6, 3),
         "rx_mpps":      round(ipackets / args.duration / 1e6, 3),
-        "tx_gbps":      round(tx.get("tx_bps", 0) / 1e9, 3),
+        # tx_bps from get_stats() is an instantaneous rate and reads 0
+        # after stop, so derive the run average from the counters.
+        "tx_gbps":      round(opackets * wire_len * 8
+                              / args.duration / 1e9, 3),
         "loss_pct":     round((1.0 - ipackets / expected) * 100.0, 4)
                         if expected else 0.0,
     }))

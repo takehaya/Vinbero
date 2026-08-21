@@ -37,13 +37,12 @@ for pid in $(pgrep -x vinberod); do
     echo "vinberod is running (pid $pid); run teardown_dut.sh first (channel changes need XDP detached)" >&2
     exit 1
 done
-if systemctl is-active --quiet irqbalance; then
-    echo "stopping irqbalance (it would rewrite the pinned affinities)"
-    sudo systemctl stop irqbalance
-fi
-
 case "$MODE" in
     apply)
+        if systemctl is-active --quiet irqbalance; then
+            echo "stopping irqbalance (it would rewrite the pinned affinities)"
+            sudo systemctl stop irqbalance
+        fi
         # The irdma auxiliary driver pins the queue layout of ice ports it is
         # bound to, and ethtool -L then fails with "Device or resource busy".
         # Unbind the RoCE aux devices (module removal would take ice down with
@@ -73,7 +72,11 @@ case "$MODE" in
         sudo ethtool -L "$IN_IF" combined 64
         sudo ethtool -C "$IN_IF" adaptive-rx on adaptive-tx on \
             rx-usecs 50 tx-usecs 50 2>/dev/null || true
-        echo "restored $IN_IF to 64 combined queues, adaptive coalescing"
+        # apply stops irqbalance so it cannot rewrite the pinned
+        # affinities; bring it back so the host returns to normal
+        # IRQ spreading.
+        sudo systemctl start irqbalance 2>/dev/null || true
+        echo "restored $IN_IF to 64 combined queues, adaptive coalescing, irqbalance"
         ;;
     *)
         echo "usage: tune_dut.sh [apply|revert]" >&2

@@ -13,6 +13,12 @@ cd "$(dirname "$0")"
 
 SCENARIO="${1:?usage: setup_dut.sh <scenario> [--peers N] [--stats]}"
 shift
+# Reject typos before any NIC/route mutation or daemon start; the
+# per-scenario case below runs only after those side effects.
+case "$SCENARIO" in
+    encaps-v4|ecmp|end|end-dt4|l2-unicast|bum) ;;
+    *) echo "unknown scenario: $SCENARIO" >&2; exit 2 ;;
+esac
 CONFIG="$REPO_ROOT/benchmark/configs/vinbero-bench.yml"
 while [ $# -gt 0 ]; do
     case "$1" in

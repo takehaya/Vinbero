@@ -3,7 +3,10 @@
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# DUT NICs (E810-C 100G, direct-cabled to the TRex host)
+# DUT NICs (E810-C 100G, direct-cabled to the TRex host).
+# Overriding these only moves the pipeline's NIC prep and counters;
+# vinberod attaches XDP to the devices named in
+# benchmark/configs/vinbero-bench*.yml, so change those in lockstep.
 IN_IF=${IN_IF:-enp138s0f0np0}       # TRex port 0 -> Vinbero ingress
 OUT_IF=${OUT_IF:-enp138s0f1np1}     # Vinbero egress -> TRex port 1
 
