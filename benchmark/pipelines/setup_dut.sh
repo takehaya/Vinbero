@@ -22,7 +22,14 @@ esac
 CONFIG="$REPO_ROOT/benchmark/configs/vinbero-bench.yml"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --peers) PEERS="$2"; shift 2 ;;
+        --peers)
+            # The dataplane holds at most 8 peers per BD; catch bad
+            # values here, before any NIC/daemon side effects.
+            case "$2" in
+                [1-8]) PEERS="$2" ;;
+                *) echo "--peers must be 1..8, got: $2" >&2; exit 2 ;;
+            esac
+            shift 2 ;;
         --stats) CONFIG="$REPO_ROOT/benchmark/configs/vinbero-bench-stats.yml"; shift ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -67,7 +74,10 @@ case "$SCENARIO" in
         sudo ip link add "$VRF_NAME" type vrf table "$VRF_TABLE" 2>/dev/null || true
         sudo ip link set "$VRF_NAME" up
         sudo ip addr replace "$EGRESS_ADDR4" dev "$OUT_IF"
-        sudo ip route replace 10.98.0.0/24 via "$NH4" dev "$OUT_IF" table "$VRF_TABLE"
+        # onlink: the gateway is a direct-cabled TRex port with a
+        # static neighbor entry, so skip gateway reachability checks.
+        sudo ip route replace 10.98.0.0/24 via "$NH4" dev "$OUT_IF" \
+            onlink table "$VRF_TABLE"
         sudo ip neigh replace "$NH4" lladdr "$TREX_PORT1_MAC" dev "$OUT_IF" nud permanent
         ;;
     l2-unicast|bum)

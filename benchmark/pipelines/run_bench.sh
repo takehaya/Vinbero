@@ -15,6 +15,12 @@ cd "$(dirname "$0")"
 
 SCENARIO="${1:?usage: run_bench.sh <scenario> [size ...]}"
 shift
+# Validate before the value reaches rm globs and the ssh command
+# string, whether or not explicit sizes bypass the default case below.
+case "$SCENARIO" in
+    encaps-v4|ecmp|end|end-dt4|l2-unicast|bum) ;;
+    *) echo "unknown scenario: $SCENARIO" >&2; exit 2 ;;
+esac
 if [ $# -gt 0 ]; then
     SIZES=("$@")
 else
@@ -22,7 +28,6 @@ else
         encaps-v4|ecmp) SIZES=(64 128 256 512 1024 1420) ;;
         end|end-dt4)    SIZES=(118 160 256 512 1024 1420) ;;
         l2-unicast|bum) SIZES=(68 512 1420) ;;
-        *) echo "unknown scenario: $SCENARIO" >&2; exit 2 ;;
     esac
 fi
 
