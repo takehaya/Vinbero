@@ -13,6 +13,13 @@ import (
 	"github.com/takehaya/vinbero/pkg/locator"
 )
 
+// errInstallEntryStranded reports that install wrote a dispatch entry it then
+// could not roll back, so the entry is still live in the map. The caller must
+// not release the SID address: the live entry still dispatches on it, and
+// returning it to the pool would let a later allocation hand the same address
+// out and collide with the entry nothing is tracking.
+var errInstallEntryStranded = errors.New("local sid: dispatch entry stranded after a failed rollback")
+
 // SIDAllocator hands out SRv6 SIDs from the configured locators.
 // *locator.Manager satisfies it.
 type SIDAllocator interface {
@@ -29,6 +36,14 @@ type SIDFunctionOps interface {
 	GetSidFunctionOwner(triggerPrefix string) (bpf.OwnerTag, bool, error)
 }
 
+// EndtVRFGrantOps is the grant-map surface a DecapVRF local SID needs: the
+// host records the VRF a plugin-dispatched End.DT4/DT6/DT46 may decap into,
+// keyed by the dispatch entry's aux index. *bpf.MapOperations satisfies it.
+type EndtVRFGrantOps interface {
+	PutEndtVRFGrant(auxIndex, vrfIfindex uint32) error
+	DeleteEndtVRFGrant(auxIndex uint32) error
+}
+
 // LocalSID is one SID a plugin wants to exist, pointing at its own
 // data-plane half.
 type LocalSID struct {
@@ -42,6 +57,15 @@ type LocalSID struct {
 	Slot uint32
 	// AuxRaw is the per-SID configuration the data-plane half reads.
 	AuxRaw []byte
+	// DecapVRF, when set, is the VRF a plugin-dispatched End.DT4/DT6/DT46
+	// decapsulates into. A plugin's data-plane half hands SRv6 traffic to a
+	// built-in decap behavior, and the handoff nulls the SID's own aux so the
+	// plugin cannot spell an arbitrary VRF ifindex there. The host resolves
+	// this name to a kernel ifindex and records it in a host-owned grant map
+	// keyed by the dispatch entry's aux index; without a grant the built-in
+	// decap fails closed. Empty leaves a plugin whose half completes without
+	// a built-in handoff unaffected.
+	DecapVRF string
 }
 
 // AllocatedSID is what a declared local SID turned into.
@@ -53,12 +77,29 @@ type AllocatedSID struct {
 	// that changes nothing can be recognised and skipped.
 	slot   uint32
 	auxRaw []byte
+	// decapVRF records the VRF grant installed for it, and auxIndex the
+	// dispatch entry's aux index that keys the grant map. Both are needed to
+	// remove the grant on release, and decapVRF is part of what a
+	// redeclaration is diffed against.
+	decapVRF string
+	auxIndex uint32
+	// stranded marks a record whose install did not complete: the dispatch
+	// entry is in the map but its grant was never written and the rollback
+	// failed. It must never satisfy a redeclaration -- otherwise the same
+	// declaration coming back would be seen as already-installed and the
+	// grant-less entry would drop forever -- so matches always fails for it
+	// and the next reconcile removes the entry by prefix and reinstalls.
+	stranded bool
 }
 
 // matches reports whether an installed SID already carries what a
 // declaration asks for.
 func (a AllocatedSID) matches(want LocalSID) bool {
-	return a.Locator == want.Locator && a.slot == want.Slot && bytes.Equal(a.auxRaw, want.AuxRaw)
+	if a.stranded {
+		return false
+	}
+	return a.Locator == want.Locator && a.slot == want.Slot &&
+		a.decapVRF == want.DecapVRF && bytes.Equal(a.auxRaw, want.AuxRaw)
 }
 
 // LocalSIDSet reconciles the local SIDs one owner has declared.
@@ -84,6 +125,13 @@ func (a AllocatedSID) matches(want LocalSID) bool {
 type LocalSIDSet struct {
 	alloc SIDAllocator
 	sids  SIDFunctionOps
+	// grants records the VRF a plugin-dispatched decap is allowed into. Nil
+	// leaves a DecapVRF declaration refused rather than silently ungranted --
+	// which would install a SID the data plane then drops on.
+	grants EndtVRFGrantOps
+	// resolveVRF turns a VRF name into the kernel ifindex the grant records.
+	// Nil is the same as a daemon that cannot serve a DecapVRF SID.
+	resolveVRF func(vrfName string) (uint32, error)
 
 	mu sync.Mutex
 	// live maps owner -> name -> what was allocated for it.
@@ -93,15 +141,18 @@ type LocalSIDSet struct {
 	swept map[bpf.OwnerTag]bool
 }
 
-// NewLocalSIDSet builds the tracker. Either dependency may be nil, in
-// which case declaring a local SID reports that this daemon cannot serve
-// one.
-func NewLocalSIDSet(alloc SIDAllocator, sids SIDFunctionOps) *LocalSIDSet {
+// NewLocalSIDSet builds the tracker. alloc and sids may be nil, in which
+// case declaring a local SID reports that this daemon cannot serve one.
+// grants and resolveVRF may be nil, in which case a DecapVRF declaration is
+// refused rather than installed as a SID the data plane would drop on.
+func NewLocalSIDSet(alloc SIDAllocator, sids SIDFunctionOps, grants EndtVRFGrantOps, resolveVRF func(string) (uint32, error)) *LocalSIDSet {
 	return &LocalSIDSet{
-		alloc: alloc,
-		sids:  sids,
-		live:  make(map[bpf.OwnerTag]map[string]AllocatedSID),
-		swept: make(map[bpf.OwnerTag]bool),
+		alloc:      alloc,
+		sids:       sids,
+		grants:     grants,
+		resolveVRF: resolveVRF,
+		live:       make(map[bpf.OwnerTag]map[string]AllocatedSID),
+		swept:      make(map[bpf.OwnerTag]bool),
 	}
 }
 
@@ -197,7 +248,28 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 			if err := l.removeEntry(owner, got); err != nil {
 				return nil, res, err
 			}
-			if err := l.install(owner, got.SID, want); err != nil {
+			auxIndex, err := l.install(owner, got.SID, want)
+			if err != nil {
+				if errors.Is(err, errInstallEntryStranded) {
+					// The dispatch entry is still live at got.SID but has no
+					// grant. Keep the address and mark the record stranded so
+					// the next reconcile cannot mistake it for up to date --
+					// it removes the entry by prefix and reinstalls -- rather
+					// than releasing an address the map still uses.
+					//
+					// auxIndex is cleared: removeEntry earlier freed got's old
+					// index, so keeping it would make the next removeEntry delete
+					// a grant at an index the allocator may have reassigned to
+					// another SID. The map-layer delete withdraws the live
+					// entry's grant by its real index regardless.
+					strandedGot := got
+					strandedGot.stranded = true
+					strandedGot.auxIndex = 0
+					l.mu.Lock()
+					current[name] = strandedGot
+					l.mu.Unlock()
+					return nil, res, err
+				}
 				l.alloc.ReleaseSID(got.SID)
 				l.mu.Lock()
 				delete(current, name)
@@ -207,6 +279,7 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 			updated := AllocatedSID{
 				Name: name, SID: got.SID, Locator: want.Locator,
 				slot: want.Slot, auxRaw: append([]byte(nil), want.AuxRaw...),
+				decapVRF: want.DecapVRF, auxIndex: auxIndex,
 			}
 			l.mu.Lock()
 			current[name] = updated
@@ -229,7 +302,23 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 		if err != nil {
 			return nil, res, fmt.Errorf("local sid %q: allocate from %q: %w", name, want.Locator, err)
 		}
-		if err := l.install(owner, sid, want); err != nil {
+		auxIndex, err := l.install(owner, sid, want)
+		if err != nil {
+			if errors.Is(err, errInstallEntryStranded) {
+				// The dispatch entry is live at sid but the rollback failed, so
+				// it has no grant. Track it as stranded (auxIndex unknown, so 0
+				// -- the map-layer delete withdraws any grant regardless) so a
+				// later reconcile always removes it by prefix and reinstalls
+				// rather than mistaking it for up to date; releasing the address
+				// would collide with the still-live entry.
+				l.mu.Lock()
+				current[name] = AllocatedSID{
+					Name: name, SID: sid, Locator: want.Locator,
+					slot: want.Slot, decapVRF: want.DecapVRF, stranded: true,
+				}
+				l.mu.Unlock()
+				return nil, res, err
+			}
 			// Give the address back rather than leaking it: nothing points
 			// at it, and the pool is finite.
 			l.alloc.ReleaseSID(sid)
@@ -238,6 +327,7 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 		allocated := AllocatedSID{
 			Name: name, SID: sid, Locator: want.Locator,
 			slot: want.Slot, auxRaw: append([]byte(nil), want.AuxRaw...),
+			decapVRF: want.DecapVRF, auxIndex: auxIndex,
 		}
 		l.mu.Lock()
 		current[name] = allocated
@@ -364,10 +454,11 @@ func (l *LocalSIDSet) LiveSIDs(owner bpf.OwnerTag) []LocalSID {
 	out := make([]LocalSID, 0, len(current))
 	for name, got := range current {
 		out = append(out, LocalSID{
-			Name:    name,
-			Locator: got.Locator,
-			Slot:    got.slot,
-			AuxRaw:  append([]byte(nil), got.auxRaw...),
+			Name:     name,
+			Locator:  got.Locator,
+			Slot:     got.slot,
+			AuxRaw:   append([]byte(nil), got.auxRaw...),
+			DecapVRF: got.decapVRF,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -397,25 +488,85 @@ func (l *LocalSIDSet) OwnsSID(owner bpf.OwnerTag, sid netip.Addr) bool {
 }
 
 // install writes the dispatch entry that points a SID at the plugin's
-// data-plane slot.
-func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID) error {
+// data-plane slot, and records the decap-VRF grant when the declaration
+// names one. It returns the dispatch entry's aux index, which keys the
+// grant and is what removeEntry needs to withdraw it.
+//
+// A DecapVRF SID must carry an aux entry so CreateSidFunction stamps a
+// non-zero aux index for the grant to key on -- even when the plugin
+// declared no aux bytes of its own, since the built-in handoff nulls those
+// bytes and takes the VRF from the grant instead.
+func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID) (uint32, error) {
+	var vrfIfindex uint32
+	if want.DecapVRF != "" {
+		if l.grants == nil || l.resolveVRF == nil {
+			return 0, fmt.Errorf("local sid %q: declares decap VRF %q, but this daemon cannot grant one",
+				want.Name, want.DecapVRF)
+		}
+		idx, err := l.resolveVRF(want.DecapVRF)
+		if err != nil {
+			return 0, fmt.Errorf("local sid %q: resolve decap VRF %q: %w", want.Name, want.DecapVRF, err)
+		}
+		if idx == 0 {
+			return 0, fmt.Errorf("local sid %q: decap VRF %q resolved to ifindex 0", want.Name, want.DecapVRF)
+		}
+		vrfIfindex = idx
+	}
+
 	entry := &bpf.SidFunctionEntry{Action: uint8(want.Slot)}
 	var aux *bpf.SidAuxEntry
-	if len(want.AuxRaw) > 0 {
+	if len(want.AuxRaw) > 0 || want.DecapVRF != "" {
 		aux = bpf.NewSidAuxPluginRaw(want.AuxRaw)
 	}
 	prefix := sid.String() + "/128"
 	if err := l.sids.CreateSidFunction(prefix, entry, aux, owner); err != nil {
-		return fmt.Errorf("local sid %q: install %s: %w", want.Name, prefix, err)
+		return 0, fmt.Errorf("local sid %q: install %s: %w", want.Name, prefix, err)
 	}
-	return nil
+	if want.DecapVRF != "" {
+		// The ifindex resolved above and written here is not serialized against
+		// a concurrent VrfDelete. If the VRF is deleted between the resolve and
+		// this write, the grant records a freed ifindex. VrfDelete refuses while
+		// a grant is live and sweeps the ifindex after teardown, so a grant that
+		// raced that far ends up on a dead ifindex and fails closed (fib-lookup
+		// miss -> drop) -- the same property every ifindex-keyed VRF reference
+		// in the tree has, since Linux does not promptly reuse an ifindex. A
+		// full close (so a grant can never outlive its VRF even for an instant)
+		// would need this resolve+Put and VrfDelete's check+teardown to share a
+		// leaf lease acquired under applyMu / the VRF mutation mutex; that is
+		// left out here rather than plumbed across the cplane/server boundary.
+		if err := l.grants.PutEndtVRFGrant(uint32(entry.AuxIndex), vrfIfindex); err != nil {
+			// Undo the dispatch entry so nothing is left pointing at a decap
+			// with no grant, which the data plane would drop on. If the undo
+			// itself fails the entry is still live: signal that so the caller
+			// keeps the address rather than releasing one the map still uses.
+			if derr := l.sids.DeleteSidFunction(prefix, owner); derr != nil {
+				return 0, fmt.Errorf("%w: local sid %q: grant decap VRF %q failed (%v) and rollback failed (%v)",
+					errInstallEntryStranded, want.Name, want.DecapVRF, err, derr)
+			}
+			return 0, fmt.Errorf("local sid %q: grant decap VRF %q: %w", want.Name, want.DecapVRF, err)
+		}
+	}
+	return uint32(entry.AuxIndex), nil
 }
 
 // removeEntry deletes the dispatch entry and keeps the address.
 //
 // Deleting the entry is what frees the aux index bound to it: the map
 // layer allocates one per install and releases it only on delete.
+//
+// The grant is withdrawn here too, keyed by the tracked index. This is
+// belt-and-suspenders: DeleteSidFunction's map layer already withdraws the
+// grant by the entry's real aux index on every delete path. Doing it here as
+// well keeps the withdrawal observable at this layer and orders it before the
+// index is freed. It relies on got.auxIndex being the current index, so a
+// record whose index is unknown or stale carries auxIndex 0 and defers wholly
+// to the map layer (see the stranded paths in Apply).
 func (l *LocalSIDSet) removeEntry(owner bpf.OwnerTag, got AllocatedSID) error {
+	if got.decapVRF != "" && got.auxIndex != 0 && l.grants != nil {
+		if err := l.grants.DeleteEndtVRFGrant(got.auxIndex); err != nil {
+			return fmt.Errorf("local sid %q: withdraw decap VRF grant: %w", got.Name, err)
+		}
+	}
 	prefix := got.SID.String() + "/128"
 	if err := l.sids.DeleteSidFunction(prefix, owner); err != nil {
 		return fmt.Errorf("local sid %q: remove %s: %w", got.Name, prefix, err)
@@ -461,6 +612,10 @@ func validateLocalSID(s LocalSID) error {
 		return fmt.Errorf("local sid %q: aux payload is %d bytes, limit %d",
 			s.Name, len(s.AuxRaw), bpf.SidAuxPluginRawMax)
 	}
+	if len(s.DecapVRF) > maxLocalSIDNameLen {
+		return fmt.Errorf("local sid %q: decap VRF name is %d bytes, limit %d",
+			s.Name, len(s.DecapVRF), maxLocalSIDNameLen)
+	}
 	return nil
 }
 
@@ -478,10 +633,11 @@ func DecodeLocalSID(in *v1.PluginLocalSid) (LocalSID, error) {
 		return LocalSID{}, errors.New("local sid: nil declaration")
 	}
 	out := LocalSID{
-		Name:    in.GetName(),
-		Locator: in.GetLocator(),
-		Slot:    in.GetSlot(),
-		AuxRaw:  append([]byte(nil), in.GetAuxRaw()...),
+		Name:     in.GetName(),
+		Locator:  in.GetLocator(),
+		Slot:     in.GetSlot(),
+		AuxRaw:   append([]byte(nil), in.GetAuxRaw()...),
+		DecapVRF: in.GetDecapVrf(),
 	}
 	return out, validateLocalSID(out)
 }

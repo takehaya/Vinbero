@@ -234,6 +234,12 @@ type ManagerConfig struct {
 	VRFBindings VRFBindingSource
 	// SIDFunctions installs the dispatch entries for those SIDs.
 	SIDFunctions SIDFunctionOps
+	// EndtVRFGrants records the VRF a plugin-dispatched End.DT4/DT6/DT46 may
+	// decapsulate into, and ResolveVRF turns a scoped VRF name into the
+	// kernel ifindex it records. Both nil leaves a DecapVRF local SID refused
+	// rather than installed as one the data plane drops on.
+	EndtVRFGrants EndtVRFGrantOps
+	ResolveVRF    func(vrfName string) (uint32, error)
 	// Quotas bound how much any one plugin may hold. Zero fields take the
 	// defaults.
 	Quotas Quotas
@@ -266,7 +272,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	return &Manager{
 		advertise:   newNamedAdvertiseSet(cfg, leases),
-		localSIDs:   NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions),
+		localSIDs:   NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions, cfg.EndtVRFGrants, cfg.ResolveVRF),
 		source:      cfg.Source,
 		snapshots:   snapshots,
 		claims:      cfg.Claims,

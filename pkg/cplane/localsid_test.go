@@ -56,12 +56,16 @@ func locatorSuffix(name string) string {
 
 // fakeSIDOps records the dispatch entries a reconcile installs.
 type fakeSIDOps struct {
-	mu       sync.Mutex
-	entries  map[string]*bpf.SidFunctionEntry
-	owners   map[string]bpf.OwnerTag
-	failOn   string // prefix whose install fails
-	installs int
-	ops      []string
+	mu        sync.Mutex
+	entries   map[string]*bpf.SidFunctionEntry
+	owners    map[string]bpf.OwnerTag
+	failOn    string // prefix whose install fails
+	delFailOn string // prefix whose delete fails (every time)
+	delSkip   int    // number of successful deletes of delFailOn before it starts failing
+	delSeen   int    // deletes of delFailOn observed so far
+	installs  int
+	auxNext   uint16 // next aux index to stamp when an entry carries aux
+	ops       []string
 }
 
 func newFakeSIDOps() *fakeSIDOps {
@@ -71,7 +75,7 @@ func newFakeSIDOps() *fakeSIDOps {
 	}
 }
 
-func (f *fakeSIDOps) CreateSidFunction(prefix string, e *bpf.SidFunctionEntry, _ *bpf.SidAuxEntry, owner bpf.OwnerTag) error {
+func (f *fakeSIDOps) CreateSidFunction(prefix string, e *bpf.SidFunctionEntry, aux *bpf.SidAuxEntry, owner bpf.OwnerTag) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if prefix == f.failOn {
@@ -79,6 +83,12 @@ func (f *fakeSIDOps) CreateSidFunction(prefix string, e *bpf.SidFunctionEntry, _
 	}
 	if cur, ok := f.owners[prefix]; ok && cur != owner {
 		return bpf.ErrEntryOwnerMismatch
+	}
+	// Mirror allocAndPutBuiltinAux: an entry carrying aux gets a non-zero
+	// aux index stamped, which is what a decap-VRF grant keys on.
+	if aux != nil {
+		f.auxNext++
+		e.AuxIndex = f.auxNext
 	}
 	f.entries[prefix] = e
 	f.owners[prefix] = owner
@@ -90,6 +100,12 @@ func (f *fakeSIDOps) CreateSidFunction(prefix string, e *bpf.SidFunctionEntry, _
 func (f *fakeSIDOps) DeleteSidFunction(prefix string, requester bpf.OwnerTag) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if prefix == f.delFailOn {
+		if f.delSeen >= f.delSkip {
+			return errors.New("simulated delete failure")
+		}
+		f.delSeen++
+	}
 	if cur, ok := f.owners[prefix]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}
@@ -149,13 +165,251 @@ func (f *fakeSIDOps) entryFor(prefix string) (*bpf.SidFunctionEntry, bool) {
 	return e, ok
 }
 
+// fakeGrantOps records the decap-VRF grants a reconcile writes, keyed by the
+// dispatch entry's aux index.
+type fakeGrantOps struct {
+	mu     sync.Mutex
+	grants map[uint32]uint32 // auxIndex -> vrfIfindex
+	putErr error             // when set, PutEndtVRFGrant fails
+	ops    []string
+}
+
+func newFakeGrantOps() *fakeGrantOps {
+	return &fakeGrantOps{grants: map[uint32]uint32{}}
+}
+
+func (f *fakeGrantOps) PutEndtVRFGrant(auxIndex, vrfIfindex uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.putErr != nil {
+		return f.putErr
+	}
+	if auxIndex == 0 {
+		return errors.New("aux index must be non-zero")
+	}
+	f.grants[auxIndex] = vrfIfindex
+	f.ops = append(f.ops, fmt.Sprintf("put %d=%d", auxIndex, vrfIfindex))
+	return nil
+}
+
+func (f *fakeGrantOps) DeleteEndtVRFGrant(auxIndex uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.grants, auxIndex)
+	f.ops = append(f.ops, fmt.Sprintf("delete %d", auxIndex))
+	return nil
+}
+
+func (f *fakeGrantOps) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.grants)
+}
+
+// A decap-VRF SID writes a grant at install and withdraws it at release; the
+// grant records the VRF ifindex the resolver returned, keyed by the dispatch
+// entry's aux index.
+func TestLocalSIDDecapVRFGrant(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	grants := newFakeGrantOps()
+	resolve := func(name string) (uint32, error) {
+		if name == "vrf-cust" {
+			return 42, nil
+		}
+		return 0, fmt.Errorf("unknown vrf %q", name)
+	}
+	set := NewLocalSIDSet(alloc, sids, grants, resolve)
+	owner := bpf.OwnerTag("plugin:demo")
+
+	out, _, err := set.Apply(owner, []LocalSID{{
+		Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-cust",
+	}}, -1)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("want 1 allocated, got %d", len(out))
+	}
+	entry, ok := sids.entryFor(out[0].SID.String() + "/128")
+	if !ok || entry.AuxIndex == 0 {
+		t.Fatalf("dispatch entry missing or has no aux index: %+v", entry)
+	}
+	if got := grants.grants[uint32(entry.AuxIndex)]; got != 42 {
+		t.Fatalf("grant for aux %d = %d, want 42", entry.AuxIndex, got)
+	}
+
+	// Dropping the SID from the declared set withdraws its grant.
+	if _, _, err := set.Apply(owner, nil, -1); err != nil {
+		t.Fatalf("apply empty: %v", err)
+	}
+	if grants.count() != 0 {
+		t.Fatalf("grant not withdrawn: %v", grants.ops)
+	}
+}
+
+// A redeclaration that does not change the decap VRF rewrites nothing, so no
+// aux index leaks and the grant stays put.
+func TestLocalSIDDecapVRFIdempotent(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	grants := newFakeGrantOps()
+	resolve := func(string) (uint32, error) { return 7, nil }
+	set := NewLocalSIDSet(alloc, sids, grants, resolve)
+	owner := bpf.OwnerTag("plugin:demo")
+	decl := []LocalSID{{Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-cust"}}
+
+	if _, _, err := set.Apply(owner, decl, -1); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	firstInstalls := sids.installCount()
+	if _, _, err := set.Apply(owner, decl, -1); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if sids.installCount() != firstInstalls {
+		t.Fatalf("redeclaration rewrote the entry: installs %d -> %d", firstInstalls, sids.installCount())
+	}
+	if grants.count() != 1 {
+		t.Fatalf("want 1 grant held, got %d", grants.count())
+	}
+}
+
+// A DecapVRF declaration on a daemon that cannot grant one is refused rather
+// than installed as a SID the data plane would drop on.
+func TestLocalSIDDecapVRFUnsupported(t *testing.T) {
+	set := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps(), nil, nil)
+	_, _, err := set.Apply(bpf.OwnerTag("plugin:demo"), []LocalSID{{
+		Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-cust",
+	}}, -1)
+	if err == nil {
+		t.Fatal("want error for decap VRF with no grant support, got nil")
+	}
+}
+
+// A rebind that strands must not carry the old, already-freed aux index into
+// its tracking record. If it did, the next reconcile's removeEntry would
+// delete a grant at that index -- which the allocator may have handed to
+// another SID -- wrongly withdrawing an unrelated plugin's live grant. The
+// stranded record must record auxIndex 0 (like the fresh-install strand) and
+// defer grant cleanup to the map layer.
+func TestLocalSIDRebindStrandDoesNotDeleteReusedGrant(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	grants := newFakeGrantOps()
+	resolve := func(name string) (uint32, error) {
+		if name == "vrf-a" {
+			return 11, nil
+		}
+		return 22, nil
+	}
+	set := NewLocalSIDSet(alloc, sids, grants, resolve)
+	owner := bpf.OwnerTag("plugin:demo")
+
+	// 1. Install "a" with decap vrf-a: grant lands at aux index 1.
+	if _, _, err := set.Apply(owner, []LocalSID{{Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-a"}}, -1); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	// 2. Redeclare "a" with a different decap VRF (a rebind: same locator,
+	// changed contents). The rebind removes the old entry (freeing index 1),
+	// then the reinstall strands -- grant write and its rollback both fail.
+	grants.putErr = errors.New("grant map full")
+	// The rebind deletes the old entry (1st delete of this prefix, succeeds)
+	// then the reinstall's rollback deletes it again (2nd, fails) -> stranded.
+	sids.delFailOn = "fd00:1::1/128"
+	sids.delSkip = 1
+	_, _, err := set.Apply(owner, []LocalSID{{Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-b"}}, -1)
+	if !errors.Is(err, errInstallEntryStranded) {
+		t.Fatalf("want errInstallEntryStranded from the rebind, got %v", err)
+	}
+
+	// 3. Simulate the freed index 1 being handed to another plugin's live
+	// decap-VRF SID: a foreign grant now occupies index 1.
+	grants.mu.Lock()
+	grants.grants[1] = 9999
+	grants.mu.Unlock()
+
+	// 4. The plugin drops the set. The stranded "a" is pruned; its removeEntry
+	// must NOT delete the foreign grant at index 1.
+	grants.putErr = nil
+	sids.delFailOn = ""
+	if _, _, err := set.Apply(owner, nil, -1); err != nil {
+		t.Fatalf("cleanup apply: %v", err)
+	}
+	grants.mu.Lock()
+	_, foreignSurvives := grants.grants[1]
+	grants.mu.Unlock()
+	if !foreignSurvives {
+		t.Fatal("the rebind-strand removeEntry deleted a foreign grant at the reused aux index")
+	}
+}
+
+// When the grant write fails and the rollback of the dispatch entry also
+// fails, the entry is still live in the map. The address must not be released
+// -- a later allocation would collide with the entry nothing else tracks --
+// and the SID stays tracked so a later reconcile removes it by prefix.
+func TestLocalSIDDecapVRFStrandedEntryKeepsAddress(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	grants := newFakeGrantOps()
+	grants.putErr = errors.New("grant map full")
+	set := NewLocalSIDSet(alloc, sids, grants, func(string) (uint32, error) { return 9, nil })
+	owner := bpf.OwnerTag("plugin:demo")
+
+	// The rollback delete of the just-created entry also fails, so the entry
+	// is stranded.
+	decl := []LocalSID{{Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-cust"}}
+	// The address the allocator will hand out, so the delete of its prefix can
+	// be made to fail.
+	sids.delFailOn = "fd00:1::1/128"
+
+	_, _, err := set.Apply(owner, decl, -1)
+	if err == nil {
+		t.Fatal("want an error when the grant write and its rollback both fail")
+	}
+	if !errors.Is(err, errInstallEntryStranded) {
+		t.Fatalf("want errInstallEntryStranded, got %v", err)
+	}
+	if alloc.releasedCount() != 0 {
+		t.Fatalf("released %d addresses; a stranded entry's address must be kept", alloc.releasedCount())
+	}
+
+	// Redeclaring the SAME set must not be mistaken for already-installed: the
+	// stranded entry has no grant, so the reconcile has to remove and reinstall
+	// it. With the failures cleared it now converges, grant and all.
+	sids.delFailOn = ""
+	grants.putErr = nil
+	out, _, err := set.Apply(owner, decl, -1)
+	if err != nil {
+		t.Fatalf("re-apply after strand: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("re-apply produced %d SIDs, want 1", len(out))
+	}
+	entry, ok := sids.entryFor(out[0].SID.String() + "/128")
+	if !ok {
+		t.Fatal("re-apply left no dispatch entry")
+	}
+	if grants.grants[uint32(entry.AuxIndex)] != 9 {
+		t.Fatalf("re-apply did not write the grant; a stranded entry was mistaken for up to date: %v", grants.ops)
+	}
+
+	// And it can still be cleaned up.
+	if _, _, err := set.Apply(owner, nil, -1); err != nil {
+		t.Fatalf("cleanup apply: %v", err)
+	}
+	if sids.count() != 0 {
+		t.Fatalf("entry not cleaned up: %d entries remain", sids.count())
+	}
+}
+
 // The two halves of a plugin meet here: a declared SID is allocated, the
 // dispatch entry points it at the plugin's own slot, and the plugin is
 // told the address it got.
 func TestLocalSIDAllocatesAndInstalls(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 
 	got, res, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
@@ -181,7 +435,7 @@ func TestLocalSIDAllocatesAndInstalls(t *testing.T) {
 // what keeps allocation idempotent despite not being declarative.
 func TestLocalSIDRedeclarationKeepsTheAddress(t *testing.T) {
 	alloc := &fakeAllocator{}
-	set := NewLocalSIDSet(alloc, newFakeSIDOps())
+	set := NewLocalSIDSet(alloc, newFakeSIDOps(), nil, nil)
 	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
@@ -205,7 +459,7 @@ func TestLocalSIDRedeclarationKeepsTheAddress(t *testing.T) {
 func TestLocalSIDReleasesWhatIsNoLongerDeclared(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 	if _, _, err := set.Apply(ownerA, []LocalSID{
 		{Name: "svc-a", Locator: "main", Slot: 33},
 		{Name: "svc-b", Locator: "main", Slot: 34},
@@ -232,7 +486,7 @@ func TestLocalSIDReleasesWhatIsNoLongerDeclared(t *testing.T) {
 func TestLocalSIDSlotChangeKeepsTheAddress(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
@@ -254,7 +508,7 @@ func TestLocalSIDSlotChangeKeepsTheAddress(t *testing.T) {
 // is given back.
 func TestLocalSIDLocatorChangeReallocates(t *testing.T) {
 	alloc := &fakeAllocator{}
-	set := NewLocalSIDSet(alloc, newFakeSIDOps())
+	set := NewLocalSIDSet(alloc, newFakeSIDOps(), nil, nil)
 	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
@@ -277,7 +531,7 @@ func TestLocalSIDReleasesOnFailedInstall(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()
 	sids.failOn = "fd00:1::1/128"
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited); err == nil {
 		t.Fatal("a failed install was reported as success")
 	}
@@ -289,7 +543,7 @@ func TestLocalSIDReleasesOnFailedInstall(t *testing.T) {
 func TestLocalSIDReleaseOwner(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 	if _, _, err := set.Apply(ownerA, []LocalSID{
 		{Name: "svc-a", Locator: "main", Slot: 33},
 		{Name: "svc-b", Locator: "main", Slot: 34},
@@ -313,14 +567,14 @@ func TestLocalSIDReleaseOwner(t *testing.T) {
 // A SID pointing at a built-in behavior would let a plugin borrow
 // vinbero's forwarding under its own address.
 func TestLocalSIDRejectsNonPluginSlot(t *testing.T) {
-	set := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	set := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps(), nil, nil)
 	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 1}}, unlimited); err == nil {
 		t.Fatal("a SID pointing at a built-in slot was accepted")
 	}
 }
 
 func TestLocalSIDRejectsMalformed(t *testing.T) {
-	set := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	set := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps(), nil, nil)
 	tests := []struct {
 		name string
 		sid  LocalSID
@@ -350,7 +604,7 @@ func TestLocalSIDRejectsMalformed(t *testing.T) {
 // A daemon with no locator manager says so rather than accepting a
 // declaration it cannot serve.
 func TestLocalSIDWithoutAnAllocator(t *testing.T) {
-	set := NewLocalSIDSet(nil, nil)
+	set := NewLocalSIDSet(nil, nil, nil, nil)
 	if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited); err == nil {
 		t.Fatal("a declaration was accepted with no allocator")
 	}
@@ -399,7 +653,7 @@ func TestLocalSIDSweepsLeftoversFromAPreviousRun(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 	got, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
@@ -423,7 +677,7 @@ func TestLocalSIDSweepsLeftoversFromAPreviousRun(t *testing.T) {
 func TestLocalSIDSweepsOnlyOnce(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 
 	first, _, err := set.Apply(ownerA, []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33}}, unlimited)
 	if err != nil {
@@ -451,7 +705,7 @@ func TestLocalSIDSweepsOnlyOnce(t *testing.T) {
 // be rewritten at all.
 func TestLocalSIDRedeclarationWithAuxDoesNotRewrite(t *testing.T) {
 	sids := newFakeSIDOps()
-	set := NewLocalSIDSet(&fakeAllocator{}, sids)
+	set := NewLocalSIDSet(&fakeAllocator{}, sids, nil, nil)
 	declared := []LocalSID{{Name: "svc-a", Locator: "main", Slot: 33, AuxRaw: []byte{1, 2, 3}}}
 
 	if _, _, err := set.Apply(ownerA, declared, unlimited); err != nil {
@@ -474,7 +728,7 @@ func TestLocalSIDRedeclarationWithAuxDoesNotRewrite(t *testing.T) {
 func TestLocalSIDChangedAuxRemovesBeforeInstalling(t *testing.T) {
 	sids := newFakeSIDOps()
 	alloc := &fakeAllocator{}
-	set := NewLocalSIDSet(alloc, sids)
+	set := NewLocalSIDSet(alloc, sids, nil, nil)
 	first, _, err := set.Apply(ownerA, []LocalSID{
 		{Name: "svc-a", Locator: "main", Slot: 33, AuxRaw: []byte{1}},
 	}, unlimited)

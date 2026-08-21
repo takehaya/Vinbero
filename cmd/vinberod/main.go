@@ -455,9 +455,22 @@ func run(cliCtx *cli.Context) error {
 			AdvertiserFor: func(producer string) cplane.Advertiser {
 				return bgpSession.AsProducer(producer)
 			},
-			Locators:     locatorMgr,
-			SIDFunctions: vin.GetMapOperations(),
-			EncapSource:  applier.EncapSourceAddr,
+			Locators:      locatorMgr,
+			SIDFunctions:  vin.GetMapOperations(),
+			EndtVRFGrants: vin.GetMapOperations(),
+			// A plugin-dispatched End.DT4/DT6/DT46 decaps into the VRF's
+			// kernel device, so the grant records that device's ifindex. A
+			// VRF with only ingress ACs and no L3 device cannot be a decap
+			// target; resolving fails and the declaration is retried or
+			// refused, the same as a locator that is not registered yet.
+			ResolveVRF: func(vrfName string) (uint32, error) {
+				v, ok := vrfBgpMgr.VRF().Get(vrfName)
+				if !ok || v.Device == nil || v.Device.Ifindex == 0 {
+					return 0, fmt.Errorf("vrf %q has no L3 device ifindex", vrfName)
+				}
+				return v.Device.Ifindex, nil
+			},
+			EncapSource: applier.EncapSourceAddr,
 			Store:        cplaneStore,
 			// What a plugin's scope is stated in terms of. Both are
 			// consulted when a declaration is applied rather than now,

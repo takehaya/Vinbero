@@ -230,16 +230,16 @@ fi
 echo ""
 echo "[4] data plane: ce-tokyo -> ce-osaka over plugin-installed state"
 
-# What this validates, and what it does not. The forward path steers into the
-# plugin's SID, which on pe-osaka tail-calls the built-in End.DT4. Because the
-# SID is a plugin slot, the aux discriminator nulls the aux (the B4 boundary),
-# so End.DT4 has no VRF ifindex and decaps against pe-osaka's main routing
-# table. ce-osaka's subnet is a connected route on that table here, so the
-# packet is delivered. This exercises the plugin -> End.DT4 handoff, not
-# VRF-scoped decap: a config that enslaved the customer interface to vrf-cust
-# would have no such main-table route and the packet would miss the VRF table.
-# Passing a granted VRF safely into End.DT4 is a separate feature (see
-# docs/design/ja/cplane-plugin.md, "既知の限界").
+# What this validates. The forward path steers into the plugin's SID, which
+# on pe-osaka tail-calls the built-in End.DT4. Because the SID is a plugin
+# slot, the aux discriminator nulls the aux (the B4 boundary), so End.DT4
+# cannot take a VRF ifindex from the plugin's own aux. It takes it from a
+# host-owned grant the plugin's declaration named (decap_vrf=vrf-cust)
+# instead. eth2 is enslaved to vrf-cust, so ce-osaka's subnet is a connected
+# route in table 100 and nowhere in the main table; a decap that fell back to
+# the main table -- the old behavior -- would find nothing and drop. The ping
+# completing therefore proves the grant is load-bearing, which the route-table
+# assertion below states directly.
 
 # Gate on every precondition before pinging, so a slow data plane cannot
 # produce a spurious failure.
@@ -273,13 +273,31 @@ else
     ng "gate: underlay not reachable between the PEs"
 fi
 
+# The decap is VRF-scoped, not a main-table fallback. ce-osaka's subnet is a
+# connected route in vrf-cust's table (100) because eth2 is enslaved, and is
+# absent from the main table. If both were true only of the main table the
+# grant would be doing nothing; asserting the split is what makes the ping
+# below prove the grant rather than a coincidental main-table route.
+if dexec "$PE_OSAKA" ip route show table 100 2>/dev/null | grep -q "$OSAKA_PREFIX"; then
+    ok "pe-osaka resolves $OSAKA_PREFIX in vrf-cust's table (100)"
+else
+    ng "pe-osaka has no $OSAKA_PREFIX route in table 100; the VRF decap has nowhere to land"
+    dexec "$PE_OSAKA" ip route show table 100 || true
+fi
+if dexec "$PE_OSAKA" ip route show table main 2>/dev/null | grep -q "$OSAKA_PREFIX"; then
+    ng "$OSAKA_PREFIX is still in pe-osaka's main table, so a main-table fallback could mask a missing grant"
+    dexec "$PE_OSAKA" ip route show table main | grep "$OSAKA_PREFIX" || true
+else
+    ok "$OSAKA_PREFIX is absent from pe-osaka's main table, so only the VRF grant resolves it"
+fi
+
 echo "  --- gates passed, starting data-plane ping ---"
 
 ping_ok() {
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" >/dev/null 2>&1
 }
 if retry_n 20 ping_ok; then
-    ok "ce-tokyo ($CE_TOKYO_ADDR) -> ce-osaka ($CE_OSAKA_ADDR) over the plugin's SRv6 path (decap via pe-osaka main table)"
+    ok "ce-tokyo ($CE_TOKYO_ADDR) -> ce-osaka ($CE_OSAKA_ADDR) over the plugin's SRv6 path (decap into vrf-cust)"
     dexec "$CE_TOKYO" ping -c 3 -W 2 "$CE_OSAKA_ADDR" | tail -3 | sed 's/^/      /'
 else
     ng "ce-tokyo cannot reach ce-osaka"

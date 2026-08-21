@@ -196,6 +196,11 @@ type BpfMupUplinkV6Key struct {
 	Teid      [4]uint8
 }
 
+type BpfPluginEndtVrf struct {
+	_          structs.HostLayout
+	VrfIfindex uint32
+}
+
 type BpfScratchBuf struct {
 	_    structs.HostLayout
 	Data [224]uint8
@@ -373,6 +378,7 @@ type BpfMapSpecs struct {
 	IngressVrfMap          *ebpf.MapSpec `ebpf:"ingress_vrf_map"`
 	MupUplinkV4Map         *ebpf.MapSpec `ebpf:"mup_uplink_v4_map"`
 	MupUplinkV6Map         *ebpf.MapSpec `ebpf:"mup_uplink_v6_map"`
+	PluginEndtVrfMap       *ebpf.MapSpec `ebpf:"plugin_endt_vrf_map"`
 	ScratchMap             *ebpf.MapSpec `ebpf:"scratch_map"`
 	ServiceIngressMap      *ebpf.MapSpec `ebpf:"service_ingress_map"`
 	ServiceReturnProgs     *ebpf.MapSpec `ebpf:"service_return_progs"`
@@ -443,6 +449,7 @@ type BpfMaps struct {
 	IngressVrfMap          *ebpf.Map `ebpf:"ingress_vrf_map"`
 	MupUplinkV4Map         *ebpf.Map `ebpf:"mup_uplink_v4_map"`
 	MupUplinkV6Map         *ebpf.Map `ebpf:"mup_uplink_v6_map"`
+	PluginEndtVrfMap       *ebpf.Map `ebpf:"plugin_endt_vrf_map"`
 	ScratchMap             *ebpf.Map `ebpf:"scratch_map"`
 	ServiceIngressMap      *ebpf.Map `ebpf:"service_ingress_map"`
 	ServiceReturnProgs     *ebpf.Map `ebpf:"service_return_progs"`
@@ -488,6 +495,7 @@ func (m *BpfMaps) Close() error {
 		m.IngressVrfMap,
 		m.MupUplinkV4Map,
 		m.MupUplinkV6Map,
+		m.PluginEndtVrfMap,
 		m.ScratchMap,
 		m.ServiceIngressMap,
 		m.ServiceReturnProgs,

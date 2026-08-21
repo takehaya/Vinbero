@@ -71,7 +71,7 @@ func TestAdvertiseQuota(t *testing.T) {
 }
 
 func TestLocalSIDQuota(t *testing.T) {
-	set := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps())
+	set := NewLocalSIDSet(&fakeAllocator{}, newFakeSIDOps(), nil, nil)
 	sids := []LocalSID{
 		{Name: "svc-a", Locator: "main", Slot: 33},
 		{Name: "svc-b", Locator: "main", Slot: 34},

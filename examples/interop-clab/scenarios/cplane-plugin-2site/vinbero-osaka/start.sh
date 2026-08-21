@@ -47,10 +47,6 @@ for i in eth1 eth2; do
     ethtool -K "$i" rxvlan off 2>/dev/null || true
 done
 
-# Return-path table for the End.DT4 endpoint: decapped customer traffic
-# resolves 10.2.0.0/24 out of table 100.
-ip route replace 10.2.0.0/24 dev eth2 table 100
-
 # --- static underlay routes ------------------------------------------------
 ip -6 route replace 2001:db8:ff::1/128 via 2001:db8:2::2 dev eth1 \
     src 2001:db8:ff::2
@@ -87,6 +83,18 @@ if ! ip link show vrf-cust >/dev/null 2>&1; then
     echo "ERROR: failed to create VRF vrf-cust -- is the kernel 'vrf' module loaded on the host? (modprobe vrf)" >&2
     exit 1
 fi
+
+# Enslave the customer interface to vrf-cust. This is what makes the decap
+# genuinely VRF-scoped: eth2's connected 10.2.0.0/24 route moves out of the
+# main table and into table 100, so a plugin-dispatched End.DT4 that fell
+# back to the main table (the old behavior) would now find nothing and drop.
+# Only the host-owned grant that names vrf-cust resolves the return route.
+ip link set eth2 master vrf-cust
+# Re-assert the address and route in case enslaving flushed them, and keep
+# eth2 up.
+ip addr add 10.2.0.1/24 dev eth2 2>/dev/null || true
+ip link set eth2 up
+ip route replace 10.2.0.0/24 dev eth2 table 100
 
 # The eBPF half of the custom behavior, in endpoint slot 32. The
 # control-plane plugin allocates a SID pointing at this slot, so traffic
@@ -125,11 +133,21 @@ fi
 #   4 VRF            vrf-cust
 #   5 slot           32               (its own eBPF half, registered above)
 #   7 next hop       2001:db8:ff::2   (this node's loopback)
+#   8 decap VRF      vrf-cust         (where its End.DT4 handoff decaps)
 #
 # No field 6: the plugin allocates its SID rather than advertising one an
 # operator provisioned. That is what makes this the whole loop -- the
 # address in the SID TLV on the wire is one the daemon handed the plugin.
-printf '\010\201\374\003\022\004\114\117\103\062\032\013\061\060\056\062\056\060\056\060\057\062\064\042\010\166\162\146\055\143\165\163\164\050\040\072\016\062\060\060\061\072\144\142\070\072\146\146\072\072\062' \
+#
+# Field 8's wire bytes, so the blob can be checked without decoding by hand:
+# tag \102 = (field 8 << 3) | wire-type 2 (length-delimited), \010 = length 8,
+# then "vrf-cust" (\166\162\146\055\143\165\163\164). The same eight name bytes
+# appear after field 4's tag \042 above.
+#
+# Field 8 is the return direction: the eBPF half hands decapsulated traffic
+# to a built-in End.DT4, and naming the VRF here makes the host record a
+# grant so that decap lands in vrf-cust's table rather than dropping.
+printf '\010\201\374\003\022\004\114\117\103\062\032\013\061\060\056\062\056\060\056\060\057\062\064\042\010\166\162\146\055\143\165\163\164\050\040\072\016\062\060\060\061\072\144\142\070\072\146\146\072\072\062\102\010\166\162\146\055\143\165\163\164' \
     > /tmp/plugin-config.bin
 
 # Granted `advertise` and `local_sid`, and no more. The capability says
@@ -152,7 +170,9 @@ printf '\010\201\374\003\022\004\114\117\103\062\032\013\061\060\056\062\056\060
     --vrf vrf-cust --locator LOC2 --endpoint-slot 32 || true
 
 # Pre-resolve neighbours so the first packet is not queued behind NDP/ARP.
+# The customer neighbour lives in vrf-cust now that eth2 is enslaved, so the
+# warm-up ping has to resolve in that table rather than the main one.
 ping6 -c 1 -W 2 2001:db8:2::2 >/dev/null 2>&1 || true
-ping -c 1 -W 2 10.2.0.10 >/dev/null 2>&1 || true
+ip vrf exec vrf-cust ping -c 1 -W 2 10.2.0.10 >/dev/null 2>&1 || true
 
 echo "[start.sh] pe-osaka (Vinbero, advertising plugin) ready"

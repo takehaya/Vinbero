@@ -226,6 +226,7 @@ object 単位の性質なので、この形は表現できません。
 | 宣言 | 範囲 | 理由 |
 |---|---|---|
 | `local_sid` | locator 名の集合 | 宣言が locator 名を持ち、割り当ては `pkg/locator` が管理する |
+| `local_sid` の decap_vrf | VRF 名の集合 | plugin dispatch の built-in decap を許可済み VRF へ縛る (advertise と同じ集合) |
 | advertise の vpnv4 と vpnv6 | VRF 名の集合 | RD と RT を binding から導出する |
 | advertise の ipv6_unicast | 許可された locator の配下 | plugin がここで広告する正当なものは自分の SID である |
 | `headend` | trigger prefix の list | 縛れる名前が存在しない |
@@ -373,9 +374,22 @@ layout として解釈し、scope の VRF grant を破って任意の VRF へ de
 
 そこで built-in の aux 参照を分けます。built-in 用の lookup は、処理中の SID の
 action が plugin slot 域 (endpoint なら 32 以上) なら aux を NULL にします。plugin の
-handoff で built-in に入ったときは aux を読まず、aux 無しと同じ fallback (End.DT4 なら
-ingress ifindex) に落ちます。plugin が自分の program で自分の aux を読む経路は
-そのままなので、plugin の aux は plugin だけが解釈します。
+handoff で built-in に入ったときは aux を読みません。plugin が自分の program で
+自分の aux を読む経路はそのままなので、plugin の aux は plugin だけが解釈します。
+
+aux を NULL にすると built-in End.DT4/DT6/DT46 は VRF ifindex を失うので、その VRF を
+host が別に渡します。plugin が制御する aux を再び信頼するのではなく、host が書き
+全 program から read-only な (`BPF_F_RDONLY_PROG`) 専用の grant map
+`plugin_endt_vrf_map` を用意し、そこから VRF を引きます。key は dispatch entry の
+aux index で、両路 (SRH 有りと reduced-encap) で `tailcall_ctx` から取れます。control
+plane は decap_vrf を持つ plugin の local SID に必ず非ゼロの aux index を確保し、VRF 名を
+kernel の L3 device ifindex に解決して `{ifindex}` を grant map へ書き、SID の解放で
+消します。grant が無ければ built-in decap は ingress table へ暗黙に fallback せず明示的に
+drop します。暗黙 fallback は ingress table に偶然一致する経路があると意図しない routing
+domain へ転送しうる曖昧な挙動なので、fail-closed にします。plugin ELF は kernel が
+`BPF_F_RDONLY_PROG` で書き込みを構造的に拒むので、`checkROWrites` の best-effort より
+強く grant を偽造できません。decap_vrf は plugin の scope の VRF 集合に含まれること
+(advertise と同じ集合) を host が確かめます。
 
 この判別は `tailcall_ctx_map` の `sid_entry.action` を読むので、plugin がその map を
 書けると action を偽造して判別を欺けます。共有 map は MapReplacements で plugin に
@@ -505,20 +519,6 @@ auto-advertise の exporter と operator の RPC の 2 つがあり、いまは�
 producer です。さらに EVPN の withdraw は producer を見ずに path を消すので、
 名前を付けるだけでは足りず withdraw 側の作り直しが要ります。別の変更として
 残しています。
-
-plugin dispatch の End.DT4 は VRF scoped な decap ができません。built-in の aux
-lookup が plugin slot の SID で aux を NULL にする (data plane 境界の節) ので、
-built-in End.DT4 は aux の VRF ifindex を受け取れず、core の ingress ifindex の
-routing table を使います。ingress table に一致する経路があれば転送され、無ければ
-落ちるので、customer interface を実際に VRF へ enslave した構成では VRF table を
-迂回します。安全に許可済み VRF を End.DT4 へ渡すには、plugin が制御する aux を
-再び信頼する形ではなく、host が書き全 program から read-only な grant map
-(SID・plugin slot・action・lease generation を key にする) を別に用意する必要が
-あり、これは別の feature として残しています。それまでの間、grant を持たない
-plugin-origin の End.DT4 を暗黙で ingress table に fallback させるのは、意図しない
-routing domain へ転送しうる曖昧な挙動なので、明示的に drop する方向で検討します。
-`cplane-plugin-2site` interop はこの handoff を main table の connected route 経由で
-検証しており、VRF scoped forwarding そのものは覆っていません。
 
 conformance harness は scope のうち daemon 無しで判定できる部分だけを見ます。
 prefix が locator に含まれるかと、VRF に binding があるかは daemon の状態に

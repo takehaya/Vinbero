@@ -286,6 +286,14 @@ message PluginLocalSid {
   // AuxRaw is the per-SID configuration the data-plane half reads, in the
   // layout its BTF declares.
   bytes aux_raw = 4;
+  // DecapVRF, when set, is the VRF a plugin-dispatched End.DT4/DT6/DT46
+  // decapsulates into. A plugin's data-plane half hands SRv6 traffic to a
+  // built-in decap behavior, and the handoff nulls the SID's own aux so the
+  // plugin cannot spell an arbitrary VRF ifindex there; the host resolves
+  // this name to a kernel ifindex and records it in a host-owned grant map.
+  // It must be a VRF in the plugin's scope. Empty leaves a plugin whose half
+  // completes without a built-in handoff unaffected.
+  string decap_vrf = 5;
 }
 
 // PluginApplyChunk is one instalment of a declared set.

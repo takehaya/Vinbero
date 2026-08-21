@@ -2,10 +2,47 @@
 #define SRV6_ENDPOINT_DECAP_H
 
 #include "endpoint/srv6_endpoint_core.h"
+#include "core/xdp_map.h"       // plugin_endt_vrf_map
+#include "core/xdp_tailcall.h"  // ENDPOINT_PLUGIN_BASE
 
 // ========================================================================
 // Decapsulation Helpers
 // ========================================================================
+
+// resolve_decap_vrf picks the VRF ifindex for an End.DT4/DT6/DT46 decap.
+//
+// A built-in SID (action below ENDPOINT_PLUGIN_BASE) takes it from its aux, or
+// falls back to the ingress interface when no VRF is configured (End.T). A
+// plugin that tail-called the built-in behavior reaches here with its aux
+// nulled by the discriminator, so its VRF cannot be read from the aux (the
+// plugin_raw bytes are the plugin's own and reading them as l3vrf would let it
+// decap into any VRF). Its VRF comes from plugin_endt_vrf_map instead, keyed by
+// the SID's aux_index and written only by the control plane from the plugin's
+// scope. A plugin SID with no grant is refused (returns non-zero) rather than
+// falling back to the ingress table, which could forward into an unintended
+// routing domain that happens to hold a matching route.
+//
+// Returns 0 and sets *out on success, non-zero to drop.
+static __always_inline int resolve_decap_vrf(
+    struct sid_function_entry *entry, struct sid_aux_entry *aux,
+    struct xdp_md *ctx, __u32 *out)
+{
+    if (entry && entry->action >= ENDPOINT_PLUGIN_BASE) {
+        __u32 idx = entry->aux_index;
+        if (idx == 0) {
+            return -1;  // no aux slot => no grant possible
+        }
+        struct plugin_endt_vrf *g =
+            bpf_map_lookup_elem(&plugin_endt_vrf_map, &idx);
+        if (!g || !g->vrf_ifindex) {
+            return -1;
+        }
+        *out = g->vrf_ifindex;
+        return 0;
+    }
+    *out = aux_vrf_or_ingress_ifindex(aux, ctx);
+    return 0;
+}
 
 // Decap + FIB redirect for inner IPv4.
 // SL check → strip outer headers → set EtherType → FIB redirect.
@@ -141,7 +178,10 @@ static __always_inline int process_end_dt4(
     struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
-    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
+    __u32 fib_ifindex;
+    if (resolve_decap_vrf(entry, aux, ctx, &fib_ifindex) != 0) {
+        return XDP_DROP;
+    }
     return decap_and_fib_v4(ctx, srh, fib_ifindex, l3_offset);
 }
 
@@ -154,7 +194,10 @@ static __always_inline int process_end_dt6(
     struct sid_aux_entry *aux,
     __u16 l3_offset)
 {
-    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
+    __u32 fib_ifindex;
+    if (resolve_decap_vrf(entry, aux, ctx, &fib_ifindex) != 0) {
+        return XDP_DROP;
+    }
     return decap_and_fib_v6(ctx, srh, fib_ifindex, l3_offset);
 }
 
