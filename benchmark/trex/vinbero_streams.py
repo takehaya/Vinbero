@@ -152,6 +152,8 @@ def main():
     if not 0 < args.duration <= 55:
         sys.exit("--duration must be 1..55: longer runs can wrap the "
                  "32-bit port counters twice; split into shorter runs")
+    if args.flows < 1 or args.pps < 0 or args.peers < 1:
+        sys.exit("--flows and --peers must be >= 1, --pps >= 0")
 
     frames = build_frames(args.scenario, args.size, args.flows)
     wire_len = len(frames[0])

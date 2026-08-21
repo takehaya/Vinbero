@@ -18,6 +18,9 @@ settings:
   # Smoke/debug config: stats stay on so the datapath can be verified
   # at low rate; measurement runs use vinbero-bench.yml (stats off).
   enable_stats: true
+  # Isolate from the host's operational state file so the harness never
+  # reconciles or clobbers /var/lib/vinbero/state.json.
+  state_path: /tmp/vinbero-bench-state.json
   fdb_aging_seconds: 0
   entries:
     sid_function:

@@ -18,6 +18,9 @@ settings:
   # Keep stats off for measurement runs; the smoke phase flips this to
   # true via configs/vinbero-bench-stats.yml to verify the datapath.
   enable_stats: false
+  # Isolate from the host's operational state file so the harness never
+  # reconciles or clobbers /var/lib/vinbero/state.json.
+  state_path: /tmp/vinbero-bench-state.json
   fdb_aging_seconds: 0
   entries:
     sid_function:

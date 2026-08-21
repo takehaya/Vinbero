@@ -23,6 +23,13 @@ case "$SCENARIO" in
 esac
 if [ $# -gt 0 ]; then
     SIZES=("$@")
+    # These values are spliced into the remote ssh command string, so
+    # accept plain integers only.
+    for size in "${SIZES[@]}"; do
+        case "$size" in
+            ''|*[!0-9]*) echo "size must be an integer, got: $size" >&2; exit 2 ;;
+        esac
+    done
 else
     case "$SCENARIO" in
         encaps-v4|ecmp) SIZES=(64 128 256 512 1024 1420) ;;

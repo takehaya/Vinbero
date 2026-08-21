@@ -35,7 +35,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-for bin in "$VINBEROD_BIN" "$VINBERO_BIN"; do
+BINS=("$VINBEROD_BIN" "$VINBERO_BIN")
+[ "$SCENARIO" = ecmp ] && BINS+=("$ECMPDEMO_BIN")
+for bin in "${BINS[@]}"; do
     [ -x "$bin" ] || { echo "$bin not found; run 'make build' first" >&2; exit 1; }
 done
 
@@ -105,7 +107,6 @@ case "$SCENARIO" in
             --src-addr "$SID_END" --segments "$SEG_REMOTE"
         ;;
     ecmp)
-        [ -x "$ECMPDEMO_BIN" ] || { echo "$ECMPDEMO_BIN not found; run 'make build' first" >&2; exit 1; }
         vbctl hv4 create --trigger-prefix 10.99.0.0/24 \
             --src-addr "$SID_END" --segments "$SEG_REMOTE"
         sudo "$ECMPDEMO_BIN" group-put --pid "$(cat "$PID_FILE")" \
