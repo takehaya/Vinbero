@@ -168,10 +168,11 @@ func (f *fakeSIDOps) entryFor(prefix string) (*bpf.SidFunctionEntry, bool) {
 // fakeGrantOps records the decap-VRF grants a reconcile writes, keyed by the
 // dispatch entry's aux index.
 type fakeGrantOps struct {
-	mu     sync.Mutex
-	grants map[uint32]uint32 // auxIndex -> vrfIfindex
-	putErr error             // when set, PutEndtVRFGrant fails
-	ops    []string
+	mu      sync.Mutex
+	grants  map[uint32]uint32 // auxIndex -> vrfIfindex
+	putErr  error             // when set, PutEndtVRFGrant fails
+	putHook func()            // when set, runs inside PutEndtVRFGrant before the write
+	ops     []string
 }
 
 func newFakeGrantOps() *fakeGrantOps {
@@ -179,6 +180,9 @@ func newFakeGrantOps() *fakeGrantOps {
 }
 
 func (f *fakeGrantOps) PutEndtVRFGrant(auxIndex, vrfIfindex uint32) error {
+	if f.putHook != nil {
+		f.putHook()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.putErr != nil {
@@ -266,6 +270,16 @@ func TestLocalSIDDecapVRFGrantHeldDuringResolve(t *testing.T) {
 		}
 		return 42, nil
 	}
+	// The lease must also be held through the grant write, not just the
+	// resolve: unlocking in between would reopen the very window this closes.
+	putHooked := false
+	grants.putHook = func() {
+		putHooked = true
+		if lease.TryLock() {
+			lease.Unlock()
+			t.Error("grant lease was not held while install wrote the grant")
+		}
+	}
 	set := NewLocalSIDSet(alloc, sids, grants, resolve)
 	set.grantLease = &lease
 	owner := bpf.OwnerTag("plugin:demo")
@@ -277,6 +291,9 @@ func TestLocalSIDDecapVRFGrantHeldDuringResolve(t *testing.T) {
 	}
 	if !resolveCalled {
 		t.Fatal("resolver never ran")
+	}
+	if !putHooked {
+		t.Fatal("grant write never ran")
 	}
 	// The lease is released once install returns.
 	if !lease.TryLock() {

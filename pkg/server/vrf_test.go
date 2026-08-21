@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -51,11 +52,12 @@ func fakeResolver(name string) (uint32, error) {
 // fakeVrfDeviceOps records device create/delete calls; create hands out
 // sequential ifindexes starting at 100.
 type fakeVrfDeviceOps struct {
-	createErr error
-	deleteErr error
-	created   []string
-	deleted   []string
-	next      uint32
+	createErr  error
+	deleteErr  error
+	created    []string
+	deleted    []string
+	next       uint32
+	deleteHook func() // when set, runs inside DeleteVrf
 }
 
 func (f *fakeVrfDeviceOps) CreateVrf(name string, tableID uint32, members []string, l3mdev bool) (uint32, error) {
@@ -68,6 +70,9 @@ func (f *fakeVrfDeviceOps) CreateVrf(name string, tableID uint32, members []stri
 }
 
 func (f *fakeVrfDeviceOps) DeleteVrf(name string) error {
+	if f.deleteHook != nil {
+		f.deleteHook()
+	}
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
@@ -80,10 +85,11 @@ func (f *fakeVrfDeviceOps) DeleteVrf(name string) error {
 // L2 aux (bridge references); default is End.DT4 with an l3vrf aux. auxErr
 // makes every GetSidAux fail (the fail-closed path).
 type fakeSidTable struct {
-	refs      map[string]uint32 // prefix -> ifindex
-	l2        bool
-	auxErr    error
-	grantRefs map[uint32]uint32 // aux index -> granted ifindex
+	refs         map[string]uint32 // prefix -> ifindex
+	l2           bool
+	auxErr       error
+	grantRefs    map[uint32]uint32 // aux index -> granted ifindex
+	grantRefHook func()            // when set, runs inside EndtVRFGrantReferences
 }
 
 func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {
@@ -124,6 +130,9 @@ func (f *fakeSidTable) GetSidAux(index uint32) (*bpf.SidAuxEntry, error) {
 }
 
 func (f *fakeSidTable) EndtVRFGrantReferences(ifindex uint32) (uint32, bool, error) {
+	if f.grantRefHook != nil {
+		f.grantRefHook()
+	}
 	for aux, granted := range f.grantRefs {
 		if granted == ifindex {
 			return aux, true, nil
@@ -572,6 +581,56 @@ func TestVrfServer_DeleteRefusals(t *testing.T) {
 			t.Errorf("VrfDelete(%q): want per-item error, got %+v", name, resp.Msg)
 		}
 	}
+}
+
+// VrfDelete holds the shared grant lease across both the grant-reference check
+// and the device teardown, so a plugin's decap-grant install (which takes the
+// same lock across its resolve+write) cannot slip a grant onto the ifindex
+// being freed. Removing either lock acquisition makes this fail.
+func TestVrfServer_DeleteHoldsGrantLease(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	var lease sync.Mutex
+	s.grantLease = &lease
+
+	// The lease must be held while the grant-reference check runs and while the
+	// device is torn down. A TryLock from inside either step must fail.
+	checkHeld, teardownHeld := false, false
+	sids := &fakeSidTable{grantRefHook: func() {
+		checkHeld = true
+		if lease.TryLock() {
+			lease.Unlock()
+			t.Error("grant lease not held during the grant-reference check")
+		}
+	}}
+	s.sids = sids
+	dev.deleteHook = func() {
+		teardownHeld = true
+		if lease.TryLock() {
+			lease.Unlock()
+			t.Error("grant lease not held during device teardown")
+		}
+	}
+
+	if _, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: "vrf-cust", TableId: 100}},
+	})); err != nil {
+		t.Fatalf("VrfCreate: %v", err)
+	}
+	resp, err := s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{"vrf-cust"}}))
+	if err != nil {
+		t.Fatalf("VrfDelete: %v", err)
+	}
+	if len(resp.Msg.DeletedNames) != 1 {
+		t.Fatalf("delete did not succeed: %+v", resp.Msg)
+	}
+	if !checkHeld || !teardownHeld {
+		t.Fatalf("hooks did not both run: check=%v teardown=%v", checkHeld, teardownHeld)
+	}
+	// Released once the delete returned.
+	if !lease.TryLock() {
+		t.Fatal("grant lease still held after VrfDelete returned")
+	}
+	lease.Unlock()
 }
 
 // A deviceless (ingress-only) VRF deletes without touching DeviceOps; a

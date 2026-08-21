@@ -397,9 +397,12 @@ install は VRF 名を ifindex へ解決してから grant を書くまでこの
 が解放中の ifindex を指すことがなくなります。install が先なら VrfDelete のチェックが
 grant を見て削除を拒み、VrfDelete が先なら device が消えて install の解決が失敗します。
 この lock は最内側でだけ取り、内側では VRF manager 自身の lock と BPF map しか触らないので
-applyMu や VRF mutation mutex と deadlock しません。VrfDelete が applyMu を取り install が
-VRF mutation mutex を取るという逆順が無いため、両者を直接共有すると deadlock する一方で、
-専用の leaf lock なら安全に閉じられます。
+applyMu や VRF mutation mutex と deadlock しません。VRF mutation mutex をそのまま grant lock に
+流用すると deadlock します。binding 更新は mutation mutex を持ったまま `ReconcileAdvertised`
+で applyMu を取り (mutation mutex から applyMu)、plugin install は applyMu を持ったまま
+mutation mutex を取る (applyMu から mutation mutex) ので、この 2 経路が逆順になるからです。
+VrfDelete 自身は applyMu を取りませんが mutation mutex を binding 側と共有するため、流用すれば
+同じ輪に巻き込まれます。専用の leaf lock はこの逆転に関与しないので安全に閉じられます。
 
 この判別は `tailcall_ctx_map` の `sid_entry.action` を読むので、plugin がその map を
 書けると action を偽造して判別を欺けます。共有 map は MapReplacements で plugin に
