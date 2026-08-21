@@ -84,14 +84,21 @@ def frame(scenario, i, size):
     if scenario == "end":
         # DA = local End SID, SL=1 -> after End the DA becomes SEG_REMOTE
         # and the packet is routed out the egress port.
-        udp = bytes(UDP(sport=12345 + i, dport=9))
+        src6 = "2001:db8::%x:2" % i
         srh = srh_bytes([SEG_REMOTE, SID_END], segments_left=1, nh=17)
-        inner_len = max(size - 14 - 40 - len(srh) - len(udp), 0)
-        payload = b"\x00" * inner_len
+        inner_len = max(size - 14 - 40 - len(srh) - 8, 0)
+        # Serialize the UDP datagram with its payload under an IPv6
+        # header whose dst is the final destination (RFC 8200: with a
+        # routing header the pseudo-header uses the last segment), so
+        # scapy fills in the correct length and checksum. Strip the
+        # 40-byte throwaway IPv6 header afterwards.
+        udp = bytes(IPv6(src=src6, dst=SEG_REMOTE)
+                    / UDP(sport=12345 + i, dport=9)
+                    / (b"\x00" * inner_len))[40:]
         hdr = bytes(Ether(src=SRC_MAC, dst=DST_MAC)
-                    / IPv6(src="2001:db8::%x:2" % i, dst=SID_END, nh=43,
-                           plen=len(srh) + len(udp) + inner_len))
-        return hdr + srh + udp + payload
+                    / IPv6(src=src6, dst=SID_END, nh=43,
+                           plen=len(srh) + len(udp)))
+        return hdr + srh + udp
     if scenario == "end-dt4":
         # DA = local End.DT4 SID, SL=0 -> decap, inner IPv4 is looked up
         # in the VRF table and routed out the egress port.

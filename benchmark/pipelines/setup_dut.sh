@@ -22,18 +22,19 @@ esac
 CONFIG="$REPO_ROOT/benchmark/configs/vinbero-bench.yml"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --peers)
-            # The dataplane holds at most 8 peers per BD; catch bad
-            # values here, before any NIC/daemon side effects.
-            case "$2" in
-                [1-8]) PEERS="$2" ;;
-                *) echo "--peers must be 1..8, got: $2" >&2; exit 2 ;;
-            esac
-            shift 2 ;;
+        --peers) PEERS="$2"; shift 2 ;;
         --stats) CONFIG="$REPO_ROOT/benchmark/configs/vinbero-bench-stats.yml"; shift ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+# The dataplane holds at most MAX_BUM_NEXTHOPS (8) peers per BD; catch
+# bad values (from --peers or the PEERS env var) before any side
+# effects rather than failing halfway through provisioning.
+case "$PEERS" in
+    [1-8]) ;;
+    *) echo "peers must be 1..8, got: $PEERS" >&2; exit 2 ;;
+esac
 
 BINS=("$VINBEROD_BIN" "$VINBERO_BIN")
 [ "$SCENARIO" = ecmp ] && BINS+=("$ECMPDEMO_BIN")
@@ -50,6 +51,17 @@ for pid in $(pgrep -x vinberod); do
     echo "vinberod is running (pid $pid); run teardown_dut.sh first" >&2
     exit 1
 done
+
+# From the first side effect on, a failure (daemon won't start, vbctl
+# provisioning error) must not leave a half-configured DUT behind; the
+# next run would just error out on the leftover vinberod. teardown is
+# idempotent, so run it on any non-success exit.
+cleanup() {
+    [ -n "${SETUP_OK:-}" ] && return
+    echo "setup failed; running teardown_dut.sh" >&2
+    ./teardown_dut.sh || true
+}
+trap cleanup EXIT
 
 echo "=== NIC preparation ==="
 # Clear any stale XDP attachment (a crashed vinberod leaves its
@@ -141,4 +153,5 @@ case "$SCENARIO" in
         ;;
 esac
 
+SETUP_OK=1
 echo "DUT ready for scenario $SCENARIO (vinberod pid $(cat "$PID_FILE"))"
