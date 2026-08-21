@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -40,6 +41,11 @@ type CplaneManager interface {
 	// operator editing a binding has to reach the plugins that took
 	// values from it.
 	ReconcileAdvertised(ctx context.Context)
+	// EndtVRFGrantLease is the lock the VRF delete handler takes so a
+	// plugin's decap-grant install cannot write a grant for a VRF ifindex it
+	// is freeing. The plugin's local-SID tracker holds the same lock across
+	// its resolve+grant-write.
+	EndtVRFGrantLease() *sync.Mutex
 }
 
 // SetCplaneManager installs the manager. Call before Setup, like the other

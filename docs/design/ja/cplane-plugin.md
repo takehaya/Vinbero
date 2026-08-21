@@ -391,6 +391,16 @@ domain へ転送しうる曖昧な挙動なので、fail-closed にします。p
 強く grant を偽造できません。decap_vrf は plugin の scope の VRF 集合に含まれること
 (advertise と同じ集合) を host が確かめます。
 
+grant の書き込みと VRF 削除は 1 本の leaf lock を共有します。plugin の local SID
+install は VRF 名を ifindex へ解決してから grant を書くまでこの lock を持ち、VrfDelete
+は grant 参照チェックから kernel device teardown までを同じ lock で囲みます。これで grant
+が解放中の ifindex を指すことがなくなります。install が先なら VrfDelete のチェックが
+grant を見て削除を拒み、VrfDelete が先なら device が消えて install の解決が失敗します。
+この lock は最内側でだけ取り、内側では VRF manager 自身の lock と BPF map しか触らないので
+applyMu や VRF mutation mutex と deadlock しません。VrfDelete が applyMu を取り install が
+VRF mutation mutex を取るという逆順が無いため、両者を直接共有すると deadlock する一方で、
+専用の leaf lock なら安全に閉じられます。
+
 この判別は `tailcall_ctx_map` の `sid_entry.action` を読むので、plugin がその map を
 書けると action を偽造して判別を欺けます。共有 map は MapReplacements で plugin に
 渡す都合上 kernel から見れば RW で、`tailcall_ctx_map` は vinbero 自身が packet ごと

@@ -1432,6 +1432,7 @@ func (f *fakeCplane) StatsFor(string) (cplane.PluginStats, bool)          { retu
 func (f *fakeCplane) Unrestored() []cplane.UnrestoredPlugin               { return nil }
 func (f *fakeCplane) Forget(string) error                                 { return nil }
 func (f *fakeCplane) ReconcileAdvertised(context.Context)                 { f.reconciles++ }
+func (f *fakeCplane) EndtVRFGrantLease() *sync.Mutex                      { return nil }
 
 // A binding edit and an unbind both re-derive plugin advertisements, since a
 // plugin route takes its RD, RTs and cap from the binding. Without this wiring

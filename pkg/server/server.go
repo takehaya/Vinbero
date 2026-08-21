@@ -250,7 +250,14 @@ func (s *Server) Setup() {
 	// the ingress maps from mapOps, the binding lookups from the vrf-bgp
 	// manager, and the bridge attach lifecycle drives the FDB watcher and (when
 	// auto-advertise is on) the EVPN coordinator.
-	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, s.evpnReplay, vrfMu)
+	// The grant lease is the cplane manager's: VrfDelete and a plugin's decap-
+	// grant install take the same lock so a grant can never outlive its VRF.
+	// Nil when control-plane plugins are disabled -- no plugin, no grant.
+	var grantLease *sync.Mutex
+	if s.cplaneMgr != nil {
+		grantLease = s.cplaneMgr.EndtVRFGrantLease()
+	}
+	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, s.evpnReplay, vrfMu, grantLease)
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))

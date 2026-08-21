@@ -25,10 +25,6 @@ type SidLister interface {
 	// VRF in a host-owned grant map rather than in l3vrf aux, so the aux scan
 	// above cannot see it.
 	EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool, error)
-	// DeleteEndtVRFGrantsByIfindex sweeps grants that point at a just-deleted
-	// VRF device ifindex, the backstop for a grant that raced the reference
-	// check above.
-	DeleteEndtVRFGrantsByIfindex(vrfIfindex uint32) (int, error)
 }
 
 // BindingGetter reports whether a vrf-bgp binding references a VRF name, so
@@ -87,16 +83,27 @@ type VrfServer struct {
 	// two managers, so serializing only within each server would leave a
 	// window where the check and the act see different states.
 	mu *sync.Mutex
+	// grantLease closes the last window between a plugin's decap-grant install
+	// and this VRF delete. VrfDelete holds it across the grant-reference check
+	// and the device teardown; the plugin's local-SID install holds the same
+	// lock across its VRF resolve and grant write. With it, a grant can never
+	// be written for an ifindex a delete is freeing: the delete either sees the
+	// grant and refuses, or the install's resolve fails because the device is
+	// gone. It is the cplane manager's lock, shared here; nil when control-
+	// plane plugins are disabled, in which case no grant can exist to race. It
+	// is a leaf lock, always taken under s.mu and releasing nothing else, so it
+	// cannot deadlock with applyMu (which the delete never takes).
+	grantLease *sync.Mutex
 }
 
 // NewVrfServer wires the handler. mu is the mutation mutex, shared with
 // VrfBgpServer so cross-facet invariants hold (see the field comment); nil
 // allocates a private one (tests without a VrfBgpServer).
-func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator, evpnReplay func(), mu *sync.Mutex) *VrfServer {
+func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator, evpnReplay func(), mu *sync.Mutex, grantLease *sync.Mutex) *VrfServer {
 	if mu == nil {
 		mu = &sync.Mutex{}
 	}
-	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu}
+	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu, grantLease: grantLease}
 }
 
 func (s *VrfServer) reconcile() error {
@@ -249,6 +256,18 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 	} else if resolved, err := s.resolve(name); err == nil {
 		ifindex = resolved
 	}
+	// Hold the grant lease across the grant-reference check and the device
+	// teardown below. A plugin's decap-grant install takes the same lock across
+	// its VRF resolve and grant write, so a grant cannot appear for this
+	// ifindex between the check and the moment teardown makes the ifindex
+	// unresolvable: the install either wrote the grant before this check (which
+	// then refuses) or resolves after the device is gone (and fails). It is a
+	// leaf held only here; nil when control-plane plugins are off, where no
+	// grant can exist.
+	if s.grantLease != nil {
+		s.grantLease.Lock()
+		defer s.grantLease.Unlock()
+	}
 	if ifindex != 0 {
 		ref, err := findVrfReference(s.sids, ifindex)
 		if err != nil {
@@ -277,22 +296,6 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 		if err := s.dev.DeleteVrf(name); err != nil {
 			return fail(fmt.Sprintf("delete kernel device: %v", err))
 		}
-	}
-	// Backstop the TOCTOU between the grant check above and this teardown: an
-	// install that wrote a grant for this ifindex in that window would dangle
-	// it at a now-freed number. The device is gone, so resolving this VRF fails
-	// and no further grant can be written for it; sweeping any that raced makes
-	// them fail closed on a dead ifindex rather than following the number to a
-	// different device. The device is already deleted, so the delete cannot be
-	// failed here without leaving the manager and the kernel inconsistent; the
-	// sweep is best-effort. If it errors, the near-impossible residual is a
-	// grant left on the freed ifindex until that number is reused -- there is
-	// no self-healing retry, because a VRF that later reuses the number is
-	// itself refused deletion by the grant check above. A full close of the
-	// window (and the elimination of this sweep) needs the install and the
-	// delete to share a lock, which crosses the cplane/VRF boundary.
-	if ifindex != 0 {
-		_, _ = s.sids.DeleteEndtVRFGrantsByIfindex(ifindex)
 	}
 	s.mgr.Delete(name)
 	return nil

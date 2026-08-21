@@ -132,17 +132,6 @@ func (f *fakeSidTable) EndtVRFGrantReferences(ifindex uint32) (uint32, bool, err
 	return 0, false, nil
 }
 
-func (f *fakeSidTable) DeleteEndtVRFGrantsByIfindex(ifindex uint32) (int, error) {
-	removed := 0
-	for aux, granted := range f.grantRefs {
-		if granted == ifindex {
-			delete(f.grantRefs, aux)
-			removed++
-		}
-	}
-	return removed, nil
-}
-
 // fakeBindings reports a binding for the names it holds. Full bindings (with
 // families) take precedence; the names set yields a bare binding.
 type fakeBindings struct {
@@ -210,7 +199,7 @@ func newTestVrfServerFull() (*VrfServer, *fakeProgrammer, *fakeVrfDeviceOps) {
 	events := []string{}
 	s := NewVrfServer(vrf.NewManager(), prog, dev, &fakeSidTable{}, &fakeBindings{},
 		&fakeServerBridgeOps{ifindexes: map[string]uint32{}, events: &events},
-		&fakeFdbRegistrar{events: &events}, nil, nil, nil)
+		&fakeFdbRegistrar{events: &events}, nil, nil, nil, nil)
 	s.resolve = fakeResolver
 	return s, prog, dev
 }
@@ -229,7 +218,7 @@ func newTestVrfServerBridge(hook EvpnBridgeHook) (*VrfServer, *fakeServerBridgeO
 	if hook != nil {
 		evpn = NewEvpnCoordinator(hook, testFacetResolver(mgr), func(int) error { return nil }, zap.NewNop())
 	}
-	s := NewVrfServer(mgr, &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn, nil, nil)
+	s := NewVrfServer(mgr, &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings, bridges, fdb, evpn, nil, nil, nil)
 	s.resolve = fakeResolver
 	return s, bridges, fdb, bindings, &events
 }
@@ -867,7 +856,7 @@ func TestVrfServer_BridgeAttachFiresEvpnReplay(t *testing.T) {
 		replays := 0
 		s := NewVrfServer(vrf.NewManager(), &fakeProgrammer{}, &fakeVrfDeviceOps{}, &fakeSidTable{}, bindings,
 			&fakeServerBridgeOps{ifindexes: map[string]uint32{"br100": 42}, events: &events},
-			&fakeFdbRegistrar{events: &events}, nil, func() { replays++ }, nil)
+			&fakeFdbRegistrar{events: &events}, nil, func() { replays++ }, nil, nil)
 		s.resolve = fakeResolver
 		return s, bindings, &replays
 	}

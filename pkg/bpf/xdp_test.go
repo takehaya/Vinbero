@@ -4199,11 +4199,10 @@ func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
 	}
 }
 
-// TestEndtVRFGrantReferencesAndSweep exercises the grant map's reference lookup
-// and ifindex sweep against a real BPF map. The VRF-delete guard and its
-// post-teardown sweep drive these; the server unit test reimplements them in a
-// fake, so the actual iteration and value-compare have no coverage there.
-func TestEndtVRFGrantReferencesAndSweep(t *testing.T) {
+// TestEndtVRFGrantReferences exercises the grant map's reference lookup against
+// a real BPF map: the VRF-delete guard drives it, and the server unit test
+// reimplements it in a fake, so the actual iteration has no coverage there.
+func TestEndtVRFGrantReferences(t *testing.T) {
 	h := newXDPTestHelper(t)
 	m := h.mapOps
 
@@ -4225,25 +4224,16 @@ func TestEndtVRFGrantReferencesAndSweep(t *testing.T) {
 		t.Fatalf("EndtVRFGrantReferences(9) = (_, %v, %v), want no reference", ok, err)
 	}
 
-	// Sweeping ifindex 5 removes exactly the two grants pointing at it, and
-	// re-reads each index before deleting so a value that no longer matches is
-	// left alone; the ifindex-7 grant survives.
-	removed, err := m.DeleteEndtVRFGrantsByIfindex(5)
-	if err != nil || removed != 2 {
-		t.Fatalf("DeleteEndtVRFGrantsByIfindex(5) = (%d, %v), want (2, nil)", removed, err)
-	}
-	if _, ok, _ := m.EndtVRFGrantReferences(5); ok {
-		t.Fatal("ifindex 5 grants survived the sweep")
-	}
-	if _, ok, _ := m.EndtVRFGrantReferences(7); !ok {
-		t.Fatal("the sweep of ifindex 5 wrongly removed the ifindex-7 grant")
-	}
-	// The sweep is idempotent and a missing-key delete is not an error.
-	if removed, err := m.DeleteEndtVRFGrantsByIfindex(5); err != nil || removed != 0 {
-		t.Fatalf("second sweep = (%d, %v), want (0, nil)", removed, err)
+	// Deleting a grant by its aux index drops just that one; a missing key is
+	// not an error.
+	if err := m.DeleteEndtVRFGrant(1); err != nil {
+		t.Fatalf("DeleteEndtVRFGrant(1): %v", err)
 	}
 	if err := m.DeleteEndtVRFGrant(999); err != nil {
 		t.Fatalf("DeleteEndtVRFGrant of a missing key must be nil, got %v", err)
+	}
+	if _, ok, _ := m.EndtVRFGrantReferences(7); !ok {
+		t.Fatal("deleting the ifindex-5 grant wrongly removed the ifindex-7 grant")
 	}
 }
 
