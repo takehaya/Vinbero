@@ -168,10 +168,11 @@ func (f *fakeSIDOps) entryFor(prefix string) (*bpf.SidFunctionEntry, bool) {
 // fakeGrantOps records the decap-VRF grants a reconcile writes, keyed by the
 // dispatch entry's aux index.
 type fakeGrantOps struct {
-	mu     sync.Mutex
-	grants map[uint32]uint32 // auxIndex -> vrfIfindex
-	putErr error             // when set, PutEndtVRFGrant fails
-	ops    []string
+	mu      sync.Mutex
+	grants  map[uint32]uint32 // auxIndex -> vrfIfindex
+	putErr  error             // when set, PutEndtVRFGrant fails
+	putHook func()            // when set, runs inside PutEndtVRFGrant before the write
+	ops     []string
 }
 
 func newFakeGrantOps() *fakeGrantOps {
@@ -179,6 +180,9 @@ func newFakeGrantOps() *fakeGrantOps {
 }
 
 func (f *fakeGrantOps) PutEndtVRFGrant(auxIndex, vrfIfindex uint32) error {
+	if f.putHook != nil {
+		f.putHook()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.putErr != nil {
@@ -246,6 +250,56 @@ func TestLocalSIDDecapVRFGrant(t *testing.T) {
 	if grants.count() != 0 {
 		t.Fatalf("grant not withdrawn: %v", grants.ops)
 	}
+}
+
+// The grant lease is held across the resolve and the grant write, so a
+// concurrent VrfDelete taking the same lock cannot free the ifindex between
+// them. The resolver runs inside install's critical section, so a TryLock of
+// the shared lease from there must fail.
+func TestLocalSIDDecapVRFGrantHeldDuringResolve(t *testing.T) {
+	alloc := &fakeAllocator{}
+	sids := newFakeSIDOps()
+	grants := newFakeGrantOps()
+	var lease sync.Mutex
+	resolveCalled := false
+	resolve := func(string) (uint32, error) {
+		resolveCalled = true
+		if lease.TryLock() {
+			lease.Unlock()
+			t.Error("grant lease was not held while install resolved the VRF")
+		}
+		return 42, nil
+	}
+	// The lease must also be held through the grant write, not just the
+	// resolve: unlocking in between would reopen the very window this closes.
+	putHooked := false
+	grants.putHook = func() {
+		putHooked = true
+		if lease.TryLock() {
+			lease.Unlock()
+			t.Error("grant lease was not held while install wrote the grant")
+		}
+	}
+	set := NewLocalSIDSet(alloc, sids, grants, resolve)
+	set.grantLease = &lease
+	owner := bpf.OwnerTag("plugin:demo")
+
+	if _, _, err := set.Apply(owner, []LocalSID{{
+		Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-cust",
+	}}, -1); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !resolveCalled {
+		t.Fatal("resolver never ran")
+	}
+	if !putHooked {
+		t.Fatal("grant write never ran")
+	}
+	// The lease is released once install returns.
+	if !lease.TryLock() {
+		t.Fatal("grant lease still held after install returned")
+	}
+	lease.Unlock()
 }
 
 // A redeclaration that does not change the decap VRF rewrites nothing, so no

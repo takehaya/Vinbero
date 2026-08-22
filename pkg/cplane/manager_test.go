@@ -428,6 +428,20 @@ func newTestManager(t *testing.T, src EventSource, claims BehaviorClaims) (*Mana
 	return m, ops
 }
 
+// The lease the manager exposes for the server's VrfDelete must be the very
+// mutex the local-SID installer holds across its resolve+grant-write --
+// otherwise the two sides would serialize on different locks and the
+// VRF-delete window would silently reopen.
+func TestEndtVRFGrantLeaseIsTheInstallLease(t *testing.T) {
+	m, _ := newTestManager(t, newFakeSource(), newFakeClaims())
+	if m.EndtVRFGrantLease() != m.localSIDs.grantLease {
+		t.Fatal("EndtVRFGrantLease and the local-SID install lease are different mutexes")
+	}
+	if m.EndtVRFGrantLease() == nil {
+		t.Fatal("the manager must always carry a grant lease")
+	}
+}
+
 func TestRegisterRunsPluginAndDeliversEvents(t *testing.T) {
 	src := newFakeSource()
 	m, ops := newTestManager(t, src, newFakeClaims())

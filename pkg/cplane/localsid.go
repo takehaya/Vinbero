@@ -132,6 +132,18 @@ type LocalSIDSet struct {
 	// resolveVRF turns a VRF name into the kernel ifindex the grant records.
 	// Nil is the same as a daemon that cannot serve a DecapVRF SID.
 	resolveVRF func(vrfName string) (uint32, error)
+	// grantLease serializes a decap-grant install (resolve the VRF ifindex,
+	// then write the grant) against VrfDelete's grant-reference check and
+	// device teardown. Held only for a DecapVRF SID, and only across those two
+	// steps, it makes the two orderings clean: either the grant is written
+	// before VrfDelete's check (which then refuses) or the VRF is already gone
+	// when install resolves (which then fails), so a grant can never be written
+	// for an ifindex being freed. VrfServer takes the same lease. Nil leaves
+	// the install unserialized -- the daemon shares one across both, tests pass
+	// nil and run single-threaded. It is a leaf: nothing else is acquired while
+	// it is held except the VRF manager's own lock and the BPF map, so it
+	// cannot deadlock with applyMu or the VRF mutation mutex.
+	grantLease *sync.Mutex
 
 	mu sync.Mutex
 	// live maps owner -> name -> what was allocated for it.
@@ -503,6 +515,16 @@ func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID)
 			return 0, fmt.Errorf("local sid %q: declares decap VRF %q, but this daemon cannot grant one",
 				want.Name, want.DecapVRF)
 		}
+		// Hold the grant lease across the resolve and the PutEndtVRFGrant below
+		// (and the CreateSidFunction between them). VrfDelete takes the same
+		// lease across its grant-reference check and device teardown, so the
+		// resolve here cannot observe a live VRF that a delete then tears down
+		// before this install writes the grant: either the grant lands first
+		// and the delete refuses, or the delete wins and this resolve fails.
+		if l.grantLease != nil {
+			l.grantLease.Lock()
+			defer l.grantLease.Unlock()
+		}
 		idx, err := l.resolveVRF(want.DecapVRF)
 		if err != nil {
 			return 0, fmt.Errorf("local sid %q: resolve decap VRF %q: %w", want.Name, want.DecapVRF, err)
@@ -523,17 +545,12 @@ func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID)
 		return 0, fmt.Errorf("local sid %q: install %s: %w", want.Name, prefix, err)
 	}
 	if want.DecapVRF != "" {
-		// The ifindex resolved above and written here is not serialized against
-		// a concurrent VrfDelete. If the VRF is deleted between the resolve and
-		// this write, the grant records a freed ifindex. VrfDelete refuses while
-		// a grant is live and sweeps the ifindex after teardown, so a grant that
-		// raced that far ends up on a dead ifindex and fails closed (fib-lookup
-		// miss -> drop) -- the same property every ifindex-keyed VRF reference
-		// in the tree has, since Linux does not promptly reuse an ifindex. A
-		// full close (so a grant can never outlive its VRF even for an instant)
-		// would need this resolve+Put and VrfDelete's check+teardown to share a
-		// leaf lease acquired under applyMu / the VRF mutation mutex; that is
-		// left out here rather than plumbed across the cplane/server boundary.
+		// The resolve above and this write are inside the grant lease taken at
+		// the top of this branch, and VrfDelete takes the same lease across its
+		// grant-reference check and device teardown, so the grant can never
+		// record an ifindex that a concurrent delete is in the middle of
+		// freeing. Outside a lease (grantLease nil, e.g. a test) this is the
+		// same ifindex-keyed reference every VRF facet uses.
 		if err := l.grants.PutEndtVRFGrant(uint32(entry.AuxIndex), vrfIfindex); err != nil {
 			// Undo the dispatch entry so nothing is left pointing at a decap
 			// with no grant, which the data plane would drop on. If the undo

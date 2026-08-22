@@ -391,6 +391,28 @@ domain へ転送しうる曖昧な挙動なので、fail-closed にします。p
 強く grant を偽造できません。decap_vrf は plugin の scope の VRF 集合に含まれること
 (advertise と同じ集合) を host が確かめます。
 
+grant の書き込みと VRF 削除は 1 本の leaf lock を共有します。plugin の local SID
+install は VRF 名を ifindex へ解決してから grant を書くまでこの lock を持ち、VrfDelete
+は grant 参照チェックから kernel device teardown までを同じ lock で囲みます。これで grant
+が解放中の ifindex を指すことがなくなります。install が先なら VrfDelete のチェックが
+grant を見て削除を拒み、VrfDelete が先なら device が消えて install の解決が失敗します。
+この lock は最内側でだけ取り、内側では VRF manager 自身の lock と BPF map しか触らないので
+applyMu や VRF mutation mutex と deadlock しません。VRF mutation mutex をそのまま grant lock に
+流用すると deadlock します。binding 更新は mutation mutex を持ったまま `ReconcileAdvertised`
+で applyMu を取り (mutation mutex から applyMu)、plugin install は applyMu を持ったまま
+mutation mutex を取る (applyMu から mutation mutex) ので、この 2 経路が逆順になるからです。
+VrfDelete 自身は applyMu を取りませんが mutation mutex を binding 側と共有するため、流用すれば
+同じ輪に巻き込まれます。専用の leaf lock はこの逆転に関与しないので安全に閉じられます。
+install 側の resolve は manager の記録に加えて kernel の device 実在も照合します。teardown が
+netlink まで済んで state の persist だけ失敗した VrfDelete は error を返して manager に旧記録を
+残すので、manager だけを信じると解放済み ifindex へ grant を書けてしまうためです。
+
+この lock が閉じるのは 1 つの daemon run の中の窓です。daemon 再起動をまたぐと pinned map の
+grant は残り、再起動後に VRF device が作り直されて ifindex が変わっていれば古い grant は stale な
+番号を指します。これは owner plugin の最初の Apply の sweep で dispatch entry ごと回収されるまで
+続き、その間は ifindex-keyed な参照が持つ従来どおりの残余 (dead ifindex への fib-lookup miss で
+drop) に留まります。起動時に grant map を kernel と突き合わせて刈る reconcile は今後の課題です。
+
 この判別は `tailcall_ctx_map` の `sid_entry.action` を読むので、plugin がその map を
 書けると action を偽造して判別を欺けます。共有 map は MapReplacements で plugin に
 渡す都合上 kernel から見れば RW で、`tailcall_ctx_map` は vinbero 自身が packet ごと

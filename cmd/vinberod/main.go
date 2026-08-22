@@ -468,10 +468,27 @@ func run(cliCtx *cli.Context) error {
 				if !ok || v.Device == nil || v.Device.Ifindex == 0 {
 					return 0, fmt.Errorf("vrf %q has no L3 device ifindex", vrfName)
 				}
+				// The manager can be momentarily ahead of the kernel: a
+				// VrfDelete whose netlink teardown succeeded but whose state
+				// persist failed keeps the manager entry while the ifindex is
+				// already freed. This resolve runs under the decap-grant lease,
+				// after any such teardown completed, so reading the kernel here
+				// is what keeps a grant from being minted against that stale
+				// record: the name no longer resolves, or resolves to a
+				// different (recreated) ifindex, and either way the install is
+				// refused rather than granted a dead number.
+				kernelIdx, err := vrf.ResolveByName(vrfName)
+				if err != nil {
+					return 0, fmt.Errorf("vrf %q: kernel device lookup: %w", vrfName, err)
+				}
+				if kernelIdx != v.Device.Ifindex {
+					return 0, fmt.Errorf("vrf %q: kernel ifindex %d does not match managed ifindex %d",
+						vrfName, kernelIdx, v.Device.Ifindex)
+				}
 				return v.Device.Ifindex, nil
 			},
 			EncapSource: applier.EncapSourceAddr,
-			Store:        cplaneStore,
+			Store:       cplaneStore,
 			// What a plugin's scope is stated in terms of. Both are
 			// consulted when a declaration is applied rather than now,
 			// because an operator registers locators and VRF bindings

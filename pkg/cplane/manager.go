@@ -152,6 +152,12 @@ type Manager struct {
 
 	// applyMu serializes reconciles across every plugin this manager runs.
 	applyMu sync.Mutex
+	// endtVRFGrantLease serializes a plugin's decap-grant install against a
+	// concurrent VrfDelete. The LocalSIDSet holds it while resolving a VRF and
+	// writing the grant; VrfServer takes the same instance while checking for
+	// grants and tearing the device down. It is exposed so the server can wire
+	// it into the VRF handler. It is a leaf lock (see LocalSIDSet.grantLease).
+	endtVRFGrantLease sync.Mutex
 	// registerMu serializes registration against unregistration.
 	//
 	// The two touch the same owner tag from opposite ends: unregister
@@ -270,7 +276,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}
 	leases := NewLeases()
 	snapshots, _ := cfg.Source.(SnapshotSource)
-	return &Manager{
+	m := &Manager{
 		advertise:   newNamedAdvertiseSet(cfg, leases),
 		localSIDs:   NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions, cfg.EndtVRFGrants, cfg.ResolveVRF),
 		source:      cfg.Source,
@@ -288,7 +294,18 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		started:     time.Now(),
 		plugins:     make(map[string]*plugin),
 		unrestored:  make(map[string]UnrestoredPlugin),
-	}, nil
+	}
+	// Share the grant lease with the local-SID tracker so install serializes
+	// against VrfDelete on the same lock the server also takes.
+	m.localSIDs.grantLease = &m.endtVRFGrantLease
+	return m, nil
+}
+
+// EndtVRFGrantLease is the lock a plugin's decap-grant install and a VrfDelete
+// share so a grant can never be written for an ifindex being freed. The server
+// wires it into the VRF delete handler.
+func (m *Manager) EndtVRFGrantLease() *sync.Mutex {
+	return &m.endtVRFGrantLease
 }
 
 // newNamedAdvertiseSet builds the advertise tracker, naming each owner's

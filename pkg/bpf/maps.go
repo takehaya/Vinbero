@@ -1304,60 +1304,6 @@ func (m *MapOperations) EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool,
 	return 0, false, nil
 }
 
-// DeleteEndtVRFGrantsByIfindex removes every grant pointing at vrfIfindex and
-// returns how many it removed. It is the VRF-delete backstop: the pre-delete
-// EndtVRFGrantReferences check refuses while a grant is live, but a grant that
-// a concurrent install writes between that check and the device teardown would
-// otherwise dangle at a freed ifindex. Sweeping after the device is gone -- at
-// which point resolving the VRF fails, so no further grant can be written for
-// it -- makes any grant that raced the check fail closed on a dead ifindex
-// rather than following the number to a different device.
-func (m *MapOperations) DeleteEndtVRFGrantsByIfindex(vrfIfindex uint32) (int, error) {
-	if vrfIfindex == 0 {
-		return 0, nil
-	}
-	var (
-		auxIndex uint32
-		val      BpfPluginEndtVrf
-		stale    []uint32
-	)
-	iter := m.objs.PluginEndtVrfMap.Iterate()
-	for iter.Next(&auxIndex, &val) {
-		if val.VrfIfindex == vrfIfindex {
-			stale = append(stale, auxIndex)
-		}
-	}
-	if err := iter.Err(); err != nil {
-		return 0, fmt.Errorf("iterate endt vrf grants: %w", err)
-	}
-	removed := 0
-	for _, idx := range stale {
-		// Re-read and compare before deleting. Between the scan and here the
-		// index could have been freed and reused for a grant pointing at a
-		// different (live) VRF; deleting it by key alone would then break that
-		// legitimate grant. Delete only while it still points at the ifindex
-		// being torn down. The lookup and the delete are not atomic -- BPF maps
-		// have no compare-and-delete -- so this narrows the window rather than
-		// closing it; a full close needs the sweep and the install to share a
-		// lock.
-		var cur BpfPluginEndtVrf
-		if err := m.objs.PluginEndtVrfMap.Lookup(idx, &cur); err != nil {
-			if errors.Is(err, ebpf.ErrKeyNotExist) {
-				continue
-			}
-			return removed, fmt.Errorf("re-read endt vrf grant %d: %w", idx, err)
-		}
-		if cur.VrfIfindex != vrfIfindex {
-			continue
-		}
-		if err := m.DeleteEndtVRFGrant(idx); err != nil {
-			return removed, err
-		}
-		removed++
-	}
-	return removed, nil
-}
-
 // DeleteEndtVRFGrant removes the grant for auxIndex. A missing key is not an
 // error: the caller deletes the grant before it frees the aux index, so a
 // re-run over a set that never carried a grant is a no-op.
