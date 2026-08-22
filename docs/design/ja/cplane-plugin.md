@@ -714,7 +714,7 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 |---|---|---|---|---|
 | register (新規) | 取得。instantiate 前の失敗では巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
 | restore 成功 | 起動時の予約のまま | 保持 | 追加 | map は pinned のまま、replay 後の宣言が差分を吸収。広告は宣言で作り直す |
-| restore 失敗 | 保持 (withhold 継続) | 保持 | 載せず unrestored に記録 | prune 前の失敗は触らない。prune まで進んだ失敗は削除できた分だけ減る。slot と locator の予約は manifest から scope が読めた分だけ残る |
+| restore 失敗 | 保持 (withhold 継続) | 保持 | publish 前の失敗は載せず unrestored に記録。publish 後の persist 失敗は動いたまま unrestored にも載る (下記) | prune 前の失敗は触らない。prune まで進んだ失敗は削除できた分だけ減る。slot と locator の予約は manifest から scope が読めた分だけ残る |
 | upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
 | unregister | flush 成功後に解放 | flush 成功後に削除を試みる。失敗は warning で unregister は成功のまま | 削除。flush 失敗時は戻す | owner の状態を削除し広告を withdraw |
 | forget (未走行のみ) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
@@ -729,7 +729,11 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
   旧版に戻ります。rename 後の directory sync で失敗すれば新版の manifest は
   既に見えており、restart は新版を restore します。scope prune の失敗は
   claim を新しい集合のまま plugin を unrestored に落とします
-  (scope を狭めたときの節)。
+  (scope を狭めたときの節)。restore の途中でこの persist 失敗を踏むと、
+  plugin は publish 済みで動いているのに、restore は Register の error を
+  一律に restore 失敗として記録するので、running と unrestored の両方に
+  同じ plugin が見えます。実害は表示の混乱に留まり、Forget は running の
+  plugin を拒むので状態は壊れませんが、二重表示の解消は繰越しです。
 - restore と再登録の prune は面ごと・entry ごとに進み、途中の失敗を
   rollback しません。prune で失敗した restore の map は「触らない」では
   なく、削除できた分だけ減った状態で残ります。
@@ -804,8 +808,9 @@ plugin は memory 上限に到達します。harness の churn test は live set
 
 local SID の名前は host の memory にしかありません。pin された map では
 前回起動の entry が残りますが、どの宣言がその address を入れたのかを
-辿る手段がありません。同じ名前を宣言し直した plugin は別の address を
-貰うので、古い entry は誰も dispatch せず誰も消せないまま残ります。
+辿る手段がありません。同じ名前を宣言し直した plugin に同じ address が
+戻る保証は無く、別の address になった古い entry は誰も dispatch せず
+誰も消せないまま残ります。
 
 そこで owner ごとに 1 回だけ sweep します。その owner のもので、今回の
 run が入れたのではない entry を消します。address の安定性は 1 回の daemon
@@ -864,6 +869,8 @@ Copilot が行数上限でレビューできないためです。以後の追加
   (既知の限界の節)。
 - owner ごとの inventory による、forget 後の残存 state の強制 cleanup
   (既知の限界の節)。
+- restore 中の persist 失敗で plugin が running と unrestored の両方に載る
+  二重表示の解消 (lifecycle の節)。
 
 ## 参照
 
