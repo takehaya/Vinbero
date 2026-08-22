@@ -92,7 +92,12 @@ replay は plugin ごとに 1 本だけ走らせます。2 本が 1 つの queue
 返します。
 snapshot の配送は drop せず block します。replay は BGP watch goroutine
 ではないので block してよく、一部を落とすと目的そのものを損ねるためです。
-snapshot も live と同じ queue を通すので、両者の順序は保たれます。
+snapshot も live と同じ queue を通し、replay の間に届いた live event は
+worker が保留して、snapshot と end of replay を積み終えてから流します。
+rib を走査している間に同じ NLRI の update が queue に割り込めないので、
+snapshot の中の copy を、それを追い越した update より後に見ることは
+ありません。保留が queue の深さを超えた分は drop して snapshot debt を
+立て直すので、追い越しではなく再修復に倒れます。
 
 replay の先頭には start of replay の event を置きます。replay は何が在る
 かを述べる手段であって、何が無くなったかは述べられません。plugin が聞いて
@@ -484,9 +489,15 @@ service SID として自分の owner で install します。plugin が同じ pr
   plugin の状態の寿命に合わせます。状態が map にある間はその codepoint の
   経路を built-in に渡さず (restore 失敗で claim を保持するのはこのため)、
   状態が消えた後は普通の経路に戻します (unregister が flush の後に解放する
-  のはこのため)。例外は forget だけで、これは operator が明示的に対応を
-  破る操作です。daemon が消し方を知らない状態を残したまま claim と予約を
+  のはこのため)。例外は 2 つあります。forget は operator が明示的に対応を
+  破る操作で、daemon が消し方を知らない状態を残したまま claim と予約を
   返すので、残存 state の扱いは operator に移ります (既知の限界の節)。
+  behavior を減らす upgrade では claim の置換を instantiate より前に行う
+  ため、外した codepoint の claim は旧 state を新しい宣言と prune が
+  reconcile するより先に返ります。2 段の release と claim に分けると別の
+  plugin に codepoint を取られたとき巻き戻せないので、置換を先に 1 回で
+  行う方を選んでおり、その間に届いたその codepoint の経路は built-in に
+  渡ります。
 - restore に失敗した plugin の claim は解放しません。解放すると built-in が
   実装できない codepoint の経路を service SID として install してしまいます。
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
@@ -588,14 +599,6 @@ dispatch し、新 program は旧 plugin の aux bytes を自分の layout と�
 ので、残存 state を確認して SID の entry を先に消すのは operator の責任です。
 owner ごとの inventory から強制的に片付ける形は繰越しです。
 
-snapshot replay の一貫性は queue の到着順で近似しています。replay は rib を
-走査しながら event を積むので、走査中に届いた live の withdraw が、まだ読んで
-いない同じ NLRI の snapshot copy より先に queue へ入る逆順があり得ます。
-このとき plugin は消えた経路を advertise として受け直します。start of replay の
-捨て直しで直せるのは replay より前の view で、replay 自身が運んだ stale な
-copy は直せず、次の replay まで残ります。revision や barrier で厳密な cut を
-作るのは、実害が観測されてからの課題にしています。
-
 control plane half と data plane half は機構としては結ばれていません。同一
 plugin であることの照合も、slot に program が載っているかの readiness 確認も、
 upgrade の順序の強制もありません。前提は operator の導入順序で、data plane
@@ -616,13 +619,14 @@ module は allowlist で検証します。
 - `_start` の自動実行は無効化し、reactor initializer だけを host が明示的
   に呼びます。
 
-capability と scope の食い違いも登録時に弾きます。食い違いとは capability を
-granted しながら、その capability が書き先を決めるのに要る scope を欠いた組の
-ことです。`headend` を granted しながら headend prefix を並べていない登録は、
+capability と scope の食い違いも登録時に弾きます。食い違いとは、scope を
+一部だけ宣言しながら、granted した capability が書き先を決めるのに要る対象を
+欠いた組のことです。locator だけ並べて `headend` を granted した登録がそれで、
 plugin が動いて宣言し、その宣言が全部拒否されるという形で失敗します。壊れた
-plugin のように見えるので、operator の手元で断ります。capability も scope も
-両方宣言しない登録は食い違いではなく、観測と log だけをする plugin の正当な
-形です (capability の節)。
+plugin のように見えるので、operator の手元で断ります。scope を丸ごと宣言
+しない登録は食い違いではありません。空の scope は意図的な deny-all で、
+capability が何であれ観測と log だけをする plugin として起動します
+(scope の節)。弾くのは中途半端な scope だけです。
 
 ## lifecycle
 
@@ -698,7 +702,7 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 | register (新規) | 取得。登録が失敗したら巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
 | restore 成功 | 起動時の予約のまま | 保持 | 追加 | map は pinned のまま、replay 後の宣言が差分を吸収。広告は宣言で作り直す |
 | restore 失敗 | 保持 (withhold 継続) | 保持 | 載せず unrestored に記録 | 触らない。slot と locator の予約も残る |
-| upgrade (同名再登録) | 新しい集合に置換 | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
+| upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
 | unregister | flush 成功後に解放 | flush 成功後に削除 | 削除。flush 失敗時は戻す | owner の状態を削除し広告を withdraw |
 | forget (未走行のみ) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
 
