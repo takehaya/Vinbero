@@ -102,7 +102,10 @@ snapshot の中の copy を、それを追い越した update より後に見る
 snapshot 自体が rib のある一瞬を写した atomic な cut だという保証では
 ありません。走査は family ごとに rib を読むだけなので、走査中に変わった
 分は snapshot に混ざり得ますが、その変化の event は保留されて snapshot の
-後に届くので、plugin の view は最終的に一致します。
+後に届くので、plugin の view はそこで揃います。保留の解放時にも queue に
+収まらなかった分は drop されて snapshot debt に戻るため、この一致は
+過負荷が続く間は次の replay へ先送りされます。追い越しはしませんが、
+恒常的に溢れている plugin の view は遅れ続けます。
 
 replay の先頭には start of replay の event を置きます。replay は何が在る
 かを述べる手段であって、何が無くなったかは述べられません。plugin が聞いて
@@ -496,20 +499,28 @@ service SID として自分の owner で install します。plugin が同じ pr
   plugin の状態の寿命に合わせます。状態が map にある間はその codepoint の
   経路を built-in に渡さず (restore 失敗で claim を保持するのはこのため)、
   状態が消えた後は普通の経路に戻します (unregister が flush の後に解放する
-  のはこのため)。例外は 2 つあります。forget は operator が明示的に対応を
-  破る操作で、daemon が消し方を知らない状態を残したまま claim と予約を
-  返すので、残存 state の扱いは operator に移ります (既知の限界の節)。
-  behavior を減らす upgrade では claim の置換を instantiate より前に行う
-  ため、外した codepoint の claim は旧 state を新しい宣言と prune が
-  reconcile するより先に返ります。2 段の release と claim に分けると別の
-  plugin に codepoint を取られたとき巻き戻せないので、置換を先に 1 回で
-  行う方を選んでおり、その間に届いたその codepoint の経路は built-in に
-  渡ります。もう 1 つ、意図しない破れが daemon 再起動の直後にあります。
-  restore された plugin が local SID を宣言し直す前に unregister すると、
-  flush が読むのは in-memory の集合なので前の run の pinned dispatch entry が
-  視界に入らず、それを残したまま claim を解放します。restore-time prune が
-  headend しか読めないのと同根で (既知の限界の節)、owner ごとの inventory
-  から flush する形が繰越しです。
+  のはこのため)。この対応が破れる場合を挙げます。
+  - forget は operator が明示的に対応を破る操作です。daemon が消し方を
+    知らない状態を残したまま claim と予約を返すので、残存 state の扱いは
+    operator に移ります (既知の限界の節)。
+  - behavior を減らす upgrade では claim の置換を instantiate より前に
+    行うため、外した codepoint の claim は旧 state を新しい宣言と prune が
+    reconcile するより先に返ります。2 段の release と claim に分けると
+    別の plugin に codepoint を取られたとき巻き戻せないので、置換を先に
+    1 回で行う方を選んでおり、その間に届いたその codepoint の経路は
+    built-in に渡ります。
+  - daemon 再起動の直後、restore された plugin が local SID を宣言し直す
+    前に unregister すると、flush が読むのは in-memory の集合なので前の
+    run の pinned dispatch entry が視界に入らず、それを残したまま claim を
+    解放します。restore-time prune が headend しか読めないのと同根で
+    (既知の限界の節)、owner ごとの inventory から flush する形が繰越しです。
+  - persist 失敗を挟んだ再起動でも破れます。新規登録や behavior を足す
+    upgrade が manifest の rename 前に persist で失敗すると、その run は
+    instance と claim と state を持ったまま動きますが、再起動時の claim
+    予約は manifest しか読まないので、pinned に残った state の codepoint が
+    予約されず built-in へ流れます。persist 失敗の error を受けた operator
+    は、登録を retry して manifest を揃えるか、unregister で state ごと
+    flush してください。
 - restore に失敗した plugin の claim は解放しません。解放すると built-in が
   実装できない codepoint の経路を service SID として install してしまいます。
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
@@ -726,8 +737,10 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
   instance は動いていて claim も新しい集合のまま、error だけが返ります。
   restart に何が見えるかは失敗の段階次第です。manifest の rename 前に失敗
   すれば store は未更新のままで、新規登録は restart を生き残らず、upgrade は
-  旧版に戻ります。rename 後の directory sync で失敗すれば新版の manifest は
-  既に見えており、restart は新版を restore します。scope prune の失敗は
+  旧版に戻ります。rename 後の directory sync で失敗した場合、新版の manifest は
+  現在の namespace には見えているので daemon の再起動は新版を restore します。
+  ただし durability を確立する処理そのものが失敗しているので、machine の
+  crash を挟むとどちらの版が見えるかは保証されません。scope prune の失敗は
   claim を新しい集合のまま plugin を unrestored に落とします
   (scope を狭めたときの節)。restore の途中でこの persist 失敗を踏むと、
   plugin は publish 済みで動いているのに、restore は Register の error を
