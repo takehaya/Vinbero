@@ -723,10 +723,12 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 
 - register と upgrade の instantiate 前の失敗 (claim 衝突、検証、admission) は
   claim を巻き戻して何も残しません。publish の後の persist 失敗は違います。
-  instance は動いていて claim も新しい集合のままですが store に書けていない
-  ので、error を返した上で restart を生き残りません。upgrade では store に
-  旧版の manifest が残るため、restart は旧版を restore します。scope prune の
-  失敗は claim を新しい集合のまま plugin を unrestored に落とします
+  instance は動いていて claim も新しい集合のまま、error だけが返ります。
+  restart に何が見えるかは失敗の段階次第です。manifest の rename 前に失敗
+  すれば store は未更新のままで、新規登録は restart を生き残らず、upgrade は
+  旧版に戻ります。rename 後の directory sync で失敗すれば新版の manifest は
+  既に見えており、restart は新版を restore します。scope prune の失敗は
+  claim を新しい集合のまま plugin を unrestored に落とします
   (scope を狭めたときの節)。
 - restore と再登録の prune は面ごと・entry ごとに進み、途中の失敗を
   rollback しません。prune で失敗した restore の map は「触らない」では
