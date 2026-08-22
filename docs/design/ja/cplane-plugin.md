@@ -17,9 +17,10 @@ WebAssembly module を受け取ります。どちらも daemon に upload され
    し、plugin の slot を指す dispatch entry を書き、address を event で
    plugin に返します。名前は plugin が付け、値は host が選びます。記憶を
    失って戻ってきた plugin が同じ名前を宣言すると同じ address が返ります。
-   この安定性は 1 つの daemon run の中の話で、instance の作り直しや同名
-   upgrade では保たれます。daemon 再起動を跨ぐと保証されません
-   (local SID と daemon 再起動の節)。
+   この安定性は 1 つの daemon run の中で、同じ名前を同じ locator から
+   宣言し直す限りの話です。instance の作り直しや同名 upgrade では保たれ、
+   locator を変えた宣言は別の address を割り当て直します。daemon 再起動を
+   跨ぐと保証されません (local SID と daemon 再起動の節)。
 4. plugin がその SID を SID TLV に自分の codepoint を載せて広告します。
 5. 対向でその経路を受けた plugin が headend の状態を宣言します。
 6. Vinbero 自身の applier はその経路を見ません。codepoint を見ずに service
@@ -713,9 +714,9 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 |---|---|---|---|---|
 | register (新規) | 取得。instantiate 前の失敗では巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
 | restore 成功 | 起動時の予約のまま | 保持 | 追加 | map は pinned のまま、replay 後の宣言が差分を吸収。広告は宣言で作り直す |
-| restore 失敗 | 保持 (withhold 継続) | 保持 | 載せず unrestored に記録 | 触らない。slot と locator の予約も残る |
+| restore 失敗 | 保持 (withhold 継続) | 保持 | 載せず unrestored に記録 | prune 前の失敗は触らない。prune まで進んだ失敗は削除できた分だけ減る。slot と locator の予約は manifest から scope が読めた分だけ残る |
 | upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
-| unregister | flush 成功後に解放 | flush 成功後に削除 | 削除。flush 失敗時は戻す | owner の状態を削除し広告を withdraw |
+| unregister | flush 成功後に解放 | flush 成功後に削除を試みる。失敗は warning で unregister は成功のまま | 削除。flush 失敗時は戻す | owner の状態を削除し広告を withdraw |
 | forget (未走行のみ) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
 
 部分失敗はそれぞれ次の形で残ります。
