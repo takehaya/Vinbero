@@ -18,7 +18,7 @@ WebAssembly module を受け取ります。どちらも daemon に upload され
    plugin に返します。名前は plugin が付け、値は host が選びます。記憶を
    失って戻ってきた plugin が同じ名前を宣言すると同じ address が返ります。
    この安定性は 1 つの daemon run の中の話で、instance の作り直しや同名
-   upgrade では保たれ、daemon 再起動を跨ぐと新しい address になります
+   upgrade では保たれます。daemon 再起動を跨ぐと保証されません
    (local SID と daemon 再起動の節)。
 4. plugin がその SID を SID TLV に自分の codepoint を載せて広告します。
 5. 対向でその経路を受けた plugin が headend の状態を宣言します。
@@ -503,7 +503,12 @@ service SID として自分の owner で install します。plugin が同じ pr
   reconcile するより先に返ります。2 段の release と claim に分けると別の
   plugin に codepoint を取られたとき巻き戻せないので、置換を先に 1 回で
   行う方を選んでおり、その間に届いたその codepoint の経路は built-in に
-  渡ります。
+  渡ります。もう 1 つ、意図しない破れが daemon 再起動の直後にあります。
+  restore された plugin が local SID を宣言し直す前に unregister すると、
+  flush が読むのは in-memory の集合なので前の run の pinned dispatch entry が
+  視界に入らず、それを残したまま claim を解放します。restore-time prune が
+  headend しか読めないのと同根で (既知の限界の節)、owner ごとの inventory
+  から flush する形が繰越しです。
 - restore に失敗した plugin の claim は解放しません。解放すると built-in が
   実装できない codepoint の経路を service SID として install してしまいます。
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
@@ -728,12 +733,16 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 - unregister の flush は広告の withdraw、local SID、headend の順に進み、
   失敗した面を飛ばして残りも試みます。消せなかった分は lease ごと残り、
   rollback はしません。plugin は registry に dead として戻るので operator が
-  retry できます。flush 成功後の store 削除の失敗は warning に留め、
-  manifest が残って restart が plugin を持ち帰ります。状態は flush 済み
-  なので空から再開するだけです。
+  retry できます。flush 成功後の store 削除の失敗は warning に留めます。
+  削除は manifest、module、directory の sync の順に進むので、どの段階で
+  失敗したかで結果が分かれます。manifest の unlink 前なら restart が
+  plugin を持ち帰り (状態は flush 済みなので空から再開するだけです)、
+  unlink 後なら restart には既に見えません。
 - forget は claim を解放してから store を消すので、store 削除が失敗すると
   error を返しつつ claim だけが先に失われます。unrestored の記録と slot /
-  locator の予約と map の状態と store は残ります。
+  locator の予約と map の状態は残ります。store 側は失敗の段階次第で、
+  manifest の unlink 前なら丸ごと残り、unlink 後なら restart が読む
+  manifest は既にありません。
 
 ## 運用
 
@@ -797,7 +806,9 @@ local SID の名前は host の memory にしかありません。pin された 
 
 そこで owner ごとに 1 回だけ sweep します。その owner のもので、今回の
 run が入れたのではない entry を消します。address の安定性は 1 回の daemon
-実行の中では保たれ、再起動を跨ぐと新しい address になります。
+実行の中では保たれ、再起動を跨ぐと保証されません。allocator は空から
+作り直すので、割り当ての順が同じなら偶然同じ address が戻ることもあり、
+それを当てにはできません。
 
 ## まだ無いもの
 
