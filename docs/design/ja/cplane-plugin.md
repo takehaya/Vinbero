@@ -97,7 +97,11 @@ worker が保留して、snapshot と end of replay を積み終えてから流�
 rib を走査している間に同じ NLRI の update が queue に割り込めないので、
 snapshot の中の copy を、それを追い越した update より後に見ることは
 ありません。保留が queue の深さを超えた分は drop して snapshot debt を
-立て直すので、追い越しではなく再修復に倒れます。
+立て直すので、追い越しではなく再修復に倒れます。これは配送順序の保証で、
+snapshot 自体が rib のある一瞬を写した atomic な cut だという保証では
+ありません。走査は family ごとに rib を読むだけなので、走査中に変わった
+分は snapshot に混ざり得ますが、その変化の event は保留されて snapshot の
+後に届くので、plugin の view は最終的に一致します。
 
 replay の先頭には start of replay の event を置きます。replay は何が在る
 かを述べる手段であって、何が無くなったかは述べられません。plugin が聞いて
@@ -479,12 +483,14 @@ service SID として自分の owner で install します。plugin が同じ pr
   (lifecycle の節)。解放は取得と対称ではありません。取得時は rib を遡って
   built-in から withdraw しますが、解放時に rib を built-in へ流し直すことは
   しません。解放後に届く advertise は built-in に配られ、素の service SID と
-  して扱われます。これが安全なのは flush が先だからです。claim が防いでいた
-  害は、plugin の書き込みと built-in の install が同じ prefix で owner 衝突し、
-  誤った意味の entry が traffic を運び続けることでした。状態を flush した後は
-  衝突する相手が居らず、headend の encap は behavior を解釈せず SID へ向ける
-  だけなので、claim 前と同じ普通の扱いに戻ります。rib に残っている経路は
-  次に churn したときに built-in へ渡ります。
+  して扱われます。flush が先なので、claim が防いでいた owner 衝突 -- plugin の
+  書き込みと built-in の install が同じ prefix を奪い合い、誤った意味の entry が
+  traffic を運び続けること -- は起きません。ただし flush が保証するのは衝突が
+  無いことまでです。built-in が作るのは既定の単一 SID の H.Encaps で、plugin が
+  headend で宣言していたかもしれない mode や segment list や source は再現され
+  ません。unregister 後の churn で入る entry は旧 plugin のものと転送の形が違い
+  得るという運用上の条件は残ります。rib に残っている経路は次に churn したときに
+  built-in へ渡ります。
 - 取得・解放・restore 失敗の扱いは 1 つの不変条件の面です。claim の寿命は
   plugin の状態の寿命に合わせます。状態が map にある間はその codepoint の
   経路を built-in に渡さず (restore 失敗で claim を保持するのはこのため)、
@@ -695,16 +701,39 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 永久に止め、operator の RPC が返りません。
 
 各遷移で plugin の持ち物がどうなるかをまとめます。map の状態には lease も
-含みます。lease は owner の状態と一緒に増減するためです。
+含みます。lease は owner の状態と一緒に増減するためです。表は各遷移が成功
+したときの姿で、部分失敗で残る形は表の後にまとめます。
 
 | 遷移 | behavior claim | store | running registry | map の状態と広告 |
 |---|---|---|---|---|
-| register (新規) | 取得。登録が失敗したら巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
+| register (新規) | 取得。instantiate 前の失敗では巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
 | restore 成功 | 起動時の予約のまま | 保持 | 追加 | map は pinned のまま、replay 後の宣言が差分を吸収。広告は宣言で作り直す |
 | restore 失敗 | 保持 (withhold 継続) | 保持 | 載せず unrestored に記録 | 触らない。slot と locator の予約も残る |
 | upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
 | unregister | flush 成功後に解放 | flush 成功後に削除 | 削除。flush 失敗時は戻す | owner の状態を削除し広告を withdraw |
 | forget (未走行のみ) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
+
+部分失敗はそれぞれ次の形で残ります。
+
+- register と upgrade の instantiate 前の失敗 (claim 衝突、検証、admission) は
+  claim を巻き戻して何も残しません。publish の後の persist 失敗は違います。
+  instance は動いていて claim も新しい集合のままですが store に書けていない
+  ので、error を返した上で restart を生き残りません。upgrade では store に
+  旧版の manifest が残るため、restart は旧版を restore します。scope prune の
+  失敗は claim を新しい集合のまま plugin を unrestored に落とします
+  (scope を狭めたときの節)。
+- restore と再登録の prune は面ごと・entry ごとに進み、途中の失敗を
+  rollback しません。prune で失敗した restore の map は「触らない」では
+  なく、削除できた分だけ減った状態で残ります。
+- unregister の flush は広告の withdraw、local SID、headend の順に進み、
+  失敗した面を飛ばして残りも試みます。消せなかった分は lease ごと残り、
+  rollback はしません。plugin は registry に dead として戻るので operator が
+  retry できます。flush 成功後の store 削除の失敗は warning に留め、
+  manifest が残って restart が plugin を持ち帰ります。状態は flush 済み
+  なので空から再開するだけです。
+- forget は claim を解放してから store を消すので、store 削除が失敗すると
+  error を返しつつ claim だけが先に失われます。unrestored の記録と slot /
+  locator の予約と map の状態と store は残ります。
 
 ## 運用
 
