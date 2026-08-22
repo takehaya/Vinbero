@@ -361,12 +361,12 @@ apply 時に失敗させれば、既存の retry 機構がそのまま修復に�
 実装は「まだ許される部分集合を desired set として apply する」形で、残りは
 既存の reconcile が落とします。
 
-この prune の視界は同一 run 内の再登録と restore で違います。再登録では
-headend・local SID・広告の 3 面が in-memory の集合から見えるので全部 prune
-されます。restore 直後は map から owner ごとに読める headend しか見えず、
-local SID と広告は prune が届かないまま残ります (既知の限界の節)。つまり
-restore を跨いだ scope の縮小は、いまは headend に対してだけ認可の失効として
-働きます。
+この prune の視界は同一 run 内の再登録と restore で違います。headend は
+どちらの場合も BPF map を owner ごとに列挙して見えます。local SID と広告は
+in-memory の集合からしか見えないので、再登録では 3 面とも prune され、
+restore 直後は headend しか prune されず、local SID と広告は届かないまま
+残ります (既知の限界の節)。つまり restore を跨いだ scope の縮小は、いまは
+headend に対してだけ認可の失効として働きます。
 
 manifest の format version は 2 です。scope は認可情報なので、scope を持たない
 version 1 の manifest (scope 導入前の build が書いたもの) を空 scope で restore
