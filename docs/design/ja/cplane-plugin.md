@@ -17,6 +17,9 @@ WebAssembly module を受け取ります。どちらも daemon に upload され
    し、plugin の slot を指す dispatch entry を書き、address を event で
    plugin に返します。名前は plugin が付け、値は host が選びます。記憶を
    失って戻ってきた plugin が同じ名前を宣言すると同じ address が返ります。
+   この安定性は 1 つの daemon run の中の話で、instance の作り直しや同名
+   upgrade では保たれ、daemon 再起動を跨ぐと新しい address になります
+   (local SID と daemon 再起動の節)。
 4. plugin がその SID を SID TLV に自分の codepoint を載せて広告します。
 5. 対向でその経路を受けた plugin が headend の状態を宣言します。
 6. Vinbero 自身の applier はその経路を見ません。codepoint を見ずに service
@@ -138,7 +141,9 @@ withdraw されるためです。
 apply は transaction ではありません。BPF map に複数 entry を atomic に書く
 手段が無いため、途中失敗は前の write を残します。冪等なので retry で収束
 します。順序は prune を先に回し、貼り替え中の prefix が二重に存在する瞬間
-を作りません。
+を作りません。ABI の `apply_begin` が開く「transaction」は宣言 chunk を
+積むための staging の単位で、commit までは何も適用されないという意味です。
+map への適用が atomic だという意味ではありません。
 
 同一 key を 2 owner が書く状況は宣言時に fail-closed で弾きます。desired
 set は owner ごとに差分を取るので、2 owner が同じ key を宣言すると互いに
@@ -346,6 +351,13 @@ apply 時に失敗させれば、既存の retry 機構がそのまま修復に�
 実装は「まだ許される部分集合を desired set として apply する」形で、残りは
 既存の reconcile が落とします。
 
+この prune の視界は同一 run 内の再登録と restore で違います。再登録では
+headend・local SID・広告の 3 面が in-memory の集合から見えるので全部 prune
+されます。restore 直後は map から owner ごとに読める headend しか見えず、
+local SID と広告は prune が届かないまま残ります (既知の限界の節)。つまり
+restore を跨いだ scope の縮小は、いまは headend に対してだけ認可の失効として
+働きます。
+
 manifest の format version は 2 です。scope は認可情報なので、scope を持たない
 version 1 の manifest (scope 導入前の build が書いたもの) を空 scope で restore
 すると、その plugin が書いた転送状態を boot 時に消してしまいます。そこで version 1 は
@@ -458,11 +470,23 @@ service SID として自分の owner で install します。plugin が同じ pr
   行います。retract は元に戻せない副作用なので、admission で弾かれた module の
   ために既存の経路を built-in から消してしまうと、実装するものが無いまま
   取り残されます。
-- unregister では claim を解放しますが、その経路を built-in に流し直すこと
-  はしません。plugin が実装していた behavior を実装できるものはここには無く、
-  built-in にとって private codepoint はただの service SID なので、渡せば
-  claim が防いでいたはずの誤った意味での install になります。理解していた
-  唯一のものを外した以上、それらの経路が転送されなくなるのが正しい帰結です。
+- unregister では owner の状態の flush が成功してから claim を解放します
+  (lifecycle の節)。解放は取得と対称ではありません。取得時は rib を遡って
+  built-in から withdraw しますが、解放時に rib を built-in へ流し直すことは
+  しません。解放後に届く advertise は built-in に配られ、素の service SID と
+  して扱われます。これが安全なのは flush が先だからです。claim が防いでいた
+  害は、plugin の書き込みと built-in の install が同じ prefix で owner 衝突し、
+  誤った意味の entry が traffic を運び続けることでした。状態を flush した後は
+  衝突する相手が居らず、headend の encap は behavior を解釈せず SID へ向ける
+  だけなので、claim 前と同じ普通の扱いに戻ります。rib に残っている経路は
+  次に churn したときに built-in へ渡ります。
+- 取得・解放・restore 失敗の扱いは 1 つの不変条件の面です。claim の寿命は
+  plugin の状態の寿命に合わせます。状態が map にある間はその codepoint の
+  経路を built-in に渡さず (restore 失敗で claim を保持するのはこのため)、
+  状態が消えた後は普通の経路に戻します (unregister が flush の後に解放する
+  のはこのため)。例外は forget だけで、これは operator が明示的に対応を
+  破る操作です。daemon が消し方を知らない状態を残したまま claim と予約を
+  返すので、残存 state の扱いは operator に移ります (既知の限界の節)。
 - restore に失敗した plugin の claim は解放しません。解放すると built-in が
   実装できない codepoint の経路を service SID として install してしまいます。
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
@@ -556,6 +580,31 @@ local SID を宣言したときの sweep で片付きますが、scope を狭め
 その宣言をしなくなるので、それまで残ります。map から owner ごとに読む形へ広げるのは
 繰越しです。
 
+forget は claim と store と slot / locator の予約を返しますが、map の状態は
+残します。daemon はそれが何のためのものかを知らないためです。返った slot を
+別の plugin に渡すと、残った dispatch entry の SID がその新しい program へ
+dispatch し、新 program は旧 plugin の aux bytes を自分の layout として読み
+ます。予約が防いでいた取り違えを forget は operator の判断で外すことになる
+ので、残存 state を確認して SID の entry を先に消すのは operator の責任です。
+owner ごとの inventory から強制的に片付ける形は繰越しです。
+
+snapshot replay の一貫性は queue の到着順で近似しています。replay は rib を
+走査しながら event を積むので、走査中に届いた live の withdraw が、まだ読んで
+いない同じ NLRI の snapshot copy より先に queue へ入る逆順があり得ます。
+このとき plugin は消えた経路を advertise として受け直します。start of replay の
+捨て直しで直せるのは replay より前の view で、replay 自身が運んだ stale な
+copy は直せず、次の replay まで残ります。revision や barrier で厳密な cut を
+作るのは、実害が観測されてからの課題にしています。
+
+control plane half と data plane half は機構としては結ばれていません。同一
+plugin であることの照合も、slot に program が載っているかの readiness 確認も、
+upgrade の順序の強制もありません。前提は operator の導入順序で、data plane
+half を slot に register してから、その slot を scope に指定して control plane
+half を register します。逆順や片方だけの更新では、SID の確保と広告が成功して
+いるのに slot に受け手が居らず、traffic が落ちる期間ができます。scope の slot
+排他が防ぐのは別の plugin との取り違えで、同名の 2 half の版ずれは防ぎません。
+identity と readiness を結ぶ機構は今後の課題です。
+
 ## 登録時の検証
 
 module は allowlist で検証します。
@@ -567,10 +616,13 @@ module は allowlist で検証します。
 - `_start` の自動実行は無効化し、reactor initializer だけを host が明示的
   に呼びます。
 
-capability と scope の食い違いも登録時に弾きます。`headend` を granted しな
-がら headend prefix を並べていない登録は、plugin が動いて宣言し、その宣言が
-全部拒否されるという形で失敗します。壊れた plugin のように見えるので、
-operator の手元で断ります。
+capability と scope の食い違いも登録時に弾きます。食い違いとは capability を
+granted しながら、その capability が書き先を決めるのに要る scope を欠いた組の
+ことです。`headend` を granted しながら headend prefix を並べていない登録は、
+plugin が動いて宣言し、その宣言が全部拒否されるという形で失敗します。壊れた
+plugin のように見えるので、operator の手元で断ります。capability も scope も
+両方宣言しない登録は食い違いではなく、観測と log だけをする plugin の正当な
+形です (capability の節)。
 
 ## lifecycle
 
@@ -589,6 +641,12 @@ operator の手元で断ります。
   ので、replay しないと最初の宣言が restart 後に届いた event だけの集合に
   なり、それ以外の entry を全部 prune します。連続失敗が上限を超えたら
   状態を残して止めます。上限は連続失敗の数で、成功配送でリセットします。
+  止めた後の広告と headend は fail-static で、以後の network の変化を映し
+  ません。短時間の障害では撤去より安全ですが、長く放置すると古い経路を
+  広告し続けることになります。この判断は daemon が下せないので operator に
+  返します。止まった plugin は stats に出るので、戻さないと決めたら
+  unregister が広告ごと撤去します。停止からの経過で広告だけ落とすような
+  自動の段階的撤去は入れていません。
 - daemon の shutdown では flush しません。
 - unregister は flush が成功してから claim と store を手放します。先に
   手放すと、flush が失敗したときに retry する手段が無くなります。claim を
@@ -614,14 +672,8 @@ operator の手元で断ります。
   最初に適用される宣言は queue にたまたま入っていた event ではなく network
   全体を述べたものになります。desired set を宣言する plugin にとって、この
   違いは収束するか自分の持ち物を全部 prune するかの違いです。
-- publication は snapshot の後に行います。宣言はそれまで保留されるので、
-  最初に適用される宣言は queue にたまたま入っていた event ではなく network
-  全体を述べたものになります。desired set を宣言する plugin にとって、この
-  違いは収束するか自分の持ち物を全部 prune するかの違いです。
 - 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
   次の配送の前に再試行します。保留されている数は stats に出し、最初の失敗は
-  warning に出します。何かを待っている plugin は、配送の counter だけ見ると
-  暇な plugin と区別が付きません。保留されている数は stats に出し、最初の失敗は
   warning に出します。何かを待っている plugin は、配送の counter だけ見ると
   暇な plugin と区別が付きません。restore された plugin は daemon の起動途中に
   configure から宣言するので、operator が後から RPC で登録する locator を
@@ -637,6 +689,18 @@ instantiate 自体も同じ budget の下で走らせます。WebAssembly の st
 section は spec 上 instantiate 中に実行されるので、これも guest の code
 です。budget を掛けないと、start section で無限 loop する module が登録を
 永久に止め、operator の RPC が返りません。
+
+各遷移で plugin の持ち物がどうなるかをまとめます。map の状態には lease も
+含みます。lease は owner の状態と一緒に増減するためです。
+
+| 遷移 | behavior claim | store | running registry | map の状態と広告 |
+|---|---|---|---|---|
+| register (新規) | 取得。登録が失敗したら巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
+| restore 成功 | 起動時の予約のまま | 保持 | 追加 | map は pinned のまま、replay 後の宣言が差分を吸収。広告は宣言で作り直す |
+| restore 失敗 | 保持 (withhold 継続) | 保持 | 載せず unrestored に記録 | 触らない。slot と locator の予約も残る |
+| upgrade (同名再登録) | 新しい集合に置換 | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
+| unregister | flush 成功後に解放 | flush 成功後に削除 | 削除。flush 失敗時は戻す | owner の状態を削除し広告を withdraw |
+| forget (未走行のみ) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
 
 ## 運用
 
@@ -747,6 +811,12 @@ Copilot が行数上限でレビューできないためです。以後の追加
 - binding 再導出を RPC の critical section の外へ出し、retry と counter を足す。
   いま commitBinding は共有 mutex を握ったまま全 plugin の経路を再広告し、失敗は
   log するだけです。
+- 起動時に decap-grant map を kernel と突き合わせて stale な grant を刈る
+  reconcile (data plane 境界の節)。
+- control plane half と data plane half の identity と readiness の結合
+  (既知の限界の節)。
+- owner ごとの inventory による、forget 後の残存 state の強制 cleanup
+  (既知の限界の節)。
 
 ## 参照
 
