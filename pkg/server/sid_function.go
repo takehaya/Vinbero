@@ -482,6 +482,44 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		}
 		aux = bpf.NewSidAuxNexthop(nexthop)
 
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+		if sidFunc.LocatorRef != nil {
+			return nil, nil, fmt.Errorf("locator_ref is not supported for uN/uA yet; set trigger_prefix explicitly")
+		}
+		blockLen := uint32(32)
+		if sidFunc.UsidBlockLen != nil {
+			blockLen = *sidFunc.UsidBlockLen
+		}
+		if blockLen != 32 {
+			return nil, nil, fmt.Errorf("usid_block_len %d is not supported (F3216 only: 32)", blockLen)
+		}
+		p, err := netip.ParsePrefix(sidFunc.TriggerPrefix)
+		if err != nil {
+			return nil, nil, fmt.Errorf("trigger_prefix: %w", err)
+		}
+		// The LPM entry covers block + node (uN) or block + node + function
+		// (uA); the Argument tail must stay outside the prefix (RFC 9800
+		// Sec.5.3).
+		var nexthop [16]uint8
+		if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+			if p.Bits() != int(blockLen)+32 {
+				return nil, nil, fmt.Errorf("uA trigger_prefix must be /%d (block + node + function), got /%d", blockLen+32, p.Bits())
+			}
+			nexthop, err = bpf.ParseIPv6(sidFunc.Nexthop)
+			if err != nil {
+				return nil, nil, fmt.Errorf("uA requires nexthop: %w", err)
+			}
+		} else {
+			if p.Bits() != int(blockLen)+16 {
+				return nil, nil, fmt.Errorf("uN trigger_prefix must be /%d (block + node), got /%d", blockLen+16, p.Bits())
+			}
+			if sidFunc.Nexthop != "" {
+				return nil, nil, fmt.Errorf("uN does not take a nexthop (use uA)")
+			}
+		}
+		aux = bpf.NewSidAuxUsid(nexthop, uint8(blockLen/8))
+
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 		// DX2 stores OIF as uint32 in first 4 bytes of aux nexthop
 		aux = &bpf.SidAuxEntry{}
@@ -875,6 +913,15 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X:
 				sf.Nexthop = bpf.FormatIPv6(aux.Nexthop.Nexthop)
+
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+				nexthop, blockLenBytes := bpf.SidAuxUsidData(aux)
+				blockLen := uint32(blockLenBytes) * 8
+				sf.UsidBlockLen = &blockLen
+				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+					sf.Nexthop = bpf.FormatIPv6(nexthop)
+				}
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 				sf.Oif = binary.NativeEndian.Uint32(aux.Nexthop.Nexthop[:4])

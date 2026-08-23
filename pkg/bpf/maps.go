@@ -783,6 +783,13 @@ func NewSidAuxUsid(nexthop [IPv6AddrLen]uint8, blockLenBytes uint8) *SidAuxEntry
 	return entry
 }
 
+// SidAuxUsidData reads the usid variant back out of an aux entry.
+func SidAuxUsidData(entry *SidAuxEntry) (nexthop [IPv6AddrLen]uint8, blockLenBytes uint8) {
+	nexthop = entry.Nexthop.Nexthop
+	raw := (*[20]byte)(unsafe.Pointer(entry))
+	return nexthop, raw[16]
+}
+
 // NewSidAuxL3Vrf creates an aux entry for End.T/DT4/DT6/DT46 carrying the
 // resolved VRF ifindex in the l3vrf variant.
 func NewSidAuxL3Vrf(vrfIfindex uint32) *SidAuxEntry {
