@@ -772,6 +772,17 @@ func NewSidAuxGtp6e(argsOffset uint8, srcAddr, dstAddr [IPv6AddrLen]uint8) *SidA
 	return entry
 }
 
+// NewSidAuxUsid creates an aux entry for uN / uA (NEXT-C-SID, RFC 9800).
+// C layout: nexthop[16] at union offset 0 (uA only; all-zero for uN),
+// block_len_bytes (u8) at offset 16.
+func NewSidAuxUsid(nexthop [IPv6AddrLen]uint8, blockLenBytes uint8) *SidAuxEntry {
+	entry := &SidAuxEntry{}
+	entry.Nexthop.Nexthop = nexthop
+	raw := (*[20]byte)(unsafe.Pointer(entry))
+	raw[16] = blockLenBytes
+	return entry
+}
+
 // NewSidAuxL3Vrf creates an aux entry for End.T/DT4/DT6/DT46 carrying the
 // resolved VRF ifindex in the l3vrf variant.
 func NewSidAuxL3Vrf(vrfIfindex uint32) *SidAuxEntry {

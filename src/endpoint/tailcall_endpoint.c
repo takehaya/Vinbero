@@ -342,6 +342,43 @@ int tailcall_endpoint_end_am(struct xdp_md *ctx)
     TAILCALL_RETURN(ctx,action);
 }
 
+// uN / uA (NEXT-C-SID): handwritten dual-path bodies. The shift path is
+// SRH-independent, so both DISPATCH_LOCALSID and DISPATCH_NOSRH land in the
+// same core; only the Argument==0 fall-through cares which path we came in
+// on. The aux carries block_len_bytes (and the uA nexthop); F3216 is the
+// only supported structure today.
+SEC("xdp")
+int tailcall_endpoint_end_un(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
+        TAILCALL_RETURN(ctx,XDP_DROP);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
+                                    &tctx->sid_entry, tctx->dispatch_type);
+    TAILCALL_RETURN(ctx,action);
+}
+
+SEC("xdp")
+int tailcall_endpoint_end_ua(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
+        TAILCALL_RETURN(ctx,XDP_DROP);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_ua_core, ctx,
+                                    &tctx->sid_entry, aux, tctx->dispatch_type);
+    TAILCALL_RETURN(ctx,action);
+}
+
 SEC("xdp")
 int tailcall_endpoint_end_dx2v(struct xdp_md *ctx)
 {
