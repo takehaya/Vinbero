@@ -536,9 +536,9 @@ service SID として自分の owner で install します。plugin が同じ pr
 | claim 取得後の retract は plugin の build と subscribe が済んでから行い、rib にある対象 behavior の経路を built-in から withdraw して最初の宣言より前に prefix を空ける。 | admission など publish 前に失敗した module では retract を行わない。元に戻せない副作用だけが残ることを防ぐ。 | 不要。 |
 | unregister は owner state の flush が成功してから claim を解放する。flush が失敗した場合は claim と store を保持し、plugin を registry に dead として戻す。 | flush は面ごとに進み部分削除を rollback しない。また built-in が後から作るのは既定の単一 SID の H.Encaps で、plugin が宣言していた mode や segment list や source は再現されない。 | flush 失敗は unregister を retry する。unregister 後の churn で転送の形が変わり得ることは運用条件として扱う。 |
 | upgrade は behavior claim を新しい集合へ 1 回で置換し、途中で別の plugin に codepoint を取られて巻き戻せなくなる形を避ける。publish 前の失敗は前の集合へ戻す。 | behavior を減らす upgrade では、外した codepoint の claim が旧 state の reconcile より先に返り、その間に届いた経路は built-in に渡る。 | 窓を避けたい場合は unregister で flush してから新しい集合で登録し直す。address は取り直しになる。 |
-| 通常の unregister は in-memory の inventory から owner state を flush してから claim を返す。 | daemon 再起動直後、plugin が local SID を宣言し直す前に unregister すると、前の run の pinned dispatch entry が flush の視界に入らず、残したまま claim が解放される。 | unregister の後に前の run の entry が残っていないかを確認し、残っていれば SID の削除 RPC で消す。owner ごとの inventory から flush する形は繰越し。 |
+| 通常の unregister は in-memory の inventory から owner state を flush してから claim を返す。 | daemon 再起動直後、plugin が local SID を宣言し直す前に unregister すると、前の run の pinned dispatch entry が flush の視界に入らず、残したまま claim が解放される。 | plugin owner の entry は SID 削除 RPC の owner 検査が拒み、force-delete の RPC も無いので、operator が消す手段はいま無い。残存を確認したら、その slot と locator を再利用しないでおく。owner ごとの inventory から flush する形は繰越し。 |
 | manifest と state が揃っていれば、再起動時にも claim を予約して pinned state と built-in の対応を保つ。 | 新規登録や behavior を足す upgrade が manifest の rename 前に persist で失敗すると、その run は instance と claim と state を持って動くが、再起動時は manifest が無いので claim が予約されず、pinned state の codepoint が built-in へ流れる。 | persist 失敗の error を受けたら、登録を retry して manifest を揃えるか、unregister で state ごと flush する。 |
-| claim の寿命は plugin の状態の寿命に合わせる、が全体の不変条件である。 | forget は operator が明示的にこの対応を破る操作で、daemon が消し方を知らない状態を残したまま claim と予約を返す。 | 残存 state を確認し、返された slot を再利用する前に SID の entry を消す。以後の残存 state は operator が引き受ける (既知の限界の節)。 |
+| claim の寿命は plugin の状態の寿命に合わせる、が全体の不変条件である。 | forget は operator が明示的にこの対応を破る操作で、daemon が消し方を知らない状態を残したまま claim と予約を返す。 | 残存 state を確認し、force-delete の経路が入るまでは返された slot と locator を再利用しない。以後の残存 state は operator が引き受ける (既知の限界の節)。 |
 
 ## 広告の所有権
 
@@ -625,9 +625,11 @@ forget は claim と store と slot / locator の予約を返しますが、map 
 残します。daemon はそれが何のためのものかを知らないためです。返った slot を
 別の plugin に渡すと、残った dispatch entry の SID がその新しい program へ
 dispatch し、新 program は旧 plugin の aux bytes を自分の layout として読み
-ます。予約が防いでいた取り違えを forget は operator の判断で外すことになる
-ので、残存 state を確認して SID の entry を先に消すのは operator の責任です。
-owner ごとの inventory から強制的に片付ける形は繰越しです。
+ます。予約が防いでいた取り違えを forget は operator の判断で外すことになり
+ますが、plugin owner の entry は SID 削除 RPC の owner 検査が拒み、force-delete
+の RPC も公開していないので、operator に消す手段がいまはありません。できるのは
+残存 state を確認して、その slot と locator を再利用しないでおくことだけです。
+owner ごとの inventory から強制的に片付ける形と force-delete 経路は繰越しです。
 
 control plane half と data plane half は機構としては結ばれていません。同一
 plugin であることの照合も、slot に program が載っているかの readiness 確認も、
@@ -801,6 +803,7 @@ stateDiagram-v2
     Running --> VolatileRunning: upgrade の publish 後 persist 失敗
     Running --> Running: trap や budget 超過。instance を作り直し snapshot から収束
     Running --> Dead: 連続失敗が上限を超え fail-static
+    Running --> Dead: instance の作り直し自体に失敗。上限を待たず fail-static
     Running --> Stored: daemon shutdown。flush しない
     Running --> Absent: unregister。flush 成功
     Running --> FlushedStored: unregister。flush 成功後の store 削除失敗
