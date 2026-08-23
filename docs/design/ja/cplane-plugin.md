@@ -1,9 +1,11 @@
 # Control plane plugin
 
-Vinbero の control plane を第三者が拡張するための機構です。data plane
+Vinbero の control plane を operator が拡張するための機構です。data plane
 plugin が eBPF bytecode を受け取るのに対し、control plane plugin は
-WebAssembly module を受け取ります。どちらも daemon に upload され、登録時
-に検証され、宣言した capability と scope の範囲でだけ動きます。
+WebAssembly module を受け取ります。どちらも daemon に upload され、登録時に
+検証されます。WASM 側の書き込みは宣言した capability と scope の範囲に host が
+強制します。eBPF 側は operator が review した semi-trusted な artifact が
+前提で、検査は best-effort です (data plane 境界の節)。
 
 ## 何のためにあるか
 
