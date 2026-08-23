@@ -65,7 +65,7 @@
 
 | Function             | Status      | Description                                                 | Reference |
 |----------------------|-------------|-------------------------------------------------------------|-----------|
-| NEXT-CSID            |             | Compressed SID with next-based encoding                     | RFC 9800 |
+| NEXT-CSID            | Partial     | uN (End) / uA (End.X), F3216 only, single flavor            | RFC 9800 |
 | REPLACE-CSID         |             | Compressed SID with replace-based encoding                  | RFC 9800 |
 | End.LBS              |             | Locator-Block Swap                                          | RFC 9800 |
 | End.XLBS             |             | L3 cross-connect and Locator-Block Swap                     | RFC 9800 |
