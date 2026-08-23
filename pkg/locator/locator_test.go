@@ -17,6 +17,16 @@ func makeClassic48(t *testing.T) Locator {
 	}
 }
 
+func makeUSID48(t *testing.T) Locator {
+	t.Helper()
+	return Locator{
+		Name: "USID1", Prefix: netip.MustParsePrefix("fd00:0:0:aa::/48"),
+		BlockLen: 32, NodeLen: 16, FunctionLen: 16, ArgumentLen: 0,
+		Behavior:          BehaviorUSID,
+		FunctionAutoStart: 1, FunctionAutoEnd: 0xFFFE,
+	}
+}
+
 func TestValidate_OK(t *testing.T) {
 	loc := makeClassic48(t)
 	if err := loc.Validate(); err != nil {
@@ -41,6 +51,32 @@ func TestValidate_Errors(t *testing.T) {
 			tc.mutate(&loc)
 			if err := loc.Validate(); err == nil {
 				t.Errorf("expected error")
+			}
+		})
+	}
+}
+
+func TestValidate_USID(t *testing.T) {
+	loc := makeUSID48(t)
+	if err := loc.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*Locator)
+	}{
+		{"prefix-length", func(l *Locator) { l.NodeLen = 8 }},
+		{"function-length", func(l *Locator) { l.FunctionLen = 15 }},
+		{"argument-length", func(l *Locator) { l.ArgumentLen = 64 }},
+		{"block-byte-alignment", func(l *Locator) { l.BlockLen = 31; l.NodeLen = 17 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			loc := makeUSID48(t)
+			tc.mutate(&loc)
+			if err := loc.Validate(); !errors.Is(err, ErrInvalidLocator) {
+				t.Errorf("Validate: got %v, want ErrInvalidLocator", err)
 			}
 		})
 	}
@@ -79,13 +115,42 @@ func TestBuildSID_OutOfRange(t *testing.T) {
 	}
 }
 
-func TestUSID_Unimplemented(t *testing.T) {
-	loc := makeClassic48(t)
-	loc.Behavior = BehaviorUSID
-	if _, err := loc.BuildSID(0x10); !errors.Is(err, ErrUnimplemented) {
-		t.Errorf("BuildSID uSID: want ErrUnimplemented, got %v", err)
+func TestBuildSID_USIDRoundTrip(t *testing.T) {
+	loc := makeUSID48(t)
+	for _, fn := range []uint32{1, 0xaa, 0xf321, 0xffff} {
+		sid, err := loc.BuildSID(fn)
+		if err != nil {
+			t.Fatalf("BuildSID(%#x): %v", fn, err)
+		}
+		got, ok, err := loc.ParseSID(sid)
+		if err != nil || !ok || got != fn {
+			t.Errorf("ParseSID(%s) = (%#x, %v, %v), want (%#x, true, nil)", sid, got, ok, err, fn)
+		}
 	}
-	if _, _, err := loc.ParseSID(netip.MustParseAddr("fd00:1:1::1")); !errors.Is(err, ErrUnimplemented) {
-		t.Errorf("ParseSID uSID: want ErrUnimplemented, got %v", err)
+	sid, err := loc.BuildSID(0xaa)
+	if err != nil {
+		t.Fatalf("BuildSID(0xaa): %v", err)
+	}
+	if want := netip.MustParseAddr("fd00:0:0:aa::"); sid != want {
+		t.Errorf("BuildSID(0xaa) = %s, want %s", sid, want)
+	}
+}
+
+func TestParseSID_USIDRejectsNonZeroRemainder(t *testing.T) {
+	loc := makeUSID48(t)
+	for _, sid := range []netip.Addr{
+		netip.MustParseAddr("fd00:0:0:aa::1"),
+		netip.MustParseAddr("fd00:0:0:aa:8000::"),
+	} {
+		if _, ok, err := loc.ParseSID(sid); err != nil || ok {
+			t.Errorf("ParseSID(%s) = (ok=%v, err=%v), want (false, nil)", sid, ok, err)
+		}
+	}
+}
+
+func TestBuildSID_USIDZeroReserved(t *testing.T) {
+	loc := makeUSID48(t)
+	if _, err := loc.BuildSID(0); !errors.Is(err, ErrFunctionReserved) {
+		t.Errorf("BuildSID(0): got %v, want ErrFunctionReserved", err)
 	}
 }

@@ -4,10 +4,9 @@
 // SID was built from which (locator, function) pair so a Delete can
 // return the function to the pool.
 //
-// Today Phase 1 implements RFC 8986 Classic SRv6. RFC 9800 uSID
-// locators (Behavior == BehaviorUSID) are accepted at the config layer
-// but BuildSID / ParseSID return ErrUnimplemented for them; the Phase 2
-// extension of the GoBGP integration plan will fill in uSID encoding.
+// It supports RFC 8986 Classic SRv6 locators and RFC 9800 uSID
+// locators. Data-plane behavior is implemented separately from the SID
+// structure and allocation handled here.
 package locator
 
 import (
@@ -58,7 +57,7 @@ type Locator struct {
 
 var (
 	// ErrUnimplemented surfaces from BuildSID / ParseSID when the locator
-	// uses a Behavior that the current build does not encode (today: USID).
+	// uses a Behavior that the current build does not encode.
 	ErrUnimplemented = errors.New("locator: behavior not yet implemented")
 
 	// ErrInvalidLocator signals a structural problem with the Locator
@@ -68,6 +67,10 @@ var (
 	// ErrFunctionOutOfRange signals a function value that does not fit in
 	// FunctionLen bits.
 	ErrFunctionOutOfRange = errors.New("locator: function value out of range")
+
+	// ErrFunctionReserved signals a function value reserved by the SID
+	// format. uSID reserves CSID 0 as the container terminator.
+	ErrFunctionReserved = errors.New("locator: function value is reserved")
 )
 
 // maxFunctionLenBits caps how large a function field the bitmap allocator
@@ -87,16 +90,35 @@ func (l *Locator) Validate() error {
 	if !l.Prefix.IsValid() || !l.Prefix.Addr().Is6() {
 		return fmt.Errorf("%w: prefix must be a valid IPv6 prefix", ErrInvalidLocator)
 	}
-	total := uint16(l.BlockLen) + uint16(l.NodeLen) + uint16(l.FunctionLen) + uint16(l.ArgumentLen)
-	if total != 128 {
-		return fmt.Errorf("%w: bit lengths must sum to 128 (got %d)", ErrInvalidLocator, total)
-	}
-	if uint16(l.BlockLen)+uint16(l.NodeLen) != uint16(l.Prefix.Bits()) {
+	prefixLen := uint16(l.BlockLen) + uint16(l.NodeLen)
+	if prefixLen != uint16(l.Prefix.Bits()) {
 		return fmt.Errorf("%w: block_len + node_len (%d) must equal prefix bits (%d)",
 			ErrInvalidLocator, l.BlockLen+l.NodeLen, l.Prefix.Bits())
 	}
-	if l.FunctionLen == 0 {
-		return fmt.Errorf("%w: function_len must be > 0", ErrInvalidLocator)
+	switch l.Behavior {
+	case BehaviorClassic:
+		total := prefixLen + uint16(l.FunctionLen) + uint16(l.ArgumentLen)
+		if total != 128 {
+			return fmt.Errorf("%w: bit lengths must sum to 128 (got %d)", ErrInvalidLocator, total)
+		}
+		if l.FunctionLen == 0 {
+			return fmt.Errorf("%w: function_len must be > 0", ErrInvalidLocator)
+		}
+	case BehaviorUSID:
+		if l.BlockLen%8 != 0 {
+			return fmt.Errorf("%w: uSID block_len must be a multiple of 8", ErrInvalidLocator)
+		}
+		if l.FunctionLen != 16 {
+			return fmt.Errorf("%w: uSID function_len must be 16", ErrInvalidLocator)
+		}
+		if l.ArgumentLen != 0 {
+			return fmt.Errorf("%w: uSID argument_len must be 0", ErrInvalidLocator)
+		}
+		if prefixLen+uint16(l.FunctionLen) > 128 {
+			return fmt.Errorf("%w: uSID locator prefix and function exceed 128 bits", ErrInvalidLocator)
+		}
+	default:
+		return fmt.Errorf("%w: unsupported behavior %v", ErrInvalidLocator, l.Behavior)
 	}
 	if l.FunctionLen > maxFunctionLenBits {
 		return fmt.Errorf("%w: function_len > %d is not supported (bitmap memory cost)",
@@ -115,11 +137,6 @@ func (l *Locator) Validate() error {
 		return fmt.Errorf("%w: function_auto_end (%d) < function_auto_start (%d)",
 			ErrInvalidLocator, l.FunctionAutoEnd, l.FunctionAutoStart)
 	}
-	switch l.Behavior {
-	case BehaviorClassic, BehaviorUSID:
-	default:
-		return fmt.Errorf("%w: unsupported behavior %v", ErrInvalidLocator, l.Behavior)
-	}
 	return nil
 }
 
@@ -130,10 +147,14 @@ func (l *Locator) MaxFunction() uint32 {
 
 // BuildSID returns the 128-bit SRv6 SID for (locator, function). The
 // function bits sit immediately after locator-block + locator-node; the
-// argument tail is left zero. uSID layout is deferred to Phase 2.
+// argument tail is left zero. For uSID this builds the zero-filled service
+// uSID form with a 16-bit function.
 func (l *Locator) BuildSID(function uint32) (netip.Addr, error) {
-	if l.Behavior != BehaviorClassic {
+	if l.Behavior != BehaviorClassic && l.Behavior != BehaviorUSID {
 		return netip.Addr{}, fmt.Errorf("%w: behavior %v BuildSID", ErrUnimplemented, l.Behavior)
+	}
+	if l.Behavior == BehaviorUSID && function == 0 {
+		return netip.Addr{}, fmt.Errorf("%w: uSID CSID 0 is the container terminator", ErrFunctionReserved)
 	}
 	if function > l.MaxFunction() {
 		return netip.Addr{}, fmt.Errorf("%w: function %d exceeds %d", ErrFunctionOutOfRange, function, l.MaxFunction())
@@ -153,7 +174,7 @@ func (l *Locator) BuildSID(function uint32) (netip.Addr, error) {
 // prefix and the caller should try a different locator. ParseSID does
 // not consult the binding table.
 func (l *Locator) ParseSID(sid netip.Addr) (function uint32, ok bool, err error) {
-	if l.Behavior != BehaviorClassic {
+	if l.Behavior != BehaviorClassic && l.Behavior != BehaviorUSID {
 		return 0, false, fmt.Errorf("%w: behavior %v ParseSID", ErrUnimplemented, l.Behavior)
 	}
 	if !sid.Is6() {
@@ -165,7 +186,23 @@ func (l *Locator) ParseSID(sid netip.Addr) (function uint32, ok bool, err error)
 	b16 := sid.As16()
 	prefixBits := uint(l.BlockLen) + uint(l.NodeLen)
 	v := readBits(b16[:], prefixBits, uint(l.FunctionLen))
+	if l.Behavior == BehaviorUSID && !bitsZero(b16[:], prefixBits+uint(l.FunctionLen), 128) {
+		return 0, false, nil
+	}
 	return uint32(v), true, nil
+}
+
+// bitsZero reports whether every bit in [start, end) is zero. Reads are
+// chunked because readBits returns at most 64 bits at a time.
+func bitsZero(buf []byte, start, end uint) bool {
+	for start < end {
+		width := min(end-start, 64)
+		if readBits(buf, start, width) != 0 {
+			return false
+		}
+		start += width
+	}
+	return true
 }
 
 // writeBits stores value into buf starting at bit offset start, spanning
