@@ -49,7 +49,10 @@ test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Linux native uN)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Linux native uN)"
 
 print_info "Removing Linux native uN from $ns_router2..."
-ip netns exec "$ns_router2" ip -6 route del local fd00:aaaa:b002::/48 2>/dev/null || true
+# The oracle route must actually go away: if it lingered, the kernel would
+# keep forwarding whenever Vinbero returns XDP_PASS and phase 2 would pass
+# vacuously. Deletion failure aborts the test (set -e).
+ip netns exec "$ns_router2" ip -6 route del local fd00:aaaa:b002::/48
 
 echo ""
 
