@@ -163,6 +163,29 @@ func TestXDPProgEndUn(t *testing.T) {
 		}
 	})
 
+	t.Run("container ending on this node without SRH passes the shifted packet up", func(t *testing.T) {
+		// Both uSIDs are this node's, so the loop consumes them and the DA
+		// lands on the bare uN SID. There is no SRH left to process, so the
+		// packet goes to the kernel for local delivery (RFC 8986 Sec.4.1) --
+		// the one place a rewritten DA is handed up, and only because that
+		// DA is this node's own SID. Pinned here so the invariant cannot be
+		// widened by accident.
+		pkt, err := buildUsidIPv6Packet(src, net.ParseIP("fd00:aaaa:bbbb:bbbb::"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_PASS {
+			t.Errorf("expected XDP_PASS, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:bbbb::"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (shifted down to the bare uN SID)", got, want)
+		}
+		if hl := outPktHopLimit(t, out); hl != 63 {
+			t.Errorf("hop limit = %d, want 63 (one logical uN hop)", hl)
+		}
+	})
+
 	t.Run("malformed SRH drops on the terminal path", func(t *testing.T) {
 		// SL exceeds the segment list: endpoint_init must reject it.
 		segs := []net.IP{net.ParseIP("fd00:9:9::1")}
@@ -310,8 +333,47 @@ func TestXDPProgEndUnBadBlockLen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ret, _ := h.run(pkt)
+	ret, out := h.run(pkt)
 	if ret != XDP_DROP {
 		t.Errorf("expected XDP_DROP, got %d", ret)
+	}
+	// XDP_DROP alone proves nothing here: the shift path fails closed with
+	// the same verdict once the FIB lookup misses. The guard is what keeps
+	// the packet untouched, so assert that instead.
+	if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:1111:cccc::"); !got.Equal(want) {
+		t.Errorf("DA = %v, want %v (unshifted: the block length guard runs before any shift)", got, want)
+	}
+	if hl := outPktHopLimit(t, out); hl != 64 {
+		t.Errorf("hop limit = %d, want 64 (no logical uN hop was executed)", hl)
+	}
+}
+
+// A re-dispatch hands the target entry's own context to the target slot.
+// Two same-shaped uN entries cannot show that -- shifting in place would
+// produce the same DA and hop limit -- so the second entry carries a block
+// length the data plane rejects. Its guard runs only if the tail call
+// really executed with entry B's aux, which stops the packet after exactly
+// one shift.
+func TestXDPProgEndUnRedispatchCarriesTargetContext(t *testing.T) {
+	h := newXDPTestHelper(t)
+	h.createSidFunctionUsid("fd00:aaaa:bbbb::/48", actionEndUn, 0, [16]byte{}, usidBlockLenBytes)
+	h.createSidFunctionUsid("fd00:aaaa:cccc::/48", actionEndUn, 0, [16]byte{}, 8)
+
+	pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:bbbb:cccc:dddd::"), 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, out := h.run(pkt)
+	if ret != XDP_DROP {
+		t.Errorf("expected XDP_DROP from uN-B's block length guard, got %d", ret)
+	}
+	// One shift (at uN-A) only. Reaching fd00:aaaa:dddd:: would mean the
+	// loop kept shifting in place under A's context instead of dispatching
+	// to B.
+	if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:cccc:dddd::"); !got.Equal(want) {
+		t.Errorf("DA = %v, want %v (one shift at uN-A, then uN-B's guard)", got, want)
+	}
+	if hl := outPktHopLimit(t, out); hl != 63 {
+		t.Errorf("hop limit = %d, want 63 (one logical uN hop)", hl)
 	}
 }
