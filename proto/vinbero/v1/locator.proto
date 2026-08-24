@@ -37,9 +37,11 @@ enum LocatorBehaviorMode {
 // and the bit layout used to slice SIDs from it.
 //
 // The (block_len + node_len) bits at the front of the prefix identify
-// the PE; the next function_len bits identify the local behavior; the
-// last argument_len bits are reserved for argument material (END.X
-// neighbor selectors, etc.). Their sum must equal 128.
+// the PE; the next function_len bits identify the local behavior.
+// Constraints depend on behavior: CLASSIC requires the four lengths to
+// sum to 128 (argument_len holds the remainder); USID requires
+// function_len == 16, argument_len == 0, and a byte-aligned block_len,
+// with the container tail after the function left implicit.
 message Locator {
   string name = 1; // Operator-chosen locator name, e.g. "LOC1-CLASSIC".
   string prefix = 2; // IPv6 prefix, e.g. "fd00:1:1::/48".
@@ -57,8 +59,10 @@ message Locator {
 // available slot from [function_auto_start, function_auto_end]. When
 // set, any value inside the function_len bit width is accepted -- manual
 // allocations may sit outside the auto-allocator range so operator-
-// reserved low / high slots can still be claimed explicitly. Conflicts
-// (value already in use) surface as a per-entry error.
+// reserved low / high slots can still be claimed explicitly -- except
+// CSID 0 on USID locators, which is reserved as the container
+// terminator and rejected on every allocation path. Conflicts (value
+// already in use) surface as a per-entry error.
 message LocatorRef {
   string name = 1;
   optional uint32 function = 2;
