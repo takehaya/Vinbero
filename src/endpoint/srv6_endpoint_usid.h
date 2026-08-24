@@ -16,6 +16,15 @@
 // exhausted hop limit drops without ICMPv6 generation, matching the other
 // End behaviors here. A zero Argument means the container ended on this
 // node and processing falls through to classic End / End.X.
+//
+// Deployment constraint: a uN entry is a /48 and a uA entry a /64, so
+// every address inside that prefix except the SID itself carries a
+// non-zero Argument and is therefore treated as a container and shifted,
+// whatever its upper-layer protocol. The prefix has to be dedicated to
+// uSID. A loopback or interface address numbered inside it (the classic
+// SRv6 habit of putting the node address in the locator) stops being
+// reachable the moment the entry is installed, because its traffic is
+// rewritten and forwarded instead of delivered locally.
 // ========================================================================
 
 #define USID_F3216_BLOCK_BYTES 4
@@ -116,9 +125,24 @@ static __always_inline int usid_shift_loop(struct xdp_md *ctx,
 }
 
 // Forward on the shifted DA. dst == NULL looks up the DA itself (uN);
-// otherwise dst is the uA nexthop. Fail closed on anything but a
-// successful redirect: the DA was rewritten, so handing the packet to the
-// kernel would forward a half-processed container.
+// otherwise dst is the uA nexthop. Fail closed on a routing failure: the
+// DA was rewritten, so handing the packet to the kernel would forward a
+// half-processed container.
+//
+// NO_NEIGH is not a routing failure: the route exists and only its
+// neighbour is unresolved. XDP cannot emit a Neighbor Solicitation, so
+// dropping there black-holes the flow until unrelated traffic happens to
+// resolve the neighbour. uN hands those packets to the kernel instead,
+// which resolves the neighbour and forwards on the already-shifted DA --
+// the same thing classic End does, at the cost of one extra hop-limit
+// decrement in ip6_forward on that first packet.
+//
+// uA cannot do that: it forwards over a configured adjacency, and the
+// kernel would route by the DA instead, which is a different next hop (in
+// a lab where the shifted DA has no route at all, an ICMPv6 unreachable
+// comes back rather than the packet). So uA stays fail-closed on
+// NO_NEIGH; its next hop must be a resolved neighbour, exactly like
+// classic End.X.
 static __always_inline int usid_forward(struct xdp_md *ctx, void *dst,
                                         __u16 l3_offset)
 {
@@ -137,6 +161,10 @@ static __always_inline int usid_forward(struct xdp_md *ctx, void *dst,
                                     ctx->ingress_ifindex);
     if (r == FIB_RESULT_REDIRECT)
         return bpf_redirect(out_ifindex, 0);
+    // dst == NULL means the lookup key was the DA itself (uN), so the
+    // kernel repeats exactly this forwarding decision.
+    if (r == FIB_RESULT_NO_NEIGH && dst == NULL)
+        return XDP_PASS;
     return XDP_DROP;
 }
 
@@ -162,8 +190,24 @@ static __always_inline int process_end_un_core(
 
     // Argument == 0: the container ends here.
     if (dispatch_type == DISPATCH_NOSRH) {
-        // Plain (non-SR) traffic addressed inside the locator, e.g. a
-        // control-plane session to the node address; not ours to consume.
+        // No SRH and nothing left to consume, so this is classic End with
+        // no segment list: RFC 8986 Sec.4.1 hands the packet to the upper
+        // layer, i.e. to the kernel. Two shapes reach this point.
+        //
+        //   1. Zero shifts: the DA is the bare uN SID itself (plain
+        //      traffic addressed to the node, e.g. a control-plane
+        //      session). The packet is unmodified.
+        //   2. One or more shifts: the container listed only this node's
+        //      uSIDs, so the DA has been rewritten down to the bare uN
+        //      SID and the hop limit is lower.
+        //
+        // In both shapes the DA that the kernel sees is this node's own uN
+        // SID, which is why passing a rewritten packet up is safe here and
+        // nowhere else. It does assume the operator configured that
+        // address locally -- see the "uN SID must be the only local
+        // address inside the prefix" note in docs/loadmap.md. Without it
+        // the kernel routes the packet by the locator prefix instead of
+        // delivering it.
         return XDP_PASS;
     }
 
@@ -202,6 +246,9 @@ static __always_inline int process_end_ua_core(
         return usid_forward(ctx, aux->usid.nexthop, l3_offset);
     }
 
+    // Nothing was shifted on this path (uA returns above whenever it
+    // shifts), so the DA is the bare uA SID and the packet is unmodified:
+    // classic End.X with no segment list, handed to the kernel.
     if (dispatch_type == DISPATCH_NOSRH)
         return XDP_PASS;
 
