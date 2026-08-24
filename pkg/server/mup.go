@@ -107,7 +107,7 @@ func fillMUPSIDStructure(mr bgp.MUPRoute, locators *locator.Manager) bgp.SIDStru
 		LocatorBlockLen: loc.BlockLen,
 		LocatorNodeLen:  loc.NodeLen,
 		FunctionLen:     loc.FunctionLen,
-		ArgumentLen:     loc.ArgumentLen,
+		ArgumentLen:     loc.WireArgumentLen(),
 	}
 }
 

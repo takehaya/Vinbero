@@ -20,7 +20,7 @@ func makeClassic48(t *testing.T) Locator {
 func makeUSID48(t *testing.T) Locator {
 	t.Helper()
 	return Locator{
-		Name: "USID1", Prefix: netip.MustParsePrefix("fd00:0:0:aa::/48"),
+		Name: "USID1", Prefix: netip.MustParsePrefix("fd00:0:b001::/48"),
 		BlockLen: 32, NodeLen: 16, FunctionLen: 16, ArgumentLen: 0,
 		Behavior:          BehaviorUSID,
 		FunctionAutoStart: 1, FunctionAutoEnd: 0xFFFE,
@@ -70,6 +70,7 @@ func TestValidate_USID(t *testing.T) {
 		{"function-length", func(l *Locator) { l.FunctionLen = 15 }},
 		{"argument-length", func(l *Locator) { l.ArgumentLen = 64 }},
 		{"non-f3216-block", func(l *Locator) { l.BlockLen = 40; l.NodeLen = 8 }},
+		{"node-csid-zero", func(l *Locator) { l.Prefix = netip.MustParsePrefix("fd00:0:0::/48") }},
 		{"non-f3216-node", func(l *Locator) {
 			l.BlockLen = 24
 			l.NodeLen = 24
@@ -136,7 +137,7 @@ func TestBuildSID_USIDRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildSID(0xaa): %v", err)
 	}
-	if want := netip.MustParseAddr("fd00:0:0:aa::"); sid != want {
+	if want := netip.MustParseAddr("fd00:0:b001:aa::"); sid != want {
 		t.Errorf("BuildSID(0xaa) = %s, want %s", sid, want)
 	}
 }
@@ -144,8 +145,8 @@ func TestBuildSID_USIDRoundTrip(t *testing.T) {
 func TestParseSID_USIDRejectsNonZeroRemainder(t *testing.T) {
 	loc := makeUSID48(t)
 	for _, sid := range []netip.Addr{
-		netip.MustParseAddr("fd00:0:0:aa::1"),
-		netip.MustParseAddr("fd00:0:0:aa:8000::"),
+		netip.MustParseAddr("fd00:0:b001:aa::1"),
+		netip.MustParseAddr("fd00:0:b001:aa:8000::"),
 	} {
 		if _, ok, err := loc.ParseSID(sid); err != nil || ok {
 			t.Errorf("ParseSID(%s) = (ok=%v, err=%v), want (false, nil)", sid, ok, err)
@@ -158,7 +159,7 @@ func TestParseSID_USIDRejectsZeroFunction(t *testing.T) {
 	// The bare locator prefix carries CSID 0 (the container terminator),
 	// which BuildSID and the allocator refuse to mint; ParseSID must not
 	// report it as a valid service uSID either.
-	bare := netip.MustParseAddr("fd00:0:0::")
+	bare := netip.MustParseAddr("fd00:0:b001::")
 	if _, ok, err := loc.ParseSID(bare); err != nil || ok {
 		t.Errorf("ParseSID(%s) = (ok=%v, err=%v), want (false, nil)", bare, ok, err)
 	}

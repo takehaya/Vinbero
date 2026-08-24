@@ -119,6 +119,16 @@ func (l *Locator) Validate() error {
 		if l.ArgumentLen != 0 {
 			return fmt.Errorf("%w: uSID argument_len must be 0", ErrInvalidLocator)
 		}
+		// The 16 bits after the block are this node's own CSID; 0 is the
+		// container terminator (RFC 9800 Section 5), so a locator whose
+		// node field is zero would mint SIDs that start with the reserved
+		// end-of-container marker.
+		if l.Prefix.IsValid() && l.Prefix.Addr().Is6() {
+			p16 := l.Prefix.Masked().Addr().As16()
+			if readBits(p16[:], 32, 16) == 0 {
+				return fmt.Errorf("%w: uSID locator node CSID must be non-zero", ErrInvalidLocator)
+			}
+		}
 	default:
 		return fmt.Errorf("%w: unsupported behavior %v", ErrInvalidLocator, l.Behavior)
 	}
@@ -140,6 +150,18 @@ func (l *Locator) Validate() error {
 			ErrInvalidLocator, l.FunctionAutoEnd, l.FunctionAutoStart)
 	}
 	return nil
+}
+
+// WireArgumentLen returns the argument length to advertise in the RFC 9252
+// SID Structure. Classic locators carry it explicitly; uSID locators store
+// argument_len == 0 locally (the container tail is implicit), but on the
+// wire the Argument spans everything after LBL+LNL+FL so the four lengths
+// still sum to 128.
+func (l *Locator) WireArgumentLen() uint8 {
+	if l.Behavior == BehaviorUSID {
+		return uint8(128 - uint16(l.BlockLen) - uint16(l.NodeLen) - uint16(l.FunctionLen))
+	}
+	return l.ArgumentLen
 }
 
 // MaxFunction returns the largest value representable in FunctionLen bits.
