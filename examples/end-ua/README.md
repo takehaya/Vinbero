@@ -1,8 +1,17 @@
-# uA (NEXT-C-SID) Example
+# end-ua — uA (NEXT-C-SID)
 
-RFC 9800 の NEXT-C-SID flavor による uA を検証します。F3216 の SID 構造を使い、locator block は 32 bit の fd00:aaaa、uSID は 16 bit です。uA は End.X の NEXT-C-SID 版で、node と function をまとめた 32 bit を 1 回の実行で消費し、shift 後のパケットを FIB でなく設定した adjacency へ転送します。router2 の uA を Linux kernel の seg6local next-csid flavor と Vinbero XDP の両方で実行し、同じトポロジで到達性を突き合わせます。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-## トポロジ
+Exercises uA, the NEXT-C-SID flavor of End.X (RFC 9800), with the F3216 SID
+structure: a 32-bit locator block (fd00:aaaa) and 16-bit uSIDs. uA consumes
+node and function together -- 32 bits per execution -- and forwards over a
+configured adjacency instead of a FIB lookup on the shifted DA. router2's uA
+is served first by the Linux kernel's seg6local next-csid flavor and then by
+Vinbero XDP, so the two are compared on the same topology.
+
+See [`docs/design/ja/usid.md`](../../docs/design/ja/usid.md) for the design.
+
+## Topology
 
 ```mermaid
 graph LR
@@ -12,24 +21,30 @@ graph LR
     router3 --- host2
 ```
 
-役割は次のとおりです。
+- router1 pushes the forward container with Linux seg6 encap, and terminates
+  the return direction on fd00:aaaa:b001:d001::/128 (End.DX4)
+- router2 is the uA. It holds one /64 per adjacency:
+  fd00:aaaa:b002:a003::/64 forwards to router3 and fd00:aaaa:b002:a001::/64
+  to router1. Phase 1 serves them from Linux native next-csid, phase 2 from
+  Vinbero END_UA
+- router3 pushes the return container with Linux seg6 encap, and terminates
+  the forward direction on fd00:aaaa:b003:d004::/128 (End.DX4)
 
-- router1 は Linux の seg6 encap で forward 方向の container を付与し、return 方向の terminal SID fd00:aaaa:b001:d001::/128 を End.DX4 で受けます
-- router2 は uA です。adjacency ごとに /64 の SID を持ち、fd00:aaaa:b002:a003::/64 は router3 へ、fd00:aaaa:b002:a001::/64 は router1 へ転送します。Phase 1 は Linux native の next-csid flavor、Phase 2 は Vinbero の END_UA で同じ SID を提供します
-- router3 は Linux の seg6 encap で return 方向の container を付与し、forward 方向の terminal SID fd00:aaaa:b003:d004::/128 を End.DX4 で受けます
+The containers are fd00:aaaa:b002:a003:b003:d004:: forward and
+fd00:aaaa:b002:a001:b001:d001:: return.
 
-container は forward が fd00:aaaa:b002:a003:b003:d004::、return が fd00:aaaa:b002:a001:b001:d001:: です。
+## The Linux side
 
-## Linux 側の設定について
+seg6local consumes lblen + nflen bits per execution, so the uA shape is
+`lblen 32 nflen 32`: node and function go together. `nflen 16` leaves the
+function CSID in the DA, which is the uN shape.
 
-Linux の seg6local は 1 回の実行で lblen + nflen bit を消費します。uA は node と function を同時に消費するので、F3216 では `lblen 32 nflen 32` を指定します。`nflen 16` は uN の形で、function CSID が DA に残ります。
+## Requirements
 
-## 必要条件
+- Linux kernel 6.6 or later (seg6local End.X next-csid flavor)
+- iproute2 6.0 or later
 
-- Linux kernel 6.6 以上 (seg6local End.X の next-csid flavor)
-- iproute2 6.0 以上
-
-## 実行方法
+## Usage
 
 ```bash
 sudo ./setup.sh
@@ -37,18 +52,25 @@ sudo ./test.sh
 sudo ./teardown.sh
 ```
 
-## 検証内容
+## What is verified
 
-1. Linux native の next-csid flavor で host1 と host2 の双方向 ping が通ることを確認します
-2. Linux native の local route を削除し、Vinbero を起動して同じ /64 に END_UA を登録し、双方向 ping が通ることを確認します
+1. Both directions ping through the Linux native next-csid flavor
+2. The native local routes are removed, Vinbero registers END_UA on the same
+   two /64s, and both directions ping again
 
-router2 は terminal SID への経路を一切持たないので、uA が設定した nexthop を使わずに shift 後の DA を FIB で引いた場合は転送できません。phase 2 の ping が通ること自体が adjacency 転送の確認になります。
+router2 has no route to either terminal SID, so a uA that ignored its
+configured nexthop and looked the shifted DA up in the FIB could not forward
+at all. Phase 2 passing is therefore the evidence that uA uses its adjacency.
 
-phase 2 は neighbor table を flush してから traffic を流します。uA は FIB が NO_NEIGH を返したパケットを kernel に渡して neighbor を解決させるので、事前の NDP warm up なしで通信が立ち上がります。
+Unlike uN, uA stays fail-closed when the FIB answers NO_NEIGH: handing the
+packet up would let the kernel route it by the DA, which is a different next
+hop. The test resolves the neighbours before sending traffic, exactly as
+classic End.X requires.
 
-## 制約
+## Constraints
 
-- uA の nexthop は IPv6 アドレスのみを受け付けます。FIB lookup の context は ingress ifindex で、既存の End.X と同じです
-- trigger prefix は /64 で、function CSID に 0 は使えません。prefix 内のアドレスは uA SID 自身を除いてすべて container とみなされます
-
-設計の全体像は [uSID (NEXT-C-SID) の uN と uA](../../docs/design/ja/usid.md) にあります。
+- The uA nexthop must be an IPv6 address. The FIB lookup context is the
+  ingress ifindex, same as classic End.X
+- The trigger prefix is a /64 and the function CSID cannot be 0. Every
+  address inside the prefix except the uA SID itself is treated as a
+  container
