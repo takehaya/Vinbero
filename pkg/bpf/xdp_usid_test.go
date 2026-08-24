@@ -208,7 +208,7 @@ func TestXDPProgEndUa(t *testing.T) {
 	// uA lives at block + node + function (/64), the shape the API enforces.
 	h.createSidFunctionUsid("fd00:aaaa:ffff:cccc::/64", actionEndUa, 0, nexthop, usidBlockLenBytes)
 
-	t.Run("shift forwards toward the aux nexthop", func(t *testing.T) {
+	t.Run("shift consumes node+function and forwards toward the aux nexthop", func(t *testing.T) {
 		pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc:dddd::"), 64)
 		if err != nil {
 			t.Fatal(err)
@@ -217,9 +217,23 @@ func TestXDPProgEndUa(t *testing.T) {
 		if ret != XDP_DROP {
 			t.Errorf("expected fail-closed XDP_DROP, got %d", ret)
 		}
-		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:cccc:dddd::"); !got.Equal(want) {
+		// uA's Argument starts after /64, so one shift consumes 32 bits.
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:dddd::"); !got.Equal(want) {
 			t.Errorf("DA = %v, want %v (shifted)", got, want)
 		}
+	})
+
+	t.Run("argument zero falls through to classic End.X", func(t *testing.T) {
+		segs := []net.IP{net.ParseIP("fd00:9:9::1"), net.ParseIP("fd00:aaaa:ffff:cccc::")}
+		pkt, err := buildSRv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc::"), segs, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_PASS {
+			t.Errorf("expected XDP_PASS (End.X FIB miss on lo), got %d", ret)
+		}
+		verifyDAAndSL(t, out, "fd00:9:9::1", 1)
 	})
 }
 

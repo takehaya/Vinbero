@@ -7,10 +7,11 @@
 // ========================================================================
 // NEXT-C-SID endpoint behaviors: uN (End) and uA (End.X), RFC 9800 Sec.4.1
 // and Sec.4.2, F3216 SID structure only (32-bit locator block, 16-bit
-// uSIDs). The active uSID sits at DA bytes [4..5]; the Argument is DA
-// bytes [6..15]. While the Argument is non-zero the endpoint shifts it 16
-// bits toward the block, zero-fills the tail, and forwards on the updated
-// DA without touching the SRH. The hop limit is decremented once per
+// uSIDs). The Argument is everything after the matched SID: bytes [6..15]
+// for uN (/48) and bytes [8..15] for uA (/64, node + function). While the
+// Argument is non-zero the endpoint shifts it toward the block (16 bits
+// for uN, 32 bits for uA), zero-fills the tail, and forwards on the
+// updated DA without touching the SRH. The hop limit is decremented once per
 // logical uN/uA execution (RFC 9800 Sec.4.1.1 pseudocode N02-N08); an
 // exhausted hop limit drops without ICMPv6 generation, matching the other
 // End behaviors here. A zero Argument means the container ended on this
@@ -18,29 +19,46 @@
 // ========================================================================
 
 #define USID_F3216_BLOCK_BYTES 4
+// Argument offsets within the DA for the two supported SID shapes.
+#define USID_UN_ARG_OFF 6   // uN: after LBL(4) + LNL(2)
+#define USID_UA_ARG_OFF 8   // uA: after LBL(4) + LNL(2) + FL(2)
 // An F3216 container carries at most 6 uSIDs, so at most 5 shifts can
 // resolve to this same node before the Argument must hit zero.
 #define USID_SHIFT_MAX 5
 
-// F3216 Argument (DA bytes [6..15]) == 0?
-static __always_inline int usid_arg_is_zero(const __u8 *da)
+// The Argument starts where the matched SID ends: byte 6 for uN
+// (LBL+LNL = /48) and byte 8 for uA (LBL+LNL+FL = /64). arg_off is a
+// compile-time constant at every call site so the memcpy lengths fold.
+static __always_inline int usid_arg_is_zero(const __u8 *da, int arg_off)
 {
     __u64 hi;
-    __u16 lo;
-    __builtin_memcpy(&hi, da + 6, sizeof(hi));
-    __builtin_memcpy(&lo, da + 14, sizeof(lo));
+    __u16 lo = 0;
+    if (arg_off == USID_UA_ARG_OFF) {
+        __builtin_memcpy(&hi, da + USID_UA_ARG_OFF, sizeof(hi));
+    } else {
+        __builtin_memcpy(&hi, da + USID_UN_ARG_OFF, sizeof(hi));
+        __builtin_memcpy(&lo, da + 14, sizeof(lo));
+    }
     return (hi | lo) == 0;
 }
 
-// Shift the Argument 16 bits toward the block and zero-fill the tail
-// (RFC 9800 Sec.4.1.1 N04-N06 for LNFL=16).
-static __always_inline void usid_shift(__u8 *da)
+// Shift the whole Argument toward the block and zero-fill the vacated
+// LNFL tail (RFC 9800 Sec.4.1.1 / Sec.4.2.1: uN consumes 16 bits, uA
+// consumes its node + function, 32 bits).
+static __always_inline void usid_shift(__u8 *da, int arg_off)
 {
-    __u8 tmp[10];
-    __builtin_memcpy(tmp, da + 6, sizeof(tmp));
-    __builtin_memcpy(da + 4, tmp, sizeof(tmp));
-    da[14] = 0;
-    da[15] = 0;
+    if (arg_off == USID_UA_ARG_OFF) {
+        __u8 tmp[8];
+        __builtin_memcpy(tmp, da + USID_UA_ARG_OFF, sizeof(tmp));
+        __builtin_memcpy(da + 4, tmp, sizeof(tmp));
+        __builtin_memset(da + 12, 0, 4);
+    } else {
+        __u8 tmp[10];
+        __builtin_memcpy(tmp, da + USID_UN_ARG_OFF, sizeof(tmp));
+        __builtin_memcpy(da + 4, tmp, sizeof(tmp));
+        da[14] = 0;
+        da[15] = 0;
+    }
 }
 
 // Shift loop shared by uN and uA. Consecutive uSIDs of the SAME entry
@@ -58,19 +76,20 @@ static __always_inline void usid_shift(__u8 *da)
 //  -1  drop (hop limit exhausted, or the shift landed on a different
 //      local SID that cannot be re-dispatched from here)
 static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h,
-                                           const struct sid_function_entry *entry)
+                                           const struct sid_function_entry *entry,
+                                           int arg_off)
 {
     __u8 *da = (__u8 *)&ip6h->daddr;
 
     for (int i = 0; i < USID_SHIFT_MAX; i++) {
-        if (usid_arg_is_zero(da))
+        if (usid_arg_is_zero(da, arg_off))
             return 0;
 
         if (ip6h->hop_limit <= 1)
             return -1;
         ip6h->hop_limit--;
 
-        usid_shift(da);
+        usid_shift(da, arg_off);
 
         struct lpm_key_v6 key = { .prefixlen = 128 };
         __builtin_memcpy(key.addr, da, IPV6_ADDR_LEN);
@@ -86,7 +105,7 @@ static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h,
     // An F3216 container holds up to 6 uSIDs of this same entry: after the
     // 5th shift the Argument must be zero, which is the classic End
     // fall-through, not a drop.
-    return usid_arg_is_zero(da) ? 0 : -1;
+    return usid_arg_is_zero(da, arg_off) ? 0 : -1;
 }
 
 // Forward on the shifted DA. dst == NULL looks up the DA itself (uN);
@@ -127,7 +146,7 @@ static __always_inline int process_end_un_core(
     if ((void *)(ip6h + 1) > data_end)
         return XDP_DROP;
 
-    int r = usid_shift_loop(ip6h, entry);
+    int r = usid_shift_loop(ip6h, entry, USID_UN_ARG_OFF);
     if (r < 0)
         return XDP_DROP;
     if (r == 1)
@@ -162,7 +181,7 @@ static __always_inline int process_end_ua_core(
     if ((void *)(ip6h + 1) > data_end)
         return XDP_DROP;
 
-    int r = usid_shift_loop(ip6h, entry);
+    int r = usid_shift_loop(ip6h, entry, USID_UA_ARG_OFF);
     if (r < 0)
         return XDP_DROP;
     if (r == 1)
