@@ -63,12 +63,6 @@ run ip netns exec "$ns_router3" ip route add 172.0.1.0/24 encap seg6 mode encap 
 run ip netns exec "$ns_router3" ip -6 route add fd00:aaaa:b002::/48 via fc00:23::2 dev "$veth_rt3_rt2"
 run ip netns exec "$ns_router3" ip -6 route add local fd00:aaaa:b003:d004::/128 encap seg6local action End.DX4 nh4 172.0.2.1 dev "$veth_rt3_h2"
 
-# Pre-resolve NDP from router2 to both neighbors. The XDP uN shift path is
-# fail-closed: bpf_fib_lookup returning no-neighbor drops instead of passing
-# to the kernel, so the neighbor entries must exist before phase 2 traffic.
-run ip netns exec "$ns_router2" ping -6 -c 1 -W 2 fc00:23::1 > /dev/null
-run ip netns exec "$ns_router2" ping -6 -c 1 -W 2 fc00:12::1 > /dev/null
-
 echo ""
 echo "=========================================="
 echo "SRv6 uN (NEXT-C-SID) Setup Complete!"

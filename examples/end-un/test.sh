@@ -71,10 +71,12 @@ ip netns exec "$ns_router2" ${VINBERO_BIN} -s http://127.0.0.1:8087 \
   sid create --trigger-prefix fd00:aaaa:b002::/48 --action END_UN
 print_success "SID function registered"
 
-# The XDP shift path is fail-closed on unresolved neighbors, so re-warm NDP
-# right before the traffic (kernel entries may have gone stale).
-ip netns exec "$ns_router2" ping -6 -c 1 -W 2 fc00:23::1 > /dev/null 2>&1 || true
-ip netns exec "$ns_router2" ping -6 -c 1 -W 2 fc00:12::1 > /dev/null 2>&1 || true
+# Start from a cold neighbor table on purpose. bpf_fib_lookup answers
+# NO_NEIGH until NDP resolves, and the uN path hands those packets to the
+# kernel rather than dropping them (XDP cannot send a Neighbor
+# Solicitation). Traffic below therefore has to come up on its own; if uN
+# ever goes back to dropping NO_NEIGH, this is what catches it.
+ip netns exec "$ns_router2" ip -6 neigh flush all
 sleep 1
 
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Vinbero XDP uN)"
