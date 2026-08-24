@@ -172,19 +172,3 @@ func TestBuildSID_USIDZeroReserved(t *testing.T) {
 	}
 }
 
-func TestWireArgumentLen(t *testing.T) {
-	classic := makeClassic48(t)
-	if got := classic.WireArgumentLen(); got != classic.ArgumentLen {
-		t.Errorf("classic WireArgumentLen = %d, want %d", got, classic.ArgumentLen)
-	}
-	usid := makeUSID48(t)
-	// The advertised SID Structure must sum to 128 bits even though the
-	// uSID locator stores argument_len == 0 locally.
-	if got := usid.WireArgumentLen(); got != 64 {
-		t.Errorf("uSID WireArgumentLen = %d, want 64", got)
-	}
-	total := uint16(usid.BlockLen) + uint16(usid.NodeLen) + uint16(usid.FunctionLen) + uint16(usid.WireArgumentLen())
-	if total != 128 {
-		t.Errorf("advertised lengths sum to %d, want 128", total)
-	}
-}

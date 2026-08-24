@@ -152,18 +152,6 @@ func (l *Locator) Validate() error {
 	return nil
 }
 
-// WireArgumentLen returns the argument length to advertise in the RFC 9252
-// SID Structure. Classic locators carry it explicitly; uSID locators store
-// argument_len == 0 locally (the container tail is implicit), but on the
-// wire the Argument spans everything after LBL+LNL+FL so the four lengths
-// still sum to 128.
-func (l *Locator) WireArgumentLen() uint8 {
-	if l.Behavior == BehaviorUSID {
-		return uint8(128 - uint16(l.BlockLen) - uint16(l.NodeLen) - uint16(l.FunctionLen))
-	}
-	return l.ArgumentLen
-}
-
 // MaxFunction returns the largest value representable in FunctionLen bits.
 func (l *Locator) MaxFunction() uint32 {
 	return uint32((uint64(1) << l.FunctionLen) - 1)

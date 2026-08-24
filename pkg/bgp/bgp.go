@@ -595,7 +595,9 @@ type MUPRoute struct {
 // SIDStructure is the SRv6 SID layout signalled by the SRv6 SID Structure
 // Sub-Sub-TLV (RFC 9252 §3.2.1.1). All fields are bit lengths except
 // TranspositionOffset (bit position). LocatorBlockLen + LocatorNodeLen +
-// FunctionLen + ArgumentLen must equal 128.
+// FunctionLen + ArgumentLen is at most 128; ArgumentLen covers only the
+// behavior's actual argument, so a uSID F3216 service SID is 32/16/16/0
+// with the container tail outside the structure.
 type SIDStructure struct {
 	LocatorBlockLen     uint8
 	LocatorNodeLen      uint8
