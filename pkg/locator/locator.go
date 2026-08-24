@@ -186,8 +186,15 @@ func (l *Locator) ParseSID(sid netip.Addr) (function uint32, ok bool, err error)
 	b16 := sid.As16()
 	prefixBits := uint(l.BlockLen) + uint(l.NodeLen)
 	v := readBits(b16[:], prefixBits, uint(l.FunctionLen))
-	if l.Behavior == BehaviorUSID && !bitsZero(b16[:], prefixBits+uint(l.FunctionLen), 128) {
-		return 0, false, nil
+	if l.Behavior == BehaviorUSID {
+		if !bitsZero(b16[:], prefixBits+uint(l.FunctionLen), 128) {
+			return 0, false, nil
+		}
+		// CSID 0 is the container terminator, so the bare locator prefix
+		// is not a service uSID this locator could have minted.
+		if v == 0 {
+			return 0, false, nil
+		}
 	}
 	return uint32(v), true, nil
 }

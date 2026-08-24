@@ -148,6 +148,17 @@ func TestParseSID_USIDRejectsNonZeroRemainder(t *testing.T) {
 	}
 }
 
+func TestParseSID_USIDRejectsZeroFunction(t *testing.T) {
+	loc := makeUSID48(t)
+	// The bare locator prefix carries CSID 0 (the container terminator),
+	// which BuildSID and the allocator refuse to mint; ParseSID must not
+	// report it as a valid service uSID either.
+	bare := netip.MustParseAddr("fd00:0:0::")
+	if _, ok, err := loc.ParseSID(bare); err != nil || ok {
+		t.Errorf("ParseSID(%s) = (ok=%v, err=%v), want (false, nil)", bare, ok, err)
+	}
+}
+
 func TestBuildSID_USIDZeroReserved(t *testing.T) {
 	loc := makeUSID48(t)
 	if _, err := loc.BuildSID(0); !errors.Is(err, ErrFunctionReserved) {
