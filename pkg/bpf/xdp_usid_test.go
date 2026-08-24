@@ -6,14 +6,13 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
 
-// uN / uA (NEXT-C-SID, RFC 9800) data-plane tests. Numeric action values
-// mirror srv6_local_action; the proto enum grows them in the control-plane
-// change set.
+// uN / uA (NEXT-C-SID, RFC 9800) data-plane tests.
 const (
-	actionEndUn = uint8(26)
-	actionEndUa = uint8(27)
+	actionEndUn = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN)
+	actionEndUa = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA)
 
 	usidBlockLenBytes = uint8(4) // F3216
 )
@@ -278,21 +277,27 @@ func TestXDPProgEndUnFullContainer(t *testing.T) {
 	}
 }
 
-func TestXDPProgEndUnShiftIntoOtherEntryDrops(t *testing.T) {
+func TestXDPProgEndUnShiftIntoOtherEntryRedispatches(t *testing.T) {
 	h := newXDPTestHelper(t)
+	// Two distinct uN entries (separate aux slots): a container [uN-A, uN-B]
+	// on the same node must hand off from A's execution to B's, carrying
+	// B's entry/aux context through a fresh tail call.
 	h.createSidFunctionUsid("fd00:aaaa:bbbb::/48", actionEndUn, 0, [16]byte{}, usidBlockLenBytes)
-	// A different local entry right where the shift lands: the uN target
-	// cannot re-dispatch it with its own action/aux, so it must fail closed
-	// rather than blind-shift through it.
-	h.createSidFunction("fd00:aaaa:cccc::/48", actionEnd)
+	h.createSidFunctionUsid("fd00:aaaa:cccc::/48", actionEndUn, 0, [16]byte{}, usidBlockLenBytes)
 
 	pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:bbbb:cccc:dddd::"), 64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ret, _ := h.run(pkt)
+	ret, out := h.run(pkt)
 	if ret != XDP_DROP {
-		t.Errorf("expected XDP_DROP, got %d", ret)
+		t.Errorf("expected fail-closed XDP_DROP after both shifts, got %d", ret)
+	}
+	if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:dddd::"); !got.Equal(want) {
+		t.Errorf("DA = %v, want %v (shift at uN-A, re-dispatch, shift at uN-B)", got, want)
+	}
+	if hl := outPktHopLimit(t, out); hl != 62 {
+		t.Errorf("hop limit = %d, want 62 (two logical uN hops)", hl)
 	}
 }
 

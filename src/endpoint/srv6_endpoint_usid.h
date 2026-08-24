@@ -5,8 +5,8 @@
 #include "endpoint/srv6_endpoint_basic.h"
 
 // ========================================================================
-// NEXT-C-SID endpoint behaviors: uN (End) and uA (End.X), RFC 9800 Sec.4.1
-// and Sec.4.2, F3216 SID structure only (32-bit locator block, 16-bit
+// NEXT-C-SID endpoint behaviors: uN (End, RFC 9800 Sec.4.1.1) and uA
+// (End.X, RFC 9800 Sec.4.1.2), F3216 SID structure only (32-bit locator block, 16-bit
 // uSIDs). The Argument is everything after the matched SID: bytes [6..15]
 // for uN (/48) and bytes [8..15] for uA (/64, node + function). While the
 // Argument is non-zero the endpoint shifts it toward the block (16 bits
@@ -43,7 +43,7 @@ static __always_inline int usid_arg_is_zero(const __u8 *da, int arg_off)
 }
 
 // Shift the whole Argument toward the block and zero-fill the vacated
-// LNFL tail (RFC 9800 Sec.4.1.1 / Sec.4.2.1: uN consumes 16 bits, uA
+// LNFL tail (RFC 9800 Sec.4.1.1 / Sec.4.1.2: uN consumes 16 bits, uA
 // consumes its node + function, 32 bits).
 static __always_inline void usid_shift(__u8 *da, int arg_off)
 {
@@ -62,22 +62,24 @@ static __always_inline void usid_shift(__u8 *da, int arg_off)
 }
 
 // uN shift loop (uA shifts exactly once and forwards over its
-// adjacency instead). Consecutive uSIDs of the SAME entry
-// (a container listing this node's uN twice) are consumed in place by
-// re-matching the shifted DA against sid_function_map, because XDP cannot
-// re-enter itself on the same packet and forwarding to ourselves would
-// hand the mutated DA to the kernel. A shift that lands on any OTHER
-// local entry (a different uN/uA, or a terminal SID) would need that
-// entry's action and aux to be honored, which this tail-call target
-// cannot re-dispatch, so it fails closed instead of silently applying
-// the wrong behavior.
+// adjacency instead). RFC 9800 Sec.4.1.1 submits the shifted DA to the
+// IPv6 FIB; on this node that FIB step can resolve to another local SID,
+// which XDP cannot reach by forwarding to itself, so local re-matches are
+// handled directly: the SAME entry keeps shifting in place, and a
+// DIFFERENT local entry (another uN, or a terminal behavior placed as the
+// next CSID) is re-dispatched to its own tail-call slot with its own
+// entry/aux context.
 // Returns:
 //   1  shifted; caller forwards on the updated DA
 //   0  Argument is zero; caller falls through to classic End
-//  -1  drop (hop limit exhausted, or the shift landed on a different
-//      local SID that cannot be re-dispatched from here)
-static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h,
-                                           const struct sid_function_entry *entry)
+//  -1  drop (hop limit exhausted, or the re-dispatch tail call failed)
+// Does not return when the re-dispatch tail call succeeds.
+static __always_inline int usid_shift_loop(struct xdp_md *ctx,
+                                           struct ipv6hdr *ip6h,
+                                           const struct sid_function_entry *entry,
+                                           __u8 dispatch_type,
+                                           __u8 inner_proto,
+                                           __u16 l3_offset)
 {
     const int arg_off = USID_UN_ARG_OFF;
     __u8 *da = (__u8 *)&ip6h->daddr;
@@ -99,8 +101,12 @@ static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h,
         if (!next)
             return 1;
         if (next->action != entry->action ||
-            next->aux_index != entry->aux_index)
-            return -1;
+            next->aux_index != entry->aux_index) {
+            if (tailcall_ctx_write_sid(next, l3_offset, dispatch_type,
+                                       inner_proto, next->action) == 0)
+                bpf_tail_call(ctx, &sid_endpoint_progs, next->action);
+            return -1; // empty slot or ctx write failure: fail closed
+        }
         // The same uN entry again: keep shifting.
     }
     // An F3216 container holds up to 6 uSIDs of this same entry: after the
@@ -139,6 +145,7 @@ static __always_inline int process_end_un_core(
     struct xdp_md *ctx,
     struct sid_function_entry *entry,
     __u8 dispatch_type,
+    __u8 inner_proto,
     __u16 l3_offset)
 {
     void *data = (void *)(long)ctx->data;
@@ -147,7 +154,7 @@ static __always_inline int process_end_un_core(
     if ((void *)(ip6h + 1) > data_end)
         return XDP_DROP;
 
-    int r = usid_shift_loop(ip6h, entry);
+    int r = usid_shift_loop(ctx, ip6h, entry, dispatch_type, inner_proto, l3_offset);
     if (r < 0)
         return XDP_DROP;
     if (r == 1)
@@ -185,7 +192,7 @@ static __always_inline int process_end_ua_core(
     // uA never re-consumes in place: every execution is one shift followed
     // by an End.X forward over the configured adjacency, so a container
     // listing the same uA twice must traverse the adjacency twice
-    // (RFC 9800 Sec.4.2.1), unlike uN's FIB-to-self problem.
+    // (RFC 9800 Sec.4.1.2), unlike uN's FIB-to-self problem.
     __u8 *da = (__u8 *)&ip6h->daddr;
     if (!usid_arg_is_zero(da, USID_UA_ARG_OFF)) {
         if (ip6h->hop_limit <= 1)

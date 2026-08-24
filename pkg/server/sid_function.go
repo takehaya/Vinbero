@@ -517,16 +517,15 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			if p.Bits() != int(blockLen)+32 {
 				return nil, nil, fmt.Errorf("uA trigger_prefix must be /%d (block + node + function), got /%d", blockLen+32, p.Bits())
 			}
-			// ParseIPv6("") yields the zero address, so the empty string
-			// must be rejected explicitly or uA would silently install a
-			// :: nexthop.
-			if sidFunc.Nexthop == "" {
-				return nil, nil, fmt.Errorf("uA requires nexthop")
+			// The uA nexthop feeds an AF_INET6 FIB lookup, so it must be a
+			// genuine IPv6 address: the empty string (zero address) and
+			// IPv4 literals (which net.ParseIP would map to ::ffff:0:0/96)
+			// are both rejected.
+			nh, err := netip.ParseAddr(sidFunc.Nexthop)
+			if err != nil || !nh.Is6() || nh.Is4In6() {
+				return nil, nil, fmt.Errorf("uA requires an IPv6 nexthop, got %q", sidFunc.Nexthop)
 			}
-			nexthop, err = bpf.ParseIPv6(sidFunc.Nexthop)
-			if err != nil {
-				return nil, nil, fmt.Errorf("uA requires nexthop: %w", err)
-			}
+			nexthop = nh.As16()
 		} else {
 			if p.Bits() != int(blockLen)+16 {
 				return nil, nil, fmt.Errorf("uN trigger_prefix must be /%d (block + node), got /%d", blockLen+16, p.Bits())

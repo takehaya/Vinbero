@@ -107,8 +107,8 @@ const (
 	Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2M        Srv6LocalAction = 23 // End.DT2M (L2 table flooding for BUM, RFC 8986 Sec.4.12)
 	Srv6LocalAction_SRV6_LOCAL_ACTION_END_AD          Srv6LocalAction = 24 // End.AD (dynamic proxy, draft-ietf-spring-srv6-service-programming)
 	Srv6LocalAction_SRV6_LOCAL_ACTION_END_AN          Srv6LocalAction = 25 // End.AN (SR-aware service, draft-ietf-spring-srv6-service-programming)
-	Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN          Srv6LocalAction = 26 // uN: End with NEXT-C-SID (RFC 9800 Sec.4.1)
-	Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA          Srv6LocalAction = 27 // uA: End.X with NEXT-C-SID (RFC 9800 Sec.4.2)
+	Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN          Srv6LocalAction = 26 // uN: End with NEXT-C-SID (RFC 9800 Sec.4.1.1)
+	Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA          Srv6LocalAction = 27 // uA: End.X with NEXT-C-SID (RFC 9800 Sec.4.1.2)
 )
 
 // Enum value maps for Srv6LocalAction.

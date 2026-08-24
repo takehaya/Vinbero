@@ -359,7 +359,8 @@ int tailcall_endpoint_end_un(struct xdp_md *ctx)
         TAILCALL_RETURN(ctx,XDP_DROP);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
-                                    &tctx->sid_entry, tctx->dispatch_type);
+                                    &tctx->sid_entry, tctx->dispatch_type,
+                                    tctx->inner_proto);
     TAILCALL_RETURN(ctx,action);
 }
 
