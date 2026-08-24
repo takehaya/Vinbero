@@ -12,10 +12,9 @@ option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 // advertise can encode the SRv6 SID Structure sub-sub-TLV (RFC 9252)
 // directly from the locator's metadata.
 //
-// Phase 1 implements Classic SRv6 (RFC 8986). uSID locators
-// (RFC 9800) are accepted at the API surface but reject SID build /
-// parse with Unimplemented; full support arrives in Phase 2 of the
-// GoBGP integration plan.
+// Classic SRv6 (RFC 8986) and uSID (RFC 9800, F3216) locators are both
+// supported: uSID locators build and parse 16-bit service uSIDs with
+// CSID 0 reserved as the container terminator.
 service LocatorService {
   rpc LocatorCreate(LocatorCreateRequest) returns (LocatorCreateResponse);
   rpc LocatorDelete(LocatorDeleteRequest) returns (LocatorDeleteResponse);
