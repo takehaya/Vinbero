@@ -223,6 +223,26 @@ func TestXDPProgEndUa(t *testing.T) {
 		}
 	})
 
+	t.Run("consecutive same uA shifts once per execution", func(t *testing.T) {
+		// Container [uA, uA]: this execution must do exactly one shift and
+		// forward over the adjacency; the second uA is consumed on re-entry,
+		// not looped locally.
+		pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc:ffff:cccc::"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Errorf("expected fail-closed XDP_DROP, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:ffff:cccc::"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (single shift)", got, want)
+		}
+		if hl := outPktHopLimit(t, out); hl != 63 {
+			t.Errorf("hop limit = %d, want 63 (exactly one uA execution)", hl)
+		}
+	})
+
 	t.Run("argument zero falls through to classic End.X", func(t *testing.T) {
 		segs := []net.IP{net.ParseIP("fd00:9:9::1"), net.ParseIP("fd00:aaaa:ffff:cccc::")}
 		pkt, err := buildSRv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc::"), segs, 1)

@@ -689,3 +689,59 @@ func TestProtoToEntry_ProxyFieldScope(t *testing.T) {
 		}
 	})
 }
+
+// TestProtoToEntry_USID verifies the uN/uA API contract: prefix shapes,
+// nexthop requirements, block length bounds, and field scoping.
+func TestProtoToEntry_USID(t *testing.T) {
+	s := newProtoToEntryServer()
+	u32 := func(v uint32) *uint32 { return &v }
+
+	tests := []struct {
+		name    string
+		sf      *v1.SidFunction
+		wantErr string // empty = success
+	}{
+		{"uN /48 default block", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48"}, ""},
+		{"uN explicit block 32", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", UsidBlockLen: u32(32)}, ""},
+		{"uN non-32 block rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", UsidBlockLen: u32(48)}, "not supported"},
+		{"uN wrong prefix width", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/64"}, "must be /48"},
+		{"uN rejects nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", Nexthop: "fe80::1"}, "does not take a nexthop"},
+		{"uA /64 with nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "fe80::1"}, ""},
+		{"uA wrong prefix width", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002::/48", Nexthop: "fe80::1"}, "must be /64"},
+		{"uA missing nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64"}, "requires nexthop"},
+		{"usid_block_len on wrong action", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END, TriggerPrefix: "fd00:1::1/128", UsidBlockLen: u32(32)}, "only valid for END_UN / END_UA"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry, aux, err := s.protoToEntry(tt.sf)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if entry.Action != uint8(tt.sf.Action) {
+				t.Errorf("action = %d, want %d", entry.Action, tt.sf.Action)
+			}
+			if aux == nil {
+				t.Fatalf("uN/uA must carry a usid aux entry")
+			}
+			if _, blockLenBytes := bpf.SidAuxUsidData(aux); blockLenBytes != 4 {
+				t.Errorf("block_len_bytes = %d, want 4", blockLenBytes)
+			}
+		})
+	}
+}

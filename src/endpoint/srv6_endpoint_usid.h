@@ -61,7 +61,8 @@ static __always_inline void usid_shift(__u8 *da, int arg_off)
     }
 }
 
-// Shift loop shared by uN and uA. Consecutive uSIDs of the SAME entry
+// uN shift loop (uA shifts exactly once and forwards over its
+// adjacency instead). Consecutive uSIDs of the SAME entry
 // (a container listing this node's uN twice) are consumed in place by
 // re-matching the shifted DA against sid_function_map, because XDP cannot
 // re-enter itself on the same packet and forwarding to ourselves would
@@ -72,13 +73,13 @@ static __always_inline void usid_shift(__u8 *da, int arg_off)
 // the wrong behavior.
 // Returns:
 //   1  shifted; caller forwards on the updated DA
-//   0  Argument is zero; caller falls through to classic End / End.X
+//   0  Argument is zero; caller falls through to classic End
 //  -1  drop (hop limit exhausted, or the shift landed on a different
 //      local SID that cannot be re-dispatched from here)
 static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h,
-                                           const struct sid_function_entry *entry,
-                                           int arg_off)
+                                           const struct sid_function_entry *entry)
 {
+    const int arg_off = USID_UN_ARG_OFF;
     __u8 *da = (__u8 *)&ip6h->daddr;
 
     for (int i = 0; i < USID_SHIFT_MAX; i++) {
@@ -100,7 +101,7 @@ static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h,
         if (next->action != entry->action ||
             next->aux_index != entry->aux_index)
             return -1;
-        // The same uN/uA entry again: keep shifting.
+        // The same uN entry again: keep shifting.
     }
     // An F3216 container holds up to 6 uSIDs of this same entry: after the
     // 5th shift the Argument must be zero, which is the classic End
@@ -146,7 +147,7 @@ static __always_inline int process_end_un_core(
     if ((void *)(ip6h + 1) > data_end)
         return XDP_DROP;
 
-    int r = usid_shift_loop(ip6h, entry, USID_UN_ARG_OFF);
+    int r = usid_shift_loop(ip6h, entry);
     if (r < 0)
         return XDP_DROP;
     if (r == 1)
@@ -166,8 +167,8 @@ static __always_inline int process_end_un_core(
     return process_end(ctx, ip6h, srh, entry, l3_offset);
 }
 
-// uA core: same as uN but the shift-path forwarding and the classic
-// fall-through both use the aux nexthop.
+// uA core: one shift per execution, forwarding over the aux nexthop;
+// a zero Argument falls through to classic End.X.
 static __always_inline int process_end_ua_core(
     struct xdp_md *ctx,
     struct sid_function_entry *entry,
@@ -181,11 +182,18 @@ static __always_inline int process_end_ua_core(
     if ((void *)(ip6h + 1) > data_end)
         return XDP_DROP;
 
-    int r = usid_shift_loop(ip6h, entry, USID_UA_ARG_OFF);
-    if (r < 0)
-        return XDP_DROP;
-    if (r == 1)
+    // uA never re-consumes in place: every execution is one shift followed
+    // by an End.X forward over the configured adjacency, so a container
+    // listing the same uA twice must traverse the adjacency twice
+    // (RFC 9800 Sec.4.2.1), unlike uN's FIB-to-self problem.
+    __u8 *da = (__u8 *)&ip6h->daddr;
+    if (!usid_arg_is_zero(da, USID_UA_ARG_OFF)) {
+        if (ip6h->hop_limit <= 1)
+            return XDP_DROP;
+        ip6h->hop_limit--;
+        usid_shift(da, USID_UA_ARG_OFF);
         return usid_forward(ctx, aux->usid.nexthop, l3_offset);
+    }
 
     if (dispatch_type == DISPATCH_NOSRH)
         return XDP_PASS;
