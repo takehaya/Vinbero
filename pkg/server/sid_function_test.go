@@ -717,6 +717,10 @@ func TestProtoToEntry_USID(t *testing.T) {
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002::/48", Nexthop: "fe80::1"}, "must be /64"},
 		{"uA missing nexthop", &v1.SidFunction{
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64"}, "requires an IPv6 nexthop"},
+		{"uA rejects zero function CSID", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002::/64", Nexthop: "fe80::1"}, "function CSID must be non-zero"},
+		{"uA rejects unspecified nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "::"}, "requires an IPv6 nexthop"},
 		{"uA rejects IPv4 nexthop", &v1.SidFunction{
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "192.0.2.1"}, "requires an IPv6 nexthop"},
 		{"usid_block_len on wrong action", &v1.SidFunction{

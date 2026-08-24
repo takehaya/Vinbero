@@ -517,12 +517,19 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			if p.Bits() != int(blockLen)+32 {
 				return nil, nil, fmt.Errorf("uA trigger_prefix must be /%d (block + node + function), got /%d", blockLen+32, p.Bits())
 			}
+			// The function field is itself a CSID; 0 is the container
+			// terminator, and a /64 ending in it would shadow the uN /48
+			// for terminal DAs.
+			fn16 := p.Masked().Addr().As16()
+			if fn16[6] == 0 && fn16[7] == 0 {
+				return nil, nil, fmt.Errorf("uA function CSID must be non-zero (0 is the container terminator)")
+			}
 			// The uA nexthop feeds an AF_INET6 FIB lookup, so it must be a
 			// genuine IPv6 address: the empty string (zero address) and
 			// IPv4 literals (which net.ParseIP would map to ::ffff:0:0/96)
 			// are both rejected.
 			nh, err := netip.ParseAddr(sidFunc.Nexthop)
-			if err != nil || !nh.Is6() || nh.Is4In6() {
+			if err != nil || !nh.Is6() || nh.Is4In6() || nh.IsUnspecified() {
 				return nil, nil, fmt.Errorf("uA requires an IPv6 nexthop, got %q", sidFunc.Nexthop)
 			}
 			nexthop = nh.As16()
