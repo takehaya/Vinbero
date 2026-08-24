@@ -1,6 +1,10 @@
-# End.AN (SR-Aware Native Service) Example
+# SRv6 End.AN
 
-draft-ietf-spring-srv6-service-programming の End.AN を netns で検証する example です。SR-aware なサービスは SRH を自分で理解するため、proxy の往復や circuit は不要で、パケット処理は End と同一です。
+*(日本語: [README.ja.md](./README.ja.md))*
+
+netns example for End.AN from draft-ietf-spring-srv6-service-programming. An
+SR-aware service understands the SRH itself, so there is no proxy round trip
+and no circuit: packet processing is identical to End.
 
 ## Topology
 
@@ -12,12 +16,16 @@ graph LR
     router3 --- host2
 ```
 
-- forward 方向は router1 が H.Encaps で `fc00:2::200, fc00:3::3` を積みます。
-- `fc00:2::200` は router2 の Vinbero が End.AN として処理します。転送は End と同じで、専用 slot は per-SID の統計と将来の service liveness 連動のためにあります。
-- `--service-name` で NF catalog の metadata を登録し、`vbctl sid get` で引けることを確認します。NF discovery はこの SidFunctionList / Get を service の registration point として使います。
-- return 方向 (host2 から host1) は Linux native の経路です。
+- In the forward direction router1 pushes `fc00:2::200, fc00:3::3` with H.Encaps.
+- `fc00:2::200` is handled by Vinbero on router2 as End.AN. Forwarding is the
+  same as End; the dedicated slot exists for per-SID statistics and for
+  future service liveness integration.
+- `--service-name` registers NF catalog metadata, which `vbctl sid get` reads
+  back. NF discovery uses this SidFunctionList / Get pair as the service
+  registration point.
+- The return direction (host2 to host1) is plain Linux forwarding.
 
-## 実行方法
+## Usage
 
 ```bash
 sudo ./setup.sh
@@ -25,7 +33,8 @@ sudo ./test.sh
 sudo ./teardown.sh
 ```
 
-## テスト内容
+## What is verified
 
-- Phase 1 は Linux native の End を baseline に underlay の疎通を確認します。
-- Phase 2 は Vinbero の End.AN で同じ chain を検証し、`service_name` が API から round trip することを確認します。
+- Phase 1 establishes an underlay baseline with Linux native End.
+- Phase 2 runs the same chain through Vinbero's End.AN and confirms that
+  `service_name` round-trips through the API.

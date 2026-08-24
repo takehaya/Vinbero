@@ -1,16 +1,25 @@
-# SRv6 GTP-U/IPv6 Drop-In (End.M.GTP6.D.Di)
+# GTP-U Drop-In mode
 
-RFC 9433のDrop-Inモード: 既存のGTP-Uインフラに最小限の変更でSRv6を導入するデモ環境です。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-## 概要
+Demo environment for the RFC 9433 Drop-In mode, which introduces SRv6 into an
+existing GTP-U deployment with minimal change.
 
-Vinbero の End.M.GTP6.D.Di は SRv6 パケットの中に載った GTP-U を認識する SID-triggered endpoint です。Drop-In モードでは:
-- SL の減算も DA の更新も**行わない**
-- パケットを**一切書き換えず** `XDP_PASS` でカーネルの SRv6 スタックに委譲する
+## Overview
 
-GTP-U のバイトが残ったまま nexthdr だけ書き換えると不整合なパケットになるため、Vinbero は意図的に無改変で渡します。これにより既存の GTP-U 転送インフラをほぼそのまま維持しつつ SRv6 ドメインと統合できます。
+Vinbero's End.M.GTP6.D.Di is a SID-triggered endpoint that recognises GTP-U
+carried inside an SRv6 packet. In Drop-In mode it:
 
-## トポロジー
+- does **not** decrement SL or update the DA
+- passes the packet to the kernel's SRv6 stack with `XDP_PASS`, **without
+  rewriting a single byte**
+
+Rewriting only the nexthdr while the GTP-U bytes stay in place would produce
+an inconsistent packet, so Vinbero deliberately hands it over untouched. That
+keeps the existing GTP-U forwarding infrastructure essentially as-is while
+integrating it with an SRv6 domain.
+
+## Topology
 
 ```mermaid
 graph LR
@@ -18,7 +27,7 @@ graph LR
     router1 -->|SRv6 via kernel| router2[router2<br/>fc00:2::1<br/>End]
 ```
 
-## クイックスタート
+## Quick start
 
 ```bash
 sudo ./setup.sh
@@ -26,11 +35,17 @@ sudo ./test.sh
 sudo ./teardown.sh
 ```
 
-## 動作
+## How it behaves
 
-1. パケット受信: `[IPv6][SRH(nexthdr=UDP)][UDP:2152][GTP-U][Inner IP]`
-2. Vinbero XDP: SRH nexthdr が UDP かつ GTP-U が妥当であることを検証
-3. パケットを書き換えずに `XDP_PASS` でカーネルに委譲 (SL/DA/nexthdr は不変)
-4. カーネル SRv6 スタックがそのまま処理
+1. The packet arrives as `[IPv6][SRH(nexthdr=UDP)][UDP:2152][GTP-U][Inner IP]`
+2. Vinbero XDP verifies that the SRH nexthdr is UDP and that the GTP-U header
+   is well formed
+3. The packet is handed to the kernel with `XDP_PASS`, unmodified (SL, DA and
+   nexthdr are all unchanged)
+4. The kernel SRv6 stack takes it from there
 
-変換が無いため、`test.sh` は per-slot 呼び出しカウンタ (`vinbero stats slot show`) で Di プログラムが当該パケットに対して実行されたことを確認します。netns example のクライアントバイナリは `vinbero` です (`out/bin/vbctl` はありません。`vbctl` は interop-clab の Docker image 内の symlink です)。
+Since nothing is converted, `test.sh` uses the per-slot invocation counter
+(`vinbero stats slot show`) to confirm that the Di program actually ran for
+those packets. The client binary in the netns examples is `vinbero`; there is
+no `out/bin/vbctl` (that name is a symlink inside the interop-clab Docker
+image).

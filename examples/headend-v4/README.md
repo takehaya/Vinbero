@@ -1,8 +1,11 @@
-# SRv6 Headend (H.Encaps) IPv4 Playground
+# SRv6 H.Encaps for IPv4 Playground
 
-Vinbero XDPによるSRv6 H.Encaps (Headend Encapsulation) for IPv4のデモ環境です。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-## トポロジー
+Demo environment for SRv6 H.Encaps (headend encapsulation) of IPv4 traffic on
+Vinbero XDP.
+
+## Topology
 
 ```mermaid
 graph LR
@@ -12,60 +15,62 @@ graph LR
     router3 -->|IPv4| host2[host2<br/>172.0.2.1]
 ```
 
-**パケットの流れ（host1→host2の例）:**
-1. host1が172.0.2.1にpingを送信 (IPv4)
-2. **router1 (Vinbero XDP)** がH.Encapsを実行:
-   - IPv4パケットをIPv6+SRHでカプセル化
-   - Outer DA: fc00:2::1 (最初のセグメント)
-   - Segment List: [fc00:2::1, fc00:3::3]
-3. router2がfc00:2::1でEnd操作を実行（SL減少、次のセグメントへ）
-4. router3がfc00:3::3でEnd.DX4を実行（IPv4に戻す）
-5. host2がpingを受信
+**Packet walk (host1 to host2):**
+1. host1 pings 172.0.2.1 over IPv4
+2. **router1 (Vinbero XDP)** runs H.Encaps:
+   - encapsulates the IPv4 packet in IPv6 + SRH
+   - outer DA: fc00:2::1 (the first segment)
+   - segment list: [fc00:2::1, fc00:3::3]
+3. router2 runs End on fc00:2::1: decrement SL, move to the next segment
+4. router3 runs End.DX4 on fc00:3::3 and restores the IPv4 packet
+5. host2 receives the ping
 
-## クイックスタート
+## Quick start
 
 ```bash
-sudo ./setup.sh    # 環境構築
-sudo ./test.sh     # テスト実行
-sudo ./teardown.sh # クリーンアップ（環境削除）
+sudo ./setup.sh    # build the environment
+sudo ./test.sh     # run the tests
+sudo ./teardown.sh # clean up
 ```
 
-## 手動実行
+## Running it by hand
 
-### 1. 環境構築とVinbero起動
+### 1. Build the environment and start Vinbero
 
 ```bash
 sudo ./setup.sh
 
-# router1のLinux native SRv6ルートを削除
+# Remove the Linux native SRv6 route on router1
 sudo ip netns exec hv4-router1 ip route del 172.0.2.0/24 2>/dev/null
 
-# Vinbero起動
+# Start Vinbero
 sudo ip netns exec hv4-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
 ```
 
-### 2. HeadendV4エントリ登録
+### 2. Register the HeadendV4 entry
 
 ```bash
 sudo ip netns exec hv4-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 hv4 create --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
 ```
 
-### 3. テスト
+### 3. Test
 
 ```bash
 sudo ip netns exec hv4-host1 ping -c 3 172.0.2.1
 ```
 
-#### パケットキャプチャ
+#### Packet capture
 
 ```bash
-# router1-router2間でSRv6パケットを確認
+# SRv6 packets between router1 and router2
 sudo ip netns exec hv4-router2 tcpdump -i hv4-rt2rt1 -n ip6
 ```
 
-SRv6 Routing Header (RT6) でsegment list: [fc00:2::1, fc00:3::3] が確認できます。
+The SRv6 Routing Header (RT6) carries the segment list
+[fc00:2::1, fc00:3::3].
 
-### 4. 環境のクリーンナップ
+### 4. Clean up
+
 ```bash
 sudo ./teardown.sh
 ```
