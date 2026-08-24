@@ -49,4 +49,6 @@ phase 2 は neighbor table を flush してから traffic を流します。uA �
 ## 制約
 
 - uA の nexthop は IPv6 アドレスのみを受け付けます。FIB lookup の context は ingress ifindex で、既存の End.X と同じです
-- trigger prefix は /64 で、function CSID に 0 は使えません。prefix 内のアドレスは uA SID 自身を除いてすべて container とみなされます。詳細は `docs/loadmap.md` の NEXT-CSID の節を参照してください
+- trigger prefix は /64 で、function CSID に 0 は使えません。prefix 内のアドレスは uA SID 自身を除いてすべて container とみなされます
+
+設計の全体像は [uSID (NEXT-C-SID) の uN と uA](../../docs/design/ja/usid.md) にあります。

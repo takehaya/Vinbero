@@ -70,16 +70,12 @@
 | End.LBS              |             | Locator-Block Swap                                          | RFC 9800 |
 | End.XLBS             |             | L3 cross-connect and Locator-Block Swap                     | RFC 9800 |
 
-uN / uA には次の制約があります。
+uN / uA の主な制約は次のとおりです。設計と運用上の注意は [uSID (NEXT-C-SID) の uN と uA](design/ja/usid.md) を参照してください。
 
-- SID 構造は F3216 (block 32 bit、uSID 16 bit) のみです。trigger prefix は uN が /48、uA が /64 です
-- trigger prefix は uSID 専用にしてください。prefix 内のアドレスは uN / uA SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます。locator の中にノードの loopback やインタフェースアドレスを採番すると、そのアドレス宛の通信が到達しなくなります
-- uN / uA SID 自身はノードのローカルアドレスとして設定してください。container が自ノードの uSID だけで終わる場合、shift 後のパケットは kernel に渡ってローカル配送されます
-- FIB が blackhole / unreachable / prohibit を返した場合は fail-closed で drop します。DA を書き換えた後なので kernel には渡しません
-- neighbor 未解決 (NO_NEIGH) の扱いは uN と uA で異なります。uN は shift 後の DA そのものを引くので、kernel に渡して NDP を解決させます。kernel は同じ転送判断をやり直すため、通信は自力で立ち上がります。uA は設定した adjacency へ転送する behavior で、kernel に渡すと DA 側の経路で転送されてしまうため drop します。uA の nexthop は neighbor が解決済みである必要があります。既存の End.X と同じ制約です
-- uN / uA の登録は trigger prefix の明示指定のみです。locator_ref からの登録には未対応です
-- uA の nexthop は IPv6 アドレスのみを受け付けます。FIB lookup の context は ingress ifindex で、既存の End.X と同じです
-- IPv6 拡張ヘッダを挟んだ NEXT-C-SID 処理と ICMPv6 の生成は、既存の End 系と同じく対象外です
+- SID 構造は F3216 (block 32 bit、uSID 16 bit) のみで、flavor は単一値のみです。trigger prefix は uN が /48、uA が /64 です
+- trigger prefix は uSID 専用にしてください。prefix 内のアドレスは uN / uA SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます
+- 登録は trigger prefix の明示指定のみで、locator_ref からの登録には未対応です
+- BGP からの uSID service SID の送受信と、第三者実装との interop は未着手です
 
 ### Service programming (draft)
 

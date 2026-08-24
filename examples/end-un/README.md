@@ -42,6 +42,8 @@ Phase 2 は neighbor table を flush してから traffic を流します。uN �
 
 ## uN prefix の設計上の制約
 
+設計の全体像は [uSID (NEXT-C-SID) の uN と uA](../../docs/design/ja/usid.md) にあります。
+
 uN の trigger prefix は /48 の wildcard です。その prefix に入るアドレスは、uN SID 自身 (Argument が全ゼロのアドレス) を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます。したがって uN prefix は uSID 専用にする必要があります。classic SRv6 でよくある「locator の中にノードの loopback も採番する」構成にすると、そのアドレス宛の BGP や SSH が data path 側で書き換えられ、到達しなくなります。この example が underlay を fc00::/16、uSID block を fd00:aaaa/32 と分けているのはこのためです。
 
 同じ理由から、uN SID そのもの (この example では fd00:aaaa:b002::) はノードのローカルアドレスとして設定してください。container が自ノードの uSID だけで終わる場合、shift 後の DA が uN SID になった状態で kernel に渡され、ローカル配送されます。設定していないと kernel は locator prefix の経路でルーティングを試みます。
