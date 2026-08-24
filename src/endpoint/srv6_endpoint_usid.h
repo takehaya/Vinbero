@@ -43,17 +43,22 @@ static __always_inline void usid_shift(__u8 *da)
     da[15] = 0;
 }
 
-// Shift loop shared by uN and uA. Consecutive uSIDs of this node are
-// consumed in place (re-matching the shifted DA against sid_function_map)
-// instead of bouncing through the FIB back to ourselves, which XDP cannot
-// re-enter on the same packet.
+// Shift loop shared by uN and uA. Consecutive uSIDs of the SAME entry
+// (a container listing this node's uN twice) are consumed in place by
+// re-matching the shifted DA against sid_function_map, because XDP cannot
+// re-enter itself on the same packet and forwarding to ourselves would
+// hand the mutated DA to the kernel. A shift that lands on any OTHER
+// local entry (a different uN/uA, or a terminal SID) would need that
+// entry's action and aux to be honored, which this tail-call target
+// cannot re-dispatch, so it fails closed instead of silently applying
+// the wrong behavior.
 // Returns:
 //   1  shifted; caller forwards on the updated DA
 //   0  Argument is zero; caller falls through to classic End / End.X
-//  -1  drop (hop limit exhausted, or the shift landed on a local terminal
-//      SID that cannot be re-dispatched from here; the DA is already
-//      mutated so failing closed keeps the packet off the kernel stack)
-static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h)
+//  -1  drop (hop limit exhausted, or the shift landed on a different
+//      local SID that cannot be re-dispatched from here)
+static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h,
+                                           const struct sid_function_entry *entry)
 {
     __u8 *da = (__u8 *)&ip6h->daddr;
 
@@ -73,12 +78,15 @@ static __always_inline int usid_shift_loop(struct ipv6hdr *ip6h)
             bpf_map_lookup_elem(&sid_function_map, &key);
         if (!next)
             return 1;
-        if (next->action != SRV6_LOCAL_ACTION_END_UN &&
-            next->action != SRV6_LOCAL_ACTION_END_UA)
+        if (next->action != entry->action ||
+            next->aux_index != entry->aux_index)
             return -1;
-        // Another local uN/uA uSID: keep shifting.
+        // The same uN/uA entry again: keep shifting.
     }
-    return -1;
+    // An F3216 container holds up to 6 uSIDs of this same entry: after the
+    // 5th shift the Argument must be zero, which is the classic End
+    // fall-through, not a drop.
+    return usid_arg_is_zero(da) ? 0 : -1;
 }
 
 // Forward on the shifted DA. dst == NULL looks up the DA itself (uN);
@@ -119,7 +127,7 @@ static __always_inline int process_end_un_core(
     if ((void *)(ip6h + 1) > data_end)
         return XDP_DROP;
 
-    int r = usid_shift_loop(ip6h);
+    int r = usid_shift_loop(ip6h, entry);
     if (r < 0)
         return XDP_DROP;
     if (r == 1)
@@ -154,7 +162,7 @@ static __always_inline int process_end_ua_core(
     if ((void *)(ip6h + 1) > data_end)
         return XDP_DROP;
 
-    int r = usid_shift_loop(ip6h);
+    int r = usid_shift_loop(ip6h, entry);
     if (r < 0)
         return XDP_DROP;
     if (r == 1)

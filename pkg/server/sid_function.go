@@ -413,6 +413,17 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	if err := validateProxyFieldScope(sidFunc); err != nil {
 		return nil, nil, err
 	}
+	// Same convention as the proxy field scope: an action-specific field on
+	// the wrong action is rejected, not silently dropped (it would otherwise
+	// vanish on a Get -> Create round trip).
+	if sidFunc.UsidBlockLen != nil {
+		switch v1.Srv6LocalAction(sidFunc.Action) {
+		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+		default:
+			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA")
+		}
+	}
 	entry := &bpf.SidFunctionEntry{
 		Action: uint8(sidFunc.Action),
 		Flavor: uint8(sidFunc.Flavor),
@@ -505,6 +516,12 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
 			if p.Bits() != int(blockLen)+32 {
 				return nil, nil, fmt.Errorf("uA trigger_prefix must be /%d (block + node + function), got /%d", blockLen+32, p.Bits())
+			}
+			// ParseIPv6("") yields the zero address, so the empty string
+			// must be rejected explicitly or uA would silently install a
+			// :: nexthop.
+			if sidFunc.Nexthop == "" {
+				return nil, nil, fmt.Errorf("uA requires nexthop")
 			}
 			nexthop, err = bpf.ParseIPv6(sidFunc.Nexthop)
 			if err != nil {

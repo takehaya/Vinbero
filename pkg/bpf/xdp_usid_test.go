@@ -205,10 +205,11 @@ func TestXDPProgEndUa(t *testing.T) {
 	h := newXDPTestHelper(t)
 	var nexthop [16]byte
 	copy(nexthop[:], net.ParseIP("fe80::1").To16())
-	h.createSidFunctionUsid("fd00:aaaa:ffff::/48", actionEndUa, 0, nexthop, usidBlockLenBytes)
+	// uA lives at block + node + function (/64), the shape the API enforces.
+	h.createSidFunctionUsid("fd00:aaaa:ffff:cccc::/64", actionEndUa, 0, nexthop, usidBlockLenBytes)
 
 	t.Run("shift forwards toward the aux nexthop", func(t *testing.T) {
-		pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc::"), 64)
+		pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc:dddd::"), 64)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -216,10 +217,49 @@ func TestXDPProgEndUa(t *testing.T) {
 		if ret != XDP_DROP {
 			t.Errorf("expected fail-closed XDP_DROP, got %d", ret)
 		}
-		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:cccc::"); !got.Equal(want) {
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:cccc:dddd::"); !got.Equal(want) {
 			t.Errorf("DA = %v, want %v (shifted)", got, want)
 		}
 	})
+}
+
+func TestXDPProgEndUnFullContainer(t *testing.T) {
+	h := newXDPTestHelper(t)
+	h.createSidFunctionUsid("fd00:aaaa:bbbb::/48", actionEndUn, 0, [16]byte{}, usidBlockLenBytes)
+
+	// All 6 uSID slots carry this node: 5 shifts empty the Argument and the
+	// packet must fall through to classic End, not drop at the loop bound.
+	segs := []net.IP{net.ParseIP("fd00:9:9::1"), net.ParseIP("fd00:aaaa:bbbb:bbbb:bbbb:bbbb:bbbb:bbbb")}
+	pkt, err := buildSRv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:bbbb:bbbb:bbbb:bbbb:bbbb:bbbb"), segs, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, out := h.run(pkt)
+	if ret != XDP_PASS {
+		t.Fatalf("expected XDP_PASS (classic End fall-through), got %d", ret)
+	}
+	verifyDAAndSL(t, out, "fd00:9:9::1", 1)
+	if hl := outPktHopLimit(t, out); hl != 59 {
+		t.Errorf("hop limit = %d, want 59 (five logical uN hops)", hl)
+	}
+}
+
+func TestXDPProgEndUnShiftIntoOtherEntryDrops(t *testing.T) {
+	h := newXDPTestHelper(t)
+	h.createSidFunctionUsid("fd00:aaaa:bbbb::/48", actionEndUn, 0, [16]byte{}, usidBlockLenBytes)
+	// A different local entry right where the shift lands: the uN target
+	// cannot re-dispatch it with its own action/aux, so it must fail closed
+	// rather than blind-shift through it.
+	h.createSidFunction("fd00:aaaa:cccc::/48", actionEnd)
+
+	pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:bbbb:cccc:dddd::"), 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, _ := h.run(pkt)
+	if ret != XDP_DROP {
+		t.Errorf("expected XDP_DROP, got %d", ret)
+	}
 }
 
 func TestXDPProgEndUnBadBlockLen(t *testing.T) {
