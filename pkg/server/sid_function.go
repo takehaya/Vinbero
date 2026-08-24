@@ -511,7 +511,12 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		}
 		// The LPM entry covers block + node (uN) or block + node + function
 		// (uA); the Argument tail must stay outside the prefix (RFC 9800
-		// Sec.5.3).
+		// Sec.5.3). The 16 bits after the block are the node CSID, and 0
+		// is the reserved container terminator for both shapes.
+		p16 := p.Masked().Addr().As16()
+		if p16[4] == 0 && p16[5] == 0 {
+			return nil, nil, fmt.Errorf("uSID node CSID must be non-zero (0 is the container terminator)")
+		}
 		var nexthop [16]uint8
 		if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
 			if p.Bits() != int(blockLen)+32 {
