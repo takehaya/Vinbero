@@ -140,6 +140,18 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		return err
 	}
 
+	// A uA entry consumes a function CSID out of its locator just like a
+	// service SID does, so claim it from the same allocator.
+	releaseUsidFn, err := s.claimUsidFunction(sidFunc)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if !committed {
+			releaseUsidFn()
+		}
+	}()
+
 	// Capture the circuit the existing entry for this trigger_prefix (if
 	// any) already owns. CreateSidFunction is an upsert, so a re-create
 	// that moves the SID to a different circuit — or turns it into a
@@ -257,6 +269,68 @@ func (s *SidFunctionServer) resolveLocatorRef(sidFunc *v1.SidFunction) error {
 	return nil
 }
 
+// claimUsidFunction reserves a uA entry's function CSID in the uSID
+// locator that owns its prefix, and returns the release for the failure
+// path. uN needs no claim: its prefix is the locator prefix itself and
+// carries no function.
+//
+// Without the claim the allocator would still consider that CSID free and
+// hand it to a service SID (`vbctl sid add --locator-ref LOC --function
+// 0xc001`). The resulting /128 wins the LPM match over the uA /64 for the
+// terminal DA, so the uA's End.X fall-through would be silently replaced
+// by the service behavior -- a data-plane mis-forward with no error at
+// registration time.
+//
+// A missing locator is not an error: a uA registered outside any uSID
+// locator has no allocator to collide with.
+func (s *SidFunctionServer) claimUsidFunction(sidFunc *v1.SidFunction) (func(), error) {
+	noop := func() {}
+	if s.locatorMgr == nil ||
+		v1.Srv6LocalAction(sidFunc.GetAction()) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+		return noop, nil
+	}
+	// protoToEntry already validated the prefix shape, so anything that
+	// fails to parse here cannot reach the map either.
+	p, err := netip.ParsePrefix(sidFunc.GetTriggerPrefix())
+	if err != nil {
+		return noop, nil
+	}
+	sid := p.Masked().Addr()
+	loc, ok := s.locatorMgr.FindByContaining(sid)
+	if !ok || loc.Behavior != locator.BehaviorUSID {
+		return noop, nil
+	}
+	fn, ok, err := loc.ParseSID(sid)
+	if err != nil || !ok {
+		return noop, nil
+	}
+	if _, _, err := s.locatorMgr.AllocateSID(loc.Name, &fn); err != nil {
+		// SidFunctionCreate is an upsert, so the CSID may already be held by
+		// this very uA entry. Anything else holding it (a service SID, or a
+		// different action at this prefix) is the collision this claim
+		// exists to catch.
+		if s.usidClaimIsOurs(sidFunc.GetTriggerPrefix()) {
+			return noop, nil
+		}
+		return noop, fmt.Errorf("uA function CSID 0x%04x in locator %q: %w", fn, loc.Name, err)
+	}
+	return func() { s.locatorMgr.ReleaseSID(sid) }, nil
+}
+
+// usidClaimIsOurs reports whether a uA entry already occupies prefix, which
+// makes an existing CSID claim a re-create of that same entry rather than a
+// collision with someone else's SID.
+func (s *SidFunctionServer) usidClaimIsOurs(prefix string) bool {
+	if s.mapOps == nil {
+		return false
+	}
+	entry, err := s.mapOps.GetSidFunction(prefix)
+	if err != nil || entry == nil {
+		return false
+	}
+	return v1.Srv6LocalAction(entry.Action) == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA
+}
+
 // rollbackLocatorRef returns the function value to the locator pool when
 // a subsequent step (validation, map write) failed after allocation.
 // Safe to call when no locator_ref was used -- becomes a no-op via
@@ -309,12 +383,13 @@ func (s *SidFunctionServer) deleteOneSidFunction(prefix string) error {
 	if err := s.mapOps.DeleteSidFunction(prefix, bpf.OwnerRPC); err != nil {
 		return err
 	}
-	// Locator-minted SIDs return their function value to the pool.
-	// Bindings for direct trigger_prefix SIDs simply miss the lookup
-	// (Manager.ReleaseSID is a no-op for unknown sids).
+	// Locator-minted SIDs return their function value to the pool, and so
+	// does a uA entry that claimed its function CSID (its prefix is a /64,
+	// not a /128). Bindings for direct trigger_prefix SIDs simply miss the
+	// lookup (Manager.ReleaseSID is a no-op for unknown sids).
 	if s.locatorMgr != nil {
-		if sid, err := parseLocatorSID(prefix); err == nil {
-			s.locatorMgr.ReleaseSID(sid)
+		if p, err := netip.ParsePrefix(prefix); err == nil {
+			s.locatorMgr.ReleaseSID(p.Masked().Addr())
 		}
 	}
 	// End.B6 policy is cleaned up automatically with the aux entry.

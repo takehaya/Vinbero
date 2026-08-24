@@ -171,4 +171,3 @@ func TestBuildSID_USIDZeroReserved(t *testing.T) {
 		t.Errorf("BuildSID(0): got %v, want ErrFunctionReserved", err)
 	}
 }
-
