@@ -81,9 +81,10 @@ func (LocatorBehaviorMode) EnumDescriptor() ([]byte, []int) {
 // The (block_len + node_len) bits at the front of the prefix identify
 // the PE; the next function_len bits identify the local behavior.
 // Constraints depend on behavior: CLASSIC requires the four lengths to
-// sum to 128 (argument_len holds the remainder); USID requires
-// function_len == 16, argument_len == 0, and a byte-aligned block_len,
-// with the container tail after the function left implicit.
+// sum to 128 (argument_len holds the remainder); USID is fixed to the
+// F3216 structure (block_len == 32, node_len == 16, function_len == 16,
+// argument_len == 0), with the container tail after the function left
+// implicit.
 type Locator struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

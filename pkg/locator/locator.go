@@ -105,17 +105,19 @@ func (l *Locator) Validate() error {
 			return fmt.Errorf("%w: function_len must be > 0", ErrInvalidLocator)
 		}
 	case BehaviorUSID:
-		if l.BlockLen%8 != 0 {
-			return fmt.Errorf("%w: uSID block_len must be a multiple of 8", ErrInvalidLocator)
+		// F3216 is the only supported uSID structure: 32-bit locator
+		// block, 16-bit uSIDs. The data plane's shift offsets assume it.
+		if l.BlockLen != 32 {
+			return fmt.Errorf("%w: uSID block_len must be 32 (F3216)", ErrInvalidLocator)
+		}
+		if l.NodeLen != 16 {
+			return fmt.Errorf("%w: uSID node_len must be 16 (F3216)", ErrInvalidLocator)
 		}
 		if l.FunctionLen != 16 {
 			return fmt.Errorf("%w: uSID function_len must be 16", ErrInvalidLocator)
 		}
 		if l.ArgumentLen != 0 {
 			return fmt.Errorf("%w: uSID argument_len must be 0", ErrInvalidLocator)
-		}
-		if prefixLen+uint16(l.FunctionLen) > 128 {
-			return fmt.Errorf("%w: uSID locator prefix and function exceed 128 bits", ErrInvalidLocator)
 		}
 	default:
 		return fmt.Errorf("%w: unsupported behavior %v", ErrInvalidLocator, l.Behavior)

@@ -69,7 +69,12 @@ func TestValidate_USID(t *testing.T) {
 		{"prefix-length", func(l *Locator) { l.NodeLen = 8 }},
 		{"function-length", func(l *Locator) { l.FunctionLen = 15 }},
 		{"argument-length", func(l *Locator) { l.ArgumentLen = 64 }},
-		{"block-byte-alignment", func(l *Locator) { l.BlockLen = 31; l.NodeLen = 17 }},
+		{"non-f3216-block", func(l *Locator) { l.BlockLen = 40; l.NodeLen = 8 }},
+		{"non-f3216-node", func(l *Locator) {
+			l.BlockLen = 24
+			l.NodeLen = 24
+			l.Prefix = netip.MustParsePrefix("fd00::/48")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
