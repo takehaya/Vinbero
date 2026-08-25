@@ -32,6 +32,33 @@ WebAssembly module を受け取ります。どちらも daemon に upload され
 これで両ノードは Vinbero も BGP も知らない behavior で通信します。実例は
 `sdk/examples/cplane-custom-behavior` にあり、この 6 段を実装しています。
 
+この 6 段を 2 ノードに割り付けると次の流れになります。node A が behavior を
+実装して広告する側、node B がそれを受けて headend を張る側です。
+
+```mermaid
+sequenceDiagram
+    participant OpA as operator (node A)
+    participant PA as cplane plugin (node A)
+    participant VA as vinberod (node A)
+    participant BGP as BGP session
+    participant VB as vinberod (node B)
+    participant PB as cplane plugin (node B)
+
+    OpA->>VA: data plane half を endpoint slot に register
+    OpA->>VA: cplane half を register (capability と scope と behavior claim)
+    Note over VA: claim 済み codepoint の経路は built-in applier に配らない
+    PA->>VA: local SID を宣言 (名前と locator と slot)
+    VA->>VA: locator から address を確保し dispatch entry を書く
+    VA-->>PA: 確保した address を event で返す
+    PA->>VA: その SID を自分の codepoint 付きの SID TLV で広告を宣言
+    VA->>BGP: VPN 経路として advertise
+    BGP->>VB: 経路が届く
+    Note over VB: built-in applier には配らず plugin だけに配送
+    VB-->>PB: event として配送
+    PB->>VB: headend の状態を宣言 (encap 先 = node A の SID)
+    Note over VB,VA: node B の customer traffic が encap され node A の SID に届き dispatch entry が plugin の slot へ渡す
+```
+
 新しい AFI/SAFI は要りません。endpoint behavior は SID TLV の中の 16bit
 codepoint なので、独自 codepoint の広告は vpnv4 や EVPN といった既存
 family にそのまま載ります。
@@ -117,6 +144,27 @@ replay の先頭には start of replay の event を置きます。replay は何
 組み立て直します。これで replay が merge ではなく修復になります。宣言は
 end of replay まで待ちます。replay の最中に空集合を宣言すると、その間だけ
 転送が落ちるためです。
+
+drop から修復までの流れをまとめます。
+
+```mermaid
+sequenceDiagram
+    participant D as demux (BGP watch goroutine)
+    participant R as replay (snapshot の作り手)
+    participant Q as plugin worker queue
+    participant G as plugin instance
+
+    D->>Q: live event を積む (block しない)
+    Q->>G: 順に配送
+    D--xQ: queue が満杯なら drop して snapshot debt を記録
+    Note over R: debt を見て replay を plugin ごとに 1 本だけ起動
+    R->>Q: 保留開始。以後の live event は pending に貯める
+    R->>Q: start of replay
+    R->>Q: rib の copy を block しながら積む
+    R->>Q: end of replay
+    R->>Q: 保留解除。pending を流し、収まらない分は drop して debt に戻す
+    Q->>G: start で view を破棄し end まで宣言を保留して再構築
+```
 
 ## behavior の claim
 
