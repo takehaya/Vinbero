@@ -65,13 +65,30 @@ sudo ip netns exec p2m-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
 sudo ip netns exec p2m-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
   peer create --bd-id 100 --src-addr fc00:1::1 --segments fc00:2::1,fc00:4::4
 
-# PE2: End.DT2 + H.Encaps.L2 (return)
+# PE2: End.DT2 + H.Encaps.L2 (return、access port ごと) + BdPeer
 sudo ip netns exec p2m-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
   sid create --trigger-prefix fc00:3::3/128 --action END_DT2 --bd-id 100 --bridge-name br100
 
-# PE3: End.DT2 + H.Encaps.L2 (return)
+sudo ip netns exec p2m-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface p2m-rt3h2 --vlan-id 100 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2 --bd-id 100
+sudo ip netns exec p2m-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface p2m-rt3h3 --vlan-id 100 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2 --bd-id 100
+
+sudo ip netns exec p2m-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  peer create --bd-id 100 --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2
+
+# PE3: End.DT2 + H.Encaps.L2 (return) + BdPeer
 sudo ip netns exec p2m-router4 ../../out/bin/vinbero -s http://127.0.0.1:8084 \
   sid create --trigger-prefix fc00:4::4/128 --action END_DT2 --bd-id 100 --bridge-name br100
+
+sudo ip netns exec p2m-router4 ../../out/bin/vinbero -s http://127.0.0.1:8084 \
+  hl2 create --interface p2m-rt4h4 --vlan-id 100 \
+  --src-addr fc00:4::4 --segments fc00:2::2,fc00:1::2 --bd-id 100
+
+sudo ip netns exec p2m-router4 ../../out/bin/vinbero -s http://127.0.0.1:8084 \
+  peer create --bd-id 100 --src-addr fc00:4::4 --segments fc00:2::2,fc00:1::2
 ```
 
 ### 4. テスト
