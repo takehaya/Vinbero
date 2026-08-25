@@ -353,18 +353,47 @@ func (s *SidFunctionServer) longestUsidLocator(sid netip.Addr) (locator.Locator,
 	return best, found
 }
 
-// usidClaimIsOurs reports whether a uA entry already occupies prefix, which
-// makes an existing CSID claim a re-create of that same entry rather than a
-// collision with someone else's SID.
+// usidClaimIsOurs reports whether a uA entry occupies exactly this prefix,
+// which makes an existing CSID claim a re-create of that same entry rather
+// than a collision with someone else's SID.
+//
+// The lookup has to be an exact one. sid_function_map is an LPM trie, so
+// GetSidFunction answers with the covering entry: a /128 created under a uA
+// /64 would look like that uA and its claim would be released out from under
+// a live SID. There is no exact-match lookup for an LPM trie, hence the
+// scan; it runs once per create and once per delete, never on the data path.
 func (s *SidFunctionServer) usidClaimIsOurs(prefix string) bool {
+	want, err := netip.ParsePrefix(prefix)
+	if err != nil {
+		return false
+	}
+	owner, ok := s.usidClaimOwner(want.Masked().Addr())
+	return ok && owner == want.Masked()
+}
+
+// usidClaimOwner returns the uA entry that owns the locator claim recorded
+// at addr, if any. A claim is keyed by the masked address of the uA's /64,
+// which a /128 at that same address shares, so both the delete path and the
+// upsert path have to ask who owns it before releasing anything.
+func (s *SidFunctionServer) usidClaimOwner(addr netip.Addr) (netip.Prefix, bool) {
 	if s.mapOps == nil {
-		return false
+		return netip.Prefix{}, false
 	}
-	entry, err := s.mapOps.GetSidFunction(prefix)
-	if err != nil || entry == nil {
-		return false
+	entries, err := s.mapOps.ListSidFunctions()
+	if err != nil {
+		return netip.Prefix{}, false
 	}
-	return v1.Srv6LocalAction(entry.Action) == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA
+	for p, entry := range entries {
+		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+			continue
+		}
+		got, err := netip.ParsePrefix(p)
+		if err != nil || got.Masked().Addr() != addr {
+			continue
+		}
+		return got.Masked(), true
+	}
+	return netip.Prefix{}, false
 }
 
 // rollbackLocatorRef returns the function value to the locator pool when
@@ -427,13 +456,15 @@ func (s *SidFunctionServer) deleteOneSidFunction(prefix string) error {
 	// Locator-minted SIDs return their function value to the pool, and so
 	// does a uA entry that claimed its function CSID. Bindings for direct
 	// trigger_prefix SIDs simply miss the lookup (Manager.ReleaseSID is a
-	// no-op for unknown sids).
+	// no-op for unknown sids) -- except when a uA holds a claim at that very
+	// address, which a /128 on the uA's base address shares. Ask who owns it.
 	if s.locatorMgr != nil {
-		if sid, err := parseLocatorSID(prefix); err == nil {
-			s.locatorMgr.ReleaseSID(sid)
-		} else if releasesUsidClaim {
-			if p, err := netip.ParsePrefix(prefix); err == nil {
-				s.locatorMgr.ReleaseSID(p.Masked().Addr())
+		if p, err := netip.ParsePrefix(prefix); err == nil {
+			addr := p.Masked().Addr()
+			if _, ownedByUA := s.usidClaimOwner(addr); releasesUsidClaim || !ownedByUA {
+				if releasesUsidClaim || p.Bits() == 128 {
+					s.locatorMgr.ReleaseSID(addr)
+				}
 			}
 		}
 	}

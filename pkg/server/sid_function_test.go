@@ -990,3 +990,40 @@ func TestClaimUsidFunction_PicksTheUsidLocatorUnderNesting(t *testing.T) {
 		t.Fatalf("the uSID allocator can still reissue the CSID: err = %v, want ErrFunctionInUse", err)
 	}
 }
+
+// sid_function_map is an LPM trie, so a lookup for a /128 under a uA /64
+// answers with that uA. Creating or deleting the /128 must not be mistaken
+// for touching the uA, or its CSID claim is released while it is still live.
+func TestSidFunction_MoreSpecificEntryUnderUALeavesTheClaim(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	const uaPrefix = "fd00:aaaa:b002:c001::/64"
+	if err := s.createOneSidFunction(uaSidFunction(uaPrefix)); err != nil {
+		t.Fatalf("create uA: %v", err)
+	}
+	t.Cleanup(func() { _ = s.deleteOneSidFunction(uaPrefix) })
+
+	// A /128 at the uA's own base address: the LPM lookup answers with the
+	// uA, and the release key would be the very address the claim is under.
+	const inner = "fd00:aaaa:b002:c001::/128"
+	if err := s.createOneSidFunction(&v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: inner,
+	}); err != nil {
+		t.Fatalf("create the more specific entry: %v", err)
+	}
+	if err := s.deleteOneSidFunction(inner); err != nil {
+		t.Fatalf("delete the more specific entry: %v", err)
+	}
+
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("the live uA's CSID was released: err = %v, want ErrFunctionInUse", err)
+	}
+}
