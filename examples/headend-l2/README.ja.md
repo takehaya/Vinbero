@@ -44,17 +44,30 @@ sudo ./teardown.sh # クリーンアップ（環境削除）
 
 ### 1. 環境構築とVinbero起動
 
+L2VPN は両端に headend が要るので、Vinbero は router1 と router3 の両方で動かします。
+
 ```bash
 sudo ./setup.sh
 
-# Vinbero起動
-sudo ip netns exec hl2-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
+# 両 router で Vinbero を起動
+sudo ip netns exec hl2-router1 ../../out/bin/vinberod -c vinbero_router1.yaml &
+sudo ip netns exec hl2-router3 ../../out/bin/vinberod -c vinbero_router3.yaml &
 ```
 
 ### 2. HeadendL2エントリ登録
 
+`--interface` は必須です。VLAN が入ってくる access port を指定します。
+
 ```bash
-sudo ip netns exec hl2-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 hl2 create --vlan-id 100 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
+# 往路 (router1)
+sudo ip netns exec hl2-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
+  hl2 create --interface hl2-rt1h1 --vlan-id 100 \
+  --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
+
+# 復路 (router3)
+sudo ip netns exec hl2-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface hl2-rt3h2 --vlan-id 100 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2
 ```
 
 ### 3. テスト
@@ -73,7 +86,7 @@ sudo ip netns exec hl2-router2 tcpdump -i hl2-rt2rt1 -n -v ip6
 
 SRv6 Routing Header (RT6) と Next Header 143 (Ethernet) が確認できます。
 
-### 5. 環境のクリーンナップ
+### 5. 環境のクリーンアップ
 ```bash
 sudo ./teardown.sh
 ```

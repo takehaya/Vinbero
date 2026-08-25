@@ -60,8 +60,8 @@ sudo ./teardown.sh
 ## What the test verifies
 
 1. **Split-horizon (phase C)**: `host1 -> broadcast -> PE1` does not come back
-   to host1 via PE2. It asserts `SPLIT_HORIZON_TX > 0` on PE1 and
-   `SPLIT_HORIZON_RX` on PE2 (the fail-safe path).
+   to host1 via PE2. It asserts `SPLIT_HORIZON_TX > 0` on both PEs and
+   checks a pcap on the host1 side for zero self-sourced ARP frames.
 2. **DF election (phase D)**: `vbctl` in the commands below is a shell
    function that `test.sh` and `smoke_api.sh` define around `vinbero -s
    http://127.0.0.1:<PE port>`; there is no `vbctl` binary inside the

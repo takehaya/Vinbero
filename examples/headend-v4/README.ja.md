@@ -67,7 +67,7 @@ sudo ip netns exec hv4-router2 tcpdump -i hv4-rt2rt1 -n ip6
 
 SRv6 Routing Header (RT6) でsegment list: [fc00:2::1, fc00:3::3] が確認できます。
 
-### 4. 環境のクリーンナップ
+### 4. 環境のクリーンアップ
 ```bash
 sudo ./teardown.sh
 ```

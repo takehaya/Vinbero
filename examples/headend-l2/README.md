@@ -46,17 +46,31 @@ sudo ./teardown.sh # clean up
 
 ### 1. Build the environment and start Vinbero
 
+An L2VPN needs a headend at both ends, so Vinbero runs on router1 and
+router3.
+
 ```bash
 sudo ./setup.sh
 
-# Start Vinbero
-sudo ip netns exec hl2-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
+# Start Vinbero on both routers
+sudo ip netns exec hl2-router1 ../../out/bin/vinberod -c vinbero_router1.yaml &
+sudo ip netns exec hl2-router3 ../../out/bin/vinberod -c vinbero_router3.yaml &
 ```
 
-### 2. Register the HeadendL2 entry
+### 2. Register the HeadendL2 entries
+
+`--interface` is required: it names the access port the VLAN arrives on.
 
 ```bash
-sudo ip netns exec hl2-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 hl2 create --vlan-id 100 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
+# Forward path on router1
+sudo ip netns exec hl2-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
+  hl2 create --interface hl2-rt1h1 --vlan-id 100 \
+  --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
+
+# Return path on router3
+sudo ip netns exec hl2-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface hl2-rt3h2 --vlan-id 100 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2
 ```
 
 ### 3. Test

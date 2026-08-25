@@ -90,6 +90,14 @@ sudo ip netns exec dx2v-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
 # End.DX2V SID referring to table_id=1
 sudo ip netns exec dx2v-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
   sid create --trigger-prefix fc00:3::3/128 --action END_DX2V --table-id 1
+
+# Return path: router3 encapsulates both VLANs back towards host1
+sudo ip netns exec dx2v-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface dx2v-rt3h2 --vlan-id 100 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2
+sudo ip netns exec dx2v-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface dx2v-rt3h2 --vlan-id 200 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2
 ```
 
 ### 4. Test

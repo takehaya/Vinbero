@@ -60,8 +60,8 @@ sudo ./teardown.sh
 ## テストで検証する内容
 
 1. **Split-horizon (Phase C)**: `host1 → broadcast → PE1` が PE2 経由で
-   host1 に戻ってこないこと。PE1 側で `SPLIT_HORIZON_TX > 0`、PE2 側
-   (fail-safe 経路) で `SPLIT_HORIZON_RX` をアサート。
+   host1 に戻ってこないこと。両 PE で `SPLIT_HORIZON_TX > 0` をアサート
+   し、host1 側の pcap に自分発の ARP frame が 0 件であることを確認。
 2. **DF 選出 (Phase D)**: 以下のコマンド例の `vbctl` は `test.sh` /
    `smoke_api.sh` が `vinbero -s http://127.0.0.1:<PE port>` を包んだシェル関数
    です。netns 内に `vbctl` という実バイナリはありません。`--esi` には冒頭の実

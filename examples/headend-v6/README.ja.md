@@ -68,7 +68,7 @@ sudo ip netns exec hv6-router2 tcpdump -i hv6-rt2rt1 -n ip6
 
 外側IPv6+SRH内に内側IPv6パケットがカプセル化されていることが確認できます。
 
-### 4. 環境のクリーンナップ
+### 4. 環境のクリーンアップ
 
 ```bash
 sudo ./teardown.sh

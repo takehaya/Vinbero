@@ -70,7 +70,7 @@ sudo ip netns exec dx6-router3 tcpdump -i dx6-rt3rt2 -n ip6
 sudo ip netns exec dx6-router3 tcpdump -i dx6-rt3h2 -n ip6
 ```
 
-### 4. 環境のクリーンナップ
+### 4. 環境のクリーンアップ
 ```bash
 sudo ./teardown.sh
 ```
