@@ -1064,7 +1064,10 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 	}
 	// This is an upsert. Whatever aux the superseded entry pointed at goes
 	// unreferenced the moment the new entry lands, so remember it now.
-	supersededAux := m.exactSidFunctionAuxIndex(key, alreadyOwned)
+	supersededAux, err := m.exactSidFunctionAuxIndex(key)
+	if err != nil {
+		return err
+	}
 	if aux != nil {
 		if err := m.allocAndPutBuiltinAux(entry, aux); err != nil {
 			return err
@@ -1083,23 +1086,35 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 }
 
 // exactSidFunctionAuxIndex returns the aux index of the entry stored under
-// exactly key, or 0. It is only consulted on an upsert (the owner map, a
-// hash keyed by the exact prefix, already told us an entry is there), which
-// keeps the scan off the common path: sid_function_map is an LPM trie, so
-// Lookup would answer with a covering entry rather than this one.
-func (m *MapOperations) exactSidFunctionAuxIndex(key *LpmKeyV6, alreadyOwned bool) uint16 {
-	if !alreadyOwned {
-		return 0
+// exactly key, or 0 when this prefix has no entry of its own.
+//
+// sid_function_map is an LPM trie, so Lookup answers with a covering entry
+// rather than this one and cannot be used for the question. A miss there
+// does settle it though -- nothing covers the key, so nothing sits on it
+// either -- which keeps the scan off the path a fresh create takes.
+// Ownership is deliberately not used as the shortcut: entries pinned before
+// owner tracking existed carry no owner record, and skipping them would
+// leak their aux on the first upsert.
+func (m *MapOperations) exactSidFunctionAuxIndex(key *LpmKeyV6) (uint16, error) {
+	var covering SidFunctionEntry
+	if err := m.objs.SidFunctionMap.Lookup(key, &covering); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("lookup SID function entry: %w", err)
 	}
 	var k LpmKeyV6
 	var e SidFunctionEntry
 	iter := m.objs.SidFunctionMap.Iterate()
 	for iter.Next(&k, &e) {
 		if k == *key {
-			return e.AuxIndex
+			return e.AuxIndex, nil
 		}
 	}
-	return 0
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("scan SID function map: %w", err)
+	}
+	return 0, nil
 }
 
 // releaseSupersededBuiltinAux frees the aux index an upsert left behind.
@@ -1146,7 +1161,10 @@ func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entr
 	}
 	// Binding a plugin aux over an entry that carried a builtin one leaves
 	// that builtin index unreferenced, same as any other upsert.
-	supersededAux := m.exactSidFunctionAuxIndex(key, alreadyOwned)
+	supersededAux, err := m.exactSidFunctionAuxIndex(key)
+	if err != nil {
+		return err
+	}
 	if err := m.auxAlloc.WithOwnerLocked(uint32(entry.AuxIndex), expectedAuxOwner, func() error {
 		return putMainAndOwner(m.objs.SidFunctionMap, m.sidFunctionOwners, key, entry, entryOwner, alreadyOwned, "SID function", nil)
 	}); err != nil {

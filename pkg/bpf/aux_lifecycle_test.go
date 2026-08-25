@@ -6,12 +6,14 @@ import (
 )
 
 // auxTestOps loads a collection and returns MapOperations for the aux
-// lifecycle tests. Requires sudo, like the rest of pkg/bpf.
+// lifecycle tests. Loading needs privileges, like the rest of pkg/bpf: the
+// suite is run with `go test -exec "sudo -E"`, and a load failure is a real
+// failure rather than a reason to skip.
 func auxTestOps(t *testing.T) *MapOperations {
 	t.Helper()
 	objs, err := ReadCollection(nil, nil)
 	if err != nil {
-		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+		t.Fatalf("Failed to load BPF objects: %v", err)
 	}
 	t.Cleanup(func() { _ = objs.Close() })
 	return NewMapOperations(objs)
@@ -98,5 +100,41 @@ func TestDeleteSidFunction_MissingPrefixKeepsTheCoveringAux(t *testing.T) {
 	}
 	if aux.Nexthop.Nexthop != nh {
 		t.Errorf("aux nexthop = %v, want %v (zeroed by an unrelated delete)", aux.Nexthop.Nexthop, nh)
+	}
+}
+
+// Entries pinned before owner tracking existed carry no owner record, so
+// ownership cannot stand in for "this prefix already has an entry". Such an
+// entry must still hand its aux back when it is upserted.
+func TestCreateSidFunction_UpsertFreesTheAuxOfAnUnownedEntry(t *testing.T) {
+	m := auxTestOps(t)
+	const prefix = "fd00:1:a11:2::1/128"
+
+	// Build the legacy shape by hand: a main-map entry with a builtin aux
+	// and no owner record.
+	key, err := buildLpmKeyV6(prefix)
+	if err != nil {
+		t.Fatalf("buildLpmKeyV6: %v", err)
+	}
+	legacyAux, err := m.auxAlloc.AllocOwner(AuxOwnerBuiltin)
+	if err != nil {
+		t.Fatalf("AllocOwner: %v", err)
+	}
+	if err := m.objs.SidAuxMap.Put(legacyAux, NewSidAuxNexthop(nexthopBytes(t, "fe80::9"))); err != nil {
+		t.Fatalf("put aux: %v", err)
+	}
+	legacy := &SidFunctionEntry{Action: actionEndX, AuxIndex: uint16(legacyAux)}
+	if err := m.objs.SidFunctionMap.Put(key, legacy); err != nil {
+		t.Fatalf("put legacy entry: %v", err)
+	}
+	t.Cleanup(func() { _ = m.ForceDeleteSidFunction(prefix) })
+
+	entry := &SidFunctionEntry{Action: actionEndX}
+	if err := m.CreateSidFunction(prefix, entry, NewSidAuxNexthop(nexthopBytes(t, "fe80::1")), OwnerRPC); err != nil {
+		t.Fatalf("upsert over the legacy entry: %v", err)
+	}
+
+	if owner := m.auxAlloc.OwnerOf(legacyAux); owner != "" {
+		t.Errorf("legacy aux index %d owner = %q, want it freed", legacyAux, owner)
 	}
 }
