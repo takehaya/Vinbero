@@ -380,16 +380,25 @@ func (s *SidFunctionServer) SidFunctionDelete(
 // its circuit. Caller holds s.mu.
 func (s *SidFunctionServer) deleteOneSidFunction(prefix string) error {
 	circuitIf, circuitVlan, hasCircuit := s.captureProxyCircuit(prefix)
+	// A uA claim is keyed by the masked address of its /64, which is also
+	// the address a locator-minted /128 service SID would use. Decide from
+	// the entry being deleted, before it is gone, so deleting some unrelated
+	// /64 at that address cannot free a live service SID's function.
+	releasesUsidClaim := s.usidClaimIsOurs(prefix)
 	if err := s.mapOps.DeleteSidFunction(prefix, bpf.OwnerRPC); err != nil {
 		return err
 	}
 	// Locator-minted SIDs return their function value to the pool, and so
-	// does a uA entry that claimed its function CSID (its prefix is a /64,
-	// not a /128). Bindings for direct trigger_prefix SIDs simply miss the
-	// lookup (Manager.ReleaseSID is a no-op for unknown sids).
+	// does a uA entry that claimed its function CSID. Bindings for direct
+	// trigger_prefix SIDs simply miss the lookup (Manager.ReleaseSID is a
+	// no-op for unknown sids).
 	if s.locatorMgr != nil {
-		if p, err := netip.ParsePrefix(prefix); err == nil {
-			s.locatorMgr.ReleaseSID(p.Masked().Addr())
+		if sid, err := parseLocatorSID(prefix); err == nil {
+			s.locatorMgr.ReleaseSID(sid)
+		} else if releasesUsidClaim {
+			if p, err := netip.ParsePrefix(prefix); err == nil {
+				s.locatorMgr.ReleaseSID(p.Masked().Addr())
+			}
 		}
 	}
 	// End.B6 policy is cleaned up automatically with the aux entry.

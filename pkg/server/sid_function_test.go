@@ -891,3 +891,39 @@ func TestClaimUsidFunction_NoOpCases(t *testing.T) {
 		t.Fatalf("loc1 pool was touched: %v", err)
 	}
 }
+
+// Deleting some other entry that happens to sit on the same base address as
+// a locator-minted service SID must not hand that SID's function back to the
+// allocator: the SID is still live, and the CSID would be reissued.
+func TestDeleteSidFunction_KeepsForeignLocatorClaim(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	// A service SID claims CSID 0xc001 through the locator.
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+		t.Fatalf("service SID allocation: %v", err)
+	}
+
+	// An unrelated non-uA entry whose /64 masks to the same address.
+	const prefix = "fd00:aaaa:b002:c001::/64"
+	other := &v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: prefix,
+	}
+	if err := s.createOneSidFunction(other); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.deleteOneSidFunction(prefix); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("the service SID's CSID was released by an unrelated delete: err = %v, want ErrFunctionInUse", err)
+	}
+}
