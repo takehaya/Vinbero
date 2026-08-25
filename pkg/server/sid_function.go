@@ -312,8 +312,8 @@ func (s *SidFunctionServer) claimUsidFunction(sidFunc *v1.SidFunction) (func(), 
 		return noop, nil
 	}
 	sid := p.Masked().Addr()
-	loc, ok := s.locatorMgr.FindByContaining(sid)
-	if !ok || loc.Behavior != locator.BehaviorUSID {
+	loc, ok := s.longestUsidLocator(sid)
+	if !ok {
 		return noop, nil
 	}
 	fn, ok, err := loc.ParseSID(sid)
@@ -331,6 +331,26 @@ func (s *SidFunctionServer) claimUsidFunction(sidFunc *v1.SidFunction) (func(), 
 		return noop, fmt.Errorf("uA function CSID 0x%04x in locator %q: %w", fn, loc.Name, err)
 	}
 	return func() { s.locatorMgr.ReleaseSID(sid) }, nil
+}
+
+// longestUsidLocator returns the most specific uSID locator containing sid.
+// Manager.FindByContaining is behavior-agnostic, so a classic locator nested
+// inside a uSID one would win the longest match and make the claim a no-op,
+// leaving the enclosing uSID allocator free to reissue the same CSID as a
+// service SID.
+func (s *SidFunctionServer) longestUsidLocator(sid netip.Addr) (locator.Locator, bool) {
+	var best locator.Locator
+	found := false
+	for _, loc := range s.locatorMgr.List() {
+		if loc.Behavior != locator.BehaviorUSID || !loc.Prefix.Contains(sid) {
+			continue
+		}
+		if !found || loc.Prefix.Bits() > best.Prefix.Bits() {
+			best = loc
+			found = true
+		}
+	}
+	return best, found
 }
 
 // usidClaimIsOurs reports whether a uA entry already occupies prefix, which

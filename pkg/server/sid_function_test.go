@@ -959,3 +959,34 @@ func TestSidFunctionCreate_UAReplacedByOtherActionReleasesCSID(t *testing.T) {
 		t.Fatalf("the replaced uA's CSID leaked: %v", err)
 	}
 }
+
+// Locators may nest. A classic locator inside a uSID one wins the
+// behavior-agnostic longest match, so the claim has to pick the enclosing
+// uSID locator itself -- otherwise it silently skips and that allocator
+// reissues the CSID as a service SID.
+func TestClaimUsidFunction_PicksTheUsidLocatorUnderNesting(t *testing.T) {
+	mgr := usidLocator(t, "usid", "fd00:aaaa:b002::/48")
+	classic := &locator.Locator{
+		Name:              "classic",
+		Prefix:            netip.MustParsePrefix("fd00:aaaa:b002:c001::/64"),
+		BlockLen:          40,
+		NodeLen:           24,
+		FunctionLen:       16,
+		ArgumentLen:       48,
+		Behavior:          locator.BehaviorClassic,
+		FunctionAutoStart: 1,
+		FunctionAutoEnd:   0xffff,
+	}
+	if err := mgr.Add(classic); err != nil {
+		t.Fatalf("nested classic locator Add: %v", err)
+	}
+	s := NewSidFunctionServer(nil, nil, mgr, nil)
+
+	if _, err := s.claimUsidFunction(uaSidFunction("fd00:aaaa:b002:c001::/64")); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("usid", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("the uSID allocator can still reissue the CSID: err = %v, want ErrFunctionInUse", err)
+	}
+}
