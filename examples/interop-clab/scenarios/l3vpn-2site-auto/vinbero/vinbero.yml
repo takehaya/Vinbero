@@ -8,8 +8,6 @@ internal:
     - eth2
   bpf:
     device_mode: "generic"
-    verifier_log_level: 2
-    verifier_log_size: 1073741823
   server:
     bind: "0.0.0.0:8080"
   logger:

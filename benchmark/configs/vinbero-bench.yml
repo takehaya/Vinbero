@@ -4,8 +4,6 @@ internal:
     - enp138s0f1np1
   bpf:
     device_mode: "driver"
-    verifier_log_level: 0
-    verifier_log_size: 1073741823
   server:
     bind: "127.0.0.1:8082"
   logger:
