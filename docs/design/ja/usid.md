@@ -44,11 +44,43 @@ uN と uA は SRH の有無に関係なく動きます。shift 処理は SRH を
 
 `sid_function_map` は LPM trie なので、/48 や /64 の locator prefix エントリと、container 終端の /128 service SID エントリが同居できます。終端 DA では /128 が longest match で勝つため、uDT4 のような terminal behavior は従来の実装のまま動きます。
 
+どこで table を引き、その結果がどの分岐に効くかを図にすると次のようになります。丸括弧付きの箱が BPF map です。
+
+```mermaid
+flowchart TD
+    RX["ingress packet (XDP)"] --> S1{"nexthdr = 43 かつ<br/>SRH type = 4 か"}
+    S1 -->|yes| L1[("sid_function_map (LPM)<br/>key = DA /128")]
+    S1 -->|no| L2[("sid_function_map (LPM)<br/>key = DA /128")]
+    L1 -->|miss| PASS0["XDP_PASS"]
+    L2 -->|miss| PASS0
+    L1 -->|hit| TC
+    L2 -->|hit| G{"action は uN / uA か"}
+    G -->|yes| TC["tail call sid_endpoint_progs[action]<br/>slot 26 = uN / 27 = uA"]
+    G -->|no| GATE{"inner proto が<br/>IPIP / IPv6 / Ethernet か"}
+    GATE -->|yes| TC
+    GATE -->|no| PASS0
+    TC --> AUX[("sid_aux_map[aux_index]<br/>usid variant")]
+    AUX -->|"block_len_bytes ≠ 4"| DROP["XDP_DROP"]
+    AUX --> ARG{"Argument = 0 か"}
+    ARG -->|yes| TERM["classic End / End.X へ fall through<br/>SRH 無しなら XDP_PASS"]
+    ARG -->|no| HL{"hop limit ≤ 1 か"}
+    HL -->|yes| DROP
+    HL -->|no| SHIFT["hop limit を 1 減らし<br/>Argument を LBL 直後へ shift"]
+    SHIFT --> RE[("sid_function_map 再 lookup<br/>key = shift 後の DA")]
+    RE -->|同じ entry| ARG
+    RE -->|別の local entry| RD["その slot へ tail call で再 dispatch<br/>SRH 無しで不適格なら XDP_PASS"]
+    RE -->|local に無し| FWD["bpf_fib_lookup<br/>uN は DA / uA は aux の nexthop"]
+    FWD -->|REDIRECT| OUT["bpf_redirect"]
+    FWD -->|NO_NEIGH| NN["uN は hop limit を戻して XDP_PASS<br/>uA は XDP_DROP"]
+    FWD -->|blackhole / unreachable / prohibit| DROP
+```
+
 ## shift アルゴリズム
 
 `src/endpoint/srv6_endpoint_usid.h` が実装です。処理は次のとおりです。
 
-1. Argument 全体がゼロかを判定します。uN は byte 6 から 10 byte、uA は byte 8 から 8 byte を見ます。次の 16 bit だけを見る実装は誤りで、後続に uSID が残っていても終端と誤判定します
+1. Argument 全体がゼロかを判定します。uN は byte 6 から 10 byte、uA は byte 8 から 8 byte を見ます。
+   1. 次の 16 bit だけを見る実装は誤りで、後続に uSID が残っていても終端と誤判定します
 2. Argument が非ゼロなら hop limit を確認します。1 以下なら drop します。ICMPv6 の Time Exceeded は生成しません。既存の End 系と同じ扱いです
 3. hop limit を 1 減らします。RFC 9800 Sec.4.1.1 の疑似コード N02-N08 のとおり、論理的な 1 hop につき 1 回減らします
 4. Argument を locator block の直後 (byte 4) へ左詰めし、空いた末尾をゼロ埋めします。uN は 2 byte、uA は 4 byte です
@@ -119,6 +151,34 @@ nexthop を offset 0 に置いているので、uA の fall-through が `process
 `sid_aux_entry` は plugin ABI として 256 byte 固定です。union の variant 追加は sizeof も既存 member の offset も動かしませんが、これは静かに壊れる種類の制約なので `_Static_assert(sizeof(struct sid_aux_entry) == SID_AUX_PLUGIN_RAW_MAX)` でコンパイル時に固定しました。
 
 ## コントロールプレーン
+
+data plane が引く table に、誰が何を書くかは次のとおりです。実線が書き込み、破線が読み取りです。`locator.Manager` だけは BPF map ではなく userspace の in-memory 構造で、CSID の重複を防ぐ allocator と binding 台帳を持ちます。
+
+```mermaid
+flowchart LR
+    OP["operator (vbctl)"] --> RPC1["SidFunctionService<br/>SidFunctionCreate / Delete"]
+    OP --> RPC2["LocatorService<br/>LocatorCreate"]
+
+    RPC1 --> VAL["protoToEntry<br/>prefix 長 / node CSID / function CSID<br/>nexthop / usid_block_len を検証"]
+    VAL --> CLAIM["claimUsidFunction<br/>uA の function CSID を予約"]
+    VAL --> PUT["MapOperations.CreateSidFunction"]
+
+    RPC2 --> ADD["AddLocatorAndClaim<br/>Add と reconcile を 1 トランザクションで"]
+
+    CLAIM --> MGR["locator.Manager<br/>allocator + binding 台帳<br/>(in-memory)"]
+    ADD --> MGR
+    ADD -.->|"既存 uA を走査"| SFM
+    CLAIM -.->|"claim の所有者を確認"| SFM
+
+    PUT --> SFM[("sid_function_map (LPM)<br/>prefix → action + aux_index")]
+    PUT --> SAM[("sid_aux_map<br/>usid variant: nexthop + block_len_bytes")]
+    PUT --> OWN[("sid_function_owner_map<br/>aux_owner_map")]
+
+    SFM -.->|"lookup"| DP["data plane (XDP)"]
+    SAM -.->|"lookup"| DP
+```
+
+BGP からの経路はまだありません。Phase 4 で uSID locator から service SID を払い出すときに、`locator.Manager` の右側に applier がもう 1 本ぶら下がります。
 
 ### locator
 
