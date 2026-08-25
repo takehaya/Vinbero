@@ -77,6 +77,45 @@ sleep 1
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Vinbero XDP)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Vinbero XDP)"
 
+# End advances the segment list and forwards, which makes router2 a hop on
+# the path: RFC 8986 S12 spends one hop limit there. Capture the same
+# forward-direction packet on both sides of router2 and compare. This is
+# the only place the redirect path can be observed -- BPF_PROG_TEST_RUN
+# never resolves a FIB entry, so its packets always take the kernel path.
+print_info "Checking the outer hop limit across router2..."
+ns_router1="${TOPO_NS_PREFIX}router1"
+ns_router3="${TOPO_NS_PREFIX}router3"
+veth_rt1_rt2="${TOPO_NS_PREFIX}rt1rt2"
+veth_rt3_rt2="${TOPO_NS_PREFIX}rt3rt2"
+in_dump=$(mktemp)
+out_dump=$(mktemp)
+
+ip netns exec "$ns_router1" timeout 12 tcpdump -c 1 -nn -v -Q out -i "$veth_rt1_rt2" \
+  'ip6 and ip6[6] == 43' > "$in_dump" 2>/dev/null &
+in_pid=$!
+ip netns exec "$ns_router3" timeout 12 tcpdump -c 1 -nn -v -Q in -i "$veth_rt3_rt2" \
+  'ip6 and ip6[6] == 43' > "$out_dump" 2>/dev/null &
+out_pid=$!
+sleep 2
+ip netns exec "$ns_host1" ping -c 3 -W 2 172.0.2.1 > /dev/null 2>&1 || true
+wait $in_pid 2>/dev/null || true
+wait $out_pid 2>/dev/null || true
+
+hlim_in=$(grep -o 'hlim [0-9]*' "$in_dump" | head -1 | cut -d' ' -f2)
+hlim_out=$(grep -o 'hlim [0-9]*' "$out_dump" | head -1 | cut -d' ' -f2)
+rm -f "$in_dump" "$out_dump"
+
+if [ -z "$hlim_in" ] || [ -z "$hlim_out" ]; then
+    print_error "hop limit across router2: no SRv6 packet captured (in='$hlim_in' out='$hlim_out')"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+elif [ "$hlim_out" -eq $((hlim_in - 1)) ]; then
+    print_success "hop limit across router2: $hlim_in -> $hlim_out (one hop)"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    print_error "hop limit across router2: $hlim_in -> $hlim_out, expected $((hlim_in - 1))"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true
 wait $VINBERO_PID 2>/dev/null || true
