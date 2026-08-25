@@ -46,7 +46,7 @@ sudo ./teardown.sh
 
 router2 は terminal SID への経路を一切持たないので、uA が設定した nexthop を使わずに shift 後の DA を FIB で引いた場合は転送できません。phase 2 の ping が通ること自体が adjacency 転送の確認になります。
 
-phase 2 は neighbor table を flush してから traffic を流します。uA は FIB が NO_NEIGH を返したパケットを kernel に渡して neighbor を解決させるので、事前の NDP warm up なしで通信が立ち上がります。
+uN と違い、uA は FIB が NO_NEIGH を返したパケットを fail-closed で drop します。kernel に渡すと adjacency ではなく DA 側の経路で転送されてしまうためです。したがって phase 2 は traffic の前に neighbor を解決します。classic End.X と同じ要件です。
 
 ## 制約
 
