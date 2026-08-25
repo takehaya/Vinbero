@@ -58,6 +58,12 @@ run ip netns exec "$ns_router1" ip -6 route add local fd00:aaaa:b001:d001::/128 
 ns_sysctl "$ns_router2" net.ipv6.conf.${veth_rt2_rt1}.seg6_enabled 1
 ns_sysctl "$ns_router2" net.ipv6.conf.${veth_rt2_rt3}.seg6_enabled 1
 
+# Both uA SIDs are local addresses on the node, as an operator would
+# configure them: a container that ends on one of them arrives with the
+# Argument zeroed out and is handed up for local delivery.
+run ip netns exec "$ns_router2" ip -6 addr add fd00:aaaa:b002:a003::/128 dev lo nodad
+run ip netns exec "$ns_router2" ip -6 addr add fd00:aaaa:b002:a001::/128 dev lo nodad
+
 run ip netns exec "$ns_router2" ip -6 route add local fd00:aaaa:b002:a003::/64 encap seg6local action End.X nh6 fc00:23::1 flavors next-csid lblen 32 nflen 32 dev "$veth_rt2_rt3"
 run ip netns exec "$ns_router2" ip -6 route add local fd00:aaaa:b002:a001::/64 encap seg6local action End.X nh6 fc00:12::1 flavors next-csid lblen 32 nflen 32 dev "$veth_rt2_rt1"
 

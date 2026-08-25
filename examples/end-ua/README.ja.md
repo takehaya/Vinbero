@@ -42,7 +42,7 @@ sudo ./teardown.sh
 ## 検証内容
 
 1. Linux native の next-csid flavor で host1 と host2 の双方向 ping が通ることを確認します
-2. Linux native の local route を削除し、Vinbero を起動して同じ /64 に END_UA を登録し、双方向 ping が通ることを確認します
+2. Linux native の local route を削除し、Vinbero を起動して同じ 2 つの /64 に END_UA を登録し、双方向 ping が通ることを確認します
 
 router2 は terminal SID への経路を一切持たないので、uA が設定した nexthop を使わずに shift 後の DA を FIB で引いた場合は転送できません。phase 2 の ping が通ること自体が adjacency 転送の確認になります。
 

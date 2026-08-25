@@ -49,6 +49,12 @@ run ip netns exec "$ns_router1" ip -6 route add local fd00:aaaa:b001:d001::/128 
 ns_sysctl "$ns_router2" net.ipv6.conf.${veth_rt2_rt1}.seg6_enabled 1
 ns_sysctl "$ns_router2" net.ipv6.conf.${veth_rt2_rt3}.seg6_enabled 1
 
+# The bare uN SID is a local address on the node, as an operator would
+# configure it: a container that ends here arrives with the Argument zeroed
+# out, and both Linux and Vinbero hand that packet up for local delivery.
+# Without the address the kernel would route it by the locator prefix.
+run ip netns exec "$ns_router2" ip -6 addr add fd00:aaaa:b002::/128 dev lo nodad
+
 run ip netns exec "$ns_router2" ip -6 route add local fd00:aaaa:b002::/48 encap seg6local action End flavors next-csid lblen 32 nflen 16 dev "$veth_rt2_rt1"
 run ip netns exec "$ns_router2" ip -6 route add fd00:aaaa:b003::/48 via fc00:23::1 dev "$veth_rt2_rt3"
 run ip netns exec "$ns_router2" ip -6 route add fd00:aaaa:b001::/48 via fc00:12::1 dev "$veth_rt2_rt1"
