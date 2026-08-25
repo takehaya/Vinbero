@@ -98,7 +98,7 @@ BPF_PROG_TEST_RUN ベースのアサーションで完全にカバー済み。
 
 | ファイル | 用途 |
 |---|---|
-| `README.md` | 本ドキュメント |
+| `README.ja.md` | 本ドキュメント (英語版は `README.md`) |
 | `smoke_api.sh` | API のみのスモーク (PE 1 台、データプレーン無し、10 秒以内に完走) |
 | `setup.sh` | 共有 CE ブリッジを含む 5-namespace トポロジー構築 |
 | `teardown.sh` | namespace / veth の撤去 |

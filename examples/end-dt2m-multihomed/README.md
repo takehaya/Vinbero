@@ -97,7 +97,7 @@ first and then moving to `setup.sh` + `test.sh` is the smoother path.
 
 | File | Purpose |
 |---|---|
-| `README.md` | This document |
+| `README.md` | This document (Japanese version: `README.ja.md`) |
 | `smoke_api.sh` | API-only smoke test (one PE, no data plane, finishes within 10 seconds) |
 | `setup.sh` | Builds the 5-namespace topology including the shared CE bridge |
 | `teardown.sh` | Removes the namespaces and veths |
