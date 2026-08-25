@@ -585,7 +585,7 @@ service SID として自分の owner で install します。plugin が同じ pr
 | unregister は owner state の flush が成功してから claim を解放する。flush が失敗した場合は claim と store を保持し、plugin を registry に dead として戻す。 | flush は面ごとに進み部分削除を rollback しない。また built-in が後から作るのは既定の単一 SID の H.Encaps で、plugin が宣言していた mode や segment list や source は再現されない。 | flush 失敗は unregister を retry する。unregister 後の churn で転送の形が変わり得ることは運用条件として扱う。 |
 | upgrade は behavior claim を新しい集合へ 1 回で置換し、途中で別の plugin に codepoint を取られて巻き戻せなくなる形を避ける。publish 前の失敗は前の集合へ戻す。 | behavior を減らす upgrade では、外した codepoint の claim が旧 state の reconcile より先に返り、その間に届いた経路は built-in に渡る。 | 窓を避けたい場合は unregister で flush してから新しい集合で登録し直す。address は取り直しになる。 |
 | 通常の unregister は in-memory の inventory から owner state を flush してから claim を返す。 | daemon 再起動直後、plugin が local SID を宣言し直す前に unregister すると、前の run の pinned dispatch entry が flush の視界に入らず、残したまま claim が解放される。 | plugin owner の entry は SID 削除 RPC の owner 検査が拒み、force-delete の RPC も無いので、operator が消す手段はいま無い。残存を確認したら、その slot と locator を再利用しないでおく。owner ごとの inventory から flush する形は繰越し。 |
-| manifest と state が揃っていれば、再起動時にも claim を予約して pinned state と built-in の対応を保つ。 | 新規登録や behavior を足す upgrade が manifest の rename 前に persist で失敗すると、その run は instance と claim と state を持って動くが、再起動時は manifest が無いので claim が予約されず、pinned state の codepoint が built-in へ流れる。 | persist 失敗の error を受けたら、登録を retry して manifest を揃えるか、unregister で state ごと flush する。 |
+| manifest と state が揃っていれば、再起動時にも claim を予約して pinned state と built-in の対応を保つ。 | manifest の rename 前に persist で失敗すると、その run は instance と claim と state を持って動くが、再起動時の claim 予約は manifest しか読まない。新規登録では manifest が無いので claim が丸ごと予約されない。behavior を足す upgrade では旧 manifest が残るので旧 claim は予約され、足した codepoint だけが予約されないまま pinned state が built-in へ流れる。 | persist 失敗の error を受けたら、登録を retry して manifest を揃えるか、unregister で state ごと flush する。 |
 | claim の寿命は plugin の状態の寿命に合わせる、が全体の不変条件である。 | forget は operator が明示的にこの対応を破る操作で、daemon が消し方を知らない状態を残したまま claim と予約を返す。 | 残存 state を確認し、force-delete の経路が入るまでは返された slot と locator を再利用しない。以後の残存 state は operator が引き受ける (既知の限界の節)。 |
 
 ## 広告の所有権
@@ -854,11 +854,12 @@ stateDiagram-v2
     Running --> Dead: instance の作り直し自体に失敗。上限を待たず fail-static
     Running --> Stored: daemon shutdown。flush しない
     Running --> Absent: unregister。flush 成功
-    Running --> FlushedStored: unregister。flush 成功後の store 削除失敗
+    Running --> FlushedStored: unregister。flush 成功後、manifest unlink 前の store 削除失敗
     Running --> Dead: unregister の flush 失敗。dead として registry に戻す
 
     Dead --> Stored: daemon restart。manifest から再試行
     Dead --> Absent: unregister の retry 成功
+    Dead --> FlushedStored: retry の flush 成功後、manifest unlink 前の store 削除失敗
     Dead --> Dead: retry の flush 失敗。部分削除は rollback しない
 
     Stored --> Running: restore 成功
@@ -867,7 +868,7 @@ stateDiagram-v2
 
     Unrestored --> Running: 再登録または次回 restore の成功で unrestored を消す
     Unrestored --> Forgotten: forget 成功。claim と store と slot / locator の予約を解放
-    Unrestored --> ForgetPartial: forget の途中失敗。claim だけ先に失う
+    Unrestored --> ForgetPartial: forget の途中失敗。claim を先に失い store は失敗段階次第
 
     RunningUnrestored --> Running: 登録の retry 成功で unrestored を消す
     RunningUnrestored --> RunningUnrestored: forget は running のため拒否
@@ -893,8 +894,12 @@ stateDiagram-v2
   だけ失敗し、かつ manifest の unlink 前だった状態です。restart は空の
   state で plugin を持ち帰ります。unlink 後の失敗なら manifest は無いので
   未登録と同じです。
-- forget 部分失敗は claim だけ先に失われた状態で、unrestored の記録と slot /
-  locator の予約と map の状態は残ります。
+- forget 部分失敗は claim が先に失われた状態で、unrestored の記録と slot /
+  locator の予約と map の状態は残ります。store は失敗の段階次第で、manifest の
+  unlink 前なら丸ごと残り、unlink 後なら manifest も既に失われていて通常の
+  restart では restore できません。
+- unregister や forget の store 削除が manifest の unlink 後に失敗した場合は、
+  現在の namespace に manifest が無いので図の上では未登録と同じ位置に落ちます。
 
 restore 中に publish 後の persist 失敗が起きたときの二重表示は、instance が
 動いたまま restore 側が一律に失敗を記録するためです。実害は表示の混乱に
