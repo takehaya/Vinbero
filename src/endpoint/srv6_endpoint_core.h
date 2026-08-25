@@ -319,6 +319,21 @@ static __always_inline int endpoint_common_processing(
     if (ret == -2)
         return XDP_DROP;
 
+    // RFC 8986 S05 and S12: the segment list is advancing, so this node is
+    // a hop on the path and spends a hop limit. Only the behaviors that
+    // forward the packet onward reach here (End, End.X, End.T); the decap
+    // behaviors terminate the outer header instead and leave it alone, and
+    // the SL=0 flavors above are the last segment.
+    //
+    // Two deliberate differences from the pseudocode. S06 asks for an
+    // ICMPv6 Time Exceeded before discarding, which no behavior here
+    // generates. And the malformed-SRH check (S08-S11) already ran inside
+    // endpoint_init, so a packet that is both malformed and out of hop
+    // limit is dropped for the former; both outcomes are a drop either way.
+    if (ip6h->hop_limit <= 1)
+        return XDP_DROP;
+    ip6h->hop_limit--;
+
     if (endpoint_update_da(ectx) != 0)
         return XDP_DROP;
 
