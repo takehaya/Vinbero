@@ -19,11 +19,37 @@
 // as "the sum of the LNL and the FL of the SID". Sec.4.1.2 replaces only
 // N08 (forward over the adjacency), leaving the shift untouched. So uN,
 // whose SID has no Function, consumes LNL = 16 bits, and uA, whose Function
-// identifies the adjacency, consumes LNL + FL = 32. The hop limit is decremented once per
-// logical uN/uA execution (RFC 9800 Sec.4.1.1 pseudocode N02-N08); an
-// exhausted hop limit drops without ICMPv6 generation, matching the other
-// End behaviors here. A zero Argument means the container ended on this
-// node and processing falls through to classic End / End.X.
+// identifies the adjacency, consumes LNL + FL = 32.
+//
+// One execution drawn on the DA, in 16-bit cells (byte offsets on top):
+//
+//   uN at fd00:aaaa:b002::/48       SID = LBL + LNL,      shift 16
+//          0-1    2-3    4-5    6-7    8-9   10-11  12-13  14-15
+//        +------+------+------+------+------+------+------+------+
+//    in  | fd00 | aaaa | b002 | b003 | d004 | 0000 | 0000 | 0000 |
+//        +------+------+------+------+------+------+------+------+
+//        |<--- LBL --->|<-LNL>|<-------------- Argument -------->|
+//        +------+------+------+------+------+------+------+------+
+//   out  | fd00 | aaaa | b003 | d004 | 0000 | 0000 | 0000 | 0000 |
+//        +------+------+------+------+------+------+------+------+
+//                         ^ Argument lands here              ^ zero fill
+//
+//   uA at fd00:aaaa:b002:a003::/64  SID = LBL + LNL + FL, shift 32
+//          0-1    2-3    4-5    6-7    8-9   10-11  12-13  14-15
+//        +------+------+------+------+------+------+------+------+
+//    in  | fd00 | aaaa | b002 | a003 | b003 | d004 | 0000 | 0000 |
+//        +------+------+------+------+------+------+------+------+
+//        |<--- LBL --->|<-LNL>|<-FL->|<---------- Argument ----->|
+//        +------+------+------+------+------+------+------+------+
+//   out  | fd00 | aaaa | b003 | d004 | 0000 | 0000 | 0000 | 0000 |
+//        +------+------+------+------+------+------+------+------+
+//                         ^ same landing spot         ^ zero fill (2 cells)
+//
+// The hop limit is decremented once per logical uN/uA execution (RFC 9800
+// Sec.4.1.1 pseudocode N02-N08); an exhausted hop limit drops without
+// ICMPv6 generation, matching the other End behaviors here. A zero Argument
+// means the container ended on this node and processing falls through to
+// classic End / End.X.
 //
 // Deployment constraint: a uN entry is a /48 and a uA entry a /64, so
 // every address inside that prefix except the SID itself carries a
