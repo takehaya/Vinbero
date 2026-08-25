@@ -46,6 +46,8 @@ uN と uA は SRH の有無に関係なく動きます。shift 処理は SRH を
 
 どこで table を引き、その結果がどの分岐に効くかを図にすると次のようになります。丸括弧付きの箱が BPF map です。
 
+tail call の飛び先は uN / uA 固定ではなく、hit した entry の action の slot です。SRH なし経路の 2 つの判定は「どの slot へ飛ぶか」ではなく「そもそも tail call するか」を決めています。uN / uA は upper-layer protocol を問わず通し、それ以外の action は従来どおり tunnel payload のときだけ通します。uN / uA 以外の slot に入ったパケットはこの図の対象外で、既存の behavior がそのまま処理します。
+
 ```mermaid
 flowchart TD
     RX["ingress packet (XDP)"] --> S1{"nexthdr = 43 かつ<br/>SRH type = 4 か"}
@@ -55,11 +57,12 @@ flowchart TD
     L2 -->|miss| PASS0
     L1 -->|hit| TC
     L2 -->|hit| G{"action は uN / uA か"}
-    G -->|yes| TC["tail call sid_endpoint_progs[action]<br/>slot 26 = uN / 27 = uA"]
+    G -->|yes| TC
     G -->|no| GATE{"inner proto が<br/>IPIP / IPv6 / Ethernet か"}
     GATE -->|yes| TC
     GATE -->|no| PASS0
-    TC --> AUX[("sid_aux_map[aux_index]<br/>usid variant")]
+    TC["tail call sid_endpoint_progs[entry->action]<br/>slot が空なら XDP_PASS"] -->|"slot 26 / 27"| AUX[("sid_aux_map[aux_index]<br/>usid variant")]
+    TC -->|"それ以外の slot"| OTHER["既存の End 系 behavior<br/>(この図の対象外)"]
     AUX -->|"block_len_bytes ≠ 4"| DROP["XDP_DROP"]
     AUX --> ARG{"Argument = 0 か"}
     ARG -->|yes| TERM["classic End / End.X へ fall through<br/>SRH 無しなら XDP_PASS"]
