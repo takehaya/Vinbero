@@ -88,6 +88,35 @@ func TestAllocator_AutoExhaustion(t *testing.T) {
 	}
 }
 
+func TestAllocator_USIDZeroReserved(t *testing.T) {
+	loc := makeUSID48(t)
+	loc.FunctionAutoStart = 0
+	loc.FunctionAutoEnd = 1
+	a := NewBitmapAllocator(&loc)
+
+	zero := uint32(0)
+	if _, err := a.Allocate(&zero); !errors.Is(err, ErrFunctionReserved) {
+		t.Errorf("manual zero: got %v, want ErrFunctionReserved", err)
+	}
+	got, err := a.Allocate(nil)
+	if err != nil || got != 1 {
+		t.Errorf("auto: got (%d, %v), want (1, nil)", got, err)
+	}
+	if _, err := a.Allocate(nil); !errors.Is(err, ErrPoolExhausted) {
+		t.Errorf("auto exhausted: got %v, want ErrPoolExhausted", err)
+	}
+}
+
+func TestAllocator_ClassicZeroUnchanged(t *testing.T) {
+	loc := makeClassic48(t)
+	loc.FunctionAutoStart = 0
+	loc.FunctionAutoEnd = 0
+	a := NewBitmapAllocator(&loc)
+	if got, err := a.Allocate(nil); err != nil || got != 0 {
+		t.Errorf("classic auto zero: got (%d, %v), want (0, nil)", got, err)
+	}
+}
+
 func TestAllocator_ReleaseUnallocatedIsNoOp(t *testing.T) {
 	loc := makeClassic48(t)
 	a := NewBitmapAllocator(&loc)

@@ -107,6 +107,10 @@ func fillMUPSIDStructure(mr bgp.MUPRoute, locators *locator.Manager) bgp.SIDStru
 		LocatorBlockLen: loc.BlockLen,
 		LocatorNodeLen:  loc.NodeLen,
 		FunctionLen:     loc.FunctionLen,
+		// ArgumentLen is the behavior's actual argument width (RFC 9252
+		// 3.2.1.1); the lengths need not sum to 128, so a uSID locator
+		// correctly advertises 32/16/16/0 with the container tail outside
+		// the structure.
 		ArgumentLen:     loc.ArgumentLen,
 	}
 }
