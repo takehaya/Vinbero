@@ -11,7 +11,15 @@
 // for uN (/48) and bytes [8..15] for uA (/64, node + function). While the
 // Argument is non-zero the endpoint shifts it toward the block (16 bits
 // for uN, 32 bits for uA), zero-fills the tail, and forwards on the
-// updated DA without touching the SRH. The hop limit is decremented once per
+// updated DA without touching the SRH.
+//
+// The two shift widths come from one rule, not from two special cases.
+// RFC 9800 Sec.4.1.1 N05/N06 copy DA.Argument to bits [LBL..LBL+AL-1] and
+// zero the rest, where the Argument starts at LBL+LNFL and LNFL is defined
+// as "the sum of the LNL and the FL of the SID". Sec.4.1.2 replaces only
+// N08 (forward over the adjacency), leaving the shift untouched. So uN,
+// whose SID has no Function, consumes LNL = 16 bits, and uA, whose Function
+// identifies the adjacency, consumes LNL + FL = 32. The hop limit is decremented once per
 // logical uN/uA execution (RFC 9800 Sec.4.1.1 pseudocode N02-N08); an
 // exhausted hop limit drops without ICMPv6 generation, matching the other
 // End behaviors here. A zero Argument means the container ended on this
