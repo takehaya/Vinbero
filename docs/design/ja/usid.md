@@ -40,7 +40,7 @@ CSID 0x0000 は container の終端を示す予約値です。node CSID にも f
 uN と uA は SRH の有無に関係なく動きます。shift 処理は SRH を読まないので、両方の入口から同じ core 関数へ入ります。
 
 - SRH ありのパケットは `process_srv6_localsid` が `sid_function_map` を引き、`DISPATCH_LOCALSID` として endpoint slot へ tail call します
-- SRH なしのパケットは `process_srv6_decap_nosrh` が入口です。この経路には従来inner protocol が IPIP / IPv6 / Ethernet のときだけ decap するという gate がありました。uSID は任意の upper-layer protocol を運ぶため、lookup を先に行い、hit した entry が uN か uA なら gate を通す形に変えています。他の action の到達性は変わりません
+- SRH なしのパケットは `process_srv6_decap_nosrh` が入口です。この経路には従来、inner protocol が IPIP / IPv6 / Ethernet のときだけ decap するという gate がありました。uSID は任意の upper-layer protocol を運ぶため、lookup を先に行い、hit した entry が uN か uA なら gate を通す形に変えています。他の action の到達性は変わりません
 
 `sid_function_map` は LPM trie なので、/48 や /64 の locator prefix エントリと、container 終端の /128 service SID エントリが同居できます。終端 DA では /128 が longest match で勝つため、uDT4 のような terminal behavior は従来の実装のまま動きます。
 
@@ -69,7 +69,8 @@ flowchart TD
     ARG -->|no| HL{"hop limit ≤ 1 か"}
     HL -->|yes| DROP
     HL -->|no| SHIFT["hop limit を 1 減らし<br/>Argument を LBL 直後へ shift"]
-    SHIFT --> RE[("sid_function_map 再 lookup<br/>key = shift 後の DA")]
+    SHIFT -->|uN| RE[("sid_function_map 再 lookup<br/>key = shift 後の DA")]
+    SHIFT -->|uA| FWD
     RE -->|同じ entry| ARG
     RE -->|別の local entry| RD["その slot へ tail call で再 dispatch<br/>SRH 無しで不適格なら XDP_PASS"]
     RE -->|local に無し| FWD["bpf_fib_lookup<br/>uN は DA / uA は aux の nexthop"]
@@ -84,7 +85,7 @@ flowchart TD
 
 1. Argument 全体がゼロかを判定します。uN は byte 6 から 10 byte、uA は byte 8 から 8 byte を見ます。
    1. 次の 16 bit だけを見る実装は誤りで、後続に uSID が残っていても終端と誤判定します
-2. Argument が非ゼロなら hop limit を確認します。1 以下なら drop します。ICMPv6 の Time Exceeded は生成しません。既存の End 系と同じ扱いです
+2. Argument が非ゼロなら hop limit を確認します。1 以下なら drop します。RFC 9800 の N03 は ICMPv6 Time Exceeded を送ってから discard するよう求めていますが、Vinbero は ICMPv6 を生成しません。既存の End 系と揃えた意図的な差です
 3. hop limit を 1 減らします。RFC 9800 Sec.4.1.1 の疑似コード N02-N08 のとおり、論理的な 1 hop につき 1 回減らします
 4. Argument を locator block の直後にあたる byte 4 へ左詰めし、空いた末尾をゼロ埋めします。uN は 2 byte、uA は 4 byte です
 5. 更新後の DA で転送します。uN は DA 自身を、uA は aux の nexthop を FIB lookup のキーにします
@@ -159,14 +160,21 @@ data plane が引く table に、誰が何を書くかは次のとおりです�
 
 ```mermaid
 flowchart LR
-    OP["operator (vbctl)"] --> RPC1["SidFunctionService<br/>SidFunctionCreate / Delete"]
+    OP["operator (vbctl)"] --> RPC1["SidFunctionService<br/>SidFunctionCreate"]
+    OP --> RPCD["SidFunctionService<br/>SidFunctionDelete"]
     OP --> RPC2["LocatorService<br/>LocatorCreate"]
 
     RPC1 --> VAL["protoToEntry<br/>prefix 長 / node CSID / function CSID<br/>nexthop / usid_block_len を検証"]
     VAL --> CLAIM["claimUsidFunction<br/>uA の function CSID を予約"]
     VAL --> PUT["MapOperations.CreateSidFunction"]
 
-    RPC2 --> ADD["AddLocatorAndClaim<br/>Add と reconcile を 1 トランザクションで"]
+    RPCD --> DEL["deleteOneSidFunction<br/>claim の所有者を確かめてから解放"]
+    DEL --> MGR
+    DEL --> DPUT["MapOperations.DeleteSidFunction"]
+    DPUT --> SFM
+    DEL -.->|"claim の所有者を確認"| SFM
+
+    RPC2 --> ADD["AddLocatorAndClaim<br/>Add と reconcile を同じ critical section で"]
 
     CLAIM --> MGR["locator.Manager<br/>allocator + binding 台帳<br/>(in-memory)"]
     ADD --> MGR
@@ -185,11 +193,11 @@ BGP からの経路はまだありません。Phase 4 で uSID locator から se
 
 ### locator
 
-`pkg/locator` の `BehaviorUSID` が uSID locator を表します。`Validate` は F3216 の 4 条件、つまり block 32、node 16、function 16、argument 0 と、prefix の node CSID が非ゼロであることを検査します。classic に課している bit 長の合計が 128 という条件は課しません。uSID では Argument が構造の外側にあるためです。
+`pkg/locator` の `BehaviorUSID` が uSID locator を表します。`Validate` は F3216 の 4 条件、つまり block 32、node 16、function 16、argument 0 と、prefix の node CSID が非ゼロであることを検査します。classic に課している bit 長の合計が 128 という条件は課しません。この 4 条件は locator が払い出す service SID の構造を表していて、その service SID は Argument を使わないためです。転送中の uN / uA SID のほうには RFC 9800 の意味での Argument があり、その長さは 128 - LBL - LNFL です。uN なら 80 bit、uA なら 64 bit になります。
 
 `BuildSID` と `ParseSID` は service uSID の形、つまり block + node + function が並び残りがゼロの形を扱います。CSID 0 は `BuildSID`、`ParseSID`、allocator の manual と auto の全経路で拒否します。
 
-BGP へ渡す SID Structure sub-sub-TLV は LBL/LNL/FL/AL = 32/16/16/0 です。RFC 9252 の AL は behavior が実際に使う argument 幅で、合計が 128 になる必要はありません。
+BGP へ渡す SID Structure sub-sub-TLV は LBL/LNL/FL/AL = 32/16/16/0 です。これは locator が払い出す service SID の構造であって、uN / uA 自身の構造ではありません。RFC 9252 の AL は behavior が実際に使う argument 幅で、合計が 128 になる必要はありません。
 
 ### SID function の登録
 
@@ -227,8 +235,9 @@ headend は変更していません。H.Encaps.Red は segment が 1 つのと�
 - uN と uA の SID 自身はノードのローカルアドレスとして設定してください
 - uA の nexthop は neighbor が解決済みである必要があります
 - flavor は単一値のみです。PSP と USP の組み合わせのような複数 flavor の同時指定は、既存の classic 実装と同じく未対応です
-- IPv6 拡張ヘッダを挟んだ NEXT-C-SID 処理は未対応です。shift 経路は SRH を検証しないので、壊れた routing header を持つパケットもそのまま中継します。RFC 9800 の疑似コードは Argument が非ゼロのとき SRH を見ないので仕様上は妥当ですが、変更前は kernel が受け取って落としていたパケットです
-- container 宛の生の TCP や UDP は DA が書き換わるため、L4 checksum が最終到達点で不一致になります。実運用の uSID は H.Encaps 経由の encap トラフィックなので問題になりません
+- IPv6 拡張ヘッダを挟んだ NEXT-C-SID 処理は未対応です。dispatcher は IPv6 ヘッダの直後にある SRH しか認識しないので、Hop-by-Hop や Destination Options を挟んだパケットは SRH 無しの経路に入ります。uN と uA はそれを container として shift して転送し、Hop-by-Hop の option は処理しません。RFC 9800 は SRH と Hop-by-Hop と Destination Options をたどった後にも NEXT-C-SID を実行するよう求めているので、ここは仕様との差です
+- shift 経路は SRH を検証しないので、壊れた routing header を持つパケットもそのまま中継します。RFC 9800 の疑似コードは Argument が非ゼロのとき SRH を見ないため、この点は仕様どおりです。変更前は kernel が受け取って落としていました
+- upper-layer checksum について、RFC 9800 Sec.6.5 は最終宛先を pseudo-header の DA として計算するよう定めています。これに従わず途中の container のアドレスで計算した送信元のパケットは、最終到達点で不一致になります。TCP と UDP に限らず ICMPv6 も同じです。実運用の uSID は H.Encaps 経由の encap トラフィックなので問題になりません
 
 ## 検証
 
@@ -250,6 +259,6 @@ end-ua の router2 は terminal SID への経路を持たないので、uA が�
 - BGP 統合は未着手です。uSID locator からの service SID 送出と、受信した service SID からの encap source 導出が残っています。後者は `decodeRemoteSrc` が locator base を仮定している点に手を入れる必要があります
 - 第三者実装との interop シナリオはまだありません
 - REPLACE-C-SID と End.LBS と End.XLBS は実装していません
-- 32 bit uSID と F3216 以外の SID 構造。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります
+- 32 bit uSID と F3216 以外の SID 構造には対応していません。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります
 - SR Policy の transport list を container へ自動 packing する処理はありません
 - `locator_ref` からの uN / uA 登録はできません
