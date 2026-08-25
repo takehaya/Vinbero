@@ -36,6 +36,8 @@ enum srv6_local_action {
     SRV6_LOCAL_ACTION_END_DT2M = 23,         // End.DT2M (L2 flood for BUM, RFC 8986 Sec.4.12)
     SRV6_LOCAL_ACTION_END_AD = 24,           // End.AD (dynamic proxy, draft-ietf-spring-srv6-service-programming)
     SRV6_LOCAL_ACTION_END_AN = 25,           // End.AN (SR-aware service, draft-ietf-spring-srv6-service-programming)
+    SRV6_LOCAL_ACTION_END_UN = 26,           // uN: End with NEXT-C-SID (RFC 9800 Sec.4.1.1)
+    SRV6_LOCAL_ACTION_END_UA = 27,           // uA: End.X with NEXT-C-SID (RFC 9800 Sec.4.1.2)
 };
 
 // ========== SRv6 Local Flavor ==========
