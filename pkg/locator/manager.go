@@ -89,10 +89,17 @@ func (m *Manager) Delete(name string, force bool) error {
 	if _, ok := m.entries[name]; !ok {
 		return fmt.Errorf("%w: %q", ErrLocatorNotFound, name)
 	}
-	if !force {
-		if used := m.bindings.ListByLocator(name); len(used) > 0 {
-			return fmt.Errorf("%w: %q has %d active bindings", ErrLocatorInUse, name, len(used))
-		}
+	used := m.bindings.ListByLocator(name)
+	if !force && len(used) > 0 {
+		return fmt.Errorf("%w: %q has %d active bindings", ErrLocatorInUse, name, len(used))
+	}
+	// A forced delete drops the bindings with the locator. They record
+	// which (locator, function) minted a SID, so keeping them would leave
+	// rows pointing at a locator that no longer exists -- and re-creating
+	// that locator would then fail on ErrBindingExists for every SID it
+	// still covers.
+	for _, sid := range used {
+		m.bindings.Forget(sid)
 	}
 	delete(m.entries, name)
 	return nil

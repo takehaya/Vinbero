@@ -1265,24 +1265,31 @@ func (s *SidFunctionServer) AddLocatorAndClaim(loc *locator.Locator) error {
 	if err := s.locatorMgr.Add(loc); err != nil {
 		return err
 	}
-	if err := s.reconcileUsidClaimsLocked(*loc); err != nil {
-		// Force: the locator was published a moment ago, and any binding
-		// under it is one this very call just made.
+	claimed, err := s.reconcileUsidClaimsLocked(*loc)
+	// Roll back completely: the claims this pass did take have to go back
+	// too, or the bindings outlive the locator (Manager.Delete leaves them)
+	// and re-creating it fails on every one of them.
+	if err != nil {
+		for _, sid := range claimed {
+			s.locatorMgr.ReleaseSID(sid)
+		}
 		_ = s.locatorMgr.Delete(loc.Name, true)
 		return err
 	}
 	return nil
 }
 
-// reconcileUsidClaimsLocked claims the CSIDs of the uA entries inside loc.
-// Caller holds s.mu.
-func (s *SidFunctionServer) reconcileUsidClaimsLocked(loc locator.Locator) error {
+// reconcileUsidClaimsLocked claims the CSIDs of the uA entries inside loc
+// and returns the SIDs it claimed, so a failure can be unwound. Caller
+// holds s.mu.
+func (s *SidFunctionServer) reconcileUsidClaimsLocked(loc locator.Locator) ([]netip.Addr, error) {
+	var claimed []netip.Addr
 	if s.mapOps == nil || loc.Behavior != locator.BehaviorUSID {
-		return nil
+		return claimed, nil
 	}
 	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
-		return fmt.Errorf("list SID functions: %w", err)
+		return claimed, fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
 		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
@@ -1303,9 +1310,10 @@ func (s *SidFunctionServer) reconcileUsidClaimsLocked(loc locator.Locator) error
 			continue
 		}
 		if _, _, err := s.locatorMgr.AllocateSID(loc.Name, &fn); err != nil {
-			return fmt.Errorf("uA %s holds function CSID 0x%04x in locator %q: %w",
+			return claimed, fmt.Errorf("uA %s holds function CSID 0x%04x in locator %q: %w",
 				prefix, fn, loc.Name, err)
 		}
+		claimed = append(claimed, sid)
 	}
-	return nil
+	return claimed, nil
 }
