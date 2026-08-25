@@ -1,9 +1,11 @@
 # Control plane plugin
 
-Vinbero の control plane を第三者が拡張するための機構です。data plane
+Vinbero の control plane を operator が拡張するための機構です。data plane
 plugin が eBPF bytecode を受け取るのに対し、control plane plugin は
-WebAssembly module を受け取ります。どちらも daemon に upload され、登録時
-に検証され、宣言した capability と scope の範囲でだけ動きます。
+WebAssembly module を受け取ります。どちらも daemon に upload され、登録時に
+検証されます。WASM 側の書き込みは宣言した capability と scope の範囲に host が
+強制します。eBPF 側は operator が review した semi-trusted な artifact が
+前提で、検査は best-effort です (data plane 境界の節)。
 
 ## 何のためにあるか
 
@@ -17,6 +19,10 @@ WebAssembly module を受け取ります。どちらも daemon に upload され
    し、plugin の slot を指す dispatch entry を書き、address を event で
    plugin に返します。名前は plugin が付け、値は host が選びます。記憶を
    失って戻ってきた plugin が同じ名前を宣言すると同じ address が返ります。
+   この安定性は 1 つの daemon run の中で、同じ名前を同じ locator から
+   宣言し直す限りの話です。instance の作り直しや同名 upgrade では保たれ、
+   locator を変えた宣言は別の address を割り当て直します。daemon 再起動を
+   跨ぐと保証されません (local SID と daemon 再起動の節)。
 4. plugin がその SID を SID TLV に自分の codepoint を載せて広告します。
 5. 対向でその経路を受けた plugin が headend の状態を宣言します。
 6. Vinbero 自身の applier はその経路を見ません。codepoint を見ずに service
@@ -25,6 +31,33 @@ WebAssembly module を受け取ります。どちらも daemon に upload され
 
 これで両ノードは Vinbero も BGP も知らない behavior で通信します。実例は
 `sdk/examples/cplane-custom-behavior` にあり、この 6 段を実装しています。
+
+この 6 段を 2 ノードに割り付けると次の流れになります。node A が behavior を
+実装して広告する側、node B がそれを受けて headend を張る側です。
+
+```mermaid
+sequenceDiagram
+    participant OpA as operator (node A)
+    participant PA as cplane plugin (node A)
+    participant VA as vinberod (node A)
+    participant BGP as BGP session
+    participant VB as vinberod (node B)
+    participant PB as cplane plugin (node B)
+
+    OpA->>VA: data plane half を endpoint slot に register
+    OpA->>VA: cplane half を register (capability と scope と behavior claim)
+    Note over VA: claim 済み codepoint の経路は built-in applier に配らない
+    PA->>VA: local SID を宣言 (名前と locator と slot)
+    VA->>VA: locator から address を確保し dispatch entry を書く
+    VA-->>PA: 確保した address を event で返す
+    PA->>VA: その SID を自分の codepoint 付きの SID TLV で広告を宣言
+    VA->>BGP: VPN 経路として advertise
+    BGP->>VB: 経路が届く
+    Note over VB: built-in applier には配らず plugin だけに配送
+    VB-->>PB: event として配送
+    PB->>VB: headend の状態を宣言 (encap 先 = node A の SID)
+    Note over VB,VA: node B の customer traffic が encap され node A の SID に届き dispatch entry が plugin の slot へ渡す
+```
 
 新しい AFI/SAFI は要りません。endpoint behavior は SID TLV の中の 16bit
 codepoint なので、独自 codepoint の広告は vpnv4 や EVPN といった既存
@@ -89,7 +122,19 @@ replay は plugin ごとに 1 本だけ走らせます。2 本が 1 つの queue
 返します。
 snapshot の配送は drop せず block します。replay は BGP watch goroutine
 ではないので block してよく、一部を落とすと目的そのものを損ねるためです。
-snapshot も live と同じ queue を通すので、両者の順序は保たれます。
+snapshot も live と同じ queue を通し、replay の間に届いた live event は
+worker が保留して、snapshot と end of replay を積み終えてから流します。
+rib を走査している間に同じ NLRI の update が queue に割り込めないので、
+snapshot の中の copy を、それを追い越した update より後に見ることは
+ありません。保留が queue の深さを超えた分は drop して snapshot debt を
+立て直すので、追い越しではなく再修復に倒れます。これは配送順序の保証で、
+snapshot 自体が rib のある一瞬を写した atomic な cut だという保証では
+ありません。走査は family ごとに rib を読むだけなので、走査中に変わった
+分は snapshot に混ざり得ますが、その変化の event は保留されて snapshot の
+後に届くので、plugin の view はそこで揃います。保留の解放時にも queue に
+収まらなかった分は drop されて snapshot debt に戻るため、この一致は
+過負荷が続く間は次の replay へ先送りされます。追い越しはしませんが、
+恒常的に溢れている plugin の view は遅れ続けます。
 
 replay の先頭には start of replay の event を置きます。replay は何が在る
 かを述べる手段であって、何が無くなったかは述べられません。plugin が聞いて
@@ -99,6 +144,27 @@ replay の先頭には start of replay の event を置きます。replay は何
 組み立て直します。これで replay が merge ではなく修復になります。宣言は
 end of replay まで待ちます。replay の最中に空集合を宣言すると、その間だけ
 転送が落ちるためです。
+
+drop から修復までの流れをまとめます。
+
+```mermaid
+sequenceDiagram
+    participant D as demux (BGP watch goroutine)
+    participant R as replay (snapshot の作り手)
+    participant Q as plugin worker queue
+    participant G as plugin instance
+
+    D->>Q: live event を積む (block しない)
+    Q->>G: 順に配送
+    D--xQ: queue が満杯なら drop して snapshot debt を記録
+    Note over R: debt を見て replay を plugin ごとに 1 本だけ起動
+    R->>Q: 保留開始。以後の live event は pending に貯める
+    R->>Q: start of replay
+    R->>Q: rib の copy を block しながら積む
+    R->>Q: end of replay
+    R->>Q: 保留解除。pending を流し、収まらない分は drop して debt に戻す
+    Q->>G: start で view を破棄し end まで宣言を保留して再構築
+```
 
 ## behavior の claim
 
@@ -138,7 +204,9 @@ withdraw されるためです。
 apply は transaction ではありません。BPF map に複数 entry を atomic に書く
 手段が無いため、途中失敗は前の write を残します。冪等なので retry で収束
 します。順序は prune を先に回し、貼り替え中の prefix が二重に存在する瞬間
-を作りません。
+を作りません。ABI の `apply_begin` が開く「transaction」は宣言 chunk を
+積むための staging の単位で、commit までは何も適用されないという意味です。
+map への適用が atomic だという意味ではありません。
 
 同一 key を 2 owner が書く状況は宣言時に fail-closed で弾きます。desired
 set は owner ごとに差分を取るので、2 owner が同じ key を宣言すると互いに
@@ -346,6 +414,13 @@ apply 時に失敗させれば、既存の retry 機構がそのまま修復に�
 実装は「まだ許される部分集合を desired set として apply する」形で、残りは
 既存の reconcile が落とします。
 
+この prune の視界は同一 run 内の再登録と restore で違います。headend は
+どちらの場合も BPF map を owner ごとに列挙して見えます。local SID と広告は
+in-memory の集合からしか見えないので、再登録では 3 面とも prune され、
+restore 直後は headend しか prune されず、local SID と広告は届かないまま
+残ります (既知の限界の節)。つまり restore を跨いだ scope の縮小は、いまは
+headend に対してだけ認可の失効として働きます。
+
 manifest の format version は 2 です。scope は認可情報なので、scope を持たない
 version 1 の manifest (scope 導入前の build が書いたもの) を空 scope で restore
 すると、その plugin が書いた転送状態を boot 時に消してしまいます。そこで version 1 は
@@ -458,11 +533,24 @@ service SID として自分の owner で install します。plugin が同じ pr
   行います。retract は元に戻せない副作用なので、admission で弾かれた module の
   ために既存の経路を built-in から消してしまうと、実装するものが無いまま
   取り残されます。
-- unregister では claim を解放しますが、その経路を built-in に流し直すこと
-  はしません。plugin が実装していた behavior を実装できるものはここには無く、
-  built-in にとって private codepoint はただの service SID なので、渡せば
-  claim が防いでいたはずの誤った意味での install になります。理解していた
-  唯一のものを外した以上、それらの経路が転送されなくなるのが正しい帰結です。
+- unregister では owner の状態の flush が成功してから claim を解放します
+  (lifecycle の節)。解放は取得と対称ではありません。取得時は rib を遡って
+  built-in から withdraw しますが、解放時に rib を built-in へ流し直すことは
+  しません。解放後に届く advertise は built-in に配られ、素の service SID と
+  して扱われます。flush が先なので、claim が防いでいた owner 衝突 -- plugin の
+  書き込みと built-in の install が同じ prefix を奪い合い、誤った意味の entry が
+  traffic を運び続けること -- は起きません。ただし flush が保証するのは衝突が
+  無いことまでです。built-in が作るのは既定の単一 SID の H.Encaps で、plugin が
+  headend で宣言していたかもしれない mode や segment list や source は再現され
+  ません。unregister 後の churn で入る entry は旧 plugin のものと転送の形が違い
+  得るという運用上の条件は残ります。rib に残っている経路は次に churn したときに
+  built-in へ渡ります。
+- 取得・解放・restore 失敗の扱いは 1 つの不変条件の面です。claim の寿命は
+  plugin の状態の寿命に合わせます。状態が map にある間はその codepoint の
+  経路を built-in に渡さず (restore 失敗で claim を保持するのはこのため)、
+  状態が消えた後は普通の経路に戻します (unregister が flush の後に解放する
+  のはこのため)。この対応が破れる場合と operator の対処は、節末の表に
+  まとめます。
 - restore に失敗した plugin の claim は解放しません。解放すると built-in が
   実装できない codepoint の経路を service SID として install してしまいます。
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
@@ -484,6 +572,21 @@ service SID として自分の owner で install します。plugin が同じ pr
   plugin を build する前に取るので、最初の宣言時には prefix が空いています。
   この配り直しは withdrawal ledger には記録しません。記録すると後から来る
   本物の withdraw を処理済みと誤判定します。
+
+### 保証と破れと対処
+
+上の散文を、保証されること・破れる場合・operator の対処の 3 列に
+まとめ直します。
+
+| 保証されること | 破れる場合 | operator の対処 |
+|---|---|---|
+| 起動時は store にある behavior claim を demux の start より前に予約する。restore に失敗しても claim を保持し、実装するものが無い codepoint の経路を built-in に渡さず withhold する。 | restore 失敗そのものではこの保証は破れない。 | warning と stats の unrestored 枠を確認する。復旧させないなら forget で claim と store を落とし、map の残存 state は operator が引き受ける。 |
+| claim 取得後の retract は plugin の build と subscribe が済んでから行い、rib にある対象 behavior の経路を built-in から withdraw して最初の宣言より前に prefix を空ける。 | admission など publish 前に失敗した module では retract を行わない。元に戻せない副作用だけが残ることを防ぐ。 | 不要。 |
+| unregister は owner state の flush が成功してから claim を解放する。flush が失敗した場合は claim と store を保持し、plugin を registry に dead として戻す。 | flush は面ごとに進み部分削除を rollback しない。また built-in が後から作るのは既定の単一 SID の H.Encaps で、plugin が宣言していた mode や segment list や source は再現されない。 | flush 失敗は unregister を retry する。unregister 後の churn で転送の形が変わり得ることは運用条件として扱う。 |
+| upgrade は behavior claim を新しい集合へ 1 回で置換し、途中で別の plugin に codepoint を取られて巻き戻せなくなる形を避ける。publish 前の失敗は前の集合へ戻す。 | behavior を減らす upgrade では、外した codepoint の claim が旧 state の reconcile より先に返り、その間に届いた経路は built-in に渡る。 | 窓を避けたい場合は unregister で flush してから新しい集合で登録し直す。address は取り直しになる。 |
+| 通常の unregister は in-memory の inventory から owner state を flush してから claim を返す。 | daemon 再起動直後、plugin が local SID を宣言し直す前に unregister すると、前の run の pinned dispatch entry が flush の視界に入らず、残したまま claim が解放される。 | plugin owner の entry は SID 削除 RPC の owner 検査が拒み、force-delete の RPC も無いので、operator が消す手段はいま無い。残存を確認したら、その slot と locator を再利用しないでおく。owner ごとの inventory から flush する形は繰越し。 |
+| manifest と state が揃っていれば、再起動時にも claim を予約して pinned state と built-in の対応を保つ。 | 新規登録や behavior を足す upgrade が manifest の rename 前に persist で失敗すると、その run は instance と claim と state を持って動くが、再起動時は manifest が無いので claim が予約されず、pinned state の codepoint が built-in へ流れる。 | persist 失敗の error を受けたら、登録を retry して manifest を揃えるか、unregister で state ごと flush する。 |
+| claim の寿命は plugin の状態の寿命に合わせる、が全体の不変条件である。 | forget は operator が明示的にこの対応を破る操作で、daemon が消し方を知らない状態を残したまま claim と予約を返す。 | 残存 state を確認し、force-delete の経路が入るまでは返された slot と locator を再利用しない。以後の残存 state は operator が引き受ける (既知の限界の節)。 |
 
 ## 広告の所有権
 
@@ -556,6 +659,35 @@ local SID を宣言したときの sweep で片付きますが、scope を狭め
 その宣言をしなくなるので、それまで残ります。map から owner ごとに読む形へ広げるのは
 繰越しです。
 
+どの surface がどこで追跡され、prune と flush のどこから見えるかをまとめます。
+
+| surface | 追跡場所 | restore 直後の prune | 再登録の prune | unregister の flush |
+|---|---|---|---|---|
+| headend | BPF map。owner ごとに全走査する | 見える。restore-time prune が扱える唯一の surface | 見える | 見える。広告と local SID の後に消し、失敗した entry と lease は残る |
+| local SID | in-memory の live 集合。dispatch entry 自体は pinned map に残り得る | 見えない。再起動直後は空で、前の run の entry は次の宣言時の sweep まで残る | 見える | 通常は見える。restore 直後で再宣言前の pinned entry だけ視界に入らない |
+| 広告 | in-memory の live 集合。wire の所有は gobgp session の producer が追跡する | 見えない。再起動直後は空で、wire 側も session ごと消えている | 見える | 見える。最初に withdraw する |
+| behavior claim | demux の claim registry。withdraw の判定は path 単位の ledger も使う | prune の対象外。起動時に manifest から demux start より先に予約する | prune の対象外。upgrade は instantiate より前に新集合へ置換する | flush の対象外。flush 成功後に解放する |
+| lease | in-memory の lease table。per-entry の owner map が最終 enforcement | headend の owner 走査からは見え、local SID と広告の分は見えない | owner state と一緒に見え、prune に伴って減る | owner state と一緒に消える。消せなかった entry の lease は残す |
+
+forget は claim と store と slot / locator の予約を返しますが、map の状態は
+残します。daemon はそれが何のためのものかを知らないためです。返った slot を
+別の plugin に渡すと、残った dispatch entry の SID がその新しい program へ
+dispatch し、新 program は旧 plugin の aux bytes を自分の layout として読み
+ます。予約が防いでいた取り違えを forget は operator の判断で外すことになり
+ますが、plugin owner の entry は SID 削除 RPC の owner 検査が拒み、force-delete
+の RPC も公開していないので、operator に消す手段がいまはありません。できるのは
+残存 state を確認して、その slot と locator を再利用しないでおくことだけです。
+owner ごとの inventory から強制的に片付ける形と force-delete 経路は繰越しです。
+
+control plane half と data plane half は機構としては結ばれていません。同一
+plugin であることの照合も、slot に program が載っているかの readiness 確認も、
+upgrade の順序の強制もありません。前提は operator の導入順序で、data plane
+half を slot に register してから、その slot を scope に指定して control plane
+half を register します。逆順や片方だけの更新では、SID の確保と広告が成功して
+いるのに slot に受け手が居らず、traffic が落ちる期間ができます。scope の slot
+排他が防ぐのは別の plugin との取り違えで、同名の 2 half の版ずれは防ぎません。
+identity と readiness を結ぶ機構は今後の課題です。
+
 ## 登録時の検証
 
 module は allowlist で検証します。
@@ -567,10 +699,14 @@ module は allowlist で検証します。
 - `_start` の自動実行は無効化し、reactor initializer だけを host が明示的
   に呼びます。
 
-capability と scope の食い違いも登録時に弾きます。`headend` を granted しな
-がら headend prefix を並べていない登録は、plugin が動いて宣言し、その宣言が
-全部拒否されるという形で失敗します。壊れた plugin のように見えるので、
-operator の手元で断ります。
+capability と scope の食い違いも登録時に弾きます。食い違いとは、scope を
+一部だけ宣言しながら、granted した capability が書き先を決めるのに要る対象を
+欠いた組のことです。locator だけ並べて `headend` を granted した登録がそれで、
+plugin が動いて宣言し、その宣言が全部拒否されるという形で失敗します。壊れた
+plugin のように見えるので、operator の手元で断ります。scope を丸ごと宣言
+しない登録は食い違いではありません。空の scope は意図的な deny-all で、
+capability が何であれ観測と log だけをする plugin として起動します
+(scope の節)。弾くのは中途半端な scope だけです。
 
 ## lifecycle
 
@@ -589,6 +725,12 @@ operator の手元で断ります。
   ので、replay しないと最初の宣言が restart 後に届いた event だけの集合に
   なり、それ以外の entry を全部 prune します。連続失敗が上限を超えたら
   状態を残して止めます。上限は連続失敗の数で、成功配送でリセットします。
+  止めた後の広告と headend は fail-static で、以後の network の変化を映し
+  ません。短時間の障害では撤去より安全ですが、長く放置すると古い経路を
+  広告し続けることになります。この判断は daemon が下せないので operator に
+  返します。止まった plugin は stats に出るので、戻さないと決めたら
+  unregister が広告ごと撤去します。停止からの経過で広告だけ落とすような
+  自動の段階的撤去は入れていません。
 - daemon の shutdown では flush しません。
 - unregister は flush が成功してから claim と store を手放します。先に
   手放すと、flush が失敗したときに retry する手段が無くなります。claim を
@@ -614,14 +756,8 @@ operator の手元で断ります。
   最初に適用される宣言は queue にたまたま入っていた event ではなく network
   全体を述べたものになります。desired set を宣言する plugin にとって、この
   違いは収束するか自分の持ち物を全部 prune するかの違いです。
-- publication は snapshot の後に行います。宣言はそれまで保留されるので、
-  最初に適用される宣言は queue にたまたま入っていた event ではなく network
-  全体を述べたものになります。desired set を宣言する plugin にとって、この
-  違いは収束するか自分の持ち物を全部 prune するかの違いです。
 - 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
   次の配送の前に再試行します。保留されている数は stats に出し、最初の失敗は
-  warning に出します。何かを待っている plugin は、配送の counter だけ見ると
-  暇な plugin と区別が付きません。保留されている数は stats に出し、最初の失敗は
   warning に出します。何かを待っている plugin は、配送の counter だけ見ると
   暇な plugin と区別が付きません。restore された plugin は daemon の起動途中に
   configure から宣言するので、operator が後から RPC で登録する locator を
@@ -637,6 +773,132 @@ instantiate 自体も同じ budget の下で走らせます。WebAssembly の st
 section は spec 上 instantiate 中に実行されるので、これも guest の code
 です。budget を掛けないと、start section で無限 loop する module が登録を
 永久に止め、operator の RPC が返りません。
+
+各遷移で plugin の持ち物がどうなるかをまとめます。map の状態には lease も
+含みます。lease は owner の状態と一緒に増減するためです。表は各遷移が成功
+したときの姿で、部分失敗で残る形は表の後にまとめます。
+
+| 遷移 | behavior claim | store | running registry | map の状態と広告 |
+|---|---|---|---|---|
+| register (新規) | 取得。instantiate 前の失敗では巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
+| restore 成功 | 起動時の予約のまま | 保持 | 追加 | map は pinned のまま、replay 後の宣言が差分を吸収。広告は宣言で作り直す |
+| restore 失敗 | 保持 (withhold 継続) | 保持 | publish 前の失敗は載せず unrestored に記録。publish 後の persist 失敗は動いたまま unrestored にも載る (下記) | prune 前の失敗は触らない。prune まで進んだ失敗は削除できた分だけ減る。slot と locator の予約は manifest から scope が読めた分だけ残る |
+| upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
+| unregister | flush 成功後に解放 | flush 成功後に削除を試みる。失敗は warning で unregister は成功のまま | 削除。flush 失敗時は戻す | owner の状態を削除し広告を withdraw |
+| forget (未走行のみ) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
+
+部分失敗はそれぞれ次の形で残ります。
+
+- register と upgrade の instantiate 前の失敗 (claim 衝突、検証、admission) は
+  claim を巻き戻して何も残しません。publish の後の persist 失敗は違います。
+  instance は動いていて claim も新しい集合のまま、error だけが返ります。
+  restart に何が見えるかは失敗の段階次第です。manifest の rename 前に失敗
+  すれば store は未更新のままで、新規登録は restart を生き残らず、upgrade は
+  旧版に戻ります。rename 後の directory sync で失敗した場合、新版の manifest は
+  現在の namespace には見えているので daemon の再起動は新版を restore します。
+  ただし durability を確立する処理そのものが失敗しているので、machine の
+  crash を挟むとどちらの版が見えるかは保証されません。scope prune の失敗は
+  claim を新しい集合のまま plugin を unrestored に落とします
+  (scope を狭めたときの節)。restore の途中でこの persist 失敗を踏むと、
+  plugin は publish 済みで動いているのに、restore は Register の error を
+  一律に restore 失敗として記録するので、running と unrestored の両方に
+  同じ plugin が見えます。実害は表示の混乱に留まり、Forget は running の
+  plugin を拒むので状態は壊れませんが、二重表示の解消は繰越しです。
+- restore と再登録の prune は面ごと・entry ごとに進み、途中の失敗を
+  rollback しません。prune で失敗した restore の map は「触らない」では
+  なく、削除できた分だけ減った状態で残ります。
+- unregister の flush は広告の withdraw、local SID、headend の順に進み、
+  失敗した面を飛ばして残りも試みます。消せなかった分は lease ごと残り、
+  rollback はしません。plugin は registry に dead として戻るので operator が
+  retry できます。flush 成功後の store 削除の失敗は warning に留めます。
+  削除は manifest、module、directory の sync の順に進むので、どの段階で
+  失敗したかで結果が分かれます。manifest の unlink 前なら restart が
+  plugin を持ち帰り (状態は flush 済みなので空から再開するだけです)、
+  unlink 後なら restart には既に見えません。
+- forget は claim を解放してから store を消すので、store 削除が失敗すると
+  error を返しつつ claim だけが先に失われます。unrestored の記録と slot /
+  locator の予約と map の状態は残ります。store 側は失敗の段階次第で、
+  manifest の unlink 前なら丸ごと残り、unlink 後なら restart が読む
+  manifest は既にありません。
+
+### 状態遷移図
+
+ここまでの遷移と部分失敗を 1 つの状態機械にまとめます。各状態が manifest と
+registry と claim をどう持つかは図の下の凡例に書きます。
+
+```mermaid
+stateDiagram-v2
+    state "未登録" as Absent
+    state "保存済み未起動" as Stored
+    state "稼働中" as Running
+    state "稼働中 persist 未確立" as VolatileRunning
+    state "fail-static で停止" as Dead
+    state "restore 失敗" as Unrestored
+    state "稼働中かつ unrestored 表示" as RunningUnrestored
+    state "flush 済み manifest 残存" as FlushedStored
+    state "forget 後の残存 state" as Forgotten
+    state "forget 部分失敗" as ForgetPartial
+    state "claim 予約なしの pinned state" as Orphaned
+
+    [*] --> Absent
+
+    Absent --> Running: register 成功
+    Absent --> Absent: publish 前の失敗は claim を巻き戻す
+    Absent --> VolatileRunning: publish 後の persist 失敗
+
+    Running --> Running: upgrade 成功。owner tag を保って instance 交換
+    Running --> Running: upgrade の publish 前失敗。claim を前の集合へ戻し旧 instance を維持
+    Running --> VolatileRunning: upgrade の publish 後 persist 失敗
+    Running --> Running: trap や budget 超過。instance を作り直し snapshot から収束
+    Running --> Dead: 連続失敗が上限を超え fail-static
+    Running --> Dead: instance の作り直し自体に失敗。上限を待たず fail-static
+    Running --> Stored: daemon shutdown。flush しない
+    Running --> Absent: unregister。flush 成功
+    Running --> FlushedStored: unregister。flush 成功後の store 削除失敗
+    Running --> Dead: unregister の flush 失敗。dead として registry に戻す
+
+    Dead --> Stored: daemon restart。manifest から再試行
+    Dead --> Absent: unregister の retry 成功
+    Dead --> Dead: retry の flush 失敗。部分削除は rollback しない
+
+    Stored --> Running: restore 成功
+    Stored --> Unrestored: restore の publish 前失敗
+    Stored --> RunningUnrestored: restore の publish 後 persist 失敗
+
+    Unrestored --> Running: 再登録または次回 restore の成功で unrestored を消す
+    Unrestored --> Forgotten: forget 成功。claim と store と slot / locator の予約を解放
+    Unrestored --> ForgetPartial: forget の途中失敗。claim だけ先に失う
+
+    RunningUnrestored --> Running: 登録の retry 成功で unrestored を消す
+    RunningUnrestored --> RunningUnrestored: forget は running のため拒否
+
+    FlushedStored --> Running: 次回起動の restore。空の state から再開
+
+    VolatileRunning --> Running: 登録の retry で manifest を揃える
+    VolatileRunning --> Stored: daemon restart で残った版の manifest を読む
+    VolatileRunning --> Orphaned: daemon restart で manifest が見えない
+    VolatileRunning --> Absent: unregister。flush 成功
+```
+
+非自明な状態の中身は次のとおりです。
+
+- 稼働中 persist 未確立は、publish 後の persist 失敗のまま動いている状態です。
+  instance と claim と state はこの run にありますが、store の manifest は
+  無いか旧版か durability 未確立の新版で、restart に何が見えるかは失敗の
+  段階次第です。
+- claim 予約なしの pinned state は、その restart で manifest が見えなかった
+  結末です。pinned state だけが残り、claim が予約されないのでその codepoint の
+  経路は built-in へ流れます。不変条件の表の persist 失敗の行が対処です。
+- flush 済み manifest 残存は、unregister の flush が成功した後に store 削除
+  だけ失敗し、かつ manifest の unlink 前だった状態です。restart は空の
+  state で plugin を持ち帰ります。unlink 後の失敗なら manifest は無いので
+  未登録と同じです。
+- forget 部分失敗は claim だけ先に失われた状態で、unrestored の記録と slot /
+  locator の予約と map の状態は残ります。
+
+restore 中に publish 後の persist 失敗が起きたときの二重表示は、instance が
+動いたまま restore 側が一律に失敗を記録するためです。実害は表示の混乱に
+限られ、forget は running の plugin を拒みます。
 
 ## 運用
 
@@ -695,12 +957,15 @@ plugin は memory 上限に到達します。harness の churn test は live set
 
 local SID の名前は host の memory にしかありません。pin された map では
 前回起動の entry が残りますが、どの宣言がその address を入れたのかを
-辿る手段がありません。同じ名前を宣言し直した plugin は別の address を
-貰うので、古い entry は誰も dispatch せず誰も消せないまま残ります。
+辿る手段がありません。同じ名前を宣言し直した plugin に同じ address が
+戻る保証は無く、別の address になった古い entry は誰も dispatch せず
+誰も消せないまま残ります。
 
 そこで owner ごとに 1 回だけ sweep します。その owner のもので、今回の
 run が入れたのではない entry を消します。address の安定性は 1 回の daemon
-実行の中では保たれ、再起動を跨ぐと新しい address になります。
+実行の中では保たれ、再起動を跨ぐと保証されません。allocator は空から
+作り直すので、割り当ての順が同じなら偶然同じ address が戻ることもあり、
+それを当てにはできません。
 
 ## まだ無いもの
 
@@ -747,6 +1012,14 @@ Copilot が行数上限でレビューできないためです。以後の追加
 - binding 再導出を RPC の critical section の外へ出し、retry と counter を足す。
   いま commitBinding は共有 mutex を握ったまま全 plugin の経路を再広告し、失敗は
   log するだけです。
+- 起動時に decap-grant map を kernel と突き合わせて stale な grant を刈る
+  reconcile (data plane 境界の節)。
+- control plane half と data plane half の identity と readiness の結合
+  (既知の限界の節)。
+- owner ごとの inventory による、forget 後の残存 state の強制 cleanup
+  (既知の限界の節)。
+- restore 中の persist 失敗で plugin が running と unrestored の両方に載る
+  二重表示の解消 (lifecycle の節)。
 
 ## 参照
 
