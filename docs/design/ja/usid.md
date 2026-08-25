@@ -62,6 +62,7 @@ container に自ノードの uSID が連続して並ぶことがあります。�
 
 - 同じ entry に再ヒットした場合は loop 内で続けて shift します。上限は 5 回で、F3216 の container が最大 6 uSID を持つことから導かれます
 - 別の local entry にヒットした場合は、その entry の action と aux で tailcall context を書き直し、対応する slot へ tail call します。別の uN でも、terminal behavior でも同じ扱いです。slot が空か context の書き込みに失敗した場合は fail-closed で drop します
+- ただし SRH の無いパケットには例外があります。ヒットした entry が uN でも uA でもなく、inner protocol が IPIP / IPv6 / Ethernet のいずれでもない場合は tail call せず kernel に渡します。多くの endpoint slot は IPv6 ヘッダの直後を無条件に SRH として parse するので、そこへ SRH の無いパケットを渡すと upper-layer ヘッダを Routing header として読んでしまうためです。これは no-SRH dispatcher が非 uN/uA の entry に課しているゲートと同じ条件です
 - どちらでもない (自ノードのどの SID でもない) 場合は転送します
 
 uA はこの loop を持ちません。uA は adjacency へ転送する behavior なので、同じ uA が container に 2 回現れるなら adjacency も 2 回通るのが正しい挙動です (RFC 9800 Sec.4.1.2)。
