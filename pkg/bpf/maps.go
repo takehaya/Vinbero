@@ -168,10 +168,23 @@ func checkEntryOwner(owners *entryOwnerMap, key any, caller OwnerTag) (alreadyOw
 // callers can delete idempotently. A double withdraw or a delete
 // replayed after a restart must not surface as an error.
 func deleteMapKey(m *ebpf.Map, key any) error {
-	if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return err
+	_, err := deleteMapKeyExisted(m, key)
+	return err
+}
+
+// deleteMapKeyExisted is deleteMapKey plus the verdict on whether the key
+// was there. Map.Delete is an exact-key operation even on an LPM trie, so
+// this is the reliable way to tell "this prefix had its own entry" from
+// "some broader prefix covers it" -- Lookup cannot, it answers with the
+// covering entry.
+func deleteMapKeyExisted(m *ebpf.Map, key any) (bool, error) {
+	if err := m.Delete(key); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return false, nil
+		}
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 // putMainAndOwner writes value to the main map and, when not already
@@ -1049,6 +1062,9 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 	if err != nil {
 		return err
 	}
+	// This is an upsert. Whatever aux the superseded entry pointed at goes
+	// unreferenced the moment the new entry lands, so remember it now.
+	supersededAux := m.exactSidFunctionAuxIndex(key, alreadyOwned)
 	if aux != nil {
 		if err := m.allocAndPutBuiltinAux(entry, aux); err != nil {
 			return err
@@ -1059,7 +1075,48 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 			_ = m.auxAlloc.FreeOwner(uint32(entry.AuxIndex), AuxOwnerBuiltin)
 		}
 	}
-	return putMainAndOwner(m.objs.SidFunctionMap, m.sidFunctionOwners, key, entry, owner, alreadyOwned, "SID function", auxCleanup)
+	if err := putMainAndOwner(m.objs.SidFunctionMap, m.sidFunctionOwners, key, entry, owner, alreadyOwned, "SID function", auxCleanup); err != nil {
+		return err
+	}
+	m.releaseSupersededBuiltinAux(supersededAux, entry.AuxIndex)
+	return nil
+}
+
+// exactSidFunctionAuxIndex returns the aux index of the entry stored under
+// exactly key, or 0. It is only consulted on an upsert (the owner map, a
+// hash keyed by the exact prefix, already told us an entry is there), which
+// keeps the scan off the common path: sid_function_map is an LPM trie, so
+// Lookup would answer with a covering entry rather than this one.
+func (m *MapOperations) exactSidFunctionAuxIndex(key *LpmKeyV6, alreadyOwned bool) uint16 {
+	if !alreadyOwned {
+		return 0
+	}
+	var k LpmKeyV6
+	var e SidFunctionEntry
+	iter := m.objs.SidFunctionMap.Iterate()
+	for iter.Next(&k, &e) {
+		if k == *key {
+			return e.AuxIndex
+		}
+	}
+	return 0
+}
+
+// releaseSupersededBuiltinAux frees the aux index an upsert left behind.
+// Plugin-owned indices are left alone: the owner check inside
+// WithOwnerLocked fails for them, and their lifecycle belongs to the
+// PluginAux RPCs. newIdx guards the case where nothing actually changed.
+func (m *MapOperations) releaseSupersededBuiltinAux(oldIdx, newIdx uint16) {
+	if oldIdx == 0 || oldIdx == newIdx {
+		return
+	}
+	idx := uint32(oldIdx)
+	_ = m.auxAlloc.WithOwnerLocked(idx, AuxOwnerBuiltin, func() error {
+		var zero SidAuxEntry
+		_ = m.objs.SidAuxMap.Put(idx, &zero)
+		m.auxAlloc.freeOwnerLocked(idx)
+		return nil
+	})
 }
 
 // CreateSidFunctionWithAuxIndex binds a SID function entry to an aux index
@@ -1087,9 +1144,16 @@ func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entr
 	if err != nil {
 		return err
 	}
-	return m.auxAlloc.WithOwnerLocked(uint32(entry.AuxIndex), expectedAuxOwner, func() error {
+	// Binding a plugin aux over an entry that carried a builtin one leaves
+	// that builtin index unreferenced, same as any other upsert.
+	supersededAux := m.exactSidFunctionAuxIndex(key, alreadyOwned)
+	if err := m.auxAlloc.WithOwnerLocked(uint32(entry.AuxIndex), expectedAuxOwner, func() error {
 		return putMainAndOwner(m.objs.SidFunctionMap, m.sidFunctionOwners, key, entry, entryOwner, alreadyOwned, "SID function", nil)
-	})
+	}); err != nil {
+		return err
+	}
+	m.releaseSupersededBuiltinAux(supersededAux, entry.AuxIndex)
+	return nil
 }
 
 // AllocPluginAux reserves an index in the plugin_raw variant of sid_aux_map
@@ -1189,12 +1253,17 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	}
 
 	// Read entry first so aux can be cleaned up after successful delete.
+	// The lookup is a longest-prefix match, so it can answer with a broader
+	// entry that merely covers this prefix; the delete below decides whether
+	// what we read was really this prefix's own entry.
 	var entry SidFunctionEntry
 	hasEntry := m.objs.SidFunctionMap.Lookup(key, &entry) == nil
 
-	if err := deleteMapKey(m.objs.SidFunctionMap, key); err != nil {
+	existed, err := deleteMapKeyExisted(m.objs.SidFunctionMap, key)
+	if err != nil {
 		return fmt.Errorf("failed to delete SID function entry: %w", err)
 	}
+	hasEntry = hasEntry && existed
 	if err := m.sidFunctionOwners.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete SID function owner: %w", err)
 	}
