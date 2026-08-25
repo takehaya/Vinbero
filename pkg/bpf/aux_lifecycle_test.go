@@ -2,6 +2,7 @@ package bpf
 
 import (
 	"net"
+	"sync"
 	"testing"
 )
 
@@ -136,5 +137,55 @@ func TestCreateSidFunction_UpsertFreesTheAuxOfAnUnownedEntry(t *testing.T) {
 
 	if owner := m.auxAlloc.OwnerOf(legacyAux); owner != "" {
 		t.Errorf("legacy aux index %d owner = %q, want it freed", legacyAux, owner)
+	}
+}
+
+// Drives concurrent upserts and checks the aux bookkeeping still adds up:
+// one live index per prefix, each owned by the entry pointing at it. The
+// ABA window the lifecycle lock closes is too narrow to hit on demand, so
+// this is a load-shaped invariant check rather than proof of the lock --
+// it catches gross double-free or double-alloc, not the specific
+// interleaving.
+func TestSidFunctionAuxLifecycle_ConcurrentUpserts(t *testing.T) {
+	m := auxTestOps(t)
+	prefixes := []string{
+		"fd00:1:a11:3::1/128",
+		"fd00:1:a11:3::2/128",
+		"fd00:1:a11:3::3/128",
+	}
+	t.Cleanup(func() {
+		for _, p := range prefixes {
+			_ = m.DeleteSidFunction(p, OwnerRPC)
+		}
+	})
+
+	before := m.auxAlloc.countByOwner(AuxOwnerBuiltin)
+	var wg sync.WaitGroup
+	for _, p := range prefixes {
+		wg.Add(1)
+		go func(prefix string) {
+			defer wg.Done()
+			for i := range 20 {
+				entry := &SidFunctionEntry{Action: actionEndX}
+				nh := nexthopBytes(t, "fe80::1")
+				nh[15] = byte(i + 1)
+				if err := m.CreateSidFunction(prefix, entry, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
+					t.Errorf("create %s: %v", prefix, err)
+					return
+				}
+			}
+		}(p)
+	}
+	wg.Wait()
+
+	// One live aux per prefix, whatever order the updates landed in.
+	if got, want := m.auxAlloc.countByOwner(AuxOwnerBuiltin), before+len(prefixes); got != want {
+		t.Errorf("builtin aux slots in use = %d, want %d", got, want)
+	}
+	for _, p := range prefixes {
+		idx := auxIndexOf(t, m, p)
+		if owner := m.auxAlloc.OwnerOf(uint32(idx)); owner != AuxOwnerBuiltin {
+			t.Errorf("%s points at aux %d whose owner is %q", p, idx, owner)
+		}
 	}
 }

@@ -112,6 +112,16 @@ type MapOperations struct {
 	headendV4Owners   *entryOwnerMap
 	headendV6Owners   *entryOwnerMap
 	ecmpGroupOwners   *entryOwnerMap
+
+	// sidLifecycle serializes the read-modify-write sequences that bind a
+	// SID entry to its aux index: the owner check, the exact-entry read,
+	// the map write or delete, and the release of the aux the previous
+	// entry held. Those steps are not atomic on their own, and the writers
+	// do not share a lock above this layer (the RPC handler has its own
+	// mutex, the BGP applier does not take it), so without this two
+	// concurrent updates can free an index the other has just reused, or
+	// read one entry and then act on another. Zero value is usable.
+	sidLifecycle sync.Mutex
 }
 
 // NewMapOperations creates a new MapOperations instance.
@@ -1058,6 +1068,8 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
+	m.sidLifecycle.Lock()
+	defer m.sidLifecycle.Unlock()
 	alreadyOwned, err := checkEntryOwner(m.sidFunctionOwners, key, owner)
 	if err != nil {
 		return err
@@ -1155,6 +1167,9 @@ func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entr
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
+	m.sidLifecycle.Lock()
+	defer m.sidLifecycle.Unlock()
+
 	alreadyOwned, err := checkEntryOwner(m.sidFunctionOwners, key, entryOwner)
 	if err != nil {
 		return err
@@ -1264,6 +1279,8 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
+	m.sidLifecycle.Lock()
+	defer m.sidLifecycle.Unlock()
 	if !force {
 		if _, err := checkEntryOwner(m.sidFunctionOwners, key, requester); err != nil {
 			return err
