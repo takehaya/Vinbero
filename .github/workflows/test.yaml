@@ -147,6 +147,8 @@ jobs:
           - end-ad
           - end-am
           - end-an
+          - end-un
+          - end-ua
           - headend-v4
           - headend-v6
           - headend-l2

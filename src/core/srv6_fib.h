@@ -13,6 +13,13 @@
 #define FIB_RESULT_REDIRECT  0   // Success, redirect to ifindex
 #define FIB_RESULT_DROP     -1   // Drop packet (blackhole/unreachable)
 #define FIB_RESULT_PASS     -2   // Pass to kernel stack
+// The route resolved but its neighbour is not (yet) known. Callers that
+// treat every non-redirect as a failure must still hand this one to the
+// kernel: XDP dropping it means nothing ever emits the Neighbor
+// Solicitation, so the flow stays black-holed instead of recovering.
+// Callers that lump it in with FIB_RESULT_PASS keep their old behaviour
+// for free, because it stays a negative "not redirected" code.
+#define FIB_RESULT_NO_NEIGH -3
 
 // Core IPv6 FIB lookup with explicit dst address, update Ethernet header
 // dst: FIB lookup destination (ip6h->daddr for normal, nexthop for End.X)
@@ -47,6 +54,9 @@ static __always_inline int srv6_fib_lookup_v6_core(
     case BPF_FIB_LKUP_RET_UNREACHABLE:
     case BPF_FIB_LKUP_RET_PROHIBIT:
         return FIB_RESULT_DROP;
+
+    case BPF_FIB_LKUP_RET_NO_NEIGH:
+        return FIB_RESULT_NO_NEIGH;
 
     default:
         return FIB_RESULT_PASS;

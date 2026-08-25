@@ -140,6 +140,30 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		return err
 	}
 
+	// A uA entry consumes a function CSID out of its locator just like a
+	// service SID does, so claim it from the same allocator.
+	releaseUsidFn, err := s.claimUsidFunction(sidFunc)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if !committed {
+			releaseUsidFn()
+		}
+	}()
+
+	// This upsert may be replacing a uA with a different action. The claim
+	// above is a no-op then (only uA claims), and the later delete would not
+	// release it either, because by then the entry is not a uA -- the CSID
+	// would leak for good. Note the replacement here and undo it once the
+	// new entry is live.
+	hadUsidClaim, err := s.usidClaimIsOurs(sidFunc.TriggerPrefix)
+	if err != nil {
+		return err
+	}
+	replacesUsidClaim := hadUsidClaim &&
+		v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA
+
 	// Capture the circuit the existing entry for this trigger_prefix (if
 	// any) already owns. CreateSidFunction is an upsert, so a re-create
 	// that moves the SID to a different circuit — or turns it into a
@@ -195,6 +219,14 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		}
 	}
 	committed = true
+
+	// The uA that used to live here is gone, so its function CSID goes back
+	// to the locator pool.
+	if replacesUsidClaim && s.locatorMgr != nil {
+		if p, err := netip.ParsePrefix(sidFunc.TriggerPrefix); err == nil {
+			s.locatorMgr.ReleaseSID(p.Masked().Addr())
+		}
+	}
 
 	// The SID is live on its new circuit. If it previously owned a
 	// different circuit (moved, or became a non-proxy action), drop the
@@ -257,6 +289,125 @@ func (s *SidFunctionServer) resolveLocatorRef(sidFunc *v1.SidFunction) error {
 	return nil
 }
 
+// claimUsidFunction reserves a uA entry's function CSID in the uSID
+// locator that owns its prefix, and returns the release for the failure
+// path. uN needs no claim: its prefix is the locator prefix itself and
+// carries no function.
+//
+// Without the claim the allocator would still consider that CSID free and
+// hand it to a service SID (`vbctl sid add --locator-ref LOC --function
+// 0xc001`). The resulting /128 wins the LPM match over the uA /64 for the
+// terminal DA, so the uA's End.X fall-through would be silently replaced
+// by the service behavior -- a data-plane mis-forward with no error at
+// registration time.
+//
+// A missing locator is not an error: a uA registered outside any uSID
+// locator has no allocator to collide with.
+func (s *SidFunctionServer) claimUsidFunction(sidFunc *v1.SidFunction) (func(), error) {
+	noop := func() {}
+	if s.locatorMgr == nil ||
+		v1.Srv6LocalAction(sidFunc.GetAction()) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+		return noop, nil
+	}
+	// protoToEntry already validated the prefix shape, so anything that
+	// fails to parse here cannot reach the map either.
+	p, err := netip.ParsePrefix(sidFunc.GetTriggerPrefix())
+	if err != nil {
+		return noop, nil
+	}
+	sid := p.Masked().Addr()
+	loc, ok := s.longestUsidLocator(sid)
+	if !ok {
+		return noop, nil
+	}
+	fn, ok, err := loc.ParseSID(sid)
+	if err != nil || !ok {
+		return noop, nil
+	}
+	if _, _, err := s.locatorMgr.AllocateSID(loc.Name, &fn); err != nil {
+		// SidFunctionCreate is an upsert, so the CSID may already be held by
+		// this very uA entry. Anything else holding it (a service SID, or a
+		// different action at this prefix) is the collision this claim
+		// exists to catch.
+		if ours, ourErr := s.usidClaimIsOurs(sidFunc.GetTriggerPrefix()); ourErr != nil {
+			return noop, ourErr
+		} else if ours {
+			return noop, nil
+		}
+		return noop, fmt.Errorf("uA function CSID 0x%04x in locator %q: %w", fn, loc.Name, err)
+	}
+	return func() { s.locatorMgr.ReleaseSID(sid) }, nil
+}
+
+// longestUsidLocator returns the most specific uSID locator containing sid.
+// Manager.FindByContaining is behavior-agnostic, so a classic locator nested
+// inside a uSID one would win the longest match and make the claim a no-op,
+// leaving the enclosing uSID allocator free to reissue the same CSID as a
+// service SID.
+func (s *SidFunctionServer) longestUsidLocator(sid netip.Addr) (locator.Locator, bool) {
+	var best locator.Locator
+	found := false
+	for _, loc := range s.locatorMgr.List() {
+		if loc.Behavior != locator.BehaviorUSID || !loc.Prefix.Contains(sid) {
+			continue
+		}
+		if !found || loc.Prefix.Bits() > best.Prefix.Bits() {
+			best = loc
+			found = true
+		}
+	}
+	return best, found
+}
+
+// usidClaimIsOurs reports whether a uA entry occupies exactly this prefix,
+// which makes an existing CSID claim a re-create of that same entry rather
+// than a collision with someone else's SID.
+//
+// The lookup has to be an exact one. sid_function_map is an LPM trie, so
+// GetSidFunction answers with the covering entry: a /128 created under a uA
+// /64 would look like that uA and its claim would be released out from under
+// a live SID. There is no exact-match lookup for an LPM trie, hence the
+// scan; it runs once per create and once per delete, never on the data path.
+func (s *SidFunctionServer) usidClaimIsOurs(prefix string) (bool, error) {
+	want, err := netip.ParsePrefix(prefix)
+	if err != nil {
+		return false, nil
+	}
+	owner, ok, err := s.usidClaimOwner(want.Masked().Addr())
+	if err != nil {
+		return false, err
+	}
+	return ok && owner == want.Masked(), nil
+}
+
+// usidClaimOwner returns the uA entry that owns the locator claim recorded
+// at addr, if any. A claim is keyed by the masked address of the uA's /64,
+// which a /128 at that same address shares, so both the delete path and the
+// upsert path have to ask who owns it before releasing anything.
+//
+// A failed lookup is an error, never "nobody owns it": treating it as the
+// latter would release a live uA's claim on the delete path.
+func (s *SidFunctionServer) usidClaimOwner(addr netip.Addr) (netip.Prefix, bool, error) {
+	if s.mapOps == nil {
+		return netip.Prefix{}, false, nil
+	}
+	entries, err := s.mapOps.ListSidFunctions()
+	if err != nil {
+		return netip.Prefix{}, false, fmt.Errorf("list SID functions: %w", err)
+	}
+	for p, entry := range entries {
+		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+			continue
+		}
+		got, err := netip.ParsePrefix(p)
+		if err != nil || got.Masked().Addr() != addr {
+			continue
+		}
+		return got.Masked(), true, nil
+	}
+	return netip.Prefix{}, false, nil
+}
+
 // rollbackLocatorRef returns the function value to the locator pool when
 // a subsequent step (validation, map write) failed after allocation.
 // Safe to call when no locator_ref was used -- becomes a no-op via
@@ -306,15 +457,37 @@ func (s *SidFunctionServer) SidFunctionDelete(
 // its circuit. Caller holds s.mu.
 func (s *SidFunctionServer) deleteOneSidFunction(prefix string) error {
 	circuitIf, circuitVlan, hasCircuit := s.captureProxyCircuit(prefix)
+	// A uA claim is keyed by the masked address of its /64, which is also
+	// the address a locator-minted /128 service SID would use. Decide from
+	// the entry being deleted, before it is gone, so deleting some unrelated
+	// /64 at that address cannot free a live service SID's function.
+	releasesUsidClaim, err := s.usidClaimIsOurs(prefix)
+	if err != nil {
+		return err
+	}
+	// Ask who owns the claim before the entry is gone, and refuse to touch
+	// the map at all when that answer is unavailable.
+	var claimedByOtherUA bool
+	if p, perr := netip.ParsePrefix(prefix); perr == nil {
+		_, owned, oerr := s.usidClaimOwner(p.Masked().Addr())
+		if oerr != nil {
+			return oerr
+		}
+		claimedByOtherUA = owned && !releasesUsidClaim
+	}
 	if err := s.mapOps.DeleteSidFunction(prefix, bpf.OwnerRPC); err != nil {
 		return err
 	}
-	// Locator-minted SIDs return their function value to the pool.
-	// Bindings for direct trigger_prefix SIDs simply miss the lookup
-	// (Manager.ReleaseSID is a no-op for unknown sids).
+	// Locator-minted SIDs return their function value to the pool, and so
+	// does a uA entry that claimed its function CSID. Bindings for direct
+	// trigger_prefix SIDs simply miss the lookup (Manager.ReleaseSID is a
+	// no-op for unknown sids) -- except when a uA holds a claim at that very
+	// address, which a /128 on the uA's base address shares. Ask who owns it.
 	if s.locatorMgr != nil {
-		if sid, err := parseLocatorSID(prefix); err == nil {
-			s.locatorMgr.ReleaseSID(sid)
+		if p, perr := netip.ParsePrefix(prefix); perr == nil && !claimedByOtherUA {
+			if releasesUsidClaim || p.Bits() == 128 {
+				s.locatorMgr.ReleaseSID(p.Masked().Addr())
+			}
 		}
 	}
 	// End.B6 policy is cleaned up automatically with the aux entry.
@@ -413,6 +586,17 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	if err := validateProxyFieldScope(sidFunc); err != nil {
 		return nil, nil, err
 	}
+	// Same convention as the proxy field scope: an action-specific field on
+	// the wrong action is rejected, not silently dropped (it would otherwise
+	// vanish on a Get -> Create round trip).
+	if sidFunc.UsidBlockLen != nil {
+		switch v1.Srv6LocalAction(sidFunc.Action) {
+		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+		default:
+			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA")
+		}
+	}
 	entry := &bpf.SidFunctionEntry{
 		Action: uint8(sidFunc.Action),
 		Flavor: uint8(sidFunc.Flavor),
@@ -481,6 +665,61 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			return nil, nil, err
 		}
 		aux = bpf.NewSidAuxNexthop(nexthop)
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+		if sidFunc.LocatorRef != nil {
+			return nil, nil, fmt.Errorf("locator_ref is not supported for uN/uA yet; set trigger_prefix explicitly")
+		}
+		blockLen := uint32(32)
+		if sidFunc.UsidBlockLen != nil {
+			blockLen = *sidFunc.UsidBlockLen
+		}
+		if blockLen != 32 {
+			return nil, nil, fmt.Errorf("usid_block_len %d is not supported (F3216 only: 32)", blockLen)
+		}
+		p, err := netip.ParsePrefix(sidFunc.TriggerPrefix)
+		if err != nil {
+			return nil, nil, fmt.Errorf("trigger_prefix: %w", err)
+		}
+		// The LPM entry covers block + node (uN) or block + node + function
+		// (uA); the Argument tail must stay outside the prefix (RFC 9800
+		// Sec.5.3). The 16 bits after the block are the node CSID, and 0
+		// is the reserved container terminator for both shapes.
+		p16 := p.Masked().Addr().As16()
+		if p16[4] == 0 && p16[5] == 0 {
+			return nil, nil, fmt.Errorf("uSID node CSID must be non-zero (0 is the container terminator)")
+		}
+		var nexthop [16]uint8
+		if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+			if p.Bits() != int(blockLen)+32 {
+				return nil, nil, fmt.Errorf("uA trigger_prefix must be /%d (block + node + function), got /%d", blockLen+32, p.Bits())
+			}
+			// The function field is itself a CSID; 0 is the container
+			// terminator, and a /64 ending in it would shadow the uN /48
+			// for terminal DAs.
+			fn16 := p.Masked().Addr().As16()
+			if fn16[6] == 0 && fn16[7] == 0 {
+				return nil, nil, fmt.Errorf("uA function CSID must be non-zero (0 is the container terminator)")
+			}
+			// The uA nexthop feeds an AF_INET6 FIB lookup, so it must be a
+			// genuine IPv6 address: the empty string (zero address) and
+			// IPv4 literals (which net.ParseIP would map to ::ffff:0:0/96)
+			// are both rejected.
+			nh, err := netip.ParseAddr(sidFunc.Nexthop)
+			if err != nil || !nh.Is6() || nh.Is4In6() || nh.IsUnspecified() {
+				return nil, nil, fmt.Errorf("uA requires an IPv6 nexthop, got %q", sidFunc.Nexthop)
+			}
+			nexthop = nh.As16()
+		} else {
+			if p.Bits() != int(blockLen)+16 {
+				return nil, nil, fmt.Errorf("uN trigger_prefix must be /%d (block + node), got /%d", blockLen+16, p.Bits())
+			}
+			if sidFunc.Nexthop != "" {
+				return nil, nil, fmt.Errorf("uN does not take a nexthop (use uA)")
+			}
+		}
+		aux = bpf.NewSidAuxUsid(nexthop, uint8(blockLen/8))
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 		// DX2 stores OIF as uint32 in first 4 bytes of aux nexthop
@@ -876,6 +1115,15 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X:
 				sf.Nexthop = bpf.FormatIPv6(aux.Nexthop.Nexthop)
 
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+				nexthop, blockLenBytes := bpf.SidAuxUsidData(aux)
+				blockLen := uint32(blockLenBytes) * 8
+				sf.UsidBlockLen = &blockLen
+				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+					sf.Nexthop = bpf.FormatIPv6(nexthop)
+				}
+
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 				sf.Oif = binary.NativeEndian.Uint32(aux.Nexthop.Nexthop[:4])
 
@@ -993,4 +1241,79 @@ func (s *SidFunctionServer) buildPolicyEntry(sidFunc *v1.SidFunction) (*bpf.Head
 		SrcAddr:     srcAddr,
 		Segments:    segments,
 	}, nil
+}
+
+// AddLocatorAndClaim registers loc and, in the same critical section,
+// claims the function CSID of every uA already installed inside it.
+//
+// Registration order is not fixed: uN and uA are registered by explicit
+// trigger_prefix and may well exist before the locator covering their block
+// does. Without this pass those CSIDs stay free and the new locator can
+// hand one to a service SID whose /128 then shadows the uA /64. Doing the
+// add and the claim under s.mu also closes the window where a concurrent
+// SidFunctionCreate would take the CSID between the two steps.
+//
+// A failed claim rolls the locator back, so LocatorCreate either publishes
+// a locator whose uA CSIDs are all reserved or reports an error.
+func (s *SidFunctionServer) AddLocatorAndClaim(loc *locator.Locator) error {
+	if s.locatorMgr == nil {
+		return errors.New("locator manager is not wired up")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.locatorMgr.Add(loc); err != nil {
+		return err
+	}
+	claimed, err := s.reconcileUsidClaimsLocked(*loc)
+	// Roll back completely: the claims this pass did take have to go back
+	// too, or the bindings outlive the locator (Manager.Delete leaves them)
+	// and re-creating it fails on every one of them.
+	if err != nil {
+		for _, sid := range claimed {
+			s.locatorMgr.ReleaseSID(sid)
+		}
+		_ = s.locatorMgr.Delete(loc.Name, true)
+		return err
+	}
+	return nil
+}
+
+// reconcileUsidClaimsLocked claims the CSIDs of the uA entries inside loc
+// and returns the SIDs it claimed, so a failure can be unwound. Caller
+// holds s.mu.
+func (s *SidFunctionServer) reconcileUsidClaimsLocked(loc locator.Locator) ([]netip.Addr, error) {
+	var claimed []netip.Addr
+	if s.mapOps == nil || loc.Behavior != locator.BehaviorUSID {
+		return claimed, nil
+	}
+	entries, err := s.mapOps.ListSidFunctions()
+	if err != nil {
+		return claimed, fmt.Errorf("list SID functions: %w", err)
+	}
+	for prefix, entry := range entries {
+		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+			continue
+		}
+		p, err := netip.ParsePrefix(prefix)
+		if err != nil {
+			continue
+		}
+		sid := p.Masked().Addr()
+		// Only the most specific uSID locator owns the claim, so a nested
+		// one does not steal it from its parent.
+		if owner, ok := s.longestUsidLocator(sid); !ok || owner.Name != loc.Name {
+			continue
+		}
+		fn, ok, err := loc.ParseSID(sid)
+		if err != nil || !ok {
+			continue
+		}
+		if _, _, err := s.locatorMgr.AllocateSID(loc.Name, &fn); err != nil {
+			return claimed, fmt.Errorf("uA %s holds function CSID 0x%04x in locator %q: %w",
+				prefix, fn, loc.Name, err)
+		}
+		claimed = append(claimed, sid)
+	}
+	return claimed, nil
 }

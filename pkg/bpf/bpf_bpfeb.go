@@ -323,6 +323,8 @@ type BpfProgramSpecs struct {
 	TailcallEndpointEndM_gtp6D_di  *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_d_di"`
 	TailcallEndpointEndM_gtp6E     *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_m_gtp6_e"`
 	TailcallEndpointEndT           *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_t"`
+	TailcallEndpointEndUa          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_ua"`
+	TailcallEndpointEndUn          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_un"`
 	TailcallEndpointEndX           *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_x"`
 	TailcallHeadendL2H_encaps      *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps"`
 	TailcallHeadendL2H_encapsRed   *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps_red"`
@@ -538,6 +540,8 @@ type BpfPrograms struct {
 	TailcallEndpointEndM_gtp6D_di  *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_d_di"`
 	TailcallEndpointEndM_gtp6E     *ebpf.Program `ebpf:"tailcall_endpoint_end_m_gtp6_e"`
 	TailcallEndpointEndT           *ebpf.Program `ebpf:"tailcall_endpoint_end_t"`
+	TailcallEndpointEndUa          *ebpf.Program `ebpf:"tailcall_endpoint_end_ua"`
+	TailcallEndpointEndUn          *ebpf.Program `ebpf:"tailcall_endpoint_end_un"`
 	TailcallEndpointEndX           *ebpf.Program `ebpf:"tailcall_endpoint_end_x"`
 	TailcallHeadendL2H_encaps      *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps"`
 	TailcallHeadendL2H_encapsRed   *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps_red"`
@@ -581,6 +585,8 @@ func (p *BpfPrograms) Close() error {
 		p.TailcallEndpointEndM_gtp6D_di,
 		p.TailcallEndpointEndM_gtp6E,
 		p.TailcallEndpointEndT,
+		p.TailcallEndpointEndUa,
+		p.TailcallEndpointEndUn,
 		p.TailcallEndpointEndX,
 		p.TailcallHeadendL2H_encaps,
 		p.TailcallHeadendL2H_encapsRed,

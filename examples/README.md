@@ -71,6 +71,8 @@ sudo ./teardown.sh # クリーンアップ
 | `end-dt2-p2mp/` | End.DT2 P2MP | マルチサイトL2VPN（BUMフラッディング） |
 | `end-dt2m-multihomed/` | End.DT2M | multi-homed L2VPN（DF election + split-horizon） |
 | `end-dx2v/` | End.DX2V | VLAN単位のL2クロスコネクト |
+| `end-un/` | uN | NEXT-C-SID の shift 転送 (RFC 9800、F3216) |
+| `end-ua/` | uA | NEXT-C-SID の shift + adjacency 転送 (RFC 9800、F3216) |
 
 ### Headend Functions
 | ディレクトリ | 機能 | 説明 |
