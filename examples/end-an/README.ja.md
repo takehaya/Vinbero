@@ -16,7 +16,7 @@ graph LR
 
 - forward 方向は router1 が H.Encaps で `fc00:2::200, fc00:3::3` を積みます。
 - `fc00:2::200` は router2 の Vinbero が End.AN として処理します。転送は End と同じで、専用 slot は per-SID の統計と将来の service liveness 連動のためにあります。
-- `--service-name` で NF catalog の metadata を登録し、`vbctl sid get` で引けることを確認します。NF discovery はこの SidFunctionList / Get を service の registration point として使います。
+- `--service-name` で NF catalog の metadata を登録し、`vinbero sid get` で引けることを確認します。netns example のクライアントバイナリは `vinbero` です。`vbctl` は interop-clab の Docker image 内にしかありません。NF discovery はこの SidFunctionList / Get を service の registration point として使います。
 - return 方向 (host2 から host1) は Linux native の経路です。
 
 ## 実行方法

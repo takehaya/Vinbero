@@ -20,9 +20,10 @@ graph LR
 - `fc00:2::200` is handled by Vinbero on router2 as End.AN. Forwarding is the
   same as End; the dedicated slot exists for per-SID statistics and for
   future service liveness integration.
-- `--service-name` registers NF catalog metadata, which `vbctl sid get` reads
-  back. NF discovery uses this SidFunctionList / Get pair as the service
-  registration point.
+- `--service-name` registers NF catalog metadata, which `vinbero sid get`
+  reads back (the netns examples use the `vinbero` binary; `vbctl` only
+  exists inside the interop-clab image). NF discovery uses this
+  SidFunctionList / Get pair as the service registration point.
 - The return direction (host2 to host1) is plain Linux forwarding.
 
 ## Usage
