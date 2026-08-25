@@ -16,10 +16,15 @@ import (
 // handler owns proto translation and error mapping.
 type LocatorServer struct {
 	mgr *locator.Manager
+	// onAdded runs after a locator is registered, so components holding
+	// state derived from locators can catch up on what already exists.
+	// SidFunctionService uses it to claim the CSIDs of uA entries that
+	// were registered before their locator. May be nil.
+	onAdded func(locator.Locator)
 }
 
-func NewLocatorServer(mgr *locator.Manager) *LocatorServer {
-	return &LocatorServer{mgr: mgr}
+func NewLocatorServer(mgr *locator.Manager, onAdded func(locator.Locator)) *LocatorServer {
+	return &LocatorServer{mgr: mgr, onAdded: onAdded}
 }
 
 func (s *LocatorServer) LocatorCreate(
@@ -45,6 +50,11 @@ func (s *LocatorServer) LocatorCreate(
 				Reason:        err.Error(),
 			})
 			continue
+		}
+		if s.onAdded != nil {
+			// Called outside Manager.Add so the manager lock is already
+			// released: the callback takes locks of its own.
+			s.onAdded(loc)
 		}
 		resp.Created = append(resp.Created, in)
 	}

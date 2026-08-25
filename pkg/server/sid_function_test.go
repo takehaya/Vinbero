@@ -1027,3 +1027,43 @@ func TestSidFunction_MoreSpecificEntryUnderUALeavesTheClaim(t *testing.T) {
 		t.Fatalf("the live uA's CSID was released: err = %v, want ErrFunctionInUse", err)
 	}
 }
+
+// uN and uA are registered by explicit trigger_prefix, so a uA can exist
+// before the locator covering its block. LocatorCreate reconciles those
+// claims; without it the new locator would happily reissue the CSID.
+func TestReconcileUsidClaims_ClaimsPreexistingUA(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := locator.NewManager()
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	// uA first, with no locator registered yet.
+	const prefix = "fd00:aaaa:b002:c001::/64"
+	if err := s.createOneSidFunction(uaSidFunction(prefix)); err != nil {
+		t.Fatalf("create uA: %v", err)
+	}
+	t.Cleanup(func() { _ = s.deleteOneSidFunction(prefix) })
+
+	loc := &locator.Locator{
+		Name:              "loc1",
+		Prefix:            netip.MustParsePrefix("fd00:aaaa:b002::/48"),
+		BlockLen:          32,
+		NodeLen:           16,
+		FunctionLen:       16,
+		Behavior:          locator.BehaviorUSID,
+		FunctionAutoStart: 1,
+		FunctionAutoEnd:   0xffff,
+	}
+	if err := mgr.Add(loc); err != nil {
+		t.Fatalf("locator Add: %v", err)
+	}
+	s.ReconcileUsidClaims(*loc)
+
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("the pre-existing uA's CSID is still free: err = %v, want ErrFunctionInUse", err)
+	}
+}
