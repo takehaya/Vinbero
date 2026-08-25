@@ -227,11 +227,9 @@ static __always_inline int process_end_un_core(
         //
         // In both shapes the DA that the kernel sees is this node's own uN
         // SID, which is why passing a rewritten packet up is safe here and
-        // nowhere else. It does assume the operator configured that
-        // address locally -- see the "uN SID must be the only local
-        // address inside the prefix" note in docs/loadmap.md. Without it
-        // the kernel routes the packet by the locator prefix instead of
-        // delivering it.
+        // nowhere else. It does assume the bare uN SID is configured as a
+        // local address on this node; without it the kernel routes the
+        // packet by the locator prefix instead of delivering it.
         return XDP_PASS;
     }
 

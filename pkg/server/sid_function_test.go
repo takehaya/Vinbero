@@ -927,3 +927,35 @@ func TestDeleteSidFunction_KeepsForeignLocatorClaim(t *testing.T) {
 		t.Fatalf("the service SID's CSID was released by an unrelated delete: err = %v, want ErrFunctionInUse", err)
 	}
 }
+
+// Replacing a uA with another action is an upsert, so nothing else releases
+// its function CSID: the claim helper only claims for uA, and the eventual
+// delete sees a non-uA entry. The replacement itself has to hand it back.
+func TestSidFunctionCreate_UAReplacedByOtherActionReleasesCSID(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	const prefix = "fd00:aaaa:b002:c001::/64"
+	if err := s.createOneSidFunction(uaSidFunction(prefix)); err != nil {
+		t.Fatalf("create uA: %v", err)
+	}
+	t.Cleanup(func() { _ = s.deleteOneSidFunction(prefix) })
+
+	// Same prefix, different action.
+	if err := s.createOneSidFunction(&v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: prefix,
+	}); err != nil {
+		t.Fatalf("replace with END: %v", err)
+	}
+
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+		t.Fatalf("the replaced uA's CSID leaked: %v", err)
+	}
+}

@@ -277,6 +277,25 @@ func TestXDPProgEndUa(t *testing.T) {
 		}
 		verifyDAAndSL(t, out, "fd00:9:9::1", 1)
 	})
+
+	t.Run("argument zero without SRH passes to the kernel", func(t *testing.T) {
+		// The bare uA SID with no SRH is classic End.X with no segment
+		// list: local delivery, and nothing in the packet may change.
+		pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc::"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_PASS {
+			t.Errorf("expected XDP_PASS, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:ffff:cccc::"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (untouched)", got, want)
+		}
+		if hl := outPktHopLimit(t, out); hl != 64 {
+			t.Errorf("hop limit = %d, want 64 (no uA hop was executed)", hl)
+		}
+	})
 }
 
 func TestXDPProgEndUnFullContainer(t *testing.T) {

@@ -152,6 +152,14 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		}
 	}()
 
+	// This upsert may be replacing a uA with a different action. The claim
+	// above is a no-op then (only uA claims), and the later delete would not
+	// release it either, because by then the entry is not a uA -- the CSID
+	// would leak for good. Note the replacement here and undo it once the
+	// new entry is live.
+	replacesUsidClaim := s.usidClaimIsOurs(sidFunc.TriggerPrefix) &&
+		v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA
+
 	// Capture the circuit the existing entry for this trigger_prefix (if
 	// any) already owns. CreateSidFunction is an upsert, so a re-create
 	// that moves the SID to a different circuit — or turns it into a
@@ -207,6 +215,14 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		}
 	}
 	committed = true
+
+	// The uA that used to live here is gone, so its function CSID goes back
+	// to the locator pool.
+	if replacesUsidClaim && s.locatorMgr != nil {
+		if p, err := netip.ParsePrefix(sidFunc.TriggerPrefix); err == nil {
+			s.locatorMgr.ReleaseSID(p.Masked().Addr())
+		}
+	}
 
 	// The SID is live on its new circuit. If it previously owned a
 	// different circuit (moved, or became a non-proxy action), drop the
