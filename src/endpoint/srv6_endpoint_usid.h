@@ -79,6 +79,8 @@ static __always_inline void usid_shift(__u8 *da, int arg_off)
 // next CSID) is re-dispatched to its own tail-call slot with its own
 // entry/aux context.
 // Returns:
+//   2  the shifted DA belongs to a local SID that cannot run without an
+//      SRH; caller hands the packet to the kernel for local delivery
 //   1  shifted; caller forwards on the updated DA
 //   0  Argument is zero; caller falls through to classic End
 //  -1  drop (hop limit exhausted, or the re-dispatch tail call failed)
@@ -111,6 +113,19 @@ static __always_inline int usid_shift_loop(struct xdp_md *ctx,
             return 1;
         if (next->action != entry->action ||
             next->aux_index != entry->aux_index) {
+            // Carry over the no-SRH dispatcher's eligibility rule. Most
+            // endpoint slots parse whatever follows the IPv6 header as an
+            // SRH, so re-dispatching an SRH-less packet into one of them
+            // would read the upper-layer header as a Routing header. Only
+            // uN/uA and the decap behaviours are safe there; anything else
+            // is a local SID whose packet the kernel should deliver.
+            if (dispatch_type == DISPATCH_NOSRH &&
+                next->action != SRV6_LOCAL_ACTION_END_UN &&
+                next->action != SRV6_LOCAL_ACTION_END_UA &&
+                inner_proto != IPPROTO_IPIP &&
+                inner_proto != IPPROTO_IPV6 &&
+                inner_proto != IPPROTO_ETHERNET)
+                return 2;
             if (tailcall_ctx_write_sid(next, l3_offset, dispatch_type,
                                        inner_proto, next->action) == 0)
                 bpf_tail_call(ctx, &sid_endpoint_progs, next->action);
@@ -134,8 +149,10 @@ static __always_inline int usid_shift_loop(struct xdp_md *ctx,
 // dropping there black-holes the flow until unrelated traffic happens to
 // resolve the neighbour. uN hands those packets to the kernel instead,
 // which resolves the neighbour and forwards on the already-shifted DA --
-// the same thing classic End does, at the cost of one extra hop-limit
-// decrement in ip6_forward on that first packet.
+// the same thing classic End does. The hop limit this execution consumed is
+// given back first, because ip6_forward decrements again on the way out;
+// without that, a packet that arrived with a hop limit of 2 would be
+// answered with Time Exceeded after a single logical uN hop.
 //
 // uA cannot do that: it forwards over a configured adjacency, and the
 // kernel would route by the DA instead, which is a different next hop (in
@@ -163,8 +180,10 @@ static __always_inline int usid_forward(struct xdp_md *ctx, void *dst,
         return bpf_redirect(out_ifindex, 0);
     // dst == NULL means the lookup key was the DA itself (uN), so the
     // kernel repeats exactly this forwarding decision.
-    if (r == FIB_RESULT_NO_NEIGH && dst == NULL)
+    if (r == FIB_RESULT_NO_NEIGH && dst == NULL) {
+        ip6h->hop_limit++;
         return XDP_PASS;
+    }
     return XDP_DROP;
 }
 
@@ -187,6 +206,11 @@ static __always_inline int process_end_un_core(
         return XDP_DROP;
     if (r == 1)
         return usid_forward(ctx, NULL, l3_offset);
+    if (r == 2) {
+        // The shifted DA is a local SID that needs an SRH this packet does
+        // not have. The kernel owns that address, so let it decide.
+        return XDP_PASS;
+    }
 
     // Argument == 0: the container ends here.
     if (dispatch_type == DISPATCH_NOSRH) {

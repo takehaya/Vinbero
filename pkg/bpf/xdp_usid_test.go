@@ -377,3 +377,29 @@ func TestXDPProgEndUnRedispatchCarriesTargetContext(t *testing.T) {
 		t.Errorf("hop limit = %d, want 63 (one logical uN hop)", hl)
 	}
 }
+
+// A shift that lands on a local SID whose behavior needs an SRH must not be
+// re-dispatched when the packet has none: most endpoint slots parse whatever
+// follows the IPv6 header as a Routing header, so an ICMPv6 payload would be
+// read as an SRH. The kernel owns that address, so the packet goes up
+// instead.
+func TestXDPProgEndUnNoSrhShiftIntoSrhOnlyEntryPassesUp(t *testing.T) {
+	h := newXDPTestHelper(t)
+	h.createSidFunctionUsid("fd00:aaaa:bbbb::/48", actionEndUn, 0, [16]byte{}, usidBlockLenBytes)
+	h.createSidFunction("fd00:aaaa:cccc::/128", uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END))
+
+	pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:bbbb:cccc::"), 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, out := h.run(pkt)
+	if ret != XDP_PASS {
+		t.Errorf("expected XDP_PASS (local delivery), got %d", ret)
+	}
+	if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:cccc::"); !got.Equal(want) {
+		t.Errorf("DA = %v, want %v (shifted once)", got, want)
+	}
+	if hl := outPktHopLimit(t, out); hl != 63 {
+		t.Errorf("hop limit = %d, want 63 (one logical uN hop)", hl)
+	}
+}
