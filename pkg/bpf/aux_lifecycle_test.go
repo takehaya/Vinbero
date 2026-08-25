@@ -140,12 +140,12 @@ func TestCreateSidFunction_UpsertFreesTheAuxOfAnUnownedEntry(t *testing.T) {
 	}
 }
 
-// Drives concurrent upserts and checks the aux bookkeeping still adds up:
-// one live index per prefix, each owned by the entry pointing at it. The
-// ABA window the lifecycle lock closes is too narrow to hit on demand, so
-// this is a load-shaped invariant check rather than proof of the lock --
-// it catches gross double-free or double-alloc, not the specific
-// interleaving.
+// Drives concurrent upserts of the SAME prefixes from several workers, so
+// the read-modify-write sequences the lifecycle lock protects actually
+// overlap, and checks the aux bookkeeping still adds up: one live index per
+// prefix, each owned by the entry pointing at it. The ABA interleaving is
+// too narrow to hit on demand, so this catches gross double-free or
+// double-alloc rather than proving the lock.
 func TestSidFunctionAuxLifecycle_ConcurrentUpserts(t *testing.T) {
 	m := auxTestOps(t)
 	prefixes := []string{
@@ -160,25 +160,28 @@ func TestSidFunctionAuxLifecycle_ConcurrentUpserts(t *testing.T) {
 	})
 
 	before := m.auxAlloc.countByOwner(AuxOwnerBuiltin)
+	const workers = 4
 	var wg sync.WaitGroup
-	for _, p := range prefixes {
+	for w := range workers {
 		wg.Add(1)
-		go func(prefix string) {
+		go func(w int) {
 			defer wg.Done()
-			for i := range 20 {
-				entry := &SidFunctionEntry{Action: actionEndX}
-				nh := nexthopBytes(t, "fe80::1")
-				nh[15] = byte(i + 1)
-				if err := m.CreateSidFunction(prefix, entry, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
-					t.Errorf("create %s: %v", prefix, err)
-					return
+			for i := range 15 {
+				for _, prefix := range prefixes {
+					entry := &SidFunctionEntry{Action: actionEndX}
+					nh := nexthopBytes(t, "fe80::1")
+					nh[14] = byte(w + 1)
+					nh[15] = byte(i + 1)
+					if err := m.CreateSidFunction(prefix, entry, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
+						t.Errorf("worker %d create %s: %v", w, prefix, err)
+						return
+					}
 				}
 			}
-		}(p)
+		}(w)
 	}
 	wg.Wait()
 
-	// One live aux per prefix, whatever order the updates landed in.
 	if got, want := m.auxAlloc.countByOwner(AuxOwnerBuiltin), before+len(prefixes); got != want {
 		t.Errorf("builtin aux slots in use = %d, want %d", got, want)
 	}

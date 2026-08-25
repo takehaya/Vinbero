@@ -1076,7 +1076,7 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 	}
 	// This is an upsert. Whatever aux the superseded entry pointed at goes
 	// unreferenced the moment the new entry lands, so remember it now.
-	supersededAux, err := m.exactSidFunctionAuxIndex(key)
+	supersededAux, err := m.exactSidFunctionAuxIndex(key, alreadyOwned)
 	if err != nil {
 		return err
 	}
@@ -1101,19 +1101,22 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 // exactly key, or 0 when this prefix has no entry of its own.
 //
 // sid_function_map is an LPM trie, so Lookup answers with a covering entry
-// rather than this one and cannot be used for the question. A miss there
-// does settle it though -- nothing covers the key, so nothing sits on it
-// either -- which keeps the scan off the path a fresh create takes.
-// Ownership is deliberately not used as the shortcut: entries pinned before
-// owner tracking existed carry no owner record, and skipping them would
-// leak their aux on the first upsert.
-func (m *MapOperations) exactSidFunctionAuxIndex(key *LpmKeyV6) (uint16, error) {
+// rather than this one. Two cheap facts settle almost every call: a miss
+// means nothing covers the key, so nothing sits on it either; and when the
+// owner map (a hash on the exact prefix) says this prefix is owned, the
+// entry exists, which makes the longest-prefix answer the exact one. Only
+// an entry with no owner record -- pinned before owner tracking existed --
+// needs the scan.
+func (m *MapOperations) exactSidFunctionAuxIndex(key *LpmKeyV6, alreadyOwned bool) (uint16, error) {
 	var covering SidFunctionEntry
 	if err := m.objs.SidFunctionMap.Lookup(key, &covering); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("lookup SID function entry: %w", err)
+	}
+	if alreadyOwned {
+		return covering.AuxIndex, nil
 	}
 	var k LpmKeyV6
 	var e SidFunctionEntry
@@ -1176,7 +1179,7 @@ func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entr
 	}
 	// Binding a plugin aux over an entry that carried a builtin one leaves
 	// that builtin index unreferenced, same as any other upsert.
-	supersededAux, err := m.exactSidFunctionAuxIndex(key)
+	supersededAux, err := m.exactSidFunctionAuxIndex(key, alreadyOwned)
 	if err != nil {
 		return err
 	}
