@@ -5,6 +5,7 @@
 
 // ========================================================================
 // Basic Endpoint Function Implementations (End, End.X, End.T)
+// End.AN reuses process_end through its own tail-call slot.
 // All share the common pipeline via endpoint_common_processing(),
 // differing only in FIB redirect method.
 // ========================================================================
@@ -21,7 +22,7 @@ static __always_inline int process_end(
     int action = endpoint_common_processing(&ectx, ctx, ip6h, srh, entry,
                                             l3_offset, ctx->ingress_ifindex);
     if (action >= 0) return action;
-    return endpoint_fib_redirect(&ectx, ctx->ingress_ifindex);
+    return endpoint_settle_hop_limit(&ectx, endpoint_fib_redirect(&ectx, ctx->ingress_ifindex));
 }
 
 // End.X: Cross-connect to specified nexthop (RFC 8986 Section 4.2)
@@ -38,7 +39,7 @@ static __always_inline int process_end_x(
     int action = endpoint_common_processing(&ectx, ctx, ip6h, srh, entry,
                                             l3_offset, ctx->ingress_ifindex);
     if (action >= 0) return action;
-    return endpoint_fib_redirect_nexthop(&ectx, aux->nexthop.nexthop);
+    return endpoint_settle_hop_limit(&ectx, endpoint_fib_redirect_nexthop(&ectx, aux->nexthop.nexthop));
 }
 
 // End.T: VRF-aware FIB lookup (RFC 8986 Section 4.3)
@@ -55,7 +56,7 @@ static __always_inline int process_end_t(
     int action = endpoint_common_processing(&ectx, ctx, ip6h, srh, entry,
                                             l3_offset, fib_ifindex);
     if (action >= 0) return action;
-    return endpoint_fib_redirect(&ectx, fib_ifindex);
+    return endpoint_settle_hop_limit(&ectx, endpoint_fib_redirect(&ectx, fib_ifindex));
 }
 
 #endif // SRV6_ENDPOINT_BASIC_H

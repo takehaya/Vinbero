@@ -1,9 +1,11 @@
-# SRv6 Headend (H.Encaps) IPv6 Playground
+# SRv6 H.Encaps for IPv6 Playground
 
-Vinbero XDPによるSRv6 H.Encaps (Headend Encapsulation) for IPv6のデモ環境です。
-IPv6パケットをIPv6+SRHでカプセル化します（IPv6-in-IPv6）。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-## トポロジー
+Demo environment for SRv6 H.Encaps (headend encapsulation) of IPv6 traffic on
+Vinbero XDP. The IPv6 packet is encapsulated in IPv6 + SRH (IPv6-in-IPv6).
+
+## Topology
 
 ```mermaid
 graph LR
@@ -13,60 +15,61 @@ graph LR
     router3 -->|IPv6| host2[host2<br/>2001:2::1]
 ```
 
-**パケットの流れ（host1→host2の例）:**
-1. host1が2001:2::1にping6を送信 (IPv6)
-2. **router1 (Vinbero XDP)** がH.Encapsを実行:
-   - IPv6パケットを外側IPv6+SRHでカプセル化
-   - Outer DA: fc00:2::1 (最初のセグメント)
-   - Segment List: [fc00:2::1, fc00:3::3]
-3. router2がfc00:2::1でEnd操作を実行（SL減少、次のセグメントへ）
-4. router3がfc00:3::3でEnd.DX6を実行（内側IPv6を取り出す）
-5. host2がping6を受信
+**Packet walk (host1 to host2):**
+1. host1 pings 2001:2::1 over IPv6
+2. **router1 (Vinbero XDP)** runs H.Encaps:
+   - encapsulates the IPv6 packet in an outer IPv6 + SRH
+   - outer DA: fc00:2::1 (the first segment)
+   - segment list: [fc00:2::1, fc00:3::3]
+3. router2 runs End on fc00:2::1: decrement SL, move to the next segment
+4. router3 runs End.DX6 on fc00:3::3 and extracts the inner IPv6 packet
+5. host2 receives the ping
 
-## クイックスタート
+## Quick start
 
 ```bash
-sudo ./setup.sh    # 環境構築
-sudo ./test.sh     # テスト実行
-sudo ./teardown.sh # クリーンアップ
+sudo ./setup.sh    # build the environment
+sudo ./test.sh     # run the tests
+sudo ./teardown.sh # clean up
 ```
 
-## 手動実行
+## Running it by hand
 
-### 1. 環境構築とVinbero起動
+### 1. Build the environment and start Vinbero
 
 ```bash
 sudo ./setup.sh
 
-# router1のLinux native SRv6ルートを削除
+# Remove the Linux native SRv6 route on router1
 sudo ip netns exec hv6-router1 ip -6 route del 2001:2::/64 2>/dev/null
 
-# Vinbero起動
+# Start Vinbero
 sudo ip netns exec hv6-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
 ```
 
-### 2. HeadendV6エントリ登録
+### 2. Register the HeadendV6 entry
 
 ```bash
 sudo ip netns exec hv6-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 hv6 create --trigger-prefix 2001:2::/64 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
 ```
 
-### 3. テスト
+### 3. Test
 
 ```bash
 sudo ip netns exec hv6-host1 ping6 -c 3 2001:2::1
 ```
 
-#### パケットキャプチャ
+#### Packet capture
 
 ```bash
-# router1-router2間でSRv6パケットを確認
+# SRv6 packets between router1 and router2
 sudo ip netns exec hv6-router2 tcpdump -i hv6-rt2rt1 -n ip6
 ```
 
-外側IPv6+SRH内に内側IPv6パケットがカプセル化されていることが確認できます。
+The capture shows the inner IPv6 packet encapsulated inside the outer
+IPv6 + SRH.
 
-### 4. 環境のクリーンナップ
+### 4. Clean up
 
 ```bash
 sudo ./teardown.sh

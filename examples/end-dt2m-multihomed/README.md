@@ -1,22 +1,24 @@
-# End.DT2M マルチホーム Playground
+# SRv6 End.DT2M multi-homing
 
-RFC 9252 の split-horizon フィルタリングと静的 DF 選出を、**host1 が共有 Linux
-ブリッジ経由で PE1 と PE2 にデュアルホームする** 5-namespace トポロジー上で
-検証します。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-- ESI: `01:00:00:00:00:00:00:00:00:01` (PE1/PE2 共に `local_attached`)
-- Bridge Domain: `bd_id = 100` / VLAN 100
-- host1 の MAC は MAC Pinning で `02:00:00:00:00:01` 固定
-- host1 側の veth は `ethtool -K <veth> txvlan off` で VLAN タグをパケット
-  データに残す (veth の VLAN offload は既知の罠)
+Verifies RFC 9252 split-horizon filtering and static DF election on a
+5-namespace topology where **host1 is dual-homed to PE1 and PE2 through a
+shared Linux bridge**.
 
-## トポロジー
+- ESI: `01:00:00:00:00:00:00:00:00:01` (`local_attached` on both PE1 and PE2)
+- Bridge domain: `bd_id = 100` / VLAN 100
+- host1's MAC is pinned to `02:00:00:00:00:01` with MAC pinning
+- The host1-side veths run `ethtool -K <veth> txvlan off` so the VLAN tag
+  stays in the packet data (veth VLAN offload is a known trap)
+
+## Topology
 
 ```mermaid
 flowchart LR
     host1["host1<br/>172.16.100.1<br/>VLAN 100"]
 
-    subgraph ES1["ES-1 (共有 CE / mh-h1-br)"]
+    subgraph ES1["ES-1 (shared CE / mh-h1-br)"]
       direction LR
       leg1(( )):::leg
       leg2(( )):::leg
@@ -41,67 +43,66 @@ flowchart LR
     classDef leg fill:#eef,stroke:#88a,stroke-dasharray:2 2;
 ```
 
-PE1 と PE2 は `mh-host1` 内の `mh-h1-br` を介して host1 と接続され、2 本の
-veth レッグが生えます。split-horizon が無いと host1 からの BUM が他方の PE
-経由でループバックしてきますが、RFC 9252 の split-horizon + DF 選出を入れ
-ることで BUM が正しく一方向にファンアウトします。
+PE1 and PE2 reach host1 through `mh-h1-br` inside `mh-host1`, so two veth
+legs come off it. Without split-horizon, BUM traffic from host1 loops back
+through the other PE; RFC 9252 split-horizon plus DF election makes it fan
+out in one direction only.
 
-## クイックスタート (要 sudo)
+## Quick start (needs sudo)
 
 ```bash
 sudo ./setup.sh
-# (各 PE で vinberod が ready になるのを待つ)
+# (wait for vinberod to become ready on each PE)
 sudo ./test.sh
 sudo ./teardown.sh
 ```
 
-## テストで検証する内容
+## What the test verifies
 
-1. **Split-horizon (Phase C)**: `host1 → broadcast → PE1` が PE2 経由で
-   host1 に戻ってこないこと。PE1 側で `SPLIT_HORIZON_TX > 0`、PE2 側
-   (fail-safe 経路) で `SPLIT_HORIZON_RX` をアサート。
-2. **DF 選出 (Phase D)**: 以下のコマンド例の `vbctl` は `test.sh` /
-   `smoke_api.sh` が `vinbero -s http://127.0.0.1:<PE port>` を包んだシェル関数
-   です。netns 内に `vbctl` という実バイナリはありません。`--esi` には冒頭の実
-   ESI を渡します。
-   - 初期状態は DF=PE1。両 PE で
-     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:1::1` を実行して DF を一致させる。
-   - リモートからの `PE3 → BUM → host1` は PE1 経由でのみ host1 に届く
-     (PE2 側は `NON_DF_DROP` で落ちる)。
-   - DF を PE2 に切り替え:
-     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:2::2`
-     → 以降は PE2 経由で届く。
+1. **Split-horizon (phase C)**: `host1 -> broadcast -> PE1` does not come back
+   to host1 via PE2. It asserts `SPLIT_HORIZON_TX > 0` on both PEs and
+   checks a pcap on the host1 side for zero self-sourced ARP frames.
+2. **DF election (phase D)**: `vbctl` in the commands below is a shell
+   function that `test.sh` and `smoke_api.sh` define around `vinbero -s
+   http://127.0.0.1:<PE port>`; there is no `vbctl` binary inside the
+   namespaces. Pass the real ESI from the top of this page to `--esi`.
+   - DF starts as PE1. Run
+     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:1::1`
+     on both PEs so they agree on the DF.
+   - `PE3 -> BUM -> host1` from the remote side reaches host1 only via PE1
+     (PE2 drops it as `NON_DF_DROP`).
+   - Switch the DF to PE2 with
+     `vbctl es df-set --esi 01:00:00:00:00:00:00:00:00:01 --pe fc00:2::2`,
+     after which the traffic arrives via PE2.
 
-## ステータス
+## Status
 
-**データプレーン** (eBPF ロジック): `pkg/bpf/split_horizon_test.go` の
-BPF_PROG_TEST_RUN ベースのアサーションで完全にカバー済み。
-- `TestXDPProgEndDT2MSplitHorizonRX` (Phase C: RX 側 drop)
-- `TestXDPProgEndDT2MNonDFDrop` (Phase D: DF ゲート)
-- `TestBdPeerReverseEsi` (`bd_peer_reverse_map` への ESI 伝播)
+**Data plane** (eBPF logic): fully covered by the BPF_PROG_TEST_RUN
+assertions in `pkg/bpf/split_horizon_test.go`.
+- `TestXDPProgEndDT2MSplitHorizonRX` (phase C: RX-side drop)
+- `TestXDPProgEndDT2MNonDFDrop` (phase D: DF gate)
+- `TestBdPeerReverseEsi` (ESI propagation into `bd_peer_reverse_map`)
 
-**コントロールプレーン API** (Connect RPC): 同ディレクトリの
-`smoke_api.sh` で検証。vinberod を 1 台だけ立ち上げ (データプレーントラ
-フィック無し)、`es create / list / df-set / df-clear / delete` と
-`bd-peer create --esi` を一通り叩きます。
+**Control plane API** (Connect RPC): covered by `smoke_api.sh` in this
+directory. It brings up a single vinberod (no data-plane traffic) and walks
+`es create / list / df-set / df-clear / delete` plus `bd-peer create --esi`.
 
-**フル E2E トポロジー**: 同ディレクトリの `setup.sh` / `test.sh` で
-5-namespace の shared-CE トポロジーを立ち上げます。BPF コード自体は
-上記のユニットテストで検証済みですが、Linux bridge との相互作用
-(veth tx-vlan offload、ARP 重複、MAC Pinning 等) の確認には E2E が有用
-です。まず `smoke_api.sh` を green にしてから `setup.sh` + `test.sh`
-に進むのがおすすめです。
+**Full E2E topology**: `setup.sh` and `test.sh` here build the 5-namespace
+shared-CE topology. The BPF code itself is covered by the unit tests above,
+but the E2E run is what exercises the interaction with the Linux bridge (veth
+tx-vlan offload, duplicate ARP, MAC pinning). Getting `smoke_api.sh` green
+first and then moving to `setup.sh` + `test.sh` is the smoother path.
 
-## ファイル一覧
+## Files
 
-| ファイル | 用途 |
+| File | Purpose |
 |---|---|
-| `README.md` | 本ドキュメント |
-| `smoke_api.sh` | API のみのスモーク (PE 1 台、データプレーン無し、10 秒以内に完走) |
-| `setup.sh` | 共有 CE ブリッジを含む 5-namespace トポロジー構築 |
-| `teardown.sh` | namespace / veth の撤去 |
-| `test.sh` | pcap + stats アサーション付きの E2E テスト |
-| `vinbero_pe1.yaml` | PE1 設定 (ES-1 local_attached) |
-| `vinbero_pe2.yaml` | PE2 設定 (ES-1 local_attached) |
-| `vinbero_p.yaml` | 中継ルータ設定 (End) |
-| `vinbero_pe3.yaml` | 出口 PE 設定 (シングルホーム) |
+| `README.md` | This document (Japanese version: `README.ja.md`) |
+| `smoke_api.sh` | API-only smoke test (one PE, no data plane, finishes within 10 seconds) |
+| `setup.sh` | Builds the 5-namespace topology including the shared CE bridge |
+| `teardown.sh` | Removes the namespaces and veths |
+| `test.sh` | E2E test with pcap and stats assertions |
+| `vinbero_pe1.yaml` | PE1 config (ES-1 local_attached) |
+| `vinbero_pe2.yaml` | PE2 config (ES-1 local_attached) |
+| `vinbero_p.yaml` | Transit router config (End) |
+| `vinbero_pe3.yaml` | Egress PE config (single-homed) |

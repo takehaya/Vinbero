@@ -314,6 +314,11 @@ func TestXDPProgEndUnFullContainer(t *testing.T) {
 		t.Fatalf("expected XDP_PASS (classic End fall-through), got %d", ret)
 	}
 	verifyDAAndSL(t, out, "fd00:9:9::1", 1)
+	// Five shifts, five hops. The classic End the packet falls through to
+	// is a sixth hop and takes one more, but it hands the packet to the
+	// kernel here (the FIB never resolves under BPF_PROG_TEST_RUN) and
+	// gives that one back for the kernel to spend. On a real redirect the
+	// packet would leave with 58.
 	if hl := outPktHopLimit(t, out); hl != 59 {
 		t.Errorf("hop limit = %d, want 59 (five logical uN hops)", hl)
 	}

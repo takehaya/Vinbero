@@ -1,10 +1,15 @@
 # SRv6 End.X Playground
 
-Vinbero XDPによるSRv6 End.X (Endpoint with L3 cross-connect) のデモ環境です。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-End.X はSRH処理 (DA更新とSL減算) のあと、通常のFIBルックアップではなく設定済みの明示的なnext-hopへ転送します。経路に依存しない固定next-hopのクロスコネクトを実現します。
+Demo environment for SRv6 End.X (endpoint with L3 cross-connect) on Vinbero
+XDP.
 
-## トポロジー
+End.X does the usual SRH processing (update the DA, decrement SL) and then
+forwards to a configured next hop instead of consulting the FIB, which gives
+a fixed cross-connect that does not depend on routing.
+
+## Topology
 
 ```mermaid
 graph LR
@@ -14,43 +19,46 @@ graph LR
     router3 -->|IPv4| host2[host2<br/>172.0.2.1]
 ```
 
-**パケットの流れ（host1→host2）:**
-1. host1が172.0.2.1にpingを送信 (IPv4)
-2. router1がLinux native H.Encapsを実行し、Segment List `[fc00:2::1, fc00:3::3]` でSRv6カプセル化
-3. **router2 (Vinbero XDP)** がfc00:2::1でEnd.Xを実行:
-   - SRH処理でDAをfc00:3::3に更新、SLを減算
-   - FIBルックアップせず、設定済みnext-hop `fc00:23::1` (rt2-rt3リンク上のrouter3) へ転送
-4. router3がfc00:3::3でEnd.DX4を実行し、内側IPv4パケットをhost2へ転送
-5. 戻り方向は対称で、fc00:2::2のEnd.Xがnext-hop `fc00:12::1` (router1) へ転送
+**Packet walk (host1 to host2):**
+1. host1 pings 172.0.2.1 over IPv4
+2. router1 runs Linux native H.Encaps with the segment list `[fc00:2::1, fc00:3::3]`
+3. **router2 (Vinbero XDP)** runs End.X on fc00:2::1:
+   - SRH processing updates the DA to fc00:3::3 and decrements SL
+   - no FIB lookup: the packet goes to the configured next hop `fc00:23::1`
+     (router3 on the rt2-rt3 link)
+4. router3 runs End.DX4 on fc00:3::3 and forwards the inner IPv4 packet to host2
+5. The return direction is symmetric: End.X on fc00:2::2 forwards to next hop
+   `fc00:12::1` (router1)
 
-## クイックスタート
+## Quick start
 
 ```bash
-sudo ./setup.sh    # 環境構築
-sudo ./test.sh     # テスト実行（Linux native → Vinbero XDP の2フェーズ）
-sudo ./teardown.sh # クリーンアップ
+sudo ./setup.sh    # build the environment
+sudo ./test.sh     # run the tests (Linux native, then Vinbero XDP)
+sudo ./teardown.sh # clean up
 ```
 
-`test.sh` はまずLinux native End.Xで疎通を確認し、native経路を削除してからVinbero XDPで再検証します。
+`test.sh` first checks connectivity through Linux native End.X, then removes
+the native routes and repeats the check against Vinbero XDP.
 
-## 手動実行
+## Running it by hand
 
-### 1. 環境構築とVinbero起動
+### 1. Build the environment and start Vinbero
 
 ```bash
 sudo ./setup.sh
 
-# router2のLinux native End.X経路を削除
+# Remove the Linux native End.X routes on router2
 sudo ip netns exec end-x-router2 ip -6 route del local fc00:2::1/128 2>/dev/null
 sudo ip netns exec end-x-router2 ip -6 route del local fc00:2::2/128 2>/dev/null
 
-# Vinbero起動（フォアグラウンドで動き続けるので & でバックグラウンド起動するか別ターミナルで）
+# vinberod stays in the foreground, so background it or use another terminal
 sudo ip netns exec end-x-router2 ../../out/bin/vinberod -c vinbero_router2.yaml &
 ```
 
-### 2. SidFunction (End.X) エントリ登録
+### 2. Register the SidFunction (End.X) entries
 
-`--nexthop` で転送先を明示します。
+`--nexthop` names the forwarding target.
 
 ```bash
 # Forward: fc00:2::1 -> nexthop fc00:23::1 (router3)
@@ -61,13 +69,13 @@ sudo ip netns exec end-x-router2 ../../out/bin/vinbero -s http://127.0.0.1:8082 
   sid create --trigger-prefix fc00:2::2/128 --action END_X --nexthop fc00:12::1
 ```
 
-### 3. テスト
+### 3. Test
 
 ```bash
 sudo ip netns exec end-x-host1 ping -c 3 172.0.2.1
 ```
 
-### 4. 環境のクリーンアップ
+### 4. Clean up
 
 ```bash
 sudo ./teardown.sh

@@ -1,6 +1,10 @@
-# End.AS (Static Proxy) Example
+# SRv6 End.AS
 
-draft-ietf-spring-srv6-service-programming の End.AS を netns で検証する example です。SR-unaware なサービス (素の IPv4 forwarder) を SRv6 chain の途中に挟みます。
+*(日本語: [README.ja.md](./README.ja.md))*
+
+netns example for End.AS from draft-ietf-spring-srv6-service-programming. An
+SR-unaware service (a plain IPv4 forwarder) is inserted in the middle of an
+SRv6 chain.
 
 ## Topology
 
@@ -13,12 +17,16 @@ graph LR
     router2 --- svc[svc<br/>SR-unaware IPv4 forwarder]
 ```
 
-- forward 方向は router1 が H.Encaps で `fc00:2::100, fc00:3::3` を積みます。
-- `fc00:2::100` は router2 の Vinbero が End.AS として処理します。SR encapsulation を剥がして svc へ渡し、svc から戻ったパケットを静的 CACHE (`fc00:3::3`) で再 encapsulation して router3 へ送ります。
-- svc は SRv6 を一切知りません。受け取った IPv4 パケットを経路表に従って同じ wire に送り返すだけです。
-- return 方向 (host2 から host1) は proxy を通らない Linux native の経路です。
+- In the forward direction router1 pushes `fc00:2::100, fc00:3::3` with H.Encaps.
+- `fc00:2::100` is handled by Vinbero on router2 as End.AS. It strips the SR
+  encapsulation, hands the packet to svc, and re-encapsulates what comes back
+  using the static CACHE (`fc00:3::3`) before sending it to router3.
+- svc knows nothing about SRv6. It just routes the IPv4 packet it receives
+  back out the same wire.
+- The return direction (host2 to host1) is plain Linux forwarding and does
+  not traverse the proxy.
 
-## 実行方法
+## Usage
 
 ```bash
 sudo ./setup.sh
@@ -26,8 +34,12 @@ sudo ./test.sh
 sudo ./teardown.sh
 ```
 
-## テスト内容
+## What is verified
 
-- Phase 1 は Linux native の End を baseline にして underlay の疎通を確認します (Linux に End.AS は無いため proxy は bypass)。
-- Phase 2 は Vinbero の End.AS で svc 経由の chain を検証します。svc 側 veth の rx counter が増えることで、トラフィックが実際にサービスを通過したことを確認します。
-- 同じ IFACE-IN に 2 つ目の proxy SID を作ると reject されること (return circuit の 1:1 制約) も確認します。
+- Phase 1 establishes an underlay baseline with Linux native End (Linux has
+  no End.AS, so the proxy is bypassed).
+- Phase 2 exercises the chain through svc with Vinbero's End.AS. The rx
+  counter on the svc-side veth growing is what proves the traffic really
+  crossed the service.
+- Creating a second proxy SID on the same IFACE-IN is rejected (the return
+  circuit is 1:1).
