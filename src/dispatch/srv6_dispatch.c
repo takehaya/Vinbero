@@ -65,11 +65,12 @@ static __always_inline int process_srv6_decap_nosrh(
     if (!entry)
         return XDP_PASS;
 
-    // uN/uA process any upper-layer protocol without an SRH (RFC 9800
+    // uN/uA/uT process any upper-layer protocol without an SRH (RFC 9800
     // Sec.4.1: NEXT-C-SID applies to SRH-less packets too). Everything
     // else keeps the reduced-encap gate: only tunnel payloads decap here.
     if (entry->action != SRV6_LOCAL_ACTION_END_UN &&
         entry->action != SRV6_LOCAL_ACTION_END_UA &&
+        entry->action != SRV6_LOCAL_ACTION_END_UT &&
         nh != IPPROTO_IPIP && nh != IPPROTO_IPV6 && nh != IPPROTO_ETHERNET)
         return XDP_PASS;
 

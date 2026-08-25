@@ -434,10 +434,14 @@ struct sid_aux_entry {
             char service_name[64];   // null-terminated ASCII
         } an_meta;                                         // 64 bytes
 
-        // uN / uA (NEXT-C-SID, RFC 9800): shift parameters. nexthop sits at
-        // offset 0 with the same layout as the nexthop variant so uA's
-        // classic End.X fall-through reads either view. block_len_bytes is
-        // the locator block length in bytes (LBL/8; F3216 => 4).
+        // uN / uA / uT (NEXT-C-SID, RFC 9800): shift parameters. nexthop
+        // sits at offset 0 with the same layout as the nexthop variant so
+        // uA's classic End.X fall-through reads either view. uT reuses the
+        // same aliasing the other way: it has no nexthop, so the control
+        // plane writes the VRF ifindex into the leading 4 bytes and the
+        // data plane reads it through the l3vrf view (uN leaves them zero,
+        // which is l3vrf's ingress fallback). block_len_bytes is the
+        // locator block length in bytes (LBL/8; F3216 => 4).
         struct {
             __u8 nexthop[IPV6_ADDR_LEN];
             __u8 block_len_bytes;

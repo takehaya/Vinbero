@@ -110,6 +110,14 @@ static __always_inline int endpoint_fib_redirect_core(struct endpoint_ctx *ectx,
     case FIB_RESULT_DROP:
         return XDP_DROP;
     default:
+        // Unresolved or unrouted: hand the packet to the kernel only when
+        // the lookup ran in the ingress context, where the kernel repeats
+        // the same decision (and resolves the neighbour on NO_NEIGH). A
+        // VRF-bound lookup (End.T/uT) is one the kernel would not repeat
+        // for a packet that arrived on a non-VRF interface, so it fails
+        // closed instead of escaping the table binding.
+        if (fib_ifindex != ectx->ctx->ingress_ifindex)
+            return XDP_DROP;
         return XDP_PASS;
     }
 }
@@ -221,6 +229,7 @@ static __always_inline int endpoint_handle_usd(
     struct ipv6hdr *ip6h,
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
+    __u32 fib_ifindex,
     __u16 l3_offset)
 {
     __u8 inner_proto = srh->nexthdr;
@@ -237,7 +246,7 @@ static __always_inline int endpoint_handle_usd(
         struct iphdr *iph = (void *)(eth + 1);
         if ((void *)(iph + 1) > data_end) return XDP_DROP;
         eth->h_proto = bpf_htons(ETH_P_IP);
-        int action = srv6_fib_redirect_v4(ctx, iph, eth, ctx->ingress_ifindex);
+        int action = srv6_fib_redirect_v4(ctx, iph, eth, fib_ifindex);
         return (action == XDP_PASS) ? XDP_DROP : action;
     }
 
@@ -252,7 +261,7 @@ static __always_inline int endpoint_handle_usd(
         if ((void *)(eth + 1) > data_end) return XDP_DROP;
         struct ipv6hdr *inner_ip6h = (void *)(eth + 1);
         if ((void *)(inner_ip6h + 1) > data_end) return XDP_DROP;
-        int action = srv6_fib_redirect(ctx, inner_ip6h, eth, ctx->ingress_ifindex);
+        int action = srv6_fib_redirect(ctx, inner_ip6h, eth, fib_ifindex);
         return (action == XDP_PASS) ? XDP_DROP : action;
     }
 
@@ -297,7 +306,8 @@ static __always_inline int endpoint_handle_usp(
 // Returns >= 0: final XDP action (packet handled by SL=0 flavor or error).
 // Returns -1:   caller should perform variant-specific FIB redirect.
 //
-// usp_fib_ifindex: FIB ifindex for USP flavor (End/End.X: ingress, End.T: vrf)
+// sl0_fib_ifindex: FIB ifindex for the SL=0 flavors USD and USP
+// (End/End.X: ingress, End.T/uT: the bound VRF)
 static __always_inline int endpoint_common_processing(
     struct endpoint_ctx *ectx,
     struct xdp_md *ctx,
@@ -305,15 +315,15 @@ static __always_inline int endpoint_common_processing(
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
     __u16 l3_offset,
-    __u32 usp_fib_ifindex)
+    __u32 sl0_fib_ifindex)
 {
     int ret = endpoint_init(ectx, ctx, ip6h, srh, entry, l3_offset);
 
     if (ret == -1) {
         if (entry->flavor == SRV6_LOCAL_FLAVOR_USD)
-            return endpoint_handle_usd(ctx, ip6h, srh, entry, l3_offset);
+            return endpoint_handle_usd(ctx, ip6h, srh, entry, sl0_fib_ifindex, l3_offset);
         if (entry->flavor == SRV6_LOCAL_FLAVOR_USP)
-            return endpoint_handle_usp(ctx, ip6h, srh, entry, usp_fib_ifindex, l3_offset);
+            return endpoint_handle_usp(ctx, ip6h, srh, entry, sl0_fib_ifindex, l3_offset);
         return XDP_PASS;
     }
     if (ret == -2)
