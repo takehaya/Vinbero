@@ -1066,3 +1066,47 @@ func TestReconcileUsidClaims_ClaimsPreexistingUA(t *testing.T) {
 		t.Fatalf("the pre-existing uA's CSID is still free: err = %v, want ErrFunctionInUse", err)
 	}
 }
+
+// Claims taken by a reconcile must not outlive the locator: a forced
+// delete drops them, and the partial-failure path unwinds the ones it took,
+// so the same locator can always be created again.
+func TestAddLocatorAndClaim_ClaimsDoNotOutliveTheLocator(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := locator.NewManager()
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	// Two uA entries inside the locator, so the reconcile records two
+	// bindings and both have to disappear with it.
+	for _, p := range []string{"fd00:aaaa:b002:c001::/64", "fd00:aaaa:b002:c002::/64"} {
+		if err := s.createOneSidFunction(uaSidFunction(p)); err != nil {
+			t.Fatalf("create uA %s: %v", p, err)
+		}
+		defer func(p string) { _ = s.deleteOneSidFunction(p) }(p)
+	}
+
+	loc := &locator.Locator{
+		Name:              "loc1",
+		Prefix:            netip.MustParsePrefix("fd00:aaaa:b002::/48"),
+		BlockLen:          32,
+		NodeLen:           16,
+		FunctionLen:       16,
+		Behavior:          locator.BehaviorUSID,
+		FunctionAutoStart: 1,
+		FunctionAutoEnd:   0xffff,
+	}
+	if err := s.AddLocatorAndClaim(loc); err != nil {
+		t.Fatalf("first AddLocatorAndClaim: %v", err)
+	}
+	if err := mgr.Delete("loc1", true); err != nil {
+		t.Fatalf("locator Delete: %v", err)
+	}
+
+	// Re-adding must not trip over bindings left by the first pass.
+	if err := s.AddLocatorAndClaim(loc); err != nil {
+		t.Fatalf("re-add after the locator was deleted: %v", err)
+	}
+}
