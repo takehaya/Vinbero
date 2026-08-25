@@ -693,6 +693,20 @@ func TestProtoToEntry_ProxyFieldScope(t *testing.T) {
 	})
 }
 
+// An out-of-range flavor must not alias to a known one through the u8
+// cast (260 % 256 == 4 == USD, which would enable decap unexpectedly).
+func TestProtoToEntryRejectsUnknownFlavor(t *testing.T) {
+	s := newProtoToEntryServer()
+	_, _, err := s.protoToEntry(&v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: "fd00:1::1/128",
+		Flavor:        v1.Srv6LocalFlavor(260),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown flavor") {
+		t.Fatalf("err = %v, want unknown flavor rejection", err)
+	}
+}
+
 // TestProtoToEntry_USID verifies the uN/uA API contract: prefix shapes,
 // nexthop requirements, block length bounds, and field scoping.
 func TestProtoToEntry_USID(t *testing.T) {

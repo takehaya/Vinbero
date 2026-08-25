@@ -223,6 +223,110 @@ func TestXDPProgEndUnPSP(t *testing.T) {
 	}
 }
 
+// USD on a no-SRH (H.Encaps.Red single-container) packet: when the
+// container ends on this node and the flavor is USD, the outer IPv6 is
+// stripped and the inner packet is forwarded. The FIB never resolves under
+// BPF_PROG_TEST_RUN, so the verdict is the fail-closed XDP_DROP; the decap
+// itself is asserted on the returned packet.
+func TestXDPProgEndUnUSDNoSrh(t *testing.T) {
+	h := newXDPTestHelper(t)
+	h.createSidFunctionUsid("fd00:aaaa:dddd::/48", actionEndUn, flavorUSD, [16]byte{}, usidBlockLenBytes)
+
+	t.Run("bare uN SID with inner IPv4 decaps", func(t *testing.T) {
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:dddd::"),
+			net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		// Whether the post-decap FIB resolves depends on the host's routing
+		// table, so the verdict is XDP_REDIRECT or the fail-closed XDP_DROP;
+		// XDP_PASS would mean the USD branch never ran.
+		if ret == XDP_PASS {
+			t.Errorf("expected XDP_REDIRECT or XDP_DROP, got XDP_PASS")
+		}
+		if !verifyEtherType(t, out, 0x0800) {
+			t.Errorf("expected decapped IPv4 packet")
+		}
+	})
+
+	t.Run("bare uN SID with inner IPv6 decaps", func(t *testing.T) {
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:dddd::"),
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret == XDP_PASS {
+			t.Errorf("expected XDP_REDIRECT or XDP_DROP, got XDP_PASS")
+		}
+		if !verifyEtherType(t, out, 0x86DD) {
+			t.Errorf("expected decapped IPv6 packet")
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
+			t.Errorf("inner DA = %v, want %v (outer stripped)", got, want)
+		}
+	})
+
+	t.Run("container ending here after a shift decaps", func(t *testing.T) {
+		// [uN, uN] of this node: the loop consumes the Argument down to the
+		// bare SID, then the USD terminal decaps.
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:dddd:dddd::"),
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret == XDP_PASS {
+			t.Errorf("expected XDP_REDIRECT or XDP_DROP, got XDP_PASS")
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
+			t.Errorf("inner DA = %v, want %v (shifted, then decapped)", got, want)
+		}
+	})
+
+	t.Run("non-tunnel payload passes up untouched", func(t *testing.T) {
+		// USD has nothing to decap for a plain ICMPv6 payload: same
+		// upper-layer delivery as flavor NONE.
+		pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:dddd::"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_PASS {
+			t.Errorf("expected XDP_PASS, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:dddd::"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (untouched)", got, want)
+		}
+	})
+}
+
+// Flavor NONE keeps the pre-USD behavior on tunnelled no-SRH terminals:
+// the packet goes to the kernel with the outer header intact. Pinned so the
+// USD branch cannot widen to flavorless entries by accident.
+func TestXDPProgEndUnNoSrhTunnelledFlavorNonePassesUp(t *testing.T) {
+	h := newXDPTestHelper(t)
+	h.createSidFunctionUsid("fd00:aaaa:bbbb::/48", actionEndUn, 0, [16]byte{}, usidBlockLenBytes)
+
+	pkt, err := buildEncapsulatedPacketNoSRH(
+		net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:bbbb::"),
+		net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, out := h.run(pkt)
+	if ret != XDP_PASS {
+		t.Errorf("expected XDP_PASS, got %d", ret)
+	}
+	if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:bbbb::"); !got.Equal(want) {
+		t.Errorf("DA = %v, want %v (outer header intact)", got, want)
+	}
+}
+
 func TestXDPProgEndUa(t *testing.T) {
 	h := newXDPTestHelper(t)
 	var nexthop [16]byte
