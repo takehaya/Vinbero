@@ -24,7 +24,7 @@ container は forward が fd00:aaaa:b002:a003:b003:d004::、return が fd00:aaaa
 
 ## Linux 側の設定について
 
-Linux の seg6local は 1 回の実行で lblen + nflen bit を消費します。uA は node と function を同時に消費するので、F3216 では `lblen 32 nflen 32` を指定します。`nflen 16` は uN の形で、function CSID が DA に残ります。
+Linux の seg6local が 1 回の実行で消費する幅は `nflen` です。`lblen` は shift せずに残す locator block の長さで、SID の prefix 長は `lblen + nflen` になります。uA は node と function を同時に消費するので、F3216 では `lblen 32 nflen 32` (prefix /64) を指定します。`nflen 16` は uN の形で、function CSID が DA に残ります。
 
 ## 必要条件
 

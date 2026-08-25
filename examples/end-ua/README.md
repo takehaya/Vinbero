@@ -35,9 +35,10 @@ fd00:aaaa:b002:a001:b001:d001:: return.
 
 ## The Linux side
 
-seg6local consumes lblen + nflen bits per execution, so the uA shape is
-`lblen 32 nflen 32`: node and function go together. `nflen 16` leaves the
-function CSID in the DA, which is the uN shape.
+seg6local consumes `nflen` bits per execution; `lblen` is the locator block
+it keeps, and the SID prefix is `lblen + nflen` wide. uA consumes node and
+function together, so its shape is `lblen 32 nflen 32` (a /64). `nflen 16`
+would leave the function CSID in the DA, which is the uN shape.
 
 ## Requirements
 

@@ -52,9 +52,10 @@ run ip netns exec "$ns_router1" ip -6 route add local fd00:aaaa:b001:d001::/128 
 # Linux-native next-csid routes as the oracle; phase 2 removes them and
 # reinstalls the same SIDs via Vinbero.
 #
-# lblen 32 nflen 32 is the uA shape: Linux consumes lblen + nflen bits per
-# execution, so node (16) + function (16) go together. nflen 16 would leave
-# the function CSID in place -- that is the uN shape.
+# lblen 32 nflen 32 is the uA shape. Linux consumes nflen bits per
+# execution and keeps lblen, so node (16) + function (16) go together and
+# the SID prefix is lblen + nflen = /64. nflen 16 would leave the function
+# CSID in place -- that is the uN shape.
 ns_sysctl "$ns_router2" net.ipv6.conf.${veth_rt2_rt1}.seg6_enabled 1
 ns_sysctl "$ns_router2" net.ipv6.conf.${veth_rt2_rt3}.seg6_enabled 1
 

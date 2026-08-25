@@ -72,7 +72,7 @@ DA を書き換えた後なので、転送に失敗したパケットを kernel 
 
 neighbor 未解決 (`BPF_FIB_LKUP_RET_NO_NEIGH`) だけは扱いが分かれます。これは経路自体は存在し、NDP がまだ解決していないだけの状態です。XDP は Neighbor Solicitation を送れないので、ここで drop すると他のトラフィックが偶然 neighbor を解決するまで通信が復旧しません。
 
-- uN は kernel に渡します。uN の FIB lookup のキーは shift 後の DA そのものなので、kernel は同じ転送判断をやり直します。classic End と同じ動作で、代償は最初の 1 パケットが `ip6_forward` で hop limit をもう 1 回消費することだけです
+- uN は kernel に渡します。uN の FIB lookup のキーは shift 後の DA そのものなので、kernel は同じ転送判断をやり直します。classic End と同じ動作です。kernel に渡す直前に、この実行で減らした hop limit を 1 戻します。`ip6_forward` がもう一度減らすためで、戻さないと hop limit 2 のパケットが 1 論理 hop で Time Exceeded になります。結果として消費は論理 hop あたり 1 のままです
 - uA は drop します。uA は設定した adjacency へ転送する behavior で、kernel に渡すと DA 側の経路で転送されてしまいます。shift 後の DA に経路がない構成では ICMPv6 unreachable が返ります。uA の nexthop は neighbor が解決済みである必要があり、これは classic End.X と同じ制約です
 
 ### container がこのノードで終わる場合
@@ -159,7 +159,7 @@ E2E は netns example の 2 本で、どちらも Linux kernel の seg6local nex
 | `examples/end-un/` | uN | `action End flavors next-csid lblen 32 nflen 16` | 6.1 以上 |
 | `examples/end-ua/` | uA | `action End.X flavors next-csid lblen 32 nflen 32` | 6.6 以上 |
 
-Linux の seg6local は 1 回の実行で lblen + nflen bit を消費します。uA は node と function を同時に消費するので `nflen 32` が正しく、`nflen 16` は function CSID を DA に残す uN の形になります。
+Linux の seg6local で 1 回の実行が消費する幅は `nflen` です。`lblen` は shift せずに残す locator block の長さで、SID の prefix 長は `lblen + nflen` になります。uA は node と function を同時に消費するので `nflen 32` (prefix /64) が正しく、`nflen 16` は function CSID を DA に残す uN の形になります。
 
 end-ua の router2 は terminal SID への経路を持たないので、uA が設定した nexthop を使わずに shift 後の DA を FIB で引いた場合は転送できません。phase 2 の疎通自体が adjacency 転送の確認になります。end-un の phase 2 は neighbor table を flush してから traffic を流すので、NO_NEIGH を drop する実装に戻ると失敗します。
 
