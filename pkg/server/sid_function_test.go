@@ -1057,10 +1057,9 @@ func TestReconcileUsidClaims_ClaimsPreexistingUA(t *testing.T) {
 		FunctionAutoStart: 1,
 		FunctionAutoEnd:   0xffff,
 	}
-	if err := mgr.Add(loc); err != nil {
-		t.Fatalf("locator Add: %v", err)
+	if err := s.AddLocatorAndClaim(loc); err != nil {
+		t.Fatalf("AddLocatorAndClaim: %v", err)
 	}
-	s.ReconcileUsidClaims(*loc)
 
 	fn := uint32(0xc001)
 	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {

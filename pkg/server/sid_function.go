@@ -1243,27 +1243,46 @@ func (s *SidFunctionServer) buildPolicyEntry(sidFunc *v1.SidFunction) (*bpf.Head
 	}, nil
 }
 
-// ReconcileUsidClaims claims the function CSID of every uA already
-// installed inside loc. Registration order is not fixed: uN and uA are
-// registered by explicit trigger_prefix and may well be created before the
-// locator that covers their block exists. Without this pass those CSIDs
-// would stay free, and the new locator could hand one to a service SID
-// whose /128 then shadows the uA /64.
+// AddLocatorAndClaim registers loc and, in the same critical section,
+// claims the function CSID of every uA already installed inside it.
 //
-// LocatorService calls this after Manager.Add returns, so the manager lock
-// is not held while s.mu is taken here.
-func (s *SidFunctionServer) ReconcileUsidClaims(loc locator.Locator) {
-	if s.mapOps == nil || s.locatorMgr == nil || loc.Behavior != locator.BehaviorUSID {
-		return
+// Registration order is not fixed: uN and uA are registered by explicit
+// trigger_prefix and may well exist before the locator covering their block
+// does. Without this pass those CSIDs stay free and the new locator can
+// hand one to a service SID whose /128 then shadows the uA /64. Doing the
+// add and the claim under s.mu also closes the window where a concurrent
+// SidFunctionCreate would take the CSID between the two steps.
+//
+// A failed claim rolls the locator back, so LocatorCreate either publishes
+// a locator whose uA CSIDs are all reserved or reports an error.
+func (s *SidFunctionServer) AddLocatorAndClaim(loc *locator.Locator) error {
+	if s.locatorMgr == nil {
+		return errors.New("locator manager is not wired up")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.locatorMgr.Add(loc); err != nil {
+		return err
+	}
+	if err := s.reconcileUsidClaimsLocked(*loc); err != nil {
+		// Force: the locator was published a moment ago, and any binding
+		// under it is one this very call just made.
+		_ = s.locatorMgr.Delete(loc.Name, true)
+		return err
+	}
+	return nil
+}
+
+// reconcileUsidClaimsLocked claims the CSIDs of the uA entries inside loc.
+// Caller holds s.mu.
+func (s *SidFunctionServer) reconcileUsidClaimsLocked(loc locator.Locator) error {
+	if s.mapOps == nil || loc.Behavior != locator.BehaviorUSID {
+		return nil
+	}
 	entries, err := s.mapOps.ListSidFunctions()
 	if err != nil {
-		s.logger.Warn("could not reconcile uA claims for a new locator",
-			zap.String("locator", loc.Name), zap.Error(err))
-		return
+		return fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
 		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
@@ -1284,9 +1303,9 @@ func (s *SidFunctionServer) ReconcileUsidClaims(loc locator.Locator) {
 			continue
 		}
 		if _, _, err := s.locatorMgr.AllocateSID(loc.Name, &fn); err != nil {
-			s.logger.Warn("uA function CSID is not claimable in its new locator",
-				zap.String("locator", loc.Name), zap.String("trigger_prefix", prefix),
-				zap.Uint32("function", fn), zap.Error(err))
+			return fmt.Errorf("uA %s holds function CSID 0x%04x in locator %q: %w",
+				prefix, fn, loc.Name, err)
 		}
 	}
+	return nil
 }
