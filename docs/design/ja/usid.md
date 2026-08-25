@@ -56,6 +56,24 @@ uN と uA は SRH の有無に関係なく動きます。shift 処理は SRH を
 
 offset はすべてコンパイル時定数です。`aux->usid.block_len_bytes` は shift 幅の計算には使わず、F3216 以外の構造で登録された entry を tail call 冒頭で弾くための guard です。
 
+### shift 幅が uN と uA で違う理由
+
+uN が 16 bit、uA が 32 bit なのは特例を 2 つ持っているのではなく、1 つの規則から出てきます。RFC 9800 Sec.4.1.1 の N05 と N06 は次のとおりです。
+
+```
+N05.   Copy DA.Argument into the bits [LBL..(LBL+AL-1)] of the
+          Destination Address.
+N06.   Set the bits [(LBL+AL)..127] of the Destination Address to
+          zero.
+```
+
+DA.Argument は bits [LBL+LNFL..127] で、LNFL は Terminology で the sum of the LNL and the FL of the SID と定義されています。Sec.4.1.2 は N08 を adjacency 転送に差し替えるだけで、N05 と N06 は変えません。したがって shift 幅はその SID の LNL + FL です。
+
+- uN は Function を持たないので LNL = 16 bit を消費します
+- uA は adjacency を識別する Function を持つので LNL + FL = 32 bit を消費します
+
+uA を 16 bit shift にすると Function を消費しないまま転送し、container の次の CSID として自分の Function を読み直すことになります。Linux kernel の seg6local も `End.X flavors next-csid lblen 32 nflen 32` で 32 bit を消費し、この導出と一致します。
+
 ### 同一ノードに連続する uSID
 
 container に自ノードの uSID が連続して並ぶことがあります。この場合 shift 後の DA が再び自ノードの prefix にマッチしますが、FIB に返しても自分宛なので XDP には再入せず kernel に落ちてしまいます。そこで shift 後に `sid_function_map` を引き直し、次の 3 通りに分けます。
