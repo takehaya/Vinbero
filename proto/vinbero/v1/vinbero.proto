@@ -103,6 +103,14 @@ message SidFunction {
   // (LNFL) in bits, 32 (default) or 16. The trigger_prefix must cover
   // exactly block + C-SID; END_X_REPLACE reuses nexthop.
   optional uint32 csid_len = 30;
+
+  // END_LBS / END_XLBS / END_LBS_REPLACE / END_XLBS_REPLACE (RFC 9800
+  // Sec.7): the target locator block as an IPv6 prefix (e.g.
+  // "fd77:7777:7777::/48"). Required for those actions; the prefix
+  // length is byte-aligned, the bits beyond it must be zero, and the
+  // block must leave room for the Argument (NEXT) or C-SID and index
+  // (REPLACE). Rejected on every other action.
+  optional string target_block = 31;
 }
 
 message SidFunctionCreateRequest {

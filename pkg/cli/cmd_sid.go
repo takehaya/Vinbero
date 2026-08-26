@@ -46,7 +46,8 @@ func sidFunctionCommand() *cli.Command {
 					&cli.UintFlag{Name: "hop-limit-margin", Usage: "Tolerated outer hop-limit drift before the dynamic cache refreshes (END_AD only)"},
 					&cli.StringFlag{Name: "service-name", Usage: "NF-catalog name of the SR-aware service behind this SID (END_AN only)"},
 					&cli.UintFlag{Name: "usid-block-len", Usage: "Locator block length in bits (END_UN/END_UA/END_UT: F3216 = 32, the default; END_REPLACE/END_X_REPLACE: required, byte-aligned)"},
-					&cli.UintFlag{Name: "csid-len", Usage: "REPLACE-CSID C-SID length in bits: 32 (default) or 16 (END_REPLACE/END_X_REPLACE)"},
+					&cli.UintFlag{Name: "csid-len", Usage: "REPLACE-CSID C-SID length in bits: 32 (default) or 16 (REPLACE-CSID actions)"},
+					&cli.StringFlag{Name: "target-block", Usage: "End.LBS/End.XLBS target locator block as an IPv6 prefix (END_LBS/END_XLBS/END_LBS_REPLACE/END_XLBS_REPLACE)"},
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 256 bytes after decode)"},
 					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
 					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},
@@ -146,6 +147,10 @@ func sidFunctionCommand() *cli.Command {
 					if c.IsSet("csid-len") {
 						csidLen := uint32(c.Uint("csid-len"))
 						sid.CsidLen = &csidLen
+					}
+					if c.IsSet("target-block") {
+						tb := c.String("target-block")
+						sid.TargetBlock = &tb
 					}
 					if c.IsSet("gtp-v4-src-position") {
 						pos := uint32(c.Uint("gtp-v4-src-position"))

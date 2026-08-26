@@ -15,6 +15,8 @@ import (
 	"github.com/cilium/ebpf/btf"
 	"go.uber.org/zap"
 
+	"google.golang.org/protobuf/proto"
+
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/locator"
@@ -289,6 +291,105 @@ func (s *SidFunctionServer) resolveLocatorRef(sidFunc *v1.SidFunction) error {
 	return nil
 }
 
+// reportLbs rewrites a listed entry whose aux carries a target block as
+// the corresponding LBS behavior (the inverse of the protoToEntry
+// mapping), attaching the target block prefix.
+func reportLbs(sf *v1.SidFunction, base v1.Srv6LocalAction, tgt [16]uint8, tgtLen uint8) {
+	// The aux is map data: a corrupted or future-version length must not
+	// panic the listing (netip.PrefixFrom rejects bits > 128).
+	if tgtLen == 0 || tgtLen > 15 {
+		return
+	}
+	var mapped v1.Srv6LocalAction
+	switch base {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN:
+		mapped = v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+		mapped = v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE:
+		mapped = v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+		mapped = v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE
+	default:
+		return
+	}
+	sf.Action = mapped
+	block := netip.PrefixFrom(netip.AddrFrom16(tgt), int(tgtLen)*8).String()
+	sf.TargetBlock = &block
+}
+
+// cloneSidFunctionWithAction clones sidFunc with the action replaced, so
+// the LBS mapping does not mutate the caller's request.
+func cloneSidFunctionWithAction(sf *v1.SidFunction, a v1.Srv6LocalAction) *v1.SidFunction {
+	c := proto.Clone(sf).(*v1.SidFunction)
+	c.Action = a
+	return c
+}
+
+// parseTargetBlock validates an End.LBS/End.XLBS target block against the
+// geometry of the (already mapped) base action: byte-aligned length, zero
+// bits beyond it, and enough room left for what the data plane writes
+// after the block -- the Argument for the NEXT-C-SID shapes (m_bytes <=
+// arg_off, i.e. the base SID's block+node[+function] width), the C-SID
+// plus the index byte for REPLACE.
+func parseTargetBlock(raw string, base v1.Srv6LocalAction, sidFunc *v1.SidFunction) ([16]uint8, uint8, error) {
+	var tgt [16]uint8
+	p, err := netip.ParsePrefix(raw)
+	if err != nil {
+		return tgt, 0, fmt.Errorf("target_block: %w", err)
+	}
+	if !p.Addr().Is6() || p.Addr().Is4In6() {
+		return tgt, 0, fmt.Errorf("target_block must be an IPv6 prefix, got %q", raw)
+	}
+	bits := p.Bits()
+	if bits == 0 || bits%8 != 0 {
+		return tgt, 0, fmt.Errorf("target_block /%d must be a non-zero multiple of 8", bits)
+	}
+	if p.Addr() != p.Masked().Addr() {
+		return tgt, 0, fmt.Errorf("target_block has non-zero bits beyond /%d", bits)
+	}
+	m := uint8(bits / 8)
+	var limit uint8
+	switch base {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN:
+		// arg_off: the Argument needs bytes [m..16). The constants track
+		// the F3216-only NEXT-C-SID geometry (block 32 is enforced
+		// upstream); a variable structure would derive these from
+		// usid_block_len instead.
+		limit = 6
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+		limit = 8
+	default: // REPLACE shapes: C-SID after the block, index in byte 15
+		csid := uint8(4)
+		if sidFunc.CsidLen != nil {
+			csid = uint8(*sidFunc.CsidLen / 8)
+		}
+		limit = 15 - csid
+	}
+	if m > limit {
+		return tgt, 0, fmt.Errorf("target_block /%d leaves no room after the block (max /%d for this shape)", bits, limit*8)
+	}
+	copy(tgt[:], p.Addr().AsSlice())
+	// A target equal to the SID's own leading bytes would recompose the
+	// same DA: the entry re-matches itself with an unchanged argument and
+	// the data plane burns its loop bound dropping every packet. Surface
+	// the misconfiguration at create time instead.
+	if tp, err := netip.ParsePrefix(sidFunc.TriggerPrefix); err == nil {
+		own := tp.Masked().Addr().As16()
+		// Compare up to the SHORTER of the two lengths: a target longer
+		// than the trigger prefix but sharing its leading bytes still
+		// recomposes a DA that re-matches the same entry.
+		cmp := int(m)
+		if tb := tp.Bits() / 8; tb < cmp {
+			cmp = tb
+		}
+		if string(own[:cmp]) == string(tgt[:cmp]) {
+			return tgt, 0, fmt.Errorf("target_block %s shares the SID's own leading %d bytes; the swap would loop on itself", raw, cmp)
+		}
+	}
+	return tgt, m, nil
+}
+
 // parseIPv6Nexthop validates a nexthop that feeds an AF_INET6
 // bpf_fib_lookup: the empty string (zero address) and IPv4 literals
 // (which net.ParseIP would map to ::ffff:0:0/96) are both rejected, so a
@@ -308,10 +409,20 @@ func parseIPv6Nexthop(who, raw string) ([16]uint8, error) {
 // (anything longer fails the locator's ParseSID zero-tail check and is
 // skipped); the claim is keyed on the locator's own 16-bit function
 // field, which is conservative for 32-bit C-SIDs.
+// The LBS aliases are included because claimUsidFunction receives the
+// caller's request before the base-action remap; the map-side checks see
+// only base actions, which the first three cover.
 func usidClaimAction(a v1.Srv6LocalAction) bool {
-	return a == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA ||
-		a == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE ||
-		a == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE
+	switch a {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE:
+		return true
+	}
+	return false
 }
 
 // claimUsidFunction reserves the entry's function CSID in the uSID
@@ -612,6 +723,32 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	if err := validateProxyFieldScope(sidFunc); err != nil {
 		return nil, nil, err
 	}
+	// The LBS behaviors are the base behavior plus a target-block SID
+	// property (RFC 9800 Sec.7): map them onto the base action here, and
+	// let entryToProto report them back from the aux.
+	lbsTarget := ""
+	switch v1.Srv6LocalAction(sidFunc.Action) {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE:
+		if sidFunc.TargetBlock == nil || *sidFunc.TargetBlock == "" {
+			return nil, nil, fmt.Errorf("the LBS behaviors require target_block")
+		}
+		lbsTarget = *sidFunc.TargetBlock
+		base := map[v1.Srv6LocalAction]v1.Srv6LocalAction{
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS:          v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS:         v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE:  v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE,
+		}[v1.Srv6LocalAction(sidFunc.Action)]
+		sidFunc = cloneSidFunctionWithAction(sidFunc, base)
+	default:
+		if sidFunc.TargetBlock != nil {
+			return nil, nil, fmt.Errorf("target_block is only valid for the LBS behaviors")
+		}
+	}
+
 	// Same convention as the proxy field scope: an action-specific field on
 	// the wrong action is rejected, not silently dropped (it would otherwise
 	// vanish on a Get -> Create round trip).
@@ -628,12 +765,16 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	}
 	if sidFunc.CsidLen != nil {
 		switch v1.Srv6LocalAction(sidFunc.Action) {
+		// The LBS remap above already turned END_LBS_REPLACE /
+		// END_XLBS_REPLACE into their base actions, so only those appear
+		// here; the message still names the API-level actions.
 		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
 		default:
-			return nil, nil, fmt.Errorf("csid_len is only valid for END_REPLACE / END_X_REPLACE")
+			return nil, nil, fmt.Errorf("csid_len is only valid for END_REPLACE / END_X_REPLACE / END_LBS_REPLACE / END_XLBS_REPLACE")
 		}
 	}
+
 	// The C side stores the flavor as a u8 scalar; reject unknown enum
 	// values here, or a value congruent to a known one modulo 256 (260,
 	// -252) would silently alias to it through the cast below.
@@ -971,6 +1112,17 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		aux = bpf.NewSidAuxPluginRaw(raw)
 	}
 
+	if lbsTarget != "" {
+		tgt, tgtLen, err := parseTargetBlock(lbsTarget, action, sidFunc)
+		if err != nil {
+			return nil, nil, err
+		}
+		if aux == nil {
+			return nil, nil, fmt.Errorf("internal: LBS base action produced no aux")
+		}
+		bpf.NewSidAuxUsidTarget(aux, tgt, tgtLen)
+	}
+
 	return entry, aux, nil
 }
 
@@ -1249,6 +1401,10 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT {
 					sf.VrfName = ifindexToName(bpf.SidAuxL3VrfData(aux))
 				}
+				// A target block turns uN/uA into End.LBS/End.XLBS.
+				if tgt, tgtLen := bpf.SidAuxUsidTargetData(aux); tgtLen != 0 {
+					reportLbs(sf, action, tgt, tgtLen)
+				}
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
 				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
@@ -1259,6 +1415,9 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				sf.CsidLen = &csidLen
 				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE {
 					sf.Nexthop = bpf.FormatIPv6(nexthop)
+				}
+				if tgt, tgtLen := bpf.SidAuxUsidTargetData(aux); tgtLen != 0 {
+					reportLbs(sf, action, tgt, tgtLen)
 				}
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
