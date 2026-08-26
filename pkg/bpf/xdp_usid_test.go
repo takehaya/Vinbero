@@ -2,6 +2,7 @@ package bpf
 
 import (
 	"net"
+	"os"
 	"testing"
 
 	"github.com/google/gopacket"
@@ -530,6 +531,22 @@ func TestXDPProgEndUtNoNeighFailsClosed(t *testing.T) {
 // BPF_PROG_TEST_RUN. Returns the nexthop and its MAC.
 func adjacencyEnv(t *testing.T) (net.IP, net.HardwareAddr) {
 	t.Helper()
+	// bpf_fib_lookup answers FWD_DISABLED unless IPv6 forwarding is on --
+	// true on a router, not on a stock CI runner. "all" covers devices
+	// that already exist and "default" the veth created below (a device
+	// inherits default at creation, not all); both are restored.
+	for _, fwd := range []string{
+		"/proc/sys/net/ipv6/conf/all/forwarding",
+		"/proc/sys/net/ipv6/conf/default/forwarding",
+	} {
+		if prev, err := os.ReadFile(fwd); err == nil {
+			if err := os.WriteFile(fwd, []byte("1"), 0); err != nil {
+				t.Skipf("cannot enable IPv6 forwarding: %v", err)
+			}
+			fwd, prev := fwd, prev
+			t.Cleanup(func() { _ = os.WriteFile(fwd, prev, 0) })
+		}
+	}
 	vethA := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "uadj-a"}, PeerName: "uadj-b"}
 	if err := netlink.LinkAdd(vethA); err != nil {
 		t.Skipf("cannot create veth pair: %v", err)
