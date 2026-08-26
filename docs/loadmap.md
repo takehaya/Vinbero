@@ -74,7 +74,7 @@ NEXT-C-SID の実装範囲は次のとおりです。設計と運用上の注意
 
 - shift 系は uN (End)、uA (End.X)、uT (End.T、VRF table に bind) を実装しています。trigger prefix は uN / uT が /48、uA が /64 です
 - uDT4/uDT6/uDT46/uDX4/uDX6 のような terminal behavior は専用 action を持ちません。既存の End.* を zero-padded /128 に登録すると LPM で uN /48 に勝ち、container の最終 uSID として動きます (`examples/end-udt4/` で実証)
-- flavor は単一値のみです。SRH ありの container 終端では PSP/USP/USD が classic End への fall-through で適用され、SRH なし (H.Encaps.Red) の終端では USD の outer decap を実装しています (`examples/end-un-usd/`)。uA の USD は未対応です
+- flavor は単一値のみです。SRH ありの container 終端では PSP/USP/USD が classic End への fall-through で適用され、SRH なし (H.Encaps.Red) の終端では USD の outer decap を実装しています (`examples/end-un-usd/`)。End.X 系 (End.X/uA/End.X(REP)) の USD は adjacency へ転送します
 - SID 構造は F3216 (block 32 bit、uSID 16 bit) のみです
 - trigger prefix は uSID 専用にしてください。prefix 内のアドレスは uN / uA / uT SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます
 - 登録は trigger prefix の明示指定のみで、locator_ref からの登録には未対応です

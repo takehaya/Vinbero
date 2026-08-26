@@ -8,6 +8,7 @@ import (
 	"github.com/google/gopacket/layers"
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // uN / uA (NEXT-C-SID, RFC 9800) data-plane tests.
@@ -519,6 +520,261 @@ func TestXDPProgEndUtNoNeighFailsClosed(t *testing.T) {
 		}
 		if got, want := outPktDA(t, out), net.ParseIP("2001:db8:42::1"); !got.Equal(want) {
 			t.Errorf("inner DA = %v, want %v (decapped)", got, want)
+		}
+	})
+}
+
+// adjacencyEnv creates a veth pair with a permanently resolved neighbour
+// so bpf_fib_lookup on the nexthop returns SUCCESS: the only way to see
+// an End.X-family USD actually decap and redirect under
+// BPF_PROG_TEST_RUN. Returns the nexthop and its MAC.
+func adjacencyEnv(t *testing.T) (net.IP, net.HardwareAddr) {
+	t.Helper()
+	vethA := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "uadj-a"}, PeerName: "uadj-b"}
+	if err := netlink.LinkAdd(vethA); err != nil {
+		t.Skipf("cannot create veth pair: %v", err)
+	}
+	t.Cleanup(func() { _ = netlink.LinkDel(vethA) })
+	for _, name := range []string{"uadj-a", "uadj-b"} {
+		link, err := netlink.LinkByName(name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := netlink.LinkSetUp(link); err != nil {
+			t.Fatalf("%s up: %v", name, err)
+		}
+	}
+	addr, _ := netlink.ParseAddr("fd00:ad::1/64")
+	// Skip DAD: a tentative address is unusable for source selection, and
+	// the inner-IPv4 resolver path picks its source from this interface.
+	addr.Flags = unix.IFA_F_NODAD
+	linkA, _ := netlink.LinkByName("uadj-a")
+	if err := netlink.AddrAdd(linkA, addr); err != nil {
+		t.Fatalf("addr add: %v", err)
+	}
+	mac, _ := net.ParseMAC("02:11:22:33:44:55")
+	nexthop := net.ParseIP("fd00:ad::2")
+	if err := netlink.NeighAdd(&netlink.Neigh{
+		LinkIndex:    linkA.Attrs().Index,
+		Family:       netlink.FAMILY_V6,
+		State:        netlink.NUD_PERMANENT,
+		IP:           nexthop,
+		HardwareAddr: mac,
+	}); err != nil {
+		t.Fatalf("neigh add: %v", err)
+	}
+	return nexthop, mac
+}
+
+// uA + USD on a bare no-SRH SID: the outer IPv6 is stripped and the
+// exposed packet leaves over the adjacency (RFC 8986 Sec.4.16.3 for the
+// End.X family), with the neighbour's MAC as the destination.
+func TestXDPProgEndUaUSDNoSrhAdjacency(t *testing.T) {
+	h := newXDPTestHelper(t)
+	nexthop, mac := adjacencyEnv(t)
+	var nh [16]byte
+	copy(nh[:], nexthop.To16())
+	h.createSidFunctionUsid("fd00:aaaa:ffff:cccc::/64", actionEndUa, flavorUSD, nh, usidBlockLenBytes)
+
+	pkt, err := buildEncapsulatedPacketNoSRH(
+		net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc::"),
+		net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, out := h.run(pkt)
+	if ret != XDP_REDIRECT {
+		t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+	}
+	if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
+		t.Errorf("inner DA = %v, want %v (outer stripped)", got, want)
+	}
+	if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
+		t.Errorf("eth dst = %v, want %v (the adjacency's MAC)", got, mac)
+	}
+}
+
+// The unresolved-adjacency case stays fail-closed and, because the
+// adjacency is resolved before the decap, leaves the packet untouched.
+// The nexthop sits inside the veth's connected /64 but has no neighbour
+// entry, so the lookup genuinely answers NO_NEIGH rather than a route
+// miss -- allowing NO_NEIGH through would be caught here.
+func TestXDPProgEndUaUSDNoSrhUnresolvedDrops(t *testing.T) {
+	h := newXDPTestHelper(t)
+	adjacencyEnv(t)
+	var nh [16]byte
+	copy(nh[:], net.ParseIP("fd00:ad::99").To16())
+	h.createSidFunctionUsid("fd00:aaaa:ffff:cccc::/64", actionEndUa, flavorUSD, nh, usidBlockLenBytes)
+
+	pkt, err := buildEncapsulatedPacketNoSRH(
+		net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:ffff:cccc::"),
+		net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, out := h.run(pkt)
+	if ret != XDP_DROP {
+		t.Errorf("expected fail-closed XDP_DROP, got %d", ret)
+	}
+	if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:ffff:cccc::"); !got.Equal(want) {
+		t.Errorf("DA = %v, want %v (still encapsulated)", got, want)
+	}
+}
+
+// Classic End.X + USD forwards the exposed packet via the adjacency
+// instead of by a FIB lookup on the inner destination -- at SL=0 with the
+// SRH, on the reduced-encaps no-SRH path, and for both inner families
+// (the IPv4 branch resolves with an unspecified source and rewrites the
+// EtherType).
+func TestXDPProgEndXUSDAdjacency(t *testing.T) {
+	h := newXDPTestHelper(t)
+	nexthop, mac := adjacencyEnv(t)
+	var nh [16]byte
+	copy(nh[:], nexthop.To16())
+	entry := &SidFunctionEntry{Action: actionEndX, Flavor: flavorUSD}
+	if err := h.mapOps.CreateSidFunction("fd00:1:100::e1/128", entry, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
+		t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+
+	segs := []net.IP{net.ParseIP("fd00:1:100::e1")}
+
+	t.Run("SRH SL=0 inner IPv6", func(t *testing.T) {
+		pkt, err := buildEncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::e1"), segs, 0,
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
+			t.Errorf("inner DA = %v, want %v", got, want)
+		}
+		if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
+			t.Errorf("eth dst = %v, want %v", got, mac)
+		}
+	})
+
+	t.Run("SRH SL=0 inner IPv4", func(t *testing.T) {
+		pkt, err := buildEncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::e1"), segs, 0,
+			net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+		}
+		if !verifyEtherType(t, out, 0x0800) {
+			t.Errorf("expected EtherType IPv4 after decap")
+		}
+		if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
+			t.Errorf("eth dst = %v, want %v", got, mac)
+		}
+		if len(out) < ethHeaderLen+20 || out[ethHeaderLen]>>4 != 4 {
+			t.Errorf("decapped packet is not IPv4")
+		}
+	})
+
+	t.Run("no SRH inner IPv6", func(t *testing.T) {
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::e1"),
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+		}
+		if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
+			t.Errorf("eth dst = %v, want %v", got, mac)
+		}
+	})
+
+	t.Run("no SRH inner IPv4", func(t *testing.T) {
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::e1"),
+			net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+		}
+		if !verifyEtherType(t, out, 0x0800) {
+			t.Errorf("expected EtherType IPv4 after decap")
+		}
+		if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
+			t.Errorf("eth dst = %v, want %v", got, mac)
+		}
+	})
+
+	t.Run("inner hop limit is spent and TTL 1 drops", func(t *testing.T) {
+		// The redirect bypasses the kernel's forwarding path, so the
+		// exposed packet's lifetime is spent here.
+		pkt, err := buildEncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::e1"), segs, 0,
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT, got %d", ret)
+		}
+		if hl := out[ethHeaderLen+7]; hl != 63 {
+			t.Errorf("inner hop limit = %d, want 63", hl)
+		}
+
+		// Same packet with an exhausted inner lifetime must drop, and
+		// because the check runs before the decap, stay encapsulated.
+		pkt2, err := buildEncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::e1"), segs, 0,
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// inner IPv6 hop limit sits behind outer(40) + SRH(8+16).
+		pkt2[ethHeaderLen+40+24+7] = 1
+		ret2, out2 := h.run(pkt2)
+		if ret2 != XDP_DROP {
+			t.Errorf("expected XDP_DROP at inner TTL 1, got %d", ret2)
+		}
+		if got, want := outPktDA(t, out2), net.ParseIP("fd00:1:100::e1"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (still encapsulated)", got, want)
+		}
+	})
+
+	t.Run("malformed SRH with inflated last entry drops", func(t *testing.T) {
+		// first_segment beyond the declared Hdr Ext Len must not let
+		// segment list bytes be exposed as the inner packet.
+		pkt, err := buildEncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::e1"), segs, 0,
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkt[ethHeaderLen+ipv6HeaderLen+4] = 5 // first_segment
+		ret, _ := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Errorf("expected XDP_DROP, got %d", ret)
+		}
+	})
+
+	t.Run("no SRH non-tunnel passes up", func(t *testing.T) {
+		// A bare End.X SID with a plain payload keeps kernel delivery.
+		pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::e1"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, _ := h.run(pkt)
+		if ret != XDP_PASS {
+			t.Errorf("expected XDP_PASS, got %d", ret)
 		}
 	})
 }

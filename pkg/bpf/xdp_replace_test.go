@@ -492,6 +492,52 @@ func TestXDPProgEndReplaceUSPTerminal(t *testing.T) {
 	}
 }
 
+// End.X(REP) + USD: the exposed packet leaves over the adjacency, both
+// at an SRH terminal and on the no-SRH reduced-encaps path.
+func TestXDPProgEndXReplaceUSDAdjacency(t *testing.T) {
+	h := newXDPTestHelper(t)
+	nexthop, mac := adjacencyEnv(t)
+	var nh [16]byte
+	copy(nh[:], nexthop.To16())
+	h.createSidFunctionReplace("fd00:aabb:ccdd:1111:2222::/80", actionEndXReplace, flavorUSD, nh, 4)
+
+	t.Run("SRH terminal", func(t *testing.T) {
+		segs := []net.IP{replDA(0x11112222, 0)}
+		pkt, err := buildEncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), replDA(0x11112222, 0), segs, 0,
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
+			t.Errorf("inner DA = %v, want %v", got, want)
+		}
+		if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
+			t.Errorf("eth dst = %v, want %v", got, mac)
+		}
+	})
+
+	t.Run("no SRH", func(t *testing.T) {
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			net.ParseIP("fd00:1:1::1"), replDA(0x11112222, 0),
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_REDIRECT {
+			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+		}
+		if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
+			t.Errorf("eth dst = %v, want %v", got, mac)
+		}
+	})
+}
+
 func TestXDPProgEndReplaceUSDNoSrh(t *testing.T) {
 	h := newXDPTestHelper(t)
 	h.createSidFunctionReplace("fd00:aabb:ccdd:1111:2222::/80", actionEndReplace, flavorUSD, [16]byte{}, 4)
