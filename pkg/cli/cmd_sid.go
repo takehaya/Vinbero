@@ -25,7 +25,7 @@ func sidFunctionCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "trigger-prefix", Required: true, Usage: "IPv6 CIDR (e.g., fc00:1::1/128)"},
 					&cli.StringFlag{Name: "action", Required: true, Usage: "Endpoint action (e.g., END_DT4, END_DT2)"},
-					&cli.StringFlag{Name: "vrf-name", Usage: "VRF device name (for End.DT4/DT6/DT46)"},
+					&cli.StringFlag{Name: "vrf-name", Usage: "VRF device name (for End.DT4/DT6/DT46 and uT)"},
 					&cli.UintFlag{Name: "bd-id", Usage: "Bridge Domain ID (for End.DT2)"},
 					&cli.StringFlag{Name: "bridge-name", Usage: "Bridge device name (for End.DT2)"},
 					&cli.StringFlag{Name: "src-addr", Usage: "Source IPv6 address"},
@@ -45,7 +45,7 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "service-mac", Usage: "Service MAC for static rewrite towards IFACE-OUT; omit to resolve the inner destination via FIB (END_AS/END_AD L3 inner; required for END_AM)"},
 					&cli.UintFlag{Name: "hop-limit-margin", Usage: "Tolerated outer hop-limit drift before the dynamic cache refreshes (END_AD only)"},
 					&cli.StringFlag{Name: "service-name", Usage: "NF-catalog name of the SR-aware service behind this SID (END_AN only)"},
-					&cli.UintFlag{Name: "usid-block-len", Usage: "NEXT-C-SID locator block length in bits (END_UN/END_UA; F3216 = 32, the default)"},
+					&cli.UintFlag{Name: "usid-block-len", Usage: "NEXT-C-SID locator block length in bits (END_UN/END_UA/END_UT; F3216 = 32, the default)"},
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 256 bytes after decode)"},
 					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
 					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},

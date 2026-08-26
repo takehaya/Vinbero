@@ -325,6 +325,7 @@ type BpfProgramSpecs struct {
 	TailcallEndpointEndT           *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_t"`
 	TailcallEndpointEndUa          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_ua"`
 	TailcallEndpointEndUn          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_un"`
+	TailcallEndpointEndUt          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_ut"`
 	TailcallEndpointEndX           *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_x"`
 	TailcallHeadendL2H_encaps      *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps"`
 	TailcallHeadendL2H_encapsRed   *ebpf.ProgramSpec `ebpf:"tailcall_headend_l2_h_encaps_red"`
@@ -542,6 +543,7 @@ type BpfPrograms struct {
 	TailcallEndpointEndT           *ebpf.Program `ebpf:"tailcall_endpoint_end_t"`
 	TailcallEndpointEndUa          *ebpf.Program `ebpf:"tailcall_endpoint_end_ua"`
 	TailcallEndpointEndUn          *ebpf.Program `ebpf:"tailcall_endpoint_end_un"`
+	TailcallEndpointEndUt          *ebpf.Program `ebpf:"tailcall_endpoint_end_ut"`
 	TailcallEndpointEndX           *ebpf.Program `ebpf:"tailcall_endpoint_end_x"`
 	TailcallHeadendL2H_encaps      *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps"`
 	TailcallHeadendL2H_encapsRed   *ebpf.Program `ebpf:"tailcall_headend_l2_h_encaps_red"`
@@ -587,6 +589,7 @@ func (p *BpfPrograms) Close() error {
 		p.TailcallEndpointEndT,
 		p.TailcallEndpointEndUa,
 		p.TailcallEndpointEndUn,
+		p.TailcallEndpointEndUt,
 		p.TailcallEndpointEndX,
 		p.TailcallHeadendL2H_encaps,
 		p.TailcallHeadendL2H_encapsRed,

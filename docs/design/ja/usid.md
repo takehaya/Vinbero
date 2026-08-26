@@ -1,15 +1,16 @@
-# uSID (NEXT-C-SID) の uN と uA
+# uSID (NEXT-C-SID) の uN / uA / uT
 
 ## 概要
 
 このドキュメントは RFC 9800 の NEXT-C-SID flavor による uSID のデータプレーンとコントロールプレーンの設計を説明します。uSID は 128 bit の IPv6 アドレス 1 つに複数の SID を詰め込む圧縮方式で、SRH を短縮または省略できるため encap の MTU オーバーヘッドが減ります。
 
-Vinbero が実装するのは uN と uA の 2 つです。uN は End の、uA は End.X の NEXT-C-SID 版です。SID 構造は F3216 に固定します。
+Vinbero が shift 系として実装するのは uN と uA と uT の 3 つです。uN は End の、uA は End.X の、uT は End.T の NEXT-C-SID 版です。SID 構造は F3216 に固定します。uDT4 のような terminal behavior は専用実装を持たず、既存の End.* を zero-padded /128 に登録する形で container の最終 uSID になります (後述)。
 
 | behavior | 対応する classic behavior | trigger prefix | 1 回の実行で消費する幅 | 転送先 |
 |---|---|---|---|---|
 | uN | End | /48 (block + node) | 16 bit (node) | shift 後の DA を FIB で解決 |
 | uA | End.X | /64 (block + node + function) | 32 bit (node + function) | 設定した adjacency |
+| uT | End.T | /48 (block + node) | 16 bit (node) | shift 後の DA を SID に bind した VRF table で解決 |
 
 ## SID 構造と用語
 
@@ -37,16 +38,16 @@ CSID 0x0000 は container の終端を示す予約値です。node CSID にも f
 
 ## dispatch 経路
 
-uN と uA は SRH の有無に関係なく動きます。shift 処理は SRH を読まないので、両方の入口から同じ core 関数へ入ります。
+uN / uA / uT は SRH の有無に関係なく動きます。shift 処理は SRH を読まないので、両方の入口から同じ core 関数へ入ります。
 
 - SRH ありのパケットは `process_srv6_localsid` が `sid_function_map` を引き、`DISPATCH_LOCALSID` として endpoint slot へ tail call します
-- SRH なしのパケットは `process_srv6_decap_nosrh` が入口です。この経路には従来、inner protocol が IPIP / IPv6 / Ethernet のときだけ decap するという gate がありました。uSID は任意の upper-layer protocol を運ぶため、lookup を先に行い、hit した entry が uN か uA なら gate を通す形に変えています。他の action の到達性は変わりません
+- SRH なしのパケットは `process_srv6_decap_nosrh` が入口です。この経路には従来、inner protocol が IPIP / IPv6 / Ethernet のときだけ decap するという gate がありました。uSID は任意の upper-layer protocol を運ぶため、lookup を先に行い、hit した entry が uN / uA / uT なら gate を通す形に変えています。他の action の到達性は変わりません
 
 `sid_function_map` は LPM trie なので、/48 や /64 の locator prefix エントリと、container 終端の /128 service SID エントリが同居できます。終端 DA では /128 が longest match で勝つため、uDT4 のような terminal behavior は従来の実装のまま動きます。
 
 どこで table を引き、その結果がどの分岐を決めるかを図にすると次のようになります。丸括弧付きの箱が BPF map です。
 
-tail call の飛び先は uN / uA 固定ではなく、hit した entry の action の slot です。SRH なし経路の 2 つの判定は、どの slot へ飛ぶかではなく、そもそも tail call するかどうかを決めています。uN / uA は upper-layer protocol を問わず通し、それ以外の action は従来どおり tunnel payload のときだけ通します。uN / uA 以外の slot に入ったパケットはこの図の対象外で、既存の behavior がそのまま処理します。
+tail call の飛び先は uN / uA / uT 固定ではなく、hit した entry の action の slot です。SRH なし経路の 2 つの判定は、どの slot へ飛ぶかではなく、そもそも tail call するかどうかを決めています。uN / uA / uT は upper-layer protocol を問わず通し、それ以外の action は従来どおり tunnel payload のときだけ通します。uN / uA / uT 以外の slot に入ったパケットはこの図の対象外で、既存の behavior がそのまま処理します。
 
 ```mermaid
 flowchart TD
@@ -56,7 +57,7 @@ flowchart TD
     L1 -->|miss| PASS0["XDP_PASS"]
     L2 -->|miss| PASS0
     L1 -->|hit| TC
-    L2 -->|hit| G{"action は uN / uA か"}
+    L2 -->|hit| G{"action は uN / uA / uT か"}
     G -->|yes| TC
     G -->|no| GATE{"inner proto が<br/>IPIP / IPv6 / Ethernet か"}
     GATE -->|yes| TC
@@ -116,7 +117,7 @@ container に自ノードの uSID が連続して並ぶことがあります。�
 
 - 同じ entry に再ヒットした場合は loop 内で続けて shift します。上限は 5 回で、F3216 の container が最大 6 uSID を持つことから導かれます
 - 別の local entry にヒットした場合は、その entry の action と aux で tailcall context を書き直し、対応する slot へ tail call します。別の uN でも、terminal behavior でも同じ扱いです。slot が空か context の書き込みに失敗した場合は fail-closed で drop します
-- ただし SRH の無いパケットには例外があります。ヒットした entry が uN でも uA でもなく、inner protocol が IPIP / IPv6 / Ethernet のいずれでもない場合は tail call せず kernel に渡します。多くの endpoint slot は IPv6 ヘッダの直後を無条件に SRH として parse するので、そこへ SRH の無いパケットを渡すと upper-layer ヘッダを Routing header として読んでしまうためです。これは no-SRH dispatcher が非 uN/uA の entry に課しているゲートと同じ条件です
+- ただし SRH の無いパケットには例外があります。ヒットした entry が uN / uA / uT のいずれでもなく、inner protocol が IPIP / IPv6 / Ethernet のいずれでもない場合は tail call せず kernel に渡します。多くの endpoint slot は IPv6 ヘッダの直後を無条件に SRH として parse するので、そこへ SRH の無いパケットを渡すと upper-layer ヘッダを Routing header として読んでしまうためです。これは no-SRH dispatcher が uN / uA / uT 以外の entry に課しているゲートと同じ条件です
 - 自ノードのどの SID でもない場合は転送します
 
 uA はこの loop を持ちません。uA は adjacency へ転送する behavior なので、RFC 9800 Sec.4.1.2 のとおり、同じ uA が container に 2 回現れるなら adjacency も 2 回通るのが正しい挙動です。
@@ -129,6 +130,7 @@ neighbor 未解決を表す `BPF_FIB_LKUP_RET_NO_NEIGH` だけは扱いが分か
 
 - uN は kernel に渡します。uN の FIB lookup のキーは shift 後の DA そのものなので、kernel は同じ転送判断をやり直します。classic End と同じ動作です。kernel に渡す直前に、この実行で減らした hop limit を 1 戻します。`ip6_forward` がもう一度減らすためで、戻さないと hop limit 2 のパケットが 1 論理 hop で Time Exceeded になります。結果として消費は論理 hop あたり 1 のままです
 - uA は drop します。uA は設定した adjacency へ転送する behavior で、kernel に渡すと DA 側の経路で転送されてしまいます。shift 後の DA に経路がない構成では ICMPv6 unreachable が返ります。uA の nexthop は neighbor が解決済みである必要があり、これは classic End.X と同じ制約です
+- uT も drop します。VRF に属さない interface に届いたパケットに対して、kernel は ingress interface の VRF 所属で経路を引くため、SID に bind した table での lookup を再現できません。uT の経路では NDP の事前解決が必要です。この規則は shift 経路だけでなく SRH 終端の fall-through にも共通で、`endpoint_fib_redirect_core` は fib ifindex が ingress と異なる lookup の未解決を kernel へ渡さず drop し、SL=0 の USD decap 後の inner lookup も bind した VRF table で行います (classic End.T も同じ経路を通るため、VRF 束縛時の挙動はこの形に統一されています)
 
 ### container がこのノードで終わる場合
 
@@ -136,9 +138,25 @@ Argument がゼロになったら classic behavior へ fall through します。
 
 この経路には 2 つの形があります。1 つは shift を 1 回も行わなかった場合で、DA は uN SID そのものです。もう 1 つは container が自ノードの uSID だけで構成されていた場合で、DA は shift されて uN SID まで縮んでいます。どちらも kernel が見る DA は自ノードの SID なので、書き換え済みのパケットを渡してよいのはここだけです。ただしこれは uN SID がノードのローカルアドレスとして設定されていることを前提にします。設定がないと kernel は locator prefix の経路でルーティングを試みます。
 
+例外が USD flavor です。SRH なしの container 終端で entry の flavor が USD、かつ inner が IPIP / IPv6 の tunnel payload なら、kernel に渡す代わりに outer IPv6 を剥がして inner パケットを FIB 転送します。H.Encaps.Red は単一 container のとき SRH を出さないため、SRH あり SL=0 を前提にした既存の USD 処理 (`endpoint_handle_usd`) はこの形を扱えず、ここが唯一の追加点です。decap ヘルパは tailcall 側 (`tailcall_endpoint.c`) にあるため、core は sentinel (`USID_RET_USD_NOSRH`) を返して判断だけを伝えます。uT では decap 後の FIB も VRF table になります。PSP と USP は pop すべき SRH が存在しないため、この経路では何もしません (SRH ありの終端では classic End への fall-through で 3 flavor とも従来どおり適用されます)。uA の USD は未対応です。End.X の USD は inner の FIB lookup でなく adjacency への転送であり、共有ヘルパでは意味が変わるためです。
+
+## uT
+
+uT (RFC 9800 Sec.4.1.3) は uN と同じ /48・同じ 16 bit shift・同じ loop で、shift 後の FIB lookup が SID に bind した VRF table で行われる点だけが違います。実装も `process_end_un_core` を `is_ut` リテラル付きで共有し、呼び出し側の tailcall body (`tailcall_endpoint_end_ut`、slot 28) が 1 を渡します。`__always_inline` の定数畳み込みで死んだ側の分岐は消えるため、uN の slot に End.T のコードは混入しません。
+
+aux に新しい variant は増やしていません。uT は nexthop を持たないので、usid variant の先頭 4 byte (uA なら nexthop の先頭) に VRF ifindex を書き、data plane は l3vrf view で読みます。uN は先頭が全ゼロなので `aux_vrf_or_ingress_ifindex` の ingress fallback と両立します。uA が nexthop variant と layout を揃えているのと同じ view aliasing です。
+
+Argument がゼロになったときの fall-through は `process_end_t` で、classic End.T として VRF table を引きます。
+
+RFC 9800 Sec.4.1.3 は shift 後の lookup を table T で行うと定めていますが、shift 後の DA が自ノードの local SID に一致した場合だけは、uN と同じく loop 内で直接消費または re-dispatch し、table T を引きません。これは意図した設計です。XDP は自分宛の FIB 転送で自プログラムに再入できないため、loop 内消費が動作する唯一の形であることに加え、宛先が自ノードの local SID なら送信者は uT を経由せず /128 に直接パケットを当てられるので、この短絡が VRF 分離の迂回になることはありません。
+
+## terminal uSID (uDT4 / uDT6 / uDT46 / uDX4 / uDX6)
+
+`sid_function_map` の lookup はすべて prefixlen 128 なので、zero-padded な終端 uSID に /128 で既存の End.DT4 などを登録すると、uN / uT の /48 より longest match で勝ちます。shift loop が自ノードの別 entry に着地した場合も、その entry の action の slot へ tail call で引き継ぐため、`[uN, 自ノードの uDT4]` のような container も 1 ノード内で完結します。専用 action・専用コードは不要で、`examples/end-udt4/` が Linux oracle との比較でこれを実証しています。なお Linux の seg6local は shift 後の DA を自ノードの local SID へ転送できない (FIB 経由の self-forward になる) ため、この 1 ノード内引き継ぎは Vinbero 側だけの検証です。
+
 ## マップとエントリ
 
-新しいマップは追加していません。uN と uA は既存の `sid_function_map` と `sid_aux_map` を使います。
+新しいマップは追加していません。uN / uA / uT は既存の `sid_function_map` と `sid_aux_map` を使います。
 
 aux は union で、uSID 用の variant を追加しました。
 
@@ -160,7 +178,7 @@ data plane が引く table に、誰が何を書くかは次のとおりです�
 
 ```mermaid
 flowchart LR
-    OP["operator (vbctl)"] --> RPC1["SidFunctionService<br/>SidFunctionCreate"]
+    OP["operator (vinbero CLI)"] --> RPC1["SidFunctionService<br/>SidFunctionCreate"]
     OP --> RPCD["SidFunctionService<br/>SidFunctionDelete"]
     OP --> RPC2["LocatorService<br/>LocatorCreate"]
 
@@ -201,7 +219,7 @@ BGP へ渡す SID Structure sub-sub-TLV は LBL/LNL/FL/AL = 32/16/16/0 です。
 
 ### SID function の登録
 
-uN と uA は `trigger_prefix` の明示指定のみを受け付けます。`locator_ref` からの登録には未対応です。
+uN / uA / uT は `trigger_prefix` の明示指定のみを受け付けます。`locator_ref` からの登録には未対応です。
 
 登録時の検査は次のとおりです。
 
@@ -217,10 +235,19 @@ uA は 16 bit の function CSID を消費するので、その prefix を含む 
 
 ```bash
 # uN
-vbctl sid create --trigger-prefix fd00:aaaa:b002::/48 --action END_UN
+vinbero sid create --trigger-prefix fd00:aaaa:b002::/48 --action END_UN
 
 # uA
-vbctl sid create --trigger-prefix fd00:aaaa:b002:a003::/64 --action END_UA --nexthop fc00:23::1
+vinbero sid create --trigger-prefix fd00:aaaa:b002:a003::/64 --action END_UA --nexthop fc00:23::1
+
+# uT (vrf_name は必須で、実在の VRF device であることを検証します)
+vinbero sid create --trigger-prefix fd00:aaaa:b002::/48 --action END_UT --vrf-name vrf100
+
+# terminal uDT4 (zero-padded /128、専用 action なし)
+vinbero sid create --trigger-prefix fd00:aaaa:b002:d004::/128 --action END_DT4 --vrf-name vrf100
+
+# uN + USD flavor
+vinbero sid create --trigger-prefix fd00:aaaa:b002::/48 --action END_UN --flavor USD
 ```
 
 `--usid-block-len` は SID 構造を明示する場合に使います。既定は 32 で、現状は 32 以外を受け付けません。
@@ -232,10 +259,10 @@ headend は変更していません。H.Encaps.Red は segment が 1 つのと�
 ## 運用上の制約
 
 - trigger prefix は uSID 専用にしてください。uN の /48 と uA の /64 は wildcard なので、その prefix に入るアドレスは SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます。classic SRv6 でよくある、locator の中にノードの loopback も採番する構成にすると、そのアドレス宛の BGP や SSH が data path 側で書き換えられて到達しなくなります
-- uN と uA の SID 自身はノードのローカルアドレスとして設定してください
+- uN / uA / uT の SID 自身はノードのローカルアドレスとして設定してください
 - uA の nexthop は neighbor が解決済みである必要があります
 - flavor は単一値のみです。PSP と USP の組み合わせのような複数 flavor の同時指定は、既存の classic 実装と同じく未対応です
-- IPv6 拡張ヘッダを挟んだ NEXT-C-SID 処理は未対応です。dispatcher は IPv6 ヘッダの直後にある SRH しか認識しないので、Hop-by-Hop や Destination Options を挟んだパケットは SRH 無しの経路に入ります。uN と uA はそれを container として shift して転送し、Hop-by-Hop の option は処理しません。RFC 9800 は SRH と Hop-by-Hop と Destination Options をたどった後にも NEXT-C-SID を実行するよう求めているので、ここは仕様との差です
+- IPv6 拡張ヘッダを挟んだ NEXT-C-SID 処理は未対応です。dispatcher は IPv6 ヘッダの直後にある SRH しか認識しないので、Hop-by-Hop や Destination Options を挟んだパケットは SRH 無しの経路に入ります。uN / uA / uT はそれを container として shift して転送し、Hop-by-Hop の option は処理しません。RFC 9800 は SRH と Hop-by-Hop と Destination Options をたどった後にも NEXT-C-SID を実行するよう求めているので、ここは仕様との差です
 - shift 経路は SRH を検証しないので、壊れた routing header を持つパケットもそのまま中継します。RFC 9800 の疑似コードは Argument が非ゼロのとき SRH を見ないため、この点は仕様どおりです。変更前は kernel が受け取って落としていました
 - upper-layer checksum について、RFC 9800 Sec.6.5 は最終宛先を pseudo-header の DA として計算するよう定めています。これに従わず途中の container のアドレスで計算した送信元のパケットは、最終到達点で不一致になります。TCP と UDP に限らず ICMPv6 も同じです。実運用の uSID は H.Encaps 経由の encap トラフィックなので問題になりません
 
@@ -243,12 +270,15 @@ headend は変更していません。H.Encaps.Red は segment が 1 つのと�
 
 データプレーンの単体テストは `pkg/bpf/xdp_usid_test.go` です。`BPF_PROG_TEST_RUN` の環境では FIB が必ず失敗するため、戻り値だけでは正しい shift と guard による drop を区別できません。したがって出力パケットの DA と hop limit を直接 assert しています。
 
-E2E は netns example の 2 本で、どちらも Linux kernel の seg6local next-csid flavor を oracle にして 2 phase で確認します。
+E2E の netns example は 5 本です。end-un / end-ua / end-udt4 は Linux kernel の seg6local を oracle にした 2 phase、end-ut と end-un-usd は kernel に対応する native 実装がないため Vinbero 単独の検証です (uT: next-csid flavor は End / End.X のみ。USD: seg6local End は `flavors usd` を拒否します)。
 
 | example | 対象 | Linux 側の設定 | kernel 要件 |
 |---|---|---|---|
 | `examples/end-un/` | uN | `action End flavors next-csid lblen 32 nflen 16` | 6.1 以上 |
 | `examples/end-ua/` | uA | `action End.X flavors next-csid lblen 32 nflen 32` | 6.6 以上 |
+| `examples/end-udt4/` | terminal uDT4 | `action End.DT4 vrftable 100` (/128) + next-csid uN | 6.1 以上 |
+| `examples/end-ut/` | uT | oracle なし (main table blackhole で VRF lookup を証明) | VRF 対応 |
+| `examples/end-un-usd/` | uN + USD | oracle なし (到達自体が decap の証明) | - |
 
 Linux の seg6local で 1 回の実行が消費する幅は `nflen` です。`lblen` は shift せずに残す locator block の長さで、SID の prefix 長は `lblen + nflen` になります。uA は node と function を同時に消費するので、prefix が /64 になる `nflen 32` が正しく、`nflen 16` は function CSID を DA に残す uN の形になります。
 
@@ -261,4 +291,7 @@ end-ua の router2 は terminal SID への経路を持たないので、uA が�
 - REPLACE-C-SID と End.LBS と End.XLBS は実装していません
 - 32 bit uSID と F3216 以外の SID 構造には対応していません。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります
 - SR Policy の transport list を container へ自動 packing する処理はありません
-- `locator_ref` からの uN / uA 登録はできません
+- `locator_ref` からの uN / uA / uT 登録はできません
+- flavor は単一値のみで、PSP+USP のような組合せは classic と同じく未対応です
+- uA の USD は未対応です (End.X の USD は adjacency への転送で、DA ベースの decap 転送とは別実装が必要です)
+- SRH なし終端の USD は nexthdr が直接 IPIP / IPv6 の場合だけ decap します。Hop-by-Hop や Destination Options を挟むパケットは既存 dispatcher 全体の方針どおり extension header 非対応で、kernel への local delivery に fall through します (DA は自ノードの SID なので情報漏洩にはなりません)

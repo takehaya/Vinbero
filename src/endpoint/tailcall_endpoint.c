@@ -1,4 +1,4 @@
-// Endpoint tail call targets (22 SEC("xdp") programs).
+// Endpoint tail call targets.
 // Included from xdp_prog.c — not compiled standalone.
 
 // ========== Helpers shared by tail call targets (nosrh path) ==========
@@ -370,11 +370,35 @@ int tailcall_endpoint_end_un(struct xdp_md *ctx)
         TAILCALL_RETURN(ctx,XDP_DROP);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
-                                    &tctx->sid_entry, tctx->dispatch_type,
-                                    tctx->inner_proto);
+                                    &tctx->sid_entry, aux, 0,
+                                    tctx->dispatch_type, tctx->inner_proto);
     // USD on a no-SRH container that ends here: same decap shape as
     // End.DT46's nosrh branch. The uN aux has no VRF, so nosrh_fib_*
     // falls back to the ingress ifindex.
+    if (action == USID_RET_USD_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
+    TAILCALL_RETURN(ctx,action);
+}
+
+// uT: uN with the FIB lookup bound to the aux VRF (RFC 9800 Sec.4.1.3).
+// The aux carries the VRF ifindex in its leading bytes (the l3vrf view of
+// the usid variant), so the USD decap below lands in the VRF too.
+SEC("xdp")
+int tailcall_endpoint_end_ut(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
+        TAILCALL_RETURN(ctx,XDP_DROP);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
+                                    &tctx->sid_entry, aux, 1,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    // USD decap in the VRF: the aux carries the ifindex in its leading
+    // bytes, which is exactly what nosrh_decap_and_fib consumes.
     if (action == USID_RET_USD_NOSRH)
         TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
     TAILCALL_RETURN(ctx,action);

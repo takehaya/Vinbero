@@ -261,9 +261,10 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 	return nil
 }
 
-// findVrfReference returns the prefix of an End.T/DT4/DT6/DT46 SID whose
+// findVrfReference returns the prefix of an End.T/DT4/DT6/DT46/uT SID whose
 // l3vrf aux references the given vrf_ifindex ("" = unreferenced). Deleting a
-// VRF device under such a SID would blackhole its decap traffic.
+// VRF device under such a SID would blackhole its decap traffic (uT reads
+// the same leading bytes through the l3vrf view).
 func findVrfReference(sids SidLister, ifindex uint32) (string, error) {
 	entries, err := sids.ListSidFunctions()
 	if err != nil {
@@ -274,7 +275,8 @@ func findVrfReference(sids SidLister, ifindex uint32) (string, error) {
 		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T,
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46:
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT:
 		default:
 			continue
 		}

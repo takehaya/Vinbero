@@ -7,15 +7,26 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/vishvananda/netlink"
 )
 
 // uN / uA (NEXT-C-SID, RFC 9800) data-plane tests.
 const (
 	actionEndUn = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN)
 	actionEndUa = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA)
+	actionEndUt = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT)
 
 	usidBlockLenBytes = uint8(4) // F3216
 )
+
+func (h *xdpTestHelper) createSidFunctionUsidVrf(prefix string, flavor uint8, vrfIfindex uint32, blockLenBytes uint8) {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: actionEndUt, Flavor: flavor}
+	aux := NewSidAuxUsidVrf(vrfIfindex, blockLenBytes)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux, OwnerRPC); err != nil {
+		h.t.Fatalf("Failed to create SID function entry: %v", err)
+	}
+}
 
 func (h *xdpTestHelper) createSidFunctionUsid(prefix string, action uint8, flavor uint8, nexthop [16]byte, blockLenBytes uint8) {
 	h.t.Helper()
@@ -301,6 +312,213 @@ func TestXDPProgEndUnUSDNoSrh(t *testing.T) {
 		}
 		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:dddd::"); !got.Equal(want) {
 			t.Errorf("DA = %v, want %v (untouched)", got, want)
+		}
+	})
+}
+
+// uT (RFC 9800 Sec.4.1.3): uN with the FIB lookup bound to the aux VRF.
+// The aux here carries the loopback ifindex, so these tests cover the
+// shared shift/terminal machinery running under the uT slot with its
+// aliased aux; the uT-specific fail-closed NO_NEIGH branch needs a real
+// VRF and is pinned by TestXDPProgEndUtNoNeighFailsClosed below.
+func TestXDPProgEndUt(t *testing.T) {
+	h := newXDPTestHelper(t)
+	h.createSidFunctionUsidVrf("fd00:aaaa:cccc::/48", 0, 1, usidBlockLenBytes)
+
+	src := net.ParseIP("fd00:1:1::1")
+
+	t.Run("shift without SRH", func(t *testing.T) {
+		pkt, err := buildUsidIPv6Packet(src, net.ParseIP("fd00:aaaa:cccc:dddd::"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Errorf("expected fail-closed XDP_DROP, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:dddd::"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (shifted)", got, want)
+		}
+		if hl := outPktHopLimit(t, out); hl != 63 {
+			t.Errorf("hop limit = %d, want 63", hl)
+		}
+	})
+
+	t.Run("consecutive own-node uSIDs shift in place", func(t *testing.T) {
+		pkt, err := buildUsidIPv6Packet(src, net.ParseIP("fd00:aaaa:cccc:cccc:dddd::"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Errorf("expected fail-closed XDP_DROP, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:dddd::"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (double shift)", got, want)
+		}
+	})
+
+	t.Run("argument zero with SRH falls through to End.T", func(t *testing.T) {
+		segs := []net.IP{net.ParseIP("fd00:9:9::1"), net.ParseIP("fd00:aaaa:cccc::")}
+		pkt, err := buildSRv6Packet(src, net.ParseIP("fd00:aaaa:cccc::"), segs, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_PASS {
+			t.Errorf("expected XDP_PASS (End.T FIB miss on lo), got %d", ret)
+		}
+		verifyDAAndSL(t, out, "fd00:9:9::1", 1)
+	})
+
+	t.Run("argument zero without SRH passes to the kernel", func(t *testing.T) {
+		pkt, err := buildUsidIPv6Packet(src, net.ParseIP("fd00:aaaa:cccc::"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_PASS {
+			t.Errorf("expected XDP_PASS, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:cccc::"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (untouched)", got, want)
+		}
+	})
+
+	t.Run("USD decap on a no-SRH terminal", func(t *testing.T) {
+		h.createSidFunctionUsidVrf("fd00:aaaa:2222::/48", flavorUSD, 1, usidBlockLenBytes)
+		pkt, err := buildEncapsulatedPacketNoSRH(
+			src, net.ParseIP("fd00:aaaa:2222::"),
+			net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret == XDP_PASS {
+			t.Errorf("expected XDP_REDIRECT or XDP_DROP, got XDP_PASS")
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
+			t.Errorf("inner DA = %v, want %v (outer stripped)", got, want)
+		}
+	})
+
+	t.Run("bad block length fails closed before any shift", func(t *testing.T) {
+		h.createSidFunctionUsidVrf("fd00:aaaa:1111::/48", 0, 1, 8)
+		pkt, err := buildUsidIPv6Packet(src, net.ParseIP("fd00:aaaa:1111:cccc::"), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Errorf("expected XDP_DROP, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:1111:cccc::"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (unshifted)", got, want)
+		}
+	})
+}
+
+// uT is fail-closed on NO_NEIGH, unlike uN: the kernel cannot repeat a
+// VRF-scoped lookup for a packet that arrived on a non-VRF interface. The
+// other uT tests cannot see this branch (their aux points at loopback, so
+// fib_ifindex == ingress and the uN hand-off condition holds); here a real
+// VRF holds a route through an unresolvable gateway on a dummy device, so
+// the lookup answers NO_NEIGH in a non-ingress context and the packet must
+// drop. Deleting the ingress condition in usid_forward turns this into an
+// XDP_PASS and fails the test.
+func TestXDPProgEndUtNoNeighFailsClosed(t *testing.T) {
+	h := newXDPTestHelper(t)
+
+	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "utnn-vrf0"}, Table: 1042}
+	if err := netlink.LinkAdd(vrf); err != nil {
+		t.Skipf("cannot create VRF device: %v", err)
+	}
+	defer func() { _ = netlink.LinkDel(vrf) }()
+	if err := netlink.LinkSetUp(vrf); err != nil {
+		t.Fatalf("vrf up: %v", err)
+	}
+	dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "utnn-dum0", MasterIndex: vrf.Attrs().Index}}
+	if err := netlink.LinkAdd(dummy); err != nil {
+		t.Fatalf("dummy add: %v", err)
+	}
+	defer func() { _ = netlink.LinkDel(dummy) }()
+	if err := netlink.LinkSetUp(dummy); err != nil {
+		t.Fatalf("dummy up: %v", err)
+	}
+	addr, _ := netlink.ParseAddr("fd00:feed::1/64")
+	if err := netlink.AddrAdd(dummy, addr); err != nil {
+		t.Fatalf("addr add: %v", err)
+	}
+	_, dst, _ := net.ParseCIDR("fd00:aaaa:dddd::/48")
+	route := &netlink.Route{
+		LinkIndex: dummy.Attrs().Index,
+		Dst:       dst,
+		Gw:        net.ParseIP("fd00:feed::2"), // never resolves on a dummy
+		Table:     1042,
+	}
+	if err := netlink.RouteAdd(route); err != nil {
+		t.Fatalf("route add: %v", err)
+	}
+
+	h.createSidFunctionUsidVrf("fd00:aaaa:cccc::/48", 0, uint32(vrf.Attrs().Index), usidBlockLenBytes)
+
+	pkt, err := buildUsidIPv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:cccc:dddd::"), 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, out := h.run(pkt)
+	if ret != XDP_DROP {
+		t.Errorf("expected fail-closed XDP_DROP on NO_NEIGH in the VRF, got %d", ret)
+	}
+	if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:dddd::"); !got.Equal(want) {
+		t.Errorf("DA = %v, want %v (shifted before the lookup)", got, want)
+	}
+
+	t.Run("SRH advance stays fail-closed too", func(t *testing.T) {
+		// The classic End.T fall-through advances to the next segment and
+		// looks it up in the VRF; NO_NEIGH there must not escape to the
+		// kernel either (endpoint_fib_redirect_core's ingress condition).
+		segs := []net.IP{net.ParseIP("fd00:aaaa:dddd::1"), net.ParseIP("fd00:aaaa:cccc::")}
+		pkt, err := buildSRv6Packet(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:cccc::"), segs, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Errorf("expected fail-closed XDP_DROP, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("fd00:aaaa:dddd::1"); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (advanced before the lookup)", got, want)
+		}
+	})
+
+	t.Run("SRH USD decap looks up in the VRF", func(t *testing.T) {
+		// SL=0 USD on a uT: the inner FIB lookup runs in the bound VRF
+		// (endpoint_handle_usd now takes the fib ifindex); the VRF route's
+		// unresolvable gateway keeps it fail-closed.
+		h.createSidFunctionUsidVrf("fd00:aaaa:eeee::/48", flavorUSD, uint32(vrf.Attrs().Index), usidBlockLenBytes)
+		_, innerDst, _ := net.ParseCIDR("2001:db8:42::/48")
+		if err := netlink.RouteAdd(&netlink.Route{
+			LinkIndex: dummy.Attrs().Index,
+			Dst:       innerDst,
+			Gw:        net.ParseIP("fd00:feed::2"),
+			Table:     1042,
+		}); err != nil {
+			t.Fatalf("route add: %v", err)
+		}
+		segs := []net.IP{net.ParseIP("fd00:aaaa:eeee::")}
+		pkt, err := buildEncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:aaaa:eeee::"), segs, 0,
+			net.ParseIP("2001:db8:41::1"), net.ParseIP("2001:db8:42::1"), innerTypeIPv6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret, out := h.run(pkt)
+		if ret != XDP_DROP {
+			t.Errorf("expected fail-closed XDP_DROP, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), net.ParseIP("2001:db8:42::1"); !got.Equal(want) {
+			t.Errorf("inner DA = %v, want %v (decapped)", got, want)
 		}
 	})
 }

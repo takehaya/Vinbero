@@ -77,6 +77,7 @@ func (EsiRedundancyMode) EnumDescriptor() ([]byte, []int) {
 // SidFunction represents a single SRv6 Endpoint function configuration.
 // The action field determines which optional fields are relevant:
 //   - End.DT4/DT6/DT46: vrf_name (VRF-aware FIB lookup)
+//   - uT (END_UT): trigger_prefix (/48) + vrf_name (required; shift-and-forward in the VRF table)
 //   - End.DT2: bd_id + bridge_name (L2 FDB lookup + bridge flood on miss)
 //   - End.DX2: oif (direct L2 output to specific interface)
 //   - End.DX2V: table_id (VLAN cross-connect table scope)
@@ -96,7 +97,7 @@ type SidFunction struct {
 	ArgSrcOffset   uint32              `protobuf:"varint,7,opt,name=arg_src_offset,json=argSrcOffset,proto3" json:"arg_src_offset,omitempty"`                                 // Bit offset for source in SID Args
 	ArgDstOffset   uint32              `protobuf:"varint,8,opt,name=arg_dst_offset,json=argDstOffset,proto3" json:"arg_dst_offset,omitempty"`                                 // Bit offset for destination in SID Args
 	Oif            uint32              `protobuf:"varint,9,opt,name=oif,proto3" json:"oif,omitempty"`                                                                         // Output interface index (End.DX2: direct L2 output)
-	VrfName        string              `protobuf:"bytes,10,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`                                                  // VRF device name (End.DT4/DT6/DT46: resolved to ifindex for FIB lookup)
+	VrfName        string              `protobuf:"bytes,10,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`                                                  // VRF device name, resolved to an ifindex for the FIB lookup (End.T/DT4/DT6/DT46: optional; uT: required)
 	BdId           uint32              `protobuf:"varint,11,opt,name=bd_id,json=bdId,proto3" json:"bd_id,omitempty"`                                                          // Bridge Domain ID (End.DT2: FDB scope for MAC learning)
 	BridgeName     string              `protobuf:"bytes,12,opt,name=bridge_name,json=bridgeName,proto3" json:"bridge_name,omitempty"`                                         // Bridge device name (End.DT2: redirect target on FDB miss)
 	Segments       []string            `protobuf:"bytes,13,rep,name=segments,proto3" json:"segments,omitempty"`                                                               // Policy segment list (End.B6/End.B6.Encaps)

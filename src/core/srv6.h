@@ -38,6 +38,7 @@ enum srv6_local_action {
     SRV6_LOCAL_ACTION_END_AN = 25,           // End.AN (SR-aware service, draft-ietf-spring-srv6-service-programming)
     SRV6_LOCAL_ACTION_END_UN = 26,           // uN: End with NEXT-C-SID (RFC 9800 Sec.4.1.1)
     SRV6_LOCAL_ACTION_END_UA = 27,           // uA: End.X with NEXT-C-SID (RFC 9800 Sec.4.1.2)
+    SRV6_LOCAL_ACTION_END_UT = 28,           // uT: End.T with NEXT-C-SID (RFC 9800 Sec.4.1.3)
 };
 
 // ========== SRv6 Local Flavor ==========
