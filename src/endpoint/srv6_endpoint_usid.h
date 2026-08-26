@@ -160,6 +160,7 @@ static __always_inline int usid_shift_loop(struct xdp_md *ctx,
             if (dispatch_type == DISPATCH_NOSRH &&
                 next->action != SRV6_LOCAL_ACTION_END_UN &&
                 next->action != SRV6_LOCAL_ACTION_END_UA &&
+                next->action != SRV6_LOCAL_ACTION_END_UT &&
                 inner_proto != IPPROTO_IPIP &&
                 inner_proto != IPPROTO_IPV6 &&
                 inner_proto != IPPROTO_ETHERNET)
@@ -199,7 +200,7 @@ static __always_inline int usid_shift_loop(struct xdp_md *ctx,
 // NO_NEIGH; its next hop must be a resolved neighbour, exactly like
 // classic End.X.
 static __always_inline int usid_forward(struct xdp_md *ctx, void *dst,
-                                        __u16 l3_offset)
+                                        __u16 l3_offset, __u32 fib_ifindex)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -213,22 +214,33 @@ static __always_inline int usid_forward(struct xdp_md *ctx, void *dst,
     __u32 out_ifindex;
     int r = srv6_fib_lookup_v6_core(ctx, ip6h, eth, &out_ifindex,
                                     dst ? dst : &ip6h->daddr,
-                                    ctx->ingress_ifindex);
+                                    fib_ifindex);
     if (r == FIB_RESULT_REDIRECT)
         return bpf_redirect(out_ifindex, 0);
     // dst == NULL means the lookup key was the DA itself (uN), so the
-    // kernel repeats exactly this forwarding decision.
-    if (r == FIB_RESULT_NO_NEIGH && dst == NULL) {
+    // kernel repeats exactly this forwarding decision -- but only when the
+    // lookup ran in the ingress context. A uT VRF lookup is one the kernel
+    // would not repeat (it routes by the ingress interface's VRF
+    // membership), so uT stays fail-closed on NO_NEIGH.
+    if (r == FIB_RESULT_NO_NEIGH && dst == NULL &&
+        fib_ifindex == ctx->ingress_ifindex) {
         ip6h->hop_limit++;
         return XDP_PASS;
     }
     return XDP_DROP;
 }
 
-// uN core, shared by the SRH and no-SRH dispatch paths.
+// uN / uT core, shared by the SRH and no-SRH dispatch paths. uT
+// (RFC 9800 Sec.4.1.3) is uN with the FIB lookup bound to a table: same
+// SID shape (/48), same shift, same loop; only the forwarding context and
+// the classic fall-through differ. is_ut is a literal 0/1 at each call
+// site, so the dead branch folds away and neither tailcall program carries
+// the other behavior's code.
 static __always_inline int process_end_un_core(
     struct xdp_md *ctx,
     struct sid_function_entry *entry,
+    struct sid_aux_entry *aux,
+    int is_ut,
     __u8 dispatch_type,
     __u8 inner_proto,
     __u16 l3_offset)
@@ -243,7 +255,9 @@ static __always_inline int process_end_un_core(
     if (r < 0)
         return XDP_DROP;
     if (r == 1)
-        return usid_forward(ctx, NULL, l3_offset);
+        return usid_forward(ctx, NULL, l3_offset,
+                            is_ut ? aux_vrf_or_ingress_ifindex(aux, ctx)
+                                  : ctx->ingress_ifindex);
     if (r == 2) {
         // The shifted DA is a local SID that needs an SRH this packet does
         // not have. The kernel owns that address, so let it decide.
@@ -284,6 +298,8 @@ static __always_inline int process_end_un_core(
     if (srh_ptr + 8 > data_end)
         return XDP_DROP;
     struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)srh_ptr;
+    if (is_ut)
+        return process_end_t(ctx, ip6h, srh, entry, aux, l3_offset);
     return process_end(ctx, ip6h, srh, entry, l3_offset);
 }
 
@@ -312,7 +328,8 @@ static __always_inline int process_end_ua_core(
             return XDP_DROP;
         ip6h->hop_limit--;
         usid_shift(da, USID_UA_ARG_OFF);
-        return usid_forward(ctx, aux->usid.nexthop, l3_offset);
+        return usid_forward(ctx, aux->usid.nexthop, l3_offset,
+                            ctx->ingress_ifindex);
     }
 
     // Nothing was shifted on this path (uA returns above whenever it

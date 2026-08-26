@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/vishvananda/netlink"
 	"net"
 
 	"connectrpc.com/connect"
@@ -26,6 +27,19 @@ func resolveIfindex(name string) (uint32, error) {
 		return 0, fmt.Errorf("interface %q not found: %w", name, err)
 	}
 	return uint32(iface.Index), nil
+}
+
+// requireVrfDevice verifies that name is an actual VRF device, not just
+// any resolvable interface.
+func requireVrfDevice(name string) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return fmt.Errorf("vrf %q: %w", name, err)
+	}
+	if _, ok := link.(*netlink.Vrf); !ok {
+		return fmt.Errorf("%q is a %s device, not a vrf", name, link.Type())
+	}
+	return nil
 }
 
 func ifindexToName(ifindex uint32) string {
