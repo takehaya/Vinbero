@@ -1,0 +1,81 @@
+internal:
+  # eth1 faces the core (SRv6 underlay): the XDP data plane here runs the
+  # End.DT4 *decap* of return traffic coming back from pe-osaka.
+  # eth2 faces ce-tokyo: the XDP data plane there runs the H.Encaps of
+  # plaintext customer traffic towards FRR's service SID. Both ports
+  # carry XDP so the full bidirectional SRv6 L3VPN data plane works.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    # generic mode: veth links in containerlab do not support native XDP.
+    device_mode: "generic"
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  enable_stats: false
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+
+# In-process BGP speaker. Consulted because vinberod is started with
+# --bgp-enabled (see start.sh). Both PEs sit in one provider AS 65100
+# and run an iBGP VPNv4/VPNv6 session -- the textbook SRv6 L3VPN design
+# (PEs of a single provider domain peer iBGP). pe-osaka runs FRR, the
+# independent RFC 9252 implementation; pe-tokyo runs Vinbero under test.
+#
+# The two PEs peer MP-BGP directly over their loopbacks, multihop past
+# the core router (which is NOT in BGP). iBGP imposes no TTL=1 limit, so
+# the loopback-to-loopback session crosses the core cleanly. The loopback
+# nexthop is reachable via the static underlay routes from start.sh.
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    # Bind TCP/179: vinberod owns BGP on this node, FRR connects in.
+    listen_port: 179
+    # Locator supplying the SRv6 encap source for routes learned from
+    # FRR; registered at startup below.
+    source_locator: "LOC1"
+  # Registered before the BGP session and RIB replay start: a locator
+  # created over RPC after boot can lose the race against FRR's first
+  # UPDATE, and the applier has no re-reconcile on locator addition --
+  # the route would stay missing until the next UPDATE.
+  # fd00:100:1::/48 == Vinbero's uSID locator (block fd00:100/32, node
+  # uSID 0x0001; a uSID locator requires a non-zero node CSID). Service
+  # SIDs minted from it are zero-padded /128 micro-SIDs and advertise
+  # SID Structure 32/16/16/0.
+  locators:
+    - name: LOC1
+      prefix: "fd00:100:1::/48"
+      block_len: 32
+      node_len: 16
+      function_len: 16
+      argument_len: 0
+      behavior: usid
+  peers:
+    # pe-osaka's loopback. Multihop iBGP session via the IPv6 core.
+    - neighbor: "2001:db8:ff::2"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - vpnv4
+        - vpnv6

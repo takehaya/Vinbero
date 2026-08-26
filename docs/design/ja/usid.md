@@ -207,7 +207,7 @@ flowchart LR
     SAM -.->|"lookup"| DP
 ```
 
-BGP からの経路はまだありません。Phase 4 で uSID locator から service SID を払い出すときに、`locator.Manager` の右側に applier がもう 1 本ぶら下がります。
+BGP からの経路は `pkg/bgp/apply` の applier 経由で headend map に入ります。詳細は BGP 統合の節を参照してください。
 
 ### locator
 
@@ -281,6 +281,16 @@ RFC 9800 Sec.7 の Locator-Block Swap を、NEXT-C-SID (Sec.7.1.1 / 7.2.1) と R
 
 headend は変更していません。H.Encaps.Red は segment が 1 つのとき SRH なしの encap を出すので、pre-packed の container を segment list として渡せばそのまま uSID のパケットになります。SR Policy の transport list を container へ自動 packing する処理は未実装です。
 
+## BGP 統合
+
+L3VPN の advertise 側は、RFC 9252 の SID Structure Sub-Sub-TLV を VPNv4 / VPNv6 経路に付けます。構造は SID を払い出した locator から取るので、uSID locator の経路は 32/16/16/0 を運びます。auto-advertise (`pkg/bgp/export`) は binding の default locator から、operator-explicit の `BgpAdvertiseVpn` は SID を含む locator の検索から構造を得ます。構造を持たない経路は従来どおり Sub-Sub-TLV なしで出るため、wire 互換は保たれます。
+
+受信側は peer の SID Structure を decode して経路に載せ、applier の mode 選択点 1 箇所 (`buildHeadendEntry`) で uSID 形状の経路を H.Encaps.Red として設置します。uSID 形状の判定 `SIDStructure.IsUSID` は、非ゼロ、Argument なし、block + node + function が container の半分 (64 bit) 以下、の 3 条件です。ECMP member の fingerprint にもこのフラグが入るので、flavor が変わると group が reconcile されます。
+
+transposition は判定から除外しません。FRR は `format usid-f3216` でも function uSID を VPN label に転置して送るため、転置の有無を uSID の印にはできません。decoder が label を畳み戻してから applier が走るので、設置される SID は常にフルの micro-SID です。この緩和により classic の 32/16/16/0 転置経路 (FRR の classic locator も同形) も H.Encaps.Red になりますが、RFC 8986 は単一 segment の SRH 省略を SID の由来によらず許しており、FRR の End.DT4 が SRH なしの encap を decap することは interop lab で確認済みです。
+
+第三者実装との interop は `examples/interop-clab/scenarios/usid-l3vpn-2site/` で検証します。FRR 10.2.1 の usid-f3216 locator と Vinbero の uSID locator を iBGP で対向させ、label fold、H.Encaps.Red の設置、双方向 ping、Vinbero → FRR 方向の wire に SRH が無いことを tcpdump で確認します。
+
 ## 運用上の制約
 
 - trigger prefix は uSID 専用にしてください。uN の /48 と uA の /64 は wildcard なので、その prefix に入るアドレスは SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます。classic SRv6 でよくある、locator の中にノードの loopback も採番する構成にすると、そのアドレス宛の BGP や SSH が data path 側で書き換えられて到達しなくなります
@@ -313,8 +323,7 @@ end-ua の router2 は terminal SID への経路を持たないので、uA が�
 
 ## 未対応
 
-- BGP 統合は未着手です。uSID locator からの service SID 送出と、受信した service SID からの encap source 導出が残っています。後者は `decodeRemoteSrc` が locator base を仮定している点に手を入れる必要があります
-- 第三者実装との interop シナリオはまだありません
+- BGP 統合は L3VPN のみです。EVPN の uSID service SID は未対応で、`decodeRemoteSrc` が locator base を仮定している点に手を入れる必要があります
 - REPLACE-C-SID の End.T / End.B6 / End.BM への適用は未対応です
 - NEXT-C-SID は 32 bit uSID と F3216 以外の SID 構造に対応していません。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります (REPLACE-C-SID は block 可変・C-SID 32/16 に対応済みです)
 - SR Policy の transport list を container へ自動 packing する処理はありません
