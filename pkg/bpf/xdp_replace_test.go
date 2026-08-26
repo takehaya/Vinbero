@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"net"
 	"testing"
+
+	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
 
 // End / End.X with REPLACE-CSID (RFC 9800 Sec.4.2) data-plane tests.
@@ -14,8 +16,8 @@ import (
 // encoded as 16-byte segment list entries with position 0 in the most
 // significant bytes.
 const (
-	actionEndReplace  = uint8(29)
-	actionEndXReplace = uint8(30)
+	actionEndReplace  = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE)
+	actionEndXReplace = uint8(vinberov1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE)
 
 	replBlockBytes = uint8(6)
 )

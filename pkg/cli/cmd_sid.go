@@ -45,7 +45,8 @@ func sidFunctionCommand() *cli.Command {
 					&cli.StringFlag{Name: "service-mac", Usage: "Service MAC for static rewrite towards IFACE-OUT; omit to resolve the inner destination via FIB (END_AS/END_AD L3 inner; required for END_AM)"},
 					&cli.UintFlag{Name: "hop-limit-margin", Usage: "Tolerated outer hop-limit drift before the dynamic cache refreshes (END_AD only)"},
 					&cli.StringFlag{Name: "service-name", Usage: "NF-catalog name of the SR-aware service behind this SID (END_AN only)"},
-					&cli.UintFlag{Name: "usid-block-len", Usage: "NEXT-C-SID locator block length in bits (END_UN/END_UA/END_UT; F3216 = 32, the default)"},
+					&cli.UintFlag{Name: "usid-block-len", Usage: "Locator block length in bits (END_UN/END_UA/END_UT: F3216 = 32, the default; END_REPLACE/END_X_REPLACE: required, byte-aligned)"},
+					&cli.UintFlag{Name: "csid-len", Usage: "REPLACE-CSID C-SID length in bits: 32 (default) or 16 (END_REPLACE/END_X_REPLACE)"},
 					&cli.StringFlag{Name: "plugin-aux-hex", Usage: "Plugin-defined aux payload as hex (<= 256 bytes after decode)"},
 					&cli.StringFlag{Name: "plugin-aux-json", Usage: "Plugin-defined aux payload as JSON (server encodes via plugin BTF)"},
 					&cli.StringFlag{Name: "plugin-aux-json-file", Usage: "Path to a file containing plugin aux JSON"},
@@ -141,6 +142,10 @@ func sidFunctionCommand() *cli.Command {
 					if c.IsSet("usid-block-len") {
 						blockLen := uint32(c.Uint("usid-block-len"))
 						sid.UsidBlockLen = &blockLen
+					}
+					if c.IsSet("csid-len") {
+						csidLen := uint32(c.Uint("csid-len"))
+						sid.CsidLen = &csidLen
 					}
 					if c.IsSet("gtp-v4-src-position") {
 						pos := uint32(c.Uint("gtp-v4-src-position"))
