@@ -290,6 +290,114 @@ static __always_inline int endpoint_handle_usd(
     return XDP_DROP;
 }
 
+// Spend one hop of the exposed inner packet's lifetime before it is
+// forwarded: bpf_redirect bypasses the kernel's forwarding path, so
+// nothing else decrements it. IPv4 needs the incremental header-checksum
+// fold for the TTL byte. Returns -1 when the lifetime is exhausted.
+static __always_inline int endpoint_spend_inner_hop(void *inner, __u8 inner_proto)
+{
+    if (inner_proto == IPPROTO_IPV6) {
+        struct ipv6hdr *i6 = inner;
+        if (i6->hop_limit <= 1)
+            return -1;
+        i6->hop_limit--;
+    } else {
+        struct iphdr *i4 = inner;
+        if (i4->ttl <= 1)
+            return -1;
+        __u32 csum = i4->check;
+        csum += bpf_htons(0x0100);
+        i4->check = (__u16)(csum + (csum >> 16));
+        i4->ttl--;
+    }
+    return 0;
+}
+
+// Resolve an End.X-family adjacency: a plain neighbour/route resolution
+// of the configured nexthop, with the source set to the packet that will
+// actually leave (the exposed inner IPv6 source, or unspecified for an
+// inner IPv4 packet) so source-specific routing cannot pick a different
+// interface than the forwarded packet would. Writes the resolved MACs
+// into eth on success.
+static __always_inline int endpoint_resolve_adjacency(
+    struct xdp_md *ctx, struct ethhdr *eth,
+    const void *inner_src6, void *nexthop, __u32 *oif)
+{
+    struct bpf_fib_lookup fib_params = {};
+    fib_params.family = AF_INET6;
+    fib_params.ifindex = ctx->ingress_ifindex;
+    if (inner_src6)
+        __builtin_memcpy(fib_params.ipv6_src, inner_src6, sizeof(fib_params.ipv6_src));
+    __builtin_memcpy(fib_params.ipv6_dst, nexthop, sizeof(fib_params.ipv6_dst));
+    if (bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0) != BPF_FIB_LKUP_RET_SUCCESS)
+        return -1;
+    __builtin_memcpy(eth->h_dest, fib_params.dmac, ETH_ALEN);
+    __builtin_memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
+    *oif = fib_params.ifindex;
+    return 0;
+}
+
+// USD towards an adjacency (RFC 8986 Sec.4.16.3 for End.X: the exposed
+// packet is forwarded via a member of J, not by a FIB lookup on its
+// destination). The adjacency is resolved on the still-encapsulated
+// packet so the resolved MACs ride through the decap's eth save/restore;
+// the adjacency must resolve, exactly like classic End.X forwarding.
+static __always_inline int endpoint_handle_usd_nexthop(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    void *nexthop,
+    __u16 l3_offset)
+{
+    __u8 inner_proto = srh->nexthdr;
+    if (inner_proto != IPPROTO_IPIP && inner_proto != IPPROTO_IPV6)
+        return XDP_DROP;
+    // The inner offset below comes from hdrlen alone, so a malformed SRH
+    // whose Last Entry exceeds the declared length must be refused here
+    // (endpoint_init does not cross-check them at SL=0), or segment list
+    // bytes would be exposed as the inner packet.
+    if (srh->hdrlen < 2 * (srh->first_segment + 1))
+        return XDP_DROP;
+
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_DROP;
+
+    // The exposed packet sits right behind the SRH: take its IPv6 source
+    // for the resolver, and refuse to expose a truncated inner header
+    // (the decap would otherwise emit a bare Ethernet frame).
+    const void *inner_src6 = NULL;
+    void *inner = (void *)srh + 8 + (srh->hdrlen * 8);
+    if (inner_proto == IPPROTO_IPV6) {
+        if (inner + sizeof(struct ipv6hdr) > data_end)
+            return XDP_DROP;
+        inner_src6 = &((struct ipv6hdr *)inner)->saddr;
+    } else {
+        if (inner + sizeof(struct iphdr) > data_end)
+            return XDP_DROP;
+    }
+
+    __u32 oif;
+    if (endpoint_resolve_adjacency(ctx, eth, inner_src6, nexthop, &oif) != 0)
+        return XDP_DROP;
+
+    if (endpoint_spend_inner_hop(inner, inner_proto) != 0)
+        return XDP_DROP;
+
+    if (srv6_decap(ctx, srh, inner_proto, l3_offset) != 0)
+        return XDP_DROP;
+
+    data = (void *)(long)ctx->data;
+    data_end = (void *)(long)ctx->data_end;
+    eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_DROP;
+    eth->h_proto = bpf_htons(inner_proto == IPPROTO_IPIP ? ETH_P_IP : ETH_P_IPV6);
+    return bpf_redirect(oif, 0);
+}
+
 // Handle USP flavor: strip SRH at SL=0 and perform FIB lookup
 // Called when SL=0 and USP flavor is set
 static __always_inline int endpoint_handle_usp(
@@ -327,7 +435,9 @@ static __always_inline int endpoint_handle_usp(
 // Returns -1:   caller should perform variant-specific FIB redirect.
 //
 // sl0_fib_ifindex: FIB ifindex for the SL=0 flavors USD and USP
-// (End/End.X: ingress, End.T/uT: the bound VRF)
+// (End/End.X: ingress, End.T/uT: the bound VRF).
+// usd_nexthop: non-NULL for the End.X family, whose USD forwards the
+// exposed packet via the adjacency instead of by a FIB lookup.
 static __always_inline int endpoint_common_processing(
     struct endpoint_ctx *ectx,
     struct xdp_md *ctx,
@@ -335,13 +445,18 @@ static __always_inline int endpoint_common_processing(
     struct ipv6_sr_hdr *srh,
     struct sid_function_entry *entry,
     __u16 l3_offset,
-    __u32 sl0_fib_ifindex)
+    __u32 sl0_fib_ifindex,
+    void *usd_nexthop)
 {
     int ret = endpoint_init(ectx, ctx, ip6h, srh, entry, l3_offset);
 
     if (ret == -1) {
-        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD)
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD) {
+            if (usd_nexthop)
+                return endpoint_handle_usd_nexthop(ctx, ip6h, srh,
+                                                   usd_nexthop, l3_offset);
             return endpoint_handle_usd(ctx, ip6h, srh, entry, sl0_fib_ifindex, l3_offset);
+        }
         if (entry->flavor == SRV6_LOCAL_FLAVOR_USP)
             return endpoint_handle_usp(ctx, ip6h, srh, entry, sl0_fib_ifindex, l3_offset);
         return XDP_PASS;

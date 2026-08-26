@@ -310,6 +310,7 @@ static __always_inline int process_end_ua_core(
     struct sid_function_entry *entry,
     struct sid_aux_entry *aux,
     __u8 dispatch_type,
+    __u8 inner_proto,
     __u16 l3_offset)
 {
     void *data = (void *)(long)ctx->data;
@@ -334,14 +335,17 @@ static __always_inline int process_end_ua_core(
 
     // Nothing was shifted on this path (uA returns above whenever it
     // shifts), so the DA is the bare uA SID and the packet is unmodified:
-    // classic End.X with no segment list, handed to the kernel.
-    // No USD decap here, unlike uN. End.X's USD forwards the decapped
-    // packet over the adjacency, not by a FIB lookup on the inner DA, so
-    // nosrh_fib_* is the wrong primitive (and it would misread the
-    // leading bytes of the uA nexthop as a VRF ifindex). A nexthop-keyed
-    // decap forward is needed if uA+USD ever becomes a requirement.
-    if (dispatch_type == DISPATCH_NOSRH)
+    // classic End.X with no segment list. With the USD flavor and a
+    // tunnelled payload the outer header is stripped and the exposed
+    // packet forwarded over the adjacency (the tailcall body owns the
+    // decap helpers, hence the sentinel); anything else goes to the
+    // kernel for local delivery.
+    if (dispatch_type == DISPATCH_NOSRH) {
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD &&
+            (inner_proto == IPPROTO_IPIP || inner_proto == IPPROTO_IPV6))
+            return USID_RET_USD_NOSRH;
         return XDP_PASS;
+    }
 
     void *srh_ptr = (void *)(ip6h + 1);
     if (srh_ptr + 8 > data_end)

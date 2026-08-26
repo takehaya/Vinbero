@@ -194,10 +194,9 @@ static __always_inline int process_end_replace_core(
         // A REPLACE-CSID flavor SID can be the last C-SID of a
         // reduced-encaps packet. RFC 9800 Sec.4.2: with no SRH the index
         // in the Argument is ignored and the upper-layer header is
-        // processed. End.X terminal delivery goes to the kernel like uA
-        // (no adjacency-keyed decap; see process_end_ua_core).
-        if (!is_endx &&
-            entry->flavor == SRV6_LOCAL_FLAVOR_USD &&
+        // processed. USD decaps tunnelled payloads (the tailcall body
+        // owns the helpers: FIB forward for End, adjacency for End.X).
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD &&
             (inner_proto == IPPROTO_IPIP || inner_proto == IPPROTO_IPV6))
             return USID_RET_USD_NOSRH;
         return XDP_PASS;
@@ -231,10 +230,15 @@ static __always_inline int process_end_replace_core(
             // USD applies only to tunnelled payloads (RFC 8986 Sec.4.16.3
             // keeps normal upper-layer processing otherwise, so e.g. an
             // ICMPv6 ping to the SID itself still reaches the kernel).
+            // End.X(REP) forwards the exposed packet over the adjacency.
             if (entry->flavor == SRV6_LOCAL_FLAVOR_USD &&
-                (srh->nexthdr == IPPROTO_IPIP || srh->nexthdr == IPPROTO_IPV6))
+                (srh->nexthdr == IPPROTO_IPIP || srh->nexthdr == IPPROTO_IPV6)) {
+                if (is_endx)
+                    return endpoint_handle_usd_nexthop(ctx, ip6h, srh,
+                                                       aux->usid.nexthop, l3_offset);
                 return endpoint_handle_usd(ctx, ip6h, srh, entry,
                                            ctx->ingress_ifindex, l3_offset);
+            }
             if (entry->flavor == SRV6_LOCAL_FLAVOR_USP)
                 return endpoint_handle_usp(ctx, ip6h, srh, entry,
                                            ctx->ingress_ifindex, l3_offset);

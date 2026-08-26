@@ -138,7 +138,7 @@ Argument がゼロになったら classic behavior へ fall through します。
 
 この経路には 2 つの形があります。1 つは shift を 1 回も行わなかった場合で、DA は uN SID そのものです。もう 1 つは container が自ノードの uSID だけで構成されていた場合で、DA は shift されて uN SID まで縮んでいます。どちらも kernel が見る DA は自ノードの SID なので、書き換え済みのパケットを渡してよいのはここだけです。ただしこれは uN SID がノードのローカルアドレスとして設定されていることを前提にします。設定がないと kernel は locator prefix の経路でルーティングを試みます。
 
-例外が USD flavor です。SRH なしの container 終端で entry の flavor が USD、かつ inner が IPIP / IPv6 の tunnel payload なら、kernel に渡す代わりに outer IPv6 を剥がして inner パケットを FIB 転送します。H.Encaps.Red は単一 container のとき SRH を出さないため、SRH あり SL=0 を前提にした既存の USD 処理 (`endpoint_handle_usd`) はこの形を扱えず、ここが唯一の追加点です。decap ヘルパは tailcall 側 (`tailcall_endpoint.c`) にあるため、core は sentinel (`USID_RET_USD_NOSRH`) を返して判断だけを伝えます。uT では decap 後の FIB も VRF table になります。PSP と USP は pop すべき SRH が存在しないため、この経路では何もしません (SRH ありの終端では classic End への fall-through で 3 flavor とも従来どおり適用されます)。uA の USD は未対応です。End.X の USD は inner の FIB lookup でなく adjacency への転送であり、共有ヘルパでは意味が変わるためです。
+例外が USD flavor です。SRH なしの container 終端で entry の flavor が USD、かつ inner が IPIP / IPv6 の tunnel payload なら、kernel に渡す代わりに outer IPv6 を剥がして inner パケットを FIB 転送します。H.Encaps.Red は単一 container のとき SRH を出さないため、SRH あり SL=0 を前提にした既存の USD 処理 (`endpoint_handle_usd`) はこの形を扱えず、ここが唯一の追加点です。decap ヘルパは tailcall 側 (`tailcall_endpoint.c`) にあるため、core は sentinel (`USID_RET_USD_NOSRH`) を返して判断だけを伝えます。uT では decap 後の FIB も VRF table になります。PSP と USP は pop すべき SRH が存在しないため、この経路では何もしません (SRH ありの終端では classic End への fall-through で 3 flavor とも従来どおり適用されます)。uA の USD は adjacency 転送で decap します。RFC 8986 Sec.4.16.3 の End.X 系 USD は inner の FIB lookup でなく adjacency J への転送であり、外側パケットが残っているうちに nexthop の neighbor を解決して MAC を eth に書き (decap の eth 保存復元で生き残ります)、decap 後に redirect します。adjacency が未解決なら decap せず fail-closed で drop します。
 
 ## uT
 
@@ -259,9 +259,9 @@ RFC 9800 Sec.4.2 の REPLACE-CSID flavor を `SRV6_LOCAL_ACTION_END_REPLACE` (29
 - SID 構造は可変です。locator block は byte 境界の任意長、C-SID 長は 32 bit (RFC 必須) と 16 bit (任意) の 2 つをコンパイル時定数の 2 系統として実装し、aux の `csid_len_bytes` で選びます。block 長も aux (`block_len_bytes`) にあり、block + C-SID は 120 bit 以下 (index の byte 15 を prefix の外に残すため)
 - trigger prefix は block + C-SID です。C-SID 0 は container 終端の予約値なので登録を拒否します
 - terminal 条件 (S02) は「SL==0 かつ (Index==0 または SegList[0][Index-1]==0)」で、SL==0 だけでは終端になりません。列の最終 C-SID は任意の behavior でよく、DA の argument bit が変動するため /128 でなく block + C-SID の prefix で登録して受けます
-- flavor は entry.Flavor をそのまま使います。PSP は RFC 9800 Sec.4.2.8 の 2 挿入点 (R09 の後は素の SL==0、R20 の後は R20.1 の複合条件)、USP/USD は S02 terminal で既存の SL=0 handler を呼びます。SRH なし (reduced encap) の bare SID は uN と同じ USD decap 経路に乗ります (End.X(REP) は uA と同じく kernel 渡し)
+- flavor は entry.Flavor をそのまま使います。PSP は RFC 9800 Sec.4.2.8 の 2 挿入点 (R09 の後は素の SL==0、R20 の後は R20.1 の複合条件)、USP/USD は S02 terminal で既存の SL=0 handler を呼びます。SRH なし (reduced encap) の bare SID も USD で decap します (End(REP) は inner の FIB 転送、End.X(REP) は uA と同じ adjacency 転送)
 - 転送は uN と同じ `usid_forward` です。End(REP) は置換後 DA の FIB (NO_NEIGH は kernel 渡し)、End.X(REP) は aux nexthop (fail-closed)
-- End.X(REP) の terminal USD は classic End.X と同じく decap 後の inner を FIB で転送します。RFC 8986 Sec.4.16.3 は adjacency J への転送を求めており、ここは classic 実装と共通の既知の差分です
+- End.X 系 (End.X / uA / End.X(REP)) の USD は SRH の有無に関わらず adjacency J へ転送します (RFC 8986 Sec.4.16.3)。SRH ありは `endpoint_handle_usd_nexthop`、SRH なしは `nosrh_decap_and_adj` で、どちらも外側パケットが残っているうちに adjacency を解決し、未解決なら decap せず drop します。露出する inner パケットの Hop Limit / TTL は redirect 前にここで 1 消費します (redirect は kernel の転送経路を通らないため)。FIB ベースの既存 decap 経路 (End.DT4 等) は inner の寿命を消費しない既存挙動のままで、これは別途の課題です
 - REPLACE には uN のような同一ノード連続 C-SID の loop 内消費はありません。shift でなく FIB 転送で次の C-SID に進む方式のため、連続する C-SID は異なるノードに置く前提です (RFC の想定どおり)
 
 ICMPv6 を生成しない点 (R03/R14 は silent drop) と、segment list の上限を max_LE でなく `MAX_SEGMENTS` とする点は codebase 全体の方針に合わせています。
@@ -284,7 +284,7 @@ headend は変更していません。H.Encaps.Red は segment が 1 つのと�
 
 ## 検証
 
-データプレーンの単体テストは `pkg/bpf/xdp_usid_test.go` (NEXT-C-SID) と `pkg/bpf/xdp_replace_test.go` (REPLACE-C-SID) です。`BPF_PROG_TEST_RUN` の環境では FIB が必ず失敗するため、戻り値だけでは正しい shift と guard による drop を区別できません。したがって出力パケットの DA と hop limit を直接 assert しています。
+データプレーンの単体テストは `pkg/bpf/xdp_usid_test.go` (NEXT-C-SID) と `pkg/bpf/xdp_replace_test.go` (REPLACE-C-SID) です。`BPF_PROG_TEST_RUN` の素の環境では FIB lookup が転送先を返さないため、戻り値だけでは正しい shift と guard による drop を区別できず、出力パケットの DA と hop limit を直接 assert しています。adjacency 転送の decap を実際に観測するテストだけは、veth pair と permanent neighbor entry を作って lookup を成功させ、redirect と宛先 MAC まで assert します。
 
 E2E の netns example は 6 本です。end-un / end-ua / end-udt4 は Linux kernel の seg6local を oracle にした 2 phase、end-ut と end-un-usd と end-replace は kernel に対応する native 実装がないため Vinbero 側で完結する検証です (uT: next-csid flavor は End / End.X のみ。USD: seg6local End は `flavors usd` を拒否します。REPLACE-CSID: seg6local に実装がありません)。
 
@@ -310,5 +310,5 @@ end-ua の router2 は terminal SID への経路を持たないので、uA が�
 - SR Policy の transport list を container へ自動 packing する処理はありません
 - `locator_ref` からの uN / uA / uT / REPLACE 登録はできません
 - flavor は単一値のみで、PSP+USP のような組合せは classic と同じく未対応です
-- uA の USD は未対応です (End.X の USD は adjacency への転送で、DA ベースの decap 転送とは別実装が必要です)
+- End.X 系の USP は classic 実装と同じく pop 後を DA ベースの FIB で転送します。RFC の厳密な読みでは adjacency 転送であり、ここは既知の差分です
 - SRH なし終端の USD は nexthdr が直接 IPIP / IPv6 の場合だけ decap します。Hop-by-Hop や Destination Options を挟むパケットは既存 dispatcher 全体の方針どおり extension header 非対応で、kernel への local delivery に fall through します (DA は自ノードの SID なので情報漏洩にはなりません)
