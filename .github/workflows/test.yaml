@@ -149,6 +149,9 @@ jobs:
           - end-an
           - end-un
           - end-ua
+          - end-un-usd
+          - end-ut
+          - end-udt4
           - headend-v4
           - headend-v6
           - headend-l2

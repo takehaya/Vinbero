@@ -73,6 +73,9 @@ sudo ./teardown.sh # クリーンアップ
 | `end-dx2v/` | End.DX2V | VLAN単位のL2クロスコネクト |
 | `end-un/` | uN | NEXT-C-SID の shift 転送 (RFC 9800、F3216) |
 | `end-ua/` | uA | NEXT-C-SID の shift + adjacency 転送 (RFC 9800、F3216) |
+| `end-ut/` | uT | NEXT-C-SID の shift + VRF table 転送 (RFC 9800、F3216) |
+| `end-udt4/` | uDT4 | container 最終 uSID の End.DT4 (zero-padded /128 の LPM 優先) |
+| `end-un-usd/` | uN + USD | SRH なし container 終端での outer decap |
 
 ### Headend Functions
 | ディレクトリ | 機能 | 説明 |
