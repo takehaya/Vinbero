@@ -222,6 +222,27 @@ static __always_inline int endpoint_strip_srh(struct endpoint_ctx *ectx)
     return 0;
 }
 
+// endpoint_strip_srh with a locally built context, for callers outside
+// the endpoint_common_processing pipeline. Only the fields
+// endpoint_strip_srh reads are meaningful; keep this the single place
+// that knows which those are.
+static __always_inline int endpoint_strip_srh_at(
+    struct xdp_md *ctx,
+    struct ipv6hdr *ip6h,
+    struct ipv6_sr_hdr *srh,
+    struct sid_function_entry *entry,
+    __u16 l3_offset)
+{
+    struct endpoint_ctx ectx;
+    ectx.ctx = ctx;
+    ectx.ip6h = ip6h;
+    ectx.srh = srh;
+    ectx.entry = entry;
+    ectx.data_end = (void *)(long)ctx->data_end;
+    ectx.l3_offset = l3_offset;
+    return endpoint_strip_srh(&ectx);
+}
+
 // Handle USD flavor: decapsulate inner packet at SL=0
 // Performs full decap (strip Eth+IPv6+SRH) and FIB redirect on inner packet
 static __always_inline int endpoint_handle_usd(
@@ -279,6 +300,12 @@ static __always_inline int endpoint_handle_usp(
     __u32 fib_ifindex,
     __u16 l3_offset)
 {
+    if (endpoint_strip_srh_at(ctx, ip6h, srh, entry, l3_offset) != 0) {
+        DEBUG_PRINT("USP: Failed to strip SRH\n");
+        return XDP_DROP;
+    }
+
+    DEBUG_PRINT("USP: Stripped SRH, FIB lookup on DA\n");
     struct endpoint_ctx ectx;
     ectx.ctx = ctx;
     ectx.ip6h = ip6h;
@@ -286,13 +313,6 @@ static __always_inline int endpoint_handle_usp(
     ectx.entry = entry;
     ectx.data_end = (void *)(long)ctx->data_end;
     ectx.l3_offset = l3_offset;
-
-    if (endpoint_strip_srh(&ectx) != 0) {
-        DEBUG_PRINT("USP: Failed to strip SRH\n");
-        return XDP_DROP;
-    }
-
-    DEBUG_PRINT("USP: Stripped SRH, FIB lookup on DA\n");
     return endpoint_fib_redirect(&ectx, fib_ifindex);
 }
 

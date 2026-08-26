@@ -831,6 +831,23 @@ func NewSidAuxUsidVrf(vrfIfindex uint32, blockLenBytes uint8) *SidAuxEntry {
 	return entry
 }
 
+// NewSidAuxReplace creates an aux entry for End/End.X with REPLACE-CSID:
+// nexthop at offset 0 (End.X only; all-zero for End), the byte-aligned
+// locator block length at offset 16, and the C-SID length (LNFL in bytes,
+// 4 or 2) at offset 17.
+func NewSidAuxReplace(nexthop [IPv6AddrLen]uint8, blockLenBytes, csidLenBytes uint8) *SidAuxEntry {
+	entry := NewSidAuxUsid(nexthop, blockLenBytes)
+	raw := (*[20]byte)(unsafe.Pointer(entry))
+	raw[17] = csidLenBytes
+	return entry
+}
+
+// SidAuxReplaceData reads the replace variant back out of an aux entry.
+func SidAuxReplaceData(entry *SidAuxEntry) (nexthop [IPv6AddrLen]uint8, blockLenBytes, csidLenBytes uint8) {
+	raw := (*[20]byte)(unsafe.Pointer(entry))
+	return entry.Nexthop.Nexthop, raw[16], raw[17]
+}
+
 // SidAuxL3VrfData extracts the VRF ifindex from the l3vrf variant.
 func SidAuxL3VrfData(entry *SidAuxEntry) uint32 {
 	return binary.NativeEndian.Uint32(entry.Nexthop.Nexthop[0:4])

@@ -39,6 +39,8 @@ enum srv6_local_action {
     SRV6_LOCAL_ACTION_END_UN = 26,           // uN: End with NEXT-C-SID (RFC 9800 Sec.4.1.1)
     SRV6_LOCAL_ACTION_END_UA = 27,           // uA: End.X with NEXT-C-SID (RFC 9800 Sec.4.1.2)
     SRV6_LOCAL_ACTION_END_UT = 28,           // uT: End.T with NEXT-C-SID (RFC 9800 Sec.4.1.3)
+    SRV6_LOCAL_ACTION_END_REPLACE = 29,      // End with REPLACE-CSID (RFC 9800 Sec.4.2.1)
+    SRV6_LOCAL_ACTION_END_X_REPLACE = 30,    // End.X with REPLACE-CSID (RFC 9800 Sec.4.2.2)
 };
 
 // ========== SRv6 Local Flavor ==========

@@ -71,6 +71,8 @@ static __always_inline int process_srv6_decap_nosrh(
     if (entry->action != SRV6_LOCAL_ACTION_END_UN &&
         entry->action != SRV6_LOCAL_ACTION_END_UA &&
         entry->action != SRV6_LOCAL_ACTION_END_UT &&
+        entry->action != SRV6_LOCAL_ACTION_END_REPLACE &&
+        entry->action != SRV6_LOCAL_ACTION_END_X_REPLACE &&
         nh != IPPROTO_IPIP && nh != IPPROTO_IPV6 && nh != IPPROTO_ETHERNET)
         return XDP_PASS;
 
