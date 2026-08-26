@@ -66,7 +66,7 @@
 | Function             | Status      | Description                                                 | Reference |
 |----------------------|-------------|-------------------------------------------------------------|-----------|
 | NEXT-CSID            | Partial     | uN / uA / uT + terminal uDT*/uDX* via /128, F3216 only      | RFC 9800 |
-| REPLACE-CSID         |             | Compressed SID with replace-based encoding                  | RFC 9800 |
+| REPLACE-CSID         | Partial     | End / End.X, 32/16-bit C-SIDs, single flavor                | RFC 9800 |
 | End.LBS              |             | Locator-Block Swap                                          | RFC 9800 |
 | End.XLBS             |             | L3 cross-connect and Locator-Block Swap                     | RFC 9800 |
 
@@ -79,6 +79,8 @@ NEXT-C-SID の実装範囲は次のとおりです。設計と運用上の注意
 - trigger prefix は uSID 専用にしてください。prefix 内のアドレスは uN / uA / uT SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます
 - 登録は trigger prefix の明示指定のみで、locator_ref からの登録には未対応です
 - BGP からの uSID service SID の送受信と、第三者実装との interop は未着手です
+
+REPLACE-CSID は End / End.X を実装しています (`SRV6_LOCAL_ACTION_END_REPLACE` / `END_X_REPLACE`)。C-SID 長は 32 bit (必須) と 16 bit (任意)、locator block は byte 境界の任意長で、trigger prefix は block + C-SID です。列の最終 C-SID は任意の behavior を block + C-SID の prefix で登録して受けます (`examples/end-replace/` 参照)。End.T/End.B6/End.BM への REPLACE 適用と locator / BGP 統合は未着手です。
 
 ### Service programming (draft)
 

@@ -183,6 +183,8 @@ func populateProgArrays(objs *BpfObjects) error {
 		26: objs.TailcallEndpointEndUn,
 		27: objs.TailcallEndpointEndUa,
 		28: objs.TailcallEndpointEndUt,
+		29: objs.TailcallEndpointEndReplace,
+		30: objs.TailcallEndpointEndX_replace,
 	}
 	for idx, prog := range endpointProgs {
 		if err := objs.SidEndpointProgs.Update(idx, prog, ebpf.UpdateAny); err != nil {

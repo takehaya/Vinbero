@@ -434,7 +434,8 @@ struct sid_aux_entry {
             char service_name[64];   // null-terminated ASCII
         } an_meta;                                         // 64 bytes
 
-        // uN / uA / uT (NEXT-C-SID, RFC 9800): shift parameters. nexthop
+        // uN / uA / uT (NEXT-C-SID) and End/End.X with REPLACE-CSID
+        // (RFC 9800): shift/replace parameters. nexthop
         // sits at offset 0 with the same layout as the nexthop variant so
         // uA's classic End.X fall-through reads either view. uT reuses the
         // same aliasing the other way: it has no nexthop, so the control
@@ -442,10 +443,13 @@ struct sid_aux_entry {
         // data plane reads it through the l3vrf view (uN leaves them zero,
         // which is l3vrf's ingress fallback). block_len_bytes is the
         // locator block length in bytes (LBL/8; F3216 => 4).
+        // csid_len_bytes is the REPLACE-CSID LNFL in bytes (4 mandatory,
+        // 2 optional; zero for the NEXT-C-SID behaviors, which fix it).
         struct {
             __u8 nexthop[IPV6_ADDR_LEN];
             __u8 block_len_bytes;
-            __u8 _pad[3];
+            __u8 csid_len_bytes;
+            __u8 _pad[2];
         } usid;                                            // 20 bytes
 
         // Plugin-defined raw payload. Sized larger than every behavior
