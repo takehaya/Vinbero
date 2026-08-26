@@ -162,7 +162,7 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 		return err
 	}
 	replacesUsidClaim := hadUsidClaim &&
-		v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA
+		!usidClaimAction(v1.Srv6LocalAction(entry.Action))
 
 	// Capture the circuit the existing entry for this trigger_prefix (if
 	// any) already owns. CreateSidFunction is an upsert, so a re-create
@@ -289,24 +289,50 @@ func (s *SidFunctionServer) resolveLocatorRef(sidFunc *v1.SidFunction) error {
 	return nil
 }
 
-// claimUsidFunction reserves a uA entry's function CSID in the uSID
-// locator that owns its prefix, and returns the release for the failure
-// path. uN needs no claim: its prefix is the locator prefix itself and
-// carries no function.
+// parseIPv6Nexthop validates a nexthop that feeds an AF_INET6
+// bpf_fib_lookup: the empty string (zero address) and IPv4 literals
+// (which net.ParseIP would map to ::ffff:0:0/96) are both rejected, so a
+// create-time error never becomes a per-packet NO_NEIGH failure.
+func parseIPv6Nexthop(who, raw string) ([16]uint8, error) {
+	nh, err := netip.ParseAddr(raw)
+	if err != nil || !nh.Is6() || nh.Is4In6() || nh.IsUnspecified() {
+		return [16]uint8{}, fmt.Errorf("%s requires an IPv6 nexthop, got %q", who, raw)
+	}
+	return nh.As16(), nil
+}
+
+// usidClaimAction reports whether an action participates in the uSID
+// function-CSID claim: uA (/64 inside an F3216 locator), and the
+// REPLACE-CSID behaviors, whose block + C-SID prefix can equally cover a
+// locator's function space. For REPLACE only a /64-shaped SID engages
+// (anything longer fails the locator's ParseSID zero-tail check and is
+// skipped); the claim is keyed on the locator's own 16-bit function
+// field, which is conservative for 32-bit C-SIDs.
+func usidClaimAction(a v1.Srv6LocalAction) bool {
+	return a == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA ||
+		a == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE ||
+		a == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE
+}
+
+// claimUsidFunction reserves the entry's function CSID in the uSID
+// locator that owns its prefix (uA and the /64-shaped REPLACE behaviors;
+// see usidClaimAction), and returns the release for the failure path. uN
+// needs no claim: its prefix is the locator prefix itself and carries no
+// function.
 //
 // Without the claim the allocator would still consider that CSID free and
 // hand it to a service SID (`vbctl sid add --locator-ref LOC --function
-// 0xc001`). The resulting /128 wins the LPM match over the uA /64 for the
-// terminal DA, so the uA's End.X fall-through would be silently replaced
-// by the service behavior -- a data-plane mis-forward with no error at
-// registration time.
+// 0xc001`). The resulting /128 wins the LPM match over the claiming /64
+// for the terminal DA, so the End.X fall-through (or the REPLACE walk)
+// would be silently replaced by the service behavior -- a data-plane
+// mis-forward with no error at registration time.
 //
-// A missing locator is not an error: a uA registered outside any uSID
-// locator has no allocator to collide with.
+// A missing locator is not an error: an entry registered outside any
+// uSID locator has no allocator to collide with.
 func (s *SidFunctionServer) claimUsidFunction(sidFunc *v1.SidFunction) (func(), error) {
 	noop := func() {}
 	if s.locatorMgr == nil ||
-		v1.Srv6LocalAction(sidFunc.GetAction()) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+		!usidClaimAction(v1.Srv6LocalAction(sidFunc.GetAction())) {
 		return noop, nil
 	}
 	// protoToEntry already validated the prefix shape, so anything that
@@ -334,7 +360,7 @@ func (s *SidFunctionServer) claimUsidFunction(sidFunc *v1.SidFunction) (func(), 
 		} else if ours {
 			return noop, nil
 		}
-		return noop, fmt.Errorf("uA function CSID 0x%04x in locator %q: %w", fn, loc.Name, err)
+		return noop, fmt.Errorf("function CSID 0x%04x in locator %q: %w", fn, loc.Name, err)
 	}
 	return func() { s.locatorMgr.ReleaseSID(sid) }, nil
 }
@@ -396,7 +422,7 @@ func (s *SidFunctionServer) usidClaimOwner(addr netip.Addr) (netip.Prefix, bool,
 		return netip.Prefix{}, false, fmt.Errorf("list SID functions: %w", err)
 	}
 	for p, entry := range entries {
-		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+		if !usidClaimAction(v1.Srv6LocalAction(entry.Action)) {
 			continue
 		}
 		got, err := netip.ParsePrefix(p)
@@ -593,9 +619,19 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		switch v1.Srv6LocalAction(sidFunc.Action) {
 		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT:
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
 		default:
-			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA / END_UT")
+			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA / END_UT / END_REPLACE / END_X_REPLACE")
+		}
+	}
+	if sidFunc.CsidLen != nil {
+		switch v1.Srv6LocalAction(sidFunc.Action) {
+		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+		default:
+			return nil, nil, fmt.Errorf("csid_len is only valid for END_REPLACE / END_X_REPLACE")
 		}
 	}
 	// The C side stores the flavor as a u8 scalar; reject unknown enum
@@ -716,15 +752,10 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			if fn16[6] == 0 && fn16[7] == 0 {
 				return nil, nil, fmt.Errorf("uA function CSID must be non-zero (0 is the container terminator)")
 			}
-			// The uA nexthop feeds an AF_INET6 FIB lookup, so it must be a
-			// genuine IPv6 address: the empty string (zero address) and
-			// IPv4 literals (which net.ParseIP would map to ::ffff:0:0/96)
-			// are both rejected.
-			nh, err := netip.ParseAddr(sidFunc.Nexthop)
-			if err != nil || !nh.Is6() || nh.Is4In6() || nh.IsUnspecified() {
-				return nil, nil, fmt.Errorf("uA requires an IPv6 nexthop, got %q", sidFunc.Nexthop)
+			var err error
+			if nexthop, err = parseIPv6Nexthop("uA", sidFunc.Nexthop); err != nil {
+				return nil, nil, err
 			}
-			nexthop = nh.As16()
 		} else {
 			// uN and uT share the /48 node-SID shape (RFC 9800 Sec.4.1.3:
 			// uT differs from uN only in the bound FIB table).
@@ -757,6 +788,60 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			}
 			aux = bpf.NewSidAuxUsid(nexthop, uint8(blockLen/8))
 		}
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+		if sidFunc.LocatorRef != nil {
+			return nil, nil, fmt.Errorf("locator_ref is not supported for REPLACE-CSID yet; set trigger_prefix explicitly")
+		}
+		if sidFunc.VrfName != "" {
+			return nil, nil, fmt.Errorf("END_REPLACE / END_X_REPLACE do not take a vrf_name")
+		}
+		if sidFunc.UsidBlockLen == nil {
+			return nil, nil, fmt.Errorf("REPLACE-CSID requires usid_block_len (the locator block length in bits)")
+		}
+		blockLen := *sidFunc.UsidBlockLen
+		csidLen := uint32(32)
+		if sidFunc.CsidLen != nil {
+			csidLen = *sidFunc.CsidLen
+		}
+		if csidLen != 32 && csidLen != 16 {
+			return nil, nil, fmt.Errorf("csid_len %d is not supported (RFC 9800: 32 or 16)", csidLen)
+		}
+		// The data plane writes the C-SID at [block..block+csid) and keeps
+		// the index bits in the last byte, so both must be byte-aligned
+		// and leave that byte free.
+		if blockLen == 0 || blockLen%8 != 0 || blockLen+csidLen > 120 {
+			return nil, nil, fmt.Errorf("usid_block_len %d is invalid for REPLACE-CSID (byte-aligned, block + csid_len <= 120)", blockLen)
+		}
+		p, err := netip.ParsePrefix(sidFunc.TriggerPrefix)
+		if err != nil {
+			return nil, nil, fmt.Errorf("trigger_prefix: %w", err)
+		}
+		if p.Bits() != int(blockLen+csidLen) {
+			return nil, nil, fmt.Errorf("REPLACE-CSID trigger_prefix must be /%d (block + csid), got /%d", blockLen+csidLen, p.Bits())
+		}
+		// C-SID 0 is the reserved container terminator (RFC 9800 Sec.5).
+		p16 := p.Masked().Addr().As16()
+		csidZero := true
+		for i := blockLen / 8; i < (blockLen+csidLen)/8; i++ {
+			if p16[i] != 0 {
+				csidZero = false
+			}
+		}
+		if csidZero {
+			return nil, nil, fmt.Errorf("REPLACE-CSID C-SID must be non-zero (0 is the container terminator)")
+		}
+		var nexthop [16]uint8
+		if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE {
+			var err error
+			if nexthop, err = parseIPv6Nexthop("END_X_REPLACE", sidFunc.Nexthop); err != nil {
+				return nil, nil, err
+			}
+		} else if sidFunc.Nexthop != "" {
+			return nil, nil, fmt.Errorf("END_REPLACE does not take a nexthop (use END_X_REPLACE)")
+		}
+		aux = bpf.NewSidAuxReplace(nexthop, uint8(blockLen/8), uint8(csidLen/8))
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 		// DX2 stores OIF as uint32 in first 4 bytes of aux nexthop
@@ -1165,6 +1250,17 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 					sf.VrfName = ifindexToName(bpf.SidAuxL3VrfData(aux))
 				}
 
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+				nexthop, blockLenBytes, csidLenBytes := bpf.SidAuxReplaceData(aux)
+				blockLen := uint32(blockLenBytes) * 8
+				csidLen := uint32(csidLenBytes) * 8
+				sf.UsidBlockLen = &blockLen
+				sf.CsidLen = &csidLen
+				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE {
+					sf.Nexthop = bpf.FormatIPv6(nexthop)
+				}
+
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 				sf.Oif = binary.NativeEndian.Uint32(aux.Nexthop.Nexthop[:4])
 
@@ -1285,7 +1381,8 @@ func (s *SidFunctionServer) buildPolicyEntry(sidFunc *v1.SidFunction) (*bpf.Head
 }
 
 // AddLocatorAndClaim registers loc and, in the same critical section,
-// claims the function CSID of every uA already installed inside it.
+// claims the function CSID of every claiming entry (uA, and /64-shaped
+// REPLACE-CSID entries) already installed inside it.
 //
 // Registration order is not fixed: uN and uA are registered by explicit
 // trigger_prefix and may well exist before the locator covering their block
@@ -1333,7 +1430,7 @@ func (s *SidFunctionServer) reconcileUsidClaimsLocked(loc locator.Locator) ([]ne
 		return claimed, fmt.Errorf("list SID functions: %w", err)
 	}
 	for prefix, entry := range entries {
-		if v1.Srv6LocalAction(entry.Action) != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
+		if !usidClaimAction(v1.Srv6LocalAction(entry.Action)) {
 			continue
 		}
 		p, err := netip.ParsePrefix(prefix)
@@ -1351,7 +1448,7 @@ func (s *SidFunctionServer) reconcileUsidClaimsLocked(loc locator.Locator) ([]ne
 			continue
 		}
 		if _, _, err := s.locatorMgr.AllocateSID(loc.Name, &fn); err != nil {
-			return claimed, fmt.Errorf("uA %s holds function CSID 0x%04x in locator %q: %w",
+			return claimed, fmt.Errorf("%s holds function CSID 0x%04x in locator %q: %w",
 				prefix, fn, loc.Name, err)
 		}
 		claimed = append(claimed, sid)

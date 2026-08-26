@@ -90,11 +90,19 @@ message SidFunction {
   // (up to 63 ASCII characters). SidFunctionList then doubles as the
   // service registration point for NF discovery.
   optional string service_name = 28;
-  // uN / uA (NEXT-C-SID, RFC 9800): locator block length in bits. Only
-  // the F3216 structure (32) is supported today; omitted defaults to 32.
-  // The trigger_prefix must cover exactly block + node for uN (e.g. /48)
-  // and block + node + function for uA (e.g. /64); uA reuses nexthop.
+  // uN / uA / uT (NEXT-C-SID, RFC 9800): locator block length in bits.
+  // Only the F3216 structure (32) is supported today; omitted defaults to
+  // 32. The trigger_prefix must cover exactly block + node for uN / uT
+  // (e.g. /48) and block + node + function for uA (e.g. /64); uA reuses
+  // nexthop. For END_REPLACE / END_X_REPLACE this is the REPLACE-CSID
+  // locator block length instead: required, byte-aligned, and
+  // block + csid_len must not exceed 120 bits.
   optional uint32 usid_block_len = 29;
+
+  // END_REPLACE / END_X_REPLACE (RFC 9800 Sec.4.2): the C-SID length
+  // (LNFL) in bits, 32 (default) or 16. The trigger_prefix must cover
+  // exactly block + C-SID; END_X_REPLACE reuses nexthop.
+  optional uint32 csid_len = 30;
 }
 
 message SidFunctionCreateRequest {

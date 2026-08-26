@@ -404,6 +404,52 @@ int tailcall_endpoint_end_ut(struct xdp_md *ctx)
     TAILCALL_RETURN(ctx,action);
 }
 
+// End / End.X with REPLACE-CSID (RFC 9800 Sec.4.2). The csid length
+// (LNFL) comes from the aux and selects one of two constant-folded core
+// variants; everything else mirrors the uN/uT shape, including the USD
+// no-SRH sentinel for End (End.X keeps XDP_PASS there, like uA).
+static __always_inline int end_replace_tailcall(struct xdp_md *ctx, int is_endx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) return XDP_DROP;
+    // Open-coded TAILCALL_BOUND_L3OFF: that macro returns through the
+    // epilogue, which the SEC wrappers below already apply once.
+    __u16 l3_off = tctx->l3_offset;
+    if (l3_off > 22) return XDP_DROP;
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux)
+        return XDP_DROP;
+
+    int action;
+    if (aux->usid.csid_len_bytes == 4)
+        action = CALL_WITH_CONST_L3(l3_off, process_end_replace_core, ctx,
+                                    &tctx->sid_entry, aux, is_endx, 4,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    else if (aux->usid.csid_len_bytes == 2)
+        action = CALL_WITH_CONST_L3(l3_off, process_end_replace_core, ctx,
+                                    &tctx->sid_entry, aux, is_endx, 2,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    else
+        return XDP_DROP;
+
+    if (action == USID_RET_USD_NOSRH)
+        return nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off);
+    return action;
+}
+
+SEC("xdp")
+int tailcall_endpoint_end_replace(struct xdp_md *ctx)
+{
+    TAILCALL_RETURN(ctx, end_replace_tailcall(ctx, 0));
+}
+
+SEC("xdp")
+int tailcall_endpoint_end_x_replace(struct xdp_md *ctx)
+{
+    TAILCALL_RETURN(ctx, end_replace_tailcall(ctx, 1));
+}
+
 SEC("xdp")
 int tailcall_endpoint_end_ua(struct xdp_md *ctx)
 {

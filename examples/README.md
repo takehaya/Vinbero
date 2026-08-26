@@ -76,6 +76,7 @@ sudo ./teardown.sh # クリーンアップ
 | `end-ut/` | uT | NEXT-C-SID の shift + VRF table 転送 (RFC 9800、F3216) |
 | `end-udt4/` | uDT4 | container 最終 uSID の End.DT4 (zero-padded /128 の LPM 優先) |
 | `end-un-usd/` | uN + USD | SRH なし container 終端での outer decap |
+| `end-replace/` | End(REP) | REPLACE-CSID の container walk (RFC 9800、32bit C-SID) |
 
 ### Headend Functions
 | ディレクトリ | 機能 | 説明 |
