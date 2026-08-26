@@ -597,6 +597,18 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA")
 		}
 	}
+	// The C side stores the flavor as a u8 scalar; reject unknown enum
+	// values here, or a value congruent to a known one modulo 256 (260,
+	// -252) would silently alias to it through the cast below.
+	switch sidFunc.Flavor {
+	case v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_UNSPECIFIED,
+		v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_NONE,
+		v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_PSP,
+		v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_USP,
+		v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_USD:
+	default:
+		return nil, nil, fmt.Errorf("unknown flavor %d", sidFunc.Flavor)
+	}
 	entry := &bpf.SidFunctionEntry{
 		Action: uint8(sidFunc.Action),
 		Flavor: uint8(sidFunc.Flavor),

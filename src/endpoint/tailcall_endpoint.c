@@ -47,6 +47,29 @@ static __always_inline int nosrh_fib_v6(
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
 
+// Shared no-SRH tunnel decap: strip the outer IPv6 (no SRH on the wire)
+// and forward the inner packet by FIB. aux selects the VRF through its
+// leading bytes (the l3vrf view), falling back to the ingress interface.
+// Callers must not derive ip6h before this runs (see the End.AS note:
+// clang would elide the decap helper's own eth bounds check and the
+// verifier rejects it).
+static __always_inline int nosrh_decap_and_fib(struct xdp_md *ctx,
+                                               struct sid_aux_entry *aux,
+                                               __u8 nh, __u16 l3_off)
+{
+    if (nh == IPPROTO_IPIP) {
+        if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
+            return XDP_DROP;
+        return nosrh_fib_v4(ctx, aux);
+    }
+    if (nh == IPPROTO_IPV6) {
+        if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
+            return XDP_DROP;
+        return nosrh_fib_v6(ctx, aux);
+    }
+    return XDP_DROP;
+}
+
 // ========== Pattern A: localsid-only actions ==========
 
 DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end, process_end)
@@ -219,20 +242,8 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
 
-    if (tctx->dispatch_type == DISPATCH_NOSRH) {
-        __u8 nh = tctx->inner_proto;
-        if (nh == IPPROTO_IPIP) {
-            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
-                TAILCALL_RETURN(ctx,XDP_DROP);
-            TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux));
-        }
-        if (nh == IPPROTO_IPV6) {
-            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
-                TAILCALL_RETURN(ctx,XDP_DROP);
-            TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux));
-        }
-        TAILCALL_RETURN(ctx,XDP_DROP);
-    }
+    if (tctx->dispatch_type == DISPATCH_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
 
     struct ethhdr *eth;
     struct ipv6hdr *ip6h;
@@ -361,6 +372,11 @@ int tailcall_endpoint_end_un(struct xdp_md *ctx)
     int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
                                     &tctx->sid_entry, tctx->dispatch_type,
                                     tctx->inner_proto);
+    // USD on a no-SRH container that ends here: same decap shape as
+    // End.DT46's nosrh branch. The uN aux has no VRF, so nosrh_fib_*
+    // falls back to the ingress ifindex.
+    if (action == USID_RET_USD_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
     TAILCALL_RETURN(ctx,action);
 }
 

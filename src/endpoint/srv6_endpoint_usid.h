@@ -68,6 +68,10 @@
 // An F3216 container carries at most 6 uSIDs, so at most 5 shifts can
 // resolve to this same node before the Argument must hit zero.
 #define USID_SHIFT_MAX 5
+// Sentinel returned by the uN/uT cores instead of an XDP action (0..4)
+// when a no-SRH container ends here with the USD flavor: the tailcall
+// body owns the decap helpers, so the core only signals the decision.
+#define USID_RET_USD_NOSRH 0x7f
 
 // The Argument starts where the matched SID ends: byte 6 for uN
 // (LBL+LNL = /48) and byte 8 for uA (LBL+LNL+FL = /64). arg_off is a
@@ -248,6 +252,15 @@ static __always_inline int process_end_un_core(
 
     // Argument == 0: the container ends here.
     if (dispatch_type == DISPATCH_NOSRH) {
+        // USD at the end of a reduced-encaps container (H.Encaps.Red with
+        // a single container emits no SRH): decap the outer IPv6 and
+        // forward the inner packet, exactly what endpoint_handle_usd does
+        // on the SRH path at SL=0. Only tunnelled payloads qualify; for
+        // anything else USD has nothing to decap and falls through to the
+        // upper-layer delivery below.
+        if (entry->flavor == SRV6_LOCAL_FLAVOR_USD &&
+            (inner_proto == IPPROTO_IPIP || inner_proto == IPPROTO_IPV6))
+            return USID_RET_USD_NOSRH;
         // No SRH and nothing left to consume, so this is classic End with
         // no segment list: RFC 8986 Sec.4.1 hands the packet to the upper
         // layer, i.e. to the kernel. Two shapes reach this point.
@@ -305,6 +318,11 @@ static __always_inline int process_end_ua_core(
     // Nothing was shifted on this path (uA returns above whenever it
     // shifts), so the DA is the bare uA SID and the packet is unmodified:
     // classic End.X with no segment list, handed to the kernel.
+    // No USD decap here, unlike uN. End.X's USD forwards the decapped
+    // packet over the adjacency, not by a FIB lookup on the inner DA, so
+    // nosrh_fib_* is the wrong primitive (and it would misread the
+    // leading bytes of the uA nexthop as a VRF ifindex). A nexthop-keyed
+    // decap forward is needed if uA+USD ever becomes a requirement.
     if (dispatch_type == DISPATCH_NOSRH)
         return XDP_PASS;
 
