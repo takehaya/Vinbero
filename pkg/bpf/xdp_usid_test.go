@@ -3,7 +3,9 @@ package bpf
 import (
 	"net"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -525,6 +527,27 @@ func TestXDPProgEndUtNoNeighFailsClosed(t *testing.T) {
 	})
 }
 
+// fatalNoRedirect reports a failed adjacency redirect together with a
+// snapshot of every fixture precondition. The adjacency tests fail
+// nondeterministically on shared CI runners and only there; the snapshot
+// tells which precondition (forwarding sysctl, carrier, route, neighbour)
+// was broken from outside the test when it happens.
+func fatalNoRedirect(t *testing.T, ret uint32) {
+	t.Helper()
+	fwd, _ := os.ReadFile("/proc/sys/net/ipv6/conf/all/forwarding")
+	state := "?"
+	var routes []netlink.Route
+	var neighs []netlink.Neigh
+	if link, err := netlink.LinkByName("uadj-a"); err == nil {
+		state = link.Attrs().OperState.String()
+		routes, _ = netlink.RouteGet(net.ParseIP("fd00:ad::2"))
+		neighs, _ = netlink.NeighList(link.Attrs().Index, netlink.FAMILY_V6)
+	}
+	t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d\n"+
+		"  all/forwarding=%q uadj-a=%s routes=%v neighs=%v",
+		ret, strings.TrimSpace(string(fwd)), state, routes, neighs)
+}
+
 // adjacencyEnv creates a veth pair with a permanently resolved neighbour
 // so bpf_fib_lookup on the nexthop returns SUCCESS: the only way to see
 // an End.X-family USD actually decap and redirect under
@@ -547,7 +570,19 @@ func adjacencyEnv(t *testing.T) (net.IP, net.HardwareAddr) {
 			t.Cleanup(func() { _ = os.WriteFile(fwd, prev, 0) })
 		}
 	}
-	vethA := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "uadj-a"}, PeerName: "uadj-b"}
+	// Explicit MACs: systemd-udevd's default MACAddressPolicy=persistent
+	// rewrites a kernel-assigned (addr_assign_type=random) veth MAC tens
+	// of milliseconds after creation, and NETDEV_CHANGEADDR flushes the
+	// device's whole neighbour table -- silently deleting the permanent
+	// neighbour this fixture depends on. An explicitly set MAC
+	// (addr_assign_type=set) is left alone.
+	macA, _ := net.ParseMAC("02:ad:00:00:00:0a")
+	macB, _ := net.ParseMAC("02:ad:00:00:00:0b")
+	vethA := &netlink.Veth{
+		LinkAttrs:        netlink.LinkAttrs{Name: "uadj-a", HardwareAddr: macA},
+		PeerName:         "uadj-b",
+		PeerHardwareAddr: macB,
+	}
 	if err := netlink.LinkAdd(vethA); err != nil {
 		t.Skipf("cannot create veth pair: %v", err)
 	}
@@ -580,6 +615,33 @@ func adjacencyEnv(t *testing.T) (net.IP, net.HardwareAddr) {
 	}); err != nil {
 		t.Fatalf("neigh add: %v", err)
 	}
+	// A veth reaches carrier and installs its connected /64 route
+	// asynchronously after LinkSetUp; on a loaded CI runner the test can
+	// win that race and bpf_fib_lookup then answers with no usable
+	// nexthop, turning the fail-closed drop into a spurious FAIL. Wait
+	// until the kernel FIB actually resolves the nexthop via the veth.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		link, err := netlink.LinkByName("uadj-a")
+		operUp := err == nil && link.Attrs().OperState == netlink.OperUp
+		routes, err := netlink.RouteGet(nexthop)
+		routed := err == nil && len(routes) > 0 &&
+			routes[0].LinkIndex == linkA.Attrs().Index
+		neighs, _ := netlink.NeighList(linkA.Attrs().Index, netlink.FAMILY_V6)
+		neighed := false
+		for _, n := range neighs {
+			if n.IP.Equal(nexthop) && n.State&netlink.NUD_PERMANENT != 0 {
+				neighed = true
+			}
+		}
+		if operUp && routed && neighed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("adjacency fixture not ready: operUp=%t routed=%t neighed=%t", operUp, routed, neighed)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	return nexthop, mac
 }
 
@@ -601,7 +663,7 @@ func TestXDPProgEndUaUSDNoSrhAdjacency(t *testing.T) {
 	}
 	ret, out := h.run(pkt)
 	if ret != XDP_REDIRECT {
-		t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+		fatalNoRedirect(t, ret)
 	}
 	if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
 		t.Errorf("inner DA = %v, want %v (outer stripped)", got, want)
@@ -664,7 +726,7 @@ func TestXDPProgEndXUSDAdjacency(t *testing.T) {
 		}
 		ret, out := h.run(pkt)
 		if ret != XDP_REDIRECT {
-			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+			fatalNoRedirect(t, ret)
 		}
 		if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
 			t.Errorf("inner DA = %v, want %v", got, want)
@@ -683,7 +745,7 @@ func TestXDPProgEndXUSDAdjacency(t *testing.T) {
 		}
 		ret, out := h.run(pkt)
 		if ret != XDP_REDIRECT {
-			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+			fatalNoRedirect(t, ret)
 		}
 		if !verifyEtherType(t, out, 0x0800) {
 			t.Errorf("expected EtherType IPv4 after decap")
@@ -705,7 +767,7 @@ func TestXDPProgEndXUSDAdjacency(t *testing.T) {
 		}
 		ret, out := h.run(pkt)
 		if ret != XDP_REDIRECT {
-			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+			fatalNoRedirect(t, ret)
 		}
 		if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
 			t.Errorf("eth dst = %v, want %v", got, mac)
@@ -721,7 +783,7 @@ func TestXDPProgEndXUSDAdjacency(t *testing.T) {
 		}
 		ret, out := h.run(pkt)
 		if ret != XDP_REDIRECT {
-			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+			fatalNoRedirect(t, ret)
 		}
 		if !verifyEtherType(t, out, 0x0800) {
 			t.Errorf("expected EtherType IPv4 after decap")
