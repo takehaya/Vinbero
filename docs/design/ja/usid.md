@@ -268,6 +268,15 @@ ICMPv6 を生成しない点 (R03/R14 は silent drop) と、segment list の上
 
 verifier の教訓を 2 つ helper に焼き込んでいます。値の範囲チェックを clang が subtract-and-mask 形に書き換えると元 register が narrow されないので、block 長は使用直前に mask してから比較します。また可変 offset の packet pointer は、固定 offset で行った data_end チェックを引き継がないため、導出した pointer 自身を data_end と比較します。
 
+## End.LBS / End.XLBS (Locator-Block Swap)
+
+RFC 9800 Sec.7 の Locator-Block Swap を、NEXT-C-SID (Sec.7.1.1 / 7.2.1) と REPLACE-CSID (Sec.7.1.2 / 7.2.2) の両 flavor で実装しています。routing domain の境界で、残りの C-SID 列を target block B2/m の上へ載せ替える behavior です。
+
+- 新しい tail call slot は使いません。target block は aux の usid variant に追加した local property (`target_block[16]` + byte 単位の長さ) で、非ゼロなら uN / uA / End(REP) / End.X(REP) の advance が in place でなく target block 上に新 DA を合成します。API の 4 action (`END_LBS` / `END_XLBS` / `END_LBS_REPLACE` / `END_XLBS_REPLACE`、enum 値は plugin action 範囲を避けて 100 番台) は登録時に base action へ写像され、List は aux から逆写像して返します
+- NEXT 系は N05-N06 の置換です。A = B2 とし、DA の Argument を A の bits [m..m+AL-1] へ copy して DA にします。terminal (Argument ゼロ) は無変更で、swap 後は同一 entry に再 match しないため、新 block 側の local SID は既存の re-dispatch が拾います
+- REPLACE 系は R20 の置換です。A = B2 に C-SID を [m..m+LNFL-1]、index を下位 bit に書き、旧 Argument は持ち越しません。stack 上で合成して固定 offset の 16 byte copy 1 回で書くため、可変 offset の packet write は発生しません
+- m は byte 境界で、NEXT では m <= base SID の block+node(+function) 幅、REPLACE では m + LNFL/8 <= 15 (index byte を残す) を登録時に検証します。target の m より後ろの bit はゼロであることも検証します
+
 ## headend 側
 
 headend は変更していません。H.Encaps.Red は segment が 1 つのとき SRH なしの encap を出すので、pre-packed の container を segment list として渡せばそのまま uSID のパケットになります。SR Policy の transport list を container へ自動 packing する処理は未実装です。
@@ -284,9 +293,9 @@ headend は変更していません。H.Encaps.Red は segment が 1 つのと�
 
 ## 検証
 
-データプレーンの単体テストは `pkg/bpf/xdp_usid_test.go` (NEXT-C-SID) と `pkg/bpf/xdp_replace_test.go` (REPLACE-C-SID) です。`BPF_PROG_TEST_RUN` の素の環境では FIB lookup が転送先を返さないため、戻り値だけでは正しい shift と guard による drop を区別できず、出力パケットの DA と hop limit を直接 assert しています。adjacency 転送の decap を実際に観測するテストだけは、veth pair と permanent neighbor entry を作って lookup を成功させ、redirect と宛先 MAC まで assert します。
+データプレーンの単体テストは `pkg/bpf/xdp_usid_test.go` (NEXT-C-SID)、`pkg/bpf/xdp_replace_test.go` (REPLACE-C-SID)、`pkg/bpf/xdp_lbs_test.go` (End.LBS / End.XLBS) です。`BPF_PROG_TEST_RUN` の素の環境では FIB lookup が転送先を返さないため、戻り値だけでは正しい shift と guard による drop を区別できず、出力パケットの DA と hop limit を直接 assert しています。adjacency 転送の decap を実際に観測するテストだけは、veth pair と permanent neighbor entry を作って lookup を成功させ、redirect と宛先 MAC まで assert します。
 
-E2E の netns example は 6 本です。end-un / end-ua / end-udt4 は Linux kernel の seg6local を oracle にした 2 phase、end-ut と end-un-usd と end-replace は kernel に対応する native 実装がないため Vinbero 側で完結する検証です (uT: next-csid flavor は End / End.X のみ。USD: seg6local End は `flavors usd` を拒否します。REPLACE-CSID: seg6local に実装がありません)。
+E2E の netns example は 7 本です。end-un / end-ua / end-udt4 は Linux kernel の seg6local を oracle にした 2 phase、end-ut と end-un-usd と end-replace と end-lbs は kernel に対応する native 実装がないため Vinbero 側で完結する検証です (uT: next-csid flavor は End / End.X のみ。USD: seg6local End は `flavors usd` を拒否します。REPLACE-CSID: seg6local に実装がありません)。
 
 | example | 対象 | Linux 側の設定 | kernel 要件 |
 |---|---|---|---|
@@ -296,6 +305,7 @@ E2E の netns example は 6 本です。end-un / end-ua / end-udt4 は Linux ker
 | `examples/end-ut/` | uT | oracle なし (main table blackhole で VRF lookup を証明) | VRF 対応 |
 | `examples/end-un-usd/` | uN + USD | oracle なし (到達自体が decap の証明) | - |
 | `examples/end-replace/` | End(REP) | oracle なし (2 台の Vinbero を 4 hop 往復する walk) | - |
+| `examples/end-lbs/` | End.LBS | oracle なし (block A を blackhole して swap を構造証明) | - |
 
 Linux の seg6local で 1 回の実行が消費する幅は `nflen` です。`lblen` は shift せずに残す locator block の長さで、SID の prefix 長は `lblen + nflen` になります。uA は node と function を同時に消費するので、prefix が /64 になる `nflen 32` が正しく、`nflen 16` は function CSID を DA に残す uN の形になります。
 
@@ -305,7 +315,7 @@ end-ua の router2 は terminal SID への経路を持たないので、uA が�
 
 - BGP 統合は未着手です。uSID locator からの service SID 送出と、受信した service SID からの encap source 導出が残っています。後者は `decodeRemoteSrc` が locator base を仮定している点に手を入れる必要があります
 - 第三者実装との interop シナリオはまだありません
-- End.LBS と End.XLBS は実装していません。REPLACE-C-SID は End / End.X のみで、End.T / End.B6 / End.BM への適用は未対応です
+- REPLACE-C-SID の End.T / End.B6 / End.BM への適用は未対応です
 - NEXT-C-SID は 32 bit uSID と F3216 以外の SID 構造に対応していません。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります (REPLACE-C-SID は block 可変・C-SID 32/16 に対応済みです)
 - SR Policy の transport list を container へ自動 packing する処理はありません
 - `locator_ref` からの uN / uA / uT / REPLACE 登録はできません

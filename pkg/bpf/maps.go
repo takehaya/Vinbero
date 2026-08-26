@@ -842,6 +842,29 @@ func NewSidAuxReplace(nexthop [IPv6AddrLen]uint8, blockLenBytes, csidLenBytes ui
 	return entry
 }
 
+// NewSidAuxUsidTarget adds an End.LBS/End.XLBS target block (RFC 9800
+// Sec.7) to a usid-variant aux entry: the 16-byte block (bits beyond the
+// length are zero) at offset 20 and its byte-aligned length at offset 36.
+func NewSidAuxUsidTarget(base *SidAuxEntry, targetBlock [IPv6AddrLen]uint8, targetLenBytes uint8) *SidAuxEntry {
+	// Enforce the contract here rather than trusting the caller: the data
+	// plane composes DAs from all 16 bytes, so anything beyond the block
+	// length must be zero.
+	for i := int(targetLenBytes); i < len(targetBlock) && i < 16; i++ {
+		targetBlock[i] = 0
+	}
+	raw := (*[40]byte)(unsafe.Pointer(base))
+	copy(raw[20:36], targetBlock[:])
+	raw[36] = targetLenBytes
+	return base
+}
+
+// SidAuxUsidTargetData reads the target block back out of an aux entry.
+func SidAuxUsidTargetData(entry *SidAuxEntry) (targetBlock [IPv6AddrLen]uint8, targetLenBytes uint8) {
+	raw := (*[40]byte)(unsafe.Pointer(entry))
+	copy(targetBlock[:], raw[20:36])
+	return targetBlock, raw[36]
+}
+
 // SidAuxReplaceData reads the replace variant back out of an aux entry.
 func SidAuxReplaceData(entry *SidAuxEntry) (nexthop [IPv6AddrLen]uint8, blockLenBytes, csidLenBytes uint8) {
 	raw := (*[20]byte)(unsafe.Pointer(entry))

@@ -89,6 +89,35 @@ static __always_inline int replace_write_csid(
     return 0;
 }
 
+// End.LBS / End.XLBS with REPLACE-CSID (RFC 9800 Sec.7.1.2 / 7.2.2):
+// R20 is replaced so the new DA is composed on the target block -- the
+// C-SID at [m..m+LNFL-1], the index in the low bits, everything else
+// B2's own bits (the old Argument is not carried over). Composed on the
+// stack and stored as one fixed-offset 16-byte copy.
+static __always_inline int replace_write_csid_lbs(
+    __u8 *da, const struct sid_aux_entry *aux, __u32 c, __u8 idx,
+    int csid_bytes, __u8 idx_mask)
+{
+    __u8 tmp[16];
+    __builtin_memcpy(tmp, aux->usid.target_block, 16);
+    // Raw value validated before the verifier mask (see usid_shift_lbs).
+    __u8 raw_m = aux->usid.target_block_len_bytes;
+    if (raw_m < 1 || raw_m > 15 - csid_bytes)
+        return -1;
+    __u8 m = raw_m;
+    // Same asm barrier as usid_shift_lbs: keep the & 0xf alive so the
+    // variable-offset stack write stays verifier-bounded.
+    asm volatile("" : "+r"(m));
+    m &= 0xf;
+    __builtin_memcpy(tmp + m, &c, csid_bytes);
+    // Compose byte 15 from the map copy, not from tmp: a scalar stack
+    // read after the variable-offset write above is rejected by some
+    // verifier versions (invalid read from stack), map memory is not.
+    tmp[15] = (aux->usid.target_block[15] & ~idx_mask) | idx;
+    __builtin_memcpy(da, tmp, 16);
+    return 0;
+}
+
 // PSP inserted after R20 (RFC 9800 Sec.4.2.8): pop the SRH when the next
 // execution would be the container end, i.e. R20.1's condition
 // "SL == 0 and (Index == 0 or SegList[0][Index-1] == 0)".
@@ -289,11 +318,17 @@ static __always_inline int process_end_replace_core(
             return usid_forward(ctx, is_endx ? aux->usid.nexthop : NULL,
                                 l3_offset, ctx->ingress_ifindex);
         }
-        // R19-R21: replace the C-SID part of the DA in place.
-        da[15] = (da[15] & ~idx_mask) | idx;
+        // R19-R21: replace the C-SID part of the DA in place (or, for
+        // End.LBS/End.XLBS, compose it on the target block).
         ip6h->hop_limit--;
-        if (replace_write_csid(da, data_end, aux, c, csid_bytes) != 0)
-            return XDP_DROP;
+        if (aux->usid.target_block_len_bytes) {
+            if (replace_write_csid_lbs(da, aux, c, idx, csid_bytes, idx_mask) != 0)
+                return XDP_DROP;
+        } else {
+            da[15] = (da[15] & ~idx_mask) | idx;
+            if (replace_write_csid(da, data_end, aux, c, csid_bytes) != 0)
+                return XDP_DROP;
+        }
     } else {
         // R12-R18: cross into the next packed container.
         if (sl > last + 1)
@@ -312,10 +347,15 @@ static __always_inline int process_end_replace_core(
         if (c == 0)
             return XDP_DROP;
         srh->segments_left = nsl;
-        da[15] = (da[15] & ~idx_mask) | idx;
         ip6h->hop_limit--;
-        if (replace_write_csid(da, data_end, aux, c, csid_bytes) != 0)
-            return XDP_DROP;
+        if (aux->usid.target_block_len_bytes) {
+            if (replace_write_csid_lbs(da, aux, c, idx, csid_bytes, idx_mask) != 0)
+                return XDP_DROP;
+        } else {
+            da[15] = (da[15] & ~idx_mask) | idx;
+            if (replace_write_csid(da, data_end, aux, c, csid_bytes) != 0)
+                return XDP_DROP;
+        }
     }
 
     // PSP (the R20 insertion point) runs before the local re-dispatch for

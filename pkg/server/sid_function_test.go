@@ -773,6 +773,168 @@ func TestProtoToEntry_Replace(t *testing.T) {
 	}
 }
 
+// TestProtoToEntry_Lbs verifies the End.LBS/End.XLBS mapping: the API
+// action maps onto the base behavior with the target block in the aux,
+// and the target geometry is validated against the base shape.
+func TestProtoToEntry_Lbs(t *testing.T) {
+	s := newProtoToEntryServer()
+	u32 := func(v uint32) *uint32 { return &v }
+	str := func(v string) *string { return &v }
+
+	tests := []struct {
+		name       string
+		sf         *v1.SidFunction
+		wantErr    string
+		baseAction v1.Srv6LocalAction
+	}{
+		{"End.LBS maps to uN", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777::/48")}, "", v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN},
+		{"End.XLBS maps to uA", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS, TriggerPrefix: "fd00:aaaa:b002:c001::/64",
+			Nexthop: "fe80::1", TargetBlock: str("fd77:7777:7777:7777::/64")}, "", v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA},
+		{"End.LBS(REP) maps to END_REPLACE", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80",
+			UsidBlockLen: u32(48), TargetBlock: str("fd77:7777:7777::/48")}, "", v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE},
+		{"End.XLBS(REP) maps to END_X_REPLACE", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80",
+			UsidBlockLen: u32(48), Nexthop: "fe80::1", TargetBlock: str("fd77:7777:7777::/48")}, "", v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE},
+		{"missing target rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48"},
+			"require target_block", 0},
+		{"target on wrong action rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777::/48")}, "only valid for the LBS behaviors", 0},
+		{"empty target on wrong action rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("")}, "only valid for the LBS behaviors", 0},
+		{"unaligned target rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777::/44")}, "multiple of 8", 0},
+		{"target with stray bits rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777:1::/48")}, "non-zero bits", 0},
+		{"IPv4 target rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("10.0.0.0/8")}, "must be an IPv6 prefix", 0},
+		{"self-block target rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd00:aaaa:b002::/48")}, "loop on itself", 0},
+		{"longer target sharing the trigger's bytes rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80",
+			UsidBlockLen: u32(48),
+			TargetBlock: str("fd00:aabb:ccdd:1111:2222:7700::/88")}, "loop on itself", 0},
+		{"oversized target for uN rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777:7777::/64")}, "no room", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry, aux, err := s.protoToEntry(tt.sf)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if entry.Action != uint8(tt.baseAction) {
+				t.Errorf("entry action = %d, want base %d", entry.Action, tt.baseAction)
+			}
+			tgt, tgtLen := bpf.SidAuxUsidTargetData(aux)
+			if tgtLen == 0 {
+				t.Fatalf("aux target block missing")
+			}
+			wantPrefix := netip.MustParsePrefix(*tt.sf.TargetBlock)
+			if got := netip.AddrFrom16(tgt); got != wantPrefix.Addr() {
+				t.Errorf("target = %v, want %v", got, wantPrefix.Addr())
+			}
+			if int(tgtLen)*8 != wantPrefix.Bits() {
+				t.Errorf("target len = %d bits, want %d", tgtLen*8, wantPrefix.Bits())
+			}
+			// The request must not have been mutated by the mapping.
+			if tt.sf.Action == tt.baseAction {
+				t.Errorf("caller's action was mutated to the base")
+			}
+		})
+	}
+
+	t.Run("entryToProto reports the LBS action back", func(t *testing.T) {
+		// The inverse mapping: a listed entry whose aux carries a target
+		// reports the LBS action, the target block, and (for the X
+		// shapes) the nexthop.
+		for _, apiAction := range []v1.Srv6LocalAction{
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE,
+		} {
+			sf := &v1.SidFunction{Action: apiAction, TargetBlock: str("fd77:7777:7777::/48")}
+			switch apiAction {
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS:
+				sf.TriggerPrefix = "fd00:aaaa:b002::/48"
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS:
+				sf.TriggerPrefix = "fd00:aaaa:b002:c001::/64"
+				sf.Nexthop = "fe80::1"
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE:
+				sf.TriggerPrefix = "fd00:aabb:ccdd:1111:2222::/80"
+				sf.UsidBlockLen = u32(48)
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE:
+				sf.TriggerPrefix = "fd00:aabb:ccdd:1111:2222::/80"
+				sf.UsidBlockLen = u32(48)
+				sf.Nexthop = "fe80::1"
+			}
+			entry, aux, err := s.protoToEntry(sf)
+			if err != nil {
+				t.Fatalf("%v: %v", apiAction, err)
+			}
+			got := &v1.SidFunction{Action: v1.Srv6LocalAction(entry.Action)}
+			base := v1.Srv6LocalAction(entry.Action)
+			switch base {
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+				nexthop, _ := bpf.SidAuxUsidData(aux)
+				got.Nexthop = bpf.FormatIPv6(nexthop)
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+				nexthop, _, _ := bpf.SidAuxReplaceData(aux)
+				got.Nexthop = bpf.FormatIPv6(nexthop)
+			}
+			tgt, tgtLen := bpf.SidAuxUsidTargetData(aux)
+			reportLbs(got, base, tgt, tgtLen)
+			if got.Action != apiAction {
+				t.Errorf("reported action = %v, want %v", got.Action, apiAction)
+			}
+			if got.TargetBlock == nil || *got.TargetBlock != *sf.TargetBlock {
+				t.Errorf("%v: reported target = %v, want %v", apiAction, got.TargetBlock, *sf.TargetBlock)
+			}
+			if sf.Nexthop != "" && base == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE && got.Nexthop != sf.Nexthop {
+				t.Errorf("%v: reported nexthop = %q, want %q", apiAction, got.Nexthop, sf.Nexthop)
+			}
+		}
+	})
+
+	t.Run("XLBS engages the allocator claim", func(t *testing.T) {
+		mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+		srv := NewSidFunctionServer(nil, nil, mgr, nil)
+		sf := &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS,
+			TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "fe80::1",
+			TargetBlock: str("fd77:7777:7777:7777::/64"),
+		}
+		release, err := srv.claimUsidFunction(sf)
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		fn := uint32(0xc001)
+		if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+			t.Fatalf("service SID allocation of the claimed CSID: err = %v, want ErrFunctionInUse", err)
+		}
+		release()
+	})
+}
+
 // An out-of-range flavor must not alias to a known one through the u8
 // cast (260 % 256 == 4 == USD, which would enable decap unexpectedly).
 func TestProtoToEntryRejectsUnknownFlavor(t *testing.T) {
