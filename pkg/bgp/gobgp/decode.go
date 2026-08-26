@@ -31,7 +31,15 @@ func decodeVPNRoute(p *apiutil.Path, fam bgp.Family) *bgp.VPNRoute {
 		// dropping the route silently so the anomaly is still visible.
 		vr.Prefix = p.Nlri.String()
 	}
-	vr.SRv6SID = decodeSRv6SID(p.Attrs, label)
+	// SID and structure come from one walk so they are guaranteed to
+	// describe the same Information Sub-TLV -- pairing the SID of one
+	// TLV with the structure of another could misclassify the encap mode.
+	if sid, st, ok := srv6ServiceSIDBytes(p.Attrs, label, gobgppkt.TLVTypeSRv6L3Service); ok {
+		if addr, ok := netip.AddrFromSlice(sid); ok {
+			vr.SRv6SID = addr.String()
+			vr.SIDStructure = st
+		}
+	}
 	vr.RTs = decodeRouteTargets(p.Attrs)
 	vr.NextHop = decodeNextHop(p.Attrs)
 	vr.Color = decodeColor(p.Attrs)
@@ -63,8 +71,8 @@ func decodeColor(attrs []gobgppkt.PathAttributeInterface) uint32 {
 // Structure Sub-Sub-TLV signals transposition, the transposed bits are
 // folded back in from the VPN label (RFC 9252 §4); label is the route's
 // MPLS label. An empty result means the path carried no SRv6 SID.
-func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface, label uint32) string {
-	sid, _, ok := srv6L2ServiceSIDBytes(attrs, label)
+func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface, label uint32, tlvType gobgppkt.TLVType) string {
+	sid, _, ok := srv6ServiceSIDBytes(attrs, label, tlvType)
 	if !ok {
 		return ""
 	}
@@ -75,11 +83,16 @@ func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface, label uint32) string
 	return addr.String()
 }
 
-// srv6L2ServiceSIDBytes returns the reconstructed 16-byte service SID and its
-// locator length in bits (0 when no SID Structure Sub-Sub-TLV is present),
-// folding any RFC 9252 transposed label bits back in. ok is false when no
-// usable SID is found.
-func srv6L2ServiceSIDBytes(attrs []gobgppkt.PathAttributeInterface, label uint32) ([]byte, uint8, bool) {
+// srv6ServiceSIDBytes returns the reconstructed 16-byte service SID and
+// the SID Structure of the same Information Sub-TLV (zero when the peer did
+// not signal one), folding any RFC 9252 transposed label bits back in. Only
+// Service TLVs of tlvType are considered -- RFC 9252 ties the TLV type to
+// the route type (L3 for VPN-IP and MUP, L2 for EVPN), so a stray TLV of
+// the other kind on a path must not supply the SID. ok is false when no
+// usable SID is found. A Sub-TLV whose structure fails semantic validation
+// is skipped entirely (RFC 9252 Sec.7 treats a path without valid SID
+// information as ineligible).
+func srv6ServiceSIDBytes(attrs []gobgppkt.PathAttributeInterface, label uint32, tlvType gobgppkt.TLVType) ([]byte, bgp.SIDStructure, bool) {
 	for _, a := range attrs {
 		psid, ok := a.(*gobgppkt.PathAttributePrefixSID)
 		if !ok {
@@ -87,7 +100,7 @@ func srv6L2ServiceSIDBytes(attrs []gobgppkt.PathAttributeInterface, label uint32
 		}
 		for _, tlv := range psid.TLVs {
 			svc, ok := tlv.(*gobgppkt.SRv6ServiceTLV)
-			if !ok {
+			if !ok || svc.Type != tlvType {
 				continue
 			}
 			for _, st := range svc.SubTLVs {
@@ -95,11 +108,16 @@ func srv6L2ServiceSIDBytes(attrs []gobgppkt.PathAttributeInterface, label uint32
 				if !ok || len(info.SID) != 16 {
 					continue
 				}
+				structure, ok := sidStructureOf(info, tlvType == gobgppkt.TLVTypeSRv6L3Service)
+				if !ok {
+					continue
+				}
 				sid := info.SID
-				if length, offset, ok := transpositionParams(info); ok {
+				if structure.TranspositionLen != 0 {
 					folded := make([]byte, 16)
 					copy(folded, info.SID)
-					if !foldTransposedLabel(folded, label, length, offset) {
+					if !foldTransposedLabel(folded, label,
+						structure.TranspositionLen, structure.TranspositionOffset) {
 						// Transposition is signalled but the SID Structure
 						// Sub-Sub-TLV is malformed: the real SID cannot be
 						// rebuilt, so skip it rather than use a wrong target.
@@ -107,29 +125,85 @@ func srv6L2ServiceSIDBytes(attrs []gobgppkt.PathAttributeInterface, label uint32
 					}
 					sid = folded
 				}
-				return sid, srv6SIDLocatorLen(info), true
+				return sid, structure, true
 			}
 		}
 	}
-	return nil, 0, false
+	return nil, bgp.SIDStructure{}, false
 }
 
-// srv6SIDLocatorLen returns the locator length in bits (LocatorBlockLength +
-// LocatorNodeLength) from the SID Structure Sub-Sub-TLV (RFC 9252 §3.2.1), or
-// 0 when there is no structure TLV or the value is out of range.
-func srv6SIDLocatorLen(info *gobgppkt.SRv6InformationSubTLV) uint8 {
+// sidStructureOf returns the SID Structure Sub-Sub-TLV of an Information
+// Sub-TLV. ok is false when a structure is present but semantically invalid
+// -- all off-the-wire values are attacker-controlled. Rejected shapes:
+// length fields that cannot fit a 128-bit SID, a transposition offset
+// without a transposition length, and -- for an L3 Service TLV, where RFC
+// 9252 §4.1 transposes function bits -- a transposition longer than the
+// Function field. On an L2 Service TLV the TL/FL relation is not checked:
+// EVPN routes transpose argument bits (§6.1/§6.2). TO+TL is bounded only
+// by the 128-bit SID, not by LBL+LNL+FL+AL: FRR's classic-mode
+// advertisements place the transposed function AFTER the declared
+// structure (32/16/16/0 with TO=64 -- see TestDecodeSRv6SID_Transposition,
+// captured from real FRR), so the stricter Errata 7817 bound would break
+// interop with deployed implementations.
+func sidStructureOf(info *gobgppkt.SRv6InformationSubTLV, l3 bool) (bgp.SIDStructure, bool) {
 	for _, ss := range info.SubSubTLVs {
-		st, ok := ss.(*gobgppkt.SRv6SIDStructureSubSubTLV)
-		if !ok {
+		st, isStruct := ss.(*gobgppkt.SRv6SIDStructureSubSubTLV)
+		if !isStruct {
 			continue
 		}
-		n := int(st.LocatorBlockLength) + int(st.LocatorNodeLength)
-		if n <= 0 || n > 128 {
-			return 0
+		if int(st.LocatorBlockLength)+int(st.LocatorNodeLength)+
+			int(st.FunctionLength)+int(st.ArgumentLength) > 128 {
+			return bgp.SIDStructure{}, false
 		}
-		return uint8(n)
+		if st.TranspositionLength == 0 && st.TranspositionOffset != 0 {
+			return bgp.SIDStructure{}, false
+		}
+		if int(st.TranspositionOffset)+int(st.TranspositionLength) > 128 {
+			return bgp.SIDStructure{}, false
+		}
+		if l3 && st.TranspositionLength != 0 {
+			if st.TranspositionLength > st.FunctionLength {
+				return bgp.SIDStructure{}, false
+			}
+			// The label carries (part of) the Function, which sits after
+			// Locator Block + Node: a transposition offset inside the
+			// locator would let the label rewrite the locator itself.
+			// FRR's real offsets (48 for usid-f3216, 64 for classic) both
+			// satisfy this.
+			if int(st.TranspositionOffset) <
+				int(st.LocatorBlockLength)+int(st.LocatorNodeLength) {
+				return bgp.SIDStructure{}, false
+			}
+		}
+		return bgp.SIDStructure{
+			LocatorBlockLen:     st.LocatorBlockLength,
+			LocatorNodeLen:      st.LocatorNodeLength,
+			FunctionLen:         st.FunctionLength,
+			ArgumentLen:         st.ArgumentLength,
+			TranspositionLen:    st.TranspositionLength,
+			TranspositionOffset: st.TranspositionOffset,
+		}, true
 	}
-	return 0
+	return bgp.SIDStructure{}, true
+}
+
+// decodeSIDStructure returns the SID Structure Sub-Sub-TLV (RFC 9252
+// Sec.3.2.1) accompanying the path's service SID, or the zero value when
+// the peer did not signal one.
+func decodeSIDStructure(attrs []gobgppkt.PathAttributeInterface) bgp.SIDStructure {
+	_, st, _ := srv6ServiceSIDBytes(attrs, 0, gobgppkt.TLVTypeSRv6L3Service)
+	return st
+}
+
+// srv6SIDLocatorLen returns the locator length in bits (LocatorBlockLen +
+// LocatorNodeLen) of a decoded SID Structure, or 0 when there is no
+// structure or the value is out of range.
+func srv6SIDLocatorLen(st bgp.SIDStructure) uint8 {
+	n := int(st.LocatorBlockLen) + int(st.LocatorNodeLen)
+	if n <= 0 || n > 128 {
+		return 0
+	}
+	return uint8(n)
 }
 
 // decodeRemoteSrc derives the advertising PE's SRv6 encap source from a
@@ -145,10 +219,11 @@ func srv6SIDLocatorLen(info *gobgppkt.SRv6InformationSubTLV) uint8 {
 // SID locator (e.g. a loopback) would not match the data plane's full-outer-src
 // reverse-map key; third-party interop is future work.
 func decodeRemoteSrc(attrs []gobgppkt.PathAttributeInterface, label uint32, fallbackLen uint8) string {
-	sid, locLen, ok := srv6L2ServiceSIDBytes(attrs, label)
+	sid, structure, ok := srv6ServiceSIDBytes(attrs, label, gobgppkt.TLVTypeSRv6L2Service)
 	if !ok {
 		return ""
 	}
+	locLen := srv6SIDLocatorLen(structure)
 	if locLen == 0 {
 		locLen = fallbackLen
 	}
@@ -163,35 +238,27 @@ func decodeRemoteSrc(attrs []gobgppkt.PathAttributeInterface, label uint32, fall
 	return prefix.Addr().String()
 }
 
-// transpositionParams returns the transposition length and offset from
-// an SRv6 Information Sub-TLV's SID Structure Sub-Sub-TLV (RFC 9252
-// §3.2.1). ok is false when there is no structure TLV or it signals no
-// transposition.
-func transpositionParams(info *gobgppkt.SRv6InformationSubTLV) (length, offset uint8, ok bool) {
-	for _, ss := range info.SubSubTLVs {
-		st, isStruct := ss.(*gobgppkt.SRv6SIDStructureSubSubTLV)
-		if !isStruct {
-			continue
-		}
-		if st.TranspositionLength == 0 {
-			return 0, 0, false
-		}
-		return st.TranspositionLength, st.TranspositionOffset, true
-	}
-	return 0, 0, false
-}
 
 // foldTransposedLabel reconstructs an SRv6 SID whose bits were
 // transposed into the VPN MPLS label (RFC 9252 §4): the high-order
 // `length` bits of the 20-bit label are OR-ed into sid at bit `offset`
-// counted from the SID's most significant bit. The on-wire SID has that
-// bit range zeroed, so OR-folding is sufficient. It returns false,
-// leaving sid untouched, when the parameters -- both attacker-controlled
-// off the wire -- cannot describe a valid transposition into the SID.
+// counted from the SID's most significant bit. RFC 9252 §4 requires the
+// on-wire SID to have that bit range zeroed, so OR-folding is sufficient
+// -- and a range that is NOT zero is a malformed advertisement whose
+// real SID cannot be known, not something to merge bits into. It returns
+// false, leaving sid untouched, when the parameters or the SID bits --
+// all attacker-controlled off the wire -- cannot describe a valid
+// transposition.
 func foldTransposedLabel(sid []byte, label uint32, length, offset uint8) bool {
 	const mplsLabelBits = 20
 	if length == 0 || length > mplsLabelBits || int(offset)+int(length) > 8*len(sid) {
 		return false
+	}
+	for i := 0; i < int(length); i++ {
+		pos := int(offset) + i
+		if sid[pos/8]&(byte(1)<<uint(7-pos%8)) != 0 {
+			return false
+		}
 	}
 	val := (label & (1<<mplsLabelBits - 1)) >> (mplsLabelBits - length)
 	for i := 0; i < int(length); i++ {

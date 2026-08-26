@@ -46,8 +46,12 @@ type vpnPathKey struct {
 // a withdraw carries no color or next hop, so the only way to release the
 // right policy is to have recorded it against the path that took it.
 type vpnPath struct {
-	sid   string
-	steer *policyKey
+	sid string
+	// reduced marks a NEXT-C-SID service SID (the peer's SID Structure
+	// was uSID-shaped): the encap uses H.Encaps.Red, which emits no SRH
+	// for the single-SID case.
+	reduced bool
+	steer   *policyKey
 	// nh is the advertising PE's BGP next hop, the destination the
 	// liveness prober terminates this path's probe at.
 	nh string
@@ -286,10 +290,10 @@ func memberFingerprint(ms []*vpnPath) []string {
 	out := make([]string, len(ms))
 	for i, m := range ms {
 		if m.steer == nil {
-			out[i] = fmt.Sprintf("%s>%s", m.sid, m.nh)
+			out[i] = fmt.Sprintf("%s>%s;r=%t", m.sid, m.nh, m.reduced)
 			continue
 		}
-		out[i] = fmt.Sprintf("%s@%d/%s>%s", m.sid, m.steer.color, m.steer.endpoint, m.nh)
+		out[i] = fmt.Sprintf("%s@%d/%s>%s;r=%t", m.sid, m.steer.color, m.steer.endpoint, m.nh, m.reduced)
 	}
 	return out
 }
@@ -319,7 +323,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 	// different SR Policies stay steered after aggregation.
 	paths := make([]bpf.EcmpPath, 0, len(ms))
 	for _, m := range ms {
-		entry, err := a.buildHeadendEntry(m.sid)
+		entry, err := a.buildHeadendEntry(m.sid, m.reduced)
 		if err != nil {
 			a.logger.Error("build ECMP member",
 				zap.String("prefix", dk.prefix), zap.String("sid", m.sid), zap.Error(err))
@@ -360,7 +364,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 
 	// The trigger mirrors the first member so the fallback forwards the same
 	// way the group's first path would, steering included.
-	trigger, err := a.buildHeadendEntry(ms[0].sid)
+	trigger, err := a.buildHeadendEntry(ms[0].sid, ms[0].reduced)
 	if err != nil {
 		a.logger.Error("build ECMP trigger",
 			zap.String("prefix", dk.prefix), zap.Error(err))

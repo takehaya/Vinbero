@@ -12,13 +12,14 @@ func TestDecodeSRv6SID(t *testing.T) {
 	psid := &gobgppkt.PathAttributePrefixSID{
 		TLVs: []gobgppkt.PrefixSIDTLVInterface{
 			&gobgppkt.SRv6ServiceTLV{
+				TLV:     gobgppkt.TLV{Type: gobgppkt.TLVTypeSRv6L3Service},
 				SubTLVs: []gobgppkt.PrefixSIDTLVInterface{
 					&gobgppkt.SRv6InformationSubTLV{SID: sid.AsSlice()},
 				},
 			},
 		},
 	}
-	got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0)
+	got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0, gobgppkt.TLVTypeSRv6L3Service)
 	if got != sid.String() {
 		t.Errorf("decodeSRv6SID = %q, want %q", got, sid.String())
 	}
@@ -26,7 +27,7 @@ func TestDecodeSRv6SID(t *testing.T) {
 
 func TestDecodeSRv6SID_AbsentAttribute(t *testing.T) {
 	// A path with no Prefix-SID attribute yields an empty SID.
-	if got := decodeSRv6SID(nil, 0); got != "" {
+	if got := decodeSRv6SID(nil, 0, gobgppkt.TLVTypeSRv6L3Service); got != "" {
 		t.Errorf("decodeSRv6SID(nil) = %q, want empty", got)
 	}
 }
@@ -42,6 +43,7 @@ func TestDecodeSRv6SID_Transposition(t *testing.T) {
 	psid := &gobgppkt.PathAttributePrefixSID{
 		TLVs: []gobgppkt.PrefixSIDTLVInterface{
 			&gobgppkt.SRv6ServiceTLV{
+				TLV:     gobgppkt.TLV{Type: gobgppkt.TLVTypeSRv6L3Service},
 				SubTLVs: []gobgppkt.PrefixSIDTLVInterface{
 					&gobgppkt.SRv6InformationSubTLV{
 						SID: onWire.AsSlice(),
@@ -56,14 +58,14 @@ func TestDecodeSRv6SID_Transposition(t *testing.T) {
 	}
 	// The function value 1 travels in the high 16 bits of the 20-bit label.
 	const label = 1 << (20 - 16)
-	got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, label)
+	got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, label, gobgppkt.TLVTypeSRv6L3Service)
 	if want := "fd00:200:0:0:1::"; got != want {
 		t.Errorf("decodeSRv6SID with transposition = %q, want %q", got, want)
 	}
 
 	// Without the label the bare locator must come back unchanged, so a
 	// non-transposing peer is unaffected.
-	if got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0); got != "fd00:200::" {
+	if got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0, gobgppkt.TLVTypeSRv6L3Service); got != "fd00:200::" {
 		t.Errorf("decodeSRv6SID transposition with zero label = %q, want fd00:200::", got)
 	}
 }
@@ -76,6 +78,7 @@ func TestDecodeSRv6SID_TranspositionMalformed(t *testing.T) {
 	psid := &gobgppkt.PathAttributePrefixSID{
 		TLVs: []gobgppkt.PrefixSIDTLVInterface{
 			&gobgppkt.SRv6ServiceTLV{
+				TLV:     gobgppkt.TLV{Type: gobgppkt.TLVTypeSRv6L3Service},
 				SubTLVs: []gobgppkt.PrefixSIDTLVInterface{
 					&gobgppkt.SRv6InformationSubTLV{
 						SID: netip.MustParseAddr("fd00:200::").AsSlice(),
@@ -88,7 +91,7 @@ func TestDecodeSRv6SID_TranspositionMalformed(t *testing.T) {
 			},
 		},
 	}
-	if got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0xFFFFF); got != "" {
+	if got := decodeSRv6SID([]gobgppkt.PathAttributeInterface{psid}, 0xFFFFF, gobgppkt.TLVTypeSRv6L3Service); got != "" {
 		t.Errorf("malformed transposition: decodeSRv6SID = %q, want empty", got)
 	}
 }

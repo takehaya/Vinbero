@@ -172,7 +172,21 @@ func encodeVPNPath(r bgp.VPNRoute) (*apiutil.Path, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse SRv6 SID %q: %w", r.SRv6SID, err)
 		}
-		infoSubTLV := gobgppkt.NewSRv6InformationSubTLV(sid, vpnEndpointBehavior(r.Family))
+		var subSubs []gobgppkt.PrefixSIDTLVInterface
+		if st := r.SIDStructure; !st.IsZero() {
+			// Advertising a transposition means the transposed SID bits are
+			// zeroed and carried in the VPN label (RFC 9252 §4). This encoder
+			// does neither, so a non-zero transposition would put the peer's
+			// fold out of sync with the wire -- reject rather than lie.
+			if st.TranspositionLen != 0 || st.TranspositionOffset != 0 {
+				return nil, fmt.Errorf("SID Structure with transposition %d/%d is not supported on advertise",
+					st.TranspositionLen, st.TranspositionOffset)
+			}
+			subSubs = append(subSubs, gobgppkt.NewSRv6SIDStructureSubSubTLV(
+				st.LocatorBlockLen, st.LocatorNodeLen, st.FunctionLen,
+				st.ArgumentLen, st.TranspositionLen, st.TranspositionOffset))
+		}
+		infoSubTLV := gobgppkt.NewSRv6InformationSubTLV(sid, vpnEndpointBehavior(r.Family), subSubs...)
 		svcTLV := gobgppkt.NewSRv6ServiceTLV(gobgppkt.TLVTypeSRv6L3Service, infoSubTLV)
 		attrs = append(attrs, gobgppkt.NewPathAttributePrefixSID(svcTLV))
 	}

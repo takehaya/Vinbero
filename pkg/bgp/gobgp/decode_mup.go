@@ -27,7 +27,7 @@ func decodeMUPRoute(p *apiutil.Path) *bgp.MUPRoute {
 	r := &bgp.MUPRoute{
 		RTs:     decodeRouteTargets(p.Attrs),
 		NextHop: decodeNextHop(p.Attrs),
-		SRv6SID: decodeSRv6SID(p.Attrs, 0),
+		SRv6SID: decodeSRv6SID(p.Attrs, 0, gobgppkt.TLVTypeSRv6L3Service),
 	}
 	r.SegmentID2, r.SegmentID4 = decodeMUPSegmentID(p.Attrs)
 

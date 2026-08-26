@@ -57,7 +57,7 @@ func (s *BgpRouteServer) BgpAdvertiseVpn(
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: r.GetPrefix(), Reason: err.Error()})
 			continue
 		}
-		err = s.advertiser.Advertise(ctx, bgp.VPNRoute{
+		vr := bgp.VPNRoute{
 			Family:  fam,
 			Prefix:  r.GetPrefix(),
 			RD:      r.GetRd(),
@@ -65,7 +65,17 @@ func (s *BgpRouteServer) BgpAdvertiseVpn(
 			SRv6SID: r.GetSrv6Sid(),
 			NextHop: r.GetNextHop(),
 			Color:   r.GetColor(),
-		})
+		}
+		// Same convention as the MUP advertise path: the SID Structure
+		// comes from the locator that contains the SID, when one is
+		// registered (a uSID locator yields 32/16/16/0).
+		vr.SIDStructure = sidStructureFromLocators(vr.SRv6SID, s.locators)
+		// End.DT4 / End.DT6 service SIDs carry no argument; the locator's
+		// argument space is layout, not the behavior's width (RFC 9252
+		// §3.2.1.1). MUP keeps the locator value -- its behaviors do use
+		// arguments.
+		vr.SIDStructure.ArgumentLen = 0
+		err = s.advertiser.Advertise(ctx, vr)
 		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{TriggerPrefix: r.GetPrefix(), Reason: err.Error()})
 			continue
