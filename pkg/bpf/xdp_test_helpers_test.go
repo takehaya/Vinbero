@@ -75,11 +75,7 @@ func newXDPTestHelperWithStats(tb testing.TB) *xdpTestHelper {
 
 func newXDPTestHelperWithConstants(tb testing.TB, constants map[string]any) *xdpTestHelper {
 	tb.Helper()
-	objs, err := ReadCollection(constants, nil)
-	if err != nil {
-		tb.Fatalf("Failed to load BPF objects: %v", err)
-	}
-	tb.Cleanup(func() { _ = objs.Close() })
+	objs := sharedCollection(tb, constants)
 	return &xdpTestHelper{
 		t:      tb,
 		objs:   objs,

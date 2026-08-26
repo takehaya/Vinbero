@@ -44,6 +44,10 @@ var pinnedControlMaps = []string{
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ../../src -I /usr/include/x86_64-linux-gnu
 
+// maxVerifierLogSize caps internal.bpf.verifier_log_size. The default in
+// the config is close to 1 GiB, which would be allocated per program.
+const maxVerifierLogSize = 64 * 1024 * 1024
+
 func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, error) {
 	// Remove memory limit for BPF
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -95,8 +99,24 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 		}
 	}
 
-	collOpts := &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{LogSizeStart: 64 * 1024 * 1024, LogLevel: ebpf.LogLevelInstruction},
+	// No verifier log is requested by default. cilium/ebpf asks the kernel
+	// for one on its own when a program fails to verify, so the only thing
+	// an unconditional log buys is the cost of producing it: the verifier
+	// writes a line per instruction for every program in the collection, on
+	// every load. internal.bpf.verifier_log_level turns it back on when a
+	// load needs to be debugged.
+	collOpts := &ebpf.CollectionOptions{}
+	if cfg != nil && cfg.InternalConfig.BpfOptions.VerifierLogLevel > 0 {
+		logSize := cfg.InternalConfig.BpfOptions.VerifierLogSize
+		if logSize == 0 || logSize > maxVerifierLogSize {
+			// The buffer is per program and grows on demand, so a huge
+			// configured value only costs memory up front.
+			logSize = maxVerifierLogSize
+		}
+		collOpts.Programs = ebpf.ProgramOptions{
+			LogLevel:     ebpf.LogLevel(cfg.InternalConfig.BpfOptions.VerifierLogLevel),
+			LogSizeStart: logSize,
+		}
 	}
 	if cfg != nil && cfg.Setting.PinMaps.Enabled {
 		pinPath := cfg.Setting.PinMaps.Path

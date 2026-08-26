@@ -80,8 +80,6 @@ internal:
     - $DUMMY_IF
   bpf:
     device_mode: generic
-    verifier_log_level: 1
-    verifier_log_size: 1073741823
   server:
     bind: "$BIND"
   logger:
