@@ -1,4 +1,4 @@
-# uSID (NEXT-C-SID) の uN / uA / uT
+# uSID の uN / uA / uT と REPLACE-C-SID
 
 ## 概要
 
@@ -250,7 +250,23 @@ vinbero sid create --trigger-prefix fd00:aaaa:b002:d004::/128 --action END_DT4 -
 vinbero sid create --trigger-prefix fd00:aaaa:b002::/48 --action END_UN --flavor USD
 ```
 
-`--usid-block-len` は SID 構造を明示する場合に使います。既定は 32 で、現状は 32 以外を受け付けません。
+`--usid-block-len` は SID 構造を明示する場合に使います。NEXT-C-SID 系 (uN/uA/uT) では既定が 32 で、32 以外を受け付けません。REPLACE-C-SID 系 (END_REPLACE / END_X_REPLACE) では必須で、byte 境界の任意長を取ります (`--csid-len` は 32 既定 / 16)。
+
+## REPLACE-C-SID (End / End.X)
+
+RFC 9800 Sec.4.2 の REPLACE-CSID flavor を `SRV6_LOCAL_ACTION_END_REPLACE` (29) と `END_X_REPLACE` (30) として実装しています。NEXT-C-SID が DA の中で shift するのに対し、REPLACE は packed container を SRH の segment list に置き、DA の Argument 下位 bit (LNFL=32 なら 2 bit、16 なら 3 bit) が container 内の index を運びます。endpoint は container を歩く間も跨ぐときも DA の C-SID 部分 (bits [LBL..LBL+LNFL-1]) だけを書き換えます (跨ぎでは index を K-1 に戻すだけです)。次の 128 bit SID を丸ごとロードするのは、container が zero C-SID で早期に終わったとき (R06-R10) だけで、そのとき segment list の次の entry は packed container でなく完全な SID です (RFC の R01-R21)。
+
+- SID 構造は可変です。locator block は byte 境界の任意長、C-SID 長は 32 bit (RFC 必須) と 16 bit (任意) の 2 つをコンパイル時定数の 2 系統として実装し、aux の `csid_len_bytes` で選びます。block 長も aux (`block_len_bytes`) にあり、block + C-SID は 120 bit 以下 (index の byte 15 を prefix の外に残すため)
+- trigger prefix は block + C-SID です。C-SID 0 は container 終端の予約値なので登録を拒否します
+- terminal 条件 (S02) は「SL==0 かつ (Index==0 または SegList[0][Index-1]==0)」で、SL==0 だけでは終端になりません。列の最終 C-SID は任意の behavior でよく、DA の argument bit が変動するため /128 でなく block + C-SID の prefix で登録して受けます
+- flavor は entry.Flavor をそのまま使います。PSP は RFC 9800 Sec.4.2.8 の 2 挿入点 (R09 の後は素の SL==0、R20 の後は R20.1 の複合条件)、USP/USD は S02 terminal で既存の SL=0 handler を呼びます。SRH なし (reduced encap) の bare SID は uN と同じ USD decap 経路に乗ります (End.X(REP) は uA と同じく kernel 渡し)
+- 転送は uN と同じ `usid_forward` です。End(REP) は置換後 DA の FIB (NO_NEIGH は kernel 渡し)、End.X(REP) は aux nexthop (fail-closed)
+- End.X(REP) の terminal USD は classic End.X と同じく decap 後の inner を FIB で転送します。RFC 8986 Sec.4.16.3 は adjacency J への転送を求めており、ここは classic 実装と共通の既知の差分です
+- REPLACE には uN のような同一ノード連続 C-SID の loop 内消費はありません。shift でなく FIB 転送で次の C-SID に進む方式のため、連続する C-SID は異なるノードに置く前提です (RFC の想定どおり)
+
+ICMPv6 を生成しない点 (R03/R14 は silent drop) と、segment list の上限を max_LE でなく `MAX_SEGMENTS` とする点は codebase 全体の方針に合わせています。
+
+verifier の教訓を 2 つ helper に焼き込んでいます。値の範囲チェックを clang が subtract-and-mask 形に書き換えると元 register が narrow されないので、block 長は使用直前に mask してから比較します。また可変 offset の packet pointer は、固定 offset で行った data_end チェックを引き継がないため、導出した pointer 自身を data_end と比較します。
 
 ## headend 側
 
@@ -268,9 +284,9 @@ headend は変更していません。H.Encaps.Red は segment が 1 つのと�
 
 ## 検証
 
-データプレーンの単体テストは `pkg/bpf/xdp_usid_test.go` です。`BPF_PROG_TEST_RUN` の環境では FIB が必ず失敗するため、戻り値だけでは正しい shift と guard による drop を区別できません。したがって出力パケットの DA と hop limit を直接 assert しています。
+データプレーンの単体テストは `pkg/bpf/xdp_usid_test.go` (NEXT-C-SID) と `pkg/bpf/xdp_replace_test.go` (REPLACE-C-SID) です。`BPF_PROG_TEST_RUN` の環境では FIB が必ず失敗するため、戻り値だけでは正しい shift と guard による drop を区別できません。したがって出力パケットの DA と hop limit を直接 assert しています。
 
-E2E の netns example は 5 本です。end-un / end-ua / end-udt4 は Linux kernel の seg6local を oracle にした 2 phase、end-ut と end-un-usd は kernel に対応する native 実装がないため Vinbero 単独の検証です (uT: next-csid flavor は End / End.X のみ。USD: seg6local End は `flavors usd` を拒否します)。
+E2E の netns example は 6 本です。end-un / end-ua / end-udt4 は Linux kernel の seg6local を oracle にした 2 phase、end-ut と end-un-usd と end-replace は kernel に対応する native 実装がないため Vinbero 側で完結する検証です (uT: next-csid flavor は End / End.X のみ。USD: seg6local End は `flavors usd` を拒否します。REPLACE-CSID: seg6local に実装がありません)。
 
 | example | 対象 | Linux 側の設定 | kernel 要件 |
 |---|---|---|---|
@@ -279,6 +295,7 @@ E2E の netns example は 5 本です。end-un / end-ua / end-udt4 は Linux ker
 | `examples/end-udt4/` | terminal uDT4 | `action End.DT4 vrftable 100` (/128) + next-csid uN | 6.1 以上 |
 | `examples/end-ut/` | uT | oracle なし (main table blackhole で VRF lookup を証明) | VRF 対応 |
 | `examples/end-un-usd/` | uN + USD | oracle なし (到達自体が decap の証明) | - |
+| `examples/end-replace/` | End(REP) | oracle なし (2 台の Vinbero を 4 hop 往復する walk) | - |
 
 Linux の seg6local で 1 回の実行が消費する幅は `nflen` です。`lblen` は shift せずに残す locator block の長さで、SID の prefix 長は `lblen + nflen` になります。uA は node と function を同時に消費するので、prefix が /64 になる `nflen 32` が正しく、`nflen 16` は function CSID を DA に残す uN の形になります。
 
@@ -288,10 +305,10 @@ end-ua の router2 は terminal SID への経路を持たないので、uA が�
 
 - BGP 統合は未着手です。uSID locator からの service SID 送出と、受信した service SID からの encap source 導出が残っています。後者は `decodeRemoteSrc` が locator base を仮定している点に手を入れる必要があります
 - 第三者実装との interop シナリオはまだありません
-- REPLACE-C-SID と End.LBS と End.XLBS は実装していません
-- 32 bit uSID と F3216 以外の SID 構造には対応していません。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります
+- End.LBS と End.XLBS は実装していません。REPLACE-C-SID は End / End.X のみで、End.T / End.B6 / End.BM への適用は未対応です
+- NEXT-C-SID は 32 bit uSID と F3216 以外の SID 構造に対応していません。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります (REPLACE-C-SID は block 可変・C-SID 32/16 に対応済みです)
 - SR Policy の transport list を container へ自動 packing する処理はありません
-- `locator_ref` からの uN / uA / uT 登録はできません
+- `locator_ref` からの uN / uA / uT / REPLACE 登録はできません
 - flavor は単一値のみで、PSP+USP のような組合せは classic と同じく未対応です
 - uA の USD は未対応です (End.X の USD は adjacency への転送で、DA ベースの decap 転送とは別実装が必要です)
 - SRH なし終端の USD は nexthdr が直接 IPIP / IPv6 の場合だけ decap します。Hop-by-Hop や Destination Options を挟むパケットは既存 dispatcher 全体の方針どおり extension header 非対応で、kernel への local delivery に fall through します (DA は自ノードの SID なので情報漏洩にはなりません)
