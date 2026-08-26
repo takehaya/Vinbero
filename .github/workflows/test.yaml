@@ -152,6 +152,7 @@ jobs:
           - end-un-usd
           - end-ut
           - end-udt4
+          - end-replace
           - headend-v4
           - headend-v6
           - headend-l2
