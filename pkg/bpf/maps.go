@@ -821,6 +821,16 @@ func NewSidAuxL3Vrf(vrfIfindex uint32) *SidAuxEntry {
 	return entry
 }
 
+// NewSidAuxUsidVrf creates an aux entry for uT: the VRF ifindex in the
+// leading bytes (the l3vrf view) plus the uSID block length at offset 16
+// (the usid view). Read it back with SidAuxL3VrfData + SidAuxUsidData.
+func NewSidAuxUsidVrf(vrfIfindex uint32, blockLenBytes uint8) *SidAuxEntry {
+	entry := NewSidAuxL3Vrf(vrfIfindex)
+	raw := (*[20]byte)(unsafe.Pointer(entry))
+	raw[16] = blockLenBytes
+	return entry
+}
+
 // SidAuxL3VrfData extracts the VRF ifindex from the l3vrf variant.
 func SidAuxL3VrfData(entry *SidAuxEntry) uint32 {
 	return binary.NativeEndian.Uint32(entry.Nexthop.Nexthop[0:4])

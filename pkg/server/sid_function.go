@@ -592,10 +592,23 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	if sidFunc.UsidBlockLen != nil {
 		switch v1.Srv6LocalAction(sidFunc.Action) {
 		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT:
 		default:
-			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA")
+			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA / END_UT")
 		}
+	}
+	// The C side stores the flavor as a u8 scalar; reject unknown enum
+	// values here, or a value congruent to a known one modulo 256 (260,
+	// -252) would silently alias to it through the cast below.
+	switch sidFunc.Flavor {
+	case v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_UNSPECIFIED,
+		v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_NONE,
+		v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_PSP,
+		v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_USP,
+		v1.Srv6LocalFlavor_SRV6_LOCAL_FLAVOR_USD:
+	default:
+		return nil, nil, fmt.Errorf("unknown flavor %d", sidFunc.Flavor)
 	}
 	entry := &bpf.SidFunctionEntry{
 		Action: uint8(sidFunc.Action),
@@ -667,9 +680,10 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		aux = bpf.NewSidAuxNexthop(nexthop)
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT:
 		if sidFunc.LocatorRef != nil {
-			return nil, nil, fmt.Errorf("locator_ref is not supported for uN/uA yet; set trigger_prefix explicitly")
+			return nil, nil, fmt.Errorf("locator_ref is not supported for uN/uA/uT yet; set trigger_prefix explicitly")
 		}
 		blockLen := uint32(32)
 		if sidFunc.UsidBlockLen != nil {
@@ -712,14 +726,37 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			}
 			nexthop = nh.As16()
 		} else {
+			// uN and uT share the /48 node-SID shape (RFC 9800 Sec.4.1.3:
+			// uT differs from uN only in the bound FIB table).
 			if p.Bits() != int(blockLen)+16 {
-				return nil, nil, fmt.Errorf("uN trigger_prefix must be /%d (block + node), got /%d", blockLen+16, p.Bits())
+				return nil, nil, fmt.Errorf("uN/uT trigger_prefix must be /%d (block + node), got /%d", blockLen+16, p.Bits())
 			}
 			if sidFunc.Nexthop != "" {
-				return nil, nil, fmt.Errorf("uN does not take a nexthop (use uA)")
+				return nil, nil, fmt.Errorf("uN/uT do not take a nexthop (use uA)")
 			}
 		}
-		aux = bpf.NewSidAuxUsid(nexthop, uint8(blockLen/8))
+		if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT {
+			// A uT without a VRF would silently degrade to uN semantics
+			// (ingress-table forwarding, including the NO_NEIGH kernel
+			// hand-off uT must not do), so the binding is mandatory --
+			// and it must be an actual VRF device: resolveIfindex accepts
+			// any interface name, and a non-VRF ifindex would again mean
+			// an ingress-context lookup.
+			if sidFunc.VrfName == "" {
+				return nil, nil, fmt.Errorf("uT requires a vrf_name")
+			}
+			if err := requireVrfDevice(sidFunc.VrfName); err != nil {
+				return nil, nil, err
+			}
+			aux = bpf.NewSidAuxUsidVrf(vrfIfindex, uint8(blockLen/8))
+		} else {
+			// Same convention as usid_block_len above: a field on the
+			// wrong action is rejected, not silently dropped.
+			if sidFunc.VrfName != "" {
+				return nil, nil, fmt.Errorf("uN/uA do not take a vrf_name (use uT)")
+			}
+			aux = bpf.NewSidAuxUsid(nexthop, uint8(blockLen/8))
+		}
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 		// DX2 stores OIF as uint32 in first 4 bytes of aux nexthop
@@ -1116,12 +1153,16 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				sf.Nexthop = bpf.FormatIPv6(aux.Nexthop.Nexthop)
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
-				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
+				v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT:
 				nexthop, blockLenBytes := bpf.SidAuxUsidData(aux)
 				blockLen := uint32(blockLenBytes) * 8
 				sf.UsidBlockLen = &blockLen
 				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA {
 					sf.Nexthop = bpf.FormatIPv6(nexthop)
+				}
+				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT {
+					sf.VrfName = ifindexToName(bpf.SidAuxL3VrfData(aux))
 				}
 
 			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:

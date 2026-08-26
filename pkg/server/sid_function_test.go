@@ -3,8 +3,11 @@ package server
 import (
 	"errors"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/vishvananda/netlink"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
@@ -693,6 +696,20 @@ func TestProtoToEntry_ProxyFieldScope(t *testing.T) {
 	})
 }
 
+// An out-of-range flavor must not alias to a known one through the u8
+// cast (260 % 256 == 4 == USD, which would enable decap unexpectedly).
+func TestProtoToEntryRejectsUnknownFlavor(t *testing.T) {
+	s := newProtoToEntryServer()
+	_, _, err := s.protoToEntry(&v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: "fd00:1::1/128",
+		Flavor:        v1.Srv6LocalFlavor(260),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown flavor") {
+		t.Fatalf("err = %v, want unknown flavor rejection", err)
+	}
+}
+
 // TestProtoToEntry_USID verifies the uN/uA API contract: prefix shapes,
 // nexthop requirements, block length bounds, and field scoping.
 func TestProtoToEntry_USID(t *testing.T) {
@@ -713,7 +730,7 @@ func TestProtoToEntry_USID(t *testing.T) {
 		{"uN wrong prefix width", &v1.SidFunction{
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/64"}, "must be /48"},
 		{"uN rejects nexthop", &v1.SidFunction{
-			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", Nexthop: "fe80::1"}, "does not take a nexthop"},
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", Nexthop: "fe80::1"}, "do not take a nexthop"},
 		{"uA /64 with nexthop", &v1.SidFunction{
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "fe80::1"}, ""},
 		{"uA wrong prefix width", &v1.SidFunction{
@@ -732,6 +749,18 @@ func TestProtoToEntry_USID(t *testing.T) {
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "192.0.2.1"}, "requires an IPv6 nexthop"},
 		{"usid_block_len on wrong action", &v1.SidFunction{
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END, TriggerPrefix: "fd00:1::1/128", UsidBlockLen: u32(32)}, "only valid for END_UN / END_UA"},
+		{"uT without VRF rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:b004::/48"}, "requires a vrf_name"},
+		{"uN rejects vrf_name", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", VrfName: "lo"}, "do not take a vrf_name"},
+		{"uT wrong prefix width", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:b004::/64"}, "must be /48"},
+		{"uT rejects nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:b004::/48", Nexthop: "fe80::1"}, "do not take a nexthop"},
+		{"uT rejects zero node CSID", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:0000::/48"}, "node CSID must be non-zero"},
+		{"uT non-32 block rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:b004::/48", VrfName: "lo", UsidBlockLen: u32(48)}, "not supported"},
 	}
 
 	for _, tt := range tests {
@@ -767,6 +796,43 @@ func TestProtoToEntry_USID(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("uT rejects a non-VRF device", func(t *testing.T) {
+		// "lo" resolves but is not a VRF: binding uT to it would run the
+		// lookup in the ingress context, the exact degradation the
+		// vrf_name requirement exists to prevent.
+		_, _, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT,
+			TriggerPrefix: "fd00:aaaa:b004::/48", VrfName: "lo"})
+		if err == nil || !strings.Contains(err.Error(), "not a vrf") {
+			t.Fatalf("err = %v, want non-VRF rejection", err)
+		}
+	})
+
+	t.Run("uT carries the resolved VRF ifindex in the aux", func(t *testing.T) {
+		// Creating a VRF device needs CAP_NET_ADMIN; the negative case
+		// above runs everywhere, this positive one only under root.
+		if os.Geteuid() != 0 {
+			t.Skip("requires root to create a VRF device")
+		}
+		vrfDev := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "utp2e-vrf0"}, Table: 1043}
+		if err := netlink.LinkAdd(vrfDev); err != nil {
+			t.Fatalf("vrf add: %v", err)
+		}
+		defer func() { _ = netlink.LinkDel(vrfDev) }()
+		_, aux, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT,
+			TriggerPrefix: "fd00:aaaa:b004::/48", VrfName: "utp2e-vrf0"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := bpf.SidAuxL3VrfData(aux); got != uint32(vrfDev.Attrs().Index) {
+			t.Errorf("vrf ifindex = %d, want %d", got, vrfDev.Attrs().Index)
+		}
+		if _, blockLenBytes := bpf.SidAuxUsidData(aux); blockLenBytes != 4 {
+			t.Errorf("block_len_bytes = %d, want 4", blockLenBytes)
+		}
+	})
 }
 
 // usidLocator builds an F3216 uSID locator for the claim tests.

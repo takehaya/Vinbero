@@ -1,4 +1,4 @@
-// Endpoint tail call targets (22 SEC("xdp") programs).
+// Endpoint tail call targets.
 // Included from xdp_prog.c — not compiled standalone.
 
 // ========== Helpers shared by tail call targets (nosrh path) ==========
@@ -45,6 +45,29 @@ static __always_inline int nosrh_fib_v6(
     __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
     int action = srv6_fib_redirect(ctx, inner_ip6h, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
+}
+
+// Shared no-SRH tunnel decap: strip the outer IPv6 (no SRH on the wire)
+// and forward the inner packet by FIB. aux selects the VRF through its
+// leading bytes (the l3vrf view), falling back to the ingress interface.
+// Callers must not derive ip6h before this runs (see the End.AS note:
+// clang would elide the decap helper's own eth bounds check and the
+// verifier rejects it).
+static __always_inline int nosrh_decap_and_fib(struct xdp_md *ctx,
+                                               struct sid_aux_entry *aux,
+                                               __u8 nh, __u16 l3_off)
+{
+    if (nh == IPPROTO_IPIP) {
+        if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
+            return XDP_DROP;
+        return nosrh_fib_v4(ctx, aux);
+    }
+    if (nh == IPPROTO_IPV6) {
+        if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
+            return XDP_DROP;
+        return nosrh_fib_v6(ctx, aux);
+    }
+    return XDP_DROP;
 }
 
 // ========== Pattern A: localsid-only actions ==========
@@ -219,20 +242,8 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
 
     TAILCALL_AUX_LOOKUP(tctx, aux);
 
-    if (tctx->dispatch_type == DISPATCH_NOSRH) {
-        __u8 nh = tctx->inner_proto;
-        if (nh == IPPROTO_IPIP) {
-            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
-                TAILCALL_RETURN(ctx,XDP_DROP);
-            TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux));
-        }
-        if (nh == IPPROTO_IPV6) {
-            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
-                TAILCALL_RETURN(ctx,XDP_DROP);
-            TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux));
-        }
-        TAILCALL_RETURN(ctx,XDP_DROP);
-    }
+    if (tctx->dispatch_type == DISPATCH_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
 
     struct ethhdr *eth;
     struct ipv6hdr *ip6h;
@@ -359,8 +370,37 @@ int tailcall_endpoint_end_un(struct xdp_md *ctx)
         TAILCALL_RETURN(ctx,XDP_DROP);
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
-                                    &tctx->sid_entry, tctx->dispatch_type,
-                                    tctx->inner_proto);
+                                    &tctx->sid_entry, aux, 0,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    // USD on a no-SRH container that ends here: same decap shape as
+    // End.DT46's nosrh branch. The uN aux has no VRF, so nosrh_fib_*
+    // falls back to the ingress ifindex.
+    if (action == USID_RET_USD_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
+    TAILCALL_RETURN(ctx,action);
+}
+
+// uT: uN with the FIB lookup bound to the aux VRF (RFC 9800 Sec.4.1.3).
+// The aux carries the VRF ifindex in its leading bytes (the l3vrf view of
+// the usid variant), so the USD decap below lands in the VRF too.
+SEC("xdp")
+int tailcall_endpoint_end_ut(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
+        TAILCALL_RETURN(ctx,XDP_DROP);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
+                                    &tctx->sid_entry, aux, 1,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    // USD decap in the VRF: the aux carries the ifindex in its leading
+    // bytes, which is exactly what nosrh_decap_and_fib consumes.
+    if (action == USID_RET_USD_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
     TAILCALL_RETURN(ctx,action);
 }
 
