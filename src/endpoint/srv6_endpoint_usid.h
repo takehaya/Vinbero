@@ -108,6 +108,50 @@ static __always_inline void usid_shift(__u8 *da, int arg_off)
     }
 }
 
+// End.LBS / End.XLBS with NEXT-C-SID (RFC 9800 Sec.7.1.1 / 7.2.1):
+// N05-N06 are replaced so the shifted Argument lands on the target
+// locator block instead of in place. A = B2; DA.Argument is copied into
+// bits [m..m+AL-1] of A; A becomes the DA. m is byte-aligned and bounded
+// so the Argument fits (m_bytes <= arg_off, enforced at registration and
+// re-clamped here for the verifier).
+static __always_inline int usid_shift_lbs(__u8 *da, int arg_off,
+                                          const struct sid_aux_entry *aux)
+{
+    __u8 tmp[16];
+    __builtin_memcpy(tmp, aux->usid.target_block, 16);
+    // Validate the raw length first -- masking before the check would let
+    // an invalid value like 17 alias to a small valid one -- and mask
+    // only afterwards, purely for the verifier's offset bound.
+    __u8 raw_m = aux->usid.target_block_len_bytes;
+    if (raw_m < 1 || raw_m > arg_off)
+        return -1;
+    __u8 m = raw_m;
+    // Hide the range proof from clang so the mask survives: without it
+    // the compiler elides the & 0xf (the branch already proves m <= 8)
+    // and the verifier, which cannot narrow through clang's compare
+    // rewrite, sees an unbounded variable-offset stack write.
+    asm volatile("" : "+r"(m));
+    m &= 0xf;
+    // Copy the Argument (bytes [arg_off..15] of the old DA, AL bits) to
+    // [m..m+AL). The lengths are compile-time constants per arg_off; the
+    // destination offset is the bounded m.
+    if (arg_off == USID_UA_ARG_OFF) {
+        __u8 arg[8];
+        __builtin_memcpy(arg, da + USID_UA_ARG_OFF, sizeof(arg));
+        if (m > 16 - (int)sizeof(arg))
+            return -1;
+        __builtin_memcpy(tmp + m, arg, sizeof(arg));
+    } else {
+        __u8 arg[10];
+        __builtin_memcpy(arg, da + USID_UN_ARG_OFF, sizeof(arg));
+        if (m > 16 - (int)sizeof(arg))
+            return -1;
+        __builtin_memcpy(tmp + m, arg, sizeof(arg));
+    }
+    __builtin_memcpy(da, tmp, 16);
+    return 0;
+}
+
 // uN shift loop (uA shifts exactly once and forwards over its
 // adjacency instead). RFC 9800 Sec.4.1.1 submits the shifted DA to the
 // IPv6 FIB; on this node that FIB step can resolve to another local SID,
@@ -126,6 +170,7 @@ static __always_inline void usid_shift(__u8 *da, int arg_off)
 static __always_inline int usid_shift_loop(struct xdp_md *ctx,
                                            struct ipv6hdr *ip6h,
                                            const struct sid_function_entry *entry,
+                                           const struct sid_aux_entry *aux,
                                            __u8 dispatch_type,
                                            __u8 inner_proto,
                                            __u16 l3_offset)
@@ -141,7 +186,17 @@ static __always_inline int usid_shift_loop(struct xdp_md *ctx,
             return -1;
         ip6h->hop_limit--;
 
-        usid_shift(da, arg_off);
+        if (aux->usid.target_block_len_bytes) {
+            // End.LBS: the swap moves the sequence to a new block.
+            // Registration rejects a target equal to the SID's own
+            // leading bytes, so the same entry cannot re-match and the
+            // loop falls out through the normal re-lookup below (the
+            // USID_SHIFT_MAX bound backstops a hand-installed entry).
+            if (usid_shift_lbs(da, arg_off, aux) != 0)
+                return -1;
+        } else {
+            usid_shift(da, arg_off);
+        }
 
         struct lpm_key_v6 key = { .prefixlen = 128 };
         __builtin_memcpy(key.addr, da, IPV6_ADDR_LEN);
@@ -251,7 +306,7 @@ static __always_inline int process_end_un_core(
     if ((void *)(ip6h + 1) > data_end)
         return XDP_DROP;
 
-    int r = usid_shift_loop(ctx, ip6h, entry, dispatch_type, inner_proto, l3_offset);
+    int r = usid_shift_loop(ctx, ip6h, entry, aux, dispatch_type, inner_proto, l3_offset);
     if (r < 0)
         return XDP_DROP;
     if (r == 1)
@@ -328,7 +383,13 @@ static __always_inline int process_end_ua_core(
         if (ip6h->hop_limit <= 1)
             return XDP_DROP;
         ip6h->hop_limit--;
-        usid_shift(da, USID_UA_ARG_OFF);
+        if (aux->usid.target_block_len_bytes) {
+            // End.XLBS with NEXT-C-SID (RFC 9800 Sec.7.2.1)
+            if (usid_shift_lbs(da, USID_UA_ARG_OFF, aux) != 0)
+                return XDP_DROP;
+        } else {
+            usid_shift(da, USID_UA_ARG_OFF);
+        }
         return usid_forward(ctx, aux->usid.nexthop, l3_offset,
                             ctx->ingress_ifindex);
     }

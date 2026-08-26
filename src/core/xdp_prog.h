@@ -445,12 +445,19 @@ struct sid_aux_entry {
         // locator block length in bytes (LBL/8; F3216 => 4).
         // csid_len_bytes is the REPLACE-CSID LNFL in bytes (4 mandatory,
         // 2 optional; zero for the NEXT-C-SID behaviors, which fix it).
+        // target_block/target_block_len_bytes express End.LBS/End.XLBS
+        // (RFC 9800 Sec.7): when target_block_len_bytes is non-zero the
+        // advance composes the new DA on that block instead of in place.
+        // The bits beyond the target block length are zero.
         struct {
             __u8 nexthop[IPV6_ADDR_LEN];
             __u8 block_len_bytes;
             __u8 csid_len_bytes;
             __u8 _pad[2];
-        } usid;                                            // 20 bytes
+            __u8 target_block[IPV6_ADDR_LEN];
+            __u8 target_block_len_bytes;
+            __u8 _pad2[3];
+        } usid;                                            // 40 bytes
 
         // Plugin-defined raw payload. Sized larger than every behavior
         // variant so it is the union's layout anchor (pins the union size).
