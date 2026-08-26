@@ -1,0 +1,139 @@
+#!/bin/bash
+# Bring up the Vinbero PE (pe-tokyo) inside the containerlab node.
+#
+# Order matters: the locator comes from vinbero.yml at boot (see
+# bgp.locators there), so it exists before BGP routes from FRR settle --
+# the BGP applier needs the source locator registered to turn a received
+# VPN route into a headend_v4/v6 map entry.
+#
+# pe-tokyo is a *full* SRv6 L3VPN PE: it H.Encaps plaintext ce-tokyo
+# traffic towards FRR (eth2 XDP) and runs an End.DT4 endpoint that
+# decaps the return traffic FRR sends back (eth1 XDP).
+#
+# Interfaces:
+#   eth1  pe-tokyo <-> core   underlay 2001:db8:1::/64  (pe-tokyo = ::1)
+#   eth2  pe-tokyo <-> ce-tokyo  customer 10.1.0.0/24   (pe-tokyo = .1)
+#   lo    loopback 2001:db8:ff::1  (iBGP peering / SRv6 transport)
+
+# setknob writes a sysctl best-effort: container sysfs may be read-only
+# for some keys, which must not abort the script.
+setknob() {
+    sysctl -w "$1=$2" >/dev/null 2>&1 || true
+}
+
+# --- interface addressing --------------------------------------------------
+# eth1 faces the core: the iBGP transport and the SRv6 underlay ride it.
+ip -6 addr add 2001:db8:1::1/64 dev eth1 2>/dev/null || true
+ip link set eth1 up
+
+# eth2 faces ce-tokyo. The CE sends plaintext IPv4 to this address as
+# its default gateway into the L3VPN.
+ip addr add 10.1.0.1/24 dev eth2 2>/dev/null || true
+ip link set eth2 up
+
+# Loopback for iBGP peering + SRv6 transport. A /128 on `lo` so the
+# session and the encapsulated underlay do not depend on any one link.
+ip -6 addr add 2001:db8:ff::1/128 dev lo 2>/dev/null || true
+ip link set lo up
+
+# --- SRv6 dataplane knobs (namespace-scoped, best-effort) ------------------
+setknob net.ipv4.ip_forward 1
+setknob net.ipv6.conf.all.forwarding 1
+setknob net.ipv6.conf.all.seg6_enabled 1
+setknob net.ipv6.conf.eth1.seg6_enabled 1
+setknob net.ipv6.conf.eth2.seg6_enabled 1
+setknob net.ipv4.conf.all.rp_filter 0
+setknob net.ipv4.conf.default.rp_filter 0
+setknob net.ipv4.conf.eth2.rp_filter 0
+
+# veth + generic XDP: VLAN offload would hide tags from the XDP program.
+ethtool -K eth1 txvlan off 2>/dev/null || true
+ethtool -K eth1 rxvlan off 2>/dev/null || true
+ethtool -K eth2 txvlan off 2>/dev/null || true
+ethtool -K eth2 rxvlan off 2>/dev/null || true
+
+# --- return-path routing table for the End.DT4 endpoint --------------------
+# The End.DT4 endpoint decaps FRR's return traffic and does a FIB lookup
+# in a dedicated routing table. The VRF device itself is created through
+# Vinbero (`vbctl vrf create` below, after the daemon is up) so it is a
+# first-class VRF object with a vrf_id; the route can go into table 100
+# already (tables exist implicitly, no device needed). eth2 is
+# intentionally NOT enslaved to the VRF: the H.Encaps path (CE -> FRR)
+# leaves the encapsulated IPv6 packet to the *main* table for the
+# fd00:200:2::/48 underlay route, while the decap path (FRR -> CE) hands
+# the End.DT4 BPF FIB lookup the VRF device so it resolves the customer
+# prefix from table 100 instead.
+ip route replace 10.1.0.0/24 dev eth2 table 100
+
+# --- static underlay routes ------------------------------------------------
+# Towards the core (eth1): pe-osaka's loopback (iBGP peer + reachable for
+# the encapsulated H.Encaps egress) and FRR's SRv6 locator block.
+#
+# `src 2001:db8:ff::1` forces the kernel to source the outbound iBGP
+# TCP connection from our loopback, so the loopback-to-loopback iBGP
+# session establishes (GoBGP sets no explicit Transport.LocalAddress).
+ip -6 route replace 2001:db8:ff::2/128 via 2001:db8:1::2 dev eth1 \
+    src 2001:db8:ff::1
+ip -6 route replace fd00:200:2::/48 via 2001:db8:1::2 dev eth1
+
+# BPF filesystem for pinned maps / XDP links.
+mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
+
+mkdir -p /etc/vinbero
+cp /vinbero.yml /etc/vinbero/vinbero.yaml
+
+# Start the daemon with the in-process BGP speaker enabled.
+/usr/local/bin/vinberod --bgp-enabled -c /etc/vinbero/vinbero.yaml \
+    > /var/log/vinberod.log 2>&1 &
+echo $! > /var/run/vinberod.pid
+
+# Wait for the RPC server (localhost:8080) to accept connections.
+for i in $(seq 1 30); do
+    if /usr/local/bin/vbctl locator list >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+# The SRv6 source locator LOC1 is registered at startup from
+# vinbero.yml's `bgp.locators`: creating it over RPC here would race the
+# BGP session, which starts receiving before the RPC server is up.
+
+# The return-path VRF, as a first-class VRF object: the kernel device on
+# table 100 plus the l3mdev rule, with the vrf_id allocated alongside. The
+# End.DT4 SID below references it by name. Requires the host kernel's `vrf`
+# module (CI loads it via modprobe).
+/usr/local/bin/vbctl vrf create \
+    --name vrf-cust \
+    --table-id 100 \
+    --enable-l3mdev-rule || true
+if ! ip link show vrf-cust >/dev/null 2>&1; then
+    echo "ERROR: failed to create VRF vrf-cust -- is the kernel 'vrf' module loaded on the host? (modprobe vrf)" >&2
+    exit 1
+fi
+
+# --- return-path End.DT4 endpoint ------------------------------------------
+# FRR encaps return traffic towards this SID; Vinbero's XDP decaps it and
+# does an IPv4 FIB lookup in vrf-cust (table 100) -> 10.1.0.0/24 -> eth2.
+/usr/local/bin/vbctl sid create \
+    --trigger-prefix fd00:100:1:1::/128 \
+    --action END_DT4 \
+    --vrf-name vrf-cust || true
+
+# --- advertise the ce-tokyo customer subnet into the L3VPN -----------------
+# RT 65000:200 == FRR's vrf-cust import RT, so FRR installs an SRv6
+# encap route for 10.1.0.0/24 towards the End.DT4 SID above. This is the
+# control-plane half of the ce-osaka -> ce-tokyo return path. The next
+# hop is our loopback so FRR encapsulates to a locator-reachable SID.
+/usr/local/bin/vbctl bgp advertise-vpn --family vpnv4 \
+    --prefix 10.1.0.0/24 --rd 65100:200 --rts 65000:200 \
+    --sid fd00:100:1:1:: --next-hop 2001:db8:ff::1 || true
+
+# Pre-resolve neighbours so the XDP BPF FIB lookups never hit
+# BPF_FIB_LKUP_RET_NO_NEIGH on the first packet: the underlay NDP entry
+# for the core (H.Encaps egress) and the ce-tokyo ARP entry in table 100
+# (End.DT4 decap egress).
+ping6 -c 1 -W 2 2001:db8:1::2 >/dev/null 2>&1 || true
+ping -c 1 -W 2 10.1.0.10 >/dev/null 2>&1 || true
+
+echo "[start.sh] pe-tokyo (Vinbero) PE ready"

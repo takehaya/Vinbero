@@ -78,7 +78,7 @@ NEXT-C-SID の実装範囲は次のとおりです。設計と運用上の注意
 - SID 構造は F3216 (block 32 bit、uSID 16 bit) のみです
 - trigger prefix は uSID 専用にしてください。prefix 内のアドレスは uN / uA / uT SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます
 - 登録は trigger prefix の明示指定のみで、locator_ref からの登録には未対応です
-- BGP からの uSID service SID の送受信と、第三者実装との interop は未着手です
+- L3VPN の BGP 統合を実装しています。uSID locator の経路は RFC 9252 SID Structure 32/16/16/0 付きで advertise され、受信側は uSID 形状の経路を H.Encaps.Red で設置します。FRR 10.2.1 の usid-f3216 との interop は `examples/interop-clab/scenarios/usid-l3vpn-2site/` で検証しています。EVPN の uSID service SID は未着手です
 
 End.LBS / End.XLBS は NEXT-C-SID と REPLACE-CSID の両 flavor で実装しています。API では専用 action として登録し、実体は uN / uA / End(REP) / End.X(REP) の slot に target block を local property として持たせる形で動きます (`examples/end-lbs/` 参照)。
 
