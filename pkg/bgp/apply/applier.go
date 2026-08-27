@@ -225,6 +225,33 @@ func (a *Applier) ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error {
 	return a.srPolicy.applyLocalCapped(p, max)
 }
 
+// removeVPNPath drops one tracked path and reconciles what remains. Shared
+// by withdraw and by a replacement UPDATE whose SID became unusable. Callers
+// hold vpnMu.
+func (a *Applier) removeVPNPath(dk vpnDestKey, pk vpnPathKey, vr *bgp.VPNRoute) {
+	d, released := a.vpnGroups.remove(dk, pk)
+	if released != nil {
+		// The removal event carries no color or next hop, so the reference
+		// recorded against the path is the only way to know which policy
+		// to release.
+		a.srPolicy.unref(released.color, released.endpoint)
+	}
+	if d == nil {
+		// Nothing tracked for this prefix, but the data plane may still
+		// hold an entry this process never saw: with pinned maps an entry
+		// installed before a restart outlives the accumulator, and this
+		// event arriving before the route is re-advertised is the only
+		// chance to remove it. Delete unconditionally; it is a no-op when
+		// the entry is already absent.
+		if err := a.deleteTrigger(vr.Family, vr.Prefix); err != nil {
+			a.logger.Error("remove untracked VPN prefix",
+				zap.String("prefix", vr.Prefix), zap.Error(err))
+		}
+		return
+	}
+	a.reconcileVPNGroup(dk, d)
+}
+
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) {
 	a.vpnMu.Lock()
 	defer a.vpnMu.Unlock()
@@ -234,27 +261,7 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 		// Withdraw bypasses the import-RT filter so a route accepted
 		// earlier is always torn down, and drops only this path: the prefix
 		// survives on whatever other PEs still advertise it.
-		d, released := a.vpnGroups.remove(dk, pk)
-		if released != nil {
-			// The withdraw carries no color or next hop, so the reference
-			// recorded against the path is the only way to know which
-			// policy to release.
-			a.srPolicy.unref(released.color, released.endpoint)
-		}
-		if d == nil {
-			// Nothing tracked for this prefix, but the data plane may still
-			// hold an entry this process never saw: with pinned maps an
-			// entry installed before a restart outlives the accumulator, and
-			// a withdraw arriving before the route is re-advertised is the
-			// only chance to remove it. Delete unconditionally; it is a
-			// no-op when the entry is already absent.
-			if err := a.deleteTrigger(vr.Family, vr.Prefix); err != nil {
-				a.logger.Error("withdraw untracked VPN prefix",
-					zap.String("prefix", vr.Prefix), zap.Error(err))
-			}
-			return
-		}
-		a.reconcileVPNGroup(dk, d)
+		a.removeVPNPath(dk, pk, vr)
 		return
 	}
 	// Import-RT filter: once any VRF binding declares this family, a
@@ -263,16 +270,25 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 	// vpnv6 gate independently as bindings arrive per family.
 	if !a.vrfBindings.EmptyForFamily(vr.Family) {
 		if _, _, ok := a.vrfBindings.MatchImportForFamily(vr.RTs, vr.Family); !ok {
+			// A replacement UPDATE whose RTs no longer match any import
+			// filter must still replace: a path imported earlier under
+			// different RTs cannot survive it (BGP UPDATEs replace the
+			// whole attribute set).
 			a.logger.Warn("VPN route matches no VRF import RT; dropping",
 				zap.String("prefix", vr.Prefix), zap.Strings("rts", vr.RTs))
+			a.removeVPNPath(dk, pk, vr)
 			return
 		}
 	}
 	if vr.SRv6SID == "" {
-		// A VPN route with no SRv6 service SID cannot be encapsulated;
-		// log and skip rather than installing a half-formed entry.
-		a.logger.Warn("VPN route has no SRv6 SID; skipping",
+		// A VPN route with no SRv6 service SID cannot be encapsulated --
+		// including one whose SID information failed RFC 9252 §7 validation
+		// on decode. A BGP UPDATE is an implicit replace, so a previously
+		// installed path for this NLRI must not survive the unusable
+		// update: tear it down exactly like a withdraw before skipping.
+		a.logger.Warn("VPN route has no usable SRv6 SID; removing any installed path",
 			zap.String("prefix", vr.Prefix), zap.String("rd", vr.RD))
+		a.removeVPNPath(dk, pk, vr)
 		return
 	}
 	// Color-based auto-steering is decided per path: the paths aggregated
@@ -311,7 +327,10 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 	if replaced != nil {
 		a.srPolicy.unref(replaced.color, replaced.endpoint)
 	}
-	d, ok := a.vpnGroups.upsert(dk, pk, &vpnPath{sid: vr.SRv6SID, steer: want, nh: vr.NextHop})
+	d, ok := a.vpnGroups.upsert(dk, pk, &vpnPath{
+		sid: vr.SRv6SID, reduced: vr.SIDStructure.IsUSID(),
+		steer: want, nh: vr.NextHop,
+	})
 	if !ok {
 		// Refused by a bound. The reference just taken would otherwise pin
 		// a policy no path holds.
@@ -358,12 +377,14 @@ func (a *Applier) applyUnicast(ur *bgp.UnicastRoute, withdraw bool) {
 	a.logger.Info("unicast route installed", zap.String("prefix", ur.Prefix))
 }
 
-// buildHeadendEntry assembles an H.Encaps headend entry that encapsulates
+// buildHeadendEntry assembles the headend entry that encapsulates
 // matching traffic towards the remote PE's SRv6 service SID. The single
 // segment is the SID itself and the outer destination equals it; parsing
 // the SID once via ParseSegments keeps DstAddr and Segments[0]
 // byte-identical.
-func (a *Applier) buildHeadendEntry(sid string) (*bpf.HeadendEntry, error) {
+// reduced selects H.Encaps.Red -- for a single NEXT-C-SID service SID
+// the data plane then emits no SRH (RFC 9800 reduced encapsulation).
+func (a *Applier) buildHeadendEntry(sid string, reduced bool) (*bpf.HeadendEntry, error) {
 	src, err := a.encapSource()
 	if err != nil {
 		return nil, err
@@ -372,8 +393,12 @@ func (a *Applier) buildHeadendEntry(sid string) (*bpf.HeadendEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse SRv6 SID %q: %w", sid, err)
 	}
+	mode := v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS
+	if reduced {
+		mode = v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED
+	}
 	return &bpf.HeadendEntry{
-		Mode:        uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+		Mode:        uint8(mode),
 		NumSegments: numSegments,
 		SrcAddr:     src,
 		DstAddr:     segments[0],

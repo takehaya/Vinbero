@@ -92,26 +92,35 @@ func NewMupServer(advertiser bgp.MUPController, nextHop string, maxRoutes uint32
 // NEXT_HOP_UNREACHABLE on every DSD. Operator-supplied non-zero structures win,
 // so an explicit override is still possible.
 func fillMUPSIDStructure(mr bgp.MUPRoute, locators *locator.Manager) bgp.SIDStructure {
-	if !mr.SIDStructure.IsZero() || locators == nil || mr.SRv6SID == "" {
+	if !mr.SIDStructure.IsZero() {
 		return mr.SIDStructure
 	}
-	sid, err := netip.ParseAddr(mr.SRv6SID)
+	return sidStructureFromLocators(mr.SRv6SID, locators)
+}
+
+// sidStructureFromLocators derives the RFC 9252 SID Structure for an SRv6
+// service SID from the registered locator that contains it (zero when no
+// locator matches). ArgumentLen is the behavior's actual argument width
+// (RFC 9252 3.2.1.1); the lengths need not sum to 128, so a uSID locator
+// correctly advertises 32/16/16/0 with the container tail outside the
+// structure.
+func sidStructureFromLocators(sidStr string, locators *locator.Manager) bgp.SIDStructure {
+	if locators == nil || sidStr == "" {
+		return bgp.SIDStructure{}
+	}
+	sid, err := netip.ParseAddr(sidStr)
 	if err != nil {
-		return mr.SIDStructure
+		return bgp.SIDStructure{}
 	}
 	loc, ok := locators.FindByContaining(sid)
 	if !ok {
-		return mr.SIDStructure
+		return bgp.SIDStructure{}
 	}
 	return bgp.SIDStructure{
 		LocatorBlockLen: loc.BlockLen,
 		LocatorNodeLen:  loc.NodeLen,
 		FunctionLen:     loc.FunctionLen,
-		// ArgumentLen is the behavior's actual argument width (RFC 9252
-		// 3.2.1.1); the lengths need not sum to 128, so a uSID locator
-		// correctly advertises 32/16/16/0 with the container tail outside
-		// the structure.
-		ArgumentLen: loc.ArgumentLen,
+		ArgumentLen:     loc.ArgumentLen,
 	}
 }
 

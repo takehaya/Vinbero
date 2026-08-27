@@ -624,7 +624,7 @@ func (e *Exporter) buildVPNRoute(st *vrfState, prefix netip.Prefix) bgp.VPNRoute
 	// declared on the same binding ending up on a VPNv4 NLRI); the legacy
 	// st.binding.ExportRTs is the union of every family's RTs.
 	rts := st.binding.ExportRTsForFamily(family)
-	return bgp.VPNRoute{
+	r := bgp.VPNRoute{
 		Family:  family,
 		Prefix:  norm.String(),
 		RD:      st.binding.RD,
@@ -632,6 +632,20 @@ func (e *Exporter) buildVPNRoute(st *vrfState, prefix netip.Prefix) bgp.VPNRoute
 		SRv6SID: sid.String(),
 		NextHop: e.nextHop,
 	}
+	// The SID Structure Sub-Sub-TLV (RFC 9252 §3.2.1) takes its lengths
+	// from the owning locator, except ArgumentLen: RFC 9252 §3.2.1.1 defines
+	// it as the argument width of the advertised behavior, and End.DT4 /
+	// End.DT6 use none -- the locator's argument space is layout, not
+	// behavior. A uSID locator thus advertises 32/16/16/0, which is how the
+	// peer recognizes a NEXT-C-SID service SID.
+	if loc, ok := e.locators.Get(st.binding.DefaultLocator); ok {
+		r.SIDStructure = bgp.SIDStructure{
+			LocatorBlockLen: loc.BlockLen,
+			LocatorNodeLen:  loc.NodeLen,
+			FunctionLen:     loc.FunctionLen,
+		}
+	}
+	return r
 }
 
 // installEndpointSID mints a function from locatorName, builds the SID, and

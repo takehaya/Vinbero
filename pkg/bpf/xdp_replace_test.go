@@ -511,7 +511,7 @@ func TestXDPProgEndXReplaceUSDAdjacency(t *testing.T) {
 		}
 		ret, out := h.run(pkt)
 		if ret != XDP_REDIRECT {
-			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+			fatalNoRedirect(t, ret)
 		}
 		if got, want := outPktDA(t, out), net.ParseIP("2001:db8::2"); !got.Equal(want) {
 			t.Errorf("inner DA = %v, want %v", got, want)
@@ -530,7 +530,7 @@ func TestXDPProgEndXReplaceUSDAdjacency(t *testing.T) {
 		}
 		ret, out := h.run(pkt)
 		if ret != XDP_REDIRECT {
-			t.Fatalf("expected XDP_REDIRECT over the adjacency, got %d", ret)
+			fatalNoRedirect(t, ret)
 		}
 		if got := net.HardwareAddr(out[0:6]); got.String() != mac.String() {
 			t.Errorf("eth dst = %v, want %v", got, mac)

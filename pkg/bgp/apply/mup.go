@@ -406,7 +406,7 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
 		return
 	}
 
-	entry, err := a.buildHeadendEntry(composed)
+	entry, err := a.buildHeadendEntry(composed, false)
 	if err != nil {
 		a.logger.Error("build MUP T1ST headend entry",
 			zap.String("ue_prefix", r.Prefix), zap.Error(err))
@@ -647,7 +647,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated at apply time
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
-	entry, err := a.buildHeadendEntry(st.installedSID)
+	entry, err := a.buildHeadendEntry(st.installedSID, false)
 	if err != nil {
 		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
@@ -786,7 +786,7 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 	// The direct SID is a plain End.DT4/DT6 target: H.Encaps toward it with no
 	// Args.Mob.Session patch (MupArgsOffsetNone), so the TEID stays only the
 	// lookup key.
-	entry, err := a.buildHeadendEntry(sid)
+	entry, err := a.buildHeadendEntry(sid, false)
 	if err != nil {
 		a.logger.Error("build MUP T2ST uplink entry",
 			zap.String("endpoint", r.Endpoint), zap.Error(err))

@@ -175,6 +175,11 @@ type VPNRoute struct {
 	RTs     []string
 	SRv6SID string
 	NextHop string
+	// SIDStructure is the RFC 9252 SID Structure Sub-Sub-TLV layout of
+	// SRv6SID. On advertise it is filled from the owning locator (zero =
+	// omit the sub-sub-TLV); on receive it is what the peer signalled,
+	// which is how a NEXT-C-SID service SID is recognized (see IsUSID).
+	SIDStructure SIDStructure
 	// Color is the value of the Color Extended Community (RFC 9012 §4.3),
 	// or 0 when the route carries none. A non-zero color requests
 	// auto-steering onto the SR Policy keyed by {Color, NextHop}.
@@ -612,6 +617,20 @@ type SIDStructure struct {
 // emit a /0-locator SID that breaks receiver next-hop tracking.
 func (s SIDStructure) IsZero() bool {
 	return s == SIDStructure{}
+}
+
+// IsUSID reports whether the structure describes a NEXT-C-SID service SID
+// (RFC 9800 / RFC 9252): no Argument and a block+node+function that fits a
+// single container half, e.g. F3216's 32/16/16/0. A headend receiving such
+// a SID can use reduced encapsulation (no SRH) for the single-SID case.
+// Transposition does not disqualify: FRR's usid-f3216 format still
+// transposes the function bits into the label, and the receiver folds
+// them back before installing, so the forwarded SID is the full
+// micro-SID either way (and RFC 8986 permits omitting a would-be SL=0
+// SRH for any single-SID encapsulation).
+func (s SIDStructure) IsUSID() bool {
+	return !s.IsZero() && s.ArgumentLen == 0 &&
+		int(s.LocatorBlockLen)+int(s.LocatorNodeLen)+int(s.FunctionLen) <= 64
 }
 
 // Family returns the address family (FamilyMUPIPv4 / FamilyMUPIPv6) the
