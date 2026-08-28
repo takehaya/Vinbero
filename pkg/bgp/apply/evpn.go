@@ -101,6 +101,10 @@ type evpnMcastState struct {
 	bdID  uint16
 	index uint16
 	sid   string
+	// pe is the advertising PE (the route's next hop), recorded so an
+	// unusable re-advertisement tears the flood peer down only when it
+	// comes from the same PE.
+	pe string
 }
 
 // evpnTable holds the EVPN applier's in-memory bookkeeping. peers/fdb/mcast
@@ -223,13 +227,15 @@ func (a *Applier) matchEVPNBD(rts []string) (uint16, bool) {
 	return bdID, true
 }
 
-// isUsableSRv6SID reports whether sid is a routable IPv6 SID. An unspecified
-// (::), IPv4-mapped, or unparseable address would install a black-hole or
-// wrong-target peer, so callers reject the route. The SR Policy decode
-// applies the same guard to transport SIDs.
+// isUsableSRv6SID reports whether sid is a global-scope IPv6 SID a remote
+// PE can be reached at. An unparseable, IPv4-mapped, unspecified (::),
+// loopback (::1), link-local (fe80::/10), or multicast (ff00::/8) address
+// would install a black-hole or wrong-target peer, so callers reject the
+// route -- the same shape the next-hop validator in pkg/bgp enforces.
 func isUsableSRv6SID(sid string) bool {
 	addr, err := netip.ParseAddr(sid)
-	return err == nil && addr.Is6() && !addr.Is4In6() && !addr.IsUnspecified()
+	return err == nil && addr.Is6() && !addr.Is4In6() && !addr.IsUnspecified() &&
+		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() && !addr.IsMulticast()
 }
 
 func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
@@ -329,20 +335,35 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		a.logger.Error("parse EVPN MAC", zap.String("mac", r.MAC), zap.Error(err))
 		return
 	}
+	// dropTracked fails closed for an unusable re-advertisement of a
+	// tracked NLRI: a BGP UPDATE is an implicit replace, so a MAC learned
+	// from an earlier advertisement must not keep forwarding over a path
+	// the route no longer backs (same rule as the per-EVI A-D applier).
+	// Teardown is confined to the PE that taught us the MAC (the EVPN
+	// next hop survives route reflection unchanged): an unusable claim
+	// from a different PE must not move or clear another PE's entry.
+	dropTracked := func() {
+		if st, ok := a.evpn.fdb[fk]; ok && st.pe == r.NextHop {
+			a.withdrawEVPNMac(fk, st)
+		}
+	}
 	bdID, ok := a.matchEVPNBD(r.RTs)
 	if !ok {
+		dropTracked()
 		a.logger.Warn("EVPN RT2 matches no bridge-domain binding; dropping",
 			zap.String("mac", r.MAC), zap.Strings("rts", r.RTs))
 		return
 	}
 	if r.SRv6SID == "" {
-		a.logger.Warn("EVPN RT2 has no SRv6 SID; skipping",
+		dropTracked()
+		a.logger.Warn("EVPN RT2 has no SRv6 SID; removing any previous entry",
 			zap.String("mac", r.MAC), zap.String("rd", r.RD))
 		return
 	}
 	// The End.DT2U SID must be a routable IPv6 SID; see isUsableSRv6SID.
 	if !isUsableSRv6SID(r.SRv6SID) {
-		a.logger.Warn("EVPN RT2 SID is not a usable IPv6 SID; skipping",
+		dropTracked()
+		a.logger.Warn("EVPN RT2 SID is not a usable IPv6 SID; removing any previous entry",
 			zap.String("mac", r.MAC), zap.String("sid", r.SRv6SID))
 		return
 	}
@@ -530,19 +551,30 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 		return
 	}
 
+	// Same implicit-replace rule as RT2, confined to the same advertising
+	// PE: an unusable re-advertisement of a tracked NLRI tears the flood
+	// peer down instead of leaving it stale.
+	dropTracked := func() {
+		if st, ok := a.evpn.mcast[mk]; ok && st.pe == r.NextHop {
+			a.withdrawEVPNMcast(mk, st)
+		}
+	}
 	bdID, ok := a.matchEVPNBD(r.RTs)
 	if !ok {
+		dropTracked()
 		a.logger.Warn("EVPN RT3 matches no bridge-domain binding; dropping",
 			zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
 		return
 	}
 	if r.SRv6SID == "" {
-		a.logger.Warn("EVPN RT3 has no SRv6 SID; skipping", zap.String("rd", r.RD))
+		dropTracked()
+		a.logger.Warn("EVPN RT3 has no SRv6 SID; removing any previous flood peer", zap.String("rd", r.RD))
 		return
 	}
 	// The End.DT2M SID must be a routable IPv6 SID, same guard as RT2.
 	if !isUsableSRv6SID(r.SRv6SID) {
-		a.logger.Warn("EVPN RT3 SID is not a usable IPv6 SID; skipping",
+		dropTracked()
+		a.logger.Warn("EVPN RT3 SID is not a usable IPv6 SID; removing any previous flood peer",
 			zap.String("rd", r.RD), zap.String("sid", r.SRv6SID))
 		return
 	}
@@ -551,6 +583,14 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 	// If the BD or SID moved, tear the old flood peer down before rebuilding.
 	if prev, ok := a.evpn.mcast[mk]; ok {
 		if prev.bdID == bdID && prev.sid == r.SRv6SID {
+			// The forwarding state is unchanged, but the advertising PE may
+			// have moved (a next-hop change with the same SID); refresh the
+			// ledger so a later unusable UPDATE from the current PE still
+			// matches dropTracked's same-PE confinement.
+			if prev.pe != r.NextHop {
+				prev.pe = r.NextHop
+				a.evpn.mcast[mk] = prev
+			}
 			return
 		}
 		a.withdrawEVPNMcast(mk, prev)
@@ -579,7 +619,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 			zap.Uint16("bd_id", bdID), zap.Error(err))
 		return
 	}
-	a.evpn.mcast[mk] = evpnMcastState{bdID: bdID, index: idx, sid: r.SRv6SID}
+	a.evpn.mcast[mk] = evpnMcastState{bdID: bdID, index: idx, sid: r.SRv6SID, pe: r.NextHop}
 	a.logger.Info("EVPN inclusive multicast (BUM) peer installed",
 		zap.String("rd", r.RD), zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 }

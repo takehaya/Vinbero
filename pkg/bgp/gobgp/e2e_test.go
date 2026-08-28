@@ -256,8 +256,14 @@ func TestE2E_VPNv4BgpToXdpEncap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BPF_PROG_TEST_RUN: %v", err)
 	}
-	if ret != bpf.XDP_PASS {
-		t.Fatalf("XDP action = %d, want XDP_PASS (%d) after H.Encaps", ret, bpf.XDP_PASS)
+	// After H.Encaps the program hands the packet to the FIB: on a host
+	// with no route to the SID that is XDP_PASS (kernel forwards), but a
+	// host holding any covering route -- e.g. an RA-learned default on a
+	// LAN -- resolves it and returns XDP_REDIRECT. Both prove the encap
+	// happened; the verdict depends on host state this test does not own.
+	if ret != bpf.XDP_PASS && ret != bpf.XDP_REDIRECT {
+		t.Fatalf("XDP action = %d, want XDP_PASS (%d) or XDP_REDIRECT (%d) after H.Encaps",
+			ret, bpf.XDP_PASS, bpf.XDP_REDIRECT)
 	}
 
 	outerSrc := netip.MustParseAddr(e2eLocatorPfx).As16()
