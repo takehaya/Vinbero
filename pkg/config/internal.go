@@ -23,7 +23,8 @@ type LoggerConfig struct {
 type BpfConfig struct {
 	DeviceMode string `yaml:"device_mode,omitempty" default:"driver"`
 	// VerifierLogLevel asks the kernel for a verifier log on every program
-	// load: 1 for instructions, 2 for branches. Off by default because the
+	// load: 1 logs branches, 2 logs every instruction. Off by default
+	// because the
 	// log costs real time per load and cilium/ebpf already requests one on
 	// its own when a program fails to verify. Turn it on to debug a load.
 	VerifierLogLevel int `yaml:"verifier_log_level,omitempty" default:"0"`

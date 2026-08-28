@@ -61,9 +61,13 @@ func sharedCollection(tb testing.TB, constants map[string]any) *BpfObjects {
 	return objs
 }
 
-// resetSharedCollection empties every map a test could have written.
-// PROG_ARRAYs are left alone: they hold the tail-call targets that
-// ReadCollection populated, and clearing them would break dispatch.
+// resetSharedCollection empties every map a test could have written and
+// puts the tail-call targets back.
+//
+// The PROG_ARRAYs cannot be left alone: tests register extra slots in them,
+// a plugin slot for instance, and do not always remove them, so the next
+// test would not get what a fresh load gives it. Emptying them and calling
+// populateProgArrays restores exactly the built-in targets.
 func resetSharedCollection(tb testing.TB, objs *BpfObjects) {
 	tb.Helper()
 	maps := reflect.ValueOf(objs.BpfMaps)
@@ -76,6 +80,9 @@ func resetSharedCollection(tb testing.TB, objs *BpfObjects) {
 			tb.Fatalf("failed to reset map %s: %v", maps.Type().Field(i).Name, err)
 		}
 	}
+	if err := populateProgArrays(objs); err != nil {
+		tb.Fatalf("failed to restore the tail-call targets: %v", err)
+	}
 }
 
 func clearMap(m *ebpf.Map) error {
@@ -84,8 +91,6 @@ func clearMap(m *ebpf.Map) error {
 		return err
 	}
 	switch info.Type {
-	case ebpf.ProgramArray:
-		return nil
 	case ebpf.Array, ebpf.PerCPUArray:
 		return zeroArray(m, info)
 	default:

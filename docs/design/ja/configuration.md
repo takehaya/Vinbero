@@ -31,15 +31,16 @@ internal:
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `device_mode` | enum | `driver` | XDP attach mode。`generic` / `driver` / `offload` |
-| `verifier_log_level` | int | `2` | eBPF verifier ログレベル (0-4) |
-| `verifier_log_size` | uint32 | `1073741823` | verifier log バッファサイズ |
+| `verifier_log_level` | int | `0` | eBPF verifier のログレベル。0 で無効、1 で branch、2 で命令単位 |
+| `verifier_log_size` | uint32 | `0` | verifier log バッファの初期サイズ。0 で既定値、上限は 64 MiB |
 
 ```yaml
 internal:
   bpf:
     device_mode: generic       # veth / netns テスト時は generic
-    verifier_log_level: 2
 ```
+
+`verifier_log_level` は既定で無効です。ログはプログラムごとに生成されるため、有効にすると load が目に見えて遅くなります。検証に失敗した場合は指定しなくてもライブラリがログ付きで再試行するので、通常は触る必要がありません。load そのものを追いたいときだけ 1 か 2 を設定します。
 
 `device_mode` の使い分け:
 - `generic`: どの NIC / veth でも動く汎用モード。dev / test 向け
@@ -237,7 +238,6 @@ internal:
     - plgcnt-rt2rt3
   bpf:
     device_mode: generic          # veth は native XDP 非対応
-    verifier_log_level: 2
   server:
     bind: "127.0.0.1:8082"
   logger:

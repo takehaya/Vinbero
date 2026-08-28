@@ -44,8 +44,9 @@ var pinnedControlMaps = []string{
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ../../src -I /usr/include/x86_64-linux-gnu
 
-// maxVerifierLogSize caps internal.bpf.verifier_log_size. The default in
-// the config is close to 1 GiB, which would be allocated per program.
+// maxVerifierLogSize caps internal.bpf.verifier_log_size. The buffer is
+// allocated per program and grows on demand, so the cap only stops a large
+// configured value from committing that much memory up front.
 const maxVerifierLogSize = 64 * 1024 * 1024
 
 func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, error) {
@@ -109,8 +110,6 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 	if cfg != nil && cfg.InternalConfig.BpfOptions.VerifierLogLevel > 0 {
 		logSize := cfg.InternalConfig.BpfOptions.VerifierLogSize
 		if logSize == 0 || logSize > maxVerifierLogSize {
-			// The buffer is per program and grows on demand, so a huge
-			// configured value only costs memory up front.
 			logSize = maxVerifierLogSize
 		}
 		collOpts.Programs = ebpf.ProgramOptions{
