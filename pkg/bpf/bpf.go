@@ -46,7 +46,8 @@ var pinnedControlMaps = []string{
 
 // maxVerifierLogSize caps internal.bpf.verifier_log_size. The buffer is
 // allocated per program and grows on demand, so the cap only stops a large
-// configured value from committing that much memory up front.
+// configured value from committing that much memory up front. Leaving the
+// setting at zero commits nothing: cilium/ebpf sizes the buffer itself.
 const maxVerifierLogSize = 64 * 1024 * 1024
 
 func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, error) {
@@ -108,8 +109,10 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 	// load needs to be debugged.
 	collOpts := &ebpf.CollectionOptions{}
 	if cfg != nil && cfg.InternalConfig.BpfOptions.VerifierLogLevel > 0 {
+		// Zero leaves LogSizeStart unset so cilium/ebpf picks its own
+		// starting size and grows from there.
 		logSize := cfg.InternalConfig.BpfOptions.VerifierLogSize
-		if logSize == 0 || logSize > maxVerifierLogSize {
+		if logSize > maxVerifierLogSize {
 			logSize = maxVerifierLogSize
 		}
 		collOpts.Programs = ebpf.ProgramOptions{

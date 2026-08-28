@@ -32,7 +32,7 @@ internal:
 |---|---|---|---|
 | `device_mode` | enum | `driver` | XDP attach mode。`generic` / `driver` / `offload` |
 | `verifier_log_level` | int | `0` | eBPF verifier のログレベル。0 で無効、1 で branch、2 で命令単位 |
-| `verifier_log_size` | uint32 | `0` | verifier log バッファの初期サイズ。0 で既定値、上限は 64 MiB |
+| `verifier_log_size` | uint32 | `0` | verifier log バッファの初期サイズ。0 で cilium/ebpf の既定に任せ、上限は 64 MiB |
 
 ```yaml
 internal:
@@ -40,7 +40,7 @@ internal:
     device_mode: generic       # veth / netns テスト時は generic
 ```
 
-`verifier_log_level` は既定で無効です。ログはプログラムごとに生成されるため、有効にすると load が目に見えて遅くなります。検証に失敗した場合は指定しなくてもライブラリがログ付きで再試行するので、通常は触る必要がありません。load そのものを追いたいときだけ 1 か 2 を設定します。
+`verifier_log_level` は既定で無効です。ログはプログラムごとに生成されるため、有効にすると load が目に見えて遅くなります。検証に失敗した場合は指定しなくても cilium/ebpf が branch レベルのログ付きで再試行するので、通常は触る必要がありません。設定が変えるのは失敗時の error に載るログの詳細度で、2 にすると命令単位になります。load に成功したプログラムのログは出力しません。
 
 `device_mode` の使い分け:
 - `generic`: どの NIC / veth でも動く汎用モード。dev / test 向け

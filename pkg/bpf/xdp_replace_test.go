@@ -55,6 +55,10 @@ func replDA(csid uint32, idx uint8) net.IP {
 func TestXDPProgEndReplace(t *testing.T) {
 	h := newXDPTestHelper(t)
 	h.createSidFunctionReplace("fd00:aabb:ccdd:1111:2222::/80", actionEndReplace, 0, [16]byte{}, 4)
+	// The USD subtest needs the same behavior with a different flavor. It
+	// goes on its own locator rather than a second helper, whose map reset
+	// would drop the entry above out from under the later subtests.
+	h.createSidFunctionReplace("fd00:aabb:ccdd:3333:4444::/80", actionEndReplace, flavorUSD, [16]byte{}, 4)
 
 	src := net.ParseIP("fd00:1:1::1")
 
@@ -202,16 +206,17 @@ func TestXDPProgEndReplace(t *testing.T) {
 	t.Run("terminal non-tunnel payload with USD passes up", func(t *testing.T) {
 		// RFC 8986 Sec.4.16.3: USD decaps tunnelled payloads only; a plain
 		// ICMPv6 terminal packet keeps normal upper-layer processing.
-		h2 := newXDPTestHelper(t)
-		h2.createSidFunctionReplace("fd00:aabb:ccdd:1111:2222::/80", actionEndReplace, flavorUSD, [16]byte{}, 4)
 		segs := []net.IP{mkContainer32(0, 0, 0, 0)}
-		pkt, err := buildSRv6Packet(src, replDA(0x11112222, 0), segs, 0)
+		pkt, err := buildSRv6Packet(src, replDA(0x33334444, 0), segs, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		ret, _ := h2.run(pkt)
+		ret, out := h.run(pkt)
 		if ret != XDP_PASS {
 			t.Errorf("expected XDP_PASS, got %d", ret)
+		}
+		if got, want := outPktDA(t, out), replDA(0x33334444, 0); !got.Equal(want) {
+			t.Errorf("DA = %v, want %v (untouched)", got, want)
 		}
 	})
 

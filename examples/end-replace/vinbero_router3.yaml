@@ -3,8 +3,6 @@ internal:
     - repl-rt3rt2  # Interface towards router2 (with "repl-" prefix)
   bpf:
     device_mode: generic  # Required for veth pairs
-    verifier_log_level: 2
-    verifier_log_size: 1073741823
   server:
     bind: "127.0.0.1:8096"
   logger:

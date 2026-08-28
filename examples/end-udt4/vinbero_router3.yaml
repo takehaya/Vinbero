@@ -4,8 +4,6 @@ internal:
     - udt4-rt3h2   # Interface towards host2 (in vrf100)
   bpf:
     device_mode: generic  # Required for veth pairs
-    verifier_log_level: 2
-    verifier_log_size: 1073741823
   server:
     bind: "127.0.0.1:8092"
   logger:

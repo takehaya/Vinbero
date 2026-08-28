@@ -43,6 +43,11 @@ func sharedCollectionKey(constants map[string]any) string {
 
 // sharedCollection returns the collection for constants, loading it on first
 // use, with every map back in the state a fresh load would have left it.
+//
+// The reset is what keeps tests apart, so a test gets one helper: taking a
+// second one wipes the map state the first has already written. A test that
+// needs two configurations puts them on distinct keys of the same helper, or
+// splits into two tests.
 func sharedCollection(tb testing.TB, constants map[string]any) *BpfObjects {
 	tb.Helper()
 	sharedCollMu.Lock()
@@ -123,7 +128,9 @@ func zeroArray(m *ebpf.Map, info *ebpf.MapInfo) error {
 	return nil
 }
 
-// deleteAllKeys drains a hash or LPM trie. Keys are collected first: the
+// deleteAllKeys drains every map type that supports delete, which is all of
+// them except the arrays: hashes, LPM tries and the PROG_ARRAYs whose
+// tail-call targets populateProgArrays puts back. Keys are collected first: the
 // iterator's behavior while the map is being modified is not defined.
 func deleteAllKeys(m *ebpf.Map, info *ebpf.MapInfo) error {
 	var keys [][]byte
