@@ -1,6 +1,10 @@
-# End.AM (Masquerading Proxy) Example
+# SRv6 End.AM
 
-draft-ietf-spring-srv6-service-programming の End.AM を netns で検証する example です。SR-unaware なサービスに SRH 付きのままパケットを渡し、宛先だけを最終 segment に偽装します。
+*(日本語: [README.ja.md](./README.ja.md))*
+
+netns example for End.AM from draft-ietf-spring-srv6-service-programming.
+The packet keeps its SRH on the way to the SR-unaware service; only the
+destination is masqueraded as the last segment.
 
 ## Topology
 
@@ -13,13 +17,19 @@ graph LR
     router2 --- svc[svc<br/>SR-unaware IPv6 forwarder]
 ```
 
-- forward 方向は router1 が H.Encaps で `fc00:2::150, fc00:3::3` を積みます。
-- `fc00:2::150` は router2 の Vinbero が End.AM として処理します。SL を消費して DA を最終 segment (`fc00:3::3`) に書き換え、SRH を残したまま svc へ渡します。
-- svc は素の IPv6 router です。パケットは自分宛てではないため SRH を見ずにそのまま転送し、同じ wire で router2 に返します。
-- 復路は packet 内の SRH から DA を復元します。AS / AD と違い、router2 側に out-of-band の状態を一切持ちません。
-- return 方向 (host2 から host1) は proxy を通らない Linux native の経路です。
+- In the forward direction router1 pushes `fc00:2::150, fc00:3::3` with H.Encaps.
+- `fc00:2::150` is handled by Vinbero on router2 as End.AM. It consumes SL,
+  rewrites the DA to the last segment (`fc00:3::3`), and hands the packet to
+  svc with the SRH still in place.
+- svc is a plain IPv6 router. The packet is not addressed to it, so it
+  forwards it without looking at the SRH and returns it to router2 on the
+  same wire.
+- The return path restores the DA from the SRH carried in the packet itself.
+  Unlike AS and AD, router2 keeps no out-of-band state.
+- The return direction (host2 to host1) is plain Linux forwarding and does
+  not traverse the proxy.
 
-## 実行方法
+## Usage
 
 ```bash
 sudo ./setup.sh
@@ -27,8 +37,11 @@ sudo ./test.sh
 sudo ./teardown.sh
 ```
 
-## テスト内容
+## What is verified
 
-- Phase 1 は Linux native の End を baseline にして underlay の疎通を確認します (Linux に End.AM は無いため proxy は bypass)。
-- Phase 2 は Vinbero の End.AM で svc 経由の chain を検証します。svc 側 veth の rx counter でサービス通過を確認します。
-- 同じ IFACE-IN に 2 つ目の proxy SID を作ると reject されること (return circuit の 1:1 制約) も確認します。
+- Phase 1 establishes an underlay baseline with Linux native End (Linux has
+  no End.AM, so the proxy is bypassed).
+- Phase 2 exercises the chain through svc with Vinbero's End.AM. The rx
+  counter on the svc-side veth confirms the service was traversed.
+- Creating a second proxy SID on the same IFACE-IN is rejected (the return
+  circuit is 1:1).

@@ -1083,7 +1083,10 @@ func TestXDPProgEndT(t *testing.T) {
 		{"End.T SL=1 default VRF", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::6", "fd00:1:100::5"}, 1, 0, XDP_PASS, true, "fd00:1:100::6"},
 		{"End.T SL=0 (pass)", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::6", "fd00:1:100::5"}, 0, 0, XDP_PASS, false, ""},
 		{"End.T SL=2", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::7", "fd00:1:100::6", "fd00:1:100::5"}, 2, 0, XDP_PASS, true, "fd00:1:100::6"},
-		{"End.T SL=1 with VRF", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::6", "fd00:1:100::5"}, 1, 999, XDP_PASS, true, "fd00:1:100::6"},
+		// A VRF-bound lookup that does not resolve fails closed: the kernel
+		// cannot repeat a table-T lookup for a packet from a non-VRF
+		// ingress, so escaping to XDP_PASS would break the table binding.
+		{"End.T SL=1 with VRF", "fd00:1:1::1", "fd00:1:100::5", []string{"fd00:1:100::6", "fd00:1:100::5"}, 1, 999, XDP_DROP, true, "fd00:1:100::6"},
 	}
 
 	for _, tt := range tests {

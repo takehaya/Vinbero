@@ -1,0 +1,75 @@
+# SRv6 Headend (H.Encaps) IPv6 Playground
+
+*(English: [README.md](./README.md))*
+
+Vinbero XDPによるSRv6 H.Encaps (Headend Encapsulation) for IPv6のデモ環境です。
+IPv6パケットをIPv6+SRHでカプセル化します（IPv6-in-IPv6）。
+
+## トポロジー
+
+```mermaid
+graph LR
+    host1[host1<br/>2001:1::1] -->|IPv6| router1[router1 / Vinbero XDP<br/>2001:1::2<br/>fc00:1::1<br/>H.Encaps<br/>Trigger: 2001:2::/64<br/>Segments: fc00:2::1, fc00:3::3]
+    router1 -->|SRv6| router2[router2<br/>fc00:12::2<br/>End]
+    router2 -->|SRv6| router3[router3<br/>2001:2::2<br/>fc00:3::3<br/>End.DX6]
+    router3 -->|IPv6| host2[host2<br/>2001:2::1]
+```
+
+**パケットの流れ（host1→host2の例）:**
+1. host1が2001:2::1にping6を送信 (IPv6)
+2. **router1 (Vinbero XDP)** がH.Encapsを実行:
+   - IPv6パケットを外側IPv6+SRHでカプセル化
+   - Outer DA: fc00:2::1 (最初のセグメント)
+   - Segment List: [fc00:2::1, fc00:3::3]
+3. router2がfc00:2::1でEnd操作を実行（SL減少、次のセグメントへ）
+4. router3がfc00:3::3でEnd.DX6を実行（内側IPv6を取り出す）
+5. host2がping6を受信
+
+## クイックスタート
+
+```bash
+sudo ./setup.sh    # 環境構築
+sudo ./test.sh     # テスト実行
+sudo ./teardown.sh # クリーンアップ
+```
+
+## 手動実行
+
+### 1. 環境構築とVinbero起動
+
+```bash
+sudo ./setup.sh
+
+# router1のLinux native SRv6ルートを削除
+sudo ip netns exec hv6-router1 ip -6 route del 2001:2::/64 2>/dev/null
+
+# Vinbero起動
+sudo ip netns exec hv6-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
+```
+
+### 2. HeadendV6エントリ登録
+
+```bash
+sudo ip netns exec hv6-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 hv6 create --trigger-prefix 2001:2::/64 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
+```
+
+### 3. テスト
+
+```bash
+sudo ip netns exec hv6-host1 ping6 -c 3 2001:2::1
+```
+
+#### パケットキャプチャ
+
+```bash
+# router1-router2間でSRv6パケットを確認
+sudo ip netns exec hv6-router2 tcpdump -i hv6-rt2rt1 -n ip6
+```
+
+外側IPv6+SRH内に内側IPv6パケットがカプセル化されていることが確認できます。
+
+### 4. 環境のクリーンアップ
+
+```bash
+sudo ./teardown.sh
+```

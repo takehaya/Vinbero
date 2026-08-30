@@ -59,6 +59,8 @@ flowchart LR
 - encap entry の生成: 一致した経路を H.Encaps の headend エントリ (segments = [service SID]) に変換し、prefix を鍵にした eBPF の LPM trie (headend map) へ書きます。書き込みには owner tag を付け、後で同じ owner の経路だけを正確に withdraw できるようにします。
 - encap source: outer の送信元 IPv6 は、設定したローカル locator の prefix から取ります。
 
+BGP の UPDATE は属性全体の暗黙の置換なので、applier は追跡済み NLRI の再広告が使えない内容になったときも withdraw と同じ撤去を行います。service SID が使えなくなった再広告 (空のほか、全ゼロの `::` のような routable でない値。decode 時の検証で不正と判定された場合を含む) は、L3VPN の headend エントリ、EVPN RT2 の FDB / bd_peer、RT3 の flood bd_peer、per-EVI A-D の aliasing 寄与、MUP ISD/DSD の discovery とその解決先のセッションを撤去してから読み飛ばします。EVPN RT2/RT3 の撤去は、その状態を教えた PE (next hop) からの再広告に限定します (per-EVI A-D は従来どおり NLRI 単位で撤去します)。RT がどの import filter にも一致しなくなった再広告の撤去は、filter を持つ経路種別、つまり L3VPN、EVPN RT2/RT3 と per-EVI A-D (bridge-domain binding 不一致)、MUP の session route (T1ST/T2ST) に適用します。MUP の discovery route (ISD/DSD) は cross-VRF 解決のため import-RT filter を意図的に迂回するので、RT 不一致による撤去はありません。
+
 ```mermaid
 flowchart LR
     PEER["BGP peer"]

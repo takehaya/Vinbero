@@ -196,6 +196,13 @@ jobs:
           - end-ad
           - end-am
           - end-an
+          - end-un
+          - end-ua
+          - end-un-usd
+          - end-ut
+          - end-udt4
+          - end-replace
+          - end-lbs
           - headend-v4
           - headend-v6
           - headend-l2

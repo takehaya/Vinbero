@@ -117,7 +117,7 @@ func (a *Applier) reprobeSRPolicy(key policyKey) {
 		paths := make([]bpf.EcmpPath, 0, len(ms))
 		rebuilt := true
 		for _, m := range ms {
-			entry, err := a.buildHeadendEntry(m.sid)
+			entry, err := a.buildHeadendEntry(m.sid, m.reduced)
 			if err != nil {
 				a.logger.Error("rebuild probe targets after SR Policy transport change",
 					zap.String("prefix", dk.prefix), zap.String("sid", m.sid), zap.Error(err))

@@ -44,6 +44,12 @@ var pinnedControlMaps = []string{
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS Bpf ../../src/xdp_prog.c -- -I ../../src -I /usr/include/x86_64-linux-gnu
 
+// maxVerifierLogSize caps internal.bpf.verifier_log_size. The buffer is
+// allocated per program and grows on demand, so the cap only stops a large
+// configured value from committing that much memory up front. Leaving the
+// setting at zero commits nothing: cilium/ebpf sizes the buffer itself.
+const maxVerifierLogSize = 64 * 1024 * 1024
+
 func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, error) {
 	// Remove memory limit for BPF
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -96,8 +102,24 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 		}
 	}
 
-	collOpts := &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{LogSizeStart: 64 * 1024 * 1024, LogLevel: ebpf.LogLevelInstruction},
+	// No verifier log is requested by default. cilium/ebpf asks the kernel
+	// for one on its own when a program fails to verify, so the only thing
+	// an unconditional log buys is the cost of producing it: the verifier
+	// writes a line per instruction for every program in the collection, on
+	// every load. internal.bpf.verifier_log_level turns it back on when a
+	// load needs to be debugged.
+	collOpts := &ebpf.CollectionOptions{}
+	if cfg != nil && cfg.InternalConfig.BpfOptions.VerifierLogLevel > 0 {
+		// Zero leaves LogSizeStart unset so cilium/ebpf picks its own
+		// starting size and grows from there.
+		logSize := cfg.InternalConfig.BpfOptions.VerifierLogSize
+		if logSize > maxVerifierLogSize {
+			logSize = maxVerifierLogSize
+		}
+		collOpts.Programs = ebpf.ProgramOptions{
+			LogLevel:     ebpf.LogLevel(cfg.InternalConfig.BpfOptions.VerifierLogLevel),
+			LogSizeStart: logSize,
+		}
 	}
 	if cfg != nil && cfg.Setting.PinMaps.Enabled {
 		pinPath := cfg.Setting.PinMaps.Path
@@ -161,6 +183,11 @@ func populateProgArrays(objs *BpfObjects) error {
 		23: objs.TailcallEndpointEndDt2m,
 		24: objs.TailcallEndpointEndAd,
 		25: objs.TailcallEndpointEndAn,
+		26: objs.TailcallEndpointEndUn,
+		27: objs.TailcallEndpointEndUa,
+		28: objs.TailcallEndpointEndUt,
+		29: objs.TailcallEndpointEndReplace,
+		30: objs.TailcallEndpointEndX_replace,
 	}
 	for idx, prog := range endpointProgs {
 		if err := objs.SidEndpointProgs.Update(idx, prog, ebpf.UpdateAny); err != nil {

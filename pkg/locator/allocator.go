@@ -47,12 +47,13 @@ var _ FunctionAllocator = (*bitmapAllocator)(nil)
 // usage finite -- a 16-bit function fits 8 KiB, a 24-bit function 2 MiB,
 // a 32-bit function 512 MiB).
 type bitmapAllocator struct {
-	mu        sync.Mutex
-	bits      []uint64 // bit i set => function i in use
-	max       uint32   // inclusive upper bound on storable function
-	autoStart uint32
-	autoEnd   uint32
-	autoNext  uint32 // hint for the next auto search; rolls forward to avoid scanning from 0 every time
+	mu          sync.Mutex
+	bits        []uint64 // bit i set => function i in use
+	max         uint32   // inclusive upper bound on storable function
+	autoStart   uint32
+	autoEnd     uint32
+	autoNext    uint32 // hint for the next auto search; rolls forward to avoid scanning from 0 every time
+	reserveZero bool   // uSID reserves CSID 0 as the container terminator
 }
 
 // NewBitmapAllocator returns an allocator preconfigured for loc. The
@@ -63,11 +64,12 @@ func NewBitmapAllocator(loc *Locator) FunctionAllocator {
 	max := loc.MaxFunction()
 	words := (uint64(max) + 64) / 64 // round up so the highest bit fits
 	return &bitmapAllocator{
-		bits:      make([]uint64, words),
-		max:       max,
-		autoStart: loc.FunctionAutoStart,
-		autoEnd:   loc.FunctionAutoEnd,
-		autoNext:  loc.FunctionAutoStart,
+		bits:        make([]uint64, words),
+		max:         max,
+		autoStart:   loc.FunctionAutoStart,
+		autoEnd:     loc.FunctionAutoEnd,
+		autoNext:    loc.FunctionAutoStart,
+		reserveZero: loc.Behavior == BehaviorUSID,
 	}
 }
 
@@ -76,6 +78,9 @@ func (a *bitmapAllocator) Allocate(requested *uint32) (uint32, error) {
 	defer a.mu.Unlock()
 	if requested != nil {
 		f := *requested
+		if a.reserveZero && f == 0 {
+			return 0, fmt.Errorf("%w: uSID CSID 0 is the container terminator", ErrFunctionReserved)
+		}
 		if f > a.max {
 			return 0, fmt.Errorf("%w: %d > %d", ErrFunctionOutsideAutoRange, f, a.max)
 		}
@@ -117,6 +122,9 @@ func (a *bitmapAllocator) autoFindLocked(from, to uint32) (uint32, bool) {
 	toBit := to % 64
 	for w := fromWord; w <= toWord; w++ {
 		free := ^a.bits[w]
+		if a.reserveZero && w == 0 {
+			free &^= 1
+		}
 		if w == fromWord && fromBit > 0 {
 			free &^= (uint64(1) << fromBit) - 1
 		}

@@ -16,10 +16,22 @@ import (
 // handler owns proto translation and error mapping.
 type LocatorServer struct {
 	mgr *locator.Manager
+	// add registers a locator. SidFunctionService supplies a version that
+	// also claims the CSIDs of uA entries already installed inside it,
+	// under its own lock so a concurrent SidFunctionCreate cannot take one
+	// in between. nil falls back to a plain Manager.Add.
+	add func(*locator.Locator) error
 }
 
-func NewLocatorServer(mgr *locator.Manager) *LocatorServer {
-	return &LocatorServer{mgr: mgr}
+func NewLocatorServer(mgr *locator.Manager, add func(*locator.Locator) error) *LocatorServer {
+	return &LocatorServer{mgr: mgr, add: add}
+}
+
+func (s *LocatorServer) addLocator(loc *locator.Locator) error {
+	if s.add != nil {
+		return s.add(loc)
+	}
+	return s.mgr.Add(loc)
 }
 
 func (s *LocatorServer) LocatorCreate(
@@ -39,7 +51,7 @@ func (s *LocatorServer) LocatorCreate(
 			})
 			continue
 		}
-		if err := s.mgr.Add(&loc); err != nil {
+		if err := s.addLocator(&loc); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: in.GetName(),
 				Reason:        err.Error(),

@@ -12,10 +12,9 @@ option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 // advertise can encode the SRv6 SID Structure sub-sub-TLV (RFC 9252)
 // directly from the locator's metadata.
 //
-// Phase 1 implements Classic SRv6 (RFC 8986). uSID locators
-// (RFC 9800) are accepted at the API surface but reject SID build /
-// parse with Unimplemented; full support arrives in Phase 2 of the
-// GoBGP integration plan.
+// Classic SRv6 (RFC 8986) and uSID (RFC 9800, F3216) locators are both
+// supported: uSID locators build and parse 16-bit service uSIDs with
+// CSID 0 reserved as the container terminator.
 service LocatorService {
   rpc LocatorCreate(LocatorCreateRequest) returns (LocatorCreateResponse);
   rpc LocatorDelete(LocatorDeleteRequest) returns (LocatorDeleteResponse);
@@ -38,9 +37,12 @@ enum LocatorBehaviorMode {
 // and the bit layout used to slice SIDs from it.
 //
 // The (block_len + node_len) bits at the front of the prefix identify
-// the PE; the next function_len bits identify the local behavior; the
-// last argument_len bits are reserved for argument material (END.X
-// neighbor selectors, etc.). Their sum must equal 128.
+// the PE; the next function_len bits identify the local behavior.
+// Constraints depend on behavior: CLASSIC requires the four lengths to
+// sum to 128 (argument_len holds the remainder); USID is fixed to the
+// F3216 structure (block_len == 32, node_len == 16, function_len == 16,
+// argument_len == 0), with the container tail after the function left
+// implicit.
 message Locator {
   string name = 1; // Operator-chosen locator name, e.g. "LOC1-CLASSIC".
   string prefix = 2; // IPv6 prefix, e.g. "fd00:1:1::/48".
@@ -58,8 +60,10 @@ message Locator {
 // available slot from [function_auto_start, function_auto_end]. When
 // set, any value inside the function_len bit width is accepted -- manual
 // allocations may sit outside the auto-allocator range so operator-
-// reserved low / high slots can still be claimed explicitly. Conflicts
-// (value already in use) surface as a per-entry error.
+// reserved low / high slots can still be claimed explicitly -- except
+// CSID 0 on USID locators, which is reserved as the container
+// terminator and rejected on every allocation path. Conflicts (value
+// already in use) surface as a per-entry error.
 message LocatorRef {
   string name = 1;
   optional uint32 function = 2;

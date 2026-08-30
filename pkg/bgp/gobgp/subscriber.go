@@ -142,12 +142,17 @@ func decodeEndpointBehavior(attrs []gobgppkt.PathAttributeInterface, label uint3
 				if !ok || len(info.SID) != 16 {
 					continue
 				}
-				if length, offset, ok := transpositionParams(info); ok {
+				structure, ok := sidStructureOf(info, svc.Type == gobgppkt.TLVTypeSRv6L3Service)
+				if !ok {
+					// The SID decode skips this sub-TLV, so its
+					// behavior must be skipped with it.
+					continue
+				}
+				if structure.TranspositionLen != 0 {
 					folded := make([]byte, 16)
 					copy(folded, info.SID)
-					if !foldTransposedLabel(folded, label, length, offset) {
-						// The SID decode skips this sub-TLV, so its
-						// behavior must be skipped with it.
+					if !foldTransposedLabel(folded, label,
+						structure.TranspositionLen, structure.TranspositionOffset) {
 						continue
 					}
 				}

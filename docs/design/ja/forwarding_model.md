@@ -38,7 +38,7 @@ flowchart TD
 
 パケットはまず ingress front door を通ります。`ingress_vrf_map` を {ifindex, vlan} で引いて vrf_id を決め、`tailcall_ctx.vrf_id` に載せて以降のハンドラへ運びます。front door が無効なら全パケットが global VRF (vrf_id 0、underlay) になります。default-deny を有効にすると、どの VRF にも分類されない access circuit を drop できます。
 
-local SID 宛のパケットは `sid_function_map` で behavior を引き、`sid_aux_map` に置いた behavior ごとのパラメータで配送先が決まります。decap 系 (End.DT4/DT6/DT46) は aux の vrf_ifindex が指す kernel VRF へ渡し、そこからは kernel の per-VRF FIB が転送します。End.DT2/DT2M は bridge domain へ、End や End.X や GTP behavior は global の next hop へ向かいます。
+local SID 宛のパケットは `sid_function_map` で behavior を引き、`sid_aux_map` に置いた behavior ごとのパラメータで配送先が決まります。decap 系 (End.DT4/DT6/DT46) は aux の vrf_ifindex が指す kernel VRF へ渡し、そこからは kernel の per-VRF FIB が転送します。End.DT2/DT2M は bridge domain へ、End や End.X や GTP behavior は global の next hop へ向かいます。uSID の uN と uA も同じ `sid_function_map` に載りますが、これらは /128 でなく locator prefix (/48 と /64) のエントリで、DA を書き換えながら転送します。詳細は [usid.md](usid.md) を参照してください。
 
 encap 対象のパケットは `headend_v4/v6_map` を prefix で引きます。エントリが H.Encaps なら service SID へ encap し、color が付いていれば `sr_policy_map` を policy_id で引いて transport SID を前置します。エントリが MUP の gate なら、front door で決めた vrf_id を使って `mup_uplink_v4/v6_map` を {vrf_id, endpoint, TEID} で引いて direct SID を得ます。同じ N3 endpoint と TEID 空間を複数の VRF が共有しても、vrf_id がキーに入るので衝突しません。
 

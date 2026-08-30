@@ -1,15 +1,19 @@
-# SRv6 Headend (H.Encaps.L2) L2VPN Playground
+# SRv6 H.Encaps.L2 Playground
 
-Vinbero XDPによるSRv6 H.Encaps.L2 (Headend L2 Encapsulation) for L2VPNのデモ環境です。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-## 概要
+Demo environment for SRv6 H.Encaps.L2 (headend L2 encapsulation) for L2VPN on
+Vinbero XDP.
 
-H.Encaps.L2は、L2フレーム全体（Ethernetヘッダーを含む）をSRv6パケットにカプセル化します。
-これにより、L2ドメインをSRv6ネットワーク経由で拡張するL2VPNを実現できます。
+## Overview
 
-**トリガー**: VLAN ID（VLANタグ付きパケット、またはVLAN ID 0でタグなしパケット）
+H.Encaps.L2 encapsulates a whole L2 frame, Ethernet header included, into an
+SRv6 packet. That gives an L2VPN which extends an L2 domain across an SRv6
+network.
 
-## トポロジー
+**Trigger**: VLAN ID (a VLAN-tagged packet, or VLAN ID 0 for untagged)
+
+## Topology
 
 ```mermaid
 graph LR
@@ -19,74 +23,90 @@ graph LR
     router3 -->|VLAN 100| host2[host2<br/>VLAN 100<br/>172.16.100.2]
 ```
 
-**パケットの流れ（host1→host2の例）:**
-1. host1がVLAN 100タグ付きフレームを送信 (172.16.100.1 → 172.16.100.2)
-2. **router1 (Vinbero XDP)** がH.Encaps.L2を実行:
-   - L2フレーム全体をIPv6+SRHでカプセル化
-   - Next Header: IPPROTO_ETHERNET (143)
-   - Outer DA: fc00:2::1 (最初のセグメント)
-   - Segment List: [fc00:2::1, fc00:3::3]
-3. router2がfc00:2::1でEnd操作を実行（SL減少、次のセグメントへ）
-4. router3がfc00:3::3でEnd.DX2を実行（L2フレームに戻す）
-5. host2がL2フレームを受信
+**Packet walk (host1 to host2):**
+1. host1 sends a VLAN 100 tagged frame (172.16.100.1 to 172.16.100.2)
+2. **router1 (Vinbero XDP)** runs H.Encaps.L2:
+   - encapsulates the whole L2 frame in IPv6 + SRH
+   - next header: IPPROTO_ETHERNET (143)
+   - outer DA: fc00:2::1 (the first segment)
+   - segment list: [fc00:2::1, fc00:3::3]
+3. router2 runs End on fc00:2::1: decrement SL, move to the next segment
+4. router3 runs End.DX2 on fc00:3::3 and restores the L2 frame
+5. host2 receives the frame
 
-## クイックスタート
+## Quick start
 
 ```bash
-sudo ./setup.sh    # 環境構築
-sudo ./test.sh     # テスト実行
-sudo ./teardown.sh # クリーンアップ（環境削除）
+sudo ./setup.sh    # build the environment
+sudo ./test.sh     # run the tests
+sudo ./teardown.sh # clean up
 ```
 
-## 手動実行
+## Running it by hand
 
-### 1. 環境構築とVinbero起動
+### 1. Build the environment and start Vinbero
+
+An L2VPN needs a headend at both ends, so Vinbero runs on router1 and
+router3.
 
 ```bash
 sudo ./setup.sh
 
-# Vinbero起動
-sudo ip netns exec hl2-router1 ../../out/bin/vinberod -c vinbero_router1.yaml
+# Start Vinbero on both routers
+sudo ip netns exec hl2-router1 ../../out/bin/vinberod -c vinbero_router1.yaml &
+sudo ip netns exec hl2-router3 ../../out/bin/vinberod -c vinbero_router3.yaml &
 ```
 
-### 2. HeadendL2エントリ登録
+### 2. Register the HeadendL2 entries
+
+`--interface` is required: it names the access port the VLAN arrives on.
 
 ```bash
-sudo ip netns exec hl2-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 hl2 create --vlan-id 100 --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
+# Forward path on router1
+sudo ip netns exec hl2-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
+  hl2 create --interface hl2-rt1h1 --vlan-id 100 \
+  --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3
+
+# Return path on router3
+sudo ip netns exec hl2-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface hl2-rt3h2 --vlan-id 100 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2
 ```
 
-### 3. テスト
+### 3. Test
 
 ```bash
-# VLAN 100経由でpingテスト
+# ping over VLAN 100
 sudo ip netns exec hl2-host1 ping -c 3 -I hl2-h1rt1.100 172.16.100.2
 ```
 
-### 4. パケットキャプチャで確認
+### 4. Confirm with a packet capture
 
 ```bash
-# router1-router2間でSRv6パケットを確認
+# SRv6 packets between router1 and router2
 sudo ip netns exec hl2-router2 tcpdump -i hl2-rt2rt1 -n -v ip6
 ```
 
-SRv6 Routing Header (RT6) と Next Header 143 (Ethernet) が確認できます。
+The capture shows the SRv6 Routing Header (RT6) and next header 143
+(Ethernet).
 
-### 5. 環境のクリーンナップ
+### 5. Clean up
+
 ```bash
 sudo ./teardown.sh
 ```
 
-## L2VPNユースケース
+## L2VPN use cases
 
-H.Encaps.L2は以下のようなL2VPNシナリオに適しています：
+H.Encaps.L2 fits L2VPN scenarios such as:
 
-- **VLAN拡張**: 異なるサイト間でVLANを透過的に接続
-- **L2ブリッジング**: リモートサイト間でEthernetセグメントを拡張
-- **レガシー対応**: L3サービスに対応していないアプリケーションの接続
+- **VLAN extension**: connect a VLAN transparently across sites
+- **L2 bridging**: extend an Ethernet segment between remote sites
+- **Legacy support**: connect applications that cannot use an L3 service
 
-## 技術詳細
+## Details
 
-### SRv6ヘッダー構造
+### SRv6 header layout
 
 ```
 +------------------+
@@ -108,11 +128,12 @@ H.Encaps.L2は以下のようなL2VPNシナリオに適しています：
 +------------------+
 ```
 
-### End.DX2動作
+### End.DX2 behavior
 
-End.DX2はSRv6パケットからL2フレームを取り出し、指定されたインターフェースに転送します：
+End.DX2 extracts the L2 frame from the SRv6 packet and forwards it out the
+configured interface:
 
 ```bash
-# LinuxでのEnd.DX2設定例
+# End.DX2 on Linux
 ip -6 route add local fc00:3::3/128 encap seg6local action End.DX2 oif eth1
 ```

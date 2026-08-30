@@ -1,4 +1,4 @@
-// Endpoint tail call targets (22 SEC("xdp") programs).
+// Endpoint tail call targets.
 // Included from xdp_prog.c — not compiled standalone.
 
 // ========== Helpers shared by tail call targets (nosrh path) ==========
@@ -50,6 +50,91 @@ static __always_inline int nosrh_fib_v6(
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
 
+// Shared no-SRH tunnel decap: strip the outer IPv6 (no SRH on the wire)
+// and forward the inner packet by FIB. aux selects the VRF through its
+// leading bytes (the l3vrf view), falling back to the ingress interface.
+// Callers must not derive ip6h before this runs (see the End.AS note:
+// clang would elide the decap helper's own eth bounds check and the
+// verifier rejects it).
+static __always_inline int nosrh_decap_and_fib(struct xdp_md *ctx,
+                                               struct sid_aux_entry *aux,
+                                               __u8 nh, __u16 l3_off)
+{
+    if (nh == IPPROTO_IPIP) {
+        if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
+            return XDP_DROP;
+        return nosrh_fib_v4(ctx, aux_vrf_or_ingress_ifindex(aux, ctx));
+    }
+    if (nh == IPPROTO_IPV6) {
+        if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
+            return XDP_DROP;
+        return nosrh_fib_v6(ctx, aux_vrf_or_ingress_ifindex(aux, ctx));
+    }
+    return XDP_DROP;
+}
+
+// No-SRH USD decap towards an adjacency (End.X family): resolve the
+// nexthop on the still-encapsulated packet (the MACs ride through the
+// decap's eth save/restore), strip the outer IPv6, and redirect out of
+// the resolved interface. The adjacency must resolve, like classic
+// End.X forwarding.
+static __always_inline int nosrh_decap_and_adj(struct xdp_md *ctx,
+                                               void *nexthop,
+                                               __u8 nh, __u16 l3_off)
+{
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_DROP;
+    if (l3_off > 22)
+        return XDP_DROP;
+    struct ipv6hdr *ip6h = (struct ipv6hdr *)(data + l3_off);
+    if ((void *)(ip6h + 1) > data_end)
+        return XDP_DROP;
+
+    // The exposed packet starts right behind the outer IPv6 header: take
+    // its IPv6 source for the resolver, and refuse to expose a truncated
+    // inner header (the decap would otherwise emit a bare Ethernet frame).
+    const void *inner_src6 = NULL;
+    void *inner = ip6h + 1;
+    if (nh == IPPROTO_IPV6) {
+        if (inner + sizeof(struct ipv6hdr) > data_end)
+            return XDP_DROP;
+        inner_src6 = &((struct ipv6hdr *)inner)->saddr;
+    } else if (nh == IPPROTO_IPIP) {
+        if (inner + sizeof(struct iphdr) > data_end)
+            return XDP_DROP;
+    } else {
+        return XDP_DROP;
+    }
+
+    __u32 oif;
+    if (endpoint_resolve_adjacency(ctx, eth, inner_src6, nexthop, &oif) != 0)
+        return XDP_DROP;
+
+    if (endpoint_spend_inner_hop(inner, nh) != 0)
+        return XDP_DROP;
+
+    if (nh == IPPROTO_IPIP) {
+        if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
+            return XDP_DROP;
+    } else if (nh == IPPROTO_IPV6) {
+        if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
+            return XDP_DROP;
+    } else {
+        return XDP_DROP;
+    }
+
+    data = (void *)(long)ctx->data;
+    data_end = (void *)(long)ctx->data_end;
+    eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return XDP_DROP;
+    eth->h_proto = bpf_htons(nh == IPPROTO_IPIP ? ETH_P_IP : ETH_P_IPV6);
+    return bpf_redirect(oif, 0);
+}
+
 // ========== Pattern A: localsid-only actions ==========
 
 DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end, process_end)
@@ -62,7 +147,38 @@ DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end_m_gtp6_d_di, process_end_m_gtp6_d
 DEFINE_ENDPOINT_LOCALSID(tailcall_endpoint_end_an, process_end)
 
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_t, process_end_t)
-DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_x, process_end_x)
+// End.X: handwritten dual body. The no-SRH dispatcher forwards tunnel
+// payloads to any slot, and the LOCALSID_AUX macro would parse the inner
+// header as an SRH; classic End.X with reduced encap and the USD flavor
+// instead decaps towards the adjacency, everything else goes to the
+// kernel for local delivery (bare End.X SID, same as uA).
+SEC("xdp")
+int tailcall_endpoint_end_x(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
+
+    if (tctx->dispatch_type == DISPATCH_NOSRH) {
+        if (tctx->sid_entry.flavor == SRV6_LOCAL_FLAVOR_USD &&
+            (tctx->inner_proto == IPPROTO_IPIP ||
+             tctx->inner_proto == IPPROTO_IPV6))
+            TAILCALL_RETURN(ctx,nosrh_decap_and_adj(ctx, aux->nexthop.nexthop,
+                                                    tctx->inner_proto, l3_off));
+        TAILCALL_RETURN(ctx,XDP_PASS);
+    }
+
+    struct ethhdr *eth;
+    struct ipv6hdr *ip6h;
+    struct ipv6_sr_hdr *srh;
+    TAILCALL_PARSE_SRH(ctx, l3_off, eth, ip6h, srh);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_x, ctx, ip6h, srh, &tctx->sid_entry, aux);
+    TAILCALL_RETURN(ctx,action);
+}
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_b6, process_end_b6_insert)
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_b6_encaps, process_end_b6_encaps)
 DEFINE_ENDPOINT_LOCALSID_AUX(tailcall_endpoint_end_m_gtp6_d, process_end_m_gtp6_d)
@@ -231,6 +347,8 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
 
     TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
+    // End.DT46 keeps its own decap instead of nosrh_decap_and_fib: the VRF
+    // comes from the plugin grant through resolve_decap_vrf, not from aux.
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         __u8 nh = tctx->inner_proto;
         __u32 fib_ifindex;
@@ -354,6 +472,129 @@ int tailcall_endpoint_end_am(struct xdp_md *ctx)
 
     int action = CALL_WITH_CONST_L3(l3_off, process_end_am, ctx, ip6h, srh,
                                     &tctx->sid_entry, aux);
+    TAILCALL_RETURN(ctx,action);
+}
+
+// uN / uA (NEXT-C-SID): handwritten dual-path bodies. The shift path is
+// SRH-independent, so both DISPATCH_LOCALSID and DISPATCH_NOSRH land in the
+// same core; only the Argument==0 fall-through cares which path we came in
+// on. The aux carries block_len_bytes (and the uA nexthop); F3216 is the
+// only supported structure today.
+SEC("xdp")
+int tailcall_endpoint_end_un(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
+        TAILCALL_RETURN(ctx,XDP_DROP);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
+                                    &tctx->sid_entry, aux, 0,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    // USD on a no-SRH container that ends here: same decap shape as
+    // End.DT46's nosrh branch. The uN aux has no VRF, so nosrh_fib_*
+    // falls back to the ingress ifindex.
+    if (action == USID_RET_USD_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
+    TAILCALL_RETURN(ctx,action);
+}
+
+// uT: uN with the FIB lookup bound to the aux VRF (RFC 9800 Sec.4.1.3).
+// The aux carries the VRF ifindex in its leading bytes (the l3vrf view of
+// the usid variant), so the USD decap below lands in the VRF too.
+SEC("xdp")
+int tailcall_endpoint_end_ut(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
+        TAILCALL_RETURN(ctx,XDP_DROP);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_un_core, ctx,
+                                    &tctx->sid_entry, aux, 1,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    // USD decap in the VRF: the aux carries the ifindex in its leading
+    // bytes, which is exactly what nosrh_decap_and_fib consumes.
+    if (action == USID_RET_USD_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
+    TAILCALL_RETURN(ctx,action);
+}
+
+// End / End.X with REPLACE-CSID (RFC 9800 Sec.4.2). The csid length
+// (LNFL) comes from the aux and selects one of two constant-folded core
+// variants; everything else mirrors the uN/uT shape, including the USD
+// no-SRH sentinel for End (End.X keeps XDP_PASS there, like uA).
+static __always_inline int end_replace_tailcall(struct xdp_md *ctx, int is_endx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) return XDP_DROP;
+    // Open-coded TAILCALL_BOUND_L3OFF: that macro returns through the
+    // epilogue, which the SEC wrappers below already apply once.
+    __u16 l3_off = tctx->l3_offset;
+    if (l3_off > 22) return XDP_DROP;
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux)
+        return XDP_DROP;
+
+    int action;
+    if (aux->usid.csid_len_bytes == 4)
+        action = CALL_WITH_CONST_L3(l3_off, process_end_replace_core, ctx,
+                                    &tctx->sid_entry, aux, is_endx, 4,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    else if (aux->usid.csid_len_bytes == 2)
+        action = CALL_WITH_CONST_L3(l3_off, process_end_replace_core, ctx,
+                                    &tctx->sid_entry, aux, is_endx, 2,
+                                    tctx->dispatch_type, tctx->inner_proto);
+    else
+        return XDP_DROP;
+
+    if (action == USID_RET_USD_NOSRH) {
+        if (is_endx)
+            return nosrh_decap_and_adj(ctx, aux->usid.nexthop,
+                                       tctx->inner_proto, l3_off);
+        return nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off);
+    }
+    return action;
+}
+
+SEC("xdp")
+int tailcall_endpoint_end_replace(struct xdp_md *ctx)
+{
+    TAILCALL_RETURN(ctx, end_replace_tailcall(ctx, 0));
+}
+
+SEC("xdp")
+int tailcall_endpoint_end_x_replace(struct xdp_md *ctx)
+{
+    TAILCALL_RETURN(ctx, end_replace_tailcall(ctx, 1));
+}
+
+SEC("xdp")
+int tailcall_endpoint_end_ua(struct xdp_md *ctx)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
+    TAILCALL_BOUND_L3OFF(tctx, l3_off);
+
+    TAILCALL_AUX_LOOKUP(tctx, aux);
+    if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
+        TAILCALL_RETURN(ctx,XDP_DROP);
+
+    int action = CALL_WITH_CONST_L3(l3_off, process_end_ua_core, ctx,
+                                    &tctx->sid_entry, aux, tctx->dispatch_type,
+                                    tctx->inner_proto);
+    // USD on a bare uA SID with no SRH: decap and forward the exposed
+    // packet over the adjacency.
+    if (action == USID_RET_USD_NOSRH)
+        TAILCALL_RETURN(ctx,nosrh_decap_and_adj(ctx, aux->usid.nexthop,
+                                                tctx->inner_proto, l3_off));
     TAILCALL_RETURN(ctx,action);
 }
 

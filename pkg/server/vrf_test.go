@@ -89,15 +89,19 @@ func (f *fakeVrfDeviceOps) DeleteVrf(name string) error {
 type fakeSidTable struct {
 	refs         map[string]uint32 // prefix -> ifindex
 	l2           bool
+	action       uint8 // 0 = End.DT4 (or End.DT2 with l2)
 	auxErr       error
 	grantRefs    map[uint32]uint32 // aux index -> granted ifindex
 	grantRefHook func()            // when set, runs inside EndtVRFGrantReferences
 }
 
 func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {
-	action := uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
-	if f.l2 {
-		action = uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+	action := f.action
+	if action == 0 {
+		action = uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4)
+		if f.l2 {
+			action = uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT2)
+		}
 	}
 	out := make(map[string]*bpf.SidFunctionEntry, len(f.refs))
 	i := uint16(1)
@@ -543,6 +547,15 @@ func TestVrfServer_DeleteRefusals(t *testing.T) {
 	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00::/64": created.Device.Ifindex}}
 	if m := del(); len(m.Errors) != 1 {
 		t.Fatalf("delete with SID ref: want refusal, got %+v", m)
+	}
+
+	// 3a. A uT SID referencing the ifindex also refuses: uT reads the VRF
+	// through the same l3vrf view, so deleting the device would leave it
+	// forwarding by a stale (reusable) ifindex.
+	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00::/48": created.Device.Ifindex},
+		action: uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT)}
+	if m := del(); len(m.Errors) != 1 {
+		t.Fatalf("delete with uT SID ref: want refusal, got %+v", m)
 	}
 
 	// 3b. An unreadable aux fails closed: the reference check cannot prove

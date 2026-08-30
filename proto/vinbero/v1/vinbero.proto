@@ -23,6 +23,7 @@ service SidFunctionService {
 // SidFunction represents a single SRv6 Endpoint function configuration.
 // The action field determines which optional fields are relevant:
 //   - End.DT4/DT6/DT46: vrf_name (VRF-aware FIB lookup)
+//   - uT (END_UT): trigger_prefix (/48) + vrf_name (required; shift-and-forward in the VRF table)
 //   - End.DT2: bd_id + bridge_name (L2 FDB lookup + bridge flood on miss)
 //   - End.DX2: oif (direct L2 output to specific interface)
 //   - End.DX2V: table_id (VLAN cross-connect table scope)
@@ -38,7 +39,7 @@ message SidFunction {
   uint32 arg_src_offset = 7; // Bit offset for source in SID Args
   uint32 arg_dst_offset = 8; // Bit offset for destination in SID Args
   uint32 oif = 9; // Output interface index (End.DX2: direct L2 output)
-  string vrf_name = 10; // VRF device name (End.DT4/DT6/DT46: resolved to ifindex for FIB lookup)
+  string vrf_name = 10; // VRF device name, resolved to an ifindex for the FIB lookup (End.T/DT4/DT6/DT46: optional; uT: required)
   uint32 bd_id = 11; // Bridge Domain ID (End.DT2: FDB scope for MAC learning)
   string bridge_name = 12; // Bridge device name (End.DT2: redirect target on FDB miss)
   repeated string segments = 13; // Policy segment list (End.B6/End.B6.Encaps)
@@ -89,6 +90,27 @@ message SidFunction {
   // (up to 63 ASCII characters). SidFunctionList then doubles as the
   // service registration point for NF discovery.
   optional string service_name = 28;
+  // uN / uA / uT (NEXT-C-SID, RFC 9800): locator block length in bits.
+  // Only the F3216 structure (32) is supported today; omitted defaults to
+  // 32. The trigger_prefix must cover exactly block + node for uN / uT
+  // (e.g. /48) and block + node + function for uA (e.g. /64); uA reuses
+  // nexthop. For END_REPLACE / END_X_REPLACE this is the REPLACE-CSID
+  // locator block length instead: required, byte-aligned, and
+  // block + csid_len must not exceed 120 bits.
+  optional uint32 usid_block_len = 29;
+
+  // END_REPLACE / END_X_REPLACE (RFC 9800 Sec.4.2): the C-SID length
+  // (LNFL) in bits, 32 (default) or 16. The trigger_prefix must cover
+  // exactly block + C-SID; END_X_REPLACE reuses nexthop.
+  optional uint32 csid_len = 30;
+
+  // END_LBS / END_XLBS / END_LBS_REPLACE / END_XLBS_REPLACE (RFC 9800
+  // Sec.7): the target locator block as an IPv6 prefix (e.g.
+  // "fd77:7777:7777::/48"). Required for those actions; the prefix
+  // length is byte-aligned, the bits beyond it must be zero, and the
+  // block must leave room for the Argument (NEXT) or C-SID and index
+  // (REPLACE). Rejected on every other action.
+  optional string target_block = 31;
 }
 
 message SidFunctionCreateRequest {

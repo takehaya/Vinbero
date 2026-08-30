@@ -81,7 +81,7 @@ func decodeEVPNEthernetAD(p *apiutil.Path, rt *gobgppkt.EVPNEthernetAutoDiscover
 	if r.IsPerES() {
 		label = esiLabel
 	}
-	r.SRv6SID = decodeSRv6SID(p.Attrs, label)
+	r.SRv6SID = decodeSRv6SID(p.Attrs, label, gobgppkt.TLVTypeSRv6L2Service)
 	r.RemoteSrc = decodeRemoteSrc(p.Attrs, label, defaultLocatorPrefixLen)
 	r.SingleActive = singleActive
 	return r
@@ -150,7 +150,7 @@ func decodeEVPNMacIP(p *apiutil.Path, rt *gobgppkt.EVPNMacIPAdvertisementRoute) 
 	if len(rt.Labels) > 0 {
 		label = rt.Labels[0]
 	}
-	r.SRv6SID = decodeSRv6SID(p.Attrs, label)
+	r.SRv6SID = decodeSRv6SID(p.Attrs, label, gobgppkt.TLVTypeSRv6L2Service)
 	r.RemoteSrc = decodeRemoteSrc(p.Attrs, label, defaultLocatorPrefixLen)
 	return r
 }
@@ -171,7 +171,7 @@ func decodeEVPNMulticast(p *apiutil.Path, rt *gobgppkt.EVPNMulticastEthernetTagR
 		r.RD = rt.RD.String()
 	}
 	label := pmsiLabel(p.Attrs)
-	r.SRv6SID = decodeSRv6SID(p.Attrs, label)
+	r.SRv6SID = decodeSRv6SID(p.Attrs, label, gobgppkt.TLVTypeSRv6L2Service)
 	r.RemoteSrc = decodeRemoteSrc(p.Attrs, label, defaultLocatorPrefixLen)
 	return r
 }

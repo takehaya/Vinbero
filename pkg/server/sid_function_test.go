@@ -1,11 +1,17 @@
 package server
 
 import (
+	"errors"
+	"net/netip"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/vishvananda/netlink"
+
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/locator"
 )
 
 // newProtoToEntryServer builds a SidFunctionServer with nil deps. protoToEntry
@@ -688,4 +694,832 @@ func TestProtoToEntry_ProxyFieldScope(t *testing.T) {
 			t.Fatalf("unexpected error for a valid END_AD: %v", err)
 		}
 	})
+}
+
+// TestProtoToEntry_Replace verifies the END_REPLACE / END_X_REPLACE API
+// contract: block/csid geometry, prefix width, C-SID zero reservation,
+// nexthop requirements, and field scoping.
+func TestProtoToEntry_Replace(t *testing.T) {
+	s := newProtoToEntryServer()
+	u32 := func(v uint32) *uint32 { return &v }
+
+	tests := []struct {
+		name    string
+		sf      *v1.SidFunction
+		wantErr string // empty = success
+	}{
+		{"End(REP) /80 with block 48", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48)}, ""},
+		{"End(REP) csid 16", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111::/64", UsidBlockLen: u32(48), CsidLen: u32(16)}, ""},
+		{"End(REP) requires block len", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80"}, "requires usid_block_len"},
+		{"End(REP) wrong prefix width", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/96", UsidBlockLen: u32(48)}, "must be /80"},
+		{"End(REP) rejects zero C-SID", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd::/80", UsidBlockLen: u32(48)}, "must be non-zero"},
+		{"End(REP) rejects odd csid len", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), CsidLen: u32(24)}, "not supported"},
+		{"End(REP) rejects unaligned block", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/76", UsidBlockLen: u32(44)}, "byte-aligned"},
+		{"End(REP) rejects oversized geometry", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222:3333:4444:0/128", UsidBlockLen: u32(96)}, "byte-aligned, block + csid_len <= 120"},
+		{"End(REP) rejects nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), Nexthop: "fe80::1"}, "does not take a nexthop"},
+		{"End.X(REP) with nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), Nexthop: "fe80::1"}, ""},
+		{"End.X(REP) missing nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48)}, "requires an IPv6 nexthop"},
+		{"csid_len on wrong action", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END, TriggerPrefix: "fd00:1::1/128", CsidLen: u32(32)}, "only valid for END_REPLACE"},
+		{"rejects vrf_name", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), VrfName: "lo"}, "do not take a vrf_name"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry, aux, err := s.protoToEntry(tt.sf)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if entry.Action != uint8(tt.sf.Action) {
+				t.Errorf("action = %d, want %d", entry.Action, tt.sf.Action)
+			}
+			nexthop, blockLenBytes, csidLenBytes := bpf.SidAuxReplaceData(aux)
+			if blockLenBytes != 6 {
+				t.Errorf("block_len_bytes = %d, want 6", blockLenBytes)
+			}
+			wantCsid := uint8(4)
+			if tt.sf.CsidLen != nil {
+				wantCsid = uint8(*tt.sf.CsidLen / 8)
+			}
+			if csidLenBytes != wantCsid {
+				t.Errorf("csid_len_bytes = %d, want %d", csidLenBytes, wantCsid)
+			}
+			want := netip.IPv6Unspecified()
+			if tt.sf.Nexthop != "" {
+				want = netip.MustParseAddr(tt.sf.Nexthop)
+			}
+			if got := netip.AddrFrom16(nexthop); got != want {
+				t.Errorf("aux nexthop = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestProtoToEntry_Lbs verifies the End.LBS/End.XLBS mapping: the API
+// action maps onto the base behavior with the target block in the aux,
+// and the target geometry is validated against the base shape.
+func TestProtoToEntry_Lbs(t *testing.T) {
+	s := newProtoToEntryServer()
+	u32 := func(v uint32) *uint32 { return &v }
+	str := func(v string) *string { return &v }
+
+	tests := []struct {
+		name       string
+		sf         *v1.SidFunction
+		wantErr    string
+		baseAction v1.Srv6LocalAction
+	}{
+		{"End.LBS maps to uN", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777::/48")}, "", v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN},
+		{"End.XLBS maps to uA", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS, TriggerPrefix: "fd00:aaaa:b002:c001::/64",
+			Nexthop: "fe80::1", TargetBlock: str("fd77:7777:7777:7777::/64")}, "", v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA},
+		{"End.LBS(REP) maps to END_REPLACE", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80",
+			UsidBlockLen: u32(48), TargetBlock: str("fd77:7777:7777::/48")}, "", v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE},
+		{"End.XLBS(REP) maps to END_X_REPLACE", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80",
+			UsidBlockLen: u32(48), Nexthop: "fe80::1", TargetBlock: str("fd77:7777:7777::/48")}, "", v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE},
+		{"missing target rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48"},
+			"require target_block", 0},
+		{"target on wrong action rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777::/48")}, "only valid for the LBS behaviors", 0},
+		{"empty target on wrong action rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("")}, "only valid for the LBS behaviors", 0},
+		{"unaligned target rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777::/44")}, "multiple of 8", 0},
+		{"target with stray bits rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777:1::/48")}, "non-zero bits", 0},
+		{"IPv4 target rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("10.0.0.0/8")}, "must be an IPv6 prefix", 0},
+		{"self-block target rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd00:aaaa:b002::/48")}, "loop on itself", 0},
+		{"longer target sharing the trigger's bytes rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80",
+			UsidBlockLen: u32(48),
+			TargetBlock: str("fd00:aabb:ccdd:1111:2222:7700::/88")}, "loop on itself", 0},
+		{"oversized target for uN rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS, TriggerPrefix: "fd00:aaaa:b002::/48",
+			TargetBlock: str("fd77:7777:7777:7777::/64")}, "no room", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry, aux, err := s.protoToEntry(tt.sf)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if entry.Action != uint8(tt.baseAction) {
+				t.Errorf("entry action = %d, want base %d", entry.Action, tt.baseAction)
+			}
+			tgt, tgtLen := bpf.SidAuxUsidTargetData(aux)
+			if tgtLen == 0 {
+				t.Fatalf("aux target block missing")
+			}
+			wantPrefix := netip.MustParsePrefix(*tt.sf.TargetBlock)
+			if got := netip.AddrFrom16(tgt); got != wantPrefix.Addr() {
+				t.Errorf("target = %v, want %v", got, wantPrefix.Addr())
+			}
+			if int(tgtLen)*8 != wantPrefix.Bits() {
+				t.Errorf("target len = %d bits, want %d", tgtLen*8, wantPrefix.Bits())
+			}
+			// The request must not have been mutated by the mapping.
+			if tt.sf.Action == tt.baseAction {
+				t.Errorf("caller's action was mutated to the base")
+			}
+		})
+	}
+
+	t.Run("entryToProto reports the LBS action back", func(t *testing.T) {
+		// The inverse mapping: a listed entry whose aux carries a target
+		// reports the LBS action, the target block, and (for the X
+		// shapes) the nexthop.
+		for _, apiAction := range []v1.Srv6LocalAction{
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE,
+		} {
+			sf := &v1.SidFunction{Action: apiAction, TargetBlock: str("fd77:7777:7777::/48")}
+			switch apiAction {
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS:
+				sf.TriggerPrefix = "fd00:aaaa:b002::/48"
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS:
+				sf.TriggerPrefix = "fd00:aaaa:b002:c001::/64"
+				sf.Nexthop = "fe80::1"
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE:
+				sf.TriggerPrefix = "fd00:aabb:ccdd:1111:2222::/80"
+				sf.UsidBlockLen = u32(48)
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE:
+				sf.TriggerPrefix = "fd00:aabb:ccdd:1111:2222::/80"
+				sf.UsidBlockLen = u32(48)
+				sf.Nexthop = "fe80::1"
+			}
+			entry, aux, err := s.protoToEntry(sf)
+			if err != nil {
+				t.Fatalf("%v: %v", apiAction, err)
+			}
+			got := &v1.SidFunction{Action: v1.Srv6LocalAction(entry.Action)}
+			base := v1.Srv6LocalAction(entry.Action)
+			switch base {
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA:
+				nexthop, _ := bpf.SidAuxUsidData(aux)
+				got.Nexthop = bpf.FormatIPv6(nexthop)
+			case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+				nexthop, _, _ := bpf.SidAuxReplaceData(aux)
+				got.Nexthop = bpf.FormatIPv6(nexthop)
+			}
+			tgt, tgtLen := bpf.SidAuxUsidTargetData(aux)
+			reportLbs(got, base, tgt, tgtLen)
+			if got.Action != apiAction {
+				t.Errorf("reported action = %v, want %v", got.Action, apiAction)
+			}
+			if got.TargetBlock == nil || *got.TargetBlock != *sf.TargetBlock {
+				t.Errorf("%v: reported target = %v, want %v", apiAction, got.TargetBlock, *sf.TargetBlock)
+			}
+			if sf.Nexthop != "" && base == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE && got.Nexthop != sf.Nexthop {
+				t.Errorf("%v: reported nexthop = %q, want %q", apiAction, got.Nexthop, sf.Nexthop)
+			}
+		}
+	})
+
+	t.Run("XLBS engages the allocator claim", func(t *testing.T) {
+		mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+		srv := NewSidFunctionServer(nil, nil, mgr, nil)
+		sf := &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS,
+			TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "fe80::1",
+			TargetBlock: str("fd77:7777:7777:7777::/64"),
+		}
+		release, err := srv.claimUsidFunction(sf)
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		fn := uint32(0xc001)
+		if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+			t.Fatalf("service SID allocation of the claimed CSID: err = %v, want ErrFunctionInUse", err)
+		}
+		release()
+	})
+}
+
+// An out-of-range flavor must not alias to a known one through the u8
+// cast (260 % 256 == 4 == USD, which would enable decap unexpectedly).
+func TestProtoToEntryRejectsUnknownFlavor(t *testing.T) {
+	s := newProtoToEntryServer()
+	_, _, err := s.protoToEntry(&v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: "fd00:1::1/128",
+		Flavor:        v1.Srv6LocalFlavor(260),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown flavor") {
+		t.Fatalf("err = %v, want unknown flavor rejection", err)
+	}
+}
+
+// TestProtoToEntry_USID verifies the uN/uA API contract: prefix shapes,
+// nexthop requirements, block length bounds, and field scoping.
+func TestProtoToEntry_USID(t *testing.T) {
+	s := newProtoToEntryServer()
+	u32 := func(v uint32) *uint32 { return &v }
+
+	tests := []struct {
+		name    string
+		sf      *v1.SidFunction
+		wantErr string // empty = success
+	}{
+		{"uN /48 default block", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48"}, ""},
+		{"uN explicit block 32", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", UsidBlockLen: u32(32)}, ""},
+		{"uN non-32 block rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", UsidBlockLen: u32(48)}, "not supported"},
+		{"uN wrong prefix width", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/64"}, "must be /48"},
+		{"uN rejects nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", Nexthop: "fe80::1"}, "do not take a nexthop"},
+		{"uA /64 with nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "fe80::1"}, ""},
+		{"uA wrong prefix width", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002::/48", Nexthop: "fe80::1"}, "must be /64"},
+		{"uA missing nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64"}, "requires an IPv6 nexthop"},
+		{"uN rejects zero node CSID", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:0000::/48"}, "node CSID must be non-zero"},
+		{"uA rejects zero node CSID", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:0000:c001::/64", Nexthop: "fe80::1"}, "node CSID must be non-zero"},
+		{"uA rejects zero function CSID", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002::/64", Nexthop: "fe80::1"}, "function CSID must be non-zero"},
+		{"uA rejects unspecified nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "::"}, "requires an IPv6 nexthop"},
+		{"uA rejects IPv4 nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA, TriggerPrefix: "fd00:aaaa:b002:c001::/64", Nexthop: "192.0.2.1"}, "requires an IPv6 nexthop"},
+		{"usid_block_len on wrong action", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END, TriggerPrefix: "fd00:1::1/128", UsidBlockLen: u32(32)}, "only valid for END_UN / END_UA"},
+		{"uT without VRF rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:b004::/48"}, "requires a vrf_name"},
+		{"uN rejects vrf_name", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN, TriggerPrefix: "fd00:aaaa:b002::/48", VrfName: "lo"}, "do not take a vrf_name"},
+		{"uT wrong prefix width", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:b004::/64"}, "must be /48"},
+		{"uT rejects nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:b004::/48", Nexthop: "fe80::1"}, "do not take a nexthop"},
+		{"uT rejects zero node CSID", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:0000::/48"}, "node CSID must be non-zero"},
+		{"uT non-32 block rejected", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT, TriggerPrefix: "fd00:aaaa:b004::/48", VrfName: "lo", UsidBlockLen: u32(48)}, "not supported"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry, aux, err := s.protoToEntry(tt.sf)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if entry.Action != uint8(tt.sf.Action) {
+				t.Errorf("action = %d, want %d", entry.Action, tt.sf.Action)
+			}
+			if aux == nil {
+				t.Fatalf("uN/uA must carry a usid aux entry")
+			}
+			nexthop, blockLenBytes := bpf.SidAuxUsidData(aux)
+			if blockLenBytes != 4 {
+				t.Errorf("block_len_bytes = %d, want 4", blockLenBytes)
+			}
+			// The data plane forwards uA over this address; nothing else in
+			// the test suite observes it, so assert the round trip here.
+			want := netip.IPv6Unspecified()
+			if tt.sf.Nexthop != "" {
+				want = netip.MustParseAddr(tt.sf.Nexthop)
+			}
+			if got := netip.AddrFrom16(nexthop); got != want {
+				t.Errorf("aux nexthop = %v, want %v", got, want)
+			}
+		})
+	}
+
+	t.Run("uT rejects a non-VRF device", func(t *testing.T) {
+		// "lo" resolves but is not a VRF: binding uT to it would run the
+		// lookup in the ingress context, the exact degradation the
+		// vrf_name requirement exists to prevent.
+		_, _, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT,
+			TriggerPrefix: "fd00:aaaa:b004::/48", VrfName: "lo"})
+		if err == nil || !strings.Contains(err.Error(), "not a vrf") {
+			t.Fatalf("err = %v, want non-VRF rejection", err)
+		}
+	})
+
+	t.Run("uT carries the resolved VRF ifindex in the aux", func(t *testing.T) {
+		// Creating a VRF device needs CAP_NET_ADMIN; the negative case
+		// above runs everywhere, this positive one only under root.
+		if os.Geteuid() != 0 {
+			t.Skip("requires root to create a VRF device")
+		}
+		vrfDev := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "utp2e-vrf0"}, Table: 1043}
+		if err := netlink.LinkAdd(vrfDev); err != nil {
+			t.Fatalf("vrf add: %v", err)
+		}
+		defer func() { _ = netlink.LinkDel(vrfDev) }()
+		_, aux, err := s.protoToEntry(&v1.SidFunction{
+			Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT,
+			TriggerPrefix: "fd00:aaaa:b004::/48", VrfName: "utp2e-vrf0"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := bpf.SidAuxL3VrfData(aux); got != uint32(vrfDev.Attrs().Index) {
+			t.Errorf("vrf ifindex = %d, want %d", got, vrfDev.Attrs().Index)
+		}
+		if _, blockLenBytes := bpf.SidAuxUsidData(aux); blockLenBytes != 4 {
+			t.Errorf("block_len_bytes = %d, want 4", blockLenBytes)
+		}
+	})
+}
+
+// usidLocator builds an F3216 uSID locator for the claim tests.
+func usidLocator(t *testing.T, name, prefix string) *locator.Manager {
+	t.Helper()
+	mgr := locator.NewManager()
+	loc := &locator.Locator{
+		Name:              name,
+		Prefix:            netip.MustParsePrefix(prefix),
+		BlockLen:          32,
+		NodeLen:           16,
+		FunctionLen:       16,
+		Behavior:          locator.BehaviorUSID,
+		FunctionAutoStart: 1,
+		FunctionAutoEnd:   0xffff,
+	}
+	if err := mgr.Add(loc); err != nil {
+		t.Fatalf("locator Add: %v", err)
+	}
+	return mgr
+}
+
+func uaSidFunction(prefix string) *v1.SidFunction {
+	return &v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
+		TriggerPrefix: prefix,
+		Nexthop:       "fe80::1",
+	}
+}
+
+// A uA consumes a function CSID out of its locator. Without the claim the
+// allocator would hand the same CSID to a service SID, whose /128 wins the
+// LPM match over the uA /64 and silently replaces the uA's terminal
+// behavior.
+func TestClaimUsidFunction_BlocksServiceSIDCollision(t *testing.T) {
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(nil, nil, mgr, nil)
+
+	release, err := s.claimUsidFunction(uaSidFunction("fd00:aaaa:b002:c001::/64"))
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("service SID allocation of the claimed CSID: err = %v, want ErrFunctionInUse", err)
+	}
+
+	// The rollback path returns it, and a neighbouring CSID was never taken.
+	release()
+	if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+}
+
+func TestClaimUsidFunction_RejectsCSIDTakenByServiceSID(t *testing.T) {
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(nil, nil, mgr, nil)
+
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+		t.Fatalf("service SID allocation: %v", err)
+	}
+	if _, err := s.claimUsidFunction(uaSidFunction("fd00:aaaa:b002:c001::/64")); err == nil {
+		t.Fatal("uA registration on a CSID already held by a service SID must fail")
+	}
+}
+
+// SidFunctionCreate is an upsert, so re-creating the same uA must not
+// collide with its own claim. Needs the real map: the re-create is told
+// apart from a foreign SID by the entry already sitting at that prefix.
+func TestSidFunctionCreate_UAReclaimIsIdempotent(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	const prefix = "fd00:aaaa:b002:c001::/64"
+	if err := s.createOneSidFunction(uaSidFunction(prefix)); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.deleteOneSidFunction(prefix) })
+	if err := s.createOneSidFunction(uaSidFunction(prefix)); err != nil {
+		t.Fatalf("re-create: %v", err)
+	}
+
+	// The claim survives the re-create, and delete gives it back.
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("CSID after re-create: err = %v, want ErrFunctionInUse", err)
+	}
+	if err := s.deleteOneSidFunction(prefix); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+		t.Fatalf("CSID was not released on delete: %v", err)
+	}
+}
+
+// The /64-shaped REPLACE behaviors sit on the same LPM shadowing hazard
+// as uA: a locator-ref service SID minted at the same function value is
+// a /128 inside their prefix. The claim must cover them end to end --
+// collision blocked, re-create idempotent, released on delete.
+func TestClaimUsidFunction_ReplaceActions(t *testing.T) {
+	u32 := func(v uint32) *uint32 { return &v }
+	replaceSid := func(action v1.Srv6LocalAction, nexthop string) *v1.SidFunction {
+		sf := &v1.SidFunction{
+			Action:        action,
+			TriggerPrefix: "fd00:aaaa:b002:d004::/64",
+			UsidBlockLen:  u32(32),
+			Nexthop:       nexthop,
+		}
+		return sf
+	}
+
+	t.Run("End(REP) claim blocks a service SID", func(t *testing.T) {
+		mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+		s := NewSidFunctionServer(nil, nil, mgr, nil)
+		release, err := s.claimUsidFunction(replaceSid(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, ""))
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		fn := uint32(0xd004)
+		if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+			t.Fatalf("service SID allocation of the claimed CSID: err = %v, want ErrFunctionInUse", err)
+		}
+		release()
+		if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+			t.Fatalf("after release: %v", err)
+		}
+	})
+
+	t.Run("End.X(REP) rejects a CSID taken by a service SID", func(t *testing.T) {
+		mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+		s := NewSidFunctionServer(nil, nil, mgr, nil)
+		fn := uint32(0xd004)
+		if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+			t.Fatalf("service SID allocation: %v", err)
+		}
+		if _, err := s.claimUsidFunction(replaceSid(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE, "fe80::1")); err == nil {
+			t.Fatal("registration on a CSID already held by a service SID must fail")
+		}
+	})
+
+	t.Run("create and delete round-trip the claim", func(t *testing.T) {
+		objs, err := bpf.ReadCollection(nil, nil)
+		if err != nil {
+			t.Skipf("BPF collection load failed (needs sudo): %v", err)
+		}
+		t.Cleanup(func() { _ = objs.Close() })
+		mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+		s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+		const prefix = "fd00:aaaa:b002:d004::/64"
+		sf := replaceSid(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, "")
+		if err := s.createOneSidFunction(sf); err != nil {
+			t.Fatalf("first create: %v", err)
+		}
+		t.Cleanup(func() { _ = s.deleteOneSidFunction(prefix) })
+		if err := s.createOneSidFunction(sf); err != nil {
+			t.Fatalf("re-create: %v", err)
+		}
+		fn := uint32(0xd004)
+		if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+			t.Fatalf("CSID after re-create: err = %v, want ErrFunctionInUse", err)
+		}
+		if err := s.deleteOneSidFunction(prefix); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+			t.Fatalf("CSID was not released on delete: %v", err)
+		}
+	})
+
+	t.Run("reconcile claims an installed REPLACE entry", func(t *testing.T) {
+		objs, err := bpf.ReadCollection(nil, nil)
+		if err != nil {
+			t.Skipf("BPF collection load failed (needs sudo): %v", err)
+		}
+		t.Cleanup(func() { _ = objs.Close() })
+		// Install first with no locator manager wired, then attach the
+		// locator: AddLocatorAndClaim must pick the entry up.
+		mapOps := bpf.NewMapOperations(objs)
+		s := NewSidFunctionServer(mapOps, nil, locator.NewManager(), nil)
+		sf := replaceSid(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, "")
+		if err := s.createOneSidFunction(sf); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		t.Cleanup(func() { _ = s.deleteOneSidFunction("fd00:aaaa:b002:d004::/64") })
+
+		loc := &locator.Locator{
+			Name:              "loc1",
+			Prefix:            netip.MustParsePrefix("fd00:aaaa:b002::/48"),
+			BlockLen:          32, NodeLen: 16, FunctionLen: 16,
+			Behavior:          locator.BehaviorUSID,
+			FunctionAutoStart: 1, FunctionAutoEnd: 0xffff,
+		}
+		if err := s.AddLocatorAndClaim(loc); err != nil {
+			t.Fatalf("AddLocatorAndClaim: %v", err)
+		}
+		fn := uint32(0xd004)
+		if _, _, err := s.locatorMgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+			t.Fatalf("CSID after reconcile: err = %v, want ErrFunctionInUse", err)
+		}
+	})
+}
+
+// uN carries no function, and a uA outside every uSID locator has no
+// allocator to collide with. Both are silent no-ops.
+func TestClaimUsidFunction_NoOpCases(t *testing.T) {
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(nil, nil, mgr, nil)
+
+	un := &v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+		TriggerPrefix: "fd00:aaaa:b002::/48",
+	}
+	if _, err := s.claimUsidFunction(un); err != nil {
+		t.Fatalf("uN claim: %v", err)
+	}
+	if _, err := s.claimUsidFunction(uaSidFunction("fd00:bbbb:b002:c001::/64")); err != nil {
+		t.Fatalf("uA outside any locator: %v", err)
+	}
+	// Neither took a function out of loc1.
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+		t.Fatalf("loc1 pool was touched: %v", err)
+	}
+}
+
+// Deleting some other entry that happens to sit on the same base address as
+// a locator-minted service SID must not hand that SID's function back to the
+// allocator: the SID is still live, and the CSID would be reissued.
+func TestDeleteSidFunction_KeepsForeignLocatorClaim(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	// A service SID claims CSID 0xc001 through the locator.
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+		t.Fatalf("service SID allocation: %v", err)
+	}
+
+	// An unrelated non-uA entry whose /64 masks to the same address.
+	const prefix = "fd00:aaaa:b002:c001::/64"
+	other := &v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: prefix,
+	}
+	if err := s.createOneSidFunction(other); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.deleteOneSidFunction(prefix); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("the service SID's CSID was released by an unrelated delete: err = %v, want ErrFunctionInUse", err)
+	}
+}
+
+// Replacing a uA with another action is an upsert, so nothing else releases
+// its function CSID: the claim helper only claims for uA, and the eventual
+// delete sees a non-uA entry. The replacement itself has to hand it back.
+func TestSidFunctionCreate_UAReplacedByOtherActionReleasesCSID(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	const prefix = "fd00:aaaa:b002:c001::/64"
+	if err := s.createOneSidFunction(uaSidFunction(prefix)); err != nil {
+		t.Fatalf("create uA: %v", err)
+	}
+	t.Cleanup(func() { _ = s.deleteOneSidFunction(prefix) })
+
+	// Same prefix, different action.
+	if err := s.createOneSidFunction(&v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: prefix,
+	}); err != nil {
+		t.Fatalf("replace with END: %v", err)
+	}
+
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
+		t.Fatalf("the replaced uA's CSID leaked: %v", err)
+	}
+}
+
+// Locators may nest. A classic locator inside a uSID one wins the
+// behavior-agnostic longest match, so the claim has to pick the enclosing
+// uSID locator itself -- otherwise it silently skips and that allocator
+// reissues the CSID as a service SID.
+func TestClaimUsidFunction_PicksTheUsidLocatorUnderNesting(t *testing.T) {
+	mgr := usidLocator(t, "usid", "fd00:aaaa:b002::/48")
+	classic := &locator.Locator{
+		Name:              "classic",
+		Prefix:            netip.MustParsePrefix("fd00:aaaa:b002:c001::/64"),
+		BlockLen:          40,
+		NodeLen:           24,
+		FunctionLen:       16,
+		ArgumentLen:       48,
+		Behavior:          locator.BehaviorClassic,
+		FunctionAutoStart: 1,
+		FunctionAutoEnd:   0xffff,
+	}
+	if err := mgr.Add(classic); err != nil {
+		t.Fatalf("nested classic locator Add: %v", err)
+	}
+	s := NewSidFunctionServer(nil, nil, mgr, nil)
+
+	if _, err := s.claimUsidFunction(uaSidFunction("fd00:aaaa:b002:c001::/64")); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("usid", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("the uSID allocator can still reissue the CSID: err = %v, want ErrFunctionInUse", err)
+	}
+}
+
+// sid_function_map is an LPM trie, so a lookup for a /128 under a uA /64
+// answers with that uA. Creating or deleting the /128 must not be mistaken
+// for touching the uA, or its CSID claim is released while it is still live.
+func TestSidFunction_MoreSpecificEntryUnderUALeavesTheClaim(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	const uaPrefix = "fd00:aaaa:b002:c001::/64"
+	if err := s.createOneSidFunction(uaSidFunction(uaPrefix)); err != nil {
+		t.Fatalf("create uA: %v", err)
+	}
+	t.Cleanup(func() { _ = s.deleteOneSidFunction(uaPrefix) })
+
+	// A /128 at the uA's own base address: the LPM lookup answers with the
+	// uA, and the release key would be the very address the claim is under.
+	const inner = "fd00:aaaa:b002:c001::/128"
+	if err := s.createOneSidFunction(&v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END,
+		TriggerPrefix: inner,
+	}); err != nil {
+		t.Fatalf("create the more specific entry: %v", err)
+	}
+	if err := s.deleteOneSidFunction(inner); err != nil {
+		t.Fatalf("delete the more specific entry: %v", err)
+	}
+
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("the live uA's CSID was released: err = %v, want ErrFunctionInUse", err)
+	}
+}
+
+// uN and uA are registered by explicit trigger_prefix, so a uA can exist
+// before the locator covering its block. LocatorCreate reconciles those
+// claims; without it the new locator would happily reissue the CSID.
+func TestReconcileUsidClaims_ClaimsPreexistingUA(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := locator.NewManager()
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	// uA first, with no locator registered yet.
+	const prefix = "fd00:aaaa:b002:c001::/64"
+	if err := s.createOneSidFunction(uaSidFunction(prefix)); err != nil {
+		t.Fatalf("create uA: %v", err)
+	}
+	t.Cleanup(func() { _ = s.deleteOneSidFunction(prefix) })
+
+	loc := &locator.Locator{
+		Name:              "loc1",
+		Prefix:            netip.MustParsePrefix("fd00:aaaa:b002::/48"),
+		BlockLen:          32,
+		NodeLen:           16,
+		FunctionLen:       16,
+		Behavior:          locator.BehaviorUSID,
+		FunctionAutoStart: 1,
+		FunctionAutoEnd:   0xffff,
+	}
+	if err := s.AddLocatorAndClaim(loc); err != nil {
+		t.Fatalf("AddLocatorAndClaim: %v", err)
+	}
+
+	fn := uint32(0xc001)
+	if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+		t.Fatalf("the pre-existing uA's CSID is still free: err = %v, want ErrFunctionInUse", err)
+	}
+}
+
+// Claims taken by a reconcile must not outlive the locator: a forced
+// delete drops them, and the partial-failure path unwinds the ones it took,
+// so the same locator can always be created again.
+func TestAddLocatorAndClaim_ClaimsDoNotOutliveTheLocator(t *testing.T) {
+	objs, err := bpf.ReadCollection(nil, nil)
+	if err != nil {
+		t.Skipf("BPF collection load failed (needs sudo): %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+	mgr := locator.NewManager()
+	s := NewSidFunctionServer(bpf.NewMapOperations(objs), nil, mgr, nil)
+
+	// Two uA entries inside the locator, so the reconcile records two
+	// bindings and both have to disappear with it.
+	for _, p := range []string{"fd00:aaaa:b002:c001::/64", "fd00:aaaa:b002:c002::/64"} {
+		if err := s.createOneSidFunction(uaSidFunction(p)); err != nil {
+			t.Fatalf("create uA %s: %v", p, err)
+		}
+		defer func(p string) { _ = s.deleteOneSidFunction(p) }(p)
+	}
+
+	loc := &locator.Locator{
+		Name:              "loc1",
+		Prefix:            netip.MustParsePrefix("fd00:aaaa:b002::/48"),
+		BlockLen:          32,
+		NodeLen:           16,
+		FunctionLen:       16,
+		Behavior:          locator.BehaviorUSID,
+		FunctionAutoStart: 1,
+		FunctionAutoEnd:   0xffff,
+	}
+	if err := s.AddLocatorAndClaim(loc); err != nil {
+		t.Fatalf("first AddLocatorAndClaim: %v", err)
+	}
+	if err := mgr.Delete("loc1", true); err != nil {
+		t.Fatalf("locator Delete: %v", err)
+	}
+
+	// Re-adding must not trip over bindings left by the first pass.
+	if err := s.AddLocatorAndClaim(loc); err != nil {
+		t.Fatalf("re-add after the locator was deleted: %v", err)
+	}
 }

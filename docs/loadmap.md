@@ -65,10 +65,24 @@
 
 | Function             | Status      | Description                                                 | Reference |
 |----------------------|-------------|-------------------------------------------------------------|-----------|
-| NEXT-CSID            |             | Compressed SID with next-based encoding                     | RFC 9800 |
-| REPLACE-CSID         |             | Compressed SID with replace-based encoding                  | RFC 9800 |
-| End.LBS              |             | Locator-Block Swap                                          | RFC 9800 |
-| End.XLBS             |             | L3 cross-connect and Locator-Block Swap                     | RFC 9800 |
+| NEXT-CSID            | Partial     | uN / uA / uT + terminal uDT*/uDX* via /128, F3216 only      | RFC 9800 |
+| REPLACE-CSID         | Partial     | End / End.X, 32/16-bit C-SIDs, single flavor                | RFC 9800 |
+| End.LBS              | Supported   | Locator-Block Swap (NEXT-C-SID / REPLACE-CSID)              | RFC 9800 |
+| End.XLBS             | Supported   | L3 cross-connect and Locator-Block Swap (NEXT / REPLACE)    | RFC 9800 |
+
+NEXT-C-SID の実装範囲は次のとおりです。設計と運用上の注意は [uSID (NEXT-C-SID)](design/ja/usid.md) を参照してください。
+
+- shift 系は uN (End)、uA (End.X)、uT (End.T、VRF table に bind) を実装しています。trigger prefix は uN / uT が /48、uA が /64 です
+- uDT4/uDT6/uDT46/uDX4/uDX6 のような terminal behavior は専用 action を持ちません。既存の End.* を zero-padded /128 に登録すると LPM で uN /48 に勝ち、container の最終 uSID として動きます (`examples/end-udt4/` で実証)
+- flavor は単一値のみです。SRH ありの container 終端では PSP/USP/USD が classic End への fall-through で適用され、SRH なし (H.Encaps.Red) の終端では USD の outer decap を実装しています (`examples/end-un-usd/`)。End.X 系 (End.X/uA/End.X(REP)) の USD は adjacency へ転送します
+- SID 構造は F3216 (block 32 bit、uSID 16 bit) のみです
+- trigger prefix は uSID 専用にしてください。prefix 内のアドレスは uN / uA / uT SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます
+- 登録は trigger prefix の明示指定のみで、locator_ref からの登録には未対応です
+- L3VPN の BGP 統合を実装しています。uSID locator の経路は RFC 9252 SID Structure 32/16/16/0 付きで advertise され、受信側は uSID 形状の経路を H.Encaps.Red で設置します。FRR 10.2.1 の usid-f3216 との interop は `examples/interop-clab/scenarios/usid-l3vpn-2site/` で検証しています。EVPN の uSID service SID は未着手です
+
+End.LBS / End.XLBS は NEXT-C-SID と REPLACE-CSID の両 flavor で実装しています。API では専用 action として登録し、実体は uN / uA / End(REP) / End.X(REP) の slot に target block を local property として持たせる形で動きます (`examples/end-lbs/` 参照)。
+
+REPLACE-CSID は End / End.X を実装しています (`SRV6_LOCAL_ACTION_END_REPLACE` / `END_X_REPLACE`)。C-SID 長は 32 bit (必須) と 16 bit (任意)、locator block は byte 境界の任意長で、trigger prefix は block + C-SID です。列の最終 C-SID は任意の behavior を block + C-SID の prefix で登録して受けます (`examples/end-replace/` 参照)。End.T/End.B6/End.BM への REPLACE 適用と locator / BGP 統合は未着手です。
 
 ### Service programming (draft)
 

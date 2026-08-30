@@ -4,6 +4,8 @@
 // Facade header: includes all endpoint sub-modules
 #include "endpoint/srv6_endpoint_core.h"
 #include "endpoint/srv6_endpoint_basic.h"
+#include "endpoint/srv6_endpoint_usid.h"
+#include "endpoint/srv6_endpoint_replace.h"
 #include "endpoint/srv6_endpoint_decap.h"
 #include "endpoint/srv6_endpoint_l2.h"
 #include "endpoint/srv6_endpoint_dx2v.h"

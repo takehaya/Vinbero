@@ -164,10 +164,15 @@ func (a *Applier) applyMUP(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	sessionRoute := r.Type == bgp.MUPRouteTypeT1ST || r.Type == bgp.MUPRouteTypeT2ST
 	if !withdraw && sessionRoute && !a.mupDefaultAllow && !a.vrfBindings.EmptyForFamily(fam) {
 		if _, _, ok := a.vrfBindings.MatchImportForFamily(r.RTs, fam); !ok {
-			a.logger.Warn("MUP route matches no VRF import RT; dropping",
+			// A BGP UPDATE is an implicit replace: a session route imported
+			// earlier must not survive a re-advertisement whose RTs no
+			// longer match any import filter. Dispatching it as a withdraw
+			// removes exactly this NLRI's tracked state (a no-op when
+			// nothing was installed).
+			a.logger.Warn("MUP route matches no VRF import RT; removing any previous session",
 				zap.String("type", r.Type.String()),
 				zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
-			return
+			withdraw = true
 		}
 	}
 	switch r.Type {
@@ -196,12 +201,22 @@ func (a *Applier) applyMUPISD(r *bgp.MUPRoute, withdraw bool) {
 	key := mupISDKey{rd: r.RD, prefix: r.Prefix}
 	if withdraw {
 		delete(a.mupISD, key)
-	} else {
-		if r.SRv6SID == "" {
-			a.logger.Warn("MUP ISD has no SRv6 SID; ignoring (resolves nothing)",
-				zap.String("prefix", r.Prefix), zap.String("rd", r.RD))
+	} else if !isUsableSRv6SID(r.SRv6SID) {
+		// A BGP UPDATE is an implicit replace: a re-advertisement whose SID
+		// became unusable (empty, all-zero, or otherwise not a routable
+		// IPv6 SID -- including one invalidated on decode per RFC 9252 §7)
+		// must stop this key resolving, exactly like a withdraw -- an
+		// earlier discovery left in place would keep steering sessions
+		// over a path the route no longer backs. An untracked key returns
+		// before the sweep so a flood of unusable advertisements cannot
+		// drive the reconcile-all loop.
+		a.logger.Warn("MUP ISD has no usable SRv6 SID; removing any previous discovery",
+			zap.String("prefix", r.Prefix), zap.String("sid", r.SRv6SID), zap.String("rd", r.RD))
+		if _, tracked := a.mupISD[key]; !tracked {
 			return
 		}
+		delete(a.mupISD, key)
+	} else {
 		if _, exists := a.mupISD[key]; !exists && len(a.mupISD) >= maxMUPDiscoveryRoutes {
 			a.logger.Warn("MUP ISD table full; dropping route",
 				zap.Int("max", maxMUPDiscoveryRoutes),
@@ -225,12 +240,17 @@ func (a *Applier) applyMUPDSD(r *bgp.MUPRoute, withdraw bool) {
 	key := mupDSDKey{rd: r.RD, address: r.Address}
 	if withdraw {
 		delete(a.mupDSD, key)
-	} else {
-		if r.SRv6SID == "" {
-			a.logger.Warn("MUP DSD has no SRv6 SID; ignoring (resolves nothing)",
-				zap.String("address", r.Address), zap.String("rd", r.RD))
+	} else if !isUsableSRv6SID(r.SRv6SID) {
+		// Same implicit-replace rule as ISD: an unusable SID on a
+		// re-advertisement removes the previous discovery, and an
+		// untracked key returns before the reconcile sweep.
+		a.logger.Warn("MUP DSD has no usable SRv6 SID; removing any previous discovery",
+			zap.String("address", r.Address), zap.String("sid", r.SRv6SID), zap.String("rd", r.RD))
+		if _, tracked := a.mupDSD[key]; !tracked {
 			return
 		}
+		delete(a.mupDSD, key)
+	} else {
 		if _, exists := a.mupDSD[key]; !exists && len(a.mupDSD) >= maxMUPDiscoveryRoutes {
 			a.logger.Warn("MUP DSD table full; dropping route",
 				zap.Int("max", maxMUPDiscoveryRoutes),
@@ -357,6 +377,17 @@ func (a *Applier) applyMUPT1ST(r *bgp.MUPRoute, withdraw bool) {
 			zap.Int("max", maxMUPSessions), zap.String("rd", r.RD), zap.String("ue_prefix", r.Prefix))
 		return
 	}
+	if r.SRv6SID != "" && !isUsableSRv6SID(r.SRv6SID) {
+		// An unusable own Prefix-SID (e.g. an all-zero "::") is normalized
+		// to the empty fallback: resolution then goes through discovery
+		// alone, and a session no discovery covers is torn down by the
+		// reconcile instead of being (re-)installed toward the bad SID.
+		a.logger.Warn("MUP session route has an unusable own SRv6 SID; treating as absent",
+			zap.String("rd", r.RD), zap.String("sid", r.SRv6SID))
+		rr := *r
+		rr.SRv6SID = ""
+		r = &rr
+	}
 	st.route = *r
 	a.reconcileMUPT1ST(key)
 }
@@ -406,7 +437,7 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) {
 		return
 	}
 
-	entry, err := a.buildHeadendEntry(composed)
+	entry, err := a.buildHeadendEntry(composed, false)
 	if err != nil {
 		a.logger.Error("build MUP T1ST headend entry",
 			zap.String("ue_prefix", r.Prefix), zap.Error(err))
@@ -629,6 +660,17 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	} else if st.installedSID == "" {
 		st.instance = vrfID
 	}
+	if r.SRv6SID != "" && !isUsableSRv6SID(r.SRv6SID) {
+		// An unusable own Prefix-SID (e.g. an all-zero "::") is normalized
+		// to the empty fallback: resolution then goes through discovery
+		// alone, and a session no discovery covers is torn down by the
+		// reconcile instead of being (re-)installed toward the bad SID.
+		a.logger.Warn("MUP session route has an unusable own SRv6 SID; treating as absent",
+			zap.String("rd", r.RD), zap.String("sid", r.SRv6SID))
+		rr := *r
+		rr.SRv6SID = ""
+		r = &rr
+	}
 	st.route = *r
 	st.fam = fam
 	a.reconcileMUPT2ST(key)
@@ -647,7 +689,7 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated at apply time
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
-	entry, err := a.buildHeadendEntry(st.installedSID)
+	entry, err := a.buildHeadendEntry(st.installedSID, false)
 	if err != nil {
 		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
@@ -786,7 +828,7 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 	// The direct SID is a plain End.DT4/DT6 target: H.Encaps toward it with no
 	// Args.Mob.Session patch (MupArgsOffsetNone), so the TEID stays only the
 	// lookup key.
-	entry, err := a.buildHeadendEntry(sid)
+	entry, err := a.buildHeadendEntry(sid, false)
 	if err != nil {
 		a.logger.Error("build MUP T2ST uplink entry",
 			zap.String("endpoint", r.Endpoint), zap.Error(err))

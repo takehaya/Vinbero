@@ -1,9 +1,12 @@
 # SRv6 End.DT2 P2MP Playground
 
-Vinbero XDPによるSRv6 End.DT2 P2MP（Point-to-Multipoint）L2VPNのデモ環境です。
-BUM flood による複数リモートPEへの転送と、bridgeの複数ポートへのfloodを検証します。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-## トポロジー
+Demo environment for a point-to-multipoint L2VPN with SRv6 End.DT2 on Vinbero
+XDP. It exercises BUM flooding towards several remote PEs and flooding across
+several bridge ports.
+
+## Topology
 
 ```mermaid
 graph LR
@@ -16,29 +19,31 @@ graph LR
     PE3 -->|VLAN 100| host4[host4<br/>VLAN100: .4]
 ```
 
-**テストシナリオ:**
+**Test scenarios:**
 
-1. BUM P2MP flood: host1がARP broadcastを送ると、PE1のTC clone-to-selfが PE2 と PE3 の両方にSRv6 encapしたコピーを送出する
-2. Bridge multi-port flood: PE2のEnd.DT2がdecapした後、bridge br100がhost2とhost3の両方にfloodする
-3. ローカルL2: host2とhost3は同じbridge上なので直接通信できる
+1. BUM P2MP flood: when host1 broadcasts an ARP request, PE1's TC
+   clone-to-self sends one SRv6-encapsulated copy to PE2 and one to PE3
+2. Bridge multi-port flood: after PE2's End.DT2 decapsulates, bridge br100
+   floods to both host2 and host3
+3. Local L2: host2 and host3 sit on the same bridge and talk directly
 
-## クイックスタート
+## Quick start
 
 ```bash
-sudo ./setup.sh    # 環境構築
-sudo ./test.sh     # テスト実行
-sudo ./teardown.sh # クリーンアップ
+sudo ./setup.sh    # build the environment
+sudo ./test.sh     # run the tests
+sudo ./teardown.sh # clean up
 ```
 
-## 手動実行
+## Running it by hand
 
-### 1. 環境構築
+### 1. Build the environment
 
 ```bash
 sudo ./setup.sh
 ```
 
-### 2. Vinbero起動（3台のPE）
+### 2. Start Vinbero on the three PEs
 
 ```bash
 # PE1
@@ -49,10 +54,10 @@ sudo ip netns exec p2m-router3 ../../out/bin/vinberod -c vinbero_pe2.yaml &
 sudo ip netns exec p2m-router4 ../../out/bin/vinberod -c vinbero_pe3.yaml &
 ```
 
-### 3. PE設定
+### 3. Configure the PEs
 
 ```bash
-# PE1: H.Encaps.L2 + BdPeer（PE2とPE3の2つ）
+# PE1: H.Encaps.L2 + two BdPeers (PE2 and PE3)
 sudo ip netns exec p2m-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
   hl2 create --interface p2m-rt1h1 --vlan-id 100 \
   --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3 --bd-id 100
@@ -63,28 +68,46 @@ sudo ip netns exec p2m-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
 sudo ip netns exec p2m-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082 \
   peer create --bd-id 100 --src-addr fc00:1::1 --segments fc00:2::1,fc00:4::4
 
-# PE2: End.DT2 + H.Encaps.L2 (return)
+# PE2: End.DT2 + H.Encaps.L2 (return, one per access port) + BdPeer
 sudo ip netns exec p2m-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
   sid create --trigger-prefix fc00:3::3/128 --action END_DT2 --bd-id 100 --bridge-name br100
 
-# PE3: End.DT2 + H.Encaps.L2 (return)
+sudo ip netns exec p2m-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface p2m-rt3h2 --vlan-id 100 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2 --bd-id 100
+sudo ip netns exec p2m-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  hl2 create --interface p2m-rt3h3 --vlan-id 100 \
+  --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2 --bd-id 100
+
+sudo ip netns exec p2m-router3 ../../out/bin/vinbero -s http://127.0.0.1:8083 \
+  peer create --bd-id 100 --src-addr fc00:3::3 --segments fc00:2::2,fc00:1::2
+
+# PE3: End.DT2 + H.Encaps.L2 (return) + BdPeer
 sudo ip netns exec p2m-router4 ../../out/bin/vinbero -s http://127.0.0.1:8084 \
   sid create --trigger-prefix fc00:4::4/128 --action END_DT2 --bd-id 100 --bridge-name br100
+
+sudo ip netns exec p2m-router4 ../../out/bin/vinbero -s http://127.0.0.1:8084 \
+  hl2 create --interface p2m-rt4h4 --vlan-id 100 \
+  --src-addr fc00:4::4 --segments fc00:2::2,fc00:1::2 --bd-id 100
+
+sudo ip netns exec p2m-router4 ../../out/bin/vinbero -s http://127.0.0.1:8084 \
+  peer create --bd-id 100 --src-addr fc00:4::4 --segments fc00:2::2,fc00:1::2
 ```
 
-### 4. テスト
+### 4. Test
 
 ```bash
-# BUM P2MP: host1 → host2 (PE2), host3 (PE2 bridge), host4 (PE3)
+# BUM P2MP: host1 to host2 (PE2), host3 (PE2 bridge), host4 (PE3)
 sudo ip netns exec p2m-host1 ping -c 3 -I p2m-h1rt1.100 172.16.100.2
 sudo ip netns exec p2m-host1 ping -c 3 -I p2m-h1rt1.100 172.16.100.3
 sudo ip netns exec p2m-host1 ping -c 3 -I p2m-h1rt1.100 172.16.100.4
 
-# Bridge multi-port: host2 ↔ host3 (same bridge)
+# Bridge multi-port: host2 and host3 on the same bridge
 sudo ip netns exec p2m-host2 ping -c 3 -I p2m-h2rt3.100 172.16.100.3
 ```
 
-### 5. クリーンアップ
+### 5. Clean up
+
 ```bash
 sudo ./teardown.sh
 ```

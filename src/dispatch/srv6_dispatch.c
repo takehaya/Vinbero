@@ -58,13 +58,22 @@ static __always_inline int process_srv6_decap_nosrh(
     __u16 l3_offset)
 {
     __u8 nh = ip6h->nexthdr;
-    if (nh != IPPROTO_IPIP && nh != IPPROTO_IPV6 && nh != IPPROTO_ETHERNET)
-        return XDP_PASS;
 
     struct lpm_key_v6 key = { .prefixlen = 128 };
     __builtin_memcpy(key.addr, &ip6h->daddr, IPV6_ADDR_LEN);
     struct sid_function_entry *entry = bpf_map_lookup_elem(&sid_function_map, &key);
     if (!entry)
+        return XDP_PASS;
+
+    // uN/uA/uT process any upper-layer protocol without an SRH (RFC 9800
+    // Sec.4.1: NEXT-C-SID applies to SRH-less packets too). Everything
+    // else keeps the reduced-encap gate: only tunnel payloads decap here.
+    if (entry->action != SRV6_LOCAL_ACTION_END_UN &&
+        entry->action != SRV6_LOCAL_ACTION_END_UA &&
+        entry->action != SRV6_LOCAL_ACTION_END_UT &&
+        entry->action != SRV6_LOCAL_ACTION_END_REPLACE &&
+        entry->action != SRV6_LOCAL_ACTION_END_X_REPLACE &&
+        nh != IPPROTO_IPIP && nh != IPPROTO_IPV6 && nh != IPPROTO_ETHERNET)
         return XDP_PASS;
 
     if (tailcall_ctx_write_sid(entry, l3_offset, DISPATCH_NOSRH, nh, entry->action) == 0)

@@ -185,13 +185,15 @@ func (s *Server) Setup() {
 	// Locator service (SRv6 locator manager). Registered before
 	// SidFunctionService so the latter can receive the manager and
 	// honor locator_ref in SidFunctionCreate.
-	locatorServer := NewLocatorServer(s.locatorMgr)
+	// SidFunction service. Built first so the locator handler can hand it
+	// newly added locators to reconcile uA claims against.
+	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr, s.logger.Named("sid_function"))
+
+	locatorServer := NewLocatorServer(s.locatorMgr, sidFunctionServer.AddLocatorAndClaim)
 	path, handler := vinberov1connect.NewLocatorServiceHandler(locatorServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered LocatorService", zap.String("path", path))
 
-	// SidFunction service
-	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr, s.logger.Named("sid_function"))
 	path, handler = vinberov1connect.NewSidFunctionServiceHandler(sidFunctionServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered SidFunctionService", zap.String("path", path))

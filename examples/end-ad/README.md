@@ -1,6 +1,10 @@
-# End.AD (Dynamic Proxy) Example
+# SRv6 End.AD
 
-draft-ietf-spring-srv6-service-programming の End.AD を netns で検証する example です。End.AS と同じ topology で、静的 CACHE の代わりに往路のパケットから SR encapsulation を動的に学習します。
+*(日本語: [README.ja.md](./README.ja.md))*
+
+netns example for End.AD from draft-ietf-spring-srv6-service-programming.
+Same topology as End.AS, but the SR encapsulation is learned dynamically
+from the forward packets instead of coming from a static CACHE.
 
 ## Topology
 
@@ -13,12 +17,18 @@ graph LR
     router2 --- svc[svc<br/>SR-unaware IPv4 forwarder]
 ```
 
-- forward 方向は router1 が H.Encaps で `fc00:2::100, fc00:3::3` を積みます。
-- `fc00:2::100` は router2 の Vinbero が End.AD として処理します。最初の forward パケットから outer IPv6 + SRH を IFACE-IN circuit 単位で cache し、decap した inner を svc へ渡します。svc から戻ったパケットには cache した encapsulation をそのまま前置します。
-- End.AS と違い、SID の設定に segment list を書きません。chain が変わっても設定変更なしで追従します。hop limit の揺れは `--hop-limit-margin` の範囲まで cache を書き換えません。
-- return 方向 (host2 から host1) は proxy を通らない Linux native の経路です。
+- In the forward direction router1 pushes `fc00:2::100, fc00:3::3` with H.Encaps.
+- `fc00:2::100` is handled by Vinbero on router2 as End.AD. The first forward
+  packet seeds a per-IFACE-IN-circuit cache of the outer IPv6 + SRH; the
+  decapsulated inner packet goes to svc, and whatever comes back gets that
+  cached encapsulation prepended.
+- Unlike End.AS, the SID carries no segment list, so a changed chain needs no
+  configuration change. Hop limit jitter within `--hop-limit-margin` does not
+  rewrite the cache.
+- The return direction (host2 to host1) is plain Linux forwarding and does
+  not traverse the proxy.
 
-## 実行方法
+## Usage
 
 ```bash
 sudo ./setup.sh
@@ -26,8 +36,12 @@ sudo ./test.sh
 sudo ./teardown.sh
 ```
 
-## テスト内容
+## What is verified
 
-- Phase 1 は Linux native の End を baseline にして underlay の疎通を確認します (Linux に End.AD は無いため proxy は bypass)。
-- Phase 2 は Vinbero の End.AD で svc 経由の chain を検証します。最初の forward パケットが cache を seed し、svc 側 veth の rx counter でサービス通過を確認します。
-- 同じ IFACE-IN に 2 つ目の proxy SID を作ると reject されること (return circuit の 1:1 制約) も確認します。
+- Phase 1 establishes an underlay baseline with Linux native End (Linux has
+  no End.AD, so the proxy is bypassed).
+- Phase 2 exercises the chain through svc with Vinbero's End.AD: the first
+  forward packet seeds the cache, and the rx counter on the svc-side veth
+  confirms the service was traversed.
+- Creating a second proxy SID on the same IFACE-IN is rejected (the return
+  circuit is 1:1).
