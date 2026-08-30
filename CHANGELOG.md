@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.1.2](https://github.com/takehaya/Vinbero/compare/v0.1.1...v0.1.2) (2026-08-30)
+
+
+### 🎉 Features
+
+* **benchmark:** TRex-driven SRv6 dataplane load-test harness ([#140](https://github.com/takehaya/Vinbero/issues/140)) ([848597e](https://github.com/takehaya/Vinbero/commit/848597eebf11eafc6abd813ed307fe408b8dd32f))
+* **bgp:** signal and honour the SRv6 SID Structure on L3VPN routes ([#167](https://github.com/takehaya/Vinbero/issues/167)) ([96a0016](https://github.com/takehaya/Vinbero/commit/96a00165f48b4711459e0618e872a67ef9708429))
+* **bpf:** forward End.X-family USD over the adjacency ([#160](https://github.com/takehaya/Vinbero/issues/160)) ([6e6372f](https://github.com/takehaya/Vinbero/commit/6e6372f66a8515dbed21796eda0aa767491c8ab1))
+* End.LBS and End.XLBS (RFC 9800 Sec.7, Locator-Block Swap) ([#166](https://github.com/takehaya/Vinbero/issues/166)) ([7a57ff8](https://github.com/takehaya/Vinbero/commit/7a57ff8fde4a3bccbbc8a5454271d0e2a6a2267d))
+* REPLACE-CSID flavor for End and End.X (RFC 9800 Sec.4.2) ([#159](https://github.com/takehaya/Vinbero/issues/159)) ([24d3e2f](https://github.com/takehaya/Vinbero/commit/24d3e2f0ca699a5c71abbe76f6cf978d2adee2d4))
+* uSID (RFC 9800 NEXT-C-SID) uN and uA support ([#150](https://github.com/takehaya/Vinbero/issues/150)) ([ed6e8bb](https://github.com/takehaya/Vinbero/commit/ed6e8bb828b36dd5c1e176f4493832b468b3bb14))
+* uSID uT / terminal uDT-uDX / USD flavor (NEXT-C-SID completion) ([#155](https://github.com/takehaya/Vinbero/issues/155)) ([aac4e13](https://github.com/takehaya/Vinbero/commit/aac4e130996ac83a78aab22bfc7c532cd76014f8))
+
+
+### 🐛 Bug Fixes
+
+* **bgp:** tear down MUP and EVPN state on unusable replacement UPDATEs ([#170](https://github.com/takehaya/Vinbero/issues/170)) ([288259f](https://github.com/takehaya/Vinbero/commit/288259f4d700d348a27b9ca8b8e14f8db2edad43))
+* **bpf:** enable IPv6 forwarding in the adjacency test fixture ([#164](https://github.com/takehaya/Vinbero/issues/164)) ([d3f178e](https://github.com/takehaya/Vinbero/commit/d3f178e9c5e70aa58d33227ecc9066a42042eb32))
+* **bpf:** finish the verifier log change and reset the plugin slots ([#169](https://github.com/takehaya/Vinbero/issues/169)) ([5fc6651](https://github.com/takehaya/Vinbero/commit/5fc665100652a6487d3974fe40ed53c276af70ab))
+* **bpf:** keep the builtin aux lifecycle tied to the exact SID entry ([#148](https://github.com/takehaya/Vinbero/issues/148)) ([3a0533a](https://github.com/takehaya/Vinbero/commit/3a0533a483304082fe7bcd85352b1e73a359a78b))
+* **bpf:** spend a hop limit when an endpoint advances the segment list ([#149](https://github.com/takehaya/Vinbero/issues/149)) ([cab1aa0](https://github.com/takehaya/Vinbero/commit/cab1aa07b6f29bef4c91633d79cf742c60e7edf1))
+
+
+### ⚡ Performance Improvements
+
+* **bpf:** make the BPF test suite finish in seconds instead of minutes ([#151](https://github.com/takehaya/Vinbero/issues/151)) ([b81e8b4](https://github.com/takehaya/Vinbero/commit/b81e8b49d062836da10d68134082abb35b90426d))
+
+
+### 📝 Documentation
+
+* **examples:** make the netns example READMEs English-first ([#147](https://github.com/takehaya/Vinbero/issues/147)) ([3a33b5b](https://github.com/takehaya/Vinbero/commit/3a33b5b51089b092d3c83d9fe00573eb1aedd899))
+
 ## [0.1.1](https://github.com/takehaya/Vinbero/compare/v0.1.0...v0.1.1) (2026-08-17)
 
 
