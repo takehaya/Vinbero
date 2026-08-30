@@ -43,6 +43,11 @@ func sharedCollectionKey(constants map[string]any) string {
 
 // sharedCollection returns the collection for constants, loading it on first
 // use, with every map back in the state a fresh load would have left it.
+//
+// The reset is what keeps tests apart, so a test gets one helper: taking a
+// second one wipes the map state the first has already written. A test that
+// needs two configurations puts them on distinct keys of the same helper, or
+// splits into two tests.
 func sharedCollection(tb testing.TB, constants map[string]any) *BpfObjects {
 	tb.Helper()
 	sharedCollMu.Lock()
@@ -61,9 +66,13 @@ func sharedCollection(tb testing.TB, constants map[string]any) *BpfObjects {
 	return objs
 }
 
-// resetSharedCollection empties every map a test could have written.
-// PROG_ARRAYs are left alone: they hold the tail-call targets that
-// ReadCollection populated, and clearing them would break dispatch.
+// resetSharedCollection empties every map a test could have written and
+// puts the tail-call targets back.
+//
+// The PROG_ARRAYs cannot be left alone: tests register extra slots in them,
+// a plugin slot for instance, and do not always remove them, so the next
+// test would not get what a fresh load gives it. Emptying them and calling
+// populateProgArrays restores exactly the built-in targets.
 func resetSharedCollection(tb testing.TB, objs *BpfObjects) {
 	tb.Helper()
 	maps := reflect.ValueOf(objs.BpfMaps)
@@ -76,6 +85,9 @@ func resetSharedCollection(tb testing.TB, objs *BpfObjects) {
 			tb.Fatalf("failed to reset map %s: %v", maps.Type().Field(i).Name, err)
 		}
 	}
+	if err := populateProgArrays(objs); err != nil {
+		tb.Fatalf("failed to restore the tail-call targets: %v", err)
+	}
 }
 
 func clearMap(m *ebpf.Map) error {
@@ -84,8 +96,6 @@ func clearMap(m *ebpf.Map) error {
 		return err
 	}
 	switch info.Type {
-	case ebpf.ProgramArray:
-		return nil
 	case ebpf.Array, ebpf.PerCPUArray:
 		return zeroArray(m, info)
 	default:
@@ -118,7 +128,9 @@ func zeroArray(m *ebpf.Map, info *ebpf.MapInfo) error {
 	return nil
 }
 
-// deleteAllKeys drains a hash or LPM trie. Keys are collected first: the
+// deleteAllKeys drains every map type that supports delete, which is all of
+// them except the arrays: hashes, LPM tries and the PROG_ARRAYs whose
+// tail-call targets populateProgArrays puts back. Keys are collected first: the
 // iterator's behavior while the map is being modified is not defined.
 func deleteAllKeys(m *ebpf.Map, info *ebpf.MapInfo) error {
 	var keys [][]byte

@@ -23,13 +23,15 @@ type LoggerConfig struct {
 type BpfConfig struct {
 	DeviceMode string `yaml:"device_mode,omitempty" default:"driver"`
 	// VerifierLogLevel asks the kernel for a verifier log on every program
-	// load: 1 for instructions, 2 for branches. Off by default because the
-	// log costs real time per load and cilium/ebpf already requests one on
-	// its own when a program fails to verify. Turn it on to debug a load.
+	// load: 1 logs branches, 2 logs every instruction. Off by default
+	// because the log costs real time per load and cilium/ebpf already
+	// requests a branch-level one on its own when a program fails to
+	// verify. Set it to 2 to get instruction-level detail in that failure.
 	VerifierLogLevel int `yaml:"verifier_log_level,omitempty" default:"0"`
 	// VerifierLogSize is the starting size of that log buffer, per program.
 	// It grows on demand, and is capped so a large value cannot commit
-	// hundreds of megabytes up front.
+	// hundreds of megabytes up front. Zero leaves the starting size to
+	// cilium/ebpf.
 	VerifierLogSize uint32 `yaml:"verifier_log_size,omitempty" default:"0"`
 }
 
