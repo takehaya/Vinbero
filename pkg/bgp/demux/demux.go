@@ -246,7 +246,7 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	if ev.Source.IsLocal() {
 		return
 	}
-	d.isClaimed(ev)
+	wasClaimed := d.isClaimed(ev)
 
 	d.mu.RLock()
 	targets := make([]*consumer, 0, len(d.consumers))
@@ -264,7 +264,11 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	for _, builtin := range []bool{true, false} {
 		for _, c := range targets {
 			if c.builtin == builtin {
-				c.handler(ev)
+				if c.view != nil {
+					c.view.handleWithClaim(ev, ev.IsWithdraw && wasClaimed)
+				} else {
+					c.handler(ev)
+				}
 			}
 		}
 	}
@@ -433,7 +437,7 @@ func (d *Demux) ReplayBuiltin(name string, families []bgp.Family) error {
 	defer target.view.mu.Unlock()
 	return d.SnapshotTo(families, func(ev bgp.RouteEvent) {
 		if !ev.IsWithdraw && target.wants(ev.Family) {
-			target.view.handleLocked(ev)
+			target.view.handleLocked(ev, false)
 		}
 	})
 }
@@ -486,7 +490,7 @@ func (d *Demux) replay(c *consumer, families []bgp.Family) {
 	if c.view != nil {
 		c.view.mu.Lock()
 		defer c.view.mu.Unlock()
-		handler = c.view.handleLocked
+		handler = func(ev bgp.RouteEvent) { c.view.handleLocked(ev, false) }
 	}
 	want := families
 	if len(want) == 0 {

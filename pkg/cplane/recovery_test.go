@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +41,48 @@ type rejectingDemux struct{ *demux.Demux }
 
 func (d *rejectingDemux) RegisterQuiet(string, []bgp.Family, bgp.RouteHandler) (func(), error) {
 	return nil, errors.New("subscription refused")
+}
+
+// Like Unregister, dropping a private behavior does not make the built-in
+// capable of implementing it. Existing paths wait for a new advertisement.
+func TestUpgradeReleasingClaimDoesNotReinterpretPrivateRoutes(t *testing.T) {
+	sub := &rollbackSubscriber{}
+	claims := demux.NewClaimRegistry(nil)
+	d := demux.New(sub, nil, nil)
+	d.SetClaimRegistry(claims)
+	var installed atomic.Bool
+	if _, err := d.RegisterBuiltin("applier", nil, func(ev bgp.RouteEvent) { installed.Store(!ev.IsWithdraw) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Stop()
+	m, _ := newTestManager(t, d, claims)
+	reg := Registration{
+		Name: "declare", Module: declareModule(t), Behaviors: []uint16{0xFE01},
+		Capabilities: testCaps(), Scope: testScope(),
+	}
+	if err := m.Register(context.Background(), reg); err != nil {
+		t.Fatal(err)
+	}
+	sub.handler(bgp.RouteEvent{
+		Family: bgp.FamilyVPNv4, EndpointBehavior: 0xFE01,
+		Source: bgp.PathSource{Peer: netip.MustParseAddr("192.0.2.1")},
+		VPN:    &bgp.VPNRoute{RD: "65000:1", Prefix: "10.0.0.0/24"},
+	})
+	waitDelivered(t, m, reg.Name)
+	if installed.Load() {
+		t.Fatal("claimed route reached the built-in")
+	}
+	reg.Behaviors = nil
+	if err := m.Register(context.Background(), reg); err != nil {
+		t.Fatal(err)
+	}
+	waitDelivered(t, m, reg.Name)
+	if installed.Load() {
+		t.Fatal("claim removal reinterpreted a private route as a built-in route")
+	}
 }
 
 func TestFailedRegistrationRestoresBuiltinView(t *testing.T) {

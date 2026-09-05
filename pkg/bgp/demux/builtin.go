@@ -31,11 +31,11 @@ type builtinView struct {
 	scans   map[*builtinScan]struct{}
 }
 
-// A scan only remembers prefixes changed during its own lifetime. This also
+// A scan only remembers paths changed during its own lifetime. This also
 // covers removed groups without keeping tombstones for every past route.
 type builtinScan struct {
 	view    *builtinView
-	changed map[string]struct{}
+	changed map[routePath]struct{}
 }
 
 func (v *builtinView) beginScan() *builtinScan {
@@ -44,7 +44,7 @@ func (v *builtinView) beginScan() *builtinScan {
 	if v.scans == nil {
 		v.scans = make(map[*builtinScan]struct{})
 	}
-	s := &builtinScan{view: v, changed: make(map[string]struct{})}
+	s := &builtinScan{view: v, changed: make(map[routePath]struct{})}
 	v.scans[s] = struct{}{}
 	return s
 }
@@ -60,7 +60,7 @@ func (s *builtinScan) retract(ev bgp.RouteEvent) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	key := forwardingKey(ev)
-	if _, changed := s.changed[key]; changed {
+	if _, changed := s.changed[routePath{nlriKey(ev), ev.Source}]; changed {
 		return
 	}
 	if key == "" {
@@ -70,12 +70,12 @@ func (s *builtinScan) retract(ev bgp.RouteEvent) {
 		}
 		return
 	}
-	v.updateLocked(ev, true, key)
+	v.updateLocked(ev, true, key, false)
 }
 
-func (v *builtinView) changedLocked(key string) {
+func (v *builtinView) changedLocked(ev bgp.RouteEvent) {
 	for s := range v.scans {
-		s.changed[key] = struct{}{}
+		s.changed[routePath{nlriKey(ev), ev.Source}] = struct{}{}
 	}
 }
 
@@ -109,39 +109,45 @@ func (v *builtinView) refresh() {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		v.changedLocked(key)
 		g := v.groups[key]
 		paths := sortedPaths(g.routes)
+		for _, path := range paths {
+			v.changedLocked(g.routes[path])
+		}
 		if len(paths) > 0 {
-			v.updateLocked(g.routes[paths[0]], false, key)
+			v.updateLocked(g.routes[paths[0]], false, key, false)
 		}
 	}
 }
 
 func (v *builtinView) handle(ev bgp.RouteEvent) {
+	v.handleWithClaim(ev, false)
+}
+
+func (v *builtinView) handleWithClaim(ev bgp.RouteEvent, claimedWithdraw bool) {
 	// Serialize the applier's state and delivery with its on-demand replays.
 	// The built-in handler must not recursively invoke this same view.
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.handleLocked(ev)
+	v.handleLocked(ev, claimedWithdraw)
 }
 
-func (v *builtinView) handleLocked(ev bgp.RouteEvent) {
+func (v *builtinView) handleLocked(ev bgp.RouteEvent, claimedWithdraw bool) {
 	if ev.Source.IsLocal() {
 		return
 	}
 	key := forwardingKey(ev)
 	if key == "" {
-		if !v.claimed(ev.EndpointBehavior) {
+		if !claimedWithdraw && !v.claimed(ev.EndpointBehavior) {
 			v.handler(ev)
 		}
 		return
 	}
-	v.changedLocked(key)
-	v.updateLocked(ev, false, key)
+	v.changedLocked(ev)
+	v.updateLocked(ev, false, key, claimedWithdraw)
 }
 
-func (v *builtinView) updateLocked(ev bgp.RouteEvent, retract bool, key string) {
+func (v *builtinView) updateLocked(ev bgp.RouteEvent, retract bool, key string, claimedWithdraw bool) {
 	if retract && !v.claimed(ev.EndpointBehavior) {
 		return
 	}
@@ -185,7 +191,7 @@ func (v *builtinView) updateLocked(ev bgp.RouteEvent, retract bool, key string) 
 		v.handler(gone)
 	}
 	if !claimed {
-		if ev.IsWithdraw && !known {
+		if ev.IsWithdraw && !known && !claimedWithdraw {
 			// The applier can own state from an earlier daemon run or an
 			// independent replay. Preserve ordinary withdrawals even when
 			// this view never observed their advertisements.

@@ -199,8 +199,11 @@ RIB の読み取りから適用までを同じ view lock で直列化します�
 登録に失敗して claim を戻した場合も、demux が保持する最新の path を再評価
 して built-in の担当を戻します。登録中に withdraw 済みの path は復活させません。
 live の claimed UPDATE も、配送履歴が無い path へ cleanup の withdraw を
-渡します。RIB 再走査中に live 更新された prefix は、古い走査結果
-で上書きしません。この更新記録は走査終了時に捨てます。
+渡します。RIB 再走査中に live 更新された path は、古い走査結果で上書き
+しません。別 sibling の更新では未変更の claimed path を見落とさないよう、
+記録は NLRI と source 単位にします。この更新記録は走査終了時に捨てます。
+consumer の登録前に ledger だけが記録していた claimed withdraw も、
+未観測の通常 withdraw と区別します。
 
 withdraw には path attribute が一切載りません。BGP は消える NLRI しか
 送らないので、advertise 時の behavior は経路が消えるときの wire に存在せず、

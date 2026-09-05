@@ -50,6 +50,24 @@ func TestUnseenOrdinaryWithdrawReachesBuiltin(t *testing.T) {
 	}
 }
 
+func TestLedgerOnlyClaimedWithdrawDoesNotReachNewBuiltin(t *testing.T) {
+	src := &fakeSource{}
+	d := claimedDemux(t, src)
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Stop()
+	src.emit(vpnEvent("65000:1", "10.0.0.0/24", 0xFE01))
+	var got collector
+	if _, err := d.RegisterBuiltin("late-applier", nil, got.handle); err != nil {
+		t.Fatal(err)
+	}
+	src.emit(vpnWithdraw("65000:1", "10.0.0.0/24"))
+	if got.len() != 0 {
+		t.Fatal("ledger-only claimed withdrawal reached the late built-in")
+	}
+}
+
 func TestClaimedUpdateRetractsBuiltinState(t *testing.T) {
 	src := &fakeSource{}
 	d := claimedDemux(t, src)
@@ -222,6 +240,37 @@ func TestBuiltinReplayOrdersLiveWithdrawAfterSnapshot(t *testing.T) {
 type interleavedLister struct {
 	*fakeSource
 	duringList func()
+}
+
+func TestRetractionScanKeepsUnchangedClaimedSibling(t *testing.T) {
+	claimed := vpnEvent("65000:1", "10.0.0.0/24", 0xFE01)
+	ordinary := vpnEventFrom("192.0.2.2", "65000:2", "10.0.0.0/24", 0x0013)
+	src := &fakeSource{rib: map[bgp.Family][]bgp.RouteEvent{bgp.FamilyVPNv4: {claimed}}}
+	d := claimedDemux(t, src)
+	d.lister = &interleavedLister{fakeSource: src, duringList: func() { src.emit(ordinary) }}
+	installed := make(map[routePath]bool)
+	if _, err := d.RegisterBuiltin("applier", nil, func(ev bgp.RouteEvent) {
+		path := routePath{nlriKey(ev), ev.Source}
+		if ev.IsWithdraw {
+			delete(installed, path)
+		} else {
+			installed[path] = true
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Stop()
+	d.RetractClaimedFromBuiltins()
+	if len(installed) != 0 {
+		t.Fatal("ordinary sibling bypassed an unchanged claimed snapshot path")
+	}
+	src.emit(vpnWithdraw("65000:1", "10.0.0.0/24"))
+	if !installed[routePath{nlriKey(ordinary), ordinary.Source}] {
+		t.Fatal("ordinary sibling was not restored after the claimed path left")
+	}
 }
 
 func (s *interleavedLister) ListRoutes(family bgp.Family, handler bgp.RouteHandler) error {
