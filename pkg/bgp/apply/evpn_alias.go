@@ -192,11 +192,18 @@ func (a *Applier) resetEVPNGroups() {
 			if k.Index < bpf.EsPeerIndexBase || k.Index >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
 				continue
 			}
-			if derr := a.fdbBd.DeleteBdPeer(k.BdId, k.Index); derr != nil {
+			if existed, derr := a.fdbBd.DeleteBdPeer(k.BdId, k.Index); derr != nil && existed {
 				a.logger.Error("sweep stale EVPN ES peer",
 					zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index), zap.Error(derr))
 				sweepOK = false
 				continue
+			} else if derr != nil {
+				// The slot is free (a concurrent delete, or a cleanup
+				// failure on an already-empty slot): the sweep's goal for
+				// this index is met, so it must not block the stale-group
+				// cleanup below.
+				a.logger.Warn("sweep stale EVPN ES peer (slot already free)",
+					zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index), zap.Error(derr))
 			}
 			a.logger.Info("swept EVPN ES peer left by a previous run",
 				zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index))
@@ -655,16 +662,16 @@ func (a *Applier) teardownESDest(dk esDestKey, d *esDest) bool {
 		// would cut it over to nothing.
 		return false
 	}
-	exists := true
-	if peers, err := a.fdbBd.ListBdPeers(); err == nil {
-		_, exists = peers[bpf.BdPeerKey{BdId: dk.bdID, Index: d.peerIdx}]
-	}
-	if exists {
-		if err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil {
-			a.logger.Error("delete EVPN ES peer",
-				zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
-			return false
-		}
+	// DeleteBdPeer itself reports whether the entry existed, so no
+	// pre-check listing is needed: an already-free slot (a failed
+	// CreateBdPeer rolled its own entry away) is not a teardown failure.
+	if existed, err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil && existed {
+		a.logger.Error("delete EVPN ES peer",
+			zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
+		return false
+	} else if err != nil {
+		a.logger.Warn("delete EVPN ES peer (slot already free)",
+			zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
 	}
 	if err := a.ecmp.DeleteEcmpGroup(d.groupID, a.esGroupOwner()); err != nil {
 		a.logger.Error("delete EVPN aliasing group",

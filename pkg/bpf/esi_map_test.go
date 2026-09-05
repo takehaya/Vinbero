@@ -1,6 +1,7 @@
 package bpf
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -121,13 +122,40 @@ func TestBdPeerReverseEsi(t *testing.T) {
 		t.Fatalf("CreateBdPeer single-homing: %v", err)
 	}
 
-	// Cleanup
-	_ = h.mapOps.DeleteBdPeer(100, 0)
-	_ = h.mapOps.DeleteBdPeer(100, 1)
-	// Ensure reverse map was drained for ESI path
-	if err := h.objs.BdPeerReverseMap.Lookup(rKey, &rVal); err != nil {
-		if err != ebpf.ErrKeyNotExist {
-			t.Logf("DeleteBdPeer left reverse_map stale: %v", err)
-		}
+	// Cleanup: the reverse entry MUST be gone afterwards -- a stale one
+	// misattributes the RX split-horizon for whatever peer later occupies
+	// the index.
+	if existed, err := h.mapOps.DeleteBdPeer(100, 0); err != nil || !existed {
+		t.Errorf("DeleteBdPeer(100,0): existed=%t err=%v", existed, err)
+	}
+	if existed, err := h.mapOps.DeleteBdPeer(100, 1); err != nil || !existed {
+		t.Errorf("DeleteBdPeer(100,1): existed=%t err=%v", existed, err)
+	}
+	if err := h.objs.BdPeerReverseMap.Lookup(rKey, &rVal); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("DeleteBdPeer left reverse_map stale: err=%v", err)
+	}
+}
+
+// A reverse entry pointing at an index whose forward entry is already gone
+// (a partial failure from an earlier run, or an external flush) must still be
+// cleaned up by DeleteBdPeer, and the missing forward entry must be reported
+// as existed=false so callers treat the slot as free.
+func TestDeleteBdPeerCleansStaleReverseEntry(t *testing.T) {
+	h := newXDPTestHelper(t)
+	srcAddr, _ := ParseIPv6("fc00:1::2")
+	rKey := &BdPeerReverseKey{BdId: 101}
+	copy(rKey.SrcAddr[:], srcAddr[:])
+	rVal := &BdPeerReverseVal{Index: 3}
+	if err := h.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
+		t.Fatalf("plant stale reverse entry: %v", err)
+	}
+
+	existed, err := h.mapOps.DeleteBdPeer(101, 3)
+	if existed || err != nil {
+		t.Errorf("DeleteBdPeer on a free slot: existed=%t err=%v, want false/nil", existed, err)
+	}
+	var got BdPeerReverseVal
+	if err := h.objs.BdPeerReverseMap.Lookup(rKey, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("stale reverse entry survived DeleteBdPeer: err=%v", err)
 	}
 }
