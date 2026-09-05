@@ -521,15 +521,11 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	// subscription the demux refused left the operator with neither
 	// version registered, the old one closed and unrecoverable, and its
 	// state sitting in the maps.
-	var (
-		cancel func()
-		quiet  bool
-	)
+	var cancel func()
 	if m.source != nil {
 		subscribe := m.source.Register
 		if qs, ok := m.source.(QuietSource); ok {
 			subscribe = qs.RegisterQuiet
-			quiet = true
 		}
 		var err error
 		// The handler resolves the plugin by name at delivery time, so
@@ -589,7 +585,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		}
 	}
 
-	if m.source != nil {
+	if m.snapshots != nil {
 		// The snapshot comes before publication. What the plugin declared
 		// from configure is held either way, and holding it across the
 		// replay means its first applied declaration describes the whole
@@ -597,11 +593,9 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		// -- which, on a plugin that declares a desired set, is the
 		// difference between converging and pruning everything it owns.
 		//
-		// A source that cannot register quietly has already replayed, and
-		// this repairs whatever that dropped.
-		if quiet || p.worker.takeSnapshotDebt() {
-			m.snapshot(p)
-		}
+		// Registration replay has no completion barrier and can arrive
+		// before the new plugin is visible. Always take our own snapshot.
+		m.snapshot(p)
 	}
 
 	// A replay publishes on the worker after end-of-replay is handled.

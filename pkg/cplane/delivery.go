@@ -251,7 +251,10 @@ func (w *worker) deliver(batch *v1.PluginEventBatch) bool {
 	if err := proto.Unmarshal(status, &msg); err != nil {
 		w.logger.Warn("plugin returned an undecodable status",
 			zap.String("plugin", w.name), zap.Error(err))
-		return false
+		// The guest handled the batch successfully. Ignore the malformed
+		// report, including any partially decoded fields, without losing
+		// a replay completion or counting this call as a runtime failure.
+		msg = v1.PluginEventStatus{}
 	}
 	w.onStatus(&msg)
 	return true

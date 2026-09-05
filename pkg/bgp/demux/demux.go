@@ -48,6 +48,8 @@ type consumer struct {
 	// A plugin consumer sees everything its families cover, claimed or not:
 	// it may well need the unclaimed routes for context.
 	builtin bool
+	// retract bypasses delivery-history filtering during explicit claim scans.
+	retract bgp.RouteHandler
 }
 
 // wants reports whether this consumer subscribed to fam.
@@ -140,7 +142,9 @@ func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHa
 	}
 	c := &consumer{name: name, handler: handler, builtin: builtin}
 	if builtin {
-		c.handler = d.builtinHandler(handler)
+		view := d.newBuiltinView(handler)
+		c.handler = view.handle
+		c.retract = view.retract
 	}
 	if len(families) > 0 {
 		c.families = make(map[bgp.Family]struct{}, len(families))
@@ -361,7 +365,7 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 						continue
 					}
 				}
-				c.handler(ev)
+				c.retract(ev)
 			}
 			retracted++
 		})
@@ -389,7 +393,7 @@ func (d *Demux) BuiltinSnapshotHandler(h bgp.RouteHandler) bgp.RouteHandler {
 	if d == nil || h == nil {
 		return h
 	}
-	return d.builtinHandler(h)
+	return d.newBuiltinView(h).handle
 }
 
 // isClaimed decides whether a route belongs to a plugin rather than to the

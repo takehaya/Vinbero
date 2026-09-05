@@ -189,6 +189,10 @@ prefix が headend の同じ key を使うので、その prefix の path に cl
 UPDATE でこの抑止を抜けることはできず、最後の claimed path が消えたら
 残っている通常の path を built-in に再配送します。
 
+claim 取得時の明示的な RIB 再走査では、現在の demux が built-in に配送した
+履歴が無くても withdraw を渡します。前の daemon が pinned map に残した
+状態や、独立した replay で入った状態も、plugin が引き継ぐ前に撤去します。
+
 withdraw には path attribute が一切載りません。BGP は消える NLRI しか
 送らないので、advertise 時の behavior は経路が消えるときの wire に存在せず、
 そのままでは claim が advertise 側にしか効きません。demux は ledger を
@@ -765,6 +769,9 @@ capability が何であれ観測と log だけをする plugin として起動�
   古い方は適用しません。宣言は集合そのものの宣言なので、retry や staged の
   drain で古い集合が新しい集合を上書きするのを防ぎます。
 - publication は worker が end of replay を正常に処理し終えた後に行います。
+  snapshot 対応の source では登録時の replay の有無によらず manager 自身の
+  snapshot を使います。guest call が成功して status だけが不正な場合は、
+  status を警告として無視し、replay の完了は有効とします。
   queue に積み終えた時点では適用しません。旧 instance 向けの完了通知では
   新 instance の宣言を公開できません。宣言はそれまで保留されるので、
   最初に適用される宣言は queue にたまたま入っていた event ではなく network

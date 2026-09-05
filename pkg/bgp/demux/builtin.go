@@ -30,8 +30,8 @@ type builtinView struct {
 	handler bgp.RouteHandler
 }
 
-func (d *Demux) builtinHandler(h bgp.RouteHandler) bgp.RouteHandler {
-	v := &builtinView{
+func (d *Demux) newBuiltinView(h bgp.RouteHandler) *builtinView {
+	return &builtinView{
 		groups: make(map[string]*builtinGroup), handler: h,
 		claimed: func(behavior uint16) bool {
 			d.mu.RLock()
@@ -40,7 +40,6 @@ func (d *Demux) builtinHandler(h bgp.RouteHandler) bgp.RouteHandler {
 			return claims.IsClaimed(behavior)
 		},
 	}
-	return v.handle
 }
 
 func forwardingKey(ev bgp.RouteEvent) string {
@@ -51,12 +50,25 @@ func forwardingKey(ev bgp.RouteEvent) string {
 }
 
 func (v *builtinView) handle(ev bgp.RouteEvent) {
+	v.update(ev, false)
+}
+
+// retract also removes state inherited from another process or an independent
+// replay, which this view's delivery history cannot account for.
+func (v *builtinView) retract(ev bgp.RouteEvent) {
+	v.update(ev, true)
+}
+
+func (v *builtinView) update(ev bgp.RouteEvent, retract bool) {
 	if ev.Source.IsLocal() {
 		return
 	}
 	key := forwardingKey(ev)
 	if key == "" {
-		if !v.claimed(ev.EndpointBehavior) {
+		if retract {
+			ev.IsWithdraw = true
+			v.handler(ev)
+		} else if !v.claimed(ev.EndpointBehavior) {
 			v.handler(ev)
 		}
 		return
@@ -65,6 +77,9 @@ func (v *builtinView) handle(ev bgp.RouteEvent) {
 	// The built-in handler must not recursively invoke this same view.
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if retract && !v.claimed(ev.EndpointBehavior) {
+		return
+	}
 	g := v.groups[key]
 	if g == nil {
 		g = &builtinGroup{routes: make(map[routePath]bgp.RouteEvent), delivered: make(map[routePath]bgp.RouteEvent)}
@@ -84,6 +99,7 @@ func (v *builtinView) handle(ev bgp.RouteEvent) {
 			break
 		}
 	}
+	retracted := false
 	for _, previous := range sortedPaths(g.delivered) {
 		if _, still := g.routes[previous]; still && !claimed {
 			continue
@@ -91,7 +107,15 @@ func (v *builtinView) handle(ev bgp.RouteEvent) {
 		gone := g.delivered[previous]
 		gone.IsWithdraw = true
 		v.handler(gone)
+		if previous == path {
+			retracted = true
+		}
 		delete(g.delivered, previous)
+	}
+	if retract && !retracted {
+		gone := ev
+		gone.IsWithdraw = true
+		v.handler(gone)
 	}
 	if !claimed {
 		if ev.IsWithdraw && !known {

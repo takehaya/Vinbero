@@ -1,9 +1,36 @@
 package demux
 
 import (
-	"github.com/takehaya/vinbero/pkg/bgp"
 	"testing"
+
+	"github.com/takehaya/vinbero/pkg/bgp"
 )
+
+func TestRetractionClearsBuiltinStateWithoutDeliveryHistory(t *testing.T) {
+	for _, observed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "independent-replay", true: "reserved-before-start"}[observed], func(t *testing.T) {
+			route := vpnEvent("65000:1", "10.0.0.0/24", 0xFE01)
+			src := &fakeSource{rib: map[bgp.Family][]bgp.RouteEvent{bgp.FamilyVPNv4: {route}}}
+			d := claimedDemux(t, src)
+			// The applier inherited this entry from another process or replay.
+			installed := true
+			if _, err := d.RegisterBuiltin("applier", nil, func(ev bgp.RouteEvent) { installed = !ev.IsWithdraw }); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer d.Stop()
+			if observed {
+				src.emit(route)
+			}
+			d.RetractClaimedFromBuiltins()
+			if installed {
+				t.Fatal("explicit retraction left inherited built-in state installed")
+			}
+		})
+	}
+}
 
 func TestUnseenOrdinaryWithdrawReachesBuiltin(t *testing.T) {
 	src := &fakeSource{}

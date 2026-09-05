@@ -7,10 +7,63 @@ import (
 	"time"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
+
+// replayingSource supports snapshots but only the ordinary registration API.
+// Its synchronous registration replay occurs before the new plugin is visible.
+type replayingSource struct{ inner *fakeSource }
+
+func (s *replayingSource) Register(name string, families []bgp.Family, h bgp.RouteHandler) (func(), error) {
+	cancel, err := s.inner.Register(name, families, h)
+	if err != nil {
+		return nil, err
+	}
+	h(bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	return cancel, nil
+}
+
+func (s *replayingSource) SnapshotTo(families []bgp.Family, h bgp.RouteHandler) error {
+	return s.inner.SnapshotTo(families, h)
+}
+
+func TestRegistrationReplayStillPublishesThroughSnapshot(t *testing.T) {
+	src := &replayingSource{inner: newFakeSource()}
+	m, headend := newTestManager(t, src, newFakeClaims())
+	if err := m.Register(context.Background(), Registration{
+		Name: "declare", Module: declareModule(t), Capabilities: testCaps(), Scope: testScope(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDelivered(t, m, "declare")
+	if src.inner.snapshotCount() != 1 || headend.countV4() != 1 {
+		t.Fatal("registration replay left the declaration unpublished")
+	}
+}
+
+func TestMalformedStatusStillCompletesReplay(t *testing.T) {
+	completed := make(chan struct{})
+	statuses := 0
+	w := newWorker("replay", zap.NewNop(), func(context.Context, []byte) ([]byte, error) {
+		return []byte{0xff}, nil
+	}, func(err error) { t.Error(err) }, func(*v1.PluginEventStatus) { statuses++ }, nil, 0, nil)
+	defer w.close()
+	m := &Manager{}
+	if !w.submitCompletion(m.endOfReplayBatch(ReplaySourceBGP), func() { close(completed) }) {
+		t.Fatal("replay completion was not queued")
+	}
+	select {
+	case <-completed:
+		if statuses != 1 {
+			t.Fatal("successful guest call did not report delivery")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("malformed status lost a successful replay's completion")
+	}
+}
 
 func TestEmptySuccessfulStatusResetsFailures(t *testing.T) {
 	m := &Manager{logger: zap.NewNop()}
