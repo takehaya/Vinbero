@@ -152,7 +152,7 @@ func (i *Instance) logAllowed() bool {
 // time passed. The epoch is unspecified and only differences are
 // meaningful, which keeps it useless as a fingerprint of the host.
 func (i *Instance) hostNowMonotonic(context.Context) int64 {
-	return int64(monotonicSince(i.started))
+	return i.nowMonotonic()
 }
 
 // hostApplyBegin opens a desired-set transaction.

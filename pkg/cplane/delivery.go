@@ -32,6 +32,13 @@ const retryInterval = 15 * time.Second
 // events that keep arriving before it forces the hold shut.
 const maxDrainRounds = 8
 
+// delivery carries a guest batch and its completion, or a host-only barrier
+// when batch is nil. Both use the same queue to preserve processing order.
+type delivery struct {
+	batch    *v1.PluginEventBatch
+	complete func()
+}
+
 // worker owns all delivery to one plugin.
 //
 // It exists because guest calls must not happen on the BGP watch
@@ -47,7 +54,7 @@ const maxDrainRounds = 8
 type worker struct {
 	name     string
 	logger   *zap.Logger
-	queue    chan *v1.PluginEventBatch
+	queue    chan delivery
 	stop     chan struct{}
 	done     chan struct{}
 	handler  func(ctx context.Context, batch []byte) ([]byte, error)
@@ -70,6 +77,9 @@ type worker struct {
 	processed uint64
 	// owesSnapshot records that a drop left the plugin's view incomplete.
 	owesSnapshot bool
+	// snapshotEpoch changes whenever replay starts or the view becomes
+	// incomplete. Consuming the debt flag cannot make an old EOR current.
+	snapshotEpoch uint64
 	// holding is set while a snapshot is being delivered, and pending
 	// holds the live events that arrived meanwhile.
 	//
@@ -108,7 +118,7 @@ func newWorker(
 	w := &worker{
 		name:        name,
 		logger:      logger,
-		queue:       make(chan *v1.PluginEventBatch, deliveryQueueDepth),
+		queue:       make(chan delivery, deliveryQueueDepth),
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
 		handler:     handler,
@@ -150,19 +160,18 @@ func (w *worker) submit(batch *v1.PluginEventBatch) bool {
 		// snapshot: the view this one is building is already stale.
 		w.dropped++
 		w.processed++
-		w.owesSnapshot = true
+		w.oweLocked()
 		w.mu.Unlock()
 		return false
 	}
-	w.mu.Unlock()
 	select {
-	case w.queue <- batch:
+	case w.queue <- delivery{batch: batch}:
+		w.mu.Unlock()
 		return true
 	default:
-		w.mu.Lock()
 		w.dropped++
 		w.processed++ // it will never be delivered; do not wait for it
-		w.owesSnapshot = true
+		w.oweLocked()
 		dropped := w.dropped
 		w.mu.Unlock()
 		// Logged at intervals rather than per drop: a plugin that has
@@ -199,11 +208,17 @@ func (w *worker) run() {
 		select {
 		case <-w.stop:
 			return
-		case batch := <-w.queue:
-			if w.beforeBatch != nil {
-				w.beforeBatch()
+		case next := <-w.queue:
+			ok := true
+			if next.batch != nil {
+				if w.beforeBatch != nil {
+					w.beforeBatch()
+				}
+				ok = w.deliver(next.batch)
 			}
-			w.deliver(batch)
+			if ok && next.complete != nil {
+				next.complete()
+			}
 			w.mu.Lock()
 			w.processed++
 			w.mu.Unlock()
@@ -222,28 +237,33 @@ func (w *worker) run() {
 }
 
 // deliver hands one batch to the guest and acts on what comes back.
-func (w *worker) deliver(batch *v1.PluginEventBatch) {
+func (w *worker) deliver(batch *v1.PluginEventBatch) bool {
 	raw, err := proto.Marshal(batch)
 	if err != nil {
 		w.logger.Error("encoding a plugin event batch",
 			zap.String("plugin", w.name), zap.Error(err))
-		return
+		return false
 	}
 	status, err := w.handler(context.Background(), raw)
 	if err != nil {
 		w.onFail(err)
-		return
+		return false
 	}
 	if len(status) == 0 {
-		return
+		w.onStatus(&v1.PluginEventStatus{})
+		return true
 	}
 	var msg v1.PluginEventStatus
 	if err := proto.Unmarshal(status, &msg); err != nil {
 		w.logger.Warn("plugin returned an undecodable status",
 			zap.String("plugin", w.name), zap.Error(err))
-		return
+		// The guest handled the batch successfully. Ignore the malformed
+		// report, including any partially decoded fields, without losing
+		// a replay completion or counting this call as a runtime failure.
+		msg = v1.PluginEventStatus{}
 	}
 	w.onStatus(&msg)
+	return true
 }
 
 // close stops the worker and waits for the in-flight batch to finish, so a
@@ -288,15 +308,28 @@ func (w *worker) takeSnapshotDebt() bool {
 func (w *worker) owe() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.oweLocked()
+}
+
+func (w *worker) oweLocked() {
 	w.owesSnapshot = true
+	w.snapshotEpoch++
 }
 
 // beginSnapshot starts holding live events, so a snapshot is delivered as
 // an uninterrupted prefix of the stream.
-func (w *worker) beginSnapshot() {
+func (w *worker) beginSnapshot() uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.holding = true
+	w.snapshotEpoch++
+	return w.snapshotEpoch
+}
+
+func (w *worker) snapshotCurrent(epoch uint64) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.snapshotEpoch == epoch
 }
 
 // endSnapshot releases the live events that arrived during the snapshot,
@@ -323,7 +356,7 @@ func (w *worker) endSnapshot() {
 
 		for _, batch := range held {
 			select {
-			case w.queue <- batch:
+			case w.queue <- delivery{batch: batch}:
 			case <-w.stop:
 				w.mu.Lock()
 				w.processed++
@@ -341,11 +374,11 @@ func (w *worker) endSnapshot() {
 	defer w.mu.Unlock()
 	for _, batch := range w.pending {
 		select {
-		case w.queue <- batch:
+		case w.queue <- delivery{batch: batch}:
 		default:
 			w.dropped++
 			w.processed++
-			w.owesSnapshot = true
+			w.oweLocked()
 		}
 	}
 	w.pending = nil
@@ -366,11 +399,15 @@ func (w *worker) endSnapshot() {
 //
 // It reports false if the worker stopped before the batch was accepted.
 func (w *worker) submitBlocking(batch *v1.PluginEventBatch) bool {
+	return w.enqueueBlocking(delivery{batch: batch})
+}
+
+func (w *worker) enqueueBlocking(next delivery) bool {
 	w.mu.Lock()
 	w.submitted++
 	w.mu.Unlock()
 	select {
-	case w.queue <- batch:
+	case w.queue <- next:
 		return true
 	case <-w.stop:
 		w.mu.Lock()
@@ -378,4 +415,12 @@ func (w *worker) submitBlocking(batch *v1.PluginEventBatch) bool {
 		w.mu.Unlock()
 		return false
 	}
+}
+
+func (w *worker) submitCompletion(batch *v1.PluginEventBatch, complete func()) bool {
+	return w.enqueueBlocking(delivery{batch: batch, complete: complete})
+}
+
+func (w *worker) submitBarrier(complete func()) bool {
+	return w.enqueueBlocking(delivery{complete: complete})
 }

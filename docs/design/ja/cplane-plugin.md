@@ -181,6 +181,30 @@ built-in applier に配りません。
   L3VPN 経路が built-in から逸れます。運用上の規則は「標準 codepoint は
   Vinbero のもの、plugin は割り当て外の codepoint を使う」です。
 
+UPDATE で behavior が変わった場合も担当を切り替えます。built-in に渡した
+path が claimed へ変わったら、以前の配送内容を withdraw として渡してから
+新しい UPDATE を plugin に配ります。VPN は RD が違っても同じ family と
+prefix が headend の同じ key を使うので、その prefix の path に claimed が
+1 本でもあれば built-in へ渡した path をすべて撤去します。通常の path の
+UPDATE でこの抑止を抜けることはできず、最後の claimed path が消えたら
+残っている通常の path を built-in に再配送します。
+
+claim 取得時の明示的な RIB 再走査では、現在の demux が built-in に配送した
+履歴が無くても withdraw を渡します。前の daemon が pinned map に残した
+状態も、plugin が引き継ぐ前に撤去します。on-demand の replay は登録済み
+built-in consumer の名前を指定し、live 配送と同じ path 履歴を使います。
+EVPN の import surface 拡大時の rescue もこの入口を使うので、replay だけで
+入った別 RD/source の通常 path も、claimed sibling の到着時に撤去できます。
+RIB の読み取りから適用までを同じ view lock で直列化します。
+登録に失敗して claim を戻した場合も、demux が保持する最新の path を再評価
+して built-in の担当を戻します。登録中に withdraw 済みの path は復活させません。
+live の claimed UPDATE も、配送履歴が無い path へ cleanup の withdraw を
+渡します。RIB 再走査中に live 更新された path は、古い走査結果で上書き
+しません。別 sibling の更新では未変更の claimed path を見落とさないよう、
+記録は NLRI と source 単位にします。この更新記録は走査終了時に捨てます。
+consumer の登録前に ledger だけが記録していた claimed withdraw も、
+未観測の通常 withdraw と区別します。
+
 withdraw には path attribute が一切載りません。BGP は消える NLRI しか
 送らないので、advertise 時の behavior は経路が消えるときの wire に存在せず、
 そのままでは claim が advertise 側にしか効きません。demux は ledger を
@@ -242,7 +266,7 @@ host が提供するもの。すべて `vinbero` module から import します�
 | host function | 意味 |
 |---|---|
 | `log(level, ptr, len)` | daemon log へ出力 |
-| `now_monotonic() -> i64` | 単調増加の ns |
+| `now_monotonic() -> i64` | `on_tick` と同じ clock による単調増加の ns |
 | `apply_begin(kind) -> i64` | desired-set transaction を開く (headend v4/v6、advertise、local SID) |
 | `apply_put(gen, ptr, len) -> i32` | 宣言の chunk を積む |
 | `apply_commit(gen) -> i32` | 差分を適用する |
@@ -252,6 +276,10 @@ host が提供するもの。すべて `vinbero` module から import します�
 stdout も filesystem も無いので log が無いと plugin 作者に調査手段があり
 ません。clock が無いと liveness 系のロジックが書けません。それ以外の
 非決定入力は必要になるまで足しません。
+
+daemon では `on_tick` と `now_monotonic` が起動時からの同じ clock を共有し、
+instance を作り直しても原点を変えません。harness では `Tick(elapsed)` で
+進めた時刻を host function からも読み、restart 後にも引き継ぎます。
 
 ## capability
 
@@ -752,10 +780,22 @@ capability が何であれ観測と log だけをする plugin として起動�
 - 宣言には commit 順の番号を振り、同じ kind でより新しい宣言が適用済みなら
   古い方は適用しません。宣言は集合そのものの宣言なので、retry や staged の
   drain で古い集合が新しい集合を上書きするのを防ぎます。
-- publication は snapshot の後に行います。宣言はそれまで保留されるので、
+- publication は worker が end of replay と保留した live event を処理し終えた
+  後の host 側 barrier で行います。EOR の成功だけでは公開しません。
+  snapshot 対応の source では登録時の replay の有無によらず manager 自身の
+  snapshot を使います。guest call が成功して status だけが不正な場合は、
+  status を警告として無視し、replay の完了は有効とします。
+  replay 中の drop や再走査要求で世代を進め、古い世代の完了通知では公開
+  しません。snapshot debt を返済した replay の完了まで初期宣言を保留します。
+  queue に積み終えた時点では適用しません。旧 instance 向けの完了通知では
+  新 instance の宣言を公開できません。宣言はそれまで保留されるので、
   最初に適用される宣言は queue にたまたま入っていた event ではなく network
   全体を述べたものになります。desired set を宣言する plugin にとって、この
   違いは収束するか自分の持ち物を全部 prune するかの違いです。
+- publication 前に同じ kind を何度 commit しても、保持するのは最新の集合
+  だけです。open transaction と各集合の entry 数と byte 数の制限に加えて、
+  staged の保持数も kind 数に制限されます。instance が替わると以前の pending
+  宣言も破棄し、replay 前に旧 instance の宣言を retry することはありません。
 - 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
   次の配送の前に再試行します。保留されている数は stats に出し、最初の失敗は
   warning に出します。何かを待っている plugin は、配送の counter だけ見ると

@@ -48,6 +48,8 @@ type consumer struct {
 	// A plugin consumer sees everything its families cover, claimed or not:
 	// it may well need the unclaimed routes for context.
 	builtin bool
+	// view reconciles delivery when claims change, including rollback.
+	view *builtinView
 }
 
 // wants reports whether this consumer subscribed to fam.
@@ -139,6 +141,10 @@ func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHa
 		return nil, fmt.Errorf("demux: register %q: nil handler", name)
 	}
 	c := &consumer{name: name, handler: handler, builtin: builtin}
+	if builtin {
+		c.view = d.newBuiltinView(handler)
+		c.handler = c.view.handle
+	}
 	if len(families) > 0 {
 		c.families = make(map[bgp.Family]struct{}, len(families))
 		for _, f := range families {
@@ -240,7 +246,7 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	if ev.Source.IsLocal() {
 		return
 	}
-	claimed := d.isClaimed(ev)
+	wasClaimed := d.isClaimed(ev)
 
 	d.mu.RLock()
 	targets := make([]*consumer, 0, len(d.consumers))
@@ -248,18 +254,23 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 		if !c.wants(ev.Family) {
 			continue
 		}
-		// A route whose behavior a plugin claimed is the plugin's to
-		// interpret; the built-in appliers would read the codepoint as an
-		// ordinary service SID and install the wrong thing.
-		if claimed && c.builtin {
-			continue
-		}
+		// Built-ins see the transition through their view, which retracts
+		// an earlier delivery before withholding a newly claimed path.
 		targets = append(targets, c)
 	}
 	d.mu.RUnlock()
 
-	for _, c := range targets {
-		c.handler(ev)
+	// Retractions must reach built-ins before a plugin can apply the UPDATE.
+	for _, builtin := range []bool{true, false} {
+		for _, c := range targets {
+			if c.builtin == builtin {
+				if c.view != nil {
+					c.view.handleWithClaim(ev, ev.IsWithdraw && wasClaimed)
+				} else {
+					c.handler(ev)
+				}
+			}
+		}
 	}
 }
 
@@ -338,6 +349,12 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 	if !started || len(builtins) == 0 {
 		return
 	}
+	scans := make(map[*consumer]*builtinScan, len(builtins))
+	for _, c := range builtins {
+		scan := c.view.beginScan()
+		scans[c] = scan
+		defer scan.close()
+	}
 
 	var retracted int
 	for _, fam := range allFamilies() {
@@ -351,15 +368,13 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 			if !claims.IsClaimed(ev.EndpointBehavior) {
 				return
 			}
-			gone := ev
-			gone.IsWithdraw = true
 			for _, c := range builtins {
 				if len(c.families) > 0 {
 					if _, want := c.families[ev.Family]; !want {
 						continue
 					}
 				}
-				c.handler(gone)
+				scans[c].retract(ev)
 			}
 			retracted++
 		})
@@ -374,28 +389,57 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 	}
 }
 
-// BuiltinSnapshotHandler wraps h with the same rules the demux applies to
-// its own delivery, for a snapshot a built-in consumer pulls on demand
-// rather than receiving through the demux.
+// RefreshBuiltinClaims restores the built-in view after tentative claims were
+// rolled back. It uses retained live paths, so it cannot reintroduce a path
+// withdrawn since registration began.
+func (d *Demux) RefreshBuiltinClaims() {
+	d.mu.RLock()
+	var views []*builtinView
+	for _, c := range d.consumers {
+		if c.view != nil {
+			views = append(views, c.view)
+		}
+	}
+	d.mu.RUnlock()
+	for _, view := range views {
+		view.refresh()
+	}
+}
+
+// ReplayBuiltin replays the RIB through a registered applier's live view.
+// In particular, EVPN import-surface rescue must retain the same path history
+// as live delivery so a later claim retracts every installed sibling path.
 //
-// Such a replay would otherwise be a hole in the claim rule: the applier's
-// EVPN rescue re-reads the loc-rib directly when an import surface widens,
-// and without this it would pick up exactly the routes dispatch withheld
-// from it. A nil demux returns h unchanged, so a daemon with no demux
-// behaves as it did before.
-func (d *Demux) BuiltinSnapshotHandler(h bgp.RouteHandler) bgp.RouteHandler {
-	if d == nil || h == nil {
-		return h
+// The view lock spans the RIB read and delivery. Live events then follow the
+// replay, as they do in the applier's own replay path. ListRoutes must not wait
+// for a live handler to finish; GoBGP's management loop and watch queue satisfy
+// this contract. Call without holding any lock the applier's handler needs.
+func (d *Demux) ReplayBuiltin(name string, families []bgp.Family) error {
+	if d == nil {
+		return nil
 	}
-	return func(ev bgp.RouteEvent) {
-		if ev.Source.IsLocal() {
-			return
+	d.mu.RLock()
+	var target *consumer
+	for _, c := range d.consumers {
+		if c.builtin && c.name == name {
+			if target != nil {
+				d.mu.RUnlock()
+				return fmt.Errorf("demux: ambiguous built-in consumer %q", name)
+			}
+			target = c
 		}
-		if d.isClaimed(ev) {
-			return
-		}
-		h(ev)
 	}
+	d.mu.RUnlock()
+	if target == nil {
+		return fmt.Errorf("demux: unknown built-in consumer %q", name)
+	}
+	target.view.mu.Lock()
+	defer target.view.mu.Unlock()
+	return d.SnapshotTo(families, func(ev bgp.RouteEvent) {
+		if !ev.IsWithdraw && target.wants(ev.Family) {
+			target.view.handleLocked(ev, false)
+		}
+	})
 }
 
 // isClaimed decides whether a route belongs to a plugin rather than to the
@@ -442,6 +486,12 @@ func (d *Demux) replay(c *consumer, families []bgp.Family) {
 	if d.lister == nil {
 		return
 	}
+	handler := c.handler
+	if c.view != nil {
+		c.view.mu.Lock()
+		defer c.view.mu.Unlock()
+		handler = func(ev bgp.RouteEvent) { c.view.handleLocked(ev, false) }
+	}
 	want := families
 	if len(want) == 0 {
 		want = allFamilies()
@@ -454,10 +504,8 @@ func (d *Demux) replay(c *consumer, families []bgp.Family) {
 			// The snapshot applies the same claim rule as the live stream:
 			// a built-in consumer registering after a plugin claimed a
 			// behavior must not pick those routes up from the replay.
-			if d.isClaimed(ev) && c.builtin {
-				return
-			}
-			c.handler(ev)
+			d.isClaimed(ev)
+			handler(ev)
 		})
 		if err != nil {
 			d.logger.Warn("BGP demux replay failed",
