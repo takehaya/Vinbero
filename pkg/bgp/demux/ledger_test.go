@@ -35,10 +35,8 @@ func claimedDemux(t *testing.T, src *fakeSource) *Demux {
 	return d
 }
 
-// The withdraw of a claimed route must not reach the built-in applier.
-// Its behavior decodes as 0, so the decision can only come from what the
-// advertise recorded -- and without that the applier gets a delete for
-// state it never installed, because the advertise was withheld from it.
+// A claimed advertisement first cleans up any independently replayed state.
+// The later wire withdrawal needs no further delivery to the built-in.
 func TestWithdrawOfClaimedRouteWithheldFromBuiltin(t *testing.T) {
 	src := &fakeSource{}
 	d := claimedDemux(t, src)
@@ -56,8 +54,8 @@ func TestWithdrawOfClaimedRouteWithheldFromBuiltin(t *testing.T) {
 	src.emit(vpnEvent("65000:1", "10.0.0.0/24", 0xFE01))
 	src.emit(vpnWithdraw("65000:1", "10.0.0.0/24"))
 
-	if builtin.len() != 0 {
-		t.Fatalf("built-in consumer saw %d events, want 0 (advertise and withdraw both claimed)", builtin.len())
+	if builtin.len() != 1 || !builtin.got[0].IsWithdraw {
+		t.Fatal("built-in must receive only the synthetic cleanup withdrawal")
 	}
 	if plug.len() != 2 {
 		t.Fatalf("plugin consumer saw %d events, want the advertise and its withdraw", plug.len())
@@ -118,8 +116,8 @@ func TestReadvertiseUnderUnclaimedBehaviorClearsTheRecord(t *testing.T) {
 	src.emit(vpnEvent("65000:1", "10.0.0.0/24", 0xFE01)) // claimed
 	src.emit(vpnEvent("65000:1", "10.0.0.0/24", 0x0013)) // now End.DT4
 	src.emit(vpnWithdraw("65000:1", "10.0.0.0/24"))      // must follow the second
-	if builtin.len() != 2 {
-		t.Fatalf("built-in consumer saw %d events, want the re-advertise and its withdraw", builtin.len())
+	if builtin.len() != 3 || !builtin.got[0].IsWithdraw || builtin.got[1].IsWithdraw || !builtin.got[2].IsWithdraw {
+		t.Fatal("want synthetic cleanup followed by the ordinary advertise and withdraw")
 	}
 	if got := d.ledger.size(); got != 0 {
 		t.Fatalf("ledger holds %d entries, want 0", got)
@@ -144,10 +142,10 @@ func TestLedgerDistinguishesNLRIs(t *testing.T) {
 	src.emit(vpnWithdraw("65000:1", "10.0.1.0/24"))      // ordinary, must be delivered
 	src.emit(vpnWithdraw("65000:1", "10.0.0.0/24"))      // claimed, must be withheld
 
-	if builtin.len() != 2 {
-		t.Fatalf("built-in consumer saw %d events, want the ordinary advertise and withdraw", builtin.len())
+	if builtin.len() != 3 || !builtin.got[0].IsWithdraw {
+		t.Fatal("want synthetic cleanup followed by the ordinary advertise and withdraw")
 	}
-	for _, ev := range builtin.got {
+	for _, ev := range builtin.got[1:] {
 		if ev.VPN.Prefix != "10.0.1.0/24" {
 			t.Fatalf("built-in consumer saw the claimed prefix: %+v", ev.VPN)
 		}
@@ -271,8 +269,8 @@ func TestLedgerTracksEachPathSeparately(t *testing.T) {
 		t.Fatalf("ledger holds %d NLRIs after the last withdraw, want 0", got)
 	}
 
-	if builtin.len() != 0 {
-		t.Fatalf("built-in consumer saw %d events, want none of the claimed route", builtin.len())
+	if builtin.len() != 2 || !builtin.got[0].IsWithdraw || !builtin.got[1].IsWithdraw {
+		t.Fatal("built-in must receive only synthetic cleanup for the two paths")
 	}
 	if plug.len() != 4 {
 		t.Fatalf("plugin consumer saw %d events, want both advertises and both withdraws", plug.len())

@@ -194,6 +194,9 @@ claim 取得時の明示的な RIB 再走査では、現在の demux が built-i
 状態や、独立した replay で入った状態も、plugin が引き継ぐ前に撤去します。
 登録に失敗して claim を戻した場合も、demux が保持する最新の path を再評価
 して built-in の担当を戻します。登録中に withdraw 済みの path は復活させません。
+live の claimed UPDATE も、独立 replay の配送履歴が無くても cleanup の
+withdraw を渡します。RIB 再走査中に live 更新された prefix は、古い走査結果
+で上書きしません。この更新記録は走査終了時に捨てます。
 
 withdraw には path attribute が一切載りません。BGP は消える NLRI しか
 送らないので、advertise 時の behavior は経路が消えるときの wire に存在せず、

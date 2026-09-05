@@ -28,6 +28,58 @@ type builtinView struct {
 	groups  map[string]*builtinGroup
 	claimed func(uint16) bool
 	handler bgp.RouteHandler
+	// Registered appliers accept idempotent withdrawals for state installed
+	// outside this view. Snapshot callbacks may accept advertisements only.
+	withdrawUnseen bool
+	scans          map[*builtinScan]struct{}
+}
+
+// A scan only remembers prefixes changed during its own lifetime. This also
+// covers removed groups without keeping tombstones for every past route.
+type builtinScan struct {
+	view    *builtinView
+	changed map[string]struct{}
+}
+
+func (v *builtinView) beginScan() *builtinScan {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.scans == nil {
+		v.scans = make(map[*builtinScan]struct{})
+	}
+	s := &builtinScan{view: v, changed: make(map[string]struct{})}
+	v.scans[s] = struct{}{}
+	return s
+}
+
+func (s *builtinScan) close() {
+	s.view.mu.Lock()
+	defer s.view.mu.Unlock()
+	delete(s.view.scans, s)
+}
+
+func (s *builtinScan) retract(ev bgp.RouteEvent) {
+	v := s.view
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	key := forwardingKey(ev)
+	if _, changed := s.changed[key]; changed {
+		return
+	}
+	if key == "" {
+		if v.claimed(ev.EndpointBehavior) {
+			ev.IsWithdraw = true
+			v.handler(ev)
+		}
+		return
+	}
+	v.updateLocked(ev, true, key)
+}
+
+func (v *builtinView) changedLocked(key string) {
+	for s := range v.scans {
+		s.changed[key] = struct{}{}
+	}
 }
 
 func (d *Demux) newBuiltinView(h bgp.RouteHandler) *builtinView {
@@ -49,16 +101,6 @@ func forwardingKey(ev bgp.RouteEvent) string {
 	return nlriKey(ev)
 }
 
-func (v *builtinView) handle(ev bgp.RouteEvent) {
-	v.update(ev, false)
-}
-
-// retract also removes state inherited from another process or an independent
-// replay, which this view's delivery history cannot account for.
-func (v *builtinView) retract(ev bgp.RouteEvent) {
-	v.update(ev, true)
-}
-
 // refresh re-evaluates current paths after a claim rollback without replaying
 // an older RIB snapshot over live updates that have already reached this view.
 func (v *builtinView) refresh() {
@@ -70,6 +112,7 @@ func (v *builtinView) refresh() {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
+		v.changedLocked(key)
 		g := v.groups[key]
 		paths := sortedPaths(g.routes)
 		if len(paths) > 0 {
@@ -78,16 +121,13 @@ func (v *builtinView) refresh() {
 	}
 }
 
-func (v *builtinView) update(ev bgp.RouteEvent, retract bool) {
+func (v *builtinView) handle(ev bgp.RouteEvent) {
 	if ev.Source.IsLocal() {
 		return
 	}
 	key := forwardingKey(ev)
 	if key == "" {
-		if retract {
-			ev.IsWithdraw = true
-			v.handler(ev)
-		} else if !v.claimed(ev.EndpointBehavior) {
+		if !v.claimed(ev.EndpointBehavior) {
 			v.handler(ev)
 		}
 		return
@@ -96,7 +136,8 @@ func (v *builtinView) update(ev bgp.RouteEvent, retract bool) {
 	// The built-in handler must not recursively invoke this same view.
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.updateLocked(ev, retract, key)
+	v.changedLocked(key)
+	v.updateLocked(ev, false, key)
 }
 
 func (v *builtinView) updateLocked(ev bgp.RouteEvent, retract bool, key string) {
@@ -135,7 +176,9 @@ func (v *builtinView) updateLocked(ev bgp.RouteEvent, retract bool, key string) 
 		}
 		delete(g.delivered, previous)
 	}
-	if retract && !retracted {
+	if (retract || v.withdrawUnseen && claimed && !ev.IsWithdraw) && !retracted {
+		// The applier may have installed this path through an independent
+		// replay. Cleanup cannot depend solely on this view's history.
 		gone := ev
 		gone.IsWithdraw = true
 		v.handler(gone)

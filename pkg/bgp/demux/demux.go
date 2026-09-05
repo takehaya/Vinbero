@@ -143,6 +143,7 @@ func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHa
 	c := &consumer{name: name, handler: handler, builtin: builtin}
 	if builtin {
 		c.view = d.newBuiltinView(handler)
+		c.view.withdrawUnseen = true
 		c.handler = c.view.handle
 	}
 	if len(families) > 0 {
@@ -345,6 +346,12 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 	if !started || len(builtins) == 0 {
 		return
 	}
+	scans := make(map[*consumer]*builtinScan, len(builtins))
+	for _, c := range builtins {
+		scan := c.view.beginScan()
+		scans[c] = scan
+		defer scan.close()
+	}
 
 	var retracted int
 	for _, fam := range allFamilies() {
@@ -364,7 +371,7 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 						continue
 					}
 				}
-				c.view.retract(ev)
+				scans[c].retract(ev)
 			}
 			retracted++
 		})
