@@ -418,9 +418,8 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 // previously installed prefix fails the cross-owner check and never comes
 // back -- and a withdraw arriving for one cannot remove it either.
 //
-// The owner is read first and force-deleted only when it is this node's own
-// legacy shape. An unconditional force would also destroy an entry an
-// operator installed for the same prefix over RPC.
+// Delete under the observed legacy owner. If an operator or another controller
+// replaces it after the read, the owner check refuses the deletion.
 //
 // Reports whether anything was cleared, so the caller knows a retry is
 // worth attempting.
@@ -443,9 +442,9 @@ func (a *Applier) clearLegacyVPNHeadend(fam bgp.Family, prefix string) bool {
 	}
 	switch fam {
 	case bgp.FamilyVPNv4:
-		err = a.headend.ForceDeleteHeadendV4(prefix)
+		err = a.headend.DeleteHeadendV4(prefix, owner)
 	case bgp.FamilyVPNv6:
-		err = a.headend.ForceDeleteHeadendV6(prefix)
+		err = a.headend.DeleteHeadendV6(prefix, owner)
 	}
 	if err != nil {
 		a.logger.Error("clear pre-aggregation VPN trigger",
