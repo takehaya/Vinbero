@@ -48,8 +48,8 @@ type consumer struct {
 	// A plugin consumer sees everything its families cover, claimed or not:
 	// it may well need the unclaimed routes for context.
 	builtin bool
-	// retract bypasses delivery-history filtering during explicit claim scans.
-	retract bgp.RouteHandler
+	// view reconciles delivery when claims change, including rollback.
+	view *builtinView
 }
 
 // wants reports whether this consumer subscribed to fam.
@@ -142,9 +142,8 @@ func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHa
 	}
 	c := &consumer{name: name, handler: handler, builtin: builtin}
 	if builtin {
-		view := d.newBuiltinView(handler)
-		c.handler = view.handle
-		c.retract = view.retract
+		c.view = d.newBuiltinView(handler)
+		c.handler = c.view.handle
 	}
 	if len(families) > 0 {
 		c.families = make(map[bgp.Family]struct{}, len(families))
@@ -365,7 +364,7 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 						continue
 					}
 				}
-				c.retract(ev)
+				c.view.retract(ev)
 			}
 			retracted++
 		})
@@ -377,6 +376,23 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 	if retracted > 0 {
 		d.logger.Info("retracted routes from the built-in appliers because their behavior is now claimed",
 			zap.Int("routes", retracted))
+	}
+}
+
+// RefreshBuiltinClaims restores the built-in view after tentative claims were
+// rolled back. It uses retained live paths, so it cannot reintroduce a path
+// withdrawn since registration began.
+func (d *Demux) RefreshBuiltinClaims() {
+	d.mu.RLock()
+	var views []*builtinView
+	for _, c := range d.consumers {
+		if c.view != nil {
+			views = append(views, c.view)
+		}
+	}
+	d.mu.RUnlock()
+	for _, view := range views {
+		view.refresh()
 	}
 }
 

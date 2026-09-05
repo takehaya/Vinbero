@@ -59,6 +59,25 @@ func (v *builtinView) retract(ev bgp.RouteEvent) {
 	v.update(ev, true)
 }
 
+// refresh re-evaluates current paths after a claim rollback without replaying
+// an older RIB snapshot over live updates that have already reached this view.
+func (v *builtinView) refresh() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	keys := make([]string, 0, len(v.groups))
+	for key := range v.groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		g := v.groups[key]
+		paths := sortedPaths(g.routes)
+		if len(paths) > 0 {
+			v.updateLocked(g.routes[paths[0]], false, key)
+		}
+	}
+}
+
 func (v *builtinView) update(ev bgp.RouteEvent, retract bool) {
 	if ev.Source.IsLocal() {
 		return
@@ -77,6 +96,10 @@ func (v *builtinView) update(ev bgp.RouteEvent, retract bool) {
 	// The built-in handler must not recursively invoke this same view.
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.updateLocked(ev, retract, key)
+}
+
+func (v *builtinView) updateLocked(ev bgp.RouteEvent, retract bool, key string) {
 	if retract && !v.claimed(ev.EndpointBehavior) {
 		return
 	}

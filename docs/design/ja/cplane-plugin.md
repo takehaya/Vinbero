@@ -192,6 +192,8 @@ UPDATE でこの抑止を抜けることはできず、最後の claimed path �
 claim 取得時の明示的な RIB 再走査では、現在の demux が built-in に配送した
 履歴が無くても withdraw を渡します。前の daemon が pinned map に残した
 状態や、独立した replay で入った状態も、plugin が引き継ぐ前に撤去します。
+登録に失敗して claim を戻した場合も、demux が保持する最新の path を再評価
+して built-in の担当を戻します。登録中に withdraw 済みの path は復活させません。
 
 withdraw には path attribute が一切載りません。BGP は消える NLRI しか
 送らないので、advertise 時の behavior は経路が消えるときの wire に存在せず、

@@ -37,6 +37,12 @@ type BuiltinRetractor interface {
 	RetractClaimedFromBuiltins()
 }
 
+// BuiltinClaimRefresher restores the current built-in view when a registration
+// rolls back claims that live updates may already have observed.
+type BuiltinClaimRefresher interface {
+	RefreshBuiltinClaims()
+}
+
 // QuietSource can add a consumer without replaying to it, for a consumer
 // that takes its own snapshot instead. The manager prefers it: the replay
 // a source performs on registration goes through the live path, where a
@@ -547,6 +553,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	old, existed := m.plugins[reg.Name]
 	m.plugins[reg.Name] = p
 	p.cancel = cancel
+	inst := p.inst
 	m.mu.Unlock()
 
 	if existed {
@@ -601,7 +608,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	// A replay publishes on the worker after end-of-replay is handled.
 	// A source without snapshots has no such barrier to wait for.
 	if m.snapshots == nil {
-		m.publish(p, p.inst)
+		m.publish(p, inst)
 	}
 
 	// Recorded only once it is actually running, so a module that could
@@ -969,6 +976,10 @@ func (m *Manager) restoreClaims(name string, behaviors []uint16) {
 		// because the running instance is now unprotected.
 		m.logger.Error("could not restore the behavior claims of a running plugin",
 			zap.String("plugin", name), zap.Error(err))
+		return
+	}
+	if source, ok := m.source.(BuiltinClaimRefresher); ok {
+		source.RefreshBuiltinClaims()
 	}
 }
 

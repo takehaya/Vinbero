@@ -2,16 +2,105 @@ package cplane
 
 import (
 	"context"
+	"errors"
+	"net/netip"
 	"os"
 	"testing"
 	"time"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bgp/demux"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
+
+type rollbackSubscriber struct{ handler bgp.RouteHandler }
+
+func (s *rollbackSubscriber) Subscribe(_ bgp.Family, h bgp.RouteHandler) (func(), error) {
+	s.handler = h
+	return func() {}, nil
+}
+
+type rollbackClaims struct {
+	*demux.ClaimRegistry
+	afterReplace func()
+}
+
+func (c *rollbackClaims) Replace(name string, behaviors []uint16) error {
+	if err := c.ClaimRegistry.Replace(name, behaviors); err != nil {
+		return err
+	}
+	c.afterReplace()
+	return nil
+}
+
+type rejectingDemux struct{ *demux.Demux }
+
+func (d *rejectingDemux) RegisterQuiet(string, []bgp.Family, bgp.RouteHandler) (func(), error) {
+	return nil, errors.New("subscription refused")
+}
+
+func TestFailedRegistrationRestoresBuiltinView(t *testing.T) {
+	for _, stage := range []string{"build", "subscribe"} {
+		for _, withdrawn := range []bool{false, true} {
+			t.Run(stage+map[bool]string{false: "/retained", true: "/withdrawn"}[withdrawn], func(t *testing.T) {
+				sub := &rollbackSubscriber{}
+				registry := demux.NewClaimRegistry(nil)
+				d := demux.New(sub, nil, nil)
+				d.SetClaimRegistry(registry)
+				installed := false
+				if _, err := d.RegisterBuiltin("applier", nil, func(ev bgp.RouteEvent) { installed = !ev.IsWithdraw }); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer d.Stop()
+				route := bgp.RouteEvent{
+					Family: bgp.FamilyVPNv4, EndpointBehavior: 0xFE01,
+					Source: bgp.PathSource{Peer: netip.MustParseAddr("192.0.2.1")},
+					VPN:    &bgp.VPNRoute{RD: "65000:1", Prefix: "10.0.0.0/24"},
+				}
+				sub.handler(route)
+				if !installed {
+					t.Fatal("initial route was not installed")
+				}
+				claims := &rollbackClaims{ClaimRegistry: registry, afterReplace: func() {
+					if registry.IsClaimed(0xFE01) {
+						sub.handler(route)
+						if installed {
+							t.Fatal("tentative claim did not retract the route")
+						}
+						if withdrawn {
+							gone := route
+							gone.IsWithdraw = true
+							gone.EndpointBehavior = 0
+							sub.handler(gone)
+						}
+					}
+				}}
+				var source EventSource = d
+				module := []byte("not wasm")
+				if stage == "subscribe" {
+					source = &rejectingDemux{d}
+					module = declareModule(t)
+				}
+				m, _ := newTestManager(t, source, claims)
+				if err := m.Register(context.Background(), Registration{
+					Name: "declare", Module: module, Behaviors: []uint16{0xFE01},
+					Capabilities: testCaps(), Scope: testScope(),
+				}); err == nil {
+					t.Fatal("registration unexpectedly succeeded")
+				}
+				if registry.IsClaimed(0xFE01) || installed == withdrawn {
+					t.Fatalf("rollback left claimed=%v installed=%v withdrawn=%v", registry.IsClaimed(0xFE01), installed, withdrawn)
+				}
+			})
+		}
+	}
+}
 
 // replayingSource supports snapshots but only the ordinary registration API.
 // Its synchronous registration replay occurs before the new plugin is visible.
