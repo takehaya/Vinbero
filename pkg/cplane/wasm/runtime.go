@@ -102,14 +102,15 @@ type HostOps interface {
 // so a plugin cannot name another plugin's owner tag in a call -- the
 // identity is not a parameter it can forge, it is bound at link time.
 type Instance struct {
-	name     string
-	caps     Capabilities
-	limits   Limits
-	logger   *zap.Logger
-	ops      HostOps
-	started  time.Time
-	runtime  wazero.Runtime
-	compiled wazero.CompiledModule
+	name         string
+	caps         Capabilities
+	limits       Limits
+	logger       *zap.Logger
+	ops          HostOps
+	started      time.Time
+	nowMonotonic func() int64
+	runtime      wazero.Runtime
+	compiled     wazero.CompiledModule
 
 	mu     sync.Mutex
 	mod    api.Module
@@ -137,6 +138,10 @@ type Instance struct {
 
 // Config describes one plugin to instantiate.
 type Config struct {
+	// NowMonotonic supplies the clock also used for on_tick. Nil uses an
+	// instance-relative clock. A manager shares one epoch across restarts;
+	// a harness supplies its simulated clock here.
+	NowMonotonic func() int64
 	// Name identifies the plugin; it appears in logs and is the identity
 	// host functions are bound to.
 	Name string
@@ -217,6 +222,10 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 		ops:     cfg.Ops,
 		started: time.Now(),
 		runtime: rt,
+	}
+	inst.nowMonotonic = cfg.NowMonotonic
+	if inst.nowMonotonic == nil {
+		inst.nowMonotonic = func() int64 { return monotonicSince(inst.started) }
 	}
 
 	compiled, err := rt.CompileModule(ctx, cfg.Module)

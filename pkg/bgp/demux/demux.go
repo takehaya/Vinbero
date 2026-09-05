@@ -139,6 +139,9 @@ func (d *Demux) register(name string, families []bgp.Family, handler bgp.RouteHa
 		return nil, fmt.Errorf("demux: register %q: nil handler", name)
 	}
 	c := &consumer{name: name, handler: handler, builtin: builtin}
+	if builtin {
+		c.handler = d.builtinHandler(handler)
+	}
 	if len(families) > 0 {
 		c.families = make(map[bgp.Family]struct{}, len(families))
 		for _, f := range families {
@@ -240,7 +243,7 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	if ev.Source.IsLocal() {
 		return
 	}
-	claimed := d.isClaimed(ev)
+	d.isClaimed(ev)
 
 	d.mu.RLock()
 	targets := make([]*consumer, 0, len(d.consumers))
@@ -248,18 +251,19 @@ func (d *Demux) dispatch(ev bgp.RouteEvent) {
 		if !c.wants(ev.Family) {
 			continue
 		}
-		// A route whose behavior a plugin claimed is the plugin's to
-		// interpret; the built-in appliers would read the codepoint as an
-		// ordinary service SID and install the wrong thing.
-		if claimed && c.builtin {
-			continue
-		}
+		// Built-ins see the transition through their view, which retracts
+		// an earlier delivery before withholding a newly claimed path.
 		targets = append(targets, c)
 	}
 	d.mu.RUnlock()
 
-	for _, c := range targets {
-		c.handler(ev)
+	// Retractions must reach built-ins before a plugin can apply the UPDATE.
+	for _, builtin := range []bool{true, false} {
+		for _, c := range targets {
+			if c.builtin == builtin {
+				c.handler(ev)
+			}
+		}
 	}
 }
 
@@ -351,15 +355,13 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 			if !claims.IsClaimed(ev.EndpointBehavior) {
 				return
 			}
-			gone := ev
-			gone.IsWithdraw = true
 			for _, c := range builtins {
 				if len(c.families) > 0 {
 					if _, want := c.families[ev.Family]; !want {
 						continue
 					}
 				}
-				c.handler(gone)
+				c.handler(ev)
 			}
 			retracted++
 		})
@@ -387,15 +389,7 @@ func (d *Demux) BuiltinSnapshotHandler(h bgp.RouteHandler) bgp.RouteHandler {
 	if d == nil || h == nil {
 		return h
 	}
-	return func(ev bgp.RouteEvent) {
-		if ev.Source.IsLocal() {
-			return
-		}
-		if d.isClaimed(ev) {
-			return
-		}
-		h(ev)
-	}
+	return d.builtinHandler(h)
 }
 
 // isClaimed decides whether a route belongs to a plugin rather than to the
@@ -454,9 +448,7 @@ func (d *Demux) replay(c *consumer, families []bgp.Family) {
 			// The snapshot applies the same claim rule as the live stream:
 			// a built-in consumer registering after a plugin claimed a
 			// behavior must not pick those routes up from the replay.
-			if d.isClaimed(ev) && c.builtin {
-				return
-			}
+			d.isClaimed(ev)
 			c.handler(ev)
 		})
 		if err != nil {

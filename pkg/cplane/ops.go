@@ -436,6 +436,10 @@ func (p *PluginOps) holdForRetry(txn *applyTxn) {
 // arrives is what repairs it.
 func (p *PluginOps) RetryPending() {
 	p.mu.Lock()
+	if !p.published {
+		p.mu.Unlock()
+		return
+	}
 	pending := p.pending
 	p.pending = nil
 	p.mu.Unlock()
@@ -509,6 +513,16 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 	if ok && !published {
 		// Declared before the plugin is live: hold it rather than apply
 		// it, so an instantiation that fails leaves nothing behind.
+		// Each kind declares a complete set. Keeping its older commits
+		// would retain unbounded host memory during configure or replay,
+		// despite the limits on open transactions. Move the replacement
+		// to the end so the surviving kinds retain their commit order.
+		for i, previous := range p.staged {
+			if previous.kind == txn.kind {
+				p.staged = append(p.staged[:i], p.staged[i+1:]...)
+				break
+			}
+		}
 		p.staged = append(p.staged, txn)
 	}
 	p.mu.Unlock()
@@ -945,6 +959,7 @@ func (p *PluginOps) BeginInstance() {
 	defer p.mu.Unlock()
 	p.open = make(map[uint64]*applyTxn)
 	p.staged = nil
+	p.pending = nil
 	p.notifiedSIDs = make(map[string]netip.Addr)
 	p.published = false
 }

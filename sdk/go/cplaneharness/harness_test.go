@@ -3,11 +3,27 @@ package cplaneharness_test
 import (
 	"os"
 	"testing"
+	"time"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplaneharness"
 )
+
+func TestHarnessTickUsesTheHostClockAcrossRestart(t *testing.T) {
+	module, err := os.ReadFile("../../../pkg/cplane/wasm/testdata/clock.wasm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := cplaneharness.New(t, module, cplaneharness.Options{})
+	if err := h.Tick(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	h.Restart()
+	if err := h.Tick(2 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // The harness is exercised against the example plugin, which is what a
 // plugin author's own test would look like. Building it needs TinyGo, so

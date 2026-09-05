@@ -1554,13 +1554,13 @@ func TestARetryDoesNotUndoANewerDeclaration(t *testing.T) {
 		}
 	}
 
-	// Both are declared before the plugin is live: the first names a
-	// locator that does not exist, the second corrects it.
+	// The first declaration names a locator that does not exist.
 	declare("late")
-	declare("main")
 	if err := ops.Publish(); err == nil {
 		t.Fatal("publishing a declaration naming a missing locator succeeded")
 	}
+	// Correct it after publication so the failed declaration is pending.
+	declare("main")
 	if got := sids.count(); got != 1 {
 		t.Fatalf("%d SIDs installed after publication, want the corrected one", got)
 	}

@@ -92,6 +92,9 @@ type worker struct {
 	// to wait for, so work deferred to "the next event" would wait
 	// forever.
 	beforeBatch func()
+	// completions run on the worker after the named batch returns. Replay
+	// publication must follow delivery, not merely admission to the queue.
+	completions map[*v1.PluginEventBatch]func()
 }
 
 // newWorker starts the delivery goroutine for one plugin.
@@ -154,12 +157,11 @@ func (w *worker) submit(batch *v1.PluginEventBatch) bool {
 		w.mu.Unlock()
 		return false
 	}
-	w.mu.Unlock()
 	select {
 	case w.queue <- batch:
+		w.mu.Unlock()
 		return true
 	default:
-		w.mu.Lock()
 		w.dropped++
 		w.processed++ // it will never be delivered; do not wait for it
 		w.owesSnapshot = true
@@ -203,7 +205,14 @@ func (w *worker) run() {
 			if w.beforeBatch != nil {
 				w.beforeBatch()
 			}
-			w.deliver(batch)
+			ok := w.deliver(batch)
+			w.mu.Lock()
+			complete := w.completions[batch]
+			delete(w.completions, batch)
+			w.mu.Unlock()
+			if ok && complete != nil {
+				complete()
+			}
 			w.mu.Lock()
 			w.processed++
 			w.mu.Unlock()
@@ -222,28 +231,30 @@ func (w *worker) run() {
 }
 
 // deliver hands one batch to the guest and acts on what comes back.
-func (w *worker) deliver(batch *v1.PluginEventBatch) {
+func (w *worker) deliver(batch *v1.PluginEventBatch) bool {
 	raw, err := proto.Marshal(batch)
 	if err != nil {
 		w.logger.Error("encoding a plugin event batch",
 			zap.String("plugin", w.name), zap.Error(err))
-		return
+		return false
 	}
 	status, err := w.handler(context.Background(), raw)
 	if err != nil {
 		w.onFail(err)
-		return
+		return false
 	}
 	if len(status) == 0 {
-		return
+		w.onStatus(&v1.PluginEventStatus{})
+		return true
 	}
 	var msg v1.PluginEventStatus
 	if err := proto.Unmarshal(status, &msg); err != nil {
 		w.logger.Warn("plugin returned an undecodable status",
 			zap.String("plugin", w.name), zap.Error(err))
-		return
+		return false
 	}
 	w.onStatus(&msg)
+	return true
 }
 
 // close stops the worker and waits for the in-flight batch to finish, so a
@@ -378,4 +389,20 @@ func (w *worker) submitBlocking(batch *v1.PluginEventBatch) bool {
 		w.mu.Unlock()
 		return false
 	}
+}
+
+func (w *worker) submitCompletion(batch *v1.PluginEventBatch, complete func()) bool {
+	w.mu.Lock()
+	if w.completions == nil {
+		w.completions = make(map[*v1.PluginEventBatch]func())
+	}
+	w.completions[batch] = complete
+	w.mu.Unlock()
+	if w.submitBlocking(batch) {
+		return true
+	}
+	w.mu.Lock()
+	delete(w.completions, batch)
+	w.mu.Unlock()
+	return false
 }

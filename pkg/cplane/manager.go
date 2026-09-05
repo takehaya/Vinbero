@@ -604,10 +604,10 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 		}
 	}
 
-	// It has seen the network, so what it declared is applied.
-	if err := p.ops.Publish(); err != nil {
-		m.logger.Warn("applying what a plugin declared before it was live",
-			zap.String("plugin", reg.Name), zap.Error(err))
+	// A replay publishes on the worker after end-of-replay is handled.
+	// A source without snapshots has no such barrier to wait for.
+	if m.snapshots == nil {
+		m.publish(p, p.inst)
 	}
 
 	// Recorded only once it is actually running, so a module that could
@@ -930,6 +930,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		return nil, err
 	}
 	inst, err := wasm.Instantiate(ctx, wasm.Config{
+		NowMonotonic: m.nowMonotonic,
 		Name:         reg.Name,
 		Module:       reg.Module,
 		ConfigBlob:   reg.Config,
@@ -1145,6 +1146,7 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 
 	ctx := context.Background()
 	inst, err := wasm.Instantiate(ctx, wasm.Config{
+		NowMonotonic: m.nowMonotonic,
 		Name:         reg.Name,
 		Module:       reg.Module,
 		ConfigBlob:   reg.Config,
@@ -1191,9 +1193,8 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	// would deadlock against itself.
 	go func() {
 		m.snapshot(p)
-		if err := p.ops.Publish(); err != nil {
-			m.logger.Warn("applying what a restarted plugin declared before it was live",
-				zap.String("plugin", p.name), zap.Error(err))
+		if m.snapshots == nil {
+			m.publish(p, inst)
 		}
 	}()
 }
@@ -1210,6 +1211,10 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 // not run on the BGP watch goroutine.
 func (m *Manager) snapshot(p *plugin) {
 	m.mu.Lock()
+	if current := m.plugins[p.name]; current != p || p.dead {
+		m.mu.Unlock()
+		return
+	}
 	if p.snapshotting {
 		// One is already running. Ask for another afterwards rather than
 		// starting a second alongside it.
@@ -1218,6 +1223,7 @@ func (m *Manager) snapshot(p *plugin) {
 		return
 	}
 	p.snapshotting = true
+	inst := p.inst
 	m.mu.Unlock()
 	// Live events are held until this finishes, so the snapshot arrives as
 	// an uninterrupted prefix rather than interleaved with updates that
@@ -1263,10 +1269,27 @@ func (m *Manager) snapshot(p *plugin) {
 			zap.String("plugin", p.name), zap.Error(err))
 		return
 	}
-	p.worker.submitBlocking(m.endOfReplayBatch(ReplaySourceBGP))
+	p.worker.submitCompletion(m.endOfReplayBatch(ReplaySourceBGP), func() {
+		m.publish(p, inst)
+	})
 	p.counters.addSnapshot()
 	m.logger.Info("replayed the rib to a plugin",
 		zap.String("plugin", p.name), zap.Int("routes", count))
+}
+
+// publish is called on the worker after its replay barrier. An end marker
+// queued for a failed instance must never publish its replacement's state.
+func (m *Manager) publish(p *plugin, inst *wasm.Instance) {
+	m.mu.Lock()
+	live := m.plugins[p.name] == p && p.inst == inst && !p.dead
+	m.mu.Unlock()
+	if !live {
+		return
+	}
+	if err := p.ops.Publish(); err != nil {
+		m.logger.Warn("applying what a plugin declared before replay completed",
+			zap.String("plugin", p.name), zap.Error(err))
+	}
 }
 
 // snapshotFor rebuilds one plugin's view on the calling goroutine,
@@ -1306,8 +1329,10 @@ func (m *Manager) tick(p *plugin) error {
 	if dead {
 		return nil
 	}
-	return inst.Tick(context.Background(), int64(time.Since(m.started)))
+	return inst.Tick(context.Background(), m.nowMonotonic())
 }
+
+func (m *Manager) nowMonotonic() int64 { return int64(time.Since(m.started)) }
 
 // ReplaySourceBGP names the BGP rib in an end-of-replay event. Sources are
 // named rather than counted so a plugin subscribing to more of them later

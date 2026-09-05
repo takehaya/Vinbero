@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +50,7 @@ type Harness struct {
 	config []byte
 	limits wasm.Limits
 	caps   wasm.Capabilities
+	now    atomic.Int64
 
 	mu sync.Mutex
 	// inst is replaced by Restart, so a test can check that a plugin
@@ -125,6 +127,7 @@ func New(tb testing.TB, module []byte, opts Options) *Harness {
 	// be refused in production.
 	h.ops = &recorder{denyCommits: opts.DenyCommits, caps: caps, scope: scope}
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
+		NowMonotonic: h.now.Load,
 		Name:         "harness",
 		Module:       module,
 		ConfigBlob:   opts.Config,
@@ -226,6 +229,7 @@ func (h *Harness) Route(route *v1.PluginRoute) (*v1.PluginEventStatus, error) {
 
 // Tick invokes the plugin's periodic callback.
 func (h *Harness) Tick(elapsed time.Duration) error {
+	h.now.Store(int64(elapsed))
 	h.mu.Lock()
 	inst := h.inst
 	h.mu.Unlock()
@@ -251,6 +255,7 @@ func (h *Harness) Restart() {
 	h.ops.beginInstance()
 
 	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
+		NowMonotonic: h.now.Load,
 		Name:         "harness",
 		Capabilities: h.caps,
 		Module:       h.module,
