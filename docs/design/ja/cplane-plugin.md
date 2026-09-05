@@ -777,7 +777,8 @@ capability が何であれ観測と log だけをする plugin として起動�
 - 宣言には commit 順の番号を振り、同じ kind でより新しい宣言が適用済みなら
   古い方は適用しません。宣言は集合そのものの宣言なので、retry や staged の
   drain で古い集合が新しい集合を上書きするのを防ぎます。
-- publication は worker が end of replay を正常に処理し終えた後に行います。
+- publication は worker が end of replay と保留した live event を処理し終えた
+  後の host 側 barrier で行います。EOR の成功だけでは公開しません。
   snapshot 対応の source では登録時の replay の有無によらず manager 自身の
   snapshot を使います。guest call が成功して status だけが不正な場合は、
   status を警告として無視し、replay の完了は有効とします。

@@ -210,83 +210,96 @@ func TestStagedDeclarationsKeepOnlyTheLatestSet(t *testing.T) {
 }
 
 func TestReplayPublicationWaitsForGuestCompletion(t *testing.T) {
-	h := newFakeHeadendOps()
-	if _, err := ApplyHeadendSet(h, nil, ownerA, AFv4, desire("10.0.1.0/24"), unlimited); err != nil {
-		t.Fatal(err)
-	}
-	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner: ownerA, Headend: h, Capabilities: testCaps(), Guard: testGuard(), EncapSource: testEncapSource,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// configure has an empty view; replay will replace this declaration.
-	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ops.ApplyCommit(gen); err != nil {
-		t.Fatal(err)
-	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	w := newWorker("replay", zap.NewNop(), func(_ context.Context, raw []byte) ([]byte, error) {
-		var batch v1.PluginEventBatch
-		if err := proto.Unmarshal(raw, &batch); err != nil {
-			return nil, err
-		}
-		if batch.Events[0].Kind == v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY {
-			close(entered)
-			<-release
+	for _, gate := range []v1.PluginEventKind{
+		v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY,
+		v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE,
+	} {
+		t.Run(gate.String(), func(t *testing.T) {
+			h := newFakeHeadendOps()
+			if _, err := ApplyHeadendSet(h, nil, ownerA, AFv4, desire("10.0.1.0/24"), unlimited); err != nil {
+				t.Fatal(err)
+			}
+			ops, err := NewPluginOps(PluginOpsConfig{
+				Owner: ownerA, Headend: h, Capabilities: testCaps(), Guard: testGuard(), EncapSource: testEncapSource,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// configure has an empty view; replay will replace this declaration.
 			gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
 			if err != nil {
-				return nil, err
+				t.Fatal(err)
 			}
-			chunk, err := proto.Marshal(&v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{TriggerPrefix: "10.0.1.0/24", Segments: []string{"fd00:2::1"}}}})
-			if err != nil {
-				return nil, err
+			if err := ops.ApplyCommit(gen); err != nil {
+				t.Fatal(err)
 			}
-			if err := ops.ApplyPut(gen, chunk); err != nil {
-				return nil, err
+			entered, release := make(chan struct{}), make(chan struct{})
+			w := newWorker("replay", zap.NewNop(), func(_ context.Context, raw []byte) ([]byte, error) {
+				var batch v1.PluginEventBatch
+				if err := proto.Unmarshal(raw, &batch); err != nil {
+					return nil, err
+				}
+				if batch.Events[0].Kind == gate {
+					close(entered)
+					<-release
+					gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
+					if err != nil {
+						return nil, err
+					}
+					chunk, err := proto.Marshal(&v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{TriggerPrefix: "10.0.1.0/24", Segments: []string{"fd00:2::1"}}}})
+					if err != nil {
+						return nil, err
+					}
+					if err := ops.ApplyPut(gen, chunk); err != nil {
+						return nil, err
+					}
+					return nil, ops.ApplyCommit(gen)
+				}
+				return nil, nil
+			}, func(err error) { t.Error(err) }, func(*v1.PluginEventStatus) {}, nil, 0, nil)
+			defer w.close()
+			released := false
+			defer func() {
+				if !released {
+					close(release)
+				}
+			}()
+			p := &plugin{name: "replay", worker: w, ops: ops, counters: newCounters()}
+			m := &Manager{plugins: map[string]*plugin{p.name: p}, snapshots: newFakeSource(), logger: zap.NewNop()}
+			if gate == v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE {
+				m.snapshots = snapshotFunc(func([]bgp.Family, bgp.RouteHandler) error {
+					w.submit(m.routeBatch(bgp.RouteEvent{Family: bgp.FamilyVPNv4}))
+					return nil
+				})
 			}
-			return nil, ops.ApplyCommit(gen)
-		}
-		return nil, nil
-	}, func(err error) { t.Error(err) }, func(*v1.PluginEventStatus) {}, nil, 0, nil)
-	defer w.close()
-	released := false
-	defer func() {
-		if !released {
+			m.snapshot(p)
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("publication gate never reached the guest")
+			}
+			ops.mu.Lock()
+			published := ops.published
+			ops.mu.Unlock()
+			if published || h.countV4() != 1 {
+				t.Fatal("published or pruned while the guest was still replaying")
+			}
 			close(release)
-		}
-	}()
-	p := &plugin{name: "replay", worker: w, ops: ops, counters: newCounters()}
-	m := &Manager{plugins: map[string]*plugin{p.name: p}, snapshots: newFakeSource(), logger: zap.NewNop()}
-	m.snapshot(p)
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("end of replay never reached the guest")
-	}
-	ops.mu.Lock()
-	published := ops.published
-	ops.mu.Unlock()
-	if published || h.countV4() != 1 {
-		t.Fatal("published or pruned while the guest was still replaying")
-	}
-	close(release)
-	released = true
-	deadline := time.Now().Add(time.Second)
-	for !w.caughtUp() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if !w.caughtUp() {
-		t.Fatal("worker did not finish replay")
-	}
-	ops.mu.Lock()
-	published = ops.published
-	ops.mu.Unlock()
-	if !published || h.countV4() != 1 {
-		t.Fatal("completed replay did not publish its final set")
+			released = true
+			deadline := time.Now().Add(time.Second)
+			for !w.caughtUp() && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if !w.caughtUp() {
+				t.Fatal("worker did not finish replay")
+			}
+			ops.mu.Lock()
+			published = ops.published
+			ops.mu.Unlock()
+			if !published || h.countV4() != 1 {
+				t.Fatal("completed replay did not publish its final set")
+			}
+		})
 	}
 }
 

@@ -32,6 +32,13 @@ const retryInterval = 15 * time.Second
 // events that keep arriving before it forces the hold shut.
 const maxDrainRounds = 8
 
+// delivery carries a guest batch and its completion, or a host-only barrier
+// when batch is nil. Both use the same queue to preserve processing order.
+type delivery struct {
+	batch    *v1.PluginEventBatch
+	complete func()
+}
+
 // worker owns all delivery to one plugin.
 //
 // It exists because guest calls must not happen on the BGP watch
@@ -47,7 +54,7 @@ const maxDrainRounds = 8
 type worker struct {
 	name     string
 	logger   *zap.Logger
-	queue    chan *v1.PluginEventBatch
+	queue    chan delivery
 	stop     chan struct{}
 	done     chan struct{}
 	handler  func(ctx context.Context, batch []byte) ([]byte, error)
@@ -95,9 +102,6 @@ type worker struct {
 	// to wait for, so work deferred to "the next event" would wait
 	// forever.
 	beforeBatch func()
-	// completions run on the worker after the named batch returns. Replay
-	// publication must follow delivery, not merely admission to the queue.
-	completions map[*v1.PluginEventBatch]func()
 }
 
 // newWorker starts the delivery goroutine for one plugin.
@@ -114,7 +118,7 @@ func newWorker(
 	w := &worker{
 		name:        name,
 		logger:      logger,
-		queue:       make(chan *v1.PluginEventBatch, deliveryQueueDepth),
+		queue:       make(chan delivery, deliveryQueueDepth),
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
 		handler:     handler,
@@ -161,7 +165,7 @@ func (w *worker) submit(batch *v1.PluginEventBatch) bool {
 		return false
 	}
 	select {
-	case w.queue <- batch:
+	case w.queue <- delivery{batch: batch}:
 		w.mu.Unlock()
 		return true
 	default:
@@ -204,17 +208,16 @@ func (w *worker) run() {
 		select {
 		case <-w.stop:
 			return
-		case batch := <-w.queue:
-			if w.beforeBatch != nil {
-				w.beforeBatch()
+		case next := <-w.queue:
+			ok := true
+			if next.batch != nil {
+				if w.beforeBatch != nil {
+					w.beforeBatch()
+				}
+				ok = w.deliver(next.batch)
 			}
-			ok := w.deliver(batch)
-			w.mu.Lock()
-			complete := w.completions[batch]
-			delete(w.completions, batch)
-			w.mu.Unlock()
-			if ok && complete != nil {
-				complete()
+			if ok && next.complete != nil {
+				next.complete()
 			}
 			w.mu.Lock()
 			w.processed++
@@ -353,7 +356,7 @@ func (w *worker) endSnapshot() {
 
 		for _, batch := range held {
 			select {
-			case w.queue <- batch:
+			case w.queue <- delivery{batch: batch}:
 			case <-w.stop:
 				w.mu.Lock()
 				w.processed++
@@ -371,7 +374,7 @@ func (w *worker) endSnapshot() {
 	defer w.mu.Unlock()
 	for _, batch := range w.pending {
 		select {
-		case w.queue <- batch:
+		case w.queue <- delivery{batch: batch}:
 		default:
 			w.dropped++
 			w.processed++
@@ -396,11 +399,15 @@ func (w *worker) endSnapshot() {
 //
 // It reports false if the worker stopped before the batch was accepted.
 func (w *worker) submitBlocking(batch *v1.PluginEventBatch) bool {
+	return w.enqueueBlocking(delivery{batch: batch})
+}
+
+func (w *worker) enqueueBlocking(next delivery) bool {
 	w.mu.Lock()
 	w.submitted++
 	w.mu.Unlock()
 	select {
-	case w.queue <- batch:
+	case w.queue <- next:
 		return true
 	case <-w.stop:
 		w.mu.Lock()
@@ -411,17 +418,9 @@ func (w *worker) submitBlocking(batch *v1.PluginEventBatch) bool {
 }
 
 func (w *worker) submitCompletion(batch *v1.PluginEventBatch, complete func()) bool {
-	w.mu.Lock()
-	if w.completions == nil {
-		w.completions = make(map[*v1.PluginEventBatch]func())
-	}
-	w.completions[batch] = complete
-	w.mu.Unlock()
-	if w.submitBlocking(batch) {
-		return true
-	}
-	w.mu.Lock()
-	delete(w.completions, batch)
-	w.mu.Unlock()
-	return false
+	return w.enqueueBlocking(delivery{batch: batch, complete: complete})
+}
+
+func (w *worker) submitBarrier(complete func()) bool {
+	return w.enqueueBlocking(delivery{complete: complete})
 }

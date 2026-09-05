@@ -1234,8 +1234,17 @@ func (m *Manager) snapshot(p *plugin) {
 	// an uninterrupted prefix rather than interleaved with updates that
 	// supersede parts of it.
 	epoch := p.worker.beginSnapshot()
+	// Only worker callbacks touch replayOK. The publication barrier follows
+	// both the EOR and all held live events, so an incomplete drain cannot
+	// prune inherited state through an earlier EOR completion.
+	replayOK := false
 	defer func() {
 		p.worker.endSnapshot()
+		p.worker.submitBarrier(func() {
+			if replayOK && p.worker.snapshotCurrent(epoch) {
+				m.publish(p, inst)
+			}
+		})
 		m.mu.Lock()
 		p.snapshotting = false
 		m.mu.Unlock()
@@ -1275,9 +1284,7 @@ func (m *Manager) snapshot(p *plugin) {
 		return
 	}
 	p.worker.submitCompletion(m.endOfReplayBatch(ReplaySourceBGP), func() {
-		if p.worker.snapshotCurrent(epoch) {
-			m.publish(p, inst)
-		}
+		replayOK = true
 	})
 	p.counters.addSnapshot()
 	m.logger.Info("replayed the rib to a plugin",
