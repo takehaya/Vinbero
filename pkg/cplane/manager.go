@@ -1233,7 +1233,7 @@ func (m *Manager) snapshot(p *plugin) {
 	// Live events are held until this finishes, so the snapshot arrives as
 	// an uninterrupted prefix rather than interleaved with updates that
 	// supersede parts of it.
-	p.worker.beginSnapshot()
+	epoch := p.worker.beginSnapshot()
 	defer func() {
 		p.worker.endSnapshot()
 		m.mu.Lock()
@@ -1275,7 +1275,9 @@ func (m *Manager) snapshot(p *plugin) {
 		return
 	}
 	p.worker.submitCompletion(m.endOfReplayBatch(ReplaySourceBGP), func() {
-		m.publish(p, inst)
+		if p.worker.snapshotCurrent(epoch) {
+			m.publish(p, inst)
+		}
 	})
 	p.counters.addSnapshot()
 	m.logger.Info("replayed the rib to a plugin",

@@ -70,6 +70,9 @@ type worker struct {
 	processed uint64
 	// owesSnapshot records that a drop left the plugin's view incomplete.
 	owesSnapshot bool
+	// snapshotEpoch changes whenever replay starts or the view becomes
+	// incomplete. Consuming the debt flag cannot make an old EOR current.
+	snapshotEpoch uint64
 	// holding is set while a snapshot is being delivered, and pending
 	// holds the live events that arrived meanwhile.
 	//
@@ -153,7 +156,7 @@ func (w *worker) submit(batch *v1.PluginEventBatch) bool {
 		// snapshot: the view this one is building is already stale.
 		w.dropped++
 		w.processed++
-		w.owesSnapshot = true
+		w.oweLocked()
 		w.mu.Unlock()
 		return false
 	}
@@ -164,7 +167,7 @@ func (w *worker) submit(batch *v1.PluginEventBatch) bool {
 	default:
 		w.dropped++
 		w.processed++ // it will never be delivered; do not wait for it
-		w.owesSnapshot = true
+		w.oweLocked()
 		dropped := w.dropped
 		w.mu.Unlock()
 		// Logged at intervals rather than per drop: a plugin that has
@@ -302,15 +305,28 @@ func (w *worker) takeSnapshotDebt() bool {
 func (w *worker) owe() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.oweLocked()
+}
+
+func (w *worker) oweLocked() {
 	w.owesSnapshot = true
+	w.snapshotEpoch++
 }
 
 // beginSnapshot starts holding live events, so a snapshot is delivered as
 // an uninterrupted prefix of the stream.
-func (w *worker) beginSnapshot() {
+func (w *worker) beginSnapshot() uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.holding = true
+	w.snapshotEpoch++
+	return w.snapshotEpoch
+}
+
+func (w *worker) snapshotCurrent(epoch uint64) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.snapshotEpoch == epoch
 }
 
 // endSnapshot releases the live events that arrived during the snapshot,
@@ -359,7 +375,7 @@ func (w *worker) endSnapshot() {
 		default:
 			w.dropped++
 			w.processed++
-			w.owesSnapshot = true
+			w.oweLocked()
 		}
 	}
 	w.pending = nil

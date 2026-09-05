@@ -781,6 +781,8 @@ capability が何であれ観測と log だけをする plugin として起動�
   snapshot 対応の source では登録時の replay の有無によらず manager 自身の
   snapshot を使います。guest call が成功して status だけが不正な場合は、
   status を警告として無視し、replay の完了は有効とします。
+  replay 中の drop や再走査要求で世代を進め、古い世代の完了通知では公開
+  しません。snapshot debt を返済した replay の完了まで初期宣言を保留します。
   queue に積み終えた時点では適用しません。旧 instance 向けの完了通知では
   新 instance の宣言を公開できません。宣言はそれまで保留されるので、
   最初に適用される宣言は queue にたまたま入っていた event ではなく network

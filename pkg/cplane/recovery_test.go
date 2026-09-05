@@ -304,6 +304,116 @@ func TestOldReplayCannotPublishReplacement(t *testing.T) {
 	}
 }
 
+type snapshotFunc func([]bgp.Family, bgp.RouteHandler) error
+
+func (f snapshotFunc) SnapshotTo(families []bgp.Family, handler bgp.RouteHandler) error {
+	return f(families, handler)
+}
+
+func TestReplayDebtKeepsInheritedStateUntilFreshCompletion(t *testing.T) {
+	headend := newFakeHeadendOps()
+	if _, err := ApplyHeadendSet(headend, nil, ownerA, AFv4, desire("10.0.1.0/24"), unlimited); err != nil {
+		t.Fatal(err)
+	}
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: ownerA, Headend: headend, Capabilities: testCaps(), Guard: testGuard(), EncapSource: testEncapSource,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ops.ApplyCommit(gen); err != nil {
+		t.Fatal(err)
+	}
+	rawSet, err := proto.Marshal(&v1.PluginApplyChunk{HeadendEntries: []*v1.PluginHeadendEntry{{
+		TriggerPrefix: "10.0.1.0/24", Segments: []string{"fd00:2::1"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ends := 0
+	w := newWorker("replay", zap.NewNop(), func(_ context.Context, raw []byte) ([]byte, error) {
+		var batch v1.PluginEventBatch
+		if err := proto.Unmarshal(raw, &batch); err != nil {
+			return nil, err
+		}
+		if batch.Events[0].Kind == v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY {
+			ends++
+			if ends == 2 {
+				gen, err := ops.ApplyBegin(uint32(v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4))
+				if err != nil {
+					return nil, err
+				}
+				if err := ops.ApplyPut(gen, rawSet); err != nil {
+					return nil, err
+				}
+				return nil, ops.ApplyCommit(gen)
+			}
+		}
+		return nil, nil
+	}, func(err error) { t.Error(err) }, func(*v1.PluginEventStatus) {}, nil, 0, nil)
+	defer w.close()
+	secondStarted, release := make(chan struct{}), make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	p := &plugin{name: "replay", worker: w, ops: ops, counters: newCounters()}
+	m := &Manager{plugins: map[string]*plugin{p.name: p}, logger: zap.NewNop()}
+	snapshots := 0
+	m.snapshots = snapshotFunc(func([]bgp.Family, bgp.RouteHandler) error {
+		snapshots++
+		if snapshots == 1 {
+			// The first RIB is already stale: held live events overflow.
+			for i := 0; i <= deliveryQueueDepth; i++ {
+				w.submit(m.routeBatch(bgp.RouteEvent{Family: bgp.FamilyVPNv4}))
+			}
+		} else {
+			close(secondStarted)
+			<-release
+		}
+		return nil
+	})
+	m.snapshot(p)
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot debt was not repaid")
+	}
+	deadline := time.Now().Add(time.Second)
+	for !w.caughtUp() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !w.caughtUp() {
+		t.Fatal("first replay did not finish")
+	}
+	ops.mu.Lock()
+	published := ops.published
+	ops.mu.Unlock()
+	if published || headend.countV4() != 1 {
+		t.Fatal("stale EOR published and pruned before replay debt was repaid")
+	}
+	close(release)
+	released = true
+	deadline = time.Now().Add(time.Second)
+	for !published && time.Now().Before(deadline) {
+		ops.mu.Lock()
+		published = ops.published
+		ops.mu.Unlock()
+		if !published {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if !published || headend.countV4() != 1 {
+		t.Fatal("fresh EOR did not publish the recovered set")
+	}
+}
+
 func TestManagerTickAndNowShareClockAcrossInstances(t *testing.T) {
 	module, err := os.ReadFile("wasm/testdata/clock.wasm")
 	if err != nil {
