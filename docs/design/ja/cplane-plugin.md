@@ -191,11 +191,15 @@ UPDATE でこの抑止を抜けることはできず、最後の claimed path �
 
 claim 取得時の明示的な RIB 再走査では、現在の demux が built-in に配送した
 履歴が無くても withdraw を渡します。前の daemon が pinned map に残した
-状態や、独立した replay で入った状態も、plugin が引き継ぐ前に撤去します。
+状態も、plugin が引き継ぐ前に撤去します。on-demand の replay は登録済み
+built-in consumer の名前を指定し、live 配送と同じ path 履歴を使います。
+EVPN の import surface 拡大時の rescue もこの入口を使うので、replay だけで
+入った別 RD/source の通常 path も、claimed sibling の到着時に撤去できます。
+RIB の読み取りから適用までを同じ view lock で直列化します。
 登録に失敗して claim を戻した場合も、demux が保持する最新の path を再評価
 して built-in の担当を戻します。登録中に withdraw 済みの path は復活させません。
-live の claimed UPDATE も、独立 replay の配送履歴が無くても cleanup の
-withdraw を渡します。RIB 再走査中に live 更新された prefix は、古い走査結果
+live の claimed UPDATE も、配送履歴が無い path へ cleanup の withdraw を
+渡します。RIB 再走査中に live 更新された prefix は、古い走査結果
 で上書きしません。この更新記録は走査終了時に捨てます。
 
 withdraw には path attribute が一切載りません。BGP は消える NLRI しか

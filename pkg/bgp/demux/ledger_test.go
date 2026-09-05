@@ -174,34 +174,33 @@ func TestNLRIKeyEmptyForUndecodedEvent(t *testing.T) {
 // An on-demand snapshot fed to a built-in consumer applies the same claim
 // rule as live delivery; without this the applier's EVPN rescue would pick
 // up exactly the routes dispatch withheld from it.
-func TestBuiltinSnapshotHandlerFiltersClaimed(t *testing.T) {
-	src := &fakeSource{}
+func TestReplayBuiltinFiltersClaimed(t *testing.T) {
+	src := &fakeSource{rib: map[bgp.Family][]bgp.RouteEvent{bgp.FamilyVPNv4: {
+		vpnEvent("65000:1", "10.0.0.0/24", 0xFE01),
+		vpnEvent("65000:1", "10.0.1.0/24", 0x0013),
+		localEvent(bgp.FamilyVPNv4),
+	}}}
 	d := claimedDemux(t, src)
 	var got collector
-	h := d.BuiltinSnapshotHandler(got.handle)
-
-	h(vpnEvent("65000:1", "10.0.0.0/24", 0xFE01)) // claimed
-	h(vpnEvent("65000:1", "10.0.1.0/24", 0x0013)) // ordinary
-	h(localEvent(bgp.FamilyEVPN))                 // this node's own advertisement
-
-	if got.len() != 1 {
-		t.Fatalf("snapshot delivered %d events, want only the ordinary one", got.len())
+	if _, err := d.RegisterBuiltin("applier", []bgp.Family{bgp.FamilyVPNv4}, got.handle); err != nil {
+		t.Fatal(err)
 	}
-	if got.got[0].VPN.Prefix != "10.0.1.0/24" {
-		t.Fatalf("snapshot delivered %+v, want the unclaimed prefix", got.got[0].VPN)
+	if err := d.ReplayBuiltin("applier", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got.len() != 2 || !got.got[0].IsWithdraw || got.got[1].IsWithdraw || got.got[1].VPN.Prefix != "10.0.1.0/24" {
+		t.Fatalf("snapshot must clean up the claimed prefix and advertise only the ordinary one: %+v", got.got)
 	}
 }
 
-func TestBuiltinSnapshotHandlerNilSafe(t *testing.T) {
+func TestReplayBuiltinNilSafe(t *testing.T) {
 	var d *Demux
-	var got collector
-	h := d.BuiltinSnapshotHandler(got.handle)
-	h(vpnEvent("65000:1", "10.0.0.0/24", 0xFE01))
-	if got.len() != 1 {
-		t.Fatal("a nil demux must pass events through unchanged")
+	if err := d.ReplayBuiltin("applier", nil); err != nil {
+		t.Fatal(err)
 	}
-	if d.BuiltinSnapshotHandler(nil) != nil {
-		t.Fatal("wrapping a nil handler should stay nil")
+	d = New(&fakeSource{}, nil, nil)
+	if err := d.ReplayBuiltin("missing", nil); err == nil {
+		t.Fatal("replay accepted an unknown applier")
 	}
 }
 

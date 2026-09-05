@@ -281,18 +281,15 @@ func run(cliCtx *cli.Context) error {
 	// bindings and facets before the session, so there is nothing to rescue),
 	// and any later failure self-heals on the next peer event.
 	//
-	// The snapshot goes through the demux's built-in filter rather than
-	// straight to the lister: this replay feeds the built-in applier, so it
-	// must withhold plugin-claimed routes exactly as live delivery does.
+	// The snapshot goes through the registered built-in view, sharing path
+	// history and serialization with live delivery and claim handoffs.
 	// routeDemux is built further down, and the closure reads it when it
 	// runs, by which time it is set.
 	var routeDemux *demux.Demux
 	var evpnReplay func()
 	if bgpSession != nil {
 		evpnReplay = func() {
-			err := applier.ReplayEVPN(func(h bgp.RouteHandler) error {
-				return bgpSession.ListRoutes(bgp.FamilyEVPN, routeDemux.BuiltinSnapshotHandler(h))
-			})
+			err := routeDemux.ReplayBuiltin("applier", []bgp.Family{bgp.FamilyEVPN})
 			if err != nil {
 				lg.Warn("EVPN loc-rib replay", zap.Error(err))
 			}

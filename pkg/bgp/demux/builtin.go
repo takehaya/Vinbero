@@ -28,10 +28,7 @@ type builtinView struct {
 	groups  map[string]*builtinGroup
 	claimed func(uint16) bool
 	handler bgp.RouteHandler
-	// Registered appliers accept idempotent withdrawals for state installed
-	// outside this view. Snapshot callbacks may accept advertisements only.
-	withdrawUnseen bool
-	scans          map[*builtinScan]struct{}
+	scans   map[*builtinScan]struct{}
 }
 
 // A scan only remembers prefixes changed during its own lifetime. This also
@@ -122,6 +119,14 @@ func (v *builtinView) refresh() {
 }
 
 func (v *builtinView) handle(ev bgp.RouteEvent) {
+	// Serialize the applier's state and delivery with its on-demand replays.
+	// The built-in handler must not recursively invoke this same view.
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.handleLocked(ev)
+}
+
+func (v *builtinView) handleLocked(ev bgp.RouteEvent) {
 	if ev.Source.IsLocal() {
 		return
 	}
@@ -132,10 +137,6 @@ func (v *builtinView) handle(ev bgp.RouteEvent) {
 		}
 		return
 	}
-	// Keep mutation and delivery ordered against live and snapshot callers.
-	// The built-in handler must not recursively invoke this same view.
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	v.changedLocked(key)
 	v.updateLocked(ev, false, key)
 }
@@ -176,7 +177,7 @@ func (v *builtinView) updateLocked(ev bgp.RouteEvent, retract bool, key string) 
 		}
 		delete(g.delivered, previous)
 	}
-	if (retract || v.withdrawUnseen && claimed && !ev.IsWithdraw) && !retracted {
+	if (retract || claimed && !ev.IsWithdraw) && !retracted {
 		// The applier may have installed this path through an independent
 		// replay. Cleanup cannot depend solely on this view's history.
 		gone := ev
