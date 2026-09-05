@@ -37,7 +37,7 @@ func TestSharedHeadendRejectsConflictBeforePruning(t *testing.T) {
 				t.Fatal(err)
 			}
 			res, err := r.ApplySet(ownerA, AFv4, desire("10.0.2.0/24"), unlimited)
-			if !errors.Is(err, bpf.ErrEntryOwnerMismatch) || res.Total() != 0 {
+			if (!errors.Is(err, bpf.ErrEntryOwnerMismatch) && !errors.Is(err, ErrLeaseHeld)) || res.Total() != 0 {
 				t.Fatalf("conflict = %+v, %v; want refusal before mutation", res, err)
 			}
 			if got := maps.v4Owners(); got["10.0.1.0/24"] != ownerA || got["10.0.2.0/24"] != bpf.OwnerBuiltin {
@@ -70,7 +70,7 @@ func TestSharedHeadendCanonicalKeysAndHandoff(t *testing.T) {
 			if holder, ok := r.Leases().HolderOf(kind, tc.masked); !ok || holder != bpf.OwnerBuiltin {
 				t.Fatalf("lease = %q, %t", holder, ok)
 			}
-			if _, err := r.ApplySet(ownerA, tc.af, desire(tc.masked), unlimited); err == nil {
+			if _, err := r.ApplySet(ownerA, tc.af, desire(tc.masked), unlimited); !errors.Is(err, ErrLeaseHeld) {
 				t.Fatal("plugin stole a built-in key")
 			}
 			if err := remove(tc.raw, bpf.OwnerBuiltin); err != nil {

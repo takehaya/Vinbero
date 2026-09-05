@@ -8,6 +8,7 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/headend"
+	"github.com/takehaya/vinbero/pkg/ownership"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -34,7 +35,7 @@ func TestVPNAndPluginUseSharedHeadendOwnership(t *testing.T) {
 	want := []headend.Desired{{TriggerPrefix: prefix, Entry: &bpf.HeadendEntry{}}}
 	advert := vpnEvent(prefix, "65000:1", "fd00:1:1:a::", "fd00::1", false)
 	a.Apply(advert)
-	if _, err := r.ApplySet(plugin, headend.AFv4, want, -1); !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
+	if _, err := r.ApplySet(plugin, headend.AFv4, want, -1); !errors.Is(err, ownership.ErrLeaseHeld) {
 		t.Fatalf("plugin overwrote a live BGP route: %v", err)
 	}
 	a.Apply(vpnEvent(prefix, "65000:1", "", "fd00::1", true))

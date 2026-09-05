@@ -140,19 +140,7 @@ func ApplySet(
 		}
 	}
 
-	// The lease table may be empty after restart, and operator RPCs do not
-	// acquire leases. Reject known map-owner conflicts before pruning any
-	// previously working entry. The backend rechecks ownership at each write.
 	sort.Strings(keys)
-	for _, prefix := range keys {
-		holder, found, err := getOwner(ops, af, prefix)
-		if err != nil {
-			return res, fmt.Errorf("read %s owner of %q: %w", af, prefix, err)
-		}
-		if found && holder != owner {
-			return res, ownerConflict(af, prefix, holder, owner)
-		}
-	}
 
 	var taken []string
 	if leases != nil {
@@ -160,6 +148,21 @@ func ApplySet(
 		taken, err = leases.AcquireAll(af.leaseKind(), keys, owner)
 		if err != nil {
 			return res, err
+		}
+	}
+
+	// The lease table may be empty after restart, and operator RPCs do not
+	// acquire leases. Reject known map-owner conflicts before pruning any
+	// previously working entry. The backend rechecks ownership at each write.
+	for _, prefix := range keys {
+		holder, found, err := getOwner(ops, af, prefix)
+		if err != nil {
+			releaseAll(leases, af, taken, owner)
+			return res, fmt.Errorf("read %s owner of %q: %w", af, prefix, err)
+		}
+		if found && holder != owner {
+			releaseAll(leases, af, taken, owner)
+			return res, ownerConflict(af, prefix, holder, owner)
 		}
 	}
 
