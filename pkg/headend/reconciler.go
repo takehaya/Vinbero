@@ -78,17 +78,20 @@ func (r *Reconciler) lockOwner(owner bpf.OwnerTag) func() {
 func (r *Reconciler) Leases() *ownership.Leases { return r.leases }
 
 func (r *Reconciler) ApplySet(owner bpf.OwnerTag, af Family, desired []Desired, quota int) (Result, error) {
-	defer r.lockOwner(owner)()
+	unlock := r.lockOwner(owner)
+	defer unlock()
 	return ApplySet(r.maps, r.leases, owner, af, desired, quota)
 }
 
 func (r *Reconciler) PruneOwner(owner bpf.OwnerTag, af Family) (int, error) {
-	defer r.lockOwner(owner)()
+	unlock := r.lockOwner(owner)
+	defer unlock()
 	return PruneOwner(r.maps, r.leases, owner, af)
 }
 
 func (r *Reconciler) OwnedEntries(owner bpf.OwnerTag, af Family) ([]Desired, error) {
-	defer r.lockOwner(owner)()
+	unlock := r.lockOwner(owner)
+	defer unlock()
 	return OwnedEntries(r.maps, owner, af)
 }
 
@@ -113,7 +116,8 @@ func (r *Reconciler) put(af Family, prefix string, entry *bpf.HeadendEntry, owne
 	if entry == nil {
 		return fmt.Errorf("write %s: nil entry for %q", af, key)
 	}
-	defer r.lockOwner(owner)()
+	unlock := r.lockOwner(owner)
+	defer unlock()
 	currentOwner, found, err := getOwner(r.maps, af, key)
 	if err != nil {
 		return err
@@ -152,7 +156,8 @@ func (r *Reconciler) remove(af Family, prefix string, owner bpf.OwnerTag) error 
 	if err != nil {
 		return err
 	}
-	defer r.lockOwner(owner)()
+	unlock := r.lockOwner(owner)
+	defer unlock()
 	currentOwner, found, err := getOwner(r.maps, af, key)
 	if err != nil {
 		return err

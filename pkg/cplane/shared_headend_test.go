@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -232,5 +233,51 @@ func TestManagerSharesHeadendReconcilerAndRejectsAmbiguousConfig(t *testing.T) {
 	}
 	if _, err := NewPluginOps(PluginOpsConfig{Owner: ownerA, HeadendReconciler: r, Leases: NewLeases()}); err == nil {
 		t.Fatal("split lease tables were accepted")
+	}
+}
+
+type stalledOwnerLookup struct {
+	*fakeHeadendOps
+	started, resume chan struct{}
+	stalled         atomic.Bool
+}
+
+func (m *stalledOwnerLookup) GetHeadendV4Owner(prefix string) (bpf.OwnerTag, bool, error) {
+	owner, found, err := m.fakeHeadendOps.GetHeadendV4Owner(prefix)
+	if m.stalled.CompareAndSwap(false, true) {
+		close(m.started)
+		<-m.resume
+	}
+	return owner, found, err
+}
+
+func TestConflictingPreflightDoesNotBlockPinnedOwnerWithdrawal(t *testing.T) {
+	maps := &stalledOwnerLookup{fakeHeadendOps: newFakeHeadendOps(), started: make(chan struct{}), resume: make(chan struct{})}
+	const prefix = "10.0.1.0/24"
+	// On startup the owner map is present but the lease table is empty.
+	if err := maps.CreateHeadendV4(prefix, &bpf.HeadendEntry{}, bpf.OwnerBuiltin); err != nil {
+		t.Fatal(err)
+	}
+	r := sharedHeadend(t, maps)
+	var once sync.Once
+	release := func() { once.Do(func() { close(maps.resume) }) }
+	t.Cleanup(release)
+	applied := make(chan error, 1)
+	go func() {
+		_, err := r.ApplySet(ownerA, AFv4, desire(prefix), unlimited)
+		applied <- err
+	}()
+	<-maps.started
+	// The plugin is about to discover the conflicting pinned owner. It
+	// must not have reserved this key and prevented its real owner deleting it.
+	if err := r.DeleteHeadendV4(prefix, bpf.OwnerBuiltin); err != nil {
+		t.Errorf("a rejected declaration prevented withdrawal: %v", err)
+	}
+	release()
+	if err := <-applied; !errors.Is(err, bpf.ErrEntryOwnerMismatch) {
+		t.Errorf("stale owner observation should refuse the first apply: %v", err)
+	}
+	if _, err := r.ApplySet(ownerA, AFv4, desire(prefix), unlimited); err != nil {
+		t.Fatalf("withdrawal did not release the key for retry: %v", err)
 	}
 }
