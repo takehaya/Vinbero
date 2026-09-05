@@ -28,7 +28,10 @@ type fdbBdOps interface {
 	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
 	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
 	CreateBdPeer(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) error
-	DeleteBdPeer(bdID, index uint16) error
+	// DeleteBdPeer reports whether the forward entry existed; false with a
+	// nil error is an already-free slot, and an error is always paired with
+	// the occupancy the caller's ledger must keep.
+	DeleteBdPeer(bdID, index uint16) (bool, error)
 	// FindFreeBdPeerIndex returns the lowest bd_peer index not in use in the
 	// real map, so a BGP-allocated peer never collides with an operator-created
 	// or restart-pinned entry.
@@ -416,7 +419,18 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 	if err := a.fdbBd.CreateFdb(bdID, mac, fdb); err != nil {
 		a.logger.Error("install EVPN FDB", zap.String("mac", r.MAC), zap.Error(err))
 		if rIdx, gone := a.evpn.releaseIndex(pk); gone {
-			_ = a.fdbBd.DeleteBdPeer(bdID, rIdx)
+			if existed, derr := a.fdbBd.DeleteBdPeer(bdID, rIdx); derr != nil && existed {
+				// Same recovery contract as withdrawEVPNMac: the peer entry
+				// survived the failed rollback, so re-pin the index (refs 0)
+				// -- releasing it would orphan the slot and a re-learn would
+				// allocate a duplicate.
+				a.evpn.peers[pk] = &evpnPeerState{index: rIdx, refs: 0}
+				a.logger.Error("roll back EVPN bd_peer",
+					zap.Uint16("bd_id", bdID), zap.Uint16("index", rIdx), zap.Error(derr))
+			} else if derr != nil {
+				a.logger.Error("roll back EVPN bd_peer (slot already free)",
+					zap.Uint16("bd_id", bdID), zap.Uint16("index", rIdx), zap.Error(derr))
+			}
 		}
 		return
 	}
@@ -520,13 +534,20 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 	}
 	a.unindexMACByES(fk, st)
 	if idx, gone := a.evpn.releaseIndex(st.peer); gone {
-		if err := a.fdbBd.DeleteBdPeer(st.bdID, idx); err != nil {
+		if existed, err := a.fdbBd.DeleteBdPeer(st.bdID, idx); err != nil && existed {
 			// The bd_peer is still in the map but releaseIndex already
 			// dropped it from the ledger. Re-pin the index (refs 0) so a
 			// re-learn of this PE reuses the surviving entry instead of
-			// allocating a duplicate and leaking the slot.
+			// allocating a duplicate and leaking the slot -- note the
+			// recovery is event-driven (nothing retries on its own; the
+			// next route for this PE does). An already-free slot is the
+			// opposite situation: re-pinning it would collide with the
+			// next peer FindFreeBdPeerIndex hands the index to.
 			a.evpn.peers[st.peer] = &evpnPeerState{index: idx, refs: 0}
 			a.logger.Error("delete EVPN bd_peer",
+				zap.Uint16("bd_id", st.bdID), zap.Uint16("index", idx), zap.Error(err))
+		} else if err != nil {
+			a.logger.Error("delete EVPN bd_peer (slot already free)",
 				zap.Uint16("bd_id", st.bdID), zap.Uint16("index", idx), zap.Error(err))
 		}
 	}
@@ -625,12 +646,20 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 }
 
 // withdrawEVPNMcast removes the BUM flood bd_peer recorded for mk. The ledger
-// entry is kept if the map delete fails so a retry can still remove it.
+// entry is kept if the map delete fails so a retry can still remove it --
+// the retry is event-driven (a replacing RT3 or withdraw for the same NLRI;
+// nothing fires on its own, so a permanently departed PE can leave the
+// flood peer until then). An already-free slot must NOT keep the ledger:
+// that would wedge it forever (every retry keeps failing the same way)
+// until the slot is reused, when the retry would delete an unrelated peer.
 func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) {
-	if err := a.fdbBd.DeleteBdPeer(st.bdID, st.index); err != nil {
+	if existed, err := a.fdbBd.DeleteBdPeer(st.bdID, st.index); err != nil && existed {
 		a.logger.Error("delete EVPN BUM bd_peer",
 			zap.Uint16("bd_id", st.bdID), zap.Uint16("index", st.index), zap.Error(err))
 		return
+	} else if err != nil {
+		a.logger.Error("delete EVPN BUM bd_peer (slot already free)",
+			zap.Uint16("bd_id", st.bdID), zap.Uint16("index", st.index), zap.Error(err))
 	}
 	delete(a.evpn.mcast, mk)
 }

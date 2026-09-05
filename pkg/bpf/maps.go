@@ -122,6 +122,19 @@ type MapOperations struct {
 	// concurrent updates can free an index the other has just reused, or
 	// read one entry and then act on another. Zero value is usable.
 	sidLifecycle sync.Mutex
+
+	// bdPeerLifecycle serializes bd_peer create and delete for the same
+	// reason: the operator RPC path and the BGP applier write the forward,
+	// reverse, and L2-ext maps without a shared lock above this layer, and
+	// DeleteBdPeer's reverse-map scan interleaved with a concurrent
+	// CreateBdPeer could delete the new peer's forward entry while leaving
+	// its reverse entry dangling. It does NOT make FindFreeBdPeerIndex +
+	// CreateBdPeer atomic for callers that probe and create separately;
+	// the server RPC path uses CreateBdPeerAtFreeIndex for that, while the
+	// BGP applier serializes its own probe+create under its ledger mutex
+	// (a cross-writer probe race with the RPC path remains and is bounded
+	// by the operator not managing the applier's index ranges).
+	bdPeerLifecycle sync.Mutex
 }
 
 // NewMapOperations creates a new MapOperations instance.
@@ -2615,7 +2628,27 @@ func currentKtimeNs() uint64 {
 // so one PE maps to one reverse entry, and the RT3 End.DT2M BUM peer toward the
 // same PE must pass false so it does not clobber that entry (the RX path needs
 // the unicast peer).
+// CreateBdPeerAtFreeIndex probes for the lowest free operator-range index in
+// bdID and installs the peer there under one critical section, so two
+// concurrent creates cannot pick the same slot and silently overwrite each
+// other. Returns the chosen index.
+func (m *MapOperations) CreateBdPeerAtFreeIndex(bdID uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) (uint16, error) {
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	index := m.findFreeBdPeerIndexLocked(bdID)
+	if index >= MaxBumNexthops {
+		return index, fmt.Errorf("bd %d: maximum number of peers (%d) reached", bdID, MaxBumNexthops)
+	}
+	return index, m.createBdPeerLocked(bdID, index, entry, esi, remoteSrc, writeReverse)
+}
+
 func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) error {
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	return m.createBdPeerLocked(bdID, index, entry, esi, remoteSrc, writeReverse)
+}
+
+func (m *MapOperations) createBdPeerLocked(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) error {
 	key := &BdPeerKey{BdId: bdID, Index: index}
 	if err := m.objs.BdPeerMap.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put bd peer entry: %w", err)
@@ -2655,38 +2688,90 @@ func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, es
 	return nil
 }
 
-// DeleteBdPeer removes a BD peer entry and its reverse-map entry. The reverse
-// map is keyed by the remote PE source (not the index), and the forward entry
-// no longer carries it, so the matching reverse entry is found by scanning for
-// the one pointing at this index (a BD holds at most MAX_BUM_NEXTHOPS peers).
-// Deletes the forward map first to avoid inconsistency if reverse delete fails.
-func (m *MapOperations) DeleteBdPeer(bdID, index uint16) error {
-	key := &BdPeerKey{BdId: bdID, Index: index}
-	if err := m.objs.BdPeerMap.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete bd peer entry: %w", err)
+// DeleteBdPeer removes a BD peer entry, its reverse-map entries, and its L2
+// ESI ext entry. The reverse map is keyed by the remote PE source (not the
+// index), and the forward entry no longer carries it, so matching reverse
+// entries are found by scanning for the ones pointing at this index -- ALL
+// of them are drained, because a partial failure in an earlier generation
+// can leave more than one entry aimed at a slot, and deleting an arbitrary
+// one would leave a live entry dangling.
+//
+// The companion entries go FIRST: every error path must leave the forward
+// entry's occupancy matching what the callers' ledgers believe, because the
+// appliers recover from a failed delete by keeping the index as occupied,
+// and FindFreeBdPeerIndex probes the forward map. If the forward delete
+// itself then fails, the drained reverse entries are restored so a peer
+// that is still forwarding does not lose its RX split-horizon protection
+// while it waits for a retry. The transient window this order opens
+// (reverse entry gone, forward entry briefly present) only weakens RX
+// split-horizon for a peer that is being torn down anyway.
+//
+// existed reports whether the forward entry was present: false with a nil
+// error is the already-free slot (the caller releases its ledger), and an
+// error is always accompanied by the occupancy the caller must keep -- a
+// cleanup failure on a slot that is in fact free must not make the caller
+// re-pin it, or the next peer allocated onto the slot collides with the
+// stale ledger.
+func (m *MapOperations) DeleteBdPeer(bdID, index uint16) (existed bool, err error) {
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+
+	forwardPresent := func() bool {
+		var e HeadendEntry
+		return m.objs.BdPeerMap.Lookup(&BdPeerKey{BdId: bdID, Index: index}, &e) == nil
 	}
 
-	// Find and delete the matching reverse entry. The reverse map is keyed by
-	// the remote PE source, not the index, so it is scanned for the one pointing
-	// at this index (a BD holds at most MAX_BUM_NEXTHOPS peers, so the scan is
-	// bounded). iter.Err() is checked so a truncated scan -- which could leave a
-	// stale reverse entry that misroutes the RX split-horizon -- surfaces instead
-	// of being silently swallowed.
+	// Drain every reverse entry pointing at this slot, remembering what was
+	// removed so a failed forward delete can put it back. iter.Err() is
+	// checked so a truncated scan -- which could leave a stale reverse
+	// entry that misattributes the RX split-horizon -- surfaces instead of
+	// being silently swallowed.
+	type drained struct {
+		key BdPeerReverseKey
+		val BdPeerReverseVal
+	}
+	var removed []drained
+	restoreReverse := func() {
+		for _, d := range removed {
+			k, v := d.key, d.val
+			_ = m.objs.BdPeerReverseMap.Put(&k, &v)
+		}
+	}
 	var rKey BdPeerReverseKey
 	var rVal BdPeerReverseVal
 	iter := m.objs.BdPeerReverseMap.Iterate()
 	for iter.Next(&rKey, &rVal) {
 		if rKey.BdId == bdID && rVal.Index == index {
 			k := rKey
-			_ = m.objs.BdPeerReverseMap.Delete(&k)
-			break
+			if derr := m.objs.BdPeerReverseMap.Delete(&k); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+				restoreReverse()
+				return forwardPresent(), fmt.Errorf("delete bd peer reverse entry for {bd %d, index %d}: %w", bdID, index, derr)
+			}
+			removed = append(removed, drained{key: rKey, val: rVal})
 		}
 	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("scan bd peer reverse map for {bd %d, index %d}: %w", bdID, index, err)
+	if serr := iter.Err(); serr != nil {
+		restoreReverse()
+		return forwardPresent(), fmt.Errorf("scan bd peer reverse map for {bd %d, index %d}: %w", bdID, index, serr)
 	}
-	_ = m.objs.BdPeerL2ExtMap.Delete(&BpfBdPeerL2ExtKey{BdId: bdID, Index: index})
-	return nil
+	if derr := m.objs.BdPeerL2ExtMap.Delete(&BpfBdPeerL2ExtKey{BdId: bdID, Index: index}); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+		restoreReverse()
+		return forwardPresent(), fmt.Errorf("delete bd peer L2 ESI ext for {bd %d, index %d}: %w", bdID, index, derr)
+	}
+	if derr := m.objs.BdPeerMap.Delete(&BdPeerKey{BdId: bdID, Index: index}); derr != nil {
+		if errors.Is(derr, ebpf.ErrKeyNotExist) {
+			// Already free. Any stale companions were still drained above,
+			// which is the only place that cleans them: the startup sweep
+			// enumerates via the forward map and cannot see them.
+			return false, nil
+		}
+		// The peer is still forwarding: put its RX split-horizon
+		// protection back rather than leaving the entry live without it
+		// until a retry succeeds.
+		restoreReverse()
+		return true, fmt.Errorf("failed to delete bd peer entry: %w", derr)
+	}
+	return true, nil
 }
 
 // GetBdPeer retrieves a BD peer entry
@@ -2703,6 +2788,12 @@ func (m *MapOperations) GetBdPeer(bdID, index uint16) (*HeadendEntry, error) {
 // and returns the first unused index. Returns MaxBumNexthops if all slots are occupied.
 // This avoids iterating the entire bd_peer_map (ListBdPeers) on every create request.
 func (m *MapOperations) FindFreeBdPeerIndex(bdID uint16) uint16 {
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	return m.findFreeBdPeerIndexLocked(bdID)
+}
+
+func (m *MapOperations) findFreeBdPeerIndexLocked(bdID uint16) uint16 {
 	var entry HeadendEntry
 	for i := uint16(0); i < MaxBumNexthops; i++ {
 		key := &BdPeerKey{BdId: bdID, Index: i}
@@ -2917,11 +3008,16 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 		if key.Index >= EsPeerIndexBase {
 			continue
 		}
-		if err := m.DeleteBdPeer(key.BdId, key.Index); err != nil {
+		existed, err := m.DeleteBdPeer(key.BdId, key.Index)
+		if err != nil {
 			return count, fmt.Errorf("flush bd_peer: delete bd=%d idx=%d: %w",
 				key.BdId, key.Index, err)
 		}
-		count++
+		if existed {
+			// A slot freed between the snapshot and the delete (a concurrent
+			// withdraw) is not a flush failure; it is just not ours to count.
+			count++
+		}
 	}
 	return count, nil
 }
