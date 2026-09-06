@@ -78,13 +78,18 @@ On same-name replacement, the host prunes existing state excluded by the new
 capabilities or scope. A guest cannot clear a kind after its capability is
 revoked. Within one daemon run this covers headend entries, local SIDs and
 advertisements; daemon restore can only discover prior headend entries.
+During authorization pruning, advertisements referencing a removed SID must be
+withdrawn before that SID is released. A failed withdrawal keeps the SID and
+fails the replacement so the operator can retry.
 
 For local SIDs, declare a name, locator and endpoint slot. Retry the declaration
 until the matching allocated SID event arrives: a successful commit does not
 guarantee notification delivery when the host queue is full. Advertise only after
 receiving that event. The SDK does not automatically order different
 kinds of declarations. The host derives VPN RD/RT from the declared VRF. Stable
-SID names survive guest replacement within one daemon run, not daemon restarts.
+SID names retain their addresses across guest replacement with the same locator
+within one daemon run. Changing the locator reallocates the SID; daemon restarts
+do not guarantee the name/address mapping.
 
 ## Maintaining a route view
 

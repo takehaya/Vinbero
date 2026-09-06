@@ -1043,6 +1043,29 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 			}
 		}
 		if len(keep) != len(held) {
+			// Withdraw references before releasing their SID. A failed withdraw
+			// must leave the dispatch entry and allocation available for retry.
+			if p.advertise != nil {
+				addresses := p.localSIDs.addressesFor(p.owner, keep)
+				routes := p.advertise.LiveRoutes(p.owner)
+				keepRoutes := make([]AdvertisedRoute, 0, len(routes))
+				for _, route := range routes {
+					sid, _ := netip.ParseAddr(route.SRv6SID)
+					if _, retained := addresses[sid]; route.SRv6SID == "" || retained {
+						keepRoutes = append(keepRoutes, route)
+					}
+				}
+				if len(keepRoutes) != len(routes) {
+					res, err := p.advertise.Apply(ctx, p.owner, keepRoutes, p.quotas.MaxAdvertisedRoutes)
+					removed += res.Pruned
+					if err != nil {
+						if firstErr == nil {
+							firstErr = err
+						}
+						return removed, firstErr
+					}
+				}
+			}
 			_, res, err := p.localSIDs.Apply(p.owner, keep, p.quotas.MaxLocalSIDs)
 			removed += res.Pruned
 			if err != nil && firstErr == nil {

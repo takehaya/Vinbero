@@ -355,6 +355,9 @@ type recorder struct {
 	// every time would let a plugin pass here and then, against the real
 	// daemon, advertise an address that had moved under it.
 	sidByName map[string]string
+	// sidDeclarations tracks the locator associated with each live address.
+	// Moving a name to another locator requires a new allocation, as on the host.
+	sidDeclarations map[string]*v1.PluginLocalSid
 	// notifiedSIDs is which allocations the running instance has been told
 	// about. The addresses outlive an instance; being told does not. The
 	// daemon resets this when it replaces an instance, so a harness that
@@ -477,6 +480,9 @@ func (r *recorder) ApplyCommit(generation uint64) error {
 		if r.sidByName == nil {
 			r.sidByName = map[string]string{}
 		}
+		if r.sidDeclarations == nil {
+			r.sidDeclarations = map[string]*v1.PluginLocalSid{}
+		}
 		// A declaration is the whole set, so a name it stopped naming has
 		// been given up and its address goes back -- exactly as the daemon
 		// releases a SID the owner no longer declares.
@@ -487,6 +493,8 @@ func (r *recorder) ApplyCommit(generation uint64) error {
 		for name := range r.sidByName {
 			if _, still := declared[name]; !still {
 				delete(r.sidByName, name)
+				delete(r.sidDeclarations, name)
+				delete(r.notifiedSIDs, name)
 			}
 		}
 		// Only what this instance has not been told produces an event, as
@@ -501,11 +509,13 @@ func (r *recorder) ApplyCommit(generation uint64) error {
 		for _, sid := range acc.GetLocalSids() {
 			name := sid.GetName()
 			addr, held := r.sidByName[name]
-			if !held {
+			if !held || r.sidDeclarations[name].GetLocator() != sid.GetLocator() {
 				r.nextSID++
 				addr = fmt.Sprintf("fd00:%d::%d", 0xbb, r.nextSID)
 				r.sidByName[name] = addr
+				delete(r.notifiedSIDs, name)
 			}
+			r.sidDeclarations[name] = proto.Clone(sid).(*v1.PluginLocalSid)
 			if _, told := r.notifiedSIDs[name]; told {
 				continue
 			}

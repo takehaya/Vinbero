@@ -12,6 +12,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
@@ -726,6 +727,73 @@ func TestAdvertiseRefusesWhenTheBindingHasNoRTForTheFamily(t *testing.T) {
 
 // PruneOutOfScope must reach the local-SID branch, and a surviving SID must
 // keep the exact address it already holds rather than being reallocated.
+func TestPruneKeepsSIDUntilItsAdvertisementIsWithdrawn(t *testing.T) {
+	for _, revokeCapability := range []bool{false, true} {
+		name := "narrow endpoint slots"
+		if revokeCapability {
+			name = "revoke local SID capability"
+		}
+		t.Run(name, func(t *testing.T) {
+			alloc, sids := &fakeAllocator{}, newFakeSIDOps()
+			set := NewLocalSIDSet(alloc, sids, nil, nil)
+			allocated, _, err := set.Apply(ownerA, []LocalSID{
+				{Name: "keep", Locator: "main", Slot: 33},
+				{Name: "drop", Locator: "main", Slot: 34},
+			}, unlimited)
+			if err != nil {
+				t.Fatal(err)
+			}
+			adv := &fakeAdvertiser{failWithdraw: "10.7.1.0/24"}
+			advertise := NewAdvertiseSet(adv, NewLeases())
+			var routes []AdvertisedRoute
+			for _, sid := range allocated {
+				prefix := "10.7.1.0/24"
+				if sid.Name == "keep" {
+					prefix = "10.7.2.0/24"
+				}
+				routes = append(routes, vpnRoute(prefix, sid.SID.String()))
+			}
+			if _, err := advertise.Apply(context.Background(), ownerA, routes, unlimited); err != nil {
+				t.Fatal(err)
+			}
+			caps, wantRemaining := testCaps(), 1
+			if revokeCapability {
+				caps, err = wasm.ParseCapabilities([]string{"advertise"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantRemaining = 0
+			}
+			ops, err := NewPluginOps(PluginOpsConfig{
+				Owner: ownerA, Headend: newFakeHeadendOps(), Capabilities: caps,
+				Guard:     NewGuard(narrowScope(t), testLocators(), testBindings()),
+				LocalSIDs: set, Advertise: advertise,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ops.PruneOutOfScope(context.Background()); err == nil {
+				t.Fatal("failed withdrawal was reported as successful pruning")
+			}
+			if sids.count() != 2 || alloc.releasedCount() != 0 {
+				t.Fatal("SID was removed before its advertisement could be withdrawn")
+			}
+			for _, route := range advertise.LiveRoutes(ownerA) {
+				if !set.OwnsSID(ownerA, netip.MustParseAddr(route.SRv6SID)) {
+					t.Fatal("live advertisement lost its SID")
+				}
+			}
+			adv.failWithdraw = ""
+			if _, err := ops.PruneOutOfScope(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if sids.count() != wantRemaining || advertise.LiveCount(ownerA) != wantRemaining {
+				t.Fatalf("recovery left SIDs=%d, advertisements=%d, want %d each", sids.count(), advertise.LiveCount(ownerA), wantRemaining)
+			}
+		})
+	}
+}
+
 func TestPruneRemovesLocalSIDsOutsideANarrowedScope(t *testing.T) {
 	alloc := &fakeAllocator{}
 	sids := newFakeSIDOps()

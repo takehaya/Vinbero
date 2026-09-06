@@ -172,6 +172,31 @@ func TestSDKPluginRetriesCleanupAfterSendingIsDisabled(t *testing.T) {
 	}
 }
 
+func TestSDKPluginReallocatesWhenLocatorChanges(t *testing.T) {
+	config := func(locator string) []byte {
+		return exampleConfig(0xFE01, locator, "10.7.0.0/24", "vpn-a", 33, "2001:db8::1")
+	}
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{Config: config("main")})
+	advertisedSID := func() string {
+		t.Helper()
+		decl, ok := h.LastDeclaration()
+		if !ok || len(decl.Routes) != 1 {
+			t.Fatalf("expected advertisement after allocation: %+v", decl)
+		}
+		return decl.Routes[0].Srv6Sid
+	}
+	first := advertisedSID()
+	h.Reconfigure(config("second"))
+	second := advertisedSID()
+	if second == "" || second == first {
+		t.Fatal("locator change retained the old SID")
+	}
+	h.Restart()
+	if got := advertisedSID(); got != second {
+		t.Fatalf("unchanged locator reallocated %s to %s", second, got)
+	}
+}
+
 func TestSDKSenderDoesNotRetryAnUnavailableHeadendKind(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
 		Capabilities: []string{"advertise", "local_sid"},

@@ -22,8 +22,9 @@ Sending: at startup it asks the daemon for a local SID from a configured
 locator, pointing at the eBPF slot its data-plane half occupies. The daemon
 allocates the address, installs the dispatch entry and tells the plugin
 which address it got -- the plugin names the SID, the daemon chooses the
-value. Recreating the plugin within the same daemon run preserves that
-name/address mapping; daemon restarts do not guarantee it. It then advertises
+value. Recreating the plugin with the same locator within the same daemon run
+preserves that name/address mapping. Changing the locator reallocates the SID;
+daemon restarts do not guarantee the mapping. It then advertises
 the configured prefix behind
 that SID, naming its own behavior codepoint in the SID TLV.
 

@@ -477,6 +477,20 @@ func (l *LocalSIDSet) LiveSIDs(owner bpf.OwnerTag) []LocalSID {
 	return out
 }
 
+// addressesFor resolves a retained subset of the owner's live declarations.
+// Callers serialize this snapshot with Apply before using it to remove SIDs.
+func (l *LocalSIDSet) addressesFor(owner bpf.OwnerTag, desired []LocalSID) map[netip.Addr]struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	addresses := make(map[netip.Addr]struct{}, len(desired))
+	for _, want := range desired {
+		if got, ok := l.live[owner][want.Name]; ok {
+			addresses[got.SID] = struct{}{}
+		}
+	}
+	return addresses
+}
+
 func (l *LocalSIDSet) LiveCount(owner bpf.OwnerTag) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

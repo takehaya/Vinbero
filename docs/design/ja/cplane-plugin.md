@@ -464,7 +464,8 @@ scope の縮小は plugin の desired-set 宣言だけでは直りません。�
 
 capability を削除した場合も、scope が変わらなくても host がその種類の状態を
 撤去します。権限を失った plugin は空集合の宣言もできないためです。
-local SID の撤去後は、その SID を参照していた広告も撤去します。
+local SID を撤去する前に、その SID を参照する広告を withdraw します。
+withdraw が失敗した場合は SID と割り当てを維持し、撤去の再試行に備えます。
 撤去が失敗した場合は再登録を成功扱いにせず、エラーを返します。
 
 この prune の視界は同一 run 内の再登録と restore で違います。headend は
