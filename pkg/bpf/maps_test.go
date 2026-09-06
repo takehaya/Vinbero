@@ -444,6 +444,9 @@ func TestDeleteMissingSIDPreservesCoveringGrant(t *testing.T) {
 	if err := h.mapOps.sidFunctionOwners.Put(key, OwnerRPC); err != nil {
 		t.Fatal(err)
 	}
+	if entry, exists, err := h.mapOps.GetSidFunctionExact("fd00:1::1/128"); err != nil || exists || entry != nil {
+		t.Fatalf("exact lookup returned covering SID: %v %v %v", entry, exists, err)
+	}
 	if err := h.mapOps.DeleteSidFunction("fd00:1::1/128", OwnerRPC); err != nil {
 		t.Fatal(err)
 	}

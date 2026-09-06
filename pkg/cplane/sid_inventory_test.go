@@ -32,11 +32,45 @@ func inventoryAllocator(t *testing.T) *locator.Manager {
 
 func persistentSet(t *testing.T, store *Store, alloc *locator.Manager, sids SIDFunctionOps, grants EndtVRFGrantOps, resolve func(string) (uint32, error)) *LocalSIDSet {
 	t.Helper()
+	switch f := sids.(type) {
+	case *fakeSIDOps:
+		f.grants = grants
+	case *interruptedSIDInstall:
+		f.grants = grants
+	}
 	s := NewLocalSIDSet(alloc, sids, grants, resolve)
 	if err := s.enablePersistence(store); err != nil {
 		t.Fatal(err)
 	}
 	return s
+}
+
+type countingSIDOps struct {
+	*fakeSIDOps
+	lists int
+}
+
+func (f *countingSIDOps) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {
+	f.lists++
+	return f.fakeSIDOps.ListSidFunctions()
+}
+
+func TestSIDInventoryAvoidsRedundantMapWalks(t *testing.T) {
+	ops := &countingSIDOps{fakeSIDOps: newFakeSIDOps()}
+	set := persistentSet(t, newTestStore(t), inventoryAllocator(t), ops, nil, nil)
+	var desired []LocalSID
+	for _, name := range []string{"a", "b", "c", "d"} {
+		desired = append(desired, LocalSID{Name: name, Locator: "main", Slot: 33})
+	}
+	if _, _, err := set.Apply(ownerA, desired, unlimited); err != nil {
+		t.Fatal(err)
+	}
+	if err := set.ReleaseOwner(ownerA); err != nil {
+		t.Fatal(err)
+	}
+	if ops.lists != 1 {
+		t.Fatalf("walked map %d times; only initial legacy sweep requires a full snapshot", ops.lists)
+	}
 }
 
 func reopenInventory(t *testing.T, store *Store) *Store {
@@ -403,6 +437,12 @@ func TestLocalSIDInventoryUnregistersWithoutGuestOrManifest(t *testing.T) {
 			}
 			if err := m.Restore(context.Background()); err != nil {
 				t.Fatal(err)
+			}
+			if err := m.checkGrantsExclusive("other", Scope{EndpointSlots: []uint32{33}}); !errors.Is(err, ErrGrantHeld) {
+				t.Fatalf("unrestored inventory lost slot reservation: %v", err)
+			}
+			if err := m.checkGrantsExclusive("other", Scope{Locators: []string{"main"}}); !errors.Is(err, ErrGrantHeld) {
+				t.Fatalf("unrestored inventory lost locator reservation: %v", err)
 			}
 			if err := m.Forget("a"); err == nil {
 				t.Fatal("forget released inventory without cleanup")

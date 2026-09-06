@@ -31,6 +31,8 @@ type SIDAllocator interface {
 // *bpf.MapOperations satisfies it.
 type SIDFunctionOps interface {
 	CreateSidFunction(triggerPrefix string, entry *bpf.SidFunctionEntry, aux *bpf.SidAuxEntry, owner bpf.OwnerTag) error
+	// Delete must check ownership and withdraw the exact entry's VRF grant
+	// before freeing its aux index, including on retries after partial deletion.
 	DeleteSidFunction(triggerPrefix string, requester bpf.OwnerTag) error
 	ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error)
 	GetSidFunctionOwner(triggerPrefix string) (bpf.OwnerTag, bool, error)

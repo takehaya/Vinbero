@@ -16,6 +16,9 @@ func TestSIDReservationsPrecedeLocatorRegistration(t *testing.T) {
 	if _, ok := m.Get(loc.Name); ok {
 		t.Fatal("reservation created a locator")
 	}
+	if err := m.Delete(loc.Name, false); !errors.Is(err, ErrLocatorNotFound) {
+		t.Fatalf("pending locator delete: %v", err)
+	}
 	if _, _, err := m.AllocateReservedSID(r.Key, loc.Name); !errors.Is(err, ErrLocatorNotFound) {
 		t.Fatalf("pending reservation: %v", err)
 	}

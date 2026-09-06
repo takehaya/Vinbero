@@ -66,6 +66,7 @@ type fakeSIDOps struct {
 	installs  int
 	auxNext   uint16 // next aux index to stamp when an entry carries aux
 	ops       []string
+	grants    EndtVRFGrantOps // optional map-layer grant cleanup, as in MapOperations
 }
 
 func newFakeSIDOps() *fakeSIDOps {
@@ -109,6 +110,11 @@ func (f *fakeSIDOps) DeleteSidFunction(prefix string, requester bpf.OwnerTag) er
 	if cur, ok := f.owners[prefix]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}
+	if e := f.entries[prefix]; e != nil && e.AuxIndex != 0 && f.grants != nil {
+		if err := f.grants.DeleteEndtVRFGrant(uint32(e.AuxIndex)); err != nil {
+			return err
+		}
+	}
 	delete(f.entries, prefix)
 	delete(f.owners, prefix)
 	f.ops = append(f.ops, "delete "+prefix)
@@ -130,6 +136,17 @@ func (f *fakeSIDOps) GetSidFunctionOwner(prefix string) (bpf.OwnerTag, bool, err
 	defer f.mu.Unlock()
 	o, ok := f.owners[prefix]
 	return o, ok, nil
+}
+
+func (f *fakeSIDOps) GetSidFunctionExact(prefix string) (*bpf.SidFunctionEntry, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.entries[prefix]
+	if !ok {
+		return nil, false, nil
+	}
+	copyEntry := *e
+	return &copyEntry, true, nil
 }
 
 // installCount and log record what was actually written, so a test can

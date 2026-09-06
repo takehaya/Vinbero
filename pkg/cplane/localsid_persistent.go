@@ -162,17 +162,37 @@ func (l *LocalSIDSet) applyPersistent(owner bpf.OwnerTag, byName map[string]Loca
 	return out, res, nil
 }
 
-func (l *LocalSIDSet) checkSIDAvailable(prefix string) error {
+// The daemon supplies an exact lookup; embedders implementing only the
+// original SIDFunctionOps surface retain the full-snapshot fallback.
+type exactSIDFunctionOps interface {
+	GetSidFunctionExact(string) (*bpf.SidFunctionEntry, bool, error)
+}
+
+func (l *LocalSIDSet) exactSIDEntry(prefix string) (*bpf.SidFunctionEntry, bool, error) {
+	if exact, ok := l.sids.(exactSIDFunctionOps); ok {
+		return exact.GetSidFunctionExact(prefix)
+	}
 	entries, err := l.sids.ListSidFunctions()
 	if err != nil {
-		return err
+		return nil, false, err
 	}
-	_, exists := entries[prefix]
+	entry, exists := entries[prefix]
+	return entry, exists, nil
+}
+
+func (l *LocalSIDSet) checkSIDAvailable(prefix string) error {
 	_, owned, err := l.sids.GetSidFunctionOwner(prefix)
 	if err != nil {
 		return err
 	}
-	if exists || owned {
+	if owned {
+		return fmt.Errorf("local sid %s is already owned: %w", prefix, bpf.ErrEntryOwnerMismatch)
+	}
+	_, exists, err := l.exactSIDEntry(prefix)
+	if err != nil {
+		return err
+	}
+	if exists {
 		return fmt.Errorf("local sid %s is already present: %w", prefix, bpf.ErrEntryOwnerMismatch)
 	}
 	return nil
@@ -183,11 +203,6 @@ func (l *LocalSIDSet) removePersistentEntry(owner bpf.OwnerTag, got AllocatedSID
 		return fmt.Errorf("local sid %q: SID maps unavailable for cleanup", got.Name)
 	}
 	prefix := got.SID.String() + "/128"
-	entries, err := l.sids.ListSidFunctions()
-	if err != nil {
-		return err
-	}
-	entry, exists := entries[prefix]
 	actual, owned, err := l.sids.GetSidFunctionOwner(prefix)
 	if err != nil {
 		return err
@@ -195,10 +210,15 @@ func (l *LocalSIDSet) removePersistentEntry(owner bpf.OwnerTag, got AllocatedSID
 	if owned && actual != owner {
 		return fmt.Errorf("local sid %q at %s: %w", got.Name, prefix, bpf.ErrEntryOwnerMismatch)
 	}
-	if exists && !owned {
-		// Older pinned maps may have no owner metadata. Only a recovered
-		// inventory record may identify such an entry, and its dispatch
-		// must agree with the last persisted declaration.
+	if !owned {
+		entry, exists, err := l.exactSIDEntry(prefix)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+		// Only a durable install attempt can identify ownerless state.
 		if entry == nil || !got.recoverOwnerless {
 			return fmt.Errorf("local sid %q: %w", got.Name, bpf.ErrEntryOwnerMismatch)
 		}
@@ -208,16 +228,9 @@ func (l *LocalSIDSet) removePersistentEntry(owner bpf.OwnerTag, got AllocatedSID
 			return fmt.Errorf("local sid %q: unowned dispatch differs from inventory", got.Name)
 		}
 	}
-	if !owned && !exists {
-		return nil
-	}
-	// Never use a persisted aux index. A live exact entry's index belongs to
-	// this owner; an absent /128 must not touch a covering entry's grant.
-	if exists && entry != nil && entry.AuxIndex != 0 && l.grants != nil {
-		if err := l.grants.DeleteEndtVRFGrant(uint32(entry.AuxIndex)); err != nil {
-			return err
-		}
-	}
+	// The map layer checks ownership again, resolves the exact entry and
+	// removes its grant before freeing aux. Do not walk the map again here
+	// or attempt grant cleanup with a separately observed, possibly stale index.
 	if err := l.sids.DeleteSidFunction(prefix, owner); err != nil {
 		return fmt.Errorf("local sid %q: remove %s: %w", got.Name, prefix, err)
 	}

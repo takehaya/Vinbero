@@ -1173,25 +1173,46 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 // can leave only the owner behind. A hit therefore needs an exact-key scan,
 // both when deleting and when finding the aux superseded by an upsert.
 func (m *MapOperations) exactSidFunctionAuxIndex(key *LpmKeyV6) (uint16, error) {
+	entry, _, err := m.exactSidFunctionEntry(key)
+	return entry.AuxIndex, err
+}
+
+// GetSidFunctionExact distinguishes an exact SID from a covering LPM entry.
+// A lookup miss avoids a map walk; a hit is verified against the stored key.
+func (m *MapOperations) GetSidFunctionExact(triggerPrefix string) (*SidFunctionEntry, bool, error) {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return nil, false, err
+	}
+	m.sidLifecycle.Lock()
+	defer m.sidLifecycle.Unlock()
+	entry, exists, err := m.exactSidFunctionEntry(key)
+	if err != nil || !exists {
+		return nil, false, err
+	}
+	return &entry, true, nil
+}
+
+func (m *MapOperations) exactSidFunctionEntry(key *LpmKeyV6) (SidFunctionEntry, bool, error) {
 	var covering SidFunctionEntry
 	if err := m.objs.SidFunctionMap.Lookup(key, &covering); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return 0, nil
+			return SidFunctionEntry{}, false, nil
 		}
-		return 0, fmt.Errorf("lookup SID function entry: %w", err)
+		return SidFunctionEntry{}, false, fmt.Errorf("lookup SID function entry: %w", err)
 	}
 	var k LpmKeyV6
 	var e SidFunctionEntry
 	iter := m.objs.SidFunctionMap.Iterate()
 	for iter.Next(&k, &e) {
 		if k == *key {
-			return e.AuxIndex, nil
+			return e, true, nil
 		}
 	}
 	if err := iter.Err(); err != nil {
-		return 0, fmt.Errorf("scan SID function map: %w", err)
+		return SidFunctionEntry{}, false, fmt.Errorf("scan SID function map: %w", err)
 	}
-	return 0, nil
+	return SidFunctionEntry{}, false, nil
 }
 
 // releaseSupersededBuiltinAux frees the aux index an upsert left behind.

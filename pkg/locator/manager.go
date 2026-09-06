@@ -102,11 +102,6 @@ func (m *Manager) Add(loc *Locator) error {
 func (m *Manager) Delete(name string, force bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, r := range m.reservations {
-		if r.Locator.Name == name && !force {
-			return fmt.Errorf("%w: %q holds SID reservation %q; release its owner first", ErrLocatorInUse, name, r.Key)
-		}
-	}
 	if _, ok := m.entries[name]; !ok {
 		return fmt.Errorf("%w: %q", ErrLocatorNotFound, name)
 	}
