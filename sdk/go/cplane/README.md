@@ -74,6 +74,11 @@ and retries failures. Retain desired state after a returned error and retry as
 appropriate. ABI 1 exposes no separate acceptance/application generations or
 cross-kind dependency status.
 
+On same-name replacement, the host prunes existing state excluded by the new
+capabilities or scope. A guest cannot clear a kind after its capability is
+revoked. Within one daemon run this covers headend entries, local SIDs and
+advertisements; daemon restore can only discover prior headend entries.
+
 For local SIDs, declare a name, locator and endpoint slot. Advertise only after
 receiving the allocated SID event. The SDK does not automatically order different
 kinds of declarations. The host derives VPN RD/RT from the declared VRF. Stable

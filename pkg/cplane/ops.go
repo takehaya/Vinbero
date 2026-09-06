@@ -984,12 +984,13 @@ func (p *PluginOps) DiscardTransactions() {
 	p.open = make(map[uint64]*applyTxn)
 }
 
-// PruneOutOfScope removes the state this owner holds that its scope no
-// longer covers, and reports how much it removed.
+// PruneOutOfScope removes state this owner's capabilities or scope no longer
+// cover, and reports how much it removed. Revoking a capability must retract its
+// state here: the replacement guest cannot declare even an empty set of that kind.
 //
-// Narrowing a scope is the one case the desired-set model cannot repair on
-// its own. The apply path refuses a declaration naming anything outside
-// the scope, and refuses it whole -- so a plugin that goes on declaring
+// Narrowing a scope also needs host intervention. The apply path refuses a
+// declaration naming anything outside the scope, and refuses it whole -- so
+// a plugin that goes on declaring
 // what it declared before the change never reconciles, and what it wrote
 // under the wider scope stays installed. Withdrawing that here is what
 // makes the narrowing mean something immediately, rather than at the mercy
@@ -1019,7 +1020,7 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 			if e.Entry == nil {
 				continue
 			}
-			if p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode) == nil {
+			if p.caps.Has(wasm.CapHeadend) && p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode) == nil {
 				keep = append(keep, e)
 			}
 		}
@@ -1037,7 +1038,7 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 		held := p.localSIDs.LiveSIDs(p.owner)
 		keep := make([]LocalSID, 0, len(held))
 		for _, s := range held {
-			if p.guard.checkLocalSID(s) == nil {
+			if p.caps.Has(wasm.CapLocalSID) && p.guard.checkLocalSID(s) == nil {
 				keep = append(keep, s)
 			}
 		}
@@ -1100,6 +1101,9 @@ func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) 
 	}
 	keep := make([]AdvertisedRoute, 0, len(held))
 	for _, r := range held {
+		if !p.caps.Has(wasm.CapAdvertise) {
+			continue
+		}
 		// A route stays only if the VRF it names is still in scope and
 		// still has a binding, which is the same question the apply path
 		// asks. What comes back carries the binding's current RD and route

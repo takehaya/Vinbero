@@ -578,8 +578,8 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 
 	// The state under this owner is inherited whether it came from the
 	// instance just torn down or from before a daemon restart, and a
-	// registration whose scope does not cover all of it must not keep the
-	// rest. The plugin cannot do this itself: its own declaration of that
+	// registration must remove what its capabilities or scope no longer cover.
+	// The plugin cannot do this itself: its own declaration of that
 	// state is now refused, and refused whole, so it would simply stop
 	// reconciling with the old entries still installed.
 	//
@@ -589,7 +589,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
 		return m.failPrune(ctx, reg, p, removed, err)
 	} else if removed > 0 {
-		m.logger.Info("removed the state a plugin held outside its new scope",
+		m.logger.Info("removed the state outside a plugin's new capabilities or scope",
 			zap.String("plugin", reg.Name), zap.Int("removed", removed))
 	}
 

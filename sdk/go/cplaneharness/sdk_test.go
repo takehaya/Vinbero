@@ -171,3 +171,32 @@ func TestSDKPluginRetriesCleanupAfterSendingIsDisabled(t *testing.T) {
 		t.Fatal("successful cleanup stayed pending")
 	}
 }
+
+func TestSDKSenderDoesNotRetryAnUnavailableHeadendKind(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Capabilities: []string{"advertise", "local_sid"},
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "vpn-a", 33, "2001:db8::1"),
+	})
+	if _, err := h.Deliver(replayMarker(v1.PluginEventKind_PLUGIN_EVENT_KIND_END_OF_REPLAY, "bgp")); err != nil {
+		t.Fatal(err)
+	}
+	before := len(h.Logs())
+	for i := 1; i <= 3; i++ {
+		if err := h.Tick(time.Duration(i) * time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(h.Logs()); got != before {
+		t.Fatalf("unavailable headend retried on ticks: %v", h.Logs()[before:])
+	}
+	if _, err := h.Route(advertise("10.0.0.0/24", "fc00::1")); err != nil {
+		t.Fatal(err)
+	}
+	before = len(h.Logs())
+	if err := h.Tick(4 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Logs()) != before {
+		t.Fatal("a new route re-enabled the unavailable headend kind")
+	}
+}

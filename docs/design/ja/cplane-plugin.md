@@ -452,15 +452,20 @@ apply 時に失敗させれば、既存の retry 機構がそのまま修復に�
 範囲外の要素が 1 つでもあれば集合ごと拒否します。宣言は集合についての表明
 なので、残りを適用すると plugin が求めていない状態を入れることになります。
 
-### scope を狭めたとき
+### capability の削除と scope の縮小
 
-狭める操作だけは desired-set の模型では直りません。plugin が同じ宣言を
+scope の縮小は plugin の desired-set 宣言だけでは直りません。同じ宣言を
 続けると集合ごと拒否されるので reconcile が走らず、広い scope の下で書いた
 状態が残ります。そこで登録の時点で host が範囲外の状態を prune します。再登録に
 限らず restore でも走らせます。daemon 再起動をまたいだ状態は pinned map に残って
 おり、狭い scope で restore した plugin はそれを 1 つも触れないためです。
 実装は「まだ許される部分集合を desired set として apply する」形で、残りは
 既存の reconcile が落とします。
+
+capability を削除した場合も、scope が変わらなくても host がその種類の状態を
+撤去します。権限を失った plugin は空集合の宣言もできないためです。
+local SID の撤去後は、その SID を参照していた広告も撤去します。
+撤去が失敗した場合は再登録を成功扱いにせず、エラーを返します。
 
 この prune の視界は同一 run 内の再登録と restore で違います。headend は
 どちらの場合も BPF map を owner ごとに列挙して見えます。local SID と広告は
@@ -967,7 +972,7 @@ vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
     --behavior 0xFE01 --family vpnv4 \
     --capability headend --capability advertise --capability local_sid \
     --locator main --vrf vpn-a \
-    --headend-prefix 10.7.0.0/16 --endpoint-slot 33
+    --headend-prefix 10.7.0.0/16 --endpoint-slot 33 --tick-ms 1000
 vbctl plugin cplane list
 vbctl plugin cplane stats
 vbctl plugin cplane unregister --name custom-behavior

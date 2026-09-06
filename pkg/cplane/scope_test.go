@@ -301,9 +301,8 @@ func TestAnOutOfScopeDeclarationRefusesTheWholeSet(t *testing.T) {
 	}
 }
 
-// Narrowing a scope is the one case the desired-set model cannot repair on
-// its own: the plugin's own declaration of the state it wrote is now
-// refused, and refused whole, so nothing would prune it.
+// Narrowing a scope needs host intervention: the plugin's own declaration of
+// the state it wrote is now refused whole, so nothing would prune it.
 func TestPruneRemovesWhatANarrowedScopeNoLongerCovers(t *testing.T) {
 	ops := newFakeHeadendOps()
 	leases := NewLeases()
@@ -323,10 +322,11 @@ func TestPruneRemovesWhatANarrowedScopeNoLongerCovers(t *testing.T) {
 
 	// Re-registered with a scope that covers only one of them.
 	pluginOps, err := NewPluginOps(PluginOpsConfig{
-		Owner:   owner,
-		Headend: ops,
-		Leases:  leases,
-		Guard:   NewGuard(narrowScope(t), testLocators(), testBindings()),
+		Owner:        owner,
+		Headend:      ops,
+		Leases:       leases,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), testBindings()),
 	})
 	if err != nil {
 		t.Fatalf("ops: %v", err)
@@ -493,10 +493,11 @@ func TestARegistrationIsRefusedWhenTheNarrowingCannotBeApplied(t *testing.T) {
 	ops.failDelete("10.9.0.0/24")
 
 	pluginOps, err := NewPluginOps(PluginOpsConfig{
-		Owner:   owner,
-		Headend: ops,
-		Leases:  leases,
-		Guard:   NewGuard(narrowScope(t), testLocators(), testBindings()),
+		Owner:        owner,
+		Headend:      ops,
+		Leases:       leases,
+		Capabilities: testCaps(),
+		Guard:        NewGuard(narrowScope(t), testLocators(), testBindings()),
 	})
 	if err != nil {
 		t.Fatalf("ops: %v", err)
@@ -753,7 +754,8 @@ func TestPruneRemovesLocalSIDsOutsideANarrowedScope(t *testing.T) {
 		Leases:    NewLeases(),
 		LocalSIDs: set,
 		// narrowScope: locator "main", endpoint slot 33 only.
-		Guard: NewGuard(narrowScope(t), testLocators(), testBindings()),
+		Guard:        NewGuard(narrowScope(t), testLocators(), testBindings()),
+		Capabilities: testCaps(),
 	})
 	if err != nil {
 		t.Fatalf("ops: %v", err)

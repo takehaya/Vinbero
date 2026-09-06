@@ -17,6 +17,7 @@ var config = configuration{behavior: 0xFE01}
 var routes = cplane.RouteView{Accept: acceptsRoute}
 var allocatedSID string
 var localSIDPending, advertisePending bool
+var headendUnavailable bool
 
 func init() {
 	guest.Register(guest.Handlers{
@@ -94,9 +95,14 @@ func reconcile() {
 			guest.Log(cplane.LogWarn, err.Error())
 		}
 	}
-	if routes.Pending() {
+	if routes.Pending() && !headendUnavailable {
 		if err := client.ApplyHeadendV4(headendEntries()); err != nil {
-			guest.Log(cplane.LogWarn, err.Error())
+			if errors.Is(err, cplane.ErrBeginRefused) {
+				headendUnavailable = true
+				guest.Log(cplane.LogInfo, "headend unavailable; running without headend writes")
+			} else {
+				guest.Log(cplane.LogWarn, err.Error())
+			}
 		} else {
 			routes.Applied()
 			guest.Log(cplane.LogInfo, "declared headend")

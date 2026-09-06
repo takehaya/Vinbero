@@ -8,6 +8,7 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
 // examplePlugin is the TinyGo plugin under sdk/examples. Unlike the
@@ -522,6 +523,68 @@ func TestExamplePluginDisablingSendingRetractsPreviousOwnerState(t *testing.T) {
 			}
 			if _, withdrawn := adv.counts(); withdrawn != 1 {
 				t.Fatalf("withdrawn=%d, want the previous advertisement retracted", withdrawn)
+			}
+		})
+	}
+}
+
+func TestExamplePluginCapabilityReductionPrunesStateWithinUnchangedScope(t *testing.T) {
+	for _, tt := range []struct {
+		name                                      string
+		capabilities                              []string
+		wantHeadend, wantSIDs, wantAdvertisements int
+	}{
+		{"revoke headend", []string{"advertise", "local_sid"}, 0, 1, 1},
+		{"revoke advertise", []string{"headend", "local_sid"}, 1, 1, 0},
+		{"revoke local SID", []string{"headend", "advertise"}, 1, 0, 0},
+		{"revoke sender capabilities", []string{"headend"}, 1, 0, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			src, headend := newFakeSource(), newFakeHeadendOps()
+			sids, adv := newFakeSIDOps(), &fakeAdvertiser{}
+			m, err := NewManager(ManagerConfig{
+				Source: src, Claims: newFakeClaims(), Headend: headend,
+				Advertiser: adv, Locators: &fakeAllocator{}, SIDFunctions: sids,
+				EncapSource: testEncapSource, LocatorInfo: testLocators(), VRFBindings: testBindings(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close(context.Background())
+			reg := Registration{
+				Name: "custom-behavior", Module: examplePlugin(t),
+				Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
+				Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
+			}
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			route := customBehaviorRoute("10.0.0.0/24", "fd00:2::100")
+			src.setRib(route)
+			src.emit(reg.Name, route)
+			waitDelivered(t, m, reg.Name)
+			if headend.countV4() != 1 || sids.count() != 1 {
+				t.Fatal("setup did not install forwarding state")
+			}
+			// Keep both config and scope. The guest still wants these entries,
+			// but can no longer declare or clear a kind whose grant was removed.
+			reg.Capabilities, err = wasm.ParseCapabilities(tt.capabilities)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			waitDelivered(t, m, reg.Name)
+			owner := bpf.OwnerPluginBundle(reg.Name)
+			if got := headend.countV4(); got != tt.wantHeadend {
+				t.Fatalf("headend=%d, want %d", got, tt.wantHeadend)
+			}
+			if got := sids.count(); got != tt.wantSIDs {
+				t.Fatalf("SID count=%d, want %d", got, tt.wantSIDs)
+			}
+			if got := len(m.advertise.LiveRoutes(owner)); got != tt.wantAdvertisements {
+				t.Fatalf("live advertisements=%d, want %d", got, tt.wantAdvertisements)
 			}
 		})
 	}
