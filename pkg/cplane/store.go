@@ -33,7 +33,8 @@ import (
 // is that the logic lives here. An operator who prefers the other model
 // can disable the store and re-register on boot.
 type Store struct {
-	dir string
+	dir  string
+	sids *sidInventoryStore
 }
 
 // storeManifestVersion is stamped into every manifest so a future format
@@ -104,7 +105,26 @@ func NewStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("cplane store: %w", err)
 	}
-	return &Store{dir: dir}, nil
+	// MkdirAll can create several parent links. Flush those too, including
+	// links visible after a previously interrupted initialization, before a
+	// successful open lets callers install state backed by this directory.
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	for parent := filepath.Dir(absolute); ; parent = filepath.Dir(parent) {
+		if err := syncDir(parent); err != nil {
+			return nil, fmt.Errorf("cplane store: sync parent %q: %w", parent, err)
+		}
+		if filepath.Dir(parent) == parent {
+			break
+		}
+	}
+	sids, err := openSIDInventory(dir)
+	if err != nil {
+		return nil, fmt.Errorf("cplane store: %w", err)
+	}
+	return &Store{dir: dir, sids: sids}, nil
 }
 
 // Dir is where the store keeps its files.
