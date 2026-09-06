@@ -233,7 +233,18 @@ func (h *Harness) Tick(elapsed time.Duration) error {
 	h.mu.Lock()
 	inst := h.inst
 	h.mu.Unlock()
-	return inst.Tick(context.Background(), int64(elapsed))
+	if err := inst.Tick(context.Background(), int64(elapsed)); err != nil {
+		return err
+	}
+	return h.flushAllocated()
+}
+
+// SetDenyCommits changes the simulated refusal without replacing the instance,
+// so a test can verify recovery when a transient conflict disappears.
+func (h *Harness) SetDenyCommits(deny bool) {
+	h.ops.mu.Lock()
+	defer h.ops.mu.Unlock()
+	h.ops.denyCommits = deny
 }
 
 // Restart replaces the instance with a fresh one, as the daemon does after

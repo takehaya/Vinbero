@@ -985,9 +985,16 @@ behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint �
 
 ## plugin を書く
 
-例は `sdk/examples/cplane-custom-behavior` にあります。TinyGo で書いて
-います。生成された Go binding は reflection を要求し、TinyGo の WebAssembly
-target はそれを持たないので、protobuf codec は手書きです。
+TinyGo 向けの [cplane SDK](../../../sdk/go/cplane/README.md) は、WASM の入口と
+protobuf の受け渡し、型付きの headend / advertise / local SID 宣言を提供します。
+`RouteView` は BGP の prefix 経路を family / RD / masked prefix / peer / Path ID
+で保持し、replay 中は batch と tick を跨いで宣言を保留します。空の replay の
+完了も反映対象になり、適用に成功するまで未反映状態を保持します。経路の採用条件と
+SID 列の組み立ては plugin が決めます。EVPN / MUP の経路保持は対象外です。
+
+例は `sdk/examples/cplane-custom-behavior` にあります。SDK の `RouteView` から
+headend を組み立て、適用失敗後は tick で再試行します。SDK の codec は reflection を
+使わず、daemon が使う生成済み protobuf 型との互換性をテストします。
 
 daemon 無しで試すための harness が `sdk/go/cplaneharness` にあります。
 daemon と同じ runtime を回し、capability 面だけ記録用に差し替えます。

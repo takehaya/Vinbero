@@ -169,7 +169,7 @@ jobs:
           fi
 
       - name: Run the plugin runtime and harness tests against the rebuilt artifacts
-        run: go test ./pkg/cplane/... ./sdk/go/cplaneharness/
+        run: go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:
     name: Integration Test - ${{ matrix.example }}
