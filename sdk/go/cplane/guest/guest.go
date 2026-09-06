@@ -1,8 +1,9 @@
-//go:build tinygo && wasm_unknown
+//go:build (wasip1 && wasm) || (tinygo && wasm_unknown)
 
 package guest
 
 import (
+	"runtime"
 	"unsafe"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
@@ -120,16 +121,19 @@ func pointer(buf []byte) uint32 {
 func Log(level cplane.LogLevel, message string) {
 	data := []byte(message)
 	hostLog(int32(level), pointer(data), uint32(len(data)))
+	runtime.KeepAlive(data)
 }
 func NowMonotonic() int64 { return hostNow() }
 
 // Host is the WASM declaration transport for cplane.Client. Plugins that only
-// observe events need not reference Host; TinyGo removes its unused imports.
+// observe events need not reference Host; the linker removes its unused imports.
 type Host struct{}
 
 func (Host) Begin(kind cplane.Kind) uint64 { return hostBegin(uint32(kind)) }
 func (Host) Put(gen uint64, chunk []byte) cplane.Status {
-	return cplane.Status(hostPut(gen, pointer(chunk), uint32(len(chunk))))
+	status := cplane.Status(hostPut(gen, pointer(chunk), uint32(len(chunk))))
+	runtime.KeepAlive(chunk)
+	return status
 }
 func (Host) Commit(gen uint64) cplane.Status { return cplane.Status(hostCommit(gen)) }
 func (Host) Abort(gen uint64)                { hostAbort(gen) }

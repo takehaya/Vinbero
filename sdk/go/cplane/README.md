@@ -1,7 +1,7 @@
 # Go control-plane plugin SDK
 
 `github.com/takehaya/vinbero/sdk/go/cplane` supplies typed events and desired
-sets, and a view of BGP prefix routes. The `guest` subpackage supplies TinyGo
+sets, and a view of BGP prefix routes. The `guest` subpackage supplies Go
 WASM entry points and host calls. Both use the daemon's existing ABI version 1.
 
 The SDK is part of the Vinbero Go module. Use a module dependency pinned to a
@@ -47,12 +47,40 @@ all events were handled. `Tick func(int64)` receives monotonic nanoseconds;
 `--tick-ms 1000` (or set `TickInterval` through the API) to drive periodic retries;
 omitting the interval leaves `Tick` undriven.
 
-Build with TinyGo 0.39.0 and the repository's Go version:
+Build with standard Go (Go 1.24 or later supports WASI reactors; this repository
+pins Go 1.25.5):
 
 ```sh
-tinygo build -o plugin.wasm -target=wasm-unknown \
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+    -buildvcs=false -ldflags="-s -w" -o plugin.wasm .
+```
+
+The host links WASI preview 1 and calls `_initialize` before the ABI callbacks.
+The Go runtime, garbage collector, reflection and WASI-compatible standard
+library packages are available. WASI supplies real clocks and randomness, but
+no host environment, arguments, filesystem mounts or sockets. Stdin is EOF;
+stdout/stderr are discarded. Use `guest.Log` for diagnostics. `time.Now` uses
+real time; `guest.NowMonotonic` and `Tick` use the host's plugin clock, which a
+test harness can simulate. Timers and sleeps remain inside the call timeout.
+Guest work runs only while the host calls the module; use `Tick` for periodic
+work and finish any goroutines that access callback data before returning.
+
+`make cplane-example` builds the committed example with standard Go. The runtime
+limits remain 16 MiB of linear memory and 2 seconds per call by default. The
+harness tests 50,000 update/withdraw pairs within that memory limit; larger
+route views may require an explicit higher limit.
+
+TinyGo 0.39.0 remains an optional smaller build:
+
+```sh
+tinygo build -o plugin.tinygo.wasm -target=wasm-unknown \
     -scheduler=none -gc=conservative -panic=trap -no-debug .
 ```
+
+Use `make cplane-example-tinygo` for the example. `-gc=conservative` is required
+for reclaiming memory on this target; its default leaking collector is unsuitable
+for a long-running plugin. TinyGo's standard-library and scheduler limitations
+still apply. Both compilers use the same SDK callbacks and ABI 1.
 
 ## Declaring state
 

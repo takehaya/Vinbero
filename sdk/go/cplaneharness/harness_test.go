@@ -27,7 +27,7 @@ func TestHarnessTickUsesTheHostClockAcrossRestart(t *testing.T) {
 }
 
 // The harness is exercised against the example plugin, which is what a
-// plugin author's own test would look like. Building it needs TinyGo, so
+// plugin author's own test would look like. Building it needs standard Go, so
 // the tests skip when the artifact is absent rather than failing on a
 // missing toolchain.
 func exampleModule(t *testing.T) []byte {

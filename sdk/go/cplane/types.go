@@ -1,5 +1,5 @@
 // Package cplane provides typed events, desired-set declarations and a BGP
-// prefix-route view for control-plane plugins. It can run under TinyGo or in
+// prefix-route view for control-plane plugins. It can run under standard Go, TinyGo or in
 // native Go tests. Package guest supplies the WASM entry points and host calls.
 // Ownership, scope enforcement and map reconciliation belong to the daemon.
 package cplane

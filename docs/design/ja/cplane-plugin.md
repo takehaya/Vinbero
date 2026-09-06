@@ -746,7 +746,10 @@ identity と readiness を結ぶ機構は今後の課題です。
 
 module は allowlist で検証します。
 
-- import は `vinbero` module からのみ。WASI はこの規則で弾かれます。
+- import は `vinbero` と `wasi_snapshot_preview1` からのみ。関数名と signature を検証。
+- WASI は Go runtime 用に時計、乱数、期限内の sleep を提供します。host の環境変数、
+  引数、filesystem mount、socket は渡しません。stdin は EOF、stdout/stderr は破棄し、
+  plugin の診断には既存の rate limit がある `vinbero.log` を使います。
 - memory は guest が定義して export する 1 つだけ。imported memory は拒否。
 - 必須 export が signature まで一致すること。
 - ABI version が一致すること。
@@ -995,7 +998,7 @@ behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint �
 
 ## plugin を書く
 
-TinyGo 向けの [cplane SDK](../../../sdk/go/cplane/README.md) は、WASM の入口と
+Go 向けの [cplane SDK](../../../sdk/go/cplane/README.md) は、WASM の入口と
 protobuf の受け渡し、型付きの headend / advertise / local SID 宣言を提供します。
 `RouteView` は BGP の prefix 経路を family / RD / masked prefix / peer / Path ID
 で保持し、replay 中は batch と tick を跨いで宣言を保留します。空の replay の
@@ -1011,24 +1014,29 @@ daemon と同じ runtime を回し、capability 面だけ記録用に差し替�
 replay、restart、commit 拒否といった本番で耐える必要のある流れを method
 として提供します。
 
-TinyGo は次の flag で使えます。
+標準 Go の WASI reactor を既定にします。Go 1.24 以降が対応し、この repository は
+Go 1.25.5 を使います。example は `make cplane-example` で build できます。
 
 ```sh
-tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=conservative -panic=trap -no-debug .
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+    -buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 ```
 
-`-no-debug` は artifact を再現可能にします。付けないと TinyGo が絶対 path を
-DWARF に埋めるので、同じ source から作った .wasm が machine ごとに変わり、
-committed の artifact と source が一致しているかを CI で見られなくなります。
+wazero が `_initialize` で Go runtime と package を初期化してから SDK callback を
+呼びます。標準 Go の GC と WASI で利用可能な標準 library が使えます。`time.Now` は
+実時計、SDK の `NowMonotonic` と tick は host が渡す plugin 用の時計です。guest は
+host から呼ばれている間だけ動き、定期処理には tick を使います。callback の data を
+使う goroutine は callback 内で完了させます。sleep 中も call timeout を守ります。
 
-`gc=conservative` は必須です。WASI を link しない target の既定は
-`gc=leaking` で memory を一切回収しません。control plane plugin は daemon
-と同じ寿命で走り、ネットワークの経路変化を全部見るので、回収しない
-plugin は memory 上限に到達します。harness の churn test は live set を
-一定に保ったまま advertise と withdraw を繰り返すので、増える分は garbage
-だけです。この test を leaking build は途中で落ち、conservative build は
-1 MiB のまま完走します。
+既定の memory 上限は 16 MiB、call timeout は 2 秒です。harness はこの memory 上限で
+50,000 回の advertise / withdraw を実行し、GC による回収を確認します。保持する経路が
+増える plugin は必要な memory 上限を明示して登録します。
+
+小さい artifact が必要な場合は `make cplane-example-tinygo` で TinyGo 0.39.0 版の
+`plugin.tinygo.wasm` を作れます。既定の Go artifact は置き換えません。
+`wasm-unknown` target には `-gc=conservative` を指定し、回収しない既定の collector を
+避けます。詳細な flag と callback の契約は [SDK README](../../../sdk/go/cplane/README.md)
+に記載しています。両 compiler とも ABI 1 を使います。
 
 ## local SID と daemon 再起動
 

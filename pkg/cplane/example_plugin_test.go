@@ -15,11 +15,11 @@ import (
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
-// examplePlugin is the TinyGo plugin under sdk/examples. Unlike the
+// examplePlugin is the standard Go plugin under sdk/examples. Unlike the
 // hand-written .wat fixtures, it is a plugin as an operator would actually
 // write one -- a real language runtime, a real allocator, a real reactor
 // initializer -- which is what makes it worth testing against the host.
-// Building it needs TinyGo (make cplane-example), so the test skips when
+// Building it needs standard Go (make cplane-example), so the test skips when
 // the artifact is not there rather than failing on a missing toolchain.
 func examplePlugin(t *testing.T) []byte {
 	t.Helper()

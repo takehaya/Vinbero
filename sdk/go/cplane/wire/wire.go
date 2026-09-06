@@ -1,4 +1,4 @@
-// Package wire provides the protobuf wire operations used by TinyGo plugins.
+// Package wire provides the protobuf wire operations used by Go WASM plugins.
 // It needs no reflection. Varint, bytes, fixed32 and fixed64 fields are accepted;
 // deprecated protobuf groups are not supported. Decoder.Bytes borrows its input.
 package wire

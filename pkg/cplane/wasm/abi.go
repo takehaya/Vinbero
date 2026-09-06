@@ -48,9 +48,8 @@ package wasm
 // documented is a version nobody checks.
 const ABIVersion = 1
 
-// HostModule is the import module name every host function lives under. A
-// module importing from anywhere else is refused at registration, which is
-// also how WASI gets excluded -- its imports name wasi_snapshot_preview1.
+// HostModule is the import module name for Vinbero's capability functions.
+// WASI runtime services are linked separately as wasi_snapshot_preview1.
 const HostModule = "vinbero"
 
 // Guest export names the host calls.

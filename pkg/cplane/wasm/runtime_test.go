@@ -290,7 +290,9 @@ func TestAdmissionRejections(t *testing.T) {
 		fixture string
 		reason  string
 	}{
-		{fixture: "wasi", reason: "WASI imports"},
+		{fixture: "foreignmodule", reason: "foreign module import"},
+		{fixture: "unknownwasi", reason: "unknown WASI import"},
+		{fixture: "badwasisig", reason: "wrong WASI signature"},
 		{fixture: "nomemory", reason: "no exported memory"},
 		{fixture: "importmem", reason: "imported memory"},
 		{fixture: "badsig", reason: "wrong handle_events signature"},
@@ -493,4 +495,8 @@ func TestInitializerWithArgumentsIsRefused(t *testing.T) {
 	if !errors.Is(err, ErrAdmission) {
 		t.Fatalf("error = %v, want ErrAdmission", err)
 	}
+}
+
+func TestWASIImportsAdmitted(t *testing.T) {
+	mustInstantiate(t, "wasi", Config{})
 }

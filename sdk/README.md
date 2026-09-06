@@ -262,12 +262,13 @@ full.
 
 ### Writing one
 
-The [Go guest SDK](go/cplane/README.md) supplies TinyGo WASM entry points,
+The [Go guest SDK](go/cplane/README.md) supplies Go WASM entry points,
 typed events and desired-set declarations, and a prefix-route view that handles
 BGP replay boundaries. The plugin supplies route selection and the forwarding
 state it wants. Host ownership and scope checks still apply to every declaration.
 
-TinyGo is the supported toolchain today. The worked example is
+Standard Go WASI reactors are the default build; TinyGo remains an optional
+smaller artifact. The worked example is
 `sdk/examples/cplane-custom-behavior/`, which implements both directions
 of the custom-behavior case and is what the `cplane-plugin-2site` interop
 lab runs. Its README covers the build flags and why each is needed.

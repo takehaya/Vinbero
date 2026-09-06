@@ -1,5 +1,5 @@
-// Package guest connects a TinyGo WASM plugin to vinberod. Register callbacks
-// from a package initializer; the host invokes them through ABI version 1.
-// WASM functions are built only with TinyGo for the wasm target. Native tests
-// can exercise package cplane directly or run a compiled module in cplaneharness.
+// Package guest connects a Go WASM plugin to vinberod. Register callbacks
+// from init; the host initializes the reactor before invoking them.
+// WASM functions are built with standard Go for wasip1/wasm or optionally
+// TinyGo for wasm-unknown. Native tests use cplane.Host and cplaneharness.
 package guest

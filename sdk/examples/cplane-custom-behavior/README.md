@@ -63,31 +63,22 @@ make cplane-example        # from the repository root
 or directly:
 
 ```sh
-tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=conservative -panic=trap -no-debug .
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+    -buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 ```
 
-The flags are not incidental.
+The default is standard Go, pinned to Go 1.25.5 by this repository. The reactor
+build exports `_initialize` and the SDK callbacks; the daemon invokes them via
+wazero with WASI preview 1. `-trimpath`, `-buildvcs=false` and stripped debug
+information keep the committed artifact reproducible.
 
-`wasm-unknown` is the target without WASI, which the daemon does not link.
+The host grants clocks and randomness without host filesystem, environment or
+network access. Use `guest.Log` for diagnostics. The churn test runs 50,000
+update/withdraw pairs under the default 16 MiB memory limit with Go's collector.
 
-`scheduler=none` because the plugin has no goroutines and the daemon calls
-it one event batch at a time.
-
-`panic=trap` because a panic is a bug rather than a control-flow tool, and
-the daemon treats a trap as a failed instance to restart.
-
-`no-debug` because TinyGo otherwise embeds the absolute build path in
-DWARF, which makes the committed artifact differ on every machine; with it
-the build is reproducible. A trap carries no stack info: the daemon reports
-the trap either way and a plugin's own diagnostics go through `log`.
-
-`gc=conservative` because a control-plane plugin runs for the life of the
-daemon and sees every route change in the network. TinyGo's default for
-this target is `gc=leaking`, which never reclaims: built that way this
-example dies partway through the SDK's churn test, while the conservative
-build runs indefinitely in a megabyte. See
-`TestPluginSurvivesSustainedChurn` in `sdk/go/cplaneharness`.
+`make cplane-example-tinygo` optionally creates `plugin.tinygo.wasm` without
+replacing the default artifact. See the [SDK build instructions](../../go/cplane/README.md)
+for its flags and runtime limitations.
 
 ## Run
 

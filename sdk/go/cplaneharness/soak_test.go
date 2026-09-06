@@ -9,28 +9,13 @@ import (
 	"github.com/takehaya/vinbero/sdk/go/cplaneharness"
 )
 
-// soakRounds is how many advertise-and-withdraw pairs the soak drives.
-// Large enough that a plugin which never reclaims memory runs out well
-// before the end -- the leaking build of this same example dies around
-// round 2000 in the memory this test allows.
-const soakRounds = 5000
+// The live set stays bounded: each route is immediately withdrawn. Enough
+// churn to exhaust the 16 MiB budget if the guest never collects garbage.
+const soakRounds = 50000
+const soakMemoryPages = 256
 
-// soakMemoryPages is the linear memory the plugin gets: 1 MiB. Deliberately
-// tight, because the point is to find out whether memory is reclaimed, and
-// a generous limit would let a leak hide behind the round count.
-const soakMemoryPages = 16
-
-// A control-plane plugin runs for the life of the daemon and sees every
-// route change in the network, so the question that decides whether a
-// toolchain is usable at all is whether its memory comes back.
-//
-// The live set here is bounded on purpose: every prefix advertised is
-// withdrawn again, so what the plugin legitimately holds stays small and
-// anything the memory grows by is garbage. A plugin that never reclaims
-// fails; one that does runs indefinitely in a megabyte.
-//
-// This is the test that qualified TinyGo. Built with the default
-// -gc=leaking it fails partway through; with -gc=conservative it finishes.
+// The standard Go artifact must keep processing and declaring state under
+// the host's default memory limit after repeated allocation and collection.
 func TestPluginSurvivesSustainedChurn(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
 		Limits: wasm.Limits{MaxMemoryPages: soakMemoryPages},
