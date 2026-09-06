@@ -225,3 +225,39 @@ func TestSDKSenderDoesNotRetryAnUnavailableHeadendKind(t *testing.T) {
 		t.Fatal("a new route re-enabled the unavailable headend kind")
 	}
 }
+
+func TestSDKSenderDoesNotRetryUnavailableSenderKinds(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		caps []string
+	}{
+		{"local SID", []string{"headend", "advertise"}},
+		{"advertise", []string{"headend", "local_sid"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+				Capabilities: tt.caps,
+				Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "vpn-a", 33, "2001:db8::1"),
+			})
+			before := len(h.Logs())
+			for i := 1; i <= 3; i++ {
+				if err := h.Tick(time.Duration(i) * time.Second); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A replayed allocation must not re-enable an unavailable kind.
+			if _, err := h.Deliver(&v1.PluginEvent{
+				Kind:     v1.PluginEventKind_PLUGIN_EVENT_KIND_LOCAL_SID,
+				LocalSid: &v1.PluginLocalSidAllocated{Name: "self", Sid: "fd00:1::1"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Tick(4 * time.Second); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(h.Logs()); got != before {
+				t.Fatalf("unavailable %s retried: %v", tt.name, h.Logs()[before:])
+			}
+		})
+	}
+}

@@ -114,8 +114,10 @@ instance wrote stay, and the new module reconciles over them. Unregistering
 is the deliberate removal and takes the plugin's entries with it. Disabling
 allocation or advertising in the configuration declares empty sets for those
 kinds, retracting state retained from the previous instance. Failed cleanup
-commits retry on ticks. Optional kinds unavailable to a receive-only instance
-are skipped. Periodic retries require `--tick-ms`; it defaults to disabled.
+commits retry on ticks. A kind whose declaration cannot begin is skipped for
+this instance, including after capability revocation. Failed puts/commits and
+missing SID notifications remain retryable. Periodic retries require `--tick-ms`;
+it defaults to disabled.
 
 ## Configuration
 

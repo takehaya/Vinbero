@@ -17,7 +17,7 @@ var config = configuration{behavior: 0xFE01}
 var routes = cplane.RouteView{Accept: acceptsRoute}
 var allocatedSID string
 var localSIDPending, advertisePending bool
-var headendUnavailable bool
+var headendUnavailable, localSIDUnavailable, advertiseUnavailable bool
 
 func init() {
 	guest.Register(guest.Handlers{
@@ -47,10 +47,10 @@ func handleEvents(events []cplane.Event) []cplane.EventResult {
 		if ev.Kind == cplane.EventRoute && !ev.Route.Withdraw && acceptsRoute(ev.Route) {
 			guest.Log(cplane.LogInfo, "steering "+ev.Route.Prefix)
 		}
-		if config.allocates() && ev.Kind == cplane.EventLocalSID && ev.LocalSID.Name == localSIDName && ev.LocalSID.SID != "" {
+		if config.allocates() && !localSIDUnavailable && ev.Kind == cplane.EventLocalSID && ev.LocalSID.Name == localSIDName && ev.LocalSID.SID != "" {
 			allocatedSID = ev.LocalSID.SID
 			localSIDPending = false
-			advertisePending = config.advertises()
+			advertisePending = config.advertises() && !advertiseUnavailable
 		}
 	}
 	reconcile()
@@ -79,6 +79,9 @@ func reconcile() {
 		err := client.ApplyLocalSIDs(desired)
 		if len(desired) == 0 {
 			localSIDPending = !optionalCleanup(err)
+		} else if errors.Is(err, cplane.ErrBeginRefused) {
+			localSIDPending, localSIDUnavailable = false, true
+			guest.Log(cplane.LogInfo, "local SID unavailable; running without local SID writes")
 		} else if err != nil {
 			guest.Log(cplane.LogWarn, err.Error())
 		}
@@ -92,6 +95,9 @@ func reconcile() {
 		}})
 		if err == nil {
 			advertisePending = false
+		} else if errors.Is(err, cplane.ErrBeginRefused) {
+			advertisePending, advertiseUnavailable = false, true
+			guest.Log(cplane.LogInfo, "advertise unavailable; running without advertisements")
 		} else {
 			guest.Log(cplane.LogWarn, err.Error())
 		}
