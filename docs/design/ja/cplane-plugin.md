@@ -76,7 +76,8 @@ flowchart LR
         GOBGP[gobgp session]
         DEMUX[event demux<br>single Subscribe<br>local-origin filter + claim]
         APPLIER[built-in applier]
-        OPS[capability ops<br>desired-set apply + lease]
+        OPS[capability ops<br>scope + quota + lifecycle]
+        HEADEND[shared headend reconciler<br>owner ごとの排他 + lease]
         subgraph RT[wazero runtime]
             W1[plugin worker + instance]
         end
@@ -84,13 +85,32 @@ flowchart LR
         NL --> DEMUX
         DEMUX --> APPLIER
         DEMUX -->|queue| W1
-        APPLIER --> OPS
+        APPLIER -->|headend 増分更新| HEADEND
+        APPLIER -->|その他の転送状態| MAPS
         W1 -->|host function| OPS
-        OPS --> MAPS
+        OPS -->|headend desired set| HEADEND
+        HEADEND --> MAPS
+        OPS -->|local SID| MAPS
+        OPS -->|広告| GOBGP
     end
 
     CLI[vbctl plugin cplane register] --> RT
 ```
+
+headend は `pkg/headend.Reconciler` を daemon が一つ作り、built-in applier と
+cplane manager が共有します。capability / scope の検査は plugin host に残し、
+実際の prefix の正規化、owner 検査、lease と map の対応を共通層に置きます。
+plugin は全量宣言、built-in は単一キーの増分更新です。behavior claim に伴う
+経路配送と既存 built-in state の撤去は demux が担います。
+
+転送キーは address family と masked prefix です。RD / peer / ADD-PATH ID が
+異なっても、別 owner による同じ転送キーへの宣言は競合します。
+
+排他は owner ごとです。同じ owner の全量宣言と増分更新は直列化しますが、別 owner
+の full-map scan で同期 BGP callback を待たせません。異なる owner の競合は
+共通の lease table で拒否します。operator RPC はこの排他に参加せず、従来の
+BPF owner 検査を使います。lease が無い pinned / RPC entry の owner も prune 前に
+検査しますが、その後の外部書き込みとの競合は最終的な map 操作で検査します。
 
 ## 経路の配送
 

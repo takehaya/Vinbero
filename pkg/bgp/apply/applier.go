@@ -20,25 +20,23 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/fib"
+	"github.com/takehaya/vinbero/pkg/headend"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/prober"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
 
-// headendOps is the subset of bpf.MapOperations the applier needs.
-// Narrowing it to an interface keeps the applier unit-testable without
-// a live BPF collection.
-type headendOps interface {
-	CreateHeadendV4(triggerPrefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error
-	CreateHeadendV6(triggerPrefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error
-	DeleteHeadendV4(triggerPrefix string, requester bpf.OwnerTag) error
-	DeleteHeadendV6(triggerPrefix string, requester bpf.OwnerTag) error
-	// The rest support the upgrade off the pre-aggregation per-RD owner;
-	// see clearLegacyVPNHeadend.
-	GetHeadendV4Owner(triggerPrefix string) (bpf.OwnerTag, bool, error)
-	GetHeadendV6Owner(triggerPrefix string) (bpf.OwnerTag, bool, error)
-	ForceDeleteHeadendV4(triggerPrefix string) error
-	ForceDeleteHeadendV6(triggerPrefix string) error
+// headendOps is shared with plugin reconciliation. It deliberately has no
+// force-delete operation: legacy migration deletes under the observed owner.
+type headendOps = headend.Writer
+
+// Option configures an applier before it starts receiving routes.
+type Option func(*Applier)
+
+// WithHeadendWriter routes incremental headend updates through the same
+// reconciler as control-plane plugins. Other data-plane surfaces stay on dp.
+func WithHeadendWriter(writer headend.Writer) Option {
+	return func(a *Applier) { a.headend = writer }
 }
 
 // mupOps is the subset of bpf.MapOperations the BGP MUP uplink path needs:
@@ -126,7 +124,7 @@ type Applier struct {
 // supplies the SRv6 encapsulation source address (see plan §6-5).
 // vrfBindings supplies the route-target import filter; an empty manager
 // accepts every received route.
-func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger) *Applier {
+func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Manager, fibInjector fib.Injector, srcLocator string, localASN uint32, logger *zap.Logger, options ...Option) *Applier {
 	a := &Applier{
 		headend:     dp,
 		fdbBd:       dp,
@@ -147,6 +145,9 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 		mupDSD:      make(map[mupDSDKey]mupDSDEntry),
 		mupGateRefs: make(map[string]int),
 		logger:      logger.Named("bgp.apply"),
+	}
+	for _, option := range options {
+		option(a)
 	}
 	// A policy's installed transport changing invalidates the probe journeys
 	// registered for the groups steered onto it; the hook re-registers them.

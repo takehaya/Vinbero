@@ -13,6 +13,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
+	"github.com/takehaya/vinbero/pkg/headend"
 )
 
 // PluginOps is the capability surface behind one plugin's host functions.
@@ -23,7 +24,7 @@ import (
 // one plugin from writing as another.
 type PluginOps struct {
 	owner   bpf.OwnerTag
-	headend HeadendMapOps
+	headend *headend.Reconciler
 	caps    wasm.Capabilities
 	// guard bounds which keys this plugin may name, and derives the parts
 	// of an advertisement that are not the plugin's to spell. A nil guard
@@ -43,12 +44,10 @@ type PluginOps struct {
 	// applyMu is shared by every plugin under one manager, and is held for
 	// the whole of a reconcile.
 	//
-	// A reconcile is a read-then-write sequence: it lists the map to work
-	// out what this owner holds, diffs, and writes. Two plugins doing that
-	// at once would have one of them list a map the other is halfway
-	// through changing. Leases keep them off each other's keys, but not
-	// out of each other's view of the map, and commits are rare enough
-	// that serializing them costs nothing worth measuring.
+	// Keep the existing cross-kind plugin lifecycle ordering here. Headend
+	// itself serializes each owner in the shared reconciler, so built-in
+	// writes do not take this lock. Splitting guest calls from asynchronous
+	// host application is a later migration step.
 	applyMu *sync.Mutex
 
 	mu sync.Mutex
@@ -117,6 +116,9 @@ type PluginOpsConfig struct {
 	Owner bpf.OwnerTag
 	// Headend is the map surface the plugin's declarations reconcile into.
 	Headend HeadendMapOps
+	// HeadendReconciler shares headend writes with built-in appliers. When set,
+	// Headend must be nil and Leases must be nil or the reconciler's table.
+	HeadendReconciler *headend.Reconciler
 	// Leases arbitrates keys across owners.
 	Leases *Leases
 	// Capabilities are what this plugin was granted. The apply functions
@@ -169,8 +171,17 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 	if cfg.Owner == "" {
 		return nil, bpf.ErrEmptyOwner
 	}
-	if cfg.Headend == nil {
-		return nil, fmt.Errorf("plugin ops: nil headend map ops")
+	reconciler := cfg.HeadendReconciler
+	if reconciler != nil {
+		if cfg.Headend != nil || (cfg.Leases != nil && cfg.Leases != reconciler.Leases()) {
+			return nil, fmt.Errorf("plugin ops: conflicting headend configuration")
+		}
+	} else {
+		var err error
+		reconciler, err = headend.NewReconciler(cfg.Headend, cfg.Leases)
+		if err != nil {
+			return nil, fmt.Errorf("plugin ops: %w", err)
+		}
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -207,8 +218,8 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 		onLocalSIDs:  cfg.OnLocalSIDs,
 		notifiedSIDs: make(map[string]netip.Addr),
 		encapSource:  cfg.EncapSource,
-		headend:      cfg.Headend,
-		leases:       cfg.Leases,
+		headend:      reconciler,
+		leases:       reconciler.Leases(),
 		logger:       logger,
 		open:         make(map[uint64]*applyTxn),
 		maxOpen:      maxOpen,
@@ -628,7 +639,7 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
 		af = AFv6
 	}
-	res, err := ApplyHeadendSet(p.headend, p.leases, p.owner, af, txn.entries, p.quotas.MaxHeadendEntries)
+	res, err := p.headend.ApplySet(p.owner, af, txn.entries, p.quotas.MaxHeadendEntries)
 	if err != nil {
 		return fmt.Errorf("apply commit: %w", err)
 	}
@@ -996,7 +1007,7 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 		firstErr error
 	)
 	for _, af := range []AddressFamily{AFv4, AFv6} {
-		held, err := OwnedHeadendEntries(p.headend, p.owner, af)
+		held, err := p.headend.OwnedEntries(p.owner, af)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -1015,7 +1026,7 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 		if len(keep) == len(held) {
 			continue
 		}
-		res, err := ApplyHeadendSet(p.headend, p.leases, p.owner, af, keep, p.quotas.MaxHeadendEntries)
+		res, err := p.headend.ApplySet(p.owner, af, keep, p.quotas.MaxHeadendEntries)
 		removed += res.Pruned
 		if err != nil && firstErr == nil {
 			firstErr = err
@@ -1191,7 +1202,7 @@ func (p *PluginOps) Flush() error {
 		}
 	}
 	for _, af := range []AddressFamily{AFv4, AFv6} {
-		if _, err := PruneHeadendOwner(p.headend, p.leases, p.owner, af); err != nil && firstErr == nil {
+		if _, err := p.headend.PruneOwner(p.owner, af); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

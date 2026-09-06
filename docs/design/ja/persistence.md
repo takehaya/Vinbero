@@ -19,7 +19,12 @@
 
 ## 永続化層: `state.json`
 
-Vinbero が daemon 内部で持つ状態のうち **永続化されるのは Network Resource (Bridge / VRF) のみ** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
+`state.json` に永続化するのは **Network Resource (Bridge / VRF) のみ** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
+
+control-plane plugin の module と登録内容は別の [cplane store](cplane-plugin.md)
+に保存されます。local SID の名前と address の対応は daemon の memory にのみ保持され、
+daemon 再起動を跨ぐ SID の安定性は保証されません
+([local SID と daemon 再起動](cplane-plugin.md#local-sid-と-daemon-再起動))。
 
 `pkg/netresource/manager.go` の ResourceManager が:
 1. 起動時に `state.json` を読み込み、記録されていた Bridge / VRF デバイスを netlink で確認

@@ -16,6 +16,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
+	"github.com/takehaya/vinbero/pkg/headend"
 )
 
 // EventSource is the demux a plugin subscribes to. Only what the manager
@@ -129,7 +130,7 @@ type Manager struct {
 	source      EventSource
 	snapshots   SnapshotSource
 	claims      BehaviorClaims
-	headend     HeadendMapOps
+	headend     *headend.Reconciler
 	quotas      Quotas
 	store       *Store
 	leases      *Leases
@@ -219,6 +220,9 @@ type ManagerConfig struct {
 	Claims BehaviorClaims
 	// Headend is the map surface plugin declarations reconcile into.
 	Headend HeadendMapOps
+	// HeadendReconciler is the shared host writer. Supply it instead of Headend
+	// when built-in appliers use the same maps. The manager adopts its leases.
+	HeadendReconciler *headend.Reconciler
 	// Advertiser is the send side a plugin originates through. Nil leaves
 	// plugins unable to advertise, which is honest on a daemon with no
 	// BGP session.
@@ -273,14 +277,23 @@ type ManagerConfig struct {
 
 // NewManager builds an empty manager.
 func NewManager(cfg ManagerConfig) (*Manager, error) {
-	if cfg.Headend == nil {
-		return nil, fmt.Errorf("cplane manager: nil headend map ops")
+	reconciler := cfg.HeadendReconciler
+	if reconciler != nil {
+		if cfg.Headend != nil {
+			return nil, fmt.Errorf("cplane manager: conflicting headend configuration")
+		}
+	} else {
+		var err error
+		reconciler, err = headend.NewReconciler(cfg.Headend, nil)
+		if err != nil {
+			return nil, fmt.Errorf("cplane manager: %w", err)
+		}
 	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	leases := NewLeases()
+	leases := reconciler.Leases()
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	m := &Manager{
 		advertise:   newNamedAdvertiseSet(cfg, leases),
@@ -288,7 +301,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		source:      cfg.Source,
 		snapshots:   snapshots,
 		claims:      cfg.Claims,
-		headend:     cfg.Headend,
+		headend:     reconciler,
 		quotas:      cfg.Quotas.withDefaults(),
 		limits:      cfg.DefaultLimits,
 		store:       cfg.Store,
@@ -914,18 +927,18 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	}
 
 	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner:        bpf.OwnerPluginBundle(reg.Name),
-		Headend:      m.headend,
-		Leases:       m.leases,
-		EncapSource:  m.encapSource,
-		Logger:       m.logger.Named("plugin." + reg.Name),
-		ApplyMutex:   &m.applyMu,
-		Capabilities: reg.Capabilities,
-		Guard:        NewGuard(reg.Scope, m.locatorInfo, m.vrfBindings),
-		Quotas:       m.quotas,
-		Advertise:    m.advertise,
-		LocalSIDs:    m.localSIDs,
-		OnLocalSIDs:  onLocalSIDs,
+		Owner:             bpf.OwnerPluginBundle(reg.Name),
+		HeadendReconciler: m.headend,
+		Leases:            m.leases,
+		EncapSource:       m.encapSource,
+		Logger:            m.logger.Named("plugin." + reg.Name),
+		ApplyMutex:        &m.applyMu,
+		Capabilities:      reg.Capabilities,
+		Guard:             NewGuard(reg.Scope, m.locatorInfo, m.vrfBindings),
+		Quotas:            m.quotas,
+		Advertise:         m.advertise,
+		LocalSIDs:         m.localSIDs,
+		OnLocalSIDs:       onLocalSIDs,
 	})
 	if err != nil {
 		return nil, err

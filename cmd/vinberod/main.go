@@ -23,6 +23,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/fib"
+	"github.com/takehaya/vinbero/pkg/headend"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
 	"github.com/takehaya/vinbero/pkg/netresource"
@@ -144,6 +145,12 @@ func run(cliCtx *cli.Context) error {
 	// must share one table or collide on policy_id. nil when BGP is disabled
 	// -> SrPolicyService RPCs return FailedPrecondition.
 	var applier *apply.Applier
+	// Construct once, before any BGP delivery. Built-in incremental writes and
+	// plugin desired sets must share owner serialization and leases.
+	headendReconciler, err := headend.NewReconciler(vin.GetMapOperations(), nil)
+	if err != nil {
+		return err
+	}
 	// exporter / routeWatcher drive the auto-advertise path (VRF export).
 	// They stay nil unless BGP is enabled with bgp.global.auto_advertise.
 	var exporter *export.Exporter
@@ -196,6 +203,7 @@ func run(cliCtx *cli.Context) error {
 			cfg.BGP.Global.SourceLocator,
 			cfg.BGP.Global.LocalASN,
 			lg,
+			apply.WithHeadendWriter(headendReconciler),
 		)
 		applier.SetMUPDefaultAllow(cfg.BGP.Global.MupDefaultAllow)
 		// The config vrf_bindings were registered before the applier existed,
@@ -439,10 +447,10 @@ func run(cliCtx *cli.Context) error {
 		// that did not exist yet, and an entry written with a zero source
 		// blackholes without saying so.
 		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
-			Source:     routeDemux,
-			Claims:     claimRegistry,
-			Headend:    vin.GetMapOperations(),
-			Advertiser: bgpSession,
+			Source:            routeDemux,
+			Claims:            claimRegistry,
+			HeadendReconciler: headendReconciler,
+			Advertiser:        bgpSession,
 			// Each plugin originates under its own name, so the session
 			// can tell their routes apart -- from each other and from
 			// vinbero's own. gobgp keeps one local path per NLRI, and
