@@ -822,6 +822,10 @@ capability が何であれ観測と log だけをする plugin として起動�
   だけです。open transaction と各集合の entry 数と byte 数の制限に加えて、
   staged の保持数も kind 数に制限されます。instance が替わると以前の pending
   宣言も破棄し、replay 前に旧 instance の宣言を retry することはありません。
+- local SID の変更・削除は、参照する広告の withdraw が成功してから行います。
+  通常の commit、publication、retry、認可の縮小で同じ処理を使います。
+  withdraw の失敗時は SID を維持します。変更後に広告するかどうかは plugin が
+  改めて宣言します。名前の重複や quota 超過は、広告を変更する前に拒否します。
 - 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
   次の配送の前に再試行します。保留されている数は stats に出し、最初の失敗は
   warning に出します。何かを待っている plugin は、配送の counter だけ見ると

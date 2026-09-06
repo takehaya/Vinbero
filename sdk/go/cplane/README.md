@@ -82,12 +82,17 @@ During authorization pruning, advertisements referencing a removed SID must be
 withdrawn before that SID is released. A failed withdrawal keeps the SID and
 fails the replacement so the operator can retry.
 
-For local SIDs, declare a name, locator and endpoint slot. Retry the declaration
-until the matching allocated SID event arrives: a successful commit does not
-guarantee notification delivery when the host queue is full. Advertise only after
-receiving that event. The SDK does not automatically order different
-kinds of declarations. The host derives VPN RD/RT from the declared VRF. Stable
-SID names retain their addresses across guest replacement with the same locator
+For local SIDs, declare a name, locator and endpoint slot. While its address is
+unknown, retry until the matching allocated SID event arrives: a successful
+commit does not guarantee notification delivery when the host queue is full.
+An unchanged address already delivered to this instance need not be notified again.
+
+Before changing or removing a SID entry, the host withdraws advertisements
+referencing it. A failed withdrawal refuses the SID change, including during
+publication and retries. The plugin must redeclare its desired advertisements
+after a successful SID change. The SDK does not automatically order declarations
+or restore those advertisements. The host derives VPN RD/RT from the declared VRF.
+Stable SID names retain their addresses across guest replacement with the same locator
 within one daemon run. Changing the locator reallocates the SID; daemon restarts
 do not guarantee the name/address mapping.
 

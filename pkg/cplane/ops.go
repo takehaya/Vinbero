@@ -588,6 +588,9 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	}
 
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		if _, err := p.withdrawSIDReferencesLocked(context.Background(), txn.sids); err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
 		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids, p.quotas.MaxLocalSIDs)
 		if err != nil {
 			return fmt.Errorf("apply commit: %w", err)
@@ -1043,28 +1046,13 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 			}
 		}
 		if len(keep) != len(held) {
-			// Withdraw references before releasing their SID. A failed withdraw
-			// must leave the dispatch entry and allocation available for retry.
-			if p.advertise != nil {
-				addresses := p.localSIDs.addressesFor(p.owner, keep)
-				routes := p.advertise.LiveRoutes(p.owner)
-				keepRoutes := make([]AdvertisedRoute, 0, len(routes))
-				for _, route := range routes {
-					sid, _ := netip.ParseAddr(route.SRv6SID)
-					if _, retained := addresses[sid]; route.SRv6SID == "" || retained {
-						keepRoutes = append(keepRoutes, route)
-					}
+			pruned, err := p.withdrawSIDReferencesLocked(ctx, keep)
+			removed += pruned
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
 				}
-				if len(keepRoutes) != len(routes) {
-					res, err := p.advertise.Apply(ctx, p.owner, keepRoutes, p.quotas.MaxAdvertisedRoutes)
-					removed += res.Pruned
-					if err != nil {
-						if firstErr == nil {
-							firstErr = err
-						}
-						return removed, firstErr
-					}
-				}
+				return removed, firstErr
 			}
 			_, res, err := p.localSIDs.Apply(p.owner, keep, p.quotas.MaxLocalSIDs)
 			removed += res.Pruned
@@ -1082,6 +1070,32 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 		removed += pruned
 	}
 	return removed, firstErr
+}
+
+// withdrawSIDReferencesLocked retires references before an allocation or dispatch
+// entry changes. It applies to live commits, publication retries and authorization
+// pruning. A failed withdrawal leaves every SID intact. Called with applyMu held.
+func (p *PluginOps) withdrawSIDReferencesLocked(ctx context.Context, desired []LocalSID) (int, error) {
+	if _, _, err := p.localSIDs.prepareDesired(desired, p.quotas.MaxLocalSIDs); err != nil {
+		return 0, err
+	}
+	if p.advertise == nil {
+		return 0, nil
+	}
+	addresses := p.localSIDs.unchangedAddresses(p.owner, desired)
+	routes := p.advertise.LiveRoutes(p.owner)
+	keep := make([]AdvertisedRoute, 0, len(routes))
+	for _, route := range routes {
+		sid, _ := netip.ParseAddr(route.SRv6SID)
+		if _, retained := addresses[sid]; route.SRv6SID == "" || retained {
+			keep = append(keep, route)
+		}
+	}
+	if len(keep) == len(routes) {
+		return 0, nil
+	}
+	res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
+	return res.Pruned, err
 }
 
 // ReconcileAdvertised re-derives what this plugin originates and applies
