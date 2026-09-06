@@ -63,14 +63,19 @@ func openSIDInventory(dir string) (*sidInventoryStore, error) {
 		if err := syncDir(dir); err != nil {
 			return nil, err
 		}
-		if err := s.save(nil); err != nil {
-			return nil, err
-		}
 	} else if err != nil {
 		return nil, err
 	}
 	if _, err := s.load(); err != nil {
-		return nil, err
+		// Before the enrollment marker is durable, no successful store
+		// open can have installed a SID. Resume an interrupted first open
+		// only when its snapshot is absent; never overwrite existing data.
+		if !errors.Is(markerErr, os.ErrNotExist) || !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		if err := s.save(nil); err != nil {
+			return nil, err
+		}
 	}
 	if errors.Is(markerErr, os.ErrNotExist) {
 		if err := writeFileAtomic(marker, []byte("1\n")); err != nil {

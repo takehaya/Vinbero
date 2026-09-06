@@ -1079,8 +1079,9 @@ allocator の予約解放の順です。途中失敗では追跡を保持しま�
 新版が見えている可能性があるため、失敗を未書き込みとみなして address を返しません。
 同じ内容の宣言がこの run で適用済みなら、map の書き換えも inventory の保存もしません。
 
-inventory と marker が無い旧 store は空の inventory へ移行します。旧 entry から SID 名を
-推測して復元することはありません。記録された owner が一致する未知の entry は最初の宣言時に
+inventory と marker が無い旧 store は空の inventory へ移行します。marker 保存前に
+初期化が停止した場合は、snapshot が無ければ初期化を再開し、既存の snapshot があれば
+その内容を保持します。旧 entry から SID 名を推測して復元することはありません。記録された owner が一致する未知の entry は最初の宣言時に
 sweep しますが、inventory 導入前に owner 記録も失われた entry は自動削除できません。
 導入後の inventory 欠落、破損、未知の version、重複・不整合な割り当ては daemon の起動を
 拒否します。空として起動すると他の allocator 利用者が使用中の SID を再取得するためです。

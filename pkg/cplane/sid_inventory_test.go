@@ -508,3 +508,42 @@ func TestFlushRetainsSIDWhenAdvertisementWithdrawalFails(t *testing.T) {
 		t.Fatal("flush retry retained SID")
 	}
 }
+
+func TestSIDInventoryResumesFirstInitialization(t *testing.T) {
+	for _, point := range []string{"directory only", "empty snapshot", "populated snapshot"} {
+		t.Run(point, func(t *testing.T) {
+			store := newTestStore(t)
+			if point == "populated snapshot" {
+				set := persistentSet(t, store, inventoryAllocator(t), newFakeSIDOps(), nil, nil)
+				if _, _, err := set.Apply(ownerA, []LocalSID{{Name: "self", Locator: "main", Slot: 33}}, unlimited); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// No successful NewStore can install a SID before this marker is
+			// durable. Existing snapshots must still never be overwritten.
+			if err := os.Remove(filepath.Join(store.Dir(), "local-sids.version")); err != nil {
+				t.Fatal(err)
+			}
+			if point == "directory only" {
+				if err := os.Remove(store.sids.path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reopened, err := NewStore(store.Dir())
+			if err != nil {
+				t.Fatalf("initialization did not resume: %v", err)
+			}
+			records, err := reopened.sids.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if point == "populated snapshot" {
+				want = 1
+			}
+			if len(records) != want {
+				t.Fatalf("initialization overwrote snapshot: %v", records)
+			}
+		})
+	}
+}

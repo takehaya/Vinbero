@@ -105,6 +105,21 @@ func NewStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("cplane store: %w", err)
 	}
+	// MkdirAll can create several parent links. Flush those too, including
+	// links visible after a previously interrupted initialization, before a
+	// successful open lets callers install state backed by this directory.
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	for parent := filepath.Dir(absolute); ; parent = filepath.Dir(parent) {
+		if err := syncDir(parent); err != nil {
+			return nil, fmt.Errorf("cplane store: sync parent %q: %w", parent, err)
+		}
+		if filepath.Dir(parent) == parent {
+			break
+		}
+	}
 	sids, err := openSIDInventory(dir)
 	if err != nil {
 		return nil, fmt.Errorf("cplane store: %w", err)
