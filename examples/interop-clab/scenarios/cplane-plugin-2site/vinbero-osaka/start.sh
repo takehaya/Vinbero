@@ -165,7 +165,7 @@ printf '\010\201\374\003\022\004\114\117\103\062\032\013\061\060\056\062\056\060
     --wasm /plugin.wasm \
     --config /tmp/plugin-config.bin \
     --behavior 0xFE01 \
-    --family vpnv4 \
+    --family vpnv4 --tick-ms 1000 \
     --capability advertise --capability local_sid \
     --vrf vrf-cust --locator LOC2 --endpoint-slot 32 || true
 

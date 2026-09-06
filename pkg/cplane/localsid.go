@@ -168,6 +168,31 @@ func NewLocalSIDSet(alloc SIDAllocator, sids SIDFunctionOps, grants EndtVRFGrant
 	}
 }
 
+// prepareDesired validates the complete set before any dependent state changes.
+func (l *LocalSIDSet) prepareDesired(desired []LocalSID, quota int) (map[string]LocalSID, []string, error) {
+	if len(desired) > 0 && (l.alloc == nil || l.sids == nil) {
+		return nil, nil, errors.New("local sid: this daemon cannot allocate SIDs")
+	}
+
+	byName := make(map[string]LocalSID, len(desired))
+	names := make([]string, 0, len(desired))
+	for _, s := range desired {
+		if err := validateLocalSID(s); err != nil {
+			return nil, nil, err
+		}
+		if _, dup := byName[s.Name]; dup {
+			return nil, nil, fmt.Errorf("local sid: %q declared twice", s.Name)
+		}
+		byName[s.Name] = s
+		names = append(names, s.Name)
+	}
+
+	if cap, bounded := limitOf(quota); bounded && len(names) > cap {
+		return nil, nil, &QuotaError{What: "local SIDs", Declared: len(names), Quota: cap}
+	}
+	return byName, names, nil
+}
+
 // Apply makes owner's local SIDs match desired exactly, returning what
 // every declared SID resolved to.
 //
@@ -179,25 +204,9 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 	if owner == "" {
 		return nil, res, bpf.ErrEmptyOwner
 	}
-	if len(desired) > 0 && (l.alloc == nil || l.sids == nil) {
-		return nil, res, errors.New("local sid: this daemon cannot allocate SIDs")
-	}
-
-	byName := make(map[string]LocalSID, len(desired))
-	names := make([]string, 0, len(desired))
-	for _, s := range desired {
-		if err := validateLocalSID(s); err != nil {
-			return nil, res, err
-		}
-		if _, dup := byName[s.Name]; dup {
-			return nil, res, fmt.Errorf("local sid: %q declared twice", s.Name)
-		}
-		byName[s.Name] = s
-		names = append(names, s.Name)
-	}
-
-	if cap, bounded := limitOf(quota); bounded && len(names) > cap {
-		return nil, res, &QuotaError{What: "local SIDs", Declared: len(names), Quota: cap}
+	byName, names, err := l.prepareDesired(desired, quota)
+	if err != nil {
+		return nil, res, err
 	}
 
 	if err := l.sweepLeftovers(owner); err != nil {
@@ -475,6 +484,20 @@ func (l *LocalSIDSet) LiveSIDs(owner bpf.OwnerTag) []LocalSID {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// unchangedAddresses resolves the declarations that will keep their entries.
+// Callers serialize this snapshot with Apply before using it to remove SIDs.
+func (l *LocalSIDSet) unchangedAddresses(owner bpf.OwnerTag, desired []LocalSID) map[netip.Addr]struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	addresses := make(map[netip.Addr]struct{}, len(desired))
+	for _, want := range desired {
+		if got, ok := l.live[owner][want.Name]; ok && got.matches(want) {
+			addresses[got.SID] = struct{}{}
+		}
+	}
+	return addresses
 }
 
 func (l *LocalSIDSet) LiveCount(owner bpf.OwnerTag) int {

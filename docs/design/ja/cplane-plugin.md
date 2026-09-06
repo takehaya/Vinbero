@@ -452,15 +452,21 @@ apply 時に失敗させれば、既存の retry 機構がそのまま修復に�
 範囲外の要素が 1 つでもあれば集合ごと拒否します。宣言は集合についての表明
 なので、残りを適用すると plugin が求めていない状態を入れることになります。
 
-### scope を狭めたとき
+### capability の削除と scope の縮小
 
-狭める操作だけは desired-set の模型では直りません。plugin が同じ宣言を
+scope の縮小は plugin の desired-set 宣言だけでは直りません。同じ宣言を
 続けると集合ごと拒否されるので reconcile が走らず、広い scope の下で書いた
 状態が残ります。そこで登録の時点で host が範囲外の状態を prune します。再登録に
 限らず restore でも走らせます。daemon 再起動をまたいだ状態は pinned map に残って
 おり、狭い scope で restore した plugin はそれを 1 つも触れないためです。
 実装は「まだ許される部分集合を desired set として apply する」形で、残りは
 既存の reconcile が落とします。
+
+capability を削除した場合も、scope が変わらなくても host がその種類の状態を
+撤去します。権限を失った plugin は空集合の宣言もできないためです。
+local SID を撤去する前に、その SID を参照する広告を withdraw します。
+withdraw が失敗した場合は SID と割り当てを維持し、撤去の再試行に備えます。
+撤去が失敗した場合は再登録を成功扱いにせず、エラーを返します。
 
 この prune の視界は同一 run 内の再登録と restore で違います。headend は
 どちらの場合も BPF map を owner ごとに列挙して見えます。local SID と広告は
@@ -740,7 +746,10 @@ identity と readiness を結ぶ機構は今後の課題です。
 
 module は allowlist で検証します。
 
-- import は `vinbero` module からのみ。WASI はこの規則で弾かれます。
+- import は `vinbero` と `wasi_snapshot_preview1` からのみ。関数名と signature を検証。
+- WASI は Go runtime 用に時計、乱数、期限内の sleep を提供します。host の環境変数、
+  引数、filesystem mount、socket は渡しません。stdin は EOF、stdout/stderr は破棄し、
+  plugin の診断には既存の rate limit がある `vinbero.log` を使います。
 - memory は guest が定義して export する 1 つだけ。imported memory は拒否。
 - 必須 export が signature まで一致すること。
 - ABI version が一致すること。
@@ -816,6 +825,10 @@ capability が何であれ観測と log だけをする plugin として起動�
   だけです。open transaction と各集合の entry 数と byte 数の制限に加えて、
   staged の保持数も kind 数に制限されます。instance が替わると以前の pending
   宣言も破棄し、replay 前に旧 instance の宣言を retry することはありません。
+- local SID の変更・削除は、参照する広告の withdraw が成功してから行います。
+  通常の commit、publication、retry、認可の縮小で同じ処理を使います。
+  withdraw の失敗時は SID を維持します。変更後に広告するかどうかは plugin が
+  改めて宣言します。名前の重複や quota 超過は、広告を変更する前に拒否します。
 - 公開前に宣言され、公開時に適用できなかった transaction は捨てずに保持し、
   次の配送の前に再試行します。保留されている数は stats に出し、最初の失敗は
   warning に出します。何かを待っている plugin は、配送の counter だけ見ると
@@ -967,7 +980,7 @@ vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
     --behavior 0xFE01 --family vpnv4 \
     --capability headend --capability advertise --capability local_sid \
     --locator main --vrf vpn-a \
-    --headend-prefix 10.7.0.0/16 --endpoint-slot 33
+    --headend-prefix 10.7.0.0/16 --endpoint-slot 33 --tick-ms 1000
 vbctl plugin cplane list
 vbctl plugin cplane stats
 vbctl plugin cplane unregister --name custom-behavior
@@ -985,33 +998,45 @@ behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint �
 
 ## plugin を書く
 
-例は `sdk/examples/cplane-custom-behavior` にあります。TinyGo で書いて
-います。生成された Go binding は reflection を要求し、TinyGo の WebAssembly
-target はそれを持たないので、protobuf codec は手書きです。
+Go 向けの [cplane SDK](../../../sdk/go/cplane/README.md) は、WASM の入口と
+protobuf の受け渡し、型付きの headend / advertise / local SID 宣言を提供します。
+`RouteView` は BGP の prefix 経路を family / RD / masked prefix / peer / Path ID
+で保持し、replay 中は batch と tick を跨いで宣言を保留します。空の replay の
+完了も反映対象になり、適用に成功するまで未反映状態を保持します。経路の採用条件と
+SID 列の組み立ては plugin が決めます。EVPN / MUP の経路保持は対象外です。
+
+例は `sdk/examples/cplane-custom-behavior` にあります。SDK の `RouteView` から
+headend を組み立て、適用失敗後は tick で再試行します。SDK の codec は reflection を
+使わず、daemon が使う生成済み protobuf 型との互換性をテストします。
 
 daemon 無しで試すための harness が `sdk/go/cplaneharness` にあります。
 daemon と同じ runtime を回し、capability 面だけ記録用に差し替えます。
 replay、restart、commit 拒否といった本番で耐える必要のある流れを method
 として提供します。
 
-TinyGo は次の flag で使えます。
+標準 Go の WASI reactor を既定にします。Go 1.24 以降が対応し、この repository は
+Go 1.25.5 を使います。example は `make cplane-example` で build できます。
 
 ```sh
-tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=conservative -panic=trap -no-debug .
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+    -buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 ```
 
-`-no-debug` は artifact を再現可能にします。付けないと TinyGo が絶対 path を
-DWARF に埋めるので、同じ source から作った .wasm が machine ごとに変わり、
-committed の artifact と source が一致しているかを CI で見られなくなります。
+wazero が `_initialize` で Go runtime と package を初期化してから SDK callback を
+呼びます。標準 Go の GC と WASI で利用可能な標準 library が使えます。`time.Now` は
+実時計、SDK の `NowMonotonic` と tick は host が渡す plugin 用の時計です。guest は
+host から呼ばれている間だけ動き、定期処理には tick を使います。callback の data を
+使う goroutine は callback 内で完了させます。sleep 中も call timeout を守ります。
 
-`gc=conservative` は必須です。WASI を link しない target の既定は
-`gc=leaking` で memory を一切回収しません。control plane plugin は daemon
-と同じ寿命で走り、ネットワークの経路変化を全部見るので、回収しない
-plugin は memory 上限に到達します。harness の churn test は live set を
-一定に保ったまま advertise と withdraw を繰り返すので、増える分は garbage
-だけです。この test を leaking build は途中で落ち、conservative build は
-1 MiB のまま完走します。
+既定の memory 上限は 16 MiB、call timeout は 2 秒です。harness はこの memory 上限で
+50,000 回の advertise / withdraw を実行し、GC による回収を確認します。保持する経路が
+増える plugin は必要な memory 上限を明示して登録します。
+
+小さい artifact が必要な場合は `make cplane-example-tinygo` で TinyGo 0.39.0 版の
+`plugin.tinygo.wasm` を作れます。既定の Go artifact は置き換えません。
+`wasm-unknown` target には `-gc=conservative` を指定し、回収しない既定の collector を
+避けます。詳細な flag と callback の契約は [SDK README](../../../sdk/go/cplane/README.md)
+に記載しています。両 compiler とも ABI 1 を使います。
 
 ## local SID と daemon 再起動
 

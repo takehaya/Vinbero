@@ -5,16 +5,21 @@ import (
 	"net/netip"
 	"os"
 	"testing"
+	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
 
-// examplePlugin is the TinyGo plugin under sdk/examples. Unlike the
+// examplePlugin is the standard Go plugin under sdk/examples. Unlike the
 // hand-written .wat fixtures, it is a plugin as an operator would actually
 // write one -- a real language runtime, a real allocator, a real reactor
 // initializer -- which is what makes it worth testing against the host.
-// Building it needs TinyGo (make cplane-example), so the test skips when
+// Building it needs standard Go (make cplane-example), so the test skips when
 // the artifact is not there rather than failing on a missing toolchain.
 func examplePlugin(t *testing.T) []byte {
 	t.Helper()
@@ -474,5 +479,187 @@ func TestExamplePluginDropsItsViewOnReplay(t *testing.T) {
 	got := sortedV4(ops)
 	if len(got) != 1 || got[0] != "10.0.1.0/24" {
 		t.Fatalf("after the replay the data plane holds %v, want only the route the rib still has", got)
+	}
+}
+
+func TestExamplePluginDisablingSendingRetractsPreviousOwnerState(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		config   []byte
+		wantSIDs int
+	}{
+		{"receive only", nil, 0},
+		{"keep SID without advertising", exampleConfig(0xFE01, "main", "", "", 33, ""), 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sids, adv := newFakeSIDOps(), &fakeAdvertiser{}
+			m, err := NewManager(ManagerConfig{
+				Source: newFakeSource(), Claims: newFakeClaims(), Headend: newFakeHeadendOps(),
+				Advertiser: adv, Locators: &fakeAllocator{}, SIDFunctions: sids,
+				EncapSource: testEncapSource, LocatorInfo: testLocators(), VRFBindings: testBindings(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close(context.Background())
+			reg := Registration{
+				Name: "custom-behavior", Module: examplePlugin(t),
+				Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
+				Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
+			}
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			waitDelivered(t, m, reg.Name)
+			if got, _ := adv.counts(); got != 1 || sids.count() != 1 {
+				t.Fatal("sender setup did not allocate and advertise")
+			}
+			reg.Config = tt.config
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			waitDelivered(t, m, reg.Name)
+			if got := sids.count(); got != tt.wantSIDs {
+				t.Fatalf("SID count after upgrade=%d, want %d", got, tt.wantSIDs)
+			}
+			if live := m.advertise.LiveRoutes(bpf.OwnerPluginBundle(reg.Name)); len(live) != 0 {
+				t.Fatalf("advertisements survived disabling sending: %+v", live)
+			}
+			if _, withdrawn := adv.counts(); withdrawn != 1 {
+				t.Fatalf("withdrawn=%d, want the previous advertisement retracted", withdrawn)
+			}
+		})
+	}
+}
+
+func TestExamplePluginRetriesDroppedSIDNotification(t *testing.T) {
+	owner := bpf.OwnerPluginBundle("custom-behavior")
+	sids, adv := newFakeSIDOps(), &fakeAdvertiser{}
+	localSIDs := NewLocalSIDSet(&fakeAllocator{}, sids, nil, nil)
+	advertise := NewAdvertiseSet(adv, NewLeases())
+	dropNotifications, attempts := true, 0
+	var notifications []AllocatedSID
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: owner, Headend: newFakeHeadendOps(), Capabilities: testCaps(),
+		Guard:     NewGuard(testScope(), testLocators(), testBindings()),
+		LocalSIDs: localSIDs, Advertise: advertise,
+		OnLocalSIDs: func(allocated []AllocatedSID) bool {
+			attempts++
+			if dropNotifications {
+				return false // The same result as a full manager delivery queue.
+			}
+			notifications = append(notifications, allocated...)
+			return true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
+		Name: "custom-behavior", Module: examplePlugin(t), Ops: ops, Capabilities: testCaps(),
+		ConfigBlob: exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = inst.Close(context.Background()) }()
+	if err := ops.Publish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.Tick(context.Background(), int64(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || sids.count() != 1 || advertise.LiveCount(owner) != 0 {
+		t.Fatalf("missing notification: attempts=%d, SIDs=%d, advertisements=%d", attempts, sids.count(), advertise.LiveCount(owner))
+	}
+	dropNotifications = false
+	if err := inst.Tick(context.Background(), int64(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifications) != 1 {
+		t.Fatalf("retry delivered %d notifications, want 1", len(notifications))
+	}
+	sid := notifications[0]
+	raw, err := proto.Marshal(&v1.PluginEventBatch{Events: []*v1.PluginEvent{{
+		Kind: v1.PluginEventKind_PLUGIN_EVENT_KIND_LOCAL_SID, Sequence: 1,
+		LocalSid: &v1.PluginLocalSidAllocated{Name: sid.Name, Sid: sid.SID.String(), Locator: sid.Locator},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inst.HandleEvents(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if advertise.LiveCount(owner) != 1 || sids.count() != 1 {
+		t.Fatal("notification recovery did not advertise the existing SID")
+	}
+	gen := ops.nextGen
+	if err := inst.Tick(context.Background(), int64(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if ops.nextGen != gen {
+		t.Fatal("allocation kept retrying after the SID event arrived")
+	}
+}
+
+func TestExamplePluginCapabilityReductionPrunesStateWithinUnchangedScope(t *testing.T) {
+	for _, tt := range []struct {
+		name                                      string
+		capabilities                              []string
+		wantHeadend, wantSIDs, wantAdvertisements int
+	}{
+		{"revoke headend", []string{"advertise", "local_sid"}, 0, 1, 1},
+		{"revoke advertise", []string{"headend", "local_sid"}, 1, 1, 0},
+		{"revoke local SID", []string{"headend", "advertise"}, 1, 0, 0},
+		{"revoke sender capabilities", []string{"headend"}, 1, 0, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			src, headend := newFakeSource(), newFakeHeadendOps()
+			sids, adv := newFakeSIDOps(), &fakeAdvertiser{}
+			m, err := NewManager(ManagerConfig{
+				Source: src, Claims: newFakeClaims(), Headend: headend,
+				Advertiser: adv, Locators: &fakeAllocator{}, SIDFunctions: sids,
+				EncapSource: testEncapSource, LocatorInfo: testLocators(), VRFBindings: testBindings(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close(context.Background())
+			reg := Registration{
+				Name: "custom-behavior", Module: examplePlugin(t),
+				Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
+				Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
+			}
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			route := customBehaviorRoute("10.0.0.0/24", "fd00:2::100")
+			src.setRib(route)
+			src.emit(reg.Name, route)
+			waitDelivered(t, m, reg.Name)
+			if headend.countV4() != 1 || sids.count() != 1 {
+				t.Fatal("setup did not install forwarding state")
+			}
+			// Keep both config and scope. The guest still wants these entries,
+			// but can no longer declare or clear a kind whose grant was removed.
+			reg.Capabilities, err = wasm.ParseCapabilities(tt.capabilities)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			waitDelivered(t, m, reg.Name)
+			owner := bpf.OwnerPluginBundle(reg.Name)
+			if got := headend.countV4(); got != tt.wantHeadend {
+				t.Fatalf("headend=%d, want %d", got, tt.wantHeadend)
+			}
+			if got := sids.count(); got != tt.wantSIDs {
+				t.Fatalf("SID count=%d, want %d", got, tt.wantSIDs)
+			}
+			if got := len(m.advertise.LiveRoutes(owner)); got != tt.wantAdvertisements {
+				t.Fatalf("live advertisements=%d, want %d", got, tt.wantAdvertisements)
+			}
+		})
 	}
 }

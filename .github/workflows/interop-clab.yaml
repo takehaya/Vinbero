@@ -21,6 +21,7 @@ on:
       # The cplane-plugin scenario runs the committed SDK example, so a
       # change to the plugin or to the runtime under it must re-run these.
       - 'pkg/cplane/**'
+      - 'sdk/go/cplane/**'
       - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/interop-clab.yaml'
   pull_request:
@@ -33,6 +34,7 @@ on:
       - 'cmd/vinbero/**'
       - 'pkg/bpf/*.o'
       - 'pkg/cplane/**'
+      - 'sdk/go/cplane/**'
       - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/interop-clab.yaml'
   workflow_dispatch:

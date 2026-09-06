@@ -22,16 +22,18 @@ Sending: at startup it asks the daemon for a local SID from a configured
 locator, pointing at the eBPF slot its data-plane half occupies. The daemon
 allocates the address, installs the dispatch entry and tells the plugin
 which address it got -- the plugin names the SID, the daemon chooses the
-value, which is what lets a restarted plugin declare the same name and be
-handed the same address. It then advertises the configured prefix behind
+value. Recreating the plugin with the same locator within the same daemon run
+preserves that name/address mapping. Changing the locator reallocates the SID;
+daemon restarts do not guarantee the mapping. It then advertises
+the configured prefix behind
 that SID, naming its own behavior codepoint in the SID TLV.
 
 Receiving, on every batch of events:
 
 - an advertisement carrying the claimed behavior and an SRv6 SID adds a
   headend entry for its prefix, steering into that SID
-- a withdrawal removes it
-- anything else is ignored
+- a withdrawal removes that path, keeping any alternatives
+- an update whose behavior no longer matches removes the old version of that path
 
 Two nodes running this plugin therefore reach each other over a behavior
 neither vinbero nor BGP knows anything about.
@@ -42,10 +44,15 @@ difference, which is what makes a restart uneventful: a fresh instance
 comes back with no memory, the daemon replays the routes, and the same
 declaration converges on the same state.
 
-A withdrawal is matched by prefix rather than by behavior. BGP sends only
-the NLRI when a route goes away, so a withdrawal carries no attributes at
-all and its behavior always decodes as zero. Matching what the plugin is
-already holding is the only thing that works.
+A withdrawal is matched by family, RD, masked prefix, peer and ADD-PATH ID.
+BGP withdrawals carry no behavior attributes. Several paths for one prefix
+remain distinct until selection: this example chooses the lowest RD, then
+peer, then numeric path ID.
+
+The SDK suspends headend declarations from BGP replay start through its end,
+across batches and ticks. Empty completed snapshots still declare an empty set
+to prune stale entries. Failed declarations remain pending and retry on ticks;
+they do not need another route update to make progress.
 
 ## Build
 
@@ -56,59 +63,61 @@ make cplane-example        # from the repository root
 or directly:
 
 ```sh
-tinygo build -o plugin.wasm -target=wasm-unknown \
-    -scheduler=none -gc=conservative -panic=trap -no-debug .
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+    -buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 ```
 
-The flags are not incidental.
+The default is standard Go, pinned to Go 1.25.5 by this repository. The reactor
+build exports `_initialize` and the SDK callbacks; the daemon invokes them via
+wazero with WASI preview 1. `-trimpath`, `-buildvcs=false` and stripped debug
+information keep the committed artifact reproducible.
 
-`wasm-unknown` is the target without WASI, which the daemon does not link.
+The host grants clocks and randomness without host filesystem, environment or
+network access. Use `guest.Log` for diagnostics. The churn test runs 50,000
+update/withdraw pairs under the default 16 MiB memory limit with Go's collector.
 
-`scheduler=none` because the plugin has no goroutines and the daemon calls
-it one event batch at a time.
-
-`panic=trap` because a panic is a bug rather than a control-flow tool, and
-the daemon treats a trap as a failed instance to restart.
-
-`no-debug` because TinyGo otherwise embeds the absolute build path in
-DWARF, which makes the committed artifact differ on every machine; with it
-the build is reproducible and the module drops from ~83 KB to ~14 KB. A
-trap then carries no stack info, which costs little: the daemon reports
-the trap either way and a plugin's own diagnostics go through `log`.
-
-`gc=conservative` because a control-plane plugin runs for the life of the
-daemon and sees every route change in the network. TinyGo's default for
-this target is `gc=leaking`, which never reclaims: built that way this
-example dies partway through the SDK's churn test, while the conservative
-build runs indefinitely in a megabyte. See
-`TestPluginSurvivesSustainedChurn` in `sdk/go/cplaneharness`.
+`make cplane-example-tinygo` optionally creates `plugin.tinygo.wasm` without
+replacing the default artifact. See the [SDK build instructions](../../go/cplane/README.md)
+for its flags and runtime limitations.
 
 ## Run
 
+From the repository root, with the daemon running and the CLI built (`make build`),
+register a receive-only instance handling `10.7.0.0/16`:
+
 ```sh
-vbctl plugin cplane register \
+./out/bin/vinbero plugin cplane register \
     --name custom-behavior \
-    --wasm plugin.wasm \
+    --wasm sdk/examples/cplane-custom-behavior/plugin.wasm \
     --behavior 0xFE01 \
     --family vpnv4 \
     --capability headend \
-    --capability advertise \
-    --capability local_sid
+    --headend-prefix 10.7.0.0/16 \
+    --tick-ms 1000
 
-vbctl plugin cplane list
-vbctl plugin cplane unregister --name custom-behavior
+./out/bin/vinbero plugin cplane list
+./out/bin/vinbero plugin cplane unregister --name custom-behavior
 ```
 
 The capabilities are what this plugin is allowed to do. The daemon links
 only the host functions they cover, so a plugin granted nothing that writes
 cannot reach the apply functions at all; between the kinds of declaration
 the check happens where the transaction is opened, because those functions
-are shared. A receive-only deployment of this same plugin needs
-`--capability headend` alone.
+are shared. A receive-only deployment needs the `headend` capability and its
+prefix scope. An allocating deployment also needs `local_sid` and `advertise`,
+with grants for its locator, VRF and endpoint slot; pass the encoded configuration
+with `--config`. See the [two-site lab](../../../examples/interop-clab/scenarios/cplane-plugin-2site/README.md)
+for the data-plane registration and complete deployment configuration.
 
 Registering the same name again upgrades in place: the entries the running
 instance wrote stay, and the new module reconciles over them. Unregistering
-is the deliberate removal and takes the plugin's entries with it.
+is the deliberate removal and takes the plugin's entries with it. Disabling
+allocation or advertising in the configuration declares empty sets for those
+kinds, retracting state retained from the previous instance. Failed cleanup
+commits retry on ticks. A kind whose declaration cannot begin is skipped for
+this instance, including after capability revocation. Failed puts/commits and
+missing SID notifications remain retryable. Periodic retries require `--tick-ms`;
+it defaults to disabled.
 
 ## Configuration
 
@@ -162,15 +171,15 @@ own without a built-in handoff; the built-in decap drops with no grant.
 
 ## Notes on the code
 
-`wire.go` is a small protobuf codec written by hand. The generated Go
-bindings need reflection, which TinyGo's WebAssembly targets do not
-support, and what crosses the boundary here is small and fixed.
+`main.go` uses the [Go guest SDK](../../go/cplane/README.md): `guest.Register`
+supplies the WASM entry points, `RouteView` tracks input paths and replay,
+and `Client` sends typed desired sets. `config.go` decodes this example's
+private configuration with the SDK's reflection-free wire decoder.
 
 `vinbero_abi_version` is what lets the daemon refuse a module built against
 an ABI it no longer implements, rather than letting it trap on the first
 call into a function whose signature moved.
 
-There is no clock and no I/O in this plugin. The sandbox provides neither,
-beyond the `log` and `now_monotonic` host functions; a plugin that needs to
-reach anything else is asking for something this mechanism deliberately
-does not offer.
+The periodic callback retries failed declarations. The plugin uses host logging
+and has no filesystem or network access. The host supplies BGP events and
+performs the declared writes.

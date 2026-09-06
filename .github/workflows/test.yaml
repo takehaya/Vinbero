@@ -145,7 +145,7 @@ jobs:
       - name: Install wabt (wat2wasm)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends wabt
 
-      - name: Install TinyGo
+      - name: Install TinyGo for optional compiler compatibility tests
         run: |
           curl -sSLo /tmp/tinygo.deb \
             https://github.com/tinygo-org/tinygo/releases/download/v0.39.0/tinygo_0.39.0_amd64.deb
@@ -169,7 +169,7 @@ jobs:
           fi
 
       - name: Run the plugin runtime and harness tests against the rebuilt artifacts
-        run: go test ./pkg/cplane/... ./sdk/go/cplaneharness/
+        run: go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:
     name: Integration Test - ${{ matrix.example }}

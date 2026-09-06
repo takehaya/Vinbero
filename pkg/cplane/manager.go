@@ -578,8 +578,8 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 
 	// The state under this owner is inherited whether it came from the
 	// instance just torn down or from before a daemon restart, and a
-	// registration whose scope does not cover all of it must not keep the
-	// rest. The plugin cannot do this itself: its own declaration of that
+	// registration must remove what its capabilities or scope no longer cover.
+	// The plugin cannot do this itself: its own declaration of that
 	// state is now refused, and refused whole, so it would simply stop
 	// reconciling with the old entries still installed.
 	//
@@ -589,7 +589,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
 		return m.failPrune(ctx, reg, p, removed, err)
 	} else if removed > 0 {
-		m.logger.Info("removed the state a plugin held outside its new scope",
+		m.logger.Info("removed the state outside a plugin's new capabilities or scope",
 			zap.String("plugin", reg.Name), zap.Int("removed", removed))
 	}
 
@@ -653,10 +653,9 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	return nil
 }
 
-// failPrune handles a registration whose out-of-scope prune could not be
-// applied: some state the new scope forbids is still installed and the
-// plugin cannot clear it itself, because its own declaration of that state
-// is now refused whole.
+// failPrune handles a registration whose authorization prune could not be
+// applied: some state the new capabilities or scope forbid is still installed.
+// The plugin cannot clear it itself because its declaration is now refused whole.
 //
 // Reporting success here would claim an authorization boundary is in force
 // when it is not, so it returns an error. But it first makes the store, the
@@ -664,9 +663,8 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 // earlier version did not:
 //
 //   - The new registration is persisted. It is what the operator asked for,
-//     and a restore replays it and re-runs the prune, so a
-//     persisted-but-not-pruned scope self-repairs on the next boot instead
-//     of reverting to the old wider one.
+//     and a restore replays it and re-runs the prune instead of reverting
+//     to the old wider grants.
 //   - The behavior claims stay as the new set. The plugin is dead but its
 //     leftover state is still in the maps, so routes carrying its codepoint
 //     must keep being withheld from the built-in appliers rather than
@@ -686,21 +684,21 @@ func (m *Manager) failPrune(ctx context.Context, reg Registration, p *plugin, re
 	m.mu.Unlock()
 
 	// Persist the narrowing so a restart retries the prune rather than
-	// bringing back the wider scope. A store failure here is logged, not
+	// bringing back the wider grants. A store failure here is logged, not
 	// returned over the prune error: the prune failure is the one the
 	// operator has to act on.
 	if err := m.store.Save(reg); err != nil {
-		m.logger.Error("could not persist the narrowed scope of a plugin whose prune failed; "+
-			"a restart may bring back the wider scope",
+		m.logger.Error("could not persist the reduced capabilities or scope of a plugin whose prune failed; "+
+			"a restart may bring back the wider grants",
 			zap.String("plugin", reg.Name), zap.Error(err))
 	}
 
-	m.recordUnrestored(reg, fmt.Errorf("scope narrowing could not be applied: %w", cause))
-	m.logger.Error("could not remove the state a plugin held outside its new scope; "+
+	m.recordUnrestored(reg, fmt.Errorf("capability or scope reduction could not be applied: %w", cause))
+	m.logger.Error("could not remove the state a plugin held outside its new capabilities or scope; "+
 		"the plugin is stopped and that state is still installed",
 		zap.String("plugin", reg.Name), zap.Int("removed", removed), zap.Error(cause))
-	return fmt.Errorf("cplane: plugin %q holds state outside its new scope that could not be removed, "+
-		"so the plugin was stopped rather than run under a scope that is not in force: %w",
+	return fmt.Errorf("cplane: plugin %q holds state outside its new capabilities or scope that could not be removed, "+
+		"so the plugin was stopped because the new grants could not be enforced: %w",
 		reg.Name, cause)
 }
 

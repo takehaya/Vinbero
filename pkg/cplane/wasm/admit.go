@@ -7,21 +7,22 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
 // admit decides whether a compiled module may run, from what the module
 // declares about itself. It runs before instantiation, so nothing in a
 // rejected module ever executes.
 //
-// The rules are an allowlist. A module may import only from the host
-// module, must export exactly the memory the host writes into, and must
-// declare an ABI version the host understands. Anything else -- a WASI
+// The rules are an allowlist. A module may import only from vinbero and
+// WASI preview 1, must export the memory the host writes into, and must
+// declare an ABI version the host understands. Anything else -- a foreign
 // import, an imported memory, an unknown host function, a required export
 // with the wrong signature -- is refused with a message naming what was
 // wrong, because the alternative is a trap on the first call whose cause
 // is far less obvious.
-func admit(compiled wazero.CompiledModule, caps Capabilities) error {
-	if err := admitImports(compiled); err != nil {
+func admit(compiled wazero.CompiledModule, caps Capabilities, wasi api.Module) error {
+	if err := admitImports(compiled, wasi); err != nil {
 		return err
 	}
 	if err := admitCapabilities(compiled, caps); err != nil {
@@ -66,14 +67,24 @@ var hostFunctionSignatures = map[string]struct{ params, results []api.ValueType 
 }
 
 // admitImports refuses anything the guest asks for that the host does not
-// provide. WASI is excluded by this rule rather than by a special case:
-// its functions are imported from wasi_snapshot_preview1, which is not the
-// host module.
-func admitImports(compiled wazero.CompiledModule) error {
+// provide. WASI signatures come from the linked implementation so admission
+// cannot drift from wazero. Resource access is restricted by ModuleConfig.
+func admitImports(compiled wazero.CompiledModule, wasi api.Module) error {
 	var foreign []string
 	for _, imp := range compiled.ImportedFunctions() {
 		module, name, ok := imp.Import()
 		if !ok {
+			continue
+		}
+		if module == wasi_snapshot_preview1.ModuleName {
+			fn, known := wasi.ExportedFunctionDefinitions()[name]
+			if !known {
+				foreign = append(foreign, module+"."+name)
+				continue
+			}
+			if !valueTypesEqual(imp.ParamTypes(), fn.ParamTypes()) || !valueTypesEqual(imp.ResultTypes(), fn.ResultTypes()) {
+				return fmt.Errorf("%w: WASI function %q imported with wrong signature", ErrAdmission, name)
+			}
 			continue
 		}
 		if module != HostModule {
@@ -97,8 +108,8 @@ func admitImports(compiled wazero.CompiledModule) error {
 	if len(foreign) > 0 {
 		sort.Strings(foreign)
 		return fmt.Errorf("%w: module imports functions the host does not provide: %s "+
-			"(only the %q module is linked; WASI is not available)",
-			ErrAdmission, strings.Join(foreign, ", "), HostModule)
+			"(only %q and %q are linked)",
+			ErrAdmission, strings.Join(foreign, ", "), HostModule, wasi_snapshot_preview1.ModuleName)
 	}
 	if len(compiled.ImportedMemories()) > 0 {
 		return fmt.Errorf("%w: module imports its memory; it must define and export its own", ErrAdmission)

@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"go.uber.org/zap"
 )
 
@@ -134,6 +136,9 @@ type Instance struct {
 	// registered the plugin while live updates arrive on the BGP watch
 	// goroutine -- so the lock is what makes the instance safe to share.
 	callMu sync.Mutex
+	// activeCall is used by WASI sleep, whose wazero hook has no context
+	// parameter. It is set only during initialization or under callMu.
+	activeCall context.Context
 }
 
 // Config describes one plugin to instantiate.
@@ -235,7 +240,13 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	}
 	inst.compiled = compiled
 
-	if err := admit(compiled, cfg.Capabilities); err != nil {
+	// Link trusted WASI host code before checking imports. No guest code
+	// runs here; admission compares imports with these exact signatures.
+	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
+		_ = rt.Close(ctx)
+		return nil, fmt.Errorf("wasm: link WASI: %w", err)
+	}
+	if err := admit(compiled, cfg.Capabilities, rt.Module(wasi_snapshot_preview1.ModuleName)); err != nil {
 		_ = rt.Close(ctx)
 		return nil, err
 	}
@@ -255,7 +266,14 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	// registration, and the operator's RPC never returns.
 	modCfg := wazero.NewModuleConfig().
 		WithName(cfg.Name).
-		WithStartFunctions()
+		WithStartFunctions().
+		WithSysWalltime().
+		WithSysNanotime().
+		WithNanosleep(inst.sleep).
+		WithRandSource(rand.Reader)
+	// Keep the resource defaults: no arguments, environment, filesystem
+	// mounts or sockets; stdin is EOF and stdout/stderr are discarded.
+	// Plugin diagnostics use vinbero.log and its existing rate limit.
 	instCtx, cancelInst := inst.callContext(ctx)
 	mod, err := rt.InstantiateModule(instCtx, compiled, modCfg)
 	cancelInst()
@@ -265,8 +283,8 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	}
 	inst.mod = mod
 
-	// Language runtimes that need to initialize do it here. TinyGo and
-	// Rust both emit a reactor initializer, and calling an exported
+	// Language runtimes that need to initialize do it here. Go, TinyGo and
+	// Rust emit a reactor initializer, and calling an exported
 	// function before it has run finds uninitialized globals and traps --
 	// which is exactly what a plugin author sees if the host forgets this.
 	if err := inst.initialize(ctx); err != nil {
@@ -493,7 +511,24 @@ func (i *Instance) freeGuest(ctx context.Context, ptr, length uint32) {
 // callContext applies the per-call budget. Cancelling it closes the
 // module, which is why a timeout is reported as an instance-level failure.
 func (i *Instance) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, i.limits.CallTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, i.limits.CallTimeout)
+	previous := i.activeCall
+	i.activeCall = callCtx
+	return callCtx, func() {
+		cancel()
+		i.activeCall = previous
+	}
+}
+
+// sleep keeps a WASI poll inside the current call budget. time.Sleep alone
+// would let a guest block the host beyond cancellation while in host code.
+func (i *Instance) sleep(ns int64) {
+	timer := time.NewTimer(time.Duration(ns))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-i.activeCall.Done():
+	}
 }
 
 // classify turns a wazero error into ErrCallTimeout when the deadline is

@@ -238,15 +238,15 @@ cplane-wasm-testdata: ## rebuild the control-plane plugin wasm test fixtures (re
 		wat2wasm $$f -o $${f%.wat}.wasm || exit 1; \
 	done
 
-.PHONY: cplane-example
-# -no-debug is what makes the artifact reproducible: without it TinyGo
-# embeds the absolute build path (and its own cache path) in DWARF, so the
-# committed .wasm would differ on every machine and the CI drift check
-# could never pass. It also cuts the module from ~83 KB to ~14 KB. A trap
-# therefore carries no stack info, which costs little: the host reports
-# the trap either way, and a plugin's own diagnostics go through the log
-# host function.
-cplane-example: ## build the control-plane plugin example (requires tinygo)
+.PHONY: cplane-example cplane-example-tinygo
+# Strip source paths and VCS metadata so CI reproduces the committed artifact.
+cplane-example: ## build the control-plane plugin example with standard Go
 	cd sdk/examples/cplane-custom-behavior && \
-		tinygo build -o plugin.wasm -target=wasm-unknown \
+		GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o plugin.wasm .
+
+# Optional smaller artifact; keep the default Go artifact intact.
+cplane-example-tinygo: ## build the control-plane plugin example with TinyGo 0.39.0
+	cd sdk/examples/cplane-custom-behavior && \
+		tinygo build -o plugin.tinygo.wasm -target=wasm-unknown \
 			-scheduler=none -gc=conservative -panic=trap -no-debug .

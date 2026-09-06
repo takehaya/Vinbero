@@ -588,6 +588,9 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	}
 
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		if _, err := p.withdrawSIDReferencesLocked(context.Background(), txn.sids); err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
 		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids, p.quotas.MaxLocalSIDs)
 		if err != nil {
 			return fmt.Errorf("apply commit: %w", err)
@@ -984,12 +987,13 @@ func (p *PluginOps) DiscardTransactions() {
 	p.open = make(map[uint64]*applyTxn)
 }
 
-// PruneOutOfScope removes the state this owner holds that its scope no
-// longer covers, and reports how much it removed.
+// PruneOutOfScope removes state this owner's capabilities or scope no longer
+// cover, and reports how much it removed. Revoking a capability must retract its
+// state here: the replacement guest cannot declare even an empty set of that kind.
 //
-// Narrowing a scope is the one case the desired-set model cannot repair on
-// its own. The apply path refuses a declaration naming anything outside
-// the scope, and refuses it whole -- so a plugin that goes on declaring
+// Narrowing a scope also needs host intervention. The apply path refuses a
+// declaration naming anything outside the scope, and refuses it whole -- so
+// a plugin that goes on declaring
 // what it declared before the change never reconciles, and what it wrote
 // under the wider scope stays installed. Withdrawing that here is what
 // makes the narrowing mean something immediately, rather than at the mercy
@@ -1019,7 +1023,7 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 			if e.Entry == nil {
 				continue
 			}
-			if p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode) == nil {
+			if p.caps.Has(wasm.CapHeadend) && p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode) == nil {
 				keep = append(keep, e)
 			}
 		}
@@ -1037,11 +1041,19 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 		held := p.localSIDs.LiveSIDs(p.owner)
 		keep := make([]LocalSID, 0, len(held))
 		for _, s := range held {
-			if p.guard.checkLocalSID(s) == nil {
+			if p.caps.Has(wasm.CapLocalSID) && p.guard.checkLocalSID(s) == nil {
 				keep = append(keep, s)
 			}
 		}
 		if len(keep) != len(held) {
+			pruned, err := p.withdrawSIDReferencesLocked(ctx, keep)
+			removed += pruned
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return removed, firstErr
+			}
 			_, res, err := p.localSIDs.Apply(p.owner, keep, p.quotas.MaxLocalSIDs)
 			removed += res.Pruned
 			if err != nil && firstErr == nil {
@@ -1058,6 +1070,32 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 		removed += pruned
 	}
 	return removed, firstErr
+}
+
+// withdrawSIDReferencesLocked retires references before an allocation or dispatch
+// entry changes. It applies to live commits, publication retries and authorization
+// pruning. A failed withdrawal leaves every SID intact. Called with applyMu held.
+func (p *PluginOps) withdrawSIDReferencesLocked(ctx context.Context, desired []LocalSID) (int, error) {
+	if _, _, err := p.localSIDs.prepareDesired(desired, p.quotas.MaxLocalSIDs); err != nil {
+		return 0, err
+	}
+	if p.advertise == nil {
+		return 0, nil
+	}
+	addresses := p.localSIDs.unchangedAddresses(p.owner, desired)
+	routes := p.advertise.LiveRoutes(p.owner)
+	keep := make([]AdvertisedRoute, 0, len(routes))
+	for _, route := range routes {
+		sid, _ := netip.ParseAddr(route.SRv6SID)
+		if _, retained := addresses[sid]; route.SRv6SID == "" || retained {
+			keep = append(keep, route)
+		}
+	}
+	if len(keep) == len(routes) {
+		return 0, nil
+	}
+	res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
+	return res.Pruned, err
 }
 
 // ReconcileAdvertised re-derives what this plugin originates and applies
@@ -1100,6 +1138,9 @@ func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) 
 	}
 	keep := make([]AdvertisedRoute, 0, len(held))
 	for _, r := range held {
+		if !p.caps.Has(wasm.CapAdvertise) {
+			continue
+		}
 		// A route stays only if the VRF it names is still in scope and
 		// still has a binding, which is the same question the apply path
 		// asks. What comes back carries the binding's current RD and route
