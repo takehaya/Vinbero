@@ -389,9 +389,17 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 // returns its group id for reuse.
 func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 	owner := a.vpnGroups.groupOwner()
+	// A failed retirement can remove the trigger or part of the group. An
+	// unchanged re-advertisement must rebuild both instead of taking the
+	// installed-fingerprint shortcut over that partially removed state.
+	d.installed = nil
 	if err := a.deleteTrigger(dk.family, dk.prefix); err != nil {
 		a.logger.Error("withdraw VPN trigger",
 			zap.String("prefix", dk.prefix), zap.Error(err))
+		// The old trigger still may reference this ID. Keep the group and
+		// its tracking until a later withdrawal or replacement can retry;
+		// reusing its ID for another prefix would redirect the old traffic.
+		return
 	}
 	// The trigger goes first: while the group still exists a stale trigger
 	// forwards correctly, whereas deleting the group first would leave the
