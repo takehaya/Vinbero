@@ -427,7 +427,7 @@ func TestLocalSIDInventoryUnregistersWithoutGuestOrManifest(t *testing.T) {
 }
 
 func TestLocalSIDInventoryRefusesMissingAndCorruptState(t *testing.T) {
-	for _, kind := range []string{"missing file", "missing directory", "invalid JSON", "unknown version", "duplicate", "wrong address", "unknown field"} {
+	for _, kind := range []string{"missing file", "missing directory", "invalid JSON", "unknown version", "missing records", "null records", "duplicate", "wrong address", "unknown field"} {
 		t.Run(kind, func(t *testing.T) {
 			store := newTestStore(t)
 			set := persistentSet(t, store, inventoryAllocator(t), newFakeSIDOps(), nil, nil)
@@ -461,6 +461,10 @@ func TestLocalSIDInventoryRefusesMissingAndCorruptState(t *testing.T) {
 					body = []byte("{")
 				case "unknown version":
 					doc["version"] = 99
+				case "missing records":
+					delete(doc, "records")
+				case "null records":
+					doc["records"] = nil
 				case "duplicate":
 					r := doc["records"].([]any)
 					doc["records"] = append(r, r[0])

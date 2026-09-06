@@ -97,6 +97,9 @@ func (s *sidInventoryStore) load() ([]sidRecord, error) {
 	if inv.Version != sidInventoryVersion {
 		return nil, fmt.Errorf("local SID inventory version %d is unsupported", inv.Version)
 	}
+	if inv.Records == nil {
+		return nil, fmt.Errorf("local SID inventory is missing its records array")
+	}
 	names := make(map[string]bool)
 	addresses := make(map[netip.Addr]bool)
 	reservations := make([]locator.SIDReservation, 0, len(inv.Records))
@@ -130,6 +133,9 @@ func (s *sidInventoryStore) load() ([]sidRecord, error) {
 }
 
 func (s *sidInventoryStore) save(records []sidRecord) error {
+	if records == nil {
+		records = []sidRecord{}
+	}
 	for i := range records {
 		owner, ok, err := bpf.ParsePluginOwnerTag(string(records[i].Owner))
 		if err != nil || !ok || !owner.IsBundle() {
