@@ -1358,12 +1358,13 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 		}
 	}
 
-	// Read entry first so aux can be cleaned up after successful delete.
-	// The lookup is a longest-prefix match, so it can answer with a broader
-	// entry that merely covers this prefix; the delete below decides whether
-	// what we read was really this prefix's own entry.
-	var entry SidFunctionEntry
-	hasEntry := m.objs.SidFunctionMap.Lookup(key, &entry) == nil
+	// A retry can find an absent entry with a remaining owner row. An LPM
+	// lookup alone would then return a covering SID and revoke its grant
+	// before the delete discovers the miss. Resolve the exact prefix first.
+	auxIndex, err := m.exactSidFunctionAuxIndex(key, false)
+	if err != nil {
+		return err
+	}
 
 	// Withdraw any decap-VRF grant keyed by this aux index first, while the SID
 	// entry and its owner are still present. The grant is keyed by aux index,
@@ -1378,9 +1379,9 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	// delete re-enters this path. Deleting the entry first and failing here
 	// would strand the grant and the index forever, because hasEntry would then
 	// be false on every retry.
-	if hasEntry && entry.AuxIndex != 0 {
-		if err := m.DeleteEndtVRFGrant(uint32(entry.AuxIndex)); err != nil {
-			return fmt.Errorf("withdraw decap-VRF grant for aux %d: %w", entry.AuxIndex, err)
+	if auxIndex != 0 {
+		if err := m.DeleteEndtVRFGrant(uint32(auxIndex)); err != nil {
+			return fmt.Errorf("withdraw decap-VRF grant for aux %d: %w", auxIndex, err)
 		}
 	}
 
@@ -1388,7 +1389,6 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	if err != nil {
 		return fmt.Errorf("failed to delete SID function entry: %w", err)
 	}
-	hasEntry = hasEntry && existed
 	if err := m.sidFunctionOwners.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete SID function owner: %w", err)
 	}
@@ -1398,8 +1398,8 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	// Builtin aux is freed in lockstep with the zero-write so a racing
 	// PluginAuxFree → PluginAuxAlloc cannot reassign idx between the
 	// owner check and the map op.
-	if hasEntry && entry.AuxIndex != 0 {
-		idx := uint32(entry.AuxIndex)
+	if existed && auxIndex != 0 {
+		idx := uint32(auxIndex)
 		_ = m.auxAlloc.WithOwnerLocked(idx, AuxOwnerBuiltin, func() error {
 			var zero SidAuxEntry
 			_ = m.objs.SidAuxMap.Put(idx, &zero)

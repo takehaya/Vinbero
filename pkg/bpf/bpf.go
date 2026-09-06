@@ -18,6 +18,7 @@ import (
 // across processes.
 var pinnedControlMaps = []string{
 	"sid_function_map",
+	"sid_function_owner_map", // ownership must survive with the dispatch entries
 	"sid_aux_map",
 	"aux_owner_map", // persistent owner tags paired with sid_aux_map
 	"headend_v4_map",

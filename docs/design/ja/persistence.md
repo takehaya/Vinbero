@@ -8,7 +8,8 @@
 |---|---|---|---|
 | `vinbero.yml` (設定ファイル) | 残る (disk) | 残る | そのまま再ロード |
 | XDP プログラムの attach | **消える** | **消える** | daemon 起動時に `internal.devices` に attach し直す |
-| SID function / aux | **消える** | **残る** (bpffs pin) | default: RPC / CLI で再投入 |
+| SID function / aux | **消える** | **残る** (bpffs pin)。SID owner も保存 | RPC / CLI で再投入。cplane plugin の SID は保存済み割り当てと再宣言で復旧 |
+| cplane plugin の SID 名と割り当て | cplane store 有効なら残る | 同左 | locator 登録より前に予約を復元。dispatch と grant は再宣言で作り直す |
 | Headend v4 / v6 / L2 | **消える** | **残る** (bpffs pin) | default: RPC / CLI で再投入 |
 | BD peer / VLAN table / FDB | **消える** | **残る** (bpffs pin) | default: RPC / CLI (FDB は学習でも埋まる) |
 | Bridge / VRF デバイス | カーネル netlink に残る / netns 単位 | 同左 | `state.json` から **自動 reconcile** |
@@ -22,9 +23,12 @@
 `state.json` に永続化するのは **Network Resource (Bridge / VRF) のみ** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
 
 control-plane plugin の module と登録内容は別の [cplane store](cplane-plugin.md)
-に保存されます。local SID の名前と address の対応は daemon の memory にのみ保持され、
-daemon 再起動を跨ぐ SID の安定性は保証されません
-([local SID と daemon 再起動](cplane-plugin.md#local-sid-と-daemon-再起動))。
+に保存されます。store 有効時は `local-sids/state.json` に local SID の名前と address、
+locator 定義、dispatch 宣言も保存し、`local-sids.version` で導入済みを記録します。
+`pin_maps` の有無にかかわらず、起動時に割り当てを予約し、plugin の再宣言で同じ SID に
+entry を再作成します。aux index と VRF ifindex はその時点で求め直します。inventory が
+欠落・破損している場合は起動を拒否します。store 無効時の SID 名は memory のみです。
+詳細は [local SID と daemon 再起動](cplane-plugin.md#local-sid-と-daemon-再起動) を参照してください。
 
 `pkg/netresource/manager.go` の ResourceManager が:
 1. 起動時に `state.json` を読み込み、記録されていた Bridge / VRF デバイスを netlink で確認

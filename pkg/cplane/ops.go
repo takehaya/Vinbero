@@ -1054,7 +1054,7 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 				}
 				return removed, firstErr
 			}
-			_, res, err := p.localSIDs.Apply(p.owner, keep, p.quotas.MaxLocalSIDs)
+			res, err := p.localSIDs.PruneExcept(p.owner, keep)
 			removed += res.Pruned
 			if err != nil && firstErr == nil {
 				firstErr = err
@@ -1234,7 +1234,7 @@ func (p *PluginOps) Flush() error {
 		// advertised for state that is gone is a blackhole its peers keep
 		// sending into.
 		if err := p.advertise.WithdrawOwner(context.Background(), p.owner); err != nil {
-			firstErr = err
+			return err
 		}
 	}
 	if p.localSIDs != nil {

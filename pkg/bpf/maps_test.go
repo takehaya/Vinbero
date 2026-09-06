@@ -419,6 +419,39 @@ func TestBpfLoad_PinMapsRoundTrip(t *testing.T) {
 		if got.AuxIndex == 0 {
 			t.Errorf("aux_index should be preserved across reload, got 0")
 		}
+		owner, ok, err := mapOps.GetSidFunctionOwner("fc00:1::1/128")
+		if err != nil || !ok || owner != OwnerRPC {
+			t.Fatalf("SID owner lost across pinned reload: %q %v %v", owner, ok, err)
+		}
+	}
+}
+
+func TestDeleteMissingSIDPreservesCoveringGrant(t *testing.T) {
+	h := newXDPTestHelper(t)
+	entry := &SidFunctionEntry{Action: 32}
+	if err := h.mapOps.CreateSidFunction("fd00:1::/64", entry, NewSidAuxPluginRaw(nil), OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.mapOps.PutEndtVRFGrant(uint32(entry.AuxIndex), 99); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an interrupted delete that removed the /128 before its owner.
+	key, err := buildLpmKeyV6("fd00:1::1/128")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.mapOps.sidFunctionOwners.Put(key, OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.mapOps.DeleteSidFunction("fd00:1::1/128", OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	var grant BpfPluginEndtVrf
+	if err := h.objs.PluginEndtVrfMap.Lookup(uint32(entry.AuxIndex), &grant); err != nil {
+		t.Fatalf("missing /128 revoked covering /64 grant: %v", err)
+	}
+	if _, ok, err := h.mapOps.GetSidFunctionOwner("fd00:1::1/128"); err != nil || ok {
+		t.Fatalf("stale owner not cleaned: %v %v", ok, err)
 	}
 }
 

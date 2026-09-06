@@ -89,7 +89,9 @@ type AllocatedSID struct {
 	// declaration coming back would be seen as already-installed and the
 	// grant-less entry would drop forever -- so matches always fails for it
 	// and the next reconcile removes the entry by prefix and reinstalls.
-	stranded bool
+	stranded         bool
+	reservation      locator.SIDReservation
+	recoverOwnerless bool
 }
 
 // matches reports whether an installed SID already carries what a
@@ -111,20 +113,20 @@ func (a AllocatedSID) matches(want LocalSID) bool {
 //
 // Allocation is the one part of the capability surface that is not purely
 // declarative -- an address has to come from somewhere and be remembered.
-// Naming each SID is what keeps even that idempotent within a daemon run:
-// a plugin instance that comes back with no memory declares the same names
-// and is handed the same addresses, because the host still holds them.
-//
-// A daemon restart is different. The names live only here, in memory, so
-// nothing can map a surviving pinned entry back to the name it was
-// installed for. What the host does instead is sweep: the first time an
-// owner declares anything, entries under that owner which this run did not
-// install are removed, and the plugin is handed fresh addresses. Leaving
-// them would be worse -- nothing dispatches to them and nothing can ever
-// remove them again.
+// Naming each SID makes redeclaration idempotent. With a cplane store, the
+// inventory persists these identities and restores their reservations before
+// ordinary allocation. Dispatch and VRF grants are rebuilt on redeclaration;
+// recorded addresses are not proof that forwarding has been installed.
+// Without a store, names live only for this daemon run. Unknown entries whose
+// owner can be verified are swept once; ownerless legacy entries are left alone.
 type LocalSIDSet struct {
-	alloc SIDAllocator
-	sids  SIDFunctionOps
+	// opMu serializes complete reconciles, including inventory snapshots shared
+	// by different owners. mu below only protects short in-memory reads.
+	opMu            sync.Mutex
+	inventory       *sidInventoryStore
+	persistentAlloc PersistentSIDAllocator
+	alloc           SIDAllocator
+	sids            SIDFunctionOps
 	// grants records the VRF a plugin-dispatched decap is allowed into. Nil
 	// leaves a DecapVRF declaration refused rather than silently ungranted --
 	// which would install a SID the data plane then drops on.
@@ -200,6 +202,8 @@ func (l *LocalSIDSet) prepareDesired(desired []LocalSID, quota int) (map[string]
 // before any new one is taken, so a plugin cycling through names does not
 // hold two allocations for one purpose.
 func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) ([]AllocatedSID, ApplyResult, error) {
+	l.opMu.Lock()
+	defer l.opMu.Unlock()
 	var res ApplyResult
 	if owner == "" {
 		return nil, res, bpf.ErrEmptyOwner
@@ -211,6 +215,9 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 
 	if err := l.sweepLeftovers(owner); err != nil {
 		return nil, res, err
+	}
+	if l.inventory != nil {
+		return l.applyPersistent(owner, byName, names)
 	}
 
 	l.mu.Lock()
@@ -422,6 +429,13 @@ func (l *LocalSIDSet) sweepLeftovers(owner bpf.OwnerTag) error {
 // ReleaseOwner removes every local SID an owner holds. It is what
 // unregistering runs.
 func (l *LocalSIDSet) ReleaseOwner(owner bpf.OwnerTag) error {
+	l.opMu.Lock()
+	defer l.opMu.Unlock()
+	if l.inventory != nil {
+		if err := l.sweepLeftovers(owner); err != nil {
+			return err
+		}
+	}
 	l.mu.Lock()
 	current := l.live[owner]
 	names := make([]string, 0, len(current))
@@ -439,7 +453,11 @@ func (l *LocalSIDSet) ReleaseOwner(owner bpf.OwnerTag) error {
 		if !ok {
 			continue
 		}
-		if err := l.remove(owner, got); err != nil {
+		remove := l.remove
+		if l.inventory != nil {
+			remove = l.removePersistent
+		}
+		if err := remove(owner, got); err != nil {
 			// Kept, not forgotten. The address and the name are what a
 			// retry needs, and dropping them here would leave a dispatch
 			// entry in the map that nothing knows about and nothing can
@@ -515,7 +533,7 @@ func (l *LocalSIDSet) OwnsSID(owner bpf.OwnerTag, sid netip.Addr) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, got := range l.live[owner] {
-		if got.SID == sid {
+		if got.SID == sid && (l.inventory == nil || !got.stranded) {
 			return true
 		}
 	}

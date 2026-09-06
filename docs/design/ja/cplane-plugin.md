@@ -459,8 +459,8 @@ scope の縮小は plugin の desired-set 宣言だけでは直りません。�
 状態が残ります。そこで登録の時点で host が範囲外の状態を prune します。再登録に
 限らず restore でも走らせます。daemon 再起動をまたいだ状態は pinned map に残って
 おり、狭い scope で restore した plugin はそれを 1 つも触れないためです。
-実装は「まだ許される部分集合を desired set として apply する」形で、残りは
-既存の reconcile が落とします。
+headend はまだ許される部分集合を desired set として apply します。local SID は
+削除する名前だけを選び、残す SID の再作成を伴わずに prune します。
 
 capability を削除した場合も、scope が変わらなくても host がその種類の状態を
 撤去します。権限を失った plugin は空集合の宣言もできないためです。
@@ -468,12 +468,11 @@ local SID を撤去する前に、その SID を参照する広告を withdraw �
 withdraw が失敗した場合は SID と割り当てを維持し、撤去の再試行に備えます。
 撤去が失敗した場合は再登録を成功扱いにせず、エラーを返します。
 
-この prune の視界は同一 run 内の再登録と restore で違います。headend は
-どちらの場合も BPF map を owner ごとに列挙して見えます。local SID と広告は
-in-memory の集合からしか見えないので、再登録では 3 面とも prune され、
-restore 直後は headend しか prune されず、local SID と広告は届かないまま
-残ります (既知の限界の節)。つまり restore を跨いだ scope の縮小は、いまは
-headend に対してだけ認可の失効として働きます。
+headend は BPF map の owner 記録から、local SID は live 集合から列挙します。
+store 有効時は SID inventory が guest より先に live 集合へ復元されるため、
+再宣言前でも scope の縮小によって local SID を撤去できます。広告の集合は
+session の再起動で失われ、plugin の宣言から作り直します。store 無効時や inventory
+導入前の local SID の制約は、既知の限界の節に記載しています。
 
 manifest の format version は 2 です。scope は認可情報なので、scope を持たない
 version 1 の manifest (scope 導入前の build が書いたもの) を空 scope で restore
@@ -634,13 +633,13 @@ service SID として自分の owner で install します。plugin が同じ pr
 
 | 保証されること | 破れる場合 | operator の対処 |
 |---|---|---|
-| 起動時は store にある behavior claim を demux の start より前に予約する。restore に失敗しても claim を保持し、実装するものが無い codepoint の経路を built-in に渡さず withhold する。 | restore 失敗そのものではこの保証は破れない。 | warning と stats の unrestored 枠を確認する。復旧させないなら forget で claim と store を落とし、map の残存 state は operator が引き受ける。 |
+| 起動時は store にある behavior claim を demux の start より前に予約する。restore に失敗しても claim を保持し、実装するものが無い codepoint の経路を built-in に渡さず withhold する。 | restore 失敗そのものではこの保証は破れない。 | warning と stats の unrestored 枠を確認する。復旧させないなら unregister で状態を撤去する。SID inventory の無い plugin を forget する場合は残存 state を operator が引き受ける。 |
 | claim 取得後の retract は plugin の build と subscribe が済んでから行い、rib にある対象 behavior の経路を built-in から withdraw して最初の宣言より前に prefix を空ける。 | admission など publish 前に失敗した module では retract を行わない。元に戻せない副作用だけが残ることを防ぐ。 | 不要。 |
 | unregister は owner state の flush が成功してから claim を解放する。flush が失敗した場合は claim と store を保持し、plugin を registry に dead として戻す。 | flush は面ごとに進み部分削除を rollback しない。また built-in が後から作るのは既定の単一 SID の H.Encaps で、plugin が宣言していた mode や segment list や source は再現されない。 | flush 失敗は unregister を retry する。unregister 後の churn で転送の形が変わり得ることは運用条件として扱う。 |
 | upgrade は behavior claim を新しい集合へ 1 回で置換し、途中で別の plugin に codepoint を取られて巻き戻せなくなる形を避ける。publish 前の失敗は前の集合へ戻す。 | behavior を減らす upgrade では、外した codepoint の claim が旧 state の reconcile より先に返り、その間に届いた経路は built-in に渡る。 | 窓を避けたい場合は unregister で flush してから新しい集合で登録し直す。address は取り直しになる。 |
-| 通常の unregister は in-memory の inventory から owner state を flush してから claim を返す。 | daemon 再起動直後、plugin が local SID を宣言し直す前に unregister すると、前の run の pinned dispatch entry が flush の視界に入らず、残したまま claim が解放される。 | plugin owner の entry は SID 削除 RPC の owner 検査が拒み、force-delete の RPC も無いので、operator が消す手段はいま無い。残存を確認したら、その slot と locator を再利用しないでおく。owner ごとの inventory から flush する形は繰越し。 |
+| store 有効時は、再起動後の再宣言前でも SID inventory から owner state を撤去できる。 | inventory 導入前の SID 名は復元できない。owner 記録も失われた旧 entry は sweep できない。 | inventory を持つ plugin は WASM が読めなくても unregister する。旧 entry の残存を確認した場合は slot と locator を再利用しない。 |
 | manifest と state が揃っていれば、再起動時にも claim を予約して pinned state と built-in の対応を保つ。 | 新規登録や behavior を足す upgrade が manifest の rename 前に persist で失敗すると、その run は instance と claim と state を持って動くが、再起動時は manifest が無いので claim が予約されず、pinned state の codepoint が built-in へ流れる。 | persist 失敗の error を受けたら、登録を retry して manifest を揃えるか、unregister で state ごと flush する。 |
-| claim の寿命は plugin の状態の寿命に合わせる、が全体の不変条件である。 | forget は operator が明示的にこの対応を破る操作で、daemon が消し方を知らない状態を残したまま claim と予約を返す。 | 残存 state を確認し、force-delete の経路が入るまでは返された slot と locator を再利用しない。以後の残存 state は operator が引き受ける (既知の限界の節)。 |
+| claim の寿命は plugin の状態の寿命に合わせる、が全体の不変条件である。 | local SID inventory の無い plugin の forget は、残存 state を残したまま claim と scope の予約を返す。 | 残存 state を確認し、force-delete の経路が入るまでは返された slot と locator を再利用しない。以後の残存 state は operator が引き受ける (既知の限界の節)。 |
 
 ## 広告の所有権
 
@@ -706,32 +705,32 @@ prefix が locator に含まれるかと、VRF に binding があるかは daemo
 prefix や範囲外の slot) は harness でも拒否され、harness が daemon より緩くなる
 のを防ぎます。
 
-restore-time の prune は headend map しか読みません。`LiveSIDs` と `LiveRoutes` は
-in-memory の集合を読むので、再起動直後は空で、前の run が確保した local SID や
-広告経路は prune の視界に入らず orphan になります。local SID は plugin が次に
-local SID を宣言したときの sweep で片付きますが、scope を狭められた plugin は
-その宣言をしなくなるので、それまで残ります。map から owner ごとに読む形へ広げるのは
-繰越しです。
+cplane store が有効な場合、local SID の inventory は guest の起動前に復元され、
+restore-time の scope prune からも見えます。prune は権限を失った SID だけを削除し、
+残す SID の再作成は plugin の再宣言まで待ちます。広告の集合は session とともに
+失われるため、plugin の宣言で作り直します。store が無効な場合や inventory 導入前の
+SID は名前を復元できず、記録された owner から判定できる entry だけが sweep の対象です。
 
 どの surface がどこで追跡され、prune と flush のどこから見えるかをまとめます。
 
 | surface | 追跡場所 | restore 直後の prune | 再登録の prune | unregister の flush |
 |---|---|---|---|---|
-| headend | BPF map。owner ごとに全走査する | 見える。restore-time prune が扱える唯一の surface | 見える | 見える。広告と local SID の後に消し、失敗した entry と lease は残る |
-| local SID | in-memory の live 集合。dispatch entry 自体は pinned map に残り得る | 見えない。再起動直後は空で、前の run の entry は次の宣言時の sweep まで残る | 見える | 通常は見える。restore 直後で再宣言前の pinned entry だけ視界に入らない |
+| headend | BPF map。owner ごとに全走査する | owner 記録がある entry は見える | 見える | 見える。広告と local SID の後に消し、失敗した entry と lease は残る |
+| local SID | cplane store の inventory と、それを復元した live 集合 | store 有効時は見える。削除対象だけを撤去する | 見える | 再宣言前でも inventory から削除できる。予約は map 撤去と inventory 更新の完了後に解放する |
 | 広告 | in-memory の live 集合。wire の所有は gobgp session の producer が追跡する | 見えない。再起動直後は空で、wire 側も session ごと消えている | 見える | 見える。最初に withdraw する |
 | behavior claim | demux の claim registry。withdraw の判定は path 単位の ledger も使う | prune の対象外。起動時に manifest から demux start より先に予約する | prune の対象外。upgrade は instantiate より前に新集合へ置換する | flush の対象外。flush 成功後に解放する |
 | lease | in-memory の lease table。per-entry の owner map が最終 enforcement | headend の owner 走査からは見え、local SID と広告の分は見えない | owner state と一緒に見え、prune に伴って減る | owner state と一緒に消える。消せなかった entry の lease は残す |
 
-forget は claim と store と slot / locator の予約を返しますが、map の状態は
-残します。daemon はそれが何のためのものかを知らないためです。返った slot を
-別の plugin に渡すと、残った dispatch entry の SID がその新しい program へ
-dispatch し、新 program は旧 plugin の aux bytes を自分の layout として読み
-ます。予約が防いでいた取り違えを forget は operator の判断で外すことになり
-ますが、plugin owner の entry は SID 削除 RPC の owner 検査が拒み、force-delete
-の RPC も公開していないので、operator に消す手段がいまはありません。できるのは
-残存 state を確認して、その slot と locator を再利用しないでおくことだけです。
-owner ごとの inventory から強制的に片付ける形と force-delete 経路は繰越しです。
+local SID の inventory を持つ plugin は、WASM が読み込めなくても `unregister` で
+owner の状態を削除できます。inventory が残る間の `forget` は拒否します。
+別 owner の entry との衝突や map 操作の失敗はエラーとして残し、claim と予約を保持します。
+衝突先の正しい owner を確認して解消してから `unregister` を再試行してください。
+
+inventory を持たない unrestored plugin の `forget` は、従来どおり claim と登録と
+slot / locator の scope 予約を返し、map の状態を残します。名前を復元できない旧 SID や
+headend の残存 state はこの操作では削除できません。残存 entry が参照する slot を
+別の program に渡すと旧 aux bytes を新しい layout として読むため、その slot と
+locator を再利用しないでください。inventory の無い state の強制 cleanup は未実装です。
 
 control plane half と data plane half は機構としては結ばれていません。同一
 plugin であることの照合も、slot に program が載っているかの readiness 確認も、
@@ -854,11 +853,11 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 | 遷移 | behavior claim | store | running registry | map の状態と広告 |
 |---|---|---|---|---|
 | register (新規) | 取得。instantiate 前の失敗では巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
-| restore 成功 | 起動時の予約のまま | 保持 | 追加 | map は pinned のまま、replay 後の宣言が差分を吸収。広告は宣言で作り直す |
-| restore 失敗 | 保持 (withhold 継続) | 保持 | publish 前の失敗は載せず unrestored に記録。publish 後の persist 失敗は動いたまま unrestored にも載る (下記) | prune 前の失敗は触らない。prune まで進んだ失敗は削除できた分だけ減る。slot と locator の予約は manifest から scope が読めた分だけ残る |
+| restore 成功 | 起動時の予約のまま | 保持 | 追加 | local SID は inventory から予約し、再宣言で同じ address に再作成。広告も宣言で作り直す |
+| restore 失敗 | 保持 (withhold 継続) | 保持 | publish 前の失敗は載せず unrestored に記録。publish 後の persist 失敗は動いたまま unrestored にも載る (下記) | prune 前の失敗は触らない。prune まで進んだ失敗は削除できた分だけ減る。slot と locator の予約は manifest の scope と SID inventory から残る |
 | upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
-| unregister | flush 成功後に解放 | flush 成功後に削除を試みる。失敗は warning で unregister は成功のまま | 削除。flush 失敗時は戻す | owner の状態を削除し広告を withdraw |
-| forget (未走行のみ) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
+| unregister | flush 成功後に解放 | flush 成功後に削除を試みる。running plugin の削除失敗は warning。unrestored plugin の削除失敗は error として再試行できる | 削除。flush 失敗時は dead または unrestored として残す | guest が起動しなくても owner の状態を削除し広告を withdraw |
+| forget (未走行かつ local SID inventory 無し) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
 
 部分失敗はそれぞれ次の形で残ります。
 
@@ -880,10 +879,12 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 - restore と再登録の prune は面ごと・entry ごとに進み、途中の失敗を
   rollback しません。prune で失敗した restore の map は「触らない」では
   なく、削除できた分だけ減った状態で残ります。
-- unregister の flush は広告の withdraw、local SID、headend の順に進み、
-  失敗した面を飛ばして残りも試みます。消せなかった分は lease ごと残り、
-  rollback はしません。plugin は registry に dead として戻るので operator が
-  retry できます。flush 成功後の store 削除の失敗は warning に留めます。
+- unregister の flush は広告の withdraw、local SID、headend の順に進みます。
+  withdraw が失敗した場合は SID と headend の削除へ進みません。それ以降の削除は
+  失敗した面を保持して残りも試み、削除済みの entry は rollback しません。
+  running plugin は dead として戻り、unrestored plugin はそのまま残るので retry
+  できます。running plugin の flush 成功後の store 削除失敗は warning に留めます。
+  unrestored plugin では store 削除の失敗も error とし、claim と管理情報を保持します。
   削除は manifest、module、directory の sync の順に進むので、どの段階で
   失敗したかで結果が分かれます。manifest の unlink 前なら restart が
   plugin を持ち帰り (状態は flush 済みなので空から再開するだけです)、
@@ -939,7 +940,7 @@ stateDiagram-v2
     Stored --> RunningUnrestored: restore の publish 後 persist 失敗
 
     Unrestored --> Running: 再登録または次回 restore の成功で unrestored を消す
-    Unrestored --> Forgotten: forget 成功。claim と store と slot / locator の予約を解放
+    Unrestored --> Forgotten: SID inventory 無しで forget 成功。claim と store と scope の予約を解放
     Unrestored --> ForgetPartial: forget の途中失敗。claim だけ先に失う
 
     RunningUnrestored --> Running: 登録の retry 成功で unrestored を消す
@@ -1040,17 +1041,54 @@ host から呼ばれている間だけ動き、定期処理には tick を使い
 
 ## local SID と daemon 再起動
 
-local SID の名前は host の memory にしかありません。pin された map では
-前回起動の entry が残りますが、どの宣言がその address を入れたのかを
-辿る手段がありません。同じ名前を宣言し直した plugin に同じ address が
-戻る保証は無く、別の address になった古い entry は誰も dispatch せず
-誰も消せないまま残ります。
+`settings.cplane_plugins.enabled: true` では、store の `local-sids/state.json` に
+plugin 名、SID 名、address、locator 定義と function、slot、aux bytes、DecapVRF を
+保存します。`local-sids.version` は inventory の導入済み marker です。
+plugin の manifest や WASM を更新しても、この inventory は置き換えません。
 
-そこで owner ごとに 1 回だけ sweep します。その owner のもので、今回の
-run が入れたのではない entry を消します。address の安定性は 1 回の daemon
-実行の中では保たれ、再起動を跨ぐと保証されません。allocator は空から
-作り直すので、割り当ての順が同じなら偶然同じ address が戻ることもあり、
-それを当てにはできません。
+同じ plugin 名・SID 名・locator の address 構造なら、daemon 再起動後も同じ SID を
+返します。`pin_maps` が無効でも割り当ては維持します。prefix、block / node / function /
+argument の長さ、behavior が変わった locator は拒否します。auto-allocation の範囲変更は
+許可し、既存の function は範囲外になっても予約します。
+
+起動時は config の locator と exporter より先に inventory を読み、address を予約します。
+未登録の locator を自動で作ることはなく、後から同じ定義で登録された際に予約した
+function を先に確保します。通常の SID 解放ではこの予約を返せません。locator の force
+削除は locator 自体を消しても予約を保留として残し、同じ定義での再登録を可能にします。
+BGP 無効時にも予約を保護しますが、その run では plugin の起動と SID の再作成は行いません。
+
+inventory は割り当ての記録であり、map への適用成功の記録ではありません。再起動直後の
+SID は未確認として扱い、plugin が再宣言した際に dispatch を撤去して再作成します。
+この間に短い転送断があります。aux index と VRF ifindex は保存せず、現在の entry と
+VRF から求め直します。locator や VRF が未登録なら宣言をエラーにし、予約を保持します。
+依存を登録した後は plugin の tick または次の宣言で再試行します。
+
+pin 有効時は `sid_function_owner_map` も dispatch とともに保存します。owner 記録が
+無い残存 entry は、復元済み inventory の exact /128 と slot・flavor が一致した場合だけ
+撤去・再作成します。別 owner の entry や内容の異なる ownerless entry は変更しません。
+新規割り当てで既存 entry に衝突した場合は、inventory を作る前に拒否します。
+
+割り当ては inventory の atomic write と file / directory の fsync が成功してから
+map に入れ、map と grant の作成に成功してから guest に address を返します。保存または
+install が失敗した場合は成功通知せず、予約を保持して再試行します。内容変更時は参照広告を
+withdraw し、古い dispatch を撤去してから新しい宣言を保存・適用します。同じ locator 内の
+更新は address を維持します。変更途中の失敗でも割り当ては返しません。
+
+削除は参照広告の withdraw、dispatch と grant の撤去、inventory からの削除を保存・同期、
+allocator の予約解放の順です。途中失敗では追跡を保持します。rename 後の fsync 失敗では
+新版が見えている可能性があるため、失敗を未書き込みとみなして address を返しません。
+同じ内容の宣言がこの run で適用済みなら、map の書き換えも inventory の保存もしません。
+
+inventory と marker が無い旧 store は空の inventory へ移行します。旧 entry から SID 名を
+推測して復元することはありません。記録された owner が一致する未知の entry は最初の宣言時に
+sweep しますが、inventory 導入前に owner 記録も失われた entry は自動削除できません。
+導入後の inventory 欠落、破損、未知の version、重複・不整合な割り当ては daemon の起動を
+拒否します。空として起動すると他の allocator 利用者が使用中の SID を再取得するためです。
+store をバックアップから復旧して再起動してください。store 全体の削除や永続化の無効化は
+割り当ての維持対象外です。複数 daemon で同じ store を共有する構成はサポートしません。
+
+store 無効時の SID 名は memory のみで保持し、address の安定性は一回の daemon 実行内に
+限られます。永続化の有無にかかわらず、data plane half の program の登録は別途必要です。
 
 ## まだ無いもの
 
@@ -1092,8 +1130,7 @@ Copilot が行数上限でレビューできないためです。以後の追加
 - EVPN advertise の producer 分離。exporter と operator の RPC の 2 つの書き手が
   あるのに無名の producer を共有しています。EVPN の withdraw は producer を
   見ずに path を消すので、名前を付けるだけでは足りません。
-- restore-time prune の local SID / 広告への拡張。いまは map から読める headend
-  しか片付けられません。
+- inventory 導入前の local SID と、再起動を跨ぐ広告の追跡。
 - binding 再導出を RPC の critical section の外へ出し、retry と counter を足す。
   いま commitBinding は共有 mutex を握ったまま全 plugin の経路を再広告し、失敗は
   log するだけです。
@@ -1101,7 +1138,7 @@ Copilot が行数上限でレビューできないためです。以後の追加
   reconcile (data plane 境界の節)。
 - control plane half と data plane half の identity と readiness の結合
   (既知の限界の節)。
-- owner ごとの inventory による、forget 後の残存 state の強制 cleanup
+- inventory の無い旧 state に対する強制 cleanup
   (既知の限界の節)。
 - restore 中の persist 失敗で plugin が running と unrestored の両方に載る
   二重表示の解消 (lifecycle の節)。
