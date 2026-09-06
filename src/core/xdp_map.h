@@ -30,6 +30,33 @@ struct {
     __uint(max_entries, 512);
 } sid_aux_map SEC(".maps");
 
+// plugin_endt_vrf: the decap VRF a plugin's SID is granted, for when a plugin
+// tail-calls a built-in End.DT4/DT6/DT46. The built-in cannot read the
+// plugin's aux -- the aux discriminator nulls it, because the plugin's
+// plugin_raw bytes read as l3vrf.vrf_ifindex would let the plugin decap into
+// any VRF -- so the trusted VRF lives here instead. It is written only by the
+// control plane from the plugin's VRF scope, and BPF_F_RDONLY_PROG so no BPF
+// program (the plugin's included) can forge it; a syscall write from the
+// control plane still succeeds.
+//
+// Keyed by the SID's aux_index (sid_function_entry.aux_index), which the
+// built-in reads straight out of tailcall_ctx in both the SRH and the reduced-
+// encap paths -- no need to re-parse the outer header the reduced-encap path
+// has already stripped. The control plane allocates a non-zero aux index for
+// every plugin SID that declares a decap VRF, so index 0 (the "no aux"
+// sentinel) always means "no grant".
+struct plugin_endt_vrf {
+    __u32 vrf_ifindex;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, struct plugin_endt_vrf);
+    __uint(max_entries, 1024);
+    __uint(map_flags, BPF_F_RDONLY_PROG | BPF_F_NO_PREALLOC);
+} plugin_endt_vrf_map SEC(".maps");
+
 // aux_owner_map: per-idx owner tag for sid_aux_map. ARRAY map paired with
 // sid_aux_map (same key=u32 idx, same max_entries) so the userspace
 // allocator can persist owner identity across daemon restart. Key 0 is

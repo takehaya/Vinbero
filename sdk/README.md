@@ -1,9 +1,19 @@
 # Vinbero Plugin SDK
 
-Vinbero's plugin SDK lets you extend the XDP data plane with custom tail
-call targets without modifying vinbero itself. Plugins run in reserved
-PROG_ARRAY slots and are loaded/unloaded dynamically over the Connect
-RPC `PluginService` API or the `vinbero plugin` CLI.
+Vinbero's plugin SDK lets you extend vinbero without modifying it. There
+are two halves, and a plugin may be either or both.
+
+A **data-plane plugin** is an eBPF object that runs in a reserved
+PROG_ARRAY slot, extending the XDP data plane with custom tail call
+targets. That is what most of this document is about.
+
+A **control-plane plugin** is a WebAssembly module that runs inside
+vinberod: it sees the BGP routes vinbero receives, and declares the
+forwarding state, the local SIDs and the advertisements it wants. See
+[Control-plane plugins](#control-plane-plugins) below.
+
+Both are loaded and unloaded dynamically over the Connect RPC
+`PluginService` API or the `vinbero plugin` CLI.
 
 ## Slot ranges
 
@@ -209,3 +219,74 @@ layout (it is decoded from the on-wire raw bytes via
 
 For packet capture / deep inspection, use the external `xdp-ninja` tool.
 The SDK does not require any BPF-side instrumentation for this.
+
+
+## Control-plane plugins
+
+A control-plane plugin is a WebAssembly module. Where a data-plane plugin
+decides what happens to a packet, a control-plane plugin decides what the
+forwarding state should be: it is handed the routes vinbero receives and
+declares what it wants installed, advertised, or allocated.
+
+The case it exists for is an SRv6 endpoint behavior of your own. The
+behavior is a 16-bit codepoint inside the SID TLV, so a plugin can claim
+one, advertise routes naming it, and act on routes carrying it -- with no
+new BGP family and nothing to standardize first. Vinbero's own appliers
+never see a claimed route, because they read a service SID without
+consulting its behavior and would install it with the wrong meaning.
+
+### The contract
+
+Everything crossing the boundary is protobuf, defined in
+`vinbero/v1/cplane_plugin.proto` (shipped in this tarball under
+`share/vinbero-sdk/proto/`). Generate bindings from it in whatever
+language you write the plugin in.
+
+The module exports a small ABI -- `alloc`, `free`, `handle_events`,
+`vinbero_abi_version`, and optionally `configure`, `on_tick` and the
+reactor initializer `_initialize` -- and imports host functions from the
+`vinbero` module. A module missing `vinbero_abi_version` is refused at
+registration: it is what lets the daemon turn away a plugin built against
+an ABI it no longer implements, rather than letting it trap on the first
+call into a function whose signature moved.
+
+Which host functions are linked depends on the capabilities the plugin was
+granted. That is the coarse half of the gate: a plugin granted nothing that
+writes cannot reach the apply functions at all -- they are not calls that
+fail but functions it cannot import. The apply functions are shared across
+the kinds of declaration, so which kind a plugin may declare is checked
+where it opens the transaction instead: one granted `advertise` alone is
+refused when it opens a headend transaction.
+`docs/design/ja/cplane-plugin.md` documents the ABI and the lifecycle in
+full.
+
+### Writing one
+
+The [Go guest SDK](go/cplane/README.md) supplies Go WASM entry points,
+typed events and desired-set declarations, and a prefix-route view that handles
+BGP replay boundaries. The plugin supplies route selection and the forwarding
+state it wants. Host ownership and scope checks still apply to every declaration.
+
+Standard Go WASI reactors are the default build; TinyGo remains an optional
+smaller artifact. The worked example is
+`sdk/examples/cplane-custom-behavior/`, which implements both directions
+of the custom-behavior case and is what the `cplane-plugin-2site` interop
+lab runs. Its README covers the build flags and why each is needed.
+
+The guest SDK is a Go package in this repository's module. The header/proto
+tarball does not install Go packages; use a checkout or a Go module dependency
+pinned to a Vinbero revision containing the SDK.
+
+Rust is a natural fit for this ABI -- `wasm32-unknown-unknown` with
+`prost` in a `no_std + alloc` profile covers everything the boundary needs
+-- but no Rust shim ships here yet, because none has been built and tested
+against the daemon. The ABI is small and fully documented, so writing one
+does not require anything this SDK withholds.
+
+### Testing one
+
+`sdk/go/cplaneharness` runs a plugin against the real runtime with no
+daemon: it drives the sequences that matter (a rib replay, a restart, a
+refused commit) and hands back what the plugin declared as ordinary Go
+values. A plugin that quietly depends on state from before a restart
+passes every other test and fails there.

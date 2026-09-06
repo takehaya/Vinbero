@@ -1,0 +1,1263 @@
+package cplane
+
+import (
+	"context"
+	"fmt"
+	"net/netip"
+	"strings"
+	"sync"
+
+	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
+
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
+	"github.com/takehaya/vinbero/pkg/headend"
+)
+
+// PluginOps is the capability surface behind one plugin's host functions.
+//
+// It is built per plugin and closed over that plugin's owner tag, so the
+// identity a write is attributed to is fixed when the plugin is
+// registered. A plugin cannot name an owner in a call, which is what keeps
+// one plugin from writing as another.
+type PluginOps struct {
+	owner   bpf.OwnerTag
+	headend *headend.Reconciler
+	caps    wasm.Capabilities
+	// guard bounds which keys this plugin may name, and derives the parts
+	// of an advertisement that are not the plugin's to spell. A nil guard
+	// permits nothing: a plugin whose operator said nothing about where it
+	// may write is one that observes and logs.
+	guard       *Guard
+	leases      *Leases
+	advertise   *AdvertiseSet
+	localSIDs   *LocalSIDSet
+	quotas      Quotas
+	onLocalSIDs func([]AllocatedSID) bool
+	// notifiedSIDs remembers which allocations this instance has already
+	// been told about, keyed by name and carrying the address it was given.
+	notifiedSIDs map[string]netip.Addr
+	encapSource  func() (netip.Addr, error)
+	logger       *zap.Logger
+	// applyMu is shared by every plugin under one manager, and is held for
+	// the whole of a reconcile.
+	//
+	// Keep the existing cross-kind plugin lifecycle ordering here. Headend
+	// itself serializes each owner in the shared reconciler, so built-in
+	// writes do not take this lock. Splitting guest calls from asynchronous
+	// host application is a later migration step.
+	applyMu *sync.Mutex
+
+	mu sync.Mutex
+	// open holds the transactions the plugin has begun but not finished.
+	open map[uint64]*applyTxn
+	// nextGen numbers transactions. It never restarts within an instance,
+	// so a stale generation from before a re-instantiation cannot be
+	// mistaken for a live one.
+	nextGen uint64
+	// maxOpen caps concurrent transactions so a plugin that begins without
+	// ever committing cannot grow the host's memory without bound.
+	maxOpen int
+	// maxEntries caps how many entries one transaction may accumulate, and
+	// maxBytes caps how large they may be between them.
+	maxEntries int
+	maxBytes   int
+	// staged holds commits made before the plugin is published.
+	//
+	// A plugin may declare state from configure, which runs during
+	// instantiation. Applying it there would be wrong twice over: an
+	// instantiation that then fails would leave state behind that no
+	// registered plugin can remove, and on an upgrade the failed new
+	// instance shares its owner tag with the old one that is still
+	// running, so its declaration would prune the live plugin's entries.
+	// So commits are held until the manager publishes the plugin, and
+	// discarded if it never does.
+	staged    []*applyTxn
+	published bool
+	// pending holds the declaration of each kind that failed at
+	// publication and is worth retrying, because what it depended on may
+	// not have existed yet. One per kind: a newer declaration replaces the
+	// one it supersedes rather than queueing behind it.
+	pending map[v1.PluginApplyKind]*applyTxn
+	// commits numbers transactions in commit order, and lastApplied is the
+	// highest number reconciled for each kind. Together they stop an older
+	// declaration from overwriting a newer one -- which a retry, or a
+	// staged declaration draining alongside a live commit, would otherwise
+	// do.
+	commits     uint64
+	lastApplied map[v1.PluginApplyKind]uint64
+	// reportedPending remembers which kinds have already been reported as
+	// stuck, so the log says it once instead of every retry.
+	reportedPending map[v1.PluginApplyKind]struct{}
+}
+
+// applyTxn is one open desired-set declaration.
+type applyTxn struct {
+	kind v1.PluginApplyKind
+	// seq is this transaction's position in commit order, stamped at
+	// commit. A declaration is a statement about a whole set, so applying
+	// an older one after a newer one of the same kind puts back a set the
+	// plugin has already replaced -- which is what a retry, or a staged
+	// declaration draining alongside a live commit, would otherwise do.
+	seq uint64
+	// bytes is what this transaction is holding, so the cap is on the
+	// memory rather than only on the number of things in it.
+	bytes   int
+	entries []HeadendDesired
+	routes  []AdvertisedRoute
+	sids    []LocalSID
+}
+
+// PluginOpsConfig builds a PluginOps.
+type PluginOpsConfig struct {
+	// Owner is the tag every write by this plugin carries.
+	Owner bpf.OwnerTag
+	// Headend is the map surface the plugin's declarations reconcile into.
+	Headend HeadendMapOps
+	// HeadendReconciler shares headend writes with built-in appliers. When set,
+	// Headend must be nil and Leases must be nil or the reconciler's table.
+	HeadendReconciler *headend.Reconciler
+	// Leases arbitrates keys across owners.
+	Leases *Leases
+	// Capabilities are what this plugin was granted. The apply functions
+	// are shared by every kind of declaration, so linking cannot separate
+	// them: the kind is checked here instead.
+	Capabilities wasm.Capabilities
+	// Guard bounds which keys the plugin may name. Nil permits nothing,
+	// which is the right default for a registration that named no scope.
+	Guard *Guard
+	// Advertise is the send side. Nil leaves a plugin unable to originate,
+	// which is what a daemon without BGP can honestly offer.
+	Advertise *AdvertiseSet
+	// LocalSIDs allocates the SIDs a plugin points at its data-plane half.
+	LocalSIDs *LocalSIDSet
+	// Quotas bound how much this plugin may hold. Zero fields take the
+	// defaults.
+	Quotas Quotas
+	// OnLocalSIDs is called with what a local-SID declaration resolved to,
+	// so the plugin can be told the addresses it was given.
+	OnLocalSIDs func([]AllocatedSID) bool
+	// EncapSource resolves the daemon's encap source for a declared entry
+	// that names none.
+	//
+	// It is a function rather than a value because locators are registered
+	// over RPC after the daemon starts: an address captured at startup is
+	// usually the one that did not exist yet, and an entry written with a
+	// zero source blackholes silently.
+	EncapSource func() (netip.Addr, error)
+	// Logger receives the plugin's own log lines.
+	Logger *zap.Logger
+	// MaxOpenTransactions, MaxEntriesPerTransaction and
+	// MaxBytesPerTransaction bound what one plugin can accumulate; zero
+	// takes a default.
+	//
+	// The byte cap exists because the entry count bounds nothing on its
+	// own: the repeated and string fields inside an entry have no length
+	// of their own, so a guest can respect every other limit and still
+	// make the host hold gigabytes by never committing.
+	MaxOpenTransactions      int
+	MaxEntriesPerTransaction int
+	MaxBytesPerTransaction   int
+	// ApplyMutex serializes reconciles across the plugins that share a
+	// data plane. Nil gives this plugin one of its own, which is only
+	// right when it is the sole writer.
+	ApplyMutex *sync.Mutex
+}
+
+// NewPluginOps builds the capability surface for one plugin.
+func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
+	if cfg.Owner == "" {
+		return nil, bpf.ErrEmptyOwner
+	}
+	reconciler := cfg.HeadendReconciler
+	if reconciler != nil {
+		if cfg.Headend != nil || (cfg.Leases != nil && cfg.Leases != reconciler.Leases()) {
+			return nil, fmt.Errorf("plugin ops: conflicting headend configuration")
+		}
+	} else {
+		var err error
+		reconciler, err = headend.NewReconciler(cfg.Headend, cfg.Leases)
+		if err != nil {
+			return nil, fmt.Errorf("plugin ops: %w", err)
+		}
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	maxOpen := cfg.MaxOpenTransactions
+	if maxOpen <= 0 {
+		maxOpen = 4
+	}
+	maxEntries := cfg.MaxEntriesPerTransaction
+	if maxEntries <= 0 {
+		maxEntries = 4096
+	}
+	// A transaction's memory is capped as well as its entry count. The
+	// default is generous next to any real desired set -- a few thousand
+	// routes with their attributes -- and small next to what an unbounded
+	// one costs a daemon that must not be restarted to recover.
+	maxBytes := cfg.MaxBytesPerTransaction
+	if maxBytes <= 0 {
+		maxBytes = 16 << 20
+	}
+	applyMu := cfg.ApplyMutex
+	if applyMu == nil {
+		applyMu = &sync.Mutex{}
+	}
+	return &PluginOps{
+		owner:        cfg.Owner,
+		applyMu:      applyMu,
+		caps:         cfg.Capabilities,
+		guard:        cfg.Guard,
+		advertise:    cfg.Advertise,
+		localSIDs:    cfg.LocalSIDs,
+		quotas:       cfg.Quotas.withDefaults(),
+		onLocalSIDs:  cfg.OnLocalSIDs,
+		notifiedSIDs: make(map[string]netip.Addr),
+		encapSource:  cfg.EncapSource,
+		headend:      reconciler,
+		leases:       reconciler.Leases(),
+		logger:       logger,
+		open:         make(map[uint64]*applyTxn),
+		maxOpen:      maxOpen,
+		maxEntries:   maxEntries,
+		maxBytes:     maxBytes,
+	}, nil
+}
+
+// Owner is the tag this plugin's writes carry.
+func (p *PluginOps) Owner() bpf.OwnerTag { return p.owner }
+
+// Log records a message the plugin emitted. Levels outside the known range
+// are treated as info: a plugin that miscounts its log levels should not
+// lose the message.
+func (p *PluginOps) Log(level int32, msg string) {
+	switch level {
+	case 0:
+		p.logger.Debug(msg)
+	case 2:
+		p.logger.Warn(msg)
+	case 3:
+		p.logger.Error(msg)
+	default:
+		p.logger.Info(msg)
+	}
+}
+
+// ApplyBegin opens a desired-set transaction.
+func (p *PluginOps) ApplyBegin(kind uint32) (uint64, error) {
+	applyKind := v1.PluginApplyKind(kind)
+	// The kind is checked against the granted capabilities here because
+	// one apply_begin serves them all: a plugin granted only advertise
+	// would otherwise open a headend transaction through the same door.
+	switch applyKind {
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
+		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+		if !p.caps.Has(wasm.CapHeadend) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapHeadend)
+		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		if !p.caps.Has(wasm.CapAdvertise) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapAdvertise)
+		}
+		if p.advertise == nil {
+			return 0, fmt.Errorf("apply begin: this daemon cannot originate routes")
+		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		if !p.caps.Has(wasm.CapLocalSID) {
+			return 0, fmt.Errorf("apply begin: plugin was not granted the %q capability", wasm.CapLocalSID)
+		}
+		if p.localSIDs == nil {
+			return 0, fmt.Errorf("apply begin: this daemon cannot allocate SIDs")
+		}
+	default:
+		return 0, fmt.Errorf("apply begin: unknown kind %d", kind)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.open) >= p.maxOpen {
+		return 0, fmt.Errorf("apply begin: %d transactions already open, limit %d", len(p.open), p.maxOpen)
+	}
+	p.nextGen++
+	gen := p.nextGen
+	p.open[gen] = &applyTxn{kind: applyKind}
+	return gen, nil
+}
+
+// ApplyPut accumulates a chunk into an open transaction. Nothing reaches
+// the data plane here: a chunk that arrives and is then followed by a trap
+// must leave no trace.
+func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
+	var msg v1.PluginApplyChunk
+	if err := proto.Unmarshal(chunk, &msg); err != nil {
+		return fmt.Errorf("apply put: decode chunk: %w", err)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	txn, ok := p.open[generation]
+	if !ok {
+		return fmt.Errorf("apply put: no open transaction %d", generation)
+	}
+	declared := len(msg.GetHeadendEntries()) + len(msg.GetAdvertisedRoutes()) + len(msg.GetLocalSids())
+	if len(txn.entries)+len(txn.routes)+len(txn.sids)+declared > p.maxEntries {
+		return fmt.Errorf("apply put: transaction %d would hold %d entries, limit %d",
+			generation, len(txn.entries)+len(txn.routes)+len(txn.sids)+declared, p.maxEntries)
+	}
+	// Entries are counted, and so are the bytes inside them. A count alone
+	// bounds nothing: the repeated and string fields of one entry have no
+	// length of their own, so a guest can stay under both the entry limit
+	// and the per-chunk buffer limit and still make the host hold gigabytes
+	// -- by never committing, which is also why nothing here reclaims it.
+	size := chunkSize(&msg)
+	if txn.bytes+size > p.maxBytes {
+		return fmt.Errorf("apply put: transaction %d would hold %d bytes, limit %d",
+			generation, txn.bytes+size, p.maxBytes)
+	}
+	// A transaction is opened for one kind, and the apply reads only the
+	// field that kind names. A chunk carrying any other field is a
+	// declaration the plugin believes it made and the host would drop in
+	// silence, so it is refused instead.
+	if err := checkChunkKind(txn.kind, &msg); err != nil {
+		return fmt.Errorf("apply put: %w", err)
+	}
+
+	// Decoded into locals first, and merged into the transaction only
+	// once the whole chunk decodes. A guest that ignores the error this
+	// returns and commits anyway would otherwise apply the surviving half
+	// of a chunk the host said it had refused.
+	var (
+		entries []HeadendDesired
+		routes  []AdvertisedRoute
+		sids    []LocalSID
+	)
+	if len(msg.GetHeadendEntries()) > 0 {
+		// Resolved here, not at startup: a locator registered over RPC
+		// after the daemon came up is the common case, and an address
+		// captured before that is the one that did not exist yet.
+		var src netip.Addr
+		if p.encapSource != nil {
+			resolved, err := p.encapSource()
+			if err != nil {
+				p.logger.Debug("resolving the encap source for a plugin declaration", zap.Error(err))
+			} else {
+				src = resolved
+			}
+		}
+		af := AFv4
+		if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+			af = AFv6
+		}
+		for _, e := range msg.GetHeadendEntries() {
+			prefix, entry, err := DecodeHeadendEntry(e, af, src)
+			if err != nil {
+				return fmt.Errorf("apply put: %w", err)
+			}
+			entries = append(entries, HeadendDesired{TriggerPrefix: prefix, Entry: entry})
+		}
+	}
+	for _, r := range msg.GetAdvertisedRoutes() {
+		route, err := DecodeAdvertisedRoute(r)
+		if err != nil {
+			return fmt.Errorf("apply put: %w", err)
+		}
+		routes = append(routes, route)
+	}
+	for _, s := range msg.GetLocalSids() {
+		sid, err := DecodeLocalSID(s)
+		if err != nil {
+			return fmt.Errorf("apply put: %w", err)
+		}
+		sids = append(sids, sid)
+	}
+	txn.bytes += size
+	txn.entries = append(txn.entries, entries...)
+	txn.routes = append(txn.routes, routes...)
+	txn.sids = append(txn.sids, sids...)
+	return nil
+}
+
+// Publish applies whatever the plugin declared before it was registered,
+// and lets later commits through directly.
+//
+// The manager calls it once the plugin is live. Until then a declaration
+// is only recorded: see the staged field.
+func (p *PluginOps) Publish() error {
+	p.mu.Lock()
+	if p.published {
+		p.mu.Unlock()
+		return nil
+	}
+	p.published = true
+	staged := p.staged
+	p.staged = nil
+	p.mu.Unlock()
+
+	// Every staged declaration is applied, not just up to the first
+	// failure: they are separate statements about separate sets, and
+	// dropping the rest would leave a plugin live with part of what it
+	// declared never applied and nothing to retry it.
+	//
+	// Only the newest failure of each kind is kept for retry. Two staged
+	// declarations of one kind are two statements about the same set, so
+	// retrying the older one after the newer succeeded would put back the
+	// set the plugin had already replaced.
+	var firstErr error
+	for _, txn := range staged {
+		if err := p.applyTransaction(txn); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			p.holdForRetry(txn)
+			continue
+		}
+		p.dropPending(txn.kind)
+	}
+	return firstErr
+}
+
+// holdForRetry keeps one failed declaration, replacing any older one of
+// the same kind.
+func (p *PluginOps) holdForRetry(txn *applyTxn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pending == nil {
+		p.pending = make(map[v1.PluginApplyKind]*applyTxn)
+	}
+	if held, ok := p.pending[txn.kind]; ok && held.seq > txn.seq {
+		return
+	}
+	p.pending[txn.kind] = txn
+}
+
+// RetryPending reapplies declarations that could not be applied when the
+// plugin went live.
+//
+// A plugin declares from configure, and a restored plugin does that while
+// the daemon is still coming up: a local SID naming a locator an operator
+// registers over RPC a moment later fails, and the plugin has already said
+// everything it intends to say. Nothing would retry it, and the SIDs and
+// the routes behind them would simply never come back from a restart.
+//
+// Retried before each batch, so the first event after the missing piece
+// arrives is what repairs it.
+func (p *PluginOps) RetryPending() {
+	p.mu.Lock()
+	if !p.published {
+		p.mu.Unlock()
+		return
+	}
+	pending := p.pending
+	p.pending = nil
+	p.mu.Unlock()
+	for _, txn := range pending {
+		if err := p.applyTransaction(txn); err != nil {
+			p.holdForRetry(txn)
+			// Said once at a level an operator watches, then quietly.
+			// A declaration naming something that does not exist retries
+			// forever; the first line is what connects the missing thing
+			// to the plugin waiting on it, and repeating it every interval
+			// would bury the log.
+			if p.notePendingFailure(txn.kind) {
+				p.logger.Warn("a plugin's declaration cannot be applied and will keep being retried",
+					zap.String("kind", kindName(txn.kind)), zap.Error(err))
+			} else {
+				p.logger.Debug("a declaration held from before the plugin was live still cannot be applied",
+					zap.Error(err))
+			}
+			continue
+		}
+		p.logger.Info("applied a declaration that was held from before the plugin was live",
+			zap.String("kind", kindName(txn.kind)))
+	}
+}
+
+// notePendingFailure reports whether this is the first failure of its kind
+// since one last succeeded, so the log says it once rather than forever.
+func (p *PluginOps) notePendingFailure(kind v1.PluginApplyKind) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reportedPending == nil {
+		p.reportedPending = make(map[v1.PluginApplyKind]struct{})
+	}
+	if _, said := p.reportedPending[kind]; said {
+		return false
+	}
+	p.reportedPending[kind] = struct{}{}
+	return true
+}
+
+// PendingDeclarations is how many declarations are waiting on something
+// that does not exist yet.
+//
+// It is what tells an operator that a plugin is not idle but stuck: the
+// counters that describe delivery all look healthy while a declaration
+// naming a missing locator retries in the background forever.
+func (p *PluginOps) PendingDeclarations() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending)
+}
+
+// ApplyCommit reconciles what the transaction accumulated. This is the
+// only point at which a plugin's declaration reaches the data plane.
+//
+// The transaction is closed whatever the outcome: a failed commit leaves
+// the plugin to declare the set again rather than to retry a
+// half-consumed one, which is the same convergence path a restart takes.
+func (p *PluginOps) ApplyCommit(generation uint64) error {
+	p.mu.Lock()
+	txn, ok := p.open[generation]
+	if ok {
+		delete(p.open, generation)
+		// Numbered in commit order, which is the order the plugin meant.
+		// Everything downstream -- staged drains, retries -- compares this
+		// rather than trusting the order it happens to run in.
+		p.commits++
+		txn.seq = p.commits
+	}
+	published := p.published
+	if ok && !published {
+		// Declared before the plugin is live: hold it rather than apply
+		// it, so an instantiation that fails leaves nothing behind.
+		// Each kind declares a complete set. Keeping its older commits
+		// would retain unbounded host memory during configure or replay,
+		// despite the limits on open transactions. Move the replacement
+		// to the end so the surviving kinds retain their commit order.
+		for i, previous := range p.staged {
+			if previous.kind == txn.kind {
+				p.staged = append(p.staged[:i], p.staged[i+1:]...)
+				break
+			}
+		}
+		p.staged = append(p.staged, txn)
+	}
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("apply commit: no open transaction %d", generation)
+	}
+	if !published {
+		return nil
+	}
+	if err := p.applyTransaction(txn); err != nil {
+		return err
+	}
+	// This declaration supersedes anything of the same kind still waiting
+	// to be retried. Retrying it afterwards would put back a set the
+	// plugin has since replaced.
+	p.dropPending(txn.kind)
+	return nil
+}
+
+// dropPending discards held declarations of one kind, because a newer
+// declaration of that kind has been applied.
+func (p *PluginOps) dropPending(kind v1.PluginApplyKind) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.pending, kind)
+	// It applied, so the next time it does not is worth saying again.
+	delete(p.reportedPending, kind)
+}
+
+// applyTransaction is the reconcile itself, shared by a live commit and by
+// one replayed at publication.
+func (p *PluginOps) applyTransaction(txn *applyTxn) error {
+	// The whole reconcile runs under applyMu, and the staleness check runs
+	// inside it. Checking outside would let two applies of one kind pass
+	// the check together and then land in either order.
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+	if p.isStale(txn) {
+		// A newer declaration of this kind has already been applied, so
+		// this one describes a set the plugin has moved on from.
+		return nil
+	}
+
+	// The scope is checked here rather than where the chunk was decoded,
+	// because part of what it is stated in terms of is registered over RPC
+	// after the daemon starts. A restored plugin declaring before its
+	// locator or its VRF binding exists fails, and this is the point the
+	// retry machinery covers; failing at decode time would leave that
+	// declaration with nothing to repair it.
+	if err := p.checkScope(txn); err != nil {
+		return err
+	}
+
+	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		if _, err := p.withdrawSIDReferencesLocked(context.Background(), txn.sids); err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
+		allocated, res, err := p.localSIDs.Apply(p.owner, txn.sids, p.quotas.MaxLocalSIDs)
+		if err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
+		p.logger.Info("plugin local SID set applied",
+			zap.Int("declared", len(txn.sids)),
+			zap.Int("allocated", res.Created),
+			zap.Int("kept", res.Updated),
+			zap.Int("released", res.Pruned))
+		// The plugin picked the names; the host picked the addresses. It
+		// cannot advertise what it has not been told.
+		//
+		// Only what this instance has not already been told is sent. Apply
+		// returns the whole live set, and a plugin that redeclares its set
+		// on every event -- which is the model this asks for -- would
+		// otherwise be handed an event for each redeclaration, redeclare in
+		// response, and never stop. A fresh instance has an empty record,
+		// so a restart still learns every address it holds.
+		if p.onLocalSIDs != nil {
+			// Recorded only once the event is queued. A dropped batch is
+			// unrecoverable here: the BGP snapshot replays routes, not SID
+			// allocations, so a plugin suppressed on the strength of an
+			// event it never received would never hear the address again.
+			if fresh := p.freshAllocations(allocated); len(fresh) > 0 {
+				if p.onLocalSIDs(fresh) {
+					p.recordNotified(fresh)
+				}
+			}
+		}
+		p.markApplied(txn)
+		return nil
+	}
+
+	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
+		res, err := p.advertise.Apply(context.Background(), p.owner, txn.routes, p.quotas.MaxAdvertisedRoutes)
+		if err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
+		p.logger.Info("plugin advertisement set applied",
+			zap.Int("declared", len(txn.routes)),
+			zap.Int("created", res.Created),
+			zap.Int("updated", res.Updated),
+			zap.Int("withdrawn", res.Pruned))
+		p.markApplied(txn)
+		return nil
+	}
+
+	af := AFv4
+	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+		af = AFv6
+	}
+	res, err := p.headend.ApplySet(p.owner, af, txn.entries, p.quotas.MaxHeadendEntries)
+	if err != nil {
+		return fmt.Errorf("apply commit: %w", err)
+	}
+	p.logger.Info("plugin desired set applied",
+		zap.String("family", af.String()),
+		zap.Int("declared", len(txn.entries)),
+		zap.Int("created", res.Created),
+		zap.Int("updated", res.Updated),
+		zap.Int("pruned", res.Pruned))
+	p.markApplied(txn)
+	return nil
+}
+
+// checkScope refuses a declaration naming something outside what this
+// plugin was given, and fills in the parts of an advertisement that are
+// derived rather than declared.
+//
+// The whole set is refused rather than the offending member dropped. A
+// declaration is a statement about a set, so applying the rest of it would
+// install something the plugin did not ask for -- and silently narrowing
+// what a plugin declared is how a plugin ends up believing it holds state
+// it does not.
+//
+// Called with applyMu held, so a resolved route cannot be overtaken by the
+// reconcile that consumes it.
+func (p *PluginOps) checkScope(txn *applyTxn) error {
+	switch txn.kind {
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		for _, sid := range txn.sids {
+			if err := p.guard.checkLocalSID(sid); err != nil {
+				return fmt.Errorf("apply commit: %w", err)
+			}
+		}
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		// Resolved in a copy first. A failure partway would otherwise
+		// leave the transaction half derived, and the retry would apply a
+		// set built from two different readings of the bindings.
+		resolved := make([]AdvertisedRoute, 0, len(txn.routes))
+		for _, r := range txn.routes {
+			out, err := p.guard.resolveAdvertised(r)
+			if err != nil {
+				return fmt.Errorf("apply commit: %w", err)
+			}
+			// The guard held the SID inside a granted locator, but a locator
+			// can also hold the built-in exporter's or an operator's service
+			// SIDs. A plugin may advertise only a SID it was itself allocated,
+			// so it cannot point a prefix at another party's SID that happens
+			// to share its locator. Checked here, where the owner's live SID
+			// set is known; a SID not yet allocated fails and the reconcile
+			// retries once the local-SID declaration has been applied.
+			if err := p.sidIsOwned(out); err != nil {
+				return fmt.Errorf("apply commit: %w", err)
+			}
+			resolved = append(resolved, out)
+		}
+		if err := p.guard.checkAdvertiseSet(resolved); err != nil {
+			return fmt.Errorf("apply commit: %w", err)
+		}
+		txn.routes = resolved
+	default:
+		af := AFv4
+		if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+			af = AFv6
+		}
+		for _, e := range txn.entries {
+			if e.Entry == nil {
+				// A nil entry is unreachable on the apply path -- decode
+				// never returns one and ApplyHeadendSet refuses it -- but an
+				// authorization function must not have a branch that means
+				// "could not check, so it passes". Refuse it.
+				return fmt.Errorf("apply commit: headend entry with no encap for %q", e.TriggerPrefix)
+			}
+			if err := p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode); err != nil {
+				return fmt.Errorf("apply commit: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// sidIsOwned refuses a VPN advertisement whose SRv6 SID is not one this
+// plugin was allocated. A route with no SID (an ipv6-unicast advertisement)
+// carries none to check.
+func (p *PluginOps) sidIsOwned(r AdvertisedRoute) error {
+	if r.SRv6SID == "" {
+		return nil
+	}
+	sid, err := netip.ParseAddr(r.SRv6SID)
+	if err != nil {
+		// resolveAdvertised already parsed it; a failure here is defensive.
+		return fmt.Errorf("advertise: %s %s SRv6 SID %q: %w", r.Family, r.Prefix, r.SRv6SID, err)
+	}
+	if p.localSIDs == nil || !p.localSIDs.OwnsSID(p.owner, sid) {
+		return fmt.Errorf("advertise: %s %s SRv6 SID %s is not one this plugin was allocated; "+
+			"a plugin may advertise only its own SIDs, not another party's SID that shares its locator",
+			r.Family, r.Prefix, r.SRv6SID)
+	}
+	return nil
+}
+
+// ValidateChunk refuses a chunk the host would not apply.
+//
+// It is exported because the conformance harness runs it too: a harness
+// that accepted what the daemon refuses would pass a plugin and let it go
+// silent in production, and a second copy of these rules would drift from
+// this one. Everything a declaration is checked against before it reaches
+// a map or a peer belongs here.
+func ValidateChunk(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
+	if err := checkChunkKind(kind, msg); err != nil {
+		return err
+	}
+	af := AFv4
+	if kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+		af = AFv6
+	}
+	// A source address the daemon would lend is not known here, so one is
+	// supplied: the entry's own source is what is being checked, and a
+	// declaration that names none is valid either way.
+	lent := netip.MustParseAddr("fd00::1")
+	for _, e := range msg.GetHeadendEntries() {
+		if _, _, err := DecodeHeadendEntry(e, af, lent); err != nil {
+			return err
+		}
+	}
+	for _, r := range msg.GetAdvertisedRoutes() {
+		if _, err := DecodeAdvertisedRoute(r); err != nil {
+			return err
+		}
+	}
+	for _, sid := range msg.GetLocalSids() {
+		if _, err := DecodeLocalSID(sid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateChunkInScope is ValidateChunk plus the parts of a scope that can
+// be decided without a daemon.
+//
+// The conformance harness runs it so a plugin declaring outside the scope
+// it will be registered with fails there rather than in production.
+// Containment in a locator and the existence of a VRF binding are not
+// decidable outside a daemon, so those stay the daemon's; naming a locator,
+// a VRF or a slot the plugin was not given is decidable here.
+func ValidateChunkInScope(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk, scope Scope) error {
+	if err := ValidateChunk(kind, msg); err != nil {
+		return err
+	}
+	af := AFv4
+	if kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+		af = AFv6
+	}
+	lent := netip.MustParseAddr("fd00::1")
+	for _, e := range msg.GetHeadendEntries() {
+		trigger, entry, err := DecodeHeadendEntry(e, af, lent)
+		if err != nil {
+			return err
+		}
+		if err := scope.CheckHeadend(af, trigger, entry.Mode); err != nil {
+			return err
+		}
+	}
+	for _, r := range msg.GetAdvertisedRoutes() {
+		route, err := DecodeAdvertisedRoute(r)
+		if err != nil {
+			return err
+		}
+		if err := scope.CheckAdvertised(route); err != nil {
+			return err
+		}
+	}
+	for _, s := range msg.GetLocalSids() {
+		sid, err := DecodeLocalSID(s)
+		if err != nil {
+			return err
+		}
+		if err := scope.CheckLocalSID(sid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkChunkKind refuses a chunk whose contents do not match the kind the
+// transaction was opened for.
+func checkChunkKind(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
+	var unexpected []string
+	if len(msg.GetHeadendEntries()) > 0 &&
+		kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4 &&
+		kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
+		unexpected = append(unexpected, "headend entries")
+	}
+	if len(msg.GetAdvertisedRoutes()) > 0 && kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE {
+		unexpected = append(unexpected, "advertised routes")
+	}
+	if len(msg.GetLocalSids()) > 0 && kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		unexpected = append(unexpected, "local SIDs")
+	}
+	if len(unexpected) > 0 {
+		return fmt.Errorf("a %s transaction cannot carry %s", kindName(kind), strings.Join(unexpected, " or "))
+	}
+	return nil
+}
+
+// kindName renders an apply kind the way a plugin author names it.
+func kindName(kind v1.PluginApplyKind) string {
+	switch kind {
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4:
+		return "headend_v4"
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
+		return "headend_v6"
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE:
+		return "advertise"
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID:
+		return "local_sid"
+	default:
+		return kind.String()
+	}
+}
+
+// chunkSize is what one chunk costs the host to keep.
+//
+// The wire size is the right measure: it is what the guest actually sent,
+// it covers every field including the repeated and string ones a count
+// ignores, and it does not depend on how the decoded form is laid out.
+func chunkSize(msg *v1.PluginApplyChunk) int {
+	return proto.Size(msg)
+}
+
+// isStale reports whether a newer declaration of this kind has already been
+// applied. It only reads: the high-water mark is advanced by markApplied,
+// after the reconcile succeeds.
+//
+// Recording the mark here, before the apply, was a silent-loss bug: a
+// transaction that then failed -- a scope refusal, a missing binding --
+// still raised the mark, so an older declaration of the same kind sitting
+// in pending became stale and was dropped on the next retry as though it
+// had been applied. The read and the mark are separate for exactly that
+// reason.
+//
+// Called with applyMu held.
+func (p *PluginOps) isStale(txn *applyTxn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return txn.seq != 0 && txn.seq < p.lastApplied[txn.kind]
+}
+
+// markApplied records this transaction as the newest of its kind, once its
+// reconcile has actually succeeded. Called with applyMu held, so the
+// read in isStale and this write cannot interleave for one kind.
+func (p *PluginOps) markApplied(txn *applyTxn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lastApplied == nil {
+		p.lastApplied = make(map[v1.PluginApplyKind]uint64)
+	}
+	if txn.seq > p.lastApplied[txn.kind] {
+		p.lastApplied[txn.kind] = txn.seq
+	}
+}
+
+// freshAllocations returns the allocations this instance has not been told
+// about yet. It does not record them: that happens in recordNotified, once
+// the event carrying them has actually been queued.
+//
+// An address that changed under a name counts as new: the plugin is
+// advertising the old one and has to hear about the replacement.
+func (p *PluginOps) freshAllocations(allocated []AllocatedSID) []AllocatedSID {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	live := make(map[string]struct{}, len(allocated))
+	fresh := make([]AllocatedSID, 0, len(allocated))
+	for _, got := range allocated {
+		live[got.Name] = struct{}{}
+		if was, told := p.notifiedSIDs[got.Name]; told && was == got.SID {
+			continue
+		}
+		fresh = append(fresh, got)
+	}
+	// A name the plugin stopped declaring is forgotten, so declaring it
+	// again later is reported rather than silently swallowed.
+	for name := range p.notifiedSIDs {
+		if _, still := live[name]; !still {
+			delete(p.notifiedSIDs, name)
+		}
+	}
+	return fresh
+}
+
+// recordNotified marks allocations as told, once they have been queued.
+func (p *PluginOps) recordNotified(fresh []AllocatedSID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, got := range fresh {
+		p.notifiedSIDs[got.Name] = got.SID
+	}
+}
+
+// ApplyAbort discards an open transaction.
+func (p *PluginOps) ApplyAbort(generation uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.open, generation)
+}
+
+// OpenTransactions is how many declarations the plugin has begun and not
+// finished, for tests and diagnostics.
+func (p *PluginOps) OpenTransactions() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.open)
+}
+
+// BeginInstance puts the ops back into the state a fresh instance starts
+// from, and must be called before that instance runs.
+//
+// Two things belong to the instance rather than to the registration. The
+// record of which SID addresses it has been told is one: an instance that
+// replaced a trapped one knows nothing, and suppressing the notification
+// because its predecessor had it would leave it holding SIDs it cannot
+// advertise. The other is publication: declarations made while the
+// instance is being built are held, so an instantiation that then fails
+// leaves the state its predecessor wrote untouched instead of pruning it
+// on the way out.
+func (p *PluginOps) BeginInstance() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.open = make(map[uint64]*applyTxn)
+	p.staged = nil
+	p.pending = nil
+	p.notifiedSIDs = make(map[string]netip.Addr)
+	p.published = false
+}
+
+// DiscardTransactions drops every open transaction. The instance running
+// them is gone -- it trapped, or its budget ran out -- so what they
+// accumulated describes a declaration nobody will finish.
+func (p *PluginOps) DiscardTransactions() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.open = make(map[uint64]*applyTxn)
+}
+
+// PruneOutOfScope removes state this owner's capabilities or scope no longer
+// cover, and reports how much it removed. Revoking a capability must retract its
+// state here: the replacement guest cannot declare even an empty set of that kind.
+//
+// Narrowing a scope also needs host intervention. The apply path refuses a
+// declaration naming anything outside the scope, and refuses it whole -- so
+// a plugin that goes on declaring
+// what it declared before the change never reconciles, and what it wrote
+// under the wider scope stays installed. Withdrawing that here is what
+// makes the narrowing mean something immediately, rather than at the mercy
+// of a plugin that may never be updated.
+//
+// It is expressed as a reconcile of the subset that is still allowed,
+// because that is the operation the sets already implement: what is not
+// declared is pruned.
+func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+
+	var (
+		removed  int
+		firstErr error
+	)
+	for _, af := range []AddressFamily{AFv4, AFv6} {
+		held, err := p.headend.OwnedEntries(p.owner, af)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		keep := make([]HeadendDesired, 0, len(held))
+		for _, e := range held {
+			if e.Entry == nil {
+				continue
+			}
+			if p.caps.Has(wasm.CapHeadend) && p.guard.checkHeadend(af, e.TriggerPrefix, e.Entry.Mode) == nil {
+				keep = append(keep, e)
+			}
+		}
+		if len(keep) == len(held) {
+			continue
+		}
+		res, err := p.headend.ApplySet(p.owner, af, keep, p.quotas.MaxHeadendEntries)
+		removed += res.Pruned
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	if p.localSIDs != nil {
+		held := p.localSIDs.LiveSIDs(p.owner)
+		keep := make([]LocalSID, 0, len(held))
+		for _, s := range held {
+			if p.caps.Has(wasm.CapLocalSID) && p.guard.checkLocalSID(s) == nil {
+				keep = append(keep, s)
+			}
+		}
+		if len(keep) != len(held) {
+			pruned, err := p.withdrawSIDReferencesLocked(ctx, keep)
+			removed += pruned
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return removed, firstErr
+			}
+			_, res, err := p.localSIDs.Apply(p.owner, keep, p.quotas.MaxLocalSIDs)
+			removed += res.Pruned
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+
+	if pruned, err := p.reconcileAdvertisedLocked(ctx); err != nil {
+		if firstErr == nil {
+			firstErr = err
+		}
+	} else {
+		removed += pruned
+	}
+	return removed, firstErr
+}
+
+// withdrawSIDReferencesLocked retires references before an allocation or dispatch
+// entry changes. It applies to live commits, publication retries and authorization
+// pruning. A failed withdrawal leaves every SID intact. Called with applyMu held.
+func (p *PluginOps) withdrawSIDReferencesLocked(ctx context.Context, desired []LocalSID) (int, error) {
+	if _, _, err := p.localSIDs.prepareDesired(desired, p.quotas.MaxLocalSIDs); err != nil {
+		return 0, err
+	}
+	if p.advertise == nil {
+		return 0, nil
+	}
+	addresses := p.localSIDs.unchangedAddresses(p.owner, desired)
+	routes := p.advertise.LiveRoutes(p.owner)
+	keep := make([]AdvertisedRoute, 0, len(routes))
+	for _, route := range routes {
+		sid, _ := netip.ParseAddr(route.SRv6SID)
+		if _, retained := addresses[sid]; route.SRv6SID == "" || retained {
+			keep = append(keep, route)
+		}
+	}
+	if len(keep) == len(routes) {
+		return 0, nil
+	}
+	res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
+	return res.Pruned, err
+}
+
+// ReconcileAdvertised re-derives what this plugin originates and applies
+// the result, reporting how many routes it withdrew.
+//
+// A VPN route's route distinguisher, its route targets and the cap it is
+// measured against all come from the binding of the VRF it names, and a
+// binding is a thing an operator edits while plugins are running. Nothing
+// re-reads it on its own: the values were stamped when the declaration was
+// applied, so an export RT changed afterwards would leave the plugin's
+// paths on the wire carrying the old one until the plugin next happened to
+// redeclare -- which an event-driven plugin may not do for a long time,
+// and a quiet one may never do.
+//
+// It is called when a binding changes, so the derived values follow the
+// operator's edit rather than the plugin's schedule.
+func (p *PluginOps) ReconcileAdvertised(ctx context.Context) (int, error) {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+	return p.reconcileAdvertisedLocked(ctx)
+}
+
+// reconcileAdvertisedLocked re-resolves the owner's live routes and applies
+// what still resolves. Called with applyMu held.
+//
+// The re-resolved routes are what is applied, not the ones that were held:
+// re-deriving and then applying the old values would answer the question
+// and throw the answer away.
+func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) {
+	if p.advertise == nil {
+		return 0, nil
+	}
+	held := p.advertise.LiveRoutes(p.owner)
+	if len(held) == 0 {
+		return 0, nil
+	}
+	live := make(map[string]struct{}, len(held))
+	for _, r := range held {
+		live[r.key()] = struct{}{}
+	}
+	keep := make([]AdvertisedRoute, 0, len(held))
+	for _, r := range held {
+		if !p.caps.Has(wasm.CapAdvertise) {
+			continue
+		}
+		// A route stays only if the VRF it names is still in scope and
+		// still has a binding, which is the same question the apply path
+		// asks. What comes back carries the binding's current RD and route
+		// targets.
+		resolved, err := p.guard.resolveAdvertised(r)
+		if err != nil {
+			continue
+		}
+		// The SID must still be one this plugin holds: a plugin that released
+		// its local SID while leaving the advertisement live stops advertising
+		// it on the next reconcile, the same bound the apply path applies.
+		if err := p.sidIsOwned(resolved); err != nil {
+			continue
+		}
+		// The RD comes off the binding verbatim, but the live keys were
+		// built from routes Apply had already canonicalized. An operator
+		// who spelled the binding's RD non-canonically (065000:0001 for
+		// 65000:1) would otherwise make every resolved key miss its live
+		// counterpart, so every route would look moved and flap on every
+		// reconcile. Canonicalize here, the same way Apply will, so the
+		// keys agree and only a route that actually moved is treated as
+		// moved.
+		resolved, err = p.advertise.canonicalize(resolved)
+		if err != nil {
+			continue
+		}
+		keep = append(keep, resolved)
+	}
+	// The cap is the binding's, so a binding that lowered it makes the set
+	// the plugin already holds too large. Refusing here would leave every
+	// route in place, which is the opposite of what the operator asked
+	// for, so the set is trimmed to the cap instead and what that drops is
+	// withdrawn. The plugin's own next declaration is refused with the
+	// reason, which is where it learns.
+	keep = p.guard.trimToVRFCaps(keep)
+
+	// A changed route distinguisher moves the NLRI, so the route has a new
+	// lease key. Apply takes every declared key before it withdraws
+	// anything, so if another producer holds the new one it fails with the
+	// old route still on the wire under an RD the binding no longer says.
+	//
+	// Declaring only what did not move retires those old keys first, which
+	// is the same reconcile doing the withdrawing rather than a second way
+	// to withdraw. A route that moved is in keep but not in settled, so the
+	// phase runs exactly when some kept route has a new key; a set where
+	// nothing moved has settled == keep and skips it. A route that was
+	// dropped (out of scope, binding gone, over the cap) is in neither and
+	// is withdrawn by the phase-2 apply below.
+	var pruned int
+	settled := make([]AdvertisedRoute, 0, len(keep))
+	for _, r := range keep {
+		if _, live := live[r.key()]; live {
+			settled = append(settled, r)
+		}
+	}
+	if len(settled) != len(keep) {
+		if _, err := p.advertise.Apply(ctx, p.owner, settled, p.quotas.MaxAdvertisedRoutes); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes); err != nil {
+		return 0, err
+	}
+	// What was withdrawn is what the plugin no longer originates at all, by
+	// NLRI regardless of RD: a route that only moved RD is re-advertised in
+	// phase 2 and must not count. So the removed set is the held NLRIs
+	// absent from keep, not the phase-1 prune total, which would double-count
+	// every move.
+	kept := make(map[string]struct{}, len(keep))
+	for _, r := range keep {
+		kept[r.Family.String()+"\x1f"+r.Prefix] = struct{}{}
+	}
+	for _, r := range held {
+		if _, ok := kept[r.Family.String()+"\x1f"+r.Prefix]; !ok {
+			pruned++
+		}
+	}
+	return pruned, nil
+}
+
+// Flush removes every entry this plugin owns and releases its leases. It
+// is what unregistering runs, and it is deliberately not what a trap runs:
+// a plugin that dies is restarted and re-declares, so flushing there would
+// blackhole traffic for the length of a restart.
+func (p *PluginOps) Flush() error {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+	var firstErr error
+	if p.advertise != nil {
+		// Withdraw before removing the data plane behind it: a route left
+		// advertised for state that is gone is a blackhole its peers keep
+		// sending into.
+		if err := p.advertise.WithdrawOwner(context.Background(), p.owner); err != nil {
+			firstErr = err
+		}
+	}
+	if p.localSIDs != nil {
+		if err := p.localSIDs.ReleaseOwner(p.owner); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, af := range []AddressFamily{AFv4, AFv6} {
+		if _, err := p.headend.PruneOwner(p.owner, af); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if p.leases != nil {
+		if firstErr != nil {
+			// Something is still installed. The steps above each keep the
+			// lease on whatever they could not remove, and releasing the
+			// owner wholesale here would undo exactly that: a route still
+			// advertised, or an entry still in the map, would be left with
+			// no lease, and the next plugin to declare that key would take
+			// it and overwrite state that is still live.
+			return firstErr
+		}
+		p.leases.ReleaseOwner(p.owner)
+	}
+	return firstErr
+}

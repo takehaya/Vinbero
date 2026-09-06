@@ -33,9 +33,13 @@ func TestParseOwnerTag(t *testing.T) {
 		{name: "builtin-v1", tag: OwnerBuiltin, wantKind: "builtin", wantVersion: "v1"},
 		{name: "bgp-vpn", tag: OwnerBGPVPN(65000, "65000:100"), wantKind: "bgp", wantVersion: "v1"},
 		{name: "bgp-unicast", tag: OwnerBGPUnicast(65000), wantKind: "bgp", wantVersion: "v1"},
+		// Plugin tags are entry owners now that a control-plane plugin can
+		// write the main maps; both tag forms parse. See plugin_owner.go.
+		{name: "plugin-slot", tag: "plugin:v1:endpoint:32", wantKind: "plugin", wantVersion: "v1"},
+		{name: "plugin-bundle", tag: OwnerPluginBundle("acl-prefix"), wantKind: "plugin", wantVersion: "v1"},
 		{name: "empty", tag: "", wantErr: true},
 		{name: "no-colon", tag: "garbage", wantErr: true},
-		{name: "unknown-kind", tag: "plugin:v1:endpoint:32", wantErr: true},
+		{name: "unknown-kind", tag: "wireguard:v1:peer=1", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

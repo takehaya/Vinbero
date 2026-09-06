@@ -122,6 +122,55 @@ jobs:
       - name: Confirm validator rejects intentionally-bad sample plugins
         run: make sdk-test-negative
 
+  cplane-plugin-artifacts:
+    name: Control-plane Plugin Artifacts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ./go.mod
+          cache: true
+
+      # The wasm test fixtures and the SDK example are committed build
+      # artifacts: the tests and the interop lab run exactly those bytes.
+      # A committed artifact that no longer matches its source is the kind
+      # of drift nobody notices until a test passes for the wrong reason,
+      # so both are rebuilt here and the tree must come back clean.
+      - name: Install wabt (wat2wasm)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends wabt
+
+      - name: Install TinyGo for optional compiler compatibility tests
+        run: |
+          curl -sSLo /tmp/tinygo.deb \
+            https://github.com/tinygo-org/tinygo/releases/download/v0.39.0/tinygo_0.39.0_amd64.deb
+          sudo dpkg -i /tmp/tinygo.deb
+
+      - name: Rebuild the wasm test fixtures
+        run: make cplane-wasm-testdata
+
+      - name: Rebuild the control-plane plugin example
+        run: make cplane-example
+
+      - name: Fail if a committed artifact drifted from its source
+        run: |
+          if ! git diff --quiet -- pkg/cplane/testdata pkg/cplane/wasm/testdata \
+              sdk/examples/cplane-custom-behavior; then
+            echo "A committed wasm artifact does not match its source. Rebuild and commit:" >&2
+            echo "  make cplane-wasm-testdata cplane-example" >&2
+            git diff --stat -- pkg/cplane/testdata pkg/cplane/wasm/testdata \
+              sdk/examples/cplane-custom-behavior >&2
+            exit 1
+          fi
+
+      - name: Run the plugin runtime and harness tests against the rebuilt artifacts
+        run: go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
+
   integration-test:
     name: Integration Test - ${{ matrix.example }}
     runs-on: ubuntu-24.04

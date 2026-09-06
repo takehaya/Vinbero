@@ -32,6 +32,34 @@ service PluginService {
   // Enumerate aux indices currently owned by the given filter. Empty
   // filter returns all live indices.
   rpc PluginAuxList(PluginAuxListRequest) returns (PluginAuxListResponse);
+
+  // Control-plane plugins are registered separately from data-plane ones.
+  // The two halves of a plugin are different artifacts with different
+  // lifecycles -- an eBPF object occupies a PROG_ARRAY slot, a WebAssembly
+  // module runs in the daemon -- so they get their own calls rather than
+  // one overloaded request whose fields are half-ignored either way.
+  //
+  // Registering a name that is already running replaces it in place: the
+  // state the old instance wrote is kept and the new module reconciles
+  // over it, so an upgrade does not empty the data plane in between.
+  rpc CplanePluginRegister(CplanePluginRegisterRequest) returns (CplanePluginRegisterResponse);
+  // Stop a control-plane plugin and remove the state it owns. This is the
+  // deliberate removal; a plugin that merely crashes is restarted and
+  // keeps its entries.
+  rpc CplanePluginUnregister(CplanePluginUnregisterRequest) returns (CplanePluginUnregisterResponse);
+  // Enumerate running control-plane plugins.
+  rpc CplanePluginList(CplanePluginListRequest) returns (CplanePluginListResponse);
+  // Report what each running plugin is doing and holding.
+  //
+  // A sandboxed plugin is otherwise unobservable: one that has fallen
+  // behind, one restarting in a loop and one with nothing to do all look
+  // the same from outside. These counters are what tell them apart.
+  rpc CplanePluginStats(CplanePluginStatsRequest) returns (CplanePluginStatsResponse);
+  // CplanePluginForget drops a plugin the store held that would not start:
+  // it releases the behaviors still claimed on its behalf and removes it
+  // from the store. The state it left in the maps is not touched, because
+  // nothing here knows what that state was for.
+  rpc CplanePluginForget(CplanePluginForgetRequest) returns (CplanePluginForgetResponse);
 }
 
 message PluginRegisterRequest {
@@ -147,3 +175,183 @@ message AuxIndexInfo {
 message PluginAuxListResponse {
   repeated AuxIndexInfo entries = 1;
 }
+
+message CplanePluginRegisterRequest {
+  // Name identifies the plugin and becomes the owner tag its writes
+  // carry, so it must fit the fixed-width owner buffer and hold no colon.
+  string name = 1;
+  // Wasm is the WebAssembly module.
+  bytes wasm = 2;
+  // Config is the operator's configuration for this deployment, handed to
+  // the module's configure export. It is opaque to the daemon: the plugin
+  // defines its own message. Keeping it out of the module means changing
+  // a threshold does not mean rebuilding and re-shipping the plugin.
+  bytes config = 3;
+  // Families restricts which BGP families the plugin is delivered, by the
+  // operator-facing name ("vpnv4", "evpn", ...). Empty means every family.
+  repeated string families = 4;
+  // EndpointBehaviors are the SRv6 endpoint behavior codepoints this
+  // plugin claims. Routes naming one are withheld from vinbero's own
+  // appliers, which would otherwise read an unrecognized codepoint as an
+  // ordinary service SID. Standardized codepoints cannot be claimed.
+  repeated uint32 endpoint_behaviors = 5;
+  // Capabilities are what this plugin is allowed to do, by name:
+  // "headend", "advertise", "local_sid". The daemon links only the host
+  // functions they cover, so a capability that was not granted is not a
+  // call that fails but a function the module cannot reach. An empty list
+  // leaves the plugin able to observe and to log, which is a real way to
+  // run one.
+  repeated string capabilities = 7;
+  // TickIntervalMs asks for the plugin's on_tick export to be called at
+  // this rate. Zero leaves it undriven, which is right for a purely
+  // event-driven plugin. The daemon clamps it up to its own minimum: a
+  // tick is a call into a sandbox under the same budget as an event, so a
+  // plugin cannot ask to be woken faster than the daemon will oblige.
+  uint32 tick_interval_ms = 6;
+  // Scope is the region of each key space this plugin may name. A
+  // capability says what kind of thing it may declare; the scope says
+  // which ones. Both are required to write anything: an unset scope
+  // leaves a plugin that can observe and log, whatever it was granted.
+  CplanePluginScope scope = 8;
+}
+
+// CplanePluginScope bounds what a plugin may name.
+//
+// Owner tags and leases stop one writer from taking a key another holds,
+// but every surface here is one where a new key can outrank an existing
+// one: a longer trigger prefix wins the LPM lookup, a more specific route
+// wins at the receiving PE. Ownership is per object and cannot express
+// that, so the region a plugin may write into is stated separately.
+message CplanePluginScope {
+  // Locators are the SRv6 locators this plugin may allocate local SIDs
+  // from, by the name they were configured under. They also bound which
+  // IPv6 unicast prefixes it may advertise: what a plugin legitimately
+  // originates there is its own SID space.
+  repeated string locators = 1;
+  // Vrfs are the VRFs this plugin may originate VPN routes into, by name.
+  // The route distinguisher and the route targets come from the VRF's
+  // binding rather than from the plugin, so a plugin cannot name a VPN it
+  // was not given.
+  repeated string vrfs = 2;
+  // HeadendPrefixes bound the trigger prefixes this plugin may install
+  // headend entries for, in CIDR form. A declared prefix must be
+  // contained in one of them.
+  //
+  // This is the one surface with no name to bind to: the headend maps are
+  // keyed on the destination prefix alone, with no VRF and no locator in
+  // the key, so the region has to be spelled out.
+  repeated string headend_prefixes = 3;
+  // HeadendV4Slots, HeadendV6Slots and EndpointSlots are the plugin
+  // PROG_ARRAY slots this plugin's own data-plane half occupies (16-31 for
+  // the headend maps, 32-63 for the endpoint map). A plugin pointing an
+  // entry at another plugin's slot would have its aux bytes read under a
+  // layout that does not describe them.
+  //
+  // The two headend arrays are separate PROG_ARRAYs that share the slot
+  // range, so a grant of v4 slot 16 must not imply v6 slot 16: a plugin
+  // with a v4 half in slot 16 and a different plugin with a v6 half there
+  // are distinct, and one must not be able to point a v6 entry at the
+  // other's program.
+  repeated uint32 headend_v4_slots = 4;
+  repeated uint32 headend_v6_slots = 6;
+  repeated uint32 endpoint_slots = 5;
+}
+
+message CplanePluginRegisterResponse {
+  // Replaced is true when this registration upgraded a running plugin of
+  // the same name rather than starting a new one.
+  bool replaced = 1;
+}
+
+message CplanePluginUnregisterRequest {
+  string name = 1;
+}
+
+message CplanePluginUnregisterResponse {}
+
+message CplanePluginListRequest {}
+
+message CplanePluginInfo {
+  string name = 1;
+}
+
+message CplanePluginListResponse {
+  repeated CplanePluginInfo plugins = 1;
+}
+
+message CplanePluginStatsRequest {
+  // Name restricts the report to one plugin. Empty reports all of them.
+  string name = 1;
+}
+
+// CplanePluginStat is one plugin's observable state.
+message CplanePluginStat {
+  string name = 1;
+  // Capabilities granted and endpoint behaviors claimed, so a deployment
+  // can be checked without reading the registration back.
+  repeated string capabilities = 2;
+  repeated uint32 endpoint_behaviors = 3;
+  // DroppedEvents counts event batches discarded because the plugin could
+  // not keep up. A plugin falling behind is otherwise invisible: its
+  // declarations simply stop reflecting routes it never saw.
+  uint64 dropped_events = 4;
+  // Restarts counts instances lost to a trap or an overrun budget since
+  // the last successful delivery.
+  uint32 restarts = 5;
+  // Quarantined counts events the plugin asked the host to stop
+  // redelivering.
+  uint64 quarantined_events = 6;
+  // Snapshots counts rib replays delivered to it.
+  uint64 snapshots = 7;
+  // Dead reports a plugin left stopped after repeated failures. The state
+  // it wrote is still installed; it is simply no longer being fed.
+  bool dead = 8;
+  // What it holds now, and the quota each is measured against.
+  uint32 headend_entries = 9;
+  uint32 advertised_routes = 10;
+  uint32 local_sids = 11;
+  uint32 max_headend_entries = 12;
+  uint32 max_advertised_routes = 13;
+  uint32 max_local_sids = 14;
+  // Since is when the running instance started, which a restart resets.
+  google.protobuf.Timestamp since = 15;
+  // PendingDeclarations is how many of its declarations are waiting on
+  // something that does not exist yet -- a locator registered later, say --
+  // and are being retried in the background. A plugin stuck this way looks
+  // idle in every other counter here.
+  uint32 pending_declarations = 16;
+  // Scope is the region of each key space it may name. It is reported
+  // beside the capabilities for the same reason they are: what a plugin
+  // is allowed to do should be readable without fetching the
+  // registration back.
+  CplanePluginScope scope = 17;
+}
+
+// UnrestoredCplanePlugin is a plugin the store held that would not start.
+//
+// The daemon is still holding something of theirs: the state they wrote is
+// pinned in the maps, and their behaviors stay claimed so nothing installs
+// those routes with the wrong meaning. Neither shows up in the running
+// set, so without this an operator sees a plugin that is simply absent,
+// with routes going nowhere and nothing saying why.
+message UnrestoredCplanePlugin {
+  string name = 1;
+  // EndpointBehaviors are the codepoints still claimed on its behalf.
+  repeated uint32 endpoint_behaviors = 2;
+  // Reason is why it would not start.
+  string reason = 3;
+  // Since is when the attempt failed.
+  google.protobuf.Timestamp since = 4;
+}
+
+message CplanePluginStatsResponse {
+  repeated CplanePluginStat plugins = 1;
+  // Unrestored are the plugins the store held that would not start.
+  repeated UnrestoredCplanePlugin unrestored = 2;
+}
+
+message CplanePluginForgetRequest {
+  string name = 1;
+}
+
+message CplanePluginForgetResponse {}

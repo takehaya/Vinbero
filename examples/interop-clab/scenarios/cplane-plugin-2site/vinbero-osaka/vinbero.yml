@@ -1,0 +1,64 @@
+internal:
+  # eth1 faces the core: the End.DT4 decap of traffic arriving for this
+  # node's service SID. eth2 faces ce-osaka: the H.Encaps of plaintext
+  # customer traffic towards the far PE.
+  devices:
+    - eth1
+    - eth2
+  bpf:
+    # generic mode: veth links in containerlab do not support native XDP.
+    device_mode: "generic"
+    verifier_log_level: 2
+    verifier_log_size: 1073741823
+  server:
+    bind: "0.0.0.0:8080"
+  logger:
+    level: info
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  # On, so the lab can read the per-slot invocation counter and show that
+  # customer packets actually traversed the plugin's endpoint slot rather
+  # than reaching ce-osaka some other way.
+  enable_stats: true
+  fdb_aging_seconds: 300
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+
+# In-process BGP speaker. This end originates the route carrying the
+# plugin's own endpoint behavior codepoint; the far end's plugin is what
+# turns it into forwarding state.
+#
+# The two PEs peer MP-BGP over their loopbacks, multihop past the core
+# router (which is NOT in BGP).
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.2"
+    # Bind TCP/179: vinberod owns BGP on this node, FRR connects in.
+    listen_port: 179
+    # Locator supplying the SRv6 encap source. Registered over RPC by
+    # start.sh before the session settles.
+    source_locator: "LOC2"
+  peers:
+    # pe-osaka's loopback. Multihop iBGP session via the IPv6 core.
+    - neighbor: "2001:db8:ff::1"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families:
+        - vpnv4
+        - vpnv6

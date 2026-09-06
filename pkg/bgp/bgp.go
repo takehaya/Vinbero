@@ -184,6 +184,16 @@ type VPNRoute struct {
 	// or 0 when the route carries none. A non-zero color requests
 	// auto-steering onto the SR Policy keyed by {Color, NextHop}.
 	Color uint32
+	// EndpointBehavior overrides the SRv6 endpoint behavior codepoint put
+	// in the SID TLV when advertising. Zero takes the family's default,
+	// which is what vinbero's own advertisements use: End.DT4 for VPNv4
+	// and End.DT6 for VPNv6.
+	//
+	// It exists for a plugin advertising a behavior of its own. Such a
+	// behavior is a codepoint inside the SID TLV rather than a family, so
+	// this one field is all that stands between an operator's own
+	// behavior and having to extend BGP.
+	EndpointBehavior uint16
 }
 
 // Key returns the RouteKey that identifies this VPN route for withdrawal.
@@ -241,6 +251,23 @@ func (s PathSource) String() string {
 	return fmt.Sprintf("%s#%d", s.Peer, s.PathID)
 }
 
+// UnknownAttribute is a BGP path attribute Vinbero does not interpret,
+// carried through verbatim so a consumer that does understand it can.
+//
+// The BGP experimental attribute types (253 / 254) are the intended use:
+// an operator can put its own data on an otherwise ordinary route without
+// waiting for a codepoint to be standardized. gobgp keeps such attributes
+// as PathAttributeUnknown, and everything below this type is Vinbero
+// declining to throw them away.
+//
+// Value is the attribute body only, without the flags / type / length
+// header. Consumers must treat it as untrusted input from a peer.
+type UnknownAttribute struct {
+	Type  uint8
+	Flags uint8
+	Value []byte
+}
+
 // RouteEvent is a single received BGP route update delivered to a
 // RouteHandler. IsWithdraw distinguishes a withdrawal from an
 // advertisement.
@@ -256,6 +283,28 @@ type RouteEvent struct {
 	EVPN       *EVPNRoute
 	MUP        *MUPRoute
 	IsWithdraw bool
+	// EndpointBehavior is the SRv6 Endpoint Behavior codepoint (RFC 8986 /
+	// RFC 9252 §3.2.1) of the path's service SID, or 0 when the path
+	// carries no SRv6 SID or the SID names no behavior. It is decoded for
+	// every family whose SID Vinbero already reads.
+	//
+	// It is kept as the raw number rather than a parsed enum on purpose:
+	// an operator's own behavior is precisely the codepoint Vinbero does
+	// not recognize, and that is the one a plugin claims.
+	EndpointBehavior uint16
+	// UnknownAttrs holds the path attributes Vinbero does not interpret.
+	// Empty for the common case.
+	UnknownAttrs []UnknownAttribute
+}
+
+// UnknownAttr returns the first unknown attribute of the given type.
+func (ev RouteEvent) UnknownAttr(typ uint8) (UnknownAttribute, bool) {
+	for _, a := range ev.UnknownAttrs {
+		if a.Type == typ {
+			return a, true
+		}
+	}
+	return UnknownAttribute{}, false
 }
 
 // RouteHandler consumes received BGP routes. It is invoked from a

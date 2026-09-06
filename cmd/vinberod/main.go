@@ -16,10 +16,14 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bgp/apply"
+	"github.com/takehaya/vinbero/pkg/bgp/demux"
 	"github.com/takehaya/vinbero/pkg/bgp/export"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/cplane"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/fib"
+	"github.com/takehaya/vinbero/pkg/headend"
 	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/logger"
 	"github.com/takehaya/vinbero/pkg/netresource"
@@ -141,6 +145,12 @@ func run(cliCtx *cli.Context) error {
 	// must share one table or collide on policy_id. nil when BGP is disabled
 	// -> SrPolicyService RPCs return FailedPrecondition.
 	var applier *apply.Applier
+	// Construct once, before any BGP delivery. Built-in incremental writes and
+	// plugin desired sets must share owner serialization and leases.
+	headendReconciler, err := headend.NewReconciler(vin.GetMapOperations(), nil)
+	if err != nil {
+		return err
+	}
 	// exporter / routeWatcher drive the auto-advertise path (VRF export).
 	// They stay nil unless BGP is enabled with bgp.global.auto_advertise.
 	var exporter *export.Exporter
@@ -177,7 +187,11 @@ func run(cliCtx *cli.Context) error {
 		}
 
 		bgpSession = gobgp.NewSession(lg)
-		advertiser = bgpSession
+		// The operator's own advertisements, made over RPC, originate
+		// under a producer name of their own. The SR Policy, EVPN and MUP
+		// controllers stay on the bare session: each has a single writer
+		// today, so there is nothing for a name to separate them from.
+		advertiser = bgpSession.AsProducer(gobgp.ProducerOperator)
 		srPolicyAdvertiser = bgpSession
 		evpnAdvertiser = bgpSession
 		mupAdvertiser = bgpSession
@@ -189,6 +203,7 @@ func run(cliCtx *cli.Context) error {
 			cfg.BGP.Global.SourceLocator,
 			cfg.BGP.Global.LocalASN,
 			lg,
+			apply.WithHeadendWriter(headendReconciler),
 		)
 		applier.SetMUPDefaultAllow(cfg.BGP.Global.MupDefaultAllow)
 		// The config vrf_bindings were registered before the applier existed,
@@ -199,8 +214,14 @@ func run(cliCtx *cli.Context) error {
 		// The exporter shares the locator manager, VRF bindings, and BGP
 		// advertiser with the rest of the daemon and owns its route watcher.
 		if cfg.BGP.Global.AutoAdvertise {
+			// Under its own producer name. The exporter follows the
+			// routing table and the operator's RPC is what an operator
+			// asked for; sharing one name makes them one producer, and
+			// gobgp keeps a single local path per NLRI, so whichever
+			// spoke last would silently replace the other's route and
+			// then withdraw it out from under them.
 			exporter = export.New(
-				advertiser,
+				bgpSession.AsProducer(gobgp.ProducerExport),
 				vin.GetMapOperations(),
 				locatorMgr,
 				vrfBgpMgr,
@@ -267,12 +288,16 @@ func run(cliCtx *cli.Context) error {
 	// session starts ListRoutes returns ErrSessionNotStarted (boot loads
 	// bindings and facets before the session, so there is nothing to rescue),
 	// and any later failure self-heals on the next peer event.
+	//
+	// The snapshot goes through the registered built-in view, sharing path
+	// history and serialization with live delivery and claim handoffs.
+	// routeDemux is built further down, and the closure reads it when it
+	// runs, by which time it is set.
+	var routeDemux *demux.Demux
 	var evpnReplay func()
 	if bgpSession != nil {
 		evpnReplay = func() {
-			err := applier.ReplayEVPN(func(h bgp.RouteHandler) error {
-				return bgpSession.ListRoutes(bgp.FamilyEVPN, h)
-			})
+			err := routeDemux.ReplayBuiltin("applier", []bgp.Family{bgp.FamilyEVPN})
 			if err != nil {
 				lg.Warn("EVPN loc-rib replay", zap.Error(err))
 			}
@@ -372,14 +397,146 @@ func run(cliCtx *cli.Context) error {
 				lg.Warn("BGP FIB cleanup failed", zap.Error(err))
 			}
 		}()
-		cancelSub, err := bgpSession.Subscribe("", applier.Apply)
-		if err != nil {
+		// One subscription per daemon, fanned out by the demux. The applier
+		// is consumer zero; later consumers (plugins) register with the same
+		// demux rather than opening their own watch. The demux drops
+		// local-origin paths on both the replay and the live stream, so this
+		// node's own advertisements never reach the applier.
+		routeDemux = demux.New(bgpSession, bgpSession, lg)
+		// Behaviors a plugin claims are withheld from the built-in applier,
+		// which would otherwise read an unrecognized codepoint as an
+		// ordinary service SID. Vinbero's own behaviors are not claimable.
+		claimRegistry := demux.NewClaimRegistry(gobgp.BuiltinEndpointBehaviors())
+		routeDemux.SetClaimRegistry(claimRegistry)
+		if _, err := routeDemux.RegisterBuiltin("applier", nil, applier.Apply); err != nil {
+			return fmt.Errorf("register BGP applier: %w", err)
+		}
+
+		// Plugins are kept across a restart unless the operator turned it
+		// off. A daemon that forgot them would come back holding the
+		// entries they wrote -- pinned maps outlive the process -- under
+		// an owner nothing can reconcile any more.
+		var cplaneStore *cplane.Store
+		if cfg.Setting.CplanePlugins.Enabled {
+			cplaneStore, err = cplane.NewStore(cfg.Setting.CplanePlugins.Path)
+			if err != nil {
+				return fmt.Errorf("open control-plane plugin store: %w", err)
+			}
+			// Their behaviors are claimed before the first route moves.
+			// Starting the demux replays everything already in the rib, so
+			// a route carrying a stored plugin's codepoint would otherwise
+			// reach the built-in appliers first and be installed as an
+			// ordinary service SID, under their owner, in the plugin's way.
+			if err := cplane.ReserveStoredClaims(cplaneStore, claimRegistry, lg.Named("cplane")); err != nil {
+				lg.Warn("reserving the behaviors of stored control-plane plugins", zap.Error(err))
+			}
+		}
+
+		if err := routeDemux.Start(); err != nil {
 			return fmt.Errorf("subscribe BGP routes: %w", err)
 		}
-		defer cancelSub()
+		defer routeDemux.Stop()
+
+		// Control-plane plugins. They are only built where BGP is running:
+		// a plugin with no event source could declare state but never react
+		// to anything, which is not a mode worth supporting quietly.
+		//
+		// The encap source is resolved when a plugin actually declares an
+		// entry, not here: locators are registered over RPC after the
+		// daemon starts, so an address captured now is usually the one
+		// that did not exist yet, and an entry written with a zero source
+		// blackholes without saying so.
+		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
+			Source:            routeDemux,
+			Claims:            claimRegistry,
+			HeadendReconciler: headendReconciler,
+			Advertiser:        bgpSession,
+			// Each plugin originates under its own name, so the session
+			// can tell their routes apart -- from each other and from
+			// vinbero's own. gobgp keeps one local path per NLRI, and
+			// without distinct names the withdraw of whichever producer
+			// declared it last would delete a route another one still
+			// wants, leaving that producer sure it is advertising.
+			AdvertiserFor: func(producer string) cplane.Advertiser {
+				return bgpSession.AsProducer(producer)
+			},
+			Locators:      locatorMgr,
+			SIDFunctions:  vin.GetMapOperations(),
+			EndtVRFGrants: vin.GetMapOperations(),
+			// A plugin-dispatched End.DT4/DT6/DT46 decaps into the VRF's
+			// kernel device, so the grant records that device's ifindex. A
+			// VRF with only ingress ACs and no L3 device cannot be a decap
+			// target; resolving fails and the declaration is retried or
+			// refused, the same as a locator that is not registered yet.
+			ResolveVRF: func(vrfName string) (uint32, error) {
+				v, ok := vrfBgpMgr.VRF().Get(vrfName)
+				if !ok || v.Device == nil || v.Device.Ifindex == 0 {
+					return 0, fmt.Errorf("vrf %q has no L3 device ifindex", vrfName)
+				}
+				// The manager can be momentarily ahead of the kernel: a
+				// VrfDelete whose netlink teardown succeeded but whose state
+				// persist failed keeps the manager entry while the ifindex is
+				// already freed. This resolve runs under the decap-grant lease,
+				// after any such teardown completed, so reading the kernel here
+				// is what keeps a grant from being minted against that stale
+				// record: the name no longer resolves, or resolves to a
+				// different (recreated) ifindex, and either way the install is
+				// refused rather than granted a dead number.
+				kernelIdx, err := vrf.ResolveByName(vrfName)
+				if err != nil {
+					return 0, fmt.Errorf("vrf %q: kernel device lookup: %w", vrfName, err)
+				}
+				if kernelIdx != v.Device.Ifindex {
+					return 0, fmt.Errorf("vrf %q: kernel ifindex %d does not match managed ifindex %d",
+						vrfName, kernelIdx, v.Device.Ifindex)
+				}
+				return v.Device.Ifindex, nil
+			},
+			EncapSource: applier.EncapSourceAddr,
+			Store:       cplaneStore,
+			// What a plugin's scope is stated in terms of. Both are
+			// consulted when a declaration is applied rather than now,
+			// because an operator registers locators and VRF bindings
+			// over RPC after the daemon is up.
+			LocatorInfo: locatorMgr,
+			VRFBindings: vrfBgpMgr,
+			// What one plugin may hold and what it may cost to run, from
+			// the operator's config. Without these the daemon ran on the
+			// built-in defaults whatever the file said, and reported the
+			// configured value back as though it were in force.
+			Quotas: cplane.Quotas{
+				MaxHeadendEntries:   cfg.Setting.CplanePlugins.Quotas.MaxHeadendEntries,
+				MaxAdvertisedRoutes: cfg.Setting.CplanePlugins.Quotas.MaxAdvertisedRoutes,
+				MaxLocalSIDs:        cfg.Setting.CplanePlugins.Quotas.MaxLocalSIDs,
+			},
+			DefaultLimits: wasm.Limits{
+				MaxModuleBytes: cfg.Setting.CplanePlugins.Limits.MaxModuleBytes,
+				MaxMemoryPages: cfg.Setting.CplanePlugins.Limits.MaxMemoryPages,
+				CallTimeout: time.Duration(cfg.Setting.CplanePlugins.Limits.CallTimeoutMs) *
+					time.Millisecond,
+				MaxBufferBytes: cfg.Setting.CplanePlugins.Limits.MaxBufferBytes,
+			},
+			Logger: lg.Named("cplane"),
+		})
+		if err != nil {
+			return fmt.Errorf("build control-plane plugin manager: %w", err)
+		}
+		// Plugins are stopped, not flushed, on shutdown: the daemon going
+		// away is not the operator taking a plugin away, and its entries
+		// should still be there when it comes back.
+		defer cplaneMgr.Close(context.Background())
+		srv.SetCplaneManager(cplaneMgr)
+
+		// Bring back what a previous run was running. A plugin that fails
+		// to restore is logged and skipped inside Restore: refusing to
+		// finish starting because one plugin is broken would turn a plugin
+		// problem into an outage.
+		if err := cplaneMgr.Restore(ctx); err != nil {
+			lg.Warn("restoring control-plane plugins", zap.Error(err))
+		}
 
 		// Auto-advertise: the exporter enables each VRF binding with a
-		// redistribute set and starts watching. Starting after Subscribe means
+		// redistribute set and starts watching. Starting after the demux means
 		// its ListExisting replay advertises boot-time prefixes through an
 		// already-running advertiser; the deferred Stop withdraws them before
 		// the session drops.

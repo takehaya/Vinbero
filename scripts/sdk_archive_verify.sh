@@ -55,6 +55,10 @@ required=(
   "$WORK/prefix/include/core/srv6.h"
   "$WORK/prefix/share/vinbero-sdk/README.md"
   "$WORK/prefix/share/vinbero-sdk/LICENSE"
+  # The control-plane plugin contract. A plugin in any language generates
+  # its bindings from this, so a tarball without it cannot be used to
+  # write one.
+  "$WORK/prefix/share/vinbero-sdk/proto/vinbero/v1/cplane_plugin.proto"
 )
 for f in "${required[@]}"; do
   test -f "$f" || { echo "missing: $f" >&2; exit 1; }
