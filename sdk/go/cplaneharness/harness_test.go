@@ -131,12 +131,13 @@ func TestPluginConvergesAfterRestart(t *testing.T) {
 // A route naming a behavior the plugin did not claim must not move it.
 func TestPluginIgnoresUnclaimedBehavior(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{})
+	before := len(h.Declarations())
 	route := advertise("10.0.0.0/24", "fd00:2::100")
 	route.EndpointBehavior = 0x0013 // End.DT4
 	if _, err := h.Route(route); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if decls := h.Declarations(); len(decls) != 0 {
+	if decls := h.Declarations(); len(decls) != before {
 		t.Fatalf("the plugin declared %+v for a behavior it does not own", decls)
 	}
 }
@@ -209,10 +210,11 @@ func TestHarnessAppliesConfig(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
 		Config: exampleConfig(0xFE02, "", "", "", 0, ""),
 	})
+	before := len(h.Declarations())
 	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if decls := h.Declarations(); len(decls) != 0 {
+	if decls := h.Declarations(); len(decls) != before {
 		t.Fatalf("the plugin acted on its compiled-in behavior after being reconfigured: %+v", decls)
 	}
 
@@ -330,12 +332,13 @@ func TestHarnessRefusesADeclarationTheCapabilitiesDoNotCover(t *testing.T) {
 	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
 		Capabilities: []string{"advertise"},
 	})
+	before := len(h.Declarations())
 	// The example declares headend entries, which this grant does not
 	// cover. Delivering a route makes it try.
 	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if _, ok := h.LastDeclaration(); ok {
+	if len(h.Declarations()) != before {
 		t.Fatal("a headend declaration was accepted from a plugin granted only advertise")
 	}
 }

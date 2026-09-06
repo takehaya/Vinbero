@@ -345,7 +345,7 @@ echo "[6] pe-tokyo: a plugin scoped away from the prefix cannot install it"
 dexec "$PE_TOKYO" sh -c 'printf "\010\201\374\003" > /tmp/plugin-config.bin' || true
 if dexec "$PE_TOKYO" vbctl plugin cplane register \
     --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
-    --behavior 0xFE01 --family vpnv4 \
+    --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
     --capability headend --headend-prefix 10.99.0.0/16 >/dev/null 2>&1; then
     if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
         ok "$OSAKA_PREFIX was not installed under a scope that does not cover it"
@@ -367,7 +367,7 @@ fi
 # above was the scope and not a broken plugin.
 if dexec "$PE_TOKYO" vbctl plugin cplane register \
     --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
-    --behavior 0xFE01 --family vpnv4 \
+    --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
     --capability headend --headend-prefix 10.2.0.0/16 >/dev/null 2>&1; then
     if retry_n 10 bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
         ok "$OSAKA_PREFIX came back once the scope covered it"

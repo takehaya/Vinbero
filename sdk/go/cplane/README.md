@@ -43,7 +43,9 @@ func main() {}
 copy any bytes retained after it returns. `Events` receives owned event data
 and can return per-event `Quarantine` results with a reason. Nil results mean
 all events were handled. `Tick func(int64)` receives monotonic nanoseconds;
-`guest.NowMonotonic` uses the same clock. Callbacks run serially.
+`guest.NowMonotonic` uses the same clock. Callbacks run serially. Register with
+`--tick-ms 1000` (or set `TickInterval` through the API) to drive periodic retries;
+omitting the interval leaves `Tick` undriven.
 
 Build with TinyGo 0.39.0 and the repository's Go version:
 
@@ -65,9 +67,12 @@ must fit within that limit.
 The host enforces capabilities, scope, ownership and quotas. Registration must
 grant both the capability and its scope. A refused begin is `ErrBeginRefused`;
 the ABI does not identify its cause. Put/commit failures are `ApplyError` values
-with the stage and host status. A commit is synchronous and may partially apply
-before returning an error. Retain desired state until success and retry as
-appropriate; acceptance and application generations are not separate in ABI 1.
+with the stage and host status. Live commits are synchronous and may partially
+apply before returning an error. During initialization/replay before publication,
+success means the host staged the declaration; the host applies it at publication
+and retries failures. Retain desired state after a returned error and retry as
+appropriate. ABI 1 exposes no separate acceptance/application generations or
+cross-kind dependency status.
 
 For local SIDs, declare a name, locator and endpoint slot. Advertise only after
 receiving the allocated SID event. The SDK does not automatically order different
@@ -107,7 +112,7 @@ record declarations or simulate failed calls. Codec tests compare SDK messages
 with the daemon's generated protobuf types.
 
 [`cplaneharness`](../cplaneharness/harness.go) runs compiled WASM through the real
-runtime. `Deliver`, `Route`, `Tick`, `Restart` and `SetDenyCommits` exercise replay
+runtime. `Deliver`, `Route`, `Tick`, `Restart`, `Reconfigure` and `SetDenyCommits` exercise replay
 boundaries and recovery, with `Declarations` exposing successfully committed
 sets. Set explicit capabilities and scope when testing deployment constraints;
 zero-valued harness scope intentionally skips checks that a daemon registration

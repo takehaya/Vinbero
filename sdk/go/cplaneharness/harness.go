@@ -293,6 +293,13 @@ func (h *Harness) Restart() {
 	}
 }
 
+// Reconfigure replaces the instance with new configuration while retaining its
+// owner state and grants, as a same-name module upgrade does.
+func (h *Harness) Reconfigure(config []byte) {
+	h.config = append([]byte(nil), config...)
+	h.Restart()
+}
+
 // Declarations returns every set the plugin has committed, oldest first.
 func (h *Harness) Declarations() []Declaration {
 	return h.ops.declarations()

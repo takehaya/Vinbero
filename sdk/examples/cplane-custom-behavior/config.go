@@ -14,6 +14,11 @@ type configuration struct {
 	decapVRF string
 }
 
+func (c configuration) allocates() bool { return c.locator != "" && c.slot != 0 }
+func (c configuration) advertises() bool {
+	return c.allocates() && c.prefix != "" && c.vrf != "" && c.nextHop != ""
+}
+
 func decodeConfig(data []byte) (configuration, error) {
 	cfg := configuration{behavior: 0xFE01}
 	d := wire.NewDecoder(data)

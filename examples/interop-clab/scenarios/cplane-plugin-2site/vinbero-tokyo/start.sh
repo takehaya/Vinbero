@@ -116,7 +116,7 @@ printf '\010\201\374\003' > /tmp/plugin-config.bin
     --wasm /plugin.wasm \
     --config /tmp/plugin-config.bin \
     --behavior 0xFE01 \
-    --family vpnv4 \
+    --family vpnv4 --tick-ms 1000 \
     --capability headend \
     --headend-prefix 10.2.0.0/16 || true
 

@@ -42,8 +42,9 @@ func (e *ApplyError) Error() string {
 }
 
 // Client submits complete desired sets. A nil or empty slice removes this
-// plugin's entries of that kind. A successful commit is synchronous; a failed
-// commit can have partially applied and must not be treated as success.
+// plugin's entries of that kind. Live commits are synchronous and can partially
+// apply before failing. During initialization the daemon stages commits until
+// publication and owns retries of those staged declarations.
 type Client struct {
 	Host Host
 	// MaxChunkBytes bounds each apply_put buffer, including protobuf framing.

@@ -145,3 +145,29 @@ func TestSDKPluginRetriesLocalSIDBeforeAdvertising(t *testing.T) {
 		t.Fatal("advertisement has no allocated SID")
 	}
 }
+
+func TestSDKPluginRetriesCleanupAfterSendingIsDisabled(t *testing.T) {
+	h := cplaneharness.New(t, exampleModule(t), cplaneharness.Options{
+		Config: exampleConfig(0xFE01, "main", "10.7.0.0/24", "vpn-a", 33, "2001:db8::1"),
+	})
+	before := len(h.Declarations())
+	h.SetDenyCommits(true)
+	h.Reconfigure(nil)
+	if len(h.Declarations()) != before {
+		t.Fatal("refused cleanup was counted as applied")
+	}
+	h.SetDenyCommits(false)
+	if err := h.Tick(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	cleared := h.Declarations()[before:]
+	if len(cleared) != 2 || cleared[0].Kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_ADVERTISE || len(cleared[0].Routes) != 0 || cleared[1].Kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID || len(cleared[1].LocalSIDs) != 0 {
+		t.Fatalf("retry did not withdraw advertisements and release SIDs: %+v", cleared)
+	}
+	if err := h.Tick(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Declarations()) != before+2 {
+		t.Fatal("successful cleanup stayed pending")
+	}
+}

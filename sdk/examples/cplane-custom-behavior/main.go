@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"sort"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
@@ -31,7 +32,10 @@ func configure(data []byte) error {
 	if err != nil {
 		return err
 	}
-	localSIDPending = config.locator != "" && config.slot != 0
+	// Owner state survives same-name replacement. Disabled kinds must declare
+	// empty sets so the previous instance's resources are retracted.
+	localSIDPending = true
+	advertisePending = !config.advertises()
 	reconcile()
 	return nil
 }
@@ -42,9 +46,9 @@ func handleEvents(events []cplane.Event) []cplane.EventResult {
 		if ev.Kind == cplane.EventRoute && !ev.Route.Withdraw && acceptsRoute(ev.Route) {
 			guest.Log(cplane.LogInfo, "steering "+ev.Route.Prefix)
 		}
-		if ev.Kind == cplane.EventLocalSID && ev.LocalSID.Name == localSIDName && ev.LocalSID.SID != "" {
+		if config.allocates() && ev.Kind == cplane.EventLocalSID && ev.LocalSID.Name == localSIDName && ev.LocalSID.SID != "" {
 			allocatedSID = ev.LocalSID.SID
-			advertisePending = config.prefix != "" && config.vrf != ""
+			advertisePending = config.advertises()
 		}
 	}
 	reconcile()
@@ -59,18 +63,27 @@ func acceptsRoute(r cplane.Route) bool {
 // when no new BGP update arrives. A BGP replay suspends headend declarations
 // across event batches and ticks until its end marker.
 func reconcile() {
-	if localSIDPending {
-		err := client.ApplyLocalSIDs([]cplane.LocalSID{{
-			Name: localSIDName, Locator: config.locator, Slot: config.slot,
-			DecapVRF: config.decapVRF,
-		}})
-		if err == nil {
+	if advertisePending && !config.advertises() {
+		advertisePending = !optionalCleanup(client.ApplyAdvertise(nil))
+	}
+	if localSIDPending && (config.allocates() || !advertisePending) {
+		var desired []cplane.LocalSID
+		if config.allocates() {
+			desired = []cplane.LocalSID{{
+				Name: localSIDName, Locator: config.locator, Slot: config.slot,
+				DecapVRF: config.decapVRF,
+			}}
+		}
+		err := client.ApplyLocalSIDs(desired)
+		if len(desired) == 0 {
+			localSIDPending = !optionalCleanup(err)
+		} else if err == nil {
 			localSIDPending = false
 		} else {
 			guest.Log(cplane.LogWarn, err.Error())
 		}
 	}
-	if advertisePending {
+	if advertisePending && config.advertises() && allocatedSID != "" {
 		err := client.ApplyAdvertise([]cplane.AdvertisedRoute{{
 			Family: "vpnv4", VRF: config.vrf, Prefix: config.prefix,
 			SRv6SID: allocatedSID, EndpointBehavior: config.behavior, NextHop: config.nextHop,
@@ -116,6 +129,17 @@ func headendEntries() []cplane.HeadendEntry {
 		entries = append(entries, cplane.HeadendEntry{TriggerPrefix: prefix, Segments: []string{chosen[prefix].sid}})
 	}
 	return entries
+}
+
+// The example has no overlapping open transactions. In ABI 1 an optional kind
+// that cannot begin is unavailable (e.g. a headend-only receiver has no sender
+// capabilities). Once cleanup can begin, every failed commit stays retryable.
+func optionalCleanup(err error) bool {
+	if err == nil || errors.Is(err, cplane.ErrBeginRefused) {
+		return true
+	}
+	guest.Log(cplane.LogWarn, err.Error())
+	return false
 }
 
 func lessPath(a, b cplane.PathKey) bool {

@@ -90,19 +90,21 @@ build runs indefinitely in a megabyte. See
 
 ## Run
 
-For a receive-only instance handling `10.7.0.0/16`:
+From the repository root, with the daemon running and the CLI built (`make build`),
+register a receive-only instance handling `10.7.0.0/16`:
 
 ```sh
-vbctl plugin cplane register \
+./out/bin/vinbero plugin cplane register \
     --name custom-behavior \
-    --wasm plugin.wasm \
+    --wasm sdk/examples/cplane-custom-behavior/plugin.wasm \
     --behavior 0xFE01 \
     --family vpnv4 \
     --capability headend \
-    --headend-prefix 10.7.0.0/16
+    --headend-prefix 10.7.0.0/16 \
+    --tick-ms 1000
 
-vbctl plugin cplane list
-vbctl plugin cplane unregister --name custom-behavior
+./out/bin/vinbero plugin cplane list
+./out/bin/vinbero plugin cplane unregister --name custom-behavior
 ```
 
 The capabilities are what this plugin is allowed to do. The daemon links
@@ -117,7 +119,11 @@ for the data-plane registration and complete deployment configuration.
 
 Registering the same name again upgrades in place: the entries the running
 instance wrote stay, and the new module reconciles over them. Unregistering
-is the deliberate removal and takes the plugin's entries with it.
+is the deliberate removal and takes the plugin's entries with it. Disabling
+allocation or advertising in the configuration declares empty sets for those
+kinds, retracting state retained from the previous instance. Failed cleanup
+commits retry on ticks. Optional kinds unavailable to a receive-only instance
+are skipped. Periodic retries require `--tick-ms`; it defaults to disabled.
 
 ## Configuration
 

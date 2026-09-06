@@ -476,3 +476,53 @@ func TestExamplePluginDropsItsViewOnReplay(t *testing.T) {
 		t.Fatalf("after the replay the data plane holds %v, want only the route the rib still has", got)
 	}
 }
+
+func TestExamplePluginDisablingSendingRetractsPreviousOwnerState(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		config   []byte
+		wantSIDs int
+	}{
+		{"receive only", nil, 0},
+		{"keep SID without advertising", exampleConfig(0xFE01, "main", "", "", 33, ""), 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sids, adv := newFakeSIDOps(), &fakeAdvertiser{}
+			m, err := NewManager(ManagerConfig{
+				Source: newFakeSource(), Claims: newFakeClaims(), Headend: newFakeHeadendOps(),
+				Advertiser: adv, Locators: &fakeAllocator{}, SIDFunctions: sids,
+				EncapSource: testEncapSource, LocatorInfo: testLocators(), VRFBindings: testBindings(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close(context.Background())
+			reg := Registration{
+				Name: "custom-behavior", Module: examplePlugin(t),
+				Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
+				Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
+			}
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			waitDelivered(t, m, reg.Name)
+			if got, _ := adv.counts(); got != 1 || sids.count() != 1 {
+				t.Fatal("sender setup did not allocate and advertise")
+			}
+			reg.Config = tt.config
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			waitDelivered(t, m, reg.Name)
+			if got := sids.count(); got != tt.wantSIDs {
+				t.Fatalf("SID count after upgrade=%d, want %d", got, tt.wantSIDs)
+			}
+			if live := m.advertise.LiveRoutes(bpf.OwnerPluginBundle(reg.Name)); len(live) != 0 {
+				t.Fatalf("advertisements survived disabling sending: %+v", live)
+			}
+			if _, withdrawn := adv.counts(); withdrawn != 1 {
+				t.Fatalf("withdrawn=%d, want the previous advertisement retracted", withdrawn)
+			}
+		})
+	}
+}
