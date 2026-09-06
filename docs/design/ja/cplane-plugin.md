@@ -103,8 +103,23 @@ cplane manager が共有します。capability / scope の検査は plugin host 
 plugin は全量宣言、built-in は単一キーの増分更新です。behavior claim に伴う
 経路配送と既存 built-in state の撤去は demux が担います。
 
+組み込み VPN の採否と ECMP メンバー選択は、`pkg/bgp/apply/vpn_select.go` の
+副作用のない関数が担います。applier が現在の family の VRF binding から import
+可否を調べ、関数へ渡します。不一致の RT または空 SID を持つ UPDATE は以前の
+path を撤去します。採用しなかった path は applier の候補 table に残らず、
+binding の変更だけで自動再評価される保証はありません。
+
+候補は RD / peer / ADD-PATH ID を区別して保持し、ECMP は SID、RD、peer、
+数値の path ID の順に選びます。同一 SID は一つにまとめ、最大 8 path を反映します。
+保持上限は 4096 prefix、prefix ごとに 32 path です。選ばれなかった候補も
+SR Policy の参照を持ち続け、選択中の path の withdraw で昇格できます。
+group ID、SR Policy の参照、probe、map 書き込みと反映成功状態は applier が管理し、
+選択結果だけで反映済みとは扱いません。plugin の独自の選択規則は plugin が担います。
+
 転送キーは address family と masked prefix です。RD / peer / ADD-PATH ID が
 異なっても、別 owner による同じ転送キーへの宣言は競合します。
+demux と組み込み applier の経路保持には受信した prefix 文字列を使い、headend
+reconciler の書き込み境界で正規化します。
 
 排他は owner ごとです。同じ owner の全量宣言と増分更新は直列化しますが、別 owner
 の full-map scan で同期 BGP callback を待たせません。異なる owner の競合は
@@ -208,6 +223,14 @@ prefix が headend の同じ key を使うので、その prefix の path に cl
 1 本でもあれば built-in へ渡した path をすべて撤去します。通常の path の
 UPDATE でこの抑止を抜けることはできず、最後の claimed path が消えたら
 残っている通常の path を built-in に再配送します。
+この抑止は built-in の import RT / SID 検査より前なので、別 VRF 向けの claimed
+path でも同じ prefix を抑止します。plugin が停止・復元失敗していても claim を
+保持している間は built-in に切り替えません。
+
+claim の解放そのものでは replay しません。ただし、その後に同じ転送 prefix の
+別 path が更新・withdraw されると、保持中の独自 behavior の path も built-in に
+再配送され得ます。独自 path 自身の再広告は必要ありません。built-in はそれを
+通常の service SID として扱い、以前の plugin の転送規則を再現する保証はありません。
 
 claim 取得時の明示的な RIB 再走査では、現在の demux が built-in に配送した
 履歴が無くても withdraw を渡します。前の daemon が pinned map に残した
@@ -590,11 +613,12 @@ service SID として自分の owner で install します。plugin が同じ pr
 - unregister では owner の状態の flush が成功してから claim を解放します
   (lifecycle の節)。解放は取得と対称ではありません。取得時は rib を遡って
   built-in から withdraw しますが、解放時に rib を built-in へ流し直すことは
-  しません。解放後に届く advertise は built-in に配られ、素の service SID と
-  して扱われます。flush が先なので、claim が防いでいた owner 衝突 -- plugin の
+  しません。解放後の advertise や、同じ転送 prefix の別 path の更新・withdraw で
+  再評価された経路は built-in に配られ、通常の service SID として扱われます。
+  flush が先なので、claim が防いでいた owner 衝突 -- plugin の
   書き込みと built-in の install が同じ prefix を奪い合い、誤った意味の entry が
   traffic を運び続けること -- は起きません。ただし flush が保証するのは衝突が
-  無いことまでです。built-in が作るのは既定の単一 SID の H.Encaps で、plugin が
+  無いことまでです。built-in は自身の ECMP / steering / encap 規則で適用し、plugin が
   headend で宣言していたかもしれない mode や segment list や source は再現され
   ません。unregister 後の churn で入る entry は旧 plugin のものと転送の形が違い
   得るという運用上の条件は残ります。rib に残っている経路は次に churn したときに
@@ -636,7 +660,7 @@ service SID として自分の owner で install します。plugin が同じ pr
 |---|---|---|
 | 起動時は store にある behavior claim を demux の start より前に予約する。restore に失敗しても claim を保持し、実装するものが無い codepoint の経路を built-in に渡さず withhold する。 | restore 失敗そのものではこの保証は破れない。 | warning と stats の unrestored 枠を確認する。復旧させないなら forget で claim と store を落とし、map の残存 state は operator が引き受ける。 |
 | claim 取得後の retract は plugin の build と subscribe が済んでから行い、rib にある対象 behavior の経路を built-in から withdraw して最初の宣言より前に prefix を空ける。 | admission など publish 前に失敗した module では retract を行わない。元に戻せない副作用だけが残ることを防ぐ。 | 不要。 |
-| unregister は owner state の flush が成功してから claim を解放する。flush が失敗した場合は claim と store を保持し、plugin を registry に dead として戻す。 | flush は面ごとに進み部分削除を rollback しない。また built-in が後から作るのは既定の単一 SID の H.Encaps で、plugin が宣言していた mode や segment list や source は再現されない。 | flush 失敗は unregister を retry する。unregister 後の churn で転送の形が変わり得ることは運用条件として扱う。 |
+| unregister は owner state の flush が成功してから claim を解放する。flush が失敗した場合は claim と store を保持し、plugin を registry に dead として戻す。 | flush は面ごとに進み部分削除を rollback しない。また built-in は自身の ECMP / steering / encap 規則で適用し、plugin が宣言していた mode や segment list や source は再現されない。 | flush 失敗は unregister を retry する。unregister 後の churn で転送の形が変わり得ることは運用条件として扱う。 |
 | upgrade は behavior claim を新しい集合へ 1 回で置換し、途中で別の plugin に codepoint を取られて巻き戻せなくなる形を避ける。publish 前の失敗は前の集合へ戻す。 | behavior を減らす upgrade では、外した codepoint の claim が旧 state の reconcile より先に返り、その間に届いた経路は built-in に渡る。 | 窓を避けたい場合は unregister で flush してから新しい集合で登録し直す。address は取り直しになる。 |
 | 通常の unregister は in-memory の inventory から owner state を flush してから claim を返す。 | daemon 再起動直後、plugin が local SID を宣言し直す前に unregister すると、前の run の pinned dispatch entry が flush の視界に入らず、残したまま claim が解放される。 | plugin owner の entry は SID 削除 RPC の owner 検査が拒み、force-delete の RPC も無いので、operator が消す手段はいま無い。残存を確認したら、その slot と locator を再利用しないでおく。owner ごとの inventory から flush する形は繰越し。 |
 | manifest と state が揃っていれば、再起動時にも claim を予約して pinned state と built-in の対応を保つ。 | 新規登録や behavior を足す upgrade が manifest の rename 前に persist で失敗すると、その run は instance と claim と state を持って動くが、再起動時は manifest が無いので claim が予約されず、pinned state の codepoint が built-in へ流れる。 | persist 失敗の error を受けたら、登録を retry して manifest を揃えるか、unregister で state ごと flush する。 |
