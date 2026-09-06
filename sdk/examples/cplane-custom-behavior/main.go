@@ -13,9 +13,7 @@ const localSIDName = "self"
 
 var client = cplane.Client{Host: guest.Host{}}
 var config = configuration{behavior: 0xFE01}
-var routes = cplane.RouteView{Accept: func(r cplane.Route) bool {
-	return r.Family == "vpnv4" && r.EndpointBehavior == config.behavior && r.SRv6SID != ""
-}}
+var routes = cplane.RouteView{Accept: acceptsRoute}
 var allocatedSID string
 var localSIDPending, advertisePending bool
 
@@ -41,6 +39,9 @@ func configure(data []byte) error {
 func handleEvents(events []cplane.Event) []cplane.EventResult {
 	routes.Update(events)
 	for _, ev := range events {
+		if ev.Kind == cplane.EventRoute && !ev.Route.Withdraw && acceptsRoute(ev.Route) {
+			guest.Log(cplane.LogInfo, "steering "+ev.Route.Prefix)
+		}
 		if ev.Kind == cplane.EventLocalSID && ev.LocalSID.Name == localSIDName && ev.LocalSID.SID != "" {
 			allocatedSID = ev.LocalSID.SID
 			advertisePending = config.prefix != "" && config.vrf != ""
@@ -48,6 +49,10 @@ func handleEvents(events []cplane.Event) []cplane.EventResult {
 	}
 	reconcile()
 	return nil
+}
+
+func acceptsRoute(r cplane.Route) bool {
+	return r.Family == "vpnv4" && r.EndpointBehavior == config.behavior && r.SRv6SID != ""
 }
 
 // Pending declarations survive a refusal and are retried on ticks, including

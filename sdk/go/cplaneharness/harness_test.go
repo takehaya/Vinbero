@@ -2,6 +2,7 @@ package cplaneharness_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,9 +162,12 @@ func TestHarnessCapturesPluginLogs(t *testing.T) {
 	if _, err := h.Route(advertise("10.0.0.0/24", "fd00:2::100")); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if len(h.Logs()) == 0 {
-		t.Fatal("no plugin log lines were captured")
+	for _, line := range h.Logs() {
+		if strings.Contains(line, "steering 10.0.0.0/24") {
+			return
+		}
 	}
+	t.Fatal("plugin logs did not identify the observed route")
 }
 
 // exampleConfig builds the example plugin's own config message: its
