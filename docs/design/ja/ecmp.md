@@ -107,6 +107,15 @@ next hop が 1 本のときは multipath でなく通常の gateway 経路とし
 
 weight は 1 始まりの自然な値で扱い、netlink の境界で変換します。wire 上の `rtnh_hops` は weight より 1 小さいので、そのまま渡すと全 next hop の取り分が 1 つずつ増えてしまいます。境界で吸収しているので、上位のコードはこの差を意識しません。weight 0 は 1 と読みます。取り分ゼロの next hop を意図する呼び出し元は無いためです。
 
+## VPN group の撤去
+
+組み込み VPN の最後の path を撤去するときは、trigger の削除に成功してから
+group を削除し、両方の削除が成功した後に group ID を再利用します。trigger の
+削除失敗時は group と管理情報を残し、古い trigger が別 prefix の group を参照する
+ことを防ぎます。group の削除失敗時も ID は予約したままです。
+失敗した削除は後続の同じ prefix の withdraw で再試行できます。同じ経路が再広告
+された場合は、以前の反映成功記録で省略せず group と trigger を再構築します。
+
 ## 観測 API
 
 `HeadendGroupService` で group を読めます。`vbctl headend-group list` が group 一覧、`vbctl headend-group get <group-id>` が member の segment list と weight と policy と生死を返します。書き込み API はありません。group は BGP 受信経路が経路の到着に応じて書くので、operator が作るものではないためです。
