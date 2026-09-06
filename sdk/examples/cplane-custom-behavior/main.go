@@ -49,6 +49,7 @@ func handleEvents(events []cplane.Event) []cplane.EventResult {
 		}
 		if config.allocates() && ev.Kind == cplane.EventLocalSID && ev.LocalSID.Name == localSIDName && ev.LocalSID.SID != "" {
 			allocatedSID = ev.LocalSID.SID
+			localSIDPending = false
 			advertisePending = config.advertises()
 		}
 	}
@@ -78,11 +79,11 @@ func reconcile() {
 		err := client.ApplyLocalSIDs(desired)
 		if len(desired) == 0 {
 			localSIDPending = !optionalCleanup(err)
-		} else if err == nil {
-			localSIDPending = false
-		} else {
+		} else if err != nil {
 			guest.Log(cplane.LogWarn, err.Error())
 		}
+		// A successful declaration can lose its allocation notification when
+		// the host queue is full. Retry until the matching SID event arrives.
 	}
 	if advertisePending && config.advertises() && allocatedSID != "" {
 		err := client.ApplyAdvertise([]cplane.AdvertisedRoute{{

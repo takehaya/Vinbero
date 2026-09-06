@@ -5,7 +5,11 @@ import (
 	"net/netip"
 	"os"
 	"testing"
+	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
@@ -525,6 +529,76 @@ func TestExamplePluginDisablingSendingRetractsPreviousOwnerState(t *testing.T) {
 				t.Fatalf("withdrawn=%d, want the previous advertisement retracted", withdrawn)
 			}
 		})
+	}
+}
+
+func TestExamplePluginRetriesDroppedSIDNotification(t *testing.T) {
+	owner := bpf.OwnerPluginBundle("custom-behavior")
+	sids, adv := newFakeSIDOps(), &fakeAdvertiser{}
+	localSIDs := NewLocalSIDSet(&fakeAllocator{}, sids, nil, nil)
+	advertise := NewAdvertiseSet(adv, NewLeases())
+	dropNotifications, attempts := true, 0
+	var notifications []AllocatedSID
+	ops, err := NewPluginOps(PluginOpsConfig{
+		Owner: owner, Headend: newFakeHeadendOps(), Capabilities: testCaps(),
+		Guard:     NewGuard(testScope(), testLocators(), testBindings()),
+		LocalSIDs: localSIDs, Advertise: advertise,
+		OnLocalSIDs: func(allocated []AllocatedSID) bool {
+			attempts++
+			if dropNotifications {
+				return false // The same result as a full manager delivery queue.
+			}
+			notifications = append(notifications, allocated...)
+			return true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
+		Name: "custom-behavior", Module: examplePlugin(t), Ops: ops, Capabilities: testCaps(),
+		ConfigBlob: exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = inst.Close(context.Background()) }()
+	if err := ops.Publish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.Tick(context.Background(), int64(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || sids.count() != 1 || advertise.LiveCount(owner) != 0 {
+		t.Fatalf("missing notification: attempts=%d, SIDs=%d, advertisements=%d", attempts, sids.count(), advertise.LiveCount(owner))
+	}
+	dropNotifications = false
+	if err := inst.Tick(context.Background(), int64(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifications) != 1 {
+		t.Fatalf("retry delivered %d notifications, want 1", len(notifications))
+	}
+	sid := notifications[0]
+	raw, err := proto.Marshal(&v1.PluginEventBatch{Events: []*v1.PluginEvent{{
+		Kind: v1.PluginEventKind_PLUGIN_EVENT_KIND_LOCAL_SID, Sequence: 1,
+		LocalSid: &v1.PluginLocalSidAllocated{Name: sid.Name, Sid: sid.SID.String(), Locator: sid.Locator},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inst.HandleEvents(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if advertise.LiveCount(owner) != 1 || sids.count() != 1 {
+		t.Fatal("notification recovery did not advertise the existing SID")
+	}
+	gen := ops.nextGen
+	if err := inst.Tick(context.Background(), int64(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if ops.nextGen != gen {
+		t.Fatal("allocation kept retrying after the SID event arrived")
 	}
 }
 

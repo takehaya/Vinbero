@@ -79,8 +79,10 @@ capabilities or scope. A guest cannot clear a kind after its capability is
 revoked. Within one daemon run this covers headend entries, local SIDs and
 advertisements; daemon restore can only discover prior headend entries.
 
-For local SIDs, declare a name, locator and endpoint slot. Advertise only after
-receiving the allocated SID event. The SDK does not automatically order different
+For local SIDs, declare a name, locator and endpoint slot. Retry the declaration
+until the matching allocated SID event arrives: a successful commit does not
+guarantee notification delivery when the host queue is full. Advertise only after
+receiving that event. The SDK does not automatically order different
 kinds of declarations. The host derives VPN RD/RT from the declared VRF. Stable
 SID names survive guest replacement within one daemon run, not daemon restarts.
 
