@@ -16,12 +16,15 @@ class LifecycleTests(unittest.TestCase):
             ip.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n'
                           'if [[ "$*" == "netns list" ]]; then echo guard-src; fi\n')
             ip.chmod(0o755)
+            helper = root / 'netns.sh'
+            helper.write_text('echo snapshot-helper\n')
             env = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
-                       TOPO_NS_PREFIX='guard-', CALLS=str(calls))
+                       TOPO_NS_PREFIX='guard-', CALLS=str(calls), NETNS_HELPER=str(helper))
             result = subprocess.run(['bash', str(SCRIPTS / 'setup.sh')], env=env,
                                     capture_output=True, text=True, timeout=5)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('namespace already exists', result.stderr)
+            self.assertIn('snapshot-helper', result.stdout)
             self.assertEqual(calls.read_text(), 'netns list\n')
 
     def test_invalid_mode_fails_before_creating_artifacts(self):

@@ -79,7 +79,9 @@ trap 'exit 143' TERM
 
 mkdir "$WORK/instrument"
 cp "$SCRIPT_DIR/"{setup.sh,teardown.sh,check.py,vinbero-bgp.yml,run_bgp.sh} "$WORK/instrument/"
+cp "$REPO_ROOT/examples/common/netns.sh" "$WORK/instrument/netns.sh"
 SCRIPT_DIR="$WORK/instrument"
+export NETNS_HELPER="$SCRIPT_DIR/netns.sh"
 python3 - "$WORK/run.json" "$MODE" "$RATE" "$TRIALS" "$TOPO_NS_PREFIX" "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY" "$WASM" "$SCRIPT_DIR/"* <<'PY'
 import hashlib, json, os, platform, subprocess, sys
 from pathlib import Path
@@ -140,6 +142,7 @@ PY
     ctl locator create --name LOC1 --prefix fd00:100::/48 --block-len 32 --node-len 16 --function-len 16 --argument-len 64 --behavior classic > "$trial_dir/locator.log"
 
     behavior=0
+    relay_pid=""
     if [[ "$MODE" == cplane ]]; then
         behavior=65025
         ctl plugin cplane register --name rq1-receiver --wasm "$WASM" \
@@ -147,7 +150,7 @@ PY
             --headend-prefix 10.0.2.0/24 --tick-ms 1000 > "$trial_dir/register.log"
     elif [[ "$MODE" == relay ]]; then
         ip netns exec "$ns_rt" "$RELAY" -neighbor fd00:12::2 -rpc 127.0.0.1:18081 > "$trial_dir/relay.log" 2>&1 &
-        pids+=("$!")
+        relay_pid=$!; pids+=("$relay_pid")
     fi
     ip netns exec "$ns_pea" "$CHURN" -neighbor fd00:12::1 -next-hop fd00:12::2 \
         -initial-sid fd00:a::100 -change-to fd00:b::100 -behavior "$behavior" \
@@ -171,6 +174,7 @@ PY
     wait_child "$pid_a"
     wait_child "$pid_b"
     kill -0 "$daemon_pid" "$churn_pid"
+    if [[ -n "$relay_pid" ]]; then kill -0 "$relay_pid"; fi
     check --sid fd00:b::100 --previous "$trial_dir/initial.json" --timeout 5 --out "$trial_dir/final.json"
     change_ns="$(sed -n 's/^change_ns=//p' "$trial_dir/churn.log")"
     [[ "$change_ns" =~ ^[0-9]+$ ]] || { echo "missing change timestamp" >&2; exit 1; }

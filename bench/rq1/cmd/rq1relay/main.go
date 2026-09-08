@@ -87,33 +87,11 @@ func main() {
 	}
 	defer func() { _ = session.Stop(ctx) }()
 
-	cancel, err := session.Subscribe(bgp.FamilyVPNv4, func(ev bgp.RouteEvent) {
-		if ev.VPN == nil {
-			return
-		}
-		r := *ev.VPN
-		if ev.IsWithdraw {
-			req := &v1.Headendv4DeleteRequest{TriggerPrefixes: []string{r.Prefix}}
-			if _, err := client.Headendv4Delete(ctx, connect.NewRequest(req)); err != nil {
-				fmt.Fprintf(os.Stderr, "rq1relay: withdraw %s: %v\n", r.Prefix, err)
-			}
-			return
-		}
-		req := &v1.Headendv4CreateRequest{
-			Headendv4S: []*v1.Headendv4{
-				{
-					TriggerPrefix: r.Prefix,
-					Mode:          v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS,
-					SrcAddr:       *encapSrc,
-					DstAddr:       r.SRv6SID,
-					Segments:      []string{r.SRv6SID},
-				},
-			},
-		}
-		if _, err := client.Headendv4Create(ctx, connect.NewRequest(req)); err != nil {
-			fmt.Fprintf(os.Stderr, "rq1relay: install %s: %v\n", r.Prefix, err)
-		}
+	worker := newRelayWorker(ctx, 256, func(ctx context.Context, ev bgp.RouteEvent) error {
+		return applyRoute(ctx, client, *encapSrc, ev)
 	})
+	defer worker.close()
+	cancel, err := session.Subscribe(bgp.FamilyVPNv4, worker.submit)
 	if err != nil {
 		fatal("subscribe: %v", err)
 	}
@@ -133,13 +111,21 @@ func main() {
 
 	fmt.Fprintln(os.Stderr, "ready")
 
+	var elapsed <-chan time.Time
 	if *hold > 0 {
-		time.Sleep(*hold)
-		return
+		timer := time.NewTimer(*hold)
+		defer timer.Stop()
+		elapsed = timer.C
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	defer signal.Stop(sig)
+	select {
+	case err := <-worker.failed:
+		fatal("reflection failed: %v", err)
+	case <-elapsed:
+	case <-sig:
+	}
 }
 
 func fatal(format string, args ...any) {

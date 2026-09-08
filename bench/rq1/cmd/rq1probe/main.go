@@ -130,27 +130,19 @@ func runRecv(args []string) {
 		fatal("receiver: %v", err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		if err := recv.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "receiver: %v\n", err)
-		}
-		close(done)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- recv.Run() }()
 
 	// Announce readiness so a driver script can start traffic without
 	// racing the bind.
 	fmt.Fprintln(os.Stderr, "ready")
 
-	if *duration > 0 {
-		time.Sleep(*duration)
-	} else {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		<-sig
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sig)
+	if err := waitReceiver(done, recv.Stop, *duration, sig); err != nil {
+		fatal("receiver: %v", err)
 	}
-	recv.Stop()
-	<-done
 
 	w, closeFn := openOut(*out)
 	defer closeFn()
@@ -165,6 +157,27 @@ func runRecv(args []string) {
 			strconv.FormatInt(r.RecvAt.UnixNano(), 10),
 		}))
 	}
+}
+
+func waitReceiver(done <-chan error, stop func(), duration time.Duration, sig <-chan os.Signal) error {
+	var elapsed <-chan time.Time
+	if duration > 0 {
+		timer := time.NewTimer(duration)
+		defer timer.Stop()
+		elapsed = timer.C
+	}
+	select {
+	case err := <-done:
+		stop()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("receiver stopped before completion")
+	case <-elapsed:
+	case <-sig:
+	}
+	stop()
+	return <-done
 }
 
 func runAnalyze(args []string) {

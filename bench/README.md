@@ -12,6 +12,8 @@
 `inproc` は `builtin` の別名として使えます。cplane と builtin の差には queue、codec、
 plugin の経路処理、host の検証、map の書き込みが含まれます。ECMP group の有無も異なるため、
 差を WASM 単体の実行コストとして解釈することはできません。
+relay は順序を保つ単一 worker から RPC を実行します。queue の上限は256件で、overflow、
+RPC の timeout、response 内の書き込み失敗はいずれも測定失敗にします。
 
 ## 構成を揃える
 
@@ -85,6 +87,7 @@ map pin と cplane store は無効なので、SID 永続化の fsync や復旧�
 - `status.json` に exit code と完了した trial 数を保存します。全 trial の成功を確認してから比較してください。
 - `trial-N/` に packet の送受信 CSV、初期・最終 state、実際の変更 timestamp、設定とログを保存します。
 - `instrument/` に開始時点の script と設定 template を保存し、その snapshot を実行します。
+  topology の共通 helper も含みます。
 
 `latency_us` の起点は送信側 GoBGP の Advertise 呼び出し直前です。BGP encoding と送信、
 受信処理、map 反映、最初の新経路の probe 到着までを含みます。受信側 BGP UPDATE の
@@ -98,6 +101,7 @@ map pin と cplane store は無効なので、SID 永続化の fsync や復旧�
 接続、登録、初期転送、更新反映、capture の検証が失敗した trial は正常な行として出力せず、
 run 全体を非ゼロで終了します。それ以前の成功行と失敗した trial のログは保持します。
 失敗を除外して高速な trial だけを集計しないでください。
+受信処理のエラーと kernel timestamp の欠落も失敗にします。user space の時刻での代替はしません。
 
 これは単一路の更新反映時間を測る装置です。CPU / RSS の連続採取、大量経路の処理容量、
 WASM 単体の時間、再起動時の復旧時間、実 NIC の最大 pps は別の測定が必要です。

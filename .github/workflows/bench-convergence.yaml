@@ -5,6 +5,8 @@ on:
   push:
     paths:
       - 'bench/**'
+      - 'Makefile'
+      - 'examples/common/netns.sh'
       - 'pkg/cplane/**'
       - 'pkg/bgp/**'
       - 'sdk/go/cplane/**'
@@ -13,6 +15,8 @@ on:
   pull_request:
     paths:
       - 'bench/**'
+      - 'Makefile'
+      - 'examples/common/netns.sh'
       - 'pkg/cplane/**'
       - 'pkg/bgp/**'
       - 'sdk/go/cplane/**'

@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # REPO_ROOT is overridable so this can run from a snapshot of the directory,
 # which is how a long measurement avoids reading a file that may be edited.
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
-source "${REPO_ROOT}/examples/common/netns.sh"
+source "${NETNS_HELPER:-${REPO_ROOT}/examples/common/netns.sh}"
 
 export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-rq1-}"
 

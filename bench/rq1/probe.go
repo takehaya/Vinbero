@@ -271,8 +271,10 @@ func (r *Receiver) Run() error {
 				errors.Is(err, unix.EINTR) {
 				continue
 			}
-			if errors.Is(err, unix.EBADF) {
+			select {
+			case <-r.done:
 				return nil
+			default:
 			}
 			return fmt.Errorf("probe: recvmsg: %w", err)
 		}
@@ -282,7 +284,7 @@ func (r *Receiver) Run() error {
 		}
 		recvAt, ok := timestampFromOOB(oob[:oobn])
 		if !ok {
-			recvAt = time.Now()
+			return errors.New("probe: received packet without a kernel timestamp")
 		}
 		r.mu.Lock()
 		r.records = append(r.records, RecvRecord{
@@ -341,11 +343,20 @@ func timestampFromOOB(oob []byte) (time.Time, bool) {
 		if m.Header.Level != unix.SOL_SOCKET || m.Header.Type != unix.SO_TIMESTAMPNS {
 			continue
 		}
-		if len(m.Data) < 16 {
+		var sec, nsec int64
+		switch len(m.Data) {
+		case 8: // native timespec on 32-bit Linux
+			sec = int64(int32(binary.NativeEndian.Uint32(m.Data[:4])))
+			nsec = int64(int32(binary.NativeEndian.Uint32(m.Data[4:8])))
+		case 16: // native timespec on 64-bit Linux
+			sec = int64(binary.NativeEndian.Uint64(m.Data[:8]))
+			nsec = int64(binary.NativeEndian.Uint64(m.Data[8:16]))
+		default:
 			continue
 		}
-		sec := int64(binary.LittleEndian.Uint64(m.Data[0:8]))
-		nsec := int64(binary.LittleEndian.Uint64(m.Data[8:16]))
+		if nsec < 0 || nsec >= int64(time.Second) {
+			return time.Time{}, false
+		}
 		return time.Unix(sec, nsec), true
 	}
 	return time.Time{}, false
