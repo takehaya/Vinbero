@@ -94,6 +94,8 @@ map pin と cplane store は無効なので、SID 永続化の fsync や復旧�
 - `trial-N/` に packet の送受信 CSV、初期・最終 state、実際の変更 timestamp、設定とログを保存します。
 - `instrument/` に開始時点の script と設定 template を保存し、その snapshot を実行します。
   topology の共通 helper も含みます。
+- `bin/` に実行する binary と cplane mode の WASM を保存します。途中で元の checkout を
+  再buildしても、以降の trial はこの snapshot を使います。
 
 `latency_us` の起点は送信側 GoBGP の Advertise 呼び出し直前です。BGP encoding と送信、
 受信処理、map 反映、最初の新経路の probe 到着までを含みます。受信側 BGP UPDATE の

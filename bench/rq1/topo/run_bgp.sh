@@ -99,10 +99,16 @@ ns_rt="${TOPO_NS_PREFIX}rt"
 ns_pea="${TOPO_NS_PREFIX}pea"
 ns_peb="${TOPO_NS_PREFIX}peb"
 topology_up=false
+export TOPOLOGY_READY_FILE="$WORK/topology-ready"
 pids=()
 completed=0
 
 cleanup_trial() {
+    # A signal can arrive between launching an asynchronous command and saving
+    # $! in pids. Bash's own job table already owns that child at this point.
+    while read -r pid; do
+        [[ " ${pids[*]} " == *" $pid "* ]] || pids+=("$pid")
+    done < <(jobs -p)
     # Every PID was started by this shell. Never kill by process name: another
     # lab or measurement may be using the same daemon binary.
     for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
@@ -114,9 +120,10 @@ cleanup_trial() {
     done
     for pid in "${pids[@]}"; do kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
     pids=()
-    if "$topology_up"; then
+    if "$topology_up" || [[ -f "$TOPOLOGY_READY_FILE" ]]; then
         "$SCRIPT_DIR/teardown.sh" >/dev/null || return 1
         topology_up=false
+        rm -f -- "$TOPOLOGY_READY_FILE"
     fi
     return 0
 }
@@ -137,6 +144,22 @@ cp "$SCRIPT_DIR/"{setup.sh,teardown.sh,check.py,vinbero-bgp.yml,run_bgp.sh} "$WO
 cp "$REPO_ROOT/examples/common/netns.sh" "$WORK/instrument/netns.sh"
 SCRIPT_DIR="$WORK/instrument"
 export NETNS_HELPER="$SCRIPT_DIR/netns.sh"
+mkdir "$WORK/bin"
+# A later build must not change subsequent trials or invalidate the hashes.
+cp --reflink=auto -- "$VINBEROD" "$WORK/bin/vinberod"
+cp --reflink=auto -- "$VBCTL" "$WORK/bin/vinbero"
+cp --reflink=auto -- "$PROBE" "$WORK/bin/rq1probe"
+cp --reflink=auto -- "$CHURN" "$WORK/bin/rq1bgp"
+cp --reflink=auto -- "$RELAY" "$WORK/bin/rq1relay"
+VINBEROD="$WORK/bin/vinberod"
+VBCTL="$WORK/bin/vinbero"
+PROBE="$WORK/bin/rq1probe"
+CHURN="$WORK/bin/rq1bgp"
+RELAY="$WORK/bin/rq1relay"
+if [[ "$MODE" == cplane ]]; then
+    cp --reflink=auto -- "$WASM" "$WORK/bin/plugin.wasm"
+    WASM="$WORK/bin/plugin.wasm"
+fi
 python3 - "$WORK/run.json" "$MODE" "$RATE" "$TRIALS" "$TOPO_NS_PREFIX" "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY" "$WASM" "$SCRIPT_DIR/"* <<'PY'
 import hashlib, json, os, platform, subprocess, sys
 from pathlib import Path

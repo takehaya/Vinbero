@@ -155,4 +155,7 @@ warm_neighbor "$ns_pea" fd00:12::1
 warm_neighbor "$ns_peb" fd00:13::1
 
 echo "topology up: $ns_src $ns_rt $ns_pea $ns_peb"
+# Publish ownership before releasing rollback. The parent may handle a signal
+# as soon as this foreground script exits, before updating its own variables.
+if [[ -n "${TOPOLOGY_READY_FILE:-}" ]]; then touch "$TOPOLOGY_READY_FILE"; fi
 trap - EXIT
