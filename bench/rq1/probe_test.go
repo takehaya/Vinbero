@@ -159,7 +159,10 @@ func TestRQ1ProbeTimestamps(t *testing.T) {
 
 	deltas := make([]time.Duration, 0, len(got))
 	negative := 0
-	for _, r := range got {
+	for i, r := range got {
+		if i > 0 && r.RecvAt.Before(got[i-1].RecvAt) {
+			t.Fatal("kernel timestamps moved backwards in receiver order")
+		}
 		s, ok := sentAt[r.Seq]
 		if !ok {
 			t.Fatalf("received seq %d that was never recorded as sent", r.Seq)

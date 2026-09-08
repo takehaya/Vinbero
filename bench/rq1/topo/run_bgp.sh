@@ -30,18 +30,39 @@ done
 if [[ "$MODE" == cplane && ! -r "$WASM" ]]; then echo "missing WASM: $WASM" >&2; exit 2; fi
 for command in ip python3 ethtool timeout flock; do command -v "$command" >/dev/null; done
 
-WORK="${WORK:-$(mktemp -d /tmp/vinbero-rq1.XXXXXX)}"
-mkdir -p "$WORK"
+umask 077
+if [[ -n "${WORK:-}" ]]; then
+    # mkdir atomically rejects files, directories and dangling symlinks.
+    # Never reuse caller-populated contents in a privileged run.
+    mkdir -m 0700 -- "$WORK" || { echo "WORK must be a new directory: $WORK" >&2; exit 2; }
+else
+    WORK="$(mktemp -d /tmp/vinbero-rq1.XXXXXX)"
+fi
 WORK="$(realpath "$WORK")"
-[[ ! -e "$WORK/run.json" ]] || { echo "WORK already contains a run: $WORK" >&2; exit 2; }
 OUT="${OUT:-${WORK}/results.csv}"
-[[ ! -e "$OUT" ]] || { echo "refusing to overwrite $OUT" >&2; exit 2; }
+[[ ! -e "$OUT" && ! -L "$OUT" ]] || { echo "refusing to overwrite $OUT" >&2; exit 2; }
 mkdir -p "$(dirname "$OUT")"
+# Hold the exclusively-created file open for the whole run. Replacing its
+# pathname later must not redirect privileged appends to another file.
+set -o noclobber
+exec 8>"$OUT"
+set +o noclobber
 export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-b$(printf '%x' "$$")-}"
 [[ "$TOPO_NS_PREFIX" =~ ^[a-zA-Z0-9-]{1,9}$ ]] || { echo "invalid namespace prefix" >&2; exit 2; }
 # Serialise uses of a chosen prefix, including across trials. The setup also
 # refuses namespaces that predate this run.
-exec 9>"/tmp/vinbero-rq1-${TOPO_NS_PREFIX}.lock"
+python3 - <<'PY'
+import os, stat
+path = '/run/vinbero-rq1'
+try:
+    os.mkdir(path, 0o700)
+except FileExistsError:
+    pass
+info = os.lstat(path)
+if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+    raise SystemExit('unsafe lock directory: ' + path)
+PY
+exec 9>"/run/vinbero-rq1/${TOPO_NS_PREFIX}.lock"
 flock -n 9 || { echo "namespace prefix is already in use" >&2; exit 2; }
 ns_src="${TOPO_NS_PREFIX}src"
 ns_rt="${TOPO_NS_PREFIX}rt"
@@ -98,7 +119,7 @@ data = dict(mode=mode, rate=int(rate), trials=int(trials), namespace_prefix=pref
             artifacts={str(Path(p).resolve()): digest(p) for p in artifacts if Path(p).is_file()})
 Path(out).write_text(json.dumps(data, indent=2) + '\n')
 PY
-echo "trial,mode,latency_us,lost,misdelivered,sample_gap_us" > "$OUT"
+echo "trial,mode,latency_us,lost,misdelivered,sample_gap_us" >&8
 
 ctl() { timeout 5 ip netns exec "$ns_rt" "$VBCTL" -s http://127.0.0.1:18081 "$@"; }
 check() { ip netns exec "$ns_rt" python3 "$SCRIPT_DIR/check.py" wait --mode "$MODE" "$@"; }
@@ -182,14 +203,14 @@ PY
         --recv "$trial_dir/pea.csv" "$trial_dir/peb.csv" --change-ns "$change_ns"
     "$PROBE" analyze -sent "$trial_dir/sent.csv" -recv "$trial_dir/pea.csv,$trial_dir/peb.csv" \
         -change-ns "$change_ns" -old pe-a -new pe-b > "$trial_dir/verdict.txt"
-    python3 - "$trial_dir/verdict.txt" "$OUT" "$trial" "$MODE" <<'PY'
-import csv, sys
+    python3 - "$trial_dir/verdict.txt" "$trial" "$MODE" <<'PY'
+import csv, os, sys
 from pathlib import Path
-verdict, out, trial, mode = sys.argv[1:]
+verdict, trial, mode = sys.argv[1:]
 fields = dict(word.split('=', 1) for word in Path(verdict).read_text().split())
 if fields.get('detected') != 'true':
     raise SystemExit('convergence not detected')
-with open(out, 'a') as stream:
+with os.fdopen(os.dup(8), 'a', newline='') as stream:
     csv.writer(stream).writerow([trial, mode] + [fields[k] for k in ('latency_us', 'lost', 'misdelivered', 'sample_gap_us')])
 PY
     completed=$trial

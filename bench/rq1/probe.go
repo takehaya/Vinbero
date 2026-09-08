@@ -212,6 +212,9 @@ type Receiver struct {
 // NewReceiver binds an endpoint. name identifies it in the records, and is
 // compared against each probe's tag to classify delivery.
 func NewReceiver(name string, bind netip.AddrPort) (*Receiver, error) {
+	if !bind.IsValid() {
+		return nil, errors.New("probe: invalid bind address")
+	}
 	domain := unix.AF_INET6
 	if bind.Addr().Is4() {
 		domain = unix.AF_INET

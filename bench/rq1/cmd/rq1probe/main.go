@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -189,14 +190,26 @@ func runAnalyze(args []string) {
 	newName := fs.String("new", "", "endpoint the route points to after the change")
 	_ = fs.Parse(args)
 
-	if *sentPath == "" || *recvPaths == "" || *changeNs == 0 {
-		fatal("analyze needs -sent, -recv and -change-ns")
+	if *sentPath == "" || *recvPaths == "" || *changeNs <= 0 || *oldName == "" || *newName == "" || *oldName == *newName {
+		fatal("analyze needs -sent, -recv, positive -change-ns and distinct -old/-new names")
 	}
 
-	sent := readSent(*sentPath)
+	sent, err := readSent(*sentPath)
+	if err != nil {
+		fatal("read sender: %v", err)
+	}
 	var received []benchrq1.RecvRecord
 	for _, p := range splitComma(*recvPaths) {
-		received = append(received, readRecv(p)...)
+		rows, err := readRecv(p)
+		if err != nil {
+			fatal("read receiver: %v", err)
+		}
+		for _, row := range rows {
+			if row.Endpoint != *oldName && row.Endpoint != *newName {
+				fatal("unexpected endpoint %q in %s", row.Endpoint, p)
+			}
+		}
+		received = append(received, rows...)
 	}
 
 	got := benchrq1.Analyze(sent, received, time.Unix(0, *changeNs), *oldName, *newName)
@@ -227,66 +240,60 @@ func splitComma(s string) []string {
 	return out
 }
 
-func readSent(path string) []benchrq1.SendRecord {
-	rows := readCSV(path)
+func readSent(path string) ([]benchrq1.SendRecord, error) {
+	rows, err := readCSV(path, []string{"seq", "tag", "sent_unix_ns"})
+	if err != nil {
+		return nil, err
+	}
 	out := make([]benchrq1.SendRecord, 0, len(rows))
-	for _, r := range rows {
-		if len(r) < 3 {
-			continue
-		}
+	seen := make(map[uint64]bool, len(rows))
+	for i, r := range rows {
 		seq, err1 := strconv.ParseUint(r[0], 10, 64)
 		tag, err2 := strconv.ParseUint(r[1], 10, 32)
 		ns, err3 := strconv.ParseInt(r[2], 10, 64)
-		if err1 != nil || err2 != nil || err3 != nil {
-			continue
+		if err1 != nil || err2 != nil || err3 != nil || ns <= 0 || seen[seq] {
+			return nil, fmt.Errorf("%s row %d: invalid sender record or duplicate sequence", path, i+2)
 		}
-		out = append(out, benchrq1.SendRecord{
-			Seq:    seq,
-			Tag:    uint32(tag),
-			SentAt: time.Unix(0, ns),
-		})
+		seen[seq] = true
+		out = append(out, benchrq1.SendRecord{Seq: seq, Tag: uint32(tag), SentAt: time.Unix(0, ns)})
 	}
-	return out
+	return out, nil
 }
 
-func readRecv(path string) []benchrq1.RecvRecord {
-	rows := readCSV(path)
+func readRecv(path string) ([]benchrq1.RecvRecord, error) {
+	rows, err := readCSV(path, []string{"seq", "tag", "endpoint", "recv_unix_ns"})
+	if err != nil {
+		return nil, err
+	}
 	out := make([]benchrq1.RecvRecord, 0, len(rows))
-	for _, r := range rows {
-		if len(r) < 4 {
-			continue
-		}
+	for i, r := range rows {
 		seq, err1 := strconv.ParseUint(r[0], 10, 64)
 		tag, err2 := strconv.ParseUint(r[1], 10, 32)
 		ns, err3 := strconv.ParseInt(r[3], 10, 64)
-		if err1 != nil || err2 != nil || err3 != nil {
-			continue
+		if err1 != nil || err2 != nil || err3 != nil || ns <= 0 || r[2] == "" {
+			return nil, fmt.Errorf("%s row %d: invalid receiver record", path, i+2)
 		}
-		out = append(out, benchrq1.RecvRecord{
-			Seq:      seq,
-			Tag:      uint32(tag),
-			Endpoint: r[2],
-			RecvAt:   time.Unix(0, ns),
-		})
+		out = append(out, benchrq1.RecvRecord{Seq: seq, Tag: uint32(tag), Endpoint: r[2], RecvAt: time.Unix(0, ns)})
 	}
-	return out
+	return out, nil
 }
 
-func readCSV(path string) [][]string {
+func readCSV(path string, header []string) ([][]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		fatal("open %s: %v", path, err)
+		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	rows, err := csv.NewReader(f).ReadAll()
+	reader := csv.NewReader(f)
+	reader.FieldsPerRecord = len(header)
+	rows, err := reader.ReadAll()
 	if err != nil {
-		fatal("read %s: %v", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	if len(rows) == 0 {
-		return nil
+	if len(rows) == 0 || !slices.Equal(rows[0], header) {
+		return nil, fmt.Errorf("%s: missing or invalid CSV header", path)
 	}
-	// drop the header
-	return rows[1:]
+	return rows[1:], nil
 }
 
 func openOut(path string) (*os.File, func()) {

@@ -3,12 +3,19 @@
 package benchrq1
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestReceiverRejectsInvalidBind(t *testing.T) {
+	if _, err := NewReceiver("test", netip.AddrPort{}); err == nil {
+		t.Fatal("accepted invalid bind address")
+	}
+}
 
 func TestReceiverRejectsMissingKernelTimestamp(t *testing.T) {
 	r, err := NewReceiver("test", loopback(0))

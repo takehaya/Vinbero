@@ -60,7 +60,8 @@ make bench-rq1-bgp MODE=relay TRIALS=30
 `BENCH_CALIBRATE=1 make bench-rq1-test` を実行してください。
 
 保存先と rate を指定する場合は script を直接実行します。`WORK` は実行ごとに新しい
-directory を指定してください。既存の run や CSV は上書きしません。
+directory を指定してください。既存の directory や symlink は拒否し、所有者だけがアクセス
+できる権限で新規作成します。CSV も排他的に作成し、開いた descriptor にだけ書き込みます。
 
 ```sh
 sudo MODE=cplane RATE=100000 WORK=/tmp/rq1-cplane-run1 \
@@ -73,6 +74,7 @@ sudo MODE=cplane RATE=100000 WORK=/tmp/rq1-cplane-run1 \
 再生成できます。
 
 各 run は固有の network namespace 名と resource state path を使います。
+namespace の排他 lock は root だけがアクセスできる `/run/vinbero-rq1/` に作成します。
 既存 namespace と衝突した場合は停止し、その namespace を削除しません。
 終了・エラー・SIGINT・SIGTERM では自分が起動した process と topology を撤去します。
 map pin と cplane store は無効なので、SID 永続化の fsync や復旧時間は測りません。
@@ -102,6 +104,7 @@ map pin と cplane store は無効なので、SID 永続化の fsync や復旧�
 run 全体を非ゼロで終了します。それ以前の成功行と失敗した trial のログは保持します。
 失敗を除外して高速な trial だけを集計しないでください。
 受信処理のエラーと kernel timestamp の欠落も失敗にします。user space の時刻での代替はしません。
+CSV の header、列数、数値、送信 sequence の重複も検証し、不正な行を除外して集計することはしません。
 
 これは単一路の更新反映時間を測る装置です。CPU / RSS の連続採取、大量経路の処理容量、
 WASM 単体の時間、再起動時の復旧時間、実 NIC の最大 pps は別の測定が必要です。
