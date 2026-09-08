@@ -124,7 +124,7 @@ func NewSender(cfg SenderConfig) (*Sender, error) {
 	}
 
 	domain := unix.AF_INET6
-	if cfg.Target.Addr().Is4() {
+	if cfg.Target.Addr().Unmap().Is4() {
 		domain = unix.AF_INET
 	}
 	fd, err := unix.Socket(domain, unix.SOCK_DGRAM, 0)
@@ -223,7 +223,7 @@ func NewReceiver(name string, bind netip.AddrPort) (*Receiver, error) {
 		return nil, errors.New("probe: invalid bind address")
 	}
 	domain := unix.AF_INET6
-	if bind.Addr().Is4() {
+	if bind.Addr().Unmap().Is4() {
 		domain = unix.AF_INET
 	}
 	fd, err := unix.Socket(domain, unix.SOCK_DGRAM, 0)

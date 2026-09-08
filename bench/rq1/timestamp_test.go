@@ -17,6 +17,40 @@ func TestReceiverRejectsInvalidBind(t *testing.T) {
 	}
 }
 
+func TestProbeIPv4MappedIPv6(t *testing.T) {
+	address := netip.MustParseAddr("::ffff:127.0.0.1")
+	r, err := NewReceiver("mapped", netip.AddrPortFrom(address, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	port, err := r.LocalPort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() { result <- r.Run() }()
+	s, err := NewSender(SenderConfig{Target: netip.AddrPortFrom(address, port), Rate: 1000, Duration: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Run(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(r.Records()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	r.Stop()
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Records()) == 0 {
+		t.Fatal("mapped sender and receiver did not exchange probes")
+	}
+}
+
 func TestReceiverRejectsMissingKernelTimestamp(t *testing.T) {
 	r, err := NewReceiver("test", loopback(0))
 	if err != nil {
