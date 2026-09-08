@@ -147,7 +147,7 @@ data = dict(mode=mode, rate=int(rate), trials=int(trials), namespace_prefix=pref
             kernel=platform.release(), machine=platform.machine(), cpu_affinity=sorted(os.sched_getaffinity(0)),
             kernel_cmdline=Path('/proc/cmdline').read_text().strip(),
             source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-            source_dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip()),
+            source_dirty=bool(subprocess.check_output(['git', '--no-optional-locks', 'status', '--porcelain'], text=True).strip()),
             endpoint_behavior='0xfe01' if mode == 'cplane' else '0x0013',
             endpoint='kernel End.DT4', xdp_mode='generic', persistence=False,
             artifacts={str(Path(p).resolve()): digest(p) for p in artifacts if Path(p).is_file()})
