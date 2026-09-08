@@ -41,15 +41,35 @@ if [[ "$MODE" == cplane && ! -r "$WASM" ]]; then echo "missing WASM: $WASM" >&2;
 for command in ip python3 ethtool timeout flock; do command -v "$command" >/dev/null; done
 
 umask 077
-if [[ -n "${WORK:-}" ]]; then
-    # mkdir atomically rejects files, directories and dangling symlinks.
-    # Never reuse caller-populated contents in a privileged run.
-    mkdir -m 0700 -- "$WORK" || { echo "WORK must be a new directory: $WORK" >&2; exit 2; }
-else
-    WORK="$(mktemp -d /tmp/vinbero-rq1.XXXXXX)"
-fi
-WORK="$(realpath "$WORK")"
-OUT="${OUT:-${WORK}/results.csv}"
+WORK="$(python3 - "${WORK:-}" <<'PY'
+import os, stat, sys, tempfile
+from pathlib import Path
+path = Path(os.path.abspath(sys.argv[1])) if sys.argv[1] else Path('/tmp/unused')
+# A private leaf is insufficient when another user can replace its parent.
+# Root-owned sticky directories such as /tmp protect root-owned children.
+for parent in reversed(path.parents):
+    info = parent.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or
+            (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+        raise SystemExit('WORK requires trusted root-owned parents without symlinks: ' + str(parent))
+if sys.argv[1]:
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        raise SystemExit('WORK must be a new directory: ' + str(path))
+else:
+    path = Path(tempfile.mkdtemp(prefix='vinbero-rq1.', dir='/tmp'))
+print(path)
+PY
+)"
+OUT="$(python3 - "$WORK" "${OUT:-${WORK}/results.csv}" <<'PY'
+import os, sys
+work, out = sys.argv[1], os.path.abspath(sys.argv[2])
+if out == work or os.path.commonpath([work, out]) != work:
+    raise SystemExit('OUT must be inside WORK')
+print(out)
+PY
+)"
 [[ ! -e "$OUT" && ! -L "$OUT" ]] || { echo "refusing to overwrite $OUT" >&2; exit 2; }
 mkdir -p "$(dirname "$OUT")"
 # Hold the exclusively-created file open for the whole run. Replacing its

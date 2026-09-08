@@ -39,8 +39,9 @@ veth_peb_rt="${TOPO_NS_PREFIX}pebrt"
 # This measurement owns fresh namespaces. Refuse collisions rather than using
 # the examples' create_netns helper, which deletes an existing namespace.
 [[ "$TOPO_NS_PREFIX" =~ ^[a-zA-Z0-9-]{1,9}$ ]] || { echo "invalid namespace prefix" >&2; exit 1; }
+namespaces="$(ip netns list)"
 for ns in "$ns_src" "$ns_rt" "$ns_pea" "$ns_peb"; do
-    if ip netns list | awk '{print $1}' | grep -Fxq "$ns"; then
+    if awk '{print $1}' <<< "$namespaces" | grep -Fxq -- "$ns"; then
         echo "namespace already exists: $ns" >&2
         exit 1
     fi
@@ -138,10 +139,20 @@ ip netns exec "$ns_peb" ip -6 route add local fd00:b::100/128 \
 
 # bpf_fib_lookup on the headend needs resolved neighbours, and so does the
 # return path; warm both directions before any measurement runs.
-ip netns exec "$ns_rt" ping6 -c 2 -W 1 fd00:12::2 >/dev/null 2>&1 || true
-ip netns exec "$ns_rt" ping6 -c 2 -W 1 fd00:13::2 >/dev/null 2>&1 || true
-ip netns exec "$ns_pea" ping6 -c 2 -W 1 fd00:12::1 >/dev/null 2>&1 || true
-ip netns exec "$ns_peb" ping6 -c 2 -W 1 fd00:13::1 >/dev/null 2>&1 || true
+warm_neighbor() {
+    local ns=$1 address=$2
+    # IPv6 duplicate address detection may still be running just after setup.
+    for attempt in {1..5}; do
+        if ip netns exec "$ns" ping6 -c 1 -W 1 "$address" >/dev/null 2>&1; then return 0; fi
+        sleep 1
+    done
+    echo "neighbor warm-up failed: $ns -> $address" >&2
+    return 1
+}
+warm_neighbor "$ns_rt" fd00:12::2
+warm_neighbor "$ns_rt" fd00:13::2
+warm_neighbor "$ns_pea" fd00:12::1
+warm_neighbor "$ns_peb" fd00:13::1
 
 echo "topology up: $ns_src $ns_rt $ns_pea $ns_peb"
 trap - EXIT

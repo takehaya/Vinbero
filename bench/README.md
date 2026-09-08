@@ -62,6 +62,9 @@ make bench-rq1-bgp MODE=relay TRIALS=30
 保存先と rate を指定する場合は script を直接実行します。`WORK` は実行ごとに新しい
 directory を指定してください。既存の directory や symlink は拒否し、所有者だけがアクセス
 できる権限で新規作成します。CSV も排他的に作成し、開いた descriptor にだけ書き込みます。
+`WORK` の親は symlink を含まない root 所有の directory に限定します。一般ユーザーが
+書き込める親は `/tmp` のような sticky directory だけを許可します。`OUT` を指定する場合も
+新しい `WORK` の配下に限定します。
 
 ```sh
 sudo MODE=cplane RATE=100000 WORK=/tmp/rq1-cplane-run1 \

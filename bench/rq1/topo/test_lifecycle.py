@@ -8,13 +8,17 @@ SCRIPTS = Path(__file__).resolve().parent
 
 
 class LifecycleTests(unittest.TestCase):
-    def run_with_mock_ip(self, script, behavior):
+    def run_with_mock_ip(self, script, behavior, fast_sleep=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             calls = root / 'calls'
             ip = root / 'ip'
             ip.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n' + behavior)
             ip.chmod(0o755)
+            if fast_sleep:
+                sleeper = root / 'sleep'
+                sleeper.write_text('#!/bin/bash\nexit 0\n')
+                sleeper.chmod(0o755)
             env = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
                        TOPO_NS_PREFIX='guard-', CALLS=str(calls))
             result = subprocess.run(['bash', str(SCRIPTS / script)], env=env,
@@ -55,6 +59,23 @@ exit 0
         result, calls = self.run_with_mock_ip('teardown.sh', 'exit 2\n')
         self.assertEqual(result.returncode, 2)
         self.assertEqual(calls, ['netns list'])
+
+    def test_setup_reports_listing_failure_before_creating_namespaces(self):
+        result, calls = self.run_with_mock_ip('setup.sh', 'exit 2\n')
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(calls, ['netns list'])
+
+    def test_setup_rejects_unresolved_new_path_and_rolls_back(self):
+        result, calls = self.run_with_mock_ip('setup.sh', '''
+if [[ "$*" == "netns exec guard-rt ping6 -c 1 -W 1 fd00:13::2" ]]; then exit 1; fi
+exit 0
+''', fast_sleep=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('neighbor warm-up failed: guard-rt -> fd00:13::2', result.stderr)
+        self.assertEqual(calls.count('netns exec guard-rt ping6 -c 1 -W 1 fd00:13::2'), 5)
+        self.assertEqual([call for call in calls if call.startswith('netns del')],
+                         ['netns del guard-src', 'netns del guard-rt',
+                          'netns del guard-pea', 'netns del guard-peb'])
 
     def test_invalid_rate_fails_before_creating_artifacts(self):
         for rate in ['1000000001', '18446744073709551616']:
