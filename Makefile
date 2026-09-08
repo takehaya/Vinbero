@@ -239,6 +239,21 @@ cplane-wasm-testdata: ## rebuild the control-plane plugin wasm test fixtures (re
 	done
 
 .PHONY: cplane-example cplane-example-tinygo
+
+.PHONY: bench-rq1-build bench-rq1-test bench-rq1-bgp
+bench-rq1-build: ## Build the BGP convergence instrument and daemon (standard Go WASM example is committed)
+	mkdir -p out/bench out/bin
+	go build -buildvcs=false -tags bench -o out/bench/ ./bench/rq1/cmd/...
+	go build -buildvcs=false -o out/bin/vinberod ./cmd/vinberod
+	go build -buildvcs=false -o out/bin/vinbero ./cmd/vinbero
+
+bench-rq1-test: ## Check the convergence instrument and measurement guards without changing the network
+	go test -tags bench -race -count=1 ./bench/rq1/...
+	python3 -m unittest discover -s bench/rq1/topo -p 'test_*.py'
+	bash -n bench/rq1/topo/run_bgp.sh bench/rq1/topo/setup.sh bench/rq1/topo/teardown.sh
+
+bench-rq1-bgp: ## Measure BGP convergence; MODE=builtin|cplane|relay, TRIALS=n, RATE=pps (requires bench-rq1-build)
+	sudo MODE=$(or $(MODE),builtin) RATE=$(or $(RATE),100000) ./bench/rq1/topo/run_bgp.sh $(or $(TRIALS),10)
 # Strip source paths and VCS metadata so CI reproduces the committed artifact.
 cplane-example: ## build the control-plane plugin example with standard Go
 	cd sdk/examples/cplane-custom-behavior && \
