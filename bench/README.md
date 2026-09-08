@@ -83,6 +83,7 @@ map pin と cplane store は無効なので、SID 永続化の fsync や復旧�
 ## 結果を読む
 
 保存先は最後に表示されます。
+成果物は root 所有で作成するため、`sudo cat /tmp/rq1-cplane-run1/results.csv` のように参照します。
 
 - `results.csv` に mode、trial と測定値を保存します。
 - `run.json` に kernel、CPU affinity、binary / WASM の SHA-256、codepoint と条件を保存します。
