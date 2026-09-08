@@ -6,9 +6,8 @@ package benchrq1
 //
 // The measurement it has to support is: a route changes, and we want the
 // timestamp of the first packet that the data plane forwarded along the new
-// path. The resolution study in reflect_test.go put the design difference at
-// roughly 151 us per route, so samples have to be dense enough that a 151 us
-// window contains several of them.
+// path. Calibration uses a 151 us timing budget, so samples have to be dense
+// enough that a window of that size contains several of them.
 //
 // Two decisions follow from that and are worth stating, because they are what
 // separate this from the liveness prober in pkg/prober:
@@ -210,6 +209,9 @@ type Receiver struct {
 	records  []RecvRecord
 	stopOnce sync.Once
 	done     chan struct{}
+	runMu    sync.Mutex
+	started  bool
+	runDone  chan struct{}
 }
 
 // NewReceiver binds an endpoint. name identifies it in the records, and is
@@ -256,11 +258,26 @@ func NewReceiver(name string, bind netip.AddrPort) (*Receiver, error) {
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("probe: bind: %w", err)
 	}
-	return &Receiver{fd: fd, name: name, done: make(chan struct{})}, nil
+	return &Receiver{fd: fd, name: name, done: make(chan struct{}), runDone: make(chan struct{})}, nil
 }
 
 // Run reads until Stop. It is meant to run in its own goroutine.
 func (r *Receiver) Run() error {
+	r.runMu.Lock()
+	select {
+	case <-r.done:
+		r.runMu.Unlock()
+		return nil
+	default:
+	}
+	if r.started {
+		r.runMu.Unlock()
+		return errors.New("probe: receiver Run may only be called once")
+	}
+	r.started = true
+	r.runMu.Unlock()
+	defer close(r.runDone)
+
 	buf := make([]byte, 2048)
 	oob := make([]byte, 256)
 
@@ -307,16 +324,30 @@ func (r *Receiver) Run() error {
 func (r *Receiver) Stop() {
 	r.stopOnce.Do(func() {
 		close(r.done)
-		// Give Run one poll timeout to notice before the fd disappears,
-		// so it never reads into a descriptor another goroutine reopened.
-		time.Sleep(250 * time.Millisecond)
+		r.runMu.Lock()
+		started := r.started
+		r.runMu.Unlock()
+		if started {
+			// Keep the descriptor open even if Run is descheduled longer
+			// than its socket timeout. It must finish before fd reuse.
+			<-r.runDone
+		}
+		r.runMu.Lock()
 		_ = unix.Close(r.fd)
+		r.runMu.Unlock()
 	})
 }
 
 // LocalPort reports the port actually bound, so a caller may bind port 0 and
 // let the kernel choose.
 func (r *Receiver) LocalPort() (uint16, error) {
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+	select {
+	case <-r.done:
+		return 0, errors.New("probe: receiver is stopped")
+	default:
+	}
 	sa, err := unix.Getsockname(r.fd)
 	if err != nil {
 		return 0, fmt.Errorf("probe: getsockname: %w", err)

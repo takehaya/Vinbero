@@ -65,6 +65,8 @@ directory を指定してください。既存の directory や symlink は拒�
 `WORK` の親は symlink を含まない root 所有の directory に限定します。一般ユーザーが
 書き込める親は `/tmp` のような sticky directory だけを許可します。`OUT` を指定する場合も
 新しい `WORK` の配下に限定します。
+`run.json`、`status.json`、`topology-ready`、`instrument/`、`bin/`、`trial-*` は内部処理が
+使うため、`OUT` に指定できません。
 
 ```sh
 sudo MODE=cplane RATE=100000 WORK=/tmp/rq1-cplane-run1 \

@@ -4,11 +4,8 @@ package benchrq1
 
 // Self-check for the convergence instrument.
 //
-// The resolution study put the design difference at roughly 151 us per route,
-// so the instrument has to place several samples inside a window that size.
-// These tests measure what it actually achieves rather than assuming the
-// configured rate, and they check that a route change injected at a known
-// instant is recovered with an error small against that 151 us.
+// Calibration uses a 151 us timing budget. These tests measure achieved
+// sampling density and recover a route change injected at a known instant.
 
 import (
 	"fmt"
@@ -196,10 +193,9 @@ func TestRQ1ProbeTimestamps(t *testing.T) {
 	if negative > len(deltas)/100 {
 		t.Fatalf("kernel receive timestamps precede send timestamps in %d of %d samples", negative, len(deltas))
 	}
-	// On loopback the true delay is microseconds. If the median exceeds the
-	// design difference we are measuring, the instrument masks the signal.
+	// Compare the observed loopback delay against the calibration budget.
 	if os.Getenv("BENCH_CALIBRATE") == "1" && p50 > 151*time.Microsecond {
-		t.Fatalf("loopback delta p50 %v exceeds the 151us design difference; instrument too slow", p50)
+		t.Fatalf("loopback delta p50 %v exceeds the 151us calibration budget", p50)
 	}
 }
 
@@ -280,10 +276,9 @@ func TestRQ1ProbeAnalyze(t *testing.T) {
 		t.Fatal("convergence not detected although traffic moved to the new endpoint")
 	}
 	// The retarget is instantaneous here, so the reported latency is the
-	// instrument's own error. It has to be small against the 151us the
-	// experiment needs to resolve.
+	// instrument's own error, which must fit the calibration budget.
 	if os.Getenv("BENCH_CALIBRATE") == "1" && got.Latency > 151*time.Microsecond {
-		t.Fatalf("instrument error %v exceeds the 151us design difference", got.Latency)
+		t.Fatalf("instrument error %v exceeds the 151us calibration budget", got.Latency)
 	}
 	if os.Getenv("BENCH_CALIBRATE") == "1" && got.SampleGap > 20*time.Microsecond {
 		t.Fatalf("sample gap %v too coarse to resolve a 151us difference", got.SampleGap)

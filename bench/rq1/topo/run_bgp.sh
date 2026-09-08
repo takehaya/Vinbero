@@ -67,6 +67,9 @@ import os, sys
 work, out = sys.argv[1], os.path.abspath(sys.argv[2])
 if out == work or os.path.commonpath([work, out]) != work:
     raise SystemExit('OUT must be inside WORK')
+first = os.path.relpath(out, work).split(os.sep)[0].casefold()
+if first in {'run.json', 'status.json', 'instrument', 'bin', 'topology-ready'} or first.startswith('trial-'):
+    raise SystemExit('OUT conflicts with a reserved artifact path')
 print(out)
 PY
 )"
