@@ -84,6 +84,7 @@ map pin と cplane store は無効なので、SID 永続化の fsync や復旧�
 - `run.json` に kernel、CPU affinity、binary / WASM の SHA-256、codepoint と条件を保存します。
 - `status.json` に exit code と完了した trial 数を保存します。全 trial の成功を確認してから比較してください。
 - `trial-N/` に packet の送受信 CSV、初期・最終 state、実際の変更 timestamp、設定とログを保存します。
+- `instrument/` に開始時点の script と設定 template を保存し、その snapshot を実行します。
 
 `latency_us` の起点は送信側 GoBGP の Advertise 呼び出し直前です。BGP encoding と送信、
 受信処理、map 反映、最初の新経路の probe 到着までを含みます。受信側 BGP UPDATE の

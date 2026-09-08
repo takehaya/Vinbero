@@ -3,6 +3,9 @@
 # endpoints. Requires make bench-rq1-build; run with sudo MODE=cplane ./run_bgp.sh.
 set -euo pipefail
 
+# Parse the whole driver before starting a long run. Bash otherwise reads
+# later commands from the file again, so an edit can change an active trial.
+main() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 export REPO_ROOT
@@ -74,7 +77,10 @@ trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-python3 - "$WORK/run.json" "$MODE" "$RATE" "$TRIALS" "$TOPO_NS_PREFIX" "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY" "$WASM" <<'PY'
+mkdir "$WORK/instrument"
+cp "$SCRIPT_DIR/"{setup.sh,teardown.sh,check.py,vinbero-bgp.yml,run_bgp.sh} "$WORK/instrument/"
+SCRIPT_DIR="$WORK/instrument"
+python3 - "$WORK/run.json" "$MODE" "$RATE" "$TRIALS" "$TOPO_NS_PREFIX" "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY" "$WASM" "$SCRIPT_DIR/"* <<'PY'
 import hashlib, json, os, platform, subprocess, sys
 from pathlib import Path
 out, mode, rate, trials, prefix, *artifacts = sys.argv[1:]
@@ -187,3 +193,6 @@ PY
     cleanup_trial
 done
 echo "wrote $OUT"
+}
+
+main "$@"
