@@ -4,16 +4,20 @@
 # program still attached to their interfaces, which would otherwise block a
 # later attach.
 
-set -eu
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# REPO_ROOT is overridable so this can run from a snapshot of the directory,
-# which is how a long measurement avoids reading a file that may be edited.
-REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
-source "${NETNS_HELPER:-${REPO_ROOT}/examples/common/netns.sh}"
+set -euo pipefail
 
 export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-rq1-}"
+[[ "$TOPO_NS_PREFIX" =~ ^[a-zA-Z0-9-]{1,9}$ ]] || { echo "invalid namespace prefix" >&2; exit 1; }
 
+namespaces="$(ip netns list)"
+status=0
 for suffix in src rt pea peb; do
-    delete_netns "${TOPO_NS_PREFIX}${suffix}"
+    ns="${TOPO_NS_PREFIX}${suffix}"
+    if awk '{print $1}' <<< "$namespaces" | grep -Fxq -- "$ns"; then
+        if ! ip netns del "$ns"; then
+            echo "could not delete namespace: $ns" >&2
+            status=1
+        fi
+    fi
 done
+exit "$status"

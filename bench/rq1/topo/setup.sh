@@ -47,7 +47,11 @@ for ns in "$ns_src" "$ns_rt" "$ns_pea" "$ns_peb"; do
 done
 created=()
 rollback() {
-    for ns in "${created[@]}"; do ip netns del "$ns"; done
+    local status=$?
+    for ns in "${created[@]}"; do
+        ip netns del "$ns" || echo "rollback could not delete namespace: $ns" >&2
+    done
+    return "$status"
 }
 trap rollback EXIT
 for ns in "$ns_src" "$ns_rt" "$ns_pea" "$ns_peb"; do

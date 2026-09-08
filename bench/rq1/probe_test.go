@@ -24,6 +24,18 @@ func loopback(port uint16) netip.AddrPort {
 	return netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port)
 }
 
+func TestSenderRejectsUnrepresentableRate(t *testing.T) {
+	sender, err := NewSender(SenderConfig{
+		Target: loopback(9999), Rate: 1_000_000_001, Duration: time.Second,
+	})
+	if sender != nil {
+		_ = sender.Close()
+	}
+	if err == nil {
+		t.Fatal("accepted a rate with a zero nanosecond pacing interval")
+	}
+}
+
 // freePort asks the kernel for an unused UDP port by binding one and closing it.
 func freePort(t *testing.T) uint16 {
 	t.Helper()

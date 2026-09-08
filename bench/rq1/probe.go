@@ -121,6 +121,9 @@ func NewSender(cfg SenderConfig) (*Sender, error) {
 	if cfg.Rate <= 0 {
 		return nil, errors.New("probe: rate must be positive")
 	}
+	if int64(cfg.Rate) > int64(time.Second) {
+		return nil, errors.New("probe: rate exceeds nanosecond pacing resolution")
+	}
 
 	domain := unix.AF_INET6
 	if cfg.Target.Addr().Is4() {

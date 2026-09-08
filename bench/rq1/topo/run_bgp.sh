@@ -16,6 +16,10 @@ case "$MODE" in builtin|cplane|relay) ;; *) echo "MODE must be builtin, cplane o
 TRIALS="${1:-10}"
 RATE="${RATE:-100000}"
 [[ "$TRIALS" =~ ^[1-9][0-9]*$ && "$RATE" =~ ^[1-9][0-9]*$ ]] || { echo "TRIALS and RATE must be positive integers" >&2; exit 2; }
+if (( ${#RATE} > 10 )) || (( RATE > 1000000000 )); then
+    echo "RATE exceeds nanosecond pacing resolution" >&2
+    exit 2
+fi
 [[ "$EUID" == 0 ]] || { echo "run with sudo after make bench-rq1-build" >&2; exit 2; }
 
 VINBEROD="${VINBEROD:-${REPO_ROOT}/out/bin/vinberod}"
@@ -84,12 +88,16 @@ cleanup_trial() {
     done
     for pid in "${pids[@]}"; do kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
     pids=()
-    if "$topology_up"; then "$SCRIPT_DIR/teardown.sh" >/dev/null; topology_up=false; fi
+    if "$topology_up"; then
+        "$SCRIPT_DIR/teardown.sh" >/dev/null || return 1
+        topology_up=false
+    fi
+    return 0
 }
 finish() {
     local status=$?
     trap - EXIT INT TERM
-    cleanup_trial
+    cleanup_trial || { if (( status == 0 )); then status=1; fi; }
     printf '{"exit_code":%d,"completed_trials":%d,"requested_trials":%d}\n' "$status" "$completed" "$TRIALS" > "$WORK/status.json"
     echo "artifacts: $WORK" >&2
     exit "$status"
@@ -203,6 +211,7 @@ PY
         --recv "$trial_dir/pea.csv" "$trial_dir/peb.csv" --change-ns "$change_ns"
     "$PROBE" analyze -sent "$trial_dir/sent.csv" -recv "$trial_dir/pea.csv,$trial_dir/peb.csv" \
         -change-ns "$change_ns" -old pe-a -new pe-b > "$trial_dir/verdict.txt"
+    cleanup_trial
     python3 - "$trial_dir/verdict.txt" "$trial" "$MODE" <<'PY'
 import csv, os, sys
 from pathlib import Path
@@ -215,7 +224,6 @@ with os.fdopen(os.dup(8), 'a', newline='') as stream:
 PY
     completed=$trial
     echo "trial $trial ($MODE): $(cat "$trial_dir/verdict.txt")"
-    cleanup_trial
 done
 echo "wrote $OUT"
 }

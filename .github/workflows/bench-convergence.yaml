@@ -58,10 +58,18 @@ jobs:
             sudo MODE="$mode" RATE=10000 WORK="/tmp/rq1-ci-$mode" \
               ./bench/rq1/topo/run_bgp.sh 1
           done
+      - name: Package private measurement diagnostics
+        if: always()
+        run: |
+          # Keep the active run directories private. Only the completed
+          # diagnostic archive needs to be readable by upload-artifact.
+          sudo tar -C /tmp --ignore-failed-read -czf - -- \
+            rq1-ci-builtin rq1-ci-cplane rq1-ci-relay \
+            > "$RUNNER_TEMP/convergence-instrument.tar.gz"
       - name: Preserve measurement diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: convergence-instrument-diagnostics
-          path: /tmp/rq1-ci-*/
+          path: ${{ runner.temp }}/convergence-instrument.tar.gz
           retention-days: 7
