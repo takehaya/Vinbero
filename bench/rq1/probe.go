@@ -36,8 +36,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// probePayload is the wire format: sequence, send timestamp, and a tag naming
-// the intended endpoint so misdelivery is decidable at the receiver.
+// The wire payload carries a sequence, truncated send timestamp and traffic
+// tag. Endpoint identity comes from the receiver's capture.
 const (
 	probePayloadSize = 20
 	probeMagic       = uint32(0x5652_5131) // "VRQ1"
@@ -83,9 +83,8 @@ type SendRecord struct {
 	SentAt time.Time
 }
 
-// RecvRecord is one observed arrival. Endpoint names the receiver that saw it,
-// so comparing Endpoint against Tag decides whether the packet was delivered as
-// intended or misdelivered.
+// RecvRecord is one observed arrival. Endpoint names the receiver that saw it;
+// Analyze compares it with the configured old and new endpoint names.
 type RecvRecord struct {
 	Seq      uint64
 	Tag      uint32
@@ -97,7 +96,7 @@ type RecvRecord struct {
 type SenderConfig struct {
 	// Target is where probes go.
 	Target netip.AddrPort
-	// Tag names the endpoint this traffic is supposed to reach.
+	// Tag is an opaque traffic identifier carried in the packet and captures.
 	Tag uint32
 	// Rate is the target packets per second. The achieved rate is reported
 	// separately; it is never assumed.
@@ -214,8 +213,8 @@ type Receiver struct {
 	runDone  chan struct{}
 }
 
-// NewReceiver binds an endpoint. name identifies it in the records, and is
-// compared against each probe's tag to classify delivery.
+// NewReceiver binds an endpoint. name identifies it in the records for
+// comparison with Analyze's old and new endpoint names.
 func NewReceiver(name string, bind netip.AddrPort) (*Receiver, error) {
 	if !bind.IsValid() {
 		return nil, errors.New("probe: invalid bind address")
@@ -428,8 +427,8 @@ type Convergence struct {
 	FirstSeq uint64
 	// Lost counts probes sent after the change that reached no endpoint.
 	Lost int
-	// Misdelivered counts probes that arrived at the old endpoint after the
-	// change; these are the packets the network got wrong, not merely late.
+	// Misdelivered counts post-change probes delivered to the old endpoint
+	// before the first observed arrival at the new endpoint.
 	Misdelivered int
 	// SampleGap is the median spacing of arrivals, the resolution floor of
 	// this run. A latency of the same order as SampleGap is not resolved.

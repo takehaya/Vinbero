@@ -45,7 +45,7 @@ jobs:
       - name: Install namespace test dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ethtool iproute2 \
+          sudo apt-get install -y --no-install-recommends ethtool iproute2 iputils-ping \
             linux-modules-extra-$(uname -r)
           sudo modprobe vrf
       - name: Build and test the instrument

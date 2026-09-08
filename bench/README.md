@@ -43,8 +43,10 @@ health と再起動の有無を確認します。初期転送が実際に PE A �
 
 ## 実行する
 
-Linux、Go 1.25.5、sudo、iproute2、ethtool、Python 3、util-linux と、kernel の VRF / SRv6 / XDP
-サポートが必要です。BPF object と標準 Go WASM example は repository の成果物を使います。
+Linux、Go 1.25.5、sudo、iproute2、ethtool、Python 3、util-linux、GNU coreutils、Git と、kernel の
+VRF / SRv6 / XDP サポートが必要です。`ping6` も必要で、Debian / Ubuntu では `iputils-ping` が
+提供します。Git checkout で実行してください。BPF object と標準 Go WASM example は repository
+の成果物を使います。
 
 ```sh
 make bench-rq1-build

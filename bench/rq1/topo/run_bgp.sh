@@ -38,7 +38,7 @@ for bin in "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY"; do
     [[ -x "$bin" ]] || { echo "missing executable $bin; run make bench-rq1-build" >&2; exit 2; }
 done
 if [[ "$MODE" == cplane && ! -r "$WASM" ]]; then echo "missing WASM: $WASM" >&2; exit 2; fi
-for command in ip python3 ethtool timeout flock; do command -v "$command" >/dev/null; done
+for command in ip python3 ethtool timeout flock ping6 git cp; do command -v "$command" >/dev/null; done
 
 umask 077
 WORK="$(python3 - "${WORK:-}" <<'PY'
