@@ -67,7 +67,7 @@ directory を指定してください。既存の directory や symlink は拒�
 `WORK` の親は symlink を含まない root 所有の directory に限定します。一般ユーザーが
 書き込める親は `/tmp` のような sticky directory だけを許可します。`OUT` を指定する場合も
 新しい `WORK` の配下に限定します。
-`run.json`、`status.json`、`topology-ready`、`instrument/`、`bin/`、`trial-*` は内部処理が
+`run.json`、`status.json`、`topology-owned`、`instrument/`、`bin/`、`trial-*` は内部処理が
 使うため、`OUT` に指定できません。
 
 ```sh
@@ -84,6 +84,7 @@ sudo MODE=cplane RATE=100000 WORK=/tmp/rq1-cplane-run1 \
 namespace の排他 lock は root だけがアクセスできる `/run/vinbero-rq1/` に作成します。
 既存 namespace と衝突した場合は停止し、その namespace を削除しません。
 終了・エラー・SIGINT・SIGTERM では自分が起動した process と topology を撤去します。
+setup が途中で失敗した場合も、記録した作成済み namespace だけを対象に再度回収を試みます。
 map pin と cplane store は無効なので、SID 永続化の fsync や復旧時間は測りません。
 `cplane_plugins.enabled: false` は保存を無効にする設定で、WASM の実行自体は可能です。
 

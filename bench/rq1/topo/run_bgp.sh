@@ -68,7 +68,7 @@ work, out = sys.argv[1], os.path.abspath(sys.argv[2])
 if out == work or os.path.commonpath([work, out]) != work:
     raise SystemExit('OUT must be inside WORK')
 first = os.path.relpath(out, work).split(os.sep)[0].casefold()
-if first in {'run.json', 'status.json', 'instrument', 'bin', 'topology-ready'} or first.startswith('trial-'):
+if first in {'run.json', 'status.json', 'instrument', 'bin', 'topology-owned'} or first.startswith('trial-'):
     raise SystemExit('OUT conflicts with a reserved artifact path')
 print(out)
 PY
@@ -101,8 +101,7 @@ ns_src="${TOPO_NS_PREFIX}src"
 ns_rt="${TOPO_NS_PREFIX}rt"
 ns_pea="${TOPO_NS_PREFIX}pea"
 ns_peb="${TOPO_NS_PREFIX}peb"
-topology_up=false
-export TOPOLOGY_READY_FILE="$WORK/topology-ready"
+export TOPOLOGY_OWNED_FILE="$WORK/topology-owned"
 pids=()
 completed=0
 
@@ -123,11 +122,10 @@ cleanup_trial() {
     done
     for pid in "${pids[@]}"; do kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
     pids=()
-    if "$topology_up" || [[ -f "$TOPOLOGY_READY_FILE" ]]; then
+    if [[ -s "$TOPOLOGY_OWNED_FILE" ]]; then
         "$SCRIPT_DIR/teardown.sh" >/dev/null || return 1
-        topology_up=false
-        rm -f -- "$TOPOLOGY_READY_FILE"
     fi
+    rm -f -- "$TOPOLOGY_OWNED_FILE"
     return 0
 }
 finish() {
@@ -208,7 +206,6 @@ for ((trial=1; trial<=TRIALS; trial++)); do
     trial_dir="$WORK/trial-$trial"
     mkdir "$trial_dir"
     "$SCRIPT_DIR/setup.sh" > "$trial_dir/setup.log" 2>&1
-    topology_up=true
     python3 - "$SCRIPT_DIR/vinbero-bgp.yml" "$trial_dir/vinbero.yml" "$TOPO_NS_PREFIX" "$trial_dir/state.json" <<'PY'
 import json, sys
 from pathlib import Path

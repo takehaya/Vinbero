@@ -33,6 +33,29 @@ func TestSenderRejectsUnrepresentableRate(t *testing.T) {
 	}
 }
 
+func TestSenderDoesNotWaitForSampleOutsideDuration(t *testing.T) {
+	r, err := NewReceiver("test", loopback(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	port, err := r.LocalPort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewSender(SenderConfig{Target: loopback(port), Rate: 1, Duration: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(s.Records()); got > 1 {
+		t.Fatalf("sent %d probes although the second sample falls outside Duration", got)
+	}
+}
+
 // freePort asks the kernel for an unused UDP port by binding one and closing it.
 func freePort(t *testing.T) uint16 {
 	t.Helper()

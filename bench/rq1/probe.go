@@ -165,7 +165,7 @@ func (s *Sender) Run() error {
 
 	for seq := uint64(0); ; seq++ {
 		now := time.Now()
-		if now.After(deadline) {
+		if !now.Before(deadline) || !next.Before(deadline) {
 			return nil
 		}
 		if wait := next.Sub(now); wait > 0 {
@@ -177,6 +177,9 @@ func (s *Sender) Run() error {
 		}
 
 		sentAt := time.Now()
+		if !sentAt.Before(deadline) {
+			return nil
+		}
 		encodeProbe(buf, probeWire{
 			Magic:  probeMagic,
 			Tag:    s.cfg.Tag,

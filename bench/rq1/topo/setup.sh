@@ -47,6 +47,7 @@ for ns in "$ns_src" "$ns_rt" "$ns_pea" "$ns_peb"; do
     fi
 done
 created=()
+if [[ -n "${TOPOLOGY_OWNED_FILE:-}" ]]; then : > "$TOPOLOGY_OWNED_FILE"; fi
 rollback() {
     local status=$?
     trap '' INT TERM
@@ -71,7 +72,10 @@ for ns in "$ns_src" "$ns_rt" "$ns_pea" "$ns_peb"; do
     registering=true
     add_status=0
     (trap '' INT TERM; exec ip netns add "$ns") || add_status=$?
-    if (( add_status == 0 )); then created+=("$ns"); fi
+    if (( add_status == 0 )); then
+        created+=("$ns")
+        if [[ -n "${TOPOLOGY_OWNED_FILE:-}" ]]; then printf '%s\n' "$ns" >> "$TOPOLOGY_OWNED_FILE"; fi
+    fi
     registering=false
     if (( pending_status != 0 )); then exit "$pending_status"; fi
     if (( add_status != 0 )); then exit "$add_status"; fi
@@ -172,7 +176,4 @@ warm_neighbor "$ns_pea" fd00:12::1
 warm_neighbor "$ns_peb" fd00:13::1
 
 echo "topology up: $ns_src $ns_rt $ns_pea $ns_peb"
-# Publish ownership before releasing rollback. The parent may handle a signal
-# as soon as this foreground script exits, before updating its own variables.
-if [[ -n "${TOPOLOGY_READY_FILE:-}" ]]; then touch "$TOPOLOGY_READY_FILE"; fi
 trap - EXIT

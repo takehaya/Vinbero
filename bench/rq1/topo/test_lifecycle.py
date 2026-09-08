@@ -8,7 +8,7 @@ SCRIPTS = Path(__file__).resolve().parent
 
 
 class LifecycleTests(unittest.TestCase):
-    def run_with_mock_ip(self, script, behavior, fast_sleep=False):
+    def run_with_mock_ip(self, script, behavior, fast_sleep=False, owned_file=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             calls = root / 'calls'
@@ -21,6 +21,8 @@ class LifecycleTests(unittest.TestCase):
                 sleeper.chmod(0o755)
             env = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
                        TOPO_NS_PREFIX='guard-', CALLS=str(calls))
+            if owned_file is not None:
+                env['TOPOLOGY_OWNED_FILE'] = str(owned_file)
             result = subprocess.run(['bash', str(SCRIPTS / script)], env=env,
                                     capture_output=True, text=True, timeout=5, start_new_session=True)
             return result, calls.read_text().splitlines()
@@ -59,6 +61,26 @@ exit 0
         self.assertEqual([call for call in calls if call.startswith('netns del')],
                          ['netns del guard-src', 'netns del guard-rt',
                           'netns del guard-pea', 'netns del guard-peb'])
+
+    def test_partial_ownership_survives_failed_rollback_for_parent_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            owned = Path(directory) / 'owned'
+            result, calls = self.run_with_mock_ip('setup.sh', '''
+case "$*" in
+    "netns add guard-rt"|"netns del guard-src") exit 1 ;;
+esac
+exit 0
+''', owned_file=owned)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('netns del guard-src', calls)
+            self.assertEqual(owned.read_text(), 'guard-src\n')
+            result, calls = self.run_with_mock_ip('teardown.sh', '''
+if [[ "$*" == "netns list" ]]; then printf 'guard-src\\nguard-rt\\nguard-pea\\nguard-peb\\n'; fi
+exit 0
+''', owned_file=owned)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual([call for call in calls if call.startswith('netns del')],
+                             ['netns del guard-src'])
 
     def test_teardown_reports_failure_and_attempts_remaining_namespaces(self):
         result, calls = self.run_with_mock_ip('teardown.sh', '''
