@@ -105,10 +105,14 @@ map pin と cplane store は無効なので、SID 永続化の fsync や復旧�
 `latency_us` の起点は送信側 GoBGP の Advertise 呼び出し直前です。BGP encoding と送信、
 受信処理、map 反映、最初の新経路の probe 到着までを含みます。受信側 BGP UPDATE の
 到着時刻から測った値ではありません。時刻は同じ host 上の namespace で共有します。
+送信ログに存在し、変更後に新経路へ到着した最初の probe を使います。変更前に送信され、
+変更時点で転送中だった probe も含みます。
 
 `lost` は変更後に送った probe のうち、どちらの receiver にも届かなかった件数です。
 `misdelivered` は新経路を最初に観測するまでに、旧 PE へ届いた変更後の probe 数です。
-`sample_gap_us` は到着間隔の median で、測定の分解能を判断する材料です。
+`sample_gap_us` は送信ログに対応する変更後の到着間隔の median です。同一 sequence の重複は
+最初の到着にまとめます。到着が2件未満の場合や、正の間隔を推定できない場合は trial を失敗にします。
+時間の出力は µs 単位の小数3桁で、記録した ns を保持します。
 設定した `RATE` を実際の観測間隔と同一視しないでください。
 
 接続、登録、初期転送、更新反映、capture の検証が失敗した trial は正常な行として出力せず、

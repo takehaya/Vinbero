@@ -213,7 +213,10 @@ func runAnalyze(args []string) {
 	}
 
 	got := benchrq1.Analyze(sent, received, time.Unix(0, *changeNs), *oldName, *newName)
-	fmt.Printf("detected=%v latency_us=%.1f first_seq=%d lost=%d misdelivered=%d sample_gap_us=%.1f\n",
+	if got.Detected && got.SampleGap <= 0 {
+		fatal("cannot estimate a positive sample gap from the matched post-change arrivals")
+	}
+	fmt.Printf("detected=%v latency_us=%.3f first_seq=%d lost=%d misdelivered=%d sample_gap_us=%.3f\n",
 		got.Detected,
 		float64(got.Latency.Nanoseconds())/1000,
 		got.FirstSeq,

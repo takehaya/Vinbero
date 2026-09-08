@@ -435,6 +435,7 @@ type Convergence struct {
 	Misdelivered int
 	// SampleGap is the median spacing of arrivals, the resolution floor of
 	// this run. A latency of the same order as SampleGap is not resolved.
+	// A nonpositive value cannot support a valid measurement trial.
 	SampleGap time.Duration
 }
 
@@ -442,18 +443,20 @@ type Convergence struct {
 // route change. newEndpoint is the receiver the route points to after the
 // change; oldEndpoint is where it pointed before.
 func Analyze(sent []SendRecord, received []RecvRecord, changeAt time.Time, oldEndpoint, newEndpoint string) Convergence {
+	known := make(map[uint64]struct{}, len(sent))
 	postChange := make(map[uint64]struct{}, len(sent))
 	for _, s := range sent {
+		known[s.Seq] = struct{}{}
 		if !s.SentAt.Before(changeAt) {
 			postChange[s.Seq] = struct{}{}
 		}
 	}
-	arrivals := make(map[uint64]RecvRecord, len(postChange))
+	arrivals := make(map[uint64]RecvRecord, len(known))
 	oldArrivals := make(map[uint64]time.Time)
 	var out Convergence
 	var firstNew time.Time
 	for _, r := range received {
-		if _, ok := postChange[r.Seq]; !ok || r.RecvAt.Before(changeAt) {
+		if _, ok := known[r.Seq]; !ok || r.RecvAt.Before(changeAt) {
 			continue
 		}
 		if r.Endpoint != oldEndpoint && r.Endpoint != newEndpoint {
@@ -471,13 +474,18 @@ func Analyze(sent []SendRecord, received []RecvRecord, changeAt time.Time, oldEn
 			out.FirstSeq = r.Seq
 			firstNew = r.RecvAt
 		}
-		if r.Endpoint == oldEndpoint {
+		_, sentAfterChange := postChange[r.Seq]
+		if sentAfterChange && r.Endpoint == oldEndpoint {
 			if prev, ok := oldArrivals[r.Seq]; !ok || r.RecvAt.Before(prev) {
 				oldArrivals[r.Seq] = r.RecvAt
 			}
 		}
 	}
-	out.Lost = len(postChange) - len(arrivals)
+	for seq := range postChange {
+		if _, ok := arrivals[seq]; !ok {
+			out.Lost++
+		}
+	}
 	for _, at := range oldArrivals {
 		if !out.Detected || at.Before(firstNew) {
 			out.Misdelivered++
