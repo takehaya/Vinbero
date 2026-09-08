@@ -49,23 +49,40 @@ done
 created=()
 rollback() {
     local status=$?
+    trap '' INT TERM
     for ns in "${created[@]}"; do
         ip netns del "$ns" || echo "rollback could not delete namespace: $ns" >&2
     done
     return "$status"
 }
 trap rollback EXIT
+registering=false
+pending_status=0
+handle_signal() {
+    if (( pending_status == 0 )); then pending_status=$1; fi
+    if ! "$registering"; then exit "$pending_status"; fi
+}
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 for ns in "$ns_src" "$ns_rt" "$ns_pea" "$ns_peb"; do
-    ip netns add "$ns"
-    created+=("$ns")
+    # Defer the parent's signal until ownership is recorded. The short-lived
+    # creator ignores group INT/TERM, so a completed kernel operation cannot
+    # lose its successful exit status before we register the namespace.
+    registering=true
+    add_status=0
+    (trap '' INT TERM; exec ip netns add "$ns") || add_status=$?
+    if (( add_status == 0 )); then created+=("$ns"); fi
+    registering=false
+    if (( pending_status != 0 )); then exit "$pending_status"; fi
+    if (( add_status != 0 )); then exit "$add_status"; fi
     ip netns exec "$ns" ip link set lo up
 done
 
 link_pair() {
     local a_if="$1" a_ns="$2" b_if="$3" b_ns="$4"
-    ip link add "$a_if" type veth peer name "$b_if"
-    ip link set "$a_if" netns "$a_ns"
-    ip link set "$b_if" netns "$b_ns"
+    # Both ends are created inside owned namespaces in the same operation.
+    # Rollback can remove them even if creation is interrupted or fails.
+    ip netns exec "$a_ns" ip link add "$a_if" type veth peer name "$b_if" netns "$b_ns"
     ip netns exec "$a_ns" ip link set "$a_if" up
     ip netns exec "$b_ns" ip link set "$b_if" up
     # XDP reads packet data, so a VLAN tag parked in skb->vlan_tci would be

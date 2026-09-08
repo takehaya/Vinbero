@@ -22,7 +22,7 @@ class LifecycleTests(unittest.TestCase):
             env = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
                        TOPO_NS_PREFIX='guard-', CALLS=str(calls))
             result = subprocess.run(['bash', str(SCRIPTS / script)], env=env,
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True, timeout=5, start_new_session=True)
             return result, calls.read_text().splitlines()
 
     def test_setup_rollback_attempts_all_created_namespaces(self):
@@ -36,6 +36,29 @@ exit 0
         self.assertEqual(result.returncode, 42)
         self.assertEqual([call for call in calls if call.startswith('netns del')],
                          ['netns del guard-src', 'netns del guard-rt', 'netns del guard-pea'])
+
+    def test_setup_defers_group_signal_until_namespace_ownership_is_recorded(self):
+        for signal_name, status in [('INT', 130), ('TERM', 143)]:
+            with self.subTest(signal=signal_name):
+                result, calls = self.run_with_mock_ip('setup.sh', f'''
+if [[ "$*" == "netns add guard-src" ]]; then kill -{signal_name} -- "-$PPID"; fi
+exit 0
+''')
+                self.assertEqual(result.returncode, status)
+                self.assertEqual([call for call in calls if call.startswith('netns del')],
+                                 ['netns del guard-src'])
+
+    def test_failed_veth_creation_stays_inside_owned_namespaces(self):
+        result, calls = self.run_with_mock_ip('setup.sh', '''
+if [[ "$*" == "netns exec guard-src ip link add "* ]]; then exit 1; fi
+exit 0
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call.startswith('link add ') for call in calls))
+        self.assertIn('netns exec guard-src ip link add guard-srcrt type veth peer name guard-rtsrc netns guard-rt', calls)
+        self.assertEqual([call for call in calls if call.startswith('netns del')],
+                         ['netns del guard-src', 'netns del guard-rt',
+                          'netns del guard-pea', 'netns del guard-peb'])
 
     def test_teardown_reports_failure_and_attempts_remaining_namespaces(self):
         result, calls = self.run_with_mock_ip('teardown.sh', '''
