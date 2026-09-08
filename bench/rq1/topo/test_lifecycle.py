@@ -66,6 +66,17 @@ exit 0
                 self.assertEqual(result.returncode, 2)
                 self.assertFalse(work.exists())
 
+    def test_overflowing_trials_fail_before_creating_artifacts(self):
+        for trials in ['9223372036854775807', '9223372036854775808', '18446744073709551616']:
+            with self.subTest(trials=trials), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory) / 'run'
+                env = dict(os.environ, WORK=str(work))
+                result = subprocess.run(['bash', str(SCRIPTS / 'run_bgp.sh'), trials], env=env,
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('loop counter range', result.stderr)
+                self.assertFalse(work.exists())
+
     def test_setup_refuses_existing_namespace_without_deleting_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

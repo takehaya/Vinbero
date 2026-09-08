@@ -16,6 +16,12 @@ case "$MODE" in builtin|cplane|relay) ;; *) echo "MODE must be builtin, cplane o
 TRIALS="${1:-10}"
 RATE="${RATE:-100000}"
 [[ "$TRIALS" =~ ^[1-9][0-9]*$ && "$RATE" =~ ^[1-9][0-9]*$ ]] || { echo "TRIALS and RATE must be positive integers" >&2; exit 2; }
+# Compare decimal text before arithmetic, leaving room for the final trial++
+# in Bash's signed 64-bit loop counter.
+if (( ${#TRIALS} > 19 )) || { (( ${#TRIALS} == 19 )) && [[ "$TRIALS" > 9223372036854775806 ]]; }; then
+    echo "TRIALS exceeds the supported loop counter range" >&2
+    exit 2
+fi
 if (( ${#RATE} > 10 )) || (( RATE > 1000000000 )); then
     echo "RATE exceeds nanosecond pacing resolution" >&2
     exit 2
