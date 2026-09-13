@@ -18,6 +18,11 @@ on:
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
       - 'pkg/bpf/*.o'
+      # The cplane-plugin scenario runs the committed SDK example, so a
+      # change to the plugin or to the runtime under it must re-run these.
+      - 'pkg/cplane/**'
+      - 'sdk/go/cplane/**'
+      - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/interop-clab.yaml'
   pull_request:
     paths:
@@ -28,6 +33,9 @@ on:
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
       - 'pkg/bpf/*.o'
+      - 'pkg/cplane/**'
+      - 'sdk/go/cplane/**'
+      - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/interop-clab.yaml'
   workflow_dispatch:
 
@@ -52,6 +60,7 @@ jobs:
           - evpn-multihoming     # EVPN RT4 multi-homing: DF election + split-horizon
           - mup-2site            # BGP MUP (SAFI 85): controller advertises, gateway applies
           - mup-2site-multivrf   # per-VRF MUP uplink: two VPNs share one N3 endpoint + TEID
+          - cplane-plugin-2site  # an operator's own SRv6 behavior, carried by a control-plane plugin
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -74,6 +83,17 @@ jobs:
           fi
           test -d /sys/module/vrf
           echo "vrf module loaded"
+
+      - name: Install the BPF toolchain when the scenario compiles a plugin
+        # A scenario that ships build.sh builds an eBPF object against the
+        # SDK headers, which needs libbpf's bpf_helpers.h. The runner image
+        # does not carry it, and the other scenarios do not need it, so the
+        # apt cost is paid only where the hook exists.
+        run: |
+          if [ -f examples/interop-clab/scenarios/${{ matrix.scenario }}/build.sh ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends clang libelf-dev libbpf-dev
+          fi
 
       - name: Build images
         working-directory: examples/interop-clab

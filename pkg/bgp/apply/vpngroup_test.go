@@ -227,8 +227,8 @@ func TestVPNGroup_UpgradesOffTheLegacyPerRDOwner(t *testing.T) {
 		if trigger == nil || trigger.GroupId == 0 {
 			t.Fatal("legacy entry blocked the aggregating writer")
 		}
-		if len(fh.v4forced) != 1 {
-			t.Errorf("legacy entry was not cleared: forced=%v", fh.v4forced)
+		if len(fh.v4deleted) != 1 || len(fh.v4forced) != 0 {
+			t.Errorf("legacy migration must delete under its owner: deleted=%v, forced=%v", fh.v4deleted, fh.v4forced)
 		}
 	})
 

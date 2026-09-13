@@ -3,9 +3,14 @@
 
 // ========== Helpers shared by tail call targets (nosrh path) ==========
 
+// nosrh_fib_v4/v6 finish a reduced-encap decap: the outer header is already
+// stripped, so the VRF ifindex is resolved by the caller (which still has the
+// SID's function entry) and passed in. A built-in behavior passes its aux VRF
+// or the ingress ifindex; End.DT4/DT6/DT46 pass the plugin grant's VRF (or drop
+// before calling here when a plugin SID has no grant).
 static __always_inline int nosrh_fib_v4(
     struct xdp_md *ctx,
-    struct sid_aux_entry *aux)
+    __u32 fib_ifindex)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -20,14 +25,13 @@ static __always_inline int nosrh_fib_v4(
 
     eth->h_proto = bpf_htons(ETH_P_IP);
 
-    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
     int action = srv6_fib_redirect_v4(ctx, iph, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
 
 static __always_inline int nosrh_fib_v6(
     struct xdp_md *ctx,
-    struct sid_aux_entry *aux)
+    __u32 fib_ifindex)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -42,7 +46,6 @@ static __always_inline int nosrh_fib_v6(
 
     eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    __u32 fib_ifindex = aux_vrf_or_ingress_ifindex(aux, ctx);
     int action = srv6_fib_redirect(ctx, inner_ip6h, eth, fib_ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
@@ -60,12 +63,12 @@ static __always_inline int nosrh_decap_and_fib(struct xdp_md *ctx,
     if (nh == IPPROTO_IPIP) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
             return XDP_DROP;
-        return nosrh_fib_v4(ctx, aux);
+        return nosrh_fib_v4(ctx, aux_vrf_or_ingress_ifindex(aux, ctx));
     }
     if (nh == IPPROTO_IPV6) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
             return XDP_DROP;
-        return nosrh_fib_v6(ctx, aux);
+        return nosrh_fib_v6(ctx, aux_vrf_or_ingress_ifindex(aux, ctx));
     }
     return XDP_DROP;
 }
@@ -209,7 +212,7 @@ int tailcall_endpoint_end_dx2(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
@@ -237,12 +240,12 @@ int tailcall_endpoint_end_dx4(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux));
+        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux_vrf_or_ingress_ifindex(aux, ctx)));
     }
 
     struct ethhdr *eth;
@@ -261,12 +264,12 @@ int tailcall_endpoint_end_dx6(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux));
+        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux_vrf_or_ingress_ifindex(aux, ctx)));
     }
 
     struct ethhdr *eth;
@@ -285,12 +288,18 @@ int tailcall_endpoint_end_dt4(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
+        // Resolve the decap VRF before the strip -- for a plugin handoff it
+        // comes from the grant (keyed by the SID's aux_index in tctx), and a
+        // plugin SID with no grant drops rather than using the ingress table.
+        __u32 fib_ifindex;
+        if (resolve_decap_vrf(&tctx->sid_entry, aux, ctx, &fib_ifindex) != 0)
+            TAILCALL_RETURN(ctx,XDP_DROP);
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux));
+        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, fib_ifindex));
     }
 
     struct ethhdr *eth;
@@ -309,12 +318,15 @@ int tailcall_endpoint_end_dt6(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
+        __u32 fib_ifindex;
+        if (resolve_decap_vrf(&tctx->sid_entry, aux, ctx, &fib_ifindex) != 0)
+            TAILCALL_RETURN(ctx,XDP_DROP);
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux));
+        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, fib_ifindex));
     }
 
     struct ethhdr *eth;
@@ -333,10 +345,27 @@ int tailcall_endpoint_end_dt46(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
-    if (tctx->dispatch_type == DISPATCH_NOSRH)
-        TAILCALL_RETURN(ctx,nosrh_decap_and_fib(ctx, aux, tctx->inner_proto, l3_off));
+    // End.DT46 keeps its own decap instead of nosrh_decap_and_fib: the VRF
+    // comes from the plugin grant through resolve_decap_vrf, not from aux.
+    if (tctx->dispatch_type == DISPATCH_NOSRH) {
+        __u8 nh = tctx->inner_proto;
+        __u32 fib_ifindex;
+        if (resolve_decap_vrf(&tctx->sid_entry, aux, ctx, &fib_ifindex) != 0)
+            TAILCALL_RETURN(ctx,XDP_DROP);
+        if (nh == IPPROTO_IPIP) {
+            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, nh) != 0)
+                TAILCALL_RETURN(ctx,XDP_DROP);
+            TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, fib_ifindex));
+        }
+        if (nh == IPPROTO_IPV6) {
+            if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, nh) != 0)
+                TAILCALL_RETURN(ctx,XDP_DROP);
+            TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, fib_ifindex));
+        }
+        TAILCALL_RETURN(ctx,XDP_DROP);
+    }
 
     struct ethhdr *eth;
     struct ipv6hdr *ip6h;
@@ -359,7 +388,7 @@ int tailcall_endpoint_end_as(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
     if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
     __u8 inner_type = aux->service.inner_type;
 
@@ -405,7 +434,7 @@ int tailcall_endpoint_end_ad(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
     if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH)
@@ -430,7 +459,7 @@ int tailcall_endpoint_end_am(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
     if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH)
@@ -576,7 +605,7 @@ int tailcall_endpoint_end_dx2v(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
         if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);

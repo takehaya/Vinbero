@@ -18,6 +18,7 @@ import (
 // across processes.
 var pinnedControlMaps = []string{
 	"sid_function_map",
+	"sid_function_owner_map", // ownership must survive with the dispatch entries
 	"sid_aux_map",
 	"aux_owner_map", // persistent owner tags paired with sid_aux_map
 	"headend_v4_map",
@@ -79,6 +80,7 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 			"sid_function_map":     entries.SidFunction.Capacity,
 			"sid_aux_map":          entries.SidFunction.Capacity,
 			"aux_owner_map":        entries.SidFunction.Capacity, // paired with sid_aux_map keyspace
+			"plugin_endt_vrf_map":  entries.SidFunction.Capacity, // keyed by aux index, so same keyspace
 			"headend_v4_map":       entries.Headendv4.Capacity,
 			"headend_v6_map":       entries.Headendv6.Capacity,
 			"headend_l2_map":       entries.HeadendL2.Capacity,

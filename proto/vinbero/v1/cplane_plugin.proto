@@ -1,0 +1,320 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// Messages crossing the control-plane plugin boundary.
+//
+// The WebAssembly ABI moves opaque byte buffers; this file is what those
+// bytes mean. Keeping the contract in protobuf rather than in a hand-rolled
+// struct layout means a plugin in any language can be built against a
+// generated type, and that adding a field does not silently reinterpret an
+// older plugin's memory.
+//
+// These are not RPC messages. Nothing here is served over the wire: the
+// host serializes an EventBatch into guest memory and the guest serializes
+// its reply back.
+
+// PluginEventKind says which source produced an event, so a plugin can
+// switch on it before looking at the payload.
+enum PluginEventKind {
+  PLUGIN_EVENT_KIND_UNSPECIFIED = 0;
+  // A BGP route was advertised or withdrawn.
+  PLUGIN_EVENT_KIND_ROUTE = 1;
+  // A local MAC was learned or aged out of a bridge.
+  PLUGIN_EVENT_KIND_MAC = 2;
+  // The snapshot replay for one source finished. A plugin that makes
+  // aggregate decisions (composing a SID list, withdrawing on health)
+  // should wait for the end of replay on every source it subscribes to
+  // before acting, or its first conclusions are drawn from a partial view
+  // and the churn is visible to its peers.
+  PLUGIN_EVENT_KIND_END_OF_REPLAY = 3;
+  // 4 was a tick event. The periodic callback is the on_tick export
+  // instead, so a tick never arrives as an event and reserving the number
+  // keeps a plugin author from waiting for one.
+  reserved 4;
+  // A local SID the plugin declared now exists, and this is the address
+  // it was given. It arrives after the declaration is applied, which is
+  // the point at which the plugin can advertise it.
+  PLUGIN_EVENT_KIND_LOCAL_SID = 5;
+  // A full replay of one source is about to be delivered, and everything
+  // the plugin knows from that source is now stale. It must discard its
+  // view of that source and rebuild it from the events that follow, up to
+  // the matching end of replay.
+  //
+  // A replay says what exists, and can therefore add and correct; it
+  // cannot say what stopped existing. A plugin whose view outlives one --
+  // after a restart, or after the host dropped a batch it could not keep
+  // up with -- would keep declaring a route that was withdrawn while it
+  // was not listening, and no later event would ever remove it. Resetting
+  // on this is what makes the replay a repair rather than a merge.
+  PLUGIN_EVENT_KIND_START_OF_REPLAY = 6;
+}
+
+// PluginUnknownAttribute is a BGP path attribute Vinbero does not
+// interpret, carried through verbatim. The experimental types (253 / 254)
+// are the intended use: an operator can put its own data on an otherwise
+// ordinary route without waiting for a standardized codepoint.
+//
+// The bytes come from a peer and are untrusted.
+message PluginUnknownAttribute {
+  uint32 type = 1;
+  uint32 flags = 2;
+  bytes value = 3;
+}
+
+// PluginRoute is the route an event is about. Fields absent from a given
+// family are simply empty; a plugin should read the ones its families
+// define.
+message PluginRoute {
+  // Family is the operator-facing name: "vpnv4", "evpn", and so on.
+  string family = 1;
+  // True when the route is being withdrawn.
+  //
+  // A withdrawal carries no path attributes at all -- BGP sends only the
+  // NLRI being removed -- so endpoint_behavior and unknown_attrs are empty
+  // on one, whatever the advertisement carried. Match a withdrawal against
+  // state the plugin recorded when it saw the advertisement.
+  bool is_withdraw = 2;
+  // Peer is the neighbour the path was learned from. Locally originated
+  // paths are never delivered to a plugin.
+  string peer = 3;
+  // PathId is the ADD-PATH identifier, 0 when none applies. It is only
+  // unique within a peer, so a path is identified by the pair.
+  uint32 path_id = 4;
+  // EndpointBehavior is the SRv6 endpoint behavior codepoint of the
+  // route's service SID (RFC 8986), 0 when it carries none. A plugin sees
+  // routes for the codepoints it claimed plus every unclaimed one its
+  // families cover.
+  uint32 endpoint_behavior = 5;
+  // RouteDistinguisher, for the families that carry one.
+  string rd = 6;
+  // Prefix in CIDR form.
+  string prefix = 7;
+  // Srv6Sid is the service SID, already reassembled if the advertisement
+  // used RFC 9252 transposition.
+  string srv6_sid = 8;
+  // NextHop as advertised.
+  string next_hop = 9;
+  // RouteTargets attached to the route.
+  repeated string route_targets = 10;
+  // Color from the Color extended community, 0 when absent.
+  uint32 color = 11;
+  // MAC and IpAddr are set for EVPN MAC/IP routes.
+  string mac = 12;
+  string ip_addr = 13;
+  // EthernetTag and Esi are set for the EVPN families.
+  uint32 ethernet_tag = 14;
+  bytes esi = 15;
+  // UnknownAttrs are the path attributes Vinbero does not interpret.
+  repeated PluginUnknownAttribute unknown_attrs = 16;
+}
+
+// PluginMacEvent is a local MAC learned or removed on a bridge domain.
+message PluginMacEvent {
+  uint32 bd_id = 1;
+  string mac = 2;
+  // Added is true for a learn, false for a removal.
+  bool added = 3;
+}
+
+// PluginEvent is one item in a batch.
+message PluginEvent {
+  reserved 6;
+  PluginEventKind kind = 1;
+  // Sequence increases across a plugin's lifetime and identifies the event
+  // in a status reply, so a plugin can point at which one it could not
+  // handle.
+  uint64 sequence = 2;
+  PluginRoute route = 3;
+  PluginMacEvent mac = 4;
+  // Source names which replay finished, for an end-of-replay event.
+  string replay_source = 5;
+  // 6 was a tick timestamp. on_tick carries it as an argument instead.
+  // LocalSid reports the address allocated for a declared local SID.
+  PluginLocalSidAllocated local_sid = 7;
+}
+
+// PluginLocalSidAllocated tells a plugin the address one of its declared
+// local SIDs was given.
+message PluginLocalSidAllocated {
+  // Name is the plugin's own name for this SID.
+  string name = 1;
+  // Sid is the allocated address.
+  string sid = 2;
+  // Locator it came from.
+  string locator = 3;
+}
+
+// PluginEventBatch is what the host hands to handle_events.
+//
+// Events are batched rather than delivered one per call because a snapshot
+// replay of a large RIB would otherwise be that many crossings of the
+// boundary, each with its own allocation.
+message PluginEventBatch {
+  repeated PluginEvent events = 1;
+}
+
+// PluginEventDisposition is what a plugin did with one event.
+enum PluginEventDisposition {
+  PLUGIN_EVENT_DISPOSITION_UNSPECIFIED = 0;
+  // Handled normally.
+  PLUGIN_EVENT_DISPOSITION_OK = 1;
+  // The plugin could not handle this event and asks the host to quarantine
+  // it: stop redelivering it, and report it.
+  //
+  // Without this a plugin has no way to refuse an event politely, and the
+  // only signal a host could act on would be a trap -- which means the
+  // instance dies and replays, repeatedly, on the same poisoned event.
+  PLUGIN_EVENT_DISPOSITION_QUARANTINE = 2;
+}
+
+// PluginEventResult reports the disposition of one event. A plugin that
+// handled the whole batch returns no results at all.
+message PluginEventResult {
+  uint64 sequence = 1;
+  PluginEventDisposition disposition = 2;
+  // Reason is a short human-readable note for the daemon log.
+  string reason = 3;
+}
+
+// PluginEventStatus is what handle_events returns.
+message PluginEventStatus {
+  repeated PluginEventResult results = 1;
+}
+
+// PluginApplyKind selects which desired set a transaction declares.
+enum PluginApplyKind {
+  PLUGIN_APPLY_KIND_UNSPECIFIED = 0;
+  // The plugin's headend_v4_map entries.
+  PLUGIN_APPLY_KIND_HEADEND_V4 = 1;
+  // The plugin's headend_v6_map entries.
+  PLUGIN_APPLY_KIND_HEADEND_V6 = 2;
+  // The local SIDs the plugin wants allocated and pointed at its
+  // data-plane half.
+  //
+  // The host chooses the SID value, so the plugin names each one and is
+  // told the address it got in a local-SID event. Naming rather than
+  // requesting a value is what lets the allocation survive a restart: the
+  // plugin declares the same names and gets the same SIDs back.
+  PLUGIN_APPLY_KIND_LOCAL_SID = 4;
+  // The routes the plugin wants advertised to BGP peers.
+  //
+  // Advertising is a desired set like any other: the plugin states which
+  // routes it wants originated, and one it stops declaring is withdrawn.
+  // There is no separate withdraw call, because a plugin that has to
+  // remember which routes it previously advertised in order to retract
+  // them is a plugin that gets it wrong after a restart.
+  PLUGIN_APPLY_KIND_ADVERTISE = 3;
+}
+
+// PluginHeadendEntry is one declared headend encap entry.
+//
+// It is the plugin's whole statement about a trigger prefix: what to encap
+// it into. The host converts this to the BPF entry, so a plugin never sees
+// the map layout and an ABI-compatible plugin survives a layout change.
+message PluginHeadendEntry {
+  // TriggerPrefix is the destination prefix that selects this entry.
+  string trigger_prefix = 1;
+  // Segments is the SRv6 segment list, in the order a packet visits them.
+  repeated string segments = 2;
+  // SrcAddr is the outer IPv6 source address for the encapsulation. Empty
+  // means the daemon's configured encap source.
+  string src_addr = 3;
+  // Mode selects the headend behavior slot. Leave it 0 and the daemon
+  // uses the ordinary H.Encaps; a plugin pairing with its own data-plane
+  // half sets the slot its eBPF program occupies (16-31).
+  uint32 mode = 4;
+}
+
+// PluginAdvertisedRoute is one route the plugin wants originated.
+//
+// Only VPN and IPv6 unicast are expressible today, which is what vinbero's
+// advertiser originates. A plugin's own SRv6 behavior rides on those:
+// the behavior is a codepoint inside the SID TLV, not a family of its own.
+message PluginAdvertisedRoute {
+  // Family is the operator-facing name: "vpnv4", "vpnv6", "ipv6_unicast".
+  string family = 1;
+  // Rd is no longer declared by the plugin. The route distinguisher and
+  // the route targets are derived from the binding of the VRF named
+  // below, because the route targets are what decide which VRF a peer
+  // imports the route into: a plugin able to name them could put a route
+  // in a VPN it was never given. Setting either is refused rather than
+  // ignored, so a plugin built against the older shape is told.
+  string rd = 2;
+  // Prefix in CIDR form. It is normalized before use, so 10.0.0.1/24 and
+  // 10.0.0.0/24 are the same route rather than two.
+  string prefix = 3;
+  // Srv6Sid is the service SID to advertise with the route. It travels in
+  // the SID TLV, which only the VPN families carry, so setting it on an
+  // ipv6_unicast route is refused rather than quietly dropped.
+  string srv6_sid = 4;
+  // EndpointBehavior is the SRv6 endpoint behavior codepoint to put in the
+  // SID TLV. A plugin advertising its own behavior sets the codepoint it
+  // claimed; 0 leaves vinbero's default for the family.
+  //
+  // The codepoint travels in the SID TLV, so setting it without a
+  // srv6_sid is refused rather than quietly dropped.
+  uint32 endpoint_behavior = 5;
+  // RouteTargets are derived from the VRF binding; see rd above.
+  repeated string route_targets = 6;
+  // NextHop to advertise. Required: the daemon has no defensible guess at
+  // it, because its encap source is a locator address and not necessarily
+  // an address peers can route to, and picking one silently would
+  // advertise a route they cannot follow.
+  string next_hop = 7;
+  // Vrf names the VRF a VPN route is originated into, and must be one the
+  // plugin's scope lists. The RD and the route targets come from that
+  // VRF's binding. An ipv6_unicast route belongs to no VRF, so naming one
+  // there is refused.
+  string vrf = 8;
+}
+
+// PluginLocalSid is one local SID the plugin wants to exist.
+message PluginLocalSid {
+  // Name identifies this SID within the plugin. It is how the plugin
+  // recognizes the address it was given, and how the host knows across a
+  // restart that a redeclared SID is the same one.
+  string name = 1;
+  // Locator is the SRv6 locator to allocate from, by the name it was
+  // configured under.
+  string locator = 2;
+  // Slot is the endpoint PROG_ARRAY slot the SID dispatches to: the
+  // plugin's own data-plane half. Valid plugin slots are 32-63.
+  uint32 slot = 3;
+  // AuxRaw is the per-SID configuration the data-plane half reads, in the
+  // layout its BTF declares.
+  bytes aux_raw = 4;
+  // DecapVRF, when set, is the VRF a plugin-dispatched End.DT4/DT6/DT46
+  // decapsulates into. A plugin's data-plane half hands SRv6 traffic to a
+  // built-in decap behavior, and the handoff nulls the SID's own aux so the
+  // plugin cannot spell an arbitrary VRF ifindex there; the host resolves
+  // this name to a kernel ifindex and records it in a host-owned grant map.
+  // It must be a VRF in the plugin's scope. Empty leaves a plugin whose half
+  // completes without a built-in handoff unaffected.
+  string decap_vrf = 5;
+}
+
+// PluginApplyChunk is one instalment of a declared set.
+//
+// A set is chunked because it may not fit in one call, and because a
+// replay is delivered in pieces so each piece gets its own execution
+// budget. Nothing a chunk carries takes effect until the transaction is
+// committed.
+message PluginApplyChunk {
+  repeated PluginHeadendEntry headend_entries = 1;
+  repeated PluginAdvertisedRoute advertised_routes = 2;
+  repeated PluginLocalSid local_sids = 3;
+}
+
+// PluginConfig is the operator's configuration for a plugin instance,
+// handed to configure at instantiation.
+//
+// It exists so deployment-specific values -- which color to watch, what
+// health threshold to withdraw at -- are not baked into the module. The
+// payload is opaque to the host: a plugin defines its own message and the
+// operator supplies the encoded bytes.
+message PluginConfig {
+  bytes payload = 1;
+}

@@ -1,0 +1,75 @@
+---
+name: BGP Convergence Instrument
+
+on:
+  push:
+    paths:
+      - 'bench/**'
+      - 'Makefile'
+      - 'examples/common/netns.sh'
+      - 'go.*'
+      - 'src/**'
+      - 'pkg/**'
+      - 'cmd/**'
+      - 'api/**'
+      - 'sdk/go/cplane/**'
+      - 'sdk/examples/cplane-custom-behavior/**'
+      - '.github/workflows/bench-convergence.yaml'
+  pull_request:
+    paths:
+      - 'bench/**'
+      - 'Makefile'
+      - 'examples/common/netns.sh'
+      - 'go.*'
+      - 'src/**'
+      - 'pkg/**'
+      - 'cmd/**'
+      - 'api/**'
+      - 'sdk/go/cplane/**'
+      - 'sdk/examples/cplane-custom-behavior/**'
+      - '.github/workflows/bench-convergence.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install namespace test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ethtool iproute2 iputils-ping \
+            linux-modules-extra-$(uname -r)
+          sudo modprobe vrf
+      - name: Build and test the instrument
+        run: make bench-rq1-build bench-rq1-test
+      # This checks that each mode measures a real transition. Timing values
+      # on a shared CI runner are not performance results or regression gates.
+      - name: Exercise all three paths
+        run: |
+          for mode in builtin cplane relay; do
+            sudo MODE="$mode" RATE=10000 WORK="/tmp/rq1-ci-$mode" \
+              ./bench/rq1/topo/run_bgp.sh 1
+          done
+      - name: Package private measurement diagnostics
+        if: always()
+        run: |
+          # Keep the active run directories private. Only the completed
+          # diagnostic archive needs to be readable by upload-artifact.
+          sudo tar -C /tmp --ignore-failed-read -czf - -- \
+            rq1-ci-builtin rq1-ci-cplane rq1-ci-relay \
+            > "$RUNNER_TEMP/convergence-instrument.tar.gz"
+      - name: Preserve measurement diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: convergence-instrument-diagnostics
+          path: ${{ runner.temp }}/convergence-instrument.tar.gz
+          retention-days: 7

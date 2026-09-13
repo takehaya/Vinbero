@@ -45,10 +45,40 @@
 
 // Lookup sid_aux_map when aux_index is non-zero. Index 0 is the "no aux"
 // sentinel reserved by the userspace allocator.
+//
+// Plugin code uses this to read its own plugin_raw aux: a plugin SID's
+// aux_entry holds bytes the plugin author laid out, and the plugin's own
+// program is the only thing meant to interpret them.
 #define TAILCALL_AUX_LOOKUP(tctx, aux)                                        \
     struct sid_aux_entry *(aux) = NULL;                                        \
     if ((tctx)->sid_entry.aux_index) {                                         \
         __u32 _idx = (tctx)->sid_entry.aux_index;                              \
+        (aux) = bpf_map_lookup_elem(&sid_aux_map, &_idx);                      \
+    }
+
+// TAILCALL_BUILTIN_AUX_LOOKUP is TAILCALL_AUX_LOOKUP for vinbero's own
+// behaviors, and it refuses the aux of a plugin-owned SID.
+//
+// The sid_aux_entry is a union discriminated by sid_entry.action. A
+// built-in reads its own variant out of it -- End.DT4 reads l3vrf.vrf_ifindex,
+// End.DX2 reads nexthop as an OIF, End.B6 reads a whole segment list. A
+// plugin's data-plane half may bpf_tail_call into any built-in slot, and if
+// it does, the built-in runs against the SID entry still describing the
+// PLUGIN's SID -- whose aux is plugin_raw, bytes the plugin chose. Reading
+// those as l3vrf.vrf_ifindex would let a plugin decapsulate into any VRF on
+// the box, defeating the scope's VRF grant; reading them as End.B6's policy
+// would let it encapsulate with an arbitrary segment list.
+//
+// The discriminator is the SID's own action. A plugin SID dispatches to an
+// endpoint slot at or above ENDPOINT_PLUGIN_BASE, so an action in that range
+// means the aux belongs to a plugin and no built-in variant describes it.
+// The built-in gets NULL and falls back exactly as it does for a SID with no
+// aux (End.DT4 uses the ingress ifindex, and so on).
+#define TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux)                                 \
+    struct sid_aux_entry *(aux) = NULL;                                        \
+    if ((tctx)->sid_entry.aux_index &&                                         \
+        (tctx)->sid_entry.action < ENDPOINT_PLUGIN_BASE) {                     \
+        __u32 _idx = (tctx)->sid_entry.aux_index;                             \
         (aux) = bpf_map_lookup_elem(&sid_aux_map, &_idx);                      \
     }
 
@@ -111,7 +141,7 @@ int prog_name(struct xdp_md *ctx)                                             \
     if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);                               \
     TAILCALL_BOUND_L3OFF(tctx, l3_off);                                      \
                                                                               \
-    TAILCALL_AUX_LOOKUP(tctx, aux);                                           \
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);                                           \
                                                                               \
     struct ethhdr *eth;                                                       \
     struct ipv6hdr *ip6h;                                                     \
@@ -153,7 +183,7 @@ int prog_name(struct xdp_md *ctx)                                             \
     if (!tctx) TAILCALL_RETURN(ctx, XDP_DROP);                                \
     TAILCALL_BOUND_L3OFF(tctx, l3_off);                                       \
                                                                               \
-    TAILCALL_AUX_LOOKUP(tctx, aux);                                           \
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);                                           \
                                                                               \
     if (tctx->dispatch_type == DISPATCH_NOSRH) {                              \
         void *_data = (void *)(long)ctx->data;                                \

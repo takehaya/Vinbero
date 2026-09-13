@@ -22,6 +22,12 @@ type MACSink interface {
 	OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool)
 }
 
+// macSinkEntry is one registered sink and the id its removal is keyed by.
+type macSinkEntry struct {
+	id   uint64
+	sink MACSink
+}
+
 // fdbMapOps is the subset of *bpf.MapOperations the FDBWatcher needs, narrowed
 // to an interface so the watcher is unit-testable without a live BPF map.
 type fdbMapOps interface {
@@ -37,7 +43,14 @@ type FDBWatcher struct {
 	logger  *zap.Logger
 	mu      sync.RWMutex
 	allowed map[int]uint16 // bridge ifindex → bd_id (for O(1) filter)
-	macSink MACSink        // nil unless EVPN auto-advertise is on
+	// macSinks receives every local MAC change, in registration order.
+	// Empty unless EVPN auto-advertise is on or a consumer added itself.
+	macSinks []macSinkEntry
+	// primarySinkID identifies the sink installed through SetMACSink, so a
+	// later SetMACSink replaces it rather than stacking another consumer.
+	// Zero means none is installed.
+	primarySinkID uint64
+	nextSinkID    uint64
 	// neighList lists kernel neighbor entries (defaults to netlink.NeighList);
 	// overridable in tests so DumpBridge's filter + sync path needs no live bridge.
 	neighList    func(linkIndex, family int) ([]netlink.Neigh, error)
@@ -104,14 +117,79 @@ func (w *FDBWatcher) SetAgingSeconds(seconds int) {
 	w.agingSeconds = seconds
 }
 
-// SetMACSink installs the sink that receives local MAC add/delete events for
-// EVPN RT2 auto-advertise. It is safe to call at any time (guarded by w.mu),
-// but setting it after Start means the boot-time ListExisting replay has already
-// run, so MACs present at that point are not delivered to the sink.
+// SetMACSink installs the primary sink for local MAC add/delete events, used
+// by EVPN RT2 auto-advertise. A second call replaces it, and a nil sink
+// removes it, leaving any sink added through AddMACSink in place. It is safe
+// to call at any time (guarded by w.mu), but setting it after Start means the
+// boot-time ListExisting replay has already run, so MACs present at that point
+// are not delivered to the sink.
 func (w *FDBWatcher) SetMACSink(sink MACSink) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.macSink = sink
+	if w.primarySinkID != 0 {
+		w.removeMACSinkLocked(w.primarySinkID)
+		w.primarySinkID = 0
+	}
+	if sink == nil {
+		return
+	}
+	w.primarySinkID = w.addMACSinkLocked(sink)
+}
+
+// AddMACSink registers an additional sink alongside the primary one and
+// returns a remove func that is safe to call more than once. Sinks are
+// notified in registration order; each gets its own copy of the MAC, so one
+// consumer cannot corrupt another's.
+func (w *FDBWatcher) AddMACSink(sink MACSink) func() {
+	if sink == nil {
+		return func() {}
+	}
+	w.mu.Lock()
+	id := w.addMACSinkLocked(sink)
+	w.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			w.removeMACSinkLocked(id)
+			if w.primarySinkID == id {
+				w.primarySinkID = 0
+			}
+		})
+	}
+}
+
+// addMACSinkLocked appends sink and returns its id. Caller holds w.mu.
+func (w *FDBWatcher) addMACSinkLocked(sink MACSink) uint64 {
+	w.nextSinkID++
+	id := w.nextSinkID
+	w.macSinks = append(w.macSinks, macSinkEntry{id: id, sink: sink})
+	return id
+}
+
+// removeMACSinkLocked drops the sink registered under id. Caller holds w.mu.
+func (w *FDBWatcher) removeMACSinkLocked(id uint64) {
+	for i, e := range w.macSinks {
+		if e.id == id {
+			w.macSinks = append(w.macSinks[:i], w.macSinks[i+1:]...)
+			return
+		}
+	}
+}
+
+// snapshotMACSinks copies the current sink list so delivery runs without
+// holding w.mu (a sink may call back into the watcher).
+func (w *FDBWatcher) snapshotMACSinks() []MACSink {
+	if len(w.macSinks) == 0 {
+		return nil
+	}
+	out := make([]MACSink, 0, len(w.macSinks))
+	for _, e := range w.macSinks {
+		out = append(out, e.sink)
+	}
+	return out
 }
 
 func (w *FDBWatcher) runAging(ctx context.Context) {
@@ -147,13 +225,13 @@ func (w *FDBWatcher) ageAndWithdraw(maxAgeNs uint64) {
 		return
 	}
 	w.mu.RLock()
-	sink := w.macSink
+	sinks := w.snapshotMACSinks()
 	w.mu.RUnlock()
 	for _, a := range aged {
 		if a.IsRemote {
 			continue
 		}
-		w.notifyMAC(sink, a.BDID, a.MAC, false)
+		w.notifyMAC(sinks, a.BDID, a.MAC, false)
 	}
 	w.logger.Info("FDB aging: deleted stale entries", zap.Int("count", len(aged)))
 }
@@ -184,7 +262,7 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 	// Filter: only process FDB entries from registered bridges
 	w.mu.RLock()
 	bdID, ok := w.allowed[neigh.MasterIndex]
-	sink := w.macSink
+	sinks := w.snapshotMACSinks()
 	w.mu.RUnlock()
 	if !ok {
 		return
@@ -197,7 +275,7 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 
 	switch update.Type {
 	case unix.RTM_NEWNEIGH:
-		w.syncAndNotify(sink, bdID, mac, neigh.LinkIndex)
+		w.syncAndNotify(sinks, bdID, mac, neigh.LinkIndex)
 
 	case unix.RTM_DELNEIGH:
 		if err := w.mapOps.DeleteFdb(bdID, net.HardwareAddr(mac)); err != nil {
@@ -206,7 +284,7 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 				zap.Uint16("bd_id", bdID),
 				zap.Error(err))
 		}
-		w.notifyMAC(sink, bdID, mac, false)
+		w.notifyMAC(sinks, bdID, mac, false)
 	}
 }
 
@@ -217,23 +295,23 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 // live update path (handleNeighUpdate) and the replay path (DumpBridge), so the
 // two cannot drift on this safety rule. The caller has already filtered to a
 // registered bridge and a unicast MAC.
-func (w *FDBWatcher) syncAndNotify(sink MACSink, bdID uint16, mac net.HardwareAddr, linkIndex int) {
+func (w *FDBWatcher) syncAndNotify(sinks []MACSink, bdID uint16, mac net.HardwareAddr, linkIndex int) {
 	entry := &bpf.FdbEntry{Oif: uint32(linkIndex)}
 	if err := w.mapOps.CreateFdb(bdID, mac, entry); err != nil {
 		w.logger.Debug("Failed to sync FDB entry to BPF map",
 			zap.String("mac", mac.String()), zap.Uint16("bd_id", bdID), zap.Error(err))
 		return
 	}
-	w.notifyMAC(sink, bdID, mac, true)
+	w.notifyMAC(sinks, bdID, mac, true)
 }
 
-// notifyMAC forwards a local MAC change to the EVPN auto-advertise sink, if one
-// is set. It copies the MAC because the netlink-supplied slice may be reused.
-func (w *FDBWatcher) notifyMAC(sink MACSink, bdID uint16, mac net.HardwareAddr, added bool) {
-	if sink == nil {
-		return
+// notifyMAC forwards a local MAC change to every registered sink. Each gets its
+// own copy: the netlink-supplied slice may be reused, and one sink retaining or
+// mutating the MAC must not affect the next.
+func (w *FDBWatcher) notifyMAC(sinks []MACSink, bdID uint16, mac net.HardwareAddr, added bool) {
+	for _, sink := range sinks {
+		sink.OnLocalMAC(bdID, append(net.HardwareAddr(nil), mac...), added)
 	}
-	sink.OnLocalMAC(bdID, append(net.HardwareAddr(nil), mac...), added)
 }
 
 // isUnicastMAC reports whether mac is a 6-byte unicast address (the only FDB
@@ -253,12 +331,12 @@ func isUnicastMAC(mac net.HardwareAddr) bool {
 func (w *FDBWatcher) DumpBridge(ifindex int) error {
 	w.mu.RLock()
 	bdID, ok := w.allowed[ifindex]
-	sink := w.macSink
+	sinks := w.snapshotMACSinks()
 	w.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("bridge ifindex %d is not registered", ifindex)
 	}
-	if sink == nil {
+	if len(sinks) == 0 {
 		return nil
 	}
 	// neighList(0, AF_BRIDGE) lists every bridge FDB entry; filter by MasterIndex
@@ -275,7 +353,7 @@ func (w *FDBWatcher) DumpBridge(ifindex int) error {
 		// Same path as a live add: re-sync the BPF fdb_map (idempotent for entries
 		// already present, and a backstop if a Start-time Put had failed) and only
 		// then advertise RT2, so a MAC missing from the data plane is not advertised.
-		w.syncAndNotify(sink, bdID, n.HardwareAddr, n.LinkIndex)
+		w.syncAndNotify(sinks, bdID, n.HardwareAddr, n.LinkIndex)
 	}
 	return nil
 }

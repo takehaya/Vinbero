@@ -46,6 +46,8 @@ bgp:
   peers:
     - neighbor: "2001:db8:ff::1"
       peer_asn: 65100
+      # Tokyo initiates; a single TCP direction avoids simultaneous-open collisions.
+      passive: true
       hold_time_sec: 30
       keepalive_sec: 10
       families:

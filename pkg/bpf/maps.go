@@ -1144,7 +1144,7 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 	}
 	// This is an upsert. Whatever aux the superseded entry pointed at goes
 	// unreferenced the moment the new entry lands, so remember it now.
-	supersededAux, err := m.exactSidFunctionAuxIndex(key, alreadyOwned)
+	supersededAux, err := m.exactSidFunctionAuxIndex(key)
 	if err != nil {
 		return err
 	}
@@ -1168,36 +1168,51 @@ func (m *MapOperations) CreateSidFunction(triggerPrefix string, entry *SidFuncti
 // exactSidFunctionAuxIndex returns the aux index of the entry stored under
 // exactly key, or 0 when this prefix has no entry of its own.
 //
-// sid_function_map is an LPM trie, so Lookup answers with a covering entry
-// rather than this one. Two cheap facts settle almost every call: a miss
-// means nothing covers the key, so nothing sits on it either; and when the
-// owner map (a hash on the exact prefix) says this prefix is owned, the
-// entry exists, which makes the longest-prefix answer the exact one. Only
-// an entry with no owner record -- pinned before owner tracking existed --
-// needs the scan.
-func (m *MapOperations) exactSidFunctionAuxIndex(key *LpmKeyV6, alreadyOwned bool) (uint16, error) {
+// sid_function_map is an LPM trie, so Lookup may return a covering entry.
+// An owner row is not proof of an exact dispatch: an interrupted deletion
+// can leave only the owner behind. A hit therefore needs an exact-key scan,
+// both when deleting and when finding the aux superseded by an upsert.
+func (m *MapOperations) exactSidFunctionAuxIndex(key *LpmKeyV6) (uint16, error) {
+	entry, _, err := m.exactSidFunctionEntry(key)
+	return entry.AuxIndex, err
+}
+
+// GetSidFunctionExact distinguishes an exact SID from a covering LPM entry.
+// A lookup miss avoids a map walk; a hit is verified against the stored key.
+func (m *MapOperations) GetSidFunctionExact(triggerPrefix string) (*SidFunctionEntry, bool, error) {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return nil, false, err
+	}
+	m.sidLifecycle.Lock()
+	defer m.sidLifecycle.Unlock()
+	entry, exists, err := m.exactSidFunctionEntry(key)
+	if err != nil || !exists {
+		return nil, false, err
+	}
+	return &entry, true, nil
+}
+
+func (m *MapOperations) exactSidFunctionEntry(key *LpmKeyV6) (SidFunctionEntry, bool, error) {
 	var covering SidFunctionEntry
 	if err := m.objs.SidFunctionMap.Lookup(key, &covering); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return 0, nil
+			return SidFunctionEntry{}, false, nil
 		}
-		return 0, fmt.Errorf("lookup SID function entry: %w", err)
-	}
-	if alreadyOwned {
-		return covering.AuxIndex, nil
+		return SidFunctionEntry{}, false, fmt.Errorf("lookup SID function entry: %w", err)
 	}
 	var k LpmKeyV6
 	var e SidFunctionEntry
 	iter := m.objs.SidFunctionMap.Iterate()
 	for iter.Next(&k, &e) {
 		if k == *key {
-			return e.AuxIndex, nil
+			return e, true, nil
 		}
 	}
 	if err := iter.Err(); err != nil {
-		return 0, fmt.Errorf("scan SID function map: %w", err)
+		return SidFunctionEntry{}, false, fmt.Errorf("scan SID function map: %w", err)
 	}
-	return 0, nil
+	return SidFunctionEntry{}, false, nil
 }
 
 // releaseSupersededBuiltinAux frees the aux index an upsert left behind.
@@ -1247,7 +1262,7 @@ func (m *MapOperations) CreateSidFunctionWithAuxIndex(triggerPrefix string, entr
 	}
 	// Binding a plugin aux over an entry that carried a builtin one leaves
 	// that builtin index unreferenced, same as any other upsert.
-	supersededAux, err := m.exactSidFunctionAuxIndex(key, alreadyOwned)
+	supersededAux, err := m.exactSidFunctionAuxIndex(key)
 	if err != nil {
 		return err
 	}
@@ -1358,20 +1373,36 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 		}
 	}
 
-	// Read entry first so aux can be cleaned up after successful delete.
-	// The lookup is a longest-prefix match, so it can answer with a broader
-	// entry that merely covers this prefix; the delete below decides whether
-	// what we read was really this prefix's own entry.
-	var entry SidFunctionEntry
-	hasEntry := m.objs.SidFunctionMap.Lookup(key, &entry) == nil
+	// A retry can find an absent entry with a remaining owner row. An LPM
+	// lookup alone would then return a covering SID and revoke its grant
+	// before the delete discovers the miss. Resolve the exact prefix first.
+	auxIndex, err := m.exactSidFunctionAuxIndex(key)
+	if err != nil {
+		return err
+	}
+
+	// Withdraw any decap-VRF grant keyed by this aux index first, while the SID
+	// entry and its owner are still present. The grant is keyed by aux index,
+	// so a freed-then-reused index would otherwise let a stale grant apply to
+	// an unrelated SID; this is the catch-all for every delete path
+	// (ForceDeleteSidFunction and any direct DeleteSidFunction), not just the
+	// control-plane's own grant-aware release. A SID that never carried a grant
+	// is a no-op here.
+	//
+	// It runs before the entry is deleted so a failure is retriable: returning
+	// now leaves the entry, its owner and the aux index intact, so the next
+	// delete re-enters this path. Deleting the entry first and failing here
+	// would strand the grant and the index forever, because hasEntry would then
+	// be false on every retry.
+	if auxIndex != 0 {
+		if err := m.DeleteEndtVRFGrant(uint32(auxIndex)); err != nil {
+			return fmt.Errorf("withdraw decap-VRF grant for aux %d: %w", auxIndex, err)
+		}
+	}
 
 	existed, err := deleteMapKeyExisted(m.objs.SidFunctionMap, key)
 	if err != nil {
 		return fmt.Errorf("failed to delete SID function entry: %w", err)
-	}
-	hasEntry = hasEntry && existed
-	if err := m.sidFunctionOwners.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete SID function owner: %w", err)
 	}
 
 	// Plugin-owned aux is NOT freed here — the plugin path (PluginAuxFree
@@ -1379,14 +1410,19 @@ func (m *MapOperations) deleteSidFunctionInternal(triggerPrefix string, requeste
 	// Builtin aux is freed in lockstep with the zero-write so a racing
 	// PluginAuxFree → PluginAuxAlloc cannot reassign idx between the
 	// owner check and the map op.
-	if hasEntry && entry.AuxIndex != 0 {
-		idx := uint32(entry.AuxIndex)
+	if existed && auxIndex != 0 {
+		idx := uint32(auxIndex)
 		_ = m.auxAlloc.WithOwnerLocked(idx, AuxOwnerBuiltin, func() error {
 			var zero SidAuxEntry
 			_ = m.objs.SidAuxMap.Put(idx, &zero)
 			m.auxAlloc.freeOwnerLocked(idx)
 			return nil
 		})
+	}
+	// Cleanup follows the successful main-map deletion even if removing its
+	// owner row fails. A retry can no longer recover the removed aux index.
+	if err := m.sidFunctionOwners.Delete(key); err != nil {
+		return fmt.Errorf("failed to delete SID function owner: %w", err)
 	}
 	return nil
 }
@@ -1412,6 +1448,65 @@ func (m *MapOperations) GetSidAux(index uint32) (*SidAuxEntry, error) {
 		return nil, fmt.Errorf("failed to lookup SID aux entry: %w", err)
 	}
 	return &aux, nil
+}
+
+// PutEndtVRFGrant records that the plugin-dispatched SID whose dispatch
+// entry carries auxIndex may decapsulate End.DT4/DT6/DT46 into vrfIfindex.
+//
+// The built-in End.DT behaviors read this map after a plugin handoff, when
+// the discriminator has nulled the SID's own aux (its plugin_raw bytes must
+// not be reinterpreted as a VRF ifindex). The map is host-written and
+// BPF_F_RDONLY_PROG, so a plugin cannot forge a grant even in its own ELF.
+// The control plane writes one per DecapVRF SID at install and deletes it at
+// release; a SID with no grant fails closed (drop) in the data plane.
+func (m *MapOperations) PutEndtVRFGrant(auxIndex, vrfIfindex uint32) error {
+	if auxIndex == 0 {
+		return fmt.Errorf("endt vrf grant: aux index must be non-zero")
+	}
+	val := BpfPluginEndtVrf{VrfIfindex: vrfIfindex}
+	if err := m.objs.PluginEndtVrfMap.Put(auxIndex, &val); err != nil {
+		return fmt.Errorf("failed to put endt vrf grant: %w", err)
+	}
+	return nil
+}
+
+// EndtVRFGrantReferences reports whether any decap-VRF grant points at
+// vrfIfindex, returning one referencing aux index for the message. It is the
+// VRF-delete guard for plugin-dispatched decap: a built-in End.DT* SID keeps
+// its VRF in l3vrf aux, but a plugin handoff keeps it here, so deleting a VRF
+// device with a live grant would dangle it and, once the ifindex is reused,
+// send that plugin's decap into another routing domain.
+func (m *MapOperations) EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool, error) {
+	if vrfIfindex == 0 {
+		return 0, false, nil
+	}
+	var (
+		auxIndex uint32
+		val      BpfPluginEndtVrf
+	)
+	iter := m.objs.PluginEndtVrfMap.Iterate()
+	for iter.Next(&auxIndex, &val) {
+		if val.VrfIfindex == vrfIfindex {
+			return auxIndex, true, nil
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, false, fmt.Errorf("iterate endt vrf grants: %w", err)
+	}
+	return 0, false, nil
+}
+
+// DeleteEndtVRFGrant removes the grant for auxIndex. A missing key is not an
+// error: the caller deletes the grant before it frees the aux index, so a
+// re-run over a set that never carried a grant is a no-op.
+func (m *MapOperations) DeleteEndtVRFGrant(auxIndex uint32) error {
+	if err := m.objs.PluginEndtVrfMap.Delete(auxIndex); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete endt vrf grant: %w", err)
+	}
+	return nil
 }
 
 // ListSidFunctions returns all SID function entries
@@ -2287,6 +2382,20 @@ func (m *MapOperations) GetHeadendV4Owner(triggerPrefix string) (OwnerTag, bool,
 	return m.headendV4Owners.Lookup(key)
 }
 
+// GetSidFunctionOwner returns the owner recorded for a SID function
+// entry, or ("", false) when none is recorded.
+//
+// It is the sid_function counterpart of GetHeadendV4Owner, and exists for
+// the same reason: a caller reconciling the entries it owns has to be able
+// to tell which of the map's entries are its own.
+func (m *MapOperations) GetSidFunctionOwner(triggerPrefix string) (OwnerTag, bool, error) {
+	key, err := buildLpmKeyV6(triggerPrefix)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
+	}
+	return m.sidFunctionOwners.Lookup(key)
+}
+
 // GetHeadendV6Owner is the v6 counterpart of GetHeadendV4Owner.
 func (m *MapOperations) GetHeadendV6Owner(triggerPrefix string) (OwnerTag, bool, error) {
 	key, err := buildLpmKeyV6(triggerPrefix)
@@ -3104,6 +3213,11 @@ func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 		// Written only by SidFunctionService (proxy IFACE-IN bindings);
 		// the return-path dispatcher and plugins just read it.
 		"service_ingress_map": m.objs.ServiceIngressMap,
+		// Written only by the control plane from a plugin's VRF scope; the
+		// built-in End.DT4/DT6/DT46 read it after a plugin handoff. It is also
+		// BPF_F_RDONLY_PROG, so the kernel refuses a plugin write structurally,
+		// not only the validator.
+		"plugin_endt_vrf_map": m.objs.PluginEndtVrfMap,
 	}
 }
 
@@ -3163,6 +3277,7 @@ func SharedReadOnlyMapNames() []string {
 		"ecmp_path_map",
 		"ecmp_live_map",
 		"service_ingress_map",
+		"plugin_endt_vrf_map",
 	}
 }
 

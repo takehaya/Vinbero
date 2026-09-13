@@ -20,6 +20,11 @@ import (
 type SidLister interface {
 	ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error)
 	GetSidAux(index uint32) (*bpf.SidAuxEntry, error)
+	// EndtVRFGrantReferences reports whether a plugin-dispatched End.DT* grant
+	// points at this VRF's device ifindex. A plugin handoff keeps its decap
+	// VRF in a host-owned grant map rather than in l3vrf aux, so the aux scan
+	// above cannot see it.
+	EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool, error)
 }
 
 // BindingGetter reports whether a vrf-bgp binding references a VRF name, so
@@ -78,16 +83,29 @@ type VrfServer struct {
 	// two managers, so serializing only within each server would leave a
 	// window where the check and the act see different states.
 	mu *sync.Mutex
+	// grantLease closes the last window between a plugin's decap-grant install
+	// and this VRF delete. VrfDelete holds it across the grant-reference check
+	// and the device teardown; the plugin's local-SID install holds the same
+	// lock across its VRF resolve and grant write. With it, a grant can never
+	// be written for an ifindex a delete is freeing: the delete either sees the
+	// grant and refuses, or the install's resolve fails because the device is
+	// gone. It is the cplane manager's lock, shared here; nil when control-
+	// plane plugins are disabled -- pinned grants from an earlier run can
+	// still exist then, but no install can race the delete, and the reference
+	// check below still refuses while one is live. It is a leaf lock, always
+	// taken under s.mu and releasing nothing else, so it cannot deadlock with
+	// applyMu (which the delete never takes).
+	grantLease *sync.Mutex
 }
 
 // NewVrfServer wires the handler. mu is the mutation mutex, shared with
 // VrfBgpServer so cross-facet invariants hold (see the field comment); nil
 // allocates a private one (tests without a VrfBgpServer).
-func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator, evpnReplay func(), mu *sync.Mutex) *VrfServer {
+func NewVrfServer(mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, sids SidLister, bindings BindingGetter, bridges vrf.BridgeOps, fdb FdbRegistrar, evpn *EvpnCoordinator, evpnReplay func(), mu *sync.Mutex, grantLease *sync.Mutex) *VrfServer {
 	if mu == nil {
 		mu = &sync.Mutex{}
 	}
-	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu}
+	return &VrfServer{mgr: mgr, prog: prog, resolve: vrf.ResolveByName, dev: dev, sids: sids, bindings: bindings, bridges: bridges, fdb: fdb, evpn: evpn, evpnReplay: evpnReplay, mu: mu, grantLease: grantLease}
 }
 
 func (s *VrfServer) reconcile() error {
@@ -240,6 +258,19 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 	} else if resolved, err := s.resolve(name); err == nil {
 		ifindex = resolved
 	}
+	// Hold the grant lease across the grant-reference check and the device
+	// teardown below. A plugin's decap-grant install takes the same lock across
+	// its VRF resolve and grant write, so a grant cannot appear for this
+	// ifindex between the check and the moment teardown makes the ifindex
+	// unresolvable: the install either wrote the grant before this check (which
+	// then refuses) or resolves after the device is gone (and fails). It is a
+	// leaf held only here; nil when control-plane plugins are off, where no
+	// install exists to race (the reference check below still guards pinned
+	// grants a previous run left behind).
+	if s.grantLease != nil {
+		s.grantLease.Lock()
+		defer s.grantLease.Unlock()
+	}
 	if ifindex != 0 {
 		ref, err := findVrfReference(s.sids, ifindex)
 		if err != nil {
@@ -247,6 +278,18 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 		}
 		if ref != "" {
 			return fail(fmt.Sprintf("VRF is referenced by SID %s", ref))
+		}
+		// A plugin-dispatched End.DT* keeps its decap VRF in a host-owned grant
+		// map, not in l3vrf aux, so the scan above cannot see it. Refuse the
+		// delete while a grant still points at this device: dropping it would
+		// dangle the grant, and a reused ifindex would send that plugin's decap
+		// into another routing domain.
+		auxIdx, granted, err := s.sids.EndtVRFGrantReferences(ifindex)
+		if err != nil {
+			return fail(fmt.Sprintf("failed to check plugin decap-VRF grants: %v", err))
+		}
+		if granted {
+			return fail(fmt.Sprintf("VRF is referenced by a plugin decap-VRF grant (aux index %d)", auxIdx))
 		}
 	}
 	// Device teardown before identity removal: a failed netlink delete leaves

@@ -45,6 +45,23 @@ type Session struct {
 
 	advMu      sync.Mutex
 	advertised map[bgp.RouteKey]uuid.UUID
+	// producers records who advertised each key, for the keys advertised
+	// by someone that named itself.
+	//
+	// gobgp keeps one local path per NLRI, so the session keeps one UUID
+	// per key -- and everything that originates through this session
+	// shares it. Without knowing who put a key there, one producer's
+	// withdraw deletes another's live route and the producer that lost it
+	// still believes it is advertising.
+	//
+	// The empty producer is vinbero's own machinery: the auto-advertise
+	// exporter and the operator's RPC both hold the bare session, so they
+	// are one producer here and can still take each other's keys. That is
+	// the behavior they have always had, and separating them is a change
+	// to their contract rather than to this one. What the naming settles
+	// is the boundary that is new: a plugin cannot touch what vinbero
+	// itself advertises, or the reverse.
+	producers map[bgp.RouteKey]string
 }
 
 // bgpServer returns the running BgpServer, or nil when the session is
@@ -67,6 +84,7 @@ func NewSession(logger *zap.Logger) *Session {
 	return &Session{
 		logger:     logger.Named("bgp.gobgp"),
 		advertised: make(map[bgp.RouteKey]uuid.UUID),
+		producers:  make(map[bgp.RouteKey]string),
 	}
 }
 

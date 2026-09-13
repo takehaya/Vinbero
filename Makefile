@@ -50,8 +50,12 @@ test-runnable: ## check no panic at init()
 	done
 
 .PHONY: test
+# pkg/bpf reloads the BPF collection per test and runs well past go test's
+# default 10m per-package timeout (about 14m on a fast machine, longer
+# under -race). Without an explicit timeout the package is killed mid-run
+# and reports failures that are only the clock.
 test: ## Run the tests of the project
-	$(GOTEST) -v -exec sudo -race ./... $(OUTPUT_OPTIONS)
+	$(GOTEST) -v -exec sudo -race -timeout 35m ./... $(OUTPUT_OPTIONS)
 
 VIMTO_KERNEL ?= 6.6
 .PHONY: test-bpf-load
@@ -226,3 +230,38 @@ help: ## Show this help.
 		} \
 		else if (/^## .*$$/) {printf "  ${CYAN}%s${RESET}\n", substr($$1,4)} \
 		}' $(MAKEFILE_LIST)
+
+.PHONY: cplane-wasm-testdata
+cplane-wasm-testdata: ## rebuild the control-plane plugin wasm test fixtures (requires wat2wasm)
+	@for f in pkg/cplane/wasm/testdata/*.wat pkg/cplane/testdata/*.wat; do \
+		echo "[wat2wasm] $$f"; \
+		wat2wasm $$f -o $${f%.wat}.wasm || exit 1; \
+	done
+
+.PHONY: cplane-example cplane-example-tinygo
+
+.PHONY: bench-rq1-build bench-rq1-test bench-rq1-bgp
+bench-rq1-build: ## Build the BGP convergence instrument and daemon (standard Go WASM example is committed)
+	mkdir -p out/bench out/bin
+	go build -buildvcs=false -tags bench -o out/bench/ ./bench/rq1/cmd/...
+	go build -buildvcs=false -o out/bin/vinberod ./cmd/vinberod
+	go build -buildvcs=false -o out/bin/vinbero ./cmd/vinbero
+
+bench-rq1-test: ## Check the convergence instrument and measurement guards without changing the network
+	go test -tags bench -race -count=1 ./bench/rq1/...
+	python3 -m unittest discover -s bench/rq1/topo -p 'test_*.py'
+	bash -n bench/rq1/topo/run_bgp.sh bench/rq1/topo/setup.sh bench/rq1/topo/teardown.sh
+
+bench-rq1-bgp: ## Measure BGP convergence; MODE=builtin|cplane|relay, TRIALS=n, RATE=pps (requires bench-rq1-build)
+	sudo MODE=$(or $(MODE),builtin) RATE=$(or $(RATE),100000) ./bench/rq1/topo/run_bgp.sh $(or $(TRIALS),10)
+# Strip source paths and VCS metadata so CI reproduces the committed artifact.
+cplane-example: ## build the control-plane plugin example with standard Go
+	cd sdk/examples/cplane-custom-behavior && \
+		GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o plugin.wasm .
+
+# Optional smaller artifact; keep the default Go artifact intact.
+cplane-example-tinygo: ## build the control-plane plugin example with TinyGo 0.39.0
+	cd sdk/examples/cplane-custom-behavior && \
+		tinygo build -o plugin.tinygo.wasm -target=wasm-unknown \
+			-scheduler=none -gc=conservative -panic=trap -no-debug .

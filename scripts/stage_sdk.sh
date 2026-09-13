@@ -41,3 +41,12 @@ install -m 644 "$ROOT"/src/core/*.h "$DEST/include/core/"
 # live in the repo under sdk/examples/ and are linked from the SDK README.
 install -m 644 "$ROOT/sdk/README.md" "$DEST/share/vinbero-sdk/README.md"
 install -m 644 "$ROOT/LICENSE" "$DEST/share/vinbero-sdk/LICENSE"
+
+# The control-plane plugin contract. A control-plane plugin is a
+# WebAssembly module rather than a C object, so it needs no headers -- what
+# it needs is the .proto, because every message crossing the boundary is
+# protobuf and a plugin in any language generates its bindings from this.
+# Shipping it here is what lets someone write one without a checkout.
+install -d "$DEST/share/vinbero-sdk/proto/vinbero/v1"
+install -m 644 "$ROOT/proto/vinbero/v1/cplane_plugin.proto" \
+    "$DEST/share/vinbero-sdk/proto/vinbero/v1/cplane_plugin.proto"

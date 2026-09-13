@@ -19,6 +19,7 @@ import (
 //   - "builtin:v1"                        -- Vinbero internal automation
 //   - "bgp:v1:asn=<asn>:rd=<rd>"          -- BGP VPN route
 //   - "bgp:v1:asn=<asn>:unicast"          -- BGP IPv6 unicast route
+//   - "plugin:v1:bundle=<name>"           -- plugin (see plugin_owner.go)
 //
 // Entry-owner shares its byte representation (64-byte aux_owner) and
 // version stamp with aux-owner (see AuxOwnerVersion / AuxOwnerBuiltin) so
@@ -136,6 +137,11 @@ const (
 	OwnerKindRPC     = "rpc"
 	OwnerKindBuiltin = "builtin"
 	OwnerKindBGP     = "bgp"
+	// OwnerKindPlugin marks a main-map entry written on behalf of a plugin.
+	// It shares its literal with AuxOwnerKindPlugin so a plugin identity
+	// reads the same in the entry-owner and aux-owner namespaces; see
+	// plugin_owner.go for the two tag forms and their canonicalization.
+	OwnerKindPlugin = AuxOwnerKindPlugin
 )
 
 // ParseOwnerTag extracts the kind and version of a tag. Unknown kinds
@@ -153,7 +159,7 @@ func ParseOwnerTag(tag OwnerTag) (kind, version string, err error) {
 	kind = parts[0]
 	version = parts[1]
 	switch kind {
-	case OwnerKindRPC, OwnerKindBuiltin, OwnerKindBGP:
+	case OwnerKindRPC, OwnerKindBuiltin, OwnerKindBGP, OwnerKindPlugin:
 		return kind, version, nil
 	default:
 		return "", "", fmt.Errorf("unknown owner tag kind %q", kind)
