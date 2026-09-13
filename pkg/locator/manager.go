@@ -40,16 +40,20 @@ type managerEntry struct {
 // table. It is the single object the RPC handler and the SidFunction
 // handler talk to.
 type Manager struct {
-	mu       sync.RWMutex
-	entries  map[string]*managerEntry
-	bindings BindingTable
+	mu           sync.RWMutex
+	entries      map[string]*managerEntry
+	bindings     BindingTable
+	reservations map[string]SIDReservation
+	reservedSIDs map[netip.Addr]string
 }
 
 // NewManager returns a manager backed by an in-memory binding table.
 func NewManager() *Manager {
 	return &Manager{
-		entries:  make(map[string]*managerEntry),
-		bindings: NewBindingTable(),
+		entries:      make(map[string]*managerEntry),
+		bindings:     NewBindingTable(),
+		reservations: make(map[string]SIDReservation),
+		reservedSIDs: make(map[netip.Addr]string),
 	}
 }
 
@@ -67,14 +71,26 @@ func (m *Manager) Add(loc *Locator) error {
 		return fmt.Errorf("%w: %q", ErrLocatorExists, loc.Name)
 	}
 	for _, e := range m.entries {
-		if e.loc.Prefix == loc.Prefix {
+		if e.loc.Prefix.Masked() == loc.Prefix.Masked() {
 			return fmt.Errorf("%w: %s already used by %q", ErrLocatorPrefixInUse, loc.Prefix, e.loc.Name)
 		}
 	}
 	// Copy so external callers cannot mutate the registered definition
 	// out from under the allocator.
 	copyLoc := *loc
-	m.entries[loc.Name] = &managerEntry{loc: &copyLoc, alloc: NewBitmapAllocator(&copyLoc)}
+	copyLoc.Prefix = copyLoc.Prefix.Masked()
+	if err := m.checkReservationLocatorLocked(copyLoc); err != nil {
+		return err
+	}
+	e := &managerEntry{loc: &copyLoc, alloc: NewBitmapAllocator(&copyLoc)}
+	for _, r := range m.reservations {
+		if r.Locator.Name == loc.Name {
+			if _, err := e.alloc.Allocate(&r.Function); err != nil {
+				return fmt.Errorf("restore SID reservation %q: %w", r.Key, err)
+			}
+		}
+	}
+	m.entries[loc.Name] = e
 	return nil
 }
 
@@ -82,7 +98,7 @@ func (m *Manager) Add(loc *Locator) error {
 // bindings still reference it (returning ErrLocatorInUse). With
 // force=true the manager only drops its own state; the caller is
 // responsible for tearing down the upstream SIDs (sid_function_map
-// entries) first.
+// entries) first. Durable reservations remain pending and are restored on Add.
 func (m *Manager) Delete(name string, force bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -99,7 +115,9 @@ func (m *Manager) Delete(name string, force bool) error {
 	// that locator would then fail on ErrBindingExists for every SID it
 	// still covers.
 	for _, sid := range used {
-		m.bindings.Forget(sid)
+		if _, reserved := m.reservedSIDs[sid]; !reserved {
+			m.bindings.Forget(sid)
+		}
 	}
 	delete(m.entries, name)
 	return nil
@@ -158,9 +176,13 @@ func (m *Manager) List() []Locator {
 // alive until ReleaseSID is called. requested=nil triggers
 // auto-allocation, otherwise the value is pinned manually.
 func (m *Manager) AllocateSID(locatorName string, requested *uint32) (netip.Addr, Binding, error) {
-	m.mu.RLock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.allocateSIDLocked(locatorName, requested)
+}
+
+func (m *Manager) allocateSIDLocked(locatorName string, requested *uint32) (netip.Addr, Binding, error) {
 	e, ok := m.entries[locatorName]
-	m.mu.RUnlock()
 	if !ok {
 		return netip.Addr{}, Binding{}, fmt.Errorf("%w: %q", ErrLocatorNotFound, locatorName)
 	}
@@ -189,13 +211,20 @@ func (m *Manager) AllocateSID(locatorName string, requested *uint32) (netip.Addr
 // were never recorded) are silent no-ops so SidFunctionDelete can call
 // this unconditionally.
 func (m *Manager) ReleaseSID(sid netip.Addr) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, reserved := m.reservedSIDs[sid]; reserved {
+		return
+	}
+	m.releaseSIDLocked(sid)
+}
+
+func (m *Manager) releaseSIDLocked(sid netip.Addr) {
 	b, ok := m.bindings.Forget(sid)
 	if !ok {
 		return
 	}
-	m.mu.RLock()
 	e := m.entries[b.LocatorName]
-	m.mu.RUnlock()
 	if e != nil {
 		e.alloc.Release(b.Function)
 	}
@@ -204,5 +233,7 @@ func (m *Manager) ReleaseSID(sid netip.Addr) {
 // BindingOf returns the recorded (locator, function) for a sid, if any.
 // Used by /vbctl sid list to render the locator origin of each entry.
 func (m *Manager) BindingOf(sid netip.Addr) (Binding, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.bindings.Lookup(sid)
 }

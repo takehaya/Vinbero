@@ -121,6 +121,21 @@ func run(cliCtx *cli.Context) error {
 	// server and the BGP route applier, so locators / VRF bindings
 	// created over RPC are visible to the BGP receive path.
 	locatorMgr := locator.NewManager()
+	// Reserve durable SID identities before config locators or exporters can
+	// allocate. This also protects their addresses when BGP is disabled.
+	var cplaneStore *cplane.Store
+	if cfg.Setting.CplanePlugins.Enabled {
+		cplaneStore, err = cplane.NewStore(cfg.Setting.CplanePlugins.Path)
+		if err != nil {
+			return fmt.Errorf("open control-plane plugin store: %w", err)
+		}
+		if err := cplane.ReserveStoredLocalSIDs(cplaneStore, locatorMgr); err != nil {
+			return fmt.Errorf("reserve stored local SIDs: %w", err)
+		}
+		if !cliCtx.Bool("bgp-enabled") {
+			lg.Info("control-plane SID reservations retained; BGP is disabled so plugins are not restored")
+		}
+	}
 	vrfBgpMgr := vrfbgp.NewManager()
 
 	// The BGP session is constructed (unstarted) before the RPC server
@@ -416,12 +431,7 @@ func run(cliCtx *cli.Context) error {
 		// off. A daemon that forgot them would come back holding the
 		// entries they wrote -- pinned maps outlive the process -- under
 		// an owner nothing can reconcile any more.
-		var cplaneStore *cplane.Store
-		if cfg.Setting.CplanePlugins.Enabled {
-			cplaneStore, err = cplane.NewStore(cfg.Setting.CplanePlugins.Path)
-			if err != nil {
-				return fmt.Errorf("open control-plane plugin store: %w", err)
-			}
+		if cplaneStore != nil {
 			// Their behaviors are claimed before the first route moves.
 			// Starting the demux replays everything already in the rib, so
 			// a route carrying a stored plugin's codepoint would otherwise

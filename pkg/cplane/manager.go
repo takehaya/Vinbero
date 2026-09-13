@@ -317,6 +317,15 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	// Share the grant lease with the local-SID tracker so install serializes
 	// against VrfDelete on the same lock the server also takes.
 	m.localSIDs.grantLease = &m.endtVRFGrantLease
+	if err := m.localSIDs.enablePersistence(cfg.Store); err != nil {
+		return nil, fmt.Errorf("cplane manager: %w", err)
+	}
+	// A crash during first publication can leave inventory before the
+	// registration manifest exists. Keep those owners visible and their
+	// grants reserved, including when their WASM cannot be loaded.
+	for name, scope := range m.localSIDs.inventoryScopes() {
+		m.recordUnrestored(Registration{Name: name, Scope: scope}, fmt.Errorf("local SID inventory awaiting plugin registration"))
+	}
 	return m, nil
 }
 
@@ -428,6 +437,14 @@ func (m *Manager) checkGrantsExclusive(name string, scope Scope) error {
 		held = append(held, grantsOf(other+" (unrestored)", u.scope))
 	}
 	m.unrestoredMu.Unlock()
+
+	// Inventory can retain grants missing from an unreadable or narrowed
+	// manifest, including records left before first publication was saved.
+	for other, scope := range m.localSIDs.inventoryScopes() {
+		if other != name {
+			held = append(held, grantsOf(other+" (SID inventory)", scope))
+		}
+	}
 
 	for _, h := range held {
 		for _, s := range scope.HeadendV4Slots {
@@ -862,9 +879,9 @@ func (m *Manager) Unrestored() []UnrestoredPlugin {
 // was holding, drops it from the store, and stops reporting it.
 //
 // It is the counterpart of Unregister for something that never ran. The
-// state it left in the maps is not touched, because nothing here knows
-// what that state was for; releasing the claim is what an operator does
-// once they have decided the plugin is not coming back.
+// state it left in the maps is not touched. Plugins with tracked local SIDs
+// must use Unregister, which can clean up without loading their WASM. Forget
+// remains available for legacy state that has no SID inventory.
 func (m *Manager) Forget(name string) error {
 	m.registerMu.Lock()
 	defer m.registerMu.Unlock()
@@ -887,6 +904,9 @@ func (m *Manager) Forget(name string) error {
 	m.mu.Unlock()
 	if running {
 		return fmt.Errorf("cplane: plugin %q is running; Unregister it rather than Forget", name)
+	}
+	if m.localSIDs.LiveCount(bpf.OwnerPluginBundle(name)) > 0 {
+		return fmt.Errorf("cplane: plugin %q still holds local SID inventory; Unregister it to clean up its state", name)
 	}
 	if m.claims != nil {
 		m.claims.Release(name)
@@ -1007,7 +1027,7 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 	delete(m.plugins, name)
 	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("cplane: %w: %q", ErrPluginNotRegistered, name)
+		return m.unregisterUnrestored(name)
 	}
 
 	// Order matters. Delivery stops first so nothing new is declared, then
