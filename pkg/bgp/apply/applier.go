@@ -269,51 +269,32 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 	// received route must carry an RT some VRF imports. A Manager with no
 	// binding under fam keeps the historical default-allow, so vpnv4 /
 	// vpnv6 gate independently as bindings arrive per family.
+	importAllowed := true
 	if !a.vrfBindings.EmptyForFamily(vr.Family) {
-		if _, _, ok := a.vrfBindings.MatchImportForFamily(vr.RTs, vr.Family); !ok {
-			// A replacement UPDATE whose RTs no longer match any import
-			// filter must still replace: a path imported earlier under
-			// different RTs cannot survive it (BGP UPDATEs replace the
-			// whole attribute set).
-			a.logger.Warn("VPN route matches no VRF import RT; dropping",
-				zap.String("prefix", vr.Prefix), zap.Strings("rts", vr.RTs))
-			a.removeVPNPath(dk, pk, vr)
-			return
-		}
+		_, _, importAllowed = a.vrfBindings.MatchImportForFamily(vr.RTs, vr.Family)
 	}
-	if vr.SRv6SID == "" {
-		// A VPN route with no SRv6 service SID cannot be encapsulated --
-		// including one whose SID information failed RFC 9252 §7 validation
-		// on decode. A BGP UPDATE is an implicit replace, so a previously
-		// installed path for this NLRI must not survive the unusable
-		// update: tear it down exactly like a withdraw before skipping.
+	path, diagnostic := selectVPNPath(vr, importAllowed)
+	switch diagnostic {
+	case vpnImportDenied:
+		a.logger.Warn("VPN route matches no VRF import RT; dropping",
+			zap.String("prefix", vr.Prefix), zap.Strings("rts", vr.RTs))
+	case vpnSIDMissing:
 		a.logger.Warn("VPN route has no usable SRv6 SID; removing any installed path",
 			zap.String("prefix", vr.Prefix), zap.String("rd", vr.RD))
+	case vpnSteeringInvalidNextHop:
+		a.logger.Warn("colored VPN route has no parseable next hop; not steering",
+			zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
+			zap.String("nexthop", vr.NextHop))
+	case vpnSteeringNonIPv6NextHop:
+		a.logger.Warn("colored VPN route next hop is not IPv6; not steering",
+			zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
+			zap.String("nexthop", vr.NextHop))
+	}
+	if path == nil {
 		a.removeVPNPath(dk, pk, vr)
 		return
 	}
-	// Color-based auto-steering is decided per path: the paths aggregated
-	// onto one prefix can carry different colors, so each contributes its
-	// own SR Policy reference rather than the prefix holding a single one.
-	var want *policyKey
-	if vr.Color != 0 {
-		endpoint, perr := netip.ParseAddr(vr.NextHop)
-		switch {
-		case perr != nil:
-			a.logger.Warn("colored VPN route has no parseable next hop; not steering",
-				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
-				zap.String("nexthop", vr.NextHop))
-		case !endpoint.Is6():
-			// SR Policy endpoints are always IPv6, so an IPv4 next hop
-			// could never match. Skip steering and don't reserve a
-			// policy_id that would never resolve.
-			a.logger.Warn("colored VPN route next hop is not IPv6; not steering",
-				zap.String("prefix", vr.Prefix), zap.Uint32("color", vr.Color),
-				zap.String("nexthop", vr.NextHop))
-		default:
-			want = &policyKey{color: vr.Color, endpoint: endpoint}
-		}
-	}
+	want := path.steer
 
 	// Take the new reference before releasing the old one so a re-advertise
 	// that keeps the same target never drops the refcount to zero and lets
@@ -328,10 +309,7 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 	if replaced != nil {
 		a.srPolicy.unref(replaced.color, replaced.endpoint)
 	}
-	d, ok := a.vpnGroups.upsert(dk, pk, &vpnPath{
-		sid: vr.SRv6SID, reduced: vr.SIDStructure.IsUSID(),
-		steer: want, nh: vr.NextHop,
-	})
+	d, ok := a.vpnGroups.upsert(dk, pk, path)
 	if !ok {
 		// Refused by a bound. The reference just taken would otherwise pin
 		// a policy no path holds.
