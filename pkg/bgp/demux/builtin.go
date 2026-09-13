@@ -1,87 +1,47 @@
 package demux
 
 import (
-	"sort"
 	"sync"
 
 	"github.com/takehaya/vinbero/pkg/bgp"
 )
 
-type routePath struct {
-	nlri   string
-	source bgp.PathSource
-}
-
-type builtinGroup struct {
-	routes    map[routePath]bgp.RouteEvent
-	delivered map[routePath]bgp.RouteEvent
-}
-
-// builtinView tracks both the paths a built-in was given and those a claim
-// withholds. An UPDATE can change its consumer without a wire withdrawal;
-// that transition needs a synthetic withdrawal of the previous delivery.
-// VPN paths share a headend key across RDs, so one claimed path withholds
-// the whole forwarding prefix. Retained ordinary paths can be replayed
-// when the last claimed path disappears.
+// builtinView serializes delivery-state transitions with their resulting
+// callbacks. Its lock also orders on-demand replay against live events.
 type builtinView struct {
 	mu      sync.Mutex
-	groups  map[string]*builtinGroup
+	state   builtinDeliveryState
 	claimed func(uint16) bool
 	handler bgp.RouteHandler
-	scans   map[*builtinScan]struct{}
 }
 
-// A scan only remembers paths changed during its own lifetime. This also
-// covers removed groups without keeping tombstones for every past route.
 type builtinScan struct {
-	view    *builtinView
-	changed map[routePath]struct{}
+	view  *builtinView
+	state *builtinScanState
 }
 
 func (v *builtinView) beginScan() *builtinScan {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.scans == nil {
-		v.scans = make(map[*builtinScan]struct{})
-	}
-	s := &builtinScan{view: v, changed: make(map[routePath]struct{})}
-	v.scans[s] = struct{}{}
-	return s
+	return &builtinScan{view: v, state: v.state.beginScan()}
 }
 
 func (s *builtinScan) close() {
 	s.view.mu.Lock()
 	defer s.view.mu.Unlock()
-	delete(s.view.scans, s)
+	s.view.state.endScan(s.state)
 }
 
 func (s *builtinScan) retract(ev bgp.RouteEvent) {
 	v := s.view
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	key := forwardingKey(ev)
-	if _, changed := s.changed[routePath{nlriKey(ev), ev.Source}]; changed {
-		return
-	}
-	if key == "" {
-		if v.claimed(ev.EndpointBehavior) {
-			ev.IsWithdraw = true
-			v.handler(ev)
-		}
-		return
-	}
-	v.updateLocked(ev, true, key, false)
-}
-
-func (v *builtinView) changedLocked(ev bgp.RouteEvent) {
-	for s := range v.scans {
-		s.changed[routePath{nlriKey(ev), ev.Source}] = struct{}{}
-	}
+	v.dispatchLocked(v.state.retract(s.state, ev, v.claimed))
 }
 
 func (d *Demux) newBuiltinView(h bgp.RouteHandler) *builtinView {
 	return &builtinView{
-		groups: make(map[string]*builtinGroup), handler: h,
+		state: newBuiltinDeliveryState(forwardingKey), handler: h,
 		claimed: func(behavior uint16) bool {
 			d.mu.RLock()
 			claims := d.claims
@@ -98,25 +58,13 @@ func forwardingKey(ev bgp.RouteEvent) string {
 	return nlriKey(ev)
 }
 
-// refresh re-evaluates current paths after a claim rollback without replaying
-// an older RIB snapshot over live updates that have already reached this view.
+// refresh uses current paths after a claim rollback, never an older snapshot
+// that could reintroduce a path withdrawn during registration.
 func (v *builtinView) refresh() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	keys := make([]string, 0, len(v.groups))
-	for key := range v.groups {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		g := v.groups[key]
-		paths := sortedPaths(g.routes)
-		for _, path := range paths {
-			v.changedLocked(g.routes[path])
-		}
-		if len(paths) > 0 {
-			v.updateLocked(g.routes[paths[0]], false, key, false)
-		}
+	for _, key := range v.state.keys() {
+		v.dispatchLocked(v.state.refresh(key, v.claimed))
 	}
 }
 
@@ -125,7 +73,6 @@ func (v *builtinView) handle(ev bgp.RouteEvent) {
 }
 
 func (v *builtinView) handleWithClaim(ev bgp.RouteEvent, claimedWithdraw bool) {
-	// Serialize the applier's state and delivery with its on-demand replays.
 	// The built-in handler must not recursively invoke this same view.
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -133,94 +80,11 @@ func (v *builtinView) handleWithClaim(ev bgp.RouteEvent, claimedWithdraw bool) {
 }
 
 func (v *builtinView) handleLocked(ev bgp.RouteEvent, claimedWithdraw bool) {
-	if ev.Source.IsLocal() {
-		return
-	}
-	key := forwardingKey(ev)
-	if key == "" {
-		if !claimedWithdraw && !v.claimed(ev.EndpointBehavior) {
-			v.handler(ev)
-		}
-		return
-	}
-	v.changedLocked(ev)
-	v.updateLocked(ev, false, key, claimedWithdraw)
+	v.dispatchLocked(v.state.handle(ev, claimedWithdraw, v.claimed))
 }
 
-func (v *builtinView) updateLocked(ev bgp.RouteEvent, retract bool, key string, claimedWithdraw bool) {
-	if retract && !v.claimed(ev.EndpointBehavior) {
-		return
+func (v *builtinView) dispatchLocked(actions []bgp.RouteEvent) {
+	for _, ev := range actions {
+		v.handler(ev)
 	}
-	g := v.groups[key]
-	if g == nil {
-		g = &builtinGroup{routes: make(map[routePath]bgp.RouteEvent), delivered: make(map[routePath]bgp.RouteEvent)}
-		v.groups[key] = g
-	}
-	path := routePath{nlriKey(ev), ev.Source}
-	_, known := g.routes[path]
-	if ev.IsWithdraw {
-		delete(g.routes, path)
-	} else {
-		g.routes[path] = ev
-	}
-	claimed := false
-	for _, route := range g.routes {
-		if v.claimed(route.EndpointBehavior) {
-			claimed = true
-			break
-		}
-	}
-	retracted := false
-	for _, previous := range sortedPaths(g.delivered) {
-		if _, still := g.routes[previous]; still && !claimed {
-			continue
-		}
-		gone := g.delivered[previous]
-		gone.IsWithdraw = true
-		v.handler(gone)
-		if previous == path {
-			retracted = true
-		}
-		delete(g.delivered, previous)
-	}
-	if (retract || claimed && !ev.IsWithdraw) && !retracted {
-		// The applier may have installed this path through an independent
-		// replay. Cleanup cannot depend solely on this view's history.
-		gone := ev
-		gone.IsWithdraw = true
-		v.handler(gone)
-	}
-	if !claimed {
-		if ev.IsWithdraw && !known && !claimedWithdraw {
-			// The applier can own state from an earlier daemon run or an
-			// independent replay. Preserve ordinary withdrawals even when
-			// this view never observed their advertisements.
-			v.handler(ev)
-		}
-		for _, current := range sortedPaths(g.routes) {
-			if _, sent := g.delivered[current]; sent && (ev.IsWithdraw || current != path) {
-				continue
-			}
-			route := g.routes[current]
-			v.handler(route)
-			g.delivered[current] = route
-		}
-	}
-	if len(g.routes) == 0 {
-		delete(v.groups, key)
-	}
-}
-
-func sortedPaths(routes map[routePath]bgp.RouteEvent) []routePath {
-	paths := make([]routePath, 0, len(routes))
-	for path := range routes {
-		paths = append(paths, path)
-	}
-	sort.Slice(paths, func(i, j int) bool {
-		if paths[i].nlri != paths[j].nlri {
-			return paths[i].nlri < paths[j].nlri
-		}
-		return paths[i].source.String() < paths[j].source.String()
-	})
-	return paths
 }

@@ -119,6 +119,12 @@ current=true の WatchEvent が開き、2 回目は loc-rib を後から attach 
 consumer へ replay してしまいます。そこで daemon が唯一の subscription を
 持ち、consumer は demux (`pkg/bgp/demux`) に登録します。
 
+組み込み consumer の配送履歴は `builtinDeliveryState` が保持し、live 更新、
+withdraw、claim 巻き戻し、RIB 走査結果から順序付きの配送 action を返します。
+`builtinView` は既存の lock 内で状態遷移と callback 呼び出しを直列化します。
+配送履歴は callback へ渡す判断の記録であり、kernel への反映成功を示しません。
+VPN は family / prefix、他 family は NLRI を集約キーとして同じ遷移処理を使います。
+
 demux が引き受ける規則は 2 つです。
 
 - local-origin path を live stream と snapshot replay の両方で落とします。
