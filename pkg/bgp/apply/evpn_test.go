@@ -293,6 +293,27 @@ func TestApplier_EVPNRT2WithdrawBdPeerDeleteErrorRepinsIndex(t *testing.T) {
 	}
 }
 
+// mcastContribs counts RT3 contributions across every NLRI (the nested
+// ledger keys NLRIs at the top level, delivering paths below).
+func mcastContribs(a *Applier) int {
+	n := 0
+	for _, srcs := range a.evpn.mcast {
+		n += len(srcs)
+	}
+	return n
+}
+
+// mcastStates flattens every RT3 contribution's state for assertions.
+func mcastStates(a *Applier) []evpnMcastState {
+	var out []evpnMcastState
+	for _, srcs := range a.evpn.mcast {
+		for _, st := range srcs {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
 // rt3 builds an RT3 Inclusive Multicast route for bd 100 with a given
 // End.DT2M flood SID.
 func rt3(sid string) *bgp.EVPNRoute {
@@ -388,14 +409,14 @@ func TestApplier_EVPNRT3WithdrawDeleteErrorKeepsLedger(t *testing.T) {
 
 	fh.bdPeerDelErr = errors.New("boom")
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt3("fd00:2:2:24::")})
-	if len(a.evpn.mcast) != 1 || len(fh.bdPeers) != 1 {
-		t.Fatalf("failed DeleteBdPeer must keep ledger and peer; mcast=%d peers=%v", len(a.evpn.mcast), fh.bdPeers)
+	if mcastContribs(a) != 1 || len(fh.bdPeers) != 1 {
+		t.Fatalf("failed DeleteBdPeer must keep ledger and peer; mcast=%d peers=%v", mcastContribs(a), fh.bdPeers)
 	}
 
 	fh.bdPeerDelErr = nil
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt3("fd00:2:2:24::")})
-	if len(a.evpn.mcast) != 0 || len(fh.bdPeers) != 0 {
-		t.Errorf("retry withdraw must clear all state; mcast=%d peers=%v", len(a.evpn.mcast), fh.bdPeers)
+	if mcastContribs(a) != 0 || len(fh.bdPeers) != 0 {
+		t.Errorf("retry withdraw must clear all state; mcast=%d peers=%v", mcastContribs(a), fh.bdPeers)
 	}
 }
 
@@ -423,7 +444,7 @@ func TestApplier_EVPNRT3BdFull(t *testing.T) {
 		fh.bdPeers[bdPeerKey{100, i}] = &bpf.HeadendEntry{}
 	}
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:24::")})
-	if _, ok := a.evpn.mcast[evpnMcastKey{rd: "65000:100", etag: 0}]; ok {
+	if mcastContribs(a) != 0 {
 		t.Error("BD-full must not record an RT3 mcast ledger entry")
 	}
 }

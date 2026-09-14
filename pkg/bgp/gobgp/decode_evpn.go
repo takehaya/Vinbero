@@ -158,8 +158,10 @@ func decodeEVPNMacIP(p *apiutil.Path, rt *gobgppkt.EVPNMacIPAdvertisementRoute) 
 // decodeEVPNMulticast decodes an RT3 Inclusive Multicast Ethernet Tag route
 // (RFC 7432 §7.3). The End.DT2M flood SID rides in the Prefix-SID L2 Service
 // TLV (RFC 9252 §6.3); any transposition offset is carried in the PMSI Tunnel
-// label rather than an NLRI label. RD / Ethernet Tag identify the flood peer;
-// the originating router IP arrives as the next hop.
+// label rather than an NLRI label. RD / Ethernet Tag / Originating Router's
+// IP Address form the NLRI identity (RFC 7432 §7.3); the same router IP
+// normally also arrives as the next hop, but only the NLRI copy
+// distinguishes two legitimate RT3s delivered by one peer.
 func decodeEVPNMulticast(p *apiutil.Path, rt *gobgppkt.EVPNMulticastEthernetTagRoute) *bgp.EVPNRoute {
 	r := &bgp.EVPNRoute{
 		Type:        bgp.EVPNRouteTypeInclusiveMulticast,
@@ -169,6 +171,9 @@ func decodeEVPNMulticast(p *apiutil.Path, rt *gobgppkt.EVPNMulticastEthernetTagR
 	}
 	if rt.RD != nil {
 		r.RD = rt.RD.String()
+	}
+	if rt.IPAddress.IsValid() {
+		r.IPAddr = rt.IPAddress.String()
 	}
 	label := pmsiLabel(p.Attrs)
 	r.SRv6SID = decodeSRv6SID(p.Attrs, label, gobgppkt.TLVTypeSRv6L2Service)

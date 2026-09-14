@@ -83,8 +83,10 @@ func rt3Path(t *testing.T, sid string) *apiutil.Path {
 	nlri := &gobgppkt.EVPNNLRI{
 		RouteType: gobgppkt.EVPN_INCLUSIVE_MULTICAST_ETHERNET_TAG,
 		RouteTypeData: &gobgppkt.EVPNMulticastEthernetTagRoute{
-			RD:   rd,
-			ETag: 0,
+			RD:              rd,
+			ETag:            0,
+			IPAddressLength: 128,
+			IPAddress:       netip.MustParseAddr("2001:db8::2"),
 		},
 	}
 	rt, _ := gobgppkt.ParseExtendedCommunity(gobgppkt.EC_SUBTYPE_ROUTE_TARGET, "65000:100")
@@ -115,6 +117,11 @@ func TestDecodeEVPN_RT3(t *testing.T) {
 	}
 	if len(r.RTs) != 1 || r.RTs[0] != "65000:100" {
 		t.Errorf("RTs = %v, want [65000:100]", r.RTs)
+	}
+	// The Originating Router's IP is NLRI identity (RFC 7432 §7.3): losing
+	// it collapses distinct RT3s onto one applier contribution.
+	if r.IPAddr != "2001:db8::2" {
+		t.Errorf("IPAddr = %q, want the NLRI Originating Router's IP 2001:db8::2", r.IPAddr)
 	}
 }
 

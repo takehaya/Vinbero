@@ -19,6 +19,13 @@ import (
 const (
 	maxTrackedESIs   = 256 // distinct ESIs whose membership we track
 	maxMembersPerESI = 32  // member PE sources per ESI (DF candidates)
+
+	// maxEVPNContribsPerEntry caps how many ledger contributions may share
+	// one data-plane entry (the {bd, mac} FDB entry for RT2, the {bd, sid}
+	// flood bd_peer for RT3) -- the same spirit as vpngroup's
+	// maxPathsPerDest. Without it a peer that negotiated ADD-PATH can mint
+	// unbounded {NLRI, source} contributions by inventing path ids.
+	maxEVPNContribsPerEntry = 32
 )
 
 // fdbBdOps is the subset of bpf.MapOperations the EVPN applier writes:
@@ -36,6 +43,20 @@ type fdbBdOps interface {
 	// the peer under one critical section, so a concurrent writer (the
 	// operator RPC path) cannot land on the same slot.
 	CreateBdPeerAtFreeIndex(bdID uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) (uint16, error)
+	// DeleteBdPeerIfEntry deletes {bdID, index} only when the slot holds
+	// exactly the expected entry, checking and deleting inside one
+	// critical section -- the identity guard for ledger-driven deletes of
+	// slots an external writer might have freed and reused.
+	// (existed, matched, err): existed=false is an already-free slot;
+	// matched=false with existed=true is a different occupant (nothing
+	// deleted); a transient read failure is an error, never a mismatch.
+	DeleteBdPeerIfEntry(bdID, index uint16, want *bpf.HeadendEntry) (bool, bool, error)
+	// BdPeerEntryIs reports whether the slot currently holds exactly this
+	// entry, under the writers' critical section. The full comparison
+	// keeps a ledger from adopting a different owner's entry that merely
+	// shares the SID. ErrKeyNotExist is (false, nil); other read failures
+	// are errors.
+	BdPeerEntryIs(bdID, index uint16, want *bpf.HeadendEntry) (bool, error)
 	// FindFreeBdPeerIndex returns the lowest bd_peer index not in use in the
 	// real map, so a BGP-allocated peer never collides with an operator-created
 	// or restart-pinned entry.
@@ -60,19 +81,32 @@ type evpnPeerKey struct {
 	sid  string
 }
 
-// evpnFdbKey is the stable identity of an RT2 NLRI ({RD, EthernetTag, MAC}),
-// used as a reverse index so a withdrawal -- whose path attributes (route
-// targets, Prefix-SID) may be absent -- can still find the bridge domain and
-// peer the advertisement installed.
+// evpnFdbKey identifies one RT2 contribution: the NLRI ({RD, EthernetTag,
+// MAC, IP} -- MAC-only and MAC+IP advertisements are distinct routes) plus
+// the path that delivered it (bgp.PathSource, so two route reflectors'
+// copies of one NLRI are separate contributions and a per-peer withdraw on
+// session loss removes only its own). Used as a reverse index so a
+// withdrawal -- whose path attributes (route targets, Prefix-SID) may be
+// absent -- can still find the bridge domain and peer the advertisement
+// installed.
 type evpnFdbKey struct {
-	rd   string
-	etag uint32
-	mac  string
+	rd     string
+	etag   uint32
+	mac    string
+	ip     string
+	source bgp.PathSource
 }
 
 type evpnPeerState struct {
 	index uint16
 	refs  int
+	// entry is the flood bd_peer exactly as installed (RT3 flood paths
+	// only; zero for RT2 unicast peers). It is the ownership truth for
+	// guarded verify/replace/delete: rebuilding the expectation from the
+	// current locator would misread our own slot as foreign after a
+	// locator delete/recreate and duplicate the peer, and a rebuilt
+	// expectation can also fail outright, orphaning the map entry.
+	entry bpf.HeadendEntry
 }
 
 type evpnFdbState struct {
@@ -93,21 +127,23 @@ type esMemberKey struct {
 	pe  string
 }
 
-// evpnMcastKey is the stable identity of an RT3 Inclusive Multicast NLRI
-// ({RD, EthernetTag}). A withdrawal -- whose route targets may be absent --
-// recovers the bridge domain and bd_peer index from this reverse index.
-type evpnMcastKey struct {
-	rd   string
-	etag uint32
+// rt3NLRIKey is the RT3 NLRI identity ({RD, EthernetTag, Originating
+// Router's IP} per RFC 7432 §7.3): the unit that holds one flood
+// reference, however many paths deliver it. Without the originating IP,
+// two legitimate RT3s delivered by one peer would collide on one
+// contribution and a withdraw of one would tear down the other.
+type rt3NLRIKey struct {
+	rd     string
+	etag   uint32
+	origIP string
 }
 
-// evpnMcastState records the BUM flood bd_peer an RT3 installed. Unlike a
-// unicast peer it carries no reference count: one RT3 per remote PE maps to
-// exactly one flood bd_peer.
+// evpnMcastState records one RT3 contribution's resolved view: the bridge
+// domain and SID its NLRI would flood toward. The flood bd_peer itself is
+// owned by the floodPeers ledger and referenced per NLRI via rt3Flood.
 type evpnMcastState struct {
-	bdID  uint16
-	index uint16
-	sid   string
+	bdID uint16
+	sid  string
 	// pe is the advertising PE (the route's next hop), recorded so an
 	// unusable re-advertisement tears the flood peer down only when it
 	// comes from the same PE.
@@ -124,7 +160,18 @@ type evpnMcastState struct {
 type evpnTable struct {
 	peers map[evpnPeerKey]*evpnPeerState
 	fdb   map[evpnFdbKey]evpnFdbState
-	mcast map[evpnMcastKey]evpnMcastState
+	mcast map[rt3NLRIKey]map[bgp.PathSource]evpnMcastState
+	// floodPeers refcounts the flood bd_peer shared per {bd, End.DT2M SID}
+	// -- the RT3 counterpart of peers: one data-plane entry, refs = the
+	// number of NLRIs currently backing it (via rt3Flood, not raw
+	// contributions: an NLRI holds exactly one ref however many sources
+	// deliver it).
+	floodPeers map[evpnPeerKey]*evpnPeerState
+	// rt3Flood records which {bd, SID} each RT3 NLRI's single flood ref is
+	// held on: the representative (contribLess-minimum source)
+	// contribution decides the SID, so two sources' divergent copies of
+	// one NLRI never replicate BUM traffic twice.
+	rt3Flood map[rt3NLRIKey]evpnPeerKey
 	// esMembers maps an ESI to the set of member PE source IPs learned from
 	// RT4 (Ethernet Segment routes), the candidate set for DF election.
 	// Guarded by esMu.
@@ -165,7 +212,9 @@ func newEVPNTable() *evpnTable {
 	return &evpnTable{
 		peers:       make(map[evpnPeerKey]*evpnPeerState),
 		fdb:         make(map[evpnFdbKey]evpnFdbState),
-		mcast:       make(map[evpnMcastKey]evpnMcastState),
+		mcast:       make(map[rt3NLRIKey]map[bgp.PathSource]evpnMcastState),
+		floodPeers:  make(map[evpnPeerKey]*evpnPeerState),
+		rt3Flood:    make(map[rt3NLRIKey]evpnPeerKey),
 		macsByES:    make(map[esMemberKey]map[evpnFdbKey]struct{}),
 		esMembers:   make(map[[bpf.ESILen]byte]map[string]struct{}),
 		esAD:        make(map[esMemberKey]bool),
@@ -177,11 +226,13 @@ func newEVPNTable() *evpnTable {
 	}
 }
 
-
-// releaseIndex drops one reference to key's peer and reports whether the peer
-// is now unreferenced (so the caller deletes the bd_peer).
-func (t *evpnTable) releaseIndex(key evpnPeerKey) (uint16, bool) {
-	st, ok := t.peers[key]
+// releaseIndex drops one reference to key's peer in m and reports whether
+// the peer is now unreferenced (so the caller deletes the bd_peer). The
+// RT3 floodPeers ledger releases through reconcileRT3Flood instead: its
+// final-reference delete carries keep-on-failure and slot-identity
+// semantics this helper deliberately does not know about.
+func releaseIndex(m map[evpnPeerKey]*evpnPeerState, key evpnPeerKey) (uint16, bool) {
+	st, ok := m[key]
 	if !ok {
 		return 0, false
 	}
@@ -189,7 +240,7 @@ func (t *evpnTable) releaseIndex(key evpnPeerKey) (uint16, bool) {
 	if st.refs > 0 {
 		return st.index, false
 	}
-	delete(t.peers, key)
+	delete(m, key)
 	return st.index, true
 }
 
@@ -228,19 +279,21 @@ func isUsableSRv6SID(sid string) bool {
 		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() && !addr.IsMulticast()
 }
 
-func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
+func (a *Applier) applyEVPN(r *bgp.EVPNRoute, src bgp.PathSource, withdraw bool) {
 	a.evpnMu.Lock()
 	defer a.evpnMu.Unlock()
-	a.applyEVPNLocked(r, withdraw)
+	a.applyEVPNLocked(r, src, withdraw)
 }
 
-// applyEVPNLocked dispatches one EVPN route. Caller holds evpnMu.
-func (a *Applier) applyEVPNLocked(r *bgp.EVPNRoute, withdraw bool) {
+// applyEVPNLocked dispatches one EVPN route. Caller holds evpnMu. RT2 and
+// RT3 track per-{NLRI, source} contributions; RT1 and RT4 are still
+// source-blind (their per-source folding is the recorded follow-up stage).
+func (a *Applier) applyEVPNLocked(r *bgp.EVPNRoute, src bgp.PathSource, withdraw bool) {
 	switch r.Type {
 	case bgp.EVPNRouteTypeMACIP:
-		a.applyEVPNMacIP(r, withdraw)
+		a.applyEVPNMacIP(r, src, withdraw)
 	case bgp.EVPNRouteTypeInclusiveMulticast:
-		a.applyEVPNInclusiveMulticast(r, withdraw)
+		a.applyEVPNInclusiveMulticast(r, src, withdraw)
 	case bgp.EVPNRouteTypeEthernetSegment:
 		a.applyEVPNEthernetSegment(r, withdraw)
 	case bgp.EVPNRouteTypeEthernetAD:
@@ -280,9 +333,12 @@ func (a *Applier) applyEVPNEthernetAD(r *bgp.EVPNRoute, withdraw bool) {
 // dedicated goroutine fed by an unbounded queue, so the mgmt loop ListRoutes
 // waits on never blocks on our callback.
 //
-// The snapshot carries every known path per NLRI (best first), so where two
-// peers advertise the same NLRI with different attributes the last replayed
-// path wins -- the same last-write-wins the live stream has.
+// The snapshot carries every known path per NLRI (best first; lister.go
+// emits one event per path). RT2/RT3 record each path as its own {NLRI,
+// source} contribution with a deterministic representative, so replay
+// order does not change the outcome. RT1/RT4 are still source-blind: their
+// values (the PE) agree across sources so the install replay is
+// idempotent, but per-source withdraw safety is the recorded follow-up.
 func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
 	a.evpnMu.Lock()
 	defer a.evpnMu.Unlock()
@@ -293,7 +349,7 @@ func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
 		if ev.Family != bgp.FamilyEVPN || ev.EVPN == nil || ev.IsWithdraw {
 			return
 		}
-		a.applyEVPNLocked(ev.EVPN, false)
+		a.applyEVPNLocked(ev.EVPN, ev.Source, false)
 		n++
 	})
 	if err != nil {
@@ -303,12 +359,12 @@ func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
 	return nil
 }
 
-func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
+func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, src bgp.PathSource, withdraw bool) {
 	if r.MAC == "" {
 		a.logger.Warn("EVPN RT2 has no MAC; skipping", zap.String("rd", r.RD))
 		return
 	}
-	fk := evpnFdbKey{rd: r.RD, etag: r.EthernetTag, mac: r.MAC}
+	fk := evpnFdbKey{rd: r.RD, etag: r.EthernetTag, mac: r.MAC, ip: r.IPAddr, source: src}
 
 	if withdraw {
 		// A withdrawal may carry no route targets, so the bridge domain and
@@ -329,11 +385,13 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 	// tracked NLRI: a BGP UPDATE is an implicit replace, so a MAC learned
 	// from an earlier advertisement must not keep forwarding over a path
 	// the route no longer backs (same rule as the per-EVI A-D applier).
-	// Teardown is confined to the PE that taught us the MAC (the EVPN
-	// next hop survives route reflection unchanged): an unusable claim
-	// from a different PE must not move or clear another PE's entry.
+	// The contribution key carries the delivering path, so teardown is
+	// inherently confined to this path's own contribution -- another
+	// reflector's (or PE's) state lives under a different key. The old
+	// same-next-hop approximation would now WEAKEN the replace rule: a
+	// path whose next hop moved while becoming unusable must still drop.
 	dropTracked := func() {
-		if st, ok := a.evpn.fdb[fk]; ok && st.pe == r.NextHop {
+		if st, ok := a.evpn.fdb[fk]; ok {
 			a.withdrawEVPNMac(fk, st)
 		}
 	}
@@ -371,7 +429,23 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		if prev.peer == pk && prev.bdID == bdID && prev.esi == r.ESI && prev.pe == r.NextHop {
 			return
 		}
-		a.withdrawEVPNMac(fk, prev)
+		if !a.withdrawEVPNMac(fk, prev) {
+			return
+		}
+	}
+
+	// Contribution cap: a peer that negotiated ADD-PATH could mint
+	// unbounded {NLRI, source} contributions onto one {bd, MAC}. An
+	// already-tracked contribution refreshing itself bypasses the cap; a
+	// dropped route installs nothing, so its later withdraw is a no-op,
+	// and it is re-admitted only by its next UPDATE or a replay (the same
+	// trade the vpngroup cap makes).
+	mk := macDPKey{bdID: bdID, mac: mac.String()}
+	if _, tracked := a.evpn.macContribs[mk][fk]; !tracked &&
+		len(a.evpn.macContribs[mk]) >= maxEVPNContribsPerEntry {
+		a.logger.Warn("EVPN RT2 contribution cap reached; dropping route",
+			zap.String("mac", r.MAC), zap.Int("max", maxEVPNContribsPerEntry))
+		return
 	}
 
 	entry, err := a.buildL2HeadendEntry(r.SRv6SID, bdID, true)
@@ -381,7 +455,6 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		return
 	}
 	rsrc := remoteSrcOrLocal(r.RemoteSrc, entry.SrcAddr)
-	var idx uint16
 	if st, tracked := a.evpn.peers[pk]; tracked {
 		// The PE already has a peer in this BD: refresh it in place and
 		// bump the reference count.
@@ -391,7 +464,6 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 			return
 		}
 		st.refs++
-		idx = st.index
 	} else {
 		// Probe-and-create runs inside one critical section: probing here
 		// and creating later would race the operator RPC path onto the
@@ -403,21 +475,37 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 			return
 		}
 		a.evpn.peers[pk] = &evpnPeerState{index: newIdx, refs: 1}
-		idx = newIdx
 	}
 	// A MAC behind an aliased segment points at the segment's ES peer, so
 	// every all-active PE forwards for it; otherwise at the advertising PE's
 	// own peer. The per-PE peer is allocated either way: the RX path needs
 	// its reverse-map entry, and it is the fallback target when aliasing
 	// dissolves.
-	fdbIdx := idx
-	if d := a.evpn.esDests[esDestKey{bdID: bdID, esi: r.ESI}]; d != nil && d.active {
-		fdbIdx = d.peerIdx
+	// Record the contribution first, then program the shared {bd, MAC}
+	// FDB entry through the single representative-driven writer: the
+	// programmed entry is a pure function of the ledgers, so install and
+	// replay order cannot change the outcome, and alias formation /
+	// dissolve reuse the same writer. A non-representative contribution
+	// still allocated its PE's peer above -- the RX path needs the
+	// reverse-map entry, and survivor hand-off falls back to it.
+	st := evpnFdbState{bdID: bdID, mac: mac, peer: pk, esi: r.ESI, pe: r.NextHop}
+	a.evpn.fdb[fk] = st
+	a.indexMACByES(fk, st)
+	if a.evpn.macContribs[mk] == nil {
+		a.evpn.macContribs[mk] = make(map[evpnFdbKey]struct{})
 	}
-	fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: fdbIdx, BdId: bdID, Esi: r.ESI}
-	if err := a.fdbBd.CreateFdb(bdID, mac, fdb); err != nil {
-		a.logger.Error("install EVPN FDB", zap.String("mac", r.MAC), zap.Error(err))
-		if rIdx, gone := a.evpn.releaseIndex(pk); gone {
+	a.evpn.macContribs[mk][fk] = struct{}{}
+	if !a.writeFdbForMac(mk, func(evpnFdbKey, evpnFdbState) bool { return false }) {
+		// Roll the contribution back out: keeping a ledger entry whose
+		// data-plane write failed would leave the withdraw path believing
+		// there is something to hand off.
+		delete(a.evpn.fdb, fk)
+		delete(a.evpn.macContribs[mk], fk)
+		if len(a.evpn.macContribs[mk]) == 0 {
+			delete(a.evpn.macContribs, mk)
+		}
+		a.unindexMACByES(fk, st)
+		if rIdx, gone := releaseIndex(a.evpn.peers, pk); gone {
 			if existed, derr := a.fdbBd.DeleteBdPeer(bdID, rIdx); derr != nil && existed {
 				// Same recovery contract as withdrawEVPNMac: the peer entry
 				// survived the failed rollback, so re-pin the index (refs 0)
@@ -433,14 +521,6 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		}
 		return
 	}
-	st := evpnFdbState{bdID: bdID, mac: mac, peer: pk, esi: r.ESI, pe: r.NextHop}
-	a.evpn.fdb[fk] = st
-	a.indexMACByES(fk, st)
-	mk := macDPKey{bdID: bdID, mac: mac.String()}
-	if a.evpn.macContribs[mk] == nil {
-		a.evpn.macContribs[mk] = make(map[evpnFdbKey]struct{})
-	}
-	a.evpn.macContribs[mk][fk] = struct{}{}
 	a.logger.Info("EVPN MAC installed",
 		zap.String("mac", r.MAC), zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 }
@@ -497,7 +577,12 @@ func (a *Applier) unindexMACByES(fk evpnFdbKey, st evpnFdbState) {
 // last contribution; while others survive it is re-installed from one of
 // them, so a single PE's withdrawal can no longer tear down a MAC the
 // remaining PEs still back. Caller holds evpnMu.
-func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
+// withdrawEVPNMac removes one RT2 contribution and reports whether its
+// ledger entry is gone. false means a map write failed and every ledger
+// was kept for an event-driven retry -- a replacing caller must then abort
+// its own install, or it would overwrite the retained bookkeeping and leak
+// the old contribution's peer reference.
+func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) bool {
 	mk := macDPKey{bdID: st.bdID, mac: st.mac.String()}
 	if sfk, sst, ok := a.survivingContrib(mk, fk); ok {
 		if idx, resolvable := a.fdbTargetIndex(sst); resolvable {
@@ -507,7 +592,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 				// target. Keep every ledger so a later retry can hand off.
 				a.logger.Error("hand EVPN MAC to surviving PE",
 					zap.String("mac", st.mac.String()), zap.Error(err))
-				return
+				return false
 			}
 		} else {
 			// The ledgers disagree (no peer to point at); leave the entry as
@@ -522,7 +607,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 		// the map entry and the peer reference it holds.
 		a.logger.Error("withdraw EVPN MAC",
 			zap.String("mac", st.mac.String()), zap.Error(err))
-		return
+		return false
 	}
 	delete(a.evpn.fdb, fk)
 	if contribs := a.evpn.macContribs[mk]; contribs != nil {
@@ -532,7 +617,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 		}
 	}
 	a.unindexMACByES(fk, st)
-	if idx, gone := a.evpn.releaseIndex(st.peer); gone {
+	if idx, gone := releaseIndex(a.evpn.peers, st.peer); gone {
 		if existed, err := a.fdbBd.DeleteBdPeer(st.bdID, idx); err != nil && existed {
 			// The bd_peer is still in the map but releaseIndex already
 			// dropped it from the ledger. Re-pin the index (refs 0) so a
@@ -550,122 +635,339 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 				zap.Uint16("bd_id", st.bdID), zap.Uint16("index", idx), zap.Error(err))
 		}
 	}
+	return true
 }
 
-// applyEVPNInclusiveMulticast installs (or withdraws) an RT3 Inclusive
-// Multicast route as a BUM flood bd_peer toward the advertising PE's End.DT2M
-// SID. The data-plane flood loop (tc_dispatch_bum_clones) replicates BUM
-// frames to every bd_peer in the bridge domain, so adding the End.DT2M entry
-// here is all the control plane has to do. One RT3 per PE maps to one
-// flood bd_peer; no MAC/refcount bookkeeping is needed.
-func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
-	mk := evpnMcastKey{rd: r.RD, etag: r.EthernetTag}
+// applyEVPNInclusiveMulticast records (or withdraws) one RT3 Inclusive
+// Multicast contribution and reconciles its NLRI's flood state. The
+// data-plane flood loop (tc_dispatch_bum_clones) replicates BUM frames to
+// every bd_peer in the bridge domain, so the control plane's whole job is
+// keeping exactly one flood bd_peer per distinct {bd, End.DT2M SID}: each
+// NLRI holds one reference on its representative's SID (rt3Flood), and
+// the shared peer itself is refcounted in floodPeers.
+// setMcast / deleteMcast maintain the per-NLRI contribution index; the
+// nesting bounds every cap count and representative election to one
+// NLRI's at-most-maxEVPNContribsPerEntry entries instead of scanning the
+// whole ledger per route.
+func (t *evpnTable) setMcast(nk rt3NLRIKey, src bgp.PathSource, st evpnMcastState) {
+	inner := t.mcast[nk]
+	if inner == nil {
+		inner = make(map[bgp.PathSource]evpnMcastState)
+		t.mcast[nk] = inner
+	}
+	inner[src] = st
+}
+
+func (t *evpnTable) deleteMcast(nk rt3NLRIKey, src bgp.PathSource) {
+	inner := t.mcast[nk]
+	delete(inner, src)
+	if len(inner) == 0 {
+		delete(t.mcast, nk)
+	}
+}
+
+func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, src bgp.PathSource, withdraw bool) {
+	nk := rt3NLRIKey{rd: r.RD, etag: r.EthernetTag, origIP: r.IPAddr}
+
+	// removeContribution drops this path's contribution and reconciles the
+	// NLRI's single flood ref; when the reconcile cannot release the old
+	// flood peer (map delete failed with the entry installed) the
+	// contribution is restored, so the ledger keeps tracking the entry for
+	// an event-driven retry -- the pre-existing keep-ledger contract.
+	removeContribution := func() {
+		st, ok := a.evpn.mcast[nk][src]
+		if !ok {
+			return
+		}
+		a.evpn.deleteMcast(nk, src)
+		if releasedOK, _ := a.reconcileRT3Flood(nk); !releasedOK {
+			a.evpn.setMcast(nk, src, st)
+		}
+	}
 
 	if withdraw {
-		// A withdrawal may carry no route targets, so the bridge domain and
-		// bd_peer index come from the reverse index. An unknown withdraw is a
-		// no-op.
-		if st, ok := a.evpn.mcast[mk]; ok {
-			a.withdrawEVPNMcast(mk, st)
-		}
+		// A withdrawal may carry no route targets, so the bridge domain
+		// comes from the reverse index. An unknown withdraw is a no-op.
+		removeContribution()
 		return
 	}
 
-	// Same implicit-replace rule as RT2, confined to the same advertising
-	// PE: an unusable re-advertisement of a tracked NLRI tears the flood
-	// peer down instead of leaving it stale.
-	dropTracked := func() {
-		if st, ok := a.evpn.mcast[mk]; ok && st.pe == r.NextHop {
-			a.withdrawEVPNMcast(mk, st)
-		}
-	}
+	// Same implicit-replace rule as RT2: the contribution key carries the
+	// delivering path, so an unusable re-advertisement tears down exactly
+	// its own contribution.
 	bdID, ok := a.matchEVPNBD(r.RTs)
 	if !ok {
-		dropTracked()
+		removeContribution()
 		a.logger.Warn("EVPN RT3 matches no bridge-domain binding; dropping",
 			zap.String("rd", r.RD), zap.Strings("rts", r.RTs))
 		return
 	}
 	if r.SRv6SID == "" {
-		dropTracked()
-		a.logger.Warn("EVPN RT3 has no SRv6 SID; removing any previous flood peer", zap.String("rd", r.RD))
+		removeContribution()
+		a.logger.Warn("EVPN RT3 has no SRv6 SID; removing any previous flood contribution", zap.String("rd", r.RD))
 		return
 	}
 	// The End.DT2M SID must be a routable IPv6 SID, same guard as RT2.
 	if !isUsableSRv6SID(r.SRv6SID) {
-		dropTracked()
-		a.logger.Warn("EVPN RT3 SID is not a usable IPv6 SID; removing any previous flood peer",
+		removeContribution()
+		a.logger.Warn("EVPN RT3 SID is not a usable IPv6 SID; removing any previous flood contribution",
 			zap.String("rd", r.RD), zap.String("sid", r.SRv6SID))
 		return
 	}
 
-	// Re-advertise: if nothing changed, leave the installed bd_peer untouched.
-	// If the BD or SID moved, tear the old flood peer down before rebuilding
-	// -- and only rebuild if the teardown actually freed the slot, or the
-	// old peer would keep replicating with nothing tracking it.
-	if prev, ok := a.evpn.mcast[mk]; ok {
-		if prev.bdID == bdID && prev.sid == r.SRv6SID {
-			// The forwarding state is unchanged, but the advertising PE may
-			// have moved (a next-hop change with the same SID); refresh the
-			// ledger so a later unusable UPDATE from the current PE still
-			// matches dropTracked's same-PE confinement.
-			if prev.pe != r.NextHop {
-				prev.pe = r.NextHop
-				a.evpn.mcast[mk] = prev
-			}
-			return
+	prev, tracked := a.evpn.mcast[nk][src]
+	if tracked && prev.bdID == bdID && prev.sid == r.SRv6SID {
+		// Forwarding-relevant state unchanged; pe is informational. A
+		// refresh of any contribution is the retry event for a floodless
+		// NLRI (an earlier acquire failed, e.g. a full BD) and for a slot
+		// an operator flush freed underneath the ledger, so reconcile
+		// unconditionally -- the held-and-verified case is one map read.
+		if prev.pe != r.NextHop {
+			prev.pe = r.NextHop
+			a.evpn.setMcast(nk, src, prev)
 		}
-		if !a.withdrawEVPNMcast(mk, prev) {
-			return
-		}
-	}
-
-	entry, err := a.buildL2HeadendEntry(r.SRv6SID, bdID, false)
-	if err != nil {
-		a.logger.Error("build EVPN RT3 headend entry",
-			zap.String("rd", r.RD), zap.Error(err))
+		a.reconcileRT3Flood(nk)
 		return
 	}
-	// The RT3 BUM peer does NOT write bd_peer_reverse_map (writeReverse=false):
-	// that index-less map identifies the remote PE for the End.DT2 RX path
-	// (remote-MAC learning, Local-Bias split-horizon) and must hold the unicast
-	// RT2 (End.DT2U) peer toward the same PE, not this flood peer. remoteSrc is
-	// therefore unused here. Probe-and-create is one critical section for the
-	// same reason as RT2.
-	var noRemoteSrc [bpf.IPv6AddrLen]byte
-	idx, err := a.fdbBd.CreateBdPeerAtFreeIndex(bdID, entry, r.ESI, noRemoteSrc, false)
-	if err != nil {
-		a.logger.Error("install EVPN BUM bd_peer",
-			zap.Uint16("bd_id", bdID), zap.Error(err))
+	if !tracked {
+		// Contribution cap per NLRI: an ADD-PATH peer could otherwise mint
+		// contributions without bound. A dropped route installs nothing,
+		// so its later withdraw is a no-op; re-admission happens on its
+		// next UPDATE or a replay, the same trade the vpngroup cap makes.
+		if len(a.evpn.mcast[nk]) >= maxEVPNContribsPerEntry {
+			a.logger.Warn("EVPN RT3 contribution cap reached; dropping route",
+				zap.String("rd", r.RD), zap.Int("max", maxEVPNContribsPerEntry))
+			return
+		}
+	}
+	a.evpn.setMcast(nk, src, evpnMcastState{bdID: bdID, sid: r.SRv6SID, pe: r.NextHop})
+	releasedOK, acquiredOK := a.reconcileRT3Flood(nk)
+	if !releasedOK {
+		// The reconcile could not release the previously held flood peer:
+		// revert this contribution to its old state (or drop it when new)
+		// so the ledger still matches the data plane and the retry
+		// contract holds.
+		if tracked {
+			a.evpn.setMcast(nk, src, prev)
+		} else {
+			a.evpn.deleteMcast(nk, src)
+		}
 		return
 	}
-	a.evpn.mcast[mk] = evpnMcastState{bdID: bdID, index: idx, sid: r.SRv6SID, pe: r.NextHop}
-	a.logger.Info("EVPN inclusive multicast (BUM) peer installed",
-		zap.String("rd", r.RD), zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
+	if !acquiredOK {
+		if _, held := a.evpn.rt3Flood[nk]; held {
+			// The failure was a repair of the still-held flood ref (the
+			// representative's slot), not this contribution's own
+			// acquire. Keep the contribution: its target stays available
+			// for a later re-election (e.g. the representative
+			// withdraws), and the kept ref retries the repair on any
+			// refresh.
+			return
+		}
+		// The new flood peer could not be installed (e.g. the BD is full):
+		// keep the ledger honest by dropping this contribution -- the old
+		// contract recorded nothing on an install failure -- and let the
+		// remaining contributions re-elect.
+		a.evpn.deleteMcast(nk, src)
+		a.reconcileRT3Flood(nk)
+	}
 }
 
-// withdrawEVPNMcast removes the BUM flood bd_peer recorded for mk and
-// reports whether the ledger entry is gone. On a delete failure with the
-// entry still installed the ledger is kept (false) so a retry can still
-// remove it -- the retry is event-driven (a replacing RT3 or withdraw for
-// the same NLRI; nothing fires on its own, so a permanently departed PE
-// can leave the flood peer until then), and a replacing caller MUST abort
-// on false: overwriting the kept ledger would leave the old forward peer
-// replicating BUM traffic with nothing tracking it. An already-free slot
-// must NOT keep the ledger: that would wedge it forever (every retry
-// keeps failing the same way) until the slot is reused, when the retry
-// would delete an unrelated peer.
-func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) bool {
-	if existed, err := a.fdbBd.DeleteBdPeer(st.bdID, st.index); err != nil && existed {
-		a.logger.Error("delete EVPN BUM bd_peer",
-			zap.Uint16("bd_id", st.bdID), zap.Uint16("index", st.index), zap.Error(err))
-		return false
-	} else if err != nil {
-		a.logger.Error("delete EVPN BUM bd_peer (slot already free)",
-			zap.Uint16("bd_id", st.bdID), zap.Uint16("index", st.index), zap.Error(err))
+// rt3Representative returns the flood target the NLRI's contributions
+// elect: the {bd, SID} of the contribLess-minimum source among them (false
+// when the NLRI has no contributions). One NLRI holds exactly one flood
+// ref however many paths deliver it, so two sources' divergent copies
+// (e.g. one reflector lagging a PE's SID change) never replicate BUM
+// traffic toward both SIDs.
+func (a *Applier) rt3Representative(nk rt3NLRIKey) (evpnPeerKey, bool) {
+	var (
+		best   bgp.PathSource
+		target evpnPeerKey
+		found  bool
+	)
+	for src, st := range a.evpn.mcast[nk] {
+		if !found || pathSourceLess(src, best) {
+			best = src
+			target = evpnPeerKey{bdID: st.bdID, sid: st.sid}
+			found = true
+		}
 	}
-	delete(a.evpn.mcast, mk)
+	return target, found
+}
+
+func pathSourceLess(x, y bgp.PathSource) bool {
+	if c := x.Peer.Compare(y.Peer); c != 0 {
+		return c < 0
+	}
+	return x.PathID < y.PathID
+}
+
+// ensureFloodPeerInstalled re-checks that the ledger's slot for want still
+// holds its SID before the slot is re-referenced: an operator delete or
+// flush can free and re-issue indexes underneath the ledger, and trusting
+// the ledger alone would pile references onto whatever occupies the slot
+// now. A stale slot is repaired in place (fresh index, same state) so
+// every NLRI already referencing want stays consistent. A transient read
+// failure keeps the ledger as-is -- optimistic, matching the pre-check
+// behavior -- and false means the slot is stale and could not be
+// reinstalled.
+func (a *Applier) ensureFloodPeerInstalled(want evpnPeerKey, fs *evpnPeerState) bool {
+	// The slot is compared against the entry exactly as this ledger
+	// installed it, so a different owner's peer that merely shares the
+	// SID (same first segment, other attributes) reads as stale and is
+	// never adopted -- the ledger moves to a fresh slot and leaves the
+	// foreign entry alone. The stored copy, not a rebuild from the
+	// current locator, is the ownership truth: a locator delete/recreate
+	// must not make the ledger disown its own slot.
+	holds, err := a.fdbBd.BdPeerEntryIs(want.bdID, fs.index, &fs.entry)
+	if err != nil {
+		a.logger.Error("verify EVPN BUM bd_peer occupant",
+			zap.Uint16("bd_id", want.bdID), zap.Uint16("index", fs.index), zap.Error(err))
+		return true
+	}
+	if holds {
+		return true
+	}
+	entry, err := a.buildL2HeadendEntry(want.sid, want.bdID, false)
+	if err != nil {
+		a.logger.Error("build EVPN RT3 headend entry",
+			zap.String("sid", want.sid), zap.Error(err))
+		return false
+	}
+	var noRemoteSrc [bpf.IPv6AddrLen]byte
+	var zeroESI [bpf.ESILen]byte
+	idx, err := a.fdbBd.CreateBdPeerAtFreeIndex(want.bdID, entry, zeroESI, noRemoteSrc, false)
+	if err != nil {
+		a.logger.Error("reinstall EVPN BUM bd_peer",
+			zap.Uint16("bd_id", want.bdID), zap.Error(err))
+		return false
+	}
+	a.logger.Warn("EVPN flood peer slot was freed underneath the ledger; reinstalled",
+		zap.Uint16("bd_id", want.bdID), zap.Uint16("old_index", fs.index),
+		zap.Uint16("index", idx), zap.String("sid", want.sid))
+	fs.index = idx
+	fs.entry = *entry
 	return true
+}
+
+// reconcileRT3Flood drives the NLRI's single flood reference to its
+// representative target: release the previously held {bd, SID} (deleting
+// the shared flood bd_peer on the last reference, after verifying the slot
+// still holds this SID -- an operator flush can free and reuse indexes
+// underneath the ledger), then acquire the new one. Release-first keeps
+// the pre-existing move semantics: a brief flood gap over a duplicate
+// window. releasedOK is false only when the release failed with the entry
+// still installed (the caller must then revert its contribution change so
+// the ledger keeps matching the data plane); acquiredOK is false when the
+// wanted flood peer could not be installed.
+func (a *Applier) reconcileRT3Flood(nk rt3NLRIKey) (releasedOK, acquiredOK bool) {
+	want, wantOK := a.rt3Representative(nk)
+	have, haveOK := a.evpn.rt3Flood[nk]
+	if haveOK && wantOK && have == want {
+		if fs, ok := a.evpn.floodPeers[have]; ok {
+			if a.ensureFloodPeerInstalled(have, fs) {
+				return true, true
+			}
+			// The slot was freed underneath the ledger and could not be
+			// reinstalled. Keep the shared state and this NLRI's ref:
+			// refs counts sibling NLRIs on the same {bd, SID}, so
+			// dropping the entry here would strand their references and
+			// let a later recreation undercount them. The next refresh
+			// of any referencing NLRI retries the same repair.
+			return true, false
+		}
+		a.logger.Error("EVPN flood peer ledger missing for tracked RT3",
+			zap.Uint16("bd_id", have.bdID), zap.String("sid", have.sid))
+		delete(a.evpn.rt3Flood, nk)
+		return true, false
+	}
+	if haveOK {
+		fs, ok := a.evpn.floodPeers[have]
+		switch {
+		case ok && fs.refs > 1:
+			fs.refs--
+		case ok:
+			// Last reference: delete the shared peer, but only if the slot
+			// still holds the entry exactly as this ledger installed it --
+			// checked and deleted in one critical section so an operator
+			// free-and-reuse cannot slip in between, and compared against
+			// the stored installed copy so a foreign same-SID entry on a
+			// reused index is never deleted as ours and a locator change
+			// cannot orphan our own entry. A transient read failure keeps
+			// the ledger (it is an error, never a mismatch).
+			existed, matched, err := a.fdbBd.DeleteBdPeerIfEntry(have.bdID, fs.index, &fs.entry)
+			switch {
+			case err != nil && existed && matched:
+				a.logger.Error("delete EVPN BUM bd_peer",
+					zap.Uint16("bd_id", have.bdID), zap.Uint16("index", fs.index), zap.Error(err))
+				return false, false
+			case err != nil:
+				// Read failure: keep everything for a retry.
+				a.logger.Error("verify EVPN BUM bd_peer occupant",
+					zap.Uint16("bd_id", have.bdID), zap.Uint16("index", fs.index), zap.Error(err))
+				return false, false
+			case existed && !matched:
+				a.logger.Warn("EVPN flood peer slot no longer holds this SID; dropping ledger without delete",
+					zap.Uint16("bd_id", have.bdID), zap.Uint16("index", fs.index), zap.String("sid", have.sid))
+				delete(a.evpn.floodPeers, have)
+			default:
+				delete(a.evpn.floodPeers, have)
+			}
+		default:
+			a.logger.Error("EVPN flood peer ledger missing for tracked RT3",
+				zap.Uint16("bd_id", have.bdID), zap.String("sid", have.sid))
+		}
+		delete(a.evpn.rt3Flood, nk)
+	}
+	if !wantOK {
+		return true, true
+	}
+	if fs, ok := a.evpn.floodPeers[want]; ok {
+		// The reference cap guards the shared peer's fan-in (distinct
+		// NLRIs anycasting one SID are as attacker-mintable as the
+		// per-NLRI contributions) and sits directly before the refs
+		// increment so every acquire path -- admission, withdraw-driven
+		// re-election, refresh -- hits the same judgment.
+		if fs.refs >= maxEVPNContribsPerEntry {
+			a.logger.Warn("EVPN RT3 flood reference cap reached; leaving the NLRI floodless",
+				zap.Uint16("bd_id", want.bdID), zap.String("sid", want.sid), zap.Int("max", maxEVPNContribsPerEntry))
+			return true, false
+		}
+		if !a.ensureFloodPeerInstalled(want, fs) {
+			// Repair failed: leave the shared state for the NLRIs already
+			// referencing it (their next refresh retries the repair) and
+			// report the acquire failure without taking a ref.
+			return true, false
+		}
+		fs.refs++
+		a.evpn.rt3Flood[nk] = want
+		return true, true
+	}
+	entry, err := a.buildL2HeadendEntry(want.sid, want.bdID, false)
+	if err != nil {
+		a.logger.Error("build EVPN RT3 headend entry",
+			zap.String("sid", want.sid), zap.Error(err))
+		return true, false
+	}
+	// The RT3 BUM peer does NOT write bd_peer_reverse_map (writeReverse=
+	// false): that index-less map identifies the remote PE for the End.DT2
+	// RX path (remote-MAC learning, Local-Bias split-horizon) and must
+	// hold the unicast RT2 (End.DT2U) peer toward the same PE, not this
+	// flood peer. remoteSrc is therefore unused here. Probe-and-create is
+	// one critical section for the same reason as RT2.
+	var noRemoteSrc [bpf.IPv6AddrLen]byte
+	var zeroESI [bpf.ESILen]byte
+	idx, err := a.fdbBd.CreateBdPeerAtFreeIndex(want.bdID, entry, zeroESI, noRemoteSrc, false)
+	if err != nil {
+		a.logger.Error("install EVPN BUM bd_peer",
+			zap.Uint16("bd_id", want.bdID), zap.Error(err))
+		return true, false
+	}
+	a.evpn.floodPeers[want] = &evpnPeerState{index: idx, refs: 1, entry: *entry}
+	a.evpn.rt3Flood[nk] = want
+	a.logger.Info("EVPN inclusive multicast (BUM) peer installed",
+		zap.Uint16("bd_id", want.bdID), zap.String("sid", want.sid))
+	return true, true
 }
 
 // applyEVPNEthernetSegment records (or removes) a remote PE's membership in an

@@ -106,6 +106,26 @@ func (f *fakeHeadend) CreateBdPeerAtFreeIndex(bdID uint16, e *bpf.HeadendEntry, 
 	return idx, f.CreateBdPeer(bdID, idx, e, esi, remoteSrc, writeReverse)
 }
 
+func (f *fakeHeadend) BdPeerEntryIs(bdID, index uint16, want *bpf.HeadendEntry) (bool, error) {
+	e, ok := f.bdPeers[bdPeerKey{bdID, index}]
+	if !ok {
+		return false, nil
+	}
+	return *e == *want, nil
+}
+
+func (f *fakeHeadend) DeleteBdPeerIfEntry(bdID, index uint16, want *bpf.HeadendEntry) (bool, bool, error) {
+	e, ok := f.bdPeers[bdPeerKey{bdID, index}]
+	if !ok {
+		return false, false, nil
+	}
+	if *e != *want {
+		return true, false, nil
+	}
+	existed, err := f.DeleteBdPeer(bdID, index)
+	return existed, true, err
+}
+
 func (f *fakeHeadend) DeleteBdPeer(bdID, index uint16) (bool, error) {
 	// Real semantics: existed reports forward-map occupancy, and an error is
 	// always paired with the occupancy the caller's ledger must keep.
