@@ -21,10 +21,23 @@ type LocatorServer struct {
 	// under its own lock so a concurrent SidFunctionCreate cannot take one
 	// in between. nil falls back to a plain Manager.Add.
 	add func(*locator.Locator) error
+	// del removes a locator. SidFunctionService supplies a version that
+	// also refuses (unless forced) while a uN/uT-shaped SID entry uses the
+	// locator's own prefix as its trigger -- such entries hold no
+	// allocation binding, so Manager.Delete alone cannot see them. nil
+	// falls back to a plain Manager.Delete.
+	del func(name string, force bool) error
 }
 
-func NewLocatorServer(mgr *locator.Manager, add func(*locator.Locator) error) *LocatorServer {
-	return &LocatorServer{mgr: mgr, add: add}
+func NewLocatorServer(mgr *locator.Manager, add func(*locator.Locator) error, del func(string, bool) error) *LocatorServer {
+	return &LocatorServer{mgr: mgr, add: add, del: del}
+}
+
+func (s *LocatorServer) deleteLocator(name string, force bool) error {
+	if s.del != nil {
+		return s.del(name, force)
+	}
+	return s.mgr.Delete(name, force)
 }
 
 func (s *LocatorServer) addLocator(loc *locator.Locator) error {
@@ -58,7 +71,10 @@ func (s *LocatorServer) LocatorCreate(
 			})
 			continue
 		}
-		resp.Created = append(resp.Created, in)
+		// Echo the STORED locator, not the request: Manager.Add normalizes
+		// host bits out of the prefix, and the response must match what
+		// Get/List and locator_ref will actually see.
+		resp.Created = append(resp.Created, locatorToProto(&loc))
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -73,7 +89,7 @@ func (s *LocatorServer) LocatorDelete(
 	}
 	force := req.Msg.GetForce()
 	for _, name := range req.Msg.Names {
-		if err := s.mgr.Delete(name, force); err != nil {
+		if err := s.deleteLocator(name, force); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: name,
 				Reason:        err.Error(),

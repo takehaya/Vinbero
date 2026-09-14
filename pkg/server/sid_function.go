@@ -127,13 +127,14 @@ func (s *SidFunctionServer) SidFunctionCreate(
 // claimed at the top is returned to the pool on any downstream failure,
 // removing the need for hand-mirrored rollback calls at each error path.
 func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error {
-	if err := s.resolveLocatorRef(sidFunc); err != nil {
+	releaseLocatorSID, err := s.resolveLocatorRef(sidFunc)
+	if err != nil {
 		return err
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			s.rollbackLocatorRef(sidFunc)
+			releaseLocatorSID()
 		}
 	}()
 
@@ -143,8 +144,13 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 	}
 
 	// A uA entry consumes a function CSID out of its locator just like a
-	// service SID does, so claim it from the same allocator.
-	releaseUsidFn, err := s.claimUsidFunction(sidFunc)
+	// service SID does, so claim it from the same allocator. A locator_ref
+	// entry's allocation in resolveLocatorRef IS that claim; claiming again
+	// would collide with itself.
+	releaseUsidFn := func() {}
+	if sidFunc.GetLocatorRef() == nil {
+		releaseUsidFn, err = s.claimUsidFunction(sidFunc)
+	}
 	if err != nil {
 		return err
 	}
@@ -250,45 +256,131 @@ func (s *SidFunctionServer) createOneSidFunction(sidFunc *v1.SidFunction) error 
 	return nil
 }
 
-// resolveLocatorRef materializes a SID prefix from sidFunc.LocatorRef.
-// When the request did not include a locator_ref the function still
-// validates that trigger_prefix is set; an entirely empty SidFunction
-// is rejected here so the missing-prefix error is reported with locator
-// context.
+// resolveLocatorRef materializes a SID prefix from sidFunc.LocatorRef and
+// returns the rollback that undoes whatever it allocated. The shape is
+// action-dependent:
 //
-// Returning a connect.Error signals a server-config problem the caller
-// should bubble up as the RPC status code (FailedPrecondition for an
-// unwired LocatorService); plain errors are per-entry validation
-// failures.
-func (s *SidFunctionServer) resolveLocatorRef(sidFunc *v1.SidFunction) error {
+//   - classic actions: mint a full 128-bit service SID, materialized as a
+//     /128 trigger_prefix (works for both locator behaviors; a uSID
+//     locator's zero-padded /128 is exactly the terminal-uDT/uDX form)
+//   - uN / uT: the uSID locator's own prefix (block + node, e.g. /48).
+//     Nothing is allocated -- the locator prefix IS the trigger.
+//   - uA and the /64-shaped REPLACE behaviors: mint a function CSID from
+//     the uSID locator and materialize block + node + function as a /64.
+//     The allocation doubles as the uSID claim, so claimUsidFunction is
+//     skipped for locator_ref entries.
+func (s *SidFunctionServer) resolveLocatorRef(sidFunc *v1.SidFunction) (func(), error) {
+	noop := func() {}
 	ref := sidFunc.GetLocatorRef()
 	if ref == nil {
 		if sidFunc.GetTriggerPrefix() == "" {
-			return fmt.Errorf("either trigger_prefix or locator_ref must be set")
+			return noop, fmt.Errorf("either trigger_prefix or locator_ref must be set")
 		}
-		return nil
+		return noop, nil
 	}
 	if s.locatorMgr == nil {
-		return connect.NewError(connect.CodeFailedPrecondition,
+		return noop, connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("locator_ref requires LocatorService to be wired up"))
 	}
 	if sidFunc.GetTriggerPrefix() != "" {
-		return fmt.Errorf("locator_ref and trigger_prefix are mutually exclusive")
+		return noop, fmt.Errorf("locator_ref and trigger_prefix are mutually exclusive")
 	}
 	var requested *uint32
 	if ref.Function != nil {
 		v := ref.GetFunction()
 		requested = &v
 	}
+
+	action := v1.Srv6LocalAction(sidFunc.Action)
+	usidShaped := func() (locator.Locator, error) {
+		loc, ok := s.locatorMgr.Get(ref.GetName())
+		if !ok {
+			return locator.Locator{}, fmt.Errorf("locator %q: %w", ref.GetName(), locator.ErrLocatorNotFound)
+		}
+		if loc.Behavior != locator.BehaviorUSID {
+			return locator.Locator{}, fmt.Errorf("locator %q: %s from locator_ref needs a usid locator; a classic locator's SIDs are /128 service SIDs", ref.GetName(), action)
+		}
+		return loc, nil
+	}
+	switch action {
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS:
+		loc, err := usidShaped()
+		if err != nil {
+			return noop, err
+		}
+		if requested != nil {
+			return noop, fmt.Errorf("uN/uT/End.LBS carry no function CSID; locator_ref.function is not applicable")
+		}
+		// Validate guarantees /48 shape and a non-zero node CSID.
+		sidFunc.TriggerPrefix = loc.Prefix.String()
+		return noop, nil
+
+	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE:
+		loc, err := usidShaped()
+		if err != nil {
+			return noop, err
+		}
+		if action != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA &&
+			action != v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS {
+			// An F3216 locator can only mint a 32-bit C-SID (node +
+			// function = bits [32..64)); a 16-bit C-SID at block 32 is the
+			// node field, which the locator prefix already fixes.
+			if sidFunc.CsidLen != nil && *sidFunc.CsidLen != 32 {
+				return noop, fmt.Errorf("locator_ref REPLACE-CSID mints csid_len 32 only (got %d)", *sidFunc.CsidLen)
+			}
+			if sidFunc.UsidBlockLen != nil && *sidFunc.UsidBlockLen != uint32(loc.BlockLen) {
+				return noop, fmt.Errorf("usid_block_len %d contradicts locator %q (block %d)", *sidFunc.UsidBlockLen, ref.GetName(), loc.BlockLen)
+			}
+			if sidFunc.UsidBlockLen == nil {
+				bl := uint32(loc.BlockLen)
+				sidFunc.UsidBlockLen = &bl
+			}
+		}
+		prefixBits := int(loc.BlockLen) + int(loc.NodeLen) + int(loc.FunctionLen)
+		sid, _, err := s.locatorMgr.AllocateSID(ref.GetName(), requested)
+		if err != nil {
+			// SidFunctionCreate is an upsert: a pinned function whose CSID
+			// is already held by this very entry re-resolves to the same
+			// prefix without allocating (and without a rollback that would
+			// release the live entry's claim). Only a definite in-use
+			// collision qualifies -- any other allocation error (a raced
+			// forced locator delete, a lookup failure) must surface rather
+			// than masquerade as a successful upsert.
+			if requested != nil && errors.Is(err, locator.ErrFunctionInUse) {
+				reSid, berr := loc.BuildSID(*requested)
+				if berr == nil {
+					prefix := netip.PrefixFrom(reSid, prefixBits).String()
+					if ours, oerr := s.usidClaimIsOurs(prefix); oerr != nil {
+						return noop, oerr
+					} else if ours {
+						sidFunc.TriggerPrefix = prefix
+						return noop, nil
+					}
+				}
+			}
+			return noop, fmt.Errorf("locator %q: %w", ref.GetName(), err)
+		}
+		sidFunc.TriggerPrefix = netip.PrefixFrom(sid, prefixBits).String()
+		return func() { s.locatorMgr.ReleaseSID(sid) }, nil
+	}
+
 	sid, _, err := s.locatorMgr.AllocateSID(ref.GetName(), requested)
 	if err != nil {
-		return fmt.Errorf("locator %q: %w", ref.GetName(), err)
+		return noop, fmt.Errorf("locator %q: %w", ref.GetName(), err)
 	}
 	// 128-bit SID materializes as a /128 trigger_prefix so the rest of
 	// the pipeline (sid_function_map LPM key build, audit log, etc.)
 	// works without further locator awareness.
 	sidFunc.TriggerPrefix = sid.String() + "/128"
-	return nil
+	return func() { s.locatorMgr.ReleaseSID(sid) }, nil
 }
 
 // reportLbs rewrites a listed entry whose aux carries a target block as
@@ -546,20 +638,6 @@ func (s *SidFunctionServer) usidClaimOwner(addr netip.Addr) (netip.Prefix, bool,
 	return netip.Prefix{}, false, nil
 }
 
-// rollbackLocatorRef returns the function value to the locator pool when
-// a subsequent step (validation, map write) failed after allocation.
-// Safe to call when no locator_ref was used -- becomes a no-op via
-// Manager.ReleaseSID's unknown-sid short-circuit.
-func (s *SidFunctionServer) rollbackLocatorRef(sidFunc *v1.SidFunction) {
-	if s.locatorMgr == nil || sidFunc.GetLocatorRef() == nil {
-		return
-	}
-	sid, err := parseLocatorSID(sidFunc.GetTriggerPrefix())
-	if err != nil {
-		return
-	}
-	s.locatorMgr.ReleaseSID(sid)
-}
 
 // SidFunctionDelete deletes SID function entries
 func (s *SidFunctionServer) SidFunctionDelete(
@@ -862,9 +940,6 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UN,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT:
-		if sidFunc.LocatorRef != nil {
-			return nil, nil, fmt.Errorf("locator_ref is not supported for uN/uA/uT yet; set trigger_prefix explicitly")
-		}
 		blockLen := uint32(32)
 		if sidFunc.UsidBlockLen != nil {
 			blockLen = *sidFunc.UsidBlockLen
@@ -936,9 +1011,6 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE:
-		if sidFunc.LocatorRef != nil {
-			return nil, nil, fmt.Errorf("locator_ref is not supported for REPLACE-CSID yet; set trigger_prefix explicitly")
-		}
 		isTReplace := action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE
 		if isTReplace {
 			// Reject the mis-scoped field before the VRF checks so the
@@ -1578,6 +1650,41 @@ func (s *SidFunctionServer) buildPolicyEntry(sidFunc *v1.SidFunction) (*bpf.Head
 		SrcAddr:     srcAddr,
 		Segments:    segments,
 	}, nil
+}
+
+// DeleteLocatorGuarded removes a locator, refusing (unless forced) while
+// any installed SID entry uses the locator's own prefix as its trigger --
+// the uN/uT locator_ref shape, which holds no allocation binding for
+// Manager.Delete to trip over. Runs under the SID mutex so a concurrent
+// SidFunctionCreate cannot materialize such an entry in between; /64
+// claims and /128 service SIDs are already bindings and stay Manager
+// territory.
+func (s *SidFunctionServer) DeleteLocatorGuarded(name string, force bool) error {
+	if s.locatorMgr == nil {
+		return errors.New("locator manager is not wired up")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !force && s.mapOps != nil {
+		if loc, ok := s.locatorMgr.Get(name); ok && loc.Behavior == locator.BehaviorUSID {
+			entries, err := s.mapOps.ListSidFunctions()
+			if err != nil {
+				// Fail closed: an unlistable table might hold the
+				// reference, and deleting under it would strand the entry.
+				return fmt.Errorf("list SID functions: %w", err)
+			}
+			// Compare as masked prefix values, not strings: Manager.Add
+			// normalizes stored prefixes, and the parse side must match
+			// regardless of textual form.
+			want := loc.Prefix.Masked()
+			for prefix := range entries {
+				if p, perr := netip.ParsePrefix(prefix); perr == nil && p.Masked() == want {
+					return fmt.Errorf("locator %q is the trigger of SID entry %s; delete the entry first (or force)", name, prefix)
+				}
+			}
+		}
+	}
+	return s.locatorMgr.Delete(name, force)
 }
 
 // AddLocatorAndClaim registers loc and, in the same critical section,

@@ -77,12 +77,12 @@ NEXT-C-SID の実装範囲は次のとおりです。設計と運用上の注意
 - flavor は単一値のみです。SRH ありの container 終端では PSP/USP/USD が classic End への fall-through で適用され、SRH なし (H.Encaps.Red) の終端では USD の outer decap を実装しています (`examples/end-un-usd/`)。End.X 系 (End.X/uA/End.X(REP)) の USD は adjacency へ転送します
 - SID 構造は F3216 (block 32 bit、uSID 16 bit) のみです
 - trigger prefix は uSID 専用にしてください。prefix 内のアドレスは uN / uA / uT SID 自身を除いてすべて container とみなされ、upper-layer protocol に関係なく shift されて転送されます
-- 登録は trigger prefix の明示指定のみで、locator_ref からの登録には未対応です
+- 登録は trigger prefix の明示指定に加えて locator_ref にも対応しています。uN/uT は locator prefix、uA と 32 bit REPLACE-CSID は function CSID を mint した /64 になります
 - L3VPN の BGP 統合を実装しています。uSID locator の経路は RFC 9252 SID Structure 32/16/16/0 付きで advertise され、受信側は uSID 形状の経路を H.Encaps.Red で設置します。FRR 10.2.1 の usid-f3216 との interop は `examples/interop-clab/scenarios/usid-l3vpn-2site/` で検証しています。EVPN の uSID service SID は未着手です
 
 End.LBS / End.XLBS は NEXT-C-SID と REPLACE-CSID の両 flavor で実装しています。API では専用 action として登録し、実体は uN / uA / End(REP) / End.X(REP) の slot に target block を local property として持たせる形で動きます (`examples/end-lbs/` 参照)。
 
-REPLACE-CSID は End / End.X / End.T を実装しています (`SRV6_LOCAL_ACTION_END_REPLACE` / `END_X_REPLACE`、End.T は仮想 action `END_T_REPLACE` を END_REPLACE + aux の VRF binding として格納)。C-SID 長は 32 bit (必須) と 16 bit (任意)、locator block は byte 境界の任意長で、trigger prefix は block + C-SID です。列の最終 C-SID は任意の behavior を block + C-SID の prefix で登録して受けます (`examples/end-replace/`、VRF 束縛は `examples/end-t-replace/` 参照)。End.B6.Encaps への適用は aux レイアウトの都合で見送り、End.BM は MPLS data plane が無いため対象外です。locator / BGP 統合は未着手です。
+REPLACE-CSID は End / End.X / End.T を実装しています (`SRV6_LOCAL_ACTION_END_REPLACE` / `END_X_REPLACE`、End.T は仮想 action `END_T_REPLACE` を END_REPLACE + aux の VRF binding として格納)。C-SID 長は 32 bit (必須) と 16 bit (任意)、locator block は byte 境界の任意長で、trigger prefix は block + C-SID です。列の最終 C-SID は任意の behavior を block + C-SID の prefix で登録して受けます (`examples/end-replace/`、VRF 束縛は `examples/end-t-replace/` 参照)。End.B6.Encaps への適用は aux レイアウトの都合で見送り、End.BM は MPLS data plane が無いため対象外です。BGP 統合は未着手です (locator_ref 登録は対応済み)。
 
 ### Service programming (draft)
 
