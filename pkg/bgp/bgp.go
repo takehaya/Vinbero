@@ -489,7 +489,7 @@ type EVPNRoute struct {
 	ESI         [10]byte
 	EthernetTag uint32
 	MAC         string // RT2: "aa:bb:cc:dd:ee:ff"
-	IPAddr      string // RT2: optional host IP (IRB); "" when MAC-only
+	IPAddr      string // RT2: optional host IP (IRB), "" when MAC-only; RT3: Originating Router's IP (NLRI identity)
 	SRv6SID     string // End.DT2U (RT2, per-EVI RT1) / End.DT2M (RT3, per-ES RT1); "" if none
 	NextHop     string
 	ESImportRT  string // RT4: ES-Import route target ("aa:bb:cc:dd:ee:ff"); "" otherwise
