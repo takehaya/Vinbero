@@ -82,7 +82,7 @@ NEXT-C-SID の実装範囲は次のとおりです。設計と運用上の注意
 
 End.LBS / End.XLBS は NEXT-C-SID と REPLACE-CSID の両 flavor で実装しています。API では専用 action として登録し、実体は uN / uA / End(REP) / End.X(REP) の slot に target block を local property として持たせる形で動きます (`examples/end-lbs/` 参照)。
 
-REPLACE-CSID は End / End.X を実装しています (`SRV6_LOCAL_ACTION_END_REPLACE` / `END_X_REPLACE`)。C-SID 長は 32 bit (必須) と 16 bit (任意)、locator block は byte 境界の任意長で、trigger prefix は block + C-SID です。列の最終 C-SID は任意の behavior を block + C-SID の prefix で登録して受けます (`examples/end-replace/` 参照)。End.T/End.B6/End.BM への REPLACE 適用と locator / BGP 統合は未着手です。
+REPLACE-CSID は End / End.X / End.T を実装しています (`SRV6_LOCAL_ACTION_END_REPLACE` / `END_X_REPLACE`、End.T は仮想 action `END_T_REPLACE` を END_REPLACE + aux の VRF binding として格納)。C-SID 長は 32 bit (必須) と 16 bit (任意)、locator block は byte 境界の任意長で、trigger prefix は block + C-SID です。列の最終 C-SID は任意の behavior を block + C-SID の prefix で登録して受けます (`examples/end-replace/`、VRF 束縛は `examples/end-t-replace/` 参照)。End.B6.Encaps への適用は aux レイアウトの都合で見送り、End.BM は MPLS data plane が無いため対象外です。locator / BGP 統合は未着手です。
 
 ### Service programming (draft)
 

@@ -417,6 +417,7 @@ func usidClaimAction(a v1.Srv6LocalAction) bool {
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_LBS_REPLACE,
 		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_XLBS_REPLACE:
@@ -758,9 +759,10 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UA,
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT,
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE:
 		default:
-			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA / END_UT / END_REPLACE / END_X_REPLACE")
+			return nil, nil, fmt.Errorf("usid_block_len is only valid for END_UN / END_UA / END_UT / END_REPLACE / END_X_REPLACE / END_T_REPLACE")
 		}
 	}
 	if sidFunc.CsidLen != nil {
@@ -769,9 +771,10 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		// END_XLBS_REPLACE into their base actions, so only those appear
 		// here; the message still names the API-level actions.
 		case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE,
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE:
 		default:
-			return nil, nil, fmt.Errorf("csid_len is only valid for END_REPLACE / END_X_REPLACE / END_LBS_REPLACE / END_XLBS_REPLACE")
+			return nil, nil, fmt.Errorf("csid_len is only valid for END_REPLACE / END_X_REPLACE / END_T_REPLACE / END_LBS_REPLACE / END_XLBS_REPLACE")
 		}
 	}
 
@@ -931,12 +934,33 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 		}
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE,
-		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE:
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE,
+		v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE:
 		if sidFunc.LocatorRef != nil {
 			return nil, nil, fmt.Errorf("locator_ref is not supported for REPLACE-CSID yet; set trigger_prefix explicitly")
 		}
-		if sidFunc.VrfName != "" {
-			return nil, nil, fmt.Errorf("END_REPLACE / END_X_REPLACE do not take a vrf_name")
+		isTReplace := action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE
+		if isTReplace {
+			// Reject the mis-scoped field before the VRF checks so the
+			// error names the field even when the named device is not a
+			// VRF (a request wrong in both ways). Note a nonexistent
+			// vrf_name still fails earlier, at the generic ifindex
+			// resolution shared by every action.
+			if sidFunc.Nexthop != "" {
+				return nil, nil, fmt.Errorf("END_REPLACE / END_T_REPLACE do not take a nexthop (use END_X_REPLACE)")
+			}
+			// Same rationale as uT: without a VRF the entry would silently
+			// degrade to End(REP) semantics (ingress-table forwarding), and
+			// a non-VRF interface name would again mean an ingress-context
+			// lookup.
+			if sidFunc.VrfName == "" {
+				return nil, nil, fmt.Errorf("END_T_REPLACE requires a vrf_name")
+			}
+			if err := requireVrfDevice(sidFunc.VrfName); err != nil {
+				return nil, nil, err
+			}
+		} else if sidFunc.VrfName != "" {
+			return nil, nil, fmt.Errorf("END_REPLACE / END_X_REPLACE do not take a vrf_name (use END_T_REPLACE)")
 		}
 		if sidFunc.UsidBlockLen == nil {
 			return nil, nil, fmt.Errorf("REPLACE-CSID requires usid_block_len (the locator block length in bits)")
@@ -980,9 +1004,20 @@ func (s *SidFunctionServer) protoToEntry(sidFunc *v1.SidFunction) (*bpf.SidFunct
 				return nil, nil, err
 			}
 		} else if sidFunc.Nexthop != "" {
-			return nil, nil, fmt.Errorf("END_REPLACE does not take a nexthop (use END_X_REPLACE)")
+			return nil, nil, fmt.Errorf("END_REPLACE / END_T_REPLACE do not take a nexthop (use END_X_REPLACE)")
 		}
-		aux = bpf.NewSidAuxReplace(nexthop, uint8(blockLen/8), uint8(csidLen/8))
+		if isTReplace {
+			// Stored as END_REPLACE with the VRF aliased into the aux
+			// leading bytes, the same property trick as uT and the LBS
+			// actions: the data plane branches on the aux, so no new
+			// tail-call slot is consumed. List reports it back as
+			// END_T_REPLACE from the non-zero leading word (an End(REP)
+			// aux is zero there, and End.X(REP) never reads it as a VRF).
+			aux = bpf.NewSidAuxReplaceVrf(vrfIfindex, uint8(blockLen/8), uint8(csidLen/8))
+			entry.Action = uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE)
+		} else {
+			aux = bpf.NewSidAuxReplace(nexthop, uint8(blockLen/8), uint8(csidLen/8))
+		}
 
 	case v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DX2:
 		// DX2 stores OIF as uint32 in first 4 bytes of aux nexthop
@@ -1415,6 +1450,12 @@ func (s *SidFunctionServer) entryToProto(prefix string, entry *bpf.SidFunctionEn
 				sf.CsidLen = &csidLen
 				if action == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE {
 					sf.Nexthop = bpf.FormatIPv6(nexthop)
+				} else if vrfIfindex := bpf.SidAuxL3VrfData(aux); vrfIfindex != 0 {
+					// A non-zero leading word on an End(REP) aux is the
+					// End.T(REP) VRF binding (End.X(REP)'s leading bytes
+					// are a real nexthop and never reach this branch).
+					sf.Action = v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE
+					sf.VrfName = ifindexToName(vrfIfindex)
 				}
 				if tgt, tgtLen := bpf.SidAuxUsidTargetData(aux); tgtLen != 0 {
 					reportLbs(sf, action, tgt, tgtLen)

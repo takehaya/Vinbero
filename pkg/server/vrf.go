@@ -276,7 +276,12 @@ func findVrfReference(sids SidLister, ifindex uint32) (string, error) {
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT4,
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT6,
 			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_DT46,
-			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT:
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_UT,
+			// End.T(REP) is stored as END_REPLACE with the VRF in the aux
+			// leading word; a plain End(REP) is zero there and matches no
+			// real ifindex. END_X_REPLACE is excluded: its leading bytes
+			// are a nexthop.
+			v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE:
 		default:
 			continue
 		}

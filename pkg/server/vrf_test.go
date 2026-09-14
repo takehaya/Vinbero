@@ -537,6 +537,14 @@ func TestVrfServer_DeleteRefusals(t *testing.T) {
 		t.Fatalf("delete with uT SID ref: want refusal, got %+v", m)
 	}
 
+	// 3a'. An End.T(REP) SID (stored as END_REPLACE with the VRF in the
+	// aux leading word) referencing the ifindex also refuses.
+	s.sids = &fakeSidTable{refs: map[string]uint32{"fd00:aabb:ccdd:1111:2222::/80": created.Device.Ifindex},
+		action: uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE)}
+	if m := del(); len(m.Errors) != 1 {
+		t.Fatalf("delete with End.T(REP) SID ref: want refusal, got %+v", m)
+	}
+
 	// 3b. An unreadable aux fails closed: the reference check cannot prove
 	// the VRF is unreferenced, so the delete is refused (not treated as
 	// "no reference").
