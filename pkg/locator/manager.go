@@ -61,6 +61,11 @@ func (m *Manager) Add(loc *Locator) error {
 	if err := loc.Validate(); err != nil {
 		return err
 	}
+	// Normalize away host bits: fd00:a::1/48 and fd00:a::/48 must be one
+	// locator, not two SID-colliding ones, and every consumer that
+	// compares or derives from the prefix (BuildSID, the SID-side
+	// delete guard, FindByContaining) assumes the masked form.
+	loc.Prefix = loc.Prefix.Masked()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.entries[loc.Name]; ok {

@@ -112,11 +112,21 @@ type SidFunction struct {
 	// Allocate the SID from a registered locator pool. Mutually exclusive
 	// with trigger_prefix: requests that set both fields are rejected with
 	// a per-entry error, and requests that set neither are likewise
-	// rejected at the SidFunctionCreate boundary. When locator_ref alone
-	// is set the server builds the SID from locator.prefix +
-	// locator_ref.function and materializes the result back into
-	// trigger_prefix, so List / Get see the same /128 prefix regardless of
-	// how the entry was originally created.
+	// rejected at the SidFunctionCreate boundary. The materialized
+	// trigger_prefix (which List / Get report regardless of how the entry
+	// was created) is action-dependent: classic actions mint a full /128
+	// service SID from locator.prefix + locator_ref.function; uN / uT take
+	// the uSID locator's own prefix (no function -- locator_ref.function is
+	// rejected); uA and the 32-bit REPLACE-CSID behaviors mint a function
+	// CSID and materialize block + node + function as a /64 (the allocation
+	// doubles as the uSID claim). uN/uA/uT, the LBS aliases, and the
+	// REPLACE behaviors require a usid-behavior locator. For the
+	// function-minting actions only (uA, End.XLBS, and the REPLACE
+	// behaviors) with locator_ref.function omitted, every create mints a
+	// fresh function -- a retried request is NOT idempotent and installs a
+	// second SID; pin the function (or reuse the returned trigger_prefix)
+	// for idempotent upserts. uN/uT/End.LBS always resolve to the locator
+	// prefix itself, so their retries are ordinary upserts of one key.
 	LocatorRef *LocatorRef `protobuf:"bytes,21,opt,name=locator_ref,json=locatorRef,proto3,oneof" json:"locator_ref,omitempty"`
 	// End.M.GTP4.E: extract the GTP-U outer IPv4 source from the outer IPv6
 	// source address at this bit position (0..96, RFC 9433 §6.6) instead of

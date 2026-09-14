@@ -219,7 +219,7 @@ BGP へ渡す SID Structure sub-sub-TLV は LBL/LNL/FL/AL = 32/16/16/0 です。
 
 ### SID function の登録
 
-uN / uA / uT は `trigger_prefix` の明示指定のみを受け付けます。`locator_ref` からの登録には未対応です。
+uN / uA / uT、LBS 系、REPLACE 系は `trigger_prefix` の明示指定に加えて `locator_ref` からの登録に対応しています。materialize の形は action 依存です。uN / uT / End.LBS は uSID locator の prefix そのもの (/48、function は割り当てず `locator_ref.function` は拒否)、uA / End.XLBS と 32 bit C-SID の REPLACE 系 (LBS alias 含む) は function CSID を mint して block + node + function の /64 にします。function を省略した auto mint は再実行のたびに別 CSID を掘るので冪等ではありません (upsert したいときは function を pin します)。加えて uSID locator は、自分の prefix を trigger にした entry が残っている間は force なしで削除できません (この形は allocation binding を持たないため、SID 側の guard で塞ぎます)。この割り当てが uSID claim を兼ねるので、locator_ref 登録では claimUsidFunction は走りません (二重確保になるため)。classic locator は uSID 系 action の locator_ref に使えません (/128 の service SID しか mint できないため)。REPLACE 系では `usid_block_len` を locator の block 長から導出し、矛盾する明示値と 16 bit の `csid_len` は拒否します。delete は既存の claim 解放経路がそのまま function を pool に返します。
 
 登録時の検査は次のとおりです。
 
@@ -328,7 +328,6 @@ end-ua の router2 は terminal SID への経路を持たないので、uA が�
 - REPLACE-C-SID の End.B6.Encaps への適用は未対応です。classic B6 の aux は union 先頭に 208 byte の headend_entry を置くため、REPLACE のパラメータを持たせるには aux union の新レイアウトか専用 slot が必要で、具体的な interop 需要が出るまで見送ります。End.BM は SR-MPLS の binding SID で、Vinbero に MPLS data plane 自体が無いため対象外です (classic の End.BM も未実装)
 - NEXT-C-SID は 32 bit uSID と F3216 以外の SID 構造に対応していません。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります (REPLACE-C-SID は block 可変・C-SID 32/16 に対応済みです)
 - SR Policy の transport list を container へ自動 packing する処理はありません
-- `locator_ref` からの uN / uA / uT / REPLACE 登録はできません
 - flavor は単一値のみで、PSP+USP のような組合せは classic と同じく未対応です
 - End.X 系の USP は classic 実装と同じく pop 後を DA ベースの FIB で転送します。RFC の厳密な読みでは adjacency 転送であり、ここは既知の差分です
 - SRH なし終端の USD は nexthdr が直接 IPIP / IPv6 の場合だけ decap します。Hop-by-Hop や Destination Options を挟むパケットは既存 dispatcher 全体の方針どおり extension header 非対応で、kernel への local delivery に fall through します (DA は自ノードの SID なので情報漏洩にはなりません)

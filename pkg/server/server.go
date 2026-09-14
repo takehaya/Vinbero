@@ -174,7 +174,7 @@ func (s *Server) Setup() {
 	// newly added locators to reconcile uA claims against.
 	sidFunctionServer := NewSidFunctionServer(s.mapOps, pluginServer, s.locatorMgr, s.logger.Named("sid_function"))
 
-	locatorServer := NewLocatorServer(s.locatorMgr, sidFunctionServer.AddLocatorAndClaim)
+	locatorServer := NewLocatorServer(s.locatorMgr, sidFunctionServer.AddLocatorAndClaim, sidFunctionServer.DeleteLocatorGuarded)
 	path, handler := vinberov1connect.NewLocatorServiceHandler(locatorServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered LocatorService", zap.String("path", path))
