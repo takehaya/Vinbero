@@ -77,6 +77,7 @@ sudo ./teardown.sh # クリーンアップ
 | `end-udt4/` | uDT4 | container 最終 uSID の End.DT4 (zero-padded /128 の LPM 優先) |
 | `end-un-usd/` | uN + USD | SRH なし container 終端での outer decap |
 | `end-replace/` | End(REP) | REPLACE-CSID の container walk (RFC 9800、32bit C-SID) |
+| `end-t-replace/` | End.T(REP) | REPLACE-CSID の walk を VRF table で解決 (main table blackhole で構造証明) |
 | `end-lbs/` | End.LBS | locator block swap で C-SID 列を別 block へ載せ替え (RFC 9800 Sec.7) |
 
 ### Headend Functions

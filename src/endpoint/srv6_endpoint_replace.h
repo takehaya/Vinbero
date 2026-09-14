@@ -265,12 +265,20 @@ static __always_inline int process_end_replace_core(
                 if (is_endx)
                     return endpoint_handle_usd_nexthop(ctx, ip6h, srh,
                                                        aux->usid.nexthop, l3_offset);
+                // End.T(REP) decaps into its VRF table; a plain End(REP)
+                // aux has a zero leading word and falls back to ingress.
                 return endpoint_handle_usd(ctx, ip6h, srh, entry,
-                                           ctx->ingress_ifindex, l3_offset);
+                                           aux_vrf_or_ingress_ifindex(aux, ctx),
+                                           l3_offset);
             }
+            // USP strips the SRH and FIB-forwards the exposed DA: like
+            // classic End.T, the bound VRF is the lookup context for
+            // End.T(REP) (zero leading aux word falls back to ingress).
             if (entry->flavor == SRV6_LOCAL_FLAVOR_USP)
                 return endpoint_handle_usp(ctx, ip6h, srh, entry,
-                                           ctx->ingress_ifindex, l3_offset);
+                                           is_endx ? ctx->ingress_ifindex
+                                                   : aux_vrf_or_ingress_ifindex(aux, ctx),
+                                           l3_offset);
             return XDP_PASS;
         }
     }
@@ -315,8 +323,14 @@ static __always_inline int process_end_replace_core(
             if (!is_endx &&
                 replace_local_redispatch(ctx, !stripped, l3_offset) != 0)
                 return XDP_DROP;
+            // End.X(REP) keeps the ingress context: its aux leading bytes
+            // are a real nexthop, not a VRF ifindex. End(REP)/End.T(REP)
+            // resolve through aux_vrf_or_ingress_ifindex -- zero for a
+            // plain End(REP), the bound VRF for End.T(REP).
             return usid_forward(ctx, is_endx ? aux->usid.nexthop : NULL,
-                                l3_offset, ctx->ingress_ifindex);
+                                l3_offset,
+                                is_endx ? ctx->ingress_ifindex
+                                        : aux_vrf_or_ingress_ifindex(aux, ctx));
         }
         // R19-R21: replace the C-SID part of the DA in place (or, for
         // End.LBS/End.XLBS, compose it on the target block).
@@ -366,8 +380,11 @@ static __always_inline int process_end_replace_core(
         return XDP_DROP;
     if (!is_endx && replace_local_redispatch(ctx, r == 0, l3_offset) != 0)
         return XDP_DROP;
+    // Same VRF resolution as the R06-R10 branch above.
     return usid_forward(ctx, is_endx ? aux->usid.nexthop : NULL,
-                        l3_offset, ctx->ingress_ifindex);
+                        l3_offset,
+                        is_endx ? ctx->ingress_ifindex
+                                : aux_vrf_or_ingress_ifindex(aux, ctx));
 }
 
 #endif // SRV6_ENDPOINT_REPLACE_H

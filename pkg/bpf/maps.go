@@ -842,6 +842,18 @@ func NewSidAuxReplace(nexthop [IPv6AddrLen]uint8, blockLenBytes, csidLenBytes ui
 	return entry
 }
 
+// NewSidAuxReplaceVrf creates an aux entry for End.T with REPLACE-CSID:
+// the VRF ifindex in the leading bytes (the l3vrf view, same aliasing as
+// uT) plus the REPLACE geometry at offsets 16/17 (the usid view). The
+// nexthop slot the ifindex aliases into stays otherwise zero -- the data
+// plane only reads it as a nexthop for End.X(REP).
+func NewSidAuxReplaceVrf(vrfIfindex uint32, blockLenBytes, csidLenBytes uint8) *SidAuxEntry {
+	entry := NewSidAuxUsidVrf(vrfIfindex, blockLenBytes)
+	raw := (*[20]byte)(unsafe.Pointer(entry))
+	raw[17] = csidLenBytes
+	return entry
+}
+
 // NewSidAuxUsidTarget adds an End.LBS/End.XLBS target block (RFC 9800
 // Sec.7) to a usid-variant aux entry: the 16-byte block (bits beyond the
 // length are zero) at offset 20 and its byte-aligned length at offset 36.

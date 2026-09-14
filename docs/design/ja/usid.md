@@ -250,9 +250,9 @@ vinbero sid create --trigger-prefix fd00:aaaa:b002:d004::/128 --action END_DT4 -
 vinbero sid create --trigger-prefix fd00:aaaa:b002::/48 --action END_UN --flavor USD
 ```
 
-`--usid-block-len` は SID 構造を明示する場合に使います。NEXT-C-SID 系 (uN/uA/uT) では既定が 32 で、32 以外を受け付けません。REPLACE-C-SID 系 (END_REPLACE / END_X_REPLACE) では必須で、byte 境界の任意長を取ります (`--csid-len` は 32 既定 / 16)。
+`--usid-block-len` は SID 構造を明示する場合に使います。NEXT-C-SID 系 (uN/uA/uT) では既定が 32 で、32 以外を受け付けません。REPLACE-C-SID 系 (END_REPLACE / END_X_REPLACE / END_T_REPLACE) では必須で、byte 境界の任意長を取ります (`--csid-len` は 32 既定 / 16)。
 
-## REPLACE-C-SID (End / End.X)
+## REPLACE-C-SID (End / End.X / End.T)
 
 RFC 9800 Sec.4.2 の REPLACE-CSID flavor を `SRV6_LOCAL_ACTION_END_REPLACE` (29) と `END_X_REPLACE` (30) として実装しています。NEXT-C-SID が DA の中で shift するのに対し、REPLACE は packed container を SRH の segment list に置き、DA の Argument 下位 bit (LNFL=32 なら 2 bit、16 なら 3 bit) が container 内の index を運びます。endpoint は container を歩く間も跨ぐときも DA の C-SID 部分 (bits [LBL..LBL+LNFL-1]) だけを書き換えます (跨ぎでは index を K-1 に戻すだけです)。次の 128 bit SID を丸ごとロードするのは、container が zero C-SID で早期に終わったとき (R06-R10) だけで、そのとき segment list の次の entry は packed container でなく完全な SID です (RFC の R01-R21)。
 
@@ -263,6 +263,7 @@ RFC 9800 Sec.4.2 の REPLACE-CSID flavor を `SRV6_LOCAL_ACTION_END_REPLACE` (29
 - 転送は uN と同じ `usid_forward` です。End(REP) は置換後 DA の FIB (NO_NEIGH は kernel 渡し)、End.X(REP) は aux nexthop (fail-closed)
 - End.X 系 (End.X / uA / End.X(REP)) の USD は SRH の有無に関わらず adjacency J へ転送します (RFC 8986 Sec.4.16.3)。SRH ありは `endpoint_handle_usd_nexthop`、SRH なしは `nosrh_decap_and_adj` で、どちらも外側パケットが残っているうちに adjacency を解決し、未解決なら decap せず drop します。露出する inner パケットの Hop Limit / TTL は redirect 前にここで 1 消費します (redirect は kernel の転送経路を通らないため)。FIB ベースの既存 decap 経路 (End.DT4 等) は inner の寿命を消費しない既存挙動のままで、これは別途の課題です
 - REPLACE には uN のような同一ノード連続 C-SID の loop 内消費はありません。shift でなく FIB 転送で次の C-SID に進む方式のため、連続する C-SID は異なるノードに置く前提です (RFC の想定どおり)
+- End.T(REP) は API の仮想 action `END_T_REPLACE` (104) です。VRF binding が及ぶのはこの entry 自身の advance と USD decap の lookup で、advance 先が自ノードの別 local SID だったときの re-dispatch には引き継ぎません。着地した entry の挙動はその entry 自身の登録が決めます (VRF を通したければ次の C-SID も END_T_REPLACE で登録します)。これは uT の loop 内 re-dispatch と同じ意図設計で、攻撃者はその local SID を /128 で直撃できるため VRF の迂回にはなりません。また VRF 束縛の実体は uT と同じく bpf_fib_lookup への VRF ifindex 指定で、kernel の l3mdev rule を経由する table 選択です (RFC の厳密な per-table lookup そのものではない点も uT と共通です)。uT や LBS と同じ property 方式で、実体は END_REPLACE + aux 先頭 4 byte への VRF ifindex の aliasing として格納し、新しい tail-call slot を消費しません。data plane は End(REP) の 2 つの転送点と USD decap の FIB context を `aux_vrf_or_ingress_ifindex` に置き換えるだけで、素の End(REP) は先頭 word が零なので ingress に fallback します (End.X(REP) の先頭 16 byte は実 nexthop なので aliasing の対象外)。vrf_name は必須で実在の VRF device を検証し、List は先頭 word 非零の END_REPLACE entry を END_T_REPLACE + VRF 名として逆引きします (`examples/end-t-replace/` が main table blackhole で VRF lookup を構造証明します)
 
 ICMPv6 を生成しない点 (R03/R14 は silent drop) と、segment list の上限を max_LE でなく `MAX_SEGMENTS` とする点は codebase 全体の方針に合わせています。
 
@@ -324,7 +325,7 @@ end-ua の router2 は terminal SID への経路を持たないので、uA が�
 ## 未対応
 
 - BGP 統合は L3VPN のみです。EVPN の uSID service SID は未対応で、`decodeRemoteSrc` が locator base を仮定している点に手を入れる必要があります
-- REPLACE-C-SID の End.T / End.B6 / End.BM への適用は未対応です
+- REPLACE-C-SID の End.B6.Encaps への適用は未対応です。classic B6 の aux は union 先頭に 208 byte の headend_entry を置くため、REPLACE のパラメータを持たせるには aux union の新レイアウトか専用 slot が必要で、具体的な interop 需要が出るまで見送ります。End.BM は SR-MPLS の binding SID で、Vinbero に MPLS data plane 自体が無いため対象外です (classic の End.BM も未実装)
 - NEXT-C-SID は 32 bit uSID と F3216 以外の SID 構造に対応していません。shift の offset がコンパイル時定数なので、`usid_block_len` を緩めるだけでは足りず `src/endpoint/srv6_endpoint_usid.h` の定数も同時に変える必要があります (REPLACE-C-SID は block 可変・C-SID 32/16 に対応済みです)
 - SR Policy の transport list を container へ自動 packing する処理はありません
 - `locator_ref` からの uN / uA / uT / REPLACE 登録はできません

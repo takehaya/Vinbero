@@ -78,6 +78,7 @@ func (EsiRedundancyMode) EnumDescriptor() ([]byte, []int) {
 // The action field determines which optional fields are relevant:
 //   - End.DT4/DT6/DT46: vrf_name (VRF-aware FIB lookup)
 //   - uT (END_UT): trigger_prefix (/48) + vrf_name (required; shift-and-forward in the VRF table)
+//   - End.T(REP) (END_T_REPLACE): trigger_prefix (block + C-SID) + usid_block_len + vrf_name (required; REPLACE walk in the VRF table)
 //   - End.DT2: bd_id + bridge_name (L2 FDB lookup + bridge flood on miss)
 //   - End.DX2: oif (direct L2 output to specific interface)
 //   - End.DX2V: table_id (VLAN cross-connect table scope)
@@ -97,7 +98,7 @@ type SidFunction struct {
 	ArgSrcOffset   uint32              `protobuf:"varint,7,opt,name=arg_src_offset,json=argSrcOffset,proto3" json:"arg_src_offset,omitempty"`                                 // Bit offset for source in SID Args
 	ArgDstOffset   uint32              `protobuf:"varint,8,opt,name=arg_dst_offset,json=argDstOffset,proto3" json:"arg_dst_offset,omitempty"`                                 // Bit offset for destination in SID Args
 	Oif            uint32              `protobuf:"varint,9,opt,name=oif,proto3" json:"oif,omitempty"`                                                                         // Output interface index (End.DX2: direct L2 output)
-	VrfName        string              `protobuf:"bytes,10,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`                                                  // VRF device name, resolved to an ifindex for the FIB lookup (End.T/DT4/DT6/DT46: optional; uT: required)
+	VrfName        string              `protobuf:"bytes,10,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`                                                  // VRF device name, resolved to an ifindex for the FIB lookup (End.T/DT4/DT6/DT46: optional; uT and END_T_REPLACE: required)
 	BdId           uint32              `protobuf:"varint,11,opt,name=bd_id,json=bdId,proto3" json:"bd_id,omitempty"`                                                          // Bridge Domain ID (End.DT2: FDB scope for MAC learning)
 	BridgeName     string              `protobuf:"bytes,12,opt,name=bridge_name,json=bridgeName,proto3" json:"bridge_name,omitempty"`                                         // Bridge device name (End.DT2: redirect target on FDB miss)
 	Segments       []string            `protobuf:"bytes,13,rep,name=segments,proto3" json:"segments,omitempty"`                                                               // Policy segment list (End.B6/End.B6.Encaps)
@@ -149,13 +150,14 @@ type SidFunction struct {
 	// Only the F3216 structure (32) is supported today; omitted defaults to
 	// 32. The trigger_prefix must cover exactly block + node for uN / uT
 	// (e.g. /48) and block + node + function for uA (e.g. /64); uA reuses
-	// nexthop. For END_REPLACE / END_X_REPLACE this is the REPLACE-CSID
-	// locator block length instead: required, byte-aligned, and
-	// block + csid_len must not exceed 120 bits.
+	// nexthop. For END_REPLACE / END_X_REPLACE / END_T_REPLACE this is the
+	// REPLACE-CSID locator block length instead: required, byte-aligned,
+	// and block + csid_len must not exceed 120 bits.
 	UsidBlockLen *uint32 `protobuf:"varint,29,opt,name=usid_block_len,json=usidBlockLen,proto3,oneof" json:"usid_block_len,omitempty"`
-	// END_REPLACE / END_X_REPLACE (RFC 9800 Sec.4.2): the C-SID length
-	// (LNFL) in bits, 32 (default) or 16. The trigger_prefix must cover
-	// exactly block + C-SID; END_X_REPLACE reuses nexthop.
+	// END_REPLACE / END_X_REPLACE / END_T_REPLACE (RFC 9800 Sec.4.2): the
+	// C-SID length (LNFL) in bits, 32 (default) or 16. The trigger_prefix
+	// must cover exactly block + C-SID; END_X_REPLACE reuses nexthop, and
+	// END_T_REPLACE requires vrf_name (the walk's FIB context).
 	CsidLen *uint32 `protobuf:"varint,30,opt,name=csid_len,json=csidLen,proto3,oneof" json:"csid_len,omitempty"`
 	// END_LBS / END_XLBS / END_LBS_REPLACE / END_XLBS_REPLACE (RFC 9800
 	// Sec.7): the target locator block as an IPv6 prefix (e.g.
