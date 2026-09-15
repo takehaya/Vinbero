@@ -76,3 +76,56 @@ func TestDeliveryIdleRejectsReplayDebtAndReportsSubscription(t *testing.T) {
 		t.Fatal("dead plugin reported idle")
 	}
 }
+
+func TestDeliveryIdleTracksAsynchronousReplayBeforeAndAfterItsProducer(t *testing.T) {
+	m, _ := newTestManager(t, newFakeSource(), newFakeClaims())
+	reg := Registration{Name: "queued-replay", Module: declareModule(t),
+		Capabilities: testCaps(), Scope: testScope()}
+	if err := m.Register(context.Background(), reg); err != nil {
+		t.Fatal(err)
+	}
+	waitDelivered(t, m, reg.Name)
+	produced, release := make(chan struct{}), make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	m.mu.Lock()
+	p := m.plugins[reg.Name]
+	m.launchSnapshotLocked(p, func() {
+		close(produced)
+		<-release
+	})
+	// The replay goroutine cannot acquire m.mu yet. Pending work must
+	// already be visible even though its producer has not started.
+	pending, producing, workerIdle := p.pendingSnapshots, p.snapshotting, p.worker.idle()
+	m.mu.Unlock()
+	if pending != 1 || producing || !workerIdle {
+		t.Fatalf("pending=%d producing=%v workerIdle=%v before producer start", pending, producing, workerIdle)
+	}
+	select {
+	case <-produced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replay producer did not finish")
+	}
+	waitDelivered(t, m, reg.Name)
+	st, _ := m.StatsFor(reg.Name)
+	if st.DeliveryIdle {
+		t.Fatal("asynchronous replay completion still pending, but delivery reported idle")
+	}
+	close(release)
+	released = true
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st, _ = m.StatsFor(reg.Name)
+		if st.DeliveryIdle {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("finished asynchronous replay did not become idle")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

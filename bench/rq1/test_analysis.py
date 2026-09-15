@@ -95,6 +95,18 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(got['negative_receive_delays'], 1)
             self.assertIn('clock_or_schedule_reversal', got['quality_flags'])
 
+    def test_unsent_tail_is_flagged_even_when_successful_sends_have_exact_pps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture(root)
+            schedule = json.loads((root / 'sender-schedule.json').read_text())
+            schedule['duration_ns'] = 1000000000
+            suite.write_json(root / 'sender-schedule.json', schedule)
+            got = analysis.capture_metrics(root)
+            self.assertEqual(got['achieved_pps'], 100000)
+            self.assertEqual(got['unsent_schedule_slots'], 99994)
+            self.assertIn('unsent_schedule_slots', got['quality_flags'])
+
 
 class SummaryTests(unittest.TestCase):
     def setUp(self):

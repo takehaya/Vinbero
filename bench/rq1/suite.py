@@ -112,7 +112,7 @@ def host_info():
 
 def calibration_errors(result, rate):
     errors = []
-    for key in ('lost', 'duplicates', 'unknown', 'negative_delays'):
+    for key in ('lost', 'duplicates', 'unknown', 'negative_delays', 'unsent_schedule_slots'):
         if result[key] != 0:
             errors.append(f'{key}={result[key]}')
     if result['rate'] != rate or result['sent'] < 2 or result['received'] < 2:
@@ -207,8 +207,8 @@ def prepare(args):
     tasks = schedule(2 if args.smoke else args.blocks, 0 if args.smoke else args.warmups,
                      args.seed, args.smoke)
     rate = 10000 if args.smoke else args.rate
-    if not 1 <= rate <= 1000000:
-        raise ValueError('rate must be between 1 and 1000000')
+    if not 2 <= rate <= 1000000:
+        raise ValueError('rate must be between 2 and 1000000 for one-second calibration')
     manifest = {'version': 1, 'kind': 'smoke' if args.smoke else 'performance',
                 'state': 'planned', 'seed': args.seed, 'rate': rate,
                 'affinity': config, 'topology': topology, 'tasks': tasks,

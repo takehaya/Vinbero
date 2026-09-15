@@ -131,6 +131,8 @@ def capture_metrics(directory):
         flags.append('coarse_transition_observation')
     if not rate*.95 <= result['achieved_pps'] <= rate*1.05:
         flags.append('offered_rate_mismatch')
+    if result['unsent_schedule_slots']:
+        flags.append('unsent_schedule_slots')
     result['quality_flags'] = ';'.join(flags)
     return result
 

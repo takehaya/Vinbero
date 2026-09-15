@@ -50,7 +50,7 @@ health と再起動の有無を確認します。初期転送が実際に PE A �
 
 ## 実行する
 
-Linux、Go 1.25.5、sudo、iproute2、ethtool、Python 3、util-linux、GNU coreutils、Git と、kernel の
+Linux、Go 1.25.5、sudo、iproute2、ethtool、Python 3.11 以降、util-linux、GNU coreutils、Git と、kernel の
 VRF / SRv6 / XDP サポートが必要です。`ping6` も必要で、Debian / Ubuntu では `iputils-ping` が
 提供します。Git checkout で実行してください。BPF object と標準 Go WASM example は repository
 の成果物を使います。
@@ -92,8 +92,8 @@ build や graph 作成を避けてください。既存 process を終了する�
 
 suite は最初に loopback で同じ probe を1秒間送受信して校正します。sender と receiver A
 の CPU の集合に校正 process を固定します。既定の100k pps では到着間隔の median が15 µs
-以下、p99 が50 µs 以下、実送信 rate が95k〜105k pps、損失・重複・未知 sequence・
-負の受信遅延が0件であることを要求します。校正値は host の観測能力の確認であり、測定値から
+以下、p99 が50 µs 以下、実送信 rate が95k〜105k pps、未送信の予定 slot・損失・重複・
+未知 sequence・負の受信遅延が0件であることを要求します。校正値は host の観測能力の確認であり、測定値から
 差し引きません。校正失敗後に速い試行だけを選んだり、自動で rate を変更したりしません。
 
 動作確認には次の command を使います。2 block、計6試行、10k pps、共有 CPU で実行し、
@@ -115,6 +115,9 @@ tracked diff、使用ファイルの SHA-256、kernel、CPU topology、governor�
 子が回収できなかった namespace は、その子が作成した記録だけを使って再度回収します。
 失敗・未着手の試行も予定どおりの行として `trials.csv` に残ります。自動再試行や再開はせず、
 原因を解決した後は別の session directory で開始してください。
+
+`--rate` は2〜1,000,000 pps を指定できます。1秒の校正に最低2件の送信が必要なため、
+1 pps は準備前に拒否します。
 
 ## suite の結果を集計する
 
@@ -140,7 +143,7 @@ make bench-rq1-report WORK=/tmp/rq1-report1
 日を跨いだ変動を確認します。
 
 すべての試行が完了した性能測定で、校正と各試行の観測品質が基準を満たした場合だけ区間を
-出します。smoke、失敗、送信 rate や到着間隔に問題がある session には記述統計だけを出します。
+出します。smoke、失敗、未送信の予定 slot、送信 rate や到着間隔に問題がある session には記述統計だけを出します。
 損失そのものは測定対象として保持します。`performance_usable` は転送損失が無い保証ではありません。
 個々の試行では到着間隔の median / p99 / 最大値、新経路を観測する直前の間隔、実送信 pps、
 送信予定からの遅れ、未送信の予定 slot 数も確認します。`old_after_first_new` は、新経路への

@@ -18,7 +18,7 @@ import suite
 def calibrated():
     return dict(rate=100000, sent=100000, received=100000, lost=0, duplicates=0,
                 unknown=0, negative_delays=0, achieved_pps=100000,
-                gap_median_us=10, gap_p99_us=10)
+                gap_median_us=10, gap_p99_us=10, unsent_schedule_slots=0)
 
 
 class AffinityTests(unittest.TestCase):
@@ -96,11 +96,23 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(suite.calibration_errors(calibrated(), 100000), [])
         for field, value in [('lost', 1), ('duplicates', 1), ('unknown', 1),
                              ('negative_delays', 1), ('gap_median_us', 16),
-                             ('gap_p99_us', 51), ('achieved_pps', 94999), ('rate', 10000)]:
+                             ('gap_p99_us', 51), ('achieved_pps', 94999), ('rate', 10000),
+                             ('unsent_schedule_slots', 1)]:
             bad = calibrated()
             bad[field] = value
             with self.subTest(field=field):
                 self.assertTrue(suite.calibration_errors(bad, 100000))
+
+    def test_rate_one_fails_during_planning_before_creating_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = affinity.suggest(shared=True)
+            config['allow_shared_cores'] = False
+            suite.write_json(root / 'affinity.json', config)
+            args = type('Args', (), dict(smoke=False, affinity=root / 'affinity.json',
+                                         blocks=6, warmups=0, seed=1, rate=1, plan=True))()
+            with patch.object(affinity, 'validate'), self.assertRaisesRegex(ValueError, 'between 2'):
+                suite.prepare(args)
 
 
 class RunnerTests(unittest.TestCase):

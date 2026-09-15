@@ -1026,7 +1026,7 @@ claim だけ残っている plugin の両方を出し、scope は本体の表と
 `stats` の `FAMILIES` は登録した購読 family を表示し、省略時は `all` です。
 RPC の `families` はこの場合に空配列になります。`DELIVERY_IDLE` と RPC の
 `delivery_idle` は、受け付けた event と replay の完了 barrier の処理が終わり、
-snapshot の作成、保留中の配送、snapshot debt が無い時点で true になります。
+snapshot の作成と再実行待ち、保留中の配送、snapshot debt が無い時点で true になります。
 dead な plugin は false です。これは取得時点の配送状態で、後続 event、実行中の
 tick、再試行待ちの宣言が無いことは保証しません。初期化を確認する用途では、
 `snapshots`、health、`pending_declarations` と必要な転送 state も確認します。

@@ -16,6 +16,9 @@ import (
 
 type calibration struct {
 	Rate           int     `json:"rate"`
+	DurationNS     int64   `json:"duration_ns"`
+	ScheduledSlots int     `json:"scheduled_slots"`
+	UnsentSlots    int     `json:"unsent_schedule_slots"`
 	Sent           int     `json:"sent"`
 	Received       int     `json:"received"`
 	Lost           int     `json:"lost"`
@@ -28,10 +31,16 @@ type calibration struct {
 	DelayMedianUS  float64 `json:"delay_median_us"`
 }
 
-func calibrationSummary(sent []benchrq1.SendRecord, received []benchrq1.RecvRecord, rate int) (calibration, error) {
-	out := calibration{Rate: rate, Sent: len(sent)}
-	if rate <= 0 || len(sent) < 2 {
-		return out, fmt.Errorf("calibration needs a positive rate and at least two sends")
+func calibrationSummary(sent []benchrq1.SendRecord, received []benchrq1.RecvRecord, rate int, duration time.Duration) (calibration, error) {
+	out := calibration{Rate: rate, DurationNS: int64(duration), Sent: len(sent)}
+	if rate <= 0 || rate > 1_000_000 || duration <= 0 || duration > 10*time.Second || len(sent) < 2 {
+		return out, fmt.Errorf("calibration needs rate 1..1000000, duration (0,10s], and at least two sends")
+	}
+	gap := time.Second / time.Duration(rate)
+	out.ScheduledSlots = int((duration + gap - 1) / gap)
+	out.UnsentSlots = out.ScheduledSlots - out.Sent
+	if out.UnsentSlots < 0 {
+		return out, fmt.Errorf("calibration has more sends than scheduled slots")
 	}
 	bySeq := make(map[uint64]time.Time, len(sent))
 	first, last := sent[0].SentAt, sent[0].SentAt
@@ -131,7 +140,7 @@ func runCalibrate(args []string) {
 	if err := <-done; err != nil {
 		fatal("calibrate receive: %v", err)
 	}
-	result, err := calibrationSummary(sender.Records(), recv.Records(), *rate)
+	result, err := calibrationSummary(sender.Records(), recv.Records(), *rate, *duration)
 	if err != nil {
 		fatal("calibrate: %v", err)
 	}

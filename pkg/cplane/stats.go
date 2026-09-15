@@ -195,7 +195,7 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 	restarts := p.restarts
 	dead := p.dead
 	reg := p.reg
-	idle := !dead && !p.snapshotting && p.worker.idle()
+	idle := !dead && !p.snapshotting && p.pendingSnapshots == 0 && p.worker.idle()
 	m.mu.Unlock()
 	families := make([]string, 0, len(reg.Families))
 	for _, family := range reg.Families {
