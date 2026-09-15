@@ -12,17 +12,20 @@ def state(mode="cplane", sid="fd00:a::100"):
              "srcAddr": "fd00:100::", "dstAddr": sid, "segments": [sid]}
     plugins = []
     groups = []
-    if mode == "cplane":
+    if mode in ("cplane", "builtin-idle"):
+        idle = mode == "builtin-idle"
         plugins = [{"name": check.PLUGIN, "endpointBehaviors": [0xFE01], "capabilities": ["headend"],
-                    "headendEntries": 1, "since": "2026-09-08T00:00:00Z", "snapshots": "1"}]
-    if mode == "builtin":
+                    "families": ["vpnv6" if idle else "vpnv4"], "deliveryIdle": True,
+                    "scope": {"headendPrefixes": [check.IDLE_PREFIX if idle else check.PREFIX]},
+                    "headendEntries": 0 if idle else 1, "since": "2026-09-08T00:00:00Z", "snapshots": "1"}]
+    if mode in ("builtin", "builtin-idle"):
         groups = [{"prefixes": [check.PREFIX], "members": [{"segments": [sid]}]}]
     return {"headend": {"headendv4s": [entry]}, "plugins": {"plugins": plugins}, "groups": {"groups": groups}}
 
 
 class CheckTests(unittest.TestCase):
     def test_valid_modes_and_update(self):
-        for mode in ("builtin", "cplane", "relay"):
+        for mode in check.MODES:
             with self.subTest(mode=mode):
                 initial = state(mode)
                 check.verify(initial, mode, "fd00:a::100")
@@ -79,6 +82,23 @@ class CheckTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         check.verify_capture(sent, [recv], 100)
+
+    def test_idle_requires_replay_completion_and_disjoint_subscription(self):
+        for field, value in (("families", ["vpnv4"]), ("families", []),
+                             ("deliveryIdle", False), ("snapshots", "0"),
+                             ("headendEntries", 1),
+                             ("scope", {"headendPrefixes": [check.PREFIX]})):
+            with self.subTest(field=field, value=value):
+                bad = state("builtin-idle")
+                bad["plugins"]["plugins"][0][field] = value
+                with self.assertRaises(ValueError):
+                    check.verify(bad, "builtin-idle", "fd00:a::100")
+        missing = state("builtin-idle")
+        del missing["plugins"]["plugins"][0]["deliveryIdle"]
+        with self.assertRaises(ValueError):
+            check.verify(missing, "builtin-idle", "fd00:a::100")
+        with self.assertRaises(ValueError):
+            check.verify(state("cplane"), "builtin-idle", "fd00:a::100")
 
 
 if __name__ == "__main__":

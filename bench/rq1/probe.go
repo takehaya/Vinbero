@@ -110,6 +110,7 @@ type Sender struct {
 	fd      int
 	cfg     SenderConfig
 	records []SendRecord
+	started time.Time
 }
 
 func NewSender(cfg SenderConfig) (*Sender, error) {
@@ -152,6 +153,9 @@ func NewSender(cfg SenderConfig) (*Sender, error) {
 
 func (s *Sender) Close() error { return unix.Close(s.fd) }
 
+// StartedAt is the origin of the pacing schedule, available after Run returns.
+func (s *Sender) StartedAt() time.Time { return s.started }
+
 // Run emits probes until the configured duration elapses. Pacing is a spin
 // against the clock: at a 10 us gap a sleep would overshoot by more than the
 // gap itself, and burning one core is acceptable for an instrument.
@@ -160,6 +164,7 @@ func (s *Sender) Run() error {
 	buf := make([]byte, probePayloadSize)
 
 	start := time.Now()
+	s.started = start
 	deadline := start.Add(s.cfg.Duration)
 	next := start
 

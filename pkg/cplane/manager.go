@@ -209,6 +209,10 @@ type plugin struct {
 	// plugin that is dropping events is by definition slow, so a replay
 	// per drop would pile up without bound.
 	snapshotting bool
+	// pendingSnapshots covers the handoff to an asynchronous replay, including
+	// the interval before its goroutine starts and sets snapshotting.
+	// Guarded by Manager.mu.
+	pendingSnapshots int
 }
 
 // ManagerConfig builds a Manager.
@@ -1227,12 +1231,42 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	// It runs on a goroutine of its own because this is the worker
 	// goroutine: the snapshot is delivered through the same queue and
 	// would deadlock against itself.
-	go func() {
-		m.snapshot(p)
+	m.mu.Lock()
+	m.launchSnapshotLocked(p, func() {
 		if m.snapshots == nil {
 			m.publish(p, inst)
 		}
+	})
+	m.mu.Unlock()
+}
+
+// launchSnapshotLocked publishes the pending work before starting its
+// goroutine. The caller holds m.mu, so stats cannot observe an idle gap.
+func (m *Manager) launchSnapshotLocked(p *plugin, after func()) {
+	p.pendingSnapshots++
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			p.pendingSnapshots--
+			m.mu.Unlock()
+		}()
+		m.snapshot(p)
+		if after != nil {
+			after()
+		}
 	}()
+}
+
+// repaySnapshotDebt transfers debt to pending work under the same lock used
+// by stats. Clearing the worker's debt before this handoff would falsely
+// report a complete view until the replay goroutine was scheduled.
+func (m *Manager) repaySnapshotDebt(p *plugin) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.plugins[p.name] != p || p.dead || !p.worker.takeSnapshotDebt() {
+		return
+	}
+	m.launchSnapshotLocked(p, nil)
 }
 
 // snapshot rebuilds a plugin's view from the rib.
@@ -1282,9 +1316,7 @@ func (m *Manager) snapshot(p *plugin) {
 		// A drop while this one was running left the view incomplete
 		// again. Repay it now rather than waiting for an event that may
 		// not come.
-		if p.worker.takeSnapshotDebt() {
-			go m.snapshot(p)
-		}
+		m.repaySnapshotDebt(p)
 	}()
 
 	if m.snapshots == nil {
@@ -1499,9 +1531,7 @@ func (m *Manager) handlerFor(name string) bgp.RouteHandler {
 		// than letting the next declaration prune what it never saw. This
 		// runs on the BGP watch goroutine, so the snapshot itself is
 		// handed to a goroutine of its own.
-		if p.worker.takeSnapshotDebt() {
-			go m.snapshot(p)
-		}
+		m.repaySnapshotDebt(p)
 	}
 }
 

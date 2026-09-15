@@ -1023,6 +1023,14 @@ plugin には両方を与えます。`stats` は動いている plugin と、res
 claim だけ残っている plugin の両方を出し、scope は本体の表とは別の block に
 出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
 
+`stats` の `FAMILIES` は登録した購読 family を表示し、省略時は `all` です。
+RPC の `families` はこの場合に空配列になります。`DELIVERY_IDLE` と RPC の
+`delivery_idle` は、受け付けた event と replay の完了 barrier の処理が終わり、
+snapshot の作成と再実行待ち、保留中の配送、snapshot debt が無い時点で true になります。
+dead な plugin は false です。これは取得時点の配送状態で、後続 event、実行中の
+tick、再試行待ちの宣言が無いことは保証しません。初期化を確認する用途では、
+`snapshots`、health、`pending_declarations` と必要な転送 state も確認します。
+
 behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint を hex で
 振っているので、0x0013 を 10 進の 13 と読むと別の behavior を claim して
 しまいます。

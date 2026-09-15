@@ -325,6 +325,12 @@ message CplanePluginStat {
   // is allowed to do should be readable without fetching the
   // registration back.
   CplanePluginScope scope = 17;
+  // The registered family subscription. Empty means all families.
+  repeated string families = 18;
+  // True when accepted deliveries and replay barriers have finished, with
+  // no replay held, running or owed, and the plugin is not dead. This is a
+  // point-in-time observation; it does not cover ticks or pending declarations.
+  bool delivery_idle = 19;
 }
 
 // UnrestoredCplanePlugin is a plugin the store held that would not start.
