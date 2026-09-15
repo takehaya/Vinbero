@@ -293,6 +293,14 @@ func (w *worker) caughtUp() bool {
 	return w.submitted == w.processed
 }
 
+// idle also excludes a held or incomplete replay. An empty queue alone is
+// insufficient: all discarded batches count as processed and may owe a replay.
+func (w *worker) idle() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.submitted == w.processed && !w.holding && !w.owesSnapshot
+}
+
 // takeSnapshotDebt reports whether a drop has left the plugin's view
 // incomplete, clearing the flag. The caller is expected to deliver a
 // snapshot; if that fails it should hand the debt back with owe.

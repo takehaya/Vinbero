@@ -14,6 +14,7 @@ package main
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/netip"
@@ -38,6 +39,8 @@ func main() {
 		runRecv(os.Args[2:])
 	case "analyze":
 		runAnalyze(os.Args[2:])
+	case "calibrate":
+		runCalibrate(os.Args[2:])
 	default:
 		usage()
 	}
@@ -48,6 +51,7 @@ func usage() {
   rq1probe send -target ADDR:PORT -rate PPS -duration DUR -tag N -out FILE
   rq1probe recv -bind ADDR:PORT -name NAME -out FILE [-duration DUR]
   rq1probe analyze -sent FILE -recv FILE[,FILE...] -change-ns N -old NAME -new NAME
+  rq1probe calibrate [-rate PPS] [-duration DUR]
 
 recv runs until the duration elapses, or until SIGINT or SIGTERM when no
 duration is given.
@@ -63,6 +67,7 @@ func runSend(args []string) {
 	tag := fs.Uint("tag", 1, "endpoint this traffic is meant to reach")
 	out := fs.String("out", "", "CSV output path; stdout when empty")
 	startAt := fs.String("start-at", "", "wall clock unix nanoseconds to begin at")
+	schedule := fs.String("schedule", "", "optional JSON recording the actual pacing origin")
 	_ = fs.Parse(args)
 
 	ap, err := netip.ParseAddrPort(*target)
@@ -97,6 +102,16 @@ func runSend(args []string) {
 
 	if err := snd.Run(); err != nil {
 		fatal("send: %v", err)
+	}
+	if *schedule != "" {
+		file, closeSchedule := openOut(*schedule)
+		must(json.NewEncoder(file).Encode(struct {
+			StartNS   int64  `json:"start_unix_ns"`
+			Requested string `json:"requested_start_unix_ns"`
+			Rate      int    `json:"rate"`
+			Duration  int64  `json:"duration_ns"`
+		}{snd.StartedAt().UnixNano(), *startAt, *rate, int64(*duration)}))
+		closeSchedule()
 	}
 
 	w, closeFn := openOut(*out)

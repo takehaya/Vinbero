@@ -240,7 +240,7 @@ cplane-wasm-testdata: ## rebuild the control-plane plugin wasm test fixtures (re
 
 .PHONY: cplane-example cplane-example-tinygo
 
-.PHONY: bench-rq1-build bench-rq1-test bench-rq1-bgp
+.PHONY: bench-rq1-build bench-rq1-test bench-rq1-bgp bench-rq1-suite bench-rq1-smoke bench-rq1-report
 bench-rq1-build: ## Build the BGP convergence instrument and daemon (standard Go WASM example is committed)
 	mkdir -p out/bench out/bin
 	go build -buildvcs=false -tags bench -o out/bench/ ./bench/rq1/cmd/...
@@ -249,11 +249,23 @@ bench-rq1-build: ## Build the BGP convergence instrument and daemon (standard Go
 
 bench-rq1-test: ## Check the convergence instrument and measurement guards without changing the network
 	go test -tags bench -race -count=1 ./bench/rq1/...
+	python3 -m unittest discover -s bench/rq1 -p 'test_*.py'
 	python3 -m unittest discover -s bench/rq1/topo -p 'test_*.py'
 	bash -n bench/rq1/topo/run_bgp.sh bench/rq1/topo/setup.sh bench/rq1/topo/teardown.sh
 
-bench-rq1-bgp: ## Measure BGP convergence; MODE=builtin|cplane|relay, TRIALS=n, RATE=pps (requires bench-rq1-build)
+bench-rq1-bgp: ## Measure BGP convergence; MODE=builtin|builtin-idle|cplane|relay, TRIALS=n, RATE=pps
 	sudo MODE=$(or $(MODE),builtin) RATE=$(or $(RATE),100000) ./bench/rq1/topo/run_bgp.sh $(or $(TRIALS),10)
+
+bench-rq1-suite: ## Run balanced three-condition measurements; AFFINITY=path is required
+	test -n "$(AFFINITY)"
+	sudo python3 bench/rq1/suite.py --affinity "$(AFFINITY)" $(SUITE_ARGS)
+
+bench-rq1-smoke: ## Exercise the three conditions in two blocks on shared CPUs
+	sudo python3 bench/rq1/suite.py --smoke $(SUITE_ARGS)
+
+bench-rq1-report: ## Validate WORK artifacts and regenerate CSV, JSON, Markdown and PNG/SVG (matplotlib required)
+	test -n "$(WORK)"
+	python3 bench/rq1/analysis.py "$(WORK)" --plot
 # Strip source paths and VCS metadata so CI reproduces the committed artifact.
 cplane-example: ## build the control-plane plugin example with standard Go
 	cd sdk/examples/cplane-custom-behavior && \
