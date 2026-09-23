@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 
@@ -23,8 +24,10 @@ func sidFunctionCommand() *cli.Command {
 				Name:  "create",
 				Usage: "Create a SID function",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "trigger-prefix", Required: true, Usage: "IPv6 CIDR (e.g., fc00:1::1/128)"},
+					&cli.StringFlag{Name: "trigger-prefix", Usage: "IPv6 CIDR (e.g., fc00:1::1/128); mutually exclusive with --locator-ref"},
 					&cli.StringFlag{Name: "action", Required: true, Usage: "Endpoint action (e.g., END_DT4, END_DT2)"},
+					&cli.StringFlag{Name: "locator-ref", Usage: "Mint the trigger prefix from this locator instead of --trigger-prefix (classic actions: /128 service SID; uN/uT/END_LBS: the locator prefix; uA/END_XLBS and the 32-bit REPLACE-CSID actions incl. the LBS aliases: a /64 with an allocated function CSID)"},
+					&cli.UintFlag{Name: "locator-function", Usage: "Pin the function value minted via --locator-ref (omit for auto-allocation, which mints a fresh CSID per create; not applicable to uN/uT/END_LBS)"},
 					&cli.StringFlag{Name: "vrf-name", Usage: "VRF device name (for End.DT4/DT6/DT46, uT, and END_T_REPLACE)"},
 					&cli.UintFlag{Name: "bd-id", Usage: "Bridge Domain ID (for End.DT2)"},
 					&cli.StringFlag{Name: "bridge-name", Usage: "Bridge device name (for End.DT2)"},
@@ -117,10 +120,31 @@ func sidFunctionCommand() *cli.Command {
 					if pluginAuxIndex != 0 && (pluginAuxRaw != nil || pluginAuxJSON != "") {
 						return fmt.Errorf("--plugin-aux-index is mutually exclusive with --plugin-aux-hex and --plugin-aux-json*")
 					}
+					var locatorRef *v1.LocatorRef
+					if name := c.String("locator-ref"); name != "" {
+						if c.String("trigger-prefix") != "" {
+							return fmt.Errorf("--locator-ref and --trigger-prefix are mutually exclusive")
+						}
+						locatorRef = &v1.LocatorRef{Name: name}
+						if c.IsSet("locator-function") {
+							raw := c.Uint("locator-function")
+							if uint64(raw) > math.MaxUint32 {
+								return fmt.Errorf("--locator-function %d exceeds uint32", raw)
+							}
+							fn := uint32(raw)
+							locatorRef.Function = &fn
+						}
+					} else if c.IsSet("locator-function") {
+						return fmt.Errorf("--locator-function requires --locator-ref")
+					}
+					if c.String("trigger-prefix") == "" && locatorRef == nil {
+						return fmt.Errorf("either --trigger-prefix or --locator-ref must be set")
+					}
 
 					sid := &v1.SidFunction{
 						Action:         action,
 						TriggerPrefix:  c.String("trigger-prefix"),
+						LocatorRef:     locatorRef,
 						SrcAddr:        c.String("src-addr"),
 						DstAddr:        c.String("dst-addr"),
 						Nexthop:        c.String("nexthop"),
