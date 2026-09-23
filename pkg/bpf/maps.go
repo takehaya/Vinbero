@@ -2908,14 +2908,17 @@ func (m *MapOperations) GetBdPeer(bdID, index uint16) (*HeadendEntry, error) {
 	return &entry, nil
 }
 
-// DeleteBdPeerIfFirstSegment deletes the bd_peer at {bdID, index} only when
-// its entry's first segment equals seg -- the identity check and the delete
-// run inside one bd_peer critical section, so a concurrent writer cannot
-// free and reuse the slot between them. Returns (existed, matched, err):
-// existed=false means the slot was already free; matched=false with
-// existed=true means a DIFFERENT entry occupies the slot (nothing deleted);
-// a transient read failure is an error, never a mismatch.
-func (m *MapOperations) DeleteBdPeerIfFirstSegment(bdID, index uint16, seg [IPv6AddrLen]byte) (existed, matched bool, err error) {
+// DeleteBdPeerIfEntry deletes the bd_peer at {bdID, index} only when it
+// holds exactly the expected entry -- the identity check and the delete run
+// inside one bd_peer critical section, so a concurrent writer cannot free
+// and reuse the slot between them. The whole entry is compared for the
+// same reason as BdPeerEntryIs: a first-segment match alone would let a
+// final withdraw delete a different owner's entry that merely shares the
+// SID. Returns (existed, matched, err): existed=false means the slot was
+// already free; matched=false with existed=true means a DIFFERENT entry
+// occupies the slot (nothing deleted); a transient read failure is an
+// error, never a mismatch.
+func (m *MapOperations) DeleteBdPeerIfEntry(bdID, index uint16, want *HeadendEntry) (existed, matched bool, err error) {
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	var cur HeadendEntry
@@ -2926,11 +2929,33 @@ func (m *MapOperations) DeleteBdPeerIfFirstSegment(bdID, index uint16, seg [IPv6
 	if lerr != nil {
 		return true, false, fmt.Errorf("read bd peer entry {bd %d, index %d}: %w", bdID, index, lerr)
 	}
-	if cur.NumSegments < 1 || cur.Segments[0] != seg {
+	if cur != *want {
 		return true, false, nil
 	}
 	ex, derr := m.deleteBdPeerLocked(bdID, index)
 	return ex, true, derr
+}
+
+// BdPeerEntryIs reports whether the bd_peer at {bdID, index} holds exactly
+// the entry the caller expects, under the same critical section as the
+// bd_peer writers. The whole entry is compared, not just an identity
+// field: a first-segment match alone would let a ledger adopt a different
+// owner's entry that merely shares the SID (an operator-created peer with
+// its own Mode/SrcAddr/FloodExclude) and later delete it as its own.
+// ErrKeyNotExist reads as false with no error; any other read failure is
+// returned so callers do not mistake a transient failure for a freed slot.
+func (m *MapOperations) BdPeerEntryIs(bdID, index uint16, want *HeadendEntry) (bool, error) {
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	var cur HeadendEntry
+	lerr := m.objs.BdPeerMap.Lookup(&BdPeerKey{BdId: bdID, Index: index}, &cur)
+	if errors.Is(lerr, ebpf.ErrKeyNotExist) {
+		return false, nil
+	}
+	if lerr != nil {
+		return false, fmt.Errorf("read bd peer entry {bd %d, index %d}: %w", bdID, index, lerr)
+	}
+	return cur == *want, nil
 }
 
 // FindFreeBdPeerIndex probes indexes 0..MaxBumNexthops-1 for a given BD

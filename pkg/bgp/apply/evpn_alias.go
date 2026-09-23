@@ -682,17 +682,23 @@ func (a *Applier) teardownESDest(dk esDestKey, d *esDest) bool {
 	return true
 }
 
-// repointSegmentMacs points every learned MAC on {bd, ESI} at the ES peer.
-// Runs at formation, so MACs that arrived before the A-D routes join the
-// group; a MAC arriving after formation targets the ES peer directly in
-// applyEVPNMacIP. Reports whether every write landed.
-func (a *Applier) repointSegmentMacs(dk esDestKey, toIdx uint16) bool {
+// repointSegmentMacs reprograms every MAC learned on {bd, ESI} after the
+// segment's aliasing state changed (formation). Each shared entry is
+// rewritten once from its deterministic representative: a MAC whose
+// representative contribution lives on a DIFFERENT segment or PE keeps its
+// current target -- formation of this group must not steal it (the
+// fdbTargetIndex resolution picks up this group only for contributions
+// whose {bd, ESI} it aliases). Reports whether every write landed.
+func (a *Applier) repointSegmentMacs(dk esDestKey, _ uint16) bool {
 	ok := true
+	handled := make(map[macDPKey]struct{})
 	a.forEachSegmentMac(dk, func(fk evpnFdbKey, st evpnFdbState) {
-		fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: toIdx, BdId: st.bdID, Esi: st.esi}
-		if err := a.fdbBd.CreateFdb(st.bdID, st.mac, fdb); err != nil {
-			a.logger.Error("repoint EVPN MAC to ES peer",
-				zap.String("mac", st.mac.String()), zap.Error(err))
+		mk := macDPKey{bdID: st.bdID, mac: st.mac.String()}
+		if _, done := handled[mk]; done {
+			return
+		}
+		handled[mk] = struct{}{}
+		if !a.writeFdbForMac(mk, func(evpnFdbKey, evpnFdbState) bool { return false }) {
 			ok = false
 		}
 	})
@@ -728,26 +734,16 @@ func (a *Applier) sweepSegmentMacs(dk esDestKey) bool {
 			return
 		}
 		handled[mk] = struct{}{}
-		_, repSt, found := a.pickContrib(mk, func(_ evpnFdbKey, cst evpnFdbState) bool {
+		// The representative's own target resolution applies: a MAC whose
+		// representative sits on ANOTHER still-active aliased segment must
+		// keep pointing at that segment's ES peer, not be forced onto a
+		// unicast peer by this segment's dissolve. Contributions whose PE
+		// deferred a mass withdraw are skipped -- they are being withdrawn
+		// above, not handed the entry.
+		if !a.writeFdbForMac(mk, func(_ evpnFdbKey, cst evpnFdbState) bool {
 			_, w := a.evpn.esWithdrawn[esMemberKey{esi: cst.esi, pe: cst.pe}]
 			return w
-		})
-		if !found {
-			repSt = st
-		}
-		ps, resolvable := a.evpn.peers[repSt.peer]
-		if !resolvable {
-			// The per-PE peer should exist for as long as the fdb ledger
-			// holds the MAC; a miss means the ledgers disagree.
-			a.logger.Error("EVPN MAC has no per-PE peer to fall back to",
-				zap.String("mac", repSt.mac.String()))
-			ok = false
-			return
-		}
-		fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: ps.index, BdId: repSt.bdID, Esi: repSt.esi}
-		if err := a.fdbBd.CreateFdb(repSt.bdID, repSt.mac, fdb); err != nil {
-			a.logger.Error("repoint EVPN MAC to per-PE peer",
-				zap.String("mac", repSt.mac.String()), zap.Error(err))
+		}) {
 			ok = false
 		}
 	})
@@ -788,10 +784,31 @@ func (a *Applier) freeESPeerIndex(bdID uint16) uint16 {
 	return bpf.EsPeerIndexBase + bpf.MaxEsPeersPerBd
 }
 
+// contribLess is the total order over RT2 contributions ({rd, etag, ip,
+// source}; mac is fixed by the shared data-plane key). One order function,
+// shared by pickContrib and the install path, makes the programmed FDB
+// entry a pure function of the contribution set -- the property that makes
+// install, withdraw, and replay order irrelevant.
+func contribLess(x, y evpnFdbKey) bool {
+	if x.rd != y.rd {
+		return x.rd < y.rd
+	}
+	if x.etag != y.etag {
+		return x.etag < y.etag
+	}
+	if x.ip != y.ip {
+		return x.ip < y.ip
+	}
+	if c := x.source.Peer.Compare(y.source.Peer); c != 0 {
+		return c < 0
+	}
+	return x.source.PathID < y.source.PathID
+}
+
 // pickContrib selects a contribution of the shared {bd, MAC} data-plane
-// key, deterministically (lowest {rd, etag}) so every caller converges on
-// the same one regardless of map iteration order. Contributions for which
-// skip returns true are not considered.
+// key, deterministically (the contribLess minimum) so every caller
+// converges on the same one regardless of map iteration order.
+// Contributions for which skip returns true are not considered.
 func (a *Applier) pickContrib(mk macDPKey, skip func(evpnFdbKey, evpnFdbState) bool) (evpnFdbKey, evpnFdbState, bool) {
 	var (
 		best   evpnFdbKey
@@ -803,7 +820,7 @@ func (a *Applier) pickContrib(mk macDPKey, skip func(evpnFdbKey, evpnFdbState) b
 		if !ok || skip(fk, st) {
 			continue
 		}
-		if !found || fk.rd < best.rd || (fk.rd == best.rd && fk.etag < best.etag) {
+		if !found || contribLess(fk, best) {
 			best, bestSt, found = fk, st, true
 		}
 	}
@@ -814,6 +831,34 @@ func (a *Applier) pickContrib(mk macDPKey, skip func(evpnFdbKey, evpnFdbState) b
 // MAC} FDB entry after another contribution withdraws.
 func (a *Applier) survivingContrib(mk macDPKey, withdrawn evpnFdbKey) (evpnFdbKey, evpnFdbState, bool) {
 	return a.pickContrib(mk, func(fk evpnFdbKey, _ evpnFdbState) bool { return fk == withdrawn })
+}
+
+// writeFdbForMac programs the shared {bd, MAC} FDB entry from the
+// deterministic representative of its contribution set (skipping the
+// contributions skip selects), resolved through fdbTargetIndex. Every FDB
+// writer goes through this one function, so the programmed entry is a pure
+// function of the ledgers no matter which event (install, withdraw
+// hand-off, alias formation, dissolve) triggered the write. Returns false
+// when the representative cannot be resolved or the write failed; with no
+// eligible contribution it writes nothing and reports true.
+func (a *Applier) writeFdbForMac(mk macDPKey, skip func(evpnFdbKey, evpnFdbState) bool) bool {
+	repFk, repSt, found := a.pickContrib(mk, skip)
+	if !found {
+		return true
+	}
+	idx, resolvable := a.fdbTargetIndex(repSt)
+	if !resolvable {
+		a.logger.Error("EVPN MAC representative has no resolvable peer",
+			zap.String("mac", repSt.mac.String()), zap.String("rd", repFk.rd))
+		return false
+	}
+	fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: idx, BdId: repSt.bdID, Esi: repSt.esi}
+	if err := a.fdbBd.CreateFdb(repSt.bdID, repSt.mac, fdb); err != nil {
+		a.logger.Error("program EVPN MAC from its representative",
+			zap.String("mac", repSt.mac.String()), zap.Error(err))
+		return false
+	}
+	return true
 }
 
 // fdbTargetIndex resolves where a contribution's FDB entry should point: the

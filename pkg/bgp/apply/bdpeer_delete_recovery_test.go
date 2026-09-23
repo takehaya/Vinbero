@@ -62,7 +62,7 @@ func TestApplier_EVPNRT3DeleteMissingKeyDropsLedger(t *testing.T) {
 		delete(fh.bdPeers, k)
 	}
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt3("fd00:2:2:24::")})
-	if len(a.evpn.mcast) != 0 {
+	if mcastContribs(a) != 0 {
 		t.Errorf("mcast ledger kept for an already-free slot: %v", a.evpn.mcast)
 	}
 	// Without the existed=false handling the ledger would be wedged: every
@@ -80,12 +80,12 @@ func TestApplier_EVPNRT3DeleteErrorKeepsLedgerForRetry(t *testing.T) {
 
 	fh.bdPeerDelErr = errors.New("map is wedged")
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt3("fd00:2:2:24::")})
-	if len(a.evpn.mcast) != 1 {
+	if mcastContribs(a) != 1 {
 		t.Fatalf("mcast ledger dropped despite a failed delete: %v", a.evpn.mcast)
 	}
 	fh.bdPeerDelErr = nil
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, IsWithdraw: true, EVPN: rt3("fd00:2:2:24::")})
-	if len(a.evpn.mcast) != 0 || len(fh.bdPeers) != 0 {
+	if mcastContribs(a) != 0 || len(fh.bdPeers) != 0 {
 		t.Errorf("retry did not finish the withdraw: ledger=%v peers=%v", a.evpn.mcast, fh.bdPeers)
 	}
 }
@@ -121,10 +121,10 @@ func TestApplier_EVPNRT3SIDMoveAbortsOnDeleteError(t *testing.T) {
 
 	fh.bdPeerDelErr = errors.New("map is wedged")
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:25::")})
-	if len(a.evpn.mcast) != 1 {
-		t.Fatalf("mcast ledger entries = %d, want 1 (old entry kept)", len(a.evpn.mcast))
+	if mcastContribs(a) != 1 {
+		t.Fatalf("mcast ledger entries = %d, want 1 (old entry kept)", mcastContribs(a))
 	}
-	for _, st := range a.evpn.mcast {
+	for _, st := range mcastStates(a) {
 		if st.sid != "fd00:2:2:24::" {
 			t.Errorf("ledger sid = %s, want the OLD sid kept for retry", st.sid)
 		}
@@ -137,10 +137,10 @@ func TestApplier_EVPNRT3SIDMoveAbortsOnDeleteError(t *testing.T) {
 	// the move.
 	fh.bdPeerDelErr = nil
 	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: rt3("fd00:2:2:25::")})
-	if len(a.evpn.mcast) != 1 || len(fh.bdPeers) != 1 {
-		t.Fatalf("after retry: ledger=%d peers=%d, want 1/1", len(a.evpn.mcast), len(fh.bdPeers))
+	if mcastContribs(a) != 1 || len(fh.bdPeers) != 1 {
+		t.Fatalf("after retry: ledger=%d peers=%d, want 1/1", mcastContribs(a), len(fh.bdPeers))
 	}
-	for _, st := range a.evpn.mcast {
+	for _, st := range mcastStates(a) {
 		if st.sid != "fd00:2:2:25::" {
 			t.Errorf("ledger sid after retry = %s, want the new sid", st.sid)
 		}

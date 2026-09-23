@@ -225,3 +225,47 @@ func TestCreateBdPeerAtFreeIndexSweepsStaleCompanions(t *testing.T) {
 		t.Errorf("cleanup: %v", err)
 	}
 }
+
+// The guarded-delete and guarded-read contracts on the real map: the
+// applier's fake reimplements the comparison, so the actual API must be
+// pinned here -- match deletes, any field mismatch spares the occupant,
+// and an already-free slot reads as existed=false.
+func TestBdPeerEntryGuards(t *testing.T) {
+	h := newXDPTestHelper(t)
+	src, _ := ParseIPv6("fc00:4::1")
+	entry := &HeadendEntry{Mode: 1, NumSegments: 1, SrcAddr: src}
+	seg, _ := ParseIPv6("fd00:4:4:24::")
+	entry.Segments[0] = seg
+	if err := h.mapOps.CreateBdPeer(104, 2, entry, [ESILen]byte{}, src, false); err != nil {
+		t.Fatalf("CreateBdPeer: %v", err)
+	}
+
+	if ok, err := h.mapOps.BdPeerEntryIs(104, 2, entry); err != nil || !ok {
+		t.Errorf("BdPeerEntryIs on the installed entry: ok=%t err=%v, want true", ok, err)
+	}
+	other := *entry
+	other.FloodExclude = 1 // same first segment, different attribute
+	if ok, err := h.mapOps.BdPeerEntryIs(104, 2, &other); err != nil || ok {
+		t.Errorf("BdPeerEntryIs must compare the whole entry: ok=%t err=%v, want false", ok, err)
+	}
+	if ok, err := h.mapOps.BdPeerEntryIs(104, 7, entry); err != nil || ok {
+		t.Errorf("BdPeerEntryIs on a free slot: ok=%t err=%v, want false/nil", ok, err)
+	}
+
+	existed, matched, err := h.mapOps.DeleteBdPeerIfEntry(104, 2, &other)
+	if err != nil || !existed || matched {
+		t.Errorf("mismatched guarded delete: existed=%t matched=%t err=%v, want true/false/nil", existed, matched, err)
+	}
+	if ok, err := h.mapOps.BdPeerEntryIs(104, 2, entry); err != nil || !ok {
+		t.Errorf("occupant must survive a mismatched guarded delete: ok=%t err=%v", ok, err)
+	}
+
+	existed, matched, err = h.mapOps.DeleteBdPeerIfEntry(104, 2, entry)
+	if err != nil || !existed || !matched {
+		t.Errorf("matching guarded delete: existed=%t matched=%t err=%v, want true/true/nil", existed, matched, err)
+	}
+	existed, matched, err = h.mapOps.DeleteBdPeerIfEntry(104, 2, entry)
+	if err != nil || existed || matched {
+		t.Errorf("guarded delete on a free slot: existed=%t matched=%t err=%v, want false/false/nil", existed, matched, err)
+	}
+}

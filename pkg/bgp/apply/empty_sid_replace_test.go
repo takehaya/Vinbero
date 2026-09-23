@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"net/netip"
 	"testing"
 
 	"go.uber.org/zap"
@@ -194,10 +195,13 @@ func TestApplier_EVPNRT3UnusableUpdateReplaces(t *testing.T) {
 	}
 }
 
-// An unusable claim from a DIFFERENT PE (next hop) must not clear the
-// entry the original PE's route still backs -- teardown is confined to
-// the PE that taught us the state.
-func TestApplier_EVPNRT2UnusableFromOtherPEKeepsEntry(t *testing.T) {
+// The contribution key (NLRI + delivering path) is the teardown
+// confinement: the SAME path re-advertising its NLRI as unusable tears its
+// contribution down even when the next hop moved in the same UPDATE --
+// an implicit replace must not be dodged by a next-hop change. (Protection
+// against OTHER paths' copies is per-source and covered in
+// evpn_multipath_test.go.)
+func TestApplier_EVPNRT2SameSourceUnusableReplacesAcrossNextHopMove(t *testing.T) {
 	const mac = "aa:bb:cc:00:00:01"
 	a, fh := evpnApplier(t)
 	installed := rt2(mac, "fd00:2:2:d2::")
@@ -207,11 +211,11 @@ func TestApplier_EVPNRT2UnusableFromOtherPEKeepsEntry(t *testing.T) {
 		t.Fatal("RT2 was not installed")
 	}
 
-	other := rt2(mac, "")
-	other.NextHop = "2001:db8::b"
-	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: other})
-	if _, ok := fh.fdb[fdbKey{100, mac}]; !ok {
-		t.Error("unusable claim from another PE cleared the tracked entry")
+	replaced := rt2(mac, "")
+	replaced.NextHop = "2001:db8::b"
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: replaced})
+	if _, ok := fh.fdb[fdbKey{100, mac}]; ok {
+		t.Error("same-path unusable replacement left the entry installed")
 	}
 }
 
@@ -316,9 +320,10 @@ func TestApplyMUP_SessionUnusableOwnSIDUpdateReplaces(t *testing.T) {
 	})
 }
 
-// The RT3 counterpart of the other-PE guard: an unusable claim from a
-// different PE must not clear the flood peer the original PE still backs.
-func TestApplier_EVPNRT3UnusableFromOtherPEKeepsPeer(t *testing.T) {
+// The RT3 counterpart: the same path's unusable re-advertisement tears
+// down its own contribution across a next-hop move, while another path's
+// copy (a different source) cannot touch it.
+func TestApplier_EVPNRT3SameSourceUnusableReplacesOtherSourceKeeps(t *testing.T) {
 	a, fh := evpnApplier(t)
 	installed := rt3("fd00:2:2:24::")
 	installed.NextHop = "2001:db8::a"
@@ -327,10 +332,21 @@ func TestApplier_EVPNRT3UnusableFromOtherPEKeepsPeer(t *testing.T) {
 		t.Fatal("RT3 was not installed")
 	}
 
-	other := rt3("")
-	other.NextHop = "2001:db8::b"
-	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: other})
+	// A different delivering path's unusable copy: separate contribution
+	// key, nothing tracked, nothing torn down.
+	otherSrc := rt3("")
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: otherSrc,
+		Source: bgp.PathSource{Peer: netip.MustParseAddr("2001:db8::b")}})
 	if len(fh.bdPeers) != 1 {
-		t.Error("unusable claim from another PE cleared the flood peer")
+		t.Fatal("another path's unusable copy cleared the flood peer")
+	}
+
+	// The same path (zero source) going unusable replaces its own state,
+	// next-hop move or not.
+	same := rt3("")
+	same.NextHop = "2001:db8::b"
+	a.Apply(bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: same})
+	if len(fh.bdPeers) != 0 {
+		t.Error("same-path unusable replacement left the flood peer installed")
 	}
 }
