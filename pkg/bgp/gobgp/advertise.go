@@ -77,6 +77,29 @@ func (s *Session) CanonicalRD(rd string) (string, error) {
 	return parsed.String(), nil
 }
 
+// canonicalRouteKey gives VPN/unicast advertisements and withdrawals the
+// same identity as their wire NLRI, regardless of the caller's spelling.
+func (s *Session) canonicalRouteKey(key bgp.RouteKey) (bgp.RouteKey, error) {
+	switch key.Family {
+	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
+		rd, err := s.CanonicalRD(key.RD)
+		if err != nil {
+			return key, fmt.Errorf("parse RD %q: %w", key.RD, err)
+		}
+		key.RD = rd
+	case bgp.FamilyIPv6Unicast:
+		key.RD = ""
+	default:
+		return key, nil
+	}
+	prefix, err := netip.ParsePrefix(key.Prefix)
+	if err != nil {
+		return key, fmt.Errorf("parse prefix %q: %w", key.Prefix, err)
+	}
+	key.Prefix = prefix.Masked().String()
+	return key, nil
+}
+
 // Withdraw removes a previously advertised route. Withdrawing a route
 // that was never advertised is a no-op so callers can withdraw
 // idempotently.
@@ -97,6 +120,11 @@ func (s *Session) withdrawAs(_ context.Context, key bgp.RouteKey, producer strin
 	srv := s.bgpServer()
 	if srv == nil {
 		return bgp.ErrSessionNotStarted
+	}
+	var err error
+	key, err = s.canonicalRouteKey(key)
+	if err != nil {
+		return err
 	}
 	s.advMu.Lock()
 	id, ok := s.advertised[key]
@@ -144,6 +172,12 @@ func (s *Session) addAndTrack(srv *gobgpsrv.BgpServer, path *apiutil.Path, key b
 
 // addAndTrackAs is addAndTrack on behalf of a named producer.
 func (s *Session) addAndTrackAs(srv *gobgpsrv.BgpServer, path *apiutil.Path, key bgp.RouteKey, producer string) error {
+	var err error
+	key, err = s.canonicalRouteKey(key)
+	if err != nil {
+		return err
+	}
+
 	// The key is claimed under the lock, before AddPath, and given back if
 	// AddPath fails. Checking and then claiming afterwards would let two
 	// producers advertising the same new NLRI both pass the check and the
@@ -263,7 +297,7 @@ func encodeVPNPath(r bgp.VPNRoute) (*apiutil.Path, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse prefix %q: %w", r.Prefix, err)
 	}
-	nlri, err := gobgppkt.NewLabeledVPNIPAddrPrefix(prefix, *gobgppkt.NewMPLSLabelStack(0), rd)
+	nlri, err := gobgppkt.NewLabeledVPNIPAddrPrefix(prefix.Masked(), *gobgppkt.NewMPLSLabelStack(0), rd)
 	if err != nil {
 		return nil, fmt.Errorf("build VPN NLRI: %w", err)
 	}
@@ -323,7 +357,7 @@ func encodeUnicastPath(r bgp.UnicastRoute) (*apiutil.Path, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse prefix %q: %w", r.Prefix, err)
 	}
-	nlri, err := gobgppkt.NewIPAddrPrefix(prefix)
+	nlri, err := gobgppkt.NewIPAddrPrefix(prefix.Masked())
 	if err != nil {
 		return nil, fmt.Errorf("build IPv6 NLRI: %w", err)
 	}
