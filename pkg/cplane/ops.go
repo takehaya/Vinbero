@@ -1030,7 +1030,10 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 		if len(keep) == len(held) {
 			continue
 		}
-		res, err := p.headend.ApplySet(p.owner, af, keep, p.quotas.MaxHeadendEntries)
+		// This host cleanup only retains a subset of already-owned entries.
+		// A lowered quota must not prevent revocation while the other family
+		// still exceeds that quota. Guest declarations keep the normal limit.
+		res, err := p.headend.ApplySet(p.owner, af, keep, unlimited)
 		removed += res.Pruned
 		if err != nil && firstErr == nil {
 			firstErr = err

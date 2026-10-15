@@ -130,12 +130,18 @@ func ApplySet(
 
 	// The quota counts both families together: a plugin's share of the
 	// data plane is what it holds, not what it holds per map.
-	if cap := quota; cap >= 0 && leases != nil {
-		other := ownership.LeaseHeadendV6
+	if cap := quota; cap >= 0 {
+		other := AFv6
 		if af == AFv6 {
-			other = ownership.LeaseHeadendV4
+			other = AFv4
 		}
-		if total := len(keys) + leases.CountOf(other, owner); total > cap {
+		// Pinned entries and their owners survive restart; in-memory leases do
+		// not. Count actual owned entries even when restoration changed nothing.
+		held, err := ownedPrefixes(ops, owner, other)
+		if err != nil {
+			return res, err
+		}
+		if total := len(keys) + len(held); total > cap {
 			return res, &ownership.QuotaError{What: "headend entries", Declared: total, Quota: cap}
 		}
 	}
