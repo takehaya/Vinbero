@@ -275,3 +275,37 @@ func TestLedgerTracksEachPathSeparately(t *testing.T) {
 		t.Fatalf("plugin consumer saw %d events, want both advertises and both withdraws", plug.len())
 	}
 }
+
+// A path's attributes can disappear on withdrawal, but every NLRI field
+// must still distinguish independently advertised paths from the same peer.
+func TestNLRIKeyMUPSessionFields(t *testing.T) {
+	base := bgp.MUPRoute{Type: bgp.MUPRouteTypeT1ST, RD: "65000:1", Prefix: "10.0.0.1/32", TEID: 1, TEIDLen: 32, QFI: 1, Endpoint: "192.0.2.1", Source: "192.0.2.2"}
+	key := func(r bgp.MUPRoute) string { return nlriKey(bgp.RouteEvent{Family: bgp.FamilyMUPIPv4, MUP: &r}) }
+	for _, field := range []string{"endpoint", "qfi", "source"} {
+		t.Run(field, func(t *testing.T) {
+			other := base
+			switch field {
+			case "endpoint":
+				other.Endpoint = "192.0.2.3"
+			case "qfi":
+				other.QFI++
+			case "source":
+				other.Source = ""
+			}
+			if key(base) == key(other) {
+				t.Fatal("distinct session NLRIs collided")
+			}
+		})
+	}
+}
+
+func TestNLRIKeyEVPNIgnoresESImportAttribute(t *testing.T) {
+	route := bgp.EVPNRoute{Type: bgp.EVPNRouteTypeEthernetSegment, RD: "65000:1", IPAddr: "192.0.2.1", ESImportRT: "aa:bb:cc:dd:ee:ff"}
+	ev := bgp.RouteEvent{Family: bgp.FamilyEVPN, EVPN: &route}
+	advertised := nlriKey(ev)
+	route.ESImportRT = ""
+	ev.IsWithdraw = true
+	if got := nlriKey(ev); got != advertised {
+		t.Fatalf("withdraw key %q differs from advertise %q", got, advertised)
+	}
+}
