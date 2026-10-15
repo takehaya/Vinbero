@@ -85,12 +85,13 @@ func (i *Instance) linkHost(ctx context.Context) error {
 // plugin that logs on every event can fill it without ever exceeding a
 // per-message limit.
 func (i *Instance) hostLog(_ context.Context, mod api.Module, level, ptr, length int32) {
+	// Rejection warnings consume the same budget as accepted guest messages.
+	if !i.logAllowed() {
+		return
+	}
 	if length < 0 || int(length) > maxLogMessageBytes {
 		i.logger.Warn("plugin log rejected: message too long",
 			zap.Int32("length", length), zap.Int("limit", maxLogMessageBytes))
-		return
-	}
-	if !i.logAllowed() {
 		return
 	}
 	msg := ""
