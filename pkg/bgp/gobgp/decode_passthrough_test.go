@@ -16,6 +16,7 @@ func prefixSIDWithBehavior(sid netip.Addr, behavior uint16) *gobgppkt.PathAttrib
 	return &gobgppkt.PathAttributePrefixSID{
 		TLVs: []gobgppkt.PrefixSIDTLVInterface{
 			&gobgppkt.SRv6ServiceTLV{
+				TLV: gobgppkt.TLV{Type: gobgppkt.TLVTypeSRv6L3Service},
 				SubTLVs: []gobgppkt.PrefixSIDTLVInterface{
 					&gobgppkt.SRv6InformationSubTLV{
 						SID:              sid.AsSlice(),
@@ -32,7 +33,7 @@ func TestDecodeEndpointBehavior(t *testing.T) {
 	// 0x0013 is End.DT4 (RFC 8986); the exact value does not matter here,
 	// only that the codepoint survives the decode unchanged.
 	psid := prefixSIDWithBehavior(sid, 0x0013)
-	if got := decodeEndpointBehavior([]gobgppkt.PathAttributeInterface{psid}, 0); got != 0x0013 {
+	if got := decodeEndpointBehavior([]gobgppkt.PathAttributeInterface{psid}, 0, gobgppkt.TLVTypeSRv6L3Service); got != 0x0013 {
 		t.Errorf("decodeEndpointBehavior = %#x, want %#x", got, 0x0013)
 	}
 }
@@ -43,27 +44,28 @@ func TestDecodeEndpointBehavior(t *testing.T) {
 func TestDecodeEndpointBehaviorKeepsUnrecognizedCodepoint(t *testing.T) {
 	const experimental = 0xFE01
 	psid := prefixSIDWithBehavior(netip.MustParseAddr("fd00:1:1::200"), experimental)
-	if got := decodeEndpointBehavior([]gobgppkt.PathAttributeInterface{psid}, 0); got != experimental {
+	if got := decodeEndpointBehavior([]gobgppkt.PathAttributeInterface{psid}, 0, gobgppkt.TLVTypeSRv6L3Service); got != experimental {
 		t.Errorf("decodeEndpointBehavior = %#x, want %#x", got, experimental)
 	}
 }
 
 func TestDecodeEndpointBehaviorAbsent(t *testing.T) {
-	if got := decodeEndpointBehavior(nil, 0); got != 0 {
-		t.Errorf("decodeEndpointBehavior(nil, 0) = %#x, want 0", got)
+	if got := decodeEndpointBehavior(nil, 0, gobgppkt.TLVTypeSRv6L3Service); got != 0 {
+		t.Errorf("decodeEndpointBehavior(nil, 0, gobgppkt.TLVTypeSRv6L3Service) = %#x, want 0", got)
 	}
 	// A Prefix-SID whose SID is the wrong width is skipped, like the SID
 	// decode does, rather than reported with a behavior of its own.
 	psid := &gobgppkt.PathAttributePrefixSID{
 		TLVs: []gobgppkt.PrefixSIDTLVInterface{
 			&gobgppkt.SRv6ServiceTLV{
+				TLV: gobgppkt.TLV{Type: gobgppkt.TLVTypeSRv6L3Service},
 				SubTLVs: []gobgppkt.PrefixSIDTLVInterface{
 					&gobgppkt.SRv6InformationSubTLV{SID: []byte{1, 2, 3}, EndpointBehavior: 0x1234},
 				},
 			},
 		},
 	}
-	if got := decodeEndpointBehavior([]gobgppkt.PathAttributeInterface{psid}, 0); got != 0 {
+	if got := decodeEndpointBehavior([]gobgppkt.PathAttributeInterface{psid}, 0, gobgppkt.TLVTypeSRv6L3Service); got != 0 {
 		t.Errorf("decodeEndpointBehavior with a malformed SID = %#x, want 0", got)
 	}
 }
