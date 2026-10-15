@@ -41,7 +41,7 @@ func customBehaviorRoute(prefix, sid string) bgp.RouteEvent {
 	}
 }
 
-func exampleManager(t *testing.T) (*Manager, *fakeSource, *fakeHeadendOps) {
+func exampleManager(t *testing.T, receivePrefixes ...string) (*Manager, *fakeSource, *fakeHeadendOps) {
 	t.Helper()
 	src := newFakeSource()
 	ops := newFakeHeadendOps()
@@ -57,9 +57,17 @@ func exampleManager(t *testing.T) (*Manager, *fakeSource, *fakeHeadendOps) {
 		t.Fatalf("manager: %v", err)
 	}
 	t.Cleanup(func() { m.Close(context.Background()) })
+	var config exampleWriter
+	if len(receivePrefixes) == 0 {
+		receivePrefixes = []string{"10.0.0.0/8"}
+	}
+	for _, prefix := range receivePrefixes {
+		config.stringField(9, prefix)
+	}
 	if err := m.Register(context.Background(), Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
+		Config:       config.buf,
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(), Scope: testScope(),
 	}); err != nil {

@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"net/netip"
 	"sort"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
@@ -58,7 +59,24 @@ func handleEvents(events []cplane.Event) []cplane.EventResult {
 }
 
 func acceptsRoute(r cplane.Route) bool {
-	return r.Family == "vpnv4" && r.EndpointBehavior == config.behavior && r.SRv6SID != ""
+	if r.Family != "vpnv4" || r.EndpointBehavior != config.behavior || r.SRv6SID == "" {
+		return false
+	}
+	prefix, err := netip.ParsePrefix(r.Prefix)
+	if err != nil || !prefix.Addr().Is4() {
+		return false
+	}
+	// With no configured filter, retain the original unrestricted receiver.
+	// Narrow host scopes must supply the same ranges in field 9.
+	if len(config.headendPrefixes) == 0 {
+		return true
+	}
+	for _, allowed := range config.headendPrefixes {
+		if prefix.Bits() >= allowed.Bits() && allowed.Contains(prefix.Masked().Addr()) {
+			return true
+		}
+	}
+	return false
 }
 
 // Pending declarations survive a refusal and are retried on ticks, including

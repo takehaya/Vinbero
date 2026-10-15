@@ -30,8 +30,8 @@ that SID, naming its own behavior codepoint in the SID TLV.
 
 Receiving, on every batch of events:
 
-- an advertisement carrying the claimed behavior and an SRv6 SID adds a
-  headend entry for its prefix, steering into that SID
+- an advertisement carrying the claimed behavior and an SRv6 SID, within the
+  configured receive prefixes, adds a headend entry steering into that SID
 - a withdrawal removes that path, keeping any alternatives
 - an update whose behavior no longer matches removes the old version of that path
 
@@ -86,9 +86,12 @@ From the repository root, with the daemon running and the CLI built (`make build
 register a receive-only instance handling `10.7.0.0/16`:
 
 ```sh
+# Protobuf field 9: receive prefixes, matching the host's headend scope.
+printf '\112\01310.7.0.0/16' > /tmp/custom-behavior-config.bin
 ./out/bin/vinbero plugin cplane register \
     --name custom-behavior \
     --wasm sdk/examples/cplane-custom-behavior/plugin.wasm \
+    --config /tmp/custom-behavior-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 \
     --capability headend \
@@ -134,6 +137,14 @@ deployments, so one build serves all of them:
 | 5 | the eBPF slot the SID dispatches to |
 | 7 | the next hop to advertise the prefix with |
 | 8 | the VRF a plugin-dispatched End.DT4 decapsulates into |
+| 9 | repeated IPv4 receive prefixes (CIDR), aligned with the host headend scope |
+
+Set field 9 whenever the host grants a restricted headend prefix scope.
+The guest receives routes outside that scope too; filtering them before building
+the desired set keeps one rejected route from blocking valid withdrawals.
+A route must fit wholly inside one configured prefix. With field 9 omitted,
+the example retains its original unfiltered receiving behavior, intended for an
+unrestricted IPv4 headend scope.
 
 There are two ways to run it, and the config picks between them:
 

@@ -342,7 +342,7 @@ echo "[6] pe-tokyo: a plugin scoped away from the prefix cannot install it"
 # that does NOT cover 10.2.0.0/24, and assert the entry does not come back
 # and the daemon logged the refusal. This is the check that would fail if
 # checkScope were a no-op -- the stats-based assertions in step 1 would not.
-dexec "$PE_TOKYO" sh -c 'printf "\010\201\374\003" > /tmp/plugin-config.bin' || true
+dexec "$PE_TOKYO" sh -c 'printf "\010\201\374\003\112\01310.2.0.0/16" > /tmp/plugin-config.bin' || true
 if dexec "$PE_TOKYO" vbctl plugin cplane register \
     --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
     --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \

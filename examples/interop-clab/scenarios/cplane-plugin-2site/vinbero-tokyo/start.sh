@@ -96,10 +96,11 @@ fi
     --sid fd00:100:0:1:: --next-hop 2001:db8:ff::1 || true
 
 # --- the control-plane plugin ----------------------------------------------
-# Config blob: field 1 is the behavior codepoint to claim (0xFE01). This
+# Config blob: field 1 is the behavior codepoint to claim (0xFE01), and
+# field 9 is the receive prefix matching the headend scope (10.2.0.0/16). This
 # end originates nothing, so the locator, prefix and SID fields are absent
 # and the plugin runs receive-only.
-printf '\010\201\374\003' > /tmp/plugin-config.bin
+printf '\010\201\374\003\112\01310.2.0.0/16' > /tmp/plugin-config.bin
 
 # Granted `headend` only: it declares forwarding state and nothing else.
 # It cannot originate a route or allocate a SID, and the host functions
