@@ -159,8 +159,7 @@ func (s *PluginServer) CplanePluginList(
 	return connect.NewResponse(&v1.CplanePluginListResponse{Plugins: out}), nil
 }
 
-// CplanePluginStats reports what each running plugin is doing and
-// holding.
+// CplanePluginStats reports running plugins and retained restoration failures.
 func (s *PluginServer) CplanePluginStats(
 	_ context.Context,
 	req *connect.Request[v1.CplanePluginStatsRequest],
@@ -172,11 +171,9 @@ func (s *PluginServer) CplanePluginStats(
 	var stats []cplane.PluginStats
 	if name := req.Msg.GetName(); name != "" {
 		one, ok := s.cplane.StatsFor(name)
-		if !ok {
-			return nil, connect.NewError(connect.CodeNotFound,
-				fmt.Errorf("plugin %q is not registered", name))
+		if ok {
+			stats = []cplane.PluginStats{one}
 		}
-		stats = []cplane.PluginStats{one}
 	} else {
 		stats = s.cplane.Stats()
 	}
@@ -220,19 +217,20 @@ func (s *PluginServer) CplanePluginStats(
 	// response that showed only what is running would let an operator
 	// conclude they are simply gone.
 	var unrestored []*v1.UnrestoredCplanePlugin
-	if req.Msg.GetName() == "" {
-		for _, u := range s.cplane.Unrestored() {
-			behaviors := make([]uint32, 0, len(u.Behaviors))
-			for _, b := range u.Behaviors {
-				behaviors = append(behaviors, uint32(b))
-			}
-			unrestored = append(unrestored, &v1.UnrestoredCplanePlugin{
-				Name:              u.Name,
-				EndpointBehaviors: behaviors,
-				Reason:            u.Reason,
-				Since:             timestamppb.New(u.Since),
-			})
+	for _, u := range s.cplane.Unrestored() {
+		if name := req.Msg.GetName(); name != "" && u.Name != name {
+			continue
 		}
+		behaviors := make([]uint32, 0, len(u.Behaviors))
+		for _, b := range u.Behaviors {
+			behaviors = append(behaviors, uint32(b))
+		}
+		unrestored = append(unrestored, &v1.UnrestoredCplanePlugin{
+			Name: u.Name, EndpointBehaviors: behaviors, Reason: u.Reason, Since: timestamppb.New(u.Since),
+		})
+	}
+	if name := req.Msg.GetName(); name != "" && len(out) == 0 && len(unrestored) == 0 {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("plugin %q is not registered", name))
 	}
 	return connect.NewResponse(&v1.CplanePluginStatsResponse{
 		Plugins:    out,
