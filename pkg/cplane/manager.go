@@ -209,6 +209,10 @@ type plugin struct {
 	// plugin that is dropping events is by definition slow, so a replay
 	// per drop would pile up without bound.
 	snapshotting bool
+	// A failed source read reserves one delayed retry. Live events cannot
+	// bypass this deadline, and stopping the worker cancels the wait.
+	snapshotRetryAt time.Time
+	snapshotBackoff time.Duration
 }
 
 // ManagerConfig builds a Manager.
@@ -1235,6 +1239,11 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	}()
 }
 
+const (
+	snapshotRetryMin = 100 * time.Millisecond
+	snapshotRetryMax = 5 * time.Second
+)
+
 // snapshot rebuilds a plugin's view from the rib.
 //
 // A plugin that declares desired sets cannot work from a partial view: its
@@ -1259,6 +1268,26 @@ func (m *Manager) snapshot(p *plugin) {
 		return
 	}
 	p.snapshotting = true
+	delay := time.Until(p.snapshotRetryAt)
+	m.mu.Unlock()
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-p.worker.stop:
+			m.mu.Lock()
+			p.snapshotting = false
+			m.mu.Unlock()
+			return
+		}
+	}
+	m.mu.Lock()
+	if m.plugins[p.name] != p || p.dead {
+		p.snapshotting = false
+		m.mu.Unlock()
+		return
+	}
 	inst := p.inst
 	m.mu.Unlock()
 	// Live events are held until this finishes, so the snapshot arrives as
@@ -1309,11 +1338,23 @@ func (m *Manager) snapshot(p *plugin) {
 		// The view is still incomplete; ask for another one on the next
 		// opportunity rather than leaving the plugin to prune what it
 		// could not see.
+		m.mu.Lock()
+		if p.snapshotBackoff == 0 {
+			p.snapshotBackoff = snapshotRetryMin
+		} else {
+			p.snapshotBackoff = min(p.snapshotBackoff*2, snapshotRetryMax)
+		}
+		p.snapshotRetryAt = time.Now().Add(p.snapshotBackoff)
+		m.mu.Unlock()
 		p.worker.owe()
 		m.logger.Warn("replaying the rib to a plugin failed",
 			zap.String("plugin", p.name), zap.Error(err))
 		return
 	}
+	m.mu.Lock()
+	p.snapshotRetryAt = time.Time{}
+	p.snapshotBackoff = 0
+	m.mu.Unlock()
 	p.worker.submitCompletion(m.endOfReplayBatch(ReplaySourceBGP), func() {
 		replayOK = true
 	})
