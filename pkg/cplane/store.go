@@ -51,6 +51,10 @@ type Store struct {
 // than a silent prune -- see Store.load and Manager.Restore.
 const storeManifestVersion = 2
 
+// Context grants are authorization data. Older daemons must refuse the
+// registration instead of restoring it while ignoring those restrictions.
+const contextManifestVersion = 3
+
 // manifestScope is the persisted form of a Scope: the five lists nested so
 // they travel as a unit.
 type manifestScope struct {
@@ -187,6 +191,10 @@ func (s *Store) Save(reg Registration) error {
 		Module:         moduleFile,
 		SavedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
+	if reg.Input != nil {
+		m.Version = contextManifestVersion
+	}
+
 	for _, f := range reg.Families {
 		m.Families = append(m.Families, string(f))
 	}
@@ -424,7 +432,7 @@ func (s *Store) Unloadable() []UnloadableManifest {
 				// be reserved. A version too old to have a scope leaves it
 				// zero. A malformed scope is left zero rather than failing the
 				// whole listing -- the plugin is unrestored either way.
-				if m.Version == storeManifestVersion && m.Scope != nil {
+				if (m.Version == storeManifestVersion || m.Version == contextManifestVersion) && m.Scope != nil {
 					if sc, sErr := ParseScope(ScopeSpec{
 						Locators:        m.Scope.Locators,
 						VRFs:            m.Scope.VRFs,
@@ -520,7 +528,7 @@ func (s *Store) load(name string) (Registration, error) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return Registration{}, fmt.Errorf("cplane store: decode manifest for %q: %w", name, err)
 	}
-	if m.Version != storeManifestVersion {
+	if (m.Version != storeManifestVersion && m.Version != contextManifestVersion) || (m.Input != nil && m.Version != contextManifestVersion) {
 		// A version this daemon does not write is refused rather than
 		// coerced. For a version-1 manifest (pre-scope) that is deliberate:
 		// it has no scope, and restoring it under an empty one would prune

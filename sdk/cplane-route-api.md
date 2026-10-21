@@ -75,6 +75,8 @@ MUP sessions are handed away from built-ins only by explicit delegation matching
 EVPN delegation similarly checks the bridge domain.
 Delegations stay reserved when a plugin fails or cannot restore, and cannot be taken by a different plugin while cleanup is outstanding.
 Changing input policy requires unregistering and finishing cleanup first.
+Context registrations use store manifest version 3 so an older daemon refuses them rather than silently ignoring their authorization policy.
+Legacy registrations continue using version 2.
 
 The initial MUP builders support GTP4 ST1+ISD and ST2+DSD.
 The downlink requires an explicit IPv6 source and a compatible SID argument layout; the uplink leaves the DSD SID unchanged.

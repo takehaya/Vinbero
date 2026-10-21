@@ -3,6 +3,7 @@ package cplane
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"net/netip"
 	"os"
 	"reflect"
@@ -288,5 +289,33 @@ func TestCompositionObserverWASMHasNoWriteImports(t *testing.T) {
 	st, _ := m.StatsFor("observe")
 	if !st.InputReady || st.AppliedRevision != 0 || st.HeadendEntries != 0 {
 		t.Fatalf("observer wrote: %+v", st)
+	}
+}
+
+func TestInputAuthorityRequiresNewManifestVersion(t *testing.T) {
+	store := newTestStore(t)
+	r := storedRegistration(t)
+	r.Families = nil
+	r.Input = compositionPolicy()
+	if err := store.Save(r); err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.readManifest(r.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != contextManifestVersion {
+		t.Fatal("old daemon could silently ignore input policy")
+	}
+	m.Version = storeManifestVersion
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(store.manifestPath(r.Name), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.List(); err == nil {
+		t.Fatal("legacy version carrying context authority accepted")
 	}
 }
