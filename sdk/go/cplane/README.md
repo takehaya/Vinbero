@@ -7,7 +7,7 @@ WASM entry points and host calls. Both use the daemon's existing ABI version 1.
 The SDK is part of the Vinbero Go module. Use a module dependency pinned to a
 revision containing it, or a local `replace` as in
 [the custom-behavior example](../../examples/cplane-custom-behavior/go.mod).
-No guest dependency uses the generated protobuf runtime or reflection.
+The base SDK and guest packages do not use the generated protobuf runtime or reflection.
 
 ## Registering callbacks
 
@@ -149,6 +149,41 @@ map to one forwarding key; selection belongs to the plugin and must be independe
 of map iteration order. See the example's
 [`headendEntries`](../../examples/cplane-custom-behavior/main.go) for a deterministic
 selection policy and its handling of local SID and advertisement retries.
+
+## Reading the GoBGP packet model
+
+`Route.BGPPath` carries the serialized NLRI, complete path attributes, an opaque destination key and source metadata alongside the legacy fields.
+The host supplies this model for its currently supported received BGP families on both live events and RIB snapshots.
+It is a serialization of GoBGP's parsed model, not a capture of the original BGP message.
+Attribute order, duplicates and unknown attribute values are retained as represented by GoBGP.
+The NLRI has no ADD-PATH header; `Route.Peer` and `Route.PathID` identify the received source.
+`Metadata.LocalPathID` is the host's separate local identifier.
+`Metadata.Best` is present for snapshots and absent for live post-policy updates, where GoBGP does not supply it.
+
+For native packet types, import the optional `cplane/gobgppath` package and call `gobgppath.Decode(route)`.
+The returned NLRI and attributes own their data and use `github.com/osrg/gobgp/v4/pkg/packet/bgp` types.
+This adapter does not expose GoBGP server calls or change write permissions.
+The codec is pinned to the host's MUP fork; consumer modules must repeat the GoBGP replacement from the [observer example](../../examples/cplane-bgp-observer/go.mod).
+The base SDK remains independent of GoBGP.
+
+Use `Route.BGPKey()` to identify retained inputs.
+Its key includes codec, AFI/SAFI, the host's opaque destination identity, peer and received ADD-PATH ID.
+Destination identity follows the pinned GoBGP RIB: VPN labels, EVPN non-key fields and MUP ST1 TEID/QFI/endpoint parameters may change without creating a new destination.
+Complete NLRI bytes retain those fields as payload.
+Do not derive identity from serialized NLRI or formatted packet values in a guest.
+A codec upgrade must review these identity semantics.
+
+Encoding failures are explicit in `EncodingError`; the adapter rejects them rather than returning partial attributes.
+An attribute failure can still carry a valid `BGPKey()`.
+When maintaining a view, remove the previous value of that key before decoding or filtering its replacement, so a rejected update cannot leave stale input.
+A missing key requires an explicit recovery policy such as rebuilding the view; the SDK does not provide a generic MUP/EVPN view yet.
+Withdrawals retain the destination key and NLRI and omit attributes.
+
+`guest.InputFeatures()` returns a support bitmap; test `cplane.FeatureBGPPath` before requiring this input.
+This read-only import adds no capabilities and leaves `Configure` bytes unchanged.
+Guests using only the original SDK continue to run on the updated host.
+A guest importing `input_features` requires an updated host; older hosts refuse the unknown import before execution.
+See the [read-only observer](../../examples/cplane-bgp-observer) for a complete example.
 
 ## Testing
 

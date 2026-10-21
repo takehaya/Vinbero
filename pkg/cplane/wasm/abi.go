@@ -48,6 +48,9 @@ package wasm
 // documented is a version nobody checks.
 const ABIVersion = 1
 
+// InputFeatureBGPPath is a read-only input capability, not a write grant.
+const InputFeatureBGPPath uint64 = 1
+
 // HostModule is the import module name for Vinbero's capability functions.
 // WASI runtime services are linked separately as wasi_snapshot_preview1.
 const HostModule = "vinbero"
@@ -97,6 +100,8 @@ const (
 	// monotonic within a daemon run. Always linked. It deliberately breaks
 	// determinism: liveness logic cannot be written without a clock.
 	HostNowMonotonic = "now_monotonic"
+	// HostInputFeatures reports additive input formats without changing configure.
+	HostInputFeatures = "input_features"
 	// HostApplyBegin opens a desired-set transaction and returns its
 	// generation id.
 	HostApplyBegin = "apply_begin"

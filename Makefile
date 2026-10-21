@@ -265,3 +265,10 @@ cplane-example-tinygo: ## build the control-plane plugin example with TinyGo 0.3
 	cd sdk/examples/cplane-custom-behavior && \
 		tinygo build -o plugin.tinygo.wasm -target=wasm-unknown \
 			-scheduler=none -gc=conservative -panic=trap -no-debug .
+
+.PHONY: cplane-bgp-observer
+cplane-bgp-observer: ## build the read-only GoBGP packet model example
+	mkdir -p out
+	cd sdk/examples/cplane-bgp-observer && \
+		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-bgp-observer.wasm .

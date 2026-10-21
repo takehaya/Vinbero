@@ -99,6 +99,14 @@ func hostLog(level int32, ptr, length uint32)
 //go:wasmimport vinbero now_monotonic
 func hostNow() int64
 
+//go:wasmimport vinbero input_features
+func hostInputFeatures() uint64
+
+// InputFeatures reports supported input formats. Importing this function makes
+// a guest fail admission on older hosts, before it can act on missing input.
+// It does not change configure's opaque bytes or grant any write capability.
+func InputFeatures() uint64 { return hostInputFeatures() }
+
 //go:wasmimport vinbero apply_begin
 func hostBegin(kind uint32) uint64
 

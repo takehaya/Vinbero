@@ -39,7 +39,7 @@ func (s *Session) ListRoutes(family bgp.Family, handler bgp.RouteHandler) error 
 			if !p.PeerAddress.IsValid() {
 				continue // locally originated (this node's own advertisement)
 			}
-			ev, ok := pathToRouteEvent(p)
+			ev, ok := pathToRouteEventWithMetadata(p, true)
 			if !ok || ev.Family != family {
 				continue
 			}

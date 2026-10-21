@@ -42,6 +42,38 @@ type Route struct {
 	EthernetTag       uint32
 	ESI               []byte
 	UnknownAttributes []UnknownAttribute
+	BGPPath           *BGPPath
+}
+
+// BGPPathCodec names the pinned GoBGP packet format, including its MUP fork.
+const BGPPathCodec = "gobgp-v4.7.0-mup-draft01/binary-v1"
+
+// FeatureBGPPath says that received BGP events carry the full packet model.
+const FeatureBGPPath uint64 = 1
+
+// BGPPath owns its buffers. Attributes include their flags/type/length headers.
+// An encoding failure is explicit and may still leave a usable NLRI identity.
+type BGPPath struct {
+	Codec         string
+	AFI           uint16
+	SAFI          uint8
+	NLRI          []byte
+	RouteKey      []byte // Opaque host identity; excludes non-key NLRI fields.
+	Attributes    [][]byte
+	EncodingError string
+	Metadata      BGPPathMetadata
+}
+
+type BGPPathMetadata struct {
+	Age                int64 // Unix seconds as supplied by GoBGP.
+	PeerASN            uint32
+	PeerRouterID       string
+	Stale              bool
+	IsFromExternal     bool
+	NoImplicitWithdraw bool
+	IsNexthopInvalid   bool
+	LocalPathID        uint32
+	Best               *bool // nil when the source does not supply best-path status.
 }
 
 type UnknownAttribute struct {

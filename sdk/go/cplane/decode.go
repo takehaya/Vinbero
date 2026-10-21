@@ -204,6 +204,15 @@ func decodeRoute(data []byte) (Route, error) {
 				return false
 			}
 			out.UnknownAttributes = append(out.UnknownAttributes, v)
+		case 17:
+			if d.Type != wire.Bytes {
+				return false
+			}
+			v, err := decodeBGPPath(d.Bytes)
+			if err != nil {
+				return false
+			}
+			out.BGPPath = v
 		}
 		return true
 	})

@@ -73,6 +73,10 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 // the loc-rib snapshot, so the path identity it attaches below reaches
 // every consumer of either.
 func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
+	return pathToRouteEventWithMetadata(p, false)
+}
+
+func pathToRouteEventWithMetadata(p *apiutil.Path, bestKnown bool) (bgp.RouteEvent, bool) {
 	fam, ok := apiFamilyToVinbero(p.Family)
 	if !ok {
 		return bgp.RouteEvent{}, false
@@ -81,6 +85,7 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 		Family:     fam,
 		Source:     pathSource(p),
 		IsWithdraw: p.Withdrawal,
+		BGPPath:    encodeBGPPath(p, bestKnown),
 	}
 	switch fam {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:

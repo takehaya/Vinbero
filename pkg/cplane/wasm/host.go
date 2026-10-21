@@ -43,6 +43,9 @@ func (i *Instance) linkHost(ctx context.Context) error {
 	b.NewFunctionBuilder().
 		WithFunc(i.hostNowMonotonic).
 		Export(HostNowMonotonic)
+	b.NewFunctionBuilder().
+		WithFunc(func() uint64 { return InputFeatureBGPPath }).
+		Export(HostInputFeatures)
 
 	// The desired-set surface exists only for a plugin allowed to declare
 	// something. A plugin granted nothing cannot import these at all,

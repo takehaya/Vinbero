@@ -109,6 +109,37 @@ message PluginRoute {
   bytes esi = 15;
   // UnknownAttrs are the path attributes Vinbero does not interpret.
   repeated PluginUnknownAttribute unknown_attrs = 16;
+  // Full GoBGP packet model, available alongside the legacy flattened fields.
+  PluginBGPPath bgp_path = 17;
+}
+
+message PluginBGPPath {
+  string codec = 1;
+  uint32 afi = 2;
+  uint32 safi = 3;
+  // Canonical serialization without an ADD-PATH header, not a packet capture.
+  bytes nlri = 4;
+  // Each item includes its flags/type/length header; order and duplicates remain.
+  repeated bytes attributes = 5;
+  // Failure is explicit; route_key remains usable if only attributes fail.
+  string encoding_error = 6;
+  PluginBGPPathMetadata metadata = 7;
+  // Opaque destination identity matching the pinned GoBGP RIB, without peer/ID.
+  // Complete NLRI above also includes fields that do not participate in identity.
+  bytes route_key = 8;
+}
+
+message PluginBGPPathMetadata {
+  int64 age = 1; // Unix seconds as supplied by GoBGP.
+  uint32 peer_asn = 2;
+  string peer_router_id = 3;
+  bool stale = 4;
+  bool is_from_external = 5;
+  bool no_implicit_withdraw = 6;
+  bool is_nexthop_invalid = 7;
+  uint32 local_path_id = 8;
+  // GoBGP supplies Best for ListPath, but not WatchPostUpdate.
+  optional bool best = 9;
 }
 
 // PluginMacEvent is a local MAC learned or removed on a bridge domain.
