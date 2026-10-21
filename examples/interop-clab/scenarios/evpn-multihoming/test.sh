@@ -117,26 +117,31 @@ echo "[4] BUM single delivery to the dual-homed CE"
 # End.DT2M; only the DF (pe1) delivers to ce-mh and split-horizon prevents a
 # loop, so ce-remote must see no duplicate (DUP!) ICMP replies.
 #
-# Flush the resolved neighbour so the next ping re-ARPs. Use busybox `ip neigh
-# flush` (always present, no runtime apk -- net-tools arp -d would need an
-# `apk add` that fails on a CI runner with no Alpine mirror), falling back to
-# bouncing the access link (which also clears the cache). Critically, ASSERT the
-# entry is gone before counting DUP!: under `set -u` (no -e) a failed flush would
-# otherwise leave the step-3 entry resolved, the ping would not re-flood, and
-# dup=0 would pass without exercising DF or split-horizon at all.
-docker exec "$CE_REMOTE" ip neigh flush dev eth1 >/dev/null 2>&1 \
-    || docker exec "$CE_REMOTE" sh -c "ip link set dev eth1 down; ip link set dev eth1 up" >/dev/null 2>&1 \
-    || true
-sleep 1
-if docker exec "$CE_REMOTE" ip neigh show "$CE_MH_ADDR" dev eth1 2>/dev/null \
-        | grep -qiE "REACHABLE|STALE|DELAY|PROBE|PERMANENT"; then
+# Late ARP replies from the preceding connectivity check can repopulate the
+# cache after a successful flush. Retry the verified setup, then require a
+# successful ping before checking duplicates; zero replies cannot prove BUM.
+clear_remote_neighbor() {
+    docker exec "$CE_REMOTE" ip neigh flush to "$CE_MH_ADDR" dev eth1 >/dev/null 2>&1 \
+        || docker exec "$CE_REMOTE" sh -c "ip link set dev eth1 down; ip link set dev eth1 up" >/dev/null 2>&1 \
+        || return 1
+    sleep 1
+    local neighbors
+    neighbors=$(docker exec "$CE_REMOTE" ip neigh show to "$CE_MH_ADDR" dev eth1 2>/dev/null) || return 1
+    ! grep -qiE "REACHABLE|STALE|DELAY|PROBE|PERMANENT" <<<"$neighbors"
+}
+if ! retry_n 5 clear_remote_neighbor; then
     ng "ce-remote: $CE_MH_ADDR neighbour not flushed (setup failed); BUM single-delivery not asserted"
 else
-    dup=$(docker exec "$CE_REMOTE" ping -c 3 -W 2 "$CE_MH_ADDR" 2>&1 | grep -c "DUP!")
-    if [ "$dup" -eq 0 ]; then
-        ok "ce-remote -> ce-mh: no duplicate replies (single DF delivery + split-horizon)"
+    if replies=$(docker exec "$CE_REMOTE" ping -c 3 -W 2 "$CE_MH_ADDR" 2>&1); then
+        dup=$(grep -c "DUP!" <<<"$replies")
+        if [ "$dup" -eq 0 ]; then
+            ok "ce-remote -> ce-mh: no duplicate replies (single DF delivery + split-horizon)"
+        else
+            ng "ce-remote -> ce-mh: $dup duplicate reply/replies (multi-homing double-delivery)"
+        fi
     else
-        ng "ce-remote -> ce-mh: $dup duplicate reply/replies (multi-homing double-delivery)"
+        ng "ce-remote -> ce-mh: BUM probe ping failed"
+        echo "$replies" | sed 's/^/      /'
     fi
 fi
 
