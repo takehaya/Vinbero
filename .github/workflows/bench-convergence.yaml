@@ -45,9 +45,11 @@ jobs:
       - name: Install namespace test dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ethtool iproute2 iputils-ping \
-            linux-modules-extra-$(uname -r)
-          sudo modprobe vrf
+          sudo apt-get install -y --no-install-recommends ethtool iproute2 iputils-ping
+          if ! sudo modprobe vrf; then
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe vrf
+          fi
       - name: Build and test the instrument
         run: make bench-rq1-build bench-rq1-test
       # This checks that each mode measures a real transition. Timing values

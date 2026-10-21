@@ -81,14 +81,15 @@ jobs:
           go-version-file: ./go.mod
           cache: true
 
-      # The netresource netns tests create kernel VRF devices; the runner
-      # kernel ships the vrf module in linux-modules-extra, unloaded.
+      # The netresource netns tests create kernel VRF devices. Some runner
+      # kernels already include VRF; others need linux-modules-extra.
       - name: Load kernel modules
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y --no-install-recommends \
-            linux-modules-extra-$(uname -r)
-          sudo modprobe vrf
+          if ! sudo modprobe vrf; then
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe vrf
+          fi
 
       - name: Run unit tests
         # pkg/bpf reloads the BPF collection per test and keeps outgrowing
@@ -232,8 +233,10 @@ jobs:
             iputils-ping \
             ethtool \
             curl \
-            python3-scapy \
-            linux-modules-extra-$(uname -r)
+            python3-scapy
+          if ! sudo modprobe vrf || ! sudo modprobe 8021q; then
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          fi
           sudo modprobe vrf
           sudo modprobe 8021q
 
