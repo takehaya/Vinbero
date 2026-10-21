@@ -272,3 +272,17 @@ cplane-bgp-observer: ## build the read-only GoBGP packet model example
 	cd sdk/examples/cplane-bgp-observer && \
 		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
 			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-bgp-observer.wasm .
+
+.PHONY: cplane-route-composition
+cplane-route-composition: ## build the route composition example with write imports
+	mkdir -p out
+	cd sdk/examples/cplane-route-composition && \
+		GOOS=wasip1 GOARCH=wasm go build -tags composition_write -mod=readonly -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-route-composition.wasm .
+
+.PHONY: cplane-route-composition-observer
+cplane-route-composition-observer: ## build the route composition example without write imports
+	mkdir -p out
+	cd sdk/examples/cplane-route-composition && \
+		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-route-composition-observer.wasm .

@@ -105,6 +105,9 @@ func (l *claimLedger) size() int {
 // Returns "" when the family carries nothing usable, in which case the
 // caller falls back to the behavior on the event itself.
 func nlriKey(ev bgp.RouteEvent) string {
+	if p := ev.BGPPath; p != nil && len(p.RouteKey) > 0 {
+		return join("packet", p.Codec, string(ev.Family), fmt.Sprint(p.AFI), fmt.Sprint(p.SAFI), fmt.Sprintf("%x", p.RouteKey))
+	}
 	switch {
 	case ev.VPN != nil:
 		return join("vpn", string(ev.Family), ev.VPN.RD, ev.VPN.Prefix)

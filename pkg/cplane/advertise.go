@@ -56,7 +56,8 @@ const maxRouteTargets = 128
 
 // AdvertisedRoute is one route an owner wants originated.
 type AdvertisedRoute struct {
-	Family bgp.Family
+	SIDStructure bgp.SIDStructure
+	Family       bgp.Family
 	// VRF is the VRF a VPN route is originated into. It is what the plugin
 	// declares; RD and RouteTargets are derived from that VRF's binding
 	// and are not the plugin's to spell.
@@ -390,6 +391,7 @@ func (a *AdvertiseSet) canonicalize(r AdvertisedRoute) (AdvertisedRoute, error) 
 			RTs:              r.RouteTargets,
 			NextHop:          r.NextHop,
 			EndpointBehavior: r.EndpointBehavior,
+			SIDStructure:     r.SIDStructure,
 		})
 	case bgp.FamilyIPv6Unicast:
 		err = v.ValidateUnicastRoute(bgp.UnicastRoute{Prefix: r.Prefix, NextHop: r.NextHop})
@@ -413,6 +415,7 @@ func (a *AdvertiseSet) originate(ctx context.Context, adv Advertiser, r Advertis
 			RTs:              r.RouteTargets,
 			NextHop:          r.NextHop,
 			EndpointBehavior: r.EndpointBehavior,
+			SIDStructure:     r.SIDStructure,
 		})
 	case bgp.FamilyIPv6Unicast:
 		return adv.AdvertiseUnicast(ctx, bgp.UnicastRoute{

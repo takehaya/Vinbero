@@ -64,9 +64,10 @@ func (c *consumer) wants(fam bgp.Family) bool {
 // Demux owns the daemon's single BGP subscription and dispatches each
 // received route to the registered consumers.
 type Demux struct {
-	sub    bgp.RouteSubscriber
-	lister bgp.RouteLister
-	logger *zap.Logger
+	delegations map[string]func(bgp.RouteEvent) bool
+	sub         bgp.RouteSubscriber
+	lister      bgp.RouteLister
+	logger      *zap.Logger
 	// claims decides which endpoint behaviors belong to a plugin rather
 	// than to the built-in appliers. Nil until SetClaimRegistry is called,
 	// in which case nothing is claimed.
@@ -330,10 +331,7 @@ func (d *Demux) SnapshotTo(families []bgp.Family, h bgp.RouteHandler) error {
 // Withdrawing what an applier does not hold is a no-op, so this is safe to
 // call whenever the claimed set grows, including when it changes nothing.
 func (d *Demux) RetractClaimedFromBuiltins() {
-	d.mu.RLock()
-	claims := d.claims
-	d.mu.RUnlock()
-	if d.lister == nil || claims == nil {
+	if d.lister == nil {
 		return
 	}
 
@@ -365,7 +363,7 @@ func (d *Demux) RetractClaimedFromBuiltins() {
 			// Read the registry rather than isClaimed: this is not a
 			// delivery, and recording it in the withdrawal ledger would
 			// claim a path the appliers are being told to forget.
-			if !claims.IsClaimed(ev.EndpointBehavior) {
+			if !d.routeClaimed(ev) {
 				return
 			}
 			for _, c := range builtins {
@@ -465,10 +463,7 @@ func (d *Demux) isClaimed(ev bgp.RouteEvent) bool {
 		return false
 	}
 
-	d.mu.RLock()
-	claims := d.claims
-	d.mu.RUnlock()
-	if claims.IsClaimed(ev.EndpointBehavior) {
+	if d.routeClaimed(ev) {
 		d.ledger.recordAdvertise(key, ev.Source)
 		return true
 	}
@@ -541,4 +536,32 @@ func familyNames(families []bgp.Family) []string {
 		out = append(out, f.String())
 	}
 	return out
+}
+
+// SetDelegation installs an operator-approved route matcher. It changes neither
+// peer configuration nor plugin scope; callers must retract before publication.
+func (d *Demux) SetDelegation(name string, match func(bgp.RouteEvent) bool) {
+	d.mu.Lock()
+	if d.delegations == nil {
+		d.delegations = map[string]func(bgp.RouteEvent) bool{}
+	}
+	if match == nil {
+		delete(d.delegations, name)
+	} else {
+		d.delegations[name] = match
+	}
+	d.mu.Unlock()
+}
+func (d *Demux) routeClaimed(ev bgp.RouteEvent) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.claims != nil && d.claims.IsClaimed(ev.EndpointBehavior) {
+		return true
+	}
+	for _, match := range d.delegations {
+		if match(ev) {
+			return true
+		}
+	}
+	return false
 }

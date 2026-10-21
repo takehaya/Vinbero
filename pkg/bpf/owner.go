@@ -82,6 +82,11 @@ func OwnerBGPEVPNGroup(asn uint32) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:evpngroup", OwnerTagVersion, asn))
 }
 
+// OwnerBGPEVPN owns the built-in EVPN FDB and peer entries across RDs.
+func OwnerBGPEVPN(asn uint32) OwnerTag {
+	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:evpn", OwnerTagVersion, asn))
+}
+
 // IsLegacyBGPVPNOwner reports whether tag is a pre-aggregation VPN owner
 // belonging to this node: the RD-scoped form OwnerBGPVPN produced when each
 // prefix was written per RD.
@@ -102,14 +107,6 @@ func IsLegacyBGPVPNOwner(asn uint32, tag OwnerTag) bool {
 // OwnerBGPMUP is the entry owner for a downlink H.Encaps headend installed from
 // a BGP MUP T1ST route (SAFI 85). Distinct from OwnerBGPVPN so MUP-owned entries
 // are attributed to MUP and not to an L3VPN route that may share the same RD.
-//
-// NOTE (lifecycle): MUP entries are not yet owner-reconciled on boot/shutdown —
-// there is no FlushByOwner caller for OwnerBGPMUP, and the mup_uplink_v{4,6}_map
-// F-TEID entries carry no owner tag at all (they are keyed by the F-TEID, which
-// is what the packet carries). With pinned maps, MUP data-plane state can outlive
-// the process; today the in-memory reverse indexes in pkg/bgp/apply are the
-// source of truth and a manual `make remove-ebpfmap` clears stale state between
-// runs. Owner-scoped MUP reconcile is a forward-looking item.
 func OwnerBGPMUP(asn uint32, rd string) OwnerTag {
 	return OwnerTag(fmt.Sprintf("bgp:%s:asn=%d:mup:rd=%s", OwnerTagVersion, asn, rd))
 }

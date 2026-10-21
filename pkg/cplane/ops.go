@@ -23,9 +23,24 @@ import (
 // registered. A plugin cannot name an owner in a call, which is what keeps
 // one plugin from writing as another.
 type PluginOps struct {
-	owner   bpf.OwnerTag
-	headend *headend.Reconciler
-	caps    wasm.Capabilities
+	services                         *compositionMaps
+	policy                           *inputPolicy
+	resolveMUPInstance               func(string) (uint32, error)
+	desiredRevision, appliedRevision uint64
+	outputFailure                    string
+	compositionHash                  [32]byte
+	compositionValid                 bool
+	lastDesired                      map[v1.PluginApplyKind]uint64
+	latestComposition                *applyTxn
+	strictInputs                     bool
+	inputReady, inputReplaying       bool
+	inputFault                       string
+	inputCleanupPending              bool
+	inputRecoveryReplay              bool
+	inputEpoch                       uint64
+	owner                            bpf.OwnerTag
+	headend                          *headend.Reconciler
+	caps                             wasm.Capabilities
 	// guard bounds which keys this plugin may name, and derives the parts
 	// of an advertisement that are not the plugin's to spell. A nil guard
 	// permits nothing: a plugin whose operator said nothing about where it
@@ -95,7 +110,9 @@ type PluginOps struct {
 
 // applyTxn is one open desired-set declaration.
 type applyTxn struct {
-	kind v1.PluginApplyKind
+	composition *v1.PluginApplyChunk
+	inputEpoch  uint64
+	kind        v1.PluginApplyKind
 	// seq is this transaction's position in commit order, stamped at
 	// commit. A declaration is a statement about a whole set, so applying
 	// an older one after a newer one of the same kind puts back a set the
@@ -112,6 +129,10 @@ type applyTxn struct {
 
 // PluginOpsConfig builds a PluginOps.
 type PluginOpsConfig struct {
+	Services           *compositionMaps
+	Policy             *inputPolicy
+	ResolveMUPInstance func(string) (uint32, error)
+	StrictInputs       bool
 	// Owner is the tag every write by this plugin carries.
 	Owner bpf.OwnerTag
 	// Headend is the map surface the plugin's declarations reconcile into.
@@ -208,23 +229,26 @@ func NewPluginOps(cfg PluginOpsConfig) (*PluginOps, error) {
 		applyMu = &sync.Mutex{}
 	}
 	return &PluginOps{
-		owner:        cfg.Owner,
-		applyMu:      applyMu,
-		caps:         cfg.Capabilities,
-		guard:        cfg.Guard,
-		advertise:    cfg.Advertise,
-		localSIDs:    cfg.LocalSIDs,
-		quotas:       cfg.Quotas.withDefaults(),
-		onLocalSIDs:  cfg.OnLocalSIDs,
-		notifiedSIDs: make(map[string]netip.Addr),
-		encapSource:  cfg.EncapSource,
-		headend:      reconciler,
-		leases:       reconciler.Leases(),
-		logger:       logger,
-		open:         make(map[uint64]*applyTxn),
-		maxOpen:      maxOpen,
-		maxEntries:   maxEntries,
-		maxBytes:     maxBytes,
+		owner:    cfg.Owner,
+		services: cfg.Services, policy: cfg.Policy, resolveMUPInstance: cfg.ResolveMUPInstance,
+		strictInputs:   cfg.StrictInputs,
+		inputReplaying: cfg.StrictInputs,
+		applyMu:        applyMu,
+		caps:           cfg.Capabilities,
+		guard:          cfg.Guard,
+		advertise:      cfg.Advertise,
+		localSIDs:      cfg.LocalSIDs,
+		quotas:         cfg.Quotas.withDefaults(),
+		onLocalSIDs:    cfg.OnLocalSIDs,
+		notifiedSIDs:   make(map[string]netip.Addr),
+		encapSource:    cfg.EncapSource,
+		headend:        reconciler,
+		leases:         reconciler.Leases(),
+		logger:         logger,
+		open:           make(map[uint64]*applyTxn),
+		maxOpen:        maxOpen,
+		maxEntries:     maxEntries,
+		maxBytes:       maxBytes,
 	}, nil
 }
 
@@ -253,7 +277,17 @@ func (p *PluginOps) ApplyBegin(kind uint32) (uint64, error) {
 	// The kind is checked against the granted capabilities here because
 	// one apply_begin serves them all: a plugin granted only advertise
 	// would otherwise open a headend transaction through the same door.
+	if p.strictInputs && applyKind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_COMPOSITION && applyKind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_LOCAL_SID {
+		return 0, fmt.Errorf("context input requires composition output")
+	}
 	switch applyKind {
+	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_COMPOSITION:
+		if !p.strictInputs || p.policy == nil {
+			return 0, fmt.Errorf("composition requires explicit input policy")
+		}
+		if !p.caps.Has(wasm.CapHeadend) && !p.caps.Has(wasm.CapMUP) && !p.caps.Has(wasm.CapEVPN) && !p.caps.Has(wasm.CapAdvertise) {
+			return 0, fmt.Errorf("composition requires write capability")
+		}
 	case v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4,
 		v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6:
 		if !p.caps.Has(wasm.CapHeadend) {
@@ -279,12 +313,15 @@ func (p *PluginOps) ApplyBegin(kind uint32) (uint64, error) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.strictInputs && p.inputFault != "" {
+		return 0, fmt.Errorf("input incomplete: %s", p.inputFault)
+	}
 	if len(p.open) >= p.maxOpen {
 		return 0, fmt.Errorf("apply begin: %d transactions already open, limit %d", len(p.open), p.maxOpen)
 	}
 	p.nextGen++
 	gen := p.nextGen
-	p.open[gen] = &applyTxn{kind: applyKind}
+	p.open[gen] = &applyTxn{kind: applyKind, inputEpoch: p.inputEpoch}
 	return gen, nil
 }
 
@@ -303,10 +340,14 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	if !ok {
 		return fmt.Errorf("apply put: no open transaction %d", generation)
 	}
-	declared := len(msg.GetHeadendEntries()) + len(msg.GetAdvertisedRoutes()) + len(msg.GetLocalSids())
-	if len(txn.entries)+len(txn.routes)+len(txn.sids)+declared > p.maxEntries {
+	declared := len(msg.GetHeadendEntries()) + len(msg.GetAdvertisedRoutes()) + len(msg.GetLocalSids()) + compositionCount(&msg)
+	held := 0
+	if txn.composition != nil {
+		held = compositionCount(txn.composition)
+	}
+	if len(txn.entries)+len(txn.routes)+len(txn.sids)+held+declared > p.maxEntries {
 		return fmt.Errorf("apply put: transaction %d would hold %d entries, limit %d",
-			generation, len(txn.entries)+len(txn.routes)+len(txn.sids)+declared, p.maxEntries)
+			generation, len(txn.entries)+len(txn.routes)+len(txn.sids)+held+declared, p.maxEntries)
 	}
 	// Entries are counted, and so are the bytes inside them. A count alone
 	// bounds nothing: the repeated and string fields of one entry have no
@@ -324,6 +365,18 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	// silence, so it is refused instead.
 	if err := checkChunkKind(txn.kind, &msg); err != nil {
 		return fmt.Errorf("apply put: %w", err)
+	}
+
+	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_COMPOSITION {
+		if txn.composition != nil && msg.DesiredRevision != 0 && msg.DesiredRevision != txn.composition.DesiredRevision {
+			return fmt.Errorf("composition revision changed within transaction")
+		}
+		if txn.composition == nil {
+			txn.composition = &v1.PluginApplyChunk{}
+		}
+		proto.Merge(txn.composition, &msg)
+		txn.bytes += size
+		return nil
 	}
 
 	// Decoded into locals first, and merged into the transaction only
@@ -388,7 +441,7 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 // is only recorded: see the staged field.
 func (p *PluginOps) Publish() error {
 	p.mu.Lock()
-	if p.published {
+	if p.published && len(p.staged) == 0 {
 		p.mu.Unlock()
 		return nil
 	}
@@ -446,6 +499,16 @@ func (p *PluginOps) holdForRetry(txn *applyTxn) {
 // Retried before each batch, so the first event after the missing piece
 // arrives is what repairs it.
 func (p *PluginOps) RetryPending() {
+	p.mu.Lock()
+	if p.strictInputs && !p.inputReady {
+		fault := p.inputFault
+		p.mu.Unlock()
+		if fault != "" {
+			_ = p.cleanupInput()
+		}
+		return
+	}
+	p.mu.Unlock()
 	p.mu.Lock()
 	if !p.published {
 		p.mu.Unlock()
@@ -512,6 +575,11 @@ func (p *PluginOps) PendingDeclarations() int {
 func (p *PluginOps) ApplyCommit(generation uint64) error {
 	p.mu.Lock()
 	txn, ok := p.open[generation]
+	if ok && txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_COMPOSITION && (txn.composition == nil || txn.composition.DesiredRevision == 0 || txn.composition.DesiredRevision < p.desiredRevision) {
+		delete(p.open, generation)
+		p.mu.Unlock()
+		return fmt.Errorf("composition revision is missing or stale")
+	}
 	if ok {
 		delete(p.open, generation)
 		// Numbered in commit order, which is the order the plugin meant.
@@ -519,8 +587,19 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 		// rather than trusting the order it happens to run in.
 		p.commits++
 		txn.seq = p.commits
+		if p.strictInputs {
+			if p.lastDesired == nil {
+				p.lastDesired = map[v1.PluginApplyKind]uint64{}
+			}
+			p.lastDesired[txn.kind] = txn.seq
+			delete(p.pending, txn.kind)
+			if txn.composition != nil {
+				p.desiredRevision = txn.composition.DesiredRevision
+				p.latestComposition = txn
+			}
+		}
 	}
-	published := p.published
+	published := p.published && (!p.strictInputs || p.inputReady)
 	if ok && !published {
 		// Declared before the plugin is live: hold it rather than apply
 		// it, so an instantiation that fails leaves nothing behind.
@@ -544,6 +623,9 @@ func (p *PluginOps) ApplyCommit(generation uint64) error {
 		return nil
 	}
 	if err := p.applyTransaction(txn); err != nil {
+		if p.strictInputs {
+			p.holdForRetry(txn)
+		}
 		return err
 	}
 	// This declaration supersedes anything of the same kind still waiting
@@ -583,6 +665,21 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	// locator or its VRF binding exists fails, and this is the point the
 	// retry machinery covers; failing at decode time would leave that
 	// declaration with nothing to repair it.
+	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_COMPOSITION {
+		err := p.applyComposition(txn)
+		p.mu.Lock()
+		if err != nil {
+			p.outputFailure = err.Error()
+		} else {
+			p.outputFailure = ""
+			p.appliedRevision = txn.composition.DesiredRevision
+		}
+		p.mu.Unlock()
+		if err == nil {
+			p.markApplied(txn)
+		}
+		return err
+	}
 	if err := p.checkScope(txn); err != nil {
 		return err
 	}
@@ -751,6 +848,9 @@ func (p *PluginOps) sidIsOwned(r AdvertisedRoute) error {
 // this one. Everything a declaration is checked against before it reaches
 // a map or a peer belongs here.
 func ValidateChunk(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
+	if kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_COMPOSITION {
+		return fmt.Errorf("composition validation requires host input policy; use the manager integration harness")
+	}
 	if err := checkChunkKind(kind, msg); err != nil {
 		return err
 	}
@@ -831,6 +931,9 @@ func ValidateChunkInScope(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk, sco
 // transaction was opened for.
 func checkChunkKind(kind v1.PluginApplyKind, msg *v1.PluginApplyChunk) error {
 	var unexpected []string
+	if (compositionCount(msg) > 0 || msg.DesiredRevision != 0) && kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_COMPOSITION {
+		unexpected = append(unexpected, "composition outputs")
+	}
 	if len(msg.GetHeadendEntries()) > 0 &&
 		kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4 &&
 		kind != v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
@@ -888,7 +991,7 @@ func chunkSize(msg *v1.PluginApplyChunk) int {
 func (p *PluginOps) isStale(txn *applyTxn) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return txn.seq != 0 && txn.seq < p.lastApplied[txn.kind]
+	return (p.strictInputs && (txn.inputEpoch != p.inputEpoch || !p.inputReady || txn.seq < p.lastDesired[txn.kind])) || (txn.seq != 0 && txn.seq < p.lastApplied[txn.kind])
 }
 
 // markApplied records this transaction as the newest of its kind, once its
@@ -969,6 +1072,8 @@ func (p *PluginOps) OpenTransactions() int {
 // leaves the state its predecessor wrote untouched instead of pruning it
 // on the way out.
 func (p *PluginOps) BeginInstance() {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.open = make(map[uint64]*applyTxn)
@@ -976,6 +1081,18 @@ func (p *PluginOps) BeginInstance() {
 	p.pending = nil
 	p.notifiedSIDs = make(map[string]netip.Addr)
 	p.published = false
+	if p.strictInputs {
+		p.latestComposition = nil
+		p.inputRecoveryReplay = false
+		p.desiredRevision = 0
+		p.appliedRevision = 0
+		p.outputFailure = ""
+		p.compositionValid = false
+		p.inputEpoch++
+		p.inputReady = false
+		p.inputReplaying = true
+		p.inputFault = ""
+	}
 }
 
 // DiscardTransactions drops every open transaction. The instance running
@@ -1003,6 +1120,12 @@ func (p *PluginOps) DiscardTransactions() {
 // because that is the operation the sets already implement: what is not
 // declared is pruned.
 func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
+	if p.strictInputs {
+		if err := p.Flush(); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
 
@@ -1116,6 +1239,9 @@ func (p *PluginOps) withdrawSIDReferencesLocked(ctx context.Context, desired []L
 // It is called when a binding changes, so the derived values follow the
 // operator's edit rather than the plugin's schedule.
 func (p *PluginOps) ReconcileAdvertised(ctx context.Context) (int, error) {
+	if p.strictInputs {
+		return p.reconcileComposition(ctx)
+	}
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
 	return p.reconcileAdvertisedLocked(ctx)
@@ -1231,6 +1357,7 @@ func (p *PluginOps) reconcileAdvertisedLocked(ctx context.Context) (int, error) 
 func (p *PluginOps) Flush() error {
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
+	p.compositionValid = false
 	var firstErr error
 	if p.advertise != nil {
 		// Withdraw before removing the data plane behind it: a route left
@@ -1240,6 +1367,12 @@ func (p *PluginOps) Flush() error {
 			return err
 		}
 	}
+	if p.services != nil {
+		if err := p.services.flush(p.owner); err != nil {
+			return err
+		}
+	}
+
 	if p.localSIDs != nil {
 		if err := p.localSIDs.ReleaseOwner(p.owner); err != nil && firstErr == nil {
 			firstErr = err

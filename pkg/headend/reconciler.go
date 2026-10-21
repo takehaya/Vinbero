@@ -27,10 +27,12 @@ type Writer interface {
 // Operator RPCs may still write directly to MapOps, whose owner checks remain
 // authoritative; this lock is not a transaction with those external writers.
 type Reconciler struct {
-	mu     sync.Mutex
-	owners map[bpf.OwnerTag]*ownerLock
-	maps   MapOps
-	leases *ownership.Leases
+	gateMu   sync.Mutex
+	gateRefs map[string]map[bpf.OwnerTag]int
+	mu       sync.Mutex
+	owners   map[bpf.OwnerTag]*ownerLock
+	maps     MapOps
+	leases   *ownership.Leases
 }
 
 type ownerLock struct {

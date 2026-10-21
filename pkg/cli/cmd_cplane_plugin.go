@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/urfave/cli/v2"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
@@ -36,6 +37,7 @@ func cplaneSubcommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "name", Required: true, Usage: "Plugin name; becomes the owner tag its writes carry"},
 					&cli.StringFlag{Name: "wasm", Required: true, Usage: "Path to the WebAssembly module"},
+					&cli.StringFlag{Name: "input-policy", Usage: "JSON input context grants and explicit delegation (input API v1)"},
 					&cli.StringFlag{Name: "config", Usage: "Path to the operator config blob handed to the module (optional)"},
 					&cli.StringSliceFlag{Name: "family", Usage: "BGP family to deliver (repeatable); omit for every family"},
 					&cli.StringSliceFlag{
@@ -112,9 +114,21 @@ func cplaneSubcommand() *cli.Command {
 					if err != nil {
 						return err
 					}
+					var input *v1.CplaneInputPolicy
+					if path := c.String("input-policy"); path != "" {
+						data, err := os.ReadFile(path)
+						if err != nil {
+							return err
+						}
+						input = &v1.CplaneInputPolicy{}
+						if err := protojson.Unmarshal(data, input); err != nil {
+							return fmt.Errorf("input policy: %w", err)
+						}
+					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Plugin.CplanePluginRegister(c.Context,
 						connect.NewRequest(&v1.CplanePluginRegisterRequest{
+							Input:             input,
 							Name:              c.String("name"),
 							Wasm:              wasm,
 							Config:            config,
@@ -198,6 +212,15 @@ func cplaneSubcommand() *cli.Command {
 					}
 					for _, p := range plugins {
 						state := "running"
+						if p.GetInput() != nil && !p.GetInputReady() {
+							state = "replaying"
+						}
+						if p.GetInputFault() != "" {
+							state = "input-incomplete"
+						}
+						if p.GetCleanupPending() {
+							state = "cleanup-pending"
+						}
 						if p.GetDead() {
 							// Its state is still installed; it is simply
 							// no longer being fed.
@@ -229,6 +252,17 @@ func cplaneSubcommand() *cli.Command {
 					// terminal.
 					if err := printCplaneScopes(plugins); err != nil {
 						return err
+					}
+					for _, p := range plugins {
+						if p.GetInput() != nil {
+							fmt.Printf("%s input_ready=%t revision=%d/%d cleanup_pending=%t\n", p.GetName(), p.GetInputReady(), p.GetAppliedRevision(), p.GetDesiredRevision(), p.GetCleanupPending())
+							if p.GetInputFault() != "" {
+								fmt.Printf("  input: %s\n", p.GetInputFault())
+							}
+							if p.GetOutputFailure() != "" {
+								fmt.Printf("  output: %s\n", p.GetOutputFailure())
+							}
+						}
 					}
 					if len(unrestored) == 0 {
 						return nil

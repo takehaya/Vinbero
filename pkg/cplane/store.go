@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
@@ -63,12 +64,13 @@ type manifestScope struct {
 
 // manifest is what is written beside a plugin's module.
 type manifest struct {
-	Version      int      `json:"version"`
-	Name         string   `json:"name"`
-	Config       []byte   `json:"config,omitempty"`
-	Families     []string `json:"families,omitempty"`
-	Behaviors    []uint16 `json:"behaviors,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	Input        *v1.CplaneInputPolicy `json:"input,omitempty"`
+	Version      int                   `json:"version"`
+	Name         string                `json:"name"`
+	Config       []byte                `json:"config,omitempty"`
+	Families     []string              `json:"families,omitempty"`
+	Behaviors    []uint16              `json:"behaviors,omitempty"`
+	Capabilities []string              `json:"capabilities,omitempty"`
 	// Scope is persisted with the capabilities because it is half of the
 	// same statement: a plugin restored with its capabilities and without
 	// its scope would come back able to declare nothing, and one restored
@@ -164,6 +166,7 @@ func (s *Store) Save(reg Registration) error {
 
 	m := manifest{
 		Version:      storeManifestVersion,
+		Input:        reg.Input,
 		Name:         reg.Name,
 		Config:       reg.Config,
 		Behaviors:    reg.Behaviors,
@@ -379,6 +382,7 @@ func (s *Store) List() ([]Registration, error) {
 // UnloadableManifest is a stored plugin whose manifest this daemon cannot
 // turn into a registration -- most often one written in an older format.
 type UnloadableManifest struct {
+	Input     *v1.CplaneInputPolicy
 	Name      string
 	Behaviors []uint16
 	Reason    error
@@ -411,8 +415,10 @@ func (s *Store) Unloadable() []UnloadableManifest {
 			m, mErr := s.readManifest(name)
 			behaviors := []uint16(nil)
 			var scope Scope
+			var input *v1.CplaneInputPolicy
 			if mErr == nil {
 				behaviors = m.Behaviors
+				input = m.Input
 				// A current-version manifest that parsed still carries its
 				// scope even when the module will not load, so the grant can
 				// be reserved. A version too old to have a scope leaves it
@@ -431,7 +437,7 @@ func (s *Store) Unloadable() []UnloadableManifest {
 					}
 				}
 			}
-			out = append(out, UnloadableManifest{Name: name, Behaviors: behaviors, Reason: err, Scope: scope})
+			out = append(out, UnloadableManifest{Name: name, Input: input, Behaviors: behaviors, Reason: err, Scope: scope})
 		}
 	}
 	return out
@@ -537,6 +543,7 @@ func (s *Store) load(name string) (Registration, error) {
 	}
 
 	reg := Registration{
+		Input:        m.Input,
 		Name:         m.Name,
 		Module:       module,
 		Config:       m.Config,

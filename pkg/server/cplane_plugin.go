@@ -106,6 +106,7 @@ func (s *PluginServer) CplanePluginRegister(
 	}
 
 	reg := cplane.Registration{
+		Input:        msg.GetInput(),
 		Name:         msg.GetName(),
 		Module:       msg.GetWasm(),
 		Config:       msg.GetConfig(),
@@ -185,7 +186,8 @@ func (s *PluginServer) CplanePluginStats(
 			behaviors = append(behaviors, uint32(b))
 		}
 		out = append(out, &v1.CplanePluginStat{
-			Name:                st.Name,
+			Name:  st.Name,
+			Input: st.Input, InputReady: st.InputReady, InputFault: st.InputFault, CleanupPending: st.CleanupPending, DesiredRevision: st.DesiredRevision, AppliedRevision: st.AppliedRevision, OutputFailure: st.OutputFailure,
 			Capabilities:        st.Capabilities,
 			EndpointBehaviors:   behaviors,
 			DroppedEvents:       st.DroppedEvents,

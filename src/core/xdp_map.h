@@ -228,9 +228,9 @@ struct {
 // userspace can read/write the owner alongside each entry. HASH (not
 // LPM_TRIE) because we look up exact entries, not longest-prefix matches.
 // Value matches struct aux_owner -- a 64-byte null-terminated tag like
-// "rpc:v1" or "bgp:v1:asn=65000:rd=65000:100". BPF programs never read
-// these maps; they exist only for userspace conflict detection and
-// owner-scoped flush.
+// "rpc:v1" or "bgp:v1:asn=65000:rd=65000:100". Userspace uses these
+// for conflict detection and owner-scoped flush. RX learning also reads
+// bd_peer_owner_map to avoid dynamic references to plugin-controlled peers.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, struct lpm_key_v6);
@@ -261,6 +261,34 @@ struct {
     __type(value, struct aux_owner);
     __uint(max_entries, 4096);
 } ecmp_group_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct mup_uplink_v4_key);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 4096);
+} mup_uplink_v4_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct mup_uplink_v6_key);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 4096);
+} mup_uplink_v6_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct fdb_key);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 8192);
+} fdb_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct bd_peer_key);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 1024);
+} bd_peer_owner_map SEC(".maps");
 
 // End.B6 policy: stored in sid_aux_map (b6_policy variant), no separate map needed.
 

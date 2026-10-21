@@ -851,7 +851,7 @@ func TestValidatePluginCollection_BTF_MissingOK(t *testing.T) {
 // downgrade it: a plugin that writes these forges the action the aux
 // discriminator reads.
 func TestValidatePluginROWrites_IntegrityMapWriteIsAlwaysFatal(t *testing.T) {
-	for _, m := range []string{"tailcall_ctx_map", "sid_aux_map", "sid_function_map"} {
+	for _, m := range []string{"tailcall_ctx_map", "sid_aux_map", "sid_function_map", "fdb_map", "bd_peer_map", "bd_peer_reverse_map", "mup_uplink_v4_map", "mup_uplink_v6_map"} {
 		lead := asm.Instructions{
 			asm.LoadMapPtr(asm.R1, 0).WithReference(m),
 			asm.StoreImm(asm.R1, 0, 99, asm.Word),
@@ -875,10 +875,10 @@ func TestValidatePluginROWrites_IntegrityMapWriteIsAlwaysFatal(t *testing.T) {
 // warn rollout.
 func TestValidatePluginROWrites_MigrationMapStaysDowngradable(t *testing.T) {
 	lead := asm.Instructions{
-		asm.LoadMapPtr(asm.R1, 0).WithReference("fdb_map"),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("headend_l2_map"),
 		asm.StoreImm(asm.R1, 0, 99, asm.Word),
 	}
-	err := ValidatePluginProgram(roSpec("writes_fdb", lead), roSet())
+	err := ValidatePluginProgram(roSpec("writes_headend_l2", lead), roSet())
 	if err == nil {
 		t.Fatal("expected the write to be rejected in strict mode")
 	}
@@ -886,7 +886,7 @@ func TestValidatePluginROWrites_MigrationMapStaysDowngradable(t *testing.T) {
 		t.Errorf("want errors.Is(ErrPluginROWrite), got %v", err)
 	}
 	if errors.Is(err, ErrPluginIntegrityMapWrite) {
-		t.Errorf("fdb_map is not an integrity map; it must stay warn-downgradable, got %v", err)
+		t.Errorf("headend_l2_map is not an integrity map; it must stay warn-downgradable, got %v", err)
 	}
 }
 
@@ -987,13 +987,13 @@ func TestValidatePluginROWrites_MapDeleteHelperOnROMapIsFlagged(t *testing.T) {
 	// bpf_map_delete_elem on a shared RO map is a write and is refused; on a
 	// non-integrity RO map it is a plain RO violation (warn-downgradable).
 	prog := buildSpec("del", ebpf.XDP, asm.Instructions{
-		asm.LoadMapPtr(asm.R1, 0).WithReference("fdb_map"),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("headend_l2_map"),
 		asm.Mov.Reg(asm.R2, asm.R10),
 		asm.FnMapDeleteElem.Call(),
 		callToSymbol(SymTailcallEpilogue),
 		asm.Return(),
 	})
-	ro := map[string]struct{}{"fdb_map": {}}
+	ro := map[string]struct{}{"headend_l2_map": {}}
 	err := ValidatePluginProgram(prog, ro)
 	if err == nil {
 		t.Fatal("bpf_map_delete_elem on an RO map was not caught")

@@ -111,6 +111,8 @@ message PluginRoute {
   repeated PluginUnknownAttribute unknown_attrs = 16;
   // Full GoBGP packet model, available alongside the legacy flattened fields.
   PluginBGPPath bgp_path = 17;
+  // Operator-authorized input memberships; supplied only with input API v1.
+  repeated string contexts = 18;
 }
 
 message PluginBGPPath {
@@ -199,6 +201,8 @@ enum PluginEventDisposition {
   // only signal a host could act on would be a trap -- which means the
   // instance dies and replays, repeatedly, on the same poisoned event.
   PLUGIN_EVENT_DISPOSITION_QUARANTINE = 2;
+  // Input is incomplete. Stop writes and clear owned outputs until full replay.
+  PLUGIN_EVENT_DISPOSITION_INPUT_INCOMPLETE = 3;
 }
 
 // PluginEventResult reports the disposition of one event. A plugin that
@@ -218,6 +222,7 @@ message PluginEventStatus {
 // PluginApplyKind selects which desired set a transaction declares.
 enum PluginApplyKind {
   PLUGIN_APPLY_KIND_UNSPECIFIED = 0;
+  PLUGIN_APPLY_KIND_COMPOSITION = 5;
   // The plugin's headend_v4_map entries.
   PLUGIN_APPLY_KIND_HEADEND_V4 = 1;
   // The plugin's headend_v6_map entries.
@@ -337,6 +342,11 @@ message PluginApplyChunk {
   repeated PluginHeadendEntry headend_entries = 1;
   repeated PluginAdvertisedRoute advertised_routes = 2;
   repeated PluginLocalSid local_sids = 3;
+  repeated PluginForwardingHeadend forwarding_headends = 4;
+  repeated PluginMupUplink mup_uplinks = 5;
+  repeated PluginEvpnForward evpn_forwards = 6;
+  repeated PluginBgpAdvertisement bgp_advertisements = 7;
+  uint64 desired_revision = 8;
 }
 
 // PluginConfig is the operator's configuration for a plugin instance,
@@ -348,4 +358,43 @@ message PluginApplyChunk {
 // operator supplies the encoded bytes.
 message PluginConfig {
   bytes payload = 1;
+}
+
+// Explicitly selected by registration.input.version, never by an import.
+message PluginInputConfig {
+  uint32 version = 1;
+  bytes payload = 2;
+  string codec = 3;
+  repeated PluginInputContext contexts = 4;
+}
+
+message PluginInputContext {
+  string name = 1;
+  repeated string families = 2;
+}
+
+message PluginForwardingHeadend {
+  string context = 1;
+  PluginHeadendEntry entry = 2;
+}
+message PluginMupUplink {
+  string context = 1;
+  string endpoint = 2;
+  uint32 teid = 3;
+  uint32 teid_bits = 4;
+  repeated string segments = 5;
+  string src_addr = 6;
+}
+message PluginEvpnForward {
+  string context = 1;
+  string mac = 2;
+  repeated string segments = 3;
+  string src_addr = 4;
+  string remote_src = 5;
+  bool flood = 6;
+}
+message PluginBgpAdvertisement {
+  string context = 1;
+  string vrf = 2;
+  PluginBGPPath path = 3;
 }

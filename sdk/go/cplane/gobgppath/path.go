@@ -1,4 +1,4 @@
-// Package gobgppath decodes the received packet model using GoBGP's native
+// Package gobgppath encodes and decodes packet models using GoBGP's native
 // NLRI and attribute types. It does not expose GoBGP server operations.
 package gobgppath
 
@@ -13,7 +13,7 @@ import (
 var (
 	ErrUnavailable = errors.New("gobgppath: full BGP input unavailable")
 	ErrCodec       = errors.New("gobgppath: unsupported codec")
-	ErrEncoding    = errors.New("gobgppath: host could not encode path")
+	ErrEncoding    = errors.New("gobgppath: could not encode path")
 	ErrMalformed   = errors.New("gobgppath: malformed path")
 )
 
@@ -43,8 +43,35 @@ func Decode(r cplane.Route) (out *Path, err error) {
 	if !ok || len(p.NLRI) == 0 {
 		return nil, fmt.Errorf("%w: missing family, route key, NLRI or peer", ErrMalformed)
 	}
-	// The packet library is an independent parser. Turn a malformed packet's
-	// bounds panic into a rejected event rather than trapping the whole guest.
+	out, err = decodePacket(p, !r.Withdraw)
+	if err != nil {
+		return nil, err
+	}
+	out.Key, out.Withdraw = key, r.Withdraw
+	return out, nil
+}
+
+// DecodePacket decodes a packet for an outgoing advertisement without requiring
+// host-assigned route identity or a peer. The returned model owns its buffers.
+// Use Decode for received routes whose identity must also be validated.
+func DecodePacket(p *cplane.BGPPath) (*Path, error) {
+	return decodePacket(p, true)
+}
+
+func decodePacket(p *cplane.BGPPath, attributes bool) (out *Path, err error) {
+	if p == nil {
+		return nil, ErrUnavailable
+	}
+	if p.Codec != cplane.BGPPathCodec {
+		return nil, fmt.Errorf("%w: %q", ErrCodec, p.Codec)
+	}
+	if p.EncodingError != "" {
+		return nil, fmt.Errorf("%w: %s", ErrEncoding, p.EncodingError)
+	}
+	if p.AFI == 0 || p.SAFI == 0 || len(p.NLRI) == 0 {
+		return nil, fmt.Errorf("%w: missing family or NLRI", ErrMalformed)
+	}
+	// Turn malformed packet bounds panics into rejected paths, not guest traps.
 	defer func() {
 		if v := recover(); v != nil {
 			out, err = nil, fmt.Errorf("%w: %v", ErrMalformed, v)
@@ -57,12 +84,12 @@ func Decode(r cplane.Route) (out *Path, err error) {
 	if nlri.Len() != len(p.NLRI) {
 		return nil, fmt.Errorf("%w: NLRI length", ErrMalformed)
 	}
-	out = &Path{Key: key, Withdraw: r.Withdraw, NLRI: nlri, Metadata: p.Metadata}
+	out = &Path{NLRI: nlri, Metadata: p.Metadata}
 	if p.Metadata.Best != nil {
 		best := *p.Metadata.Best
 		out.Metadata.Best = &best
 	}
-	if r.Withdraw {
+	if !attributes {
 		return out, nil
 	}
 	for i, raw := range p.Attributes {

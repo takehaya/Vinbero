@@ -156,7 +156,7 @@ func (a *Applier) resetEVPNGroups() {
 	// they too survive a restart, and a MAC that the replayed rib no
 	// longer carries would keep aiming at an index a different segment may
 	// be handed later.
-	sweepOK := true
+	sweepOK := a.sweepOwnedEVPNEntries()
 	if fdbs, err := a.fdbBd.ListFdb(); err != nil {
 		a.logger.Error("list fdb; stale EVPN aliasing pointers may be left behind", zap.Error(err))
 		sweepOK = false
@@ -166,7 +166,16 @@ func (a *Applier) resetEVPNGroups() {
 				e.PeerIndex >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
 				continue
 			}
-			if derr := a.fdbBd.DeleteFdb(k.BdId, net.HardwareAddr(k.Mac[:])); derr != nil {
+			tag, owned, oerr := a.fdbBd.GetFdbOwner(k.BdId, net.HardwareAddr(k.Mac[:]))
+			if oerr != nil {
+				a.logger.Error("read EVPN FDB owner", zap.Error(oerr))
+				sweepOK = false
+				continue
+			}
+			if owned && tag != bpf.OwnerBGPEVPN(a.localASN) {
+				continue
+			}
+			if derr := a.fdbBd.DeleteFdbOwned(k.BdId, net.HardwareAddr(k.Mac[:]), bpf.OwnerBGPEVPN(a.localASN)); derr != nil {
 				a.logger.Error("sweep stale EVPN aliasing FDB entry",
 					zap.Uint16("bd_id", k.BdId), zap.Error(derr))
 				sweepOK = false
@@ -192,7 +201,16 @@ func (a *Applier) resetEVPNGroups() {
 			if k.Index < bpf.EsPeerIndexBase || k.Index >= bpf.EsPeerIndexBase+bpf.MaxEsPeersPerBd {
 				continue
 			}
-			if existed, derr := a.fdbBd.DeleteBdPeer(k.BdId, k.Index); derr != nil && existed {
+			tag, owned, oerr := a.fdbBd.GetBdPeerOwner(k.BdId, k.Index)
+			if oerr != nil {
+				a.logger.Error("read EVPN peer owner", zap.Error(oerr))
+				sweepOK = false
+				continue
+			}
+			if owned && tag != bpf.OwnerBGPEVPN(a.localASN) {
+				continue
+			}
+			if existed, derr := a.fdbBd.DeleteBdPeerOwned(k.BdId, k.Index, bpf.OwnerBGPEVPN(a.localASN)); derr != nil && existed {
 				a.logger.Error("sweep stale EVPN ES peer",
 					zap.Uint16("bd_id", k.BdId), zap.Uint16("index", k.Index), zap.Error(derr))
 				sweepOK = false
@@ -600,7 +618,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	}
 	trigger.GroupId = d.groupID
 	var noRemoteSrc [bpf.IPv6AddrLen]byte
-	if err := a.fdbBd.CreateBdPeer(dk.bdID, d.peerIdx, trigger, dk.esi, noRemoteSrc, false); err != nil {
+	if err := a.fdbBd.CreateBdPeerOwned(dk.bdID, d.peerIdx, trigger, dk.esi, noRemoteSrc, false, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 		a.logger.Error("install EVPN ES peer",
 			zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
 		fail()
@@ -665,7 +683,7 @@ func (a *Applier) teardownESDest(dk esDestKey, d *esDest) bool {
 	// DeleteBdPeer itself reports whether the entry existed, so no
 	// pre-check listing is needed: an already-free slot (a failed
 	// CreateBdPeer rolled its own entry away) is not a teardown failure.
-	if existed, err := a.fdbBd.DeleteBdPeer(dk.bdID, d.peerIdx); err != nil && existed {
+	if existed, err := a.fdbBd.DeleteBdPeerOwned(dk.bdID, d.peerIdx, bpf.OwnerBGPEVPN(a.localASN)); err != nil && existed {
 		a.logger.Error("delete EVPN ES peer",
 			zap.Uint16("bd_id", dk.bdID), zap.Uint16("index", d.peerIdx), zap.Error(err))
 		return false
@@ -690,7 +708,7 @@ func (a *Applier) repointSegmentMacs(dk esDestKey, toIdx uint16) bool {
 	ok := true
 	a.forEachSegmentMac(dk, func(fk evpnFdbKey, st evpnFdbState) {
 		fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: toIdx, BdId: st.bdID, Esi: st.esi}
-		if err := a.fdbBd.CreateFdb(st.bdID, st.mac, fdb); err != nil {
+		if err := a.fdbBd.CreateFdbOwned(st.bdID, st.mac, fdb, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 			a.logger.Error("repoint EVPN MAC to ES peer",
 				zap.String("mac", st.mac.String()), zap.Error(err))
 			ok = false
@@ -745,7 +763,7 @@ func (a *Applier) sweepSegmentMacs(dk esDestKey) bool {
 			return
 		}
 		fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: ps.index, BdId: repSt.bdID, Esi: repSt.esi}
-		if err := a.fdbBd.CreateFdb(repSt.bdID, repSt.mac, fdb); err != nil {
+		if err := a.fdbBd.CreateFdbOwned(repSt.bdID, repSt.mac, fdb, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 			a.logger.Error("repoint EVPN MAC to per-PE peer",
 				zap.String("mac", repSt.mac.String()), zap.Error(err))
 			ok = false

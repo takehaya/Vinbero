@@ -52,14 +52,16 @@ type delivery struct {
 // anyway: a WebAssembly instance has a single linear memory and a single
 // allocator behind it.
 type worker struct {
-	name     string
-	logger   *zap.Logger
-	queue    chan delivery
-	stop     chan struct{}
-	done     chan struct{}
-	handler  func(ctx context.Context, batch []byte) ([]byte, error)
-	onFail   func(err error)
-	onStatus func(*v1.PluginEventStatus)
+	prepare      func(*v1.PluginEventBatch) (*v1.PluginEventBatch, error)
+	onInputError func(error)
+	name         string
+	logger       *zap.Logger
+	queue        chan delivery
+	stop         chan struct{}
+	done         chan struct{}
+	handler      func(ctx context.Context, batch []byte) ([]byte, error)
+	onFail       func(err error)
+	onStatus     func(*v1.PluginEventStatus)
 	// tick fires the plugin's periodic callback. It runs on this
 	// goroutine like everything else, so a tick can never overlap an event
 	// batch inside the guest.
@@ -238,6 +240,16 @@ func (w *worker) run() {
 
 // deliver hands one batch to the guest and acts on what comes back.
 func (w *worker) deliver(batch *v1.PluginEventBatch) bool {
+	if w.prepare != nil {
+		prepared, err := w.prepare(batch)
+		if err != nil {
+			if w.onInputError != nil {
+				w.onInputError(err)
+			}
+			return false
+		}
+		batch = prepared
+	}
 	raw, err := proto.Marshal(batch)
 	if err != nil {
 		w.logger.Error("encoding a plugin event batch",

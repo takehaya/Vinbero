@@ -25,17 +25,21 @@ const (
 // the FDB (MAC -> peer), the per-PE bd_peer encap entry, and the Ethernet
 // Segment (ESI) table that DF election drives.
 type fdbBdOps interface {
-	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
-	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
-	CreateBdPeer(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) error
+	ListFdbOwners() (map[bpf.FdbKey]bpf.OwnerTag, error)
+	ListBdPeerOwners() (map[bpf.BdPeerKey]bpf.OwnerTag, error)
+	GetFdbOwner(bdID uint16, mac net.HardwareAddr) (bpf.OwnerTag, bool, error)
+	GetBdPeerOwner(bdID, index uint16) (bpf.OwnerTag, bool, error)
+	CreateFdbOwned(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry, owner bpf.OwnerTag) error
+	DeleteFdbOwned(bdID uint16, mac net.HardwareAddr, owner bpf.OwnerTag) error
+	CreateBdPeerOwned(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool, owner bpf.OwnerTag) error
 	// DeleteBdPeer reports whether the forward entry existed; false with a
 	// nil error is an already-free slot, and an error is always paired with
 	// the occupancy the caller's ledger must keep.
-	DeleteBdPeer(bdID, index uint16) (bool, error)
+	DeleteBdPeerOwned(bdID, index uint16, owner bpf.OwnerTag) (bool, error)
 	// CreateBdPeerAtFreeIndex probes for the lowest free index and installs
 	// the peer under one critical section, so a concurrent writer (the
 	// operator RPC path) cannot land on the same slot.
-	CreateBdPeerAtFreeIndex(bdID uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) (uint16, error)
+	CreateBdPeerAtFreeIndexOwned(bdID uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool, owner bpf.OwnerTag) (uint16, error)
 	// FindFreeBdPeerIndex returns the lowest bd_peer index not in use in the
 	// real map, so a BGP-allocated peer never collides with an operator-created
 	// or restart-pinned entry.
@@ -176,7 +180,6 @@ func newEVPNTable() *evpnTable {
 		esWithdrawn: make(map[esMemberKey]struct{}),
 	}
 }
-
 
 // releaseIndex drops one reference to key's peer and reports whether the peer
 // is now unreferenced (so the caller deletes the bd_peer).
@@ -385,7 +388,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 	if st, tracked := a.evpn.peers[pk]; tracked {
 		// The PE already has a peer in this BD: refresh it in place and
 		// bump the reference count.
-		if err := a.fdbBd.CreateBdPeer(bdID, st.index, entry, r.ESI, rsrc, true); err != nil {
+		if err := a.fdbBd.CreateBdPeerOwned(bdID, st.index, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 			a.logger.Error("install EVPN bd_peer",
 				zap.Uint16("bd_id", bdID), zap.Error(err))
 			return
@@ -396,7 +399,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		// Probe-and-create runs inside one critical section: probing here
 		// and creating later would race the operator RPC path onto the
 		// same free slot (both allocate from the same operator range).
-		newIdx, err := a.fdbBd.CreateBdPeerAtFreeIndex(bdID, entry, r.ESI, rsrc, true)
+		newIdx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN))
 		if err != nil {
 			a.logger.Error("install EVPN bd_peer",
 				zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID), zap.Error(err))
@@ -415,10 +418,10 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		fdbIdx = d.peerIdx
 	}
 	fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: fdbIdx, BdId: bdID, Esi: r.ESI}
-	if err := a.fdbBd.CreateFdb(bdID, mac, fdb); err != nil {
+	if err := a.fdbBd.CreateFdbOwned(bdID, mac, fdb, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 		a.logger.Error("install EVPN FDB", zap.String("mac", r.MAC), zap.Error(err))
 		if rIdx, gone := a.evpn.releaseIndex(pk); gone {
-			if existed, derr := a.fdbBd.DeleteBdPeer(bdID, rIdx); derr != nil && existed {
+			if existed, derr := a.fdbBd.DeleteBdPeerOwned(bdID, rIdx, bpf.OwnerBGPEVPN(a.localASN)); derr != nil && existed {
 				// Same recovery contract as withdrawEVPNMac: the peer entry
 				// survived the failed rollback, so re-pin the index (refs 0)
 				// -- releasing it would orphan the slot and a re-learn would
@@ -502,7 +505,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 	if sfk, sst, ok := a.survivingContrib(mk, fk); ok {
 		if idx, resolvable := a.fdbTargetIndex(sst); resolvable {
 			fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: idx, BdId: sst.bdID, Esi: sst.esi}
-			if err := a.fdbBd.CreateFdb(sst.bdID, sst.mac, fdb); err != nil {
+			if err := a.fdbBd.CreateFdbOwned(sst.bdID, sst.mac, fdb, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 				// The FDB entry still points at the withdrawn contribution's
 				// target. Keep every ledger so a later retry can hand off.
 				a.logger.Error("hand EVPN MAC to surviving PE",
@@ -516,7 +519,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 			a.logger.Error("EVPN MAC survivor has no resolvable peer",
 				zap.String("mac", st.mac.String()), zap.String("rd", sfk.rd))
 		}
-	} else if err := a.fdbBd.DeleteFdb(st.bdID, st.mac); err != nil {
+	} else if err := a.fdbBd.DeleteFdbOwned(st.bdID, st.mac, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 		// The FDB entry is still in the map. Keep the reverse index so a
 		// later retry can find and remove it; dropping it here would orphan
 		// the map entry and the peer reference it holds.
@@ -533,7 +536,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 	}
 	a.unindexMACByES(fk, st)
 	if idx, gone := a.evpn.releaseIndex(st.peer); gone {
-		if existed, err := a.fdbBd.DeleteBdPeer(st.bdID, idx); err != nil && existed {
+		if existed, err := a.fdbBd.DeleteBdPeerOwned(st.bdID, idx, bpf.OwnerBGPEVPN(a.localASN)); err != nil && existed {
 			// The bd_peer is still in the map but releaseIndex already
 			// dropped it from the ledger. Re-pin the index (refs 0) so a
 			// re-learn of this PE reuses the surviving entry instead of
@@ -633,7 +636,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 	// therefore unused here. Probe-and-create is one critical section for the
 	// same reason as RT2.
 	var noRemoteSrc [bpf.IPv6AddrLen]byte
-	idx, err := a.fdbBd.CreateBdPeerAtFreeIndex(bdID, entry, r.ESI, noRemoteSrc, false)
+	idx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, noRemoteSrc, false, bpf.OwnerBGPEVPN(a.localASN))
 	if err != nil {
 		a.logger.Error("install EVPN BUM bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
@@ -656,7 +659,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 // keeps failing the same way) until the slot is reused, when the retry
 // would delete an unrelated peer.
 func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) bool {
-	if existed, err := a.fdbBd.DeleteBdPeer(st.bdID, st.index); err != nil && existed {
+	if existed, err := a.fdbBd.DeleteBdPeerOwned(st.bdID, st.index, bpf.OwnerBGPEVPN(a.localASN)); err != nil && existed {
 		a.logger.Error("delete EVPN BUM bd_peer",
 			zap.Uint16("bd_id", st.bdID), zap.Uint16("index", st.index), zap.Error(err))
 		return false

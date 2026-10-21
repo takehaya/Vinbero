@@ -50,6 +50,7 @@ const ABIVersion = 1
 
 // InputFeatureBGPPath is a read-only input capability, not a write grant.
 const InputFeatureBGPPath uint64 = 1
+const InputFeatureContexts uint64 = 2
 
 // HostModule is the import module name for Vinbero's capability functions.
 // WASI runtime services are linked separately as wasi_snapshot_preview1.

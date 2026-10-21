@@ -112,6 +112,11 @@ type MapOperations struct {
 	headendV4Owners   *entryOwnerMap
 	headendV6Owners   *entryOwnerMap
 	ecmpGroupOwners   *entryOwnerMap
+	mupUplinkV4Owners *entryOwnerMap
+	mupUplinkV6Owners *entryOwnerMap
+	fdbOwners         *entryOwnerMap
+	bdPeerOwners      *entryOwnerMap
+	controlLifecycle  sync.Mutex
 
 	// sidLifecycle serializes the read-modify-write sequences that bind a
 	// SID entry to its aux index: the owner check, the exact-entry read,
@@ -156,6 +161,10 @@ func NewMapOperations(objs *BpfObjects) *MapOperations {
 		headendV4Owners:   newEntryOwnerMap(objs.HeadendV4OwnerMap),
 		headendV6Owners:   newEntryOwnerMap(objs.HeadendV6OwnerMap),
 		ecmpGroupOwners:   newEntryOwnerMap(objs.EcmpGroupOwnerMap),
+		mupUplinkV4Owners: newEntryOwnerMap(objs.MupUplinkV4OwnerMap),
+		mupUplinkV6Owners: newEntryOwnerMap(objs.MupUplinkV6OwnerMap),
+		fdbOwners:         newEntryOwnerMap(objs.FdbOwnerMap),
+		bdPeerOwners:      newEntryOwnerMap(objs.BdPeerOwnerMap),
 	}
 }
 
@@ -336,8 +345,9 @@ var ErrOwnerMismatch = errors.New("aux owner mismatch")
 // generic Internal that other write failures use.
 var ErrAuxPayloadTooLarge = errors.New("plugin aux payload exceeds SidAuxPluginRawMax")
 
-// ErrBdPeerForwardLeaked marks a failed bd_peer create that left the forward
-// map in an unintended state: a companion write failed and rolling the
+// ErrBdPeerForwardLeaked also marks owned creates that retain companion or
+// owner cleanup state; callers must retain the returned index for cleanup.
+// For the forward map this means an unintended state: a companion write failed and rolling the
 // forward entry back also failed. The slot keeps its occupant (a new slot
 // keeps flooding BUM toward the half-created peer) and stays out of index
 // circulation because the free-index probe sees it, so the only recovery is
@@ -1830,33 +1840,14 @@ func buildMupUplinkV4Key(instance uint32, endpoint string, teid uint32, teidPref
 // H.Encaps headend_entry; set entry.ArgsOffset = MupArgsOffsetNone for a direct
 // (End.DT4) target so Args.Mob.Session is not patched into the outgoing SID.
 func (m *MapOperations) CreateMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *HeadendEntry) error {
-	key, err := buildMupUplinkV4Key(instance, endpoint, teid, teidPrefixBits)
-	if err != nil {
-		return err
-	}
-	// F-TEID lookups happen inside behavior programs, which bypass the
-	// dispatcher's ECMP group resolution, so a group reference here would
-	// silently never resolve. Force the entry terminal.
-	pe := *entry
-	pe.GroupId = EcmpGroupNone
-	if err := m.objs.MupUplinkV4Map.Put(key, &pe); err != nil {
-		return fmt.Errorf("failed to put mup uplink v4 entry: %w", err)
-	}
-	return nil
+	return m.CreateMupUplinkV4Owned(instance, endpoint, teid, teidPrefixBits, entry, OwnerRPC)
 }
 
 // DeleteMupUplinkV4 removes an F-TEID uplink session entry. The {endpoint, teid,
 // teidPrefixBits} tuple must match an installed prefix. A missing key is treated
 // as success so a double withdraw is idempotent.
 func (m *MapOperations) DeleteMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
-	key, err := buildMupUplinkV4Key(instance, endpoint, teid, teidPrefixBits)
-	if err != nil {
-		return err
-	}
-	if err := deleteMapKey(m.objs.MupUplinkV4Map, key); err != nil {
-		return fmt.Errorf("failed to delete mup uplink v4 entry: %w", err)
-	}
-	return nil
+	return m.DeleteMupUplinkV4Owned(instance, endpoint, teid, teidPrefixBits, OwnerRPC)
 }
 
 // buildMupUplinkV6Key assembles the LPM_TRIE key for mup_uplink_v6_map: the
@@ -1892,31 +1883,13 @@ func buildMupUplinkV6Key(instance uint32, endpoint string, teid uint32, teidPref
 // T2ST, IPv6 endpoint): the IPv6 counterpart of CreateMupUplinkV4, read by the
 // H.M.GTP6.D_TEID behavior. See CreateMupUplinkV4 for the entry semantics.
 func (m *MapOperations) CreateMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *HeadendEntry) error {
-	key, err := buildMupUplinkV6Key(instance, endpoint, teid, teidPrefixBits)
-	if err != nil {
-		return err
-	}
-	// Same terminal forcing as CreateMupUplinkV4: F-TEID lookups bypass
-	// the dispatcher's ECMP group resolution.
-	pe := *entry
-	pe.GroupId = EcmpGroupNone
-	if err := m.objs.MupUplinkV6Map.Put(key, &pe); err != nil {
-		return fmt.Errorf("failed to put mup uplink v6 entry: %w", err)
-	}
-	return nil
+	return m.CreateMupUplinkV6Owned(instance, endpoint, teid, teidPrefixBits, entry, OwnerRPC)
 }
 
 // DeleteMupUplinkV6 removes an F-TEID uplink session entry over GTP6. A missing
 // key is treated as success so a double withdraw is idempotent.
 func (m *MapOperations) DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
-	key, err := buildMupUplinkV6Key(instance, endpoint, teid, teidPrefixBits)
-	if err != nil {
-		return err
-	}
-	if err := deleteMapKey(m.objs.MupUplinkV6Map, key); err != nil {
-		return fmt.Errorf("failed to delete mup uplink v6 entry: %w", err)
-	}
-	return nil
+	return m.DeleteMupUplinkV6Owned(instance, endpoint, teid, teidPrefixBits, OwnerRPC)
 }
 
 // ===== MUP Uplink Instance Map Operations =====
@@ -2603,20 +2576,12 @@ func (m *MapOperations) ListHeadendL2() (map[HeadendL2Key]*HeadendEntry, error) 
 
 // CreateFdb adds an FDB entry to the map
 func (m *MapOperations) CreateFdb(bdID uint16, mac net.HardwareAddr, entry *FdbEntry) error {
-	key := buildFdbKey(bdID, mac)
-	if err := m.objs.FdbMap.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put fdb entry: %w", err)
-	}
-	return nil
+	return m.CreateFdbOwned(bdID, mac, entry, OwnerRPC)
 }
 
 // DeleteFdb removes an FDB entry from the map
 func (m *MapOperations) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
-	key := buildFdbKey(bdID, mac)
-	if err := m.objs.FdbMap.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete fdb entry: %w", err)
-	}
-	return nil
+	return m.DeleteFdbOwned(bdID, mac, OwnerRPC)
 }
 
 // GetFdb retrieves an FDB entry from the map
@@ -2697,6 +2662,8 @@ type AgedFdbEntry struct {
 // It returns the entries actually deleted so the caller can withdraw their RT2
 // advertisements; len() is the number deleted.
 func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
+	m.controlLifecycle.Lock()
+	defer m.controlLifecycle.Unlock()
 	var key FdbKey
 	var entry FdbEntry
 	iter := m.objs.FdbMap.Iterate()
@@ -2726,7 +2693,24 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 	deleted := make([]AgedFdbEntry, 0, len(toDelete))
 	for _, c := range toDelete {
 		k := c.key
+		tag, owned, oerr := m.fdbOwners.Lookup(&k)
+		if oerr != nil {
+			return deleted, oerr
+		}
+		if owned && tag != OwnerRPC {
+			continue
+		}
+		var current FdbEntry
+		if err := m.objs.FdbMap.Lookup(&k, &current); err != nil {
+			continue
+		}
+		if current.IsStatic != 0 || current.LastSeen == 0 || current.LastSeen > now || now-current.LastSeen <= maxAgeNs {
+			continue
+		}
 		if err := m.objs.FdbMap.Delete(&k); err == nil {
+			if err := m.fdbOwners.Delete(&k); err != nil {
+				return deleted, err
+			}
 			deleted = append(deleted, AgedFdbEntry{
 				BDID:     k.BdId,
 				MAC:      net.HardwareAddr(append([]byte(nil), k.Mac[:]...)),
@@ -2764,28 +2748,11 @@ func currentKtimeNs() uint64 {
 // concurrent creates cannot pick the same slot and silently overwrite each
 // other. Returns the chosen index.
 func (m *MapOperations) CreateBdPeerAtFreeIndex(bdID uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) (uint16, error) {
-	m.bdPeerLifecycle.Lock()
-	defer m.bdPeerLifecycle.Unlock()
-	index := m.findFreeBdPeerIndexLocked(bdID)
-	if index >= MaxBumNexthops {
-		return index, fmt.Errorf("bd %d: maximum number of peers (%d) reached", bdID, MaxBumNexthops)
-	}
-	// A free forward slot can still carry companions left by an older
-	// generation's partial failure or an external flush (a stale reverse
-	// entry would misattribute the new peer's RX split-horizon the moment
-	// the slot is reused, and nothing else can see it -- the startup sweep
-	// enumerates via the forward map). Sweep them before installing, and
-	// refuse the slot if the sweep fails.
-	if _, cerr := m.deleteBdPeerLocked(bdID, index); cerr != nil {
-		return index, fmt.Errorf("sweep stale companions of free slot {bd %d, index %d}: %w", bdID, index, cerr)
-	}
-	return index, m.createBdPeerLocked(bdID, index, entry, esi, remoteSrc, writeReverse)
+	return m.CreateBdPeerAtFreeIndexOwned(bdID, entry, esi, remoteSrc, writeReverse, OwnerRPC)
 }
 
 func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) error {
-	m.bdPeerLifecycle.Lock()
-	defer m.bdPeerLifecycle.Unlock()
-	return m.createBdPeerLocked(bdID, index, entry, esi, remoteSrc, writeReverse)
+	return m.CreateBdPeerOwned(bdID, index, entry, esi, remoteSrc, writeReverse, OwnerRPC)
 }
 
 func (m *MapOperations) createBdPeerLocked(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) error {
@@ -2905,10 +2872,8 @@ func (m *MapOperations) createBdPeerLocked(bdID, index uint16, entry *HeadendEnt
 // cleanup failure on a slot that is in fact free must not make the caller
 // re-pin it, or the next peer allocated onto the slot collides with the
 // stale ledger.
-func (m *MapOperations) DeleteBdPeer(bdID, index uint16) (existed bool, err error) {
-	m.bdPeerLifecycle.Lock()
-	defer m.bdPeerLifecycle.Unlock()
-	return m.deleteBdPeerLocked(bdID, index)
+func (m *MapOperations) DeleteBdPeer(bdID, index uint16) (bool, error) {
+	return m.DeleteBdPeerOwned(bdID, index, OwnerRPC)
 }
 
 func (m *MapOperations) deleteBdPeerLocked(bdID, index uint16) (existed bool, err error) {
@@ -3050,7 +3015,7 @@ func (m *MapOperations) DeleteBdPeerIfFirstSegment(bdID, index uint16, seg [IPv6
 	if cur.NumSegments < 1 || cur.Segments[0] != seg {
 		return true, false, nil
 	}
-	ex, derr := m.deleteBdPeerLocked(bdID, index)
+	ex, derr := m.deleteBdPeerOwnedLocked(bdID, index, OwnerRPC)
 	return ex, true, derr
 }
 
@@ -3069,6 +3034,11 @@ func (m *MapOperations) findFreeBdPeerIndexLocked(bdID uint16) uint16 {
 		key := &BdPeerKey{BdId: bdID, Index: i}
 		err := m.objs.BdPeerMap.Lookup(key, &entry)
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			if _, owned, oerr := m.bdPeerOwners.Lookup(key); oerr != nil {
+				return MaxBumNexthops
+			} else if owned {
+				continue
+			}
 			return i
 		}
 		if err != nil {
@@ -3255,6 +3225,13 @@ func (m *MapOperations) FlushFdb(bdID uint16, keepStatic bool) (uint32, error) {
 		if keepStatic && entry.IsStatic != 0 {
 			continue
 		}
+		tag, owned, oerr := m.fdbOwners.Lookup(&key)
+		if oerr != nil {
+			return count, oerr
+		}
+		if owned && tag != OwnerRPC {
+			continue
+		}
 		mac := net.HardwareAddr(key.Mac[:])
 		if err := m.DeleteFdb(key.BdId, mac); err != nil {
 			return count, fmt.Errorf("flush fdb: delete bd=%d mac=%s: %w",
@@ -3298,7 +3275,14 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 		if key.Index >= EsPeerIndexBase {
 			continue
 		}
-		existed, err := m.deleteBdPeerLocked(key.BdId, key.Index)
+		tag, owned, oerr := m.bdPeerOwners.Lookup(&key)
+		if oerr != nil {
+			return count, oerr
+		}
+		if owned && tag != OwnerRPC {
+			continue
+		}
+		existed, err := m.deleteBdPeerOwnedLocked(key.BdId, key.Index, OwnerRPC)
 		if err != nil {
 			return count, fmt.Errorf("flush bd_peer: delete bd=%d idx=%d: %w",
 				key.BdId, key.Index, err)

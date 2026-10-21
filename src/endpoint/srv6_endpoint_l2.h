@@ -43,6 +43,15 @@ static __always_inline void fdb_learn_remote_mac(
     __u16 bd_id,
     __u16 peer_idx)
 {
+    // Plugin peers use controlled FDB entries only. Dynamic references would
+    // survive owner cleanup and could point at a subsequently reused slot.
+    struct bd_peer_key peer_key = { .bd_id = bd_id, .index = peer_idx };
+    struct aux_owner *peer_owner = bpf_map_lookup_elem(&bd_peer_owner_map, &peer_key);
+    if (peer_owner && peer_owner->tag[0] == 'p' && peer_owner->tag[1] == 'l' &&
+        peer_owner->tag[2] == 'u' && peer_owner->tag[3] == 'g' &&
+        peer_owner->tag[4] == 'i' && peer_owner->tag[5] == 'n' && peer_owner->tag[6] == ':')
+        return;
+
     // Only learn unicast source MACs (bit 0 of first octet = multicast flag)
     if (inner_eth->h_source[0] & 0x01)
         return;
@@ -52,6 +61,9 @@ static __always_inline void fdb_learn_remote_mac(
 
     // Check if existing entry already matches — avoid redundant map write
     struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &learn_key);
+    // Control-plane entries must not be replaced by data-plane learning.
+    if (existing && existing->is_static)
+        return;
     if (existing && existing->is_remote && existing->peer_index == peer_idx) {
         // Refresh timestamp for existing dynamic entry
         if (!existing->is_static)
@@ -75,7 +87,12 @@ static __always_inline void fdb_learn_remote_mac(
         .bd_id = bd_id,
         .last_seen = bpf_ktime_get_ns(),
     };
-    bpf_map_update_elem(&fdb_map, &learn_key, &learn_val, BPF_ANY);
+    // HASH updates replace elements atomically. Updating the looked-up
+    // dynamic value cannot overwrite a newer userspace control entry.
+    if (existing)
+        *existing = learn_val;
+    else
+        bpf_map_update_elem(&fdb_map, &learn_key, &learn_val, BPF_NOEXIST);
     DEBUG_PRINT("FDB: learned remote MAC, bd_id=%d peer_index=%d\n", bd_id, peer_idx);
 }
 

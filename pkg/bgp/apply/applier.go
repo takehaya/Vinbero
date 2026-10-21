@@ -46,10 +46,10 @@ func WithHeadendWriter(writer headend.Writer) Option {
 // downlink path reuses headendOps (H.Encaps into headend_v4_map), and the
 // uplink gate is an ordinary headend_v4_map entry.
 type mupOps interface {
-	CreateMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
-	DeleteMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error
-	CreateMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry) error
-	DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error
+	CreateMupUplinkV4Owned(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error
+	DeleteMupUplinkV4Owned(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, owner bpf.OwnerTag) error
+	CreateMupUplinkV6Owned(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error
+	DeleteMupUplinkV6Owned(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, owner bpf.OwnerTag) error
 }
 
 // dataPlane is the BPF map surface the applier writes: headend encap
@@ -112,6 +112,7 @@ type Applier struct {
 	mupISD      map[mupISDKey]mupISDEntry
 	mupDSD      map[mupDSDKey]mupDSDEntry
 	mupGateRefs map[string]int
+	mupRecovery *mupStartupRecovery
 	// evpnMu serializes the EVPN receive state (evpnTable.peers/fdb/mcast)
 	// between the GoBGP RouteHandler goroutine (applyEVPN) and the RPC-driven
 	// ReplayEVPN (VrfBridgeAttach / commitBinding re-pull the loc-rib after
@@ -155,6 +156,7 @@ func NewApplier(dp dataPlane, locators *locator.Manager, vrfBindings *vrfbgp.Man
 	// Runs before the BGP session starts, so it cannot race a route event.
 	// The EVPN sweep goes first: it clears the high-partition group ids so
 	// the VPN table's high-water seed below is not inflated by them.
+	a.resetMUPOwned()
 	a.resetEVPNGroups()
 	a.vpnGroups.reset()
 	return a

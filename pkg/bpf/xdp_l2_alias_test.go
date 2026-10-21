@@ -262,3 +262,45 @@ func TestXDPProgHeadendL2Aliasing(t *testing.T) {
 		}
 	})
 }
+
+func TestXDPProgEndDT2LearnPreservesOwnedStaticMAC(t *testing.T) {
+	h := newXDPTestHelper(t)
+	const bdID uint16 = 100
+	h.createSidFunctionWithBD("fd00:1:100::10/128", actionEndDT2, bdID)
+	peerSrc, _ := ParseIPv6("fd00:1:1::1")
+	if err := h.mapOps.CreateBdPeer(bdID, 0, &HeadendEntry{NumSegments: 1}, [ESILen]byte{}, peerSrc, true); err != nil {
+		t.Fatal(err)
+	}
+	mac := net.HardwareAddr{0, 0, 0, 0, 0, 1}
+	owner := OwnerPluginBundle("static-mac")
+	if err := h.mapOps.CreateFdbOwned(bdID, mac, &FdbEntry{IsRemote: 1, PeerIndex: 1, BdId: bdID}, owner); err != nil {
+		t.Fatal(err)
+	}
+	pkt, err := buildL2EncapsulatedPacket(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::10"), []net.IP{net.ParseIP("fd00:1:100::10")}, 0, 100, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.run(pkt)
+	got, err := h.mapOps.GetFdb(bdID, mac)
+	if err != nil || got.PeerIndex != 1 || got.IsStatic != 1 || got.LastSeen != 0 {
+		t.Fatalf("RX learning replaced owned static MAC: %+v %v", got, err)
+	}
+}
+
+func TestXDPProgEndDT2PluginPeerDoesNotLearnDynamicMAC(t *testing.T) {
+	h := newXDPTestHelper(t)
+	const bdID uint16 = 100
+	h.createSidFunctionWithBD("fd00:1:100::10/128", actionEndDT2, bdID)
+	peerSrc, _ := ParseIPv6("fd00:1:1::1")
+	if err := h.mapOps.CreateBdPeerOwned(bdID, 0, &HeadendEntry{NumSegments: 1}, [ESILen]byte{}, peerSrc, true, OwnerPluginBundle("controlled")); err != nil {
+		t.Fatal(err)
+	}
+	pkt, err := buildL2EncapsulatedPacket(net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::10"), []net.IP{net.ParseIP("fd00:1:100::10")}, 0, 100, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.run(pkt)
+	if got, err := h.mapOps.GetFdb(bdID, net.HardwareAddr{0, 0, 0, 0, 0, 1}); err == nil {
+		t.Fatalf("plugin RX learned unowned slot reference: %+v", got)
+	}
+}

@@ -9,6 +9,7 @@ on:
       - '**.h'
       - '**.c'
       - 'examples/**'
+      - 'sdk/**'
       - 'src/**'
       - 'pkg/**'
       - 'cmd/**'
@@ -20,6 +21,7 @@ on:
       - '**.h'
       - '**.c'
       - 'examples/**'
+      - 'sdk/**'
       - 'src/**'
       - 'pkg/**'
       - 'cmd/**'
@@ -90,6 +92,13 @@ jobs:
             sudo apt-get install -qq -y --no-install-recommends "linux-modules-extra-$(uname -r)"
             sudo modprobe vrf
           fi
+
+      - name: Build and test route composition guests
+        run: |
+          make cplane-route-composition cplane-route-composition-observer
+          cd sdk/examples/cplane-route-composition
+          go test -race ./...
+          go test -race -tags composition_write ./...
 
       - name: Run unit tests
         # pkg/bpf reloads the BPF collection per test and keeps outgrowing

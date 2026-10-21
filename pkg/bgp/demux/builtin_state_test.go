@@ -27,7 +27,7 @@ func TestBuiltinDeliveryStateFamilyGrouping(t *testing.T) {
 	for _, family := range []bgp.Family{bgp.FamilyVPNv4, bgp.FamilyVPNv6, bgp.FamilyEVPN, bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6} {
 		t.Run(string(family), func(t *testing.T) {
 			state := newBuiltinDeliveryState(forwardingKey)
-			claimed := func(code uint16) bool { return code == 0xFE01 }
+			claimed := func(ev bgp.RouteEvent) bool { return ev.EndpointBehavior == 0xFE01 }
 			route := func(rd string, behavior uint16) bgp.RouteEvent {
 				ev := peerEvent(family, "192.0.2.1")
 				ev.EndpointBehavior = behavior
@@ -136,7 +136,7 @@ func TestBuiltinCleanupDispatchPrecedesPluginUpdate(t *testing.T) {
 
 func TestBuiltinDeliveryScanDoesNotKeepWithdrawnPaths(t *testing.T) {
 	state := newBuiltinDeliveryState(forwardingKey)
-	claimed := func(code uint16) bool { return code == 0xFE01 }
+	claimed := func(ev bgp.RouteEvent) bool { return ev.EndpointBehavior == 0xFE01 }
 	scan := state.beginScan()
 	route := vpnEvent("65000:1", "10.0.0.0/24", 0xFE01)
 	state.handle(route, false, claimed)

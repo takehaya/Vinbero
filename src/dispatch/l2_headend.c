@@ -52,7 +52,11 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
             .oif = ctx->ingress_ifindex,
             .last_seen = bpf_ktime_get_ns(),
         };
-        bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_ANY);
+        // Never replace a control entry published after the lookup.
+        if (existing)
+            *existing = learn_val;
+        else
+            bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_NOEXIST);
     } else if (existing && !existing->is_static) {
         existing->last_seen = bpf_ktime_get_ns();
     }

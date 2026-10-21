@@ -362,6 +362,7 @@ type BpfMapSpecs struct {
 	BdLocalEsiMap          *ebpf.MapSpec `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap         *ebpf.MapSpec `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap              *ebpf.MapSpec `ebpf:"bd_peer_map"`
+	BdPeerOwnerMap         *ebpf.MapSpec `ebpf:"bd_peer_owner_map"`
 	BdPeerReverseMap       *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
 	Dx2vMap                *ebpf.MapSpec `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.MapSpec `ebpf:"ecmp_group_map"`
@@ -370,6 +371,7 @@ type BpfMapSpecs struct {
 	EcmpPathMap            *ebpf.MapSpec `ebpf:"ecmp_path_map"`
 	EsiMap                 *ebpf.MapSpec `ebpf:"esi_map"`
 	FdbMap                 *ebpf.MapSpec `ebpf:"fdb_map"`
+	FdbOwnerMap            *ebpf.MapSpec `ebpf:"fdb_owner_map"`
 	HeadendL2ExtMap        *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
 	HeadendL2Map           *ebpf.MapSpec `ebpf:"headend_l2_map"`
 	HeadendL2Progs         *ebpf.MapSpec `ebpf:"headend_l2_progs"`
@@ -382,7 +384,9 @@ type BpfMapSpecs struct {
 	IngressPolicyMap       *ebpf.MapSpec `ebpf:"ingress_policy_map"`
 	IngressVrfMap          *ebpf.MapSpec `ebpf:"ingress_vrf_map"`
 	MupUplinkV4Map         *ebpf.MapSpec `ebpf:"mup_uplink_v4_map"`
+	MupUplinkV4OwnerMap    *ebpf.MapSpec `ebpf:"mup_uplink_v4_owner_map"`
 	MupUplinkV6Map         *ebpf.MapSpec `ebpf:"mup_uplink_v6_map"`
+	MupUplinkV6OwnerMap    *ebpf.MapSpec `ebpf:"mup_uplink_v6_owner_map"`
 	PluginEndtVrfMap       *ebpf.MapSpec `ebpf:"plugin_endt_vrf_map"`
 	ScratchMap             *ebpf.MapSpec `ebpf:"scratch_map"`
 	ServiceIngressMap      *ebpf.MapSpec `ebpf:"service_ingress_map"`
@@ -433,6 +437,7 @@ type BpfMaps struct {
 	BdLocalEsiMap          *ebpf.Map `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap         *ebpf.Map `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap              *ebpf.Map `ebpf:"bd_peer_map"`
+	BdPeerOwnerMap         *ebpf.Map `ebpf:"bd_peer_owner_map"`
 	BdPeerReverseMap       *ebpf.Map `ebpf:"bd_peer_reverse_map"`
 	Dx2vMap                *ebpf.Map `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.Map `ebpf:"ecmp_group_map"`
@@ -441,6 +446,7 @@ type BpfMaps struct {
 	EcmpPathMap            *ebpf.Map `ebpf:"ecmp_path_map"`
 	EsiMap                 *ebpf.Map `ebpf:"esi_map"`
 	FdbMap                 *ebpf.Map `ebpf:"fdb_map"`
+	FdbOwnerMap            *ebpf.Map `ebpf:"fdb_owner_map"`
 	HeadendL2ExtMap        *ebpf.Map `ebpf:"headend_l2_ext_map"`
 	HeadendL2Map           *ebpf.Map `ebpf:"headend_l2_map"`
 	HeadendL2Progs         *ebpf.Map `ebpf:"headend_l2_progs"`
@@ -453,7 +459,9 @@ type BpfMaps struct {
 	IngressPolicyMap       *ebpf.Map `ebpf:"ingress_policy_map"`
 	IngressVrfMap          *ebpf.Map `ebpf:"ingress_vrf_map"`
 	MupUplinkV4Map         *ebpf.Map `ebpf:"mup_uplink_v4_map"`
+	MupUplinkV4OwnerMap    *ebpf.Map `ebpf:"mup_uplink_v4_owner_map"`
 	MupUplinkV6Map         *ebpf.Map `ebpf:"mup_uplink_v6_map"`
+	MupUplinkV6OwnerMap    *ebpf.Map `ebpf:"mup_uplink_v6_owner_map"`
 	PluginEndtVrfMap       *ebpf.Map `ebpf:"plugin_endt_vrf_map"`
 	ScratchMap             *ebpf.Map `ebpf:"scratch_map"`
 	ServiceIngressMap      *ebpf.Map `ebpf:"service_ingress_map"`
@@ -479,6 +487,7 @@ func (m *BpfMaps) Close() error {
 		m.BdLocalEsiMap,
 		m.BdPeerL2ExtMap,
 		m.BdPeerMap,
+		m.BdPeerOwnerMap,
 		m.BdPeerReverseMap,
 		m.Dx2vMap,
 		m.EcmpGroupMap,
@@ -487,6 +496,7 @@ func (m *BpfMaps) Close() error {
 		m.EcmpPathMap,
 		m.EsiMap,
 		m.FdbMap,
+		m.FdbOwnerMap,
 		m.HeadendL2ExtMap,
 		m.HeadendL2Map,
 		m.HeadendL2Progs,
@@ -499,7 +509,9 @@ func (m *BpfMaps) Close() error {
 		m.IngressPolicyMap,
 		m.IngressVrfMap,
 		m.MupUplinkV4Map,
+		m.MupUplinkV4OwnerMap,
 		m.MupUplinkV6Map,
+		m.MupUplinkV6OwnerMap,
 		m.PluginEndtVrfMap,
 		m.ScratchMap,
 		m.ServiceIngressMap,

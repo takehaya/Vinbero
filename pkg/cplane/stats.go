@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/ownership"
 )
 
@@ -76,7 +77,13 @@ func limitOf(n int) (int, bool) {
 // is the whole reason a sandboxed component needs them: nothing else about
 // it is observable.
 type PluginStats struct {
-	Name string
+	Input                            *v1.CplaneInputPolicy
+	InputReady                       bool
+	InputFault                       string
+	CleanupPending                   bool
+	DesiredRevision, AppliedRevision uint64
+	OutputFailure                    string
+	Name                             string
 	// Capabilities and Behaviors are what it was granted and what it
 	// claimed, so an operator can check a deployment without reading back
 	// the registration.
@@ -194,8 +201,11 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 
 	quarantined, snapshots, since := p.counters.snapshot()
 	owner := p.ops.Owner()
+	ready, fault, cleanup := p.ops.InputState()
+	desired, applied, failure := p.ops.OutputState()
 	return PluginStats{
-		Name:                p.name,
+		Name:  p.name,
+		Input: reg.Input, InputReady: ready, InputFault: fault, CleanupPending: cleanup, DesiredRevision: desired, AppliedRevision: applied, OutputFailure: failure,
 		Capabilities:        reg.Capabilities.Names(),
 		Scope:               reg.Scope,
 		Behaviors:           reg.Behaviors,
