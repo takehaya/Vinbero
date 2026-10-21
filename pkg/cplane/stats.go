@@ -208,8 +208,8 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 	desired, applied, failure := p.ops.OutputState()
 	forwarding, inventoryErr := p.ops.services.forwardingCount(owner)
 	for _, af := range []AddressFamily{AFv4, AFv6} {
-		entries, err := p.ops.headend.OwnedEntries(owner, af)
-		forwarding += len(entries)
+		count, err := p.ops.headend.OwnedCount(owner, af)
+		forwarding += count
 		inventoryErr = errors.Join(inventoryErr, err)
 	}
 	if inventoryErr != nil {

@@ -15,7 +15,9 @@ import (
 // the writes an owner is allowed plus the reads needed to work out what
 // that owner already holds. *bpf.MapOperations satisfies it; narrowing it
 // keeps this testable without a live BPF collection, and keeps the 101
-// methods of MapOperations away from anything plugin-facing.
+// methods of MapOperations away from anything plugin-facing. Native backends
+// also enumerate headend owners; older backends without those methods can only
+// discover reservations that still have a main-map entry.
 type MapOps interface {
 	ListHeadendV4() (map[string]*bpf.HeadendEntry, error)
 	ListHeadendV6() (map[string]*bpf.HeadendEntry, error)
@@ -92,14 +94,21 @@ func (r Result) Total() int { return r.Created + r.Updated + r.Pruned }
 // Leases are taken for the whole declared set before anything is written,
 // so a set overlapping another owner's key is rejected before it has
 // changed the data plane.
-func ApplySet(
-	ops MapOps,
-	leases *ownership.Leases,
-	owner bpf.OwnerTag,
-	af Family,
-	desired []Desired,
-	quota int,
-) (Result, error) {
+func ApplySet(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, af Family, desired []Desired, quota int) (Result, error) {
+	return applySets(ops, leases, owner, []familySet{{af: af, desired: desired}}, quota)
+}
+
+type familySet struct {
+	af          Family
+	desired     []Desired
+	byPrefix    map[string]*bpf.HeadendEntry
+	keys, taken []string
+	current     map[string]struct{}
+}
+
+// applySets reserves every declared key before pruning either family. A
+// single-family caller still counts retained keys in the other family.
+func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []familySet, quota int) (Result, error) {
 	var res Result
 	if owner == "" {
 		return res, bpf.ErrEmptyOwner
@@ -107,126 +116,122 @@ func ApplySet(
 	if ops == nil {
 		return res, errors.New("apply headend set: nil map ops")
 	}
-	if af != AFv4 && af != AFv6 {
-		return res, fmt.Errorf("invalid headend family %d", af)
+	var present [2]bool
+	total := 0
+	for i := range sets {
+		x := &sets[i]
+		if x.af != AFv4 && x.af != AFv6 {
+			return res, fmt.Errorf("invalid headend family %d", x.af)
+		}
+		present[x.af] = true
+		x.byPrefix = make(map[string]*bpf.HeadendEntry, len(x.desired))
+		for _, d := range x.desired {
+			key, err := canonicalPrefix(x.af, d.TriggerPrefix)
+			if err != nil {
+				return res, err
+			}
+			if d.Entry == nil {
+				return res, fmt.Errorf("apply %s set: nil entry for %q", x.af, d.TriggerPrefix)
+			}
+			if _, dup := x.byPrefix[key]; dup {
+				return res, fmt.Errorf("apply %s set: %q declared twice", x.af, key)
+			}
+			x.byPrefix[key] = d.Entry
+			x.keys = append(x.keys, key)
+		}
+		sort.Strings(x.keys)
+		total += len(x.keys)
 	}
-
-	byPrefix := make(map[string]*bpf.HeadendEntry, len(desired))
-	keys := make([]string, 0, len(desired))
-	for _, d := range desired {
-		key, err := canonicalPrefix(af, d.TriggerPrefix)
-		if err != nil {
-			return res, err
-		}
-		if d.Entry == nil {
-			return res, fmt.Errorf("apply %s set: nil entry for %q", af, d.TriggerPrefix)
-		}
-		if _, dup := byPrefix[key]; dup {
-			return res, fmt.Errorf("apply %s set: %q declared twice", af, key)
-		}
-		byPrefix[key] = d.Entry
-		keys = append(keys, key)
-	}
-
-	// The quota counts both families together: a plugin's share of the
-	// data plane is what it holds, not what it holds per map.
-	if cap := quota; cap >= 0 {
-		other := AFv6
-		if af == AFv6 {
-			other = AFv4
-		}
-		// Pinned entries and their owners survive restart; in-memory leases do
-		// not. Count actual owned entries even when restoration changed nothing.
-		held, err := ownedPrefixes(ops, owner, other)
-		if err != nil {
-			return res, err
-		}
-		if total := len(keys) + len(held); total > cap {
-			return res, &ownership.QuotaError{What: "headend entries", Declared: total, Quota: cap}
-		}
-	}
-
-	sort.Strings(keys)
-
-	// The lease table may be empty after restart, and operator RPCs do not
-	// acquire leases. Reject known map-owner conflicts before pruning any
-	// previously working entry. The backend rechecks ownership at each write.
-	for _, prefix := range keys {
-		// Preserve the existing permission-refusal error for leased keys,
-		// without reserving any key until its persisted owner is checked.
-		if leases != nil {
-			if holder, held := leases.HolderOf(af.leaseKind(), prefix); held && holder != owner {
-				return res, &ownership.LeaseError{Kind: af.leaseKind(), Key: prefix, Holder: holder}
+	if quota >= 0 {
+		for _, af := range []Family{AFv4, AFv6} {
+			if !present[af] {
+				held, err := ownedPrefixes(ops, owner, af)
+				if err != nil {
+					return res, err
+				}
+				total += len(held)
 			}
 		}
-		holder, found, err := getOwner(ops, af, prefix)
-		if err != nil {
-			return res, fmt.Errorf("read %s owner of %q: %w", af, prefix, err)
-		}
-		if found && holder != owner {
-			return res, ownerConflict(af, prefix, holder, owner)
+		if total > quota {
+			return res, &ownership.QuotaError{What: "headend entries", Declared: total, Quota: quota}
 		}
 	}
-
-	var taken []string
-	if leases != nil {
+	// Persisted owners survive restart, and direct operator writes do not
+	// take leases. Check both before reserving or deleting any working key.
+	for _, x := range sets {
+		for _, prefix := range x.keys {
+			if leases != nil {
+				if holder, held := leases.HolderOf(x.af.leaseKind(), prefix); held && holder != owner {
+					return res, &ownership.LeaseError{Kind: x.af.leaseKind(), Key: prefix, Holder: holder}
+				}
+			}
+			holder, found, err := getOwner(ops, x.af, prefix)
+			if err != nil {
+				return res, fmt.Errorf("read %s owner of %q: %w", x.af, prefix, err)
+			}
+			if found && holder != owner {
+				return res, ownerConflict(x.af, prefix, holder, owner)
+			}
+		}
+	}
+	rollback := func() {
+		for _, x := range sets {
+			releaseAll(leases, x.af, x.taken, owner)
+		}
+	}
+	for i := range sets {
+		if leases != nil {
+			var err error
+			sets[i].taken, err = leases.AcquireAll(sets[i].af.leaseKind(), sets[i].keys, owner)
+			if err != nil {
+				rollback()
+				return res, err
+			}
+		}
+	}
+	for i := range sets {
 		var err error
-		taken, err = leases.AcquireAll(af.leaseKind(), keys, owner)
+		sets[i].current, err = ownedPrefixes(ops, owner, sets[i].af)
 		if err != nil {
+			rollback()
 			return res, err
 		}
 	}
-
-	current, err := ownedPrefixes(ops, owner, af)
-	if err != nil {
-		// Nothing was written, so the leases this call took describe
-		// nothing and are given back. Only the ones it took: a key the
-		// owner already held belongs to an entry that is still in the map,
-		// and releasing that would let another owner take it and overwrite
-		// an entry this one is still responsible for.
-		releaseAll(leases, af, taken, owner)
-		return res, err
-	}
-
-	// Prune first: a prefix moving out of the set must be gone before any
-	// new entry is written, so the data plane never holds a stale entry
-	// alongside the one meant to replace it.
-	stale := make([]string, 0, len(current))
-	for prefix := range current {
-		if _, keep := byPrefix[prefix]; !keep {
-			stale = append(stale, prefix)
+	for _, x := range sets {
+		var stale []string
+		for prefix := range x.current {
+			if _, keep := x.byPrefix[prefix]; !keep {
+				stale = append(stale, prefix)
+			}
+		}
+		sort.Strings(stale)
+		for _, prefix := range stale {
+			if err := deleteHeadend(ops, x.af, prefix, owner); err != nil {
+				for _, pending := range sets {
+					releaseUnwritten(leases, pending.af, pending.keys, pending.current, owner)
+				}
+				return res, fmt.Errorf("apply %s set: prune %q: %w", x.af, prefix, err)
+			}
+			if leases != nil {
+				leases.Release(x.af.leaseKind(), prefix, owner)
+			}
+			res.Pruned++
 		}
 	}
-	sort.Strings(stale)
-	for _, prefix := range stale {
-		if err := deleteHeadend(ops, af, prefix, owner); err != nil {
-			// Release only the declared keys this owner has no entry for.
-			// A key it already holds from an earlier apply is still live
-			// in the map, and dropping its lease would let another owner
-			// take a key whose entry this one still owns.
-			releaseUnwritten(leases, af, keys, current, owner)
-			return res, fmt.Errorf("apply %s set: prune %q: %w", af, prefix, err)
-		}
-		if leases != nil {
-			leases.Release(af.leaseKind(), prefix, owner)
-		}
-		res.Pruned++
-	}
-
-	for i, prefix := range keys {
-		if err := createHeadend(ops, af, prefix, byPrefix[prefix], owner); err != nil {
-			// Release the leases of the keys that were never written,
-			// including this one. They hold no map entry, so a later
-			// reconcile would not prune them either -- the lease would
-			// outlive the declaration and block another owner from a key
-			// this one does not actually hold.
-			releaseUnwritten(leases, af, keys[i:], current, owner)
-			return res, fmt.Errorf("apply %s set: write %q: %w", af, prefix, err)
-		}
-		if _, existed := current[prefix]; existed {
-			res.Updated++
-		} else {
-			res.Created++
+	for i, x := range sets {
+		for j, prefix := range x.keys {
+			if err := createHeadend(ops, x.af, prefix, x.byPrefix[prefix], owner); err != nil {
+				releaseUnwritten(leases, x.af, x.keys[j:], x.current, owner)
+				for _, pending := range sets[i+1:] {
+					releaseUnwritten(leases, pending.af, pending.keys, pending.current, owner)
+				}
+				return res, fmt.Errorf("apply %s set: write %q: %w", x.af, prefix, err)
+			}
+			if _, existed := x.current[prefix]; existed {
+				res.Updated++
+			} else {
+				res.Created++
+			}
 		}
 	}
 	return res, nil
@@ -343,11 +348,35 @@ func OwnedEntries(ops MapOps, owner bpf.OwnerTag, af Family) ([]Desired, error) 
 	return out, nil
 }
 
-// ownedPrefixes returns the trigger prefixes owner currently holds in one
-// family. Entries with no recorded owner predate owner tracking and are
-// left alone: they belong to nobody, and claiming them here would let a
-// plugin prune state it never wrote.
+// ownedPrefixes returns the trigger prefixes reserved by owner in one family.
+// Entries with no recorded owner are left alone: claiming them here would let
+// a plugin prune state it never wrote.
 func ownedPrefixes(ops MapOps, owner bpf.OwnerTag, af Family) (map[string]struct{}, error) {
+	// Native maps enumerate ownership independently of live entries so failed
+	// owner deletions remain discoverable after restart. Older backends can
+	// only discover ownership while the main entry still exists.
+	if inventory, ok := ops.(interface {
+		ListHeadendV4Owners() (map[string]bpf.OwnerTag, error)
+		ListHeadendV6Owners() (map[string]bpf.OwnerTag, error)
+	}); ok {
+		var owners map[string]bpf.OwnerTag
+		var err error
+		if af == AFv6 {
+			owners, err = inventory.ListHeadendV6Owners()
+		} else {
+			owners, err = inventory.ListHeadendV4Owners()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list %s owners: %w", af, err)
+		}
+		out := make(map[string]struct{})
+		for key, holder := range owners {
+			if holder == owner {
+				out[key] = struct{}{}
+			}
+		}
+		return out, nil
+	}
 	var (
 		entries map[string]*bpf.HeadendEntry
 		err     error

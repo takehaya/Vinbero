@@ -347,37 +347,8 @@ func (p *PluginOps) applyComposition(txn *applyTxn) error {
 	if err = p.services.prune(p.owner, d.uplinks, d.peers); err != nil {
 		return err
 	}
-	headends := []struct {
-		af      AddressFamily
-		entries []HeadendDesired
-		owned   []HeadendDesired
-		remove  func(string, bpf.OwnerTag) error
-	}{{af: AFv4, entries: d.v4, remove: p.headend.DeleteHeadendV4}, {af: AFv6, entries: d.v6, remove: p.headend.DeleteHeadendV6}}
-	// Read both inventories before mutation, then free obsolete keys in both
-	// families before any allocation can count them against the final quota.
-	for i := range headends {
-		headends[i].owned, err = p.headend.OwnedEntries(p.owner, headends[i].af)
-		if err != nil {
-			return err
-		}
-	}
-	for _, x := range headends {
-		want := make(map[string]bool, len(x.entries))
-		for _, h := range x.entries {
-			want[h.TriggerPrefix] = true
-		}
-		for _, h := range x.owned {
-			if !want[h.TriggerPrefix] {
-				if err := x.remove(h.TriggerPrefix, p.owner); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	for _, x := range headends {
-		if _, err = p.headend.ApplySet(p.owner, x.af, x.entries, p.quotas.MaxHeadendEntries); err != nil {
-			return err
-		}
+	if _, err = p.headend.ApplySets(p.owner, d.v4, d.v6, p.quotas.MaxHeadendEntries); err != nil {
+		return err
 	}
 	if p.services != nil {
 		if err = p.services.apply(p.owner, d.uplinks, d.peers); err != nil {

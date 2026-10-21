@@ -190,3 +190,74 @@ func TestOwnedCreationRequiresOwnerPersistence(t *testing.T) {
 		t.Fatalf("main map changed: %v", err)
 	}
 }
+
+func TestOrdinaryOwnerInventoryAfterPartialDeletion(t *testing.T) {
+	for _, v6 := range []bool{false, true} {
+		name := "v4"
+		if v6 {
+			name = "v6"
+		}
+		t.Run(name, func(t *testing.T) {
+			keySize := uint32(binary.Size(LpmKeyV4{}))
+			if v6 {
+				keySize = uint32(binary.Size(LpmKeyV6{}))
+			}
+			main, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.LPMTrie, KeySize: keySize, ValueSize: uint32(binary.Size(HeadendEntry{})), MaxEntries: 4, Flags: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = main.Close() })
+			owners, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Hash, KeySize: keySize, ValueSize: auxOwnerTagBytes, MaxEntries: 4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = owners.Close() })
+			objects := &BpfObjects{}
+			if v6 {
+				objects.HeadendV6Map, objects.HeadendV6OwnerMap = main, owners
+			} else {
+				objects.HeadendV4Map, objects.HeadendV4OwnerMap = main, owners
+			}
+			fresh := func() *MapOperations {
+				return &MapOperations{objs: objects, headendV4Owners: newEntryOwnerMap(objects.HeadendV4OwnerMap), headendV6Owners: newEntryOwnerMap(objects.HeadendV6OwnerMap)}
+			}
+			m := fresh()
+			create, del, list, live := m.CreateHeadendV4, m.DeleteHeadendV4, m.ListHeadendV4Owners, m.ListHeadendV4
+			prefix := "10.0.0.1/32"
+			if v6 {
+				create, del, list, live = m.CreateHeadendV6, m.DeleteHeadendV6, m.ListHeadendV6Owners, m.ListHeadendV6
+				prefix = "fd00:10::1/128"
+			}
+			owner := OwnerPluginBundle("ordinary")
+			if err := create(prefix, &HeadendEntry{}, owner); err != nil {
+				t.Fatal(err)
+			}
+			if err := owners.Freeze(); err != nil {
+				t.Fatal(err)
+			}
+			if err := del(prefix, owner); err == nil {
+				t.Fatal("frozen owner accepted deletion")
+			}
+			if entries, err := live(); err != nil || len(entries) != 0 {
+				t.Fatalf("main deletion did not precede owner failure: %v %v", entries, err)
+			}
+			for _, scan := range []func() (map[string]OwnerTag, error){list, func() (map[string]OwnerTag, error) {
+				if v6 {
+					return fresh().ListHeadendV6Owners()
+				}
+				return fresh().ListHeadendV4Owners()
+			}} {
+				inventory, err := scan()
+				if err != nil || len(inventory) != 1 || inventory[prefix] != owner {
+					t.Fatalf("owner-only reservation missing: %v %v", inventory, err)
+				}
+			}
+			if err := owners.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := list(); err == nil {
+				t.Fatal("closed owner inventory reported success")
+			}
+		})
+	}
+}

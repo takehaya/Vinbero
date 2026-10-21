@@ -71,6 +71,26 @@ func (f *fakeHeadendOps) ListHeadendV6() (map[string]*bpf.HeadendEntry, error) {
 	}
 	return out, f.listErr
 }
+
+func (f *fakeHeadendOps) ListHeadendV4Owners() (map[string]bpf.OwnerTag, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]bpf.OwnerTag, len(f.owner4))
+	for key, owner := range f.owner4 {
+		out[key] = owner
+	}
+	return out, f.listErr
+}
+
+func (f *fakeHeadendOps) ListHeadendV6Owners() (map[string]bpf.OwnerTag, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]bpf.OwnerTag, len(f.owner6))
+	for key, owner := range f.owner6 {
+		out[key] = owner
+	}
+	return out, f.listErr
+}
 func (f *fakeHeadendOps) GetHeadendV4Owner(rawPrefix string) (bpf.OwnerTag, bool, error) {
 	p := maskKey(rawPrefix)
 	f.mu.Lock()
@@ -106,6 +126,9 @@ func (f *fakeHeadendOps) CreateHeadendV6(rawPrefix string, e *bpf.HeadendEntry, 
 	p := maskKey(rawPrefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if p == f.failOn {
+		return fmt.Errorf("simulated write failure for %q", p)
+	}
 	if cur, ok := f.owner6[p]; ok && cur != owner {
 		return bpf.ErrEntryOwnerMismatch
 	}
