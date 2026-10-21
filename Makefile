@@ -55,7 +55,8 @@ test-runnable: ## check no panic at init()
 # under -race). Without an explicit timeout the package is killed mid-run
 # and reports failures that are only the clock.
 test: ## Run the tests of the project
-	$(GOTEST) -v -exec sudo -race -timeout 35m ./... $(OUTPUT_OPTIONS)
+	# Keep mise compilers available to guest builds inside privileged tests.
+	$(GOTEST) -v -exec "sudo env PATH=$(PATH)" -race -timeout 35m ./... $(OUTPUT_OPTIONS)
 
 VIMTO_KERNEL ?= 6.6
 .PHONY: test-bpf-load
