@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func compositionStats(p *PluginOps) PluginStats {
@@ -47,9 +48,9 @@ func TestCompositionEVPNQuotaMatchesInventory(t *testing.T) {
 	if len(f.peers) != 1 || len(f.fdb) != 1 || compositionStats(p).HeadendEntries != 2 {
 		t.Fatal("equivalent EVPN declarations do not match owned quota units")
 	}
-	b := *a
+	b := proto.Clone(a).(*v1.PluginEvpnForward)
 	b.Mac = "02:00:00:00:00:02"
-	next := &v1.PluginApplyChunk{DesiredRevision: 2, EvpnForwards: []*v1.PluginEvpnForward{a, &b}}
+	next := &v1.PluginApplyChunk{DesiredRevision: 2, EvpnForwards: []*v1.PluginEvpnForward{a, b}}
 	if err := putComposition(p, next); err == nil {
 		t.Fatal("two MACs and a peer fit quota two")
 	}
