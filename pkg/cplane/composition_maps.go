@@ -355,6 +355,46 @@ func (s *compositionMaps) flush(owner bpf.OwnerTag) error {
 	return s.apply(owner, nil, nil)
 }
 
+func countOwner[K comparable](entries map[K]bpf.OwnerTag, owner bpf.OwnerTag) int {
+	n := 0
+	for _, o := range entries {
+		if o == owner {
+			n++
+		}
+	}
+	return n
+}
+
+// forwardingCount uses persistent owner reservations, including failed deletions.
+// Shared gates and peer reverse entries are dependencies, not extra quota units.
+func (s *compositionMaps) forwardingCount(owner bpf.OwnerTag) (int, error) {
+	if s == nil || s.maps == nil {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v4, err := s.maps.ListMupUplinkV4Owners()
+	if err != nil {
+		return 0, err
+	}
+	n := countOwner(v4, owner)
+	v6, err := s.maps.ListMupUplinkV6Owners()
+	if err != nil {
+		return n, err
+	}
+	n += countOwner(v6, owner)
+	fdb, err := s.maps.ListFdbOwners()
+	if err != nil {
+		return n, err
+	}
+	n += countOwner(fdb, owner)
+	peers, err := s.maps.ListBdPeerOwners()
+	if err != nil {
+		return n, err
+	}
+	return n + countOwner(peers, owner), nil
+}
+
 // inventoryOwners includes main-map deletion failures whose owner reservation
 // survived. These owners remain visible even if their registration is missing.
 func (s *compositionMaps) inventoryOwners() (map[bpf.OwnerTag]bool, error) {

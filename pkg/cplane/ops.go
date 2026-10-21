@@ -66,6 +66,8 @@ type PluginOps struct {
 	applyMu *sync.Mutex
 
 	mu sync.Mutex
+	// Retirement is permanent: a replacement gets its own ops, even for the same owner.
+	retired bool
 	// open holds the transactions the plugin has begun but not finished.
 	open map[uint64]*applyTxn
 	// nextGen numbers transactions. It never restarts within an instance,
@@ -313,6 +315,9 @@ func (p *PluginOps) ApplyBegin(kind uint32) (uint64, error) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.retired {
+		return 0, fmt.Errorf("plugin registration retired")
+	}
 	if p.strictInputs && p.inputFault != "" {
 		return 0, fmt.Errorf("input incomplete: %s", p.inputFault)
 	}
@@ -441,6 +446,10 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 // is only recorded: see the staged field.
 func (p *PluginOps) Publish() error {
 	p.mu.Lock()
+	if p.retired {
+		p.mu.Unlock()
+		return fmt.Errorf("plugin registration retired")
+	}
 	if p.published && len(p.staged) == 0 {
 		p.mu.Unlock()
 		return nil
@@ -478,6 +487,9 @@ func (p *PluginOps) Publish() error {
 func (p *PluginOps) holdForRetry(txn *applyTxn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.retired {
+		return
+	}
 	if p.pending == nil {
 		p.pending = make(map[v1.PluginApplyKind]*applyTxn)
 	}
@@ -500,6 +512,10 @@ func (p *PluginOps) holdForRetry(txn *applyTxn) {
 // arrives is what repairs it.
 func (p *PluginOps) RetryPending() {
 	p.mu.Lock()
+	if p.retired {
+		p.mu.Unlock()
+		return
+	}
 	if p.strictInputs && !p.inputReady {
 		fault := p.inputFault
 		p.mu.Unlock()
@@ -991,7 +1007,7 @@ func chunkSize(msg *v1.PluginApplyChunk) int {
 func (p *PluginOps) isStale(txn *applyTxn) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return (p.strictInputs && (txn.inputEpoch != p.inputEpoch || !p.inputReady || txn.seq < p.lastDesired[txn.kind])) || (txn.seq != 0 && txn.seq < p.lastApplied[txn.kind])
+	return p.retired || (p.strictInputs && (txn.inputEpoch != p.inputEpoch || !p.inputReady || txn.seq < p.lastDesired[txn.kind])) || (txn.seq != 0 && txn.seq < p.lastApplied[txn.kind])
 }
 
 // markApplied records this transaction as the newest of its kind, once its
@@ -1076,6 +1092,9 @@ func (p *PluginOps) BeginInstance() {
 	defer p.applyMu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.retired {
+		return
+	}
 	p.open = make(map[uint64]*applyTxn)
 	p.staged = nil
 	p.pending = nil
@@ -1104,6 +1123,24 @@ func (p *PluginOps) DiscardTransactions() {
 	p.open = make(map[uint64]*applyTxn)
 }
 
+// retire fences saved callbacks and transactions before the owner is handed off.
+// Flush remains available so failed cleanup can be retried.
+func (p *PluginOps) retire() {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.retired = true
+	p.inputEpoch++
+	p.inputReady = false
+	p.published = false
+	p.compositionValid = false
+	p.latestComposition = nil
+	p.open = make(map[uint64]*applyTxn)
+	p.staged = nil
+	p.pending = nil
+}
+
 // PruneOutOfScope removes state this owner's capabilities or scope no longer
 // cover, and reports how much it removed. Revoking a capability must retract its
 // state here: the replacement guest cannot declare even an empty set of that kind.
@@ -1129,6 +1166,11 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
 
+	if p.services != nil {
+		if err := p.services.flush(p.owner); err != nil {
+			return 0, err
+		}
+	}
 	var (
 		removed  int
 		firstErr error
@@ -1220,6 +1262,8 @@ func (p *PluginOps) withdrawSIDReferencesLocked(ctx context.Context, desired []L
 	if len(keep) == len(routes) {
 		return 0, nil
 	}
+	// Withdrawal can partly succeed before returning an error.
+	p.compositionValid = false
 	res, err := p.advertise.Apply(ctx, p.owner, keep, p.quotas.MaxAdvertisedRoutes)
 	return res.Pruned, err
 }
@@ -1244,6 +1288,12 @@ func (p *PluginOps) ReconcileAdvertised(ctx context.Context) (int, error) {
 	}
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
+	p.mu.Lock()
+	retired := p.retired
+	p.mu.Unlock()
+	if retired {
+		return 0, nil
+	}
 	return p.reconcileAdvertisedLocked(ctx)
 }
 

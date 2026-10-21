@@ -262,7 +262,7 @@ cplane-example: ## build the control-plane plugin example with standard Go
 			-buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 
 # Optional smaller artifact; keep the default Go artifact intact.
-cplane-example-tinygo: ## build the control-plane plugin example with TinyGo 0.39.0
+cplane-example-tinygo: ## build the control-plane plugin example with TinyGo 0.43.0
 	cd sdk/examples/cplane-custom-behavior && \
 		tinygo build -o plugin.tinygo.wasm -target=wasm-unknown \
 			-scheduler=none -gc=conservative -panic=trap -no-debug .

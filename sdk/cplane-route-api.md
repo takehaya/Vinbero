@@ -50,8 +50,9 @@ down, err := resolve.Register(engine, resolve.Rule[mup.ST1, mup.ISD]{
 
 `Equal`, `Contains`, and `All` express the join independently of MUP or EVPN.
 Rules use equality or prefix indexes and enforce rule, work, and diagnostic budgets.
-Equivalent supporters of the same canonical destination collapse only when their complete projections agree.
-Different destinations, conflicting projections, and equal-ranked ties remain ambiguous.
+Right-side supporters of the same canonical destination collapse only when their complete projections agree.
+Different right destinations, conflicting projections, and equal-ranked ties remain ambiguous.
+Each left path is an independent query; writing callers must coalesce identical outputs and suppress conflicts at the actual forwarding key, which can be shared even by different BGP destinations.
 No map iteration order chooses a winner, and these rules do not implement BGP best-path selection.
 The generic VPN service-SID to IPv6-unicast longest-prefix example is exercised in `go/cplane/resolve/rule_test.go`.
 
@@ -97,6 +98,10 @@ Apply is ordered convergence, not an atomic multi-map transaction; a failure can
 Input loss invalidates pending work and initiates owner-scoped cleanup.
 Persistent owner inventories preserve failed deletes across daemon restart, including peer companions and shared MUP gate dependencies.
 Stats expose input readiness/fault, cleanup pending, and desired/applied revisions with the last output failure.
+The forwarding quota and its usage count owned IPv4/IPv6 headend keys, MUP uplink keys, EVPN peer slots, and EVPN MAC keys.
+For example, one EVPN peer with two MACs uses three units; repeated equivalent service declarations use the same keys once.
+Shared MUP gates and reverse peer companions are dependencies and do not consume additional per-plugin units.
+Failed cleanup retains its ownership usage; an inventory read failure is reported in the output failure field rather than silently presented as a complete count.
 The legacy standalone conformance validator lacks context policy and rejects composition transactions; use the manager integration tests for this API.
 
 ## Run the example

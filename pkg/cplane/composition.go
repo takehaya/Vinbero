@@ -215,9 +215,6 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 		}
 		out.peers = append(out.peers, d)
 	}
-	if len(out.v4)+len(out.v6)+len(out.uplinks)+len(out.peers) > p.quotas.MaxHeadendEntries && p.quotas.MaxHeadendEntries >= 0 {
-		return out, fmt.Errorf("forwarding quota exceeded")
-	}
 	// Validate conflicting desired keys before mutating any live state.
 	keys := map[string]bpf.HeadendEntry{}
 	for _, set := range [][]HeadendDesired{out.v4, out.v6} {
@@ -260,6 +257,10 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 			}
 			macs[k] = v.key()
 		}
+	}
+	// Count owned forwarding keys; raw declarations have separate transaction bounds.
+	if len(out.v4)+len(out.v6)+len(us)+len(peers)+len(macs) > p.quotas.MaxHeadendEntries && p.quotas.MaxHeadendEntries >= 0 {
+		return out, fmt.Errorf("forwarding quota exceeded")
 	}
 	for _, a := range m.BgpAdvertisements {
 		if a == nil || !p.caps.Has(wasm.CapAdvertise) || p.advertise == nil {
@@ -496,6 +497,13 @@ func (p *PluginOps) OutputState() (uint64, uint64, string) {
 // revision. Withdraw dependents and reconcile the latest declaration again.
 func (p *PluginOps) reconcileComposition(ctx context.Context) (int, error) {
 	p.applyMu.Lock()
+	p.mu.Lock()
+	retired := p.retired
+	p.mu.Unlock()
+	if retired {
+		p.applyMu.Unlock()
+		return 0, nil
+	}
 	p.compositionValid = false
 	if p.advertise != nil {
 		if err := p.advertise.WithdrawOwner(ctx, p.owner); err != nil {

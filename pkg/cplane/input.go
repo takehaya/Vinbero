@@ -402,6 +402,11 @@ func (m *Manager) checkInputRegistration(reg Registration, policy *inputPolicy) 
 	if old := m.plugins[reg.Name]; old != nil && !proto.Equal(old.reg.Input, reg.Input) {
 		return fmt.Errorf("input policy is immutable while registered; unregister and clean up before changing it")
 	}
+	m.unrestoredMu.Lock()
+	defer m.unrestoredMu.Unlock()
+	if old, ok := m.unrestored[reg.Name]; ok && !proto.Equal(old.input, reg.Input) {
+		return fmt.Errorf("input policy held by unrestored owner; clean up before replacing")
+	}
 	if !policy.hasDelegation() {
 		return nil
 	}
@@ -411,13 +416,8 @@ func (m *Manager) checkInputRegistration(reg Registration, policy *inputPolicy) 
 	if _, ok := m.source.(delegationSource); !ok {
 		return fmt.Errorf("source does not support explicit built-in delegation")
 	}
-	m.unrestoredMu.Lock()
-	defer m.unrestoredMu.Unlock()
 	for name, u := range m.unrestored {
 		if name == reg.Name {
-			if u.input != nil && !proto.Equal(u.input, reg.Input) {
-				return fmt.Errorf("input policy held by unrestored owner; clean up before replacing")
-			}
 			continue
 		}
 		for _, a := range policy.contexts {

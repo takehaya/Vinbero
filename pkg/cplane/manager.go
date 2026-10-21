@@ -1219,7 +1219,7 @@ func (m *Manager) teardown(ctx context.Context, p *plugin) {
 	if err := p.inst.Close(ctx); err != nil {
 		m.logger.Warn("closing plugin instance", zap.String("plugin", p.name), zap.Error(err))
 	}
-	p.ops.DiscardTransactions()
+	p.ops.retire()
 }
 
 // Close stops every plugin. It does not flush: a daemon shutting down

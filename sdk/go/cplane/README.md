@@ -70,7 +70,7 @@ limits remain 16 MiB of linear memory and 2 seconds per call by default. The
 harness tests 50,000 update/withdraw pairs within that memory limit; larger
 route views may require an explicit higher limit.
 
-TinyGo 0.39.0 remains an optional smaller build:
+TinyGo 0.43.0 remains an optional smaller build:
 
 ```sh
 tinygo build -o plugin.tinygo.wasm -target=wasm-unknown \

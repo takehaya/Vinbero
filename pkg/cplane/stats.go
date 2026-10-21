@@ -1,6 +1,7 @@
 package cplane
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -20,8 +21,9 @@ import (
 // Zero means the default; a negative value means unbounded, which is a
 // deliberate escape hatch rather than a value anyone should reach for.
 type Quotas struct {
-	// MaxHeadendEntries caps the headend entries one plugin may own,
-	// counting v4 and v6 together.
+	// MaxHeadendEntries caps owned forwarding keys: v4/v6 headends, MUP
+	// uplinks, EVPN peers and EVPN MACs. Equivalent service declarations
+	// share one key; shared MUP gates and reverse entries are not charged.
 	MaxHeadendEntries int
 	// MaxAdvertisedRoutes caps the routes one plugin may originate. It is
 	// the quota that reaches other routers: a plugin that advertises
@@ -203,6 +205,13 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 	owner := p.ops.Owner()
 	ready, fault, cleanup := p.ops.InputState()
 	desired, applied, failure := p.ops.OutputState()
+	services, err := p.ops.services.forwardingCount(owner)
+	if err != nil {
+		if failure != "" {
+			failure += "; "
+		}
+		failure += fmt.Sprintf("forwarding inventory incomplete: %v", err)
+	}
 	return PluginStats{
 		Name:  p.name,
 		Input: reg.Input, InputReady: ready, InputFault: fault, CleanupPending: cleanup, DesiredRevision: desired, AppliedRevision: applied, OutputFailure: failure,
@@ -215,7 +224,7 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 		Snapshots:           snapshots,
 		Dead:                dead,
 		PendingDeclarations: p.ops.PendingDeclarations(),
-		HeadendEntries:      m.leases.CountOf(LeaseHeadendV4, owner) + m.leases.CountOf(LeaseHeadendV6, owner),
+		HeadendEntries:      m.leases.CountOf(LeaseHeadendV4, owner) + m.leases.CountOf(LeaseHeadendV6, owner) + services,
 		AdvertisedRoutes:    m.advertise.LiveCount(owner),
 		LocalSIDs:           m.localSIDs.LiveCount(owner),
 		Quotas:              m.quotas,

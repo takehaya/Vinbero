@@ -158,7 +158,7 @@ jobs:
       - name: Install TinyGo for optional compiler compatibility tests
         run: |
           curl -sSLo /tmp/tinygo.deb \
-            https://github.com/tinygo-org/tinygo/releases/download/v0.39.0/tinygo_0.39.0_amd64.deb
+            https://github.com/tinygo-org/tinygo/releases/download/v0.43.0/tinygo_0.43.0_amd64.deb
           sudo dpkg -i /tmp/tinygo.deb
 
       - name: Rebuild the wasm test fixtures
@@ -179,7 +179,10 @@ jobs:
           fi
 
       - name: Run the plugin runtime and harness tests against the rebuilt artifacts
-        run: go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
+        run: |
+          make cplane-route-composition cplane-route-composition-observer
+          go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
+          cd sdk/examples/cplane-route-composition && go test -tags composition_write ./...
 
   integration-test:
     name: Integration Test - ${{ matrix.example }}

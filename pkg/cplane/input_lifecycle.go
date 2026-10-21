@@ -87,6 +87,12 @@ func (p *PluginOps) failInput(reason string) error {
 func (p *PluginOps) cleanupInput() error {
 	p.applyMu.Lock()
 	defer p.applyMu.Unlock()
+	p.mu.Lock()
+	retired := p.retired
+	p.mu.Unlock()
+	if retired {
+		return nil
+	}
 	var errs []error
 	if p.advertise != nil {
 		if err := p.advertise.WithdrawOwner(context.Background(), p.owner); err != nil {

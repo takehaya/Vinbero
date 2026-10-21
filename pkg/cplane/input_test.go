@@ -146,12 +146,16 @@ type compositionSource struct{ *fakeSource }
 
 func (*compositionSource) SetDelegation(string, func(bgp.RouteEvent) bool) {}
 func mupFixture(t *testing.T) []bgp.RouteEvent {
+	return mupFixtureWithTEID(t, 256)
+}
+
+func mupFixtureWithTEID(t *testing.T, value uint32) []bgp.RouteEvent {
 	t.Helper()
 	a := netip.MustParseAddr
 	p := netip.MustParsePrefix
 	rd := gp.NewRouteDistinguisherTwoOctetAS(65000, 7)
 	var teid [4]byte
-	binary.BigEndian.PutUint32(teid[:], 256)
+	binary.BigEndian.PutUint32(teid[:], value)
 	sid := func(b gp.SRBehavior) gp.PathAttributeInterface {
 		return gp.NewPathAttributePrefixSID(gp.NewSRv6ServiceTLV(gp.TLVTypeSRv6L3Service, gp.NewSRv6InformationSubTLV(a("fd00:a:0:100::"), b, gp.NewSRv6SIDStructureSubSubTLV(32, 16, 8, 72, 0, 0))))
 	}
@@ -202,7 +206,34 @@ func TestCompositionWASMReplayAndWithdraw(t *testing.T) {
 	if !st.InputReady || st.OutputFailure != "" || st.AppliedRevision == 0 || len(f.uplinks) != 1 || f.v4["10.0.0.1/32"] == nil {
 		t.Fatalf("WASM outputs failed: %+v uplinks=%v v4=%v", st, f.uplinks, f.v4)
 	}
+	initial := *f.v4["10.0.0.1/32"]
+	duplicate := src.rib[0]
+	duplicate.Source.Peer = netip.MustParseAddr("192.0.2.253")
+	if !src.emit("composition", duplicate) || !m.WaitIdle("composition", 5*time.Second) {
+		t.Fatal("equivalent supporter idle")
+	}
+	st, _ = m.StatsFor("composition")
+	if st.OutputFailure != "" || st.AppliedRevision != st.DesiredRevision || f.v4["10.0.0.1/32"] == nil {
+		t.Fatalf("duplicate supporter blocked real host apply: %+v", st)
+	}
+	conflicting := mupFixtureWithTEID(t, 512)[0]
+	conflicting.Source = duplicate.Source
+	if !src.emit("composition", conflicting) || !m.WaitIdle("composition", 5*time.Second) {
+		t.Fatal("conflicting supporter idle")
+	}
+	st, _ = m.StatsFor("composition")
+	if st.OutputFailure != "" || st.AppliedRevision != st.DesiredRevision || f.v4["10.0.0.1/32"] != nil || len(f.uplinks) != 1 {
+		t.Fatalf("conflict did not retract only the ambiguous output: %+v", st)
+	}
 	withdraw := src.rib[0]
+	withdraw.IsWithdraw = true
+	if !src.emit("composition", withdraw) || !m.WaitIdle("composition", 5*time.Second) {
+		t.Fatal("remaining supporter idle")
+	}
+	if current := f.v4["10.0.0.1/32"]; current == nil || *current == initial {
+		t.Fatal("surviving changed supporter did not recover forwarding")
+	}
+	withdraw = conflicting
 	withdraw.IsWithdraw = true
 	if !src.emit("composition", withdraw) {
 		t.Fatal("no subscription")

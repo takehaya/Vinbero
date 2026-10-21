@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"reflect"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplane/mup"
@@ -124,6 +125,13 @@ func (c *controller) reconcile() {
 		}
 		set.Uplinks = append(set.Uplinks, entry)
 	}
+	set.Headends = unambiguousOutputs(set.Headends, func(h cplane.ForwardingHeadend) string {
+		return h.Entry.TriggerPrefix
+	}, c.log)
+	// This controller has one context, hence one host-resolved MUP instance.
+	set.Uplinks = unambiguousOutputs(set.Uplinks, func(u cplane.MUPUplink) string {
+		return fmt.Sprintf("%s/%d/%d", u.Endpoint, u.TEID, u.TEIDBits)
+	}, c.log)
 	if !c.observeOnly {
 		if err := c.client.ApplyComposition(set); err != nil {
 			c.log(cplane.LogWarn, fmt.Sprintf("revision %d apply failed: %v", set.Revision, err))
@@ -132,4 +140,30 @@ func (c *controller) reconcile() {
 	}
 	c.handledRevision = status.Revision
 	c.log(cplane.LogInfo, fmt.Sprintf("revision %d observe_only=%t headends=%d uplinks=%d", set.Revision, c.observeOnly, len(set.Headends), len(set.Uplinks)))
+}
+
+// Different NLRIs can build the same forwarding key. Preserve result order,
+// coalesce identical outputs and omit every value for a conflicting key.
+func unambiguousOutputs[T any](entries []T, key func(T) string, log func(cplane.LogLevel, string)) []T {
+	first := map[string]int{}
+	conflicts := map[string]bool{}
+	for i, entry := range entries {
+		k := key(entry)
+		if at, ok := first[k]; ok {
+			if !conflicts[k] && !reflect.DeepEqual(entries[at], entry) {
+				conflicts[k] = true
+				log(cplane.LogWarn, "ambiguous forwarding key: "+k)
+			}
+		} else {
+			first[k] = i
+		}
+	}
+	out := entries[:0]
+	for i, entry := range entries {
+		k := key(entry)
+		if !conflicts[k] && first[k] == i {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
