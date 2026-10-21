@@ -1,6 +1,7 @@
 package cplane
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -205,12 +206,17 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 	owner := p.ops.Owner()
 	ready, fault, cleanup := p.ops.InputState()
 	desired, applied, failure := p.ops.OutputState()
-	services, err := p.ops.services.forwardingCount(owner)
-	if err != nil {
+	forwarding, inventoryErr := p.ops.services.forwardingCount(owner)
+	for _, af := range []AddressFamily{AFv4, AFv6} {
+		entries, err := p.ops.headend.OwnedEntries(owner, af)
+		forwarding += len(entries)
+		inventoryErr = errors.Join(inventoryErr, err)
+	}
+	if inventoryErr != nil {
 		if failure != "" {
 			failure += "; "
 		}
-		failure += fmt.Sprintf("forwarding inventory incomplete: %v", err)
+		failure += fmt.Sprintf("forwarding inventory incomplete: %v", inventoryErr)
 	}
 	return PluginStats{
 		Name:  p.name,
@@ -224,7 +230,7 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 		Snapshots:           snapshots,
 		Dead:                dead,
 		PendingDeclarations: p.ops.PendingDeclarations(),
-		HeadendEntries:      m.leases.CountOf(LeaseHeadendV4, owner) + m.leases.CountOf(LeaseHeadendV6, owner) + services,
+		HeadendEntries:      forwarding,
 		AdvertisedRoutes:    m.advertise.LiveCount(owner),
 		LocalSIDs:           m.localSIDs.LiveCount(owner),
 		Quotas:              m.quotas,

@@ -143,6 +143,9 @@ func (f *fakeHeadendOps) DeleteHeadendV6(rawPrefix string, requester bpf.OwnerTa
 	p := maskKey(rawPrefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if p == f.failDel {
+		return fmt.Errorf("simulated delete failure for %q", p)
+	}
 	if cur, ok := f.owner6[p]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}

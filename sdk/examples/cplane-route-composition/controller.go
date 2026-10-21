@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/netip"
 	"reflect"
+	"slices"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplane/mup"
@@ -125,6 +126,26 @@ func (c *controller) reconcile() {
 		}
 		set.Uplinks = append(set.Uplinks, entry)
 	}
+	// Every uplink also claims its endpoint /32 in the headend map. Record
+	// all raw claims before reducing either list so ambiguity stays sticky.
+	gates := map[string]bool{}
+	for _, u := range set.Uplinks {
+		gates[u.Endpoint+"/32"] = true
+	}
+	conflicts := map[string]bool{}
+	for _, h := range set.Headends {
+		k := h.Entry.TriggerPrefix
+		if gates[k] && !conflicts[k] {
+			conflicts[k] = true
+			c.log(cplane.LogWarn, "ambiguous forwarding key: "+k)
+		}
+	}
+	set.Headends = slices.DeleteFunc(set.Headends, func(h cplane.ForwardingHeadend) bool {
+		return conflicts[h.Entry.TriggerPrefix]
+	})
+	set.Uplinks = slices.DeleteFunc(set.Uplinks, func(u cplane.MUPUplink) bool {
+		return conflicts[u.Endpoint+"/32"]
+	})
 	set.Headends = unambiguousOutputs(set.Headends, func(h cplane.ForwardingHeadend) string {
 		return h.Entry.TriggerPrefix
 	}, c.log)

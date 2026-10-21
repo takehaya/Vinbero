@@ -88,3 +88,58 @@ func TestControllerUplinkOutputKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestControllerSharedGateClaims(t *testing.T) {
+	for _, name := range []string{"single", "conflicting headends", "conflicting uplinks", "containing prefix"} {
+		for _, reverse := range []bool{false, true} {
+			t.Run(name+map[bool]string{false: "/forward", true: "/reverse"}[reverse], func(t *testing.T) {
+				r := &recorder{}
+				c, err := newController(inputConfig(`,"observe_only":false`), r, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				prefix := "192.0.2.1/32"
+				if name == "containing prefix" {
+					prefix = "192.0.2.0/24"
+				}
+				extra := []cplane.Event{route(t, bgp.NewMUPType1SessionTransformedRoute(bgp.NewRouteDistinguisherTwoOctetAS(65000, 8), netip.MustParsePrefix(prefix), netip.MustParseAddr("0.0.1.0"), 9, netip.MustParseAddr("172.16.0.1"), nil))}
+				if name == "conflicting headends" {
+					extra = append(extra, route(t, bgp.NewMUPType1SessionTransformedRoute(bgp.NewRouteDistinguisherTwoOctetAS(65000, 9), netip.MustParsePrefix(prefix), netip.MustParseAddr("0.0.2.0"), 9, netip.MustParseAddr("172.16.0.1"), nil)))
+				}
+				if name == "conflicting uplinks" {
+					direct := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(0, 1)})
+					rd := bgp.NewRouteDistinguisherTwoOctetAS(65000, 8)
+					sid := bgp.NewPathAttributePrefixSID(bgp.NewSRv6ServiceTLV(bgp.TLVTypeSRv6L3Service, bgp.NewSRv6InformationSubTLV(netip.MustParseAddr("fd00:b:0:100::"), bgp.END_DT4)))
+					extra = append(extra, route(t, bgp.NewMUPType2SessionTransformedRoute(rd, 64, netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("0.0.1.0")), direct), route(t, bgp.NewMUPDirectSegmentDiscoveryRoute(rd, netip.MustParseAddr("192.0.2.3")), direct, sid))
+				}
+				initial := fixtures(t, 256)
+				events := append(append([]cplane.Event(nil), initial...), extra...)
+				if reverse {
+					for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+						events[i], events[j] = events[j], events[i]
+					}
+				}
+				c.update(replay(events))
+				withdraw := initial[0]
+				withdraw.Route.Withdraw = true
+				c.update([]cplane.Event{withdraw})
+				set := r.sets[len(r.sets)-1]
+				wantHeads, wantUplinks := 0, 0
+				if name == "containing prefix" {
+					wantHeads, wantUplinks = 1, 1
+				}
+				if len(set.Headends) != wantHeads || len(set.Uplinks) != wantUplinks {
+					t.Fatalf("cross-kind ambiguity was lost or nonexact overlap suppressed: %+v", set)
+				}
+				for i := range extra {
+					extra[i].Route.Withdraw = true
+				}
+				c.update(extra)
+				set = r.sets[len(r.sets)-1]
+				if len(set.Headends) != 0 || len(set.Uplinks) != 1 {
+					t.Fatalf("remaining uplink did not recover: %+v", set)
+				}
+			})
+		}
+	}
+}

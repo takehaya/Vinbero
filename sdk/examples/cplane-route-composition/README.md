@@ -76,6 +76,8 @@ The tick interval in the registration command enables retries when no further ro
 Unresolved or ambiguous pairs are omitted and reported through diagnostics.
 Built outputs are also grouped by their actual forwarding key: equivalent values collapse, while every value for a conflicting key is omitted and diagnosed.
 This includes reflected copies of one route and different RDs that map to the same headend trigger.
+An uplink also claims its endpoint `/32` as a shared MUP gate, so a downlink with that exact trigger conflicts across output types.
+All successful raw builder outputs contribute to that collision check before either list is reduced; the controller omits every claimant without giving one output type priority.
 A pair that fails the builder's profile checks is also omitted, allowing its previous output to be withdrawn in the next complete set.
 The first profile supports GTP4 ST1+ISD and ST2+DSD; ST2+ISD and GTP6 writes are unsupported.
 Missing, duplicate, and unsupported Direct Segment communities are distinct from a valid zero-valued community.
