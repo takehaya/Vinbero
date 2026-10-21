@@ -78,6 +78,7 @@ func (EsiRedundancyMode) EnumDescriptor() ([]byte, []int) {
 // The action field determines which optional fields are relevant:
 //   - End.DT4/DT6/DT46: vrf_name (VRF-aware FIB lookup)
 //   - uT (END_UT): trigger_prefix (/48) + vrf_name (required; shift-and-forward in the VRF table)
+//   - End.T(REP) (END_T_REPLACE): trigger_prefix (block + C-SID) + usid_block_len + vrf_name (required; REPLACE walk in the VRF table)
 //   - End.DT2: bd_id + bridge_name (L2 FDB lookup + bridge flood on miss)
 //   - End.DX2: oif (direct L2 output to specific interface)
 //   - End.DX2V: table_id (VLAN cross-connect table scope)
@@ -97,7 +98,7 @@ type SidFunction struct {
 	ArgSrcOffset   uint32              `protobuf:"varint,7,opt,name=arg_src_offset,json=argSrcOffset,proto3" json:"arg_src_offset,omitempty"`                                 // Bit offset for source in SID Args
 	ArgDstOffset   uint32              `protobuf:"varint,8,opt,name=arg_dst_offset,json=argDstOffset,proto3" json:"arg_dst_offset,omitempty"`                                 // Bit offset for destination in SID Args
 	Oif            uint32              `protobuf:"varint,9,opt,name=oif,proto3" json:"oif,omitempty"`                                                                         // Output interface index (End.DX2: direct L2 output)
-	VrfName        string              `protobuf:"bytes,10,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`                                                  // VRF device name, resolved to an ifindex for the FIB lookup (End.T/DT4/DT6/DT46: optional; uT: required)
+	VrfName        string              `protobuf:"bytes,10,opt,name=vrf_name,json=vrfName,proto3" json:"vrf_name,omitempty"`                                                  // VRF device name, resolved to an ifindex for the FIB lookup (End.T/DT4/DT6/DT46: optional; uT and END_T_REPLACE: required)
 	BdId           uint32              `protobuf:"varint,11,opt,name=bd_id,json=bdId,proto3" json:"bd_id,omitempty"`                                                          // Bridge Domain ID (End.DT2: FDB scope for MAC learning)
 	BridgeName     string              `protobuf:"bytes,12,opt,name=bridge_name,json=bridgeName,proto3" json:"bridge_name,omitempty"`                                         // Bridge device name (End.DT2: redirect target on FDB miss)
 	Segments       []string            `protobuf:"bytes,13,rep,name=segments,proto3" json:"segments,omitempty"`                                                               // Policy segment list (End.B6/End.B6.Encaps)
@@ -111,11 +112,21 @@ type SidFunction struct {
 	// Allocate the SID from a registered locator pool. Mutually exclusive
 	// with trigger_prefix: requests that set both fields are rejected with
 	// a per-entry error, and requests that set neither are likewise
-	// rejected at the SidFunctionCreate boundary. When locator_ref alone
-	// is set the server builds the SID from locator.prefix +
-	// locator_ref.function and materializes the result back into
-	// trigger_prefix, so List / Get see the same /128 prefix regardless of
-	// how the entry was originally created.
+	// rejected at the SidFunctionCreate boundary. The materialized
+	// trigger_prefix (which List / Get report regardless of how the entry
+	// was created) is action-dependent: classic actions mint a full /128
+	// service SID from locator.prefix + locator_ref.function; uN / uT take
+	// the uSID locator's own prefix (no function -- locator_ref.function is
+	// rejected); uA and the 32-bit REPLACE-CSID behaviors mint a function
+	// CSID and materialize block + node + function as a /64 (the allocation
+	// doubles as the uSID claim). uN/uA/uT, the LBS aliases, and the
+	// REPLACE behaviors require a usid-behavior locator. For the
+	// function-minting actions only (uA, End.XLBS, and the REPLACE
+	// behaviors) with locator_ref.function omitted, every create mints a
+	// fresh function -- a retried request is NOT idempotent and installs a
+	// second SID; pin the function (or reuse the returned trigger_prefix)
+	// for idempotent upserts. uN/uT/End.LBS always resolve to the locator
+	// prefix itself, so their retries are ordinary upserts of one key.
 	LocatorRef *LocatorRef `protobuf:"bytes,21,opt,name=locator_ref,json=locatorRef,proto3,oneof" json:"locator_ref,omitempty"`
 	// End.M.GTP4.E: extract the GTP-U outer IPv4 source from the outer IPv6
 	// source address at this bit position (0..96, RFC 9433 §6.6) instead of
@@ -149,13 +160,14 @@ type SidFunction struct {
 	// Only the F3216 structure (32) is supported today; omitted defaults to
 	// 32. The trigger_prefix must cover exactly block + node for uN / uT
 	// (e.g. /48) and block + node + function for uA (e.g. /64); uA reuses
-	// nexthop. For END_REPLACE / END_X_REPLACE this is the REPLACE-CSID
-	// locator block length instead: required, byte-aligned, and
-	// block + csid_len must not exceed 120 bits.
+	// nexthop. For END_REPLACE / END_X_REPLACE / END_T_REPLACE this is the
+	// REPLACE-CSID locator block length instead: required, byte-aligned,
+	// and block + csid_len must not exceed 120 bits.
 	UsidBlockLen *uint32 `protobuf:"varint,29,opt,name=usid_block_len,json=usidBlockLen,proto3,oneof" json:"usid_block_len,omitempty"`
-	// END_REPLACE / END_X_REPLACE (RFC 9800 Sec.4.2): the C-SID length
-	// (LNFL) in bits, 32 (default) or 16. The trigger_prefix must cover
-	// exactly block + C-SID; END_X_REPLACE reuses nexthop.
+	// END_REPLACE / END_X_REPLACE / END_T_REPLACE (RFC 9800 Sec.4.2): the
+	// C-SID length (LNFL) in bits, 32 (default) or 16. The trigger_prefix
+	// must cover exactly block + C-SID; END_X_REPLACE reuses nexthop, and
+	// END_T_REPLACE requires vrf_name (the walk's FIB context).
 	CsidLen *uint32 `protobuf:"varint,30,opt,name=csid_len,json=csidLen,proto3,oneof" json:"csid_len,omitempty"`
 	// END_LBS / END_XLBS / END_LBS_REPLACE / END_XLBS_REPLACE (RFC 9800
 	// Sec.7): the target locator block as an IPv6 prefix (e.g.

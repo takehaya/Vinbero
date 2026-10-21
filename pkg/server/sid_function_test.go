@@ -725,7 +725,7 @@ func TestProtoToEntry_Replace(t *testing.T) {
 		{"End(REP) rejects oversized geometry", &v1.SidFunction{
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222:3333:4444:0/128", UsidBlockLen: u32(96)}, "byte-aligned, block + csid_len <= 120"},
 		{"End(REP) rejects nexthop", &v1.SidFunction{
-			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), Nexthop: "fe80::1"}, "does not take a nexthop"},
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), Nexthop: "fe80::1"}, "do not take a nexthop"},
 		{"End.X(REP) with nexthop", &v1.SidFunction{
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_X_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), Nexthop: "fe80::1"}, ""},
 		{"End.X(REP) missing nexthop", &v1.SidFunction{
@@ -734,6 +734,12 @@ func TestProtoToEntry_Replace(t *testing.T) {
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END, TriggerPrefix: "fd00:1::1/128", CsidLen: u32(32)}, "only valid for END_REPLACE"},
 		{"rejects vrf_name", &v1.SidFunction{
 			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), VrfName: "lo"}, "do not take a vrf_name"},
+		{"End.T(REP) requires vrf_name", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48)}, "requires a vrf_name"},
+		{"End.T(REP) rejects a non-VRF device", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), VrfName: "lo"}, "not a vrf"},
+		{"End.T(REP) rejects nexthop", &v1.SidFunction{
+			Action: v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE, TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80", UsidBlockLen: u32(48), VrfName: "lo", Nexthop: "fe80::1"}, "do not take a nexthop"},
 	}
 
 	for _, tt := range tests {
@@ -748,8 +754,15 @@ func TestProtoToEntry_Replace(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if entry.Action != uint8(tt.sf.Action) {
-				t.Errorf("action = %d, want %d", entry.Action, tt.sf.Action)
+			wantAction := tt.sf.Action
+			if wantAction == v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE {
+				// The T variant is stored as END_REPLACE with the VRF in
+				// the aux (List maps it back from the non-zero leading
+				// word).
+				wantAction = v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE
+			}
+			if entry.Action != uint8(wantAction) {
+				t.Errorf("action = %d, want %d", entry.Action, wantAction)
 			}
 			nexthop, blockLenBytes, csidLenBytes := bpf.SidAuxReplaceData(aux)
 			if blockLenBytes != 6 {
@@ -1074,6 +1087,39 @@ func TestProtoToEntry_USID(t *testing.T) {
 	})
 }
 
+// TestProtoToEntry_EndTReplaceVrf covers the root-only positive path: the
+// VRF resolves, the entry is stored as END_REPLACE, and the aux carries the
+// ifindex (l3vrf view) alongside the REPLACE geometry (usid view).
+func TestProtoToEntry_EndTReplaceVrf(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a VRF device")
+	}
+	s := newProtoToEntryServer()
+	u32 := func(v uint32) *uint32 { return &v }
+	vrfDev := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "trp2e-vrf0"}, Table: 1044}
+	if err := netlink.LinkAdd(vrfDev); err != nil {
+		t.Fatalf("vrf add: %v", err)
+	}
+	defer func() { _ = netlink.LinkDel(vrfDev) }()
+
+	entry, aux, err := s.protoToEntry(&v1.SidFunction{
+		Action:        v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE,
+		TriggerPrefix: "fd00:aabb:ccdd:1111:2222::/80",
+		UsidBlockLen:  u32(48), VrfName: "trp2e-vrf0"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.Action != uint8(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_REPLACE) {
+		t.Errorf("stored action = %d, want END_REPLACE", entry.Action)
+	}
+	if got := bpf.SidAuxL3VrfData(aux); got != uint32(vrfDev.Attrs().Index) {
+		t.Errorf("vrf ifindex = %d, want %d", got, vrfDev.Attrs().Index)
+	}
+	if _, blockLenBytes, csidLenBytes := bpf.SidAuxReplaceData(aux); blockLenBytes != 6 || csidLenBytes != 4 {
+		t.Errorf("geometry = %d/%d bytes, want 6/4", blockLenBytes, csidLenBytes)
+	}
+}
+
 // usidLocator builds an F3216 uSID locator for the claim tests.
 func usidLocator(t *testing.T, name, prefix string) *locator.Manager {
 	t.Helper()
@@ -1205,6 +1251,23 @@ func TestClaimUsidFunction_ReplaceActions(t *testing.T) {
 		if _, _, err := mgr.AllocateSID("loc1", &fn); err != nil {
 			t.Fatalf("after release: %v", err)
 		}
+	})
+
+	t.Run("End.T(REP) claim blocks a service SID", func(t *testing.T) {
+		// The virtual action must claim exactly like its stored base --
+		// a /64 END_T_REPLACE that skipped the claim could collide with
+		// a locator-allocated service SID.
+		mgr := usidLocator(t, "loc1", "fd00:aaaa:b002::/48")
+		s := NewSidFunctionServer(nil, nil, mgr, nil)
+		release, err := s.claimUsidFunction(replaceSid(v1.Srv6LocalAction_SRV6_LOCAL_ACTION_END_T_REPLACE, ""))
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		fn := uint32(0xd004)
+		if _, _, err := mgr.AllocateSID("loc1", &fn); !errors.Is(err, locator.ErrFunctionInUse) {
+			t.Fatalf("service SID allocation of the claimed CSID: err = %v, want ErrFunctionInUse", err)
+		}
+		release()
 	})
 
 	t.Run("End.X(REP) rejects a CSID taken by a service SID", func(t *testing.T) {

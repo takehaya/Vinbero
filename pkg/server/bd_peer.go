@@ -2,12 +2,10 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 
 	"connectrpc.com/connect"
-	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
@@ -29,10 +27,6 @@ func (s *BdPeerServer) BdPeerCreate(
 		Errors:  make([]*v1.OperationError, 0),
 	}
 
-	// Track next indexes per BD within this batch.
-	// Seed each BD's starting index via O(8) probe instead of full map iteration.
-	bdIndexes := make(map[uint32]uint16)
-
 	for _, peer := range req.Msg.Peers {
 		// Range-check before the uint16 cast: a wrapped bd_id would install
 		// the peer into a different bridge domain than the caller asked for.
@@ -44,20 +38,6 @@ func (s *BdPeerServer) BdPeerCreate(
 			continue
 		}
 		bdID := uint16(peer.BdId)
-
-		// Lazily resolve starting index for this BD on first encounter
-		if _, ok := bdIndexes[peer.BdId]; !ok {
-			bdIndexes[peer.BdId] = s.mapOps.FindFreeBdPeerIndex(bdID)
-		}
-		index := bdIndexes[peer.BdId]
-
-		if index >= bpf.MaxBumNexthops {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: fmt.Sprintf("bd_%d", peer.BdId),
-				Reason:        fmt.Sprintf("maximum number of peers (%d) reached for this BD", bpf.MaxBumNexthops),
-			})
-			continue
-		}
 
 		entry, err := s.protoToEntry(peer)
 		if err != nil {
@@ -79,7 +59,9 @@ func (s *BdPeerServer) BdPeerCreate(
 
 		// Operator-created peers carry no advertising-PE source, so key the
 		// reverse map on the entry's own SrcAddr (preserving prior behavior).
-		if err := s.mapOps.CreateBdPeer(bdID, index, entry, esi, entry.SrcAddr, true); err != nil {
+		// Probe-and-create runs under one critical section so a concurrent
+		// writer cannot land on the same index and be silently overwritten.
+		if _, err := s.mapOps.CreateBdPeerAtFreeIndex(bdID, entry, esi, entry.SrcAddr, true); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("bd_%d", peer.BdId),
 				Reason:        err.Error(),
@@ -87,7 +69,6 @@ func (s *BdPeerServer) BdPeerCreate(
 			continue
 		}
 
-		bdIndexes[peer.BdId] = index + 1
 		resp.Created = append(resp.Created, peer)
 	}
 
@@ -119,14 +100,14 @@ func (s *BdPeerServer) BdPeerDelete(
 		// nothing to trigger a repair. Leftovers in that range are swept by
 		// the applier itself at startup.
 		for i := uint16(0); i < bpf.MaxBumNexthops; i++ {
-			err := s.mapOps.DeleteBdPeer(uint16(bdID), i)
-			if err == nil {
-				deleted = true
-			} else if !errors.Is(err, ebpf.ErrKeyNotExist) {
+			existed, err := s.mapOps.DeleteBdPeer(uint16(bdID), i)
+			if err != nil {
 				resp.Errors = append(resp.Errors, &v1.OperationError{
 					TriggerPrefix: fmt.Sprintf("bd_%d_idx_%d", bdID, i),
 					Reason:        err.Error(),
 				})
+			} else if existed {
+				deleted = true
 			}
 		}
 		if deleted {
