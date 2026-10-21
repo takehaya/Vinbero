@@ -130,9 +130,9 @@ type stalledHeadendScan struct {
 	once            sync.Once
 }
 
-func (m *stalledHeadendScan) ListHeadendV4() (map[string]*bpf.HeadendEntry, error) {
+func (m *stalledHeadendScan) ListHeadendV4Owners() (map[string]bpf.OwnerTag, error) {
 	m.once.Do(func() { close(m.started); <-m.resume })
-	return m.fakeHeadendOps.ListHeadendV4()
+	return m.fakeHeadendOps.ListHeadendV4Owners()
 }
 
 func TestSharedHeadendScanDoesNotBlockBuiltinAndReservesPendingKeys(t *testing.T) {
@@ -146,7 +146,11 @@ func TestSharedHeadendScanDoesNotBlockBuiltinAndReservesPendingKeys(t *testing.T
 		_, err := r.ApplySet(ownerA, AFv4, desire("10.0.1.0/24"), unlimited)
 		applied <- err
 	}()
-	<-maps.started
+	select {
+	case <-maps.started:
+	case <-time.After(time.Second):
+		t.Fatal("apply did not reach the reserved-key inventory barrier")
+	}
 	builtin := make(chan error, 1)
 	go func() {
 		// The plugin reserved its key but has not written its owner record.
@@ -267,7 +271,11 @@ func TestConflictingPreflightDoesNotBlockPinnedOwnerWithdrawal(t *testing.T) {
 		_, err := r.ApplySet(ownerA, AFv4, desire(prefix), unlimited)
 		applied <- err
 	}()
-	<-maps.started
+	select {
+	case <-maps.started:
+	case <-time.After(time.Second):
+		t.Fatal("apply did not reach the owner preflight barrier")
+	}
 	// The plugin is about to discover the conflicting pinned owner. It
 	// must not have reserved this key and prevented its real owner deleting it.
 	if err := r.DeleteHeadendV4(prefix, bpf.OwnerBuiltin); err != nil {
