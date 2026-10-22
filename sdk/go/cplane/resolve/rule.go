@@ -264,6 +264,9 @@ func (e *Engine) Update(events []cplane.Event) []cplane.EventResult {
 type Plan[L comparable, R comparable] struct {
 	rule  Rule[L, R]
 	pairs []Pair[L, R]
+	// Evaluation scratch belongs to the already allocated plan. Its contents
+	// are cleared on entry and exit, so no prefix keys survive an evaluation.
+	probe prefixProbe
 }
 
 func (p *Plan[L, R]) Results() []Pair[L, R] {
@@ -336,6 +339,8 @@ func selected(e routes.Entry, ctx string, families []string) bool {
 	return false
 }
 func (p *Plan[L, R]) evaluate(v *routes.View, b *budget) {
+	p.probe = prefixProbe{}
+	defer func() { p.probe = prefixProbe{} }()
 	p.pairs = nil
 	r := p.rule
 	type group struct {
@@ -345,7 +350,6 @@ func (p *Plan[L, R]) evaluate(v *routes.View, b *budget) {
 	right := []candidate[R]{}
 	groups := map[group]int{}
 	index := map[any][]int{}
-	var probe prefixProbe
 	v.Range(func(entry routes.Entry) {
 		if b.exceeded || !selected(entry, r.Context, r.Right.Families) || !b.spend(1) {
 			return
@@ -385,7 +389,7 @@ func (p *Plan[L, R]) evaluate(v *routes.View, b *budget) {
 			b.issue(Issue{r.Name, "invalid_left", x.Reason, entry.Key})
 			return
 		}
-		keys, reason := r.Match.leftKeys(x.Value, &probe)
+		keys, reason := r.Match.leftKeys(x.Value, &p.probe)
 		if reason != "" {
 			b.issue(Issue{r.Name, "invalid_left_field", reason, entry.Key})
 			return
