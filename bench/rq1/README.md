@@ -86,3 +86,34 @@ IPv6 payload in the downlink profile still uses a GTP4 transport endpoint.
 GTP6 and ST2+ISD are unsupported by this controller.
 EVPN has SDK builders but no shared native/WASM controller in this comparison.
 The existing packet-convergence fixture covers only the IPv4 downlink profile.
+
+## Scale and cost boundaries
+
+`BenchmarkCompositionScale` holds N IPv4 ST1 routes and one shared IPv4 ISD.
+Set `VINBERO_CPLANE_SESSIONS` to N, `VINBERO_CPLANE_CHANGE` to `st1` (change
+TEIDs in a fixed session set) or `isd` (change the shared service SID), and
+`VINBERO_CPLANE_BATCH` to the number of ST1 updates per call (ISD requires 1).
+`VINBERO_CPLANE_STAGE` selects `core`, `native`, `wasm`, `decode`, or `encode`.
+The first three measure typed controller execution, the native encoded adapter,
+and the WASM encoded adapter respectively; all use the same semantic fixture.
+Core still decodes GoBGP NLRI and attributes inside the View.
+`decode` measures SDK event-envelope decoding with structural checks, and
+`encode` measures SDK desired-set encoding/transport from prebuilt typed outputs.
+These independent diagnostics are not an additive time breakdown.
+
+Run `make bench-cplane-build` first, then from `pkg/cplane/native`, for example:
+
+```sh
+VINBERO_CPLANE_SESSIONS=512 VINBERO_CPLANE_CHANGE=st1 \
+VINBERO_CPLANE_BATCH=1 VINBERO_CPLANE_STAGE=wasm \
+  ../../../out/bench/cplane-runtime.test -test.run '^$' \
+  -test.bench '^BenchmarkCompositionScale$' -test.benchtime=20x
+```
+
+A/B output values and counts are checked outside timing, as are total commits and
+final expected output; `VINBERO_CPLANE_TRACE_DIR` saves inputs and final output.
+All non-decode stages must produce identical bytes for equal iteration counts.
+The sink is in memory: no manager queue, authorization, BGP transport or real BPF
+is included, and changing batch width does not measure an offered arrival rate.
+Keep resource limits fixed and report failed cases rather than reducing N or
+raising limits after seeing results.
