@@ -31,6 +31,21 @@ The byte budget measures retained encoded data plus accounting overhead, not the
 Existing registrations without `input` keep their original configure bytes and legacy output API.
 The presence of an `input_features` import alone never switches the configure format.
 
+### Grouping live updates
+
+Set the top-level `"max_batch_events": 16` in the JSON passed to `--input-policy` to allow the host to group live BGP route events that are already queued.
+Omitting the field, or setting it to 0 or 1, retains one delivery per call; values from 2 through 16 set the maximum event count.
+The same policy applies to native and WASM controllers.
+The worker adds no timer or waiting period to fill a group and stops at replay, completion barriers, and other event types.
+Queue and replay-hold limits continue to count original deliveries; the existing buffer size and call timeout still bound each handler call.
+
+Events retain their order and sequence numbers, including successive replacements of the same path.
+A controller that reconciles once per callback may install only the final desired state of that group, so enable grouping when intermediate forwarding states are unnecessary.
+Input preparation is also performed on the group: if one route fails validation, the group is withheld from the controller and the host marks input incomplete and starts output cleanup.
+There is no guarantee that a valid prefix of that group will be delivered before the failure; a complete valid replay is required to recover.
+Per-event status still refers to the original sequence number; a handler failure applies to the combined call and uses the existing restart/replay recovery.
+This host setting is preserved in input policy and stats and does not alter the guest configure envelope.
+
 ## Rules
 
 A selector projects a packet into a comparable value containing every field the output builder reads.

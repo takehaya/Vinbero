@@ -378,6 +378,12 @@ message CplaneInputPolicy {
   uint32 version = 1;
   repeated CplaneInputContext contexts = 2;
   uint32 max_paths = 3;
+  // Opt-in grouping of already queued live BGP route events, without waiting.
+  // 0 or 1 preserves one delivery per call; 2..16 caps events per call.
+  // Replay, barriers and non-route events remain separate. Applies to both
+  // native and WASM backends; existing buffer and call limits still apply.
+  // Input preparation and runtime failures affect the whole combined call.
+  uint32 max_batch_events = 4;
 }
 
 message CplaneInputContext {

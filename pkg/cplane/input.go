@@ -34,9 +34,10 @@ type teidScope struct {
 	bits  uint8
 }
 type inputPolicy struct {
-	spec     *v1.CplaneInputPolicy
-	contexts []inputContext
-	maxPaths int
+	spec           *v1.CplaneInputPolicy
+	contexts       []inputContext
+	maxPaths       int
+	maxBatchEvents int
 }
 type inputDelivery struct {
 	policy *inputPolicy
@@ -91,7 +92,11 @@ func parseInputPolicy(raw *v1.CplaneInputPolicy, families []bgp.Family) (*inputP
 	if limit > 65536 {
 		return nil, fmt.Errorf("input: max_paths exceeds 65536")
 	}
-	policy := &inputPolicy{spec: spec, maxPaths: limit}
+	if spec.MaxBatchEvents > 16 {
+		return nil, fmt.Errorf("input: max_batch_events must be 0, 1, or 2..16")
+	}
+	batchLimit := max(1, int(spec.MaxBatchEvents))
+	policy := &inputPolicy{spec: spec, maxPaths: limit, maxBatchEvents: batchLimit}
 	names := map[string]bool{}
 	for _, c := range spec.Contexts {
 		if c == nil || c.Name == "" || len(c.Name) > 63 || names[c.Name] || len(c.Grants) == 0 || len(c.Grants) > 64 {

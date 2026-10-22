@@ -47,6 +47,13 @@ all events were handled. `Tick func(int64)` receives monotonic nanoseconds;
 `--tick-ms 1000` (or set `TickInterval` through the API) to drive periodic retries;
 omitting the interval leaves `Tick` undriven.
 
+Context registrations can opt into grouping already queued live BGP updates with
+`max_batch_events` in their input policy.
+Callbacks must preserve event order and report dispositions using each event's original sequence number.
+The host adds no waiting period to fill a group, and a group shares the existing per-call limits.
+Input preparation and runtime failures affect the whole combined call.
+See [grouping live updates](../../cplane-route-api.md#grouping-live-updates) for the operator setting and recovery semantics.
+
 Build with standard Go (Go 1.24 or later supports WASI reactors; this repository
 pins Go 1.25.5):
 
