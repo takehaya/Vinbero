@@ -21,12 +21,12 @@ import (
 )
 
 type scaleFixture struct {
-	sessions, batch int
-	change          string
-	replay          []byte
-	updates         [2][]byte
-	typedReplay     []cplane.Event
-	typed           [2][]cplane.Event
+	sessions, batch   int
+	change, endpoints string
+	replay            []byte
+	updates           [2][]byte
+	typedReplay       []cplane.Event
+	typed             [2][]cplane.Event
 }
 
 func scalePrefix(i int) string { return fmt.Sprintf("10.64.%d.%d/32", i/256, i%256) }
@@ -38,17 +38,27 @@ func scaleEvents(t testing.TB, events ...*v1.PluginEvent) []byte {
 	}
 	return raw
 }
-func newScaleFixture(t testing.TB, n, batch int, change string) scaleFixture {
+func newScaleFixture(t testing.TB, n, batch int, change, endpoints string) scaleFixture {
 	t.Helper()
+	if endpoints == "" {
+		endpoints = "shared"
+	}
+	if endpoints != "shared" && endpoints != "varied" {
+		t.Fatal("VINBERO_CPLANE_ENDPOINTS must be shared or varied")
+	}
 	if n < 1 || n > 1024 || batch < 1 || batch > n || (change != "st1" && change != "isd") || (change == "isd" && batch != 1) {
 		t.Fatal("invalid scale fixture")
 	}
-	f := scaleFixture{sessions: n, batch: batch, change: change}
+	f := scaleFixture{sessions: n, batch: batch, change: change, endpoints: endpoints}
 	rd := gp.NewRouteDistinguisherTwoOctetAS(65000, 7)
 	session := func(i int, teid uint32) *v1.PluginEvent {
 		var bytes [4]byte
 		binary.BigEndian.PutUint32(bytes[:], teid)
-		e := parityRoute(t, gp.NewMUPType1SessionTransformedRoute(rd, netip.MustParsePrefix(scalePrefix(i)), netip.AddrFrom4(bytes), 9, netip.MustParseAddr("172.16.0.1"), nil))
+		endpoint := netip.MustParseAddr("172.16.0.1")
+		if endpoints == "varied" {
+			endpoint = netip.AddrFrom4([4]byte{172, 16, 0, byte(1 + i%254)})
+		}
+		e := parityRoute(t, gp.NewMUPType1SessionTransformedRoute(rd, netip.MustParsePrefix(scalePrefix(i)), netip.AddrFrom4(bytes), 9, endpoint, nil))
 		// A TEID change replaces the same session rather than growing the View.
 		e.Route.BgpPath.RouteKey = []byte(scalePrefix(i))
 		return e
@@ -155,6 +165,9 @@ func verifyScale(t testing.TB, f scaleFixture, raw []byte, iteration int) {
 		}
 		sid := netip.MustParseAddr("fd00:" + location + ":0:100::").As16()
 		copy(sid[7:11], []byte{172, 16, 0, 1})
+		if f.endpoints == "varied" {
+			sid[10] = byte(1 + i%254)
+		}
 		sid[11] = 9 << 2
 		binary.BigEndian.PutUint32(sid[12:], teid)
 		expected[scalePrefix(i)] = netip.AddrFrom16(sid).String()
@@ -182,7 +195,7 @@ func BenchmarkCompositionScale(b *testing.B) {
 	batch, _ := strconv.Atoi(os.Getenv("VINBERO_CPLANE_BATCH"))
 	change := os.Getenv("VINBERO_CPLANE_CHANGE")
 	stage := os.Getenv("VINBERO_CPLANE_STAGE")
-	f := newScaleFixture(b, n, batch, change)
+	f := newScaleFixture(b, n, batch, change, os.Getenv("VINBERO_CPLANE_ENDPOINTS"))
 	ops := &benchmarkOps{}
 	sink := &scaleSink{}
 	ctx := context.Background()
@@ -314,11 +327,15 @@ func BenchmarkCompositionScale(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
-		meta, _ := json.Marshal(map[string]any{"sessions": n, "batch": batch, "change": change, "stage": stage, "iterations": b.N})
+		meta, _ := json.Marshal(map[string]any{"sessions": n, "batch": batch, "change": change, "stage": stage, "iterations": b.N, "endpoints": f.endpoints})
 		if err := os.WriteFile(filepath.Join(dir, "case.json"), meta, 0600); err != nil {
 			b.Fatal(err)
 		}
 	}
+	b.Logf("input_sha256=%s", scaleInputSHA(f))
+}
+
+func scaleInputSHA(f scaleFixture) string {
 	h := sha256.New()
 	for _, raw := range [][]byte{configuration(false), f.replay, f.updates[0], f.updates[1]} {
 		var length [8]byte
@@ -326,37 +343,31 @@ func BenchmarkCompositionScale(b *testing.B) {
 		h.Write(length[:])
 		h.Write(raw)
 	}
-	b.Logf("input_sha256=%x", h.Sum(nil))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func TestScaleFixtures(t *testing.T) {
-	for _, n := range []int{1, 64, 512} {
-		for _, change := range []string{"st1", "isd"} {
-			t.Run(fmt.Sprintf("%d-%s", n, change), func(t *testing.T) {
-				f := newScaleFixture(t, n, 1, change)
-				sink := &scaleSink{}
-				c := scaleController(t, sink)
-				if out := c.Update(f.typedReplay); len(out) != 0 {
-					t.Fatal(out)
-				}
-				for k := 0; k < 2; k++ {
-					if out := c.Update(f.typed[k]); len(out) != 0 {
-						t.Fatal(out)
-					}
-					ops := &benchmarkOps{}
-					client := cplane.Client{Host: scaleHost{ops}}
-					if err := client.ApplyComposition(sink.last); err != nil {
-						t.Fatal(err)
-					}
-					verifyScale(t, f, ops.last, k+1)
-				}
-			})
+	for _, endpoints := range []string{"shared", "varied"} {
+		for _, n := range []int{1, 64, 512} {
+			for _, change := range []string{"st1", "isd"} {
+				t.Run(fmt.Sprintf("%s-%d-%s", endpoints, n, change), func(t *testing.T) {
+					checkScaleFixture(t, newScaleFixture(t, n, 1, change, endpoints))
+				})
+			}
 		}
 	}
 }
 
 func TestScaleBatchFixture(t *testing.T) {
-	f := newScaleFixture(t, 512, 16, "st1")
+	for _, endpoints := range []string{"shared", "varied"} {
+		t.Run(endpoints, func(t *testing.T) {
+			checkScaleFixture(t, newScaleFixture(t, 512, 16, "st1", endpoints))
+		})
+	}
+}
+
+func checkScaleFixture(t *testing.T, f scaleFixture) {
+	t.Helper()
 	sink := &scaleSink{}
 	c := scaleController(t, sink)
 	if out := c.Update(f.typedReplay); len(out) != 0 {
@@ -372,5 +383,33 @@ func TestScaleBatchFixture(t *testing.T) {
 			t.Fatal(err)
 		}
 		verifyScale(t, f, ops.last, k+1)
+	}
+}
+
+func TestScaleSharedInputsRetainFrozenBytes(t *testing.T) {
+	// Digests from the frozen 2026-10-23 scale protocol (fcae945/3dae639).
+	// The hash covers length-framed config, replay and both changing inputs.
+	// This prevents the new negative control from silently changing the old
+	// shared-endpoint experiment, including the omitted-env default.
+	for _, tc := range []struct {
+		n, batch     int
+		change, want string
+	}{
+		{1, 1, "st1", "4bcd18a7d9e6026d750fc5ca5aa248ac081a7fe3dc27edb7b5c87d3be40b7e6a"},
+		{1, 1, "isd", "e28828e1b53814779fbeba8ec1667326d8552c2022071bc35a14cd70ce139a4d"},
+		{64, 1, "st1", "2562c5e1ab1c2086083ee16c134fa48f74281e34e60e93745270ac08ef19d6bf"},
+		{64, 1, "isd", "420da90b54ad9d98ef3ac17d7223c9145e65608e4d5d8d096e207bacd2ac7271"},
+		{512, 1, "st1", "b8c4525923ff9a24b712a098b57836d7cf940bfae6022d418c5397caa0f643fe"},
+		{512, 1, "isd", "b9d88bf2924429d9284d56f034778929d222264976fa16abd9f4bfbb9952eb51"},
+		{512, 16, "st1", "12f88a81c4ea1c26f62d0b35ddfa56af656f48ef688cc8964a97436511d21db5"},
+	} {
+		for _, mode := range []string{"", "shared"} {
+			t.Run(fmt.Sprintf("n%d-%s-b%d-%s", tc.n, tc.change, tc.batch, mode), func(t *testing.T) {
+				f := newScaleFixture(t, tc.n, tc.batch, tc.change, mode)
+				if got := scaleInputSHA(f); got != tc.want {
+					t.Fatalf("shared inputs changed: %s, want %s", got, tc.want)
+				}
+			})
+		}
 	}
 }
