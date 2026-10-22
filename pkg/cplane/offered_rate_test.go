@@ -29,7 +29,8 @@ import (
 
 // This opt-in experiment exercises the real manager, policy, worker and host
 // reconciler with in-memory forwarding maps. It does not measure BGP transport
-// or BPF writes. No production limits or APIs are changed for the experiment.
+// or BPF writes. Per-call budgets and queue/hold limits retain their production
+// defaults; the live-delivery batch policy is selected explicitly.
 //
 // VINBERO_CPLANE_OFFERED_RATE=1 VINBERO_CPLANE_BACKEND=native|wasm
 // VINBERO_CPLANE_RATE=<updates/s> VINBERO_CPLANE_DURATION=10s
@@ -38,6 +39,7 @@ import (
 //
 // VINBERO_CPLANE_TRACE_DIR=<new directory>
 // VINBERO_CPLANE_WASM=<fresh writing module> (required for wasm)
+// VINBERO_CPLANE_BATCH_EVENTS=1|16 (default 1; host live-delivery policy)
 // go test ./pkg/cplane -run '^TestCplaneOfferedRate$' -count=1 -timeout=10m
 func TestCplaneOfferedRate(t *testing.T) {
 	if os.Getenv("VINBERO_CPLANE_OFFERED_RATE") != "1" {
@@ -130,6 +132,7 @@ type offeredOutcomes struct {
 }
 
 type offeredReport struct {
+	BatchEvents                                    int
 	Origin                                         time.Time
 	GoVersion                                      string
 	GOMAXPROCS                                     int
@@ -187,6 +190,7 @@ func (r *offeredReport) run(t *testing.T, dir string) error {
 	if err != nil {
 		return err
 	}
+	r.BatchEvents = int(reg.Input.MaxBatchEvents)
 	if len(reg.Module) != 0 {
 		sum := sha256.Sum256(reg.Module)
 		r.ModuleSHA256 = hex.EncodeToString(sum[:])
@@ -364,6 +368,14 @@ func (r *offeredReport) run(t *testing.T, dir string) error {
 }
 
 func offeredRegistration(backend string) (Registration, error) {
+	batchEvents := os.Getenv("VINBERO_CPLANE_BATCH_EVENTS")
+	if batchEvents == "" {
+		batchEvents = "1"
+	}
+	if batchEvents != "1" && batchEvents != "16" {
+		return Registration{}, fmt.Errorf("BATCH_EVENTS must be 1 or 16")
+	}
+	batchLimit, _ := strconv.Atoi(batchEvents)
 	scope, err := ParseScope(ScopeSpec{HeadendPrefixes: []string{"10.64.0.0/16"}})
 	if err != nil {
 		return Registration{}, err
@@ -376,6 +388,7 @@ func offeredRegistration(backend string) (Registration, error) {
 		Config: []byte(`{"context":"mobile","source":"fd00:feed::1","args_offset":7,"observe_only":false}`),
 		Input:  &v1.CplaneInputPolicy{Version: 1, Contexts: []*v1.CplaneInputContext{{Name: "mobile", Grants: []*v1.CplaneInputGrant{{Families: []string{"mup_ipv4", "mup_ipv6"}, RouteTargets: []string{"65000:7"}}}, DelegateMupTypes: []uint32{3}}}},
 	}
+	reg.Input.MaxBatchEvents = uint32(batchLimit)
 	if backend == BackendNative {
 		reg.NativeID, reg.NativeVersion = native.MUPComposition, native.ImplementationVersion
 	} else {
@@ -565,7 +578,7 @@ func (r *offeredReport) write(dir string) error {
 		"Stats snapshots are not atomic across subsystems. DroppedEvents counts batches, can overlap replay, and cannot be assigned exactly to individual update tags.",
 		"Stats.Restarts is consecutive failures since the last successful call, not a cumulative count. Runtime failure callbacks and observed instance changes are recorded separately.",
 		"Passed means initial readiness, final drain and final full-replay map equivalence; it does not assert that every emitted update was delivered or that transient failures did not occur.",
-		"Final non-headend maps are expected empty and remain immutable in this downlink-only fixture; the forwarding sink is in-memory, not BPF. Optional controller ticks are disabled and all production limits retain their defaults.",
+		"Final non-headend maps are expected empty and remain immutable in this downlink-only fixture; the forwarding sink is in-memory, not BPF. Optional controller ticks are disabled and all production limits retain their defaults, apart from the explicit live-batch policy being compared. Handler service and failure are per group, not per update.",
 	}
 	r.Outcomes.RuntimeFailures = len(r.Failures)
 	for i := range r.Calls {
