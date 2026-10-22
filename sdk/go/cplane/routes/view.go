@@ -31,7 +31,7 @@ type View struct {
 	catalog map[string]map[string]bool
 	paths   map[cplane.BGPPathKey]stored
 	// ordered holds only keys; every traversal reads the current entries.
-	// Map mutations discard it so all rules can reuse one ordering.
+	// Changes to the key set discard it; successful replacements retain it.
 	ordered []cplane.BGPPathKey
 	limits  Limits
 	bytes   int
@@ -138,7 +138,9 @@ func (v *View) Update(events []cplane.Event) []cplane.EventResult {
 				results = append(results, v.incomplete(ev.Sequence, "routes: input has no usable identity"))
 				continue
 			}
-			if old, held := v.paths[k]; held {
+			previousOrdering := v.ordered
+			old, held := v.paths[k]
+			if held {
 				v.bytes -= old.bytes
 				delete(v.paths, k)
 				v.ordered = nil
@@ -183,6 +185,10 @@ func (v *View) Update(events []cplane.Event) []cplane.EventResult {
 			sort.Strings(contexts)
 			v.paths[k] = stored{Entry{k, r.Family, contexts, path}, size}
 			v.ordered = nil
+			if held {
+				// Restore only after acceptance: failures must leave the old key absent.
+				v.ordered = previousOrdering
+			}
 			v.bytes += size
 		}
 	}

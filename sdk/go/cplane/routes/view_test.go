@@ -213,3 +213,76 @@ func TestRangeContextsAreIndependentCopies(t *testing.T) {
 		t.Fatal("separate traversals share contexts")
 	}
 }
+
+func TestReplacementOrderingAfterOtherChangesInSameBatch(t *testing.T) {
+	for _, change := range []string{"insert", "withdraw", "reject", "replace"} {
+		t.Run(change, func(t *testing.T) {
+			v := newView(t)
+			a := route(t, "10.0.0.0/24", "192.0.2.1", 1, 100)
+			b := route(t, "10.0.1.0/24", "192.0.2.1", 1, 100)
+			c := route(t, "10.0.2.0/24", "192.0.2.1", 1, 100)
+			replay(t, v, b, a)
+			assertOrder(t, v, a, b)
+			replacement := route(t, "10.0.1.0/24", "192.0.2.1", 1, 300)
+			first, want := c, []cplane.Event{a, replacement, c}
+			switch change {
+			case "withdraw":
+				first = a
+				first.Route.Withdraw = true
+				want = []cplane.Event{replacement}
+			case "reject":
+				first = route(t, "10.0.0.0/24", "192.0.2.1", 1, 200)
+				first.Route.BGPPath.NLRI = []byte{33}
+				want = []cplane.Event{replacement}
+			case "replace":
+				first = route(t, "10.0.0.0/24", "192.0.2.1", 1, 200)
+				want = []cplane.Event{first, replacement}
+			}
+			results := v.Update([]cplane.Event{first, replacement})
+			if change == "reject" {
+				if len(results) != 1 || results[0].Disposition != cplane.Quarantine {
+					t.Fatalf("quarantine = %+v", results)
+				}
+			} else if len(results) != 0 {
+				t.Fatal(results)
+			}
+			got := assertOrder(t, v, want...)
+			for _, entry := range got {
+				key, _ := replacement.Route.BGPKey()
+				if entry.Key == key && entry.Path.Attributes[0].(*bgp.PathAttributeLocalPref).Value != 300 {
+					t.Fatal("successful replacement retained old value")
+				}
+			}
+			// A later full replay must replace the whole key set, including any
+			// ordering retained by a successful replacement in this batch.
+			replay(t, v, c)
+			assertOrder(t, v, c)
+		})
+	}
+}
+
+func TestReplacementAtPathLimitAndOversizedReplacement(t *testing.T) {
+	v, err := routes.NewView(cplane.InputConfig{Version: 1, Codec: cplane.BGPPathCodec,
+		Contexts: []cplane.InputContext{{Name: "tenant", Families: []string{"ipv4_unicast"}}}},
+		routes.Limits{MaxPaths: 1, MaxBytes: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := route(t, "10.0.0.0/24", "192.0.2.1", 1, 100)
+	replay(t, v, a)
+	assertOrder(t, v, a)
+	replacement := route(t, "10.0.0.0/24", "192.0.2.1", 1, 200)
+	update(t, v, replacement)
+	assertOrder(t, v, replacement)
+	// Duplicate decodable attributes consume the input byte budget.
+	for len(replacement.Route.BGPPath.Attributes) < 32 {
+		replacement.Route.BGPPath.Attributes = append(replacement.Route.BGPPath.Attributes, replacement.Route.BGPPath.Attributes[0])
+	}
+	results := v.Update([]cplane.Event{replacement})
+	if len(results) != 1 || results[0].Disposition != cplane.InputIncomplete || v.Status().Ready || v.Len() != 0 {
+		t.Fatalf("oversized replacement retained a usable path: %+v %+v len=%d", results, v.Status(), v.Len())
+	}
+	assertOrder(t, v)
+	replay(t, v, a)
+	assertOrder(t, v, a)
+}
