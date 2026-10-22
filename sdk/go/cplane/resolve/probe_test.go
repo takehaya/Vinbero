@@ -82,6 +82,50 @@ func TestContainsRepeatedAddressPreservesAccessorReadsAndFreshEvaluation(t *test
 	}
 }
 
+func TestContainsSameAddressRebuildsChangedRightIndex(t *testing.T) {
+	rule := vpnRule()
+	address := netip.MustParseAddr("2001:db8:1::7")
+	wide := netip.MustParsePrefix("2001:db8::/32")
+	narrow := netip.MustParsePrefix("2001:db8:2::/48")
+	swapped, reads := false, 0
+	sid := resolve.Field[vpnRoute, netip.Addr]{Name: "sid", Get: func(vpnRoute) resolve.Value[netip.Addr] {
+		return resolve.Known(address)
+	}}
+	prefix := resolve.Field[underlayRoute, netip.Prefix]{Name: "dynamic_prefix", Get: func(v underlayRoute) resolve.Value[netip.Prefix] {
+		reads++
+		p := v.Prefix
+		if swapped {
+			if p == wide {
+				p = narrow
+			} else {
+				p = wide
+			}
+		}
+		return resolve.Known(p)
+	}}
+	rule.Match = resolve.Contains(resolve.Right(prefix), resolve.Left(sid))
+	rule.Rank = nil
+	e, p := probeEngine(t, rule)
+	a, b := vpn(t), vpn(t)
+	b.Route.Peer = "192.0.2.5"
+	events := replay(a, b,
+		underlay(t, wide.String(), "192.0.2.2", "2001:db8:ffff::1"),
+		underlay(t, narrow.String(), "192.0.2.3", "2001:db8:ffff::2"))
+	for phase, want := range []netip.Prefix{wide, narrow, wide} {
+		swapped, reads = phase == 1, 0
+		e.Update(events)
+		events = nil // Same left address and routes; only accessor state changes.
+		if !e.Status().Ready || len(p.Results()) != 2 || reads != 4 {
+			t.Fatalf("phase %d: reads=%d status=%+v pairs=%+v", phase, reads, e.Status(), p.Results())
+		}
+		for _, pair := range p.Results() {
+			if pair.Right.Prefix != want {
+				t.Fatalf("phase %d reused a previous index bucket: got %s, want %s", phase, pair.Right.Prefix, want)
+			}
+		}
+	}
+}
+
 func TestContainsAddressChangesWithinEvaluation(t *testing.T) {
 	// The sequence includes repeated, alternate-family, invalid, and mapped
 	// addresses; each valid path must resolve through its own address family.

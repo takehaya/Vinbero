@@ -39,9 +39,15 @@ func Right[T comparable, V comparable](f Field[T, V]) RightRef[T, V] { return Ri
 
 type Condition[L comparable, R comparable] struct {
 	rightKey func(R) (any, string)
-	leftKeys func(L, *prefixProbe) ([]any, string)
+	leftKeys func(L, *prefixProbe) (probeKeys, string)
 	match    func(L, R) (bool, string)
 	valid    bool
+}
+
+// Contains carries a validated address; Equal keeps its generic key.
+type probeKeys struct {
+	values  []any
+	address netip.Addr
 }
 
 func read[T comparable, V comparable](f Field[T, V], v T) (V, string) {
@@ -58,7 +64,10 @@ func read[T comparable, V comparable](f Field[T, V], v T) (V, string) {
 func Equal[L comparable, R comparable, V comparable](l LeftRef[L, V], r RightRef[R, V]) Condition[L, R] {
 	return Condition[L, R]{
 		rightKey: func(v R) (any, string) { x, e := read(r.field, v); return x, e },
-		leftKeys: func(v L, _ *prefixProbe) ([]any, string) { x, e := read(l.field, v); return []any{x}, e },
+		leftKeys: func(v L, _ *prefixProbe) (probeKeys, string) {
+			x, e := read(l.field, v)
+			return probeKeys{values: []any{x}}, e
+		},
 		match: func(a L, b R) (bool, string) {
 			x, e := read(l.field, a)
 			if e != "" {
@@ -71,11 +80,11 @@ func Equal[L comparable, R comparable, V comparable](l LeftRef[L, V], r RightRef
 	}
 }
 
-// prefixProbe retains only the last address's derived keys within one evaluation.
+// prefixProbe retains only the last address's index buckets within one evaluation.
 // It never caches accessor results, matches, or work-budget charges.
 type prefixProbe struct {
-	address netip.Addr
-	keys    []any
+	address    netip.Addr
+	candidates [][]int
 }
 
 // Contains indexes the right prefix and probes at most 129 prefix lengths.
@@ -88,23 +97,18 @@ func Contains[L comparable, R comparable](r RightRef[R, netip.Prefix], l LeftRef
 			}
 			return p.Masked(), e
 		},
-		leftKeys: func(v L, probe *prefixProbe) ([]any, string) {
+		leftKeys: func(v L, probe *prefixProbe) (probeKeys, string) {
 			a, e := read(l.field, v)
 			if e != "" {
-				return nil, e
+				return probeKeys{}, e
 			}
 			if !a.IsValid() || a.Is4In6() {
-				return nil, "invalid address"
+				return probeKeys{}, "invalid address"
 			}
-			if probe.address == a {
-				return probe.keys, ""
+			if probe.address != a {
+				*probe = prefixProbe{address: a}
 			}
-			keys := make([]any, 0, a.BitLen()+1)
-			for bits := a.BitLen(); bits >= 0; bits-- {
-				keys = append(keys, netip.PrefixFrom(a, bits).Masked())
-			}
-			probe.address, probe.keys = a, keys
-			return keys, ""
+			return probeKeys{address: a}, ""
 		},
 		match: func(a L, b R) (bool, string) {
 			ip, e := read(l.field, a)
@@ -265,7 +269,7 @@ type Plan[L comparable, R comparable] struct {
 	rule  Rule[L, R]
 	pairs []Pair[L, R]
 	// Evaluation scratch belongs to the already allocated plan. Its contents
-	// are cleared on entry and exit, so no prefix keys survive an evaluation.
+	// are cleared on entry and exit, so no index buckets survive an evaluation.
 	probe prefixProbe
 }
 
@@ -395,11 +399,30 @@ func (p *Plan[L, R]) evaluate(v *routes.View, b *budget) {
 			return
 		}
 		best, bestRank, ties := -1, 0, 0
-		for _, k := range keys {
+		count := len(keys.values)
+		prefixes := keys.address.IsValid()
+		if prefixes {
+			count = keys.address.BitLen() + 1
+		}
+		for j := 0; j < count; j++ {
 			if !b.spend(1) {
 				return
 			}
-			for _, i := range index[k] {
+			var candidates []int
+			if prefixes {
+				// Prefixes are visited in order, so length also marks cached
+				// empty buckets. The right index is immutable during this walk.
+				if j == len(p.probe.candidates) {
+					if p.probe.candidates == nil {
+						p.probe.candidates = make([][]int, 0, count)
+					}
+					p.probe.candidates = append(p.probe.candidates, index[netip.PrefixFrom(keys.address, count-1-j).Masked()])
+				}
+				candidates = p.probe.candidates[j]
+			} else {
+				candidates = index[keys.values[j]]
+			}
+			for _, i := range candidates {
 				if !b.spend(1) {
 					return
 				}
