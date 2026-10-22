@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -63,6 +64,7 @@ func runSend(args []string) {
 	tag := fs.Uint("tag", 1, "endpoint this traffic is meant to reach")
 	out := fs.String("out", "", "CSV output path; stdout when empty")
 	startAt := fs.String("start-at", "", "wall clock unix nanoseconds to begin at")
+	startFile := fs.String("start-file", "", "wait for a future timestamp after announcing ready")
 	_ = fs.Parse(args)
 
 	ap, err := netip.ParseAddrPort(*target)
@@ -81,6 +83,17 @@ func runSend(args []string) {
 	}
 	defer func() { _ = snd.Close() }()
 
+	if *startAt != "" && *startFile != "" {
+		fatal("-start-at and -start-file are exclusive")
+	}
+	fmt.Fprintln(os.Stderr, "ready")
+	if *startFile != "" {
+		ns, err := awaitStart(*startFile, 30*time.Second)
+		if err != nil {
+			fatal("start handshake: %v", err)
+		}
+		*startAt = strconv.FormatInt(ns, 10)
+	}
 	// Constructing the sender costs hundreds of microseconds for the socket
 	// and the record buffer. When a caller wants traffic already flowing at
 	// a known instant, it passes that instant here so the setup is paid
@@ -319,4 +332,24 @@ func must(err error) {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "rq1probe: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// awaitStart excludes process/socket startup from the scheduled capture window.
+func awaitStart(path string, timeout time.Duration) (int64, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			ns, parseErr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+			if parseErr != nil || ns <= time.Now().UnixNano() {
+				return 0, fmt.Errorf("start timestamp must be in the future")
+			}
+			return ns, nil
+		}
+		if !os.IsNotExist(err) {
+			return 0, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return 0, fmt.Errorf("start timestamp was not published")
 }

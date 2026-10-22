@@ -158,6 +158,16 @@ ip netns exec "$ns_pea" ip -6 route add local fd00:a::100/128 \
 ip netns exec "$ns_peb" ip -6 route add local fd00:b::100/128 \
     encap seg6local action End.DT4 vrftable 100 dev lo
 
+# The composition measurement uses real MUP ST1/ISD input and generated GTP4
+# argument SIDs. End.DT4 is a synthetic common sink for the inner IP probes;
+# this fixture does not test the remote GTP/UPF conversion behavior.
+if [[ "${RQ1_COMPOSITION:-0}" == 1 ]]; then
+    ip netns exec "$ns_rt" ip -6 route add fd00:a::/48 via fd00:12::2 dev "$veth_rt_pea"
+    ip netns exec "$ns_rt" ip -6 route add fd00:b::/48 via fd00:13::2 dev "$veth_rt_peb"
+    ip netns exec "$ns_pea" ip -6 route add local fd00:a:0:100::/56 encap seg6local action End.DT4 vrftable 100 dev lo
+    ip netns exec "$ns_peb" ip -6 route add local fd00:b:0:100::/56 encap seg6local action End.DT4 vrftable 100 dev lo
+fi
+
 # bpf_fib_lookup on the headend needs resolved neighbours, and so does the
 # return path; warm both directions before any measurement runs.
 warm_neighbor() {

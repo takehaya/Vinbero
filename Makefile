@@ -287,3 +287,7 @@ cplane-route-composition-observer: ## build the route composition example withou
 	cd sdk/examples/cplane-route-composition && \
 		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
 			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-route-composition-observer.wasm .
+
+.PHONY: bench-cplane-build
+bench-cplane-build: cplane-route-composition cplane-route-composition-observer bench-rq1-build ## Build identical-controller native/WASM measurement artifacts
+	go test -c -o out/bench/cplane-runtime.test ./pkg/cplane/native

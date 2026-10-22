@@ -61,13 +61,23 @@ def verify(state, mode, sid, previous=None):
     else:
         require(not groups, "direct headend unexpectedly has an ECMP group")
 
-    if mode != "cplane":
+    if mode not in ("cplane", "composition-native", "composition-wasm"):
         require(not plugins, "baseline unexpectedly has a plugin")
         return
     require(len(plugins) == 1 and plugins[0].get("name") == PLUGIN, "measurement plugin is absent")
     plugin = plugins[0]
-    require(plugin.get("endpointBehaviors") == [0xFE01], "wrong behavior claim")
-    require(plugin.get("capabilities") == ["headend"], "wrong capabilities")
+    if mode.startswith("composition-"):
+        require(not plugin.get("endpointBehaviors"), "unexpected behavior claim")
+        require(plugin.get("capabilities") == ["headend", "mup"], "wrong capabilities")
+        require(plugin.get("backend") == mode.removeprefix("composition-"), "wrong backend")
+        require(plugin.get("inputReady"), "composition input incomplete")
+        require(not plugin.get("inputFault") and not plugin.get("outputFailure"), "composition output failed")
+        require(plugin.get("desiredRevision") == plugin.get("appliedRevision") and int(plugin.get("appliedRevision", 0)) > 0, "revision not applied")
+        if mode == "composition-native":
+            require(plugin.get("nativeId") == "mup-composition" and plugin.get("nativeVersion") == "1" and plugin.get("nativeIdentity"), "wrong native implementation")
+    else:
+        require(plugin.get("endpointBehaviors") == [0xFE01], "wrong behavior claim")
+        require(plugin.get("capabilities") == ["headend"], "wrong capabilities")
     require(not plugin.get("dead"), "plugin is dead")
     for field in ("droppedEvents", "restarts", "quarantinedEvents", "pendingDeclarations", "localSids", "advertisedRoutes"):
         require(int(plugin.get(field, 0)) == 0, f"plugin {field} is nonzero")
@@ -98,7 +108,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     wait = commands.add_parser("wait")
     wait.add_argument("--rpc", default="127.0.0.1:18081")
-    wait.add_argument("--mode", choices=("builtin", "cplane", "relay"), required=True)
+    wait.add_argument("--mode", choices=("builtin", "cplane", "relay", "composition-native", "composition-wasm"), required=True)
     wait.add_argument("--sid", default="")
     wait.add_argument("--previous", type=Path)
     wait.add_argument("--out", type=Path, required=True)

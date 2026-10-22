@@ -83,3 +83,19 @@ class CheckTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompositionCheckTests(unittest.TestCase):
+    def test_same_controller_identity_and_applied_state_required(self):
+        for mode in ("composition-native", "composition-wasm"):
+            sample = state("cplane")
+            plugin = sample["plugins"]["plugins"][0]
+            plugin.update(endpointBehaviors=[], capabilities=["headend", "mup"],
+                          backend=mode.removeprefix("composition-"), inputReady=True,
+                          desiredRevision="2", appliedRevision="2")
+            if mode.endswith("native"):
+                plugin.update(nativeId="mup-composition", nativeVersion="1", nativeIdentity="source-digest")
+            check.verify(sample, mode, "fd00:a::100")
+            plugin["backend"] = "other"
+            with self.assertRaises(ValueError):
+                check.verify(sample, mode, "fd00:a::100")

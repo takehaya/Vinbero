@@ -36,6 +36,7 @@ func main() {
 	peerASN := fs.Uint("peer-asn", 65100, "the neighbor's AS number")
 	routerID := fs.String("router-id", "10.255.0.2", "our BGP router id")
 	listenPort := fs.Int("listen-port", -1, "TCP port to bind; -1 disables the listener")
+	mup := fs.Bool("mup", false, "Compose a fixed ST1 with an ISD whose service SID switches")
 	prefix := fs.String("prefix", "10.0.2.0/24", "VPN prefix to advertise")
 	rd := fs.String("rd", "65100:100", "route distinguisher")
 	rts := fs.String("rts", "65100:100", "route target")
@@ -70,6 +71,10 @@ func main() {
 	}
 	defer func() { _ = session.Stop(ctx) }()
 
+	family := bgp.FamilyVPNv4
+	if *mup {
+		family = bgp.FamilyMUPIPv4
+	}
 	// A short connect retry keeps a first attempt that lands before the peer
 	// is listening from costing the default two minutes.
 	if err := session.AddPeer(ctx, bgp.PeerConfig{
@@ -77,7 +82,7 @@ func main() {
 		PeerASN:         uint32(*peerASN),
 		HoldTimeSec:     30,
 		KeepaliveSec:    10,
-		Families:        []bgp.Family{bgp.FamilyVPNv4},
+		Families:        []bgp.Family{family},
 		ConnectRetrySec: 2,
 	}); err != nil {
 		fatal("add peer: %v", err)
@@ -95,7 +100,16 @@ func main() {
 		}
 	}
 
-	if err := session.Advertise(ctx, route(*initialSID)); err != nil {
+	advertise := func(sid string) error { return session.Advertise(ctx, route(sid)) }
+	if *mup {
+		if err := session.PushMUPT1ST(ctx, bgp.MUPRoute{Type: bgp.MUPRouteTypeT1ST, RD: *rd, RTs: strings.Split(*rts, ","), Prefix: *prefix, TEID: 256, TEIDLen: 32, QFI: 9, Endpoint: "172.16.0.1", NextHop: *nextHop}); err != nil {
+			fatal("advertise ST1: %v", err)
+		}
+		advertise = func(sid string) error {
+			return session.PushMUPISD(ctx, bgp.MUPRoute{Type: bgp.MUPRouteTypeISD, RD: *rd, RTs: strings.Split(*rts, ","), Prefix: "172.16.0.0/24", SRv6SID: sid, NextHop: *nextHop, SIDStructure: bgp.SIDStructure{LocatorBlockLen: 32, LocatorNodeLen: 16, FunctionLen: 8, ArgumentLen: 72}})
+		}
+	}
+	if err := advertise(*initialSID); err != nil {
 		fatal("advertise initial: %v", err)
 	}
 
@@ -113,7 +127,6 @@ func main() {
 	fmt.Fprintln(os.Stderr, "ready")
 
 	if *changeTo != "" {
-		next := route(*changeTo)
 		if *changeAt > 0 {
 			for time.Now().UnixNano() < *changeAt {
 				remaining := *changeAt - time.Now().UnixNano()
@@ -126,7 +139,7 @@ func main() {
 		// this point, including the speaker's own encoding and the TCP
 		// write, is part of what the reflection path costs.
 		stamp := time.Now().UnixNano()
-		if err := session.Advertise(ctx, next); err != nil {
+		if err := advertise(*changeTo); err != nil {
 			fatal("advertise change: %v", err)
 		}
 		fmt.Printf("change_ns=%d\n", stamp)

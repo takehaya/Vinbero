@@ -12,7 +12,9 @@ export REPO_ROOT
 cd "$REPO_ROOT"
 MODE="${MODE:-builtin}"
 [[ "$MODE" != inproc ]] || MODE=builtin
-case "$MODE" in builtin|cplane|relay) ;; *) echo "MODE must be builtin, cplane or relay" >&2; exit 2 ;; esac
+case "$MODE" in builtin|cplane|relay|composition-native|composition-wasm) ;; *) echo "MODE must be builtin, cplane, relay, composition-native or composition-wasm" >&2; exit 2 ;; esac
+export RQ1_COMPOSITION=0
+if [[ "$MODE" == composition-* ]]; then export RQ1_COMPOSITION=1; fi
 TRIALS="${1:-10}"
 RATE="${RATE:-100000}"
 [[ "$TRIALS" =~ ^[1-9][0-9]*$ && "$RATE" =~ ^[1-9][0-9]*$ ]] || { echo "TRIALS and RATE must be positive integers" >&2; exit 2; }
@@ -33,11 +35,13 @@ VBCTL="${VBCTL:-${REPO_ROOT}/out/bin/vinbero}"
 PROBE="${REPO_ROOT}/out/bench/rq1probe"
 CHURN="${REPO_ROOT}/out/bench/rq1bgp"
 RELAY="${REPO_ROOT}/out/bench/rq1relay"
-WASM="${WASM:-${REPO_ROOT}/sdk/examples/cplane-custom-behavior/plugin.wasm}"
+default_wasm="${REPO_ROOT}/sdk/examples/cplane-custom-behavior/plugin.wasm"
+if [[ "$RQ1_COMPOSITION" == 1 ]]; then default_wasm="${REPO_ROOT}/out/cplane-route-composition.wasm"; fi
+WASM="${WASM:-$default_wasm}"
 for bin in "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY"; do
     [[ -x "$bin" ]] || { echo "missing executable $bin; run make bench-rq1-build" >&2; exit 2; }
 done
-if [[ "$MODE" == cplane && ! -r "$WASM" ]]; then echo "missing WASM: $WASM" >&2; exit 2; fi
+if [[ ( "$MODE" == cplane || "$MODE" == composition-wasm ) && ! -r "$WASM" ]]; then echo "missing WASM: $WASM" >&2; exit 2; fi
 for command in ip python3 ethtool timeout flock ping6 git cp; do command -v "$command" >/dev/null; done
 
 umask 077
@@ -141,7 +145,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 mkdir "$WORK/instrument"
-cp "$SCRIPT_DIR/"{setup.sh,teardown.sh,check.py,vinbero-bgp.yml,run_bgp.sh} "$WORK/instrument/"
+cp "$SCRIPT_DIR/"{setup.sh,teardown.sh,check.py,vinbero-bgp.yml,run_bgp.sh,composition-config.json,composition-policy.json} "$WORK/instrument/"
 cp "$REPO_ROOT/examples/common/netns.sh" "$WORK/instrument/netns.sh"
 SCRIPT_DIR="$WORK/instrument"
 export NETNS_HELPER="$SCRIPT_DIR/netns.sh"
@@ -157,7 +161,7 @@ VBCTL="$WORK/bin/vinbero"
 PROBE="$WORK/bin/rq1probe"
 CHURN="$WORK/bin/rq1bgp"
 RELAY="$WORK/bin/rq1relay"
-if [[ "$MODE" == cplane ]]; then
+if [[ "$MODE" == cplane || "$MODE" == composition-wasm ]]; then
     cp --reflink=auto -- "$WASM" "$WORK/bin/plugin.wasm"
     WASM="$WORK/bin/plugin.wasm"
 fi
@@ -172,7 +176,8 @@ data = dict(mode=mode, rate=int(rate), trials=int(trials), namespace_prefix=pref
             kernel_cmdline=Path('/proc/cmdline').read_text().strip(),
             source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
             source_dirty=bool(subprocess.check_output(['git', '--no-optional-locks', 'status', '--porcelain'], text=True).strip()),
-            endpoint_behavior='0xfe01' if mode == 'cplane' else '0x0013',
+            endpoint_behavior='MUP ST1+ISD / GTP4 argument SID' if mode.startswith('composition-') else ('0xfe01' if mode == 'cplane' else '0x0013'),
+            sink_profile='synthetic kernel End.DT4, no GTP/UPF conversion' if mode.startswith('composition-') else 'kernel End.DT4',
             endpoint='kernel End.DT4', xdp_mode='generic', persistence=False,
             artifacts={str(Path(p).resolve()): digest(p) for p in artifacts if Path(p).is_file()})
 Path(out).write_text(json.dumps(data, indent=2) + '\n')
@@ -183,12 +188,12 @@ ctl() { timeout 5 ip netns exec "$ns_rt" "$VBCTL" -s http://127.0.0.1:18081 "$@"
 check() { ip netns exec "$ns_rt" python3 "$SCRIPT_DIR/check.py" wait --mode "$MODE" "$@"; }
 wait_receiver() {
     local pid=$1 log=$2
-    for attempt in {1..50}; do
+    for attempt in {1..300}; do
         if grep -qx ready "$log"; then return; fi
         kill -0 "$pid" || return 1
         sleep 0.1
     done
-    echo "receiver did not bind: $log" >&2
+    echo "probe did not become ready: $log" >&2
     return 1
 }
 wait_child() {
@@ -210,7 +215,11 @@ for ((trial=1; trial<=TRIALS; trial++)); do
 import json, sys
 from pathlib import Path
 source, target, prefix, state = sys.argv[1:]
-Path(target).write_text(Path(source).read_text().replace('@PREFIX@', prefix).replace("'@STATE_PATH@'", json.dumps(state)))
+import os
+config=Path(source).read_text().replace('@PREFIX@', prefix).replace("'@STATE_PATH@'",json.dumps(state))
+if os.environ.get('RQ1_COMPOSITION')=='1':
+    config=config.replace('        - vpnv4','        - mup_ipv4').replace('    enabled: false\n  pin_maps:', '    enabled: false\n    native_enabled: true\n  pin_maps:')
+Path(target).write_text(config)
 PY
     bgp_flags=()
     [[ "$MODE" == relay ]] || bgp_flags+=(--bgp-enabled)
@@ -221,7 +230,24 @@ PY
 
     behavior=0
     relay_pid=""
-    if [[ "$MODE" == cplane ]]; then
+    initial_sid=fd00:a::100
+    changed_sid=fd00:b::100
+    initial_base=$initial_sid
+    changed_base=$changed_sid
+    churn_flags=()
+    if [[ "$RQ1_COMPOSITION" == 1 ]]; then
+        initial_base=fd00:a:0:100::
+        changed_base=fd00:b:0:100::
+        initial_sid=fd00:a:0:1ac:1000:124:0:100
+        changed_sid=fd00:b:0:1ac:1000:124:0:100
+        artifact_flags=(--native mup-composition --native-version 1)
+        if [[ "$MODE" == composition-wasm ]]; then artifact_flags=(--wasm "$WASM"); fi
+        ctl plugin cplane register --name rq1-receiver "${artifact_flags[@]}" \
+            --family mup_ipv4 --family mup_ipv6 --capability headend --capability mup \
+            --headend-prefix 10.0.2.0/24 --input-policy "$SCRIPT_DIR/composition-policy.json" \
+            --config "$SCRIPT_DIR/composition-config.json" --tick-ms 1000 > "$trial_dir/register.log"
+        churn_flags=(-mup -rd 65000:7 -rts 65000:7)
+    elif [[ "$MODE" == cplane ]]; then
         behavior=65025
         ctl plugin cplane register --name rq1-receiver --wasm "$WASM" \
             --behavior 0xFE01 --family vpnv4 --capability headend \
@@ -231,29 +257,37 @@ PY
         relay_pid=$!; pids+=("$relay_pid")
     fi
     ip netns exec "$ns_pea" "$CHURN" -neighbor fd00:12::1 -next-hop fd00:12::2 \
-        -initial-sid fd00:a::100 -change-to fd00:b::100 -behavior "$behavior" \
+        -initial-sid "$initial_base" -change-to "$changed_base" -behavior "$behavior" "${churn_flags[@]}" \
         -change-file "$trial_dir/change-at" -ready-timeout 90s -hold 30s > "$trial_dir/churn.log" 2>&1 &
     churn_pid=$!; pids+=("$churn_pid")
-    check --sid fd00:a::100 --out "$trial_dir/initial.json"
+    check --sid "$initial_sid" --out "$trial_dir/initial.json"
 
-    ip netns exec "$ns_pea" "$PROBE" recv -bind 0.0.0.0:9999 -name pe-a -duration 7s -out "$trial_dir/pea.csv" > "$trial_dir/pea.log" 2>&1 &
+    ip netns exec "$ns_pea" "$PROBE" recv -bind 0.0.0.0:9999 -name pe-a -duration 0 -out "$trial_dir/pea.csv" > "$trial_dir/pea.log" 2>&1 &
     pid_a=$!; pids+=("$pid_a")
-    ip netns exec "$ns_peb" "$PROBE" recv -bind 0.0.0.0:9999 -name pe-b -duration 7s -out "$trial_dir/peb.csv" > "$trial_dir/peb.log" 2>&1 &
+    ip netns exec "$ns_peb" "$PROBE" recv -bind 0.0.0.0:9999 -name pe-b -duration 0 -out "$trial_dir/peb.csv" > "$trial_dir/peb.log" 2>&1 &
     pid_b=$!; pids+=("$pid_b")
     wait_receiver "$pid_a" "$trial_dir/pea.log"
     wait_receiver "$pid_b" "$trial_dir/peb.log"
-    change_at=$(( $(date +%s%N) + 2000000000 ))
     ip netns exec "$ns_src" "$PROBE" send -target 10.0.2.2:9999 -rate "$RATE" -duration 3s -tag 1 \
-        -start-at "$((change_at - 1000000000))" -out "$trial_dir/sent.csv" > "$trial_dir/sender.log" 2>&1 &
+        -start-file "$trial_dir/send-at" -out "$trial_dir/sent.csv" > "$trial_dir/sender.log" 2>&1 &
     pid_s=$!; pids+=("$pid_s")
+    wait_receiver "$pid_s" "$trial_dir/sender.log"
+    kill -0 "$pid_a" "$pid_b"
+    change_at=$(( $(date +%s%N) + 2000000000 ))
+    printf '%s\n' "$((change_at - 1000000000))" > "$trial_dir/send-at.tmp"
+    mv "$trial_dir/send-at.tmp" "$trial_dir/send-at"
     printf '%s\n' "$change_at" > "$trial_dir/change-at.tmp"
     mv "$trial_dir/change-at.tmp" "$trial_dir/change-at"
     wait_child "$pid_s"
+    # Leave the same two-second receive drain as the old seven-second window.
+    sleep 2
+    kill -0 "$pid_a" "$pid_b"
+    kill -TERM "$pid_a" "$pid_b"
     wait_child "$pid_a"
     wait_child "$pid_b"
     kill -0 "$daemon_pid" "$churn_pid"
     if [[ -n "$relay_pid" ]]; then kill -0 "$relay_pid"; fi
-    check --sid fd00:b::100 --previous "$trial_dir/initial.json" --timeout 5 --out "$trial_dir/final.json"
+    check --sid "$changed_sid" --previous "$trial_dir/initial.json" --timeout 5 --out "$trial_dir/final.json"
     change_ns="$(sed -n 's/^change_ns=//p' "$trial_dir/churn.log")"
     [[ "$change_ns" =~ ^[0-9]+$ ]] || { echo "missing change timestamp" >&2; exit 1; }
     python3 "$SCRIPT_DIR/check.py" capture --sent "$trial_dir/sent.csv" \
