@@ -39,7 +39,7 @@ func Right[T comparable, V comparable](f Field[T, V]) RightRef[T, V] { return Ri
 
 type Condition[L comparable, R comparable] struct {
 	rightKey func(R) (any, string)
-	leftKeys func(L) ([]any, string)
+	leftKeys func(L, *prefixProbe) ([]any, string)
 	match    func(L, R) (bool, string)
 	valid    bool
 }
@@ -58,7 +58,7 @@ func read[T comparable, V comparable](f Field[T, V], v T) (V, string) {
 func Equal[L comparable, R comparable, V comparable](l LeftRef[L, V], r RightRef[R, V]) Condition[L, R] {
 	return Condition[L, R]{
 		rightKey: func(v R) (any, string) { x, e := read(r.field, v); return x, e },
-		leftKeys: func(v L) ([]any, string) { x, e := read(l.field, v); return []any{x}, e },
+		leftKeys: func(v L, _ *prefixProbe) ([]any, string) { x, e := read(l.field, v); return []any{x}, e },
 		match: func(a L, b R) (bool, string) {
 			x, e := read(l.field, a)
 			if e != "" {
@@ -71,6 +71,13 @@ func Equal[L comparable, R comparable, V comparable](l LeftRef[L, V], r RightRef
 	}
 }
 
+// prefixProbe retains only the last address's derived keys within one evaluation.
+// It never caches accessor results, matches, or work-budget charges.
+type prefixProbe struct {
+	address netip.Addr
+	keys    []any
+}
+
 // Contains indexes the right prefix and probes at most 129 prefix lengths.
 func Contains[L comparable, R comparable](r RightRef[R, netip.Prefix], l LeftRef[L, netip.Addr]) Condition[L, R] {
 	return Condition[L, R]{
@@ -81,7 +88,7 @@ func Contains[L comparable, R comparable](r RightRef[R, netip.Prefix], l LeftRef
 			}
 			return p.Masked(), e
 		},
-		leftKeys: func(v L) ([]any, string) {
+		leftKeys: func(v L, probe *prefixProbe) ([]any, string) {
 			a, e := read(l.field, v)
 			if e != "" {
 				return nil, e
@@ -89,10 +96,14 @@ func Contains[L comparable, R comparable](r RightRef[R, netip.Prefix], l LeftRef
 			if !a.IsValid() || a.Is4In6() {
 				return nil, "invalid address"
 			}
+			if probe.address == a {
+				return probe.keys, ""
+			}
 			keys := make([]any, 0, a.BitLen()+1)
 			for bits := a.BitLen(); bits >= 0; bits-- {
 				keys = append(keys, netip.PrefixFrom(a, bits).Masked())
 			}
+			probe.address, probe.keys = a, keys
 			return keys, ""
 		},
 		match: func(a L, b R) (bool, string) {
@@ -334,6 +345,7 @@ func (p *Plan[L, R]) evaluate(v *routes.View, b *budget) {
 	right := []candidate[R]{}
 	groups := map[group]int{}
 	index := map[any][]int{}
+	var probe prefixProbe
 	v.Range(func(entry routes.Entry) {
 		if b.exceeded || !selected(entry, r.Context, r.Right.Families) || !b.spend(1) {
 			return
@@ -373,7 +385,7 @@ func (p *Plan[L, R]) evaluate(v *routes.View, b *budget) {
 			b.issue(Issue{r.Name, "invalid_left", x.Reason, entry.Key})
 			return
 		}
-		keys, reason := r.Match.leftKeys(x.Value)
+		keys, reason := r.Match.leftKeys(x.Value, &probe)
 		if reason != "" {
 			b.issue(Issue{r.Name, "invalid_left_field", reason, entry.Key})
 			return
