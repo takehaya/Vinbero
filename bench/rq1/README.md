@@ -51,3 +51,38 @@ The original `builtin`, `cplane` and `relay` modes remain available.
 They have different implementations and must not stand in for this same-controller comparison.
 Repeated trials should freeze source/toolchains/binary hashes, balance mode order, retain failures, record achieved probe rate and host load, and avoid concurrent measurement jobs.
 Shared-host CI smoke timings are functional checks, not performance regression thresholds.
+
+## Supported controller input profiles
+
+`BenchmarkCompositionBehaviorUpdates` compares the existing shared controller with
+`VINBERO_CPLANE_CASE` set to one of these values:
+
+| Case | Input and output |
+| --- | --- |
+| `downlink-gtp4-v4` | IPv4 ST1 + IPv4 ISD; IPv4 H.Encaps trigger with a GTP4 argument SID |
+| `downlink-gtp4-v6` | IPv6 ST1 + IPv4 ISD; IPv6 H.Encaps trigger with a GTP4 argument SID |
+| `uplink-dt4` | IPv4 ST2 + DSD advertising End.DT4; GTP4 uplink declaration |
+| `uplink-dt6` | IPv4 ST2 + DSD advertising End.DT6; GTP4 uplink declaration |
+| `uplink-dt46` | IPv4 ST2 + DSD advertising End.DT46; GTP4 uplink declaration |
+
+For example, after `make bench-cplane-build`, run from `pkg/cplane/native`:
+
+```sh
+VINBERO_CPLANE_BACKEND=native VINBERO_CPLANE_CASE=uplink-dt6 \
+  ../../../out/bench/cplane-runtime.test -test.run '^$' \
+  -test.bench '^BenchmarkCompositionBehaviorUpdates$' -test.benchtime=1000x
+```
+
+Use `VINBERO_CPLANE_BACKEND=wasm` with the same case for the WASM arm.
+Both A and B outputs are checked before timing; the commit count and final expected
+output are checked afterward.
+`VINBERO_CPLANE_TRACE_DIR` preserves config, replay, both updates and final output
+for byte comparison between arms.
+
+These are control-plane input profiles, not measurements of endpoint instructions.
+The three uplink profiles emit the same declaration schema and do not execute
+End.DT4/6/46 packet decapsulation or the host's endpoint headend gate.
+IPv6 payload in the downlink profile still uses a GTP4 transport endpoint.
+GTP6 and ST2+ISD are unsupported by this controller.
+EVPN has SDK builders but no shared native/WASM controller in this comparison.
+The existing packet-convergence fixture covers only the IPv4 downlink profile.
