@@ -1,6 +1,7 @@
 package cplane
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tetratelabs/wazero"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
@@ -198,15 +200,20 @@ type Manager struct {
 // unregistration and a restart can all touch the same plugin from
 // different goroutines.
 type plugin struct {
-	input    *inputDelivery
-	config   []byte
-	name     string
-	reg      Registration
-	inst     pluginInstance
-	ops      *PluginOps
-	worker   *worker
-	cancel   func()
-	restarts int
+	input  *inputDelivery
+	config []byte
+	name   string
+	reg    Registration
+	inst   pluginInstance
+	// One cache belongs to this registration generation and its immutable
+	// module/config. Only worker-owned restarts reuse it; replacements get a
+	// fresh cache. Teardown waits for that worker before closing the cache.
+	compilationCache wazero.CompilationCache
+	cacheCloseOnce   sync.Once
+	ops              *PluginOps
+	worker           *worker
+	cancel           func()
+	restarts         int
 	// dead marks an instance that failed and was not restarted, so events
 	// stop being handed to a module that cannot take them.
 	dead bool
@@ -612,6 +619,10 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	}
 
 	reg.Limits = m.limits.Merge(reg.Limits)
+	// The running generation must not borrow bytes an API caller can mutate
+	// after registration: every restart uses the same module and config.
+	reg.Module = bytes.Clone(reg.Module)
+	reg.Config = bytes.Clone(reg.Config)
 
 	p, err := m.build(ctx, reg)
 	if err != nil {
@@ -1064,11 +1075,20 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	if err != nil {
 		return nil, err
 	}
-	inst, err := m.instantiate(ctx, reg, config, ops)
+	var cache wazero.CompilationCache
+	if reg.Backend == BackendWASM {
+		cache = wazero.NewCompilationCache()
+	}
+	inst, err := m.instantiate(ctx, reg, config, ops, cache)
 	if err != nil {
+		// Instantiate has already closed its failed runtime. No worker or
+		// other instance can still hold this unpublished generation.
+		if cache != nil {
+			_ = cache.Close(ctx)
+		}
 		return nil, err
 	}
-	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops, counters: newCounters(), config: config}
+	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops, counters: newCounters(), config: config, compilationCache: cache}
 	if policy != nil {
 		p.input = &inputDelivery{policy: policy}
 	}
@@ -1232,6 +1252,13 @@ func (m *Manager) teardown(ctx context.Context, p *plugin) {
 	if err := p.inst.Close(ctx); err != nil {
 		m.logger.Warn("closing plugin instance", zap.String("plugin", p.name), zap.Error(err))
 	}
+	p.cacheCloseOnce.Do(func() {
+		if p.compilationCache != nil {
+			if err := p.compilationCache.Close(ctx); err != nil {
+				m.logger.Warn("closing plugin compilation cache", zap.String("plugin", p.name), zap.Error(err))
+			}
+		}
+	})
 	p.ops.retire()
 }
 
@@ -1325,7 +1352,7 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	p.ops.BeginInstance()
 
 	ctx := context.Background()
-	inst, err := m.instantiate(ctx, reg, p.config, p.ops)
+	inst, err := m.instantiate(ctx, reg, p.config, p.ops, p.compilationCache)
 	if err != nil {
 		m.mu.Lock()
 		p.dead = true

@@ -156,6 +156,11 @@ type Config struct {
 	// configure export. Deployment-specific settings ride here so changing
 	// them does not mean rebuilding the module.
 	ConfigBlob []byte
+	// CompilationCache is borrowed from the registration owner. It shares
+	// compiled code only; admission, host bindings and guest state stay local
+	// to each instance. The owner must close all instances before the cache.
+	// Nil keeps compilation scoped to this instance's runtime.
+	CompilationCache wazero.CompilationCache
 	// Limits bound this instance. Zero fields take defaults.
 	Limits Limits
 	// Ops is the capability surface host functions call into.
@@ -217,6 +222,9 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	rtCfg := wazero.NewRuntimeConfig().
 		WithMemoryLimitPages(limits.MaxMemoryPages).
 		WithCloseOnContextDone(true)
+	if cfg.CompilationCache != nil {
+		rtCfg = rtCfg.WithCompilationCache(cfg.CompilationCache)
+	}
 	rt := wazero.NewRuntimeWithConfig(ctx, rtCfg)
 
 	inst := &Instance{
