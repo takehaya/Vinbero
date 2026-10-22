@@ -106,6 +106,7 @@ func (s *PluginServer) CplanePluginRegister(
 	}
 
 	reg := cplane.Registration{
+		Backend: msg.GetBackend(), NativeID: msg.GetNativeId(), NativeVersion: msg.GetNativeVersion(),
 		Input:        msg.GetInput(),
 		Name:         msg.GetName(),
 		Module:       msg.GetWasm(),
@@ -186,6 +187,7 @@ func (s *PluginServer) CplanePluginStats(
 			behaviors = append(behaviors, uint32(b))
 		}
 		out = append(out, &v1.CplanePluginStat{
+			Backend: st.Backend, NativeId: st.NativeID, NativeVersion: st.NativeVersion, NativeIdentity: st.NativeIdentity,
 			Name:  st.Name,
 			Input: st.Input, InputReady: st.InputReady, InputFault: st.InputFault, CleanupPending: st.CleanupPending, DesiredRevision: st.DesiredRevision, AppliedRevision: st.AppliedRevision, OutputFailure: st.OutputFailure,
 			Capabilities:        st.Capabilities,
@@ -293,6 +295,8 @@ func parseBehaviors(codepoints []uint32) ([]uint16, error) {
 // everything else is the daemon's.
 func cplaneRPCError(err error) error {
 	switch {
+	case errors.Is(err, cplane.ErrNativeDisabled):
+		return connect.NewError(connect.CodePermissionDenied, err)
 	case errors.Is(err, wasm.ErrAdmission),
 		errors.Is(err, demux.ErrUnclaimable),
 		errors.Is(err, cplane.ErrScopeDoesNotCoverCapabilities),

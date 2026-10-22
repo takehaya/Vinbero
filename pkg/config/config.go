@@ -338,8 +338,10 @@ type SettingConfig struct {
 // Set enabled to false to keep the other model, where something outside
 // re-registers every plugin after a restart.
 type CplanePluginsConfig struct {
-	Enabled bool   `yaml:"enabled,omitempty" default:"true"`
-	Path    string `yaml:"path,omitempty" default:"/var/lib/vinbero/cplane-plugins"`
+	// NativeEnabled permits trusted statically linked controllers without WASM isolation.
+	NativeEnabled bool   `yaml:"native_enabled,omitempty" default:"false"`
+	Enabled       bool   `yaml:"enabled,omitempty" default:"true"`
+	Path          string `yaml:"path,omitempty" default:"/var/lib/vinbero/cplane-plugins"`
 	// Quotas bound what any one plugin may hold. Zero fields take the
 	// defaults, which are generous next to an ordinary plugin and small
 	// next to what a runaway one costs.

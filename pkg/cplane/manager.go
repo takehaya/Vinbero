@@ -87,7 +87,9 @@ const maxRestarts = 5
 
 // Registration describes a plugin to run.
 type Registration struct {
-	Input *v1.CplaneInputPolicy
+	Backend                                 string
+	NativeID, NativeVersion, NativeIdentity string
+	Input                                   *v1.CplaneInputPolicy
 	// Name identifies the plugin. It becomes the owner tag its writes
 	// carry, so it must survive the fixed-width owner buffer.
 	Name string
@@ -128,6 +130,7 @@ const MinTickInterval = 100 * time.Millisecond
 
 // Manager owns the running control-plane plugins.
 type Manager struct {
+	allowNative            bool
 	resolveInputTarget     func(bgp.RouteEvent) (string, uint16, bool)
 	retryForwardingCleanup func()
 	services               *compositionMaps
@@ -198,7 +201,7 @@ type plugin struct {
 	config   []byte
 	name     string
 	reg      Registration
-	inst     *wasm.Instance
+	inst     pluginInstance
 	ops      *PluginOps
 	worker   *worker
 	cancel   func()
@@ -224,6 +227,8 @@ type plugin struct {
 
 // ManagerConfig builds a Manager.
 type ManagerConfig struct {
+	// AllowNative permits trusted controllers statically linked into this daemon.
+	AllowNative            bool
 	ResolveInputTarget     func(bgp.RouteEvent) (string, uint16, bool)
 	RetryForwardingCleanup func()
 	ForwardingMaps         ForwardingMapOps
@@ -318,6 +323,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	leases := reconciler.Leases()
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	m := &Manager{
+		allowNative:        cfg.AllowNative,
 		resolveInputTarget: cfg.ResolveInputTarget, retryForwardingCleanup: cfg.RetryForwardingCleanup,
 		services: services, resolveMUPInstance: cfg.ResolveMUPInstance,
 		advertise:   newNamedAdvertiseSet(cfg, leases),
@@ -544,6 +550,9 @@ func slotSet(slots []uint32) map[uint32]struct{} {
 // between the two.
 func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
+		return err
+	}
+	if err := m.validateBackend(&reg); err != nil {
 		return err
 	}
 	// A capability with nothing in the scope to exercise it on is an inert
@@ -1054,16 +1063,7 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	if err != nil {
 		return nil, err
 	}
-	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		NowMonotonic: m.nowMonotonic,
-		Name:         reg.Name,
-		Module:       reg.Module,
-		ConfigBlob:   config,
-		Limits:       reg.Limits,
-		Ops:          ops,
-		Capabilities: reg.Capabilities,
-		Logger:       m.logger,
-	})
+	inst, err := m.instantiate(ctx, reg, config, ops)
 	if err != nil {
 		return nil, err
 	}
@@ -1312,16 +1312,7 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	p.ops.BeginInstance()
 
 	ctx := context.Background()
-	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		NowMonotonic: m.nowMonotonic,
-		Name:         reg.Name,
-		Module:       reg.Module,
-		ConfigBlob:   p.config,
-		Limits:       reg.Limits,
-		Ops:          p.ops,
-		Capabilities: reg.Capabilities,
-		Logger:       m.logger,
-	})
+	inst, err := m.instantiate(ctx, reg, p.config, p.ops)
 	if err != nil {
 		m.mu.Lock()
 		p.dead = true
@@ -1493,7 +1484,7 @@ func (m *Manager) snapshot(p *plugin) {
 
 // publish is called on the worker after its replay barrier. An end marker
 // queued for a failed instance must never publish its replacement's state.
-func (m *Manager) publish(p *plugin, inst *wasm.Instance) {
+func (m *Manager) publish(p *plugin, inst pluginInstance) {
 	m.mu.Lock()
 	live := m.plugins[p.name] == p && p.inst == inst && !p.dead
 	m.mu.Unlock()

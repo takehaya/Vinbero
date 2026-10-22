@@ -215,6 +215,11 @@ message CplanePluginRegisterRequest {
   CplanePluginScope scope = 8;
   // Opt in to context-filtered inputs and the versioned configure envelope.
   CplaneInputPolicy input = 9;
+  // Empty preserves the historical WASM backend. Native requires daemon opt-in.
+  string backend = 10;
+  // Identity in the statically linked native catalog; no library path is accepted.
+  string native_id = 11;
+  string native_version = 12;
 }
 
 // CplanePluginScope bounds what a plugin may name.
@@ -334,6 +339,10 @@ message CplanePluginStat {
   uint64 desired_revision = 22;
   uint64 applied_revision = 23;
   string output_failure = 24;
+  string backend = 25;
+  string native_id = 26;
+  string native_version = 27;
+  string native_identity = 28;
 }
 
 // UnrestoredCplanePlugin is a plugin the store held that would not start.

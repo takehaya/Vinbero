@@ -176,79 +176,81 @@ func mupFixtureWithTEID(t *testing.T, value uint32) []bgp.RouteEvent {
 	}
 	return out
 }
-func TestCompositionWASMReplayAndWithdraw(t *testing.T) {
-	mod, e := os.ReadFile("../../out/cplane-route-composition.wasm")
-	if e != nil {
-		t.Skip("make cplane-route-composition")
-	}
-	f := newServiceFake()
-	src := &compositionSource{newFakeSource()}
-	src.rib = mupFixture(t)
-	scope, _ := ParseScope(ScopeSpec{HeadendPrefixes: []string{"10.0.0.0/8", "192.0.2.0/24"}})
-	m, e := NewManager(ManagerConfig{Source: src, Headend: f, ForwardingMaps: f, ResolveMUPInstance: func(string) (uint32, error) { return 7, nil }, ResolveInputTarget: func(bgp.RouteEvent) (string, uint16, bool) { return "", 0, true }})
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer m.Close(context.Background())
-	caps, _ := wasm.ParseCapabilities([]string{"headend", "mup"})
-	if e = m.Register(context.Background(), Registration{Name: "composition", Module: mod, Config: []byte(`{"context":"mobile","source":"fd00:feed::1","args_offset":7,"observe_only":false}`), Capabilities: caps, Scope: scope, Input: func() *v1.CplaneInputPolicy {
-		p := compositionPolicy()
-		p.Contexts[0].DelegateEvpn = false
-		p.Contexts[0].BridgeDomain = 0
-		return p
-	}()}); e != nil {
-		t.Fatal(e)
-	}
-	if !m.WaitIdle("composition", 5*time.Second) {
-		t.Fatal("WASM did not become idle")
-	}
-	st, _ := m.StatsFor("composition")
-	if !st.InputReady || st.OutputFailure != "" || st.AppliedRevision == 0 || len(f.uplinks) != 1 || f.v4["10.0.0.1/32"] == nil {
-		t.Fatalf("WASM outputs failed: %+v uplinks=%v v4=%v", st, f.uplinks, f.v4)
-	}
-	initial := *f.v4["10.0.0.1/32"]
-	duplicate := src.rib[0]
-	duplicate.Source.Peer = netip.MustParseAddr("192.0.2.253")
-	if !src.emit("composition", duplicate) || !m.WaitIdle("composition", 5*time.Second) {
-		t.Fatal("equivalent supporter idle")
-	}
-	st, _ = m.StatsFor("composition")
-	if st.OutputFailure != "" || st.AppliedRevision != st.DesiredRevision || f.v4["10.0.0.1/32"] == nil {
-		t.Fatalf("duplicate supporter blocked real host apply: %+v", st)
-	}
-	conflicting := mupFixtureWithTEID(t, 512)[0]
-	conflicting.Source = duplicate.Source
-	if !src.emit("composition", conflicting) || !m.WaitIdle("composition", 5*time.Second) {
-		t.Fatal("conflicting supporter idle")
-	}
-	st, _ = m.StatsFor("composition")
-	if st.OutputFailure != "" || st.AppliedRevision != st.DesiredRevision || f.v4["10.0.0.1/32"] != nil || len(f.uplinks) != 1 {
-		t.Fatalf("conflict did not retract only the ambiguous output: %+v", st)
-	}
-	withdraw := src.rib[0]
-	withdraw.IsWithdraw = true
-	if !src.emit("composition", withdraw) || !m.WaitIdle("composition", 5*time.Second) {
-		t.Fatal("remaining supporter idle")
-	}
-	if current := f.v4["10.0.0.1/32"]; current == nil || *current == initial {
-		t.Fatal("surviving changed supporter did not recover forwarding")
-	}
-	withdraw = conflicting
-	withdraw.IsWithdraw = true
-	if !src.emit("composition", withdraw) {
-		t.Fatal("no subscription")
-	}
-	if !m.WaitIdle("composition", 5*time.Second) {
-		t.Fatal("withdraw idle")
-	}
-	if f.v4["10.0.0.1/32"] != nil {
-		t.Fatal("withdraw did not remove downlink")
-	}
-	if e = m.Unregister(context.Background(), "composition"); e != nil {
-		t.Fatal(e)
-	}
-	if len(f.uplinks) != 0 || len(f.v4) != 0 {
-		t.Fatal("WASM unregister leaked")
+func TestCompositionBackendReplayAndWithdraw(t *testing.T) {
+	for _, backend := range []string{BackendNative, BackendWASM} {
+		t.Run(backend, func(t *testing.T) {
+			reg := compositionBackendRegistration(t, backend)
+			f := newServiceFake()
+			src := &compositionSource{newFakeSource()}
+			src.rib = mupFixture(t)
+			scope, _ := ParseScope(ScopeSpec{HeadendPrefixes: []string{"10.0.0.0/8", "192.0.2.0/24"}})
+			m, e := NewManager(ManagerConfig{AllowNative: true, Source: src, Headend: f, ForwardingMaps: f, ResolveMUPInstance: func(string) (uint32, error) { return 7, nil }, ResolveInputTarget: func(bgp.RouteEvent) (string, uint16, bool) { return "", 0, true }})
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer m.Close(context.Background())
+			caps, _ := wasm.ParseCapabilities([]string{"headend", "mup"})
+			if e = m.Register(context.Background(), Registration{Backend: reg.Backend, NativeID: reg.NativeID, NativeVersion: reg.NativeVersion, Name: "composition", Module: reg.Module, Config: []byte(`{"context":"mobile","source":"fd00:feed::1","args_offset":7,"observe_only":false}`), Capabilities: caps, Scope: scope, Input: func() *v1.CplaneInputPolicy {
+				p := compositionPolicy()
+				p.Contexts[0].DelegateEvpn = false
+				p.Contexts[0].BridgeDomain = 0
+				return p
+			}()}); e != nil {
+				t.Fatal(e)
+			}
+			if !m.WaitIdle("composition", 5*time.Second) {
+				t.Fatal("WASM did not become idle")
+			}
+			st, _ := m.StatsFor("composition")
+			if !st.InputReady || st.OutputFailure != "" || st.AppliedRevision == 0 || len(f.uplinks) != 1 || f.v4["10.0.0.1/32"] == nil {
+				t.Fatalf("WASM outputs failed: %+v uplinks=%v v4=%v", st, f.uplinks, f.v4)
+			}
+			initial := *f.v4["10.0.0.1/32"]
+			duplicate := src.rib[0]
+			duplicate.Source.Peer = netip.MustParseAddr("192.0.2.253")
+			if !src.emit("composition", duplicate) || !m.WaitIdle("composition", 5*time.Second) {
+				t.Fatal("equivalent supporter idle")
+			}
+			st, _ = m.StatsFor("composition")
+			if st.OutputFailure != "" || st.AppliedRevision != st.DesiredRevision || f.v4["10.0.0.1/32"] == nil {
+				t.Fatalf("duplicate supporter blocked real host apply: %+v", st)
+			}
+			conflicting := mupFixtureWithTEID(t, 512)[0]
+			conflicting.Source = duplicate.Source
+			if !src.emit("composition", conflicting) || !m.WaitIdle("composition", 5*time.Second) {
+				t.Fatal("conflicting supporter idle")
+			}
+			st, _ = m.StatsFor("composition")
+			if st.OutputFailure != "" || st.AppliedRevision != st.DesiredRevision || f.v4["10.0.0.1/32"] != nil || len(f.uplinks) != 1 {
+				t.Fatalf("conflict did not retract only the ambiguous output: %+v", st)
+			}
+			withdraw := src.rib[0]
+			withdraw.IsWithdraw = true
+			if !src.emit("composition", withdraw) || !m.WaitIdle("composition", 5*time.Second) {
+				t.Fatal("remaining supporter idle")
+			}
+			if current := f.v4["10.0.0.1/32"]; current == nil || *current == initial {
+				t.Fatal("surviving changed supporter did not recover forwarding")
+			}
+			withdraw = conflicting
+			withdraw.IsWithdraw = true
+			if !src.emit("composition", withdraw) {
+				t.Fatal("no subscription")
+			}
+			if !m.WaitIdle("composition", 5*time.Second) {
+				t.Fatal("withdraw idle")
+			}
+			if f.v4["10.0.0.1/32"] != nil {
+				t.Fatal("withdraw did not remove downlink")
+			}
+			if e = m.Unregister(context.Background(), "composition"); e != nil {
+				t.Fatal(e)
+			}
+			if len(f.uplinks) != 0 || len(f.v4) != 0 {
+				t.Fatal("WASM unregister leaked")
+			}
+
+		})
 	}
 }
 

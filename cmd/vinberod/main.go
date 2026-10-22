@@ -452,6 +452,7 @@ func run(cliCtx *cli.Context) error {
 		// that did not exist yet, and an entry written with a zero source
 		// blackholes without saying so.
 		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
+			AllowNative:            cfg.Setting.CplanePlugins.NativeEnabled,
 			Source:                 routeDemux,
 			RetryForwardingCleanup: applier.RetryMUPOwnedCleanup,
 			ResolveInputTarget: func(ev bgp.RouteEvent) (string, uint16, bool) {

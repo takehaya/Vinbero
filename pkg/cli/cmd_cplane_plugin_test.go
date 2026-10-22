@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"github.com/urfave/cli/v2"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -62,5 +64,21 @@ func TestSlotFlagsThatDoNotFitAreRefused(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != 32 || got[1] != 33 {
 		t.Fatalf("converted %v, want the slots as given", got)
+	}
+}
+
+func TestCplaneArtifactFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"--name", "test"},
+		{"--name", "test", "--wasm", "missing.wasm", "--native", "mup-composition", "--native-version", "1"},
+		{"--name", "test", "--native", "mup-composition"},
+		{"--name", "test", "--wasm", "missing.wasm", "--native-version", "1"},
+	} {
+		app := cli.NewApp()
+		app.Commands = []*cli.Command{cplaneSubcommand()}
+		err := app.Run(append([]string{"test", "cplane", "register"}, args...))
+		if err == nil || (!strings.Contains(err.Error(), "exactly one") && !strings.Contains(err.Error(), "specified together")) {
+			t.Fatalf("unexpected invalid artifact result: %v", err)
+		}
 	}
 }

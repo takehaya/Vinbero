@@ -80,13 +80,15 @@ func limitOf(n int) (int, bool) {
 // is the whole reason a sandboxed component needs them: nothing else about
 // it is observable.
 type PluginStats struct {
-	Input                            *v1.CplaneInputPolicy
-	InputReady                       bool
-	InputFault                       string
-	CleanupPending                   bool
-	DesiredRevision, AppliedRevision uint64
-	OutputFailure                    string
-	Name                             string
+	Backend                                 string
+	NativeID, NativeVersion, NativeIdentity string
+	Input                                   *v1.CplaneInputPolicy
+	InputReady                              bool
+	InputFault                              string
+	CleanupPending                          bool
+	DesiredRevision, AppliedRevision        uint64
+	OutputFailure                           string
+	Name                                    string
 	// Capabilities and Behaviors are what it was granted and what it
 	// claimed, so an operator can check a deployment without reading back
 	// the registration.
@@ -219,6 +221,7 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 		failure += fmt.Sprintf("forwarding inventory incomplete: %v", inventoryErr)
 	}
 	return PluginStats{
+		Backend: reg.Backend, NativeID: reg.NativeID, NativeVersion: reg.NativeVersion, NativeIdentity: reg.NativeIdentity,
 		Name:  p.name,
 		Input: reg.Input, InputReady: ready, InputFault: fault, CleanupPending: cleanup, DesiredRevision: desired, AppliedRevision: applied, OutputFailure: failure,
 		Capabilities:        reg.Capabilities.Names(),

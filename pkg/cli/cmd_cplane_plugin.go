@@ -26,7 +26,7 @@ import (
 func cplaneSubcommand() *cli.Command {
 	return &cli.Command{
 		Name:  "cplane",
-		Usage: "Manage control-plane (WebAssembly) plugins",
+		Usage: "Manage control-plane plugins",
 		Subcommands: []*cli.Command{
 			{
 				Name:  "register",
@@ -36,7 +36,9 @@ func cplaneSubcommand() *cli.Command {
 					"over it, so the data plane is not emptied between the two.",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "name", Required: true, Usage: "Plugin name; becomes the owner tag its writes carry"},
-					&cli.StringFlag{Name: "wasm", Required: true, Usage: "Path to the WebAssembly module"},
+					&cli.StringFlag{Name: "wasm", Usage: "Path to the WebAssembly module (exclusive with --native)"},
+					&cli.StringFlag{Name: "native", Usage: "Statically linked native implementation ID (requires daemon native_enabled)"},
+					&cli.StringFlag{Name: "native-version", Usage: "Exact native implementation version"},
 					&cli.StringFlag{Name: "input-policy", Usage: "JSON input context grants and explicit delegation (input API v1)"},
 					&cli.StringFlag{Name: "config", Usage: "Path to the operator config blob handed to the module (optional)"},
 					&cli.StringSliceFlag{Name: "family", Usage: "BGP family to deliver (repeatable); omit for every family"},
@@ -87,9 +89,23 @@ func cplaneSubcommand() *cli.Command {
 					},
 				},
 				Action: func(c *cli.Context) error {
-					wasm, err := os.ReadFile(c.String("wasm"))
-					if err != nil {
-						return fmt.Errorf("read module: %w", err)
+					wasmPath, nativeID := c.String("wasm"), c.String("native")
+					if (wasmPath == "") == (nativeID == "") {
+						return fmt.Errorf("specify exactly one of --wasm or --native")
+					}
+					if (nativeID == "") != (c.String("native-version") == "") {
+						return fmt.Errorf("--native and --native-version must be specified together")
+					}
+					backend := "wasm"
+					var wasm []byte
+					var err error
+					if wasmPath != "" {
+						wasm, err = os.ReadFile(wasmPath)
+						if err != nil {
+							return fmt.Errorf("read module: %w", err)
+						}
+					} else {
+						backend = "native"
 					}
 					var config []byte
 					if path := c.String("config"); path != "" {
@@ -128,6 +144,7 @@ func cplaneSubcommand() *cli.Command {
 					clients := clientsFromContext(c)
 					resp, err := clients.Plugin.CplanePluginRegister(c.Context,
 						connect.NewRequest(&v1.CplanePluginRegisterRequest{
+							Backend: backend, NativeId: nativeID, NativeVersion: c.String("native-version"),
 							Input:             input,
 							Name:              c.String("name"),
 							Wasm:              wasm,
@@ -206,7 +223,7 @@ func cplaneSubcommand() *cli.Command {
 					w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 					if len(plugins) > 0 {
 						if _, err := fmt.Fprintln(w,
-							"NAME\tCAPABILITIES\tBEHAVIORS\tSTATE\tSINCE\tDROPPED\tRESTARTS\tQUARANTINED\tSNAPSHOTS\tPENDING\tHEADEND\tADVERTISED\tSIDS"); err != nil {
+							"NAME\tBACKEND\tIMPLEMENTATION\tCAPABILITIES\tBEHAVIORS\tSTATE\tSINCE\tDROPPED\tRESTARTS\tQUARANTINED\tSNAPSHOTS\tPENDING\tHEADEND\tADVERTISED\tSIDS"); err != nil {
 							return err
 						}
 					}
@@ -230,8 +247,8 @@ func cplaneSubcommand() *cli.Command {
 						if caps == "" {
 							caps = "-"
 						}
-						if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%d/%d\t%d/%d\n",
-							p.GetName(), caps, formatBehaviors(p.GetEndpointBehaviors()), state,
+						if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%d/%d\t%d/%d\n",
+							p.GetName(), p.GetBackend(), nativeImplementationLabel(p), caps, formatBehaviors(p.GetEndpointBehaviors()), state,
 							formatSince(p.GetSince().AsTime(), p.GetSince() != nil),
 							p.GetDroppedEvents(), p.GetRestarts(), p.GetQuarantinedEvents(), p.GetSnapshots(),
 							p.GetPendingDeclarations(),
@@ -453,4 +470,11 @@ func formatSince(t time.Time, ok bool) string {
 		d = 0
 	}
 	return d.String()
+}
+
+func nativeImplementationLabel(p *v1.CplanePluginStat) string {
+	if p.GetNativeId() == "" {
+		return "-"
+	}
+	return p.GetNativeId() + "@" + p.GetNativeVersion()
 }
