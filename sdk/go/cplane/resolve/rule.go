@@ -345,7 +345,9 @@ func selected(e routes.Entry, ctx string, families []string) bool {
 func (p *Plan[L, R]) evaluate(v *routes.View, b *budget) {
 	p.probe = prefixProbe{}
 	defer func() { p.probe = prefixProbe{} }()
-	p.pairs = nil
+	// Keep capacity while ready, but release every previous route/path reference.
+	clear(p.pairs)
+	p.pairs = p.pairs[:0]
 	r := p.rule
 	type group struct {
 		destination destination
