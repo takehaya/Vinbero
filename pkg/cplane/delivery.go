@@ -37,6 +37,7 @@ const maxDrainRounds = 8
 type delivery struct {
 	batch    *v1.PluginEventBatch
 	complete func()
+	live     bool
 }
 
 // worker owns all delivery to one plugin.
@@ -67,6 +68,9 @@ type worker struct {
 	// batch inside the guest.
 	tick     func() error
 	interval time.Duration
+	// Opt-in live route coalescing never waits for another event. Byte bounds
+	// reserve every authorized context plus nested protobuf length growth.
+	maxBatchEvents, maxBatchBytes, contextBytes int
 
 	mu      sync.Mutex
 	dropped uint64
@@ -93,7 +97,7 @@ type worker struct {
 	// snapshot finishes makes the snapshot a prefix of the stream, which
 	// is the order the plugin is entitled to assume.
 	holding bool
-	pending []*v1.PluginEventBatch
+	pending []delivery
 
 	// beforeBatch runs on this goroutine ahead of each delivery, and on a
 	// slow timer of its own. It is where work that has to happen off the
@@ -148,13 +152,21 @@ func newWorker(
 // do with the answer -- a dropped route is repaired by the snapshot the
 // drop owes -- but an event the snapshot cannot regenerate has to know.
 func (w *worker) submit(batch *v1.PluginEventBatch) bool {
+	return w.submitDelivery(delivery{batch: batch})
+}
+
+func (w *worker) submitLiveRoute(batch *v1.PluginEventBatch) bool {
+	return w.submitDelivery(delivery{batch: batch, live: true})
+}
+
+func (w *worker) submitDelivery(next delivery) bool {
 	w.mu.Lock()
 	w.submitted++
 	if w.holding {
 		// A snapshot is in flight. Hold this until it finishes rather
 		// than letting it be overtaken by an older copy of the same NLRI.
 		if len(w.pending) < deliveryQueueDepth {
-			w.pending = append(w.pending, batch)
+			w.pending = append(w.pending, next)
 			w.mu.Unlock()
 			return true
 		}
@@ -167,7 +179,7 @@ func (w *worker) submit(batch *v1.PluginEventBatch) bool {
 		return false
 	}
 	select {
-	case w.queue <- delivery{batch: batch}:
+	case w.queue <- next:
 		w.mu.Unlock()
 		return true
 	default:
@@ -206,11 +218,23 @@ func (w *worker) run() {
 		retries = t.C
 	}
 
+	// A lookahead item stays ahead of newer queue entries, including barriers.
+	carry := make(chan delivery, 1)
 	for {
+		source := w.queue
+		if len(carry) != 0 {
+			source = carry
+		}
 		select {
 		case <-w.stop:
 			return
-		case next := <-w.queue:
+		case next := <-source:
+			var count int
+			var following *delivery
+			next, count, following = w.coalesce(next)
+			if following != nil {
+				carry <- *following
+			}
 			ok := true
 			if next.batch != nil {
 				if w.beforeBatch != nil {
@@ -222,7 +246,7 @@ func (w *worker) run() {
 				next.complete()
 			}
 			w.mu.Lock()
-			w.processed++
+			w.processed += uint64(count)
 			w.mu.Unlock()
 		case <-retries:
 			// Nothing to do in the ordinary case; this exists for the
@@ -236,6 +260,51 @@ func (w *worker) run() {
 			}
 		}
 	}
+}
+
+func liveRoute(d delivery) bool {
+	return d.live && d.complete == nil && d.batch != nil &&
+		len(d.batch.Events) == 1 && len(d.batch.ProtoReflect().GetUnknown()) == 0 &&
+		d.batch.Events[0].GetKind() == v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE &&
+		d.batch.Events[0].GetRoute() != nil
+}
+
+// coalesce preserves every event and sequence. Preparation and guest failure
+// apply to the combined group; enabling batching opts into that failure unit.
+func (w *worker) coalesce(first delivery) (delivery, int, *delivery) {
+	if w.maxBatchEvents < 2 || !liveRoute(first) || len(w.queue) == 0 {
+		return first, 1, nil
+	}
+	// Only contexts are added during input preparation. Each singleton's size
+	// already includes its framing; 20 bounds growth of the two nested lengths.
+	size := proto.Size(first.batch) + w.contextBytes + 20
+	if size > w.maxBatchBytes {
+		return first, 1, nil
+	}
+	count := 1
+	out := first
+	for count < w.maxBatchEvents {
+		select {
+		case next := <-w.queue:
+			if !liveRoute(next) {
+				return out, count, &next
+			}
+			n := proto.Size(next.batch) + w.contextBytes + 20
+			if n > w.maxBatchBytes-size {
+				return out, count, &next
+			}
+			if count == 1 {
+				out.batch = &v1.PluginEventBatch{Events: make([]*v1.PluginEvent, 0, w.maxBatchEvents)}
+				out.batch.Events = append(out.batch.Events, first.batch.Events...)
+			}
+			out.batch.Events = append(out.batch.Events, next.batch.Events...)
+			size += n
+			count++
+		default:
+			return out, count, nil
+		}
+	}
+	return out, count, nil
 }
 
 // deliver hands one batch to the guest and acts on what comes back.
@@ -366,9 +435,9 @@ func (w *worker) endSnapshot() {
 		w.pending = nil
 		w.mu.Unlock()
 
-		for _, batch := range held {
+		for _, next := range held {
 			select {
-			case w.queue <- delivery{batch: batch}:
+			case w.queue <- next:
 			case <-w.stop:
 				w.mu.Lock()
 				w.processed++
@@ -384,9 +453,9 @@ func (w *worker) endSnapshot() {
 	// same snapshot.
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	for _, batch := range w.pending {
+	for _, next := range w.pending {
 		select {
-		case w.queue <- delivery{batch: batch}:
+		case w.queue <- next:
 		default:
 			w.dropped++
 			w.processed++

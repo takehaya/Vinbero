@@ -45,7 +45,7 @@ func TestInputBatchPolicyBounds(t *testing.T) {
 			if policy.maxBatchEvents != tc.want || !proto.Equal(policy.spec, original) || !proto.Equal(&input, original) {
 				t.Fatalf("effective limit or preserved policy differs: limit=%d input=%v stored=%v", policy.maxBatchEvents, &input, policy.spec)
 			}
-			// Serialization is the existing CLI/store/stats transport. Its policy
+			// Proto JSON is the CLI input transport. Its policy
 			// value remains explicit even when 0 and 1 have the same effect.
 			encoded, err := protojson.Marshal(policy.spec)
 			if err != nil {

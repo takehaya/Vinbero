@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -1095,6 +1096,18 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 			}
 		})
 
+	if policy != nil {
+		p.worker.maxBatchEvents = policy.maxBatchEvents
+		p.worker.maxBatchBytes = reg.Limits.MaxBufferBytes
+		if p.worker.maxBatchBytes <= 0 {
+			p.worker.maxBatchBytes = wasm.DefaultLimits().MaxBufferBytes
+		}
+		contexts := &v1.PluginRoute{}
+		for _, c := range policy.spec.Contexts {
+			contexts.Contexts = append(contexts.Contexts, c.Name)
+		}
+		p.worker.contextBytes = proto.Size(contexts)
+	}
 	p.worker.prepare = func(batch *v1.PluginEventBatch) (*v1.PluginEventBatch, error) {
 		for _, ev := range batch.Events {
 			if ev.Kind == v1.PluginEventKind_PLUGIN_EVENT_KIND_START_OF_REPLAY && ev.ReplaySource == ReplaySourceBGP {
@@ -1661,7 +1674,7 @@ func (m *Manager) handlerFor(name string) bgp.RouteHandler {
 		if !ok || dead {
 			return
 		}
-		if !p.worker.submit(m.routeBatch(ev)) && p.reg.Input != nil {
+		if !p.worker.submitLiveRoute(m.routeBatch(ev)) && p.reg.Input != nil {
 			p.ops.noteInputLoss()
 		}
 

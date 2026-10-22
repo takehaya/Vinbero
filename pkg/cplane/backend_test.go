@@ -48,6 +48,7 @@ func TestNativeBackendAdmissionAndPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := nativeObserverRegistration()
+	reg.Input.MaxBatchEvents = 16
 	if err = m.Register(ctx, reg); !errors.Is(err, ErrNativeDisabled) {
 		t.Fatalf("disabled: %v", err)
 	}
@@ -81,6 +82,9 @@ func TestNativeBackendAdmissionAndPersistence(t *testing.T) {
 	if len(regs[0].Module) != 0 || regs[0].NativeIdentity != st.NativeIdentity {
 		t.Fatal("native identity lost")
 	}
+	if regs[0].Input.GetMaxBatchEvents() != 16 || m.plugins[reg.Name].worker.maxBatchEvents != 16 {
+		t.Fatal("batch policy did not reach the worker and persistent registration")
+	}
 	entries, err := os.ReadDir(store.Dir())
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +109,9 @@ func TestNativeBackendAdmissionAndPersistence(t *testing.T) {
 	got, ok := restored.StatsFor(reg.Name)
 	if !ok || got.NativeIdentity != st.NativeIdentity {
 		t.Fatal("native did not restore")
+	}
+	if got.Input.GetMaxBatchEvents() != 16 || restored.plugins[reg.Name].worker.maxBatchEvents != 16 {
+		t.Fatal("batch policy changed across restore")
 	}
 	restored.Close(ctx)
 	// A source/dependency mismatch keeps the registration visible, never swaps backend.
