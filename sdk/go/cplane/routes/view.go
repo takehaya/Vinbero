@@ -3,9 +3,10 @@ package routes
 
 import (
 	"fmt"
+	"sort"
+
 	"github.com/takehaya/vinbero/sdk/go/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplane/gobgppath"
-	"sort"
 )
 
 type Limits struct{ MaxPaths, MaxBytes int }
@@ -29,6 +30,9 @@ type stored struct {
 type View struct {
 	catalog map[string]map[string]bool
 	paths   map[cplane.BGPPathKey]stored
+	// ordered holds only keys; every traversal reads the current entries.
+	// Map mutations discard it so all rules can reuse one ordering.
+	ordered []cplane.BGPPathKey
 	limits  Limits
 	bytes   int
 	status  Status
@@ -67,12 +71,15 @@ func (v *View) Range(visit func(Entry)) {
 	if !v.status.Ready {
 		return
 	}
-	keys := make([]cplane.BGPPathKey, 0, len(v.paths))
-	for k := range v.paths {
-		keys = append(keys, k)
+	if v.ordered == nil {
+		keys := make([]cplane.BGPPathKey, 0, len(v.paths))
+		for k := range v.paths {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool { return KeyLess(keys[i], keys[j]) })
+		v.ordered = keys
 	}
-	sort.Slice(keys, func(i, j int) bool { return KeyLess(keys[i], keys[j]) })
-	for _, k := range keys {
+	for _, k := range v.ordered {
 		e := v.paths[k].entry
 		e.Contexts = append([]string(nil), e.Contexts...)
 		visit(e)
@@ -111,6 +118,7 @@ func (v *View) Update(events []cplane.Event) []cplane.EventResult {
 		case cplane.EventStartOfReplay:
 			if ev.ReplaySource == cplane.BGPSource {
 				v.paths = map[cplane.BGPPathKey]stored{}
+				v.ordered = nil
 				v.bytes = 0
 				v.status = Status{Replaying: true, Revision: v.status.Revision + 1}
 			}
@@ -133,6 +141,7 @@ func (v *View) Update(events []cplane.Event) []cplane.EventResult {
 			if old, held := v.paths[k]; held {
 				v.bytes -= old.bytes
 				delete(v.paths, k)
+				v.ordered = nil
 			}
 			v.status.Revision++
 			if r.Withdraw || len(r.Contexts) == 0 {
@@ -173,6 +182,7 @@ func (v *View) Update(events []cplane.Event) []cplane.EventResult {
 			}
 			sort.Strings(contexts)
 			v.paths[k] = stored{Entry{k, r.Family, contexts, path}, size}
+			v.ordered = nil
 			v.bytes += size
 		}
 	}
