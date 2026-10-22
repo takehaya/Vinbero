@@ -1,6 +1,8 @@
 # MUP route composition guest
 
-This example joins authorized MUP routes in a shared View and submits a complete forwarding set after each ready revision.
+This example imports the shared [`mupcontroller`](../../go/cplane/mupcontroller) package, which is also used by the daemon's native adapter.
+The controller source is maintained once and compiled for each target.
+It joins authorized MUP routes in a shared View and submits a complete forwarding set after each ready revision.
 The default configuration observes routes and logs the number of buildable entries without calling the output API.
 The default build also omits the host's write imports, so it needs no write capability and cannot be switched to writing through configuration.
 
@@ -13,7 +15,7 @@ These are application selection rules; they do not run BGP best-path selection.
 Run these commands from this directory with Go 1.25.5 or later:
 
 ```sh
-go test -race ./...
+(cd ../../.. && go test -race ./sdk/go/cplane/mupcontroller)
 GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath -buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 vinbero plugin cplane register \
   --name mup-composition --wasm plugin.wasm \
@@ -84,3 +86,28 @@ Missing, duplicate, and unsupported Direct Segment communities are distinct from
 
 Native tests exercise both rules, the client transport, withdrawal, empty replay, incomplete input, and retries after newer updates.
 The standard Go WASI build is supported here; TinyGo compatibility has not been tested.
+
+## Run the same controller natively
+
+The daemon can statically link the same controller under implementation ID `mup-composition`, version `1`.
+The observation profile is `mup-composition-observer`, version `1`; supplying write configuration to this profile is rejected.
+Native execution requires the daemon's explicit `cplane_plugins.native_enabled: true` opt-in because this code runs in its process.
+Use the same input policy, configuration, capabilities, scope and tick interval as the WASM command, replacing `--wasm plugin-write.wasm` with `--native mup-composition --native-version 1`.
+For observation, replace `--wasm plugin.wasm` with `--native mup-composition-observer --native-version 1`.
+Use the existing same-name replacement or unregister workflow; a backend is never selected by fallback.
+
+The native adapter uses the same encoded events, results and output transactions, and the manager retains policy checks and reconciliation.
+Native calls run serially, with cooperative cancellation and panic recovery; a hung call cannot be forcibly stopped in-process and can block shutdown.
+WASM memory limits do not impose a per-instance native heap limit.
+The daemon persists a native identity derived from controller/SDK/adapter source, dependency pins and Go toolchain, and refuses restoration if that identity changes.
+Adding or upgrading native implementations requires rebuilding the daemon.
+
+To check both builds from the repository root:
+
+```sh
+make cplane-route-composition cplane-route-composition-observer
+VINBERO_CPLANE_PARITY=1 go test ./pkg/cplane/native
+```
+
+The parity tests replay the same GoBGP-encoded paths through both adapters and compare event statuses and output transactions, including retries and observation-only behavior.
+They complement manager tests of final map state; passing them does not establish a performance advantage.

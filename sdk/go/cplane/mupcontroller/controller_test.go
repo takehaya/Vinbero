@@ -1,4 +1,4 @@
-package main
+package mupcontroller
 
 import (
 	"encoding/binary"
@@ -80,11 +80,11 @@ func replay(events []cplane.Event) []cplane.Event {
 func TestObserveOnlyDefault(t *testing.T) {
 	r := &recorder{}
 	var logs []string
-	c, err := newController(inputConfig(""), r, func(_ cplane.LogLevel, s string) { logs = append(logs, s) })
+	c, err := New(inputConfig(""), r, func(_ cplane.LogLevel, s string) { logs = append(logs, s) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.update(replay(fixtures(t, 256)))
+	c.Update(replay(fixtures(t, 256)))
 	c.reconcile()
 	if len(r.sets) != 0 || len(logs) != 1 || !strings.Contains(logs[0], "observe_only=true headends=1 uplinks=1") {
 		t.Fatalf("writes=%d logs=%v", len(r.sets), logs)
@@ -93,12 +93,12 @@ func TestObserveOnlyDefault(t *testing.T) {
 
 func TestWriteWithdrawAndEmptyReplay(t *testing.T) {
 	r := &recorder{}
-	c, err := newController(inputConfig(`,"observe_only":false`), r, nil)
+	c, err := New(inputConfig(`,"observe_only":false`), r, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	events := fixtures(t, 256)
-	c.update(replay(events))
+	c.Update(replay(events))
 	if len(r.sets) != 1 || len(r.sets[0].Headends) != 1 || len(r.sets[0].Uplinks) != 1 {
 		t.Fatalf("initial desired set: %+v", r.sets)
 	}
@@ -111,11 +111,11 @@ func TestWriteWithdrawAndEmptyReplay(t *testing.T) {
 		t.Fatal("successful revision was retried")
 	}
 	events[1].Route.Withdraw = true
-	c.update(events[1:2])
+	c.Update(events[1:2])
 	if len(r.sets) != 2 || len(r.sets[1].Headends) != 0 || len(r.sets[1].Uplinks) != 1 {
 		t.Fatalf("ISD withdraw: %+v", r.sets)
 	}
-	c.update(replay(nil))
+	c.Update(replay(nil))
 	last := r.sets[len(r.sets)-1]
 	if len(r.sets) != 3 || len(last.Headends)+len(last.Uplinks) != 0 || last.Revision <= set.Revision {
 		t.Fatalf("empty replay failed to retract: %+v", r.sets)
@@ -124,12 +124,12 @@ func TestWriteWithdrawAndEmptyReplay(t *testing.T) {
 
 func TestRetryUsesLatestReadyRevision(t *testing.T) {
 	r := &recorder{fail: true}
-	c, err := newController(inputConfig(`,"observe_only":false`), r, nil)
+	c, err := New(inputConfig(`,"observe_only":false`), r, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	initial := fixtures(t, 256)
-	c.update(replay(initial))
+	c.Update(replay(initial))
 	first := r.sets[0]
 	c.reconcile()
 	if len(r.sets) != 2 || r.sets[1].Revision != first.Revision {
@@ -138,7 +138,7 @@ func TestRetryUsesLatestReadyRevision(t *testing.T) {
 	// ST1 TEID is payload, not destination identity: replace the same key.
 	changed := fixtures(t, 512)[0]
 	changed.Route.BGPPath.RouteKey = append([]byte(nil), initial[0].Route.BGPPath.RouteKey...)
-	c.update([]cplane.Event{changed})
+	c.Update([]cplane.Event{changed})
 	r.fail = false
 	c.reconcile()
 	last := r.sets[len(r.sets)-1]
@@ -155,15 +155,15 @@ func TestReplayAndIncompleteSuppressRetry(t *testing.T) {
 	for _, reason := range []string{"replay", "incomplete"} {
 		t.Run(reason, func(t *testing.T) {
 			r := &recorder{fail: true}
-			c, err := newController(inputConfig(`,"observe_only":false`), r, nil)
+			c, err := New(inputConfig(`,"observe_only":false`), r, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.update(replay(fixtures(t, 256)))
+			c.Update(replay(fixtures(t, 256)))
 			if reason == "replay" {
-				c.update([]cplane.Event{marker(cplane.EventStartOfReplay)})
+				c.Update([]cplane.Event{marker(cplane.EventStartOfReplay)})
 			} else {
-				results := c.update([]cplane.Event{{Kind: cplane.EventRoute, Sequence: 42}})
+				results := c.Update([]cplane.Event{{Kind: cplane.EventRoute, Sequence: 42}})
 				if len(results) != 1 || results[0].Disposition != cplane.InputIncomplete {
 					t.Fatalf("missing incomplete result: %v", results)
 				}
@@ -173,7 +173,7 @@ func TestReplayAndIncompleteSuppressRetry(t *testing.T) {
 			if len(r.sets) != 1 || c.engine.Status().Ready {
 				t.Fatal("stale desired set retried")
 			}
-			c.update(replay(nil))
+			c.Update(replay(nil))
 			if len(r.sets) != 2 || len(r.sets[1].Headends)+len(r.sets[1].Uplinks) != 0 {
 				t.Fatalf("recovery reused stale desired set: %+v", r.sets)
 			}
@@ -182,7 +182,7 @@ func TestReplayAndIncompleteSuppressRetry(t *testing.T) {
 }
 
 func TestConfigFailsClosed(t *testing.T) {
-	if _, err := newController(inputConfig(`,"observe_only":false`), nil, nil); err == nil {
+	if _, err := New(inputConfig(`,"observe_only":false`), nil, nil); err == nil {
 		t.Fatal("observation artifact accepted writing configuration")
 	}
 	for name, payload := range map[string]string{
@@ -195,14 +195,14 @@ func TestConfigFailsClosed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			input := inputConfig("")
 			input.Payload = []byte(payload)
-			if _, err := newController(input, nil, nil); err == nil {
+			if _, err := New(input, nil, nil); err == nil {
 				t.Fatal("invalid config accepted")
 			}
 		})
 	}
 	input := inputConfig("")
 	input.Contexts[0].Families = []string{"mup_ipv4"}
-	if _, err := newController(input, nil, nil); err == nil {
+	if _, err := New(input, nil, nil); err == nil {
 		t.Fatal("missing family grant accepted")
 	}
 }
@@ -226,11 +226,11 @@ func (*wireHost) Abort(uint64)                  { panic("unexpected abort") }
 
 func TestClientTransportCommitFailure(t *testing.T) {
 	h := &wireHost{status: cplane.StatusInternal}
-	c, err := newController(inputConfig(`,"observe_only":false`), &cplane.Client{Host: h}, nil)
+	c, err := New(inputConfig(`,"observe_only":false`), &cplane.Client{Host: h}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.update(replay(fixtures(t, 256)))
+	c.Update(replay(fixtures(t, 256)))
 	if h.kind != cplane.CompositionSet || h.commits != 1 || h.puts == 0 || c.handledRevision != 0 {
 		t.Fatal(fmt.Sprintf("transport=%+v handled=%d", h, c.handledRevision))
 	}

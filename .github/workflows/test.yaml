@@ -96,9 +96,7 @@ jobs:
       - name: Build and test route composition guests
         run: |
           make cplane-route-composition cplane-route-composition-observer
-          cd sdk/examples/cplane-route-composition
-          go test -race ./...
-          go test -race -tags composition_write ./...
+          VINBERO_CPLANE_PARITY=1 go test -race ./sdk/go/cplane/mupcontroller ./pkg/cplane/native
 
       - name: Run unit tests
         # pkg/bpf reloads the BPF collection per test and keeps outgrowing
@@ -181,8 +179,7 @@ jobs:
       - name: Run the plugin runtime and harness tests against the rebuilt artifacts
         run: |
           make cplane-route-composition cplane-route-composition-observer
-          go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
-          cd sdk/examples/cplane-route-composition && go test -tags composition_write ./...
+          VINBERO_CPLANE_PARITY=1 go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:
     name: Integration Test - ${{ matrix.example }}

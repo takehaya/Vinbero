@@ -1,4 +1,5 @@
-package main
+// Package mupcontroller implements the shared GTP4 MUP route-composition controller.
+package mupcontroller
 
 import (
 	"bytes"
@@ -22,24 +23,27 @@ type operatorConfig struct {
 	ObserveOnly *bool  `json:"observe_only"`
 }
 
-type compositionClient interface {
+// CompositionClient receives complete desired forwarding sets.
+type CompositionClient interface {
 	ApplyComposition(cplane.Composition) error
 }
 
-type controller struct {
+// Controller keeps the route view and retry state for one serially driven instance.
+type Controller struct {
 	engine      *resolve.Engine
 	down        *resolve.Plan[mup.ST1, mup.ISD]
 	up          *resolve.Plan[mup.ST2, mup.DSD]
 	downContext mup.DownlinkContext
 	observeOnly bool
-	client      compositionClient
+	client      CompositionClient
 	log         func(cplane.LogLevel, string)
 	// Only successful writes (or previews) advance this revision. Failed writes
 	// are rebuilt from the current ready view on the next event or tick.
 	handledRevision uint64
 }
 
-func newController(input cplane.InputConfig, client compositionClient, log func(cplane.LogLevel, string)) (*controller, error) {
+// New configures one controller. A nil client permits observation only.
+func New(input cplane.InputConfig, client CompositionClient, log func(cplane.LogLevel, string)) (*Controller, error) {
 	var config operatorConfig
 	d := json.NewDecoder(bytes.NewReader(input.Payload))
 	d.DisallowUnknownFields()
@@ -90,18 +94,22 @@ func newController(input cplane.InputConfig, client compositionClient, log func(
 	if log == nil {
 		log = func(cplane.LogLevel, string) {}
 	}
-	return &controller{engine: engine, down: down, up: up,
+	return &Controller{engine: engine, down: down, up: up,
 		downContext: mup.DownlinkContext{Source: source, ArgsOffset: *config.ArgsOffset},
 		observeOnly: observeOnly, client: client, log: log}, nil
 }
 
-func (c *controller) update(events []cplane.Event) []cplane.EventResult {
+// Update applies a batch and reconciles the latest complete route view.
+func (c *Controller) Update(events []cplane.Event) []cplane.EventResult {
 	results := c.engine.Update(events)
 	c.reconcile()
 	return results
 }
 
-func (c *controller) reconcile() {
+// Tick retries a pending revision when no route event arrives.
+func (c *Controller) Tick(_ int64) { c.reconcile() }
+
+func (c *Controller) reconcile() {
 	status := c.engine.Status()
 	if !status.Ready || status.Revision == c.handledRevision {
 		return
