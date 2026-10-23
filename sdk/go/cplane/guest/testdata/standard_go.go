@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,11 +27,22 @@ func init() {
 			if string(config) == "sleep" {
 				time.Sleep(time.Hour)
 			}
-			if mode != "check" {
+			if mode != "check" && !strings.HasPrefix(mode, "budget:") {
 				return nil
 			}
-			if env := os.Environ(); len(env) != 0 {
+			wantLimit := int64(8 << 20)
+			if strings.HasPrefix(mode, "budget:") {
+				var err error
+				wantLimit, err = strconv.ParseInt(strings.TrimPrefix(mode, "budget:"), 10, 64)
+				if err != nil {
+					return err
+				}
+			}
+			if env := os.Environ(); len(env) != 1 || env[0] != fmt.Sprintf("GOMEMLIMIT=%dB", wantLimit) {
 				return fmt.Errorf("unexpected guest environment: %v", env)
+			}
+			if limit := debug.SetMemoryLimit(-1); limit != wantLimit {
+				return fmt.Errorf("Go GC target: %d", limit)
 			}
 			if _, err := os.ReadFile("/etc/passwd"); err == nil {
 				return fmt.Errorf("host filesystem exposed")

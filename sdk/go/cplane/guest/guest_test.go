@@ -3,6 +3,7 @@ package guest_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,7 +126,7 @@ func testObserver(t *testing.T, module []byte) {
 func TestStandardGoRuntime(t *testing.T) {
 	t.Setenv("VINBERO_WASI_HOST_ONLY", "must not be inherited")
 	module := buildGuest(t, "standard_go.go", false)
-	t.Setenv("GOMEMLIMIT", "2GiB") // Must not be inherited by the guest.
+	t.Setenv("GOMEMLIMIT", "2GiB") // Must not replace the guest's own target.
 	newInstance := func(t *testing.T, config string) (*wasm.Instance, error) {
 		t.Helper()
 		inst, err := wasm.Instantiate(t.Context(), wasm.Config{
@@ -167,6 +168,21 @@ func TestStandardGoRuntime(t *testing.T) {
 		if !strings.Contains(message, "retained panic diagnostic") || !strings.Contains(message, "truncated") ||
 			strings.Contains(message, "configuration-only diagnostic") || strings.Contains(message, strings.Repeat("x", 4097)) {
 			t.Fatalf("missing or stale guest diagnostics: %v", err)
+		}
+	})
+	t.Run("memory cap sets guest GC target", func(t *testing.T) {
+		for _, pages := range []uint32{128, 512} {
+			t.Run(fmt.Sprintf("%d pages", pages), func(t *testing.T) {
+				inst, err := wasm.Instantiate(t.Context(), wasm.Config{
+					Name: "go-budget", Module: module, Ops: &logHost{},
+					ConfigBlob: []byte(fmt.Sprintf("budget:%d", uint64(pages)*(64<<10)/2)),
+					Limits:     wasm.Limits{MaxMemoryPages: pages},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = inst.Close(context.Background()) })
+			})
 		}
 	})
 	t.Run("configure sleep respects budget", func(t *testing.T) {

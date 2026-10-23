@@ -794,6 +794,9 @@ module は allowlist で検証します。
 - import は `vinbero` と `wasi_snapshot_preview1` からのみ。関数名と signature を検証。
 - WASI は Go runtime 用に時計、乱数、期限内の sleep を提供します。host の環境変数、
   引数、filesystem mount、socket は渡しません。stdin は EOF、stdout は破棄します。
+  guest 専用の環境変数 `GOMEMLIMIT` だけを、module と host の実効 memory 上限の半分に設定します。
+  これは Go GC の目標値で、static data や線形メモリの拡張に余裕を残すための設定です。
+  guest は変更や無視ができ、OOM の回避や最適な性能を保証しません。
   安全境界は従来の線形メモリ上限と call timeout です。
   stderr は各 export 呼び出しの先頭 4 KiB だけを保持し、trap や timeout などの WASM 実行失敗時の error に添付します。
   通常の plugin の診断には既存の rate limit がある `vinbero.log` を使います。

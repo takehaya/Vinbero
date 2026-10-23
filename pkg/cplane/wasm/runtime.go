@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -276,13 +277,16 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	modCfg := wazero.NewModuleConfig().
 		WithName(cfg.Name).
 		WithStderr(&inst.stderr).
+		WithEnv("GOMEMLIMIT", goMemoryLimit(limits.MaxMemoryPages, compiled.ExportedMemories()[GuestMemory])).
 		WithStartFunctions().
 		WithSysWalltime().
 		WithSysNanotime().
 		WithNanosleep(inst.sleep).
 		WithRandSource(rand.Reader)
-	// No environment, arguments, filesystem mounts or sockets; stdin is EOF
-	// and stdout is discarded. A bounded stderr prefix is attached only to failed
+	// The only environment variable is an advisory Go GC target derived
+	// from this guest's memory cap. Never inherit the host environment.
+	// No arguments, filesystem mounts or sockets; stdin is EOF and stdout
+	// is discarded. A bounded stderr prefix is attached only to failed
 	// WASM executions. Normal plugin logs use vinbero.log and its rate limit.
 	instCtx, cancelInst := inst.callContext(ctx)
 	mod, err := rt.InstantiateModule(instCtx, compiled, modCfg)
@@ -320,6 +324,15 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 		zap.Int("config_bytes", len(cfg.ConfigBlob)),
 		zap.Strings("capabilities", cfg.Capabilities.Names()))
 	return inst, nil
+}
+
+// Reserve headroom for static data and linear-memory growth. This is an
+// advisory GC target; the runtime's hard memory cap remains authoritative.
+func goMemoryLimit(hostPages uint32, memory api.MemoryDefinition) string {
+	if moduleMax, ok := memory.Max(); ok {
+		hostPages = min(hostPages, moduleMax)
+	}
+	return strconv.FormatUint(uint64(hostPages)*(64<<10)/2, 10) + "B"
 }
 
 // Name is the plugin's identity.

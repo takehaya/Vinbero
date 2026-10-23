@@ -85,6 +85,8 @@ GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
 The host links WASI preview 1 and calls `_initialize` before the ABI callbacks.
 The Go runtime, garbage collector, reflection and WASI-compatible standard library packages are available.
 WASI supplies real clocks and randomness, without inheriting the host environment, arguments, filesystem mounts or sockets.
+The only supplied environment variable is `GOMEMLIMIT`, set to half the smaller of the module's declared memory maximum and the host's memory cap (or half the host cap when the module has no maximum).
+This advisory Go GC target leaves headroom for static data and linear-memory growth; guests can change or ignore it, and it does not guarantee freedom from OOM or optimal performance.
 The existing hard memory cap and call timeout remain the resource boundaries.
 Stdin is EOF and stdout is discarded.
 The host retains at most the first 4 KiB of stderr per export call and attaches it only when WASM execution fails, such as a trap or timeout.
