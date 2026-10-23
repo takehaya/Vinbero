@@ -284,6 +284,17 @@ func (p *Plan[L, R]) Results() []Pair[L, R] {
 	return out
 }
 
+// Range visits results in order without allocating an outer snapshot slice.
+// Each pair's path lists are independent copies, as in Results; Left and Right
+// are copied by value. Engine updates must not run concurrently or from visit.
+func (p *Plan[L, R]) Range(visit func(Pair[L, R])) {
+	for _, pair := range p.pairs {
+		pair.LeftPaths = append([]cplane.BGPPathKey(nil), pair.LeftPaths...)
+		pair.RightPaths = append([]cplane.BGPPathKey(nil), pair.RightPaths...)
+		visit(pair)
+	}
+}
+
 // CopyResults overwrites dst with the current results and returns the resized
 // slice, reusing its capacity and each pair's path-list capacity when possible.
 // The caller must exclusively own dst and its path slices, with nonoverlapping

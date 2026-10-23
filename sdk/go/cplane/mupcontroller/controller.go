@@ -118,22 +118,22 @@ func (c *Controller) reconcile() {
 		c.log(cplane.LogWarn, fmt.Sprintf("%s: %s: %s", issue.Rule, issue.Code, issue.Reason))
 	}
 	set := cplane.Composition{Revision: status.Revision}
-	for _, pair := range c.down.Results() {
+	c.down.Range(func(pair resolve.Pair[mup.ST1, mup.ISD]) {
 		entry, err := mup.BuildDownlink(pair, c.downContext)
 		if err != nil {
 			c.log(cplane.LogWarn, "downlink: "+err.Error())
-			continue
+			return
 		}
 		set.Headends = append(set.Headends, entry)
-	}
-	for _, pair := range c.up.Results() {
+	})
+	c.up.Range(func(pair resolve.Pair[mup.ST2, mup.DSD]) {
 		entry, err := mup.BuildUplink(pair, c.downContext.Source)
 		if err != nil {
 			c.log(cplane.LogWarn, "uplink: "+err.Error())
-			continue
+			return
 		}
 		set.Uplinks = append(set.Uplinks, entry)
-	}
+	})
 	// Every uplink also claims its endpoint /32 in the headend map. Record
 	// all raw claims before reducing either list so ambiguity stays sticky.
 	gates := map[string]bool{}

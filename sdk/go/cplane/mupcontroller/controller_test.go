@@ -91,6 +91,32 @@ func TestObserveOnlyDefault(t *testing.T) {
 	}
 }
 
+func TestBuilderFailureKeepsLaterOutputs(t *testing.T) {
+	r := &recorder{}
+	var warnings []string
+	c, err := New(inputConfig(`,"observe_only":false`), r, func(level cplane.LogLevel, message string) {
+		if level == cplane.LogWarn {
+			warnings = append(warnings, message)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := route(t, bgp.NewMUPType1SessionTransformedRoute(
+		bgp.NewRouteDistinguisherTwoOctetAS(65000, 7), netip.MustParsePrefix("10.0.0.0/32"),
+		netip.AddrFrom4([4]byte{0, 0, 1, 0}), 64, netip.MustParseAddr("172.16.0.1"), nil))
+	c.Update(replay(append([]cplane.Event{bad}, fixtures(t, 256)...)))
+	pairs := c.down.Results()
+	if len(pairs) != 2 || pairs[0].Left.QFI != 64 {
+		t.Fatal("fixture must put the builder-rejected pair first")
+	}
+	if len(r.sets) != 1 || len(r.sets[0].Headends) != 1 || len(r.sets[0].Uplinks) != 1 ||
+		r.sets[0].Headends[0].Entry.TriggerPrefix != "10.0.0.1/32" ||
+		len(warnings) != 1 || !strings.Contains(warnings[0], "QFI or RQI out of range") {
+		t.Fatalf("builder failure lost later outputs or warning: sets=%+v warnings=%v", r.sets, warnings)
+	}
+}
+
 func TestWriteWithdrawAndEmptyReplay(t *testing.T) {
 	r := &recorder{}
 	c, err := New(inputConfig(`,"observe_only":false`), r, nil)

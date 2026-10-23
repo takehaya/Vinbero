@@ -7,6 +7,42 @@ import (
 	"github.com/takehaya/vinbero/sdk/go/cplane"
 )
 
+func TestRangeResultsOrderAndOwnership(t *testing.T) {
+	shared := []cplane.BGPPathKey{{Peer: "original"}}
+	p := &Plan[string, string]{pairs: []Pair[string, string]{
+		{Left: "first", Right: "right", Context: "tenant", Revision: 4, LeftPaths: shared, RightPaths: shared},
+		{Left: "second", Right: "right", Context: "tenant", Revision: 4, LeftPaths: shared, RightPaths: shared},
+	}}
+	want := p.Results()
+	var saved []Pair[string, string]
+	p.Range(func(pair Pair[string, string]) {
+		if !reflect.DeepEqual(pair, want[len(saved)]) {
+			t.Fatalf("wrong order or aliased callback: %+v", pair)
+		}
+		saved = append(saved, pair)
+		pair.LeftPaths[0].Peer = "caller-left"
+		if pair.RightPaths[0].Peer != "original" {
+			t.Fatal("left and right path lists alias")
+		}
+		pair.RightPaths[0].Peer = "caller-right"
+	})
+	if len(saved) != len(want) || !reflect.DeepEqual(p.Results(), want) {
+		t.Fatal("range omitted results or mutated the plan")
+	}
+	saved[0].LeftPaths[0].Peer = "first-left"
+	saved[0].RightPaths[0].Peer = "first-right"
+	if saved[1].LeftPaths[0].Peer != "caller-left" || saved[1].RightPaths[0].Peer != "caller-right" {
+		t.Fatal("retained callback values share path lists")
+	}
+	p.pairs[0].Revision++
+	shared[0].Peer = "updated"
+	if saved[0].Revision != 4 || saved[0].LeftPaths[0].Peer != "first-left" || saved[1].RightPaths[0].Peer != "caller-right" {
+		t.Fatal("plan update changed a retained callback value")
+	}
+	p.clear()
+	p.Range(func(Pair[string, string]) { t.Fatal("empty plan returned a stale result") })
+}
+
 func TestCopyResultsOwnershipAndReuse(t *testing.T) {
 	p := &Plan[string, string]{pairs: []Pair[string, string]{
 		{Left: "left", Right: "right", Context: "tenant", Revision: 4,

@@ -29,12 +29,17 @@ func TestResultsSnapshotSurvivesReplacementAndShrink(t *testing.T) {
 	reused := p.CopyResults(nil)
 	check := func(want int) {
 		t.Helper()
+		var ranged []resolve.Pair[vpnRoute, underlayRoute]
 		if !e.Status().Ready || len(p.Results()) != want {
 			t.Fatalf("want %d fresh results: status=%+v results=%+v", want, e.Status(), p.Results())
 		}
 		reused = p.CopyResults(reused)
 		if len(reused) != want || (want > 0 && !reflect.DeepEqual(reused, p.Results())) {
 			t.Fatal("reused results differ after replacement or shrink")
+		}
+		p.Range(func(pair resolve.Pair[vpnRoute, underlayRoute]) { ranged = append(ranged, pair) })
+		if len(ranged) != want || (want > 0 && !reflect.DeepEqual(ranged, p.Results())) {
+			t.Fatal("ranged results differ after replacement, withdrawal, or replay")
 		}
 		after, err := json.Marshal(saved)
 		if err != nil || !bytes.Equal(before, after) {
