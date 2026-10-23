@@ -117,16 +117,21 @@ func (c *Client) apply(kind Kind, count int, encode func(int) []byte) error {
 }
 
 func encodeHeadend(entry HeadendEntry) []byte {
-	var body, chunk wire.Encoder
+	var chunk wire.Encoder
+	chunk.Message(1, encodeHeadendBody(entry))
+	return chunk
+}
+func encodeHeadendBody(entry HeadendEntry) []byte {
+	var body wire.Encoder
 	body.String(1, entry.TriggerPrefix)
 	for _, sid := range entry.Segments {
 		body.Message(2, []byte(sid))
 	}
 	body.String(3, entry.SrcAddr)
 	body.Uint(4, uint64(entry.Mode))
-	chunk.Message(1, body)
-	return chunk
+	return body
 }
+
 func encodeAdvertised(route AdvertisedRoute) []byte {
 	var body, chunk wire.Encoder
 	body.String(1, route.Family)

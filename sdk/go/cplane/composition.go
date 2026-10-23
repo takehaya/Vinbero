@@ -25,10 +25,7 @@ func (c *Client) ApplyComposition(set Composition) error {
 		if i < len(set.Headends) {
 			h := set.Headends[i]
 			body.String(1, h.Context)
-			encoded := encodeHeadend(h.Entry)
-			d := wire.NewDecoder(encoded)
-			d.Next()
-			body.Message(2, d.Bytes)
+			body.Message(2, encodeHeadendBody(h.Entry))
 			chunk.Message(4, body)
 			return chunk
 		}
