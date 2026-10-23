@@ -103,8 +103,9 @@ fi
 printf '\010\201\374\003\112\01310.2.0.0/16' > /tmp/plugin-config.bin
 
 # Granted `headend` only: it declares forwarding state and nothing else.
-# It cannot originate a route or allocate a SID, and the host functions
-# for those are not linked into its module at all.
+# The shared host rejects advertisement and local-SID declarations.
+# WASM links the shared apply surface for any write grant; each
+# declaration kind is still checked by the host.
 #
 # The scope says where that capability may be exercised. The headend maps
 # are keyed on the destination prefix alone, so without it the plugin could
@@ -112,9 +113,16 @@ printf '\010\201\374\003\112\01310.2.0.0/16' > /tmp/plugin-config.bin
 # operator's own VPN traffic, which wins on longest match without ever
 # touching the entry it shadows. 10.2.0.0/16 covers the far end's customer
 # subnet and nothing else here.
+backend_args=()
+case "${CPLANE_BACKEND:-native}" in
+    native) ;;
+    wasm) backend_args=(--wasm /plugin.wasm) ;;
+    *) echo "CPLANE_BACKEND must be native or wasm" >&2; exit 1 ;;
+esac
+
 /usr/local/bin/vbctl plugin cplane register \
     --name custom-behavior \
-    --wasm /plugin.wasm \
+    "${backend_args[@]}" \
     --config /tmp/plugin-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 --tick-ms 1000 \

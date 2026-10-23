@@ -43,9 +43,8 @@ a plugin put it there, and the test pings through it.
 
 Neither plugin is granted more than it needs. pe-tokyo's has `headend`
 alone and cannot originate a route; pe-osaka's has `advertise` and
-`local_sid` and cannot write forwarding state -- not as a check they might
-get past, but because the host functions for what they were not granted
-are never linked into their modules.
+`local_sid` and cannot write forwarding state -- with declaration kinds checked by the shared host at transaction begin.
+WASM registrations without any write capability cannot import the apply functions.
 
 Each is also given a scope, which says where that capability may be
 exercised. pe-tokyo's plugin may install headend entries only inside
@@ -113,9 +112,17 @@ the traffic into the VRF.
 make all SCENARIO=cplane-plugin-2site
 ```
 
-The WebAssembly half is `sdk/examples/cplane-custom-behavior/plugin.wasm`,
-bound into both PEs, so the lab runs exactly what `make cplane-example`
-produces. Rebuild it with TinyGo after changing the example.
+The control-plane controller runs natively by default.
+To select the bound `sdk/examples/cplane-custom-behavior/plugin.wasm`, deploy with the variable passed through sudo:
+
+```sh
+sudo env CPLANE_BACKEND=wasm containerlab -t scenarios/cplane-plugin-2site/clab.yml deploy
+make test SCENARIO=cplane-plugin-2site
+```
+
+The scope checks preserve the receiving plugin's running backend.
+Build that artifact with standard Go using `make cplane-example`; TinyGo is optional.
+The native and WASM entrypoints use the same shared controller source.
 
 The eBPF half is compiled by the scenario's `build.sh`, which `make build`
 runs. It is built rather than committed because the object depends on the

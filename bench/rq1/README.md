@@ -22,7 +22,8 @@ The host sink checks that every timed update committed a real declaration and th
 Queueing, host authorization and real BPF operations are excluded from this instrument.
 `init-ns` separately measures constructor/compile/instantiate/configure work; it excludes process startup, reading the module, replay and warmup.
 Go runs an untimed one-iteration pilot before the fixed iteration count, so this initialization is for a fresh instance after that harness pilot, not a cold process.
-`B/op` and `allocs/op` describe Go host allocations and exclude the WASM linear heap, so they are not total-memory comparisons.
+`B/op` and `allocs/op` count Go host allocations, which can include allocation of backing storage when WASM linear memory grows.
+They do not count guest allocations one for one and do not measure total or peak memory.
 
 ## BGP-to-packet convergence
 

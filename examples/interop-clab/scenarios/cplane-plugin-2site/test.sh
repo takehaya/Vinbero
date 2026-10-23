@@ -24,11 +24,12 @@
 # Exit non-zero on the first failed assertion.
 set -u
 
-PE_TOKYO=clab-cplane-plugin-2site-pe-tokyo   # receiving plugin
-PE_OSAKA=clab-cplane-plugin-2site-pe-osaka   # advertising plugin
-CORE=clab-cplane-plugin-2site-core
-CE_TOKYO=clab-cplane-plugin-2site-ce-tokyo
-CE_OSAKA=clab-cplane-plugin-2site-ce-osaka
+LAB_NAME=${LAB_NAME:-cplane-plugin-2site}
+PE_TOKYO=clab-${LAB_NAME}-pe-tokyo   # receiving plugin
+PE_OSAKA=clab-${LAB_NAME}-pe-osaka   # advertising plugin
+CORE=clab-${LAB_NAME}-core
+CE_TOKYO=clab-${LAB_NAME}-ce-tokyo
+CE_OSAKA=clab-${LAB_NAME}-ce-osaka
 
 TOKYO_PREFIX=10.1.0.0/24      # ce-tokyo subnet, advertised without a plugin
 OSAKA_PREFIX=10.2.0.0/24      # ce-osaka subnet, advertised BY the plugin
@@ -51,6 +52,16 @@ PLUGIN_BEHAVIOR=0xFE01
 # turn into asserting the allocator's first choice.
 PLUGIN_LOCATOR_BLOCK=fd00:200:
 PLUGIN_SLOT=32
+
+# Preserve the receiving plugin's backend during destructive scope checks.
+backend=$(docker exec "$PE_TOKYO" cat /var/lib/vinbero/cplane-plugins/custom-behavior.json |
+    sed -n 's/.*"backend": "\([^"]*\)".*/\1/p')
+backend_args=()
+case "$backend" in
+    native) ;;
+    wasm) backend_args=(--wasm /plugin.wasm) ;;
+    *) echo "Cannot determine pe-tokyo plugin backend: $backend" >&2; exit 1 ;;
+esac
 
 pass=0
 fail=0
@@ -90,8 +101,8 @@ done
 
 # The capability each side was granted is the one it needs and no more.
 # pe-tokyo cannot originate a route; pe-osaka cannot write forwarding
-# state. Neither is a check the plugin could get past: the host functions
-# for what they were not granted are not linked into their modules.
+# state. The shared host checks the granted declaration kinds and scope
+# for both native and WASM registrations.
 if dexec "$PE_TOKYO" grep -q '"capabilities": \["headend"\]\|capabilities.*headend' /var/log/vinberod.log 2>/dev/null; then
     ok "pe-tokyo's plugin was granted headend only"
 else
@@ -344,7 +355,7 @@ echo "[6] pe-tokyo: a plugin scoped away from the prefix cannot install it"
 # checkScope were a no-op -- the stats-based assertions in step 1 would not.
 dexec "$PE_TOKYO" sh -c 'printf "\010\201\374\003\112\01310.2.0.0/16" > /tmp/plugin-config.bin' || true
 if dexec "$PE_TOKYO" vbctl plugin cplane register \
-    --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
+    --name custom-behavior "${backend_args[@]}" --config /tmp/plugin-config.bin \
     --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
     --capability headend --headend-prefix 10.99.0.0/16 >/dev/null 2>&1; then
     if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
@@ -366,7 +377,7 @@ fi
 # Re-register correctly and assert the entry comes back, so the refusal
 # above was the scope and not a broken plugin.
 if dexec "$PE_TOKYO" vbctl plugin cplane register \
-    --name custom-behavior --wasm /plugin.wasm --config /tmp/plugin-config.bin \
+    --name custom-behavior "${backend_args[@]}" --config /tmp/plugin-config.bin \
     --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
     --capability headend --headend-prefix 10.2.0.0/16 >/dev/null 2>&1; then
     if retry_n 10 bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
@@ -377,6 +388,14 @@ if dexec "$PE_TOKYO" vbctl plugin cplane register \
     fi
 else
     ng "could not re-register the plugin with a covering scope"
+fi
+
+restored_backend=$(dexec "$PE_TOKYO" cat /var/lib/vinbero/cplane-plugins/custom-behavior.json |
+    sed -n 's/.*"backend": "\([^"]*\)".*/\1/p')
+if [ "$restored_backend" = "$backend" ]; then
+    ok "scope checks preserved the $backend backend"
+else
+    ng "scope checks changed backend from $backend to $restored_backend"
 fi
 
 echo ""

@@ -1,7 +1,7 @@
 # containerlab topology for the cplane-plugin-2site scenario.
 #
-# What is under test is a control-plane plugin: a WebAssembly module an
-# operator loads into vinberod, which claims an SRv6 endpoint behavior of
+# What is under test is a control-plane plugin, running natively by default
+# or as an operator-loaded WASM module, which claims an SRv6 endpoint behavior of
 # its own and turns routes carrying it into forwarding state.
 #
 #   ce-tokyo --- pe-tokyo ===== core ===== pe-osaka --- ce-osaka
@@ -18,7 +18,7 @@
 # The direction under test is ce-tokyo -> ce-osaka:
 #
 #   * pe-osaka's plugin advertises 10.2.0.0/24 with the SID
-#     fd00:200:0:1:: and the behavior codepoint 0xFE01 in the SID TLV.
+#     allocated from LOC2 and the behavior codepoint 0xFE01 in the SID TLV.
 #   * pe-tokyo's plugin claims 0xFE01, so vinbero's own applier never
 #     sees that route; the plugin declares the headend entry instead.
 #   * traffic from ce-tokyo is therefore steered by state that exists
@@ -44,6 +44,8 @@ topology:
     pe-tokyo:
       kind: linux
       image: vinbero-interop:latest
+      env:
+        CPLANE_BACKEND: ${CPLANE_BACKEND:-native}
       binds:
         - vinbero-tokyo/vinbero.yml:/vinbero.yml
         - vinbero-tokyo/start.sh:/start.sh
@@ -66,6 +68,8 @@ topology:
     pe-osaka:
       kind: linux
       image: vinbero-interop:latest
+      env:
+        CPLANE_BACKEND: ${CPLANE_BACKEND:-native}
       binds:
         - vinbero-osaka/vinbero.yml:/vinbero.yml
         - vinbero-osaka/start.sh:/start.sh

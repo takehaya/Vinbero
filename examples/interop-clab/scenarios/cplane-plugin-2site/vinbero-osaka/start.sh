@@ -2,17 +2,13 @@
 # pe-osaka: the PE that ADVERTISES a route carrying the plugin's own SRv6
 # endpoint behavior.
 #
-# The control-plane plugin here is granted only `advertise`. It is told,
-# through its config blob, which prefix to originate and which SID to put
-# behind it, and it stamps its own behavior codepoint (0xFE01) into the
-# SID TLV. Nothing in vinbero or in BGP knows what that codepoint means:
-# the far end's plugin is what gives it meaning.
+# The plugin is granted `advertise` and `local_sid`. Its config selects
+# the prefix, locator and eBPF endpoint slot. The daemon allocates the SID;
+# the plugin advertises it with behavior codepoint 0xFE01, whose meaning
+# is supplied by the receiving plugin.
 #
-# The SID itself is an ordinary End.DT4 endpoint provisioned by the
-# operator on this node. A plugin that ships its own eBPF half would ask
-# the daemon for a SID pointing at its own slot instead; this scenario
-# tests the control-plane path, and using a real End.DT4 here is what
-# lets the customer ping actually complete.
+# The endpoint dispatches to the plugin's own eBPF half in slot 32, then
+# hands decapsulation to End.DT4 using the host-recorded VRF grant.
 #
 # Interfaces:
 #   eth1  pe-osaka <-> core     underlay 2001:db8:2::/64  (pe-osaka = ::1)
@@ -158,11 +154,17 @@ printf '\010\201\374\003\022\004\114\117\103\062\032\013\061\060\056\062\056\060
 # layout that does not describe them.
 #
 # It still cannot write forwarding state on this node: `headend` was not
-# granted, and a capability it was not granted is not a call that fails but
-# a host function its module cannot reach.
+# granted. Both backends reject headend declarations at transaction begin.
+backend_args=()
+case "${CPLANE_BACKEND:-native}" in
+    native) ;;
+    wasm) backend_args=(--wasm /plugin.wasm) ;;
+    *) echo "CPLANE_BACKEND must be native or wasm" >&2; exit 1 ;;
+esac
+
 /usr/local/bin/vbctl plugin cplane register \
     --name custom-behavior \
-    --wasm /plugin.wasm \
+    "${backend_args[@]}" \
     --config /tmp/plugin-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 --tick-ms 1000 \
