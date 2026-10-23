@@ -1123,6 +1123,15 @@ func (p *PluginOps) DiscardTransactions() {
 	p.open = make(map[uint64]*applyTxn)
 }
 
+// inputHandoffClean can also be checked after retirement, when inputReady has
+// been cleared. Registration separately requires readiness before teardown.
+func (p *PluginOps) inputHandoffClean() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.strictInputs && p.inputFault == "" && !p.inputCleanupPending &&
+		p.outputFailure == "" && p.desiredRevision == p.appliedRevision && len(p.pending) == 0
+}
+
 // retire fences saved callbacks and transactions before the owner is handed off.
 // Flush remains available so failed cleanup can be retried.
 func (p *PluginOps) retire() {

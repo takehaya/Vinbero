@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -550,14 +551,29 @@ func slotSet(slots []uint32) map[uint32]struct{} {
 	return out
 }
 
+// sameInputAuthority is deliberately conservative: any authorization or limit
+// change keeps the existing fail-closed prune. Backend, module and business
+// configuration may change within that authority. Caller holds m.mu.
+func sameInputAuthority(old *plugin, reg Registration) bool {
+	if old == nil || old.dead || old.reg.Input == nil || reg.Input == nil {
+		return false
+	}
+	ready, _, _ := old.ops.InputState()
+	return ready && old.ops.inputHandoffClean() &&
+		proto.Equal(old.reg.Input, reg.Input) &&
+		reflect.DeepEqual(old.reg.Families, reg.Families) &&
+		reflect.DeepEqual(old.reg.Behaviors, reg.Behaviors) &&
+		reflect.DeepEqual(old.reg.Capabilities, reg.Capabilities) &&
+		reflect.DeepEqual(old.reg.Scope, reg.Scope) && old.reg.Limits == reg.Limits
+}
+
 // Register starts a plugin.
 //
 // Registering a name that is already running replaces it in place: the old
 // instance is stopped and the new one starts against the same owner tag,
-// keeping the state the old one wrote. That is what makes an upgrade
-// non-disruptive -- the new module re-declares its desired set and the
-// reconcile absorbs any difference, rather than the data plane going empty
-// between the two.
+// preserving compatible, healthy state until the new instance re-declares
+// its desired set. Changed authority and unrestored input state still follow
+// the fail-closed prune before replay.
 func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
 		return err
@@ -662,6 +678,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 
 	m.mu.Lock()
 	old, existed := m.plugins[reg.Name]
+	preserveInput := sameInputAuthority(old, reg)
 	m.plugins[reg.Name] = p
 	p.cancel = cancel
 	inst := p.inst
@@ -691,11 +708,16 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	// Not gated on having replaced something: a restore goes through here
 	// with nothing in the registry and its predecessor's writes still
 	// pinned in the maps, which is the same situation.
-	if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
-		return m.failPrune(ctx, reg, p, removed, err)
-	} else if removed > 0 {
-		m.logger.Info("removed the state outside a plugin's new capabilities or scope",
-			zap.String("plugin", reg.Name), zap.Int("removed", removed))
+	// An unchanged input authority can keep its last complete forwarding set
+	// until the replacement's replay publishes. Recheck after closing the old
+	// worker: its final in-flight call may have discovered an input/output fault.
+	if !preserveInput || !old.ops.inputHandoffClean() {
+		if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
+			return m.failPrune(ctx, reg, p, removed, err)
+		} else if removed > 0 {
+			m.logger.Info("removed the state outside a plugin's new capabilities or scope",
+				zap.String("plugin", reg.Name), zap.Int("removed", removed))
+		}
 	}
 
 	// The claim reaches back over routes that arrived before it, now that
