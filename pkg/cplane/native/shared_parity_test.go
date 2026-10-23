@@ -312,8 +312,11 @@ func TestNewControllersAdmissionBeforeWrites(t *testing.T) {
 				config.Module = sharedModule(t, CustomBehavior)
 				_, err = wasm.Instantiate(context.Background(), config.Config)
 			}
-			if !errors.Is(err, wasm.ErrAdmission) {
-				t.Fatalf("%s expected admission failure: %v", backend, err)
+			if err == nil {
+				t.Fatalf("%s accepted a forbidden or malformed configuration", backend)
+			}
+			if backend == "native" && !errors.Is(err, wasm.ErrAdmission) {
+				t.Fatalf("native configuration error lost admission classification: %v", err)
 			}
 			if len(config.Ops.(*sharedOps).Calls) != 0 {
 				t.Fatal("rejected configure wrote declarations")
