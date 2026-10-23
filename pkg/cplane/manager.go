@@ -559,7 +559,7 @@ func sameInputAuthority(old *plugin, reg Registration) bool {
 		return false
 	}
 	ready, _, _ := old.ops.InputState()
-	return ready && old.ops.inputHandoffClean() &&
+	return ready &&
 		proto.Equal(old.reg.Input, reg.Input) &&
 		reflect.DeepEqual(old.reg.Families, reg.Families) &&
 		reflect.DeepEqual(old.reg.Behaviors, reg.Behaviors) &&

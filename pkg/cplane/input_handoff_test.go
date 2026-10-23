@@ -3,6 +3,7 @@ package cplane
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,14 @@ func (s *handoffSource) SnapshotTo(f []bgp.Family, h bgp.RouteHandler) error {
 type handoffMaps struct {
 	*serviceFake
 	uplinkDeletes int
+	beforeHeadend func(string)
+}
+
+func (f *handoffMaps) CreateHeadendV4(prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+	if f.beforeHeadend != nil {
+		f.beforeHeadend(prefix)
+	}
+	return f.serviceFake.CreateHeadendV4(prefix, entry, owner)
 }
 
 func (f *handoffMaps) DeleteMupUplinkV4Owned(id uint32, ep string, teid uint32, bits uint8, owner bpf.OwnerTag) error {
@@ -226,5 +235,93 @@ func TestInputHandoffRevocationStillFlushes(t *testing.T) {
 			}
 			handoffIdle(t, m)
 		})
+	}
+}
+
+// The replacement must judge the completed old call, not its transient
+// desired/applied mismatch while a normal map write is still in flight.
+func TestInputHandoffWaitsForHealthyInFlightApply(t *testing.T) {
+	ctx := context.Background()
+	f := &handoffMaps{serviceFake: newServiceFake()}
+	src := &handoffSource{compositionSource: &compositionSource{newFakeSource()}}
+	src.setRib(mupFixture(t)...)
+	m := handoffManager(t, src, f)
+	reg := handoffRegistration(t, BackendNative)
+	if err := m.Register(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	handoffIdle(t, m)
+	before := *f.v4["10.0.0.1/32"]
+	writes, deleted := len(f.writes), f.uplinkDeletes
+	m.mu.Lock()
+	old := m.plugins[reg.Name]
+	m.mu.Unlock()
+
+	applying, finishApply := make(chan struct{}), make(chan struct{})
+	var enteredOnce, finishOnce sync.Once
+	defer finishOnce.Do(func() { close(finishApply) })
+	f.beforeHeadend = func(prefix string) {
+		if prefix == "10.0.0.1/32" {
+			enteredOnce.Do(func() { close(applying); <-finishApply })
+		}
+	}
+	latest := mupFixture(t)
+	latest[0] = mupFixtureWithTEID(t, 512)[0]
+	src.setRib(latest...)
+	if !src.emit(reg.Name, latest[0]) {
+		t.Fatal("missing old subscription")
+	}
+	select {
+	case <-applying:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old apply did not reach map write")
+	}
+	old.ops.mu.Lock()
+	ready, desired, applied := old.ops.inputReady, old.ops.desiredRevision, old.ops.appliedRevision
+	old.ops.mu.Unlock()
+	if !ready || desired <= applied {
+		t.Fatalf("not a healthy in-flight apply: ready=%t desired=%d applied=%d", ready, desired, applied)
+	}
+
+	src.entered, src.release = make(chan struct{}), make(chan struct{})
+	var replayOnce sync.Once
+	defer replayOnce.Do(func() { close(src.release) })
+	done := make(chan error, 1)
+	next := handoffRegistration(t, BackendNative)
+	go func() { done <- m.Register(ctx, next) }()
+	// close(stop) follows the handoff decision and precedes waiting for this
+	// in-flight call, so the ordering does not depend on a sleep or polling.
+	select {
+	case <-old.worker.stop:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement did not wait for old worker")
+	}
+	finishOnce.Do(func() { close(finishApply) })
+	select {
+	case <-src.entered:
+	case err := <-done:
+		t.Fatalf("replacement ended before replay: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement did not reach replay")
+	}
+	if got := f.v4["10.0.0.1/32"]; got == nil || *got == before || len(f.v4) != 2 || len(f.uplinks) != 1 {
+		t.Fatalf("completed old apply was flushed before replay: v4=%v uplinks=%v", f.v4, f.uplinks)
+	}
+	replayOnce.Do(func() { close(src.release) })
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	handoffIdle(t, m)
+	if f.uplinkDeletes != deleted {
+		t.Fatal("unchanged uplink deleted during in-flight handoff")
+	}
+	for _, write := range f.writes[writes:] {
+		if strings.HasPrefix(write, "delete ") {
+			t.Fatalf("forwarding deleted during in-flight handoff: %s", write)
+		}
+	}
+	st, _ := m.StatsFor(reg.Name)
+	if !st.InputReady || st.OutputFailure != "" || st.DesiredRevision != st.AppliedRevision {
+		t.Fatalf("bad final state: %+v", st)
 	}
 }
