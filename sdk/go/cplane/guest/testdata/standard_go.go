@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
@@ -14,16 +15,21 @@ import (
 )
 
 func init() {
+	var mode string
 	guest.Register(guest.Handlers{
 		Configure: func(config []byte) error {
+			mode = string(config)
+			if mode == "panic" {
+				fmt.Fprint(os.Stderr, "configuration-only diagnostic")
+			}
 			if string(config) == "sleep" {
 				time.Sleep(time.Hour)
 			}
-			if string(config) != "check" {
+			if mode != "check" {
 				return nil
 			}
-			if len(os.Environ()) != 0 {
-				return fmt.Errorf("host environment leaked")
+			if env := os.Environ(); len(env) != 0 {
+				return fmt.Errorf("unexpected guest environment: %v", env)
 			}
 			if _, err := os.ReadFile("/etc/passwd"); err == nil {
 				return fmt.Errorf("host filesystem exposed")
@@ -66,6 +72,10 @@ func init() {
 			return nil
 		},
 		Events: func([]cplane.Event) []cplane.EventResult {
+			if mode == "panic" {
+				fmt.Fprint(os.Stderr, "retained panic diagnostic\n", strings.Repeat("x", 8192))
+				panic("deliberate diagnostic panic")
+			}
 			// Force collection while the host owns an allocated input buffer.
 			runtime.GC()
 			guest.Log(cplane.LogInfo, "Go GC completed")

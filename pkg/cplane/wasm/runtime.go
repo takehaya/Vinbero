@@ -139,6 +139,7 @@ type Instance struct {
 	// activeCall is used by WASI sleep, whose wazero hook has no context
 	// parameter. It is set only during initialization or under callMu.
 	activeCall context.Context
+	stderr     guestStderr
 }
 
 // Config describes one plugin to instantiate.
@@ -274,20 +275,21 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	// registration, and the operator's RPC never returns.
 	modCfg := wazero.NewModuleConfig().
 		WithName(cfg.Name).
+		WithStderr(&inst.stderr).
 		WithStartFunctions().
 		WithSysWalltime().
 		WithSysNanotime().
 		WithNanosleep(inst.sleep).
 		WithRandSource(rand.Reader)
-	// Keep the resource defaults: no arguments, environment, filesystem
-	// mounts or sockets; stdin is EOF and stdout/stderr are discarded.
-	// Plugin diagnostics use vinbero.log and its existing rate limit.
+	// No environment, arguments, filesystem mounts or sockets; stdin is EOF
+	// and stdout is discarded. A bounded stderr prefix is attached only to failed
+	// WASM executions. Normal plugin logs use vinbero.log and its rate limit.
 	instCtx, cancelInst := inst.callContext(ctx)
 	mod, err := rt.InstantiateModule(instCtx, compiled, modCfg)
 	cancelInst()
 	if err != nil {
 		_ = rt.Close(ctx)
-		return nil, fmt.Errorf("wasm: instantiate %q: %w", cfg.Name, err)
+		return nil, fmt.Errorf("wasm: instantiate %q: %w", cfg.Name, inst.classify(instCtx, err))
 	}
 	inst.mod = mod
 
@@ -488,6 +490,7 @@ func (i *Instance) callWithBuffer(ctx context.Context, fn api.Function, buf []by
 		defer i.freeGuest(ctx, ptr, uint32(len(buf)))
 	}
 
+	i.stderr.reset()
 	res, err := fn.Call(callCtx, uint64(ptr), uint64(len(buf)))
 	if err != nil {
 		return 0, i.classify(callCtx, err)
@@ -512,13 +515,14 @@ func (i *Instance) freeGuest(ctx context.Context, ptr, length uint32) {
 	callCtx, cancel := i.callContext(ctx)
 	defer cancel()
 	if _, err := freeFn.Call(callCtx, uint64(ptr), uint64(length)); err != nil {
-		i.logger.Debug("plugin free failed", zap.Error(err))
+		i.logger.Debug("plugin free failed", zap.Error(i.classify(callCtx, err)))
 	}
 }
 
 // callContext applies the per-call budget. Cancelling it closes the
 // module, which is why a timeout is reported as an instance-level failure.
 func (i *Instance) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	i.stderr.reset()
 	callCtx, cancel := context.WithTimeout(ctx, i.limits.CallTimeout)
 	previous := i.activeCall
 	i.activeCall = callCtx
@@ -543,6 +547,7 @@ func (i *Instance) sleep(ns int64) {
 // what stopped it, so the caller can tell "this plugin is too slow" from
 // "this plugin trapped".
 func (i *Instance) classify(callCtx context.Context, err error) error {
+	err = i.stderr.annotate(err)
 	if callCtx.Err() != nil && errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("%w after %s: %w", ErrCallTimeout, i.limits.CallTimeout, err)
 	}

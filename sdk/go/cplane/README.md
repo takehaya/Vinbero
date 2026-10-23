@@ -55,7 +55,7 @@ Input preparation and runtime failures affect the whole combined call.
 See [grouping live updates](../../cplane-route-api.md#grouping-live-updates) for the operator setting and recovery semantics.
 
 Build with standard Go (Go 1.24 or later supports WASI reactors; this repository
-pins Go 1.25.5):
+pins Go 1.27.3):
 
 ```sh
 GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
@@ -63,12 +63,14 @@ GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
 ```
 
 The host links WASI preview 1 and calls `_initialize` before the ABI callbacks.
-The Go runtime, garbage collector, reflection and WASI-compatible standard
-library packages are available. WASI supplies real clocks and randomness, but
-no host environment, arguments, filesystem mounts or sockets. Stdin is EOF;
-stdout/stderr are discarded. Use `guest.Log` for diagnostics. `time.Now` uses
-real time; `guest.NowMonotonic` and `Tick` use the host's plugin clock, which a
-test harness can simulate. Timers and sleeps remain inside the call timeout.
+The Go runtime, garbage collector, reflection and WASI-compatible standard library packages are available.
+WASI supplies real clocks and randomness, without inheriting the host environment, arguments, filesystem mounts or sockets.
+The existing hard memory cap and call timeout remain the resource boundaries.
+Stdin is EOF and stdout is discarded.
+The host retains at most the first 4 KiB of stderr per export call and attaches it only when WASM execution fails, such as a trap or timeout.
+Use `guest.Log` for normal diagnostics.
+`time.Now` uses real time; `guest.NowMonotonic` and `Tick` use the host's plugin clock, which a test harness can simulate.
+Timers and sleeps remain inside the call timeout.
 Guest work runs only while the host calls the module; use `Tick` for periodic
 work and finish any goroutines that access callback data before returning.
 
