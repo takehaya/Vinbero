@@ -29,10 +29,10 @@ type stored struct {
 }
 type View struct {
 	catalog map[string]map[string]bool
-	paths   map[cplane.BGPPathKey]stored
-	// ordered holds only keys; every traversal reads the current entries.
-	// Changes to the key set discard it; successful replacements retain it.
-	ordered []cplane.BGPPathKey
+	paths   map[cplane.BGPPathKey]*stored
+	// Accepted replacements update the stored slot, so traversals need no
+	// repeated key lookup. Changes to the key set discard the ordering.
+	ordered []*stored
 	limits  Limits
 	bytes   int
 	status  Status
@@ -51,7 +51,7 @@ func NewView(config cplane.InputConfig, limits Limits) (*View, error) {
 	if limits.MaxPaths < 1 || limits.MaxBytes < 1 {
 		return nil, fmt.Errorf("routes: positive limits required")
 	}
-	v := &View{catalog: map[string]map[string]bool{}, paths: map[cplane.BGPPathKey]stored{}, limits: limits}
+	v := &View{catalog: map[string]map[string]bool{}, paths: map[cplane.BGPPathKey]*stored{}, limits: limits}
 	for _, ctx := range config.Contexts {
 		if ctx.Name == "" || v.catalog[ctx.Name] != nil || len(ctx.Families) == 0 {
 			return nil, fmt.Errorf("routes: invalid context %q", ctx.Name)
@@ -72,15 +72,15 @@ func (v *View) Range(visit func(Entry)) {
 		return
 	}
 	if v.ordered == nil {
-		keys := make([]cplane.BGPPathKey, 0, len(v.paths))
-		for k := range v.paths {
-			keys = append(keys, k)
+		entries := make([]*stored, 0, len(v.paths))
+		for _, entry := range v.paths {
+			entries = append(entries, entry)
 		}
-		sort.Slice(keys, func(i, j int) bool { return KeyLess(keys[i], keys[j]) })
-		v.ordered = keys
+		sort.Slice(entries, func(i, j int) bool { return KeyLess(entries[i].entry.Key, entries[j].entry.Key) })
+		v.ordered = entries
 	}
-	for _, k := range v.ordered {
-		e := v.paths[k].entry
+	for _, entry := range v.ordered {
+		e := entry.entry
 		e.Contexts = append([]string(nil), e.Contexts...)
 		visit(e)
 	}
@@ -117,7 +117,7 @@ func (v *View) Update(events []cplane.Event) []cplane.EventResult {
 		switch ev.Kind {
 		case cplane.EventStartOfReplay:
 			if ev.ReplaySource == cplane.BGPSource {
-				v.paths = map[cplane.BGPPathKey]stored{}
+				v.paths = map[cplane.BGPPathKey]*stored{}
 				v.ordered = nil
 				v.bytes = 0
 				v.status = Status{Replaying: true, Revision: v.status.Revision + 1}
@@ -183,10 +183,14 @@ func (v *View) Update(events []cplane.Event) []cplane.EventResult {
 				continue
 			}
 			sort.Strings(contexts)
-			v.paths[k] = stored{Entry{k, r.Family, contexts, path}, size}
+			if !held {
+				old = new(stored)
+			}
+			// Reuse the slot only after acceptance: failures leave the old key absent.
+			*old = stored{Entry{k, r.Family, contexts, path}, size}
+			v.paths[k] = old
 			v.ordered = nil
 			if held {
-				// Restore only after acceptance: failures must leave the old key absent.
 				v.ordered = previousOrdering
 			}
 			v.bytes += size

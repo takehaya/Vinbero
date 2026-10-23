@@ -214,6 +214,53 @@ func TestRangeContextsAreIndependentCopies(t *testing.T) {
 	}
 }
 
+func TestRangeReplacementPreservesPreviouslyVisitedEntries(t *testing.T) {
+	v := newView(t)
+	a := route(t, "10.0.0.0/24", "192.0.2.1", 1, 100)
+	b := route(t, "10.0.1.0/24", "192.0.2.2", 2, 200)
+	replay(t, v, b, a)
+	before := assertOrder(t, v, a, b)
+	replacement := route(t, "10.0.0.0/24", "192.0.2.1", 1, 300)
+	replacement.Route.Contexts = []string{"other"}
+	update(t, v, replacement)
+	after := assertOrder(t, v, replacement, b)
+	if !reflect.DeepEqual(after[1], before[1]) {
+		t.Fatal("replacement changed an unrelated entry")
+	}
+	if before[0].Path.Attributes[0].(*bgp.PathAttributeLocalPref).Value != 100 ||
+		!reflect.DeepEqual(before[0].Contexts, []string{"tenant"}) {
+		t.Fatal("replacement changed a previously visited entry")
+	}
+	if after[0].Path.Attributes[0].(*bgp.PathAttributeLocalPref).Value != 300 ||
+		!reflect.DeepEqual(after[0].Contexts, []string{"other"}) {
+		t.Fatal("replacement retained stale attributes or membership")
+	}
+	after[0].Contexts[0] = "changed"
+	if got := assertOrder(t, v, replacement, b); got[0].Contexts[0] != "other" {
+		t.Fatal("callback changed stored membership")
+	}
+	// Removing and restoring the same key in one batch must use its new value.
+	for _, reject := range []bool{false, true} {
+		removed := a
+		if reject {
+			removed.Route.BGPPath.NLRI = []byte{33}
+		} else {
+			removed.Route.Withdraw = true
+		}
+		results := v.Update([]cplane.Event{removed, replacement})
+		if reject && (len(results) != 1 || results[0].Disposition != cplane.Quarantine) {
+			t.Fatalf("rejected replacement: %+v", results)
+		}
+		if !reject && len(results) != 0 {
+			t.Fatal(results)
+		}
+		got := assertOrder(t, v, replacement, b)
+		if got[0].Path.Attributes[0].(*bgp.PathAttributeLocalPref).Value != 300 {
+			t.Fatal("restored key has stale attributes")
+		}
+	}
+}
+
 func TestReplacementOrderingAfterOtherChangesInSameBatch(t *testing.T) {
 	for _, change := range []string{"insert", "withdraw", "reject", "replace"} {
 		t.Run(change, func(t *testing.T) {
