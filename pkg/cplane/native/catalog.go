@@ -12,6 +12,8 @@ import (
 )
 
 const (
+	CustomBehavior         = "custom-behavior"
+	BGPObserver            = "bgp-observer"
 	MUPComposition         = "mup-composition"
 	MUPCompositionObserver = "mup-composition-observer"
 	ImplementationVersion  = "1"
@@ -29,9 +31,9 @@ type Descriptor struct {
 func Lookup(id string) (Descriptor, bool) {
 	identity := fmt.Sprintf("%x", sha256.Sum256([]byte(id+"\x00"+ImplementationVersion+"\x00"+buildidentity.Source)))
 	switch id {
-	case MUPComposition:
+	case MUPComposition, CustomBehavior:
 		return Descriptor{ID: id, Version: ImplementationVersion, Identity: identity, Write: true}, true
-	case MUPCompositionObserver:
+	case MUPCompositionObserver, BGPObserver:
 		return Descriptor{ID: id, Version: ImplementationVersion, Identity: identity}, true
 	default:
 		return Descriptor{}, false

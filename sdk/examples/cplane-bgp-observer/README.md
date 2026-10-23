@@ -2,6 +2,7 @@
 
 This read-only control-plane plugin decodes received routes into GoBGP's native NLRI and attribute types and logs their family, source and attribute count.
 It makes no forwarding declarations or BGP advertisements and needs no write capabilities.
+The shared [`bgpobserver`](../../go/cplane/bgpobserver) package implements the controller for both WASM and native execution.
 
 Build from the repository root with Go 1.25.5:
 
@@ -24,3 +25,12 @@ The import reports input support and does not change the opaque `Configure` payl
 The guest module pins the same GoBGP MUP fork as the host because Go module dependency replacements are not inherited.
 See the [SDK documentation](../../go/cplane/README.md#reading-the-gobgp-packet-model) for the codec and identity contract.
 The standard Go build is exercised in the real WASM runtime with its default 16 MiB memory limit; this example does not retain a route view or measure large-RIB performance.
+
+With `cplane_plugins.native_enabled: true` in the daemon, replace `--wasm out/cplane-bgp-observer.wasm` with `--native bgp-observer --native-version 1` to run the same controller natively.
+Keep the same families and omit write capabilities.
+Both adapters require full BGP input and ignore the opaque configuration payload.
+Malformed BGP paths produce quarantined event results with the original sequence number.
+
+Native execution is statically linked and runs inside the daemon without WASM memory isolation or forced interruption.
+Rebuild the daemon when updating the implementation and explicitly update persisted registrations if their native identity no longer matches.
+The native/WASM differential tests compare encoded event statuses, route and withdrawal logs, and the absence of output transactions.

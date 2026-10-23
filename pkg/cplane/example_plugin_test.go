@@ -23,8 +23,14 @@ import (
 // the artifact is not there rather than failing on a missing toolchain.
 func examplePlugin(t *testing.T) []byte {
 	t.Helper()
+	if nativeExampleTests() {
+		return nil
+	}
 	mod, err := os.ReadFile("../../sdk/examples/cplane-custom-behavior/plugin.wasm")
 	if err != nil {
+		if os.Getenv("VINBERO_CPLANE_PARITY") == "1" {
+			t.Fatal(err)
+		}
 		t.Skip("sdk/examples/cplane-custom-behavior not built (make cplane-example)")
 	}
 	return mod
@@ -45,14 +51,14 @@ func exampleManager(t *testing.T, receivePrefixes ...string) (*Manager, *fakeSou
 	t.Helper()
 	src := newFakeSource()
 	ops := newFakeHeadendOps()
-	m, err := NewManager(ManagerConfig{
+	m, err := NewManager(exampleManagerConfig(ManagerConfig{
 		Source:      src,
 		Claims:      newFakeClaims(),
 		Headend:     ops,
 		EncapSource: testEncapSource,
 		LocatorInfo: testLocators(),
 		VRFBindings: testBindings(),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("manager: %v", err)
 	}
@@ -64,13 +70,13 @@ func exampleManager(t *testing.T, receivePrefixes ...string) (*Manager, *fakeSou
 	for _, prefix := range receivePrefixes {
 		config.stringField(9, prefix)
 	}
-	if err := m.Register(context.Background(), Registration{
+	if err := m.Register(context.Background(), exampleRegistration(Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
 		Config:       config.buf,
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(), Scope: testScope(),
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	return m, src, ops
@@ -174,12 +180,12 @@ func TestExamplePluginConvergesAfterRestart(t *testing.T) {
 
 	// Re-registering is the upgrade path and stands in for a restart: a
 	// fresh instance over the same owner tag.
-	if err := m.Register(context.Background(), Registration{
+	if err := m.Register(context.Background(), exampleRegistration(Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(), Scope: testScope(),
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
 	// The state is still there across the swap.
@@ -199,14 +205,14 @@ func TestExamplePluginConvergesAfterRestart(t *testing.T) {
 func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	src := newFakeSource()
 	ops := newFakeHeadendOps()
-	m, err := NewManager(ManagerConfig{
+	m, err := NewManager(exampleManagerConfig(ManagerConfig{
 		Source:      src,
 		Claims:      newFakeClaims(),
 		Headend:     ops,
 		EncapSource: testEncapSource,
 		LocatorInfo: testLocators(),
 		VRFBindings: testBindings(),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("manager: %v", err)
 	}
@@ -215,13 +221,13 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	// The example's own config message, asking it to claim a different
 	// codepoint than the one it was built with.
 	config := exampleConfig(0xFE02, "", "", "", 0, "")
-	if err := m.Register(context.Background(), Registration{
+	if err := m.Register(context.Background(), exampleRegistration(Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
 		Config:       config,
 		Behaviors:    []uint16{0xFE02},
 		Capabilities: testCaps(), Scope: testScope(),
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
@@ -299,7 +305,7 @@ func TestExamplePluginCompletesTheLoop(t *testing.T) {
 	sids := newFakeSIDOps()
 	adv := &fakeAdvertiser{}
 
-	m, err := NewManager(ManagerConfig{
+	m, err := NewManager(exampleManagerConfig(ManagerConfig{
 		Source:       src,
 		Claims:       newFakeClaims(),
 		Headend:      headend,
@@ -309,19 +315,19 @@ func TestExamplePluginCompletesTheLoop(t *testing.T) {
 		EncapSource:  testEncapSource,
 		LocatorInfo:  testLocators(),
 		VRFBindings:  testBindings(),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("manager: %v", err)
 	}
 	defer m.Close(context.Background())
 
-	if err := m.Register(context.Background(), Registration{
+	if err := m.Register(context.Background(), exampleRegistration(Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
 		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(), Scope: testScope(),
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	waitDelivered(t, m, "custom-behavior")
@@ -388,24 +394,24 @@ func TestExamplePluginUnregisterRetractsEverything(t *testing.T) {
 	sids := newFakeSIDOps()
 	adv := &fakeAdvertiser{}
 
-	m, err := NewManager(ManagerConfig{
+	m, err := NewManager(exampleManagerConfig(ManagerConfig{
 		Source: src, Claims: newFakeClaims(), Headend: headend,
 		Advertiser: adv, Locators: alloc, SIDFunctions: sids,
 		EncapSource: testEncapSource,
 		LocatorInfo: testLocators(), VRFBindings: testBindings(),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("manager: %v", err)
 	}
 	defer m.Close(context.Background())
 
-	if err := m.Register(context.Background(), Registration{
+	if err := m.Register(context.Background(), exampleRegistration(Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
 		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(), Scope: testScope(),
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	waitDelivered(t, m, "custom-behavior")
@@ -501,20 +507,20 @@ func TestExamplePluginDisablingSendingRetractsPreviousOwnerState(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			sids, adv := newFakeSIDOps(), &fakeAdvertiser{}
-			m, err := NewManager(ManagerConfig{
+			m, err := NewManager(exampleManagerConfig(ManagerConfig{
 				Source: newFakeSource(), Claims: newFakeClaims(), Headend: newFakeHeadendOps(),
 				Advertiser: adv, Locators: &fakeAllocator{}, SIDFunctions: sids,
 				EncapSource: testEncapSource, LocatorInfo: testLocators(), VRFBindings: testBindings(),
-			})
+			}))
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer m.Close(context.Background())
-			reg := Registration{
+			reg := exampleRegistration(Registration{
 				Name: "custom-behavior", Module: examplePlugin(t),
 				Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 				Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
-			}
+			})
 			if err := m.Register(context.Background(), reg); err != nil {
 				t.Fatal(err)
 			}
@@ -563,7 +569,7 @@ func TestExamplePluginRetriesDroppedSIDNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inst, err := wasm.Instantiate(context.Background(), wasm.Config{
+	inst, err := exampleInstantiate(context.Background(), wasm.Config{
 		Name: "custom-behavior", Module: examplePlugin(t), Ops: ops, Capabilities: testCaps(),
 		ConfigBlob: exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 	})
@@ -624,20 +630,20 @@ func TestExamplePluginCapabilityReductionPrunesStateWithinUnchangedScope(t *test
 		t.Run(tt.name, func(t *testing.T) {
 			src, headend := newFakeSource(), newFakeHeadendOps()
 			sids, adv := newFakeSIDOps(), &fakeAdvertiser{}
-			m, err := NewManager(ManagerConfig{
+			m, err := NewManager(exampleManagerConfig(ManagerConfig{
 				Source: src, Claims: newFakeClaims(), Headend: headend,
 				Advertiser: adv, Locators: &fakeAllocator{}, SIDFunctions: sids,
 				EncapSource: testEncapSource, LocatorInfo: testLocators(), VRFBindings: testBindings(),
-			})
+			}))
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer m.Close(context.Background())
-			reg := Registration{
+			reg := exampleRegistration(Registration{
 				Name: "custom-behavior", Module: examplePlugin(t),
 				Config:    exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 				Behaviors: []uint16{0xFE01}, Capabilities: testCaps(), Scope: testScope(),
-			}
+			})
 			if err := m.Register(context.Background(), reg); err != nil {
 				t.Fatal(err)
 			}

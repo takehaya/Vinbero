@@ -1045,7 +1045,9 @@ replay、withdraw、apply 失敗後の再試行も対象にし、性能比較で
 最適化を切り替える場合も出力の一致を確認し、性能は backend ごとに測定します。
 
 現在、MUP の書き込みと観測 profile は `sdk/go/cplane/mupcontroller` を WASM の example と `pkg/cplane/native` から呼びます。
-`cplane-custom-behavior` と `cplane-bgp-observer` の example はまだ WASM 専用であり、native 対応時にはこの方針で処理本体を切り出します。
+独自 behavior は `sdk/go/cplane/customcontroller`、BGP observer は `sdk/go/cplane/bgpobserver` を同じ形で呼びます。
+native の実装 ID はそれぞれ `custom-behavior` と `bgp-observer`、version は `1` です。
+独自 behavior の設定は従来の opaque protobuf、observer は opaque な設定を解釈せず BGPPath 機能を確認する契約を保ち、MUP だけが context input envelope を decode します。
 
 ## plugin を書く
 

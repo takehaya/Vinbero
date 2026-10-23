@@ -93,10 +93,10 @@ jobs:
             sudo modprobe vrf
           fi
 
-      - name: Build and test route composition guests
+      - name: Build and test shared control-plane controllers
         run: |
-          make cplane-route-composition cplane-route-composition-observer
-          VINBERO_CPLANE_PARITY=1 go test -race ./sdk/go/cplane/mupcontroller ./pkg/cplane/native
+          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
+          VINBERO_CPLANE_PARITY=1 go test -race ./sdk/go/cplane/customcontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./pkg/cplane/native
 
       - name: Run unit tests
         # pkg/bpf reloads the BPF collection per test and keeps outgrowing
@@ -178,7 +178,7 @@ jobs:
 
       - name: Run the plugin runtime and harness tests against the rebuilt artifacts
         run: |
-          make cplane-route-composition cplane-route-composition-observer
+          make cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
           VINBERO_CPLANE_PARITY=1 go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:

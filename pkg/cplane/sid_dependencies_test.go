@@ -74,7 +74,7 @@ func TestExampleReplacementKeepsReferencedSIDsWhenPublicationFails(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			f := newSIDDependencyFixture(t)
 			f.advertiser.failWithdraw = "10.7.0.0/24"
-			inst, err := wasm.Instantiate(context.Background(), wasm.Config{
+			inst, err := exampleInstantiate(context.Background(), wasm.Config{
 				Name: "custom-behavior", Module: examplePlugin(t), ConfigBlob: tt.config,
 				Ops: f.ops, Capabilities: testCaps(),
 			})

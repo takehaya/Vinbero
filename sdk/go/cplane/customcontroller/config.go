@@ -1,4 +1,4 @@
-package main
+package customcontroller
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"github.com/takehaya/vinbero/sdk/go/cplane/wire"
 )
 
-// Configuration is private to this example. The host forwards these bytes
+// Configuration is private to this controller. The host forwards these bytes
 // unchanged; registration separately grants capabilities, scope and the claim.
 type configuration struct {
 	behavior        uint32

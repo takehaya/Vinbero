@@ -9,6 +9,8 @@ import (
 
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/sdk/go/cplane"
+	"github.com/takehaya/vinbero/sdk/go/cplane/bgpobserver"
+	"github.com/takehaya/vinbero/sdk/go/cplane/customcontroller"
 	"github.com/takehaya/vinbero/sdk/go/cplane/mupcontroller"
 	"go.uber.org/zap"
 )
@@ -28,12 +30,17 @@ var (
 	ErrPanic  = errors.New("native: controller panicked")
 )
 
+type controller interface {
+	Update([]cplane.Event) []cplane.EventResult
+	Tick(int64)
+}
+
 // Instance owns one controller. Calls, including Close, are serialized. A hung
 // call can block this worker and Close; process supervision is the hard stop.
 type Instance struct {
 	mu         sync.Mutex
 	closed     bool
-	controller *mupcontroller.Controller
+	controller controller
 	host       *host
 	limit      int
 	timeout    time.Duration
@@ -70,15 +77,24 @@ func Instantiate(ctx context.Context, cfg Config) (inst *Instance, err error) {
 	h := &host{ops: cfg.Ops, logger: logger.With(zap.String("plugin", cfg.Name)), limit: limit}
 	i := &Instance{host: h, limit: limit, timeout: timeout}
 	err = i.call(ctx, func() error {
-		input, err := cplane.DecodeInputConfig(cfg.ConfigBlob, wasm.InputFeatureBGPPath|wasm.InputFeatureContexts)
-		if err != nil {
-			return err
+		switch cfg.Implementation {
+		case MUPComposition, MUPCompositionObserver:
+			input, decodeErr := cplane.DecodeInputConfig(cfg.ConfigBlob, wasm.InputFeatureBGPPath|wasm.InputFeatureContexts)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			var client mupcontroller.CompositionClient
+			if descriptor.Write {
+				client = &cplane.Client{Host: h}
+			}
+			i.controller, err = mupcontroller.New(input, client, h.log)
+		case CustomBehavior:
+			i.controller, err = customcontroller.New(cfg.ConfigBlob, &cplane.Client{Host: h}, h.log)
+		case BGPObserver:
+			i.controller, err = bgpobserver.New(wasm.InputFeatureBGPPath, h.log)
+		default:
+			return fmt.Errorf("native: no constructor for %q", cfg.Implementation)
 		}
-		var client mupcontroller.CompositionClient
-		if descriptor.Write {
-			client = &cplane.Client{Host: h}
-		}
-		i.controller, err = mupcontroller.New(input, client, h.log)
 		return err
 	})
 	if err != nil {

@@ -2,6 +2,9 @@
 
 An operator's own SRv6 endpoint behavior, driven from the control plane.
 
+The implementation lives in the shared [`customcontroller`](../../go/cplane/customcontroller) package.
+This example supplies the WASM entry points and host transport; the daemon's native adapter calls the same controller.
+
 This is the control-plane half of the case the plugin mechanism exists for.
 You define a behavior of your own, number it outside the standardized
 codepoint space, implement its forwarding as a data-plane plugin in an eBPF
@@ -79,6 +82,28 @@ update/withdraw pairs under the default 16 MiB memory limit with Go's collector.
 `make cplane-example-tinygo` optionally creates `plugin.tinygo.wasm` without
 replacing the default artifact. See the [SDK build instructions](../../go/cplane/README.md)
 for its flags and runtime limitations.
+
+## Run natively
+
+Enable `cplane_plugins.native_enabled: true` in the daemon and replace `--wasm sdk/examples/cplane-custom-behavior/plugin.wasm` in the registration commands below with `--native custom-behavior --native-version 1`.
+Keep the same configuration, behavior claims, families, capabilities, scopes and tick interval.
+The native implementation accepts the same opaque protobuf configuration as the WASM example; it does not use the MUP context-input envelope.
+Receive-only operation needs a headend grant; sending also needs the existing local-SID and advertisement grants and scopes.
+
+The controller is statically linked into the daemon, so adding or updating it requires rebuilding the daemon.
+Native calls run in the daemon process with cooperative cancellation, without WASM memory isolation or forced interruption.
+Persisted native registrations must match the rebuilt daemon's source identity; an identity mismatch requires an explicit registration update.
+
+To check both builds from the repository root:
+
+```sh
+make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
+VINBERO_CPLANE_PARITY=1 go test -race ./pkg/cplane/native
+VINBERO_CPLANE_PARITY=1 go test -race ./pkg/cplane -run 'TestExample|TestNativeCustomBehaviorIntegration'
+```
+
+The differential tests compare configure-time transactions, encoded outputs, event statuses, logs and retries.
+The Manager integration tests reuse the same expected forwarding maps and authorization checks for both backends.
 
 ## Run
 
@@ -182,15 +207,14 @@ own without a built-in handoff; the built-in decap drops with no grant.
 
 ## Notes on the code
 
-`main.go` uses the [Go guest SDK](../../go/cplane/README.md): `guest.Register`
-supplies the WASM entry points, `RouteView` tracks input paths and replay,
-and `Client` sends typed desired sets. `config.go` decodes this example's
-private configuration with the SDK's reflection-free wire decoder.
+`main.go` connects the shared controller to `guest.Register`, which supplies the WASM entry points.
+In [`customcontroller`](../../go/cplane/customcontroller), `RouteView` tracks input paths and replay, and `Client` sends typed desired sets through the injected host transport.
+That package also decodes the private configuration with the SDK's reflection-free wire decoder.
 
 `vinbero_abi_version` is what lets the daemon refuse a module built against
 an ABI it no longer implements, rather than letting it trap on the first
 call into a function whose signature moved.
 
-The periodic callback retries failed declarations. The plugin uses host logging
-and has no filesystem or network access. The host supplies BGP events and
-performs the declared writes.
+The periodic callback retries failed declarations.
+The WASM instance uses host logging and has no filesystem or network access.
+The host supplies BGP events and performs the declared writes.
