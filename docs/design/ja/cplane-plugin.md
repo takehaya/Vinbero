@@ -1027,6 +1027,26 @@ behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint �
 振っているので、0x0013 を 10 進の 13 と読むと別の behavior を claim して
 しまいます。
 
+## WASM と native の共通実装
+
+この repository で提供するすべての Go 製 control plane plugin は、WASM と native で処理本体を一つの Go package に維持する方針とします。
+経路の decode、保持、選択、合成、desired set の生成と再試行を共通にし、SDK の codec、view、resolver と builder も両 backend から使います。
+処理本体は `guest` や wazero に依存させず、host への出力と log は adapter から渡します。
+新しい plugin を native 対応するときも、この共通 package を両方から呼びます。
+
+target 固有の入口、host function の接続と runtime の制御は adapter に置きます。
+メモリ確保や buffer 再利用などの最適化を target ごとに選ぶ場合は、共通の処理本体を保ち、build tag や target 固有の小さな実装で選択します。
+経路の採否、転送設定、エラー判定と所有権の契約は build の選択で変えません。
+host が行う capability、scope と owner の検査も共通であり、最適化の選択で省略しません。
+WASM の memory 制限や強制中断と、native のプロセス内実行や協調的な中断は、それぞれの runtime の性質として扱います。
+
+両 backend を提供する plugin は、同じ設定と event 列を与え、結果 status と出力 transaction の一致を検査します。
+replay、withdraw、apply 失敗後の再試行も対象にし、性能比較では source revision、build の選択と入力を記録します。
+最適化を切り替える場合も出力の一致を確認し、性能は backend ごとに測定します。
+
+現在、MUP の書き込みと観測 profile は `sdk/go/cplane/mupcontroller` を WASM の example と `pkg/cplane/native` から呼びます。
+`cplane-custom-behavior` と `cplane-bgp-observer` の example はまだ WASM 専用であり、native 対応時にはこの方針で処理本体を切り出します。
+
 ## plugin を書く
 
 Go 向けの [cplane SDK](../../../sdk/go/cplane/README.md) は、WASM の入口と
