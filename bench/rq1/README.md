@@ -118,3 +118,34 @@ The sink is in memory: no manager queue, authorization, BGP transport or real BP
 is included, and changing batch width does not measure an offered arrival rate.
 Keep resource limits fixed and report failed cases rather than reducing N or
 raising limits after seeing results.
+
+## Concurrent MUP update source
+
+`make bench-rq1-build` also builds `out/bench/rq1mupload` for a persistent
+BGP session with 64 or 512 IPv4 ST1 routes, one fixed ISD, and an independently
+scheduled VPNv4 sentinel route carrying custom behavior `0xfe01`.
+Run it inside a prepared speaker namespace, for example:
+
+```sh
+ip netns exec "$speaker_ns" out/bench/rq1mupload \
+  -neighbor fd00:12::1 -next-hop fd00:12::2 -sessions 64 \
+  -rate 50 -duration 10s -start-file "$work/start-at" \
+  -log "$work/events.jsonl" -expected "$work/expected.json" \
+  -stop-file "$work/stop"
+```
+
+After the initial `ready` message, gate the receiver's complete forwarding maps
+before atomically publishing a future Unix nanosecond timestamp in `start-at`.
+Use `-burst 512` instead of `-rate` for the immediate burst profile.
+The sentinel remains active for three seconds in that profile.
+Late rate slots are recorded as skipped and are not replayed as catch-up bursts.
+Each successful update alternates between two TEIDs distinct from the initial
+value, with an independent version counter for every prefix.
+
+The JSONL records planned times, API call bounds, versions, errors and skips.
+`expected.json` records the final speaker-accepted state; it is not a receiver
+RIB export, and `complete: true` does not imply zero skipped slots.
+The BGP session remains alive until the driver creates `stop`, allowing final
+map and packet checks before withdrawal.
+All event times describe the source API boundary; they do not establish the
+receiver's enqueue rate or prove that every intermediate version was applied.
