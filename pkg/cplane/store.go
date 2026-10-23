@@ -571,6 +571,8 @@ func (s *Store) load(name string) (Registration, error) {
 	var module []byte
 	switch m.Backend {
 	case "", BackendWASM:
+		// Legacy manifests must retain WASM semantics, even for an empty module.
+		m.Backend = BackendWASM
 		if m.NativeID != "" || m.NativeVersion != "" || m.NativeIdentity != "" {
 			return Registration{}, fmt.Errorf("cplane store: WASM manifest has native identity")
 		}

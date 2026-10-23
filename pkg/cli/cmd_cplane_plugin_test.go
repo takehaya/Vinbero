@@ -1,10 +1,17 @@
 package cli
 
 import (
-	"github.com/urfave/cli/v2"
+	"context"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"connectrpc.com/connect"
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
+	"github.com/urfave/cli/v2"
 )
 
 // A behavior is conventionally written in hex (RFC 8986 numbers them that
@@ -69,16 +76,63 @@ func TestSlotFlagsThatDoNotFitAreRefused(t *testing.T) {
 
 func TestCplaneArtifactFlags(t *testing.T) {
 	for _, args := range [][]string{
-		{"--name", "test"},
 		{"--name", "test", "--wasm", "missing.wasm", "--native", "mup-composition", "--native-version", "1"},
-		{"--name", "test", "--native", "mup-composition"},
 		{"--name", "test", "--wasm", "missing.wasm", "--native-version", "1"},
+		{"--name", "test", "--wasm", "missing.wasm", "--native", ""},
+		{"--name", "test", "--wasm", ""},
 	} {
 		app := cli.NewApp()
 		app.Commands = []*cli.Command{cplaneSubcommand()}
 		err := app.Run(append([]string{"test", "cplane", "register"}, args...))
-		if err == nil || (!strings.Contains(err.Error(), "exactly one") && !strings.Contains(err.Error(), "specified together")) {
+		if err == nil || (!strings.Contains(err.Error(), "cannot be combined") && !strings.Contains(err.Error(), "requires a module path")) {
 			t.Fatalf("unexpected invalid artifact result: %v", err)
 		}
+	}
+}
+
+type cplaneRegisterCapture struct {
+	vinberov1connect.PluginServiceClient
+	request *v1.CplanePluginRegisterRequest
+}
+
+func (c *cplaneRegisterCapture) CplanePluginRegister(_ context.Context, req *connect.Request[v1.CplanePluginRegisterRequest]) (*connect.Response[v1.CplanePluginRegisterResponse], error) {
+	c.request = req.Msg
+	return connect.NewResponse(&v1.CplanePluginRegisterResponse{}), nil
+}
+
+func TestCplaneDefaultNativeAndExplicitWASM(t *testing.T) {
+	module := filepath.Join(t.TempDir(), "plugin.wasm")
+	if err := os.WriteFile(module, []byte("module"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(t.TempDir(), "empty.wasm")
+	if err := os.WriteFile(empty, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, backend, id, version, module string
+		args                               []string
+	}{
+		{name: "default", backend: "native"},
+		{name: "alias", backend: "native", id: "bgp-observer", args: []string{"--native", "bgp-observer"}},
+		{name: "pinned", backend: "native", id: "bgp-observer", version: "1", args: []string{"--native", "bgp-observer", "--native-version", "1"}},
+		{name: "version only", backend: "native", version: "1", args: []string{"--native-version", "1"}},
+		{name: "wasm", backend: "wasm", module: "module", args: []string{"--wasm", module}},
+		{name: "empty wasm stays wasm", backend: "wasm", args: []string{"--wasm", empty}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &cplaneRegisterCapture{}
+			app := cli.NewApp()
+			app.Commands = []*cli.Command{cplaneSubcommand()}
+			app.Metadata = map[string]interface{}{clientsKey: &Clients{Plugin: capture}}
+			args := append([]string{"test", "cplane", "register", "--name", "bgp-observer"}, tc.args...)
+			if err := app.Run(args); err != nil {
+				t.Fatal(err)
+			}
+			r := capture.request
+			if r == nil || r.Backend != tc.backend || r.NativeId != tc.id || r.NativeVersion != tc.version || string(r.Wasm) != tc.module || r.Name != "bgp-observer" {
+				t.Fatalf("unexpected registration: %v", r)
+			}
+		})
 	}
 }

@@ -91,9 +91,11 @@ The standard Go WASI build is supported here; TinyGo compatibility has not been 
 
 The daemon can statically link the same controller under implementation ID `mup-composition`, version `1`.
 The observation profile is `mup-composition-observer`, version `1`; supplying write configuration to this profile is rejected.
-Native execution requires the daemon's explicit `cplane_plugins.native_enabled: true` opt-in because this code runs in its process.
-Use the same input policy, configuration, capabilities, scope and tick interval as the WASM command, replacing `--wasm plugin-write.wasm` with `--native mup-composition --native-version 1`.
-For observation, replace `--wasm plugin.wasm` with `--native mup-composition-observer --native-version 1`.
+Native is the default backend and is enabled by default in the daemon; `settings.cplane_plugins.native_enabled: false` restricts execution to WASM.
+Use the same input policy, configuration, capabilities, scope and tick interval as the WASM command, replacing `--wasm plugin-write.wasm` with `--native mup-composition`.
+For observation, replace `--wasm plugin.wasm` with `--native mup-composition-observer`.
+The implementation ID defaults to the registration name, so it can also be omitted when those names match.
+Use `--native-version 1` to pin the version; otherwise the daemon resolves and persists its catalog version.
 Use the existing same-name replacement or unregister workflow; a backend is never selected by fallback.
 
 The native adapter uses the same encoded events, results and output transactions, and the manager retains policy checks and reconciliation.

@@ -2,7 +2,7 @@
 
 `make bench-cplane-build` builds the daemon, probe/speaker tools, fresh standard-Go writing/observation WASM artifacts, and an encoded-call benchmark executable.
 The daemon statically links the same `sdk/go/cplane/mupcontroller` source used by those WASM entrypoints.
-Native execution requires `settings.cplane_plugins.native_enabled: true`; the measurement driver enables this in its private configuration.
+Native execution is enabled by default; the measurement driver also sets `settings.cplane_plugins.native_enabled: true` explicitly in its private configuration.
 
 ## Encoded calls
 

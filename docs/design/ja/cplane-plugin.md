@@ -1006,6 +1006,15 @@ restore 中に publish 後の persist 失敗が起きたときの二重表示は
 
 ## 運用
 
+登録の既定 backend は native です。
+`--wasm` を指定しない場合、native の実装 ID は `--name`、version は daemon の catalog の版を使います。
+異なる登録名を使う場合は `--native <実装ID>`、版を固定する場合は `--native-version <版>` を指定します。
+例えば `vbctl plugin cplane register --name bgp-observer` で組込みの observer を起動できます。
+native は daemon で既定で許可され、`settings.cplane_plugins.native_enabled: false` で無効化できます。
+全 example の自動起動は行わず、登録時の capability、scope と claim の検査も維持します。
+
+WASM のみの plugin は次のように `--wasm` で明示して追加できます。
+
 ```sh
 vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
     --behavior 0xFE01 --family vpnv4 \
@@ -1016,6 +1025,10 @@ vbctl plugin cplane list
 vbctl plugin cplane stats
 vbctl plugin cplane unregister --name custom-behavior
 ```
+
+旧 API client が backend を省略して module を送った場合は、従来どおり WASM として扱います。
+旧保存形式で backend が空の登録も WASM として復元し、壊れた module や読み込めない module を native に切り替えません。
+新しい登録では選択した backend と、native の場合は確定した ID、version と identity を保存します。
 
 capability と scope はどちらも省略できますが、片方でも欠けた plugin は何も
 宣言できません。observe と log しかしない plugin はそれで正しく、宣言する

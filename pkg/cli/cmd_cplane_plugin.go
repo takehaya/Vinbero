@@ -17,7 +17,7 @@ import (
 )
 
 // cplaneSubcommand builds `vbctl plugin cplane`, which manages the
-// WebAssembly control-plane half of a plugin.
+// native or WebAssembly control-plane half of a plugin.
 //
 // It is a sibling of the data-plane commands rather than an extension of
 // them: the two halves are different artifacts with different lifecycles,
@@ -33,12 +33,14 @@ func cplaneSubcommand() *cli.Command {
 				Usage: "Register or upgrade a control-plane plugin",
 				Description: "Registering a name that is already running upgrades it in place: the\n" +
 					"state the running instance wrote is kept and the new module reconciles\n" +
-					"over it, so the data plane is not emptied between the two.",
+					"over it, so the data plane is not emptied between the two.\n" +
+					"Without --wasm, run the native implementation selected by --native or --name.\n" +
+					"An omitted native version is resolved by the daemon.",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "name", Required: true, Usage: "Plugin name; becomes the owner tag its writes carry"},
-					&cli.StringFlag{Name: "wasm", Usage: "Path to the WebAssembly module (exclusive with --native)"},
-					&cli.StringFlag{Name: "native", Usage: "Statically linked native implementation ID (requires daemon native_enabled)"},
-					&cli.StringFlag{Name: "native-version", Usage: "Exact native implementation version"},
+					&cli.StringFlag{Name: "wasm", Usage: "Use a WebAssembly module instead of native (exclusive with --native and --native-version)"},
+					&cli.StringFlag{Name: "native", Usage: "Statically linked native implementation ID (defaults to --name)"},
+					&cli.StringFlag{Name: "native-version", Usage: "Exact native implementation version (defaults to the daemon's catalog version)"},
 					&cli.StringFlag{Name: "input-policy", Usage: "JSON input context grants and explicit delegation (input API v1)"},
 					&cli.StringFlag{Name: "config", Usage: "Path to the operator config blob handed to the module (optional)"},
 					&cli.StringSliceFlag{Name: "family", Usage: "BGP family to deliver (repeatable); omit for every family"},
@@ -90,22 +92,21 @@ func cplaneSubcommand() *cli.Command {
 				},
 				Action: func(c *cli.Context) error {
 					wasmPath, nativeID := c.String("wasm"), c.String("native")
-					if (wasmPath == "") == (nativeID == "") {
-						return fmt.Errorf("specify exactly one of --wasm or --native")
+					if c.IsSet("wasm") && wasmPath == "" {
+						return fmt.Errorf("--wasm requires a module path")
 					}
-					if (nativeID == "") != (c.String("native-version") == "") {
-						return fmt.Errorf("--native and --native-version must be specified together")
+					if c.IsSet("wasm") && (c.IsSet("native") || c.IsSet("native-version")) {
+						return fmt.Errorf("--wasm cannot be combined with --native or --native-version")
 					}
-					backend := "wasm"
+					backend := "native"
 					var wasm []byte
 					var err error
 					if wasmPath != "" {
+						backend = "wasm"
 						wasm, err = os.ReadFile(wasmPath)
 						if err != nil {
 							return fmt.Errorf("read module: %w", err)
 						}
-					} else {
-						backend = "native"
 					}
 					var config []byte
 					if path := c.String("config"); path != "" {

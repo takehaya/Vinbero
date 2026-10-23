@@ -25,7 +25,11 @@ type pluginInstance interface {
 
 func (m *Manager) validateBackend(reg *Registration) error {
 	if reg.Backend == "" {
-		reg.Backend = BackendWASM
+		reg.Backend = BackendNative
+		// A supplied module remains an explicit WASM choice for older clients.
+		if len(reg.Module) != 0 {
+			reg.Backend = BackendWASM
+		}
 	}
 	switch reg.Backend {
 	case BackendWASM:
@@ -39,10 +43,16 @@ func (m *Manager) validateBackend(reg *Registration) error {
 		if len(reg.Module) != 0 {
 			return fmt.Errorf("%w: native registration contains a WASM module", wasm.ErrAdmission)
 		}
+		if reg.NativeID == "" {
+			reg.NativeID = reg.Name
+		}
+		desc, _ := native.Lookup(reg.NativeID)
+		if reg.NativeVersion == "" {
+			reg.NativeVersion = desc.Version
+		}
 		if err := native.ValidateIdentity(reg.NativeID, reg.NativeVersion); err != nil {
 			return err
 		}
-		desc, _ := native.Lookup(reg.NativeID)
 		if reg.NativeIdentity != "" && reg.NativeIdentity != desc.Identity {
 			return fmt.Errorf("%w: native implementation identity changed", wasm.ErrAdmission)
 		}

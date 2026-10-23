@@ -85,7 +85,10 @@ for its flags and runtime limitations.
 
 ## Run natively
 
-Enable `cplane_plugins.native_enabled: true` in the daemon and replace `--wasm sdk/examples/cplane-custom-behavior/plugin.wasm` in the registration commands below with `--native custom-behavior --native-version 1`.
+Native is the default backend and is enabled by default in the daemon.
+For the registration named `custom-behavior` below, omit `--wasm sdk/examples/cplane-custom-behavior/plugin.wasm` to run the shared controller natively.
+Use `--native custom-behavior` for a different registration name, and optionally pin the implementation with `--native-version 1`; otherwise the daemon resolves and persists its catalog version.
+Set `settings.cplane_plugins.native_enabled: false` to allow only WASM plugins.
 Keep the same configuration, behavior claims, families, capabilities, scopes and tick interval.
 The native implementation accepts the same opaque protobuf configuration as the WASM example; it does not use the MUP context-input envelope.
 Receive-only operation needs a headend grant; sending also needs the existing local-SID and advertisement grants and scopes.

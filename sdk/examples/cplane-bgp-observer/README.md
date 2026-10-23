@@ -10,7 +10,15 @@ Build from the repository root with Go 1.25.5:
 make cplane-bgp-observer
 ```
 
-With a running daemon and peers configured for the desired families, register it using:
+With a running daemon and peers configured for the desired families, register the native controller using:
+
+```sh
+vinbero plugin cplane register --name bgp-observer --family mup_ipv4 --family evpn
+```
+
+Native is the default backend; omitting the implementation ID uses the registration name, and omitting the version selects the daemon's catalog version.
+Use `--native bgp-observer` when registering under a different name.
+To load the WASM build instead:
 
 ```sh
 vinbero plugin cplane register --name bgp-observer \
@@ -26,7 +34,8 @@ The guest module pins the same GoBGP MUP fork as the host because Go module depe
 See the [SDK documentation](../../go/cplane/README.md#reading-the-gobgp-packet-model) for the codec and identity contract.
 The standard Go build is exercised in the real WASM runtime with its default 16 MiB memory limit; this example does not retain a route view or measure large-RIB performance.
 
-With `cplane_plugins.native_enabled: true` in the daemon, replace `--wasm out/cplane-bgp-observer.wasm` with `--native bgp-observer --native-version 1` to run the same controller natively.
+Native execution is enabled by default; set `settings.cplane_plugins.native_enabled: false` to allow only WASM plugins.
+Use `--native-version 1` to require an exact native implementation version.
 Keep the same families and omit write capabilities.
 Both adapters require full BGP input and ignore the opaque configuration payload.
 Malformed BGP paths produce quarantined event results with the original sequence number.

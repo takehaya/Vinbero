@@ -90,7 +90,9 @@ const maxRestarts = 5
 
 // Registration describes a plugin to run.
 type Registration struct {
-	Backend                                 string
+	// Backend defaults to native; a supplied Module selects WASM for older callers.
+	Backend string
+	// NativeID defaults to Name and NativeVersion to the linked catalog version.
 	NativeID, NativeVersion, NativeIdentity string
 	Input                                   *v1.CplaneInputPolicy
 	// Name identifies the plugin. It becomes the owner tag its writes

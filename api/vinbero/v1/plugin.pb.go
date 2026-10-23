@@ -1264,10 +1264,13 @@ type CplanePluginRegisterRequest struct {
 	Scope *CplanePluginScope `protobuf:"bytes,8,opt,name=scope,proto3" json:"scope,omitempty"`
 	// Opt in to context-filtered inputs and the versioned configure envelope.
 	Input *CplaneInputPolicy `protobuf:"bytes,9,opt,name=input,proto3" json:"input,omitempty"`
-	// Empty preserves the historical WASM backend. Native requires daemon opt-in.
+	// Empty selects native unless wasm contains a module, preserving older clients.
+	// Set "wasm" explicitly to request WASM even when the module is empty.
 	Backend string `protobuf:"bytes,10,opt,name=backend,proto3" json:"backend,omitempty"`
-	// Identity in the statically linked native catalog; no library path is accepted.
-	NativeId      string `protobuf:"bytes,11,opt,name=native_id,json=nativeId,proto3" json:"native_id,omitempty"`
+	// ID in the statically linked native catalog; defaults to name.
+	// No library path is accepted.
+	NativeId string `protobuf:"bytes,11,opt,name=native_id,json=nativeId,proto3" json:"native_id,omitempty"`
+	// Defaults to the daemon's catalog version; the resolved version is persisted.
 	NativeVersion string `protobuf:"bytes,12,opt,name=native_version,json=nativeVersion,proto3" json:"native_version,omitempty"`
 }
 
