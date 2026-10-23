@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/netip"
+	"reflect"
 	"testing"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
@@ -25,10 +26,15 @@ func TestResultsSnapshotSurvivesReplacementAndShrink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reused := p.CopyResults(nil)
 	check := func(want int) {
 		t.Helper()
 		if !e.Status().Ready || len(p.Results()) != want {
 			t.Fatalf("want %d fresh results: status=%+v results=%+v", want, e.Status(), p.Results())
+		}
+		reused = p.CopyResults(reused)
+		if len(reused) != want || (want > 0 && !reflect.DeepEqual(reused, p.Results())) {
+			t.Fatal("reused results differ after replacement or shrink")
 		}
 		after, err := json.Marshal(saved)
 		if err != nil || !bytes.Equal(before, after) {

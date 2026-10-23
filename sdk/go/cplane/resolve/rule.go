@@ -6,6 +6,7 @@ import (
 	"github.com/takehaya/vinbero/sdk/go/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplane/routes"
 	"net/netip"
+	"slices"
 )
 
 type State uint8
@@ -282,6 +283,34 @@ func (p *Plan[L, R]) Results() []Pair[L, R] {
 	}
 	return out
 }
+
+// CopyResults overwrites dst with the current results and returns the resized
+// slice, reusing its capacity and each pair's path-list capacity when possible.
+// The caller must exclusively own dst and its path slices, with nonoverlapping
+// backing storage (including capacity);
+// previous contents are invalidated, including aliases to those slices.
+// As with Results, path lists are copied independently of the plan, while Left
+// and Right are copied by value. Pass nil to obtain a new independent snapshot.
+// Discarded entries within the supplied lengths are cleared. Pass the previous
+// returned slice without shortening it to preserve that clearing guarantee.
+// Retained capacity can be released by dropping dst.
+func (p *Plan[L, R]) CopyResults(dst []Pair[L, R]) []Pair[L, R] {
+	n := len(p.pairs)
+	dst = slices.Grow(dst, max(0, n-len(dst)))
+	clear(dst[min(n, len(dst)):])
+	dst = dst[:n]
+	for i := range p.pairs {
+		pair := &p.pairs[i]
+		left, right := dst[i].LeftPaths, dst[i].RightPaths
+		clear(left[min(len(left), len(pair.LeftPaths)):])
+		clear(right[min(len(right), len(pair.RightPaths)):])
+		dst[i] = *pair
+		dst[i].LeftPaths = append(left[:0], pair.LeftPaths...)
+		dst[i].RightPaths = append(right[:0], pair.RightPaths...)
+	}
+	return dst
+}
+
 func (p *Plan[L, R]) clear() { p.pairs = nil }
 func Register[L comparable, R comparable](e *Engine, r Rule[L, R]) (*Plan[L, R], error) {
 	if e == nil || r.Name == "" || e.rules[r.Name] != nil || len(e.rules) >= e.limits.MaxRules {
