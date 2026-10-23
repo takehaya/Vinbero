@@ -37,6 +37,7 @@ type Controller struct {
 	observeOnly bool
 	client      CompositionClient
 	log         func(cplane.LogLevel, string)
+	downCache   []downlinkProjection
 	// Only successful writes (or previews) advance this revision. Failed writes
 	// are rebuilt from the current ready view on the next event or tick.
 	handledRevision uint64
@@ -101,6 +102,12 @@ func New(input cplane.InputConfig, client CompositionClient, log func(cplane.Log
 
 // Update applies a batch and reconciles the latest complete route view.
 func (c *Controller) Update(events []cplane.Event) []cplane.EventResult {
+	for _, event := range events {
+		if event.Kind == cplane.EventStartOfReplay && event.ReplaySource == cplane.BGPSource {
+			c.downCache = nil
+			break
+		}
+	}
 	results := c.engine.Update(events)
 	c.reconcile()
 	return results
@@ -111,21 +118,34 @@ func (c *Controller) Tick(_ int64) { c.reconcile() }
 
 func (c *Controller) reconcile() {
 	status := c.engine.Status()
-	if !status.Ready || status.Revision == c.handledRevision {
+	if !status.Ready {
+		c.downCache = nil
+		return
+	}
+	if status.Revision == c.handledRevision {
 		return
 	}
 	for _, issue := range status.Issues {
 		c.log(cplane.LogWarn, fmt.Sprintf("%s: %s: %s", issue.Rule, issue.Code, issue.Reason))
 	}
 	set := cplane.Composition{Revision: status.Revision}
+	// Cache slots follow result positions; a moved pair is simply a miss.
+	n := 0
 	c.down.Range(func(pair resolve.Pair[mup.ST1, mup.ISD]) {
-		entry, err := mup.BuildDownlink(pair, c.downContext)
+		i := n
+		n++
+		if i == len(c.downCache) {
+			c.downCache = append(c.downCache, downlinkProjection{})
+		}
+		entry, err := c.buildDownlink(i, pair)
 		if err != nil {
 			c.log(cplane.LogWarn, "downlink: "+err.Error())
 			return
 		}
 		set.Headends = append(set.Headends, entry)
 	})
+	clear(c.downCache[n:])
+	c.downCache = c.downCache[:n]
 	c.up.Range(func(pair resolve.Pair[mup.ST2, mup.DSD]) {
 		entry, err := mup.BuildUplink(pair, c.downContext.Source)
 		if err != nil {
