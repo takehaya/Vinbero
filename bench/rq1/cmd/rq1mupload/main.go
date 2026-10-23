@@ -164,6 +164,23 @@ func saveExpected(path string, state *expectedState) error {
 	return os.Rename(path+".tmp", path)
 }
 
+// The MUP BGP key excludes TEID. GoBGP's path comparison also excludes
+// MP_REACH_NLRI, so a changing test-only RT makes each TEID replacement visible.
+// The controller is still authorized and matched by the unchanged primary RT.
+func st1Route(prefix string, teid uint32, version int, nextHop string) bgp.MUPRoute {
+	rts := []string{"65000:7"}
+	if version > 0 {
+		rts = append(rts, fmt.Sprintf("65000:%d", 1000+(version-1)%2))
+	}
+	return bgp.MUPRoute{Type: bgp.MUPRouteTypeT1ST, RD: "65000:7", RTs: rts, Prefix: prefix,
+		TEID: teid, TEIDLen: 32, QFI: 9, Endpoint: "172.16.0.1", NextHop: nextHop}
+}
+
+func sentinelRoute(sid, nextHop string) bgp.VPNRoute {
+	return bgp.VPNRoute{Family: bgp.FamilyVPNv4, Prefix: "10.250.0.1/32", RD: "65100:100",
+		RTs: []string{"65100:100"}, SRv6SID: sid, NextHop: nextHop, EndpointBehavior: 65025}
+}
+
 func run(ctx context.Context, c config) (retErr error) {
 	if c.sessions != 64 && c.sessions != 512 {
 		return fmt.Errorf("sessions must be 64 or 512")
@@ -225,13 +242,11 @@ func run(ctx context.Context, c config) (retErr error) {
 		Families: []bgp.Family{bgp.FamilyMUPIPv4, bgp.FamilyVPNv4}, HoldTimeSec: 30, KeepaliveSec: 10, ConnectRetrySec: 2}); err != nil {
 		return err
 	}
-	st1 := func(prefix string, teid uint32) error {
-		return speaker.PushMUPT1ST(ctx, bgp.MUPRoute{Type: bgp.MUPRouteTypeT1ST, RD: "65000:7", RTs: []string{"65000:7"}, Prefix: prefix,
-			TEID: teid, TEIDLen: 32, QFI: 9, Endpoint: "172.16.0.1", NextHop: c.nextHop})
+	st1 := func(prefix string, teid uint32, version int) error {
+		return speaker.PushMUPT1ST(ctx, st1Route(prefix, teid, version, c.nextHop))
 	}
 	vpn := func(sid string) error {
-		return speaker.Advertise(ctx, bgp.VPNRoute{Family: bgp.FamilyVPNv4, Prefix: "10.250.0.1/32", RD: "65100:100",
-			RTs: []string{"65100:100"}, SRv6SID: sid, NextHop: c.nextHop, EndpointBehavior: 65025})
+		return speaker.Advertise(ctx, sentinelRoute(sid, c.nextHop))
 	}
 	call := func(e event, fn func() error) error {
 		e.StartNS = time.Now().UnixNano()
@@ -243,7 +258,7 @@ func run(ctx context.Context, c config) (retErr error) {
 		return errors.Join(err, record.write(e))
 	}
 	for i, r := range routes {
-		if err := call(event{Kind: "initial", Initial: true, RouteType: "st1", Index: i, Prefix: r.Prefix, TEID: r.TEID, DecisionNS: time.Now().UnixNano()}, func() error { return st1(r.Prefix, r.TEID) }); err != nil {
+		if err := call(event{Kind: "initial", Initial: true, RouteType: "st1", Index: i, Prefix: r.Prefix, TEID: r.TEID, DecisionNS: time.Now().UnixNano()}, func() error { return st1(r.Prefix, r.TEID, 0) }); err != nil {
 			return err
 		}
 	}
@@ -325,7 +340,7 @@ func run(ctx context.Context, c config) (retErr error) {
 				continue
 			}
 		}
-		if err := call(e, func() error { return st1(r.Prefix, teid) }); err != nil {
+		if err := call(e, func() error { return st1(r.Prefix, teid, r.Version+1) }); err != nil {
 			loadErr = errors.Join(loadErr, err)
 		} else {
 			r.TEID, r.Version = teid, r.Version+1

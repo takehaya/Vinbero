@@ -141,6 +141,14 @@ The sentinel remains active for three seconds in that profile.
 Late rate slots are recorded as skipped and are not replayed as catch-up bursts.
 Each successful update alternates between two TEIDs distinct from the initial
 value, with an independent version counter for every prefix.
+The primary RT remains `65000:7`; updates also alternate the test-only RT
+`65000:1000`/`65000:1001` according to that successful per-prefix version.
+This forces GoBGP to announce replacements: its ST1 key excludes TEID, and
+its path-attribute comparison excludes the MP_REACH_NLRI carrying the TEID.
+The additional RT does not grant controller authorization or change its match.
+The instrument does not withdraw routes between versions.
+A real TCP BGP test checks that the receiving RIB contains exactly one current
+ST1 path and receives the sentinel's changing SID with its behavior intact.
 
 The JSONL records planned times, API call bounds, versions, errors and skips.
 `expected.json` records the final speaker-accepted state; it is not a receiver

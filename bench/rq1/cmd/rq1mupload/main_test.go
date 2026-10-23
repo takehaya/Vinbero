@@ -4,7 +4,18 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	gobgpapi "github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/apiutil"
+	gobgppkt "github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	gobgpsrv "github.com/osrg/gobgp/v4/pkg/server"
+	"github.com/takehaya/vinbero/pkg/bgp"
+	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
+	"go.uber.org/zap"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -118,5 +129,124 @@ func TestExpectedStateAndStartBarrier(t *testing.T) {
 	cancel()
 	if err := waitUntil(ctx, time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("cancelled wait succeeded")
+	}
+}
+
+// A real TCP peer checks the instrument's replacement semantics independently
+// of the controller: one received path per prefix, new TEID, and intact VPN SID.
+func TestLiveRouteReplacements(t *testing.T) {
+	ctx := context.Background()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	source := gobgp.NewSession(zap.NewNop())
+	if err := source.Start(ctx, bgp.GlobalConfig{LocalASN: 65100, RouterID: "10.255.0.2", ListenPort: int32(port)}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = source.Stop(ctx) })
+	if err := source.AddPeer(ctx, bgp.PeerConfig{Neighbor: "127.0.0.1", PeerASN: 65100, Passive: true, Families: []bgp.Family{bgp.FamilyMUPIPv4, bgp.FamilyVPNv4}}); err != nil {
+		t.Fatal(err)
+	}
+	sink := gobgpsrv.NewBgpServer()
+	go sink.Serve()
+	t.Cleanup(sink.Stop)
+	if err := sink.StartBgp(ctx, &gobgpapi.StartBgpRequest{Global: &gobgpapi.Global{Asn: 65100, RouterId: "10.255.0.1", ListenPort: -1}}); err != nil {
+		t.Fatal(err)
+	}
+	families := []*gobgpapi.AfiSafi{}
+	for _, safi := range []gobgpapi.Family_Safi{gobgpapi.Family_SAFI_MUP, gobgpapi.Family_SAFI_MPLS_VPN} {
+		families = append(families, &gobgpapi.AfiSafi{Config: &gobgpapi.AfiSafiConfig{Family: &gobgpapi.Family{Afi: gobgpapi.Family_AFI_IP, Safi: safi}}})
+	}
+	if err := sink.AddPeer(ctx, &gobgpapi.AddPeerRequest{Peer: &gobgpapi.Peer{Conf: &gobgpapi.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65100}, Transport: &gobgpapi.Transport{RemoteAddress: "127.0.0.1", RemotePort: uint32(port), LocalAddress: "127.0.0.1"}, AfiSafis: families}}); err != nil {
+		t.Fatal(err)
+	}
+	wait := func(what string, fn func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			if fn() {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatal("timeout: " + what)
+	}
+	wait("peer established", func() bool {
+		peers, err := source.Peers(ctx)
+		return err == nil && len(peers) == 1 && peers[0].SessionState == "established"
+	})
+	paths := func(family gobgppkt.Family) []*apiutil.Path {
+		t.Helper()
+		var result []*apiutil.Path
+		if err := sink.ListPath(apiutil.ListPathRequest{TableType: gobgpapi.TableType_TABLE_TYPE_GLOBAL, Family: family}, func(_ gobgppkt.NLRI, p []*apiutil.Path) { result = append(result, p...) }); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for version := 0; version < 5; version++ {
+		teid := uint32(256)
+		if version > 0 {
+			teid = nextTEID(0, version-1)
+		}
+		route := st1Route("10.0.2.2/32", teid, version, "127.0.0.1")
+		if route.RTs[0] != "65000:7" || version > 0 && (len(route.RTs) != 2 || route.RTs[1] != fmt.Sprintf("65000:%d", 1000+(version-1)%2)) {
+			t.Fatalf("wrong RTs: %v", route.RTs)
+		}
+		if err := source.PushMUPT1ST(ctx, route); err != nil {
+			t.Fatal(err)
+		}
+		wait(fmt.Sprintf("TEID version %d", version), func() bool {
+			got := paths(gobgppkt.RF_MUP_IPv4)
+			if len(got) != 1 {
+				return false
+			}
+			n, ok := got[0].Nlri.(*gobgppkt.MUPNLRI)
+			if !ok {
+				return false
+			}
+			r, ok := n.RouteTypeData.(*gobgppkt.MUPType1SessionTransformedRoute)
+			if !ok {
+				return false
+			}
+			bytes := r.TEID.As4()
+			return binary.BigEndian.Uint32(bytes[:]) == teid
+		})
+		sid := "fd00:a::100"
+		if version%2 == 1 {
+			sid = "fd00:b::100"
+		}
+		if err := source.Advertise(ctx, sentinelRoute(sid, "127.0.0.1")); err != nil {
+			t.Fatal(err)
+		}
+		wait(fmt.Sprintf("sentinel SID version %d", version), func() bool {
+			got := paths(gobgppkt.RF_IPv4_VPN)
+			if len(got) != 1 {
+				return false
+			}
+			for _, attr := range got[0].Attrs {
+				psid, ok := attr.(*gobgppkt.PathAttributePrefixSID)
+				if !ok {
+					continue
+				}
+				for _, tlv := range psid.TLVs {
+					service, ok := tlv.(*gobgppkt.SRv6ServiceTLV)
+					if !ok {
+						continue
+					}
+					for _, sub := range service.SubTLVs {
+						info, ok := sub.(*gobgppkt.SRv6InformationSubTLV)
+						if !ok {
+							continue
+						}
+						addr, ok := netip.AddrFromSlice(info.SID)
+						return ok && addr.String() == sid && info.EndpointBehavior == 65025
+					}
+				}
+			}
+			return false
+		})
 	}
 }
