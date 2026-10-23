@@ -54,8 +54,15 @@ PLUGIN_LOCATOR_BLOCK=fd00:200:
 PLUGIN_SLOT=32
 
 # Preserve the receiving plugin's backend during destructive scope checks.
-backend=$(docker exec "$PE_TOKYO" cat /var/lib/vinbero/cplane-plugins/custom-behavior.json |
-    sed -n 's/.*"backend": "\([^"]*\)".*/\1/p')
+plugin_backend() {
+    docker exec "$1" vbctl plugin cplane stats |
+        awk '$1 == "custom-behavior" { print $2; exit }'
+}
+case "${CPLANE_BACKEND:-}" in
+    ""|native|wasm) ;;
+    *) echo "CPLANE_BACKEND must be native or wasm" >&2; exit 1 ;;
+esac
+backend=$(plugin_backend "$PE_TOKYO")
 backend_args=()
 case "$backend" in
     native) ;;
@@ -67,6 +74,17 @@ pass=0
 fail=0
 ok() { echo "  PASS: $1"; pass=$((pass + 1)); }
 ng() { echo "  FAIL: $1"; fail=$((fail + 1)); }
+
+check_backend() {
+    [ -n "${CPLANE_BACKEND:-}" ] || return 0
+    local actual_backend
+    actual_backend=$(plugin_backend "$1")
+    if [ "$actual_backend" = "$CPLANE_BACKEND" ]; then
+        ok "$1 uses the requested $CPLANE_BACKEND backend"
+    else
+        ng "$1 backend is $actual_backend; expected $CPLANE_BACKEND"
+    fi
+}
 
 dexec() { docker exec "$@"; }
 
@@ -92,6 +110,7 @@ echo "[1] control-plane plugins registered"
 for node in "$PE_TOKYO" "$PE_OSAKA"; do
     if retry bash -c "docker exec $node vbctl plugin cplane list 2>/dev/null | grep -q custom-behavior"; then
         ok "$node runs the custom-behavior plugin"
+        check_backend "$node"
     else
         ng "$node did not register the plugin"
         dexec "$node" vbctl plugin cplane list || true
@@ -390,13 +409,16 @@ else
     ng "could not re-register the plugin with a covering scope"
 fi
 
-restored_backend=$(dexec "$PE_TOKYO" cat /var/lib/vinbero/cplane-plugins/custom-behavior.json |
-    sed -n 's/.*"backend": "\([^"]*\)".*/\1/p')
+restored_backend=$(plugin_backend "$PE_TOKYO")
 if [ "$restored_backend" = "$backend" ]; then
     ok "scope checks preserved the $backend backend"
 else
     ng "scope checks changed backend from $backend to $restored_backend"
 fi
+
+for node in "$PE_TOKYO" "$PE_OSAKA"; do
+    check_backend "$node"
+done
 
 echo ""
 echo "=============================================="

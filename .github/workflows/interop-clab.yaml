@@ -17,10 +17,16 @@ on:
       - 'pkg/config/config.go'
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
-      - 'pkg/bpf/*.o'
-      # The cplane-plugin scenario runs the committed SDK example, so a
-      # change to the plugin or to the runtime under it must re-run these.
+      - 'pkg/bpf/**'
+      # Rebuild the SDK example for both Cplane backend jobs so shared
+      # source and runtime changes exercise the current implementation.
       - 'pkg/cplane/**'
+      - 'pkg/server/cplane_plugin.go'
+      - 'pkg/cli/cmd_cplane_plugin.go'
+      - 'sdk/include/**'
+      - 'sdk/examples/plugin-custom-behavior/**'
+      - 'go.mod'
+      - 'go.sum'
       - 'sdk/go/cplane/**'
       - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/interop-clab.yaml'
@@ -32,8 +38,14 @@ on:
       - 'pkg/config/config.go'
       - 'cmd/vinberod/**'
       - 'cmd/vinbero/**'
-      - 'pkg/bpf/*.o'
+      - 'pkg/bpf/**'
       - 'pkg/cplane/**'
+      - 'pkg/server/cplane_plugin.go'
+      - 'pkg/cli/cmd_cplane_plugin.go'
+      - 'sdk/include/**'
+      - 'sdk/examples/plugin-custom-behavior/**'
+      - 'go.mod'
+      - 'go.sum'
       - 'sdk/go/cplane/**'
       - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/interop-clab.yaml'
@@ -41,7 +53,7 @@ on:
 
 jobs:
   interop-clab:
-    name: ${{ matrix.scenario }} interop
+    name: ${{ matrix.scenario }} (${{ matrix.backend || 'default' }}) interop
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -60,7 +72,13 @@ jobs:
           - evpn-multihoming     # EVPN RT4 multi-homing: DF election + split-horizon
           - mup-2site            # BGP MUP (SAFI 85): controller advertises, gateway applies
           - mup-2site-multivrf   # per-VRF MUP uplink: two VPNs share one N3 endpoint + TEID
-          - cplane-plugin-2site  # an operator's own SRv6 behavior, carried by a control-plane plugin
+        include:
+          - scenario: cplane-plugin-2site
+            backend: native
+          - scenario: cplane-plugin-2site
+            backend: wasm
+    env:
+      CPLANE_BACKEND: ${{ matrix.backend || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -95,6 +113,17 @@ jobs:
             sudo apt-get install -y -qq --no-install-recommends clang libelf-dev libbpf-dev
           fi
 
+      - name: Set up Go for the Cplane example
+        if: matrix.scenario == 'cplane-plugin-2site'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ./go.mod
+          cache: true
+
+      - name: Rebuild the current Cplane WASM example
+        if: matrix.scenario == 'cplane-plugin-2site'
+        run: make cplane-example
+
       - name: Build images
         working-directory: examples/interop-clab
         run: make build SCENARIO=${{ matrix.scenario }}
@@ -111,6 +140,24 @@ jobs:
         if: failure()
         working-directory: examples/interop-clab
         run: make status logs SCENARIO=${{ matrix.scenario }}
+
+      - name: Collect Cplane state
+        if: always() && matrix.scenario == 'cplane-plugin-2site'
+        run: |
+          mkdir -p out/interop-clab
+          for site in tokyo osaka; do
+            node=clab-cplane-plugin-2site-pe-$site
+            docker exec "$node" cat /var/log/vinberod.log > "out/interop-clab/$site-daemon.log" 2>&1 || true
+            docker exec "$node" vbctl plugin cplane stats > "out/interop-clab/$site-stats.log" 2>&1 || true
+            docker exec "$node" cat /var/lib/vinbero/cplane-plugins/custom-behavior.json > "out/interop-clab/$site-manifest.json" 2>&1 || true
+          done
+
+      - name: Upload Cplane state
+        if: always() && matrix.scenario == 'cplane-plugin-2site'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cplane-plugin-${{ matrix.backend }}
+          path: out/interop-clab
 
       - name: Destroy lab
         if: always()

@@ -116,11 +116,13 @@ The control-plane controller runs natively by default.
 To select the bound `sdk/examples/cplane-custom-behavior/plugin.wasm`, deploy with the variable passed through sudo:
 
 ```sh
-sudo env CPLANE_BACKEND=wasm containerlab -t scenarios/cplane-plugin-2site/clab.yml deploy
-make test SCENARIO=cplane-plugin-2site
+make deploy SCENARIO=cplane-plugin-2site CPLANE_BACKEND=wasm
+make test SCENARIO=cplane-plugin-2site CPLANE_BACKEND=wasm
 ```
 
 The scope checks preserve the receiving plugin's running backend.
+An explicit `CPLANE_BACKEND` also checks that both PEs use the requested backend.
+CI rebuilds the WASM example from the current shared source, runs this scenario separately with `native` and `wasm`, and retains both PE logs, stats and manifests.
 Build that artifact with standard Go using `make cplane-example`; TinyGo is optional.
 The native and WASM entrypoints use the same shared controller source.
 
