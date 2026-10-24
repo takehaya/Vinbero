@@ -136,11 +136,38 @@ func TestOverflowReplayPreservesOtherPluginProgress(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("A handler did not reach the artificial stall")
 			}
-			// Fill both production queue and replay hold, without changing limits.
-			for i := 0; i < 3*deliveryQueueDepth; i++ {
+			// Overflow the stalled worker's queue to request a real replay.
+			for i := 0; i <= deliveryQueueDepth; i++ {
 				if !src.emit(a.Name, session) {
 					t.Fatal("A subscription disappeared")
 				}
+			}
+			// Replay starts asynchronously and switches live delivery to a new
+			// hold. Wait for that switch before filling it; a fixed-size burst
+			// can otherwise finish before the empty hold becomes active.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				pa.worker.mu.Lock()
+				holding := pa.worker.holding
+				pa.worker.mu.Unlock()
+				if holding {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("queue overflow did not start replay holding")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			for i := 0; i < deliveryQueueDepth; i++ {
+				if !src.emit(a.Name, session) {
+					t.Fatal("A subscription disappeared")
+				}
+			}
+			pa.worker.mu.Lock()
+			holding, pending, queued := pa.worker.holding, len(pa.worker.pending), len(pa.worker.queue)
+			pa.worker.mu.Unlock()
+			if !holding || pending != deliveryQueueDepth || queued != deliveryQueueDepth {
+				t.Fatalf("stall did not fill queue and replay hold: holding=%t pending=%d queued=%d", holding, pending, queued)
 			}
 			beforeFinal := pa.worker.droppedCount()
 			session = offeredSession(t, 1, 999)
