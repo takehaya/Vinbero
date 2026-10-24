@@ -181,8 +181,11 @@ func (r *evpnPacketWire) check(t *testing.T, frame []byte, present bool) {
 	deadline := time.Now().Add(window)
 	buf := make([]byte, 4096)
 	matches := 0
-	for time.Now().Before(deadline) {
+	for {
 		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
 		ms := int((remaining + time.Millisecond - 1) / time.Millisecond)
 		ready, err := unix.Poll([]unix.PollFd{{Fd: int32(r.fd), Events: unix.POLLIN}}, ms)
 		if errors.Is(err, unix.EINTR) {
