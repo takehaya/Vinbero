@@ -39,7 +39,16 @@ install -m 644 "$ROOT"/src/core/*.h "$DEST/include/core/"
 
 # Static docs under share/ (FHS). Examples are intentionally NOT shipped: they
 # live in the repo under sdk/examples/ and are linked from the SDK README.
-install -m 644 "$ROOT/sdk/README.md" "$DEST/share/vinbero-sdk/README.md"
+# Resolve repository links for the installed layout, where their relative
+# targets are absent. Releases retain their source revision in those links.
+SOURCE_REF="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo main)"
+SOURCE_URL="https://github.com/takehaya/Vinbero/blob/$SOURCE_REF"
+sed -E \
+    -e '/^```/,/^```/b' \
+    -e "s#\]\(\.\./([^)]*)\)#]($SOURCE_URL/\1)#g" \
+    -e "s@\]\(([^#/:)][^:)]*)\)@]($SOURCE_URL/sdk/\1)@g" \
+    "$ROOT/sdk/README.md" > "$DEST/share/vinbero-sdk/README.md"
+chmod 644 "$DEST/share/vinbero-sdk/README.md"
 install -m 644 "$ROOT/LICENSE" "$DEST/share/vinbero-sdk/LICENSE"
 
 # The control-plane plugin contract. A control-plane plugin is a

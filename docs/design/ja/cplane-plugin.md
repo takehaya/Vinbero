@@ -1,11 +1,15 @@
 # Control plane plugin
 
-Vinbero の control plane を operator が拡張するための機構です。data plane
-plugin が eBPF bytecode を受け取るのに対し、control plane plugin は
-WebAssembly module を受け取ります。どちらも daemon に upload され、登録時に
-検証されます。WASM 側の書き込みは宣言した capability と scope の範囲に host が
-強制します。eBPF 側は operator が review した semi-trusted な artifact が
-前提で、検査は best-effort です (data plane 境界の節)。
+Vinbero の control plane を、稼働中の daemon へ WASM module をロードして拡張する機構です。
+経路の選択や合成などの処理を追加、更新するときに、daemon の再ビルドや再起動を必要としません。
+data plane plugin が packet の処理を eBPF で拡張し、control plane plugin は BGP event から必要な転送状態、local SID、広告を宣言します。
+登録時には ABI と権限を検査し、WASM の出力は host が capability と scope の範囲に制限します。
+eBPF 側は operator が review した semi-trusted な artifact が前提で、検査は best-effort です (data plane 境界の節)。
+
+同じ Go controller を daemon に静的リンクし、native backend から使うこともできます。
+CLI は `--wasm` を省略すると native を選びますが、新しい native の実装を追加するには daemon の再ビルドが必要です。
+WASM と native の共通化は処理本体を二重に保守しないための構造であり、WASM を動的に追加できる性質は維持します。
+最初のロード手順は [SDK の observer walkthrough](../../../sdk/README.md#load-a-wasm-observer)、backend の指定は本書の運用の節にあります。
 
 ## 何のためにあるか
 
@@ -78,24 +82,35 @@ flowchart LR
         APPLIER[built-in applier]
         OPS[capability ops<br>scope + quota + lifecycle]
         HEADEND[shared headend reconciler<br>owner ごとの排他 + lease]
-        subgraph RT[wazero runtime]
-            W1[plugin worker + instance]
+        subgraph CM[cplane manager]
+            Q[plugin ごとの worker queue]
+            SELECT{登録済み backend}
+            W1[WASM instance / wazero]
+            N1[native adapter / 静的リンク済み controller]
         end
         GOBGP --> DEMUX
         NL --> DEMUX
         DEMUX --> APPLIER
-        DEMUX -->|queue| W1
+        DEMUX --> Q
+        Q --> SELECT
+        SELECT -->|WASM| W1
+        SELECT -->|native| N1
         APPLIER -->|headend 増分更新| HEADEND
         APPLIER -->|その他の転送状態| MAPS
         W1 -->|host function| OPS
+        N1 -->|host adapter| OPS
         OPS -->|headend desired set| HEADEND
         HEADEND --> MAPS
         OPS -->|local SID| MAPS
         OPS -->|広告| GOBGP
     end
 
-    CLI[vinbero plugin cplane register] --> RT
+    CLI[vinbero plugin cplane register] --> CM
 ```
+
+各 plugin は登録時に選んだ backend で動き、event はその plugin の queue から実行先へ渡します。
+WASM なら登録時に送られた module を使い、native なら daemon に静的リンク済みの実装を使います。
+capability、scope、owner の検査と転送状態の反映は共通の host 側で行います。
 
 headend は `pkg/headend.Reconciler` を daemon が一つ作り、built-in applier と
 cplane manager が共有します。capability / scope の検査は plugin host に残し、
@@ -799,9 +814,10 @@ capability が何であれ観測と log だけをする plugin として起動�
 
 ## lifecycle
 
-- 同名での再登録は in-place upgrade です。古い instance を止めて新しい
-  ものを同じ owner tag で始めるので、古いものが書いた状態は残り、新しい
-  module が宣言し直して差分が吸収されます。
+- 同名での再登録は in-place upgrade です。
+  新しい instance は同じ owner tag で始め、保持できる既存状態に対して宣言を収束させます。
+  権限の縮小では対象外の状態を撤去し、context 登録では入力権限、制限、設定と旧 instance の健全性によって保持の可否を決めます。
+  詳細は後述の context 入力の引継ぎ条件に従い、同名であることだけでは転送状態の保持や切替中の無損失を保証しません。
 - plugin が configure から宣言した内容は、登録が成立するまで保留します。
   configure は instantiate の途中で走るので、そこで適用すると instantiate
   が失敗したときに誰も消せない state が残ります。upgrade では更に悪く、
@@ -1014,6 +1030,22 @@ restore 中に publish 後の persist 失敗が起きたときの二重表示は
 限られ、forget は running の plugin を拒みます。
 
 ## 運用
+
+稼働中の daemon へ新しい処理をロードする場合は `--wasm` を指定します。
+例えば observer module は、daemon のコードを変更せずに次のように追加できます。
+
+```sh
+make cplane-bgp-observer
+vinbero plugin cplane register --name route-audit \
+    --wasm out/cplane-bgp-observer.wasm --family evpn
+vinbero plugin cplane stats --name route-audit
+vinbero plugin cplane unregister --name route-audit
+```
+
+これは repository root で build し、BGP peer と EVPN family が別途設定された daemon に登録する例です。
+書き込み capability を与えず、経路を観測して log に出します。
+同じ名前で新しい module を登録すると置換になります。
+書き込みを行う plugin の既存状態を保持できる条件は lifecycle の節に従い、切替中の無損失を一律には保証しません。
 
 登録の既定 backend は native です。
 `--wasm` を指定しない場合、native の実装 ID は `--name`、version は daemon の catalog の版を使います。

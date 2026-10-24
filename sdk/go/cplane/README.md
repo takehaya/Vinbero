@@ -4,6 +4,12 @@
 sets, and a view of BGP prefix routes. The `guest` subpackage supplies Go
 WASM entry points and host calls. Both use the daemon's existing ABI version 1.
 
+Compile a plugin to WASM to load new controller code into a running daemon without rebuilding it.
+The [SDK walkthrough](../../README.md#load-a-wasm-observer) covers loading, registration, and backend selection.
+Keep controller logic in a package independent of `guest`; a native adapter can call that package when it is linked into the daemon.
+The WASM entry point imports `guest`, while the shared controller uses typed events and an injected output host.
+Adding a native implementation requires rebuilding the daemon; uploading a WASM module does not add it to the native catalog.
+
 The SDK is part of the Vinbero Go module. Use a module dependency pinned to a
 revision containing it, or a local `replace` as in
 [the custom-behavior example](../../examples/cplane-custom-behavior/go.mod).
@@ -164,7 +170,7 @@ Do not mutate retained route slices or the view during `Range`.
 The view does not choose a path or combine its SIDs. Several input paths can
 map to one forwarding key; selection belongs to the plugin and must be independent
 of map iteration order. See the example's
-[`headendEntries`](../../examples/cplane-custom-behavior/main.go) for a deterministic
+[`headendEntries`](customcontroller/controller.go) in the shared controller for a deterministic
 selection policy and its handling of local SID and advertisement retries.
 
 ## Reading the GoBGP packet model

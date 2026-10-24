@@ -10,7 +10,16 @@ Build from the repository root with Go 1.25.5:
 make cplane-bgp-observer
 ```
 
-With a running daemon and peers configured for the desired families, register the native controller using:
+With a running daemon and peers configured for the desired families, dynamically load the WASM build:
+
+```sh
+vinbero plugin cplane register --name bgp-observer \
+    --wasm out/cplane-bgp-observer.wasm --family mup_ipv4 --family evpn
+```
+
+Loading this module adds its code to the running daemon without rebuilding or restarting the daemon.
+Repeat registration with the same name to replace it with a new WASM build.
+The same controller is also statically linked under native implementation ID `bgp-observer`:
 
 ```sh
 vinbero plugin cplane register --name bgp-observer --family mup_ipv4 --family evpn
@@ -18,12 +27,6 @@ vinbero plugin cplane register --name bgp-observer --family mup_ipv4 --family ev
 
 Native is the default backend; omitting the implementation ID uses the registration name, and omitting the version selects the daemon's catalog version.
 Use `--native bgp-observer` when registering under a different name.
-To load the WASM build instead:
-
-```sh
-vinbero plugin cplane register --name bgp-observer \
-    --wasm out/cplane-bgp-observer.wasm --family mup_ipv4 --family evpn
-```
 
 Registration subscribes to received routes; it does not configure BGP peers or enable new address families on them.
 The example calls `guest.InputFeatures()` and requires `cplane.FeatureBGPPath`.
