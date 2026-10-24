@@ -278,6 +278,11 @@ smaller artifact. The worked example is
 of the custom-behavior case and is what the `cplane-plugin-2site` interop
 lab runs. Its README covers the build flags and why each is needed.
 
+The [IMET-gated EVPN example](examples/cplane-evpn-imet/README.md) joins RT2 and
+RT3 with one shared Go controller for native and WASM execution.
+It demonstrates an optional static MAC policy within the existing single-homed
+EVPN profile, with host-authorized bridge-domain writes.
+
 The guest SDK is a Go package in this repository's module. The header/proto
 tarball does not install Go packages; use a checkout or a Go module dependency
 pinned to a Vinbero revision containing the SDK.

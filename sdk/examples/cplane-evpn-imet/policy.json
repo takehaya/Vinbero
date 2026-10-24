@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "contexts": [{
+    "name": "l2",
+    "grants": [{"families": ["evpn"], "route_targets": ["65000:7"]}],
+    "delegate_evpn": true,
+    "bridge_domain": 100
+  }]
+}

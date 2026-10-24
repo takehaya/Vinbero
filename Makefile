@@ -291,6 +291,13 @@ cplane-route-composition-observer: ## build the route composition example withou
 		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
 			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-route-composition-observer.wasm .
 
+.PHONY: cplane-evpn-imet
+cplane-evpn-imet: ## build the optional IMET-gated EVPN static MAC policy
+	mkdir -p out
+	cd sdk/examples/cplane-evpn-imet && \
+		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-evpn-imet.wasm .
+
 .PHONY: bench-cplane-build
 bench-cplane-build: cplane-route-composition cplane-route-composition-observer bench-rq1-build ## Build identical-controller native/WASM measurement artifacts
 	go test -c -o out/bench/cplane-runtime.test ./pkg/cplane/native
