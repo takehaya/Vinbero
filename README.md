@@ -15,6 +15,7 @@ https://github.com/takehaya/Vinbero-legacy/tree/master) has become outdated, so 
 - **Unified VRF binding** — one `vbctl vrf-bgp bind --rt FAMILY:RT:DIRECTION` drives import/export policy and auto-advertise across every AF.
 - **Interop tested** — FRR (L3VPN/EVPN) in CI under `examples/interop-clab/scenarios/`.
 - **Custom XDP plugins** — reserved tail-call slots, runtime register via `vinbero plugin`. SDK in `sdk/`.
+- **Control-plane plugins** — dynamically load WASM routing logic without rebuilding or restarting `vinberod`; shared Go controllers can also run through a statically linked native backend.
 - **Connect RPC + gRPC** — every primitive reachable over HTTP/2.
 
 ## Quickstart
@@ -163,7 +164,7 @@ eval "$(vinbero completion zsh)"
 | `fdb` | | FDB (MAC address table) entries |
 | `vlan-table` | `vt` | VLAN cross-connect table for End.DX2V |
 | `stats` | | Global and per-slot packet statistics |
-| `plugin` | | Register / unregister custom BPF plugins |
+| `plugin` | | Register / unregister BPF plugins; manage control-plane plugins with `plugin cplane` |
 | `completion` | | Shell completion scripts |
 
 Each resource command carries a `flush` subcommand (requires `--yes`) that
@@ -176,6 +177,16 @@ removing the pin directory.
 See [docs/loadmap.md](./docs/loadmap.md) for supported functions and roadmap.
 
 ## Plugins
+
+Control-plane plugins extend how BGP routes become forwarding state, local SIDs, and advertisements.
+Load a WASM module into the running daemon to add or upgrade routing logic without rebuilding `vinberod`.
+The daemon checks the module's ABI, capabilities, and output scope before accepting its declarations.
+Start with the [WASM observer walkthrough](./sdk/README.md#load-a-wasm-observer), then use the [Go SDK](./sdk/go/cplane/README.md) to write a plugin.
+The [context route API](./sdk/cplane-route-api.md) covers authorized route views and composition rules, with MUP and EVPN examples.
+
+The same Go controller can also be compiled into the daemon and selected through the native backend.
+Native is the CLI default when `--wasm` is omitted; adding native controller code requires rebuilding the daemon.
+See [backend selection](./sdk/README.md#selecting-a-backend) for the distinction between dynamic WASM loading and native registration.
 
 Vinbero's XDP data plane can be extended with custom BPF plugins.
 Plugins are loaded into reserved PROG_ARRAY slots and can be dynamically

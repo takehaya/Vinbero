@@ -7,14 +7,14 @@ A **data-plane plugin** is an eBPF object that runs in a reserved
 PROG_ARRAY slot, extending the XDP data plane with custom tail call
 targets. That is what most of this document is about.
 
-A **control-plane plugin** is a WebAssembly module that runs inside
-vinberod: it sees the BGP routes vinbero receives, and declares the
-forwarding state, the local SIDs and the advertisements it wants. See
-[Control-plane plugins](#control-plane-plugins) below.
+A **control-plane plugin** extends routing logic by observing BGP routes and declaring forwarding state, local SIDs, and advertisements.
+Upload a WebAssembly module to add or upgrade that logic while `vinberod` is running, without rebuilding the daemon.
+Shared Go controllers can also be statically linked into the daemon and registered through the native backend.
+Start with [Control-plane plugins](#control-plane-plugins) below for the WASM walkthrough and backend selection.
 The [context route API](cplane-route-api.md) adds authorized Views, typed route joins, and owned composition outputs.
 
-Both are loaded and unloaded dynamically over the Connect RPC
-`PluginService` API or the `vinbero plugin` CLI.
+Register and unregister plugins through the Connect RPC `PluginService` API or the `vinbero plugin` CLI.
+New eBPF and WASM code is supplied as an artifact; native registration selects an implementation already compiled into the daemon.
 
 Rebuild data-plane plugins that read the FDB against these headers.
 Use `fdb_read_forward()` for one coherent forwarding snapshot and the lookup key's BD ID for peer lookups; separate field loads can mix concurrent MAC-learning updates.
@@ -67,7 +67,11 @@ This installs:
 - `/usr/local/include/vinbero/*.h` — public ABI headers
 - `/usr/local/include/core/*.h` — internal headers referenced by the public ones
 - `/usr/local/include/vinbero/Makefile.plugin` — build template for plugin projects
-- `/usr/local/share/vinbero-sdk/{README.md,LICENSE,examples/}` — docs and worked examples
+- `/usr/local/share/vinbero-sdk/{README.md,LICENSE}` — SDK overview and license
+- `/usr/local/share/vinbero-sdk/proto/vinbero/v1/cplane_plugin.proto` — control-plane wire contract
+
+Examples and Go packages remain in the repository; the tarball does not install them.
+The packaged README links to repository documentation at the source commit used to build the SDK (or `main` when built without Git metadata).
 
 ### From an in-tree checkout (for vinbero developers)
 
@@ -77,7 +81,8 @@ cd Vinbero
 sudo make install-sdk
 ```
 
-This installs the same files from the working tree without producing a tarball.
+This target installs the C headers and build template from the working tree.
+Use this checkout for the documentation, examples, and Go packages.
 
 ## Build
 
@@ -228,10 +233,58 @@ The SDK does not require any BPF-side instrumentation for this.
 
 ## Control-plane plugins
 
-A control-plane plugin is a WebAssembly module. Where a data-plane plugin
-decides what happens to a packet, a control-plane plugin decides what the
-forwarding state should be: it is handed the routes vinbero receives and
-declares what it wants installed, advertised, or allocated.
+A control-plane plugin receives BGP events and declares the state it wants installed, advertised, or allocated.
+Its WASM artifact is a dynamic extension point: an operator can load new routing logic through the API without rebuilding or restarting the daemon.
+The host applies authorized declarations to the existing forwarding and BGP machinery.
+WASM runs in the daemon's wazero runtime; the plugin does not process packets in the kernel.
+
+### Load a WASM observer
+
+Use a checkout containing the control-plane SDK and a Go version supported by its `go.mod`.
+The development toolchain is recorded in `mise.toml`.
+Run the following commands from the repository root, with `vinbero` on `PATH` and a running daemon reachable at the CLI's server address:
+
+```sh
+make cplane-bgp-observer
+vinbero plugin cplane register --name route-audit \
+  --wasm out/cplane-bgp-observer.wasm --family evpn
+vinbero plugin cplane stats --name route-audit
+```
+
+The module logs route events and requests no write capabilities, so it cannot install forwarding state or originate routes.
+Configure BGP peers and the selected address family separately; registration subscribes to received events and does not establish sessions.
+The registration name `route-audit` need not identify a native implementation because `--wasm` supplies the code.
+See the [observer example](examples/cplane-bgp-observer/README.md) for its input requirements and log format.
+
+To upgrade, build the new module and repeat registration with the same name and the required configuration and grants.
+To remove this observer:
+
+```sh
+vinbero plugin cplane unregister --name route-audit
+```
+
+For writing plugins, replacement and cleanup depend on their input authority, configuration, and owned outputs.
+Same-name replacement can retain compatible forwarding state, but it is not an unconditional loss-free handoff guarantee.
+The [lifecycle reference](../docs/design/ja/cplane-plugin.md#lifecycle) specifies those conditions.
+
+### Selecting a backend
+
+| | WASM | Native |
+| --- | --- | --- |
+| Code supplied at registration | A `.wasm` file through `--wasm` | An ID already in the daemon's implementation catalog |
+| Adding or updating controller code | Rebuild the module and register it with the running daemon | Rebuild and deploy the daemon |
+| Execution boundary | Guest linear-memory limit and call timeout | In-process execution with cooperative cancellation |
+| Go controller source | Shared controller package called through the guest adapter | The same package called through the native adapter |
+
+The CLI selects native when `--wasm` is omitted.
+For the linked observer, register `--name route-audit --native bgp-observer --family evpn`; this selects the same shared controller used above.
+Without `--native`, the implementation ID defaults to the registration name; `--native-version` can pin its catalog version.
+Native execution is enabled by default, and `settings.cplane_plugins.native_enabled: false` restricts the daemon to WASM registrations.
+This setting does not add a native copy of a new WASM plugin: native support requires an explicit adapter and a daemon build.
+An invalid WASM module is rejected rather than falling back to native.
+Treat native implementations as trusted daemon code; they have no per-instance heap cap or forced call termination.
+
+### Routing policies
 
 The case it exists for is an SRv6 endpoint behavior of your own. The
 behavior is a 16-bit codepoint inside the SID TLV, so a plugin can claim
@@ -262,8 +315,7 @@ fail but functions it cannot import. The apply functions are shared across
 the kinds of declaration, so which kind a plugin may declare is checked
 where it opens the transaction instead: one granted `advertise` alone is
 refused when it opens a headend transaction.
-`docs/design/ja/cplane-plugin.md` documents the ABI and the lifecycle in
-full.
+The [Japanese design reference](../docs/design/ja/cplane-plugin.md) documents the ABI, event delivery, authorization, and lifecycle in full.
 
 ### Writing one
 
@@ -272,16 +324,20 @@ typed events and desired-set declarations, and a prefix-route view that handles
 BGP replay boundaries. The plugin supplies route selection and the forwarding
 state it wants. Host ownership and scope checks still apply to every declaration.
 
-Standard Go WASI reactors are the default build; TinyGo remains an optional
-smaller artifact. The worked example is
-`sdk/examples/cplane-custom-behavior/`, which implements both directions
-of the custom-behavior case and is what the `cplane-plugin-2site` interop
-lab runs. Its README covers the build flags and why each is needed.
+Standard Go WASI reactors are the default build; TinyGo remains an optional smaller artifact.
+Choose a worked example by the policy being implemented:
 
-The [IMET-gated EVPN example](examples/cplane-evpn-imet/README.md) joins RT2 and
-RT3 with one shared Go controller for native and WASM execution.
-It demonstrates an optional static MAC policy within the existing single-homed
-EVPN profile, with host-authorized bridge-domain writes.
+| Example | Purpose |
+| --- | --- |
+| [BGP observer](examples/cplane-bgp-observer/README.md) | Read received GoBGP paths without write capabilities |
+| [Custom behavior](examples/cplane-custom-behavior/README.md) | Claim a behavior, allocate local SIDs, advertise routes, and declare headend state |
+| [MUP composition](examples/cplane-route-composition/README.md) | Join authorized MUP routes and build forwarding outputs |
+| [IMET-gated EVPN](examples/cplane-evpn-imet/README.md) | Join RT2 and RT3 for an optional static MAC policy |
+
+The custom-behavior example is exercised by the `cplane-plugin-2site` interop lab.
+Each example documents its grants, build options, and supported profile.
+
+The [context route API](cplane-route-api.md) defines authorized views, generic join rules, and complete composition outputs for MUP and EVPN.
 
 The guest SDK is a Go package in this repository's module. The header/proto
 tarball does not install Go packages; use a checkout or a Go module dependency

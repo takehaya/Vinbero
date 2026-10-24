@@ -31,9 +31,10 @@ func cplaneSubcommand() *cli.Command {
 			{
 				Name:  "register",
 				Usage: "Register or upgrade a control-plane plugin",
-				Description: "Registering a name that is already running upgrades it in place: the\n" +
-					"state the running instance wrote is kept and the new module reconciles\n" +
-					"over it, so the data plane is not emptied between the two.\n" +
+				Description: "Registering a name that is already running replaces that instance.\n" +
+					"Compatible forwarding state can be retained while the new instance replays.\n" +
+					"Changes to authorization or context configuration can remove old state first.\n" +
+					"Replacement does not guarantee loss-free handoff.\n" +
 					"Without --wasm, run the native implementation selected by --native or --name.\n" +
 					"An omitted native version is resolved by the daemon.",
 				Flags: []cli.Flag{
