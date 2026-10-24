@@ -236,6 +236,71 @@ func TestUnregisterRemovesFromTheStore(t *testing.T) {
 	}
 }
 
+func TestUnregisterStoreFailureRemainsRetryable(t *testing.T) {
+	store := newTestStore(t)
+	src := newFakeSource()
+	claims := newFakeClaims()
+	m, ops := newTestManagerWithStoreAndClaims(t, src, store, claims)
+	if err := m.Register(context.Background(), storedRegistration(t)); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	src.emit("declare", bgp.RouteEvent{Family: bgp.FamilyVPNv4})
+	waitDelivered(t, m, "declare")
+	if ops.countV4() != 1 {
+		t.Fatal("setup: plugin did not declare forwarding state")
+	}
+
+	// A nonempty directory makes manifest removal fail even as root.
+	manifestPath := store.manifestPath("declare")
+	savedManifest := filepath.Join(t.TempDir(), "declare.json")
+	if err := os.Rename(manifestPath, savedManifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(manifestPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(manifestPath, "blocker")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Unregister(context.Background(), "declare"); err == nil {
+		t.Fatal("unregister reported success despite failing to remove the manifest")
+	}
+	if st, ok := m.StatsFor("declare"); !ok || !st.Dead {
+		t.Fatal("failed unregister must remain visible as a stopped, retryable registration")
+	}
+	if !claims.claimed("declare") {
+		t.Fatal("failed unregister released the behavior claim before durable removal")
+	}
+	if ops.countV4() != 0 {
+		t.Fatal("unregister did not flush owned state before removing the manifest")
+	}
+
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(savedManifest, manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Unregister(context.Background(), "declare"); err != nil {
+		t.Fatalf("retry unregister: %v", err)
+	}
+	if _, ok := m.StatsFor("declare"); ok || claims.claimed("declare") {
+		t.Fatal("successful retry retained the registration or behavior claim")
+	}
+	m.Close(context.Background())
+	restarted, _ := newTestManagerWithStore(t, newFakeSource(), store)
+	if err := restarted.Restore(context.Background()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if names := restarted.List(); len(names) != 0 {
+		t.Fatalf("restart restored unregistered plugins: %v", names)
+	}
+}
+
 // Shutting the daemon down is not unregistering, so the store keeps what
 // it had and the next start brings it back.
 func TestCloseKeepsTheStore(t *testing.T) {
