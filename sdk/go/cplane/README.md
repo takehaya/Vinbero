@@ -47,6 +47,14 @@ all events were handled. `Tick func(int64)` receives monotonic nanoseconds;
 `--tick-ms 1000` (or set `TickInterval` through the API) to drive periodic retries;
 omitting the interval leaves `Tick` undriven.
 
+For context-input registrations, replacing a healthy instance preserves its old
+forwarding set only while input authority, limits, and opaque configuration bytes
+remain identical. Configuration changes remove the old set before replay, including
+changes from writing to observation-only mode. Observers need not submit an empty
+set or acquire write capabilities. The host does not interpret plugin configuration;
+changing a module's meaning without changing configuration is outside this guarantee.
+Same-configuration native/WASM replacement can still preserve forwarding state.
+
 Context registrations can opt into grouping already queued live BGP updates with
 `max_batch_events` in their input policy.
 Callbacks must preserve event order and report dispositions using each event's original sequence number.

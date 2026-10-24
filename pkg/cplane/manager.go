@@ -553,7 +553,8 @@ func slotSet(slots []uint32) map[uint32]struct{} {
 
 // sameInputAuthority is deliberately conservative: any authorization or limit
 // change keeps the existing fail-closed prune. Backend, module and business
-// configuration may change within that authority. Caller holds m.mu.
+// configuration do not define authority. Retention also requires unchanged
+// opaque configuration; an observer may never re-declare output. Caller holds m.mu.
 func sameInputAuthority(old *plugin, reg Registration) bool {
 	if old == nil || old.dead || old.reg.Input == nil || reg.Input == nil {
 		return false
@@ -572,8 +573,8 @@ func sameInputAuthority(old *plugin, reg Registration) bool {
 // Registering a name that is already running replaces it in place: the old
 // instance is stopped and the new one starts against the same owner tag,
 // preserving compatible, healthy state until the new instance re-declares
-// its desired set. Changed authority and unrestored input state still follow
-// the fail-closed prune before replay.
+// its desired set. Changed authority or configuration and unrestored input
+// state still follow the fail-closed prune before replay.
 func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
 		return err
@@ -678,7 +679,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 
 	m.mu.Lock()
 	old, existed := m.plugins[reg.Name]
-	preserveInput := sameInputAuthority(old, reg)
+	preserveInput := sameInputAuthority(old, reg) && bytes.Equal(old.reg.Config, reg.Config)
 	m.plugins[reg.Name] = p
 	p.cancel = cancel
 	inst := p.inst
@@ -708,8 +709,9 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	// Not gated on having replaced something: a restore goes through here
 	// with nothing in the registry and its predecessor's writes still
 	// pinned in the maps, which is the same situation.
-	// An unchanged input authority can keep its last complete forwarding set
-	// until the replacement's replay publishes. Recheck after closing the old
+	// An unchanged input authority and byte-identical configuration can keep the
+	// last complete forwarding set until the replacement's replay publishes.
+	// Recheck after closing the old
 	// worker: its final in-flight call may have discovered an input/output fault.
 	if !preserveInput || !old.ops.inputHandoffClean() {
 		if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
