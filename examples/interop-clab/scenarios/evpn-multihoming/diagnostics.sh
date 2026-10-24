@@ -40,13 +40,19 @@ done
 for site in ce-mh ce-remote core; do
     node="clab-evpn-multihoming-$site"
     run docker inspect --format 'image={{.Image}} state={{.State.Status}} pid={{.State.Pid}}' "$node"
-    run docker exec "$node" ip -d link show
+    run docker exec "$node" ip link show
     run docker exec "$node" ip address show
     run docker exec "$node" ip route show
     run docker exec "$node" ip -6 route show
     run docker exec "$node" ip neigh show
     run docker exec "$node" ip -6 neigh show
     run docker exec "$node" bridge fdb show
+    if [ "$site" = ce-mh ]; then
+        # Alpine ships BusyBox brctl, without iproute2's bridge or ip -d.
+        run docker exec "$node" brctl show
+        run docker exec "$node" brctl showmacs br-ce
+        run docker exec "$node" brctl showstp br-ce
+    fi
 done
 
 # Disabled counters and CLI projections are not raw BPF map or BGP RIB dumps.
