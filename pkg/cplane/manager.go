@@ -1246,6 +1246,16 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 		return fmt.Errorf("cplane: flush plugin %q: %w", name, err)
 	}
 
+	if err := m.store.Remove(name); err != nil {
+		// Keep a stopped registration and its claims until the durable
+		// removal succeeds, so an operator can see the failure and retry.
+		m.mu.Lock()
+		p.dead = true
+		m.plugins[name] = p
+		m.mu.Unlock()
+		return fmt.Errorf("cplane: remove plugin %q from store: %w", name, err)
+	}
+
 	if ds, ok := m.source.(delegationSource); ok {
 		ds.SetDelegation(name, nil)
 		if refresh, ok := m.source.(BuiltinClaimRefresher); ok {
@@ -1258,10 +1268,6 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 		// live updates, refreshes and RIB replay use the current claims and
 		// delegation; they may deliver those paths with built-in semantics.
 		m.claims.Release(name)
-	}
-	if err := m.store.Remove(name); err != nil {
-		m.logger.Warn("could not remove a plugin from the store; a restart would bring it back",
-			zap.String("plugin", name), zap.Error(err))
 	}
 	m.logger.Info("control-plane plugin unregistered", zap.String("plugin", name))
 	return nil
