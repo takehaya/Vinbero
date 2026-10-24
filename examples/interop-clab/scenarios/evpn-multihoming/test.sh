@@ -127,10 +127,12 @@ clear_remote_neighbor() {
     sleep 1
     local neighbors
     neighbors=$(docker exec "$CE_REMOTE" ip neigh show to "$CE_MH_ADDR" dev eth1 2>/dev/null) || return 1
-    ! grep -qiE "REACHABLE|STALE|DELAY|PROBE|PERMANENT" <<<"$neighbors"
+    # BusyBox also prints a lowercase "probes" count for unresolved entries.
+    ! grep -qiE "(^|[[:space:]])(REACHABLE|STALE|DELAY|PROBE|PERMANENT|NOARP)([[:space:]]|$)" <<<"$neighbors"
 }
 if ! retry_n 5 clear_remote_neighbor; then
     ng "ce-remote: $CE_MH_ADDR neighbour not flushed (setup failed); BUM single-delivery not asserted"
+    docker exec "$CE_REMOTE" ip neigh show to "$CE_MH_ADDR" dev eth1 2>&1 | sed 's/^/      /'
 else
     if replies=$(docker exec "$CE_REMOTE" ping -c 3 -W 2 "$CE_MH_ADDR" 2>&1); then
         dup=$(grep -c "DUP!" <<<"$replies")
