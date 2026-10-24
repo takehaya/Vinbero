@@ -41,8 +41,8 @@ func (s *Session) WithdrawPolicy(_ context.Context, key bgp.SRPolicyKey) error {
 	}
 	rk := srPolicyAdvKey(key.Color, key.Endpoint, key.Distinguisher)
 	s.advMu.Lock()
+	defer s.advMu.Unlock()
 	id, ok := s.advertised[rk]
-	s.advMu.Unlock()
 	if !ok {
 		return nil
 	}
@@ -52,10 +52,8 @@ func (s *Session) WithdrawPolicy(_ context.Context, key bgp.SRPolicyKey) error {
 		return fmt.Errorf("withdraw SR Policy {color=%d, endpoint=%s, dist=%d}: %w",
 			key.Color, key.Endpoint, key.Distinguisher, err)
 	}
-	s.advMu.Lock()
 	delete(s.advertised, rk)
 	delete(s.producers, rk)
-	s.advMu.Unlock()
 	return nil
 }
 

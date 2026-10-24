@@ -14,20 +14,20 @@ import (
 // fakeFdbMapOps records FDB writes without a live BPF map (the MAC string of
 // each create/delete).
 type fakeFdbMapOps struct {
-	created   []string           // mac.String() of each CreateFdb
-	deleted   []string           // mac.String() of each DeleteFdb
-	createErr error              // when set, CreateFdb fails (dataplane sync failure)
+	created   []string           // mac.String() of each LearnFdb
+	deleted   []string           // mac.String() of each DeleteLearnedFdb
+	createErr error              // when set, LearnFdb fails (dataplane sync failure)
 	aged      []bpf.AgedFdbEntry // returned by AgeFdbEntries (the entries it removed)
 }
 
-func (f *fakeFdbMapOps) CreateFdb(bdID uint16, mac net.HardwareAddr, _ *bpf.FdbEntry) error {
+func (f *fakeFdbMapOps) LearnFdb(bdID uint16, mac net.HardwareAddr, _ uint32) (bool, error) {
 	if f.createErr != nil {
-		return f.createErr
+		return false, f.createErr
 	}
 	f.created = append(f.created, mac.String())
-	return nil
+	return true, nil
 }
-func (f *fakeFdbMapOps) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
+func (f *fakeFdbMapOps) DeleteLearnedFdb(bdID uint16, mac net.HardwareAddr, _ uint32) error {
 	f.deleted = append(f.deleted, mac.String())
 	return nil
 }

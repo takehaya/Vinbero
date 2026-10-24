@@ -44,11 +44,10 @@ VINBERO_PLUGIN(plugin_custom_behavior)
     if (seen)
         __sync_fetch_and_add(seen, 1);
 
-    // End.DT4 reads what it needs from the same tail-call context this
-    // program was handed -- the SID entry and its aux -- so the handoff
-    // needs nothing prepared. With no aux the lookup falls back to the
-    // ingress interface's table, which is where the decapsulated customer
-    // prefix lives in this example.
+    // The control-plane half must request decap_vrf when allocating this
+    // SID. End.DT4 uses the SID's aux to look up the host-owned VRF grant.
+    // Without that grant it drops the packet; it does not fall back to
+    // the ingress interface's table for a plugin-owned SID.
     bpf_tail_call(ctx, &sid_endpoint_progs, SRV6_LOCAL_ACTION_END_DT4);
 
     // Only reached when the slot is empty, which means the daemon is not

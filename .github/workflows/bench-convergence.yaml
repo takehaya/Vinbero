@@ -8,6 +8,7 @@ on:
       - 'Makefile'
       - 'examples/common/netns.sh'
       - 'go.*'
+      - 'identity.go'
       - 'src/**'
       - 'pkg/**'
       - 'cmd/**'
@@ -22,6 +23,7 @@ on:
       - 'Makefile'
       - 'examples/common/netns.sh'
       - 'go.*'
+      - 'identity.go'
       - 'src/**'
       - 'pkg/**'
       - 'cmd/**'
@@ -47,20 +49,24 @@ jobs:
       - name: Install namespace test dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ethtool iproute2 iputils-ping \
-            linux-modules-extra-$(uname -r)
-          sudo modprobe vrf
+          sudo apt-get install -y --no-install-recommends ethtool iproute2 iputils-ping
+          if ! sudo modprobe vrf; then
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe vrf
+          fi
       - name: Build and test the instrument
-        run: make bench-rq1-build bench-rq1-test
+        run: make bench-cplane-build bench-rq1-test
       # This checks that each mode measures a real transition. Timing values
       # on a shared CI runner are not performance results or regression gates.
       - name: Exercise balanced builtin, idle plugin and cplane conditions
         run: |
           sudo python3 bench/rq1/suite.py --smoke --work /tmp/rq1-ci-suite
-      - name: Exercise the relay path
+      - name: Exercise relay and shared-controller paths
         run: |
-          sudo MODE=relay RATE=10000 WORK=/tmp/rq1-ci-relay \
-            ./bench/rq1/topo/run_bgp.sh 1
+          for mode in relay composition-native composition-wasm; do
+            sudo MODE="$mode" RATE=10000 WORK="/tmp/rq1-ci-$mode" \
+              ./bench/rq1/topo/run_bgp.sh 1
+          done
       - name: Package private measurement diagnostics
         if: always()
         run: |
@@ -68,6 +74,7 @@ jobs:
           # diagnostic archive needs to be readable by upload-artifact.
           sudo tar -C /tmp --ignore-failed-read -czf - -- \
             rq1-ci-suite rq1-ci-relay \
+            rq1-ci-composition-native rq1-ci-composition-wasm \
             > "$RUNNER_TEMP/convergence-instrument.tar.gz"
       - name: Preserve measurement diagnostics
         if: always()

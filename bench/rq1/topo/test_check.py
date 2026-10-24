@@ -12,12 +12,18 @@ def state(mode="cplane", sid="fd00:a::100"):
              "srcAddr": "fd00:100::", "dstAddr": sid, "segments": [sid]}
     plugins = []
     groups = []
-    if mode in ("cplane", "builtin-idle"):
+    if mode in ("cplane", "builtin-idle", "composition-native", "composition-wasm"):
         idle = mode == "builtin-idle"
         plugins = [{"name": check.PLUGIN, "endpointBehaviors": [0xFE01], "capabilities": ["headend"],
                     "families": ["vpnv6" if idle else "vpnv4"], "deliveryIdle": True,
                     "scope": {"headendPrefixes": [check.IDLE_PREFIX if idle else check.PREFIX]},
                     "headendEntries": 0 if idle else 1, "since": "2026-09-08T00:00:00Z", "snapshots": "1"}]
+    if mode.startswith("composition-"):
+        plugins[0].update(endpointBehaviors=[], capabilities=["headend", "mup"],
+                          families=["mup_ipv4", "mup_ipv6"], backend=mode.removeprefix("composition-"),
+                          inputReady=True, desiredRevision="2", appliedRevision="2")
+        if mode == "composition-native":
+            plugins[0].update(nativeId="mup-composition", nativeVersion="1", nativeIdentity="source-digest")
     if mode in ("builtin", "builtin-idle"):
         groups = [{"prefixes": [check.PREFIX], "members": [{"segments": [sid]}]}]
     return {"headend": {"headendv4s": [entry]}, "plugins": {"plugins": plugins}, "groups": {"groups": groups}}
@@ -103,3 +109,24 @@ class CheckTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompositionCheckTests(unittest.TestCase):
+    def test_same_controller_identity_and_applied_state_required(self):
+        for mode in ("composition-native", "composition-wasm"):
+            sample = state("cplane")
+            plugin = sample["plugins"]["plugins"][0]
+            plugin.update(endpointBehaviors=[], capabilities=["headend", "mup"],
+                          backend=mode.removeprefix("composition-"), families=["mup_ipv4", "mup_ipv6"], inputReady=True,
+                          desiredRevision="2", appliedRevision="2")
+            if mode.endswith("native"):
+                plugin.update(nativeId="mup-composition", nativeVersion="1", nativeIdentity="source-digest")
+            check.verify(sample, mode, "fd00:a::100")
+            for field, value in (("families", ["vpnv4"]), ("deliveryIdle", False), ("inputReady", False)):
+                bad = copy.deepcopy(sample)
+                bad["plugins"]["plugins"][0][field] = value
+                with self.assertRaises(ValueError):
+                    check.verify(bad, mode, "fd00:a::100")
+            plugin["backend"] = "other"
+            with self.assertRaises(ValueError):
+                check.verify(sample, mode, "fd00:a::100")

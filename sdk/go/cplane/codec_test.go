@@ -78,6 +78,26 @@ func TestMalformedBatchNeverReturnsPartialEvents(t *testing.T) {
 	}
 }
 
+func TestBGPPathCodecRejectsOverflow(t *testing.T) {
+	for _, item := range []struct {
+		field int
+		value uint64
+	}{{2, 1 << 16}, {3, 1 << 8}} {
+		var path, route, event, batch []byte
+		path = protowire.AppendTag(path, protowire.Number(item.field), protowire.VarintType)
+		path = protowire.AppendVarint(path, item.value)
+		route = protowire.AppendTag(route, 17, protowire.BytesType)
+		route = protowire.AppendBytes(route, path)
+		event = protowire.AppendTag(event, 3, protowire.BytesType)
+		event = protowire.AppendBytes(event, route)
+		batch = protowire.AppendTag(batch, 1, protowire.BytesType)
+		batch = protowire.AppendBytes(batch, event)
+		if got, err := cplane.DecodeEvents(batch); got != nil || err == nil {
+			t.Fatalf("accepted field %d overflow", item.field)
+		}
+	}
+}
+
 func TestEncodeEventDisposition(t *testing.T) {
 	data := cplane.EncodeResults([]cplane.EventResult{{Sequence: 15, Disposition: cplane.Quarantine, Reason: "unsupported attribute"}})
 	var status v1.PluginEventStatus

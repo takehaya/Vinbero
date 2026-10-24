@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
@@ -50,6 +51,13 @@ type Store struct {
 // than a silent prune -- see Store.load and Manager.Restore.
 const storeManifestVersion = 2
 
+// Context grants are authorization data. Older daemons must refuse the
+// registration instead of restoring it while ignoring those restrictions.
+const contextManifestVersion = 3
+
+// Native implementations persist an exact linked source/dependency identity.
+const nativeManifestVersion = 4
+
 // manifestScope is the persisted form of a Scope: the five lists nested so
 // they travel as a unit.
 type manifestScope struct {
@@ -63,12 +71,17 @@ type manifestScope struct {
 
 // manifest is what is written beside a plugin's module.
 type manifest struct {
-	Version      int      `json:"version"`
-	Name         string   `json:"name"`
-	Config       []byte   `json:"config,omitempty"`
-	Families     []string `json:"families,omitempty"`
-	Behaviors    []uint16 `json:"behaviors,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	Backend        string                `json:"backend,omitempty"`
+	NativeID       string                `json:"native_id,omitempty"`
+	NativeVersion  string                `json:"native_version,omitempty"`
+	NativeIdentity string                `json:"native_identity,omitempty"`
+	Input          *v1.CplaneInputPolicy `json:"input,omitempty"`
+	Version        int                   `json:"version"`
+	Name           string                `json:"name"`
+	Config         []byte                `json:"config,omitempty"`
+	Families       []string              `json:"families,omitempty"`
+	Behaviors      []uint16              `json:"behaviors,omitempty"`
+	Capabilities   []string              `json:"capabilities,omitempty"`
 	// Scope is persisted with the capabilities because it is half of the
 	// same statement: a plugin restored with its capabilities and without
 	// its scope would come back able to declare nothing, and one restored
@@ -157,13 +170,28 @@ func (s *Store) Save(reg Registration) error {
 			previous = path
 		}
 	}
-	moduleFile := moduleFileName(reg.Name, reg.Module)
-	if err := writeFileAtomic(filepath.Join(s.dir, moduleFile), reg.Module); err != nil {
-		return fmt.Errorf("cplane store: write module for %q: %w", reg.Name, err)
+	moduleFile := ""
+	if reg.Backend == BackendNative {
+		if len(reg.Module) != 0 || reg.NativeID == "" || reg.NativeVersion == "" || reg.NativeIdentity == "" {
+			return fmt.Errorf("cplane store: invalid native identity")
+		}
+	} else {
+		if reg.Backend != "" && reg.Backend != BackendWASM {
+			return fmt.Errorf("cplane store: unknown backend %q", reg.Backend)
+		}
+		if reg.NativeID != "" || reg.NativeVersion != "" || reg.NativeIdentity != "" {
+			return fmt.Errorf("cplane store: WASM registration has native identity")
+		}
+		moduleFile = moduleFileName(reg.Name, reg.Module)
+		if err := writeFileAtomic(filepath.Join(s.dir, moduleFile), reg.Module); err != nil {
+			return fmt.Errorf("cplane store: write module for %q: %w", reg.Name, err)
+		}
 	}
 
 	m := manifest{
+		Backend: reg.Backend, NativeID: reg.NativeID, NativeVersion: reg.NativeVersion, NativeIdentity: reg.NativeIdentity,
 		Version:      storeManifestVersion,
+		Input:        reg.Input,
 		Name:         reg.Name,
 		Config:       reg.Config,
 		Behaviors:    reg.Behaviors,
@@ -184,6 +212,13 @@ func (s *Store) Save(reg Registration) error {
 		Module:         moduleFile,
 		SavedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
+	if reg.Input != nil {
+		m.Version = contextManifestVersion
+	}
+	if reg.Backend == BackendNative {
+		m.Version = nativeManifestVersion
+	}
+
 	for _, f := range reg.Families {
 		m.Families = append(m.Families, string(f))
 	}
@@ -379,6 +414,7 @@ func (s *Store) List() ([]Registration, error) {
 // UnloadableManifest is a stored plugin whose manifest this daemon cannot
 // turn into a registration -- most often one written in an older format.
 type UnloadableManifest struct {
+	Input     *v1.CplaneInputPolicy
 	Name      string
 	Behaviors []uint16
 	Reason    error
@@ -411,14 +447,16 @@ func (s *Store) Unloadable() []UnloadableManifest {
 			m, mErr := s.readManifest(name)
 			behaviors := []uint16(nil)
 			var scope Scope
+			var input *v1.CplaneInputPolicy
 			if mErr == nil {
 				behaviors = m.Behaviors
+				input = m.Input
 				// A current-version manifest that parsed still carries its
 				// scope even when the module will not load, so the grant can
 				// be reserved. A version too old to have a scope leaves it
 				// zero. A malformed scope is left zero rather than failing the
 				// whole listing -- the plugin is unrestored either way.
-				if m.Version == storeManifestVersion && m.Scope != nil {
+				if (m.Version == storeManifestVersion || m.Version == contextManifestVersion || m.Version == nativeManifestVersion) && m.Scope != nil {
 					if sc, sErr := ParseScope(ScopeSpec{
 						Locators:        m.Scope.Locators,
 						VRFs:            m.Scope.VRFs,
@@ -431,7 +469,7 @@ func (s *Store) Unloadable() []UnloadableManifest {
 					}
 				}
 			}
-			out = append(out, UnloadableManifest{Name: name, Behaviors: behaviors, Reason: err, Scope: scope})
+			out = append(out, UnloadableManifest{Name: name, Input: input, Behaviors: behaviors, Reason: err, Scope: scope})
 		}
 	}
 	return out
@@ -514,7 +552,7 @@ func (s *Store) load(name string) (Registration, error) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return Registration{}, fmt.Errorf("cplane store: decode manifest for %q: %w", name, err)
 	}
-	if m.Version != storeManifestVersion {
+	if (m.Version != storeManifestVersion && m.Version != contextManifestVersion && m.Version != nativeManifestVersion) || (m.Input != nil && m.Version == storeManifestVersion) {
 		// A version this daemon does not write is refused rather than
 		// coerced. For a version-1 manifest (pre-scope) that is deliberate:
 		// it has no scope, and restoring it under an empty one would prune
@@ -527,16 +565,36 @@ func (s *Store) load(name string) (Registration, error) {
 			"re-register the plugin (with a scope) to store it in the current format",
 			name, m.Version, storeManifestVersion)
 	}
-	modulePath, err := s.modulePathFor(name, m)
-	if err != nil {
-		return Registration{}, err
+	if m.Version == nativeManifestVersion && m.Backend != BackendNative {
+		return Registration{}, fmt.Errorf("cplane store: version 4 requires a native backend")
 	}
-	module, err := os.ReadFile(modulePath)
-	if err != nil {
-		return Registration{}, fmt.Errorf("cplane store: read module for %q: %w", name, err)
+	var module []byte
+	switch m.Backend {
+	case "", BackendWASM:
+		// Legacy manifests must retain WASM semantics, even for an empty module.
+		m.Backend = BackendWASM
+		if m.NativeID != "" || m.NativeVersion != "" || m.NativeIdentity != "" {
+			return Registration{}, fmt.Errorf("cplane store: WASM manifest has native identity")
+		}
+		modulePath, err := s.modulePathFor(name, m)
+		if err != nil {
+			return Registration{}, err
+		}
+		module, err = os.ReadFile(modulePath)
+		if err != nil {
+			return Registration{}, fmt.Errorf("cplane store: read module for %q: %w", name, err)
+		}
+	case BackendNative:
+		if m.Version != nativeManifestVersion || m.Module != "" || m.NativeID == "" || m.NativeVersion == "" || m.NativeIdentity == "" {
+			return Registration{}, fmt.Errorf("cplane store: invalid native manifest")
+		}
+	default:
+		return Registration{}, fmt.Errorf("cplane store: unknown backend %q", m.Backend)
 	}
 
 	reg := Registration{
+		Backend: m.Backend, NativeID: m.NativeID, NativeVersion: m.NativeVersion, NativeIdentity: m.NativeIdentity,
+		Input:        m.Input,
 		Name:         m.Name,
 		Module:       module,
 		Config:       m.Config,

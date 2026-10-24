@@ -18,6 +18,8 @@ import (
 type Capability string
 
 const (
+	CapMUP  Capability = "mup"
+	CapEVPN Capability = "evpn"
 	// CapHeadend lets a plugin declare headend encap entries: which
 	// traffic is steered into which SID list.
 	CapHeadend Capability = "headend"
@@ -64,7 +66,7 @@ func (c Capabilities) Names() []string {
 // valid reports whether a capability is one the host defines.
 func (c Capability) valid() bool {
 	switch c {
-	case CapHeadend, CapAdvertise, CapLocalSID:
+	case CapHeadend, CapAdvertise, CapLocalSID, CapMUP, CapEVPN:
 		return true
 	default:
 		return false
@@ -73,20 +75,21 @@ func (c Capability) valid() bool {
 
 // capabilityNames lists every capability, for error messages.
 func capabilityNames() []string {
-	return []string{string(CapAdvertise), string(CapHeadend), string(CapLocalSID)}
+	return []string{string(CapAdvertise), string(CapHeadend), string(CapLocalSID), string(CapMUP), string(CapEVPN)}
 }
 
 // alwaysLinked are the host functions every plugin gets.
 //
-// Both are diagnostics rather than authority: a module has no stdout and
+// These provide diagnostics and input format discovery: a module has no stdout and
 // no filesystem, so without log a plugin author cannot see why their
 // plugin did nothing, and without a clock no liveness logic can be
-// written. Neither changes any state, so gating them would cost
+// written. None changes any state, so gating them would cost
 // debuggability and buy nothing.
 func alwaysLinked() map[string]struct{} {
 	return map[string]struct{}{
-		HostLog:          {},
-		HostNowMonotonic: {},
+		HostLog:           {},
+		HostNowMonotonic:  {},
+		HostInputFeatures: {},
 	}
 }
 
@@ -98,7 +101,7 @@ func alwaysLinked() map[string]struct{} {
 // without the second check a plugin granted only advertise could open a
 // headend transaction through the same door.
 func (c Capabilities) grantsAnyWrite() bool {
-	return c.Has(CapHeadend) || c.Has(CapAdvertise) || c.Has(CapLocalSID)
+	return c.Has(CapHeadend) || c.Has(CapAdvertise) || c.Has(CapLocalSID) || c.Has(CapMUP) || c.Has(CapEVPN)
 }
 
 // checkImports refuses a module that imports a host function its granted

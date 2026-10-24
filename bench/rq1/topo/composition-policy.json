@@ -1,0 +1,1 @@
+{"version":1,"contexts":[{"name":"mobile","grants":[{"families":["mup_ipv4","mup_ipv6"],"route_targets":["65000:7"]}],"delegate_mup_types":[3]}]}

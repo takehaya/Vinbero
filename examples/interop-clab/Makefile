@@ -27,6 +27,8 @@ LAB_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 SCENARIO ?= l3vpn-2site
 SCENARIO_DIR := $(LAB_DIR)/scenarios/$(SCENARIO)
 TOPO         := $(SCENARIO_DIR)/clab.yml
+# Empty keeps the topology default and lets tests preserve the running backend.
+CPLANE_BACKEND ?=
 
 # Shared container images (built once, reused by every scenario).
 VINBERO_IMAGE ?= vinbero-interop:latest
@@ -86,7 +88,7 @@ provision:
 # `make` already worked before this line.
 deploy:
 	@sudo modprobe vrf 2>/dev/null || true
-	sudo containerlab -t $(TOPO) deploy
+	sudo env CPLANE_BACKEND="$(CPLANE_BACKEND)" containerlab -t $(TOPO) deploy
 
 destroy:
 	sudo containerlab -t $(TOPO) destroy -c
@@ -95,7 +97,7 @@ reload: destroy deploy
 
 # Run the selected scenario's assertions against a running lab.
 test:
-	sudo bash $(SCENARIO_DIR)/test.sh
+	sudo env CPLANE_BACKEND="$(CPLANE_BACKEND)" bash $(SCENARIO_DIR)/test.sh
 
 # List the available scenarios.
 scenarios:

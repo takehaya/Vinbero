@@ -1,16 +1,20 @@
 package cplane
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/tetratelabs/wazero"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
@@ -87,6 +91,11 @@ const maxRestarts = 5
 
 // Registration describes a plugin to run.
 type Registration struct {
+	// Backend defaults to native; a supplied Module selects WASM for older callers.
+	Backend string
+	// NativeID defaults to Name and NativeVersion to the linked catalog version.
+	NativeID, NativeVersion, NativeIdentity string
+	Input                                   *v1.CplaneInputPolicy
 	// Name identifies the plugin. It becomes the owner tag its writes
 	// carry, so it must survive the fixed-width owner buffer.
 	Name string
@@ -127,16 +136,21 @@ const MinTickInterval = 100 * time.Millisecond
 
 // Manager owns the running control-plane plugins.
 type Manager struct {
-	source      EventSource
-	snapshots   SnapshotSource
-	claims      BehaviorClaims
-	headend     *headend.Reconciler
-	quotas      Quotas
-	store       *Store
-	leases      *Leases
-	advertise   *AdvertiseSet
-	localSIDs   *LocalSIDSet
-	encapSource func() (netip.Addr, error)
+	allowNative            bool
+	resolveInputTarget     func(bgp.RouteEvent) (string, uint16, bool)
+	retryForwardingCleanup func()
+	services               *compositionMaps
+	resolveMUPInstance     func(string) (uint32, error)
+	source                 EventSource
+	snapshots              SnapshotSource
+	claims                 BehaviorClaims
+	headend                *headend.Reconciler
+	quotas                 Quotas
+	store                  *Store
+	leases                 *Leases
+	advertise              *AdvertiseSet
+	localSIDs              *LocalSIDSet
+	encapSource            func() (netip.Addr, error)
 	// locatorInfo and vrfBindings are what a scope is stated in terms of.
 	locatorInfo LocatorSource
 	vrfBindings VRFBindingSource
@@ -189,13 +203,20 @@ type Manager struct {
 // unregistration and a restart can all touch the same plugin from
 // different goroutines.
 type plugin struct {
-	name     string
-	reg      Registration
-	inst     *wasm.Instance
-	ops      *PluginOps
-	worker   *worker
-	cancel   func()
-	restarts int
+	input  *inputDelivery
+	config []byte
+	name   string
+	reg    Registration
+	inst   pluginInstance
+	// One cache belongs to this registration generation and its immutable
+	// module/config. Only worker-owned restarts reuse it; replacements get a
+	// fresh cache. Teardown waits for that worker before closing the cache.
+	compilationCache wazero.CompilationCache
+	cacheCloseOnce   sync.Once
+	ops              *PluginOps
+	worker           *worker
+	cancel           func()
+	restarts         int
 	// dead marks an instance that failed and was not restarted, so events
 	// stop being handed to a module that cannot take them.
 	dead bool
@@ -213,10 +234,20 @@ type plugin struct {
 	// the interval before its goroutine starts and sets snapshotting.
 	// Guarded by Manager.mu.
 	pendingSnapshots int
+	// A failed source read reserves one delayed retry. Live events cannot
+	// bypass this deadline, and stopping the worker cancels the wait.
+	snapshotRetryAt time.Time
+	snapshotBackoff time.Duration
 }
 
 // ManagerConfig builds a Manager.
 type ManagerConfig struct {
+	// AllowNative permits trusted controllers statically linked into this daemon.
+	AllowNative            bool
+	ResolveInputTarget     func(bgp.RouteEvent) (string, uint16, bool)
+	RetryForwardingCleanup func()
+	ForwardingMaps         ForwardingMapOps
+	ResolveMUPInstance     func(string) (uint32, error)
 	// Source delivers route events. May be nil, in which case plugins run
 	// but receive nothing -- useful for a daemon started without BGP.
 	Source EventSource
@@ -297,9 +328,19 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	if cfg.RetryForwardingCleanup != nil {
+		cfg.RetryForwardingCleanup()
+	}
+	services, err := newCompositionMaps(cfg.ForwardingMaps, reconciler)
+	if err != nil {
+		return nil, fmt.Errorf("forwarding inventory: %w", err)
+	}
 	leases := reconciler.Leases()
 	snapshots, _ := cfg.Source.(SnapshotSource)
 	m := &Manager{
+		allowNative:        cfg.AllowNative,
+		resolveInputTarget: cfg.ResolveInputTarget, retryForwardingCleanup: cfg.RetryForwardingCleanup,
+		services: services, resolveMUPInstance: cfg.ResolveMUPInstance,
 		advertise:   newNamedAdvertiseSet(cfg, leases),
 		localSIDs:   NewLocalSIDSet(cfg.Locators, cfg.SIDFunctions, cfg.EndtVRFGrants, cfg.ResolveVRF),
 		source:      cfg.Source,
@@ -329,6 +370,27 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	// grants reserved, including when their WASM cannot be loaded.
 	for name, scope := range m.localSIDs.inventoryScopes() {
 		m.recordUnrestored(Registration{Name: name, Scope: scope}, fmt.Errorf("local SID inventory awaiting plugin registration"))
+	}
+	owners, err := services.inventoryOwners()
+	if err != nil {
+		return nil, err
+	}
+	for owner := range owners {
+		if parsed, ok, e := bpf.ParsePluginOwnerTag(string(owner)); e == nil && ok && parsed.IsBundle() {
+			m.recordUnrestored(Registration{Name: parsed.Bundle}, fmt.Errorf("forwarding inventory awaiting plugin registration"))
+		}
+	}
+	if cfg.Store != nil {
+		for _, u := range cfg.Store.Unloadable() {
+			reg := Registration{Name: u.Name, Input: u.Input, Scope: u.Scope, Behaviors: u.Behaviors}
+			m.recordUnrestored(reg, u.Reason)
+			m.reserveInputDelegation(reg)
+		}
+		regs, _ := cfg.Store.List()
+		for _, reg := range regs {
+			m.recordUnrestored(reg, fmt.Errorf("registration awaiting restore"))
+			m.reserveInputDelegation(reg)
+		}
 	}
 	return m, nil
 }
@@ -493,16 +555,35 @@ func slotSet(slots []uint32) map[uint32]struct{} {
 	return out
 }
 
+// sameInputAuthority is deliberately conservative: any authorization or limit
+// change keeps the existing fail-closed prune. Backend, module and business
+// configuration do not define authority. Retention also requires unchanged
+// opaque configuration; an observer may never re-declare output. Caller holds m.mu.
+func sameInputAuthority(old *plugin, reg Registration) bool {
+	if old == nil || old.dead || old.reg.Input == nil || reg.Input == nil {
+		return false
+	}
+	ready, _, _ := old.ops.InputState()
+	return ready &&
+		proto.Equal(old.reg.Input, reg.Input) &&
+		reflect.DeepEqual(old.reg.Families, reg.Families) &&
+		reflect.DeepEqual(old.reg.Behaviors, reg.Behaviors) &&
+		reflect.DeepEqual(old.reg.Capabilities, reg.Capabilities) &&
+		reflect.DeepEqual(old.reg.Scope, reg.Scope) && old.reg.Limits == reg.Limits
+}
+
 // Register starts a plugin.
 //
 // Registering a name that is already running replaces it in place: the old
 // instance is stopped and the new one starts against the same owner tag,
-// keeping the state the old one wrote. That is what makes an upgrade
-// non-disruptive -- the new module re-declares its desired set and the
-// reconcile absorbs any difference, rather than the data plane going empty
-// between the two.
+// preserving compatible, healthy state until the new instance re-declares
+// its desired set. Changed authority or configuration and unrestored input
+// state still follow the fail-closed prune before replay.
 func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	if err := bpf.ValidatePluginBundleName(reg.Name); err != nil {
+		return err
+	}
+	if err := m.validateBackend(&reg); err != nil {
 		return err
 	}
 	// A capability with nothing in the scope to exercise it on is an inert
@@ -510,11 +591,24 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	// which reads as a broken plugin. Refused here rather than at the RPC
 	// so the restore path is held to it too -- a stored registration gone
 	// incoherent is refused instead of restored into that state.
+	policy, err := parseInputPolicy(reg.Input, reg.Families)
+	if err != nil {
+		return err
+	}
+	if policy != nil {
+		reg.Input = policy.spec
+		if m.snapshots == nil {
+			return fmt.Errorf("context input API requires a snapshot source")
+		}
+	}
 	if err := ScopeCoversCapabilities(reg.Capabilities, reg.Scope); err != nil {
 		return err
 	}
 	m.registerMu.Lock()
 	defer m.registerMu.Unlock()
+	if err := m.checkInputRegistration(reg, policy); err != nil {
+		return err
+	}
 
 	// Slots and locators are exclusive across plugins. A slot holds one
 	// program, so two plugins granted one slot would have one's SID dispatch
@@ -548,6 +642,10 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	}
 
 	reg.Limits = m.limits.Merge(reg.Limits)
+	// The running generation must not borrow bytes an API caller can mutate
+	// after registration: every restart uses the same module and config.
+	reg.Module = bytes.Clone(reg.Module)
+	reg.Config = bytes.Clone(reg.Config)
 
 	p, err := m.build(ctx, reg)
 	if err != nil {
@@ -585,11 +683,26 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 
 	m.mu.Lock()
 	old, existed := m.plugins[reg.Name]
+	preserveInput := sameInputAuthority(old, reg) && bytes.Equal(old.reg.Config, reg.Config)
+	// Reserve registration replay before the new generation becomes observable.
+	p.pendingSnapshots++
+	defer func() {
+		m.mu.Lock()
+		p.pendingSnapshots--
+		m.mu.Unlock()
+	}()
 	m.plugins[reg.Name] = p
 	p.cancel = cancel
 	inst := p.inst
 	m.mu.Unlock()
 
+	if ds, ok := m.source.(delegationSource); ok {
+		if policy != nil {
+			ds.SetDelegation(reg.Name, m.delegationMatcher(policy))
+		} else {
+			ds.SetDelegation(reg.Name, nil)
+		}
+	}
 	if existed {
 		// Stop the old instance without flushing: the new one inherits the
 		// owner tag and re-declares over the same state. This also cancels
@@ -607,11 +720,17 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	// Not gated on having replaced something: a restore goes through here
 	// with nothing in the registry and its predecessor's writes still
 	// pinned in the maps, which is the same situation.
-	if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
-		return m.failPrune(ctx, reg, p, removed, err)
-	} else if removed > 0 {
-		m.logger.Info("removed the state outside a plugin's new capabilities or scope",
-			zap.String("plugin", reg.Name), zap.Int("removed", removed))
+	// An unchanged input authority and byte-identical configuration can keep the
+	// last complete forwarding set until the replacement's replay publishes.
+	// Recheck after closing the old
+	// worker: its final in-flight call may have discovered an input/output fault.
+	if !preserveInput || !old.ops.inputHandoffClean() {
+		if removed, err := p.ops.PruneOutOfScope(ctx); err != nil {
+			return m.failPrune(ctx, reg, p, removed, err)
+		} else if removed > 0 {
+			m.logger.Info("removed the state outside a plugin's new capabilities or scope",
+				zap.String("plugin", reg.Name), zap.Int("removed", removed))
+		}
 	}
 
 	// The claim reaches back over routes that arrived before it, now that
@@ -620,7 +739,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	// them over is built and subscribed: a module refused at admission
 	// would otherwise leave those routes removed from the appliers with
 	// nothing left implementing them.
-	if m.claims != nil && len(reg.Behaviors) > 0 {
+	if (m.claims != nil && len(reg.Behaviors) > 0) || (policy != nil && policy.hasDelegation()) {
 		if r, ok := m.source.(BuiltinRetractor); ok {
 			r.RetractClaimedFromBuiltins()
 		}
@@ -782,6 +901,7 @@ func (m *Manager) Restore(ctx context.Context) error {
 	// reconcile.
 	regs, listErr := m.store.List()
 	for _, reg := range regs {
+		m.reserveInputDelegation(reg)
 		if err := m.Register(ctx, reg); err != nil {
 			m.logger.Error("could not restore a plugin from the store",
 				zap.String("plugin", reg.Name), zap.Error(err))
@@ -826,14 +946,15 @@ func (m *Manager) Restore(ctx context.Context) error {
 	for _, u := range m.store.Unloadable() {
 		m.logger.Warn("a stored plugin could not be restored; its state is left in place",
 			zap.String("plugin", u.Name), zap.Error(u.Reason))
-		m.recordUnrestored(Registration{Name: u.Name, Behaviors: u.Behaviors, Scope: u.Scope}, u.Reason)
+		m.recordUnrestored(Registration{Name: u.Name, Input: u.Input, Behaviors: u.Behaviors, Scope: u.Scope}, u.Reason)
 	}
 	return listErr
 }
 
 // UnrestoredPlugin is a plugin the store held that would not start.
 type UnrestoredPlugin struct {
-	Name string
+	input *v1.CplaneInputPolicy
+	Name  string
 	// Behaviors are the codepoints still claimed on its behalf, which is
 	// why routes carrying them reach nothing.
 	Behaviors []uint16
@@ -851,8 +972,17 @@ type UnrestoredPlugin struct {
 func (m *Manager) recordUnrestored(reg Registration, cause error) {
 	m.unrestoredMu.Lock()
 	defer m.unrestoredMu.Unlock()
+	if old, ok := m.unrestored[reg.Name]; ok {
+		if reg.Scope.Empty() {
+			reg.Scope = old.scope
+		}
+		if reg.Input == nil {
+			reg.Input = old.input
+		}
+	}
 	m.unrestored[reg.Name] = UnrestoredPlugin{
 		Name:      reg.Name,
+		input:     reg.Input,
 		Behaviors: append([]uint16(nil), reg.Behaviors...),
 		Reason:    cause.Error(),
 		Since:     time.Now(),
@@ -909,6 +1039,13 @@ func (m *Manager) Forget(name string) error {
 	if running {
 		return fmt.Errorf("cplane: plugin %q is running; Unregister it rather than Forget", name)
 	}
+	owners, err := m.services.inventoryOwners()
+	if err != nil {
+		return err
+	}
+	if owners[bpf.OwnerPluginBundle(name)] {
+		return fmt.Errorf("plugin %q holds forwarding inventory; Unregister it to clean up", name)
+	}
 	if m.localSIDs.LiveCount(bpf.OwnerPluginBundle(name)) > 0 {
 		return fmt.Errorf("cplane: plugin %q still holds local SID inventory; Unregister it to clean up its state", name)
 	}
@@ -935,6 +1072,14 @@ func (m *Manager) Forget(name string) error {
 // build instantiates a plugin and its delivery worker without publishing
 // it.
 func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) {
+	policy, err := parseInputPolicy(reg.Input, reg.Families)
+	if err != nil {
+		return nil, err
+	}
+	config, err := policy.configure(reg.Config)
+	if err != nil {
+		return nil, err
+	}
 	// Local SIDs declared from configure are answered through the worker
 	// like any other event. configure runs during instantiation, before
 	// there is a worker, but nothing it declares is applied until
@@ -949,7 +1094,8 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	}
 
 	ops, err := NewPluginOps(PluginOpsConfig{
-		Owner:             bpf.OwnerPluginBundle(reg.Name),
+		Owner:    bpf.OwnerPluginBundle(reg.Name),
+		Services: m.services, Policy: policy, ResolveMUPInstance: m.resolveMUPInstance,
 		HeadendReconciler: m.headend,
 		Leases:            m.leases,
 		EncapSource:       m.encapSource,
@@ -961,24 +1107,28 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		Advertise:         m.advertise,
 		LocalSIDs:         m.localSIDs,
 		OnLocalSIDs:       onLocalSIDs,
+		StrictInputs:      policy != nil,
 	})
 	if err != nil {
 		return nil, err
 	}
-	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		NowMonotonic: m.nowMonotonic,
-		Name:         reg.Name,
-		Module:       reg.Module,
-		ConfigBlob:   reg.Config,
-		Limits:       reg.Limits,
-		Ops:          ops,
-		Capabilities: reg.Capabilities,
-		Logger:       m.logger,
-	})
+	var cache wazero.CompilationCache
+	if reg.Backend == BackendWASM {
+		cache = wazero.NewCompilationCache()
+	}
+	inst, err := m.instantiate(ctx, reg, config, ops, cache)
 	if err != nil {
+		// Instantiate has already closed its failed runtime. No worker or
+		// other instance can still hold this unpublished generation.
+		if cache != nil {
+			_ = cache.Close(ctx)
+		}
 		return nil, err
 	}
-	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops, counters: newCounters()}
+	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops, counters: newCounters(), config: config, compilationCache: cache}
+	if policy != nil {
+		p.input = &inputDelivery{policy: policy}
+	}
 	interval := reg.TickInterval
 	if interval > 0 && interval < MinTickInterval {
 		interval = MinTickInterval
@@ -993,8 +1143,41 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 		// A restored plugin declares from configure, before an operator
 		// has registered the locator it names; this is what lets the first
 		// event afterwards repair that instead of leaving it lost.
-		ops.RetryPending)
+		func() {
+			if m.retryForwardingCleanup != nil {
+				m.retryForwardingCleanup()
+			}
+			ops.RetryPending()
+			m.mu.Lock()
+			m.repayInputRecoveryLocked(p)
+			m.mu.Unlock()
+		})
 
+	if policy != nil {
+		p.worker.maxBatchEvents = policy.maxBatchEvents
+		p.worker.maxBatchBytes = reg.Limits.MaxBufferBytes
+		if p.worker.maxBatchBytes <= 0 {
+			p.worker.maxBatchBytes = wasm.DefaultLimits().MaxBufferBytes
+		}
+		contexts := &v1.PluginRoute{}
+		for _, c := range policy.spec.Contexts {
+			contexts.Contexts = append(contexts.Contexts, c.Name)
+		}
+		p.worker.contextBytes = proto.Size(contexts)
+	}
+	p.worker.prepare = func(batch *v1.PluginEventBatch) (*v1.PluginEventBatch, error) {
+		for _, ev := range batch.Events {
+			if ev.Kind == v1.PluginEventKind_PLUGIN_EVENT_KIND_START_OF_REPLAY && ev.ReplaySource == ReplaySourceBGP {
+				ops.beginInputReplay()
+			}
+		}
+		return p.input.prepare(batch)
+	}
+	p.worker.onInputError = func(err error) {
+		if cleanupErr := ops.failInput(err.Error()); cleanupErr != nil {
+			m.logger.Error("input cleanup failed", zap.Error(cleanupErr))
+		}
+	}
 	built = p
 	return p, nil
 }
@@ -1063,15 +1246,17 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 		return fmt.Errorf("cplane: flush plugin %q: %w", name, err)
 	}
 
+	if ds, ok := m.source.(delegationSource); ok {
+		ds.SetDelegation(name, nil)
+		if refresh, ok := m.source.(BuiltinClaimRefresher); ok {
+			refresh.RefreshBuiltinClaims()
+		}
+	}
 	if m.claims != nil {
-		// The claim goes, but the routes are not handed to the built-in
-		// appliers. Nothing here can implement the behavior the plugin
-		// implemented: to the built-in a private codepoint is just a
-		// service SID, and installing it as one is the wrong-meaning
-		// install the claim existed to prevent. Those routes stop being
-		// forwarded, which is the honest outcome of removing the only
-		// thing that understood them, and they will be picked up with
-		// built-in semantics only if their originator readvertises.
+		// Keep behavior claims through the refresh above so it cannot
+		// re-advertise retained paths matching those claims. After release,
+		// live updates, refreshes and RIB replay use the current claims and
+		// delegation; they may deliver those paths with built-in semantics.
 		m.claims.Release(name)
 	}
 	if err := m.store.Remove(name); err != nil {
@@ -1100,7 +1285,14 @@ func (m *Manager) teardown(ctx context.Context, p *plugin) {
 	if err := p.inst.Close(ctx); err != nil {
 		m.logger.Warn("closing plugin instance", zap.String("plugin", p.name), zap.Error(err))
 	}
-	p.ops.DiscardTransactions()
+	p.cacheCloseOnce.Do(func() {
+		if p.compilationCache != nil {
+			if err := p.compilationCache.Close(ctx); err != nil {
+				m.logger.Warn("closing plugin compilation cache", zap.String("plugin", p.name), zap.Error(err))
+			}
+		}
+	})
+	p.ops.retire()
 }
 
 // Close stops every plugin. It does not flush: a daemon shutting down
@@ -1153,6 +1345,14 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	m.mu.Unlock()
 
 	p.ops.DiscardTransactions()
+	if p.reg.Input != nil {
+		if err := p.ops.failInput(cause.Error()); err != nil {
+			m.mu.Lock()
+			p.dead = true
+			m.mu.Unlock()
+			return
+		}
+	}
 
 	if restarts > maxRestarts {
 		m.mu.Lock()
@@ -1185,16 +1385,7 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 	p.ops.BeginInstance()
 
 	ctx := context.Background()
-	inst, err := wasm.Instantiate(ctx, wasm.Config{
-		NowMonotonic: m.nowMonotonic,
-		Name:         reg.Name,
-		Module:       reg.Module,
-		ConfigBlob:   reg.Config,
-		Limits:       reg.Limits,
-		Ops:          p.ops,
-		Capabilities: reg.Capabilities,
-		Logger:       m.logger,
-	})
+	inst, err := m.instantiate(ctx, reg, p.config, p.ops, p.compilationCache)
 	if err != nil {
 		m.mu.Lock()
 		p.dead = true
@@ -1257,6 +1448,15 @@ func (m *Manager) launchSnapshotLocked(p *plugin, after func()) {
 	}()
 }
 
+// repayInputRecoveryLocked transfers completed cleanup's replay request to
+// pending delivery atomically with stats. The caller holds m.mu.
+func (m *Manager) repayInputRecoveryLocked(p *plugin) {
+	if m.plugins[p.name] != p || p.dead || !p.ops.takeInputRecoveryReplay() {
+		return
+	}
+	m.launchSnapshotLocked(p, nil)
+}
+
 // repaySnapshotDebt transfers debt to pending work under the same lock used
 // by stats. Clearing the worker's debt before this handoff would falsely
 // report a complete view until the replay goroutine was scheduled.
@@ -1268,6 +1468,11 @@ func (m *Manager) repaySnapshotDebt(p *plugin) {
 	}
 	m.launchSnapshotLocked(p, nil)
 }
+
+const (
+	snapshotRetryMin = 100 * time.Millisecond
+	snapshotRetryMax = 5 * time.Second
+)
 
 // snapshot rebuilds a plugin's view from the rib.
 //
@@ -1293,11 +1498,32 @@ func (m *Manager) snapshot(p *plugin) {
 		return
 	}
 	p.snapshotting = true
+	delay := time.Until(p.snapshotRetryAt)
+	m.mu.Unlock()
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-p.worker.stop:
+			m.mu.Lock()
+			p.snapshotting = false
+			m.mu.Unlock()
+			return
+		}
+	}
+	m.mu.Lock()
+	if m.plugins[p.name] != p || p.dead {
+		p.snapshotting = false
+		m.mu.Unlock()
+		return
+	}
 	inst := p.inst
 	m.mu.Unlock()
 	// Live events are held until this finishes, so the snapshot arrives as
 	// an uninterrupted prefix rather than interleaved with updates that
 	// supersede parts of it.
+	p.ops.holdInputReplay()
 	epoch := p.worker.beginSnapshot()
 	// Only worker callbacks touch replayOK. The publication barrier follows
 	// both the EOR and all held live events, so an incomplete drain cannot
@@ -1341,11 +1567,23 @@ func (m *Manager) snapshot(p *plugin) {
 		// The view is still incomplete; ask for another one on the next
 		// opportunity rather than leaving the plugin to prune what it
 		// could not see.
+		m.mu.Lock()
+		if p.snapshotBackoff == 0 {
+			p.snapshotBackoff = snapshotRetryMin
+		} else {
+			p.snapshotBackoff = min(p.snapshotBackoff*2, snapshotRetryMax)
+		}
+		p.snapshotRetryAt = time.Now().Add(p.snapshotBackoff)
+		m.mu.Unlock()
 		p.worker.owe()
 		m.logger.Warn("replaying the rib to a plugin failed",
 			zap.String("plugin", p.name), zap.Error(err))
 		return
 	}
+	m.mu.Lock()
+	p.snapshotRetryAt = time.Time{}
+	p.snapshotBackoff = 0
+	m.mu.Unlock()
 	p.worker.submitCompletion(m.endOfReplayBatch(ReplaySourceBGP), func() {
 		replayOK = true
 	})
@@ -1356,11 +1594,14 @@ func (m *Manager) snapshot(p *plugin) {
 
 // publish is called on the worker after its replay barrier. An end marker
 // queued for a failed instance must never publish its replacement's state.
-func (m *Manager) publish(p *plugin, inst *wasm.Instance) {
+func (m *Manager) publish(p *plugin, inst pluginInstance) {
 	m.mu.Lock()
 	live := m.plugins[p.name] == p && p.inst == inst && !p.dead
 	m.mu.Unlock()
 	if !live {
+		return
+	}
+	if err := p.ops.finishInputReplay(); err != nil {
 		return
 	}
 	if err := p.ops.Publish(); err != nil {
@@ -1378,6 +1619,14 @@ func (m *Manager) publish(p *plugin, inst *wasm.Instance) {
 func (m *Manager) snapshotFor(name string) error {
 	m.mu.Lock()
 	p, ok := m.plugins[name]
+	if ok {
+		p.pendingSnapshots++
+		defer func() {
+			m.mu.Lock()
+			p.pendingSnapshots--
+			m.mu.Unlock()
+		}()
+	}
 	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("cplane: %w: %q", ErrPluginNotRegistered, name)
@@ -1497,6 +1746,11 @@ func (m *Manager) delivered(p *plugin, status *v1.PluginEventStatus) {
 // reportStatus records what a plugin said about the events it was given.
 func (m *Manager) reportStatus(p *plugin, status *v1.PluginEventStatus) {
 	for _, r := range status.GetResults() {
+		if r.GetDisposition() == v1.PluginEventDisposition_PLUGIN_EVENT_DISPOSITION_INPUT_INCOMPLETE && p.reg.Input != nil {
+			if err := p.ops.failInput(r.GetReason()); err != nil {
+				m.logger.Warn("input cleanup pending", zap.String("plugin", p.name), zap.Error(err))
+			}
+		}
 		if r.GetDisposition() == v1.PluginEventDisposition_PLUGIN_EVENT_DISPOSITION_QUARANTINE {
 			// The plugin declined this event on purpose. Recording it is
 			// the whole value of having a polite refusal: the alternative
@@ -1525,7 +1779,9 @@ func (m *Manager) handlerFor(name string) bgp.RouteHandler {
 		if !ok || dead {
 			return
 		}
-		p.worker.submit(m.routeBatch(ev))
+		if !p.worker.submitLiveRoute(m.routeBatch(ev)) && p.reg.Input != nil {
+			p.ops.noteInputLoss()
+		}
 
 		// A drop leaves the plugin's view with a hole. Rebuild it rather
 		// than letting the next declaration prune what it never saw. This

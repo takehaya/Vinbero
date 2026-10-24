@@ -1,10 +1,13 @@
 package cplane
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/ownership"
 )
 
@@ -19,8 +22,9 @@ import (
 // Zero means the default; a negative value means unbounded, which is a
 // deliberate escape hatch rather than a value anyone should reach for.
 type Quotas struct {
-	// MaxHeadendEntries caps the headend entries one plugin may own,
-	// counting v4 and v6 together.
+	// MaxHeadendEntries caps owned forwarding keys: v4/v6 headends, MUP
+	// uplinks, EVPN peers and EVPN MACs. Equivalent service declarations
+	// share one key; shared MUP gates and reverse entries are not charged.
 	MaxHeadendEntries int
 	// MaxAdvertisedRoutes caps the routes one plugin may originate. It is
 	// the quota that reaches other routers: a plugin that advertises
@@ -76,7 +80,15 @@ func limitOf(n int) (int, bool) {
 // is the whole reason a sandboxed component needs them: nothing else about
 // it is observable.
 type PluginStats struct {
-	Name string
+	Backend                                 string
+	NativeID, NativeVersion, NativeIdentity string
+	Input                                   *v1.CplaneInputPolicy
+	InputReady                              bool
+	InputFault                              string
+	CleanupPending                          bool
+	DesiredRevision, AppliedRevision        uint64
+	OutputFailure                           string
+	Name                                    string
 	// Capabilities and Behaviors are what it was granted and what it
 	// claimed, so an operator can check a deployment without reading back
 	// the registration.
@@ -195,7 +207,7 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 	restarts := p.restarts
 	dead := p.dead
 	reg := p.reg
-	idle := !dead && !p.snapshotting && p.pendingSnapshots == 0 && p.worker.idle()
+	idle := !dead && !p.snapshotting && p.pendingSnapshots == 0 && !p.ops.inputRecoveryPending() && p.worker.idle()
 	m.mu.Unlock()
 	families := make([]string, 0, len(reg.Families))
 	for _, family := range reg.Families {
@@ -205,8 +217,24 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 
 	quarantined, snapshots, since := p.counters.snapshot()
 	owner := p.ops.Owner()
+	ready, fault, cleanup := p.ops.InputState()
+	desired, applied, failure := p.ops.OutputState()
+	forwarding, inventoryErr := p.ops.services.forwardingCount(owner)
+	for _, af := range []AddressFamily{AFv4, AFv6} {
+		count, err := p.ops.headend.OwnedCount(owner, af)
+		forwarding += count
+		inventoryErr = errors.Join(inventoryErr, err)
+	}
+	if inventoryErr != nil {
+		if failure != "" {
+			failure += "; "
+		}
+		failure += fmt.Sprintf("forwarding inventory incomplete: %v", inventoryErr)
+	}
 	return PluginStats{
-		Name:                p.name,
+		Backend: reg.Backend, NativeID: reg.NativeID, NativeVersion: reg.NativeVersion, NativeIdentity: reg.NativeIdentity,
+		Name:  p.name,
+		Input: reg.Input, InputReady: ready, InputFault: fault, CleanupPending: cleanup, DesiredRevision: desired, AppliedRevision: applied, OutputFailure: failure,
 		Capabilities:        reg.Capabilities.Names(),
 		Scope:               reg.Scope,
 		Behaviors:           reg.Behaviors,
@@ -218,7 +246,7 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 		Snapshots:           snapshots,
 		Dead:                dead,
 		PendingDeclarations: p.ops.PendingDeclarations(),
-		HeadendEntries:      m.leases.CountOf(LeaseHeadendV4, owner) + m.leases.CountOf(LeaseHeadendV6, owner),
+		HeadendEntries:      forwarding,
 		AdvertisedRoutes:    m.advertise.LiveCount(owner),
 		LocalSIDs:           m.localSIDs.LiveCount(owner),
 		Quotas:              m.quotas,

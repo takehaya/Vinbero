@@ -11,9 +11,14 @@ A **control-plane plugin** is a WebAssembly module that runs inside
 vinberod: it sees the BGP routes vinbero receives, and declares the
 forwarding state, the local SIDs and the advertisements it wants. See
 [Control-plane plugins](#control-plane-plugins) below.
+The [context route API](cplane-route-api.md) adds authorized Views, typed route joins, and owned composition outputs.
 
 Both are loaded and unloaded dynamically over the Connect RPC
 `PluginService` API or the `vinbero plugin` CLI.
+
+Rebuild data-plane plugins that read the FDB against these headers.
+Use `fdb_read_forward()` for one coherent forwarding snapshot and the lookup key's BD ID for peer lookups; separate field loads can mix concurrent MAC-learning updates.
+The FDB map layout remains 32 bytes, so existing pinned maps do not need migration.
 
 ## Slot ranges
 

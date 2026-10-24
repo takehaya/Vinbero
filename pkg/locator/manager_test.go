@@ -203,3 +203,31 @@ func TestBindingTable_RecordRejectsDuplicate(t *testing.T) {
 		t.Errorf("Lookup after rejected duplicate: got %+v, want LOC1/1", got)
 	}
 }
+
+// Host bits are normalized away at registration: fd00:a::1/48 and
+// fd00:a::/48 must be one locator, and every consumer that compares or
+// derives from the prefix assumes the masked form.
+func TestAddMasksHostBits(t *testing.T) {
+	m := NewManager()
+	if err := m.Add(&Locator{
+		Name: "hostbits", Prefix: netip.MustParsePrefix("fd00:aaaa:b002::1/48"),
+		BlockLen: 32, NodeLen: 16, FunctionLen: 16,
+		Behavior: BehaviorUSID, FunctionAutoStart: 1, FunctionAutoEnd: 0xfffe,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	loc, ok := m.Get("hostbits")
+	if !ok {
+		t.Fatal("Get after Add")
+	}
+	if loc.Prefix != netip.MustParsePrefix("fd00:aaaa:b002::/48") {
+		t.Errorf("stored prefix = %s, want masked fd00:aaaa:b002::/48", loc.Prefix)
+	}
+	if err := m.Add(&Locator{
+		Name: "dup", Prefix: netip.MustParsePrefix("fd00:aaaa:b002::2/48"),
+		BlockLen: 32, NodeLen: 16, FunctionLen: 16,
+		Behavior: BehaviorUSID, FunctionAutoStart: 1, FunctionAutoEnd: 0xfffe,
+	}); !errors.Is(err, ErrLocatorPrefixInUse) {
+		t.Errorf("Add with same masked prefix: err = %v, want ErrLocatorPrefixInUse", err)
+	}
+}

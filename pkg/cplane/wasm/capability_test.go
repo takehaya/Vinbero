@@ -77,7 +77,7 @@ func TestObserveOnlyPluginNeedsNoCapability(t *testing.T) {
 	if _, err := inst.HandleEvents(context.Background(), []byte("batch")); err != nil {
 		t.Fatalf("handle events: %v", err)
 	}
-	if !inst.Capabilities().Has(CapHeadend) && len(inst.Capabilities().Names()) != 0 {
+	if len(inst.Capabilities().Names()) != 0 {
 		t.Fatalf("capabilities = %v, want none", inst.Capabilities().Names())
 	}
 }

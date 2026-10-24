@@ -11,7 +11,7 @@ import (
 type builtinView struct {
 	mu      sync.Mutex
 	state   builtinDeliveryState
-	claimed func(uint16) bool
+	claimed func(bgp.RouteEvent) bool
 	handler bgp.RouteHandler
 }
 
@@ -42,12 +42,7 @@ func (s *builtinScan) retract(ev bgp.RouteEvent) {
 func (d *Demux) newBuiltinView(h bgp.RouteHandler) *builtinView {
 	return &builtinView{
 		state: newBuiltinDeliveryState(forwardingKey), handler: h,
-		claimed: func(behavior uint16) bool {
-			d.mu.RLock()
-			claims := d.claims
-			d.mu.RUnlock()
-			return claims.IsClaimed(behavior)
-		},
+		claimed: d.routeClaimed,
 	}
 }
 

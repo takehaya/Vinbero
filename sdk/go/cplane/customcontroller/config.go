@@ -1,17 +1,23 @@
-package main
+package customcontroller
 
-import "github.com/takehaya/vinbero/sdk/go/cplane/wire"
+import (
+	"fmt"
+	"net/netip"
 
-// Configuration is private to this example. The host forwards these bytes
+	"github.com/takehaya/vinbero/sdk/go/cplane/wire"
+)
+
+// Configuration is private to this controller. The host forwards these bytes
 // unchanged; registration separately grants capabilities, scope and the claim.
 type configuration struct {
-	behavior uint32
-	locator  string
-	prefix   string
-	vrf      string
-	slot     uint32
-	nextHop  string
-	decapVRF string
+	behavior        uint32
+	locator         string
+	prefix          string
+	vrf             string
+	slot            uint32
+	nextHop         string
+	decapVRF        string
+	headendPrefixes []netip.Prefix
 }
 
 func (c configuration) allocates() bool { return c.locator != "" && c.slot != 0 }
@@ -34,7 +40,7 @@ func decodeConfig(data []byte) (configuration, error) {
 				return cfg, wire.ErrMalformed
 			}
 			cfg.slot = uint32(d.Uint)
-		case 2, 3, 4, 7, 8:
+		case 2, 3, 4, 7, 8, 9:
 			if d.Type != wire.Bytes {
 				return cfg, wire.ErrMalformed
 			}
@@ -50,6 +56,12 @@ func decodeConfig(data []byte) (configuration, error) {
 				cfg.nextHop = value
 			case 8:
 				cfg.decapVRF = value
+			case 9:
+				prefix, err := netip.ParsePrefix(value)
+				if err != nil || !prefix.Addr().Is4() {
+					return cfg, fmt.Errorf("invalid IPv4 headend prefix %q", value)
+				}
+				cfg.headendPrefixes = append(cfg.headendPrefixes, prefix.Masked())
 			}
 		}
 	}

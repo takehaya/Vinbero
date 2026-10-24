@@ -1,6 +1,7 @@
 package bpf
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -121,13 +122,106 @@ func TestBdPeerReverseEsi(t *testing.T) {
 		t.Fatalf("CreateBdPeer single-homing: %v", err)
 	}
 
-	// Cleanup
-	_ = h.mapOps.DeleteBdPeer(100, 0)
-	_ = h.mapOps.DeleteBdPeer(100, 1)
-	// Ensure reverse map was drained for ESI path
-	if err := h.objs.BdPeerReverseMap.Lookup(rKey, &rVal); err != nil {
-		if err != ebpf.ErrKeyNotExist {
-			t.Logf("DeleteBdPeer left reverse_map stale: %v", err)
+	// Cleanup: the reverse entry MUST be gone afterwards -- a stale one
+	// misattributes the RX split-horizon for whatever peer later occupies
+	// the index.
+	if existed, err := h.mapOps.DeleteBdPeer(100, 0); err != nil || !existed {
+		t.Errorf("DeleteBdPeer(100,0): existed=%t err=%v", existed, err)
+	}
+	if existed, err := h.mapOps.DeleteBdPeer(100, 1); err != nil || !existed {
+		t.Errorf("DeleteBdPeer(100,1): existed=%t err=%v", existed, err)
+	}
+	if err := h.objs.BdPeerReverseMap.Lookup(rKey, &rVal); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("DeleteBdPeer left reverse_map stale: err=%v", err)
+	}
+}
+
+// A reverse entry pointing at an index whose forward entry is already gone
+// (a partial failure from an earlier run, or an external flush) must still be
+// cleaned up by DeleteBdPeer, and the missing forward entry must be reported
+// as existed=false so callers treat the slot as free.
+func TestDeleteBdPeerCleansStaleReverseEntry(t *testing.T) {
+	h := newXDPTestHelper(t)
+	srcAddr, _ := ParseIPv6("fc00:1::2")
+	rKey := &BdPeerReverseKey{BdId: 101}
+	copy(rKey.SrcAddr[:], srcAddr[:])
+	rVal := &BdPeerReverseVal{Index: 3}
+	if err := h.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
+		t.Fatalf("plant stale reverse entry: %v", err)
+	}
+
+	existed, err := h.mapOps.DeleteBdPeer(101, 3)
+	if existed || err != nil {
+		t.Errorf("DeleteBdPeer on a free slot: existed=%t err=%v, want false/nil", existed, err)
+	}
+	var got BdPeerReverseVal
+	if err := h.objs.BdPeerReverseMap.Lookup(rKey, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("stale reverse entry survived DeleteBdPeer: err=%v", err)
+	}
+}
+
+// Every reverse entry pointing at a slot is drained, not just the first:
+// duplicates can survive partial failures from earlier generations, and
+// deleting an arbitrary one would leave a live entry dangling.
+func TestDeleteBdPeerDrainsAllReverseEntries(t *testing.T) {
+	h := newXDPTestHelper(t)
+	srcA, _ := ParseIPv6("fc00:2::1")
+	srcB, _ := ParseIPv6("fc00:2::2")
+	entry := &HeadendEntry{Mode: 1, NumSegments: 1, SrcAddr: srcA}
+	if err := h.mapOps.CreateBdPeer(102, 1, entry, [ESILen]byte{}, srcA, true); err != nil {
+		t.Fatalf("CreateBdPeer: %v", err)
+	}
+	// Plant a second, stale reverse entry aimed at the same slot.
+	rKeyB := &BdPeerReverseKey{BdId: 102}
+	copy(rKeyB.SrcAddr[:], srcB[:])
+	if err := h.objs.BdPeerReverseMap.Put(rKeyB, &BdPeerReverseVal{Index: 1}); err != nil {
+		t.Fatalf("plant duplicate reverse entry: %v", err)
+	}
+
+	if existed, err := h.mapOps.DeleteBdPeer(102, 1); err != nil || !existed {
+		t.Fatalf("DeleteBdPeer: existed=%t err=%v", existed, err)
+	}
+	var got BdPeerReverseVal
+	for _, src := range [][IPv6AddrLen]byte{srcA, srcB} {
+		rk := &BdPeerReverseKey{BdId: 102}
+		copy(rk.SrcAddr[:], src[:])
+		if err := h.objs.BdPeerReverseMap.Lookup(rk, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
+			t.Errorf("reverse entry for %x survived the drain: err=%v", src, err)
 		}
+	}
+}
+
+// A free forward slot with a stale reverse companion (an older
+// generation's partial failure) must be swept before it is reused, or the
+// new peer inherits the old source's RX split-horizon attribution.
+func TestCreateBdPeerAtFreeIndexSweepsStaleCompanions(t *testing.T) {
+	h := newXDPTestHelper(t)
+	staleSrc, _ := ParseIPv6("fc00:3::1")
+	rKey := &BdPeerReverseKey{BdId: 103}
+	copy(rKey.SrcAddr[:], staleSrc[:])
+	if err := h.objs.BdPeerReverseMap.Put(rKey, &BdPeerReverseVal{Index: 0}); err != nil {
+		t.Fatalf("plant stale reverse entry: %v", err)
+	}
+
+	newSrc, _ := ParseIPv6("fc00:3::2")
+	entry := &HeadendEntry{Mode: 1, NumSegments: 1, SrcAddr: newSrc}
+	idx, err := h.mapOps.CreateBdPeerAtFreeIndex(103, entry, [ESILen]byte{}, newSrc, true)
+	if err != nil {
+		t.Fatalf("CreateBdPeerAtFreeIndex: %v", err)
+	}
+	if idx != 0 {
+		t.Fatalf("index = %d, want 0 (lowest free)", idx)
+	}
+	var got BdPeerReverseVal
+	if err := h.objs.BdPeerReverseMap.Lookup(rKey, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Errorf("stale reverse entry survived slot reuse: err=%v", err)
+	}
+	rNew := &BdPeerReverseKey{BdId: 103}
+	copy(rNew.SrcAddr[:], newSrc[:])
+	if err := h.objs.BdPeerReverseMap.Lookup(rNew, &got); err != nil || got.Index != 0 {
+		t.Errorf("new peer's reverse entry: err=%v idx=%d, want present at 0", err, got.Index)
+	}
+	if _, err := h.mapOps.DeleteBdPeer(103, 0); err != nil {
+		t.Errorf("cleanup: %v", err)
 	}
 }

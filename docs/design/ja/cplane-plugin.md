@@ -94,7 +94,7 @@ flowchart LR
         OPS -->|広告| GOBGP
     end
 
-    CLI[vbctl plugin cplane register] --> RT
+    CLI[vinbero plugin cplane register] --> RT
 ```
 
 headend は `pkg/headend.Reconciler` を daemon が一つ作り、built-in applier と
@@ -233,10 +233,11 @@ UPDATE でこの抑止を抜けることはできず、最後の claimed path �
 path でも同じ prefix を抑止します。plugin が停止・復元失敗していても claim を
 保持している間は built-in に切り替えません。
 
-claim の解放そのものでは replay しません。ただし、その後に同じ転送 prefix の
-別 path が更新・withdraw されると、保持中の独自 behavior の path も built-in に
-再配送され得ます。独自 path 自身の再広告は必要ありません。built-in はそれを
-通常の service SID として扱い、以前の plugin の転送規則を再現する保証はありません。
+unregister の Refresh では behavior claim を保持し、その claim に該当する保持経路の再広告を防ぎます。
+claim の解放そのものでは replay しません。
+解放後の live 更新、Refresh、RIB replay は現在の claim と delegation に従うため、保持中の独自 behavior の path も built-in に再配送され得ます。
+独自 path 自身の再広告は必要ありません。
+built-in はそれを通常の service SID として扱い、以前の plugin の転送規則を再現する保証はありません。
 
 claim 取得時の明示的な RIB 再走査では、現在の demux が built-in に配送した
 履歴が無くても withdraw を渡します。前の daemon が pinned map に残した
@@ -638,10 +639,10 @@ service SID として自分の owner で install します。plugin が同じ pr
   実装できない codepoint の経路を service SID として install してしまいます。
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
   claim を保持したことは warning に出します。restore に失敗した plugin は
-  `vbctl plugin cplane stats` に別枠で出します。動いていないのに daemon は
+  `vinbero plugin cplane stats` に別枠で出します。動いていないのに daemon は
   その state と claim を持ち続けるので、running な plugin だけを見せると
   「単に居ない」ようにしか見えません。戻ってこないと判断したら
-  `vbctl plugin cplane forget` で claim と store の登録を落とせます。map に
+  `vinbero plugin cplane forget` で claim と store の登録を落とせます。map に
   残った state には触れません。それが何のためのものかを daemon は知らない
   ためです。
 
@@ -777,8 +778,10 @@ module は allowlist で検証します。
 
 - import は `vinbero` と `wasi_snapshot_preview1` からのみ。関数名と signature を検証。
 - WASI は Go runtime 用に時計、乱数、期限内の sleep を提供します。host の環境変数、
-  引数、filesystem mount、socket は渡しません。stdin は EOF、stdout/stderr は破棄し、
-  plugin の診断には既存の rate limit がある `vinbero.log` を使います。
+  引数、filesystem mount、socket は渡しません。stdin は EOF、stdout は破棄します。
+  安全境界は従来の線形メモリ上限と call timeout です。
+  stderr は各 export 呼び出しの先頭 4 KiB だけを保持し、trap や timeout などの WASM 実行失敗時の error に添付します。
+  通常の plugin の診断には既存の rate limit がある `vinbero.log` を使います。
 - memory は guest が定義して export する 1 つだけ。imported memory は拒否。
 - 必須 export が signature まで一致すること。
 - ABI version が一致すること。
@@ -885,9 +888,15 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 | register (新規) | 取得。instantiate 前の失敗では巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
 | restore 成功 | 起動時の予約のまま | 保持 | 追加 | local SID は inventory から予約し、再宣言で同じ address に再作成。広告も宣言で作り直す |
 | restore 失敗 | 保持 (withhold 継続) | 保持 | publish 前の失敗は載せず unrestored に記録。publish 後の persist 失敗は動いたまま unrestored にも載る (下記) | prune 前の失敗は触らない。prune まで進んだ失敗は削除できた分だけ減る。slot と locator の予約は manifest の scope と SID inventory から残る |
-| upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
+| upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | input API の健全な状態は同じ入力権限・制限と byte 単位で同じ設定の場合だけ保持し、新 module の宣言が差分を吸収。設定変更は replay 前に旧状態を撤去 |
 | unregister | flush 成功後に解放 | flush 成功後に削除を試みる。running plugin の削除失敗は warning。unrestored plugin の削除失敗は error として再試行できる | 削除。flush 失敗時は dead または unrestored として残す | guest が起動しなくても owner の状態を削除し広告を withdraw |
 | forget (未走行かつ local SID inventory 無し) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
+
+input API を使う同名置換では、opaque な設定 bytes の変更も旧 forwarding set を保持しない条件です。
+host は `observe_only` 等の plugin 固有設定を解釈しません。
+これにより、書込みから観測専用への設定変更では observer に空の desired set や書込み権限を要求せずに旧状態を撤去します。
+同じ設定・入力権限・制限を使う健全な native/WASM 間の置換は保持対象です。
+module の変更だけで同じ設定の意味が変わる場合まで、観測専用への遷移を判定する保証はありません。
 
 部分失敗はそれぞれ次の形で残ります。
 
@@ -1006,22 +1015,35 @@ restore 中に publish 後の persist 失敗が起きたときの二重表示は
 
 ## 運用
 
+登録の既定 backend は native です。
+`--wasm` を指定しない場合、native の実装 ID は `--name`、version は daemon の catalog の版を使います。
+異なる登録名を使う場合は `--native <実装ID>`、版を固定する場合は `--native-version <版>` を指定します。
+例えば `vinbero plugin cplane register --name bgp-observer` で組込みの observer を起動できます。
+native は daemon で既定で許可され、`settings.cplane_plugins.native_enabled: false` で無効化できます。
+全 example の自動起動は行わず、登録時の capability、scope と claim の検査も維持します。
+
+WASM のみの plugin は次のように `--wasm` で明示して追加できます。
+
 ```sh
-vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
+vinbero plugin cplane register --name custom-behavior --wasm plugin.wasm \
     --behavior 0xFE01 --family vpnv4 \
     --capability headend --capability advertise --capability local_sid \
     --locator main --vrf vpn-a \
     --headend-prefix 10.7.0.0/16 --endpoint-slot 33 --tick-ms 1000
-vbctl plugin cplane list
-vbctl plugin cplane stats
-vbctl plugin cplane unregister --name custom-behavior
+vinbero plugin cplane list
+vinbero plugin cplane stats
+vinbero plugin cplane unregister --name custom-behavior
 ```
+
+旧 API client が backend を省略して module を送った場合は、従来どおり WASM として扱います。
+旧保存形式で backend が空の登録も WASM として復元し、壊れた module や読み込めない module を native に切り替えません。
+新しい登録では選択した backend と、native の場合は確定した ID、version と identity を保存します。
 
 capability と scope はどちらも省略できますが、片方でも欠けた plugin は何も
 宣言できません。observe と log しかしない plugin はそれで正しく、宣言する
 plugin には両方を与えます。`stats` は動いている plugin と、restore に失敗して
 claim だけ残っている plugin の両方を出し、scope は本体の表とは別の block に
-出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
+出します。後者は `vinbero plugin cplane forget --name <plugin>` で落とせます。
 
 `stats` の `FAMILIES` は登録した購読 family を表示し、省略時は `all` です。
 RPC の `families` はこの場合に空配列になります。`DELIVERY_IDLE` と RPC の
@@ -1034,6 +1056,28 @@ tick、再試行待ちの宣言が無いことは保証しません。初期化�
 behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint を hex で
 振っているので、0x0013 を 10 進の 13 と読むと別の behavior を claim して
 しまいます。
+
+## WASM と native の共通実装
+
+この repository で提供するすべての Go 製 control plane plugin は、WASM と native で処理本体を一つの Go package に維持する方針とします。
+経路の decode、保持、選択、合成、desired set の生成と再試行を共通にし、SDK の codec、view、resolver と builder も両 backend から使います。
+処理本体は `guest` や wazero に依存させず、host への出力と log は adapter から渡します。
+新しい plugin を native 対応するときも、この共通 package を両方から呼びます。
+
+target 固有の入口、host function の接続と runtime の制御は adapter に置きます。
+メモリ確保や buffer 再利用などの最適化を target ごとに選ぶ場合は、共通の処理本体を保ち、build tag や target 固有の小さな実装で選択します。
+経路の採否、転送設定、エラー判定と所有権の契約は build の選択で変えません。
+host が行う capability、scope と owner の検査も共通であり、最適化の選択で省略しません。
+WASM の memory 制限や強制中断と、native のプロセス内実行や協調的な中断は、それぞれの runtime の性質として扱います。
+
+両 backend を提供する plugin は、同じ設定と event 列を与え、結果 status と出力 transaction の一致を検査します。
+replay、withdraw、apply 失敗後の再試行も対象にし、性能比較では source revision、build の選択と入力を記録します。
+最適化を切り替える場合も出力の一致を確認し、性能は backend ごとに測定します。
+
+現在、MUP の書き込みと観測 profile は `sdk/go/cplane/mupcontroller` を WASM の example と `pkg/cplane/native` から呼びます。
+独自 behavior は `sdk/go/cplane/customcontroller`、BGP observer は `sdk/go/cplane/bgpobserver` を同じ形で呼びます。
+native の実装 ID はそれぞれ `custom-behavior` と `bgp-observer`、version は `1` です。
+独自 behavior の設定は従来の opaque protobuf、observer は opaque な設定を解釈せず BGPPath 機能を確認する契約を保ち、MUP だけが context input envelope を decode します。
 
 ## plugin を書く
 
@@ -1053,11 +1097,13 @@ daemon と同じ runtime を回し、capability 面だけ記録用に差し替�
 replay、restart、commit 拒否といった本番で耐える必要のある流れを method
 として提供します。
 
-標準 Go の WASI reactor を既定にします。Go 1.24 以降が対応し、この repository は
-Go 1.25.5 を使います。example は `make cplane-example` で build できます。
+標準 Go の WASI reactor を既定にします。Go 1.24 以降が対応し、コミットする example は
+`make cplane-example` で build できます。この target は `go.mod` の Go version
+（現在は 1.25.5）を `GOTOOLCHAIN` で指定し、CI と成果物を揃えます。
+mise の Go 1.27.3 は通常の daemon build や test に使います。
 
 ```sh
-GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+GOTOOLCHAIN=go1.25.5 GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
     -buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 ```
 
@@ -1071,7 +1117,7 @@ host から呼ばれている間だけ動き、定期処理には tick を使い
 50,000 回の advertise / withdraw を実行し、GC による回収を確認します。保持する経路が
 増える plugin は必要な memory 上限を明示して登録します。
 
-小さい artifact が必要な場合は `make cplane-example-tinygo` で TinyGo 0.39.0 版の
+小さい artifact が必要な場合は `make cplane-example-tinygo` で TinyGo 0.43.0 版の
 `plugin.tinygo.wasm` を作れます。既定の Go artifact は置き換えません。
 `wasm-unknown` target には `-gc=conservative` を指定し、回収しない既定の collector を
 避けます。詳細な flag と callback の契約は [SDK README](../../../sdk/go/cplane/README.md)

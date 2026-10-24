@@ -26,6 +26,7 @@ SCRIPTS = [
     'bench/rq1/suite.py', 'bench/rq1/analysis.py', 'bench/rq1/affinity.py',
     'bench/rq1/topo/run_bgp.sh', 'bench/rq1/topo/setup.sh', 'bench/rq1/topo/teardown.sh',
     'bench/rq1/topo/check.py', 'bench/rq1/topo/vinbero-bgp.yml', 'examples/common/netns.sh',
+    'bench/rq1/topo/composition-config.json', 'bench/rq1/topo/composition-policy.json',
     'go.mod', 'go.sum',
 ]
 BINARIES = ['out/bin/vinberod', 'out/bin/vinbero', 'out/bench/rq1probe',

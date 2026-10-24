@@ -42,6 +42,40 @@ type Route struct {
 	EthernetTag       uint32
 	ESI               []byte
 	UnknownAttributes []UnknownAttribute
+	BGPPath           *BGPPath
+	Contexts          []string
+}
+
+// BGPPathCodec names the pinned GoBGP packet format, including its MUP fork.
+const BGPPathCodec = "gobgp-v4.7.0-mup-draft01/binary-v1"
+
+// FeatureBGPPath says that received BGP events carry the full packet model.
+const FeatureBGPPath uint64 = 1
+const FeatureInputContexts uint64 = 2
+
+// BGPPath owns its buffers. Attributes include their flags/type/length headers.
+// An encoding failure is explicit and may still leave a usable NLRI identity.
+type BGPPath struct {
+	Codec         string
+	AFI           uint16
+	SAFI          uint8
+	NLRI          []byte
+	RouteKey      []byte // Opaque host identity; excludes non-key NLRI fields.
+	Attributes    [][]byte
+	EncodingError string
+	Metadata      BGPPathMetadata
+}
+
+type BGPPathMetadata struct {
+	Age                int64 // Unix seconds as supplied by GoBGP.
+	PeerASN            uint32
+	PeerRouterID       string
+	Stale              bool
+	IsFromExternal     bool
+	NoImplicitWithdraw bool
+	IsNexthopInvalid   bool
+	LocalPathID        uint32
+	Best               *bool // nil when the source does not supply best-path status.
 }
 
 type UnknownAttribute struct {
@@ -61,8 +95,9 @@ type LocalSIDAllocated struct{ Name, SID, Locator string }
 type Disposition uint32
 
 const (
-	Handled    Disposition = 1
-	Quarantine Disposition = 2
+	Handled         Disposition = 1
+	Quarantine      Disposition = 2
+	InputIncomplete Disposition = 3
 )
 
 type EventResult struct {
@@ -74,10 +109,11 @@ type EventResult struct {
 type Kind uint32
 
 const (
-	HeadendV4 Kind = 1
-	HeadendV6 Kind = 2
-	Advertise Kind = 3
-	LocalSIDs Kind = 4
+	HeadendV4      Kind = 1
+	HeadendV6      Kind = 2
+	Advertise      Kind = 3
+	LocalSIDs      Kind = 4
+	CompositionSet Kind = 5
 )
 
 type HeadendEntry struct {

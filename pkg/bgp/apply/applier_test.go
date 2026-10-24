@@ -2,6 +2,7 @@ package apply
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -45,14 +46,17 @@ type fakeHeadend struct {
 	ecmpDeletes []uint32
 	putEcmpErr  error
 
-	fdb           map[fdbKey]*bpf.FdbEntry
-	bdPeers       map[bdPeerKey]*bpf.HeadendEntry
-	bdPeerReverse map[bdPeerKey]bool // writeReverse flag passed per peer
-	bdPeerErr     error
-	fdbErr        error
-	fdbDelErr     error
-	bdPeerDelErr  error
-	esis          map[[bpf.ESILen]byte]*bpf.EsiEntry
+	fdb                              map[fdbKey]*bpf.FdbEntry
+	bdPeers                          map[bdPeerKey]*bpf.HeadendEntry
+	bdPeerReverse                    map[bdPeerKey]bool // writeReverse flag passed per peer
+	bdPeerErr                        error
+	fdbErr                           error
+	fdbDelErr                        error
+	bdPeerDelErr                     error
+	esis                             map[[bpf.ESILen]byte]*bpf.EsiEntry
+	esPeers                          map[esPeerKey]struct{}
+	esPeerCreateErr, esPeerDeleteErr error
+	esPeerCreates, esPeerDeletes     int
 
 	mupUplink map[mupUplinkKey]*bpf.HeadendEntry
 }
@@ -65,6 +69,7 @@ func newFakeHeadend() *fakeHeadend {
 		bdPeers:       map[bdPeerKey]*bpf.HeadendEntry{},
 		bdPeerReverse: map[bdPeerKey]bool{},
 		esis:          map[[bpf.ESILen]byte]*bpf.EsiEntry{},
+		esPeers:       map[esPeerKey]struct{}{},
 		v4owners:      map[string]bpf.OwnerTag{},
 		v6owners:      map[string]bpf.OwnerTag{},
 		ecmpGroups:    map[uint32][]bpf.EcmpPath{},
@@ -97,12 +102,26 @@ func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [b
 	return nil
 }
 
-func (f *fakeHeadend) DeleteBdPeer(bdID, index uint16) error {
+func (f *fakeHeadend) CreateBdPeerAtFreeIndex(bdID uint16, e *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) (uint16, error) {
+	idx := f.FindFreeBdPeerIndex(bdID)
+	if idx >= bpf.MaxBumNexthops {
+		return idx, fmt.Errorf("bd %d: maximum number of peers (%d) reached", bdID, bpf.MaxBumNexthops)
+	}
+	return idx, f.CreateBdPeer(bdID, idx, e, esi, remoteSrc, writeReverse)
+}
+
+func (f *fakeHeadend) DeleteBdPeer(bdID, index uint16) (bool, error) {
+	// Real semantics: existed reports forward-map occupancy, and an error is
+	// always paired with the occupancy the caller's ledger must keep.
+	_, existed := f.bdPeers[bdPeerKey{bdID, index}]
 	if f.bdPeerDelErr != nil {
-		return f.bdPeerDelErr
+		return existed, f.bdPeerDelErr
+	}
+	if !existed {
+		return false, nil
 	}
 	delete(f.bdPeers, bdPeerKey{bdID, index})
-	return nil
+	return true, nil
 }
 
 // FindFreeBdPeerIndex returns the lowest index not present in bdPeers for bdID,
@@ -674,4 +693,21 @@ func TestApplier_ColorSteerRetarget(t *testing.T) {
 	if id2 := a.srPolicy.idOf(100, ep2); id2 == 0 {
 		t.Errorf("new steering target not referenced after retarget")
 	}
+}
+
+func (f *fakeHeadend) CreateEsiPeer(esi [bpf.ESILen]byte, source [bpf.IPv6AddrLen]byte) error {
+	f.esPeerCreates++
+	if f.esPeerCreateErr != nil {
+		return f.esPeerCreateErr
+	}
+	f.esPeers[esPeerKey{esi: esi, source: source}] = struct{}{}
+	return nil
+}
+func (f *fakeHeadend) DeleteEsiPeer(esi [bpf.ESILen]byte, source [bpf.IPv6AddrLen]byte) error {
+	f.esPeerDeletes++
+	if f.esPeerDeleteErr != nil {
+		return f.esPeerDeleteErr
+	}
+	delete(f.esPeers, esPeerKey{esi: esi, source: source})
+	return nil
 }

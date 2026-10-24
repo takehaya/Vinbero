@@ -80,14 +80,12 @@ type AllocatedSID struct {
 	slot   uint32
 	auxRaw []byte
 	// decapVRF records the VRF grant installed for it, and auxIndex the
-	// dispatch entry's aux index that keys the grant map. Both are needed to
-	// remove the grant on release, and decapVRF is part of what a
-	// redeclaration is diffed against.
+	// last confirmed dispatch index. decapVRF is part of the declaration diff;
+	// deletion resolves the current index in the map layer, never from this cache.
 	decapVRF string
 	auxIndex uint32
-	// stranded marks a record whose install did not complete: the dispatch
-	// entry is in the map but its grant was never written and the rollback
-	// failed. It must never satisfy a redeclaration -- otherwise the same
+	// stranded marks a record whose install or removal did not complete.
+	// The dispatch entry or its grant may already be absent. It must never satisfy a redeclaration -- otherwise the same
 	// declaration coming back would be seen as already-installed and the
 	// grant-less entry would drop forever -- so matches always fails for it
 	// and the next reconcile removes the entry by prefix and reinstalls.
@@ -287,11 +285,8 @@ func (l *LocalSIDSet) Apply(owner bpf.OwnerTag, desired []LocalSID, quota int) (
 					// it removes the entry by prefix and reinstalls -- rather
 					// than releasing an address the map still uses.
 					//
-					// auxIndex is cleared: removeEntry earlier freed got's old
-					// index, so keeping it would make the next removeEntry delete
-					// a grant at an index the allocator may have reassigned to
-					// another SID. The map-layer delete withdraws the live
-					// entry's grant by its real index regardless.
+					// The old aux index was freed. Only a successful install
+					// can confirm the new dispatch and grant.
 					strandedGot := got
 					strandedGot.stranded = true
 					strandedGot.auxIndex = 0
@@ -535,7 +530,7 @@ func (l *LocalSIDSet) OwnsSID(owner bpf.OwnerTag, sid netip.Addr) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, got := range l.live[owner] {
-		if got.SID == sid && (l.inventory == nil || !got.stranded) {
+		if got.SID == sid && !got.stranded {
 			return true
 		}
 	}
@@ -545,7 +540,7 @@ func (l *LocalSIDSet) OwnsSID(owner bpf.OwnerTag, sid netip.Addr) bool {
 // install writes the dispatch entry that points a SID at the plugin's
 // data-plane slot, and records the decap-VRF grant when the declaration
 // names one. It returns the dispatch entry's aux index, which keys the
-// grant and is what removeEntry needs to withdraw it.
+// grant. Grant removal resolves the live index in the map layer.
 //
 // A DecapVRF SID must carry an aux entry so CreateSidFunction stamps a
 // non-zero aux index for the grant to key on -- even when the plugin
@@ -614,19 +609,12 @@ func (l *LocalSIDSet) install(owner bpf.OwnerTag, sid netip.Addr, want LocalSID)
 // Deleting the entry is what frees the aux index bound to it: the map
 // layer allocates one per install and releases it only on delete.
 //
-// The grant is withdrawn here too, keyed by the tracked index. This is
-// belt-and-suspenders: DeleteSidFunction's map layer already withdraws the
-// grant by the entry's real aux index on every delete path. Doing it here as
-// well keeps the withdrawal observable at this layer and orders it before the
-// index is freed. It relies on got.auxIndex being the current index, so a
-// record whose index is unknown or stale carries auxIndex 0 and defers wholly
-// to the map layer (see the stranded paths in Apply).
+// Mark the allocation unconfirmed before touching the maps: a failed delete
+// may already have removed the grant or freed the aux index. Redeclaration
+// must reinstall it, and advertisement must wait for that install to succeed.
+// Only the map layer may delete the grant, using the exact owned entry's index.
 func (l *LocalSIDSet) removeEntry(owner bpf.OwnerTag, got AllocatedSID) error {
-	if got.decapVRF != "" && got.auxIndex != 0 && l.grants != nil {
-		if err := l.grants.DeleteEndtVRFGrant(got.auxIndex); err != nil {
-			return fmt.Errorf("local sid %q: withdraw decap VRF grant: %w", got.Name, err)
-		}
-	}
+	l.markSIDUnconfirmed(owner, got)
 	prefix := got.SID.String() + "/128"
 	if err := l.sids.DeleteSidFunction(prefix, owner); err != nil {
 		return fmt.Errorf("local sid %q: remove %s: %w", got.Name, prefix, err)

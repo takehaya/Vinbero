@@ -12,7 +12,7 @@ import urllib.request
 PREFIX = "10.0.2.0/24"
 PLUGIN = "rq1-receiver"
 IDLE_PREFIX = "10.0.254.0/24"
-MODES = ("builtin", "builtin-idle", "cplane", "relay")
+MODES = ("builtin", "builtin-idle", "cplane", "relay", "composition-native", "composition-wasm")
 
 
 def rpc(address, service, method):
@@ -63,18 +63,29 @@ def verify(state, mode, sid, previous=None):
     else:
         require(not groups, "direct headend unexpectedly has an ECMP group")
 
-    if mode not in ("cplane", "builtin-idle"):
+    if mode not in ("cplane", "builtin-idle", "composition-native", "composition-wasm"):
         require(not plugins, "baseline unexpectedly has a plugin")
         return
     require(len(plugins) == 1 and plugins[0].get("name") == PLUGIN, "measurement plugin is absent")
     plugin = plugins[0]
-    require(plugin.get("endpointBehaviors") == [0xFE01], "wrong behavior claim")
-    require(plugin.get("capabilities") == ["headend"], "wrong capabilities")
+    if mode.startswith("composition-"):
+        require(not plugin.get("endpointBehaviors"), "unexpected behavior claim")
+        require(plugin.get("capabilities") == ["headend", "mup"], "wrong capabilities")
+        require(plugin.get("backend") == mode.removeprefix("composition-"), "wrong backend")
+        require(plugin.get("inputReady"), "composition input incomplete")
+        require(not plugin.get("inputFault") and not plugin.get("outputFailure"), "composition output failed")
+        require(plugin.get("desiredRevision") == plugin.get("appliedRevision") and int(plugin.get("appliedRevision", 0)) > 0, "revision not applied")
+        if mode == "composition-native":
+            require(plugin.get("nativeId") == "mup-composition" and plugin.get("nativeVersion") == "1" and plugin.get("nativeIdentity"), "wrong native implementation")
+    else:
+        require(plugin.get("endpointBehaviors") == [0xFE01], "wrong behavior claim")
+        require(plugin.get("capabilities") == ["headend"], "wrong capabilities")
     require(not plugin.get("dead"), "plugin is dead")
     for field in ("droppedEvents", "restarts", "quarantinedEvents", "pendingDeclarations", "localSids", "advertisedRoutes"):
         require(int(plugin.get(field, 0)) == 0, f"plugin {field} is nonzero")
     idle = mode == "builtin-idle"
-    require(plugin.get("families") == ["vpnv6" if idle else "vpnv4"], "wrong family subscription")
+    families = ["mup_ipv4", "mup_ipv6"] if mode.startswith("composition-") else ["vpnv6" if idle else "vpnv4"]
+    require(plugin.get("families") == families, "wrong family subscription")
     require(plugin.get("deliveryIdle") is True, "plugin delivery or initial replay has not finished")
     require(int(plugin.get("snapshots", 0)) > 0, "plugin has not replayed its initial view")
     require(plugin.get("scope", {}).get("headendPrefixes") == [IDLE_PREFIX if idle else PREFIX], "wrong headend scope")

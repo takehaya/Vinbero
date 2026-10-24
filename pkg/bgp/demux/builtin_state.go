@@ -56,13 +56,13 @@ func (s *builtinDeliveryState) changed(ev bgp.RouteEvent) {
 	}
 }
 
-func (s *builtinDeliveryState) retract(scan *builtinScanState, ev bgp.RouteEvent, isClaimed func(uint16) bool) []bgp.RouteEvent {
+func (s *builtinDeliveryState) retract(scan *builtinScanState, ev bgp.RouteEvent, isClaimed func(bgp.RouteEvent) bool) []bgp.RouteEvent {
 	key := s.key(ev)
 	if _, changed := scan.changed[routePath{nlriKey(ev), ev.Source}]; changed {
 		return nil
 	}
 	if key == "" {
-		if isClaimed(ev.EndpointBehavior) {
+		if isClaimed(ev) {
 			ev.IsWithdraw = true
 			return []bgp.RouteEvent{ev}
 		}
@@ -82,7 +82,7 @@ func (s *builtinDeliveryState) keys() []string {
 
 // refresh re-evaluates one group from current retained paths after a claim
 // rollback. The view dispatches each group's actions before evaluating the next.
-func (s *builtinDeliveryState) refresh(key string, isClaimed func(uint16) bool) []bgp.RouteEvent {
+func (s *builtinDeliveryState) refresh(key string, isClaimed func(bgp.RouteEvent) bool) []bgp.RouteEvent {
 	g := s.groups[key]
 	paths := sortedPaths(g.routes)
 	for _, path := range paths {
@@ -94,13 +94,13 @@ func (s *builtinDeliveryState) refresh(key string, isClaimed func(uint16) bool) 
 	return s.update(g.routes[paths[0]], false, key, false, isClaimed)
 }
 
-func (s *builtinDeliveryState) handle(ev bgp.RouteEvent, claimedWithdraw bool, isClaimed func(uint16) bool) []bgp.RouteEvent {
+func (s *builtinDeliveryState) handle(ev bgp.RouteEvent, claimedWithdraw bool, isClaimed func(bgp.RouteEvent) bool) []bgp.RouteEvent {
 	if ev.Source.IsLocal() {
 		return nil
 	}
 	key := s.key(ev)
 	if key == "" {
-		if !claimedWithdraw && !isClaimed(ev.EndpointBehavior) {
+		if !claimedWithdraw && !isClaimed(ev) {
 			return []bgp.RouteEvent{ev}
 		}
 		return nil
@@ -109,8 +109,8 @@ func (s *builtinDeliveryState) handle(ev bgp.RouteEvent, claimedWithdraw bool, i
 	return s.update(ev, false, key, claimedWithdraw, isClaimed)
 }
 
-func (s *builtinDeliveryState) update(ev bgp.RouteEvent, retract bool, key string, claimedWithdraw bool, isClaimed func(uint16) bool) []bgp.RouteEvent {
-	if retract && !isClaimed(ev.EndpointBehavior) {
+func (s *builtinDeliveryState) update(ev bgp.RouteEvent, retract bool, key string, claimedWithdraw bool, isClaimed func(bgp.RouteEvent) bool) []bgp.RouteEvent {
+	if retract && !isClaimed(ev) {
 		return nil
 	}
 	var actions []bgp.RouteEvent
@@ -128,7 +128,7 @@ func (s *builtinDeliveryState) update(ev bgp.RouteEvent, retract bool, key strin
 	}
 	claimed := false
 	for _, route := range g.routes {
-		if isClaimed(route.EndpointBehavior) {
+		if isClaimed(route) {
 			claimed = true
 			break
 		}

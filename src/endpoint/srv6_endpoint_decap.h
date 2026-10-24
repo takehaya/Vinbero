@@ -9,7 +9,7 @@
 // Decapsulation Helpers
 // ========================================================================
 
-// resolve_decap_vrf picks the VRF ifindex for an End.DT4/DT6/DT46 decap.
+// resolve_decap_vrf authorizes plugin L3 decap handoffs (DX4/DX6/DT4/DT6/DT46).
 //
 // A built-in SID (action below ENDPOINT_PLUGIN_BASE) takes it from its aux, or
 // falls back to the ingress interface when no VRF is configured (End.T). A
@@ -109,7 +109,12 @@ static __always_inline int process_end_dx4(
     struct sid_function_entry *entry,
     __u16 l3_offset)
 {
-    return decap_and_fib_v4(ctx, srh, ctx->ingress_ifindex, l3_offset);
+    // Built-in DX keeps its ingress lookup. A plugin must use the same
+    // trusted VRF grant as DT, never its raw aux or an ingress fallback.
+    __u32 fib_ifindex;
+    if (resolve_decap_vrf(entry, NULL, ctx, &fib_ifindex) != 0)
+        return XDP_DROP;
+    return decap_and_fib_v4(ctx, srh, fib_ifindex, l3_offset);
 }
 
 // End.DX6: Decap to IPv6 cross-connect (RFC 8986 Section 4.5)
@@ -120,7 +125,12 @@ static __always_inline int process_end_dx6(
     struct sid_function_entry *entry,
     __u16 l3_offset)
 {
-    return decap_and_fib_v6(ctx, srh, ctx->ingress_ifindex, l3_offset);
+    // Built-in DX keeps its ingress lookup. A plugin must use the same
+    // trusted VRF grant as DT, never its raw aux or an ingress fallback.
+    __u32 fib_ifindex;
+    if (resolve_decap_vrf(entry, NULL, ctx, &fib_ifindex) != 0)
+        return XDP_DROP;
+    return decap_and_fib_v6(ctx, srh, fib_ifindex, l3_offset);
 }
 
 // End.DX2: Decap to L2 cross-connect (RFC 8986 Section 4.10)

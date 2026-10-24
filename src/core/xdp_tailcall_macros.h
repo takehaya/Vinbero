@@ -72,8 +72,9 @@
 // The discriminator is the SID's own action. A plugin SID dispatches to an
 // endpoint slot at or above ENDPOINT_PLUGIN_BASE, so an action in that range
 // means the aux belongs to a plugin and no built-in variant describes it.
-// The built-in gets NULL and falls back exactly as it does for a SID with no
-// aux (End.DT4 uses the ingress ifindex, and so on).
+// The built-in gets NULL: aux-required behaviors reject the handoff. L3
+// decap handoffs must separately authorize their VRF with resolve_decap_vrf;
+// they must not fall back to the ingress routing domain for a plugin SID.
 #define TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux)                                 \
     struct sid_aux_entry *(aux) = NULL;                                        \
     if ((tctx)->sid_entry.aux_index &&                                         \

@@ -1,0 +1,6 @@
+{
+  "context": "mobile",
+  "source": "fd00:feed::1",
+  "args_offset": 7,
+  "observe_only": true
+}

@@ -11,12 +11,13 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/urfave/cli/v2"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
 
 // cplaneSubcommand builds `vbctl plugin cplane`, which manages the
-// WebAssembly control-plane half of a plugin.
+// native or WebAssembly control-plane half of a plugin.
 //
 // It is a sibling of the data-plane commands rather than an extension of
 // them: the two halves are different artifacts with different lifecycles,
@@ -25,17 +26,22 @@ import (
 func cplaneSubcommand() *cli.Command {
 	return &cli.Command{
 		Name:  "cplane",
-		Usage: "Manage control-plane (WebAssembly) plugins",
+		Usage: "Manage control-plane plugins",
 		Subcommands: []*cli.Command{
 			{
 				Name:  "register",
 				Usage: "Register or upgrade a control-plane plugin",
 				Description: "Registering a name that is already running upgrades it in place: the\n" +
 					"state the running instance wrote is kept and the new module reconciles\n" +
-					"over it, so the data plane is not emptied between the two.",
+					"over it, so the data plane is not emptied between the two.\n" +
+					"Without --wasm, run the native implementation selected by --native or --name.\n" +
+					"An omitted native version is resolved by the daemon.",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "name", Required: true, Usage: "Plugin name; becomes the owner tag its writes carry"},
-					&cli.StringFlag{Name: "wasm", Required: true, Usage: "Path to the WebAssembly module"},
+					&cli.StringFlag{Name: "wasm", Usage: "Use a WebAssembly module instead of native (exclusive with --native and --native-version)"},
+					&cli.StringFlag{Name: "native", Usage: "Statically linked native implementation ID (defaults to --name)"},
+					&cli.StringFlag{Name: "native-version", Usage: "Exact native implementation version (defaults to the daemon's catalog version)"},
+					&cli.StringFlag{Name: "input-policy", Usage: "JSON input context grants and explicit delegation (input API v1)"},
 					&cli.StringFlag{Name: "config", Usage: "Path to the operator config blob handed to the module (optional)"},
 					&cli.StringSliceFlag{Name: "family", Usage: "BGP family to deliver (repeatable); omit for every family"},
 					&cli.StringSliceFlag{
@@ -85,9 +91,22 @@ func cplaneSubcommand() *cli.Command {
 					},
 				},
 				Action: func(c *cli.Context) error {
-					wasm, err := os.ReadFile(c.String("wasm"))
-					if err != nil {
-						return fmt.Errorf("read module: %w", err)
+					wasmPath, nativeID := c.String("wasm"), c.String("native")
+					if c.IsSet("wasm") && wasmPath == "" {
+						return fmt.Errorf("--wasm requires a module path")
+					}
+					if c.IsSet("wasm") && (c.IsSet("native") || c.IsSet("native-version")) {
+						return fmt.Errorf("--wasm cannot be combined with --native or --native-version")
+					}
+					backend := "native"
+					var wasm []byte
+					var err error
+					if wasmPath != "" {
+						backend = "wasm"
+						wasm, err = os.ReadFile(wasmPath)
+						if err != nil {
+							return fmt.Errorf("read module: %w", err)
+						}
 					}
 					var config []byte
 					if path := c.String("config"); path != "" {
@@ -112,9 +131,22 @@ func cplaneSubcommand() *cli.Command {
 					if err != nil {
 						return err
 					}
+					var input *v1.CplaneInputPolicy
+					if path := c.String("input-policy"); path != "" {
+						data, err := os.ReadFile(path)
+						if err != nil {
+							return err
+						}
+						input = &v1.CplaneInputPolicy{}
+						if err := protojson.Unmarshal(data, input); err != nil {
+							return fmt.Errorf("input policy: %w", err)
+						}
+					}
 					clients := clientsFromContext(c)
 					resp, err := clients.Plugin.CplanePluginRegister(c.Context,
 						connect.NewRequest(&v1.CplanePluginRegisterRequest{
+							Backend: backend, NativeId: nativeID, NativeVersion: c.String("native-version"),
+							Input:             input,
 							Name:              c.String("name"),
 							Wasm:              wasm,
 							Config:            config,
@@ -192,12 +224,21 @@ func cplaneSubcommand() *cli.Command {
 					w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 					if len(plugins) > 0 {
 						if _, err := fmt.Fprintln(w,
-							"NAME\tCAPABILITIES\tBEHAVIORS\tSTATE\tSINCE\tDROPPED\tRESTARTS\tQUARANTINED\tSNAPSHOTS\tPENDING\tHEADEND\tADVERTISED\tSIDS\tFAMILIES\tDELIVERY_IDLE"); err != nil {
+							"NAME\tBACKEND\tIMPLEMENTATION\tCAPABILITIES\tBEHAVIORS\tSTATE\tSINCE\tDROPPED\tRESTARTS\tQUARANTINED\tSNAPSHOTS\tPENDING\tHEADEND\tADVERTISED\tSIDS\tFAMILIES\tDELIVERY_IDLE"); err != nil {
 							return err
 						}
 					}
 					for _, p := range plugins {
 						state := "running"
+						if p.GetInput() != nil && !p.GetInputReady() {
+							state = "replaying"
+						}
+						if p.GetInputFault() != "" {
+							state = "input-incomplete"
+						}
+						if p.GetCleanupPending() {
+							state = "cleanup-pending"
+						}
 						if p.GetDead() {
 							// Its state is still installed; it is simply
 							// no longer being fed.
@@ -211,8 +252,8 @@ func cplaneSubcommand() *cli.Command {
 						if families == "" {
 							families = "all"
 						}
-						if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%d/%d\t%d/%d\t%s\t%t\n",
-							p.GetName(), caps, formatBehaviors(p.GetEndpointBehaviors()), state,
+						if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%d/%d\t%d/%d\t%s\t%t\n",
+							p.GetName(), p.GetBackend(), nativeImplementationLabel(p), caps, formatBehaviors(p.GetEndpointBehaviors()), state,
 							formatSince(p.GetSince().AsTime(), p.GetSince() != nil),
 							p.GetDroppedEvents(), p.GetRestarts(), p.GetQuarantinedEvents(), p.GetSnapshots(),
 							p.GetPendingDeclarations(),
@@ -233,6 +274,17 @@ func cplaneSubcommand() *cli.Command {
 					// terminal.
 					if err := printCplaneScopes(plugins); err != nil {
 						return err
+					}
+					for _, p := range plugins {
+						if p.GetInput() != nil {
+							fmt.Printf("%s input_ready=%t revision=%d/%d cleanup_pending=%t\n", p.GetName(), p.GetInputReady(), p.GetAppliedRevision(), p.GetDesiredRevision(), p.GetCleanupPending())
+							if p.GetInputFault() != "" {
+								fmt.Printf("  input: %s\n", p.GetInputFault())
+							}
+							if p.GetOutputFailure() != "" {
+								fmt.Printf("  output: %s\n", p.GetOutputFailure())
+							}
+						}
 					}
 					if len(unrestored) == 0 {
 						return nil
@@ -423,4 +475,11 @@ func formatSince(t time.Time, ok bool) string {
 		d = 0
 	}
 	return d.String()
+}
+
+func nativeImplementationLabel(p *v1.CplanePluginStat) string {
+	if p.GetNativeId() == "" {
+		return "-"
+	}
+	return p.GetNativeId() + "@" + p.GetNativeVersion()
 }

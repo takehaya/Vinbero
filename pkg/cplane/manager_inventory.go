@@ -18,7 +18,7 @@ func (m *Manager) unregisterUnrestored(name string) error {
 	ops, err := NewPluginOps(PluginOpsConfig{
 		Owner: bpf.OwnerPluginBundle(name), HeadendReconciler: m.headend,
 		Advertise: m.advertise, LocalSIDs: m.localSIDs, Leases: m.leases,
-		ApplyMutex: &m.applyMu,
+		ApplyMutex: &m.applyMu, Services: m.services,
 	})
 	if err != nil {
 		return err
@@ -29,6 +29,13 @@ func (m *Manager) unregisterUnrestored(name string) error {
 	if err := m.store.Remove(name); err != nil {
 		return err
 	}
+	if ds, ok := m.source.(delegationSource); ok {
+		ds.SetDelegation(name, nil)
+		if r, ok := m.source.(BuiltinClaimRefresher); ok {
+			r.RefreshBuiltinClaims()
+		}
+	}
+	// Refresh while private behaviors are still claimed, as for running plugins.
 	if m.claims != nil {
 		m.claims.Release(name)
 	}

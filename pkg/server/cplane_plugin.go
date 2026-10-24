@@ -106,6 +106,8 @@ func (s *PluginServer) CplanePluginRegister(
 	}
 
 	reg := cplane.Registration{
+		Backend: msg.GetBackend(), NativeID: msg.GetNativeId(), NativeVersion: msg.GetNativeVersion(),
+		Input:        msg.GetInput(),
 		Name:         msg.GetName(),
 		Module:       msg.GetWasm(),
 		Config:       msg.GetConfig(),
@@ -159,8 +161,7 @@ func (s *PluginServer) CplanePluginList(
 	return connect.NewResponse(&v1.CplanePluginListResponse{Plugins: out}), nil
 }
 
-// CplanePluginStats reports what each running plugin is doing and
-// holding.
+// CplanePluginStats reports running plugins and retained restoration failures.
 func (s *PluginServer) CplanePluginStats(
 	_ context.Context,
 	req *connect.Request[v1.CplanePluginStatsRequest],
@@ -172,11 +173,9 @@ func (s *PluginServer) CplanePluginStats(
 	var stats []cplane.PluginStats
 	if name := req.Msg.GetName(); name != "" {
 		one, ok := s.cplane.StatsFor(name)
-		if !ok {
-			return nil, connect.NewError(connect.CodeNotFound,
-				fmt.Errorf("plugin %q is not registered", name))
+		if ok {
+			stats = []cplane.PluginStats{one}
 		}
-		stats = []cplane.PluginStats{one}
 	} else {
 		stats = s.cplane.Stats()
 	}
@@ -188,7 +187,9 @@ func (s *PluginServer) CplanePluginStats(
 			behaviors = append(behaviors, uint32(b))
 		}
 		out = append(out, &v1.CplanePluginStat{
-			Name:                st.Name,
+			Backend: st.Backend, NativeId: st.NativeID, NativeVersion: st.NativeVersion, NativeIdentity: st.NativeIdentity,
+			Name:  st.Name,
+			Input: st.Input, InputReady: st.InputReady, InputFault: st.InputFault, CleanupPending: st.CleanupPending, DesiredRevision: st.DesiredRevision, AppliedRevision: st.AppliedRevision, OutputFailure: st.OutputFailure,
 			Capabilities:        st.Capabilities,
 			EndpointBehaviors:   behaviors,
 			Families:            st.Families,
@@ -222,19 +223,20 @@ func (s *PluginServer) CplanePluginStats(
 	// response that showed only what is running would let an operator
 	// conclude they are simply gone.
 	var unrestored []*v1.UnrestoredCplanePlugin
-	if req.Msg.GetName() == "" {
-		for _, u := range s.cplane.Unrestored() {
-			behaviors := make([]uint32, 0, len(u.Behaviors))
-			for _, b := range u.Behaviors {
-				behaviors = append(behaviors, uint32(b))
-			}
-			unrestored = append(unrestored, &v1.UnrestoredCplanePlugin{
-				Name:              u.Name,
-				EndpointBehaviors: behaviors,
-				Reason:            u.Reason,
-				Since:             timestamppb.New(u.Since),
-			})
+	for _, u := range s.cplane.Unrestored() {
+		if name := req.Msg.GetName(); name != "" && u.Name != name {
+			continue
 		}
+		behaviors := make([]uint32, 0, len(u.Behaviors))
+		for _, b := range u.Behaviors {
+			behaviors = append(behaviors, uint32(b))
+		}
+		unrestored = append(unrestored, &v1.UnrestoredCplanePlugin{
+			Name: u.Name, EndpointBehaviors: behaviors, Reason: u.Reason, Since: timestamppb.New(u.Since),
+		})
+	}
+	if name := req.Msg.GetName(); name != "" && len(out) == 0 && len(unrestored) == 0 {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("plugin %q is not registered", name))
 	}
 	return connect.NewResponse(&v1.CplanePluginStatsResponse{
 		Plugins:    out,
@@ -295,6 +297,8 @@ func parseBehaviors(codepoints []uint32) ([]uint16, error) {
 // everything else is the daemon's.
 func cplaneRPCError(err error) error {
 	switch {
+	case errors.Is(err, cplane.ErrNativeDisabled):
+		return connect.NewError(connect.CodePermissionDenied, err)
 	case errors.Is(err, wasm.ErrAdmission),
 		errors.Is(err, demux.ErrUnclaimable),
 		errors.Is(err, cplane.ErrScopeDoesNotCoverCapabilities),

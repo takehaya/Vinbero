@@ -2,6 +2,9 @@
 
 An operator's own SRv6 endpoint behavior, driven from the control plane.
 
+The implementation lives in the shared [`customcontroller`](../../go/cplane/customcontroller) package.
+This example supplies the WASM entry points and host transport; the daemon's native adapter calls the same controller.
+
 This is the control-plane half of the case the plugin mechanism exists for.
 You define a behavior of your own, number it outside the standardized
 codepoint space, implement its forwarding as a data-plane plugin in an eBPF
@@ -30,8 +33,8 @@ that SID, naming its own behavior codepoint in the SID TLV.
 
 Receiving, on every batch of events:
 
-- an advertisement carrying the claimed behavior and an SRv6 SID adds a
-  headend entry for its prefix, steering into that SID
+- an advertisement carrying the claimed behavior and an SRv6 SID, within the
+  configured receive prefixes, adds a headend entry steering into that SID
 - a withdrawal removes that path, keeping any alternatives
 - an update whose behavior no longer matches removes the old version of that path
 
@@ -80,15 +83,43 @@ update/withdraw pairs under the default 16 MiB memory limit with Go's collector.
 replacing the default artifact. See the [SDK build instructions](../../go/cplane/README.md)
 for its flags and runtime limitations.
 
+## Run natively
+
+Native is the default backend and is enabled by default in the daemon.
+For the registration named `custom-behavior` below, omit `--wasm sdk/examples/cplane-custom-behavior/plugin.wasm` to run the shared controller natively.
+Use `--native custom-behavior` for a different registration name, and optionally pin the implementation with `--native-version 1`; otherwise the daemon resolves and persists its catalog version.
+Set `settings.cplane_plugins.native_enabled: false` to allow only WASM plugins.
+Keep the same configuration, behavior claims, families, capabilities, scopes and tick interval.
+The native implementation accepts the same opaque protobuf configuration as the WASM example; it does not use the MUP context-input envelope.
+Receive-only operation needs a headend grant; sending also needs the existing local-SID and advertisement grants and scopes.
+
+The controller is statically linked into the daemon, so adding or updating it requires rebuilding the daemon.
+Native calls run in the daemon process with cooperative cancellation, without WASM memory isolation or forced interruption.
+Persisted native registrations must match the rebuilt daemon's source identity; an identity mismatch requires an explicit registration update.
+
+To check both builds from the repository root:
+
+```sh
+make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
+VINBERO_CPLANE_PARITY=1 go test -race ./pkg/cplane/native
+VINBERO_CPLANE_PARITY=1 go test -race ./pkg/cplane -run 'TestExample|TestNativeCustomBehaviorIntegration'
+```
+
+The differential tests compare configure-time transactions, encoded outputs, event statuses, logs and retries.
+The Manager integration tests reuse the same expected forwarding maps and authorization checks for both backends.
+
 ## Run
 
 From the repository root, with the daemon running and the CLI built (`make build`),
 register a receive-only instance handling `10.7.0.0/16`:
 
 ```sh
+# Protobuf field 9: receive prefixes, matching the host's headend scope.
+printf '\112\01310.7.0.0/16' > /tmp/custom-behavior-config.bin
 ./out/bin/vinbero plugin cplane register \
     --name custom-behavior \
     --wasm sdk/examples/cplane-custom-behavior/plugin.wasm \
+    --config /tmp/custom-behavior-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 \
     --capability headend \
@@ -134,6 +165,14 @@ deployments, so one build serves all of them:
 | 5 | the eBPF slot the SID dispatches to |
 | 7 | the next hop to advertise the prefix with |
 | 8 | the VRF a plugin-dispatched End.DT4 decapsulates into |
+| 9 | repeated IPv4 receive prefixes (CIDR), aligned with the host headend scope |
+
+Set field 9 whenever the host grants a restricted headend prefix scope.
+The guest receives routes outside that scope too; filtering them before building
+the desired set keeps one rejected route from blocking valid withdrawals.
+A route must fit wholly inside one configured prefix. With field 9 omitted,
+the example retains its original unfiltered receiving behavior, intended for an
+unrestricted IPv4 headend scope.
 
 There are two ways to run it, and the config picks between them:
 
@@ -171,15 +210,14 @@ own without a built-in handoff; the built-in decap drops with no grant.
 
 ## Notes on the code
 
-`main.go` uses the [Go guest SDK](../../go/cplane/README.md): `guest.Register`
-supplies the WASM entry points, `RouteView` tracks input paths and replay,
-and `Client` sends typed desired sets. `config.go` decodes this example's
-private configuration with the SDK's reflection-free wire decoder.
+`main.go` connects the shared controller to `guest.Register`, which supplies the WASM entry points.
+In [`customcontroller`](../../go/cplane/customcontroller), `RouteView` tracks input paths and replay, and `Client` sends typed desired sets through the injected host transport.
+That package also decodes the private configuration with the SDK's reflection-free wire decoder.
 
 `vinbero_abi_version` is what lets the daemon refuse a module built against
 an ABI it no longer implements, rather than letting it trap on the first
 call into a function whose signature moved.
 
-The periodic callback retries failed declarations. The plugin uses host logging
-and has no filesystem or network access. The host supplies BGP events and
-performs the declared writes.
+The periodic callback retries failed declarations.
+The WASM instance uses host logging and has no filesystem or network access.
+The host supplies BGP events and performs the declared writes.

@@ -101,12 +101,6 @@ func (f *fakeSIDOps) CreateSidFunction(prefix string, e *bpf.SidFunctionEntry, a
 func (f *fakeSIDOps) DeleteSidFunction(prefix string, requester bpf.OwnerTag) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if prefix == f.delFailOn {
-		if f.delSeen >= f.delSkip {
-			return errors.New("simulated delete failure")
-		}
-		f.delSeen++
-	}
 	if cur, ok := f.owners[prefix]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}
@@ -114,6 +108,12 @@ func (f *fakeSIDOps) DeleteSidFunction(prefix string, requester bpf.OwnerTag) er
 		if err := f.grants.DeleteEndtVRFGrant(uint32(e.AuxIndex)); err != nil {
 			return err
 		}
+	}
+	if prefix == f.delFailOn {
+		if f.delSeen >= f.delSkip {
+			return errors.New("simulated delete failure")
+		}
+		f.delSeen++
 	}
 	delete(f.entries, prefix)
 	delete(f.owners, prefix)
@@ -240,6 +240,7 @@ func TestLocalSIDDecapVRFGrant(t *testing.T) {
 		}
 		return 0, fmt.Errorf("unknown vrf %q", name)
 	}
+	sids.grants = grants
 	set := NewLocalSIDSet(alloc, sids, grants, resolve)
 	owner := bpf.OwnerTag("plugin:demo")
 
@@ -297,6 +298,7 @@ func TestLocalSIDDecapVRFGrantHeldDuringResolve(t *testing.T) {
 			t.Error("grant lease was not held while install wrote the grant")
 		}
 	}
+	sids.grants = grants
 	set := NewLocalSIDSet(alloc, sids, grants, resolve)
 	set.grantLease = &lease
 	owner := bpf.OwnerTag("plugin:demo")
@@ -326,6 +328,7 @@ func TestLocalSIDDecapVRFIdempotent(t *testing.T) {
 	sids := newFakeSIDOps()
 	grants := newFakeGrantOps()
 	resolve := func(string) (uint32, error) { return 7, nil }
+	sids.grants = grants
 	set := NewLocalSIDSet(alloc, sids, grants, resolve)
 	owner := bpf.OwnerTag("plugin:demo")
 	decl := []LocalSID{{Name: "a", Locator: "main", Slot: 32, DecapVRF: "vrf-cust"}}
@@ -373,6 +376,7 @@ func TestLocalSIDRebindStrandDoesNotDeleteReusedGrant(t *testing.T) {
 		}
 		return 22, nil
 	}
+	sids.grants = grants
 	set := NewLocalSIDSet(alloc, sids, grants, resolve)
 	owner := bpf.OwnerTag("plugin:demo")
 
@@ -424,6 +428,7 @@ func TestLocalSIDDecapVRFStrandedEntryKeepsAddress(t *testing.T) {
 	sids := newFakeSIDOps()
 	grants := newFakeGrantOps()
 	grants.putErr = errors.New("grant map full")
+	sids.grants = grants
 	set := NewLocalSIDSet(alloc, sids, grants, func(string) (uint32, error) { return 9, nil })
 	owner := bpf.OwnerTag("plugin:demo")
 

@@ -11,9 +11,7 @@ import (
 
 // EncodeRouteEvent renders a received BGP route for delivery to a plugin.
 //
-// The plugin sees a flattened view rather than Vinbero's tagged union: it
-// reads the fields its families define and ignores the rest, which keeps a
-// plugin from having to know how the daemon happens to model a route.
+// Legacy flattened fields remain available alongside the full BGP packet model.
 func EncodeRouteEvent(ev bgp.RouteEvent) *v1.PluginRoute {
 	out := &v1.PluginRoute{
 		Family:           string(ev.Family),
@@ -23,6 +21,26 @@ func EncodeRouteEvent(ev bgp.RouteEvent) *v1.PluginRoute {
 	}
 	if ev.Source.Peer.IsValid() {
 		out.Peer = ev.Source.Peer.String()
+	}
+	if p := ev.BGPPath; p != nil {
+		out.BgpPath = &v1.PluginBGPPath{
+			Codec: p.Codec, Afi: uint32(p.AFI), Safi: uint32(p.SAFI),
+			Nlri: append([]byte(nil), p.NLRI...), EncodingError: p.EncodingError,
+			RouteKey: append([]byte(nil), p.RouteKey...),
+			Metadata: &v1.PluginBGPPathMetadata{
+				Age: p.Metadata.Age, PeerAsn: p.Metadata.PeerASN, PeerRouterId: p.Metadata.PeerRouterID,
+				Stale: p.Metadata.Stale, IsFromExternal: p.Metadata.IsFromExternal,
+				NoImplicitWithdraw: p.Metadata.NoImplicitWithdraw, IsNexthopInvalid: p.Metadata.IsNexthopInvalid,
+				LocalPathId: p.Metadata.LocalPathID,
+			},
+		}
+		if p.Metadata.Best != nil {
+			best := *p.Metadata.Best
+			out.BgpPath.Metadata.Best = &best
+		}
+		for _, attr := range p.Attributes {
+			out.BgpPath.Attributes = append(out.BgpPath.Attributes, append([]byte(nil), attr...))
+		}
 	}
 	for _, a := range ev.UnknownAttrs {
 		out.UnknownAttrs = append(out.UnknownAttrs, &v1.PluginUnknownAttribute{

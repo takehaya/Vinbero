@@ -28,6 +28,7 @@
 
 #include "core/xdp_map.h"
 #include "core/xdp_prog.h"
+#include "core/fdb.h"
 
 #ifndef ETH_P_8021Q
 #define ETH_P_8021Q 0x8100
@@ -147,11 +148,16 @@ static __always_inline int vinbero_l2_dst_peer_esi(const struct xdp_md *ctx, __u
     struct fdb_key fkey = { .bd_id = bd_id };
     __builtin_memcpy(fkey.mac, eth->h_dest, ETH_ALEN);
     struct fdb_entry *f = bpf_map_lookup_elem(&fdb_map, &fkey);
-    if (!f || !f->is_remote) {
+    if (!f) {
         __builtin_memset(out_esi, 0, ESI_LEN);
         return -1;
     }
-    struct bd_peer_l2_ext_key pkey = { .bd_id = f->bd_id, .index = f->peer_index };
+    union fdb_forward dst = fdb_read_forward(f);
+    if (!dst.is_remote) {
+        __builtin_memset(out_esi, 0, ESI_LEN);
+        return -1;
+    }
+    struct bd_peer_l2_ext_key pkey = { .bd_id = fkey.bd_id, .index = dst.peer_index };
     struct bd_peer_l2_ext_val *pval = bpf_map_lookup_elem(&bd_peer_l2_ext_map, &pkey);
     if (!pval) {
         __builtin_memset(out_esi, 0, ESI_LEN);

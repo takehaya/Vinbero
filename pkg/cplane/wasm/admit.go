@@ -49,6 +49,9 @@ var hostFunctionSignatures = map[string]struct{ params, results []api.ValueType 
 	HostNowMonotonic: { // -> ns
 		results: []api.ValueType{api.ValueTypeI64},
 	},
+	HostInputFeatures: {
+		results: []api.ValueType{api.ValueTypeI64},
+	},
 	HostApplyBegin: { // kind -> generation
 		params:  []api.ValueType{api.ValueTypeI32},
 		results: []api.ValueType{api.ValueTypeI64},

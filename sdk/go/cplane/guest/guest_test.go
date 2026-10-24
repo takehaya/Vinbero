@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,6 +125,7 @@ func testObserver(t *testing.T, module []byte) {
 func TestStandardGoRuntime(t *testing.T) {
 	t.Setenv("VINBERO_WASI_HOST_ONLY", "must not be inherited")
 	module := buildGuest(t, "standard_go.go", false)
+	t.Setenv("GOMEMLIMIT", "2GiB") // Must not be inherited by the guest.
 	newInstance := func(t *testing.T, config string) (*wasm.Instance, error) {
 		t.Helper()
 		inst, err := wasm.Instantiate(t.Context(), wasm.Config{
@@ -146,6 +148,25 @@ func TestStandardGoRuntime(t *testing.T) {
 		}
 		if _, err := inst.HandleEvents(t.Context(), batch); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("failed export keeps bounded stderr", func(t *testing.T) {
+		inst, err := newInstance(t, "panic")
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch, err := proto.Marshal(&v1.PluginEventBatch{Events: []*v1.PluginEvent{{Kind: v1.PluginEventKind_PLUGIN_EVENT_KIND_ROUTE}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = inst.HandleEvents(t.Context(), batch)
+		if err == nil || errors.Is(err, wasm.ErrCallTimeout) {
+			t.Fatalf("want guest trap, got %v", err)
+		}
+		message := err.Error()
+		if !strings.Contains(message, "retained panic diagnostic") || !strings.Contains(message, "truncated") ||
+			strings.Contains(message, "configuration-only diagnostic") || strings.Contains(message, strings.Repeat("x", 4097)) {
+			t.Fatalf("missing or stale guest diagnostics: %v", err)
 		}
 	})
 	t.Run("configure sleep respects budget", func(t *testing.T) {

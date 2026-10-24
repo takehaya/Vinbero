@@ -1,8 +1,11 @@
 # cf. based https://gist.github.com/thomaspoignant/5b72d579bd5f311904d973652180c705
 GOCMD=go
+# Match CI when regenerating the committed standard-Go WASM artifact.
+CPLANE_ARTIFACT_GO := $(shell awk '$$1 == "go" {print $$2; exit}' go.mod)
 GOTEST=$(GOCMD) test
 GOVET=$(GOCMD) vet
-CLANG ?= clang
+# Production BPF uses the compiler validated by the packet-path tests.
+CLANG ?= clang-18
 CFLAGS := -O2 -g -Wall -Werror $(CFLAGS)
 DIFF_FROM_BRANCH_NAME ?= origin/main
 
@@ -55,7 +58,8 @@ test-runnable: ## check no panic at init()
 # under -race). Without an explicit timeout the package is killed mid-run
 # and reports failures that are only the clock.
 test: ## Run the tests of the project
-	$(GOTEST) -v -exec sudo -race -timeout 35m ./... $(OUTPUT_OPTIONS)
+	# Keep mise compilers available to guest builds inside privileged tests.
+	$(GOTEST) -v -exec "sudo env PATH=$(PATH)" -race -timeout 35m ./... $(OUTPUT_OPTIONS)
 
 VIMTO_KERNEL ?= 6.6
 .PHONY: test-bpf-load
@@ -269,11 +273,36 @@ bench-rq1-report: ## Validate WORK artifacts and regenerate CSV, JSON, Markdown 
 # Strip source paths and VCS metadata so CI reproduces the committed artifact.
 cplane-example: ## build the control-plane plugin example with standard Go
 	cd sdk/examples/cplane-custom-behavior && \
-		GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+		GOTOOLCHAIN=go$(CPLANE_ARTIFACT_GO) GOOS=wasip1 GOARCH=wasm $(GOCMD) build -buildmode=c-shared -trimpath \
 			-buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 
 # Optional smaller artifact; keep the default Go artifact intact.
-cplane-example-tinygo: ## build the control-plane plugin example with TinyGo 0.39.0
+cplane-example-tinygo: ## build the control-plane plugin example with TinyGo 0.43.0
 	cd sdk/examples/cplane-custom-behavior && \
 		tinygo build -o plugin.tinygo.wasm -target=wasm-unknown \
 			-scheduler=none -gc=conservative -panic=trap -no-debug .
+
+.PHONY: cplane-bgp-observer
+cplane-bgp-observer: ## build the read-only GoBGP packet model example
+	mkdir -p out
+	cd sdk/examples/cplane-bgp-observer && \
+		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-bgp-observer.wasm .
+
+.PHONY: cplane-route-composition
+cplane-route-composition: ## build the route composition example with write imports
+	mkdir -p out
+	cd sdk/examples/cplane-route-composition && \
+		GOOS=wasip1 GOARCH=wasm go build -tags composition_write -mod=readonly -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-route-composition.wasm .
+
+.PHONY: cplane-route-composition-observer
+cplane-route-composition-observer: ## build the route composition example without write imports
+	mkdir -p out
+	cd sdk/examples/cplane-route-composition && \
+		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-route-composition-observer.wasm .
+
+.PHONY: bench-cplane-build
+bench-cplane-build: cplane-route-composition cplane-route-composition-observer bench-rq1-build ## Build identical-controller native/WASM measurement artifacts
+	go test -c -o out/bench/cplane-runtime.test ./pkg/cplane/native

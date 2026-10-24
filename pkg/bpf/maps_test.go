@@ -1,6 +1,7 @@
 package bpf
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -389,6 +390,13 @@ func TestBpfLoad_PinMapsRoundTrip(t *testing.T) {
 		if err := mapOps.CreateSidFunction("fc00:1::1/128", entry, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
 			t.Fatalf("create: %v", err)
 		}
+		owner := OwnerPluginBundle("pinned-headend")
+		if err := mapOps.CreateHeadendV4("192.0.2.0/24", &HeadendEntry{}, owner); err != nil {
+			t.Fatal(err)
+		}
+		if err := mapOps.CreateHeadendV6("fd00:beef::/64", &HeadendEntry{}, owner); err != nil {
+			t.Fatal(err)
+		}
 		if err := objs.Close(); err != nil {
 			t.Fatalf("close: %v", err)
 		}
@@ -423,6 +431,27 @@ func TestBpfLoad_PinMapsRoundTrip(t *testing.T) {
 		owner, ok, err := mapOps.GetSidFunctionOwner("fc00:1::1/128")
 		if err != nil || !ok || owner != OwnerRPC {
 			t.Fatalf("SID owner lost across pinned reload: %q %v %v", owner, ok, err)
+		}
+		pluginOwner := OwnerPluginBundle("pinned-headend")
+		for _, tc := range []struct {
+			prefix string
+			owners func() (map[string]OwnerTag, error)
+			create func(string, *HeadendEntry, OwnerTag) error
+			remove func(string, OwnerTag) error
+		}{
+			{"192.0.2.0/24", mapOps.ListHeadendV4Owners, mapOps.CreateHeadendV4, mapOps.DeleteHeadendV4},
+			{"fd00:beef::/64", mapOps.ListHeadendV6Owners, mapOps.CreateHeadendV6, mapOps.DeleteHeadendV6},
+		} {
+			owners, err := tc.owners()
+			if err != nil || owners[tc.prefix] != pluginOwner {
+				t.Fatalf("headend ownership lost across pinned reload: %s %v %v", tc.prefix, owners, err)
+			}
+			if err := tc.create(tc.prefix, &HeadendEntry{}, OwnerPluginBundle("other")); !errors.Is(err, ErrEntryOwnerMismatch) {
+				t.Fatalf("cross-owner replacement after pinned reload: %v", err)
+			}
+			if err := tc.remove(tc.prefix, pluginOwner); err != nil {
+				t.Fatalf("owner cleanup after pinned reload: %v", err)
+			}
 		}
 	}
 }

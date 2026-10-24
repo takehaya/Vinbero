@@ -1,6 +1,7 @@
 package gobgp
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -395,4 +396,27 @@ func TestDecodeEVPN_RT1(t *testing.T) {
 			t.Error("an explicit all-active per-ES route must be aliasable")
 		}
 	})
+}
+
+func TestEVPNOriginatingIPSurvivesWithdrawal(t *testing.T) {
+	origin := netip.MustParseAddr("2001:db8::99")
+	for _, typ := range []uint8{gobgppkt.EVPN_INCLUSIVE_MULTICAST_ETHERNET_TAG, gobgppkt.EVPN_ETHERNET_SEGMENT_ROUTE} {
+		t.Run(fmt.Sprint(typ), func(t *testing.T) {
+			rd := gobgppkt.NewRouteDistinguisherTwoOctetAS(65000, 1)
+			var nlri *gobgppkt.EVPNNLRI
+			if typ == gobgppkt.EVPN_INCLUSIVE_MULTICAST_ETHERNET_TAG {
+				nlri = gobgppkt.NewEVPNNLRI(typ, &gobgppkt.EVPNMulticastEthernetTagRoute{RD: rd, ETag: 1, IPAddress: origin, IPAddressLength: 128})
+			} else {
+				nlri = gobgppkt.NewEVPNNLRI(typ, &gobgppkt.EVPNEthernetSegmentRoute{RD: rd, IPAddress: origin, IPAddressLength: 128})
+			}
+			p := &apiutil.Path{Family: gobgppkt.RF_EVPN, Nlri: nlri}
+			for _, withdraw := range []bool{false, true} {
+				p.Withdrawal = withdraw
+				ev, ok := pathToRouteEvent(p)
+				if !ok || ev.EVPN == nil || ev.EVPN.IPAddr != origin.String() {
+					t.Fatalf("withdraw=%v lost NLRI originator: %+v", withdraw, ev)
+				}
+			}
+		})
+	}
 }

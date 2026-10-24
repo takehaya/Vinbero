@@ -442,11 +442,6 @@ func run(cliCtx *cli.Context) error {
 			}
 		}
 
-		if err := routeDemux.Start(); err != nil {
-			return fmt.Errorf("subscribe BGP routes: %w", err)
-		}
-		defer routeDemux.Stop()
-
 		// Control-plane plugins. They are only built where BGP is running:
 		// a plugin with no event source could declare state but never react
 		// to anything, which is not a mode worth supporting quietly.
@@ -457,7 +452,35 @@ func run(cliCtx *cli.Context) error {
 		// that did not exist yet, and an entry written with a zero source
 		// blackholes without saying so.
 		cplaneMgr, err := cplane.NewManager(cplane.ManagerConfig{
-			Source:            routeDemux,
+			AllowNative:            cfg.Setting.CplanePlugins.NativeEnabled,
+			Source:                 routeDemux,
+			RetryForwardingCleanup: applier.RetryMUPOwnedCleanup,
+			ResolveInputTarget: func(ev bgp.RouteEvent) (string, uint16, bool) {
+				if ev.EVPN != nil {
+					return vrfBgpMgr.MatchImportForFamily(ev.EVPN.RTs, ev.Family)
+				}
+				if ev.MUP != nil {
+					name, _, ok := vrfBgpMgr.MatchImportForFamily(ev.MUP.RTs, ev.Family)
+					if ok {
+						return name, 0, true
+					}
+					if cfg.BGP.Global.MupDefaultAllow || vrfBgpMgr.EmptyForFamily(ev.Family) {
+						return "", 0, true
+					}
+				}
+				return "", 0, false
+			},
+			ForwardingMaps: vin.GetMapOperations(),
+			ResolveMUPInstance: func(name string) (uint32, error) {
+				if name == "" {
+					return 0, nil
+				}
+				id, ok := vrfBgpMgr.VRF().IDForName(name)
+				if !ok {
+					return 0, fmt.Errorf("MUP VRF %q missing", name)
+				}
+				return id, nil
+			},
 			Claims:            claimRegistry,
 			HeadendReconciler: headendReconciler,
 			Advertiser:        bgpSession,
@@ -534,6 +557,10 @@ func run(cliCtx *cli.Context) error {
 		// Plugins are stopped, not flushed, on shutdown: the daemon going
 		// away is not the operator taking a plugin away, and its entries
 		// should still be there when it comes back.
+		if err := routeDemux.Start(); err != nil {
+			return fmt.Errorf("subscribe BGP routes: %w", err)
+		}
+		defer routeDemux.Stop()
 		defer cplaneMgr.Close(context.Background())
 		srv.SetCplaneManager(cplaneMgr)
 

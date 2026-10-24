@@ -295,6 +295,35 @@ type RouteEvent struct {
 	// UnknownAttrs holds the path attributes Vinbero does not interpret.
 	// Empty for the common case.
 	UnknownAttrs []UnknownAttribute
+	// BGPPath retains the complete NLRI and attributes for plugin readers.
+	// It is immutable after delivery and independent of GoBGP's RIB objects.
+	BGPPath *EncodedBGPPath
+}
+
+// BGPPathCodec identifies the packet codec, including the MUP framing fork.
+const BGPPathCodec = "gobgp-v4.7.0-mup-draft01/binary-v1"
+
+type EncodedBGPPath struct {
+	Codec         string
+	AFI           uint16
+	SAFI          uint8
+	NLRI          []byte
+	RouteKey      []byte // Opaque host identity; excludes non-key NLRI fields.
+	Attributes    [][]byte
+	EncodingError string
+	Metadata      BGPPathMetadata
+}
+
+type BGPPathMetadata struct {
+	Age                int64 // Unix seconds, as supplied by GoBGP.
+	PeerASN            uint32
+	PeerRouterID       string
+	Stale              bool
+	IsFromExternal     bool
+	NoImplicitWithdraw bool
+	IsNexthopInvalid   bool
+	LocalPathID        uint32
+	Best               *bool // nil for live post-policy updates, which do not supply it.
 }
 
 // UnknownAttr returns the first unknown attribute of the given type.
@@ -538,7 +567,7 @@ type EVPNRoute struct {
 	ESI         [10]byte
 	EthernetTag uint32
 	MAC         string // RT2: "aa:bb:cc:dd:ee:ff"
-	IPAddr      string // RT2: optional host IP (IRB); "" when MAC-only
+	IPAddr      string // RT2: optional host IP; RT3/RT4: originating router IP from NLRI
 	SRv6SID     string // End.DT2U (RT2, per-EVI RT1) / End.DT2M (RT3, per-ES RT1); "" if none
 	NextHop     string
 	ESImportRT  string // RT4: ES-Import route target ("aa:bb:cc:dd:ee:ff"); "" otherwise

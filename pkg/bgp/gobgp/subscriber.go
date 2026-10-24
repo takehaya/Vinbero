@@ -73,6 +73,10 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 // the loc-rib snapshot, so the path identity it attaches below reaches
 // every consumer of either.
 func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
+	return pathToRouteEventWithMetadata(p, false)
+}
+
+func pathToRouteEventWithMetadata(p *apiutil.Path, bestKnown bool) (bgp.RouteEvent, bool) {
 	fam, ok := apiFamilyToVinbero(p.Family)
 	if !ok {
 		return bgp.RouteEvent{}, false
@@ -81,6 +85,7 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 		Family:     fam,
 		Source:     pathSource(p),
 		IsWithdraw: p.Withdrawal,
+		BGPPath:    encodeBGPPath(p, bestKnown),
 	}
 	switch fam {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
@@ -97,7 +102,11 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 	case bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6:
 		ev.MUP = decodeMUPRoute(p)
 	}
-	ev.EndpointBehavior = decodeEndpointBehavior(p.Attrs, vpnLabel(p))
+	tlvType := gobgppkt.TLVTypeSRv6L3Service
+	if fam == bgp.FamilyEVPN {
+		tlvType = gobgppkt.TLVTypeSRv6L2Service
+	}
+	ev.EndpointBehavior = decodeEndpointBehavior(p.Attrs, vpnLabel(p), tlvType)
 	ev.UnknownAttrs = decodeUnknownAttrs(p.Attrs)
 	return ev, true
 }
@@ -121,46 +130,11 @@ func vpnLabel(p *apiutil.Path) uint32 {
 // what a plugin claims. Transposition does not apply to the codepoint --
 // only SID bytes are transposed, never the behavior field.
 //
-// It must name the same sub-TLV srv6L2ServiceSIDBytes settles on, or an
-// event could carry one SID's bytes with another's behavior, so it skips a
-// malformed-transposition sub-TLV exactly as that function does. label is
-// the route's VPN label, needed only to make that skip decision the same
-// way; the codepoint itself never depends on it.
-func decodeEndpointBehavior(attrs []gobgppkt.PathAttributeInterface, label uint32) uint16 {
-	for _, a := range attrs {
-		psid, ok := a.(*gobgppkt.PathAttributePrefixSID)
-		if !ok {
-			continue
-		}
-		for _, tlv := range psid.TLVs {
-			svc, ok := tlv.(*gobgppkt.SRv6ServiceTLV)
-			if !ok {
-				continue
-			}
-			for _, st := range svc.SubTLVs {
-				info, ok := st.(*gobgppkt.SRv6InformationSubTLV)
-				if !ok || len(info.SID) != 16 {
-					continue
-				}
-				structure, ok := sidStructureOf(info, svc.Type == gobgppkt.TLVTypeSRv6L3Service)
-				if !ok {
-					// The SID decode skips this sub-TLV, so its
-					// behavior must be skipped with it.
-					continue
-				}
-				if structure.TranspositionLen != 0 {
-					folded := make([]byte, 16)
-					copy(folded, info.SID)
-					if !foldTransposedLabel(folded, label,
-						structure.TranspositionLen, structure.TranspositionOffset) {
-						continue
-					}
-				}
-				return info.EndpointBehavior
-			}
-		}
-	}
-	return 0
+// SID reconstruction and behavior selection share one decoder, including
+// service type filtering and malformed-transposition rejection.
+func decodeEndpointBehavior(attrs []gobgppkt.PathAttributeInterface, label uint32, tlvType gobgppkt.TLVType) uint16 {
+	_, _, behavior, _ := srv6ServiceSID(attrs, label, tlvType)
+	return behavior
 }
 
 // decodeUnknownAttrs carries through the path attributes gobgp could not

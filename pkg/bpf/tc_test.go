@@ -12,7 +12,8 @@ import (
 // the rest must remain zero or the kernel returns EINVAL.
 //
 // Allowed fields: mark, priority, ingress_ifindex, ifindex, cb[5],
-//                 tstamp, wire_len, gso_segs, gso_size, hwtstamp
+//
+//	tstamp, wire_len, gso_segs, gso_size, hwtstamp
 //
 // NOT allowed (must be zero): data, data_end, data_meta, and others
 // in the range offsetofend(cb)..offsetof(tstamp).
@@ -101,36 +102,35 @@ func (h *tcTestHelper) run(pkt []byte, ifindex uint32) (uint32, []byte) {
 // so tc_read_bum_meta returns false → TC_ACT_OK immediately.
 func TestTCBumNoMeta(t *testing.T) {
 	h := newTCTestHelper(t)
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
-		name    string
-		ifindex uint32
-		pkt     func() ([]byte, error)
+		name string
+		pkt  func() ([]byte, error)
 	}{
 		{
 			"unicast IPv4 → TC_ACT_OK",
-			1,
 			func() ([]byte, error) {
 				return buildSimpleIPv4Packet(net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.1").To4())
 			},
 		},
 		{
 			"unicast IPv6 → TC_ACT_OK",
-			1,
 			func() ([]byte, error) {
 				return buildSimpleIPv6Packet(net.ParseIP("fd00::1"), net.ParseIP("fd00::2"))
 			},
 		},
 		{
 			"VLAN tagged IPv4 → TC_ACT_OK",
-			2,
 			func() ([]byte, error) {
 				return buildVlanTaggedIPv4Packet(100, net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.1").To4())
 			},
 		},
 		{
 			"broadcast MAC without meta → TC_ACT_OK",
-			3,
 			func() ([]byte, error) {
 				pkt, err := buildVlanTaggedIPv4Packet(100, net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.1").To4())
 				if err != nil {
@@ -149,11 +149,11 @@ func TestTCBumNoMeta(t *testing.T) {
 				t.Fatalf("Failed to build packet: %v", err)
 			}
 
-			ret, _ := h.run(pkt, tt.ifindex)
+			ret, _ := h.run(pkt, uint32(lo.Index))
 			if ret != uint32(TC_ACT_OK) {
 				t.Errorf("Expected TC_ACT_OK (%d), got %d", TC_ACT_OK, ret)
 			} else {
-				t.Logf("SUCCESS: %s (ifindex=%d)", tt.name, tt.ifindex)
+				t.Logf("SUCCESS: %s (ifindex=%d)", tt.name, lo.Index)
 			}
 		})
 	}

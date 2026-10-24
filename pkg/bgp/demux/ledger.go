@@ -105,6 +105,9 @@ func (l *claimLedger) size() int {
 // Returns "" when the family carries nothing usable, in which case the
 // caller falls back to the behavior on the event itself.
 func nlriKey(ev bgp.RouteEvent) string {
+	if p := ev.BGPPath; p != nil && len(p.RouteKey) > 0 {
+		return join("packet", p.Codec, string(ev.Family), fmt.Sprint(p.AFI), fmt.Sprint(p.SAFI), fmt.Sprintf("%x", p.RouteKey))
+	}
 	switch {
 	case ev.VPN != nil:
 		return join("vpn", string(ev.Family), ev.VPN.RD, ev.VPN.Prefix)
@@ -113,14 +116,19 @@ func nlriKey(ev bgp.RouteEvent) string {
 	case ev.EVPN != nil:
 		e := ev.EVPN
 		return join("evpn", string(ev.Family), fmt.Sprint(int(e.Type)), e.RD,
-			fmt.Sprintf("%x", e.ESI), fmt.Sprint(e.EthernetTag), e.MAC, e.IPAddr, e.ESImportRT)
+			fmt.Sprintf("%x", e.ESI), fmt.Sprint(e.EthernetTag), e.MAC, e.IPAddr)
 	case ev.MUP != nil:
 		m := ev.MUP
 		return join("mup", string(ev.Family), fmt.Sprint(int(m.Type)), m.RD, m.Prefix,
-			m.Address, fmt.Sprint(m.TEID), fmt.Sprint(m.TEIDLen))
+			m.Address, fmt.Sprint(m.TEID), fmt.Sprint(m.TEIDLen),
+			m.Endpoint, fmt.Sprint(m.QFI), m.Source)
 	case ev.SRPolicy != nil:
 		p := ev.SRPolicy
-		return join("srpolicy", string(ev.Family), fmt.Sprint(p.Color), p.Endpoint.String())
+		// A received NLRI carries exactly one candidate, including withdrawals.
+		if len(p.Candidates) != 1 {
+			return ""
+		}
+		return join("srpolicy", string(ev.Family), fmt.Sprint(p.Candidates[0].Distinguisher), fmt.Sprint(p.Color), p.Endpoint.String())
 	default:
 		return ""
 	}

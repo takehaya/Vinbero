@@ -9,6 +9,7 @@ on:
       - '**.h'
       - '**.c'
       - 'examples/**'
+      - 'sdk/**'
       - 'src/**'
       - 'pkg/**'
       - 'cmd/**'
@@ -20,6 +21,7 @@ on:
       - '**.h'
       - '**.c'
       - 'examples/**'
+      - 'sdk/**'
       - 'src/**'
       - 'pkg/**'
       - 'cmd/**'
@@ -81,14 +83,20 @@ jobs:
           go-version-file: ./go.mod
           cache: true
 
-      # The netresource netns tests create kernel VRF devices; the runner
-      # kernel ships the vrf module in linux-modules-extra, unloaded.
+      # The netresource netns tests create kernel VRF devices. Some runner
+      # kernels already include VRF; others need linux-modules-extra.
       - name: Load kernel modules
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y --no-install-recommends \
-            linux-modules-extra-$(uname -r)
-          sudo modprobe vrf
+          if ! sudo modprobe vrf; then
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe vrf
+          fi
+
+      - name: Build and test shared control-plane controllers
+        run: |
+          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
+          VINBERO_CPLANE_PARITY=1 go test -race -timeout 35m ./sdk/go/cplane/customcontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./pkg/cplane/native
 
       - name: Run unit tests
         # pkg/bpf reloads the BPF collection per test and keeps outgrowing
@@ -148,7 +156,7 @@ jobs:
       - name: Install TinyGo for optional compiler compatibility tests
         run: |
           curl -sSLo /tmp/tinygo.deb \
-            https://github.com/tinygo-org/tinygo/releases/download/v0.39.0/tinygo_0.39.0_amd64.deb
+            https://github.com/tinygo-org/tinygo/releases/download/v0.43.0/tinygo_0.43.0_amd64.deb
           sudo dpkg -i /tmp/tinygo.deb
 
       - name: Rebuild the wasm test fixtures
@@ -169,7 +177,9 @@ jobs:
           fi
 
       - name: Run the plugin runtime and harness tests against the rebuilt artifacts
-        run: go test ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
+        run: |
+          make cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
+          VINBERO_CPLANE_PARITY=1 go test -timeout 35m ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:
     name: Integration Test - ${{ matrix.example }}
@@ -202,6 +212,7 @@ jobs:
           - end-ut
           - end-udt4
           - end-replace
+          - end-t-replace
           - end-lbs
           - headend-v4
           - headend-v6
@@ -231,8 +242,10 @@ jobs:
             iputils-ping \
             ethtool \
             curl \
-            python3-scapy \
-            linux-modules-extra-$(uname -r)
+            python3-scapy
+          if ! sudo modprobe vrf || ! sudo modprobe 8021q; then
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          fi
           sudo modprobe vrf
           sudo modprobe 8021q
 

@@ -112,6 +112,11 @@ type MapOperations struct {
 	headendV4Owners   *entryOwnerMap
 	headendV6Owners   *entryOwnerMap
 	ecmpGroupOwners   *entryOwnerMap
+	mupUplinkV4Owners *entryOwnerMap
+	mupUplinkV6Owners *entryOwnerMap
+	fdbOwners         *entryOwnerMap
+	bdPeerOwners      *entryOwnerMap
+	controlLifecycle  sync.Mutex
 
 	// sidLifecycle serializes the read-modify-write sequences that bind a
 	// SID entry to its aux index: the owner check, the exact-entry read,
@@ -122,6 +127,19 @@ type MapOperations struct {
 	// concurrent updates can free an index the other has just reused, or
 	// read one entry and then act on another. Zero value is usable.
 	sidLifecycle sync.Mutex
+
+	// bdPeerLifecycle serializes bd_peer create and delete for the same
+	// reason: the operator RPC path and the BGP applier write the forward,
+	// reverse, and L2-ext maps without a shared lock above this layer, and
+	// DeleteBdPeer's reverse-map scan interleaved with a concurrent
+	// CreateBdPeer could delete the new peer's forward entry while leaving
+	// its reverse entry dangling. Probe+create atomicity comes from
+	// CreateBdPeerAtFreeIndex, which every writer (the server RPC path and
+	// the BGP applier alike) uses for new slots, so index allocation never
+	// races across writers even though they share one index range; bare
+	// FindFreeBdPeerIndex answers are stale by the time the lock is
+	// dropped and must not feed a separate create.
+	bdPeerLifecycle sync.Mutex
 }
 
 // NewMapOperations creates a new MapOperations instance.
@@ -143,6 +161,10 @@ func NewMapOperations(objs *BpfObjects) *MapOperations {
 		headendV4Owners:   newEntryOwnerMap(objs.HeadendV4OwnerMap),
 		headendV6Owners:   newEntryOwnerMap(objs.HeadendV6OwnerMap),
 		ecmpGroupOwners:   newEntryOwnerMap(objs.EcmpGroupOwnerMap),
+		mupUplinkV4Owners: newEntryOwnerMap(objs.MupUplinkV4OwnerMap),
+		mupUplinkV6Owners: newEntryOwnerMap(objs.MupUplinkV6OwnerMap),
+		fdbOwners:         newEntryOwnerMap(objs.FdbOwnerMap),
+		bdPeerOwners:      newEntryOwnerMap(objs.BdPeerOwnerMap),
 	}
 }
 
@@ -322,6 +344,17 @@ var ErrOwnerMismatch = errors.New("aux owner mismatch")
 // layer can map this caller-side mistake to InvalidArgument instead of the
 // generic Internal that other write failures use.
 var ErrAuxPayloadTooLarge = errors.New("plugin aux payload exceeds SidAuxPluginRawMax")
+
+// ErrBdPeerForwardLeaked also marks owned creates that retain companion or
+// owner cleanup state; callers must retain the returned index for cleanup.
+// For the forward map this means an unintended state: a companion write failed and rolling the
+// forward entry back also failed. The slot keeps its occupant (a new slot
+// keeps flooding BUM toward the half-created peer) and stays out of index
+// circulation because the free-index probe sees it, so the only recovery is
+// an operator delete or flush of that slot. Callers detect the condition
+// with errors.Is to surface that guidance instead of assuming the create
+// left no trace.
+var ErrBdPeerForwardLeaked = errors.New("bd_peer forward entry left behind by failed create")
 
 // auxOwnerMap is the persistence backing for indexAllocator.owners.
 // A nil receiver means pinning is disabled (or AuxOwnerMap was never
@@ -837,6 +870,18 @@ func NewSidAuxUsidVrf(vrfIfindex uint32, blockLenBytes uint8) *SidAuxEntry {
 // 4 or 2) at offset 17.
 func NewSidAuxReplace(nexthop [IPv6AddrLen]uint8, blockLenBytes, csidLenBytes uint8) *SidAuxEntry {
 	entry := NewSidAuxUsid(nexthop, blockLenBytes)
+	raw := (*[20]byte)(unsafe.Pointer(entry))
+	raw[17] = csidLenBytes
+	return entry
+}
+
+// NewSidAuxReplaceVrf creates an aux entry for End.T with REPLACE-CSID:
+// the VRF ifindex in the leading bytes (the l3vrf view, same aliasing as
+// uT) plus the REPLACE geometry at offsets 16/17 (the usid view). The
+// nexthop slot the ifindex aliases into stays otherwise zero -- the data
+// plane only reads it as a nexthop for End.X(REP).
+func NewSidAuxReplaceVrf(vrfIfindex uint32, blockLenBytes, csidLenBytes uint8) *SidAuxEntry {
+	entry := NewSidAuxUsidVrf(vrfIfindex, blockLenBytes)
 	raw := (*[20]byte)(unsafe.Pointer(entry))
 	raw[17] = csidLenBytes
 	return entry
@@ -1795,33 +1840,14 @@ func buildMupUplinkV4Key(instance uint32, endpoint string, teid uint32, teidPref
 // H.Encaps headend_entry; set entry.ArgsOffset = MupArgsOffsetNone for a direct
 // (End.DT4) target so Args.Mob.Session is not patched into the outgoing SID.
 func (m *MapOperations) CreateMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *HeadendEntry) error {
-	key, err := buildMupUplinkV4Key(instance, endpoint, teid, teidPrefixBits)
-	if err != nil {
-		return err
-	}
-	// F-TEID lookups happen inside behavior programs, which bypass the
-	// dispatcher's ECMP group resolution, so a group reference here would
-	// silently never resolve. Force the entry terminal.
-	pe := *entry
-	pe.GroupId = EcmpGroupNone
-	if err := m.objs.MupUplinkV4Map.Put(key, &pe); err != nil {
-		return fmt.Errorf("failed to put mup uplink v4 entry: %w", err)
-	}
-	return nil
+	return m.CreateMupUplinkV4Owned(instance, endpoint, teid, teidPrefixBits, entry, OwnerRPC)
 }
 
 // DeleteMupUplinkV4 removes an F-TEID uplink session entry. The {endpoint, teid,
 // teidPrefixBits} tuple must match an installed prefix. A missing key is treated
 // as success so a double withdraw is idempotent.
 func (m *MapOperations) DeleteMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
-	key, err := buildMupUplinkV4Key(instance, endpoint, teid, teidPrefixBits)
-	if err != nil {
-		return err
-	}
-	if err := deleteMapKey(m.objs.MupUplinkV4Map, key); err != nil {
-		return fmt.Errorf("failed to delete mup uplink v4 entry: %w", err)
-	}
-	return nil
+	return m.DeleteMupUplinkV4Owned(instance, endpoint, teid, teidPrefixBits, OwnerRPC)
 }
 
 // buildMupUplinkV6Key assembles the LPM_TRIE key for mup_uplink_v6_map: the
@@ -1857,31 +1883,13 @@ func buildMupUplinkV6Key(instance uint32, endpoint string, teid uint32, teidPref
 // T2ST, IPv6 endpoint): the IPv6 counterpart of CreateMupUplinkV4, read by the
 // H.M.GTP6.D_TEID behavior. See CreateMupUplinkV4 for the entry semantics.
 func (m *MapOperations) CreateMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8, entry *HeadendEntry) error {
-	key, err := buildMupUplinkV6Key(instance, endpoint, teid, teidPrefixBits)
-	if err != nil {
-		return err
-	}
-	// Same terminal forcing as CreateMupUplinkV4: F-TEID lookups bypass
-	// the dispatcher's ECMP group resolution.
-	pe := *entry
-	pe.GroupId = EcmpGroupNone
-	if err := m.objs.MupUplinkV6Map.Put(key, &pe); err != nil {
-		return fmt.Errorf("failed to put mup uplink v6 entry: %w", err)
-	}
-	return nil
+	return m.CreateMupUplinkV6Owned(instance, endpoint, teid, teidPrefixBits, entry, OwnerRPC)
 }
 
 // DeleteMupUplinkV6 removes an F-TEID uplink session entry over GTP6. A missing
 // key is treated as success so a double withdraw is idempotent.
 func (m *MapOperations) DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
-	key, err := buildMupUplinkV6Key(instance, endpoint, teid, teidPrefixBits)
-	if err != nil {
-		return err
-	}
-	if err := deleteMapKey(m.objs.MupUplinkV6Map, key); err != nil {
-		return fmt.Errorf("failed to delete mup uplink v6 entry: %w", err)
-	}
-	return nil
+	return m.DeleteMupUplinkV6Owned(instance, endpoint, teid, teidPrefixBits, OwnerRPC)
 }
 
 // ===== MUP Uplink Instance Map Operations =====
@@ -2568,20 +2576,12 @@ func (m *MapOperations) ListHeadendL2() (map[HeadendL2Key]*HeadendEntry, error) 
 
 // CreateFdb adds an FDB entry to the map
 func (m *MapOperations) CreateFdb(bdID uint16, mac net.HardwareAddr, entry *FdbEntry) error {
-	key := buildFdbKey(bdID, mac)
-	if err := m.objs.FdbMap.Put(key, entry); err != nil {
-		return fmt.Errorf("failed to put fdb entry: %w", err)
-	}
-	return nil
+	return m.CreateFdbOwned(bdID, mac, entry, OwnerRPC)
 }
 
 // DeleteFdb removes an FDB entry from the map
 func (m *MapOperations) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
-	key := buildFdbKey(bdID, mac)
-	if err := m.objs.FdbMap.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete fdb entry: %w", err)
-	}
-	return nil
+	return m.DeleteFdbOwned(bdID, mac, OwnerRPC)
 }
 
 // GetFdb retrieves an FDB entry from the map
@@ -2590,6 +2590,9 @@ func (m *MapOperations) GetFdb(bdID uint16, mac net.HardwareAddr) (*FdbEntry, er
 	var entry FdbEntry
 	if err := m.objs.FdbMap.Lookup(key, &entry); err != nil {
 		return nil, fmt.Errorf("failed to lookup fdb entry: %w", err)
+	}
+	if entry.IsRemote != 0 {
+		entry.BdId = bdID
 	}
 	return &entry, nil
 }
@@ -2602,6 +2605,11 @@ func (m *MapOperations) ListFdb() (map[FdbKey]*FdbEntry, error) {
 	iter := m.objs.FdbMap.Iterate()
 	for iter.Next(&key, &entry) {
 		entryCopy := entry
+		// A local node can become remote through a forwarding-word CAS.
+		// Its legacy value.BdId is unchanged; the immutable key is authoritative.
+		if entryCopy.IsRemote != 0 {
+			entryCopy.BdId = key.BdId
+		}
 		result[key] = &entryCopy
 	}
 	if err := iter.Err(); err != nil {
@@ -2660,18 +2668,18 @@ type AgedFdbEntry struct {
 // AgeFdbEntries deletes dynamic FDB entries older than maxAgeNs nanoseconds.
 // Static entries (is_static=1) and entries with last_seen=0 are never aged out.
 // It returns the entries actually deleted so the caller can withdraw their RT2
-// advertisements; len() is the number deleted.
+// advertisements; len() is the number deleted. BPF timestamps are best-effort
+// refreshes independent of the forwarding identity. The second lookup avoids
+// deleting entries already observed as fresh; refresh-versus-delete is not atomic.
 func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
+	m.controlLifecycle.Lock()
+	defer m.controlLifecycle.Unlock()
 	var key FdbKey
 	var entry FdbEntry
 	iter := m.objs.FdbMap.Iterate()
 
 	now := currentKtimeNs()
-	type candidate struct {
-		key      FdbKey
-		isRemote bool
-	}
-	var toDelete []candidate
+	var toDelete []FdbKey
 	for iter.Next(&key, &entry) {
 		if entry.IsStatic != 0 || entry.LastSeen == 0 {
 			continue
@@ -2681,7 +2689,7 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 		}
 		age := now - entry.LastSeen
 		if age > maxAgeNs {
-			toDelete = append(toDelete, candidate{key: key, isRemote: entry.IsRemote != 0})
+			toDelete = append(toDelete, key)
 		}
 	}
 	if err := iter.Err(); err != nil {
@@ -2689,13 +2697,29 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 	}
 
 	deleted := make([]AgedFdbEntry, 0, len(toDelete))
-	for _, c := range toDelete {
-		k := c.key
+	for _, k := range toDelete {
+		tag, owned, oerr := m.fdbOwners.Lookup(&k)
+		if oerr != nil {
+			return deleted, oerr
+		}
+		if owned && tag != OwnerRPC {
+			continue
+		}
+		var current FdbEntry
+		if err := m.objs.FdbMap.Lookup(&k, &current); err != nil {
+			continue
+		}
+		if current.IsStatic != 0 || current.LastSeen == 0 || current.LastSeen > now || now-current.LastSeen <= maxAgeNs {
+			continue
+		}
 		if err := m.objs.FdbMap.Delete(&k); err == nil {
+			if err := m.fdbOwners.Delete(&k); err != nil {
+				return deleted, err
+			}
 			deleted = append(deleted, AgedFdbEntry{
 				BDID:     k.BdId,
 				MAC:      net.HardwareAddr(append([]byte(nil), k.Mac[:]...)),
-				IsRemote: c.isRemote,
+				IsRemote: current.IsRemote != 0,
 			})
 		}
 	}
@@ -2724,24 +2748,88 @@ func currentKtimeNs() uint64 {
 // so one PE maps to one reverse entry, and the RT3 End.DT2M BUM peer toward the
 // same PE must pass false so it does not clobber that entry (the RX path needs
 // the unicast peer).
+// CreateBdPeerAtFreeIndex probes for the lowest free operator-range index in
+// bdID and installs the peer there under one critical section, so two
+// concurrent creates cannot pick the same slot and silently overwrite each
+// other. Returns the chosen index.
+func (m *MapOperations) CreateBdPeerAtFreeIndex(bdID uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) (uint16, error) {
+	return m.CreateBdPeerAtFreeIndexOwned(bdID, entry, esi, remoteSrc, writeReverse, OwnerRPC)
+}
+
 func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) error {
+	return m.CreateBdPeerOwned(bdID, index, entry, esi, remoteSrc, writeReverse, OwnerRPC)
+}
+
+func (m *MapOperations) createBdPeerLocked(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool) error {
+	// Snapshot whatever the slot holds before touching it: a create is
+	// also the refresh path for an already-installed peer, and a partial
+	// failure must put the PREVIOUS state back, not roll forward to an
+	// empty slot -- deleting a live peer that a ledger still pins hands
+	// its index to the next allocation while the pinned ledger later
+	// overwrites the reused slot.
 	key := &BdPeerKey{BdId: bdID, Index: index}
+	var prevFwd HeadendEntry
+	prevErr := m.objs.BdPeerMap.Lookup(key, &prevFwd)
+	if prevErr != nil && !errors.Is(prevErr, ebpf.ErrKeyNotExist) {
+		// The snapshot must be definite: treating a transient read failure
+		// as "no previous entry" would make a later rollback DELETE a live
+		// entry instead of restoring it.
+		return fmt.Errorf("read existing bd peer entry {bd %d, index %d}: %w", bdID, index, prevErr)
+	}
+	hadFwd := prevErr == nil
+	// A failed restore is reported, not swallowed: the caller decides its
+	// ledger from the returned error, and "creation failed" while a new
+	// forward entry silently survived is exactly the orphan-slot
+	// inconsistency this module exists to prevent.
+	restoreFwd := func() error {
+		if hadFwd {
+			return m.objs.BdPeerMap.Put(key, &prevFwd)
+		}
+		if derr := m.objs.BdPeerMap.Delete(key); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+			return derr
+		}
+		return nil
+	}
+
 	if err := m.objs.BdPeerMap.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put bd peer entry: %w", err)
 	}
 
 	var rKey *BdPeerReverseKey
+	var prevRev BdPeerReverseVal
+	hadRev := false
 	if writeReverse {
 		rKey = &BdPeerReverseKey{BdId: bdID}
 		copy(rKey.SrcAddr[:], remoteSrc[:])
+		revErr := m.objs.BdPeerReverseMap.Lookup(rKey, &prevRev)
+		if revErr != nil && !errors.Is(revErr, ebpf.ErrKeyNotExist) {
+			err := fmt.Errorf("read existing bd peer reverse entry {bd %d}: %w", bdID, revErr)
+			if rerr := restoreFwd(); rerr != nil {
+				err = fmt.Errorf("%w (restoring the previous forward entry also failed: %v): %w", err, rerr, ErrBdPeerForwardLeaked)
+			}
+			return err
+		}
+		hadRev = revErr == nil
 		rVal := &BdPeerReverseVal{Index: index, Esi: esi}
 		if err := m.objs.BdPeerReverseMap.Put(rKey, rVal); err != nil {
-			// Roll back the forward entry: a half-installed peer would orphan a
-			// bd_peer slot (FindFreeBdPeerIndex skips it forever) and leave the
-			// map inconsistent with the applier ledger.
-			_ = m.objs.BdPeerMap.Delete(key)
-			return fmt.Errorf("failed to put bd peer reverse entry: %w", err)
+			err = fmt.Errorf("failed to put bd peer reverse entry: %w", err)
+			if rerr := restoreFwd(); rerr != nil {
+				err = fmt.Errorf("%w (restoring the previous forward entry also failed: %v): %w", err, rerr, ErrBdPeerForwardLeaked)
+			}
+			return err
 		}
+	}
+	restoreRev := func() error {
+		if rKey == nil {
+			return nil
+		}
+		if hadRev {
+			return m.objs.BdPeerReverseMap.Put(rKey, &prevRev)
+		}
+		if derr := m.objs.BdPeerReverseMap.Delete(rKey); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+			return derr
+		}
+		return nil
 	}
 
 	var zero [ESILen]byte
@@ -2749,13 +2837,14 @@ func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, es
 	if esi != zero {
 		ext := &BpfBdPeerL2ExtVal{Esi: esi}
 		if err := m.objs.BdPeerL2ExtMap.Put(extKey, ext); err != nil {
-			// Roll back the forward (and reverse, if written) entries so the
-			// slot is not orphaned by a partial install.
-			_ = m.objs.BdPeerMap.Delete(key)
-			if rKey != nil {
-				_ = m.objs.BdPeerReverseMap.Delete(rKey)
+			err = fmt.Errorf("failed to put bd peer L2 ESI ext: %w", err)
+			if rerr := restoreFwd(); rerr != nil {
+				err = fmt.Errorf("%w (restoring the previous forward entry also failed: %v): %w", err, rerr, ErrBdPeerForwardLeaked)
 			}
-			return fmt.Errorf("failed to put bd peer L2 ESI ext: %w", err)
+			if rerr := restoreRev(); rerr != nil {
+				err = fmt.Errorf("%w (restoring the previous reverse entry also failed: %v)", err, rerr)
+			}
+			return err
 		}
 	} else {
 		_ = m.objs.BdPeerL2ExtMap.Delete(extKey)
@@ -2764,38 +2853,140 @@ func (m *MapOperations) CreateBdPeer(bdID, index uint16, entry *HeadendEntry, es
 	return nil
 }
 
-// DeleteBdPeer removes a BD peer entry and its reverse-map entry. The reverse
-// map is keyed by the remote PE source (not the index), and the forward entry
-// no longer carries it, so the matching reverse entry is found by scanning for
-// the one pointing at this index (a BD holds at most MAX_BUM_NEXTHOPS peers).
-// Deletes the forward map first to avoid inconsistency if reverse delete fails.
-func (m *MapOperations) DeleteBdPeer(bdID, index uint16) error {
-	key := &BdPeerKey{BdId: bdID, Index: index}
-	if err := m.objs.BdPeerMap.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete bd peer entry: %w", err)
+// DeleteBdPeer removes a BD peer entry, its reverse-map entries, and its L2
+// ESI ext entry. The reverse map is keyed by the remote PE source (not the
+// index), and the forward entry no longer carries it, so matching reverse
+// entries are found by scanning for the ones pointing at this index -- ALL
+// of them are drained, because a partial failure in an earlier generation
+// can leave more than one entry aimed at a slot, and deleting an arbitrary
+// one would leave a live entry dangling.
+//
+// The companion entries go FIRST: every error path must leave the forward
+// entry's occupancy matching what the callers' ledgers believe, because the
+// appliers recover from a failed delete by keeping the index as occupied,
+// and FindFreeBdPeerIndex probes the forward map. If the forward delete
+// itself then fails, the drained reverse entries are restored so a peer
+// that is still forwarding does not lose its RX split-horizon protection
+// while it waits for a retry. The transient window this order opens
+// (reverse entry gone, forward entry briefly present) only weakens RX
+// split-horizon for a peer that is being torn down anyway.
+//
+// existed reports whether the forward entry was present: false with a nil
+// error is the already-free slot (the caller releases its ledger), and an
+// error is always accompanied by the occupancy the caller must keep -- a
+// cleanup failure on a slot that is in fact free must not make the caller
+// re-pin it, or the next peer allocated onto the slot collides with the
+// stale ledger.
+func (m *MapOperations) DeleteBdPeer(bdID, index uint16) (bool, error) {
+	return m.DeleteBdPeerOwned(bdID, index, OwnerRPC)
+}
+
+func (m *MapOperations) deleteBdPeerLocked(bdID, index uint16) (existed bool, err error) {
+	// Occupancy is decided conservatively: only a definite ErrKeyNotExist
+	// counts as absent. Any other Lookup error keeps the caller's ledger --
+	// releasing a slot on a transient read failure is the collision this
+	// contract exists to prevent.
+	forwardPresent := func() bool {
+		var e HeadendEntry
+		lerr := m.objs.BdPeerMap.Lookup(&BdPeerKey{BdId: bdID, Index: index}, &e)
+		return !errors.Is(lerr, ebpf.ErrKeyNotExist)
 	}
 
-	// Find and delete the matching reverse entry. The reverse map is keyed by
-	// the remote PE source, not the index, so it is scanned for the one pointing
-	// at this index (a BD holds at most MAX_BUM_NEXTHOPS peers, so the scan is
-	// bounded). iter.Err() is checked so a truncated scan -- which could leave a
-	// stale reverse entry that misroutes the RX split-horizon -- surfaces instead
-	// of being silently swallowed.
+	// Drain every reverse entry pointing at this slot, remembering what was
+	// removed so a failed forward delete can put it back. iter.Err() is
+	// checked so a truncated scan -- which could leave a stale reverse
+	// entry that misattributes the RX split-horizon -- surfaces instead of
+	// being silently swallowed.
+	type drained struct {
+		key BdPeerReverseKey
+		val BdPeerReverseVal
+	}
+	var removed []drained
+	// A failed restore is reported, not swallowed: a forward peer left
+	// without its reverse entries has no RX split-horizon, and the caller
+	// (which keeps its ledger and retries) must know the slot is degraded.
+	restoreReverse := func() error {
+		var firstErr error
+		for _, d := range removed {
+			k, v := d.key, d.val
+			if perr := m.objs.BdPeerReverseMap.Put(&k, &v); perr != nil && firstErr == nil {
+				firstErr = perr
+			}
+		}
+		return firstErr
+	}
 	var rKey BdPeerReverseKey
 	var rVal BdPeerReverseVal
 	iter := m.objs.BdPeerReverseMap.Iterate()
 	for iter.Next(&rKey, &rVal) {
 		if rKey.BdId == bdID && rVal.Index == index {
 			k := rKey
-			_ = m.objs.BdPeerReverseMap.Delete(&k)
-			break
+			if derr := m.objs.BdPeerReverseMap.Delete(&k); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+				derr = fmt.Errorf("delete bd peer reverse entry for {bd %d, index %d}: %w", bdID, index, derr)
+				if rerr := restoreReverse(); rerr != nil {
+					derr = fmt.Errorf("%w (restoring drained reverse entries also failed: %v)", derr, rerr)
+				}
+				return forwardPresent(), derr
+			}
+			removed = append(removed, drained{key: rKey, val: rVal})
 		}
 	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("scan bd peer reverse map for {bd %d, index %d}: %w", bdID, index, err)
+	if serr := iter.Err(); serr != nil {
+		serr = fmt.Errorf("scan bd peer reverse map for {bd %d, index %d}: %w", bdID, index, serr)
+		if rerr := restoreReverse(); rerr != nil {
+			serr = fmt.Errorf("%w (restoring drained reverse entries also failed: %v)", serr, rerr)
+		}
+		return forwardPresent(), serr
 	}
-	_ = m.objs.BdPeerL2ExtMap.Delete(&BpfBdPeerL2ExtKey{BdId: bdID, Index: index})
-	return nil
+	// The L2 ESI ext entry is saved before it is removed so a failed
+	// forward delete can put it back: a forward peer left without it
+	// loses TX split-horizon (tc_bum skips peers whose ext matches the
+	// source ESI).
+	extKey := BpfBdPeerL2ExtKey{BdId: bdID, Index: index}
+	var extVal BpfBdPeerL2ExtVal
+	extLookupErr := m.objs.BdPeerL2ExtMap.Lookup(&extKey, &extVal)
+	if extLookupErr != nil && !errors.Is(extLookupErr, ebpf.ErrKeyNotExist) {
+		// Absent must be definite: freeing the forward entry while a live
+		// ext survives would judge TX split-horizon by the old ESI once
+		// the index is reused.
+		lerr := fmt.Errorf("read bd peer L2 ESI ext for {bd %d, index %d}: %w", bdID, index, extLookupErr)
+		if rerr := restoreReverse(); rerr != nil {
+			lerr = fmt.Errorf("%w (restoring drained reverse entries also failed: %v)", lerr, rerr)
+		}
+		return forwardPresent(), lerr
+	}
+	extPresent := extLookupErr == nil
+	if extPresent {
+		if derr := m.objs.BdPeerL2ExtMap.Delete(&extKey); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+			derr = fmt.Errorf("delete bd peer L2 ESI ext for {bd %d, index %d}: %w", bdID, index, derr)
+			if rerr := restoreReverse(); rerr != nil {
+				derr = fmt.Errorf("%w (restoring drained reverse entries also failed: %v)", derr, rerr)
+			}
+			return forwardPresent(), derr
+		}
+	}
+	if derr := m.objs.BdPeerMap.Delete(&BdPeerKey{BdId: bdID, Index: index}); derr != nil {
+		if errors.Is(derr, ebpf.ErrKeyNotExist) {
+			// Already free. Any stale companions were still drained above,
+			// which is the only place that cleans them: the startup sweep
+			// enumerates via the forward map and cannot see them.
+			return false, nil
+		}
+		// The peer is still forwarding: put its companion state back
+		// rather than leaving the entry live without split-horizon until
+		// a retry succeeds.
+		derr = fmt.Errorf("failed to delete bd peer entry: %w", derr)
+		if rerr := restoreReverse(); rerr != nil {
+			derr = fmt.Errorf("%w (restoring drained reverse entries also failed: %v)", derr, rerr)
+		}
+		if extPresent {
+			if perr := m.objs.BdPeerL2ExtMap.Put(&extKey, &extVal); perr != nil {
+				derr = fmt.Errorf("%w (restoring the L2 ESI ext also failed: %v)", derr, perr)
+			}
+		}
+		return true, derr
+	}
+	return true, nil
 }
 
 // GetBdPeer retrieves a BD peer entry
@@ -2808,15 +2999,58 @@ func (m *MapOperations) GetBdPeer(bdID, index uint16) (*HeadendEntry, error) {
 	return &entry, nil
 }
 
+// DeleteBdPeerIfFirstSegment deletes the bd_peer at {bdID, index} only when
+// its entry's first segment equals seg -- the identity check and the delete
+// run inside one bd_peer critical section, so a concurrent writer cannot
+// free and reuse the slot between them. Returns (existed, matched, err):
+// existed=false means the slot was already free; matched=false with
+// existed=true means a DIFFERENT entry occupies the slot (nothing deleted);
+// a transient read failure is an error, never a mismatch.
+func (m *MapOperations) DeleteBdPeerIfFirstSegment(bdID, index uint16, seg [IPv6AddrLen]byte) (existed, matched bool, err error) {
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	var cur HeadendEntry
+	lerr := m.objs.BdPeerMap.Lookup(&BdPeerKey{BdId: bdID, Index: index}, &cur)
+	if errors.Is(lerr, ebpf.ErrKeyNotExist) {
+		return false, false, nil
+	}
+	if lerr != nil {
+		return true, false, fmt.Errorf("read bd peer entry {bd %d, index %d}: %w", bdID, index, lerr)
+	}
+	if cur.NumSegments < 1 || cur.Segments[0] != seg {
+		return true, false, nil
+	}
+	ex, derr := m.deleteBdPeerOwnedLocked(bdID, index, OwnerRPC)
+	return ex, true, derr
+}
+
 // FindFreeBdPeerIndex probes indexes 0..MaxBumNexthops-1 for a given BD
 // and returns the first unused index. Returns MaxBumNexthops if all slots are occupied.
 // This avoids iterating the entire bd_peer_map (ListBdPeers) on every create request.
 func (m *MapOperations) FindFreeBdPeerIndex(bdID uint16) uint16 {
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	return m.findFreeBdPeerIndexLocked(bdID)
+}
+
+func (m *MapOperations) findFreeBdPeerIndexLocked(bdID uint16) uint16 {
 	var entry HeadendEntry
 	for i := uint16(0); i < MaxBumNexthops; i++ {
 		key := &BdPeerKey{BdId: bdID, Index: i}
-		if err := m.objs.BdPeerMap.Lookup(key, &entry); err != nil {
+		err := m.objs.BdPeerMap.Lookup(key, &entry)
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			if _, owned, oerr := m.bdPeerOwners.Lookup(key); oerr != nil {
+				return MaxBumNexthops
+			} else if owned {
+				continue
+			}
 			return i
+		}
+		if err != nil {
+			// A transient read failure must not present an occupied slot
+			// as free -- overwriting a live peer is worse than reporting
+			// the BD full and letting the caller retry.
+			return MaxBumNexthops
 		}
 	}
 	return MaxBumNexthops
@@ -2984,6 +3218,9 @@ func (m *MapOperations) FlushHeadendL2() (uint32, error) {
 // optionally keeping user-configured static entries. bdID == 0 means
 // all BDs; keepStatic == true skips entries with IsStatic != 0.
 func (m *MapOperations) FlushFdb(bdID uint16, keepStatic bool) (uint32, error) {
+	// Serialize the static/owner checks and deletion with userspace publication.
+	m.controlLifecycle.Lock()
+	defer m.controlLifecycle.Unlock()
 	entries, err := m.ListFdb()
 	if err != nil {
 		return 0, err
@@ -2996,10 +3233,16 @@ func (m *MapOperations) FlushFdb(bdID uint16, keepStatic bool) (uint32, error) {
 		if keepStatic && entry.IsStatic != 0 {
 			continue
 		}
-		mac := net.HardwareAddr(key.Mac[:])
-		if err := m.DeleteFdb(key.BdId, mac); err != nil {
+		tag, owned, oerr := m.fdbOwners.Lookup(&key)
+		if oerr != nil {
+			return count, oerr
+		}
+		if owned && tag != OwnerRPC {
+			continue
+		}
+		if err := deleteControlEntry[FdbKey, FdbEntry](m.objs.FdbMap, m.fdbOwners, &key, OwnerRPC, false); err != nil {
 			return count, fmt.Errorf("flush fdb: delete bd=%d mac=%s: %w",
-				key.BdId, mac, err)
+				key.BdId, net.HardwareAddr(key.Mac[:]), err)
 		}
 		count++
 	}
@@ -3010,12 +3253,25 @@ func (m *MapOperations) FlushFdb(bdID uint16, keepStatic bool) (uint32, error) {
 // bdID == 0 means all BDs. The companion reverse-map entries are cleaned
 // up transitively via DeleteBdPeer.
 func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
-	entries, err := m.ListBdPeers()
-	if err != nil {
-		return 0, err
+	// Snapshot and delete under one critical section: a slot deleted and
+	// re-created by a concurrent writer between the two would otherwise be
+	// flushed as if it were the snapshotted peer.
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	var (
+		key   BdPeerKey
+		entry HeadendEntry
+		keys  []BdPeerKey
+	)
+	iter := m.objs.BdPeerMap.Iterate()
+	for iter.Next(&key, &entry) {
+		keys = append(keys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("flush bd_peer: snapshot: %w", err)
 	}
 	var count uint32
-	for key := range entries {
+	for _, key := range keys {
 		if bdID != 0 && key.BdId != bdID {
 			continue
 		}
@@ -3026,11 +3282,21 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 		if key.Index >= EsPeerIndexBase {
 			continue
 		}
-		if err := m.DeleteBdPeer(key.BdId, key.Index); err != nil {
+		tag, owned, oerr := m.bdPeerOwners.Lookup(&key)
+		if oerr != nil {
+			return count, oerr
+		}
+		if owned && tag != OwnerRPC {
+			continue
+		}
+		existed, err := m.deleteBdPeerOwnedLocked(key.BdId, key.Index, OwnerRPC)
+		if err != nil {
 			return count, fmt.Errorf("flush bd_peer: delete bd=%d idx=%d: %w",
 				key.BdId, key.Index, err)
 		}
-		count++
+		if existed {
+			count++
+		}
 	}
 	return count, nil
 }
@@ -3196,6 +3462,7 @@ func (m *MapOperations) GetSharedReadOnlyMaps() map[string]*ebpf.Map {
 		"bd_peer_map":         m.objs.BdPeerMap,
 		"bd_peer_reverse_map": m.objs.BdPeerReverseMap,
 		"esi_map":             m.objs.EsiMap,
+		"esi_peer_map":        m.objs.EsiPeerMap,
 		"bd_peer_l2_ext_map":  m.objs.BdPeerL2ExtMap,
 		"headend_l2_ext_map":  m.objs.HeadendL2ExtMap,
 		"bd_local_esi_map":    m.objs.BdLocalEsiMap,
@@ -3266,6 +3533,7 @@ func SharedReadOnlyMapNames() []string {
 		"bd_peer_map",
 		"bd_peer_reverse_map",
 		"esi_map",
+		"esi_peer_map",
 		"bd_peer_l2_ext_map",
 		"headend_l2_ext_map",
 		"bd_local_esi_map",
