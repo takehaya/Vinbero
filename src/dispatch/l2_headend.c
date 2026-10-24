@@ -1,3 +1,5 @@
+#include "core/fdb.h"
+
 // L2 headend pipeline — BD forwarding and L2 encapsulation dispatch.
 // Included from xdp_prog.c — not compiled standalone.
 // Depends on headend/srv6_encaps_l2.h (must be included before this file).
@@ -46,19 +48,23 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
 
     __builtin_memcpy(key.mac, eth->h_source, ETH_ALEN);
     struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &key);
-    if (!existing ||
-        (!existing->is_remote && !existing->is_static && existing->oif != ctx->ingress_ifindex)) {
+    if (!existing) {
         struct fdb_entry learn_val = {
             .oif = ctx->ingress_ifindex,
             .last_seen = bpf_ktime_get_ns(),
         };
-        // Never replace a control entry published after the lookup.
-        if (existing)
-            *existing = learn_val;
-        else
-            bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_NOEXIST);
-    } else if (existing && !existing->is_static) {
-        existing->last_seen = bpf_ktime_get_ns();
+        bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_NOEXIST);
+    } else {
+        union fdb_forward old = fdb_read_forward(existing);
+        if (!old.is_static) {
+            if (!old.is_remote && old.oif != ctx->ingress_ifindex) {
+                union fdb_forward next = { .oif = ctx->ingress_ifindex };
+                if (fdb_replace_forward(existing, old, next))
+                    existing->last_seen = bpf_ktime_get_ns();
+            } else if (!old.is_remote || old.peer_index < MAX_BUM_NEXTHOPS) {
+                existing->last_seen = bpf_ktime_get_ns();
+            }
+        }
     }
 
     if (eth->h_dest[0] & 0x01) {
@@ -70,8 +76,9 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
     __builtin_memcpy(key.mac, eth->h_dest, ETH_ALEN);
     struct fdb_entry *dst_fdb = bpf_map_lookup_elem(&fdb_map, &key);
     if (dst_fdb) {
-        if (dst_fdb->is_remote) {
-            struct bd_peer_key pk = { .bd_id = dst_fdb->bd_id, .index = dst_fdb->peer_index };
+        union fdb_forward dst = fdb_read_forward(dst_fdb);
+        if (dst.is_remote) {
+            struct bd_peer_key pk = { .bd_id = key.bd_id, .index = dst.peer_index };
             struct headend_entry *pe = bpf_map_lookup_elem(&bd_peer_map, &pk);
             if (pe) {
                 return pe;

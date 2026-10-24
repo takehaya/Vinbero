@@ -2591,6 +2591,9 @@ func (m *MapOperations) GetFdb(bdID uint16, mac net.HardwareAddr) (*FdbEntry, er
 	if err := m.objs.FdbMap.Lookup(key, &entry); err != nil {
 		return nil, fmt.Errorf("failed to lookup fdb entry: %w", err)
 	}
+	if entry.IsRemote != 0 {
+		entry.BdId = bdID
+	}
 	return &entry, nil
 }
 
@@ -2602,6 +2605,11 @@ func (m *MapOperations) ListFdb() (map[FdbKey]*FdbEntry, error) {
 	iter := m.objs.FdbMap.Iterate()
 	for iter.Next(&key, &entry) {
 		entryCopy := entry
+		// A local node can become remote through a forwarding-word CAS.
+		// Its legacy value.BdId is unchanged; the immutable key is authoritative.
+		if entryCopy.IsRemote != 0 {
+			entryCopy.BdId = key.BdId
+		}
 		result[key] = &entryCopy
 	}
 	if err := iter.Err(); err != nil {
@@ -2660,7 +2668,9 @@ type AgedFdbEntry struct {
 // AgeFdbEntries deletes dynamic FDB entries older than maxAgeNs nanoseconds.
 // Static entries (is_static=1) and entries with last_seen=0 are never aged out.
 // It returns the entries actually deleted so the caller can withdraw their RT2
-// advertisements; len() is the number deleted.
+// advertisements; len() is the number deleted. BPF timestamps are best-effort
+// refreshes independent of the forwarding identity. The second lookup avoids
+// deleting entries already observed as fresh; refresh-versus-delete is not atomic.
 func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 	m.controlLifecycle.Lock()
 	defer m.controlLifecycle.Unlock()
@@ -2669,11 +2679,7 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 	iter := m.objs.FdbMap.Iterate()
 
 	now := currentKtimeNs()
-	type candidate struct {
-		key      FdbKey
-		isRemote bool
-	}
-	var toDelete []candidate
+	var toDelete []FdbKey
 	for iter.Next(&key, &entry) {
 		if entry.IsStatic != 0 || entry.LastSeen == 0 {
 			continue
@@ -2683,7 +2689,7 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 		}
 		age := now - entry.LastSeen
 		if age > maxAgeNs {
-			toDelete = append(toDelete, candidate{key: key, isRemote: entry.IsRemote != 0})
+			toDelete = append(toDelete, key)
 		}
 	}
 	if err := iter.Err(); err != nil {
@@ -2691,8 +2697,7 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 	}
 
 	deleted := make([]AgedFdbEntry, 0, len(toDelete))
-	for _, c := range toDelete {
-		k := c.key
+	for _, k := range toDelete {
 		tag, owned, oerr := m.fdbOwners.Lookup(&k)
 		if oerr != nil {
 			return deleted, oerr
@@ -2714,7 +2719,7 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 			deleted = append(deleted, AgedFdbEntry{
 				BDID:     k.BdId,
 				MAC:      net.HardwareAddr(append([]byte(nil), k.Mac[:]...)),
-				IsRemote: c.isRemote,
+				IsRemote: current.IsRemote != 0,
 			})
 		}
 	}
@@ -3213,6 +3218,9 @@ func (m *MapOperations) FlushHeadendL2() (uint32, error) {
 // optionally keeping user-configured static entries. bdID == 0 means
 // all BDs; keepStatic == true skips entries with IsStatic != 0.
 func (m *MapOperations) FlushFdb(bdID uint16, keepStatic bool) (uint32, error) {
+	// Serialize the static/owner checks and deletion with userspace publication.
+	m.controlLifecycle.Lock()
+	defer m.controlLifecycle.Unlock()
 	entries, err := m.ListFdb()
 	if err != nil {
 		return 0, err
@@ -3232,10 +3240,9 @@ func (m *MapOperations) FlushFdb(bdID uint16, keepStatic bool) (uint32, error) {
 		if owned && tag != OwnerRPC {
 			continue
 		}
-		mac := net.HardwareAddr(key.Mac[:])
-		if err := m.DeleteFdb(key.BdId, mac); err != nil {
+		if err := deleteControlEntry[FdbKey, FdbEntry](m.objs.FdbMap, m.fdbOwners, &key, OwnerRPC, false); err != nil {
 			return count, fmt.Errorf("flush fdb: delete bd=%d mac=%s: %w",
-				key.BdId, mac, err)
+				key.BdId, net.HardwareAddr(key.Mac[:]), err)
 		}
 		count++
 	}

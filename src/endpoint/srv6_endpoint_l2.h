@@ -5,6 +5,7 @@
 #include "core/xdp_map.h"
 #include "core/xdp_stats.h"
 #include "core/esi.h"
+#include "core/fdb.h"
 
 // ========================================================================
 // L2 Bridge Domain Endpoint Functions (End.DT2)
@@ -59,17 +60,7 @@ static __always_inline void fdb_learn_remote_mac(
     struct fdb_key learn_key = { .bd_id = bd_id };
     __builtin_memcpy(learn_key.mac, inner_eth->h_source, ETH_ALEN);
 
-    // Check if existing entry already matches — avoid redundant map write
     struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &learn_key);
-    // Control-plane entries must not be replaced by data-plane learning.
-    if (existing && existing->is_static)
-        return;
-    if (existing && existing->is_remote && existing->peer_index == peer_idx) {
-        // Refresh timestamp for existing dynamic entry
-        if (!existing->is_static)
-            existing->last_seen = bpf_ktime_get_ns();
-        return;
-    }
     // An entry pointing above the flood range is the control plane's EVPN
     // aliasing pointer (synthetic ES peer). The frame's sender is one member
     // PE of that segment; rewriting the entry to the sender's own peer would
@@ -78,21 +69,26 @@ static __always_inline void fdb_learn_remote_mac(
     // writes it as 0 (never aged), and stamping a timestamp here would turn
     // the entry dynamic and let aging remove it behind the BGP ledger's
     // back, where an unchanged RT2 re-apply would never re-install it.
-    if (existing && existing->is_remote && existing->peer_index >= MAX_BUM_NEXTHOPS)
-        return;
-
-    struct fdb_entry learn_val = {
-        .is_remote = 1,
-        .peer_index = peer_idx,
-        .bd_id = bd_id,
-        .last_seen = bpf_ktime_get_ns(),
-    };
-    // HASH updates replace elements atomically. Updating the looked-up
-    // dynamic value cannot overwrite a newer userspace control entry.
-    if (existing)
-        *existing = learn_val;
-    else
+    if (existing) {
+        union fdb_forward old = fdb_read_forward(existing);
+        if (old.is_static || (old.is_remote && old.peer_index >= MAX_BUM_NEXTHOPS))
+            return;
+        if (!old.is_remote || old.peer_index != peer_idx) {
+            union fdb_forward next = { .is_remote = 1, .peer_index = peer_idx };
+            if (!fdb_replace_forward(existing, old, next))
+                return;
+        }
+        // Aging metadata is best effort and is not part of the identity CAS.
+        existing->last_seen = bpf_ktime_get_ns();
+    } else {
+        struct fdb_entry learn_val = {
+            .is_remote = 1,
+            .peer_index = peer_idx,
+            .bd_id = bd_id,
+            .last_seen = bpf_ktime_get_ns(),
+        };
         bpf_map_update_elem(&fdb_map, &learn_key, &learn_val, BPF_NOEXIST);
+    }
     DEBUG_PRINT("FDB: learned remote MAC, bd_id=%d peer_index=%d\n", bd_id, peer_idx);
 }
 
@@ -123,10 +119,11 @@ static __always_inline int fdb_forward_l2(
         return XDP_PASS;
     }
 
-    if (!fdb->is_remote) {
+    union fdb_forward dst = fdb_read_forward(fdb);
+    if (!dst.is_remote) {
         // Local FDB hit: fast-path redirect
-        DEBUG_PRINT("FDB: hit local, redirect to ifindex %d\n", fdb->oif);
-        return bpf_redirect(fdb->oif, 0);
+        DEBUG_PRINT("FDB: hit local, redirect to ifindex %d\n", dst.oif);
+        return bpf_redirect(dst.oif, 0);
     }
 
     // Remote FDB hit on receiving PE — routing loop or stale entry

@@ -490,9 +490,9 @@ struct fdb_entry {
     __u8 is_remote;                // 0=local, 1=remote (use bd_peer_map)
     __u8 is_static;                // 1=static (never aged out), 0=dynamic (BPF-learned)
     __u16 peer_index;              // bd_peer_map index (when is_remote=1)
-    __u16 bd_id;                   // BD ID for bd_peer_map lookup (when is_remote=1)
+    __u16 bd_id;                   // Legacy copy; forwarding uses fdb_key.bd_id
     __u8 _pad[2];
-    __u64 last_seen;               // bpf_ktime_get_ns() timestamp (0=static entry)
+    __u64 last_seen;               // Best-effort aging timestamp, not part of the forwarding identity
     __u8 esi[ESI_LEN];             // Remote only: ES this MAC was learned from (all-zero = single-homing)
     __u8 _pad_esi[2];
 } __attribute__((packed));         // 32 bytes total
