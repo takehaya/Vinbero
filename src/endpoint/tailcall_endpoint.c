@@ -159,7 +159,7 @@ int tailcall_endpoint_end_x(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
     if (!aux) TAILCALL_RETURN(ctx,XDP_DROP);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
@@ -243,9 +243,12 @@ int tailcall_endpoint_end_dx4(struct xdp_md *ctx)
     TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
+        __u32 fib_ifindex;
+        if (resolve_decap_vrf(&tctx->sid_entry, aux, ctx, &fib_ifindex) != 0)
+            TAILCALL_RETURN(ctx,XDP_DROP);
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, aux_vrf_or_ingress_ifindex(aux, ctx)));
+        TAILCALL_RETURN(ctx,nosrh_fib_v4(ctx, fib_ifindex));
     }
 
     struct ethhdr *eth;
@@ -267,9 +270,12 @@ int tailcall_endpoint_end_dx6(struct xdp_md *ctx)
     TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
 
     if (tctx->dispatch_type == DISPATCH_NOSRH) {
+        __u32 fib_ifindex;
+        if (resolve_decap_vrf(&tctx->sid_entry, aux, ctx, &fib_ifindex) != 0)
+            TAILCALL_RETURN(ctx,XDP_DROP);
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPV6, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, aux_vrf_or_ingress_ifindex(aux, ctx)));
+        TAILCALL_RETURN(ctx,nosrh_fib_v6(ctx, fib_ifindex));
     }
 
     struct ethhdr *eth;
@@ -487,7 +493,7 @@ int tailcall_endpoint_end_un(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
     if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
         TAILCALL_RETURN(ctx,XDP_DROP);
 
@@ -512,7 +518,7 @@ int tailcall_endpoint_end_ut(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
     if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
         TAILCALL_RETURN(ctx,XDP_DROP);
 
@@ -539,7 +545,7 @@ static __always_inline int end_replace_tailcall(struct xdp_md *ctx, int is_endx)
     __u16 l3_off = tctx->l3_offset;
     if (l3_off > 22) return XDP_DROP;
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
     if (!aux)
         return XDP_DROP;
 
@@ -583,7 +589,7 @@ int tailcall_endpoint_end_ua(struct xdp_md *ctx)
     if (!tctx) TAILCALL_RETURN(ctx,XDP_DROP);
     TAILCALL_BOUND_L3OFF(tctx, l3_off);
 
-    TAILCALL_AUX_LOOKUP(tctx, aux);
+    TAILCALL_BUILTIN_AUX_LOOKUP(tctx, aux);
     if (!aux || aux->usid.block_len_bytes != USID_F3216_BLOCK_BYTES)
         TAILCALL_RETURN(ctx,XDP_DROP);
 
