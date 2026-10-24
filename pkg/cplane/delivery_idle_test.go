@@ -2,15 +2,20 @@ package cplane
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/cplane/native"
+	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -242,5 +247,126 @@ func TestDeliveryStatsWireFieldsRemainCompatible(t *testing.T) {
 		if field == nil || field.Number() != number {
 			t.Fatalf("wire field %s: got %v, want %d", name, field, number)
 		}
+	}
+}
+
+// Tick failure has no accepted delivery keeping submitted != processed.
+type idleFailingTick struct {
+	pluginInstance
+	beforeClose func()
+}
+
+func (i *idleFailingTick) Tick(context.Context, int64) error {
+	return errors.New("injected tick failure")
+}
+func (i *idleFailingTick) Close(ctx context.Context) error {
+	i.beforeClose()
+	return i.pluginInstance.Close(ctx)
+}
+
+func TestDeliveryIdleWaitsForTickRestartConfigureAndClose(t *testing.T) {
+	m, _ := newTestManager(t, newFakeSource(), newFakeClaims())
+	m.allowNative = true
+	configureEntered, configureRelease := make(chan struct{}), make(chan struct{})
+	closeEntered, closeRelease := make(chan struct{}), make(chan struct{})
+	var armed atomic.Bool
+	var configureOnce, closeOnce sync.Once
+	defer configureOnce.Do(func() { close(configureRelease) })
+	defer closeOnce.Do(func() { close(closeRelease) })
+	core, _ := observer.New(zap.InfoLevel)
+	m.logger = zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+		if e.Message == "local SID unavailable; running without local SID writes" && armed.CompareAndSwap(true, false) {
+			close(configureEntered)
+			<-configureRelease
+		}
+		return nil
+	}))
+	reg := Registration{Name: "tick-restart-idle", Backend: BackendNative,
+		NativeID: native.CustomBehavior, NativeVersion: native.ImplementationVersion,
+		Capabilities: wasm.Capabilities{wasm.CapHeadend: {}}, Scope: testScope(),
+		// This asks for locator main/slot 1 without SID permission. The
+		// shared constructor logs the refusal inside Instantiate, where we pause it.
+		Config: []byte{0x12, 4, 'm', 'a', 'i', 'n', 0x28, 1}}
+	if err := m.Register(context.Background(), reg); err != nil {
+		t.Fatal(err)
+	}
+	waitDelivered(t, m, reg.Name)
+	m.mu.Lock()
+	p := m.plugins[reg.Name]
+	p.inst = &idleFailingTick{pluginInstance: p.inst, beforeClose: func() {
+		close(closeEntered)
+		<-closeRelease
+	}}
+	m.mu.Unlock()
+	armed.Store(true)
+	finished := make(chan struct{})
+	go func() {
+		if err := m.tick(p); err != nil {
+			m.instanceFailed(p, err)
+		}
+		close(finished)
+	}()
+	for _, stage := range []struct {
+		name    string
+		entered <-chan struct{}
+		release chan struct{}
+		once    *sync.Once
+	}{{"configure", configureEntered, configureRelease, &configureOnce}, {"old close", closeEntered, closeRelease, &closeOnce}} {
+		select {
+		case <-stage.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("restart did not reach %s", stage.name)
+		}
+		st, _ := m.StatsFor(reg.Name)
+		if st.DeliveryIdle || !p.worker.idle() || p.reg.Input != nil {
+			t.Errorf("%s: idle=%v worker idle=%v input=%v", stage.name, st.DeliveryIdle, p.worker.idle(), p.reg.Input)
+		}
+		stage.once.Do(func() { close(stage.release) })
+	}
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not finish")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st, _ := m.StatsFor(reg.Name)
+		if st.DeliveryIdle {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("restart pending reservation leaked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestDeliveryIdleRestartFailureReleasesReservation(t *testing.T) {
+	for _, failure := range []string{"admission", "restart limit"} {
+		t.Run(failure, func(t *testing.T) {
+			m, _ := newTestManager(t, newFakeSource(), newFakeClaims())
+			m.allowNative = true
+			reg := Registration{Name: "failed-restart", Backend: BackendNative, NativeID: native.BGPObserver, NativeVersion: native.ImplementationVersion}
+			if err := m.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			waitDelivered(t, m, reg.Name)
+			m.mu.Lock()
+			p := m.plugins[reg.Name]
+			if failure == "admission" {
+				p.reg.NativeVersion = "invalid"
+			} else {
+				p.restarts = maxRestarts
+			}
+			m.mu.Unlock()
+			m.instanceFailed(p, errors.New("injected failure"))
+			m.mu.Lock()
+			pending, dead := p.pendingSnapshots, p.dead
+			m.mu.Unlock()
+			st, _ := m.StatsFor(reg.Name)
+			if pending != 0 || !dead || st.DeliveryIdle {
+				t.Fatalf("pending=%d dead=%v idle=%v", pending, dead, st.DeliveryIdle)
+			}
+		})
 	}
 }

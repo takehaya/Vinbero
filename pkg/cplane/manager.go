@@ -230,8 +230,8 @@ type plugin struct {
 	// plugin that is dropping events is by definition slow, so a replay
 	// per drop would pile up without bound.
 	snapshotting bool
-	// pendingSnapshots covers the handoff to an asynchronous replay, including
-	// the interval before its goroutine starts and sets snapshotting.
+	// pendingSnapshots covers restart/registration and the handoff to an
+	// asynchronous replay before its goroutine sets snapshotting.
 	// Guarded by Manager.mu.
 	pendingSnapshots int
 	// A failed source read reserves one delayed retry. Live events cannot
@@ -1345,6 +1345,14 @@ func (m *Manager) instanceFailed(p *plugin, cause error) {
 		m.mu.Unlock()
 		return
 	}
+	// A failed tick need not have an outstanding delivery. Reserve recovery
+	// before rebuilding or closing the old instance can expose a false idle.
+	p.pendingSnapshots++
+	defer func() {
+		m.mu.Lock()
+		p.pendingSnapshots--
+		m.mu.Unlock()
+	}()
 	p.restarts++
 	restarts := p.restarts
 	reg := p.reg
