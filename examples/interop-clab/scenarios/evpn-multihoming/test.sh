@@ -13,7 +13,9 @@
 #   5. RT1 aliasing: both PEs advertise per-ES (all-active) + per-EVI A-D, so
 #      pe3 folds ES-1 into one EVPN ECMP group with a member per PE;
 #   6. RT1 mass withdraw: withdrawing pe2's per-ES route shrinks the group to
-#      pe1 in one update, traffic survives, and re-advertising heals it.
+#      pe1 in one update, traffic and BUM survive, and re-advertising heals it.
+#   7. BUM remains single-delivery with RT4/RT3 intact and both CE RT2s withdrawn,
+#      then RT2 re-advertisement restores the MAC and positive ICMP delivery.
 set -u
 SCENARIO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
@@ -119,15 +121,20 @@ echo "[4] BUM single delivery to the dual-homed CE"
 # -b keeps the request broadcast and -f (quit on first reply) is deliberately absent.
 # Check the expected reply IP/MAC and the send/receive totals before the existing
 # positive ICMP/DUP check. Neither silence nor a successful unicast ping proves BUM.
-arp_ok=1
-for probe in 1 2 3; do
+single_bum_arp() {
+    local replies
     if replies=$(docker exec "$CE_REMOTE" arping -b -c 1 -w 3 -I eth1 \
         -s "$CE_REMOTE_ADDR" "$CE_MH_ADDR" 2>&1) \
         && python3 "$SCENARIO_DIR/check_bum_arp.py" "$CE_MH_ADDR" "$CE_REMOTE_ADDR" "$CE_MH_MAC" <<<"$replies"; then
-        :
-    else
+        return 0
+    fi
+    echo "$replies" | sed 's/^/      /'
+    return 1
+}
+arp_ok=1
+for probe in 1 2 3; do
+    if ! single_bum_arp; then
         ng "ce-remote -> ce-mh: broadcast ARP probe $probe did not receive exactly one expected reply"
-        echo "$replies" | sed 's/^/      /'
         arp_ok=0
         break
     fi
@@ -220,6 +227,12 @@ else
     ng "ce-remote -> ce-mh unicast broken after the mass withdraw"
 fi
 
+if single_bum_arp; then
+    ok "BUM has one expected reply after the RT1 mass withdraw"
+else
+    ng "BUM single delivery failed after the RT1 mass withdraw"
+fi
+
 # Re-advertise and the group must heal back to two members.
 docker exec "$PE2" vbctl bgp advertise-evpn-ad --rd 65100:2 --esi "$ESI" \
     --route-targets 65000:100 --per-es --next-hop 2001:db8:ff::2 >/dev/null 2>&1 || true
@@ -229,6 +242,92 @@ if retry_n 15 es_group_member_count_is 2; then
 else
     ng "pe3 did not restore two members (members=$(es_group_members))"
     es_group_json || true
+fi
+
+if single_bum_arp; then
+    ok "BUM has one expected reply after RT1 re-advertisement"
+else
+    ng "BUM single delivery failed after RT1 re-advertisement"
+fi
+
+# --- 7. RT2-only withdrawal must not remove same-ES BUM filtering ----------
+echo ""
+echo "[7] RT2 withdrawal with RT3/RT4 and the Ethernet Segment still attached"
+# API success alone does not establish receiver convergence: require the CE's
+# programmed MAC to disappear from pe3, while flood peers, DF, and RT1 survive.
+ce_mh_mac_state_is() {
+    local entries
+    entries=$(docker exec "$PE3" vbctl --json fdb list 2>/dev/null) || return 1
+    python3 -c '
+import json, sys
+entries = json.load(sys.stdin) or []
+matches = [e for e in entries if e.get("bd_id") == 100 and e.get("mac", "").lower() == sys.argv[1]]
+ready = any(e.get("is_static") for e in matches) if sys.argv[2] == "1" else not matches
+sys.exit(0 if ready else 1)
+' "$CE_MH_MAC" "$1" <<<"$entries"
+}
+bum_peers_include() {
+    local container=$1 entries; shift
+    entries=$(docker exec "$container" vbctl --json bd-peer list --bd-id 100 2>/dev/null) || return 1
+    python3 -c '
+import json, sys
+peers = json.load(sys.stdin) or []
+sids = {s for p in peers for s in p.get("segments", [])}
+sys.exit(0 if set(sys.argv[1:]).issubset(sids) else 1)
+' "$@" <<<"$entries"
+}
+bum_topology_intact() {
+    df_is "$PE1" "$DF_SRC" && df_is "$PE2" "$DF_SRC" \
+        && es_group_member_count_is 2 \
+        && bum_peers_include "$PE1" fd00:200:0:3:: fd00:300:0:3:: \
+        && bum_peers_include "$PE2" fd00:100:0:3:: fd00:300:0:3:: \
+        && bum_peers_include "$PE3" fd00:100:0:3:: fd00:200:0:3::
+}
+rt2_withdraw_ok=1
+if ! docker exec "$PE1" vbctl bgp withdraw-evpn-mac --rd 65100:1 --mac "$CE_MH_MAC"; then
+    rt2_withdraw_ok=0
+fi
+if ! docker exec "$PE2" vbctl bgp withdraw-evpn-mac --rd 65100:2 --mac "$CE_MH_MAC"; then
+    rt2_withdraw_ok=0
+fi
+if [ "$rt2_withdraw_ok" -eq 1 ] && retry_n 15 ce_mh_mac_state_is 0 && retry_n 15 bum_topology_intact; then
+    ok "both CE RT2s withdrawn; flood peers, DF, and the two-member ES group remain"
+    if single_bum_arp; then
+        ok "BUM has one expected reply without either CE RT2"
+    else
+        ng "BUM loops or fails with RT3/RT4 intact but both CE RT2s withdrawn"
+    fi
+else
+    ng "RT2-only withdrawal setup did not converge; BUM without RT2 was not asserted"
+fi
+
+# Restore both advertisements even when the withdrawal/probe failed.
+rt2_restore_ok=1
+if ! docker exec "$PE1" vbctl bgp advertise-evpn-mac --rd 65100:1 \
+    --route-targets 65000:100 --mac "$CE_MH_MAC" --sid fd00:100:0:2:: \
+    --next-hop 2001:db8:ff::1 --esi "$ESI"; then
+    rt2_restore_ok=0
+fi
+if ! docker exec "$PE2" vbctl bgp advertise-evpn-mac --rd 65100:2 \
+    --route-targets 65000:100 --mac "$CE_MH_MAC" --sid fd00:200:0:2:: \
+    --next-hop 2001:db8:ff::2 --esi "$ESI"; then
+    rt2_restore_ok=0
+fi
+if [ "$rt2_restore_ok" -eq 1 ] && retry_n 15 ce_mh_mac_state_is 1 && retry_n 15 bum_topology_intact; then
+    ok "both CE RT2s re-advertised and the receiver MAC restored"
+    if single_bum_arp; then
+        ok "BUM has one expected reply after RT2 recovery"
+    else
+        ng "BUM single delivery failed after RT2 recovery"
+    fi
+    if replies=$(docker exec "$CE_REMOTE" ping -c 3 -W 2 "$CE_MH_ADDR" 2>&1) && ! grep -q "DUP!" <<<"$replies"; then
+        ok "ce-remote -> ce-mh: successful ICMP without duplicates after RT2 recovery"
+    else
+        ng "ce-remote -> ce-mh: ICMP failed or duplicated after RT2 recovery"
+        echo "$replies" | sed 's/^/      /'
+    fi
+else
+    ng "RT2 recovery did not restore the receiver MAC and BUM topology"
 fi
 
 echo ""
