@@ -1,5 +1,117 @@
 # Changelog
 
+## [0.1.2](https://github.com/takehaya/Vinbero/compare/v0.1.1...v0.1.2) (2026-10-24)
+
+
+### 🎉 Features
+
+* **bench:** add balanced cplane convergence measurement suites ([d82aa53](https://github.com/takehaya/Vinbero/commit/d82aa53cb0449a8bdb0f8f115bd4177e0ecad3fe))
+* **benchmark:** TRex-driven SRv6 dataplane load-test harness ([#140](https://github.com/takehaya/Vinbero/issues/140)) ([848597e](https://github.com/takehaya/Vinbero/commit/848597eebf11eafc6abd813ed307fe408b8dd32f))
+* **bench:** measure BGP convergence through cplane plugins ([#179](https://github.com/takehaya/Vinbero/issues/179)) ([00f6fd3](https://github.com/takehaya/Vinbero/commit/00f6fd3e63c4d1d64bd334746ee6dab2ecd6113d))
+* **bgp:** signal and honour the SRv6 SID Structure on L3VPN routes ([#167](https://github.com/takehaya/Vinbero/issues/167)) ([96a0016](https://github.com/takehaya/Vinbero/commit/96a00165f48b4711459e0618e872a67ef9708429))
+* **bpf:** End.T with REPLACE-CSID (RFC 9800 Sec.4.2, VRF-bound FIB) ([#180](https://github.com/takehaya/Vinbero/issues/180)) ([dfa92dc](https://github.com/takehaya/Vinbero/commit/dfa92dcbe23425278250469707f363bcd319b472))
+* **bpf:** forward End.X-family USD over the adjacency ([#160](https://github.com/takehaya/Vinbero/issues/160)) ([6e6372f](https://github.com/takehaya/Vinbero/commit/6e6372f66a8515dbed21796eda0aa767491c8ab1))
+* **cplane:** add extensible control-plane plugins ([8f021e1](https://github.com/takehaya/Vinbero/commit/8f021e1709f1c5bead5d5b0d50402b15ef2c1a41))
+* **cplane:** add Go guest SDK and replay-aware route view ([#174](https://github.com/takehaya/Vinbero/issues/174)) ([7697258](https://github.com/takehaya/Vinbero/commit/76972586502c03c4537dc72db5a5701ae3bee070))
+* **cplane:** add opt-in live batch input policy ([b219e5b](https://github.com/takehaya/Vinbero/commit/b219e5b2fded4cb09788fc11e25e87114025957f))
+* **cplane:** add shared IMET-gated EVPN static MAC policy ([7de73e4](https://github.com/takehaya/Vinbero/commit/7de73e4b231e70d222c0d9b76b45a219cb906b6f))
+* **cplane:** add shared IMET-gated EVPN static MAC policy ([26900d6](https://github.com/takehaya/Vinbero/commit/26900d66212dec33246c852a8d4fe83d6bf34535))
+* **cplane:** coalesce opted-in queued live routes ([5d12dd8](https://github.com/takehaya/Vinbero/commit/5d12dd81609c03f91fa948d8d7400bce96757a90))
+* **cplane:** compose authorized routes and reconcile owned outputs ([b330130](https://github.com/takehaya/Vinbero/commit/b330130aed0c23059e8c3db2fe27f2f55f8b0a45))
+* **cplane:** default new plugin registrations to native ([9531e4b](https://github.com/takehaya/Vinbero/commit/9531e4b7be248d768d6d65fea2243aa041089563))
+* **cplane:** expose received GoBGP packet model to WASM plugins ([88824f0](https://github.com/takehaya/Vinbero/commit/88824f041b8fc594cd9d972677262504a42e0126))
+* **cplane:** persist local SID identities across restarts ([#178](https://github.com/takehaya/Vinbero/issues/178)) ([3d34ad2](https://github.com/takehaya/Vinbero/commit/3d34ad23439b73621c1d46c3c828b7a9add2ae38))
+* **cplane:** plugin dispatch の End.DT4/6/46 を VRF scoped に decap する ([#139](https://github.com/takehaya/Vinbero/issues/139)) ([30c7932](https://github.com/takehaya/Vinbero/commit/30c793279aac1ce43709678b1736e391eeb9d90e))
+* **cplane:** plugin の scope と producer 分離と eBPF half 込みの interop ([#138](https://github.com/takehaya/Vinbero/issues/138)) ([88ab6f6](https://github.com/takehaya/Vinbero/commit/88ab6f6ccacb9759aa3cc0f1f6003d5da74822b6))
+* **cplane:** register and restore trusted native controllers ([9ddc632](https://github.com/takehaya/Vinbero/commit/9ddc632aecbfcbfc9136971e336fcddc43620309))
+* **cplane:** share MUP controller across native and WASM runtimes ([2a88c78](https://github.com/takehaya/Vinbero/commit/2a88c7871653c724c00e396ba66e0e1aaa7b940c))
+* End.LBS and End.XLBS (RFC 9800 Sec.7, Locator-Block Swap) ([#166](https://github.com/takehaya/Vinbero/issues/166)) ([7a57ff8](https://github.com/takehaya/Vinbero/commit/7a57ff8fde4a3bccbbc8a5454271d0e2a6a2267d))
+* REPLACE-CSID flavor for End and End.X (RFC 9800 Sec.4.2) ([#159](https://github.com/takehaya/Vinbero/issues/159)) ([24d3e2f](https://github.com/takehaya/Vinbero/commit/24d3e2f0ca699a5c71abbe76f6cf978d2adee2d4))
+* **server:** mint uSID SID functions from a locator_ref ([#181](https://github.com/takehaya/Vinbero/issues/181)) ([5346abf](https://github.com/takehaya/Vinbero/commit/5346abf2b2e7a84f960bbabcbe217750cd781d8d))
+* uSID (RFC 9800 NEXT-C-SID) uN and uA support ([#150](https://github.com/takehaya/Vinbero/issues/150)) ([ed6e8bb](https://github.com/takehaya/Vinbero/commit/ed6e8bb828b36dd5c1e176f4493832b468b3bb14))
+* uSID uT / terminal uDT-uDX / USD flavor (NEXT-C-SID completion) ([#155](https://github.com/takehaya/Vinbero/issues/155)) ([aac4e13](https://github.com/takehaya/Vinbero/commit/aac4e130996ac83a78aab22bfc7c532cd76014f8))
+
+
+### 🐛 Bug Fixes
+
+* **bench:** make MUP TEID replacements observable over a real BGP peer ([d373ab0](https://github.com/takehaya/Vinbero/commit/d373ab056ce483320d85098d0162708b71c9732a))
+* **bench:** preserve cleanup grace on cancellation ([a58142a](https://github.com/takehaya/Vinbero/commit/a58142adcc7295830deba0d2112fbc08c2ba9d8f))
+* **bench:** reject incomplete pacing and track pending replays ([51f058c](https://github.com/takehaya/Vinbero/commit/51f058c057581eac5a5204f2f85069001d233a71))
+* **bench:** stop orphaned workers after driver failure ([c3152fd](https://github.com/takehaya/Vinbero/commit/c3152fdb3fe3e7c1901942611784161cd0da6981))
+* **bench:** verify archived trial executable bytes ([d3b4fe8](https://github.com/takehaya/Vinbero/commit/d3b4fe85a96e91c0256298fdf157ce10f06c0b51))
+* **bgp:** drain subscription callbacks before demux shutdown ([e42664e](https://github.com/takehaya/Vinbero/commit/e42664e0275c4aef09dbc600dc8f6e4d3254486a))
+* **bgp:** reserve RFC-assigned endpoint behavior claims ([4ec4b38](https://github.com/takehaya/Vinbero/commit/4ec4b382bb66bfb0426ee0eb218ace0b9901e7fe))
+* **bgp:** retain VPN groups until trigger cleanup succeeds ([#176](https://github.com/takehaya/Vinbero/issues/176)) ([5836b60](https://github.com/takehaya/Vinbero/commit/5836b6099d8e907a6819e665d77898a4ca72375d))
+* **bgp:** serialize route ownership with GoBGP updates ([87fd6f2](https://github.com/takehaya/Vinbero/commit/87fd6f2ce4b99bb7b41b47f0497853134da358f3))
+* **bgp:** tear down MUP and EVPN state on unusable replacement UPDATEs ([#170](https://github.com/takehaya/Vinbero/issues/170)) ([288259f](https://github.com/takehaya/Vinbero/commit/288259f4d700d348a27b9ca8b8e14f8db2edad43))
+* **bgp:** wait for server shutdown before final stop ([ca38264](https://github.com/takehaya/Vinbero/commit/ca382646f82d7e025a2f9851c9787e109cef66ac))
+* **bpf:** atomically update FDB forwarding identities ([20e066a](https://github.com/takehaya/Vinbero/commit/20e066a5c100466c1289d046889dbfbd0db842d8))
+* **bpf:** enable IPv6 forwarding in the adjacency test fixture ([#164](https://github.com/takehaya/Vinbero/issues/164)) ([d3f178e](https://github.com/takehaya/Vinbero/commit/d3f178e9c5e70aa58d33227ecc9066a42042eb32))
+* **bpf:** enforce plugin aux and decap grants on builtin handoffs ([9fa9034](https://github.com/takehaya/Vinbero/commit/9fa9034005932ea0659e4e2489d3c2e079953fc3))
+* **bpf:** filter DT2M by independent ES peer membership ([6c5fbab](https://github.com/takehaya/Vinbero/commit/6c5fbabf1967a1a40040b186e7335c3ae40ed675))
+* **bpf:** finish the verifier log change and reset the plugin slots ([#169](https://github.com/takehaya/Vinbero/issues/169)) ([5fc6651](https://github.com/takehaya/Vinbero/commit/5fc665100652a6487d3974fe40ed53c276af70ab))
+* **bpf:** keep the builtin aux lifecycle tied to the exact SID entry ([#148](https://github.com/takehaya/Vinbero/issues/148)) ([3a0533a](https://github.com/takehaya/Vinbero/commit/3a0533a483304082fe7bcd85352b1e73a359a78b))
+* **bpf:** make bd_peer lifecycle transactional across its writers ([#172](https://github.com/takehaya/Vinbero/issues/172)) ([82b9254](https://github.com/takehaya/Vinbero/commit/82b9254da4a9cf72737d4036ffdcde41d9db16dd))
+* **bpf:** spend a hop limit when an endpoint advances the segment list ([#149](https://github.com/takehaya/Vinbero/issues/149)) ([cab1aa0](https://github.com/takehaya/Vinbero/commit/cab1aa07b6f29bef4c91633d79cf742c60e7edf1))
+* **ci:** install extra kernel modules only when missing ([5871412](https://github.com/takehaya/Vinbero/commit/58714121664ebec54348d7f33880bf880f0a8bfb))
+* **ci:** watch the C SDK header directory used by plugin builds ([ca39e91](https://github.com/takehaya/Vinbero/commit/ca39e91d498159fed96e67be90f4fd463ca3c850))
+* **cplane:** clear inherited input state when config changes ([6ec1b21](https://github.com/takehaya/Vinbero/commit/6ec1b21d359f86840bd1f63cf4d7466e465eac25))
+* **cplane:** decap-grant の VRF 削除 TOCTOU を共有 leaf lease で閉じる ([#142](https://github.com/takehaya/Vinbero/issues/142)) ([de25eb3](https://github.com/takehaya/Vinbero/commit/de25eb3989767490551984c6c7d5fbcda70a06d9))
+* **cplane:** exclude conflicting EVPN reverse peers ([2653755](https://github.com/takehaya/Vinbero/commit/26537552eacf91c975c3956c53c55c56bc2051cf))
+* **cplane:** fence retired owners and reconcile complete outputs ([6890e21](https://github.com/takehaya/Vinbero/commit/6890e210e008ca4a614c0c53239f91409d8f1c2c))
+* **cplane:** judge handoff health after the in-flight apply finishes ([1c1656f](https://github.com/takehaya/Vinbero/commit/1c1656f3ae5417525666a3d11d10d36171f4bb50))
+* **cplane:** preflight both families and retain ordinary reservations ([caa730f](https://github.com/takehaya/Vinbero/commit/caa730ff9a36274cecc6a09b3952a2bb0d1bb621))
+* **cplane:** preserve unchanged routes on binding notifications ([523dfc7](https://github.com/takehaya/Vinbero/commit/523dfc7b4c49241f03ce2dda5d4213e0dca89a4f))
+* **cplane:** reconcile partial withdrawals and shared forwarding keys ([9c09180](https://github.com/takehaya/Vinbero/commit/9c09180c0e03865afbf76a216eaff7c01abbfdbe))
+* **cplane:** refresh CI artifact and endpoint grant documentation ([bddbef4](https://github.com/takehaya/Vinbero/commit/bddbef405dd8f1627c35a7346247d52b9e30b7a2))
+* **cplane:** report restart work before rebuilding ([70d71bf](https://github.com/takehaya/Vinbero/commit/70d71bfe6b6ca3a547e90a0f5eda9f57bade5e59))
+* **cplane:** retain bounded WASM execution diagnostics ([f8f66f6](https://github.com/takehaya/Vinbero/commit/f8f66f66697b87404adbc8a6f073e84dcf3b3250))
+* **cplane:** retain failed durable unregisters for retry ([1b06721](https://github.com/takehaya/Vinbero/commit/1b067216d6567fe7f1ac4ba9196f692d843ede54))
+* **cplane:** retain forwarding ownership and release claims safely ([b69377c](https://github.com/takehaya/Vinbero/commit/b69377c4af669c9f9888177c18afbdc6f782b262))
+* **cplane:** retain healthy forwarding across equivalent input registrations ([22ed61d](https://github.com/takehaya/Vinbero/commit/22ed61d8ea7a290d68090bd3c06285433f1eb843))
+* **cplane:** version persisted input authorization explicitly ([af40951](https://github.com/takehaya/Vinbero/commit/af40951e1735777cbc257aa5d272967e2571c59f))
+* **cplane:** 経路の担当変更と replay 後の状態適用を修正する ([#171](https://github.com/takehaya/Vinbero/issues/171)) ([a53bd7b](https://github.com/takehaya/Vinbero/commit/a53bd7b2570ba2d8195f2c0049c8cf90b14e9ba6))
+* **evpn:** retain RX membership by RT4 path reference ([a0b6c48](https://github.com/takehaya/Vinbero/commit/a0b6c48665f65abad0145ee98613906725785b8a))
+* **fdb:** leave kernel-learned MAC entries unowned ([4c96989](https://github.com/takehaya/Vinbero/commit/4c969897bce05ccf6b08254380cdb9139b9ea712))
+* **sdk:** preserve fenced examples when staging README links ([a5c25f5](https://github.com/takehaya/Vinbero/commit/a5c25f56ea45980f978fe2eb47aa628fa308c8f1))
+* **sdk:** verify archives when git is unavailable ([18d60a0](https://github.com/takehaya/Vinbero/commit/18d60a02a914e3cfe906987e061734c7ce81c8ff))
+
+
+### ⚡ Performance Improvements
+
+* **bpf:** make the BPF test suite finish in seconds instead of minutes ([#151](https://github.com/takehaya/Vinbero/issues/151)) ([b81e8b4](https://github.com/takehaya/Vinbero/commit/b81e8b49d062836da10d68134082abb35b90426d))
+* **cplane:** encode composition headend bodies directly ([e3a0897](https://github.com/takehaya/Vinbero/commit/e3a089786794be99d87470727e256126fb225c05))
+* **cplane:** reuse route key ordering between view mutations ([3dae639](https://github.com/takehaya/Vinbero/commit/3dae639f2e42361912b5de3b7fd9760acf0abfc0))
+* **cplane:** traverse ordered route slots without key lookups ([06ebec8](https://github.com/takehaya/Vinbero/commit/06ebec8906d70e9f3526bfc502ac297522e12c2c))
+* **cplane:** visit resolved pairs without a snapshot slice ([f412052](https://github.com/takehaya/Vinbero/commit/f412052fadb17558fd36f05d9a8656cfeb259deb))
+
+
+### 📝 Documentation
+
+* **cplane:** add an opt-in batched MUP policy ([6b88b0e](https://github.com/takehaya/Vinbero/commit/6b88b0eadb99244a0f8ab9278b560fa2ee913c3f))
+* **cplane:** add an opt-in batched MUP policy ([cd7f07e](https://github.com/takehaya/Vinbero/commit/cd7f07ee15b793700961d39a7503ad4d5234f0ce))
+* **cplane:** clarify behavior claim release semantics ([94ac586](https://github.com/takehaya/Vinbero/commit/94ac586c397d643b30628106f5a7d4f7402c5af0))
+* **cplane:** distinguish preparation errors from overflow recovery ([14900fc](https://github.com/takehaya/Vinbero/commit/14900fcc711b4906defad738c8b89ae9b944c61a))
+* **cplane:** guide dynamic WASM loading and fix SDK links ([db5d206](https://github.com/takehaya/Vinbero/commit/db5d2066229f8fee82c97f01e81367b76c5594e6))
+* **cplane:** guide dynamic WASM loading and fix SDK links ([6f0360f](https://github.com/takehaya/Vinbero/commit/6f0360f92bd902f3cdf193770275cb06cd2dfee5))
+* **cplane:** require shared implementations across native and WASM ([02c4a2d](https://github.com/takehaya/Vinbero/commit/02c4a2d48a622ae309dfd65625d7aa5dc8d2bbb0))
+* **cplane:** 設計 doc に安全性の不変条件と lifecycle の境界を明文化する ([#143](https://github.com/takehaya/Vinbero/issues/143)) ([ee8c896](https://github.com/takehaya/Vinbero/commit/ee8c896352dce2bd4feaeca688f0ee4b8c994f85))
+* **examples:** make the netns example READMEs English-first ([#147](https://github.com/takehaya/Vinbero/issues/147)) ([3a33b5b](https://github.com/takehaya/Vinbero/commit/3a33b5b51089b092d3c83d9fe00573eb1aedd899))
+
+
+### 🔧 Miscellaneous Chores
+
+* **cplane:** merge main into the control plane plugin branch ([ebdc546](https://github.com/takehaya/Vinbero/commit/ebdc54657fe22ff883c74239a20217dabf695427))
+* update mise compilers and stabilize privileged tests ([022f710](https://github.com/takehaya/Vinbero/commit/022f71048f870740c159e567741d497d2d32dd5f))
+
+
+### ♻️ Code Refactoring
+
+* **bgp:** separate built-in delivery transitions from callbacks ([#177](https://github.com/takehaya/Vinbero/issues/177)) ([3251005](https://github.com/takehaya/Vinbero/commit/325100528d00247f832477b1b57b770d02485cb4))
+* **bgp:** separate VPN selection from application ([#175](https://github.com/takehaya/Vinbero/issues/175)) ([0c8d987](https://github.com/takehaya/Vinbero/commit/0c8d9875acd5a7a4d6c0e7d2051f8a08a3b26c3d))
+* **cplane:** share headend reconciliation with built-in appliers ([#173](https://github.com/takehaya/Vinbero/issues/173)) ([7b67ab4](https://github.com/takehaya/Vinbero/commit/7b67ab4b5d6c03b57cddcd8fbef8985b976aab29))
+* **sdk:** extract documentation link verifier ([75415df](https://github.com/takehaya/Vinbero/commit/75415dfdf3fed22702feafa9a28be73b9a8cf7b0))
+
 ## [0.1.1](https://github.com/takehaya/Vinbero/compare/v0.1.0...v0.1.1) (2026-08-17)
 
 
