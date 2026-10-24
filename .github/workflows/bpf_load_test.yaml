@@ -8,6 +8,8 @@ on:
       - '**.c'
       - 'src/**'
       - 'pkg/bpf/*.o'
+      - 'pkg/cplane/evpn_packet_test.go'
+      - 'pkg/cplane/evpn_packet_wire_test.go'
       - '.github/workflows/bpf_load_test.yaml'
   pull_request:
     paths:
@@ -15,6 +17,8 @@ on:
       - '**.c'
       - 'src/**'
       - 'pkg/bpf/*.o'
+      - 'pkg/cplane/evpn_packet_test.go'
+      - 'pkg/cplane/evpn_packet_wire_test.go'
       - '.github/workflows/bpf_load_test.yaml'
 
 jobs:
@@ -100,3 +104,14 @@ jobs:
 
       - name: Run BPF load test
         run: vimto -sudo -memory 2G -kernel :${{ matrix.kernel }} -- go test -v -count 1 -timeout 5m ./pkg/bpf/ -run TestBpfLoad
+
+      - name: Test EVPN controller packet lifecycle on kernel 6.1
+        if: matrix.kernel == '6.1'
+        run: |
+          git rev-parse HEAD
+          go version
+          make cplane-evpn-imet
+          sha256sum pkg/cplane/evpn_packet_test.go pkg/cplane/evpn_packet_wire_test.go out/cplane-evpn-imet.wasm
+          VINBERO_CPLANE_EVPN_PACKET=1 VINBERO_CPLANE_EVPN_WASM="$PWD/out/cplane-evpn-imet.wasm" \
+            vimto -sudo -memory 2G -kernel :6.1 -- \
+            go test -v -race -count 1 -timeout 10m ./pkg/cplane -run '^TestEVPNControllerPacketLifecycle$'

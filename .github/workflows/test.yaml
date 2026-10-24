@@ -101,6 +101,12 @@ jobs:
       - name: Test EVPN controller with anonymous owned BPF maps
         run: go test -exec "sudo env VINBERO_CPLANE_PARITY=1 VINBERO_CPLANE_EVPN_BPF=1" -race -timeout 35m -run '^TestEVPNControllerOwnedBPFMaps$' ./pkg/cplane
 
+      - name: Test EVPN controller packet and interface lifecycle
+        run: |
+          go test -exec "sudo env VINBERO_CPLANE_EVPN_PACKET=1 VINBERO_CPLANE_EVPN_WIRE=1 VINBERO_CPLANE_EVPN_WASM=$PWD/out/cplane-evpn-imet.wasm" \
+            -v -race -count 1 -timeout 35m \
+            -run '^TestEVPNController(Packet|Wire)Lifecycle$' ./pkg/cplane
+
       - name: Run unit tests
         # pkg/bpf reloads the BPF collection per test and keeps outgrowing
         # go test's per-package timeout under -race (the run takes ~15m on a
