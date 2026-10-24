@@ -2,7 +2,8 @@
 GOCMD=go
 GOTEST=$(GOCMD) test
 GOVET=$(GOCMD) vet
-CLANG ?= clang
+# Production BPF uses the compiler validated by the packet-path tests.
+CLANG ?= clang-18
 CFLAGS := -O2 -g -Wall -Werror $(CFLAGS)
 DIFF_FROM_BRANCH_NAME ?= origin/main
 
