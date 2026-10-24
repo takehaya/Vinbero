@@ -133,3 +133,42 @@ func TestFDBWatcherHandleNeighUpdate(t *testing.T) {
 		}
 	})
 }
+
+// The real watcher must not reserve rpc:v1 for kernel learning. BGP must
+// replace that unowned observation, and later kernel NEW/DEL must preserve it.
+func TestFDBWatcherBGPReplacesKernelLearning(t *testing.T) {
+	w, maps := newTestFDBWatcher(t)
+	sink := &fakeMACSink{}
+	w.SetMACSink(sink)
+	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0, 0, 0x30}
+	update := netlink.NeighUpdate{Type: unix.RTM_NEWNEIGH,
+		Neigh: netlink.Neigh{Family: unix.AF_BRIDGE, MasterIndex: 10, LinkIndex: 3, HardwareAddr: mac}}
+	w.handleNeighUpdate(update)
+	if tag, owned, err := maps.GetFdbOwner(100, mac); err != nil || owned {
+		t.Errorf("kernel observation claimed managed owner: %q %v %v", tag, owned, err)
+	}
+	if len(sink.events) != 1 || !sink.events[0].added {
+		t.Fatalf("successful local learning did not advertise: %+v", sink.events)
+	}
+	owner := bpf.OwnerBGPEVPN(65100)
+	if err := maps.CreateFdbOwned(100, mac, &bpf.FdbEntry{IsRemote: 1, PeerIndex: 7}, owner); err != nil {
+		t.Fatalf("BGP import blocked after kernel learning: %v", err)
+	}
+	w.handleNeighUpdate(update)
+	if len(sink.events) != 1 {
+		t.Fatalf("protected remote route advertised as new local MAC: %+v", sink.events)
+	}
+	update.Type = unix.RTM_DELNEIGH
+	w.handleNeighUpdate(update)
+	if entry, err := maps.GetFdb(100, mac); err != nil || entry.IsRemote != 1 || entry.PeerIndex != 7 || entry.IsStatic != 1 {
+		t.Fatalf("kernel notification changed managed forwarding: %+v %v", entry, err)
+	}
+	if tag, owned, err := maps.GetFdbOwner(100, mac); err != nil || !owned || tag != owner {
+		t.Fatalf("kernel notification changed BGP owner: %q %v %v", tag, owned, err)
+	}
+	// The kernel local disappearance must still withdraw any locally
+	// originated RT2, even when another producer now owns BPF forwarding.
+	if len(sink.events) != 2 || sink.events[1].added {
+		t.Fatalf("kernel DEL lost local withdrawal notification: %+v", sink.events)
+	}
+}
