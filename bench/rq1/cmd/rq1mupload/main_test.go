@@ -50,6 +50,36 @@ func TestIPv4SessionRange(t *testing.T) {
 	}
 }
 
+func TestFiniteLoadWindow(t *testing.T) {
+	c := config{sessions: 512, rate: 200, duration: 5 * time.Minute, hold: 120 * time.Second, readyTimeout: time.Minute}
+	if slots, err := loadSlots(c); err != nil || slots != 60_000 {
+		t.Fatalf("maximum finite load: slots=%d error=%v", slots, err)
+	}
+	start := time.Unix(100, 0)
+	planned, missed := slot(start, 59_999, 200, c.duration, start.Add(c.duration-time.Nanosecond))
+	if planned != start.Add(c.duration-5*time.Millisecond) || missed {
+		t.Fatal("last admitted slot must remain inside the 300-second window")
+	}
+	if _, missed := slot(start, 59_999, 200, c.duration, start.Add(c.duration)); !missed {
+		t.Fatal("last slot must expire at the finite deadline")
+	}
+	for _, duration := range []time.Duration{time.Second - time.Nanosecond, 5*time.Minute + time.Nanosecond, time.Duration(1<<63 - 1)} {
+		bad := c
+		bad.duration = duration
+		if _, err := loadSlots(bad); err == nil {
+			t.Fatalf("accepted invalid duration %s", duration)
+		}
+	}
+	c.duration = time.Second + time.Nanosecond
+	if slots, err := loadSlots(c); err != nil || slots != 201 {
+		t.Fatalf("partial final slot changed: slots=%d error=%v", slots, err)
+	}
+	c.rate, c.burst, c.duration = 0, 512, 10*time.Second
+	if slots, err := loadSlots(c); err != nil || slots != 512 {
+		t.Fatalf("burst schedule changed: slots=%d error=%v", slots, err)
+	}
+}
+
 func TestLateSlotsDoNotCatchUp(t *testing.T) {
 	start := time.Unix(100, 0)
 	// Waking 350ms late at 10/s discards slots 0,1,2; only the current

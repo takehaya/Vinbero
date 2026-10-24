@@ -181,15 +181,32 @@ func sentinelRoute(sid, nextHop string) bgp.VPNRoute {
 		RTs: []string{"65100:100"}, SRv6SID: sid, NextHop: nextHop, EndpointBehavior: 65025}
 }
 
-func run(ctx context.Context, c config) (retErr error) {
+// loadSlots bounds the source workload before creating files or a BGP session.
+func loadSlots(c config) (int, error) {
 	if c.sessions != 64 && c.sessions != 512 {
-		return fmt.Errorf("sessions must be 64 or 512")
+		return 0, fmt.Errorf("sessions must be 64 or 512")
 	}
 	if (c.rate != 10 && c.rate != 50 && c.rate != 200) && c.burst != 512 || c.rate != 0 && c.burst != 0 || c.burst != 0 && c.burst != 512 {
-		return fmt.Errorf("select rate 10/50/200 or burst 512, exclusively")
+		return 0, fmt.Errorf("select rate 10/50/200 or burst 512, exclusively")
 	}
-	if c.duration < time.Second || c.duration > time.Minute || c.hold <= 0 || c.readyTimeout <= 0 {
-		return fmt.Errorf("duration must be 1s..60s; hold and ready-timeout must be positive")
+	if c.duration < time.Second || c.duration > 5*time.Minute || c.hold <= 0 || c.readyTimeout <= 0 {
+		return 0, fmt.Errorf("duration must be 1s..300s; hold and ready-timeout must be positive")
+	}
+	slots := c.burst
+	if c.rate > 0 {
+		slots = int((int64(c.duration)*int64(c.rate) + int64(time.Second) - 1) / int64(time.Second))
+	}
+	// 300 seconds at the highest admitted rate, including a final partial slot.
+	if slots > 60_000 {
+		return 0, fmt.Errorf("load exceeds 60000 scheduled update slots")
+	}
+	return slots, nil
+}
+
+func run(ctx context.Context, c config) (retErr error) {
+	slots, err := loadSlots(c)
+	if err != nil {
+		return err
 	}
 	if c.neighbor == "" || c.nextHop == "" || c.startFile == "" || c.log == "" || c.expected == "" {
 		return fmt.Errorf("neighbor, next-hop, start-file, log and expected are required")
@@ -314,10 +331,6 @@ func run(ctx context.Context, c config) (retErr error) {
 		}
 		sentinelDone <- errs
 	}()
-	slots := c.burst
-	if c.rate > 0 {
-		slots = int((int64(c.duration)*int64(c.rate) + int64(time.Second) - 1) / int64(time.Second))
-	}
 	var loadErr error
 	for i := 0; i < slots; i++ {
 		planned := start
@@ -383,7 +396,7 @@ func main() {
 	flag.IntVar(&c.sessions, "sessions", 64, "64 or 512 initial ST1 sessions")
 	flag.IntVar(&c.rate, "rate", 0, "10, 50 or 200 ST1 updates/s; excludes burst")
 	flag.IntVar(&c.burst, "burst", 0, "512 immediate ST1 updates; excludes rate; sentinel remains active for 3s")
-	flag.DurationVar(&c.duration, "duration", 10*time.Second, "rate load duration, 1s..60s")
+	flag.DurationVar(&c.duration, "duration", 10*time.Second, "rate load duration, 1s..300s (at most 60000 update slots)")
 	flag.StringVar(&c.startFile, "start-file", "", "driver atomically publishes future Unix nanoseconds after readiness")
 	flag.DurationVar(&c.readyTimeout, "ready-timeout", 2*time.Minute, "maximum wait for start-file")
 	flag.StringVar(&c.stopFile, "stop-file", "", "driver creates this file after drain/state checks; must not already exist")
