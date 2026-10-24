@@ -121,6 +121,7 @@ echo "[4] BUM single delivery to the dual-homed CE"
 # -b keeps the request broadcast and -f (quit on first reply) is deliberately absent.
 # Check the expected reply IP/MAC and the send/receive totals before the existing
 # positive ICMP/DUP check. Neither silence nor a successful unicast ping proves BUM.
+bum_diagnostics_taken=0
 single_bum_arp() {
     local replies
     if replies=$(docker exec "$CE_REMOTE" arping -b -c 1 -w 3 -I eth1 \
@@ -129,6 +130,11 @@ single_bum_arp() {
         return 0
     fi
     echo "$replies" | sed 's/^/      /'
+    if [ "$bum_diagnostics_taken" -eq 0 ]; then
+        bum_diagnostics_taken=1
+        echo "[diagnostics] first BUM failure, before subsequent route changes"
+        bash "$SCENARIO_DIR/diagnostics.sh" || true
+    fi
     return 1
 }
 arp_ok=1

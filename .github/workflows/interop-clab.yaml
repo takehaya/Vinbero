@@ -141,7 +141,13 @@ jobs:
       - name: Dump lab state on failure
         if: failure()
         working-directory: examples/interop-clab
-        run: make status logs SCENARIO=${{ matrix.scenario }}
+        run: |
+          diagnostics="scenarios/${{ matrix.scenario }}/diagnostics.sh"
+          if [ -f "$diagnostics" ]; then
+            bash "$diagnostics"
+          else
+            make status logs SCENARIO=${{ matrix.scenario }}
+          fi
 
       - name: Collect Cplane state
         if: always() && matrix.scenario == 'cplane-plugin-2site'
