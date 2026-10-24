@@ -1,4 +1,5 @@
 import copy
+import ctypes
 import itertools
 import json
 import os
@@ -7,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -185,6 +187,85 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(runner.run(['not-launched'], Path(directory) / 'log', {}, 1), 130)
                 child.assert_not_called()
             self.assertIsNone(runner.child)
+
+    def test_abnormal_driver_exit_cleans_only_its_descendants(self):
+        # Reap orphaned fixture children ourselves instead of depending on PID 1.
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        try:
+            for mode in ('exit', 'killed', 'ignore', 'cancel'):
+                with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    child = root / 'descendant.py'
+                    child.write_text('import os,signal,time\nfrom pathlib import Path\n'
+                                     'def stop(*args):\n'
+                                     '    signal.signal(signal.SIGTERM, signal.SIG_DFL)\n'
+                                     f'    Path({str(root / "cleaning")!r}).write_text("started")\n'
+                                     '    time.sleep(0.1)\n'
+                                     f'    Path({str(root / "cleaned")!r}).write_text("done")\n'
+                                     '    raise SystemExit(0)\n'
+                                     f'signal.signal(signal.SIGTERM, {"signal.SIG_IGN" if mode == "ignore" else "stop"})\n'
+                                     f'Path({str(root / "ready")!r}).write_text(str(os.getpid()))\n'
+                                     'time.sleep(30)\n')
+                    driver = root / 'driver.py'
+                    ending = {'exit': 'os._exit(7)', 'ignore': 'os._exit(7)',
+                              'killed': 'os.kill(os.getpid(), signal.SIGKILL)',
+                              'cancel': ('def stop(*args):\n'
+                                         '    child.send_signal(signal.SIGTERM)\n'
+                                         f'    while not Path({str(root / "cleaning")!r}).exists(): time.sleep(0.01)\n'
+                                         '    os._exit(9)\n'
+                                         'signal.signal(signal.SIGTERM, stop)\n'
+                                         'os.kill(os.getppid(), signal.SIGINT)\n'
+                                         'time.sleep(30)')}[mode]
+                    driver.write_text('import os,signal,subprocess,sys,time\nfrom pathlib import Path\n'
+                                      f'child = subprocess.Popen([sys.executable, {str(child)!r}])\n'
+                                      f'while not Path({str(root / "ready")!r}).exists(): time.sleep(0.01)\n'
+                                      + ending + '\n')
+                    # This sibling has a different session and must never be signalled.
+                    unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+                    runner = suite.ChildRunner()
+                    prior = signal.signal(signal.SIGINT, runner.interrupt)
+                    descendant = None
+                    try:
+                        with patch.object(suite, 'CLEANUP_GRACE_SECONDS', 0.4, create=True):
+                            code = runner.run([sys.executable, str(driver)], root / 'log', os.environ, 5)
+                        descendant = int((root / 'ready').read_text())
+                        self.assertEqual(code, {'exit': 7, 'ignore': 7, 'killed': -9, 'cancel': 130}[mode])
+                        self.assertIsNone(runner.child)
+                        self.assertIsNone(unrelated.poll())
+                        deadline = time.monotonic() + 1
+                        status = None
+                        while time.monotonic() < deadline:
+                            pid, status = os.waitpid(descendant, os.WNOHANG)
+                            if pid:
+                                descendant = None
+                                break
+                            time.sleep(0.01)
+                        self.assertIsNone(descendant, 'owned descendant survived driver failure')
+                        if mode == 'ignore':
+                            self.assertTrue(os.WIFSIGNALED(status))
+                            self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+                        else:
+                            self.assertTrue((root / 'cleaned').exists(), 'descendant lost its TERM cleanup grace')
+                    finally:
+                        signal.signal(signal.SIGINT, prior)
+                        if descendant is None and (root / 'ready').exists():
+                            # Successful reaping above makes waitpid raise below.
+                            descendant = int((root / 'ready').read_text())
+                        if descendant is not None:
+                            try:
+                                pid, _ = os.waitpid(descendant, os.WNOHANG)
+                                if not pid:
+                                    os.kill(descendant, signal.SIGKILL)
+                                    os.waitpid(descendant, 0)
+                            except ChildProcessError:
+                                pass
+                        unrelated.terminate()
+                        unrelated.wait(timeout=5)
+        finally:
+            self.assertEqual(libc.prctl(36, previous.value, 0, 0, 0), 0)
 
     def test_already_cancelled_does_not_launch(self):
         runner = suite.ChildRunner()
