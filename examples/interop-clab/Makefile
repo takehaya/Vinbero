@@ -27,17 +27,29 @@ LAB_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 SCENARIO ?= l3vpn-2site
 SCENARIO_DIR := $(LAB_DIR)/scenarios/$(SCENARIO)
 TOPO         := $(SCENARIO_DIR)/clab.yml
+# Empty keeps the topology default and lets tests preserve the running backend.
+CPLANE_BACKEND ?=
 
 # Shared container images (built once, reused by every scenario).
 VINBERO_IMAGE ?= vinbero-interop:latest
 FRR_IMAGE     ?= frr-interop:10.2.1
 
-.PHONY: all build build-vinbero build-frr provision deploy destroy reload test \
+.PHONY: all build build-vinbero build-frr build-scenario provision deploy destroy reload test \
         logs status scenarios
 
 all: build deploy test destroy
 
-build: build-vinbero build-frr
+build: build-vinbero build-frr build-scenario
+
+# Per-scenario artifacts that are built rather than committed -- an eBPF
+# plugin object, say, which has to be compiled against the SDK headers of
+# the checkout it runs with. A scenario opts in by shipping a `build.sh` at
+# its root; most ship none and this is a no-op for them.
+build-scenario:
+	@if [ -f $(SCENARIO_DIR)/build.sh ]; then \
+		echo "building $(SCENARIO) artifacts"; \
+		bash $(SCENARIO_DIR)/build.sh; \
+	fi
 
 # Vinbero runtime image. Build context = repo root; the BPF objects are
 # committed + embedded, so no `make bpf-gen` is needed. The gobgp fork that
@@ -76,7 +88,7 @@ provision:
 # `make` already worked before this line.
 deploy:
 	@sudo modprobe vrf 2>/dev/null || true
-	sudo containerlab -t $(TOPO) deploy
+	sudo env CPLANE_BACKEND="$(CPLANE_BACKEND)" containerlab -t $(TOPO) deploy
 
 destroy:
 	sudo containerlab -t $(TOPO) destroy -c
@@ -85,7 +97,7 @@ reload: destroy deploy
 
 # Run the selected scenario's assertions against a running lab.
 test:
-	sudo bash $(SCENARIO_DIR)/test.sh
+	sudo env CPLANE_BACKEND="$(CPLANE_BACKEND)" bash $(SCENARIO_DIR)/test.sh
 
 # List the available scenarios.
 scenarios:

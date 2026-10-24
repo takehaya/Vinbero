@@ -39,8 +39,8 @@ func (s *Session) WithdrawEVPNMac(_ context.Context, key bgp.EVPNMACKey) error {
 	}
 	rk := evpnAdvKey(key.RD, key.EthernetTag, key.MAC)
 	s.advMu.Lock()
+	defer s.advMu.Unlock()
 	id, ok := s.advertised[rk]
-	s.advMu.Unlock()
 	if !ok {
 		return nil
 	}
@@ -50,9 +50,8 @@ func (s *Session) WithdrawEVPNMac(_ context.Context, key bgp.EVPNMACKey) error {
 		return fmt.Errorf("withdraw EVPN RT2 {rd=%s, etag=%d, mac=%s}: %w",
 			key.RD, key.EthernetTag, key.MAC, err)
 	}
-	s.advMu.Lock()
 	delete(s.advertised, rk)
-	s.advMu.Unlock()
+	delete(s.producers, rk)
 	return nil
 }
 
@@ -94,8 +93,8 @@ func (s *Session) WithdrawEVPNInclusiveMulticast(_ context.Context, key bgp.EVPN
 	}
 	rk := evpnImetKey(key.RD, key.EthernetTag)
 	s.advMu.Lock()
+	defer s.advMu.Unlock()
 	id, ok := s.advertised[rk]
-	s.advMu.Unlock()
 	if !ok {
 		return nil
 	}
@@ -103,9 +102,8 @@ func (s *Session) WithdrawEVPNInclusiveMulticast(_ context.Context, key bgp.EVPN
 		return fmt.Errorf("withdraw EVPN RT3 {rd=%s, etag=%d}: %w",
 			key.RD, key.EthernetTag, err)
 	}
-	s.advMu.Lock()
 	delete(s.advertised, rk)
-	s.advMu.Unlock()
+	delete(s.producers, rk)
 	return nil
 }
 
@@ -260,17 +258,16 @@ func (s *Session) WithdrawEVPNEthernetSegment(_ context.Context, key bgp.EVPNESK
 	}
 	rk := evpnEsKey(key.RD, key.ESI)
 	s.advMu.Lock()
+	defer s.advMu.Unlock()
 	id, ok := s.advertised[rk]
-	s.advMu.Unlock()
 	if !ok {
 		return nil
 	}
 	if err := srv.DeletePath(apiutil.DeletePathRequest{UUIDs: []uuid.UUID{id}}); err != nil {
 		return fmt.Errorf("withdraw EVPN RT4 {rd=%s, esi=%x}: %w", key.RD, key.ESI, err)
 	}
-	s.advMu.Lock()
 	delete(s.advertised, rk)
-	s.advMu.Unlock()
+	delete(s.producers, rk)
 	return nil
 }
 
@@ -356,8 +353,8 @@ func (s *Session) WithdrawEVPNEthernetAD(_ context.Context, key bgp.EVPNADKey) e
 	}
 	rk := evpnAdKey(key.RD, key.ESI, key.EthernetTag)
 	s.advMu.Lock()
+	defer s.advMu.Unlock()
 	id, ok := s.advertised[rk]
-	s.advMu.Unlock()
 	if !ok {
 		return nil
 	}
@@ -365,9 +362,8 @@ func (s *Session) WithdrawEVPNEthernetAD(_ context.Context, key bgp.EVPNADKey) e
 		return fmt.Errorf("withdraw EVPN RT1 {rd=%s, esi=%x, etag=%d}: %w",
 			key.RD, key.ESI, key.EthernetTag, err)
 	}
-	s.advMu.Lock()
 	delete(s.advertised, rk)
-	s.advMu.Unlock()
+	delete(s.producers, rk)
 	return nil
 }
 

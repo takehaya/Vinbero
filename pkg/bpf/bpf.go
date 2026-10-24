@@ -18,14 +18,24 @@ import (
 // across processes.
 var pinnedControlMaps = []string{
 	"sid_function_map",
+	"sid_function_owner_map", // ownership must survive with the dispatch entries
 	"sid_aux_map",
 	"aux_owner_map", // persistent owner tags paired with sid_aux_map
 	"headend_v4_map",
+	"headend_v4_owner_map",
 	"headend_v6_map",
+	"headend_v6_owner_map",
 	"headend_l2_map",
 	"fdb_map",
+	"fdb_owner_map",
+	"bd_peer_owner_map",
+	"mup_uplink_v4_map",
+	"mup_uplink_v4_owner_map",
+	"mup_uplink_v6_map",
+	"mup_uplink_v6_owner_map",
 	"bd_peer_map",
 	"bd_peer_reverse_map",
+	"bd_peer_l2_ext_map",
 	"dx2v_map",
 	"sr_policy_map", // headend policy_id refs persist here, so pin it alongside the headend maps
 	// headend group_id refs persist in the pinned headend maps, so the group
@@ -79,10 +89,15 @@ func ReadCollection(constants map[string]any, cfg *config.Config) (*BpfObjects, 
 			"sid_function_map":     entries.SidFunction.Capacity,
 			"sid_aux_map":          entries.SidFunction.Capacity,
 			"aux_owner_map":        entries.SidFunction.Capacity, // paired with sid_aux_map keyspace
+			"plugin_endt_vrf_map":  entries.SidFunction.Capacity, // keyed by aux index, so same keyspace
 			"headend_v4_map":       entries.Headendv4.Capacity,
+			"headend_v4_owner_map": entries.Headendv4.Capacity,
 			"headend_v6_map":       entries.Headendv6.Capacity,
+			"headend_v6_owner_map": entries.Headendv6.Capacity,
 			"headend_l2_map":       entries.HeadendL2.Capacity,
 			"fdb_map":              entries.Fdb.Capacity,
+			"fdb_owner_map":        entries.Fdb.Capacity,
+			"bd_peer_owner_map":    entries.BdPeer.Capacity,
 			"bd_peer_map":          entries.BdPeer.Capacity,
 			"bd_peer_reverse_map":  entries.BdPeer.Capacity,
 			"dx2v_map":             entries.VlanTable.Capacity,

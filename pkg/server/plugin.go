@@ -72,6 +72,11 @@ type PluginServer struct {
 
 	mu       sync.RWMutex
 	registry map[pluginSlotKey]*pluginEntry
+
+	// cplane runs the control-plane (WebAssembly) plugins. Nil when the
+	// daemon was built without them, in which case those RPCs answer
+	// Unimplemented rather than pretending to work.
+	cplane CplaneManager
 }
 
 func NewPluginServer(mapOps *bpf.MapOperations, bpfConstants map[string]any, roEnforce bpf.ROEnforceMode, logger *zap.Logger) *PluginServer {
@@ -184,7 +189,12 @@ func (s *PluginServer) PluginRegister(
 		// be rejected once enforce is flipped on. Other validator
 		// failures (forbidden helper, missing epilogue, BTF mismatch,
 		// ...) are not warn-eligible and always reject.
-		if s.roEnforce == bpf.ROEnforceWarn && errors.Is(err, bpf.ErrPluginROWrite) {
+		// A write to a dispatch/aux integrity map is never warn-downgradable:
+		// it lets the plugin forge the action the aux discriminator reads or
+		// install a SID function outside its scope, so no deployment may run
+		// it regardless of ro_enforce.
+		if s.roEnforce == bpf.ROEnforceWarn && errors.Is(err, bpf.ErrPluginROWrite) &&
+			!errors.Is(err, bpf.ErrPluginIntegrityMapWrite) {
 			s.logger.Warn("plugin RO write violation (warn-only)",
 				zap.String("program", msg.Program),
 				zap.String("map_type", msg.MapType),

@@ -115,6 +115,7 @@ func decodeESILabel(attrs []gobgppkt.PathAttributeInterface) (uint32, bool, bool
 func decodeEVPNEthernetSegment(p *apiutil.Path, rt *gobgppkt.EVPNEthernetSegmentRoute) *bgp.EVPNRoute {
 	r := &bgp.EVPNRoute{
 		Type:       bgp.EVPNRouteTypeEthernetSegment,
+		IPAddr:     rt.IPAddress.String(),
 		ESI:        esiToArray(rt.ESI),
 		ESImportRT: decodeESImportRT(p.Attrs),
 		NextHop:    decodeNextHop(p.Attrs),
@@ -163,6 +164,7 @@ func decodeEVPNMacIP(p *apiutil.Path, rt *gobgppkt.EVPNMacIPAdvertisementRoute) 
 func decodeEVPNMulticast(p *apiutil.Path, rt *gobgppkt.EVPNMulticastEthernetTagRoute) *bgp.EVPNRoute {
 	r := &bgp.EVPNRoute{
 		Type:        bgp.EVPNRouteTypeInclusiveMulticast,
+		IPAddr:      rt.IPAddress.String(),
 		EthernetTag: rt.ETag,
 		RTs:         decodeRouteTargets(p.Attrs),
 		NextHop:     decodeNextHop(p.Attrs),

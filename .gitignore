@@ -219,3 +219,4 @@ examples/interop-clab/scenarios/*/clab-*/
 
 # benchmark run artifacts
 /benchmark/results/
+/bench/results/

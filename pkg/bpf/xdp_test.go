@@ -3,8 +3,11 @@ package bpf
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
+
+	"github.com/cilium/ebpf"
 
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 )
@@ -3996,5 +3999,272 @@ func TestXDPProgEndAN(t *testing.T) {
 	}
 	if !bytes.Equal(out[:len(pkt0)], pkt0) {
 		t.Fatalf("SL=0 packet was modified")
+	}
+}
+
+// TestXDPProgPluginAuxNotReadByBuiltin is the regression for the aux/union
+// escape: a plugin's sid_aux is plugin_raw bytes it chose, and a built-in
+// behavior reached by the plugin's own tail-call must not interpret those
+// bytes as its own union variant.
+//
+// The exploit shape: a plugin allocates a local SID (endpoint slot >= 32),
+// sets its aux to bytes that, read as End.DX2's nexthop variant, are an OIF
+// of the attacker's choosing, and its data-plane half tail-calls the built-in
+// DX2 slot. Before the fix DX2 would bpf_redirect to that OIF; the built-in
+// aux lookup now refuses a plugin-owned SID's aux (sid_entry.action is a
+// plugin slot), so DX2 sees no aux and drops instead of redirecting.
+//
+// End.DX2 is used because its outcome is observable: with the aux it
+// redirects (XDP_REDIRECT), without it it returns XDP_DROP ("OIF not
+// configured"). The companion assertion below is that DX2 at its own slot
+// still reads its aux, so the fix did not break the legitimate path.
+func TestXDPProgPluginAuxNotReadByBuiltin(t *testing.T) {
+	const pluginSlot = uint32(32) // an endpoint plugin slot (>= ENDPOINT_PLUGIN_BASE)
+	oif := uint32(1)
+
+	segments := []net.IP{net.ParseIP("fd00:1:100::10")}
+	buildPkt := func(t *testing.T) []byte {
+		t.Helper()
+		pkt, err := buildL2EncapsulatedPacket(
+			net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::10"),
+			segments, 0, 100, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true)
+		if err != nil {
+			t.Fatalf("build packet: %v", err)
+		}
+		return pkt
+	}
+
+	t.Run("plugin aux is not read by the built-in it tail-calls into", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		// Stand in for the plugin's data-plane half by loading the real DX2
+		// program into the plugin slot: the point under test is what DX2
+		// does with the aux, not what a hostile plugin body computes. The
+		// SID carries the plugin-slot action, which is what marks its aux
+		// as plugin-owned.
+		if err := h.objs.SidEndpointProgs.Update(pluginSlot, h.objs.TailcallEndpointEndDx2, ebpf.UpdateAny); err != nil {
+			t.Fatalf("load DX2 into plugin slot: %v", err)
+		}
+		t.Cleanup(func() { _ = h.objs.SidEndpointProgs.Delete(pluginSlot) })
+
+		h.createSidFunctionWithOIF("fd00:1:100::10/128", uint8(pluginSlot), oif)
+
+		ret, _ := h.run(buildPkt(t))
+		if ret == XDP_REDIRECT {
+			t.Fatalf("a built-in read a plugin-owned SID's aux and redirected to the plugin's chosen OIF; " +
+				"the aux discriminator did not hold (got XDP_REDIRECT)")
+		}
+		if ret != XDP_DROP {
+			t.Fatalf("expected XDP_DROP (no aux, so DX2 has no OIF), got %d", ret)
+		}
+	})
+
+	t.Run("a built-in still reads its own SID's aux", func(t *testing.T) {
+		h := newXDPTestHelper(t)
+		// The same aux under the real DX2 action redirects, proving the
+		// discriminator refuses only a plugin-owned aux, not every aux.
+		h.createSidFunctionWithOIF("fd00:1:100::10/128", actionEndDX2, oif)
+		ret, _ := h.run(buildPkt(t))
+		if ret != XDP_REDIRECT {
+			t.Fatalf("a legitimate End.DX2 no longer reads its aux; expected XDP_REDIRECT, got %d", ret)
+		}
+	})
+}
+
+// grantPluginEndtVrf writes a plugin End.DT VRF grant, as the control plane
+// does when a plugin's scope-checked local SID declares a decap VRF. The grant
+// is keyed by the SID's aux_index, which the built-in reads from tailcall_ctx.
+func (h *xdpTestHelper) grantPluginEndtVrf(auxIndex, ifindex uint32) {
+	h.t.Helper()
+	val := BpfPluginEndtVrf{VrfIfindex: ifindex}
+	if err := h.objs.PluginEndtVrfMap.Update(auxIndex, val, ebpf.UpdateAny); err != nil {
+		h.t.Fatalf("write plugin End.DT VRF grant: %v", err)
+	}
+}
+
+// createPluginDT4Sid installs a plugin-slot End.DT4 SID (action = plugin slot,
+// with an aux so it gets a non-zero aux_index) and returns that aux_index.
+func (h *xdpTestHelper) createPluginDT4Sid(prefix string, slot uint32) uint32 {
+	h.t.Helper()
+	entry := &SidFunctionEntry{Action: uint8(slot)}
+	aux := NewSidAuxL3Vrf(0)
+	if err := h.mapOps.CreateSidFunction(prefix, entry, aux, OwnerRPC); err != nil {
+		h.t.Fatalf("create plugin SID: %v", err)
+	}
+	if entry.AuxIndex == 0 {
+		h.t.Fatalf("plugin SID got aux_index 0; the grant cannot be keyed")
+	}
+	return uint32(entry.AuxIndex)
+}
+
+// TestXDPProgPluginEndDT4VrfGrant covers the plugin End.DT4 VRF grant: a plugin
+// that tail-calls the built-in End.DT4 has its aux nulled by the discriminator
+// (so it cannot pick a VRF from the plugin_raw bytes), and the built-in reads
+// the trusted VRF from plugin_endt_vrf_map instead. Without a grant it must
+// drop rather than fall back to the ingress table.
+//
+// The FIB-level outcome (a granted packet actually forwarded via the VRF
+// table) is not observable in the unit env -- bpf_fib_lookup runs against the
+// host and declines -- so that is verified in the cplane-plugin-2site interop
+// with a VRF-enslaved customer interface. Both subtests here return XDP_DROP,
+// so the return code alone cannot tell a working grant from an always-drop
+// regression. The distinguisher is where the drop happens: with no grant,
+// resolve_decap_vrf drops before decap, so the packet is unchanged; with a
+// grant, the packet is decapped (the outer IPv6 header stripped) and only then
+// does the host FIB decline. The output length is asserted for exactly that.
+func TestXDPProgPluginEndDT4VrfGrant(t *testing.T) {
+	const pluginSlot = uint32(32) // an endpoint plugin slot (>= ENDPOINT_PLUGIN_BASE)
+	sid := "fd00:1:700::10"
+
+	// The grant is resolved on two distinct dispatch paths: the SRH path
+	// (process_end_dt4, packet carries an SRH with SL=0) and the reduced-encap
+	// path (the DISPATCH_NOSRH branch, no SRH). Both must gate on the grant, so
+	// the whole contract is run against each builder.
+	paths := []struct {
+		name  string
+		build func(t *testing.T) []byte
+	}{
+		{"srh", func(t *testing.T) []byte {
+			t.Helper()
+			pkt, err := buildEncapsulatedPacket(
+				net.ParseIP("fd00:1:1::1"), net.ParseIP(sid),
+				[]net.IP{net.ParseIP(sid)}, 0,
+				net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
+			if err != nil {
+				t.Fatalf("build SRH packet: %v", err)
+			}
+			return pkt
+		}},
+		{"nosrh", func(t *testing.T) []byte {
+			t.Helper()
+			pkt, err := buildEncapsulatedPacketNoSRH(
+				net.ParseIP("fd00:1:1::1"), net.ParseIP(sid),
+				net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4(), innerTypeIPv4)
+			if err != nil {
+				t.Fatalf("build no-SRH packet: %v", err)
+			}
+			return pkt
+		}},
+	}
+
+	loadDT4IntoPluginSlot := func(t *testing.T, h *xdpTestHelper) {
+		t.Helper()
+		if err := h.objs.SidEndpointProgs.Update(pluginSlot, h.objs.TailcallEndpointEndDt4, ebpf.UpdateAny); err != nil {
+			t.Fatalf("load End.DT4 into plugin slot: %v", err)
+		}
+		t.Cleanup(func() { _ = h.objs.SidEndpointProgs.Delete(pluginSlot) })
+	}
+
+	for _, p := range paths {
+		buildPkt := p.build
+		t.Run(p.name+"/no VRF grant drops before decap rather than using the ingress table", func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			loadDT4IntoPluginSlot(t, h)
+			h.createPluginDT4Sid(sid+"/128", pluginSlot)
+			pkt := buildPkt(t)
+			ret, out := h.run(pkt)
+			if ret != XDP_DROP {
+				t.Fatalf("a plugin End.DT4 with no VRF grant returned %d, want XDP_DROP; it must not fall back to the ingress table", ret)
+			}
+			// The drop is at resolve_decap_vrf, before any decap, so the packet
+			// is untouched. If it were decapped the grant gate had let it through.
+			if len(out) != len(pkt) {
+				t.Fatalf("no-grant packet was modified (in %d bytes, out %d): the gate should drop it before decap", len(pkt), len(out))
+			}
+		})
+
+		t.Run(p.name+"/a grant decaps and takes the same FIB decision as a built-in End.DT4", func(t *testing.T) {
+			const vrfIfindex = uint32(1) // loopback: present in the test env
+			// Built-in reference: an ordinary End.DT4 into the same VRF ifindex.
+			hb := newXDPTestHelper(t)
+			hb.createSidFunctionWithVRF(sid+"/128", actionEndDT4, vrfIfindex)
+			builtinRet, _ := hb.run(buildPkt(t))
+
+			// Plugin path: End.DT4 in a plugin slot, aux nulled, VRF from the grant.
+			h := newXDPTestHelper(t)
+			loadDT4IntoPluginSlot(t, h)
+			auxIdx := h.createPluginDT4Sid(sid+"/128", pluginSlot)
+			h.grantPluginEndtVrf(auxIdx, vrfIfindex)
+			pkt := buildPkt(t)
+			pluginRet, out := h.run(pkt)
+
+			if pluginRet != builtinRet {
+				t.Fatalf("plugin End.DT4 with a grant returned %d, want the built-in path's %d; "+
+					"the grant should route it to the same FIB decision, not the gate drop", pluginRet, builtinRet)
+			}
+			// The grant let it past resolve_decap_vrf into the decap: the outer
+			// IPv6 (and SRH, if present) is stripped, so the output is shorter
+			// than the input. An always-drop-at-the-gate regression would fail
+			// this, since both paths return XDP_DROP once the host FIB declines.
+			if len(out) >= len(pkt) {
+				t.Fatalf("granted packet was not decapped (in %d bytes, out %d): the grant did not gate through to decap", len(pkt), len(out))
+			}
+		})
+	}
+}
+
+// TestEndtVRFGrantReferences exercises the grant map's reference lookup against
+// a real BPF map: the VRF-delete guard drives it, and the server unit test
+// reimplements it in a fake, so the actual iteration has no coverage there.
+func TestEndtVRFGrantReferences(t *testing.T) {
+	h := newXDPTestHelper(t)
+	m := h.mapOps
+
+	// Two grants on ifindex 5, one on ifindex 7.
+	for idx, ifindex := range map[uint32]uint32{1: 5, 2: 7, 3: 5} {
+		if err := m.PutEndtVRFGrant(idx, ifindex); err != nil {
+			t.Fatalf("put grant %d: %v", idx, err)
+		}
+	}
+	if err := m.PutEndtVRFGrant(0, 5); err == nil {
+		t.Fatal("PutEndtVRFGrant with aux index 0 must be refused")
+	}
+
+	// A live grant is found; an ifindex with no grant is not.
+	if aux, ok, err := m.EndtVRFGrantReferences(5); err != nil || !ok || (aux != 1 && aux != 3) {
+		t.Fatalf("EndtVRFGrantReferences(5) = (%d, %v, %v), want a matching aux index", aux, ok, err)
+	}
+	if _, ok, err := m.EndtVRFGrantReferences(9); err != nil || ok {
+		t.Fatalf("EndtVRFGrantReferences(9) = (_, %v, %v), want no reference", ok, err)
+	}
+
+	// Deleting a grant by its aux index drops just that one; a missing key is
+	// not an error.
+	if err := m.DeleteEndtVRFGrant(1); err != nil {
+		t.Fatalf("DeleteEndtVRFGrant(1): %v", err)
+	}
+	if err := m.DeleteEndtVRFGrant(999); err != nil {
+		t.Fatalf("DeleteEndtVRFGrant of a missing key must be nil, got %v", err)
+	}
+	if _, ok, _ := m.EndtVRFGrantReferences(7); !ok {
+		t.Fatal("deleting the ifindex-5 grant wrongly removed the ifindex-7 grant")
+	}
+}
+
+// TestForceDeleteSidFunctionRemovesEndtVRFGrant pins the catch-all: every path
+// that frees a dispatch entry's aux index must withdraw the decap-VRF grant
+// keyed by it, or a freed-then-reused index would let a stale grant apply to
+// an unrelated SID. The control plane's own release deletes the grant, but the
+// operator escape hatch (ForceDeleteSidFunction) and any direct delete bypass
+// it, so the guarantee lives in deleteSidFunctionInternal.
+func TestForceDeleteSidFunctionRemovesEndtVRFGrant(t *testing.T) {
+	h := newXDPTestHelper(t)
+	const pluginSlot = uint32(32)
+	prefix := "fd00:1:701::10/128"
+	auxIdx := h.createPluginDT4Sid(prefix, pluginSlot)
+	h.grantPluginEndtVrf(auxIdx, 1)
+
+	// It is there before the delete.
+	var val BpfPluginEndtVrf
+	if err := h.objs.PluginEndtVrfMap.Lookup(auxIdx, &val); err != nil {
+		t.Fatalf("grant missing before delete: %v", err)
+	}
+
+	if err := h.mapOps.ForceDeleteSidFunction(prefix); err != nil {
+		t.Fatalf("force delete: %v", err)
+	}
+
+	// The force delete freed the aux index, so the grant must be gone too.
+	if err := h.objs.PluginEndtVrfMap.Lookup(auxIdx, &val); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("grant survived ForceDeleteSidFunction (err=%v); a reused aux index would inherit a stale VRF", err)
 	}
 }

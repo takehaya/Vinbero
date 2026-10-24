@@ -42,9 +42,28 @@ type Session struct {
 
 	srvMu  sync.RWMutex
 	server *gobgpsrv.BgpServer
+	// serveDone closes after Serve has published all of its shutdown state.
+	serveDone <-chan struct{}
 
 	advMu      sync.Mutex
 	advertised map[bgp.RouteKey]uuid.UUID
+	// producers records who advertised each key, for the keys advertised
+	// by someone that named itself.
+	//
+	// gobgp keeps one local path per NLRI, so the session keeps one UUID
+	// per key -- and everything that originates through this session
+	// shares it. Without knowing who put a key there, one producer's
+	// withdraw deletes another's live route and the producer that lost it
+	// still believes it is advertising.
+	//
+	// The empty producer is vinbero's own machinery: the auto-advertise
+	// exporter and the operator's RPC both hold the bare session, so they
+	// are one producer here and can still take each other's keys. That is
+	// the behavior they have always had, and separating them is a change
+	// to their contract rather than to this one. What the naming settles
+	// is the boundary that is new: a plugin cannot touch what vinbero
+	// itself advertises, or the reverse.
+	producers map[bgp.RouteKey]string
 }
 
 // bgpServer returns the running BgpServer, or nil when the session is
@@ -67,6 +86,7 @@ func NewSession(logger *zap.Logger) *Session {
 	return &Session{
 		logger:     logger.Named("bgp.gobgp"),
 		advertised: make(map[bgp.RouteKey]uuid.UUID),
+		producers:  make(map[bgp.RouteKey]string),
 	}
 }
 
@@ -74,6 +94,8 @@ func NewSession(logger *zap.Logger) *Session {
 // for the configured global identity. Calling Start on an already-
 // started Session is an error so a double-wire bug surfaces loudly.
 func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
+	s.srvMu.Lock()
+	defer s.srvMu.Unlock()
 	if s.server != nil {
 		return bgp.ErrSessionAlreadyStarted
 	}
@@ -86,7 +108,11 @@ func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
 	srv := gobgpsrv.NewBgpServer(gobgpsrv.LoggerOption(gobgpLogger, gobgpLevel))
 	// Serve() is the blocking API event loop; it must run in its own
 	// goroutine for the duration of the session.
-	go srv.Serve()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		srv.Serve()
+	}()
 	req := &gobgpapi.StartBgpRequest{
 		Global: &gobgpapi.Global{
 			Asn:        cfg.LocalASN,
@@ -98,9 +124,8 @@ func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
 		srv.Stop()
 		return fmt.Errorf("start bgp (asn=%d router_id=%s): %w", cfg.LocalASN, cfg.RouterID, err)
 	}
-	s.srvMu.Lock()
 	s.server = srv
-	s.srvMu.Unlock()
+	s.serveDone = serveDone
 	s.logger.Info("BGP session started",
 		zap.Uint32("local_asn", cfg.LocalASN),
 		zap.String("router_id", cfg.RouterID),
@@ -123,24 +148,27 @@ const stopTimeout = 10 * time.Second
 // Stop tears the session down. It is safe to call on a Session that was never
 // started (no-op) so callers can defer it unconditionally, and it always clears
 // the handle so the Session does not wedge. The graceful gobgp teardown is
-// bounded by stopTimeout (and by ctx): if gobgp does not return in time, Stop
-// abandons it and returns an error for the caller to log rather than blocking.
+// bounded by stopTimeout (and by ctx) after acquiring the session handle:
+// if gobgp does not return in time, Stop abandons it and returns an error.
 func (s *Session) Stop(ctx context.Context) error {
-	if s.server == nil {
-		return nil
-	}
 	s.srvMu.Lock()
 	srv := s.server
+	serveDone := s.serveDone
 	s.server = nil
+	s.serveDone = nil
 	s.srvMu.Unlock()
+	if srv == nil {
+		return nil
+	}
 
 	// Run the graceful stop off the caller's goroutine so a wedged gobgp
-	// management loop cannot hang us. StopBgp cancels the Serve context; the
-	// subsequent Stop() is gobgp's hard stop (its internal StopBgp then returns
-	// immediately with "not running").
+	// management loop cannot hang us. StopBgp may return before Serve clears
+	// isServing; wait for Serve itself before Stop calls StopBgp again, or
+	// that call can enqueue into a management channel with no reader.
 	done := make(chan error, 1)
 	go func() {
 		err := srv.StopBgp(ctx, &gobgpapi.StopBgpRequest{})
+		<-serveDone
 		srv.Stop()
 		done <- err
 	}()

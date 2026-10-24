@@ -1,7 +1,6 @@
 package apply
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
 	"slices"
@@ -236,66 +235,8 @@ func (t *vpnGroupTable) remove(dk vpnDestKey, pk vpnPathKey) (*vpnDest, *policyK
 	return d, released
 }
 
-// members picks the paths to program, in a deterministic order.
-//
-// Sorting matters beyond tidiness: the data plane selects by hash modulo
-// the member list, so if the order depended on Go's map iteration the same
-// set of paths would spread flows differently on every reconcile and every
-// restart. Sorting by SID pins it.
-//
-// Two paths that resolve to the same SID are the same forwarding outcome
-// (typically one PE re-advertised under a second RD), so they are deduped:
-// programming both would silently double that PE's share of the traffic.
 func (d *vpnDest) members() []*vpnPath {
-	type keyed struct {
-		key vpnPathKey
-		p   *vpnPath
-	}
-	all := make([]keyed, 0, len(d.paths))
-	for k, p := range d.paths {
-		all = append(all, keyed{k, p})
-	}
-	// SID orders the members, but SortFunc is not stable and two paths can
-	// share a SID, so the key breaks the tie. Without it the survivor of the
-	// dedupe below would depend on map iteration order -- and since the paths
-	// sharing a SID can carry different colors, the programmed policy id
-	// would flip between reconciles and defeat the unchanged-set skip.
-	slices.SortFunc(all, func(a, b keyed) int {
-		if c := cmp.Compare(a.p.sid, b.p.sid); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(a.key.rd, b.key.rd); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(a.key.source.Peer.String(), b.key.source.Peer.String()); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.key.source.PathID, b.key.source.PathID)
-	})
-	out := make([]*vpnPath, 0, len(all))
-	for _, k := range all {
-		out = append(out, k.p)
-	}
-	out = slices.CompactFunc(out, func(a, b *vpnPath) bool { return a.sid == b.sid })
-	if len(out) > bpf.EcmpMaxPaths {
-		out = out[:bpf.EcmpMaxPaths]
-	}
-	return out
-}
-
-// memberFingerprint renders the programmed member set so an unchanged
-// reconcile can be skipped. The steering target is part of it: a path whose
-// color changed keeps its SID but must be rewritten with a new policy id.
-func memberFingerprint(ms []*vpnPath) []string {
-	out := make([]string, len(ms))
-	for i, m := range ms {
-		if m.steer == nil {
-			out[i] = fmt.Sprintf("%s>%s;r=%t", m.sid, m.nh, m.reduced)
-			continue
-		}
-		out[i] = fmt.Sprintf("%s@%d/%s>%s;r=%t", m.sid, m.steer.color, m.steer.endpoint, m.nh, m.reduced)
-	}
-	return out
+	return selectVPNMembers(d.paths)
 }
 
 // reconcileVPNGroup writes the destination's current member set to the data
@@ -389,9 +330,17 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 // returns its group id for reuse.
 func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 	owner := a.vpnGroups.groupOwner()
+	// A failed retirement can remove the trigger or part of the group. An
+	// unchanged re-advertisement must rebuild both instead of taking the
+	// installed-fingerprint shortcut over that partially removed state.
+	d.installed = nil
 	if err := a.deleteTrigger(dk.family, dk.prefix); err != nil {
 		a.logger.Error("withdraw VPN trigger",
 			zap.String("prefix", dk.prefix), zap.Error(err))
+		// The old trigger still may reference this ID. Keep the group and
+		// its tracking until a later withdrawal or replacement can retry;
+		// reusing its ID for another prefix would redirect the old traffic.
+		return
 	}
 	// The trigger goes first: while the group still exists a stale trigger
 	// forwards correctly, whereas deleting the group first would leave the
@@ -418,9 +367,8 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 // previously installed prefix fails the cross-owner check and never comes
 // back -- and a withdraw arriving for one cannot remove it either.
 //
-// The owner is read first and force-deleted only when it is this node's own
-// legacy shape. An unconditional force would also destroy an entry an
-// operator installed for the same prefix over RPC.
+// Delete under the observed legacy owner. If an operator or another controller
+// replaces it after the read, the owner check refuses the deletion.
 //
 // Reports whether anything was cleared, so the caller knows a retry is
 // worth attempting.
@@ -443,9 +391,9 @@ func (a *Applier) clearLegacyVPNHeadend(fam bgp.Family, prefix string) bool {
 	}
 	switch fam {
 	case bgp.FamilyVPNv4:
-		err = a.headend.ForceDeleteHeadendV4(prefix)
+		err = a.headend.DeleteHeadendV4(prefix, owner)
 	case bgp.FamilyVPNv6:
-		err = a.headend.ForceDeleteHeadendV6(prefix)
+		err = a.headend.DeleteHeadendV6(prefix, owner)
 	}
 	if err != nil {
 		a.logger.Error("clear pre-aggregation VPN trigger",

@@ -3,12 +3,14 @@ package apply
 import (
 	"net/netip"
 	"slices"
+	"strings"
 
 	"go.uber.org/zap"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/headend"
 	"github.com/takehaya/vinbero/pkg/vrf"
 )
 
@@ -70,6 +72,10 @@ type mupDSDEntry struct {
 // session is not re-logged on every unrelated discovery-route event (the
 // resolution model re-reconciles every session of a type on each ISD/DSD change).
 type mupSessionState struct {
+	withdrawn bool
+	// A gate can remain held after an uplink create or delete fails. Track it
+	// independently of installedSID so retries do not acquire a second reference.
+	gateHeld     bool
 	route        bgp.MUPRoute
 	installedSID string
 	// installedSrc is the outer IPv6 source the installed entry carries. It can
@@ -161,6 +167,7 @@ func rtsIntersect(a, b []string) bool {
 func (a *Applier) applyMUP(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	a.mupMu.Lock()
 	defer a.mupMu.Unlock()
+	a.retryMUPOwnedCleanup()
 	sessionRoute := r.Type == bgp.MUPRouteTypeT1ST || r.Type == bgp.MUPRouteTypeT2ST
 	if !withdraw && sessionRoute && !a.mupDefaultAllow && !a.vrfBindings.EmptyForFamily(fam) {
 		if _, _, ok := a.vrfBindings.MatchImportForFamily(r.RTs, fam); !ok {
@@ -589,8 +596,8 @@ type (
 // uplink session: the F-TEID map writers, the gate behavior/prefix, and the gate
 // map writers. GTP4 vs GTP6 is the endpoint's address family.
 type mupT2STDataPlane struct {
-	uplinkCreate func(uint32, string, uint32, uint8, *bpf.HeadendEntry) error
-	uplinkDelete func(uint32, string, uint32, uint8) error
+	uplinkCreate func(uint32, string, uint32, uint8, *bpf.HeadendEntry, bpf.OwnerTag) error
+	uplinkDelete func(uint32, string, uint32, uint8, bpf.OwnerTag) error
 	gateMode     uint8
 	createGate   headendCreateFn
 	deleteGate   headendDeleteFn
@@ -600,8 +607,8 @@ type mupT2STDataPlane struct {
 func (a *Applier) mupT2STDataPlane(endpoint netip.Addr, endpointStr string) mupT2STDataPlane {
 	if endpoint.Is6() {
 		return mupT2STDataPlane{
-			uplinkCreate: a.mupUplink.CreateMupUplinkV6,
-			uplinkDelete: a.mupUplink.DeleteMupUplinkV6,
+			uplinkCreate: a.createMUPUplinkOwned,
+			uplinkDelete: a.mupUplink.DeleteMupUplinkV6Owned,
 			gateMode:     uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID),
 			createGate:   a.headend.CreateHeadendV6,
 			deleteGate:   a.headend.DeleteHeadendV6,
@@ -609,8 +616,8 @@ func (a *Applier) mupT2STDataPlane(endpoint netip.Addr, endpointStr string) mupT
 		}
 	}
 	return mupT2STDataPlane{
-		uplinkCreate: a.mupUplink.CreateMupUplinkV4,
-		uplinkDelete: a.mupUplink.DeleteMupUplinkV4,
+		uplinkCreate: a.createMUPUplinkOwned,
+		uplinkDelete: a.mupUplink.DeleteMupUplinkV4Owned,
 		gateMode:     uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID),
 		createGate:   a.headend.CreateHeadendV4,
 		deleteGate:   a.headend.DeleteHeadendV4,
@@ -629,8 +636,9 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 		if !ok {
 			return
 		}
-		if st.installedSID != "" {
-			a.uninstallMUPT2ST(st)
+		st.withdrawn = true
+		if (st.installedSID != "" || st.gateHeld) && !a.uninstallMUPT2ST(st) {
+			return
 		}
 		delete(a.mupT2ST, key)
 		a.reconcileMUPT1STForGTP4Src(r.RD)
@@ -672,6 +680,7 @@ func (a *Applier) applyMUPT2ST(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 		r = &rr
 	}
 	st.route = *r
+	st.withdrawn = false
 	st.fam = fam
 	a.reconcileMUPT2ST(key)
 	a.reconcileMUPT1STForGTP4Src(r.RD)
@@ -696,16 +705,17 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 		return
 	}
 	entry.ArgsOffset = bpf.MupArgsOffsetNone
-	if err := dp.uplinkCreate(inst, r.Endpoint, r.TEID, r.TEIDLen, entry); err != nil {
+	if err := dp.uplinkCreate(inst, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 			zap.Uint32("instance", inst), zap.Error(err))
 		return
 	}
-	if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen); err != nil {
-		a.logger.Error("remove old-instance MUP T2ST uplink entry (continuing)",
+	if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
+		a.logger.Error("remove old-instance MUP T2ST uplink entry (retaining for retry)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 			zap.Uint32("instance", st.instance), zap.Error(err))
+		a.rememberMUPOwnedCleanup(mupRecoveryKey{st.instance, endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)})
 	}
 	old := st.instance
 	st.instance = inst
@@ -738,6 +748,7 @@ func (a *Applier) mupVRFForRoute(fam bgp.Family, r *bgp.MUPRoute) uint32 {
 func (a *Applier) ReconcileMUPUplinkInstances() {
 	a.mupMu.Lock()
 	defer a.mupMu.Unlock()
+	a.retryMUPOwnedCleanup()
 	for _, st := range a.mupT2ST {
 		id := a.mupVRFForRoute(st.fam, &st.route)
 		if id == st.instance {
@@ -802,6 +813,12 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 	if !ok {
 		return
 	}
+	if st.withdrawn {
+		if (st.installedSID == "" && !st.gateHeld) || a.uninstallMUPT2ST(st) {
+			delete(a.mupT2ST, key)
+		}
+		return
+	}
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated in applyMUPT2ST
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
@@ -809,7 +826,7 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 
 	sid := a.resolveDirectSID(r)
 	if sid == "" {
-		if st.installedSID != "" {
+		if st.installedSID != "" || st.gateHeld {
 			a.uninstallMUPT2ST(st)
 		}
 		// Log the deferral only on the transition into it (see reconcileMUPT1ST).
@@ -840,18 +857,23 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 		// New session. Install the gate first: without it the data plane never
 		// parses GTP-U for this endpoint, so the F-TEID entry would be dead. Roll
 		// the gate back if the F-TEID write fails so a failed install leaks no gate.
-		if err := a.acquireMUPGate(dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
-			a.logger.Error("install MUP T2ST gate",
-				zap.String("endpoint", r.Endpoint), zap.Error(err))
-			return
+		if !st.gateHeld {
+			if err := a.acquireMUPGate(dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
+				a.logger.Error("install MUP T2ST gate",
+					zap.String("endpoint", r.Endpoint), zap.Error(err))
+				return
+			}
+			st.gateHeld = true
 		}
-		if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry); err != nil {
+		if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 			a.logger.Error("install MUP T2ST uplink entry",
 				zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
-			a.releaseMUPGate(dp.gatePrefix, gateOwner, dp.deleteGate)
+			if a.releaseMUPGate(dp.gatePrefix, gateOwner, dp.deleteGate) {
+				st.gateHeld = false
+			}
 			return
 		}
-	} else if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry); err != nil {
+	} else if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 		// SID changed (a different DSD now resolves): re-Put the F-TEID entry. The
 		// gate already exists and its ref-count is unchanged.
 		a.logger.Error("re-Put MUP T2ST uplink entry",
@@ -866,25 +888,51 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) {
 }
 
 // uninstallMUPT2ST removes an uplink session's F-TEID entry and releases its
-// endpoint gate reference. Continues past a delete error (the BPF delete is
-// idempotent) so the gate ref-count is always released, never stranded.
-func (a *Applier) uninstallMUPT2ST(st *mupSessionState) {
+// endpoint gate reference. A failure retains the state and dependency for retry.
+func (a *Applier) uninstallMUPT2ST(st *mupSessionState) bool {
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint)
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
-	if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen); err != nil {
-		a.logger.Error("withdraw MUP T2ST uplink entry (continuing to release gate)",
-			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
+	if st.installedSID != "" {
+		if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
+			a.logger.Error("withdraw MUP T2ST uplink entry; retaining gate",
+				zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
+			return false
+		}
+		// A gate-only cleanup failure must not make a later reconcile believe
+		// this SID is still programmed and skip recreating the deleted uplink.
+		st.installedSID = ""
 	}
-	a.releaseMUPGate(dp.gatePrefix, bpf.OwnerBGPMUPGate(a.localASN), dp.deleteGate)
-	st.installedSID = ""
+	if st.gateHeld {
+		if !a.releaseMUPGate(dp.gatePrefix, bpf.OwnerBGPMUPGate(a.localASN), dp.deleteGate) {
+			return false
+		}
+		st.gateHeld = false
+	}
+	return true
 }
 
 // acquireMUPGate ensures the H.M.GTP{4,6}.D_TEID gate for endpoint exists and
 // bumps its reference count. The gate's segment list is unused (the behavior
 // resolves the real SID from mup_uplink_v{4,6}_map), so a bare mode-only headend
 // entry suffices.
+type sharedMUPGate interface {
+	SetGateReferences(headend.Family, string, uint8, bpf.OwnerTag, int) error
+}
+
 func (a *Applier) acquireMUPGate(gatePrefix string, mode uint8, owner bpf.OwnerTag, create headendCreateFn) error {
+	if shared, ok := a.headend.(sharedMUPGate); ok {
+		af := headend.AFv4
+		if strings.Contains(gatePrefix, ":") {
+			af = headend.AFv6
+		}
+		n := a.mupGateRefs[gatePrefix] + 1
+		if err := shared.SetGateReferences(af, gatePrefix, mode, owner, n); err != nil {
+			return err
+		}
+		a.mupGateRefs[gatePrefix] = n
+		return nil
+	}
 	if a.mupGateRefs[gatePrefix] > 0 {
 		a.mupGateRefs[gatePrefix]++
 		return nil
@@ -899,15 +947,36 @@ func (a *Applier) acquireMUPGate(gatePrefix string, mode uint8, owner bpf.OwnerT
 
 // releaseMUPGate drops one reference to endpoint's gate and removes it when the
 // last uplink session on that endpoint is gone.
-func (a *Applier) releaseMUPGate(gatePrefix string, owner bpf.OwnerTag, del headendDeleteFn) {
+func (a *Applier) releaseMUPGate(gatePrefix string, owner bpf.OwnerTag, del headendDeleteFn) bool {
+	if shared, ok := a.headend.(sharedMUPGate); ok {
+		af := headend.AFv4
+		mode := uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP4_D_TEID)
+		if strings.Contains(gatePrefix, ":") {
+			af = headend.AFv6
+			mode = uint8(v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_M_GTP6_D_TEID)
+		}
+		n := max(a.mupGateRefs[gatePrefix]-1, 0)
+		if err := shared.SetGateReferences(af, gatePrefix, mode, owner, n); err != nil {
+			a.logger.Error("remove MUP gate", zap.Error(err))
+			return false
+		}
+		if n == 0 {
+			delete(a.mupGateRefs, gatePrefix)
+		} else {
+			a.mupGateRefs[gatePrefix] = n
+		}
+		return true
+	}
 	n := a.mupGateRefs[gatePrefix]
 	if n <= 1 {
-		delete(a.mupGateRefs, gatePrefix)
 		if err := del(gatePrefix, owner); err != nil {
 			a.logger.Error("remove MUP T2ST gate",
 				zap.String("gate", gatePrefix), zap.Error(err))
+			return false
 		}
-		return
+		delete(a.mupGateRefs, gatePrefix)
+		return true
 	}
 	a.mupGateRefs[gatePrefix] = n - 1
+	return true
 }

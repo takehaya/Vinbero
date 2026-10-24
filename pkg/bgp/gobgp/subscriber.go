@@ -46,17 +46,18 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 	// plane should mirror. current=true replays the existing RIB so a
 	// subscriber that attaches after peers are up still sees them.
 	//
-	// INVARIANT: Subscribe is called exactly once, at daemon start, before
-	// any local route/SR Policy is advertised (see cmd/vinberod/main.go).
-	// The current=true replay therefore only ever delivers peer-learned
-	// routes, never this node's own advertisements. If that ordering is ever
-	// broken -- a second Subscribe, or advertising before subscribing -- the
-	// replay would feed the node's own advertised routes back into the
-	// applier. A node that both advertises and steers would then act on its
-	// own SR Policy / VPN routes. Preserve the single-boot-subscribe ordering,
-	// or filter local-origin paths here, before relaxing this.
-	// (ListRoutes, the on-demand rib snapshot, does NOT depend on this
-	// ordering: it filters local-origin paths explicitly.)
+	// INVARIANT: Subscribe is called exactly once per daemon, by the demux
+	// (pkg/bgp/demux), which every consumer registers with instead of
+	// calling this directly. A second Subscribe would open a second
+	// current=true watch and replay the loc-rib into whoever attached late.
+	//
+	// The replay and the live stream both carry this node's own
+	// advertisements once anything in the process advertises, so a consumer
+	// acting on them would install self-pointing state (an own EVPN RT3
+	// becomes a BUM peer aimed back here). Local-origin paths are therefore
+	// dropped by the demux on both paths; do not rely on subscribe-before-
+	// advertise ordering for that. (ListRoutes, the on-demand rib snapshot,
+	// filters local-origin paths itself for the same reason.)
 	if err := srv.WatchEvent(ctx, cbs, gobgpsrv.WatchPostUpdate(true, "", "")); err != nil {
 		cancel()
 		return nil, fmt.Errorf("watch event: %w", err)
@@ -72,6 +73,10 @@ func (s *Session) Subscribe(filter bgp.Family, handler bgp.RouteHandler) (func()
 // the loc-rib snapshot, so the path identity it attaches below reaches
 // every consumer of either.
 func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
+	return pathToRouteEventWithMetadata(p, false)
+}
+
+func pathToRouteEventWithMetadata(p *apiutil.Path, bestKnown bool) (bgp.RouteEvent, bool) {
 	fam, ok := apiFamilyToVinbero(p.Family)
 	if !ok {
 		return bgp.RouteEvent{}, false
@@ -80,6 +85,7 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 		Family:     fam,
 		Source:     pathSource(p),
 		IsWithdraw: p.Withdrawal,
+		BGPPath:    encodeBGPPath(p, bestKnown),
 	}
 	switch fam {
 	case bgp.FamilyVPNv4, bgp.FamilyVPNv6:
@@ -96,7 +102,61 @@ func pathToRouteEvent(p *apiutil.Path) (bgp.RouteEvent, bool) {
 	case bgp.FamilyMUPIPv4, bgp.FamilyMUPIPv6:
 		ev.MUP = decodeMUPRoute(p)
 	}
+	tlvType := gobgppkt.TLVTypeSRv6L3Service
+	if fam == bgp.FamilyEVPN {
+		tlvType = gobgppkt.TLVTypeSRv6L2Service
+	}
+	ev.EndpointBehavior = decodeEndpointBehavior(p.Attrs, vpnLabel(p), tlvType)
+	ev.UnknownAttrs = decodeUnknownAttrs(p.Attrs)
 	return ev, true
+}
+
+// vpnLabel returns the path's first MPLS label, or 0 when the NLRI carries
+// none. Only the transposition check needs it.
+func vpnLabel(p *apiutil.Path) uint32 {
+	vpn, ok := p.Nlri.(*gobgppkt.LabeledVPNIPAddrPrefix)
+	if !ok || len(vpn.Labels.Labels) == 0 {
+		return 0
+	}
+	return vpn.Labels.Labels[0]
+}
+
+// decodeEndpointBehavior returns the SRv6 Endpoint Behavior codepoint of
+// the path's service SID, or 0 when it carries none.
+//
+// It reads the codepoint straight off the wire without checking it against
+// the behaviors Vinbero implements: an unrecognized value is the whole
+// point, since that is what an operator's own behavior looks like here and
+// what a plugin claims. Transposition does not apply to the codepoint --
+// only SID bytes are transposed, never the behavior field.
+//
+// SID reconstruction and behavior selection share one decoder, including
+// service type filtering and malformed-transposition rejection.
+func decodeEndpointBehavior(attrs []gobgppkt.PathAttributeInterface, label uint32, tlvType gobgppkt.TLVType) uint16 {
+	_, _, behavior, _ := srv6ServiceSID(attrs, label, tlvType)
+	return behavior
+}
+
+// decodeUnknownAttrs carries through the path attributes gobgp could not
+// type, so a consumer that understands one can read it. Returns nil for the
+// common case of a path with no unknown attribute.
+//
+// The bytes are copied: gobgp owns the decoded path and a consumer may keep
+// the event past this call.
+func decodeUnknownAttrs(attrs []gobgppkt.PathAttributeInterface) []bgp.UnknownAttribute {
+	var out []bgp.UnknownAttribute
+	for _, a := range attrs {
+		u, ok := a.(*gobgppkt.PathAttributeUnknown)
+		if !ok {
+			continue
+		}
+		out = append(out, bgp.UnknownAttribute{
+			Type:  uint8(u.GetType()),
+			Flags: uint8(u.GetFlags()),
+			Value: append([]byte(nil), u.Value...),
+		})
+	}
+	return out
 }
 
 // pathSource extracts the path's identity: which neighbor sent it and,

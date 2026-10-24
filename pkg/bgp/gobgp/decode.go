@@ -93,6 +93,13 @@ func decodeSRv6SID(attrs []gobgppkt.PathAttributeInterface, label uint32, tlvTyp
 // is skipped entirely (RFC 9252 Sec.7 treats a path without valid SID
 // information as ineligible).
 func srv6ServiceSIDBytes(attrs []gobgppkt.PathAttributeInterface, label uint32, tlvType gobgppkt.TLVType) ([]byte, bgp.SIDStructure, bool) {
+	sid, structure, _, ok := srv6ServiceSID(attrs, label, tlvType)
+	return sid, structure, ok
+}
+
+// srv6ServiceSID selects the SID, structure and behavior together so every
+// consumer uses the same valid Information Sub-TLV of the route's service type.
+func srv6ServiceSID(attrs []gobgppkt.PathAttributeInterface, label uint32, tlvType gobgppkt.TLVType) ([]byte, bgp.SIDStructure, uint16, bool) {
 	for _, a := range attrs {
 		psid, ok := a.(*gobgppkt.PathAttributePrefixSID)
 		if !ok {
@@ -125,11 +132,11 @@ func srv6ServiceSIDBytes(attrs []gobgppkt.PathAttributeInterface, label uint32, 
 					}
 					sid = folded
 				}
-				return sid, structure, true
+				return sid, structure, info.EndpointBehavior, true
 			}
 		}
 	}
-	return nil, bgp.SIDStructure{}, false
+	return nil, bgp.SIDStructure{}, 0, false
 }
 
 // sidStructureOf returns the SID Structure Sub-Sub-TLV of an Information
@@ -237,7 +244,6 @@ func decodeRemoteSrc(attrs []gobgppkt.PathAttributeInterface, label uint32, fall
 	}
 	return prefix.Addr().String()
 }
-
 
 // foldTransposedLabel reconstructs an SRv6 SID whose bits were
 // transposed into the VPN MPLS label (RFC 9252 §4): the high-order

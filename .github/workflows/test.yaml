@@ -9,6 +9,7 @@ on:
       - '**.h'
       - '**.c'
       - 'examples/**'
+      - 'sdk/**'
       - 'src/**'
       - 'pkg/**'
       - 'cmd/**'
@@ -20,6 +21,7 @@ on:
       - '**.h'
       - '**.c'
       - 'examples/**'
+      - 'sdk/**'
       - 'src/**'
       - 'pkg/**'
       - 'cmd/**'
@@ -81,14 +83,20 @@ jobs:
           go-version-file: ./go.mod
           cache: true
 
-      # The netresource netns tests create kernel VRF devices; the runner
-      # kernel ships the vrf module in linux-modules-extra, unloaded.
+      # The netresource netns tests create kernel VRF devices. Some runner
+      # kernels already include VRF; others need linux-modules-extra.
       - name: Load kernel modules
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y --no-install-recommends \
-            linux-modules-extra-$(uname -r)
-          sudo modprobe vrf
+          if ! sudo modprobe vrf; then
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe vrf
+          fi
+
+      - name: Build and test shared control-plane controllers
+        run: |
+          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
+          VINBERO_CPLANE_PARITY=1 go test -race -timeout 35m ./sdk/go/cplane/customcontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./pkg/cplane/native
 
       - name: Run unit tests
         # pkg/bpf reloads the BPF collection per test and keeps outgrowing
@@ -121,6 +129,57 @@ jobs:
 
       - name: Confirm validator rejects intentionally-bad sample plugins
         run: make sdk-test-negative
+
+  cplane-plugin-artifacts:
+    name: Control-plane Plugin Artifacts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ./go.mod
+          cache: true
+
+      # The wasm test fixtures and the SDK example are committed build
+      # artifacts: the tests and the interop lab run exactly those bytes.
+      # A committed artifact that no longer matches its source is the kind
+      # of drift nobody notices until a test passes for the wrong reason,
+      # so both are rebuilt here and the tree must come back clean.
+      - name: Install wabt (wat2wasm)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends wabt
+
+      - name: Install TinyGo for optional compiler compatibility tests
+        run: |
+          curl -sSLo /tmp/tinygo.deb \
+            https://github.com/tinygo-org/tinygo/releases/download/v0.43.0/tinygo_0.43.0_amd64.deb
+          sudo dpkg -i /tmp/tinygo.deb
+
+      - name: Rebuild the wasm test fixtures
+        run: make cplane-wasm-testdata
+
+      - name: Rebuild the control-plane plugin example
+        run: make cplane-example
+
+      - name: Fail if a committed artifact drifted from its source
+        run: |
+          if ! git diff --quiet -- pkg/cplane/testdata pkg/cplane/wasm/testdata \
+              sdk/examples/cplane-custom-behavior; then
+            echo "A committed wasm artifact does not match its source. Rebuild and commit:" >&2
+            echo "  make cplane-wasm-testdata cplane-example" >&2
+            git diff --stat -- pkg/cplane/testdata pkg/cplane/wasm/testdata \
+              sdk/examples/cplane-custom-behavior >&2
+            exit 1
+          fi
+
+      - name: Run the plugin runtime and harness tests against the rebuilt artifacts
+        run: |
+          make cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
+          VINBERO_CPLANE_PARITY=1 go test -timeout 35m ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:
     name: Integration Test - ${{ matrix.example }}
@@ -183,8 +242,10 @@ jobs:
             iputils-ping \
             ethtool \
             curl \
-            python3-scapy \
-            linux-modules-extra-$(uname -r)
+            python3-scapy
+          if ! sudo modprobe vrf || ! sudo modprobe 8021q; then
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          fi
           sudo modprobe vrf
           sudo modprobe 8021q
 

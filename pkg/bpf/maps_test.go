@@ -1,6 +1,7 @@
 package bpf
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"github.com/takehaya/vinbero/pkg/config"
 )
 
@@ -388,6 +390,13 @@ func TestBpfLoad_PinMapsRoundTrip(t *testing.T) {
 		if err := mapOps.CreateSidFunction("fc00:1::1/128", entry, NewSidAuxNexthop(nh), OwnerRPC); err != nil {
 			t.Fatalf("create: %v", err)
 		}
+		owner := OwnerPluginBundle("pinned-headend")
+		if err := mapOps.CreateHeadendV4("192.0.2.0/24", &HeadendEntry{}, owner); err != nil {
+			t.Fatal(err)
+		}
+		if err := mapOps.CreateHeadendV6("fd00:beef::/64", &HeadendEntry{}, owner); err != nil {
+			t.Fatal(err)
+		}
 		if err := objs.Close(); err != nil {
 			t.Fatalf("close: %v", err)
 		}
@@ -419,6 +428,145 @@ func TestBpfLoad_PinMapsRoundTrip(t *testing.T) {
 		if got.AuxIndex == 0 {
 			t.Errorf("aux_index should be preserved across reload, got 0")
 		}
+		owner, ok, err := mapOps.GetSidFunctionOwner("fc00:1::1/128")
+		if err != nil || !ok || owner != OwnerRPC {
+			t.Fatalf("SID owner lost across pinned reload: %q %v %v", owner, ok, err)
+		}
+		pluginOwner := OwnerPluginBundle("pinned-headend")
+		for _, tc := range []struct {
+			prefix string
+			owners func() (map[string]OwnerTag, error)
+			create func(string, *HeadendEntry, OwnerTag) error
+			remove func(string, OwnerTag) error
+		}{
+			{"192.0.2.0/24", mapOps.ListHeadendV4Owners, mapOps.CreateHeadendV4, mapOps.DeleteHeadendV4},
+			{"fd00:beef::/64", mapOps.ListHeadendV6Owners, mapOps.CreateHeadendV6, mapOps.DeleteHeadendV6},
+		} {
+			owners, err := tc.owners()
+			if err != nil || owners[tc.prefix] != pluginOwner {
+				t.Fatalf("headend ownership lost across pinned reload: %s %v %v", tc.prefix, owners, err)
+			}
+			if err := tc.create(tc.prefix, &HeadendEntry{}, OwnerPluginBundle("other")); !errors.Is(err, ErrEntryOwnerMismatch) {
+				t.Fatalf("cross-owner replacement after pinned reload: %v", err)
+			}
+			if err := tc.remove(tc.prefix, pluginOwner); err != nil {
+				t.Fatalf("owner cleanup after pinned reload: %v", err)
+			}
+		}
+	}
+}
+
+func TestDeleteMissingSIDPreservesCoveringGrant(t *testing.T) {
+	h := newXDPTestHelper(t)
+	entry := &SidFunctionEntry{Action: 32}
+	if err := h.mapOps.CreateSidFunction("fd00:1::/64", entry, NewSidAuxPluginRaw(nil), OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.mapOps.PutEndtVRFGrant(uint32(entry.AuxIndex), 99); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an interrupted delete that removed the /128 before its owner.
+	key, err := buildLpmKeyV6("fd00:1::1/128")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.mapOps.sidFunctionOwners.Put(key, OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	if entry, exists, err := h.mapOps.GetSidFunctionExact("fd00:1::1/128"); err != nil || exists || entry != nil {
+		t.Fatalf("exact lookup returned covering SID: %v %v %v", entry, exists, err)
+	}
+	if err := h.mapOps.DeleteSidFunction("fd00:1::1/128", OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	var grant BpfPluginEndtVrf
+	if err := h.objs.PluginEndtVrfMap.Lookup(uint32(entry.AuxIndex), &grant); err != nil {
+		t.Fatalf("missing /128 revoked covering /64 grant: %v", err)
+	}
+	if _, ok, err := h.mapOps.GetSidFunctionOwner("fd00:1::1/128"); err != nil || ok {
+		t.Fatalf("stale owner not cleaned: %v %v", ok, err)
+	}
+}
+
+func TestSIDRecreationAfterPartialDeletePreservesCoveringAux(t *testing.T) {
+	for _, pluginAux := range []bool{false, true} {
+		t.Run(fmt.Sprint("plugin aux=", pluginAux), func(t *testing.T) {
+			h := newXDPTestHelper(t)
+			parent := &SidFunctionEntry{Action: 32}
+			if err := h.mapOps.CreateSidFunction("fd00:1::/64", parent, NewSidAuxPluginRaw([]byte{42}), OwnerRPC); err != nil {
+				t.Fatal(err)
+			}
+			key, err := buildLpmKeyV6("fd00:1::1/128")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.mapOps.sidFunctionOwners.Put(key, OwnerRPC); err != nil {
+				t.Fatal(err)
+			}
+			child := &SidFunctionEntry{Action: 33}
+			if pluginAux {
+				owner := AuxOwnerPluginTag("endpoint", 33)
+				idx, err := h.mapOps.auxAlloc.AllocOwner(owner)
+				if err != nil {
+					t.Fatal(err)
+				}
+				child.AuxIndex = uint16(idx)
+				err = h.mapOps.CreateSidFunctionWithAuxIndex("fd00:1::1/128", child, owner, OwnerRPC)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err := h.mapOps.CreateSidFunction("fd00:1::1/128", child, nil, OwnerRPC); err != nil {
+				t.Fatal(err)
+			}
+			if got := h.mapOps.auxAlloc.OwnerOf(uint32(parent.AuxIndex)); got != AuxOwnerBuiltin {
+				t.Fatalf("recreation freed covering aux: %q", got)
+			}
+		})
+	}
+}
+
+func TestSIDDeleteOwnerFailureStillReleasesBuiltinAux(t *testing.T) {
+	h := newXDPTestHelper(t)
+	// The collection is pooled across tests. Freeze a dedicated owner map,
+	// not the pool's map, so the next test can still reset its own state.
+	spec, err := LoadBpf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerSpec := spec.Maps["sid_function_owner_map"].Copy()
+	ownerSpec.Pinning = ebpf.PinNone
+	owners, err := ebpf.NewMap(ownerSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owners.Close() })
+	h.mapOps.sidFunctionOwners = newEntryOwnerMap(owners)
+	entry := &SidFunctionEntry{Action: 32}
+	prefix := "fd00:1::1/128"
+	if err := h.mapOps.CreateSidFunction(prefix, entry, NewSidAuxPluginRaw([]byte{42}), OwnerRPC); err != nil {
+		t.Fatal(err)
+	}
+	// Freeze leaves owner lookup readable but makes owner deletion fail,
+	// after the independently writable dispatch map has been deleted.
+	if err := owners.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.mapOps.DeleteSidFunction(prefix, OwnerRPC); err == nil {
+		t.Fatal("frozen owner map accepted deletion")
+	}
+	entries, err := h.mapOps.ListSidFunctions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := entries[prefix]; exists {
+		t.Fatal("dispatch was not removed before owner deletion")
+	}
+	if got := h.mapOps.auxAlloc.OwnerOf(uint32(entry.AuxIndex)); got != "" {
+		t.Fatalf("owner-delete failure leaked builtin aux: %q", got)
+	}
+	fresh := NewMapOperations(h.objs)
+	if got := fresh.auxAlloc.OwnerOf(uint32(entry.AuxIndex)); got != "" {
+		t.Fatalf("leaked aux survived allocator reconstruction: %q", got)
 	}
 }
 

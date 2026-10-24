@@ -17,25 +17,32 @@ import (
 // EVPN RT4 membership is bounded so a peer flooding crafted Ethernet Segment
 // routes cannot grow the in-memory tables without limit.
 const (
-	maxTrackedESIs   = 256 // distinct ESIs whose membership we track
-	maxMembersPerESI = 32  // member PE sources per ESI (DF candidates)
+	maxTrackedESIs   = 256                               // distinct ESIs whose membership we track
+	maxMembersPerESI = 32                                // member PE sources per ESI (DF candidates)
+	maxESPaths       = maxTrackedESIs * maxMembersPerESI // includes duplicate paths/RDs
 )
 
 // fdbBdOps is the subset of bpf.MapOperations the EVPN applier writes:
 // the FDB (MAC -> peer), the per-PE bd_peer encap entry, and the Ethernet
 // Segment (ESI) table that DF election drives.
 type fdbBdOps interface {
-	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
-	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
-	CreateBdPeer(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) error
+	CreateEsiPeer(esi [bpf.ESILen]byte, source [bpf.IPv6AddrLen]byte) error
+	DeleteEsiPeer(esi [bpf.ESILen]byte, source [bpf.IPv6AddrLen]byte) error
+	ListFdbOwners() (map[bpf.FdbKey]bpf.OwnerTag, error)
+	ListBdPeerOwners() (map[bpf.BdPeerKey]bpf.OwnerTag, error)
+	GetFdbOwner(bdID uint16, mac net.HardwareAddr) (bpf.OwnerTag, bool, error)
+	GetBdPeerOwner(bdID, index uint16) (bpf.OwnerTag, bool, error)
+	CreateFdbOwned(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry, owner bpf.OwnerTag) error
+	DeleteFdbOwned(bdID uint16, mac net.HardwareAddr, owner bpf.OwnerTag) error
+	CreateBdPeerOwned(bdID, index uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool, owner bpf.OwnerTag) error
 	// DeleteBdPeer reports whether the forward entry existed; false with a
 	// nil error is an already-free slot, and an error is always paired with
 	// the occupancy the caller's ledger must keep.
-	DeleteBdPeer(bdID, index uint16) (bool, error)
+	DeleteBdPeerOwned(bdID, index uint16, owner bpf.OwnerTag) (bool, error)
 	// CreateBdPeerAtFreeIndex probes for the lowest free index and installs
 	// the peer under one critical section, so a concurrent writer (the
 	// operator RPC path) cannot land on the same slot.
-	CreateBdPeerAtFreeIndex(bdID uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) (uint16, error)
+	CreateBdPeerAtFreeIndexOwned(bdID uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool, owner bpf.OwnerTag) (uint16, error)
 	// FindFreeBdPeerIndex returns the lowest bd_peer index not in use in the
 	// real map, so a BGP-allocated peer never collides with an operator-created
 	// or restart-pinned entry.
@@ -127,9 +134,13 @@ type evpnTable struct {
 	mcast map[evpnMcastKey]evpnMcastState
 	// esMembers maps an ESI to the set of member PE source IPs learned from
 	// RT4 (Ethernet Segment routes), the candidate set for DF election.
-	// Guarded by esMu.
+	// All four membership ledgers are guarded by esMu; esApplied records
+	// only successful writes, retaining failures for a later retry.
 	esMembers map[[bpf.ESILen]byte]map[string]struct{}
 	esMu      sync.Mutex
+	esPaths   map[esPathKey]esPeerKey
+	esRefs    map[esPeerKey]int
+	esApplied map[esPeerKey]struct{}
 	// macsByES indexes the MACs each PE taught us on each Ethernet Segment.
 	// It exists for mass withdraw (RFC 7432 §8.2): when a PE withdraws its
 	// per-ES Ethernet A-D route it is saying the whole segment is gone, and
@@ -168,6 +179,9 @@ func newEVPNTable() *evpnTable {
 		mcast:       make(map[evpnMcastKey]evpnMcastState),
 		macsByES:    make(map[esMemberKey]map[evpnFdbKey]struct{}),
 		esMembers:   make(map[[bpf.ESILen]byte]map[string]struct{}),
+		esPaths:     make(map[esPathKey]esPeerKey),
+		esRefs:      make(map[esPeerKey]int),
+		esApplied:   make(map[esPeerKey]struct{}),
 		esAD:        make(map[esMemberKey]bool),
 		esADByNLRI:  make(map[esNLRIKey]string),
 		eviAD:       make(map[evpnEviADKey]eviADState),
@@ -176,7 +190,6 @@ func newEVPNTable() *evpnTable {
 		esWithdrawn: make(map[esMemberKey]struct{}),
 	}
 }
-
 
 // releaseIndex drops one reference to key's peer and reports whether the peer
 // is now unreferenced (so the caller deletes the bd_peer).
@@ -228,21 +241,22 @@ func isUsableSRv6SID(sid string) bool {
 		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() && !addr.IsMulticast()
 }
 
-func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
+func (a *Applier) applyEVPN(ev bgp.RouteEvent) {
 	a.evpnMu.Lock()
 	defer a.evpnMu.Unlock()
-	a.applyEVPNLocked(r, withdraw)
+	a.applyEVPNLocked(ev)
 }
 
 // applyEVPNLocked dispatches one EVPN route. Caller holds evpnMu.
-func (a *Applier) applyEVPNLocked(r *bgp.EVPNRoute, withdraw bool) {
+func (a *Applier) applyEVPNLocked(ev bgp.RouteEvent) {
+	r, withdraw := ev.EVPN, ev.IsWithdraw
 	switch r.Type {
 	case bgp.EVPNRouteTypeMACIP:
 		a.applyEVPNMacIP(r, withdraw)
 	case bgp.EVPNRouteTypeInclusiveMulticast:
 		a.applyEVPNInclusiveMulticast(r, withdraw)
 	case bgp.EVPNRouteTypeEthernetSegment:
-		a.applyEVPNEthernetSegment(r, withdraw)
+		a.applyEVPNEthernetSegment(ev)
 	case bgp.EVPNRouteTypeEthernetAD:
 		a.applyEVPNEthernetAD(r, withdraw)
 	default:
@@ -282,7 +296,9 @@ func (a *Applier) applyEVPNEthernetAD(r *bgp.EVPNRoute, withdraw bool) {
 //
 // The snapshot carries every known path per NLRI (best first), so where two
 // peers advertise the same NLRI with different attributes the last replayed
-// path wins -- the same last-write-wins the live stream has.
+// path wins -- the same last-write-wins the live stream has. RT4 instead
+// retains every NLRI/PathSource reference, so withdrawing one reflected path
+// does not remove another path's RX membership or DF candidacy.
 func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
 	a.evpnMu.Lock()
 	defer a.evpnMu.Unlock()
@@ -293,9 +309,13 @@ func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
 		if ev.Family != bgp.FamilyEVPN || ev.EVPN == nil || ev.IsWithdraw {
 			return
 		}
-		a.applyEVPNLocked(ev.EVPN, false)
+		a.applyEVPNLocked(ev)
 		n++
 	})
+	// An empty replay still retries a failed final membership deletion.
+	a.evpn.esMu.Lock()
+	a.syncESPeers()
+	a.evpn.esMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("replay EVPN rib: %w", err)
 	}
@@ -385,7 +405,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 	if st, tracked := a.evpn.peers[pk]; tracked {
 		// The PE already has a peer in this BD: refresh it in place and
 		// bump the reference count.
-		if err := a.fdbBd.CreateBdPeer(bdID, st.index, entry, r.ESI, rsrc, true); err != nil {
+		if err := a.fdbBd.CreateBdPeerOwned(bdID, st.index, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 			a.logger.Error("install EVPN bd_peer",
 				zap.Uint16("bd_id", bdID), zap.Error(err))
 			return
@@ -396,7 +416,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		// Probe-and-create runs inside one critical section: probing here
 		// and creating later would race the operator RPC path onto the
 		// same free slot (both allocate from the same operator range).
-		newIdx, err := a.fdbBd.CreateBdPeerAtFreeIndex(bdID, entry, r.ESI, rsrc, true)
+		newIdx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN))
 		if err != nil {
 			a.logger.Error("install EVPN bd_peer",
 				zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID), zap.Error(err))
@@ -415,10 +435,10 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		fdbIdx = d.peerIdx
 	}
 	fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: fdbIdx, BdId: bdID, Esi: r.ESI}
-	if err := a.fdbBd.CreateFdb(bdID, mac, fdb); err != nil {
+	if err := a.fdbBd.CreateFdbOwned(bdID, mac, fdb, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 		a.logger.Error("install EVPN FDB", zap.String("mac", r.MAC), zap.Error(err))
 		if rIdx, gone := a.evpn.releaseIndex(pk); gone {
-			if existed, derr := a.fdbBd.DeleteBdPeer(bdID, rIdx); derr != nil && existed {
+			if existed, derr := a.fdbBd.DeleteBdPeerOwned(bdID, rIdx, bpf.OwnerBGPEVPN(a.localASN)); derr != nil && existed {
 				// Same recovery contract as withdrawEVPNMac: the peer entry
 				// survived the failed rollback, so re-pin the index (refs 0)
 				// -- releasing it would orphan the slot and a re-learn would
@@ -502,7 +522,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 	if sfk, sst, ok := a.survivingContrib(mk, fk); ok {
 		if idx, resolvable := a.fdbTargetIndex(sst); resolvable {
 			fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: idx, BdId: sst.bdID, Esi: sst.esi}
-			if err := a.fdbBd.CreateFdb(sst.bdID, sst.mac, fdb); err != nil {
+			if err := a.fdbBd.CreateFdbOwned(sst.bdID, sst.mac, fdb, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 				// The FDB entry still points at the withdrawn contribution's
 				// target. Keep every ledger so a later retry can hand off.
 				a.logger.Error("hand EVPN MAC to surviving PE",
@@ -516,7 +536,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 			a.logger.Error("EVPN MAC survivor has no resolvable peer",
 				zap.String("mac", st.mac.String()), zap.String("rd", sfk.rd))
 		}
-	} else if err := a.fdbBd.DeleteFdb(st.bdID, st.mac); err != nil {
+	} else if err := a.fdbBd.DeleteFdbOwned(st.bdID, st.mac, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
 		// The FDB entry is still in the map. Keep the reverse index so a
 		// later retry can find and remove it; dropping it here would orphan
 		// the map entry and the peer reference it holds.
@@ -533,7 +553,7 @@ func (a *Applier) withdrawEVPNMac(fk evpnFdbKey, st evpnFdbState) {
 	}
 	a.unindexMACByES(fk, st)
 	if idx, gone := a.evpn.releaseIndex(st.peer); gone {
-		if existed, err := a.fdbBd.DeleteBdPeer(st.bdID, idx); err != nil && existed {
+		if existed, err := a.fdbBd.DeleteBdPeerOwned(st.bdID, idx, bpf.OwnerBGPEVPN(a.localASN)); err != nil && existed {
 			// The bd_peer is still in the map but releaseIndex already
 			// dropped it from the ledger. Re-pin the index (refs 0) so a
 			// re-learn of this PE reuses the surviving entry instead of
@@ -633,7 +653,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 	// therefore unused here. Probe-and-create is one critical section for the
 	// same reason as RT2.
 	var noRemoteSrc [bpf.IPv6AddrLen]byte
-	idx, err := a.fdbBd.CreateBdPeerAtFreeIndex(bdID, entry, r.ESI, noRemoteSrc, false)
+	idx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, noRemoteSrc, false, bpf.OwnerBGPEVPN(a.localASN))
 	if err != nil {
 		a.logger.Error("install EVPN BUM bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
@@ -656,7 +676,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 // keeps failing the same way) until the slot is reused, when the retry
 // would delete an unrelated peer.
 func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) bool {
-	if existed, err := a.fdbBd.DeleteBdPeer(st.bdID, st.index); err != nil && existed {
+	if existed, err := a.fdbBd.DeleteBdPeerOwned(st.bdID, st.index, bpf.OwnerBGPEVPN(a.localASN)); err != nil && existed {
 		a.logger.Error("delete EVPN BUM bd_peer",
 			zap.Uint16("bd_id", st.bdID), zap.Uint16("index", st.index), zap.Error(err))
 		return false
@@ -668,65 +688,6 @@ func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) bool {
 	return true
 }
 
-// applyEVPNEthernetSegment records (or removes) a remote PE's membership in an
-// Ethernet Segment from an RT4 route, then re-runs DF election for that ESI.
-// RT4 carries no SID; the ESI plus the originating router IP (next hop)
-// identify the attaching PE. Membership is tracked for every ESI, but DF
-// election only writes esi_map for an ESI this PE locally attaches (declared by
-// the operator via `vbctl es create --local-attached`); an RT4 for an
-// unattached ESI is recorded informationally and never creates a local ES, so a
-// crafted RT4 cannot mint a phantom segment.
-func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
-	var zeroESI [bpf.ESILen]byte
-	if r.ESI == zeroESI {
-		a.logger.Warn("EVPN RT4 has all-zero ESI; skipping", zap.String("rd", r.RD))
-		return
-	}
-	pe := r.NextHop
-	if pe == "" {
-		a.logger.Warn("EVPN RT4 has no originating PE (next hop); skipping",
-			zap.String("rd", r.RD))
-		return
-	}
-
-	// Record membership for every ESI, attached or not, so a later local
-	// attach can elect a DF from RT4s that arrived first (ReelectDF).
-	// electDF itself gates on local attachment, so an unattached ESI stays
-	// informational. Membership is bounded (maxTrackedESIs /
-	// maxMembersPerESI) so crafted RT4s cannot grow it without limit.
-	// esMu serializes against ReelectDF on the RPC goroutine.
-	a.evpn.esMu.Lock()
-	defer a.evpn.esMu.Unlock()
-
-	members := a.evpn.esMembers[r.ESI]
-	if withdraw {
-		if members == nil {
-			return
-		}
-		delete(members, pe)
-		if len(members) == 0 {
-			delete(a.evpn.esMembers, r.ESI)
-		}
-	} else {
-		if members == nil {
-			if len(a.evpn.esMembers) >= maxTrackedESIs {
-				a.logger.Warn("EVPN RT4 ESI table full; ignoring segment",
-					zap.String("rd", r.RD), zap.Int("max", maxTrackedESIs))
-				return
-			}
-			members = make(map[string]struct{})
-			a.evpn.esMembers[r.ESI] = members
-		}
-		if _, known := members[pe]; !known && len(members) >= maxMembersPerESI {
-			a.logger.Warn("EVPN RT4 member set full for ESI; ignoring PE",
-				zap.String("rd", r.RD), zap.String("pe", pe), zap.Int("max", maxMembersPerESI))
-			return
-		}
-		members[pe] = struct{}{}
-	}
-	a.electDF(r.ESI)
-}
-
 // ReelectDF re-runs DF election for an ESI from the membership already learned
 // over RT4. The operator path calls it right after `es create` marks an ESI
 // locally attached, so an RT4 that arrived before the local attach -- recorded
@@ -735,6 +696,7 @@ func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
 func (a *Applier) ReelectDF(esi [bpf.ESILen]byte) {
 	a.evpn.esMu.Lock()
 	defer a.evpn.esMu.Unlock()
+	a.syncESPeers()
 	a.electDF(esi)
 }
 

@@ -37,22 +37,62 @@ var protocolNames = map[string][]int{
 // RouteSink. It mirrors FDBWatcher's lifecycle: subscribe in Start, drain on a
 // goroutine, stop by closing done.
 type RouteWatcher struct {
-	sink    RouteSink
 	logger  *zap.Logger
 	mu      sync.RWMutex
 	watched map[uint32]map[int]struct{} // table id -> allowed RTPROT_* set
-	done    chan struct{}
-	wg      sync.WaitGroup
+	// sinks receives every matching route change, in registration order. The
+	// first entry is the sink NewRouteWatcher was built with.
+	sinks      []routeSinkEntry
+	nextSinkID uint64
+	done       chan struct{}
+	wg         sync.WaitGroup
+}
+
+// routeSinkEntry is one registered sink and the id its removal is keyed by.
+type routeSinkEntry struct {
+	id   uint64
+	sink RouteSink
 }
 
 // NewRouteWatcher creates a RouteWatcher that delivers matching route changes
-// to sink.
+// to sink. Further consumers attach with AddSink.
 func NewRouteWatcher(sink RouteSink, logger *zap.Logger) *RouteWatcher {
-	return &RouteWatcher{
-		sink:    sink,
+	w := &RouteWatcher{
 		logger:  logger.Named("route.watch"),
 		watched: make(map[uint32]map[int]struct{}),
 		done:    make(chan struct{}),
+	}
+	if sink != nil {
+		w.nextSinkID++
+		w.sinks = append(w.sinks, routeSinkEntry{id: w.nextSinkID, sink: sink})
+	}
+	return w
+}
+
+// AddSink registers an additional consumer and returns a remove func that is
+// safe to call more than once. Sinks are notified in registration order.
+func (w *RouteWatcher) AddSink(sink RouteSink) func() {
+	if sink == nil {
+		return func() {}
+	}
+	w.mu.Lock()
+	w.nextSinkID++
+	id := w.nextSinkID
+	w.sinks = append(w.sinks, routeSinkEntry{id: id, sink: sink})
+	w.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			for i, e := range w.sinks {
+				if e.id == id {
+					w.sinks = append(w.sinks[:i], w.sinks[i+1:]...)
+					return
+				}
+			}
+		})
 	}
 }
 
@@ -158,8 +198,9 @@ func (w *RouteWatcher) handleRouteUpdate(u netlink.RouteUpdate) {
 }
 
 // deliver applies the redistribute protocol allowlist to one route and forwards
-// it to the sink. Shared by the live update path (handleRouteUpdate) and the
-// replay path (DumpTable) so the filter contract lives in one place.
+// it to every registered sink. Shared by the live update path
+// (handleRouteUpdate) and the replay path (DumpTable) so the filter contract
+// lives in one place.
 func (w *RouteWatcher) deliver(table uint32, protos map[int]struct{}, proto int, dst *net.IPNet, added bool) {
 	if _, allow := protos[proto]; !allow {
 		return
@@ -173,7 +214,17 @@ func (w *RouteWatcher) deliver(table uint32, protos map[int]struct{}, proto int,
 	if !ok {
 		return
 	}
-	w.sink.OnRoute(table, prefix, added)
+	// Copy the sink list so delivery runs without holding w.mu: a sink may
+	// call back into the watcher (RegisterTable / DumpTable).
+	w.mu.RLock()
+	sinks := make([]RouteSink, 0, len(w.sinks))
+	for _, e := range w.sinks {
+		sinks = append(sinks, e.sink)
+	}
+	w.mu.RUnlock()
+	for _, sink := range sinks {
+		sink.OnRoute(table, prefix, added)
+	}
 }
 
 // Stop ends the watch and waits for the drain goroutine to exit.

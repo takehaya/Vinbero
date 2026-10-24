@@ -129,6 +129,9 @@ func TestListRoutes_PeerLearnedOnlyAndLocalOriginSkipped(t *testing.T) {
 				t.Errorf("non-EVPN event from an EVPN list: %+v", ev)
 				return
 			}
+			if ev.BGPPath == nil || len(ev.BGPPath.NLRI) == 0 || len(ev.BGPPath.RouteKey) == 0 || ev.BGPPath.EncodingError != "" || ev.BGPPath.Metadata.Best == nil {
+				t.Errorf("snapshot missing full BGP model or Best presence: %+v", ev.BGPPath)
+			}
 			if ev.IsWithdraw {
 				t.Errorf("rib-resident path delivered as withdraw: %+v", ev.EVPN)
 			}

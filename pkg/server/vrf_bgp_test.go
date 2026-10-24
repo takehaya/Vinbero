@@ -10,6 +10,7 @@ import (
 
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 	"go.uber.org/zap"
@@ -1329,7 +1330,6 @@ func TestVrfBgpUnbind_DrivesMupUplinkReconcile(t *testing.T) {
 	}
 }
 
-
 // commitBinding fires the EVPN loc-rib replay only when the mutation widened
 // the binding's import surface AND the VRF carries a bridge facet: a new
 // binding with import RTs replays, an import RT added replays, an unrelated
@@ -1416,5 +1416,57 @@ func TestVrfBgpBind_FiresEvpnReplayOnImportSurface(t *testing.T) {
 	bind(t, s, evpnImport)
 	if *replays != 0 {
 		t.Errorf("bind without a facet: replays = %d, want 0", *replays)
+	}
+}
+
+// fakeCplane counts ReconcileAdvertised calls; the rest of CplaneManager is
+// inert. It stands in for the plugin manager so the binding-to-plugin
+// re-derivation wiring can be asserted.
+type fakeCplane struct{ reconciles int }
+
+func (f *fakeCplane) Register(context.Context, cplane.Registration) error { return nil }
+func (f *fakeCplane) Unregister(context.Context, string) error            { return nil }
+func (f *fakeCplane) List() []string                                      { return nil }
+func (f *fakeCplane) Stats() []cplane.PluginStats                         { return nil }
+func (f *fakeCplane) StatsFor(string) (cplane.PluginStats, bool)          { return cplane.PluginStats{}, false }
+func (f *fakeCplane) Unrestored() []cplane.UnrestoredPlugin               { return nil }
+func (f *fakeCplane) Forget(string) error                                 { return nil }
+func (f *fakeCplane) ReconcileAdvertised(context.Context)                 { f.reconciles++ }
+func (f *fakeCplane) EndtVRFGrantLease() *sync.Mutex                      { return nil }
+
+// A binding edit and an unbind both re-derive plugin advertisements, since a
+// plugin route takes its RD, RTs and cap from the binding. Without this wiring
+// the wire would keep carrying stale values until a plugin next redeclared.
+func TestVrfBgpBindAndUnbindReconcilePluginAdvertisements(t *testing.T) {
+	cp := &fakeCplane{}
+	s := NewVrfBgpServer(vrfbgp.NewManager(), &fakeVrfExporter{}, nil, nil, nil, nil)
+	s.SetCplaneManager(cp)
+
+	if _, err := s.VrfBgpBind(context.Background(), connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{
+			{VrfName: "vrf1", Rd: "65100:200", ExportRts: []string{"65000:200"}, DefaultLocator: "LOC1", Redistribute: []string{"static"}},
+		},
+	})); err != nil {
+		t.Fatalf("VrfBgpBind: %v", err)
+	}
+	if cp.reconciles < 1 {
+		t.Fatalf("a binding edit did not reconcile plugin advertisements (reconciles=%d)", cp.reconciles)
+	}
+
+	afterBind := cp.reconciles
+	if _, err := s.VrfBgpUnbind(context.Background(), connect.NewRequest(&v1.VrfBgpUnbindRequest{VrfNames: []string{"vrf1"}})); err != nil {
+		t.Fatalf("VrfBgpUnbind: %v", err)
+	}
+	if cp.reconciles != afterBind+1 {
+		t.Fatalf("an unbind batch reconciled %d times, want exactly one more than after bind (%d)", cp.reconciles-afterBind, afterBind)
+	}
+
+	// An unbind that removed nothing does not reconcile.
+	afterUnbind := cp.reconciles
+	if _, err := s.VrfBgpUnbind(context.Background(), connect.NewRequest(&v1.VrfBgpUnbindRequest{VrfNames: []string{"nonexistent"}})); err != nil {
+		t.Fatalf("VrfBgpUnbind(nonexistent): %v", err)
+	}
+	if cp.reconciles != afterUnbind {
+		t.Errorf("an unbind that removed nothing still reconciled (%d -> %d)", afterUnbind, cp.reconciles)
 	}
 }

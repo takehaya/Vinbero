@@ -14,20 +14,20 @@ import (
 // fakeFdbMapOps records FDB writes without a live BPF map (the MAC string of
 // each create/delete).
 type fakeFdbMapOps struct {
-	created   []string           // mac.String() of each CreateFdb
-	deleted   []string           // mac.String() of each DeleteFdb
-	createErr error              // when set, CreateFdb fails (dataplane sync failure)
+	created   []string           // mac.String() of each LearnFdb
+	deleted   []string           // mac.String() of each DeleteLearnedFdb
+	createErr error              // when set, LearnFdb fails (dataplane sync failure)
 	aged      []bpf.AgedFdbEntry // returned by AgeFdbEntries (the entries it removed)
 }
 
-func (f *fakeFdbMapOps) CreateFdb(bdID uint16, mac net.HardwareAddr, _ *bpf.FdbEntry) error {
+func (f *fakeFdbMapOps) LearnFdb(bdID uint16, mac net.HardwareAddr, _ uint32) (bool, error) {
 	if f.createErr != nil {
-		return f.createErr
+		return false, f.createErr
 	}
 	f.created = append(f.created, mac.String())
-	return nil
+	return true, nil
 }
-func (f *fakeFdbMapOps) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
+func (f *fakeFdbMapOps) DeleteLearnedFdb(bdID uint16, mac net.HardwareAddr, _ uint32) error {
 	f.deleted = append(f.deleted, mac.String())
 	return nil
 }
@@ -239,3 +239,96 @@ func TestAgeAndWithdrawWithdrawsLocalNotRemote(t *testing.T) {
 		t.Errorf("withdraw event = %+v, want bd 100 delete of %s", ev, local)
 	}
 }
+
+// A sink added with AddMACSink receives events alongside the primary sink, and
+// stops receiving them once its remove func runs.
+func TestAddMACSinkFansOutAndRemoves(t *testing.T) {
+	primary := &fakeMACSink{}
+	w, _ := newSinkTestWatcher(primary)
+	extra := &fakeMACSink{}
+	remove := w.AddMACSink(extra)
+
+	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02}
+	add := netlink.NeighUpdate{
+		Type:  unix.RTM_NEWNEIGH,
+		Neigh: netlink.Neigh{Family: unix.AF_BRIDGE, MasterIndex: 10, LinkIndex: 3, HardwareAddr: mac},
+	}
+	w.handleNeighUpdate(add)
+	if len(primary.events) != 1 || len(extra.events) != 1 {
+		t.Fatalf("fan-out incomplete: primary=%d extra=%d, want 1 each", len(primary.events), len(extra.events))
+	}
+
+	remove()
+	remove() // idempotent
+	w.handleNeighUpdate(add)
+	if len(primary.events) != 2 {
+		t.Errorf("primary sink stopped receiving after the extra was removed: got %d, want 2", len(primary.events))
+	}
+	if len(extra.events) != 1 {
+		t.Errorf("removed sink still received events: got %d, want 1", len(extra.events))
+	}
+}
+
+// SetMACSink replaces the primary sink rather than stacking another consumer,
+// and clearing it with nil leaves an AddMACSink consumer in place.
+func TestSetMACSinkReplacesPrimaryOnly(t *testing.T) {
+	first := &fakeMACSink{}
+	w, _ := newSinkTestWatcher(first)
+	extra := &fakeMACSink{}
+	w.AddMACSink(extra)
+
+	second := &fakeMACSink{}
+	w.SetMACSink(second)
+
+	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x03}
+	add := netlink.NeighUpdate{
+		Type:  unix.RTM_NEWNEIGH,
+		Neigh: netlink.Neigh{Family: unix.AF_BRIDGE, MasterIndex: 10, LinkIndex: 3, HardwareAddr: mac},
+	}
+	w.handleNeighUpdate(add)
+	if len(first.events) != 0 {
+		t.Errorf("replaced primary sink still received events: got %d, want 0", len(first.events))
+	}
+	if len(second.events) != 1 || len(extra.events) != 1 {
+		t.Fatalf("after replace: second=%d extra=%d, want 1 each", len(second.events), len(extra.events))
+	}
+
+	w.SetMACSink(nil)
+	w.handleNeighUpdate(add)
+	if len(second.events) != 1 {
+		t.Errorf("cleared primary sink still received events: got %d, want 1", len(second.events))
+	}
+	if len(extra.events) != 2 {
+		t.Errorf("AddMACSink consumer dropped by SetMACSink(nil): got %d, want 2", len(extra.events))
+	}
+}
+
+// Each sink gets its own copy of the MAC, so one consumer mutating it cannot
+// corrupt what the next sees.
+func TestMACSinksGetIndependentCopies(t *testing.T) {
+	w, _ := newSinkTestWatcher(nil)
+	var firstSeen, secondSeen string
+	w.AddMACSink(macSinkFunc(func(_ uint16, mac net.HardwareAddr, _ bool) {
+		firstSeen = mac.String()
+		for i := range mac {
+			mac[i] = 0xff // a badly behaved consumer
+		}
+	}))
+	w.AddMACSink(macSinkFunc(func(_ uint16, mac net.HardwareAddr, _ bool) {
+		secondSeen = mac.String()
+	}))
+
+	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x04}
+	w.handleNeighUpdate(netlink.NeighUpdate{
+		Type:  unix.RTM_NEWNEIGH,
+		Neigh: netlink.Neigh{Family: unix.AF_BRIDGE, MasterIndex: 10, LinkIndex: 3, HardwareAddr: mac},
+	})
+	if firstSeen != mac.String() || secondSeen != mac.String() {
+		t.Fatalf("sinks saw %q and %q, want %q for both", firstSeen, secondSeen, mac)
+	}
+}
+
+// macSinkFunc adapts a func to the MACSink interface.
+type macSinkFunc func(bdID uint16, mac net.HardwareAddr, added bool)
+
+func (f macSinkFunc) OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool) { f(bdID, mac, added) }

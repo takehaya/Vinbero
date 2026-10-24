@@ -24,8 +24,11 @@ import (
 
 // Server represents the Connect RPC server
 type Server struct {
-	cfg          *config.Config
-	mapOps       *bpf.MapOperations
+	cfg    *config.Config
+	mapOps *bpf.MapOperations
+	// cplaneMgr runs the control-plane (WebAssembly) plugins. Nil when
+	// they are not enabled, in which case those RPCs report Unimplemented.
+	cplaneMgr    CplaneManager
 	resMgr       *netresource.ResourceManager
 	fdbWatcher   *netlinkwatch.FDBWatcher
 	locatorMgr   *locator.Manager
@@ -104,6 +107,14 @@ func (s *Server) SetProber(source ProberStatusSource, intervalMs, multiplier uin
 	s.proberMultiplier = multiplier
 }
 
+// SetCplaneManager installs the control-plane plugin manager. Like
+// SetProber, it is an optional dependency injected after construction and
+// before Setup: a daemon without BGP has no event source to give a plugin,
+// so the manager is only built where it can actually work.
+func (s *Server) SetCplaneManager(m CplaneManager) {
+	s.cplaneMgr = m
+}
+
 // Setup registers all service handlers
 func (s *Server) Setup() {
 	// Plugin service is constructed first so SidFunctionServer can resolve
@@ -126,12 +137,16 @@ func (s *Server) Setup() {
 		zap.String("mode", roEnforce.String()),
 	)
 	pluginServer := NewPluginServer(s.mapOps, s.cfg.BpfConstants(), roEnforce, s.logger)
+	// Installed before the handler is mounted so the RPCs never see a
+	// half-built server.
+	pluginServer.SetCplaneManager(s.cplaneMgr)
 
 	// VrfBgp service (VRF <-> BGP route-target bindings).
 	// One mutation mutex shared by VrfBgpService and VrfService: their
 	// facet<->binding cross-checks are check-then-act across two managers.
 	vrfMu := &sync.Mutex{}
 	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc, s.evpnReplay, vrfMu)
+	vrfBgpServer.SetCplaneManager(s.cplaneMgr)
 	vrfBgpPath, vrfBgpHandler := vinberov1connect.NewVrfBgpServiceHandler(vrfBgpServer)
 	s.mux.Handle(vrfBgpPath, vrfBgpHandler)
 	s.logger.Info("Registered VrfBgpService", zap.String("path", vrfBgpPath))
@@ -237,7 +252,17 @@ func (s *Server) Setup() {
 	// the ingress maps from mapOps, the binding lookups from the vrf-bgp
 	// manager, and the bridge attach lifecycle drives the FDB watcher and (when
 	// auto-advertise is on) the EVPN coordinator.
-	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, s.evpnReplay, vrfMu)
+	// The grant lease is the cplane manager's: VrfDelete and a plugin's decap-
+	// grant install take the same lock so a grant can never outlive its VRF.
+	// Nil when control-plane plugins are disabled: pinned grants from an
+	// earlier run can still exist then, but no install can race the delete,
+	// and the grant-reference check (which runs regardless of the lease) still
+	// refuses a delete while one is live.
+	var grantLease *sync.Mutex
+	if s.cplaneMgr != nil {
+		grantLease = s.cplaneMgr.EndtVRFGrantLease()
+	}
+	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, s.evpnReplay, vrfMu, grantLease)
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))

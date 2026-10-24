@@ -1,0 +1,70 @@
+# Configuration for the BGP arm of RQ1.
+#
+# The node under test receives a VPNv4 route from the churn source and turns it
+# into the same headend entry the earlier arms wrote directly. What differs is
+# only how the route arrives, which is the point: the reflection path now starts
+# at a BGP UPDATE rather than at an API call.
+#
+# The XDP data plane is attached to all three links for the same reason as the
+# other arms: a redirect into a veth is only delivered when that side runs XDP
+# too, so the egress links need the program as well as the ingress one.
+internal:
+  devices:
+    - '@PREFIX@rtsrc'
+    - '@PREFIX@rtpea'
+    - '@PREFIX@rtpeb'
+  bpf:
+    device_mode: "generic"
+    verifier_log_level: 0
+  server:
+    bind: "127.0.0.1:18081"
+  logger:
+    level: warn
+    format: text
+    no_color: true
+    add_caller: false
+
+settings:
+  state_path: '@STATE_PATH@'
+  cplane_plugins:
+    enabled: false
+  pin_maps:
+    enabled: false
+  enable_stats: false
+  entries:
+    sid_function:
+      capacity: 1024
+    headendv4:
+      capacity: 1024
+    headendv6:
+      capacity: 1024
+    headend_l2:
+      capacity: 1024
+    fdb:
+      capacity: 8192
+    bd_peer:
+      capacity: 1024
+    sr_policy:
+      capacity: 1024
+    service_ingress:
+      capacity: 1024
+
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    # Bind the listener: the churn source dials in rather than the other way
+    # round, so only one side needs to initiate and there is no connection
+    # collision to flap the session.
+    listen_port: 179
+    # The applier resolves the encapsulation source from this locator, and
+    # refuses to materialise a headend entry without it.
+    source_locator: "LOC1"
+  peers:
+    - neighbor: "fd00:12::2"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      passive: true
+      families:
+        - vpnv4

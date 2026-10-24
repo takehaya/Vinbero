@@ -30,6 +30,33 @@ struct {
     __uint(max_entries, 512);
 } sid_aux_map SEC(".maps");
 
+// plugin_endt_vrf: the decap VRF a plugin's SID is granted, for when a plugin
+// tail-calls a built-in End.DT4/DT6/DT46. The built-in cannot read the
+// plugin's aux -- the aux discriminator nulls it, because the plugin's
+// plugin_raw bytes read as l3vrf.vrf_ifindex would let the plugin decap into
+// any VRF -- so the trusted VRF lives here instead. It is written only by the
+// control plane from the plugin's VRF scope, and BPF_F_RDONLY_PROG so no BPF
+// program (the plugin's included) can forge it; a syscall write from the
+// control plane still succeeds.
+//
+// Keyed by the SID's aux_index (sid_function_entry.aux_index), which the
+// built-in reads straight out of tailcall_ctx in both the SRH and the reduced-
+// encap paths -- no need to re-parse the outer header the reduced-encap path
+// has already stripped. The control plane allocates a non-zero aux index for
+// every plugin SID that declares a decap VRF, so index 0 (the "no aux"
+// sentinel) always means "no grant".
+struct plugin_endt_vrf {
+    __u32 vrf_ifindex;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, struct plugin_endt_vrf);
+    __uint(max_entries, 1024);
+    __uint(map_flags, BPF_F_RDONLY_PROG | BPF_F_NO_PREALLOC);
+} plugin_endt_vrf_map SEC(".maps");
+
 // aux_owner_map: per-idx owner tag for sid_aux_map. ARRAY map paired with
 // sid_aux_map (same key=u32 idx, same max_entries) so the userspace
 // allocator can persist owner identity across daemon restart. Key 0 is
@@ -201,9 +228,9 @@ struct {
 // userspace can read/write the owner alongside each entry. HASH (not
 // LPM_TRIE) because we look up exact entries, not longest-prefix matches.
 // Value matches struct aux_owner -- a 64-byte null-terminated tag like
-// "rpc:v1" or "bgp:v1:asn=65000:rd=65000:100". BPF programs never read
-// these maps; they exist only for userspace conflict detection and
-// owner-scoped flush.
+// "rpc:v1" or "bgp:v1:asn=65000:rd=65000:100". Userspace uses these
+// for conflict detection and owner-scoped flush. RX learning also reads
+// bd_peer_owner_map to avoid dynamic references to plugin-controlled peers.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, struct lpm_key_v6);
@@ -234,6 +261,34 @@ struct {
     __type(value, struct aux_owner);
     __uint(max_entries, 4096);
 } ecmp_group_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct mup_uplink_v4_key);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 4096);
+} mup_uplink_v4_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct mup_uplink_v6_key);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 4096);
+} mup_uplink_v6_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct fdb_key);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 8192);
+} fdb_owner_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct bd_peer_key);
+    __type(value, struct aux_owner);
+    __uint(max_entries, 1024);
+} bd_peer_owner_map SEC(".maps");
 
 // End.B6 policy: stored in sid_aux_map (b6_policy variant), no separate map needed.
 
@@ -295,6 +350,16 @@ struct {
     __type(value, struct esi_entry);
     __uint(max_entries, 256);
 } esi_map SEC(".maps");
+
+// Host-managed RT4 ES membership: {ESI, exact outer IPv6 source} -> present.
+// Unpinned like esi_map; rebuilt from RT4 replay, not from RT2 FDB state.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct esi_peer_key);
+    __type(value, __u8);
+    __uint(max_entries, 8192); // 256 ESIs * 32 RT4 members
+    __uint(map_flags, BPF_F_RDONLY_PROG);
+} esi_peer_map SEC(".maps");
 
 // Peer ESI side table: (bd_id, index) → ESI. Paired with bd_peer_map.
 struct {

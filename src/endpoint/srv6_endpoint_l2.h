@@ -5,6 +5,7 @@
 #include "core/xdp_map.h"
 #include "core/xdp_stats.h"
 #include "core/esi.h"
+#include "core/fdb.h"
 
 // ========================================================================
 // L2 Bridge Domain Endpoint Functions (End.DT2)
@@ -43,6 +44,15 @@ static __always_inline void fdb_learn_remote_mac(
     __u16 bd_id,
     __u16 peer_idx)
 {
+    // Plugin peers use controlled FDB entries only. Dynamic references would
+    // survive owner cleanup and could point at a subsequently reused slot.
+    struct bd_peer_key peer_key = { .bd_id = bd_id, .index = peer_idx };
+    struct aux_owner *peer_owner = bpf_map_lookup_elem(&bd_peer_owner_map, &peer_key);
+    if (peer_owner && peer_owner->tag[0] == 'p' && peer_owner->tag[1] == 'l' &&
+        peer_owner->tag[2] == 'u' && peer_owner->tag[3] == 'g' &&
+        peer_owner->tag[4] == 'i' && peer_owner->tag[5] == 'n' && peer_owner->tag[6] == ':')
+        return;
+
     // Only learn unicast source MACs (bit 0 of first octet = multicast flag)
     if (inner_eth->h_source[0] & 0x01)
         return;
@@ -50,14 +60,7 @@ static __always_inline void fdb_learn_remote_mac(
     struct fdb_key learn_key = { .bd_id = bd_id };
     __builtin_memcpy(learn_key.mac, inner_eth->h_source, ETH_ALEN);
 
-    // Check if existing entry already matches — avoid redundant map write
     struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &learn_key);
-    if (existing && existing->is_remote && existing->peer_index == peer_idx) {
-        // Refresh timestamp for existing dynamic entry
-        if (!existing->is_static)
-            existing->last_seen = bpf_ktime_get_ns();
-        return;
-    }
     // An entry pointing above the flood range is the control plane's EVPN
     // aliasing pointer (synthetic ES peer). The frame's sender is one member
     // PE of that segment; rewriting the entry to the sender's own peer would
@@ -66,16 +69,26 @@ static __always_inline void fdb_learn_remote_mac(
     // writes it as 0 (never aged), and stamping a timestamp here would turn
     // the entry dynamic and let aging remove it behind the BGP ledger's
     // back, where an unchanged RT2 re-apply would never re-install it.
-    if (existing && existing->is_remote && existing->peer_index >= MAX_BUM_NEXTHOPS)
-        return;
-
-    struct fdb_entry learn_val = {
-        .is_remote = 1,
-        .peer_index = peer_idx,
-        .bd_id = bd_id,
-        .last_seen = bpf_ktime_get_ns(),
-    };
-    bpf_map_update_elem(&fdb_map, &learn_key, &learn_val, BPF_ANY);
+    if (existing) {
+        union fdb_forward old = fdb_read_forward(existing);
+        if (old.is_static || (old.is_remote && old.peer_index >= MAX_BUM_NEXTHOPS))
+            return;
+        if (!old.is_remote || old.peer_index != peer_idx) {
+            union fdb_forward next = { .is_remote = 1, .peer_index = peer_idx };
+            if (!fdb_replace_forward(existing, old, next))
+                return;
+        }
+        // Aging metadata is best effort and is not part of the identity CAS.
+        existing->last_seen = bpf_ktime_get_ns();
+    } else {
+        struct fdb_entry learn_val = {
+            .is_remote = 1,
+            .peer_index = peer_idx,
+            .bd_id = bd_id,
+            .last_seen = bpf_ktime_get_ns(),
+        };
+        bpf_map_update_elem(&fdb_map, &learn_key, &learn_val, BPF_NOEXIST);
+    }
     DEBUG_PRINT("FDB: learned remote MAC, bd_id=%d peer_index=%d\n", bd_id, peer_idx);
 }
 
@@ -106,10 +119,11 @@ static __always_inline int fdb_forward_l2(
         return XDP_PASS;
     }
 
-    if (!fdb->is_remote) {
+    union fdb_forward dst = fdb_read_forward(fdb);
+    if (!dst.is_remote) {
         // Local FDB hit: fast-path redirect
-        DEBUG_PRINT("FDB: hit local, redirect to ifindex %d\n", fdb->oif);
-        return bpf_redirect(fdb->oif, 0);
+        DEBUG_PRINT("FDB: hit local, redirect to ifindex %d\n", dst.oif);
+        return bpf_redirect(dst.oif, 0);
     }
 
     // Remote FDB hit on receiving PE — routing loop or stale entry
@@ -233,6 +247,21 @@ static __always_inline bool dt2m_rx_split_horizon(__u16 bd_id, struct in6_addr *
 {
     if (bd_id == 0)
         return false;
+
+    // RT2 withdrawal may remove the forwarding peer's reverse ESI while
+    // RT4 still says the sender shares this BD's locally attached ES.
+    __u32 bd_id32 = bd_id;
+    struct bd_local_esi_val *lv = bpf_map_lookup_elem(&bd_local_esi_map, &bd_id32);
+    if (lv && !esi_is_zero(lv->esi) && esi_is_local_attached(lv->esi)) {
+        struct esi_peer_key peer = {};
+        __builtin_memcpy(peer.esi, lv->esi, ESI_LEN);
+        __builtin_memcpy(peer.src_addr, outer_src, IPV6_ADDR_LEN);
+        __u8 *present = bpf_map_lookup_elem(&esi_peer_map, &peer);
+        if (present && *present)
+            return true;
+    }
+
+    // Keep manually configured forwarding peers' existing split-horizon.
     struct bd_peer_reverse_key rk = { .bd_id = bd_id };
     __builtin_memcpy(rk.src_addr, outer_src, sizeof(struct in6_addr));
     struct bd_peer_reverse_val *rv = bpf_map_lookup_elem(&bd_peer_reverse_map, &rk);
