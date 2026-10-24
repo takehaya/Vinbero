@@ -127,9 +127,9 @@ func (s *Session) withdrawAs(_ context.Context, key bgp.RouteKey, producer strin
 		return err
 	}
 	s.advMu.Lock()
+	defer s.advMu.Unlock()
 	id, ok := s.advertised[key]
 	holder := s.producers[key]
-	s.advMu.Unlock()
 	if !ok {
 		return nil
 	}
@@ -146,10 +146,8 @@ func (s *Session) withdrawAs(_ context.Context, key bgp.RouteKey, producer strin
 	if err := srv.DeletePath(apiutil.DeletePathRequest{UUIDs: []uuid.UUID{id}}); err != nil {
 		return fmt.Errorf("withdraw %s: %w", key.Prefix, err)
 	}
-	s.advMu.Lock()
 	delete(s.advertised, key)
 	delete(s.producers, key)
-	s.advMu.Unlock()
 	return nil
 }
 
@@ -178,15 +176,13 @@ func (s *Session) addAndTrackAs(srv *gobgpsrv.BgpServer, path *apiutil.Path, key
 		return err
 	}
 
-	// The key is claimed under the lock, before AddPath, and given back if
-	// AddPath fails. Checking and then claiming afterwards would let two
-	// producers advertising the same new NLRI both pass the check and the
-	// second overwrite the first, which is the outcome this exists to
-	// prevent.
+	// Keep the RIB operation and its ownership/UUID commit in one order.
+	// Otherwise a completed withdrawal can erase a newer advertisement's
+	// tracking entry, or concurrent advertisements can commit stale UUIDs.
 	s.advMu.Lock()
+	defer s.advMu.Unlock()
 	holder, taken := s.producers[key]
 	if taken && holder != producer {
-		s.advMu.Unlock()
 		// Refused rather than superseded. There is one local path per
 		// NLRI, so taking it over discards the first producer's UUID: the
 		// second producer's withdraw then removes the route outright,
@@ -198,17 +194,14 @@ func (s *Session) addAndTrackAs(srv *gobgpsrv.BgpServer, path *apiutil.Path, key
 			key.Prefix, producerName(holder), producerName(producer))
 	}
 	s.producers[key] = producer
-	s.advMu.Unlock()
 
 	resps, err := srv.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{path}})
 	// The claim is released on every failure path, or a route that was
 	// never advertised would keep the key from anyone else forever.
 	release := func() {
-		s.advMu.Lock()
 		if _, live := s.advertised[key]; !live && !taken {
 			delete(s.producers, key)
 		}
-		s.advMu.Unlock()
 	}
 	if err != nil {
 		release()
@@ -222,9 +215,7 @@ func (s *Session) addAndTrackAs(srv *gobgpsrv.BgpServer, path *apiutil.Path, key
 		release()
 		return fmt.Errorf("advertise %s: %w", key.Prefix, resps[0].Error)
 	}
-	s.advMu.Lock()
 	s.advertised[key] = resps[0].UUID
-	s.advMu.Unlock()
 	return nil
 }
 
