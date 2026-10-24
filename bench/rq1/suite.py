@@ -136,11 +136,7 @@ class ChildRunner:
 
     def interrupt(self, signum, _frame):
         self.cancelled = 128 + signum
-        if self.child is not None:
-            try:
-                self.child.send_signal(signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        # The wait loop sends TERM once, then allows the driver's cleanup grace.
 
     def run(self, command, log, env, timeout):
         if self.cancelled:
@@ -154,6 +150,8 @@ class ChildRunner:
                 signal.pthread_sigmask(signal.SIG_SETMASK, prior)
 
             try:
+                if self.cancelled:
+                    return self.cancelled
                 self.child = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT,
                                               env=env, start_new_session=True,
                                               # The child must not inherit the temporary mask.

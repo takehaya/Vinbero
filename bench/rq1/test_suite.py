@@ -139,6 +139,53 @@ class RunnerTests(unittest.TestCase):
                 self.assertTrue((root / 'cleaned').exists())
                 self.assertIsNone(runner.child)
 
+    def test_cancellation_sends_term_once_and_waits_for_slow_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / 'child.py'
+            script.write_text('import os,signal,time,threading\nfrom pathlib import Path\n'
+                              'def stop(*args):\n'
+                              '    signal.signal(signal.SIGTERM, signal.SIG_DFL)\n'
+                              '    time.sleep(0.6)\n'
+                              f'    Path({str(root / "cleaned")!r}).write_text("yes")\n'
+                              '    raise SystemExit(0)\n'
+                              'def cancel():\n'
+                              '    os.kill(os.getppid(), signal.SIGINT)\n'
+                              '    time.sleep(0.05)\n'
+                              '    os.kill(os.getppid(), signal.SIGTERM)\n'
+                              'signal.signal(signal.SIGTERM, stop)\n'
+                              'threading.Thread(target=cancel).start()\n'
+                              'time.sleep(10)\n')
+            runner = suite.ChildRunner()
+            prior = {sig: signal.signal(sig, runner.interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+            try:
+                code = runner.run([sys.executable, str(script)], root / 'log', os.environ, 3)
+            finally:
+                for sig, handler in prior.items():
+                    signal.signal(sig, handler)
+            self.assertEqual(code, 143)
+            self.assertTrue((root / 'cleaned').exists())
+            self.assertIsNone(runner.child)
+            with patch.object(subprocess, 'Popen') as child:
+                self.assertEqual(runner.run(['not-launched'], root / 'next', {}, 1), 143)
+                child.assert_not_called()
+
+    def test_cancellation_between_initial_check_and_mask_prevents_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = suite.ChildRunner()
+            mask = signal.pthread_sigmask
+
+            def interrupt_before_mask(how, signals):
+                if how == signal.SIG_BLOCK:
+                    runner.interrupt(signal.SIGINT, None)
+                return mask(how, signals)
+
+            with patch.object(signal, 'pthread_sigmask', side_effect=interrupt_before_mask), \
+                    patch.object(subprocess, 'Popen') as child:
+                self.assertEqual(runner.run(['not-launched'], Path(directory) / 'log', {}, 1), 130)
+                child.assert_not_called()
+            self.assertIsNone(runner.child)
+
     def test_already_cancelled_does_not_launch(self):
         runner = suite.ChildRunner()
         runner.interrupt(signal.SIGINT, None)
