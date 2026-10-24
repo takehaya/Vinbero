@@ -29,14 +29,15 @@ func (m *Manager) unregisterUnrestored(name string) error {
 	if err := m.store.Remove(name); err != nil {
 		return err
 	}
-	if m.claims != nil {
-		m.claims.Release(name)
-	}
 	if ds, ok := m.source.(delegationSource); ok {
 		ds.SetDelegation(name, nil)
 		if r, ok := m.source.(BuiltinClaimRefresher); ok {
 			r.RefreshBuiltinClaims()
 		}
+	}
+	// Refresh while private behaviors are still claimed, as for running plugins.
+	if m.claims != nil {
+		m.claims.Release(name)
 	}
 	m.clearUnrestored(name)
 	return nil
