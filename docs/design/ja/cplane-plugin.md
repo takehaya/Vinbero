@@ -1083,11 +1083,13 @@ daemon と同じ runtime を回し、capability 面だけ記録用に差し替�
 replay、restart、commit 拒否といった本番で耐える必要のある流れを method
 として提供します。
 
-標準 Go の WASI reactor を既定にします。Go 1.24 以降が対応し、この repository は
-Go 1.25.5 を使います。example は `make cplane-example` で build できます。
+標準 Go の WASI reactor を既定にします。Go 1.24 以降が対応し、コミットする example は
+`make cplane-example` で build できます。この target は `go.mod` の Go version
+（現在は 1.25.5）を `GOTOOLCHAIN` で指定し、CI と成果物を揃えます。
+mise の Go 1.27.3 は通常の daemon build や test に使います。
 
 ```sh
-GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+GOTOOLCHAIN=go1.25.5 GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
     -buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 ```
 
@@ -1101,7 +1103,7 @@ host から呼ばれている間だけ動き、定期処理には tick を使い
 50,000 回の advertise / withdraw を実行し、GC による回収を確認します。保持する経路が
 増える plugin は必要な memory 上限を明示して登録します。
 
-小さい artifact が必要な場合は `make cplane-example-tinygo` で TinyGo 0.39.0 版の
+小さい artifact が必要な場合は `make cplane-example-tinygo` で TinyGo 0.43.0 版の
 `plugin.tinygo.wasm` を作れます。既定の Go artifact は置き換えません。
 `wasm-unknown` target には `-gc=conservative` を指定し、回収しない既定の collector を
 避けます。詳細な flag と callback の契約は [SDK README](../../../sdk/go/cplane/README.md)

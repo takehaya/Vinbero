@@ -1,5 +1,7 @@
 # cf. based https://gist.github.com/thomaspoignant/5b72d579bd5f311904d973652180c705
 GOCMD=go
+# Match CI when regenerating the committed standard-Go WASM artifact.
+CPLANE_ARTIFACT_GO := $(shell awk '$$1 == "go" {print $$2; exit}' go.mod)
 GOTEST=$(GOCMD) test
 GOVET=$(GOCMD) vet
 # Production BPF uses the compiler validated by the packet-path tests.
@@ -259,7 +261,7 @@ bench-rq1-bgp: ## Measure BGP convergence; MODE=builtin|cplane|relay, TRIALS=n, 
 # Strip source paths and VCS metadata so CI reproduces the committed artifact.
 cplane-example: ## build the control-plane plugin example with standard Go
 	cd sdk/examples/cplane-custom-behavior && \
-		GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+		GOTOOLCHAIN=go$(CPLANE_ARTIFACT_GO) GOOS=wasip1 GOARCH=wasm $(GOCMD) build -buildmode=c-shared -trimpath \
 			-buildvcs=false -ldflags="-s -w" -o plugin.wasm .
 
 # Optional smaller artifact; keep the default Go artifact intact.

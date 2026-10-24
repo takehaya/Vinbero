@@ -195,7 +195,7 @@ func (a *Applier) Apply(ev bgp.RouteEvent) {
 	case ev.Unicast != nil:
 		a.applyUnicast(ev.Unicast, ev.IsWithdraw)
 	case ev.EVPN != nil:
-		a.applyEVPN(ev.EVPN, ev.IsWithdraw)
+		a.applyEVPN(ev)
 	case ev.MUP != nil:
 		a.applyMUP(ev.Family, ev.MUP, ev.IsWithdraw)
 	}

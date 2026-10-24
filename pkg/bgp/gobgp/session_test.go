@@ -2,6 +2,7 @@ package gobgp
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	gobgpapi "github.com/osrg/gobgp/v4/api"
@@ -47,6 +48,33 @@ func TestSession_DoubleStartRejected(t *testing.T) {
 	err := s.Start(context.Background(), bgp.GlobalConfig{LocalASN: 65000, RouterID: "10.255.0.2", ListenPort: -1})
 	if err == nil {
 		t.Errorf("second Start should fail")
+	}
+}
+
+func TestSession_ConcurrentStop(t *testing.T) {
+	s := newTestSession(t)
+	startTestSession(t, s)
+	const callers = 16
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			errs <- s.Stop(context.Background())
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range callers {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent Stop: %v", err)
+		}
+	}
+	if _, err := s.Peers(context.Background()); err != bgp.ErrSessionNotStarted {
+		t.Errorf("Peers after Stop = %v, want ErrSessionNotStarted", err)
 	}
 }
 

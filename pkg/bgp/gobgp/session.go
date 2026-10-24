@@ -42,6 +42,8 @@ type Session struct {
 
 	srvMu  sync.RWMutex
 	server *gobgpsrv.BgpServer
+	// serveDone closes after Serve has published all of its shutdown state.
+	serveDone <-chan struct{}
 
 	advMu      sync.Mutex
 	advertised map[bgp.RouteKey]uuid.UUID
@@ -92,6 +94,8 @@ func NewSession(logger *zap.Logger) *Session {
 // for the configured global identity. Calling Start on an already-
 // started Session is an error so a double-wire bug surfaces loudly.
 func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
+	s.srvMu.Lock()
+	defer s.srvMu.Unlock()
 	if s.server != nil {
 		return bgp.ErrSessionAlreadyStarted
 	}
@@ -104,7 +108,11 @@ func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
 	srv := gobgpsrv.NewBgpServer(gobgpsrv.LoggerOption(gobgpLogger, gobgpLevel))
 	// Serve() is the blocking API event loop; it must run in its own
 	// goroutine for the duration of the session.
-	go srv.Serve()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		srv.Serve()
+	}()
 	req := &gobgpapi.StartBgpRequest{
 		Global: &gobgpapi.Global{
 			Asn:        cfg.LocalASN,
@@ -116,9 +124,8 @@ func (s *Session) Start(ctx context.Context, cfg bgp.GlobalConfig) error {
 		srv.Stop()
 		return fmt.Errorf("start bgp (asn=%d router_id=%s): %w", cfg.LocalASN, cfg.RouterID, err)
 	}
-	s.srvMu.Lock()
 	s.server = srv
-	s.srvMu.Unlock()
+	s.serveDone = serveDone
 	s.logger.Info("BGP session started",
 		zap.Uint32("local_asn", cfg.LocalASN),
 		zap.String("router_id", cfg.RouterID),
@@ -141,24 +148,27 @@ const stopTimeout = 10 * time.Second
 // Stop tears the session down. It is safe to call on a Session that was never
 // started (no-op) so callers can defer it unconditionally, and it always clears
 // the handle so the Session does not wedge. The graceful gobgp teardown is
-// bounded by stopTimeout (and by ctx): if gobgp does not return in time, Stop
-// abandons it and returns an error for the caller to log rather than blocking.
+// bounded by stopTimeout (and by ctx) after acquiring the session handle:
+// if gobgp does not return in time, Stop abandons it and returns an error.
 func (s *Session) Stop(ctx context.Context) error {
-	if s.server == nil {
-		return nil
-	}
 	s.srvMu.Lock()
 	srv := s.server
+	serveDone := s.serveDone
 	s.server = nil
+	s.serveDone = nil
 	s.srvMu.Unlock()
+	if srv == nil {
+		return nil
+	}
 
 	// Run the graceful stop off the caller's goroutine so a wedged gobgp
-	// management loop cannot hang us. StopBgp cancels the Serve context; the
-	// subsequent Stop() is gobgp's hard stop (its internal StopBgp then returns
-	// immediately with "not running").
+	// management loop cannot hang us. StopBgp may return before Serve clears
+	// isServing; wait for Serve itself before Stop calls StopBgp again, or
+	// that call can enqueue into a management channel with no reader.
 	done := make(chan error, 1)
 	go func() {
 		err := srv.StopBgp(ctx, &gobgpapi.StopBgpRequest{})
+		<-serveDone
 		srv.Stop()
 		done <- err
 	}()

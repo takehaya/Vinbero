@@ -17,14 +17,17 @@ import (
 // EVPN RT4 membership is bounded so a peer flooding crafted Ethernet Segment
 // routes cannot grow the in-memory tables without limit.
 const (
-	maxTrackedESIs   = 256 // distinct ESIs whose membership we track
-	maxMembersPerESI = 32  // member PE sources per ESI (DF candidates)
+	maxTrackedESIs   = 256                               // distinct ESIs whose membership we track
+	maxMembersPerESI = 32                                // member PE sources per ESI (DF candidates)
+	maxESPaths       = maxTrackedESIs * maxMembersPerESI // includes duplicate paths/RDs
 )
 
 // fdbBdOps is the subset of bpf.MapOperations the EVPN applier writes:
 // the FDB (MAC -> peer), the per-PE bd_peer encap entry, and the Ethernet
 // Segment (ESI) table that DF election drives.
 type fdbBdOps interface {
+	CreateEsiPeer(esi [bpf.ESILen]byte, source [bpf.IPv6AddrLen]byte) error
+	DeleteEsiPeer(esi [bpf.ESILen]byte, source [bpf.IPv6AddrLen]byte) error
 	ListFdbOwners() (map[bpf.FdbKey]bpf.OwnerTag, error)
 	ListBdPeerOwners() (map[bpf.BdPeerKey]bpf.OwnerTag, error)
 	GetFdbOwner(bdID uint16, mac net.HardwareAddr) (bpf.OwnerTag, bool, error)
@@ -131,9 +134,13 @@ type evpnTable struct {
 	mcast map[evpnMcastKey]evpnMcastState
 	// esMembers maps an ESI to the set of member PE source IPs learned from
 	// RT4 (Ethernet Segment routes), the candidate set for DF election.
-	// Guarded by esMu.
+	// All four membership ledgers are guarded by esMu; esApplied records
+	// only successful writes, retaining failures for a later retry.
 	esMembers map[[bpf.ESILen]byte]map[string]struct{}
 	esMu      sync.Mutex
+	esPaths   map[esPathKey]esPeerKey
+	esRefs    map[esPeerKey]int
+	esApplied map[esPeerKey]struct{}
 	// macsByES indexes the MACs each PE taught us on each Ethernet Segment.
 	// It exists for mass withdraw (RFC 7432 §8.2): when a PE withdraws its
 	// per-ES Ethernet A-D route it is saying the whole segment is gone, and
@@ -172,6 +179,9 @@ func newEVPNTable() *evpnTable {
 		mcast:       make(map[evpnMcastKey]evpnMcastState),
 		macsByES:    make(map[esMemberKey]map[evpnFdbKey]struct{}),
 		esMembers:   make(map[[bpf.ESILen]byte]map[string]struct{}),
+		esPaths:     make(map[esPathKey]esPeerKey),
+		esRefs:      make(map[esPeerKey]int),
+		esApplied:   make(map[esPeerKey]struct{}),
 		esAD:        make(map[esMemberKey]bool),
 		esADByNLRI:  make(map[esNLRIKey]string),
 		eviAD:       make(map[evpnEviADKey]eviADState),
@@ -231,21 +241,22 @@ func isUsableSRv6SID(sid string) bool {
 		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() && !addr.IsMulticast()
 }
 
-func (a *Applier) applyEVPN(r *bgp.EVPNRoute, withdraw bool) {
+func (a *Applier) applyEVPN(ev bgp.RouteEvent) {
 	a.evpnMu.Lock()
 	defer a.evpnMu.Unlock()
-	a.applyEVPNLocked(r, withdraw)
+	a.applyEVPNLocked(ev)
 }
 
 // applyEVPNLocked dispatches one EVPN route. Caller holds evpnMu.
-func (a *Applier) applyEVPNLocked(r *bgp.EVPNRoute, withdraw bool) {
+func (a *Applier) applyEVPNLocked(ev bgp.RouteEvent) {
+	r, withdraw := ev.EVPN, ev.IsWithdraw
 	switch r.Type {
 	case bgp.EVPNRouteTypeMACIP:
 		a.applyEVPNMacIP(r, withdraw)
 	case bgp.EVPNRouteTypeInclusiveMulticast:
 		a.applyEVPNInclusiveMulticast(r, withdraw)
 	case bgp.EVPNRouteTypeEthernetSegment:
-		a.applyEVPNEthernetSegment(r, withdraw)
+		a.applyEVPNEthernetSegment(ev)
 	case bgp.EVPNRouteTypeEthernetAD:
 		a.applyEVPNEthernetAD(r, withdraw)
 	default:
@@ -285,7 +296,9 @@ func (a *Applier) applyEVPNEthernetAD(r *bgp.EVPNRoute, withdraw bool) {
 //
 // The snapshot carries every known path per NLRI (best first), so where two
 // peers advertise the same NLRI with different attributes the last replayed
-// path wins -- the same last-write-wins the live stream has.
+// path wins -- the same last-write-wins the live stream has. RT4 instead
+// retains every NLRI/PathSource reference, so withdrawing one reflected path
+// does not remove another path's RX membership or DF candidacy.
 func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
 	a.evpnMu.Lock()
 	defer a.evpnMu.Unlock()
@@ -296,9 +309,13 @@ func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
 		if ev.Family != bgp.FamilyEVPN || ev.EVPN == nil || ev.IsWithdraw {
 			return
 		}
-		a.applyEVPNLocked(ev.EVPN, false)
+		a.applyEVPNLocked(ev)
 		n++
 	})
+	// An empty replay still retries a failed final membership deletion.
+	a.evpn.esMu.Lock()
+	a.syncESPeers()
+	a.evpn.esMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("replay EVPN rib: %w", err)
 	}
@@ -671,65 +688,6 @@ func (a *Applier) withdrawEVPNMcast(mk evpnMcastKey, st evpnMcastState) bool {
 	return true
 }
 
-// applyEVPNEthernetSegment records (or removes) a remote PE's membership in an
-// Ethernet Segment from an RT4 route, then re-runs DF election for that ESI.
-// RT4 carries no SID; the ESI plus the originating router IP (next hop)
-// identify the attaching PE. Membership is tracked for every ESI, but DF
-// election only writes esi_map for an ESI this PE locally attaches (declared by
-// the operator via `vbctl es create --local-attached`); an RT4 for an
-// unattached ESI is recorded informationally and never creates a local ES, so a
-// crafted RT4 cannot mint a phantom segment.
-func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
-	var zeroESI [bpf.ESILen]byte
-	if r.ESI == zeroESI {
-		a.logger.Warn("EVPN RT4 has all-zero ESI; skipping", zap.String("rd", r.RD))
-		return
-	}
-	pe := r.NextHop
-	if pe == "" {
-		a.logger.Warn("EVPN RT4 has no originating PE (next hop); skipping",
-			zap.String("rd", r.RD))
-		return
-	}
-
-	// Record membership for every ESI, attached or not, so a later local
-	// attach can elect a DF from RT4s that arrived first (ReelectDF).
-	// electDF itself gates on local attachment, so an unattached ESI stays
-	// informational. Membership is bounded (maxTrackedESIs /
-	// maxMembersPerESI) so crafted RT4s cannot grow it without limit.
-	// esMu serializes against ReelectDF on the RPC goroutine.
-	a.evpn.esMu.Lock()
-	defer a.evpn.esMu.Unlock()
-
-	members := a.evpn.esMembers[r.ESI]
-	if withdraw {
-		if members == nil {
-			return
-		}
-		delete(members, pe)
-		if len(members) == 0 {
-			delete(a.evpn.esMembers, r.ESI)
-		}
-	} else {
-		if members == nil {
-			if len(a.evpn.esMembers) >= maxTrackedESIs {
-				a.logger.Warn("EVPN RT4 ESI table full; ignoring segment",
-					zap.String("rd", r.RD), zap.Int("max", maxTrackedESIs))
-				return
-			}
-			members = make(map[string]struct{})
-			a.evpn.esMembers[r.ESI] = members
-		}
-		if _, known := members[pe]; !known && len(members) >= maxMembersPerESI {
-			a.logger.Warn("EVPN RT4 member set full for ESI; ignoring PE",
-				zap.String("rd", r.RD), zap.String("pe", pe), zap.Int("max", maxMembersPerESI))
-			return
-		}
-		members[pe] = struct{}{}
-	}
-	a.electDF(r.ESI)
-}
-
 // ReelectDF re-runs DF election for an ESI from the membership already learned
 // over RT4. The operator path calls it right after `es create` marks an ESI
 // locally attached, so an RT4 that arrived before the local attach -- recorded
@@ -738,6 +696,7 @@ func (a *Applier) applyEVPNEthernetSegment(r *bgp.EVPNRoute, withdraw bool) {
 func (a *Applier) ReelectDF(esi [bpf.ESILen]byte) {
 	a.evpn.esMu.Lock()
 	defer a.evpn.esMu.Unlock()
+	a.syncESPeers()
 	a.electDF(esi)
 }
 

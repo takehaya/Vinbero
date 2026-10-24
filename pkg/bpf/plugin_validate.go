@@ -39,6 +39,7 @@ var integrityMapNames = map[string]struct{}{
 	"fdb_map":               {},
 	"bd_peer_map":           {},
 	"bd_peer_reverse_map":   {},
+	"esi_peer_map":          {}, // RT4 split-horizon membership is host-only.
 	"mup_uplink_v4_map":     {},
 	"mup_uplink_v6_map":     {},
 	"tailcall_ctx_map":      {},
