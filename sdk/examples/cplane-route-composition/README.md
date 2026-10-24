@@ -67,6 +67,21 @@ To return to observation, unregister the writing instance and register with the 
 The host retains final control of capabilities, context delegation, output scope, ownership conflicts, and recovery.
 The guest does not install local SIDs or advertise routes; provision the receiving SRv6 behaviors separately.
 
+## Batch live updates
+
+Use `--input-policy policy-write-batched.json` with either backend to permit up to 16 queued live events per controller call.
+This policy has the same grants, delegation, and output bounds as `policy-write.json`; it only sets `max_batch_events` to 16.
+The host takes events already waiting in the queue and adds no collection delay, so a call can contain fewer than 16 events.
+Leaving this field unset or setting it to 0 or 1 retains one-event delivery; explicit values from 2 through 16 enable batching.
+Replay boundaries and ticks remain separate from live batches.
+
+The controller reconciles the final route view of each batch, so intermediate versions in that batch need not become forwarding state.
+A batch shares one call timeout; choose a cap that fits the controller's call budget.
+If input preparation fails for one event, the host rejects the whole group and requests input recovery.
+For a changed, ready view, the controller attempts one complete desired-set transaction per batch; this does not guarantee atomic rollback of BPF writes.
+Queue overflow still marks input incomplete and triggers cleanup and replay.
+To apply a different input policy, unregister and finish cleanup before registering again, as described above.
+
 ## Updates and recovery
 
 The controller waits for a complete BGP replay before constructing outputs.
