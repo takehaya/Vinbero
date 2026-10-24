@@ -888,9 +888,15 @@ section は spec 上 instantiate 中に実行されるので、これも guest �
 | register (新規) | 取得。instantiate 前の失敗では巻き戻す | 成立後に persist | 追加 | 宣言に従って作る |
 | restore 成功 | 起動時の予約のまま | 保持 | 追加 | local SID は inventory から予約し、再宣言で同じ address に再作成。広告も宣言で作り直す |
 | restore 失敗 | 保持 (withhold 継続) | 保持 | publish 前の失敗は載せず unrestored に記録。publish 後の persist 失敗は動いたまま unrestored にも載る (下記) | prune 前の失敗は触らない。prune まで進んだ失敗は削除できた分だけ減る。slot と locator の予約は manifest の scope と SID inventory から残る |
-| upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | 残したまま新 module の宣言が差分を吸収 |
+| upgrade (同名再登録) | 新しい集合に置換。外した codepoint は旧 state の reconcile より先に返る | 更新 | instance を入れ替え (owner tag は同一) | input API の健全な状態は同じ入力権限・制限と byte 単位で同じ設定の場合だけ保持し、新 module の宣言が差分を吸収。設定変更は replay 前に旧状態を撤去 |
 | unregister | flush 成功後に解放 | flush 成功後に削除を試みる。running plugin の削除失敗は warning。unrestored plugin の削除失敗は error として再試行できる | 削除。flush 失敗時は dead または unrestored として残す | guest が起動しなくても owner の状態を削除し広告を withdraw |
 | forget (未走行かつ local SID inventory 無し) | 解放 | 削除 | unrestored から削除 | 触らない。slot と locator の予約は返る |
+
+input API を使う同名置換では、opaque な設定 bytes の変更も旧 forwarding set を保持しない条件です。
+host は `observe_only` 等の plugin 固有設定を解釈しません。
+これにより、書込みから観測専用への設定変更では observer に空の desired set や書込み権限を要求せずに旧状態を撤去します。
+同じ設定・入力権限・制限を使う健全な native/WASM 間の置換は保持対象です。
+module の変更だけで同じ設定の意味が変わる場合まで、観測専用への遷移を判定する保証はありません。
 
 部分失敗はそれぞれ次の形で残ります。
 

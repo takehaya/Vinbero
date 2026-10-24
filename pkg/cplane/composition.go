@@ -306,19 +306,12 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 	return out, nil
 }
 
-// applyComposition orders dependents before their forwarding changes. Failure
-// retains ownership and the latest desired set for a bounded retry.
-func (p *PluginOps) applyComposition(txn *applyTxn) error {
-	m := txn.composition
-	d, err := p.normalizeComposition(m)
-	if err != nil {
-		return err
-	}
+func compositionDigest(m *v1.PluginApplyChunk, d compositionDesired) (hash [32]byte, err error) {
 	hashInput := proto.Clone(m).(*v1.PluginApplyChunk)
 	hashInput.DesiredRevision = 0
 	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(hashInput)
 	if err != nil {
-		return err
+		return hash, err
 	}
 	hasher := sha256.New()
 	_, _ = hasher.Write(raw)
@@ -327,11 +320,25 @@ func (p *PluginOps) applyComposition(txn *applyTxn) error {
 	}
 	derived, err := json.Marshal(d.routes)
 	if err != nil {
-		return err
+		return hash, err
 	}
 	_, _ = hasher.Write(derived)
-	var hash [32]byte
 	copy(hash[:], hasher.Sum(nil))
+	return hash, nil
+}
+
+// applyComposition orders dependents before their forwarding changes. Failure
+// retains ownership and the latest desired set for a bounded retry.
+func (p *PluginOps) applyComposition(txn *applyTxn) error {
+	m := txn.composition
+	d, err := p.normalizeComposition(m)
+	if err != nil {
+		return err
+	}
+	hash, err := compositionDigest(m, d)
+	if err != nil {
+		return err
+	}
 	if p.compositionValid && hash == p.compositionHash {
 		return nil
 	}
@@ -499,6 +506,22 @@ func (p *PluginOps) reconcileComposition(ctx context.Context) (int, error) {
 		p.applyMu.Unlock()
 		return 0, nil
 	}
+	p.mu.Lock()
+	txn := p.latestComposition
+	ready := p.inputReady && p.inputFault == ""
+	fullyApplied := p.outputFailure == "" && !p.inputCleanupPending &&
+		p.appliedRevision == p.desiredRevision && len(p.pending) == 0
+	p.mu.Unlock()
+	// A notification may concern another VRF. Revalidate first and preserve
+	// the complete applied set only if its host-derived values still match.
+	if p.compositionValid && txn != nil && ready && fullyApplied {
+		if desired, err := p.normalizeComposition(txn.composition); err == nil {
+			if digest, err := compositionDigest(txn.composition, desired); err == nil && digest == p.compositionHash {
+				p.applyMu.Unlock()
+				return 0, nil
+			}
+		}
+	}
 	p.compositionValid = false
 	if p.advertise != nil {
 		if err := p.advertise.WithdrawOwner(ctx, p.owner); err != nil {
@@ -506,10 +529,6 @@ func (p *PluginOps) reconcileComposition(ctx context.Context) (int, error) {
 			return 0, err
 		}
 	}
-	p.mu.Lock()
-	txn := p.latestComposition
-	ready := p.inputReady && p.inputFault == ""
-	p.mu.Unlock()
 	p.applyMu.Unlock()
 	if txn == nil || !ready {
 		return 0, nil

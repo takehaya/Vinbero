@@ -14,10 +14,10 @@ import (
 )
 
 // MACSink consumes local bridge FDB MAC changes the FDBWatcher observes, for
-// EVPN RT2 auto-advertise. The kernel bridge FDB only holds locally-learned
-// MACs -- the EVPN receive path installs remote MACs into the BPF fdb_map with
-// IsRemote=1, never into the kernel FDB -- so every MAC delivered here is local
-// and advertising it as RT2 cannot loop. nil sink means no auto-advertise.
+// EVPN RT2 auto-advertise. Adds are delivered only when the BPF map accepts
+// local forwarding; kernel observations cannot overwrite managed remote MACs.
+// Deletes withdraw local advertisements even if forwarding has since changed
+// owner. A nil sink means no auto-advertise.
 type MACSink interface {
 	OnLocalMAC(bdID uint16, mac net.HardwareAddr, added bool)
 }
@@ -31,8 +31,8 @@ type macSinkEntry struct {
 // fdbMapOps is the subset of *bpf.MapOperations the FDBWatcher needs, narrowed
 // to an interface so the watcher is unit-testable without a live BPF map.
 type fdbMapOps interface {
-	CreateFdb(bdID uint16, mac net.HardwareAddr, entry *bpf.FdbEntry) error
-	DeleteFdb(bdID uint16, mac net.HardwareAddr) error
+	LearnFdb(bdID uint16, mac net.HardwareAddr, oif uint32) (bool, error)
+	DeleteLearnedFdb(bdID uint16, mac net.HardwareAddr, oif uint32) error
 	AgeFdbEntries(maxAgeNs uint64) ([]bpf.AgedFdbEntry, error)
 }
 
@@ -278,7 +278,7 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 		w.syncAndNotify(sinks, bdID, mac, neigh.LinkIndex)
 
 	case unix.RTM_DELNEIGH:
-		if err := w.mapOps.DeleteFdb(bdID, net.HardwareAddr(mac)); err != nil {
+		if err := w.mapOps.DeleteLearnedFdb(bdID, net.HardwareAddr(mac), uint32(neigh.LinkIndex)); err != nil {
 			w.logger.Debug("Failed to delete FDB entry from BPF map",
 				zap.String("mac", mac.String()),
 				zap.Uint16("bd_id", bdID),
@@ -289,20 +289,22 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 }
 
 // syncAndNotify installs a locally-learned MAC into the BPF fdb_map and, only on
-// success, forwards it to the EVPN auto-advertise sink as an add. Gating the
+// acceptance, forwards it to the EVPN auto-advertise sink as an add. Gating the
 // sink on the data-plane write means RT2 is never advertised for a MAC the data
 // plane cannot decap to (which would blackhole remote traffic). Shared by the
 // live update path (handleNeighUpdate) and the replay path (DumpBridge), so the
 // two cannot drift on this safety rule. The caller has already filtered to a
 // registered bridge and a unicast MAC.
 func (w *FDBWatcher) syncAndNotify(sinks []MACSink, bdID uint16, mac net.HardwareAddr, linkIndex int) {
-	entry := &bpf.FdbEntry{Oif: uint32(linkIndex)}
-	if err := w.mapOps.CreateFdb(bdID, mac, entry); err != nil {
+	local, err := w.mapOps.LearnFdb(bdID, mac, uint32(linkIndex))
+	if err != nil {
 		w.logger.Debug("Failed to sync FDB entry to BPF map",
 			zap.String("mac", mac.String()), zap.Uint16("bd_id", bdID), zap.Error(err))
 		return
 	}
-	w.notifyMAC(sinks, bdID, mac, true)
+	if local {
+		w.notifyMAC(sinks, bdID, mac, true)
+	}
 }
 
 // notifyMAC forwards a local MAC change to every registered sink. Each gets its
