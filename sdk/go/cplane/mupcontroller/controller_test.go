@@ -3,7 +3,6 @@ package mupcontroller
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -258,7 +257,7 @@ func TestClientTransportCommitFailure(t *testing.T) {
 	}
 	c.Update(replay(fixtures(t, 256)))
 	if h.kind != cplane.CompositionSet || h.commits != 1 || h.puts == 0 || c.handledRevision != 0 {
-		t.Fatal(fmt.Sprintf("transport=%+v handled=%d", h, c.handledRevision))
+		t.Fatalf("transport=%+v handled=%d", h, c.handledRevision)
 	}
 	h.status = cplane.StatusOK
 	c.reconcile()

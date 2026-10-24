@@ -252,7 +252,11 @@ func BenchmarkCompositionScale(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		defer instance.Close(ctx)
+		defer func() {
+			if err := instance.Close(ctx); err != nil {
+				b.Errorf("close instance: %v", err)
+			}
+		}()
 		if status, err := instance.HandleEvents(ctx, f.replay); err != nil || len(status) != 0 {
 			b.Fatalf("replay failed: %x %v", status, err)
 		}

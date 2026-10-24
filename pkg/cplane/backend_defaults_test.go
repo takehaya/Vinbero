@@ -119,9 +119,10 @@ func TestLegacyWASMRestoreKeepsBackend(t *testing.T) {
 				module := tc.module
 				store := newTestStore(t)
 				reg := Registration{Name: native.BGPObserver, Module: declareModule(t), Capabilities: testCaps(), Scope: testScope()}
-				if module == "empty" {
+				switch module {
+				case "empty":
 					reg.Module = nil
-				} else if module == "corrupt" {
+				case "corrupt":
 					reg.Module = []byte("invalid WASM")
 				}
 				if err := store.Save(reg); err != nil {

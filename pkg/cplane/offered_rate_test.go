@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -222,15 +223,13 @@ func (r *offeredReport) run(t *testing.T, dir string) error {
 		for _, event := range events {
 			raw, e := proto.MarshalOptions{Deterministic: true}.Marshal(EncodeRouteEvent(event))
 			if e != nil {
-				inputFile.Close()
-				return e
+				return errors.Join(e, inputFile.Close())
 			}
 			var size [4]byte
 			binary.BigEndian.PutUint32(size[:], uint32(len(raw)))
 			for _, part := range [][]byte{size[:], raw} {
 				if _, e = inputFile.Write(part); e != nil {
-					inputFile.Close()
-					return e
+					return errors.Join(e, inputFile.Close())
 				}
 				hash.Write(part)
 			}
@@ -657,25 +656,26 @@ func (r *offeredReport) write(dir string) error {
 		return err
 	}
 	w := csv.NewWriter(f)
-	w.Write([]string{"tag", "session", "planned_ns", "decision_ns", "emit_start_ns", "emit_end_ns", "scheduler_missed", "callback_found_not_acceptance", "observed_live", "observed_replay"})
+	if err := w.Write([]string{"tag", "session", "planned_ns", "decision_ns", "emit_start_ns", "emit_end_ns", "scheduler_missed", "callback_found_not_acceptance", "observed_live", "observed_replay"}); err != nil {
+		return errors.Join(err, f.Close())
+	}
 	for _, e := range r.Emits {
-		w.Write([]string{fmt.Sprint(e.Tag), fmt.Sprint(e.Session), fmt.Sprint(e.PlannedNS), fmt.Sprint(e.DecisionNS), fmt.Sprint(e.EmitStartNS), fmt.Sprint(e.EmitEndNS), fmt.Sprint(e.Missed), fmt.Sprint(e.CallbackFound), fmt.Sprint(e.ObservedLive), fmt.Sprint(e.ObservedReplay)})
+		if err := w.Write([]string{fmt.Sprint(e.Tag), fmt.Sprint(e.Session), fmt.Sprint(e.PlannedNS), fmt.Sprint(e.DecisionNS), fmt.Sprint(e.EmitStartNS), fmt.Sprint(e.EmitEndNS), fmt.Sprint(e.Missed), fmt.Sprint(e.CallbackFound), fmt.Sprint(e.ObservedLive), fmt.Sprint(e.ObservedReplay)}); err != nil {
+			return errors.Join(err, f.Close())
+		}
 	}
 	w.Flush()
-	err = w.Error()
-	closeErr := f.Close()
-	if err != nil {
+	if err := errors.Join(w.Error(), f.Close()); err != nil {
 		return err
-	}
-	if closeErr != nil {
-		return closeErr
 	}
 	f, err = os.Create(filepath.Join(dir, "observations.csv"))
 	if err != nil {
 		return err
 	}
 	w = csv.NewWriter(f)
-	w.Write([]string{"call", "tag", "sequence", "kind", "replay_epoch", "in_observed_replay", "prepare_start_ns", "prepare_end_ns", "entry_ns", "return_ns", "service_ns", "prehandler_from_emit_start_ns", "prehandler_from_emit_end_ns", "return_from_emit_start_ns", "runtime_error", "prepare_error"})
+	if err := w.Write([]string{"call", "tag", "sequence", "kind", "replay_epoch", "in_observed_replay", "prepare_start_ns", "prepare_end_ns", "entry_ns", "return_ns", "service_ns", "prehandler_from_emit_start_ns", "prehandler_from_emit_end_ns", "return_from_emit_start_ns", "runtime_error", "prepare_error"}); err != nil {
+		return errors.Join(err, f.Close())
+	}
 	for _, c := range r.Calls {
 		for _, e := range c.Events {
 			service, fromStart, fromEnd, untilReturn := "", "", "", ""
@@ -686,16 +686,13 @@ func (r *offeredReport) write(dir string) error {
 					fromStart, fromEnd, untilReturn = fmt.Sprint(c.EntryNS-emit.EmitStartNS), fmt.Sprint(c.EntryNS-emit.EmitEndNS), fmt.Sprint(c.ReturnNS-emit.EmitStartNS)
 				}
 			}
-			w.Write([]string{fmt.Sprint(c.ID), fmt.Sprint(e.Tag), fmt.Sprint(e.Sequence), e.Kind, fmt.Sprint(e.Epoch), fmt.Sprint(e.InReplay), fmt.Sprint(c.PrepareStartNS), fmt.Sprint(c.PrepareEndNS), fmt.Sprint(c.EntryNS), fmt.Sprint(c.ReturnNS), service, fromStart, fromEnd, untilReturn, c.Error, c.PrepareError})
+			if err := w.Write([]string{fmt.Sprint(c.ID), fmt.Sprint(e.Tag), fmt.Sprint(e.Sequence), e.Kind, fmt.Sprint(e.Epoch), fmt.Sprint(e.InReplay), fmt.Sprint(c.PrepareStartNS), fmt.Sprint(c.PrepareEndNS), fmt.Sprint(c.EntryNS), fmt.Sprint(c.ReturnNS), service, fromStart, fromEnd, untilReturn, c.Error, c.PrepareError}); err != nil {
+				return errors.Join(err, f.Close())
+			}
 		}
 	}
 	w.Flush()
-	err = w.Error()
-	closeErr = f.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
+	return errors.Join(w.Error(), f.Close())
 }
 
 func TestOfferedReadinessGate(t *testing.T) {

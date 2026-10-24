@@ -81,7 +81,11 @@ func benchmarkCompositionUpdates(b *testing.B, profile string) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer instance.Close(ctx)
+	defer func() {
+		if err := instance.Close(ctx); err != nil {
+			b.Errorf("close instance: %v", err)
+		}
+	}()
 	encode := func(e ...*v1.PluginEvent) []byte {
 		raw, err := proto.Marshal(&v1.PluginEventBatch{Events: e})
 		if err != nil {
