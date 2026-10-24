@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -28,6 +29,9 @@ def run_artifacts(root, task, manifest):
     trial = directory / 'trial-1'
     trial.mkdir(parents=True)
     capture(trial)
+    (directory / 'bin').mkdir()
+    for name in manifest['sha256']:
+        (directory / 'bin' / Path(name).name).write_bytes(Path(name).name.encode())
     suite.write_json(directory / 'status.json', dict(exit_code=0, completed_trials=1, requested_trials=1))
     suite.write_json(directory / 'affinity.json', {'config': manifest['affinity']})
     suite.write_json(directory / 'run.json', dict(mode=task['mode'], rate=100000, trials=1,
@@ -178,7 +182,7 @@ class SummaryTests(unittest.TestCase):
                         source=dict(commit='a' * 40, dirty=False),
                         affinity=dict(version=1, allow_shared_cores=True, gomaxprocs=1,
                                       cpus={role: [0] for role in suite.affinity.ROLES}),
-                        sha256={name: 'sha-' + Path(name).name for name in suite.BINARIES})
+                        sha256={name: hashlib.sha256(Path(name).name.encode()).hexdigest() for name in suite.BINARIES})
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for task in manifest['tasks']:
@@ -190,6 +194,29 @@ class SummaryTests(unittest.TestCase):
             self.assertFalse(summary['performance_usable'])
             self.assertEqual(summary['modes']['cplane']['lost'], 2)
             self.assertTrue(all(row['state'] == 'complete' for row in rows))
+            # Recorded paths may refer to the original machine. Validation must
+            # read each relocated trial's own binaries, not those original paths.
+            for task in manifest['tasks']:
+                directory = root / 'runs' / task['id']
+                meta = analysis.read_json(directory / 'run.json')
+                meta['artifacts'] = {'/original/run/' + name: sha for name, sha in meta['artifacts'].items()}
+                suite.write_json(directory / 'run.json', meta)
+                analysis.validate_run(root, task, manifest)
+                for name in suite.BINARIES:
+                    name = Path(name).name
+                    if name == 'plugin.wasm' and task['mode'] == 'builtin':
+                        continue
+                    artifact = directory / 'bin' / name
+                    original = artifact.read_bytes()
+                    for corruption in ('missing', 'changed'):
+                        with self.subTest(mode=task['mode'], artifact=name, corruption=corruption):
+                            if corruption == 'missing':
+                                artifact.unlink()
+                            else:
+                                artifact.write_bytes(b'corrupted')
+                            with self.assertRaises((ValueError, OSError)):
+                                analysis.validate_run(root, task, manifest)
+                            artifact.write_bytes(original)
             first = manifest['tasks'][0]
             trial = root / 'runs' / first['id'] / 'trial-1'
             record = json.loads((trial / 'sender-affinity.json').read_text())

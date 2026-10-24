@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -165,6 +166,11 @@ def validate_run(work, task, manifest):
         source = next(key for key in manifest['sha256'] if Path(key).name == name)
         if observed.get(name) != manifest['sha256'][source]:
             raise ValueError(f"{task['id']}: executable changed: {name}")
+        # Use this archive's copy, not the original absolute path in run.json.
+        with (directory / 'bin' / name).open('rb') as stream:
+            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if actual != manifest['sha256'][source]:
+            raise ValueError(f"{task['id']}: stored executable changed: {name}")
     config = read_json(directory / 'affinity.json')['config']
     if config != manifest['affinity']:
         raise ValueError(f"{task['id']}: CPU assignment changed")
