@@ -28,15 +28,16 @@ hard to get right.
 Handing off rather than forwarding directly is not a shortcut. A plugin
 cannot call `bpf_redirect`: every packet-level redirect goes through the
 epilogue or a vinbero PROG_ARRAY, so tail-calling into a validated slot is
-how a plugin finishes a packet's journey. End.DT4 reads what it needs from
-the same tail-call context this program was handed, so the handoff needs
-nothing prepared.
+how a plugin finishes a packet's journey.
+The control-plane half must request `decap_vrf` when allocating the local SID, using a VRF in its granted scope.
+The host records the VRF in a grant referenced by the SID's aux, and End.DT4 reads that grant from the shared tail-call context.
+Without the grant, End.DT4 drops the packet instead of falling back to the ingress interface's table.
 
 ## Build and register
 
 ```sh
 make
-vbctl plugin register --type endpoint --index 32 \
+vinbero plugin register --type endpoint --index 32 \
     --prog plugin.o --program plugin_custom_behavior
 ```
 

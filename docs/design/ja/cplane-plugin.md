@@ -94,7 +94,7 @@ flowchart LR
         OPS -->|広告| GOBGP
     end
 
-    CLI[vbctl plugin cplane register] --> RT
+    CLI[vinbero plugin cplane register] --> RT
 ```
 
 headend は `pkg/headend.Reconciler` を daemon が一つ作り、built-in applier と
@@ -638,10 +638,10 @@ service SID として自分の owner で install します。plugin が同じ pr
   実装できない codepoint の経路を service SID として install してしまいます。
   黙って誤った転送をするより、operator が直すまで転送されない方がましです。
   claim を保持したことは warning に出します。restore に失敗した plugin は
-  `vbctl plugin cplane stats` に別枠で出します。動いていないのに daemon は
+  `vinbero plugin cplane stats` に別枠で出します。動いていないのに daemon は
   その state と claim を持ち続けるので、running な plugin だけを見せると
   「単に居ない」ようにしか見えません。戻ってこないと判断したら
-  `vbctl plugin cplane forget` で claim と store の登録を落とせます。map に
+  `vinbero plugin cplane forget` で claim と store の登録を落とせます。map に
   残った state には触れません。それが何のためのものかを daemon は知らない
   ためです。
 
@@ -1011,21 +1011,21 @@ restore 中に publish 後の persist 失敗が起きたときの二重表示は
 登録の既定 backend は native です。
 `--wasm` を指定しない場合、native の実装 ID は `--name`、version は daemon の catalog の版を使います。
 異なる登録名を使う場合は `--native <実装ID>`、版を固定する場合は `--native-version <版>` を指定します。
-例えば `vbctl plugin cplane register --name bgp-observer` で組込みの observer を起動できます。
+例えば `vinbero plugin cplane register --name bgp-observer` で組込みの observer を起動できます。
 native は daemon で既定で許可され、`settings.cplane_plugins.native_enabled: false` で無効化できます。
 全 example の自動起動は行わず、登録時の capability、scope と claim の検査も維持します。
 
 WASM のみの plugin は次のように `--wasm` で明示して追加できます。
 
 ```sh
-vbctl plugin cplane register --name custom-behavior --wasm plugin.wasm \
+vinbero plugin cplane register --name custom-behavior --wasm plugin.wasm \
     --behavior 0xFE01 --family vpnv4 \
     --capability headend --capability advertise --capability local_sid \
     --locator main --vrf vpn-a \
     --headend-prefix 10.7.0.0/16 --endpoint-slot 33 --tick-ms 1000
-vbctl plugin cplane list
-vbctl plugin cplane stats
-vbctl plugin cplane unregister --name custom-behavior
+vinbero plugin cplane list
+vinbero plugin cplane stats
+vinbero plugin cplane unregister --name custom-behavior
 ```
 
 旧 API client が backend を省略して module を送った場合は、従来どおり WASM として扱います。
@@ -1036,7 +1036,7 @@ capability と scope はどちらも省略できますが、片方でも欠け�
 宣言できません。observe と log しかしない plugin はそれで正しく、宣言する
 plugin には両方を与えます。`stats` は動いている plugin と、restore に失敗して
 claim だけ残っている plugin の両方を出し、scope は本体の表とは別の block に
-出します。後者は `vbctl plugin cplane forget --name <plugin>` で落とせます。
+出します。後者は `vinbero plugin cplane forget --name <plugin>` で落とせます。
 
 behavior は 10 進でも 0x 前置でも書けます。RFC 8986 は codepoint を hex で
 振っているので、0x0013 を 10 進の 13 と読むと別の behavior を claim して
