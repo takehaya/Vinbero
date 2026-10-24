@@ -77,12 +77,14 @@ type Demux struct {
 	// from -- inherits the decision its advertise made.
 	ledger *claimLedger
 
-	mu        sync.RWMutex
-	consumers []*consumer
-	nextID    uint64
-	ids       []uint64
-	cancelSub func()
-	started   bool
+	// lifecycleMu serializes subscription publication with Stop and restart.
+	lifecycleMu sync.Mutex
+	mu          sync.RWMutex
+	consumers   []*consumer
+	nextID      uint64
+	ids         []uint64
+	cancelSub   func()
+	started     bool
 }
 
 // New builds a demux over sub. lister supplies the loc-rib snapshot for
@@ -199,8 +201,11 @@ func (d *Demux) remove(id uint64) {
 // Start opens the single underlying subscription. Consumers registered
 // beforehand see the current=true replay of peer-learned routes; the
 // daemon calls this once, after the applier is registered and before
-// anything advertises.
+// anything advertises. Start and Stop must not be called synchronously from a
+// route handler, including waiting there for another goroutine to call them.
 func (d *Demux) Start() error {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	d.mu.Lock()
 	if d.started {
 		d.mu.Unlock()
@@ -209,22 +214,46 @@ func (d *Demux) Start() error {
 	d.started = true
 	d.mu.Unlock()
 
-	cancel, err := d.sub.Subscribe("", d.dispatch)
+	// Each subscription captures its own gate: an old watcher can still invoke
+	// its callback after cancellation, including after a later Start.
+	var callbackMu sync.Mutex
+	closed := false
+	cancel, err := d.sub.Subscribe("", func(ev bgp.RouteEvent) {
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		if !closed {
+			d.dispatch(ev)
+		}
+	})
+	stop := func() {
+		// A source may wait for callbacks in cancel; do not hold their gate here.
+		if cancel != nil {
+			cancel()
+		}
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		closed = true
+	}
 	if err != nil {
 		d.mu.Lock()
 		d.started = false
 		d.mu.Unlock()
+		stop()
 		return fmt.Errorf("demux: subscribe: %w", err)
 	}
 	d.mu.Lock()
-	d.cancelSub = cancel
+	d.cancelSub = stop
 	d.mu.Unlock()
 	return nil
 }
 
-// Stop tears the underlying subscription down. Registered consumers are
-// left in place, so a later Start resumes delivery to them.
+// Stop cancels and drains the underlying subscription, rejecting its late
+// callbacks. Registered consumers remain for a later Start. Callers must stop
+// their own snapshot/replay operations separately before destroying resources.
+// Like Start, Stop must not be called or waited for from a route handler.
 func (d *Demux) Stop() {
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
 	d.mu.Lock()
 	cancel := d.cancelSub
 	d.cancelSub = nil
@@ -235,8 +264,8 @@ func (d *Demux) Stop() {
 	}
 }
 
-// dispatch is the single RouteHandler handed to the subscriber. It runs on
-// a gobgp-internal goroutine, so it must not block: it only filters and
+// dispatch fans out a callback admitted by the subscription gate. It runs
+// on a gobgp-internal goroutine, so it must not block: it only filters and
 // calls the consumers, which carry the same no-blocking contract.
 func (d *Demux) dispatch(ev bgp.RouteEvent) {
 	// Drop this node's own advertisements. The post-policy stream carries
