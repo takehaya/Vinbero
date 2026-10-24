@@ -77,7 +77,8 @@ Replay boundaries and ticks remain separate from live batches.
 
 The controller reconciles the final route view of each batch, so intermediate versions in that batch need not become forwarding state.
 A batch shares one call timeout; choose a cap that fits the controller's call budget.
-If input preparation fails for one event, the host rejects the whole group and requests input recovery.
+If input preparation fails for one event, the host rejects the whole group, marks input incomplete, and starts output cleanup.
+This error does not itself request replay; writes remain blocked until a successful full input replay.
 For a changed, ready view, the controller attempts one complete desired-set transaction per batch; this does not guarantee atomic rollback of BPF writes.
 Queue overflow still marks input incomplete and triggers cleanup and replay.
 To apply a different input policy, unregister and finish cleanup before registering again, as described above.
