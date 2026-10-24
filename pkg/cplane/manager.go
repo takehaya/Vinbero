@@ -1240,14 +1240,10 @@ func (m *Manager) Unregister(ctx context.Context, name string) error {
 		}
 	}
 	if m.claims != nil {
-		// The claim goes, but the routes are not handed to the built-in
-		// appliers. Nothing here can implement the behavior the plugin
-		// implemented: to the built-in a private codepoint is just a
-		// service SID, and installing it as one is the wrong-meaning
-		// install the claim existed to prevent. Those routes stop being
-		// forwarded, which is the honest outcome of removing the only
-		// thing that understood them, and they will be picked up with
-		// built-in semantics only if their originator readvertises.
+		// Keep behavior claims through the refresh above so it cannot
+		// re-advertise retained paths matching those claims. After release,
+		// live updates, refreshes and RIB replay use the current claims and
+		// delegation; they may deliver those paths with built-in semantics.
 		m.claims.Release(name)
 	}
 	if err := m.store.Remove(name); err != nil {

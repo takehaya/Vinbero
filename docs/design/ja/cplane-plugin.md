@@ -233,10 +233,11 @@ UPDATE でこの抑止を抜けることはできず、最後の claimed path �
 path でも同じ prefix を抑止します。plugin が停止・復元失敗していても claim を
 保持している間は built-in に切り替えません。
 
-claim の解放そのものでは replay しません。ただし、その後に同じ転送 prefix の
-別 path が更新・withdraw されると、保持中の独自 behavior の path も built-in に
-再配送され得ます。独自 path 自身の再広告は必要ありません。built-in はそれを
-通常の service SID として扱い、以前の plugin の転送規則を再現する保証はありません。
+unregister の Refresh では behavior claim を保持し、その claim に該当する保持経路の再広告を防ぎます。
+claim の解放そのものでは replay しません。
+解放後の live 更新、Refresh、RIB replay は現在の claim と delegation に従うため、保持中の独自 behavior の path も built-in に再配送され得ます。
+独自 path 自身の再広告は必要ありません。
+built-in はそれを通常の service SID として扱い、以前の plugin の転送規則を再現する保証はありません。
 
 claim 取得時の明示的な RIB 再走査では、現在の demux が built-in に配送した
 履歴が無くても withdraw を渡します。前の daemon が pinned map に残した
