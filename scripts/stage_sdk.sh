@@ -44,6 +44,7 @@ install -m 644 "$ROOT"/src/core/*.h "$DEST/include/core/"
 SOURCE_REF="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo main)"
 SOURCE_URL="https://github.com/takehaya/Vinbero/blob/$SOURCE_REF"
 sed -E \
+    -e '/^```/,/^```/b' \
     -e "s#\]\(\.\./([^)]*)\)#]($SOURCE_URL/\1)#g" \
     -e "s@\]\(([^#/:)][^:)]*)\)@]($SOURCE_URL/sdk/\1)@g" \
     "$ROOT/sdk/README.md" > "$DEST/share/vinbero-sdk/README.md"

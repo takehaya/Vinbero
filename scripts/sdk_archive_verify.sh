@@ -78,7 +78,11 @@ ref = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
                      capture_output=True, text=True)
 ref = ref.stdout.strip() if ref.returncode == 0 else "main"
 repository = "https://github.com/takehaya/Vinbero/blob/"
-for target in re.findall(r"\]\(([^\s)]+)\)", readme.read_text()):
+# Fenced examples must survive staging verbatim, and their syntax is not a link.
+sections = re.split(r"(?m)^```[^\n]*$", readme.read_text())
+source_sections = re.split(r"(?m)^```[^\n]*$", (source / "sdk/README.md").read_text())
+assert sections[1::2] == source_sections[1::2], "SDK doc code examples changed during staging"
+for target in re.findall(r"\]\(([^\s)]+)\)", "".join(sections[::2])):
     if target.startswith("#"):
         continue
     if target.startswith(repository):
