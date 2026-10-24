@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compare BGP -> builtin/cplane/relay -> forwarding, with fixed kernel End.DT4
+# Compare BGP -> builtin/builtin-idle/cplane/relay -> forwarding, with fixed kernel End.DT4
 # endpoints. Requires make bench-rq1-build; run with sudo MODE=cplane ./run_bgp.sh.
 set -euo pipefail
 
@@ -9,10 +9,12 @@ main() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 export REPO_ROOT
+SOURCE_METADATA="${SOURCE_METADATA:-}"
+AFFINITY_FILE="${AFFINITY_FILE:-}"
 cd "$REPO_ROOT"
 MODE="${MODE:-builtin}"
 [[ "$MODE" != inproc ]] || MODE=builtin
-case "$MODE" in builtin|cplane|relay|composition-native|composition-wasm) ;; *) echo "MODE must be builtin, cplane, relay, composition-native or composition-wasm" >&2; exit 2 ;; esac
+case "$MODE" in builtin|builtin-idle|cplane|relay|composition-native|composition-wasm) ;; *) echo "MODE must be builtin, builtin-idle, cplane, relay, composition-native or composition-wasm" >&2; exit 2 ;; esac
 export RQ1_COMPOSITION=0
 if [[ "$MODE" == composition-* ]]; then export RQ1_COMPOSITION=1; fi
 TRIALS="${1:-10}"
@@ -41,7 +43,7 @@ WASM="${WASM:-$default_wasm}"
 for bin in "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY"; do
     [[ -x "$bin" ]] || { echo "missing executable $bin; run make bench-rq1-build" >&2; exit 2; }
 done
-if [[ ( "$MODE" == cplane || "$MODE" == composition-wasm ) && ! -r "$WASM" ]]; then echo "missing WASM: $WASM" >&2; exit 2; fi
+if [[ ( "$MODE" == cplane || "$MODE" == builtin-idle || "$MODE" == composition-wasm ) && ! -r "$WASM" ]]; then echo "missing WASM: $WASM" >&2; exit 2; fi
 for command in ip python3 ethtool timeout flock ping6 git cp; do command -v "$command" >/dev/null; done
 
 umask 077
@@ -72,7 +74,7 @@ work, out = sys.argv[1], os.path.abspath(sys.argv[2])
 if out == work or os.path.commonpath([work, out]) != work:
     raise SystemExit('OUT must be inside WORK')
 first = os.path.relpath(out, work).split(os.sep)[0].casefold()
-if first in {'run.json', 'status.json', 'instrument', 'bin', 'topology-owned'} or first.startswith('trial-'):
+if first in {'run.json', 'status.json', 'affinity.json', 'instrument', 'bin', 'topology-owned'} or first.startswith('trial-'):
     raise SystemExit('OUT conflicts with a reserved artifact path')
 print(out)
 PY
@@ -147,8 +149,18 @@ trap 'exit 143' TERM
 mkdir "$WORK/instrument"
 cp "$SCRIPT_DIR/"{setup.sh,teardown.sh,check.py,vinbero-bgp.yml,run_bgp.sh,composition-config.json,composition-policy.json} "$WORK/instrument/"
 cp "$REPO_ROOT/examples/common/netns.sh" "$WORK/instrument/netns.sh"
+cp "$REPO_ROOT/bench/rq1/affinity.py" "$WORK/instrument/affinity.py"
 SCRIPT_DIR="$WORK/instrument"
 export NETNS_HELPER="$SCRIPT_DIR/netns.sh"
+if [[ -n "$AFFINITY_FILE" ]]; then
+    cp -- "$AFFINITY_FILE" "$SCRIPT_DIR/affinity.json"
+    AFFINITY_FILE="$SCRIPT_DIR/affinity.json"
+    python3 "$SCRIPT_DIR/affinity.py" validate "$AFFINITY_FILE" > "$WORK/affinity.json"
+fi
+if [[ -n "$SOURCE_METADATA" ]]; then
+    cp -- "$SOURCE_METADATA" "$SCRIPT_DIR/source.json"
+    SOURCE_METADATA="$SCRIPT_DIR/source.json"
+fi
 mkdir "$WORK/bin"
 # A later build must not change subsequent trials or invalidate the hashes.
 cp --reflink=auto -- "$VINBEROD" "$WORK/bin/vinberod"
@@ -161,21 +173,28 @@ VBCTL="$WORK/bin/vinbero"
 PROBE="$WORK/bin/rq1probe"
 CHURN="$WORK/bin/rq1bgp"
 RELAY="$WORK/bin/rq1relay"
-if [[ "$MODE" == cplane || "$MODE" == composition-wasm ]]; then
+if [[ "$MODE" == cplane || "$MODE" == builtin-idle || "$MODE" == composition-wasm ]]; then
     cp --reflink=auto -- "$WASM" "$WORK/bin/plugin.wasm"
     WASM="$WORK/bin/plugin.wasm"
 fi
-python3 - "$WORK/run.json" "$MODE" "$RATE" "$TRIALS" "$TOPO_NS_PREFIX" "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY" "$WASM" "$SCRIPT_DIR/"* <<'PY'
-import hashlib, json, os, platform, subprocess, sys
+python3 - "$WORK/run.json" "$MODE" "$RATE" "$TRIALS" "$TOPO_NS_PREFIX" "$SOURCE_METADATA" "$VINBEROD" "$VBCTL" "$PROBE" "$CHURN" "$RELAY" "$WASM" "$SCRIPT_DIR/"* <<'PY'
+import hashlib, json, os, platform, re, subprocess, sys
 from pathlib import Path
-out, mode, rate, trials, prefix, *artifacts = sys.argv[1:]
+out, mode, rate, trials, prefix, source, *artifacts = sys.argv[1:]
+if source:
+    provenance = json.loads(Path(source).read_text())
+    if (not re.fullmatch(r'[0-9a-f]{40,64}', provenance['commit']) or
+            type(provenance['dirty']) is not bool):
+        raise SystemExit('invalid snapshot provenance')
+else:
+    provenance = dict(commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                      dirty=bool(subprocess.check_output(['git', '--no-optional-locks', 'status', '--porcelain'], text=True).strip()))
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 data = dict(mode=mode, rate=int(rate), trials=int(trials), namespace_prefix=prefix,
             kernel=platform.release(), machine=platform.machine(), cpu_affinity=sorted(os.sched_getaffinity(0)),
             kernel_cmdline=Path('/proc/cmdline').read_text().strip(),
-            source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-            source_dirty=bool(subprocess.check_output(['git', '--no-optional-locks', 'status', '--porcelain'], text=True).strip()),
+            source_commit=provenance['commit'], source_dirty=provenance['dirty'],
             endpoint_behavior='MUP ST1+ISD / GTP4 argument SID' if mode.startswith('composition-') else ('0xfe01' if mode == 'cplane' else '0x0013'),
             sink_profile='synthetic kernel End.DT4, no GTP/UPF conversion' if mode.startswith('composition-') else 'kernel End.DT4',
             endpoint='kernel End.DT4', xdp_mode='generic', persistence=False,
@@ -186,6 +205,17 @@ echo "trial,mode,latency_us,lost,misdelivered,sample_gap_us" >&8
 
 ctl() { timeout 5 ip netns exec "$ns_rt" "$VBCTL" -s http://127.0.0.1:18081 "$@"; }
 check() { ip netns exec "$ns_rt" python3 "$SCRIPT_DIR/check.py" wait --mode "$MODE" "$@"; }
+launch() {
+    local role=$1 name=$2 ns=$3
+    shift 3
+    # Always called in the background: exec preserves the PID owned by the
+    # driver through namespace entry, affinity assignment and program startup.
+    if [[ -n "$AFFINITY_FILE" ]]; then
+        exec ip netns exec "$ns" python3 "$SCRIPT_DIR/affinity.py" exec \
+            --config "$AFFINITY_FILE" --role "$role" --record "$trial_dir/$name-affinity.json" -- "$@"
+    fi
+    exec ip netns exec "$ns" "$@"
+}
 wait_receiver() {
     local pid=$1 log=$2
     for attempt in {1..300}; do
@@ -223,7 +253,7 @@ Path(target).write_text(config)
 PY
     bgp_flags=()
     [[ "$MODE" == relay ]] || bgp_flags+=(--bgp-enabled)
-    ip netns exec "$ns_rt" "$VINBEROD" --config "$trial_dir/vinbero.yml" "${bgp_flags[@]}" > "$trial_dir/daemon.log" 2>&1 &
+    launch daemon daemon "$ns_rt" "$VINBEROD" --config "$trial_dir/vinbero.yml" "${bgp_flags[@]}" > "$trial_dir/daemon.log" 2>&1 &
     daemon_pid=$!; pids+=("$daemon_pid")
     check --out "$trial_dir/empty.json"
     ctl locator create --name LOC1 --prefix fd00:100::/48 --block-len 32 --node-len 16 --function-len 16 --argument-len 64 --behavior classic > "$trial_dir/locator.log"
@@ -247,29 +277,36 @@ PY
             --headend-prefix 10.0.2.0/24 --input-policy "$SCRIPT_DIR/composition-policy.json" \
             --config "$SCRIPT_DIR/composition-config.json" --tick-ms 1000 > "$trial_dir/register.log"
         churn_flags=(-mup -rd 65000:7 -rts 65000:7)
-    elif [[ "$MODE" == cplane ]]; then
-        behavior=65025
+    elif [[ "$MODE" == cplane || "$MODE" == builtin-idle ]]; then
+        plugin_family=vpnv4
+        plugin_prefix=10.0.2.0/24
+        if [[ "$MODE" == cplane ]]; then
+            behavior=65025
+        else
+            plugin_family=vpnv6
+            plugin_prefix=10.0.254.0/24
+        fi
         ctl plugin cplane register --name rq1-receiver --wasm "$WASM" \
-            --behavior 0xFE01 --family vpnv4 --capability headend \
-            --headend-prefix 10.0.2.0/24 --tick-ms 1000 > "$trial_dir/register.log"
+            --behavior 0xFE01 --family "$plugin_family" --capability headend \
+            --headend-prefix "$plugin_prefix" --tick-ms 1000 > "$trial_dir/register.log"
     elif [[ "$MODE" == relay ]]; then
-        ip netns exec "$ns_rt" "$RELAY" -neighbor fd00:12::2 -rpc 127.0.0.1:18081 > "$trial_dir/relay.log" 2>&1 &
+        launch daemon relay "$ns_rt" "$RELAY" -neighbor fd00:12::2 -rpc 127.0.0.1:18081 > "$trial_dir/relay.log" 2>&1 &
         relay_pid=$!; pids+=("$relay_pid")
     fi
-    ip netns exec "$ns_pea" "$CHURN" -neighbor fd00:12::1 -next-hop fd00:12::2 \
+    launch bgp bgp "$ns_pea" "$CHURN" -neighbor fd00:12::1 -next-hop fd00:12::2 \
         -initial-sid "$initial_base" -change-to "$changed_base" -behavior "$behavior" "${churn_flags[@]}" \
         -change-file "$trial_dir/change-at" -ready-timeout 90s -hold 30s > "$trial_dir/churn.log" 2>&1 &
     churn_pid=$!; pids+=("$churn_pid")
     check --sid "$initial_sid" --out "$trial_dir/initial.json"
 
-    ip netns exec "$ns_pea" "$PROBE" recv -bind 0.0.0.0:9999 -name pe-a -duration 0 -out "$trial_dir/pea.csv" > "$trial_dir/pea.log" 2>&1 &
+    launch receiver_a receiver_a "$ns_pea" "$PROBE" recv -bind 0.0.0.0:9999 -name pe-a -duration 0 -out "$trial_dir/pea.csv" > "$trial_dir/pea.log" 2>&1 &
     pid_a=$!; pids+=("$pid_a")
-    ip netns exec "$ns_peb" "$PROBE" recv -bind 0.0.0.0:9999 -name pe-b -duration 0 -out "$trial_dir/peb.csv" > "$trial_dir/peb.log" 2>&1 &
+    launch receiver_b receiver_b "$ns_peb" "$PROBE" recv -bind 0.0.0.0:9999 -name pe-b -duration 0 -out "$trial_dir/peb.csv" > "$trial_dir/peb.log" 2>&1 &
     pid_b=$!; pids+=("$pid_b")
     wait_receiver "$pid_a" "$trial_dir/pea.log"
     wait_receiver "$pid_b" "$trial_dir/peb.log"
-    ip netns exec "$ns_src" "$PROBE" send -target 10.0.2.2:9999 -rate "$RATE" -duration 3s -tag 1 \
-        -start-file "$trial_dir/send-at" -out "$trial_dir/sent.csv" > "$trial_dir/sender.log" 2>&1 &
+    launch sender sender "$ns_src" "$PROBE" send -target 10.0.2.2:9999 -rate "$RATE" -duration 3s -tag 1 \
+        -start-file "$trial_dir/send-at" -schedule "$trial_dir/sender-schedule.json" -out "$trial_dir/sent.csv" > "$trial_dir/sender.log" 2>&1 &
     pid_s=$!; pids+=("$pid_s")
     wait_receiver "$pid_s" "$trial_dir/sender.log"
     kill -0 "$pid_a" "$pid_b"

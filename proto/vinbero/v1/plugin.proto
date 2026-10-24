@@ -346,6 +346,12 @@ message CplanePluginStat {
   string native_id = 26;
   string native_version = 27;
   string native_identity = 28;
+  // The registered family subscription. Empty means all families.
+  repeated string families = 29;
+  // True when accepted deliveries and replay barriers have finished, with
+  // no replay held, running or owed, and the plugin is not dead. This is a
+  // point-in-time observation; it does not cover ticks or pending declarations.
+  bool delivery_idle = 30;
 }
 
 // UnrestoredCplanePlugin is a plugin the store held that would not start.

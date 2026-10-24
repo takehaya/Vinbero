@@ -94,6 +94,11 @@ type PluginStats struct {
 	// the registration.
 	Capabilities []string
 	Behaviors    []uint16
+	Families     []string
+	// DeliveryIdle reports that accepted deliveries and replay barriers have
+	// finished, with no replay being held or owed. It is a point-in-time
+	// observation, not a promise about future events or periodic ticks.
+	DeliveryIdle bool
 	// Scope is where those capabilities may be exercised. It is reported
 	// beside them because neither half describes the grant on its own.
 	Scope Scope
@@ -202,7 +207,13 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 	restarts := p.restarts
 	dead := p.dead
 	reg := p.reg
+	idle := !dead && !p.snapshotting && p.pendingSnapshots == 0 && !p.ops.inputRecoveryPending() && p.worker.idle()
 	m.mu.Unlock()
+	families := make([]string, 0, len(reg.Families))
+	for _, family := range reg.Families {
+		families = append(families, string(family))
+	}
+	sort.Strings(families)
 
 	quarantined, snapshots, since := p.counters.snapshot()
 	owner := p.ops.Owner()
@@ -227,6 +238,8 @@ func (m *Manager) statsFor(p *plugin) PluginStats {
 		Capabilities:        reg.Capabilities.Names(),
 		Scope:               reg.Scope,
 		Behaviors:           reg.Behaviors,
+		Families:            families,
+		DeliveryIdle:        idle,
 		DroppedEvents:       p.worker.droppedCount(),
 		Restarts:            restarts,
 		Quarantined:         quarantined,

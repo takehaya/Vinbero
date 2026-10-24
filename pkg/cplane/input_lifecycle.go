@@ -141,3 +141,10 @@ func (p *PluginOps) takeInputRecoveryReplay() bool {
 	p.inputRecoveryReplay = false
 	return true
 }
+
+// inputRecoveryPending includes replay debt still waiting for cleanup to finish.
+func (p *PluginOps) inputRecoveryPending() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inputRecoveryReplay
+}

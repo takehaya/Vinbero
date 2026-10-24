@@ -225,7 +225,7 @@ func cplaneSubcommand() *cli.Command {
 					w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 					if len(plugins) > 0 {
 						if _, err := fmt.Fprintln(w,
-							"NAME\tBACKEND\tIMPLEMENTATION\tCAPABILITIES\tBEHAVIORS\tSTATE\tSINCE\tDROPPED\tRESTARTS\tQUARANTINED\tSNAPSHOTS\tPENDING\tHEADEND\tADVERTISED\tSIDS"); err != nil {
+							"NAME\tBACKEND\tIMPLEMENTATION\tCAPABILITIES\tBEHAVIORS\tSTATE\tSINCE\tDROPPED\tRESTARTS\tQUARANTINED\tSNAPSHOTS\tPENDING\tHEADEND\tADVERTISED\tSIDS\tFAMILIES\tDELIVERY_IDLE"); err != nil {
 							return err
 						}
 					}
@@ -249,14 +249,18 @@ func cplaneSubcommand() *cli.Command {
 						if caps == "" {
 							caps = "-"
 						}
-						if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%d/%d\t%d/%d\n",
+						families := strings.Join(p.GetFamilies(), ",")
+						if families == "" {
+							families = "all"
+						}
+						if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%d/%d\t%d/%d\t%s\t%t\n",
 							p.GetName(), p.GetBackend(), nativeImplementationLabel(p), caps, formatBehaviors(p.GetEndpointBehaviors()), state,
 							formatSince(p.GetSince().AsTime(), p.GetSince() != nil),
 							p.GetDroppedEvents(), p.GetRestarts(), p.GetQuarantinedEvents(), p.GetSnapshots(),
 							p.GetPendingDeclarations(),
 							p.GetHeadendEntries(), p.GetMaxHeadendEntries(),
 							p.GetAdvertisedRoutes(), p.GetMaxAdvertisedRoutes(),
-							p.GetLocalSids(), p.GetMaxLocalSids()); err != nil {
+							p.GetLocalSids(), p.GetMaxLocalSids(), families, p.GetDeliveryIdle()); err != nil {
 							return err
 						}
 					}

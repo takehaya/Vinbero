@@ -13,6 +13,7 @@ on:
       - 'pkg/**'
       - 'cmd/**'
       - 'api/**'
+      - 'proto/**'
       - 'sdk/go/cplane/**'
       - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/bench-convergence.yaml'
@@ -27,6 +28,7 @@ on:
       - 'pkg/**'
       - 'cmd/**'
       - 'api/**'
+      - 'proto/**'
       - 'sdk/go/cplane/**'
       - 'sdk/examples/cplane-custom-behavior/**'
       - '.github/workflows/bench-convergence.yaml'
@@ -56,9 +58,12 @@ jobs:
         run: make bench-cplane-build bench-rq1-test
       # This checks that each mode measures a real transition. Timing values
       # on a shared CI runner are not performance results or regression gates.
-      - name: Exercise the baseline and shared-controller paths
+      - name: Exercise balanced builtin, idle plugin and cplane conditions
         run: |
-          for mode in builtin cplane relay composition-native composition-wasm; do
+          sudo python3 bench/rq1/suite.py --smoke --work /tmp/rq1-ci-suite
+      - name: Exercise relay and shared-controller paths
+        run: |
+          for mode in relay composition-native composition-wasm; do
             sudo MODE="$mode" RATE=10000 WORK="/tmp/rq1-ci-$mode" \
               ./bench/rq1/topo/run_bgp.sh 1
           done
@@ -68,7 +73,7 @@ jobs:
           # Keep the active run directories private. Only the completed
           # diagnostic archive needs to be readable by upload-artifact.
           sudo tar -C /tmp --ignore-failed-read -czf - -- \
-            rq1-ci-builtin rq1-ci-cplane rq1-ci-relay \
+            rq1-ci-suite rq1-ci-relay \
             rq1-ci-composition-native rq1-ci-composition-wasm \
             > "$RUNNER_TEMP/convergence-instrument.tar.gz"
       - name: Preserve measurement diagnostics
