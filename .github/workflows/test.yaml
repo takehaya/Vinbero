@@ -95,8 +95,11 @@ jobs:
 
       - name: Build and test shared control-plane controllers
         run: |
-          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
-          VINBERO_CPLANE_PARITY=1 go test -race -timeout 35m ./sdk/go/cplane/customcontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./pkg/cplane/native
+          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet
+          VINBERO_CPLANE_PARITY=1 go test -race -timeout 35m ./sdk/go/cplane/customcontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./sdk/go/cplane/evpncontroller ./pkg/cplane/native
+
+      - name: Test EVPN controller with anonymous owned BPF maps
+        run: go test -exec "sudo env VINBERO_CPLANE_PARITY=1 VINBERO_CPLANE_EVPN_BPF=1" -race -timeout 35m -run '^TestEVPNControllerOwnedBPFMaps$' ./pkg/cplane
 
       - name: Run unit tests
         # pkg/bpf reloads the BPF collection per test and keeps outgrowing
@@ -178,7 +181,7 @@ jobs:
 
       - name: Run the plugin runtime and harness tests against the rebuilt artifacts
         run: |
-          make cplane-bgp-observer cplane-route-composition cplane-route-composition-observer
+          make cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet
           VINBERO_CPLANE_PARITY=1 go test -timeout 35m ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:

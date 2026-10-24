@@ -11,6 +11,7 @@ import (
 	"github.com/takehaya/vinbero/sdk/go/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplane/bgpobserver"
 	"github.com/takehaya/vinbero/sdk/go/cplane/customcontroller"
+	"github.com/takehaya/vinbero/sdk/go/cplane/evpncontroller"
 	"github.com/takehaya/vinbero/sdk/go/cplane/mupcontroller"
 	"go.uber.org/zap"
 )
@@ -88,6 +89,12 @@ func Instantiate(ctx context.Context, cfg Config) (inst *Instance, err error) {
 				client = &cplane.Client{Host: h}
 			}
 			i.controller, err = mupcontroller.New(input, client, h.log)
+		case EVPNIMET:
+			input, decodeErr := cplane.DecodeInputConfig(cfg.ConfigBlob, wasm.InputFeatureBGPPath|wasm.InputFeatureContexts)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			i.controller, err = evpncontroller.New(input, &cplane.Client{Host: h}, h.log)
 		case CustomBehavior:
 			i.controller, err = customcontroller.New(cfg.ConfigBlob, &cplane.Client{Host: h}, h.log)
 		case BGPObserver:
