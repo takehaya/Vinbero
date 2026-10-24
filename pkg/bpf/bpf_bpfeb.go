@@ -106,6 +106,13 @@ type BpfEsiKey struct {
 	Pad [6]uint8
 }
 
+type BpfEsiPeerKey struct {
+	_       structs.HostLayout
+	Esi     [10]uint8
+	Pad     [6]uint8
+	SrcAddr [16]uint8
+}
+
 type BpfFdbEntry struct {
 	_         structs.HostLayout
 	Oif       uint32
@@ -370,6 +377,7 @@ type BpfMapSpecs struct {
 	EcmpLiveMap            *ebpf.MapSpec `ebpf:"ecmp_live_map"`
 	EcmpPathMap            *ebpf.MapSpec `ebpf:"ecmp_path_map"`
 	EsiMap                 *ebpf.MapSpec `ebpf:"esi_map"`
+	EsiPeerMap             *ebpf.MapSpec `ebpf:"esi_peer_map"`
 	FdbMap                 *ebpf.MapSpec `ebpf:"fdb_map"`
 	FdbOwnerMap            *ebpf.MapSpec `ebpf:"fdb_owner_map"`
 	HeadendL2ExtMap        *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
@@ -445,6 +453,7 @@ type BpfMaps struct {
 	EcmpLiveMap            *ebpf.Map `ebpf:"ecmp_live_map"`
 	EcmpPathMap            *ebpf.Map `ebpf:"ecmp_path_map"`
 	EsiMap                 *ebpf.Map `ebpf:"esi_map"`
+	EsiPeerMap             *ebpf.Map `ebpf:"esi_peer_map"`
 	FdbMap                 *ebpf.Map `ebpf:"fdb_map"`
 	FdbOwnerMap            *ebpf.Map `ebpf:"fdb_owner_map"`
 	HeadendL2ExtMap        *ebpf.Map `ebpf:"headend_l2_ext_map"`
@@ -495,6 +504,7 @@ func (m *BpfMaps) Close() error {
 		m.EcmpLiveMap,
 		m.EcmpPathMap,
 		m.EsiMap,
+		m.EsiPeerMap,
 		m.FdbMap,
 		m.FdbOwnerMap,
 		m.HeadendL2ExtMap,

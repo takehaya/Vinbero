@@ -351,6 +351,16 @@ struct {
     __uint(max_entries, 256);
 } esi_map SEC(".maps");
 
+// Host-managed RT4 ES membership: {ESI, exact outer IPv6 source} -> present.
+// Unpinned like esi_map; rebuilt from RT4 replay, not from RT2 FDB state.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct esi_peer_key);
+    __type(value, __u8);
+    __uint(max_entries, 8192); // 256 ESIs * 32 RT4 members
+    __uint(map_flags, BPF_F_RDONLY_PROG);
+} esi_peer_map SEC(".maps");
+
 // Peer ESI side table: (bd_id, index) → ESI. Paired with bd_peer_map.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);

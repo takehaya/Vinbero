@@ -534,6 +534,15 @@ struct esi_key {
     __u8 _pad[6];
 } __attribute__((packed));
 
+// RT4 membership is independent of the RT2/RT3 per-BD forwarding peers.
+struct esi_peer_key {
+    __u8 esi[ESI_LEN];
+    __u8 _pad[6];
+    __u8 src_addr[IPV6_ADDR_LEN];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct esi_peer_key) == 32, "ESI peer key must be 32 bytes");
+
 // RFC 7432 Ethernet Segment master table value.
 // local_pe_src_addr is captured on EsCreate (not hard-coded via const volatile)
 // so one BPF image can serve any number of SIDs without a reload.

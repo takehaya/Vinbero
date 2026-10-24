@@ -851,7 +851,7 @@ func TestValidatePluginCollection_BTF_MissingOK(t *testing.T) {
 // downgrade it: a plugin that writes these forges the action the aux
 // discriminator reads.
 func TestValidatePluginROWrites_IntegrityMapWriteIsAlwaysFatal(t *testing.T) {
-	for _, m := range []string{"tailcall_ctx_map", "sid_aux_map", "sid_function_map", "fdb_map", "bd_peer_map", "bd_peer_reverse_map", "mup_uplink_v4_map", "mup_uplink_v6_map"} {
+	for _, m := range []string{"tailcall_ctx_map", "sid_aux_map", "sid_function_map", "fdb_map", "bd_peer_map", "bd_peer_reverse_map", "esi_peer_map", "mup_uplink_v4_map", "mup_uplink_v6_map"} {
 		lead := asm.Instructions{
 			asm.LoadMapPtr(asm.R1, 0).WithReference(m),
 			asm.StoreImm(asm.R1, 0, 99, asm.Word),
