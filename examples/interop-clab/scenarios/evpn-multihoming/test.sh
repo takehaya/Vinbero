@@ -15,6 +15,7 @@
 #   6. RT1 mass withdraw: withdrawing pe2's per-ES route shrinks the group to
 #      pe1 in one update, traffic survives, and re-advertising heals it.
 set -u
+SCENARIO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 PE1=clab-evpn-multihoming-pe1
 PE2=clab-evpn-multihoming-pe2
@@ -113,31 +114,29 @@ fi
 # --- 4. BUM single delivery (DF forwards, non-DF drops, no re-flood) --------
 echo ""
 echo "[4] BUM single delivery to the dual-homed CE"
-# Re-ARP from ce-remote so the request is BUM-flooded to both pe1/pe2's
-# End.DT2M; only the DF (pe1) delivers to ce-mh and split-horizon prevents a
-# loop, so ce-remote must see no duplicate (DUP!) ICMP replies.
-#
-# Late ARP replies from the preceding connectivity check can repopulate the
-# cache after a successful flush. Retry the verified setup, then require a
-# successful ping before checking duplicates; zero replies cannot prove BUM.
-clear_remote_neighbor() {
-    docker exec "$CE_REMOTE" ip neigh flush to "$CE_MH_ADDR" dev eth1 >/dev/null 2>&1 \
-        || docker exec "$CE_REMOTE" sh -c "ip link set dev eth1 down; ip link set dev eth1 up" >/dev/null 2>&1 \
-        || return 1
-    sleep 1
-    local neighbors
-    neighbors=$(docker exec "$CE_REMOTE" ip neigh show to "$CE_MH_ADDR" dev eth1 2>/dev/null) || return 1
-    # BusyBox also prints a lowercase "probes" count for unresolved entries.
-    ! grep -qiE "(^|[[:space:]])(REACHABLE|STALE|DELAY|PROBE|PERMANENT|NOARP)([[:space:]]|$)" <<<"$neighbors"
-}
-if ! retry_n 5 clear_remote_neighbor; then
-    ng "ce-remote: $CE_MH_ADDR neighbour not flushed (setup failed); BUM single-delivery not asserted"
-    docker exec "$CE_REMOTE" ip neigh show to "$CE_MH_ADDR" dev eth1 2>&1 | sed 's/^/      /'
-else
+# Explicit broadcast ARP bypasses the neighbour cache, including a valid STALE
+# entry. One request per process gives duplicate replies a full receive window;
+# -b keeps the request broadcast and -f (quit on first reply) is deliberately absent.
+# Check the expected reply IP/MAC and the send/receive totals before the existing
+# positive ICMP/DUP check. Neither silence nor a successful unicast ping proves BUM.
+arp_ok=1
+for probe in 1 2 3; do
+    if replies=$(docker exec "$CE_REMOTE" arping -b -c 1 -w 3 -I eth1 \
+        -s "$CE_REMOTE_ADDR" "$CE_MH_ADDR" 2>&1) \
+        && python3 "$SCENARIO_DIR/check_bum_arp.py" "$CE_MH_ADDR" "$CE_REMOTE_ADDR" "$CE_MH_MAC" <<<"$replies"; then
+        :
+    else
+        ng "ce-remote -> ce-mh: broadcast ARP probe $probe did not receive exactly one expected reply"
+        echo "$replies" | sed 's/^/      /'
+        arp_ok=0
+        break
+    fi
+done
+if [ "$arp_ok" -eq 1 ]; then
     if replies=$(docker exec "$CE_REMOTE" ping -c 3 -W 2 "$CE_MH_ADDR" 2>&1); then
         dup=$(grep -c "DUP!" <<<"$replies")
         if [ "$dup" -eq 0 ]; then
-            ok "ce-remote -> ce-mh: no duplicate replies (single DF delivery + split-horizon)"
+            ok "ce-remote -> ce-mh: three single-reply broadcast ARP probes and successful ICMP without duplicates"
         else
             ng "ce-remote -> ce-mh: $dup duplicate reply/replies (multi-homing double-delivery)"
         fi
