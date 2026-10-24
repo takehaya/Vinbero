@@ -22,6 +22,7 @@ import affinity
 
 ROOT = Path(__file__).resolve().parents[2]
 MODES = ('builtin', 'builtin-idle', 'cplane')
+CLEANUP_GRACE_SECONDS = 15
 SCRIPTS = [
     'bench/rq1/suite.py', 'bench/rq1/analysis.py', 'bench/rq1/affinity.py',
     'bench/rq1/topo/run_bgp.sh', 'bench/rq1/topo/setup.sh', 'bench/rq1/topo/teardown.sh',
@@ -138,6 +139,27 @@ class ChildRunner:
         self.cancelled = 128 + signum
         # The wait loop sends TERM once, then allows the driver's cleanup grace.
 
+    def cleanup_group(self, stream, deadline, send_term=True):
+        # The driver has exited. Its session may still contain orphaned workers.
+        pgid = self.child.pid
+        if send_term:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            print(f'suite: TERM remaining owned process group {pgid}', file=stream, flush=True)
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            print(f'suite: KILL remaining owned process group {pgid}', file=stream, flush=True)
+        except ProcessLookupError:
+            pass
+
     def run(self, command, log, env, timeout):
         if self.cancelled:
             return self.cancelled
@@ -163,23 +185,30 @@ class ChildRunner:
                 while True:
                     try:
                         code = self.child.wait(timeout=min(0.2, max(0, deadline-time.monotonic())))
+                        if code != 0 or self.cancelled:
+                            self.cleanup_group(stream, time.monotonic() + CLEANUP_GRACE_SECONDS)
                         return self.cancelled or code
                     except subprocess.TimeoutExpired:
                         if not self.cancelled and time.monotonic() < deadline:
                             continue
                         break
+                cleanup_deadline = time.monotonic() + CLEANUP_GRACE_SECONDS
                 try:
                     self.child.send_signal(signal.SIGTERM)
                 except ProcessLookupError:
                     pass
                 try:
-                    self.child.wait(timeout=15)
+                    self.child.wait(timeout=max(0, cleanup_deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     try:
                         os.killpg(self.child.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
                     self.child.wait()
+                else:
+                    # The driver may have forwarded TERM before exiting. Do not
+                    # interrupt descendant cleanup with a second TERM or new grace.
+                    self.cleanup_group(stream, cleanup_deadline, send_term=False)
                 return self.cancelled or 124
             finally:
                 self.child = None
