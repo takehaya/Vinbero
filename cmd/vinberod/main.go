@@ -405,8 +405,8 @@ func run(cliCtx *cli.Context) error {
 		// the data plane from received BGP routes: VPNv4/v6 -> headend maps,
 		// IPv6 unicast -> kernel FIB, SR Policy -> sr_policy_map.
 		// Drop BGP-learned kernel FIB routes on shutdown so they do not
-		// outlive the process. Runs after cancelSub (deferred below) so no
-		// route can be re-installed while cleanup is in flight.
+		// outlive the process. Runs after routeDemux.Stop (deferred below)
+		// has drained subscription callbacks, so they cannot re-install routes.
 		defer func() {
 			if err := applier.CleanupFIB(); err != nil {
 				lg.Warn("BGP FIB cleanup failed", zap.Error(err))

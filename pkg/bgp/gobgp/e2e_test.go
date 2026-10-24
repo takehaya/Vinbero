@@ -125,11 +125,7 @@ func setupVPNv4Receive(t *testing.T) e2eReceive {
 	}); err != nil {
 		t.Fatalf("PE2 AddPeer: %v", err)
 	}
-	cancelSub, err := pe2.Subscribe("", applier.Apply)
-	if err != nil {
-		t.Fatalf("PE2 Subscribe: %v", err)
-	}
-	t.Cleanup(cancelSub)
+	subscribeE2E(t, pe2, applier.Apply)
 
 	// --- Remote PE (PE1): plain gobgp BgpServer, the route source ---
 	pe1 := gobgpsrv.NewBgpServer()
