@@ -102,11 +102,7 @@ func TestE2E_EVPNRT2ToFdbAndBdPeer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PE2 AddPeer: %v", err)
 	}
-	cancelSub, err := pe2.Subscribe("", applier.Apply)
-	if err != nil {
-		t.Fatalf("PE2 Subscribe: %v", err)
-	}
-	t.Cleanup(cancelSub)
+	subscribeE2E(t, pe2, applier.Apply)
 
 	// Remote PE (PE1): plain gobgp, the RT2 source.
 	pe1 := gobgpsrv.NewBgpServer()
@@ -269,11 +265,7 @@ func TestE2E_EVPNRT3ToBdPeer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PE2 AddPeer: %v", err)
 	}
-	cancelSub, err := pe2.Subscribe("", applier.Apply)
-	if err != nil {
-		t.Fatalf("PE2 Subscribe: %v", err)
-	}
-	t.Cleanup(cancelSub)
+	subscribeE2E(t, pe2, applier.Apply)
 
 	pe1 := gobgpsrv.NewBgpServer()
 	go pe1.Serve()
@@ -421,11 +413,7 @@ func TestE2E_EVPNReplayRescuesEarlyRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PE2 AddPeer: %v", err)
 	}
-	cancelSub, err := pe2.Subscribe("", applier.Apply)
-	if err != nil {
-		t.Fatalf("PE2 Subscribe: %v", err)
-	}
-	t.Cleanup(cancelSub)
+	subscribeE2E(t, pe2, applier.Apply)
 
 	pe1 := gobgpsrv.NewBgpServer()
 	go pe1.Serve()

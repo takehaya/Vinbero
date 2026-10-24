@@ -66,3 +66,21 @@ go test -exec 'sudo env VINBERO_CPLANE_PARITY=1 VINBERO_CPLANE_EVPN_BPF=1' \
   -race -timeout 35m \
   -run '^TestEVPNControllerOwnedBPFMaps$' ./pkg/cplane
 ```
+
+The packet lifecycle tests use the same Manager and anonymous BPF collection with native, WASM, and both directions of same-name backend replacement.
+They check settled registration, IMET withdrawal, re-advertisement, and cleanup for one zero-ESI/tag-zero MAC.
+From the repository root, run them with BPF and network-namespace privileges:
+
+```sh
+make cplane-evpn-imet
+go test -exec "sudo env VINBERO_CPLANE_EVPN_PACKET=1 VINBERO_CPLANE_EVPN_WIRE=1 VINBERO_CPLANE_EVPN_WASM=$PWD/out/cplane-evpn-imet.wasm" \
+  -v -race -count 1 -timeout 35m \
+  -run '^TestEVPNController(Packet|Wire)Lifecycle$' ./pkg/cplane
+```
+
+`PacketLifecycle` uses `BPF_PROG_TEST_RUN` to inspect encapsulation and unchanged Ethernet bytes after withdrawal; known BUM metadata is checked separately.
+`WireLifecycle` attaches generic XDP to an owned veth pair and checks one identified packet per state in a one-second capture window.
+A positive capture must contain the expected IPv6/SRH headers and the complete original Ethernet frame; a negative capture requires no identified encapsulation in that window.
+Routes, neighbors, forwarding settings, and interfaces are confined to the test namespaces.
+The tests do not send traffic during replacement or establish BGP sessions, and do not verify remote decapsulation, general EVPN interoperability, or loss-free handoff.
+The kernel 6.1 CI job runs the test-run variant separately from the existing BPF load checks.

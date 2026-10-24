@@ -11,6 +11,8 @@ import urllib.request
 
 PREFIX = "10.0.2.0/24"
 PLUGIN = "rq1-receiver"
+IDLE_PREFIX = "10.0.254.0/24"
+MODES = ("builtin", "builtin-idle", "cplane", "relay", "composition-native", "composition-wasm")
 
 
 def rpc(address, service, method):
@@ -54,14 +56,14 @@ def verify(state, mode, sid, previous=None):
     require(entry.get("segments") == [sid], "wrong headend SID")
     require(entry.get("dstAddr") == sid, "wrong outer destination")
 
-    if mode == "builtin":
+    if mode in ("builtin", "builtin-idle"):
         require(len(groups) == 1 and groups[0].get("prefixes") == [PREFIX], "expected one builtin group")
         members = groups[0].get("members", [])
         require(len(members) == 1 and members[0].get("segments") == [sid], "wrong group SID")
     else:
         require(not groups, "direct headend unexpectedly has an ECMP group")
 
-    if mode not in ("cplane", "composition-native", "composition-wasm"):
+    if mode not in ("cplane", "builtin-idle", "composition-native", "composition-wasm"):
         require(not plugins, "baseline unexpectedly has a plugin")
         return
     require(len(plugins) == 1 and plugins[0].get("name") == PLUGIN, "measurement plugin is absent")
@@ -81,7 +83,13 @@ def verify(state, mode, sid, previous=None):
     require(not plugin.get("dead"), "plugin is dead")
     for field in ("droppedEvents", "restarts", "quarantinedEvents", "pendingDeclarations", "localSids", "advertisedRoutes"):
         require(int(plugin.get(field, 0)) == 0, f"plugin {field} is nonzero")
-    require(int(plugin.get("headendEntries", 0)) == 1, "plugin does not own the headend")
+    idle = mode == "builtin-idle"
+    families = ["mup_ipv4", "mup_ipv6"] if mode.startswith("composition-") else ["vpnv6" if idle else "vpnv4"]
+    require(plugin.get("families") == families, "wrong family subscription")
+    require(plugin.get("deliveryIdle") is True, "plugin delivery or initial replay has not finished")
+    require(int(plugin.get("snapshots", 0)) > 0, "plugin has not replayed its initial view")
+    require(plugin.get("scope", {}).get("headendPrefixes") == [IDLE_PREFIX if idle else PREFIX], "wrong headend scope")
+    require(int(plugin.get("headendEntries", 0)) == (0 if idle else 1), "wrong plugin headend ownership count")
     require(plugin.get("since"), "plugin start time is missing")
     if previous:
         before = previous["plugins"]["plugins"][0]
@@ -108,7 +116,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     wait = commands.add_parser("wait")
     wait.add_argument("--rpc", default="127.0.0.1:18081")
-    wait.add_argument("--mode", choices=("builtin", "cplane", "relay", "composition-native", "composition-wasm"), required=True)
+    wait.add_argument("--mode", choices=MODES, required=True)
     wait.add_argument("--sid", default="")
     wait.add_argument("--previous", type=Path)
     wait.add_argument("--out", type=Path, required=True)

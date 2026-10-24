@@ -192,6 +192,8 @@ func (s *PluginServer) CplanePluginStats(
 			Input: st.Input, InputReady: st.InputReady, InputFault: st.InputFault, CleanupPending: st.CleanupPending, DesiredRevision: st.DesiredRevision, AppliedRevision: st.AppliedRevision, OutputFailure: st.OutputFailure,
 			Capabilities:        st.Capabilities,
 			EndpointBehaviors:   behaviors,
+			Families:            st.Families,
+			DeliveryIdle:        st.DeliveryIdle,
 			DroppedEvents:       st.DroppedEvents,
 			Restarts:            uint32(st.Restarts),
 			QuarantinedEvents:   st.Quarantined,

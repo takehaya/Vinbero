@@ -64,6 +64,10 @@ for f in "${required[@]}"; do
   test -f "$f" || { echo "missing: $f" >&2; exit 1; }
 done
 
+# File links must work after installation without the source checkout. Check
+# repository URLs against this checkout without requiring network access.
+python3 "$ROOT/scripts/sdk_docs_verify.py" "$WORK/prefix/share/vinbero-sdk/README.md" "$ROOT"
+
 # The tarball ships headers + docs only; examples are NOT bundled (they live in
 # the repo under sdk/examples/). Confirm no stray example tree leaked in.
 if [ -e "$WORK/prefix/share/vinbero-sdk/examples" ]; then
