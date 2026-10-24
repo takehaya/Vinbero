@@ -54,14 +54,18 @@ func (f *evpnValueFake) ListBdPeers() (map[bpf.BdPeerKey]*bpf.HeadendEntry, erro
 func evpnPolicyFixture(t *testing.T, imet bool, rt string) bgp.RouteEvent {
 	t.Helper()
 	rdNumber := uint32(7)
-	behavior := gp.END_DT2U
 	sid := "fd00:2::1"
-	kind := bgp.EVPNRouteType(2)
 	if imet {
 		rdNumber = 8
-		behavior = gp.END_DT2M
 		sid = "fd00:3::1"
-		kind = 3
+	}
+	return evpnPolicyPath(t, imet, rt, rdNumber, "02:00:00:00:00:01", "2001:db8::1", sid)
+}
+func evpnPolicyPath(t *testing.T, imet bool, rt string, rdNumber uint32, mac, remote, sid string) bgp.RouteEvent {
+	t.Helper()
+	behavior, kind := gp.END_DT2U, bgp.EVPNRouteType(2)
+	if imet {
+		behavior, kind = gp.END_DT2M, 3
 	}
 	rd := gp.NewRouteDistinguisherTwoOctetAS(65000, rdNumber)
 	var n *gp.EVPNNLRI
@@ -69,12 +73,12 @@ func evpnPolicyFixture(t *testing.T, imet bool, rt string) bgp.RouteEvent {
 	if imet {
 		n, err = gp.NewEVPNMulticastEthernetTagRoute(rd, 0, netip.MustParseAddr("192.0.2.1"))
 	} else {
-		n, err = gp.NewEVPNMacIPAdvertisementRoute(rd, gp.EthernetSegmentIdentifier{}, 0, "02:00:00:00:00:01", netip.Addr{}, []uint32{0})
+		n, err = gp.NewEVPNMacIPAdvertisementRoute(rd, gp.EthernetSegmentIdentifier{}, 0, mac, netip.Addr{}, []uint32{0})
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	mp, err := gp.NewPathAttributeMpReachNLRI(gp.RF_EVPN, []gp.PathNLRI{{NLRI: n}}, netip.MustParseAddr("2001:db8::1"))
+	mp, err := gp.NewPathAttributeMpReachNLRI(gp.RF_EVPN, []gp.PathNLRI{{NLRI: n}}, netip.MustParseAddr(remote))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +87,7 @@ func evpnPolicyFixture(t *testing.T, imet bool, rt string) bgp.RouteEvent {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return bgp.RouteEvent{Family: bgp.FamilyEVPN, Source: bgp.PathSource{Peer: netip.MustParseAddr("192.0.2.254")}, EVPN: &bgp.EVPNRoute{Type: kind, RD: rd.String(), RTs: []string{rt}, MAC: "02:00:00:00:00:01", NextHop: "2001:db8::1", SRv6SID: sid}, BGPPath: &bgp.EncodedBGPPath{Codec: path.Codec, AFI: path.AFI, SAFI: path.SAFI, NLRI: path.NLRI, RouteKey: []byte(n.String()), Attributes: path.Attributes}}
+	return bgp.RouteEvent{Family: bgp.FamilyEVPN, Source: bgp.PathSource{Peer: netip.MustParseAddr("192.0.2.254")}, EVPN: &bgp.EVPNRoute{Type: kind, RD: rd.String(), RTs: []string{rt}, MAC: mac, NextHop: remote, SRv6SID: sid}, BGPPath: &bgp.EncodedBGPPath{Codec: path.Codec, AFI: path.AFI, SAFI: path.SAFI, NLRI: path.NLRI, RouteKey: []byte(n.String()), Attributes: path.Attributes}}
 }
 func evpnManagerLifecycle(t *testing.T, backend string, maps evpnFixtureMaps) {
 	t.Helper()
@@ -300,5 +304,79 @@ func TestEVPNControllerDelegationTarget(t *testing.T) {
 	event.IsWithdraw = true
 	if policy.delegates(event, func(bgp.RouteEvent) (string, uint16, bool) { return "", 100, true }) {
 		t.Fatal("withdrawal withheld from built-in cleanup")
+	}
+}
+
+func TestEVPNControllerRemoteConflictWithdrawal(t *testing.T) {
+	for _, backend := range []string{BackendNative, BackendWASM} {
+		t.Run(backend, func(t *testing.T) {
+			path := func(imet bool, rd uint32, mac, remote, sid string) bgp.RouteEvent {
+				return evpnPolicyPath(t, imet, "65000:7", rd, mac, remote, sid)
+			}
+			a := path(false, 7, "02:00:00:00:00:01", "2001:db8::1", "fd00:2::1")
+			b := path(false, 9, "02:00:00:00:00:02", "2001:db8::1", "fd00:2::2")
+			unrelated := path(false, 10, "02:00:00:00:00:03", "2001:db8::2", "fd00:2::3")
+			source := &compositionSource{newFakeSource()}
+			source.rib = []bgp.RouteEvent{a, unrelated, path(true, 8, "", "2001:db8::1", "fd00:3::1"), path(true, 11, "", "2001:db8::2", "fd00:3::2")}
+			maps := &evpnValueFake{serviceFake: newServiceFake(), entries: map[bpf.FdbKey]*bpf.FdbEntry{}}
+			manager, err := NewManager(ManagerConfig{AllowNative: true, Source: source, Headend: newFakeHeadendOps(), ForwardingMaps: maps, ResolveInputTarget: func(bgp.RouteEvent) (string, uint16, bool) { return "", 100, true }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close(context.Background())
+			policy := &v1.CplaneInputPolicy{Version: 1, Contexts: []*v1.CplaneInputContext{{Name: "l2", Grants: []*v1.CplaneInputGrant{{Families: []string{"evpn"}, RouteTargets: []string{"65000:7"}}}, DelegateEvpn: true, BridgeDomain: 100}}}
+			reg := Registration{Name: "imet", Backend: backend, Config: []byte(`{"context":"l2","source":"fd00:feed::1","observe_only":false}`), Capabilities: wasm.Capabilities{wasm.CapEVPN: {}}, Input: policy}
+			if backend == BackendNative {
+				reg.NativeID = native.EVPNIMET
+				reg.NativeVersion = native.ImplementationVersion
+			} else {
+				reg.Module, err = os.ReadFile("../../out/cplane-evpn-imet.wasm")
+				if err != nil {
+					if os.Getenv("VINBERO_CPLANE_PARITY") == "1" {
+						t.Fatal(err)
+					}
+					t.Skip(err)
+				}
+			}
+			if err = manager.Register(context.Background(), reg); err != nil {
+				t.Fatal(err)
+			}
+			check := func(want map[string]string, peerCount int) {
+				t.Helper()
+				if !manager.WaitIdle("imet", 5*time.Second) {
+					t.Fatal("worker did not drain")
+				}
+				st, _ := manager.StatsFor("imet")
+				if !st.InputReady || st.InputFault != "" || st.OutputFailure != "" || st.DesiredRevision == 0 || st.DesiredRevision != st.AppliedRevision {
+					t.Fatalf("unhealthy: %+v", st)
+				}
+				if len(maps.entries) != len(want) || len(maps.peerEntries) != peerCount {
+					t.Fatalf("wrong output sizes: MACs=%v peers=%v", maps.entries, maps.peerEntries)
+				}
+				for key, entry := range maps.entries {
+					mac := net.HardwareAddr(key.Mac[:]).String()
+					sid, ok := want[mac]
+					peer := maps.peerEntries[bpf.BdPeerKey{BdId: 100, Index: entry.PeerIndex}]
+					if !ok || key.BdId != 100 || entry.IsStatic != 1 || peer == nil || peer.NumSegments != 1 || peer.Segments[0] != netip.MustParseAddr(sid).As16() {
+						t.Fatalf("unexpected MAC %s entry %+v peer %+v", mac, entry, peer)
+					}
+				}
+			}
+			check(map[string]string{a.EVPN.MAC: "fd00:2::1", unrelated.EVPN.MAC: "fd00:2::3"}, 2)
+			source.emit("imet", b)
+			if !manager.WaitIdle("imet", 5*time.Second) {
+				t.Fatal("conflicting input did not drain")
+			}
+			// A rejected whole set used to leave this unrelated MAC installed.
+			unrelated.IsWithdraw = true
+			source.emit("imet", unrelated)
+			check(nil, 0)
+			b.IsWithdraw = true
+			source.emit("imet", b)
+			check(map[string]string{a.EVPN.MAC: "fd00:2::1"}, 1)
+			b = path(false, 9, "02:00:00:00:00:02", "2001:db8::1", "fd00:2::1")
+			source.emit("imet", b)
+			check(map[string]string{a.EVPN.MAC: "fd00:2::1", b.EVPN.MAC: "fd00:2::1"}, 1)
+		})
 	}
 }

@@ -145,6 +145,29 @@ func (c *Controller) reconcile() {
 		out = append(out, entry)
 	}
 	set.EVPN = out
+	// One authorized context maps a remote source to one unicast reverse peer.
+	// Remove every conflicting peer after MAC filtering so its invalid set
+	// cannot prevent independent MAC withdrawals from reaching the host.
+	remoteFirst := map[string]int{}
+	remoteConflicts := map[string]bool{}
+	for i, entry := range set.EVPN {
+		if at, exists := remoteFirst[entry.RemoteSrc]; exists {
+			if !reflect.DeepEqual(set.EVPN[at].Segments, entry.Segments) {
+				remoteConflicts[entry.RemoteSrc] = true
+			}
+		} else {
+			remoteFirst[entry.RemoteSrc] = i
+		}
+	}
+	out = set.EVPN[:0]
+	for _, entry := range set.EVPN {
+		if remoteConflicts[entry.RemoteSrc] {
+			c.log(cplane.LogWarn, "ambiguous remote peer: "+entry.RemoteSrc)
+			continue
+		}
+		out = append(out, entry)
+	}
+	set.EVPN = out
 	if !c.observeOnly {
 		if err := c.client.ApplyComposition(set); err != nil {
 			c.log(cplane.LogWarn, fmt.Sprintf("revision %d apply failed: %v", set.Revision, err))

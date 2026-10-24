@@ -28,6 +28,10 @@ func config() cplane.InputConfig {
 }
 func fixture(t *testing.T, imet bool, rdNumber uint32, remote, sid string, tag uint32) cplane.Event {
 	t.Helper()
+	return fixtureMAC(t, imet, rdNumber, remote, sid, tag, "02:00:00:00:00:01")
+}
+func fixtureMAC(t *testing.T, imet bool, rdNumber uint32, remote, sid string, tag uint32, mac string) cplane.Event {
+	t.Helper()
 	rd := bgp.NewRouteDistinguisherTwoOctetAS(65000, rdNumber)
 	var n *bgp.EVPNNLRI
 	var err error
@@ -36,7 +40,7 @@ func fixture(t *testing.T, imet bool, rdNumber uint32, remote, sid string, tag u
 		n, err = bgp.NewEVPNMulticastEthernetTagRoute(rd, tag, netip.MustParseAddr("192.0.2.1"))
 		behavior = bgp.END_DT2M
 	} else {
-		n, err = bgp.NewEVPNMacIPAdvertisementRoute(rd, bgp.EthernetSegmentIdentifier{}, tag, "02:00:00:00:00:01", netip.Addr{}, []uint32{0})
+		n, err = bgp.NewEVPNMacIPAdvertisementRoute(rd, bgp.EthernetSegmentIdentifier{}, tag, mac, netip.Addr{}, []uint32{0})
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -255,5 +259,50 @@ func TestBadIMETBehaviorAndStickyCollisionOrder(t *testing.T) {
 		withdraw.Route.Withdraw = true
 		c.Update([]cplane.Event{withdraw})
 		latest(t, r, 1)
+	}
+}
+
+func TestRemoteConflictExcludesEveryMACAndRecovers(t *testing.T) {
+	for _, order := range [][]int{{0, 1, 2}, {1, 2, 0}, {2, 0, 1}} {
+		r := &recorder{}
+		c := newController(t, r)
+		macs := []string{"02:00:00:00:00:01", "02:00:00:00:00:02", "02:00:00:00:00:03"}
+		sids := []string{"fd00:2::1", "fd00:2::2", "fd00:2::1"}
+		events := []cplane.Event{fixture(t, true, 20, "2001:db8::1", "fd00:3::1", 0), fixture(t, true, 21, "2001:db8::2", "fd00:3::2", 0), fixtureMAC(t, false, 22, "2001:db8::2", "fd00:2::3", 0, "02:00:00:00:00:04")}
+		var conflict cplane.Event
+		for position, index := range order {
+			e := fixtureMAC(t, false, uint32(7+position), "2001:db8::1", sids[index], 0, macs[index])
+			events = append(events, e)
+			if index == 1 {
+				conflict = e
+			}
+		}
+		c.Update(replay(events...))
+		if got := latest(t, r, 1).EVPN[0]; got.MAC != "02:00:00:00:00:04" {
+			t.Fatalf("order %v retained conflicting remote: %+v", order, got)
+		}
+		conflict.Route.Withdraw = true
+		c.Update([]cplane.Event{conflict})
+		got := latest(t, r, 3)
+		for _, entry := range got.EVPN {
+			if entry.RemoteSrc == "2001:db8::1" && !reflect.DeepEqual(entry.Segments, []string{"fd00:2::1"}) {
+				t.Fatalf("wrong recovered peer: %+v", entry)
+			}
+		}
+	}
+}
+
+func TestRemoteConflictUsesOnlyUnambiguousMACs(t *testing.T) {
+	r := &recorder{}
+	c := newController(t, r)
+	c.Update(replay(
+		fixture(t, true, 8, "2001:db8::1", "fd00:3::1", 0),
+		fixture(t, false, 7, "2001:db8::1", "fd00:2::1", 0),
+		fixture(t, false, 9, "2001:db8::1", "fd00:2::2", 0),
+		fixtureMAC(t, false, 10, "2001:db8::1", "fd00:2::2", 0, "02:00:00:00:00:02"),
+	))
+	got := latest(t, r, 1).EVPN[0]
+	if got.MAC != "02:00:00:00:00:02" || !reflect.DeepEqual(got.Segments, []string{"fd00:2::2"}) {
+		t.Fatalf("a removed MAC conflict affected a valid peer: %+v", got)
 	}
 }
