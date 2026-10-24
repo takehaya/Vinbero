@@ -74,9 +74,12 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 readme, source = map(Path, sys.argv[1:])
-ref = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
-                     capture_output=True, text=True)
-ref = ref.stdout.strip() if ref.returncode == 0 else "main"
+try:
+    ref = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
+                         capture_output=True, text=True)
+    ref = ref.stdout.strip() if ref.returncode == 0 else "main"
+except FileNotFoundError:
+    ref = "main"
 repository = "https://github.com/takehaya/Vinbero/blob/"
 # Fenced examples must survive staging verbatim, and their syntax is not a link.
 sections = re.split(r"(?m)^```[^\n]*$", readme.read_text())
