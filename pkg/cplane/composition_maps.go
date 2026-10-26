@@ -216,7 +216,8 @@ func (s *compositionMaps) applyUplinks(owner bpf.OwnerTag, desired []uplinkDesir
 }
 
 // Reuse a known slot only when the owner's BD has one old and one desired
-// peer, and only its segment list changes. More complex changes still prune.
+// peer, and only its segment list changes. MAC-free peers prune to release
+// reverse references left by withdrawn MACs; more complex changes also prune.
 func (s *compositionMaps) evpnSegmentUpdates(owner bpf.OwnerTag, current map[string]bpf.BdPeerKey, want map[string]peerDesired, owners map[bpf.BdPeerKey]bpf.OwnerTag) (map[string]string, error) {
 	if len(current) == 0 || len(want) == 0 {
 		return nil, nil
@@ -247,7 +248,7 @@ func (s *compositionMaps) evpnSegmentUpdates(owner bpf.OwnerTag, current map[str
 	}
 	var entries map[bpf.BdPeerKey]*bpf.HeadendEntry
 	for key, p := range want {
-		if _, held := current[key]; held || len(known[p.bd]) != 1 || ownedCount[p.bd] != 1 || desiredCount[p.bd] != 1 {
+		if _, held := current[key]; len(p.macs) == 0 || held || len(known[p.bd]) != 1 || ownedCount[p.bd] != 1 || desiredCount[p.bd] != 1 {
 			continue
 		}
 		oldKey := known[p.bd][0]

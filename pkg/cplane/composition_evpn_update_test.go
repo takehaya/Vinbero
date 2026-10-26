@@ -270,3 +270,22 @@ func TestCompositionEVPNSegmentUpdateFallsBack(t *testing.T) {
 		})
 	}
 }
+
+func TestCompositionEVPNSegmentUpdateLastMACWithdrawal(t *testing.T) {
+	p, maps := evpnUpdateFixture(t)
+	old := evpnUpdateSet(1, "fd00:c::1")
+	old.EvpnForwards[0].Flood = true
+	if err := putComposition(p, old); err != nil {
+		t.Fatal(err)
+	}
+	deletedPeer := false
+	maps.after = func(operation string) { deletedPeer = deletedPeer || operation == "delete peer" }
+	next := evpnUpdateSet(2, "fd00:c::9", "fd00:c::1")
+	next.EvpnForwards[0].Mac, next.EvpnForwards[0].Flood = "", true
+	if err := putComposition(p, next); err != nil {
+		t.Fatal(err)
+	}
+	if !deletedPeer || len(maps.entries) != 0 || len(maps.peers) != 1 {
+		t.Fatal("last MAC withdrawal must remove old peer dependencies before recreating the flood peer")
+	}
+}
