@@ -1,4 +1,4 @@
-# Cplane and Dplane plugins together
+# Custom Cplane and Dplane behavior
 
 Run the existing custom-behavior SDK plugins through two real `vinberod` processes, BGP and customer traffic, using four Linux network namespaces.
 This is the Docker-free counterpart of the [two-site containerlab scenario](../interop-clab/scenarios/cplane-plugin-2site/README.md).
@@ -16,6 +16,8 @@ Packets reach the [Dplane plugin](../../sdk/examples/plugin-custom-behavior/READ
 The customer route exists only in that VRF's table, so the reply proves actual decapsulation and delivery, in addition to plugin invocation.
 The return path uses an ordinary VPN route and built-in End.DT4.
 
+The example registers its Cplane instance as `custom-cdplane-behavior`.
+For native execution, it explicitly selects the existing `custom-behavior` implementation.
 The controller source is shared between the native and WASM builds.
 The Dplane plugin is an eBPF ELF in both cases; selecting WASM changes the Cplane runtime.
 No new SDK, behavior implementation or plugin binary is added by this example.
@@ -36,7 +38,7 @@ Load the `vrf` module if the kernel does not provide it directly.
 Then run:
 
 ```sh
-cd examples/cplane-dplane
+cd examples/custom-cdplane-behavior
 sudo ./setup.sh
 sudo ./test.sh
 sudo ./teardown.sh

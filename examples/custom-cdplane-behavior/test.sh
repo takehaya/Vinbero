@@ -57,12 +57,12 @@ ctl "$PE1" bgp advertise-vpn --family vpnv4 --prefix 10.1.0.0/24 --rd 65100:100 
 
 register() {
     local backend=$1
-    local args=()
+    local args=(--native custom-behavior)
     [[ "$backend" != wasm ]] || args=(--wasm "$WASM")
-    ctl "$PE1" plugin cplane register --name custom-behavior "${args[@]}" \
+    ctl "$PE1" plugin cplane register --name custom-cdplane-behavior "${args[@]}" \
         --config "$work/receive.bin" --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
         --capability headend --headend-prefix 10.2.0.0/24
-    ctl "$PE2" plugin cplane register --name custom-behavior "${args[@]}" \
+    ctl "$PE2" plugin cplane register --name custom-cdplane-behavior "${args[@]}" \
         --config "$work/send.bin" --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
         --capability advertise --capability local_sid --vrf vrf-cust --locator LOC2 --endpoint-slot 32
 }
@@ -75,7 +75,7 @@ ready() {
     local backend=$1 sid
     for ns in "$PE1" "$PE2"; do
         ctl "$ns" plugin cplane stats | awk -v backend="$backend" \
-            '$1 == "custom-behavior" && $2 == backend && $6 == "running" { found=1 } END { exit !found }' || return 1
+            '$1 == "custom-cdplane-behavior" && $2 == backend && $6 == "running" { found=1 } END { exit !found }' || return 1
     done
     sid=$(headend_sid) || return 1
     [[ "$sid" == fd00:200:* ]] || return 1
@@ -128,7 +128,7 @@ for backend in native wasm native; do
 done
 
 # Removing the advertising controller retracts its route and allocated SID.
-ctl "$PE2" plugin cplane unregister --name custom-behavior
+ctl "$PE2" plugin cplane unregister --name custom-cdplane-behavior
 withdrawn() {
     local entries sids
     entries=$(ctl "$PE1" --json headend-v4 list) || return 1
@@ -144,6 +144,6 @@ if [[ "$ping_rc" != 1 ]] || ! grep -Fq '2 packets transmitted, 0 received' <<< "
     print_error "Traffic still forwarded after the advertising plugin was removed"
     exit 1
 fi
-ctl "$PE1" plugin cplane unregister --name custom-behavior
+ctl "$PE1" plugin cplane unregister --name custom-cdplane-behavior
 ctl "$PE2" plugin unregister --type endpoint --index 32
 print_success "Cplane + Dplane lifecycle passed (native -> WASM -> native -> unregister)"
