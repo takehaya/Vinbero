@@ -1,0 +1,52 @@
+internal:
+  devices: [eth1, eth2]
+  bpf:
+    device_mode: generic
+  server:
+    bind: "127.0.0.1:8082"
+  logger:
+    level: info
+    format: text
+    no_color: true
+settings:
+  enable_stats: true
+  # Network namespaces share the filesystem. test.sh supplies a private path.
+  state_path: __STATE_PATH__
+  pin_maps:
+    enabled: false
+  cplane_plugins:
+    enabled: false
+vrfs:
+  entries:
+    - name: vrf-cust
+      table_id: 100
+      members: [eth2]
+      enable_l3mdev_rule: true
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    listen_port: 179
+    source_locator: LOC1
+  locators:
+    - name: LOC1
+      prefix: fd00:100::/48
+      block_len: 32
+      node_len: 16
+      function_len: 16
+      argument_len: 64
+      behavior: classic
+  vrf_bindings:
+    - vrf_name: vrf-cust
+      rd: "65100:100"
+      families:
+        vpnv4:
+          route_targets:
+            - rt: "65000:200"
+              direction: both
+  peers:
+    - neighbor: "2001:db8:ff::2"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families: [vpnv4]
