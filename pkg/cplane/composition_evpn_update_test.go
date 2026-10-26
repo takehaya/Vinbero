@@ -8,6 +8,7 @@ import (
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"google.golang.org/protobuf/proto"
 )
 
 type evpnUpdateMaps struct {
@@ -82,9 +83,9 @@ func TestCompositionEVPNSegmentUpdateKeepsForwarding(t *testing.T) {
 			set := func(revision uint64, segments ...string) *v1.PluginApplyChunk {
 				m := evpnUpdateSet(revision, segments...)
 				if shared {
-					other := *m.EvpnForwards[0]
+					other := proto.Clone(m.EvpnForwards[0]).(*v1.PluginEvpnForward)
 					other.Mac = "02:00:00:00:00:02"
-					m.EvpnForwards = append(m.EvpnForwards, &other)
+					m.EvpnForwards = append(m.EvpnForwards, other)
 				}
 				return m
 			}
@@ -201,9 +202,9 @@ func evpnPeerKey(peers map[string]bpf.BdPeerKey) string {
 func TestCompositionEVPNSegmentUpdateDeletesRevokedMACFirst(t *testing.T) {
 	p, maps := evpnUpdateFixture(t)
 	old := evpnUpdateSet(1, "fd00:c::1")
-	second := *old.EvpnForwards[0]
+	second := proto.Clone(old.EvpnForwards[0]).(*v1.PluginEvpnForward)
 	second.Mac = "02:00:00:00:00:02"
-	old.EvpnForwards = append(old.EvpnForwards, &second)
+	old.EvpnForwards = append(old.EvpnForwards, second)
 	if err := putComposition(p, old); err != nil {
 		t.Fatal(err)
 	}
@@ -253,9 +254,9 @@ func TestCompositionEVPNSegmentUpdateFallsBack(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "split":
-				other := *m.EvpnForwards[0]
+				other := proto.Clone(m.EvpnForwards[0]).(*v1.PluginEvpnForward)
 				other.Mac, other.RemoteSrc = "02:00:00:00:00:02", "fd00:c::3"
-				m.EvpnForwards = append(m.EvpnForwards, &other)
+				m.EvpnForwards = append(m.EvpnForwards, other)
 			}
 			maps.refreshes = 0
 			removed := false
