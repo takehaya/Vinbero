@@ -53,6 +53,12 @@ all events were handled. `Tick func(int64)` receives monotonic nanoseconds;
 `--tick-ms 1000` (or set `TickInterval` through the API) to drive periodic retries;
 omitting the interval leaves `Tick` undriven.
 
+Configuration is a plugin-specific input, separate from the bytes a Dplane program reads.
+The host forwards the configuration without decoding its private schema.
+Validate it before making declarations, then use the existing desired-set APIs for the required outputs.
+The [JSON-configured Cplane/Dplane example](../../examples/cplane-custom-cdplane-behavior/README.md) keeps JSON and policy encoding in one shared adapter and reuses `customcontroller.Config` / `NewWithConfig` for routing.
+Its `AuxRaw` field carries opaque endpoint bytes; the routing controller does not interpret their policy.
+
 For context-input registrations, replacing a healthy instance preserves its old
 forwarding set only while input authority, limits, and opaque configuration bytes
 remain identical. Configuration changes remove the old set before replay, including

@@ -1109,6 +1109,11 @@ replay、withdraw、apply 失敗後の再試行も対象にし、性能比較で
 現在、MUP の書き込みと観測 profile は `sdk/go/cplane/mupcontroller` を WASM の example と `pkg/cplane/native` から呼びます。
 独自 behavior は `sdk/go/cplane/customcontroller`、BGP observer は `sdk/go/cplane/bgpobserver` を同じ形で呼びます。
 native の実装 ID はそれぞれ `custom-behavior` と `bgp-observer`、version は `1` です。
+
+JSON で設定する専用例は `custom-cdplane-behavior`（version `1`）です。
+同じ共有 adapter が Native と WASM の両方で設定を解釈します。
+設定の意味と Dplane への aux の符号化をプラグイン側に置き、host は設定 bytes をそのまま渡します。
+操作手順は [Cplane と Dplane の専用例](../../../examples/custom-cdplane-behavior/README.md)を参照してください。
 独自 behavior の設定は従来の opaque protobuf、observer は opaque な設定を解釈せず BGPPath 機能を確認する契約を保ち、MUP だけが context input envelope を decode します。
 
 ## plugin を書く

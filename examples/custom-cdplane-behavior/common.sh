@@ -14,8 +14,8 @@ HOST2=cpdp-host2
 NAMESPACES=("$HOST1" "$PE1" "$PE2" "$HOST2")
 VINBEROD_BIN="$REPO_ROOT/out/bin/vinberod"
 VINBERO_BIN="$REPO_ROOT/out/bin/vinbero"
-WASM="$REPO_ROOT/sdk/examples/cplane-custom-behavior/plugin.wasm"
-PLUGIN="$REPO_ROOT/sdk/examples/plugin-custom-behavior/plugin.o"
+WASM="$REPO_ROOT/out/cplane-custom-cdplane-behavior.wasm"
+PLUGIN="$REPO_ROOT/sdk/examples/plugin-custom-cdplane-behavior/plugin.o"
 
 ctl() {
     local ns=$1

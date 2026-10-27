@@ -198,6 +198,11 @@ BTF に `<program>_aux` 型が無い場合は raw / index 経路だけが使え�
 
 ### 独立 aux のライフサイクル (`vbctl plugin aux`)
 
+`plugin aux alloc/update` は `--json-file PATH` で JSON ファイルを受け取れます。
+`--json-file`、inline の `--json`、`--raw` は同時指定できません。
+Cplane が `LocalSID.AuxRaw` で作成した aux は host 管理であり、この独立 aux コマンドでは更新できません。
+Cplane プラグインの設定を変更し、同名で再登録して反映します。
+
 `--plugin-aux-index` で SID から参照される aux は `sid_aux_map` 上で所有者タグ (`plugin:<mapType>:<slot>` 形式) により保護されており、払い出したスロットからしか書き換え / 解放できません。別スロット経由で触ろうとすると `PermissionDenied` が返ります。
 
 ```bash

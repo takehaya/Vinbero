@@ -64,8 +64,11 @@ func (o *sharedOps) ApplyAbort(id uint64) {
 func sharedModule(t *testing.T, id string) []byte {
 	t.Helper()
 	path := filepath.Join("..", "..", "..", "out", "cplane-bgp-observer.wasm")
-	if id == CustomBehavior {
+	switch id {
+	case CustomBehavior:
 		path = filepath.Join("..", "..", "..", "sdk", "examples", "cplane-custom-behavior", "plugin.wasm")
+	case CustomCDplaneBehavior:
+		path = filepath.Join("..", "..", "..", "out", "cplane-custom-cdplane-behavior.wasm")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -83,7 +86,7 @@ func sharedInstances(t *testing.T, id string, config []byte) ([]eventInstance, [
 	ops := []*sharedOps{{}, {}}
 	for index := range instances {
 		cfg := wasm.Config{Name: id, Ops: ops[index], ConfigBlob: config}
-		if id == CustomBehavior {
+		if id == CustomBehavior || id == CustomCDplaneBehavior {
 			cfg.Capabilities = wasm.Capabilities{wasm.CapHeadend: {}}
 		}
 		var err error

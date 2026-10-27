@@ -310,6 +310,13 @@ cplane-evpn-imet: ## build the optional IMET-gated EVPN static MAC policy
 		GOOS=wasip1 GOARCH=wasm go build -mod=readonly -buildmode=c-shared -trimpath \
 			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-evpn-imet.wasm .
 
+.PHONY: cplane-custom-cdplane-behavior
+cplane-custom-cdplane-behavior: ## Build the JSON-configured custom Cplane and Dplane controller
+	mkdir -p out
+	cd sdk/examples/cplane-custom-cdplane-behavior && \
+		GOTOOLCHAIN=go$(CPLANE_ARTIFACT_GO) GOOS=wasip1 GOARCH=wasm $(GOCMD) build -mod=readonly -buildmode=c-shared -trimpath \
+			-buildvcs=false -ldflags="-s -w" -o ../../../out/cplane-custom-cdplane-behavior.wasm .
+
 .PHONY: bench-cplane-build
 bench-cplane-build: cplane-route-composition cplane-route-composition-observer bench-rq1-build ## Build identical-controller native/WASM measurement artifacts
 	go test -c -o out/bench/cplane-runtime.test ./pkg/cplane/native
