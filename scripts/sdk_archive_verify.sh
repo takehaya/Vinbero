@@ -82,7 +82,7 @@ fi
 #    MAKEFILE_PLUGIN points at the template shipped inside the tarball so the
 #    in-tree relative include (../../c/Makefile.plugin) is bypassed.
 EXAMPLES_SRC="${EXAMPLES_SRC:-$ROOT/sdk/examples}"
-for ex in plugin-counter simple-acl plugin-counter-l2 plugin-custom-sh; do
+for ex in plugin-counter simple-acl plugin-counter-l2 plugin-custom-sh plugin-custom-cdplane-behavior; do
   exdir="$WORK/examples/$ex"
   mkdir -p "$exdir"
   cp "$EXAMPLES_SRC/$ex/Makefile" "$EXAMPLES_SRC/$ex/plugin.c" "$exdir/"
@@ -115,5 +115,8 @@ fi
 "$VBCTL" plugin validate \
   --prog "$WORK/examples/plugin-custom-sh/plugin.o" \
   --program plugin_custom_sh
+"$VBCTL" plugin validate \
+  --prog "$WORK/examples/plugin-custom-cdplane-behavior/plugin.o" \
+  --program plugin_custom_cdplane_behavior
 
 echo "[verify] OK"
