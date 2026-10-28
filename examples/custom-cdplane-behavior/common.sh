@@ -17,6 +17,26 @@ VINBERO_BIN="$REPO_ROOT/out/bin/vinbero"
 WASM="$REPO_ROOT/out/cplane-custom-cdplane-behavior.wasm"
 PLUGIN="$REPO_ROOT/sdk/examples/plugin-custom-cdplane-behavior/plugin.o"
 
+resolve_bpftool() {
+    if [[ -n "${BPFTOOL_BIN:-}" ]]; then
+        "$BPFTOOL_BIN" version >/dev/null 2>&1 || {
+            print_error "Cannot run BPFTOOL_BIN=$BPFTOOL_BIN"
+            return 1
+        }
+        return 0
+    fi
+    local candidate
+    # Ubuntu's wrapper requires tools matching the running kernel; use a real binary if needed.
+    for candidate in bpftool /usr/lib/linux-tools/*/bpftool /usr/lib/linux-tools-*/bpftool; do
+        if "$candidate" version >/dev/null 2>&1; then
+            BPFTOOL_BIN=$candidate
+            return 0
+        fi
+    done
+    print_error "No working bpftool found; install kernel tools or set BPFTOOL_BIN"
+    return 1
+}
+
 ctl() {
     local ns=$1
     shift

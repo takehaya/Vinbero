@@ -34,7 +34,10 @@ sudo ./teardown.sh
 ```
 
 The host needs root privileges, Linux network namespaces, veth, VRF and generic XDP support.
-On Debian/Ubuntu, the example uses `iproute2`, `iputils-ping`, `jq`, `bpftool`, `clang-18`, `libbpf-dev` and `libelf-dev`.
+On Debian/Ubuntu, install `iproute2`, `iputils-ping`, `jq`, `clang-18`, `libbpf-dev` and `libelf-dev`, plus a package providing `bpftool`.
+On Ubuntu 24.04, install `linux-tools-generic`; `bpftool` is a virtual package.
+The test can use the versioned binary when the system wrapper has no tools for the running kernel.
+To select another executable, run `sudo BPFTOOL_BIN=/absolute/path/to/bpftool ./test.sh`.
 Load the `vrf` module if the kernel does not provide it directly.
 
 The test uses four namespaces and two real daemons.
@@ -122,6 +125,7 @@ If registration fails, first check the field named in the error and the native/W
 If registration succeeds but traffic fails, check the SID, headend, BGP session, underlay source and the daemon logs printed by the lab.
 
 For an optional policy-counter check in this single-instance lab:
+If the system wrapper cannot run, replace `bpftool` below with the executable printed by the interactive test.
 
 ```sh
 sudo bpftool -j map dump name cdplane_policy |
