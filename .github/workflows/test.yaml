@@ -230,6 +230,7 @@ jobs:
           - gtp4-encap
           - gtp6-encap
           - gtp6-drop-in
+          - custom-cdplane-behavior
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -251,12 +252,19 @@ jobs:
             iputils-ping \
             ethtool \
             curl \
+            jq \
             python3-scapy
           if ! sudo modprobe vrf || ! sudo modprobe 8021q; then
             sudo apt-get install -y "linux-modules-extra-$(uname -r)"
           fi
           sudo modprobe vrf
           sudo modprobe 8021q
+
+      - name: Build the Dplane plugin for the combined plugin example
+        if: matrix.example == 'custom-cdplane-behavior'
+        run: |
+          sudo apt-get install -y --no-install-recommends clang libbpf-dev libelf-dev
+          make -C sdk/examples/plugin-custom-behavior
 
       - name: Setup test environment
         working-directory: examples/${{ matrix.example }}

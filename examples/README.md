@@ -97,4 +97,8 @@ sudo ./teardown.sh # クリーンアップ
 
 ### Plugin Extension
 
+| ディレクトリ | 機能 | 説明 |
+|---|---|---|
+| [`custom-cdplane-behavior/`](custom-cdplane-behavior/) | Cplane + Dplane | BGPによるSID広告と転送設定、eBPFでのカウントとデカプセル化、Native／WASMの動的交換 |
+
 プラグインによる拡張は SDK で行います。サンプル (ビルド確認 + E2E デモ) は [`../sdk/examples/`](../sdk/examples/) 参照、プラグインの書き方は [Plugin SDK ドキュメント](../docs/design/ja/plugin-sdk.md) 参照。
