@@ -95,8 +95,15 @@ jobs:
 
       - name: Build and test shared control-plane controllers
         run: |
-          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet
-          VINBERO_CPLANE_PARITY=1 go test -race -timeout 35m ./sdk/go/cplane/customcontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./sdk/go/cplane/evpncontroller ./pkg/cplane/native
+          make cplane-example cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet cplane-custom-cdplane-behavior
+          VINBERO_CPLANE_PARITY=1 go test -race -timeout 35m ./sdk/go/cplane/customcontroller ./sdk/go/cplane/cdplanecontroller ./sdk/go/cplane/bgpobserver ./sdk/go/cplane/mupcontroller ./sdk/go/cplane/evpncontroller ./pkg/cplane/native
+
+      - name: Build the dedicated Cplane/Dplane packet fixture
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-18 libbpf-dev libelf-dev
+          make -C sdk/examples/plugin-custom-cdplane-behavior BPF_CLANG=clang-18
+          VINBERO_CPLANE_PARITY=1 go test -race -run '^TestCDplaneMalformedConfigPreservesRunningInstance$' ./pkg/cplane
 
       - name: Test EVPN controller with anonymous owned BPF maps
         run: go test -exec "sudo env VINBERO_CPLANE_PARITY=1 VINBERO_CPLANE_EVPN_BPF=1" -race -timeout 35m -run '^TestEVPNControllerOwnedBPFMaps$' ./pkg/cplane
@@ -187,7 +194,7 @@ jobs:
 
       - name: Run the plugin runtime and harness tests against the rebuilt artifacts
         run: |
-          make cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet
+          make cplane-bgp-observer cplane-route-composition cplane-route-composition-observer cplane-evpn-imet cplane-custom-cdplane-behavior
           VINBERO_CPLANE_PARITY=1 go test -timeout 35m ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:
@@ -263,8 +270,9 @@ jobs:
       - name: Build the Dplane plugin for the combined plugin example
         if: matrix.example == 'custom-cdplane-behavior'
         run: |
-          sudo apt-get install -y --no-install-recommends clang libbpf-dev libelf-dev
-          make -C sdk/examples/plugin-custom-behavior
+          sudo apt-get install -y --no-install-recommends clang-18 libbpf-dev libelf-dev bpftool
+          make -C sdk/examples/plugin-custom-cdplane-behavior BPF_CLANG=clang-18
+          make cplane-custom-cdplane-behavior
 
       - name: Setup test environment
         working-directory: examples/${{ matrix.example }}

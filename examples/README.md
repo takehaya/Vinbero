@@ -110,7 +110,7 @@ Each example uses its own namespace prefix, such as `end-host1` or `dx4-router1`
 
 | Directory | Components | Description |
 | --- | --- | --- |
-| [`custom-cdplane-behavior/`](custom-cdplane-behavior/) | Cplane + Dplane | BGP-driven SID advertisement and forwarding configuration, eBPF counting and decapsulation, and dynamic native/WASM replacement |
+| [`custom-cdplane-behavior/`](custom-cdplane-behavior/) | Cplane + Dplane | JSON-configured outer IPv6 source-prefix filtering, BGP SID advertisement, VRF decapsulation, and native/WASM replacement |
 
 Use the SDK to build plugin extensions.
 See [`../sdk/examples/`](../sdk/examples/) for build checks and end-to-end demos, and the [Plugin SDK documentation (Japanese)](../docs/design/ja/plugin-sdk.md) for instructions on writing plugins.

@@ -15,7 +15,7 @@ const localSIDName = "self"
 // Controller owns the route view and pending declarations for one serial instance.
 type Controller struct {
 	client       *cplane.Client
-	config       configuration
+	config       Config
 	routes       cplane.RouteView
 	log          func(cplane.LogLevel, string)
 	allocatedSID string
@@ -30,6 +30,27 @@ func New(data []byte, client *cplane.Client, log func(cplane.LogLevel, string)) 
 	if err != nil {
 		return nil, err
 	}
+	return NewWithConfig(config, client, log)
+}
+
+// NewWithConfig owns a copy of the configuration, including endpoint bytes.
+// It retains the wire entry's partial sender configuration semantics; adapters
+// can impose a stricter configuration contract before calling this constructor.
+func NewWithConfig(config Config, client *cplane.Client, log func(cplane.LogLevel, string)) (*Controller, error) {
+	if config.Behavior == 0 {
+		config.Behavior = 0xFE01
+	}
+	if config.Behavior > 0xffff {
+		return nil, fmt.Errorf("behavior must fit in 16 bits")
+	}
+	config.HeadendPrefixes = append([]netip.Prefix(nil), config.HeadendPrefixes...)
+	for i, prefix := range config.HeadendPrefixes {
+		if !prefix.IsValid() || !prefix.Addr().Is4() {
+			return nil, fmt.Errorf("invalid IPv4 headend prefix %q", prefix)
+		}
+		config.HeadendPrefixes[i] = prefix.Masked()
+	}
+	config.AuxRaw = append([]byte(nil), config.AuxRaw...)
 	if client == nil {
 		return nil, fmt.Errorf("custom behavior requires a declaration client")
 	}
@@ -63,7 +84,7 @@ func (c *Controller) Update(events []cplane.Event) []cplane.EventResult {
 }
 
 func (c *Controller) acceptsRoute(r cplane.Route) bool {
-	if r.Family != "vpnv4" || r.EndpointBehavior != c.config.behavior || r.SRv6SID == "" {
+	if r.Family != "vpnv4" || r.EndpointBehavior != c.config.Behavior || r.SRv6SID == "" {
 		return false
 	}
 	prefix, err := netip.ParsePrefix(r.Prefix)
@@ -72,10 +93,10 @@ func (c *Controller) acceptsRoute(r cplane.Route) bool {
 	}
 	// With no configured filter, retain the original unrestricted receiver.
 	// Narrow host scopes must supply the same ranges in field 9.
-	if len(c.config.headendPrefixes) == 0 {
+	if len(c.config.HeadendPrefixes) == 0 {
 		return true
 	}
-	for _, allowed := range c.config.headendPrefixes {
+	for _, allowed := range c.config.HeadendPrefixes {
 		if prefix.Bits() >= allowed.Bits() && allowed.Contains(prefix.Masked().Addr()) {
 			return true
 		}
@@ -94,8 +115,8 @@ func (c *Controller) reconcile() {
 		var desired []cplane.LocalSID
 		if c.config.allocates() {
 			desired = []cplane.LocalSID{{
-				Name: localSIDName, Locator: c.config.locator, Slot: c.config.slot,
-				DecapVRF: c.config.decapVRF,
+				Name: localSIDName, Locator: c.config.Locator, Slot: c.config.Slot,
+				DecapVRF: c.config.DecapVRF, AuxRaw: c.config.AuxRaw,
 			}}
 		}
 		err := c.client.ApplyLocalSIDs(desired)
@@ -112,8 +133,8 @@ func (c *Controller) reconcile() {
 	}
 	if c.advertisePending && c.config.advertises() && c.allocatedSID != "" {
 		err := c.client.ApplyAdvertise([]cplane.AdvertisedRoute{{
-			Family: "vpnv4", VRF: c.config.vrf, Prefix: c.config.prefix,
-			SRv6SID: c.allocatedSID, EndpointBehavior: c.config.behavior, NextHop: c.config.nextHop,
+			Family: "vpnv4", VRF: c.config.VRF, Prefix: c.config.Prefix,
+			SRv6SID: c.allocatedSID, EndpointBehavior: c.config.Behavior, NextHop: c.config.NextHop,
 		}})
 		if err == nil {
 			c.advertisePending = false

@@ -178,11 +178,28 @@ func pluginAuxCommand() *cli.Command {
 	typeFlag := &cli.StringFlag{Name: "map-type", Required: true, Usage: "Plugin map type: " + pluginMapTypesCSV()}
 	slotFlag := &cli.UintFlag{Name: "slot", Required: true, Usage: "Plugin PROG_ARRAY slot (endpoint >= 32, headend >= 16)"}
 	jsonFlag := &cli.StringFlag{Name: "json", Usage: "JSON payload encoded via the plugin's <program>_aux BTF type"}
+	jsonFileFlag := &cli.StringFlag{Name: "json-file", Usage: "Path to plugin aux JSON (exclusive with --json and --raw)"}
 	rawFlag := &cli.StringFlag{Name: "raw", Usage: "Raw payload as hex (<= 256 bytes). Mutually exclusive with --json"}
 	indexFlag := &cli.UintFlag{Name: "index", Required: true, Usage: "Aux index previously returned by PluginAuxAlloc"}
 
 	parsePayload := func(c *cli.Context) (jsonStr string, rawBytes []byte, err error) {
+		selected := 0
+		for _, name := range []string{"json", "json-file", "raw"} {
+			if c.IsSet(name) {
+				selected++
+			}
+		}
+		if selected > 1 {
+			return "", nil, fmt.Errorf("--json, --json-file and --raw are mutually exclusive")
+		}
 		jsonStr = c.String("json")
+		if c.IsSet("json-file") {
+			data, readErr := os.ReadFile(c.String("json-file"))
+			if readErr != nil {
+				return "", nil, fmt.Errorf("read --json-file: %w", readErr)
+			}
+			jsonStr = string(data)
+		}
 		rawHex := c.String("raw")
 		if jsonStr != "" && rawHex != "" {
 			return "", nil, fmt.Errorf("--json and --raw are mutually exclusive")
@@ -203,14 +220,14 @@ func pluginAuxCommand() *cli.Command {
 			{
 				Name:  "alloc",
 				Usage: "Reserve an aux index and write payload",
-				Flags: []cli.Flag{typeFlag, slotFlag, jsonFlag, rawFlag},
+				Flags: []cli.Flag{typeFlag, slotFlag, jsonFlag, jsonFileFlag, rawFlag},
 				Action: func(c *cli.Context) error {
 					js, raw, err := parsePayload(c)
 					if err != nil {
 						return err
 					}
 					if js == "" && len(raw) == 0 {
-						return fmt.Errorf("either --json or --raw is required")
+						return fmt.Errorf("one of --json, --json-file or --raw is required")
 					}
 					clients := clientsFromContext(c)
 					req := &v1.PluginAuxAllocRequest{
@@ -233,14 +250,14 @@ func pluginAuxCommand() *cli.Command {
 			{
 				Name:  "update",
 				Usage: "Rewrite payload at an existing aux index",
-				Flags: []cli.Flag{typeFlag, slotFlag, indexFlag, jsonFlag, rawFlag},
+				Flags: []cli.Flag{typeFlag, slotFlag, indexFlag, jsonFlag, jsonFileFlag, rawFlag},
 				Action: func(c *cli.Context) error {
 					js, raw, err := parsePayload(c)
 					if err != nil {
 						return err
 					}
 					if js == "" && len(raw) == 0 {
-						return fmt.Errorf("either --json or --raw is required")
+						return fmt.Errorf("one of --json, --json-file or --raw is required")
 					}
 					clients := clientsFromContext(c)
 					req := &v1.PluginAuxUpdateRequest{
