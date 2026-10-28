@@ -10,6 +10,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/sdk/go/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplane/bgpobserver"
+	"github.com/takehaya/vinbero/sdk/go/cplane/cdplanecontroller"
 	"github.com/takehaya/vinbero/sdk/go/cplane/customcontroller"
 	"github.com/takehaya/vinbero/sdk/go/cplane/evpncontroller"
 	"github.com/takehaya/vinbero/sdk/go/cplane/mupcontroller"
@@ -97,6 +98,8 @@ func Instantiate(ctx context.Context, cfg Config) (inst *Instance, err error) {
 			i.controller, err = evpncontroller.New(input, &cplane.Client{Host: h}, h.log)
 		case CustomBehavior:
 			i.controller, err = customcontroller.New(cfg.ConfigBlob, &cplane.Client{Host: h}, h.log)
+		case CustomCDplaneBehavior:
+			i.controller, err = cdplanecontroller.New(cfg.ConfigBlob, &cplane.Client{Host: h}, h.log)
 		case BGPObserver:
 			i.controller, err = bgpobserver.New(wasm.InputFeatureBGPPath, h.log)
 		default:

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "routing": {
+    "locator": "LOC2",
+    "prefix": "10.2.0.0/24",
+    "vrf": "vrf-cust",
+    "slot": 32,
+    "next_hop": "2001:db8:ff::2",
+    "decap_vrf": "vrf-cust"
+  },
+  "endpoint": {
+    "allowed_underlay_prefix": "fd00:100::/128"
+  }
+}

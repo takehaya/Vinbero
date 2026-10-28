@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "routing": {
+    "headend_prefixes": ["10.2.0.0/24"]
+  }
+}

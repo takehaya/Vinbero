@@ -7,26 +7,27 @@ import (
 	"github.com/takehaya/vinbero/sdk/go/cplane/wire"
 )
 
-// Configuration is private to this controller. The host forwards these bytes
-// unchanged; registration separately grants capabilities, scope and the claim.
-type configuration struct {
-	behavior        uint32
-	locator         string
-	prefix          string
-	vrf             string
-	slot            uint32
-	nextHop         string
-	decapVRF        string
-	headendPrefixes []netip.Prefix
+// Config describes routing and opaque endpoint data. Registration separately
+// grants capabilities and scope; AuxRaw has meaning only to the Dplane plugin.
+type Config struct {
+	Behavior        uint32
+	Locator         string
+	Prefix          string
+	VRF             string
+	Slot            uint32
+	NextHop         string
+	DecapVRF        string
+	HeadendPrefixes []netip.Prefix
+	AuxRaw          []byte
 }
 
-func (c configuration) allocates() bool { return c.locator != "" && c.slot != 0 }
-func (c configuration) advertises() bool {
-	return c.allocates() && c.prefix != "" && c.vrf != "" && c.nextHop != ""
+func (c Config) allocates() bool { return c.Locator != "" && c.Slot != 0 }
+func (c Config) advertises() bool {
+	return c.allocates() && c.Prefix != "" && c.VRF != "" && c.NextHop != ""
 }
 
-func decodeConfig(data []byte) (configuration, error) {
-	cfg := configuration{behavior: 0xFE01}
+func decodeConfig(data []byte) (Config, error) {
+	cfg := Config{Behavior: 0xFE01}
 	d := wire.NewDecoder(data)
 	for d.Next() {
 		switch d.Field {
@@ -34,12 +35,12 @@ func decodeConfig(data []byte) (configuration, error) {
 			if d.Type != wire.Varint || d.Uint == 0 || d.Uint > 0xffff {
 				return cfg, wire.ErrMalformed
 			}
-			cfg.behavior = uint32(d.Uint)
+			cfg.Behavior = uint32(d.Uint)
 		case 5:
 			if d.Type != wire.Varint || d.Uint > 1<<32-1 {
 				return cfg, wire.ErrMalformed
 			}
-			cfg.slot = uint32(d.Uint)
+			cfg.Slot = uint32(d.Uint)
 		case 2, 3, 4, 7, 8, 9:
 			if d.Type != wire.Bytes {
 				return cfg, wire.ErrMalformed
@@ -47,21 +48,21 @@ func decodeConfig(data []byte) (configuration, error) {
 			value := string(d.Bytes)
 			switch d.Field {
 			case 2:
-				cfg.locator = value
+				cfg.Locator = value
 			case 3:
-				cfg.prefix = value
+				cfg.Prefix = value
 			case 4:
-				cfg.vrf = value
+				cfg.VRF = value
 			case 7:
-				cfg.nextHop = value
+				cfg.NextHop = value
 			case 8:
-				cfg.decapVRF = value
+				cfg.DecapVRF = value
 			case 9:
 				prefix, err := netip.ParsePrefix(value)
 				if err != nil || !prefix.Addr().Is4() {
 					return cfg, fmt.Errorf("invalid IPv4 headend prefix %q", value)
 				}
-				cfg.headendPrefixes = append(cfg.headendPrefixes, prefix.Masked())
+				cfg.HeadendPrefixes = append(cfg.HeadendPrefixes, prefix.Masked())
 			}
 		}
 	}

@@ -331,6 +331,7 @@ Choose a worked example by the policy being implemented:
 | --- | --- |
 | [BGP observer](examples/cplane-bgp-observer/README.md) | Read received GoBGP paths without write capabilities |
 | [Custom behavior](examples/cplane-custom-behavior/README.md) | Claim a behavior, allocate local SIDs, advertise routes, and declare headend state |
+| [JSON-configured Cplane and Dplane](examples/cplane-custom-cdplane-behavior/README.md) | Configure an outer source-prefix policy, advertise its service SID, and use native or WASM with the same JSON |
 | [MUP composition](examples/cplane-route-composition/README.md) | Join authorized MUP routes and build forwarding outputs |
 | [IMET-gated EVPN](examples/cplane-evpn-imet/README.md) | Join RT2 and RT3 for an optional static MAC policy |
 
