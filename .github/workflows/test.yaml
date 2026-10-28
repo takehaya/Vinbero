@@ -270,7 +270,7 @@ jobs:
       - name: Build the Dplane plugin for the combined plugin example
         if: matrix.example == 'custom-cdplane-behavior'
         run: |
-          sudo apt-get install -y --no-install-recommends clang-18 libbpf-dev libelf-dev bpftool
+          sudo apt-get install -y --no-install-recommends clang-18 libbpf-dev libelf-dev linux-tools-generic
           make -C sdk/examples/plugin-custom-cdplane-behavior BPF_CLANG=clang-18
           make cplane-custom-cdplane-behavior
 

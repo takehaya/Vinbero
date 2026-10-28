@@ -17,7 +17,8 @@ done
 for artifact in "$WASM" "$PLUGIN"; do
     [[ -s "$artifact" ]] || { print_error "Missing $artifact; see README.md"; exit 1; }
 done
-for dep in jq ss timeout bpftool; do command -v "$dep" >/dev/null; done
+for dep in jq ss timeout; do command -v "$dep" >/dev/null; done
+resolve_bpftool
 for ns in "${NAMESPACES[@]}"; do
     ip -n "$ns" link show lo >/dev/null
     [[ -z "$(ip netns pids "$ns")" ]] || { print_error "$ns is already in use"; exit 1; }
@@ -57,9 +58,9 @@ for ns in "$PE1" "$PE2"; do wait_for "$ns RPC ready" ctl "$ns" locator list; don
 cp "$EXAMPLE_DIR/pe1.json" "$work/pe1.json"
 cp "$EXAMPLE_DIR/pe2.json" "$work/pe2.json"
 jq '.endpoint.allowed_underlay_prefix = "fd00:100::bad/128"' "$work/pe2.json" > "$work/pe2-deny.json"
-before_maps=$(bpftool -j map show | jq '[.[] | select(.name == "cdplane_policy") | .id]')
+before_maps=$("$BPFTOOL_BIN" -j map show | jq '[.[] | select(.name == "cdplane_policy") | .id]')
 ctl "$PE2" plugin register --type endpoint --index 32 --prog "$PLUGIN" --program plugin_custom_cdplane_behavior
-decision_map=$(bpftool -j map show | jq -er --argjson before "$before_maps" \
+decision_map=$("$BPFTOOL_BIN" -j map show | jq -er --argjson before "$before_maps" \
     '[.[] | select(.name == "cdplane_policy") | .id | select(. as $id | $before | index($id) | not)] |
      if length == 1 then .[0] else error("expected one new policy counter map") end')
 ctl "$PE1" sid create --trigger-prefix fd00:100:0:1::/128 --action END_DT4 --vrf-name vrf-cust
@@ -96,7 +97,7 @@ slot_packets() {
 }
 
 policy_packets() {
-    bpftool -j map dump id "$decision_map" |
+    "$BPFTOOL_BIN" -j map dump id "$decision_map" |
         jq -er --argjson index "$1" '[.[] | (.formatted // .) | select(.key == $index) | .values[].value] | add'
 }
 
@@ -128,6 +129,7 @@ sid=$(headend_sid)
 if [[ "$interactive" == true ]]; then
     echo "Interactive lab is running; Ctrl-C stops its daemons."
     echo "Policy files and logs: $work"
+    echo "bpftool executable: $BPFTOOL_BIN"
     echo "From another terminal in $EXAMPLE_DIR:"
     echo "  sudo ./apply.sh pe2 $work/pe2-deny.json"
     echo "  sudo ./apply.sh pe2 $work/pe2.json"
@@ -177,13 +179,13 @@ done
 # Removing the advertising controller retracts its route and allocated SID.
 # Identify this endpoint's host maps through program references, rather than
 # selecting another namespace's maps with the same kernel names.
-program_maps=$(bpftool -j prog show | jq -er --argjson counter "$decision_map" \
+program_maps=$("$BPFTOOL_BIN" -j prog show | jq -er --argjson counter "$decision_map" \
     '[.[] | select(.map_ids | index($counter)) | .map_ids] | if length == 1 then .[0] else error("ambiguous endpoint") end')
-aux_map=$(bpftool -j map show | jq -er --argjson ids "$program_maps" \
+aux_map=$("$BPFTOOL_BIN" -j map show | jq -er --argjson ids "$program_maps" \
     '.[] | select(.name == "sid_aux_map") | .id | select(. as $id | $ids | index($id))')
-host_maps=$(bpftool -j prog show | jq -er --argjson aux "$aux_map" \
+host_maps=$("$BPFTOOL_BIN" -j prog show | jq -er --argjson aux "$aux_map" \
     '[.[] | select(.map_ids | index($aux)) | .map_ids[]] | unique')
-grant_map=$(bpftool -j map show | jq -er --argjson ids "$host_maps" \
+grant_map=$("$BPFTOOL_BIN" -j map show | jq -er --argjson ids "$host_maps" \
     '[.[] | select(.name | startswith("plugin_endt_vrf")) | .id | select(. as $id | $ids | index($id))] |
      if length == 1 then .[0] else error("ambiguous VRF grant map") end')
 aux_index=$(ctl "$PE2" --json sid list | jq -er --arg sid "$sid/128" \
@@ -194,8 +196,8 @@ for shift in 0 8 16 24; do
     printf -v byte '%02x' "$(((aux_index >> shift) & 255))"
     aux_key+=("$byte")
 done
-bpftool -j map lookup id "$aux_map" key hex "${aux_key[@]}" | jq -e '.value[0] == "0x01"' >/dev/null
-bpftool -j map dump id "$grant_map" | jq -e 'length == 1' >/dev/null
+"$BPFTOOL_BIN" -j map lookup id "$aux_map" key hex "${aux_key[@]}" | jq -e '.value[0] == "0x01"' >/dev/null
+"$BPFTOOL_BIN" -j map dump id "$grant_map" | jq -e 'length == 1' >/dev/null
 printf '%s\n' '{"version":1,"allowed_underlay_prefix":"fd00:100::/128"}' > "$work/endpoint.json"
 if ctl "$PE2" plugin aux update --map-type endpoint --slot 32 --index "$aux_index" \
     --json-file "$work/endpoint.json" > "$work/owner-rejection.log" 2>&1; then
@@ -219,8 +221,8 @@ withdrawn() {
         jq -e --arg sid "$sid/128" 'all((. // [])[]; .trigger_prefix != $sid)' <<< "$sids" >/dev/null
 }
 wait_for "Unregister retracted the headend and plugin SID" withdrawn
-bpftool -j map lookup id "$aux_map" key hex "${aux_key[@]}" | jq -e 'all(.value[]; . == "0x00")' >/dev/null
-bpftool -j map dump id "$grant_map" | jq -e 'length == 0' >/dev/null
+"$BPFTOOL_BIN" -j map lookup id "$aux_map" key hex "${aux_key[@]}" | jq -e 'all(.value[]; . == "0x00")' >/dev/null
+"$BPFTOOL_BIN" -j map dump id "$grant_map" | jq -e 'length == 0' >/dev/null
 print_success "Unregister cleared the host-managed aux and VRF grant"
 ping_rc=0
 replies=$(ip netns exec "$HOST1" ping -c 2 -W 1 10.2.0.10 2>&1) || ping_rc=$?
