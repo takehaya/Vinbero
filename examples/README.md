@@ -1,104 +1,116 @@
 # Vinbero Examples
 
-VinberoのSRv6機能を実際に試せるPlayground環境です。
+*(日本語: [README.ja.md](./README.ja.md))*
 
-ここには2系統のサンプルがあります。
+Playground environments for trying Vinbero's SRv6 features.
 
-- netns example（このディレクトリ直下の `end-*` / `headend-*` / `gtp*-*`）。各 SRv6 機能を単独の Linux network namespace 上で検証する自己完結スクリプト。`test.yaml` の matrix に登録した example を CI で並列実行します。matrix 未登録の example はローカル実行のみです。
-- interop ラボ（[`interop-clab/`](interop-clab/)）。Vinbero を FRR など第三者実装と相互運用させる containerlab シナリオ群。
+This directory contains two kinds of examples:
 
-このページは netns example を説明します。interop ラボは [`interop-clab/README.md`](interop-clab/README.md) を参照してください。
+- **Network namespace examples** (`end-*`, `headend-*` and `gtp*-*` directly under this directory): self-contained scripts that test individual SRv6 features using Linux network namespaces.
+  CI runs the examples listed in the `test.yaml` matrix in parallel.
+  Examples outside that matrix run locally only.
+- **Interoperability labs** ([`interop-clab/`](interop-clab/)): containerlab scenarios for testing Vinbero with third-party implementations such as FRR.
 
-## 前提のビルド
+This page covers the network namespace examples.
+See the [interoperability lab README](interop-clab/README.md) for containerlab scenarios.
 
-netns example は `out/bin/vinberod` と `out/bin/vinbero` を使います。clone 直後は repo ルートで一度ビルドしてください。
+## Build prerequisites
+
+The network namespace examples use `out/bin/vinberod` and `out/bin/vinbero`.
+After cloning the repository, build them from the repository root:
 
 ```bash
 make protobuf-gen && make bpf-gen && make build
 ```
 
-ビルドしていないと `setup.sh` は通っても `test.sh` が Vinbero failed to start で落ちます。
+Without the binaries, `setup.sh` may succeed but `test.sh` fails with `Vinbero failed to start`.
 
-## クイックスタート
+## Quick start
 
 ```bash
 cd examples/end
-sudo ./setup.sh    # 環境構築
-sudo ./test.sh     # テスト実行
-sudo ./teardown.sh # クリーンアップ
+sudo ./setup.sh    # Set up the environment
+sudo ./test.sh     # Run the tests
+sudo ./teardown.sh # Clean up
 ```
 
-各 example は固有のプレフィックスで独自の namespace 空間を持つため（例: `end-host1`、`dx4-router1`）、衝突なく並列実行できます。
+Each example uses its own namespace prefix, such as `end-host1` or `dx4-router1`, so different examples can run in parallel without namespace collisions.
 
-## 新しいExampleの追加
-1. **ディレクトリを作成**: `examples/<name>/`
-2. **必要なファイル**:
-   - `README.md`: シナリオの説明
-   - `setup.sh`: 環境構築（`common/`の関数を使用）
-   - `test.sh`: テスト実行
-   - `teardown.sh`: クリーンアップ
-   - `vinbero_*.yaml`: Vinbero設定
-3. **プレフィックス設定**: 他 example と衝突しない固有のプレフィックスを `TOPO_NS_PREFIX` に設定します。ディレクトリ名から導くか、短い固有文字列を直接指定します。
+## Add an example
+
+1. Create a directory at `examples/<name>/`.
+2. Add the required files:
+   - `README.md`: scenario description.
+   - `setup.sh`: environment setup using the helpers in `common/`.
+   - `test.sh`: test execution.
+   - `teardown.sh`: cleanup.
+   - `vinbero_*.yaml`: Vinbero configuration.
+3. Set `TOPO_NS_PREFIX` to a prefix that does not overlap with other examples.
+   Derive it from the directory name or choose a short prefix explicitly:
+
    ```bash
    EXAMPLE_NAME="$(basename "$SCRIPT_DIR")"
    export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-${EXAMPLE_NAME}-}"
-   # または短い固有プレフィックス: export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-dx4-}"
+   # Or use a short prefix: export TOPO_NS_PREFIX="${TOPO_NS_PREFIX:-dx4-}"
    ```
-4. **ワークフローに追加**: `.github/workflows/test.yaml`の`Integration Test`ジョブの`matrix.example`に追加
 
-## 共通機能
+4. Add the example to `matrix.example` in the `Integration Test` job in [`.github/workflows/test.yaml`](../.github/workflows/test.yaml).
 
-各exampleで使える共通ユーティリティ：
+## Shared helpers
 
-- **`common/netns.sh`**: namespace操作（create/delete/srv6有効化/sysctl設定）
-- **`common/veth.sh`**: vethペア作成とIP設定（IPv4/IPv6自動判定）
-- **`common/test_utils.sh`**: テストヘルパー（ping疎通確認、vinberodデーモン起動/readyチェック、root権限チェック、カラー出力）
-- **`common/topologies/three_router.sh`**: 3ルータートポロジーの構築/削除（設定変数でカスタマイズ可能）
+- **`common/netns.sh`**: create and delete namespaces, enable SRv6, and configure sysctls.
+- **`common/veth.sh`**: create veth pairs and configure IP addresses, detecting IPv4 or IPv6 automatically.
+- **`common/test_utils.sh`**: check ping connectivity, start vinberod and check readiness, verify root privileges, and print colored output.
+- **`common/topologies/three_router.sh`**: create and remove a three-router topology, customized through configuration variables.
 
-## Example一覧
+## Available examples
 
-### Endpoint Functions
-| ディレクトリ | 機能 | 説明 |
-|---|---|---|
-| `end/` | End | 基本SRHエンドポイント処理 |
-| `end-x/` | End.X | ネクストホップ指定のクロスコネクト |
-| `end-t/` | End.T | VRF指定のFIBルックアップ |
-| `end-dx4/` | End.DX4 | IPv4デカプセレーション |
-| `end-dx6/` | End.DX6 | IPv6デカプセレーション |
-| `end-dt4/` | End.DT4 | VRF対応IPv4テーブルルックアップ |
-| `end-dt6/` | End.DT6 | VRF対応IPv6テーブルルックアップ |
-| `end-dt2/` | End.DT2 | L2VPN（FDB学習 + ブリッジ転送） |
-| `end-dt2-p2mp/` | End.DT2 P2MP | マルチサイトL2VPN（BUMフラッディング） |
-| `end-dt2m-multihomed/` | End.DT2M | multi-homed L2VPN（DF election + split-horizon） |
-| `end-dx2v/` | End.DX2V | VLAN単位のL2クロスコネクト |
-| `end-un/` | uN | NEXT-C-SID の shift 転送 (RFC 9800、F3216) |
-| `end-ua/` | uA | NEXT-C-SID の shift + adjacency 転送 (RFC 9800、F3216) |
-| `end-ut/` | uT | NEXT-C-SID の shift + VRF table 転送 (RFC 9800、F3216) |
-| `end-udt4/` | uDT4 | container 最終 uSID の End.DT4 (zero-padded /128 の LPM 優先) |
-| `end-un-usd/` | uN + USD | SRH なし container 終端での outer decap |
-| `end-replace/` | End(REP) | REPLACE-CSID の container walk (RFC 9800、32bit C-SID) |
-| `end-t-replace/` | End.T(REP) | REPLACE-CSID の walk を VRF table で解決 (main table blackhole で構造証明) |
-| `end-lbs/` | End.LBS | locator block swap で C-SID 列を別 block へ載せ替え (RFC 9800 Sec.7) |
+### Endpoint functions
 
-### Headend Functions
-| ディレクトリ | 機能 | 説明 |
-|---|---|---|
-| `headend-v4/` | H.Encaps (IPv4) | IPv4パケットのSRv6カプセル化 |
-| `headend-v6/` | H.Encaps (IPv6) | IPv6パケットのSRv6カプセル化 |
-| `headend-l2/` | H.Encaps.L2 | L2フレームのSRv6カプセル化 |
-| `headend-ecmp/` | H.Encaps + ECMP | headend ECMP path group と liveness fast reroute |
+| Directory | Behavior | Description |
+| --- | --- | --- |
+| `end/` | End | Basic SRH endpoint processing |
+| `end-x/` | End.X | Cross-connect to a specified next hop |
+| `end-t/` | End.T | FIB lookup in a specified VRF |
+| `end-dx4/` | End.DX4 | IPv4 decapsulation |
+| `end-dx6/` | End.DX6 | IPv6 decapsulation |
+| `end-dt4/` | End.DT4 | IPv4 table lookup in a VRF |
+| `end-dt6/` | End.DT6 | IPv6 table lookup in a VRF |
+| `end-dt2/` | End.DT2 | L2VPN with FDB learning and bridge forwarding |
+| `end-dt2-p2mp/` | End.DT2 P2MP | Multisite L2VPN with BUM flooding |
+| `end-dt2m-multihomed/` | End.DT2M | Multihomed L2VPN with DF election and split horizon |
+| `end-dx2v/` | End.DX2V | Per-VLAN L2 cross-connect |
+| `end-un/` | uN | NEXT-C-SID shift forwarding (RFC 9800, F3216) |
+| `end-ua/` | uA | NEXT-C-SID shift and adjacency forwarding (RFC 9800, F3216) |
+| `end-ut/` | uT | NEXT-C-SID shift and VRF table forwarding (RFC 9800, F3216) |
+| `end-udt4/` | uDT4 | End.DT4 at the final uSID in a container, with LPM priority for a zero-padded /128 |
+| `end-un-usd/` | uN + USD | Outer decapsulation at the end of a container without an SRH |
+| `end-replace/` | End(REP) | REPLACE-CSID container walk (RFC 9800, 32-bit C-SID) |
+| `end-t-replace/` | End.T(REP) | REPLACE-CSID container walk using a VRF table, with a main-table blackhole to verify table selection |
+| `end-lbs/` | End.LBS | Locator block swap that moves a C-SID sequence to a different block (RFC 9800 Section 7) |
+
+### Headend functions
+
+| Directory | Behavior | Description |
+| --- | --- | --- |
+| `headend-v4/` | H.Encaps (IPv4) | SRv6 encapsulation of IPv4 packets |
+| `headend-v6/` | H.Encaps (IPv6) | SRv6 encapsulation of IPv6 packets |
+| `headend-l2/` | H.Encaps.L2 | SRv6 encapsulation of L2 frames |
+| `headend-ecmp/` | H.Encaps + ECMP | Headend ECMP path groups and liveness-based fast reroute |
 
 ### Mobile (GTP-U)
-| ディレクトリ | 機能 | 説明 |
-|---|---|---|
-| `gtp4-encap/` | H.M.GTP4.D + End.M.GTP4.E | GTP-U/IPv4とSRv6の相互変換 |
-| `gtp6-encap/` | H.M.GTP6.D + End.M.GTP6.E | GTP-U/IPv6とSRv6の相互変換 |
-| `gtp6-drop-in/` | End.M.GTP6.D.Di | GTP-U Drop-Inモード |
 
-### Plugin Extension
+| Directory | Behavior | Description |
+| --- | --- | --- |
+| `gtp4-encap/` | H.M.GTP4.D + End.M.GTP4.E | Conversion between GTP-U/IPv4 and SRv6 |
+| `gtp6-encap/` | H.M.GTP6.D + End.M.GTP6.E | Conversion between GTP-U/IPv6 and SRv6 |
+| `gtp6-drop-in/` | End.M.GTP6.D.Di | GTP-U drop-in mode |
 
-| ディレクトリ | 機能 | 説明 |
-|---|---|---|
-| [`custom-cdplane-behavior/`](custom-cdplane-behavior/) | Cplane + Dplane | JSON設定による送信元prefixの許可、BGPによるSID広告とVRFへのデカプセル化、Native／WASMの動的交換 |
+### Plugin extensions
 
-プラグインによる拡張は SDK で行います。サンプル (ビルド確認 + E2E デモ) は [`../sdk/examples/`](../sdk/examples/) 参照、プラグインの書き方は [Plugin SDK ドキュメント](../docs/design/ja/plugin-sdk.md) 参照。
+| Directory | Components | Description |
+| --- | --- | --- |
+| [`custom-cdplane-behavior/`](custom-cdplane-behavior/) | Cplane + Dplane | JSON-configured outer IPv6 source-prefix filtering, BGP SID advertisement, VRF decapsulation, and native/WASM replacement |
+
+Use the SDK to build plugin extensions.
+See [`../sdk/examples/`](../sdk/examples/) for build checks and end-to-end demos, and the [Plugin SDK documentation (Japanese)](../docs/design/ja/plugin-sdk.md) for instructions on writing plugins.
