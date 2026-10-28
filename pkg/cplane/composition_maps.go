@@ -214,6 +214,73 @@ func (s *compositionMaps) applyUplinks(owner bpf.OwnerTag, desired []uplinkDesir
 	}
 	return nil
 }
+
+// Reuse a known slot only when the owner's BD has one old and one desired
+// peer, and only its segment list changes. MAC-free peers prune to release
+// reverse references left by withdrawn MACs; more complex changes also prune.
+func (s *compositionMaps) evpnSegmentUpdates(owner bpf.OwnerTag, current map[string]bpf.BdPeerKey, want map[string]peerDesired, owners map[bpf.BdPeerKey]bpf.OwnerTag) (map[string]string, error) {
+	if len(current) == 0 || len(want) == 0 {
+		return nil, nil
+	}
+	changed := false
+	for key := range want {
+		if _, held := current[key]; !held {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return nil, nil
+	}
+	updates := map[string]string{}
+	known := map[uint16][]string{}
+	ownedCount, desiredCount := map[uint16]int{}, map[uint16]int{}
+	for key, slot := range current {
+		known[slot.BdId] = append(known[slot.BdId], key)
+	}
+	for slot, tag := range owners {
+		if tag == owner {
+			ownedCount[slot.BdId]++
+		}
+	}
+	for _, p := range want {
+		desiredCount[p.bd]++
+	}
+	var entries map[bpf.BdPeerKey]*bpf.HeadendEntry
+	for key, p := range want {
+		if _, held := current[key]; len(p.macs) == 0 || held || len(known[p.bd]) != 1 || ownedCount[p.bd] != 1 || desiredCount[p.bd] != 1 {
+			continue
+		}
+		oldKey := known[p.bd][0]
+		slot := current[oldKey]
+		if owners[slot] != owner {
+			continue
+		}
+		if entries == nil {
+			var err error
+			entries, err = s.maps.ListBdPeers()
+			if err != nil {
+				return nil, err
+			}
+		}
+		old := entries[slot]
+		if old == nil {
+			continue
+		}
+		previous := p
+		previous.entry = *old
+		if previous.key() != oldKey {
+			continue
+		}
+		updated := *old
+		updated.NumSegments, updated.Segments, updated.DstAddr = p.entry.NumSegments, p.entry.Segments, p.entry.DstAddr
+		if updated == p.entry {
+			updates[key] = oldKey
+		}
+	}
+	return updates, nil
+}
+
 func (s *compositionMaps) applyEVPN(owner bpf.OwnerTag, desired []peerDesired, write bool) error {
 	if s.maps == nil {
 		if len(desired) > 0 {
@@ -262,11 +329,18 @@ func (s *compositionMaps) applyEVPN(owner bpf.OwnerTag, desired []peerDesired, w
 		current = map[string]bpf.BdPeerKey{}
 		s.peers[owner] = current
 	}
+	updates, err := s.evpnSegmentUpdates(owner, current, want, peers)
+	if err != nil {
+		return err
+	}
 	keepPeers := map[bpf.BdPeerKey]bool{}
 	for key, pk := range current {
 		if _, ok := want[key]; ok {
 			keepPeers[pk] = true
 		}
+	}
+	for _, oldKey := range updates {
+		keepPeers[current[oldKey]] = true
 	}
 	// Rewrite MACs after peer preparation. First remove only MACs absent from
 	// the new desired set; a failed delete keeps every peer dependency reserved.
@@ -319,9 +393,17 @@ func (s *compositionMaps) applyEVPN(owner bpf.OwnerTag, desired []peerDesired, w
 	for _, key := range keys {
 		p := want[key]
 		pk, held := current[key]
+		oldKey, updating := updates[key]
+		if updating {
+			pk, held = current[oldKey]
+		}
 		if held {
 			if err := s.maps.CreateBdPeerOwned(pk.BdId, pk.Index, &p.entry, [bpf.ESILen]byte{}, p.remote, len(p.macs) > 0, owner); err != nil {
 				return err
+			}
+			if updating {
+				delete(current, oldKey)
+				current[key] = pk
 			}
 		} else {
 			idx, err := s.maps.CreateBdPeerAtFreeIndexOwned(p.bd, &p.entry, [bpf.ESILen]byte{}, p.remote, len(p.macs) > 0, owner)
