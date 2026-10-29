@@ -194,6 +194,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	plugins map[string]*plugin
+	closed  bool
 	seq     atomic.Uint64
 }
 
@@ -208,11 +209,10 @@ type plugin struct {
 	name   string
 	reg    Registration
 	inst   pluginInstance
-	// One cache belongs to this registration generation and its immutable
-	// module/config. Only worker-owned restarts reuse it; replacements get a
-	// fresh cache. Teardown waits for that worker before closing the cache.
+	// Compatible replacements share compiled code, never a guest instance.
+	// Each generation owns a lease until its worker and runtime have closed.
 	compilationCache wazero.CompilationCache
-	cacheCloseOnce   sync.Once
+	cacheLease       *compilationCacheLease
 	ops              *PluginOps
 	worker           *worker
 	cancel           func()
@@ -606,6 +606,12 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	}
 	m.registerMu.Lock()
 	defer m.registerMu.Unlock()
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return errManagerClosed
+	}
 	if err := m.checkInputRegistration(reg, policy); err != nil {
 		return err
 	}
@@ -646,6 +652,7 @@ func (m *Manager) Register(ctx context.Context, reg Registration) error {
 	// after registration: every restart uses the same module and config.
 	reg.Module = bytes.Clone(reg.Module)
 	reg.Config = bytes.Clone(reg.Config)
+	ownRegistrationAuthority(&reg)
 
 	p, err := m.build(ctx, reg)
 	if err != nil {
@@ -1112,20 +1119,14 @@ func (m *Manager) build(ctx context.Context, reg Registration) (*plugin, error) 
 	if err != nil {
 		return nil, err
 	}
-	var cache wazero.CompilationCache
-	if reg.Backend == BackendWASM {
-		cache = wazero.NewCompilationCache()
-	}
+	cache, lease := m.registrationCompilationCache(reg)
 	inst, err := m.instantiate(ctx, reg, config, ops, cache)
 	if err != nil {
-		// Instantiate has already closed its failed runtime. No worker or
-		// other instance can still hold this unpublished generation.
-		if cache != nil {
-			_ = cache.Close(ctx)
-		}
+		// Instantiate closed its failed runtime; release only this candidate.
+		_ = lease.release(ctx)
 		return nil, err
 	}
-	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops, counters: newCounters(), config: config, compilationCache: cache}
+	p := &plugin{name: reg.Name, reg: reg, inst: inst, ops: ops, counters: newCounters(), config: config, compilationCache: cache, cacheLease: lease}
 	if policy != nil {
 		p.input = &inputDelivery{policy: policy}
 	}
@@ -1291,21 +1292,20 @@ func (m *Manager) teardown(ctx context.Context, p *plugin) {
 	if err := p.inst.Close(ctx); err != nil {
 		m.logger.Warn("closing plugin instance", zap.String("plugin", p.name), zap.Error(err))
 	}
-	p.cacheCloseOnce.Do(func() {
-		if p.compilationCache != nil {
-			if err := p.compilationCache.Close(ctx); err != nil {
-				m.logger.Warn("closing plugin compilation cache", zap.String("plugin", p.name), zap.Error(err))
-			}
-		}
-	})
+	if err := p.cacheLease.release(ctx); err != nil {
+		m.logger.Warn("closing plugin compilation cache", zap.String("plugin", p.name), zap.Error(err))
+	}
 	p.ops.retire()
 }
 
 // Close stops every plugin. It does not flush: a daemon shutting down
 // leaves the data plane as it stands, and only an explicit unregister
-// means the state should go away.
+// means the state should go away. Close is terminal: later registrations fail.
 func (m *Manager) Close(ctx context.Context) {
+	m.registerMu.Lock()
+	defer m.registerMu.Unlock()
 	m.mu.Lock()
+	m.closed = true
 	plugins := make([]*plugin, 0, len(m.plugins))
 	for _, p := range m.plugins {
 		plugins = append(plugins, p)
