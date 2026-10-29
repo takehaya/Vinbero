@@ -818,6 +818,10 @@ capability が何であれ観測と log だけをする plugin として起動�
   新しい instance は同じ owner tag で始め、保持できる既存状態に対して宣言を収束させます。
   権限の縮小では対象外の状態を撤去し、context 登録では入力権限、制限、設定と旧 instance の健全性によって保持の可否を決めます。
   詳細は後述の context 入力の引継ぎ条件に従い、同名であることだけでは転送状態の保持や切替中の無損失を保証しません。
+- 同名の WASM を byte 単位で同じ module と入力 policy、family、behavior、capability、scope、制限で再登録すると、コンパイル結果を再利用します。
+  設定だけの変更でも再利用しますが、guest instance、memory、host ops は毎回作り直し、admission、ABI、configure の検査も実行します。
+  cache は現在の module を使う世代間だけで共有し、別 module、native への切替、unregister では過去の module を保持しません。
+  最後に利用する世代の worker と runtime が終了してから cache を解放します。
 - plugin が configure から宣言した内容は、登録が成立するまで保留します。
   configure は instantiate の途中で走るので、そこで適用すると instantiate
   が失敗したときに誰も消せない state が残ります。upgrade では更に悪く、
