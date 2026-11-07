@@ -43,16 +43,6 @@ const (
 // GrantsVersion is the PluginGrants layout DecodeGrants understands.
 const GrantsVersion = 1
 
-// Has reports whether the registration granted the named capability.
-func (g Grants) Has(capability string) bool {
-	for _, name := range g.Capabilities {
-		if name == capability {
-			return true
-		}
-	}
-	return false
-}
-
 // DecodeGrants parses the host's PluginGrants message. It accepts both packed
 // and unpacked repeated integers and skips fields added by newer hosts. Empty
 // input decodes to the zero Grants, which describes a registration that
@@ -130,26 +120,13 @@ func appendUint32s(target *[]uint32, d *wire.Decoder) bool {
 		*target = append(*target, uint32(d.Uint))
 		return true
 	case wire.Bytes:
-		data := d.Bytes
-		for len(data) > 0 {
-			var v uint64
-			var shift uint
-			for {
-				if len(data) == 0 || shift > 28 {
-					return false
-				}
-				b := data[0]
-				data = data[1:]
-				v |= uint64(b&0x7f) << shift
-				if b < 0x80 {
-					break
-				}
-				shift += 7
-			}
-			if v > 1<<32-1 {
+		for data := d.Bytes; len(data) > 0; {
+			v, n := wire.ConsumeVarint(data)
+			if n == 0 || v > 1<<32-1 {
 				return false
 			}
 			*target = append(*target, uint32(v))
+			data = data[n:]
 		}
 		return true
 	default:
