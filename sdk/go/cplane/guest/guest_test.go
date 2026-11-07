@@ -235,7 +235,10 @@ func TestGuestGrants(t *testing.T) {
 				`{"schema_version":1,"routing":{"locator":"locator-3","slot":33}}`: "behavior=0xfe01 locator=locator-3 slot=33 prefixes=[10.2.0.0/16]",
 				`{"schema_version":1,"routing":{"slot":33}}`:                       "error: routing.locator is required: the registration grants several locators",
 				`{"schema_version":1,"routing":{"locator":"main"}}`:                "error: routing.locator main is outside the registration's locators",
-				`{"schema_version":1,"routing":{"lcator":"main"}}`:                 `error: configuration: json: unknown field "lcator"`,
+				`{"schema_version":1,"routing":{"lcator":"main"}}`:                 `error: configuration: unknown key "routing.lcator"`,
+				`{"schema_version":1,"routing":{"Locator":"main"}}`:                `error: configuration: unknown key "routing.Locator"`,
+				`{"schema_version":1,"routing":{"slot":33},"routing":{}}`:          `error: configuration: duplicate key "routing"`,
+				`{"schema_version":1,"routing":{"locator":"locator-3","slot":0}}`:  "error: routing.slot must be in [32,64) to allocate a SID (got 0)",
 				`{"schema_version":1,"routing":{"slot":null}}`:                     "error: configuration: null values are not supported",
 				"\x08\x81\xfc\x03": "error: configuration must be a JSON object",
 			} {

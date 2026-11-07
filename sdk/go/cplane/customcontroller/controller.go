@@ -59,6 +59,9 @@ func NewWithConfig(config Config, client *cplane.Client, log func(cplane.LogLeve
 	if log == nil {
 		log = func(cplane.LogLevel, string) {}
 	}
+	if config.ReceiveNone {
+		log(cplane.LogInfo, "headend scope has no IPv4 prefix; accepting no IPv4 routes")
+	}
 	c := &Controller{client: client, config: config, log: log,
 		localSIDPending: true, advertisePending: !config.advertises()}
 	c.routes.Accept = c.acceptsRoute
@@ -93,17 +96,12 @@ func (c *Controller) acceptsRoute(r cplane.Route) bool {
 	if err != nil || !prefix.Addr().Is4() {
 		return false
 	}
+	if c.config.ReceiveNone {
+		return false
+	}
 	// No filter accepts every prefix. Resolve fills the filter from the
 	// headend scope, so only a registration without one reaches this.
-	if len(c.config.HeadendPrefixes) == 0 {
-		return true
-	}
-	for _, allowed := range c.config.HeadendPrefixes {
-		if prefix.Bits() >= allowed.Bits() && allowed.Contains(prefix.Masked().Addr()) {
-			return true
-		}
-	}
-	return false
+	return len(c.config.HeadendPrefixes) == 0 || within(c.config.HeadendPrefixes, prefix)
 }
 
 // Pending declarations survive a refusal and are retried on ticks, including
