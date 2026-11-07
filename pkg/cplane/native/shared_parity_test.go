@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/sdk/go/cplane"
-	"github.com/takehaya/vinbero/sdk/go/cplane/wire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -82,10 +83,27 @@ func sharedModule(t *testing.T, id string) []byte {
 
 func sharedInstances(t *testing.T, id string, config []byte) ([]eventInstance, []*sharedOps) {
 	t.Helper()
+	return sharedInstancesWithGrants(t, id, config, nil)
+}
+
+// sharedGrants encodes registration grants the way the manager hands them
+// to both backends.
+func sharedGrants(t *testing.T, grants *v1.PluginGrants) []byte {
+	t.Helper()
+	grants.Version = 1
+	raw, err := proto.Marshal(grants)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func sharedInstancesWithGrants(t *testing.T, id string, config, grants []byte) ([]eventInstance, []*sharedOps) {
+	t.Helper()
 	instances := make([]eventInstance, 2)
 	ops := []*sharedOps{{}, {}}
 	for index := range instances {
-		cfg := wasm.Config{Name: id, Ops: ops[index], ConfigBlob: config}
+		cfg := wasm.Config{Name: id, Ops: ops[index], ConfigBlob: config, Grants: grants}
 		if id == CustomBehavior || id == CustomCDplaneBehavior {
 			cfg.Capabilities = wasm.Capabilities{wasm.CapHeadend: {}}
 		}
@@ -144,9 +162,10 @@ func sharedTick(t *testing.T, instances []eventInstance, ops []*sharedOps) {
 }
 
 func TestCustomBehaviorEncodedParity(t *testing.T) {
-	var config wire.Encoder
-	config.String(9, "10.0.0.0/8")
-	instances, ops := sharedInstances(t, CustomBehavior, config)
+	// No configuration: the behavior and the receive filter come from the
+	// registration's grants on both backends.
+	grants := sharedGrants(t, &v1.PluginGrants{Behaviors: []uint32{0xfe01}, HeadendPrefixes: []string{"10.0.0.0/8"}})
+	instances, ops := sharedInstancesWithGrants(t, CustomBehavior, nil, grants)
 	sharedCompare(t, ops)
 	if len(ops[0].Calls) != 4 || ops[0].Calls[0].Value != uint64(cplane.Advertise) || ops[0].Calls[2].Value != uint64(cplane.LocalSIDs) {
 		t.Fatal("configure cleanup order changed")
@@ -222,13 +241,11 @@ func TestBGPObserverEncodedParity(t *testing.T) {
 }
 
 func TestCustomSenderEncodedParity(t *testing.T) {
-	var config wire.Encoder
-	config.String(2, "main")
-	config.String(3, "10.7.0.0/24")
-	config.String(4, "vpn-a")
-	config.Uint(5, 33)
-	config.String(7, "2001:db8::1")
-	instances, ops := sharedInstances(t, CustomBehavior, config)
+	// The locator, VRF and endpoint slot come from the grants; the
+	// configuration names only what the registration cannot.
+	grants := sharedGrants(t, &v1.PluginGrants{Locators: []string{"main"}, Vrfs: []string{"vpn-a"}, EndpointSlots: []uint32{33}})
+	config := []byte(`{"schema_version":1,"routing":{"prefix":"10.7.0.0/24","next_hop":"2001:db8::1"}}`)
+	instances, ops := sharedInstancesWithGrants(t, CustomBehavior, config, grants)
 	sharedCompare(t, ops)
 	if len(ops[0].Calls) != 3 || ops[0].Calls[0].Value != uint64(cplane.LocalSIDs) {
 		t.Fatal("sender did not request its local SID during configure")
@@ -256,8 +273,7 @@ func TestCustomNativeInstancesHaveIndependentConfiguration(t *testing.T) {
 	ops := []*sharedOps{{}, {}}
 	instances := make([]eventInstance, 2)
 	for i := range instances {
-		var payload wire.Encoder
-		payload.Uint(1, uint64(0xfe01+i))
+		payload := []byte(fmt.Sprintf(`{"schema_version":1,"routing":{"behavior":%d}}`, 0xfe01+i))
 		cfg := Config{Config: wasm.Config{Name: "independent", Ops: ops[i], ConfigBlob: payload,
 			Capabilities: wasm.Capabilities{wasm.CapHeadend: {}}}, Implementation: CustomBehavior, Version: ImplementationVersion}
 		instance, err := Instantiate(context.Background(), cfg)
@@ -292,6 +308,34 @@ func TestCustomKindRefusalEncodedParity(t *testing.T) {
 	sharedTick(t, instances, ops)
 	if len(ops[0].Calls) != before {
 		t.Fatal("unavailable kind was retried")
+	}
+}
+
+// A configuration that contradicts the grants fails Configure on both
+// backends before anything is declared.
+func TestCustomGrantConflictParity(t *testing.T) {
+	grants := sharedGrants(t, &v1.PluginGrants{Behaviors: []uint32{0xfe01}, HeadendPrefixes: []string{"10.2.0.0/16"}})
+	for _, data := range []string{
+		`{"schema_version":1,"routing":{"behavior":65026}}`,
+		`{"schema_version":1,"routing":{"headend_prefixes":["10.0.0.0/8"]}}`,
+	} {
+		for _, backend := range []string{"native", "wasm"} {
+			op := &sharedOps{}
+			cfg := wasm.Config{Name: "conflict", Ops: op, ConfigBlob: []byte(data), Grants: grants, Capabilities: wasm.Capabilities{wasm.CapHeadend: {}}}
+			var err error
+			if backend == "native" {
+				_, err = Instantiate(context.Background(), Config{Config: cfg, Implementation: CustomBehavior, Version: ImplementationVersion})
+			} else {
+				cfg.Module = sharedModule(t, CustomBehavior)
+				_, err = wasm.Instantiate(context.Background(), cfg)
+			}
+			if err == nil || len(op.Calls) != 0 {
+				t.Fatalf("%s accepted %s against its grants or declared: %v", backend, data, err)
+			}
+			if backend == "wasm" && (len(op.Logs) != 1 || !strings.HasPrefix(op.Logs[0].Message, "routing.")) {
+				t.Fatalf("wasm configure did not explain the conflict: %+v", op.Logs)
+			}
+		}
 	}
 }
 

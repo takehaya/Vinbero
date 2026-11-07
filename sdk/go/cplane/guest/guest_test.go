@@ -229,16 +229,27 @@ func TestGuestGrants(t *testing.T) {
 			name = "TinyGo"
 		}
 		t.Run(name, func(t *testing.T) {
-			host := &logHost{}
-			inst, err := wasm.Instantiate(t.Context(), wasm.Config{
-				Name: "grants", Module: buildGuest(t, "grants.go", tinygo), Ops: host, Grants: raw,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = inst.Close(context.Background()) })
-			if len(host.messages) != 1 || host.messages[0] != want {
-				t.Fatalf("logs: %q", host.messages)
+			module := buildGuest(t, "grants.go", tinygo)
+			for config, result := range map[string]string{
+				``: "behavior=0xfe01 locator= slot=0 prefixes=[10.2.0.0/16]",
+				`{"schema_version":1,"routing":{"locator":"locator-3","slot":33}}`: "behavior=0xfe01 locator=locator-3 slot=33 prefixes=[10.2.0.0/16]",
+				`{"schema_version":1,"routing":{"slot":33}}`:                       "error: routing.locator is required: the registration grants several locators",
+				`{"schema_version":1,"routing":{"locator":"main"}}`:                "error: routing.locator main is outside the registration's locators",
+				`{"schema_version":1,"routing":{"lcator":"main"}}`:                 `error: configuration: json: unknown field "lcator"`,
+				`{"schema_version":1,"routing":{"slot":null}}`:                     "error: configuration: null values are not supported",
+				"\x08\x81\xfc\x03": "error: configuration must be a JSON object",
+			} {
+				host := &logHost{}
+				inst, err := wasm.Instantiate(t.Context(), wasm.Config{
+					Name: "grants", Module: module, Ops: host, Grants: raw, ConfigBlob: []byte(config),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = inst.Close(context.Background())
+				if len(host.messages) != 2 || host.messages[0] != want || !strings.HasPrefix(host.messages[1], result) {
+					t.Fatalf("config %q: logs: %q", config, host.messages)
+				}
 			}
 			imports := guestImports(t, buildGuest(t, "observer.go", tinygo))
 			if imports[wasm.HostGrants] {
