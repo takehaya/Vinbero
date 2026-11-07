@@ -71,7 +71,7 @@ A guest that never calls `guest.Grants` does not import it.
 A host that does not provide it refuses a guest that imports it at registration, before `Configure` runs.
 
 The host forwards configuration bytes without decoding them.
-Use JSON with a `schema_version` key, decoded by `jsonconfig.Decode`: it requires exactly one object with the expected version and rejects unknown keys and `null`, so a misspelled key fails registration rather than taking a default.
+Use JSON with a `schema_version` key, decoded by `jsonconfig.Decode`: it requires exactly one object with the expected version, and rejects `null`, repeated keys and keys that do not match the target's json names exactly, at every level, so a misspelled key fails registration rather than taking a default.
 `jsonconfig` uses `encoding/json`, which works under both compilers; it is a separate package so the base SDK stays free of reflection.
 
 ```go

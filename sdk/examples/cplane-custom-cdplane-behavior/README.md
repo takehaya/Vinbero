@@ -47,7 +47,7 @@ Advertiser and local endpoint, registered with `--locator LOC2 --vrf vrf-cust --
 | `schema_version` | Required; currently `1` |
 | `routing` | Required object containing the routing parameters |
 | `routing.behavior` | Endpoint behavior, 1–65535; defaults to the claimed behavior when exactly one is claimed, otherwise `65025` (`0xFE01`) |
-| `routing.headend_prefixes` | IPv4 prefixes restricting accepted routes; defaults to the IPv4 prefixes of the headend scope |
+| `routing.headend_prefixes` | IPv4 prefixes restricting accepted routes; defaults to the IPv4 prefixes of the headend scope, or to accepting no routes when the scope has only IPv6 prefixes |
 | `routing.locator`, `routing.slot` | Locator and endpoint slot (32–63) for the SID; each defaults to the scope's only value |
 | `routing.decap_vrf` | Required with SID allocation, and requests one; selects a host-authorized VRF grant, separate from endpoint aux bytes |
 | `routing.prefix`, `routing.next_hop` | Both required to advertise an IPv4 VPN prefix; next hop must be a usable native IPv6 address |
@@ -56,7 +56,8 @@ Advertiser and local endpoint, registered with `--locator LOC2 --vrf vrf-cust --
 
 Prefixes are masked to their network address.
 IPv4-mapped IPv6 addresses and zoned addresses are not accepted as IPv6 endpoint policy or next-hop values.
-Unknown fields, null values, unsupported schema versions and multiple JSON documents are rejected.
+Unknown or differently cased keys, repeated keys, null values, unsupported schema versions and multiple JSON documents are rejected.
+A key that is present is validated as written; only absent keys take the registration's value.
 The configuration is validated against these constraints and the registration before the adapter invokes the routing controller.
 Locator and VRF existence remain host checks when applying declarations.
 The error identifies the field to correct.
