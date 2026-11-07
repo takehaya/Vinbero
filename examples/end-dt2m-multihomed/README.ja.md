@@ -57,6 +57,8 @@ sudo ./test.sh
 sudo ./teardown.sh
 ```
 
+`sudo BUM_MODE=xdp ./test.sh` で、同じテストを `settings.l2.bum_mode: xdp`（BUM を XDP で複製する。`docs/design/ja/bum_mode.md` を参照）で実行します。既定は `tc` です。
+
 ## テストで検証する内容
 
 1. **Split-horizon (Phase C)**: `host1 → broadcast → PE1` が PE2 経由で

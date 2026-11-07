@@ -57,6 +57,9 @@ sudo ./test.sh
 sudo ./teardown.sh
 ```
 
+`sudo BUM_MODE=xdp ./test.sh` runs the same tests with `settings.l2.bum_mode: xdp`
+(BUM replicated in XDP, see `docs/design/ja/bum_mode.md`); the default is `tc`.
+
 ## What the test verifies
 
 1. **Split-horizon (phase C)**: `host1 -> broadcast -> PE1` does not come back

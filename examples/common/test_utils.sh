@@ -140,4 +140,66 @@ test_ping_with_counter() {
     return 0
 }
 
+# ========== BUM replication mode (settings.l2.bum_mode) ==========
+
+# bum_mode_config <yaml> <out>: prints the vinberod config to start with for
+# BUM_MODE (default tc). tc prints <yaml> unchanged; xdp writes <yaml> plus
+# settings.l2.bum_mode to <out> and prints <out>. <yaml> must end with its
+# top-level settings: block.
+bum_mode_config() {
+    local src="$1" out="$2"
+    case "${BUM_MODE:-tc}" in
+        tc) echo "$src" ;;
+        xdp)
+            { cat "$src"; printf '  l2:\n    bum_mode: xdp\n'; } > "$out"
+            echo "$out"
+            ;;
+        *)
+            print_error "unknown BUM_MODE '${BUM_MODE}' (want tc or xdp)" >&2
+            return 1
+            ;;
+    esac
+}
+
+# bum_marker_send <ns> <iface> <tag>: sends one broadcast Ethernet frame
+# (EtherType 0x88b5, local experimental) whose payload carries <tag>, so a
+# capture can count the copies of exactly this frame.
+bum_marker_send() {
+    local ns="$1" iface="$2" tag="$3"
+    ip netns exec "$ns" python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+s.bind((sys.argv[1], 0))
+mac = s.getsockname()[4]
+payload = sys.argv[2].encode().ljust(46, b"\0")
+s.send(b"\xff" * 6 + mac + b"\x88\xb5" + payload)
+' "$iface" "$tag"
+}
+
+# bum_capture_start <ns> <iface> <pcap>: background tcpdump; sets CAPTURE_PID.
+bum_capture_start() {
+    # -Z root: a privilege-dropped tcpdump cannot reopen a pcap it left in
+    # sticky /tmp under fs.protected_regular.
+    ip netns exec "$1" tcpdump -Z root -i "$2" -U -nn -p -w "$3" > /dev/null 2>&1 &
+    CAPTURE_PID=$!
+}
+
+# bum_marker_count <pcap> <tag>: number of captured frames that contain
+# <tag>, plain or SRv6-encapsulated alike.
+bum_marker_count() {
+    python3 - "$1" "$2" <<'PY'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+tag = sys.argv[2].encode()
+off, n = 24, 0
+while off + 16 <= len(data):
+    incl = struct.unpack("<I", data[off + 8:off + 12])[0]
+    off += 16
+    if tag in data[off:off + incl]:
+        n += 1
+    off += incl
+print(n)
+PY
+}
+
 

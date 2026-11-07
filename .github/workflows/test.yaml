@@ -198,7 +198,7 @@ jobs:
           VINBERO_CPLANE_PARITY=1 go test -timeout 35m ./pkg/cplane/... ./sdk/go/cplane/... ./sdk/go/cplaneharness/
 
   integration-test:
-    name: Integration Test - ${{ matrix.example }}
+    name: Integration Test - ${{ matrix.example }}${{ matrix.bum_mode != 'tc' && format(' (bum_mode {0})', matrix.bum_mode) || '' }}
     runs-on: ubuntu-24.04
     needs: build
     permissions:
@@ -238,6 +238,16 @@ jobs:
           - gtp6-encap
           - gtp6-drop-in
           - custom-cdplane-behavior
+        # settings.l2.bum_mode. Every example runs in the default tc mode; the
+        # BUM examples also run in xdp mode (an include entry whose bum_mode
+        # differs from the matrix value adds a job instead of altering one).
+        bum_mode:
+          - tc
+        include:
+          - example: end-dt2-p2mp
+            bum_mode: xdp
+          - example: end-dt2m-multihomed
+            bum_mode: xdp
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -280,7 +290,7 @@ jobs:
 
       - name: Run tests
         working-directory: examples/${{ matrix.example }}
-        run: sudo ./test.sh
+        run: sudo BUM_MODE=${{ matrix.bum_mode }} ./test.sh
 
       - name: Cleanup
         if: always()
