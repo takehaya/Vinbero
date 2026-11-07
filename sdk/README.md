@@ -308,6 +308,15 @@ registration: it is what lets the daemon turn away a plugin built against
 an ABI it no longer implements, rather than letting it trap on the first
 call into a function whose signature moved.
 
+`configure` receives the operator's configuration bytes unchanged. The
+plugin can also read what its registration granted -- capabilities,
+families, claimed behaviors and scope -- through the read-only `grants`
+host function, so the configuration need only carry the plugin's own
+choices. The grants are information for the plugin: the host checks every
+declaration against the registration regardless. Go plugins in this
+repository use JSON configuration with a `schema_version`; see the
+[Go guest SDK](go/cplane/README.md#configuration-and-grants).
+
 Which host functions are linked depends on the capabilities the plugin was
 granted. That is the coarse half of the gate: a plugin granted nothing that
 writes cannot reach the apply functions at all -- they are not calls that

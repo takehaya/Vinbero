@@ -21,7 +21,7 @@ to the same prefix. The claim is what keeps the two apart.
 
 It runs both halves of the case.
 
-Sending: at startup it asks the daemon for a local SID from a configured
+Sending: at startup it asks the daemon for a local SID from its
 locator, pointing at the eBPF slot its data-plane half occupies. The daemon
 allocates the address, installs the dispatch entry and tells the plugin
 which address it got -- the plugin names the SID, the daemon chooses the
@@ -34,7 +34,7 @@ that SID, naming its own behavior codepoint in the SID TLV.
 Receiving, on every batch of events:
 
 - an advertisement carrying the claimed behavior and an SRv6 SID, within the
-  configured receive prefixes, adds a headend entry steering into that SID
+  receive prefixes, adds a headend entry steering into that SID
 - a withdrawal removes that path, keeping any alternatives
 - an update whose behavior no longer matches removes the old version of that path
 
@@ -90,7 +90,7 @@ For the registration named `custom-behavior` below, omit `--wasm sdk/examples/cp
 Use `--native custom-behavior` for a different registration name, and optionally pin the implementation with `--native-version 1`; otherwise the daemon resolves and persists its catalog version.
 Set `settings.cplane_plugins.native_enabled: false` to allow only WASM plugins.
 Keep the same configuration, behavior claims, families, capabilities, scopes and tick interval.
-The native implementation accepts the same opaque protobuf configuration as the WASM example; it does not use the MUP context-input envelope.
+Both backends read the same JSON configuration and the same registration grants; neither uses the MUP context-input envelope.
 Receive-only operation needs a headend grant; sending also needs the existing local-SID and advertisement grants and scopes.
 
 The controller is statically linked into the daemon, so adding or updating it requires rebuilding the daemon.
@@ -114,12 +114,9 @@ From the repository root, with the daemon running and the CLI built (`make build
 register a receive-only instance handling `10.7.0.0/16`:
 
 ```sh
-# Protobuf field 9: receive prefixes, matching the host's headend scope.
-printf '\112\01310.7.0.0/16' > /tmp/custom-behavior-config.bin
 ./out/bin/vinbero plugin cplane register \
     --name custom-behavior \
     --wasm sdk/examples/cplane-custom-behavior/plugin.wasm \
-    --config /tmp/custom-behavior-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 \
     --capability headend \
@@ -130,14 +127,39 @@ printf '\112\01310.7.0.0/16' > /tmp/custom-behavior-config.bin
 ./out/bin/vinbero plugin cplane unregister --name custom-behavior
 ```
 
+A receiver needs no `--config`. The plugin reads its registration when it
+starts: it steers the behavior it claims (`--behavior`) and accepts the
+prefixes of its headend scope (`--headend-prefix`).
+
+A sender also allocates a SID and advertises a prefix behind it. The
+registration supplies the locator, VRF and endpoint slot; the configuration
+names what only the plugin knows:
+
+```sh
+cat > /tmp/custom-behavior.json <<'EOF'
+{"schema_version": 1,
+ "routing": {"prefix": "10.2.0.0/24", "next_hop": "2001:db8:ff::2", "decap_vrf": "vpn-a"}}
+EOF
+./out/bin/vinbero plugin cplane register \
+    --name custom-behavior \
+    --wasm sdk/examples/cplane-custom-behavior/plugin.wasm \
+    --config /tmp/custom-behavior.json \
+    --behavior 0xFE01 \
+    --family vpnv4 \
+    --capability headend --capability advertise --capability local_sid \
+    --headend-prefix 10.7.0.0/16 \
+    --locator main --vrf vpn-a --endpoint-slot 33 \
+    --tick-ms 1000
+```
+
 The capabilities are what this plugin is allowed to do. The daemon links
 only the host functions they cover, so a plugin granted nothing that writes
 cannot reach the apply functions at all; between the kinds of declaration
 the check happens where the transaction is opened, because those functions
 are shared. A receive-only deployment needs the `headend` capability and its
-prefix scope. An allocating deployment also needs `local_sid` and `advertise`,
-with grants for its locator, VRF and endpoint slot; pass the encoded configuration
-with `--config`. See the [two-site lab](../../../examples/interop-clab/scenarios/cplane-plugin-2site/README.md)
+prefix scope. A sender also needs `local_sid` and `advertise`, with grants
+for its locator, VRF and endpoint slot. See the
+[two-site lab](../../../examples/interop-clab/scenarios/cplane-plugin-2site/README.md)
 for the data-plane registration and complete deployment configuration.
 
 Registering the same name again upgrades in place: the entries the running
@@ -152,38 +174,67 @@ it defaults to disabled.
 
 ## Configuration
 
-The config blob is this plugin's own protobuf message, which the daemon
-does not interpret. It carries everything that differs between
-deployments, so one build serves all of them:
+The configuration is a JSON object that the daemon passes to the plugin
+without reading it. Empty configuration is the same as `{"schema_version": 1}`.
+Unknown keys and `null` values are refused, so a misspelled key fails
+registration instead of being ignored.
 
-| field | meaning |
-|---|---|
-| 1 | the endpoint behavior codepoint to claim |
-| 2 | the locator to take a local SID from |
-| 3 | the prefix to advertise behind that SID |
-| 4 | the VRF to advertise it into |
-| 5 | the eBPF slot the SID dispatches to |
-| 7 | the next hop to advertise the prefix with |
-| 8 | the VRF a plugin-dispatched End.DT4 decapsulates into |
-| 9 | repeated IPv4 receive prefixes (CIDR), aligned with the host headend scope |
+```json
+{
+  "schema_version": 1,
+  "routing": {
+    "behavior": 65025,
+    "headend_prefixes": ["10.7.0.0/16"],
+    "locator": "main",
+    "slot": 33,
+    "decap_vrf": "vpn-a",
+    "vrf": "vpn-a",
+    "prefix": "10.2.0.0/24",
+    "next_hop": "2001:db8:ff::2"
+  }
+}
+```
 
-Set field 9 whenever the host grants a restricted headend prefix scope.
-The guest receives routes outside that scope too; filtering them before building
-the desired set keeps one rejected route from blocking valid withdrawals.
-A route must fit wholly inside one configured prefix. With field 9 omitted,
-the example retains its original unfiltered receiving behavior, intended for an
-unrestricted IPv4 headend scope.
+Every `routing` key is optional. Where the registration already decides a
+value, leave the key out and the plugin takes it from the registration:
 
-There are two ways to run it, and the config picks between them:
+| key | meaning | when omitted |
+|---|---|---|
+| `behavior` | endpoint behavior codepoint to steer | the claimed behavior if exactly one is claimed; `0xFE01` if none |
+| `headend_prefixes` | IPv4 receive prefixes (CIDR) | the IPv4 prefixes of the headend scope |
+| `locator` | locator to take a local SID from | the scope's locator, if it lists exactly one |
+| `slot` | eBPF endpoint slot the SID dispatches to, in [32,64) | the scope's endpoint slot, if it lists exactly one |
+| `decap_vrf` | VRF a plugin-dispatched End.DT4 decapsulates into | no decap grant |
+| `vrf` | VRF to advertise into | the scope's VRF, if it lists exactly one |
+| `prefix` | IPv4 prefix to advertise behind the SID | no advertisement |
+| `next_hop` | IPv6 next hop to advertise with | no advertisement |
 
-- **Allocating.** Set the locator and the slot. The plugin asks the host
-  for a SID, is told the address, and advertises the prefix behind it. The
+A value the configuration does give must agree with the registration: a
+behavior it does not claim, a receive prefix outside its headend scope, or a
+locator, VRF or slot outside its scope fails registration with an error naming
+both values. When the registration lists several candidates and the
+configuration names none, registration fails and asks for one. An axis the
+registration grants nothing on is not checked; the host still refuses every
+declaration outside the scope.
+
+The configuration picks the mode:
+
+- **Receive-only.** No SID or advertisement key. The plugin originates
+  nothing and only acts on routes carrying its behavior, which is a
+  perfectly ordinary way to run it.
+- **Allocating.** Any of `locator`, `slot` or `decap_vrf`. The plugin asks
+  the host for a SID, is told the address, and points it at its slot. The
   slot is where its eBPF half lives; [`../plugin-custom-behavior`](../plugin-custom-behavior)
   is that half, and the two are exercised together by the
   `cplane-plugin-2site` interop scenario.
-- **Receive-only.** Set neither a locator nor a slot. The plugin originates
-  nothing and only acts on routes carrying its behavior, which is a
-  perfectly ordinary way to run it.
+- **Advertising.** Any of `prefix`, `next_hop` or `vrf`, which also
+  allocates. `prefix` and `next_hop` are both required: the daemon refuses
+  an advertisement with no next hop rather than guessing one.
+
+The receive prefixes matter because the guest receives routes outside its
+headend scope too. Filtering them before building the desired set keeps one
+rejected route from blocking valid withdrawals. A route must fit wholly
+inside one receive prefix.
 
 A plugin may advertise only a SID it was itself allocated: the daemon
 refuses a route pointing at any other SID, since one the plugin did not
@@ -191,28 +242,24 @@ allocate could belong to another VRF. Fronting a SID an operator
 provisioned outside the plugin would need an explicit operator grant the
 scope model does not yet carry, so there is no "advertise a given SID" mode.
 
-Fields 3, 4 and 7 are what the advertisement is made of, so the allocating
-mode needs all three. The daemon refuses an advertisement with no next hop
-rather than guessing one.
+The route distinguisher and route targets come from the VRF's binding
+rather than from this config. A plugin cannot name them: they are what
+decides which VPN a peer imports the route into.
 
-The VRF has to be one the plugin's registration lists in its scope, and the
-route distinguisher and route targets come from that VRF's binding rather
-than from this config. A plugin cannot name them: they are what decides
-which VPN a peer imports the route into.
-
-Field 8 is the return direction. When the eBPF half hands decapsulated
+`decap_vrf` is the return direction. When the eBPF half hands decapsulated
 traffic to a built-in End.DT4, the handoff nulls the SID's own aux so the
-plugin cannot spell an arbitrary VRF there. Naming the VRF here makes the
-host record it in a grant it owns, and the built-in decap reads the VRF from
-the grant. It must be a VRF in the plugin's scope, the same set the
+plugin cannot spell an arbitrary VRF there. Naming the VRF makes the host
+record it in a grant it owns, and the built-in decap reads the VRF from the
+grant. It must be a VRF in the plugin's scope, the same set the
 advertisement is bound to. Leave it unset for a half that forwards on its
 own without a built-in handoff; the built-in decap drops with no grant.
 
 ## Notes on the code
 
 `main.go` connects the shared controller to `guest.Register`, which supplies the WASM entry points.
+Its `Configure` reads the registration with `guest.Grants()` and passes it to `customcontroller.New` with the configuration bytes.
 In [`customcontroller`](../../go/cplane/customcontroller), `RouteView` tracks input paths and replay, and `Client` sends typed desired sets through the injected host transport.
-That package also decodes the private configuration with the SDK's reflection-free wire decoder.
+That package decodes the configuration with [`jsonconfig`](../../go/cplane/jsonconfig) and fills unset values from the grants in `Routing.Resolve`.
 
 `vinbero_abi_version` is what lets the daemon refuse a module built against
 an ABI it no longer implements, rather than letting it trap on the first

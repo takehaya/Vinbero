@@ -45,7 +45,7 @@ func init() {
 func main() {}
 ```
 
-`Configure func([]byte) error` receives the plugin's opaque configuration;
+`Configure func([]byte) error` receives the plugin's configuration bytes;
 copy any bytes retained after it returns. `Events` receives owned event data
 and can return per-event `Quarantine` results with a reason. Nil results mean
 all events were handled. `Tick func(int64)` receives monotonic nanoseconds;
@@ -53,11 +53,55 @@ all events were handled. `Tick func(int64)` receives monotonic nanoseconds;
 `--tick-ms 1000` (or set `TickInterval` through the API) to drive periodic retries;
 omitting the interval leaves `Tick` undriven.
 
-Configuration is a plugin-specific input, separate from the bytes a Dplane program reads.
-The host forwards the configuration without decoding its private schema.
+## Configuration and grants
+
+A registration already states a plugin's behavior claim, families, capabilities and scope.
+Call `guest.Grants()` from `Configure` to read them as a `cplane.Grants`, and keep the configuration for choices only the plugin makes.
+For example, the [custom-behavior example](../../examples/cplane-custom-behavior/README.md) takes its behavior from the claim and its receive prefixes from the headend scope, so a receiver is registered with no configuration at all.
+A native adapter decodes the same bytes with `cplane.DecodeGrants` and passes the result to the shared controller.
+
+Grants are information, not authority.
+The host checks every declaration against the registration whatever the plugin does with them, so a plugin that misreads its grants loses declarations but gains nothing.
+They are fixed for the instance; a new registration starts a new instance.
+In `Grants`, an empty list means nothing was granted on that axis, except `Families`, where it means every family.
+Report a configured value that contradicts the grants from `Configure`: the registration then fails with that message instead of starting a plugin whose declarations are refused.
+
+The accessor imports the read-only `vinbero.grants` host function.
+A guest that never calls `guest.Grants` does not import it.
+A host that does not provide it refuses a guest that imports it at registration, before `Configure` runs.
+
+The host forwards configuration bytes without decoding them.
+Use JSON with a `schema_version` key, decoded by `jsonconfig.Decode`: it requires exactly one object with the expected version and rejects unknown keys and `null`, so a misspelled key fails registration rather than taking a default.
+`jsonconfig` uses `encoding/json`, which works under both compilers; it is a separate package so the base SDK stays free of reflection.
+
+```go
+type config struct {
+    jsonconfig.Version
+    Prefix string `json:"prefix"`
+}
+
+guest.Register(guest.Handlers{
+    Configure: func(data []byte) error {
+        grants, err := guest.Grants()
+        if err != nil {
+            return err
+        }
+        var c config
+        if err := jsonconfig.Decode(data, 1, &c); err != nil {
+            return err
+        }
+        // Combine c with grants, then start the shared controller.
+        return nil
+    },
+})
+```
+
+Configuration is separate from the bytes a Dplane program reads.
 Validate it before making declarations, then use the existing desired-set APIs for the required outputs.
-The [JSON-configured Cplane/Dplane example](../../examples/cplane-custom-cdplane-behavior/README.md) keeps JSON and policy encoding in one shared adapter and reuses `customcontroller.Config` / `NewWithConfig` for routing.
+The [JSON-configured Cplane/Dplane example](../../examples/cplane-custom-cdplane-behavior/README.md) reuses `customcontroller.Routing` and `NewWithConfig` for routing and adds its own endpoint policy.
 Its `AuxRaw` field carries opaque endpoint bytes; the routing controller does not interpret their policy.
+
+## Context inputs and replacement
 
 For context-input registrations, replacing a healthy instance preserves its old
 forwarding set only while input authority, limits, and opaque configuration bytes
@@ -73,6 +117,8 @@ Callbacks must preserve event order and report dispositions using each event's o
 The host adds no waiting period to fill a group, and a group shares the existing per-call limits.
 Input preparation and runtime failures affect the whole combined call.
 See [grouping live updates](../../cplane-route-api.md#grouping-live-updates) for the operator setting and recovery semantics.
+
+## Building
 
 Build with standard Go (Go 1.24 or later supports WASI reactors; this repository
 pins Go 1.27.3):
@@ -225,7 +271,9 @@ runtime. `Deliver`, `Route`, `Tick`, `Restart`, `Reconfigure` and `SetDenyCommit
 boundaries and recovery, with `Declarations` exposing successfully committed
 sets. Set explicit capabilities and scope when testing deployment constraints;
 zero-valued harness scope intentionally skips checks that a daemon registration
-would enforce. Locator membership and VRF bindings still require daemon tests.
+would enforce. The harness options `Capabilities`, `Scope`, `Behaviors` and
+`Families` also make up the grants `guest.Grants` returns. Locator membership
+and VRF bindings still require daemon tests.
 
 From the repository root:
 
