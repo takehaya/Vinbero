@@ -116,6 +116,9 @@ func run(cliCtx *cli.Context) error {
 	if err := vin.StartFDBWatcher(ctx); err != nil {
 		return fmt.Errorf("start FDB watcher: %w", err)
 	}
+	if err := vin.StartBumRouteWatch(ctx); err != nil {
+		return fmt.Errorf("start xdp BUM route watch: %w", err)
+	}
 
 	// The locator.Manager and vrfbgp.Manager are shared between the RPC
 	// server and the BGP route applier, so locators / VRF bindings
