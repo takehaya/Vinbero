@@ -3,6 +3,7 @@ package cplane_test
 import (
 	"net/netip"
 	"reflect"
+	"slices"
 	"testing"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
@@ -39,8 +40,8 @@ func TestGrantsMatchHostProtobuf(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("grants = %+v, want %+v", got, want)
 	}
-	if !got.Has(cplane.CapabilityHeadend) || got.Has(cplane.CapabilityLocalSID) {
-		t.Fatal("Has does not follow the granted capabilities")
+	if !slices.Contains(got.Capabilities, cplane.CapabilityHeadend) || slices.Contains(got.Capabilities, cplane.CapabilityLocalSID) {
+		t.Fatal("capabilities do not follow the grant")
 	}
 }
 
