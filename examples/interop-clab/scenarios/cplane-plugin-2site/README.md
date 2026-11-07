@@ -59,6 +59,16 @@ and the slot is bounded because a SID aimed at another plugin's slot would
 have that plugin read these aux bytes under a layout that does not
 describe them.
 
+The plugins read their registration when they start, so the operator states
+each of these facts once. pe-tokyo's plugin takes the behavior it steers
+from its claim and the prefixes it accepts from its headend scope, and is
+registered with no configuration. pe-osaka's JSON configuration names only
+the prefix to advertise, its next hop and the decap VRF; the behavior,
+locator, VRF and slot come from its registration. A configuration that
+contradicted the registration would be refused when the plugin starts. The
+test checks that, and separately that the host refuses an out-of-scope
+declaration from a plugin registered with no headend scope.
+
 ## Why both ends are Vinbero
 
 Every other scenario here peers vinbero against an independent
