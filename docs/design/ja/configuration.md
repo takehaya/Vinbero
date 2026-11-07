@@ -132,6 +132,25 @@ settings:
   fdb_aging_seconds: 300
 ```
 
+### `settings.l2.*`
+
+Bridge Domain の BUM 複製モード。詳細は [bum_mode.md](bum_mode.md) を参照してください。
+
+| フィールド | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `bum_mode` | string | `tc` | 全 BD の既定。`tc` か `xdp`。`xdp` は `internal.bpf.device_mode: generic` が必要 |
+| `bridge_domains[].bd_id` | int | - | 上書きする BD |
+| `bridge_domains[].bum_mode` | string | 既定に従う | その BD のモード |
+
+```yaml
+settings:
+  l2:
+    bum_mode: xdp
+    bridge_domains:
+      - bd_id: 200
+        bum_mode: tc
+```
+
 ### `settings.entries.*.capacity`
 
 各 BPF マップの `max_entries`。ELF 上のコンパイル時値は 1024 ですが、このキーで **ロード時に拡張**できます (縮小は kernel 仕様上不可)。

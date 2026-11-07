@@ -128,6 +128,8 @@ headend（H.Encaps.L2）側は、顧客ポートで直接XDPが処理するた�
 | End.DT2（decap側） | 必要 | FDB miss時にdecapしたフレームを顧客ポートにfloodするため |
 | H.Encaps.L2（headend側） | 顧客ポートが1つなら不要 | 複数ポート間のローカルL2転送が必要なら要る |
 
+`settings.l2.bum_mode: xdp` の BD では、ローカルの flood と既知 unicast も XDP で行い、bridge を経路に使いません。その代わり STP や IGMP snooping などの bridge の機能は効きません。詳しくは [bum_mode.md](bum_mode.md) を参照してください。
+
 ### bridgeの作成方法
 
 bridgeは `VrfService/VrfBridgeAttach` APIで、VRF オブジェクトの L2 facet として作成します ([vrf.md](vrf.md) 参照)。APIを呼ぶとnetlinkでbridgeを作成し、member interfaceをenslaveし、owning VRF に facet として記録し、FDBWatcherにも自動登録します。1 つの bd_id はちょうど 1 つの VRF に属します。
