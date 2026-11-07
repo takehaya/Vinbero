@@ -169,15 +169,15 @@ func (i *Instance) hostNowMonotonic(context.Context) int64 {
 // allocator from inside a host function, which not every guest runtime
 // supports. A buffer that is too small is left untouched and the guest is
 // told the length it needs.
-func (i *Instance) hostGrants(_ context.Context, mod api.Module, ptr, capacity int32) int32 {
-	length := int32(len(i.grants))
+func (i *Instance) hostGrants(_ context.Context, mod api.Module, ptr, capacity uint32) int32 {
+	length := uint32(len(i.grants))
 	if capacity < length {
-		return length
+		return int32(length)
 	}
-	if length > 0 && (ptr < 0 || !mod.Memory().Write(uint32(ptr), i.grants)) {
+	if length > 0 && !mod.Memory().Write(ptr, i.grants) {
 		return -1
 	}
-	return length
+	return int32(length)
 }
 
 // hostApplyBegin opens a desired-set transaction.

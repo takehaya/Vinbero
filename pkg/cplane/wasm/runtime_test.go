@@ -527,8 +527,12 @@ func TestGrantsHostFunction(t *testing.T) {
 	if raw, _ := inst.mod.Memory().Read(2048, uint32(len(grants))); string(raw) != string(grants) {
 		t.Fatalf("guest read %q", raw)
 	}
-	if n := read(65536-4, 64); n != -1 {
-		t.Fatalf("out-of-range buffer returned %d", n)
+	// The pointer is unsigned: memory bounds alone decide, so an address at
+	// or above 2 GiB is checked against memory rather than read as negative.
+	for _, ptr := range []uint32{65536 - 4, 1 << 31, 1<<32 - 1} {
+		if n := read(ptr, 64); n != -1 {
+			t.Fatalf("out-of-range buffer at %#x returned %d", ptr, n)
+		}
 	}
 	empty := mustInstantiate(t, "grants", Config{})
 	res, err := empty.mod.ExportedFunction("read_grants").Call(ctx, 2048, 64)
