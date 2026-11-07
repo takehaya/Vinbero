@@ -105,6 +105,8 @@ func TestConfigurationContradictingGrantsIsRejected(t *testing.T) {
 	several.VRFs = []string{"vpn-a", "vpn-b"}
 	v6only := senderGrants
 	v6only.HeadendPrefixes = []netip.Prefix{netip.MustParsePrefix("2001:db8::/32")}
+	ownSlot := senderGrants
+	ownSlot.EndpointSlots = []uint32{0, 33}
 	for _, tc := range []struct {
 		name, data string
 		grants     cplane.Grants
@@ -119,7 +121,16 @@ func TestConfigurationContradictingGrantsIsRejected(t *testing.T) {
 		{"behavior out of range", `{"schema_version":1,"routing":{"behavior":65536}}`, cplane.Grants{}, "between 1 and 65535"},
 		{"prefix outside scope", `{"schema_version":1,"routing":{"headend_prefixes":["10.0.0.0/8"]}}`, senderGrants,
 			"routing.headend_prefixes: 10.0.0.0/8 is outside the headend scope (10.2.0.0/16)"},
-		{"no IPv4 scope", ``, v6only, "the headend scope grants no IPv4 prefix"},
+		{"receive prefix with IPv6 scope", `{"schema_version":1,"routing":{"headend_prefixes":["10.2.0.0/16"]}}`, v6only,
+			"routing.headend_prefixes: 10.2.0.0/16 is outside the headend scope (no IPv4 prefix)"},
+		{"explicit empty receive prefixes", `{"schema_version":1,"routing":{"headend_prefixes":[]}}`, senderGrants,
+			"routing.headend_prefixes must list at least one prefix"},
+		{"explicit slot zero", `{"schema_version":1,"routing":{"slot":0}}`, senderGrants, "routing.slot must be in [32,64) to allocate a SID (got 0)"},
+		{"explicit slot zero granted", `{"schema_version":1,"routing":{"slot":0}}`, ownSlot, "routing.slot must be in [32,64) to allocate a SID (got 0)"},
+		{"explicit empty locator", `{"schema_version":1,"routing":{"locator":""}}`, senderGrants, "routing.locator must not be empty"},
+		{"explicit empty vrf", `{"schema_version":1,"routing":{"vrf":"","prefix":"10.1.0.0/16","next_hop":"2001:db8::1"}}`, senderGrants, "routing.vrf must not be empty"},
+		{"explicit empty decap vrf", `{"schema_version":1,"routing":{"decap_vrf":""}}`, senderGrants, "routing.decap_vrf must not be empty"},
+		{"explicit empty prefix", `{"schema_version":1,"routing":{"prefix":"","next_hop":"2001:db8::1"}}`, senderGrants, "routing.prefix: invalid IPv4 prefix"},
 		{"locator outside scope", `{"schema_version":1,"routing":{"locator":"second","slot":33}}`, senderGrants,
 			"routing.locator second is outside the registration's locators (main)"},
 		{"ambiguous locator", `{"schema_version":1,"routing":{"behavior":65025,"slot":33}}`, several,
@@ -152,6 +163,33 @@ func TestConfigurationContradictingGrantsIsRejected(t *testing.T) {
 				t.Fatal("rejected configuration declared state")
 			}
 		})
+	}
+}
+
+// A headend scope with only IPv6 prefixes leaves this IPv4 receiver nothing
+// the host would accept, so it receives no routes, says so once, and still
+// starts its sender half.
+func TestIPv6OnlyHeadendScopeReceivesNothing(t *testing.T) {
+	grants := senderGrants
+	grants.HeadendPrefixes = []netip.Prefix{netip.MustParsePrefix("2001:db8::/32")}
+	host := &recordingHost{}
+	var logs []string
+	controller, err := New([]byte(`{"schema_version":1,"routing":{"prefix":"10.1.0.0/16","next_hop":"2001:db8::1"}}`), grants,
+		&cplane.Client{Host: host}, func(_ cplane.LogLevel, message string) { logs = append(logs, message) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !controller.config.ReceiveNone || controller.config.Locator != "main" || controller.config.VRF != "vpn-a" {
+		t.Fatalf("config = %+v", controller.config)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "accepting no IPv4 routes") {
+		t.Fatalf("logs = %q", logs)
+	}
+	if controller.acceptsRoute(cplane.Route{Family: "vpnv4", Prefix: "10.2.0.0/24", SRv6SID: "fd00::1", EndpointBehavior: 0xfe01}) {
+		t.Fatal("accepted an IPv4 route outside every headend prefix")
+	}
+	if len(host.calls) == 0 || host.calls[0].kind != cplane.LocalSIDs {
+		t.Fatalf("sender did not request its SID: %+v", host.calls)
 	}
 }
 
