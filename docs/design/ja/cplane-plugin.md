@@ -1163,7 +1163,9 @@ JSON で設定する専用例は `custom-cdplane-behavior`（version `1`）で�
 同じ共有 adapter が Native と WASM の両方で設定を解釈します。
 設定の意味と Dplane への aux の符号化をプラグイン側に置き、host は設定 bytes をそのまま渡します。
 操作手順は [Cplane と Dplane の専用例](../../../examples/custom-cdplane-behavior/README.md)を参照してください。
-独自 behavior は `custom-cdplane-behavior` と同じ JSON の `routing` object を読み、未指定の値は登録内容 (grants) から決めます。
+独自 behavior は `custom-cdplane-behavior` と同じ JSON の `routing` object を読み、key が無い値だけを登録内容 (grants) から決めます。
+key があれば `"slot": 0` のような値もそのまま検証します。
+headend scope が IPv6 prefix だけなら IPv4 の経路を一切受け付けず、その旨を log に 1 行出して起動します。
 observer は設定を解釈せず BGPPath 機能を確認し、MUP と EVPN は context input envelope を decode します。
 JSON の厳密な decode は SDK の `jsonconfig` が共通に提供し、両 backend で同じ結果になります。
 
@@ -1180,7 +1182,8 @@ SID 列の組み立ては plugin が決めます。EVPN / MUP の経路保持は
 headend を組み立て、適用失敗後は tick で再試行します。SDK の codec は reflection を
 使わず、daemon が使う生成済み protobuf 型との互換性をテストします。
 登録内容は `guest.Grants()` で読み、設定は `jsonconfig` で JSON として decode します。
-`jsonconfig` は `schema_version` を必須とし、未知の key、`null`、複数の JSON 値を
+`jsonconfig` は `schema_version` を必須とし、未知の key、大文字小文字が json 名と
+一致しない key、同じ object 内で重複した key、`null`、複数の JSON 値を、どの階層でも
 拒否します。`encoding/json` を使うので base SDK とは別 package にしています。
 
 daemon 無しで試すための harness が `sdk/go/cplaneharness` にあります。

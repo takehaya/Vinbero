@@ -201,7 +201,7 @@ value, leave the key out and the plugin takes it from the registration:
 | key | meaning | when omitted |
 |---|---|---|
 | `behavior` | endpoint behavior codepoint to steer | the claimed behavior if exactly one is claimed; `0xFE01` if none |
-| `headend_prefixes` | IPv4 receive prefixes (CIDR) | the IPv4 prefixes of the headend scope |
+| `headend_prefixes` | IPv4 receive prefixes (CIDR) | the IPv4 prefixes of the headend scope; none at all if the scope has only IPv6 prefixes |
 | `locator` | locator to take a local SID from | the scope's locator, if it lists exactly one |
 | `slot` | eBPF endpoint slot the SID dispatches to, in [32,64) | the scope's endpoint slot, if it lists exactly one |
 | `decap_vrf` | VRF a plugin-dispatched End.DT4 decapsulates into | no decap grant |
@@ -209,13 +209,20 @@ value, leave the key out and the plugin takes it from the registration:
 | `prefix` | IPv4 prefix to advertise behind the SID | no advertisement |
 | `next_hop` | IPv6 next hop to advertise with | no advertisement |
 
+Only an absent key takes the registration's value. A key that is present is
+used as written, so `"slot": 0`, `"locator": ""` or `"headend_prefixes": []`
+is refused rather than replaced. Keys must match the names above exactly and
+appear once.
+
 A value the configuration does give must agree with the registration: a
 behavior it does not claim, a receive prefix outside its headend scope, or a
 locator, VRF or slot outside its scope fails registration with an error naming
 both values. When the registration lists several candidates and the
 configuration names none, registration fails and asks for one. An axis the
 registration grants nothing on is not checked; the host still refuses every
-declaration outside the scope.
+declaration outside the scope. A headend scope with only IPv6 prefixes leaves
+this IPv4 receiver nothing to install, so it accepts no routes and logs that
+once; a sending configuration still starts.
 
 The configuration picks the mode:
 
