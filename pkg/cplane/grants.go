@@ -2,6 +2,7 @@ package cplane
 
 import (
 	"fmt"
+	"slices"
 
 	"google.golang.org/protobuf/proto"
 
@@ -28,12 +29,18 @@ func EncodeGrants(caps wasm.Capabilities, families []bgp.Family, behaviors []uin
 		HeadendV6Slots:  append([]uint32(nil), scope.HeadendV6Slots...),
 		EndpointSlots:   append([]uint32(nil), scope.EndpointSlots...),
 	}
+	// A registration may repeat a family or behavior; the plugin sees each
+	// once, so a repeated claim still counts as a single claimed behavior.
 	for _, f := range families {
 		msg.Families = append(msg.Families, string(f))
 	}
+	slices.Sort(msg.Families)
+	msg.Families = slices.Compact(msg.Families)
 	for _, b := range behaviors {
 		msg.Behaviors = append(msg.Behaviors, uint32(b))
 	}
+	slices.Sort(msg.Behaviors)
+	msg.Behaviors = slices.Compact(msg.Behaviors)
 	out, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("cplane: encode grants: %w", err)

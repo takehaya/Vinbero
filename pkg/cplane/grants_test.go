@@ -42,6 +42,23 @@ func TestEncodeGrantsRoundTripsThroughSDK(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("grants = %+v, want %+v", got, want)
 	}
+	// Repeated families and claims reach the plugin once each, sorted, so a
+	// behavior given twice is still the registration's single claim.
+	repeated, err := EncodeGrants(nil, []bgp.Family{bgp.FamilyVPNv6, bgp.FamilyVPNv4, bgp.FamilyVPNv6}, []uint16{0xfe02, 0xfe01, 0xfe02}, Scope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := sdk.DecodeGrants(repeated); err != nil || !reflect.DeepEqual(got.Families, []string{"vpnv4", "vpnv6"}) ||
+		!reflect.DeepEqual(got.Behaviors, []uint32{0xfe01, 0xfe02}) {
+		t.Fatalf("repeated registration values = %+v, %v", got, err)
+	}
+	single, err := EncodeGrants(nil, nil, []uint16{0xfe01, 0xfe01}, Scope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := sdk.DecodeGrants(single); err != nil || !reflect.DeepEqual(got.Behaviors, []uint32{0xfe01}) {
+		t.Fatalf("repeated claim = %+v, %v", got, err)
+	}
 	empty, err := EncodeGrants(nil, nil, nil, Scope{})
 	if err != nil {
 		t.Fatal(err)
