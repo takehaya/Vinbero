@@ -125,19 +125,19 @@ func TestBumDevmapSync(t *testing.T) {
 	if flood[1].ProgFD != 0 || flood[1].Ifindex != 1 {
 		t.Errorf("AC entry = %+v, want ifindex 1 without a program", flood[1])
 	}
+	// The kernel reports the attached program by ID, not by fd.
+	info, err := s.egress.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	egressID, _ := info.ID()
 	for _, slot := range []uint32{0, 2} {
 		v := flood[BumSlotKeyBase|slot]
 		if v.Ifindex != 1 {
 			t.Errorf("slot %d uplink = %d, want 1", slot, v.Ifindex)
 		}
-		// The kernel reports the attached program by ID, not by fd.
-		info, err := s.egress[slot].Info()
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, _ := info.ID()
-		if v.ProgFD != uint32(id) {
-			t.Errorf("slot %d program id = %d, want bum_remote_egress_%d (id %d)", slot, v.ProgFD, slot, id)
+		if v.ProgFD != uint32(egressID) {
+			t.Errorf("slot %d program id = %d, want the shared bum_remote_egress (id %d)", slot, v.ProgFD, egressID)
 		}
 	}
 	if got := sortedKeys(devmapEntries(t, h.objs.BumLocalMap, bumTestBD)); !slices.Equal(got, []uint32{1}) {

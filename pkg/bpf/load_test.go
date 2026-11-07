@@ -25,7 +25,7 @@ func TestBpfLoad(t *testing.T) {
 // TestBpfLoadXDPBum loads the collection with xdp BUM mode compiled in, so
 // the multi-kernel CI also verifies the xdp-mode branches of vinbero_main
 // and the endpoint programs (pruned when bum_xdp_enabled is 0) next to the
-// devmap egress programs.
+// devmap egress program.
 func TestBpfLoadXDPBum(t *testing.T) {
 	objs, err := ReadCollection(map[string]any{
 		"bum_xdp_enabled":  uint8(1),
@@ -35,10 +35,7 @@ func TestBpfLoadXDPBum(t *testing.T) {
 		t.Fatalf("Failed to load BPF objects with xdp BUM mode: %v", err)
 	}
 	t.Cleanup(func() { _ = objs.Close() })
-	s := NewBumDevmapSync(objs, func(uint16) uint8 { return BumModeXDP }, nil, nil)
-	for i, p := range s.egress {
-		if p == nil {
-			t.Fatalf("bum_remote_egress_%d not loaded", i)
-		}
+	if NewBumDevmapSync(objs, func(uint16) uint8 { return BumModeXDP }, nil, nil).egress == nil {
+		t.Fatal("bum_remote_egress not loaded")
 	}
 }

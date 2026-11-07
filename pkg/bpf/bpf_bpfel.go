@@ -75,11 +75,32 @@ type BpfBdPeerReverseVal struct {
 	Pad   [4]uint8
 }
 
+type BpfBumPlan struct {
+	_          structs.HostLayout
+	Seq        uint64
+	Data       uint64
+	SrcIfindex uint32
+	BdId       uint16
+	VlanId     uint16
+	Len        uint16
+	N_uplinks  uint8
+	Shared     uint8
+	Pad        uint32
+	Up         [8]struct {
+		_       structs.HostLayout
+		Ifindex uint32
+		Slots   uint8
+		N       uint8
+		NextIdx uint8
+		Pad     uint8
+	}
+}
+
 type BpfBumTestParams struct {
-	_             structs.HostLayout
-	Slot          uint32
-	SrcIfindex    uint32
-	EgressIfindex uint32
+	_              structs.HostLayout
+	IngressIfindex uint32
+	EgressIfindex  uint32
+	SameBuffer     uint32
 }
 
 type BpfDx2vEntry struct {
@@ -330,14 +351,7 @@ type BpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfProgramSpecs struct {
-	BumRemoteEgress0               *ebpf.ProgramSpec `ebpf:"bum_remote_egress_0"`
-	BumRemoteEgress1               *ebpf.ProgramSpec `ebpf:"bum_remote_egress_1"`
-	BumRemoteEgress2               *ebpf.ProgramSpec `ebpf:"bum_remote_egress_2"`
-	BumRemoteEgress3               *ebpf.ProgramSpec `ebpf:"bum_remote_egress_3"`
-	BumRemoteEgress4               *ebpf.ProgramSpec `ebpf:"bum_remote_egress_4"`
-	BumRemoteEgress5               *ebpf.ProgramSpec `ebpf:"bum_remote_egress_5"`
-	BumRemoteEgress6               *ebpf.ProgramSpec `ebpf:"bum_remote_egress_6"`
-	BumRemoteEgress7               *ebpf.ProgramSpec `ebpf:"bum_remote_egress_7"`
+	BumRemoteEgress                *ebpf.ProgramSpec `ebpf:"bum_remote_egress"`
 	BumRemoteEgressTest            *ebpf.ProgramSpec `ebpf:"bum_remote_egress_test"`
 	TailcallEndpointEnd            *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end"`
 	TailcallEndpointEndAd          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_ad"`
@@ -399,6 +413,8 @@ type BpfMapSpecs struct {
 	BdPeerReverseMap       *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
 	BumFloodMap            *ebpf.MapSpec `ebpf:"bum_flood_map"`
 	BumLocalMap            *ebpf.MapSpec `ebpf:"bum_local_map"`
+	BumPlanRing            *ebpf.MapSpec `ebpf:"bum_plan_ring"`
+	BumSeq                 *ebpf.MapSpec `ebpf:"bum_seq"`
 	BumTestParamsMap       *ebpf.MapSpec `ebpf:"bum_test_params_map"`
 	Dx2vMap                *ebpf.MapSpec `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.MapSpec `ebpf:"ecmp_group_map"`
@@ -482,6 +498,8 @@ type BpfMaps struct {
 	BdPeerReverseMap       *ebpf.Map `ebpf:"bd_peer_reverse_map"`
 	BumFloodMap            *ebpf.Map `ebpf:"bum_flood_map"`
 	BumLocalMap            *ebpf.Map `ebpf:"bum_local_map"`
+	BumPlanRing            *ebpf.Map `ebpf:"bum_plan_ring"`
+	BumSeq                 *ebpf.Map `ebpf:"bum_seq"`
 	BumTestParamsMap       *ebpf.Map `ebpf:"bum_test_params_map"`
 	Dx2vMap                *ebpf.Map `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.Map `ebpf:"ecmp_group_map"`
@@ -538,6 +556,8 @@ func (m *BpfMaps) Close() error {
 		m.BdPeerReverseMap,
 		m.BumFloodMap,
 		m.BumLocalMap,
+		m.BumPlanRing,
+		m.BumSeq,
 		m.BumTestParamsMap,
 		m.Dx2vMap,
 		m.EcmpGroupMap,
@@ -596,14 +616,7 @@ type BpfVariables struct {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfPrograms struct {
-	BumRemoteEgress0               *ebpf.Program `ebpf:"bum_remote_egress_0"`
-	BumRemoteEgress1               *ebpf.Program `ebpf:"bum_remote_egress_1"`
-	BumRemoteEgress2               *ebpf.Program `ebpf:"bum_remote_egress_2"`
-	BumRemoteEgress3               *ebpf.Program `ebpf:"bum_remote_egress_3"`
-	BumRemoteEgress4               *ebpf.Program `ebpf:"bum_remote_egress_4"`
-	BumRemoteEgress5               *ebpf.Program `ebpf:"bum_remote_egress_5"`
-	BumRemoteEgress6               *ebpf.Program `ebpf:"bum_remote_egress_6"`
-	BumRemoteEgress7               *ebpf.Program `ebpf:"bum_remote_egress_7"`
+	BumRemoteEgress                *ebpf.Program `ebpf:"bum_remote_egress"`
 	BumRemoteEgressTest            *ebpf.Program `ebpf:"bum_remote_egress_test"`
 	TailcallEndpointEnd            *ebpf.Program `ebpf:"tailcall_endpoint_end"`
 	TailcallEndpointEndAd          *ebpf.Program `ebpf:"tailcall_endpoint_end_ad"`
@@ -653,14 +666,7 @@ type BpfPrograms struct {
 
 func (p *BpfPrograms) Close() error {
 	return _BpfClose(
-		p.BumRemoteEgress0,
-		p.BumRemoteEgress1,
-		p.BumRemoteEgress2,
-		p.BumRemoteEgress3,
-		p.BumRemoteEgress4,
-		p.BumRemoteEgress5,
-		p.BumRemoteEgress6,
-		p.BumRemoteEgress7,
+		p.BumRemoteEgress,
 		p.BumRemoteEgressTest,
 		p.TailcallEndpointEnd,
 		p.TailcallEndpointEndAd,

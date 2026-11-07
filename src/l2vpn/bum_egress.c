@@ -1,16 +1,17 @@
-// Devmap egress programs for xdp-mode BUM replication.
+// Devmap egress program for xdp-mode BUM replication.
 // Included from xdp_prog.c — not compiled standalone.
 //
-// Each remote flood slot of a BD's devmap (bum_flood_map) runs its own copy
-// of bum_remote_egress_N, N being the bd_peer index, so copies that leave
-// through the same uplink still get their own peer's headers. The copy
-// arrives untouched: the source AC comes from ctx->ingress_ifindex and its
-// VLAN from the frame, which together key headend_l2_map exactly as the
-// ingress lookup did. No data_meta is used, because generic XDP does not
-// hand ingress metadata to devmap programs.
+// One program, bum_remote_egress, sits on every remote flood slot entry of
+// every BD devmap (bum_flood_map). The copies it sees of one frame are
+// identical, and all copies headed for one uplink also share the egress
+// device, so the program cannot tell from the copy which peer it is for.
+// It takes that from the frame's plan instead (bum_xdp.h): it finds the
+// uplink's entry, takes its next slot and builds that peer's H.Encaps.L2
+// headers. The plan also supplies the source AC and the BD, so the copy
+// itself is not parsed.
 //
-// These programs contain no tail call (see the single-call-site invariant in
-// dispatch/l2_headend.c), and they return XDP_PASS to transmit: XDP_REDIRECT
+// The program contains no tail call (see the single-call-site invariant in
+// dispatch/l2_headend.c), and it returns XDP_PASS to transmit: XDP_REDIRECT
 // is not a valid devmap program verdict.
 
 // Build [Eth][IPv6][SRH] (or [Eth][IPv6] for H.Encaps.L2.Red with one
@@ -72,52 +73,99 @@ static __always_inline int bum_egress_encap(struct xdp_md *ctx, struct headend_e
     return copy_segments_to_srh(srh_segments, data_end, peer->segments, nsegs) ? -1 : 0;
 }
 
-static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u32 slot, __u32 src_if, __u32 egress_if)
+// The seq this copy belongs to. Generic XDP runs the devmap programs of a
+// broadcast on the ingress CPU, synchronously, before that CPU takes
+// another frame: the copy is from the CPU's latest AC-side BUM frame.
+static __always_inline int bum_egress_seq_generic(__u64 *seq)
+{
+    __u32 zero = 0;
+    __u64 *next = bpf_map_lookup_elem(&bum_seq, &zero);
+    if (!next || *next == 0)
+        return -1;
+    *seq = *next - 1;
+    return 0;
+}
+
+// Slot of the idx-th set bit of slots (ascending), or -1.
+static __always_inline int bum_plan_nth_slot(__u8 slots, __u32 idx)
+{
+    __u32 seen = 0;
+    for (__u32 i = 0; i < MAX_BUM_NEXTHOPS; i++) {
+        if (!(slots & (1u << i)))
+            continue;
+        if (seen == idx)
+            return (int)i;
+        seen++;
+    }
+    return -1;
+}
+
+static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u32 ingress_if, __u32 egress_if)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     __u64 pkt_len = data_end - data;
 
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
+    __u32 k = seq & (BUM_PLAN_RING_SIZE - 1);
+    struct bum_plan *plan = bpf_map_lookup_elem(&bum_plan_ring, &k);
+    if (!plan)
         goto drop;
-    __u16 vlan_id = 0;
-    if (eth->h_proto == bpf_htons(ETH_P_8021Q) || eth->h_proto == bpf_htons(ETH_P_8021AD)) {
-        struct vlan_hdr *vh = (void *)(eth + 1);
-        if ((void *)(vh + 1) > data_end)
-            goto drop;
-        vlan_id = bpf_ntohs(vh->h_vlan_TCI) & 0x0FFF;
+    // The plan must be this frame's: same number, same source AC, same
+    // length. A mismatch means the copy outlived its plan; sending it with
+    // another frame's slot list could deliver it to the wrong peers.
+    if (plan->seq != seq || plan->src_ifindex != ingress_if || plan->len != pkt_len) {
+        STATS_INC(STATS_BUM_PLAN_STALE, pkt_len);
+        return XDP_DROP;
     }
 
-    struct headend_l2_key src_key = { .ifindex = src_if, .vlan_id = vlan_id };
-    struct headend_entry *src = bpf_map_lookup_elem(&headend_l2_map, &src_key);
-    if (!headend_should_encaps_l2_any(src) || src->bd_id == 0 || slot >= MAX_BUM_NEXTHOPS)
-        goto drop;
-    __u16 bd_id = src->bd_id;
-
-    struct bd_peer_key pk = { .bd_id = bd_id, .index = (__u16)slot };
-    struct headend_entry *peer = bpf_map_lookup_elem(&bd_peer_map, &pk);
-    if (!peer || peer->flood_exclude)
-        goto drop;
-
-    // RFC 9252 split horizon, same rule as tc_dispatch_bum_clones: a peer
-    // on the source AC's Ethernet Segment would re-flood to the shared CE.
-    struct headend_l2_ext_val *src_ext = bpf_map_lookup_elem(&headend_l2_ext_map, &src_key);
-    if (src_ext && !esi_is_zero(src_ext->esi)) {
-        struct bd_peer_l2_ext_key ek = { .bd_id = bd_id, .index = (__u16)slot };
-        struct bd_peer_l2_ext_val *pe = bpf_map_lookup_elem(&bd_peer_l2_ext_map, &ek);
-        if (pe && esi_equal(pe->esi, src_ext->esi)) {
-            STATS_INC(STATS_SPLIT_HORIZON_TX, pkt_len);
-            return XDP_DROP;
+    struct bum_plan_uplink *up = NULL;
+    for (__u32 u = 0; u < BUM_PLAN_MAX_UPLINKS; u++) {
+        if (u >= plan->n_uplinks)
+            break;
+        if (plan->up[u].ifindex == egress_if) {
+            up = &plan->up[u];
+            break;
         }
     }
+    // The devmap holds one entry per peer behind the uplink; the plan lists
+    // fewer when split horizon or flood_exclude removed some. The copies
+    // beyond the list are surplus.
+    if (!up) {
+        STATS_INC(STATS_BUM_PLAN_SURPLUS, pkt_len);
+        return XDP_DROP;
+    }
+    __u32 idx = up->next_idx++;
+    if (idx >= up->n) {
+        STATS_INC(STATS_BUM_PLAN_SURPLUS, pkt_len);
+        return XDP_DROP;
+    }
+
+    // Kernels without "bpf: Run generic devmap egress prog on private skb"
+    // hand every copy of a broadcast the same packet buffer, and the
+    // headers one copy writes in front of the frame are what every queued
+    // copy then carries. Only the first remote copy on that buffer is
+    // encapsulated; the others are dropped rather than sent to the wrong
+    // peer. A kernel with the fix gives each clone its own buffer.
+    if ((__u64)(long)ctx->data == plan->data && plan->shared++ > 0) {
+        STATS_INC(STATS_BUM_SHARED_BUFFER, pkt_len);
+        return XDP_DROP;
+    }
+
+    int slot = bum_plan_nth_slot(up->slots, idx);
+    if (slot < 0)
+        goto drop;
+    __u32 src_if = plan->src_ifindex;
+    struct bd_peer_key pk = { .bd_id = plan->bd_id, .index = (__u16)slot };
+    struct headend_entry *peer = bpf_map_lookup_elem(&bd_peer_map, &pk);
+    if (!peer)
+        goto drop;
 
     if (bum_egress_encap(ctx, peer) < 0)
         goto drop;
 
     data = (void *)(long)ctx->data;
     data_end = (void *)(long)ctx->data_end;
-    eth = data;
+    struct ethhdr *eth = data;
     struct ipv6hdr *ip6h = (struct ipv6hdr *)(eth + 1);
     if ((void *)(ip6h + 1) > data_end)
         goto drop;
@@ -141,33 +189,29 @@ drop:
     return XDP_DROP;
 }
 
-#define BUM_REMOTE_EGRESS(n)                                                        \
-    SEC("xdp/devmap")                                                               \
-    int bum_remote_egress_##n(struct xdp_md *ctx)                                   \
-    {                                                                               \
-        return bum_remote_egress_body(ctx, n, ctx->ingress_ifindex, ctx->egress_ifindex); \
+SEC("xdp/devmap")
+int bum_remote_egress(struct xdp_md *ctx)
+{
+    __u64 seq;
+    if (bum_egress_seq_generic(&seq) < 0) {
+        STATS_INC(STATS_BUM_PLAN_STALE, (__u64)((long)ctx->data_end - (long)ctx->data));
+        return XDP_DROP;
     }
-
-// One program per flood slot: MAX_BUM_NEXTHOPS == 8.
-BUM_REMOTE_EGRESS(0)
-BUM_REMOTE_EGRESS(1)
-BUM_REMOTE_EGRESS(2)
-BUM_REMOTE_EGRESS(3)
-BUM_REMOTE_EGRESS(4)
-BUM_REMOTE_EGRESS(5)
-BUM_REMOTE_EGRESS(6)
-BUM_REMOTE_EGRESS(7)
-
-_Static_assert(MAX_BUM_NEXTHOPS == 8, "one bum_remote_egress program per flood slot");
+    return bum_remote_egress_body(ctx, seq, ctx->ingress_ifindex, ctx->egress_ifindex);
+}
 
 // Test entry for BPF_PROG_TEST_RUN, which refuses devmap programs and any
-// non-zero egress_ifindex. Runs the same body with the slot, source AC and
-// egress device taken from bum_test_params_map; the control plane never
-// attaches it.
+// non-zero egress_ifindex. Runs the same body for the calling CPU's latest
+// plan, with the source AC and egress device taken from
+// bum_test_params_map; the control plane never attaches it.
+//
+// Every test run gets a fresh buffer, which may or may not land where the
+// ingress run's was. same_buffer makes that explicit: 1 stands for a copy
+// on the ingress buffer, 0 for a copy on a buffer of its own.
 struct bum_test_params {
-    __u32 slot;
-    __u32 src_ifindex;
+    __u32 ingress_ifindex;
     __u32 egress_ifindex;
+    __u32 same_buffer;
 };
 
 struct {
@@ -184,5 +228,14 @@ int bum_remote_egress_test(struct xdp_md *ctx)
     struct bum_test_params *p = bpf_map_lookup_elem(&bum_test_params_map, &k);
     if (!p)
         return XDP_ABORTED;
-    return bum_remote_egress_body(ctx, p->slot, p->src_ifindex, p->egress_ifindex);
+    __u64 seq;
+    if (bum_egress_seq_generic(&seq) < 0) {
+        STATS_INC(STATS_BUM_PLAN_STALE, (__u64)((long)ctx->data_end - (long)ctx->data));
+        return XDP_DROP;
+    }
+    __u32 rk = seq & (BUM_PLAN_RING_SIZE - 1);
+    struct bum_plan *plan = bpf_map_lookup_elem(&bum_plan_ring, &rk);
+    if (plan)
+        plan->data = p->same_buffer ? (__u64)(long)ctx->data : 0;
+    return bum_remote_egress_body(ctx, seq, p->ingress_ifindex, p->egress_ifindex);
 }

@@ -6,12 +6,16 @@ import (
 	"errors"
 	"net"
 	"os"
+	"runtime"
+	"slices"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"golang.org/x/sys/unix"
 )
 
 // xdpBumConstants loads the collection with every BD in xdp BUM mode, the
@@ -290,12 +294,82 @@ func TestXDPBumLearningEvents(t *testing.T) {
 	})
 }
 
-// ===== devmap egress program (through its BPF_PROG_TEST_RUN entry) =====
+// ===== replication plan and devmap egress program =====
+//
+// BPF_PROG_TEST_RUN does not perform the broadcast, so a test plays both
+// halves itself on one CPU: vinbero_main writes the frame's plan into that
+// CPU's ring and returns XDP_REDIRECT, then each run of the egress test
+// entry stands for one devmap copy.
+
+// TestBumPlanMapsArePerCPU pins the map types the plan relies on: the
+// sequence counter and the ring are per-CPU, so the egress program finds
+// its frame's plan without locking.
+func TestBumPlanMapsArePerCPU(t *testing.T) {
+	spec, err := LoadBpf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct {
+		name       string
+		maxEntries uint32
+		valueSize  uint32
+	}{
+		{"bum_seq", 1, 8},
+		{"bum_plan_ring", 1024, uint32(unsafe.Sizeof(BpfBumPlan{}))},
+	} {
+		m, ok := spec.Maps[want.name]
+		if !ok {
+			t.Fatalf("no map %s", want.name)
+		}
+		if m.Type != ebpf.PerCPUArray || m.MaxEntries != want.maxEntries || m.ValueSize != want.valueSize {
+			t.Errorf("%s: type %v, %d entries of %d bytes; want PerCPUArray, %d of %d",
+				want.name, m.Type, m.MaxEntries, m.ValueSize, want.maxEntries, want.valueSize)
+		}
+	}
+	if unsafe.Sizeof(BpfBumPlan{}) != 96 {
+		t.Errorf("struct bum_plan is %d bytes, want 96", unsafe.Sizeof(BpfBumPlan{}))
+	}
+}
+
+// pinCPU keeps the calling goroutine on one CPU, the same one every time,
+// until the test ends, and returns it: the plan the ingress run writes is
+// per-CPU, and so is the egress run's view. A subtest runs on a goroutine
+// of its own and pins again.
+func pinCPU(t *testing.T) int {
+	t.Helper()
+	runtime.LockOSThread()
+	var prev unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &prev); err != nil {
+		t.Fatal(err)
+	}
+	cpu := -1
+	for i := 0; i < 1024; i++ {
+		if prev.IsSet(i) {
+			cpu = i
+			break
+		}
+	}
+	var one unix.CPUSet
+	one.Set(cpu)
+	if err := unix.SchedSetaffinity(0, &one); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unix.SchedSetaffinity(0, &prev)
+		runtime.UnlockOSThread()
+	})
+	return cpu
+}
 
 type egressCase struct {
 	h       *xdpTestHelper
+	cpu     int
 	nexthop net.IP
 	uplink  uint32
+	sync    *BumDevmapSync
+	// uplinkOf maps a peer's first segment to its uplink; anything else
+	// resolves to uplink.
+	uplinkOf map[string]uint32
 }
 
 // newEgressCase sets up the adjacency the FIB lookup resolves through and
@@ -309,7 +383,14 @@ func newEgressCase(t *testing.T) *egressCase {
 		t.Fatal(err)
 	}
 	h.bumAC(1)
-	return &egressCase{h: h, nexthop: nexthop, uplink: uint32(link.Index)}
+	c := &egressCase{h: h, cpu: pinCPU(t), nexthop: nexthop, uplink: uint32(link.Index), uplinkOf: map[string]uint32{}}
+	c.sync = NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(seg [IPv6AddrLen]byte) (uint32, error) {
+		if up, ok := c.uplinkOf[net.IP(seg[:]).String()]; ok {
+			return up, nil
+		}
+		return c.uplink, nil
+	}, nil)
+	return c
 }
 
 func (c *egressCase) peer(t *testing.T, index uint16, mode vinberov1.Srv6HeadendBehavior, segs []string, esi [ESILen]byte, floodExclude bool) {
@@ -328,9 +409,63 @@ func (c *egressCase) peer(t *testing.T, index uint16, mode vinberov1.Srv6Headend
 	}
 }
 
-func (c *egressCase) run(t *testing.T, slot, srcIf, egressIf uint32, pkt []byte) (uint32, []byte) {
+// ingress builds the BD's devmaps and runs one AC-side broadcast through
+// vinbero_main, which plans it; it returns the plan.
+func (c *egressCase) ingress(t *testing.T, pkt []byte) BpfBumPlan {
 	t.Helper()
-	p := BpfBumTestParams{Slot: slot, SrcIfindex: srcIf, EgressIfindex: egressIf}
+	if err := c.sync.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if ret, _ := c.h.run(pkt); ret != XDP_REDIRECT {
+		t.Fatalf("ingress: action = %d, want XDP_REDIRECT", ret)
+	}
+	seq, plan := c.latestPlan(t)
+	if plan.Seq != seq {
+		t.Fatalf("ingress wrote seq %d into the ring, counter says %d", plan.Seq, seq)
+	}
+	return plan
+}
+
+// latestPlan reads this CPU's latest seq and its ring entry.
+func (c *egressCase) latestPlan(t *testing.T) (uint64, BpfBumPlan) {
+	t.Helper()
+	var next []uint64
+	if err := c.h.objs.BumSeq.Lookup(uint32(0), &next); err != nil {
+		t.Fatal(err)
+	}
+	if next[c.cpu] == 0 {
+		t.Fatal("no plan on this CPU")
+	}
+	seq := next[c.cpu] - 1
+	var plans []BpfBumPlan
+	if err := c.h.objs.BumPlanRing.Lookup(uint32(seq%1024), &plans); err != nil {
+		t.Fatal(err)
+	}
+	return seq, plans[c.cpu]
+}
+
+// editPlan rewrites this CPU's latest plan.
+func (c *egressCase) editPlan(t *testing.T, edit func(*BpfBumPlan)) {
+	t.Helper()
+	seq, _ := c.latestPlan(t)
+	var plans []BpfBumPlan
+	if err := c.h.objs.BumPlanRing.Lookup(uint32(seq%1024), &plans); err != nil {
+		t.Fatal(err)
+	}
+	edit(&plans[c.cpu])
+	if err := c.h.objs.BumPlanRing.Put(uint32(seq%1024), plans); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// egress runs one copy through the egress test entry. sameBuffer makes the
+// copy look as if it ran on the ingress program's buffer.
+func (c *egressCase) egress(t *testing.T, srcIf, egressIf uint32, sameBuffer bool, pkt []byte) (uint32, []byte) {
+	t.Helper()
+	p := BpfBumTestParams{IngressIfindex: srcIf, EgressIfindex: egressIf}
+	if sameBuffer {
+		p.SameBuffer = 1
+	}
 	if err := c.h.objs.BumTestParamsMap.Put(uint32(0), &p); err != nil {
 		t.Fatal(err)
 	}
@@ -342,43 +477,127 @@ func (c *egressCase) run(t *testing.T, slot, srcIf, egressIf uint32, pkt []byte)
 	return ret, opts.DataOut
 }
 
+func lastSegment(i uint16) net.IP {
+	return net.IP{0xfc, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, byte(i)}
+}
+
+// The plan is what the tc path's per-peer checks would let through,
+// grouped by uplink: flood_exclude and same-ES peers are left out at
+// ingress, and the copies for one uplink hand out its slots in order.
+func TestBumPlanFromIngress(t *testing.T) {
+	c := newEgressCase(t)
+	nh := c.nexthop.String()
+	l2 := bumFrame(t)
+	esi, _ := ParseESI("01:00:00:00:00:00:00:00:00:01")
+	src, _ := ParseIPv6("fc00::1")
+	segs, n, _ := ParseSegments([]string{"fc00::200"})
+	if err := c.h.mapOps.CreateHeadendL2(1, 100, &HeadendEntry{
+		Mode: uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2), NumSegments: n,
+		SrcAddr: src, Segments: segs, BdId: bumTestBD,
+	}, esi); err != nil {
+		t.Fatal(err)
+	}
+	l2Mode := vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2
+	c.peer(t, 0, l2Mode, []string{nh, lastSegment(0).String()}, [ESILen]byte{}, false)
+	c.peer(t, 2, l2Mode, []string{nh, lastSegment(2).String()}, [ESILen]byte{}, false)
+	c.peer(t, 3, l2Mode, []string{nh, lastSegment(3).String()}, [ESILen]byte{}, true) // RT2 unicast peer
+	c.peer(t, 4, l2Mode, []string{nh, lastSegment(4).String()}, esi, false)           // same ES as the AC
+	c.peer(t, 6, l2Mode, []string{nh, lastSegment(6).String()}, [ESILen]byte{}, false)
+	c.uplinkOf["fc00::99"] = 1 // a second uplink (lo)
+	c.peer(t, 7, l2Mode, []string{"fc00::99", lastSegment(7).String()}, [ESILen]byte{}, false)
+
+	shBefore := statCount(t, c.h.mapOps, "SPLIT_HORIZON_TX")
+	plan := c.ingress(t, l2)
+	if plan.SrcIfindex != 1 || plan.BdId != bumTestBD || plan.VlanId != 100 || int(plan.Len) != len(l2) {
+		t.Errorf("plan header = src %d bd %d vlan %d len %d, want 1/%d/100/%d",
+			plan.SrcIfindex, plan.BdId, plan.VlanId, plan.Len, bumTestBD, len(l2))
+	}
+	type up struct {
+		ifindex uint32
+		slots   uint8
+		n       uint8
+	}
+	var got []up
+	for i := range int(plan.N_uplinks) {
+		got = append(got, up{plan.Up[i].Ifindex, plan.Up[i].Slots, plan.Up[i].N})
+	}
+	want := []up{{c.uplink, 1<<0 | 1<<2 | 1<<6, 3}, {1, 1 << 7, 1}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("plan uplinks = %+v, want %+v", got, want)
+	}
+	if n := statCount(t, c.h.mapOps, "SPLIT_HORIZON_TX"); n != shBefore+1 {
+		t.Errorf("SPLIT_HORIZON_TX = %d, want %d (peer 4)", n, shBefore+1)
+	}
+
+	// The three copies headed for the uplink get slots 0, 2, 6 in turn.
+	for _, slot := range []uint16{0, 2, 6} {
+		ret, out := c.egress(t, 1, c.uplink, false, l2)
+		if ret != XDP_PASS {
+			t.Fatalf("copy for slot %d: action = %d, want XDP_PASS", slot, ret)
+		}
+		if got := net.IP(out[ethHeaderLen+ipv6HeaderLen+srhBaseLen : ethHeaderLen+ipv6HeaderLen+srhBaseLen+ipv6AddrLen]); !got.Equal(lastSegment(slot)) {
+			t.Errorf("copy for slot %d: SRH[0] = %v, want %v", slot, got, lastSegment(slot))
+		}
+	}
+	// The devmap holds an entry for every peer behind the uplink (four:
+	// the same-ES one too), so one copy too many arrives.
+	before := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS")
+	if ret, _ := c.egress(t, 1, c.uplink, false, l2); ret != XDP_DROP {
+		t.Fatalf("surplus copy: action = %d, want XDP_DROP", ret)
+	}
+	// So does a copy for an uplink the plan does not list.
+	if ret, _ := c.egress(t, 1, 4242, false, l2); ret != XDP_DROP {
+		t.Fatalf("copy for an unplanned uplink: action = %d, want XDP_DROP", ret)
+	}
+	if n := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS"); n != before+2 {
+		t.Errorf("BUM_PLAN_SURPLUS = %d, want %d", n, before+2)
+	}
+	flood := devmapEntries(t, c.h.objs.BumFloodMap, bumTestBD)
+	if got := sortedKeys(flood); !slices.Equal(got, []uint32{1, BumSlotKeyBase, BumSlotKeyBase | 2, BumSlotKeyBase | 4, BumSlotKeyBase | 6, BumSlotKeyBase | 7}) {
+		t.Errorf("flood devmap keys = %#x", got)
+	}
+}
+
 func TestBumRemoteEgressEncap(t *testing.T) {
 	c := newEgressCase(t)
 	nh := c.nexthop.String()
 	l2 := bumFrame(t)
 
 	// Slots 0..7, each its own peer (distinct last segment), all behind the
-	// one uplink: every slot must build its own peer's headers.
+	// one uplink: one shared program, and every copy gets its own peer's
+	// headers.
 	for i := range uint16(MaxBumNexthops) {
-		last := net.IP{0xfc, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, byte(i)}
-		c.peer(t, i, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, []string{nh, last.String()}, [ESILen]byte{}, false)
+		c.peer(t, i, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, []string{nh, lastSegment(i).String()}, [ESILen]byte{}, false)
 	}
-	for i := range uint32(MaxBumNexthops) {
-		ret, out := c.run(t, i, 1, c.uplink, l2)
+	if plan := c.ingress(t, l2); plan.N_uplinks != 1 || plan.Up[0].N != MaxBumNexthops || plan.Up[0].Slots != 0xff {
+		t.Fatalf("plan = %d uplinks, first %+v; want one uplink with all 8 slots", plan.N_uplinks, plan.Up[0])
+	}
+	for i := range uint16(MaxBumNexthops) {
+		ret, out := c.egress(t, 1, c.uplink, false, l2)
 		if ret != XDP_PASS {
-			t.Fatalf("slot %d: action = %d, want XDP_PASS (devmap transmit)", i, ret)
+			t.Fatalf("copy %d: action = %d, want XDP_PASS (devmap transmit)", i, ret)
 		}
 		const hdr = ethHeaderLen + ipv6HeaderLen + srhBaseLen + 2*ipv6AddrLen
 		if len(out) != hdr+len(l2) {
-			t.Fatalf("slot %d: len %d, want %d", i, len(out), hdr+len(l2))
+			t.Fatalf("copy %d: len %d, want %d", i, len(out), hdr+len(l2))
 		}
 		if binary.BigEndian.Uint16(out[12:14]) != 0x86dd {
-			t.Fatalf("slot %d: outer ethertype %#x", i, out[12:14])
+			t.Fatalf("copy %d: outer ethertype %#x", i, out[12:14])
 		}
 		ip6 := out[ethHeaderLen:]
 		if got := net.IP(ip6[24:40]); !got.Equal(c.nexthop) {
-			t.Errorf("slot %d: outer DA %v, want segments[0] %v", i, got, c.nexthop)
+			t.Errorf("copy %d: outer DA %v, want segments[0] %v", i, got, c.nexthop)
 		}
 		srh := ip6[ipv6HeaderLen:]
 		if srh[0] != 143 || srh[2] != 4 || srh[3] != 1 || srh[4] != 1 {
-			t.Errorf("slot %d: SRH nh=%d type=%d SL=%d LE=%d, want 143/4/1/1", i, srh[0], srh[2], srh[3], srh[4])
+			t.Errorf("copy %d: SRH nh=%d type=%d SL=%d LE=%d, want 143/4/1/1", i, srh[0], srh[2], srh[3], srh[4])
 		}
 		// SRH segment list is reversed: [0] is the last segment.
-		if got := net.IP(srh[8:24]); got[15] != byte(i) || got[14] != 0x10 {
-			t.Errorf("slot %d: SRH[0] = %v, want the slot's own peer", i, got)
+		if got := net.IP(srh[8:24]); !got.Equal(lastSegment(i)) {
+			t.Errorf("copy %d: SRH[0] = %v, want slot %d's peer", i, got, i)
 		}
 		if !bytes.Equal(out[hdr:], l2) {
-			t.Errorf("slot %d: inner frame changed", i)
+			t.Errorf("copy %d: inner frame changed", i)
 		}
 	}
 	if n := statCount(t, c.h.mapOps, "BUM_EGRESS_TX"); n != MaxBumNexthops {
@@ -386,8 +605,17 @@ func TestBumRemoteEgressEncap(t *testing.T) {
 	}
 
 	t.Run("reduced, one segment: no SRH", func(t *testing.T) {
+		pinCPU(t)
+		if _, err := c.h.mapOps.DeleteBdPeer(bumTestBD, 3); err != nil {
+			t.Fatal(err)
+		}
 		c.peer(t, 3, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2_RED, []string{nh}, [ESILen]byte{}, false)
-		ret, out := c.run(t, 3, 1, c.uplink, l2)
+		c.ingress(t, l2)
+		// Copies 0..2 take slots 0..2; the fourth is slot 3.
+		for range 3 {
+			c.egress(t, 1, c.uplink, false, l2)
+		}
+		ret, out := c.egress(t, 1, c.uplink, false, l2)
 		if ret != XDP_PASS {
 			t.Fatalf("action = %d, want XDP_PASS", ret)
 		}
@@ -400,7 +628,12 @@ func TestBumRemoteEgressEncap(t *testing.T) {
 	})
 
 	t.Run("FIB egress differs from the devmap uplink", func(t *testing.T) {
-		ret, _ := c.run(t, 0, 1, c.uplink+1000, l2)
+		pinCPU(t)
+		// The control plane resolved slot 0's peer to lo; the FIB says
+		// uadj-a.
+		c.uplinkOf[nh] = 1
+		c.ingress(t, l2)
+		ret, _ := c.egress(t, 1, 1, false, l2)
 		if ret != XDP_DROP {
 			t.Fatalf("action = %d, want XDP_DROP", ret)
 		}
@@ -410,50 +643,76 @@ func TestBumRemoteEgressEncap(t *testing.T) {
 	})
 }
 
-func TestBumRemoteEgressDrops(t *testing.T) {
+// A copy is only sent with a plan that is provably its frame's.
+func TestBumRemoteEgressPlanChecks(t *testing.T) {
 	c := newEgressCase(t)
 	nh := c.nexthop.String()
 	l2 := bumFrame(t)
-	esi, _ := ParseESI("01:00:00:00:00:00:00:00:00:01")
-
-	c.peer(t, 0, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, []string{nh}, [ESILen]byte{}, true) // RT2 unicast peer
-	c.peer(t, 1, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, []string{nh}, esi, false)            // same ES as the AC
-	// The AC on lo carries the ESI too.
-	src, _ := ParseIPv6("fc00::1")
-	segs, n, _ := ParseSegments([]string{"fc00::200"})
-	if err := c.h.mapOps.CreateHeadendL2(1, 100, &HeadendEntry{
-		Mode: uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2), NumSegments: n,
-		SrcAddr: src, Segments: segs, BdId: bumTestBD,
-	}, esi); err != nil {
-		t.Fatal(err)
+	for i := range uint16(3) {
+		c.peer(t, i, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, []string{nh, lastSegment(i).String()}, [ESILen]byte{}, false)
 	}
 
-	cases := []struct {
-		name  string
-		slot  uint32
-		srcIf uint32
-		stat  string
-	}{
-		{"flood_exclude peer", 0, 1, "BUM_EGRESS_DROP"},
-		{"split horizon (same ES)", 1, 1, "SPLIT_HORIZON_TX"},
-		{"empty slot", 5, 1, "BUM_EGRESS_DROP"},
-		{"source is not an AC", 1, 4242, "BUM_EGRESS_DROP"},
+	expectDrop := func(t *testing.T, stat string, srcIf uint32, sameBuffer bool, pkt []byte) {
+		t.Helper()
+		before := statCount(t, c.h.mapOps, stat)
+		ret, out := c.egress(t, srcIf, c.uplink, sameBuffer, pkt)
+		if ret != XDP_DROP {
+			t.Fatalf("action = %d, want XDP_DROP", ret)
+		}
+		if !bytes.Equal(out[:len(pkt)], pkt) {
+			t.Error("a dropped copy must not have been rewritten")
+		}
+		if n := statCount(t, c.h.mapOps, stat); n != before+1 {
+			t.Errorf("%s = %d, want %d", stat, n, before+1)
+		}
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			before := statCount(t, c.h.mapOps, tc.stat)
-			ret, out := c.run(t, tc.slot, tc.srcIf, c.uplink, l2)
-			if ret != XDP_DROP {
-				t.Fatalf("action = %d, want XDP_DROP", ret)
-			}
-			if !bytes.Equal(out[:len(l2)], l2) {
-				t.Error("a dropped copy must not have been rewritten")
-			}
-			if n := statCount(t, c.h.mapOps, tc.stat); n != before+1 {
-				t.Errorf("%s = %d, want %d", tc.stat, n, before+1)
-			}
-		})
-	}
+
+	t.Run("no plan yet", func(t *testing.T) {
+		pinCPU(t)
+		expectDrop(t, "BUM_PLAN_STALE", 1, false, l2)
+	})
+	t.Run("ring entry overwritten by a later frame", func(t *testing.T) {
+		pinCPU(t)
+		c.ingress(t, l2)
+		c.editPlan(t, func(p *BpfBumPlan) { p.Seq += 1024 })
+		expectDrop(t, "BUM_PLAN_STALE", 1, false, l2)
+	})
+	t.Run("copy of a frame from another AC", func(t *testing.T) {
+		pinCPU(t)
+		c.ingress(t, l2)
+		expectDrop(t, "BUM_PLAN_STALE", 4242, false, l2)
+	})
+	t.Run("copy of a frame of another length", func(t *testing.T) {
+		pinCPU(t)
+		c.ingress(t, l2)
+		expectDrop(t, "BUM_PLAN_STALE", 1, false, append(slices.Clone(l2), 0))
+	})
+	t.Run("peer deleted after the plan", func(t *testing.T) {
+		pinCPU(t)
+		c.ingress(t, l2)
+		if err := c.h.objs.BdPeerMap.Delete(&BdPeerKey{BdId: bumTestBD, Index: 0}); err != nil {
+			t.Fatal(err)
+		}
+		expectDrop(t, "BUM_EGRESS_DROP", 1, false, l2)
+		if ret, _ := c.egress(t, 1, c.uplink, false, l2); ret != XDP_PASS {
+			t.Errorf("next copy (slot 1): action = %d, want XDP_PASS", ret)
+		}
+	})
+	t.Run("copies sharing the ingress buffer", func(t *testing.T) {
+		pinCPU(t)
+		c.peer(t, 0, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, []string{nh, lastSegment(0).String()}, [ESILen]byte{}, false)
+		c.ingress(t, l2)
+		// The first remote copy on the shared buffer is encapsulated; a
+		// second would overwrite its headers, so it is dropped.
+		if ret, _ := c.egress(t, 1, c.uplink, true, l2); ret != XDP_PASS {
+			t.Fatalf("first copy: action = %d, want XDP_PASS", ret)
+		}
+		expectDrop(t, "BUM_SHARED_BUFFER", 1, true, l2)
+		// A copy on a buffer of its own is fine.
+		if ret, _ := c.egress(t, 1, c.uplink, false, l2); ret != XDP_PASS {
+			t.Errorf("private copy: action = %d, want XDP_PASS", ret)
+		}
+	})
 }
 
 // bumFrame is the VLAN 100 broadcast an AC hands to the devmap.

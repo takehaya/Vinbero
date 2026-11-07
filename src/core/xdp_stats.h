@@ -26,6 +26,9 @@ enum stats_counter {
     STATS_BUM_EGRESS_TX      = 11,  // xdp mode: remote copies encapsulated by the devmap egress program
     STATS_BUM_EGRESS_DROP    = 12,  // xdp mode: remote copy dropped (no AC/peer, encap or FIB failure)
     STATS_BUM_UPLINK_MISMATCH = 13, // xdp mode: FIB egress differs from the slot's devmap uplink
+    STATS_BUM_PLAN_STALE     = 14,  // xdp mode: remote copy whose replication plan is not its frame's
+    STATS_BUM_PLAN_SURPLUS   = 15,  // xdp mode: remote copy beyond its uplink's planned slots
+    STATS_BUM_SHARED_BUFFER  = 16,  // xdp mode: remote copy dropped, its buffer is shared with another
     STATS_MAX,
 };
 

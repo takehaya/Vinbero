@@ -53,7 +53,7 @@ func RouteUplinkResolver(seg [IPv6AddrLen]byte) (uint32, error) {
 type BumDevmapSync struct {
 	mu        sync.Mutex // serializes rebuilds: a stale read must not overwrite a newer one
 	objs      *BpfObjects
-	egress    [MaxBumNexthops]*ebpf.Program
+	egress    *ebpf.Program // bum_remote_egress, shared by every remote slot entry
 	innerSpec *ebpf.MapSpec
 	modeOf    func(bdID uint16) uint8
 	uplink    UplinkResolver
@@ -70,11 +70,8 @@ func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink Uplink
 		logger = zap.NewNop()
 	}
 	return &BumDevmapSync{
-		objs: objs,
-		egress: [MaxBumNexthops]*ebpf.Program{
-			objs.BumRemoteEgress0, objs.BumRemoteEgress1, objs.BumRemoteEgress2, objs.BumRemoteEgress3,
-			objs.BumRemoteEgress4, objs.BumRemoteEgress5, objs.BumRemoteEgress6, objs.BumRemoteEgress7,
-		},
+		objs:   objs,
+		egress: objs.BumRemoteEgress,
 		innerSpec: &ebpf.MapSpec{
 			Name:       "bum_devmap",
 			Type:       ebpf.DevMapHash,
@@ -168,12 +165,14 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16) error {
 			return fmt.Errorf("bd %d: add AC ifindex %d: %w", bdID, ifindex, err)
 		}
 	}
+	if len(slots) > 0 && s.egress == nil {
+		return fmt.Errorf("bd %d: bum_remote_egress is not loaded", bdID)
+	}
 	for _, sl := range slots {
-		prog := s.egress[sl.index]
-		if prog == nil {
-			return fmt.Errorf("bd %d: no egress program for slot %d", bdID, sl.index)
-		}
-		v := devmapVal{Ifindex: sl.uplink, ProgFD: uint32(prog.FD())}
+		// One entry per peer: an uplink with k peers behind it gets k
+		// copies, and the egress program hands each the next slot of the
+		// frame's plan for that uplink.
+		v := devmapVal{Ifindex: sl.uplink, ProgFD: uint32(s.egress.FD())}
 		if err := flood.Put(BumSlotKeyBase|uint32(sl.index), v); err != nil {
 			return fmt.Errorf("bd %d: add flood slot %d (uplink %d): %w", bdID, sl.index, sl.uplink, err)
 		}
