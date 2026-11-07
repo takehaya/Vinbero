@@ -29,7 +29,7 @@ func (c *observedCacheClose) Close(ctx context.Context) error {
 	return c.CompilationCache.Close(ctx)
 }
 
-func TestRestartCacheOwnsModuleBytesAndEndsWithRegistration(t *testing.T) {
+func TestCompilationCacheSurvivesRestartAndCompatibleReplacement(t *testing.T) {
 	ctx := context.Background()
 	src := newFakeSource()
 	m, _ := newTestManager(t, src, newFakeClaims())
@@ -73,9 +73,9 @@ func TestRestartCacheOwnsModuleBytesAndEndsWithRegistration(t *testing.T) {
 	if current == first || dead || !reused {
 		t.Fatal("restart did not reuse this generation's cache with immutable input")
 	}
-	// New registration, even with identical bytes, gets a separate cache.
+	// Compatible registration reuses code, but creates fresh guest and host state.
 	observed := &observedCacheClose{CompilationCache: cache}
-	p.compilationCache = observed // No more failures are injected in this worker.
+	p.cacheLease.owner.cache = observed // Observe final Close; runtimes still receive the original cache.
 	reg.Module, reg.Config = originalModule, originalConfig
 	if err := m.Register(ctx, reg); err != nil {
 		t.Fatal(err)
@@ -83,12 +83,18 @@ func TestRestartCacheOwnsModuleBytesAndEndsWithRegistration(t *testing.T) {
 	m.mu.Lock()
 	replacement := m.plugins[reg.Name]
 	m.mu.Unlock()
-	if replacement == p || replacement.compilationCache == cache || observed.calls.Load() != 1 {
-		t.Fatal("replacement shared or retained the old generation's cache")
+	if replacement == p || replacement.inst == current || replacement.ops == p.ops || replacement.compilationCache != cache || observed.calls.Load() != 0 {
+		t.Fatal("replacement did not preserve compiled code with fresh instance and ops")
 	}
 	m.teardown(ctx, p)
+	if observed.calls.Load() != 0 || p.cacheLease.retain() != nil {
+		t.Fatal("retired generation released twice or issued another lease")
+	}
+	if err := m.Unregister(ctx, reg.Name); err != nil {
+		t.Fatal(err)
+	}
 	if observed.calls.Load() != 1 {
-		t.Fatal("repeated teardown closed the cache twice")
+		t.Fatal("last generation did not close the shared cache once")
 	}
 }
 
@@ -120,7 +126,7 @@ func TestRestartCacheCloseWaitsForWorkerAndRuntime(t *testing.T) {
 			t.Error("cache closed before runtime closed")
 		}
 	}}
-	p.compilationCache = observed
+	p.cacheLease.owner.cache = observed
 	finished := make(chan error, 1)
 	go func() { finished <- m.Unregister(ctx, reg.Name) }()
 	select {
