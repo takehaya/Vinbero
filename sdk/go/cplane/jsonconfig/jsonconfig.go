@@ -31,10 +31,10 @@ type Version struct {
 
 // Decode parses data into v, which must point to a struct that declares a
 // "schema_version" field (embed Version for convenience). Errors name the
-// offending key or value and are prefixed with "configuration:".
+// offending key or value and begin with "configuration".
 func Decode(data []byte, version int, v any) error {
 	if err := checkShape(data); err != nil {
-		return fmt.Errorf("configuration: %w", err)
+		return err
 	}
 	var header struct {
 		SchemaVersion *int `json:"schema_version"`
@@ -61,19 +61,19 @@ func checkShape(data []byte) error {
 	tokens := json.NewDecoder(bytes.NewReader(data))
 	first, err := tokens.Token()
 	if err == io.EOF {
-		return errors.New("config must be a JSON object (got no data)")
+		return errors.New("configuration must be a JSON object (got no data)")
 	}
 	if err != nil || first != json.Delim('{') {
-		return errors.New("config must be a JSON object")
+		return errors.New("configuration must be a JSON object")
 	}
 	for depth := 1; depth > 0; {
 		token, err := tokens.Token()
 		if err != nil {
-			return err
+			return fmt.Errorf("configuration: %w", err)
 		}
 		switch token {
 		case nil:
-			return errors.New("null values are not supported")
+			return errors.New("configuration: null values are not supported")
 		case json.Delim('{'), json.Delim('['):
 			depth++
 		case json.Delim('}'), json.Delim(']'):
@@ -81,7 +81,7 @@ func checkShape(data []byte) error {
 		}
 	}
 	if _, err := tokens.Token(); err != io.EOF {
-		return errors.New("expected one JSON object")
+		return errors.New("configuration: expected one JSON object")
 	}
 	return nil
 }

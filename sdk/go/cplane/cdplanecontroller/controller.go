@@ -13,19 +13,8 @@ import (
 
 type configuration struct {
 	jsonconfig.Version
-	Routing  *routing  `json:"routing"`
-	Endpoint *endpoint `json:"endpoint"`
-}
-
-type routing struct {
-	Behavior        *uint32  `json:"behavior"`
-	Locator         string   `json:"locator"`
-	Prefix          string   `json:"prefix"`
-	VRF             string   `json:"vrf"`
-	Slot            uint32   `json:"slot"`
-	NextHop         string   `json:"next_hop"`
-	DecapVRF        string   `json:"decap_vrf"`
-	HeadendPrefixes []string `json:"headend_prefixes"`
+	Routing  *customcontroller.Routing `json:"routing"`
+	Endpoint *endpoint                 `json:"endpoint"`
 }
 
 type endpoint struct {
@@ -33,84 +22,49 @@ type endpoint struct {
 }
 
 // New validates the entire JSON configuration before making declarations.
-// Native and WASM call this same adapter; the host forwards configuration bytes.
-func New(data []byte, client *cplane.Client, log func(cplane.LogLevel, string)) (*customcontroller.Controller, error) {
-	config, err := decodeConfig(data)
+// Native and WASM call this same adapter; the host forwards configuration bytes
+// and the adapter's host supplies the registration's grants.
+func New(data []byte, grants cplane.Grants, client *cplane.Client, log func(cplane.LogLevel, string)) (*customcontroller.Controller, error) {
+	config, err := decodeConfig(data, grants)
 	if err != nil {
 		return nil, err
 	}
 	return customcontroller.NewWithConfig(config, client, log)
 }
 
-func decodeConfig(data []byte) (customcontroller.Config, error) {
+// decodeConfig shares the routing object and its grant defaults with
+// customcontroller. A local SID here always carries the endpoint policy and
+// a built-in decap VRF, so both are required whenever one is allocated.
+func decodeConfig(data []byte, grants cplane.Grants) (customcontroller.Config, error) {
 	var input configuration
-	var config customcontroller.Config
 	if err := jsonconfig.Decode(data, 1, &input); err != nil {
-		return config, err
+		return customcontroller.Config{}, err
 	}
 	if input.Routing == nil {
-		return config, fmt.Errorf("routing is required")
+		return customcontroller.Config{}, fmt.Errorf("routing is required")
 	}
-	r := input.Routing
-	config = customcontroller.Config{Behavior: 0xFE01, Locator: r.Locator,
-		Prefix: r.Prefix, VRF: r.VRF, Slot: r.Slot, NextHop: r.NextHop, DecapVRF: r.DecapVRF}
-	if r.Behavior != nil {
-		if *r.Behavior == 0 || *r.Behavior > 0xffff {
-			return config, fmt.Errorf("routing.behavior must be between 1 and 65535 (got %d)", *r.Behavior)
-		}
-		config.Behavior = *r.Behavior
+	config, err := input.Routing.Resolve(grants)
+	if err != nil {
+		return customcontroller.Config{}, err
 	}
-	for _, value := range r.HeadendPrefixes {
-		prefix, err := netip.ParsePrefix(value)
-		if err != nil || !prefix.Addr().Is4() {
-			return config, fmt.Errorf("routing.headend_prefixes: invalid IPv4 prefix %q", value)
+	if config.Locator == "" {
+		if input.Endpoint != nil {
+			return customcontroller.Config{}, fmt.Errorf("endpoint requires a local SID: set routing.decap_vrf, and routing.locator and routing.slot unless the registration grants one of each")
 		}
-		config.HeadendPrefixes = append(config.HeadendPrefixes, prefix.Masked())
+		return config, nil
 	}
-	allocates := r.Locator != "" || r.Slot != 0
-	if allocates {
-		// The endpoint plugin PROG_ARRAY ABI reserves slots [32,64).
-		// The host still validates ownership and the registration's narrower scope.
-		if r.Locator == "" {
-			return config, fmt.Errorf("routing.locator is required to allocate a SID")
-		}
-		if r.Slot < 32 || r.Slot >= 64 {
-			return config, fmt.Errorf("routing.slot must be in [32,64) to allocate a SID (got %d)", r.Slot)
-		}
-		if r.DecapVRF == "" {
-			return config, fmt.Errorf("routing.decap_vrf is required to allocate a SID")
-		}
-		if input.Endpoint == nil {
-			return config, fmt.Errorf("endpoint.allowed_underlay_prefix is required to allocate a SID")
-		}
-	} else if input.Endpoint != nil || r.DecapVRF != "" {
-		return config, fmt.Errorf("endpoint and routing.decap_vrf require routing.locator and routing.slot")
+	if config.DecapVRF == "" {
+		return customcontroller.Config{}, fmt.Errorf("routing.decap_vrf is required to allocate a SID")
 	}
-	advertises := r.Prefix != "" || r.VRF != "" || r.NextHop != ""
-	if advertises {
-		if !allocates || r.Prefix == "" || r.VRF == "" || r.NextHop == "" {
-			return config, fmt.Errorf("routing.prefix, routing.vrf and routing.next_hop must be supplied together with SID allocation")
-		}
-		prefix, err := netip.ParsePrefix(r.Prefix)
-		if err != nil || !prefix.Addr().Is4() {
-			return config, fmt.Errorf("routing.prefix: invalid IPv4 prefix %q", r.Prefix)
-		}
-		config.Prefix = prefix.Masked().String()
-		nextHop, err := netip.ParseAddr(r.NextHop)
-		if err != nil || !nextHop.Is6() || nextHop.Is4In6() || nextHop.Zone() != "" || !nextHop.IsGlobalUnicast() {
-			return config, fmt.Errorf("routing.next_hop: expected a usable IPv6 address (got %q)", r.NextHop)
-		}
-		config.NextHop = nextHop.String()
+	if input.Endpoint == nil {
+		return customcontroller.Config{}, fmt.Errorf("endpoint.allowed_underlay_prefix is required to allocate a SID")
 	}
-	if input.Endpoint != nil {
-		prefix, err := netip.ParsePrefix(input.Endpoint.AllowedUnderlayPrefix)
-		if err != nil {
-			return config, fmt.Errorf("endpoint.allowed_underlay_prefix: invalid IPv6 prefix %q", input.Endpoint.AllowedUnderlayPrefix)
-		}
-		config.AuxRaw, err = EncodeEndpointAux(prefix)
-		if err != nil {
-			return config, err
-		}
+	prefix, err := netip.ParsePrefix(input.Endpoint.AllowedUnderlayPrefix)
+	if err != nil {
+		return customcontroller.Config{}, fmt.Errorf("endpoint.allowed_underlay_prefix: invalid IPv6 prefix %q", input.Endpoint.AllowedUnderlayPrefix)
+	}
+	if config.AuxRaw, err = EncodeEndpointAux(prefix); err != nil {
+		return customcontroller.Config{}, err
 	}
 	return config, nil
 }

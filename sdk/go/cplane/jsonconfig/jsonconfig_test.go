@@ -30,11 +30,11 @@ func TestDecodeAcceptsOneVersionedObject(t *testing.T) {
 
 func TestDecodeRejects(t *testing.T) {
 	for _, tc := range []struct{ name, input, want string }{
-		{"empty", ``, "config must be a JSON object"},
-		{"binary", "\x08\x81\xfc\x03", "config must be a JSON object"},
-		{"array", `[{"schema_version":1}]`, "config must be a JSON object"},
-		{"scalar", `1`, "config must be a JSON object"},
-		{"top-level null", `null`, "config must be a JSON object"},
+		{"empty", ``, "configuration must be a JSON object"},
+		{"binary", "\x08\x81\xfc\x03", "configuration must be a JSON object"},
+		{"array", `[{"schema_version":1}]`, "configuration must be a JSON object"},
+		{"scalar", `1`, "configuration must be a JSON object"},
+		{"top-level null", `null`, "configuration must be a JSON object"},
 		{"missing version", `{"name":"a"}`, "schema_version is required"},
 		{"wrong version", `{"schema_version":2}`, "schema_version must be 1 (got 2)"},
 		{"string version", `{"schema_version":"1"}`, "schema_version"},
@@ -50,7 +50,7 @@ func TestDecodeRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var c config
 			err := jsonconfig.Decode([]byte(tc.input), 1, &c)
-			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.HasPrefix(err.Error(), "configuration: ") {
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.HasPrefix(err.Error(), "configuration") {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})

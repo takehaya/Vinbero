@@ -1161,7 +1161,7 @@ func TestFailedInstantiationLeavesNoState(t *testing.T) {
 	err = m.Register(context.Background(), Registration{
 		Name:   "custom-behavior",
 		Module: examplePlugin(t),
-		Config: append(exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+		Config: append(exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 			// A trailing byte that cannot be parsed, so configure returns
 			// non-zero after it has already declared.
 			0xff),
@@ -1203,7 +1203,7 @@ func TestFailedUpgradeLeavesTheRunningPluginAlone(t *testing.T) {
 	good := Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
-		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", "65000:7", 33, "2001:db8::1"),
+		Config:       exampleConfig(0xFE01, "main", "10.7.0.0/24", testVRF, 33, "2001:db8::1"),
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(), Scope: testScope(),
 	}

@@ -5,12 +5,13 @@ import (
 	"strings"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
+	"github.com/takehaya/vinbero/sdk/go/cplane/customcontroller"
 	"github.com/takehaya/vinbero/sdk/go/cplane/guest"
 )
 
 func init() {
 	guest.Register(guest.Handlers{
-		Configure: func([]byte) error {
+		Configure: func(data []byte) error {
 			g, err := guest.Grants()
 			if err != nil {
 				return err
@@ -22,6 +23,13 @@ func init() {
 			guest.Log(cplane.LogInfo, fmt.Sprintf("caps=%s families=%s behaviors=%v locators=%d vrfs=%s prefixes=%s v4=%v v6=%v endpoint=%v",
 				strings.Join(g.Capabilities, ","), strings.Join(g.Families, ","), g.Behaviors, len(g.Locators),
 				strings.Join(g.VRFs, ","), strings.Join(prefixes, ","), g.HeadendV4Slots, g.HeadendV6Slots, g.EndpointSlots))
+			// The shared JSON decoder must behave the same under both compilers.
+			config, err := customcontroller.DecodeConfig(data, g)
+			if err != nil {
+				guest.Log(cplane.LogInfo, "error: "+err.Error())
+				return nil
+			}
+			guest.Log(cplane.LogInfo, fmt.Sprintf("behavior=%#x locator=%s slot=%d prefixes=%v", config.Behavior, config.Locator, config.Slot, config.HeadendPrefixes))
 			return nil
 		},
 	})

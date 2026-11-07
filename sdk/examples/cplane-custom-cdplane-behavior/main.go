@@ -13,7 +13,11 @@ func init() {
 	client := &cplane.Client{Host: guest.Host{}}
 	guest.Register(guest.Handlers{
 		Configure: func(data []byte) error {
-			next, err := cdplanecontroller.New(data, client, guest.Log)
+			grants, err := guest.Grants()
+			if err != nil {
+				return err
+			}
+			next, err := cdplanecontroller.New(data, grants, client, guest.Log)
 			if err == nil {
 				current = next
 			}

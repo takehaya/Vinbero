@@ -13,7 +13,7 @@ import (
 const senderConfig = `{"schema_version":1,"routing":{"locator":"main","prefix":"10.7.0.1/24","vrf":"blue","slot":32,"next_hop":"2001:db8::1","decap_vrf":"blue"},"endpoint":{"allowed_underlay_prefix":"2001:db8:ff::1234/64"}}`
 
 func TestEndpointEncoding(t *testing.T) {
-	config, err := decodeConfig([]byte(senderConfig))
+	config, err := decodeConfig([]byte(senderConfig), cplane.Grants{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestConfigurationRejectedBeforeDeclarations(t *testing.T) {
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
 			host := &countingHost{}
-			if _, err := New([]byte(data), &cplane.Client{Host: host}, nil); err == nil || host.calls != 0 {
+			if _, err := New([]byte(data), cplane.Grants{}, &cplane.Client{Host: host}, nil); err == nil || host.calls != 0 {
 				t.Fatalf("invalid configuration accepted or declared state: calls=%d, error=%v", host.calls, err)
 			}
 		})
@@ -91,11 +91,34 @@ func TestConfigurationRejectedBeforeDeclarations(t *testing.T) {
 }
 
 func TestReceiverConfiguration(t *testing.T) {
-	config, err := decodeConfig([]byte(`{"schema_version":1,"routing":{"behavior":65025,"headend_prefixes":["10.7.1.2/16"]}}`))
+	config, err := decodeConfig([]byte(`{"schema_version":1,"routing":{"behavior":65025,"headend_prefixes":["10.7.1.2/16"]}}`), cplane.Grants{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if config.Behavior != 65025 || len(config.AuxRaw) != 0 || len(config.HeadendPrefixes) != 1 || config.HeadendPrefixes[0].String() != "10.7.0.0/16" {
 		t.Fatalf("receiver config changed: %+v", config)
+	}
+}
+
+// The routing object takes the same grant defaults as customcontroller; the
+// endpoint policy and decap VRF stay plugin choices.
+func TestSenderConfigurationFromGrants(t *testing.T) {
+	grants := cplane.Grants{Behaviors: []uint32{0xfe02}, Locators: []string{"main"}, VRFs: []string{"blue"},
+		EndpointSlots: []uint32{32}, HeadendPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}
+	config, err := decodeConfig([]byte(`{"schema_version":1,"routing":{"decap_vrf":"blue","prefix":"10.7.0.0/24","next_hop":"2001:db8::1"},"endpoint":{"allowed_underlay_prefix":"2001:db8:ff::/64"}}`), grants)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Behavior != 0xfe02 || config.Locator != "main" || config.Slot != 32 || config.VRF != "blue" || len(config.AuxRaw) != 32 ||
+		len(config.HeadendPrefixes) != 1 || config.HeadendPrefixes[0].String() != "10.0.0.0/8" {
+		t.Fatalf("grant defaults not applied: %+v", config)
+	}
+	for name, data := range map[string]string{
+		"endpoint without SID": `{"schema_version":1,"routing":{},"endpoint":{"allowed_underlay_prefix":"::/0"}}`,
+		"slot outside scope":   `{"schema_version":1,"routing":{"slot":33,"decap_vrf":"blue"},"endpoint":{"allowed_underlay_prefix":"::/0"}}`,
+	} {
+		if _, err := decodeConfig([]byte(data), grants); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

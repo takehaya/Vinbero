@@ -284,9 +284,9 @@ func TestDeliveryIdleWaitsForTickRestartConfigureAndClose(t *testing.T) {
 	reg := Registration{Name: "tick-restart-idle", Backend: BackendNative,
 		NativeID: native.CustomBehavior, NativeVersion: native.ImplementationVersion,
 		Capabilities: wasm.Capabilities{wasm.CapHeadend: {}}, Scope: testScope(),
-		// This asks for locator main/slot 1 without SID permission. The
+		// This asks for locator main/slot 33 without SID permission. The
 		// shared constructor logs the refusal inside Instantiate, where we pause it.
-		Config: []byte{0x12, 4, 'm', 'a', 'i', 'n', 0x28, 1}}
+		Config: []byte(`{"schema_version":1,"routing":{"locator":"main","slot":33}}`)}
 	if err := m.Register(context.Background(), reg); err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package cplane
 
 import (
 	"context"
+	"encoding/json"
 	"net/netip"
 	"os"
 	"testing"
@@ -63,17 +64,17 @@ func exampleManager(t *testing.T, receivePrefixes ...string) (*Manager, *fakeSou
 		t.Fatalf("manager: %v", err)
 	}
 	t.Cleanup(func() { m.Close(context.Background()) })
-	var config exampleWriter
 	if len(receivePrefixes) == 0 {
 		receivePrefixes = []string{"10.0.0.0/8"}
 	}
-	for _, prefix := range receivePrefixes {
-		config.stringField(9, prefix)
+	config, err := json.Marshal(map[string]any{"schema_version": 1, "routing": map[string]any{"headend_prefixes": receivePrefixes}})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := m.Register(context.Background(), exampleRegistration(Registration{
 		Name:         "custom-behavior",
 		Module:       examplePlugin(t),
-		Config:       config.buf,
+		Config:       config,
 		Behaviors:    []uint16{0xFE01},
 		Capabilities: testCaps(), Scope: testScope(),
 	})); err != nil {
@@ -247,47 +248,26 @@ func TestExamplePluginHonoursConfiguredBehavior(t *testing.T) {
 	}
 }
 
-// exampleConfig encodes the example plugin's own config message: the
-// behavior codepoint to claim, the locator to take a SID from, the prefix
-// to advertise behind it, the VRF to advertise it into, and the data-plane
-// slot the SID dispatches to.
+// exampleConfig renders the example plugin's JSON configuration: the
+// behavior codepoint to steer, and optionally the locator to take a SID
+// from, the prefix to advertise behind it, the VRF to advertise it into, the
+// data-plane slot the SID dispatches to and the next hop. Empty values are
+// left out, so the plugin takes them from the registration.
 func exampleConfig(behavior uint64, locator, prefix, vrf string, slot uint64, nextHop string) []byte {
-	var w exampleWriter
-	w.varintField(1, behavior)
-	w.stringField(2, locator)
-	w.stringField(3, prefix)
-	w.stringField(4, vrf)
-	w.varintField(5, slot)
-	w.stringField(7, nextHop)
-	return w.buf
-}
-
-// exampleWriter is a minimal protobuf encoder for building that config.
-type exampleWriter struct{ buf []byte }
-
-func (w *exampleWriter) varint(v uint64) {
-	for v >= 0x80 {
-		w.buf = append(w.buf, byte(v)|0x80)
-		v >>= 7
+	routing := map[string]any{"behavior": behavior}
+	for key, value := range map[string]string{"locator": locator, "prefix": prefix, "vrf": vrf, "next_hop": nextHop} {
+		if value != "" {
+			routing[key] = value
+		}
 	}
-	w.buf = append(w.buf, byte(v))
-}
-
-// wireVarint and wireBytes are the protobuf wire types these fields use.
-const (
-	wireVarint = 0
-	wireBytes  = 2
-)
-
-func (w *exampleWriter) varintField(field int, v uint64) {
-	w.varint(uint64(field)<<3 | wireVarint)
-	w.varint(v)
-}
-
-func (w *exampleWriter) stringField(field int, s string) {
-	w.varint(uint64(field)<<3 | wireBytes)
-	w.varint(uint64(len(s)))
-	w.buf = append(w.buf, s...)
+	if slot != 0 {
+		routing["slot"] = slot
+	}
+	raw, err := json.Marshal(map[string]any{"schema_version": 1, "routing": routing})
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 // The whole point of the mechanism, driven end to end by a real plugin:
