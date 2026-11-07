@@ -140,6 +140,13 @@ type MapOperations struct {
 	// FindFreeBdPeerIndex answers are stale by the time the lock is
 	// dropped and must not feed a separate create.
 	bdPeerLifecycle sync.Mutex
+
+	// bum rebuilds the xdp-mode BUM devmaps after every bd_peer and
+	// headend_l2 mutation (nil: no BD runs in xdp mode). It only reads the
+	// maps and takes its own lock, so calling it with bdPeerLifecycle held
+	// cannot invert lock order.
+	bumMu sync.Mutex
+	bum   *BumDevmapSync
 }
 
 // NewMapOperations creates a new MapOperations instance.
@@ -2495,6 +2502,11 @@ func (m *MapOperations) DeleteEcmpLive(groupID uint32) error {
 // and esi is set, bd_local_esi_map is also populated for the DT2M DF check.
 func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *HeadendEntry, esi [ESILen]byte) error {
 	key := buildHeadendL2Key(ifindex, vlanID)
+	var prev HeadendEntry
+	if m.objs.HeadendL2Map.Lookup(key, &prev) == nil && prev.BdId != entry.BdId {
+		defer m.resyncBum(prev.BdId) // the AC left its old BD
+	}
+	defer m.resyncBum(entry.BdId)
 	if err := m.objs.HeadendL2Map.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put headend L2 entry: %w", err)
 	}
@@ -2525,6 +2537,9 @@ func (m *MapOperations) DeleteHeadendL2(ifindex uint32, vlanID uint16) error {
 	key := buildHeadendL2Key(ifindex, vlanID)
 	var prev HeadendEntry
 	hadEntry := m.objs.HeadendL2Map.Lookup(key, &prev) == nil
+	if hadEntry {
+		defer m.resyncBum(prev.BdId)
+	}
 	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete headend L2 entry: %w", err)
 	}

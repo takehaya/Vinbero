@@ -162,6 +162,9 @@ func (m *MapOperations) CreateBdPeerOwned(bdID, index uint16, entry *HeadendEntr
 	return m.createBdPeerOwnedLocked(bdID, index, entry, esi, remoteSrc, writeReverse, owner)
 }
 func (m *MapOperations) createBdPeerOwnedLocked(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool, owner OwnerTag) error {
+	// Success or not, the xdp-mode devmap follows whatever bd_peer_map
+	// holds afterwards, rollbacks included.
+	defer m.resyncBum(bdID)
 	if entry == nil {
 		return errors.New("nil BD peer entry")
 	}
@@ -232,6 +235,7 @@ func (m *MapOperations) DeleteBdPeerOwned(bdID, index uint16, owner OwnerTag) (b
 	return m.deleteBdPeerOwnedLocked(bdID, index, owner)
 }
 func (m *MapOperations) deleteBdPeerOwnedLocked(bdID, index uint16, owner OwnerTag) (bool, error) {
+	defer m.resyncBum(bdID)
 	key := &BdPeerKey{BdId: bdID, Index: index}
 	owned, err := checkControlOwner[BdPeerKey, HeadendEntry](m.objs.BdPeerMap, m.bdPeerOwners, key, owner, false)
 	if err != nil {
