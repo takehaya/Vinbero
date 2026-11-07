@@ -121,30 +121,25 @@ ip route replace 10.2.0.0/24 dev eth2 table 100
     --import-rts 65000:200 || true
 
 # --- the control-plane plugin ----------------------------------------------
-# Config blob, in the plugin's own protobuf message (see the example's
-# README for the field numbers):
-#   1 behavior       0xFE01
-#   2 locator        LOC2             (allocate a SID from this block)
-#   3 prefix         10.2.0.0/24
-#   4 VRF            vrf-cust
-#   5 slot           32               (its own eBPF half, registered above)
-#   7 next hop       2001:db8:ff::2   (this node's loopback)
-#   8 decap VRF      vrf-cust         (where its End.DT4 handoff decaps)
+# The plugin's JSON configuration names only what the registration below
+# does not: the prefix to advertise, its next hop (this node's loopback) and
+# the VRF its End.DT4 handoff decaps into. The behavior (0xFE01), the locator
+# it allocates a SID from (LOC2), the VRF it advertises into (vrf-cust) and
+# the slot of its own eBPF half (32) come from the registration's claim and
+# scope, which the plugin reads in Configure.
 #
-# No field 6: the plugin allocates its SID rather than advertising one an
-# operator provisioned. That is what makes this the whole loop -- the
-# address in the SID TLV on the wire is one the daemon handed the plugin.
+# There is no SID in it: the plugin allocates its SID rather than
+# advertising one an operator provisioned. That is what makes this the whole
+# loop -- the address in the SID TLV on the wire is one the daemon handed
+# the plugin.
 #
-# Field 8's wire bytes, so the blob can be checked without decoding by hand:
-# tag \102 = (field 8 << 3) | wire-type 2 (length-delimited), \010 = length 8,
-# then "vrf-cust" (\166\162\146\055\143\165\163\164). The same eight name bytes
-# appear after field 4's tag \042 above.
-#
-# Field 8 is the return direction: the eBPF half hands decapsulated traffic
-# to a built-in End.DT4, and naming the VRF here makes the host record a
+# decap_vrf is the return direction: the eBPF half hands decapsulated
+# traffic to a built-in End.DT4, and naming the VRF makes the host record a
 # grant so that decap lands in vrf-cust's table rather than dropping.
-printf '\010\201\374\003\022\004\114\117\103\062\032\013\061\060\056\062\056\060\056\060\057\062\064\042\010\166\162\146\055\143\165\163\164\050\040\072\016\062\060\060\061\072\144\142\070\072\146\146\072\072\062\102\010\166\162\146\055\143\165\163\164' \
-    > /tmp/plugin-config.bin
+cat > /tmp/plugin-config.json <<'EOF'
+{"schema_version": 1,
+ "routing": {"prefix": "10.2.0.0/24", "next_hop": "2001:db8:ff::2", "decap_vrf": "vrf-cust"}}
+EOF
 
 # Granted `advertise` and `local_sid`, and no more. The capability says
 # what it may do; the scope says where: it may originate only into
@@ -165,7 +160,7 @@ esac
 /usr/local/bin/vbctl plugin cplane register \
     --name custom-behavior \
     "${backend_args[@]}" \
-    --config /tmp/plugin-config.bin \
+    --config /tmp/plugin-config.json \
     --behavior 0xFE01 \
     --family vpnv4 --tick-ms 1000 \
     --capability advertise --capability local_sid \
