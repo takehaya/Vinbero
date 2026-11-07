@@ -2,7 +2,9 @@
 # examples/end-dt2-p2mp/test.sh
 # Test End.DT2 P2MP: BUM flood to multiple PEs + bridge multi-port flood
 #
-# BUM_MODE=tc (default) or xdp selects settings.l2.bum_mode for all PEs.
+# BUM_MODE=tc (default) or xdp selects settings.l2.bum_mode for all PEs. On a
+# kernel where vinberod falls back from xdp to tc replication, the xdp run
+# checks the fallback instead.
 
 set -e
 
@@ -70,6 +72,9 @@ print_info "Starting PE3 (router4)..."
 start_vinbero "$ns_router4" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe3.yaml" /tmp/vinbero_p2mp_pe3_bum.yaml)" "/tmp/vinbero_p2mp_pe3.log"
 VINBERO_PID_PE3=$VINBERO_LAST_PID
 wait_vinbero_ready "$ns_router4" "127.0.0.1:8084" 10
+
+BUM_EFFECTIVE=$(bum_effective_mode /tmp/vinbero_p2mp_pe1.log)
+print_info "BUM replication runs in mode ${BUM_EFFECTIVE}"
 
 # ==========================================
 # Phase 1: Configure all PEs
@@ -171,7 +176,7 @@ vbctl_pe3 fdb list
 # ==========================================
 echo ""
 echo "=========================================="
-echo "Phase 5: BUM copies per PE (BUM_MODE=${BUM_MODE})"
+echo "Phase 5: BUM copies per PE (BUM_MODE=${BUM_MODE}, running ${BUM_EFFECTIVE})"
 echo "=========================================="
 
 stats_counter() {
@@ -241,15 +246,22 @@ vbctl_pe3 stats reset > /dev/null 2>&1 || true
 
 bum_round "vbbum-both-1" 1 1
 
-if [ "$BUM_MODE" = "xdp" ]; then
+if [ "$BUM_EFFECTIVE" = "xdp" ]; then
     expect_nonzero "PE1 BUM_XDP_FLOOD" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)"
     expect_nonzero "PE1 BUM_EGRESS_TX" "$(stats_counter vbctl_pe1 BUM_EGRESS_TX)"
     expect_eq "PE1 BUM_UPLINK_MISMATCH" "$(stats_counter vbctl_pe1 BUM_UPLINK_MISMATCH)" 0
     expect_eq "PE1 BUM_XDP_FALLBACK" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)" 0
+    expect_eq "PE1 BUM_PLAN_STALE" "$(stats_counter vbctl_pe1 BUM_PLAN_STALE)" 0
+    expect_eq "PE1 BUM_SHARED_BUFFER" "$(stats_counter vbctl_pe1 BUM_SHARED_BUFFER)" 0
     expect_nonzero "PE2 BUM_XDP_LOCAL_FLOOD" "$(stats_counter vbctl_pe2 BUM_XDP_LOCAL_FLOOD)"
     expect_nonzero "PE3 BUM_XDP_LOCAL_FLOOD" "$(stats_counter vbctl_pe3 BUM_XDP_LOCAL_FLOOD)"
+elif [ "$BUM_EFFECTIVE" = "tc-fallback" ]; then
+    expect_nonzero "PE1 BUM_XDP_FALLBACK (tc replication in place of xdp)" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)"
+    expect_eq "PE1 BUM_XDP_FLOOD" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)" 0
+    expect_nonzero "PE2 BUM_XDP_FALLBACK (post-decap flood through the bridge)" "$(stats_counter vbctl_pe2 BUM_XDP_FALLBACK)"
 else
     expect_eq "PE1 BUM_XDP_FLOOD stays 0 in tc mode" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)" 0
+    expect_eq "PE1 BUM_XDP_FALLBACK stays 0 in tc mode" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)" 0
 fi
 
 print_info "Runtime peer changes on PE1..."
@@ -275,7 +287,7 @@ else
     print_error "PE1 fdb_map lacks host1's MAC $host1_mac"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
-if [ "$BUM_MODE" = "xdp" ]; then
+if [ "$BUM_EFFECTIVE" = "xdp" ]; then
     if grep -q "XDP learned local MAC.*${host1_mac}" /tmp/vinbero_p2mp_pe1.log; then
         print_success "PE1 control plane received the XDP learning event for $host1_mac"
         TESTS_PASSED=$((TESTS_PASSED + 1))

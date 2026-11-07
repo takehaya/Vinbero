@@ -6,7 +6,9 @@
 #          (STATS_SPLIT_HORIZON_TX increments on both PE1 and PE2).
 # Phase D: with DF=PE1, a forced BUM into PE2 drops (STATS_NON_DF_DROP).
 #
-# BUM_MODE=tc (default) or xdp selects settings.l2.bum_mode for all PEs.
+# BUM_MODE=tc (default) or xdp selects settings.l2.bum_mode for all PEs. On a
+# kernel where vinberod falls back from xdp to tc replication, the xdp run
+# checks the fallback instead.
 
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,6 +83,8 @@ VINBERO_PID_PE3=$VINBERO_LAST_PID
 wait_vinbero_ready "$NS_PE1" "$BIND_PE1" 10
 wait_vinbero_ready "$NS_PE2" "$BIND_PE2" 10
 wait_vinbero_ready "$NS_PE3" "$BIND_PE3" 10
+BUM_EFFECTIVE=$(bum_effective_mode /tmp/vinbero_dt2m_pe1.log)
+print_info "BUM replication runs in mode ${BUM_EFFECTIVE}"
 
 # ================================================
 # Configure ES / BdPeers / HeadendL2 / SID
@@ -206,7 +210,11 @@ assert_eq "frames on P-PE1 (PE1's own copy only, none towards PE1)" \
 assert_eq "frames on P-PE2 (PE2's own copy only, none towards PE2)" \
     "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-ppe2.pcap "$TAG")" 1
 
-if [ "$BUM_MODE" = "xdp" ]; then
+if [ "$BUM_EFFECTIVE" = "tc-fallback" ]; then
+    assert_nonzero "PE1 BUM_XDP_FALLBACK > 0 (tc replication in place of xdp)" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)"
+    assert_eq "PE1 BUM_XDP_FLOOD" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)" 0
+fi
+if [ "$BUM_EFFECTIVE" = "xdp" ]; then
     assert_nonzero "PE1 BUM_XDP_FLOOD > 0" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)"
     assert_nonzero "PE1 BUM_EGRESS_TX > 0" "$(stats_counter vbctl_pe1 BUM_EGRESS_TX)"
     assert_nonzero "PE2 BUM_EGRESS_TX > 0" "$(stats_counter vbctl_pe2 BUM_EGRESS_TX)"
@@ -268,7 +276,7 @@ wait "${pids[@]}" 2>/dev/null || true
 assert_eq "host1 copies via PE1 (non-DF)" "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-h1pe1.pcap "$TAG")" 0
 assert_eq "host1 copies via PE2 (DF)" "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-h1pe2.pcap "$TAG")" 1
 
-if [ "$BUM_MODE" = "xdp" ]; then
+if [ "$BUM_EFFECTIVE" = "xdp" ]; then
     # The DF floods host2's BUM to host1 from XDP, not through br100.
     assert_nonzero "PE2 BUM_XDP_LOCAL_FLOOD > 0 (DF floods from XDP)" \
         "$(stats_counter vbctl_pe2 BUM_XDP_LOCAL_FLOOD)"

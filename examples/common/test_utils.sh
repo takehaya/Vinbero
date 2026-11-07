@@ -184,6 +184,18 @@ bum_capture_start() {
     CAPTURE_PID=$!
 }
 
+# bum_effective_mode <vinberod log>: the BUM mode that vinberod runs with:
+# BUM_MODE, or tc-fallback when BUM_MODE is xdp but vinberod found at
+# startup that this kernel cannot run xdp mode (the copies of a generic XDP
+# broadcast share one buffer) and replicates in tc instead.
+bum_effective_mode() {
+    if [ "${BUM_MODE:-tc}" = xdp ] && grep -q "xdp BUM replication unavailable" "$1"; then
+        echo tc-fallback
+    else
+        echo "${BUM_MODE:-tc}"
+    fi
+}
+
 # bum_marker_count <pcap> <tag>: number of captured frames that contain
 # <tag>, plain or SRv6-encapsulated alike.
 bum_marker_count() {
