@@ -33,6 +33,16 @@ settings:
       capacity: 1024
     service_ingress:
       capacity: 1024
+  # L2VPN BUM replication (docs/design/ja/bum_mode.md). "tc" (default)
+  # clones in TC and floods locally through the kernel bridge; "xdp"
+  # replicates through a per-BD devmap and keeps the bridge off the path
+  # (no STP / IGMP snooping / bridge netfilter). xdp needs
+  # internal.bpf.device_mode: generic.
+  # l2:
+  #   bum_mode: tc
+  #   bridge_domains:
+  #     - bd_id: 100
+  #       bum_mode: xdp
 
 # In-process BGP speaker. Only consulted when vinberod runs with
 # --bgp-enabled; otherwise this whole section is ignored.

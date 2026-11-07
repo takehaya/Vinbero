@@ -312,7 +312,15 @@ func (c *Config) BpfConstants() map[string]any {
 	if c.Setting.EnableStats {
 		v = 1
 	}
-	return map[string]any{"enable_stats": v}
+	consts := map[string]any{"enable_stats": v}
+	// The BUM mode constants are added only when a bridge domain uses a
+	// non-default mode, so a tc-only config sets exactly the constants it
+	// did before xdp mode existed (plugins skip names they do not have).
+	if c.Setting.L2.AnyXDP() {
+		consts["bum_mode_default"] = c.Setting.L2.DefaultBumMode()
+		consts["bum_xdp_enabled"] = uint8(1)
+	}
+	return consts
 }
 
 type SettingConfig struct {
@@ -323,6 +331,7 @@ type SettingConfig struct {
 	PinMaps         PinMapsConfig       `yaml:"pin_maps,omitempty"`                        // Pin control-state BPF maps under /sys/fs/bpf so they survive a vinberod restart.
 	Validate        ValidateConfig      `yaml:"validate,omitempty"`                        // Plugin validator policy knobs.
 	CplanePlugins   CplanePluginsConfig `yaml:"cplane_plugins,omitempty"`                  // Where registered control-plane plugins are kept across a restart.
+	L2              L2Config            `yaml:"l2,omitempty"`                              // L2VPN data-plane settings (BUM replication mode).
 }
 
 // CplanePluginsConfig governs whether registered control-plane plugins
@@ -467,6 +476,9 @@ func Load(s string) (*Config, error) {
 		if err := cfg.BGP.VrfBindings[i].Validate(); err != nil {
 			return nil, err
 		}
+	}
+	if err := cfg.Setting.L2.Validate(cfg.InternalConfig.BpfOptions.DeviceMode); err != nil {
+		return nil, err
 	}
 	cfg.Original = s
 	return &cfg, nil
