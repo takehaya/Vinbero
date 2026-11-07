@@ -3,20 +3,18 @@
 package cdplanecontroller
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/netip"
 
 	"github.com/takehaya/vinbero/sdk/go/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplane/customcontroller"
+	"github.com/takehaya/vinbero/sdk/go/cplane/jsonconfig"
 )
 
 type configuration struct {
-	SchemaVersion int       `json:"schema_version"`
-	Routing       *routing  `json:"routing"`
-	Endpoint      *endpoint `json:"endpoint"`
+	jsonconfig.Version
+	Routing  *routing  `json:"routing"`
+	Endpoint *endpoint `json:"endpoint"`
 }
 
 type routing struct {
@@ -47,31 +45,8 @@ func New(data []byte, client *cplane.Client, log func(cplane.LogLevel, string)) 
 func decodeConfig(data []byte) (customcontroller.Config, error) {
 	var input configuration
 	var config customcontroller.Config
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		return config, fmt.Errorf("configuration: %w", err)
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return config, fmt.Errorf("configuration: expected one JSON object")
-	}
-	// encoding/json accepts null for scalar fields. Reject it explicitly so
-	// a misspecified policy cannot silently acquire a scalar's default value.
-	tokens := json.NewDecoder(bytes.NewReader(data))
-	for {
-		token, err := tokens.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return config, fmt.Errorf("configuration: %w", err)
-		}
-		if token == nil {
-			return config, fmt.Errorf("configuration: null values are not supported")
-		}
-	}
-	if input.SchemaVersion != 1 {
-		return config, fmt.Errorf("schema_version must be 1 (got %d)", input.SchemaVersion)
+	if err := jsonconfig.Decode(data, 1, &input); err != nil {
+		return config, err
 	}
 	if input.Routing == nil {
 		return config, fmt.Errorf("routing is required")
