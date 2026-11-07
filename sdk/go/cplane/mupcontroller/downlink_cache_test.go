@@ -136,3 +136,22 @@ func TestDownlinkMemoDoesNotBorrowClientOutputs(t *testing.T) {
 		}
 	}
 }
+
+// The downlink context is fixed per controller today; this pins the key in
+// case configuration is ever applied in place.
+func TestDownlinkMemoKeysOnDownlinkContext(t *testing.T) {
+	client := &recorder{}
+	c, err := New(inputConfig(`,"observe_only":false`), client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := fixtures(t, 256)
+	c.Update(replay(events))
+	before := client.sets[len(client.sets)-1].Headends[0].Entry
+	c.downContext.Source = netip.MustParseAddr("fd00:ffff::1")
+	c.Update(events[2:3]) // New revision; the downlink pair itself is unchanged.
+	after := client.sets[len(client.sets)-1].Headends[0].Entry
+	if after.SrcAddr != "fd00:ffff::1" || after.SrcAddr == before.SrcAddr {
+		t.Fatalf("cache hit ignored the downlink context: %q -> %q", before.SrcAddr, after.SrcAddr)
+	}
+}
