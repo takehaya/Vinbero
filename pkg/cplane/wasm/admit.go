@@ -52,6 +52,10 @@ var hostFunctionSignatures = map[string]struct{ params, results []api.ValueType 
 	HostInputFeatures: {
 		results: []api.ValueType{api.ValueTypeI64},
 	},
+	HostGrants: { // ptr, cap -> len
+		params:  []api.ValueType{api.ValueTypeI32, api.ValueTypeI32},
+		results: []api.ValueType{api.ValueTypeI32},
+	},
 	HostApplyBegin: { // kind -> generation
 		params:  []api.ValueType{api.ValueTypeI32},
 		results: []api.ValueType{api.ValueTypeI64},

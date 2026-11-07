@@ -65,7 +65,11 @@ func (m *Manager) validateBackend(reg *Registration) error {
 
 // One factory is used for initial registration, replacement and restart.
 func (m *Manager) instantiate(ctx context.Context, reg Registration, config []byte, ops *PluginOps, cache wazero.CompilationCache) (pluginInstance, error) {
-	cfg := wasm.Config{NowMonotonic: m.nowMonotonic, Name: reg.Name, Module: reg.Module, ConfigBlob: config, Limits: reg.Limits, Ops: ops, Capabilities: reg.Capabilities, Logger: m.logger}
+	grants, err := EncodeGrants(reg.Capabilities, reg.Families, reg.Behaviors, reg.Scope)
+	if err != nil {
+		return nil, err
+	}
+	cfg := wasm.Config{NowMonotonic: m.nowMonotonic, Name: reg.Name, Module: reg.Module, ConfigBlob: config, Grants: grants, Limits: reg.Limits, Ops: ops, Capabilities: reg.Capabilities, Logger: m.logger}
 	if reg.Backend == BackendNative {
 		return native.Instantiate(ctx, native.Config{Config: cfg, Implementation: reg.NativeID, Version: reg.NativeVersion})
 	}

@@ -106,6 +106,7 @@ type HostOps interface {
 type Instance struct {
 	name         string
 	caps         Capabilities
+	grants       []byte
 	limits       Limits
 	logger       *zap.Logger
 	ops          HostOps
@@ -157,6 +158,11 @@ type Config struct {
 	// configure export. Deployment-specific settings ride here so changing
 	// them does not mean rebuilding the module.
 	ConfigBlob []byte
+	// Grants is the encoded PluginGrants message the guest reads through
+	// vinbero.grants. It describes the registration for the plugin's
+	// benefit and grants nothing by itself: Capabilities and Ops still
+	// decide what the plugin can do.
+	Grants []byte
 	// CompilationCache is borrowed from the registration owner. It shares
 	// compiled code only; admission, host bindings and guest state stay local
 	// to each instance. The owner must close all instances before the cache.
@@ -231,6 +237,7 @@ func Instantiate(ctx context.Context, cfg Config) (*Instance, error) {
 	inst := &Instance{
 		name:    cfg.Name,
 		caps:    cfg.Capabilities,
+		grants:  append([]byte(nil), cfg.Grants...),
 		limits:  limits,
 		logger:  logger,
 		ops:     cfg.Ops,

@@ -13,6 +13,7 @@ import (
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
+	"github.com/tetratelabs/wazero"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -205,4 +206,61 @@ func TestStandardGoRuntime(t *testing.T) {
 			t.Fatalf("want cancellation, got %v", err)
 		}
 	})
+}
+
+// A guest that calls Grants reads the registration through vinbero.grants,
+// including a message larger than the accessor's first buffer. A guest that
+// never calls it must not import it, so it still runs on hosts without it.
+func TestGuestGrants(t *testing.T) {
+	grants := &v1.PluginGrants{Version: 1, Capabilities: []string{"headend", "local_sid"},
+		Families: []string{"vpnv4"}, Behaviors: []uint32{0xfe01}, Vrfs: []string{"vpn-a"},
+		HeadendPrefixes: []string{"10.2.0.0/16"}, HeadendV4Slots: []uint32{16}, EndpointSlots: []uint32{33, 34}}
+	for i := 0; i < 40; i++ {
+		grants.Locators = append(grants.Locators, "locator-"+strconv.Itoa(i))
+	}
+	raw, err := proto.Marshal(grants)
+	if err != nil || len(raw) <= 256 {
+		t.Fatalf("grants fixture must exceed the first buffer: %d %v", len(raw), err)
+	}
+	want := "caps=headend,local_sid families=vpnv4 behaviors=[65025] locators=40 vrfs=vpn-a prefixes=10.2.0.0/16 v4=[16] v6=[] endpoint=[33 34]"
+	for _, tinygo := range []bool{false, true} {
+		name := "Go"
+		if tinygo {
+			name = "TinyGo"
+		}
+		t.Run(name, func(t *testing.T) {
+			host := &logHost{}
+			inst, err := wasm.Instantiate(t.Context(), wasm.Config{
+				Name: "grants", Module: buildGuest(t, "grants.go", tinygo), Ops: host, Grants: raw,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = inst.Close(context.Background()) })
+			if len(host.messages) != 1 || host.messages[0] != want {
+				t.Fatalf("logs: %q", host.messages)
+			}
+			imports := guestImports(t, buildGuest(t, "observer.go", tinygo))
+			if imports[wasm.HostGrants] {
+				t.Fatal("a guest that never reads its grants imports vinbero.grants")
+			}
+		})
+	}
+}
+
+func guestImports(t *testing.T, module []byte) map[string]bool {
+	t.Helper()
+	rt := wazero.NewRuntime(t.Context())
+	defer func() { _ = rt.Close(context.Background()) }()
+	compiled, err := rt.CompileModule(t.Context(), module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	for _, fn := range compiled.ImportedFunctions() {
+		if module, name, ok := fn.Import(); ok && module == wasm.HostModule {
+			out[name] = true
+		}
+	}
+	return out
 }

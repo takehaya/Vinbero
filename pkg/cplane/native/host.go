@@ -15,12 +15,17 @@ import (
 // all capability, scope, quota and ownership validation behind this adapter.
 type host struct {
 	ops                  wasm.HostOps
+	grants               []byte
 	logger               *zap.Logger
 	limit                int
 	active               context.Context
 	logWindow            time.Time
 	logCount, logDropped int
 }
+
+// Grants decodes the same PluginGrants bytes a WASM guest reads through
+// vinbero.grants, so both backends hand the controller identical values.
+func (h *host) Grants() (cplane.Grants, error) { return cplane.DecodeGrants(h.grants) }
 
 func (h *host) canceled() bool { return h.active == nil || h.active.Err() != nil }
 

@@ -46,6 +46,11 @@ func (i *Instance) linkHost(ctx context.Context) error {
 	b.NewFunctionBuilder().
 		WithFunc(func() uint64 { return InputFeatureBGPPath | InputFeatureContexts }).
 		Export(HostInputFeatures)
+	// Read-only: the guest learns what its registration already granted it,
+	// which it could equally be told through its configuration.
+	b.NewFunctionBuilder().
+		WithFunc(i.hostGrants).
+		Export(HostGrants)
 
 	// The desired-set surface exists only for a plugin allowed to declare
 	// something. A plugin granted nothing cannot import these at all,
@@ -157,6 +162,22 @@ func (i *Instance) logAllowed() bool {
 // meaningful, which keeps it useless as a fingerprint of the host.
 func (i *Instance) hostNowMonotonic(context.Context) int64 {
 	return i.nowMonotonic()
+}
+
+// hostGrants copies the registration's grants into a guest buffer. The
+// guest owns the buffer, so the host never calls back into the guest's
+// allocator from inside a host function, which not every guest runtime
+// supports. A buffer that is too small is left untouched and the guest is
+// told the length it needs.
+func (i *Instance) hostGrants(_ context.Context, mod api.Module, ptr, capacity int32) int32 {
+	length := int32(len(i.grants))
+	if capacity < length {
+		return length
+	}
+	if length > 0 && (ptr < 0 || !mod.Memory().Write(uint32(ptr), i.grants)) {
+		return -1
+	}
+	return length
 }
 
 // hostApplyBegin opens a desired-set transaction.

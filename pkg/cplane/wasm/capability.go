@@ -80,7 +80,8 @@ func capabilityNames() []string {
 
 // alwaysLinked are the host functions every plugin gets.
 //
-// These provide diagnostics and input format discovery: a module has no stdout and
+// These provide diagnostics, input format discovery and a read-only view of
+// the registration's own grants: a module has no stdout and
 // no filesystem, so without log a plugin author cannot see why their
 // plugin did nothing, and without a clock no liveness logic can be
 // written. None changes any state, so gating them would cost
@@ -90,6 +91,7 @@ func alwaysLinked() map[string]struct{} {
 		HostLog:           {},
 		HostNowMonotonic:  {},
 		HostInputFeatures: {},
+		HostGrants:        {},
 	}
 }
 
