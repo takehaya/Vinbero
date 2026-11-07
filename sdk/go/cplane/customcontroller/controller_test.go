@@ -112,7 +112,7 @@ func TestConfigurationContradictingGrantsIsRejected(t *testing.T) {
 	}{
 		{"binary", "\x08\x81\xfc\x03", senderGrants, "configuration must be a JSON object"},
 		{"missing schema", `{"routing":{}}`, senderGrants, "schema_version is required"},
-		{"unknown key", `{"schema_version":1,"endpoint":{}}`, senderGrants, `unknown field "endpoint"`},
+		{"unknown key", `{"schema_version":1,"endpoint":{}}`, senderGrants, `unknown key "endpoint"`},
 		{"unclaimed behavior", `{"schema_version":1,"routing":{"behavior":65026}}`, senderGrants,
 			"routing.behavior 0xFE02 is not claimed by the registration (claims 0xFE01)"},
 		{"ambiguous behavior", ``, several, "routing.behavior is required: the registration claims several behaviors (0xFE01, 0xFE02)"},
