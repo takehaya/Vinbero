@@ -76,7 +76,7 @@ func Instantiate(ctx context.Context, cfg Config) (inst *Instance, err error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	h := &host{ops: cfg.Ops, logger: logger.With(zap.String("plugin", cfg.Name)), limit: limit}
+	h := &host{ops: cfg.Ops, grants: cfg.Grants, logger: logger.With(zap.String("plugin", cfg.Name)), limit: limit}
 	i := &Instance{host: h, limit: limit, timeout: timeout}
 	err = i.call(ctx, func() error {
 		switch cfg.Implementation {

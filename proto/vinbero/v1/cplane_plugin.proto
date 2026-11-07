@@ -373,6 +373,28 @@ message PluginInputContext {
   repeated string families = 2;
 }
 
+// PluginGrants is what the registration granted, as the guest reads it
+// through vinbero.grants. It lets a plugin take its behavior, receive
+// prefixes, locator, VRF and slot from the registration instead of having
+// the operator repeat them in its configuration.
+//
+// It is advisory. The host enforces the same capabilities, scope and
+// claims at every declaration whatever the guest makes of this message.
+// An empty list means the registration granted nothing on that axis,
+// except families, where empty means every family.
+message PluginGrants {
+  uint32 version = 1;
+  repeated string capabilities = 2;
+  repeated string families = 3;
+  repeated uint32 behaviors = 4;
+  repeated string locators = 5;
+  repeated string vrfs = 6;
+  repeated string headend_prefixes = 7;
+  repeated uint32 headend_v4_slots = 8;
+  repeated uint32 headend_v6_slots = 9;
+  repeated uint32 endpoint_slots = 10;
+}
+
 message PluginForwardingHeadend {
   string context = 1;
   PluginHeadendEntry entry = 2;

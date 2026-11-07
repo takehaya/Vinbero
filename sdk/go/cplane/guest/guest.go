@@ -3,6 +3,7 @@
 package guest
 
 import (
+	"errors"
 	"runtime"
 	"unsafe"
 
@@ -106,6 +107,29 @@ func hostInputFeatures() uint64
 // a guest fail admission on older hosts, before it can act on missing input.
 // It does not change configure's opaque bytes or grant any write capability.
 func InputFeatures() uint64 { return hostInputFeatures() }
+
+//go:wasmimport vinbero grants
+func hostGrants(ptr, capacity uint32) int32
+
+// Grants returns what the registration granted this instance: capabilities,
+// families, claimed behaviors and scope. Call it from Configure to take
+// values the operator already gave at registration. The result is advisory;
+// the host still checks every declaration. Importing this function makes a
+// guest fail admission on hosts that do not provide it, before Configure runs.
+func Grants() (cplane.Grants, error) {
+	buf := make([]byte, 256)
+	for {
+		n := hostGrants(pointer(buf), uint32(len(buf)))
+		runtime.KeepAlive(buf)
+		if n < 0 {
+			return cplane.Grants{}, errors.New("grants: host refused the buffer")
+		}
+		if int(n) <= len(buf) {
+			return cplane.DecodeGrants(buf[:n])
+		}
+		buf = make([]byte, n)
+	}
+}
 
 //go:wasmimport vinbero apply_begin
 func hostBegin(kind uint32) uint64

@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 )
@@ -50,6 +51,7 @@ type Harness struct {
 	config []byte
 	limits wasm.Limits
 	caps   wasm.Capabilities
+	grants []byte
 	now    atomic.Int64
 
 	mu sync.Mutex
@@ -96,6 +98,13 @@ type Options struct {
 	// contains a prefix, whether a VRF has a binding -- stay the daemon's
 	// either way.
 	Scope cplane.ScopeSpec
+	// Behaviors are the endpoint behavior codepoints the registration
+	// claims, and Families the BGP families it subscribes to (empty means
+	// every family). The harness delivers whatever events a test gives it;
+	// these only shape the grants the plugin reads, together with
+	// Capabilities and Scope.
+	Behaviors []uint16
+	Families  []string
 }
 
 // New starts a plugin from a compiled module. It fails the test if the
@@ -119,7 +128,15 @@ func New(tb testing.TB, module []byte, opts Options) *Harness {
 	if err := cplane.ScopeCoversCapabilities(caps, scope); err != nil {
 		tb.Fatalf("scope does not cover the capabilities: %v", err)
 	}
-	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps}
+	families := make([]bgp.Family, 0, len(opts.Families))
+	for _, f := range opts.Families {
+		families = append(families, bgp.Family(f))
+	}
+	grants, err := cplane.EncodeGrants(caps, families, opts.Behaviors, scope)
+	if err != nil {
+		tb.Fatalf("grants: %v", err)
+	}
+	h := &Harness{tb: tb, module: module, config: opts.Config, limits: opts.Limits, caps: caps, grants: grants}
 	// The recorder is given the same capabilities as the instance, because
 	// the daemon checks the declaration kind against them when a
 	// transaction is opened. Without that here, a plugin granted only
@@ -131,6 +148,7 @@ func New(tb testing.TB, module []byte, opts Options) *Harness {
 		Name:         "harness",
 		Module:       module,
 		ConfigBlob:   opts.Config,
+		Grants:       grants,
 		Limits:       opts.Limits,
 		Ops:          h.ops,
 		Capabilities: caps,
@@ -275,6 +293,7 @@ func (h *Harness) Restart() {
 		// never performs -- a plugin coming back on defaults, or refusing
 		// an empty blob it never received the first time.
 		ConfigBlob: h.config,
+		Grants:     h.grants,
 		Limits:     h.limits,
 		Ops:        h.ops,
 		Logger:     zap.NewNop(),
