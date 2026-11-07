@@ -20,6 +20,12 @@ enum stats_counter {
     STATS_SPLIT_HORIZON_TX   = 5,   // BUM clones skipped by send-side split-horizon
     STATS_SPLIT_HORIZON_RX   = 6,   // DT2M receives dropped by recv-side split-horizon
     STATS_NON_DF_DROP        = 7,   // DT2M BUM dropped on a non-DF PE
+    STATS_BUM_XDP_FLOOD      = 8,   // xdp mode: AC-ingress BUM broadcast through the BD devmap
+    STATS_BUM_XDP_LOCAL_FLOOD = 9,  // xdp mode: post-decap flood to the local ACs
+    STATS_BUM_XDP_FALLBACK   = 10,  // xdp mode BD without a devmap: tc/bridge path used
+    STATS_BUM_EGRESS_TX      = 11,  // xdp mode: remote copies encapsulated by the devmap egress program
+    STATS_BUM_EGRESS_DROP    = 12,  // xdp mode: remote copy dropped (no AC/peer, encap or FIB failure)
+    STATS_BUM_UPLINK_MISMATCH = 13, // xdp mode: FIB egress differs from the slot's devmap uplink
     STATS_MAX,
 };
 

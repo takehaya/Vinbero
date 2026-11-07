@@ -1576,11 +1576,13 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 
 // ===== Stats Map Operations =====
 
-const StatsMax = 8
+const StatsMax = 14
 
 var StatsCounterName = [StatsMax]string{
 	"RX_PACKETS", "PASS", "DROP", "REDIRECT", "ABORTED",
 	"SPLIT_HORIZON_TX", "SPLIT_HORIZON_RX", "NON_DF_DROP",
+	"BUM_XDP_FLOOD", "BUM_XDP_LOCAL_FLOOD", "BUM_XDP_FALLBACK",
+	"BUM_EGRESS_TX", "BUM_EGRESS_DROP", "BUM_UPLINK_MISMATCH",
 }
 
 type AggregatedStats struct {

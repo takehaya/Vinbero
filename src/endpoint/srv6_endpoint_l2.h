@@ -6,6 +6,7 @@
 #include "core/xdp_stats.h"
 #include "core/esi.h"
 #include "core/fdb.h"
+#include "l2vpn/bum_xdp.h"
 
 // ========================================================================
 // L2 Bridge Domain Endpoint Functions (End.DT2)
@@ -97,6 +98,7 @@ static __always_inline void fdb_learn_remote_mac(
 //
 // Returns:
 //   bpf_redirect(oif)            on local FDB hit (fast path)
+//   devmap broadcast             on FDB miss or remote hit in an xdp-mode BD
 //   bpf_redirect(bridge_ifindex) on FDB miss or remote hit (when bridge configured)
 //   XDP_PASS                     when no bridge configured
 static __always_inline int fdb_forward_l2(
@@ -110,6 +112,10 @@ static __always_inline int fdb_forward_l2(
 
     struct fdb_entry *fdb = bpf_map_lookup_elem(&fdb_map, &dk);
     if (!fdb) {
+        // FDB miss in an xdp-mode BD: flood to the local ACs from XDP.
+        int flood = bum_xdp_flood_from_tunnel(ctx, bd_id);
+        if (flood >= 0)
+            return flood;
         // FDB miss: redirect to bridge device for flooding.
         if (bridge_ifindex != 0) {
             DEBUG_PRINT("FDB: miss, redirect to bridge ifindex %d\n", bridge_ifindex);
@@ -127,6 +133,9 @@ static __always_inline int fdb_forward_l2(
     }
 
     // Remote FDB hit on receiving PE — routing loop or stale entry
+    int flood = bum_xdp_flood_from_tunnel(ctx, bd_id);
+    if (flood >= 0)
+        return flood;
     DEBUG_PRINT("FDB: hit remote on receiver, redirect to bridge\n");
     if (bridge_ifindex != 0)
         return bpf_redirect(bridge_ifindex, 0);

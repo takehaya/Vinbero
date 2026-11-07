@@ -11,6 +11,7 @@
 //                to the no-BD path", XDP_PASS means "leave to kernel").
 //
 // FDB src learning, broadcast/multicast BUM meta, and missing-FDB BUM meta
+// (or, for an xdp-mode BD, the devmap flood and the local unicast redirect)
 // are all handled here so the caller stays simple. Keeping the bpf_tail_call
 // out of this helper is intentional and enforced as an invariant: any second
 // lexical bpf_tail_call site into headend_l2_progs in the same translation
@@ -45,6 +46,8 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
     }
 
     struct fdb_key key = { .bd_id = l2_entry->bd_id };
+    // tc unless settings.l2 put this BD in xdp mode (see l2vpn/bum_xdp.h).
+    __u8 bum_mode = bum_bd_mode(l2_entry->bd_id);
 
     __builtin_memcpy(key.mac, eth->h_source, ETH_ALEN);
     struct fdb_entry *existing = bpf_map_lookup_elem(&fdb_map, &key);
@@ -53,14 +56,20 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
             .oif = ctx->ingress_ifindex,
             .last_seen = bpf_ktime_get_ns(),
         };
-        bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_NOEXIST);
+        if (bpf_map_update_elem(&fdb_map, &key, &learn_val, BPF_NOEXIST) == 0 &&
+            bum_mode == BUM_MODE_XDP)
+            bum_fdb_event_emit(key.bd_id, eth->h_source, ctx->ingress_ifindex, FDB_EVENT_ADD);
     } else {
         union fdb_forward old = fdb_read_forward(existing);
         if (!old.is_static) {
             if (!old.is_remote && old.oif != ctx->ingress_ifindex) {
                 union fdb_forward next = { .oif = ctx->ingress_ifindex };
-                if (fdb_replace_forward(existing, old, next))
+                if (fdb_replace_forward(existing, old, next)) {
                     existing->last_seen = bpf_ktime_get_ns();
+                    if (bum_mode == BUM_MODE_XDP)
+                        bum_fdb_event_emit(key.bd_id, eth->h_source, ctx->ingress_ifindex,
+                                           FDB_EVENT_MOVE);
+                }
             } else if (!old.is_remote || old.peer_index < MAX_BUM_NEXTHOPS) {
                 existing->last_seen = bpf_ktime_get_ns();
             }
@@ -68,6 +77,10 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
     }
 
     if (eth->h_dest[0] & 0x01) {
+        if (bum_mode == BUM_MODE_XDP) {
+            *out_action = bum_xdp_flood_from_ac(ctx, key.bd_id, vlan_id);
+            return NULL;
+        }
         xdp_write_bum_meta(ctx, vlan_id);
         *out_action = XDP_PASS;
         return NULL;
@@ -83,11 +96,21 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
             if (pe) {
                 return pe;
             }
+        } else if (bum_mode == BUM_MODE_XDP) {
+            // The bridge is off the path in xdp mode: deliver to the learned
+            // port directly. A MAC learned on the ingress port itself is
+            // dropped, as the bridge would (no hairpin).
+            *out_action = dst.oif == ctx->ingress_ifindex ? XDP_DROP : bpf_redirect(dst.oif, 0);
+            return NULL;
         }
         *out_action = XDP_PASS;
         return NULL;
     }
 
+    if (bum_mode == BUM_MODE_XDP) {
+        *out_action = bum_xdp_flood_from_ac(ctx, key.bd_id, vlan_id);
+        return NULL;
+    }
     xdp_write_bum_meta(ctx, vlan_id);
     *out_action = XDP_PASS;
     return NULL;

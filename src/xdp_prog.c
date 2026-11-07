@@ -26,6 +26,7 @@
 #include "endpoint/srv6_endpoint.h"
 #include "endpoint/srv6_end_b6.h"
 #include "l2vpn/bum_meta.h"
+#include "l2vpn/bum_xdp.h"
 #include "core/srv6_gtp.h"
 #include "endpoint/srv6_gtp_endpoint.h"
 #include "endpoint/srv6_gtp_encap.h"
@@ -48,3 +49,4 @@ char _license[] SEC("license") = "GPL";
 #include "xdp_main.c"
 #include "l2vpn/tc_bum.h"
 #include "l2vpn/tc_prog.c"
+#include "l2vpn/bum_egress.c"
