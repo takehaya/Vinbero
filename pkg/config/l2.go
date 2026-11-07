@@ -51,14 +51,13 @@ func bumModeValue(mode string) (uint8, error) {
 
 // Validate checks the mode strings and the attach-mode requirement.
 //
-// xdp mode needs generic XDP. Its remote copies are built by one devmap
-// egress program per flood slot, all of them targeting the same uplink when
-// the peers sit behind one. Native XDP queues redirected frames in a per-CPU
-// bulk queue per egress device and runs the program of the first frame
-// queued in a NAPI poll for the whole queue, so every copy towards one
-// uplink would get the same peer's headers (and frames redirected to the
-// uplink by other paths would skip or wrongly run the program). Generic XDP
-// runs each entry's program on its own copy.
+// xdp mode needs generic XDP. One devmap egress program builds every remote
+// copy, and it learns which peer a copy is for from the replication plan the
+// ingress program left for the frame on that CPU. Generic XDP runs the
+// devmap programs of a broadcast synchronously, right after the ingress
+// program, so the plan to use is the CPU's latest. Native XDP defers them to
+// the bulk-queue flush at the end of the NAPI poll, when the CPU's latest
+// plan belongs to a later frame.
 func (c *L2Config) Validate(deviceMode string) error {
 	def, err := bumModeValue(c.BumMode)
 	if err != nil {
@@ -84,7 +83,7 @@ func (c *L2Config) Validate(deviceMode string) error {
 	}
 	if xdp && deviceMode != "generic" {
 		return fmt.Errorf("settings.l2: bum_mode %q requires internal.bpf.device_mode \"generic\" (got %q): "+
-			"native XDP runs one devmap egress program per egress device and NAPI poll, so per-peer copies sharing an uplink cannot be told apart",
+			"native XDP runs the devmap egress program at the end of the NAPI poll, when the per-CPU replication plan may already belong to a later frame",
 			BumModeXDP, deviceMode)
 	}
 	return nil

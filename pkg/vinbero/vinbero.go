@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -73,6 +75,9 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 // devmaps from whatever headend_l2 / bd_peer state the maps already hold
 // (pinned maps after a restart); every later mutation rebuilds its BD.
 func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Config, logger *zap.Logger) (*bpf.BumDevmapSync, error) {
+	if err := checkBumXDPKernel(kernelRealtimePath); err != nil {
+		return nil, err
+	}
 	for bd, mode := range l2.BumModeOverrides() {
 		if err := mapOps.SetBdBumMode(bd, mode); err != nil {
 			return nil, fmt.Errorf("write BUM mode of bd %d: %w", bd, err)
@@ -86,6 +91,24 @@ func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Co
 	logger.Info("BUM replication in XDP enabled",
 		zap.String("default_mode", l2.BumMode), zap.Int("bd_overrides", len(l2.BridgeDomains)))
 	return bs, nil
+}
+
+// kernelRealtimePath reads "1" on a PREEMPT_RT kernel.
+const kernelRealtimePath = "/sys/kernel/realtime"
+
+// checkBumXDPKernel refuses xdp BUM mode on PREEMPT_RT. The devmap egress
+// program finds a copy's replication plan as the latest one of its CPU,
+// which holds because a BH-disabled section is never interleaved with
+// another one on the same CPU. PREEMPT_RT kernels without
+// CONFIG_PREEMPT_RT_NEEDS_BH_LOCK let one preempt another, so a second
+// frame could be planned on that CPU before the first frame's copies run.
+func checkBumXDPKernel(realtimePath string) error {
+	b, err := os.ReadFile(realtimePath)
+	if err != nil || strings.TrimSpace(string(b)) != "1" {
+		return nil
+	}
+	return errors.New("settings.l2: bum_mode \"xdp\" is not supported on a PREEMPT_RT kernel " +
+		"(BH sections are preemptible there, and the per-CPU replication plan could belong to another frame); use bum_mode \"tc\"")
 }
 
 // StartBumRouteWatch rebuilds the xdp-mode devmaps on routing changes, so a
