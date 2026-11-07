@@ -157,7 +157,7 @@ static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id
 // BD is not in xdp mode or has no devmap, so the caller keeps its bridge path.
 static __always_inline int bum_xdp_flood_from_tunnel(struct xdp_md *ctx, __u16 bd_id)
 {
-    if (bum_bd_mode(bd_id) != BUM_MODE_XDP)
+    if (bd_id == 0 || bum_bd_mode(bd_id) != BUM_MODE_XDP)
         return -1;
     __u64 pkt_len = (__u64)((long)ctx->data_end - (long)ctx->data);
     __u32 key = bd_id;
