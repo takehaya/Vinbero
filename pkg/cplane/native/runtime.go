@@ -76,9 +76,13 @@ func Instantiate(ctx context.Context, cfg Config) (inst *Instance, err error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	h := &host{ops: cfg.Ops, logger: logger.With(zap.String("plugin", cfg.Name)), limit: limit}
+	h := &host{ops: cfg.Ops, grants: cfg.Grants, logger: logger.With(zap.String("plugin", cfg.Name)), limit: limit}
 	i := &Instance{host: h, limit: limit, timeout: timeout}
 	err = i.call(ctx, func() error {
+		grants, grantsErr := h.Grants()
+		if grantsErr != nil {
+			return grantsErr
+		}
 		switch cfg.Implementation {
 		case MUPComposition, MUPCompositionObserver:
 			input, decodeErr := cplane.DecodeInputConfig(cfg.ConfigBlob, wasm.InputFeatureBGPPath|wasm.InputFeatureContexts)
@@ -97,9 +101,9 @@ func Instantiate(ctx context.Context, cfg Config) (inst *Instance, err error) {
 			}
 			i.controller, err = evpncontroller.New(input, &cplane.Client{Host: h}, h.log)
 		case CustomBehavior:
-			i.controller, err = customcontroller.New(cfg.ConfigBlob, &cplane.Client{Host: h}, h.log)
+			i.controller, err = customcontroller.New(cfg.ConfigBlob, grants, &cplane.Client{Host: h}, h.log)
 		case CustomCDplaneBehavior:
-			i.controller, err = cdplanecontroller.New(cfg.ConfigBlob, &cplane.Client{Host: h}, h.log)
+			i.controller, err = cdplanecontroller.New(cfg.ConfigBlob, grants, &cplane.Client{Host: h}, h.log)
 		case BGPObserver:
 			i.controller, err = bgpobserver.New(wasm.InputFeatureBGPPath, h.log)
 		default:

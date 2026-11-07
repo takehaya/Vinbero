@@ -12,30 +12,27 @@ The Dplane remains eBPF when the Cplane backend changes.
 
 Pass JSON directly through `vinbero plugin cplane register --config PATH`.
 The host forwards the bytes without interpreting this schema.
-The JSON schema belongs to this example; it is not a format required of other Cplane plugins.
-Registration capabilities and scopes are separate from these configuration values.
+The `routing` object is the one [`customcontroller`](../../go/cplane/customcontroller) reads for `custom-behavior`, including its defaults; this example adds `endpoint`.
+Values the registration already decides (the claimed behavior, the headend scope, and a single locator, VRF or endpoint slot) can be left out, and the plugin reads them from its registration when it starts.
+A configured value that disagrees with the registration fails registration with an error naming both values.
+Configuration values grant nothing: the host checks every declaration against the registration.
 
-Receiver:
+Receiver, registered with `--behavior 0xFE01 --headend-prefix 10.2.0.0/24`:
 
 ```json
 {
   "schema_version": 1,
-  "routing": {
-    "headend_prefixes": ["10.2.0.0/24"]
-  }
+  "routing": {}
 }
 ```
 
-Advertiser and local endpoint:
+Advertiser and local endpoint, registered with `--locator LOC2 --vrf vrf-cust --endpoint-slot 32`:
 
 ```json
 {
   "schema_version": 1,
   "routing": {
-    "locator": "LOC2",
     "prefix": "10.2.0.0/24",
-    "vrf": "vrf-cust",
-    "slot": 32,
     "next_hop": "2001:db8:ff::2",
     "decap_vrf": "vrf-cust"
   },
@@ -49,21 +46,23 @@ Advertiser and local endpoint:
 | --- | --- |
 | `schema_version` | Required; currently `1` |
 | `routing` | Required object containing the routing parameters |
-| `routing.behavior` | Optional integer endpoint behavior, 1–65535; defaults to `65025` (`0xFE01`) |
-| `routing.headend_prefixes` | Optional IPv4 prefixes restricting accepted routes; omitted or empty retains unrestricted receiver selection, still bounded by host grants |
-| `routing.locator`, `routing.slot` | Supply both to allocate a SID; endpoint slot must be 32–63 |
-| `routing.decap_vrf` | Required with SID allocation; selects a host-authorized VRF grant, separate from endpoint aux bytes |
-| `routing.prefix`, `routing.vrf`, `routing.next_hop` | Supply all three with SID allocation to advertise an IPv4 VPN prefix; next hop must be a usable native IPv6 address |
+| `routing.behavior` | Endpoint behavior, 1–65535; defaults to the claimed behavior when exactly one is claimed, otherwise `65025` (`0xFE01`) |
+| `routing.headend_prefixes` | IPv4 prefixes restricting accepted routes; defaults to the IPv4 prefixes of the headend scope, or to accepting no routes when the scope has only IPv6 prefixes |
+| `routing.locator`, `routing.slot` | Locator and endpoint slot (32–63) for the SID; each defaults to the scope's only value |
+| `routing.decap_vrf` | Required with SID allocation, and requests one; selects a host-authorized VRF grant, separate from endpoint aux bytes |
+| `routing.prefix`, `routing.next_hop` | Both required to advertise an IPv4 VPN prefix; next hop must be a usable native IPv6 address |
+| `routing.vrf` | VRF to advertise into; defaults to the scope's only VRF |
 | `endpoint.allowed_underlay_prefix` | Required with SID allocation; allowed outer IPv6 source prefix, including `::/0` to permit all sources |
 
 Prefixes are masked to their network address.
 IPv4-mapped IPv6 addresses and zoned addresses are not accepted as IPv6 endpoint policy or next-hop values.
-Unknown fields, null values, unsupported schema versions and multiple JSON documents are rejected.
-The JSON structure and the field constraints listed above are validated before the adapter invokes the routing controller.
-Locator and VRF existence and authorization remain host checks when applying declarations.
+Unknown or differently cased keys, repeated keys, null values, unsupported schema versions and multiple JSON documents are rejected.
+A key that is present is validated as written; only absent keys take the registration's value.
+The configuration is validated against these constraints and the registration before the adapter invokes the routing controller.
+Locator and VRF existence remain host checks when applying declarations.
 The error identifies the field to correct.
 
-An endpoint can allocate a SID without advertising it by omitting all three advertisement fields.
+An endpoint can allocate a SID without advertising it by giving `decap_vrf` and `endpoint` and no advertisement field.
 The receiver configuration does not allocate a SID and must omit endpoint policy and `decap_vrf`.
 The combined example grants the receiver only headend writes and the advertiser only local SID and advertisement writes.
 
@@ -85,8 +84,7 @@ Use `--name custom-cdplane-behavior` for the default native implementation, or a
 If using a different instance name, select native explicitly with `--native custom-cdplane-behavior`.
 Repeat all capability and scope flags on replacement; they are not inherited.
 
-The original `custom-behavior` native ID and [binary-configured guest](../cplane-custom-behavior/README.md) remain available.
-This example does not change their configuration format or the Cplane SDK wire ABI.
+The [`custom-behavior`](../cplane-custom-behavior/README.md) implementation shares the routing controller without the endpoint policy.
 
 ## Endpoint data and lifecycle
 

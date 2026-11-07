@@ -24,9 +24,10 @@ type Controller struct {
 	headendUnavailable, localSIDUnavailable, advertiseUnavailable bool
 }
 
-// New preserves the example's opaque wire configuration and initial cleanup.
-func New(data []byte, client *cplane.Client, log func(cplane.LogLevel, string)) (*Controller, error) {
-	config, err := decodeConfig(data)
+// New decodes the JSON configuration, completes it from the registration's
+// grants and starts the controller. Native and WASM adapters both call it.
+func New(data []byte, grants cplane.Grants, client *cplane.Client, log func(cplane.LogLevel, string)) (*Controller, error) {
+	config, err := DecodeConfig(data, grants)
 	if err != nil {
 		return nil, err
 	}
@@ -34,11 +35,12 @@ func New(data []byte, client *cplane.Client, log func(cplane.LogLevel, string)) 
 }
 
 // NewWithConfig owns a copy of the configuration, including endpoint bytes.
-// It retains the wire entry's partial sender configuration semantics; adapters
-// can impose a stricter configuration contract before calling this constructor.
+// It takes the configuration as given: a SID is allocated when Locator and Slot
+// are set and advertised when Prefix, VRF and NextHop are set too. Adapters
+// validate their own configuration, usually through Routing.Resolve, first.
 func NewWithConfig(config Config, client *cplane.Client, log func(cplane.LogLevel, string)) (*Controller, error) {
 	if config.Behavior == 0 {
-		config.Behavior = 0xFE01
+		config.Behavior = DefaultBehavior
 	}
 	if config.Behavior > 0xffff {
 		return nil, fmt.Errorf("behavior must fit in 16 bits")
@@ -56,6 +58,9 @@ func NewWithConfig(config Config, client *cplane.Client, log func(cplane.LogLeve
 	}
 	if log == nil {
 		log = func(cplane.LogLevel, string) {}
+	}
+	if config.ReceiveNone {
+		log(cplane.LogInfo, "headend scope has no IPv4 prefix; accepting no IPv4 routes")
 	}
 	c := &Controller{client: client, config: config, log: log,
 		localSIDPending: true, advertisePending: !config.advertises()}
@@ -91,17 +96,12 @@ func (c *Controller) acceptsRoute(r cplane.Route) bool {
 	if err != nil || !prefix.Addr().Is4() {
 		return false
 	}
-	// With no configured filter, retain the original unrestricted receiver.
-	// Narrow host scopes must supply the same ranges in field 9.
-	if len(c.config.HeadendPrefixes) == 0 {
-		return true
+	if c.config.ReceiveNone {
+		return false
 	}
-	for _, allowed := range c.config.HeadendPrefixes {
-		if prefix.Bits() >= allowed.Bits() && allowed.Contains(prefix.Masked().Addr()) {
-			return true
-		}
-	}
-	return false
+	// No filter accepts every prefix. Resolve fills the filter from the
+	// headend scope, so only a registration without one reaches this.
+	return len(c.config.HeadendPrefixes) == 0 || within(c.config.HeadendPrefixes, prefix)
 }
 
 // Pending declarations survive a refusal and are retried on ticks, including

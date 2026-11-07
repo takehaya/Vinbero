@@ -13,6 +13,7 @@ import (
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
+	"github.com/tetratelabs/wazero"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -205,4 +206,75 @@ func TestStandardGoRuntime(t *testing.T) {
 			t.Fatalf("want cancellation, got %v", err)
 		}
 	})
+}
+
+// A guest that calls Grants reads the registration through vinbero.grants,
+// including a message larger than the accessor's first buffer. A guest that
+// never calls it must not import it, so it still runs on hosts without it.
+func TestGuestGrants(t *testing.T) {
+	grants := &v1.PluginGrants{Version: 1, Capabilities: []string{"headend", "local_sid"},
+		Families: []string{"vpnv4"}, Behaviors: []uint32{0xfe01}, Vrfs: []string{"vpn-a"},
+		HeadendPrefixes: []string{"10.2.0.0/16"}, HeadendV4Slots: []uint32{16}, EndpointSlots: []uint32{33, 34}}
+	for i := 0; i < 40; i++ {
+		grants.Locators = append(grants.Locators, "locator-"+strconv.Itoa(i))
+	}
+	raw, err := proto.Marshal(grants)
+	if err != nil || len(raw) <= 256 {
+		t.Fatalf("grants fixture must exceed the first buffer: %d %v", len(raw), err)
+	}
+	want := "caps=headend,local_sid families=vpnv4 behaviors=[65025] locators=40 vrfs=vpn-a prefixes=10.2.0.0/16 v4=[16] v6=[] endpoint=[33 34]"
+	for _, tinygo := range []bool{false, true} {
+		name := "Go"
+		if tinygo {
+			name = "TinyGo"
+		}
+		t.Run(name, func(t *testing.T) {
+			module := buildGuest(t, "grants.go", tinygo)
+			for config, result := range map[string]string{
+				``: "behavior=0xfe01 locator= slot=0 prefixes=[10.2.0.0/16]",
+				`{"schema_version":1,"routing":{"locator":"locator-3","slot":33}}`: "behavior=0xfe01 locator=locator-3 slot=33 prefixes=[10.2.0.0/16]",
+				`{"schema_version":1,"routing":{"slot":33}}`:                       "error: routing.locator is required: the registration grants several locators",
+				`{"schema_version":1,"routing":{"locator":"main"}}`:                "error: routing.locator main is outside the registration's locators",
+				`{"schema_version":1,"routing":{"lcator":"main"}}`:                 `error: configuration: unknown key "routing.lcator"`,
+				`{"schema_version":1,"routing":{"Locator":"main"}}`:                `error: configuration: unknown key "routing.Locator"`,
+				`{"schema_version":1,"routing":{"slot":33},"routing":{}}`:          `error: configuration: duplicate key "routing"`,
+				`{"schema_version":1,"routing":{"locator":"locator-3","slot":0}}`:  "error: routing.slot must be in [32,64) to allocate a SID (got 0)",
+				`{"schema_version":1,"routing":{"slot":null}}`:                     "error: configuration: null values are not supported",
+				"\x08\x81\xfc\x03": "error: configuration must be a JSON object",
+			} {
+				host := &logHost{}
+				inst, err := wasm.Instantiate(t.Context(), wasm.Config{
+					Name: "grants", Module: module, Ops: host, Grants: raw, ConfigBlob: []byte(config),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = inst.Close(context.Background())
+				if len(host.messages) != 2 || host.messages[0] != want || !strings.HasPrefix(host.messages[1], result) {
+					t.Fatalf("config %q: logs: %q", config, host.messages)
+				}
+			}
+			imports := guestImports(t, buildGuest(t, "observer.go", tinygo))
+			if imports[wasm.HostGrants] {
+				t.Fatal("a guest that never reads its grants imports vinbero.grants")
+			}
+		})
+	}
+}
+
+func guestImports(t *testing.T, module []byte) map[string]bool {
+	t.Helper()
+	rt := wazero.NewRuntime(t.Context())
+	defer func() { _ = rt.Close(context.Background()) }()
+	compiled, err := rt.CompileModule(t.Context(), module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	for _, fn := range compiled.ImportedFunctions() {
+		if module, name, ok := fn.Import(); ok && module == wasm.HostModule {
+			out[name] = true
+		}
+	}
+	return out
 }

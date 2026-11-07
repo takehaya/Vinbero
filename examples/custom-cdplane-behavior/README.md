@@ -69,7 +69,8 @@ sudo ip netns exec cpdp-host1 ping -c 3 -W 1 10.2.0.10
 
 Expect three replies.
 The new daemon must include native implementation `custom-cdplane-behavior`; an older daemon will report that it is unavailable.
-The existing `custom-behavior` implementation retains its original binary configuration format.
+PE1's policy is empty because its behavior and receive prefix come from its registration.
+PE2's names only the advertised prefix, next hop, decap VRF and endpoint policy; its locator, VRF and slot come from its registration.
 
 To reject PE1's traffic, save a modified policy and apply it to PE2:
 

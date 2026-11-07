@@ -103,6 +103,12 @@ const (
 	HostNowMonotonic = "now_monotonic"
 	// HostInputFeatures reports additive input formats without changing configure.
 	HostInputFeatures = "input_features"
+	// HostGrants copies the encoded PluginGrants message into a guest
+	// buffer: grants(ptr, cap i32) -> i32. It returns the message length
+	// and writes only when cap is at least that length, so a guest calls
+	// it again with a larger buffer when the first was too small. It
+	// returns -1 when the buffer is outside guest memory.
+	HostGrants = "grants"
 	// HostApplyBegin opens a desired-set transaction and returns its
 	// generation id.
 	HostApplyBegin = "apply_begin"

@@ -96,12 +96,11 @@ fi
     --sid fd00:100:0:1:: --next-hop 2001:db8:ff::1 || true
 
 # --- the control-plane plugin ----------------------------------------------
-# Config blob: field 1 is the behavior codepoint to claim (0xFE01), and
-# field 9 is the receive prefix matching the headend scope (10.2.0.0/16). This
-# end originates nothing, so the locator, prefix and SID fields are absent
-# and the plugin runs receive-only.
-printf '\010\201\374\003\112\01310.2.0.0/16' > /tmp/plugin-config.bin
-
+# No --config: the plugin reads its registration in Configure and takes the
+# behavior it steers from the claim (--behavior 0xFE01) and the prefixes it
+# accepts from the headend scope (10.2.0.0/16). This end originates nothing,
+# so the plugin runs receive-only.
+#
 # Granted `headend` only: it declares forwarding state and nothing else.
 # The shared host rejects advertisement and local-SID declarations.
 # WASM links the shared apply surface for any write grant; each
@@ -123,7 +122,6 @@ esac
 /usr/local/bin/vbctl plugin cplane register \
     --name custom-behavior \
     "${backend_args[@]}" \
-    --config /tmp/plugin-config.bin \
     --behavior 0xFE01 \
     --family vpnv4 --tick-ms 1000 \
     --capability headend \

@@ -500,3 +500,43 @@ func TestInitializerWithArgumentsIsRefused(t *testing.T) {
 func TestWASIImportsAdmitted(t *testing.T) {
 	mustInstantiate(t, "wasi", Config{})
 }
+
+// vinbero.grants is linked without any capability. It reports the length a
+// guest needs, writes only into a buffer that is large enough, and refuses a
+// buffer outside guest memory.
+func TestGrantsHostFunction(t *testing.T) {
+	grants := []byte("encoded-grants")
+	inst := mustInstantiate(t, "grants", Config{Grants: grants, Capabilities: Capabilities{}})
+	ctx := context.Background()
+	read := func(ptr, capacity uint32) int32 {
+		res, err := inst.mod.ExportedFunction("read_grants").Call(ctx, uint64(ptr), uint64(capacity))
+		if err != nil {
+			t.Fatalf("read_grants: %v", err)
+		}
+		return int32(res[0])
+	}
+	if n := read(2048, 4); n != int32(len(grants)) {
+		t.Fatalf("short buffer returned %d", n)
+	}
+	if raw, _ := inst.mod.Memory().Read(2048, 4); string(raw) != "\x00\x00\x00\x00" {
+		t.Fatal("short buffer was written")
+	}
+	if n := read(2048, 64); n != int32(len(grants)) {
+		t.Fatalf("large buffer returned %d", n)
+	}
+	if raw, _ := inst.mod.Memory().Read(2048, uint32(len(grants))); string(raw) != string(grants) {
+		t.Fatalf("guest read %q", raw)
+	}
+	// The pointer is unsigned: memory bounds alone decide, so an address at
+	// or above 2 GiB is checked against memory rather than read as negative.
+	for _, ptr := range []uint32{65536 - 4, 1 << 31, 1<<32 - 1} {
+		if n := read(ptr, 64); n != -1 {
+			t.Fatalf("out-of-range buffer at %#x returned %d", ptr, n)
+		}
+	}
+	empty := mustInstantiate(t, "grants", Config{})
+	res, err := empty.mod.ExportedFunction("read_grants").Call(ctx, 2048, 64)
+	if err != nil || int32(res[0]) != 0 {
+		t.Fatalf("no grants: %v %v", res, err)
+	}
+}

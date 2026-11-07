@@ -332,6 +332,8 @@ host が提供するもの。すべて `vinbero` module から import します�
 |---|---|
 | `log(level, ptr, len)` | daemon log へ出力 |
 | `now_monotonic() -> i64` | `on_tick` と同じ clock による単調増加の ns |
+| `input_features() -> i64` | host が渡せる入力形式の bitmap |
+| `grants(ptr, cap) -> i32` | 登録内容 (`PluginGrants`) を guest の buffer に書き、長さを返す |
 | `apply_begin(kind) -> i64` | desired-set transaction を開く (headend v4/v6、advertise、local SID) |
 | `apply_put(gen, ptr, len) -> i32` | 宣言の chunk を積む |
 | `apply_commit(gen) -> i32` | 差分を適用する |
@@ -361,7 +363,8 @@ plugin は登録時に何をしてよいかを宣言し、host はそれが覆�
 | `local_sid` | locator から SID を確保し自分の slot に向ける |
 
 `log` と `now_monotonic` は常に link します。どちらも状態を変えず、無いと
-plugin 作者が何も調べられなくなるためです。
+plugin 作者が何も調べられなくなるためです。`input_features` と `grants` も
+読み取り専用で権限を与えないので、常に link します。
 
 desired-set の apply 関数は宣言の種類をまたいで共有なので、link は「何か
 1 つでも書ける capability があるか」で決まります。種類ごとの判定は
@@ -610,6 +613,41 @@ inter-procedural / stack-slot の provenance 追跡が要り、既知の限界�
 semi-trusted 前提の best-effort です。第三者や tenant 提供の ELF を許す運用に広げる場合は、
 integrity map を plugin から参照させない host-owned な grant map など構造的な隔離が要ります。
 
+## plugin から見た登録内容
+
+claim、family、capability と scope は登録で operator が一度だけ書きます。
+plugin が同じ値を設定にも持つと、二か所の値が食い違っても気付けません。
+そこで plugin は `configure` の中で `grants` を呼び、自分の登録内容を読めます。
+設定には plugin 固有の選択だけを書きます。
+
+`grants(ptr, cap)` は `PluginGrants` (`proto/vinbero/v1/cplane_plugin.proto`) を
+encode した bytes を guest の buffer に書きます。戻り値は message の長さです。
+`cap` が足りなければ何も書かずに必要な長さを返すので、guest は buffer を広げて
+呼び直します。buffer が guest memory の外なら -1 を返します。host function の中から
+guest の `alloc` を呼び返さない形にしたのは、host function 実行中の再入を許さない
+言語 runtime があるためです。中身は capability、family、claim した behavior、
+locator、VRF、headend prefix と各 slot です。family 以外の空 list はその軸に
+何も渡していないことを表し、family の空 list は全 family を表します。
+値は instance の間は変わらず、登録し直すと新しい instance が新しい値を読みます。
+
+native backend は同じ bytes を adapter が decode し、共有 controller に渡します。
+WASM と native で plugin が見る値は一致します。
+
+grants は plugin への情報であって、権限ではありません。host は宣言のたびに
+登録内容で capability、scope、owner を検査し、grants を参照しません。plugin が
+grants を誤読しても宣言が拒否されるだけで、書ける範囲は広がりません。
+設定の値が grants と食い違うことを `configure` で検出して失敗させるのは plugin の
+判断で、こうすると operator は登録時点で誤りに気付けます。
+
+`grants` を import しない guest はこの関数と無関係に動きます。Go SDK の
+`guest.Grants()` を呼ばない guest には import 自体が入りません。import した
+guest は、`grants` を提供しない host では import の検査で起動前に拒否されます。
+
+MUP と EVPN の context input envelope には grants を入れていません。envelope が
+運ぶのは、host が経路を絞り込む context の割り当てと operator の payload です。
+grants は context 登録の plugin も同じ関数で読めるので、envelope の形式は
+変えずに済みます。
+
 ## claim と built-in state の関係
 
 claim は demux が経路を配る先を決める述語なので、claim が立つ前に届いた
@@ -792,6 +830,7 @@ identity と readiness を結ぶ機構は今後の課題です。
 module は allowlist で検証します。
 
 - import は `vinbero` と `wasi_snapshot_preview1` からのみ。関数名と signature を検証。
+  host が定義しない関数を import する module は、その関数を使う前に拒否します。
 - WASI は Go runtime 用に時計、乱数、期限内の sleep を提供します。host の環境変数、
   引数、filesystem mount、socket は渡しません。stdin は EOF、stdout は破棄します。
   安全境界は従来の線形メモリ上限と call timeout です。
@@ -1071,6 +1110,12 @@ vinbero plugin cplane stats
 vinbero plugin cplane unregister --name custom-behavior
 ```
 
+この例は `--config` を渡していません。plugin は登録内容を読み、claim した
+`0xFE01` の経路のうち headend scope の `10.7.0.0/16` に収まるものを受信します。
+SID の確保と広告には、広告する prefix と next hop を JSON の設定で渡します。
+locator、VRF、slot は登録内容から決まります
+([独自 behavior の例](../../../sdk/examples/cplane-custom-behavior/README.md#configuration))。
+
 旧 API client が backend を省略して module を送った場合は、従来どおり WASM として扱います。
 旧保存形式で backend が空の登録も WASM として復元し、壊れた module や読み込めない module を native に切り替えません。
 新しい登録では選択した backend と、native の場合は確定した ID、version と identity を保存します。
@@ -1118,7 +1163,11 @@ JSON で設定する専用例は `custom-cdplane-behavior`（version `1`）で�
 同じ共有 adapter が Native と WASM の両方で設定を解釈します。
 設定の意味と Dplane への aux の符号化をプラグイン側に置き、host は設定 bytes をそのまま渡します。
 操作手順は [Cplane と Dplane の専用例](../../../examples/custom-cdplane-behavior/README.md)を参照してください。
-独自 behavior の設定は従来の opaque protobuf、observer は opaque な設定を解釈せず BGPPath 機能を確認する契約を保ち、MUP だけが context input envelope を decode します。
+独自 behavior は `custom-cdplane-behavior` と同じ JSON の `routing` object を読み、key が無い値だけを登録内容 (grants) から決めます。
+key があれば `"slot": 0` のような値もそのまま検証します。
+headend scope が IPv6 prefix だけなら IPv4 の経路を一切受け付けず、その旨を log に 1 行出して起動します。
+observer は設定を解釈せず BGPPath 機能を確認し、MUP と EVPN は context input envelope を decode します。
+JSON の厳密な decode は SDK の `jsonconfig` が共通に提供し、両 backend で同じ結果になります。
 
 ## plugin を書く
 
@@ -1132,6 +1181,10 @@ SID 列の組み立ては plugin が決めます。EVPN / MUP の経路保持は
 例は `sdk/examples/cplane-custom-behavior` にあります。SDK の `RouteView` から
 headend を組み立て、適用失敗後は tick で再試行します。SDK の codec は reflection を
 使わず、daemon が使う生成済み protobuf 型との互換性をテストします。
+登録内容は `guest.Grants()` で読み、設定は `jsonconfig` で JSON として decode します。
+`jsonconfig` は `schema_version` を必須とし、未知の key、大文字小文字が json 名と
+一致しない key、同じ object 内で重複した key、`null`、複数の JSON 値を、どの階層でも
+拒否します。`encoding/json` を使うので base SDK とは別 package にしています。
 
 daemon 無しで試すための harness が `sdk/go/cplaneharness` にあります。
 daemon と同じ runtime を回し、capability 面だけ記録用に差し替えます。

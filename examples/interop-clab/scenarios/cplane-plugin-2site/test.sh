@@ -368,35 +368,56 @@ fi
 echo ""
 echo "[6] pe-tokyo: a plugin scoped away from the prefix cannot install it"
 
-# The plugin is unregistered (step 5). Re-register it with a headend prefix
-# that does NOT cover 10.2.0.0/24, and assert the entry does not come back
-# and the daemon logged the refusal. This is the check that would fail if
-# checkScope were a no-op -- the stats-based assertions in step 1 would not.
-dexec "$PE_TOKYO" sh -c 'printf "\010\201\374\003\112\01310.2.0.0/16" > /tmp/plugin-config.bin' || true
-if dexec "$PE_TOKYO" vbctl plugin cplane register \
-    --name custom-behavior "${backend_args[@]}" --config /tmp/plugin-config.bin \
+# The plugin is unregistered (step 5). The configuration names receive
+# prefix 10.2.0.0/16, which covers $OSAKA_PREFIX.
+dexec "$PE_TOKYO" sh -c 'echo "{\"schema_version\":1,\"routing\":{\"headend_prefixes\":[\"10.2.0.0/16\"]}}" > /tmp/plugin-config.json' || true
+
+# 6a. The plugin reads its grants in Configure, so a receive prefix outside
+# the registration's headend scope is refused before it runs. Native
+# returns the plugin's error to the CLI; WASM logs it through the daemon.
+if out=$(dexec "$PE_TOKYO" vbctl plugin cplane register \
+    --name custom-behavior "${backend_args[@]}" --config /tmp/plugin-config.json \
     --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
-    --capability headend --headend-prefix 10.99.0.0/16 >/dev/null 2>&1; then
+    --capability headend --headend-prefix 10.99.0.0/16 2>&1); then
+    ng "a configuration outside the headend scope was accepted"
+else
+    if echo "$out" | grep -q "outside the headend scope" ||
+        dexec "$PE_TOKYO" grep -q "outside the headend scope" /var/log/vinberod.log 2>/dev/null; then
+        ok "a configuration outside the headend scope was refused, naming both prefixes"
+    else
+        ng "the refusal did not name the scope conflict: $out"
+    fi
+fi
+
+# 6b. The host enforces the scope without the plugin's help. Registered
+# with headend and no scope, the plugin has no grant to check against and
+# declares $OSAKA_PREFIX; the host refuses it and logs the refusal. This is
+# the check that would fail if checkScope were a no-op -- the stats-based
+# assertions in step 1 would not.
+if dexec "$PE_TOKYO" vbctl plugin cplane register \
+    --name custom-behavior "${backend_args[@]}" --config /tmp/plugin-config.json \
+    --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
+    --capability headend >/dev/null 2>&1; then
     if retry_n 10 bash -c "! docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then
         ok "$OSAKA_PREFIX was not installed under a scope that does not cover it"
     else
         ng "the plugin installed $OSAKA_PREFIX outside its scope"
         dexec "$PE_TOKYO" vbctl headend-v4 list || true
     fi
-    if dexec "$PE_TOKYO" grep -q "outside this plugin's scope" /var/log/vinberod.log 2>/dev/null; then
+    if retry_n 10 docker exec "$PE_TOKYO" grep -q "outside this plugin's scope" /var/log/vinberod.log; then
         ok "the daemon logged the out-of-scope refusal"
     else
         ng "no out-of-scope refusal in the daemon log"
         dexec "$PE_TOKYO" grep -i "scope" /var/log/vinberod.log | tail -5 || true
     fi
 else
-    ng "could not re-register the plugin with a narrow scope"
+    ng "could not re-register the plugin without a headend scope"
 fi
 
-# Re-register correctly and assert the entry comes back, so the refusal
-# above was the scope and not a broken plugin.
+# Re-register as start.sh does, with no configuration, and assert the entry
+# comes back, so the refusal above was the scope and not a broken plugin.
 if dexec "$PE_TOKYO" vbctl plugin cplane register \
-    --name custom-behavior "${backend_args[@]}" --config /tmp/plugin-config.bin \
+    --name custom-behavior "${backend_args[@]}" \
     --behavior 0xFE01 --family vpnv4 --tick-ms 1000 \
     --capability headend --headend-prefix 10.2.0.0/16 >/dev/null 2>&1; then
     if retry_n 10 bash -c "docker exec $PE_TOKYO vbctl headend-v4 list 2>/dev/null | grep -q '$OSAKA_PREFIX'"; then

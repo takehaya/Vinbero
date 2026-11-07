@@ -1,6 +1,7 @@
 package cplaneharness_test
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -171,38 +172,24 @@ func TestHarnessCapturesPluginLogs(t *testing.T) {
 	t.Fatal("plugin logs did not identify the observed route")
 }
 
-// exampleConfig builds the example plugin's own config message: its
-// behavior codepoint, and optionally the locator, prefix, VRF and slot
-// that make it originate as well as receive.
+// exampleConfig renders the example plugin's JSON configuration: its
+// behavior codepoint, and optionally the locator, prefix, VRF, slot and next
+// hop that make it originate as well as receive.
 func exampleConfig(behavior uint64, locator, prefix, vrf string, slot uint64, nextHop string) []byte {
-	var buf []byte
-	putVarint := func(v uint64) {
-		for v >= 0x80 {
-			buf = append(buf, byte(v)|0x80)
-			v >>= 7
+	routing := map[string]any{"behavior": behavior}
+	for key, value := range map[string]string{"locator": locator, "prefix": prefix, "vrf": vrf, "next_hop": nextHop} {
+		if value != "" {
+			routing[key] = value
 		}
-		buf = append(buf, byte(v))
 	}
-	field := func(n int, wire int) { putVarint(uint64(n)<<3 | uint64(wire)) }
-	str := func(n int, s string) {
-		if s == "" {
-			return
-		}
-		field(n, 2)
-		putVarint(uint64(len(s)))
-		buf = append(buf, s...)
-	}
-	field(1, 0)
-	putVarint(behavior)
-	str(2, locator)
-	str(3, prefix)
-	str(4, vrf)
 	if slot != 0 {
-		field(5, 0)
-		putVarint(slot)
+		routing["slot"] = slot
 	}
-	str(7, nextHop)
-	return buf
+	raw, err := json.Marshal(map[string]any{"schema_version": 1, "routing": routing})
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 // The config blob retunes the plugin without rebuilding it.

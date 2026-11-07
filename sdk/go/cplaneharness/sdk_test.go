@@ -5,8 +5,52 @@ import (
 	"time"
 
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/sdk/go/cplaneharness"
 )
+
+// The example takes its behavior, receive prefixes, locator, VRF and slot
+// from the registration, so the configuration carries only what the
+// registration cannot: here, the prefix to advertise and its next hop.
+func TestSDKPluginConfiguresFromGrants(t *testing.T) {
+	opts := cplaneharness.Options{
+		Behaviors: []uint16{0xFE02},
+		Scope: cplane.ScopeSpec{Locators: []string{"main"}, VRFs: []string{"vpn-a"},
+			HeadendPrefixes: []string{"10.2.0.0/16"}, EndpointSlots: []uint32{33}},
+	}
+	receiver := cplaneharness.New(t, exampleModule(t), opts)
+	route := func(prefix string, behavior uint32) *v1.PluginRoute {
+		r := advertise(prefix, "fd00:2::1")
+		r.EndpointBehavior = behavior
+		return r
+	}
+	for _, r := range []*v1.PluginRoute{route("10.2.1.0/24", 0xFE02), route("10.3.0.0/24", 0xFE02), route("10.2.2.0/24", 0xFE01)} {
+		if _, err := receiver.Route(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decl, ok := receiver.LastDeclaration()
+	if !ok || len(decl.Entries) != 1 || decl.Entries[0].TriggerPrefix != "10.2.1.0/24" {
+		t.Fatalf("receiver did not follow its grants: %+v", decl)
+	}
+	for _, d := range receiver.Declarations() {
+		if len(d.LocalSIDs) != 0 || len(d.Routes) != 0 {
+			t.Fatalf("receiver declared sender state: %+v", d)
+		}
+	}
+
+	opts.Config = []byte(`{"schema_version":1,"routing":{"prefix":"10.7.0.0/24","next_hop":"2001:db8::1"}}`)
+	sender := cplaneharness.New(t, exampleModule(t), opts)
+	var sid *v1.PluginLocalSid
+	for _, d := range sender.Declarations() {
+		if len(d.LocalSIDs) == 1 {
+			sid = d.LocalSIDs[0]
+		}
+	}
+	if sid == nil || sid.Locator != "main" || sid.Slot != 33 {
+		t.Fatalf("sender did not allocate from its granted locator and slot: %+v", sender.Declarations())
+	}
+}
 
 func replayMarker(kind v1.PluginEventKind, source string) *v1.PluginEvent {
 	return &v1.PluginEvent{Kind: kind, ReplaySource: source}

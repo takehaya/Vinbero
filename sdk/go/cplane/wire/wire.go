@@ -29,20 +29,28 @@ type Decoder struct {
 func NewDecoder(data []byte) *Decoder { return &Decoder{data: data} }
 func (d *Decoder) Err() error         { return d.err }
 
-func (d *Decoder) varint() (uint64, bool) {
+// ConsumeVarint parses the varint at the start of b and returns its value and
+// length. The length is 0 when b does not start with a valid varint, as in a
+// packed repeated field that is truncated or overflows 64 bits.
+func ConsumeVarint(b []byte) (uint64, int) {
 	var v uint64
-	for shift := uint(0); shift < 64 && d.pos < len(d.data); shift += 7 {
-		b := d.data[d.pos]
-		d.pos++
-		if shift == 63 && b > 1 {
-			return 0, false
+	for i, shift := 0, uint(0); shift < 64 && i < len(b); i, shift = i+1, shift+7 {
+		c := b[i]
+		if shift == 63 && c > 1 {
+			return 0, 0
 		}
-		v |= uint64(b&0x7f) << shift
-		if b < 0x80 {
-			return v, true
+		v |= uint64(c&0x7f) << shift
+		if c < 0x80 {
+			return v, i + 1
 		}
 	}
-	return 0, false
+	return 0, 0
+}
+
+func (d *Decoder) varint() (uint64, bool) {
+	v, n := ConsumeVarint(d.data[d.pos:])
+	d.pos += n
+	return v, n > 0
 }
 
 func (d *Decoder) Next() bool {
