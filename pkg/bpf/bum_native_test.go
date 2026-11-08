@@ -3,6 +3,7 @@ package bpf
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"testing"
 
@@ -242,5 +243,31 @@ func TestBumNativeLocalCopy(t *testing.T) {
 	params(1)
 	if ret, _ := runWithMeta(t, c.h.objs.BumRemoteEgressTest, meta, l2); ret != XDP_DROP {
 		t.Fatalf("copy for the source AC: action = %d, want XDP_DROP", ret)
+	}
+}
+
+// A BD whose device finds no room in bum_tx_map gets no devmap (tc path):
+// a devmap sending to a device outside the map could leave copies on a
+// queue without the egress program.
+func TestBumNativeTxMapFull(t *testing.T) {
+	h := newXDPTestHelperWithConstants(t, xdpBumNativeConstants)
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
+		func([IPv6AddrLen]byte) (BumUplink, error) { return BumUplink{Ifindex: 1}, nil }, nil)
+	s.SetNativeXDP(true)
+	h.mapOps.SetBumDevmapSync(s)
+	t.Cleanup(func() { h.mapOps.SetBumDevmapSync(nil) })
+
+	for i := range int(h.objs.BumTxMap.MaxEntries()) {
+		ifindex := dummyIfindex(t, fmt.Sprintf("bumtx-%d", i))
+		if err := h.objs.BumTxMap.Put(ifindex, devmapVal{Ifindex: ifindex}); err != nil {
+			t.Fatalf("fill bum_tx_map (%d): %v", i, err)
+		}
+	}
+	h.bumAC(1)
+	if devmapEntries(t, h.objs.BumFloodMap, bumTestBD) != nil {
+		t.Fatal("a BD whose AC is not in bum_tx_map got a devmap")
+	}
+	if _, ok := s.unserved[bumTestBD]; !ok {
+		t.Error("the BD is not recorded as falling back")
 	}
 }

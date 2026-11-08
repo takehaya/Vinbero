@@ -80,7 +80,8 @@ native XDP の bulk queue には、もう 1 つ性質があります。queue は
 - BD の devmap が送るデバイス（ローカル AC とスロットの uplink）への redirect は、すべて `bum_tx_map`（ifindex → {デバイス、`bum_remote_egress`}）を通ります。メインの program の redirect は全部 `xdp_redirect_dev` を使い、`bum_tx_map` にある出力デバイスにはこの map で、それ以外には `bpf_redirect` で送ります。egress program は metadata のないフレーム（unicast）をそのまま送ります。control plane は、BD の devmap を入れる前に、その devmap が送るデバイスを `bum_tx_map` に加えます。加えたデバイスは取り除きません（どの BD も使わなくなったデバイスへのフレームが、egress program を 1 回通るだけです）。
 - ingress program は、届いたフレームの metadata を最初に消します。他のホストの native XDP から redirect されたフレームは、その program の metadata を持ったまま届くことがあるためです。
 - この決まりがあるので、あるデバイスが AC と uplink を兼ねていても（同じ BD でも、別々の BD でも）、そのデバイスの queue に入るフレームはすべて egress program を通ります。BD の組み立ての順番によらず、program のないコピーが混ざることはありません。
-- 新しいデバイスを `bum_tx_map` に加えたときは、BD の devmap を入れる前に 10 ms 待ちます。加える直前に、そのデバイスへ program なしで redirect した NAPI poll が終わるのを待つためです。
+- 新しいデバイスを `bum_tx_map` に加えたときは、BD の devmap を入れる前に 10 ms 待ちます。加える直前に、そのデバイスへ program なしで redirect した NAPI poll が終わるのを待つためです。全 BD を組み立て直すときは、全 BD のデバイスを先に加えて 1 回だけ待ちます。XDP の program を付ける前（起動時の組み立て）は待ちません。
+- `bum_tx_map`（256 エントリー）にデバイスを加えられない BD には devmap を作らず、tc モードで動かします（警告と `BUM_XDP_FALLBACK`）。
 
 native XDP では、コピーはそれぞれ別のバッファにあるので、次節の問題は起きません。起動時の確認も行いません。
 

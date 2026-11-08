@@ -173,6 +173,11 @@ func (v *Vinbero) LoadXDPProgram() error {
 	if err != nil {
 		return fmt.Errorf("invalid XDP attach mode: %w", err)
 	}
+	if v.bumSync != nil {
+		// From here on a device joining bum_tx_map waits for the NAPI
+		// polls in flight (native XDP).
+		v.bumSync.SetLive()
+	}
 	for _, dev := range v.devices {
 		l, err := link.AttachXDP(link.XDPOptions{
 			Program:   v.obj.VinberoMain,
