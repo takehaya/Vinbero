@@ -3,6 +3,7 @@ package vinbero
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"slices"
 	"sort"
@@ -234,11 +235,28 @@ func (v *Vinbero) DetachDevice(name string) error {
 // TC program. A close error is ignored when the interface is gone (the
 // kernel already released the attachment).
 func (v *Vinbero) closeLinks(a *deviceAttachment) error {
-	err := errors.Join(a.xdp.Close(), a.tc.Close())
+	err := closeAttachments(a)
 	if err == nil || !v.alive(a) {
 		return nil
 	}
 	return fmt.Errorf("detach device %s: %w", a.Name, err)
+}
+
+// closeAttachments closes the XDP links of every attachment, then their TC
+// links (see closeLinks for the order), and returns every close error.
+func closeAttachments(as ...*deviceAttachment) error {
+	var errs []error
+	for _, a := range as {
+		if err := a.xdp.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close XDP link of %s: %w", a.Name, err))
+		}
+	}
+	for _, a := range as {
+		if err := a.tc.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close TC link of %s: %w", a.Name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (v *Vinbero) isConfigDevice(name string) bool {
@@ -260,7 +278,7 @@ func (v *Vinbero) alive(a *deviceAttachment) bool {
 // dropLocked forgets a stale attachment (its interface is gone or was
 // recreated). Caller holds v.devMu.
 func (v *Vinbero) dropLocked(a *deviceAttachment, why string) {
-	if err := errors.Join(a.xdp.Close(), a.tc.Close()); err != nil {
+	if err := closeAttachments(a); err != nil {
 		v.logger.Debug("close stale device links", zap.String("device", a.Name), zap.Error(err))
 	}
 	delete(v.attached, a.Name)
@@ -333,17 +351,7 @@ func (v *Vinbero) ReconcileDevices() error {
 func (v *Vinbero) closeAllDevices() error {
 	v.devMu.Lock()
 	defer v.devMu.Unlock()
-	var errs []error
-	for _, a := range v.attached {
-		if err := a.xdp.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close XDP link of %s: %w", a.Name, err))
-		}
-	}
-	for _, a := range v.attached {
-		if err := a.tc.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close TC link of %s: %w", a.Name, err))
-		}
-	}
+	err := closeAttachments(slices.Collect(maps.Values(v.attached))...)
 	clear(v.attached)
-	return errors.Join(errs...)
+	return err
 }
