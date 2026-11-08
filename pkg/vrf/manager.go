@@ -353,6 +353,10 @@ func (m *Manager) CreateDevice(name string, d Device, ops DeviceOps) (VRF, error
 type BridgeOps interface {
 	CreateBridge(name string, bdID uint16, members []string, ownerVRF string) (uint32, error)
 	DeleteBridge(name string) error
+	// AddBridgeMember / RemoveBridgeMember enslave and release one port of
+	// an existing bridge; both are idempotent.
+	AddBridgeMember(bridge, member string) error
+	RemoveBridgeMember(bridge, member string) error
 }
 
 // validateBridgeFacet rejects what an L2 facet may never carry: the reserved
@@ -451,7 +455,70 @@ func (m *Manager) AttachBridge(name string, b Bridge, ops BridgeOps) (VRF, error
 		return VRF{}, fmt.Errorf("vrf %q: create bridge: %w", name, err)
 	}
 	b.Ifindex = ifindex
+	// A re-attach keeps the members the bridge already has (the kernel
+	// bridge keeps them too, and its state record is the union).
+	if cur, ok := m.Get(name); ok && cur.Bridge != nil && cur.Bridge.Name == b.Name {
+		members := cur.Bridge.Members
+		for _, mb := range b.Members {
+			if !slices.Contains(members, mb) {
+				members = append(members, mb)
+			}
+		}
+		b.Members = members
+	}
 	return m.SetBridge(name, b)
+}
+
+// AddBridgeMember enslaves one port to the VRF's attached bridge through ops
+// and adds it to the facet's members. Adding a current member is a no-op
+// apart from the (idempotent) ops call.
+func (m *Manager) AddBridgeMember(name, member string, ops BridgeOps) (VRF, error) {
+	return m.changeBridgeMember(name, member, true, ops)
+}
+
+// RemoveBridgeMember releases one port from the VRF's attached bridge
+// through ops and removes it from the facet's members.
+func (m *Manager) RemoveBridgeMember(name, member string, ops BridgeOps) (VRF, error) {
+	return m.changeBridgeMember(name, member, false, ops)
+}
+
+// changeBridgeMember runs ops outside m.mu, like AttachBridge; VrfServer.mu
+// serializes facet mutations, so the facet read before the call is still
+// the one updated after it.
+func (m *Manager) changeBridgeMember(name, member string, add bool, ops BridgeOps) (VRF, error) {
+	if member == "" {
+		return VRF{}, fmt.Errorf("vrf %q: member interface name is required", name)
+	}
+	v, ok := m.Get(name)
+	if !ok {
+		return VRF{}, fmt.Errorf("unknown VRF %q", name)
+	}
+	if v.Bridge == nil {
+		return VRF{}, fmt.Errorf("vrf %q carries no bridge facet", name)
+	}
+	if v.Bridge.Name == member {
+		return VRF{}, fmt.Errorf("vrf %q: bridge %q cannot be its own member", name, member)
+	}
+	if add {
+		if err := ops.AddBridgeMember(v.Bridge.Name, member); err != nil {
+			return VRF{}, fmt.Errorf("vrf %q: add bridge member: %w", name, err)
+		}
+	} else if err := ops.RemoveBridgeMember(v.Bridge.Name, member); err != nil {
+		return VRF{}, fmt.Errorf("vrf %q: remove bridge member: %w", name, err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.byName[name]
+	if !ok || cur.Bridge == nil {
+		return VRF{}, fmt.Errorf("vrf %q lost its bridge facet during the member change", name)
+	}
+	switch has := slices.Contains(cur.Bridge.Members, member); {
+	case add && !has:
+		cur.Bridge.Members = append(slices.Clone(cur.Bridge.Members), member)
+	case !add && has:
+		cur.Bridge.Members = slices.DeleteFunc(slices.Clone(cur.Bridge.Members), func(n string) bool { return n == member })
+	}
+	return cur.clone(), nil
 }
 
 // RemoveBridge clears the L2 facet and reports whether one was attached

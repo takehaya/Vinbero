@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -804,7 +805,7 @@ func seedVrfBridges(resMgr *netresource.ResourceManager, mgr *vrf.Manager, cfgVR
 		if _, err := mgr.SetBridge(owner, vrf.Bridge{
 			Name:    mb.Name,
 			BdID:    mb.BdID,
-			Members: mb.Members,
+			Members: append(slices.Clone(mb.Members), mb.RuntimeMembers...),
 			Ifindex: mb.Ifindex,
 		}); err != nil {
 			return fmt.Errorf("seed bridge %q from state: %w (fix the entry in the netresource state file, settings.state_path, and restart)", mb.Name, err)

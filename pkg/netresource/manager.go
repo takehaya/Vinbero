@@ -62,6 +62,7 @@ func (m *ResourceManager) Reconcile() error {
 					return fix("bridge "+b.Name, err)
 				}
 				b.Ifindex = ifindex
+				b.RuntimeMembers = m.enslaveRuntimeMembers(b.Name, ifindex, b.RuntimeMembers)
 				continue
 			}
 			ifindex, err := adoptBridgeDevice(link, b.Name, b.Members)
@@ -69,6 +70,7 @@ func (m *ResourceManager) Reconcile() error {
 				return fix("bridge "+b.Name, err)
 			}
 			b.Ifindex = ifindex
+			b.RuntimeMembers = m.enslaveRuntimeMembers(b.Name, ifindex, b.RuntimeMembers)
 		}
 
 		for i := range m.state.VRFs {
@@ -114,6 +116,7 @@ func (m *ResourceManager) GetBridgeByName(name string) (ManagedBridge, bool) {
 	for _, b := range m.state.Bridges {
 		if b.Name == name {
 			b.Members = slices.Clone(b.Members)
+			b.RuntimeMembers = slices.Clone(b.RuntimeMembers)
 			return b, true
 		}
 	}

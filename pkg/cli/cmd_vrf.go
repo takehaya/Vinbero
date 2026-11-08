@@ -130,6 +130,47 @@ func vrfCommand() *cli.Command {
 				},
 			},
 			{
+				Name:  "bridge-member-add",
+				Usage: "Enslave one more interface to the VRF's attached bridge (kept across daemon restarts)",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "vrf", Required: true, Usage: "VRF name"},
+					&cli.StringFlag{Name: "interface", Required: true, Usage: "Interface to enslave"},
+				},
+				Action: func(c *cli.Context) error {
+					resp, err := clientsFromContext(c).Vrf.VrfBridgeMemberAdd(context.Background(),
+						connect.NewRequest(&v1.VrfBridgeMemberAddRequest{
+							VrfName: c.String("vrf"), InterfaceName: c.String("interface"),
+						}))
+					if err != nil {
+						return err
+					}
+					b := resp.Msg.GetVrf().GetBridge()
+					fmt.Printf("vrf %s: %s added to bridge %s (members: %s)\n",
+						resp.Msg.GetVrf().GetName(), c.String("interface"), b.GetName(), strings.Join(b.GetMembers(), ","))
+					return nil
+				},
+			},
+			{
+				Name:  "bridge-member-remove",
+				Usage: "Release an interface from the VRF's attached bridge",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "vrf", Required: true, Usage: "VRF name"},
+					&cli.StringFlag{Name: "interface", Required: true, Usage: "Interface to release"},
+				},
+				Action: func(c *cli.Context) error {
+					resp, err := clientsFromContext(c).Vrf.VrfBridgeMemberRemove(context.Background(),
+						connect.NewRequest(&v1.VrfBridgeMemberRemoveRequest{
+							VrfName: c.String("vrf"), InterfaceName: c.String("interface"),
+						}))
+					if err != nil {
+						return err
+					}
+					fmt.Printf("vrf %s: %s removed from bridge %s\n",
+						resp.Msg.GetVrf().GetName(), c.String("interface"), resp.Msg.GetVrf().GetBridge().GetName())
+					return nil
+				},
+			},
+			{
 				Name:  "ac-add",
 				Usage: "Add an ingress access circuit {interface, vlan} to a VRF (creates the VRF)",
 				Flags: []cli.Flag{

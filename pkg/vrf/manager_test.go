@@ -1,7 +1,9 @@
 package vrf
 
 import (
+	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
@@ -394,6 +396,8 @@ type fakeBridgeOps struct {
 	created   []string
 	owners    map[string]string
 	deleted   []string
+	memberErr error
+	memberOps []string
 }
 
 func (f *fakeBridgeOps) CreateBridge(name string, bdID uint16, members []string, ownerVRF string) (uint32, error) {
@@ -411,6 +415,82 @@ func (f *fakeBridgeOps) CreateBridge(name string, bdID uint16, members []string,
 func (f *fakeBridgeOps) DeleteBridge(name string) error {
 	f.deleted = append(f.deleted, name)
 	return nil
+}
+
+func (f *fakeBridgeOps) AddBridgeMember(bridge, member string) error {
+	if f.memberErr != nil {
+		return f.memberErr
+	}
+	f.memberOps = append(f.memberOps, "add:"+bridge+":"+member)
+	return nil
+}
+
+func (f *fakeBridgeOps) RemoveBridgeMember(bridge, member string) error {
+	if f.memberErr != nil {
+		return f.memberErr
+	}
+	f.memberOps = append(f.memberOps, "remove:"+bridge+":"+member)
+	return nil
+}
+
+// Member add / remove go through ops on the attached bridge and keep the
+// facet's member list in step; a failing op leaves the facet unchanged.
+func TestManager_BridgeMembers(t *testing.T) {
+	m := NewManager()
+	ops := &fakeBridgeOps{ifindexes: map[string]uint32{"br100": 7}}
+	if _, err := m.AttachBridge("evi-100", Bridge{Name: "br100", BdID: 100, Members: []string{"eth2"}}, ops); err != nil {
+		t.Fatalf("AttachBridge: %v", err)
+	}
+	v, err := m.AddBridgeMember("evi-100", "veth1", ops)
+	if err != nil {
+		t.Fatalf("AddBridgeMember: %v", err)
+	}
+	if got := v.Bridge.Members; !slices.Equal(got, []string{"eth2", "veth1"}) {
+		t.Errorf("members after add = %v", got)
+	}
+	// Adding again is idempotent: no duplicate in the facet.
+	if v, _ = m.AddBridgeMember("evi-100", "veth1", ops); len(v.Bridge.Members) != 2 {
+		t.Errorf("re-add duplicated the member: %v", v.Bridge.Members)
+	}
+	if v, err = m.RemoveBridgeMember("evi-100", "eth2", ops); err != nil || !slices.Equal(v.Bridge.Members, []string{"veth1"}) {
+		t.Errorf("remove = %v / %v", v.Bridge, err)
+	}
+	want := []string{"add:br100:veth1", "add:br100:veth1", "remove:br100:eth2"}
+	if !slices.Equal(ops.memberOps, want) {
+		t.Errorf("ops = %v, want %v", ops.memberOps, want)
+	}
+
+	// An idempotent re-attach keeps the members added since.
+	if v, err = m.AttachBridge("evi-100", Bridge{Name: "br100", BdID: 100, Members: []string{"eth9"}}, ops); err != nil ||
+		!slices.Equal(v.Bridge.Members, []string{"veth1", "eth9"}) {
+		t.Errorf("re-attach = %v / %v, want members [veth1 eth9]", v.Bridge, err)
+	}
+	if v, err = m.RemoveBridgeMember("evi-100", "eth9", ops); err != nil || !slices.Equal(v.Bridge.Members, []string{"veth1"}) {
+		t.Errorf("remove = %v / %v", v.Bridge, err)
+	}
+
+	ops.memberErr = errors.New("boom")
+	if _, err := m.AddBridgeMember("evi-100", "veth2", ops); err == nil {
+		t.Error("failing op: want error")
+	}
+	if got, _ := m.Get("evi-100"); !slices.Equal(got.Bridge.Members, []string{"veth1"}) {
+		t.Errorf("failing op changed the facet: %v", got.Bridge.Members)
+	}
+
+	ops.memberErr = nil
+	for _, bad := range []struct{ vrf, member string }{
+		{"missing", "veth3"}, // unknown VRF
+		{"evi-100", ""},      // empty member
+		{"evi-100", "br100"}, // the bridge itself
+	} {
+		if _, err := m.AddBridgeMember(bad.vrf, bad.member, ops); err == nil {
+			t.Errorf("AddBridgeMember(%q, %q): want error", bad.vrf, bad.member)
+		}
+	}
+	m.Ensure("no-bridge")
+	if _, err := m.AddBridgeMember("no-bridge", "veth3", ops); err == nil {
+		t.Error("VRF without a bridge facet: want error")
+	}
 }
 
 // AttachBridge drives ops with the owning VRF name, attaches the facet with

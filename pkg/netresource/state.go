@@ -42,6 +42,11 @@ type ManagedBridge struct {
 	// the state file, and restart (detaching instead would delete the kernel
 	// bridge and disrupt traffic).
 	VRF string `json:"vrf,omitempty"`
+	// RuntimeMembers are ports added one at a time (VrfBridgeMemberAdd),
+	// typically veths that come and go with their workload. Unlike Members,
+	// a runtime member that is gone at boot is dropped instead of failing
+	// the reconcile.
+	RuntimeMembers []string `json:"runtime_members,omitempty"`
 }
 
 func loadState(path string) (*ManagedState, error) {

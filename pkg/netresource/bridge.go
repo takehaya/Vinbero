@@ -137,6 +137,7 @@ func (m *ResourceManager) ListBridges() []ManagedBridge {
 		// Deep-copy Members: the shallow struct copy would alias the
 		// state-owned backing array, which ensureBridgeInState appends to.
 		result[i].Members = slices.Clone(result[i].Members)
+		result[i].RuntimeMembers = slices.Clone(result[i].RuntimeMembers)
 	}
 	return result
 }
@@ -166,6 +167,10 @@ func (m *ResourceManager) ensureBridgeInState(name string, bdID uint16, members 
 				e.Members = append(e.Members, member)
 			}
 		}
+		// A runtime member now declared at attach time is a plain member.
+		e.RuntimeMembers = slices.DeleteFunc(e.RuntimeMembers, func(r string) bool {
+			return slices.Contains(e.Members, r)
+		})
 		return
 	}
 	m.state.Bridges = append(m.state.Bridges, ManagedBridge{
