@@ -3,6 +3,7 @@
 
 #include "endpoint/srv6_endpoint_core.h"
 #include "core/xdp_map.h"
+#include "core/xdp_redirect.h"
 
 // ========================================================================
 // End.DX2V: Decapsulation with VLAN L2 cross-connect (RFC 8986 Section 4.10)
@@ -36,7 +37,7 @@ static __always_inline int dx2v_forward_l2(
     }
 
     DEBUG_PRINT("End.DX2V: VLAN %d -> oif %d\n", vlan_id, entry->oif);
-    return bpf_redirect(entry->oif, 0);
+    return xdp_redirect_dev(entry->oif);
 }
 
 // End.DX2V with SRH: decap + VLAN cross-connect lookup

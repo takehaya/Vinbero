@@ -1583,7 +1583,7 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 
 // ===== Stats Map Operations =====
 
-const StatsMax = 18
+const StatsMax = 19
 
 var StatsCounterName = [StatsMax]string{
 	"RX_PACKETS", "PASS", "DROP", "REDIRECT", "ABORTED",
@@ -1591,7 +1591,7 @@ var StatsCounterName = [StatsMax]string{
 	"BUM_XDP_FLOOD", "BUM_XDP_LOCAL_FLOOD", "BUM_XDP_FALLBACK",
 	"BUM_EGRESS_TX", "BUM_EGRESS_DROP", "BUM_UPLINK_MISMATCH",
 	"BUM_PLAN_STALE", "BUM_PLAN_SURPLUS", "BUM_SHARED_BUFFER",
-	"BUM_EGRESS_NO_NEIGH",
+	"BUM_EGRESS_NO_NEIGH", "BUM_XDP_META_FAIL",
 }
 
 type AggregatedStats struct {
@@ -2506,9 +2506,9 @@ func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *He
 	key := buildHeadendL2Key(ifindex, vlanID)
 	var prev HeadendEntry
 	if m.objs.HeadendL2Map.Lookup(key, &prev) == nil && prev.BdId != entry.BdId {
-		defer m.resyncBum(prev.BdId) // the AC left its old BD
+		defer m.resyncBumACs(prev.BdId) // the AC left its old BD
 	}
-	defer m.resyncBum(entry.BdId)
+	defer m.resyncBumACs(entry.BdId)
 	if err := m.objs.HeadendL2Map.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put headend L2 entry: %w", err)
 	}
@@ -2540,7 +2540,7 @@ func (m *MapOperations) DeleteHeadendL2(ifindex uint32, vlanID uint16) error {
 	var prev HeadendEntry
 	hadEntry := m.objs.HeadendL2Map.Lookup(key, &prev) == nil
 	if hadEntry {
-		defer m.resyncBum(prev.BdId)
+		defer m.resyncBumACs(prev.BdId)
 	}
 	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete headend L2 entry: %w", err)

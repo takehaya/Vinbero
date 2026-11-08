@@ -4,6 +4,7 @@
 #include "endpoint/srv6_endpoint_core.h"
 #include "core/xdp_map.h"       // plugin_endt_vrf_map
 #include "core/xdp_tailcall.h"  // ENDPOINT_PLUGIN_BASE
+#include "core/xdp_redirect.h"
 
 // ========================================================================
 // Decapsulation Helpers
@@ -176,7 +177,7 @@ static __always_inline int process_end_dx2(
     }
 
     DEBUG_PRINT("End.DX2: Decapsulated, redirect to ifindex %d\n", oif);
-    return bpf_redirect(oif, 0);
+    return xdp_redirect_dev(oif);
 }
 
 // End.DT4: Decap to IPv4 with VRF table lookup (RFC 8986 Section 4.8)

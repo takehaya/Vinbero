@@ -39,6 +39,11 @@ static __always_inline int process_l3(struct xdp_md *ctx, __u16 l3_offset, __u16
 SEC("xdp_vinbero_main")
 int vinbero_main(struct xdp_md *ctx)
 {
+    // Native xdp-mode BUM: the devmap egress program trusts metadata, so
+    // none may come from outside this program (see core/xdp_redirect.h).
+    if (bum_xdp_native)
+        xdp_meta_clear(ctx);
+
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     __u64 pkt_len = data_end - data;

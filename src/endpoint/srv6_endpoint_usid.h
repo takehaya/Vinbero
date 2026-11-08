@@ -3,6 +3,7 @@
 
 #include "endpoint/srv6_endpoint_core.h"
 #include "endpoint/srv6_endpoint_basic.h"
+#include "core/xdp_redirect.h"
 
 // ========================================================================
 // NEXT-C-SID endpoint behaviors: uN (End, RFC 9800 Sec.4.1.1) and uA
@@ -271,7 +272,7 @@ static __always_inline int usid_forward(struct xdp_md *ctx, void *dst,
                                     dst ? dst : &ip6h->daddr,
                                     fib_ifindex);
     if (r == FIB_RESULT_REDIRECT)
-        return bpf_redirect(out_ifindex, 0);
+        return xdp_redirect_dev(out_ifindex);
     // dst == NULL means the lookup key was the DA itself (uN), so the
     // kernel repeats exactly this forwarding decision -- but only when the
     // lookup ran in the ingress context. A uT VRF lookup is one the kernel

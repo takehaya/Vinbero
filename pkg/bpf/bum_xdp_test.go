@@ -434,7 +434,12 @@ type egressCase struct {
 // an AC on lo (vlan 100) in bumTestBD.
 func newEgressCase(t *testing.T) *egressCase {
 	t.Helper()
-	h := newXDPBumHelper(t)
+	return newEgressCaseWithConstants(t, xdpBumConstants)
+}
+
+func newEgressCaseWithConstants(t *testing.T, consts map[string]any) *egressCase {
+	t.Helper()
+	h := newXDPTestHelperWithConstants(t, consts)
 	nexthop, _ := adjacencyEnv(t)
 	link, err := net.InterfaceByName("uadj-a")
 	if err != nil {

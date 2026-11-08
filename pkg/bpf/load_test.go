@@ -39,3 +39,17 @@ func TestBpfLoadXDPBum(t *testing.T) {
 		t.Fatal("bum_remote_egress not loaded")
 	}
 }
+
+// TestBpfLoadXDPBumNative also verifies the native-XDP variant: metadata
+// handoff to the egress program and every redirect through uplink_tx_map.
+func TestBpfLoadXDPBumNative(t *testing.T) {
+	objs, err := ReadCollection(map[string]any{
+		"bum_xdp_enabled":  uint8(1),
+		"bum_mode_default": BumModeXDP,
+		"bum_xdp_native":   uint8(1),
+	}, nil)
+	if err != nil {
+		t.Fatalf("Failed to load BPF objects with native xdp BUM mode: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+}

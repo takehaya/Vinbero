@@ -13,6 +13,7 @@
 #include "core/srv6_fib.h"
 #include "endpoint/srv6_decaps.h"
 #include "core/xdp_stats.h"
+#include "core/xdp_redirect.h"
 
 // Pick the VRF ifindex from aux->l3vrf, falling back to the ingress
 // interface when aux is absent or carries a zero ifindex (e.g. End.T
@@ -106,7 +107,7 @@ static __always_inline int endpoint_fib_redirect_core(struct endpoint_ctx *ectx,
 
     switch (fib_result) {
     case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
+        return xdp_redirect_dev(ifindex);
     case FIB_RESULT_DROP:
         return XDP_DROP;
     default:
@@ -395,7 +396,7 @@ static __always_inline int endpoint_handle_usd_nexthop(
     if ((void *)(eth + 1) > data_end)
         return XDP_DROP;
     eth->h_proto = bpf_htons(inner_proto == IPPROTO_IPIP ? ETH_P_IP : ETH_P_IPV6);
-    return bpf_redirect(oif, 0);
+    return xdp_redirect_dev(oif);
 }
 
 // Handle USP flavor: strip SRH at SL=0 and perform FIB lookup

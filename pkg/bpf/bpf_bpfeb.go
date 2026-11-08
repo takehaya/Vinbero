@@ -453,6 +453,7 @@ type BpfMapSpecs struct {
 	SrPolicyMap            *ebpf.MapSpec `ebpf:"sr_policy_map"`
 	StatsMap               *ebpf.MapSpec `ebpf:"stats_map"`
 	TailcallCtxMap         *ebpf.MapSpec `ebpf:"tailcall_ctx_map"`
+	UplinkTxMap            *ebpf.MapSpec `ebpf:"uplink_tx_map"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -461,6 +462,7 @@ type BpfMapSpecs struct {
 type BpfVariableSpecs struct {
 	BumModeDefault *ebpf.VariableSpec `ebpf:"bum_mode_default"`
 	BumXdpEnabled  *ebpf.VariableSpec `ebpf:"bum_xdp_enabled"`
+	BumXdpNative   *ebpf.VariableSpec `ebpf:"bum_xdp_native"`
 	EnableStats    *ebpf.VariableSpec `ebpf:"enable_stats"`
 }
 
@@ -538,6 +540,7 @@ type BpfMaps struct {
 	SrPolicyMap            *ebpf.Map `ebpf:"sr_policy_map"`
 	StatsMap               *ebpf.Map `ebpf:"stats_map"`
 	TailcallCtxMap         *ebpf.Map `ebpf:"tailcall_ctx_map"`
+	UplinkTxMap            *ebpf.Map `ebpf:"uplink_tx_map"`
 }
 
 func (m *BpfMaps) Close() error {
@@ -596,6 +599,7 @@ func (m *BpfMaps) Close() error {
 		m.SrPolicyMap,
 		m.StatsMap,
 		m.TailcallCtxMap,
+		m.UplinkTxMap,
 	)
 }
 
@@ -605,6 +609,7 @@ func (m *BpfMaps) Close() error {
 type BpfVariables struct {
 	BumModeDefault *ebpf.Variable `ebpf:"bum_mode_default"`
 	BumXdpEnabled  *ebpf.Variable `ebpf:"bum_xdp_enabled"`
+	BumXdpNative   *ebpf.Variable `ebpf:"bum_xdp_native"`
 	EnableStats    *ebpf.Variable `ebpf:"enable_stats"`
 }
 

@@ -31,6 +31,7 @@
 #include "core/xdp_map.h"
 #include "core/xdp_stats.h"
 #include "core/esi.h"
+#include "core/xdp_redirect.h"
 #include "l2vpn/bum_meta.h"
 
 // Per-BD BUM replication mode (bd_config_map). INHERIT takes bum_mode_default.
@@ -118,12 +119,19 @@ struct {
 // ===== Per-frame replication plan =====
 //
 // bum_seq numbers the AC-side BUM frames of each CPU; frame seq's plan is
-// bum_plan_ring[seq % BUM_PLAN_RING_SIZE] of the same CPU. The egress
-// program finds the seq it serves without help from the frame: generic XDP
-// runs the devmap programs of a broadcast synchronously, on the CPU and
-// right after the ingress program that issued it (dev_map_redirect_multi
-// -> dev_map_generic_redirect), so it is that CPU's latest seq. The ring
-// has room for a deferred mode that carries seq with the frame.
+// bum_plan_ring[seq % BUM_PLAN_RING_SIZE] of the same CPU. How the egress
+// program learns the seq of a copy depends on the XDP mode:
+//
+// - generic: the devmap programs of a broadcast run synchronously, on the
+//   CPU and right after the ingress program that issued it
+//   (dev_map_redirect_multi -> dev_map_generic_redirect), so the copy is
+//   from that CPU's latest seq. Generic XDP does not pass metadata to
+//   devmap programs.
+// - native (bum_xdp_native): the copies wait in per-CPU bulk queues until
+//   the end of the NAPI poll, when later frames may have been planned. The
+//   ingress program puts the seq in the frame's metadata (struct
+//   bum_xdp_meta), which every copy carries. The flush runs on the same
+//   CPU within the same poll, well inside the ring.
 #define BUM_PLAN_RING_SIZE 1024
 #define BUM_PLAN_MAX_UPLINKS MAX_BUM_NEXTHOPS
 
@@ -151,6 +159,19 @@ struct bum_plan {
 };
 
 _Static_assert(sizeof(struct bum_plan) == 96, "bum_plan layout");
+
+// Native XDP: the metadata the ingress program puts in front of a BUM frame
+// before the broadcast. The egress program strips it.
+#define BUM_XDP_META_MARKER 0x564E4258 // "VNBX"
+
+struct bum_xdp_meta {
+    __u32 marker;             // BUM_XDP_META_MARKER
+    __u32 src_ifindex;        // source AC
+    __u64 seq;                // the frame's bum_seq number
+};
+
+_Static_assert(sizeof(struct bum_xdp_meta) % 4 == 0 && sizeof(struct bum_xdp_meta) <= 32,
+               "XDP metadata is 4-byte aligned and at most 32 bytes");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -186,9 +207,32 @@ static __always_inline void bum_fdb_event_emit(__u16 bd_id, const __u8 *mac, __u
     bpf_ringbuf_output(&fdb_event_rb, &ev, sizeof(ev), 0);
 }
 
-// Return values of bum_xdp_broadcast other than an XDP action: the frame
-// takes the tc path instead.
+// Native XDP: hand the seq that bum_xdp_broadcast just used to the copies.
+// vinbero_main has cleared any metadata the frame arrived with.
+static __always_inline int bum_xdp_meta_write(struct xdp_md *ctx)
+{
+    __u32 zero = 0;
+    __u64 *next = bpf_map_lookup_elem(&bum_seq, &zero);
+    if (!next || *next == 0)
+        return -1;
+    __u64 seq = *next - 1;
+    __u32 src_if = ctx->ingress_ifindex;
+    if (bpf_xdp_adjust_meta(ctx, -(int)sizeof(struct bum_xdp_meta)))
+        return -1;
+    struct bum_xdp_meta *m = (void *)(long)ctx->data_meta;
+    if ((void *)(m + 1) > (void *)(long)ctx->data)
+        return -1;
+    m->marker = BUM_XDP_META_MARKER;
+    m->src_ifindex = src_if;
+    m->seq = seq;
+    return 0;
+}
+
+// Return values of bum_xdp_broadcast other than an XDP action.
+// NO_DEVMAP: the frame takes the tc path instead. NO_META: native XDP could
+// not put the frame's metadata in front of it.
 #define BUM_BCAST_NO_DEVMAP (-1)
+#define BUM_BCAST_NO_META   (-2)
 
 // Plan the frame's remote copies and broadcast it through the BD's flood
 // devmap. Plan and broadcast use the one devmap this function looked up, so
@@ -205,7 +249,8 @@ static __always_inline void bum_fdb_event_emit(__u16 bd_id, const __u8 *mac, __u
 // as its uplink (an AC and an uplink on one port): then the ingress AC gets
 // a copy too, which the egress program drops (item.local is 0 for it).
 //
-// Returns the XDP action, or BUM_BCAST_NO_DEVMAP when the BD has no devmap.
+// Returns the XDP action, BUM_BCAST_NO_DEVMAP when the BD has no devmap, or
+// BUM_BCAST_NO_META.
 // A global function on purpose: the verifier checks it once, not once per
 // path of vinbero_main that reaches the flood.
 __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
@@ -286,6 +331,8 @@ __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
     }
     plan->n_uplinks = (__u8)n_up;
 
+    if (bum_xdp_native && bum_xdp_meta_write(ctx) != 0)
+        return BUM_BCAST_NO_META;
     STATS_INC(STATS_BUM_XDP_FLOOD, pkt_len);
     __u64 flags = BPF_F_BROADCAST;
     if (!hairpin)
@@ -321,6 +368,10 @@ static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id
 {
     __u64 pkt_len = (__u64)((long)ctx->data_end - (long)ctx->data);
     int act = bum_xdp_broadcast(ctx, bd_id, vlan_id);
+    if (act == BUM_BCAST_NO_META) {
+        STATS_INC(STATS_BUM_XDP_META_FAIL, pkt_len);
+        return XDP_DROP;
+    }
     if (act < 0) {
         STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
         xdp_write_bum_meta(ctx, vlan_id);

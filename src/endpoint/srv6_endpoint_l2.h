@@ -7,6 +7,7 @@
 #include "core/esi.h"
 #include "core/fdb.h"
 #include "l2vpn/bum_xdp.h"
+#include "core/xdp_redirect.h"
 
 // ========================================================================
 // L2 Bridge Domain Endpoint Functions (End.DT2)
@@ -97,9 +98,9 @@ static __always_inline void fdb_learn_remote_mac(
 // Looks up destination MAC in fdb_map and returns the appropriate XDP action.
 //
 // Returns:
-//   bpf_redirect(oif)            on local FDB hit (fast path)
+//   redirect to oif              on local FDB hit (fast path)
 //   devmap broadcast             on FDB miss or remote hit in an xdp-mode BD
-//   bpf_redirect(bridge_ifindex) on FDB miss or remote hit (when bridge configured)
+//   redirect to bridge_ifindex   on FDB miss or remote hit (when bridge configured)
 //   XDP_PASS                     when no bridge configured
 static __always_inline int fdb_forward_l2(
     struct xdp_md *ctx,
@@ -119,7 +120,7 @@ static __always_inline int fdb_forward_l2(
         // FDB miss: redirect to bridge device for flooding.
         if (bridge_ifindex != 0) {
             DEBUG_PRINT("FDB: miss, redirect to bridge ifindex %d\n", bridge_ifindex);
-            return bpf_redirect(bridge_ifindex, 0);
+            return xdp_redirect_dev(bridge_ifindex);
         }
         DEBUG_PRINT("FDB: miss, no bridge, passing to kernel\n");
         return XDP_PASS;
@@ -129,7 +130,7 @@ static __always_inline int fdb_forward_l2(
     if (!dst.is_remote) {
         // Local FDB hit: fast-path redirect
         DEBUG_PRINT("FDB: hit local, redirect to ifindex %d\n", dst.oif);
-        return bpf_redirect(dst.oif, 0);
+        return xdp_redirect_dev(dst.oif);
     }
 
     // Remote FDB hit on receiving PE — routing loop or stale entry
@@ -138,7 +139,7 @@ static __always_inline int fdb_forward_l2(
         return flood;
     DEBUG_PRINT("FDB: hit remote on receiver, redirect to bridge\n");
     if (bridge_ifindex != 0)
-        return bpf_redirect(bridge_ifindex, 0);
+        return xdp_redirect_dev(bridge_ifindex);
     return XDP_PASS;
 }
 
