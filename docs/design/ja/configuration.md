@@ -138,7 +138,7 @@ Bridge Domain の BUM 複製モード。詳細は [bum_mode.md](bum_mode.md) を
 
 | フィールド | 型 | デフォルト | 説明 |
 |---|---|---|---|
-| `bum_mode` | string | `tc` | 全 BD の既定。`tc` か `xdp`。`xdp` は `internal.bpf.device_mode: generic` が必要で、PREEMPT_RT のカーネルでは使えない。generic XDP の broadcast のコピーがバッファを共有するカーネルでは、起動時に検出して tc で動く |
+| `bum_mode` | string | `tc` | 全 BD の既定。`tc` か `xdp`。`xdp` は `internal.bpf.device_mode` が `generic` か `driver` のときに使え、PREEMPT_RT のカーネルでは使えない。generic XDP の broadcast のコピーがバッファを共有するカーネルでは、起動時に検出して tc で動く |
 | `bridge_domains[].bd_id` | int | - | 上書きする BD |
 | `bridge_domains[].bum_mode` | string | 既定に従う | その BD のモード |
 

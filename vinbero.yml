@@ -36,8 +36,8 @@ settings:
   # L2VPN BUM replication (docs/design/ja/bum_mode.md). "tc" (default)
   # clones in TC and floods locally through the kernel bridge; "xdp"
   # replicates through a per-BD devmap and keeps the bridge off the path
-  # (no STP / IGMP snooping / bridge netfilter). xdp needs
-  # internal.bpf.device_mode: generic.
+  # (no STP / IGMP snooping / bridge netfilter). xdp runs with
+  # internal.bpf.device_mode generic or driver.
   # l2:
   #   bum_mode: tc
   #   bridge_domains:
