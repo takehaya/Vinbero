@@ -135,17 +135,19 @@ func TestBridgeMember_RetryAfterPersistFailure(t *testing.T) {
 	}
 }
 
-// Reconcile re-enslaves runtime members, drops the ones that vanished
-// instead of failing the boot, and persists the pruned list.
+// Reconcile re-enslaves runtime members, drops the ones that vanished or
+// whose name another bridge now holds instead of failing the boot, and
+// persists the pruned list.
 func TestReconcile_RuntimeMembers(t *testing.T) {
 	withTestNetns(t)
 	m := newTestManager(t)
 	addDummy(t, "rt-keep0")
 	gone := addDummy(t, "rt-gone0")
+	taken := addDummy(t, "rt-taken0")
 	if _, err := m.CreateBridge("br-rt", 700, nil, ""); err != nil {
 		t.Fatalf("CreateBridge: %v", err)
 	}
-	for _, member := range []string{"rt-keep0", "rt-gone0"} {
+	for _, member := range []string{"rt-keep0", "rt-gone0", "rt-taken0"} {
 		if err := m.AddBridgeMember("br-rt", member); err != nil {
 			t.Fatalf("AddBridgeMember(%s): %v", member, err)
 		}
@@ -161,6 +163,13 @@ func TestReconcile_RuntimeMembers(t *testing.T) {
 	}
 	if err := netlink.LinkDel(gone); err != nil {
 		t.Fatalf("LinkDel member: %v", err)
+	}
+	other := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: "br-other"}}
+	if err := netlink.LinkAdd(other); err != nil {
+		t.Fatalf("LinkAdd br-other: %v", err)
+	}
+	if err := netlink.LinkSetMaster(taken, other); err != nil {
+		t.Fatalf("enslave rt-taken0 elsewhere: %v", err)
 	}
 
 	m2, err := NewResourceManager(m.statePath, zap.NewNop())

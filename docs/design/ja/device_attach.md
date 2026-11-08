@@ -71,7 +71,8 @@ L2 で使う veth は bridge に enslave する必要があります。`VrfServi
 - add は port を enslave し、state の bridge record の `runtime_members` に記録します。既に member なら何もせず成功します。別の device に enslave されている port は付け替えずに拒否します
 - remove は port を release し、`members` と `runtime_members` の両方から外します。port が消えている場合と member でない場合も成功します
 - config file の `vrfs.entries[].bridge.members` に書いた port の remove は `FAILED_PRECONDITION` で拒否します。config は起動のたびにこの port を enslave し直すので、外すには config から消して再起動します。拒否は config に書いた VRF と bridge の組に対してだけ働きます。その bridge を detach して別の bridge を attach した場合、同じ port でも外せます
-- Reconcile は `members` (attach 時に指定した port) が欠けていれば従来どおり起動を拒否しますが、`runtime_members` の port が欠けていれば warning を出して外し、起動を続けます
+- Reconcile は `members` (attach 時に指定した port) が欠けていれば起動を拒否します。`runtime_members` の port が消えている、またはその名前の port が別の device に enslave されている場合は、warning を出して外し、起動を続けます。lookup や enslave がそれ以外の理由で失敗した port は warning を出して記録に残し、次の起動で enslave し直します
+- attach 時に指定した port は、別の device に enslave されていれば付け替えます。実行時に足した port は付け替えずに拒否します
 - `VrfShow` の bridge の `members` は両方を合わせたものです
 
 member の追加と削除は `VrfBridgeAttach` と同じ mutex の下で行います。FDBWatcher と EVPN は bridge 単位で動くので、member の増減では何もしません。

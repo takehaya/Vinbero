@@ -117,32 +117,42 @@ func (m *ResourceManager) RemoveBridgeMember(bridge, member string) error {
 }
 
 // enslaveRuntimeMembers re-enslaves a reconciled bridge's runtime members
-// and returns the ones still present. A runtime member that is gone,
-// enslaved elsewhere or cannot be enslaved is dropped with a warning: its
+// and returns the ones to keep. A runtime member that is gone, or whose name
+// now belongs to a port enslaved elsewhere, is dropped with a warning: its
 // workload went away while the daemon was down, and that must not block the
-// boot. Called by Reconcile with m.mu held.
+// boot. A member that fails for another reason (a lookup or enslave error)
+// is kept with a warning, so a transient failure does not forget it; the
+// next start tries again. Called by Reconcile with m.mu held.
 func (m *ResourceManager) enslaveRuntimeMembers(bridge string, ifindex uint32, members []string) []string {
 	if len(members) == 0 {
 		return members
 	}
 	br, err := netlink.LinkByIndex(int(ifindex))
 	if err != nil {
-		m.logger.Warn("Reconcile: bridge lookup failed; dropping its runtime members",
+		m.logger.Warn("Reconcile: bridge lookup failed; keeping its runtime members unenslaved",
 			zap.String("bridge", bridge), zap.Error(err))
-		return nil
+		return members
 	}
 	kept := make([]string, 0, len(members))
 	for _, member := range members {
 		port, err := netlink.LinkByName(member)
-		if err != nil {
+		if errors.As(err, &netlink.LinkNotFoundError{}) {
 			m.logger.Warn("Reconcile: dropping vanished bridge member",
 				zap.String("bridge", bridge), zap.String("member", member))
 			continue
 		}
-		if err := enslave(port, br, false); err != nil {
+		if err == nil {
+			err = enslave(port, br, false)
+		}
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrEnslavedElsewhere):
 			m.logger.Warn("Reconcile: dropping bridge member",
 				zap.String("bridge", bridge), zap.String("member", member), zap.Error(err))
 			continue
+		default:
+			m.logger.Warn("Reconcile: bridge member not enslaved; keeping it for the next start",
+				zap.String("bridge", bridge), zap.String("member", member), zap.Error(err))
 		}
 		kept = append(kept, member)
 	}
