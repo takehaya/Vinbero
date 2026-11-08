@@ -41,7 +41,7 @@ func TestBpfLoadXDPBum(t *testing.T) {
 }
 
 // TestBpfLoadXDPBumNative also verifies the native-XDP variant: metadata
-// handoff to the egress program and every redirect through uplink_tx_map.
+// handoff to the egress program and every redirect through bum_tx_map.
 func TestBpfLoadXDPBumNative(t *testing.T) {
 	objs, err := ReadCollection(map[string]any{
 		"bum_xdp_enabled":  uint8(1),

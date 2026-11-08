@@ -62,8 +62,8 @@ func TestBumNativeMetaCarriesSeq(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tx devmapVal
-	if err := c.h.objs.UplinkTxMap.Lookup(c.uplink, &tx); err != nil || tx.Ifindex != c.uplink || tx.ProgFD == 0 {
-		t.Fatalf("uplink_tx_map[%d] = %+v, %v; want the uplink with the egress program", c.uplink, tx, err)
+	if err := c.h.objs.BumTxMap.Lookup(c.uplink, &tx); err != nil || tx.Ifindex != c.uplink || tx.ProgFD == 0 {
+		t.Fatalf("bum_tx_map[%d] = %+v, %v; want the uplink with the egress program", c.uplink, tx, err)
 	}
 
 	ret, out := c.h.run(l2)
@@ -115,7 +115,7 @@ func TestBumNativeMetaCarriesSeq(t *testing.T) {
 }
 
 // A frame without the metadata is a unicast frame redirected through
-// uplink_tx_map: the egress program leaves it alone.
+// bum_tx_map: the egress program leaves it alone.
 func TestBumNativeEgressPassesUnicast(t *testing.T) {
 	c := newEgressCaseWithConstants(t, xdpBumNativeConstants)
 	pkt := bumFrame(t)
@@ -148,10 +148,11 @@ func TestBumNativeIngressClearsMeta(t *testing.T) {
 	}
 }
 
-// In native XDP a device cannot be both an uplink and a local AC of an
-// xdp-mode BD. Making an uplink an AC of another BD rebuilds every BD: the
-// slot through it leaves its devmap and the device leaves uplink_tx_map.
-func TestBumNativeUplinkBecomesAC(t *testing.T) {
+// In native XDP every entry of both BD devmaps carries the egress program,
+// and every device they send to has a bum_tx_map entry: a device's queue
+// then always runs the program, whether the device is an AC, an uplink or
+// both, in one BD or several.
+func TestBumNativeEveryEntryCarriesTheProgram(t *testing.T) {
 	h := newXDPTestHelperWithConstants(t, xdpBumNativeConstants)
 	up := dummyIfindex(t, "bumnat-up")
 	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
@@ -169,36 +170,77 @@ func TestBumNativeUplinkBecomesAC(t *testing.T) {
 	}, [ESILen]byte{}, [IPv6AddrLen]byte{}, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase]; !ok {
-		t.Fatal("slot 0 missing from the flood devmap")
+	check := func(t *testing.T, bd uint16, keys ...uint32) {
+		t.Helper()
+		for _, outer := range []*ebpf.Map{h.objs.BumFloodMap, h.objs.BumLocalMap} {
+			m := devmapEntries(t, outer, bd)
+			for k, v := range m {
+				if v.ProgFD == 0 {
+					t.Errorf("bd %d: devmap entry %#x has no egress program", bd, k)
+				}
+			}
+		}
+		flood := devmapEntries(t, h.objs.BumFloodMap, bd)
+		for _, k := range keys {
+			if _, ok := flood[k]; !ok {
+				t.Errorf("bd %d: flood devmap misses %#x", bd, k)
+			}
+		}
 	}
-	var v devmapVal
-	if err := h.objs.UplinkTxMap.Lookup(up, &v); err != nil {
-		t.Fatalf("uplink not in uplink_tx_map: %v", err)
+	inTx := func(t *testing.T, ifindex uint32) {
+		t.Helper()
+		var v devmapVal
+		if err := h.objs.BumTxMap.Lookup(ifindex, &v); err != nil || v.ProgFD == 0 {
+			t.Errorf("device %d: bum_tx_map entry %+v, %v; want one with the egress program", ifindex, v, err)
+		}
 	}
+	check(t, bumTestBD, 1, BumSlotKeyBase)
+	inTx(t, 1)
+	inTx(t, up)
 
-	// The uplink becomes an AC of another xdp-mode BD.
+	// The uplink becomes an AC of another xdp-mode BD: both BDs keep it.
 	if err := h.mapOps.CreateHeadendL2(up, 0, &HeadendEntry{
 		Mode: uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2), NumSegments: n,
 		SrcAddr: src, Segments: segs, BdId: 999,
 	}, [ESILen]byte{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase]; ok {
-		t.Error("slot 0 still sends through a device that is now an AC")
-	}
-	if err := h.objs.UplinkTxMap.Lookup(up, &v); err == nil {
-		t.Error("the AC's device is still in uplink_tx_map")
-	}
+	check(t, bumTestBD, 1, BumSlotKeyBase)
+	check(t, 999, up)
+	inTx(t, up)
+}
 
-	// Once it is no AC any more, the slot comes back.
-	if err := h.mapOps.DeleteHeadendL2(up, 0); err != nil {
+// A copy with the metadata for a device without slot entries is the copy
+// for that local AC: it leaves unchanged, without the metadata. The source
+// AC's own is surplus.
+func TestBumNativeLocalCopy(t *testing.T) {
+	c := newEgressCaseWithConstants(t, xdpBumNativeConstants)
+	c.sync.SetNativeXDP(true)
+	ac := dummyIfindex(t, "bumnat-ac")
+	c.h.bumAC(ac)
+	nh := c.nexthop.String()
+	l2 := bumFrame(t)
+	c.peer(t, 0, vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2, []string{nh, lastSegment(0).String()}, [ESILen]byte{}, false)
+	if err := c.sync.SyncBD(bumTestBD); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase]; !ok {
-		t.Error("slot 0 did not come back")
+	ret, out := c.h.run(l2)
+	if ret != XDP_REDIRECT {
+		t.Fatalf("ingress: action = %d, want XDP_REDIRECT", ret)
 	}
-	if err := h.objs.UplinkTxMap.Lookup(up, &v); err != nil {
-		t.Errorf("uplink not back in uplink_tx_map: %v", err)
+	meta := append([]byte{}, out[:16]...)
+	params := func(egress uint32) {
+		t.Helper()
+		if err := c.h.objs.BumTestParamsMap.Put(uint32(0), &BpfBumTestParams{EgressIfindex: egress}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	params(ac)
+	if ret, out := runWithMeta(t, c.h.objs.BumRemoteEgressTest, meta, l2); ret != XDP_PASS || !bytes.Equal(out[:len(l2)], l2) {
+		t.Fatalf("local copy: action = %d, want XDP_PASS and the frame unchanged", ret)
+	}
+	params(1)
+	if ret, _ := runWithMeta(t, c.h.objs.BumRemoteEgressTest, meta, l2); ret != XDP_DROP {
+		t.Fatalf("copy for the source AC: action = %d, want XDP_DROP", ret)
 	}
 }

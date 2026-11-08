@@ -2506,9 +2506,9 @@ func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *He
 	key := buildHeadendL2Key(ifindex, vlanID)
 	var prev HeadendEntry
 	if m.objs.HeadendL2Map.Lookup(key, &prev) == nil && prev.BdId != entry.BdId {
-		defer m.resyncBumACs(prev.BdId) // the AC left its old BD
+		defer m.resyncBum(prev.BdId) // the AC left its old BD
 	}
-	defer m.resyncBumACs(entry.BdId)
+	defer m.resyncBum(entry.BdId)
 	if err := m.objs.HeadendL2Map.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put headend L2 entry: %w", err)
 	}
@@ -2540,7 +2540,7 @@ func (m *MapOperations) DeleteHeadendL2(ifindex uint32, vlanID uint16) error {
 	var prev HeadendEntry
 	hadEntry := m.objs.HeadendL2Map.Lookup(key, &prev) == nil
 	if hadEntry {
-		defer m.resyncBumACs(prev.BdId)
+		defer m.resyncBum(prev.BdId)
 	}
 	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete headend L2 entry: %w", err)

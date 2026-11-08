@@ -109,7 +109,7 @@ type BumDevmapSync struct {
 	innerSpec *ebpf.MapSpec
 	modeOf    func(bdID uint16) uint8
 	uplink    UplinkResolver
-	native    bool // native XDP: keep uplink_tx_map in step too
+	native    bool // native XDP: keep bum_tx_map in step too
 	logger    *zap.Logger
 	// keepNeigh, when set, keeps each flood slot's next hop resolved
 	// (KeepNeighResolved).
@@ -146,19 +146,21 @@ func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink Uplink
 }
 
 // SetNativeXDP tells the sync that the data plane runs in native XDP
-// (bum_xdp_native). Every uplink of a flood slot then also gets an
-// uplink_tx_map entry carrying bum_remote_egress before the first BD devmap
-// that sends through it is installed: native XDP runs one egress program
-// per output-device queue, so all redirects to an uplink must carry the
-// same one (src/core/xdp_redirect.h). An uplink that no BD uses any more
-// keeps its entry; that only costs its unicast frames one pass through the
-// program.
+// (bum_xdp_native). Native XDP queues redirected frames per CPU and output
+// device until the end of the NAPI poll, and runs the devmap program of the
+// first frame queued on the whole queue (src/core/xdp_redirect.h). So every
+// frame sent to a device the BUM devmaps send to must carry the same
+// program, bum_remote_egress:
 //
-// A local AC of an xdp-mode BD cannot be an uplink: the BD devmaps send it
-// local copies without a program, and its queue would mix those with
-// remote copies or unicast frames that carry one. Such a slot is left out,
-// and the AC's device is dropped from uplink_tx_map. Since an AC change can
-// affect the slots of every BD, it rebuilds them all (SyncACs).
+//   - every entry of both BD devmaps carries it, local ACs included; it
+//     sends the copies without BUM metadata (post-decap flood) unchanged,
+//     and tells local copies from remote ones with the plan;
+//   - every such device, AC or uplink, has a bum_tx_map entry carrying it,
+//     added before the first devmap that sends to the device is installed,
+//     and every other redirect of the main program goes through that map.
+//
+// A device keeps its bum_tx_map entry when no BD uses it any more; that
+// only costs its frames one pass through the program.
 func (s *BumDevmapSync) SetNativeXDP(native bool) {
 	s.mu.Lock()
 	s.native = native
@@ -190,21 +192,7 @@ func (s *BumDevmapSync) SyncBD(bdID uint16) error {
 	if err != nil {
 		return err
 	}
-	return s.syncBDLocked(bdID, acs[bdID], s.xdpACsLocked(acs))
-}
-
-// xdpACsLocked returns the AC devices of every xdp-mode BD.
-func (s *BumDevmapSync) xdpACsLocked(acs map[uint16][]bumAC) map[uint32]struct{} {
-	all := map[uint32]struct{}{}
-	for bd, list := range acs {
-		if s.modeOf(bd) != BumModeXDP {
-			continue
-		}
-		for _, ac := range list {
-			all[ac.ifindex] = struct{}{}
-		}
-	}
-	return all
+	return s.syncBDLocked(bdID, acs[bdID])
 }
 
 // bumAC is one headend_l2 entry of a BD: a local AC.
@@ -236,7 +224,7 @@ func unservable(acs []bumAC, ifindexes []uint32, slots int) string {
 	return ""
 }
 
-func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC, allACs map[uint32]struct{}) error {
+func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC) error {
 	if s.modeOf(bdID) != BumModeXDP {
 		return s.clearBDLocked(bdID, "")
 	}
@@ -279,11 +267,6 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC, allACs map[uint32
 				zap.String("segment", net.IP(peer.Segments[0][:]).String()), zap.Error(err))
 			continue
 		}
-		if _, isAC := allACs[up.Ifindex]; isAC && s.native {
-			s.logger.Warn("xdp BUM: the uplink of a flood peer is also a local AC; native XDP cannot send both through it, slot left out",
-				zap.Uint16("bd_id", bdID), zap.Uint16("index", i), zap.Uint32("ifindex", up.Ifindex))
-			continue
-		}
 		slots = append(slots, slot{index: i, uplink: up.Ifindex, nexthop: up.Nexthop})
 	}
 	if reason := unservable(acs, ifindexes, len(slots)); reason != "" {
@@ -301,7 +284,7 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC, allACs map[uint32
 	}
 	defer func() { _ = local.Close() }()
 
-	if len(slots) > 0 && s.egress == nil {
+	if (len(slots) > 0 || s.native) && s.egress == nil {
 		return fmt.Errorf("bd %d: bum_remote_egress is not loaded", bdID)
 	}
 	uplinks := make(map[uint32]struct{}, len(slots))
@@ -310,6 +293,9 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC, allACs map[uint32
 	}
 	for _, ifindex := range ifindexes {
 		v := devmapVal{Ifindex: ifindex}
+		if s.native {
+			v.ProgFD = uint32(s.egress.FD()) // see SetNativeXDP
+		}
 		err := local.Put(ifindex, v)
 		if err == nil {
 			// An AC on the uplink of one of the BD's slots: that device's
@@ -344,18 +330,21 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC, allACs map[uint32
 
 	if s.native {
 		added := false
-		for _, sl := range slots {
-			fresh, err := s.ensureUplinkTx(sl.uplink)
+		for ifindex := range uplinks {
+			ifindexes = append(ifindexes, ifindex)
+		}
+		for _, ifindex := range ifindexes {
+			fresh, err := s.ensureBumTx(ifindex)
 			if err != nil {
-				return fmt.Errorf("bd %d: flood slot %d: %w", bdID, sl.index, err)
+				return fmt.Errorf("bd %d: %w", bdID, err)
 			}
 			added = added || fresh
 		}
-		// A NAPI poll that redirected to a new uplink with a plain
+		// A NAPI poll that redirected to a new device with a plain
 		// bpf_redirect just before the entry appeared must be over before
 		// this BD's copies can join that poll's queue.
 		if added {
-			time.Sleep(uplinkTxGrace)
+			time.Sleep(bumTxGrace)
 		}
 	}
 
@@ -395,63 +384,32 @@ func (s *BumDevmapSync) clearBDLocked(bdID uint16, reason string) error {
 	return errors.Join(errs...)
 }
 
-// uplinkTxGrace outlasts any NAPI poll in flight when an uplink joins
-// uplink_tx_map (a poll handles at most its budget of frames).
-const uplinkTxGrace = 10 * time.Millisecond
+// bumTxGrace outlasts any NAPI poll in flight when an uplink joins
+// bum_tx_map (a poll handles at most its budget of frames).
+const bumTxGrace = 10 * time.Millisecond
 
-// ensureUplinkTx adds ifindex to uplink_tx_map unless it is there, and
+// ensureBumTx adds ifindex to bum_tx_map unless it is there, and
 // reports whether it added it.
-func (s *BumDevmapSync) ensureUplinkTx(ifindex uint32) (bool, error) {
+func (s *BumDevmapSync) ensureBumTx(ifindex uint32) (bool, error) {
 	var cur devmapVal
-	err := s.objs.UplinkTxMap.Lookup(ifindex, &cur)
+	err := s.objs.BumTxMap.Lookup(ifindex, &cur)
 	if err == nil {
 		return false, nil
 	}
 	if !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return false, fmt.Errorf("read uplink_tx_map[%d]: %w", ifindex, err)
+		return false, fmt.Errorf("read bum_tx_map[%d]: %w", ifindex, err)
 	}
 	if s.egress == nil {
 		return false, errors.New("bum_remote_egress is not loaded")
 	}
 	v := devmapVal{Ifindex: ifindex, ProgFD: uint32(s.egress.FD())}
-	if err := s.objs.UplinkTxMap.Update(ifindex, v, ebpf.UpdateNoExist); err != nil {
+	if err := s.objs.BumTxMap.Update(ifindex, v, ebpf.UpdateNoExist); err != nil {
 		if errors.Is(err, ebpf.ErrKeyExist) {
 			return false, nil
 		}
-		return false, fmt.Errorf("add uplink %d to uplink_tx_map: %w", ifindex, err)
+		return false, fmt.Errorf("add device %d to bum_tx_map: %w", ifindex, err)
 	}
 	return true, nil
-}
-
-// pruneUplinkTxLocked drops the local ACs of xdp-mode BDs from
-// uplink_tx_map, after every BD has been rebuilt without slots through them.
-func (s *BumDevmapSync) pruneUplinkTxLocked(allACs map[uint32]struct{}) error {
-	var errs []error
-	for ifindex := range allACs {
-		if err := s.objs.UplinkTxMap.Delete(ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			errs = append(errs, fmt.Errorf("drop AC %d from uplink_tx_map: %w", ifindex, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// SyncACs rebuilds after a local AC of bdIDs was added, moved or removed.
-// In native XDP the set of ACs decides which slots may use which uplink in
-// every BD, so all BDs are rebuilt; otherwise only bdIDs.
-func (s *BumDevmapSync) SyncACs(bdIDs ...uint16) error {
-	s.mu.Lock()
-	native := s.native
-	s.mu.Unlock()
-	if native {
-		return s.SyncAll()
-	}
-	var errs []error
-	for _, bd := range bdIDs {
-		if err := s.SyncBD(bd); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
 }
 
 // noteServedLocked logs when an xdp-mode BD starts or stops falling back
@@ -515,15 +473,9 @@ func (s *BumDevmapSync) SyncAll() error {
 		}
 	}
 
-	allACs := s.xdpACsLocked(acs)
 	var errs []error
 	for bd := range bds {
-		if err := s.syncBDLocked(bd, acs[bd], allACs); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if s.native {
-		if err := s.pruneUplinkTxLocked(allACs); err != nil {
+		if err := s.syncBDLocked(bd, acs[bd]); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -660,15 +612,3 @@ func (m *MapOperations) resyncBum(bdIDs ...uint16) {
 	}
 }
 
-// resyncBumACs is resyncBum for a change of local ACs (SyncACs).
-func (m *MapOperations) resyncBumACs(bdIDs ...uint16) {
-	m.bumMu.Lock()
-	s := m.bum
-	m.bumMu.Unlock()
-	if s == nil {
-		return
-	}
-	if err := s.SyncACs(bdIDs...); err != nil {
-		s.logger.Warn("xdp BUM: devmap rebuild after an AC change failed", zap.Error(err))
-	}
-}

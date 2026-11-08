@@ -412,6 +412,7 @@ type BpfMapSpecs struct {
 	BumPlanRing            *ebpf.MapSpec `ebpf:"bum_plan_ring"`
 	BumSeq                 *ebpf.MapSpec `ebpf:"bum_seq"`
 	BumTestParamsMap       *ebpf.MapSpec `ebpf:"bum_test_params_map"`
+	BumTxMap               *ebpf.MapSpec `ebpf:"bum_tx_map"`
 	Dx2vMap                *ebpf.MapSpec `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.MapSpec `ebpf:"ecmp_group_map"`
 	EcmpGroupOwnerMap      *ebpf.MapSpec `ebpf:"ecmp_group_owner_map"`
@@ -453,7 +454,6 @@ type BpfMapSpecs struct {
 	SrPolicyMap            *ebpf.MapSpec `ebpf:"sr_policy_map"`
 	StatsMap               *ebpf.MapSpec `ebpf:"stats_map"`
 	TailcallCtxMap         *ebpf.MapSpec `ebpf:"tailcall_ctx_map"`
-	UplinkTxMap            *ebpf.MapSpec `ebpf:"uplink_tx_map"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -499,6 +499,7 @@ type BpfMaps struct {
 	BumPlanRing            *ebpf.Map `ebpf:"bum_plan_ring"`
 	BumSeq                 *ebpf.Map `ebpf:"bum_seq"`
 	BumTestParamsMap       *ebpf.Map `ebpf:"bum_test_params_map"`
+	BumTxMap               *ebpf.Map `ebpf:"bum_tx_map"`
 	Dx2vMap                *ebpf.Map `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.Map `ebpf:"ecmp_group_map"`
 	EcmpGroupOwnerMap      *ebpf.Map `ebpf:"ecmp_group_owner_map"`
@@ -540,7 +541,6 @@ type BpfMaps struct {
 	SrPolicyMap            *ebpf.Map `ebpf:"sr_policy_map"`
 	StatsMap               *ebpf.Map `ebpf:"stats_map"`
 	TailcallCtxMap         *ebpf.Map `ebpf:"tailcall_ctx_map"`
-	UplinkTxMap            *ebpf.Map `ebpf:"uplink_tx_map"`
 }
 
 func (m *BpfMaps) Close() error {
@@ -558,6 +558,7 @@ func (m *BpfMaps) Close() error {
 		m.BumPlanRing,
 		m.BumSeq,
 		m.BumTestParamsMap,
+		m.BumTxMap,
 		m.Dx2vMap,
 		m.EcmpGroupMap,
 		m.EcmpGroupOwnerMap,
@@ -599,7 +600,6 @@ func (m *BpfMaps) Close() error {
 		m.SrPolicyMap,
 		m.StatsMap,
 		m.TailcallCtxMap,
-		m.UplinkTxMap,
 	)
 }
 

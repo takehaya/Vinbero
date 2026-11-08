@@ -11,9 +11,10 @@
 // headers; once the slots are used up, one more copy leaves unchanged when
 // the device is also a local AC. The plan also supplies the source AC and
 // the BD, so the copy itself is not parsed.
-// In native XDP the program also sits on every entry of uplink_tx_map
-// (core/xdp_redirect.h) and passes the frames there that are not BUM
-// copies through untouched.
+// In native XDP the program sits on every entry of both BD devmaps and of
+// bum_tx_map (core/xdp_redirect.h): it passes the frames without BUM
+// metadata through untouched, and a copy for a device without slot entries
+// is that local AC's.
 //
 // The program contains no tail call (see the single-call-site invariant in
 // dispatch/l2_headend.c), and it returns XDP_PASS to transmit: XDP_REDIRECT
@@ -82,7 +83,8 @@ static __always_inline int bum_egress_encap(struct xdp_md *ctx, struct headend_e
 
 // Which frame a copy belongs to: its seq and source AC. Returns 0, -1 when
 // it cannot tell (drop), or BUM_EGRESS_NOT_BUM for a frame that is no BUM
-// copy (native XDP only: a unicast redirect through uplink_tx_map).
+// copy (native XDP only: a redirect through bum_tx_map, or a post-decap
+// flood copy).
 //
 // Generic XDP runs the devmap programs of a broadcast on the ingress CPU,
 // synchronously, before that CPU takes another frame: the copy is from the
@@ -158,7 +160,11 @@ static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u3
     // not matter: the first one past the slots. The copies beyond that are
     // surplus, among them the ingress AC's own when the broadcast had to
     // include the ingress device (item.local is 0 there).
+    // A device without an item has no slot entry in the devmap: the copy is
+    // its local AC's (native XDP, where every entry carries this program).
     if (!up) {
+        if (egress_if != ingress_if)
+            return XDP_PASS;
         STATS_INC(STATS_BUM_PLAN_SURPLUS, pkt_len);
         return XDP_DROP;
     }

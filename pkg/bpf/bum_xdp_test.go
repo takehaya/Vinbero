@@ -608,12 +608,14 @@ func TestBumPlanFromIngress(t *testing.T) {
 	if ret, _ := c.egress(t, 1, c.uplink, false, l2); ret != XDP_DROP {
 		t.Fatalf("surplus copy: action = %d, want XDP_DROP", ret)
 	}
-	// So does a copy for an uplink the plan does not list.
-	if ret, _ := c.egress(t, 1, 4242, false, l2); ret != XDP_DROP {
-		t.Fatalf("copy for an unplanned uplink: action = %d, want XDP_DROP", ret)
+	if n := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS"); n != before+1 {
+		t.Errorf("BUM_PLAN_SURPLUS = %d, want %d", n, before+1)
 	}
-	if n := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS"); n != before+2 {
-		t.Errorf("BUM_PLAN_SURPLUS = %d, want %d", n, before+2)
+	// A device the plan has no item for has no slot entry: the copy is a
+	// local AC's (native XDP gives local entries the program too), and it
+	// leaves unchanged.
+	if ret, out := c.egress(t, 1, 4242, false, l2); ret != XDP_PASS || !bytes.Equal(out[:len(l2)], l2) {
+		t.Fatalf("copy for a device without slots: action = %d, want XDP_PASS and the frame unchanged", ret)
 	}
 	flood := devmapEntries(t, c.h.objs.BumFloodMap, bumTestBD)
 	if got := sortedKeys(flood); !slices.Equal(got, []uint32{1, BumSlotKeyBase, BumSlotKeyBase | 2, BumSlotKeyBase | 4, BumSlotKeyBase | 6, BumSlotKeyBase | 7}) {

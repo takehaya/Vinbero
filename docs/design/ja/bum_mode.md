@@ -14,14 +14,14 @@ Bridge Domain（BD）の BUM（broadcast、未知 unicast、multicast）フレ�
 送信側（AC から入った BUM）:
 
 1. XDP の L2 headend がいつもどおり送信元 MAC を学習し、宛先が multicast か FDB miss なら、BD の devmap（`bum_flood_map[bd_id]`）で broadcast します。
-2. devmap のメンバーはローカル AC（key は ifindex）と、リモートの flood スロット（key は `0x80000000 | index`）です。スロットのエントリーの値は、その peer へ向かう uplink の ifindex と egress program です。egress program は全エントリー共通の 1 本（`bum_remote_egress`）です。同じ uplink の先に peer が k 個あれば、その uplink のエントリーも k 個になり、broadcast はその uplink 向けに k 個のコピーを作ります。ローカル AC のエントリーは program を持ちません。ただし、AC のデバイスがその BD のスロットの uplink でもある場合（AC と uplink が同じポート）は、そのエントリーにも同じ egress program を付けます（後述）。
+2. devmap のメンバーはローカル AC（key は ifindex）と、リモートの flood スロット（key は `0x80000000 | index`）です。スロットのエントリーの値は、その peer へ向かう uplink の ifindex と egress program です。egress program は全エントリー共通の 1 本（`bum_remote_egress`）です。同じ uplink の先に peer が k 個あれば、その uplink のエントリーも k 個になり、broadcast はその uplink 向けに k 個のコピーを作ります。ローカル AC のエントリーは program を持ちません。ただし、AC のデバイスがその BD のスロットの uplink でもある場合（AC と uplink が同じポート）は、そのエントリーにも同じ egress program を付けます（後述）。native XDP では、すべてのエントリーに付けます（「native XDP」の節）。
 3. ingress program は broadcast の直前に、そのフレームの複製計画（以下 plan）を CPU ごとのリングに書きます（次節）。
 4. `bpf_redirect_map(BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS)` で broadcast します。入力ポートが、送るスロットの uplink でもある場合だけは `BPF_F_EXCLUDE_INGRESS` を付けません（付けると、そのポートへのリモートのコピーも除かれるため）。plan を書くときに引いた devmap をそのまま使うので、control plane が devmap を差し替えている最中でも、plan と broadcast が別々の版を見ることはありません。
 5. egress program はコピーごとに、plan から自分の uplink の項目を探して次のスロットを 1 つ取り、`bd_peer_map[{bd_id, スロット}]` の peer へ H.Encaps.L2（.Red）をかけて、FIB の結果で MAC を書き換えます。
 
 ローカルの既知 unicast は bridge を通さず、FDB の出力ポートへ `bpf_redirect` します（入力ポートと同じなら破棄）。devmap のない BD では、これまでどおり bridge に渡します。
 
-受信側（End.DT2 / End.DT2M の decap 後）: FDB miss のとき、bridge への redirect の代わりに `bum_local_map[bd_id]`（ローカル AC のみ、egress program なし）へ broadcast します。DF と RX split horizon の判定はその前に行われ、変わりません。
+受信側（End.DT2 / End.DT2M の decap 後）: FDB miss のとき、bridge への redirect の代わりに `bum_local_map[bd_id]`（ローカル AC のみ。generic XDP では egress program なし）へ broadcast します。DF と RX split horizon の判定はその前に行われ、変わりません。
 
 devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
 
@@ -55,7 +55,7 @@ egress program の手順は次のとおりです。
 
 1. 担当する `seq` と送信元 AC を決めます。generic XDP では、この CPU の最新の seq（`bum_seq` の値 − 1）と `ctx->ingress_ifindex` です。native XDP では、コピーが運ぶ metadata から読みます（後述）。
 2. `bum_plan_ring[seq & 1023]` を引き、plan の `seq`、送信元 AC、フレーム長がコピーと一致するか確かめます。一致しなければ破棄し、`BUM_PLAN_STALE` を数えます。
-3. `ctx->egress_ifindex` で uplink の項目を探し、`idx = next_idx++` とします。
+3. `ctx->egress_ifindex` で uplink の項目を探し、`idx = next_idx++` とします。項目がなければ、スロットのエントリーがないデバイス、つまりローカル AC へのコピーなので、そのまま `XDP_PASS` で送ります（ローカル AC のエントリーにも program を付ける native XDP で起きます）。
 4. `idx < n` なら、集合の `idx` 番目のスロットの peer へ encap し、FIB の出力先がエントリーの uplink と一致することを確かめてから、`XDP_PASS` で送ります。
 5. `idx == n` で `local` が 1 なら、そのデバイスのローカル AC へのコピーとして、そのまま `XDP_PASS` で送ります。コピーはどれも同じなので、どのコピーをローカル用にしても結果は変わりません。
 6. それ以外は破棄し、`BUM_PLAN_SURPLUS` を数えます。devmap のエントリーは uplink の先の peer の数だけあるので、split horizon や `flood_exclude` で ingress が除いた分だけコピーが余ります。入力ポートを除かずに broadcast したときの、送信元 AC 自身へのコピーもここで破棄されます。
@@ -74,12 +74,13 @@ native XDP は redirect したフレームを CPU と出力デバイスごとの
 
 コピーが自分の uplink の項目のどのスロットを取るかは、plan の `next_idx` で決まります。plan は CPU ごと、項目は uplink ごとなので、これは CPU × 出力デバイスごとの状態です。同じ uplink のコピーは同じ bulk queue に入り、同じ CPU で順に処理されます。
 
-native XDP の bulk queue には、もう 1 つ性質があります。queue は flush のあと最初に入ったフレームの devmap program を記録し、poll の終わりまで、その queue のフレーム全部にその program を実行します（`bq_enqueue`）。program のない `bpf_redirect` のフレームが先に入ると、その poll の BUM のコピーは egress program を通らず、encap されないまま uplink から出てしまいます。これを防ぐため、xdp モードを native XDP で動かすときは次の決まりを守ります。
+native XDP の bulk queue には、もう 1 つ性質があります。queue は flush のあと最初に入ったフレームの devmap program を記録し、poll の終わりまで、その queue のフレーム全部にその program を実行します（`bq_enqueue`）。program のないフレームが先に入ると、その poll のそのデバイスへの BUM のコピーは egress program を通らず、リモートへのコピーは encap されないまま出てしまいます。逆に program のある queue に入ったローカルへのコピーは、リモートへのコピーと区別できなければいけません。これを防ぐため、xdp モードを native XDP で動かすときは、BD の devmap が送るデバイスの queue で、常に egress program が動くようにします。
 
-- uplink へのすべての redirect は `uplink_tx_map`（uplink の ifindex → {uplink、`bum_remote_egress`}）を通ります。メインの program の redirect は全部 `xdp_redirect_dev` を使い、`uplink_tx_map` にある出力デバイスにはこの map で、それ以外には `bpf_redirect` で送ります。egress program は metadata のないフレーム（uplink への unicast）をそのまま送ります。control plane は、uplink を使う BD の devmap を入れる前に、その uplink を `uplink_tx_map` に加えます。加えた uplink は取り除きません。
+- 2 つの BD devmap（`bum_flood_map`、`bum_local_map`）のすべてのエントリーに、ローカル AC のものも含めて egress program を付けます。program は metadata のないフレーム（decap 後の flood のコピー）をそのまま送ります。metadata のあるコピーは plan で振り分けます。スロットのエントリーがないデバイスへのコピーはそのデバイスのローカル AC へのもので、metadata を取り除いてそのまま送ります。
+- BD の devmap が送るデバイス（ローカル AC とスロットの uplink）への redirect は、すべて `bum_tx_map`（ifindex → {デバイス、`bum_remote_egress`}）を通ります。メインの program の redirect は全部 `xdp_redirect_dev` を使い、`bum_tx_map` にある出力デバイスにはこの map で、それ以外には `bpf_redirect` で送ります。egress program は metadata のないフレーム（unicast）をそのまま送ります。control plane は、BD の devmap を入れる前に、その devmap が送るデバイスを `bum_tx_map` に加えます。加えたデバイスは取り除きません（どの BD も使わなくなったデバイスへのフレームが、egress program を 1 回通るだけです）。
 - ingress program は、届いたフレームの metadata を最初に消します。他のホストの native XDP から redirect されたフレームは、その program の metadata を持ったまま届くことがあるためです。
-- xdp モードの BD のローカル AC のデバイスを uplink にはできません。その queue にはローカルへのコピー（program なし）と、program 付きのリモートへのコピーや unicast が混ざるためです。uplink が AC と同じデバイスになるスロットは、警告を出して devmap から外し、そのデバイスを `uplink_tx_map` からも外します。AC の追加や削除は、どの BD のスロットにも影響しうるので、すべての BD を組み立て直します。
-- 新しい uplink を `uplink_tx_map` に加えたときは、BD の devmap を入れる前に 10 ms 待ちます。加える直前に、その uplink へ program なしで redirect した NAPI poll が終わるのを待つためです。
+- この決まりがあるので、あるデバイスが AC と uplink を兼ねていても（同じ BD でも、別々の BD でも）、そのデバイスの queue に入るフレームはすべて egress program を通ります。BD の組み立ての順番によらず、program のないコピーが混ざることはありません。
+- 新しいデバイスを `bum_tx_map` に加えたときは、BD の devmap を入れる前に 10 ms 待ちます。加える直前に、そのデバイスへ program なしで redirect した NAPI poll が終わるのを待つためです。
 
 native XDP では、コピーはそれぞれ別のバッファにあるので、次節の問題は起きません。起動時の確認も行いません。
 
@@ -104,8 +105,8 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 - generic XDP か native XDP（`internal.bpf.device_mode: generic` か `driver`）で動きます。offload は使えません。
 - PREEMPT_RT のカーネルでは使えません（起動時に拒否します）。
 - generic XDP では、broadcast のコピーにそれぞれ別のバッファを渡すカーネルが必要です。そうでないカーネルでは tc モードで動きます（前節）。
-- native XDP では、AC のドライバーが XDP の metadata を扱えること（tc モードの VNBU マーカーと同じ条件）と、redirect 先のデバイスがすべて XDP の redirect を受けられること（ドライバーが `ndo_xdp_xmit` を持つこと。veth は相手側に XDP program があるか GRO が有効なこと）が必要です。uplink への unicast もすべて egress program を 1 回通るので、そのぶん少し遅くなります。
-- native XDP では、同じホストの vinbero 以外の XDP program から uplink へ `bpf_redirect` しないでください。`uplink_tx_map` を通らない redirect は、上の決まりを破ります。vinbero の plugin は `bpf_redirect` を呼べない（読み込み時の検査で拒否されます）ので、この心配はありません。
+- native XDP では、AC のドライバーが XDP の metadata を扱えること（tc モードの VNBU マーカーと同じ条件）と、redirect 先のデバイスがすべて XDP の redirect を受けられること（ドライバーが `ndo_xdp_xmit` を持つこと。veth は相手側に XDP program があるか GRO が有効なこと）が必要です。BD の devmap が送るデバイス（AC と uplink）への unicast の redirect もすべて egress program を 1 回通るので、そのぶん少し遅くなります。
+- native XDP では、同じホストの vinbero 以外の XDP program から、BD の devmap が送るデバイスへ `bpf_redirect` しないでください。`bum_tx_map` を通らない redirect は、上の決まりを破ります。vinbero の plugin は `bpf_redirect` を呼べない（読み込み時の検査で拒否されます）ので、この心配はありません。
 - flood の対象は BD の HeadendL2 で登録した AC だけです。bridge の他のポートや bridge 自身には届きません。
 - AC の VLAN tag は、ローカルへのコピーでも既知 unicast でもリモートへのコピーでも、そのまま運びます。BD のすべての AC が同じ VLAN ID なら、これは bridge と同じ結果です（bridge のメンバーがポートそのものでも、ポート上の VLAN デバイスでも）。VLAN ID の違う AC が混ざる BD では、フレームが他の AC でどう見えるべきかは bridge の構成で決まります（ポート上の VLAN デバイスをメンバーにすれば、bridge は tag を付け替えます）。同じポートの別の VLAN どうしも、bridge を通らなければ届きません。そこで、このような BD は tc モードで動かします（前述）。
 - devmap は 1 BD あたり 32 エントリー（ローカル AC のデバイスとリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。収まらない BD は tc モードで動かします。
