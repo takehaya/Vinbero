@@ -147,10 +147,18 @@ func (c *L2Config) BumModeOverrides() map[uint16]uint8 {
 	return out
 }
 
-// EffectiveBumMode returns the BUM_MODE_* value bdID runs with.
+// EffectiveBumMode returns the BUM_MODE_* value bdID runs with. It sits on
+// per-event paths (the FDB watcher), so it scans the overrides in place
+// rather than building BumModeOverrides.
 func (c *L2Config) EffectiveBumMode(bdID uint16) uint8 {
-	if v, ok := c.BumModeOverrides()[bdID]; ok {
-		return v
+	for _, bd := range c.BridgeDomains {
+		if bd.BdID != bdID {
+			continue
+		}
+		if v, err := bumModeValue(bd.BumMode); err == nil && v != BumModeValueInherit {
+			return c.effective(v)
+		}
+		break
 	}
 	return c.DefaultBumMode()
 }
