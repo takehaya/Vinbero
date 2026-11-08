@@ -59,6 +59,7 @@ sudo ./teardown.sh
 
 `sudo BUM_MODE=xdp ./test.sh` runs the same tests with `settings.l2.bum_mode: xdp`
 (BUM replicated in XDP, see `docs/design/ja/bum_mode.md`); the default is `tc`.
+`BUM_MODE=xdp-native` does the same in native XDP (`device_mode: driver`).
 
 ## What the test verifies
 

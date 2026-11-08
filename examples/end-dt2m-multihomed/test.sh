@@ -6,9 +6,9 @@
 #          (STATS_SPLIT_HORIZON_TX increments on both PE1 and PE2).
 # Phase D: with DF=PE1, a forced BUM into PE2 drops (STATS_NON_DF_DROP).
 #
-# BUM_MODE=tc (default) or xdp selects settings.l2.bum_mode for all PEs. On a
-# kernel where vinberod falls back from xdp to tc replication, the xdp run
-# checks the fallback instead.
+# BUM_MODE=tc (default), xdp or xdp-native (xdp in native XDP) selects
+# settings.l2.bum_mode for all PEs. On a kernel where vinberod falls back
+# from xdp to tc replication, the xdp run checks the fallback instead.
 
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,6 +72,7 @@ assert_nonzero() {
 # ================================================
 # Start vinberod
 # ================================================
+bum_native_prepare "$NS_H1" "$NS_H2" "$NS_PE1" "$NS_PE2" "$NS_PE3" "$NS_P"
 print_info "Launching PE1/PE2/PE3 vinberod in parallel (BUM_MODE=${BUM_MODE})..."
 start_vinbero "$NS_PE1" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe1.yaml" /tmp/vinbero_dt2m_pe1_bum.yaml)" /tmp/vinbero_dt2m_pe1.log
 VINBERO_PID_PE1=$VINBERO_LAST_PID
