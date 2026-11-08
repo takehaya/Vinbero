@@ -157,14 +157,15 @@ func (m *MapOperations) DeleteFdbOwned(bdID uint16, mac net.HardwareAddr, owner 
 }
 
 func (m *MapOperations) CreateBdPeerOwned(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool, owner OwnerTag) error {
+	// Success or not, the xdp-mode devmap follows whatever bd_peer_map
+	// holds afterwards, rollbacks included. The rebuild runs once per
+	// public call, after the lock is released.
+	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	return m.createBdPeerOwnedLocked(bdID, index, entry, esi, remoteSrc, writeReverse, owner)
 }
 func (m *MapOperations) createBdPeerOwnedLocked(bdID, index uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool, owner OwnerTag) error {
-	// Success or not, the xdp-mode devmap follows whatever bd_peer_map
-	// holds afterwards, rollbacks included.
-	defer m.resyncBum(bdID)
 	if entry == nil {
 		return errors.New("nil BD peer entry")
 	}
@@ -218,6 +219,7 @@ func (m *MapOperations) createBdPeerOwnedLocked(bdID, index uint16, entry *Heade
 	return err
 }
 func (m *MapOperations) CreateBdPeerAtFreeIndexOwned(bdID uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool, owner OwnerTag) (uint16, error) {
+	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	index := m.findFreeBdPeerIndexLocked(bdID)
@@ -230,12 +232,12 @@ func (m *MapOperations) CreateBdPeerAtFreeIndexOwned(bdID uint16, entry *Headend
 	return index, m.createBdPeerOwnedLocked(bdID, index, entry, esi, remoteSrc, writeReverse, owner)
 }
 func (m *MapOperations) DeleteBdPeerOwned(bdID, index uint16, owner OwnerTag) (bool, error) {
+	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	return m.deleteBdPeerOwnedLocked(bdID, index, owner)
 }
 func (m *MapOperations) deleteBdPeerOwnedLocked(bdID, index uint16, owner OwnerTag) (bool, error) {
-	defer m.resyncBum(bdID)
 	key := &BdPeerKey{BdId: bdID, Index: index}
 	owned, err := checkControlOwner[BdPeerKey, HeadendEntry](m.objs.BdPeerMap, m.bdPeerOwners, key, owner, false)
 	if err != nil {

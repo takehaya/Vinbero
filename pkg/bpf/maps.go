@@ -142,9 +142,9 @@ type MapOperations struct {
 	bdPeerLifecycle sync.Mutex
 
 	// bum rebuilds the xdp-mode BUM devmaps after every bd_peer and
-	// headend_l2 mutation (nil: no BD runs in xdp mode). It only reads the
-	// maps and takes its own lock, so calling it with bdPeerLifecycle held
-	// cannot invert lock order.
+	// headend_l2 mutation (nil: no BD runs in xdp mode), once per public
+	// call. It only reads the maps and takes its own lock; the bd_peer
+	// writers call it after releasing bdPeerLifecycle.
 	bumMu sync.Mutex
 	bum   *BumDevmapSync
 }
@@ -3038,6 +3038,7 @@ func (m *MapOperations) GetBdPeer(bdID, index uint16) (*HeadendEntry, error) {
 // existed=true means a DIFFERENT entry occupies the slot (nothing deleted);
 // a transient read failure is an error, never a mismatch.
 func (m *MapOperations) DeleteBdPeerIfFirstSegment(bdID, index uint16, seg [IPv6AddrLen]byte) (existed, matched bool, err error) {
+	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	var cur HeadendEntry
@@ -3287,6 +3288,13 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 	// Snapshot and delete under one critical section: a slot deleted and
 	// re-created by a concurrent writer between the two would otherwise be
 	// flushed as if it were the snapshotted peer.
+	// One devmap rebuild per BD touched, not per peer, after the lock.
+	touched := map[uint16]struct{}{}
+	defer func() {
+		for bd := range touched {
+			m.resyncBum(bd)
+		}
+	}()
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	var (
@@ -3320,6 +3328,7 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 		if owned && tag != OwnerRPC {
 			continue
 		}
+		touched[key.BdId] = struct{}{}
 		existed, err := m.deleteBdPeerOwnedLocked(key.BdId, key.Index, OwnerRPC)
 		if err != nil {
 			return count, fmt.Errorf("flush bd_peer: delete bd=%d idx=%d: %w",
