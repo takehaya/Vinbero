@@ -161,11 +161,16 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16) error {
 
 	for _, ifindex := range acs {
 		v := devmapVal{Ifindex: ifindex}
-		if err := flood.Put(ifindex, v); err != nil {
-			return fmt.Errorf("bd %d: add AC ifindex %d: %w", bdID, ifindex, err)
+		err := flood.Put(ifindex, v)
+		if err == nil {
+			err = local.Put(ifindex, v)
 		}
-		if err := local.Put(ifindex, v); err != nil {
-			return fmt.Errorf("bd %d: add AC ifindex %d: %w", bdID, ifindex, err)
+		if err != nil {
+			// Not fatal, like an unresolvable slot: an AC whose device is
+			// gone must not keep the rest of the BD on stale devmaps.
+			_ = flood.Delete(ifindex)
+			s.logger.Warn("xdp BUM: cannot add a local AC to the BD devmap; AC left out",
+				zap.Uint16("bd_id", bdID), zap.Uint32("ifindex", ifindex), zap.Error(err))
 		}
 	}
 	if len(slots) > 0 && s.egress == nil {
@@ -272,41 +277,99 @@ func (s *BumDevmapSync) SyncAll() error {
 // changes, so a flood slot follows its peer's uplink and a slot whose route
 // appears late joins. It returns when ctx is done.
 func (s *BumDevmapSync) WatchRoutes(ctx context.Context, debounce time.Duration) error {
-	updates := make(chan netlink.RouteUpdate, 64)
-	done := make(chan struct{})
-	if err := netlink.RouteSubscribe(updates, done); err != nil {
+	sub, err := s.subscribeRoutes()
+	if err != nil {
 		return fmt.Errorf("subscribe to route updates: %w", err)
 	}
-	go func() {
-		defer close(done)
-		var timer *time.Timer
-		var fire <-chan time.Time
-		for {
-			select {
-			case <-ctx.Done():
-				if timer != nil {
-					timer.Stop()
-				}
-				return
-			case _, ok := <-updates:
-				if !ok {
-					return
-				}
-				if timer == nil {
-					timer = time.NewTimer(debounce)
-				} else {
-					timer.Reset(debounce)
-				}
-				fire = timer.C
-			case <-fire:
-				fire = nil
-				if err := s.SyncAll(); err != nil {
-					s.logger.Warn("xdp BUM: devmap rebuild after a route change failed", zap.Error(err))
-				}
-			}
+	go s.watchRoutes(ctx, sub, debounce)
+	return nil
+}
+
+type routeSub struct {
+	updates chan netlink.RouteUpdate
+	done    chan struct{}
+}
+
+func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
+	r := &routeSub{updates: make(chan netlink.RouteUpdate, 256), done: make(chan struct{})}
+	err := netlink.RouteSubscribeWithOptions(r.updates, r.done, netlink.RouteSubscribeOptions{
+		ErrorCallback: func(err error) {
+			s.logger.Warn("xdp BUM: route subscription failed", zap.Error(err))
+		},
+		ReceiveBufferSize: 1 << 20, // a full table load must not overflow it
+	})
+	if err != nil {
+		close(r.done)
+		return nil, err
+	}
+	return r, nil
+}
+
+// routeSyncMaxDelay caps how long a steady stream of route updates can
+// postpone the rebuild, in multiples of the debounce.
+const routeSyncMaxDelay = 10
+
+func (s *BumDevmapSync) watchRoutes(ctx context.Context, sub *routeSub, debounce time.Duration) {
+	timer := time.NewTimer(debounce)
+	timer.Stop()
+	var (
+		fire  <-chan time.Time
+		first time.Time // first update since the last rebuild
+	)
+	schedule := func(d time.Duration) {
+		timer.Stop()
+		timer.Reset(d)
+		fire = timer.C
+	}
+	defer func() {
+		timer.Stop()
+		if sub != nil {
+			close(sub.done)
 		}
 	}()
-	return nil
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-sub.updates:
+			if !ok {
+				// The subscription ended (typically ENOBUFS: the kernel
+				// dropped notifications). Updates may be lost, so
+				// subscribe again and rebuild everything.
+				close(sub.done)
+				sub = nil
+				for sub == nil {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Second):
+					}
+					var err error
+					if sub, err = s.subscribeRoutes(); err != nil {
+						s.logger.Warn("xdp BUM: route resubscribe failed; retrying", zap.Error(err))
+					}
+				}
+				first = time.Time{}
+				schedule(0)
+				continue
+			}
+			now := time.Now()
+			if first.IsZero() {
+				first = now
+			}
+			wait := debounce
+			if left := first.Add(routeSyncMaxDelay * debounce).Sub(now); left < wait {
+				wait = max(left, 0)
+			}
+			schedule(wait)
+		case <-fire:
+			fire = nil
+			first = time.Time{}
+			if err := s.SyncAll(); err != nil {
+				s.logger.Warn("xdp BUM: devmap rebuild after a route change failed", zap.Error(err))
+			}
+		}
+	}
 }
 
 // SetBdBumMode writes a per-BD override into bd_config_map.

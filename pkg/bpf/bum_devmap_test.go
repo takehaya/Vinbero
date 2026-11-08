@@ -195,4 +195,14 @@ func TestBumDevmapSync(t *testing.T) {
 	if len(resolved) == 0 {
 		t.Error("the resolver was never asked")
 	}
+
+	// An AC whose device is gone leaves only that AC out.
+	s.uplink = uplink
+	ac(0x7ffffff0, 100, bumTestBD) // no such device
+	if got := sortedKeys(devmapEntries(t, h.objs.BumFloodMap, bumTestBD)); !slices.Equal(got, []uint32{1, BumSlotKeyBase | 2}) {
+		t.Errorf("AC without a device: flood keys = %#x, want the other AC and slot 2", got)
+	}
+	if got := sortedKeys(devmapEntries(t, h.objs.BumLocalMap, bumTestBD)); !slices.Equal(got, []uint32{1}) {
+		t.Errorf("AC without a device: local keys = %v, want [1]", got)
+	}
 }

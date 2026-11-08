@@ -23,9 +23,9 @@ Bridge Domain（BD）の BUM（broadcast、未知 unicast、multicast）フレ�
 
 受信側（End.DT2 / End.DT2M の decap 後）: FDB miss のとき、bridge への redirect の代わりに `bum_local_map[bd_id]`（ローカル AC のみ、egress program なし）へ broadcast します。DF と RX split horizon の判定はその前に行われ、変わりません。
 
-devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。devmap がない BD（作成前など）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。
+devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
 
-xdp モードの BD では kernel の bridge が MAC を学習しないため、XDP の学習（新規・移動）を ring buffer（`fdb_event_rb`）で通知し、EVPN RT2 の自動広告に使います。その BD の bridge の FDB 通知は無視します。取りこぼしは FDB エージングの周期で `fdb_map` から補います。
+xdp モードの BD では kernel の bridge が MAC を学習しないため、XDP の学習（新規・移動）を ring buffer（`fdb_event_rb`）で通知し、EVPN RT2 の自動広告に使います。その BD の bridge の FDB 通知は無視します。取りこぼしは FDB エージングの周期で `fdb_map` から補います（`fdb_aging_seconds: 0` でエージングを止めると、補われません）。
 
 ### 複製計画（plan）
 
@@ -86,7 +86,9 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 - devmap は 1 BD あたり 32 エントリー（ローカル AC とリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。
 - `bum_plan_ring` は CPU ごとに 96 KiB（96 バイト × 1024）を使います。
 - control plane が devmap を差し替えている最中のフレームは、plan と broadcast が別々の版の devmap を見ることがあります。その場合のコピーは `BUM_PLAN_SURPLUS` か `BUM_EGRESS_DROP` で破棄されるか、届かないだけで、別の peer へ送られることはありません。
-- egress program は出力デバイスを変えられません。FIB の結果が devmap の uplink と違うコピーは破棄し、`BUM_UPLINK_MISMATCH` を数えます。uplink の MTU は「内側フレーム + 外側 IPv6 + SRH」以上にしてください（devmap の MTU 確認は encap 前の長さで行われます）。
+- egress program は出力デバイスを変えられません。FIB の結果が devmap の uplink と違うコピーは破棄し、`BUM_UPLINK_MISMATCH` を数えます。control plane は uplink を宛先だけで引くので、peer への経路が ECMP で複数の uplink に分かれる構成では、一部の peer へのコピーが恒常的にこの理由で落ちます。このような構成では tc モードを使ってください。
+- egress program は、next hop の neighbor エントリーが解決していないコピーを破棄し、`BUM_EGRESS_DROP` を数えます（tc モードと違い、kernel に渡して解決させることはできません）。他の通信で解決すれば送られます。
+- uplink の MTU は「内側フレーム + 外側 IPv6 + SRH」以上にしてください（devmap の MTU 確認は encap 前の長さで行われます）。
 
 ## xdp モードで失う bridge の機能
 
@@ -125,7 +127,7 @@ settings:
 |---|---|
 | `BUM_XDP_FLOOD` | AC から入った BUM を devmap で broadcast した |
 | `BUM_XDP_LOCAL_FLOOD` | decap 後の flood をローカル AC へ broadcast した |
-| `BUM_XDP_FALLBACK` | xdp モードの BD で TC / bridge の経路を使った（devmap がまだない、またはこのカーネルで xdp モードを使えない） |
+| `BUM_XDP_FALLBACK` | xdp モードの BD で TC / bridge の経路を使った（devmap がない、またはこのカーネルで xdp モードを使えない） |
 | `BUM_EGRESS_TX` | egress program がリモートへのコピーを encap した |
 | `BUM_EGRESS_DROP` | egress program がコピーを破棄した（plan の後で peer が消えた、encap や FIB の失敗） |
 | `BUM_UPLINK_MISMATCH` | FIB の出力先が devmap の uplink と違った |

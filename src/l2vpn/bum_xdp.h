@@ -203,7 +203,7 @@ static __always_inline void bum_fdb_event_emit(__u16 bd_id, const __u8 *mac, __u
 // is the slot's uplink, read from the very map the broadcast walks -- and it
 // passes the tc path's per-peer checks: a bd_peer exists, is not
 // flood_exclude, and is not on the source AC's Ethernet Segment.
-// Returns 0, or -1 when no plan could be written (the caller drops).
+// Returns 0, or -1 when no plan could be written.
 //
 // A global function on purpose: the verifier checks it once, not once per
 // path of vinbero_main that reaches the flood.
@@ -305,8 +305,13 @@ static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id
         xdp_write_bum_meta(ctx, vlan_id);
         return XDP_PASS;
     }
-    if (bum_plan_write(ctx, bd_id, vlan_id) != 0)
-        return XDP_DROP;
+    // Fails only when the devmap went away since the lookup above (the
+    // control plane cleared the BD): take the tc path then too.
+    if (bum_plan_write(ctx, bd_id, vlan_id) != 0) {
+        STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
+        xdp_write_bum_meta(ctx, vlan_id);
+        return XDP_PASS;
+    }
     STATS_INC(STATS_BUM_XDP_FLOOD, pkt_len);
     return bpf_redirect_map(inner, 0, BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS);
 }
