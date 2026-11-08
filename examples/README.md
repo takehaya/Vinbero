@@ -111,6 +111,7 @@ Each example uses its own namespace prefix, such as `end-host1` or `dx4-router1`
 | Directory | Feature | Description |
 | --- | --- | --- |
 | `device-attach/` | DeviceService | Attach and detach a device at runtime, re-attach after a restart, and add bridge members at runtime |
+| `cni-l3/` | CNI plugin | Wire pods into a VRF with the `vinbero` CNI plugin across two PEs: ADD, CHECK, DEL, VPNv4 /32 advertisement and withdraw |
 
 ### Plugin extensions
 

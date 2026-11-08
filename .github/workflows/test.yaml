@@ -239,6 +239,7 @@ jobs:
           - gtp6-drop-in
           - custom-cdplane-behavior
           - device-attach
+          - cni-l3
         # settings.l2.bum_mode. Every example runs in the default tc mode; the
         # BUM examples also run in xdp mode, in generic XDP (on a runner
         # kernel whose generic broadcast copies share a buffer, that checks
@@ -291,6 +292,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang-18 libbpf-dev libelf-dev linux-tools-generic
           make -C sdk/examples/plugin-custom-cdplane-behavior BPF_CLANG=clang-18
           make cplane-custom-cdplane-behavior
+
+      - name: Install the CNI reference plugins (host-local IPAM)
+        if: matrix.example == 'cni-l3'
+        run: sudo apt-get install -y --no-install-recommends containernetworking-plugins
 
       - name: Setup test environment
         working-directory: examples/${{ matrix.example }}
