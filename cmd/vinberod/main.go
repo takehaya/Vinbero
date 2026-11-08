@@ -363,6 +363,7 @@ func run(cliCtx *cli.Context) error {
 	}
 
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, lg)
+	srv.SetDeviceAttacher(vin)
 	if liveProber != nil {
 		srv.SetProber(liveProber, proberIntervalMs, proberMultiplier)
 	}

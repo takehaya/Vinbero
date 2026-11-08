@@ -52,6 +52,9 @@ type Server struct {
 	proberSrc        ProberStatusSource
 	proberIntervalMs uint32
 	proberMultiplier uint32
+	// devices attaches interfaces at runtime (DeviceService); nil makes
+	// those RPCs report Unimplemented.
+	devices DeviceAttacher
 }
 
 // NewServer creates a new Server instance. locatorMgr and vrfBgpMgr are
@@ -105,6 +108,12 @@ func (s *Server) SetProber(source ProberStatusSource, intervalMs, multiplier uin
 	s.proberSrc = source
 	s.proberIntervalMs = intervalMs
 	s.proberMultiplier = multiplier
+}
+
+// SetDeviceAttacher hands the server the data-plane device attach surface.
+// Call before Setup.
+func (s *Server) SetDeviceAttacher(a DeviceAttacher) {
+	s.devices = a
 }
 
 // SetCplaneManager installs the control-plane plugin manager. Like
@@ -266,6 +275,11 @@ func (s *Server) Setup() {
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))
+
+	// Device service (attach interfaces to the data plane at runtime)
+	path, handler = vinberov1connect.NewDeviceServiceHandler(NewDeviceServer(s.devices))
+	s.mux.Handle(path, handler)
+	s.logger.Info("Registered DeviceService", zap.String("path", path))
 
 	// Plugin service (dynamic BPF plugin registration). pluginServer was
 	// created at the top of Setup() so SidFunctionServer could hold a

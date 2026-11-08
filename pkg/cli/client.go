@@ -26,6 +26,7 @@ type Clients struct {
 	Vrf      vinberov1connect.VrfServiceClient
 	HGroup   vinberov1connect.HeadendGroupServiceClient
 	Prober   vinberov1connect.ProberServiceClient
+	Device   vinberov1connect.DeviceServiceClient
 }
 
 func NewClients(serverURL string) *Clients {
@@ -51,5 +52,6 @@ func NewClients(serverURL string) *Clients {
 		Vrf:      vinberov1connect.NewVrfServiceClient(httpClient, serverURL, opts...),
 		HGroup:   vinberov1connect.NewHeadendGroupServiceClient(httpClient, serverURL, opts...),
 		Prober:   vinberov1connect.NewProberServiceClient(httpClient, serverURL, opts...),
+		Device:   vinberov1connect.NewDeviceServiceClient(httpClient, serverURL, opts...),
 	}
 }

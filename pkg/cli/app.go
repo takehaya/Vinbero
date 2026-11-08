@@ -51,6 +51,7 @@ func NewApp() *cli.App {
 			bdPeerCommand(),
 			esCommand(),
 			vrfCommand(),
+			deviceCommand(),
 			locatorCommand(),
 			vrfBgpCommand(),
 			bgpCommand(),
