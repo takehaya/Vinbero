@@ -169,8 +169,13 @@ func validIfname(name string) error {
 		return fmt.Errorf("%q is longer than 15 bytes", name)
 	case name == "." || name == "..":
 		return fmt.Errorf("%q is not a valid interface name", name)
-	case strings.ContainsAny(name, "/: \t\n"):
-		return fmt.Errorf("%q contains '/', ':' or whitespace", name)
+	}
+	// dev_valid_name: '/', ':' and every byte the kernel's isspace() accepts.
+	for i := 0; i < len(name); i++ {
+		switch name[i] {
+		case '/', ':', ' ', '\t', '\n', '\v', '\f', '\r', 0xa0:
+			return fmt.Errorf("%q contains '/', ':' or whitespace", name)
+		}
 	}
 	return nil
 }

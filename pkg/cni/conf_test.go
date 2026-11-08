@@ -47,6 +47,7 @@ func TestParseConfRejects(t *testing.T) {
 		{"no vrf", map[string]string{"vrf": `""`}, "vrf"},
 		{"long vrf", map[string]string{"vrf": `"a-vrf-name-too-long"`}, "longer than 15"},
 		{"slash vrf", map[string]string{"vrf": `"a/b"`}, "contains"},
+		{"cr vrf", map[string]string{"vrf": `"a\rb"`}, "contains"},
 		{"global vrf", map[string]string{"vrf": `"global"`}, "reserved"},
 		{"no table", map[string]string{"tableId": `0`}, "tableId is required"},
 		{"main table", map[string]string{"tableId": `254`}, "reserved kernel table"},
