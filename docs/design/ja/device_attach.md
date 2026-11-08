@@ -7,7 +7,7 @@
 attach は interface ごとに管理します。1 つの attach は XDP の entry program (`vinbero_main`) と TCX ingress の program (`vinbero_tc_ingress`、BUM 用) の組です。
 
 - XDP を先に attach し、TCX の attach に失敗したら XDP を外して失敗を返します。片方だけ載った interface は残りません
-- mode は XDP の attach mode で、`driver` / `generic` / `offload` のいずれかです。指定しなければ `internal.bpf.device_mode` を使います。veth のように native XDP の挙動が kernel に依存する interface は、attach ごとに `generic` を指定できます
+- mode は XDP の attach mode で、`driver` / `generic` / `offload` のいずれかです。指定しなければ `internal.bpf.device_mode` を使います。`internal.bpf.device_mode` が不正なら、`internal.devices` が空でも起動を拒否します。veth のように native XDP の挙動が kernel に依存する interface は、attach ごとに `generic` を指定できます
 - 同じ interface を同じ mode で attach し直すと、kernel に触れず成功します。別の mode で attach し直すと `FAILED_PRECONDITION` で拒否するので、先に detach します
 - `internal.devices` の interface も同じ経路で attach します。config が持ち主なので state file には記録せず、detach は拒否し、mode は `internal.bpf.device_mode` に固定します
 

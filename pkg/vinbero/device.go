@@ -109,8 +109,13 @@ func (v *Vinbero) resolveMode(mode string) (string, link.XDPAttachFlags, error) 
 
 // AttachConfigDevices attaches every internal.devices entry, in the mode
 // internal.bpf.device_mode names. A failure is fatal for the boot, as it
-// was before devices could be attached at runtime.
+// was before devices could be attached at runtime. An invalid
+// internal.bpf.device_mode fails the boot even with no internal.devices:
+// it is the default of every runtime attach.
 func (v *Vinbero) AttachConfigDevices() error {
+	if _, _, err := v.resolveMode(""); err != nil {
+		return fmt.Errorf("internal.bpf.device_mode: %w", err)
+	}
 	if v.bumSync != nil {
 		// From here on a device joining bum_tx_map waits for the NAPI
 		// polls in flight (native XDP).

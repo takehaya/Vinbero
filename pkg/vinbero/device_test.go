@@ -242,6 +242,16 @@ func TestDevices_StaleAttachments(t *testing.T) {
 	}
 }
 
+// An invalid internal.bpf.device_mode fails the boot even without
+// internal.devices: every runtime attach without a mode would fail.
+func TestAttachConfigDevices_InvalidMode(t *testing.T) {
+	v := newTestVinbero(t, newFakeLinkOps(), "")
+	v.cfg.InternalConfig.BpfOptions.DeviceMode = "native"
+	if err := v.AttachConfigDevices(); !errors.Is(err, ErrInvalidMode) {
+		t.Errorf("AttachConfigDevices = %v, want ErrInvalidMode", err)
+	}
+}
+
 // After a restart the state devices are attached again; an entry whose
 // interface is gone, that cannot be attached, or that internal.devices now
 // declares is dropped instead of failing the boot.
