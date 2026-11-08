@@ -106,7 +106,7 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 - generic XDP か native XDP（`internal.bpf.device_mode: generic` か `driver`）で動きます。offload は使えません。
 - PREEMPT_RT のカーネルでは使えません（起動時に拒否します）。
 - generic XDP では、broadcast のコピーにそれぞれ別のバッファを渡すカーネルが必要です。そうでないカーネルでは tc モードで動きます（前節）。
-- native XDP では、AC のドライバーが XDP の metadata を扱えること（tc モードの VNBU マーカーと同じ条件）と、redirect 先のデバイスがすべて XDP の redirect を受けられること（ドライバーが `ndo_xdp_xmit` を持つこと。veth は相手側に XDP program があるか GRO が有効なこと）が必要です。BD の devmap が送るデバイス（AC と uplink）への unicast の redirect もすべて egress program を 1 回通るので、そのぶん少し遅くなります。
+- native XDP では、AC のドライバーが XDP の metadata を扱えること（tc モードの VNBU マーカーと同じ条件。扱えないドライバーでは、BUM フレームは tc モードの経路へ回り、`BUM_XDP_META_FAIL` を数えます。tc モードと同じく、リモートへのコピーは作られず、bridge のローカルの flood だけになります）と、redirect 先のデバイスがすべて XDP の redirect を受けられること（ドライバーが `ndo_xdp_xmit` を持つこと。veth は相手側に XDP program があるか GRO が有効なこと）が必要です。BD の devmap が送るデバイス（AC と uplink）への unicast の redirect もすべて egress program を 1 回通るので、そのぶん少し遅くなります。
 - native XDP では、同じホストの vinbero 以外の XDP program から、BD の devmap が送るデバイスへ `bpf_redirect` しないでください。`bum_tx_map` を通らない redirect は、上の決まりを破ります。vinbero の plugin は `bpf_redirect` を呼べない（読み込み時の検査で拒否されます）ので、この心配はありません。
 - flood の対象は BD の HeadendL2 で登録した AC だけです。bridge の他のポートや bridge 自身には届きません。
 - AC の VLAN tag は、ローカルへのコピーでも既知 unicast でもリモートへのコピーでも、そのまま運びます。BD のすべての AC が同じ VLAN ID なら、これは bridge と同じ結果です（bridge のメンバーがポートそのものでも、ポート上の VLAN デバイスでも）。VLAN ID の違う AC が混ざる BD では、フレームが他の AC でどう見えるべきかは bridge の構成で決まります（ポート上の VLAN デバイスをメンバーにすれば、bridge は tag を付け替えます）。同じポートの別の VLAN どうしも、bridge を通らなければ届きません。そこで、このような BD は tc モードで動かします（前述）。
@@ -161,6 +161,6 @@ settings:
 | `BUM_PLAN_SURPLUS` | uplink の plan に残りのスロットがないコピーだった（破棄） |
 | `BUM_SHARED_BUFFER` | コピーが他のコピーとバッファを共有していた（2 つ目以降を破棄） |
 | `BUM_EGRESS_NO_NEIGH` | uplink の next hop の neighbor エントリーが未解決で、コピーを破棄した |
-| `BUM_XDP_META_FAIL` | native XDP で、AC のドライバーが metadata を書かせず、BUM フレームを破棄した |
+| `BUM_XDP_META_FAIL` | native XDP で、AC のドライバーが metadata を書かせず、BUM フレームを tc モードの経路へ回した（`BUM_XDP_FALLBACK` にも数える） |
 
 split horizon で落としたコピーは、TC モードと同じ `SPLIT_HORIZON_TX` に数えます。

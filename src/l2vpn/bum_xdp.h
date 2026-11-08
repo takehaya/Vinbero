@@ -207,16 +207,10 @@ static __always_inline void bum_fdb_event_emit(__u16 bd_id, const __u8 *mac, __u
     bpf_ringbuf_output(&fdb_event_rb, &ev, sizeof(ev), 0);
 }
 
-// Native XDP: hand the seq that bum_xdp_broadcast just used to the copies.
+// Native XDP: hand the frame's seq and source AC to the copies.
 // vinbero_main has cleared any metadata the frame arrived with.
-static __always_inline int bum_xdp_meta_write(struct xdp_md *ctx)
+static __always_inline int bum_xdp_meta_write(struct xdp_md *ctx, __u64 seq, __u32 src_if)
 {
-    __u32 zero = 0;
-    __u64 *next = bpf_map_lookup_elem(&bum_seq, &zero);
-    if (!next || *next == 0)
-        return -1;
-    __u64 seq = *next - 1;
-    __u32 src_if = ctx->ingress_ifindex;
     if (bpf_xdp_adjust_meta(ctx, -(int)sizeof(struct bum_xdp_meta)))
         return -1;
     struct bum_xdp_meta *m = (void *)(long)ctx->data_meta;
@@ -228,9 +222,9 @@ static __always_inline int bum_xdp_meta_write(struct xdp_md *ctx)
     return 0;
 }
 
-// Return values of bum_xdp_broadcast other than an XDP action.
-// NO_DEVMAP: the frame takes the tc path instead. NO_META: native XDP could
-// not put the frame's metadata in front of it.
+// Return values of bum_xdp_broadcast other than an XDP action: the frame
+// takes the tc path instead. NO_META: native XDP could not put the frame's
+// metadata in front of it (a driver without XDP metadata support).
 #define BUM_BCAST_NO_DEVMAP (-1)
 #define BUM_BCAST_NO_META   (-2)
 
@@ -331,7 +325,7 @@ __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
     }
     plan->n_uplinks = (__u8)n_up;
 
-    if (bum_xdp_native && bum_xdp_meta_write(ctx) != 0)
+    if (bum_xdp_native && bum_xdp_meta_write(ctx, seq, src_if) != 0)
         return BUM_BCAST_NO_META;
     STATS_INC(STATS_BUM_XDP_FLOOD, pkt_len);
     __u64 flags = BPF_F_BROADCAST;
@@ -368,16 +362,15 @@ static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id
 {
     __u64 pkt_len = (__u64)((long)ctx->data_end - (long)ctx->data);
     int act = bum_xdp_broadcast(ctx, bd_id, vlan_id);
-    if (act == BUM_BCAST_NO_META) {
+    if (act >= 0)
+        return act;
+    // The tc path needs metadata too (VNBU), so on a driver without it
+    // only the bridge's local flood remains, as in tc mode.
+    if (act == BUM_BCAST_NO_META)
         STATS_INC(STATS_BUM_XDP_META_FAIL, pkt_len);
-        return XDP_DROP;
-    }
-    if (act < 0) {
-        STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
-        xdp_write_bum_meta(ctx, vlan_id);
-        return XDP_PASS;
-    }
-    return act;
+    STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
+    xdp_write_bum_meta(ctx, vlan_id);
+    return XDP_PASS;
 }
 
 // Flood after decap in an xdp-mode BD: local ACs only. Returns -1 when the

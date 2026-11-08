@@ -30,7 +30,7 @@ enum stats_counter {
     STATS_BUM_PLAN_SURPLUS   = 15,  // xdp mode: remote copy beyond its uplink's planned slots
     STATS_BUM_SHARED_BUFFER  = 16,  // xdp mode: remote copy dropped, its buffer is shared with another
     STATS_BUM_EGRESS_NO_NEIGH = 17, // xdp mode: remote copy dropped, the uplink next hop's neighbour is unresolved
-    STATS_BUM_XDP_META_FAIL  = 18,  // native xdp mode: BUM dropped, the driver gave no room for XDP metadata
+    STATS_BUM_XDP_META_FAIL  = 18,  // native xdp mode: BUM sent the tc way, the driver gave no room for XDP metadata
     STATS_MAX,
 };
 
