@@ -14,20 +14,26 @@ builds:
   - id: vinberod
     binary: vinberod
     main: ./cmd/vinberod
-    goos: [ linux ]
-    goarch: [ amd64 ]
+    goos: [linux]
+    goarch: [amd64]
   - id: vinbero
     binary: vinbero
     main: ./cmd/vinbero
-    goos: [ linux ]
-    goarch: [ amd64 ]
+    goos: [linux]
+    goarch: [amd64]
+  - id: vinbero-cni
+    binary: vinbero-cni
+    main: ./cmd/vinbero-cni
+    goos: [linux]
+    goarch: [amd64]
 archives:
   - id: vinbero
     formats:
-    - 'binary'
+      - 'binary'
     ids:
-    - vinberod
-    - vinbero
+      - vinberod
+      - vinbero
+      - vinbero-cni
   # SDK tarball: distributed alongside the binaries so plugin authors can
   # `curl | sudo tar xz -C /usr/local/` and start building without cloning
   # the vinbero repo. Layout matches docs/plan/plugin-sdk-3-tarball-distribution.md §2.

@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	connectrpc.com/connect v1.18.1
 	github.com/cilium/ebpf v0.20.0
+	github.com/containernetworking/cni v1.3.0
 	github.com/google/gopacket v1.1.19
 	github.com/google/uuid v1.6.0
 	github.com/mcuadros/go-defaults v1.2.0
