@@ -106,6 +106,12 @@ Each example uses its own namespace prefix, such as `end-host1` or `dx4-router1`
 | `gtp6-encap/` | H.M.GTP6.D + End.M.GTP6.E | Conversion between GTP-U/IPv6 and SRv6 |
 | `gtp6-drop-in/` | End.M.GTP6.D.Di | GTP-U drop-in mode |
 
+### Daemon operations
+
+| Directory | Feature | Description |
+| --- | --- | --- |
+| `device-attach/` | DeviceService | Attach and detach a device at runtime, re-attach after a restart, and add bridge members at runtime |
+
 ### Plugin extensions
 
 | Directory | Components | Description |
