@@ -12,7 +12,6 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
-	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
@@ -99,11 +98,6 @@ type VrfServer struct {
 	// taken under s.mu and releasing nothing else, so it cannot deadlock with
 	// applyMu (which the delete never takes).
 	grantLease *sync.Mutex
-	// configMembers holds, per VRF name, the bridge members declared in the
-	// config file (vrfs.entries[].bridge.members). The config enslaves them
-	// again on every boot, so VrfBridgeMemberRemove refuses them instead of
-	// reporting a removal the next start would undo. Set once before serving.
-	configMembers map[string][]string
 }
 
 // NewVrfServer wires the handler. mu is the mutation mutex, shared with
@@ -496,24 +490,6 @@ func (s *VrfServer) VrfBridgeMemberRemove(
 	return connect.NewResponse(&v1.VrfBridgeMemberRemoveResponse{Vrf: vrfToProto(v)}), nil
 }
 
-// SetConfigBridgeMembers records the bridge members the config file declares
-// per VRF name. Call it before the server starts handling requests.
-func (s *VrfServer) SetConfigBridgeMembers(members map[string][]string) {
-	s.configMembers = members
-}
-
-// configBridgeMembers collects the bridge members each config VRF declares,
-// keyed by VRF name.
-func configBridgeMembers(cfg config.VRFsConfig) map[string][]string {
-	out := make(map[string][]string)
-	for _, v := range cfg.Entries {
-		if v.Bridge != nil && len(v.Bridge.Members) > 0 {
-			out[v.Name] = slices.Clone(v.Bridge.Members)
-		}
-	}
-	return out
-}
-
 // changeBridgeMember validates a member request and applies it. Caller
 // holds s.mu.
 func (s *VrfServer) changeBridgeMember(vrfName, member string, add bool) (vrf.VRF, error) {
@@ -530,10 +506,6 @@ func (s *VrfServer) changeBridgeMember(vrfName, member string, add bool) (vrf.VR
 	if v.Bridge == nil {
 		return vrf.VRF{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("vrf %q carries no bridge facet", vrfName))
 	}
-	if !add && slices.Contains(s.configMembers[vrfName], member) {
-		return vrf.VRF{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
-			"%s is declared in the config file (vrfs.entries[].bridge.members of vrf %q) and is enslaved again on every start; remove it there and restart", member, vrfName))
-	}
 	var err error
 	if add {
 		v, err = s.mgr.AddBridgeMember(vrfName, member, s.bridges)
@@ -545,6 +517,8 @@ func (s *VrfServer) changeBridgeMember(vrfName, member string, add bool) (vrf.VR
 		return v, nil
 	case errors.Is(err, netresource.ErrNoMember):
 		return vrf.VRF{}, connect.NewError(connect.CodeNotFound, err)
+	case errors.Is(err, vrf.ErrConfigMember):
+		return vrf.VRF{}, connect.NewError(connect.CodeFailedPrecondition, err)
 	case errors.Is(err, netresource.ErrPersist):
 		return vrf.VRF{}, connect.NewError(connect.CodeInternal, err)
 	default:

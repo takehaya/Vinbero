@@ -727,6 +727,11 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, dev 
 			}, br); err != nil {
 				return err
 			}
+			// VrfBridgeMemberRemove refuses these: the next start enslaves
+			// them again.
+			if err := mgr.SetConfigBridgeMembers(v.Name, v.Bridge.Name, v.Bridge.Members); err != nil {
+				return err
+			}
 		}
 		for _, ac := range v.ACs {
 			if _, err := mgr.AddAC(v.Name, vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN}); err != nil {

@@ -12,6 +12,7 @@
 package vrf
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -66,13 +67,20 @@ type Device struct {
 // End.DT2M deliver decapsulated frames into, plus the bd_id that scopes its
 // FDB and EVPN advertisements. The device name may differ from the VRF name
 // (an EVI named "evi-100" typically carries a bridge named "br100"). Ifindex
-// is filled by the mechanics layer at create/adopt time.
+// is filled by the mechanics layer at create/adopt time. ConfigMembers are
+// the members the config file declares for this bridge (set through
+// SetConfigBridgeMembers); the config enslaves them again on every start,
+// so RemoveBridgeMember refuses them.
 type Bridge struct {
-	Name    string
-	BdID    uint16
-	Members []string
-	Ifindex uint32
+	Name          string
+	BdID          uint16
+	Members       []string
+	Ifindex       uint32
+	ConfigMembers []string
 }
+
+// ErrConfigMember: the bridge member is declared in the config file.
+var ErrConfigMember = errors.New("bridge member is declared in the config file")
 
 // VRF is a routing/forwarding instance identity. ID is its data-plane id
 // (ingress classification + MUP F-TEID scope). ACs is its ingress membership.
@@ -138,6 +146,7 @@ func (v *VRF) clone() VRF {
 	if v.Bridge != nil {
 		b := *v.Bridge
 		b.Members = append([]string(nil), v.Bridge.Members...)
+		b.ConfigMembers = append([]string(nil), v.Bridge.ConfigMembers...)
 		out.Bridge = &b
 	}
 	return out
@@ -429,6 +438,7 @@ func (m *Manager) SetBridge(name string, b Bridge) (VRF, error) {
 	v := m.ensureLocked(name)
 	bb := b
 	bb.Members = append([]string(nil), b.Members...)
+	bb.ConfigMembers = append([]string(nil), b.ConfigMembers...)
 	v.Bridge = &bb
 	return v.clone(), nil
 }
@@ -457,6 +467,7 @@ func (m *Manager) AttachBridge(name string, b Bridge, ops BridgeOps) (VRF, error
 	b.Ifindex = ifindex
 	// A re-attach keeps the members the bridge already has (the kernel
 	// bridge keeps them too, and its state record is the union).
+	// It keeps the config's claim on its members too.
 	if cur, ok := m.Get(name); ok && cur.Bridge != nil && cur.Bridge.Name == b.Name {
 		members := cur.Bridge.Members
 		for _, mb := range b.Members {
@@ -465,8 +476,24 @@ func (m *Manager) AttachBridge(name string, b Bridge, ops BridgeOps) (VRF, error
 			}
 		}
 		b.Members = members
+		b.ConfigMembers = cur.Bridge.ConfigMembers
 	}
 	return m.SetBridge(name, b)
+}
+
+// SetConfigBridgeMembers records the members the config file declares for
+// the VRF's bridge, replacing what an earlier apply recorded. The claim is
+// tied to that bridge: it is dropped with the facet on detach, and a
+// different bridge attached later carries none.
+func (m *Manager) SetConfigBridgeMembers(name, bridge string, members []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.byName[name]
+	if !ok || v.Bridge == nil || v.Bridge.Name != bridge {
+		return fmt.Errorf("vrf %q carries no bridge %q", name, bridge)
+	}
+	v.Bridge.ConfigMembers = append([]string(nil), members...)
+	return nil
 }
 
 // AddBridgeMember enslaves one port to the VRF's attached bridge through ops
@@ -498,6 +525,10 @@ func (m *Manager) changeBridgeMember(name, member string, add bool, ops BridgeOp
 	}
 	if v.Bridge.Name == member {
 		return VRF{}, fmt.Errorf("vrf %q: bridge %q cannot be its own member", name, member)
+	}
+	if !add && slices.Contains(v.Bridge.ConfigMembers, member) {
+		return VRF{}, fmt.Errorf("%w: %s is in vrfs.entries[].bridge.members of vrf %q and is enslaved to %s again on every start; remove it there and restart",
+			ErrConfigMember, member, name, v.Bridge.Name)
 	}
 	if add {
 		if err := ops.AddBridgeMember(v.Bridge.Name, member); err != nil {
