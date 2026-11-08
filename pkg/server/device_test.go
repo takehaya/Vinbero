@@ -47,7 +47,7 @@ func TestDeviceServer_Attach(t *testing.T) {
 		t.Errorf("device = %+v", d)
 	}
 
-	for _, name := range []string{"", "a-name-past-15-bytes", "a/b", "a b", "..", "a:1"} {
+	for _, name := range []string{"", "a-name-past-15-bytes", "a/b", "a b", "..", "a:1", "a\rb", "a\vb", "a\fb", "a\xa0b"} {
 		_, err := s.DeviceAttach(context.Background(), connect.NewRequest(&v1.DeviceAttachRequest{Name: name}))
 		if connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Errorf("DeviceAttach(%q) = %v, want InvalidArgument", name, err)

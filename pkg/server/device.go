@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"connectrpc.com/connect"
 
@@ -43,10 +42,26 @@ func validateIfname(name string) error {
 		return errors.New("name is required")
 	case len(name) > maxIfnameLen:
 		return fmt.Errorf("interface name %q is longer than %d bytes", name, maxIfnameLen)
-	case name == "." || name == "..", strings.ContainsAny(name, "/: \t\n"):
+	case name == "." || name == "..":
 		return fmt.Errorf("invalid interface name %q", name)
 	}
+	for i := 0; i < len(name); i++ {
+		if invalidIfnameByte(name[i]) {
+			return fmt.Errorf("invalid interface name %q", name)
+		}
+	}
 	return nil
+}
+
+// invalidIfnameByte mirrors the kernel's dev_valid_name: '/', ':' and every
+// byte its isspace() accepts (including 0xa0, a space in the kernel's
+// Latin-1 ctype table).
+func invalidIfnameByte(c byte) bool {
+	switch c {
+	case '/', ':', ' ', '\t', '\n', '\v', '\f', '\r', 0xa0:
+		return true
+	}
+	return false
 }
 
 func (s *DeviceServer) unavailable() error {
