@@ -2,6 +2,7 @@ package bpf
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -115,8 +116,7 @@ func TestBumDevmapSync(t *testing.T) {
 	ifA, ifB := dummyIfindex(t, "bumdm-a"), dummyIfindex(t, "bumdm-b")
 	ifUp = dummyIfindex(t, "bumdm-up")
 	ac(1, 100, bumTestBD)
-	ac(1, 200, bumTestBD) // a second VLAN on the same port is one member
-	ac(ifA, 0, 999)       // another BD
+	ac(ifA, 0, 999) // another BD
 	peer(1, true)         // RT2 unicast peer: not flooded
 	peer(EsPeerIndexBase, false)
 	peer(2, false)
@@ -208,5 +208,71 @@ func TestBumDevmapSync(t *testing.T) {
 	}
 	if got := sortedKeys(devmapEntries(t, h.objs.BumLocalMap, bumTestBD)); !slices.Equal(got, []uint32{1}) {
 		t.Errorf("AC without a device: local keys = %v, want [1]", got)
+	}
+	if err := h.mapOps.DeleteHeadendL2(0x7ffffff0, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	// ACs with different VLAN IDs: xdp mode would forward the tag
+	// unchanged, so the BD is left to the tc path and the bridge.
+	ac(1, 200, bumTestBD)
+	if devmapEntries(t, h.objs.BumFloodMap, bumTestBD) != nil || devmapEntries(t, h.objs.BumLocalMap, bumTestBD) != nil {
+		t.Error("a BD whose ACs differ in VLAN kept a devmap")
+	}
+	if _, ok := s.unserved[bumTestBD]; !ok {
+		t.Error("the BD is not recorded as falling back")
+	}
+	if err := h.mapOps.DeleteHeadendL2(1, 200); err != nil {
+		t.Fatal(err)
+	}
+	if got := sortedKeys(devmapEntries(t, h.objs.BumFloodMap, bumTestBD)); !slices.Equal(got, []uint32{1, BumSlotKeyBase | 2}) {
+		t.Errorf("one VLAN again: flood keys = %#x, want the AC and slot 2", got)
+	}
+	if _, ok := s.unserved[bumTestBD]; ok {
+		t.Error("the BD still counts as falling back")
+	}
+}
+
+// ACs and slots that do not fit into one BD devmap leave the BD on the tc
+// path rather than with a devmap that misses some of them.
+func TestBumDevmapSyncCapacity(t *testing.T) {
+	h := newXDPBumHelper(t)
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func([IPv6AddrLen]byte) (uint32, error) { return 1, nil }, zap.NewNop())
+	h.mapOps.SetBumDevmapSync(s)
+	t.Cleanup(func() { h.mapOps.SetBumDevmapSync(nil) })
+
+	src, _ := ParseIPv6("fc00::1")
+	segs, n, _ := ParseSegments([]string{"fc00::200"})
+	entry := func() *HeadendEntry {
+		return &HeadendEntry{
+			Mode: uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2), NumSegments: n,
+			SrcAddr: src, Segments: segs, BdId: bumTestBD,
+		}
+	}
+	// Devmap entries must name devices that exist; ifindex 1 (lo) is the
+	// only one guaranteed, so the ACs are dummies.
+	const acs = bumDevmapMaxEntries - 2
+	for i := range acs {
+		ifindex := dummyIfindex(t, fmt.Sprintf("bumcap-%d", i))
+		if err := h.mapOps.CreateHeadendL2(ifindex, 100, entry(), [ESILen]byte{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range uint16(2) {
+		if err := h.mapOps.CreateBdPeer(bumTestBD, i, entry(), [ESILen]byte{}, [IPv6AddrLen]byte{}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(devmapEntries(t, h.objs.BumFloodMap, bumTestBD)); got != bumDevmapMaxEntries {
+		t.Fatalf("flood devmap has %d entries, want %d", got, bumDevmapMaxEntries)
+	}
+	if err := h.mapOps.CreateBdPeer(bumTestBD, 2, entry(), [ESILen]byte{}, [IPv6AddrLen]byte{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if devmapEntries(t, h.objs.BumFloodMap, bumTestBD) != nil {
+		t.Error("a BD that does not fit kept a devmap")
+	}
+	if _, ok := s.unserved[bumTestBD]; !ok {
+		t.Error("the BD is not recorded as falling back")
 	}
 }

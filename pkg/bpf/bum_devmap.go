@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -61,6 +62,9 @@ type BumDevmapSync struct {
 	modeOf    func(bdID uint16) uint8
 	uplink    UplinkResolver
 	logger    *zap.Logger
+	// unserved holds the xdp-mode BDs the sync leaves on the tc path,
+	// with the reason (unservable), so the change is logged once.
+	unserved map[uint16]string
 }
 
 // NewBumDevmapSync binds the sync to a loaded collection. modeOf returns the
@@ -82,9 +86,10 @@ func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink Uplink
 			ValueSize:  8, // struct bpf_devmap_val {ifindex, prog fd}
 			MaxEntries: bumDevmapMaxEntries,
 		},
-		modeOf: modeOf,
-		uplink: uplink,
-		logger: logger,
+		modeOf:   modeOf,
+		uplink:   uplink,
+		logger:   logger,
+		unserved: map[uint16]string{},
 	}
 }
 
@@ -98,25 +103,59 @@ type devmapVal struct {
 func (s *BumDevmapSync) SyncBD(bdID uint16) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.syncBDLocked(bdID)
-}
-
-func (s *BumDevmapSync) syncBDLocked(bdID uint16) error {
 	if bdID == 0 {
 		return nil
 	}
-	if s.modeOf(bdID) != BumModeXDP {
-		return s.clearBDLocked(bdID)
-	}
-
-	acs, err := s.localACs(bdID)
+	acs, err := s.scanACs()
 	if err != nil {
 		return err
+	}
+	return s.syncBDLocked(bdID, acs[bdID])
+}
+
+// bumAC is one headend_l2 entry of a BD: a local AC.
+type bumAC struct {
+	ifindex uint32
+	vlanID  uint16
+}
+
+// unservable returns why xdp mode cannot serve a BD with these ACs
+// and this many flood slots, or "". Such a BD gets no devmap, so its BUM
+// takes the tc path and the bridge (BUM_XDP_FALLBACK).
+func unservable(acs []bumAC, ifindexes []uint32, slots int) string {
+	// xdp mode forwards a frame with its VLAN tag unchanged, local copies
+	// and known unicast alike. That is what the bridge does too as long as
+	// every AC of the BD uses the same VLAN ID, whether its members are the
+	// ports themselves or VLAN devices on them. With different VLAN IDs
+	// only the bridge setup can say what a frame should look like on the
+	// other ACs, and two ACs on one port must reach each other through it.
+	for _, ac := range acs[1:] {
+		if ac.vlanID != acs[0].vlanID {
+			return fmt.Sprintf("its ACs use different VLAN IDs (%d and %d), and xdp mode forwards frames with their VLAN tag unchanged",
+				acs[0].vlanID, ac.vlanID)
+		}
+	}
+	if n := len(ifindexes) + slots; n > bumDevmapMaxEntries {
+		return fmt.Sprintf("its %d AC devices and %d flood slots exceed the %d entries of a BD devmap",
+			len(ifindexes), slots, bumDevmapMaxEntries)
+	}
+	return ""
+}
+
+func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC) error {
+	if s.modeOf(bdID) != BumModeXDP {
+		return s.clearBDLocked(bdID, "")
 	}
 	// A BD without a local AC keeps no devmap: the post-decap flood then
 	// falls back to the bridge, and there is no AC ingress to flood from.
 	if len(acs) == 0 {
-		return s.clearBDLocked(bdID)
+		return s.clearBDLocked(bdID, "")
+	}
+	ifindexes := make([]uint32, 0, len(acs))
+	for _, ac := range acs {
+		if !slices.Contains(ifindexes, ac.ifindex) {
+			ifindexes = append(ifindexes, ac.ifindex)
+		}
 	}
 
 	type slot struct {
@@ -147,6 +186,9 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16) error {
 		}
 		slots = append(slots, slot{index: i, uplink: up})
 	}
+	if reason := unservable(acs, ifindexes, len(slots)); reason != "" {
+		return s.clearBDLocked(bdID, reason)
+	}
 
 	flood, err := ebpf.NewMap(s.innerSpec)
 	if err != nil {
@@ -166,7 +208,7 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16) error {
 	for _, sl := range slots {
 		uplinks[sl.uplink] = struct{}{}
 	}
-	for _, ifindex := range acs {
+	for _, ifindex := range ifindexes {
 		v := devmapVal{Ifindex: ifindex}
 		err := local.Put(ifindex, v)
 		if err == nil {
@@ -192,7 +234,11 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16) error {
 		// frame's plan for that uplink.
 		v := devmapVal{Ifindex: sl.uplink, ProgFD: uint32(s.egress.FD())}
 		if err := flood.Put(BumSlotKeyBase|uint32(sl.index), v); err != nil {
-			return fmt.Errorf("bd %d: add flood slot %d (uplink %d): %w", bdID, sl.index, sl.uplink, err)
+			// The devmap has room (unservable), so the uplink device is
+			// gone: like an unresolvable uplink, the slot waits for the
+			// next rebuild.
+			s.logger.Warn("xdp BUM: cannot add a flood slot to the BD devmap; slot left out",
+				zap.Uint16("bd_id", bdID), zap.Uint16("index", sl.index), zap.Uint32("uplink", sl.uplink), zap.Error(err))
 		}
 	}
 
@@ -203,10 +249,13 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16) error {
 	if err := s.objs.BumFloodMap.Update(key, flood, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("bd %d: install flood devmap: %w", bdID, err)
 	}
+	s.noteServedLocked(bdID, "")
 	return nil
 }
 
-func (s *BumDevmapSync) clearBDLocked(bdID uint16) error {
+// clearBDLocked removes the BD's devmaps. reason, when set, says why an
+// xdp-mode BD cannot run in xdp mode (it then takes the tc path).
+func (s *BumDevmapSync) clearBDLocked(bdID uint16, reason string) error {
 	key := uint32(bdID)
 	var errs []error
 	for _, m := range []*ebpf.Map{s.objs.BumFloodMap, s.objs.BumLocalMap} {
@@ -214,30 +263,41 @@ func (s *BumDevmapSync) clearBDLocked(bdID uint16) error {
 			errs = append(errs, err)
 		}
 	}
+	s.noteServedLocked(bdID, reason)
 	return errors.Join(errs...)
 }
 
-// localACs returns the distinct ifindexes of the BD's headend_l2 entries.
-func (s *BumDevmapSync) localACs(bdID uint16) ([]uint32, error) {
+// noteServedLocked logs when an xdp-mode BD starts or stops falling back
+// to the tc path because of its configuration.
+func (s *BumDevmapSync) noteServedLocked(bdID uint16, reason string) {
+	prev, had := s.unserved[bdID]
+	switch {
+	case reason != "" && prev != reason:
+		s.unserved[bdID] = reason
+		s.logger.Warn("xdp BUM: bridge domain replicates BUM in tc mode (counted as BUM_XDP_FALLBACK)",
+			zap.Uint16("bd_id", bdID), zap.String("reason", reason))
+	case reason == "" && had:
+		delete(s.unserved, bdID)
+		s.logger.Info("xdp BUM: bridge domain replicates BUM in xdp mode again", zap.Uint16("bd_id", bdID))
+	}
+}
+
+// scanACs returns the headend_l2 entries of every BD, keyed by BD.
+func (s *BumDevmapSync) scanACs() (map[uint16][]bumAC, error) {
 	var (
 		key   HeadendL2Key
 		entry HeadendEntry
-		out   []uint32
 	)
-	seen := map[uint32]struct{}{}
+	out := map[uint16][]bumAC{}
 	iter := s.objs.HeadendL2Map.Iterate()
 	for iter.Next(&key, &entry) {
-		if entry.BdId != bdID || key.Ifindex == 0 {
+		if entry.BdId == 0 || key.Ifindex == 0 {
 			continue
 		}
-		if _, dup := seen[key.Ifindex]; dup {
-			continue
-		}
-		seen[key.Ifindex] = struct{}{}
-		out = append(out, key.Ifindex)
+		out[entry.BdId] = append(out[entry.BdId], bumAC{ifindex: key.Ifindex, vlanID: key.VlanId})
 	}
 	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("bd %d: scan headend_l2: %w", bdID, err)
+		return nil, fmt.Errorf("scan headend_l2: %w", err)
 	}
 	return out, nil
 }
@@ -248,19 +308,13 @@ func (s *BumDevmapSync) SyncAll() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	bds := map[uint16]struct{}{}
-	var (
-		l2Key   HeadendL2Key
-		l2Entry HeadendEntry
-	)
-	iter := s.objs.HeadendL2Map.Iterate()
-	for iter.Next(&l2Key, &l2Entry) {
-		if l2Entry.BdId != 0 {
-			bds[l2Entry.BdId] = struct{}{}
-		}
+	acs, err := s.scanACs()
+	if err != nil {
+		return err
 	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("scan headend_l2: %w", err)
+	bds := map[uint16]struct{}{}
+	for bd := range acs {
+		bds[bd] = struct{}{}
 	}
 	var outerKey uint32
 	var innerID ebpf.MapID
@@ -276,7 +330,7 @@ func (s *BumDevmapSync) SyncAll() error {
 
 	var errs []error
 	for bd := range bds {
-		if err := s.syncBDLocked(bd); err != nil {
+		if err := s.syncBDLocked(bd, acs[bd]); err != nil {
 			errs = append(errs, err)
 		}
 	}

@@ -19,11 +19,18 @@ Bridge Domain（BD）の BUM（broadcast、未知 unicast、multicast）フレ�
 4. `bpf_redirect_map(BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS)` で broadcast します。入力ポートが、送るスロットの uplink でもある場合だけは `BPF_F_EXCLUDE_INGRESS` を付けません（付けると、そのポートへのリモートのコピーも除かれるため）。plan を書くときに引いた devmap をそのまま使うので、control plane が devmap を差し替えている最中でも、plan と broadcast が別々の版を見ることはありません。
 5. egress program はコピーごとに、plan から自分の uplink の項目を探して次のスロットを 1 つ取り、`bd_peer_map[{bd_id, スロット}]` の peer へ H.Encaps.L2（.Red）をかけて、FIB の結果で MAC を書き換えます。
 
-ローカルの既知 unicast は bridge を通さず、FDB の出力ポートへ `bpf_redirect` します（入力ポートと同じなら破棄）。
+ローカルの既知 unicast は bridge を通さず、FDB の出力ポートへ `bpf_redirect` します（入力ポートと同じなら破棄）。devmap のない BD では、これまでどおり bridge に渡します。
 
 受信側（End.DT2 / End.DT2M の decap 後）: FDB miss のとき、bridge への redirect の代わりに `bum_local_map[bd_id]`（ローカル AC のみ、egress program なし）へ broadcast します。DF と RX split horizon の判定はその前に行われ、変わりません。
 
 devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
+
+xdp モードで正しく扱えない BD には、control plane は devmap を作りません。次の 2 つです。
+
+- AC の VLAN ID が揃っていない BD。xdp モードはフレームを VLAN tag ごとそのまま送ります（後述）。
+- AC のデバイスとスロットの合計が、devmap の 32 エントリーに収まらない BD。
+
+このような BD は、BUM も既知 unicast も TC モードと同じ経路（TC の複製と bridge）を通り、BUM は `BUM_XDP_FALLBACK` に数えます。理由は、状態が変わったときに 1 回、警告としてログに出します。構成が直れば、次の組み立てで xdp モードに戻ります。MAC 学習の通知（次段落）は、その間も XDP の学習から出ます。
 
 xdp モードの BD では kernel の bridge が MAC を学習しないため、XDP の学習（新規・移動）を ring buffer（`fdb_event_rb`）で通知し、EVPN RT2 の自動広告に使います。その BD の bridge の FDB 通知は無視します。取りこぼしは FDB エージングの周期で `fdb_map` から補います（`fdb_aging_seconds: 0` でエージングを止めると、補われません）。
 
@@ -83,8 +90,8 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 - PREEMPT_RT のカーネルでは使えません（起動時に拒否します）。
 - generic XDP の broadcast のコピーに、それぞれ別のバッファを渡すカーネルが必要です。そうでないカーネルでは tc モードで動きます（前節）。
 - flood の対象は BD の HeadendL2 で登録した AC だけです。bridge の他のポートや bridge 自身には届きません。
-- AC の VLAN tag はそのまま運びます（TC モードと bridge の動作と同じく、変換はしません）。
-- devmap は 1 BD あたり 32 エントリー（ローカル AC とリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。
+- AC の VLAN tag は、ローカルへのコピーでも既知 unicast でもリモートへのコピーでも、そのまま運びます。BD のすべての AC が同じ VLAN ID なら、これは bridge と同じ結果です（bridge のメンバーがポートそのものでも、ポート上の VLAN デバイスでも）。VLAN ID の違う AC が混ざる BD では、フレームが他の AC でどう見えるべきかは bridge の構成で決まります（ポート上の VLAN デバイスをメンバーにすれば、bridge は tag を付け替えます）。同じポートの別の VLAN どうしも、bridge を通らなければ届きません。そこで、このような BD は tc モードで動かします（前述）。
+- devmap は 1 BD あたり 32 エントリー（ローカル AC のデバイスとリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。収まらない BD は tc モードで動かします。
 - `bum_plan_ring` は CPU ごとに 96 KiB（96 バイト × 1024）を使います。
 - egress program は出力デバイスを変えられません。FIB の結果が devmap の uplink と違うコピーは破棄し、`BUM_UPLINK_MISMATCH` を数えます。control plane は uplink を宛先だけで引くので、peer への経路が ECMP で複数の uplink に分かれる構成では、一部の peer へのコピーが恒常的にこの理由で落ちます。このような構成では tc モードを使ってください。
 - egress program は、next hop の neighbor エントリーが解決していないコピーを破棄し、`BUM_EGRESS_DROP` を数えます（tc モードと違い、kernel に渡して解決させることはできません）。他の通信で解決すれば送られます。
@@ -127,7 +134,7 @@ settings:
 |---|---|
 | `BUM_XDP_FLOOD` | AC から入った BUM を devmap で broadcast した |
 | `BUM_XDP_LOCAL_FLOOD` | decap 後の flood をローカル AC へ broadcast した |
-| `BUM_XDP_FALLBACK` | xdp モードの BD で TC / bridge の経路を使った（devmap がない、またはこのカーネルで xdp モードを使えない） |
+| `BUM_XDP_FALLBACK` | xdp モードの BD で TC / bridge の経路を使った（devmap がない、xdp モードで扱えない構成の BD、またはこのカーネルで xdp モードを使えない） |
 | `BUM_EGRESS_TX` | egress program がリモートへのコピーを encap した |
 | `BUM_EGRESS_DROP` | egress program がコピーを破棄した（plan の後で peer が消えた、encap や FIB の失敗） |
 | `BUM_UPLINK_MISMATCH` | FIB の出力先が devmap の uplink と違った |

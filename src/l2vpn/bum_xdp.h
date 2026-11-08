@@ -306,6 +306,15 @@ __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
     return bpf_redirect_map(flood, 0, flags);
 }
 
+// Whether the control plane serves the BD in xdp mode: it has a devmap. A
+// BD it cannot serve (BumDevmapSync) has none and keeps the tc path and the
+// bridge for its BUM and its local unicast alike.
+static __always_inline bool bum_xdp_served(__u16 bd_id)
+{
+    __u32 key = bd_id;
+    return bpf_map_lookup_elem(&bum_flood_map, &key) != NULL;
+}
+
 // BUM that entered on a local AC of a tc-mode BD: mark it for the TC
 // clones and the bridge.
 static __always_inline int bum_tc_flood_from_ac(struct xdp_md *ctx, __u8 bum_mode, __u16 vlan_id)
@@ -318,8 +327,9 @@ static __always_inline int bum_tc_flood_from_ac(struct xdp_md *ctx, __u8 bum_mod
 
 // BUM that entered on a local AC of an xdp-mode BD: plan the remote copies,
 // then broadcast to the members of the BD's devmap.
-// Without a devmap (the control plane has not built it yet) the frame takes
-// the tc path instead, exactly as a tc-mode BD would.
+// Without a devmap (not built yet, or a BD the control plane cannot serve
+// in xdp mode) the frame takes the tc path instead, exactly as a tc-mode BD
+// would.
 static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id, __u16 vlan_id)
 {
     __u64 pkt_len = (__u64)((long)ctx->data_end - (long)ctx->data);

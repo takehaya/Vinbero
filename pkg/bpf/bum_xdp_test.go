@@ -221,6 +221,16 @@ func TestXDPBumLocalUnicast(t *testing.T) {
 	if ret, _ := h.run(vlanFrame(t, dst)); ret != XDP_DROP {
 		t.Errorf("hairpin: action = %d, want XDP_DROP", ret)
 	}
+
+	// A BD the control plane does not serve in xdp mode (no devmap) leaves
+	// its unicast to the bridge, like its BUM.
+	if err := h.objs.BumFloodMap.Delete(uint32(bumTestBD)); err != nil {
+		t.Fatal(err)
+	}
+	h.createFdbEntry(bumTestBD, dst, 7)
+	if ret, _ := h.run(vlanFrame(t, dst)); ret != XDP_PASS {
+		t.Errorf("known unicast without a devmap: action = %d, want XDP_PASS", ret)
+	}
 }
 
 // TestXDPBumTCModeLocalUnicastPasses pins today's tc-mode behavior, which
