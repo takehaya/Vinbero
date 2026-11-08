@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -239,6 +240,47 @@ func TestDevices_StaleAttachments(t *testing.T) {
 	}
 	if ops.live() != 2 || ops.open["xdp:99"] != 1 || ops.open["tc:99"] != 1 {
 		t.Errorf("links = %v, want only the pair on ifindex 99", ops.open)
+	}
+}
+
+// A detach whose state write failed is retried: the device is no longer
+// attached, but the retry removes the record instead of NOT_FOUND, so the
+// next start does not attach it again.
+func TestDetachDevice_RetryAfterPersistFailure(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	ops := newFakeLinkOps("veth1")
+	v := newTestVinbero(t, ops, statePath)
+	if _, err := v.AttachDevice("veth1", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Renaming the new state onto a directory fails, also for root.
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.DetachDevice("veth1"); err == nil {
+		t.Fatal("detach with an unwritable state file succeeded")
+	}
+	if ops.live() != 0 {
+		t.Errorf("links still open: %v", ops.open)
+	}
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.DetachDevice("veth1"); err != nil {
+		t.Fatalf("retried detach: %v", err)
+	}
+	reloaded, err := netresource.NewResourceManager(statePath, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.ListDevices(); len(got) != 0 {
+		t.Errorf("state on disk = %v, want none", got)
+	}
+	if err := v.DetachDevice("veth1"); !errors.Is(err, ErrNotAttached) {
+		t.Errorf("third detach = %v, want ErrNotAttached", err)
 	}
 }
 

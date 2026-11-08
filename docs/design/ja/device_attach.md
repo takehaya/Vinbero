@@ -29,6 +29,7 @@ bpf_link は pin しません。attach は daemon の lifetime に縛られ、da
 | interface が存在しない / detach 対象が attach されていない | `NOT_FOUND` |
 | 別の mode で attach 済み / `internal.devices` の device を detach しようとした | `FAILED_PRECONDITION` |
 | detach 対象の interface が既に消えている | 成功 (state からも消す) |
+| attach されていないが state に記録が残っている (前回の detach で state の書き込みに失敗した、再起動時に attach できなかった) | 成功 (state を書き直す) |
 
 CNI の DEL は冪等である必要があるので、呼び出し側は detach の `NOT_FOUND` を成功として扱えます。
 
@@ -56,7 +57,7 @@ RPC で attach した device は state file (`settings.state_path`) の `devices
 - それ以外の理由で attach に失敗した entry は、warning を出して state に残します。一時的な失敗で device を忘れないためです。次の起動で attach し直し、不要なら `DeviceDetach` で記録を消せます
 - `internal.devices` に移った名前の entry は、config が持ち主になるので外します
 
-state への書き込みに失敗した場合、attach / detach の結果は残したままエラーを返します。どちらも冪等なので retry すれば state も収束します。
+state への書き込みに失敗した場合、attach / detach の結果は残したままエラーを返します。attach は retry すれば state も書き直します。detach の retry は、device が既に外れていても state を書き直して成功します。
 
 ## 消えた interface の後始末
 

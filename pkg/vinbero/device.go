@@ -11,6 +11,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 )
@@ -213,12 +214,16 @@ func (v *Vinbero) attachLocked(name, mode string) (*deviceAttachment, error) {
 // of the state file. A device whose interface is already gone detaches
 // successfully. internal.devices entries are refused: the config file owns
 // them and would attach them again on the next start.
+//
+// A device that is not attached but still recorded in the state file (an
+// earlier detach whose state write failed, or an entry the restart could
+// not attach) loses its record, so a retried detach converges.
 func (v *Vinbero) DetachDevice(name string) error {
 	v.devMu.Lock()
 	defer v.devMu.Unlock()
 	a, ok := v.attached[name]
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrNotAttached, name)
+		return v.detachRecordLocked(name)
 	}
 	if a.Config {
 		return fmt.Errorf("%w: %s (remove it from the config file and restart)", ErrConfigDevice, name)
@@ -230,9 +235,44 @@ func (v *Vinbero) DetachDevice(name string) error {
 	v.logger.Info("Detached device", zap.String("device", name))
 	var persistErr error
 	if v.resMgr != nil {
-		persistErr = v.resMgr.RemoveDevices(name)
+		if persistErr = v.resMgr.RemoveDevices(name); persistErr != nil {
+			v.markUnsaved(name)
+		}
 	}
 	return errors.Join(closeErr, persistErr)
+}
+
+func (v *Vinbero) markUnsaved(name string) {
+	if v.unsaved == nil {
+		v.unsaved = make(map[string]bool)
+	}
+	v.unsaved[name] = true
+}
+
+// detachRecordLocked handles a detach of a device that is not attached. A
+// record the state still holds (an entry the restart could not attach) is
+// removed; a detach whose state write failed writes the state again.
+// Otherwise the device is unknown. Caller holds v.devMu.
+func (v *Vinbero) detachRecordLocked(name string) error {
+	if v.resMgr == nil {
+		return fmt.Errorf("%w: %s", ErrNotAttached, name)
+	}
+	if slices.ContainsFunc(v.resMgr.ListDevices(), func(d netresource.ManagedDevice) bool { return d.Name == name }) {
+		if err := v.resMgr.RemoveDevices(name); err != nil {
+			v.markUnsaved(name)
+			return err
+		}
+		delete(v.unsaved, name)
+		return nil
+	}
+	if v.unsaved[name] {
+		if err := v.resMgr.Save(); err != nil {
+			return err
+		}
+		delete(v.unsaved, name)
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrNotAttached, name)
 }
 
 // closeLinks closes XDP before TC, the same order as Close: XDP is the

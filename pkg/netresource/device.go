@@ -48,3 +48,13 @@ func (m *ResourceManager) ListDevices() []ManagedDevice {
 	defer m.mu.RUnlock()
 	return slices.Clone(m.state.Devices)
 }
+
+// Save writes the state file as it is in memory. A caller whose earlier
+// write failed uses it to retry: the in-memory state already holds the
+// change.
+func (m *ResourceManager) Save() error {
+	if err := m.persist(); err != nil {
+		return fmt.Errorf("persist state: %w", err)
+	}
+	return nil
+}

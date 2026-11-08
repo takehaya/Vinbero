@@ -18,13 +18,17 @@ import (
 )
 
 type Vinbero struct {
-	cfg        *config.Config
-	obj        *bpf.BpfObjects
-	mapOps     *bpf.MapOperations
-	devices    []net.Interface // internal.devices, resolved at startup
-	devMu      sync.Mutex      // guards attached
-	attached   map[string]*deviceAttachment
-	devOps     deviceLinkOps // nil = the kernel; tests replace it
+	cfg      *config.Config
+	obj      *bpf.BpfObjects
+	mapOps   *bpf.MapOperations
+	devices  []net.Interface // internal.devices, resolved at startup
+	devMu    sync.Mutex      // guards attached
+	attached map[string]*deviceAttachment
+	devOps   deviceLinkOps // nil = the kernel; tests replace it
+	// unsaved names the detached devices whose state write failed, so a
+	// retried detach writes the state again instead of NOT_FOUND. Guarded
+	// by devMu.
+	unsaved    map[string]bool
 	fdbWatcher *netlinkwatch.FDBWatcher
 	resMgr     *netresource.ResourceManager
 	bumSync    *bpf.BumDevmapSync // nil unless a BD runs in xdp BUM mode
