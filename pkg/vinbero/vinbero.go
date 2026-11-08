@@ -36,11 +36,15 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 		if err := checkBumXDPKernel(kernelRealtimePath); err != nil {
 			return nil, err
 		}
-		if reason := bumXDPUnavailable(probeGenericBroadcastCopies); reason != "" {
-			l2.DisableXDP(reason)
-			logger.Warn("xdp BUM replication unavailable on this kernel: bridge domains configured with "+
-				"bum_mode xdp replicate BUM in tc instead (counted as BUM_XDP_FALLBACK)",
-				zap.String("reason", reason))
+		// Only generic XDP copies a broadcast as skb clones; native XDP
+		// copies every frame (xdpf_clone).
+		if cfg.InternalConfig.BpfOptions.DeviceMode == "generic" {
+			if reason := bumXDPUnavailable(probeGenericBroadcastCopies); reason != "" {
+				l2.DisableXDP(reason)
+				logger.Warn("xdp BUM replication unavailable on this kernel: bridge domains configured with "+
+					"bum_mode xdp replicate BUM in tc instead (counted as BUM_XDP_FALLBACK)",
+					zap.String("reason", reason))
+			}
 		}
 	}
 
@@ -57,7 +61,8 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 
 	var bumSync *bpf.BumDevmapSync
 	if l2 := &cfg.Setting.L2; l2.ConfiguresXDP() {
-		if bumSync, err = setupBumXDP(obj, mapOps, l2, logger); err != nil {
+		native := cfg.InternalConfig.BpfOptions.DeviceMode == "driver"
+		if bumSync, err = setupBumXDP(obj, mapOps, l2, native, logger); err != nil {
 			_ = obj.Close()
 			return nil, err
 		}
@@ -88,7 +93,7 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 // (pinned maps after a restart); every later mutation rebuilds its BD.
 // When xdp mode is unavailable only the overrides are written, and no BD
 // gets a devmap.
-func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Config, logger *zap.Logger) (*bpf.BumDevmapSync, error) {
+func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Config, native bool, logger *zap.Logger) (*bpf.BumDevmapSync, error) {
 	for bd, mode := range l2.BumModeOverrides() {
 		if err := mapOps.SetBdBumMode(bd, mode); err != nil {
 			return nil, fmt.Errorf("write BUM mode of bd %d: %w", bd, err)
@@ -99,12 +104,14 @@ func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Co
 	}
 	bs := bpf.NewBumDevmapSync(obj, l2.EffectiveBumMode, bpf.RouteUplinkResolver, logger)
 	bs.SetNeighKeeper(bpf.KeepNeighResolved)
+	bs.SetNativeXDP(native)
 	mapOps.SetBumDevmapSync(bs)
 	if err := bs.SyncAll(); err != nil {
 		logger.Warn("xdp BUM: initial devmap build incomplete", zap.Error(err))
 	}
 	logger.Info("BUM replication in XDP enabled",
-		zap.String("default_mode", l2.BumMode), zap.Int("bd_overrides", len(l2.BridgeDomains)))
+		zap.String("default_mode", l2.BumMode), zap.Int("bd_overrides", len(l2.BridgeDomains)),
+		zap.Bool("native_xdp", native))
 	return bs, nil
 }
 

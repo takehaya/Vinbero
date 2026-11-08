@@ -52,14 +52,28 @@ func TestL2BumModeConfig(t *testing.T) {
 			},
 		},
 		{
-			name:    "xdp requires generic XDP (driver is the default)",
-			yaml:    "settings:\n  l2:\n    bum_mode: xdp\n",
-			wantErr: `requires internal.bpf.device_mode "generic"`,
+			name: "xdp in native XDP (driver is the default)",
+			yaml: "settings:\n  l2:\n    bum_mode: xdp\n",
+			check: func(t *testing.T, c *Config) {
+				consts := c.BpfConstants()
+				if consts["bum_xdp_enabled"] != uint8(1) || consts["bum_xdp_native"] != uint8(1) {
+					t.Errorf("constants = %v", consts)
+				}
+			},
 		},
 		{
-			name:    "a per-BD xdp override also requires generic XDP",
-			yaml:    "internal:\n  bpf:\n    device_mode: driver\nsettings:\n  l2:\n    bridge_domains:\n      - bd_id: 7\n        bum_mode: xdp\n",
-			wantErr: `requires internal.bpf.device_mode "generic"`,
+			name: "generic XDP does not set bum_xdp_native",
+			yaml: "internal:\n  bpf:\n    device_mode: generic\nsettings:\n  l2:\n    bridge_domains:\n      - bd_id: 7\n        bum_mode: xdp\n",
+			check: func(t *testing.T, c *Config) {
+				if _, ok := c.BpfConstants()["bum_xdp_native"]; ok {
+					t.Errorf("bum_xdp_native set for generic XDP")
+				}
+			},
+		},
+		{
+			name:    "offloaded XDP cannot run xdp mode",
+			yaml:    "internal:\n  bpf:\n    device_mode: offload\nsettings:\n  l2:\n    bridge_domains:\n      - bd_id: 7\n        bum_mode: xdp\n",
+			wantErr: `requires internal.bpf.device_mode "generic" or "driver"`,
 		},
 		{
 			name:    "auto is not implemented yet",
