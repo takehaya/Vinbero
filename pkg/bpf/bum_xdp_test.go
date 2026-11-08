@@ -880,3 +880,36 @@ func TestListLocalDynamicFdb(t *testing.T) {
 		t.Errorf("a BD filter must exclude other BDs: %v", other)
 	}
 }
+
+// AgeLocalFdbEntries ages only the local entries of the BDs it is given.
+func TestAgeLocalFdbEntries(t *testing.T) {
+	h := newXDPBumHelper(t)
+	put := func(bd uint16, last byte, remote bool) net.HardwareAddr {
+		t.Helper()
+		mac := net.HardwareAddr{0x02, 0, 0, 0, 0, last}
+		e := &FdbEntry{Oif: 1, LastSeen: 1}
+		if remote {
+			e.Oif, e.IsRemote = 0, 1
+		}
+		if err := h.mapOps.CreateFdb(bd, mac, e); err != nil {
+			t.Fatal(err)
+		}
+		return mac
+	}
+	local := put(bumTestBD, 1, false)
+	remote := put(bumTestBD, 2, true)
+	other := put(200, 3, false)
+	aged, err := h.mapOps.AgeLocalFdbEntries(1e9, func(bd uint16) bool { return bd == bumTestBD })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aged) != 1 || aged[0].BDID != bumTestBD || aged[0].MAC.String() != local.String() {
+		t.Fatalf("aged = %+v, want only %s in bd %d", aged, local, bumTestBD)
+	}
+	if _, err := h.mapOps.GetFdb(bumTestBD, remote); err != nil {
+		t.Error("remote entry aged out")
+	}
+	if _, err := h.mapOps.GetFdb(200, other); err != nil {
+		t.Error("another BD's entry aged out")
+	}
+}

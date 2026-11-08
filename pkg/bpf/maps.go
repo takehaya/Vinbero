@@ -2690,6 +2690,18 @@ type AgedFdbEntry struct {
 // refreshes independent of the forwarding identity. The second lookup avoids
 // deleting entries already observed as fresh; refresh-versus-delete is not atomic.
 func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
+	return m.ageFdbEntries(maxAgeNs, nil)
+}
+
+// AgeLocalFdbEntries is AgeFdbEntries restricted to the locally learned
+// entries of the BDs inBD accepts.
+func (m *MapOperations) AgeLocalFdbEntries(maxAgeNs uint64, inBD func(bdID uint16) bool) ([]AgedFdbEntry, error) {
+	return m.ageFdbEntries(maxAgeNs, func(k FdbKey, e FdbEntry) bool {
+		return e.IsRemote == 0 && inBD(k.BdId)
+	})
+}
+
+func (m *MapOperations) ageFdbEntries(maxAgeNs uint64, scope func(FdbKey, FdbEntry) bool) ([]AgedFdbEntry, error) {
 	m.controlLifecycle.Lock()
 	defer m.controlLifecycle.Unlock()
 	var key FdbKey
@@ -2699,7 +2711,7 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 	now := currentKtimeNs()
 	var toDelete []FdbKey
 	for iter.Next(&key, &entry) {
-		if entry.IsStatic != 0 || entry.LastSeen == 0 {
+		if entry.IsStatic != 0 || entry.LastSeen == 0 || (scope != nil && !scope(key, entry)) {
 			continue
 		}
 		if entry.LastSeen > now {

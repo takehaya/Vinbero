@@ -2,6 +2,7 @@ package netlinkwatch
 
 import (
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -127,5 +128,31 @@ func TestFDBWatcherXDPReplayAndReconcile(t *testing.T) {
 	w.ageAndWithdraw(uint64(time.Hour))
 	if len(sink.events) != 1 || sink.events[0] != want {
 		t.Fatalf("reconcile = %+v, want %+v", sink.events, want)
+	}
+}
+
+// Without fdb_aging_seconds the xdp-mode BDs still age their local MACs
+// (the bridge would have, in tc mode) and reconcile; other BDs and remote
+// entries are untouched.
+func TestFDBWatcherXDPAgingWithoutAgingSeconds(t *testing.T) {
+	sink := &fakeMACSink{}
+	w, ops := newSinkTestWatcher(sink)
+	w.SetXDPLearnedBDs(xdpBD100)
+	stale := net.HardwareAddr{0x02, 0, 0, 0, 0, 0x01}
+	kept := net.HardwareAddr{0x02, 0, 0, 0, 0, 0x02}
+	ops.aged = []bpf.AgedFdbEntry{
+		{BDID: 100, MAC: stale},
+		{BDID: 100, MAC: net.HardwareAddr{0x02, 0, 0, 0, 0, 0x03}, IsRemote: true},
+		{BDID: 200, MAC: net.HardwareAddr{0x02, 0, 0, 0, 0, 0x04}},
+	}
+	ops.local = map[uint16][]net.HardwareAddr{100: {kept}}
+
+	w.ageXDPLocal(uint64(xdpAgingDefault))
+	want := []macEvent{
+		{bdID: 100, mac: stale.String(), added: false},
+		{bdID: 100, mac: kept.String(), added: true},
+	}
+	if !slices.Equal(sink.events, want) {
+		t.Fatalf("events = %+v, want %+v", sink.events, want)
 	}
 }

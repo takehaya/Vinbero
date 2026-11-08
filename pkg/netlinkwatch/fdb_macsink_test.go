@@ -33,6 +33,15 @@ func (f *fakeFdbMapOps) DeleteLearnedFdb(bdID uint16, mac net.HardwareAddr, _ ui
 	return nil
 }
 func (f *fakeFdbMapOps) AgeFdbEntries(uint64) ([]bpf.AgedFdbEntry, error) { return f.aged, nil }
+func (f *fakeFdbMapOps) AgeLocalFdbEntries(_ uint64, inBD func(uint16) bool) ([]bpf.AgedFdbEntry, error) {
+	var out []bpf.AgedFdbEntry
+	for _, a := range f.aged {
+		if !a.IsRemote && inBD(a.BDID) {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
 func (f *fakeFdbMapOps) ListLocalDynamicFdb(bdID uint16) (map[uint16][]net.HardwareAddr, error) {
 	if bdID == 0 {
 		return f.local, nil

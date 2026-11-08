@@ -35,6 +35,7 @@ type fdbMapOps interface {
 	LearnFdb(bdID uint16, mac net.HardwareAddr, oif uint32) (bool, error)
 	DeleteLearnedFdb(bdID uint16, mac net.HardwareAddr, oif uint32) error
 	AgeFdbEntries(maxAgeNs uint64) ([]bpf.AgedFdbEntry, error)
+	AgeLocalFdbEntries(maxAgeNs uint64, inBD func(bdID uint16) bool) ([]bpf.AgedFdbEntry, error)
 	ListLocalDynamicFdb(bdID uint16) (map[uint16][]net.HardwareAddr, error)
 }
 
@@ -121,6 +122,10 @@ func (w *FDBWatcher) Start(ctx context.Context) error {
 	if w.agingSeconds > 0 {
 		w.wg.Go(func() {
 			w.runAging(ctx)
+		})
+	} else if w.xdpLearned != nil {
+		w.wg.Go(func() {
+			w.runXDPAging(ctx)
 		})
 	}
 
@@ -303,6 +308,47 @@ func (w *FDBWatcher) runAging(ctx context.Context) {
 	}
 }
 
+// Without fdb_aging_seconds, the kernel bridge still ages the local MACs of
+// a tc-mode BD (and its RTM_DELNEIGH withdraws them); an xdp-mode BD's
+// frames never reach the bridge. Its local MACs are aged here instead, at
+// the bridge's default ageing time, and the pass also re-announces what a
+// full fdb_event_rb dropped.
+const (
+	xdpAgingDefault  = 300 * time.Second
+	xdpAgingInterval = 30 * time.Second
+)
+
+func (w *FDBWatcher) runXDPAging(ctx context.Context) {
+	ticker := time.NewTicker(xdpAgingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.done:
+			return
+		case <-ticker.C:
+			w.ageXDPLocal(uint64(xdpAgingDefault))
+		}
+	}
+}
+
+// ageXDPLocal ages the local MACs of the xdp-mode BDs only, withdraws them,
+// and reconciles the XDP-learned ones.
+func (w *FDBWatcher) ageXDPLocal(maxAgeNs uint64) {
+	defer w.reconcileXDPLearned()
+	aged, err := w.mapOps.AgeLocalFdbEntries(maxAgeNs, func(bdID uint16) bool {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		return w.isXDPLearnedLocked(bdID)
+	})
+	if err != nil {
+		w.logger.Warn("FDB aging error", zap.Error(err))
+		return
+	}
+	w.withdrawAged(aged)
+}
+
 // ageAndWithdraw runs one BPF aging pass and withdraws the RT2 for each aged
 // locally-learned MAC. Vinbero's BPF ager may remove an fdb_map entry the kernel
 // FDB still holds (the kernel runs its own aging and would emit RTM_DELNEIGH), so
@@ -316,6 +362,11 @@ func (w *FDBWatcher) ageAndWithdraw(maxAgeNs uint64) {
 		w.logger.Warn("FDB aging error", zap.Error(err))
 		return
 	}
+	w.withdrawAged(aged)
+}
+
+// withdrawAged withdraws the RT2 of each aged locally-learned MAC.
+func (w *FDBWatcher) withdrawAged(aged []bpf.AgedFdbEntry) {
 	if len(aged) == 0 {
 		return
 	}
