@@ -97,19 +97,19 @@ func run(cliCtx *cli.Context) error {
 	}
 	defer func() { _ = vin.Close() }()
 
-	if err := vin.LoadXDPProgram(); err != nil {
-		return fmt.Errorf("load XDP program: %w", err)
+	if err := vin.AttachConfigDevices(); err != nil {
+		return fmt.Errorf("attach devices: %w", err)
 	}
-	lg.Info("Vinbero XDP program loaded successfully")
-
-	if err := vin.LoadTCProgram(); err != nil {
-		return fmt.Errorf("load TC program: %w", err)
-	}
-	lg.Info("Vinbero TC BUM program loaded successfully")
+	lg.Info("Vinbero XDP and TC programs attached to internal.devices")
 
 	// Initialize resource manager (reconcile state before FDB watcher)
 	if err := vin.InitResourceManager(); err != nil {
 		return fmt.Errorf("init resource manager: %w", err)
+	}
+	// Re-attach the devices that were attached at runtime (DeviceAttach)
+	// before the restart, from the state the resource manager loaded.
+	if err := vin.ReconcileDevices(); err != nil {
+		return fmt.Errorf("reconcile devices: %w", err)
 	}
 
 	// Start FDB watcher

@@ -14,6 +14,7 @@ type ResourceManager struct {
 	statePath string
 	state     *ManagedState
 	mu        sync.RWMutex
+	writeMu   sync.Mutex // serializes persist (see there)
 }
 
 func NewResourceManager(statePath string, logger *zap.Logger) (*ResourceManager, error) {

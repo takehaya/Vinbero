@@ -10,6 +10,16 @@ import (
 type ManagedState struct {
 	VRFs    []ManagedVrf    `json:"vrfs"`
 	Bridges []ManagedBridge `json:"bridges"`
+	// Devices are the interfaces attached to the data plane at runtime
+	// (DeviceAttach). internal.devices entries are not recorded here.
+	Devices []ManagedDevice `json:"devices,omitempty"`
+}
+
+// ManagedDevice is a runtime-attached device: the interface name and the
+// XDP mode it was attached in (config spelling, never empty).
+type ManagedDevice struct {
+	Name string `json:"name"`
+	Mode string `json:"mode"`
 }
 
 type ManagedVrf struct {
@@ -54,7 +64,12 @@ func loadState(path string) (*ManagedState, error) {
 // persist snapshots the state under the read lock and writes it to the state
 // file atomically. Callers must NOT hold m.mu (RWMutex is not reentrant); the
 // file I/O happens outside the lock so a slow disk does not stall readers.
+// writeMu spans the snapshot and the rename: the VRF service and the device
+// service persist independently, and an older snapshot must not be renamed
+// in after a newer one.
 func (m *ResourceManager) persist() error {
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
 	m.mu.RLock()
 	data, err := json.MarshalIndent(m.state, "", "  ")
 	m.mu.RUnlock()
