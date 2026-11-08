@@ -318,10 +318,13 @@ func (v *Vinbero) ListDevices() []Device {
 }
 
 // ReconcileDevices attaches the devices the state file records, after a
-// restart. An entry is dropped from the state, with a warning, when its
-// interface is gone (a pod deleted while the daemon was down) or it cannot be
-// attached; one device must not keep the daemon from starting. An entry that
-// internal.devices now declares is dropped too: the config owns it.
+// restart. An entry whose interface is gone (a pod deleted while the daemon
+// was down) or whose mode is invalid is dropped from the state with a
+// warning. An entry that fails to attach for another reason is kept with a
+// warning, so a transient failure does not forget the device; the next start
+// tries again, and DetachDevice removes it. Either way one device must not
+// keep the daemon from starting. An entry that internal.devices now
+// declares is dropped too: the config owns it.
 // Call after AttachConfigDevices and InitResourceManager.
 func (v *Vinbero) ReconcileDevices() error {
 	if v.resMgr == nil {
@@ -337,10 +340,16 @@ func (v *Vinbero) ReconcileDevices() error {
 			drop = append(drop, d.Name)
 			continue
 		}
-		if _, err := v.attachLocked(d.Name, d.Mode); err != nil {
-			v.logger.Warn("Reconcile: dropping device that cannot be attached",
+		_, err := v.attachLocked(d.Name, d.Mode)
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrNoInterface), errors.Is(err, ErrInvalidMode):
+			v.logger.Warn("Reconcile: dropping device",
 				zap.String("device", d.Name), zap.String("mode", d.Mode), zap.Error(err))
 			drop = append(drop, d.Name)
+		default:
+			v.logger.Warn("Reconcile: device not attached; keeping its state entry for the next start",
+				zap.String("device", d.Name), zap.String("mode", d.Mode), zap.Error(err))
 		}
 	}
 	// The dropped entries are gone from memory either way; a state file that

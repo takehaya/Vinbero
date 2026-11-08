@@ -46,11 +46,15 @@ RPC で attach した device は state file (`settings.state_path`) の `devices
 
 起動時の順序は次のとおりです。
 
-1. `internal.devices` を attach します。失敗すると起動を中止します (従来どおり)
+1. `internal.devices` を attach します。失敗すると起動を中止します
 2. `netresource.Reconcile` が VRF と bridge を復元します
 3. state の `devices` を記録された mode で attach し直します
 
-3 は fail-closed にしていません。interface が消えている entry (daemon の停止中に pod が消えた、host が再起動した) と、attach に失敗した entry は warning を出して state から外し、起動は続けます。1 つの veth のために node 全体の data plane を止めないためです。`internal.devices` に移った名前の entry も、config が持ち主になるので外します。
+3 は fail-closed にしていません。1 つの veth のために node 全体の data plane を止めないためです。
+
+- interface が消えている entry (daemon の停止中に pod が消えた、host が再起動した) と mode が不正な entry は、warning を出して state から外します
+- それ以外の理由で attach に失敗した entry は、warning を出して state に残します。一時的な失敗で device を忘れないためです。次の起動で attach し直し、不要なら `DeviceDetach` で記録を消せます
+- `internal.devices` に移った名前の entry は、config が持ち主になるので外します
 
 state への書き込みに失敗した場合、attach / detach の結果は残したままエラーを返します。どちらも冪等なので retry すれば state も収束します。
 

@@ -252,9 +252,10 @@ func TestAttachConfigDevices_InvalidMode(t *testing.T) {
 	}
 }
 
-// After a restart the state devices are attached again; an entry whose
-// interface is gone, that cannot be attached, or that internal.devices now
-// declares is dropped instead of failing the boot.
+// After a restart the state devices are attached again. An entry whose
+// interface is gone or that internal.devices now declares is dropped; one
+// that fails to attach for another reason stays for the next start. None of
+// them fails the boot.
 func TestReconcileDevices(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	ops := newFakeLinkOps("eth0", "veth1", "veth2", "veth3")
@@ -291,8 +292,9 @@ func TestReconcileDevices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload state: %v", err)
 	}
-	if got := reloaded.ListDevices(); !slices.Equal(got, []netresource.ManagedDevice{{Name: "veth1", Mode: "generic"}}) {
-		t.Errorf("state on disk = %v, want only veth1", got)
+	want := []netresource.ManagedDevice{{Name: "veth1", Mode: "generic"}, {Name: "veth3", Mode: "generic"}}
+	if got := reloaded.ListDevices(); !slices.Equal(got, want) {
+		t.Errorf("state on disk = %v, want %v", got, want)
 	}
 }
 
