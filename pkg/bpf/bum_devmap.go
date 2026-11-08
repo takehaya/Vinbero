@@ -18,6 +18,9 @@ const (
 	BumModeInherit uint8 = 0
 	BumModeTC      uint8 = 1
 	BumModeXDP     uint8 = 2
+	// BumModeTCFallback: an xdp-mode BD on a host that cannot run xdp
+	// mode. It takes the tc path and counts BUM_XDP_FALLBACK.
+	BumModeTCFallback uint8 = 4
 )
 
 // BumSlotKeyBase marks a devmap key as remote flood slot (key = base | slot).

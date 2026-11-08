@@ -32,6 +32,18 @@ type Vinbero struct {
 }
 
 func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
+	if l2 := &cfg.Setting.L2; l2.ConfiguresXDP() {
+		if err := checkBumXDPKernel(kernelRealtimePath); err != nil {
+			return nil, err
+		}
+		if reason := bumXDPUnavailable(probeGenericBroadcastCopies); reason != "" {
+			l2.DisableXDP(reason)
+			logger.Warn("xdp BUM replication unavailable on this kernel: bridge domains configured with "+
+				"bum_mode xdp replicate BUM in tc instead (counted as BUM_XDP_FALLBACK)",
+				zap.String("reason", reason))
+		}
+	}
+
 	obj, err := bpf.ReadCollection(cfg.BpfConstants(), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("fail to bpf load: %w", err)
@@ -44,7 +56,7 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 	}
 
 	var bumSync *bpf.BumDevmapSync
-	if l2 := &cfg.Setting.L2; l2.AnyXDP() {
+	if l2 := &cfg.Setting.L2; l2.ConfiguresXDP() {
 		if bumSync, err = setupBumXDP(obj, mapOps, l2, logger); err != nil {
 			_ = obj.Close()
 			return nil, err
@@ -74,14 +86,16 @@ func NewVinbero(cfg *config.Config, logger *zap.Logger) (*Vinbero, error) {
 // setupBumXDP writes the per-BD mode overrides and builds the xdp-mode
 // devmaps from whatever headend_l2 / bd_peer state the maps already hold
 // (pinned maps after a restart); every later mutation rebuilds its BD.
+// When xdp mode is unavailable only the overrides are written, and no BD
+// gets a devmap.
 func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Config, logger *zap.Logger) (*bpf.BumDevmapSync, error) {
-	if err := checkBumXDPKernel(kernelRealtimePath); err != nil {
-		return nil, err
-	}
 	for bd, mode := range l2.BumModeOverrides() {
 		if err := mapOps.SetBdBumMode(bd, mode); err != nil {
 			return nil, fmt.Errorf("write BUM mode of bd %d: %w", bd, err)
 		}
+	}
+	if !l2.AnyXDP() {
+		return nil, nil
 	}
 	bs := bpf.NewBumDevmapSync(obj, l2.EffectiveBumMode, bpf.RouteUplinkResolver, logger)
 	mapOps.SetBumDevmapSync(bs)
@@ -91,6 +105,30 @@ func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Co
 	logger.Info("BUM replication in XDP enabled",
 		zap.String("default_mode", l2.BumMode), zap.Int("bd_overrides", len(l2.BridgeDomains)))
 	return bs, nil
+}
+
+// probeGenericBroadcastCopies is the startup check of bumXDPUnavailable.
+var probeGenericBroadcastCopies = bpf.ProbeGenericBroadcastCopies
+
+// bumProbeTimeout bounds the wait for the probe's frames; they normally
+// come back within a millisecond.
+const bumProbeTimeout = time.Second
+
+// bumXDPUnavailable returns why this host cannot run xdp-mode BUM
+// replication, or "". xdp mode writes a different encapsulation into each
+// copy of a generic-XDP broadcast, which needs every copy on a buffer of its
+// own; the probe tries exactly that in a throwaway network namespace. A
+// probe that cannot run counts as unavailable: tc mode works everywhere.
+func bumXDPUnavailable(probe func(time.Duration) (bool, error)) string {
+	private, err := probe(bumProbeTimeout)
+	if err != nil {
+		return "the generic XDP broadcast check could not run: " + err.Error()
+	}
+	if !private {
+		return "the copies of a generic XDP broadcast share one packet buffer on this kernel " +
+			"(it lacks \"bpf: Run generic devmap egress prog on private skb\")"
+	}
+	return ""
 }
 
 // kernelRealtimePath reads "1" on a PREEMPT_RT kernel.

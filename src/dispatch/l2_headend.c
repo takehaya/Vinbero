@@ -77,12 +77,8 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
     }
 
     if (eth->h_dest[0] & 0x01) {
-        if (bum_mode == BUM_MODE_XDP) {
-            *out_action = bum_xdp_flood_from_ac(ctx, key.bd_id, vlan_id);
-            return NULL;
-        }
-        xdp_write_bum_meta(ctx, vlan_id);
-        *out_action = XDP_PASS;
+        *out_action = bum_mode == BUM_MODE_XDP ? bum_xdp_flood_from_ac(ctx, key.bd_id, vlan_id)
+                                               : bum_tc_flood_from_ac(ctx, bum_mode, vlan_id);
         return NULL;
     }
 
@@ -107,12 +103,8 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
         return NULL;
     }
 
-    if (bum_mode == BUM_MODE_XDP) {
-        *out_action = bum_xdp_flood_from_ac(ctx, key.bd_id, vlan_id);
-        return NULL;
-    }
-    xdp_write_bum_meta(ctx, vlan_id);
-    *out_action = XDP_PASS;
+    *out_action = bum_mode == BUM_MODE_XDP ? bum_xdp_flood_from_ac(ctx, key.bd_id, vlan_id)
+                                           : bum_tc_flood_from_ac(ctx, bum_mode, vlan_id);
     return NULL;
 }
 

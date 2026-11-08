@@ -15,6 +15,10 @@ const (
 	BumModeValueInherit uint8 = 0
 	BumModeValueTC      uint8 = 1
 	BumModeValueXDP     uint8 = 2
+	// BumModeValueTCFallback is what an xdp-mode BD runs as when the kernel
+	// cannot do xdp-mode replication (see DisableXDP): the tc path, with
+	// each BUM frame counted as BUM_XDP_FALLBACK.
+	BumModeValueTCFallback uint8 = 4
 )
 
 // L2Config holds L2VPN data-plane settings.
@@ -27,6 +31,10 @@ type L2Config struct {
 	BumMode string `yaml:"bum_mode,omitempty"`
 	// BridgeDomains overrides BumMode per bridge domain.
 	BridgeDomains []BridgeDomainL2Config `yaml:"bridge_domains,omitempty"`
+
+	// xdpUnavailable, when set, says why xdp mode cannot run on this host;
+	// BDs configured for it then run in tc mode.
+	xdpUnavailable string
 }
 
 // BridgeDomainL2Config is a per-BD override of the L2 settings.
@@ -89,21 +97,52 @@ func (c *L2Config) Validate(deviceMode string) error {
 	return nil
 }
 
-// DefaultBumMode returns the BUM_MODE_* value for BDs without an override.
-func (c *L2Config) DefaultBumMode() uint8 {
+// DisableXDP makes every BD configured for xdp mode run in tc mode
+// (BumModeValueTCFallback) and records why.
+func (c *L2Config) DisableXDP(reason string) {
+	c.xdpUnavailable = reason
+}
+
+// XDPUnavailable returns the reason given to DisableXDP, or "".
+func (c *L2Config) XDPUnavailable() string {
+	return c.xdpUnavailable
+}
+
+// effective maps a configured BUM_MODE_* value to the one the data plane runs.
+func (c *L2Config) effective(v uint8) uint8 {
+	if v == BumModeValueXDP && c.xdpUnavailable != "" {
+		return BumModeValueTCFallback
+	}
+	return v
+}
+
+func (c *L2Config) configuredDefault() uint8 {
 	if v, err := bumModeValue(c.BumMode); err == nil && v != BumModeValueInherit {
 		return v
 	}
 	return BumModeValueTC
 }
 
-// BumModeOverrides returns the per-BD BUM_MODE_* values that are set.
-func (c *L2Config) BumModeOverrides() map[uint16]uint8 {
+func (c *L2Config) configuredOverrides() map[uint16]uint8 {
 	out := make(map[uint16]uint8, len(c.BridgeDomains))
 	for _, bd := range c.BridgeDomains {
 		if v, err := bumModeValue(bd.BumMode); err == nil && v != BumModeValueInherit {
 			out[bd.BdID] = v
 		}
+	}
+	return out
+}
+
+// DefaultBumMode returns the BUM_MODE_* value for BDs without an override.
+func (c *L2Config) DefaultBumMode() uint8 {
+	return c.effective(c.configuredDefault())
+}
+
+// BumModeOverrides returns the per-BD BUM_MODE_* values that are set.
+func (c *L2Config) BumModeOverrides() map[uint16]uint8 {
+	out := c.configuredOverrides()
+	for bd, v := range out {
+		out[bd] = c.effective(v)
 	}
 	return out
 }
@@ -116,15 +155,21 @@ func (c *L2Config) EffectiveBumMode(bdID uint16) uint8 {
 	return c.DefaultBumMode()
 }
 
-// AnyXDP reports whether any bridge domain can run in xdp mode.
-func (c *L2Config) AnyXDP() bool {
-	if c.DefaultBumMode() == BumModeValueXDP {
+// ConfiguresXDP reports whether the configuration puts any bridge domain in
+// xdp mode, whether or not the host can run it.
+func (c *L2Config) ConfiguresXDP() bool {
+	if c.configuredDefault() == BumModeValueXDP {
 		return true
 	}
-	for _, v := range c.BumModeOverrides() {
+	for _, v := range c.configuredOverrides() {
 		if v == BumModeValueXDP {
 			return true
 		}
 	}
 	return false
+}
+
+// AnyXDP reports whether any bridge domain runs in xdp mode.
+func (c *L2Config) AnyXDP() bool {
+	return c.ConfiguresXDP() && c.xdpUnavailable == ""
 }

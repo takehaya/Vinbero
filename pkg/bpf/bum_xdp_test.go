@@ -113,6 +113,54 @@ func TestXDPBumTCOverrideKeepsTCPath(t *testing.T) {
 	}
 }
 
+// A BD configured for xdp mode on a host that cannot run it takes the tc
+// path even with a devmap installed, and counts each BUM frame as
+// BUM_XDP_FALLBACK.
+func TestXDPBumTCFallbackMode(t *testing.T) {
+	h := newXDPTestHelperWithConstants(t, map[string]any{
+		"enable_stats":     uint8(1),
+		"bum_xdp_enabled":  uint8(1),
+		"bum_mode_default": BumModeTCFallback,
+	})
+	h.bumAC(1)
+	installDevmap(t, h.objs.BumFloodMap)
+	pkt := vlanFrame(t, bcast)
+	ret, out := h.run(pkt)
+	if ret != XDP_PASS {
+		t.Fatalf("action = %d, want XDP_PASS", ret)
+	}
+	if len(out) != len(pkt)+8 || binary.LittleEndian.Uint64(out[:8])>>32 != uint64(vnbuMarker) {
+		t.Fatalf("want the 8-byte VNBU meta in front of the frame (len %d, input %d)", len(out), len(pkt))
+	}
+	if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 1 {
+		t.Errorf("BUM_XDP_FALLBACK = %d, want 1", n)
+	}
+	if n := statCount(t, h.mapOps, "BUM_XDP_FLOOD"); n != 0 {
+		t.Errorf("BUM_XDP_FLOOD = %d, want 0", n)
+	}
+
+	// After decap: the bridge path (here: no bridge, so XDP_PASS).
+	h.createSidFunctionWithBD("fd00:1:100::10/128", actionEndDT2M, bumTestBD)
+	installDevmap(t, h.objs.BumLocalMap)
+	enc, err := buildL2EncapsulatedPacket(
+		net.ParseIP("fd00:1:1::1"), net.ParseIP("fd00:1:100::10"),
+		[]net.IP{net.ParseIP("fd00:1:100::10")}, 0,
+		100, net.ParseIP("10.0.0.1"), net.ParseIP("192.0.2.100"), true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ret, _ := h.run(enc); ret != XDP_PASS {
+		t.Fatalf("after decap: action = %d, want XDP_PASS", ret)
+	}
+	if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 2 {
+		t.Errorf("BUM_XDP_FALLBACK = %d, want 2", n)
+	}
+	if n := statCount(t, h.mapOps, "BUM_XDP_LOCAL_FLOOD"); n != 0 {
+		t.Errorf("BUM_XDP_LOCAL_FLOOD = %d, want 0", n)
+	}
+}
+
 func TestXDPBumFloodFromAC(t *testing.T) {
 	h := newXDPBumHelper(t)
 	h.bumAC(1)

@@ -98,3 +98,25 @@ func TestL2BumModeConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestL2DisableXDP(t *testing.T) {
+	c, err := Load("internal:\n  bpf:\n    device_mode: generic\nsettings:\n  l2:\n    bum_mode: xdp\n    bridge_domains:\n      - bd_id: 200\n        bum_mode: tc\n      - bd_id: 300\n        bum_mode: xdp\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2 := &c.Setting.L2
+	l2.DisableXDP("test")
+	if l2.AnyXDP() || !l2.ConfiguresXDP() || l2.XDPUnavailable() != "test" {
+		t.Errorf("AnyXDP=%v ConfiguresXDP=%v reason=%q", l2.AnyXDP(), l2.ConfiguresXDP(), l2.XDPUnavailable())
+	}
+	for bd, want := range map[uint16]uint8{100: BumModeValueTCFallback, 200: BumModeValueTC, 300: BumModeValueTCFallback} {
+		if got := l2.EffectiveBumMode(bd); got != want {
+			t.Errorf("bd %d: mode %d, want %d", bd, got, want)
+		}
+	}
+	// The constants stay, so the fallback BDs can count their frames.
+	consts := c.BpfConstants()
+	if consts["bum_xdp_enabled"] != uint8(1) || consts["bum_mode_default"] != BumModeValueTCFallback {
+		t.Errorf("constants = %v", consts)
+	}
+}

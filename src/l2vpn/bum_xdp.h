@@ -38,6 +38,9 @@
 #define BUM_MODE_TC      1
 #define BUM_MODE_XDP     2
 #define BUM_MODE_AUTO    3 // reserved: per-frame tc/xdp classification
+// An xdp-mode BD on a host that cannot run xdp mode (the control plane's
+// startup check): the tc path, each BUM frame counted as BUM_XDP_FALLBACK.
+#define BUM_MODE_TC_FALLBACK 4
 
 // Reserved for auto mode: which BUM classes keep the tc + bridge path.
 #define BUM_SLOW_LINK_LOCAL (1u << 0)
@@ -278,6 +281,16 @@ __noinline int bum_plan_write(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
     return 0;
 }
 
+// BUM that entered on a local AC of a tc-mode BD: mark it for the TC
+// clones and the bridge.
+static __always_inline int bum_tc_flood_from_ac(struct xdp_md *ctx, __u8 bum_mode, __u16 vlan_id)
+{
+    if (bum_mode == BUM_MODE_TC_FALLBACK)
+        STATS_INC(STATS_BUM_XDP_FALLBACK, (__u64)((long)ctx->data_end - (long)ctx->data));
+    xdp_write_bum_meta(ctx, vlan_id);
+    return XDP_PASS;
+}
+
 // BUM that entered on a local AC of an xdp-mode BD: plan the remote copies,
 // then broadcast to every member of the BD's devmap except the ingress AC.
 // Without a devmap (the control plane has not built it yet) the frame takes
@@ -302,9 +315,14 @@ static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id
 // BD is not in xdp mode or has no devmap, so the caller keeps its bridge path.
 static __always_inline int bum_xdp_flood_from_tunnel(struct xdp_md *ctx, __u16 bd_id)
 {
-    if (bd_id == 0 || bum_bd_mode(bd_id) != BUM_MODE_XDP)
+    if (bd_id == 0)
         return -1;
+    __u8 mode = bum_bd_mode(bd_id);
     __u64 pkt_len = (__u64)((long)ctx->data_end - (long)ctx->data);
+    if (mode == BUM_MODE_TC_FALLBACK)
+        STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
+    if (mode != BUM_MODE_XDP)
+        return -1;
     __u32 key = bd_id;
     void *inner = bpf_map_lookup_elem(&bum_local_map, &key);
     if (!inner) {

@@ -61,15 +61,25 @@ PREEMPT_RT のカーネルは例外です。`CONFIG_PREEMPT_RT_NEEDS_BH_LOCK` �
 
 ### コピーがバッファを共有するカーネル
 
-"bpf: Run generic devmap egress prog on private skb" が入っていないカーネルでは、generic XDP の broadcast のコピー（`skb_clone`）がすべて同じパケットバッファを共有します。egress program がフレームの前に書いたヘッダーは共有部分に入るので、送信待ちのコピーは全部、最後に書かれたヘッダーを運ぶことになります。そのままでは、peer が 2 つ以上あると宛先を取り違えたコピーが出ます。
+"bpf: Run generic devmap egress prog on private skb" が入っていないカーネルでは、generic XDP の broadcast のコピー（`skb_clone`）がすべて同じパケットバッファを共有します。egress program がフレームの前に書いたヘッダーは共有部分に入るので、送信待ちのコピーは全部、最後に書かれたヘッダーを運びます。xdp モードはコピーごとに別の peer 宛てのヘッダーを書くので、このようなカーネルでは使えません。
 
-egress program は、コピーの `ctx->data` が plan に記録した ingress のアドレスと同じなら、共有バッファ上のコピーだと判断します。共有バッファ上で encap するのは最初の 1 コピーだけで、2 つ目以降は破棄して `BUM_SHARED_BUFFER` を数えます。このようなカーネルでは、1 フレームあたりのリモートへのコピーは 1 つだけになります（宛先の取り違えは起きません）。リモートの peer が 2 つ以上ある BD で xdp モードを使うときは、この修正が入ったカーネル（安定版への backport を含む）を使ってください。
+vinberod は起動時に、これを実際に試して確かめます。
+
+1. 使い捨ての network namespace を作り、その中に veth のペアを置きます。
+2. 片側に generic XDP の program を付けます。この program は、受け取ったフレームを同じ veth を指す 2 つの devmap エントリーへ broadcast します。2 つのエントリーの egress program は、フレームにそれぞれ別の値を 1 バイト書きます。
+3. 反対側から通常の AF_PACKET socket で 3 フレームを送り、戻ってきたコピーの値を比べます。1 フレームの 2 つのコピーの値が違えば、コピーは別々のバッファにあります。
+
+所要時間は 40 ms ほどです。namespace とその中の veth は、確認の終わりに消えます。
+
+コピーがバッファを共有していた場合、または確認そのものが失敗した場合（network namespace を作れないなど）、vinberod は xdp モードを設定した BD を tc モードで動かします。理由つきの警告（`xdp BUM replication unavailable on this kernel`）をログに出し、その BD の BUM フレームを `BUM_XDP_FALLBACK` に数えます。ローカルの flood と MAC 学習は、tc モードと同じく kernel の bridge が担います。
+
+egress program も、念のため共有を検出します。コピーの `ctx->data` が plan に記録した ingress のアドレスと同じなら、共有バッファ上のコピーとみなします。共有バッファ上で encap するのは最初の 1 コピーだけで、2 つ目以降は破棄して `BUM_SHARED_BUFFER` を数えます。
 
 ## 要件と制約
 
 - **generic XDP が必要**（`internal.bpf.device_mode: generic`）。native XDP は redirect したフレームを出力デバイスごとの bulk queue にため、devmap program を NAPI poll の終わりの flush でまとめて実行します。その時点では CPU の最新の seq が後続のフレームのものになっているため、コピーが自分の plan を見つけられません。設定の読み込み時に、generic 以外との組み合わせは拒否します。
 - PREEMPT_RT のカーネルでは使えません（起動時に拒否します）。
-- リモートの peer が 2 つ以上あるときは、コピーごとに別のバッファを渡すカーネルが必要です（前節）。
+- generic XDP の broadcast のコピーに、それぞれ別のバッファを渡すカーネルが必要です。そうでないカーネルでは tc モードで動きます（前節）。
 - flood の対象は BD の HeadendL2 で登録した AC だけです。bridge の他のポートや bridge 自身には届きません。
 - AC の VLAN tag はそのまま運びます（TC モードと bridge の動作と同じく、変換はしません）。
 - AC と uplink が同じ物理ポートにある構成は対象外です（`BPF_F_EXCLUDE_INGRESS` で uplink へのコピーも除かれます）。
@@ -115,7 +125,7 @@ settings:
 |---|---|
 | `BUM_XDP_FLOOD` | AC から入った BUM を devmap で broadcast した |
 | `BUM_XDP_LOCAL_FLOOD` | decap 後の flood をローカル AC へ broadcast した |
-| `BUM_XDP_FALLBACK` | xdp モードだが devmap がなく、TC / bridge の経路を使った |
+| `BUM_XDP_FALLBACK` | xdp モードの BD で TC / bridge の経路を使った（devmap がまだない、またはこのカーネルで xdp モードを使えない） |
 | `BUM_EGRESS_TX` | egress program がリモートへのコピーを encap した |
 | `BUM_EGRESS_DROP` | egress program がコピーを破棄した（plan の後で peer が消えた、encap や FIB の失敗） |
 | `BUM_UPLINK_MISMATCH` | FIB の出力先が devmap の uplink と違った |

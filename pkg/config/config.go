@@ -313,10 +313,12 @@ func (c *Config) BpfConstants() map[string]any {
 		v = 1
 	}
 	consts := map[string]any{"enable_stats": v}
-	// The BUM mode constants are added only when a bridge domain uses a
-	// non-default mode, so a tc-only config sets exactly the constants it
-	// did before xdp mode existed (plugins skip names they do not have).
-	if c.Setting.L2.AnyXDP() {
+	// The BUM mode constants are added only when a bridge domain is
+	// configured for xdp mode, so a tc-only config sets exactly the
+	// constants it did before xdp mode existed (plugins skip names they do
+	// not have). They stay set when the host cannot run xdp mode: those
+	// BDs then run as BumModeValueTCFallback, which counts its frames.
+	if c.Setting.L2.ConfiguresXDP() {
 		consts["bum_mode_default"] = c.Setting.L2.DefaultBumMode()
 		consts["bum_xdp_enabled"] = uint8(1)
 	}

@@ -143,9 +143,10 @@ static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u3
     // Kernels without "bpf: Run generic devmap egress prog on private skb"
     // hand every copy of a broadcast the same packet buffer, and the
     // headers one copy writes in front of the frame are what every queued
-    // copy then carries. Only the first remote copy on that buffer is
-    // encapsulated; the others are dropped rather than sent to the wrong
-    // peer. A kernel with the fix gives each clone its own buffer.
+    // copy then carries. The control plane checks for that at startup and
+    // runs xdp-mode BDs in tc mode there; should a shared buffer show up
+    // anyway, only its first remote copy is encapsulated and the others are
+    // dropped rather than sent to the wrong peer.
     if ((__u64)(long)ctx->data == plan->data && plan->shared++ > 0) {
         STATS_INC(STATS_BUM_SHARED_BUFFER, pkt_len);
         return XDP_DROP;
