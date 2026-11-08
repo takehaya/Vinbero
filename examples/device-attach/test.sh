@@ -157,6 +157,18 @@ check "attach a dummy in generic mode" vbctl device attach --name "${TOPO_NS_PRE
 check "attach a second dummy" vbctl device attach --name "${TOPO_NS_PREFIX}d1"
 r3 ip link del "${TOPO_NS_PREFIX}d0"
 check "detach of a deleted interface succeeds" vbctl device detach --name "${TOPO_NS_PREFIX}d0"
+r3 ip link add "${TOPO_NS_PREFIX}d2" type dummy
+check "attach a third dummy" vbctl device attach --name "${TOPO_NS_PREFIX}d2"
+r3 ip link del "${TOPO_NS_PREFIX}d2"
+forgotten_d2() {
+    for _ in $(seq 1 20); do
+        state_has_device "${TOPO_NS_PREFIX}d2" > /dev/null 2>&1 || return 0
+        sleep 0.25
+    done
+    return 1
+}
+check "deleted interface forgotten by the link watcher" forgotten_d2
+check "deleted interface not listed" test -z "$(device_source "${TOPO_NS_PREFIX}d2")"
 stop_daemon
 r3 ip link del "${TOPO_NS_PREFIX}d1"
 start_daemon

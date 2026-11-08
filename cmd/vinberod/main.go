@@ -112,6 +112,10 @@ func run(cliCtx *cli.Context) error {
 	if err := vin.ReconcileDevices(); err != nil {
 		return fmt.Errorf("reconcile devices: %w", err)
 	}
+	// Forget runtime attachments whose interface is deleted.
+	if err := vin.WatchDevices(); err != nil {
+		return fmt.Errorf("watch devices: %w", err)
+	}
 
 	// Start FDB watcher
 	if err := vin.StartFDBWatcher(ctx); err != nil {

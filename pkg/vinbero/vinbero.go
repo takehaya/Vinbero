@@ -18,13 +18,14 @@ import (
 )
 
 type Vinbero struct {
-	cfg      *config.Config
-	obj      *bpf.BpfObjects
-	mapOps   *bpf.MapOperations
-	devices  []net.Interface // internal.devices, resolved at startup
-	devMu    sync.Mutex      // guards attached
-	attached map[string]*deviceAttachment
-	devOps   deviceLinkOps // nil = the kernel; tests replace it
+	cfg       *config.Config
+	obj       *bpf.BpfObjects
+	mapOps    *bpf.MapOperations
+	devices   []net.Interface // internal.devices, resolved at startup
+	devMu     sync.Mutex      // guards attached
+	attached  map[string]*deviceAttachment
+	devOps    deviceLinkOps // nil = the kernel; tests replace it
+	stopWatch func()        // stops WatchDevices; guarded by devMu
 	// unsaved names the detached devices whose state write failed, so a
 	// retried detach writes the state again instead of NOT_FOUND. Guarded
 	// by devMu.
@@ -254,6 +255,13 @@ func (v *Vinbero) Close() error {
 
 	if v.fdbWatcher != nil {
 		v.fdbWatcher.Stop()
+	}
+	v.devMu.Lock()
+	stop := v.stopWatch
+	v.stopWatch = nil
+	v.devMu.Unlock()
+	if stop != nil {
+		stop()
 	}
 	if err := v.closeAllDevices(); err != nil {
 		errs = append(errs, err)

@@ -15,8 +15,8 @@ The test checks that:
 - the same-mode attach is idempotent, a mode change and a detach of a config
   device are refused, and detach removes the programs
 - a restart attaches the uplink again from the state file
-- a device whose interface was deleted detaches, and is dropped at the next
-  start instead of failing it
+- a device whose interface was deleted detaches, is forgotten while the
+  daemon runs, and is dropped at the next start instead of failing it
 - a bridge member added with `vbctl vrf bridge-member-add` is enslaved again
   after a restart, and one deleted while the daemon was down is dropped
 

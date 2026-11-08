@@ -3,6 +3,7 @@ package vinbero
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -53,6 +54,13 @@ func (f *fakeLinkOps) ifindex(name string) (int, error) {
 		return i, nil
 	}
 	return 0, fmt.Errorf("%w: %s", ErrNoInterface, name)
+}
+
+func (f *fakeLinkOps) links() (map[string]int, error) {
+	if f.lookupErr != nil {
+		return nil, f.lookupErr
+	}
+	return maps.Clone(f.ifindexes), nil
 }
 
 func (f *fakeLinkOps) attachXDP(ifindex int, _ link.XDPAttachFlags) (link.Link, error) {
@@ -197,6 +205,10 @@ func TestDetachDevice(t *testing.T) {
 	if err := v.DetachDevice("veth2"); err != nil {
 		t.Errorf("detach of a vanished interface: %v", err)
 	}
+	// Also when the link watcher already forgot it.
+	if err := v.DetachDevice("veth2"); err != nil {
+		t.Errorf("second detach of a vanished interface: %v", err)
+	}
 	if got := v.resMgr.ListDevices(); len(got) != 0 {
 		t.Errorf("state devices after detach = %v", got)
 	}
@@ -205,29 +217,53 @@ func TestDetachDevice(t *testing.T) {
 	}
 }
 
-// ListDevices drops an attachment whose interface is gone, and an attach on a
-// recreated interface (same name, new ifindex) replaces the stale links.
+// ListDevices leaves out an attachment whose interface is gone without
+// forgetting it; the link watcher's deletion and sweep forget it. An attach
+// on a recreated interface (same name, new ifindex) replaces the stale
+// links.
 func TestDevices_StaleAttachments(t *testing.T) {
-	ops := newFakeLinkOps("veth1", "veth2")
+	ops := newFakeLinkOps("veth1", "veth2", "veth3")
 	v := newTestVinbero(t, ops, filepath.Join(t.TempDir(), "state.json"))
-	for _, n := range []string{"veth1", "veth2"} {
+	for _, n := range []string{"veth1", "veth2", "veth3"} {
 		if _, err := v.AttachDevice(n, ""); err != nil {
 			t.Fatalf("AttachDevice(%s): %v", n, err)
 		}
 	}
-	// A lookup that fails for another reason keeps both attached.
+	// A failed dump lists everything.
 	ops.lookupErr = errors.New("ENOBUFS")
-	if got := v.ListDevices(); len(got) != 2 || ops.live() != 4 {
-		t.Errorf("a failed lookup dropped devices: %+v, links %v", got, ops.open)
+	if got := v.ListDevices(); len(got) != 3 {
+		t.Errorf("a failed dump hid devices: %+v", got)
 	}
 	ops.lookupErr = nil
 
 	delete(ops.ifindexes, "veth1")
-	if got := v.ListDevices(); len(got) != 1 || got[0].Name != "veth2" {
-		t.Errorf("ListDevices = %+v, want only veth2", got)
+	if got := v.ListDevices(); len(got) != 2 || got[0].Name != "veth2" {
+		t.Errorf("ListDevices = %+v, want veth2 and veth3", got)
 	}
+	if len(v.resMgr.ListDevices()) != 3 || ops.live() != 6 {
+		t.Error("ListDevices changed the attachments or the state")
+	}
+
+	// A deletion event for another ifindex (the name was reused) is ignored.
+	idx1 := v.attached["veth1"].Ifindex
+	v.linkDeleted("veth1", idx1+100)
+	if len(v.attached) != 3 {
+		t.Error("deletion of another ifindex dropped veth1")
+	}
+	v.linkDeleted("veth1", idx1)
+	if _, ok := v.attached["veth1"]; ok || ops.live() != 4 {
+		t.Errorf("veth1 still attached after its deletion (links %v)", ops.open)
+	}
+	if got := v.resMgr.ListDevices(); len(got) != 2 {
+		t.Errorf("state devices = %v, want veth2 and veth3", got)
+	}
+
+	// The sweep forgets whatever is not present any more.
+	delete(ops.ifindexes, "veth3")
+	present, _ := ops.links()
+	v.pruneDevices(present)
 	if got := v.resMgr.ListDevices(); len(got) != 1 || got[0].Name != "veth2" {
-		t.Errorf("state devices = %v, want only veth2", got)
+		t.Errorf("state devices after the sweep = %v, want only veth2", got)
 	}
 
 	ops.ifindexes["veth2"] = 99 // deleted and recreated under the same name

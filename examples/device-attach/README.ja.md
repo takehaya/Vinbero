@@ -9,7 +9,7 @@ test は次を確認します。
 - uplink を attach している間だけ End.DT4 の通信が host2 に届き、ingress AC と default-deny もその uplink に効く
 - 同じ mode の attach は冪等で、mode の変更と config の device の detach は拒否され、detach で program が外れる
 - 再起動後に state file から uplink が attach し直される
-- interface を削除した device は detach でき、次の起動では起動を止めずに捨てられる
+- interface を削除した device は detach でき、稼働中は link の削除イベントで忘れられ、次の起動では起動を止めずに捨てられる
 - `vbctl vrf bridge-member-add` で足した bridge member は再起動後に enslave し直され、daemon の停止中に消えた member は捨てられる
 
 ```bash

@@ -8,8 +8,9 @@ option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
 // XDP entry program and the TC ingress program are attached as a pair, the
 // same way internal.devices entries are attached at startup. Devices attached
 // here are recorded in the state file and attached again when the daemon
-// restarts; an entry whose interface is gone by then is dropped. This is the
-// hook a CNI plugin uses for the veths it creates.
+// restarts; an entry whose interface is gone by then is dropped, and an
+// attachment whose interface is deleted while the daemon runs is forgotten.
+// This is the hook a CNI plugin uses for the veths it creates.
 service DeviceService {
   rpc DeviceAttach(DeviceAttachRequest) returns (DeviceAttachResponse); // idempotent for the same mode
   rpc DeviceDetach(DeviceDetachRequest) returns (DeviceDetachResponse); // succeeds when the interface is already gone
@@ -35,11 +36,14 @@ message DeviceAttachResponse {
 }
 
 message DeviceDetachRequest {
-  string name = 1; // interface name; NOT_FOUND when it is not attached
+  // interface name. Succeeds when the interface is gone; NOT_FOUND when it
+  // exists but is neither attached nor recorded in the state file (a detach
+  // whose state write failed can be retried)
+  string name = 1;
 }
 message DeviceDetachResponse {}
 
 message DeviceListRequest {}
 message DeviceListResponse {
-  repeated Device devices = 1; // sorted by name; attachments whose interface is gone are dropped first
+  repeated Device devices = 1; // sorted by name; attachments whose interface is gone are left out
 }

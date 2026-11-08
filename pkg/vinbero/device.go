@@ -53,6 +53,8 @@ type deviceAttachment struct {
 // deviceLinkOps is the kernel surface of a device attach. Tests replace it.
 type deviceLinkOps interface {
 	ifindex(name string) (int, error)
+	// links returns every interface, name to ifindex, in one dump.
+	links() (map[string]int, error)
 	attachXDP(ifindex int, flags link.XDPAttachFlags) (link.Link, error)
 	attachTC(ifindex int) (link.Link, error)
 }
@@ -60,7 +62,7 @@ type deviceLinkOps interface {
 type kernelLinkOps struct{ v *Vinbero }
 
 // ifindex looks the name up with one RTM_GETLINK request (net.InterfaceByName
-// dumps every link, which adds up when ListDevices checks each attachment).
+// dumps every link).
 func (k kernelLinkOps) ifindex(name string) (int, error) {
 	l, err := netlink.LinkByName(name)
 	if errors.As(err, &netlink.LinkNotFoundError{}) {
@@ -70,6 +72,21 @@ func (k kernelLinkOps) ifindex(name string) (int, error) {
 		return 0, fmt.Errorf("look up interface %s: %w", name, err)
 	}
 	return l.Attrs().Index, nil
+}
+
+func (k kernelLinkOps) links() (map[string]int, error) {
+	return linkIndexes(netlink.LinkList())
+}
+
+func linkIndexes(links []netlink.Link, err error) (map[string]int, error) {
+	if err != nil {
+		return nil, fmt.Errorf("list interfaces: %w", err)
+	}
+	out := make(map[string]int, len(links))
+	for _, l := range links {
+		out[l.Attrs().Name] = l.Attrs().Index
+	}
+	return out, nil
 }
 
 func (k kernelLinkOps) attachXDP(ifindex int, flags link.XDPAttachFlags) (link.Link, error) {
@@ -251,11 +268,13 @@ func (v *Vinbero) markUnsaved(name string) {
 
 // detachRecordLocked handles a detach of a device that is not attached. A
 // record the state still holds (an entry the restart could not attach) is
-// removed; a detach whose state write failed writes the state again.
-// Otherwise the device is unknown. Caller holds v.devMu.
+// removed; a detach whose state write failed writes the state again. A name
+// with no interface succeeds: the link watcher may already have forgotten
+// the attachment of a deleted interface. Otherwise the device is not
+// attached. Caller holds v.devMu.
 func (v *Vinbero) detachRecordLocked(name string) error {
 	if v.resMgr == nil {
-		return fmt.Errorf("%w: %s", ErrNotAttached, name)
+		return v.notAttached(name)
 	}
 	if slices.ContainsFunc(v.resMgr.ListDevices(), func(d netresource.ManagedDevice) bool { return d.Name == name }) {
 		if err := v.resMgr.RemoveDevices(name); err != nil {
@@ -270,6 +289,13 @@ func (v *Vinbero) detachRecordLocked(name string) error {
 			return err
 		}
 		delete(v.unsaved, name)
+		return nil
+	}
+	return v.notAttached(name)
+}
+
+func (v *Vinbero) notAttached(name string) error {
+	if _, err := v.linkOps().ifindex(name); errors.Is(err, ErrNoInterface) {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrNotAttached, name)
@@ -330,28 +356,23 @@ func (v *Vinbero) dropLocked(a *deviceAttachment, why string) {
 	v.logger.Info("Dropped stale device", zap.String("device", a.Name), zap.String("reason", why))
 }
 
-// ListDevices returns the attached devices sorted by name. Attachments whose
-// interface has disappeared are dropped first (and removed from the state
-// file), so a pod veth deleted without a detach does not linger.
+// ListDevices returns the attached devices sorted by name. It changes
+// nothing: an attachment whose interface is gone is left out of the answer,
+// and the link watcher (WatchDevices) forgets it. A failed interface dump
+// lists every attachment.
 func (v *Vinbero) ListDevices() []Device {
+	present, err := v.linkOps().links()
+	if err != nil {
+		v.logger.Warn("list devices: interface dump failed; listing every attachment", zap.Error(err))
+	}
 	v.devMu.Lock()
 	defer v.devMu.Unlock()
-	var gone []string
 	out := make([]Device, 0, len(v.attached))
 	for _, a := range v.attached {
-		if !v.alive(a) {
-			if !a.Config {
-				gone = append(gone, a.Name)
-			}
-			v.dropLocked(a, "interface is gone")
+		if idx, ok := present[a.Name]; present != nil && (!ok || idx != a.Ifindex) {
 			continue
 		}
 		out = append(out, a.Device)
-	}
-	if len(gone) > 0 && v.resMgr != nil {
-		if err := v.resMgr.RemoveDevices(gone...); err != nil {
-			v.logger.Warn("persist state after dropping vanished devices", zap.Error(err))
-		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

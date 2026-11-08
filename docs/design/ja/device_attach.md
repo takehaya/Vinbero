@@ -26,9 +26,9 @@ bpf_link は pin しません。attach は daemon の lifetime に縛られ、da
 | 状況 | 結果 |
 |---|---|
 | interface 名が不正 (空、15 byte 超、`/` を含むなど) / mode が不明 | `INVALID_ARGUMENT` |
-| interface が存在しない / detach 対象が attach されていない | `NOT_FOUND` |
+| attach 対象の interface が存在しない / detach 対象の interface はあるが attach されていない | `NOT_FOUND` |
 | 別の mode で attach 済み / `internal.devices` の device を detach しようとした | `FAILED_PRECONDITION` |
-| detach 対象の interface が既に消えている | 成功 (state からも消す) |
+| detach 対象の interface が既に消えている (link の削除イベントで記録が先に消えた場合も) | 成功 (state からも消す) |
 | attach されていないが state に記録が残っている (前回の detach で state の書き込みに失敗した、再起動時に attach できなかった) | 成功 (state を書き直す) |
 
 CNI の DEL は冪等である必要があるので、呼び出し側は detach の `NOT_FOUND` を成功として扱えます。
@@ -61,13 +61,13 @@ state への書き込みに失敗した場合、attach / detach の結果は残�
 
 ## 消えた interface の後始末
 
-interface を削除すると kernel は XDP と TCX を外しますが、daemon の記録は残ります。記録の後始末は次の 3 か所で行います。
+interface を削除すると kernel は XDP と TCX を外します。daemon の記録は次のように片付けます。
 
-- `DeviceList` は interface が消えた記録 (その名前の interface が無い、または ifindex が変わった。lookup 自体の失敗では落としません) を落とし、state からも外します
+- daemon は netlink の link イベント (`RTM_DELLINK`) を購読し、attach 中の interface が削除されると、その記録を閉じて state からも外します。bridge から port が外れたときも `RTM_DELLINK` (family `AF_BRIDGE`) が届くので、名前で引き直して interface が本当に無い (または ifindex が変わった) ことを確かめてから外します
+- 購読が失敗した場合 (受信 buffer の溢れなど) は購読し直します。購読のたびに、まず全 interface を 1 回 dump して消えた記録を外すので、購読していない間の削除も取りこぼしません
+- `DeviceList` は何も変更しません。1 回の dump で interface を引き、消えた interface の記録は一覧から除くだけです
 - `DeviceAttach` は、同じ名前で ifindex が変わった interface (作り直された veth) を見つけると、古い link を閉じて attach し直します
 - `DeviceDetach` は interface が消えていても成功します
-
-netlink の link 削除イベントは購読していないので、`DeviceList` を呼ぶまで記録は残ります。害はなく、残った記録は次の list、attach、再起動のいずれかで消えます。
 
 ## bridge member の実行時追加
 

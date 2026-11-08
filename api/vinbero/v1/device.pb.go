@@ -202,7 +202,10 @@ type DeviceDetachRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // interface name; NOT_FOUND when it is not attached
+	// interface name. Succeeds when the interface is gone; NOT_FOUND when it
+	// exists but is neither attached nor recorded in the state file (a detach
+	// whose state write failed can be retried)
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 }
 
 func (x *DeviceDetachRequest) Reset() {
@@ -325,7 +328,7 @@ type DeviceListResponse struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Devices []*Device `protobuf:"bytes,1,rep,name=devices,proto3" json:"devices,omitempty"` // sorted by name; attachments whose interface is gone are dropped first
+	Devices []*Device `protobuf:"bytes,1,rep,name=devices,proto3" json:"devices,omitempty"` // sorted by name; attachments whose interface is gone are left out
 }
 
 func (x *DeviceListResponse) Reset() {

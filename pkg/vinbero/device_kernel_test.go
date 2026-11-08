@@ -6,11 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/takehaya/vinbero/pkg/config"
+	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"go.uber.org/zap"
@@ -198,5 +201,60 @@ func TestReconcileDevices_Kernel_VanishedInterface(t *testing.T) {
 	}
 	if got := v.GetResourceManager().ListDevices(); len(got) != 0 {
 		t.Errorf("state devices = %v", got)
+	}
+}
+
+// The link watcher forgets a runtime attachment when its veth is deleted,
+// and keeps it when the veth only leaves a bridge (which also sends an
+// RTM_DELLINK, for the bridge port).
+func TestWatchDevices_Kernel(t *testing.T) {
+	withKernelNetns(t)
+	addVeth(t, "kdw0", "kdw0p")
+	addVeth(t, "kdw1", "kdw1p")
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	v := newKernelVinbero(t, statePath)
+	defer func() { _ = v.Close() }()
+	for _, n := range []string{"kdw0", "kdw1"} {
+		if _, err := v.AttachDevice(n, ""); err != nil {
+			t.Fatalf("AttachDevice(%s): %v", n, err)
+		}
+	}
+	if err := v.WatchDevices(); err != nil {
+		t.Fatalf("WatchDevices: %v", err)
+	}
+	recorded := func(name string) bool {
+		return slices.ContainsFunc(v.GetResourceManager().ListDevices(), func(d netresource.ManagedDevice) bool {
+			return d.Name == name
+		})
+	}
+
+	br := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: "kdwbr"}}
+	if err := netlink.LinkAdd(br); err != nil {
+		t.Fatalf("bridge add: %v", err)
+	}
+	l1, _ := netlink.LinkByName("kdw1")
+	if err := netlink.LinkSetMaster(l1, br); err != nil {
+		t.Fatalf("enslave: %v", err)
+	}
+	if err := netlink.LinkSetNoMaster(l1); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	l0, _ := netlink.LinkByName("kdw0")
+	if err := netlink.LinkDel(l0); err != nil {
+		t.Fatalf("LinkDel: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for recorded("kdw0") && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if recorded("kdw0") {
+		t.Fatal("deleted veth still recorded in the state")
+	}
+	if !recorded("kdw1") {
+		t.Error("a veth released from a bridge was forgotten")
+	}
+	if got := v.ListDevices(); len(got) != 1 || got[0].Name != "kdw1" {
+		t.Errorf("ListDevices = %+v, want only kdw1", got)
 	}
 }
