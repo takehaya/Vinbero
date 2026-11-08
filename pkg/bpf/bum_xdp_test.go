@@ -566,9 +566,9 @@ func TestBumPlanFromIngress(t *testing.T) {
 
 	shBefore := statCount(t, c.h.mapOps, "SPLIT_HORIZON_TX")
 	plan := c.ingress(t, l2)
-	if plan.SrcIfindex != 1 || plan.BdId != bumTestBD || plan.VlanId != 100 || int(plan.Len) != len(l2) {
-		t.Errorf("plan header = src %d bd %d vlan %d len %d, want 1/%d/100/%d",
-			plan.SrcIfindex, plan.BdId, plan.VlanId, plan.Len, bumTestBD, len(l2))
+	if plan.SrcIfindex != 1 || plan.BdId != bumTestBD || int(plan.Len) != len(l2) {
+		t.Errorf("plan header = src %d bd %d len %d, want 1/%d/%d",
+			plan.SrcIfindex, plan.BdId, plan.Len, bumTestBD, len(l2))
 	}
 	type up struct {
 		ifindex uint32

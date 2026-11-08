@@ -45,7 +45,7 @@ xdp モードの BD では kernel の bridge が MAC を学習しないため、
 
 plan の中身は次のとおりです。
 
-- `seq`（照合用）、送信元 AC の ifindex、`bd_id`、`vlan_id`、フレーム長
+- `seq`（照合用）、送信元 AC の ifindex、`bd_id`、フレーム長
 - uplink ごと（最大 8 個）の項目: uplink の ifindex、送るスロットの集合（ビット i がスロット i、小さい順に割り当てる）、個数 `n`、割り当て済みの数 `next_idx`、そのデバイスがこの BD のローカル AC でもあるか（`local`。送信元 AC 自身なら 0）。項目は、devmap にスロットのエントリーがある uplink すべてに作ります（送るスロットが 0 個でも）
 - ingress 時点の `ctx->data`（共有バッファの検出用、後述）
 

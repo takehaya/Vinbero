@@ -37,27 +37,16 @@
 #define BUM_MODE_INHERIT 0
 #define BUM_MODE_TC      1
 #define BUM_MODE_XDP     2
-#define BUM_MODE_AUTO    3 // reserved: per-frame tc/xdp classification
 // An xdp-mode BD on a host that cannot run xdp mode (the control plane's
 // startup check): the tc path, each BUM frame counted as BUM_XDP_FALLBACK.
 #define BUM_MODE_TC_FALLBACK 4
 
-// Reserved for auto mode: which BUM classes keep the tc + bridge path.
-#define BUM_SLOW_LINK_LOCAL (1u << 0)
-#define BUM_SLOW_HOST_MAC   (1u << 1)
-#define BUM_SLOW_ARP_ND     (1u << 2)
-#define BUM_SLOW_IP_MCAST   (1u << 3)
-#define BUM_SLOW_ALL        (1u << 31)
-
 struct bd_config {
     __u8 bum_mode;            // BUM_MODE_*
-    __u8 _pad;
-    __u8 host_mac[ETH_ALEN];  // reserved (auto mode)
-    __u32 slow_mask;          // reserved (auto mode)
-    __u32 _reserved;
-} __attribute__((packed));
+    __u8 _pad[3];
+};
 
-_Static_assert(sizeof(struct bd_config) == 16, "bd_config ABI must remain 16 bytes");
+_Static_assert(sizeof(struct bd_config) == 4, "bd_config layout");
 
 // Devmap key of remote flood slot i. Local ACs are keyed by their ifindex,
 // which never has the top bit set.
@@ -154,11 +143,10 @@ struct bum_plan {
     __u64 data;               // ingress ctx->data: detects copies sharing one buffer
     __u32 src_ifindex;        // source AC
     __u16 bd_id;
-    __u16 vlan_id;
     __u16 len;                // frame length as broadcast
     __u8 n_uplinks;
     __u8 shared;              // remote copies seen on the ingress buffer
-    __u32 _pad;
+    __u8 _pad[6];
     struct bum_plan_uplink up[BUM_PLAN_MAX_UPLINKS];
 };
 
@@ -244,7 +232,6 @@ __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
     plan->data = (__u64)(long)ctx->data;
     plan->src_ifindex = src_if;
     plan->bd_id = (__u16)bd_id;
-    plan->vlan_id = (__u16)vlan_id;
     plan->len = (__u16)pkt_len;
     plan->n_uplinks = 0;
     plan->shared = 0;

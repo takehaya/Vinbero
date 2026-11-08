@@ -29,12 +29,9 @@ type BpfAuxOwner struct {
 }
 
 type BpfBdConfig struct {
-	_        structs.HostLayout
-	BumMode  uint8
-	Pad      uint8
-	HostMac  [6]uint8
-	SlowMask uint32
-	Reserved uint32
+	_       structs.HostLayout
+	BumMode uint8
+	Pad     [3]uint8
 }
 
 type BpfBdLocalEsiVal struct {
@@ -81,11 +78,10 @@ type BpfBumPlan struct {
 	Data       uint64
 	SrcIfindex uint32
 	BdId       uint16
-	VlanId     uint16
 	Len        uint16
 	N_uplinks  uint8
 	Shared     uint8
-	Pad        uint32
+	Pad        [6]uint8
 	Up         [8]struct {
 		_       structs.HostLayout
 		Ifindex uint32
