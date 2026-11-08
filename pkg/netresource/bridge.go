@@ -207,13 +207,12 @@ func createBridgeNetlink(name string, members []string) (uint32, error) {
 	return uint32(link.Attrs().Index), nil
 }
 
+// enslaveInterface enslaves a member named at create or attach time to
+// master, moving it from another master if it has one (see enslave).
 func enslaveInterface(memberName string, master netlink.Link) error {
 	memberLink, err := netlink.LinkByName(memberName)
 	if err != nil {
 		return fmt.Errorf("member interface %s not found: %w", memberName, err)
 	}
-	if err := netlink.LinkSetMaster(memberLink, master); err != nil {
-		return fmt.Errorf("enslave %s to %s: %w", memberName, master.Attrs().Name, err)
-	}
-	return nil
+	return enslave(memberLink, master, true)
 }

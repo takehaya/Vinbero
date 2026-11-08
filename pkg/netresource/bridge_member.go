@@ -15,22 +15,27 @@ var (
 	// ErrPersist: the kernel change was made but the state file could not
 	// be written; a retry writes it.
 	ErrPersist = errors.New("persist state")
+	// ErrEnslavedElsewhere: the port already has another master.
+	ErrEnslavedElsewhere = errors.New("port is enslaved to another device")
 )
 
-// enslaveIfFree enslaves port to br unless it already is. A port enslaved to
-// another device is refused rather than moved.
-func enslaveIfFree(port, br netlink.Link) error {
-	switch master := port.Attrs().MasterIndex; master {
-	case br.Attrs().Index:
+// enslave makes master the port's master. A port already enslaved to master
+// is left alone. A port enslaved to another device is moved when move is
+// set (members named at create or attach time, which the caller placed
+// deliberately) and refused with ErrEnslavedElsewhere otherwise (members
+// added at runtime, whose name may have been reused by an unrelated port).
+func enslave(port, master netlink.Link, move bool) error {
+	switch cur := port.Attrs().MasterIndex; {
+	case cur == master.Attrs().Index:
 		return nil
-	case 0:
-		if err := netlink.LinkSetMaster(port, br); err != nil {
-			return fmt.Errorf("enslave %s to %s: %w", port.Attrs().Name, br.Attrs().Name, err)
-		}
-		return nil
-	default:
-		return fmt.Errorf("interface %s is enslaved to another device (ifindex %d); release it first", port.Attrs().Name, master)
+	case cur != 0 && !move:
+		return fmt.Errorf("%w: interface %s is enslaved to another device (ifindex %d); release it first",
+			ErrEnslavedElsewhere, port.Attrs().Name, cur)
 	}
+	if err := netlink.LinkSetMaster(port, master); err != nil {
+		return fmt.Errorf("enslave %s to %s: %w", port.Attrs().Name, master.Attrs().Name, err)
+	}
+	return nil
 }
 
 // AddBridgeMember enslaves one more port to a managed bridge and records it
@@ -50,7 +55,7 @@ func (m *ResourceManager) AddBridgeMember(bridge, member string) error {
 	if err != nil {
 		return fmt.Errorf("member %s lookup: %w", member, err)
 	}
-	if err := enslaveIfFree(port, br); err != nil {
+	if err := enslave(port, br, false); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -134,7 +139,7 @@ func (m *ResourceManager) enslaveRuntimeMembers(bridge string, ifindex uint32, m
 				zap.String("bridge", bridge), zap.String("member", member))
 			continue
 		}
-		if err := enslaveIfFree(port, br); err != nil {
+		if err := enslave(port, br, false); err != nil {
 			m.logger.Warn("Reconcile: dropping bridge member",
 				zap.String("bridge", bridge), zap.String("member", member), zap.Error(err))
 			continue
