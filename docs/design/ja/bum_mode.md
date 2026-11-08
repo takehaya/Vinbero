@@ -105,7 +105,7 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 - PREEMPT_RT のカーネルでは使えません（起動時に拒否します）。
 - generic XDP では、broadcast のコピーにそれぞれ別のバッファを渡すカーネルが必要です。そうでないカーネルでは tc モードで動きます（前節）。
 - native XDP では、AC のドライバーが XDP の metadata を扱えること（tc モードの VNBU マーカーと同じ条件）と、redirect 先のデバイスがすべて XDP の redirect を受けられること（ドライバーが `ndo_xdp_xmit` を持つこと。veth は相手側に XDP program があるか GRO が有効なこと）が必要です。uplink への unicast もすべて egress program を 1 回通るので、そのぶん少し遅くなります。
-- native XDP では、plugin の program や、同じホストの vinbero 以外の XDP program から uplink へ `bpf_redirect` しないでください。`uplink_tx_map` を通らない redirect は、上の決まりを破ります。
+- native XDP では、同じホストの vinbero 以外の XDP program から uplink へ `bpf_redirect` しないでください。`uplink_tx_map` を通らない redirect は、上の決まりを破ります。vinbero の plugin は `bpf_redirect` を呼べない（読み込み時の検査で拒否されます）ので、この心配はありません。
 - flood の対象は BD の HeadendL2 で登録した AC だけです。bridge の他のポートや bridge 自身には届きません。
 - AC の VLAN tag は、ローカルへのコピーでも既知 unicast でもリモートへのコピーでも、そのまま運びます。BD のすべての AC が同じ VLAN ID なら、これは bridge と同じ結果です（bridge のメンバーがポートそのものでも、ポート上の VLAN デバイスでも）。VLAN ID の違う AC が混ざる BD では、フレームが他の AC でどう見えるべきかは bridge の構成で決まります（ポート上の VLAN デバイスをメンバーにすれば、bridge は tag を付け替えます）。同じポートの別の VLAN どうしも、bridge を通らなければ届きません。そこで、このような BD は tc モードで動かします（前述）。
 - devmap は 1 BD あたり 32 エントリー（ローカル AC のデバイスとリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。収まらない BD は tc モードで動かします。
