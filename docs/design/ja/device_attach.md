@@ -1,0 +1,86 @@
+# Device の実行時 attach
+
+`internal.devices` に書いた interface は起動時に data plane に載りますが、起動後に作られる interface (CNI plugin が pod ごとに作る veth など) は載せられませんでした。`DeviceService` は daemon を止めずに interface を attach / detach し、その状態を再起動後も保ちます。
+
+## attach の単位
+
+attach は interface ごとに管理します。1 つの attach は XDP の entry program (`vinbero_main`) と TCX ingress の program (`vinbero_tc_ingress`、BUM 用) の組です。
+
+- XDP を先に attach し、TCX の attach に失敗したら XDP を外して失敗を返します。片方だけ載った interface は残りません
+- mode は XDP の attach mode で、`driver` / `generic` / `offload` のいずれかです。指定しなければ `internal.bpf.device_mode` を使います。veth のように native XDP の挙動が kernel に依存する interface は、attach ごとに `generic` を指定できます
+- 同じ interface を同じ mode で attach し直すと、kernel に触れず成功します。別の mode で attach し直すと `FAILED_PRECONDITION` で拒否するので、先に detach します
+- `internal.devices` の interface も同じ経路で attach します。config が持ち主なので state file には記録せず、detach は拒否し、mode は `internal.bpf.device_mode` に固定します
+
+bpf_link は pin しません。attach は daemon の lifetime に縛られ、daemon が終了すると kernel から外れます。再起動後の復旧は state file からの再 attach で行います ([persistence.md](persistence.md) の他の資源と同じ考え方です)。
+
+## API
+
+| 操作 | RPC | CLI |
+|---|---|---|
+| attach | `DeviceService/DeviceAttach` | `vbctl device attach --name I [--mode generic]` |
+| detach | `DeviceService/DeviceDetach` | `vbctl device detach --name I` |
+| 一覧 | `DeviceService/DeviceList` | `vbctl device list` |
+
+`device list` の `SOURCE` 列は、`internal.devices` 由来なら `config`、RPC で attach したものなら `api` です。
+
+| 状況 | 結果 |
+|---|---|
+| interface 名が不正 (空、15 byte 超、`/` を含むなど) / mode が不明 | `INVALID_ARGUMENT` |
+| interface が存在しない / detach 対象が attach されていない | `NOT_FOUND` |
+| 別の mode で attach 済み / `internal.devices` の device を detach しようとした | `FAILED_PRECONDITION` |
+| detach 対象の interface が既に消えている | 成功 (state からも消す) |
+
+CNI の DEL は冪等である必要があるので、呼び出し側は detach の `NOT_FOUND` を成功として扱えます。
+
+## 永続化と再起動
+
+RPC で attach した device は state file (`settings.state_path`) の `devices` に名前と mode を記録します。
+
+```json
+{
+  "vrfs": [],
+  "bridges": [],
+  "devices": [{"name": "veth1a2b3c", "mode": "generic"}]
+}
+```
+
+起動時の順序は次のとおりです。
+
+1. `internal.devices` を attach します。失敗すると起動を中止します (従来どおり)
+2. `netresource.Reconcile` が VRF と bridge を復元します
+3. state の `devices` を記録された mode で attach し直します
+
+3 は fail-closed にしていません。interface が消えている entry (daemon の停止中に pod が消えた、host が再起動した) と、attach に失敗した entry は warning を出して state から外し、起動は続けます。1 つの veth のために node 全体の data plane を止めないためです。`internal.devices` に移った名前の entry も、config が持ち主になるので外します。
+
+state への書き込みに失敗した場合、attach / detach の結果は残したままエラーを返します。どちらも冪等なので retry すれば state も収束します。
+
+## 消えた interface の後始末
+
+interface を削除すると kernel は XDP と TCX を外しますが、daemon の記録は残ります。記録の後始末は次の 3 か所で行います。
+
+- `DeviceList` は interface が消えた記録 (その名前の interface が無い、または ifindex が変わった。lookup 自体の失敗では落としません) を落とし、state からも外します
+- `DeviceAttach` は、同じ名前で ifindex が変わった interface (作り直された veth) を見つけると、古い link を閉じて attach し直します
+- `DeviceDetach` は interface が消えていても成功します
+
+netlink の link 削除イベントは購読していないので、`DeviceList` を呼ぶまで記録は残ります。害はなく、残った記録は次の list、attach、再起動のいずれかで消えます。
+
+## bridge member の実行時追加
+
+L2 で使う veth は bridge に enslave する必要があります。`VrfService` の `VrfBridgeMemberAdd` / `VrfBridgeMemberRemove` (CLI は `vbctl vrf bridge-member-add|bridge-member-remove --vrf X --interface I`) は、attach 済みの bridge facet に port を 1 つずつ足し引きします。呼び出し側が直接 `ip link set master` すると state と食い違い、再起動時の Reconcile で member が失われるため、この RPC を通します。
+
+- add は port を enslave し、state の bridge record の `runtime_members` に記録します。既に member なら何もせず成功します。別の device に enslave されている port は付け替えずに拒否します
+- remove は port を release し、`members` と `runtime_members` の両方から外します。port が消えている場合と member でない場合も成功します
+- Reconcile は `members` (attach 時に指定した port) が欠けていれば従来どおり起動を拒否しますが、`runtime_members` の port が欠けていれば warning を出して外し、起動を続けます
+- `VrfShow` の bridge の `members` は両方を合わせたものです
+
+member の追加と削除は `VrfBridgeAttach` と同じ mutex の下で行います。FDBWatcher と EVPN は bridge 単位で動くので、member の増減では何もしません。
+
+## 排他
+
+attach の表は `pkg/vinbero` が mutex 1 つで守ります。attach / detach / list / 起動時の再 attach と終了時の一括 detach はこの mutex の下で行い、state file への書き込みもその中で行います。そのため同じ interface への attach と detach が並行しても、kernel と state の順序は入れ替わりません。`DeviceService` の handler は lock を持ちません。
+
+## 関連ドキュメント
+
+- [persistence.md](persistence.md): state file と再起動時の挙動
+- [vrf.md](vrf.md): VRF オブジェクトと bridge facet
+- [configuration.md](configuration.md): `internal.devices` と `internal.bpf.device_mode`

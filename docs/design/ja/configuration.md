@@ -17,7 +17,7 @@ settings:    # 挙動フラグと map capacity
 
 ### `internal.devices` (必須)
 
-XDP をアタッチするインターフェース名の配列。`make bpf-gen` 済みの BPF オブジェクトが各デバイスの ingress に attach されます。
+XDP をアタッチするインターフェース名の配列。`make bpf-gen` 済みの BPF オブジェクトが各デバイスの ingress に attach されます。起動後に作られる interface は `vbctl device attach` で追加できます ([device_attach.md](device_attach.md))。
 
 ```yaml
 internal:
