@@ -272,6 +272,7 @@ func (s *Server) Setup() {
 		grantLease = s.cplaneMgr.EndtVRFGrantLease()
 	}
 	vrfServer := NewVrfServer(s.vrfBgpMgr.VRF(), s.mapOps, s.resMgr, s.mapOps, s.vrfBgpMgr, s.resMgr, s.fdbWatcher, s.evpnCoord, s.evpnReplay, vrfMu, grantLease)
+	vrfServer.SetConfigBridgeMembers(configBridgeMembers(s.cfg.VRFs))
 	path, handler = vinberov1connect.NewVrfServiceHandler(vrfServer)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered VrfService", zap.String("path", path))

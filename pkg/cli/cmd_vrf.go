@@ -152,7 +152,7 @@ func vrfCommand() *cli.Command {
 			},
 			{
 				Name:  "bridge-member-remove",
-				Usage: "Release an interface from the VRF's attached bridge",
+				Usage: "Release an interface from the VRF's attached bridge (members declared in the config file are refused; remove them there)",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "vrf", Required: true, Usage: "VRF name"},
 					&cli.StringFlag{Name: "interface", Required: true, Usage: "Interface to release"},

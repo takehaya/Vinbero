@@ -4696,7 +4696,9 @@ func (x *VrfBridgeMemberAddResponse) GetVrf() *Vrf {
 }
 
 // VrfBridgeMemberRemoveRequest releases a port from the VRF's attached
-// bridge and forgets it. A port that is gone, or not a member, succeeds.
+// bridge and forgets it. A port that is gone, or not a member, succeeds. A
+// port declared in the config file (vrfs.entries[].bridge.members) is
+// refused with FAILED_PRECONDITION: the config enslaves it again on start.
 type VrfBridgeMemberRemoveRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
