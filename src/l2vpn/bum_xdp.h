@@ -198,32 +198,39 @@ static __always_inline void bum_fdb_event_emit(__u16 bd_id, const __u8 *mac, __u
     bpf_ringbuf_output(&fdb_event_rb, &ev, sizeof(ev), 0);
 }
 
-// Write the plan of the frame about to be broadcast through the BD's flood
-// devmap. A slot is planned when the devmap holds its entry -- whose ifindex
-// is the slot's uplink, read from the very map the broadcast walks -- and it
-// passes the tc path's per-peer checks: a bd_peer exists, is not
-// flood_exclude, and is not on the source AC's Ethernet Segment.
-// Returns 0, or -1 when no plan could be written.
+// Return values of bum_xdp_broadcast other than an XDP action: the frame
+// takes the tc path instead.
+#define BUM_BCAST_NO_DEVMAP (-1)
+
+// Plan the frame's remote copies and broadcast it through the BD's flood
+// devmap. Plan and broadcast use the one devmap this function looked up, so
+// a concurrent rebuild of the BD cannot give them different member lists.
 //
+// A slot is planned when the devmap holds its entry -- whose ifindex is the
+// slot's uplink -- and it passes the tc path's per-peer checks: a bd_peer
+// exists, is not flood_exclude, and is not on the source AC's Ethernet
+// Segment.
+//
+// Returns the XDP action, or BUM_BCAST_NO_DEVMAP when the BD has no devmap.
 // A global function on purpose: the verifier checks it once, not once per
 // path of vinbero_main that reaches the flood.
-__noinline int bum_plan_write(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
+__noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
 {
     if (!ctx)
-        return -1;
+        return BUM_BCAST_NO_DEVMAP;
     __u32 bd_key = bd_id;
     void *flood = bpf_map_lookup_elem(&bum_flood_map, &bd_key);
     if (!flood)
-        return -1;
+        return BUM_BCAST_NO_DEVMAP;
     __u32 zero = 0;
     __u64 *seqp = bpf_map_lookup_elem(&bum_seq, &zero);
     if (!seqp)
-        return -1;
+        return BUM_BCAST_NO_DEVMAP;
     __u64 seq = (*seqp)++;
     __u32 k = seq & (BUM_PLAN_RING_SIZE - 1);
     struct bum_plan *plan = bpf_map_lookup_elem(&bum_plan_ring, &k);
     if (!plan)
-        return -1;
+        return BUM_BCAST_NO_DEVMAP;
 
     __u32 src_if = ctx->ingress_ifindex;
     __u64 pkt_len = (__u64)((long)ctx->data_end - (long)ctx->data);
@@ -278,7 +285,9 @@ __noinline int bum_plan_write(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
         plan->up[u].n++;
     }
     plan->n_uplinks = (__u8)n_up;
-    return 0;
+
+    STATS_INC(STATS_BUM_XDP_FLOOD, pkt_len);
+    return bpf_redirect_map(flood, 0, BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS);
 }
 
 // BUM that entered on a local AC of a tc-mode BD: mark it for the TC
@@ -298,22 +307,13 @@ static __always_inline int bum_tc_flood_from_ac(struct xdp_md *ctx, __u8 bum_mod
 static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id, __u16 vlan_id)
 {
     __u64 pkt_len = (__u64)((long)ctx->data_end - (long)ctx->data);
-    __u32 key = bd_id;
-    void *inner = bpf_map_lookup_elem(&bum_flood_map, &key);
-    if (!inner) {
+    int act = bum_xdp_broadcast(ctx, bd_id, vlan_id);
+    if (act < 0) {
         STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
         xdp_write_bum_meta(ctx, vlan_id);
         return XDP_PASS;
     }
-    // Fails only when the devmap went away since the lookup above (the
-    // control plane cleared the BD): take the tc path then too.
-    if (bum_plan_write(ctx, bd_id, vlan_id) != 0) {
-        STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
-        xdp_write_bum_meta(ctx, vlan_id);
-        return XDP_PASS;
-    }
-    STATS_INC(STATS_BUM_XDP_FLOOD, pkt_len);
-    return bpf_redirect_map(inner, 0, BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS);
+    return act;
 }
 
 // Flood after decap in an xdp-mode BD: local ACs only. Returns -1 when the

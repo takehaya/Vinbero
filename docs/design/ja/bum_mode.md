@@ -16,7 +16,7 @@ Bridge Domain（BD）の BUM（broadcast、未知 unicast、multicast）フレ�
 1. XDP の L2 headend がいつもどおり送信元 MAC を学習し、宛先が multicast か FDB miss なら、BD の devmap（`bum_flood_map[bd_id]`）で broadcast します。
 2. devmap のメンバーはローカル AC（key は ifindex、program なし）と、リモートの flood スロット（key は `0x80000000 | index`）です。スロットのエントリーの値は、その peer へ向かう uplink の ifindex と egress program です。egress program は全エントリー共通の 1 本（`bum_remote_egress`）です。同じ uplink の先に peer が k 個あれば、その uplink のエントリーも k 個になり、broadcast はその uplink 向けに k 個のコピーを作ります。
 3. ingress program は broadcast の直前に、そのフレームの複製計画（以下 plan）を CPU ごとのリングに書きます（次節）。
-4. `bpf_redirect_map(BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS)` で broadcast します。
+4. `bpf_redirect_map(BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS)` で broadcast します。plan を書くときに引いた devmap をそのまま使うので、control plane が devmap を差し替えている最中でも、plan と broadcast が別々の版を見ることはありません。
 5. egress program はコピーごとに、plan から自分の uplink の項目を探して次のスロットを 1 つ取り、`bd_peer_map[{bd_id, スロット}]` の peer へ H.Encaps.L2（.Red）をかけて、FIB の結果で MAC を書き換えます。
 
 ローカルの既知 unicast は bridge を通さず、FDB の出力ポートへ `bpf_redirect` します（入力ポートと同じなら破棄）。
@@ -85,7 +85,6 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 - AC と uplink が同じ物理ポートにある構成は対象外です（`BPF_F_EXCLUDE_INGRESS` で uplink へのコピーも除かれます）。
 - devmap は 1 BD あたり 32 エントリー（ローカル AC とリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。
 - `bum_plan_ring` は CPU ごとに 96 KiB（96 バイト × 1024）を使います。
-- control plane が devmap を差し替えている最中のフレームは、plan と broadcast が別々の版の devmap を見ることがあります。その場合のコピーは `BUM_PLAN_SURPLUS` か `BUM_EGRESS_DROP` で破棄されるか、届かないだけで、別の peer へ送られることはありません。
 - egress program は出力デバイスを変えられません。FIB の結果が devmap の uplink と違うコピーは破棄し、`BUM_UPLINK_MISMATCH` を数えます。control plane は uplink を宛先だけで引くので、peer への経路が ECMP で複数の uplink に分かれる構成では、一部の peer へのコピーが恒常的にこの理由で落ちます。このような構成では tc モードを使ってください。
 - egress program は、next hop の neighbor エントリーが解決していないコピーを破棄し、`BUM_EGRESS_DROP` を数えます（tc モードと違い、kernel に渡して解決させることはできません）。他の通信で解決すれば送られます。
 - uplink の MTU は「内側フレーム + 外側 IPv6 + SRH」以上にしてください（devmap の MTU 確認は encap 前の長さで行われます）。
