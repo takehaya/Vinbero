@@ -442,11 +442,11 @@ func newEgressCase(t *testing.T) *egressCase {
 	}
 	h.bumAC(1)
 	c := &egressCase{h: h, cpu: pinCPU(t), nexthop: nexthop, uplink: uint32(link.Index), uplinkOf: map[string]uint32{}}
-	c.sync = NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(seg [IPv6AddrLen]byte) (uint32, error) {
+	c.sync = NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(seg [IPv6AddrLen]byte) (BumUplink, error) {
 		if up, ok := c.uplinkOf[net.IP(seg[:]).String()]; ok {
-			return up, nil
+			return BumUplink{Ifindex: up}, nil
 		}
-		return c.uplink, nil
+		return BumUplink{Ifindex: c.uplink}, nil
 	}, nil)
 	return c
 }

@@ -98,6 +98,7 @@ func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Co
 		return nil, nil
 	}
 	bs := bpf.NewBumDevmapSync(obj, l2.EffectiveBumMode, bpf.RouteUplinkResolver, logger)
+	bs.SetNeighKeeper(bpf.KeepNeighResolved)
 	mapOps.SetBumDevmapSync(bs)
 	if err := bs.SyncAll(); err != nil {
 		logger.Warn("xdp BUM: initial devmap build incomplete", zap.Error(err))

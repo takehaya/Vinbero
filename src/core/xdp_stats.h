@@ -29,6 +29,7 @@ enum stats_counter {
     STATS_BUM_PLAN_STALE     = 14,  // xdp mode: remote copy whose replication plan is not its frame's
     STATS_BUM_PLAN_SURPLUS   = 15,  // xdp mode: remote copy beyond its uplink's planned slots
     STATS_BUM_SHARED_BUFFER  = 16,  // xdp mode: remote copy dropped, its buffer is shared with another
+    STATS_BUM_EGRESS_NO_NEIGH = 17, // xdp mode: remote copy dropped, the uplink next hop's neighbour is unresolved
     STATS_MAX,
 };
 

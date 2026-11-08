@@ -94,7 +94,7 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 - devmap は 1 BD あたり 32 エントリー（ローカル AC のデバイスとリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。収まらない BD は tc モードで動かします。
 - `bum_plan_ring` は CPU ごとに 96 KiB（96 バイト × 1024）を使います。
 - egress program は出力デバイスを変えられません。FIB の結果が devmap の uplink と違うコピーは破棄し、`BUM_UPLINK_MISMATCH` を数えます。control plane は uplink を宛先だけで引くので、peer への経路が ECMP で複数の uplink に分かれる構成では、一部の peer へのコピーが恒常的にこの理由で落ちます。このような構成では tc モードを使ってください。
-- egress program は、next hop の neighbor エントリーが解決していないコピーを破棄し、`BUM_EGRESS_DROP` を数えます（tc モードと違い、kernel に渡して解決させることはできません）。他の通信で解決すれば送られます。
+- egress program は、next hop の neighbor エントリーが解決していないコピーを kernel に渡して解決させることができません（tc モードやメインの program は `XDP_PASS` で渡します）。そこで control plane は、devmap を組み立てるたびに、各スロットの uplink の next hop（経路の gateway、on-link なら peer 自身）を managed の neighbor エントリー（`NTF_EXT_MANAGED`、`ip neigh` の `managed extern_learn`）にします。kernel は、通信がなくてもこのエントリーを解決し、解決したまま保ちます。next hop が応答しない間も定期的に解決を試みます（`extern_learn` は、失敗中のエントリーを neighbor の GC に消させないために付けます）。静的なエントリー（permanent、noarp）はそのままにします。managed にしたエントリーは、vinberod が止まっても残ります。まだ解決していないコピーは破棄し、`BUM_EGRESS_NO_NEIGH` を数えます。
 - uplink の MTU は「内側フレーム + 外側 IPv6 + SRH」以上にしてください（devmap の MTU 確認は encap 前の長さで行われます）。
 
 ## xdp モードで失う bridge の機能
@@ -141,5 +141,6 @@ settings:
 | `BUM_PLAN_STALE` | コピーと plan の seq・送信元 AC・長さが一致しなかった（破棄） |
 | `BUM_PLAN_SURPLUS` | uplink の plan に残りのスロットがないコピーだった（破棄） |
 | `BUM_SHARED_BUFFER` | コピーが他のコピーとバッファを共有していた（2 つ目以降を破棄） |
+| `BUM_EGRESS_NO_NEIGH` | uplink の next hop の neighbor エントリーが未解決で、コピーを破棄した |
 
 split horizon で落としたコピーは、TC モードと同じ `SPLIT_HORIZON_TX` に数えます。

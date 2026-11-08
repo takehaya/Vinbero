@@ -3,13 +3,16 @@ package bpf
 import (
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	vinberov1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 // dummyIfindex creates a dummy link: devmap entries must name a device
@@ -74,9 +77,9 @@ func TestBumDevmapSync(t *testing.T) {
 		resolved [][IPv6AddrLen]byte
 		ifUp     uint32 // the uplink of every peer: no AC of the BD
 	)
-	uplink := func(seg [IPv6AddrLen]byte) (uint32, error) {
+	uplink := func(seg [IPv6AddrLen]byte) (BumUplink, error) {
 		resolved = append(resolved, seg)
-		return ifUp, nil
+		return BumUplink{Ifindex: ifUp}, nil
 	}
 	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return mode }, uplink, zap.NewNop())
 	h.mapOps.SetBumDevmapSync(s)
@@ -189,7 +192,7 @@ func TestBumDevmapSync(t *testing.T) {
 
 	// An unresolvable uplink leaves only that slot out.
 	mode = BumModeXDP
-	s.uplink = func([IPv6AddrLen]byte) (uint32, error) { return 0, errors.New("no route") }
+	s.uplink = func([IPv6AddrLen]byte) (BumUplink, error) { return BumUplink{}, errors.New("no route") }
 	if err := s.SyncBD(bumTestBD); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +240,7 @@ func TestBumDevmapSync(t *testing.T) {
 // path rather than with a devmap that misses some of them.
 func TestBumDevmapSyncCapacity(t *testing.T) {
 	h := newXDPBumHelper(t)
-	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func([IPv6AddrLen]byte) (uint32, error) { return 1, nil }, zap.NewNop())
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func([IPv6AddrLen]byte) (BumUplink, error) { return BumUplink{Ifindex: 1}, nil }, zap.NewNop())
 	h.mapOps.SetBumDevmapSync(s)
 	t.Cleanup(func() { h.mapOps.SetBumDevmapSync(nil) })
 
@@ -274,5 +277,110 @@ func TestBumDevmapSyncCapacity(t *testing.T) {
 	}
 	if _, ok := s.unserved[bumTestBD]; !ok {
 		t.Error("the BD is not recorded as falling back")
+	}
+}
+
+// KeepNeighResolved turns a slot's next hop into a managed neighbour that
+// the kernel keeps trying to resolve without traffic, GC-exempt, and leaves
+// a static one alone.
+func TestKeepNeighResolved(t *testing.T) {
+	// Explicit MACs, as in adjacencyEnv: udevd rewrites a kernel-assigned
+	// veth MAC shortly after creation, and the address change flushes the
+	// device's neighbour table, managed entries included.
+	macA, _ := net.ParseMAC("02:ad:00:00:01:0a")
+	macB, _ := net.ParseMAC("02:ad:00:00:01:0b")
+	veth := &netlink.Veth{
+		LinkAttrs:        netlink.LinkAttrs{Name: "bumnb-a", HardwareAddr: macA},
+		PeerName:         "bumnb-b",
+		PeerHardwareAddr: macB,
+	}
+	if err := netlink.LinkAdd(veth); err != nil {
+		t.Skipf("cannot create veth: %v", err)
+	}
+	t.Cleanup(func() { _ = netlink.LinkDel(veth) })
+	addr := func(name, cidr string) (netlink.Link, uint32) {
+		t.Helper()
+		l, err := netlink.LinkByName(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, _ := netlink.ParseAddr(cidr)
+		a.Flags = unix.IFA_F_NODAD
+		if err := netlink.AddrAdd(l, a); err != nil {
+			t.Fatal(err)
+		}
+		return l, uint32(l.Attrs().Index)
+	}
+	linkA, ifA := addr("bumnb-a", "fd00:bb::1/64")
+	linkB, _ := addr("bumnb-b", "fd00:bb::2/64")
+	if err := netlink.LinkSetUp(linkA); err != nil {
+		t.Fatal(err)
+	}
+
+	find := func(ip net.IP) *netlink.Neigh {
+		neighs, err := netlink.NeighList(int(ifA), netlink.FAMILY_V6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range neighs {
+			if n.IP.Equal(ip) {
+				return &n
+			}
+		}
+		return nil
+	}
+	waitFor := func(what string, limit time.Duration, ok func(*netlink.Neigh) bool, ip net.IP) *netlink.Neigh {
+		t.Helper()
+		deadline := time.Now().Add(limit)
+		for {
+			n := find(ip)
+			if n != nil && ok(n) {
+				return n
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: neighbour = %+v", what, n)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	// The next hop does not answer yet: its solicits run out and the entry
+	// fails, staying managed and exempt from GC.
+	nh := net.ParseIP("fd00:bb::2")
+	if err := KeepNeighResolved(ifA, nh); err != nil {
+		t.Fatal(err)
+	}
+	failed := waitFor("next hop did not fail while unreachable", 15*time.Second,
+		func(n *netlink.Neigh) bool { return n.State&netlink.NUD_FAILED != 0 }, nh)
+	if failed.FlagsExt&netlink.NTF_EXT_MANAGED == 0 || failed.Flags&netlink.NTF_EXT_LEARNED == 0 {
+		t.Errorf("failed entry: flags %#x, ext flags %#x; want extern_learn and managed", failed.Flags, failed.FlagsExt)
+	}
+
+	// Once it answers, the kernel's periodic probe resolves it, no traffic
+	// involved (after a failure that takes up to the 5 s probe interval
+	// plus a round of solicits).
+	if err := netlink.LinkSetUp(linkB); err != nil {
+		t.Fatal(err)
+	}
+	const reachable = netlink.NUD_REACHABLE | netlink.NUD_STALE | netlink.NUD_DELAY | netlink.NUD_PROBE
+	waitFor("next hop not resolved after it came up", 20*time.Second,
+		func(n *netlink.Neigh) bool { return n.State&reachable != 0 && len(n.HardwareAddr) != 0 }, nh)
+	// Idempotent.
+	if err := KeepNeighResolved(ifA, nh); err != nil {
+		t.Fatal(err)
+	}
+
+	static := net.ParseIP("fd00:bb::3")
+	if err := netlink.NeighAdd(&netlink.Neigh{
+		LinkIndex: int(ifA), Family: netlink.FAMILY_V6, IP: static,
+		HardwareAddr: net.HardwareAddr{0x02, 0, 0, 0, 0, 3}, State: netlink.NUD_PERMANENT,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := KeepNeighResolved(ifA, static); err != nil {
+		t.Fatal(err)
+	}
+	if n := find(static); n == nil || n.State != netlink.NUD_PERMANENT || n.FlagsExt&netlink.NTF_EXT_MANAGED != 0 {
+		t.Errorf("static neighbour changed: %+v", n)
 	}
 }

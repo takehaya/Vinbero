@@ -31,21 +31,69 @@ const BumSlotKeyBase uint32 = 0x80000000
 // bumDevmapMaxEntries matches BUM_DEVMAP_MAX_ENTRIES (inner devmap size).
 const bumDevmapMaxEntries = 32
 
-// UplinkResolver returns the ifindex a remote PE's first segment is routed
+// BumUplink is where a remote PE's copies leave: the device, and the next
+// hop on it (the gateway, or the PE itself when it is on link).
+type BumUplink struct {
+	Ifindex uint32
+	Nexthop net.IP
+}
+
+// UplinkResolver returns the uplink a remote PE's first segment is routed
 // out of. The devmap entry of a flood slot transmits on that device.
-type UplinkResolver func(firstSegment [IPv6AddrLen]byte) (uint32, error)
+type UplinkResolver func(firstSegment [IPv6AddrLen]byte) (BumUplink, error)
 
 // RouteUplinkResolver resolves through the kernel routing table of the
 // current network namespace.
-func RouteUplinkResolver(seg [IPv6AddrLen]byte) (uint32, error) {
-	routes, err := netlink.RouteGet(net.IP(seg[:]))
+func RouteUplinkResolver(seg [IPv6AddrLen]byte) (BumUplink, error) {
+	dst := net.IP(seg[:])
+	routes, err := netlink.RouteGet(dst)
 	if err != nil {
-		return 0, err
+		return BumUplink{}, err
 	}
 	if len(routes) == 0 || routes[0].LinkIndex == 0 {
-		return 0, fmt.Errorf("no route to %s", net.IP(seg[:]))
+		return BumUplink{}, fmt.Errorf("no route to %s", dst)
 	}
-	return uint32(routes[0].LinkIndex), nil
+	nh := routes[0].Gw
+	if nh == nil {
+		nh = dst
+	}
+	return BumUplink{Ifindex: uint32(routes[0].LinkIndex), Nexthop: nh}, nil
+}
+
+// KeepNeighResolved makes the neighbour entry of ip on ifindex a managed
+// one (NTF_EXT_MANAGED): the kernel resolves it and keeps it resolved
+// whether or not traffic uses it. It is marked extern_learn too, because
+// neighbour GC spares only those: a managed entry alone that is FAILED
+// while its next hop is down would be deleted and never probed again. The devmap egress program cannot hand an
+// unresolved next hop to the kernel the way the main program's XDP_PASS
+// does, so without this a peer that only gets BUM would wait for other
+// traffic to resolve its uplink's next hop. Static entries (permanent,
+// noarp) and managed ones are left as they are.
+func KeepNeighResolved(ifindex uint32, ip net.IP) error {
+	family := netlink.FAMILY_V6
+	if ip.To4() != nil {
+		family = netlink.FAMILY_V4
+	}
+	neighs, err := netlink.NeighList(int(ifindex), family)
+	if err != nil {
+		return fmt.Errorf("list neighbours of %d: %w", ifindex, err)
+	}
+	for _, n := range neighs {
+		if !n.IP.Equal(ip) {
+			continue
+		}
+		if n.State&(netlink.NUD_PERMANENT|netlink.NUD_NOARP) != 0 || n.FlagsExt&netlink.NTF_EXT_MANAGED != 0 {
+			return nil
+		}
+		break
+	}
+	if err := netlink.NeighSet(&netlink.Neigh{
+		LinkIndex: int(ifindex), Family: family, IP: ip,
+		State: netlink.NUD_NONE, Flags: netlink.NTF_EXT_LEARNED, FlagsExt: netlink.NTF_EXT_MANAGED,
+	}); err != nil {
+		return fmt.Errorf("make neighbour %s on %d managed: %w", ip, ifindex, err)
+	}
+	return nil
 }
 
 // BumDevmapSync keeps the xdp-mode devmaps (bum_flood_map, bum_local_map) in
@@ -62,6 +110,9 @@ type BumDevmapSync struct {
 	modeOf    func(bdID uint16) uint8
 	uplink    UplinkResolver
 	logger    *zap.Logger
+	// keepNeigh, when set, keeps each flood slot's next hop resolved
+	// (KeepNeighResolved).
+	keepNeigh func(ifindex uint32, nexthop net.IP) error
 	// unserved holds the xdp-mode BDs the sync leaves on the tc path,
 	// with the reason (unservable), so the change is logged once.
 	unserved map[uint16]string
@@ -91,6 +142,14 @@ func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink Uplink
 		logger:   logger,
 		unserved: map[uint16]string{},
 	}
+}
+
+// SetNeighKeeper installs the hook that keeps the flood slots' next hops
+// resolved (KeepNeighResolved); nil disables it.
+func (s *BumDevmapSync) SetNeighKeeper(keep func(ifindex uint32, nexthop net.IP) error) {
+	s.mu.Lock()
+	s.keepNeigh = keep
+	s.mu.Unlock()
 }
 
 // devmapVal is struct bpf_devmap_val as written from userspace.
@@ -159,8 +218,9 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC) error {
 	}
 
 	type slot struct {
-		index  uint16
-		uplink uint32
+		index   uint16
+		uplink  uint32
+		nexthop net.IP
 	}
 	var slots []slot
 	for i := uint16(0); i < MaxBumNexthops; i++ {
@@ -184,7 +244,7 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC) error {
 				zap.String("segment", net.IP(peer.Segments[0][:]).String()), zap.Error(err))
 			continue
 		}
-		slots = append(slots, slot{index: i, uplink: up})
+		slots = append(slots, slot{index: i, uplink: up.Ifindex, nexthop: up.Nexthop})
 	}
 	if reason := unservable(acs, ifindexes, len(slots)); reason != "" {
 		return s.clearBDLocked(bdID, reason)
@@ -250,6 +310,17 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16, acs []bumAC) error {
 		return fmt.Errorf("bd %d: install flood devmap: %w", bdID, err)
 	}
 	s.noteServedLocked(bdID, "")
+	if s.keepNeigh != nil {
+		for _, sl := range slots {
+			if sl.nexthop == nil {
+				continue
+			}
+			if err := s.keepNeigh(sl.uplink, sl.nexthop); err != nil {
+				s.logger.Debug("xdp BUM: cannot keep a flood slot's next hop resolved",
+					zap.Uint16("bd_id", bdID), zap.Uint16("index", sl.index), zap.Error(err))
+			}
+		}
+	}
 	return nil
 }
 

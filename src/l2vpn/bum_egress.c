@@ -183,8 +183,16 @@ static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u3
     // uses too. The devmap entry fixed the egress device; a FIB answer that
     // disagrees (route change since the control plane resolved it) cannot
     // be honoured from here, so the copy is dropped and counted.
+    // An unresolved neighbour cannot be handed to the kernel to resolve
+    // from a devmap program: the control plane keeps the slots' next hops
+    // resolved instead (managed neighbour entries).
     __u32 oif = 0;
-    if (srv6_fib_lookup_and_update(ctx, ip6h, eth, &oif, src_if) != FIB_RESULT_REDIRECT)
+    int fib = srv6_fib_lookup_and_update(ctx, ip6h, eth, &oif, src_if);
+    if (fib == FIB_RESULT_NO_NEIGH) {
+        STATS_INC(STATS_BUM_EGRESS_NO_NEIGH, pkt_len);
+        return XDP_DROP;
+    }
+    if (fib != FIB_RESULT_REDIRECT)
         goto drop;
     if (oif != egress_if) {
         STATS_INC(STATS_BUM_UPLINK_MISMATCH, pkt_len);
