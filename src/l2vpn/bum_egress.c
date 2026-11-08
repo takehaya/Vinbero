@@ -80,9 +80,11 @@ static __always_inline int bum_egress_encap(struct xdp_md *ctx, struct headend_e
 }
 
 #define BUM_EGRESS_NOT_BUM 1
+#define BUM_EGRESS_NO_STRIP (-2)
 
 // Which frame a copy belongs to: its seq and source AC. Returns 0, -1 when
-// it cannot tell (drop), or BUM_EGRESS_NOT_BUM for a frame that is no BUM
+// it cannot tell (drop), BUM_EGRESS_NO_STRIP when the metadata could not be
+// removed (drop), or BUM_EGRESS_NOT_BUM for a frame that is no BUM
 // copy (native XDP only: a redirect through bum_tx_map, or a post-decap
 // flood copy).
 //
@@ -100,7 +102,7 @@ static __always_inline int bum_egress_frame(struct xdp_md *ctx, __u64 *seq, __u3
         *seq = m->seq;
         *src_if = m->src_ifindex;
         if (bpf_xdp_adjust_meta(ctx, (int)sizeof(struct bum_xdp_meta)))
-            return -1;
+            return BUM_EGRESS_NO_STRIP;
         return 0;
     }
     __u32 zero = 0;
@@ -234,6 +236,16 @@ drop:
     return XDP_DROP;
 }
 
+static __always_inline int bum_egress_frame_drop(struct xdp_md *ctx, int r)
+{
+    __u64 len = (__u64)((long)ctx->data_end - (long)ctx->data);
+    if (r == BUM_EGRESS_NO_STRIP)
+        STATS_INC(STATS_BUM_EGRESS_DROP, len);
+    else
+        STATS_INC(STATS_BUM_PLAN_STALE, len);
+    return XDP_DROP;
+}
+
 SEC("xdp/devmap")
 int bum_remote_egress(struct xdp_md *ctx)
 {
@@ -242,10 +254,8 @@ int bum_remote_egress(struct xdp_md *ctx)
     int r = bum_egress_frame(ctx, &seq, &src_if);
     if (r == BUM_EGRESS_NOT_BUM)
         return XDP_PASS;
-    if (r < 0) {
-        STATS_INC(STATS_BUM_PLAN_STALE, (__u64)((long)ctx->data_end - (long)ctx->data));
-        return XDP_DROP;
-    }
+    if (r < 0)
+        return bum_egress_frame_drop(ctx, r);
     return bum_remote_egress_body(ctx, seq, src_if, ctx->egress_ifindex);
 }
 
@@ -283,10 +293,8 @@ int bum_remote_egress_test(struct xdp_md *ctx)
     int r = bum_egress_frame(ctx, &seq, &src_if);
     if (r == BUM_EGRESS_NOT_BUM)
         return XDP_PASS;
-    if (r < 0) {
-        STATS_INC(STATS_BUM_PLAN_STALE, (__u64)((long)ctx->data_end - (long)ctx->data));
-        return XDP_DROP;
-    }
+    if (r < 0)
+        return bum_egress_frame_drop(ctx, r);
     if (!bum_xdp_native) {
         src_if = p->ingress_ifindex;
         __u32 rk = seq & (BUM_PLAN_RING_SIZE - 1);
