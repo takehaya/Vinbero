@@ -606,6 +606,78 @@ func TestBumPlanFromIngress(t *testing.T) {
 	}
 }
 
+// An AC on the device that is also the uplink of the BD's slots: that
+// device's local entry carries the egress program too, and its copies are
+// the slots' encapsulated ones plus one unchanged for the AC.
+func TestBumACOnUplink(t *testing.T) {
+	c := newEgressCase(t)
+	nh := c.nexthop.String()
+	l2 := bumFrame(t)
+	c.h.bumAC(c.uplink)
+	l2Mode := vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2
+	c.peer(t, 0, l2Mode, []string{nh, lastSegment(0).String()}, [ESILen]byte{}, false)
+	c.peer(t, 1, l2Mode, []string{nh, lastSegment(1).String()}, [ESILen]byte{}, false)
+
+	plan := c.ingress(t, l2)
+	if plan.N_uplinks != 1 || plan.Up[0].Ifindex != c.uplink || plan.Up[0].Slots != 0b11 || plan.Up[0].N != 2 || plan.Up[0].Local != 1 {
+		t.Fatalf("plan = %d uplinks, first %+v; want uplink %d, slots 0b11, n 2, local 1", plan.N_uplinks, plan.Up[0], c.uplink)
+	}
+	flood := devmapEntries(t, c.h.objs.BumFloodMap, bumTestBD)
+	if flood[c.uplink].ProgFD == 0 {
+		t.Error("the AC on the uplink has no egress program in the flood devmap")
+	}
+	if flood[1].ProgFD != 0 {
+		t.Error("an AC that is no uplink got the egress program")
+	}
+	if local := devmapEntries(t, c.h.objs.BumLocalMap, bumTestBD); local[c.uplink].ProgFD != 0 {
+		t.Error("the post-decap devmap got the egress program")
+	}
+
+	for _, slot := range []uint16{0, 1} {
+		ret, out := c.egress(t, 1, c.uplink, false, l2)
+		if ret != XDP_PASS {
+			t.Fatalf("copy for slot %d: action = %d, want XDP_PASS", slot, ret)
+		}
+		if got := net.IP(out[ethHeaderLen+ipv6HeaderLen+srhBaseLen : ethHeaderLen+ipv6HeaderLen+srhBaseLen+ipv6AddrLen]); !got.Equal(lastSegment(slot)) {
+			t.Errorf("copy for slot %d: SRH[0] = %v, want %v", slot, got, lastSegment(slot))
+		}
+	}
+	ret, out := c.egress(t, 1, c.uplink, false, l2)
+	if ret != XDP_PASS || !bytes.Equal(out[:len(l2)], l2) {
+		t.Fatalf("local copy: action = %d, frame changed = %v; want XDP_PASS, unchanged", ret, !bytes.Equal(out[:len(l2)], l2))
+	}
+	before := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS")
+	if ret, _ := c.egress(t, 1, c.uplink, false, l2); ret != XDP_DROP {
+		t.Fatalf("copy past the local one: action = %d, want XDP_DROP", ret)
+	}
+	if n := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS"); n != before+1 {
+		t.Errorf("BUM_PLAN_SURPLUS = %d, want %d", n, before+1)
+	}
+
+	t.Run("frame from the AC on the uplink", func(t *testing.T) {
+		pinCPU(t)
+		// The test runner's ingress device is lo: make lo the uplink of
+		// slot 1, so the source AC is on a planned slot's uplink.
+		c.uplinkOf[nh] = 1
+		plan := c.ingress(t, l2)
+		if plan.N_uplinks != 1 || plan.Up[0].Ifindex != 1 || plan.Up[0].N != 2 || plan.Up[0].Local != 0 {
+			t.Fatalf("plan = %d uplinks, first %+v; want uplink 1 (the source AC), n 2, local 0", plan.N_uplinks, plan.Up[0])
+		}
+		// Two slot copies (sent elsewhere by the FIB: dropped as a
+		// mismatch here), then the source AC's own copy: surplus.
+		for range 2 {
+			c.egress(t, 1, 1, false, l2)
+		}
+		before := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS")
+		if ret, _ := c.egress(t, 1, 1, false, l2); ret != XDP_DROP {
+			t.Fatalf("hairpin copy: action = %d, want XDP_DROP", ret)
+		}
+		if n := statCount(t, c.h.mapOps, "BUM_PLAN_SURPLUS"); n != before+1 {
+			t.Errorf("BUM_PLAN_SURPLUS = %d, want %d", n, before+1)
+		}
+	})
+}
+
 func TestBumRemoteEgressEncap(t *testing.T) {
 	c := newEgressCase(t)
 	nh := c.nexthop.String()

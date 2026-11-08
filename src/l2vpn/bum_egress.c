@@ -2,13 +2,15 @@
 // Included from xdp_prog.c — not compiled standalone.
 //
 // One program, bum_remote_egress, sits on every remote flood slot entry of
-// every BD devmap (bum_flood_map). The copies it sees of one frame are
-// identical, and all copies headed for one uplink also share the egress
+// every BD devmap (bum_flood_map), and on the local AC entries whose device
+// is also the uplink of a slot of the BD. The copies it sees of one frame
+// are identical, and all copies headed for one device also share the egress
 // device, so the program cannot tell from the copy which peer it is for.
 // It takes that from the frame's plan instead (bum_xdp.h): it finds the
-// uplink's entry, takes its next slot and builds that peer's H.Encaps.L2
-// headers. The plan also supplies the source AC and the BD, so the copy
-// itself is not parsed.
+// device's item, takes its next slot and builds that peer's H.Encaps.L2
+// headers; once the slots are used up, one more copy leaves unchanged when
+// the device is also a local AC. The plan also supplies the source AC and
+// the BD, so the copy itself is not parsed.
 //
 // The program contains no tail call (see the single-call-site invariant in
 // dispatch/l2_headend.c), and it returns XDP_PASS to transmit: XDP_REDIRECT
@@ -127,15 +129,21 @@ static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u3
             break;
         }
     }
-    // The devmap holds one entry per peer behind the uplink; the plan lists
-    // fewer when split horizon or flood_exclude removed some. The copies
-    // beyond the list are surplus.
+    // The devmap holds one entry per peer behind the uplink, plus the
+    // device's local AC entry when it is an AC of the BD too; the plan
+    // lists fewer slots when split horizon or flood_exclude removed some.
+    // The copies are identical, so which one becomes the local copy does
+    // not matter: the first one past the slots. The copies beyond that are
+    // surplus, among them the ingress AC's own when the broadcast had to
+    // include the ingress device (item.local is 0 there).
     if (!up) {
         STATS_INC(STATS_BUM_PLAN_SURPLUS, pkt_len);
         return XDP_DROP;
     }
     __u32 idx = up->next_idx++;
     if (idx >= up->n) {
+        if (idx == up->n && up->local)
+            return XDP_PASS;
         STATS_INC(STATS_BUM_PLAN_SURPLUS, pkt_len);
         return XDP_DROP;
     }

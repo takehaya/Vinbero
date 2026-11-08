@@ -69,10 +69,13 @@ func sortedKeys(m map[uint32]devmapVal) []uint32 {
 func TestBumDevmapSync(t *testing.T) {
 	h := newXDPBumHelper(t)
 	mode := BumModeXDP
-	var resolved [][IPv6AddrLen]byte
+	var (
+		resolved [][IPv6AddrLen]byte
+		ifUp     uint32 // the uplink of every peer: no AC of the BD
+	)
 	uplink := func(seg [IPv6AddrLen]byte) (uint32, error) {
 		resolved = append(resolved, seg)
-		return 1, nil // lo: any existing device will do
+		return ifUp, nil
 	}
 	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return mode }, uplink, zap.NewNop())
 	h.mapOps.SetBumDevmapSync(s)
@@ -110,6 +113,7 @@ func TestBumDevmapSync(t *testing.T) {
 	}
 
 	ifA, ifB := dummyIfindex(t, "bumdm-a"), dummyIfindex(t, "bumdm-b")
+	ifUp = dummyIfindex(t, "bumdm-up")
 	ac(1, 100, bumTestBD)
 	ac(1, 200, bumTestBD) // a second VLAN on the same port is one member
 	ac(ifA, 0, 999)       // another BD
@@ -133,8 +137,8 @@ func TestBumDevmapSync(t *testing.T) {
 	egressID, _ := info.ID()
 	for _, slot := range []uint32{0, 2} {
 		v := flood[BumSlotKeyBase|slot]
-		if v.Ifindex != 1 {
-			t.Errorf("slot %d uplink = %d, want 1", slot, v.Ifindex)
+		if v.Ifindex != ifUp {
+			t.Errorf("slot %d uplink = %d, want %d", slot, v.Ifindex, ifUp)
 		}
 		if v.ProgFD != uint32(egressID) {
 			t.Errorf("slot %d program id = %d, want the shared bum_remote_egress (id %d)", slot, v.ProgFD, egressID)

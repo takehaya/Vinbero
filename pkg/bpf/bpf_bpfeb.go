@@ -92,7 +92,7 @@ type BpfBumPlan struct {
 		Slots   uint8
 		N       uint8
 		NextIdx uint8
-		Pad     uint8
+		Local   uint8
 	}
 }
 

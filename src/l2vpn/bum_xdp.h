@@ -146,7 +146,7 @@ struct bum_plan_uplink {
     __u8 slots;               // flood slots to send through it, bit i = slot i
     __u8 n;                   // number of bits set in slots
     __u8 next_idx;            // copies handed out so far (egress)
-    __u8 _pad;
+    __u8 local;               // also a local AC of the BD: one copy leaves as is
 };
 
 struct bum_plan {
@@ -209,7 +209,13 @@ static __always_inline void bum_fdb_event_emit(__u16 bd_id, const __u8 *mac, __u
 // A slot is planned when the devmap holds its entry -- whose ifindex is the
 // slot's uplink -- and it passes the tc path's per-peer checks: a bd_peer
 // exists, is not flood_exclude, and is not on the source AC's Ethernet
-// Segment.
+// Segment. Every uplink of a slot entry gets a plan item, planned slots or
+// not, so the egress program can tell a device's surplus copies from the
+// copy of a local AC on the same device (item.local).
+//
+// The broadcast excludes the ingress device, unless a planned slot uses it
+// as its uplink (an AC and an uplink on one port): then the ingress AC gets
+// a copy too, which the egress program drops (item.local is 0 for it).
 //
 // Returns the XDP action, or BUM_BCAST_NO_DEVMAP when the BD has no devmap.
 // A global function on purpose: the verifier checks it once, not once per
@@ -247,12 +253,32 @@ __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
     struct headend_l2_ext_val *src_ext = bpf_map_lookup_elem(&headend_l2_ext_map, &src_key);
     bool src_esi_set = src_ext && !esi_is_zero(src_ext->esi);
 
+    bool hairpin = false;
     __u32 n_up = 0;
     for (__u32 i = 0; i < MAX_BUM_NEXTHOPS; i++) {
         __u32 dk = BUM_SLOT_KEY_BASE | i;
         struct bpf_devmap_val *dv = bpf_map_lookup_elem(flood, &dk);
         if (!dv)
             continue;
+        __u32 uplink = dv->ifindex;
+        __u32 u;
+        for (u = 0; u < BUM_PLAN_MAX_UPLINKS; u++) {
+            if (u == n_up) {
+                plan->up[u].ifindex = uplink;
+                plan->up[u].slots = 0;
+                plan->up[u].n = 0;
+                plan->up[u].next_idx = 0;
+                // Local ACs are keyed by their ifindex.
+                plan->up[u].local = uplink != src_if && bpf_map_lookup_elem(flood, &uplink) != NULL;
+                n_up++;
+                break;
+            }
+            if (plan->up[u].ifindex == uplink)
+                break;
+        }
+        if (u >= BUM_PLAN_MAX_UPLINKS)
+            continue; // unreachable: at most one uplink per slot
+
         struct bd_peer_key pk = { .bd_id = (__u16)bd_id, .index = (__u16)i };
         struct headend_entry *peer = bpf_map_lookup_elem(&bd_peer_map, &pk);
         if (!peer || peer->flood_exclude)
@@ -266,28 +292,18 @@ __noinline int bum_xdp_broadcast(struct xdp_md *ctx, __u32 bd_id, __u32 vlan_id)
                 continue;
             }
         }
-        __u32 u;
-        for (u = 0; u < BUM_PLAN_MAX_UPLINKS; u++) {
-            if (u == n_up) {
-                plan->up[u].ifindex = dv->ifindex;
-                plan->up[u].slots = 0;
-                plan->up[u].n = 0;
-                plan->up[u].next_idx = 0;
-                n_up++;
-                break;
-            }
-            if (plan->up[u].ifindex == dv->ifindex)
-                break;
-        }
-        if (u >= BUM_PLAN_MAX_UPLINKS)
-            continue; // unreachable: at most one uplink per slot
         plan->up[u].slots |= (__u8)(1u << i);
         plan->up[u].n++;
+        if (uplink == src_if)
+            hairpin = true;
     }
     plan->n_uplinks = (__u8)n_up;
 
     STATS_INC(STATS_BUM_XDP_FLOOD, pkt_len);
-    return bpf_redirect_map(flood, 0, BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS);
+    __u64 flags = BPF_F_BROADCAST;
+    if (!hairpin)
+        flags |= BPF_F_EXCLUDE_INGRESS;
+    return bpf_redirect_map(flood, 0, flags);
 }
 
 // BUM that entered on a local AC of a tc-mode BD: mark it for the TC
@@ -301,7 +317,7 @@ static __always_inline int bum_tc_flood_from_ac(struct xdp_md *ctx, __u8 bum_mod
 }
 
 // BUM that entered on a local AC of an xdp-mode BD: plan the remote copies,
-// then broadcast to every member of the BD's devmap except the ingress AC.
+// then broadcast to the members of the BD's devmap.
 // Without a devmap (the control plane has not built it yet) the frame takes
 // the tc path instead, exactly as a tc-mode BD would.
 static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id, __u16 vlan_id)

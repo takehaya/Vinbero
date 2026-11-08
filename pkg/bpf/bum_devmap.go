@@ -159,22 +159,32 @@ func (s *BumDevmapSync) syncBDLocked(bdID uint16) error {
 	}
 	defer func() { _ = local.Close() }()
 
+	if len(slots) > 0 && s.egress == nil {
+		return fmt.Errorf("bd %d: bum_remote_egress is not loaded", bdID)
+	}
+	uplinks := make(map[uint32]struct{}, len(slots))
+	for _, sl := range slots {
+		uplinks[sl.uplink] = struct{}{}
+	}
 	for _, ifindex := range acs {
 		v := devmapVal{Ifindex: ifindex}
-		err := flood.Put(ifindex, v)
+		err := local.Put(ifindex, v)
 		if err == nil {
-			err = local.Put(ifindex, v)
+			// An AC on the uplink of one of the BD's slots: that device's
+			// copies all go through the egress program, which sends the
+			// slots' copies encapsulated and one more unchanged (bum_egress.c).
+			if _, both := uplinks[ifindex]; both {
+				v.ProgFD = uint32(s.egress.FD())
+			}
+			err = flood.Put(ifindex, v)
 		}
 		if err != nil {
 			// Not fatal, like an unresolvable slot: an AC whose device is
 			// gone must not keep the rest of the BD on stale devmaps.
-			_ = flood.Delete(ifindex)
+			_ = local.Delete(ifindex)
 			s.logger.Warn("xdp BUM: cannot add a local AC to the BD devmap; AC left out",
 				zap.Uint16("bd_id", bdID), zap.Uint32("ifindex", ifindex), zap.Error(err))
 		}
-	}
-	if len(slots) > 0 && s.egress == nil {
-		return fmt.Errorf("bd %d: bum_remote_egress is not loaded", bdID)
 	}
 	for _, sl := range slots {
 		// One entry per peer: an uplink with k peers behind it gets k
