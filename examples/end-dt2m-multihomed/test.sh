@@ -38,7 +38,7 @@ TESTS_PASSED=0
 TESTS_FAILED=0
 
 cleanup() {
-    rm -f /tmp/vinbero_dt2m_pe*_bum.yaml /tmp/vinbero_dt2m_bum_*.pcap
+    rm -f /tmp/vinbero_dt2m_pe*_bum.yaml /tmp/vinbero_dt2m_bum_*.pcap*
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
         # Guard against PID reuse: only kill if the PID is still our vinberod.
@@ -264,9 +264,8 @@ assert_nonzero "PE1 NON_DF_DROP > 0 (PE2 is DF)" "${pe1_nondf:-0}"
 TAG="vbbum-mh-df"
 pids=()
 for ifc in mh-h1pe1 mh-h1pe2; do
-    ip netns exec "$NS_H1" tcpdump -Z root -i "$ifc" -Q in -U -nn -p \
-        -w "/tmp/vinbero_dt2m_bum_${ifc}.pcap" > /dev/null 2>&1 &
-    pids+=("$!")
+    bum_capture_start "$NS_H1" "$ifc" "/tmp/vinbero_dt2m_bum_${ifc}.pcap" -Q in
+    pids+=("$CAPTURE_PID")
 done
 sleep 1
 bum_marker_send "$NS_H2" mh-h2pe3.100 "$TAG"

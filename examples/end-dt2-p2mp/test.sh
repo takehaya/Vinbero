@@ -34,7 +34,7 @@ VINBERO_PID_PE2=""
 VINBERO_PID_PE3=""
 
 cleanup() {
-    rm -f /tmp/vinbero_p2mp_pe*_bum.yaml /tmp/vinbero_p2mp_bum_*.pcap
+    rm -f /tmp/vinbero_p2mp_pe*_bum.yaml /tmp/vinbero_p2mp_bum_*.pcap*
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
         if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then

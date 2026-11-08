@@ -176,12 +176,23 @@ s.send(b"\xff" * 6 + mac + b"\x88\xb5" + payload)
 ' "$iface" "$tag"
 }
 
-# bum_capture_start <ns> <iface> <pcap>: background tcpdump; sets CAPTURE_PID.
+# bum_capture_start <ns> <iface> <pcap> [tcpdump args...]: background
+# tcpdump; sets CAPTURE_PID. Returns once tcpdump is capturing (or after
+# 5 s), so a frame sent next is not missed.
 bum_capture_start() {
+    local ns="$1" ifc="$2" pcap="$3"
+    shift 3
     # -Z root: a privilege-dropped tcpdump cannot reopen a pcap it left in
-    # sticky /tmp under fs.protected_regular.
-    ip netns exec "$1" tcpdump -Z root -i "$2" -U -nn -p -w "$3" > /dev/null 2>&1 &
+    # sticky /tmp under fs.protected_regular. --immediate-mode: without it
+    # a frame can sit in a capture ring block that tcpdump never reads
+    # when it is stopped a second later.
+    ip netns exec "$ns" tcpdump -Z root -i "$ifc" --immediate-mode -U -nn -p "$@" -w "$pcap" > /dev/null 2> "$pcap.log" &
     CAPTURE_PID=$!
+    local i
+    for i in $(seq 50); do
+        grep -q "listening on" "$pcap.log" 2> /dev/null && return 0
+        sleep 0.1
+    done
 }
 
 # bum_effective_mode <vinberod log>: the BUM mode that vinberod runs with:
