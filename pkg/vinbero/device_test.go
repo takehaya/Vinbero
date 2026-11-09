@@ -320,6 +320,32 @@ func TestDetachDevice_RetryAfterPersistFailure(t *testing.T) {
 	}
 }
 
+// With xdp BUM replication every device must use internal.bpf.device_mode:
+// the BPF program is built for that one mode.
+func TestAttachDevice_XDPBumFixesMode(t *testing.T) {
+	ops := newFakeLinkOps("veth1")
+	v := newTestVinbero(t, ops, filepath.Join(t.TempDir(), "state.json"))
+	v.cfg.Setting.L2.BumMode = config.BumModeXDP
+	if !v.cfg.Setting.L2.AnyXDP() {
+		t.Fatal("test config does not enable xdp BUM")
+	}
+	if _, err := v.AttachDevice("veth1", "generic"); !errors.Is(err, ErrModeConflict) {
+		t.Errorf("attach in another mode = %v, want ErrModeConflict", err)
+	}
+	if ops.live() != 0 {
+		t.Errorf("refused attach left links: %v", ops.open)
+	}
+	if _, err := v.AttachDevice("veth1", ""); err != nil {
+		t.Errorf("attach in device_mode: %v", err)
+	}
+
+	// Without xdp BUM a per-device mode stays allowed.
+	v2 := newTestVinbero(t, newFakeLinkOps("veth1"), "")
+	if _, err := v2.AttachDevice("veth1", "generic"); err != nil {
+		t.Errorf("attach in another mode without xdp BUM: %v", err)
+	}
+}
+
 // An invalid internal.bpf.device_mode fails the boot even without
 // internal.devices: every runtime attach without a mode would fail.
 func TestAttachConfigDevices_InvalidMode(t *testing.T) {

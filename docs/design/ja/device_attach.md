@@ -9,6 +9,7 @@ attach は interface ごとに管理します。1 つの attach は XDP の entr
 - XDP を先に attach し、TCX の attach に失敗したら XDP を外して失敗を返します。片方だけ載った interface は残りません
 - mode は XDP の attach mode で、`driver` / `generic` / `offload` のいずれかです。指定しなければ `internal.bpf.device_mode` を使います。`internal.bpf.device_mode` が不正なら、`internal.devices` が空でも起動を拒否します。veth のように native XDP の挙動が kernel に依存する interface は、attach ごとに `generic` を指定できます
 - 同じ interface を同じ mode で attach し直すと、kernel に触れず成功します。別の mode で attach し直すと `FAILED_PRECONDITION` で拒否するので、先に detach します
+- `settings.l2.bum_mode: xdp` で動いている daemon では、`internal.bpf.device_mode` と違う mode の attach を `FAILED_PRECONDITION` で拒否します。xdp モードの BUM の BPF program は 1 つの XDP mode 向けに作られるためです (下の「xdp モードの BUM」を参照)
 - `internal.devices` の interface も同じ経路で attach します。config が持ち主なので state file には記録せず、detach は拒否し、mode は `internal.bpf.device_mode` に固定します
 
 bpf_link は pin しません。attach は daemon の lifetime に縛られ、daemon が終了すると kernel から外れます。再起動後の復旧は state file からの再 attach で行います ([persistence.md](persistence.md) の他の資源と同じ考え方です)。
@@ -81,6 +82,14 @@ L2 で使う veth は bridge に enslave する必要があります。`VrfServi
 - `VrfShow` の bridge の `members` は両方を合わせたものです
 
 member の追加と削除は `VrfBridgeAttach` と同じ mutex の下で行います。FDBWatcher と EVPN は bridge 単位で動くので、member の増減では何もしません。
+
+## xdp モードの BUM
+
+xdp モードの BUM ([bum_mode.md](bum_mode.md)) の devmap と `bum_tx_map` は、`headend_l2` の AC、`bd_peer` の flood slot、経路から組み立てます。どの device に XDP が attach されているかは参照しないので、実行時の attach と detach で devmap を組み直す必要はありません。
+
+- AC は `HeadendL2Create` の時点で、uplink は flood slot の経路が解決した時点で devmap と `bum_tx_map` に入ります。attach の順序は問いません
+- detach した device の entry は残ります。その device へ送るコピーの扱いは attach の有無で変わりません
+- interface を削除すると、kernel が devmap から entry を外します
 
 ## 排他
 

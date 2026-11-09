@@ -180,10 +180,18 @@ func (v *Vinbero) attachLocked(name, mode string) (*deviceAttachment, error) {
 	if err != nil {
 		return nil, err
 	}
+	deviceMode := v.cfg.InternalConfig.BpfOptions.DeviceMode
 	fromConfig := v.isConfigDevice(name)
-	if fromConfig && mode != v.cfg.InternalConfig.BpfOptions.DeviceMode {
+	if fromConfig && mode != deviceMode {
 		return nil, fmt.Errorf("%w: %s is declared in internal.devices, which attaches it in %s mode",
-			ErrModeConflict, name, v.cfg.InternalConfig.BpfOptions.DeviceMode)
+			ErrModeConflict, name, deviceMode)
+	}
+	// xdp BUM is built for one XDP mode: native XDP carries the replication
+	// plan in frame metadata, which generic XDP drops on redirect, and
+	// generic XDP finds it per CPU, which native XDP's bulk queues break.
+	if mode != deviceMode && v.cfg.Setting.L2.AnyXDP() {
+		return nil, fmt.Errorf("%w: %s requested in %s mode, but settings.l2.bum_mode xdp needs every device in internal.bpf.device_mode (%s)",
+			ErrModeConflict, name, mode, deviceMode)
 	}
 	ops := v.linkOps()
 	ifindex, err := ops.ifindex(name)
