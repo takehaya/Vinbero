@@ -11,6 +11,10 @@
 // headers; once the slots are used up, one more copy leaves unchanged when
 // the device is also a local AC. The plan also supplies the source AC and
 // the BD, so the copy itself is not parsed.
+// In native XDP the program sits on every entry of both BD devmaps and of
+// bum_tx_map (core/xdp_redirect.h): it passes the frames without BUM
+// metadata through untouched, and a copy for a device without slot entries
+// is that local AC's.
 //
 // The program contains no tail call (see the single-call-site invariant in
 // dispatch/l2_headend.c), and it returns XDP_PASS to transmit: XDP_REDIRECT
@@ -75,16 +79,38 @@ static __always_inline int bum_egress_encap(struct xdp_md *ctx, struct headend_e
     return copy_segments_to_srh(srh_segments, data_end, peer->segments, nsegs) ? -1 : 0;
 }
 
-// The seq this copy belongs to. Generic XDP runs the devmap programs of a
-// broadcast on the ingress CPU, synchronously, before that CPU takes
-// another frame: the copy is from the CPU's latest AC-side BUM frame.
-static __always_inline int bum_egress_seq_generic(__u64 *seq)
+#define BUM_EGRESS_NOT_BUM 1
+#define BUM_EGRESS_NO_STRIP (-2)
+
+// Which frame a copy belongs to: its seq and source AC. Returns 0, -1 when
+// it cannot tell (drop), BUM_EGRESS_NO_STRIP when the metadata could not be
+// removed (drop), or BUM_EGRESS_NOT_BUM for a frame that is no BUM
+// copy (native XDP only: a redirect through bum_tx_map, or a post-decap
+// flood copy).
+//
+// Generic XDP runs the devmap programs of a broadcast on the ingress CPU,
+// synchronously, before that CPU takes another frame: the copy is from the
+// CPU's latest AC-side BUM frame. Native XDP runs them at the end of the
+// NAPI poll, and the copy carries its seq in the metadata, which is
+// stripped here so the frame leaves without it.
+static __always_inline int bum_egress_frame(struct xdp_md *ctx, __u64 *seq, __u32 *src_if)
 {
+    if (bum_xdp_native) {
+        struct bum_xdp_meta *m = (void *)(long)ctx->data_meta;
+        if ((void *)(m + 1) > (void *)(long)ctx->data || m->marker != BUM_XDP_META_MARKER)
+            return BUM_EGRESS_NOT_BUM;
+        *seq = m->seq;
+        *src_if = m->src_ifindex;
+        if (bpf_xdp_adjust_meta(ctx, (int)sizeof(struct bum_xdp_meta)))
+            return BUM_EGRESS_NO_STRIP;
+        return 0;
+    }
     __u32 zero = 0;
     __u64 *next = bpf_map_lookup_elem(&bum_seq, &zero);
     if (!next || *next == 0)
         return -1;
     *seq = *next - 1;
+    *src_if = ctx->ingress_ifindex;
     return 0;
 }
 
@@ -136,7 +162,11 @@ static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u3
     // not matter: the first one past the slots. The copies beyond that are
     // surplus, among them the ingress AC's own when the broadcast had to
     // include the ingress device (item.local is 0 there).
+    // A device without an item has no slot entry in the devmap: the copy is
+    // its local AC's (native XDP, where every entry carries this program).
     if (!up) {
+        if (egress_if != ingress_if)
+            return XDP_PASS;
         STATS_INC(STATS_BUM_PLAN_SURPLUS, pkt_len);
         return XDP_DROP;
     }
@@ -155,7 +185,7 @@ static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u3
     // runs xdp-mode BDs in tc mode there; should a shared buffer show up
     // anyway, only its first remote copy is encapsulated and the others are
     // dropped rather than sent to the wrong peer.
-    if ((__u64)(long)ctx->data == plan->data && plan->shared++ > 0) {
+    if (!bum_xdp_native && (__u64)(long)ctx->data == plan->data && plan->shared++ > 0) {
         STATS_INC(STATS_BUM_SHARED_BUFFER, pkt_len);
         return XDP_DROP;
     }
@@ -206,21 +236,34 @@ drop:
     return XDP_DROP;
 }
 
+static __always_inline int bum_egress_frame_drop(struct xdp_md *ctx, int r)
+{
+    __u64 len = (__u64)((long)ctx->data_end - (long)ctx->data);
+    if (r == BUM_EGRESS_NO_STRIP)
+        STATS_INC(STATS_BUM_EGRESS_DROP, len);
+    else
+        STATS_INC(STATS_BUM_PLAN_STALE, len);
+    return XDP_DROP;
+}
+
 SEC("xdp/devmap")
 int bum_remote_egress(struct xdp_md *ctx)
 {
     __u64 seq;
-    if (bum_egress_seq_generic(&seq) < 0) {
-        STATS_INC(STATS_BUM_PLAN_STALE, (__u64)((long)ctx->data_end - (long)ctx->data));
-        return XDP_DROP;
-    }
-    return bum_remote_egress_body(ctx, seq, ctx->ingress_ifindex, ctx->egress_ifindex);
+    __u32 src_if;
+    int r = bum_egress_frame(ctx, &seq, &src_if);
+    if (r == BUM_EGRESS_NOT_BUM)
+        return XDP_PASS;
+    if (r < 0)
+        return bum_egress_frame_drop(ctx, r);
+    return bum_remote_egress_body(ctx, seq, src_if, ctx->egress_ifindex);
 }
 
 // Test entry for BPF_PROG_TEST_RUN, which refuses devmap programs and any
-// non-zero egress_ifindex. Runs the same body for the calling CPU's latest
-// plan, with the source AC and egress device taken from
-// bum_test_params_map; the control plane never attaches it.
+// non-zero egress_ifindex. Runs the same steps as bum_remote_egress, with
+// the egress device (and, in generic mode, the source AC) taken from
+// bum_test_params_map; in native mode the test passes the metadata. The
+// control plane never attaches it.
 //
 // Every test run gets a fresh buffer, which may or may not land where the
 // ingress run's was. same_buffer makes that explicit: 1 stands for a copy
@@ -246,13 +289,18 @@ int bum_remote_egress_test(struct xdp_md *ctx)
     if (!p)
         return XDP_ABORTED;
     __u64 seq;
-    if (bum_egress_seq_generic(&seq) < 0) {
-        STATS_INC(STATS_BUM_PLAN_STALE, (__u64)((long)ctx->data_end - (long)ctx->data));
-        return XDP_DROP;
+    __u32 src_if;
+    int r = bum_egress_frame(ctx, &seq, &src_if);
+    if (r == BUM_EGRESS_NOT_BUM)
+        return XDP_PASS;
+    if (r < 0)
+        return bum_egress_frame_drop(ctx, r);
+    if (!bum_xdp_native) {
+        src_if = p->ingress_ifindex;
+        __u32 rk = seq & (BUM_PLAN_RING_SIZE - 1);
+        struct bum_plan *plan = bpf_map_lookup_elem(&bum_plan_ring, &rk);
+        if (plan)
+            plan->data = p->same_buffer ? (__u64)(long)ctx->data : 0;
     }
-    __u32 rk = seq & (BUM_PLAN_RING_SIZE - 1);
-    struct bum_plan *plan = bpf_map_lookup_elem(&bum_plan_ring, &rk);
-    if (plan)
-        plan->data = p->same_buffer ? (__u64)(long)ctx->data : 0;
-    return bum_remote_egress_body(ctx, seq, p->ingress_ifindex, p->egress_ifindex);
+    return bum_remote_egress_body(ctx, seq, src_if, p->egress_ifindex);
 }

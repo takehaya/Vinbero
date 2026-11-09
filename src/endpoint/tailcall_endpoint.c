@@ -132,7 +132,7 @@ static __always_inline int nosrh_decap_and_adj(struct xdp_md *ctx,
     if ((void *)(eth + 1) > data_end)
         return XDP_DROP;
     eth->h_proto = bpf_htons(nh == IPPROTO_IPIP ? ETH_P_IP : ETH_P_IPV6);
-    return bpf_redirect(oif, 0);
+    return xdp_redirect_dev(oif);
 }
 
 // ========== Pattern A: localsid-only actions ==========
@@ -221,7 +221,7 @@ int tailcall_endpoint_end_dx2(struct xdp_md *ctx)
         if (oif == 0) TAILCALL_RETURN(ctx,XDP_DROP);
         if (CALL_WITH_CONST_L3(l3_off, srv6_decap_l2_nosrh, ctx, tctx->inner_proto) != 0)
             TAILCALL_RETURN(ctx,XDP_DROP);
-        TAILCALL_RETURN(ctx,bpf_redirect(oif, 0));
+        TAILCALL_RETURN(ctx,xdp_redirect_dev(oif));
     }
 
     struct ethhdr *eth;
@@ -404,7 +404,7 @@ int tailcall_endpoint_end_as(struct xdp_md *ctx)
                 TAILCALL_RETURN(ctx,XDP_DROP);
             if (CALL_WITH_CONST_L3(l3_off, srv6_decap_l2_nosrh, ctx, tctx->inner_proto) != 0)
                 TAILCALL_RETURN(ctx,XDP_DROP);
-            TAILCALL_RETURN(ctx,bpf_redirect(aux->service.iface_out, 0));
+            TAILCALL_RETURN(ctx,xdp_redirect_dev(aux->service.iface_out));
         }
         if (inner_type == SVC_INNER_IPV4) {
             if (CALL_WITH_CONST_L3(l3_off, srv6_decap_nosrh, ctx, IPPROTO_IPIP, tctx->inner_proto) != 0)

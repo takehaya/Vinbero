@@ -412,6 +412,7 @@ type BpfMapSpecs struct {
 	BumPlanRing            *ebpf.MapSpec `ebpf:"bum_plan_ring"`
 	BumSeq                 *ebpf.MapSpec `ebpf:"bum_seq"`
 	BumTestParamsMap       *ebpf.MapSpec `ebpf:"bum_test_params_map"`
+	BumTxMap               *ebpf.MapSpec `ebpf:"bum_tx_map"`
 	Dx2vMap                *ebpf.MapSpec `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.MapSpec `ebpf:"ecmp_group_map"`
 	EcmpGroupOwnerMap      *ebpf.MapSpec `ebpf:"ecmp_group_owner_map"`
@@ -461,6 +462,7 @@ type BpfMapSpecs struct {
 type BpfVariableSpecs struct {
 	BumModeDefault *ebpf.VariableSpec `ebpf:"bum_mode_default"`
 	BumXdpEnabled  *ebpf.VariableSpec `ebpf:"bum_xdp_enabled"`
+	BumXdpNative   *ebpf.VariableSpec `ebpf:"bum_xdp_native"`
 	EnableStats    *ebpf.VariableSpec `ebpf:"enable_stats"`
 }
 
@@ -497,6 +499,7 @@ type BpfMaps struct {
 	BumPlanRing            *ebpf.Map `ebpf:"bum_plan_ring"`
 	BumSeq                 *ebpf.Map `ebpf:"bum_seq"`
 	BumTestParamsMap       *ebpf.Map `ebpf:"bum_test_params_map"`
+	BumTxMap               *ebpf.Map `ebpf:"bum_tx_map"`
 	Dx2vMap                *ebpf.Map `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.Map `ebpf:"ecmp_group_map"`
 	EcmpGroupOwnerMap      *ebpf.Map `ebpf:"ecmp_group_owner_map"`
@@ -555,6 +558,7 @@ func (m *BpfMaps) Close() error {
 		m.BumPlanRing,
 		m.BumSeq,
 		m.BumTestParamsMap,
+		m.BumTxMap,
 		m.Dx2vMap,
 		m.EcmpGroupMap,
 		m.EcmpGroupOwnerMap,
@@ -605,6 +609,7 @@ func (m *BpfMaps) Close() error {
 type BpfVariables struct {
 	BumModeDefault *ebpf.Variable `ebpf:"bum_mode_default"`
 	BumXdpEnabled  *ebpf.Variable `ebpf:"bum_xdp_enabled"`
+	BumXdpNative   *ebpf.Variable `ebpf:"bum_xdp_native"`
 	EnableStats    *ebpf.Variable `ebpf:"enable_stats"`
 }
 

@@ -2,9 +2,9 @@
 # examples/end-dt2-p2mp/test.sh
 # Test End.DT2 P2MP: BUM flood to multiple PEs + bridge multi-port flood
 #
-# BUM_MODE=tc (default) or xdp selects settings.l2.bum_mode for all PEs. On a
-# kernel where vinberod falls back from xdp to tc replication, the xdp run
-# checks the fallback instead.
+# BUM_MODE=tc (default), xdp or xdp-native (xdp in native XDP) selects
+# settings.l2.bum_mode for all PEs. On a kernel where vinberod falls back
+# from xdp to tc replication, the xdp run checks the fallback instead.
 
 set -e
 
@@ -58,6 +58,9 @@ echo ""
 # ==========================================
 # Start all Vinbero instances
 # ==========================================
+bum_native_prepare "$ns_host1" "$ns_host2" "$ns_host3" "$ns_host4" \
+    "$ns_router1" "$ns_router2" "$ns_router3" "$ns_router4"
+
 print_info "Starting PE1 (router1)..."
 start_vinbero "$ns_router1" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe1.yaml" /tmp/vinbero_p2mp_pe1_bum.yaml)" "/tmp/vinbero_p2mp_pe1.log"
 VINBERO_PID_PE1=$VINBERO_LAST_PID

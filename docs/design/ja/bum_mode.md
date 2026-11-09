@@ -14,14 +14,14 @@ Bridge Domain（BD）の BUM（broadcast、未知 unicast、multicast）フレ�
 送信側（AC から入った BUM）:
 
 1. XDP の L2 headend がいつもどおり送信元 MAC を学習し、宛先が multicast か FDB miss なら、BD の devmap（`bum_flood_map[bd_id]`）で broadcast します。
-2. devmap のメンバーはローカル AC（key は ifindex）と、リモートの flood スロット（key は `0x80000000 | index`）です。スロットのエントリーの値は、その peer へ向かう uplink の ifindex と egress program です。egress program は全エントリー共通の 1 本（`bum_remote_egress`）です。同じ uplink の先に peer が k 個あれば、その uplink のエントリーも k 個になり、broadcast はその uplink 向けに k 個のコピーを作ります。ローカル AC のエントリーは program を持ちません。ただし、AC のデバイスがその BD のスロットの uplink でもある場合（AC と uplink が同じポート）は、そのエントリーにも同じ egress program を付けます（後述）。
+2. devmap のメンバーはローカル AC（key は ifindex）と、リモートの flood スロット（key は `0x80000000 | index`）です。スロットのエントリーの値は、その peer へ向かう uplink の ifindex と egress program です。egress program は全エントリー共通の 1 本（`bum_remote_egress`）です。同じ uplink の先に peer が k 個あれば、その uplink のエントリーも k 個になり、broadcast はその uplink 向けに k 個のコピーを作ります。ローカル AC のエントリーは program を持ちません。ただし、AC のデバイスがその BD のスロットの uplink でもある場合（AC と uplink が同じポート）は、そのエントリーにも同じ egress program を付けます（後述）。native XDP では、すべてのエントリーに付けます（「native XDP」の節）。
 3. ingress program は broadcast の直前に、そのフレームの複製計画（以下 plan）を CPU ごとのリングに書きます（次節）。
 4. `bpf_redirect_map(BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS)` で broadcast します。入力ポートが、送るスロットの uplink でもある場合だけは `BPF_F_EXCLUDE_INGRESS` を付けません（付けると、そのポートへのリモートのコピーも除かれるため）。plan を書くときに引いた devmap をそのまま使うので、control plane が devmap を差し替えている最中でも、plan と broadcast が別々の版を見ることはありません。
 5. egress program はコピーごとに、plan から自分の uplink の項目を探して次のスロットを 1 つ取り、`bd_peer_map[{bd_id, スロット}]` の peer へ H.Encaps.L2（.Red）をかけて、FIB の結果で MAC を書き換えます。
 
 ローカルの既知 unicast は bridge を通さず、FDB の出力ポートへ `bpf_redirect` します（入力ポートと同じなら破棄）。devmap のない BD では、これまでどおり bridge に渡します。
 
-受信側（End.DT2 / End.DT2M の decap 後）: FDB miss のとき、bridge への redirect の代わりに `bum_local_map[bd_id]`（ローカル AC のみ、egress program なし）へ broadcast します。DF と RX split horizon の判定はその前に行われ、変わりません。
+受信側（End.DT2 / End.DT2M の decap 後）: FDB miss のとき、bridge への redirect の代わりに `bum_local_map[bd_id]`（ローカル AC のみ。generic XDP では egress program なし）へ broadcast します。DF と RX split horizon の判定はその前に行われ、変わりません。
 
 devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
 
@@ -53,20 +53,37 @@ plan の中身は次のとおりです。
 
 egress program の手順は次のとおりです。
 
-1. 担当する `seq` を決めます。generic XDP では、この CPU の最新の seq（`bum_seq` の値 − 1）です。
-2. `bum_plan_ring[seq & 1023]` を引き、plan の `seq`、送信元 AC（`ctx->ingress_ifindex`）、フレーム長がコピーと一致するか確かめます。一致しなければ破棄し、`BUM_PLAN_STALE` を数えます。
-3. `ctx->egress_ifindex` で uplink の項目を探し、`idx = next_idx++` とします。
+1. 担当する `seq` と送信元 AC を決めます。generic XDP では、この CPU の最新の seq（`bum_seq` の値 − 1）と `ctx->ingress_ifindex` です。native XDP では、コピーが運ぶ metadata から読みます（後述）。
+2. `bum_plan_ring[seq & 1023]` を引き、plan の `seq`、送信元 AC、フレーム長がコピーと一致するか確かめます。一致しなければ破棄し、`BUM_PLAN_STALE` を数えます。
+3. `ctx->egress_ifindex` で uplink の項目を探し、`idx = next_idx++` とします。項目がなければ、スロットのエントリーがないデバイス、つまりローカル AC へのコピーなので、そのまま `XDP_PASS` で送ります（ローカル AC のエントリーにも program を付ける native XDP で起きます）。
 4. `idx < n` なら、集合の `idx` 番目のスロットの peer へ encap し、FIB の出力先がエントリーの uplink と一致することを確かめてから、`XDP_PASS` で送ります。
 5. `idx == n` で `local` が 1 なら、そのデバイスのローカル AC へのコピーとして、そのまま `XDP_PASS` で送ります。コピーはどれも同じなので、どのコピーをローカル用にしても結果は変わりません。
 6. それ以外は破棄し、`BUM_PLAN_SURPLUS` を数えます。devmap のエントリーは uplink の先の peer の数だけあるので、split horizon や `flood_exclude` で ingress が除いた分だけコピーが余ります。入力ポートを除かずに broadcast したときの、送信元 AC 自身へのコピーもここで破棄されます。
 
 ### 「最新の seq」で足りる理由
 
-generic XDP の broadcast は、ingress program が返った直後に、同じ CPU の同じ呼び出しの中で、各コピーの devmap program を順に実行します（`do_xdp_generic` → `xdp_do_generic_redirect` → `dev_map_redirect_multi` → `dev_map_generic_redirect`）。この区間は BH が無効です（NAPI や backlog の softirq、threaded NAPI、tun などの `local_bh_disable`）。同じ CPU で別のフレームの ingress program が割り込むことはないので、コピーの egress program から見たこの CPU の最新の seq は、必ずそのコピーのフレームの seq です。リングを 1024 エントリーにしてあるのは、コピーを後でまとめて処理するモード（native）で、seq をフレームと一緒に運ぶ場合に備えるためです。
+generic XDP の broadcast は、ingress program が返った直後に、同じ CPU の同じ呼び出しの中で、各コピーの devmap program を順に実行します（`do_xdp_generic` → `xdp_do_generic_redirect` → `dev_map_redirect_multi` → `dev_map_generic_redirect`）。この区間は BH が無効です（NAPI や backlog の softirq、threaded NAPI、tun などの `local_bh_disable`）。同じ CPU で別のフレームの ingress program が割り込むことはないので、コピーの egress program から見たこの CPU の最新の seq は、必ずそのコピーのフレームの seq です。generic XDP は devmap program に metadata を渡さないので、seq をフレームと一緒には運べません。
 
-PREEMPT_RT のカーネルは例外です。`CONFIG_PREEMPT_RT_NEEDS_BH_LOCK` がなければ、BH 無効の区間どうしが同じ CPU で入れ替わることがあり、この前提が成り立ちません。`/sys/kernel/realtime` が 1 のカーネルでは、xdp モードでの起動を拒否します。
+PREEMPT_RT のカーネルは例外です。`CONFIG_PREEMPT_RT_NEEDS_BH_LOCK` がなければ、BH 無効の区間どうしが同じ CPU で入れ替わることがあり、この前提が成り立ちません。`/sys/kernel/realtime` が 1 のカーネルでは、generic でも native でも、xdp モードでの起動を拒否します（`bum_seq` の更新も、BH 無効の区間が入れ替わらないことを前提にしています）。
 
-フレームの識別に `ctx->data` のアドレスは使えません。次節の修正が入ったカーネルでは、egress program を持つコピーはそれぞれ別のバッファに複製され、アドレスが ingress のものと一致しないためです。plan との照合には、seq に加えて送信元 AC とフレーム長を使います。
+フレームの識別に `ctx->data` のアドレスは使えません。「コピーがバッファを共有するカーネル」の節の修正が入ったカーネルでは、egress program を持つコピーはそれぞれ別のバッファに複製され、アドレスが ingress のものと一致しないためです。plan との照合には、seq に加えて送信元 AC とフレーム長を使います。
+
+### native XDP（`device_mode: driver`）
+
+native XDP は redirect したフレームを CPU と出力デバイスごとの bulk queue にため、devmap program を NAPI poll の終わりの flush でまとめて実行します（`bq_enqueue` → `bq_xmit_all`）。その時点では、この CPU の最新の seq は後続のフレームのものになっていることがあります。そこで ingress program は、broadcast の直前にフレームの前へ 16 バイトの metadata（`struct bum_xdp_meta`: マーカー、送信元 AC、seq）を書きます。broadcast のコピー（`xdpf_clone`）はフレームを headroom ごと複製するので、どのコピーも同じ metadata を運びます。egress program はそこから seq と送信元 AC を読み、metadata を取り除いてから encap します。flush は同じ CPU、同じ poll の中で行われ、1 poll のフレーム数（NAPI の budget）はリングの 1024 エントリーより十分少ないので、plan は上書きされる前に使われます。万一上書きされていれば、seq の照合で `BUM_PLAN_STALE` になります。
+
+コピーが自分の uplink の項目のどのスロットを取るかは、plan の `next_idx` で決まります。plan は CPU ごと、項目は uplink ごとなので、これは CPU × 出力デバイスごとの状態です。同じ uplink のコピーは同じ bulk queue に入り、同じ CPU で順に処理されます。
+
+native XDP の bulk queue には、もう 1 つ性質があります。queue は flush のあと最初に入ったフレームの devmap program を記録し、poll の終わりまで、その queue のフレーム全部にその program を実行します（`bq_enqueue`）。program のないフレームが先に入ると、その poll のそのデバイスへの BUM のコピーは egress program を通らず、リモートへのコピーは encap されないまま出てしまいます。逆に program のある queue に入ったローカルへのコピーは、リモートへのコピーと区別できなければいけません。これを防ぐため、xdp モードを native XDP で動かすときは、BD の devmap が送るデバイスの queue で、常に egress program が動くようにします。
+
+- 2 つの BD devmap（`bum_flood_map`、`bum_local_map`）のすべてのエントリーに、ローカル AC のものも含めて egress program を付けます。program は metadata のないフレーム（decap 後の flood のコピー）をそのまま送ります。metadata のあるコピーは plan で振り分けます。スロットのエントリーがないデバイスへのコピーはそのデバイスのローカル AC へのもので、metadata を取り除いてそのまま送ります。
+- BD の devmap が送るデバイス（ローカル AC とスロットの uplink）への redirect は、すべて `bum_tx_map`（ifindex → {デバイス、`bum_remote_egress`}）を通ります。メインの program の redirect は全部 `xdp_redirect_dev` を使い、`bum_tx_map` にある出力デバイスにはこの map で、それ以外には `bpf_redirect` で送ります。egress program は metadata のないフレーム（unicast）をそのまま送ります。control plane は、BD の devmap を入れる前に、その devmap が送るデバイスを `bum_tx_map` に加えます。加えたデバイスは取り除きません（どの BD も使わなくなったデバイスへのフレームが、egress program を 1 回通るだけです）。
+- ingress program は、届いたフレームの metadata を最初に消します。他のホストの native XDP から redirect されたフレームは、その program の metadata を持ったまま届くことがあるためです。
+- この決まりがあるので、あるデバイスが AC と uplink を兼ねていても（同じ BD でも、別々の BD でも）、そのデバイスの queue に入るフレームはすべて egress program を通ります。BD の組み立ての順番によらず、program のないコピーが混ざることはありません。
+- 新しいデバイスを `bum_tx_map` に加えたときは、BD の devmap を入れる前に 10 ms 待ちます。加える直前に、そのデバイスへ program なしで redirect した NAPI poll が終わるのを待つためです。全 BD を組み立て直すときは、全 BD のデバイスを先に加えて 1 回だけ待ちます。XDP の program を付ける前（起動時の組み立て）は待ちません。
+- `bum_tx_map`（256 エントリー）にデバイスを加えられない BD には devmap を作らず、tc モードで動かします（警告と `BUM_XDP_FALLBACK`）。
+
+native XDP では、コピーはそれぞれ別のバッファにあるので、次節の問題は起きません。起動時の確認も行いません。
 
 ### コピーがバッファを共有するカーネル
 
@@ -86,9 +103,11 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 
 ## 要件と制約
 
-- **generic XDP が必要**（`internal.bpf.device_mode: generic`）。native XDP は redirect したフレームを出力デバイスごとの bulk queue にため、devmap program を NAPI poll の終わりの flush でまとめて実行します。その時点では CPU の最新の seq が後続のフレームのものになっているため、コピーが自分の plan を見つけられません。設定の読み込み時に、generic 以外との組み合わせは拒否します。
+- generic XDP か native XDP（`internal.bpf.device_mode: generic` か `driver`）で動きます。offload は使えません。
 - PREEMPT_RT のカーネルでは使えません（起動時に拒否します）。
-- generic XDP の broadcast のコピーに、それぞれ別のバッファを渡すカーネルが必要です。そうでないカーネルでは tc モードで動きます（前節）。
+- generic XDP では、broadcast のコピーにそれぞれ別のバッファを渡すカーネルが必要です。そうでないカーネルでは tc モードで動きます（前節）。
+- native XDP では、AC のドライバーが XDP の metadata を扱えること（tc モードの VNBU マーカーと同じ条件。扱えないドライバーでは、BUM フレームは tc モードの経路へ回り、`BUM_XDP_META_FAIL` を数えます。tc モードと同じく、リモートへのコピーは作られず、bridge のローカルの flood だけになります）と、redirect 先のデバイスがすべて XDP の redirect を受けられること（ドライバーが `ndo_xdp_xmit` を持つこと。veth は相手側に XDP program があるか GRO が有効なこと）が必要です。BD の devmap が送るデバイス（AC と uplink）への unicast の redirect もすべて egress program を 1 回通るので、そのぶん少し遅くなります。
+- native XDP では、同じホストの vinbero 以外の XDP program から、BD の devmap が送るデバイスへ `bpf_redirect` しないでください。`bum_tx_map` を通らない redirect は、上の決まりを破ります。vinbero の plugin は `bpf_redirect` を呼べない（読み込み時の検査で拒否されます）ので、この心配はありません。
 - flood の対象は BD の HeadendL2 で登録した AC だけです。bridge の他のポートや bridge 自身には届きません。
 - AC の VLAN tag は、ローカルへのコピーでも既知 unicast でもリモートへのコピーでも、そのまま運びます。BD のすべての AC が同じ VLAN ID なら、これは bridge と同じ結果です（bridge のメンバーがポートそのものでも、ポート上の VLAN デバイスでも）。VLAN ID の違う AC が混ざる BD では、フレームが他の AC でどう見えるべきかは bridge の構成で決まります（ポート上の VLAN デバイスをメンバーにすれば、bridge は tag を付け替えます）。同じポートの別の VLAN どうしも、bridge を通らなければ届きません。そこで、このような BD は tc モードで動かします（前述）。
 - devmap は 1 BD あたり 32 エントリー（ローカル AC のデバイスとリモートのスロット 8 つの合計）、xdp モードの BD は 4096 個までです。収まらない BD は tc モードで動かします。
@@ -114,7 +133,7 @@ egress program も、念のため共有を検出します。コピーの `ctx->d
 ```yaml
 internal:
   bpf:
-    device_mode: generic      # xdp モードに必要
+    device_mode: driver       # native XDP（generic でも動く）
 settings:
   enable_stats: true          # BUM_* カウンタを見る場合
   l2:
@@ -142,5 +161,6 @@ settings:
 | `BUM_PLAN_SURPLUS` | uplink の plan に残りのスロットがないコピーだった（破棄） |
 | `BUM_SHARED_BUFFER` | コピーが他のコピーとバッファを共有していた（2 つ目以降を破棄） |
 | `BUM_EGRESS_NO_NEIGH` | uplink の next hop の neighbor エントリーが未解決で、コピーを破棄した |
+| `BUM_XDP_META_FAIL` | native XDP で、AC のドライバーが metadata を書かせず、BUM フレームを tc モードの経路へ回した（`BUM_XDP_FALLBACK` にも数える） |
 
 split horizon で落としたコピーは、TC モードと同じ `SPLIT_HORIZON_TX` に数えます。

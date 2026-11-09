@@ -10,6 +10,7 @@
 // usually sits mid-chain with segments still left after the service.
 
 #include "endpoint/srv6_endpoint_core.h"
+#include "core/xdp_redirect.h"
 
 // Emit a decapsulated L3 packet towards the service. The frame's Ethernet
 // header was preserved by srv6_decap*; only the ethertype (and, in static
@@ -33,7 +34,7 @@ static __always_inline int svc_fwd_l3_out(
             return XDP_DROP;
         __builtin_memcpy(eth->h_dest, aux->service.dmac, ETH_ALEN);
         __builtin_memcpy(eth->h_source, aux->service.smac, ETH_ALEN);
-        return bpf_redirect(aux->service.iface_out, 0);
+        return xdp_redirect_dev(aux->service.iface_out);
     }
 
     // FIB mode: the operator routes the inner destination via IFACE-OUT,
@@ -79,7 +80,7 @@ static __always_inline int process_end_as(
         struct ethhdr *inner_eth = data;
         if ((void *)(inner_eth + 1) > data_end)
             return XDP_DROP;
-        return bpf_redirect(aux->service.iface_out, 0);
+        return xdp_redirect_dev(aux->service.iface_out);
     }
 
     // Constant expected-proto per branch: a runtime-selected proto value
@@ -377,7 +378,7 @@ static __always_inline int process_end_am(
         return XDP_DROP;
     __builtin_memcpy(eth->h_dest, aux->service.dmac, ETH_ALEN);
     __builtin_memcpy(eth->h_source, aux->service.smac, ETH_ALEN);
-    return bpf_redirect(aux->service.iface_out, 0);
+    return xdp_redirect_dev(aux->service.iface_out);
 }
 
 #endif // SRV6_ENDPOINT_PROXY_H

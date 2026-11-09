@@ -144,7 +144,8 @@ test_ping_with_counter() {
 
 # bum_mode_config <yaml> <out>: prints the vinberod config to start with for
 # BUM_MODE (default tc). tc prints <yaml> unchanged; xdp writes <yaml> plus
-# settings.l2.bum_mode to <out> and prints <out>. <yaml> must end with its
+# settings.l2.bum_mode to <out> and prints <out>; xdp-native also switches
+# internal.bpf.device_mode to driver (native XDP). <yaml> must end with its
 # top-level settings: block.
 bum_mode_config() {
     local src="$1" out="$2"
@@ -154,11 +155,29 @@ bum_mode_config() {
             { cat "$src"; printf '  l2:\n    bum_mode: xdp\n'; } > "$out"
             echo "$out"
             ;;
+        xdp-native)
+            { sed 's/device_mode: generic/device_mode: driver/' "$src"; printf '  l2:\n    bum_mode: xdp\n'; } > "$out"
+            echo "$out"
+            ;;
         *)
-            print_error "unknown BUM_MODE '${BUM_MODE}' (want tc or xdp)" >&2
+            print_error "unknown BUM_MODE '${BUM_MODE}' (want tc, xdp or xdp-native)" >&2
             return 1
             ;;
     esac
+}
+
+# bum_native_prepare <ns>...: with BUM_MODE=xdp-native, turns GRO on for
+# every veth in the namespaces. A veth accepts frames that native XDP
+# redirects to its peer only when the receiving end runs an XDP program or
+# has GRO on.
+bum_native_prepare() {
+    [ "${BUM_MODE:-tc}" = xdp-native ] || return 0
+    local ns dev
+    for ns in "$@"; do
+        for dev in $(ip -n "$ns" -o link show type veth | awk -F': ' '{print $2}' | cut -d@ -f1); do
+            ip netns exec "$ns" ethtool -K "$dev" gro on > /dev/null 2>&1 || true
+        done
+    done
 }
 
 # bum_marker_send <ns> <iface> <tag>: sends one broadcast Ethernet frame
@@ -196,15 +215,22 @@ bum_capture_start() {
 }
 
 # bum_effective_mode <vinberod log>: the BUM mode that vinberod runs with:
-# BUM_MODE, or tc-fallback when BUM_MODE is xdp but vinberod found at
-# startup that this kernel cannot run xdp mode (the copies of a generic XDP
-# broadcast share one buffer) and replicates in tc instead.
+# xdp for both xdp modes, tc for tc, or tc-fallback when BUM_MODE is xdp
+# but vinberod found at startup that this kernel cannot run xdp mode in
+# generic XDP (the copies of a broadcast share one buffer) and replicates
+# in tc instead.
 bum_effective_mode() {
-    if [ "${BUM_MODE:-tc}" = xdp ] && grep -q "xdp BUM replication unavailable" "$1"; then
-        echo tc-fallback
-    else
-        echo "${BUM_MODE:-tc}"
-    fi
+    case "${BUM_MODE:-tc}" in
+        xdp-native) echo xdp ;;
+        xdp)
+            if grep -q "xdp BUM replication unavailable" "$1"; then
+                echo tc-fallback
+            else
+                echo xdp
+            fi
+            ;;
+        *) echo "${BUM_MODE:-tc}" ;;
+    esac
 }
 
 # bum_marker_count <pcap> <tag>: number of captured frames that contain

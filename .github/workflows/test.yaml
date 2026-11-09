@@ -239,8 +239,11 @@ jobs:
           - gtp6-drop-in
           - custom-cdplane-behavior
         # settings.l2.bum_mode. Every example runs in the default tc mode; the
-        # BUM examples also run in xdp mode (an include entry whose bum_mode
-        # differs from the matrix value adds a job instead of altering one).
+        # BUM examples also run in xdp mode, in generic XDP (on a runner
+        # kernel whose generic broadcast copies share a buffer, that checks
+        # the fallback to tc) and in native XDP on the veths (an include
+        # entry whose bum_mode differs from the matrix value adds a job
+        # instead of altering one).
         bum_mode:
           - tc
         include:
@@ -248,6 +251,10 @@ jobs:
             bum_mode: xdp
           - example: end-dt2m-multihomed
             bum_mode: xdp
+          - example: end-dt2-p2mp
+            bum_mode: xdp-native
+          - example: end-dt2m-multihomed
+            bum_mode: xdp-native
     steps:
       - name: Check out code
         uses: actions/checkout@v4

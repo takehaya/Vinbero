@@ -97,7 +97,7 @@ static __always_inline struct headend_entry *try_bd_peer_lookup(
             // port directly. A MAC learned on the ingress port itself is
             // dropped, as the bridge would (no hairpin). A BD without a
             // devmap is left to the bridge, like its BUM.
-            *out_action = dst.oif == ctx->ingress_ifindex ? XDP_DROP : bpf_redirect(dst.oif, 0);
+            *out_action = dst.oif == ctx->ingress_ifindex ? XDP_DROP : xdp_redirect_dev(dst.oif);
             return NULL;
         }
         *out_action = XDP_PASS;

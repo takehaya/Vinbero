@@ -8,6 +8,7 @@
 #include <bpf/bpf_helpers.h>
 
 #include "core/xdp_prog.h"
+#include "core/xdp_redirect.h"
 
 // FIB lookup result codes
 #define FIB_RESULT_REDIRECT  0   // Success, redirect to ifindex
@@ -79,7 +80,7 @@ static __always_inline int fib_result_to_xdp_action(int fib_result, __u32 ifinde
 {
     switch (fib_result) {
     case FIB_RESULT_REDIRECT:
-        return bpf_redirect(ifindex, 0);
+        return xdp_redirect_dev(ifindex);
     case FIB_RESULT_DROP:
         return XDP_DROP;
     default:

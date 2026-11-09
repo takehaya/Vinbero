@@ -57,15 +57,11 @@ func bumModeValue(mode string) (uint8, error) {
 	return 0, fmt.Errorf("unknown bum_mode %q (want %q or %q)", mode, BumModeTC, BumModeXDP)
 }
 
-// Validate checks the mode strings and the attach-mode requirement.
-//
-// xdp mode needs generic XDP. One devmap egress program builds every remote
-// copy, and it learns which peer a copy is for from the replication plan the
-// ingress program left for the frame on that CPU. Generic XDP runs the
-// devmap programs of a broadcast synchronously, right after the ingress
-// program, so the plan to use is the CPU's latest. Native XDP defers them to
-// the bulk-queue flush at the end of the NAPI poll, when the CPU's latest
-// plan belongs to a later frame.
+// Validate checks the mode strings and the attach-mode requirement: xdp
+// mode runs in generic or native ("driver") XDP. The devmap egress program
+// learns which frame a copy belongs to from the CPU's latest replication
+// plan in generic XDP, and from the frame's metadata in native XDP;
+// offloaded programs have neither devmaps nor metadata.
 func (c *L2Config) Validate(deviceMode string) error {
 	def, err := bumModeValue(c.BumMode)
 	if err != nil {
@@ -89,9 +85,8 @@ func (c *L2Config) Validate(deviceMode string) error {
 			xdp = true
 		}
 	}
-	if xdp && deviceMode != "generic" {
-		return fmt.Errorf("settings.l2: bum_mode %q requires internal.bpf.device_mode \"generic\" (got %q): "+
-			"native XDP runs the devmap egress program at the end of the NAPI poll, when the per-CPU replication plan may already belong to a later frame",
+	if xdp && deviceMode != "generic" && deviceMode != "driver" {
+		return fmt.Errorf("settings.l2: bum_mode %q requires internal.bpf.device_mode \"generic\" or \"driver\" (got %q)",
 			BumModeXDP, deviceMode)
 	}
 	return nil

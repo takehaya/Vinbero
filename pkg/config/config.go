@@ -321,6 +321,9 @@ func (c *Config) BpfConstants() map[string]any {
 	if c.Setting.L2.ConfiguresXDP() {
 		consts["bum_mode_default"] = c.Setting.L2.DefaultBumMode()
 		consts["bum_xdp_enabled"] = uint8(1)
+		if c.InternalConfig.BpfOptions.DeviceMode == "driver" {
+			consts["bum_xdp_native"] = uint8(1)
+		}
 	}
 	return consts
 }
