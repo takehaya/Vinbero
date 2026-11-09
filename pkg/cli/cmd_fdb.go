@@ -11,6 +11,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// fdbEntryType names an entry for the TYPE column. A remote entry installed
+// from BGP is also flagged static, so remote is checked first.
+func fdbEntryType(e *v1.FdbEntry) string {
+	switch {
+	case e.IsRemote:
+		return "remote"
+	case e.IsStatic:
+		return "static"
+	}
+	return "dynamic"
+}
+
 func fdbCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "fdb",
@@ -98,12 +110,7 @@ func fdbCommand() *cli.Command {
 					headers := []string{"BD_ID", "MAC", "OIF", "TYPE", "AGE"}
 					var rows [][]string
 					for _, e := range resp.Msg.Entries {
-						entryType := "dynamic"
-						if e.IsStatic {
-							entryType = "static"
-						} else if e.IsRemote {
-							entryType = "remote"
-						}
+						entryType := fdbEntryType(e)
 
 						age := "-"
 						if !e.IsStatic && e.LastSeen > 0 {
