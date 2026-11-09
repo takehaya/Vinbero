@@ -548,10 +548,12 @@ func TestBumRetriesExcludedSlot(t *testing.T) {
 	}
 
 	failing.Store(false)
-	waitUntil(t, "the slot did not come back", func() bool {
-		return devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex == up
-	})
-	waitUntil(t, "still retrying", func() bool { return !s.retryPending() })
+	// retryPending takes the rebuild's lock, so once it is false the new
+	// devmap is installed and no swap can free it under the read below.
+	waitUntil(t, "the slot did not come back", func() bool { return !s.retryPending() })
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex; got != up {
+		t.Errorf("slot uplink = %d, want %d", got, up)
+	}
 	settled := calls.Load()
 	time.Sleep(50 * time.Millisecond)
 	if calls.Load() != settled {
@@ -586,9 +588,10 @@ func TestBumRetriesSplitACs(t *testing.T) {
 	}
 	startWatch(t, s)
 	split.Store(false)
-	waitUntil(t, "the BD did not return to xdp mode", func() bool {
-		return devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex == upA
-	})
+	waitUntil(t, "the BD did not return to xdp mode", func() bool { return !s.retryPending() })
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex; got != upA {
+		t.Errorf("slot uplink = %d, want %d", got, upA)
+	}
 }
 
 // A rebuild that would produce the same devmaps leaves them in place and
