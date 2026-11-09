@@ -263,10 +263,7 @@ func headendL2Command() *cli.Command {
 					if err != nil {
 						return err
 					}
-					for _, d := range resp.Msg.Deleted {
-						fmt.Printf("Deleted: %s vlan=%d\n", d.InterfaceName, d.VlanId)
-					}
-					return nil
+					return printOperationResult(resp.Msg.Deleted, resp.Msg.Errors, "Headend L2", "deleted")
 				},
 			},
 			{
