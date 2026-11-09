@@ -24,9 +24,11 @@
 
 // Run the IPv6 FIB lookup the data plane makes, on zeroed params: family,
 // the device the lookup runs on, source and destination; flowinfo, L4 and
-// flags stay 0. Every IPv6 forwarding lookup goes through here, and so does
-// the control plane's uplink probe (bum_uplink_probe), so a change to the
-// inputs reaches both.
+// flags stay 0. The XDP path (srv6_fib_lookup_v6_core), the tc path's encap
+// and the control plane's uplink probe (bum_uplink_probe) all go through
+// here, so a change to the inputs reaches each of them. End.X adjacency
+// resolution does not: it looks up the configured next hop with the exposed
+// inner source (endpoint_resolve_adjacency).
 static __always_inline int srv6_fib_lookup_v6_params(
     void *ctx,
     struct bpf_fib_lookup *params,

@@ -115,7 +115,7 @@ type BumDevmapSync struct {
 	excluded map[bdSlot]string
 	// built holds what each BD's installed devmaps were built from: a
 	// rebuild that would produce the same ones leaves them alone.
-	built map[uint16]devmapKey
+	built map[uint16]builtDevmaps
 	// resync and resyncPoll: see uplinkResyncRose.
 	resync     uint64
 	resyncPoll time.Duration
@@ -147,7 +147,7 @@ func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink Uplink
 		logger:   logger,
 		unserved: map[uint16]string{},
 		excluded: map[bdSlot]string{},
-		built:    map[uint16]devmapKey{},
+		built:    map[uint16]builtDevmaps{},
 
 		resyncPoll: bumUplinkResyncPoll,
 		retryPoll:  bumExcludedRetry,
@@ -210,11 +210,12 @@ func (s *BumDevmapSync) SyncBD(bdID uint16) error {
 	if err != nil {
 		return err
 	}
-	b, err := s.buildBDLocked(bdID, acs[bdID])
+	seen := map[string]struct{}{}
+	b, err := s.buildBDLocked(bdID, acs[bdID], seen)
 	if err != nil || b == nil {
 		return err
 	}
-	return s.installLocked([]*bdBuild{b})
+	return s.installLocked([]*bdBuild{b}, seen)
 }
 
 // bumAC is one headend_l2 entry of a BD: a local AC.
@@ -256,10 +257,11 @@ func unservable(acs []bumAC, ifindexes []uint32, slots int) string {
 // agree unless an iif ip rule or a VRF sends one of them to another table.
 // disagree reports such a split, an AC that has no usable route included;
 // one devmap cannot serve that, so the BD takes the tc path, where every
-// frame's copies are looked up on its own AC (splitACsReason). extra are the
-// next hops other ACs chose on the same uplink, which need resolving too. An
-// AC whose device is gone is passed over, the same as it is in the devmap.
-func (s *BumDevmapSync) resolveUplink(acs []uint32, peer *HeadendEntry) (up BumUplink, extra []net.IP, disagree bool, err error) {
+// frame's copies are looked up on its own AC (splitACsReason). others are
+// the answers of the other ACs that differ from up: their next hops need
+// resolving too. An AC whose device is gone is passed over, the same as it
+// is in the devmap.
+func (s *BumDevmapSync) resolveUplink(acs []uint32, peer *HeadendEntry) (up BumUplink, others []BumUplink, disagree bool, err error) {
 	found := false
 	for _, ac := range acs {
 		got, e := s.uplink(UplinkQuery{AC: ac, Src: peer.SrcAddr, Dst: peer.Segments[0]})
@@ -272,14 +274,15 @@ func (s *BumDevmapSync) resolveUplink(acs []uint32, peer *HeadendEntry) (up BumU
 			up, found = got, true
 		case got.Ifindex != up.Ifindex:
 			disagree = true
+			others = append(others, got)
 		case !got.Nexthop.Equal(up.Nexthop):
-			extra = append(extra, got.Nexthop)
+			others = append(others, got)
 		}
 	}
 	if !found {
 		return BumUplink{}, nil, false, err
 	}
-	return up, extra, disagree, nil
+	return up, others, disagree, nil
 }
 
 // bdBuild is a BD's pair of freshly built devmaps, not installed yet.
@@ -288,16 +291,16 @@ type bdBuild struct {
 	flood, local *ebpf.Map
 	devices      []uint32 // every device the devmaps send to
 	slots        []bumSlot
-	key          devmapKey
+	state        builtDevmaps
 }
 
 type bumSlot struct {
 	index   uint16
 	uplink  uint32
 	nexthop net.IP
-	// extraNexthops: next hops other ACs of the BD chose on the same
-	// uplink. They need their neighbour entries too.
-	extraNexthops []net.IP
+	// others are what the BD's other ACs answered where it differs. Their
+	// next hops need their neighbour entries too.
+	others []BumUplink
 }
 
 // bdSlot names a flood slot of a BD.
@@ -311,8 +314,8 @@ type devmapSlotKey struct {
 	uplink uint32
 }
 
-// devmapKey is what a BD's devmaps are built from (ifindexes sorted, slots
-// in slot order, both as built: left-out entries do not count).
+// devmapKey is what a BD's devmaps hold: ifindexes sorted, slots in slot
+// order.
 type devmapKey struct {
 	acs   []uint32
 	slots []devmapSlotKey
@@ -320,6 +323,12 @@ type devmapKey struct {
 
 func (k devmapKey) equal(o devmapKey) bool {
 	return slices.Equal(k.acs, o.acs) && slices.Equal(k.slots, o.slots)
+}
+
+// builtDevmaps records a BD's installed devmaps: want is what they were
+// built from, placed what could be added (a device that is gone cannot).
+type builtDevmaps struct {
+	want, placed devmapKey
 }
 
 func slotKeys(slots []bumSlot) []devmapSlotKey {
@@ -337,7 +346,7 @@ func (b *bdBuild) close() {
 
 // buildBDLocked builds the devmaps of one BD. A BD that gets no devmap is
 // cleared right away, and the build is nil.
-func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error) {
+func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC, seen map[string]struct{}) (*bdBuild, error) {
 	if s.modeOf(bdID) != BumModeXDP {
 		return nil, s.clearBDLocked(bdID, "")
 	}
@@ -371,7 +380,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 		if peer.FloodExclude != 0 || peer.NumSegments < 1 {
 			continue
 		}
-		up, extra, disagree, err := s.resolveUplink(ifindexes, &peer)
+		up, others, disagree, err := s.resolveUplink(ifindexes, &peer)
 		split = split || disagree
 		if err != nil {
 			// Not fatal: the slot rejoins on the next rebuild (route change,
@@ -390,20 +399,28 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 				zap.String("segment", net.IP(peer.Segments[0][:]).String()), zap.Error(err))
 			continue
 		}
-		slots = append(slots, bumSlot{index: i, uplink: up.Ifindex, nexthop: up.Nexthop, extraNexthops: extra})
+		slots = append(slots, bumSlot{index: i, uplink: up.Ifindex, nexthop: up.Nexthop, others: others})
 	}
 	for key := range s.excluded {
-		if _, still := left[key.index]; key.bd == bdID && !still {
-			delete(s.excluded, key)
+		if _, still := left[key.index]; key.bd != bdID || still {
+			continue
+		}
+		delete(s.excluded, key)
+		// Not when the peer is simply gone.
+		if slices.ContainsFunc(slots, func(sl bumSlot) bool { return sl.index == key.index }) {
 			s.logger.Info("xdp BUM: flood slot is no longer left out",
 				zap.Uint16("bd_id", bdID), zap.Uint16("index", key.index))
 		}
 	}
-	if reason := unservable(acs, ifindexes, len(slots)); reason != "" {
-		return nil, s.clearBDLocked(bdID, reason)
+	reason := unservable(acs, ifindexes, len(slots))
+	if reason == "" && split {
+		reason = splitACsReason
 	}
-	if split {
-		return nil, s.clearBDLocked(bdID, splitACsReason)
+	if reason != "" {
+		// The tc path drops a copy whose next hop is unresolved, so these
+		// BDs need their next hops resolved as much as xdp mode does.
+		s.keepNeighsLocked(bdID, slots, seen)
+		return nil, s.clearBDLocked(bdID, reason)
 	}
 	if (len(slots) > 0 || s.native) && s.egress == nil {
 		return nil, fmt.Errorf("bd %d: bum_remote_egress is not loaded", bdID)
@@ -412,9 +429,9 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 	// Nothing to install when the BD's devmaps would come out the same. The
 	// rebuilds a persistent drop triggers then cost a probe per peer and no
 	// map swap (uplinkResyncRose).
-	key := devmapKey{acs: ifindexes, slots: slotKeys(slots)}
-	if cur, ok := s.built[bdID]; ok && cur.equal(key) {
-		s.keepNeighsLocked(bdID, slots, map[string]struct{}{})
+	want := devmapKey{acs: ifindexes, slots: slotKeys(slots)}
+	if s.devmapsCurrentLocked(bdID, want) {
+		s.keepNeighsLocked(bdID, slots, seen)
 		return nil, nil
 	}
 
@@ -427,7 +444,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 		_ = flood.Close()
 		return nil, fmt.Errorf("bd %d: create local devmap: %w", bdID, err)
 	}
-	b := &bdBuild{bd: bdID, flood: flood, local: local, slots: slots, key: key}
+	b := &bdBuild{bd: bdID, flood: flood, local: local, slots: slots, state: builtDevmaps{want: want, placed: want}}
 	uplinks := make(map[uint32]struct{}, len(slots))
 	for _, sl := range slots {
 		uplinks[sl.uplink] = struct{}{}
@@ -452,7 +469,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 		} else {
 			// Not fatal, like an unresolvable slot: an AC whose device is
 			// gone must not keep the rest of the BD on stale devmaps.
-			b.key.acs = slices.DeleteFunc(slices.Clone(b.key.acs), func(ac uint32) bool { return ac == ifindex })
+			b.state.placed.acs = slices.DeleteFunc(slices.Clone(b.state.placed.acs), func(ac uint32) bool { return ac == ifindex })
 			_ = local.Delete(ifindex)
 			s.logger.Warn("xdp BUM: cannot add a local AC to the BD devmap; AC left out",
 				zap.Uint16("bd_id", bdID), zap.Uint32("ifindex", ifindex), zap.Error(err))
@@ -471,7 +488,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 			// The devmap has room (unservable), so the uplink device is
 			// gone: like an unresolvable uplink, the slot waits for the
 			// next rebuild.
-			b.key.slots = slices.DeleteFunc(slices.Clone(b.key.slots), func(k devmapSlotKey) bool { return k.index == sl.index })
+			b.state.placed.slots = slices.DeleteFunc(slices.Clone(b.state.placed.slots), func(k devmapSlotKey) bool { return k.index == sl.index })
 			s.logger.Warn("xdp BUM: cannot add a flood slot to the BD devmap; slot left out",
 				zap.Uint16("bd_id", bdID), zap.Uint16("index", sl.index), zap.Uint32("uplink", sl.uplink), zap.Error(err))
 		}
@@ -479,10 +496,80 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 	return b, nil
 }
 
+// devmapsCurrentLocked reports whether the BD's installed devmaps are still
+// what a build from want would produce. Comparing want is not enough: the
+// kernel removes a device's entries when it unregisters, which moving it to
+// another namespace and back does while its ifindex stays the same.
+func (s *BumDevmapSync) devmapsCurrentLocked(bdID uint16, want devmapKey) bool {
+	cur, ok := s.built[bdID]
+	if !ok || !cur.want.equal(want) {
+		return false
+	}
+	// A device left out because it was gone may be back.
+	for _, ac := range want.acs {
+		if !slices.Contains(cur.placed.acs, ac) && linkExists(ac) {
+			return false
+		}
+	}
+	for _, sl := range want.slots {
+		if !slices.Contains(cur.placed.slots, sl) && linkExists(sl.uplink) {
+			return false
+		}
+	}
+
+	floodWant := make(map[uint32]uint32, len(cur.placed.acs)+len(cur.placed.slots))
+	localWant := make(map[uint32]uint32, len(cur.placed.acs))
+	for _, ac := range cur.placed.acs {
+		floodWant[ac], localWant[ac] = ac, ac
+	}
+	for _, sl := range cur.placed.slots {
+		floodWant[BumSlotKeyBase|uint32(sl.index)] = sl.uplink
+	}
+	if !s.devmapHolds(s.objs.BumFloodMap, bdID, floodWant) || !s.devmapHolds(s.objs.BumLocalMap, bdID, localWant) {
+		return false
+	}
+	if s.native {
+		for _, dev := range floodWant {
+			var v devmapVal
+			if err := s.objs.BumTxMap.Lookup(dev, &v); err != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// devmapHolds reports whether outer[bdID] has every entry of want (key to
+// device). Anything unexpected, a read error included, counts as no: the
+// caller then rebuilds.
+func (s *BumDevmapSync) devmapHolds(outer *ebpf.Map, bdID uint16, want map[uint32]uint32) bool {
+	var id ebpf.MapID
+	if err := outer.Lookup(uint32(bdID), &id); err != nil {
+		return false
+	}
+	inner, err := ebpf.NewMapFromID(id)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = inner.Close() }()
+	for key, dev := range want {
+		var v devmapVal
+		if err := inner.Lookup(key, &v); err != nil || v.Ifindex != dev {
+			return false
+		}
+	}
+	return true
+}
+
+func linkExists(ifindex uint32) bool {
+	_, err := netlink.LinkByIndex(int(ifindex))
+	return err == nil
+}
+
 // installLocked swaps the builds' devmaps in. In native XDP every device
 // they send to gets its bum_tx_map entry first (SetNativeXDP); a BD whose
 // device finds no room there runs in tc mode instead. Builds are closed.
-func (s *BumDevmapSync) installLocked(builds []*bdBuild) error {
+func (s *BumDevmapSync) installLocked(builds []*bdBuild, seen map[string]struct{}) error {
 	defer func() {
 		for _, b := range builds {
 			b.close()
@@ -511,13 +598,14 @@ func (s *BumDevmapSync) installLocked(builds []*bdBuild) error {
 	}
 
 	var errs []error
-	seen := map[string]struct{}{}
 	for _, b := range builds {
 		if reason, ok := failed[b.bd]; ok {
+			s.keepNeighsLocked(b.bd, b.slots, seen) // it takes the tc path
 			errs = append(errs, s.clearBDLocked(b.bd, reason))
 			continue
 		}
 		key := uint32(b.bd)
+		delete(s.built, b.bd) // until both maps are in
 		if err := s.objs.BumLocalMap.Update(key, b.local, ebpf.UpdateAny); err != nil {
 			errs = append(errs, fmt.Errorf("bd %d: install local devmap: %w", b.bd, err))
 			continue
@@ -526,7 +614,7 @@ func (s *BumDevmapSync) installLocked(builds []*bdBuild) error {
 			errs = append(errs, fmt.Errorf("bd %d: install flood devmap: %w", b.bd, err))
 			continue
 		}
-		s.built[b.bd] = b.key
+		s.built[b.bd] = b.state
 		s.noteServedLocked(b.bd, "")
 		s.keepNeighsLocked(b.bd, b.slots, seen)
 	}
@@ -534,22 +622,23 @@ func (s *BumDevmapSync) installLocked(builds []*bdBuild) error {
 }
 
 // keepNeighsLocked keeps the next hops of a BD's flood slots resolved.
-// seen dedupes the (device, next hop) pairs of one rebuild.
+// seen dedupes the (device, next hop) pairs of one rebuild: each is a dump
+// of the device's neighbours.
 func (s *BumDevmapSync) keepNeighsLocked(bd uint16, slots []bumSlot, seen map[string]struct{}) {
 	if s.keepNeigh == nil {
 		return
 	}
 	for _, sl := range slots {
-		for _, nh := range append([]net.IP{sl.nexthop}, sl.extraNexthops...) {
-			if nh == nil {
+		for _, up := range append([]BumUplink{{Ifindex: sl.uplink, Nexthop: sl.nexthop}}, sl.others...) {
+			if up.Nexthop == nil {
 				continue
 			}
-			key := fmt.Sprintf("%d/%s", sl.uplink, nh)
+			key := fmt.Sprintf("%d/%s", up.Ifindex, up.Nexthop)
 			if _, dup := seen[key]; dup {
 				continue
 			}
 			seen[key] = struct{}{}
-			if err := s.keepNeigh(sl.uplink, nh); err != nil {
+			if err := s.keepNeigh(up.Ifindex, up.Nexthop); err != nil {
 				s.logger.Debug("xdp BUM: cannot keep a flood slot's next hop resolved",
 					zap.Uint16("bd_id", bd), zap.Uint16("index", sl.index), zap.Error(err))
 			}
@@ -671,9 +760,10 @@ func (s *BumDevmapSync) SyncAll() error {
 	var (
 		errs   []error
 		builds []*bdBuild
+		seen   = map[string]struct{}{}
 	)
 	for bd := range bds {
-		b, err := s.buildBDLocked(bd, acs[bd])
+		b, err := s.buildBDLocked(bd, acs[bd], seen)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -681,7 +771,7 @@ func (s *BumDevmapSync) SyncAll() error {
 			builds = append(builds, b)
 		}
 	}
-	errs = append(errs, s.installLocked(builds))
+	errs = append(errs, s.installLocked(builds, seen))
 	return errors.Join(errs...)
 }
 
@@ -802,12 +892,16 @@ func (s *BumDevmapSync) uplinkResyncRose() bool {
 // lasts, which can be indefinitely on a misconfigured AC.
 const bumExcludedRetry = 30 * time.Second
 
-// retryPending reports whether a rebuild could bring something back.
+// retryPending reports whether a rebuild could bring something back. A BD
+// that xdp mode cannot serve for its configuration cannot: its slots stay
+// recorded, so they warn once, but only a BD that may return counts.
 func (s *BumDevmapSync) retryPending() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.excluded) > 0 {
-		return true
+	for key := range s.excluded {
+		if reason, unserved := s.unserved[key.bd]; !unserved || reason == splitACsReason {
+			return true
+		}
 	}
 	for _, reason := range s.unserved {
 		if reason == splitACsReason {

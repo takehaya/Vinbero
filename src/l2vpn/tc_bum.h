@@ -12,6 +12,7 @@
 #include "core/xdp_prog.h"
 #include "core/xdp_map.h"
 #include "core/srv6.h"
+#include "core/srv6_fib.h"
 #include "core/esi.h"
 #include "core/xdp_stats.h"
 #include "headend/srv6_headend.h"
@@ -56,13 +57,7 @@ static __always_inline int tc_srv6_fib_lookup_and_update(
     __u32 *out_ifindex)
 {
     struct bpf_fib_lookup fib_params = {};
-    fib_params.family = AF_INET6;
-    fib_params.ifindex = skb->ifindex;
-
-    __builtin_memcpy(fib_params.ipv6_src, &ip6h->saddr, sizeof(fib_params.ipv6_src));
-    __builtin_memcpy(fib_params.ipv6_dst, &ip6h->daddr, sizeof(fib_params.ipv6_dst));
-
-    int ret = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params), 0);
+    int ret = srv6_fib_lookup_v6_params(skb, &fib_params, &ip6h->saddr, &ip6h->daddr, skb->ifindex);
     if (ret != BPF_FIB_LKUP_RET_SUCCESS)
         return -1;
 
