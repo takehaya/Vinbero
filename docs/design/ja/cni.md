@@ -72,7 +72,7 @@ ADD は次の順に進みます。
 2. 別の VRF の pod が同じ node で使っている subnet と重なれば拒否します (後述)
 3. attachment を `dataDir` に記録します。以降で失敗したときは DEL と同じ手順で巻き戻します
 4. veth を作り、pod 側を設定します
-5. `VrfCreate` (adopt を含む) と、必要なら `VrfBgpBind` を呼びます
+5. VRF が無ければ `VrfCreate` を呼び、必要なら `VrfBgpBind` を呼びます
 6. host veth を VRF に enslave し、`VrfAcAdd`、`DeviceAttach` を呼びます
 7. 最後に VRF table へ /32 と neighbour を入れます。veth が data plane に載ってから広告が出ます
 

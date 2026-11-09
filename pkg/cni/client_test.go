@@ -15,6 +15,17 @@ import (
 type fakeVrfClient struct {
 	vinberov1connect.VrfServiceClient
 	removeErr error // the context error VrfAcRemove saw
+	vrfs      []*v1.Vrf
+	creates   int
+}
+
+func (f *fakeVrfClient) VrfShow(context.Context, *connect.Request[v1.VrfShowRequest]) (*connect.Response[v1.VrfShowResponse], error) {
+	return connect.NewResponse(&v1.VrfShowResponse{Vrfs: f.vrfs}), nil
+}
+
+func (f *fakeVrfClient) VrfCreate(context.Context, *connect.Request[v1.VrfCreateRequest]) (*connect.Response[v1.VrfCreateResponse], error) {
+	f.creates++
+	return connect.NewResponse(&v1.VrfCreateResponse{}), nil
 }
 
 func (f *fakeVrfClient) VrfAcRemove(ctx context.Context, _ *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error) {
@@ -44,5 +55,31 @@ func TestRPCTimeoutIsPerCall(t *testing.T) {
 	}
 	if vrf.removeErr != nil {
 		t.Errorf("RemoveAC ran with a spent context: %v", vrf.removeErr)
+	}
+}
+
+// An existing VRF is left alone (VrfCreate would replace its device facet);
+// another table is refused; a missing or deviceless VRF is created.
+func TestEnsureVRF(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		vrfs    []*v1.Vrf
+		creates int
+		wantErr bool
+	}{
+		{"missing", nil, 1, false},
+		{"deviceless", []*v1.Vrf{{Name: "tenant-a"}}, 1, false},
+		{"same table", []*v1.Vrf{{Name: "tenant-a", TableId: 100, Ifindex: 7}}, 0, false},
+		{"other table", []*v1.Vrf{{Name: "tenant-a", TableId: 200, Ifindex: 7}}, 0, true},
+		{"other vrf", []*v1.Vrf{{Name: "tenant-b", TableId: 200, Ifindex: 7}}, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vrf := &fakeVrfClient{vrfs: tc.vrfs}
+			d := &rpcDaemon{vrf: vrf, timeout: time.Second}
+			err := d.EnsureVRF(context.Background(), "tenant-a", 100)
+			if (err != nil) != tc.wantErr || vrf.creates != tc.creates {
+				t.Errorf("err = %v, creates = %d, want creates %d", err, vrf.creates, tc.creates)
+			}
+		})
 	}
 }

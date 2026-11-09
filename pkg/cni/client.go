@@ -27,8 +27,8 @@ type Binding struct {
 // Daemon is the part of the vinberod API the plugin drives. Every call is
 // idempotent, so a retried ADD or DEL converges.
 type Daemon interface {
-	// EnsureVRF creates the kernel VRF, or adopts it when it already
-	// exists on the same table.
+	// EnsureVRF creates the kernel VRF unless vinberod already has it on
+	// the same table; another table is an error.
 	EnsureVRF(ctx context.Context, name string, tableID uint32) error
 	// EnsureBinding binds the VRF when it has no binding yet. An existing
 	// binding is kept; it must use the same RD and redistribute static
@@ -80,6 +80,23 @@ func opErrors(errs []*v1.OperationError) error {
 }
 
 func (d *rpcDaemon) EnsureVRF(ctx context.Context, name string, tableID uint32) error {
+	showCtx, cancelShow := d.bound(ctx)
+	defer cancelShow()
+	show, err := d.vrf.VrfShow(showCtx, connect.NewRequest(&v1.VrfShowRequest{}))
+	if err != nil {
+		return fmt.Errorf("VrfShow: %w", err)
+	}
+	// VrfCreate on an existing VRF replaces its device facet with the
+	// request's and writes the state file, so it only runs when needed.
+	for _, v := range show.Msg.GetVrfs() {
+		if v.GetName() != name || v.GetIfindex() == 0 {
+			continue
+		}
+		if v.GetTableId() != tableID {
+			return fmt.Errorf("vrf %s exists with table %d, the network configuration says %d", name, v.GetTableId(), tableID)
+		}
+		return nil
+	}
 	ctx, cancel := d.bound(ctx)
 	defer cancel()
 	resp, err := d.vrf.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
