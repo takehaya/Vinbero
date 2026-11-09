@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 )
@@ -135,4 +136,44 @@ func (m *ResourceManager) GetVrfByName(name string) (ManagedVrf, bool) {
 		}
 	}
 	return ManagedVrf{}, false
+}
+
+// VRFState returns the VRF objects' saved state. It is the zero State on a
+// file written before they were recorded.
+func (m *ResourceManager) VRFState() vrf.State {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	objs := m.state.VrfObjects
+	if objs == nil {
+		return vrf.State{}
+	}
+	s := vrf.State{NextID: objs.NextVrfID, VRFs: make([]vrf.PersistedVRF, 0, len(objs.Entries))}
+	for _, e := range objs.Entries {
+		p := vrf.PersistedVRF{Name: e.Name, ID: e.VrfID}
+		for _, ac := range e.RuntimeACs {
+			p.RuntimeACs = append(p.RuntimeACs, vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN})
+		}
+		s.VRFs = append(s.VRFs, p)
+	}
+	return s
+}
+
+// SaveVRFState records the VRF objects' state and writes the state file. On a
+// persist failure the record stays in memory and the next persist writes it.
+func (m *ResourceManager) SaveVRFState(s vrf.State) error {
+	objs := &ManagedVrfObjects{NextVrfID: s.NextID, Entries: make([]ManagedVrfObject, 0, len(s.VRFs))}
+	for _, p := range s.VRFs {
+		e := ManagedVrfObject{Name: p.Name, VrfID: p.ID}
+		for _, ac := range p.RuntimeACs {
+			e.RuntimeACs = append(e.RuntimeACs, ManagedAC{Interface: ac.Interface, VLAN: ac.VLAN})
+		}
+		objs.Entries = append(objs.Entries, e)
+	}
+	m.mu.Lock()
+	m.state.VrfObjects = objs
+	m.mu.Unlock()
+	if err := m.persist(); err != nil {
+		return fmt.Errorf("persist state after updating VRF objects: %w", err)
+	}
+	return nil
 }

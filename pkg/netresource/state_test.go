@@ -3,9 +3,11 @@ package netresource
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"go.uber.org/zap"
 )
 
@@ -145,5 +147,62 @@ func TestReconcile_EmptyStateSkipsPersist(t *testing.T) {
 	m.ensureBridgeInState("br-x", 1, nil, 9, "")
 	if err := m.persist(); err == nil {
 		t.Fatal("persist into an unwritable state dir must fail")
+	}
+}
+
+// VRF identities and runtime ACs round-trip through the file, next to the
+// other records.
+func TestVRFState_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	m, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := vrf.State{NextID: 9, VRFs: []vrf.PersistedVRF{
+		{Name: "global", ID: 0, RuntimeACs: []vrf.AC{{Interface: "eth0", VLAN: 0}}},
+		{Name: "tenant-a", ID: 3, RuntimeACs: []vrf.AC{{Interface: "vb1", VLAN: 0}, {Interface: "vb2", VLAN: 100}}},
+		{Name: "tenant-b", ID: 8},
+	}}
+	if err := m.SaveVRFState(want); err != nil {
+		t.Fatalf("SaveVRFState: %v", err)
+	}
+	m2, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := m2.VRFState(); !reflect.DeepEqual(got, want) {
+		t.Errorf("after reload = %+v\nwant %+v", got, want)
+	}
+}
+
+// A file from before VRF objects were recorded still loads, with the records
+// it does have intact, and reads as no saved identities.
+func TestVRFState_OlderFileWithoutTheFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	old := `{"vrfs":[{"name":"vrf1","table_id":100,"members":["eth1"],"enable_l3mdev_rule":true,"ifindex":5}],` +
+		`"bridges":[{"name":"br1","bd_id":10,"members":null,"ifindex":6}],` +
+		`"devices":[{"name":"vb1","mode":"generic"}]}`
+	if err := os.WriteFile(path, []byte(old), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatalf("older state refused: %v", err)
+	}
+	if got := m.VRFState(); !reflect.DeepEqual(got, vrf.State{}) {
+		t.Errorf("VRFState of an older file = %+v, want zero", got)
+	}
+	if err := m.SaveVRFState(vrf.State{NextID: 2, VRFs: []vrf.PersistedVRF{{Name: "vrf1", ID: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	m2, err := NewResourceManager(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m2.ListVrfs()) != 1 || len(m2.ListBridges()) != 1 || len(m2.ListDevices()) != 1 {
+		t.Errorf("older records lost: vrfs=%v bridges=%v devices=%v", m2.ListVrfs(), m2.ListBridges(), m2.ListDevices())
+	}
+	if m2.VRFState().NextID != 2 {
+		t.Errorf("NextID = %d, want 2", m2.VRFState().NextID)
 	}
 }

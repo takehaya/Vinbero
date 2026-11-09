@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -1052,5 +1053,81 @@ func TestVrfServer_BridgeAttachFiresEvpnReplay(t *testing.T) {
 	attach(t, s)
 	if *replays != 0 {
 		t.Errorf("attach without a binding: replays = %d, want 0", *replays)
+	}
+}
+
+type fakeVrfStore struct {
+	saved []vrf.State
+	err   error
+}
+
+func (f *fakeVrfStore) SaveVRFState(st vrf.State) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.saved = append(f.saved, st)
+	return nil
+}
+
+// A runtime AC reaches the state file with its VRF, and leaves it again.
+func TestVrfServer_RuntimeACsArePersisted(t *testing.T) {
+	s, _ := newTestVrfServer()
+	store := &fakeVrfStore{}
+	s.mgr.SetStore(store)
+	ctx := context.Background()
+	ac := &v1.VrfAc{InterfaceName: "eth1"}
+	if _, err := s.VrfAcAdd(ctx, connect.NewRequest(&v1.VrfAcAddRequest{Name: "tenant-a", Ac: ac})); err != nil {
+		t.Fatalf("VrfAcAdd: %v", err)
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("saves after add = %d, want 1", len(store.saved))
+	}
+	got := store.saved[0].VRFs
+	if len(got) != 1 || got[0].Name != "tenant-a" || got[0].ID == 0 ||
+		!slices.Equal(got[0].RuntimeACs, []vrf.AC{{Interface: "eth1"}}) {
+		t.Fatalf("saved %+v, want tenant-a with eth1", got)
+	}
+	if _, err := s.VrfAcRemove(ctx, connect.NewRequest(&v1.VrfAcRemoveRequest{Name: "tenant-a", Ac: ac})); err != nil {
+		t.Fatalf("VrfAcRemove: %v", err)
+	}
+	last := store.saved[len(store.saved)-1].VRFs
+	if len(last) != 1 || len(last[0].RuntimeACs) != 0 || last[0].ID != got[0].ID {
+		t.Errorf("after remove %+v, want the VRF kept without ACs", last)
+	}
+}
+
+// A failed save is the caller's error, and repeating the call writes it.
+func TestVrfServer_AcAddSaveFailureIsReportedAndRetryable(t *testing.T) {
+	s, _ := newTestVrfServer()
+	store := &fakeVrfStore{err: errors.New("disk full")}
+	s.mgr.SetStore(store)
+	ctx := context.Background()
+	req := func() *connect.Request[v1.VrfAcAddRequest] {
+		return connect.NewRequest(&v1.VrfAcAddRequest{Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: "eth1"}})
+	}
+	if _, err := s.VrfAcAdd(ctx, req()); connect.CodeOf(err) != connect.CodeInternal {
+		t.Fatalf("VrfAcAdd with a failing store: %v, want Internal", err)
+	}
+	store.err = nil
+	if _, err := s.VrfAcAdd(ctx, req()); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if len(store.saved) != 1 || len(store.saved[0].VRFs[0].RuntimeACs) != 1 {
+		t.Errorf("retry saved %+v, want the AC", store.saved)
+	}
+}
+
+// Deleting a VRF is saved, so the retired id cannot return after a restart.
+func TestVrfServer_DeleteIsPersisted(t *testing.T) {
+	s, _ := newTestVrfServer()
+	store := &fakeVrfStore{}
+	s.mgr.SetStore(store)
+	id := s.mgr.Ensure("tenant-a").ID
+	if _, err := s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{"tenant-a"}})); err != nil {
+		t.Fatalf("VrfDelete: %v", err)
+	}
+	last := store.saved[len(store.saved)-1]
+	if len(last.VRFs) != 0 || last.NextID <= id {
+		t.Errorf("saved %+v, want no VRFs and a next id above %d", last, id)
 	}
 }

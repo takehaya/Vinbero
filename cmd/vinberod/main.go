@@ -98,19 +98,28 @@ func run(cliCtx *cli.Context) error {
 	}
 	defer func() { _ = vin.Close() }()
 
-	if err := vin.AttachConfigDevices(); err != nil {
-		return fmt.Errorf("attach devices: %w", err)
-	}
-	lg.Info("Vinbero XDP and TC programs attached to internal.devices")
-
 	// Initialize resource manager (reconcile state before FDB watcher)
 	if err := vin.InitResourceManager(); err != nil {
 		return fmt.Errorf("init resource manager: %w", err)
 	}
-	// Re-attach the devices that were attached at runtime (DeviceAttach)
-	// before the restart, from the state the resource manager loaded.
-	if err := vin.ReconcileDevices(); err != nil {
-		return fmt.Errorf("reconcile devices: %w", err)
+	vrfBgpMgr := vrfbgp.NewManager()
+	vrfBgpMgr.VRF().SetLogger(lg)
+	err = bringUpDataPlane(func() error {
+		return restoreVRFs(cfg.VRFs, vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetResourceManager(), lg)
+	}, func() error {
+		if err := vin.AttachConfigDevices(); err != nil {
+			return fmt.Errorf("attach devices: %w", err)
+		}
+		lg.Info("Vinbero XDP and TC programs attached to internal.devices")
+		// Re-attach the devices that were attached at runtime (DeviceAttach)
+		// before the restart, from the state the resource manager loaded.
+		if err := vin.ReconcileDevices(); err != nil {
+			return fmt.Errorf("reconcile devices: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	// Forget runtime attachments whose interface is deleted.
 	if err := vin.WatchDevices(); err != nil {
@@ -144,7 +153,6 @@ func run(cliCtx *cli.Context) error {
 			lg.Info("control-plane SID reservations retained; BGP is disabled so plugins are not restored")
 		}
 	}
-	vrfBgpMgr := vrfbgp.NewManager()
 
 	// The BGP session is constructed (unstarted) before the RPC server
 	// so the server can hold it as a RouteAdvertiser for BgpRouteService.
@@ -384,31 +392,12 @@ func run(cliCtx *cli.Context) error {
 		srv.SetProber(liveProber, proberIntervalMs, proberMultiplier)
 	}
 
-	// Seed the VRF objects with the kernel devices and bridges the resource
-	// manager reconciled from its state file (InitResourceManager ran before
-	// the manager existed), so a persisted facet is a full first-class VRF
-	// from boot. Then load the config: kernel-device and bridge facets
-	// (adopt-idempotent over the seed) and the ingress facet, programmed once
-	// at boot (later runtime mutations go through VrfService). Failures are
-	// fatal: a config-declared AC, device or bridge that cannot materialize is
-	// a misconfiguration the operator should see at startup.
-	if err := seedVrfDevices(vin.GetResourceManager(), srv.VrfManager()); err != nil {
-		return fmt.Errorf("vrf: %w", err)
-	}
-	if err := seedVrfBridges(vin.GetResourceManager(), srv.VrfManager(), cfg.VRFs, lg); err != nil {
-		return fmt.Errorf("vrf: %w", err)
-	}
-	if err := loadVRFs(cfg.VRFs, srv.VrfManager(), vin.GetMapOperations(), vin.GetResourceManager(), vin.GetResourceManager(), lg); err != nil {
-		return fmt.Errorf("vrf: %w", err)
-	}
-	// StartFDBWatcher's registration loop ran before loadVRFs, so a bridge
-	// first created by the config attach path is not watched yet; sweep every
-	// bridge facet (RegisterBridge is a pure map op, double-registering the
-	// state-seeded ones is harmless).
-	for _, v := range srv.VrfManager().List() {
-		if v.Bridge != nil {
-			vin.GetFDBWatcher().RegisterBridge(int(v.Bridge.Ifindex), v.Bridge.BdID)
-		}
+	// Boot-time VRF creation is done; from here every change is saved as it
+	// happens. Not being able to write the file must not stop a daemon that
+	// runs without the state directory.
+	srv.VrfManager().SetStore(vin.GetResourceManager())
+	if err := srv.VrfManager().Save(); err != nil {
+		lg.Warn("VRF state not saved; vrf_ids and runtime ACs will not survive a restart", zap.Error(err))
 	}
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
@@ -698,6 +687,41 @@ func startBGPSession(ctx context.Context, session bgp.Session, cfg config.BGPCon
 	return nil
 }
 
+// bringUpDataPlane programs the ingress classification, then attaches the
+// devices. A device attached first would classify its traffic against an empty
+// ingress_vrf_map: a pod would count as global VRF, or be dropped under
+// default-deny, until the map was written.
+func bringUpDataPlane(classify, attach func() error) error {
+	if err := classify(); err != nil {
+		return err
+	}
+	return attach()
+}
+
+// restoreVRFs brings the VRF objects back and programs ingress_vrf_map: the
+// saved identities and runtime ACs first, so nothing allocates an id a previous
+// run already gave out, then the kernel devices and bridges the resource
+// manager reconciled from the state file, then the config (adopt-idempotent
+// over the seed). Failures are fatal: a config-declared AC, device or bridge
+// that cannot materialize is a misconfiguration the operator should see at
+// startup, and a state file that contradicts itself is not guessed around.
+func restoreVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, resMgr *netresource.ResourceManager, lg *zap.Logger) error {
+	if err := mgr.Restore(resMgr.VRFState()); err != nil {
+		return fmt.Errorf("vrf: %w (repair the state file, settings.state_path, and restart)", err)
+	}
+	if err := seedVrfDevices(resMgr, mgr); err != nil {
+		return fmt.Errorf("vrf: %w", err)
+	}
+	if err := seedVrfBridges(resMgr, mgr, cfg, lg); err != nil {
+		return fmt.Errorf("vrf: %w", err)
+	}
+	if err := loadVRFs(cfg, mgr, prog, resMgr, resMgr, lg); err != nil {
+		return fmt.Errorf("vrf: %w", err)
+	}
+	lg.Info("VRF ingress classification programmed", zap.Int("vrfs", len(mgr.List())))
+	return nil
+}
+
 // loadVRFs programs the VRFs' ingress facet from config at boot: it sets the
 // global policy, registers each VRF's access circuits, and reconciles the
 // data-plane maps. A config-declared interface that does not resolve is fatal
@@ -749,7 +773,14 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, dev 
 			}
 		}
 		for _, ac := range v.ACs {
-			if _, err := mgr.AddAC(v.Name, vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN}); err != nil {
+			declared := vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN}
+			// The config owns an AC it declares, whatever the state file says.
+			if owner, released := mgr.ReleaseRuntimeAC(declared); released && owner != v.Name {
+				lg.Warn("config moves a runtime AC to another VRF",
+					zap.String("interface", ac.Interface), zap.Uint16("vlan", ac.VLAN),
+					zap.String("from", owner), zap.String("to", v.Name))
+			}
+			if _, err := mgr.AddAC(v.Name, declared); err != nil {
 				return err
 			}
 		}

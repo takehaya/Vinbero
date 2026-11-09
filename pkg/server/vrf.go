@@ -196,6 +196,9 @@ func (s *VrfServer) createOne(in *v1.Vrf) (vrf.VRF, *v1.OperationError) {
 	if err != nil {
 		return fail(err.Error())
 	}
+	if err := s.mgr.Save(); err != nil {
+		return fail(err.Error())
+	}
 	return created, nil
 }
 
@@ -303,6 +306,9 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 		}
 	}
 	s.mgr.Delete(name)
+	if err := s.mgr.Save(); err != nil {
+		return fail(fmt.Sprintf("deleted, but the state file is out of date until the next successful save: %v", err))
+	}
 	return nil
 }
 
@@ -405,6 +411,9 @@ func (s *VrfServer) VrfBridgeAttach(
 		if b, bound := s.bindings.Get(vrfName); bound && len(importRTsForFamily(b, bgp.FamilyEVPN)) > 0 {
 			s.evpnReplay()
 		}
+	}
+	if err := s.mgr.Save(); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&v1.VrfBridgeAttachResponse{Vrf: vrfToProto(attached)}), nil
 }
@@ -590,6 +599,9 @@ func (s *VrfServer) VrfAcAdd(
 	if added {
 		s.mgr.MarkRuntimeAC(name, acVal)
 	}
+	if err := s.mgr.Save(); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
 	id, _ := s.mgr.IDForName(name)
 	v, _ := s.mgr.ByID(id)
 	return connect.NewResponse(&v1.VrfAcAddResponse{Vrf: vrfToProto(v)}), nil
@@ -636,6 +648,9 @@ func (s *VrfServer) VrfAcRemove(
 		}
 	}
 	if err := s.reconcileOrRollback(undo); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	if err := s.mgr.Save(); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&v1.VrfAcRemoveResponse{}), nil

@@ -83,7 +83,8 @@ DEL は記録を読み、逆順に /32 と neighbour の削除 (withdraw)、`Dev
 
 - IPAM の lease。whereabouts なら reconciler が回収します。host-local には回収の仕組みがありません
 - `dataDir` の attachment の記録。veth が無いので、subnet の重なりの検査では無視されます
-- vinberod が持つ AC と attach の記録 (`VrfAcRemove` や `DeviceDetach` が失敗したとき)。interface はもう無いので通信には関係せず、vinberod の次の再起動で消えます
+- vinberod が持つ attach の記録 (`DeviceDetach` が失敗したとき)。interface はもう無いので通信には関係せず、vinberod の次の再起動で消えます
+- vinberod が持つ AC の記録 (`VrfAcRemove` が失敗したとき)。これも通信には関係しません。再起動後も `state.json` に残り、reconcile のたびに warning を出して飛ばされます。消すには `vbctl vrf ac-remove` を実行します
 
 VRF と binding は最後の pod が消えても残します。
 
@@ -119,7 +120,7 @@ bgp:
 
 vinberod は `--bgp-enabled` を付けて起動します。付けないと `bgp` の設定があっても BGP は動きません。`listen_port` の既定値 `-1` では TCP の listen をしないので、node どうしの iBGP には例のように `179` を指定します。`router_id`、`next_hop`、locator の `prefix` は node ごとに変えます。
 
-VRF と binding も config で宣言しておくことを勧めます。RPC で作った binding と AC は daemon の再起動で消えるためです ([persistence.md](persistence.md))。config で宣言した binding は再起動後も残り、VRF table に残っている /32 は再び広告されます。host veth の attach は state file から戻ります。
+VRF と binding も config で宣言しておくことを勧めます。RPC で作った binding は daemon の再起動で消えるためです ([persistence.md](persistence.md))。config で宣言した binding は再起動後も残り、VRF table に残っている /32 は再び広告されます。host veth の attach と、plugin が足した AC は state file から戻ります。
 
 ```yaml
 vrfs:
@@ -208,7 +209,7 @@ pod は `k8s.v1.cni.cncf.io/networks: tenant-a` の annotation で接続しま�
 - L3 mode だけです。EVPN L2 mode は未実装です
 - `headend_v4_map` は VRF を key に持たないので、VRF 間で pod の subnet が重なると encap の LPM が衝突します。plugin は同じ node の記録 (veth が残っているもの) どうしで subnet の重なりを拒否しますが、別 node で別の VRF が同じ subnet を使う場合は検出できません。NAD 間で subnet を重ねないでください
 - 同じ理由で、VRF の分離は pod の経路表に頼っています。NET_ADMIN を持つ pod が net1 経由の経路を足すと、別の node にいる別の VRF の pod の /32 宛の packet が encap されて相手の pod に届きます。信頼できない pod に、この network で NET_ADMIN を与えないでください
-- vinberod を再起動すると、plugin が足した AC と、network configuration から作った binding は消えます。default-deny を有効にしている node では、再起動後の pod の通信が AC 不在で落ちます。binding は config で宣言し、default-deny を使う場合は再起動後に pod を作り直してください
+- vinberod を再起動すると、network configuration から作った binding は消えます。binding は config で宣言してください。plugin が足した AC と VRF の vrf_id は state file から戻るので、pod は再起動後も同じ VRF に分類されます
 - node を再起動すると、Multus が CNI の設定を書き直す前に kubelet が pod の sandbox を作り直すことがあります。その pod は primary network だけで Running になり、net1 がありません。`k8s.v1.cni.cncf.io/network-status` annotation は古い値のままなので、再起動後は pod の中で net1 を確認し、無ければ pod を作り直してください
 - vinberod が `settings.l2.bum_mode: xdp` で動いている node では、host veth の attach mode は `internal.bpf.device_mode` と同じでなければなりません。`device_mode: driver` の node では `deviceMode: driver` を指定しないと ADD が失敗します
 - `deviceMode: driver` (veth の native XDP) では、host veth へ redirect した frame を pod 側 veth が受け取るために、pod 側 veth にも XDP program か GRO が要ります。plugin はそれを設定しないので、既定の `generic` を使ってください

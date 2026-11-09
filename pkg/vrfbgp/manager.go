@@ -406,6 +406,9 @@ func (m *Manager) Bind(b Binding) error {
 		return ErrEmptyVRFName
 	}
 	m.vrf.Ensure(b.VRFName) // VRF identity is independent of the binding's lifetime
+	if err := m.vrf.Save(); err != nil {
+		return err
+	}
 	b = b.Normalize()
 	m.mu.Lock()
 	prev := m.bindings[b.VRFName]

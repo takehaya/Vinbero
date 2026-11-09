@@ -13,6 +13,8 @@
 | Headend v4 / v6 / L2 | **消える** | **残る** (bpffs pin) | default: RPC / CLI で再投入 |
 | BD peer / VLAN table / FDB | **消える** | **残る** (bpffs pin) | default: RPC / CLI (FDB は学習でも埋まる) |
 | Bridge / VRF デバイス | カーネル netlink に残る / netns 単位 | 同左 | `state.json` から **自動 reconcile** |
+| VRF の vrf_id と実行時 AC (`vrf ac-add`) | `state.json` に残る | 同左 | 起動時に XDP attach より前に復元 |
+| 実行時の vrf-bgp binding | **消える** | **消える** | RPC / CLI で再投入 (config の binding は残る) |
 | 登録済み plugin (`PROG_ARRAY`) | **消える** | **消える** (pin しない) | register RPC を再実行 |
 | Global stats / per-slot stats | **消える** | **消える** (pin しない) | 自然増加で埋まる |
 
@@ -20,7 +22,7 @@
 
 ## 永続化層: `state.json`
 
-`state.json` に永続化するのは **Network Resource (Bridge / VRF) と、実行時に attach した device** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
+`state.json` に永続化するのは **Network Resource (Bridge / VRF)、実行時に attach した device、VRF オブジェクトの vrf_id と実行時に足した AC** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
 
 control-plane plugin の module と登録内容は別の [cplane store](cplane-plugin.md)
 に保存されます。store 有効時は `local-sids/state.json` に local SID の名前と address、
@@ -43,6 +45,20 @@ entry を再作成します。aux index と VRF ifindex はその時点で求め
 - 書き込みは atomic です。同一ディレクトリの temp file に書いて fsync してから rename するので、書き込み途中の crash や ENOSPC でも直前の state.json が無傷で残ります。
 - 保存の失敗は RPC エラーとして返ります (旧実装は warn に落として成功を返していた)。kernel device とメモリ上の記録は巻き戻さず、次に成功した保存が全量を書き直して収束します。
 - boot の reconcile は fail-closed です。state の entry が実体化できない場合 (member NIC の消失、名前を別種の link に取られた等) は、entry 名と修復手順 (デバイスの復旧か entry の削除) を示すエラーで起動を拒否します。stale な ifindex のまま続行すると FDB watcher / EVPN / SID 参照ガードが誤った index で動くためです。parse できない state.json も同様に起動を拒否します (空 state で始めると管理下のデバイスを黙って放棄することになるため)。
+
+VRF オブジェクトは `vrf_objects` に保存します。`next_vrf_id` は次に割り当てる id、`entries` は VRF 名ごとの `vrf_id` と `runtime_acs` です。kernel device を持たない VRF もここに入ります。
+
+```json
+"vrf_objects": {
+  "next_vrf_id": 3,
+  "entries": [
+    {"name": "tenant-a", "vrf_id": 1, "runtime_acs": [{"interface": "vb1a2b3c", "vlan": 0}]},
+    {"name": "tenant-b", "vrf_id": 2}
+  ]
+}
+```
+
+`vrf_objects` が無い state も読めます。その場合は起動時に id を割り当て、次の保存から記録します。起動時の順序と、interface が消えた AC の扱いは [vrf.md](vrf.md#永続化と-boot) を参照してください。
 
 state.json フォーマットは内部実装扱いで、手編集は非推奨です。`vinbero` CLI 経由で操作してください (例外は上記の修復手順と、bridge record の owning VRF 付け替え)。
 
@@ -192,7 +208,7 @@ Flush はサーバ側で `sid_function_map` を iterate → 1 件ずつ `Delete`
 1. **上流ルーティングで draining** (可能なら)。SID を減らす / BGP で切り離すなど
 2. `vinberod` 停止
 3. (必要なら) `ip link set dev <iface> xdp off` を実行
-4. `vinberod -c vinbero.yml` 再起動 → XDP attach + Bridge/VRF reconcile が自動で走る
+4. `vinberod -c vinbero.yml` 再起動 → Bridge/VRF reconcile、vrf_id と実行時 AC の復元、XDP attach が自動で走る
 5. SID / Headend を再投入:
    - `pin_maps: false`: **外部コントローラから全部再投入**
    - `pin_maps: true`: 前回のエントリが bpffs から復元されるので再投入不要

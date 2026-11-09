@@ -39,13 +39,14 @@ vrf_id は `vrf.Manager` が割り当てます。最初に参照された時点�
 - `vbctl vrf-bgp bind` で BGP binding を張る (binding の公開前に Ensure が走るので、並行する route apply が vrf_id 未割当ての binding を見ることはありません)
 - config の `vrfs.entries[]`
 
-削除された VRF の id は free list で再利用されます。予約名 `global` は常に id 0 で、tenant には使えず、id 0 が再利用されることもありません。`global` に AC を足すと {ifindex, vlan} → 0 の明示エントリになり、default-deny 下でも underlay/control interface を通せます。`global` は kernel device も bridge も持てません (global VRF は underlay そのものを指すためです)。
+vrf_id は単調増加で、削除された VRF の id も別の VRF には使いません。vrf_id を key にした状態が VRF より長く残っても、別の tenant を指さないためです。割り当ては `state.json` に保存し、同じ VRF は再起動後も同じ id を持ちます。予約名 `global` は常に id 0 で、tenant には使えません。`global` に AC を足すと {ifindex, vlan} → 0 の明示エントリになり、default-deny 下でも underlay/control interface を通せます。`global` は kernel device も bridge も持てません (global VRF は underlay そのものを指すためです)。
 
 ## ingress facet
 
 data plane は XDP 入口で ingress front door を 1 回だけ通します。`ingress_vrf_map` ({ifindex, vlan} → vrf_id) を引き、結果を `tailcall_ctx.vrf_id` に載せて下流のハンドラへ運びます。front door は AC が 1 つでも存在するか default-deny が有効なときだけ enable され、無効なら全パケットが vrf 0 になります (後方互換)。
 
 - `VrfAcAdd` で足した AC の interface が後から消えた場合、reconcile は warning を出してその AC を飛ばします (pod の veth が AC の削除より先に消えても、他の AC の操作を止めないためです)。AC は `VrfAcRemove` まで残り、同じ名前の interface が戻れば再び効きます。config の `vrfs.entries[].acs` の AC は、interface が解決できなければ reconcile を失敗させます。
+- `VrfAcAdd` で足した AC は `state.json` に記録し、再起動後に元の VRF へ戻します。interface が消えていれば上と同じく warning を出して飛ばし、記録は残します。config が同じ AC を宣言すると config の AC として扱い、別の VRF に宣言されていれば config の VRF に移します。
 - AC はちょうど 1 つの VRF に属します。別 VRF が持つ AC の追加は拒否されます (map の衝突キーを作らせない)。
 - default-deny を有効にすると、どの VRF にも分類されない AC のパケットを drop (または pass) します。underlay/control interface を通すには `global` VRF に AC を足します。
 - front door は {ifindex, vlan} を完全一致で引きます。AC の無い {ifindex, vlan} は、default-deny が有効なら `deny_action` に従います。以下は default-deny が無効な場合です。
@@ -114,11 +115,15 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 
 ## 永続化と boot
 
-kernel device facet は `settings.state_path` の JSON state に永続化され、restart を跨いで生き残ります。boot 順序は次のとおりです。
+kernel device facet、vrf_id の割り当て、実行時に足した AC は `settings.state_path` の JSON state に永続化され、restart を跨いで生き残ります。boot 順序は次のとおりです。XDP と TC を attach する前に `ingress_vrf_map` と policy を書き終えるので、attach された interface のパケットが未分類で流れる時間はありません。
 
 1. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成し、存在するものは Create と同じ検証と収束で adopt します。実体化できない entry があれば fail-closed で起動を拒否します (stale な ifindex を FDB watcher / EVPN / SID 参照ガードに渡さない。エラーに修復手順が出ます)
-2. `seedVrfDevices` / `seedVrfBridges` が state を VRF オブジェクトに mirror します (restart 後も facet 付きの一級 VRF として見える)。facet 化以前の bridge record は owning VRF を持たないので、bridge 名を仮の VRF 名として seed します (state file の `vrf` フィールドを書いて再起動すれば本来の VRF に移せます)
-3. `loadVRFs` が config の `vrfs:` を適用します (device / bridge は adopt 冪等、AC、policy、最後に ingress reconcile と bridge facet の FDBWatcher 登録 sweep)
+2. `Manager.Restore` が保存された vrf_id と次に割り当てる id、実行時の AC を戻します。これより前に id を割り当てる処理はありません。同じ id を持つ 2 つの VRF のように矛盾した state は、推測で直さずに起動を拒否します
+3. `seedVrfDevices` / `seedVrfBridges` が state を VRF オブジェクトに mirror します (restart 後も facet 付きの一級 VRF として見える)。facet 化以前の bridge record は owning VRF を持たないので、bridge 名を仮の VRF 名として seed します (state file の `vrf` フィールドを書いて再起動すれば本来の VRF に移せます)
+4. `loadVRFs` が config の `vrfs:` を適用します (device / bridge は adopt 冪等、AC、policy、最後に ingress reconcile)
+5. `internal.devices` と、state に記録された実行時 attach の device に XDP / TC を attach します
+
+起動時の VRF の作成が終わった後は、変更のたびに state を書きます。書き込みの失敗は RPC エラーとして返り、メモリ上の状態は巻き戻さず、次に成功した保存が全量を書きます。起動時だけは warning に留めるので、state の置き場所が書けない環境でも起動できます。
 
 config は加算的です。`vrfs.entries[]` から entry を消しても device は消えません。削除は明示的な `vbctl vrf delete` だけです。
 

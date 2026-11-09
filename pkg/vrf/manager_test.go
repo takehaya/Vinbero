@@ -57,17 +57,20 @@ func TestManager_EnsureAndID(t *testing.T) {
 	}
 }
 
-// Delete recycles the id for the next Ensure.
-func TestManager_DeleteRecyclesID(t *testing.T) {
+// A deleted VRF's id is not handed out again.
+func TestManager_DeleteDoesNotReuseID(t *testing.T) {
 	m := NewManager()
 	a := m.Ensure("a")
 	m.Delete("a")
 	if _, ok := m.IDForName("a"); ok {
 		t.Error("IDForName(a) after delete: want absent")
 	}
-	c := m.Ensure("c")
-	if c.ID != a.ID {
-		t.Errorf("recycled id = %d, want %d", c.ID, a.ID)
+	if c := m.Ensure("c"); c.ID <= a.ID {
+		t.Errorf("id after delete = %d, want above %d", c.ID, a.ID)
+	}
+	// Recreating the same name is a new VRF too.
+	if again := m.Ensure("a"); again.ID == a.ID {
+		t.Errorf("recreated VRF reused id %d", a.ID)
 	}
 }
 
@@ -272,7 +275,7 @@ func TestManager_SetDevice(t *testing.T) {
 	}
 }
 
-// Delete drops the whole object including the facet and recycles the id.
+// Delete drops the whole object including the facet, and the id stays retired.
 func TestManager_Delete_DropsDeviceFacet(t *testing.T) {
 	m := NewManager()
 	ops := &fakeDeviceOps{ifindexes: map[string]uint32{"vrf-a": 9}}
@@ -284,14 +287,14 @@ func TestManager_Delete_DropsDeviceFacet(t *testing.T) {
 	if _, ok := m.Get("vrf-a"); ok {
 		t.Error("Get after Delete: want absent")
 	}
-	if next := m.Ensure("vrf-b"); next.ID != v.ID {
-		t.Errorf("id not recycled: got %d, want %d", next.ID, v.ID)
+	if next := m.Ensure("vrf-b"); next.ID == v.ID {
+		t.Errorf("id %d reused after Delete", v.ID)
 	}
 }
 
 // The reserved global VRF name maps ACs to vrf_id 0 (the underlay): under
 // default-deny those ACs get an explicit {ifindex, vlan} -> 0 entry so they
-// pass, while a tenant VRF keeps a non-zero id. The id 0 is never recycled.
+// pass, while a tenant VRF keeps a non-zero id. The id 0 is never handed out.
 func TestManager_GlobalVRFAC(t *testing.T) {
 	m := NewManager()
 	if added, err := m.AddAC(GlobalVRFName, AC{"eth3", 0}); err != nil || !added {
@@ -315,10 +318,10 @@ func TestManager_GlobalVRFAC(t *testing.T) {
 	if v, ok := fp.mapping[bpf.IngressACKey{Ifindex: 13, VlanId: 0}]; !ok || v != GlobalVRFID {
 		t.Errorf("global AC eth3 -> (%d, %v), want explicit 0 entry", v, ok)
 	}
-	// The global id must not be recycled to a tenant on delete.
+	// The global id must not go to a tenant after a delete.
 	m.Delete(GlobalVRFName)
 	if next := m.Ensure("tenant2"); next.ID == GlobalVRFID {
-		t.Errorf("global id 0 was recycled to tenant2")
+		t.Errorf("global id 0 was handed to tenant2")
 	}
 }
 

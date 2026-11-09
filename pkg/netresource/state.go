@@ -13,6 +13,33 @@ type ManagedState struct {
 	// Devices are the interfaces attached to the data plane at runtime
 	// (DeviceAttach). internal.devices entries are not recorded here.
 	Devices []ManagedDevice `json:"devices,omitempty"`
+	// VrfObjects are the VRF objects' identities and runtime facets. Nil on
+	// a file written before they were recorded.
+	VrfObjects *ManagedVrfObjects `json:"vrf_objects,omitempty"`
+}
+
+// ManagedVrfObjects is the vrf_id allocator and one record per VRF object.
+type ManagedVrfObjects struct {
+	NextVrfID uint32             `json:"next_vrf_id"`
+	Entries   []ManagedVrfObject `json:"entries"`
+}
+
+// ManagedVrfObject is what a VRF object keeps across a restart, by name. A
+// VRF without a kernel device has a record here and none in ManagedState.VRFs.
+// State declared at runtime for one VRF belongs in this record, a field per
+// facet.
+type ManagedVrfObject struct {
+	Name  string `json:"name"`
+	VrfID uint32 `json:"vrf_id"`
+	// RuntimeACs are the ACs added over the API. Unlike the ACs of the
+	// config, one whose interface is gone is skipped with a warning.
+	RuntimeACs []ManagedAC `json:"runtime_acs,omitempty"`
+}
+
+// ManagedAC is one ingress access circuit.
+type ManagedAC struct {
+	Interface string `json:"interface"`
+	VLAN      uint16 `json:"vlan"`
 }
 
 // ManagedDevice is a runtime-attached device: the interface name and the

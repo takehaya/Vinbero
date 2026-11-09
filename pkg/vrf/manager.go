@@ -96,20 +96,26 @@ type VRF struct {
 	Bridge *Bridge
 }
 
-// Manager owns the VRF objects, the id allocator (free list; 0 reserved for the
+// Manager owns the VRF objects, the id allocator (monotonic; 0 reserved for the
 // global VRF), the global policy, and the ingress_vrf_map programming.
 type Manager struct {
-	mu      sync.RWMutex
-	byName  map[string]*VRF
-	byID    map[uint32]string
-	freeIDs []uint32
-	nextID  uint32
-	policy  Policy
+	mu     sync.RWMutex
+	byName map[string]*VRF
+	byID   map[uint32]string
+	nextID uint32
+	policy Policy
 	// runtimeACs are the ACs added over the API that have resolved at least
 	// once (MarkRuntimeAC). Unlike config-declared ACs, one whose interface
-	// disappears is skipped by Reconcile.
+	// disappears is skipped by Reconcile, and they are what Save persists.
 	runtimeACs map[runtimeACKey]struct{}
 	logger     *zap.Logger
+	// store receives the persistent state on Save; nil until SetStore. dirty
+	// says the state changed since the last successful Save, guarded by mu.
+	// saveMu spans the snapshot and the write so an older snapshot cannot
+	// overwrite a newer one.
+	store  StateStore
+	dirty  bool
+	saveMu sync.Mutex
 }
 
 type runtimeACKey struct {
@@ -135,18 +141,11 @@ func (m *Manager) SetLogger(logger *zap.Logger) {
 	m.logger = logger
 }
 
-// allocIDLocked returns a recycled or fresh vrf_id (>= 1). Deleted ids are
-// recycled via the free list, so nextID only advances for genuinely-new VRFs.
-// Wraparound of the uint32 counter is not guarded: reaching it needs ~4 billion
-// concurrently-live VRFs (deletes recycle), which exhausts the byName map's
-// memory — and the data-plane ingress_vrf_map (4096 entries) — long before the
-// counter could overflow.
+// allocIDLocked returns a fresh vrf_id (>= 1). An id is never handed out twice,
+// not even after its VRF is deleted: state keyed by a vrf_id can outlive the
+// VRF, and a reused id would point that state at another tenant. Wraparound of
+// the uint32 counter is not guarded: it takes ~4 billion VRF creations.
 func (m *Manager) allocIDLocked() uint32 {
-	if n := len(m.freeIDs); n > 0 {
-		id := m.freeIDs[n-1]
-		m.freeIDs = m.freeIDs[:n-1]
-		return id
-	}
 	id := m.nextID
 	m.nextID++
 	return id
@@ -194,6 +193,7 @@ func (m *Manager) ensureLocked(name string) *VRF {
 	v := &VRF{Name: name, ID: id}
 	m.byName[name] = v
 	m.byID[v.ID] = name
+	m.dirty = true
 	return v
 }
 
@@ -293,7 +293,10 @@ func (m *Manager) RemoveAC(name string, ac AC) (removed bool) {
 		}
 	}
 	v.ACs = out
-	delete(m.runtimeACs, runtimeACKey{name, ac})
+	if _, ok := m.runtimeACs[runtimeACKey{name, ac}]; ok {
+		delete(m.runtimeACs, runtimeACKey{name, ac})
+		m.dirty = true
+	}
 	return removed
 }
 
@@ -304,6 +307,7 @@ func (m *Manager) MarkRuntimeAC(name string, ac AC) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.runtimeACs[runtimeACKey{name, ac}] = struct{}{}
+	m.dirty = true
 }
 
 // IsRuntimeAC reports whether MarkRuntimeAC recorded the AC.
@@ -314,8 +318,7 @@ func (m *Manager) IsRuntimeAC(name string, ac AC) bool {
 	return ok
 }
 
-// Delete removes a VRF and recycles its id. A no-op when absent. The reserved
-// global VRF's id (0) is never recycled — it must never be handed to a tenant.
+// Delete removes a VRF. A no-op when absent. Its id is not used again.
 func (m *Manager) Delete(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -328,9 +331,157 @@ func (m *Manager) Delete(name string) {
 	for _, ac := range v.ACs {
 		delete(m.runtimeACs, runtimeACKey{name, ac})
 	}
-	if v.ID != GlobalVRFID {
-		m.freeIDs = append(m.freeIDs, v.ID)
+	m.dirty = true
+}
+
+// PersistedVRF is what survives a restart of one VRF object: its identity and
+// the ACs added over the API. The other facets have their own records.
+type PersistedVRF struct {
+	Name       string
+	ID         uint32
+	RuntimeACs []AC
+}
+
+// State is the persistent part of the Manager.
+type State struct {
+	NextID uint32
+	VRFs   []PersistedVRF
+}
+
+// StateStore keeps the Manager's State across restarts.
+// *netresource.ResourceManager satisfies it; tests use a fake.
+type StateStore interface {
+	SaveVRFState(State) error
+}
+
+// SetStore sets where Save writes. Set it after the boot-time load, so a
+// deployment with an unwritable state directory still starts.
+func (m *Manager) SetStore(store StateStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store = store
+}
+
+// Save writes the state if it changed since the last successful Save. Without
+// a store it does nothing. A failed Save leaves the state in memory and dirty,
+// so the next Save writes all of it.
+func (m *Manager) Save() error {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+	m.mu.Lock()
+	store := m.store
+	if store == nil || !m.dirty {
+		m.mu.Unlock()
+		return nil
 	}
+	state := m.stateLocked()
+	m.dirty = false
+	m.mu.Unlock()
+
+	if err := store.SaveVRFState(state); err != nil {
+		m.mu.Lock()
+		m.dirty = true
+		m.mu.Unlock()
+		return fmt.Errorf("save vrf state: %w", err)
+	}
+	return nil
+}
+
+// stateLocked snapshots the persistent state, sorted so equal states encode
+// the same way.
+func (m *Manager) stateLocked() State {
+	s := State{NextID: m.nextID, VRFs: make([]PersistedVRF, 0, len(m.byName))}
+	for _, v := range m.byName {
+		p := PersistedVRF{Name: v.Name, ID: v.ID}
+		for _, ac := range v.ACs {
+			if _, ok := m.runtimeACs[runtimeACKey{v.Name, ac}]; ok {
+				p.RuntimeACs = append(p.RuntimeACs, ac)
+			}
+		}
+		sortACs(p.RuntimeACs)
+		s.VRFs = append(s.VRFs, p)
+	}
+	sort.Slice(s.VRFs, func(i, j int) bool { return s.VRFs[i].Name < s.VRFs[j].Name })
+	return s
+}
+
+// Restore loads a saved state into an empty Manager. It runs before anything
+// can allocate an id. A state that breaks the Manager's invariants is refused
+// rather than repaired: guessing would put an AC or an id in the wrong tenant.
+func (m *Manager) Restore(s State) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.byName) != 0 {
+		return errors.New("vrf: Restore needs an empty manager")
+	}
+	next := max(s.NextID, 1)
+	names := make(map[string]struct{}, len(s.VRFs))
+	ids := make(map[uint32]string, len(s.VRFs))
+	owners := make(map[AC]string)
+	for _, p := range s.VRFs {
+		if p.Name == "" {
+			return errors.New("vrf: saved state has a VRF without a name")
+		}
+		if (p.Name == GlobalVRFName) != (p.ID == GlobalVRFID) {
+			return fmt.Errorf("vrf %q: saved id %d: id %d belongs to the %q VRF only", p.Name, p.ID, GlobalVRFID, GlobalVRFName)
+		}
+		if _, dup := names[p.Name]; dup {
+			return fmt.Errorf("vrf %q: saved twice", p.Name)
+		}
+		names[p.Name] = struct{}{}
+		if other, dup := ids[p.ID]; dup {
+			return fmt.Errorf("vrf %q: saved id %d is also held by vrf %q", p.Name, p.ID, other)
+		}
+		ids[p.ID] = p.Name
+		next = max(next, p.ID+1)
+		for _, ac := range p.RuntimeACs {
+			if ac.Interface == "" || ac.VLAN > 4095 {
+				return fmt.Errorf("vrf %q: saved ac {interface %q, vlan %d} is invalid", p.Name, ac.Interface, ac.VLAN)
+			}
+			if other, dup := owners[ac]; dup {
+				return fmt.Errorf("vrf %q: saved ac {interface %q, vlan %d} is also held by vrf %q", p.Name, ac.Interface, ac.VLAN, other)
+			}
+			owners[ac] = p.Name
+		}
+	}
+	for _, p := range s.VRFs {
+		m.byName[p.Name] = &VRF{Name: p.Name, ID: p.ID, ACs: slices.Clone(p.RuntimeACs)}
+		m.byID[p.ID] = p.Name
+		for _, ac := range p.RuntimeACs {
+			m.runtimeACs[runtimeACKey{p.Name, ac}] = struct{}{}
+		}
+	}
+	m.nextID = next
+	return nil
+}
+
+// ReleaseRuntimeAC drops the runtime record of ac under whichever VRF holds
+// it, and reports that VRF. The config uses it to take an AC over: from then
+// on the AC is config-declared, so an interface that does not resolve is an
+// error again, and it can move to the VRF the config names.
+func (m *Manager) ReleaseRuntimeAC(ac AC) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key := range m.runtimeACs {
+		if key.ac != ac {
+			continue
+		}
+		delete(m.runtimeACs, key)
+		v := m.byName[key.vrf]
+		v.ACs = slices.DeleteFunc(v.ACs, func(a AC) bool { return a == ac })
+		m.dirty = true
+		return key.vrf, true
+	}
+	return "", false
+}
+
+func sortACs(acs []AC) {
+	sort.Slice(acs, func(i, j int) bool {
+		if acs[i].Interface != acs[j].Interface {
+			return acs[i].Interface < acs[j].Interface
+		}
+		return acs[i].VLAN < acs[j].VLAN
+	})
 }
 
 // DeviceOps is the kernel mechanics + persistence surface the device facet is
@@ -615,12 +766,7 @@ func (m *Manager) List() []VRF {
 	out := make([]VRF, 0, len(m.byName))
 	for _, v := range m.byName {
 		c := v.clone()
-		sort.Slice(c.ACs, func(i, j int) bool {
-			if c.ACs[i].Interface != c.ACs[j].Interface {
-				return c.ACs[i].Interface < c.ACs[j].Interface
-			}
-			return c.ACs[i].VLAN < c.ACs[j].VLAN
-		})
+		sortACs(c.ACs)
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
