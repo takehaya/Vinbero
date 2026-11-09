@@ -11,14 +11,17 @@
 // XDP: Write BUM metadata before XDP_PASS
 // Signals to TC ingress that this packet needs SRv6 encap + clone to remote PE.
 // On failure, XDP_PASS still proceeds (local bridge flood works, remote forwarding skipped).
-static __always_inline void xdp_write_bum_meta(struct xdp_md *ctx, __u16 vlan_id)
+// Returns whether the marker was written.
+static __always_inline bool xdp_write_bum_meta(struct xdp_md *ctx, __u16 vlan_id)
 {
-    if (bpf_xdp_adjust_meta(ctx, -(int)sizeof(__u64)) == 0) {
-        void *data = (void *)(long)ctx->data;
-        __u64 *meta = (void *)(long)ctx->data_meta;
-        if ((void *)(meta + 1) <= data)
-            *meta = ((__u64)BUM_META_MARKER << 32) | vlan_id;
-    }
+    if (bpf_xdp_adjust_meta(ctx, -(int)sizeof(__u64)) != 0)
+        return false;
+    void *data = (void *)(long)ctx->data;
+    __u64 *meta = (void *)(long)ctx->data_meta;
+    if ((void *)(meta + 1) > data)
+        return false;
+    *meta = ((__u64)BUM_META_MARKER << 32) | vlan_id;
+    return true;
 }
 
 // TC: Read BUM metadata from skb->data_meta
