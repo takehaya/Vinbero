@@ -268,21 +268,45 @@ if [ "$BUM_EFFECTIVE" = "xdp" ]; then
     expect_nonzero "PE2 BUM_XDP_LOCAL_FLOOD" "$(stats_counter vbctl_pe2 BUM_XDP_LOCAL_FLOOD)"
     expect_nonzero "PE3 BUM_XDP_LOCAL_FLOOD" "$(stats_counter vbctl_pe3 BUM_XDP_LOCAL_FLOOD)"
 elif [ "$BUM_EFFECTIVE" = "tc-fallback" ]; then
-    # One broadcast frame, two peers: one count for the frame, whatever the
-    # number of clones (a stray frame from a host in the window is tolerated).
-    fallback=$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)
-    if [ -n "$fallback" ] && [ "$fallback" -ge 1 ] && [ "$fallback" -le 2 ]; then
-        print_success "PE1 BUM_XDP_FALLBACK counts each frame once, clones not included (got $fallback)"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    else
-        print_error "PE1 BUM_XDP_FALLBACK (got '$fallback', want 1 or 2)"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-    fi
+    expect_nonzero "PE1 BUM_XDP_FALLBACK (tc replication in place of xdp)" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)"
     expect_eq "PE1 BUM_XDP_FLOOD" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)" 0
     expect_nonzero "PE2 BUM_XDP_FALLBACK (post-decap flood through the bridge)" "$(stats_counter vbctl_pe2 BUM_XDP_FALLBACK)"
 else
     expect_eq "PE1 BUM_XDP_FLOOD stays 0 in tc mode" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)" 0
     expect_eq "PE1 BUM_XDP_FALLBACK stays 0 in tc mode" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)" 0
+fi
+
+# BUM_XDP_FALLBACK counts each ingress frame once. The clones of a generic
+# XDP tc path pass through XDP again, and on an untagged AC they match it
+# again, so that is the case that can over-count. The two VLAN IDs keep the
+# BD out of xdp mode on every kernel; its peers need no route, as the count
+# comes before the lookup. N frames with two peers would count 3N.
+if [ "$BUM_EFFECTIVE" != "tc" ]; then
+    n=20
+    vbctl_pe1 hl2 create --interface "${TOPO_NS_PREFIX}rt1h1" --vlan-id 0 \
+        --src-addr fc00:1::1 --segments fc00:ff:1::1 --bd-id 200 > /dev/null
+    vbctl_pe1 hl2 create --interface "${TOPO_NS_PREFIX}rt1rt2" --vlan-id 200 \
+        --src-addr fc00:1::1 --segments fc00:ff:1::1 --bd-id 200 > /dev/null
+    vbctl_pe1 peer create --bd-id 200 --src-addr fc00:1::1 --segments fc00:ff:1::1 > /dev/null
+    vbctl_pe1 peer create --bd-id 200 --src-addr fc00:1::1 --segments fc00:ff:2::1 > /dev/null
+    sleep 1
+    before=$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)
+    for i in $(seq "$n"); do
+        bum_marker_send "$ns_host1" "${TOPO_NS_PREFIX}h1rt1" "vbbum-count-$i"
+    done
+    sleep 1
+    counted=$(( $(stats_counter vbctl_pe1 BUM_XDP_FALLBACK) - before ))
+    # The slack is for what else the host sends; a double count reaches 2N.
+    if [ "$counted" -ge "$n" ] && [ "$counted" -lt $((2 * n)) ]; then
+        print_success "PE1 BUM_XDP_FALLBACK counts each frame once ($counted for $n frames, two peers)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "PE1 BUM_XDP_FALLBACK counted $counted for $n frames (want $n to $((2 * n - 1)))"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    vbctl_pe1 peer delete --bd-id 200 > /dev/null
+    vbctl_pe1 hl2 delete --interface "${TOPO_NS_PREFIX}rt1h1" --vlan-id 0 > /dev/null
+    vbctl_pe1 hl2 delete --interface "${TOPO_NS_PREFIX}rt1rt2" --vlan-id 200 > /dev/null
 fi
 
 print_info "Runtime peer changes on PE1..."

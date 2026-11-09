@@ -364,13 +364,17 @@ static __always_inline bool bum_xdp_served(__u16 bd_id)
     return bpf_map_lookup_elem(&bum_flood_map, &key) != NULL;
 }
 
-// BUM that entered on a local AC of a tc-mode BD: mark it for the TC
-// clones and the bridge. An xdp-mode BD on this path is counted as
-// BUM_XDP_FALLBACK by the TC side (tc_dispatch_bum_clones): the clones TC
-// makes re-enter generic XDP, so counting here would count them too.
-static __always_inline int bum_tc_flood_from_ac(struct xdp_md *ctx, __u16 vlan_id)
+// Hand a BUM frame that entered on a local AC to the tc path: the VNBU marker
+// makes TC clone it to the remote PEs, and the bridge floods it locally.
+// TC counts an xdp-mode BD's frames as BUM_XDP_FALLBACK, once per ingress
+// frame (tc_dispatch_bum_clones); XDP cannot, because the clones TC makes
+// pass through generic XDP again. A frame that cannot carry the marker never
+// reaches that code, so it is counted here.
+static __always_inline int bum_mark_for_tc(struct xdp_md *ctx, __u8 bum_mode, __u16 vlan_id)
 {
-    xdp_write_bum_meta(ctx, vlan_id);
+    __u64 pkt_len = (__u64)((long)ctx->data_end - (long)ctx->data);
+    if (!xdp_write_bum_meta(ctx, vlan_id) && bum_mode != BUM_MODE_TC)
+        STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
     return XDP_PASS;
 }
 
@@ -386,15 +390,10 @@ static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id
     if (act >= 0)
         return act;
     // The tc path needs metadata too (VNBU), so on a driver without it
-    // only the bridge's local flood remains, as in tc mode. TC cannot see
-    // such a frame, so it is counted here; the TC side counts every other
-    // frame on this path (tc_dispatch_bum_clones).
-    if (act == BUM_BCAST_NO_META) {
+    // only the bridge's local flood remains, as in tc mode.
+    if (act == BUM_BCAST_NO_META)
         STATS_INC(STATS_BUM_XDP_META_FAIL, pkt_len);
-        STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
-    }
-    xdp_write_bum_meta(ctx, vlan_id);
-    return XDP_PASS;
+    return bum_mark_for_tc(ctx, BUM_MODE_XDP, vlan_id);
 }
 
 // Flood after decap in an xdp-mode BD: local ACs only. Returns -1 when the

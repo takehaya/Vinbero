@@ -114,8 +114,9 @@ func TestXDPBumTCOverrideKeepsTCPath(t *testing.T) {
 }
 
 // A BD configured for xdp mode on a host that cannot run it takes the tc
-// path even with a devmap installed, and counts each BUM frame as
-// BUM_XDP_FALLBACK.
+// path even with a devmap installed. Its AC-side frames are counted as
+// BUM_XDP_FALLBACK by TC (tc_dispatch_bum_clones), so not here; frames after
+// decap are counted in XDP.
 func TestXDPBumTCFallbackMode(t *testing.T) {
 	h := newXDPTestHelperWithConstants(t, map[string]any{
 		"enable_stats":     uint8(1),
@@ -132,7 +133,7 @@ func TestXDPBumTCFallbackMode(t *testing.T) {
 	if len(out) != len(pkt)+8 || binary.LittleEndian.Uint64(out[:8])>>32 != uint64(vnbuMarker) {
 		t.Fatalf("want the 8-byte VNBU meta in front of the frame (len %d, input %d)", len(out), len(pkt))
 	}
-	// Counted on the TC side, not here (bum_tc_flood_from_ac).
+	// Counted on the TC side, not here (tc_dispatch_bum_clones).
 	if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 0 {
 		t.Errorf("BUM_XDP_FALLBACK = %d, want 0", n)
 	}
@@ -175,7 +176,7 @@ func TestXDPBumFloodFromAC(t *testing.T) {
 		if len(out) != len(pkt)+8 || binary.LittleEndian.Uint64(out[:8])>>32 != uint64(vnbuMarker) {
 			t.Fatalf("fallback must write the VNBU meta (len %d, input %d)", len(out), len(pkt))
 		}
-		// Counted on the TC side, not here (bum_xdp_flood_from_ac).
+		// Counted on the TC side, not here (tc_dispatch_bum_clones).
 		if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 0 {
 			t.Errorf("BUM_XDP_FALLBACK = %d, want 0", n)
 		}
