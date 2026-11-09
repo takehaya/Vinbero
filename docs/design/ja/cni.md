@@ -61,7 +61,7 @@ pod から別 node の pod への packet は host veth の XDP で headend (`hea
 binding の扱いは次のとおりです。
 
 - `rd` / `rts` / `locator` を書くと、ADD は VRF に binding が無ければ `redistribute: [static]` 付きで作ります
-- binding が既にあれば書き換えません。RD と locator が一致し、`static` を redistribute していることだけを確かめ、違えば ADD を失敗させます。binding の持ち主は vinberod の config か別の NAD かもしれないためです
+- binding が既にあれば書き換えません。RD、locator、NAD に書いた family の route target、(指定があれば) `maxPrefixes` が一致し、`static` を redistribute していることを確かめ、違えば ADD を失敗させます。binding の持ち主は vinberod の config か別の NAD かもしれないためです
 - 書かなければ binding には触れません。vinberod の config で VRF と binding を宣言する使い方です
 
 ## ADD / DEL / CHECK

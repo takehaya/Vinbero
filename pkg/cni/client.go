@@ -3,6 +3,7 @@ package cni
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -136,7 +137,8 @@ func (d *rpcDaemon) EnsureBinding(ctx context.Context, b Binding) error {
 }
 
 // checkBinding refuses an existing binding the pod routes would not be
-// advertised through as configured. The plugin never rewrites a binding: it
+// advertised through as configured: another RD, locator, route targets or
+// prefix limit, or no redistribution of static routes. The plugin never rewrites a binding: it
 // may come from the vinberod config or another network.
 func checkBinding(cur *v1.VrfBgpBinding, want Binding) error {
 	if cur.GetRd() != want.RD {
@@ -147,6 +149,48 @@ func checkBinding(cur *v1.VrfBgpBinding, want Binding) error {
 	}
 	if !slices.Contains(cur.GetRedistribute(), "static") {
 		return fmt.Errorf("vrf %s is bound without redistribute static, so pod routes would not be advertised", want.VRF)
+	}
+	if want.MaxPrefixes != 0 && cur.GetMaxPrefixes() != want.MaxPrefixes {
+		return fmt.Errorf("vrf %s is already bound with maxPrefixes %d, the network configuration says %d", want.VRF, cur.GetMaxPrefixes(), want.MaxPrefixes)
+	}
+	return checkRouteTargets(cur, want)
+}
+
+const (
+	rtImport = 1 << iota
+	rtExport
+)
+
+// rtDirection maps a direction to its bits; empty means both.
+func rtDirection(direction string) int {
+	switch direction {
+	case "import":
+		return rtImport
+	case "export":
+		return rtExport
+	default:
+		return rtImport | rtExport
+	}
+}
+
+// checkRouteTargets compares the route targets of every family the network
+// configuration names. Families it does not name are left to the binding.
+func checkRouteTargets(cur *v1.VrfBgpBinding, want Binding) error {
+	wanted := make(map[string]map[string]int)
+	for _, rt := range want.RTs {
+		if wanted[rt.Family] == nil {
+			wanted[rt.Family] = make(map[string]int)
+		}
+		wanted[rt.Family][rt.RT] |= rtDirection(rt.Direction)
+	}
+	for family, rts := range wanted {
+		have := make(map[string]int)
+		for _, rt := range cur.GetFamilies()[family].GetRouteTargets() {
+			have[rt.GetRt()] |= rtDirection(rt.GetDirection())
+		}
+		if !maps.Equal(have, rts) {
+			return fmt.Errorf("vrf %s is already bound with other %s route targets than the network configuration says", want.VRF, family)
+		}
 	}
 	return nil
 }

@@ -394,6 +394,38 @@ func TestCheckBinding(t *testing.T) {
 	if err := checkBinding(ok, want); err != nil {
 		t.Errorf("matching binding: %v", err)
 	}
+	withRTs := func(direction string) *v1.VrfBgpBinding {
+		b := bindingProto("65000:1", "LOC1", "static")
+		b.MaxPrefixes = 10
+		b.Families = map[string]*v1.VrfBgpFamily{
+			"vpnv4": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "65000:100", Direction: direction}}},
+			"vpnv6": {RouteTargets: []*v1.VrfBgpRouteTarget{{Rt: "65000:999", Direction: "both"}}},
+		}
+		return b
+	}
+	wantRT := want
+	wantRT.RTs = []RouteTarget{{Family: "vpnv4", RT: "65000:100"}}
+	if err := checkBinding(withRTs("both"), wantRT); err != nil {
+		t.Errorf("same route targets (empty direction means both): %v", err)
+	}
+	if err := checkBinding(withRTs("import"), wantRT); err == nil || !strings.Contains(err.Error(), "route targets") {
+		t.Errorf("another direction: %v", err)
+	}
+	other := wantRT
+	other.RTs = []RouteTarget{{Family: "vpnv4", RT: "65000:200"}}
+	if err := checkBinding(withRTs("both"), other); err == nil || !strings.Contains(err.Error(), "route targets") {
+		t.Errorf("another route target: %v", err)
+	}
+	limited := wantRT
+	limited.MaxPrefixes = 11
+	if err := checkBinding(withRTs("both"), limited); err == nil || !strings.Contains(err.Error(), "maxPrefixes") {
+		t.Errorf("another prefix limit: %v", err)
+	}
+	limited.MaxPrefixes = 10
+	if err := checkBinding(withRTs("both"), limited); err != nil {
+		t.Errorf("same prefix limit: %v", err)
+	}
+
 	for _, bad := range []struct {
 		rd, loc, redist, want string
 	}{
