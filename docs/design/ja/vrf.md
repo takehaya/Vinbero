@@ -45,6 +45,7 @@ vrf_id は `vrf.Manager` が割り当てます。最初に参照された時点�
 
 data plane は XDP 入口で ingress front door を 1 回だけ通します。`ingress_vrf_map` ({ifindex, vlan} → vrf_id) を引き、結果を `tailcall_ctx.vrf_id` に載せて下流のハンドラへ運びます。front door は AC が 1 つでも存在するか default-deny が有効なときだけ enable され、無効なら全パケットが vrf 0 になります (後方互換)。
 
+- `VrfAcAdd` で足した AC の interface が後から消えた場合、reconcile は warning を出してその AC を飛ばします (pod の veth が AC の削除より先に消えても、他の AC の操作を止めないためです)。AC は `VrfAcRemove` まで残り、同じ名前の interface が戻れば再び効きます。config の `vrfs.entries[].acs` の AC は、interface が解決できなければ reconcile を失敗させます。
 - AC はちょうど 1 つの VRF に属します。別 VRF が持つ AC の追加は拒否されます (map の衝突キーを作らせない)。
 - default-deny を有効にすると、どの VRF にも分類されない AC のパケットを drop (または pass) します。underlay/control interface を通すには `global` VRF に AC を足します。
 - `ingress_vrf_map` の writer は `vrf.Manager.Reconcile` だけです。

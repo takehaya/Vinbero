@@ -160,7 +160,6 @@ pod は `k8s.v1.cni.cncf.io/networks: tenant-a` の annotation で接続しま�
 - L3 mode だけです。EVPN L2 mode は未実装です
 - `headend_v4_map` は VRF を key に持たないので、VRF 間で pod の subnet が重なると encap の LPM が衝突します。plugin は同じ node の記録どうしで subnet の重なりを拒否しますが、別 node で別の VRF が同じ subnet を使う場合は検出できません。NAD 間で subnet を重ねないでください
 - vinberod を再起動すると、plugin が足した AC と、network configuration から作った binding は消えます。default-deny を有効にしている node では、再起動後の pod の通信が AC 不在で落ちます。binding は config で宣言し、default-deny を使う場合は再起動後に pod を作り直してください
-- pod の veth が DEL 前に消えると、その AC が VRF の reconcile を失敗させ、DEL が届くまで他の AC の追加と削除も失敗します
 - vinberod が `settings.l2.bum_mode: xdp` で動いている node では、host veth の attach mode は `internal.bpf.device_mode` と同じでなければなりません。`device_mode: driver` の node では `deviceMode: driver` を指定しないと ADD が失敗します
 - `deviceMode: driver` (veth の native XDP) では、host veth へ redirect した frame を pod 側 veth が受け取るために、pod 側 veth にも XDP program か GRO が要ります。plugin はそれを設定しないので、既定の `generic` を使ってください
 - MTU は SID 1 つの SRH を前提にしています。SR Policy で transport SID を足す場合や underlay の MTU が違う場合は `mtu` で指定してください

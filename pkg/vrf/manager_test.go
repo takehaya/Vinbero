@@ -359,6 +359,45 @@ func TestManager_Reconcile(t *testing.T) {
 	}
 }
 
+// A runtime AC whose interface is gone is skipped so it cannot block other
+// ACs; an AC that was never marked runtime (config-declared) stays fatal, as
+// does a resolve failure that says nothing about the interface.
+func TestManager_Reconcile_SkipsVanishedRuntimeAC(t *testing.T) {
+	gone := func(names map[string]uint32) func(string) (uint32, error) {
+		return func(n string) (uint32, error) {
+			if idx, ok := names[n]; ok {
+				return idx, nil
+			}
+			return 0, fmt.Errorf("%w: %s", ErrInterfaceGone, n)
+		}
+	}
+	m := NewManager()
+	_, _ = m.AddAC("a", AC{"vb0", 0})
+	m.MarkRuntimeAC("a", AC{"vb0", 0})
+	_, _ = m.AddAC("a", AC{"vb1", 0})
+	m.MarkRuntimeAC("a", AC{"vb1", 0})
+	fp := &fakeProg{}
+	if err := m.Reconcile(gone(map[string]uint32{"vb1": 21}), fp); err != nil {
+		t.Fatalf("Reconcile with a vanished runtime AC: %v", err)
+	}
+	if len(fp.mapping) != 1 || fp.mapping[bpf.IngressACKey{Ifindex: 21}] == 0 {
+		t.Errorf("mapping = %v, want only vb1", fp.mapping)
+	}
+	if err := m.Reconcile(func(string) (uint32, error) { return 0, errors.New("ENOBUFS") }, &fakeProg{}); err == nil {
+		t.Error("a resolve failure other than a missing interface must stay fatal")
+	}
+
+	_, _ = m.AddAC("a", AC{"cfg0", 0})
+	if err := m.Reconcile(gone(map[string]uint32{"vb0": 20, "vb1": 21}), &fakeProg{}); err == nil {
+		t.Error("an unmarked (config-declared) AC with a missing interface must stay fatal")
+	}
+
+	m.RemoveAC("a", AC{"vb0", 0})
+	if m.IsRuntimeAC("a", AC{"vb0", 0}) {
+		t.Error("RemoveAC kept the runtime mark")
+	}
+}
+
 func TestManager_Reconcile_UnresolvableIsFatal(t *testing.T) {
 	m := NewManager()
 	_, _ = m.AddAC("a", AC{"ghost", 0})

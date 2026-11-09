@@ -587,6 +587,9 @@ func (s *VrfServer) VrfAcAdd(
 	if err := s.reconcileOrRollback(undo); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	if added {
+		s.mgr.MarkRuntimeAC(name, acVal)
+	}
 	id, _ := s.mgr.IDForName(name)
 	v, _ := s.mgr.ByID(id)
 	return connect.NewResponse(&v1.VrfAcAddResponse{Vrf: vrfToProto(v)}), nil
@@ -616,12 +619,21 @@ func (s *VrfServer) VrfAcRemove(
 	}
 	name := req.Msg.GetName()
 	acVal := vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())}
+	wasRuntime := s.mgr.IsRuntimeAC(name, acVal)
 	removed := s.mgr.RemoveAC(name, acVal)
 	// Roll back only what this call changed: if the AC was already absent
 	// (removed == false), a reconcile failure must not create it via the undo.
 	undo := func() error { return nil }
 	if removed {
-		undo = func() error { _, err := s.mgr.AddAC(name, acVal); return err }
+		undo = func() error {
+			if _, err := s.mgr.AddAC(name, acVal); err != nil {
+				return err
+			}
+			if wasRuntime {
+				s.mgr.MarkRuntimeAC(name, acVal)
+			}
+			return nil
+		}
 	}
 	if err := s.reconcileOrRollback(undo); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
