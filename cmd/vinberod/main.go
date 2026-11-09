@@ -318,12 +318,21 @@ func run(cliCtx *cli.Context) error {
 	// runs, by which time it is set.
 	var routeDemux *demux.Demux
 	var evpnReplay func()
+	var vpnReplay func([]bgp.Family) error
 	if bgpSession != nil {
 		evpnReplay = func() {
 			err := routeDemux.ReplayBuiltin("applier", []bgp.Family{bgp.FamilyEVPN})
 			if err != nil {
 				lg.Warn("EVPN loc-rib replay", zap.Error(err))
 			}
+		}
+		// Re-evaluates the L3VPN loc-rib after a runtime binding adds import
+		// RTs, e.g. one created by a CNI ADD after the peer's routes were
+		// already in the loc-rib.
+		vpnReplay = func(families []bgp.Family) error {
+			return applier.QuietVPNDenials(func() error {
+				return routeDemux.ReplayBuiltin("applier", families)
+			})
 		}
 	}
 	// SRv6 liveness prober: probes every ECMP group member over its actual
@@ -367,7 +376,7 @@ func run(cliCtx *cli.Context) error {
 		}
 	}
 
-	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, lg)
+	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, vpnReplay, lg)
 	srv.SetDeviceAttacher(vin)
 	if liveProber != nil {
 		srv.SetProber(liveProber, proberIntervalMs, proberMultiplier)

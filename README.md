@@ -242,11 +242,13 @@ so `vinberod` advertises it as VPNv4. Pods on other nodes are reached over
 SRv6 (End.DT4). The primary CNI keeps handling ClusterIP, DNS and
 NetworkPolicy.
 
-1. Install the binary on every node as `/opt/cni/bin/vinbero`.
-2. Run `vinberod` with `bgp.global.auto_advertise: true`, a locator, the
-   VPNv4 peers and, ideally, the VRF and its binding (`redistribute: [static]`)
-   in its config.
-3. Create a NetworkAttachmentDefinition:
+1. Give every node an IPv6 underlay: a loopback address, routes to the other
+   nodes' loopbacks and locators, and IP forwarding enabled.
+2. Install the binary on every node as `/opt/cni/bin/vinbero`.
+3. Run `vinberod --bgp-enabled` with `bgp.global.auto_advertise: true`,
+   `bgp.global.listen_port: 179`, a locator, the VPNv4 peers and, ideally, the
+   VRF and its binding (`redistribute: [static]`) in its config.
+4. Create a NetworkAttachmentDefinition:
 
 ```yaml
 apiVersion: k8s.cni.cncf.io/v1
@@ -267,7 +269,7 @@ spec:
 ```
 
 See [`docs/design/ja/cni.md`](./docs/design/ja/cni.md) for every field, the
-ADD/DEL sequence, the `vinberod` config and the current limits, and
+ADD/DEL sequence, the node setup, the `vinberod` config and the current limits, and
 [`examples/cni-l3/`](./examples/cni-l3/) for a two-node run without Kubernetes.
 
 ## Examples

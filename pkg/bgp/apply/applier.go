@@ -87,6 +87,10 @@ type Applier struct {
 	// pattern as mupMu / evpnMu. NewApplier's startup reset runs before any
 	// of that and needs no lock.
 	vpnMu     sync.Mutex
+	// vpnQuiet and vpnQuietDenied, guarded by vpnMu, count import-RT denials
+	// instead of logging each one while QuietVPNDenials runs.
+	vpnQuiet       bool
+	vpnQuietDenied int
 	vpnGroups *vpnGroupTable
 	// mupDefaultAllow forces every MUP session route through the historical
 	// default-allow path even when some VRF binding has declared a mup_ipv*
@@ -228,6 +232,25 @@ func (a *Applier) ApplyLocalSRPolicyCapped(p bgp.SRPolicy, max uint32) error {
 	return a.srPolicy.applyLocalCapped(p, max)
 }
 
+// QuietVPNDenials runs replay with per-route import-RT denials summarized in
+// one log line. A loc-rib replay revisits every route a VRF does not import,
+// so warning for each would repeat the whole rib. replay must hold off live
+// delivery for its duration, as ReplayBuiltin does.
+func (a *Applier) QuietVPNDenials(replay func() error) error {
+	a.vpnMu.Lock()
+	a.vpnQuiet, a.vpnQuietDenied = true, 0
+	a.vpnMu.Unlock()
+	err := replay()
+	a.vpnMu.Lock()
+	denied := a.vpnQuietDenied
+	a.vpnQuiet = false
+	a.vpnMu.Unlock()
+	if denied > 0 {
+		a.logger.Info("VPN loc-rib replay dropped routes no VRF imports", zap.Int("routes", denied))
+	}
+	return err
+}
+
 // removeVPNPath drops one tracked path and reconciles what remains. Shared
 // by withdraw and by a replacement UPDATE whose SID became unusable. Callers
 // hold vpnMu.
@@ -278,6 +301,10 @@ func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) 
 	path, diagnostic := selectVPNPath(vr, importAllowed)
 	switch diagnostic {
 	case vpnImportDenied:
+		if a.vpnQuiet {
+			a.vpnQuietDenied++
+			break
+		}
 		a.logger.Warn("VPN route matches no VRF import RT; dropping",
 			zap.String("prefix", vr.Prefix), zap.Strings("rts", vr.RTs))
 	case vpnSIDMissing:
