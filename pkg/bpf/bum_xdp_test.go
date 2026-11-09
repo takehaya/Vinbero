@@ -447,8 +447,8 @@ func newEgressCaseWithConstants(t *testing.T, consts map[string]any) *egressCase
 	}
 	h.bumAC(1)
 	c := &egressCase{h: h, cpu: pinCPU(t), nexthop: nexthop, uplink: uint32(link.Index), uplinkOf: map[string]uint32{}}
-	c.sync = NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(seg [IPv6AddrLen]byte) (BumUplink, error) {
-		if up, ok := c.uplinkOf[net.IP(seg[:]).String()]; ok {
+	c.sync = NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(q UplinkQuery) (BumUplink, error) {
+		if up, ok := c.uplinkOf[net.IP(q.Dst[:]).String()]; ok {
 			return BumUplink{Ifindex: up}, nil
 		}
 		return BumUplink{Ifindex: c.uplink}, nil
