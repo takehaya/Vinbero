@@ -77,8 +77,8 @@ func TestBumDevmapSync(t *testing.T) {
 		resolved [][IPv6AddrLen]byte
 		ifUp     uint32 // the uplink of every peer: no AC of the BD
 	)
-	uplink := func(seg [IPv6AddrLen]byte) (BumUplink, error) {
-		resolved = append(resolved, seg)
+	uplink := func(q UplinkQuery) (BumUplink, error) {
+		resolved = append(resolved, q.Dst)
 		return BumUplink{Ifindex: ifUp}, nil
 	}
 	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return mode }, uplink, zap.NewNop())
@@ -192,7 +192,7 @@ func TestBumDevmapSync(t *testing.T) {
 
 	// An unresolvable uplink leaves only that slot out.
 	mode = BumModeXDP
-	s.uplink = func([IPv6AddrLen]byte) (BumUplink, error) { return BumUplink{}, errors.New("no route") }
+	s.uplink = func(UplinkQuery) (BumUplink, error) { return BumUplink{}, errors.New("no route") }
 	if err := s.SyncBD(bumTestBD); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestBumDevmapSync(t *testing.T) {
 // path rather than with a devmap that misses some of them.
 func TestBumDevmapSyncCapacity(t *testing.T) {
 	h := newXDPBumHelper(t)
-	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func([IPv6AddrLen]byte) (BumUplink, error) { return BumUplink{Ifindex: 1}, nil }, zap.NewNop())
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(UplinkQuery) (BumUplink, error) { return BumUplink{Ifindex: 1}, nil }, zap.NewNop())
 	h.mapOps.SetBumDevmapSync(s)
 	t.Cleanup(func() { h.mapOps.SetBumDevmapSync(nil) })
 

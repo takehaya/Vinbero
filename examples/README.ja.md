@@ -72,6 +72,7 @@ sudo ./teardown.sh # クリーンアップ
 | `end-dt2/` | End.DT2 | L2VPN（FDB学習 + ブリッジ転送） |
 | `end-dt2-p2mp/` | End.DT2 P2MP | マルチサイトL2VPN（BUMフラッディング） |
 | `end-dt2m-multihomed/` | End.DT2M | multi-homed L2VPN（DF election + split-horizon） |
+| `bum-ecmp-underlay/` | H.Encaps.L2 | ECMP の underlay での BUM 複製（tc、xdp） |
 | `end-dx2v/` | End.DX2V | VLAN単位のL2クロスコネクト |
 | `end-un/` | uN | NEXT-C-SID の shift 転送 (RFC 9800、F3216) |
 | `end-ua/` | uA | NEXT-C-SID の shift + adjacency 転送 (RFC 9800、F3216) |

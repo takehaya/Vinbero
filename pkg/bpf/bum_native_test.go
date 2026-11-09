@@ -157,7 +157,7 @@ func TestBumNativeEveryEntryCarriesTheProgram(t *testing.T) {
 	h := newXDPTestHelperWithConstants(t, xdpBumNativeConstants)
 	up := dummyIfindex(t, "bumnat-up")
 	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
-		func([IPv6AddrLen]byte) (BumUplink, error) { return BumUplink{Ifindex: up}, nil }, nil)
+		func(UplinkQuery) (BumUplink, error) { return BumUplink{Ifindex: up}, nil }, nil)
 	s.SetNativeXDP(true)
 	h.mapOps.SetBumDevmapSync(s)
 	t.Cleanup(func() { h.mapOps.SetBumDevmapSync(nil) })
@@ -252,7 +252,7 @@ func TestBumNativeLocalCopy(t *testing.T) {
 func TestBumNativeTxMapFull(t *testing.T) {
 	h := newXDPTestHelperWithConstants(t, xdpBumNativeConstants)
 	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
-		func([IPv6AddrLen]byte) (BumUplink, error) { return BumUplink{Ifindex: 1}, nil }, nil)
+		func(UplinkQuery) (BumUplink, error) { return BumUplink{Ifindex: 1}, nil }, nil)
 	s.SetNativeXDP(true)
 	h.mapOps.SetBumDevmapSync(s)
 	t.Cleanup(func() { h.mapOps.SetBumDevmapSync(nil) })

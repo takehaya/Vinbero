@@ -217,6 +217,7 @@ jobs:
           - end-dt2
           - end-dt2-p2mp
           - end-dt2m-multihomed
+          - bum-ecmp-underlay
           - end-dx2v
           - end-as
           - end-ad
@@ -253,9 +254,13 @@ jobs:
             bum_mode: xdp
           - example: end-dt2m-multihomed
             bum_mode: xdp
+          - example: bum-ecmp-underlay
+            bum_mode: xdp
           - example: end-dt2-p2mp
             bum_mode: xdp-native
           - example: end-dt2m-multihomed
+            bum_mode: xdp-native
+          - example: bum-ecmp-underlay
             bum_mode: xdp-native
     steps:
       - name: Check out code

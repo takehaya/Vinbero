@@ -349,6 +349,7 @@ type BpfSpecs struct {
 type BpfProgramSpecs struct {
 	BumRemoteEgress                *ebpf.ProgramSpec `ebpf:"bum_remote_egress"`
 	BumRemoteEgressTest            *ebpf.ProgramSpec `ebpf:"bum_remote_egress_test"`
+	BumUplinkProbe                 *ebpf.ProgramSpec `ebpf:"bum_uplink_probe"`
 	TailcallEndpointEnd            *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end"`
 	TailcallEndpointEndAd          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_ad"`
 	TailcallEndpointEndAm          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_am"`
@@ -413,6 +414,7 @@ type BpfMapSpecs struct {
 	BumSeq                 *ebpf.MapSpec `ebpf:"bum_seq"`
 	BumTestParamsMap       *ebpf.MapSpec `ebpf:"bum_test_params_map"`
 	BumTxMap               *ebpf.MapSpec `ebpf:"bum_tx_map"`
+	BumUplinkResync        *ebpf.MapSpec `ebpf:"bum_uplink_resync"`
 	Dx2vMap                *ebpf.MapSpec `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.MapSpec `ebpf:"ecmp_group_map"`
 	EcmpGroupOwnerMap      *ebpf.MapSpec `ebpf:"ecmp_group_owner_map"`
@@ -500,6 +502,7 @@ type BpfMaps struct {
 	BumSeq                 *ebpf.Map `ebpf:"bum_seq"`
 	BumTestParamsMap       *ebpf.Map `ebpf:"bum_test_params_map"`
 	BumTxMap               *ebpf.Map `ebpf:"bum_tx_map"`
+	BumUplinkResync        *ebpf.Map `ebpf:"bum_uplink_resync"`
 	Dx2vMap                *ebpf.Map `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.Map `ebpf:"ecmp_group_map"`
 	EcmpGroupOwnerMap      *ebpf.Map `ebpf:"ecmp_group_owner_map"`
@@ -559,6 +562,7 @@ func (m *BpfMaps) Close() error {
 		m.BumSeq,
 		m.BumTestParamsMap,
 		m.BumTxMap,
+		m.BumUplinkResync,
 		m.Dx2vMap,
 		m.EcmpGroupMap,
 		m.EcmpGroupOwnerMap,
@@ -619,6 +623,7 @@ type BpfVariables struct {
 type BpfPrograms struct {
 	BumRemoteEgress                *ebpf.Program `ebpf:"bum_remote_egress"`
 	BumRemoteEgressTest            *ebpf.Program `ebpf:"bum_remote_egress_test"`
+	BumUplinkProbe                 *ebpf.Program `ebpf:"bum_uplink_probe"`
 	TailcallEndpointEnd            *ebpf.Program `ebpf:"tailcall_endpoint_end"`
 	TailcallEndpointEndAd          *ebpf.Program `ebpf:"tailcall_endpoint_end_ad"`
 	TailcallEndpointEndAm          *ebpf.Program `ebpf:"tailcall_endpoint_end_am"`
@@ -669,6 +674,7 @@ func (p *BpfPrograms) Close() error {
 	return _BpfClose(
 		p.BumRemoteEgress,
 		p.BumRemoteEgressTest,
+		p.BumUplinkProbe,
 		p.TailcallEndpointEnd,
 		p.TailcallEndpointEndAd,
 		p.TailcallEndpointEndAm,

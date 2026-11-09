@@ -219,12 +219,14 @@ static __noinline int bum_remote_egress_body(struct xdp_md *ctx, __u64 seq, __u3
     __u32 oif = 0;
     int fib = srv6_fib_lookup_and_update(ctx, ip6h, eth, &oif, src_if);
     if (fib == FIB_RESULT_NO_NEIGH) {
+        bum_note_uplink_resync();
         STATS_INC(STATS_BUM_EGRESS_NO_NEIGH, pkt_len);
         return XDP_DROP;
     }
     if (fib != FIB_RESULT_REDIRECT)
         goto drop;
     if (oif != egress_if) {
+        bum_note_uplink_resync();
         STATS_INC(STATS_BUM_UPLINK_MISMATCH, pkt_len);
         return XDP_DROP;
     }
@@ -303,4 +305,35 @@ int bum_remote_egress_test(struct xdp_md *ctx)
             plan->data = p->same_buffer ? (__u64)(long)ctx->data : 0;
     }
     return bum_remote_egress_body(ctx, seq, src_if, p->egress_ifindex);
+}
+
+// Control-plane uplink probe: which uplink and next hop bpf_fib_lookup picks
+// for a peer, run through BPF_PROG_TEST_RUN (bum_uplink_probe.go). With a
+// multipath route the kernel hashes source, destination, flowinfo and L4,
+// so a peer's uplink can only be resolved by asking the way the data plane
+// does: the lookup above (srv6_fib_lookup_v6_params), on the source AC, with
+// the peer's encap source and first segment. The answer lands in the
+// packet: the uplink in ifindex and, as the helper leaves it, the next hop
+// in dst (the gateway, or dst itself on link).
+struct bum_uplink_probe_io {
+    __u8 src[16];      // in: encap source
+    __u8 dst[16];      // in: first segment; out: next hop
+    __u32 ifindex;     // in: the BD's AC; out: uplink
+    __s32 ret;         // out: bpf_fib_lookup's return value
+};
+
+_Static_assert(sizeof(struct bum_uplink_probe_io) == 40, "bum_uplink_probe_io layout");
+
+SEC("xdp")
+int bum_uplink_probe(struct xdp_md *ctx)
+{
+    struct bum_uplink_probe_io *io = (void *)(long)ctx->data;
+    if ((void *)(io + 1) > (void *)(long)ctx->data_end)
+        return XDP_ABORTED;
+
+    struct bpf_fib_lookup fib_params = {};
+    io->ret = srv6_fib_lookup_v6_params(ctx, &fib_params, io->src, io->dst, io->ifindex);
+    io->ifindex = fib_params.ifindex;
+    __builtin_memcpy(io->dst, fib_params.ipv6_dst, sizeof(io->dst));
+    return XDP_PASS;
 }

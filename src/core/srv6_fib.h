@@ -22,6 +22,27 @@
 // for free, because it stays a negative "not redirected" code.
 #define FIB_RESULT_NO_NEIGH -3
 
+// Run the IPv6 FIB lookup the data plane makes, on zeroed params: family,
+// the device the lookup runs on, source and destination; flowinfo, L4 and
+// flags stay 0. The XDP path (srv6_fib_lookup_v6_core), the tc path's encap
+// and the control plane's uplink probe (bum_uplink_probe) all go through
+// here, so a change to the inputs reaches each of them. End.X adjacency
+// resolution does not: it looks up the configured next hop with the exposed
+// inner source (endpoint_resolve_adjacency).
+static __always_inline int srv6_fib_lookup_v6_params(
+    void *ctx,
+    struct bpf_fib_lookup *params,
+    const void *src,
+    const void *dst,
+    __u32 ifindex)
+{
+    params->family = AF_INET6;
+    params->ifindex = ifindex;
+    __builtin_memcpy(params->ipv6_src, src, sizeof(params->ipv6_src));
+    __builtin_memcpy(params->ipv6_dst, dst, sizeof(params->ipv6_dst));
+    return bpf_fib_lookup(ctx, params, sizeof(*params), 0);
+}
+
 // Core IPv6 FIB lookup with explicit dst address, update Ethernet header
 // dst: FIB lookup destination (ip6h->daddr for normal, nexthop for End.X)
 // ifindex: L3 device index for lookup (use ctx->ingress_ifindex or VRF ifindex)
@@ -36,13 +57,7 @@ static __always_inline int srv6_fib_lookup_v6_core(
     __u32 ifindex)
 {
     struct bpf_fib_lookup fib_params = {};
-    fib_params.family = AF_INET6;
-    fib_params.ifindex = ifindex;
-
-    __builtin_memcpy(fib_params.ipv6_src, &ip6h->saddr, sizeof(fib_params.ipv6_src));
-    __builtin_memcpy(fib_params.ipv6_dst, dst, sizeof(fib_params.ipv6_dst));
-
-    int ret = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0);
+    int ret = srv6_fib_lookup_v6_params(ctx, &fib_params, &ip6h->saddr, dst, ifindex);
 
     switch (ret) {
     case BPF_FIB_LKUP_RET_SUCCESS:
