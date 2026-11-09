@@ -24,6 +24,8 @@ graph LR
 2. Bridge multi-port flood: PE2のEnd.DT2がdecapした後、bridge br100がhost2とhost3の両方にfloodする
 3. ローカルL2: host2とhost3は同じbridge上なので直接通信できる
 
+PE1 のアクセスポートは、どの BUM モードでも `vbctl device attach` で実行時に attach し、最後の BUM の確認の前に detach と attach をやり直します。
+
 ## クイックスタート
 
 ```bash

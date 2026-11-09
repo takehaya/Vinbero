@@ -27,6 +27,9 @@ graph LR
    floods to both host2 and host3
 3. Local L2: host2 and host3 sit on the same bridge and talk directly
 
+PE1's access port is attached at runtime with `vbctl device attach`, in every
+BUM mode, and is detached and attached again before a last BUM round.
+
 ## Quick start
 
 ```bash
