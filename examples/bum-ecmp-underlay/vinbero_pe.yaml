@@ -1,6 +1,7 @@
 internal:
   devices:
     - becmp-ac
+    - becmp-ac2
     - becmp-up1
     - becmp-up2
   bpf:

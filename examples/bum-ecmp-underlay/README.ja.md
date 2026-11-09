@@ -17,6 +17,9 @@ graph LR
 2. 経路を nexthop object の group に移し、重みを変え、member を消して戻し、uplink を admin down して戻す。変更のたびに、全 peer に 1 コピーずつ届くこと。
 3. gateway の neighbor が FAILED になり、hash-threshold の group がその next hop を外す（netlink の通知はない）。xdp モードではコピーの破棄が組み立て直しの契機になり、その後は全 peer に 1 コピーずつ届く。戻したときも同様。
 
+4. xdp モードで、BD の 2 つの AC が peer の uplink について違う答えを持つ（iif の ip rule）。1 つの devmap では扱えないので、BD は tc モードで動き、全 peer に 1 コピーずつ、AC ごとの table に沿って届く。AC の答えが揃うと xdp モードに戻る。
+5. xdp モードで AC の forwarding sysctl を落とすと、全スロットが外れる。sysctl を戻しても netlink の通知は出ないが、定期的な再試行で 30 秒以内にスロットが戻る。
+
 ## 実行
 
 ```bash

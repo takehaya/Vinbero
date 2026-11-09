@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -321,14 +322,17 @@ func TestBumResolverQueriesEachAC(t *testing.T) {
 	if !slices.Equal(queries, want) {
 		t.Fatalf("queries = %+v, want %+v", queries, want)
 	}
-	flood := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)
-	if flood[BumSlotKeyBase].Ifindex != upA {
-		t.Errorf("slot uplink = %d, want the first AC's answer (%d)", flood[BumSlotKeyBase].Ifindex, upA)
+	// One devmap cannot serve the split: the BD takes the tc path, warned
+	// about once, like the other BDs xdp mode cannot serve.
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD); got != nil {
+		t.Fatalf("split ACs got a flood devmap: %v", got)
 	}
-
-	warned := func() int { return logs.FilterMessageSnippet("resolve a peer differently").Len() }
+	warned := func() int { return logs.FilterMessageSnippet("replicates BUM in tc mode").Len() }
 	if warned() != 1 {
 		t.Fatalf("split ACs warned %d times, want 1", warned())
+	}
+	if !s.retryPending() {
+		t.Error("a split BD is not retried")
 	}
 	if err := s.SyncBD(bumTestBD); err != nil {
 		t.Fatal(err)
@@ -337,15 +341,52 @@ func TestBumResolverQueriesEachAC(t *testing.T) {
 		t.Errorf("a rebuild warned again: %d warnings", warned())
 	}
 
+	// The ACs agree again: back in xdp mode.
 	split = false
 	if err := s.SyncBD(bumTestBD); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SyncBD(bumTestBD); err != nil {
-		t.Fatal(err)
+	flood := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)
+	if flood[BumSlotKeyBase].Ifindex != upA {
+		t.Errorf("slot uplink = %d, want %d", flood[BumSlotKeyBase].Ifindex, upA)
+	}
+	if s.retryPending() {
+		t.Error("nothing is left out, yet a retry is pending")
 	}
 	if warned() != 1 {
 		t.Errorf("after the ACs agree: %d warnings, want still 1", warned())
+	}
+}
+
+// ACs that pick different next hops on one uplink fit one devmap: no tc
+// path, no warning, and both next hops are kept resolved.
+func TestBumACsDifferingOnlyInNexthopStayInXDP(t *testing.T) {
+	h := newXDPBumHelper(t)
+	core, logs := observer.New(zap.WarnLevel)
+	up := dummyIfindex(t, "bumn-up")
+	ifA, ifB := dummyIfindex(t, "bumn-a"), dummyIfindex(t, "bumn-b")
+	nhFor := map[uint32]net.IP{min(ifA, ifB): net.ParseIP("fd00::1"), max(ifA, ifB): net.ParseIP("fd00::2")}
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(q UplinkQuery) (BumUplink, error) {
+		return BumUplink{Ifindex: up, Nexthop: nhFor[q.AC]}, nil
+	}, zap.New(core))
+	var kept []string
+	s.SetNeighKeeper(func(_ uint32, nh net.IP) error { kept = append(kept, nh.String()); return nil })
+	h.mapOps.SetBumDevmapSync(s)
+	t.Cleanup(func() { h.mapOps.SetBumDevmapSync(nil) })
+	h.bumAC(ifA)
+	h.bumAC(ifB)
+	createFloodPeer(t, h, 0)
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex; got != up {
+		t.Errorf("slot uplink = %d, want %d", got, up)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("warned: %v", logs.All())
+	}
+	if !slices.Contains(kept, "fd00::1") || !slices.Contains(kept, "fd00::2") {
+		t.Errorf("kept next hops = %v, want both", kept)
 	}
 }
 
@@ -386,8 +427,8 @@ func TestBumResolverSkipsFailingAC(t *testing.T) {
 }
 
 // An AC that has no usable route, unlike one whose device is gone, is a
-// split: the other AC's peers are still served, with the warning.
-func TestBumResolverWarnsOnACWithoutRoute(t *testing.T) {
+// split: the BD takes the tc path.
+func TestBumACWithoutRouteFallsBackToTC(t *testing.T) {
 	h := newXDPBumHelper(t)
 	core, logs := observer.New(zap.WarnLevel)
 	up := dummyIfindex(t, "bumr-up")
@@ -416,12 +457,138 @@ func TestBumResolverWarnsOnACWithoutRoute(t *testing.T) {
 	if err := s.SyncBD(bumTestBD); err != nil {
 		t.Fatal(err)
 	}
-	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex; got != up {
-		t.Errorf("slot uplink = %d, want %d", got, up)
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD); got != nil {
+		t.Errorf("flood devmap = %v, want none", got)
 	}
-	if n := logs.FilterMessageSnippet("resolve a peer differently").Len(); n != 1 {
+	if n := logs.FilterMessageSnippet("replicates BUM in tc mode").Len(); n != 1 {
 		t.Errorf("warned %d times, want 1", n)
 	}
+}
+
+// createFloodPeer adds flood peer index of bumTestBD.
+func createFloodPeer(t *testing.T, h *xdpTestHelper, index uint16) {
+	t.Helper()
+	src, _ := ParseIPv6("fc00:1::5")
+	segs, n, _ := ParseSegments([]string{fmt.Sprintf("fc00:100:%x::1", index+1)})
+	if err := h.mapOps.CreateBdPeer(bumTestBD, index, &HeadendEntry{
+		Mode: uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2), NumSegments: n,
+		SrcAddr: src, Segments: segs,
+	}, [ESILen]byte{}, [IPv6AddrLen]byte{}, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitUntil polls cond for up to five seconds.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatal(what)
+}
+
+// startWatch runs watchRoutes on a subscription that never delivers an
+// event, so whatever the test sees came from the retry.
+func startWatch(t *testing.T, s *BumDevmapSync) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go s.watchRoutes(ctx, &routeSub{
+		routes:   make(chan netlink.RouteUpdate),
+		nexthops: make(chan struct{}),
+		done:     make(chan struct{}),
+	}, time.Millisecond)
+}
+
+// A slot a failed lookup left out comes back with no event at all. Until it
+// does, the retries neither replace the devmap nor repeat the warning, and
+// once nothing is left out they stop.
+func TestBumRetriesExcludedSlot(t *testing.T) {
+	h := newXDPBumHelper(t)
+	core, logs := observer.New(zap.WarnLevel)
+	up := dummyIfindex(t, "bumx-up")
+	var failing atomic.Bool
+	var calls atomic.Int64
+	failing.Store(true)
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(UplinkQuery) (BumUplink, error) {
+		calls.Add(1)
+		if failing.Load() {
+			return BumUplink{}, errors.New("bpf_fib_lookup returned 5")
+		}
+		return BumUplink{Ifindex: up, Nexthop: net.ParseIP("fd00::1")}, nil
+	}, zap.New(core))
+	s.retryPoll = 5 * time.Millisecond
+	h.bumAC(1)
+	createFloodPeer(t, h, 0)
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if !s.retryPending() {
+		t.Fatal("an excluded slot is not retried")
+	}
+	var innerBefore ebpf.MapID
+	if err := h.objs.BumFloodMap.Lookup(uint32(bumTestBD), &innerBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	startWatch(t, s)
+	start := calls.Load()
+	waitUntil(t, "no retries while a slot is left out", func() bool { return calls.Load() >= start+5 })
+	var inner ebpf.MapID
+	if err := h.objs.BumFloodMap.Lookup(uint32(bumTestBD), &inner); err != nil {
+		t.Fatal(err)
+	}
+	if inner != innerBefore {
+		t.Errorf("a retry with the same result replaced the devmap: %d -> %d", innerBefore, inner)
+	}
+	if n := logs.FilterMessageSnippet("slot left out").Len(); n != 1 {
+		t.Errorf("the persistent failure warned %d times, want 1", n)
+	}
+
+	failing.Store(false)
+	waitUntil(t, "the slot did not come back", func() bool {
+		return devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex == up
+	})
+	waitUntil(t, "still retrying", func() bool { return !s.retryPending() })
+	settled := calls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if calls.Load() != settled {
+		t.Errorf("retried %d times with nothing left out", calls.Load()-settled)
+	}
+}
+
+// A BD on the tc path because its ACs disagree returns to xdp mode with no
+// event too.
+func TestBumRetriesSplitACs(t *testing.T) {
+	h := newXDPBumHelper(t)
+	upA, upB := dummyIfindex(t, "bumy-up1"), dummyIfindex(t, "bumy-up2")
+	ifA, ifB := dummyIfindex(t, "bumy-a"), dummyIfindex(t, "bumy-b")
+	var split atomic.Bool
+	split.Store(true)
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(q UplinkQuery) (BumUplink, error) {
+		up := upA
+		if split.Load() && q.AC == max(ifA, ifB) {
+			up = upB
+		}
+		return BumUplink{Ifindex: up, Nexthop: net.ParseIP("fd00::1")}, nil
+	}, zap.NewNop())
+	s.retryPoll = 5 * time.Millisecond
+	h.bumAC(ifA)
+	h.bumAC(ifB)
+	createFloodPeer(t, h, 0)
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD); got != nil {
+		t.Fatalf("split ACs got a flood devmap: %v", got)
+	}
+	startWatch(t, s)
+	split.Store(false)
+	waitUntil(t, "the BD did not return to xdp mode", func() bool {
+		return devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex == upA
+	})
 }
 
 // A rebuild that would produce the same devmaps leaves them in place and

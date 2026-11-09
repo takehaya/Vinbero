@@ -31,6 +31,8 @@ TMP=/tmp/vinbero_becmp
 # Copies of one marker frame are counted, so a peer shows up on a capture
 # under its outer IPv6 destination.
 NUM_PEERS=8
+SEND_IF=becmp-c0.100
+PE_LOG=/tmp/vinbero_becmp_pe.log
 
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -124,10 +126,10 @@ start_mode() {
     print_info "Starting vinberod in BUM mode ${mode}..."
     local cfg
     cfg=$(BUM_MODE="$mode" bum_mode_config "${SCRIPT_DIR}/vinbero_pe.yaml" "$TMP/pe_${mode}.yaml")
-    start_vinbero "$ns_pe" "$cfg" "/tmp/vinbero_becmp_pe.log"
+    start_vinbero "$ns_pe" "$cfg" "$PE_LOG"
     VINBERO_PID=$VINBERO_LAST_PID
     wait_vinbero_ready "$ns_pe" "127.0.0.1:8085" 15
-    BUM_EFFECTIVE=$(BUM_MODE="$mode" bum_effective_mode /tmp/vinbero_becmp_pe.log)
+    BUM_EFFECTIVE=$(BUM_MODE="$mode" bum_effective_mode "$PE_LOG")
     print_info "BUM replication runs in mode ${BUM_EFFECTIVE}"
     configure_vinbero
     resolve_neighs
@@ -145,7 +147,7 @@ round() {
     bum_capture_start "$ns_rt" becmp-d2 "$pcap2"
     pid2=$CAPTURE_PID
     sleep 0.3
-    bum_marker_send "$ns_ce" becmp-c0.100 "$tag"
+    bum_marker_send "$ns_ce" "$SEND_IF" "$tag"
     sleep 0.7
     kill "$pid1" "$pid2" 2>/dev/null || true
     wait "$pid1" "$pid2" 2>/dev/null || true
@@ -186,7 +188,7 @@ check_delivery() {
 settle_round() {
     local desc="$1" traffic="${2:-0}" tag="$3" output
     if [ "$traffic" = 1 ]; then
-        bum_marker_send "$ns_ce" becmp-c0.100 "vbsac-$RANDOM"
+        bum_marker_send "$ns_ce" "$SEND_IF" "vbsac-$RANDOM"
     fi
     sleep 3
     local before=""
@@ -286,6 +288,102 @@ ip -n "$ns_rt" addr add "$GW2/64" dev becmp-d2 nodad
 # traffic to resolve it.
 wait_neigh "$GW2" becmp-up2
 settle_round "gateway back" 1 vbchg-back
+
+log_count() { grep -c "$1" "$PE_LOG" || true; }
+
+# expect_more <desc> <got> <before>: the counter rose.
+expect_more() {
+    if [ "$2" -gt "$3" ] 2>/dev/null; then
+        print_success "$1 (from $3 to $2)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "$1 (from '$3' to '$2')"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+}
+
+# Both cases are about the devmaps, so a run replicating in tc has no use
+# for them.
+if [ "$BUM_EFFECTIVE" = xdp ]; then
+    echo ""
+    echo "=========================================="
+    echo "ACs that disagree: the BD falls back to tc"
+    echo "=========================================="
+    vbctl hl2 create --interface becmp-ac2 --vlan-id 100 \
+        --src-addr "$SRC" --segments "${PEERS[0]}" --bd-id 100 > /dev/null
+    flood_before=$(stats_counter BUM_XDP_FLOOD)
+    settle_round "second AC, still xdp" 0 vbsplit-agree
+    expect_more "[second AC] replicated in xdp" "$(stats_counter BUM_XDP_FLOOD)" "$flood_before"
+
+    # The second AC's table sends every peer over the uplink the first AC
+    # does not use for the first peer, so at least that peer disagrees.
+    first_dev=$(pe ip -6 route get "${PEERS[0]}" from "$SRC" iif "$ac" | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+    if [ "$first_dev" = becmp-up1 ]; then
+        other_dev=becmp-up2 other_gw=$GW2 other_up=up2
+    else
+        other_dev=becmp-up1 other_gw=$GW1 other_up=up1
+    fi
+    warned_before=$(log_count "replicates BUM in tc mode")
+    pe ip -6 route add fc00:100::/32 via "$other_gw" dev "$other_dev" table 100
+    pe ip -6 rule add iif becmp-ac2 lookup 100 pref 100
+    sleep 1.5
+    expect_eq "[split] the fallback is warned about once" "$(log_count "replicates BUM in tc mode")" "$((warned_before + 1))"
+
+    flood_before=$(stats_counter BUM_XDP_FLOOD)
+    fallback_before=$(stats_counter BUM_XDP_FALLBACK)
+    check_delivery "split, frame from the first AC" "$(round vbsplit-ac1)"
+    SEND_IF=becmp-c1.100
+    from_ac2=$(round vbsplit-ac2)
+    SEND_IF=becmp-c0.100
+    check_delivery "split, frame from the second AC" "$from_ac2"
+    expect_eq "[split] the second AC's copies use its own table" \
+        "$(echo "$from_ac2" | awk -v u="$other_up" 'NF==3 && $2!=u' | wc -l | tr -d ' ')" 0
+    expect_eq "[split] nothing replicated in xdp" "$(stats_counter BUM_XDP_FLOOD)" "$flood_before"
+    expect_more "[split] BUM_XDP_FALLBACK" "$(stats_counter BUM_XDP_FALLBACK)" "$fallback_before"
+
+    recovered_before=$(log_count "replicates BUM in xdp mode again")
+    pe ip -6 rule del iif becmp-ac2 lookup 100 pref 100
+    pe ip -6 route del fc00:100::/32 table 100
+    flood_before=$(stats_counter BUM_XDP_FLOOD)
+    settle_round "ACs agree again" 0 vbsplit-back
+    expect_more "[ACs agree] replicated in xdp again" "$(stats_counter BUM_XDP_FLOOD)" "$flood_before"
+    expect_eq "[ACs agree] the recovery is logged" "$(log_count "replicates BUM in xdp mode again")" "$((recovered_before + 1))"
+    vbctl hl2 delete --interface becmp-ac2 --vlan-id 100 > /dev/null
+    sleep 0.5
+
+    echo ""
+    echo "=========================================="
+    echo "A slot left out comes back with no event"
+    echo "=========================================="
+    # forwarding off makes the AC's lookups fail (FWD_DISABLED). Toggling it
+    # on a device with an address also adds or removes an anycast route, so
+    # the AC goes without IPv6 addresses here and the fix sends no event.
+    pe sysctl -qw net.ipv6.conf.becmp-ac.disable_ipv6=1
+    pe sysctl -qw net.ipv6.conf.becmp-ac.forwarding=0
+    left_before=$(log_count "slot left out")
+    pe ip -6 route add fc00:fff::/64 dev lo # any event: the rebuild that finds out
+    sleep 1.5
+    expect_eq "[forwarding off] every slot left out, logged once" "$(log_count "slot left out")" "$((left_before + NUM_PEERS))"
+    expect_eq "[forwarding off] no copies" "$(round vbsysctl-off | awk 'NF==3' | wc -l | tr -d ' ')" 0
+
+    back_before=$(log_count "flood slot is no longer left out")
+    pe ip monitor route rule nexthop > "$TMP/events.txt" 2>/dev/null &
+    monitor_pid=$!
+    sleep 0.5
+    pe sysctl -qw net.ipv6.conf.becmp-ac.forwarding=1
+    # bumExcludedRetry is 30 s.
+    for _ in $(seq 90); do
+        [ "$(log_count "flood slot is no longer left out")" -ge "$((back_before + NUM_PEERS))" ] && break
+        sleep 0.5
+    done
+    expect_eq "[forwarding on] every slot came back" "$(log_count "flood slot is no longer left out")" "$((back_before + NUM_PEERS))"
+    kill "$monitor_pid" 2>/dev/null || true
+    wait "$monitor_pid" 2>/dev/null || true
+    expect_eq "[forwarding on] no route, rule or nexthop event" "$(wc -l < "$TMP/events.txt" | tr -d ' ')" 0
+    check_delivery "forwarding back on" "$(round vbsysctl-on)"
+    pe ip -6 route del fc00:fff::/64 dev lo
+    pe sysctl -qw net.ipv6.conf.becmp-ac.disable_ipv6=0
+fi
 
 echo ""
 echo "=========================================="

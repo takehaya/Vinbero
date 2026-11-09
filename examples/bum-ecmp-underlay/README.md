@@ -27,6 +27,14 @@ graph LR
    rebuild; afterwards every peer gets one copy again. The same when it
    comes back.
 
+4. In the xdp modes, two ACs of the BD disagree on a peer's uplink (an iif ip
+   rule). One devmap cannot serve that, so the BD falls back to tc mode: every
+   peer still gets one copy, and each AC's copies follow its own table. The BD
+   returns to xdp mode when the ACs agree again.
+5. In the xdp modes, the AC's forwarding sysctl goes off, which leaves every
+   slot out. Turning it back on sends no netlink event; the periodic retry
+   brings the slots back within 30 s.
+
 ## Quick start
 
 ```bash

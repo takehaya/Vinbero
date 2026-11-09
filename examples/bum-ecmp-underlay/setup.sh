@@ -27,18 +27,22 @@ create_netns "$ns_pe"
 create_netns "$ns_rt"
 
 create_veth_pair becmp-c0 "$ns_ce" becmp-ac "$ns_pe"
+create_veth_pair becmp-c1 "$ns_ce" becmp-ac2 "$ns_pe"
 create_veth_pair becmp-up1 "$ns_pe" becmp-d1 "$ns_rt"
 create_veth_pair becmp-up2 "$ns_pe" becmp-d2 "$ns_rt"
 
 ip netns exec "$ns_pe" sysctl -qw net.ipv6.conf.all.forwarding=1 net.ipv6.conf.default.forwarding=1
 ip netns exec "$ns_rt" sysctl -qw net.ipv6.conf.all.forwarding=1
 
-# The host side: a VLAN-tagged access port.
+# The host side: VLAN-tagged access ports (the second becomes an AC of the
+# BD only for the split-AC case).
 run modprobe 8021q 2>/dev/null || true
-ip -n "$ns_ce" link add link becmp-c0 name becmp-c0.100 type vlan id 100
-ip -n "$ns_ce" link set becmp-c0.100 up
-# The tag must stay in the frame for the AC match (generic XDP on veth).
-run ip netns exec "$ns_ce" ethtool -K becmp-c0 txvlan off 2>/dev/null || true
+for port in becmp-c0 becmp-c1; do
+    ip -n "$ns_ce" link add link "$port" name "$port.100" type vlan id 100
+    ip -n "$ns_ce" link set "$port.100" up
+    # The tag must stay in the frame for the AC match (generic XDP on veth).
+    run ip netns exec "$ns_ce" ethtool -K "$port" txvlan off 2>/dev/null || true
+done
 
 # The uplinks. nodad: a tentative address cannot be used right away.
 ip -n "$ns_pe" addr add fd00:a::1/64 dev becmp-up1 nodad
