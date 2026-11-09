@@ -107,7 +107,7 @@ func setupBumXDP(obj *bpf.BpfObjects, mapOps *bpf.MapOperations, l2 *config.L2Co
 	if !l2.AnyXDP() {
 		return nil, nil
 	}
-	bs := bpf.NewBumDevmapSync(obj, l2.EffectiveBumMode, bpf.RouteUplinkResolver, logger)
+	bs := bpf.NewBumDevmapSync(obj, l2.EffectiveBumMode, nil, logger)
 	bs.SetNeighKeeper(bpf.KeepNeighResolved)
 	bs.SetNativeXDP(native)
 	mapOps.SetBumDevmapSync(bs)

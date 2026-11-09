@@ -187,6 +187,27 @@ struct {
     __type(value, struct bum_plan);
 } bum_plan_ring SEC(".maps");
 
+// Copies the egress program dropped because the FIB no longer answers what
+// the devmap was built from: the uplink differs (BUM_UPLINK_MISMATCH) or
+// the next hop's neighbour is unresolved (BUM_EGRESS_NO_NEIGH). Unlike those
+// stats counters it is always counted, enable_stats or not: the control
+// plane polls it and rebuilds the BD devmaps, for the routing changes that
+// send no netlink event (bum_devmap.go).
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} bum_uplink_resync SEC(".maps");
+
+static __always_inline void bum_note_uplink_resync(void)
+{
+    __u32 zero = 0;
+    __u64 *n = bpf_map_lookup_elem(&bum_uplink_resync, &zero);
+    if (n)
+        (*n)++;
+}
+
 static __always_inline __u8 bum_bd_mode(__u16 bd_id)
 {
     if (!bum_xdp_enabled)

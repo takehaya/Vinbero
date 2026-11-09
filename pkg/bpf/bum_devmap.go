@@ -11,7 +11,9 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 // BUM replication modes, matching BUM_MODE_* in src/l2vpn/bum_xdp.h.
@@ -38,27 +40,17 @@ type BumUplink struct {
 	Nexthop net.IP
 }
 
-// UplinkResolver returns the uplink a remote PE's first segment is routed
-// out of. The devmap entry of a flood slot transmits on that device.
-type UplinkResolver func(firstSegment [IPv6AddrLen]byte) (BumUplink, error)
-
-// RouteUplinkResolver resolves through the kernel routing table of the
-// current network namespace.
-func RouteUplinkResolver(seg [IPv6AddrLen]byte) (BumUplink, error) {
-	dst := net.IP(seg[:])
-	routes, err := netlink.RouteGet(dst)
-	if err != nil {
-		return BumUplink{}, err
-	}
-	if len(routes) == 0 || routes[0].LinkIndex == 0 {
-		return BumUplink{}, fmt.Errorf("no route to %s", dst)
-	}
-	nh := routes[0].Gw
-	if nh == nil {
-		nh = dst
-	}
-	return BumUplink{Ifindex: uint32(routes[0].LinkIndex), Nexthop: nh}, nil
+// UplinkQuery is one uplink lookup: the arguments the data plane's FIB
+// lookup uses for a copy to this peer (bum_egress.c).
+type UplinkQuery struct {
+	AC  uint32 // the BD's source AC: the device the lookup runs on
+	Src [IPv6AddrLen]byte
+	Dst [IPv6AddrLen]byte
 }
+
+// UplinkResolver returns the uplink a remote PE's copies are routed out of.
+// The devmap entry of a flood slot transmits on that device.
+type UplinkResolver func(q UplinkQuery) (BumUplink, error)
 
 // KeepNeighResolved makes the neighbour entry of ip on ifindex a managed
 // one (NTF_EXT_MANAGED): the kernel resolves it and keeps it resolved
@@ -113,18 +105,28 @@ type BumDevmapSync struct {
 	live      bool // XDP programs may be running (SetLive)
 	logger    *zap.Logger
 	// keepNeigh, when set, keeps each flood slot's next hop resolved
-	// (KeepNeighResolved).
+	// (KeepNeighResolved): the next hop the probe chose, so per ECMP member.
 	keepNeigh func(ifindex uint32, nexthop net.IP) error
 	// unserved holds the xdp-mode BDs the sync leaves on the tc path,
 	// with the reason (unservable), so the change is logged once.
 	unserved map[uint16]string
+	// splitACs holds the BDs whose ACs resolve a peer differently, so the
+	// warning is logged once (resolveUplink).
+	splitACs map[uint16]struct{}
+	// built holds what each BD's installed devmaps were built from: a
+	// rebuild that would produce the same ones leaves them alone.
+	built map[uint16]devmapKey
+	// resync and resyncPoll: see uplinkResyncRose.
+	resync     uint64
+	resyncPoll time.Duration
 }
 
 // NewBumDevmapSync binds the sync to a loaded collection. modeOf returns the
-// effective BUM_MODE_* of a BD (config default or override).
+// effective BUM_MODE_* of a BD (config default or override). A nil uplink
+// resolver uses the collection's probe program (ProbeUplinkResolver).
 func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink UplinkResolver, logger *zap.Logger) *BumDevmapSync {
 	if uplink == nil {
-		uplink = RouteUplinkResolver
+		uplink = ProbeUplinkResolver(objs.BumUplinkProbe)
 	}
 	if logger == nil {
 		logger = zap.NewNop()
@@ -143,6 +145,10 @@ func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink Uplink
 		uplink:   uplink,
 		logger:   logger,
 		unserved: map[uint16]string{},
+		splitACs: map[uint16]struct{}{},
+		built:    map[uint16]devmapKey{},
+
+		resyncPoll: bumUplinkResyncPoll,
 	}
 }
 
@@ -238,18 +244,95 @@ func unservable(acs []bumAC, ifindexes []uint32, slots int) string {
 	return ""
 }
 
+// resolveUplink returns a peer's uplink. A BD has one devmap, so one uplink
+// per peer, but the FIB lookup runs on the frame's own AC: the ACs of a BD
+// agree unless an iif ip rule or a VRF sends one of them to another table.
+// disagree reports such a split, an AC that has no usable route included;
+// the BD then keeps the answer of its first AC that resolved, and copies
+// from the other ACs that go elsewhere are dropped (BUM_UPLINK_MISMATCH,
+// BUM_EGRESS_DROP). extra are the next hops other ACs chose on the same
+// uplink, which need resolving too. An AC whose device is gone is passed
+// over, the same as it is in the devmap.
+func (s *BumDevmapSync) resolveUplink(acs []uint32, peer *HeadendEntry) (up BumUplink, extra []net.IP, disagree bool, err error) {
+	found := false
+	for _, ac := range acs {
+		got, e := s.uplink(UplinkQuery{AC: ac, Src: peer.SrcAddr, Dst: peer.Segments[0]})
+		switch {
+		case errors.Is(e, unix.ENODEV):
+			err = e
+		case e != nil:
+			err, disagree = e, true
+		case !found:
+			up, found = got, true
+		case got.Ifindex != up.Ifindex:
+			disagree = true
+		case !got.Nexthop.Equal(up.Nexthop):
+			extra = append(extra, got.Nexthop)
+		}
+	}
+	if !found {
+		return BumUplink{}, nil, false, err
+	}
+	return up, extra, disagree, nil
+}
+
+// noteSplitACsLocked logs once when a BD's ACs start or stop resolving a
+// peer differently.
+func (s *BumDevmapSync) noteSplitACsLocked(bdID uint16, split bool) {
+	_, had := s.splitACs[bdID]
+	switch {
+	case split && !had:
+		s.splitACs[bdID] = struct{}{}
+		s.logger.Warn("xdp BUM: the ACs of this bridge domain resolve a peer differently (an iif ip rule or a VRF); "+
+			"one devmap cannot serve them all, so copies from some ACs are dropped",
+			zap.Uint16("bd_id", bdID))
+	case !split && had:
+		delete(s.splitACs, bdID)
+		s.logger.Info("xdp BUM: the ACs of this bridge domain agree on their uplinks again", zap.Uint16("bd_id", bdID))
+	}
+}
+
 // bdBuild is a BD's pair of freshly built devmaps, not installed yet.
 type bdBuild struct {
 	bd           uint16
 	flood, local *ebpf.Map
 	devices      []uint32 // every device the devmaps send to
 	slots        []bumSlot
+	key          devmapKey
 }
 
 type bumSlot struct {
 	index   uint16
 	uplink  uint32
 	nexthop net.IP
+	// extraNexthops: next hops other ACs of the BD chose on the same
+	// uplink. They need their neighbour entries too.
+	extraNexthops []net.IP
+}
+
+// devmapSlotKey is the part of a slot the devmaps hold.
+type devmapSlotKey struct {
+	index  uint16
+	uplink uint32
+}
+
+// devmapKey is what a BD's devmaps are built from (ifindexes sorted, slots
+// in slot order, both as built: left-out entries do not count).
+type devmapKey struct {
+	acs   []uint32
+	slots []devmapSlotKey
+}
+
+func (k devmapKey) equal(o devmapKey) bool {
+	return slices.Equal(k.acs, o.acs) && slices.Equal(k.slots, o.slots)
+}
+
+func slotKeys(slots []bumSlot) []devmapSlotKey {
+	keys := make([]devmapSlotKey, 0, len(slots))
+	for _, sl := range slots {
+		keys = append(keys, devmapSlotKey{index: sl.index, uplink: sl.uplink})
+	}
+	return keys
 }
 
 func (b *bdBuild) close() {
@@ -274,8 +357,12 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 			ifindexes = append(ifindexes, ac.ifindex)
 		}
 	}
+	slices.Sort(ifindexes) // the same AC answers first on every rebuild
 
-	var slots []bumSlot
+	var (
+		slots []bumSlot
+		split bool
+	)
 	for i := uint16(0); i < MaxBumNexthops; i++ {
 		var peer HeadendEntry
 		err := s.objs.BdPeerMap.Lookup(&BdPeerKey{BdId: bdID, Index: i}, &peer)
@@ -288,7 +375,8 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 		if peer.FloodExclude != 0 || peer.NumSegments < 1 {
 			continue
 		}
-		up, err := s.uplink(peer.Segments[0])
+		up, extra, disagree, err := s.resolveUplink(ifindexes, &peer)
+		split = split || disagree
 		if err != nil {
 			// Not fatal: the slot rejoins on the next rebuild (route change
 			// or BD mutation). Until then that peer gets no BUM copy.
@@ -297,13 +385,23 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 				zap.String("segment", net.IP(peer.Segments[0][:]).String()), zap.Error(err))
 			continue
 		}
-		slots = append(slots, bumSlot{index: i, uplink: up.Ifindex, nexthop: up.Nexthop})
+		slots = append(slots, bumSlot{index: i, uplink: up.Ifindex, nexthop: up.Nexthop, extraNexthops: extra})
 	}
+	s.noteSplitACsLocked(bdID, split)
 	if reason := unservable(acs, ifindexes, len(slots)); reason != "" {
 		return nil, s.clearBDLocked(bdID, reason)
 	}
 	if (len(slots) > 0 || s.native) && s.egress == nil {
 		return nil, fmt.Errorf("bd %d: bum_remote_egress is not loaded", bdID)
+	}
+
+	// Nothing to install when the BD's devmaps would come out the same. The
+	// rebuilds a persistent drop triggers then cost a probe per peer and no
+	// map swap (uplinkResyncRose).
+	key := devmapKey{acs: ifindexes, slots: slotKeys(slots)}
+	if cur, ok := s.built[bdID]; ok && cur.equal(key) {
+		s.keepNeighsLocked(bdID, slots, map[string]struct{}{})
+		return nil, nil
 	}
 
 	flood, err := ebpf.NewMap(s.innerSpec)
@@ -315,7 +413,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 		_ = flood.Close()
 		return nil, fmt.Errorf("bd %d: create local devmap: %w", bdID, err)
 	}
-	b := &bdBuild{bd: bdID, flood: flood, local: local, slots: slots}
+	b := &bdBuild{bd: bdID, flood: flood, local: local, slots: slots, key: key}
 	uplinks := make(map[uint32]struct{}, len(slots))
 	for _, sl := range slots {
 		uplinks[sl.uplink] = struct{}{}
@@ -340,6 +438,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 		} else {
 			// Not fatal, like an unresolvable slot: an AC whose device is
 			// gone must not keep the rest of the BD on stale devmaps.
+			b.key.acs = slices.DeleteFunc(slices.Clone(b.key.acs), func(ac uint32) bool { return ac == ifindex })
 			_ = local.Delete(ifindex)
 			s.logger.Warn("xdp BUM: cannot add a local AC to the BD devmap; AC left out",
 				zap.Uint16("bd_id", bdID), zap.Uint32("ifindex", ifindex), zap.Error(err))
@@ -358,6 +457,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 			// The devmap has room (unservable), so the uplink device is
 			// gone: like an unresolvable uplink, the slot waits for the
 			// next rebuild.
+			b.key.slots = slices.DeleteFunc(slices.Clone(b.key.slots), func(k devmapSlotKey) bool { return k.index == sl.index })
 			s.logger.Warn("xdp BUM: cannot add a flood slot to the BD devmap; slot left out",
 				zap.Uint16("bd_id", bdID), zap.Uint16("index", sl.index), zap.Uint32("uplink", sl.uplink), zap.Error(err))
 		}
@@ -397,6 +497,7 @@ func (s *BumDevmapSync) installLocked(builds []*bdBuild) error {
 	}
 
 	var errs []error
+	seen := map[string]struct{}{}
 	for _, b := range builds {
 		if reason, ok := failed[b.bd]; ok {
 			errs = append(errs, s.clearBDLocked(b.bd, reason))
@@ -411,21 +512,35 @@ func (s *BumDevmapSync) installLocked(builds []*bdBuild) error {
 			errs = append(errs, fmt.Errorf("bd %d: install flood devmap: %w", b.bd, err))
 			continue
 		}
+		s.built[b.bd] = b.key
 		s.noteServedLocked(b.bd, "")
-		if s.keepNeigh == nil {
-			continue
-		}
-		for _, sl := range b.slots {
-			if sl.nexthop == nil {
+		s.keepNeighsLocked(b.bd, b.slots, seen)
+	}
+	return errors.Join(errs...)
+}
+
+// keepNeighsLocked keeps the next hops of a BD's flood slots resolved.
+// seen dedupes the (device, next hop) pairs of one rebuild.
+func (s *BumDevmapSync) keepNeighsLocked(bd uint16, slots []bumSlot, seen map[string]struct{}) {
+	if s.keepNeigh == nil {
+		return
+	}
+	for _, sl := range slots {
+		for _, nh := range append([]net.IP{sl.nexthop}, sl.extraNexthops...) {
+			if nh == nil {
 				continue
 			}
-			if err := s.keepNeigh(sl.uplink, sl.nexthop); err != nil {
+			key := fmt.Sprintf("%d/%s", sl.uplink, nh)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			if err := s.keepNeigh(sl.uplink, nh); err != nil {
 				s.logger.Debug("xdp BUM: cannot keep a flood slot's next hop resolved",
-					zap.Uint16("bd_id", b.bd), zap.Uint16("index", sl.index), zap.Error(err))
+					zap.Uint16("bd_id", bd), zap.Uint16("index", sl.index), zap.Error(err))
 			}
 		}
 	}
-	return errors.Join(errs...)
 }
 
 // clearBDLocked removes the BD's devmaps. reason, when set, says why an
@@ -439,6 +554,8 @@ func (s *BumDevmapSync) clearBDLocked(bdID uint16, reason string) error {
 		}
 	}
 	s.noteServedLocked(bdID, reason)
+	delete(s.built, bdID)
+	s.noteSplitACsLocked(bdID, false)
 	return errors.Join(errs...)
 }
 
@@ -548,26 +665,37 @@ func (s *BumDevmapSync) SyncAll() error {
 	return errors.Join(errs...)
 }
 
-// WatchRoutes rebuilds every BD (debounced) when the main routing table
-// changes, so a flood slot follows its peer's uplink and a slot whose route
-// appears late joins. It returns when ctx is done.
+// WatchRoutes rebuilds every BD (debounced) when the routing table or a
+// nexthop object changes, or when the egress program drops copies whose
+// uplink no longer matches the devmap, so a flood slot follows its peer's
+// uplink and a slot whose route appears late joins. It returns when ctx is
+// done.
 func (s *BumDevmapSync) WatchRoutes(ctx context.Context, debounce time.Duration) error {
 	sub, err := s.subscribeRoutes()
 	if err != nil {
 		return fmt.Errorf("subscribe to route updates: %w", err)
 	}
+	s.uplinkResyncRose() // copies dropped so far are not this watch's business
 	go s.watchRoutes(ctx, sub, debounce)
 	return nil
 }
 
+// routeSub is the route, nexthop-object and ip-rule subscription. nexthops
+// carries a value per batch of nexthop and rule messages. Either channel
+// closes when its subscription ends; done stops both.
 type routeSub struct {
-	updates chan netlink.RouteUpdate
-	done    chan struct{}
+	routes   chan netlink.RouteUpdate
+	nexthops chan struct{}
+	done     chan struct{}
 }
 
 func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
-	r := &routeSub{updates: make(chan netlink.RouteUpdate, 256), done: make(chan struct{})}
-	err := netlink.RouteSubscribeWithOptions(r.updates, r.done, netlink.RouteSubscribeOptions{
+	r := &routeSub{
+		routes:   make(chan netlink.RouteUpdate, 256),
+		nexthops: make(chan struct{}, 1),
+		done:     make(chan struct{}),
+	}
+	err := netlink.RouteSubscribeWithOptions(r.routes, r.done, netlink.RouteSubscribeOptions{
 		ErrorCallback: func(err error) {
 			s.logger.Warn("xdp BUM: route subscription failed", zap.Error(err))
 		},
@@ -577,6 +705,41 @@ func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
 		close(r.done)
 		return nil, err
 	}
+	// A group change that does not touch routes (nexthop_compat_mode=0, a
+	// member removed) only shows up here, and so does an ip rule that sends
+	// an AC to another table. vishvananda/netlink has no API for the nexthop
+	// group, but a raw subscription is enough: any message means a rebuild.
+	nh, err := nl.Subscribe(unix.NETLINK_ROUTE, unix.RTNLGRP_NEXTHOP, unix.RTNLGRP_IPV6_RULE)
+	if err != nil {
+		close(r.done)
+		return nil, fmt.Errorf("subscribe to nexthop updates: %w", err)
+	}
+	if err := nh.SetReceiveBufferSize(1<<20, false); err != nil {
+		s.logger.Debug("xdp BUM: cannot grow the nexthop socket's buffer", zap.Error(err))
+	}
+	go func() {
+		<-r.done
+		nh.Close()
+	}()
+	go func() {
+		defer close(r.nexthops)
+		for {
+			if _, _, err := nh.Receive(); err != nil {
+				select {
+				case <-r.done:
+				default:
+					s.logger.Warn("xdp BUM: nexthop subscription failed", zap.Error(err))
+				}
+				return
+			}
+			select {
+			case r.nexthops <- struct{}{}:
+			case <-r.done:
+				return
+			default: // a rebuild is already on its way
+			}
+		}
+	}()
 	return r, nil
 }
 
@@ -584,9 +747,36 @@ func (s *BumDevmapSync) subscribeRoutes() (*routeSub, error) {
 // postpone the rebuild, in multiples of the debounce.
 const routeSyncMaxDelay = 10
 
+// bumUplinkResyncPoll is how often the watch reads bum_uplink_resync.
+const bumUplinkResyncPoll = time.Second
+
+// uplinkResyncRose reports whether the egress program counted more copies
+// in bum_uplink_resync since the last call (bum_xdp.h). No event announces
+// some of what moves a peer to another next hop or leaves it unresolved: a
+// sysctl (fib_multipath_hash_policy 3's fields, the hash seed), a gateway's
+// neighbour going FAILED or INCOMPLETE in a hash-threshold group, a carrier
+// change, a nexthop the kernel flushes when its device goes down. A rebuild
+// probes again and makes the new next hop a managed neighbour.
+func (s *BumDevmapSync) uplinkResyncRose() bool {
+	var perCPU []uint64
+	if err := s.objs.BumUplinkResync.Lookup(uint32(0), &perCPU); err != nil {
+		s.logger.Debug("xdp BUM: cannot read bum_uplink_resync", zap.Error(err))
+		return false
+	}
+	var sum uint64
+	for _, n := range perCPU {
+		sum += n
+	}
+	rose := sum != s.resync
+	s.resync = sum
+	return rose
+}
+
 func (s *BumDevmapSync) watchRoutes(ctx context.Context, sub *routeSub, debounce time.Duration) {
 	timer := time.NewTimer(debounce)
 	timer.Stop()
+	resync := time.NewTicker(s.resyncPoll)
+	defer resync.Stop()
 	var (
 		fire  <-chan time.Time
 		first time.Time // first update since the last rebuild
@@ -595,6 +785,38 @@ func (s *BumDevmapSync) watchRoutes(ctx context.Context, sub *routeSub, debounce
 		timer.Stop()
 		timer.Reset(d)
 		fire = timer.C
+	}
+	pending := func() {
+		now := time.Now()
+		if first.IsZero() {
+			first = now
+		}
+		wait := debounce
+		if left := first.Add(routeSyncMaxDelay * debounce).Sub(now); left < wait {
+			wait = max(left, 0)
+		}
+		schedule(wait)
+	}
+	// The subscription ended (typically ENOBUFS: the kernel dropped
+	// notifications). Updates may be lost, so subscribe again and rebuild
+	// everything. False when ctx ended first.
+	resubscribe := func() bool {
+		close(sub.done)
+		sub = nil
+		for sub == nil {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Second):
+			}
+			var err error
+			if sub, err = s.subscribeRoutes(); err != nil {
+				s.logger.Warn("xdp BUM: route resubscribe failed; retrying", zap.Error(err))
+			}
+		}
+		first = time.Time{}
+		schedule(0)
+		return true
 	}
 	defer func() {
 		timer.Stop()
@@ -606,37 +828,26 @@ func (s *BumDevmapSync) watchRoutes(ctx context.Context, sub *routeSub, debounce
 		select {
 		case <-ctx.Done():
 			return
-		case _, ok := <-sub.updates:
+		case _, ok := <-sub.routes:
 			if !ok {
-				// The subscription ended (typically ENOBUFS: the kernel
-				// dropped notifications). Updates may be lost, so
-				// subscribe again and rebuild everything.
-				close(sub.done)
-				sub = nil
-				for sub == nil {
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(time.Second):
-					}
-					var err error
-					if sub, err = s.subscribeRoutes(); err != nil {
-						s.logger.Warn("xdp BUM: route resubscribe failed; retrying", zap.Error(err))
-					}
+				if !resubscribe() {
+					return
 				}
-				first = time.Time{}
-				schedule(0)
 				continue
 			}
-			now := time.Now()
-			if first.IsZero() {
-				first = now
+			pending()
+		case _, ok := <-sub.nexthops:
+			if !ok {
+				if !resubscribe() {
+					return
+				}
+				continue
 			}
-			wait := debounce
-			if left := first.Add(routeSyncMaxDelay * debounce).Sub(now); left < wait {
-				wait = max(left, 0)
+			pending()
+		case <-resync.C:
+			if s.uplinkResyncRose() {
+				pending()
 			}
-			schedule(wait)
 		case <-fire:
 			fire = nil
 			first = time.Time{}
@@ -677,4 +888,3 @@ func (m *MapOperations) resyncBum(bdIDs ...uint16) {
 		}
 	}
 }
-
