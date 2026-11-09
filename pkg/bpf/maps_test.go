@@ -695,7 +695,7 @@ func TestFdbAging(t *testing.T) {
 
 	// Age with 1s timeout — should delete the old entry (last_seen=1ns is ancient)
 	// Use short timeout because CI VMs may have small CLOCK_MONOTONIC after boot.
-	aged, err := h.mapOps.AgeFdbEntries(1e9) // 1 second in ns
+	aged, err := h.mapOps.AgeFdbEntries(1e9, nil) // 1 second in ns
 	if err != nil {
 		t.Fatalf("AgeFdbEntries: %v", err)
 	}

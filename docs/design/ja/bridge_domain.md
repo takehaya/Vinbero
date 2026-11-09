@@ -158,6 +158,15 @@ SRv6パケット → End.DT2 decap → inner frame:
 
 ローカル学習はリモートエントリを上書きしません。End.DT2で「このMACはPE3の先にいる」と学習した内容が、H.Encaps.L2側のローカル学習で壊されることを防ぎます。
 
+### bridge の local エントリーと ageing
+
+tc モードの BD では、kernel の bridge の FDB を `fdb_map` に写し、EVPN の自動広告では RT2 にします。
+
+- bridge の port の MAC と bridge 自身の MAC は `fdb_map` には写しますが、RT2 にはしません。decap したフレームは bridge の送信経路に redirect されるので、host には届かないためです。`bridge fdb add MAC dev tap0 master` のように operator が port に置いた MAC は RT2 にします
+- bridge が持っている MAC の寿命は kernel が決めます。`settings.fdb_aging_seconds` の ageing は、bridge が持っている local MAC を消しません。`ageing_time` で消えたときの通知で withdraw します。static エントリーも bridge が消すまで残ります
+- XDP が直近 30 秒以内に見ている MAC は、bridge が ageing で消しても `fdb_map` にも RT2 にも残します。ホストが remote とだけ通信していると bridge からは見えないためです。XDP からも見えなくなると ageing で消えます
+- それより長く静かだった MAC は bridge の ageing で RT2 を取り下げます。XDP がまた学習すると、ageing の周期ごとに RT2 に戻します
+
 ## 設定例
 
 ### 最小構成としてP2PでBDを使わない場合

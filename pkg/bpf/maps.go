@@ -2690,16 +2690,35 @@ type AgedFdbEntry struct {
 // advertisements; len() is the number deleted. BPF timestamps are best-effort
 // refreshes independent of the forwarding identity. The second lookup avoids
 // deleting entries already observed as fresh; refresh-versus-delete is not atomic.
-func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
-	return m.ageFdbEntries(maxAgeNs, nil)
+//
+// keep, when set, leaves the locally learned entries it selects. A remote entry
+// ages regardless, even if its MAC is also kept locally.
+func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64, keep func(FdbKey) bool) ([]AgedFdbEntry, error) {
+	return m.ageFdbEntries(maxAgeNs, func(k FdbKey, e FdbEntry) bool {
+		return keep == nil || e.IsRemote != 0 || !keep(k)
+	})
 }
 
 // AgeLocalFdbEntries is AgeFdbEntries restricted to the locally learned
-// entries of the BDs inBD accepts.
-func (m *MapOperations) AgeLocalFdbEntries(maxAgeNs uint64, inBD func(bdID uint16) bool) ([]AgedFdbEntry, error) {
+// entries of the BDs inBD accepts, leaving those keep selects (nil: none).
+func (m *MapOperations) AgeLocalFdbEntries(maxAgeNs uint64, inBD func(bdID uint16) bool, keep func(FdbKey) bool) ([]AgedFdbEntry, error) {
 	return m.ageFdbEntries(maxAgeNs, func(k FdbKey, e FdbEntry) bool {
-		return e.IsRemote == 0 && inBD(k.BdId)
+		return e.IsRemote == 0 && inBD(k.BdId) && (keep == nil || !keep(k))
 	})
+}
+
+// LocalFdbSeen reports whether a local entry exists for the MAC and, when
+// withinNs is non-zero, whether XDP saw it that recently.
+func (m *MapOperations) LocalFdbSeen(bdID uint16, mac net.HardwareAddr, withinNs uint64) bool {
+	var e FdbEntry
+	if err := m.objs.FdbMap.Lookup(buildFdbKey(bdID, mac), &e); err != nil || e.IsRemote != 0 {
+		return false
+	}
+	if withinNs == 0 {
+		return true
+	}
+	now := currentKtimeNs()
+	return e.LastSeen != 0 && e.LastSeen <= now && now-e.LastSeen <= withinNs
 }
 
 func (m *MapOperations) ageFdbEntries(maxAgeNs uint64, scope func(FdbKey, FdbEntry) bool) ([]AgedFdbEntry, error) {
@@ -2712,14 +2731,13 @@ func (m *MapOperations) ageFdbEntries(maxAgeNs uint64, scope func(FdbKey, FdbEnt
 	now := currentKtimeNs()
 	var toDelete []FdbKey
 	for iter.Next(&key, &entry) {
-		if entry.IsStatic != 0 || entry.LastSeen == 0 || (scope != nil && !scope(key, entry)) {
+		if entry.IsStatic != 0 || entry.LastSeen == 0 {
 			continue
 		}
 		if entry.LastSeen > now {
 			continue // clock skew or corruption
 		}
-		age := now - entry.LastSeen
-		if age > maxAgeNs {
+		if age := now - entry.LastSeen; age > maxAgeNs && (scope == nil || scope(key, entry)) {
 			toDelete = append(toDelete, key)
 		}
 	}

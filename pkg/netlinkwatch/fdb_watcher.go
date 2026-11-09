@@ -1,6 +1,7 @@
 package netlinkwatch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,8 +35,9 @@ type macSinkEntry struct {
 type fdbMapOps interface {
 	LearnFdb(bdID uint16, mac net.HardwareAddr, oif uint32) (bool, error)
 	DeleteLearnedFdb(bdID uint16, mac net.HardwareAddr, oif uint32) error
-	AgeFdbEntries(maxAgeNs uint64) ([]bpf.AgedFdbEntry, error)
-	AgeLocalFdbEntries(maxAgeNs uint64, inBD func(bdID uint16) bool) ([]bpf.AgedFdbEntry, error)
+	AgeFdbEntries(maxAgeNs uint64, keep func(bpf.FdbKey) bool) ([]bpf.AgedFdbEntry, error)
+	AgeLocalFdbEntries(maxAgeNs uint64, inBD func(bdID uint16) bool, keep func(bpf.FdbKey) bool) ([]bpf.AgedFdbEntry, error)
+	LocalFdbSeen(bdID uint16, mac net.HardwareAddr, withinNs uint64) bool
 	ListLocalDynamicFdb(bdID uint16) (map[uint16][]net.HardwareAddr, error)
 }
 
@@ -73,16 +75,23 @@ type FDBWatcher struct {
 	// events are ignored: an idle bridge entry aging out must not delete an
 	// entry the data plane keeps fresh, nor withdraw its RT2. Nil: none.
 	xdpLearned func(bdID uint16) bool
+	// deviceAddr returns a device's hardware address. Tests replace it; the
+	// zero value is the kernel.
+	deviceAddr func(ifindex int) (net.HardwareAddr, error)
+	// localMu keeps a reconcile re-announcement from landing after the
+	// withdrawal of the MAC it read.
+	localMu sync.Mutex
 }
 
 // NewFDBWatcher creates a new FDB watcher
 func NewFDBWatcher(mapOps *bpf.MapOperations, logger *zap.Logger) *FDBWatcher {
 	return &FDBWatcher{
-		mapOps:    mapOps,
-		logger:    logger,
-		allowed:   make(map[int]uint16),
-		neighList: netlink.NeighList,
-		done:      make(chan struct{}),
+		mapOps:     mapOps,
+		logger:     logger,
+		allowed:    make(map[int]uint16),
+		neighList:  netlink.NeighList,
+		deviceAddr: linkHardwareAddr,
+		done:       make(chan struct{}),
 	}
 }
 
@@ -123,9 +132,9 @@ func (w *FDBWatcher) Start(ctx context.Context) error {
 		w.wg.Go(func() {
 			w.runAging(ctx)
 		})
-	} else if w.xdpLearned != nil {
+	} else {
 		w.wg.Go(func() {
-			w.runXDPAging(ctx)
+			w.runLocalAging(ctx)
 		})
 	}
 
@@ -182,33 +191,117 @@ func (w *FDBWatcher) StartXDPEvents(src FdbEventSource) {
 	})
 }
 
-// reconcileXDPLearned re-announces every XDP-learned local MAC of the
-// xdp-mode BDs. A full ring buffer drops events; the sinks dedup, so this
-// pass only fills in what was lost.
-func (w *FDBWatcher) reconcileXDPLearned() {
+// reconcileLocalMACs re-announces the local MACs in fdb_map. A full ring
+// buffer drops xdp-mode events, and in a tc-mode BD no event follows when
+// XDP learns back a MAC the bridge has aged; the sinks dedup, so this pass
+// only fills in what was lost. The addresses of bridge ports and of the bridge
+// itself are not re-announced.
+func (w *FDBWatcher) reconcileLocalMACs(kernel *bridgeFDB) {
 	w.mu.RLock()
-	enabled := w.xdpLearned != nil
 	sinks := w.snapshotMACSinks()
 	w.mu.RUnlock()
-	if !enabled || len(sinks) == 0 {
+	if len(sinks) == 0 {
 		return
 	}
 	byBD, err := w.mapOps.ListLocalDynamicFdb(0)
 	if err != nil {
-		w.logger.Warn("XDP FDB reconciliation failed", zap.Error(err))
+		w.logger.Warn("FDB reconciliation failed", zap.Error(err))
 		return
 	}
 	for bdID, macs := range byBD {
 		w.mu.RLock()
 		xdp := w.isXDPLearnedLocked(bdID)
 		w.mu.RUnlock()
-		if !xdp {
-			continue
-		}
 		for _, mac := range macs {
-			w.notifyMAC(sinks, bdID, mac, true)
+			if xdp || kernel.mayAdvertise(bdID, mac) {
+				w.announceIfLocal(sinks, bdID, mac)
+			}
 		}
 	}
+}
+
+// announceIfLocal re-announces a MAC only if it is still in fdb_map, so a MAC
+// the list above read before its withdrawal does not come back. Holding
+// localMu makes the check and the announcement atomic against a withdrawal.
+func (w *FDBWatcher) announceIfLocal(sinks []MACSink, bdID uint16, mac net.HardwareAddr) {
+	w.localMu.Lock()
+	defer w.localMu.Unlock()
+	if w.mapOps.LocalFdbSeen(bdID, mac, 0) {
+		w.notifyMAC(sinks, bdID, mac, true)
+	}
+}
+
+// bridgeFDB is one dump of the kernel FDB of the bridges in tc-mode BDs.
+// unknown means the dump failed: nothing is known about those bridges.
+type bridgeFDB struct {
+	bds     map[uint16]struct{}     // BDs with a registered bridge
+	held    map[bpf.FdbKey]struct{} // every MAC the bridges hold
+	devices map[bpf.FdbKey]struct{} // the MACs that are a port's or a bridge's own address
+	unknown bool
+}
+
+// holds reports whether the bridge still has an entry for k, or might have.
+func (f *bridgeFDB) holds(k bpf.FdbKey) bool {
+	if f.unknown {
+		_, ok := f.bds[k.BdId]
+		return ok
+	}
+	_, ok := f.held[k]
+	return ok
+}
+
+// mayAdvertise reports whether a local MAC of the BD may be advertised: the BD
+// has a registered bridge and the MAC is not a device's own address.
+func (f *bridgeFDB) mayAdvertise(bd uint16, mac net.HardwareAddr) bool {
+	if _, ok := f.bds[bd]; !ok || f.unknown {
+		return false
+	}
+	_, device := f.devices[bpf.FdbKey{BdId: bd, Mac: [6]byte(mac)}]
+	return !device
+}
+
+// dumpBridgeFDB returns the kernel FDB of the tc-mode bridges. A failed dump
+// is logged and reported through unknown, so aging and reconciliation that do
+// not depend on it can continue.
+func (w *FDBWatcher) dumpBridgeFDB() *bridgeFDB {
+	w.mu.RLock()
+	bdOf := make(map[int]uint16, len(w.allowed))
+	for ifindex, bd := range w.allowed {
+		if !w.isXDPLearnedLocked(bd) {
+			bdOf[ifindex] = bd
+		}
+	}
+	w.mu.RUnlock()
+	f := &bridgeFDB{
+		bds:     make(map[uint16]struct{}, len(bdOf)),
+		held:    make(map[bpf.FdbKey]struct{}),
+		devices: make(map[bpf.FdbKey]struct{}),
+	}
+	for _, bd := range bdOf {
+		f.bds[bd] = struct{}{}
+	}
+	if len(bdOf) == 0 {
+		return f
+	}
+	neighs, err := w.neighList(0, unix.AF_BRIDGE)
+	if err != nil {
+		w.logger.Warn("FDB aging: dump the bridge FDB", zap.Error(err))
+		f.unknown = true
+		return f
+	}
+	for i := range neighs {
+		n := &neighs[i]
+		bd, ok := bdOf[n.MasterIndex]
+		if !ok || !isUnicastMAC(n.HardwareAddr) {
+			continue
+		}
+		k := bpf.FdbKey{BdId: bd, Mac: [6]byte(n.HardwareAddr)}
+		f.held[k] = struct{}{}
+		if w.isDeviceAddress(n) {
+			f.devices[k] = struct{}{}
+		}
+	}
+	return f
 }
 
 // SetAgingSeconds configures the FDB aging timeout.
@@ -308,18 +401,22 @@ func (w *FDBWatcher) runAging(ctx context.Context) {
 	}
 }
 
-// Without fdb_aging_seconds, the kernel bridge still ages the local MACs of
-// a tc-mode BD (and its RTM_DELNEIGH withdraws them); an xdp-mode BD's
-// frames never reach the bridge. Its local MACs are aged here instead, at
-// the bridge's default ageing time, and the pass also re-announces what a
-// full fdb_event_rb dropped.
+// Without fdb_aging_seconds, the kernel bridge still ages the local MACs it
+// holds in a tc-mode BD, and its RTM_DELNEIGH withdraws them. Nothing else
+// would age the local MACs of an xdp-mode BD, whose frames never reach the
+// bridge, or those of a tc-mode BD that XDP has learned with no bridge entry
+// behind them, so they are aged here at the bridge's default ageing time. The
+// pass also re-announces what the data plane learned but no event reported.
 const (
-	xdpAgingDefault  = 300 * time.Second
-	xdpAgingInterval = 30 * time.Second
+	localAgingDefault  = 300 * time.Second
+	localAgingInterval = 30 * time.Second
+	// recentlySeen is how recently XDP must have seen a MAC for an expiry in
+	// the bridge not to count as the host being gone.
+	recentlySeen = uint64(30 * time.Second)
 )
 
-func (w *FDBWatcher) runXDPAging(ctx context.Context) {
-	ticker := time.NewTicker(xdpAgingInterval)
+func (w *FDBWatcher) runLocalAging(ctx context.Context) {
+	ticker := time.NewTicker(localAgingInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -328,20 +425,30 @@ func (w *FDBWatcher) runXDPAging(ctx context.Context) {
 		case <-w.done:
 			return
 		case <-ticker.C:
-			w.ageXDPLocal(uint64(xdpAgingDefault))
+			w.ageLocal(uint64(localAgingDefault))
 		}
 	}
 }
 
-// ageXDPLocal ages the local MACs of the xdp-mode BDs only, withdraws them,
-// and reconciles the XDP-learned ones.
-func (w *FDBWatcher) ageXDPLocal(maxAgeNs uint64) {
-	defer w.reconcileXDPLearned()
+// ageLocal runs one pass of the above. It does nothing when no BD runs in xdp
+// mode and nobody consumes local MACs.
+func (w *FDBWatcher) ageLocal(maxAgeNs uint64) {
+	w.mu.RLock()
+	idle := w.xdpLearned == nil && len(w.macSinks) == 0
+	w.mu.RUnlock()
+	if idle {
+		return
+	}
+	kernel := w.dumpBridgeFDB()
+	defer w.reconcileLocalMACs(kernel)
 	aged, err := w.mapOps.AgeLocalFdbEntries(maxAgeNs, func(bdID uint16) bool {
+		if _, tc := kernel.bds[bdID]; tc {
+			return true
+		}
 		w.mu.RLock()
 		defer w.mu.RUnlock()
 		return w.isXDPLearnedLocked(bdID)
-	})
+	}, kernel.holds)
 	if err != nil {
 		w.logger.Warn("FDB aging error", zap.Error(err))
 		return
@@ -350,14 +457,16 @@ func (w *FDBWatcher) ageXDPLocal(maxAgeNs uint64) {
 }
 
 // ageAndWithdraw runs one BPF aging pass and withdraws the RT2 for each aged
-// locally-learned MAC. Vinbero's BPF ager may remove an fdb_map entry the kernel
-// FDB still holds (the kernel runs its own aging and would emit RTM_DELNEIGH), so
-// without this the route stays advertised with no data-plane entry behind it --
-// an aging-induced blackhole. Remote entries (IsRemote) were never advertised as
-// RT2, so they are skipped.
+// locally-learned MAC. A MAC the bridge of a tc-mode BD still holds stays: the
+// kernel owns its lifetime, ages it on its own clock and reports the removal,
+// and it sends no event that could put back an entry removed here. Entries
+// that XDP learned without a bridge entry behind them still age here, so they
+// cannot stay advertised with no data-plane entry behind them. Remote entries
+// (IsRemote) were never advertised as RT2, so they are not withdrawn.
 func (w *FDBWatcher) ageAndWithdraw(maxAgeNs uint64) {
-	defer w.reconcileXDPLearned()
-	aged, err := w.mapOps.AgeFdbEntries(maxAgeNs)
+	kernel := w.dumpBridgeFDB()
+	defer w.reconcileLocalMACs(kernel)
+	aged, err := w.mapOps.AgeFdbEntries(maxAgeNs, kernel.holds)
 	if err != nil {
 		w.logger.Warn("FDB aging error", zap.Error(err))
 		return
@@ -422,9 +531,18 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 
 	switch update.Type {
 	case unix.RTM_NEWNEIGH:
-		w.syncAndNotify(sinks, bdID, mac, neigh.LinkIndex)
+		w.learnFromBridge(sinks, bdID, &neigh)
 
 	case unix.RTM_DELNEIGH:
+		// An expiry of a MAC XDP is still seeing only means the bridge lost
+		// sight of it (the host sends to remote MACs, which XDP encapsulates
+		// past the bridge). Keep it; the aging pass removes it once XDP stops
+		// seeing it too.
+		if neigh.State&netlink.NUD_STALE != 0 && w.mapOps.LocalFdbSeen(bdID, mac, recentlySeen) {
+			return
+		}
+		w.localMu.Lock()
+		defer w.localMu.Unlock()
 		if err := w.mapOps.DeleteLearnedFdb(bdID, net.HardwareAddr(mac), uint32(neigh.LinkIndex)); err != nil {
 			w.logger.Debug("Failed to delete FDB entry from BPF map",
 				zap.String("mac", mac.String()),
@@ -433,6 +551,57 @@ func (w *FDBWatcher) handleNeighUpdate(update netlink.NeighUpdate) {
 		}
 		w.notifyMAC(sinks, bdID, mac, false)
 	}
+}
+
+// learnFromBridge applies one bridge FDB entry. The address of a bridge port
+// or of the bridge itself is synced to fdb_map, so frames to it are not
+// flooded, but is not advertised: a frame decapsulated for it cannot reach the
+// host through the bridge's transmit path, and advertising it would spend a
+// route on every PE for each port. It is withdrawn in case it was advertised
+// before the bridge took it over.
+func (w *FDBWatcher) learnFromBridge(sinks []MACSink, bdID uint16, n *netlink.Neigh) {
+	if w.isDeviceAddress(n) {
+		w.syncAndNotify(nil, bdID, n.HardwareAddr, n.LinkIndex)
+		w.notifyMAC(sinks, bdID, n.HardwareAddr, false)
+		return
+	}
+	w.syncAndNotify(sinks, bdID, n.HardwareAddr, n.LinkIndex)
+}
+
+// isDeviceAddress reports whether a bridge entry is the address of the device
+// it is on, or sits on the bridge device itself. Local entries also include
+// the ones an operator pins on a port (`bridge fdb add MAC dev tap0 master` is
+// permanent by default), which reach a workload through fdb_map and are
+// advertised like any other. A device that no longer exists counts: it is
+// about to go away. Any other lookup failure says nothing, so the entry stays
+// advertised.
+func (w *FDBWatcher) isDeviceAddress(n *netlink.Neigh) bool {
+	if n.State&netlink.NUD_PERMANENT == 0 {
+		return false
+	}
+	if n.LinkIndex == n.MasterIndex {
+		return true
+	}
+	addr, err := w.lookupDeviceAddr(n.LinkIndex)
+	if err != nil {
+		return errors.As(err, &netlink.LinkNotFoundError{})
+	}
+	return bytes.Equal(addr, n.HardwareAddr)
+}
+
+func (w *FDBWatcher) lookupDeviceAddr(ifindex int) (net.HardwareAddr, error) {
+	if w.deviceAddr != nil {
+		return w.deviceAddr(ifindex)
+	}
+	return linkHardwareAddr(ifindex)
+}
+
+func linkHardwareAddr(ifindex int) (net.HardwareAddr, error) {
+	l, err := netlink.LinkByIndex(ifindex)
+	if err != nil {
+		return nil, err
+	}
+	return l.Attrs().HardwareAddr, nil
 }
 
 // syncAndNotify installs a locally-learned MAC into the BPF fdb_map and, only on
@@ -514,7 +683,7 @@ func (w *FDBWatcher) DumpBridge(ifindex int) error {
 		// Same path as a live add: re-sync the BPF fdb_map (idempotent for entries
 		// already present, and a backstop if a Start-time Put had failed) and only
 		// then advertise RT2, so a MAC missing from the data plane is not advertised.
-		w.syncAndNotify(sinks, bdID, n.HardwareAddr, n.LinkIndex)
+		w.learnFromBridge(sinks, bdID, n)
 	}
 	return nil
 }

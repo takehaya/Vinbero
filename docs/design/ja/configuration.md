@@ -121,7 +121,7 @@ settings:
 
 ### `settings.fdb_aging_seconds`
 
-End.DT2 の FDB エントリを aging で削除する秒数。`0` で aging 無効 (静的 FDB のみ)。ただし `settings.l2.bum_mode: xdp` の BD のローカルの MAC は、`0` のときも bridge の既定と同じ 300 秒で消します ([bum_mode.md](bum_mode.md) 参照)。
+End.DT2 の FDB エントリを aging で削除する秒数。`0` で aging 無効 (静的 FDB のみ)。ただし `settings.l2.bum_mode: xdp` の BD のローカルの MAC は、`0` のときも bridge の既定と同じ 300 秒で消します ([bum_mode.md](bum_mode.md) 参照)。tc モードの BD で bridge が持っているローカルの MAC には効きません。その寿命は bridge の `ageing_time` で決まります。bridge が持っていないローカルの MAC は `0` のときも 300 秒で消します ([bridge_domain.md](bridge_domain.md) 参照)。
 
 | 型 | デフォルト |
 |---|---|
