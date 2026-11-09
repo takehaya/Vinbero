@@ -53,8 +53,8 @@ func (f fakeNet) AddHostRoute(h HostConfig) error {
 func (f fakeNet) DelHostRoute(h HostConfig) error {
 	return f.r.do("route-del %s table=%d %s", h.Veth, h.TableID, h.PodIP)
 }
-func (f fakeNet) DeleteVeth(ns, podIf, hostIf string) error {
-	return f.r.do("veth-del %s %s %s", ns, podIf, hostIf)
+func (f fakeNet) DeleteVeth(hostIf string) error {
+	return f.r.do("veth-del %s", hostIf)
 }
 func (f fakeNet) CheckPod(p PodConfig) error   { return f.r.do("check-pod %s %s", p.IfName, p.Address) }
 func (f fakeNet) CheckHost(h HostConfig) error { return f.r.do("check-host %s %s", h.Veth, h.PodIP) }
@@ -206,7 +206,7 @@ func TestAddFailureUndoes(t *testing.T) {
 		"route-del " + host + " table=100 10.100.1.5",
 		"rpc device-detach " + host,
 		"rpc ac-remove tenant-a " + host,
-		"veth-del /var/run/netns/c1 net1 " + host,
+		"veth-del " + host,
 		"ipam-del host-local",
 	}
 	if !slices.Equal(tail, want) {
@@ -232,7 +232,7 @@ func TestDelIsIdempotent(t *testing.T) {
 		"route-del " + host + " table=100 10.100.1.5",
 		"rpc device-detach " + host,
 		"rpc ac-remove tenant-a " + host,
-		"veth-del /var/run/netns/c1 net1 " + host,
+		"veth-del " + host,
 		"ipam-del host-local",
 	}
 	if !slices.Equal(r.calls, want) {
@@ -252,7 +252,7 @@ func TestDelIsIdempotent(t *testing.T) {
 	want = []string{
 		"rpc device-detach " + host,
 		"rpc ac-remove tenant-a " + host,
-		"veth-del  net1 " + host,
+		"veth-del " + host,
 		"ipam-del host-local",
 	}
 	if !slices.Equal(r.calls, want) {

@@ -145,7 +145,7 @@ func TestKernelNetopsLifecycle(t *testing.T) {
 		t.Error("CheckHost after DelHostRoute succeeded")
 	}
 	for range 2 {
-		if err := k.DeleteVeth(podNS, "net1", host); err != nil {
+		if err := k.DeleteVeth(host); err != nil {
 			t.Fatalf("DeleteVeth: %v", err)
 		}
 	}
@@ -155,7 +155,19 @@ func TestKernelNetopsLifecycle(t *testing.T) {
 	if err := k.DelHostRoute(hc); err != nil {
 		t.Errorf("DelHostRoute without the veth: %v", err)
 	}
-	if err := k.DeleteVeth("/var/run/netns/vbcni-test-missing", "net1", host); err != nil {
-		t.Errorf("DeleteVeth with a missing netns: %v", err)
+
+	// A veth another plugin owns under the pod interface name survives a
+	// conflicting ADD and its rollback.
+	if err := h.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "net1"}, PeerName: "other0"}); err != nil {
+		t.Fatalf("add foreign veth: %v", err)
+	}
+	if _, err := k.CreateVeth(podNS, "net1", host, tmp, 1436); err == nil {
+		t.Fatal("CreateVeth over a foreign interface succeeded")
+	}
+	if err := k.DeleteVeth(host); err != nil {
+		t.Fatalf("DeleteVeth: %v", err)
+	}
+	if _, err := h.LinkByName("net1"); err != nil {
+		t.Errorf("rollback removed the foreign veth: %v", err)
 	}
 }

@@ -18,7 +18,6 @@ import (
 type Attachment struct {
 	ContainerID string `json:"containerId"`
 	IfName      string `json:"ifName"`
-	Netns       string `json:"netns,omitempty"`
 	Network     string `json:"network"`
 	VRF         string `json:"vrf"`
 	TableID     uint32 `json:"tableId"`

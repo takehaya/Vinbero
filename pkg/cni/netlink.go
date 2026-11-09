@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -52,8 +51,10 @@ type Netops interface {
 	AddHostRoute(h HostConfig) error
 	// DelHostRoute removes them; missing ones succeed.
 	DelHostRoute(h HostConfig) error
-	// DeleteVeth removes the pair; a missing pair or netns succeeds.
-	DeleteVeth(netnsPath, podIf, hostIf string) error
+	// DeleteVeth removes the pair through its host end, which ADD names
+	// after the attachment; without that end there is no pair of ours. A
+	// missing pair succeeds.
+	DeleteVeth(hostIf string) error
 	CheckPod(p PodConfig) error
 	CheckHost(h HostConfig) error
 }
@@ -245,39 +246,21 @@ func (kernelNetops) DelHostRoute(h HostConfig) error {
 	return nil
 }
 
-func (kernelNetops) DeleteVeth(netnsPath, podIf, hostIf string) error {
-	if l, err := netlink.LinkByName(hostIf); err == nil {
-		// Deleting one end deletes the pair.
-		if err := netlink.LinkDel(l); err != nil && !isNotFound(err) {
-			return fmt.Errorf("delete %s: %w", hostIf, err)
-		}
-		return nil
-	} else if !isNotFound(err) {
-		return err
-	}
-	if netnsPath == "" {
-		return nil
-	}
-	pod, closeNS, err := openNetns(netnsPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	defer closeNS()
-	l, err := pod.LinkByName(podIf)
+func (kernelNetops) DeleteVeth(hostIf string) error {
+	l, err := netlink.LinkByName(hostIf)
 	if isNotFound(err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	// Only a veth: the runtime may have reused the name for something else.
 	if _, ok := l.(*netlink.Veth); !ok {
-		return nil
+		return nil // not the pair ADD created
 	}
-	return pod.LinkDel(l)
+	if err := netlink.LinkDel(l); err != nil && !isNotFound(err) {
+		return fmt.Errorf("delete %s: %w", hostIf, err)
+	}
+	return nil
 }
 
 func (kernelNetops) CheckPod(p PodConfig) error {

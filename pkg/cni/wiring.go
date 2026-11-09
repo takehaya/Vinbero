@@ -93,7 +93,6 @@ func (p *Plugin) Add(args *skel.CmdArgs) (*current.Result, error) {
 	a := Attachment{
 		ContainerID: args.ContainerID,
 		IfName:      args.IfName,
-		Netns:       args.Netns,
 		Network:     conf.Name,
 		VRF:         conf.VRF,
 		TableID:     conf.TableID,
@@ -268,12 +267,9 @@ func (p *Plugin) Del(args *skel.CmdArgs) error {
 		// the kernel drops the route with the veth.
 		host, _ := vethNames(args.ContainerID, args.IfName)
 		a = Attachment{
-			ContainerID: args.ContainerID, IfName: args.IfName, Netns: args.Netns,
+			ContainerID: args.ContainerID, IfName: args.IfName,
 			VRF: conf.VRF, TableID: conf.TableID, HostVeth: host,
 		}
-	}
-	if args.Netns != "" {
-		a.Netns = args.Netns
 	}
 	return p.teardown(context.Background(), p.Daemon(conf.Server), store, conf, args, a)
 }
@@ -297,7 +293,7 @@ func (p *Plugin) teardown(ctx context.Context, daemon Daemon, store *Store, conf
 	// finishes both.
 	if acErr == nil {
 		errs = append(errs,
-			p.Net.DeleteVeth(a.Netns, a.IfName, a.HostVeth),
+			p.Net.DeleteVeth(a.HostVeth),
 			p.IPAM.Del(ctx, conf.IPAM.Type, args.StdinData),
 		)
 	}
