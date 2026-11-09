@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -311,6 +312,13 @@ func (p *Plugin) teardown(ctx context.Context, daemon Daemon, store *Store, conf
 	return store.Delete(a.ContainerID, a.IfName)
 }
 
+// checkNotImplemented recognizes an IPAM plugin without CHECK support:
+// whereabouts answers every CHECK with "CNI CHECK method is not implemented".
+// The address is still verified on the pod's interface.
+func checkNotImplemented(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "not implemented")
+}
+
 // Check runs CNI CHECK.
 func (p *Plugin) Check(args *skel.CmdArgs) error {
 	conf, err := ParseConf(args.StdinData)
@@ -335,7 +343,7 @@ func (p *Plugin) Check(args *skel.CmdArgs) error {
 			a.VRF, a.TableID, conf.VRF, conf.TableID)
 	}
 	ctx := context.Background()
-	if err := p.IPAM.Check(ctx, conf.IPAM.Type, args.StdinData); err != nil {
+	if err := p.IPAM.Check(ctx, conf.IPAM.Type, args.StdinData); err != nil && !checkNotImplemented(err) {
 		return fmt.Errorf("ipam %s: %w", conf.IPAM.Type, err)
 	}
 	if err := p.Net.CheckPod(PodConfig{Netns: args.Netns, IfName: args.IfName, Address: a.Address.Addr()}); err != nil {

@@ -65,8 +65,9 @@ func (f fakeNet) CheckPod(p PodConfig) error   { return f.r.do("check-pod %s %s"
 func (f fakeNet) CheckHost(h HostConfig) error { return f.r.do("check-host %s %s", h.Veth, h.PodIP) }
 
 type fakeIPAM struct {
-	r  *recorder
-	ip string
+	r        *recorder
+	ip       string
+	checkErr error
 }
 
 func (f fakeIPAM) Add(_ context.Context, typ string, _ []byte) (*current.Result, error) {
@@ -81,7 +82,10 @@ func (f fakeIPAM) Del(_ context.Context, typ string, _ []byte) error {
 	return f.r.do("ipam-del %s", typ)
 }
 func (f fakeIPAM) Check(_ context.Context, typ string, _ []byte) error {
-	return f.r.do("ipam-check %s", typ)
+	if err := f.r.do("ipam-check %s", typ); err != nil {
+		return err
+	}
+	return f.checkErr
 }
 
 type staticDNSIPAM struct{ fakeIPAM }
@@ -218,6 +222,24 @@ func TestAddDNS(t *testing.T) {
 	}
 	if !slices.Equal(res.DNS.Nameservers, []string{"10.9.9.9"}) {
 		t.Errorf("DNS with one in the configuration = %+v", res.DNS)
+	}
+}
+
+// whereabouts answers every CHECK with "not implemented"; a healthy pod on it
+// must pass, while a real IPAM CHECK failure still fails.
+func TestCheckToleratesIPAMWithoutCheck(t *testing.T) {
+	p, r, _ := newTestPlugin(t, "10.100.1.5/24")
+	args := testArgs("c1", "tenant-a", 100, "")
+	if _, err := p.Add(args); err != nil {
+		t.Fatal(err)
+	}
+	p.IPAM = fakeIPAM{r: r, ip: "10.100.1.5/24", checkErr: errors.New("CNI CHECK method is not implemented")}
+	if err := p.Check(args); err != nil {
+		t.Errorf("Check with an IPAM plugin without CHECK: %v", err)
+	}
+	p.IPAM = fakeIPAM{r: r, ip: "10.100.1.5/24", checkErr: errors.New("lease lost")}
+	if err := p.Check(args); err == nil {
+		t.Error("Check ignored a real IPAM failure")
 	}
 }
 

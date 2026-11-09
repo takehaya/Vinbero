@@ -80,7 +80,7 @@ DEL は記録を読み、逆順に /32 と neighbour の削除 (withdraw)、`Dev
 
 VRF と binding は最後の pod が消えても残します。
 
-CHECK は記録、IPAM CHECK、pod 側のアドレス、host 側の VRF 所属と /32、`DeviceList` の attach を確かめます。
+CHECK は記録、IPAM CHECK (whereabouts のように CHECK を実装しない IPAM plugin の "not implemented" は無視します)、pod 側のアドレス、host 側の VRF 所属と /32、`DeviceList` の attach を確かめます。
 
 ## vinberod 側に必要な設定
 
