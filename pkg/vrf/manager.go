@@ -14,12 +14,13 @@ package vrf
 import (
 	"errors"
 	"fmt"
-	"net"
 	"slices"
 	"sort"
 	"sync"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/vishvananda/netlink"
+	"go.uber.org/zap"
 )
 
 // DenyAction values mirror INGRESS_DENY_* in src/core/xdp_prog.h.
@@ -104,6 +105,16 @@ type Manager struct {
 	freeIDs []uint32
 	nextID  uint32
 	policy  Policy
+	// runtimeACs are the ACs added over the API that have resolved at least
+	// once (MarkRuntimeAC). Unlike config-declared ACs, one whose interface
+	// disappears is skipped by Reconcile.
+	runtimeACs map[runtimeACKey]struct{}
+	logger     *zap.Logger
+}
+
+type runtimeACKey struct {
+	vrf string
+	ac  AC
 }
 
 // NewManager returns an empty manager. The global VRF (id 0) is implicit.
@@ -112,7 +123,16 @@ func NewManager() *Manager {
 		byName: make(map[string]*VRF),
 		byID:   make(map[uint32]string),
 		nextID: 1,
+
+		runtimeACs: make(map[runtimeACKey]struct{}),
+		logger:     zap.NewNop(),
 	}
+}
+
+// SetLogger sets the logger Reconcile warns through. Call it before the
+// manager is shared.
+func (m *Manager) SetLogger(logger *zap.Logger) {
+	m.logger = logger
 }
 
 // allocIDLocked returns a recycled or fresh vrf_id (>= 1). Deleted ids are
@@ -273,7 +293,25 @@ func (m *Manager) RemoveAC(name string, ac AC) (removed bool) {
 		}
 	}
 	v.ACs = out
+	delete(m.runtimeACs, runtimeACKey{name, ac})
 	return removed
+}
+
+// MarkRuntimeAC records that an AC added over the API has resolved: a pod veth
+// behind such an AC can vanish before its owner removes the AC, and that must
+// not fail every other VRF's reconcile. Config-declared ACs are never marked.
+func (m *Manager) MarkRuntimeAC(name string, ac AC) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runtimeACs[runtimeACKey{name, ac}] = struct{}{}
+}
+
+// IsRuntimeAC reports whether MarkRuntimeAC recorded the AC.
+func (m *Manager) IsRuntimeAC(name string, ac AC) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.runtimeACs[runtimeACKey{name, ac}]
+	return ok
 }
 
 // Delete removes a VRF and recycles its id. A no-op when absent. The reserved
@@ -287,6 +325,9 @@ func (m *Manager) Delete(name string) {
 	}
 	delete(m.byName, name)
 	delete(m.byID, v.ID)
+	for _, ac := range v.ACs {
+		delete(m.runtimeACs, runtimeACKey{name, ac})
+	}
 	if v.ID != GlobalVRFID {
 		m.freeIDs = append(m.freeIDs, v.ID)
 	}
@@ -637,6 +678,8 @@ func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programme
 		name string
 		id   uint32
 		acs  []AC
+		// runtime marks the ACs a vanished interface does not make fatal.
+		runtime map[AC]bool
 	}
 	m.mu.RLock()
 	names := make([]string, 0, len(m.byName))
@@ -647,7 +690,13 @@ func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programme
 	snaps := make([]vrfSnapshot, 0, len(names))
 	for _, name := range names {
 		v := m.byName[name]
-		snaps = append(snaps, vrfSnapshot{name: v.Name, id: v.ID, acs: append([]AC(nil), v.ACs...)})
+		runtime := make(map[AC]bool)
+		for _, ac := range v.ACs {
+			if _, ok := m.runtimeACs[runtimeACKey{v.Name, ac}]; ok {
+				runtime[ac] = true
+			}
+		}
+		snaps = append(snaps, vrfSnapshot{name: v.Name, id: v.ID, acs: append([]AC(nil), v.ACs...), runtime: runtime})
 	}
 	pol := m.policy
 	enabled := m.enabledLocked()
@@ -657,6 +706,11 @@ func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programme
 	for _, s := range snaps {
 		for _, ac := range s.acs {
 			idx, err := resolve(ac.Interface)
+			if errors.Is(err, ErrInterfaceGone) && s.runtime[ac] {
+				m.logger.Warn("Skipping AC whose interface is gone until its owner removes it",
+					zap.String("vrf", s.name), zap.String("interface", ac.Interface), zap.Uint16("vlan", ac.VLAN))
+				continue
+			}
 			if err != nil {
 				return fmt.Errorf("vrf %q: resolve %q: %w", s.name, ac.Interface, err)
 			}
@@ -681,9 +735,16 @@ func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programme
 
 // ResolveByName is the production interface-name resolver (net.InterfaceByName).
 func ResolveByName(name string) (uint32, error) {
-	ifi, err := net.InterfaceByName(name)
+	l, err := netlink.LinkByName(name)
+	if errors.As(err, &netlink.LinkNotFoundError{}) {
+		return 0, fmt.Errorf("%w: %s", ErrInterfaceGone, name)
+	}
 	if err != nil {
 		return 0, err
 	}
-	return uint32(ifi.Index), nil
+	return uint32(l.Attrs().Index), nil
 }
+
+// ErrInterfaceGone: no interface has the name (ResolveByName). Other resolve
+// failures say nothing about whether the interface exists.
+var ErrInterfaceGone = errors.New("no such interface")

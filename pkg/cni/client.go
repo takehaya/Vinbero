@@ -1,0 +1,269 @@
+package cni
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"net/http"
+	"slices"
+	"strings"
+	"time"
+
+	"connectrpc.com/connect"
+
+	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/api/vinbero/v1/vinberov1connect"
+)
+
+// Binding is the BGP binding the plugin creates for a VRF that has none.
+type Binding struct {
+	VRF         string
+	RD          string
+	RTs         []RouteTarget
+	Locator     string
+	MaxPrefixes uint32
+}
+
+// Daemon is the part of the vinberod API the plugin drives. Every call is
+// idempotent, so a retried ADD or DEL converges.
+type Daemon interface {
+	// EnsureVRF creates the kernel VRF unless vinberod already has it on
+	// the same table; another table is an error.
+	EnsureVRF(ctx context.Context, name string, tableID uint32) error
+	// EnsureBinding binds the VRF when it has no binding yet. An existing
+	// binding is kept; it must use the same RD and redistribute static
+	// routes.
+	EnsureBinding(ctx context.Context, b Binding) error
+	AddAC(ctx context.Context, vrf, ifname string) error
+	RemoveAC(ctx context.Context, vrf, ifname string) error
+	AttachDevice(ctx context.Context, ifname, mode string) error
+	// DetachDevice succeeds when the device is not attached.
+	DetachDevice(ctx context.Context, ifname string) error
+	DeviceAttached(ctx context.Context, ifname string) (bool, error)
+}
+
+// rpcDaemon talks to vinberod over Connect RPC, like vbctl. Each RPC gets its
+// own timeout, so a hung one fails alone instead of using up the time of
+// the calls after it, and a hung daemon fails the CNI command instead of
+// blocking the runtime.
+type rpcDaemon struct {
+	vrf     vinberov1connect.VrfServiceClient
+	vrfBgp  vinberov1connect.VrfBgpServiceClient
+	device  vinberov1connect.DeviceServiceClient
+	timeout time.Duration
+}
+
+func (d *rpcDaemon) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, d.timeout)
+}
+
+// NewDaemon returns a Daemon for the vinberod at serverURL.
+func NewDaemon(serverURL string) Daemon {
+	c := http.DefaultClient
+	return &rpcDaemon{
+		vrf:     vinberov1connect.NewVrfServiceClient(c, serverURL),
+		vrfBgp:  vinberov1connect.NewVrfBgpServiceClient(c, serverURL),
+		device:  vinberov1connect.NewDeviceServiceClient(c, serverURL),
+		timeout: rpcTimeout,
+	}
+}
+
+func opErrors(errs []*v1.OperationError) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	reasons := make([]string, 0, len(errs))
+	for _, e := range errs {
+		reasons = append(reasons, e.GetReason())
+	}
+	return fmt.Errorf("%s", strings.Join(reasons, "; "))
+}
+
+func (d *rpcDaemon) EnsureVRF(ctx context.Context, name string, tableID uint32) error {
+	showCtx, cancelShow := d.bound(ctx)
+	defer cancelShow()
+	show, err := d.vrf.VrfShow(showCtx, connect.NewRequest(&v1.VrfShowRequest{}))
+	if err != nil {
+		return fmt.Errorf("VrfShow: %w", err)
+	}
+	// VrfCreate on an existing VRF replaces its device facet with the
+	// request's and writes the state file, so it only runs when needed.
+	for _, v := range show.Msg.GetVrfs() {
+		if v.GetName() != name || v.GetIfindex() == 0 {
+			continue
+		}
+		if v.GetTableId() != tableID {
+			return fmt.Errorf("vrf %s exists with table %d, the network configuration says %d", name, v.GetTableId(), tableID)
+		}
+		return nil
+	}
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	resp, err := d.vrf.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{
+		Vrfs: []*v1.Vrf{{Name: name, TableId: tableID}},
+	}))
+	if err != nil {
+		return fmt.Errorf("VrfCreate %s: %w", name, err)
+	}
+	if err := opErrors(resp.Msg.GetErrors()); err != nil {
+		return fmt.Errorf("VrfCreate %s (table %d): %w", name, tableID, err)
+	}
+	return nil
+}
+
+func (d *rpcDaemon) EnsureBinding(ctx context.Context, b Binding) error {
+	listCtx, cancel := d.bound(ctx)
+	defer cancel()
+	list, err := d.vrfBgp.VrfBgpList(listCtx, connect.NewRequest(&v1.VrfBgpListRequest{}))
+	if err != nil {
+		return fmt.Errorf("VrfBgpList: %w", err)
+	}
+	for _, cur := range list.Msg.GetBindings() {
+		if cur.GetVrfName() == b.VRF {
+			return checkBinding(cur, b)
+		}
+	}
+	families := make(map[string]*v1.VrfBgpFamily)
+	for _, rt := range b.RTs {
+		f := families[rt.Family]
+		if f == nil {
+			f = &v1.VrfBgpFamily{}
+			families[rt.Family] = f
+		}
+		f.RouteTargets = append(f.RouteTargets, &v1.VrfBgpRouteTarget{Rt: rt.RT, Direction: rt.Direction})
+	}
+	bindCtx, cancelBind := d.bound(ctx)
+	defer cancelBind()
+	resp, err := d.vrfBgp.VrfBgpBind(bindCtx, connect.NewRequest(&v1.VrfBgpBindRequest{
+		Bindings: []*v1.VrfBgpBinding{{
+			VrfName:        b.VRF,
+			Rd:             b.RD,
+			DefaultLocator: b.Locator,
+			Redistribute:   []string{"static"},
+			MaxPrefixes:    b.MaxPrefixes,
+			Families:       families,
+		}},
+	}))
+	if err != nil {
+		return fmt.Errorf("VrfBgpBind %s: %w", b.VRF, err)
+	}
+	if err := opErrors(resp.Msg.GetErrors()); err != nil {
+		return fmt.Errorf("VrfBgpBind %s: %w", b.VRF, err)
+	}
+	return nil
+}
+
+// checkBinding refuses an existing binding the pod routes would not be
+// advertised through as configured: another RD, locator, route targets or
+// prefix limit, or no redistribution of static routes. The plugin never rewrites a binding: it
+// may come from the vinberod config or another network.
+func checkBinding(cur *v1.VrfBgpBinding, want Binding) error {
+	if cur.GetRd() != want.RD {
+		return fmt.Errorf("vrf %s is already bound with rd %q, the network configuration says %q", want.VRF, cur.GetRd(), want.RD)
+	}
+	if cur.GetDefaultLocator() != want.Locator {
+		return fmt.Errorf("vrf %s is already bound with locator %q, the network configuration says %q", want.VRF, cur.GetDefaultLocator(), want.Locator)
+	}
+	if !slices.Contains(cur.GetRedistribute(), "static") {
+		return fmt.Errorf("vrf %s is bound without redistribute static, so pod routes would not be advertised", want.VRF)
+	}
+	if want.MaxPrefixes != 0 && cur.GetMaxPrefixes() != want.MaxPrefixes {
+		return fmt.Errorf("vrf %s is already bound with maxPrefixes %d, the network configuration says %d", want.VRF, cur.GetMaxPrefixes(), want.MaxPrefixes)
+	}
+	return checkRouteTargets(cur, want)
+}
+
+const (
+	rtImport = 1 << iota
+	rtExport
+)
+
+// rtDirection maps a direction to its bits; empty means both.
+func rtDirection(direction string) int {
+	switch direction {
+	case "import":
+		return rtImport
+	case "export":
+		return rtExport
+	default:
+		return rtImport | rtExport
+	}
+}
+
+// checkRouteTargets compares the route targets of every family the network
+// configuration names. Families it does not name are left to the binding.
+func checkRouteTargets(cur *v1.VrfBgpBinding, want Binding) error {
+	wanted := make(map[string]map[string]int)
+	for _, rt := range want.RTs {
+		if wanted[rt.Family] == nil {
+			wanted[rt.Family] = make(map[string]int)
+		}
+		wanted[rt.Family][rt.RT] |= rtDirection(rt.Direction)
+	}
+	for family, rts := range wanted {
+		have := make(map[string]int)
+		for _, rt := range cur.GetFamilies()[family].GetRouteTargets() {
+			have[rt.GetRt()] |= rtDirection(rt.GetDirection())
+		}
+		if !maps.Equal(have, rts) {
+			return fmt.Errorf("vrf %s is already bound with other %s route targets than the network configuration says", want.VRF, family)
+		}
+	}
+	return nil
+}
+
+func (d *rpcDaemon) AddAC(ctx context.Context, vrf, ifname string) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	_, err := d.vrf.VrfAcAdd(ctx, connect.NewRequest(&v1.VrfAcAddRequest{
+		Name: vrf, Ac: &v1.VrfAc{InterfaceName: ifname},
+	}))
+	if err != nil {
+		return fmt.Errorf("VrfAcAdd %s/%s: %w", vrf, ifname, err)
+	}
+	return nil
+}
+
+func (d *rpcDaemon) RemoveAC(ctx context.Context, vrf, ifname string) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	_, err := d.vrf.VrfAcRemove(ctx, connect.NewRequest(&v1.VrfAcRemoveRequest{
+		Name: vrf, Ac: &v1.VrfAc{InterfaceName: ifname},
+	}))
+	if err != nil {
+		return fmt.Errorf("VrfAcRemove %s/%s: %w", vrf, ifname, err)
+	}
+	return nil
+}
+
+func (d *rpcDaemon) AttachDevice(ctx context.Context, ifname, mode string) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	_, err := d.device.DeviceAttach(ctx, connect.NewRequest(&v1.DeviceAttachRequest{Name: ifname, Mode: mode}))
+	if err != nil {
+		return fmt.Errorf("DeviceAttach %s: %w", ifname, err)
+	}
+	return nil
+}
+
+func (d *rpcDaemon) DetachDevice(ctx context.Context, ifname string) error {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	_, err := d.device.DeviceDetach(ctx, connect.NewRequest(&v1.DeviceDetachRequest{Name: ifname}))
+	if err != nil && connect.CodeOf(err) != connect.CodeNotFound {
+		return fmt.Errorf("DeviceDetach %s: %w", ifname, err)
+	}
+	return nil
+}
+
+func (d *rpcDaemon) DeviceAttached(ctx context.Context, ifname string) (bool, error) {
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
+	resp, err := d.device.DeviceList(ctx, connect.NewRequest(&v1.DeviceListRequest{}))
+	if err != nil {
+		return false, fmt.Errorf("DeviceList: %w", err)
+	}
+	return slices.ContainsFunc(resp.Msg.GetDevices(), func(dev *v1.Device) bool {
+		return dev.GetName() == ifname
+	}), nil
+}

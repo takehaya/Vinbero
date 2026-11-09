@@ -102,6 +102,7 @@ sudo ./teardown.sh # クリーンアップ
 | ディレクトリ | 機能 | 説明 |
 |---|---|---|
 | `device-attach/` | DeviceService | device の実行時 attach と detach、再起動後の再 attach、bridge member の実行時追加 |
+| `cni-l3/` | CNI plugin | `vinbero` CNI plugin で 2 PE の pod を VRF に接続する。ADD / CHECK / DEL、VPNv4 /32 の広告と withdraw |
 
 ### Plugin Extension
 

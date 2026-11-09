@@ -100,3 +100,4 @@ attach の表は `pkg/vinbero` が mutex 1 つで守ります。attach / detach 
 - [persistence.md](persistence.md): state file と再起動時の挙動
 - [vrf.md](vrf.md): VRF オブジェクトと bridge facet
 - [configuration.md](configuration.md): `internal.devices` と `internal.bpf.device_mode`
+- [cni.md](cni.md): `DeviceService` で pod の veth を載せる CNI plugin

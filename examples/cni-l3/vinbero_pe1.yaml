@@ -1,0 +1,39 @@
+# PE1: no VRF in the config. The CNI network configuration carries rd, rts
+# and locator, so the first ADD creates the VRF and its BGP binding.
+internal:
+  devices: [eth1]
+  bpf:
+    device_mode: generic
+  server:
+    bind: "127.0.0.1:8084"
+  logger:
+    level: info
+    format: text
+    no_color: true
+settings:
+  # Network namespaces share the filesystem. test.sh supplies a private path.
+  state_path: __STATE_PATH__
+  pin_maps:
+    enabled: false
+bgp:
+  global:
+    local_asn: 65100
+    router_id: "10.255.0.1"
+    listen_port: 179
+    source_locator: LOC1
+    auto_advertise: true
+    next_hop: "2001:db8:ff::1"
+  locators:
+    - name: LOC1
+      prefix: fd00:1::/48
+      block_len: 32
+      node_len: 16
+      function_len: 16
+      argument_len: 64
+      behavior: classic
+  peers:
+    - neighbor: "2001:db8:ff::2"
+      peer_asn: 65100
+      hold_time_sec: 30
+      keepalive_sec: 10
+      families: [vpnv4]

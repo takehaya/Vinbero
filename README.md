@@ -231,6 +231,45 @@ SDK-provided types accept their natural string representations:
 Runnable examples live under [`sdk/examples/`](./sdk/examples/).
 See [`sdk/README.md`](./sdk/README.md) for the full SDK reference.
 
+## CNI plugin
+
+`vinbero-cni` connects Kubernetes pods to a Vinbero VRF as a
+[Multus](https://github.com/k8snetworkplumbingwg/multus-cni) secondary
+network (L3 mode, IPv4). Each NetworkAttachmentDefinition maps to one VRF:
+the plugin creates a veth per pod, puts the host end on the XDP data plane
+through the node's `vinberod`, and installs the pod's /32 into the VRF table
+so `vinberod` advertises it as VPNv4. Pods on other nodes are reached over
+SRv6 (End.DT4). The primary CNI keeps handling ClusterIP, DNS and
+NetworkPolicy.
+
+1. Install the binary on every node as `/opt/cni/bin/vinbero`.
+2. Run `vinberod` with `bgp.global.auto_advertise: true`, a locator, the
+   VPNv4 peers and, ideally, the VRF and its binding (`redistribute: [static]`)
+   in its config.
+3. Create a NetworkAttachmentDefinition:
+
+```yaml
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: tenant-a
+spec:
+  config: |
+    {
+      "cniVersion": "1.0.0",
+      "name": "tenant-a",
+      "type": "vinbero",
+      "server": "127.0.0.1:8080",
+      "vrf": "tenant-a",
+      "tableId": 100,
+      "ipam": {"type": "whereabouts", "range": "10.100.0.0/16"}
+    }
+```
+
+See [`docs/design/ja/cni.md`](./docs/design/ja/cni.md) for every field, the
+ADD/DEL sequence, the `vinberod` config and the current limits, and
+[`examples/cni-l3/`](./examples/cni-l3/) for a two-node run without Kubernetes.
+
 ## Examples
 
 See [examples/](./examples/) for playground environments.

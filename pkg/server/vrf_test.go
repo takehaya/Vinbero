@@ -400,6 +400,51 @@ func TestVrfServer_InvalidInput(t *testing.T) {
 	}
 }
 
+// Once an AC added over the API has resolved, its interface vanishing must
+// not fail the AC operations of other pods.
+func TestVrfServer_VanishedRuntimeACDoesNotBlockOthers(t *testing.T) {
+	s, prog := newTestVrfServer()
+	present := map[string]uint32{"veth-a": 21, "veth-b": 22, "veth-c": 23}
+	s.resolve = func(n string) (uint32, error) {
+		if i, ok := present[n]; ok {
+			return i, nil
+		}
+		return 0, fmt.Errorf("%w: %s", vrf.ErrInterfaceGone, n)
+	}
+	add := func(name string) error {
+		_, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{
+			Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: name},
+		}))
+		return err
+	}
+	for _, n := range []string{"veth-a", "veth-b"} {
+		if err := add(n); err != nil {
+			t.Fatalf("add %s: %v", n, err)
+		}
+	}
+	delete(present, "veth-a") // pod A's veth vanished before its DEL
+	if err := add("veth-c"); err != nil {
+		t.Errorf("add with a vanished runtime AC present: %v", err)
+	}
+	if _, err := s.VrfAcRemove(context.Background(), connect.NewRequest(&v1.VrfAcRemoveRequest{
+		Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: "veth-b"},
+	})); err != nil {
+		t.Errorf("remove with a vanished runtime AC present: %v", err)
+	}
+	if _, ok := prog.mapping[bpf.IngressACKey{Ifindex: 22}]; ok {
+		t.Errorf("veth-b still programmed: %v", prog.mapping)
+	}
+	// A fresh add of a missing interface still fails and rolls back.
+	if err := add("does-not-exist"); connect.CodeOf(err) != connect.CodeInternal {
+		t.Errorf("fresh add of a missing interface: %v, want Internal", err)
+	}
+	if _, err := s.VrfAcRemove(context.Background(), connect.NewRequest(&v1.VrfAcRemoveRequest{
+		Name: "tenant-a", Ac: &v1.VrfAc{InterfaceName: "veth-a"},
+	})); err != nil {
+		t.Errorf("remove of the vanished AC: %v", err)
+	}
+}
+
 // An unresolvable AC interface fails the reconcile (Internal); the failed add
 // is rolled back so the bad AC does not linger and poison every later
 // reconcile, and a subsequent valid add still succeeds.
