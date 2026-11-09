@@ -168,7 +168,9 @@ func TestSharedHeadendScanDoesNotBlockBuiltinAndReservesPendingKeys(t *testing.T
 	case <-time.After(time.Second):
 		t.Error("synchronous BGP writer waited for another owner's full-map scan")
 		release()
-		<-builtin
+		if err := <-builtin; err != nil {
+			t.Error(err)
+		}
 	}
 	release()
 	if err := <-applied; err != nil {

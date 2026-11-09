@@ -113,8 +113,8 @@ func TestCompilationCacheCloseSerializesWithCandidateRegistration(t *testing.T) 
 	go func() { close(closeStarted); m.Close(ctx); closed <- nil }()
 	waitCacheSignal(t, "Close start", closeStarted)
 	select {
-	case <-closed:
-		t.Fatal("Close passed a registration blocked in subscription")
+	case err := <-closed:
+		t.Fatalf("Close passed a registration blocked in subscription (result: %v)", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	m.mu.Lock()
