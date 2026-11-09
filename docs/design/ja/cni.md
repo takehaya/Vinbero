@@ -63,6 +63,7 @@ binding の扱いは次のとおりです。
 - `rd` / `rts` / `locator` を書くと、ADD は VRF に binding が無ければ `redistribute: [static]` 付きで作ります
 - binding が既にあれば書き換えません。RD、locator、NAD に書いた family の route target、(指定があれば) `maxPrefixes` が一致し、`static` を redistribute していることを確かめ、違えば ADD を失敗させます。binding の持ち主は vinberod の config か別の NAD かもしれないためです
 - 書かなければ binding には触れません。vinberod の config で VRF と binding を宣言する使い方です
+- vpnv4 / vpnv6 を import する binding が 1 つも無い間、その family の VPN 経路はすべて受け入れられます。binding が import RT を増やすと、vinberod はその family の受信済み経路を評価し直します。最初の binding の時点でこの全受け入れは終わるので、どの VRF も import しない経路は data plane から消えます。評価は ADD の RPC とは別に非同期で行い、失敗すれば log に残して再試行します
 
 ## ADD / DEL / CHECK
 
@@ -76,7 +77,13 @@ ADD は次の順に進みます。
 6. host veth を VRF に enslave し、`VrfAcAdd`、`DeviceAttach` を呼びます
 7. 最後に VRF table へ /32 と neighbour を入れます。veth が data plane に載ってから広告が出ます
 
-DEL は記録を読み、逆順に /32 と neighbour の削除 (withdraw)、`DeviceDetach`、`VrfAcRemove`、veth の削除、IPAM DEL を行います。どの手順も「既に無い」を成功として扱います。記録が無い場合 (ADD が途中で止まった、DEL の再実行) も、veth の名前は導出できるので data plane 側は片付きます。途中の手順が失敗すると記録を残してエラーを返し、runtime の再実行で収束させます。`VrfAcRemove` が失敗した場合は veth の削除と IPAM DEL を行わず、再実行に回します。vinberod に届かない間は DEL も失敗します。
+DEL は記録を読み、逆順に /32 と neighbour の削除 (withdraw)、`DeviceDetach`、`VrfAcRemove`、veth の削除、IPAM DEL を行います。どの手順も「既に無い」を成功として扱います。記録が無い場合 (ADD が途中で止まった、DEL の再実行) も、veth の名前は導出できるので data plane 側は片付きます。途中の手順が失敗すると記録を残してエラーを返します。`VrfAcRemove` が失敗した場合は veth の削除と IPAM DEL を行いません。vinberod に届かない間は DEL も失敗します。
+
+失敗した DEL が片付くかどうかは runtime によります。DEL を再実行する runtime なら、次の DEL で残りを片付けます。Multus の thick plugin は delegate の DEL の失敗を runtime に返さないので、再実行は来ません。この場合 veth と /32 は pod の netns とともに消えますが、次のものが残ります。
+
+- IPAM の lease。whereabouts なら reconciler が回収します。host-local には回収の仕組みがありません
+- `dataDir` の attachment の記録。veth が無いので、subnet の重なりの検査では無視されます
+- vinberod が持つ AC と attach の記録 (`VrfAcRemove` や `DeviceDetach` が失敗したとき)。interface はもう無いので通信には関係せず、vinberod の次の再起動で消えます
 
 VRF と binding は最後の pod が消えても残します。
 
@@ -93,6 +100,7 @@ bgp:
   global:
     local_asn: 65000
     router_id: "10.0.0.1"
+    listen_port: 179         # 既定の -1 は listen しない
     source_locator: LOC1
     auto_advertise: true     # VRF table の static 経路を VPNv4 で広告する
     next_hop: "2001:db8::1"  # この node の loopback
@@ -108,6 +116,8 @@ bgp:
       peer_asn: 65000
       families: [vpnv4]
 ```
+
+vinberod は `--bgp-enabled` を付けて起動します。付けないと `bgp` の設定があっても BGP は動きません。`listen_port` の既定値 `-1` では TCP の listen をしないので、node どうしの iBGP には例のように `179` を指定します。`router_id`、`next_hop`、locator の `prefix` は node ごとに変えます。
 
 VRF と binding も config で宣言しておくことを勧めます。RPC で作った binding と AC は daemon の再起動で消えるためです ([persistence.md](persistence.md))。config で宣言した binding は再起動後も残り、VRF table に残っている /32 は再び広告されます。host veth の attach は state file から戻ります。
 
@@ -129,11 +139,49 @@ bgp:
               direction: both
 ```
 
+`vrfs.default_deny: true` にすると、どの VRF の AC でもない interface の packet をすべて drop します。underlay の interface も対象なので、`global` VRF の AC にしてください。そうしないと SRv6 も BGP も止まります ([vrf.md](vrf.md))。
+
+```yaml
+vrfs:
+  default_deny: true
+  entries:
+    - name: global
+      acs:
+        - interface: eth0    # underlay
+```
+
+## node の準備
+
+各 node に、vinberod の起動より前に次を設定します。node の再起動で消えるので、起動のたびに必要です。
+
+- BGP の peer と `next_hop` に使う loopback の IPv6 アドレス (/128)
+- ほかの node の loopback への経路。BGP の TCP の source を loopback にするため `src` を指定します
+- ほかの node の locator への経路
+- IPv4 と IPv6 の forwarding の sysctl
+
+node 1 の例です。underlay は eth0 で、node 2 の eth0 のアドレスを `2001:db8:12::2` とします。
+
+```bash
+ip -6 addr add 2001:db8::1/128 dev lo
+ip -6 route add 2001:db8::2/128 via 2001:db8:12::2 dev eth0 src 2001:db8::1
+ip -6 route add fd00:2::/48 via 2001:db8:12::2 dev eth0
+sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1
+```
+
+`bpf_fib_lookup` は forwarding が無効な interface では失敗するので、この 2 つは必須です。SRv6 は XDP が処理するので `seg6_enabled` は要りません。
+
+同じ node の pod 間の packet は kernel の forwarding を通るので、node の netfilter も通ります。cluster CIDR 以外の宛先をまとめて MASQUERADE する規則 (kindnet の kind-masq-agent など) があると、IPv4 アドレスを持たない host veth では packet が捨てられ、dmesg に `vbXXXXXXXXXXX ate my IP address` と出ます。host veth を NAT の対象から外してください。この規則も node の起動のたびに必要です。
+
+```bash
+iptables -t nat -I POSTROUTING 1 -o vb+ -j RETURN
+```
+
 ## 導入
 
-1. 各 node に binary を `/opt/cni/bin/vinbero` として置きます (`type` の値が binary 名です)。DaemonSet の initContainer で配る形を想定しています
-2. vinberod を host network で動かし、上の設定を入れます
-3. NAD を作ります
+1. 各 node を [上記](#node-の準備) のとおり準備します
+2. 各 node に binary を `/opt/cni/bin/vinbero` として置きます (`type` の値が binary 名です)。DaemonSet の initContainer で配る形を想定しています
+3. vinberod を host network で `--bgp-enabled` を付けて動かし、上の設定を入れます
+4. NAD を作ります
 
 ```yaml
 apiVersion: k8s.cni.cncf.io/v1
@@ -159,7 +207,9 @@ pod は `k8s.v1.cni.cncf.io/networks: tenant-a` の annotation で接続しま�
 - IPv4 だけです。IPAM が IPv6 を返すと ADD は失敗します
 - L3 mode だけです。EVPN L2 mode は未実装です
 - `headend_v4_map` は VRF を key に持たないので、VRF 間で pod の subnet が重なると encap の LPM が衝突します。plugin は同じ node の記録 (veth が残っているもの) どうしで subnet の重なりを拒否しますが、別 node で別の VRF が同じ subnet を使う場合は検出できません。NAD 間で subnet を重ねないでください
+- 同じ理由で、VRF の分離は pod の経路表に頼っています。NET_ADMIN を持つ pod が net1 経由の経路を足すと、別の node にいる別の VRF の pod の /32 宛の packet が encap されて相手の pod に届きます。信頼できない pod に、この network で NET_ADMIN を与えないでください
 - vinberod を再起動すると、plugin が足した AC と、network configuration から作った binding は消えます。default-deny を有効にしている node では、再起動後の pod の通信が AC 不在で落ちます。binding は config で宣言し、default-deny を使う場合は再起動後に pod を作り直してください
+- node を再起動すると、Multus が CNI の設定を書き直す前に kubelet が pod の sandbox を作り直すことがあります。その pod は primary network だけで Running になり、net1 がありません。`k8s.v1.cni.cncf.io/network-status` annotation は古い値のままなので、再起動後は pod の中で net1 を確認し、無ければ pod を作り直してください
 - vinberod が `settings.l2.bum_mode: xdp` で動いている node では、host veth の attach mode は `internal.bpf.device_mode` と同じでなければなりません。`device_mode: driver` の node では `deviceMode: driver` を指定しないと ADD が失敗します
 - `deviceMode: driver` (veth の native XDP) では、host veth へ redirect した frame を pod 側 veth が受け取るために、pod 側 veth にも XDP program か GRO が要ります。plugin はそれを設定しないので、既定の `generic` を使ってください
 - MTU は SID 1 つの SRH を前提にしています。SR Policy で transport SID を足す場合や underlay の MTU が違う場合は `mtu` で指定してください
