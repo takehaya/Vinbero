@@ -329,6 +329,16 @@ if [ "$BUM_EFFECTIVE" = xdp ]; then
     sleep 1.5
     expect_eq "[split] the fallback is warned about once" "$(log_count "replicates BUM in tc mode")" "$((warned_before + 1))"
 
+    # The tc path drops a copy whose next hop is unresolved, so the fallback
+    # must keep the second AC's next hop resolved with no other traffic.
+    pe ip -6 neigh del "$other_gw" dev "$other_dev"
+    pe ip -6 route add fc00:ffe::/64 dev lo # any event: the rebuild
+    wait_neigh "$other_gw" "$other_dev"
+    expect_eq "[split] the second AC's next hop is a managed neighbour" \
+        "$(pe ip -6 neigh show to "$other_gw" dev "$other_dev" | grep -c managed)" 1
+    pe ip -6 route del fc00:ffe::/64 dev lo
+    sleep 0.5
+
     flood_before=$(stats_counter BUM_XDP_FLOOD)
     fallback_before=$(stats_counter BUM_XDP_FALLBACK)
     check_delivery "split, frame from the first AC" "$(round vbsplit-ac1)"
@@ -360,10 +370,11 @@ if [ "$BUM_EFFECTIVE" = xdp ]; then
     # the AC goes without IPv6 addresses here and the fix sends no event.
     pe sysctl -qw net.ipv6.conf.becmp-ac.disable_ipv6=1
     pe sysctl -qw net.ipv6.conf.becmp-ac.forwarding=0
-    left_before=$(log_count "slot left out")
+    # The warnings only: the retries repeat the line at debug level.
+    left_before=$(log_count "WARN.*slot left out")
     pe ip -6 route add fc00:fff::/64 dev lo # any event: the rebuild that finds out
     sleep 1.5
-    expect_eq "[forwarding off] every slot left out, logged once" "$(log_count "slot left out")" "$((left_before + NUM_PEERS))"
+    expect_eq "[forwarding off] every slot left out, logged once" "$(log_count "WARN.*slot left out")" "$((left_before + NUM_PEERS))"
     expect_eq "[forwarding off] no copies" "$(round vbsysctl-off | awk 'NF==3' | wc -l | tr -d ' ')" 0
 
     back_before=$(log_count "flood slot is no longer left out")

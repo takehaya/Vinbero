@@ -594,6 +594,243 @@ func TestBumRetriesSplitACs(t *testing.T) {
 	}
 }
 
+// A BD on the tc path still keeps every AC's next hop resolved: the tc path
+// drops a copy whose next hop is unresolved.
+func TestBumSplitFallbackKeepsEveryNexthop(t *testing.T) {
+	h := newXDPBumHelper(t)
+	upA, upB := dummyIfindex(t, "bumk-up1"), dummyIfindex(t, "bumk-up2")
+	ifA, ifB := dummyIfindex(t, "bumk-a"), dummyIfindex(t, "bumk-b")
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP }, func(q UplinkQuery) (BumUplink, error) {
+		if q.AC == min(ifA, ifB) {
+			return BumUplink{Ifindex: upA, Nexthop: net.ParseIP("fd00:a::2")}, nil
+		}
+		return BumUplink{Ifindex: upB, Nexthop: net.ParseIP("fd00:b::2")}, nil
+	}, zap.NewNop())
+	var kept []string
+	s.SetNeighKeeper(func(ifindex uint32, nh net.IP) error {
+		kept = append(kept, fmt.Sprintf("%d/%s", ifindex, nh))
+		return nil
+	})
+	h.bumAC(ifA)
+	h.bumAC(ifB)
+	createFloodPeer(t, h, 0)
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD); got != nil {
+		t.Fatalf("split ACs got a flood devmap: %v", got)
+	}
+	for _, want := range []string{fmt.Sprintf("%d/fd00:a::2", upA), fmt.Sprintf("%d/fd00:b::2", upB)} {
+		if !slices.Contains(kept, want) {
+			t.Errorf("kept next hops = %v, missing %s", kept, want)
+		}
+	}
+}
+
+// Unregistering a device removes its entries from the devmaps, and moving
+// it to another namespace and back unregisters it without changing its
+// ifindex. The inputs of a rebuild are then the same as before, and the
+// rebuild must put the entries back all the same (bum_tx_map too).
+func TestBumRebuildRestoresEntriesTheKernelRemoved(t *testing.T) {
+	h := newXDPTestHelperWithConstants(t, xdpBumNativeConstants)
+	up := dummyIfindex(t, "bumr2-up")
+	ac := dummyIfindex(t, "bumr2-ac")
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
+		func(UplinkQuery) (BumUplink, error) { return BumUplink{Ifindex: up}, nil }, zap.NewNop())
+	s.SetNativeXDP(true)
+	h.bumAC(ac)
+	createFloodPeer(t, h, 0)
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	orig, err := netns.Get()
+	if err != nil {
+		t.Skipf("cannot read the network namespace: %v", err)
+	}
+	defer func() { _ = orig.Close() }()
+	other, err := netns.New()
+	if err != nil {
+		t.Skipf("cannot create a network namespace: %v", err)
+	}
+	defer func() { _ = other.Close() }()
+	if err := netns.Set(orig); err != nil {
+		t.Fatal(err)
+	}
+	move := func(from netns.NsHandle, to netns.NsHandle) {
+		t.Helper()
+		if err := netns.Set(from); err != nil {
+			t.Fatal(err)
+		}
+		link, err := netlink.LinkByName("bumr2-ac")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := netlink.LinkSetNsFd(link, int(to)); err != nil {
+			t.Fatal(err)
+		}
+		if err := netns.Set(orig); err != nil {
+			t.Fatal(err)
+		}
+	}
+	move(orig, other)
+	if _, there := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[ac]; there {
+		t.Fatal("the kernel kept the entry of an unregistered device: this test proves nothing")
+	}
+	move(other, orig)
+	link, err := netlink.LinkByName("bumr2-ac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uint32(link.Attrs().Index) != ac {
+		t.Skipf("the device came back as ifindex %d, not %d", link.Attrs().Index, ac)
+	}
+
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if _, there := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[ac]; !there {
+		t.Error("the AC is still missing from the flood devmap")
+	}
+	if _, there := devmapEntries(t, h.objs.BumLocalMap, bumTestBD)[ac]; !there {
+		t.Error("the AC is still missing from the local devmap")
+	}
+	var v devmapVal
+	if err := h.objs.BumTxMap.Lookup(ac, &v); err != nil {
+		t.Errorf("the AC is still missing from bum_tx_map: %v", err)
+	}
+}
+
+// A slot whose uplink device is gone cannot be added. Rebuilds with nothing
+// new then neither replace the devmaps nor repeat the warning, and the slot
+// comes back when the device does.
+func TestBumRebuildLeavesFailedPutsAlone(t *testing.T) {
+	h := newXDPBumHelper(t)
+	core, logs := observer.New(zap.WarnLevel)
+	const absent = uint32(54321)
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
+		func(UplinkQuery) (BumUplink, error) { return BumUplink{Ifindex: absent}, nil }, zap.New(core))
+	h.bumAC(1)
+	createFloodPeer(t, h, 0)
+	innerID := func() ebpf.MapID {
+		t.Helper()
+		var id ebpf.MapID
+		if err := h.objs.BumFloodMap.Lookup(uint32(bumTestBD), &id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	first := innerID()
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if got := innerID(); got != first {
+		t.Errorf("a rebuild with nothing new replaced the devmap: %d -> %d", first, got)
+	}
+	if n := logs.FilterMessageSnippet("cannot add a flood slot").Len(); n != 1 {
+		t.Errorf("warned %d times, want 1", n)
+	}
+
+	d := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "bumabs", Index: int(absent)}}
+	if err := netlink.LinkAdd(d); err != nil {
+		t.Skipf("cannot create a dummy with a chosen ifindex: %v", err)
+	}
+	t.Cleanup(func() { _ = netlink.LinkDel(d) })
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD)[BumSlotKeyBase].Ifindex; got != absent {
+		t.Errorf("after the device appeared: slot uplink = %d, want %d", got, absent)
+	}
+}
+
+// A next hop shared by many peers and BDs is looked after once per rebuild,
+// also when the devmaps are unchanged.
+func TestBumRebuildDedupesNexthops(t *testing.T) {
+	h := newXDPBumHelper(t)
+	up := dummyIfindex(t, "bumd-up")
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
+		func(UplinkQuery) (BumUplink, error) {
+			return BumUplink{Ifindex: up, Nexthop: net.ParseIP("fd00::1")}, nil
+		}, zap.NewNop())
+	kept := 0
+	s.SetNeighKeeper(func(uint32, net.IP) error { kept++; return nil })
+	const otherBD = uint16(101)
+	src, _ := ParseIPv6("fc00::1")
+	segs, n, _ := ParseSegments([]string{"fc00::200"})
+	h.bumAC(1)
+	h.createHeadendL2Entry(1, 101, src, segs, n, otherBD)
+	createFloodPeer(t, h, 0)
+	createFloodPeer(t, h, 1)
+	if err := h.mapOps.CreateBdPeer(otherBD, 0, &HeadendEntry{
+		Mode: uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS_L2), NumSegments: n,
+		SrcAddr: src, Segments: segs,
+	}, [ESILen]byte{}, [IPv6AddrLen]byte{}, false); err != nil {
+		t.Fatal(err)
+	}
+	for pass, what := range []string{"first build", "unchanged"} {
+		kept = 0
+		if err := s.SyncAll(); err != nil {
+			t.Fatal(err)
+		}
+		if kept != 1 {
+			t.Errorf("pass %d (%s): kept %d times, want 1", pass, what, kept)
+		}
+	}
+}
+
+// A BD xdp mode cannot serve for its configuration does not come back by
+// retrying, so its left-out slot does not keep the retry going.
+func TestBumUnservableBDIsNotRetried(t *testing.T) {
+	h := newXDPBumHelper(t)
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
+		func(UplinkQuery) (BumUplink, error) { return BumUplink{}, errors.New("bpf_fib_lookup returned 5") }, zap.NewNop())
+	src, _ := ParseIPv6("fc00::1")
+	segs, n, _ := ParseSegments([]string{"fc00::200"})
+	h.createHeadendL2Entry(1, 100, src, segs, n, bumTestBD)
+	h.createHeadendL2Entry(1, 200, src, segs, n, bumTestBD) // mixed VLANs
+	createFloodPeer(t, h, 0)
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if got := devmapEntries(t, h.objs.BumFloodMap, bumTestBD); got != nil {
+		t.Fatalf("flood devmap = %v, want none", got)
+	}
+	if s.retryPending() {
+		t.Error("an unservable BD keeps the retry going")
+	}
+}
+
+// A left-out slot whose peer is deleted did not recover: nothing says so.
+func TestBumDeletedPeerIsNotReportedAsRecovered(t *testing.T) {
+	h := newXDPBumHelper(t)
+	core, logs := observer.New(zap.InfoLevel)
+	s := NewBumDevmapSync(h.objs, func(uint16) uint8 { return BumModeXDP },
+		func(UplinkQuery) (BumUplink, error) { return BumUplink{}, errors.New("bpf_fib_lookup returned 5") }, zap.New(core))
+	h.bumAC(1)
+	createFloodPeer(t, h, 0)
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.objs.BdPeerMap.Delete(&BdPeerKey{BdId: bumTestBD, Index: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncBD(bumTestBD); err != nil {
+		t.Fatal(err)
+	}
+	if n := logs.FilterMessageSnippet("no longer left out").Len(); n != 0 {
+		t.Errorf("a deleted peer was reported as recovered %d times", n)
+	}
+	if s.retryPending() {
+		t.Error("a deleted peer keeps the retry going")
+	}
+}
+
 // A rebuild that would produce the same devmaps leaves them in place and
 // only keeps the next hops resolved; a changed answer replaces them.
 func TestBumRebuildSkipsUnchangedDevmaps(t *testing.T) {
