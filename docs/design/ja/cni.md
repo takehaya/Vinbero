@@ -76,7 +76,7 @@ ADD は次の順に進みます。
 6. host veth を VRF に enslave し、`VrfAcAdd`、`DeviceAttach` を呼びます
 7. 最後に VRF table へ /32 と neighbour を入れます。veth が data plane に載ってから広告が出ます
 
-DEL は記録を読み、逆順に /32 と neighbour の削除 (withdraw)、`DeviceDetach`、`VrfAcRemove`、veth の削除、IPAM DEL を行います。どの手順も「既に無い」を成功として扱います。記録が無い場合 (ADD が途中で止まった、DEL の再実行) も、veth の名前は導出できるので data plane 側は片付きます。途中の手順が失敗すると記録を残してエラーを返し、runtime の再実行で収束させます。vinberod に届かない間は DEL も失敗します。
+DEL は記録を読み、逆順に /32 と neighbour の削除 (withdraw)、`DeviceDetach`、`VrfAcRemove`、veth の削除、IPAM DEL を行います。どの手順も「既に無い」を成功として扱います。記録が無い場合 (ADD が途中で止まった、DEL の再実行) も、veth の名前は導出できるので data plane 側は片付きます。途中の手順が失敗すると記録を残してエラーを返し、runtime の再実行で収束させます。`VrfAcRemove` が失敗した場合は veth の削除と IPAM DEL を行わず、再実行に回します。vinberod に届かない間は DEL も失敗します。
 
 VRF と binding は最後の pod が消えても残します。
 

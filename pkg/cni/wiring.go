@@ -289,12 +289,18 @@ func (p *Plugin) teardown(ctx context.Context, daemon Daemon, store *Store, conf
 	}
 	rctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
-	errs = append(errs,
-		daemon.DetachDevice(rctx, a.HostVeth),
-		daemon.RemoveAC(rctx, a.VRF, a.HostVeth),
-		p.Net.DeleteVeth(a.Netns, a.IfName, a.HostVeth),
-		p.IPAM.Del(ctx, conf.IPAM.Type, args.StdinData),
-	)
+	errs = append(errs, daemon.DetachDevice(rctx, a.HostVeth))
+	acErr := daemon.RemoveAC(rctx, a.VRF, a.HostVeth)
+	errs = append(errs, acErr)
+	// While the AC is still registered the veth stays, so the AC keeps
+	// resolving, and the address stays leased with it. The retried DEL
+	// finishes both.
+	if acErr == nil {
+		errs = append(errs,
+			p.Net.DeleteVeth(a.Netns, a.IfName, a.HostVeth),
+			p.IPAM.Del(ctx, conf.IPAM.Type, args.StdinData),
+		)
+	}
 	if err := errors.Join(errs...); err != nil {
 		return err
 	}

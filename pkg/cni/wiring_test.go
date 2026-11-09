@@ -273,16 +273,22 @@ func TestDelKeepsRecordOnError(t *testing.T) {
 	if err := p.Del(args); err == nil {
 		t.Fatal("DEL with an unreachable daemon succeeded")
 	}
-	// The remaining steps still ran.
-	if !slices.Contains(r.calls, "ipam-del host-local") {
-		t.Errorf("DEL stopped at the failure: %v", r.calls)
+	// The veth and the lease stay until the AC is gone.
+	for _, c := range r.calls {
+		if strings.HasPrefix(c, "veth-del") || strings.HasPrefix(c, "ipam-del") {
+			t.Errorf("%q ran although the AC could not be removed: %v", c, r.calls)
+		}
 	}
 	if _, ok, _ := (&Store{Dir: dir}).Get("c1", "net1"); !ok {
 		t.Error("record dropped although DEL failed; a retry could not find the route")
 	}
 	r.fail = ""
+	r.calls = nil
 	if err := p.Del(args); err != nil {
 		t.Fatalf("retried DEL: %v", err)
+	}
+	if !slices.Contains(r.calls, "ipam-del host-local") {
+		t.Errorf("retried DEL did not release the address: %v", r.calls)
 	}
 }
 
