@@ -51,6 +51,8 @@ type Netops interface {
 	AddHostRoute(h HostConfig) error
 	// DelHostRoute removes them; missing ones succeed.
 	DelHostRoute(h HostConfig) error
+	// HostVethExists reports whether the host end of an attachment exists.
+	HostVethExists(hostIf string) (bool, error)
 	// DeleteVeth removes the pair through its host end, which ADD names
 	// after the attachment; without that end there is no pair of ours. A
 	// missing pair succeeds.
@@ -246,6 +248,14 @@ func (kernelNetops) DelHostRoute(h HostConfig) error {
 		return fmt.Errorf("delete neighbour %s: %w", h.PodIP, err)
 	}
 	return nil
+}
+
+func (kernelNetops) HostVethExists(hostIf string) (bool, error) {
+	_, err := netlink.LinkByName(hostIf)
+	if isNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (kernelNetops) DeleteVeth(hostIf string) error {

@@ -38,7 +38,12 @@ var (
 	podMAC  = net.HardwareAddr{0x02, 0, 0, 0, 0, 2}
 )
 
-type fakeNet struct{ r *recorder }
+type fakeNet struct {
+	r    *recorder
+	gone map[string]bool // host veths that no longer exist
+}
+
+func (f fakeNet) HostVethExists(hostIf string) (bool, error) { return !f.gone[hostIf], nil }
 
 func (f fakeNet) CreateVeth(ns, podIf, hostIf, tmpIf string, mtu int) (Veth, error) {
 	return Veth{HostMAC: hostMAC, PodMAC: podMAC}, f.r.do("veth %s %s %s mtu=%d", ns, podIf, hostIf, mtu)
@@ -117,7 +122,7 @@ func newTestPlugin(t *testing.T, ip string) (*Plugin, *recorder, string) {
 	dir := t.TempDir()
 	d := &fakeDaemon{r: r, attached: map[string]bool{}}
 	p := &Plugin{
-		Net:    fakeNet{r},
+		Net:    fakeNet{r: r, gone: map[string]bool{}},
 		IPAM:   fakeIPAM{r: r, ip: ip},
 		Daemon: func(string) Daemon { return d },
 		Store:  func(string) *Store { return &Store{Dir: dir} },
@@ -316,6 +321,21 @@ func TestAddRefusesOverlapAcrossVRFs(t *testing.T) {
 	p.IPAM = fakeIPAM{r: r, ip: "10.200.0.1/24"}
 	if _, err := p.Add(testArgs("c4", "tenant-b", 200, "")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A record whose veth is gone (a reboot, a DEL that never came) no longer
+// occupies its subnet.
+func TestOverlapIgnoresRecordsWithoutAVeth(t *testing.T) {
+	p, r, _ := newTestPlugin(t, "10.100.1.5/16")
+	if _, err := p.Add(testArgs("c1", "tenant-a", 100, "")); err != nil {
+		t.Fatal(err)
+	}
+	host, _ := vethNames("c1", "net1")
+	p.Net.(fakeNet).gone[host] = true
+	p.IPAM = fakeIPAM{r: r, ip: "10.100.200.1/24"}
+	if _, err := p.Add(testArgs("c2", "tenant-b", 200, "")); err != nil {
+		t.Errorf("Add over a stale record: %v", err)
 	}
 }
 

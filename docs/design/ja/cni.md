@@ -55,7 +55,7 @@ pod から別 node の pod への packet は host veth の XDP で headend (`hea
 | `maxPrefixes` | 0 (無制限) | binding を作るときの広告数の上限 |
 | `deviceMode` | `generic` | host veth の XDP attach mode。`generic` / `driver` |
 | `mtu` | 1436 | veth 両端の MTU |
-| `dataDir` | `/var/lib/vinbero/cni` | attachment の記録を置く directory |
+| `dataDir` | `/var/lib/vinbero/cni` | attachment の記録を置く directory。subnet の重なりの検査はこの中の記録を見るので、node 上のすべての NAD で同じ値にします |
 | `ipam` | 必須 | 委譲先の IPAM plugin の設定 |
 
 binding の扱いは次のとおりです。
@@ -158,7 +158,7 @@ pod は `k8s.v1.cni.cncf.io/networks: tenant-a` の annotation で接続しま�
 
 - IPv4 だけです。IPAM が IPv6 を返すと ADD は失敗します
 - L3 mode だけです。EVPN L2 mode は未実装です
-- `headend_v4_map` は VRF を key に持たないので、VRF 間で pod の subnet が重なると encap の LPM が衝突します。plugin は同じ node の記録どうしで subnet の重なりを拒否しますが、別 node で別の VRF が同じ subnet を使う場合は検出できません。NAD 間で subnet を重ねないでください
+- `headend_v4_map` は VRF を key に持たないので、VRF 間で pod の subnet が重なると encap の LPM が衝突します。plugin は同じ node の記録 (veth が残っているもの) どうしで subnet の重なりを拒否しますが、別 node で別の VRF が同じ subnet を使う場合は検出できません。NAD 間で subnet を重ねないでください
 - vinberod を再起動すると、plugin が足した AC と、network configuration から作った binding は消えます。default-deny を有効にしている node では、再起動後の pod の通信が AC 不在で落ちます。binding は config で宣言し、default-deny を使う場合は再起動後に pod を作り直してください
 - vinberod が `settings.l2.bum_mode: xdp` で動いている node では、host veth の attach mode は `internal.bpf.device_mode` と同じでなければなりません。`device_mode: driver` の node では `deviceMode: driver` を指定しないと ADD が失敗します
 - `deviceMode: driver` (veth の native XDP) では、host veth へ redirect した frame を pod 側 veth が受け取るために、pod 側 veth にも XDP program か GRO が要ります。plugin はそれを設定しないので、既定の `generic` を使ってください
