@@ -482,7 +482,7 @@ sequenceDiagram
     Note over CE,BR: エージング
 
     FW->>FW: 定期タイマー (aging_seconds)
-    FW->>FDB: AgeFdbEntries(max_age_ns)
+    FW->>FDB: AgeFdbEntries(max_age_ns, keep)
     FDB-->>FW: deleted: N entries
     Note right of FDB: is_static=1のエントリは削除されない
 ```

@@ -33,7 +33,7 @@ xdp モードで正しく扱えない BD には、control plane は devmap を�
 
 このような BD は、BUM も既知 unicast も TC モードと同じ経路（TC の複製と bridge）を通り、BUM は `BUM_XDP_FALLBACK` に数えます。理由は、状態が変わったときに 1 回、警告としてログに出します。構成が直れば、次の組み立てで xdp モードに戻ります。MAC 学習の通知（次段落）は、その間も XDP の学習から出ます。
 
-xdp モードの BD では kernel の bridge が MAC を学習しないため、XDP の学習（新規・移動）を ring buffer（`fdb_event_rb`）で通知し、EVPN RT2 の自動広告に使います。その BD の bridge の FDB 通知は無視します。取りこぼしは FDB エージングの周期で `fdb_map` から補います。tc モードの BD では、`fdb_aging_seconds: 0` でも bridge が自分のエージング（既定 300 秒）でローカルの MAC を消し、その通知で RT2 を取り下げます。xdp モードの BD の MAC は bridge に載らないので、`fdb_aging_seconds: 0` のときは、vinberod が 30 秒ごとに、その BD のローカルの MAC のうち 300 秒使われていないものを消して RT2 を取り下げ、あわせて取りこぼしを補います。
+xdp モードの BD では kernel の bridge が MAC を学習しないため、XDP の学習（新規・移動）を ring buffer（`fdb_event_rb`）で通知し、EVPN RT2 の自動広告に使います。その BD の bridge の FDB 通知は無視します。取りこぼしは FDB エージングの周期で `fdb_map` から補います。tc モードの BD では、bridge が持っているローカルの MAC は bridge が自分のエージング（既定 300 秒）で消し、その通知で RT2 を取り下げます。bridge が持っていない MAC（remote だけと通信するホストを XDP が学習し直したもの）は `fdb_aging_seconds: 0` のときも 300 秒使われなければ消えて RT2 を取り下げます。xdp モードの BD の MAC は bridge に載らないので、`fdb_aging_seconds: 0` のときは、vinberod が 30 秒ごとに、その BD のローカルの MAC のうち 300 秒使われていないものを消して RT2 を取り下げ、あわせて取りこぼしを補います。
 
 ### 複製計画（plan）
 

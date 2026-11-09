@@ -147,7 +147,7 @@ func TestFDBWatcherXDPAgingWithoutAgingSeconds(t *testing.T) {
 	}
 	ops.local = map[uint16][]net.HardwareAddr{100: {kept}}
 
-	w.ageXDPLocal(uint64(xdpAgingDefault))
+	w.ageLocal(uint64(localAgingDefault))
 	want := []macEvent{
 		{bdID: 100, mac: stale.String(), added: false},
 		{bdID: 100, mac: kept.String(), added: true},

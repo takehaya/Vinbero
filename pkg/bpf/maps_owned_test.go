@@ -118,7 +118,7 @@ func TestOwnedFdb(t *testing.T) {
 	if n, err := m.FlushFdb(100, false); err != nil || n != 1 {
 		t.Fatalf("flush %d %v", n, err)
 	}
-	if aged, err := m.AgeFdbEntries(1); err != nil || len(aged) != 0 {
+	if aged, err := m.AgeFdbEntries(1, nil); err != nil || len(aged) != 0 {
 		t.Fatalf("ager touched owned entry %v %v", aged, err)
 	}
 	inventory, err := reopenOwnedTestMaps(m.objs).ListFdbOwners()

@@ -909,7 +909,7 @@ func TestAgeLocalFdbEntries(t *testing.T) {
 	local := put(bumTestBD, 1, false)
 	remote := put(bumTestBD, 2, true)
 	other := put(200, 3, false)
-	aged, err := h.mapOps.AgeLocalFdbEntries(1e9, func(bd uint16) bool { return bd == bumTestBD })
+	aged, err := h.mapOps.AgeLocalFdbEntries(1e9, func(bd uint16) bool { return bd == bumTestBD }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
