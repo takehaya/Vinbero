@@ -4,9 +4,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,6 +129,13 @@ type MapOperations struct {
 	// concurrent updates can free an index the other has just reused, or
 	// read one entry and then act on another. Zero value is usable.
 	sidLifecycle sync.Mutex
+
+	// headendL2Lifecycle serializes headend_l2 writes with the derivation of
+	// each BD's local ESI from its ACs, which reads the whole map.
+	headendL2Lifecycle sync.Mutex
+	// bdLocalEsiPending holds BDs whose local ESI still has to be derived
+	// after a failed attempt. Guarded by headendL2Lifecycle.
+	bdLocalEsiPending map[uint16]struct{}
 
 	// bdPeerLifecycle serializes bd_peer create and delete for the same
 	// reason: the operator RPC path and the BGP applier write the forward,
@@ -2500,57 +2509,183 @@ func (m *MapOperations) DeleteEcmpLive(groupID uint32) error {
 
 // CreateHeadendL2 adds a headend L2 entry to the map (keyed by port + VLAN).
 // esi is the 10-byte RFC 7432 ESI of this local AC; all-zero means
-// single-homing and skips the side-table write. If entry.BdId is non-zero
-// and esi is set, bd_local_esi_map is also populated for the DT2M DF check.
+// single-homing and skips the side-table write. The BD's local ESI is derived
+// from its ACs (see deriveBdLocalEsi).
 func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *HeadendEntry, esi [ESILen]byte) error {
 	key := buildHeadendL2Key(ifindex, vlanID)
+	touched := []uint16{entry.BdId}
+	defer func() { m.resyncBum(touched...) }() // after the unlock below
+	m.headendL2Lifecycle.Lock()
+	defer m.headendL2Lifecycle.Unlock()
 	var prev HeadendEntry
 	if m.objs.HeadendL2Map.Lookup(key, &prev) == nil && prev.BdId != entry.BdId {
-		defer m.resyncBum(prev.BdId) // the AC left its old BD
+		touched = append(touched, prev.BdId) // the AC left its old BD
 	}
-	defer m.resyncBum(entry.BdId)
+	var ext BpfHeadendL2ExtVal
+	hadESI := m.objs.HeadendL2ExtMap.Lookup(key, &ext) == nil
 	if err := m.objs.HeadendL2Map.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put headend L2 entry: %w", err)
 	}
 
 	var zero [ESILen]byte
+	var errs []error
 	if esi != zero {
 		if err := m.objs.HeadendL2ExtMap.Put(key, &BpfHeadendL2ExtVal{Esi: esi}); err != nil {
-			return fmt.Errorf("failed to put headend L2 ESI ext: %w", err)
+			errs = append(errs, fmt.Errorf("failed to put headend L2 ESI ext: %w", err))
 		}
-		if entry.BdId != 0 {
-			bdKey := uint32(entry.BdId)
-			if err := m.objs.BdLocalEsiMap.Put(&bdKey, &BpfBdLocalEsiVal{Esi: esi}); err != nil {
-				return fmt.Errorf("failed to put bd_local_esi entry: %w", err)
+	} else if err := deleteMapKey(m.objs.HeadendL2ExtMap, key); err != nil {
+		errs = append(errs, fmt.Errorf("failed to delete headend L2 ESI ext: %w", err))
+	}
+	// A plain AC that was already plain cannot change the BD's ESI.
+	if esi != zero || hadESI {
+		errs = append(errs, m.settleBdLocalEsi(touched...))
+	}
+	return errors.Join(errs...)
+}
+
+// DeleteHeadendL2 removes a headend L2 entry from the map. The BD's local ESI
+// follows it; if that update fails it is retried on the next headend_l2
+// change, and the delete itself still succeeded.
+func (m *MapOperations) DeleteHeadendL2(ifindex uint32, vlanID uint16) error {
+	key := buildHeadendL2Key(ifindex, vlanID)
+	var bd uint16
+	defer func() {
+		if bd != 0 {
+			m.resyncBum(bd) // after the unlock below
+		}
+	}()
+	m.headendL2Lifecycle.Lock()
+	defer m.headendL2Lifecycle.Unlock()
+	var err error
+	if bd, err = m.deleteHeadendL2Locked(key); err != nil {
+		return err
+	}
+	_ = m.settleBdLocalEsi(bd)
+	return nil
+}
+
+// deleteHeadendL2Locked removes one entry and returns the BD it was in (0 if
+// there was none). The caller holds headendL2Lifecycle and owes the BD a
+// settleBdLocalEsi and a resyncBum.
+func (m *MapOperations) deleteHeadendL2Locked(key *HeadendL2Key) (uint16, error) {
+	var prev HeadendEntry
+	if err := m.objs.HeadendL2Map.Lookup(key, &prev); err != nil {
+		prev.BdId = 0
+	}
+	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
+		return 0, fmt.Errorf("failed to delete headend L2 entry: %w", err)
+	}
+	_ = m.objs.HeadendL2ExtMap.Delete(key)
+	return prev.BdId, nil
+}
+
+// settleBdLocalEsi derives the local ESI of the given BDs and of any BD whose
+// earlier derivation failed. A BD that fails stays pending for the next call.
+// The caller holds headendL2Lifecycle.
+func (m *MapOperations) settleBdLocalEsi(bds ...uint16) error {
+	if m.bdLocalEsiPending == nil {
+		m.bdLocalEsiPending = make(map[uint16]struct{})
+	}
+	for _, bd := range bds {
+		if bd != 0 {
+			m.bdLocalEsiPending[bd] = struct{}{}
+		}
+	}
+	var errs []error
+	for bd := range m.bdLocalEsiPending {
+		if err := m.deriveBdLocalEsi(bd); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		delete(m.bdLocalEsiPending, bd)
+	}
+	return errors.Join(errs...)
+}
+
+// deriveBdLocalEsi sets bd_local_esi_map[bd] to the ESI of the BD's AC on a
+// segment with the lowest key, or removes it when none is on a segment. It is
+// the one rule for every change, so a plain AC created or removed never
+// flips the result. The caller holds headendL2Lifecycle.
+func (m *MapOperations) deriveBdLocalEsi(bd uint16) error {
+	var (
+		key    HeadendL2Key
+		entry  HeadendEntry
+		first  HeadendL2Key
+		chosen bool
+		esi    [ESILen]byte
+	)
+	iter := m.objs.HeadendL2Map.Iterate()
+	for iter.Next(&key, &entry) {
+		if entry.BdId != bd {
+			continue
+		}
+		var ext BpfHeadendL2ExtVal
+		if err := m.objs.HeadendL2ExtMap.Lookup(&key, &ext); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				continue
 			}
+			return fmt.Errorf("read headend_l2 ESI ext for bd %d: %w", bd, err)
 		}
-	} else {
-		_ = m.objs.HeadendL2ExtMap.Delete(key)
-		if entry.BdId != 0 {
-			bdKey := uint32(entry.BdId)
-			_ = m.objs.BdLocalEsiMap.Delete(&bdKey)
+		if !chosen || key.Ifindex < first.Ifindex || (key.Ifindex == first.Ifindex && key.VlanId < first.VlanId) {
+			chosen, first, esi = true, key, ext.Esi
 		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("scan headend_l2 for bd %d: %w", bd, err)
+	}
+	bdKey := uint32(bd)
+	if !chosen {
+		return deleteMapKey(m.objs.BdLocalEsiMap, &bdKey)
+	}
+	if err := m.objs.BdLocalEsiMap.Put(&bdKey, &BpfBdLocalEsiVal{Esi: esi}); err != nil {
+		return fmt.Errorf("failed to put bd_local_esi entry: %w", err)
 	}
 	return nil
 }
 
-// DeleteHeadendL2 removes a headend L2 entry from the map
-func (m *MapOperations) DeleteHeadendL2(ifindex uint32, vlanID uint16) error {
-	key := buildHeadendL2Key(ifindex, vlanID)
-	var prev HeadendEntry
-	hadEntry := m.objs.HeadendL2Map.Lookup(key, &prev) == nil
-	if hadEntry {
-		defer m.resyncBum(prev.BdId)
+// DeleteHeadendL2Where removes every headend_l2 entry whose interface match
+// selects and returns how many it removed. An entry is keyed by ifindex, so
+// this is the only way to reach the entries of an interface that no longer
+// has a name. A failure does not stop it: every error is returned together,
+// and an entry already gone counts as removed.
+func (m *MapOperations) DeleteHeadendL2Where(match func(ifindex uint32) bool) (int, error) {
+	touched := map[uint16]struct{}{}
+	defer func() { // one devmap rebuild per BD, after the unlock below
+		for bd := range touched {
+			m.resyncBum(bd)
+		}
+	}()
+	m.headendL2Lifecycle.Lock()
+	defer m.headendL2Lifecycle.Unlock()
+	entries, err := m.ListHeadendL2()
+	if err != nil {
+		return 0, err
 	}
-	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete headend L2 entry: %w", err)
+	var errs []error
+	n := 0
+	for key := range entries {
+		if !match(key.Ifindex) {
+			continue
+		}
+		bd, err := m.deleteHeadendL2Locked(&key)
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("delete headend_l2 ifindex=%d vlan=%d: %w", key.Ifindex, key.VlanId, err))
+			continue
+		}
+		if bd != 0 {
+			touched[bd] = struct{}{}
+		}
+		n++
 	}
-	_ = m.objs.HeadendL2ExtMap.Delete(key)
-	if hadEntry && prev.BdId != 0 {
-		bdKey := uint32(prev.BdId)
-		_ = m.objs.BdLocalEsiMap.Delete(&bdKey)
+	// A periodic sweep comes through here with nothing to remove, which also
+	// retries a derivation that failed.
+	if err := m.settleBdLocalEsi(slices.Collect(maps.Keys(touched))...); err != nil {
+		errs = append(errs, err)
 	}
-	return nil
+	return n, errors.Join(errs...)
 }
 
 // GetHeadendL2Esi looks up the side-table ESI for a given (ifindex, vlan).
@@ -3231,19 +3366,8 @@ func (m *MapOperations) ForceFlushHeadendV6() (uint32, error) {
 
 // FlushHeadendL2 removes every headend_l2 entry.
 func (m *MapOperations) FlushHeadendL2() (uint32, error) {
-	entries, err := m.ListHeadendL2()
-	if err != nil {
-		return 0, err
-	}
-	var count uint32
-	for key := range entries {
-		if err := m.DeleteHeadendL2(key.Ifindex, key.VlanId); err != nil {
-			return count, fmt.Errorf("flush headend_l2: delete ifindex=%d vlan=%d: %w",
-				key.Ifindex, key.VlanId, err)
-		}
-		count++
-	}
-	return count, nil
+	n, err := m.DeleteHeadendL2Where(func(uint32) bool { return true })
+	return uint32(n), err
 }
 
 // FlushFdb removes FDB entries, optionally scoped to a single BD and

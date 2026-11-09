@@ -11,13 +11,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// linkSweepInterval is how often the link watcher re-checks its state against
+// the interfaces that exist. Tests shorten it.
+var linkSweepInterval = time.Minute
+
 // WatchDevices subscribes to link deletions and forgets an attachment as
 // soon as its interface is deleted, removing it from the state file, so a
-// pod veth deleted without a detach does not linger. It watches the network
+// pod veth deleted without a detach does not linger. The headend_l2 entries
+// of a deleted interface go with it: they are keyed by an ifindex nothing
+// can name any more, so no RPC could remove them. It watches the network
 // namespace of the calling thread. A subscription that fails (e.g. a
 // receive buffer overflow) is opened again, and every (re)subscription
 // starts with a sweep over the current interfaces, so a deletion missed in
-// between is still caught. Close stops it.
+// between is still caught; the same sweep runs periodically and retries a
+// removal that failed. Close stops it.
 func (v *Vinbero) WatchDevices() error {
 	ns, err := netns.Get()
 	if err != nil {
@@ -64,16 +71,15 @@ func (v *Vinbero) watchOnce(ns netns.NsHandle, h *netlink.Handle, done <-chan st
 		v.logger.Warn("device watch: subscribe to link events", zap.Error(err))
 		return
 	}
-	present, err := linkIndexes(h.LinkList())
-	if err != nil {
-		v.logger.Warn("device watch: sweep", zap.Error(err))
-	} else {
-		v.pruneDevices(present)
-	}
+	v.sweepLinks(h)
+	sweep := time.NewTicker(linkSweepInterval)
+	defer sweep.Stop()
 	for {
 		select {
 		case <-done:
 			return
+		case <-sweep.C:
+			v.sweepLinks(h)
 		case u, ok := <-updates:
 			if !ok {
 				return // the subscription failed; resubscribe
@@ -92,8 +98,26 @@ func (v *Vinbero) watchOnce(ns netns.NsHandle, h *netlink.Handle, done <-chan st
 				continue
 			}
 			v.linkDeleted(name, ifindex)
+			// The name is confirmed gone, but a new interface can already
+			// hold the ifindex; check it before touching its entries.
+			if _, err := h.LinkByIndex(ifindex); errors.As(err, &netlink.LinkNotFoundError{}) {
+				v.deleteHeadendL2(func(i uint32) bool { return i == uint32(ifindex) })
+			}
 		}
 	}
+}
+
+// sweepLinks compares the attachments and headend_l2 entries with the
+// interfaces that exist, which catches a deletion the subscription missed and
+// retries a removal that failed.
+func (v *Vinbero) sweepLinks(h *netlink.Handle) {
+	present, err := linkIndexes(h.LinkList())
+	if err != nil {
+		v.logger.Warn("device watch: sweep", zap.Error(err))
+		return
+	}
+	v.pruneDevices(present)
+	v.pruneHeadendL2(h, present)
 }
 
 // linkDeleted forgets the attachment on a deleted interface. An attachment
@@ -107,14 +131,48 @@ func (v *Vinbero) linkDeleted(name string, ifindex int) {
 	}
 }
 
+// pruneHeadendL2 removes the headend_l2 entries of interfaces that are not
+// in present (name to ifindex), which covers a deletion the subscription
+// missed and, with pinned maps, one that happened while the daemon was down.
+// present may predate an interface created since, so an ifindex missing from
+// it is confirmed gone before its entries are removed.
+func (v *Vinbero) pruneHeadendL2(h *netlink.Handle, present map[string]int) {
+	live := make(map[uint32]struct{}, len(present))
+	for _, ifindex := range present {
+		live[uint32(ifindex)] = struct{}{}
+	}
+	v.deleteHeadendL2(func(i uint32) bool {
+		if _, ok := live[i]; ok || i == 0 {
+			return false
+		}
+		_, err := h.LinkByIndex(int(i))
+		return errors.As(err, &netlink.LinkNotFoundError{})
+	})
+}
+
+func (v *Vinbero) deleteHeadendL2(match func(ifindex uint32) bool) {
+	if v.mapOps == nil {
+		return
+	}
+	n, err := v.mapOps.DeleteHeadendL2Where(match)
+	if err != nil {
+		v.logger.Warn("device watch: remove headend_l2 entries of a deleted interface", zap.Error(err))
+	}
+	if n > 0 {
+		v.logger.Info("Removed headend_l2 entries of a deleted interface", zap.Int("count", n))
+	}
+}
+
 // pruneDevices forgets every attachment whose interface is not in present
-// (name to ifindex) any more.
+// (name to ifindex) any more. present is older than the lock, so an attachment
+// missing from it is confirmed gone under the lock first: it may have been
+// made after the dump.
 func (v *Vinbero) pruneDevices(present map[string]int) {
 	v.devMu.Lock()
 	defer v.devMu.Unlock()
 	var gone []*deviceAttachment
 	for _, a := range v.attached {
-		if idx, ok := present[a.Name]; !ok || idx != a.Ifindex {
+		if idx, ok := present[a.Name]; (!ok || idx != a.Ifindex) && !v.alive(a) {
 			gone = append(gone, a)
 		}
 	}

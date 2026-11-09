@@ -65,6 +65,7 @@ state への書き込みに失敗した場合、attach / detach の結果は残�
 interface を削除すると kernel は XDP と TCX を外します。daemon の記録は次のように片付けます。
 
 - daemon は netlink の link イベント (`RTM_DELLINK`) を購読し、attach 中の interface が削除されると、その記録を閉じて state からも外します。bridge から port が外れたときも `RTM_DELLINK` (family `AF_BRIDGE`) が届くので、名前で引き直して interface が本当に無い (または ifindex が変わった) ことを確かめてから外します
+- 同じ契機で、その interface の `headend_l2` entry も消します。entry の key は ifindex で、interface が消えると名前で指定できなくなるためです。attach していない interface の entry も対象です。xdp モードの BUM の devmap もこのとき組み直します。interface の名前を解決できない `HeadendL2Delete` は、対象ごとの `not found` で返します。名前の間違いや rename された interface も同じです。teardown の途中の呼び出し側は `not found` を「既に無い」として扱えます
 - 購読が失敗した場合 (受信 buffer の溢れなど) は購読し直します。購読のたびに、まず全 interface を 1 回 dump して消えた記録を外すので、購読していない間の削除も取りこぼしません
 - `DeviceList` は何も変更しません。1 回の dump で interface を引き、消えた interface の記録は一覧から除くだけです
 - `DeviceAttach` は、同じ名前で ifindex が変わった interface (作り直された veth) を見つけると、古い link を閉じて attach し直します

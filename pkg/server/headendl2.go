@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/vishvananda/netlink"
 	"net"
 
 	"connectrpc.com/connect"
+	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
 )
@@ -14,11 +16,48 @@ import (
 // HeadendL2Server implements the HeadendL2ServiceHandler interface
 type HeadendL2Server struct {
 	mapOps *bpf.MapOperations
+	// deleteEntry and linkGone default to mapOps and the kernel; tests
+	// replace them.
+	deleteEntry func(ifindex uint32, vlan uint16) error
+	linkGone    func(ifindex uint32) bool
 }
 
 // NewHeadendL2Server creates a new HeadendL2Server
 func NewHeadendL2Server(mapOps *bpf.MapOperations) *HeadendL2Server {
-	return &HeadendL2Server{mapOps: mapOps}
+	s := &HeadendL2Server{mapOps: mapOps, linkGone: ifindexGone}
+	if mapOps != nil {
+		s.deleteEntry = mapOps.DeleteHeadendL2
+	}
+	return s
+}
+
+// ifindexGone reports whether no interface has this index. A lookup that
+// fails for another reason is not an answer.
+func ifindexGone(ifindex uint32) bool {
+	_, err := netlink.LinkByIndex(int(ifindex))
+	return errors.As(err, &netlink.LinkNotFoundError{})
+}
+
+// deleteTarget removes one entry. A name that resolves to nothing, or an
+// interface with no such entry, is reported as v1.ReasonNotFound: a typo and a
+// renamed interface are visible, and the link watcher removes the entries of
+// a deleted interface, so a caller doing teardown treats it as already gone.
+func (s *HeadendL2Server) deleteTarget(name string, vlan uint16) error {
+	if err := validateIfname(name); err != nil {
+		return err
+	}
+	link, err := netlink.LinkByName(name)
+	if errors.As(err, &netlink.LinkNotFoundError{}) {
+		return fmt.Errorf("%s: interface %q", v1.ReasonNotFound, name)
+	}
+	if err != nil {
+		return fmt.Errorf("look up interface %q: %w", name, err)
+	}
+	err = s.deleteEntry(uint32(link.Attrs().Index), vlan)
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("%s: interface %q has no entry for VLAN %d", v1.ReasonNotFound, name, vlan)
+	}
+	return err
 }
 
 func resolveIfindex(name string) (uint32, error) {
@@ -97,6 +136,19 @@ func (s *HeadendL2Server) HeadendL2Create(
 			})
 			continue
 		}
+		// The interface can vanish between the lookup and the write, and the
+		// link watcher would then not see the entry.
+		if s.linkGone(ifindex) {
+			reason := fmt.Sprintf("interface %q was deleted during the create", headend.InterfaceName)
+			if err := s.deleteEntry(ifindex, uint16(headend.VlanId)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				reason = fmt.Sprintf("%s; removing the entry failed: %v", reason, err)
+			}
+			resp.Errors = append(resp.Errors, &v1.OperationError{
+				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
+				Reason:        reason,
+			})
+			continue
+		}
 
 		resp.Created = append(resp.Created, headend)
 	}
@@ -115,23 +167,13 @@ func (s *HeadendL2Server) HeadendL2Delete(
 	}
 
 	for _, target := range req.Msg.Targets {
-		ifindex, err := resolveIfindex(target.InterfaceName)
-		if err != nil {
+		if err := s.deleteTarget(target.InterfaceName, uint16(target.VlanId)); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", target.InterfaceName, target.VlanId),
 				Reason:        err.Error(),
 			})
 			continue
 		}
-
-		if err := s.mapOps.DeleteHeadendL2(ifindex, uint16(target.VlanId)); err != nil {
-			resp.Errors = append(resp.Errors, &v1.OperationError{
-				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", target.InterfaceName, target.VlanId),
-				Reason:        err.Error(),
-			})
-			continue
-		}
-
 		resp.Deleted = append(resp.Deleted, target)
 	}
 
