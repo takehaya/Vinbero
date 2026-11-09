@@ -132,8 +132,9 @@ func TestXDPBumTCFallbackMode(t *testing.T) {
 	if len(out) != len(pkt)+8 || binary.LittleEndian.Uint64(out[:8])>>32 != uint64(vnbuMarker) {
 		t.Fatalf("want the 8-byte VNBU meta in front of the frame (len %d, input %d)", len(out), len(pkt))
 	}
-	if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 1 {
-		t.Errorf("BUM_XDP_FALLBACK = %d, want 1", n)
+	// Counted on the TC side, not here (bum_tc_flood_from_ac).
+	if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 0 {
+		t.Errorf("BUM_XDP_FALLBACK = %d, want 0", n)
 	}
 	if n := statCount(t, h.mapOps, "BUM_XDP_FLOOD"); n != 0 {
 		t.Errorf("BUM_XDP_FLOOD = %d, want 0", n)
@@ -153,8 +154,8 @@ func TestXDPBumTCFallbackMode(t *testing.T) {
 	if ret, _ := h.run(enc); ret != XDP_PASS {
 		t.Fatalf("after decap: action = %d, want XDP_PASS", ret)
 	}
-	if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 2 {
-		t.Errorf("BUM_XDP_FALLBACK = %d, want 2", n)
+	if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 1 {
+		t.Errorf("BUM_XDP_FALLBACK = %d, want 1", n)
 	}
 	if n := statCount(t, h.mapOps, "BUM_XDP_LOCAL_FLOOD"); n != 0 {
 		t.Errorf("BUM_XDP_LOCAL_FLOOD = %d, want 0", n)
@@ -174,8 +175,9 @@ func TestXDPBumFloodFromAC(t *testing.T) {
 		if len(out) != len(pkt)+8 || binary.LittleEndian.Uint64(out[:8])>>32 != uint64(vnbuMarker) {
 			t.Fatalf("fallback must write the VNBU meta (len %d, input %d)", len(out), len(pkt))
 		}
-		if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 1 {
-			t.Errorf("BUM_XDP_FALLBACK = %d, want 1", n)
+		// Counted on the TC side, not here (bum_xdp_flood_from_ac).
+		if n := statCount(t, h.mapOps, "BUM_XDP_FALLBACK"); n != 0 {
+			t.Errorf("BUM_XDP_FALLBACK = %d, want 0", n)
 		}
 	})
 

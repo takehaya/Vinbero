@@ -365,11 +365,11 @@ static __always_inline bool bum_xdp_served(__u16 bd_id)
 }
 
 // BUM that entered on a local AC of a tc-mode BD: mark it for the TC
-// clones and the bridge.
-static __always_inline int bum_tc_flood_from_ac(struct xdp_md *ctx, __u8 bum_mode, __u16 vlan_id)
+// clones and the bridge. An xdp-mode BD on this path is counted as
+// BUM_XDP_FALLBACK by the TC side (tc_dispatch_bum_clones): the clones TC
+// makes re-enter generic XDP, so counting here would count them too.
+static __always_inline int bum_tc_flood_from_ac(struct xdp_md *ctx, __u16 vlan_id)
 {
-    if (bum_mode == BUM_MODE_TC_FALLBACK)
-        STATS_INC(STATS_BUM_XDP_FALLBACK, (__u64)((long)ctx->data_end - (long)ctx->data));
     xdp_write_bum_meta(ctx, vlan_id);
     return XDP_PASS;
 }
@@ -386,10 +386,13 @@ static __always_inline int bum_xdp_flood_from_ac(struct xdp_md *ctx, __u16 bd_id
     if (act >= 0)
         return act;
     // The tc path needs metadata too (VNBU), so on a driver without it
-    // only the bridge's local flood remains, as in tc mode.
-    if (act == BUM_BCAST_NO_META)
+    // only the bridge's local flood remains, as in tc mode. TC cannot see
+    // such a frame, so it is counted here; the TC side counts every other
+    // frame on this path (tc_dispatch_bum_clones).
+    if (act == BUM_BCAST_NO_META) {
         STATS_INC(STATS_BUM_XDP_META_FAIL, pkt_len);
-    STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
+        STATS_INC(STATS_BUM_XDP_FALLBACK, pkt_len);
+    }
     xdp_write_bum_meta(ctx, vlan_id);
     return XDP_PASS;
 }

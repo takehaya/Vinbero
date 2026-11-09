@@ -268,7 +268,16 @@ if [ "$BUM_EFFECTIVE" = "xdp" ]; then
     expect_nonzero "PE2 BUM_XDP_LOCAL_FLOOD" "$(stats_counter vbctl_pe2 BUM_XDP_LOCAL_FLOOD)"
     expect_nonzero "PE3 BUM_XDP_LOCAL_FLOOD" "$(stats_counter vbctl_pe3 BUM_XDP_LOCAL_FLOOD)"
 elif [ "$BUM_EFFECTIVE" = "tc-fallback" ]; then
-    expect_nonzero "PE1 BUM_XDP_FALLBACK (tc replication in place of xdp)" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)"
+    # One broadcast frame, two peers: one count for the frame, whatever the
+    # number of clones (a stray frame from a host in the window is tolerated).
+    fallback=$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)
+    if [ -n "$fallback" ] && [ "$fallback" -ge 1 ] && [ "$fallback" -le 2 ]; then
+        print_success "PE1 BUM_XDP_FALLBACK counts each frame once, clones not included (got $fallback)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "PE1 BUM_XDP_FALLBACK (got '$fallback', want 1 or 2)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
     expect_eq "PE1 BUM_XDP_FLOOD" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)" 0
     expect_nonzero "PE2 BUM_XDP_FALLBACK (post-decap flood through the bridge)" "$(stats_counter vbctl_pe2 BUM_XDP_FALLBACK)"
 else

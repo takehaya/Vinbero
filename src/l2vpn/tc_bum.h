@@ -18,6 +18,7 @@
 #include "headend/srv6_headend.h"
 #include "headend/srv6_headend_utils.h"
 #include "l2vpn/bum_meta.h"
+#include "l2vpn/bum_xdp.h"
 
 // Magic value in skb->cb[0] to identify clone-to-self encap requests.
 // Reuses BUM_META_MARKER so both XDP meta and TC cb[] use the same sentinel.
@@ -214,6 +215,12 @@ static __noinline int tc_dispatch_bum_clones(
 
     __u16 bd_id = l2->bd_id;
     DEBUG_PRINT("TC dispatch: bd_id=%d\n", bd_id);
+
+    // An xdp-mode BD on the tc path. Counted here, on the frame XDP marked,
+    // not in XDP: in generic XDP each clone below passes through the XDP
+    // program again, which would count it as well.
+    if (bum_bd_mode(bd_id) != BUM_MODE_TC)
+        STATS_INC(STATS_BUM_XDP_FALLBACK, skb->len);
 
     // Resolve source AC's ESI once, out of the per-peer loop.
     struct headend_l2_ext_val *src_ext = bpf_map_lookup_elem(&headend_l2_ext_map, &l2_key);
