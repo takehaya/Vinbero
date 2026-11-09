@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -97,19 +98,23 @@ func run(cliCtx *cli.Context) error {
 	}
 	defer func() { _ = vin.Close() }()
 
-	if err := vin.LoadXDPProgram(); err != nil {
-		return fmt.Errorf("load XDP program: %w", err)
+	if err := vin.AttachConfigDevices(); err != nil {
+		return fmt.Errorf("attach devices: %w", err)
 	}
-	lg.Info("Vinbero XDP program loaded successfully")
-
-	if err := vin.LoadTCProgram(); err != nil {
-		return fmt.Errorf("load TC program: %w", err)
-	}
-	lg.Info("Vinbero TC BUM program loaded successfully")
+	lg.Info("Vinbero XDP and TC programs attached to internal.devices")
 
 	// Initialize resource manager (reconcile state before FDB watcher)
 	if err := vin.InitResourceManager(); err != nil {
 		return fmt.Errorf("init resource manager: %w", err)
+	}
+	// Re-attach the devices that were attached at runtime (DeviceAttach)
+	// before the restart, from the state the resource manager loaded.
+	if err := vin.ReconcileDevices(); err != nil {
+		return fmt.Errorf("reconcile devices: %w", err)
+	}
+	// Forget runtime attachments whose interface is deleted.
+	if err := vin.WatchDevices(); err != nil {
+		return fmt.Errorf("watch devices: %w", err)
 	}
 
 	// Start FDB watcher
@@ -363,6 +368,7 @@ func run(cliCtx *cli.Context) error {
 	}
 
 	srv := server.NewServer(cfg, vin.GetMapOperations(), vin.GetResourceManager(), vin.GetFDBWatcher(), locatorMgr, vrfBgpMgr, advertiser, srPolicyAdvertiser, evpnAdvertiser, mupAdvertiser, applier, vrfExp, evpnCoord, evpnES, evpnReplay, lg)
+	srv.SetDeviceAttacher(vin)
 	if liveProber != nil {
 		srv.SetProber(liveProber, proberIntervalMs, proberMultiplier)
 	}
@@ -725,6 +731,11 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, dev 
 			}, br); err != nil {
 				return err
 			}
+			// VrfBridgeMemberRemove refuses these: the next start enslaves
+			// them again.
+			if err := mgr.SetConfigBridgeMembers(v.Name, v.Bridge.Name, v.Bridge.Members); err != nil {
+				return err
+			}
 		}
 		for _, ac := range v.ACs {
 			if _, err := mgr.AddAC(v.Name, vrf.AC{Interface: ac.Interface, VLAN: ac.VLAN}); err != nil {
@@ -803,7 +814,7 @@ func seedVrfBridges(resMgr *netresource.ResourceManager, mgr *vrf.Manager, cfgVR
 		if _, err := mgr.SetBridge(owner, vrf.Bridge{
 			Name:    mb.Name,
 			BdID:    mb.BdID,
-			Members: mb.Members,
+			Members: append(slices.Clone(mb.Members), mb.RuntimeMembers...),
 			Ifindex: mb.Ifindex,
 		}); err != nil {
 			return fmt.Errorf("seed bridge %q from state: %w (fix the entry in the netresource state file, settings.state_path, and restart)", mb.Name, err)

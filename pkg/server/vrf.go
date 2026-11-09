@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/netresource"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
@@ -453,6 +455,75 @@ func (s *VrfServer) VrfBridgeDetach(
 	}
 	s.mgr.RemoveBridge(vrfName)
 	return connect.NewResponse(&v1.VrfBridgeDetachResponse{}), nil
+}
+
+// VrfBridgeMemberAdd enslaves one port to the VRF's attached bridge and
+// records it, so a port added at runtime (a workload's veth) survives a
+// restart like the members given at attach time. Nothing else changes: the
+// FDB watcher follows the bridge, not its ports.
+func (s *VrfServer) VrfBridgeMemberAdd(
+	_ context.Context,
+	req *connect.Request[v1.VrfBridgeMemberAddRequest],
+) (*connect.Response[v1.VrfBridgeMemberAddResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, err := s.changeBridgeMember(req.Msg.GetVrfName(), req.Msg.GetInterfaceName(), true)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&v1.VrfBridgeMemberAddResponse{Vrf: vrfToProto(v)}), nil
+}
+
+// VrfBridgeMemberRemove releases one port from the VRF's attached bridge
+// and forgets it. A port that is already gone succeeds. A port the config
+// file declares is refused: the config would enslave it again on restart.
+func (s *VrfServer) VrfBridgeMemberRemove(
+	_ context.Context,
+	req *connect.Request[v1.VrfBridgeMemberRemoveRequest],
+) (*connect.Response[v1.VrfBridgeMemberRemoveResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, err := s.changeBridgeMember(req.Msg.GetVrfName(), req.Msg.GetInterfaceName(), false)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&v1.VrfBridgeMemberRemoveResponse{Vrf: vrfToProto(v)}), nil
+}
+
+// changeBridgeMember validates a member request and applies it. Caller
+// holds s.mu.
+func (s *VrfServer) changeBridgeMember(vrfName, member string, add bool) (vrf.VRF, error) {
+	if vrfName == "" {
+		return vrf.VRF{}, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("vrf_name is required"))
+	}
+	if err := validateIfname(member); err != nil {
+		return vrf.VRF{}, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("interface_name: %w", err))
+	}
+	v, ok := s.mgr.Get(vrfName)
+	if !ok {
+		return vrf.VRF{}, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown VRF %q", vrfName))
+	}
+	if v.Bridge == nil {
+		return vrf.VRF{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("vrf %q carries no bridge facet", vrfName))
+	}
+	var err error
+	if add {
+		v, err = s.mgr.AddBridgeMember(vrfName, member, s.bridges)
+	} else {
+		v, err = s.mgr.RemoveBridgeMember(vrfName, member, s.bridges)
+	}
+	switch {
+	case err == nil:
+		return v, nil
+	case errors.Is(err, netresource.ErrNoMember):
+		return vrf.VRF{}, connect.NewError(connect.CodeNotFound, err)
+	case errors.Is(err, vrf.ErrConfigMember):
+		return vrf.VRF{}, connect.NewError(connect.CodeFailedPrecondition, err)
+	case errors.Is(err, netresource.ErrPersist):
+		return vrf.VRF{}, connect.NewError(connect.CodeInternal, err)
+	default:
+		return vrf.VRF{}, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 }
 
 // findBridgeReference returns the prefix of an End.DT2/DT2M SID whose L2 aux

@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package vinbero.v1;
+
+option go_package = "github.com/takehaya/vinbero/api/vinbero/v1;vinberov1";
+
+// DeviceService puts network interfaces on the data plane at runtime: the
+// XDP entry program and the TC ingress program are attached as a pair, the
+// same way internal.devices entries are attached at startup. Devices attached
+// here are recorded in the state file and attached again when the daemon
+// restarts; an entry whose interface is gone by then is dropped, and an
+// attachment whose interface is deleted while the daemon runs is forgotten.
+// This is the hook a CNI plugin uses for the veths it creates.
+service DeviceService {
+  rpc DeviceAttach(DeviceAttachRequest) returns (DeviceAttachResponse); // idempotent for the same mode
+  rpc DeviceDetach(DeviceDetachRequest) returns (DeviceDetachResponse); // succeeds when the interface is already gone
+  rpc DeviceList(DeviceListRequest) returns (DeviceListResponse);
+}
+
+// Device is one interface the data plane is attached to.
+message Device {
+  string name = 1; // interface name
+  uint32 ifindex = 2; // server-assigned
+  string mode = 3; // XDP attach mode: "driver" | "generic" | "offload"
+  bool config = 4; // declared in internal.devices: not persisted, and DeviceDetach refuses it
+}
+
+message DeviceAttachRequest {
+  string name = 1; // interface name
+  // XDP attach mode; empty uses internal.bpf.device_mode. Attaching a device
+  // that is attached in another mode fails: detach it first.
+  string mode = 2;
+}
+message DeviceAttachResponse {
+  Device device = 1;
+}
+
+message DeviceDetachRequest {
+  // interface name. Succeeds when the interface is gone; NOT_FOUND when it
+  // exists but is neither attached nor recorded in the state file (a detach
+  // whose state write failed can be retried)
+  string name = 1;
+}
+message DeviceDetachResponse {}
+
+message DeviceListRequest {}
+message DeviceListResponse {
+  repeated Device devices = 1; // sorted by name; attachments whose interface is gone are left out
+}

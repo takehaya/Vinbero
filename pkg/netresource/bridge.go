@@ -137,6 +137,7 @@ func (m *ResourceManager) ListBridges() []ManagedBridge {
 		// Deep-copy Members: the shallow struct copy would alias the
 		// state-owned backing array, which ensureBridgeInState appends to.
 		result[i].Members = slices.Clone(result[i].Members)
+		result[i].RuntimeMembers = slices.Clone(result[i].RuntimeMembers)
 	}
 	return result
 }
@@ -166,6 +167,10 @@ func (m *ResourceManager) ensureBridgeInState(name string, bdID uint16, members 
 				e.Members = append(e.Members, member)
 			}
 		}
+		// A runtime member now declared at attach time is a plain member.
+		e.RuntimeMembers = slices.DeleteFunc(e.RuntimeMembers, func(r string) bool {
+			return slices.Contains(e.Members, r)
+		})
 		return
 	}
 	m.state.Bridges = append(m.state.Bridges, ManagedBridge{
@@ -202,13 +207,12 @@ func createBridgeNetlink(name string, members []string) (uint32, error) {
 	return uint32(link.Attrs().Index), nil
 }
 
+// enslaveInterface enslaves a member named at create or attach time to
+// master, moving it from another master if it has one (see enslave).
 func enslaveInterface(memberName string, master netlink.Link) error {
 	memberLink, err := netlink.LinkByName(memberName)
 	if err != nil {
 		return fmt.Errorf("member interface %s not found: %w", memberName, err)
 	}
-	if err := netlink.LinkSetMaster(memberLink, master); err != nil {
-		return fmt.Errorf("enslave %s to %s: %w", memberName, master.Attrs().Name, err)
-	}
-	return nil
+	return enslave(memberLink, master, true)
 }

@@ -169,6 +169,7 @@ func (f *fakeBindings) Get(name string) (vrfbgp.Binding, bool) {
 type fakeServerBridgeOps struct {
 	ifindexes map[string]uint32
 	deleteErr error
+	memberErr error
 	events    *[]string
 }
 
@@ -182,6 +183,19 @@ func (f *fakeServerBridgeOps) DeleteBridge(name string) error {
 		return f.deleteErr
 	}
 	*f.events = append(*f.events, "delete:"+name)
+	return nil
+}
+
+func (f *fakeServerBridgeOps) AddBridgeMember(bridge, member string) error {
+	if f.memberErr != nil {
+		return f.memberErr
+	}
+	*f.events = append(*f.events, "member-add:"+bridge+":"+member)
+	return nil
+}
+
+func (f *fakeServerBridgeOps) RemoveBridgeMember(bridge, member string) error {
+	*f.events = append(*f.events, "member-remove:"+bridge+":"+member)
 	return nil
 }
 

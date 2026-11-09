@@ -1,0 +1,15 @@
+internal:
+  devices:
+    - dva-rt3h2  # Interface towards host2 (in VRF); the uplink is attached at runtime
+  bpf:
+    device_mode: generic  # Required for veth pairs
+  server:
+    bind: "127.0.0.1:8089"
+  logger:
+    level: debug
+    format: text
+    no_color: false
+    add_caller: true
+
+settings:
+  state_path: /tmp/vinbero_device_attach_state.json

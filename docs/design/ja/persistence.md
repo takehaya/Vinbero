@@ -7,7 +7,7 @@
 | リソース | `pin_maps: false` (default) | `pin_maps: true` | 復旧手段 |
 |---|---|---|---|
 | `vinbero.yml` (設定ファイル) | 残る (disk) | 残る | そのまま再ロード |
-| XDP プログラムの attach | **消える** | **消える** | daemon 起動時に `internal.devices` に attach し直す |
+| XDP プログラムの attach | **消える** | **消える** | daemon 起動時に `internal.devices` と、`state.json` に記録された実行時 attach の device に attach し直す |
 | SID function / aux | **消える** | **残る** (bpffs pin)。SID owner も保存 | RPC / CLI で再投入。cplane plugin の SID は保存済み割り当てと再宣言で復旧 |
 | cplane plugin の SID 名と割り当て | cplane store 有効なら残る | 同左 | locator 登録より前に予約を復元。dispatch と grant は再宣言で作り直す |
 | Headend v4 / v6 / L2 | **消える** | **残る** (bpffs pin) | default: RPC / CLI で再投入 |
@@ -20,7 +20,7 @@
 
 ## 永続化層: `state.json`
 
-`state.json` に永続化するのは **Network Resource (Bridge / VRF) のみ** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
+`state.json` に永続化するのは **Network Resource (Bridge / VRF) と、実行時に attach した device** です。保存先は `settings.state_path` (デフォルト `/var/lib/vinbero/state.json`)。
 
 control-plane plugin の module と登録内容は別の [cplane store](cplane-plugin.md)
 に保存されます。store 有効時は `local-sids/state.json` に local SID の名前と address、
@@ -152,6 +152,8 @@ Phase 1d までは `vbctl plugin aux alloc` で払い出した「独立 aux」(S
 - daemon が **別プロセスとして再起動**: attach 済みと衝突するとロードエラー。対処: `ip link set dev <iface> xdp off` で前の XDP を剥がしてから起動。`make remove-ebpfmap` も補助的に使える
 
 現状は bpf_link ベースで attach しているので、daemon がいない状態で XDP が残ることは基本的にありません。
+
+`vbctl device attach` で実行時に attach した device は `state.json` の `devices` に記録され、次の起動で attach し直されます。interface が消えている entry は起動を止めずに捨てます。詳細は [device_attach.md](device_attach.md) を参照してください。
 
 ## Plugin 登録
 

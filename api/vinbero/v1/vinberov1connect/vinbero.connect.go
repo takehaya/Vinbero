@@ -186,6 +186,12 @@ const (
 	// VrfServiceVrfBridgeDetachProcedure is the fully-qualified name of the VrfService's
 	// VrfBridgeDetach RPC.
 	VrfServiceVrfBridgeDetachProcedure = "/vinbero.v1.VrfService/VrfBridgeDetach"
+	// VrfServiceVrfBridgeMemberAddProcedure is the fully-qualified name of the VrfService's
+	// VrfBridgeMemberAdd RPC.
+	VrfServiceVrfBridgeMemberAddProcedure = "/vinbero.v1.VrfService/VrfBridgeMemberAdd"
+	// VrfServiceVrfBridgeMemberRemoveProcedure is the fully-qualified name of the VrfService's
+	// VrfBridgeMemberRemove RPC.
+	VrfServiceVrfBridgeMemberRemoveProcedure = "/vinbero.v1.VrfService/VrfBridgeMemberRemove"
 	// VrfServiceVrfAcAddProcedure is the fully-qualified name of the VrfService's VrfAcAdd RPC.
 	VrfServiceVrfAcAddProcedure = "/vinbero.v1.VrfService/VrfAcAdd"
 	// VrfServiceVrfAcRemoveProcedure is the fully-qualified name of the VrfService's VrfAcRemove RPC.
@@ -256,6 +262,8 @@ var (
 	vrfServiceVrfDeleteMethodDescriptor                 = vrfServiceServiceDescriptor.Methods().ByName("VrfDelete")
 	vrfServiceVrfBridgeAttachMethodDescriptor           = vrfServiceServiceDescriptor.Methods().ByName("VrfBridgeAttach")
 	vrfServiceVrfBridgeDetachMethodDescriptor           = vrfServiceServiceDescriptor.Methods().ByName("VrfBridgeDetach")
+	vrfServiceVrfBridgeMemberAddMethodDescriptor        = vrfServiceServiceDescriptor.Methods().ByName("VrfBridgeMemberAdd")
+	vrfServiceVrfBridgeMemberRemoveMethodDescriptor     = vrfServiceServiceDescriptor.Methods().ByName("VrfBridgeMemberRemove")
 	vrfServiceVrfAcAddMethodDescriptor                  = vrfServiceServiceDescriptor.Methods().ByName("VrfAcAdd")
 	vrfServiceVrfAcRemoveMethodDescriptor               = vrfServiceServiceDescriptor.Methods().ByName("VrfAcRemove")
 	vrfServiceVrfSetPolicyMethodDescriptor              = vrfServiceServiceDescriptor.Methods().ByName("VrfSetPolicy")
@@ -1807,6 +1815,8 @@ type VrfServiceClient interface {
 	VrfDelete(context.Context, *connect.Request[v1.VrfDeleteRequest]) (*connect.Response[v1.VrfDeleteResponse], error)
 	VrfBridgeAttach(context.Context, *connect.Request[v1.VrfBridgeAttachRequest]) (*connect.Response[v1.VrfBridgeAttachResponse], error)
 	VrfBridgeDetach(context.Context, *connect.Request[v1.VrfBridgeDetachRequest]) (*connect.Response[v1.VrfBridgeDetachResponse], error)
+	VrfBridgeMemberAdd(context.Context, *connect.Request[v1.VrfBridgeMemberAddRequest]) (*connect.Response[v1.VrfBridgeMemberAddResponse], error)
+	VrfBridgeMemberRemove(context.Context, *connect.Request[v1.VrfBridgeMemberRemoveRequest]) (*connect.Response[v1.VrfBridgeMemberRemoveResponse], error)
 	VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error)
 	VrfAcRemove(context.Context, *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error)
 	VrfSetPolicy(context.Context, *connect.Request[v1.VrfSetPolicyRequest]) (*connect.Response[v1.VrfSetPolicyResponse], error)
@@ -1847,6 +1857,18 @@ func NewVrfServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 			connect.WithSchema(vrfServiceVrfBridgeDetachMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		vrfBridgeMemberAdd: connect.NewClient[v1.VrfBridgeMemberAddRequest, v1.VrfBridgeMemberAddResponse](
+			httpClient,
+			baseURL+VrfServiceVrfBridgeMemberAddProcedure,
+			connect.WithSchema(vrfServiceVrfBridgeMemberAddMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		vrfBridgeMemberRemove: connect.NewClient[v1.VrfBridgeMemberRemoveRequest, v1.VrfBridgeMemberRemoveResponse](
+			httpClient,
+			baseURL+VrfServiceVrfBridgeMemberRemoveProcedure,
+			connect.WithSchema(vrfServiceVrfBridgeMemberRemoveMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 		vrfAcAdd: connect.NewClient[v1.VrfAcAddRequest, v1.VrfAcAddResponse](
 			httpClient,
 			baseURL+VrfServiceVrfAcAddProcedure,
@@ -1876,14 +1898,16 @@ func NewVrfServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...
 
 // vrfServiceClient implements VrfServiceClient.
 type vrfServiceClient struct {
-	vrfCreate       *connect.Client[v1.VrfCreateRequest, v1.VrfCreateResponse]
-	vrfDelete       *connect.Client[v1.VrfDeleteRequest, v1.VrfDeleteResponse]
-	vrfBridgeAttach *connect.Client[v1.VrfBridgeAttachRequest, v1.VrfBridgeAttachResponse]
-	vrfBridgeDetach *connect.Client[v1.VrfBridgeDetachRequest, v1.VrfBridgeDetachResponse]
-	vrfAcAdd        *connect.Client[v1.VrfAcAddRequest, v1.VrfAcAddResponse]
-	vrfAcRemove     *connect.Client[v1.VrfAcRemoveRequest, v1.VrfAcRemoveResponse]
-	vrfSetPolicy    *connect.Client[v1.VrfSetPolicyRequest, v1.VrfSetPolicyResponse]
-	vrfShow         *connect.Client[v1.VrfShowRequest, v1.VrfShowResponse]
+	vrfCreate             *connect.Client[v1.VrfCreateRequest, v1.VrfCreateResponse]
+	vrfDelete             *connect.Client[v1.VrfDeleteRequest, v1.VrfDeleteResponse]
+	vrfBridgeAttach       *connect.Client[v1.VrfBridgeAttachRequest, v1.VrfBridgeAttachResponse]
+	vrfBridgeDetach       *connect.Client[v1.VrfBridgeDetachRequest, v1.VrfBridgeDetachResponse]
+	vrfBridgeMemberAdd    *connect.Client[v1.VrfBridgeMemberAddRequest, v1.VrfBridgeMemberAddResponse]
+	vrfBridgeMemberRemove *connect.Client[v1.VrfBridgeMemberRemoveRequest, v1.VrfBridgeMemberRemoveResponse]
+	vrfAcAdd              *connect.Client[v1.VrfAcAddRequest, v1.VrfAcAddResponse]
+	vrfAcRemove           *connect.Client[v1.VrfAcRemoveRequest, v1.VrfAcRemoveResponse]
+	vrfSetPolicy          *connect.Client[v1.VrfSetPolicyRequest, v1.VrfSetPolicyResponse]
+	vrfShow               *connect.Client[v1.VrfShowRequest, v1.VrfShowResponse]
 }
 
 // VrfCreate calls vinbero.v1.VrfService.VrfCreate.
@@ -1904,6 +1928,16 @@ func (c *vrfServiceClient) VrfBridgeAttach(ctx context.Context, req *connect.Req
 // VrfBridgeDetach calls vinbero.v1.VrfService.VrfBridgeDetach.
 func (c *vrfServiceClient) VrfBridgeDetach(ctx context.Context, req *connect.Request[v1.VrfBridgeDetachRequest]) (*connect.Response[v1.VrfBridgeDetachResponse], error) {
 	return c.vrfBridgeDetach.CallUnary(ctx, req)
+}
+
+// VrfBridgeMemberAdd calls vinbero.v1.VrfService.VrfBridgeMemberAdd.
+func (c *vrfServiceClient) VrfBridgeMemberAdd(ctx context.Context, req *connect.Request[v1.VrfBridgeMemberAddRequest]) (*connect.Response[v1.VrfBridgeMemberAddResponse], error) {
+	return c.vrfBridgeMemberAdd.CallUnary(ctx, req)
+}
+
+// VrfBridgeMemberRemove calls vinbero.v1.VrfService.VrfBridgeMemberRemove.
+func (c *vrfServiceClient) VrfBridgeMemberRemove(ctx context.Context, req *connect.Request[v1.VrfBridgeMemberRemoveRequest]) (*connect.Response[v1.VrfBridgeMemberRemoveResponse], error) {
+	return c.vrfBridgeMemberRemove.CallUnary(ctx, req)
 }
 
 // VrfAcAdd calls vinbero.v1.VrfService.VrfAcAdd.
@@ -1932,6 +1966,8 @@ type VrfServiceHandler interface {
 	VrfDelete(context.Context, *connect.Request[v1.VrfDeleteRequest]) (*connect.Response[v1.VrfDeleteResponse], error)
 	VrfBridgeAttach(context.Context, *connect.Request[v1.VrfBridgeAttachRequest]) (*connect.Response[v1.VrfBridgeAttachResponse], error)
 	VrfBridgeDetach(context.Context, *connect.Request[v1.VrfBridgeDetachRequest]) (*connect.Response[v1.VrfBridgeDetachResponse], error)
+	VrfBridgeMemberAdd(context.Context, *connect.Request[v1.VrfBridgeMemberAddRequest]) (*connect.Response[v1.VrfBridgeMemberAddResponse], error)
+	VrfBridgeMemberRemove(context.Context, *connect.Request[v1.VrfBridgeMemberRemoveRequest]) (*connect.Response[v1.VrfBridgeMemberRemoveResponse], error)
 	VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error)
 	VrfAcRemove(context.Context, *connect.Request[v1.VrfAcRemoveRequest]) (*connect.Response[v1.VrfAcRemoveResponse], error)
 	VrfSetPolicy(context.Context, *connect.Request[v1.VrfSetPolicyRequest]) (*connect.Response[v1.VrfSetPolicyResponse], error)
@@ -1968,6 +2004,18 @@ func NewVrfServiceHandler(svc VrfServiceHandler, opts ...connect.HandlerOption) 
 		connect.WithSchema(vrfServiceVrfBridgeDetachMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	vrfServiceVrfBridgeMemberAddHandler := connect.NewUnaryHandler(
+		VrfServiceVrfBridgeMemberAddProcedure,
+		svc.VrfBridgeMemberAdd,
+		connect.WithSchema(vrfServiceVrfBridgeMemberAddMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	vrfServiceVrfBridgeMemberRemoveHandler := connect.NewUnaryHandler(
+		VrfServiceVrfBridgeMemberRemoveProcedure,
+		svc.VrfBridgeMemberRemove,
+		connect.WithSchema(vrfServiceVrfBridgeMemberRemoveMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	vrfServiceVrfAcAddHandler := connect.NewUnaryHandler(
 		VrfServiceVrfAcAddProcedure,
 		svc.VrfAcAdd,
@@ -2002,6 +2050,10 @@ func NewVrfServiceHandler(svc VrfServiceHandler, opts ...connect.HandlerOption) 
 			vrfServiceVrfBridgeAttachHandler.ServeHTTP(w, r)
 		case VrfServiceVrfBridgeDetachProcedure:
 			vrfServiceVrfBridgeDetachHandler.ServeHTTP(w, r)
+		case VrfServiceVrfBridgeMemberAddProcedure:
+			vrfServiceVrfBridgeMemberAddHandler.ServeHTTP(w, r)
+		case VrfServiceVrfBridgeMemberRemoveProcedure:
+			vrfServiceVrfBridgeMemberRemoveHandler.ServeHTTP(w, r)
 		case VrfServiceVrfAcAddProcedure:
 			vrfServiceVrfAcAddHandler.ServeHTTP(w, r)
 		case VrfServiceVrfAcRemoveProcedure:
@@ -2033,6 +2085,14 @@ func (UnimplementedVrfServiceHandler) VrfBridgeAttach(context.Context, *connect.
 
 func (UnimplementedVrfServiceHandler) VrfBridgeDetach(context.Context, *connect.Request[v1.VrfBridgeDetachRequest]) (*connect.Response[v1.VrfBridgeDetachResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfBridgeDetach is not implemented"))
+}
+
+func (UnimplementedVrfServiceHandler) VrfBridgeMemberAdd(context.Context, *connect.Request[v1.VrfBridgeMemberAddRequest]) (*connect.Response[v1.VrfBridgeMemberAddResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfBridgeMemberAdd is not implemented"))
+}
+
+func (UnimplementedVrfServiceHandler) VrfBridgeMemberRemove(context.Context, *connect.Request[v1.VrfBridgeMemberRemoveRequest]) (*connect.Response[v1.VrfBridgeMemberRemoveResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("vinbero.v1.VrfService.VrfBridgeMemberRemove is not implemented"))
 }
 
 func (UnimplementedVrfServiceHandler) VrfAcAdd(context.Context, *connect.Request[v1.VrfAcAddRequest]) (*connect.Response[v1.VrfAcAddResponse], error) {

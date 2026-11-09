@@ -238,6 +238,7 @@ jobs:
           - gtp6-encap
           - gtp6-drop-in
           - custom-cdplane-behavior
+          - device-attach
         # settings.l2.bum_mode. Every example runs in the default tc mode; the
         # BUM examples also run in xdp mode, in generic XDP (on a runner
         # kernel whose generic broadcast copies share a buffer, that checks

@@ -97,6 +97,12 @@ sudo ./teardown.sh # クリーンアップ
 | `gtp6-encap/` | H.M.GTP6.D + End.M.GTP6.E | GTP-U/IPv6とSRv6の相互変換 |
 | `gtp6-drop-in/` | End.M.GTP6.D.Di | GTP-U Drop-Inモード |
 
+### Daemon の操作
+
+| ディレクトリ | 機能 | 説明 |
+|---|---|---|
+| `device-attach/` | DeviceService | device の実行時 attach と detach、再起動後の再 attach、bridge member の実行時追加 |
+
 ### Plugin Extension
 
 | ディレクトリ | 機能 | 説明 |

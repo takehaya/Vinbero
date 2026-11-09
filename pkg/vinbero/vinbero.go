@@ -7,10 +7,9 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/netlinkwatch"
@@ -19,12 +18,18 @@ import (
 )
 
 type Vinbero struct {
-	cfg        *config.Config
-	obj        *bpf.BpfObjects
-	mapOps     *bpf.MapOperations
-	devices    []net.Interface
-	devLinks   []link.Link
-	tcLinks    []link.Link
+	cfg       *config.Config
+	obj       *bpf.BpfObjects
+	mapOps    *bpf.MapOperations
+	devices   []net.Interface // internal.devices, resolved at startup
+	devMu     sync.Mutex      // guards attached
+	attached  map[string]*deviceAttachment
+	devOps    deviceLinkOps // nil = the kernel; tests replace it
+	stopWatch func()        // stops WatchDevices; guarded by devMu
+	// unsaved names the detached devices whose state write failed, so a
+	// retried detach writes the state again instead of NOT_FOUND. Guarded
+	// by devMu.
+	unsaved    map[string]bool
 	fdbWatcher *netlinkwatch.FDBWatcher
 	resMgr     *netresource.ResourceManager
 	bumSync    *bpf.BumDevmapSync // nil unless a BD runs in xdp BUM mode
@@ -168,46 +173,6 @@ func (v *Vinbero) StartBumRouteWatch(ctx context.Context) error {
 
 const bumRouteDebounce = 200 * time.Millisecond
 
-func (v *Vinbero) LoadXDPProgram() error {
-	attachMode, err := config.ConvToStrXDPAttachMode(v.cfg.InternalConfig.BpfOptions.DeviceMode)
-	if err != nil {
-		return fmt.Errorf("invalid XDP attach mode: %w", err)
-	}
-	if v.bumSync != nil {
-		// From here on a device joining bum_tx_map waits for the NAPI
-		// polls in flight (native XDP).
-		v.bumSync.SetLive()
-	}
-	for _, dev := range v.devices {
-		l, err := link.AttachXDP(link.XDPOptions{
-			Program:   v.obj.VinberoMain,
-			Interface: dev.Index,
-			Flags:     attachMode,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to attach XDP program to device %s: %w", dev.Name, err)
-		}
-		v.devLinks = append(v.devLinks, l)
-	}
-
-	return nil
-}
-
-func (v *Vinbero) LoadTCProgram() error {
-	for _, dev := range v.devices {
-		l, err := link.AttachTCX(link.TCXOptions{
-			Program:   v.obj.VinberoTcIngress,
-			Attach:    ebpf.AttachTCXIngress,
-			Interface: dev.Index,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to attach TC program to device %s: %w", dev.Name, err)
-		}
-		v.tcLinks = append(v.tcLinks, l)
-	}
-	return nil
-}
-
 const defaultStatePath = "/var/lib/vinbero/state.json"
 
 // InitResourceManager initializes the resource manager and reconciles state.
@@ -291,17 +256,15 @@ func (v *Vinbero) Close() error {
 	if v.fdbWatcher != nil {
 		v.fdbWatcher.Stop()
 	}
-	// Detach XDP first (stop ingress) before removing TC (BUM encap).
-	// Otherwise XDP_PASS with BUM meta can reach a detached TC program.
-	for _, l := range v.devLinks {
-		if err := l.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close XDP link: %w", err))
-		}
+	v.devMu.Lock()
+	stop := v.stopWatch
+	v.stopWatch = nil
+	v.devMu.Unlock()
+	if stop != nil {
+		stop()
 	}
-	for _, l := range v.tcLinks {
-		if err := l.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close TC link: %w", err))
-		}
+	if err := v.closeAllDevices(); err != nil {
+		errs = append(errs, err)
 	}
 	if err := v.obj.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("failed to close bpf objects: %w", err))

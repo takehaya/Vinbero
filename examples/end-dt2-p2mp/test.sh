@@ -34,7 +34,8 @@ VINBERO_PID_PE2=""
 VINBERO_PID_PE3=""
 
 cleanup() {
-    rm -f /tmp/vinbero_p2mp_pe*_bum.yaml /tmp/vinbero_p2mp_bum_*.pcap*
+    rm -f /tmp/vinbero_p2mp_pe*_bum.yaml /tmp/vinbero_p2mp_bum_*.pcap* \
+        /tmp/vinbero_p2mp_pe1_base.yaml /tmp/vinbero_p2mp_pe1_state.json
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
         if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
@@ -61,8 +62,15 @@ echo ""
 bum_native_prepare "$ns_host1" "$ns_host2" "$ns_host3" "$ns_host4" \
     "$ns_router1" "$ns_router2" "$ns_router3" "$ns_router4"
 
+# PE1's access port is not in internal.devices: it is attached at runtime, so
+# every BUM mode also runs through a runtime-attached AC. The state file is
+# private because the attach is recorded there.
+sed -e "/- ${TOPO_NS_PREFIX}rt1h1/d" \
+    -e '/^settings:/a\  state_path: /tmp/vinbero_p2mp_pe1_state.json' \
+    "${SCRIPT_DIR}/vinbero_pe1.yaml" > /tmp/vinbero_p2mp_pe1_base.yaml
+
 print_info "Starting PE1 (router1)..."
-start_vinbero "$ns_router1" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe1.yaml" /tmp/vinbero_p2mp_pe1_bum.yaml)" "/tmp/vinbero_p2mp_pe1.log"
+start_vinbero "$ns_router1" "$(bum_mode_config /tmp/vinbero_p2mp_pe1_base.yaml /tmp/vinbero_p2mp_pe1_bum.yaml)" "/tmp/vinbero_p2mp_pe1.log"
 VINBERO_PID_PE1=$VINBERO_LAST_PID
 wait_vinbero_ready "$ns_router1" "127.0.0.1:8082" 10
 
@@ -87,8 +95,9 @@ echo "=========================================="
 echo "Phase 1: Configure P2MP L2VPN"
 echo "=========================================="
 
-# PE1: H.Encaps.L2 + BdPeer to PE2 and PE3
+# PE1: runtime-attached AC, H.Encaps.L2 + BdPeer to PE2 and PE3
 print_info "Configuring PE1 (H.Encaps.L2 + BUM flood to PE2, PE3)..."
+vbctl_pe1 device attach --name "${TOPO_NS_PREFIX}rt1h1"
 vbctl_pe1 hl2 create \
   --interface "${TOPO_NS_PREFIX}rt1h1" --vlan-id 100 \
   --src-addr fc00:1::1 --segments fc00:2::1,fc00:3::3 --bd-id 100
@@ -276,6 +285,11 @@ vbctl_pe1 peer create --bd-id 100 --src-addr fc00:1::1 --segments fc00:2::1,fc00
 bum_round "vbbum-pe2" 1 0
 vbctl_pe1 peer create --bd-id 100 --src-addr fc00:1::1 --segments fc00:2::1,fc00:4::4
 bum_round "vbbum-both-2" 1 1
+
+print_info "Detaching PE1's AC and attaching it again..."
+vbctl_pe1 device detach --name "${TOPO_NS_PREFIX}rt1h1"
+vbctl_pe1 device attach --name "${TOPO_NS_PREFIX}rt1h1"
+bum_round "vbbum-reattach" 1 1
 
 test_ping_with_counter "$ns_host1" 172.16.100.4 \
   "host1 -> host4 after peer re-create" "${TOPO_NS_PREFIX}h1rt1.100"
