@@ -345,9 +345,9 @@ func TestPodAddress(t *testing.T) {
 		return r
 	}
 	res := mk("10.1.2.3/16")
-	_, def, _ := net.ParseCIDR("0.0.0.0/0")
+	_, extra, _ := net.ParseCIDR("172.16.0.0/16")
 	_, same, _ := net.ParseCIDR("10.1.0.0/16")
-	res.Routes = append(res.Routes, routeTo(*def), routeTo(*same))
+	res.Routes = append(res.Routes, routeTo(*extra), routeTo(*same))
 	addr, routes, err := podAddress(res)
 	if err != nil {
 		t.Fatal(err)
@@ -355,10 +355,13 @@ func TestPodAddress(t *testing.T) {
 	if addr != netip.MustParsePrefix("10.1.2.3/16") {
 		t.Errorf("addr = %v", addr)
 	}
-	if !slices.Equal(routes, []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16"), netip.MustParsePrefix("0.0.0.0/0")}) {
+	if !slices.Equal(routes, []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16"), netip.MustParsePrefix("172.16.0.0/16")}) {
 		t.Errorf("routes = %v", routes)
 	}
-	for _, bad := range []*current.Result{mk(), mk("fd00::1/64"), mk("10.0.0.1/24", "10.0.0.2/24")} {
+	_, def, _ := net.ParseCIDR("0.0.0.0/0")
+	withDefault := mk("10.1.2.3/16")
+	withDefault.Routes = []*types.Route{routeTo(*def)}
+	for _, bad := range []*current.Result{mk(), mk("fd00::1/64"), mk("10.0.0.1/24", "10.0.0.2/24"), withDefault} {
 		if _, _, err := podAddress(bad); err == nil {
 			t.Errorf("podAddress(%v) accepted", bad.IPs)
 		}

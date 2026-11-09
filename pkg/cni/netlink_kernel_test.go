@@ -71,8 +71,8 @@ func TestKernelNetopsLifecycle(t *testing.T) {
 	if err := k.ConfigurePod(pc); err != nil {
 		t.Fatalf("ConfigurePod: %v", err)
 	}
-	if err := k.ConfigurePod(pc); err != nil {
-		t.Fatalf("ConfigurePod again: %v", err)
+	if err := k.ConfigurePod(pc); err == nil {
+		t.Error("ConfigurePod over an existing route succeeded; a conflict must not be replaced")
 	}
 	hc := HostConfig{Veth: host, VRF: "tenant-a", TableID: 100, PodIP: podIP, PodMAC: veth.PodMAC}
 	if err := k.CheckHost(hc); err == nil {

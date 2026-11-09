@@ -21,7 +21,7 @@ pod netns                              node (host netns)
   (neighbour は両側とも nud permanent)
 ```
 
-- pod 側には IPAM のアドレスを /32 で付けます。IPAM が返した prefix (例: /16) と IPAM の `routes` は、どこにも付けない gateway `169.254.1.1` 経由の経路にします (`onlink`)。gateway の neighbour は host veth の MAC で permanent に置くので、pod は ARP を出しません。primary network の default route には触れません
+- pod 側には IPAM のアドレスを /32 で付けます。IPAM が返した prefix (例: /16) と IPAM の `routes` は、どこにも付けない gateway `169.254.1.1` 経由の経路にします (`onlink`)。gateway の neighbour は host veth の MAC で permanent に置くので、pod は ARP を出しません。primary network の default route には触れません。IPAM が `0.0.0.0/0` を返すと ADD は失敗し、primary の経路と同じ宛先の経路も置き換えずに失敗させます
 - host 側の veth は VRF device に enslave します。同じ node の pod 間は kernel の VRF table で折り返します
 - host 側に pod の /32 を `proto static` で VRF table に入れます。vinberod の route watcher は redistribute `static` が RTPROT_STATIC だけを拾うので、これが VPNv4 広告の起点になります。pod の permanent neighbour も入れ、End.DT4 の decap 後の `bpf_fib_lookup` が NO_NEIGH に落ちないようにします
 - host veth は `DeviceAttach` で XDP / TC に載せ、`VrfAcAdd` で VRF の ingress AC にします

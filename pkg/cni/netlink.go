@@ -165,7 +165,9 @@ func (kernelNetops) ConfigurePod(p PodConfig) error {
 		return fmt.Errorf("gateway neighbour on %s: %w", p.IfName, err)
 	}
 	for _, dst := range p.Routes {
-		if err := pod.RouteReplace(&netlink.Route{
+		// Add, not replace: a prefix the primary network already routes
+		// must fail the ADD instead of moving that traffic into the VRF.
+		if err := pod.RouteAdd(&netlink.Route{
 			LinkIndex: link.Attrs().Index,
 			Dst:       prefixToIPNet(dst),
 			Gw:        net.IP(podGateway.AsSlice()),

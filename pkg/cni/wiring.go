@@ -215,6 +215,9 @@ func podAddress(r *current.Result) (netip.Prefix, []netip.Prefix, error) {
 		}
 		ones, _ := rt.Dst.Mask.Size()
 		pfx := netip.PrefixFrom(dst.Unmap(), ones).Masked()
+		if pfx.Addr().Is4() && pfx.Bits() == 0 {
+			return netip.Prefix{}, nil, fmt.Errorf("ipam route %s would replace the default route of the primary network; list the prefixes this network reaches", pfx)
+		}
 		if pfx.Addr().Is4() && pfx != routes[0] {
 			routes = append(routes, pfx)
 		}
