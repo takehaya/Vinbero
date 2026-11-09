@@ -109,6 +109,9 @@ func (p *Plugin) Add(args *skel.CmdArgs) (*current.Result, error) {
 		return nil, fmt.Errorf("record attachment: %w", err)
 	}
 	res, err := p.setup(ctx, daemon, store, conf, args, &a, tmpIf, routes)
+	if res != nil && conf.DNS.IsEmpty() {
+		res.DNS = ipamRes.DNS
+	}
 	if err != nil {
 		if terr := p.teardown(ctx, daemon, store, conf, args, a); terr != nil {
 			return nil, fmt.Errorf("%w (cleanup: %v)", err, terr)

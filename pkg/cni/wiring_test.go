@@ -84,6 +84,16 @@ func (f fakeIPAM) Check(_ context.Context, typ string, _ []byte) error {
 	return f.r.do("ipam-check %s", typ)
 }
 
+type staticDNSIPAM struct{ fakeIPAM }
+
+func (f staticDNSIPAM) Add(ctx context.Context, typ string, conf []byte) (*current.Result, error) {
+	res, err := f.fakeIPAM.Add(ctx, typ, conf)
+	if err == nil {
+		res.DNS = types.DNS{Nameservers: []string{"10.0.0.53"}}
+	}
+	return res, err
+}
+
 type fakeDaemon struct {
 	r        *recorder
 	attached map[string]bool
@@ -183,6 +193,31 @@ func TestAddWiresInOrder(t *testing.T) {
 	}
 	if len(r.calls) != 4 {
 		t.Errorf("check calls = %v", r.calls)
+	}
+}
+
+// DNS comes from the network configuration, or else from IPAM.
+func TestAddDNS(t *testing.T) {
+	dnsIPAM := func(r *recorder) IPAM {
+		return staticDNSIPAM{fakeIPAM{r: r, ip: "10.100.1.5/24"}}
+	}
+	p, r, _ := newTestPlugin(t, "10.100.1.5/24")
+	p.IPAM = dnsIPAM(r)
+	res, err := p.Add(testArgs("c1", "tenant-a", 100, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(res.DNS.Nameservers, []string{"10.0.0.53"}) {
+		t.Errorf("DNS without one in the configuration = %+v, want IPAM's", res.DNS)
+	}
+	p, r, _ = newTestPlugin(t, "10.100.1.5/24")
+	p.IPAM = dnsIPAM(r)
+	res, err = p.Add(testArgs("c2", "tenant-a", 100, `,"dns":{"nameservers":["10.9.9.9"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(res.DNS.Nameservers, []string{"10.9.9.9"}) {
+		t.Errorf("DNS with one in the configuration = %+v", res.DNS)
 	}
 }
 
