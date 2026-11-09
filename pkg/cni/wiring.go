@@ -15,8 +15,7 @@ import (
 	current "github.com/containernetworking/cni/pkg/types/100"
 )
 
-// rpcTimeout bounds every call to vinberod, so a hung daemon fails the CNI
-// command instead of blocking the runtime.
+// rpcTimeout bounds one RPC to vinberod.
 const rpcTimeout = 10 * time.Second
 
 // IPAM runs the delegated IPAM plugin named in the network configuration.
@@ -135,13 +134,11 @@ func (p *Plugin) setup(ctx context.Context, daemon Daemon, store *Store, conf *N
 		return nil, err
 	}
 
-	rctx, cancel := context.WithTimeout(ctx, rpcTimeout)
-	defer cancel()
-	if err := daemon.EnsureVRF(rctx, conf.VRF, conf.TableID); err != nil {
+	if err := daemon.EnsureVRF(ctx, conf.VRF, conf.TableID); err != nil {
 		return nil, err
 	}
 	if conf.WantsBinding() {
-		if err := daemon.EnsureBinding(rctx, Binding{
+		if err := daemon.EnsureBinding(ctx, Binding{
 			VRF: conf.VRF, RD: conf.RD, RTs: conf.RTs, Locator: conf.Locator, MaxPrefixes: conf.MaxPrefixes,
 		}); err != nil {
 			return nil, err
@@ -150,10 +147,10 @@ func (p *Plugin) setup(ctx context.Context, daemon Daemon, store *Store, conf *N
 	if err := p.Net.EnslaveHost(a.HostVeth, conf.VRF); err != nil {
 		return nil, err
 	}
-	if err := daemon.AddAC(rctx, conf.VRF, a.HostVeth); err != nil {
+	if err := daemon.AddAC(ctx, conf.VRF, a.HostVeth); err != nil {
 		return nil, err
 	}
-	if err := daemon.AttachDevice(rctx, a.HostVeth, conf.DeviceMode); err != nil {
+	if err := daemon.AttachDevice(ctx, a.HostVeth, conf.DeviceMode); err != nil {
 		return nil, err
 	}
 	// Last: the static route is what vinberod advertises, so the pod is
@@ -286,10 +283,8 @@ func (p *Plugin) teardown(ctx context.Context, daemon Daemon, store *Store, conf
 			Veth: a.HostVeth, VRF: a.VRF, TableID: a.TableID, PodIP: a.Address.Addr(),
 		}))
 	}
-	rctx, cancel := context.WithTimeout(ctx, rpcTimeout)
-	defer cancel()
-	errs = append(errs, daemon.DetachDevice(rctx, a.HostVeth))
-	acErr := daemon.RemoveAC(rctx, a.VRF, a.HostVeth)
+	errs = append(errs, daemon.DetachDevice(ctx, a.HostVeth))
+	acErr := daemon.RemoveAC(ctx, a.VRF, a.HostVeth)
 	errs = append(errs, acErr)
 	// While the AC is still registered the veth stays, so the AC keeps
 	// resolving, and the address stays leased with it. The retried DEL
@@ -341,9 +336,7 @@ func (p *Plugin) Check(args *skel.CmdArgs) error {
 	}); err != nil {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(ctx, rpcTimeout)
-	defer cancel()
-	attached, err := p.Daemon(conf.Server).DeviceAttached(rctx, a.HostVeth)
+	attached, err := p.Daemon(conf.Server).DeviceAttached(ctx, a.HostVeth)
 	if err != nil {
 		return err
 	}
