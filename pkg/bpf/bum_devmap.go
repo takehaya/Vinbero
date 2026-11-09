@@ -110,15 +110,16 @@ type BumDevmapSync struct {
 	// unserved holds the xdp-mode BDs the sync leaves on the tc path,
 	// with the reason (unservable), so the change is logged once.
 	unserved map[uint16]string
-	// splitACs holds the BDs whose ACs resolve a peer differently, so the
-	// warning is logged once (resolveUplink).
-	splitACs map[uint16]struct{}
+	// excluded holds the flood slots a failed lookup left out, with the
+	// error, so each is logged once and the watch knows to retry them.
+	excluded map[bdSlot]string
 	// built holds what each BD's installed devmaps were built from: a
 	// rebuild that would produce the same ones leaves them alone.
 	built map[uint16]devmapKey
 	// resync and resyncPoll: see uplinkResyncRose.
 	resync     uint64
 	resyncPoll time.Duration
+	retryPoll  time.Duration // see bumExcludedRetry
 }
 
 // NewBumDevmapSync binds the sync to a loaded collection. modeOf returns the
@@ -145,10 +146,11 @@ func NewBumDevmapSync(objs *BpfObjects, modeOf func(uint16) uint8, uplink Uplink
 		uplink:   uplink,
 		logger:   logger,
 		unserved: map[uint16]string{},
-		splitACs: map[uint16]struct{}{},
+		excluded: map[bdSlot]string{},
 		built:    map[uint16]devmapKey{},
 
 		resyncPoll: bumUplinkResyncPoll,
+		retryPoll:  bumExcludedRetry,
 	}
 }
 
@@ -221,6 +223,11 @@ type bumAC struct {
 	vlanID  uint16
 }
 
+// splitACsReason is why a BD whose ACs resolve a peer differently runs in
+// tc mode (resolveUplink, unservable).
+const splitACsReason = "its ACs resolve a peer differently (an iif ip rule, a VRF, or an AC with no usable route), " +
+	"and its devmap holds one uplink per peer"
+
 // unservable returns why xdp mode cannot serve a BD with these ACs
 // and this many flood slots, or "". Such a BD gets no devmap, so its BUM
 // takes the tc path and the bridge (BUM_XDP_FALLBACK).
@@ -248,11 +255,10 @@ func unservable(acs []bumAC, ifindexes []uint32, slots int) string {
 // per peer, but the FIB lookup runs on the frame's own AC: the ACs of a BD
 // agree unless an iif ip rule or a VRF sends one of them to another table.
 // disagree reports such a split, an AC that has no usable route included;
-// the BD then keeps the answer of its first AC that resolved, and copies
-// from the other ACs that go elsewhere are dropped (BUM_UPLINK_MISMATCH,
-// BUM_EGRESS_DROP). extra are the next hops other ACs chose on the same
-// uplink, which need resolving too. An AC whose device is gone is passed
-// over, the same as it is in the devmap.
+// one devmap cannot serve that, so the BD takes the tc path, where every
+// frame's copies are looked up on its own AC (splitACsReason). extra are the
+// next hops other ACs chose on the same uplink, which need resolving too. An
+// AC whose device is gone is passed over, the same as it is in the devmap.
 func (s *BumDevmapSync) resolveUplink(acs []uint32, peer *HeadendEntry) (up BumUplink, extra []net.IP, disagree bool, err error) {
 	found := false
 	for _, ac := range acs {
@@ -276,22 +282,6 @@ func (s *BumDevmapSync) resolveUplink(acs []uint32, peer *HeadendEntry) (up BumU
 	return up, extra, disagree, nil
 }
 
-// noteSplitACsLocked logs once when a BD's ACs start or stop resolving a
-// peer differently.
-func (s *BumDevmapSync) noteSplitACsLocked(bdID uint16, split bool) {
-	_, had := s.splitACs[bdID]
-	switch {
-	case split && !had:
-		s.splitACs[bdID] = struct{}{}
-		s.logger.Warn("xdp BUM: the ACs of this bridge domain resolve a peer differently (an iif ip rule or a VRF); "+
-			"one devmap cannot serve them all, so copies from some ACs are dropped",
-			zap.Uint16("bd_id", bdID))
-	case !split && had:
-		delete(s.splitACs, bdID)
-		s.logger.Info("xdp BUM: the ACs of this bridge domain agree on their uplinks again", zap.Uint16("bd_id", bdID))
-	}
-}
-
 // bdBuild is a BD's pair of freshly built devmaps, not installed yet.
 type bdBuild struct {
 	bd           uint16
@@ -308,6 +298,11 @@ type bumSlot struct {
 	// extraNexthops: next hops other ACs of the BD chose on the same
 	// uplink. They need their neighbour entries too.
 	extraNexthops []net.IP
+}
+
+// bdSlot names a flood slot of a BD.
+type bdSlot struct {
+	bd, index uint16
 }
 
 // devmapSlotKey is the part of a slot the devmaps hold.
@@ -363,6 +358,7 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 		slots []bumSlot
 		split bool
 	)
+	left := map[uint16]struct{}{}
 	for i := uint16(0); i < MaxBumNexthops; i++ {
 		var peer HeadendEntry
 		err := s.objs.BdPeerMap.Lookup(&BdPeerKey{BdId: bdID, Index: i}, &peer)
@@ -378,18 +374,36 @@ func (s *BumDevmapSync) buildBDLocked(bdID uint16, acs []bumAC) (*bdBuild, error
 		up, extra, disagree, err := s.resolveUplink(ifindexes, &peer)
 		split = split || disagree
 		if err != nil {
-			// Not fatal: the slot rejoins on the next rebuild (route change
-			// or BD mutation). Until then that peer gets no BUM copy.
-			s.logger.Warn("xdp BUM: cannot resolve the uplink of a flood peer; slot left out",
+			// Not fatal: the slot rejoins on the next rebuild (route change,
+			// BD mutation or bumExcludedRetry). Until then that peer gets no
+			// BUM copy. Logged when it starts or its cause changes: the
+			// retries repeat this for as long as the failure lasts.
+			left[i] = struct{}{}
+			key, msg := bdSlot{bd: bdID, index: i}, err.Error()
+			log := s.logger.Debug
+			if s.excluded[key] != msg {
+				log = s.logger.Warn
+			}
+			s.excluded[key] = msg
+			log("xdp BUM: cannot resolve the uplink of a flood peer; slot left out",
 				zap.Uint16("bd_id", bdID), zap.Uint16("index", i),
 				zap.String("segment", net.IP(peer.Segments[0][:]).String()), zap.Error(err))
 			continue
 		}
 		slots = append(slots, bumSlot{index: i, uplink: up.Ifindex, nexthop: up.Nexthop, extraNexthops: extra})
 	}
-	s.noteSplitACsLocked(bdID, split)
+	for key := range s.excluded {
+		if _, still := left[key.index]; key.bd == bdID && !still {
+			delete(s.excluded, key)
+			s.logger.Info("xdp BUM: flood slot is no longer left out",
+				zap.Uint16("bd_id", bdID), zap.Uint16("index", key.index))
+		}
+	}
 	if reason := unservable(acs, ifindexes, len(slots)); reason != "" {
 		return nil, s.clearBDLocked(bdID, reason)
+	}
+	if split {
+		return nil, s.clearBDLocked(bdID, splitACsReason)
 	}
 	if (len(slots) > 0 || s.native) && s.egress == nil {
 		return nil, fmt.Errorf("bd %d: bum_remote_egress is not loaded", bdID)
@@ -555,7 +569,13 @@ func (s *BumDevmapSync) clearBDLocked(bdID uint16, reason string) error {
 	}
 	s.noteServedLocked(bdID, reason)
 	delete(s.built, bdID)
-	s.noteSplitACsLocked(bdID, false)
+	if reason == "" { // no xdp-mode BD left to retry the slots of
+		for key := range s.excluded {
+			if key.bd == bdID {
+				delete(s.excluded, key)
+			}
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -772,11 +792,38 @@ func (s *BumDevmapSync) uplinkResyncRose() bool {
 	return rose
 }
 
+// bumExcludedRetry is how often the watch rebuilds while something waits
+// for a lookup to work again: a slot a failed probe left out, or a BD on the
+// tc path because its ACs disagree. Those produce no copy, so the resync
+// counter cannot report them, and what fixes them may send no event (the
+// AC's forwarding sysctl). A pass is a probe per peer and AC, plus no map
+// swap when the result is unchanged. 30 s bounds how long a peer stays dark
+// after such a fix while keeping the rounds rare for as long as the failure
+// lasts, which can be indefinitely on a misconfigured AC.
+const bumExcludedRetry = 30 * time.Second
+
+// retryPending reports whether a rebuild could bring something back.
+func (s *BumDevmapSync) retryPending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.excluded) > 0 {
+		return true
+	}
+	for _, reason := range s.unserved {
+		if reason == splitACsReason {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *BumDevmapSync) watchRoutes(ctx context.Context, sub *routeSub, debounce time.Duration) {
 	timer := time.NewTimer(debounce)
 	timer.Stop()
 	resync := time.NewTicker(s.resyncPoll)
 	defer resync.Stop()
+	retry := time.NewTicker(s.retryPoll)
+	defer retry.Stop()
 	var (
 		fire  <-chan time.Time
 		first time.Time // first update since the last rebuild
@@ -846,6 +893,10 @@ func (s *BumDevmapSync) watchRoutes(ctx context.Context, sub *routeSub, debounce
 			pending()
 		case <-resync.C:
 			if s.uplinkResyncRose() {
+				pending()
+			}
+		case <-retry.C:
+			if s.retryPending() {
 				pending()
 			}
 		case <-fire:

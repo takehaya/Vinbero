@@ -25,10 +25,11 @@ Bridge Domain（BD）の BUM（broadcast、未知 unicast、multicast）フレ�
 
 devmap は control plane が `headend_l2_map`、`bd_peer_map`、BD のモードから組み立て直します（HeadendL2 / BdPeer の作成・削除のたび、起動時、経路の変化時）。新しい内側の map を作ってから、外側の map のエントリーを差し替えます。devmap がない BD（作成前や、ローカル AC がない BD）は TC モードの経路にフォールバックし、`BUM_XDP_FALLBACK` を数えます。AC のデバイスが消えているなど、devmap に加えられない AC やスロットは、警告を出して外し、残りで組み立てます。
 
-xdp モードで正しく扱えない BD には、control plane は devmap を作りません。次の 2 つです。
+xdp モードで正しく扱えない BD には、control plane は devmap を作りません。次の 3 つです。
 
 - AC の VLAN ID が揃っていない BD。xdp モードはフレームを VLAN tag ごとそのまま送ります（後述）。
 - AC のデバイスとスロットの合計が、devmap の 32 エントリーに収まらない BD。
+- AC によって peer の uplink の答えが割れる BD（「ECMP の underlay」の節）。
 
 このような BD は、BUM も既知 unicast も TC モードと同じ経路（TC の複製と bridge）を通り、BUM は `BUM_XDP_FALLBACK` に数えます。理由は、状態が変わったときに 1 回、警告としてログに出します。構成が直れば、次の組み立てで xdp モードに戻ります。MAC 学習の通知（次段落）は、その間も XDP の学習から出ます。
 
@@ -124,14 +125,16 @@ kernel の multipath は、送信元、宛先、flowinfo、L4 ポートのハッ
 
 - `bum_uplink_probe` という map を持たない XDP program を `BPF_PROG_TEST_RUN` で実行します。この program は egress program と同じ関数（`srv6_fib_lookup_v6_params`）で `bpf_fib_lookup` を呼びます。入力は `fib_params.ifindex` に BD の AC、`ipv6_src` に encap 送信元、`ipv6_dst` に最初のセグメントです。
 - 出力の `fib_params.ifindex` が uplink、`ipv6_dst` が next hop です（経路に gateway がなければ宛先のままです）。`BPF_FIB_LKUP_RET_NO_NEIGH` でもこの 2 つは分かるので、そのまま使います。managed の neighbor エントリーは、この next hop に対して作ります。同じ ECMP の別の next hop を選んだ peer が増えれば、その peer の分のエントリーが増えます。
-- 同じ BD に AC が複数あれば、AC ごとに引きます。ハッシュは入力デバイスを使いませんが、table の選択（AC への iif の ip rule や VRF）は AC に依存します。AC によって答えが割れる BD（一部の AC だけ経路がない場合を含みます）は 1 つの devmap では表せないので、ログに 1 回だけ警告を出し、最初の AC の答えを使います。ほかの AC から入ったコピーのうち経路の違うものは破棄されます（`BUM_UPLINK_MISMATCH` か `BUM_EGRESS_DROP`）。AC のデバイスが消えているときは、その AC は無視します。AC ごとに同じ uplink の別の next hop を選ぶ場合は、それぞれの next hop の neighbor エントリーを管理します。
+- 同じ BD に AC が複数あれば、AC ごとに引きます。ハッシュは入力デバイスを使いませんが、table の選択（AC への iif の ip rule や VRF）は AC に依存します。AC によって答えが割れる BD（一部の AC だけ経路がない場合を含みます）は 1 つの devmap では表せないので、VLAN ID が揃わない BD などと同じく devmap を作らず、tc モードの経路で動かします（警告と `BUM_XDP_FALLBACK`）。tc モードの経路では、フレームごとにその AC で FIB を引くので、AC ごとの table どおりに送れます。組み立て直しで AC の答えが揃えば、xdp モードに戻ります。AC のデバイスが消えているときは、その AC は無視します。AC ごとに同じ uplink の別の next hop を選ぶ場合は、それぞれの next hop の neighbor エントリーを管理します。
 
 経路が変わったときは、次の契機で全 BD の devmap を組み立て直します（200 ms の debounce を挟みます）。
 
 - route の通知と、nexthop object（`RTNLGRP_NEXTHOP`）、IPv6 の ip rule（`RTNLGRP_IPV6_RULE`）の通知。group の member の削除や `nexthop_compat_mode=0` のように、route の通知が出ない変更があるためです。
 - egress program が `BUM_UPLINK_MISMATCH` か `BUM_EGRESS_NO_NEIGH` を数えたとき（どちらも 1 秒ごとに確認します）。通知なしで peer の next hop が変わる場合があるためです。`fib_multipath_hash_policy` 3 の hash field やハッシュの seed の変更、hash-threshold の nexthop group で gateway の neighbor が FAILED や INCOMPLETE になったとき（その next hop は選ばれなくなり、戻ると元に戻ります）、carrier の変化、device を落としたときの nexthop の削除などです。組み立て直しで uplink と next hop を引き直し、neighbor エントリーも作り直します。neighbor が flush された場合（carrier の変化など）もここで回復します。これらの数え上げは `enable_stats` に関係なく働きます（`bum_uplink_resync`）。
 
-組み立て直しても devmap の中身が変わらない BD は、map を差し替えず、neighbor エントリーの維持だけを行います。原因の解消しない破棄（応答しない gateway など）が続いても、毎秒の組み立て直しの負荷はこの程度に収まります。
+- 30 秒ごとの再試行。uplink を引けずに外れたスロットや、AC の答えが割れて tc モードで動いている BD があるときだけ行います。これらはコピーを出さないのでカウンタでは分からず、原因の解消（AC の forwarding sysctl など）に通知が出ないこともあるためです。外れたスロットのログは、外れたときと原因が変わったときに警告を 1 回出し、再試行の間は debug レベルです。
+
+組み立て直しても devmap の中身が変わらない BD は、map を差し替えず、neighbor エントリーの維持だけを行います。原因の解消しない破棄（応答しない gateway など）が続いても、毎秒の組み立て直しの負荷はこの程度に収まります。外れたスロットの再試行も同じです。
 
 組み立て直しの前に落ちたコピーは戻りません。経路が変わった直後は、少数のフレームがこれらのカウンタに数えられて落ちることがあります。
 
