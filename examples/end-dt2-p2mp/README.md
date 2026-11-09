@@ -35,6 +35,9 @@ sudo ./test.sh     # run the tests
 sudo ./teardown.sh # clean up
 ```
 
+`sudo BUM_MODE=xdp ./test.sh` runs the same tests with `settings.l2.bum_mode: xdp`
+(BUM replicated in XDP, see `docs/design/ja/bum_mode.md`); the default is `tc`.
+
 ## Running it by hand
 
 ### 1. Build the environment

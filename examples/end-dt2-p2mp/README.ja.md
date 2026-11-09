@@ -32,6 +32,8 @@ sudo ./test.sh     # テスト実行
 sudo ./teardown.sh # クリーンアップ
 ```
 
+`sudo BUM_MODE=xdp ./test.sh` で、同じテストを `settings.l2.bum_mode: xdp`（BUM を XDP で複製する。`docs/design/ja/bum_mode.md` を参照）で実行します。既定は `tc` です。
+
 ## 手動実行
 
 ### 1. 環境構築

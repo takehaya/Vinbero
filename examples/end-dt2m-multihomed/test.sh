@@ -5,6 +5,10 @@
 # Phase C: host1 ARP broadcast must not loop back via the other PE
 #          (STATS_SPLIT_HORIZON_TX increments on both PE1 and PE2).
 # Phase D: with DF=PE1, a forced BUM into PE2 drops (STATS_NON_DF_DROP).
+#
+# BUM_MODE=tc (default) or xdp selects settings.l2.bum_mode for all PEs. On a
+# kernel where vinberod falls back from xdp to tc replication, the xdp run
+# checks the fallback instead.
 
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +20,8 @@ VINBEROD_BIN="${SCRIPT_DIR}/../../out/bin/vinberod"
 VINBERO_BIN="${SCRIPT_DIR}/../../out/bin/vinbero"
 
 NS_H1="mh-host1" NS_H2="mh-host2"
-NS_PE1="mh-pe1" NS_PE2="mh-pe2" NS_PE3="mh-pe3"
+NS_PE1="mh-pe1" NS_PE2="mh-pe2" NS_PE3="mh-pe3" NS_P="mh-p"
+BUM_MODE="${BUM_MODE:-tc}"
 BIND_PE1="127.0.0.1:18101"
 BIND_PE2="127.0.0.1:18102"
 BIND_PE3="127.0.0.1:18103"
@@ -26,12 +31,14 @@ PE1_SRC="fc00:1::1"
 PE2_SRC="fc00:2::2"
 PE3_SRC="fc00:3::3"
 HOST1_MAC="02:00:00:00:00:01" # matches setup.sh
+VLAN_IF_H1="mh-h1-v100"       # matches setup.sh
 
 VINBERO_PID_PE1="" VINBERO_PID_PE2="" VINBERO_PID_PE3=""
 TESTS_PASSED=0
 TESTS_FAILED=0
 
 cleanup() {
+    rm -f /tmp/vinbero_dt2m_pe*_bum.yaml /tmp/vinbero_dt2m_bum_*.pcap*
     for pid_var in VINBERO_PID_PE1 VINBERO_PID_PE2 VINBERO_PID_PE3; do
         local pid="${!pid_var}"
         # Guard against PID reuse: only kill if the PID is still our vinberod.
@@ -65,17 +72,19 @@ assert_nonzero() {
 # ================================================
 # Start vinberod
 # ================================================
-print_info "Launching PE1/PE2/PE3 vinberod in parallel..."
-start_vinbero "$NS_PE1" "${SCRIPT_DIR}/vinbero_pe1.yaml" /tmp/vinbero_dt2m_pe1.log
+print_info "Launching PE1/PE2/PE3 vinberod in parallel (BUM_MODE=${BUM_MODE})..."
+start_vinbero "$NS_PE1" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe1.yaml" /tmp/vinbero_dt2m_pe1_bum.yaml)" /tmp/vinbero_dt2m_pe1.log
 VINBERO_PID_PE1=$VINBERO_LAST_PID
-start_vinbero "$NS_PE2" "${SCRIPT_DIR}/vinbero_pe2.yaml" /tmp/vinbero_dt2m_pe2.log
+start_vinbero "$NS_PE2" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe2.yaml" /tmp/vinbero_dt2m_pe2_bum.yaml)" /tmp/vinbero_dt2m_pe2.log
 VINBERO_PID_PE2=$VINBERO_LAST_PID
-start_vinbero "$NS_PE3" "${SCRIPT_DIR}/vinbero_pe3.yaml" /tmp/vinbero_dt2m_pe3.log
+start_vinbero "$NS_PE3" "$(bum_mode_config "${SCRIPT_DIR}/vinbero_pe3.yaml" /tmp/vinbero_dt2m_pe3_bum.yaml)" /tmp/vinbero_dt2m_pe3.log
 VINBERO_PID_PE3=$VINBERO_LAST_PID
 
 wait_vinbero_ready "$NS_PE1" "$BIND_PE1" 10
 wait_vinbero_ready "$NS_PE2" "$BIND_PE2" 10
 wait_vinbero_ready "$NS_PE3" "$BIND_PE3" 10
+BUM_EFFECTIVE=$(bum_effective_mode /tmp/vinbero_dt2m_pe1.log)
+print_info "BUM replication runs in mode ${BUM_EFFECTIVE}"
 
 # ================================================
 # Configure ES / BdPeers / HeadendL2 / SID
@@ -165,6 +174,60 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
+assert_eq() {
+    local desc="$1" got="$2" want="$3"
+    if [ "$got" = "$want" ]; then
+        print_success "$desc (got $got)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "$desc (got '${got}', want $want)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+}
+
+# One broadcast from host1 reaches PE1 and PE2 (the shared CE floods both
+# legs). Each PE must send exactly one SRv6 copy, to PE3 only: the peer on
+# ES-1 is split-horizon filtered. Count on P, which runs no XDP.
+print_info "Counting the SRv6 copies of one host1 broadcast on P..."
+TAG="vbbum-mh-1"
+pids=()
+for ifc in mh-ppe1 mh-ppe2 mh-ppe3; do
+    bum_capture_start "$NS_P" "$ifc" "/tmp/vinbero_dt2m_bum_${ifc}.pcap"
+    pids+=("$CAPTURE_PID")
+done
+sleep 1
+bum_marker_send "$NS_H1" "$VLAN_IF_H1" "$TAG"
+sleep 1
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+assert_eq "SRv6 copies towards PE3 (one from PE1, one from PE2)" \
+    "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-ppe3.pcap "$TAG")" 2
+# Each PE's uplink capture also carries the copy it sends to PE3, so the
+# frames seen there must be exactly that one: nothing came back from the
+# other ES-1 PE.
+assert_eq "frames on P-PE1 (PE1's own copy only, none towards PE1)" \
+    "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-ppe1.pcap "$TAG")" 1
+assert_eq "frames on P-PE2 (PE2's own copy only, none towards PE2)" \
+    "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-ppe2.pcap "$TAG")" 1
+
+if [ "$BUM_EFFECTIVE" = "tc-fallback" ]; then
+    assert_nonzero "PE1 BUM_XDP_FALLBACK > 0 (tc replication in place of xdp)" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)"
+    assert_eq "PE1 BUM_XDP_FLOOD" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)" 0
+fi
+if [ "$BUM_EFFECTIVE" = "xdp" ]; then
+    assert_nonzero "PE1 BUM_XDP_FLOOD > 0" "$(stats_counter vbctl_pe1 BUM_XDP_FLOOD)"
+    assert_nonzero "PE1 BUM_EGRESS_TX > 0" "$(stats_counter vbctl_pe1 BUM_EGRESS_TX)"
+    assert_nonzero "PE2 BUM_EGRESS_TX > 0" "$(stats_counter vbctl_pe2 BUM_EGRESS_TX)"
+    assert_eq "PE1 BUM_XDP_FALLBACK" "$(stats_counter vbctl_pe1 BUM_XDP_FALLBACK)" 0
+    if grep -q "XDP learned local MAC.*${HOST1_MAC}" /tmp/vinbero_dt2m_pe1.log; then
+        print_success "PE1 control plane received the XDP learning event for host1"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "PE1 control plane never saw an XDP learning event for host1"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+fi
+
 # ================================================
 # Phase D: Static DF election
 # ================================================
@@ -195,6 +258,28 @@ sleep 1
 
 pe1_nondf=$(stats_counter vbctl_pe1 NON_DF_DROP)
 assert_nonzero "PE1 NON_DF_DROP > 0 (PE2 is DF)" "${pe1_nondf:-0}"
+
+# A broadcast from host2 reaches host1 exactly once: through PE2 (the DF),
+# never through PE1. Captured inbound on host1's two legs.
+TAG="vbbum-mh-df"
+pids=()
+for ifc in mh-h1pe1 mh-h1pe2; do
+    bum_capture_start "$NS_H1" "$ifc" "/tmp/vinbero_dt2m_bum_${ifc}.pcap" -Q in
+    pids+=("$CAPTURE_PID")
+done
+sleep 1
+bum_marker_send "$NS_H2" mh-h2pe3.100 "$TAG"
+sleep 1
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+assert_eq "host1 copies via PE1 (non-DF)" "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-h1pe1.pcap "$TAG")" 0
+assert_eq "host1 copies via PE2 (DF)" "$(bum_marker_count /tmp/vinbero_dt2m_bum_mh-h1pe2.pcap "$TAG")" 1
+
+if [ "$BUM_EFFECTIVE" = "xdp" ]; then
+    # The DF floods host2's BUM to host1 from XDP, not through br100.
+    assert_nonzero "PE2 BUM_XDP_LOCAL_FLOOD > 0 (DF floods from XDP)" \
+        "$(stats_counter vbctl_pe2 BUM_XDP_LOCAL_FLOOD)"
+fi
 
 # ================================================
 # Summary

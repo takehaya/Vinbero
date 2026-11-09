@@ -140,6 +140,13 @@ type MapOperations struct {
 	// FindFreeBdPeerIndex answers are stale by the time the lock is
 	// dropped and must not feed a separate create.
 	bdPeerLifecycle sync.Mutex
+
+	// bum rebuilds the xdp-mode BUM devmaps after every bd_peer and
+	// headend_l2 mutation (nil: no BD runs in xdp mode), once per public
+	// call. It only reads the maps and takes its own lock; the bd_peer
+	// writers call it after releasing bdPeerLifecycle.
+	bumMu sync.Mutex
+	bum   *BumDevmapSync
 }
 
 // NewMapOperations creates a new MapOperations instance.
@@ -1576,11 +1583,15 @@ func (m *MapOperations) ListSidFunctions() (map[string]*SidFunctionEntry, error)
 
 // ===== Stats Map Operations =====
 
-const StatsMax = 8
+const StatsMax = 18
 
 var StatsCounterName = [StatsMax]string{
 	"RX_PACKETS", "PASS", "DROP", "REDIRECT", "ABORTED",
 	"SPLIT_HORIZON_TX", "SPLIT_HORIZON_RX", "NON_DF_DROP",
+	"BUM_XDP_FLOOD", "BUM_XDP_LOCAL_FLOOD", "BUM_XDP_FALLBACK",
+	"BUM_EGRESS_TX", "BUM_EGRESS_DROP", "BUM_UPLINK_MISMATCH",
+	"BUM_PLAN_STALE", "BUM_PLAN_SURPLUS", "BUM_SHARED_BUFFER",
+	"BUM_EGRESS_NO_NEIGH",
 }
 
 type AggregatedStats struct {
@@ -2493,6 +2504,11 @@ func (m *MapOperations) DeleteEcmpLive(groupID uint32) error {
 // and esi is set, bd_local_esi_map is also populated for the DT2M DF check.
 func (m *MapOperations) CreateHeadendL2(ifindex uint32, vlanID uint16, entry *HeadendEntry, esi [ESILen]byte) error {
 	key := buildHeadendL2Key(ifindex, vlanID)
+	var prev HeadendEntry
+	if m.objs.HeadendL2Map.Lookup(key, &prev) == nil && prev.BdId != entry.BdId {
+		defer m.resyncBum(prev.BdId) // the AC left its old BD
+	}
+	defer m.resyncBum(entry.BdId)
 	if err := m.objs.HeadendL2Map.Put(key, entry); err != nil {
 		return fmt.Errorf("failed to put headend L2 entry: %w", err)
 	}
@@ -2523,6 +2539,9 @@ func (m *MapOperations) DeleteHeadendL2(ifindex uint32, vlanID uint16) error {
 	key := buildHeadendL2Key(ifindex, vlanID)
 	var prev HeadendEntry
 	hadEntry := m.objs.HeadendL2Map.Lookup(key, &prev) == nil
+	if hadEntry {
+		defer m.resyncBum(prev.BdId)
+	}
 	if err := m.objs.HeadendL2Map.Delete(key); err != nil {
 		return fmt.Errorf("failed to delete headend L2 entry: %w", err)
 	}
@@ -2672,6 +2691,18 @@ type AgedFdbEntry struct {
 // refreshes independent of the forwarding identity. The second lookup avoids
 // deleting entries already observed as fresh; refresh-versus-delete is not atomic.
 func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
+	return m.ageFdbEntries(maxAgeNs, nil)
+}
+
+// AgeLocalFdbEntries is AgeFdbEntries restricted to the locally learned
+// entries of the BDs inBD accepts.
+func (m *MapOperations) AgeLocalFdbEntries(maxAgeNs uint64, inBD func(bdID uint16) bool) ([]AgedFdbEntry, error) {
+	return m.ageFdbEntries(maxAgeNs, func(k FdbKey, e FdbEntry) bool {
+		return e.IsRemote == 0 && inBD(k.BdId)
+	})
+}
+
+func (m *MapOperations) ageFdbEntries(maxAgeNs uint64, scope func(FdbKey, FdbEntry) bool) ([]AgedFdbEntry, error) {
 	m.controlLifecycle.Lock()
 	defer m.controlLifecycle.Unlock()
 	var key FdbKey
@@ -2681,7 +2712,7 @@ func (m *MapOperations) AgeFdbEntries(maxAgeNs uint64) ([]AgedFdbEntry, error) {
 	now := currentKtimeNs()
 	var toDelete []FdbKey
 	for iter.Next(&key, &entry) {
-		if entry.IsStatic != 0 || entry.LastSeen == 0 {
+		if entry.IsStatic != 0 || entry.LastSeen == 0 || (scope != nil && !scope(key, entry)) {
 			continue
 		}
 		if entry.LastSeen > now {
@@ -3007,6 +3038,7 @@ func (m *MapOperations) GetBdPeer(bdID, index uint16) (*HeadendEntry, error) {
 // existed=true means a DIFFERENT entry occupies the slot (nothing deleted);
 // a transient read failure is an error, never a mismatch.
 func (m *MapOperations) DeleteBdPeerIfFirstSegment(bdID, index uint16, seg [IPv6AddrLen]byte) (existed, matched bool, err error) {
+	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	var cur HeadendEntry
@@ -3256,6 +3288,13 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 	// Snapshot and delete under one critical section: a slot deleted and
 	// re-created by a concurrent writer between the two would otherwise be
 	// flushed as if it were the snapshotted peer.
+	// One devmap rebuild per BD touched, not per peer, after the lock.
+	touched := map[uint16]struct{}{}
+	defer func() {
+		for bd := range touched {
+			m.resyncBum(bd)
+		}
+	}()
 	m.bdPeerLifecycle.Lock()
 	defer m.bdPeerLifecycle.Unlock()
 	var (
@@ -3289,6 +3328,7 @@ func (m *MapOperations) FlushBdPeers(bdID uint16) (uint32, error) {
 		if owned && tag != OwnerRPC {
 			continue
 		}
+		touched[key.BdId] = struct{}{}
 		existed, err := m.deleteBdPeerOwnedLocked(key.BdId, key.Index, OwnerRPC)
 		if err != nil {
 			return count, fmt.Errorf("flush bd_peer: delete bd=%d idx=%d: %w",

@@ -96,6 +96,8 @@ func clearMap(m *ebpf.Map) error {
 		return err
 	}
 	switch info.Type {
+	case ebpf.RingBuf:
+		return nil // no keys; a test drains what it reads
 	case ebpf.Array, ebpf.PerCPUArray:
 		return zeroArray(m, info)
 	default:

@@ -28,6 +28,12 @@ type BpfAuxOwner struct {
 	Tag [64]int8
 }
 
+type BpfBdConfig struct {
+	_       structs.HostLayout
+	BumMode uint8
+	Pad     [3]uint8
+}
+
 type BpfBdLocalEsiVal struct {
 	_   structs.HostLayout
 	Esi [10]uint8
@@ -64,6 +70,33 @@ type BpfBdPeerReverseVal struct {
 	Index uint16
 	Esi   [10]uint8
 	Pad   [4]uint8
+}
+
+type BpfBumPlan struct {
+	_          structs.HostLayout
+	Seq        uint64
+	Data       uint64
+	SrcIfindex uint32
+	BdId       uint16
+	Len        uint16
+	N_uplinks  uint8
+	Shared     uint8
+	Pad        [6]uint8
+	Up         [8]struct {
+		_       structs.HostLayout
+		Ifindex uint32
+		Slots   uint8
+		N       uint8
+		NextIdx uint8
+		Local   uint8
+	}
+}
+
+type BpfBumTestParams struct {
+	_              structs.HostLayout
+	IngressIfindex uint32
+	EgressIfindex  uint32
+	SameBuffer     uint32
 }
 
 type BpfDx2vEntry struct {
@@ -314,6 +347,8 @@ type BpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfProgramSpecs struct {
+	BumRemoteEgress                *ebpf.ProgramSpec `ebpf:"bum_remote_egress"`
+	BumRemoteEgressTest            *ebpf.ProgramSpec `ebpf:"bum_remote_egress_test"`
 	TailcallEndpointEnd            *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end"`
 	TailcallEndpointEndAd          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_ad"`
 	TailcallEndpointEndAm          *ebpf.ProgramSpec `ebpf:"tailcall_endpoint_end_am"`
@@ -366,11 +401,17 @@ type BpfProgramSpecs struct {
 type BpfMapSpecs struct {
 	AdCacheMap             *ebpf.MapSpec `ebpf:"ad_cache_map"`
 	AuxOwnerMap            *ebpf.MapSpec `ebpf:"aux_owner_map"`
+	BdConfigMap            *ebpf.MapSpec `ebpf:"bd_config_map"`
 	BdLocalEsiMap          *ebpf.MapSpec `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap         *ebpf.MapSpec `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap              *ebpf.MapSpec `ebpf:"bd_peer_map"`
 	BdPeerOwnerMap         *ebpf.MapSpec `ebpf:"bd_peer_owner_map"`
 	BdPeerReverseMap       *ebpf.MapSpec `ebpf:"bd_peer_reverse_map"`
+	BumFloodMap            *ebpf.MapSpec `ebpf:"bum_flood_map"`
+	BumLocalMap            *ebpf.MapSpec `ebpf:"bum_local_map"`
+	BumPlanRing            *ebpf.MapSpec `ebpf:"bum_plan_ring"`
+	BumSeq                 *ebpf.MapSpec `ebpf:"bum_seq"`
+	BumTestParamsMap       *ebpf.MapSpec `ebpf:"bum_test_params_map"`
 	Dx2vMap                *ebpf.MapSpec `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.MapSpec `ebpf:"ecmp_group_map"`
 	EcmpGroupOwnerMap      *ebpf.MapSpec `ebpf:"ecmp_group_owner_map"`
@@ -378,6 +419,7 @@ type BpfMapSpecs struct {
 	EcmpPathMap            *ebpf.MapSpec `ebpf:"ecmp_path_map"`
 	EsiMap                 *ebpf.MapSpec `ebpf:"esi_map"`
 	EsiPeerMap             *ebpf.MapSpec `ebpf:"esi_peer_map"`
+	FdbEventRb             *ebpf.MapSpec `ebpf:"fdb_event_rb"`
 	FdbMap                 *ebpf.MapSpec `ebpf:"fdb_map"`
 	FdbOwnerMap            *ebpf.MapSpec `ebpf:"fdb_owner_map"`
 	HeadendL2ExtMap        *ebpf.MapSpec `ebpf:"headend_l2_ext_map"`
@@ -417,7 +459,9 @@ type BpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfVariableSpecs struct {
-	EnableStats *ebpf.VariableSpec `ebpf:"enable_stats"`
+	BumModeDefault *ebpf.VariableSpec `ebpf:"bum_mode_default"`
+	BumXdpEnabled  *ebpf.VariableSpec `ebpf:"bum_xdp_enabled"`
+	EnableStats    *ebpf.VariableSpec `ebpf:"enable_stats"`
 }
 
 // BpfObjects contains all objects after they have been loaded into the kernel.
@@ -442,11 +486,17 @@ func (o *BpfObjects) Close() error {
 type BpfMaps struct {
 	AdCacheMap             *ebpf.Map `ebpf:"ad_cache_map"`
 	AuxOwnerMap            *ebpf.Map `ebpf:"aux_owner_map"`
+	BdConfigMap            *ebpf.Map `ebpf:"bd_config_map"`
 	BdLocalEsiMap          *ebpf.Map `ebpf:"bd_local_esi_map"`
 	BdPeerL2ExtMap         *ebpf.Map `ebpf:"bd_peer_l2_ext_map"`
 	BdPeerMap              *ebpf.Map `ebpf:"bd_peer_map"`
 	BdPeerOwnerMap         *ebpf.Map `ebpf:"bd_peer_owner_map"`
 	BdPeerReverseMap       *ebpf.Map `ebpf:"bd_peer_reverse_map"`
+	BumFloodMap            *ebpf.Map `ebpf:"bum_flood_map"`
+	BumLocalMap            *ebpf.Map `ebpf:"bum_local_map"`
+	BumPlanRing            *ebpf.Map `ebpf:"bum_plan_ring"`
+	BumSeq                 *ebpf.Map `ebpf:"bum_seq"`
+	BumTestParamsMap       *ebpf.Map `ebpf:"bum_test_params_map"`
 	Dx2vMap                *ebpf.Map `ebpf:"dx2v_map"`
 	EcmpGroupMap           *ebpf.Map `ebpf:"ecmp_group_map"`
 	EcmpGroupOwnerMap      *ebpf.Map `ebpf:"ecmp_group_owner_map"`
@@ -454,6 +504,7 @@ type BpfMaps struct {
 	EcmpPathMap            *ebpf.Map `ebpf:"ecmp_path_map"`
 	EsiMap                 *ebpf.Map `ebpf:"esi_map"`
 	EsiPeerMap             *ebpf.Map `ebpf:"esi_peer_map"`
+	FdbEventRb             *ebpf.Map `ebpf:"fdb_event_rb"`
 	FdbMap                 *ebpf.Map `ebpf:"fdb_map"`
 	FdbOwnerMap            *ebpf.Map `ebpf:"fdb_owner_map"`
 	HeadendL2ExtMap        *ebpf.Map `ebpf:"headend_l2_ext_map"`
@@ -493,11 +544,17 @@ func (m *BpfMaps) Close() error {
 	return _BpfClose(
 		m.AdCacheMap,
 		m.AuxOwnerMap,
+		m.BdConfigMap,
 		m.BdLocalEsiMap,
 		m.BdPeerL2ExtMap,
 		m.BdPeerMap,
 		m.BdPeerOwnerMap,
 		m.BdPeerReverseMap,
+		m.BumFloodMap,
+		m.BumLocalMap,
+		m.BumPlanRing,
+		m.BumSeq,
+		m.BumTestParamsMap,
 		m.Dx2vMap,
 		m.EcmpGroupMap,
 		m.EcmpGroupOwnerMap,
@@ -505,6 +562,7 @@ func (m *BpfMaps) Close() error {
 		m.EcmpPathMap,
 		m.EsiMap,
 		m.EsiPeerMap,
+		m.FdbEventRb,
 		m.FdbMap,
 		m.FdbOwnerMap,
 		m.HeadendL2ExtMap,
@@ -545,13 +603,17 @@ func (m *BpfMaps) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfVariables struct {
-	EnableStats *ebpf.Variable `ebpf:"enable_stats"`
+	BumModeDefault *ebpf.Variable `ebpf:"bum_mode_default"`
+	BumXdpEnabled  *ebpf.Variable `ebpf:"bum_xdp_enabled"`
+	EnableStats    *ebpf.Variable `ebpf:"enable_stats"`
 }
 
 // BpfPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfPrograms struct {
+	BumRemoteEgress                *ebpf.Program `ebpf:"bum_remote_egress"`
+	BumRemoteEgressTest            *ebpf.Program `ebpf:"bum_remote_egress_test"`
 	TailcallEndpointEnd            *ebpf.Program `ebpf:"tailcall_endpoint_end"`
 	TailcallEndpointEndAd          *ebpf.Program `ebpf:"tailcall_endpoint_end_ad"`
 	TailcallEndpointEndAm          *ebpf.Program `ebpf:"tailcall_endpoint_end_am"`
@@ -600,6 +662,8 @@ type BpfPrograms struct {
 
 func (p *BpfPrograms) Close() error {
 	return _BpfClose(
+		p.BumRemoteEgress,
+		p.BumRemoteEgressTest,
 		p.TailcallEndpointEnd,
 		p.TailcallEndpointEndAd,
 		p.TailcallEndpointEndAm,

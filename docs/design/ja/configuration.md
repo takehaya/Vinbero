@@ -121,7 +121,7 @@ settings:
 
 ### `settings.fdb_aging_seconds`
 
-End.DT2 の FDB エントリを aging で削除する秒数。`0` で aging 無効 (静的 FDB のみ)。
+End.DT2 の FDB エントリを aging で削除する秒数。`0` で aging 無効 (静的 FDB のみ)。ただし `settings.l2.bum_mode: xdp` の BD のローカルの MAC は、`0` のときも bridge の既定と同じ 300 秒で消します ([bum_mode.md](bum_mode.md) 参照)。
 
 | 型 | デフォルト |
 |---|---|
@@ -130,6 +130,25 @@ End.DT2 の FDB エントリを aging で削除する秒数。`0` で aging 無�
 ```yaml
 settings:
   fdb_aging_seconds: 300
+```
+
+### `settings.l2.*`
+
+Bridge Domain の BUM 複製モード。詳細は [bum_mode.md](bum_mode.md) を参照してください。
+
+| フィールド | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `bum_mode` | string | `tc` | 全 BD の既定。`tc` か `xdp`。`xdp` は `internal.bpf.device_mode: generic` が必要で、PREEMPT_RT のカーネルでは使えない。generic XDP の broadcast のコピーがバッファを共有するカーネルでは、起動時に検出して tc で動く |
+| `bridge_domains[].bd_id` | int | - | 上書きする BD |
+| `bridge_domains[].bum_mode` | string | 既定に従う | その BD のモード |
+
+```yaml
+settings:
+  l2:
+    bum_mode: xdp
+    bridge_domains:
+      - bd_id: 200
+        bum_mode: tc
 ```
 
 ### `settings.entries.*.capacity`

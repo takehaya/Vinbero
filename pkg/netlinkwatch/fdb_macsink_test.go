@@ -14,10 +14,11 @@ import (
 // fakeFdbMapOps records FDB writes without a live BPF map (the MAC string of
 // each create/delete).
 type fakeFdbMapOps struct {
-	created   []string           // mac.String() of each LearnFdb
-	deleted   []string           // mac.String() of each DeleteLearnedFdb
-	createErr error              // when set, LearnFdb fails (dataplane sync failure)
-	aged      []bpf.AgedFdbEntry // returned by AgeFdbEntries (the entries it removed)
+	created   []string                      // mac.String() of each LearnFdb
+	deleted   []string                      // mac.String() of each DeleteLearnedFdb
+	createErr error                         // when set, LearnFdb fails (dataplane sync failure)
+	aged      []bpf.AgedFdbEntry            // returned by AgeFdbEntries (the entries it removed)
+	local     map[uint16][]net.HardwareAddr // returned by ListLocalDynamicFdb (XDP-learned MACs)
 }
 
 func (f *fakeFdbMapOps) LearnFdb(bdID uint16, mac net.HardwareAddr, _ uint32) (bool, error) {
@@ -32,6 +33,21 @@ func (f *fakeFdbMapOps) DeleteLearnedFdb(bdID uint16, mac net.HardwareAddr, _ ui
 	return nil
 }
 func (f *fakeFdbMapOps) AgeFdbEntries(uint64) ([]bpf.AgedFdbEntry, error) { return f.aged, nil }
+func (f *fakeFdbMapOps) AgeLocalFdbEntries(_ uint64, inBD func(uint16) bool) ([]bpf.AgedFdbEntry, error) {
+	var out []bpf.AgedFdbEntry
+	for _, a := range f.aged {
+		if !a.IsRemote && inBD(a.BDID) {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+func (f *fakeFdbMapOps) ListLocalDynamicFdb(bdID uint16) (map[uint16][]net.HardwareAddr, error) {
+	if bdID == 0 {
+		return f.local, nil
+	}
+	return map[uint16][]net.HardwareAddr{bdID: f.local[bdID]}, nil
+}
 
 type macEvent struct {
 	bdID  uint16
