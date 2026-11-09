@@ -12,6 +12,7 @@ test は次を確認します。
 - 各 PE が相手の pod の /32 を、相手の locator の service SID 付きで import し、PE をまたいだ pod 間と同じ PE 内の pod 間で ping が通る
 - 配線済みの pod で CHECK が通り、DEL の後は失敗する
 - PE2 の再起動後に veth が attach し直され、pod2 の /32 が再び広告される
+- DEL の前に veth が消えても、他の pod の ADD と DEL は止まらない
 - DEL で /32 が withdraw され、veth が detach と削除され、AC が外れ、アドレスが解放される。2 回目の DEL も成功する
 
 `host-local` は `$CNI_PLUGIN_DIR`、`/opt/cni/bin`、`/usr/lib/cni` の順に探します (Debian / Ubuntu では `apt install containernetworking-plugins`)。

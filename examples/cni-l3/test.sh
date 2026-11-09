@@ -262,7 +262,12 @@ check "pod2 -> pod1b still works" ping_from "$POD2" "$ip1b"
 check "DEL pod1 again succeeds" cni 1 DEL $POD1
 check_not "CHECK pod1 after DEL fails" cni 1 CHECK $POD1
 
-check "DEL pod1b" cni 1 DEL $POD1B
+# pod1b's veth vanishes before its DEL: its stale AC must not block the other
+# pods' AC changes.
+ip -n "$PE1" link del "$(host_veth "$POD1B")"
+check "ADD with a vanished veth's AC present" cni_add 1 "$POD1"
+check "DEL pod1 with a vanished veth's AC present" cni 1 DEL $POD1
+check "DEL pod1b after its veth vanished" cni 1 DEL $POD1B
 check "DEL pod2" cni 2 DEL $POD2
 eventually "PE1 withdrew pod2's /32" no_headend_to 1 "$ip2"
 check "only the config device is left (PE1)" only_config_device 1

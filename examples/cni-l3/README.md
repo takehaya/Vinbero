@@ -22,6 +22,7 @@ The test checks that:
 - CHECK passes on a wired pod and fails after DEL
 - after a PE2 restart the veth is attached again and pod2's /32 is
   advertised again
+- a veth that vanishes before its DEL does not block other pods' ADD and DEL
 - DEL withdraws the /32, detaches and deletes the veth, removes the AC and
   releases the address; a second DEL succeeds
 
