@@ -104,7 +104,7 @@ settings:
     path: /sys/fs/bpf/vinbero
 ```
 
-pin 対象: `sid_function_map` / `sid_aux_map` / `headend_v4_map` / `headend_v6_map` / `headend_l2_map` / `fdb_map` / `bd_peer_map` / `bd_peer_reverse_map` / `dx2v_map` の 9 本。stats / slot_stats / PROG_ARRAY 等は pin しません。
+pin 対象は `pkg/bpf/bpf.go` の `pinnedControlMaps` に並ぶ制御マップです。SID (`sid_function_map`、`sid_aux_map`)、headend (`headend_v4_map`、`headend_v6_map`、`headend_l2_map`)、FDB と bd_peer、MUP F-TEID、`dx2v_map`、`sr_policy_map`、ECMP group、`service_ingress_map` と、それぞれの owner map がこれにあたります。stats / slot_stats / PROG_ARRAY / `ecmp_live_map` などは pin しません。既存の pin を使える条件 (key サイズを含む) は [persistence.md](persistence.md#pin-の互換条件) を参照してください。
 
 ### `settings.state_path`
 

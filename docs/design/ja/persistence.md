@@ -86,7 +86,7 @@ SRv6 制御状態 (`sid_function_map`, `sid_aux_map`, `headend_*_map`, `fdb_map`
 cilium/ebpf の `PinByName` で、対象の制御マップ (`pkg/bpf/bpf.go` の `pinnedControlMaps`) を `/sys/fs/bpf/<path>/<map_name>` に pin します (`path` はデフォルト `/sys/fs/bpf/vinbero`)。
 
 挙動:
-- **daemon 起動時**: pin dir に map が無ければ新規作成して pin、既にあれば既存 map を reuse
+- **daemon 起動時**: pin dir に map が無ければ新規作成して pin、既にあれば [互換条件](#pin-の互換条件) を確かめて既存 map を reuse
 - **daemon 終了時**: ユーザ側 FD は閉じるが、bpffs の pin が FD を保持しているため **kernel map は生き残る**
 - **daemon 再起動**: 同じ pin dir を指定すれば、前回書き込んだエントリは全部見える
 
@@ -115,9 +115,31 @@ pin されるのはマップだけで、control plane 側の採番状態は再�
 
 生き残った id は使い切りで、対応する policy が再広告されると新しい id を取ります。id は uint32 なので枯渇は実質問題になりません。
 
-### 破壊的変更時の注意
+### pin の互換条件
 
-**schema / capacity を変えたときは pin dir を削除**してください。BPF map の `max_entries` や value サイズは作成後に変更不可なので、cilium/ebpf は pin された既存 map と spec の不一致を見ると load エラーを返します。
+起動時に pin dir に同じ名前の map があると、Vinbero はそれを使う前に、この build が宣言する map と次の 5 点が一致するかを確かめます。
+
+- map の型
+- key のサイズ
+- value のサイズ
+- `max_entries`
+- flags
+
+これらは BPF map の作成後に変えられないため、1 つでも違えば load は失敗し、daemon は起動しません。pin された map を自動で削除したり、entry を別の layout に変換したりはしません。エラーには合わない map の名前と pin dir、cilium/ebpf が報告する差分 (例: `KeySize: 8 changed to 12`) が出ます。
+
+```
+pinned maps in /sys/fs/bpf/vinbero do not match this build (headend_v4_map, headend_v4_owner_map): stop vinberod, remove the pin directory and apply the configuration again: ...
+```
+
+key のサイズも互換条件に含まれます。たとえば `headend_v4_map` / `headend_v6_map` とそれぞれの owner map の key は `{prefixlen, vrf_id, prefix}` で、IPv4 が 12 byte、IPv6 が 24 byte です (layout は [plugin-sdk.md](plugin-sdk.md#headend-map-の-key) を参照)。key の layout が違う build で作られた pin は、本体と owner map のどちらも key サイズの不一致で拒否されます。本体だけを消しても起動は直りません。
+
+不一致になる典型は次のとおりです。
+
+- `settings.entries.*.capacity` を変えた (`max_entries` が変わる)
+- map の key か value の struct layout が違う Vinbero に入れ替えた。plugin SDK の `VINBERO_SDK_VERSION` が BREAKING として上がる版がこれにあたります
+- マップ名が変わった (古い pin は使われずに残ります)
+
+不一致のときは daemon を止めて pin dir を削除し、起動してから状態を入れ直してください。
 
 ```bash
 sudo systemctl stop vinberod
@@ -125,12 +147,7 @@ sudo rm -rf /sys/fs/bpf/vinbero
 sudo systemctl start vinberod
 ```
 
-典型的にハマる場面:
-- `settings.entries.*.capacity` を変更した
-- Vinbero をアップグレードして BPF struct layout が変わった (例: plugin SDK v2 で `sid_function_entry` が 12B → 4B、SDK v4 で `headend_entry` が 204B → 208B)
-- マップ名が変わった
-
-ECMP path group の導入 (plugin SDK v4) で `headend_entry` のサイズが変わったため、pin_maps を有効にしたまま v4 より前の Vinbero から in-place upgrade すると headend 系と `bd_peer_map` の pin が不一致で load に失敗します。上の手順で pin dir を削除してから起動してください。
+pin dir を消すと、SID、headend、owner、SR Policy、ECMP group など、pin されていた制御状態がすべて消えます。RPC や vbctl で入れた entry と plugin の宣言は投入し直し、BGP 由来の entry は session が上がって経路を受け直すと戻ります。
 
 ### Aux index の allocator recovery
 

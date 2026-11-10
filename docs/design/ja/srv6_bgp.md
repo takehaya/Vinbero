@@ -56,7 +56,7 @@ flowchart LR
 - BGP speaker: default では gobgp を in-process で動かして実現します。gobgp が peer と VPNv4/VPNv6 を交換し、受信した経路を route handler へ渡します。BGP speaker は差し替え可能な interface で、gobgp はその default 実装です。
 - route handler (applier): 受信経路ごとに RD・prefix・service SID・RT・next hop を取り出します。
 - VRF と RT の対応: VRF ごとの RT は config か RPC で事前に登録し、VRF 名を鍵にした in-memory の map で保持します。binding は family (vpnv4 / vpnv6 / evpn / mup_ipv4 / mup_ipv6) ごとに RT と import/export の方向を持てます。applier は経路の RT を該当 family の import RT と照合し、どれにも一致しない経路を落とします。
-- encap entry の生成: 一致した経路を H.Encaps の headend エントリ (segments = [service SID]) に変換し、prefix を鍵にした eBPF の LPM trie (headend map) へ書きます。書き込みには owner tag を付け、後で同じ owner の経路だけを正確に withdraw できるようにします。
+- encap entry の生成: 一致した経路を H.Encaps の headend エントリ (segments = [service SID]) に変換し、{vrf_id, prefix} を鍵にした eBPF の LPM trie (headend map) へ、vrf_id 0 (global VRF) で書きます。書き込みには owner tag を付け、後で同じ owner の経路だけを正確に withdraw できるようにします。
 - encap source: outer の送信元 IPv6 は、設定したローカル locator の prefix から取ります。
 
 BGP の UPDATE は属性全体の暗黙の置換なので、applier は追跡済み NLRI の再広告が使えない内容になったときも withdraw と同じ撤去を行います。service SID が使えなくなった再広告 (空のほか、全ゼロの `::` のような routable でない値。decode 時の検証で不正と判定された場合を含む) は、L3VPN の headend エントリ、EVPN RT2 の FDB / bd_peer、RT3 の flood bd_peer、per-EVI A-D の aliasing 寄与、MUP ISD/DSD の discovery とその解決先のセッションを撤去してから読み飛ばします。EVPN RT2/RT3 の撤去は、その状態を教えた PE (next hop) からの再広告に限定します (per-EVI A-D は従来どおり NLRI 単位で撤去します)。RT がどの import filter にも一致しなくなった再広告の撤去は、filter を持つ経路種別、つまり L3VPN、EVPN RT2/RT3 と per-EVI A-D (bridge-domain binding 不一致)、MUP の session route (T1ST/T2ST) に適用します。MUP の discovery route (ISD/DSD) は cross-VRF 解決のため import-RT filter を意図的に迂回するので、RT 不一致による撤去はありません。
@@ -70,7 +70,7 @@ flowchart LR
         VRFRT["VRF↔RT map<br/>VRF 名 → import/export RT"]
         LOC["locator<br/>encap source prefix"]
     end
-    HM["headend map<br/>eBPF LPM trie (prefix 鍵)<br/>+ owner tag"]
+    HM["headend map<br/>eBPF LPM trie ({vrf_id 0, prefix} 鍵)<br/>+ owner tag"]
     XDP["XDP data plane<br/>H.Encaps / decap"]
 
     PEER -->|VPNv4/v6 UPDATE| SPK

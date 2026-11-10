@@ -479,8 +479,9 @@ binding が変わった時点で再導出します。unbind も同じで、bindi
 
 ### headend だけ prefix で縛る
 
-`headend_v4_map` の key は `lpm_key_v4` で prefixlen と addr しか持たず、
-VRF も locator も key に入りません。名前で縛れる対象が無いので、operator が
+`headend_v4_map` の key は `{vrf_id, prefix}` ですが、headend の entry は
+すべて vrf_id 0 (global VRF) に書かれ、plugin の宣言も VRF を指定できません。
+locator も key に入りません。名前で縛れる対象が無いので、operator が
 prefix を並べます。未指定なら headend の宣言を拒否するので、`::/0` の
 catch-all は書けません。
 
