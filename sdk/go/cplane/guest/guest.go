@@ -30,10 +30,8 @@ func Register(h Handlers) {
 	handlers, registered = h, true
 }
 
-// abiVersion is the ABI this SDK speaks: 2 carries a headend entry's VRF.
-//
 //go:wasmexport vinbero_abi_version
-func abiVersion() uint32 { return 2 }
+func abiVersion() uint32 { return 1 }
 
 //go:wasmexport alloc
 func alloc(size uint32) uint32 {
@@ -171,3 +169,7 @@ func (Host) Put(gen uint64, chunk []byte) cplane.Status {
 }
 func (Host) Commit(gen uint64) cplane.Status { return cplane.Status(hostCommit(gen)) }
 func (Host) Abort(gen uint64)                { hostAbort(gen) }
+
+// Features reports what the host implements (InputFeatures); the Client
+// checks it before it sends a headend entry naming a VRF.
+func (Host) Features() uint64 { return hostInputFeatures() }

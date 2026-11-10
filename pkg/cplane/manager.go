@@ -21,6 +21,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/headend"
+	"github.com/takehaya/vinbero/pkg/vrf"
 )
 
 // EventSource is the demux a plugin subscribes to. Only what the manager
@@ -141,7 +142,7 @@ type Manager struct {
 	retryForwardingCleanup func()
 	services               *compositionMaps
 	resolveMUPInstance     func(string) (uint32, error)
-	vrfs                   VRFDirectory
+	vrfs                   vrf.Directory
 	source                 EventSource
 	snapshots              SnapshotSource
 	claims                 BehaviorClaims
@@ -256,7 +257,7 @@ type ManagerConfig struct {
 	Claims BehaviorClaims
 	// VRFs resolves the VRF a headend declaration names. Nil refuses every
 	// VRF but the global one.
-	VRFs VRFDirectory
+	VRFs vrf.Directory
 	// Headend is the map surface plugin declarations reconcile into.
 	Headend HeadendMapOps
 	// HeadendReconciler is the shared host writer. Supply it instead of Headend

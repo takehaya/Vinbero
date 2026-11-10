@@ -118,6 +118,14 @@ type recordingHost struct {
 	putStatus, commitStatus cplane.Status
 }
 
+// featureRecordingHost is a recordingHost that reports host features.
+type featureRecordingHost struct {
+	*recordingHost
+	features uint64
+}
+
+func (h featureRecordingHost) Features() uint64 { return h.features }
+
 func (h *recordingHost) Begin(kind cplane.Kind) uint64 {
 	h.begins++
 	h.kind = kind
@@ -164,7 +172,7 @@ func TestTypedDeclarationsMatchHostProtobuf(t *testing.T) {
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			host := &recordingHost{}
-			if err := tt.apply(&cplane.Client{Host: host}); err != nil {
+			if err := tt.apply(&cplane.Client{Host: featureRecordingHost{host, cplane.FeatureHeadendVRF}}); err != nil {
 				t.Fatal(err)
 			}
 			if host.kind != tt.kind || host.commits != 1 || host.aborts != 0 || len(host.chunks) != 1 {
@@ -253,5 +261,49 @@ func TestDeclarationFailureClosesStagingAndEmptySetStillCommits(t *testing.T) {
 				t.Fatalf("failed transport: %+v", host)
 			}
 		})
+	}
+}
+
+// A headend entry naming a VRF is sent only to a host that reports
+// FeatureHeadendVRF. Any other host would ignore the field and write the
+// entry into the global VRF, so the declaration fails before anything is
+// sent. An entry naming no VRF, or "global", goes to any host.
+func TestHeadendVRFNeedsTheHostFeature(t *testing.T) {
+	named := []cplane.HeadendEntry{{TriggerPrefix: "10.0.0.0/24", Segments: []string{"fc00::1"}}, {TriggerPrefix: "10.0.1.0/24", Segments: []string{"fc00::1"}, VRF: "vpn-a"}}
+	plain := []cplane.HeadendEntry{{TriggerPrefix: "10.0.0.0/24", Segments: []string{"fc00::1"}, VRF: "global"}}
+	for _, tc := range []struct {
+		name string
+		host func(*recordingHost) cplane.Host
+	}{
+		{"no feature interface", func(h *recordingHost) cplane.Host { return h }},
+		{"feature bit clear", func(h *recordingHost) cplane.Host {
+			return featureRecordingHost{h, cplane.FeatureBGPPath | cplane.FeatureInputContexts}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &recordingHost{}
+			c := &cplane.Client{Host: tc.host(h)}
+			if err := c.ApplyHeadendV4(named); !errors.Is(err, cplane.ErrNoHeadendVRF) {
+				t.Errorf("v4 set naming a VRF = %v, want ErrNoHeadendVRF", err)
+			}
+			if err := c.ApplyHeadendV6([]cplane.HeadendEntry{{TriggerPrefix: "2001:db8::/64", Segments: []string{"fc00::1"}, VRF: "vpn-a"}}); !errors.Is(err, cplane.ErrNoHeadendVRF) {
+				t.Errorf("v6 set naming a VRF = %v, want ErrNoHeadendVRF", err)
+			}
+			set := cplane.Composition{Revision: 1, Headends: []cplane.ForwardingHeadend{{Context: "c", Entry: named[1]}}}
+			if err := c.ApplyComposition(set); !errors.Is(err, cplane.ErrNoHeadendVRF) {
+				t.Errorf("composition naming a VRF = %v, want ErrNoHeadendVRF", err)
+			}
+			if h.begins != 0 || len(h.chunks) != 0 {
+				t.Errorf("sent to the host: %d begins, %d chunks", h.begins, len(h.chunks))
+			}
+			if err := c.ApplyHeadendV4(plain); err != nil || h.commits != 1 {
+				t.Errorf("set naming no VRF = %v, %d commits", err, h.commits)
+			}
+		})
+	}
+	h := &recordingHost{}
+	c := &cplane.Client{Host: featureRecordingHost{h, cplane.FeatureHeadendVRF}}
+	if err := c.ApplyHeadendV4(named); err != nil || h.commits != 1 {
+		t.Errorf("set naming a VRF on a host with the feature = %v, %d commits", err, h.commits)
 	}
 }

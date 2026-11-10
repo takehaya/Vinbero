@@ -27,6 +27,10 @@ type host struct {
 // vinbero.grants, so both backends hand the controller identical values.
 func (h *host) Grants() (cplane.Grants, error) { return cplane.DecodeGrants(h.grants) }
 
+// Features reports what the host implements, the bitmap a WASM guest reads
+// through vinbero.input_features.
+func (h *host) Features() uint64 { return wasm.HostFeatures }
+
 func (h *host) canceled() bool { return h.active == nil || h.active.Err() != nil }
 
 func (h *host) Begin(kind cplane.Kind) uint64 {

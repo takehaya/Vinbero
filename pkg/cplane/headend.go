@@ -19,65 +19,79 @@ const (
 	AFv6 = headend.AFv6
 )
 
-// VRFDirectory resolves the VRF a headend declaration names to the vrf_id
-// its entry is keyed by. *vrf.Manager satisfies it.
-type VRFDirectory interface {
-	// LookupID resolves a name without creating the VRF: "" and "global"
-	// are vrf 0, an unknown name is an error.
-	LookupID(name string) (uint32, error)
-	// NameOf names the VRF holding id.
-	NameOf(id uint32) (string, bool)
-	// HoldIDs keeps every VRF from being deleted until release is called.
-	HoldIDs() (release func())
-}
-
 // errNoVRFDirectory refuses a VRF name on a host that resolves none.
 var errNoVRFDirectory = fmt.Errorf("this daemon resolves no VRF names for headend entries")
 
-// resolveHeadendVRFs returns entries with each one's VRF set to the id of
-// the name at the same index, and holds the VRFs against deletion until
-// release is called; the caller writes the entries before it does. A set
-// naming only the global VRF comes back as it is, with no hold. An unknown
-// VRF refuses the set, as an unknown locator does: no VRF is created, and
-// the retry that follows a failed apply tries again.
-func resolveHeadendVRFs(vrfs VRFDirectory, entries []HeadendDesired, names []string) ([]HeadendDesired, func(), error) {
-	named := false
-	for _, name := range names {
-		if !isGlobalVRFName(name) {
-			named = true
-			break
+// declaredHeadend is one headend entry as the plugin declared it: the
+// entry and the name of the VRF it named. The name is resolved to the
+// vrf_id the entry is keyed by (HeadendDesired.VRF) when the set is
+// written, so the two travel together.
+type declaredHeadend struct {
+	HeadendDesired
+	VRFName string
+}
+
+// namesVRF reports whether any entry names a VRF other than the global one.
+func namesVRF(sets ...[]declaredHeadend) bool {
+	for _, set := range sets {
+		for _, d := range set {
+			if !vrf.IsGlobalName(d.VRFName) {
+				return true
+			}
 		}
 	}
-	if !named {
-		return entries, func() {}, nil
-	}
-	if vrfs == nil {
-		return nil, nil, errNoVRFDirectory
-	}
-	release := vrfs.HoldIDs()
-	out := make([]HeadendDesired, len(entries))
-	for i, e := range entries {
-		out[i] = e
-		if i >= len(names) || isGlobalVRFName(names[i]) {
-			out[i].VRF = vrf.GlobalVRFID
+	return false
+}
+
+// resolveDeclared returns the entries with each one's VRF id looked up
+// from its name. An unknown VRF refuses the set; no VRF is created. The
+// host does not keep a refused set: the plugin declares it again once the
+// VRF exists.
+func resolveDeclared(vrfs vrf.Directory, set []declaredHeadend) ([]HeadendDesired, error) {
+	out := make([]HeadendDesired, len(set))
+	for i, d := range set {
+		out[i] = d.HeadendDesired
+		out[i].VRF = vrf.GlobalVRFID
+		if vrf.IsGlobalName(d.VRFName) {
 			continue
 		}
-		id, err := vrfs.LookupID(names[i])
+		if vrfs == nil {
+			return nil, errNoVRFDirectory
+		}
+		id, err := vrfs.LookupID(d.VRFName)
 		if err != nil {
-			release()
-			return nil, nil, fmt.Errorf("headend entry for %q: %w", e.TriggerPrefix, err)
+			return nil, fmt.Errorf("headend entry for %q: %w", d.TriggerPrefix, err)
 		}
 		out[i].VRF = id
+	}
+	return out, nil
+}
+
+// holdDeclared takes the VRF hold a write of these sets needs: it holds the
+// VRFs against the start of their deletion and resolves the names, and the
+// caller writes the result and then releases, doing nothing else in
+// between. A set naming only the global VRF takes no hold.
+func holdDeclared(vrfs vrf.Directory, sets ...[]declaredHeadend) (out [][]HeadendDesired, release func(), err error) {
+	release = func() {}
+	if namesVRF(sets...) && vrfs != nil {
+		release = vrfs.HoldIDs()
+	}
+	for _, set := range sets {
+		resolved, err := resolveDeclared(vrfs, set)
+		if err != nil {
+			release()
+			return nil, nil, err
+		}
+		out = append(out, resolved)
 	}
 	return out, release, nil
 }
 
-// headendVRFName names the VRF of an entry the plugin already holds, for
-// re-checking it against the scope: "" for the global VRF, false for an id
-// no VRF holds.
-func headendVRFName(vrfs VRFDirectory, id uint32) (string, bool) {
+// heldVRFName names the VRF of an entry the plugin already holds, for
+// re-checking it against the scope; false for an id no VRF holds.
+func heldVRFName(vrfs vrf.Directory, id uint32) (string, bool) {
 	if id == vrf.GlobalVRFID {
-		return "", true
+		return vrf.GlobalVRFName, true
 	}
 	if vrfs == nil {
 		return "", false

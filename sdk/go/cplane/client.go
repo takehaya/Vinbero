@@ -30,6 +30,10 @@ var (
 	ErrNoHost        = errors.New("cplane: no host configured")
 	ErrBeginRefused  = errors.New("cplane: host refused to open declaration")
 	ErrEntryTooLarge = errors.New("cplane: entry exceeds chunk size")
+	// ErrNoHeadendVRF refuses a headend entry naming a VRF for a host that
+	// does not report FeatureHeadendVRF: it would write the entry into the
+	// global VRF. Nothing is sent.
+	ErrNoHeadendVRF = errors.New("cplane: this host does not place headend entries in a named VRF (no headend VRF feature); declare the entry without a VRF or use a daemon that has the feature")
 )
 
 type ApplyError struct {
@@ -53,10 +57,39 @@ type Client struct {
 }
 
 func (c *Client) ApplyHeadendV4(entries []HeadendEntry) error {
+	if err := c.checkHeadendVRFs(entries); err != nil {
+		return err
+	}
 	return c.apply(HeadendV4, len(entries), func(i int) []byte { return encodeHeadend(entries[i]) })
 }
 func (c *Client) ApplyHeadendV6(entries []HeadendEntry) error {
+	if err := c.checkHeadendVRFs(entries); err != nil {
+		return err
+	}
 	return c.apply(HeadendV6, len(entries), func(i int) []byte { return encodeHeadend(entries[i]) })
+}
+
+// FeatureHost is a Host that reports what it implements (the
+// input_features bitmap). guest.Host is one.
+type FeatureHost interface {
+	Features() uint64
+}
+
+// checkHeadendVRFs refuses entries naming a VRF unless the host reports
+// FeatureHeadendVRF. A host that does not would ignore the field and write
+// the entry into the global VRF. An entry naming no VRF, or "global",
+// needs nothing from the host.
+func (c *Client) checkHeadendVRFs(entries []HeadendEntry) error {
+	for _, e := range entries {
+		if e.VRF == "" || e.VRF == "global" {
+			continue
+		}
+		if fh, ok := c.Host.(FeatureHost); ok && fh.Features()&FeatureHeadendVRF != 0 {
+			return nil
+		}
+		return ErrNoHeadendVRF
+	}
+	return nil
 }
 func (c *Client) ApplyAdvertise(routes []AdvertisedRoute) error {
 	return c.apply(Advertise, len(routes), func(i int) []byte { return encodeAdvertised(routes[i]) })

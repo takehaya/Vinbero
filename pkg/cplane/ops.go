@@ -14,6 +14,7 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/headend"
+	"github.com/takehaya/vinbero/pkg/vrf"
 )
 
 // PluginOps is the capability surface behind one plugin's host functions.
@@ -26,7 +27,7 @@ type PluginOps struct {
 	services                         *compositionMaps
 	policy                           *inputPolicy
 	resolveMUPInstance               func(string) (uint32, error)
-	vrfs                             VRFDirectory
+	vrfs                             vrf.Directory
 	desiredRevision, appliedRevision uint64
 	outputFailure                    string
 	compositionHash                  [32]byte
@@ -124,22 +125,12 @@ type applyTxn struct {
 	seq uint64
 	// bytes is what this transaction is holding, so the cap is on the
 	// memory rather than only on the number of things in it.
-	bytes   int
-	entries []HeadendDesired
-	// vrfs are the VRF names the headend entries declare, by index. They
-	// are resolved to ids when the set is applied, as locators are.
-	vrfs   []string
-	routes []AdvertisedRoute
-	sids   []LocalSID
-}
-
-// vrfName is the VRF the i-th headend entry declares; "" (the global VRF)
-// when the declaration named none.
-func (t *applyTxn) vrfName(i int) string {
-	if i < len(t.vrfs) {
-		return t.vrfs[i]
-	}
-	return ""
+	bytes int
+	// entries carry the VRF name each declares; it is resolved to an id
+	// when the set is applied, as locators are.
+	entries []declaredHeadend
+	routes  []AdvertisedRoute
+	sids    []LocalSID
 }
 
 // PluginOpsConfig builds a PluginOps.
@@ -149,7 +140,7 @@ type PluginOpsConfig struct {
 	ResolveMUPInstance func(string) (uint32, error)
 	// VRFs resolves the VRF a headend declaration names. Nil refuses every
 	// VRF but the global one.
-	VRFs         VRFDirectory
+	VRFs         vrf.Directory
 	StrictInputs bool
 	// Owner is the tag every write by this plugin carries.
 	Owner bpf.OwnerTag
@@ -406,8 +397,7 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	// returns and commits anyway would otherwise apply the surviving half
 	// of a chunk the host said it had refused.
 	var (
-		entries []HeadendDesired
-		vrfs    []string
+		entries []declaredHeadend
 		routes  []AdvertisedRoute
 		sids    []LocalSID
 	)
@@ -433,8 +423,10 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 			if err != nil {
 				return fmt.Errorf("apply put: %w", err)
 			}
-			entries = append(entries, HeadendDesired{TriggerPrefix: prefix, Entry: entry})
-			vrfs = append(vrfs, e.GetVrf())
+			entries = append(entries, declaredHeadend{
+				HeadendDesired: HeadendDesired{TriggerPrefix: prefix, Entry: entry},
+				VRFName:        e.GetVrf(),
+			})
 		}
 	}
 	for _, r := range msg.GetAdvertisedRoutes() {
@@ -453,7 +445,6 @@ func (p *PluginOps) ApplyPut(generation uint64, chunk []byte) error {
 	}
 	txn.bytes += size
 	txn.entries = append(txn.entries, entries...)
-	txn.vrfs = append(txn.vrfs, vrfs...)
 	txn.routes = append(txn.routes, routes...)
 	txn.sids = append(txn.sids, sids...)
 	return nil
@@ -775,11 +766,11 @@ func (p *PluginOps) applyTransaction(txn *applyTxn) error {
 	if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
 		af = AFv6
 	}
-	entries, release, err := resolveHeadendVRFs(p.vrfs, txn.entries, txn.vrfs)
+	resolved, release, err := holdDeclared(p.vrfs, txn.entries)
 	if err != nil {
 		return fmt.Errorf("apply commit: %w", err)
 	}
-	res, err := p.headend.ApplySet(p.owner, af, entries, p.quotas.MaxHeadendEntries)
+	res, err := p.headend.ApplySet(p.owner, af, resolved[0], p.quotas.MaxHeadendEntries)
 	release()
 	if err != nil {
 		return fmt.Errorf("apply commit: %w", err)
@@ -845,7 +836,7 @@ func (p *PluginOps) checkScope(txn *applyTxn) error {
 		if txn.kind == v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V6 {
 			af = AFv6
 		}
-		for i, e := range txn.entries {
+		for _, e := range txn.entries {
 			if e.Entry == nil {
 				// A nil entry is unreachable on the apply path -- decode
 				// never returns one and ApplyHeadendSet refuses it -- but an
@@ -853,7 +844,7 @@ func (p *PluginOps) checkScope(txn *applyTxn) error {
 				// "could not check, so it passes". Refuse it.
 				return fmt.Errorf("apply commit: headend entry with no encap for %q", e.TriggerPrefix)
 			}
-			if err := p.guard.checkHeadendIn(af, txn.vrfName(i), e.TriggerPrefix, e.Entry.Mode); err != nil {
+			if err := p.guard.checkHeadendIn(af, e.VRFName, e.TriggerPrefix, e.Entry.Mode); err != nil {
 				return fmt.Errorf("apply commit: %w", err)
 			}
 		}
@@ -1224,7 +1215,7 @@ func (p *PluginOps) PruneOutOfScope(ctx context.Context) (int, error) {
 			}
 			// An entry of a VRF that no longer has a name is outside every
 			// scope.
-			name, named := headendVRFName(p.vrfs, e.VRF)
+			name, named := heldVRFName(p.vrfs, e.VRF)
 			if named && p.caps.Has(wasm.CapHeadend) && p.guard.checkHeadendIn(af, name, e.TriggerPrefix, e.Entry.Mode) == nil {
 				keep = append(keep, e)
 			}

@@ -44,7 +44,7 @@ func (i *Instance) linkHost(ctx context.Context) error {
 		WithFunc(i.hostNowMonotonic).
 		Export(HostNowMonotonic)
 	b.NewFunctionBuilder().
-		WithFunc(func() uint64 { return InputFeatureBGPPath | InputFeatureContexts }).
+		WithFunc(func() uint64 { return HostFeatures }).
 		Export(HostInputFeatures)
 	// Read-only: the guest learns what its registration already granted it,
 	// which it could equally be told through its configuration.

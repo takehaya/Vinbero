@@ -284,15 +284,12 @@ func (s Scope) CheckHeadend(af AddressFamily, trigger string, mode uint8) error 
 // bounds advertisements and decap VRFs; the prefix and slot checks apply
 // in every VRF.
 func (s Scope) CheckHeadendIn(af AddressFamily, vrfName, trigger string, mode uint8) error {
-	if !isGlobalVRFName(vrfName) && !s.allowsVRF(vrfName) {
+	if !vrf.IsGlobalName(vrfName) && !s.allowsVRF(vrfName) {
 		return fmt.Errorf("headend entry for %q in VRF %q: the VRF is outside this plugin's scope (%s)",
 			trigger, vrfName, describe(s.VRFs, "no VRFs"))
 	}
 	return s.CheckHeadend(af, trigger, mode)
 }
-
-// isGlobalVRFName reports a headend VRF name that means the global VRF.
-func isGlobalVRFName(name string) bool { return name == "" || name == vrf.GlobalVRFName }
 
 // checkHeadend is CheckHeadend with the no-scope case spelled out.
 func (g *Guard) checkHeadend(af AddressFamily, trigger string, mode uint8) error {

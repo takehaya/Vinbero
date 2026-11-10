@@ -13,6 +13,8 @@ import (
 	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
 	"github.com/takehaya/vinbero/pkg/headend"
+	"github.com/takehaya/vinbero/pkg/vrf"
+	sdk "github.com/takehaya/vinbero/sdk/go/cplane"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -213,7 +215,7 @@ func (f *fakeVRFs) HoldIDs() func() {
 	}
 }
 
-func vrfPluginOps(t *testing.T, maps HeadendMapOps, vrfs VRFDirectory, scope ScopeSpec) *PluginOps {
+func vrfPluginOps(t *testing.T, maps HeadendMapOps, vrfs vrf.Directory, scope ScopeSpec) *PluginOps {
 	t.Helper()
 	s, err := ParseScope(scope)
 	if err != nil {
@@ -393,5 +395,16 @@ func TestCompositionHeadendPerVRF(t *testing.T) {
 	other.Entry.Vrf = "tenant-b"
 	if _, err := p.normalizeComposition(m); err == nil {
 		t.Error("a composition naming an ungranted VRF was accepted")
+	}
+}
+
+// Both backends report the headend VRF feature the SDK checks before it
+// sends a VRF, under the bit the SDK expects.
+func TestHostReportsHeadendVRFFeature(t *testing.T) {
+	if wasm.FeatureHeadendVRF != sdk.FeatureHeadendVRF {
+		t.Fatalf("host bit %d, SDK bit %d", wasm.FeatureHeadendVRF, sdk.FeatureHeadendVRF)
+	}
+	if wasm.HostFeatures&wasm.FeatureHeadendVRF == 0 {
+		t.Error("the WASM host does not report the headend VRF feature")
 	}
 }

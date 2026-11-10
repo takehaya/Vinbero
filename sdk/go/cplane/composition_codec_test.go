@@ -17,7 +17,7 @@ func TestCompositionHeadendsMatchHostProtobufAcrossChunks(t *testing.T) {
 		{TriggerPrefix: "10.0.0.1/32", Segments: []string{"fd00::1"}, VRF: "vpn-a"},
 	}
 	host := &recordingHost{}
-	client := &cplane.Client{Host: host, MaxChunkBytes: 256}
+	client := &cplane.Client{Host: featureRecordingHost{host, cplane.FeatureHeadendVRF}, MaxChunkBytes: 256}
 	set := cplane.Composition{Revision: 99}
 	want := &v1.PluginApplyChunk{DesiredRevision: 99}
 	for _, entry := range entries {

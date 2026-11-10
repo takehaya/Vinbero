@@ -72,7 +72,9 @@ func outputEntry(segments []string, source string, mode uint8) (bpf.HeadendEntry
 }
 
 type compositionDesired struct {
-	v4, v6  []HeadendDesired
+	// v4 and v6 carry the VRF id their names resolved to when the
+	// composition was normalized.
+	v4, v6  []declaredHeadend
 	uplinks []uplinkDesired
 	peers   []peerDesired
 	routes  []AdvertisedRoute
@@ -116,15 +118,12 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 		if err = p.guard.checkHeadendIn(af, h.Entry.Vrf, trigger, e.Mode); err != nil {
 			return out, err
 		}
-		d := HeadendDesired{TriggerPrefix: trigger, Entry: e}
-		if !isGlobalVRFName(h.Entry.Vrf) {
-			if p.vrfs == nil {
-				return out, errNoVRFDirectory
-			}
-			if d.VRF, err = p.vrfs.LookupID(h.Entry.Vrf); err != nil {
-				return out, fmt.Errorf("headend entry for %q: %w", trigger, err)
-			}
+		d := declaredHeadend{HeadendDesired: HeadendDesired{TriggerPrefix: trigger, Entry: e}, VRFName: h.Entry.Vrf}
+		resolved, err := resolveDeclared(p.vrfs, []declaredHeadend{d})
+		if err != nil {
+			return out, err
 		}
+		d.HeadendDesired = resolved[0]
 		if af == AFv4 {
 			out.v4 = append(out.v4, d)
 		} else {
@@ -225,7 +224,7 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 	}
 	// Validate conflicting desired keys before mutating any live state.
 	keys := map[bpf.HeadendID]bpf.HeadendEntry{}
-	for _, set := range [][]HeadendDesired{out.v4, out.v6} {
+	for _, set := range [][]declaredHeadend{out.v4, out.v6} {
 		for _, h := range set {
 			if old, ok := keys[h.ID()]; ok && old != *h.Entry {
 				return out, fmt.Errorf("ambiguous headend trigger")
@@ -328,7 +327,7 @@ func compositionDigest(m *v1.PluginApplyChunk, d compositionDesired) (hash [32]b
 		_, _ = fmt.Fprintf(hasher, "/instance=%d", u.instance)
 	}
 	// The VRF ids are derived from the declared names, as the instances are.
-	for _, set := range [][]HeadendDesired{d.v4, d.v6} {
+	for _, set := range [][]declaredHeadend{d.v4, d.v6} {
 		for _, h := range set {
 			if h.VRF != 0 {
 				_, _ = fmt.Fprintf(hasher, "/vrf=%s=%d", h.TriggerPrefix, h.VRF)
@@ -344,27 +343,33 @@ func compositionDigest(m *v1.PluginApplyChunk, d compositionDesired) (hash [32]b
 	return hash, nil
 }
 
-// compositionNamesVRF reports whether a composition declares a headend
-// entry outside the global VRF.
-func compositionNamesVRF(m *v1.PluginApplyChunk) bool {
-	for _, h := range m.GetForwardingHeadends() {
-		if !isGlobalVRFName(h.GetEntry().GetVrf()) {
-			return true
+// applyComposedHeadends writes the composition's headend sets. The VRFs
+// they name are held against the start of their deletion only from the
+// name lookup to this write, not across the BGP and service work around
+// it. A name that resolves to another id than it did when the composition
+// was normalized (its VRF was deleted and created again in between) fails
+// the apply, and the retry normalizes again.
+func (p *PluginOps) applyComposedHeadends(d compositionDesired) error {
+	sets, release, err := holdDeclared(p.vrfs, d.v4, d.v6)
+	if err != nil {
+		return err
+	}
+	defer release()
+	for i, set := range [][]declaredHeadend{d.v4, d.v6} {
+		for j, h := range set {
+			if sets[i][j].VRF != h.VRF {
+				return fmt.Errorf("headend entry for %q: VRF %q changed while the composition was applied", h.TriggerPrefix, h.VRFName)
+			}
 		}
 	}
-	return false
+	_, err = p.headend.ApplySets(p.owner, sets[0], sets[1], p.quotas.MaxHeadendEntries)
+	return err
 }
 
 // applyComposition orders dependents before their forwarding changes. Failure
 // retains ownership and the latest desired set for a bounded retry.
 func (p *PluginOps) applyComposition(txn *applyTxn) error {
 	m := txn.composition
-	// A headend entry in a named VRF is written under the id resolved here,
-	// so the VRF is held against deletion until the apply is done.
-	if compositionNamesVRF(m) && p.vrfs != nil {
-		release := p.vrfs.HoldIDs()
-		defer release()
-	}
 	d, err := p.normalizeComposition(m)
 	if err != nil {
 		return err
@@ -388,7 +393,7 @@ func (p *PluginOps) applyComposition(txn *applyTxn) error {
 	if err = p.services.prune(p.owner, d.uplinks, d.peers); err != nil {
 		return err
 	}
-	if _, err = p.headend.ApplySets(p.owner, d.v4, d.v6, p.quotas.MaxHeadendEntries); err != nil {
+	if err = p.applyComposedHeadends(d); err != nil {
 		return err
 	}
 	if p.services != nil {

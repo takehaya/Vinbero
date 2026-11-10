@@ -14,6 +14,13 @@ func (c *Client) ApplyComposition(set Composition) error {
 			return fmt.Errorf("composition: missing advertised path")
 		}
 	}
+	entries := make([]HeadendEntry, 0, len(set.Headends))
+	for _, h := range set.Headends {
+		entries = append(entries, h.Entry)
+	}
+	if err := c.checkHeadendVRFs(entries); err != nil {
+		return err
+	}
 	count := 1 + len(set.Headends) + len(set.Uplinks) + len(set.EVPN) + len(set.Advertisements)
 	return c.apply(CompositionSet, count, func(i int) []byte {
 		var body, chunk wire.Encoder

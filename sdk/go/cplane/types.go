@@ -53,6 +53,11 @@ const BGPPathCodec = "gobgp-v4.7.0-mup-draft01/binary-v1"
 const FeatureBGPPath uint64 = 1
 const FeatureInputContexts uint64 = 2
 
+// FeatureHeadendVRF says the host places a headend entry in the VRF it
+// names. Client refuses to send a HeadendEntry.VRF to a host without it,
+// which would ignore the field and write the entry into the global VRF.
+const FeatureHeadendVRF uint64 = 4
+
 // BGPPath owns its buffers. Attributes include their flags/type/length headers.
 // An encoding failure is explicit and may still leave a usable NLRI identity.
 type BGPPath struct {
@@ -118,8 +123,8 @@ const (
 
 // HeadendEntry is one headend declaration. VRF names the VRF the entry
 // belongs to: empty (or "global") is the global VRF, any other name must be
-// an existing VRF the plugin's scope grants. It needs a host with ABI
-// version 2 or later.
+// an existing VRF the plugin's scope grants. Naming one needs a host that
+// reports FeatureHeadendVRF.
 type HeadendEntry struct {
 	TriggerPrefix string
 	Segments      []string

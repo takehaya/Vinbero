@@ -46,20 +46,21 @@ package wasm
 // This is the same lesson the data-plane SDK learned when its ABI grew a
 // field and older plugin objects kept loading: a version that is only
 // documented is a version nobody checks.
-//
-// Version 2 adds the VRF of a headend entry (PluginHeadendEntry.vrf). The
-// host functions are the same as in version 1, so a version 1 module is
-// still admitted (MinABIVersion); a version 2 module is refused by a host
-// that only knows version 1, which would otherwise ignore the VRF and
-// write the entry into the global VRF.
-const ABIVersion = 2
-
-// MinABIVersion is the oldest ABI version this host admits.
-const MinABIVersion = 1
+const ABIVersion = 1
 
 // InputFeatureBGPPath is a read-only input capability, not a write grant.
 const InputFeatureBGPPath uint64 = 1
 const InputFeatureContexts uint64 = 2
+
+// FeatureHeadendVRF says the host keys a declared headend entry by the VRF
+// it names (PluginHeadendEntry.vrf). A host without it ignores the field
+// and writes the entry into the global VRF, so the SDK refuses to send a
+// VRF to such a host. The bit travels in the same bitmap as the input
+// features (input_features); it is not a write grant.
+const FeatureHeadendVRF uint64 = 4
+
+// HostFeatures is the bitmap input_features reports.
+const HostFeatures = InputFeatureBGPPath | InputFeatureContexts | FeatureHeadendVRF
 
 // HostModule is the import module name for Vinbero's capability functions.
 // WASI runtime services are linked separately as wasi_snapshot_preview1.
