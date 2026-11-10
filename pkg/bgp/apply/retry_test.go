@@ -284,3 +284,78 @@ func TestT2STSIDChangeWhileSourceLocatorGone(t *testing.T) {
 		t.Errorf("uplink source = %s, want fd00:1:1::", got)
 	}
 }
+
+// groupSources lists the distinct sources a group's members carry.
+func groupSources(fh *fakeHeadend, group uint32) map[netip.Addr]bool {
+	out := map[netip.Addr]bool{}
+	for _, p := range fh.ecmpGroups[group] {
+		out[netip.AddrFrom16(p.Entry.SrcAddr)] = true
+	}
+	return out
+}
+
+// A refresh that writes the group with the new source but fails its trigger
+// write leaves the group carrying the new source. A later change while the
+// locator is deleted must be written with that source, not the one the
+// last fully successful write used.
+func TestVPNFallbackSourceIsWhatTheGroupCarries(t *testing.T) {
+	a, fh, locs := vpnSourceLab(t)
+	group := vpnGroupOf(t, fh, "10.0.0.0/24")
+	if err := locs.Delete("LOC1", false); err != nil {
+		t.Fatal(err)
+	}
+	addTestLocator(t, locs, "fd00:9:9::/48")
+	fh.createErr = errors.New("trigger write refused")
+	if err := a.ReconcileTracked(); err == nil {
+		t.Fatal("setup: the trigger write did not fail")
+	}
+	fh.createErr = nil
+	moved := netip.MustParseAddr("fd00:9:9::")
+	if got := groupSources(fh, group); len(got) != 1 || !got[moved] {
+		t.Fatalf("setup: group sources = %v, want only %s", got, moved)
+	}
+
+	if err := locs.Delete("LOC1", false); err != nil {
+		t.Fatal(err)
+	}
+	a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "fd00:3:3:a::", "fd00::3", true))
+	if got := groupSources(fh, group); len(got) != 1 || !got[moved] {
+		t.Errorf("group sources after a change with the locator gone = %v, want only %s", got, moved)
+	}
+	if trigger := fh.v4created["10.0.0.0/24"]; trigger == nil || netip.AddrFrom16(trigger.SrcAddr) != moved {
+		t.Errorf("trigger = %+v, want it rewritten with %s", trigger, moved)
+	}
+}
+
+// A final withdrawal whose removal fails leaves the trigger and the group in
+// the data plane. A replacement path arriving while the locator is deleted
+// must rewrite them, and the retry must not report success while the old
+// member is still there.
+func TestVPNReplacementAfterFailedRetirement(t *testing.T) {
+	fh := newFakeHeadend()
+	locs := locator.NewManager()
+	addTestLocator(t, locs, "fd00:1:1::/48")
+	a := NewApplier(fh, locs, vrfbgp.NewManager(), &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "fd00:2:2:a::", "fd00::2", false))
+	group := vpnGroupOf(t, fh, "10.0.0.0/24")
+	if err := locs.Delete("LOC1", false); err != nil {
+		t.Fatal(err)
+	}
+
+	fh.deleteErr = errors.New("busy")
+	a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "fd00:2:2:a::", "fd00::2", true))
+	if _, ok := fh.v4created["10.0.0.0/24"]; !ok {
+		t.Fatal("setup: trigger removed although its delete failed")
+	}
+	fh.deleteErr = nil
+	a.Apply(vpnEvent("10.0.0.0/24", "65000:1", "fd00:3:3:a::", "fd00::3", false))
+	reconcileTracked(t, a)
+
+	if got := groupSIDs(t, fh, group); len(got) != 1 || got[0] != "fd00:3:3:a::" {
+		t.Errorf("group members = %v, want only the replacement fd00:3:3:a::", got)
+	}
+	trigger := fh.v4created["10.0.0.0/24"]
+	if trigger == nil || trigger.Segments[0] != netip.MustParseAddr("fd00:3:3:a::").As16() {
+		t.Errorf("trigger = %+v, want it pointing at the replacement", trigger)
+	}
+}

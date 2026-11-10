@@ -148,7 +148,7 @@ func TestVPNReplayerTrackedRequestBounded(t *testing.T) {
 	}
 	f := &fakeVPNReplay{seen: make(chan struct{}, 8)}
 	r := newRetryTestReplayer(f, tr, nil)
-	r.requestTracked()
+	r.requestTrackedAfterFailure()
 	for range vpnReplayMaxRetries + 1 {
 		waitTracked(t, tr)
 	}
@@ -158,5 +158,63 @@ func TestVPNReplayerTrackedRequestBounded(t *testing.T) {
 	}
 	if n := len(f.snapshot()); n != 0 {
 		t.Errorf("replays = %d, want none", n)
+	}
+}
+
+// A write that always fails, hit again by a stream of live updates, gets one
+// bounded series of passes: a failure-caused request joins the running
+// series instead of restarting it, and after the series gave up such
+// requests are ignored until the cool-down has passed. A request that is not
+// failure-caused starts a series at any time.
+func TestVPNReplayerFailureStormBounded(t *testing.T) {
+	var calls atomic.Int32
+	tracked := func() error {
+		calls.Add(1)
+		return &apply.TrackedWriteError{MUP: 1}
+	}
+	var clock atomic.Int64
+	clock.Store(time.Now().UnixNano())
+	f := &fakeVPNReplay{seen: make(chan struct{}, 64)}
+	r := newVPNReplayer(f.replay, tracked, nil)
+	r.retryMin, r.retryMax = time.Millisecond, 2*time.Millisecond
+	r.now = func() time.Time { return time.Unix(0, clock.Load()) }
+
+	storm := func() {
+		deadline := time.Now().Add(200 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			r.requestTrackedAfterFailure()
+			time.Sleep(50 * time.Microsecond)
+		}
+		waitReplayerIdle(t, r)
+	}
+	series := int32(vpnReplayMaxRetries + 1)
+	storm()
+	if n := calls.Load(); n != series {
+		t.Fatalf("tracked passes during the storm = %d, want one series of %d", n, series)
+	}
+
+	// Within the cool-down a failure starts nothing.
+	clock.Add(int64(vpnReplayFailureCooldown / 2))
+	storm()
+	if n := calls.Load(); n != series {
+		t.Errorf("tracked passes within the cool-down = %d, want still %d", n, series)
+	}
+
+	// After it, one more series.
+	clock.Add(int64(vpnReplayFailureCooldown))
+	storm()
+	if n := calls.Load(); n != 2*series {
+		t.Errorf("tracked passes after the cool-down = %d, want %d", n, 2*series)
+	}
+
+	// A binding change is not failure-caused: it runs at once and clears
+	// the give-up, so the next failure starts a series again.
+	r.request([]bgp.Family{bgp.FamilyVPNv4})
+	waitReplay(t, f)
+	waitReplayerIdle(t, r)
+	r.requestTrackedAfterFailure()
+	waitReplayerIdle(t, r)
+	if n := calls.Load(); n != 3*series {
+		t.Errorf("tracked passes after a binding change = %d, want %d", n, 3*series)
 	}
 }

@@ -22,6 +22,15 @@ const (
 	// (a bridge domain at its flood-list limit, an entry another owner
 	// holds).
 	vpnReplayMaxRetries = 6
+	// vpnReplayFailureCooldown is how long, after a series gave up, a
+	// retry asked for by a failed write (requestTrackedAfterFailure) is
+	// ignored. A write that keeps failing is hit again by every route event
+	// that reconciles it, and each would otherwise start a new series of
+	// passes. Five minutes keeps such a failure to one series (seven
+	// passes) per five minutes; a request that is not caused by a failure
+	// (a binding change, the source locator registration) starts a series
+	// at any time.
+	vpnReplayFailureCooldown = 5 * time.Minute
 )
 
 // vpnReplayer re-applies the loc-rib, or only the applier's tracked state,
@@ -39,8 +48,9 @@ const (
 // not read the rib by the whole replay. Retries back off and are bounded: a
 // series that still fails after vpnReplayMaxRetries retries is logged once
 // and dropped. A new request runs at once, ends any backoff wait, and starts
-// a fresh series. Requests made while a pass runs are merged into the next
-// one.
+// a fresh series; a request caused by a failed write does not (see
+// requestTrackedAfterFailure). Requests made while a pass runs are merged
+// into the next one.
 type vpnReplayer struct {
 	replay func([]bgp.Family) error // runs the tracked pass after the replay
 	// tracked runs the tracked pass alone; nil turns tracked-only retries
@@ -51,6 +61,7 @@ type vpnReplayer struct {
 	// maxRetries the attempts of one series.
 	retryMin, retryMax time.Duration
 	maxRetries         int
+	cooldown           time.Duration
 
 	mu sync.Mutex
 	// dirty and dirtyTracked are the work to do now; retry and retryTracked
@@ -65,6 +76,10 @@ type vpnReplayer struct {
 	series   uint64
 	wake     chan struct{}
 	running  bool
+	// gaveUpAt is when the last series gave up (zero after a request that
+	// is not failure-caused); see vpnReplayFailureCooldown.
+	gaveUpAt time.Time
+	now      func() time.Time
 }
 
 func newVPNReplayer(replay func([]bgp.Family) error, tracked func() error, logger *zap.Logger) *vpnReplayer {
@@ -78,6 +93,8 @@ func newVPNReplayer(replay func([]bgp.Family) error, tracked func() error, logge
 		retryMin:   vpnReplayRetryMin,
 		retryMax:   vpnReplayRetryMax,
 		maxRetries: vpnReplayMaxRetries,
+		cooldown:   vpnReplayFailureCooldown,
+		now:        time.Now,
 		dirty:      make(map[bgp.Family]struct{}),
 		retry:      make(map[bgp.Family]struct{}),
 		wake:       make(chan struct{}, 1),
@@ -94,18 +111,31 @@ func (r *vpnReplayer) request(families []bgp.Family) {
 	for _, fam := range families {
 		r.dirty[fam] = struct{}{}
 	}
+	r.gaveUpAt = time.Time{}
 	r.startLocked()
 }
 
-// requestTracked schedules the tracked pass alone and returns without
-// waiting for it. The applier calls it when a write of tracked state failed
-// outside that pass; it must not block.
-func (r *vpnReplayer) requestTracked() {
+// requestTrackedAfterFailure asks for the tracked pass alone because a write
+// of tracked state failed outside that pass (the applier calls it; it must
+// not block). Unlike request it never restarts a series: while one runs the
+// pass is merged into its next retry, with the series' delay and budget, so
+// a failure that every route event hits again cannot keep passes running.
+// With no series running it starts one, unless the last one gave up less
+// than the cool-down ago.
+func (r *vpnReplayer) requestTrackedAfterFailure() {
 	if r.tracked == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.running {
+		r.retryTracked = true
+		return
+	}
+	if !r.gaveUpAt.IsZero() && r.now().Sub(r.gaveUpAt) < r.cooldown {
+		return
+	}
+	r.gaveUpAt = time.Time{}
 	r.dirtyTracked = true
 	r.startLocked()
 }
@@ -198,6 +228,9 @@ func (r *vpnReplayer) run() {
 		r.attempts++
 		if r.attempts > r.maxRetries {
 			r.attempts = 0
+			r.gaveUpAt = r.now()
+			// Failure-caused requests merged in since are given up with it.
+			r.retryTracked = false
 			r.mu.Unlock()
 			r.logger.Error("giving up retrying failed writes until the next replay request",
 				zap.Int("retries", r.maxRetries), zap.Int("still_failing", failing),

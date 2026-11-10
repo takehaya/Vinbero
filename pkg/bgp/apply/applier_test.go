@@ -34,6 +34,7 @@ type fakeHeadend struct {
 	v4deleted []string
 	v6deleted []string
 	createErr error
+	deleteErr error // DeleteHeadendV4 fails with it when set
 
 	// v4owners / v6owners model the persisted owner table so the upgrade off
 	// the pre-aggregation per-RD owner can be exercised.
@@ -365,6 +366,9 @@ func (f *fakeHeadend) CreateHeadendV6(p string, e *bpf.HeadendEntry, owner bpf.O
 }
 
 func (f *fakeHeadend) DeleteHeadendV4(p string, requester bpf.OwnerTag) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	if cur, ok := f.v4owners[p]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}

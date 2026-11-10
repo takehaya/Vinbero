@@ -63,9 +63,14 @@ type vpnDest struct {
 	// installed is the member SID list last written, used to skip
 	// reconciles that would rewrite an unchanged group.
 	installed []string // groupFingerprint of the last write
-	// src is the encapsulation source of that write. While the source
-	// locator is missing a membership change is written with it.
-	src [16]byte
+	// src is the encapsulation source the group's members carry, set when
+	// the group is written (hasSrc) and kept while the group may still be
+	// in the data plane, including after a failed trigger write or a failed
+	// retirement. While the source locator is missing a change to the group
+	// is written with it, so the rewrite uses the source that is in the
+	// data plane and the group never mixes two sources.
+	src    [16]byte
+	hasSrc bool
 	// awaitingSource records that the group could not be written for lack
 	// of the source locator and that this was logged, so a replay does not
 	// log it again for every such prefix.
@@ -270,11 +275,12 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	src, err := a.encapSource()
 	switch {
 	case err == nil:
-	case d.installed != nil:
-		// Without the source locator an installed group keeps the source
-		// it has (deleting the locator logs that once), and a membership
-		// change is written with that source: a withdrawn path must not
-		// stay in the group until the locator is back.
+	case d.hasSrc:
+		// Without the source locator a group in the data plane keeps the
+		// source it has (deleting the locator logs that once), and a
+		// change to it is written with that source: a withdrawn path must
+		// not stay in the group until the locator is back. That holds for a
+		// group whose last trigger write or retirement failed too.
 		src = d.src
 	default:
 		// One never written waits, logged once, and ReconcileTracked writes
@@ -338,6 +344,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	}
 	a.prober.Register(d.groupID, a.probeTargets(paths, dsts))
 	d.probed = true
+	d.src, d.hasSrc = src, true
 
 	// The trigger mirrors the first member so the fallback forwards the same
 	// way the group's first path would, steering included.
@@ -357,7 +364,6 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 		return a.vpnFailed()
 	}
 	d.installed = fingerprint
-	d.src = src
 	a.logger.Info("VPN prefix programmed",
 		zap.String("prefix", dk.prefix), zap.Int("paths", len(ms)),
 		zap.Uint32("group_id", d.groupID))

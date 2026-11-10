@@ -171,7 +171,7 @@ func (s *Server) Setup() {
 		replayer := newVPNReplayer(s.vpnReplay, tracked, s.logger)
 		requestReplay = replayer.request
 		if r, ok := s.tracked.(trackedRetrySetter); ok {
-			r.SetTrackedRetry(replayer.requestTracked)
+			r.SetTrackedRetry(replayer.requestTrackedAfterFailure)
 		}
 		// The manager reports every binding mutation that changed what the
 		// import-RT filter accepts, whichever path made it.
