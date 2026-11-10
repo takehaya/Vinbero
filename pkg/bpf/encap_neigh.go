@@ -473,8 +473,9 @@ type EncapNeighKeeper struct {
 	pending map[netip.Addr]struct{} // written, not yet resolved
 	reroute bool                    // routes changed: re-resolve the set
 	rekeep  bool                    // a kept entry was deleted
-	// walkNotified collects what is written while a sweep walks the maps
-	// (nil when no walk runs): the sweep keeps it whatever the walk saw.
+	// walkNotified collects what is written while a sweep runs, from the
+	// start of its walk to the end of its releases (nil when no sweep
+	// runs): the sweep keeps it whatever the walk saw.
 	walkNotified map[netip.Addr]struct{}
 
 	// mu guards the set and the owned entries, and is held by a pass.
@@ -484,6 +485,10 @@ type EncapNeighKeeper struct {
 	missed map[netip.Addr]int
 	// dests is the destination set with each one's next hops.
 	dests map[netip.Addr][]NeighTarget
+	// dropped holds, while a sweep runs, the destinations it drops with
+	// their next hops, so that one written before its next hop is given back
+	// goes back into the set instead (rescueLocked).
+	dropped map[netip.Addr][]NeighTarget
 	// owned are the next hops whose managed entry this keeper made.
 	owned map[string]NeighTarget
 	// warned holds what was logged, so a lasting condition logs once.
@@ -584,23 +589,33 @@ const sweepsBeforeRelease = 2
 //
 // Pruning is conservative. A destination leaves the set only after
 // sweepsBeforeRelease complete walks in a row did not see it, and a
-// destination written while a walk runs counts as seen by it. A walk that
-// failed part-way may add destinations, never remove them.
+// destination written while a walk runs counts as seen by it. A dropped
+// destination written after the walk, up to the release of its next hop,
+// goes back into the set and keeps the next hop. A walk that failed
+// part-way may add destinations, never remove them.
 func (k *EncapNeighKeeper) Sweep() ([]NeighTarget, error) {
-	// Events from before the walk are covered by it; writes during it are
-	// collected.
+	// Events from before the walk are covered by it; writes from its start
+	// to the end of the releases are collected.
 	_, _, _ = k.takeEvents()
 	k.pmu.Lock()
 	k.walkNotified = map[netip.Addr]struct{}{}
 	k.pmu.Unlock()
+	defer func() {
+		k.pmu.Lock()
+		k.walkNotified = nil
+		k.pmu.Unlock()
+	}()
 	dsts, werr := k.walk()
 	k.pmu.Lock()
-	notified := k.walkNotified
-	k.walkNotified = nil
+	notified := make(map[netip.Addr]struct{}, len(k.walkNotified))
+	for d := range k.walkNotified {
+		notified[d] = struct{}{}
+	}
 	k.pmu.Unlock()
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	defer func() { k.dropped = nil }()
 	seen := make(map[netip.Addr]struct{}, len(dsts)+len(notified))
 	for _, d := range dsts {
 		seen[d] = struct{}{}
@@ -628,6 +643,10 @@ func (k *EncapNeighKeeper) Sweep() ([]NeighTarget, error) {
 			continue
 		}
 		delete(k.missed, d)
+		if k.dropped == nil {
+			k.dropped = map[netip.Addr][]NeighTarget{}
+		}
+		k.dropped[d] = k.dests[d]
 	}
 	err := k.resolveLocked(list, true)
 	return k.targetsLocked(), err
@@ -753,8 +772,17 @@ func (k *EncapNeighKeeper) applyLocked() error {
 	// Ownership ends only when the entry is gone or is no longer the
 	// keeper's to remove; a release whose dump or delete failed stays owned
 	// and is retried by a later pass.
+	usedBy := map[string][]netip.Addr{}
+	for d, ts := range k.dropped {
+		for _, t := range ts {
+			usedBy[t.key()] = append(usedBy[t.key()], d)
+		}
+	}
 	for _, t := range release {
 		key := t.key()
+		if k.rescueLocked(usedBy[key]) {
+			continue // written again since the walk: still in use
+		}
 		if _, bum := bumNeighClaims.Load(key); bum {
 			delete(k.owned, key) // the BUM flood slots hold it now
 			continue
@@ -780,6 +808,36 @@ func (k *EncapNeighKeeper) applyLocked() error {
 			zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
 	}
 	return errors.Join(errs...)
+}
+
+// rescueLocked puts back into the set, with their next hops, the dropped
+// destinations among dsts that were written since the sweep's walk began
+// (queued, or collected by the sweep), and reports whether there was one.
+// It reads the writes under pmu right before the release it decides. A
+// rescue asks for one more pass, which makes any next hop of the rescued
+// destinations released earlier in this one again.
+func (k *EncapNeighKeeper) rescueLocked(dsts []netip.Addr) bool {
+	if len(dsts) == 0 {
+		return false
+	}
+	k.pmu.Lock()
+	rescued := false
+	for _, d := range dsts {
+		_, queued := k.pending[d]
+		_, collected := k.walkNotified[d]
+		if queued || collected {
+			k.dests[d] = k.dropped[d]
+			rescued = true
+		}
+	}
+	if rescued {
+		k.rekeep = true
+	}
+	k.pmu.Unlock()
+	if rescued {
+		k.poke()
+	}
+	return rescued
 }
 
 func (k *EncapNeighKeeper) targetsLocked() []NeighTarget {

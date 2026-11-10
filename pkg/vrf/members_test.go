@@ -42,8 +42,8 @@ func membersFixture(t *testing.T) (*Manager, Links) {
 		7:  {Name: "br-a", Master: 10},
 		8:  {Name: "br-a.5", Master: 10, VLANOf: 7, VLANID: 5},
 		9:  {Name: "eth9", XDP: true, Master: 20},
-		10: {Name: "vrf-a", IsVrf: true},
-		20: {Name: "vrf-open", IsVrf: true},
+		10: {Name: "vrf-a", IsVrf: true, VrfTable: 100},
+		20: {Name: "vrf-open", IsVrf: true, VrfTable: 200},
 		11: {Name: "eth11", XDP: true},
 	}
 	return m, links
@@ -123,12 +123,17 @@ func TestClosedByTable(t *testing.T) {
 	links := Links{
 		5:  {Name: "eth5", XDP: true, Master: 31},
 		6:  {Name: "eth6", XDP: true, Master: 32},
-		30: {Name: "vrf-x", IsVrf: true},
-		31: {Name: "vrf-y", IsVrf: true},
-		32: {Name: "vrf-z", IsVrf: true},
+		7:  {Name: "eth7", XDP: true, Master: 33},
+		30: {Name: "vrf-x", IsVrf: true, VrfTable: 600},
+		31: {Name: "vrf-y", IsVrf: true, VrfTable: 600},
+		32: {Name: "vrf-z", IsVrf: true, VrfTable: 700},
+		33: {Name: "vrf-raw", IsVrf: true, VrfTable: 600}, // not managed by Vinbero
 	}
 	if name, ok := m.ClosedVRFOfPort(links, 5); !ok || name != "vrf-y" {
 		t.Errorf("ClosedVRFOfPort(eth5) = %q %v, want vrf-y closed through table 600", name, ok)
+	}
+	if name, ok := m.ClosedVRFOfPort(links, 7); !ok || name != "vrf-raw" {
+		t.Errorf("ClosedVRFOfPort(eth7) = %q %v, want the unmanaged vrf-raw closed through table 600", name, ok)
 	}
 	if _, ok := m.ClosedVRFOfPort(links, 6); ok {
 		t.Error("eth6 is in vrf-z, alone on its opted-out table 700, and must not be closed")
@@ -137,8 +142,8 @@ func TestClosedByTable(t *testing.T) {
 	if len(got) != 1 || got[0].VRF != "vrf-y" || got[0].Interface != "eth5" {
 		t.Errorf("uncovered = %+v, want vrf-y/eth5 only", got)
 	}
-	if len(m.L2CircuitsOnClosedVRFs(links, []uint32{5, 6})) != 1 {
-		t.Error("the circuit on eth5 is not reported")
+	if len(m.L2CircuitsOnClosedVRFs(links, []uint32{5, 6, 7})) != 2 {
+		t.Error("the circuits on eth5 and eth7 are not both reported")
 	}
 	if !m.TableClosedAfterCreate(600, true) || m.TableClosedAfterCreate(700, true) || !m.TableClosedAfterCreate(800, false) {
 		t.Error("TableClosedAfterCreate: want 600 closed for an opt-out, 700 open, 800 closed without one")

@@ -1340,7 +1340,7 @@ func TestVrfServer_MemberChecks(t *testing.T) {
 	// The first create gets device ifindex 100; eth1 (ifindex 11) is its
 	// attached member.
 	s.links = func() (vrf.Links, error) {
-		return vrf.Links{11: {Name: "eth1", XDP: true, Master: 100}, 100: {Name: "vrf-cust", IsVrf: true}}, nil
+		return vrf.Links{11: {Name: "eth1", XDP: true, Master: 100}, 100: {Name: "vrf-cust", IsVrf: true, VrfTable: 100}}, nil
 	}
 	core, logs := observer.New(zap.WarnLevel)
 	s.SetLogger(zap.New(core))
@@ -1422,7 +1422,7 @@ func TestVrfServer_CreateRefusesL2CircuitOnExistingPort(t *testing.T) {
 	s, _, dev := newTestVrfServerFull()
 	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{51}, nil })
 	s.links = func() (vrf.Links, error) {
-		return vrf.Links{50: {Name: "vrf-u", IsVrf: true}, 51: {Name: "eth5", Master: 50}}, nil
+		return vrf.Links{50: {Name: "vrf-u", IsVrf: true, VrfTable: 100}, 51: {Name: "eth5", Master: 50}}, nil
 	}
 	ctx := context.Background()
 	resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-u", TableId: 100}}}))
@@ -1445,5 +1445,33 @@ func TestVrfServer_CreateRefusesL2CircuitOnExistingPort(t *testing.T) {
 	}
 	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, "carries an L2 headend circuit") {
 		t.Errorf("opted-out VRF on a closed table: errors %v, want the refusal", resp.Msg.Errors)
+	}
+}
+
+// Closing a table checks the ports of every VRF device on it: vrf-a (here a
+// device Vinbero does not manage, or one that opted out) on table 600 has a
+// circuit on eth6, and vrf-b on the same table without the opt-out would
+// close the table under that circuit.
+func TestVrfServer_CreateRefusesClosingSharedTable(t *testing.T) {
+	s, _, dev := newTestVrfServerFull()
+	s.SetL2CircuitPorts(func() ([]uint32, error) { return []uint32{61}, nil })
+	s.links = func() (vrf.Links, error) {
+		return vrf.Links{
+			60: {Name: "vrf-a", IsVrf: true, VrfTable: 600},
+			61: {Name: "eth6", Master: 60},
+		}, nil
+	}
+	ctx := context.Background()
+	resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-b", TableId: 600}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Errors) != 1 || !strings.Contains(resp.Msg.Errors[0].Reason, `port "eth6" carries an L2 headend circuit`) || len(dev.created) != 0 {
+		t.Errorf("errors %v, created %v; want the refusal for vrf-a's eth6", resp.Msg.Errors, dev.created)
+	}
+	// With the opt-out the table stays open: allowed.
+	resp, err = s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-c", TableId: 600, NoUnreachableDefault: true}}}))
+	if err != nil || len(resp.Msg.Errors) != 0 {
+		t.Errorf("opted-out create: %v %v", err, resp.Msg.GetErrors())
 	}
 }

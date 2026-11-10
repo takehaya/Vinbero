@@ -732,7 +732,8 @@ func TestEncapNeighKeeperResubscribes(t *testing.T) {
 // Pruning is conservative. A walk that failed part-way removes nothing; a
 // destination written while a walk runs counts as seen by it; a destination
 // complete walks miss is dropped only at the second miss in a row, and a
-// write in between resets the count.
+// write in between resets the count; a write after the walk that drops a
+// destination, before its next hop is given back, keeps it.
 func TestEncapNeighKeeperConservativePrune(t *testing.T) {
 	a, b := netip.MustParseAddr("fc00:1::1"), netip.MustParseAddr("fc00:2::1")
 	main := []netlink.Route{route("fc00:1::/32", "fe80::1", 2), route("fc00:2::/32", "fe80::2", 2)}
@@ -786,9 +787,26 @@ func TestEncapNeighKeeperConservativePrune(t *testing.T) {
 	}
 	kept("a miss, a write, a miss")
 
-	// Two complete misses in a row: dropped and given back.
+	// The second miss in a row, but b is written after the walk, while the
+	// sweep resolves, before the release: kept, and back in the set.
+	k.res.dumpMain = func() ([]netlink.Route, error) {
+		k.Notify([]netip.Addr{b})
+		return main, nil
+	}
 	if _, err := k.Sweep(); err != nil {
 		t.Fatal(err)
+	}
+	kept("a miss, then a miss with a write before the release")
+	if ts := k.dests[b]; len(ts) != 1 || ts[0].key() != bKey {
+		t.Fatalf("fc00:2::1 next hops = %v, want %s", ts, bKey)
+	}
+	k.res.dumpMain = func() ([]netlink.Route, error) { return main, nil }
+
+	// Two complete misses in a row: dropped and given back.
+	for range sweepsBeforeRelease {
+		if _, err := k.Sweep(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, ok := k.dests[b]; ok {
 		t.Fatal("fc00:2::1 kept after two complete misses in a row")

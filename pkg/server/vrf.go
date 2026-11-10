@@ -246,8 +246,10 @@ func (s *VrfServer) createOne(in *v1.Vrf) (*vrf.VRF, *v1.OperationError) {
 // the circuit's encapsulations and BUM copies are looked up on the port, so
 // they would go to that table and stop there. The ports checked are the
 // requested members and, for an adopt, every port the kernel already has in
-// the device; the table counts as closed when the request asks for the
-// routes or another managed VRF on the table has them.
+// the device; when the create closes a table that was open, also every port
+// of every VRF device on that table, managed or not. The table counts as
+// closed when the request asks for the routes or another managed VRF on the
+// table has them.
 func (s *VrfServer) refuseL2CircuitMembers(in *v1.Vrf) error {
 	if s.l2Ports == nil || !s.mgr.TableClosedAfterCreate(in.GetTableId(), in.GetNoUnreachableDefault()) {
 		return nil
@@ -269,8 +271,13 @@ func (s *VrfServer) refuseL2CircuitMembers(in *v1.Vrf) error {
 	if err != nil {
 		return fmt.Errorf("list the ports of VRF %q: %w", in.GetName(), err)
 	}
+	closesTable := !s.mgr.TableClosed(in.GetTableId())
 	for ifindex, l := range links {
-		if !l.IsVrf || l.Name != in.GetName() {
+		if !l.IsVrf {
+			continue
+		}
+		sharesTable := closesTable && l.VrfTable == in.GetTableId()
+		if l.Name != in.GetName() && !sharesTable {
 			continue
 		}
 		for port, pl := range links {

@@ -17,6 +17,8 @@ type LinkInfo struct {
 	VLANID  uint16
 	IsVrf   bool
 	VrfName string
+	// VrfTable is a VRF device's routing table (0 for other links).
+	VrfTable uint32
 }
 
 // Links is one snapshot of the host's interfaces, by ifindex.
@@ -39,8 +41,9 @@ func SnapshotLinks() (Links, error) {
 			info.VLANOf = uint32(a.ParentIndex)
 			info.VLANID = uint16(v.VlanId)
 		}
-		if _, ok := l.(*netlink.Vrf); ok {
+		if v, ok := l.(*netlink.Vrf); ok {
 			info.IsVrf = true
+			info.VrfTable = v.Table
 		}
 		out[uint32(a.Index)] = info
 	}
@@ -112,15 +115,30 @@ func (m *Manager) TableClosedAfterCreate(table uint32, noUnreachableDefault bool
 	return !noUnreachableDefault || m.closedTablesLocked()[table]
 }
 
-// ClosedVRFOfPort returns the managed VRF whose closed table the port with
-// this ifindex is enslaved to, if any.
+// ClosedVRFOfPort returns the VRF device the port with this ifindex is
+// enslaved to and whether that device's table is closed
+// (closedTablesLocked). The device may be one Vinbero does not manage: its
+// table is closed all the same when a managed VRF on it did not opt out.
 func (m *Manager) ClosedVRFOfPort(links Links, ifindex uint32) (string, bool) {
 	l, ok := links[ifindex]
 	if !ok || l.Master == 0 {
 		return "", false
 	}
-	v, ok := m.closedVRFs()[l.Master]
-	return v.Name, ok
+	master, ok := links[l.Master]
+	if !ok || !master.IsVrf {
+		return "", false
+	}
+	m.mu.RLock()
+	closed := m.closedTablesLocked()[master.VrfTable]
+	m.mu.RUnlock()
+	return master.Name, closed
+}
+
+// TableClosed reports whether table ends in the unreachable default now.
+func (m *Manager) TableClosed(table uint32) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.closedTablesLocked()[table]
 }
 
 // MemberWithoutAC is a port of a VRF's kernel device, attached to the data
