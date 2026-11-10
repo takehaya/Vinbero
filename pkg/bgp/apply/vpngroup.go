@@ -367,15 +367,17 @@ func groupFingerprint(ms []*vpnPath, src [16]byte) []string {
 // applier tracks whose data plane does not match it, and leaves the others
 // alone. A route received while the source locator was missing is tracked
 // but not written, and nothing else would deliver it again; one written
-// earlier takes the locator's new prefix if it changed; a write that failed
-// is retried. It returns an error when some write still failed, so the
+// earlier takes the locator's new prefix if it changed, and so do the EVPN
+// peers and aliasing groups (an EVPN route that could not be written is not
+// tracked, so the caller replays the EVPN loc-rib for those); a write that
+// failed is retried. It returns an error when some write still failed, so the
 // caller can try again later. Without a source locator it does nothing:
 // registering the locator calls it again. Safe to call from RPC goroutines.
 func (a *Applier) ReconcileTracked() error {
 	if _, err := a.encapSource(); err != nil {
 		return nil
 	}
-	var vpnFailed, mupFailed int
+	var vpnFailed, mupFailed, evpnFailed int
 	a.vpnMu.Lock()
 	for dk, d := range a.vpnGroups.dests {
 		if !a.reconcileVPNGroup(dk, d) {
@@ -396,8 +398,13 @@ func (a *Applier) ReconcileTracked() error {
 		}
 	}
 	a.mupMu.Unlock()
-	if vpnFailed+mupFailed > 0 {
-		return fmt.Errorf("data-plane writes failed for %d VPN prefixes and %d MUP sessions", vpnFailed, mupFailed)
+
+	a.evpnMu.Lock()
+	evpnFailed = a.reconcileEVPNSource()
+	a.evpnMu.Unlock()
+	if vpnFailed+mupFailed+evpnFailed > 0 {
+		return fmt.Errorf("data-plane writes failed for %d VPN prefixes, %d MUP sessions and %d EVPN peers",
+			vpnFailed, mupFailed, evpnFailed)
 	}
 	return nil
 }

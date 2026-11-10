@@ -398,24 +398,15 @@ func (a *Applier) applyUnicast(ur *bgp.UnicastRoute, withdraw bool) {
 	a.logger.Info("unicast route installed", zap.String("prefix", ur.Prefix))
 }
 
-// buildHeadendEntry assembles the headend entry that encapsulates
-// matching traffic towards the remote PE's SRv6 service SID. The single
-// segment is the SID itself and the outer destination equals it; parsing
-// the SID once via ParseSegments keeps DstAddr and Segments[0]
-// byte-identical.
+// buildHeadendEntryFrom assembles the headend entry that encapsulates
+// matching traffic towards the remote PE's SRv6 service SID, with src as
+// the outer source. The single segment is the SID itself and the outer
+// destination equals it; parsing the SID once via ParseSegments keeps
+// DstAddr and Segments[0] byte-identical.
 // reduced selects H.Encaps.Red -- for a single NEXT-C-SID service SID
 // the data plane then emits no SRH (RFC 9800 reduced encapsulation).
-func (a *Applier) buildHeadendEntry(sid string, reduced bool) (*bpf.HeadendEntry, error) {
-	src, err := a.encapSource()
-	if err != nil {
-		return nil, err
-	}
-	return buildHeadendEntryFrom(src, sid, reduced)
-}
-
-// buildHeadendEntryFrom is buildHeadendEntry with the encapsulation source
-// already resolved, for a caller that writes several entries and records
-// which source it wrote them with.
+// Callers resolve src (encapSource) once per reconcile and record it with
+// what they wrote, so a moved source locator is seen as a change.
 func buildHeadendEntryFrom(src [16]byte, sid string, reduced bool) (*bpf.HeadendEntry, error) {
 	segments, numSegments, err := bpf.ParseSegments([]string{sid})
 	if err != nil {

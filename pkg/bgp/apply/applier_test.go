@@ -53,6 +53,8 @@ type fakeHeadend struct {
 	fdb                              map[fdbKey]*bpf.FdbEntry
 	bdPeers                          map[bdPeerKey]*bpf.HeadendEntry
 	bdPeerReverse                    map[bdPeerKey]bool // writeReverse flag passed per peer
+	bdPeerRemoteSrc                  map[bdPeerKey][bpf.IPv6AddrLen]byte
+	bdPeerESI                        map[bdPeerKey][bpf.ESILen]byte
 	bdPeerErr                        error
 	fdbErr                           error
 	fdbDelErr                        error
@@ -67,17 +69,19 @@ type fakeHeadend struct {
 
 func newFakeHeadend() *fakeHeadend {
 	return &fakeHeadend{
-		v4created:     map[string]*bpf.HeadendEntry{},
-		v6created:     map[string]*bpf.HeadendEntry{},
-		fdb:           map[fdbKey]*bpf.FdbEntry{},
-		bdPeers:       map[bdPeerKey]*bpf.HeadendEntry{},
-		bdPeerReverse: map[bdPeerKey]bool{},
-		esis:          map[[bpf.ESILen]byte]*bpf.EsiEntry{},
-		esPeers:       map[esPeerKey]struct{}{},
-		v4owners:      map[string]bpf.OwnerTag{},
-		v6owners:      map[string]bpf.OwnerTag{},
-		ecmpGroups:    map[uint32][]bpf.EcmpPath{},
-		ecmpOwners:    map[uint32]bpf.OwnerTag{},
+		v4created:       map[string]*bpf.HeadendEntry{},
+		v6created:       map[string]*bpf.HeadendEntry{},
+		fdb:             map[fdbKey]*bpf.FdbEntry{},
+		bdPeers:         map[bdPeerKey]*bpf.HeadendEntry{},
+		bdPeerReverse:   map[bdPeerKey]bool{},
+		bdPeerRemoteSrc: map[bdPeerKey][bpf.IPv6AddrLen]byte{},
+		bdPeerESI:       map[bdPeerKey][bpf.ESILen]byte{},
+		esis:            map[[bpf.ESILen]byte]*bpf.EsiEntry{},
+		esPeers:         map[esPeerKey]struct{}{},
+		v4owners:        map[string]bpf.OwnerTag{},
+		v6owners:        map[string]bpf.OwnerTag{},
+		ecmpGroups:      map[uint32][]bpf.EcmpPath{},
+		ecmpOwners:      map[uint32]bpf.OwnerTag{},
 	}
 }
 
@@ -97,12 +101,14 @@ func (f *fakeHeadend) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
 	return nil
 }
 
-func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [bpf.ESILen]byte, _ [bpf.IPv6AddrLen]byte, writeReverse bool) error {
+func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) error {
 	if f.bdPeerErr != nil {
 		return f.bdPeerErr
 	}
 	f.bdPeers[bdPeerKey{bdID, index}] = e
 	f.bdPeerReverse[bdPeerKey{bdID, index}] = writeReverse
+	f.bdPeerRemoteSrc[bdPeerKey{bdID, index}] = remoteSrc
+	f.bdPeerESI[bdPeerKey{bdID, index}] = esi
 	return nil
 }
 

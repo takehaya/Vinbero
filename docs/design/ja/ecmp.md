@@ -184,7 +184,7 @@ probe は SRv6 self-probe です。member の segment list の transport 部分�
 
 送信は IPPROTO_RAW socket で IPv6 + SRH + ICMPv6 を自前で組みます (checksum は RFC 8200 に従い最終宛先で計算)。受信は ICMPv6 raw socket に echo reply だけを通す kernel filter を掛けます。reply は送信元 address と、probe ごとの乱数 cookie (echo payload) の一致で照合するので、無関係な process の ping や偽装 reply が dead path を up に保てません。判定は送信時に前回 round の応答有無を畳む方式で、直前 round の probe への遅延応答も生存として数えるため、RTT が 2 interval 未満の path まで扱えます。multiplier 回連続の無応答で down、同じ回数の連続応答で up に戻るヒステリシスを持ちます。
 
-probe の送信元は `bgp.global.next_hop` (PE の loopback) を優先します。echo reply は SRv6 を通らず素の IPv6 で戻るので、kernel が実際に所有して local 配達する address が要るためです。locator base (encap source) は通常どのインターフェースにも付与されないので fallback に留めます。link-local の next hop は zone を運べないため unprobeable として up に固定します。
+probe の送信元は `bgp.global.next_hop` (PE の loopback) を優先します。echo reply は SRv6 を通らず素の IPv6 で戻るので、kernel が実際に所有して local 配達する address が要るためです。locator base (encap source) は通常どのインターフェースにも付与されないので fallback に留めます。probe の送信元は起動時に 1 回だけ決めるので、fallback で locator base を使っているときに source locator を別の prefix で登録し直しても、probe の送信元は変わりません。link-local の next hop は zone を運べないため unprobeable として up に固定します。
 
 applier は group を書き込むたびに `Register(groupID, targets)` で member 集合を差し替え、group を畳むときに `Unregister` します。差し替えでは同じ target (宛先と transport segments が一致する path) の状態を引き継ぐので、membership の churn が dead path を蘇生させることはありません。新規 path は up で登録し、以後は状態変化のときだけ bitmap を書き換えます。L3VPN 側は next hop を `vpnPath` に載せて member から引き、EVPN 側は per-EVI A-D の広告元 PE を使います。next hop の変化は fingerprint に含めているので、SID が同じままでも再登録されます。
 

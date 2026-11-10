@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"net"
+	"net/netip"
 	"slices"
 
 	"go.uber.org/zap"
@@ -74,8 +75,9 @@ type esDest struct {
 	// and its group id -- may be released. It outlives active: a failed
 	// reconcile can leave a dest inactive but still programmed.
 	programmed bool
-	// installed is the member SID list last written (see memberFingerprint's
-	// role in vpngroup.go).
+	// installed is the member list last written plus the encapsulation
+	// source it was written with (see groupFingerprint's role in
+	// vpngroup.go).
 	installed []string
 }
 
@@ -518,6 +520,17 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		}
 		return
 	}
+	// One source for the whole write, recorded in the fingerprint, so a
+	// source locator registered again under another prefix rewrites the
+	// group and its ES peer, and an unchanged one writes nothing.
+	src, err := a.encapSource()
+	if err != nil {
+		// Without the source locator nothing can be written. A segment
+		// already aliased keeps forwarding with the source it has, one not
+		// yet aliased stays on per-PE forwarding, and ReconcileTracked
+		// writes either once the locator is back.
+		return
+	}
 	if d == nil {
 		if len(a.evpn.esDests) >= maxTrackedESDest {
 			a.logger.Warn("EVPN segment table full; not aliasing",
@@ -540,12 +553,13 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 		a.evpn.esDests[dk] = d
 	}
 
-	fingerprint := make([]string, len(members))
+	fingerprint := make([]string, len(members), len(members)+1)
 	for i, m := range members {
 		// The PE is part of it: with an anycast SID the surviving member's
 		// probe destination changes even when the SID does not.
 		fingerprint[i] = m.sid + ">" + m.pe
 	}
+	fingerprint = append(fingerprint, "src="+netip.AddrFrom16(src).String())
 	if d.active && slices.Equal(fingerprint, d.installed) {
 		return
 	}
@@ -578,7 +592,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 
 	paths := make([]bpf.EcmpPath, 0, len(members))
 	for _, m := range members {
-		entry, err := a.buildL2HeadendEntry(m.sid, dk.bdID, true)
+		entry, err := buildL2HeadendEntryFrom(src, m.sid, dk.bdID, true)
 		if err != nil {
 			a.logger.Error("build EVPN aliasing member",
 				zap.Uint16("bd_id", dk.bdID), zap.String("sid", m.sid), zap.Error(err))
@@ -609,7 +623,7 @@ func (a *Applier) reconcileESKey(dk esDestKey) {
 	// fallback forwards the way the first path would (same shape as the VPN
 	// trigger entries). It is parked above the flood range and marked
 	// flood-excluded, so BUM replication never sees it.
-	trigger, err := a.buildL2HeadendEntry(members[0].sid, dk.bdID, true)
+	trigger, err := buildL2HeadendEntryFrom(src, members[0].sid, dk.bdID, true)
 	if err != nil {
 		a.logger.Error("build EVPN ES peer entry",
 			zap.Uint16("bd_id", dk.bdID), zap.Error(err))
