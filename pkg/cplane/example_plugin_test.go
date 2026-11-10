@@ -173,11 +173,21 @@ func TestExamplePluginDeclaresTheWholeSet(t *testing.T) {
 // declaration converges on the same state.
 func TestExamplePluginConvergesAfterRestart(t *testing.T) {
 	m, src, ops := exampleManager(t)
-	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
+	route := customBehaviorRoute("10.0.0.0/24", "fd00:2::100")
+	src.emit("custom-behavior", route)
 	waitDelivered(t, m, "custom-behavior")
 	if ops.countV4() != 1 {
 		t.Fatalf("setup: %d entries, want 1", ops.countV4())
 	}
+
+	// The demux's rib holds every route it delivered live; the fake keeps
+	// the two apart, so the test states it. The replay on re-register reads
+	// the rib, and a rib without the route means it was withdrawn while
+	// nobody was listening, which the new instance rightly prunes.
+	src.setRib(route)
+	ops.mu.Lock()
+	before := len(ops.writes)
+	ops.mu.Unlock()
 
 	// Re-registering is the upgrade path and stands in for a restart: a
 	// fresh instance over the same owner tag.
@@ -189,15 +199,29 @@ func TestExamplePluginConvergesAfterRestart(t *testing.T) {
 	})); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
-	// The state is still there across the swap.
-	if ops.countV4() != 1 {
-		t.Fatalf("the restart disturbed the data plane: %v", sortedV4(ops))
+	// The new instance knows nothing yet; the replay is what tells it, and
+	// it is applied on the worker after Register returns. Checking before it
+	// has run would pass or fail on scheduling alone.
+	waitDelivered(t, m, "custom-behavior")
+	if got := sortedV4(ops); len(got) != 1 || got[0] != "10.0.0.0/24" {
+		t.Fatalf("after replay the data plane holds %v, want the same single entry", got)
 	}
-	// The new instance knows nothing yet; the replay is what tells it.
-	src.emit("custom-behavior", customBehaviorRoute("10.0.0.0/24", "fd00:2::100"))
+	// The state is still there across the swap: the replacement restates
+	// the entry over the same owner tag and never takes it out.
+	ops.mu.Lock()
+	swap := append([]string(nil), ops.writes[before:]...)
+	ops.mu.Unlock()
+	for _, write := range swap {
+		if write == "delete v4 10.0.0.0/24" {
+			t.Fatalf("the restart disturbed the data plane: %v", swap)
+		}
+	}
+
+	// A live update after the replay is a duplicate the desired set absorbs.
+	src.emit("custom-behavior", route)
 	waitDelivered(t, m, "custom-behavior")
 	if ops.countV4() != 1 {
-		t.Fatalf("after replay the data plane holds %v, want the same single entry", sortedV4(ops))
+		t.Fatalf("a duplicate after replay left the data plane holding %v, want the same single entry", sortedV4(ops))
 	}
 }
 
