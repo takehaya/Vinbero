@@ -84,7 +84,7 @@ DEL は記録を読み、逆順に /32 と neighbour の削除 (withdraw)、`Dev
 - IPAM の lease。whereabouts なら reconciler が回収します。host-local には回収の仕組みがありません
 - `dataDir` の attachment の記録。veth が無いので、subnet の重なりの検査では無視されます
 - vinberod が持つ attach の記録 (`DeviceDetach` が失敗したとき)。interface はもう無いので通信には関係せず、vinberod の次の再起動で消えます
-- vinberod が持つ AC の記録 (`VrfAcRemove` が失敗したとき)。これも通信には関係しません。再起動後も `state.json` に残り、reconcile のたびに warning を出して飛ばされます。消すには `vbctl vrf ac-remove` を実行します
+- vinberod が持つ AC の記録 (`VrfAcRemove` が失敗したとき)。これも通信には関係しません。再起動後も `state.json` に残り、reconcile で飛ばされます (warning は 1 度だけ出ます)。消すには `vbctl vrf ac-remove` を実行します
 
 VRF と binding は最後の pod が消えても残します。
 
