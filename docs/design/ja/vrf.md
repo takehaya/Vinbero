@@ -113,6 +113,22 @@ VRF device に enslave したまま AC にしていない interface は vrf_id 0
 - どの宛先も使わなくなった next hop は返します。keeper が managed にした entry を消し、元の動的な扱いに戻します。neighbour の読み込みや削除が失敗したときは keeper のものとして持ち続け、後の見直しでやり直します。最初から静的 (permanent、noarp) だった entry、keeper が見る前から managed だった entry、BUM の flood 先として managed にした entry には触れません。1 回の見直しで neighbour table を読むのは device と family ごとに 1 回です
 - End.AM の戻りの次の宛先はパケットの SRH にしかなく、map から知る方法がありません。End.AM の戻りの next hop は keeper の対象外で、ほかの通信で解決されている必要があります ([service_programming.md](service_programming.md))
 
+## headend entry の VRF
+
+L3 headend の表 (`headend_v4_map` / `headend_v6_map`) は `{vrf_id, prefix}` を key にします。同じ trigger prefix でも VRF が違えば別の entry で、owner も別に持ちます。entry を書く経路ごとの VRF は次のとおりです。
+
+- operator の RPC と vbctl (`Headendv4Create` などの `vrf_name`、`vbctl headend-v4 create --vrf X`)。省略するか `global` を指定すると global VRF (vrf_id 0) です。それ以外の名前は既存の VRF でなければならず、未知の名前は拒否します。要求が VRF を作ることはありません (名前の打ち間違いで見えない entry ができるのを防ぐためです)。
+- control plane plugin の宣言 (`PluginHeadendEntry.vrf`)。global VRF には grant が要りません。それ以外の VRF は plugin の scope の VRF list に入っている必要があります ([cplane-plugin.md](cplane-plugin.md#headend-の-vrf-と-prefix))。
+- BGP の applier は global VRF に書きます。
+
+`vrf_name` を省略した要求は、どの操作でも global VRF を扱います。一覧 (`Headendv4List`、`vbctl headend-v4 list`) と Flush (`vbctl headend-v4 flush --yes`) も global VRF だけです。全 VRF を扱うには `all_vrfs` (`--all-vrfs`) を指定します。`vrf_name` と同時には指定できません。一覧の各 entry は VRF を持ちます。応答の `vrf_name` は global VRF では空、`vrf_id` は VRF の id です。Create は `vrf_id` を省略するか、`vrf_name` が指す VRF と同じ id を受け付けるので、一覧の entry をそのまま送り返せます。違う id は拒否します。
+
+Flush は、その VRF (または全 VRF) にある RPC の entry と owner の無い entry に加えて、entry が消えて RPC の owner の記録だけが残ったものも消します。plugin や BGP の entry は消しません。
+
+control plane plugin が存在しない VRF を宣言すると、その集合は拒否されます。host が受け取った入力を渡す plugin (input policy を持つもの。composition はこれです) と、公開前に宣言した集合は、host が保持して次の event で再試行します。それ以外の plugin の集合は保持しないので、plugin は VRF ができてから宣言し直します。
+
+data plane は入口の VRF に関係なく vrf_id 0 で headend の表を引きます。そのため global VRF 以外の entry は保存、一覧、削除はできますが、転送には使われません。
+
 ## kernel device facet
 
 End.DT4/DT6/DT46 は decap 後に `bpf_fib_lookup(ifindex=VRF device)` で per-VRF FIB を引くため、Linux VRF device が必要です。この device の lifecycle を VRF オブジェクトが持ちます。
@@ -156,8 +172,16 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 1. ingress AC が残っている → 拒否 (`vrf ac-remove` で先に外す)
 2. vrf-bgp binding が存在する → 拒否 (`vrf-bgp unbind` で先に外す。vpnv4 / vpnv6 の RT を持つ最後の binding を外すと、その family は default-allow に戻り、受信済みの経路がすべて入ります。[srv6_bgp.md](srv6_bgp.md#binding-と-locator-の変更による再評価))
 3. bridge facet が付いている → 拒否 (`vrf bridge-detach` で先に外す)
-4. End.T/DT4/DT6/DT46 の SID が device ifindex を参照している → 拒否 (`sid delete` で先に外す)。参照チェック中に aux が読めない場合も fail-closed で拒否します (読めない aux が参照かもしれないため)
-5. すべて clear なら device を teardown し (その VRF が足した unreachable default も外します。[kernel device facet](#kernel-device-facet))、identity を消して id を回収します。device 削除が失敗した場合は identity に触れず、retry できます
+4. その vrf_id の headend entry がある → 拒否。vrf_id は二度と使わないので、残すと名前で消せない entry になるためです。拒否の理由は owner ごとの件数と、それを消す操作を示します
+   - operator の entry: `vbctl headend-v4 delete --vrf X` か `headend-v4 flush --yes --vrf X` (v6 も同じ)
+   - owner の無い entry: `headend-v4 flush --yes --vrf X`
+   - control plane plugin の entry: plugin が宣言から外すか、`vbctl cplane unregister --name P` で登録を外す
+   - BGP の entry: その経路を取り込む vrf-bgp binding を外す
+   - entry が消えて owner の記録だけ残ったものは、operator と plugin の分を数えます (上の flush と plugin の宣言で消えます)。それ以外の owner の記録は、どの API も表示も削除もしないので数えず、VRF と一緒に消します
+
+   検査は、headend の entry を書く RPC と plugin が VRF の名前を id に解決してから書き終えるまでの間を避けて行い、検査を通った時点から名前の解決はその VRF を拒否します。そのため検査が書きかけの entry を見落とすことはありません。書き手が待つのは検査の間だけで、device の teardown や state の保存の間は待ちません
+5. End.T/DT4/DT6/DT46 の SID が device ifindex を参照している → 拒否 (`sid delete` で先に外す)。参照チェック中に aux が読めない場合も fail-closed で拒否します (読めない aux が参照かもしれないため)
+6. すべて clear なら device を teardown し (その VRF が足した unreachable default も外します。[kernel device facet](#kernel-device-facet))、identity を消します。id は他の VRF に使いません。device 削除が失敗した場合は identity に触れず、retry できます
 
 `global` と、Vinbero 管理外の raw な kernel device (先に `vrf create` で adopt すれば管理下に入る) は削除できません。
 
@@ -166,11 +190,11 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 kernel device facet、vrf_id の割り当て、実行時に足した AC は `settings.state_path` の JSON state に永続化され、restart を跨いで生き残ります。boot 順序は次のとおりです。id は `ingress_vrf_map` に書く前に state に保存し、XDP と TC を attach する前に `ingress_vrf_map` と policy を書き終えます。attach された interface のパケットが未分類で流れる時間はありません。保存に失敗した場合 (state の置き場所が書けない等) は warning を出して起動を続けるので、その id は記録されないまま data plane で使われます。保存が成功するまでは、次の再起動で各 VRF が同じ id を受け取る保証はありません。
 
 1. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成し、存在するものは Create と同じ検証と収束で adopt します。その前に、各 entry の unreachable default の設定を config の値で決め (config が宣言していない entry は記録の値、未決定なら既定)、opt-out になった entry が足した経路を外します。そのうえで opt-out していない entry の table に経路を足します。L2 headend の circuit が port にある table は開けたままにします ([encap の外側の経路](#encap-の外側の経路) の L2 circuit と同じ確認)。実体化できない entry があれば fail-closed で起動を拒否します (stale な ifindex を FDB watcher / EVPN / SID 参照ガードに渡さない。エラーに修復手順が出ます)
-2. `Manager.Restore` が保存された vrf_id と次に割り当てる id、実行時の AC を戻します。これより前に id を割り当てる処理はありません。同じ id を持つ 2 つの VRF や `next_vrf_id` 以上の id のように矛盾した state は、推測で直さずに起動を拒否します
+2. `Manager.Restore` が保存された vrf_id と次に割り当てる id、実行時の AC を戻します。これより前に id を割り当てる処理はありません。同じ id を持つ 2 つの VRF や `next_vrf_id` 以上の id のように矛盾した state は、推測で直さずに起動を拒否します。続けて、pin された map のうち vrf_id を key に持つもの (headend と MUP uplink、それぞれの owner map) にある最大の vrf_id より上から割り当てるようにします。state file を失った、または保存できなかった場合でも、map に状態が残っている id を新しい VRF に渡さないためです
 3. `--bgp-enabled` のとき、config の `bgp.vrf_bindings` の VRF に id を割り当てます
 4. `seedVrfDevices` / `seedVrfBridges` が state を VRF オブジェクトに mirror します (restart 後も facet 付きの一級 VRF として見える)。facet 化以前の bridge record は owning VRF を持たないので、bridge 名を仮の VRF 名として seed します (state file の `vrf` フィールドを書いて再起動すれば本来の VRF に移せます。仮の VRF は何も持たなくなるので、次の項目の規則で戻りません)
 5. `loadVRFs` が config の `vrfs:` を適用します (device / bridge は adopt 冪等、AC、policy)
-6. `Manager.FinishRestore` が、起動時の読み込みで作られた VRF (`config` 付き) のうち、config がもう宣言しておらず、AC も device も bridge も持たないものを外します。その id は再利用しません。API で作った VRF は `vbctl vrf delete` まで残ります
+6. `Manager.FinishRestore` が、起動時の読み込みで作られた VRF (`config` 付き) のうち、config がもう宣言しておらず、AC も device も bridge も持たないものを外します。その id は再利用しません。API で作った VRF は `vbctl vrf delete` まで残ります。続けて、どの VRF も持たない vrf_id の headend entry と owner の記録を、owner に関係なく消し、id ごとに件数を log に出します。ここで外した VRF の entry と、state file が記録していなかった id の entry がこれにあたります。存在しない VRF は entry を持てないからで、起動時には拒否する相手がいないので、config に書かれた operator の意図に従います。BGP の applier と plugin の restore はこの後に動きます
 7. state を保存し、`ingress_vrf_map` と policy を書きます
 8. `internal.devices` と、state に記録された実行時 attach の device に XDP / TC を attach します
 9. FDB watcher を起動し、bridge facet を登録します。VRF オブジェクトの復元前に登録しようとすると起動を失敗させるので、順序を入れ替えても bridge が黙って監視から漏れることはありません

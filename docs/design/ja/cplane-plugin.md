@@ -332,7 +332,7 @@ host が提供するもの。すべて `vinbero` module から import します�
 |---|---|
 | `log(level, ptr, len)` | daemon log へ出力 |
 | `now_monotonic() -> i64` | `on_tick` と同じ clock による単調増加の ns |
-| `input_features() -> i64` | host が渡せる入力形式の bitmap |
+| `input_features() -> i64` | host が渡せる入力形式と、host が対応する機能 (headend の VRF など) の bitmap |
 | `grants(ptr, cap) -> i32` | 登録内容 (`PluginGrants`) を guest の buffer に書き、長さを返す |
 | `apply_begin(kind) -> i64` | desired-set transaction を開く (headend v4/v6、advertise、local SID) |
 | `apply_put(gen, ptr, len) -> i32` | 宣言の chunk を積む |
@@ -393,7 +393,7 @@ object 単位の性質なので、この形は表現できません。
 | `local_sid` の decap_vrf | VRF 名の集合 | plugin dispatch の built-in decap を許可済み VRF へ縛る (advertise と同じ集合) |
 | advertise の vpnv4 と vpnv6 | VRF 名の集合 | RD と RT を binding から導出する |
 | advertise の ipv6_unicast | 許可された locator の配下 | plugin がここで広告する正当なものは自分の SID である |
-| `headend` | trigger prefix の list | 縛れる名前が存在しない |
+| `headend` | trigger prefix の list。global VRF 以外は VRF 名の集合 (advertise と同じ集合) | prefix には縛れる名前が存在しない。VRF は宣言が名前を持つ |
 
 加えて、plugin が所有する PROG_ARRAY slot を宣言します。headend は v4 と v6 の
 map が別の PROG_ARRAY で slot 番号を共有するので、grant も別にします。v4 の
@@ -477,13 +477,34 @@ binding が変わった時点で再導出します。unbind も同じで、bindi
 上限を超えた分を withdraw します。operator が上限を下げたときに拒否すると経路が
 全部残り、頼んだことと逆になるためです。
 
-### headend だけ prefix で縛る
+### headend の VRF と prefix
 
-`headend_v4_map` の key は `{vrf_id, prefix}` ですが、headend の entry は
-すべて vrf_id 0 (global VRF) に書かれ、plugin の宣言も VRF を指定できません。
-locator も key に入りません。名前で縛れる対象が無いので、operator が
-prefix を並べます。未指定なら headend の宣言を拒否するので、`::/0` の
-catch-all は書けません。
+`headend_v4_map` の key は `{vrf_id, prefix}` です。plugin は entry ごとに
+VRF を名前で宣言でき (`PluginHeadendEntry.vrf`、SDK の `HeadendEntry.VRF`)、
+省略するか `global` と書くと global VRF (vrf_id 0) です。global VRF 以外は
+scope の VRF list に入っていなければ集合ごと拒否します。advertise と local SID の
+decap_vrf と同じ list です。名前は apply の時点で vrf_id に解決し、存在しない
+VRF は集合ごと拒否します。宣言が VRF を作ることはありません。input policy を持つ
+plugin (composition) の宣言と公開前の宣言は、ほかの失敗と同じく host が保持して
+次の event で再試行します。それ以外は保持しないので、plugin は VRF ができてから
+宣言し直します。名前の解決から map への
+書き込みまでの間は VRF の削除を始めさせないので、削除された VRF の id に entry が
+残ることはありません。composition でも、この間に BGP や service の処理を挟みません。同じ prefix を global VRF と別の VRF に宣言すると、2 つの entry に
+なります。data plane は vrf_id 0 で引くので、global VRF 以外の entry は転送に
+使われません ([vrf.md](vrf.md#headend-entry-の-vrf))。
+
+host は headend の VRF に対応していることを `input_features` の bit
+(`FeatureHeadendVRF`、4) で示します。field を知らない古い host は VRF を無視して
+global VRF に書いてしまうので、SDK はこの bit が無い host には VRF を指定した宣言を
+送らず、宣言の時点で `ErrNoHeadendVRF` を返します。VRF を指定しない plugin は bit に
+関係なく動きます。SDK を使わずに wire を組む plugin は、自分でこの bit を確かめます。
+
+prefix には縛れる名前がありません。locator も key に入らないので、operator が
+prefix を並べます。prefix の検査はどの VRF の entry にもかかります。未指定なら
+headend の宣言を拒否するので、`::/0` の catch-all は書けません。
+
+scope を縮めて VRF を list から外すと、登録時の prune がその VRF の entry を
+消します。名前を失った VRF の entry も範囲外として消します。
 
 将来は「claim した behavior で自分に配送された経路の prefix」を scope の
 要素として並べられるようにする余地を残しています。いまは採っていません。

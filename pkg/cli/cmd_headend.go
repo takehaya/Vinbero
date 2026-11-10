@@ -25,6 +25,7 @@ func headendV4Command() *cli.Command {
 					&cli.StringFlag{Name: "segments", Required: true, Usage: "Segment list (comma-separated)"},
 					&cli.StringFlag{Name: "mode", Value: "H_ENCAPS", Usage: "Headend mode (H_ENCAPS, H_INSERT, H_M_GTP4_D)"},
 					&cli.UintFlag{Name: "args-offset", Usage: "Args.Mob.Session byte offset in SID (for H.M.GTP4.D)"},
+					headendVRFFlag(),
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -38,6 +39,7 @@ func headendV4Command() *cli.Command {
 						SrcAddr:       c.String("src-addr"),
 						Segments:      strings.Split(c.String("segments"), ","),
 						ArgsOffset:    uint32(c.Uint("args-offset")),
+						VrfName:       c.String("vrf"),
 					}
 					resp, err := clients.Hv4.Headendv4Create(context.Background(),
 						connect.NewRequest(&v1.Headendv4CreateRequest{Headendv4S: []*v1.Headendv4{entry}}))
@@ -50,11 +52,11 @@ func headendV4Command() *cli.Command {
 			{
 				Name:  "delete",
 				Usage: "Delete a Headend v4 entry",
-				Flags: []cli.Flag{&cli.StringFlag{Name: "trigger-prefix", Required: true}},
+				Flags: []cli.Flag{&cli.StringFlag{Name: "trigger-prefix", Required: true}, headendVRFFlag()},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv4.Headendv4Delete(context.Background(),
-						connect.NewRequest(&v1.Headendv4DeleteRequest{TriggerPrefixes: []string{c.String("trigger-prefix")}}))
+						connect.NewRequest(&v1.Headendv4DeleteRequest{TriggerPrefixes: []string{c.String("trigger-prefix")}, VrfName: c.String("vrf")}))
 					if err != nil {
 						return err
 					}
@@ -64,14 +66,16 @@ func headendV4Command() *cli.Command {
 			},
 			{
 				Name:  "flush",
-				Usage: "Delete every Headend v4 entry (requires --yes)",
+				Usage: "Delete the Headend v4 entries the API wrote in one VRF (default: the global VRF), or with --all-vrfs in every VRF (requires --yes)",
 				Flags: []cli.Flag{
 					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
+					headendVRFFlag(),
+					headendAllVRFsFlag(),
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv4.Headendv4Flush(context.Background(),
-						connect.NewRequest(&v1.Headendv4FlushRequest{}))
+						connect.NewRequest(&v1.Headendv4FlushRequest{VrfName: c.String("vrf"), AllVrfs: c.Bool("all-vrfs")}))
 					if err != nil {
 						return err
 					}
@@ -81,22 +85,26 @@ func headendV4Command() *cli.Command {
 			},
 			{
 				Name:  "list",
-				Usage: "List all Headend v4 entries",
+				Usage: "List the Headend v4 entries of one VRF (default: the global VRF), or with --all-vrfs of every VRF",
+				Flags: []cli.Flag{
+					headendVRFFlag(),
+					headendAllVRFsFlag(),
+				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv4.Headendv4List(context.Background(),
-						connect.NewRequest(&v1.Headendv4ListRequest{}))
+						connect.NewRequest(&v1.Headendv4ListRequest{VrfName: c.String("vrf"), AllVrfs: c.Bool("all-vrfs")}))
 					if err != nil {
 						return err
 					}
 					if useJSON(c) {
 						return printJSON(resp.Msg.Headendv4S)
 					}
-					headers := []string{"TRIGGER PREFIX", "MODE", "SRC ADDR", "SEGMENTS"}
+					headers := []string{"TRIGGER PREFIX", "VRF", "MODE", "SRC ADDR", "SEGMENTS"}
 					var rows [][]string
 					for _, h := range resp.Msg.Headendv4S {
 						rows = append(rows, []string{
-							h.TriggerPrefix, formatMode(h.Mode), h.SrcAddr, strings.Join(h.Segments, ","),
+							h.TriggerPrefix, formatHeadendVRF(h.VrfName, h.VrfId), formatMode(h.Mode), h.SrcAddr, strings.Join(h.Segments, ","),
 						})
 					}
 					printTable(headers, rows)
@@ -122,6 +130,7 @@ func headendV6Command() *cli.Command {
 					&cli.StringFlag{Name: "segments", Required: true, Usage: "Segment list (comma-separated)"},
 					&cli.StringFlag{Name: "mode", Value: "H_ENCAPS", Usage: "Headend mode (H_ENCAPS, H_INSERT, H_M_GTP6_D)"},
 					&cli.UintFlag{Name: "args-offset", Usage: "Args.Mob.Session byte offset in SID (for H.M.GTP6.D)"},
+					headendVRFFlag(),
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
@@ -135,6 +144,7 @@ func headendV6Command() *cli.Command {
 						SrcAddr:       c.String("src-addr"),
 						Segments:      strings.Split(c.String("segments"), ","),
 						ArgsOffset:    uint32(c.Uint("args-offset")),
+						VrfName:       c.String("vrf"),
 					}
 					resp, err := clients.Hv6.Headendv6Create(context.Background(),
 						connect.NewRequest(&v1.Headendv6CreateRequest{Headendv6S: []*v1.Headendv6{entry}}))
@@ -147,11 +157,11 @@ func headendV6Command() *cli.Command {
 			{
 				Name:  "delete",
 				Usage: "Delete a Headend v6 entry",
-				Flags: []cli.Flag{&cli.StringFlag{Name: "trigger-prefix", Required: true}},
+				Flags: []cli.Flag{&cli.StringFlag{Name: "trigger-prefix", Required: true}, headendVRFFlag()},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv6.Headendv6Delete(context.Background(),
-						connect.NewRequest(&v1.Headendv6DeleteRequest{TriggerPrefixes: []string{c.String("trigger-prefix")}}))
+						connect.NewRequest(&v1.Headendv6DeleteRequest{TriggerPrefixes: []string{c.String("trigger-prefix")}, VrfName: c.String("vrf")}))
 					if err != nil {
 						return err
 					}
@@ -161,14 +171,16 @@ func headendV6Command() *cli.Command {
 			},
 			{
 				Name:  "flush",
-				Usage: "Delete every Headend v6 entry (requires --yes)",
+				Usage: "Delete the Headend v6 entries the API wrote in one VRF (default: the global VRF), or with --all-vrfs in every VRF (requires --yes)",
 				Flags: []cli.Flag{
 					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
+					headendVRFFlag(),
+					headendAllVRFsFlag(),
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv6.Headendv6Flush(context.Background(),
-						connect.NewRequest(&v1.Headendv6FlushRequest{}))
+						connect.NewRequest(&v1.Headendv6FlushRequest{VrfName: c.String("vrf"), AllVrfs: c.Bool("all-vrfs")}))
 					if err != nil {
 						return err
 					}
@@ -178,22 +190,26 @@ func headendV6Command() *cli.Command {
 			},
 			{
 				Name:  "list",
-				Usage: "List all Headend v6 entries",
+				Usage: "List the Headend v6 entries of one VRF (default: the global VRF), or with --all-vrfs of every VRF",
+				Flags: []cli.Flag{
+					headendVRFFlag(),
+					headendAllVRFsFlag(),
+				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv6.Headendv6List(context.Background(),
-						connect.NewRequest(&v1.Headendv6ListRequest{}))
+						connect.NewRequest(&v1.Headendv6ListRequest{VrfName: c.String("vrf"), AllVrfs: c.Bool("all-vrfs")}))
 					if err != nil {
 						return err
 					}
 					if useJSON(c) {
 						return printJSON(resp.Msg.Headendv6S)
 					}
-					headers := []string{"TRIGGER PREFIX", "MODE", "SRC ADDR", "SEGMENTS"}
+					headers := []string{"TRIGGER PREFIX", "VRF", "MODE", "SRC ADDR", "SEGMENTS"}
 					var rows [][]string
 					for _, h := range resp.Msg.Headendv6S {
 						rows = append(rows, []string{
-							h.TriggerPrefix, formatMode(h.Mode), h.SrcAddr, strings.Join(h.Segments, ","),
+							h.TriggerPrefix, formatHeadendVRF(h.VrfName, h.VrfId), formatMode(h.Mode), h.SrcAddr, strings.Join(h.Segments, ","),
 						})
 					}
 					printTable(headers, rows)
@@ -314,5 +330,30 @@ func headendL2Command() *cli.Command {
 				},
 			},
 		},
+	}
+}
+
+// headendVRFFlag names the VRF a headend command acts on. Omitted, it is the
+// global VRF.
+func headendVRFFlag() cli.Flag {
+	return &cli.StringFlag{Name: "vrf", Usage: "VRF (default: the global VRF); it must already exist"}
+}
+
+// headendAllVRFsFlag selects every VRF for list and flush.
+func headendAllVRFsFlag() cli.Flag {
+	return &cli.BoolFlag{Name: "all-vrfs", Usage: "Every VRF (not with --vrf)"}
+}
+
+// formatHeadendVRF renders the VRF column of a headend entry. The VRF
+// column comes second so the prefix stays the first field and the segment
+// list the last.
+func formatHeadendVRF(name string, id uint32) string {
+	switch {
+	case id == 0:
+		return "global"
+	case name == "":
+		return fmt.Sprintf("vrf_id=%d", id)
+	default:
+		return name
 	}
 }

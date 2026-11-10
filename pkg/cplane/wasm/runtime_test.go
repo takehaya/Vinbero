@@ -504,6 +504,19 @@ func TestWASIImportsAdmitted(t *testing.T) {
 // vinbero.grants is linked without any capability. It reports the length a
 // guest needs, writes only into a buffer that is large enough, and refuses a
 // buffer outside guest memory.
+// input_features reports the host's bitmap, the headend VRF bit included:
+// the SDK sends a headend entry naming a VRF only when it is set.
+func TestInputFeaturesReportHeadendVRF(t *testing.T) {
+	inst := mustInstantiate(t, "features", Config{})
+	res, err := inst.mod.ExportedFunction("read_features").Call(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0] != HostFeatures || res[0]&FeatureHeadendVRF == 0 {
+		t.Errorf("input_features = %#x, want %#x with the headend VRF bit", res[0], HostFeatures)
+	}
+}
+
 func TestGrantsHostFunction(t *testing.T) {
 	grants := []byte("encoded-grants")
 	inst := mustInstantiate(t, "grants", Config{Grants: grants, Capabilities: Capabilities{}})

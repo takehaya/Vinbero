@@ -52,6 +52,16 @@ const ABIVersion = 1
 const InputFeatureBGPPath uint64 = 1
 const InputFeatureContexts uint64 = 2
 
+// FeatureHeadendVRF says the host keys a declared headend entry by the VRF
+// it names (PluginHeadendEntry.vrf). A host without it ignores the field
+// and writes the entry into the global VRF, so the SDK refuses to send a
+// VRF to such a host. The bit travels in the same bitmap as the input
+// features (input_features); it is not a write grant.
+const FeatureHeadendVRF uint64 = 4
+
+// HostFeatures is the bitmap input_features reports.
+const HostFeatures = InputFeatureBGPPath | InputFeatureContexts | FeatureHeadendVRF
+
 // HostModule is the import module name for Vinbero's capability functions.
 // WASI runtime services are linked separately as wasi_snapshot_preview1.
 const HostModule = "vinbero"

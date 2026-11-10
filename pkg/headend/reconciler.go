@@ -9,9 +9,10 @@ import (
 	"github.com/takehaya/vinbero/pkg/ownership"
 )
 
-// Writer is the incremental headend surface used by built-in appliers.
-// Owner reads support migration from a previous owner format; removal still
-// checks the observed owner, so migration cannot delete a concurrent replacement.
+// Writer is the incremental headend surface used by built-in appliers. It
+// writes the global VRF. Owner reads support migration from a previous owner
+// format; removal still checks the observed owner, so migration cannot delete
+// a concurrent replacement.
 type Writer interface {
 	CreateHeadendV4(string, *bpf.HeadendEntry, bpf.OwnerTag) error
 	CreateHeadendV6(string, *bpf.HeadendEntry, bpf.OwnerTag) error
@@ -93,8 +94,8 @@ func (r *Reconciler) ApplySets(owner bpf.OwnerTag, v4, v6 []Desired, quota int) 
 	return applySets(r.maps, r.leases, owner, []familySet{{af: AFv4, desired: v4}, {af: AFv6, desired: v6}}, quota)
 }
 
-// OwnedCount includes persistent reservations whose main entry was removed
-// before a failed owner deletion.
+// OwnedCount counts the owner's entries of every VRF, including persistent
+// reservations whose main entry was removed before a failed owner deletion.
 func (r *Reconciler) OwnedCount(owner bpf.OwnerTag, af Family) (int, error) {
 	if owner == "" {
 		return 0, bpf.ErrEmptyOwner
@@ -104,7 +105,7 @@ func (r *Reconciler) OwnedCount(owner bpf.OwnerTag, af Family) (int, error) {
 	}
 	unlock := r.lockOwner(owner)
 	defer unlock()
-	keys, err := ownedPrefixes(r.maps, owner, af)
+	keys, err := ownedIDs(r.maps, owner, af)
 	return len(keys), err
 }
 
@@ -121,23 +122,24 @@ func (r *Reconciler) OwnedEntries(owner bpf.OwnerTag, af Family) ([]Desired, err
 }
 
 func (r *Reconciler) CreateHeadendV4(prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
-	return r.put(AFv4, prefix, entry, owner)
+	return r.put(AFv4, ID{Prefix: prefix}, entry, owner)
 }
 
 func (r *Reconciler) CreateHeadendV6(prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
-	return r.put(AFv6, prefix, entry, owner)
+	return r.put(AFv6, ID{Prefix: prefix}, entry, owner)
 }
 
 // put touches only the named key. A built-in route update must not scan the
 // whole map or replace the other prefixes held by that built-in's owner.
-func (r *Reconciler) put(af Family, prefix string, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
+func (r *Reconciler) put(af Family, id ID, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
 	if owner == "" {
 		return bpf.ErrEmptyOwner
 	}
-	key, err := canonicalPrefix(af, prefix)
+	prefix, err := canonicalPrefix(af, id.Prefix)
 	if err != nil {
 		return err
 	}
+	key := ID{VRF: id.VRF, Prefix: prefix}
 	if entry == nil {
 		return fmt.Errorf("write %s: nil entry for %q", af, key)
 	}
@@ -150,7 +152,7 @@ func (r *Reconciler) put(af Family, prefix string, entry *bpf.HeadendEntry, owne
 	if found && currentOwner != owner {
 		return ownerConflict(af, key, currentOwner, owner)
 	}
-	taken, err := r.leases.AcquireAll(af.leaseKind(), []string{key}, owner)
+	taken, err := r.leases.AcquireAll(af.leaseKind(), []string{leaseKey(key)}, owner)
 	if err != nil {
 		return err
 	}
@@ -166,21 +168,22 @@ func (r *Reconciler) put(af Family, prefix string, entry *bpf.HeadendEntry, owne
 }
 
 func (r *Reconciler) DeleteHeadendV4(prefix string, owner bpf.OwnerTag) error {
-	return r.remove(AFv4, prefix, owner)
+	return r.remove(AFv4, ID{Prefix: prefix}, owner)
 }
 
 func (r *Reconciler) DeleteHeadendV6(prefix string, owner bpf.OwnerTag) error {
-	return r.remove(AFv6, prefix, owner)
+	return r.remove(AFv6, ID{Prefix: prefix}, owner)
 }
 
-func (r *Reconciler) remove(af Family, prefix string, owner bpf.OwnerTag) error {
+func (r *Reconciler) remove(af Family, id ID, owner bpf.OwnerTag) error {
 	if owner == "" {
 		return bpf.ErrEmptyOwner
 	}
-	key, err := canonicalPrefix(af, prefix)
+	prefix, err := canonicalPrefix(af, id.Prefix)
 	if err != nil {
 		return err
 	}
+	key := ID{VRF: id.VRF, Prefix: prefix}
 	unlock := r.lockOwner(owner)
 	defer unlock()
 	currentOwner, found, err := getOwner(r.maps, af, key)
@@ -192,7 +195,7 @@ func (r *Reconciler) remove(af Family, prefix string, owner bpf.OwnerTag) error 
 	}
 	// Even an absent key may be reserved by another owner's in-flight
 	// creation. Do not delete its main entry before its owner record lands.
-	taken, err := r.leases.AcquireAll(af.leaseKind(), []string{key}, owner)
+	taken, err := r.leases.AcquireAll(af.leaseKind(), []string{leaseKey(key)}, owner)
 	if err != nil {
 		return err
 	}
@@ -202,27 +205,20 @@ func (r *Reconciler) remove(af Family, prefix string, owner bpf.OwnerTag) error 
 		}
 		return err
 	}
-	r.leases.Release(af.leaseKind(), key, owner)
+	r.leases.Release(af.leaseKind(), leaseKey(key), owner)
 	return nil
 }
 
 func (r *Reconciler) GetHeadendV4Owner(prefix string) (bpf.OwnerTag, bool, error) {
-	return getOwner(r.maps, AFv4, prefix)
+	return getOwner(r.maps, AFv4, ID{Prefix: prefix})
 }
 
 func (r *Reconciler) GetHeadendV6Owner(prefix string) (bpf.OwnerTag, bool, error) {
-	return getOwner(r.maps, AFv6, prefix)
+	return getOwner(r.maps, AFv6, ID{Prefix: prefix})
 }
 
-func getOwner(ops MapOps, af Family, prefix string) (bpf.OwnerTag, bool, error) {
-	if af == AFv6 {
-		return ops.GetHeadendV6Owner(prefix)
-	}
-	return ops.GetHeadendV4Owner(prefix)
-}
-
-func ownerConflict(af Family, prefix string, holder, caller bpf.OwnerTag) error {
-	return fmt.Errorf("%s key %q: %w: existing %q, caller %q", af, prefix, bpf.ErrEntryOwnerMismatch, holder, caller)
+func ownerConflict(af Family, key ID, holder, caller bpf.OwnerTag) error {
+	return fmt.Errorf("%s key %q: %w: existing %q, caller %q", af, key, bpf.ErrEntryOwnerMismatch, holder, caller)
 }
 
 func canonicalPrefix(af Family, raw string) (string, error) {

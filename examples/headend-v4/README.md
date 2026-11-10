@@ -69,6 +69,28 @@ sudo ip netns exec hv4-router2 tcpdump -i hv4-rt2rt1 -n ip6
 The SRv6 Routing Header (RT6) carries the segment list
 [fc00:2::1, fc00:3::3].
 
+### Headend entry in a named VRF
+
+A headend entry belongs to a VRF: without `--vrf` every `hv4` command acts on
+the global VRF, and `list` / `flush` take `--all-vrfs` for every VRF. The
+same prefix can also be installed in a named VRF that already exists
+(`--vrf` with an unknown name is refused). The data plane looks every
+packet up in the global VRF, so the ping above keeps using the global entry.
+
+```bash
+VB="sudo ip netns exec hv4-router1 ../../out/bin/vinbero -s http://127.0.0.1:8082"
+$VB vrf create --name hv4-tenant --table-id 4242
+$VB hv4 create --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:9::1 --vrf hv4-tenant
+$VB hv4 list --all-vrfs
+# TRIGGER PREFIX  VRF         MODE      SRC ADDR   SEGMENTS
+# 172.0.2.0/24    global      H_ENCAPS  fc00:1::1  fc00:2::1,fc00:3::3
+# 172.0.2.0/24    hv4-tenant  H_ENCAPS  fc00:1::1  fc00:9::1
+$VB hv4 delete --trigger-prefix 172.0.2.0/24 --vrf hv4-tenant
+$VB vrf delete --name hv4-tenant   # refused while the VRF still has headend entries
+```
+
+`test.sh` runs these steps after the ping test.
+
 ### 4. Clean up
 
 ```bash

@@ -169,3 +169,7 @@ func (Host) Put(gen uint64, chunk []byte) cplane.Status {
 }
 func (Host) Commit(gen uint64) cplane.Status { return cplane.Status(hostCommit(gen)) }
 func (Host) Abort(gen uint64)                { hostAbort(gen) }
+
+// Features reports what the host implements (InputFeatures); the Client
+// checks it before it sends a headend entry naming a VRF.
+func (Host) Features() uint64 { return hostInputFeatures() }

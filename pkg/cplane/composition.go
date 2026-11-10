@@ -72,7 +72,9 @@ func outputEntry(segments []string, source string, mode uint8) (bpf.HeadendEntry
 }
 
 type compositionDesired struct {
-	v4, v6  []HeadendDesired
+	// v4 and v6 carry the VRF id their names resolved to when the
+	// composition was normalized.
+	v4, v6  []declaredHeadend
 	uplinks []uplinkDesired
 	peers   []peerDesired
 	routes  []AdvertisedRoute
@@ -113,10 +115,15 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 				return out, err
 			}
 		}
-		if err = p.guard.checkHeadend(af, trigger, e.Mode); err != nil {
+		if err = p.guard.checkHeadendIn(af, h.Entry.Vrf, trigger, e.Mode); err != nil {
 			return out, err
 		}
-		d := HeadendDesired{TriggerPrefix: trigger, Entry: e}
+		d := declaredHeadend{HeadendDesired: HeadendDesired{TriggerPrefix: trigger, Entry: e}, VRFName: h.Entry.Vrf}
+		resolved, err := resolveDeclared(p.vrfs, []declaredHeadend{d})
+		if err != nil {
+			return out, err
+		}
+		d.HeadendDesired = resolved[0]
 		if af == AFv4 {
 			out.v4 = append(out.v4, d)
 		} else {
@@ -216,18 +223,19 @@ func (p *PluginOps) normalizeComposition(m *v1.PluginApplyChunk) (compositionDes
 		out.peers = append(out.peers, d)
 	}
 	// Validate conflicting desired keys before mutating any live state.
-	keys := map[string]bpf.HeadendEntry{}
-	for _, set := range [][]HeadendDesired{out.v4, out.v6} {
+	keys := map[bpf.HeadendID]bpf.HeadendEntry{}
+	for _, set := range [][]declaredHeadend{out.v4, out.v6} {
 		for _, h := range set {
-			if old, ok := keys[h.TriggerPrefix]; ok && old != *h.Entry {
+			if old, ok := keys[h.ID()]; ok && old != *h.Entry {
 				return out, fmt.Errorf("ambiguous headend trigger")
 			}
-			keys[h.TriggerPrefix] = *h.Entry
+			keys[h.ID()] = *h.Entry
 		}
 	}
 	us := map[string]bpf.HeadendEntry{}
 	for _, u := range out.uplinks {
-		if _, ok := keys[u.endpoint+"/32"]; ok {
+		// The uplink's gate is a global VRF entry.
+		if _, ok := keys[bpf.HeadendID{Prefix: u.endpoint + "/32"}]; ok {
 			return out, fmt.Errorf("headend trigger conflicts with MUP gate")
 		}
 		if old, ok := us[u.key()]; ok && old != u.entry {
@@ -318,6 +326,14 @@ func compositionDigest(m *v1.PluginApplyChunk, d compositionDesired) (hash [32]b
 	for _, u := range d.uplinks {
 		_, _ = fmt.Fprintf(hasher, "/instance=%d", u.instance)
 	}
+	// The VRF ids are derived from the declared names, as the instances are.
+	for _, set := range [][]declaredHeadend{d.v4, d.v6} {
+		for _, h := range set {
+			if h.VRF != 0 {
+				_, _ = fmt.Fprintf(hasher, "/vrf=%s=%d", h.TriggerPrefix, h.VRF)
+			}
+		}
+	}
 	derived, err := json.Marshal(d.routes)
 	if err != nil {
 		return hash, err
@@ -325,6 +341,29 @@ func compositionDigest(m *v1.PluginApplyChunk, d compositionDesired) (hash [32]b
 	_, _ = hasher.Write(derived)
 	copy(hash[:], hasher.Sum(nil))
 	return hash, nil
+}
+
+// applyComposedHeadends writes the composition's headend sets. The VRFs
+// they name are held against the start of their deletion only from the
+// name lookup to this write, not across the BGP and service work around
+// it. A name that resolves to another id than it did when the composition
+// was normalized (its VRF was deleted and created again in between) fails
+// the apply, and the retry normalizes again.
+func (p *PluginOps) applyComposedHeadends(d compositionDesired) error {
+	sets, release, err := holdDeclared(p.vrfs, d.v4, d.v6)
+	if err != nil {
+		return err
+	}
+	defer release()
+	for i, set := range [][]declaredHeadend{d.v4, d.v6} {
+		for j, h := range set {
+			if sets[i][j].VRF != h.VRF {
+				return fmt.Errorf("headend entry for %q: VRF %q changed while the composition was applied", h.TriggerPrefix, h.VRFName)
+			}
+		}
+	}
+	_, err = p.headend.ApplySets(p.owner, sets[0], sets[1], p.quotas.MaxHeadendEntries)
+	return err
 }
 
 // applyComposition orders dependents before their forwarding changes. Failure
@@ -354,7 +393,7 @@ func (p *PluginOps) applyComposition(txn *applyTxn) error {
 	if err = p.services.prune(p.owner, d.uplinks, d.peers); err != nil {
 		return err
 	}
-	if _, err = p.headend.ApplySets(p.owner, d.v4, d.v6, p.quotas.MaxHeadendEntries); err != nil {
+	if err = p.applyComposedHeadends(d); err != nil {
 		return err
 	}
 	if p.services != nil {

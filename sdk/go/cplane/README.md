@@ -174,7 +174,7 @@ with the stage and host status. Live commits are synchronous and may partially
 apply before returning an error. During initialization/replay before publication,
 success means the host staged the declaration; the host applies it at publication
 and retries failures. Retain desired state after a returned error and retry as
-appropriate. ABI 1 exposes no separate acceptance/application generations or
+appropriate. The ABI exposes no separate acceptance/application generations or
 cross-kind dependency status.
 
 On same-name replacement, the host prunes existing state excluded by the new
@@ -184,6 +184,21 @@ advertisements; daemon restore can only discover prior headend entries.
 During authorization pruning, advertisements referencing a removed SID must be
 withdrawn before that SID is released. A failed withdrawal keeps the SID and
 fails the replacement so the operator can retry.
+
+A headend entry names its VRF in `HeadendEntry.VRF`. Empty (or `global`) is
+the global VRF and needs no grant. Any other VRF must be in the registration's
+scope VRF list and must exist when the set is applied; otherwise the whole set
+is refused. The host keeps and retries it on the next event only for a plugin
+with an input policy (compositions) or a declaration staged before
+publication; otherwise declare it again once the VRF exists. The same prefix in two VRFs is two entries. The data plane looks every
+packet up in the global VRF, so an entry of another VRF is installed and listed
+but not used for forwarding.
+
+Naming a VRF needs a host that reports `FeatureHeadendVRF` (the
+`input_features` bitmap). A host without it would ignore the field and write
+the entry into the global VRF, so the client refuses such a declaration with
+`ErrNoHeadendVRF` before sending anything. Entries that name no VRF work on any
+host.
 
 For local SIDs, declare a name, locator and endpoint slot. While its address is
 unknown, retry until the matching allocated SID event arrives: a successful

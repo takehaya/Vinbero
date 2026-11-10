@@ -2,6 +2,7 @@ package bpf
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"net"
 	"testing"
@@ -28,6 +29,15 @@ type headendKeyFamily struct {
 	rawPrefixlen                func(t *testing.T, vrf uint32, prefix string) uint32
 	rawCount                    func(t *testing.T) int
 	putMalformed                func(t *testing.T) func()
+	putMalformedOwner           func(t *testing.T, owner OwnerTag)
+	putMalformedOwnerIn         func(t *testing.T, vrf uint32, owner OwnerTag)
+	createIn                    func(uint32, string, *HeadendEntry, OwnerTag) error
+	removeIn                    func(uint32, string, OwnerTag) error
+	getIn                       func(uint32, string) (*HeadendEntry, error)
+	getOwnerIn                  func(uint32, string) (OwnerTag, bool, error)
+	listIDs                     func() (map[HeadendID]*HeadendEntry, error)
+	ownerIDs                    func() (map[HeadendID]OwnerTag, error)
+	flushIn                     func(uint32, OwnerTag) (uint32, error)
 	flush                       func(OwnerTag) (uint32, error)
 	forceFlush                  func() (uint32, error)
 	pruneUnlisted               func(OwnerTag) (int, error)
@@ -44,7 +54,24 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 			toCover: "10.1.9.9", toLonger: "10.1.2.3", toOther: "198.51.100.1",
 			create: m.CreateHeadendV4, remove: m.DeleteHeadendV4, list: m.ListHeadendV4,
 			owners: m.ListHeadendV4Owners, getOwner: m.GetHeadendV4Owner,
-			flush: m.FlushHeadendV4, forceFlush: m.ForceFlushHeadendV4, pruneUnlisted: m.PruneUnlistedHeadendV4,
+			flush: m.FlushHeadendV4AllVRFs, forceFlush: m.ForceFlushHeadendV4, pruneUnlisted: m.PruneUnlistedHeadendV4,
+			createIn: m.CreateHeadendV4In, removeIn: m.DeleteHeadendV4In, getIn: m.GetHeadendV4In,
+			getOwnerIn: m.GetHeadendV4OwnerIn, listIDs: m.ListHeadendV4IDs, ownerIDs: m.ListHeadendV4OwnerIDs,
+			flushIn: m.FlushHeadendV4In,
+			putMalformedOwner: func(t *testing.T, owner OwnerTag) {
+				t.Helper()
+				if err := m.headendV4Owners.Put(&HeadendV4Key{Prefixlen: 8}, owner); err != nil {
+					t.Fatal(err)
+				}
+			},
+			putMalformedOwnerIn: func(t *testing.T, vrf uint32, owner OwnerTag) {
+				t.Helper()
+				key := &HeadendV4Key{Prefixlen: 8}
+				binary.BigEndian.PutUint32(key.Instance[:], vrf)
+				if err := m.headendV4Owners.Put(key, owner); err != nil {
+					t.Fatal(err)
+				}
+			},
 			policyID: 77,
 			putMalformed: func(t *testing.T) func() {
 				t.Helper()
@@ -123,7 +150,24 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 			toCover: "fd00:1:9::9", toLonger: "fd00:1:2::3", toOther: "fd00:99::1",
 			create: m.CreateHeadendV6, remove: m.DeleteHeadendV6, list: m.ListHeadendV6,
 			owners: m.ListHeadendV6Owners, getOwner: m.GetHeadendV6Owner,
-			flush: m.FlushHeadendV6, forceFlush: m.ForceFlushHeadendV6, pruneUnlisted: m.PruneUnlistedHeadendV6,
+			flush: m.FlushHeadendV6AllVRFs, forceFlush: m.ForceFlushHeadendV6, pruneUnlisted: m.PruneUnlistedHeadendV6,
+			createIn: m.CreateHeadendV6In, removeIn: m.DeleteHeadendV6In, getIn: m.GetHeadendV6In,
+			getOwnerIn: m.GetHeadendV6OwnerIn, listIDs: m.ListHeadendV6IDs, ownerIDs: m.ListHeadendV6OwnerIDs,
+			flushIn: m.FlushHeadendV6In,
+			putMalformedOwner: func(t *testing.T, owner OwnerTag) {
+				t.Helper()
+				if err := m.headendV6Owners.Put(&HeadendV6Key{Prefixlen: 8}, owner); err != nil {
+					t.Fatal(err)
+				}
+			},
+			putMalformedOwnerIn: func(t *testing.T, vrf uint32, owner OwnerTag) {
+				t.Helper()
+				key := &HeadendV6Key{Prefixlen: 8}
+				binary.BigEndian.PutUint32(key.Instance[:], vrf)
+				if err := m.headendV6Owners.Put(key, owner); err != nil {
+					t.Fatal(err)
+				}
+			},
 			policyID: 88,
 			putMalformed: func(t *testing.T) func() {
 				t.Helper()
@@ -355,14 +399,29 @@ func TestXDPProgHeadendKeyVRF(t *testing.T) {
 			expectEncap(t, f.toOther, 7, segDefault)
 			expectEncap(t, f.toLonger, 0, segLonger)
 
-			// The owner cleanup reaches what an owner holds outside vrf 0,
-			// an owner record without its entry included, and nothing else.
+			// The per-VRF owner inventory names what an owner holds outside
+			// vrf 0, an owner record without its entry included, so the
+			// owner cleanup prunes it by name. The unlisted prune is left
+			// with the malformed keys no listing can name.
 			gone := OwnerPluginBundle("gone")
 			f.putRaw(t, 9, f.cover, entryTo(t, segTenant))
 			f.putRawOwner(t, 9, f.cover, gone)
 			f.putRawOwner(t, 9, f.longer, gone)
-			if n, err := f.pruneUnlisted(gone); err != nil || n != 2 {
-				t.Errorf("prune unlisted = %d %v, want 2", n, err)
+			f.putMalformedOwner(t, gone)
+			ids, err := f.ownerIDs()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ids[HeadendID{9, f.cover}] != gone || ids[HeadendID{9, f.longer}] != gone || ids[HeadendID{0, f.cover}] != OwnerRPC {
+				t.Errorf("owner ids = %v", ids)
+			}
+			if n, err := f.pruneUnlisted(gone); err != nil || n != 1 {
+				t.Errorf("prune unlisted = %d %v, want 1 (the malformed owner record)", n, err)
+			}
+			for _, p := range []string{f.cover, f.longer} {
+				if err := f.removeIn(9, p, gone); err != nil {
+					t.Errorf("delete vrf 9 %s: %v", p, err)
+				}
 			}
 			if n := f.rawCount(t); n != 5 {
 				t.Errorf("raw map holds %d entries after the prune, want 5", n)
@@ -477,5 +536,198 @@ func TestPluginHeadendKeyABI(t *testing.T) {
 	}
 	if !errors.Is(err, ebpf.ErrMapIncompatible) {
 		t.Errorf("load error %v, want ErrMapIncompatible", err)
+	}
+}
+
+// TestXDPProgHeadendSamePrefixAcrossVRFs writes one trigger prefix in the
+// global VRF and in two named ones through the per-VRF MapOperations
+// methods. The three are separate entries with their own owners: each is
+// read, listed and removed alone, the VRF-scoped flush takes one VRF's,
+// and the data plane, which looks up vrf_id 0 only, keeps encapsulating
+// with the global entry whatever VRF the packet came from.
+func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
+	h := newXDPTestHelper(t)
+	const ifidx = 1
+	src, _ := ParseIPv6("fc00::1")
+	entryTo := func(t *testing.T, seg string) *HeadendEntry {
+		t.Helper()
+		segments, n, err := ParseSegments([]string{seg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &HeadendEntry{
+			Mode:        uint8(vinberov1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS),
+			NumSegments: n,
+			SrcAddr:     src,
+			Segments:    segments,
+		}
+	}
+	seg := map[uint32]string{0: "fc00:a::1", 7: "fc00:b::1", 8: "fc00:c::1"}
+	owner := map[uint32]OwnerTag{0: OwnerRPC, 7: OwnerRPC, 8: OwnerPluginBundle("tenant")}
+
+	for _, f := range headendKeyFamilies(h) {
+		t.Run(f.name, func(t *testing.T) {
+			t.Cleanup(func() {
+				_, _ = f.forceFlush()
+				_ = h.mapOps.SetIngressVrf(map[IngressACKey]uint32{})
+				_ = h.mapOps.SetIngressPolicy(false, false, 0)
+			})
+			outerTo := func(t *testing.T, vrf uint32) net.IP {
+				t.Helper()
+				if err := h.mapOps.SetIngressPolicy(vrf != 0, false, 0); err != nil {
+					t.Fatal(err)
+				}
+				acs := map[IngressACKey]uint32{}
+				if vrf != 0 {
+					acs[IngressACKey{Ifindex: ifidx}] = vrf
+				}
+				if err := h.mapOps.SetIngressVrf(acs); err != nil {
+					t.Fatal(err)
+				}
+				pkt := f.packet(t, f.toLonger)
+				_, out := h.runOnIfindex(pkt, ifidx)
+				if len(out) < ethHeaderLen+40 || bytes.Equal(out[:len(pkt)], pkt) {
+					return nil
+				}
+				return outerDA(out, ethHeaderLen)
+			}
+			segOf := func(e *HeadendEntry) string { return net.IP(e.Segments[0][:]).String() }
+
+			for _, vrf := range []uint32{0, 7, 8} {
+				if err := f.createIn(vrf, f.longer, entryTo(t, seg[vrf]), owner[vrf]); err != nil {
+					t.Fatalf("create vrf %d: %v", vrf, err)
+				}
+			}
+			// The prefix-only API is the global VRF: the same key as vrf 0.
+			if err := f.create(f.longer, entryTo(t, seg[0]), OwnerRPC); err != nil {
+				t.Fatalf("prefix-only create over the vrf 0 entry: %v", err)
+			}
+			if n := f.rawCount(t); n != 3 {
+				t.Fatalf("raw map holds %d entries, want 3", n)
+			}
+			for _, vrf := range []uint32{0, 7, 8} {
+				if got := f.rawPrefixlen(t, vrf, f.longer); got != headendKeyVRFBits+uint32(prefixLenOf(t, f.longer)) {
+					t.Errorf("vrf %d raw prefixlen = %d", vrf, got)
+				}
+				e, err := f.getIn(vrf, f.longer)
+				if err != nil || segOf(e) != seg[vrf] {
+					t.Errorf("get vrf %d = %v %v, want segment %s", vrf, e, err, seg[vrf])
+				}
+				if o, ok, err := f.getOwnerIn(vrf, f.longer); err != nil || !ok || o != owner[vrf] {
+					t.Errorf("owner vrf %d = %q %v %v, want %q", vrf, o, ok, err, owner[vrf])
+				}
+				// A covering lookup stays inside the VRF.
+				if e, err := f.getIn(vrf, f.toLonger); err != nil || segOf(e) != seg[vrf] {
+					t.Errorf("get vrf %d %s = %v %v, want the covering entry of that VRF", vrf, f.toLonger, e, err)
+				}
+			}
+			ids, err := f.listIDs()
+			if err != nil || len(ids) != 3 {
+				t.Fatalf("list ids = %v %v, want 3", ids, err)
+			}
+			for _, vrf := range []uint32{0, 7, 8} {
+				if e := ids[HeadendID{vrf, f.longer}]; e == nil || segOf(e) != seg[vrf] {
+					t.Errorf("list ids vrf %d = %v", vrf, e)
+				}
+			}
+			if entries, err := f.list(); err != nil || len(entries) != 1 || segOf(entries[f.longer]) != seg[0] {
+				t.Errorf("prefix-only list = %v %v, want the vrf 0 entry alone", keysOf(entries), err)
+			}
+			if used, err := h.mapOps.HeadendVRFInUse(7); err != nil || !used {
+				t.Errorf("vrf 7 in use = %v %v, want true", used, err)
+			}
+			if used, err := h.mapOps.HeadendVRFInUse(5); err != nil || used {
+				t.Errorf("vrf 5 in use = %v %v, want false", used, err)
+			}
+			// An owner record left without its entry is a reference too, and
+			// the flush of its owner removes it. One under a malformed key is
+			// not: no API names it.
+			f.putRawOwner(t, 7, f.cover, OwnerRPC)
+			f.putMalformedOwnerIn(t, 7, OwnerRPC)
+			refs, err := h.mapOps.HeadendVRFRefs(7)
+			if err != nil || refs.Entries[OwnerRPC] != 1 || refs.OwnerOnly[OwnerRPC] != 1 || len(refs.Entries) != 1 || len(refs.OwnerOnly) != 1 {
+				t.Errorf("vrf 7 refs = %+v %v", refs, err)
+			}
+			if refs, err := h.mapOps.HeadendVRFRefs(8); err != nil || refs.Entries[owner[8]] != 1 || len(refs.OwnerOnly) != 0 {
+				t.Errorf("vrf 8 refs = %+v %v", refs, err)
+			}
+			if id, err := h.mapOps.HighestVRFIDInUse(); err != nil || id != 8 {
+				t.Errorf("highest vrf_id in use = %d %v, want 8", id, err)
+			}
+
+			// The lookup is vrf_id 0 for every packet.
+			for _, vrf := range []uint32{0, 7, 8} {
+				if got := outerTo(t, vrf); !got.Equal(net.ParseIP(seg[0])) {
+					t.Errorf("packet from vrf %d: outer DA %v, want the vrf 0 segment %s", vrf, got, seg[0])
+				}
+			}
+
+			// Each is owned and removed alone.
+			if err := f.removeIn(8, f.longer, OwnerRPC); !errors.Is(err, ErrEntryOwnerMismatch) {
+				t.Errorf("RPC delete of the tenant's vrf 8 entry = %v, want ErrEntryOwnerMismatch", err)
+			}
+			if err := f.removeIn(7, f.longer, OwnerRPC); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.getIn(7, f.longer); err == nil {
+				t.Error("vrf 7 entry still there after its delete")
+			}
+			for _, vrf := range []uint32{0, 8} {
+				if _, err := f.getIn(vrf, f.longer); err != nil {
+					t.Errorf("vrf %d entry gone with the vrf 7 delete: %v", vrf, err)
+				}
+			}
+			if n, err := f.flushIn(7, OwnerRPC); n != 1 || !errors.Is(err, ErrMalformedHeadendKey) {
+				t.Errorf("flush of vrf 7 = %d %v, want 1 (the owner record left without its entry) and the malformed one reported", n, err)
+			}
+			if refs, err := h.mapOps.HeadendVRFRefs(7); err != nil || len(refs.Entries)+len(refs.OwnerOnly) != 0 {
+				t.Errorf("vrf 7 refs after its delete and flush = %+v %v, want none", refs, err)
+			}
+			if removed, err := h.mapOps.PurgeHeadendVRFs(func(id uint32) bool { return id != 7 }); err != nil || removed[7] != 1 {
+				t.Errorf("purge of vrf 7 = %v %v, want the malformed record", removed, err)
+			}
+			if used, err := h.mapOps.HeadendVRFInUse(7); err != nil || used {
+				t.Errorf("vrf 7 in use after the purge = %v %v", used, err)
+			}
+			if n, err := f.flushIn(8, OwnerRPC); err != nil || n != 0 {
+				t.Errorf("RPC-scoped flush of vrf 8 = %d %v, want 0 (the entry is the tenant's)", n, err)
+			}
+			if n, err := f.flushIn(8, owner[8]); err != nil || n != 1 {
+				t.Errorf("flush of vrf 8 = %d %v, want 1", n, err)
+			}
+			if e, err := f.getIn(0, f.longer); err != nil || segOf(e) != seg[0] {
+				t.Errorf("vrf 0 entry after the vrf 8 flush = %v %v", e, err)
+			}
+			// The boot cleanup removes what a VRF that no longer exists holds,
+			// whoever owns it, and never touches the global VRF.
+			for _, vrf := range []uint32{7, 9} {
+				if err := f.createIn(vrf, f.longer, entryTo(t, seg[0]), owner[8]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.putRawOwner(t, 11, f.cover, owner[8])
+			removed, err := h.mapOps.PurgeHeadendVRFs(func(id uint32) bool { return id == 9 })
+			if err != nil || removed[7] != 1 || removed[11] != 1 || len(removed) != 2 {
+				t.Errorf("purge = %v %v, want vrf 7 and 11 one each", removed, err)
+			}
+			if _, err := f.getIn(9, f.longer); err != nil {
+				t.Errorf("vrf 9 entry gone with the purge: %v", err)
+			}
+			if _, err := f.getIn(0, f.longer); err != nil {
+				t.Errorf("global entry gone with the purge: %v", err)
+			}
+			if err := f.removeIn(9, f.longer, owner[8]); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.remove(f.longer, OwnerRPC); err != nil {
+				t.Fatal(err)
+			}
+			if n := f.rawCount(t); n != 0 {
+				t.Errorf("raw map holds %d entries at the end, want 0", n)
+			}
+			if ids, err := f.ownerIDs(); err != nil || len(ids) != 0 {
+				t.Errorf("owner records at the end = %v %v", ids, err)
+			}
+		})
 	}
 }

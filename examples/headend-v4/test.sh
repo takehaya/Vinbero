@@ -74,6 +74,51 @@ sleep 1
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (Vinbero XDP H.Encaps)"
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Vinbero XDP)"
 
+echo ""
+
+# Phase 3: a headend entry under a named VRF
+echo "=========================================="
+echo "Phase 3: Headend entry in a named VRF"
+echo "=========================================="
+
+vb() { ip netns exec "$ns_router1" "${VINBERO_BIN}" -s http://127.0.0.1:8082 "$@"; }
+fails() { ! "$@" > /dev/null 2>&1; }
+check() {
+    local desc="$1"; shift
+    if "$@"; then
+        print_success "$desc"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        print_error "$desc"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+}
+# The VRF column of the list row for prefix in the named VRF ("" if none).
+listed_vrf() { vb hv4 list --all-vrfs | awk -v p="$1" -v v="$2" '$1 == p && $2 == v {print $2}'; }
+
+check "an unknown VRF is refused" fails vb hv4 create \
+    --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:9::1 --vrf hv4-nosuch
+check "the refused request created no VRF" test -z "$(vb vrf show | grep hv4-nosuch)"
+
+vb vrf create --name hv4-tenant --table-id 4242 > /dev/null
+vb hv4 create --trigger-prefix 172.0.2.0/24 --src-addr fc00:1::1 --segments fc00:9::1 --vrf hv4-tenant > /dev/null
+vb hv4 list --all-vrfs | sed 's/^/    /'
+check "the list without --vrf is the global VRF" test "$(vb hv4 list | awk 'NR > 1 {print $2}')" = global
+check "the global entry is listed" test "$(listed_vrf 172.0.2.0/24 global)" = global
+check "the same prefix is listed in hv4-tenant" test "$(listed_vrf 172.0.2.0/24 hv4-tenant)" = hv4-tenant
+check "--vrf lists that VRF only" test "$(vb hv4 list --vrf hv4-tenant | awk 'NR > 1' | wc -l)" = 1
+
+# The data plane looks up the global VRF only: traffic still takes the
+# global entry.
+test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (global entry, with a hv4-tenant entry present)"
+
+check "a VRF holding a headend entry is not deleted" fails vb vrf delete --name hv4-tenant
+vb hv4 delete --trigger-prefix 172.0.2.0/24 --vrf hv4-tenant > /dev/null
+check "the hv4-tenant entry is removed" test -z "$(listed_vrf 172.0.2.0/24 hv4-tenant)"
+check "the global entry stays" test "$(listed_vrf 172.0.2.0/24 global)" = global
+check "the empty VRF is deleted" vb vrf delete --name hv4-tenant
+test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (after the hv4-tenant delete)"
+
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true
 wait $VINBERO_PID 2>/dev/null || true

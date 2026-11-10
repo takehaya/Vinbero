@@ -176,6 +176,16 @@ message Headendv4 {
   string dst_addr = 4; // Outer IPv6 destination (optional, usually derived from segments)
   repeated string segments = 5; // SRv6 segment list
   uint32 args_offset = 6; // Args.Mob.Session byte offset in SID (RFC 9433, for H.M.GTP4.D)
+  // vrf_name is the VRF the entry belongs to: the entry is keyed by
+  // {vrf_id, trigger_prefix}. Empty or "global" is the global VRF (vrf_id
+  // 0); any other name must be an existing VRF, and a request naming an
+  // unknown one is refused (no VRF is created). Responses leave it empty
+  // for the global VRF. The data plane looks up the global VRF only, so an
+  // entry of another VRF is stored, listed and removable but not used.
+  string vrf_name = 7;
+  // vrf_id is the VRF's id, server-assigned and set in responses. A
+  // request may leave it 0 or repeat the id vrf_name resolves to.
+  uint32 vrf_id = 8;
 }
 
 message Headendv4CreateRequest {
@@ -188,25 +198,33 @@ message Headendv4CreateResponse {
 
 message Headendv4DeleteRequest {
   repeated string trigger_prefixes = 1;
+  string vrf_name = 2; // VRF of every prefix above; empty or "global" = the global VRF
 }
 message Headendv4DeleteResponse {
   repeated string deleted_trigger_prefixes = 1;
   repeated OperationError errors = 2;
 }
 
-message Headendv4ListRequest {}
+message Headendv4ListRequest {
+  string vrf_name = 1; // VRF to list; empty or "global" = the global VRF
+  bool all_vrfs = 2; // list every VRF, each entry with its vrf_name and vrf_id; vrf_name must be empty
+}
 message Headendv4ListResponse {
   repeated Headendv4 headendv4s = 1;
 }
 
 message Headendv4GetRequest {
   string trigger_prefix = 1;
+  string vrf_name = 2; // empty or "global" = the global VRF
 }
 message Headendv4GetResponse {
   Headendv4 headendv4 = 1;
 }
 
-message Headendv4FlushRequest {}
+message Headendv4FlushRequest {
+  string vrf_name = 1; // VRF to flush; empty or "global" = the global VRF
+  bool all_vrfs = 2; // flush every VRF; vrf_name must be empty
+}
 message Headendv4FlushResponse {
   uint32 deleted_count = 1;
 }
@@ -228,6 +246,16 @@ message Headendv6 {
   string dst_addr = 4;
   repeated string segments = 5;
   uint32 args_offset = 6; // Args.Mob.Session byte offset in SID (RFC 9433, for H.M.GTP6.D)
+  // vrf_name is the VRF the entry belongs to: the entry is keyed by
+  // {vrf_id, trigger_prefix}. Empty or "global" is the global VRF (vrf_id
+  // 0); any other name must be an existing VRF, and a request naming an
+  // unknown one is refused (no VRF is created). Responses leave it empty
+  // for the global VRF. The data plane looks up the global VRF only, so an
+  // entry of another VRF is stored, listed and removable but not used.
+  string vrf_name = 7;
+  // vrf_id is the VRF's id, server-assigned and set in responses. A
+  // request may leave it 0 or repeat the id vrf_name resolves to.
+  uint32 vrf_id = 8;
 }
 
 message Headendv6CreateRequest {
@@ -240,25 +268,33 @@ message Headendv6CreateResponse {
 
 message Headendv6DeleteRequest {
   repeated string trigger_prefixes = 1;
+  string vrf_name = 2; // VRF of every prefix above; empty or "global" = the global VRF
 }
 message Headendv6DeleteResponse {
   repeated string deleted_trigger_prefixes = 1;
   repeated OperationError errors = 2;
 }
 
-message Headendv6ListRequest {}
+message Headendv6ListRequest {
+  string vrf_name = 1; // VRF to list; empty or "global" = the global VRF
+  bool all_vrfs = 2; // list every VRF, each entry with its vrf_name and vrf_id; vrf_name must be empty
+}
 message Headendv6ListResponse {
   repeated Headendv6 headendv6s = 1;
 }
 
 message Headendv6GetRequest {
   string trigger_prefix = 1;
+  string vrf_name = 2; // empty or "global" = the global VRF
 }
 message Headendv6GetResponse {
   Headendv6 headendv6 = 1;
 }
 
-message Headendv6FlushRequest {}
+message Headendv6FlushRequest {
+  string vrf_name = 1; // VRF to flush; empty or "global" = the global VRF
+  bool all_vrfs = 2; // flush every VRF; vrf_name must be empty
+}
 message Headendv6FlushResponse {
   uint32 deleted_count = 1;
 }
@@ -531,7 +567,7 @@ message VrfCreateResponse {
 }
 
 message VrfDeleteRequest {
-  repeated string names = 1; // VRF names to delete; fails while a SID, ingress AC, vrf-bgp binding or attached bridge references the VRF
+  repeated string names = 1; // VRF names to delete; fails while a SID, ingress AC, vrf-bgp binding, attached bridge or headend entry references the VRF
 }
 message VrfDeleteResponse {
   repeated string deleted_names = 1;

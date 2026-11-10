@@ -212,7 +212,7 @@ func TestHeadendV4OwnerConflictMatrix(t *testing.T) {
 			}
 		})
 
-		n, err := h.mapOps.FlushHeadendV4(OwnerRPC)
+		n, err := h.mapOps.FlushHeadendV4AllVRFs(OwnerRPC)
 		if err != nil {
 			t.Fatalf("flush RPC scope: %v", err)
 		}
@@ -286,7 +286,7 @@ func TestHeadendV6OwnerConflictMatrix(t *testing.T) {
 				_ = h.mapOps.ForceDeleteHeadendV6(p)
 			}
 		})
-		n, err := h.mapOps.FlushHeadendV6(OwnerRPC)
+		n, err := h.mapOps.FlushHeadendV6AllVRFs(OwnerRPC)
 		if err != nil {
 			t.Fatalf("flush RPC scope: %v", err)
 		}

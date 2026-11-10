@@ -20,8 +20,8 @@ import (
 	"github.com/takehaya/vinbero/pkg/bgp/apply"
 	"github.com/takehaya/vinbero/pkg/bgp/demux"
 	"github.com/takehaya/vinbero/pkg/bgp/export"
-	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/bgp/gobgp"
+	"github.com/takehaya/vinbero/pkg/bpf"
 	"github.com/takehaya/vinbero/pkg/config"
 	"github.com/takehaya/vinbero/pkg/cplane"
 	"github.com/takehaya/vinbero/pkg/cplane/wasm"
@@ -115,7 +115,7 @@ func run(cliCtx *cli.Context) error {
 		bindingVRFs = append(bindingVRFs, b.VRFName)
 	}
 	err = bringUpDataPlane(func() error {
-		return restoreVRFs(cfg.VRFs, bindingVRFs, cliCtx.Bool("bgp-enabled"), vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetResourceManager(), lg)
+		return restoreVRFs(cfg.VRFs, bindingVRFs, cliCtx.Bool("bgp-enabled"), vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetMapOperations(), vin.GetResourceManager(), lg)
 	}, func() error {
 		if err := vin.AttachConfigDevices(); err != nil {
 			return fmt.Errorf("attach devices: %w", err)
@@ -495,6 +495,9 @@ func run(cliCtx *cli.Context) error {
 				return "", 0, false
 			},
 			ForwardingMaps: vin.GetMapOperations(),
+			// Headend declarations name VRFs; *vrf.Manager resolves them
+			// without creating one and holds them against deletion.
+			VRFs: vrfBgpMgr.VRF(),
 			ResolveMUPInstance: func(name string) (uint32, error) {
 				if name == "" {
 					return 0, nil
@@ -730,13 +733,30 @@ func bringUpDataPlane(classify, attach func() error) error {
 // data plane only after it is on disk. A failed write is a warning, so a
 // daemon without a writable state directory still starts.
 //
+// Pinned state keyed by a vrf_id: the allocator starts above every vrf_id
+// the pinned maps still key state by, so a state file that was lost or never
+// saved cannot hand such an id to a new VRF. Once the VRF objects are back,
+// the headend entries and owner records of every vrf_id no VRF holds are
+// removed, whoever owns them: a VRF the config dropped here, or one the
+// state file forgot. Both run before the BGP applier or a plugin can write.
+// pinned may be nil (no maps to read).
+//
 // Failures are fatal: a config-declared AC, device or bridge that cannot
 // materialize is a misconfiguration the operator should see at startup, and a
 // state file that contradicts itself is not guessed around.
-func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, mgr *vrf.Manager, prog vrf.Programmer, resMgr *netresource.ResourceManager, lg *zap.Logger) error {
+func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, mgr *vrf.Manager, prog vrf.Programmer, pinned vrfKeyedMaps, resMgr *netresource.ResourceManager, lg *zap.Logger) error {
 	store := vrfStateStore{res: resMgr}
 	if err := mgr.Restore(store.load()); err != nil {
 		return fmt.Errorf("vrf: %w (repair the state file, settings.state_path, and restart)", err)
+	}
+	if pinned != nil {
+		highest, err := pinned.HighestVRFIDInUse()
+		if err != nil {
+			return fmt.Errorf("vrf: read the vrf_ids the pinned maps hold: %w", err)
+		}
+		if err := mgr.ReserveIDsThrough(highest); err != nil {
+			return fmt.Errorf("vrf: %w", err)
+		}
 	}
 	declared := make([]string, 0, len(bindingVRFs)+len(cfg.Entries))
 	for _, name := range bindingVRFs {
@@ -761,9 +781,18 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 	if err := loadVRFs(cfg, mgr, resMgr, resMgr, lg); err != nil {
 		return fmt.Errorf("vrf: %w", err)
 	}
+	before := map[uint32]string{}
+	for _, v := range mgr.List() {
+		before[v.ID] = v.Name
+	}
 	for _, name := range mgr.FinishRestore(declared) {
-		lg.Info("VRF not restored: the config no longer declares it and nothing holds it; its vrf_id stays retired",
+		lg.Info("VRF not restored: the config no longer declares it and it has no AC, device or bridge; its vrf_id stays retired",
 			zap.String("vrf", name))
+	}
+	if pinned != nil {
+		if err := purgeOrphanHeadends(mgr, pinned, before, lg); err != nil {
+			return err
+		}
 	}
 	mgr.SetStore(store)
 	if err := mgr.Save(); err != nil {
@@ -797,6 +826,41 @@ func warnVRFPorts(mgr *vrf.Manager, mapOps *bpf.MapOperations, lg *zap.Logger) {
 		return
 	}
 	mgr.WarnL2CircuitsOnClosedVRFs(links, ports, lg)
+}
+
+// vrfKeyedMaps is what the VRF restore reads and cleans in the pinned maps
+// keyed by a vrf_id. *bpf.MapOperations satisfies it.
+type vrfKeyedMaps interface {
+	HighestVRFIDInUse() (uint32, error)
+	PurgeHeadendVRFs(keep func(vrfID uint32) bool) (map[uint32]int, error)
+}
+
+// purgeOrphanHeadends removes the headend entries and owner records of
+// every vrf_id no restored VRF holds, and logs one line per id. names are
+// the VRFs before FinishRestore, to name the ones it dropped.
+func purgeOrphanHeadends(mgr *vrf.Manager, pinned vrfKeyedMaps, names map[uint32]string, lg *zap.Logger) error {
+	removed, err := pinned.PurgeHeadendVRFs(func(id uint32) bool {
+		_, ok := mgr.NameOf(id)
+		return ok
+	})
+	ids := make([]uint32, 0, len(removed))
+	for id := range removed {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		if name, ok := names[id]; ok {
+			lg.Info("headend entries of a VRF that is not restored removed",
+				zap.String("vrf", name), zap.Uint32("vrf_id", id), zap.Int("removed", removed[id]))
+		} else {
+			lg.Warn("headend entries of a vrf_id no VRF holds removed (the state file did not record it)",
+				zap.Uint32("vrf_id", id), zap.Int("removed", removed[id]))
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("vrf: remove the headend entries of VRFs that do not exist: %w", err)
+	}
+	return nil
 }
 
 // bridgeRegistrar is the FDB-watcher surface watchBridgeFacets needs.

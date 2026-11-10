@@ -36,7 +36,7 @@ func TestHeadendQuotaAfterRestart(t *testing.T) {
 	}
 	err = p.applyTransaction(&applyTxn{
 		kind: v1.PluginApplyKind_PLUGIN_APPLY_KIND_HEADEND_V4, seq: 1,
-		entries: []HeadendDesired{{TriggerPrefix: "10.0.1.0/24", Entry: entry}},
+		entries: []declaredHeadend{{HeadendDesired: HeadendDesired{TriggerPrefix: "10.0.1.0/24", Entry: entry}}},
 	})
 	v4, _ := maps.ListHeadendV4()
 	v6, _ := maps.ListHeadendV6()

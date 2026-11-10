@@ -141,7 +141,7 @@ struct headend_v4_key {
 // headend_v6_key は addr[16]、prefixlen は 32 + IPv6 prefix 長
 ```
 
-LPM の比較対象は `instance` から始まるので、vrf_id の 32 bit が必ず先に完全一致し、その後で宛先の prefix を比べます。`/p` の entry は `prefixlen = 32 + p` で格納されます。全 entry は vrf_id 0 (global VRF) にあり、data plane も入口の VRF に関係なく vrf_id 0 で引きます。プラグインがパケットの宛先で引く場合も同じにします。
+LPM の比較対象は `instance` から始まるので、vrf_id の 32 bit が必ず先に完全一致し、その後で宛先の prefix を比べます。`/p` の entry は `prefixlen = 32 + p` で格納されます。data plane は入口の VRF に関係なく vrf_id 0 (global VRF) で引きます。operator や control plane plugin が VRF を指定した entry は vrf_id 0 以外に入りますが、転送には使われません。プラグインがパケットの宛先で引く場合も vrf_id 0 で引きます。
 
 ```c
 struct headend_v4_key key = { .prefixlen = HEADEND_KEY_VRF_BITS + 32 };
@@ -151,7 +151,7 @@ __builtin_memcpy(key.addr, &iph->daddr, sizeof(key.addr));
 struct headend_entry *he = bpf_map_lookup_elem(&headend_v4_map, &key);
 ```
 
-`bpftool map dump` で見える raw key もこの形です。little-endian のホストで vrf_id 0 の `10.1.2.0/24` は `38 00 00 00 00 00 00 00 0a 01 02 00` (prefixlen 56)、`2001:db8::/64` は prefixlen 96 です。`vbctl headend-v4 list` などの API は prefix 長をそのまま (`/24`、`/64`) 表示します。
+`bpftool map dump` で見える raw key もこの形です。little-endian のホストで vrf_id 0 の `10.1.2.0/24` は `38 00 00 00 00 00 00 00 0a 01 02 00` (prefixlen 56)、`2001:db8::/64` は prefixlen 96 です。`vbctl headend-v4 list` などの API は prefix 長をそのまま (`/24`、`/64`) 表示し、VRF は別の列 (`vrf_name` と `vrf_id`) に出します。
 
 この key は `VINBERO_SDK_VERSION` 5 の header で定義されています。登録時の検証は、プラグインが宣言した `headend_v4_map` / `headend_v6_map` の BTF key 型名が `headend_v4_key` / `headend_v6_key` であることを確かめ、違えば header の更新を促すエラーで拒否します。BTF の無い ELF でも、key サイズが合わなければロード時の map 差し替え (`MapReplacements`) が拒否します。`<vinbero/maps.h>` は共有マップをすべて宣言するので、これを include するプラグインは v5 の header でビルドし直してください。
 

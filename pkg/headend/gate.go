@@ -4,6 +4,7 @@ import (
 	"fmt"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"strings"
 )
 
@@ -34,16 +35,16 @@ func (r *Reconciler) KeepGateReferences(af Family, prefix string, mode uint8, ow
 		r.gateRefs[id] = map[bpf.OwnerTag]int{}
 	}
 	r.gateRefs[id][owner] = refs
-	current, found, err := getOwner(r.maps, af, key)
+	current, found, err := getOwner(r.maps, af, ID{Prefix: key})
 	if err != nil {
 		return err
 	}
 	if found && current != MUPGateOwner && strings.HasPrefix(string(current), "bgp:") && strings.HasSuffix(string(current), ":mup-gate") {
-		if err := r.remove(af, key, current); err != nil {
+		if err := r.remove(af, ID{Prefix: key}, current); err != nil {
 			return err
 		}
 	}
-	return r.put(af, key, &bpf.HeadendEntry{Mode: mode}, MUPGateOwner)
+	return r.put(af, ID{Prefix: key}, &bpf.HeadendEntry{Mode: mode}, MUPGateOwner)
 }
 
 // SetGateReferences shares a physical endpoint gate across service owners.
@@ -76,20 +77,20 @@ func (r *Reconciler) SetGateReferences(af Family, prefix string, mode uint8, own
 		}
 	}
 	if total > 0 {
-		current, found, err := getOwner(r.maps, af, key)
+		current, found, err := getOwner(r.maps, af, ID{Prefix: key})
 		if err != nil {
 			return err
 		}
 		if found && current != MUPGateOwner && strings.HasPrefix(string(current), "bgp:") && strings.HasSuffix(string(current), ":mup-gate") {
-			if err := r.remove(af, key, current); err != nil {
+			if err := r.remove(af, ID{Prefix: key}, current); err != nil {
 				return err
 			}
 		}
-		if err := r.put(af, key, &bpf.HeadendEntry{Mode: mode}, MUPGateOwner); err != nil {
+		if err := r.put(af, ID{Prefix: key}, &bpf.HeadendEntry{Mode: mode}, MUPGateOwner); err != nil {
 			return err
 		}
 	} else {
-		if err := r.remove(af, key, MUPGateOwner); err != nil {
+		if err := r.remove(af, ID{Prefix: key}, MUPGateOwner); err != nil {
 			return err
 		}
 	}
@@ -117,8 +118,9 @@ func (r *Reconciler) PruneUnreferencedMUPGates() error {
 			return err
 		}
 		for _, e := range entries {
-			if len(r.gateRefs[fmt.Sprintf("%d/%s", af, e.TriggerPrefix)]) == 0 {
-				if err = r.remove(af, e.TriggerPrefix, MUPGateOwner); err != nil {
+			// Gates are global VRF entries; one elsewhere has no reference.
+			if e.VRF != vrf.GlobalVRFID || len(r.gateRefs[fmt.Sprintf("%d/%s", af, e.TriggerPrefix)]) == 0 {
+				if err = r.remove(af, e.ID(), MUPGateOwner); err != nil {
 					return err
 				}
 			}
