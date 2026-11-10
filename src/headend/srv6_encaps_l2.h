@@ -65,7 +65,7 @@ static __noinline int do_h_encaps_l2(
     }
 
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, outer_ip6h, new_eth, &ifindex, tailcall_ctx_vrf_id());
     // After encap, must not return XDP_PASS (stale pointers in caller)
     int action = fib_result_to_xdp_action(fib_result, ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
@@ -100,7 +100,7 @@ static __always_inline int do_h_encaps_l2_red_1seg(
                      headend_ctx_flow_label(0));
 
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, outer_ip6h, new_eth, &ifindex, tailcall_ctx_vrf_id());
     int action = fib_result_to_xdp_action(fib_result, ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
 }
@@ -160,7 +160,7 @@ static __always_inline int do_h_encaps_l2_red_multi(
         return XDP_DROP;
 
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, outer_ip6h, new_eth, &ifindex, tailcall_ctx_vrf_id());
     int action = fib_result_to_xdp_action(fib_result, ifindex);
     return (action == XDP_PASS) ? XDP_DROP : action;
 }

@@ -241,7 +241,7 @@ int tailcall_service_return_ad(struct xdp_md *ctx)
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         TAILCALL_RETURN(ctx, XDP_DROP);
-    int action = srv6_fib_redirect(ctx, outer, eth, ctx->ingress_ifindex);
+    int action = srv6_fib_redirect_encap(ctx, outer, eth, tctx->vrf_id);
     // Fail closed on a FIB miss. A proxy IFACE-IN is a dedicated circuit
     // whose only destination is the chain's next segment, so handing a
     // freshly assembled SR-encapsulated packet to the service-side kernel
@@ -295,7 +295,7 @@ int tailcall_service_return_am(struct xdp_md *ctx)
     if (copy_segment_by_index(&ip6h->daddr, seg_base, data_end, sl) != 0)
         TAILCALL_RETURN(ctx, XDP_DROP);
 
-    int action = srv6_fib_redirect(ctx, ip6h, eth, ctx->ingress_ifindex);
+    int action = srv6_fib_redirect_encap(ctx, ip6h, eth, tctx->vrf_id);
     TAILCALL_RETURN(ctx, action);
 }
 

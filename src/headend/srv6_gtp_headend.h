@@ -170,7 +170,7 @@ static __always_inline int gtp4_d_build_srv6(
     __builtin_memcpy(new_eth, &saved_eth, sizeof(struct ethhdr));
     new_eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-    return srv6_fib_redirect(ctx, outer_ip6h, new_eth, ctx->ingress_ifindex);
+    return srv6_fib_redirect_encap(ctx, outer_ip6h, new_eth, tailcall_ctx_vrf_id());
 }
 
 // gtp4_d_parse validates the GTP-U/IPv4 packet and parses its header. Shared

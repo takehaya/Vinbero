@@ -156,7 +156,7 @@ static __always_inline int do_h_encaps_impl(
 
     // FIB lookup and redirect
     __u32 ifindex;
-    int fib_result = srv6_fib_lookup_and_update(ctx, outer_ip6h, new_eth, &ifindex, ctx->ingress_ifindex);
+    int fib_result = srv6_fib_lookup_encap(ctx, outer_ip6h, new_eth, &ifindex, tailcall_ctx_vrf_id());
     return fib_result_to_xdp_action(fib_result, ifindex);
 }
 

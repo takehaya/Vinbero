@@ -82,6 +82,14 @@ static __always_inline struct tailcall_ctx *tailcall_ctx_read(void)
     return bpf_map_lookup_elem(&tailcall_ctx_map, &key);
 }
 
+// The ingress VRF of the packet being processed, as the front door set it
+// (0 when the per-CPU context cannot be read, which does not happen).
+static __always_inline __u32 tailcall_ctx_vrf_id(void)
+{
+    struct tailcall_ctx *tctx = tailcall_ctx_read();
+    return tctx ? tctx->vrf_id : 0;
+}
+
 // Read context in a built-in endpoint program (sid_endpoint_progs). Local
 // SIDs serve only the global VRF, and the dispatchers never tail-call an
 // endpoint for a tenant packet. A plugin can still bpf_tail_call a built-in
