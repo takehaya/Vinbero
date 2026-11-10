@@ -88,15 +88,24 @@ func TestHeadendV4VRFFlag(t *testing.T) {
 	if _, err := run("delete", "--trigger-prefix", "10.0.0.0/24", "--vrf", "tenant-a"); err != nil || stub.deleted.VrfName != "tenant-a" {
 		t.Errorf("delete = %v %v", stub.deleted, err)
 	}
-	if _, err := run("flush", "--yes", "--vrf", "tenant-a"); err != nil || stub.flushed.VrfName != "tenant-a" {
+	if _, err := run("flush", "--yes", "--vrf", "tenant-a"); err != nil || stub.flushed.VrfName != "tenant-a" || stub.flushed.AllVrfs {
 		t.Errorf("flush = %v %v", stub.flushed, err)
 	}
-	out, err := run("list")
+	if _, err := run("flush", "--yes"); err != nil || stub.flushed.VrfName != "" || stub.flushed.AllVrfs {
+		t.Errorf("flush without a VRF = %v %v, want the global VRF", stub.flushed, err)
+	}
+	if _, err := run("flush", "--yes", "--all-vrfs"); err != nil || !stub.flushed.AllVrfs {
+		t.Errorf("flush --all-vrfs = %v %v", stub.flushed, err)
+	}
+	if _, err := run("list"); err != nil || stub.listed.VrfName != "" || stub.listed.AllVrfs {
+		t.Errorf("list without a VRF = %v %v, want the global VRF", stub.listed, err)
+	}
+	out, err := run("list", "--all-vrfs")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stub.listed.VrfName != "" {
-		t.Errorf("list without --vrf sent %q", stub.listed.VrfName)
+	if !stub.listed.AllVrfs {
+		t.Error("list --all-vrfs did not ask for every VRF")
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 4 || strings.Fields(lines[0])[2] != "VRF" {

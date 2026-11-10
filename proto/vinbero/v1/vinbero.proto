@@ -183,8 +183,8 @@ message Headendv4 {
   // for the global VRF. The data plane looks up the global VRF only, so an
   // entry of another VRF is stored, listed and removable but not used.
   string vrf_name = 7;
-  // vrf_id is the VRF's id, server-assigned: set in responses, must be 0
-  // in requests.
+  // vrf_id is the VRF's id, server-assigned and set in responses. A
+  // request may leave it 0 or repeat the id vrf_name resolves to.
   uint32 vrf_id = 8;
 }
 
@@ -206,7 +206,8 @@ message Headendv4DeleteResponse {
 }
 
 message Headendv4ListRequest {
-  string vrf_name = 1; // list this VRF only ("global" = the global VRF); empty = every VRF
+  string vrf_name = 1; // VRF to list; empty or "global" = the global VRF
+  bool all_vrfs = 2; // list every VRF, each entry with its vrf_name and vrf_id; vrf_name must be empty
 }
 message Headendv4ListResponse {
   repeated Headendv4 headendv4s = 1;
@@ -221,7 +222,8 @@ message Headendv4GetResponse {
 }
 
 message Headendv4FlushRequest {
-  string vrf_name = 1; // flush this VRF only ("global" = the global VRF); empty = every VRF
+  string vrf_name = 1; // VRF to flush; empty or "global" = the global VRF
+  bool all_vrfs = 2; // flush every VRF; vrf_name must be empty
 }
 message Headendv4FlushResponse {
   uint32 deleted_count = 1;
@@ -251,8 +253,8 @@ message Headendv6 {
   // for the global VRF. The data plane looks up the global VRF only, so an
   // entry of another VRF is stored, listed and removable but not used.
   string vrf_name = 7;
-  // vrf_id is the VRF's id, server-assigned: set in responses, must be 0
-  // in requests.
+  // vrf_id is the VRF's id, server-assigned and set in responses. A
+  // request may leave it 0 or repeat the id vrf_name resolves to.
   uint32 vrf_id = 8;
 }
 
@@ -274,7 +276,8 @@ message Headendv6DeleteResponse {
 }
 
 message Headendv6ListRequest {
-  string vrf_name = 1; // list this VRF only ("global" = the global VRF); empty = every VRF
+  string vrf_name = 1; // VRF to list; empty or "global" = the global VRF
+  bool all_vrfs = 2; // list every VRF, each entry with its vrf_name and vrf_id; vrf_name must be empty
 }
 message Headendv6ListResponse {
   repeated Headendv6 headendv6s = 1;
@@ -289,7 +292,8 @@ message Headendv6GetResponse {
 }
 
 message Headendv6FlushRequest {
-  string vrf_name = 1; // flush this VRF only ("global" = the global VRF); empty = every VRF
+  string vrf_name = 1; // VRF to flush; empty or "global" = the global VRF
+  bool all_vrfs = 2; // flush every VRF; vrf_name must be empty
 }
 message Headendv6FlushResponse {
   uint32 deleted_count = 1;

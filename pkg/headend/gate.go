@@ -4,6 +4,7 @@ import (
 	"fmt"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"strings"
 )
 
@@ -118,7 +119,7 @@ func (r *Reconciler) PruneUnreferencedMUPGates() error {
 		}
 		for _, e := range entries {
 			// Gates are global VRF entries; one elsewhere has no reference.
-			if e.VRF != bpf.HeadendGlobalVRF || len(r.gateRefs[fmt.Sprintf("%d/%s", af, e.TriggerPrefix)]) == 0 {
+			if e.VRF != vrf.GlobalVRFID || len(r.gateRefs[fmt.Sprintf("%d/%s", af, e.TriggerPrefix)]) == 0 {
 				if err = r.remove(af, e.ID(), MUPGateOwner); err != nil {
 					return err
 				}

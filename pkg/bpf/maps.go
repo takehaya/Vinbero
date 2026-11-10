@@ -1748,7 +1748,7 @@ func (m *MapOperations) ResetSlotStats(mapType string) error {
 // persisted to headend_v4_owner_map; empty owner returns ErrEmptyOwner,
 // cross-owner write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
-	return m.CreateHeadendV4In(HeadendGlobalVRF, triggerPrefix, entry, owner)
+	return m.CreateHeadendV4In(globalVRF, triggerPrefix, entry, owner)
 }
 
 // CreateHeadendV4In is CreateHeadendV4 for the entry of triggerPrefix in
@@ -1771,7 +1771,7 @@ func (m *MapOperations) CreateHeadendV4In(vrfID uint32, triggerPrefix string, en
 // ErrEntryOwnerMismatch. Use ForceDeleteHeadendV4 for migration /
 // force-override paths.
 func (m *MapOperations) DeleteHeadendV4(triggerPrefix string, requester OwnerTag) error {
-	return m.DeleteHeadendV4In(HeadendGlobalVRF, triggerPrefix, requester)
+	return m.DeleteHeadendV4In(globalVRF, triggerPrefix, requester)
 }
 
 // DeleteHeadendV4In is DeleteHeadendV4 for the entry in VRF vrfID.
@@ -1782,7 +1782,7 @@ func (m *MapOperations) DeleteHeadendV4In(vrfID uint32, triggerPrefix string, re
 // ForceDeleteHeadendV4 removes a headend v4 entry of the global VRF
 // regardless of recorded owner.
 func (m *MapOperations) ForceDeleteHeadendV4(triggerPrefix string) error {
-	return m.deleteHeadendV4Internal(HeadendGlobalVRF, triggerPrefix, "", true)
+	return m.deleteHeadendV4Internal(globalVRF, triggerPrefix, "", true)
 }
 
 func (m *MapOperations) deleteHeadendV4Internal(vrfID uint32, triggerPrefix string, requester OwnerTag, force bool) error {
@@ -1795,7 +1795,7 @@ func (m *MapOperations) deleteHeadendV4Internal(vrfID uint32, triggerPrefix stri
 
 // GetHeadendV4 retrieves a headend v4 entry of the global VRF.
 func (m *MapOperations) GetHeadendV4(triggerPrefix string) (*HeadendEntry, error) {
-	return m.GetHeadendV4In(HeadendGlobalVRF, triggerPrefix)
+	return m.GetHeadendV4In(globalVRF, triggerPrefix)
 }
 
 // GetHeadendV4In retrieves the entry covering triggerPrefix in VRF vrfID.
@@ -2005,7 +2005,7 @@ func (m *MapOperations) SetIngressPolicy(enabled, defaultDeny bool, denyAction u
 // persisted to headend_v6_owner_map; empty owner returns ErrEmptyOwner,
 // cross-owner write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
-	return m.CreateHeadendV6In(HeadendGlobalVRF, triggerPrefix, entry, owner)
+	return m.CreateHeadendV6In(globalVRF, triggerPrefix, entry, owner)
 }
 
 // CreateHeadendV6In is CreateHeadendV6 for the entry of triggerPrefix in
@@ -2028,7 +2028,7 @@ func (m *MapOperations) CreateHeadendV6In(vrfID uint32, triggerPrefix string, en
 // ErrEntryOwnerMismatch. Use ForceDeleteHeadendV6 for migration /
 // force-override paths.
 func (m *MapOperations) DeleteHeadendV6(triggerPrefix string, requester OwnerTag) error {
-	return m.DeleteHeadendV6In(HeadendGlobalVRF, triggerPrefix, requester)
+	return m.DeleteHeadendV6In(globalVRF, triggerPrefix, requester)
 }
 
 // DeleteHeadendV6In is DeleteHeadendV6 for the entry in VRF vrfID.
@@ -2039,7 +2039,7 @@ func (m *MapOperations) DeleteHeadendV6In(vrfID uint32, triggerPrefix string, re
 // ForceDeleteHeadendV6 removes a headend v6 entry of the global VRF
 // regardless of recorded owner.
 func (m *MapOperations) ForceDeleteHeadendV6(triggerPrefix string) error {
-	return m.deleteHeadendV6Internal(HeadendGlobalVRF, triggerPrefix, "", true)
+	return m.deleteHeadendV6Internal(globalVRF, triggerPrefix, "", true)
 }
 
 func (m *MapOperations) deleteHeadendV6Internal(vrfID uint32, triggerPrefix string, requester OwnerTag, force bool) error {
@@ -2052,7 +2052,7 @@ func (m *MapOperations) deleteHeadendV6Internal(vrfID uint32, triggerPrefix stri
 
 // GetHeadendV6 retrieves a headend v6 entry of the global VRF.
 func (m *MapOperations) GetHeadendV6(triggerPrefix string) (*HeadendEntry, error) {
-	return m.GetHeadendV6In(HeadendGlobalVRF, triggerPrefix)
+	return m.GetHeadendV6In(globalVRF, triggerPrefix)
 }
 
 // GetHeadendV6In retrieves the entry covering triggerPrefix in VRF vrfID.
@@ -2420,7 +2420,7 @@ func (m *MapOperations) GetEcmpGroup(groupID uint32) (*EcmpGroupInfo, []*Headend
 // GetHeadendV4Owner returns the owner recorded for a v4 trigger prefix of the
 // global VRF, or ("", false) when the entry or its owner is absent.
 func (m *MapOperations) GetHeadendV4Owner(triggerPrefix string) (OwnerTag, bool, error) {
-	return m.GetHeadendV4OwnerIn(HeadendGlobalVRF, triggerPrefix)
+	return m.GetHeadendV4OwnerIn(globalVRF, triggerPrefix)
 }
 
 // GetHeadendV4OwnerIn is GetHeadendV4Owner for the entry in VRF vrfID.
@@ -2448,7 +2448,7 @@ func (m *MapOperations) GetSidFunctionOwner(triggerPrefix string) (OwnerTag, boo
 
 // GetHeadendV6Owner is the v6 counterpart of GetHeadendV4Owner.
 func (m *MapOperations) GetHeadendV6Owner(triggerPrefix string) (OwnerTag, bool, error) {
-	return m.GetHeadendV6OwnerIn(HeadendGlobalVRF, triggerPrefix)
+	return m.GetHeadendV6OwnerIn(globalVRF, triggerPrefix)
 }
 
 // GetHeadendV6OwnerIn is GetHeadendV6Owner for the entry in VRF vrfID.
@@ -3401,17 +3401,18 @@ func (m *MapOperations) ForceFlushSidFunctions() (uint32, error) {
 	return flushForce(entries, m.ForceDeleteSidFunction, "sid_function")
 }
 
-// FlushHeadendV4 removes headend_v4 entries whose owner matches scope, in
-// every VRF. scope must be non-empty; use ForceFlushHeadendV4 to drop every
-// entry.
-func (m *MapOperations) FlushHeadendV4(scope OwnerTag) (uint32, error) {
+// FlushHeadendV4AllVRFs removes the headend_v4 entries of every VRF whose
+// owner matches scope (and those with no owner recorded), and the owner
+// records of scope left without an entry. scope must be non-empty; use
+// ForceFlushHeadendV4 to drop every entry.
+func (m *MapOperations) FlushHeadendV4AllVRFs(scope OwnerTag) (uint32, error) {
 	if scope == "" {
-		return 0, fmt.Errorf("FlushHeadendV4: scope must be non-empty; use ForceFlushHeadendV4 for unconditional flush")
+		return 0, fmt.Errorf("FlushHeadendV4AllVRFs: scope must be non-empty; use ForceFlushHeadendV4 for unconditional flush")
 	}
 	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, nil, scope, false, "v4")
 }
 
-// FlushHeadendV4In is FlushHeadendV4 for the entries of VRF vrfID only.
+// FlushHeadendV4In is FlushHeadendV4AllVRFs for VRF vrfID only.
 func (m *MapOperations) FlushHeadendV4In(vrfID uint32, scope OwnerTag) (uint32, error) {
 	if scope == "" {
 		return 0, fmt.Errorf("FlushHeadendV4In: scope must be non-empty")
@@ -3419,22 +3420,24 @@ func (m *MapOperations) FlushHeadendV4In(vrfID uint32, scope OwnerTag) (uint32, 
 	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, &vrfID, scope, false, "v4")
 }
 
-// ForceFlushHeadendV4 removes every headend_v4 entry regardless of owner.
+// ForceFlushHeadendV4 removes every headend_v4 entry and owner record of
+// every VRF, regardless of owner.
 func (m *MapOperations) ForceFlushHeadendV4() (uint32, error) {
 	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, nil, "", true, "v4")
 }
 
-// FlushHeadendV6 removes headend_v6 entries whose owner matches scope, in
-// every VRF. scope must be non-empty; use ForceFlushHeadendV6 to drop every
-// entry.
-func (m *MapOperations) FlushHeadendV6(scope OwnerTag) (uint32, error) {
+// FlushHeadendV6AllVRFs removes the headend_v6 entries of every VRF whose
+// owner matches scope (and those with no owner recorded), and the owner
+// records of scope left without an entry. scope must be non-empty; use
+// ForceFlushHeadendV6 to drop every entry.
+func (m *MapOperations) FlushHeadendV6AllVRFs(scope OwnerTag) (uint32, error) {
 	if scope == "" {
-		return 0, fmt.Errorf("FlushHeadendV6: scope must be non-empty; use ForceFlushHeadendV6 for unconditional flush")
+		return 0, fmt.Errorf("FlushHeadendV6AllVRFs: scope must be non-empty; use ForceFlushHeadendV6 for unconditional flush")
 	}
 	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, nil, scope, false, "v6")
 }
 
-// FlushHeadendV6In is FlushHeadendV6 for the entries of VRF vrfID only.
+// FlushHeadendV6In is FlushHeadendV6AllVRFs for VRF vrfID only.
 func (m *MapOperations) FlushHeadendV6In(vrfID uint32, scope OwnerTag) (uint32, error) {
 	if scope == "" {
 		return 0, fmt.Errorf("FlushHeadendV6In: scope must be non-empty")
@@ -3442,7 +3445,8 @@ func (m *MapOperations) FlushHeadendV6In(vrfID uint32, scope OwnerTag) (uint32, 
 	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, &vrfID, scope, false, "v6")
 }
 
-// ForceFlushHeadendV6 removes every headend_v6 entry regardless of owner.
+// ForceFlushHeadendV6 removes every headend_v6 entry and owner record of
+// every VRF, regardless of owner.
 func (m *MapOperations) ForceFlushHeadendV6() (uint32, error) {
 	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, nil, "", true, "v6")
 }

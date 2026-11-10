@@ -52,7 +52,7 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 			toCover: "10.1.9.9", toLonger: "10.1.2.3", toOther: "198.51.100.1",
 			create: m.CreateHeadendV4, remove: m.DeleteHeadendV4, list: m.ListHeadendV4,
 			owners: m.ListHeadendV4Owners, getOwner: m.GetHeadendV4Owner,
-			flush: m.FlushHeadendV4, forceFlush: m.ForceFlushHeadendV4, pruneUnlisted: m.PruneUnlistedHeadendV4,
+			flush: m.FlushHeadendV4AllVRFs, forceFlush: m.ForceFlushHeadendV4, pruneUnlisted: m.PruneUnlistedHeadendV4,
 			createIn: m.CreateHeadendV4In, removeIn: m.DeleteHeadendV4In, getIn: m.GetHeadendV4In,
 			getOwnerIn: m.GetHeadendV4OwnerIn, listIDs: m.ListHeadendV4IDs, ownerIDs: m.ListHeadendV4OwnerIDs,
 			flushIn: m.FlushHeadendV4In,
@@ -140,7 +140,7 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 			toCover: "fd00:1:9::9", toLonger: "fd00:1:2::3", toOther: "fd00:99::1",
 			create: m.CreateHeadendV6, remove: m.DeleteHeadendV6, list: m.ListHeadendV6,
 			owners: m.ListHeadendV6Owners, getOwner: m.GetHeadendV6Owner,
-			flush: m.FlushHeadendV6, forceFlush: m.ForceFlushHeadendV6, pruneUnlisted: m.PruneUnlistedHeadendV6,
+			flush: m.FlushHeadendV6AllVRFs, forceFlush: m.ForceFlushHeadendV6, pruneUnlisted: m.PruneUnlistedHeadendV6,
 			createIn: m.CreateHeadendV6In, removeIn: m.DeleteHeadendV6In, getIn: m.GetHeadendV6In,
 			getOwnerIn: m.GetHeadendV6OwnerIn, listIDs: m.ListHeadendV6IDs, ownerIDs: m.ListHeadendV6OwnerIDs,
 			flushIn: m.FlushHeadendV6In,
@@ -615,8 +615,24 @@ func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
 			if entries, err := f.list(); err != nil || len(entries) != 1 || segOf(entries[f.longer]) != seg[0] {
 				t.Errorf("prefix-only list = %v %v, want the vrf 0 entry alone", keysOf(entries), err)
 			}
-			if n, err := h.mapOps.HeadendEntriesInVRF(7); err != nil || n != 1 {
-				t.Errorf("entries in vrf 7 = %d %v, want 1", n, err)
+			if used, err := h.mapOps.HeadendVRFInUse(7); err != nil || !used {
+				t.Errorf("vrf 7 in use = %v %v, want true", used, err)
+			}
+			if used, err := h.mapOps.HeadendVRFInUse(5); err != nil || used {
+				t.Errorf("vrf 5 in use = %v %v, want false", used, err)
+			}
+			// An owner record left without its entry is a reference too, and
+			// the flush of its owner removes it.
+			f.putRawOwner(t, 7, f.cover, OwnerRPC)
+			refs, err := h.mapOps.HeadendVRFRefs(7)
+			if err != nil || refs.Entries[OwnerRPC] != 1 || refs.OwnerOnly[OwnerRPC] != 1 || len(refs.Entries) != 1 || len(refs.OwnerOnly) != 1 {
+				t.Errorf("vrf 7 refs = %+v %v", refs, err)
+			}
+			if refs, err := h.mapOps.HeadendVRFRefs(8); err != nil || refs.Entries[owner[8]] != 1 || len(refs.OwnerOnly) != 0 {
+				t.Errorf("vrf 8 refs = %+v %v", refs, err)
+			}
+			if id, err := h.mapOps.HighestVRFIDInUse(); err != nil || id != 8 {
+				t.Errorf("highest vrf_id in use = %d %v, want 8", id, err)
 			}
 
 			// The lookup is vrf_id 0 for every packet.
@@ -641,8 +657,11 @@ func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
 					t.Errorf("vrf %d entry gone with the vrf 7 delete: %v", vrf, err)
 				}
 			}
-			if n, err := h.mapOps.HeadendEntriesInVRF(7); err != nil || n != 0 {
-				t.Errorf("entries in vrf 7 after the delete = %d %v, want 0", n, err)
+			if n, err := f.flushIn(7, OwnerRPC); err != nil || n != 1 {
+				t.Errorf("flush of vrf 7 = %d %v, want 1 (the owner record left without its entry)", n, err)
+			}
+			if used, err := h.mapOps.HeadendVRFInUse(7); err != nil || used {
+				t.Errorf("vrf 7 in use after its delete and flush = %v %v", used, err)
 			}
 			if n, err := f.flushIn(8, OwnerRPC); err != nil || n != 0 {
 				t.Errorf("RPC-scoped flush of vrf 8 = %d %v, want 0 (the entry is the tenant's)", n, err)
@@ -653,11 +672,35 @@ func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
 			if e, err := f.getIn(0, f.longer); err != nil || segOf(e) != seg[0] {
 				t.Errorf("vrf 0 entry after the vrf 8 flush = %v %v", e, err)
 			}
+			// The boot cleanup removes what a VRF that no longer exists holds,
+			// whoever owns it, and never touches the global VRF.
+			for _, vrf := range []uint32{7, 9} {
+				if err := f.createIn(vrf, f.longer, entryTo(t, seg[0]), owner[8]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.putRawOwner(t, 11, f.cover, owner[8])
+			removed, err := h.mapOps.PurgeHeadendVRFs(func(id uint32) bool { return id == 9 })
+			if err != nil || removed[7] != 1 || removed[11] != 1 || len(removed) != 2 {
+				t.Errorf("purge = %v %v, want vrf 7 and 11 one each", removed, err)
+			}
+			if _, err := f.getIn(9, f.longer); err != nil {
+				t.Errorf("vrf 9 entry gone with the purge: %v", err)
+			}
+			if _, err := f.getIn(0, f.longer); err != nil {
+				t.Errorf("global entry gone with the purge: %v", err)
+			}
+			if err := f.removeIn(9, f.longer, owner[8]); err != nil {
+				t.Fatal(err)
+			}
 			if err := f.remove(f.longer, OwnerRPC); err != nil {
 				t.Fatal(err)
 			}
 			if n := f.rawCount(t); n != 0 {
 				t.Errorf("raw map holds %d entries at the end, want 0", n)
+			}
+			if ids, err := f.ownerIDs(); err != nil || len(ids) != 0 {
+				t.Errorf("owner records at the end = %v %v", ids, err)
 			}
 		})
 	}

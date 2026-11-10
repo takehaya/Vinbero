@@ -66,15 +66,16 @@ func headendV4Command() *cli.Command {
 			},
 			{
 				Name:  "flush",
-				Usage: "Delete every Headend v4 entry, of every VRF unless --vrf names one (requires --yes)",
+				Usage: "Delete the Headend v4 entries the API wrote in one VRF (default: the global VRF), or with --all-vrfs in every VRF (requires --yes)",
 				Flags: []cli.Flag{
 					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
-					&cli.StringFlag{Name: "vrf", Usage: "Flush this VRF only (\"global\" for the global VRF)"},
+					headendVRFFlag(),
+					headendAllVRFsFlag(),
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv4.Headendv4Flush(context.Background(),
-						connect.NewRequest(&v1.Headendv4FlushRequest{VrfName: c.String("vrf")}))
+						connect.NewRequest(&v1.Headendv4FlushRequest{VrfName: c.String("vrf"), AllVrfs: c.Bool("all-vrfs")}))
 					if err != nil {
 						return err
 					}
@@ -84,14 +85,15 @@ func headendV4Command() *cli.Command {
 			},
 			{
 				Name:  "list",
-				Usage: "List the Headend v4 entries of every VRF, or of the one --vrf names",
+				Usage: "List the Headend v4 entries of one VRF (default: the global VRF), or with --all-vrfs of every VRF",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "vrf", Usage: "List this VRF only (\"global\" for the global VRF)"},
+					headendVRFFlag(),
+					headendAllVRFsFlag(),
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv4.Headendv4List(context.Background(),
-						connect.NewRequest(&v1.Headendv4ListRequest{VrfName: c.String("vrf")}))
+						connect.NewRequest(&v1.Headendv4ListRequest{VrfName: c.String("vrf"), AllVrfs: c.Bool("all-vrfs")}))
 					if err != nil {
 						return err
 					}
@@ -169,15 +171,16 @@ func headendV6Command() *cli.Command {
 			},
 			{
 				Name:  "flush",
-				Usage: "Delete every Headend v6 entry, of every VRF unless --vrf names one (requires --yes)",
+				Usage: "Delete the Headend v6 entries the API wrote in one VRF (default: the global VRF), or with --all-vrfs in every VRF (requires --yes)",
 				Flags: []cli.Flag{
 					&cli.BoolFlag{Name: "yes", Required: true, Usage: "Confirm the destructive operation"},
-					&cli.StringFlag{Name: "vrf", Usage: "Flush this VRF only (\"global\" for the global VRF)"},
+					headendVRFFlag(),
+					headendAllVRFsFlag(),
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv6.Headendv6Flush(context.Background(),
-						connect.NewRequest(&v1.Headendv6FlushRequest{VrfName: c.String("vrf")}))
+						connect.NewRequest(&v1.Headendv6FlushRequest{VrfName: c.String("vrf"), AllVrfs: c.Bool("all-vrfs")}))
 					if err != nil {
 						return err
 					}
@@ -187,14 +190,15 @@ func headendV6Command() *cli.Command {
 			},
 			{
 				Name:  "list",
-				Usage: "List the Headend v6 entries of every VRF, or of the one --vrf names",
+				Usage: "List the Headend v6 entries of one VRF (default: the global VRF), or with --all-vrfs of every VRF",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "vrf", Usage: "List this VRF only (\"global\" for the global VRF)"},
+					headendVRFFlag(),
+					headendAllVRFsFlag(),
 				},
 				Action: func(c *cli.Context) error {
 					clients := clientsFromContext(c)
 					resp, err := clients.Hv6.Headendv6List(context.Background(),
-						connect.NewRequest(&v1.Headendv6ListRequest{VrfName: c.String("vrf")}))
+						connect.NewRequest(&v1.Headendv6ListRequest{VrfName: c.String("vrf"), AllVrfs: c.Bool("all-vrfs")}))
 					if err != nil {
 						return err
 					}
@@ -329,10 +333,15 @@ func headendL2Command() *cli.Command {
 	}
 }
 
-// headendVRFFlag names the VRF of a headend entry. Omitted, the entry is in
-// the global VRF.
+// headendVRFFlag names the VRF a headend command acts on. Omitted, it is the
+// global VRF.
 func headendVRFFlag() cli.Flag {
-	return &cli.StringFlag{Name: "vrf", Usage: "VRF of the entry (default: the global VRF); it must already exist"}
+	return &cli.StringFlag{Name: "vrf", Usage: "VRF (default: the global VRF); it must already exist"}
+}
+
+// headendAllVRFsFlag selects every VRF for list and flush.
+func headendAllVRFsFlag() cli.Flag {
+	return &cli.BoolFlag{Name: "all-vrfs", Usage: "Every VRF (not with --vrf)"}
 }
 
 // formatHeadendVRF renders the VRF column of a headend entry. The VRF

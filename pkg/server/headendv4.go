@@ -8,18 +8,19 @@ import (
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/vrf"
 	"google.golang.org/protobuf/proto"
 )
 
 // Headendv4Server implements the Headendv4ServiceHandler interface
 type Headendv4Server struct {
 	mapOps *bpf.MapOperations
-	vrfs   HeadendVRFs
+	vrfs   vrf.Directory
 }
 
 // NewHeadendv4Server creates a new Headendv4Server. vrfs resolves the
 // vrf_name of a request; nil accepts the global VRF only.
-func NewHeadendv4Server(mapOps *bpf.MapOperations, vrfs HeadendVRFs) *Headendv4Server {
+func NewHeadendv4Server(mapOps *bpf.MapOperations, vrfs vrf.Directory) *Headendv4Server {
 	return &Headendv4Server{mapOps: mapOps, vrfs: vrfs}
 }
 
@@ -58,25 +59,34 @@ func (s *Headendv4Server) Headendv4Create(
 	return connect.NewResponse(resp), nil
 }
 
-// create writes one entry in the VRF it names, holding the VRF against
-// deletion until the entry is in place. The entry returned carries the
-// VRF's id; a request without vrf_name comes back as it was sent.
+// create writes one entry in the VRF it names. The VRF is held against
+// the start of its deletion from the name lookup to the write. The entry
+// returned carries the VRF's name and id; a request naming no VRF comes
+// back as it was sent.
 func (s *Headendv4Server) create(headend *v1.Headendv4, entry *bpf.HeadendEntry) (*v1.Headendv4, error) {
-	vrfID, release, err := resolveHeadendVRF(s.vrfs, headend.VrfName, true)
+	vrfID, err := s.write(headend, entry)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	if err := s.mapOps.CreateHeadendV4In(vrfID, headend.TriggerPrefix, entry, bpf.OwnerRPC); err != nil {
-		return nil, err
-	}
-	if headend.VrfName == "" {
+	if headend.VrfName == "" && headend.VrfId == 0 {
 		return headend, nil
 	}
 	out := proto.Clone(headend).(*v1.Headendv4)
 	out.VrfName = headendVRFName(s.vrfs, vrfID)
 	out.VrfId = vrfID
 	return out, nil
+}
+
+func (s *Headendv4Server) write(headend *v1.Headendv4, entry *bpf.HeadendEntry) (uint32, error) {
+	vrfID, release, err := resolveHeadendVRF(s.vrfs, headend.VrfName, true)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	if err := checkRequestVRFID(headend.VrfId, vrfID, headend.VrfName); err != nil {
+		return 0, err
+	}
+	return vrfID, s.mapOps.CreateHeadendV4In(vrfID, headend.TriggerPrefix, entry, bpf.OwnerRPC)
 }
 
 // Headendv4Delete deletes Headend v4 entries of one VRF
@@ -108,24 +118,22 @@ func (s *Headendv4Server) Headendv4Delete(
 	return connect.NewResponse(resp), nil
 }
 
-// Headendv4Flush removes the headend v4 entries the RPC wrote: those of
-// every VRF, or of the VRF the request names.
+// Headendv4Flush removes the headend v4 entries the RPC wrote, and the
+// RPC's owner records left without an entry, in the VRF the request names
+// (the global VRF when it names none) or, with all_vrfs, in every VRF.
 func (s *Headendv4Server) Headendv4Flush(
 	ctx context.Context,
 	req *connect.Request[v1.Headendv4FlushRequest],
 ) (*connect.Response[v1.Headendv4FlushResponse], error) {
-	var (
-		count uint32
-		err   error
-	)
-	if req.Msg.VrfName == "" {
-		count, err = s.mapOps.FlushHeadendV4(bpf.OwnerRPC)
+	only, err := headendVRFScope(s.vrfs, req.Msg.VrfName, req.Msg.AllVrfs)
+	if err != nil {
+		return nil, err
+	}
+	var count uint32
+	if only == nil {
+		count, err = s.mapOps.FlushHeadendV4AllVRFs(bpf.OwnerRPC)
 	} else {
-		vrfID, _, rerr := resolveHeadendVRF(s.vrfs, req.Msg.VrfName, false)
-		if rerr != nil {
-			return nil, headendVRFError(rerr)
-		}
-		count, err = s.mapOps.FlushHeadendV4In(vrfID, bpf.OwnerRPC)
+		count, err = s.mapOps.FlushHeadendV4In(*only, bpf.OwnerRPC)
 	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -133,19 +141,16 @@ func (s *Headendv4Server) Headendv4Flush(
 	return connect.NewResponse(&v1.Headendv4FlushResponse{DeletedCount: count}), nil
 }
 
-// Headendv4List lists the Headend v4 entries of every VRF, or of the VRF
-// the request names. Each carries its VRF.
+// Headendv4List lists the Headend v4 entries of the VRF the request names
+// (the global VRF when it names none) or, with all_vrfs, of every VRF.
+// Each entry carries its VRF.
 func (s *Headendv4Server) Headendv4List(
 	ctx context.Context,
 	req *connect.Request[v1.Headendv4ListRequest],
 ) (*connect.Response[v1.Headendv4ListResponse], error) {
-	var only *uint32
-	if req.Msg.VrfName != "" {
-		vrfID, _, err := resolveHeadendVRF(s.vrfs, req.Msg.VrfName, false)
-		if err != nil {
-			return nil, headendVRFError(err)
-		}
-		only = &vrfID
+	only, err := headendVRFScope(s.vrfs, req.Msg.VrfName, req.Msg.AllVrfs)
+	if err != nil {
+		return nil, err
 	}
 	entries, err := s.mapOps.ListHeadendV4IDs()
 	if err != nil {
@@ -193,9 +198,6 @@ func (s *Headendv4Server) Headendv4Get(
 
 // protoToEntry converts a protobuf Headendv4 to a BPF map entry
 func (s *Headendv4Server) protoToEntry(headend *v1.Headendv4) (*bpf.HeadendEntry, error) {
-	if headend.VrfId != 0 {
-		return nil, errVRFIDServerAssigned
-	}
 	srcAddr, err := bpf.ParseIPv6(headend.SrcAddr)
 	if err != nil {
 		return nil, err

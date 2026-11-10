@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/takehaya/vinbero/pkg/ownership"
-
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/ownership"
+	"github.com/takehaya/vinbero/pkg/vrf"
 )
 
 // MapOps is the headend surface a desired-set apply needs. It is
@@ -187,10 +187,8 @@ func applySets(ops MapOps, leases *ownership.Leases, owner bpf.OwnerTag, sets []
 				return res, fmt.Errorf("apply %s set: nil entry for %q", x.af, d.TriggerPrefix)
 			}
 			key := ID{VRF: d.VRF, Prefix: prefix}
-			if key.VRF != bpf.HeadendGlobalVRF {
-				if _, ok := ops.(VRFMapOps); !ok {
-					return res, fmt.Errorf("apply %s set: %s: %w", x.af, key, ErrGlobalVRFOnly)
-				}
+			if key.VRF != vrf.GlobalVRFID && !holdsVRFs(ops) {
+				return res, fmt.Errorf("apply %s set: %s: %w", x.af, key, ErrGlobalVRFOnly)
 			}
 			if _, dup := x.byID[key]; dup {
 				return res, fmt.Errorf("apply %s set: %q declared twice", x.af, key)
@@ -426,131 +424,165 @@ func OwnedEntries(ops MapOps, owner bpf.OwnerTag, af Family) ([]Desired, error) 
 	return out, nil
 }
 
-// listEntries reads one family's entries: every VRF from a VRFMapOps
-// backend, the global VRF from any other.
-func listEntries(ops MapOps, af Family) (map[ID]*bpf.HeadendEntry, error) {
+// perVRF returns ops as a VRFMapOps: ops itself when it implements one,
+// otherwise an adapter that holds the global VRF only. Every helper below
+// reads and writes through it, so none of them branches on the backend.
+func perVRF(ops MapOps) VRFMapOps {
 	if v, ok := ops.(VRFMapOps); ok {
-		var (
-			entries map[ID]*bpf.HeadendEntry
-			err     error
-		)
-		if af == AFv6 {
-			entries, err = v.ListHeadendV6IDs()
-		} else {
-			entries, err = v.ListHeadendV4IDs()
-		}
-		if err != nil {
-			return nil, fmt.Errorf("list %s: %w", af, err)
-		}
-		return entries, nil
+		return v
 	}
-	var (
-		entries map[string]*bpf.HeadendEntry
-		err     error
-	)
-	if af == AFv6 {
-		entries, err = ops.ListHeadendV6()
-	} else {
-		entries, err = ops.ListHeadendV4()
+	return globalOnly{ops}
+}
+
+// holdsVRFs reports whether ops can hold an entry outside the global VRF.
+func holdsVRFs(ops MapOps) bool {
+	_, legacy := perVRF(ops).(globalOnly)
+	return !legacy
+}
+
+// globalOnly adapts a backend keyed by prefix alone. It is the global VRF:
+// an operation naming another VRF fails with ErrGlobalVRFOnly.
+type globalOnly struct{ MapOps }
+
+func (g globalOnly) only(vrfID uint32, prefix string) error {
+	if vrfID != vrf.GlobalVRFID {
+		return fmt.Errorf("%s: %w", ID{VRF: vrfID, Prefix: prefix}, ErrGlobalVRFOnly)
 	}
+	return nil
+}
+
+func globalIDs[V any](in map[string]V, err error) (map[ID]V, error) {
 	if err != nil {
-		return nil, fmt.Errorf("list %s: %w", af, err)
+		return nil, err
 	}
-	out := make(map[ID]*bpf.HeadendEntry, len(entries))
-	for prefix, e := range entries {
-		out[ID{Prefix: prefix}] = e
+	out := make(map[ID]V, len(in))
+	for prefix, v := range in {
+		out[ID{Prefix: prefix}] = v
 	}
 	return out, nil
 }
 
-// ownedIDs returns the entries reserved by owner in one family. Entries
-// with no recorded owner are left alone: claiming them here would let a
-// plugin prune state it never wrote.
-func ownedIDs(ops MapOps, owner bpf.OwnerTag, af Family) (map[ID]struct{}, error) {
-	// Native maps enumerate ownership independently of live entries so failed
-	// owner deletions remain discoverable after restart, in every VRF. Older
-	// backends can only discover ownership while the main entry still exists.
-	if v, ok := ops.(VRFMapOps); ok {
-		var (
-			owners map[ID]bpf.OwnerTag
-			err    error
-		)
-		if af == AFv6 {
-			owners, err = v.ListHeadendV6OwnerIDs()
-		} else {
-			owners, err = v.ListHeadendV4OwnerIDs()
-		}
-		if err != nil {
-			return nil, fmt.Errorf("list %s owners: %w", af, err)
-		}
-		out := make(map[ID]struct{})
-		for key, holder := range owners {
-			if holder == owner {
-				out[key] = struct{}{}
-			}
-		}
-		return out, nil
-	}
-	if inventory, ok := ops.(interface {
+func (g globalOnly) ListHeadendV4IDs() (map[ID]*bpf.HeadendEntry, error) {
+	return globalIDs(g.ListHeadendV4())
+}
+func (g globalOnly) ListHeadendV6IDs() (map[ID]*bpf.HeadendEntry, error) {
+	return globalIDs(g.ListHeadendV6())
+}
+
+// ownerIDs lists the owners from the backend's own inventory when it has
+// one, which also finds owner records whose entry is gone; otherwise from
+// the entries it lists.
+func (g globalOnly) ownerIDs(v6 bool) (map[ID]bpf.OwnerTag, error) {
+	if inventory, ok := g.MapOps.(interface {
 		ListHeadendV4Owners() (map[string]bpf.OwnerTag, error)
 		ListHeadendV6Owners() (map[string]bpf.OwnerTag, error)
 	}); ok {
-		var owners map[string]bpf.OwnerTag
-		var err error
-		if af == AFv6 {
-			owners, err = inventory.ListHeadendV6Owners()
-		} else {
-			owners, err = inventory.ListHeadendV4Owners()
+		if v6 {
+			return globalIDs(inventory.ListHeadendV6Owners())
 		}
-		if err != nil {
-			return nil, fmt.Errorf("list %s owners: %w", af, err)
-		}
-		out := make(map[ID]struct{})
-		for prefix, holder := range owners {
-			if holder == owner {
-				out[ID{Prefix: prefix}] = struct{}{}
-			}
-		}
-		return out, nil
+		return globalIDs(inventory.ListHeadendV4Owners())
 	}
-	entries, err := listEntries(ops, af)
+	list, get := g.ListHeadendV4, g.GetHeadendV4Owner
+	if v6 {
+		list, get = g.ListHeadendV6, g.GetHeadendV6Owner
+	}
+	entries, err := list()
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[ID]struct{})
-	for key := range entries {
-		got, ok, err := getOwner(ops, af, key)
+	out := make(map[ID]bpf.OwnerTag)
+	for prefix := range entries {
+		holder, ok, err := get(prefix)
 		if err != nil {
-			return nil, fmt.Errorf("read %s owner of %q: %w", af, key, err)
+			return nil, fmt.Errorf("read owner of %q: %w", prefix, err)
 		}
-		if ok && got == owner {
+		if ok {
+			out[ID{Prefix: prefix}] = holder
+		}
+	}
+	return out, nil
+}
+
+func (g globalOnly) ListHeadendV4OwnerIDs() (map[ID]bpf.OwnerTag, error) { return g.ownerIDs(false) }
+func (g globalOnly) ListHeadendV6OwnerIDs() (map[ID]bpf.OwnerTag, error) { return g.ownerIDs(true) }
+func (g globalOnly) GetHeadendV4OwnerIn(v uint32, p string) (bpf.OwnerTag, bool, error) {
+	if err := g.only(v, p); err != nil {
+		return "", false, err
+	}
+	return g.GetHeadendV4Owner(p)
+}
+func (g globalOnly) GetHeadendV6OwnerIn(v uint32, p string) (bpf.OwnerTag, bool, error) {
+	if err := g.only(v, p); err != nil {
+		return "", false, err
+	}
+	return g.GetHeadendV6Owner(p)
+}
+func (g globalOnly) CreateHeadendV4In(v uint32, p string, e *bpf.HeadendEntry, o bpf.OwnerTag) error {
+	if err := g.only(v, p); err != nil {
+		return err
+	}
+	return g.CreateHeadendV4(p, e, o)
+}
+func (g globalOnly) CreateHeadendV6In(v uint32, p string, e *bpf.HeadendEntry, o bpf.OwnerTag) error {
+	if err := g.only(v, p); err != nil {
+		return err
+	}
+	return g.CreateHeadendV6(p, e, o)
+}
+func (g globalOnly) DeleteHeadendV4In(v uint32, p string, o bpf.OwnerTag) error {
+	if err := g.only(v, p); err != nil {
+		return err
+	}
+	return g.DeleteHeadendV4(p, o)
+}
+func (g globalOnly) DeleteHeadendV6In(v uint32, p string, o bpf.OwnerTag) error {
+	if err := g.only(v, p); err != nil {
+		return err
+	}
+	return g.DeleteHeadendV6(p, o)
+}
+
+// listEntries reads one family's entries of every VRF the backend holds.
+func listEntries(ops MapOps, af Family) (map[ID]*bpf.HeadendEntry, error) {
+	v := perVRF(ops)
+	list := v.ListHeadendV4IDs
+	if af == AFv6 {
+		list = v.ListHeadendV6IDs
+	}
+	entries, err := list()
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", af, err)
+	}
+	return entries, nil
+}
+
+// ownedIDs returns the entries reserved by owner in one family. Entries
+// with no recorded owner are left alone: claiming them here would let a
+// plugin prune state it never wrote. Native maps enumerate ownership
+// independently of live entries, so failed owner deletions remain
+// discoverable after restart.
+func ownedIDs(ops MapOps, owner bpf.OwnerTag, af Family) (map[ID]struct{}, error) {
+	v := perVRF(ops)
+	list := v.ListHeadendV4OwnerIDs
+	if af == AFv6 {
+		list = v.ListHeadendV6OwnerIDs
+	}
+	owners, err := list()
+	if err != nil {
+		return nil, fmt.Errorf("list %s owners: %w", af, err)
+	}
+	out := make(map[ID]struct{})
+	for key, holder := range owners {
+		if holder == owner {
 			out[key] = struct{}{}
 		}
 	}
 	return out, nil
 }
 
-// vrfOps returns the per-VRF surface for an entry outside the global VRF.
-func vrfOps(ops MapOps, key ID) (VRFMapOps, error) {
-	v, ok := ops.(VRFMapOps)
-	if !ok {
-		return nil, fmt.Errorf("%s: %w", key, ErrGlobalVRFOnly)
-	}
-	return v, nil
-}
-
 // getOwner reads the owner recorded for one entry.
 func getOwner(ops MapOps, af Family, key ID) (bpf.OwnerTag, bool, error) {
-	if key.VRF == bpf.HeadendGlobalVRF {
-		if af == AFv6 {
-			return ops.GetHeadendV6Owner(key.Prefix)
-		}
-		return ops.GetHeadendV4Owner(key.Prefix)
-	}
-	v, err := vrfOps(ops, key)
-	if err != nil {
-		return "", false, err
-	}
+	v := perVRF(ops)
 	if af == AFv6 {
 		return v.GetHeadendV6OwnerIn(key.VRF, key.Prefix)
 	}
@@ -559,16 +591,7 @@ func getOwner(ops MapOps, af Family, key ID) (bpf.OwnerTag, bool, error) {
 
 // createHeadend writes one entry in the family's map.
 func createHeadend(ops MapOps, af Family, key ID, entry *bpf.HeadendEntry, owner bpf.OwnerTag) error {
-	if key.VRF == bpf.HeadendGlobalVRF {
-		if af == AFv6 {
-			return ops.CreateHeadendV6(key.Prefix, entry, owner)
-		}
-		return ops.CreateHeadendV4(key.Prefix, entry, owner)
-	}
-	v, err := vrfOps(ops, key)
-	if err != nil {
-		return err
-	}
+	v := perVRF(ops)
 	if af == AFv6 {
 		return v.CreateHeadendV6In(key.VRF, key.Prefix, entry, owner)
 	}
@@ -577,16 +600,7 @@ func createHeadend(ops MapOps, af Family, key ID, entry *bpf.HeadendEntry, owner
 
 // deleteHeadend removes one entry from the family's map.
 func deleteHeadend(ops MapOps, af Family, key ID, owner bpf.OwnerTag) error {
-	if key.VRF == bpf.HeadendGlobalVRF {
-		if af == AFv6 {
-			return ops.DeleteHeadendV6(key.Prefix, owner)
-		}
-		return ops.DeleteHeadendV4(key.Prefix, owner)
-	}
-	v, err := vrfOps(ops, key)
-	if err != nil {
-		return err
-	}
+	v := perVRF(ops)
 	if af == AFv6 {
 		return v.DeleteHeadendV6In(key.VRF, key.Prefix, owner)
 	}

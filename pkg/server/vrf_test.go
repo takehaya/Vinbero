@@ -102,15 +102,39 @@ type fakeSidTable struct {
 	auxErr       error
 	grantRefs    map[uint32]uint32 // aux index -> granted ifindex
 	grantRefHook func()            // when set, runs inside EndtVRFGrantReferences
-	headends     map[uint32]int    // vrf_id -> headend entries
-	headendHook  func()            // when set, runs inside HeadendEntriesInVRF
+	headends     map[uint32]bpf.HeadendVRFRefs // vrf_id -> what it holds
+	headendHook  func()                        // when set, runs inside HeadendVRFInUse
+	purged       []uint32                      // vrf_ids PurgeHeadendVRFs removed
 }
 
-func (f *fakeSidTable) HeadendEntriesInVRF(vrfID uint32) (int, error) {
+func (f *fakeSidTable) HeadendVRFInUse(vrfID uint32) (bool, error) {
 	if f.headendHook != nil {
 		f.headendHook()
 	}
+	refs := f.headends[vrfID]
+	return len(refs.Entries)+len(refs.OwnerOnly) > 0, nil
+}
+
+func (f *fakeSidTable) HeadendVRFRefs(vrfID uint32) (bpf.HeadendVRFRefs, error) {
 	return f.headends[vrfID], nil
+}
+
+func (f *fakeSidTable) PurgeHeadendVRFs(keep func(uint32) bool) (map[uint32]int, error) {
+	out := map[uint32]int{}
+	for id, refs := range f.headends {
+		if id == 0 || keep(id) {
+			continue
+		}
+		for _, n := range refs.Entries {
+			out[id] += n
+		}
+		for _, n := range refs.OwnerOnly {
+			out[id] += n
+		}
+		f.purged = append(f.purged, id)
+		delete(f.headends, id)
+	}
+	return out, nil
 }
 
 func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {

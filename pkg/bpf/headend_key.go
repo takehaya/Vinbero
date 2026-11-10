@@ -21,10 +21,10 @@ const headendKeyVRFBits = 32
 // and removable, but no packet looks them up.
 const HeadendLookupVRF uint32 = 0
 
-// HeadendGlobalVRF is the vrf_id of the global VRF. The MapOperations
-// methods that take a trigger prefix alone read and write this VRF; the
-// ...In methods name the VRF.
-const HeadendGlobalVRF uint32 = 0
+// globalVRF is the vrf_id of the global VRF (vrf.GlobalVRFID; pkg/vrf
+// imports this package). The MapOperations methods that take a trigger
+// prefix alone read and write this VRF; the ...In methods name the VRF.
+const globalVRF uint32 = 0
 
 // HeadendID names one headend entry: the VRF it belongs to and its trigger
 // prefix in CIDR form, host bits cleared. The same prefix in two VRFs is
@@ -37,7 +37,7 @@ type HeadendID struct {
 // String renders the id for errors and logs: the bare prefix in the global
 // VRF, "vrf <id> <prefix>" elsewhere.
 func (id HeadendID) String() string {
-	if id.VRF == HeadendGlobalVRF {
+	if id.VRF == globalVRF {
 		return id.Prefix
 	}
 	return fmt.Sprintf("vrf %d %s", id.VRF, id.Prefix)
@@ -47,7 +47,7 @@ func (id HeadendID) String() string {
 func globalOnly[V any](all map[HeadendID]V) map[string]V {
 	out := make(map[string]V, len(all))
 	for id, v := range all {
-		if id.VRF == HeadendGlobalVRF {
+		if id.VRF == globalVRF {
 			out[id.Prefix] = v
 		}
 	}
@@ -168,19 +168,38 @@ func deleteHeadendKey(main *ebpf.Map, owners *entryOwnerMap, key any, requester 
 
 // flushHeadend empties one headend map of every VRF, or of *vrfID alone
 // when it is set: the entries scope owns (and those with no owner
-// recorded), or every entry when force is set. A malformed key is left in
-// place and reported after the rest is done.
-func flushHeadend[K any, PK headendKey[K]](main *ebpf.Map, owners *entryOwnerMap, vrfID *uint32, scope OwnerTag, force bool, family string) (uint32, error) {
+// recorded), or every entry when force is set, and the owner records of
+// scope (every one when force is set) whose entry is already gone. Each
+// removed entry or record counts once. A malformed key is left in place
+// and reported after the rest is done.
+func flushHeadend[K comparable, PK headendKey[K]](main *ebpf.Map, owners *entryOwnerMap, vrfID *uint32, scope OwnerTag, force bool, family string) (uint32, error) {
 	var (
 		keys      []K
 		malformed int
-		key       K
-		entry     HeadendEntry
 	)
+	inScope := func(key *K) bool { return vrfID == nil || PK(key).vrf() == *vrfID }
 	// Keys first: the iterator's behaviour while the map changes is not defined.
-	it := main.Iterate()
-	for it.Next(&key, &entry) {
-		if vrfID != nil && PK(&key).vrf() != *vrfID {
+	live := map[K]struct{}{}
+	if err := eachKey(main, func(key *K) bool {
+		live[*key] = struct{}{}
+		if !inScope(key) {
+			return true
+		}
+		if _, ok := PK(key).prefix(); !ok {
+			malformed++
+			return true
+		}
+		keys = append(keys, *key)
+		return true
+	}); err != nil {
+		return 0, fmt.Errorf("flush headend_%s: iterate: %w", family, err)
+	}
+	held, err := listEntryOwners[K](owners)
+	if err != nil {
+		return 0, fmt.Errorf("flush headend_%s: list owners: %w", family, err)
+	}
+	for key, holder := range held {
+		if _, ok := live[key]; ok || !inScope(&key) || (!force && holder != scope) {
 			continue
 		}
 		if _, ok := PK(&key).prefix(); !ok {
@@ -188,9 +207,6 @@ func flushHeadend[K any, PK headendKey[K]](main *ebpf.Map, owners *entryOwnerMap
 			continue
 		}
 		keys = append(keys, key)
-	}
-	if err := it.Err(); err != nil {
-		return 0, fmt.Errorf("flush headend_%s: iterate: %w", family, err)
 	}
 	var count uint32
 	for i := range keys {
@@ -208,6 +224,29 @@ func flushHeadend[K any, PK headendKey[K]](main *ebpf.Map, owners *entryOwnerMap
 		return count, fmt.Errorf("flush headend_%s: deleted %d, %w: %d left in place", family, count, ErrMalformedHeadendKey, malformed)
 	}
 	return count, nil
+}
+
+// eachKey calls fn with every key of m, without reading the values, until
+// fn returns false.
+func eachKey[K any](m *ebpf.Map, fn func(*K) bool) error {
+	var (
+		cur, next K
+		prev      any
+	)
+	for {
+		err := m.NextKey(prev, &next)
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !fn(&next) {
+			return nil
+		}
+		cur = next
+		prev = &cur
+	}
 }
 
 // pruneUnlistedHeadend removes what owner holds under the keys no listing
@@ -296,48 +335,4 @@ func (m *MapOperations) ListHeadendV4OwnerIDs() (map[HeadendID]OwnerTag, error) 
 // ListHeadendV6OwnerIDs is the IPv6 counterpart of ListHeadendV4OwnerIDs.
 func (m *MapOperations) ListHeadendV6OwnerIDs() (map[HeadendID]OwnerTag, error) {
 	return listHeadendOwners[HeadendV6Key](m.headendV6Owners)
-}
-
-// HeadendEntriesInVRF counts the headend entries of both families stored
-// under vrfID, together with owner records whose entry is gone. A VRF is
-// not deleted while it has any: its id is never given out again, so they
-// would stay behind with no name to remove them by.
-func (m *MapOperations) HeadendEntriesInVRF(vrfID uint32) (int, error) {
-	seen := map[string]struct{}{}
-	add := func(family string, ids map[HeadendID]struct{}) {
-		for id := range ids {
-			if id.VRF == vrfID {
-				seen[family+" "+id.Prefix] = struct{}{}
-			}
-		}
-	}
-	v4, err := m.ListHeadendV4IDs()
-	if err != nil {
-		return 0, err
-	}
-	add("v4", idSet(v4))
-	v4o, err := m.ListHeadendV4OwnerIDs()
-	if err != nil {
-		return 0, err
-	}
-	add("v4", idSet(v4o))
-	v6, err := m.ListHeadendV6IDs()
-	if err != nil {
-		return 0, err
-	}
-	add("v6", idSet(v6))
-	v6o, err := m.ListHeadendV6OwnerIDs()
-	if err != nil {
-		return 0, err
-	}
-	add("v6", idSet(v6o))
-	return len(seen), nil
-}
-
-func idSet[V any](m map[HeadendID]V) map[HeadendID]struct{} {
-	out := make(map[HeadendID]struct{}, len(m))
-	for id := range m {
-		out[id] = struct{}{}
-	}
-	return out
 }

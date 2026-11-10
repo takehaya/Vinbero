@@ -91,7 +91,7 @@ func TestBringUpDataPlane_ClassifiesBeforeAttach(t *testing.T) {
 	prog := &recordingProg{}
 	attached := false
 	err := bringUpDataPlane(func() error {
-		return restoreVRFs(config.VRFsConfig{DefaultDeny: true}, nil, false, mgr, prog, resMgr, zap.NewNop())
+		return restoreVRFs(config.VRFsConfig{DefaultDeny: true}, nil, false, mgr, prog, nil, resMgr, zap.NewNop())
 	}, func() error {
 		attached = true
 		if got := prog.mapping[bpf.IngressACKey{Ifindex: loIfindex}]; got != 7 {
@@ -129,7 +129,7 @@ func TestBringUpDataPlane_NoAttachOnClassifyFailure(t *testing.T) {
 func TestRestoreVRFs_ContradictoryStateIsFatal(t *testing.T) {
 	resMgr := resourceManagerWith(t, `{"vrfs":[],"bridges":[],"vrf_objects":{"next_vrf_id":2,"entries":[
 		{"name":"a","vrf_id":1},{"name":"b","vrf_id":1}]}}`)
-	if err := restoreVRFs(config.VRFsConfig{}, nil, false, vrf.NewManager(), &recordingProg{}, resMgr, zap.NewNop()); err == nil {
+	if err := restoreVRFs(config.VRFsConfig{}, nil, false, vrf.NewManager(), &recordingProg{}, nil, resMgr, zap.NewNop()); err == nil {
 		t.Fatal("restoreVRFs accepted a duplicated id")
 	}
 }
@@ -141,7 +141,7 @@ func TestRestoreVRFs_OlderStateAndConfigACRules(t *testing.T) {
 	cfg := config.VRFsConfig{Entries: []config.VRFConfig{{Name: "a", ACs: []config.VRFACConfig{{Interface: "lo"}}}}}
 	mgr := vrf.NewManager()
 	prog := &recordingProg{}
-	if err := restoreVRFs(cfg, nil, false, mgr, prog, resourceManagerWith(t, older), zap.NewNop()); err != nil {
+	if err := restoreVRFs(cfg, nil, false, mgr, prog, nil, resourceManagerWith(t, older), zap.NewNop()); err != nil {
 		t.Fatalf("older state: %v", err)
 	}
 	if id, ok := mgr.IDForName("a"); !ok || id == 0 || prog.mapping[bpf.IngressACKey{Ifindex: loIfindex}] != id {
@@ -149,14 +149,14 @@ func TestRestoreVRFs_OlderStateAndConfigACRules(t *testing.T) {
 	}
 
 	bad := config.VRFsConfig{Entries: []config.VRFConfig{{Name: "a", ACs: []config.VRFACConfig{{Interface: "vanished0"}}}}}
-	if err := restoreVRFs(bad, nil, false, vrf.NewManager(), &recordingProg{}, resourceManagerWith(t, older), zap.NewNop()); err == nil {
+	if err := restoreVRFs(bad, nil, false, vrf.NewManager(), &recordingProg{}, nil, resourceManagerWith(t, older), zap.NewNop()); err == nil {
 		t.Error("an unresolved config-declared AC did not fail the boot")
 	}
 
 	// The same interface recorded as a runtime AC does not soften the config's rule.
 	taken := `{"vrfs":[],"bridges":[],"vrf_objects":{"next_vrf_id":2,"entries":[
 		{"name":"a","vrf_id":1,"runtime_acs":[{"interface":"vanished0","vlan":0}]}]}}`
-	if err := restoreVRFs(bad, nil, false, vrf.NewManager(), &recordingProg{}, resourceManagerWith(t, taken), zap.NewNop()); err == nil {
+	if err := restoreVRFs(bad, nil, false, vrf.NewManager(), &recordingProg{}, nil, resourceManagerWith(t, taken), zap.NewNop()); err == nil {
 		t.Error("a config AC the state calls runtime was skipped instead of failing")
 	}
 }
@@ -169,7 +169,7 @@ func TestRestoreVRFs_FirstBootKeepsTheAllocationOrder(t *testing.T) {
 	cfg := config.VRFsConfig{Entries: []config.VRFConfig{{Name: "entry-c", ACs: []config.VRFACConfig{{Interface: "lo"}}}}}
 
 	mgr := vrf.NewManager()
-	if err := restoreVRFs(cfg, []string{"bind-a", "bind-b"}, true, mgr, &recordingProg{}, resourceManagerWith(t, older), zap.NewNop()); err != nil {
+	if err := restoreVRFs(cfg, []string{"bind-a", "bind-b"}, true, mgr, &recordingProg{}, nil, resourceManagerWith(t, older), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]uint32{"bind-a": 1, "bind-b": 2, "dev-x": 3, "entry-c": 4} {
@@ -180,7 +180,7 @@ func TestRestoreVRFs_FirstBootKeepsTheAllocationOrder(t *testing.T) {
 
 	// Without BGP the bindings are not loaded, as before.
 	mgr = vrf.NewManager()
-	if err := restoreVRFs(cfg, []string{"bind-a", "bind-b"}, false, mgr, &recordingProg{}, resourceManagerWith(t, older), zap.NewNop()); err != nil {
+	if err := restoreVRFs(cfg, []string{"bind-a", "bind-b"}, false, mgr, &recordingProg{}, nil, resourceManagerWith(t, older), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]uint32{"dev-x": 1, "entry-c": 2} {
@@ -200,7 +200,7 @@ func TestRestoreVRFs_SavesBeforeTheDataPlane(t *testing.T) {
 	mgr := vrf.NewManager()
 	var atWrite map[string]uint32
 	prog := &recordingProg{onWrite: func() { atWrite = savedIDs(t, path) }}
-	if err := restoreVRFs(cfg, []string{"b"}, true, mgr, prog, resMgr, zap.NewNop()); err != nil {
+	if err := restoreVRFs(cfg, []string{"b"}, true, mgr, prog, nil, resMgr, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := mgr.IDForName("a")
@@ -219,7 +219,7 @@ func TestRestoreVRFs_DropsUndeclaredConfigVRFs(t *testing.T) {
 		{"name":"cfg-kept","vrf_id":3,"config":true}]}}`)
 	cfg := config.VRFsConfig{Entries: []config.VRFConfig{{Name: "cfg-kept"}}}
 	mgr := vrf.NewManager()
-	if err := restoreVRFs(cfg, nil, false, mgr, &recordingProg{}, resMgr, zap.NewNop()); err != nil {
+	if err := restoreVRFs(cfg, nil, false, mgr, &recordingProg{}, nil, resMgr, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := mgr.Get("cfg-old"); ok {

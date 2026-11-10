@@ -43,6 +43,24 @@ const GlobalVRFID uint32 = 0
 // non-zero id.
 const GlobalVRFName = "global"
 
+// IsGlobalName reports a VRF name that a request uses for the global VRF:
+// the empty name (no VRF named) and GlobalVRFName.
+func IsGlobalName(name string) bool { return name == "" || name == GlobalVRFName }
+
+// Directory resolves the VRF a request names to the vrf_id state is keyed
+// by. *Manager satisfies it; the headend RPCs and the control-plane plugin
+// host take it.
+type Directory interface {
+	// LookupID resolves a name without creating the VRF (see
+	// Manager.LookupID).
+	LookupID(name string) (uint32, error)
+	// NameOf names the VRF holding id; GlobalVRFName for id 0.
+	NameOf(id uint32) (string, bool)
+	// HoldIDs keeps every VRF from starting its deletion until release is
+	// called.
+	HoldIDs() (release func())
+}
+
 // Policy is the global ingress policy.
 type Policy struct {
 	DefaultDeny bool
@@ -144,9 +162,12 @@ type Manager struct {
 	// circuit, with the circuit (SetTablesHeldOpen); nil lists none.
 	heldOpen func() map[uint32]string
 	// idMu orders the writers that store state under a VRF's id against
-	// the VRF's deletion (HoldIDs, LockIDs). It is separate from mu, which
-	// the lookups inside a hold take.
+	// the start of the VRF's deletion (HoldIDs, StartDelete). It is
+	// separate from mu, which the lookups inside a hold take.
 	idMu sync.RWMutex
+	// deleting are the VRFs whose deletion has started (StartDelete):
+	// LookupID refuses them. Guarded by mu.
+	deleting map[string]struct{}
 }
 
 type runtimeACKey struct {
@@ -167,6 +188,7 @@ func NewManager() *Manager {
 		unsavedDeletes: make(map[string]struct{}),
 		configOrigin:   make(map[string]struct{}),
 		goneACs:        make(map[runtimeACKey]struct{}),
+		deleting:       make(map[string]struct{}),
 	}
 }
 
@@ -278,13 +300,19 @@ var ErrUnknownVRF = errors.New("unknown VRF")
 
 // LookupID resolves the VRF a request names to its vrf_id without creating
 // it. The empty name and GlobalVRFName are the global VRF; any other name
-// must exist, or the error wraps ErrUnknownVRF.
+// must exist and must not be in the middle of its deletion, or the error
+// wraps ErrUnknownVRF.
 func (m *Manager) LookupID(name string) (uint32, error) {
-	if name == "" || name == GlobalVRFName {
+	if IsGlobalName(name) {
 		return GlobalVRFID, nil
 	}
-	if id, ok := m.IDForName(name); ok {
-		return id, nil
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if _, ok := m.deleting[name]; ok {
+		return 0, fmt.Errorf("%w %q: it is being deleted", ErrUnknownVRF, name)
+	}
+	if v, ok := m.byName[name]; ok {
+		return v.ID, nil
 	}
 	return 0, fmt.Errorf("%w %q", ErrUnknownVRF, name)
 }
@@ -301,22 +329,66 @@ func (m *Manager) NameOf(id uint32) (string, bool) {
 	return name, ok
 }
 
-// HoldIDs keeps every VRF from being deleted until release is called. A
-// writer that stores state under a vrf_id it resolved (a headend entry)
-// holds it from the LookupID to the write, so a delete that checks for
-// such state sees the write, or the lookup fails because the VRF is gone.
-// Holds are shared; take one at a time per goroutine.
+// HoldIDs keeps every VRF from starting its deletion until release is
+// called. A writer that stores state under a vrf_id it resolved (a headend
+// entry) holds it from the LookupID to the write and no longer: the
+// delete's reference check then sees the write, or the lookup fails
+// because the deletion has started. Holds are shared; take one at a time
+// per goroutine.
 func (m *Manager) HoldIDs() (release func()) {
 	m.idMu.RLock()
 	return m.idMu.RUnlock
 }
 
-// LockIDs waits for every HoldIDs to end and keeps new ones out until
-// release is called. A VRF delete holds it from its reference checks to
-// Delete.
-func (m *Manager) LockIDs() (release func()) {
+// StartDelete begins the deletion of name. It waits for every HoldIDs to
+// end, runs check with the VRF's id while no new hold can start, and if
+// check passes marks the VRF so LookupID refuses it from then on. No
+// writer can therefore store new state under the id between the check and
+// the end of the deletion, and the slow part of a delete (device teardown,
+// the state save) runs with no hold blocked. Finish with Delete, or call
+// abort to keep the VRF. A VRF that does not exist is not an error: check
+// is not run and abort does nothing.
+func (m *Manager) StartDelete(name string, check func(id uint32) error) (abort func(), err error) {
 	m.idMu.Lock()
-	return m.idMu.Unlock
+	defer m.idMu.Unlock()
+	m.mu.RLock()
+	v, ok := m.byName[name]
+	m.mu.RUnlock()
+	if !ok {
+		return func() {}, nil
+	}
+	if err := check(v.ID); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.deleting[name] = struct{}{}
+	m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		delete(m.deleting, name)
+		m.mu.Unlock()
+	}, nil
+}
+
+// ReserveIDsThrough raises the allocator watermark above id, so no VRF is
+// given id or a lower one again. The boot passes the highest vrf_id found
+// in the pinned maps keyed by one, before anything allocates: a state file
+// that was lost or never saved would otherwise hand an id that still keys
+// state to a new VRF.
+func (m *Manager) ReserveIDsThrough(id uint32) error {
+	if id == GlobalVRFID {
+		return nil
+	}
+	if id >= MaxNextID {
+		return fmt.Errorf("vrf: vrf_id %d in use is at or above the highest watermark %d", id, MaxNextID)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.nextID <= id {
+		m.nextID = id + 1
+		m.dirty = true
+	}
+	return nil
 }
 
 // ByID returns the VRF holding id. The returned VRF's ACs are a copy (see clone).
@@ -445,6 +517,7 @@ func (m *Manager) Delete(name string) {
 	}
 	delete(m.byName, name)
 	delete(m.byID, v.ID)
+	delete(m.deleting, name)
 	for _, ac := range v.ACs {
 		delete(m.runtimeACs, runtimeACKey{name, ac})
 	}

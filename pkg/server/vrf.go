@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -29,9 +30,14 @@ type SidLister interface {
 	// VRF in a host-owned grant map rather than in l3vrf aux, so the aux scan
 	// above cannot see it.
 	EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool, error)
-	// HeadendEntriesInVRF counts the headend entries (v4 and v6, owner
-	// records included) stored under a vrf_id.
-	HeadendEntriesInVRF(vrfID uint32) (int, error)
+	// HeadendVRFInUse reports whether a headend entry or owner record of
+	// either family is stored under a vrf_id, stopping at the first.
+	HeadendVRFInUse(vrfID uint32) (bool, error)
+	// HeadendVRFRefs counts them by owner.
+	HeadendVRFRefs(vrfID uint32) (bpf.HeadendVRFRefs, error)
+	// PurgeHeadendVRFs removes every entry and owner record of the vrf_ids
+	// keep refuses.
+	PurgeHeadendVRFs(keep func(vrfID uint32) bool) (map[uint32]int, error)
 }
 
 // BindingGetter reports whether a vrf-bgp binding references a VRF name, so
@@ -367,18 +373,21 @@ func (s *VrfServer) deleteOne(name string) (deleted bool, opErr *v1.OperationErr
 		return fail(fmt.Sprintf("bridge %q is attached; detach it first (vrf bridge-detach)", v.Bridge.Name))
 	}
 	// A headend entry is keyed by the VRF's id, which is never given out
-	// again: left behind it would have no name to be removed by. LockIDs
-	// waits for a headend write that resolved this VRF (RPC or plugin) and
-	// keeps new ones out until the VRF is gone, so the count cannot miss
-	// one. It is taken before the grant lease: a plugin apply holds its
-	// VRF ids while it may take that lease.
-	unlockIDs := s.mgr.LockIDs()
-	defer unlockIDs()
-	if n, err := s.sids.HeadendEntriesInVRF(v.ID); err != nil {
-		return fail(fmt.Sprintf("failed to check headend entries: %v", err))
-	} else if n > 0 {
-		return fail(fmt.Sprintf("headend entries remain in this VRF (%d); delete them first (headend-v4 / headend-v6 delete --vrf %s)", n, name))
+	// again: left behind it would have no name to be removed by. StartDelete
+	// runs the check while no headend write (RPC or plugin) is between its
+	// name lookup and its write, and from then on the lookup refuses this
+	// VRF, so the check cannot miss an entry. Nothing below waits for a
+	// headend writer.
+	abort, err := s.mgr.StartDelete(name, func(id uint32) error { return s.checkHeadendRefs(name, id) })
+	if err != nil {
+		return fail(err.Error())
 	}
+	finished := false
+	defer func() {
+		if !finished {
+			abort()
+		}
+	}()
 	// SID reference check on the device ifindex. A deviceless VRF can still
 	// shadow a same-named raw kernel device that SIDs reference, so fall back
 	// to a best-effort name resolve.
@@ -430,6 +439,12 @@ func (s *VrfServer) deleteOne(name string) (deleted bool, opErr *v1.OperationErr
 			return fail(fmt.Sprintf("delete kernel device: %v", err))
 		}
 	}
+	// What the check let through: owner records, left without an entry, of
+	// owners no API removes them for. They go with the VRF.
+	if _, err := s.sids.PurgeHeadendVRFs(func(id uint32) bool { return id != v.ID }); err != nil {
+		return fail(fmt.Sprintf("remove the headend records left in this VRF: %v", err))
+	}
+	finished = true
 	s.mgr.Delete(name)
 	return saved()
 }
@@ -748,16 +763,86 @@ func (s *VrfServer) VrfAcAdd(
 // entry was written under its id in the meantime: the VRF then stays, so
 // the entry keeps a name to be listed and removed by.
 func (s *VrfServer) dropCreatedVRF(name string) {
-	id, ok := s.mgr.IDForName(name)
-	if !ok {
-		return
-	}
-	unlockIDs := s.mgr.LockIDs()
-	defer unlockIDs()
-	if n, err := s.sids.HeadendEntriesInVRF(id); err != nil || n > 0 {
+	_, err := s.mgr.StartDelete(name, func(id uint32) error {
+		used, err := s.sids.HeadendVRFInUse(id)
+		if err == nil && used {
+			err = errors.New("headend entries remain")
+		}
+		return err
+	})
+	if err != nil {
 		return
 	}
 	s.mgr.Delete(name)
+}
+
+// checkHeadendRefs refuses the delete of a VRF that still holds headend
+// state an API can show or remove, and says, per owner, what removes it.
+// An entry counts whoever owns it: the list of the VRF shows it. An owner
+// record whose entry is gone counts when its owner can remove it (the
+// operator's flush, a plugin's declaration); any other such record goes
+// with the VRF.
+func (s *VrfServer) checkHeadendRefs(name string, id uint32) error {
+	used, err := s.sids.HeadendVRFInUse(id)
+	if err != nil {
+		return fmt.Errorf("failed to check headend entries: %w", err)
+	}
+	if !used {
+		return nil
+	}
+	refs, err := s.sids.HeadendVRFRefs(id)
+	if err != nil {
+		return fmt.Errorf("failed to check headend entries: %w", err)
+	}
+	counts := map[bpf.OwnerTag]int{}
+	for owner, n := range refs.Entries {
+		counts[owner] += n
+	}
+	for owner, n := range refs.OwnerOnly {
+		if owner == bpf.OwnerRPC || pluginBundle(owner) != "" {
+			counts[owner] += n
+		}
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	owners := make([]bpf.OwnerTag, 0, len(counts))
+	for owner := range counts {
+		owners = append(owners, owner)
+	}
+	slices.Sort(owners)
+	parts := make([]string, 0, len(owners))
+	for _, owner := range owners {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[owner], headendRemedy(owner, name)))
+	}
+	return fmt.Errorf("headend entries remain in this VRF: %s", strings.Join(parts, "; "))
+}
+
+// headendRemedy names who holds headend state in a VRF and what removes it.
+func headendRemedy(owner bpf.OwnerTag, vrfName string) string {
+	switch {
+	case owner == "":
+		return fmt.Sprintf("with no owner (headend-v4 / headend-v6 flush --vrf %s)", vrfName)
+	case owner == bpf.OwnerRPC:
+		return fmt.Sprintf("of the operator (headend-v4 / headend-v6 delete or flush --vrf %s)", vrfName)
+	case pluginBundle(owner) != "":
+		p := pluginBundle(owner)
+		return fmt.Sprintf("of control-plane plugin %q (change its declaration, or cplane unregister --name %s)", p, p)
+	case strings.HasPrefix(string(owner), "bgp:"):
+		return fmt.Sprintf("of BGP owner %q (remove the vrf-bgp binding that imports them)", owner)
+	default:
+		return fmt.Sprintf("of owner %q (headend-v4 / headend-v6 list --vrf %s shows them)", owner, vrfName)
+	}
+}
+
+// pluginBundle is the plugin name of a control-plane plugin's owner tag,
+// "" for any other owner.
+func pluginBundle(owner bpf.OwnerTag) string {
+	p, ok, err := bpf.ParsePluginOwnerTag(string(owner))
+	if err != nil || !ok || !p.IsBundle() {
+		return ""
+	}
+	return p.Bundle
 }
 
 func (s *VrfServer) VrfAcRemove(
