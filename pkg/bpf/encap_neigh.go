@@ -37,7 +37,9 @@ func (m *MapOperations) SetEncapChangeHook(fn func(dsts []netip.Addr)) {
 // may notify too: a destination the maps do not hold is dropped by the
 // keeper's next resweep.
 func (m *MapOperations) encapWrote(dsts ...netip.Addr) {
-	if len(dsts) == 0 {
+	// A nil receiver is a caller whose write was refused before any map
+	// was touched; the deferred notification has nothing to say.
+	if m == nil || len(dsts) == 0 {
 		return
 	}
 	if fn := m.encapHook.Load(); fn != nil {
