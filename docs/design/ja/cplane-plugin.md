@@ -484,8 +484,10 @@ VRF を名前で宣言でき (`PluginHeadendEntry.vrf`、SDK の `HeadendEntry.V
 省略するか `global` と書くと global VRF (vrf_id 0) です。global VRF 以外は
 scope の VRF list に入っていなければ集合ごと拒否します。advertise と local SID の
 decap_vrf と同じ list です。名前は apply の時点で vrf_id に解決し、存在しない
-VRF は集合ごと拒否します。宣言が VRF を作ることはありません。host は拒否した集合を
-保持しないので、plugin は VRF ができてから宣言し直します。名前の解決から map への
+VRF は集合ごと拒否します。宣言が VRF を作ることはありません。input policy を持つ
+plugin (composition) の宣言と公開前の宣言は、ほかの失敗と同じく host が保持して
+次の event で再試行します。それ以外は保持しないので、plugin は VRF ができてから
+宣言し直します。名前の解決から map への
 書き込みまでの間は VRF の削除を始めさせないので、削除された VRF の id に entry が
 残ることはありません。composition でも、この間に BGP や service の処理を挟みません。同じ prefix を global VRF と別の VRF に宣言すると、2 つの entry に
 なります。data plane は vrf_id 0 で引くので、global VRF 以外の entry は転送に

@@ -188,8 +188,9 @@ fails the replacement so the operator can retry.
 A headend entry names its VRF in `HeadendEntry.VRF`. Empty (or `global`) is
 the global VRF and needs no grant. Any other VRF must be in the registration's
 scope VRF list and must exist when the set is applied; otherwise the whole set
-is refused, and the host does not keep it: declare it again once the VRF
-exists. The same prefix in two VRFs is two entries. The data plane looks every
+is refused. The host keeps and retries it on the next event only for a plugin
+with an input policy (compositions) or a declaration staged before
+publication; otherwise declare it again once the VRF exists. The same prefix in two VRFs is two entries. The data plane looks every
 packet up in the global VRF, so an entry of another VRF is installed and listed
 but not used for forwarding.
 

@@ -125,7 +125,7 @@ L3 headend の表 (`headend_v4_map` / `headend_v6_map`) は `{vrf_id, prefix}` �
 
 Flush は、その VRF (または全 VRF) にある RPC の entry と owner の無い entry に加えて、entry が消えて RPC の owner の記録だけが残ったものも消します。plugin や BGP の entry は消しません。
 
-control plane plugin が存在しない VRF を宣言すると、その集合は拒否されます。host は拒否した集合を保持しないので、plugin は VRF ができてから宣言し直します。
+control plane plugin が存在しない VRF を宣言すると、その集合は拒否されます。host が受け取った入力を渡す plugin (input policy を持つもの。composition はこれです) と、公開前に宣言した集合は、host が保持して次の event で再試行します。それ以外の plugin の集合は保持しないので、plugin は VRF ができてから宣言し直します。
 
 data plane は入口の VRF に関係なく vrf_id 0 で headend の表を引きます。そのため global VRF 以外の entry は保存、一覧、削除はできますが、転送には使われません。
 

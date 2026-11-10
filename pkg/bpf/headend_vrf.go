@@ -73,14 +73,19 @@ type HeadendVRFRefs struct {
 	OwnerOnly map[OwnerTag]int
 }
 
-// HeadendVRFRefs counts what vrfID holds in the headend maps.
+// HeadendVRFRefs counts what vrfID holds in the headend maps under keys an
+// API can name. A malformed key (an impossible prefix length) is not
+// counted: no API lists or removes it, and PurgeHeadendVRFs takes it.
 func (m *MapOperations) HeadendVRFRefs(vrfID uint32) (HeadendVRFRefs, error) {
 	refs := HeadendVRFRefs{Entries: map[OwnerTag]int{}, OwnerOnly: map[OwnerTag]int{}}
 	for _, f := range m.headendFamilies() {
 		live := map[any]struct{}{}
 		var scanErr error
-		if err := f.main(vrfID, func(key any, _ bool) bool {
+		if err := f.main(vrfID, func(key any, prefixOK bool) bool {
 			live[keyOf(key)] = struct{}{}
+			if !prefixOK {
+				return true // no API lists or removes it; it goes with the VRF
+			}
 			owner, ok, err := f.ownerMap.Lookup(key)
 			if err != nil {
 				scanErr = err
@@ -97,8 +102,8 @@ func (m *MapOperations) HeadendVRFRefs(vrfID uint32) (HeadendVRFRefs, error) {
 		if scanErr != nil {
 			return refs, fmt.Errorf("scan headend_%s owners: %w", f.family, scanErr)
 		}
-		if err := f.owners(vrfID, func(key any, _ bool) bool {
-			if _, ok := live[keyOf(key)]; ok {
+		if err := f.owners(vrfID, func(key any, prefixOK bool) bool {
+			if _, ok := live[keyOf(key)]; ok || !prefixOK {
 				return true
 			}
 			owner, ok, err := f.ownerMap.Lookup(key)

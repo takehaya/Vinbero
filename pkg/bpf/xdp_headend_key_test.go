@@ -2,6 +2,7 @@ package bpf
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"net"
 	"testing"
@@ -29,6 +30,7 @@ type headendKeyFamily struct {
 	rawCount                    func(t *testing.T) int
 	putMalformed                func(t *testing.T) func()
 	putMalformedOwner           func(t *testing.T, owner OwnerTag)
+	putMalformedOwnerIn         func(t *testing.T, vrf uint32, owner OwnerTag)
 	createIn                    func(uint32, string, *HeadendEntry, OwnerTag) error
 	removeIn                    func(uint32, string, OwnerTag) error
 	getIn                       func(uint32, string) (*HeadendEntry, error)
@@ -59,6 +61,14 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 			putMalformedOwner: func(t *testing.T, owner OwnerTag) {
 				t.Helper()
 				if err := m.headendV4Owners.Put(&HeadendV4Key{Prefixlen: 8}, owner); err != nil {
+					t.Fatal(err)
+				}
+			},
+			putMalformedOwnerIn: func(t *testing.T, vrf uint32, owner OwnerTag) {
+				t.Helper()
+				key := &HeadendV4Key{Prefixlen: 8}
+				binary.BigEndian.PutUint32(key.Instance[:], vrf)
+				if err := m.headendV4Owners.Put(key, owner); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -147,6 +157,14 @@ func headendKeyFamilies(h *xdpTestHelper) []headendKeyFamily {
 			putMalformedOwner: func(t *testing.T, owner OwnerTag) {
 				t.Helper()
 				if err := m.headendV6Owners.Put(&HeadendV6Key{Prefixlen: 8}, owner); err != nil {
+					t.Fatal(err)
+				}
+			},
+			putMalformedOwnerIn: func(t *testing.T, vrf uint32, owner OwnerTag) {
+				t.Helper()
+				key := &HeadendV6Key{Prefixlen: 8}
+				binary.BigEndian.PutUint32(key.Instance[:], vrf)
+				if err := m.headendV6Owners.Put(key, owner); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -622,8 +640,10 @@ func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
 				t.Errorf("vrf 5 in use = %v %v, want false", used, err)
 			}
 			// An owner record left without its entry is a reference too, and
-			// the flush of its owner removes it.
+			// the flush of its owner removes it. One under a malformed key is
+			// not: no API names it.
 			f.putRawOwner(t, 7, f.cover, OwnerRPC)
+			f.putMalformedOwnerIn(t, 7, OwnerRPC)
 			refs, err := h.mapOps.HeadendVRFRefs(7)
 			if err != nil || refs.Entries[OwnerRPC] != 1 || refs.OwnerOnly[OwnerRPC] != 1 || len(refs.Entries) != 1 || len(refs.OwnerOnly) != 1 {
 				t.Errorf("vrf 7 refs = %+v %v", refs, err)
@@ -657,11 +677,17 @@ func TestXDPProgHeadendSamePrefixAcrossVRFs(t *testing.T) {
 					t.Errorf("vrf %d entry gone with the vrf 7 delete: %v", vrf, err)
 				}
 			}
-			if n, err := f.flushIn(7, OwnerRPC); err != nil || n != 1 {
-				t.Errorf("flush of vrf 7 = %d %v, want 1 (the owner record left without its entry)", n, err)
+			if n, err := f.flushIn(7, OwnerRPC); n != 1 || !errors.Is(err, ErrMalformedHeadendKey) {
+				t.Errorf("flush of vrf 7 = %d %v, want 1 (the owner record left without its entry) and the malformed one reported", n, err)
+			}
+			if refs, err := h.mapOps.HeadendVRFRefs(7); err != nil || len(refs.Entries)+len(refs.OwnerOnly) != 0 {
+				t.Errorf("vrf 7 refs after its delete and flush = %+v %v, want none", refs, err)
+			}
+			if removed, err := h.mapOps.PurgeHeadendVRFs(func(id uint32) bool { return id != 7 }); err != nil || removed[7] != 1 {
+				t.Errorf("purge of vrf 7 = %v %v, want the malformed record", removed, err)
 			}
 			if used, err := h.mapOps.HeadendVRFInUse(7); err != nil || used {
-				t.Errorf("vrf 7 in use after its delete and flush = %v %v", used, err)
+				t.Errorf("vrf 7 in use after the purge = %v %v", used, err)
 			}
 			if n, err := f.flushIn(8, OwnerRPC); err != nil || n != 0 {
 				t.Errorf("RPC-scoped flush of vrf 8 = %d %v, want 0 (the entry is the tenant's)", n, err)

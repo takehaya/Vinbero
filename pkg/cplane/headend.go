@@ -45,8 +45,9 @@ func namesVRF(sets ...[]declaredHeadend) bool {
 
 // resolveDeclared returns the entries with each one's VRF id looked up
 // from its name. An unknown VRF refuses the set; no VRF is created. The
-// host does not keep a refused set: the plugin declares it again once the
-// VRF exists.
+// set is retried only where any failed declaration is (a plugin with an
+// input policy, or one staged before publication); otherwise the plugin
+// declares it again once the VRF exists.
 func resolveDeclared(vrfs vrf.Directory, set []declaredHeadend) ([]HeadendDesired, error) {
 	out := make([]HeadendDesired, len(set))
 	for i, d := range set {
