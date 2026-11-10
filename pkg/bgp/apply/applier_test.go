@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 
 	"go.uber.org/zap"
@@ -45,6 +46,9 @@ type fakeHeadend struct {
 	ecmpOwners  map[uint32]bpf.OwnerTag
 	ecmpDeletes []uint32
 	putEcmpErr  error
+	// putEcmpFailures fails that many more PutEcmpGroup calls. Atomic, so
+	// a test can arm it while another goroutine applies routes.
+	putEcmpFailures atomic.Int32
 
 	fdb                              map[fdbKey]*bpf.FdbEntry
 	bdPeers                          map[bdPeerKey]*bpf.HeadendEntry
@@ -217,6 +221,10 @@ func (f *fakeHeadend) PutEcmpGroup(groupID uint32, paths []bpf.EcmpPath, owner b
 	if f.putEcmpErr != nil {
 		return f.putEcmpErr
 	}
+	if f.putEcmpFailures.Add(-1) >= 0 {
+		return errors.New("injected PutEcmpGroup failure")
+	}
+	f.putEcmpFailures.Store(0)
 	if f.ecmpGroups == nil {
 		f.ecmpGroups = map[uint32][]bpf.EcmpPath{}
 	}

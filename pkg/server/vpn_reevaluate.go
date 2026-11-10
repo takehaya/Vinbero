@@ -40,10 +40,10 @@ func vpnImportFilterHook(request func([]bgp.Family), logger *zap.Logger) func([]
 	}
 }
 
-// SourceLocatorReconciler rewrites what the BGP applier tracks once the
-// source locator is registered (implemented by *apply.Applier).
-type SourceLocatorReconciler interface {
-	ReconcileSourceLocator()
+// TrackedReconciler writes what the BGP applier tracks but has not written
+// (implemented by *apply.Applier).
+type TrackedReconciler interface {
+	ReconcileTracked() error
 }
 
 // sourceLocatorHooks wraps the locator add and delete with what the BGP
@@ -52,19 +52,22 @@ type SourceLocatorReconciler interface {
 // locator is often created over RPC after the daemon, and so its BGP
 // sessions, are already up:
 //
-//   - Registering it rewrites the routes the applier tracks: those received
-//     while it was missing are written, and those already written take the
-//     new prefix if it changed. The EVPN loc-rib is replayed as well, since
-//     an EVPN route that could not be written is not tracked.
+//   - Registering it writes the routes the applier tracks within the RPC:
+//     those received while it was missing, and those already written whose
+//     source moved with the locator's prefix. It then requests a replay of
+//     the EVPN loc-rib, since an EVPN route that could not be written is not
+//     tracked. That replay runs the tracked pass again and is retried with
+//     backoff until both succeed, so a write that fails here converges. The
+//     locator stays registered and the RPC succeeds either way.
 //   - Deleting it leaves written entries forwarding with the source they
 //     have; it logs one warning, and nothing is rewritten until the locator
 //     is registered again.
 //
 // add and del are returned unchanged when BGP or the source locator is not
 // configured.
-func (s *Server) sourceLocatorHooks(add func(*locator.Locator) error, del func(string, bool) error) (func(*locator.Locator) error, func(string, bool) error) {
+func (s *Server) sourceLocatorHooks(add func(*locator.Locator) error, del func(string, bool) error, requestReplay func([]bgp.Family)) (func(*locator.Locator) error, func(string, bool) error) {
 	source := s.cfg.BGP.Global.SourceLocator
-	if source == "" || s.srcLocator == nil || add == nil || del == nil {
+	if source == "" || s.tracked == nil || requestReplay == nil || add == nil || del == nil {
 		return add, del
 	}
 	wrappedAdd := func(loc *locator.Locator) error {
@@ -72,10 +75,11 @@ func (s *Server) sourceLocatorHooks(add func(*locator.Locator) error, del func(s
 			return err
 		}
 		if loc.Name == source {
-			s.srcLocator.ReconcileSourceLocator()
-			if s.evpnReplay != nil {
-				s.evpnReplay()
+			if err := s.tracked.ReconcileTracked(); err != nil {
+				s.logger.Warn("writing routes after the source locator was registered failed; retrying",
+					zap.String("locator", loc.Name), zap.Error(err))
 			}
+			requestReplay([]bgp.Family{bgp.FamilyEVPN})
 		}
 		return nil
 	}

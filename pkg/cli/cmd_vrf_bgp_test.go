@@ -160,3 +160,33 @@ func TestBatchKind_Invalid(t *testing.T) {
 		t.Errorf("case-insensitive add must map to KIND_ADD; got %v", k)
 	}
 }
+
+// Every vrf-bgp command that can take a vpnv4 / vpnv6 import away carries the
+// same note about re-evaluation and the return to default-allow.
+func TestVrfBgpImportRemovalNote(t *testing.T) {
+	root := vrfBgpCommand()
+	find := func(path ...string) string {
+		cmds := root.Subcommands
+		for i, name := range path {
+			for _, c := range cmds {
+				if c.Name == name {
+					if i == len(path)-1 {
+						return c.Description
+					}
+					cmds = c.Subcommands
+					break
+				}
+			}
+		}
+		t.Fatalf("command %v not found", path)
+		return ""
+	}
+	for _, path := range [][]string{
+		{"bind"}, {"update"}, {"unbind"},
+		{"rt", "remove"}, {"rt", "batch"}, {"family", "remove"},
+	} {
+		if got := find(path...); got != vpnImportRemovalNote {
+			t.Errorf("vrf-bgp %v help = %q, want the import removal note", path, got)
+		}
+	}
+}

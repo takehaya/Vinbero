@@ -30,8 +30,8 @@ import (
 // loc-rib standing in for GoBGP: the server requests replays, the loc-rib
 // re-delivers what it holds, and the assertions read the data plane. A
 // binding change reaches the applier through a VPN loc-rib replay on the
-// replayer's goroutine; a source locator registration is handled within
-// the LocatorCreate RPC.
+// replayer's goroutine. A source locator registration writes the tracked
+// routes within the LocatorCreate RPC and then requests an EVPN replay.
 
 const sourceLocator = "LOC2"
 
@@ -62,9 +62,9 @@ func (r *fakeRIB) deliver(ev bgp.RouteEvent) {
 	r.a.Apply(ev)
 }
 
-// replay is what the daemon hands the server as its VPN replay.
+// replay is what the daemon hands the server as its loc-rib replay.
 func (r *fakeRIB) replay(families []bgp.Family) error {
-	err := r.a.QuietVPNDenials(func() error {
+	err := r.a.ReplayAndReconcile(func() error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		for _, ev := range r.routes {
@@ -166,6 +166,7 @@ func (l *vpnLab) createLocator(prefix string) {
 	if err != nil || len(resp.Msg.GetErrors()) != 0 {
 		l.t.Fatalf("LocatorCreate: %v %v", err, resp.Msg.GetErrors())
 	}
+	l.replayed() // the EVPN replay it requests
 }
 
 func (l *vpnLab) deleteLocator() {
@@ -473,5 +474,23 @@ func TestEVPNRouteBeforeSourceLocator(t *testing.T) {
 	l.createLocator("fd00:200::/48")
 	if !l.dp.HasFdb(100, "aa:bb:cc:00:00:01") {
 		t.Fatal("RT2 not written after the source locator was registered")
+	}
+}
+
+// A route write that fails when the source locator is registered is logged,
+// the RPC still succeeds, and the replay the registration requests retries
+// until the route is written.
+func TestVPNSourceLocatorWriteFailureConverges(t *testing.T) {
+	l := newVPNLab(t)
+	l.rib.deliver(importedRoute)
+	// The synchronous pass in the RPC and the first replay attempt fail.
+	l.dp.FailEcmpWrites(2)
+	l.createLocator("fd00:200::/48")
+	if n := l.logs.FilterMessageSnippet("after the source locator was registered failed").Len(); n != 1 {
+		t.Errorf("failed write warnings = %d, want 1", n)
+	}
+	l.replayed() // the retry, after the replayer's backoff
+	if !l.programmed("10.1.0.0/24", loc2Src) {
+		t.Fatal("route not written after the retry")
 	}
 }

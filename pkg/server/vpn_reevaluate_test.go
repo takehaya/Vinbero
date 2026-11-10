@@ -44,23 +44,27 @@ func TestVPNImportFilterHook(t *testing.T) {
 	}
 }
 
-type fakeSourceReconciler struct{ calls int }
+type fakeTracked struct {
+	calls int
+	err   error
+}
 
-func (f *fakeSourceReconciler) ReconcileSourceLocator() { f.calls++ }
+func (f *fakeTracked) ReconcileTracked() error { f.calls++; return f.err }
 
-// Registering the BGP source locator rewrites what the applier tracks and
-// replays the EVPN loc-rib, synchronously in the RPC. Other locators and
-// failed registrations do neither. Deleting it logs one warning and leaves the
-// installed entries alone.
+// Registering the BGP source locator writes what the applier tracks within
+// the RPC and requests an EVPN replay, which runs the tracked pass again with
+// the replayer's retry. Other locators and failed registrations do neither.
+// A failed tracked pass is logged and the RPC still succeeds. Deleting the
+// locator logs one warning and leaves the installed entries alone.
 func TestLocatorService_SourceLocatorHooks(t *testing.T) {
 	core, logs := observer.New(zapcore.WarnLevel)
 	mgr := locator.NewManager()
-	rec := &fakeSourceReconciler{}
-	evpnReplays := 0
+	rec := &fakeTracked{}
+	var requests [][]bgp.Family
 	cfg := &config.Config{}
 	cfg.BGP.Global.SourceLocator = "LOC2"
-	s := &Server{cfg: cfg, srcLocator: rec, evpnReplay: func() { evpnReplays++ }, logger: zap.New(core)}
-	add, del := s.sourceLocatorHooks(mgr.Add, mgr.Delete)
+	s := &Server{cfg: cfg, tracked: rec, logger: zap.New(core)}
+	add, del := s.sourceLocatorHooks(mgr.Add, mgr.Delete, func(f []bgp.Family) { requests = append(requests, slices.Clone(f)) })
 	srv := NewLocatorServer(mgr, add, del)
 
 	create := func(name, prefix string) {
@@ -83,8 +87,13 @@ func TestLocatorService_SourceLocatorHooks(t *testing.T) {
 	}
 	want := func(what string, n int) {
 		t.Helper()
-		if rec.calls != n || evpnReplays != n {
-			t.Errorf("%s: reconciles = %d, EVPN replays = %d, want %d each", what, rec.calls, evpnReplays, n)
+		if rec.calls != n || len(requests) != n {
+			t.Errorf("%s: tracked passes = %d, replay requests = %v, want %d each", what, rec.calls, requests, n)
+		}
+		for _, r := range requests {
+			if !slices.Equal(r, []bgp.Family{bgp.FamilyEVPN}) {
+				t.Errorf("%s: replay request %v, want [evpn]", what, r)
+			}
 		}
 	}
 
@@ -107,8 +116,17 @@ func TestLocatorService_SourceLocatorHooks(t *testing.T) {
 		t.Errorf("deleting the source locator logged %d warnings, want 1", logs.Len())
 	}
 	want("delete", 1)
-	create("LOC2", "fd00:300::/48")
-	want("registered again", 2)
+
+	logs.TakeAll()
+	rec.err = errors.New("map full")
+	create("LOC2", "fd00:300::/48") // fails the test if the RPC reports an error
+	want("registered again with a failing write", 2)
+	if n := logs.FilterMessageSnippet("retrying").Len(); n != 1 {
+		t.Errorf("failed tracked pass logged %d warnings, want 1", n)
+	}
+	if _, ok := mgr.Get("LOC2"); !ok {
+		t.Error("source locator not registered after a failed tracked pass")
+	}
 }
 
 // Without BGP or a configured source locator the locator calls are passed
@@ -118,14 +136,14 @@ func TestSourceLocatorHooksPassThrough(t *testing.T) {
 	add := func(*locator.Locator) error { return boom }
 	del := func(string, bool) error { return nil }
 	for _, s := range []*Server{
-		{cfg: &config.Config{}, srcLocator: &fakeSourceReconciler{}},
+		{cfg: &config.Config{}, tracked: &fakeTracked{}},
 		func() *Server {
 			cfg := &config.Config{}
 			cfg.BGP.Global.SourceLocator = "LOC2"
 			return &Server{cfg: cfg}
 		}(),
 	} {
-		gotAdd, gotDel := s.sourceLocatorHooks(add, del)
+		gotAdd, gotDel := s.sourceLocatorHooks(add, del, func([]bgp.Family) { t.Error("unexpected replay request") })
 		if err := gotAdd(&locator.Locator{Name: "LOC2"}); !errors.Is(err, boom) {
 			t.Errorf("add was wrapped: %v", err)
 		}

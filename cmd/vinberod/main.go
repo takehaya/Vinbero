@@ -326,12 +326,13 @@ func run(cliCtx *cli.Context) error {
 				lg.Warn("EVPN loc-rib replay", zap.Error(err))
 			}
 		}
-		// Re-evaluates the L3VPN loc-rib after a runtime binding change
-		// alters what the import-RT filter accepts (a CNI ADD binding a VRF
-		// after the peer's routes were already in the loc-rib, an RT or
-		// binding removed).
+		// Re-evaluates the loc-rib of families after a runtime binding
+		// change alters what the L3VPN import-RT filter accepts (a CNI ADD
+		// binding a VRF after the peer's routes were already in the loc-rib,
+		// an RT or binding removed), and EVPN after the source locator is
+		// registered. The server retries it until it succeeds.
 		vpnReplay = func(families []bgp.Family) error {
-			return applier.QuietVPNDenials(func() error {
+			return applier.ReplayAndReconcile(func() error {
 				return routeDemux.ReplayBuiltin("applier", families)
 			})
 		}

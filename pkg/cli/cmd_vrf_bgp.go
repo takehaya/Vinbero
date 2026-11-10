@@ -74,9 +74,10 @@ func buildBindingFromFlags(c *cli.Context) (*v1.VrfBgpBinding, error) {
 
 func vrfBgpBindCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "bind",
-		Usage: "Bind a VRF to its BGP route-target policy",
-		Flags: vrfBgpBindFlags(true),
+		Name:        "bind",
+		Usage:       "Bind a VRF to its BGP route-target policy",
+		Description: vpnImportRemovalNote,
+		Flags:       vrfBgpBindFlags(true),
 		Action: func(c *cli.Context) error {
 			b, err := buildBindingFromFlags(c)
 			if err != nil {
@@ -93,8 +94,8 @@ func vrfBgpBindCommand() *cli.Command {
 	}
 }
 
-// vpnImportRemovalNote is the help text of the commands that can take a
-// vpnv4 / vpnv6 import away.
+// vpnImportRemovalNote is the help text of every command that can take a
+// vpnv4 / vpnv6 import away, a binding replaced by bind or update included.
 const vpnImportRemovalNote = "Received vpnv4 / vpnv6 routes are evaluated again after the change:\n" +
 	"routes no VRF imports any more are removed from the data plane.\n" +
 	"When no binding declares an RT under the family any more, the family is\n" +
@@ -161,9 +162,10 @@ func vrfBgpListCommand() *cli.Command {
 
 func vrfBgpUpdateCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "update",
-		Usage: "Atomically replace a VRF binding (omitted flags preserve prior values)",
-		Flags: vrfBgpBindFlags(true),
+		Name:        "update",
+		Usage:       "Atomically replace a VRF binding (omitted flags preserve prior values)",
+		Description: vpnImportRemovalNote,
+		Flags:       vrfBgpBindFlags(true),
 		Action: func(c *cli.Context) error {
 			b, err := buildBindingFromFlags(c)
 			if err != nil {
@@ -331,8 +333,9 @@ func vrfBgpRTCommand() *cli.Command {
 				},
 			},
 			{
-				Name:  "batch",
-				Usage: "Apply a sequence of RT add/remove ops atomically (rollback on failure)",
+				Name:        "batch",
+				Usage:       "Apply a sequence of RT add/remove ops atomically (rollback on failure)",
+				Description: vpnImportRemovalNote,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "vrf", Required: true},
 					&cli.StringFlag{Name: "from-file", Required: true, Usage: "YAML/JSON file listing ops (see docs/dev/cli_vrf_bgp.md)"},

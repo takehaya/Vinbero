@@ -253,11 +253,14 @@ func (d *vpnDest) members() []*vpnPath {
 // be resolved, so this turns the two windows where that happens -- a
 // reconcile mid-update, and the gap after a restart sweeps the old groups
 // -- into single-path forwarding instead of a drop.
-func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
+//
+// It reports false when a data-plane write failed, which a later reconcile
+// can fix; a group waiting for the source locator, or one whose entries
+// cannot be built at all, reports true.
+func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	ms := d.members()
 	if len(ms) == 0 {
-		a.retireVPNGroup(dk, d)
-		return
+		return a.retireVPNGroup(dk, d)
 	}
 	// One source for the whole write, so the fingerprint records the
 	// source the entries actually carry.
@@ -266,18 +269,21 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 		// Without the source locator nothing can be written. An installed
 		// group keeps forwarding with the source it has (deleting the
 		// locator logs that once); one never written waits, logged once, and
-		// ReconcileSourceLocator writes both when the locator is back.
+		// ReconcileTracked writes both when the locator is back.
 		if d.installed == nil && !d.awaitingSource {
 			d.awaitingSource = true
 			a.logger.Warn("VPN prefix not installed until the source locator is registered",
 				zap.String("prefix", dk.prefix), zap.Error(err))
 		}
-		return
+		return true
 	}
 	d.awaitingSource = false
 	fingerprint := groupFingerprint(ms, src)
-	if slices.Equal(fingerprint, d.installed) {
-		return
+	// Unchanged only if the prober also still holds the group: a failed
+	// write or an SR Policy change it could not follow unregisters it, and
+	// only a rewrite registers it again.
+	if slices.Equal(fingerprint, d.installed) && d.probed {
+		return true
 	}
 
 	// Resolve each member's steering id before building anything: the id is
@@ -289,7 +295,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 		if err != nil {
 			a.logger.Error("build ECMP member",
 				zap.String("prefix", dk.prefix), zap.String("sid", m.sid), zap.Error(err))
-			return
+			return true
 		}
 		if m.steer != nil {
 			entry.PolicyId = a.srPolicy.idOf(m.steer.color, m.steer.endpoint)
@@ -310,7 +316,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 		// and returns the group to fail-open until a retry rebuilds it.
 		a.prober.Unregister(d.groupID)
 		d.probed = false
-		return
+		return false
 	}
 	// Registered immediately after the group write: PutEcmpGroup resets the
 	// liveness bitmap (bit positions refer to the new member set), and this
@@ -330,7 +336,7 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 	if err != nil {
 		a.logger.Error("build ECMP trigger",
 			zap.String("prefix", dk.prefix), zap.Error(err))
-		return
+		return true
 	}
 	if ms[0].steer != nil {
 		trigger.PolicyId = a.srPolicy.idOf(ms[0].steer.color, ms[0].steer.endpoint)
@@ -339,12 +345,13 @@ func (a *Applier) reconcileVPNGroup(dk vpnDestKey, d *vpnDest) {
 	if err := a.createTrigger(dk.family, dk.prefix, trigger); err != nil {
 		a.logger.Error("install ECMP trigger",
 			zap.String("prefix", dk.prefix), zap.Error(err))
-		return
+		return false
 	}
 	d.installed = fingerprint
 	a.logger.Info("VPN prefix programmed",
 		zap.String("prefix", dk.prefix), zap.Int("paths", len(ms)),
 		zap.Uint32("group_id", d.groupID))
+	return true
 }
 
 // groupFingerprint is what reconcileVPNGroup records as installed: the
@@ -356,32 +363,48 @@ func groupFingerprint(ms []*vpnPath, src [16]byte) []string {
 	return append(memberFingerprint(ms), "src="+netip.AddrFrom16(src).String())
 }
 
-// ReconcileSourceLocator writes what the applier tracks again after the
-// source locator is registered. A VPN prefix or MUP session received while
-// it was missing is tracked but could not be written, and nothing else
-// would deliver it again; one written earlier takes the locator's new prefix
-// if it changed. Unchanged entries are left alone. Safe to call from RPC
-// goroutines.
-func (a *Applier) ReconcileSourceLocator() {
+// ReconcileTracked writes again every VPN prefix and MUP session the
+// applier tracks whose data plane does not match it, and leaves the others
+// alone. A route received while the source locator was missing is tracked
+// but not written, and nothing else would deliver it again; one written
+// earlier takes the locator's new prefix if it changed; a write that failed
+// is retried. It returns an error when some write still failed, so the
+// caller can try again later. Without a source locator it does nothing:
+// registering the locator calls it again. Safe to call from RPC goroutines.
+func (a *Applier) ReconcileTracked() error {
+	if _, err := a.encapSource(); err != nil {
+		return nil
+	}
+	var vpnFailed, mupFailed int
 	a.vpnMu.Lock()
 	for dk, d := range a.vpnGroups.dests {
-		a.reconcileVPNGroup(dk, d)
+		if !a.reconcileVPNGroup(dk, d) {
+			vpnFailed++
+		}
 	}
 	a.vpnMu.Unlock()
 
 	a.mupMu.Lock()
-	defer a.mupMu.Unlock()
 	for k := range a.mupT1ST {
-		a.reconcileMUPT1ST(k)
+		if !a.reconcileMUPT1ST(k) {
+			mupFailed++
+		}
 	}
 	for k := range a.mupT2ST {
-		a.reconcileMUPT2ST(k)
+		if !a.reconcileMUPT2ST(k) {
+			mupFailed++
+		}
 	}
+	a.mupMu.Unlock()
+	if vpnFailed+mupFailed > 0 {
+		return fmt.Errorf("data-plane writes failed for %d VPN prefixes and %d MUP sessions", vpnFailed, mupFailed)
+	}
+	return nil
 }
 
 // retireVPNGroup tears down a destination whose last path went away and
-// returns its group id for reuse.
-func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
+// returns its group id for reuse. It reports false when a delete failed.
+func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) bool {
 	owner := a.vpnGroups.groupOwner()
 	// A failed retirement can remove the trigger or part of the group. An
 	// unchanged re-advertisement must rebuild both instead of taking the
@@ -393,7 +416,7 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 		// The old trigger still may reference this ID. Keep the group and
 		// its tracking until a later withdrawal or replacement can retry;
 		// reusing its ID for another prefix would redirect the old traffic.
-		return
+		return false
 	}
 	// The trigger goes first: while the group still exists a stale trigger
 	// forwards correctly, whereas deleting the group first would leave the
@@ -403,13 +426,14 @@ func (a *Applier) retireVPNGroup(dk vpnDestKey, d *vpnDest) {
 	if err := a.vpnGroups.ecmp.DeleteEcmpGroup(d.groupID, owner); err != nil {
 		a.logger.Error("delete ECMP group",
 			zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID), zap.Error(err))
-		return
+		return false
 	}
 	a.prober.Unregister(d.groupID)
 	delete(a.vpnGroups.dests, dk)
 	a.vpnGroups.freeIDs = append(a.vpnGroups.freeIDs, d.groupID)
 	a.logger.Info("VPN prefix withdrawn",
 		zap.String("prefix", dk.prefix), zap.Uint32("group_id", d.groupID))
+	return true
 }
 
 // clearLegacyVPNHeadend removes a trigger left by the pre-aggregation

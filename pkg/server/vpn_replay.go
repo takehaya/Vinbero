@@ -76,14 +76,14 @@ func (r *vpnReplayer) run() {
 		switch {
 		case err == nil:
 			delay = r.retryMin
-			r.logger.Info("replayed VPN loc-rib",
+			r.logger.Info("replayed loc-rib",
 				zap.Any("families", families), zap.Duration("took", time.Since(start)))
 		case errors.Is(err, bgp.ErrSessionNotStarted):
 			// Routes received after the session starts see the binding,
 			// so there is nothing to rescue.
 			delay = r.retryMin
 		default:
-			r.logger.Warn("VPN loc-rib replay failed; retrying",
+			r.logger.Warn("loc-rib replay failed; retrying",
 				zap.Any("families", families), zap.Duration("retry_in", delay), zap.Error(err))
 			r.requeue(families)
 			time.Sleep(delay)
