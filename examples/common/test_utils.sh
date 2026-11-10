@@ -195,23 +195,64 @@ s.send(b"\xff" * 6 + mac + b"\x88\xb5" + payload)
 ' "$iface" "$tag"
 }
 
-# bum_capture_start <ns> <iface> <pcap> [tcpdump args...]: background
-# tcpdump; sets CAPTURE_PID. Returns once tcpdump is capturing (or after
-# 5 s), so a frame sent next is not missed.
-bum_capture_start() {
+# capture_start <ns> <iface> <pcap> [tcpdump options...] [filter]:
+# background tcpdump writing <pcap>; sets CAPTURE_PID. Returns once tcpdump
+# prints "listening on", which it does after binding to <iface> and
+# attaching the filter, so a packet sent next is captured. Returns 1 if that
+# has not happened after 5 s. Wait for this instead of sleeping: on a CI
+# runner the first tcpdump of a job has taken over 3 s to get that far.
+capture_start() {
     local ns="$1" ifc="$2" pcap="$3"
     shift 3
+    # Empty the log before starting, so a "listening on" left by an earlier
+    # run cannot end the wait before this tcpdump has opened it.
+    : > "$pcap.log"
     # -Z root: a privilege-dropped tcpdump cannot reopen a pcap it left in
     # sticky /tmp under fs.protected_regular. --immediate-mode: without it
     # a frame can sit in a capture ring block that tcpdump never reads
     # when it is stopped a second later.
-    ip netns exec "$ns" tcpdump -Z root -i "$ifc" --immediate-mode -U -nn -p "$@" -w "$pcap" > /dev/null 2> "$pcap.log" &
+    ip netns exec "$ns" tcpdump -Z root -i "$ifc" --immediate-mode -U -nn -p -w "$pcap" "$@" > /dev/null 2> "$pcap.log" &
     CAPTURE_PID=$!
     local i
     for i in $(seq 50); do
         grep -q "listening on" "$pcap.log" 2> /dev/null && return 0
         sleep 0.1
     done
+    print_error "tcpdump on $ifc in $ns is not listening after 5s"
+    return 1
+}
+
+# capture_stop <pid> [timeout_s]: waits up to timeout_s (default 5) for the
+# capture to end by itself (tcpdump -c reached its count), then stops it.
+capture_stop() {
+    local pid="$1" timeout="${2:-5}" i
+    for i in $(seq $((timeout * 10))); do
+        kill -0 "$pid" 2> /dev/null || break
+        sleep 0.1
+    done
+    kill "$pid" 2> /dev/null || true
+    wait "$pid" 2> /dev/null || true
+}
+
+# capture_count <pcap>: number of packets in <pcap>, 0 if there is none.
+capture_count() {
+    [ -f "$1" ] || { echo 0; return 0; }
+    tcpdump -r "$1" 2> /dev/null | wc -l
+}
+
+# resolve_neigh <ns> <addr>: pings <addr> from <ns> until the kernel holds
+# a resolved neighbour entry for it; returns 1 after 5 tries. bpf_fib_lookup
+# redirects only toward a resolved neighbour, so a test of the XDP redirect
+# path resolves its next hops with this before sending.
+resolve_neigh() {
+    local ns="$1" addr="$2" ping=ping
+    [[ "$addr" == *:* ]] && ping=ping6
+    for _ in $(seq 5); do
+        ip netns exec "$ns" "$ping" -c 1 -W 1 "$addr" > /dev/null 2>&1 || true
+        ip -n "$ns" neigh show to "$addr" | grep -qE 'REACHABLE|STALE|DELAY|PROBE' && return 0
+    done
+    print_error "$ns: neighbour $addr not resolved"
+    return 1
 }
 
 # bum_effective_mode <vinberod log>: the BUM mode that vinberod runs with:

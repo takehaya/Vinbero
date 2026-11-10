@@ -234,7 +234,7 @@ bum_round() {
     )
     for c in "${caps[@]}"; do
         IFS=: read -r ns ifc name <<< "$c"
-        bum_capture_start "$ns" "$ifc" "/tmp/vinbero_p2mp_bum_${tag}_${name}.pcap"
+        capture_start "$ns" "$ifc" "/tmp/vinbero_p2mp_bum_${tag}_${name}.pcap"
         pids+=("$CAPTURE_PID")
     done
     sleep 1
