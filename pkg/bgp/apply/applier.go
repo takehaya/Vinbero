@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -122,6 +123,21 @@ type Applier struct {
 	// ReplayEVPN (VrfBridgeAttach / commitBinding re-pull the loc-rib after
 	// the EVPN import surface widens). Same pattern as mupMu.
 	evpnMu sync.Mutex
+	// onTrackedFailure asks for another ReconcileTracked pass (see
+	// SetTrackedRetry). The receive path and the RPC-driven reconciles call
+	// it when a write of tracked state failed; ReconcileTracked itself
+	// reports its failures by its return value.
+	onTrackedFailure atomic.Pointer[func()]
+	// replaying is set while ReplayAndReconcile delivers its replay. The
+	// tracked pass that follows the replay reports what failed, so those
+	// deliveries do not ask for a retry of their own.
+	replaying atomic.Bool
+	// vpnWriteFailed and mupWriteFailed, guarded by vpnMu and mupMu (and
+	// evpnTable.writeFailed by evpnMu), record that a tracked write failed
+	// while the lock was held. The holder hands them to flushTrackedFailure
+	// before it unlocks.
+	vpnWriteFailed bool
+	mupWriteFailed bool
 	logger *zap.Logger
 }
 
@@ -251,17 +267,82 @@ func (a *Applier) QuietVPNDenials(replay func() error) error {
 	return err
 }
 
+// ReplayScope runs deliver, the delivery of a loc-rib replay, and must call
+// it with live delivery held off (demux.ReplayBuiltinScoped does), so that
+// what fails inside it is the replay's own.
+type ReplayScope func(deliver func() error) error
+
 // ReplayAndReconcile is the loc-rib replay the daemon runs off the RPC
-// path: replay re-delivers the received routes (with VPN denials summarized,
-// see QuietVPNDenials), then ReconcileTracked writes what is still not in
-// the data plane. It returns an error when either step failed, so the caller
-// retries the whole pass.
-func (a *Applier) ReplayAndReconcile(replay func() error) error {
-	err := a.QuietVPNDenials(replay)
-	if terr := a.ReconcileTracked(); terr != nil {
-		return terr
+// path: replay re-delivers the received routes through Apply inside the
+// scope it is handed (with VPN denials summarized, see QuietVPNDenials),
+// then ReconcileTracked writes what is still not in the data plane.
+//
+// The error says what a retry needs. A *TrackedWriteError (from
+// ReconcileTracked) needs only another tracked pass. An
+// *UnwrittenRoutesError needs another replay of its family: an EVPN route
+// is tracked only once it is written, so one whose first write failed in
+// this replay is delivered again by nothing else. Any other error is the
+// replay's own (reading the loc-rib failed) and needs the whole replay.
+func (a *Applier) ReplayAndReconcile(replay func(scope ReplayScope) error) error {
+	unwritten := 0
+	scope := func(deliver func() error) error {
+		a.evpnMu.Lock()
+		a.evpn.replayUnwritten = &unwritten
+		a.evpnMu.Unlock()
+		a.replaying.Store(true)
+		defer func() {
+			a.replaying.Store(false)
+			a.evpnMu.Lock()
+			a.evpn.replayUnwritten = nil
+			a.evpnMu.Unlock()
+		}()
+		return deliver()
 	}
-	return err
+	var errs []error
+	if err := a.QuietVPNDenials(func() error { return replay(scope) }); err != nil {
+		errs = append(errs, err)
+	}
+	if unwritten > 0 {
+		errs = append(errs, &UnwrittenRoutesError{Family: bgp.FamilyEVPN, Routes: unwritten})
+	}
+	if err := a.ReconcileTracked(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// SetTrackedRetry installs what the applier calls to ask for another
+// ReconcileTracked pass after a write of tracked state failed outside that
+// pass: on the live receive path, or in a reconcile an RPC drove. f must
+// not block or call back into the applier. It may be set while routes
+// arrive (the RPC server is set up after the BGP session starts); a failure
+// before then is retried by the next event or pass.
+func (a *Applier) SetTrackedRetry(f func()) { a.onTrackedFailure.Store(&f) }
+
+// flushTrackedFailure hands a failure recorded under one of the applier's
+// locks to the retry, and clears it. The caller holds the lock that guards
+// *failed. Deliveries of a replay do not ask: the tracked pass after the
+// replay reports what is still failing.
+func (a *Applier) flushTrackedFailure(failed *bool) {
+	if !*failed {
+		return
+	}
+	*failed = false
+	if f := a.onTrackedFailure.Load(); f != nil && !a.replaying.Load() {
+		(*f)()
+	}
+}
+
+// vpnFailed and mupFailed record a failed tracked write and return false,
+// for the reconciles to report it with. The caller holds vpnMu / mupMu.
+func (a *Applier) vpnFailed() bool {
+	a.vpnWriteFailed = true
+	return false
+}
+
+func (a *Applier) mupFailed() bool {
+	a.mupWriteFailed = true
+	return false
 }
 
 // removeVPNPath drops one tracked path and reconciles what remains. Shared
@@ -294,6 +375,7 @@ func (a *Applier) removeVPNPath(dk vpnDestKey, pk vpnPathKey, vr *bgp.VPNRoute) 
 func (a *Applier) applyVPN(vr *bgp.VPNRoute, src bgp.PathSource, withdraw bool) {
 	a.vpnMu.Lock()
 	defer a.vpnMu.Unlock()
+	defer a.flushTrackedFailure(&a.vpnWriteFailed)
 	dk := vpnDestKey{family: vr.Family, prefix: vr.Prefix}
 	pk := vpnPathKey{rd: vr.RD, source: src}
 	if withdraw {
@@ -398,24 +480,15 @@ func (a *Applier) applyUnicast(ur *bgp.UnicastRoute, withdraw bool) {
 	a.logger.Info("unicast route installed", zap.String("prefix", ur.Prefix))
 }
 
-// buildHeadendEntry assembles the headend entry that encapsulates
-// matching traffic towards the remote PE's SRv6 service SID. The single
-// segment is the SID itself and the outer destination equals it; parsing
-// the SID once via ParseSegments keeps DstAddr and Segments[0]
-// byte-identical.
+// buildHeadendEntryFrom assembles the headend entry that encapsulates
+// matching traffic towards the remote PE's SRv6 service SID, with src as
+// the outer source. The single segment is the SID itself and the outer
+// destination equals it; parsing the SID once via ParseSegments keeps
+// DstAddr and Segments[0] byte-identical.
 // reduced selects H.Encaps.Red -- for a single NEXT-C-SID service SID
 // the data plane then emits no SRH (RFC 9800 reduced encapsulation).
-func (a *Applier) buildHeadendEntry(sid string, reduced bool) (*bpf.HeadendEntry, error) {
-	src, err := a.encapSource()
-	if err != nil {
-		return nil, err
-	}
-	return buildHeadendEntryFrom(src, sid, reduced)
-}
-
-// buildHeadendEntryFrom is buildHeadendEntry with the encapsulation source
-// already resolved, for a caller that writes several entries and records
-// which source it wrote them with.
+// Callers resolve src (encapSource) once per reconcile and record it with
+// what they wrote, so a moved source locator is seen as a change.
 func buildHeadendEntryFrom(src [16]byte, sid string, reduced bool) (*bpf.HeadendEntry, error) {
 	segments, numSegments, err := bpf.ParseSegments([]string{sid})
 	if err != nil {

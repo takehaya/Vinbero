@@ -43,6 +43,11 @@ type fdbBdOps interface {
 	// the peer under one critical section, so a concurrent writer (the
 	// operator RPC path) cannot land on the same slot.
 	CreateBdPeerAtFreeIndexOwned(bdID uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool, owner bpf.OwnerTag) (uint16, error)
+	// UpdateBdPeersOwned rewrites existing bd_peer entries of one bridge
+	// domain in place (the forward entry and its ESI side entry; not the
+	// reverse map) and rebuilds the BD's BUM flood state once. It returns
+	// one error per update, nil where the update was written.
+	UpdateBdPeersOwned(bdID uint16, updates []bpf.BdPeerUpdate, owner bpf.OwnerTag) []error
 	// FindFreeBdPeerIndex returns the lowest bd_peer index not in use in the
 	// real map, so a BGP-allocated peer never collides with an operator-created
 	// or restart-pinned entry.
@@ -80,6 +85,14 @@ type evpnFdbKey struct {
 type evpnPeerState struct {
 	index uint16
 	refs  int
+	// src is the encapsulation source the bd_peer entry was last written
+	// with, and esi the ESI its side entry was written with, so
+	// reconcileEVPNSource can rewrite the entry in place when the source
+	// locator moves. The reverse-map entry is keyed by the remote PE's
+	// source and holds the index and ESI, none of which the local source
+	// changes, so that rewrite leaves it alone.
+	src [bpf.IPv6AddrLen]byte
+	esi [bpf.ESILen]byte
 }
 
 type evpnFdbState struct {
@@ -115,6 +128,10 @@ type evpnMcastState struct {
 	bdID  uint16
 	index uint16
 	sid   string
+	// src and esi are what the flood bd_peer was written with (see
+	// evpnPeerState.src).
+	src [bpf.IPv6AddrLen]byte
+	esi [bpf.ESILen]byte
 	// pe is the advertising PE (the route's next hop), recorded so an
 	// unusable re-advertisement tears the flood peer down only when it
 	// comes from the same PE.
@@ -167,6 +184,20 @@ type evpnTable struct {
 	// the departed PE. Cleared when the PE re-advertises the per-ES route
 	// or its last indexed MAC drains.
 	esWithdrawn map[esMemberKey]struct{}
+	// esPending holds the segments the next ReconcileTracked looks at again:
+	// a write or teardown for them failed, or they could not be formed for
+	// lack of the source locator. esSrc is the source the aliasing groups
+	// were last reconciled with; only when it changes does that pass visit
+	// every programmed segment.
+	esPending  map[esDestKey]struct{}
+	esSrc      [bpf.IPv6AddrLen]byte
+	esSrcValid bool
+	// writeFailed records that a write of tracked EVPN state (a segment)
+	// failed while evpnMu was held; see Applier.flushTrackedFailure.
+	writeFailed bool
+	// replayUnwritten is set while ReplayAndReconcile delivers a replay, and
+	// counts the routes that delivery could not write (see evpnUnwritten).
+	replayUnwritten *int
 	// Segment group id allocation, in the partition above esGroupIDBase.
 	nextGroupID  uint32
 	freeGroupIDs []uint32
@@ -188,6 +219,7 @@ func newEVPNTable() *evpnTable {
 		esDests:     make(map[esDestKey]*esDest),
 		macContribs: make(map[macDPKey]map[evpnFdbKey]struct{}),
 		esWithdrawn: make(map[esMemberKey]struct{}),
+		esPending:   make(map[esDestKey]struct{}),
 	}
 }
 
@@ -244,6 +276,7 @@ func isUsableSRv6SID(sid string) bool {
 func (a *Applier) applyEVPN(ev bgp.RouteEvent) {
 	a.evpnMu.Lock()
 	defer a.evpnMu.Unlock()
+	defer a.flushTrackedFailure(&a.evpn.writeFailed)
 	a.applyEVPNLocked(ev)
 }
 
@@ -302,6 +335,7 @@ func (a *Applier) applyEVPNEthernetAD(r *bgp.EVPNRoute, withdraw bool) {
 func (a *Applier) ReplayEVPN(snapshot func(bgp.RouteHandler) error) error {
 	a.evpnMu.Lock()
 	defer a.evpnMu.Unlock()
+	defer a.flushTrackedFailure(&a.evpn.writeFailed)
 	n := 0
 	err := snapshot(func(ev bgp.RouteEvent) {
 		// Rib-resident paths always carry IsWithdraw=false; the guard keeps a
@@ -394,7 +428,20 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		a.withdrawEVPNMac(fk, prev)
 	}
 
-	entry, err := a.buildL2HeadendEntry(r.SRv6SID, bdID, true)
+	src, err := a.encapSource()
+	if err != nil {
+		// Without the source locator a MAC behind a PE whose peer is
+		// already written is still installed, with the source the peer
+		// carries; a new peer waits for the locator.
+		st, tracked := a.evpn.peers[pk]
+		if !tracked || st.src == ([bpf.IPv6AddrLen]byte{}) {
+			a.logger.Error("build EVPN headend entry",
+				zap.String("mac", r.MAC), zap.Error(err))
+			return
+		}
+		src = st.src
+	}
+	entry, err := buildL2HeadendEntryFrom(src, r.SRv6SID, bdID, true)
 	if err != nil {
 		a.logger.Error("build EVPN headend entry",
 			zap.String("mac", r.MAC), zap.Error(err))
@@ -406,11 +453,13 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		// The PE already has a peer in this BD: refresh it in place and
 		// bump the reference count.
 		if err := a.fdbBd.CreateBdPeerOwned(bdID, st.index, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
+			a.evpnUnwritten()
 			a.logger.Error("install EVPN bd_peer",
 				zap.Uint16("bd_id", bdID), zap.Error(err))
 			return
 		}
 		st.refs++
+		st.src, st.esi = entry.SrcAddr, r.ESI
 		idx = st.index
 	} else {
 		// Probe-and-create runs inside one critical section: probing here
@@ -418,11 +467,12 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 		// same free slot (both allocate from the same operator range).
 		newIdx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, rsrc, true, bpf.OwnerBGPEVPN(a.localASN))
 		if err != nil {
+			a.evpnUnwritten()
 			a.logger.Error("install EVPN bd_peer",
 				zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID), zap.Error(err))
 			return
 		}
-		a.evpn.peers[pk] = &evpnPeerState{index: newIdx, refs: 1}
+		a.evpn.peers[pk] = &evpnPeerState{index: newIdx, refs: 1, src: entry.SrcAddr, esi: r.ESI}
 		idx = newIdx
 	}
 	// A MAC behind an aliased segment points at the segment's ES peer, so
@@ -436,6 +486,7 @@ func (a *Applier) applyEVPNMacIP(r *bgp.EVPNRoute, withdraw bool) {
 	}
 	fdb := &bpf.FdbEntry{IsRemote: 1, PeerIndex: fdbIdx, BdId: bdID, Esi: r.ESI}
 	if err := a.fdbBd.CreateFdbOwned(bdID, mac, fdb, bpf.OwnerBGPEVPN(a.localASN)); err != nil {
+		a.evpnUnwritten()
 		a.logger.Error("install EVPN FDB", zap.String("mac", r.MAC), zap.Error(err))
 		if rIdx, gone := a.evpn.releaseIndex(pk); gone {
 			if existed, derr := a.fdbBd.DeleteBdPeerOwned(bdID, rIdx, bpf.OwnerBGPEVPN(a.localASN)); derr != nil && existed {
@@ -636,6 +687,7 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 			return
 		}
 		if !a.withdrawEVPNMcast(mk, prev) {
+			a.evpnUnwritten()
 			return
 		}
 	}
@@ -655,11 +707,12 @@ func (a *Applier) applyEVPNInclusiveMulticast(r *bgp.EVPNRoute, withdraw bool) {
 	var noRemoteSrc [bpf.IPv6AddrLen]byte
 	idx, err := a.fdbBd.CreateBdPeerAtFreeIndexOwned(bdID, entry, r.ESI, noRemoteSrc, false, bpf.OwnerBGPEVPN(a.localASN))
 	if err != nil {
+		a.evpnUnwritten()
 		a.logger.Error("install EVPN BUM bd_peer",
 			zap.Uint16("bd_id", bdID), zap.Error(err))
 		return
 	}
-	a.evpn.mcast[mk] = evpnMcastState{bdID: bdID, index: idx, sid: r.SRv6SID, pe: r.NextHop}
+	a.evpn.mcast[mk] = evpnMcastState{bdID: bdID, index: idx, sid: r.SRv6SID, src: entry.SrcAddr, esi: r.ESI, pe: r.NextHop}
 	a.logger.Info("EVPN inclusive multicast (BUM) peer installed",
 		zap.String("rd", r.RD), zap.Uint16("bd_id", bdID), zap.String("sid", r.SRv6SID))
 }
@@ -763,6 +816,12 @@ func (a *Applier) buildL2HeadendEntry(sid string, bdID uint16, floodExclude bool
 	if err != nil {
 		return nil, err
 	}
+	return buildL2HeadendEntryFrom(src, sid, bdID, floodExclude)
+}
+
+// buildL2HeadendEntryFrom is buildL2HeadendEntry with the encapsulation
+// source already resolved (see buildHeadendEntryFrom).
+func buildL2HeadendEntryFrom(src [bpf.IPv6AddrLen]byte, sid string, bdID uint16, floodExclude bool) (*bpf.HeadendEntry, error) {
 	segments, numSegments, err := bpf.ParseSegments([]string{sid})
 	if err != nil {
 		return nil, fmt.Errorf("parse L2 service SID %q: %w", sid, err)
@@ -780,4 +839,123 @@ func (a *Applier) buildL2HeadendEntry(sid string, bdID uint16, floodExclude bool
 		e.FloodExclude = 1
 	}
 	return e, nil
+}
+
+// evpnUnwritten records that a received EVPN route could not be written.
+// Such a route is not tracked, so only another delivery of it can write it.
+// Inside a replay (Applier.ReplayAndReconcile) it is counted for that replay
+// to report; on the live path there is nothing to retry from. Only failures
+// another delivery of the same route can fix are recorded: an install, or
+// the teardown a replacing route has to do first. Caller holds evpnMu.
+func (a *Applier) evpnUnwritten() {
+	if a.evpn.replayUnwritten != nil {
+		*a.evpn.replayUnwritten++
+	}
+}
+
+// reconcileEVPNSource rewrites the EVPN entries written with an
+// encapsulation source other than the current one: the per-PE unicast
+// peers (RT2), the BUM flood peers (RT3) and the aliasing groups. The
+// receive path's "unchanged" checks compare routes, not the source, so a
+// source locator registered again under another prefix reaches these
+// entries only through here. Each peer is rewritten in place at its index,
+// so FDB entries, reference counts and flood slots stay as they are, the
+// reverse-map entry is not written (nothing in it depends on the local
+// source), and an entry already carrying the source is not written. The
+// segments are visited when the source changed, and those esPending holds
+// otherwise, which also retries their failed writes and teardowns without
+// the source locator. It returns how many entries are still failing; the
+// next call retries them (a peer keeps the source it has meanwhile, and a
+// segment whose rewrite failed is on per-PE forwarding). Caller holds
+// evpnMu.
+func (a *Applier) reconcileEVPNSource() int {
+	failed := 0
+	src, err := a.encapSource()
+	if err == nil {
+		failed += a.rewriteEVPNPeers(src)
+	}
+	keys := make(map[esDestKey]struct{}, len(a.evpn.esPending))
+	if err == nil && (!a.evpn.esSrcValid || a.evpn.esSrc != src) {
+		for dk := range a.evpn.esDests {
+			keys[dk] = struct{}{}
+		}
+		a.evpn.esSrc, a.evpn.esSrcValid = src, true
+	}
+	for dk := range a.evpn.esPending {
+		keys[dk] = struct{}{}
+	}
+	for dk := range keys {
+		if !a.reconcileESKey(dk) {
+			failed++
+		}
+	}
+	return failed
+}
+
+// rewriteEVPNPeers rewrites, one bridge domain at a time, the unicast and
+// flood peers whose entry carries a source other than src, and returns how
+// many could not be rewritten. Caller holds evpnMu.
+func (a *Applier) rewriteEVPNPeers(src [bpf.IPv6AddrLen]byte) int {
+	type unicast struct {
+		key evpnPeerKey
+		st  *evpnPeerState
+	}
+	type flood struct {
+		key evpnMcastKey
+		st  evpnMcastState
+	}
+	byBD := map[uint16][]bpf.BdPeerUpdate{}
+	unicastByBD := map[uint16][]unicast{}
+	floodByBD := map[uint16][]flood{}
+	failed := 0
+	for pk, st := range a.evpn.peers {
+		// refs 0 is a slot kept after a failed delete, not a live peer.
+		if st.refs == 0 || st.src == src {
+			continue
+		}
+		entry, err := buildL2HeadendEntryFrom(src, pk.sid, pk.bdID, true)
+		if err != nil {
+			a.logger.Error("build EVPN bd_peer for the new encap source",
+				zap.Uint16("bd_id", pk.bdID), zap.String("sid", pk.sid), zap.Error(err))
+			continue
+		}
+		byBD[pk.bdID] = append(byBD[pk.bdID], bpf.BdPeerUpdate{Index: st.index, Entry: entry, ESI: st.esi})
+		unicastByBD[pk.bdID] = append(unicastByBD[pk.bdID], unicast{pk, st})
+	}
+	for mk, st := range a.evpn.mcast {
+		if st.src == src {
+			continue
+		}
+		entry, err := buildL2HeadendEntryFrom(src, st.sid, st.bdID, false)
+		if err != nil {
+			a.logger.Error("build EVPN BUM bd_peer for the new encap source",
+				zap.Uint16("bd_id", st.bdID), zap.String("sid", st.sid), zap.Error(err))
+			continue
+		}
+		byBD[st.bdID] = append(byBD[st.bdID], bpf.BdPeerUpdate{Index: st.index, Entry: entry, ESI: st.esi})
+		floodByBD[st.bdID] = append(floodByBD[st.bdID], flood{mk, st})
+	}
+	owner := bpf.OwnerBGPEVPN(a.localASN)
+	for bdID, updates := range byBD {
+		// One call per bridge domain: the BD's BUM flood state is rebuilt
+		// once for all of its peers.
+		errs := a.fdbBd.UpdateBdPeersOwned(bdID, updates, owner)
+		n := len(unicastByBD[bdID])
+		for i, err := range errs {
+			if err != nil {
+				a.logger.Error("rewrite EVPN bd_peer with the new encap source",
+					zap.Uint16("bd_id", bdID), zap.Uint16("index", updates[i].Index), zap.Error(err))
+				failed++
+				continue
+			}
+			if i < n {
+				unicastByBD[bdID][i].st.src = src
+				continue
+			}
+			f := floodByBD[bdID][i-n]
+			f.st.src = src
+			a.evpn.mcast[f.key] = f.st
+		}
+	}
+	return failed
 }

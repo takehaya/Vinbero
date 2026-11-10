@@ -12,6 +12,7 @@ import (
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bgp"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"github.com/takehaya/vinbero/pkg/locator"
 	"github.com/takehaya/vinbero/pkg/vrf"
 	"github.com/takehaya/vinbero/pkg/vrfbgp"
 )
@@ -20,6 +21,12 @@ import (
 // 100 and whose binding imports RT "65000:100" under the evpn family, the
 // setup an RT2 needs to install (the bd resolves from the facet).
 func evpnApplier(t *testing.T) (*Applier, *fakeHeadend) {
+	t.Helper()
+	return evpnApplierOn(t, testLocatorManager(t))
+}
+
+// evpnApplierOn is evpnApplier over a locator manager the test controls.
+func evpnApplierOn(t *testing.T, locs *locator.Manager) (*Applier, *fakeHeadend) {
 	t.Helper()
 	fh := newFakeHeadend()
 	vm := vrfbgp.NewManager()
@@ -31,7 +38,7 @@ func evpnApplier(t *testing.T) (*Applier, *fakeHeadend) {
 	}}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	a := NewApplier(fh, testLocatorManager(t), vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
+	a := NewApplier(fh, locs, vm, &fakeFib{}, "LOC1", 65000, zap.NewNop())
 	return a, fh
 }
 

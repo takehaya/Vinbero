@@ -159,11 +159,20 @@ func (s *Server) Setup() {
 	// facet<->binding cross-checks are check-then-act across two managers.
 	vrfMu := &sync.Mutex{}
 	vrfBgpServer := NewVrfBgpServer(s.vrfBgpMgr, s.vrfExporter, s.evpnCoord, s.mupSrc, s.evpnReplay, vrfMu)
-	// One replayer, and so one retry, serves both triggers: binding changes
-	// and the source locator registration.
+	// One replayer, and so one retry, serves every trigger: binding changes,
+	// the source locator registration, and tracked writes the applier saw
+	// fail outside a pass of its own.
 	var requestReplay func([]bgp.Family)
 	if s.vpnReplay != nil {
-		requestReplay = newVPNReplayer(s.vpnReplay, s.logger).request
+		var tracked func() error
+		if s.tracked != nil {
+			tracked = s.tracked.ReconcileTracked
+		}
+		replayer := newVPNReplayer(s.vpnReplay, tracked, s.logger)
+		requestReplay = replayer.request
+		if r, ok := s.tracked.(trackedRetrySetter); ok {
+			r.SetTrackedRetry(replayer.requestTrackedAfterFailure)
+		}
 		// The manager reports every binding mutation that changed what the
 		// import-RT filter accepts, whichever path made it.
 		s.vrfBgpMgr.SetImportFilterHook(vpnImportFilterHook(requestReplay, s.logger))

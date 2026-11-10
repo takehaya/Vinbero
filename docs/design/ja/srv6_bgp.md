@@ -90,12 +90,23 @@ XDP の data plane は、受信が headend エントリを引いて H.Encaps し
 受信経路の取り込み可否は、届いた時点で 1 度だけ判定します。gobgp の watch は同じ経路を送り直さないので、判定の材料が後から変わったときは、applier が gobgp の loc-rib にある受信済みの VPN 経路を受け取り直して評価し直します。結果は新しく届いた場合と同じになるので、取り込みと撤去の両方が起きます。
 
 - binding の変更: vpnv4 / vpnv6 の RT を持つ binding が 1 つも無い family は、受信した経路をすべて取り込みます (default-allow)。binding の作成、更新、削除、RT や family の追加と削除でその family の import 判定が変わると、評価し直します。import RT が増えれば、それまで落としていた経路が入ります。RT や binding が減れば、どの VRF も import しなくなった経路が data plane から消えます。最初の binding で default-allow は終わります。別の VRF が既に import している RT を足すなど、判定が変わらない変更では評価し直しません。
-- source locator の登録: headend エントリの送信元は `bgp.global.source_locator` の locator から取るので、この locator が無い間に届いた経路は、取り込んでも書き込めません (L3VPN では prefix ごとに 1 回 warning を出します)。`vbctl locator create` でこの locator を登録すると、その RPC の中で書き込みます。対象は追跡している L3VPN の経路と MUP のセッション経路 (T1ST/T2ST) で、EVPN は続けて loc-rib を受け取り直して書き込みます。書き込みに失敗した経路があれば log に残し、locator の登録は成功させたうえで、EVPN の受け取り直しと一緒に成功するまで再試行します。別の prefix で登録し直した場合は、書き込み済みの L3VPN の経路と、送信元を locator から取る MUP T1ST の経路の送信元が新しい prefix に置き換わります。`mup_gtp4_source_prefix` で VRF ごとの送信元を埋め込む GTP4 の T1ST は、その送信元のままです。EVPN と MUP T2ST の書き込み済みエントリは、経路が変わるまで元の送信元のままです。
-- source locator の削除: 書き込み済みのエントリは、持っている送信元のまま転送を続けます。削除時に warning を 1 回出し、それ以降に届いた経路は locator を登録し直すまで書き込みません。
+- source locator の登録: headend エントリの送信元は `bgp.global.source_locator` の locator から取るので、この locator が無い間に届いた経路は、取り込んでも書き込めません (L3VPN では prefix ごと、MUP ではセッションごとに 1 回 warning を出します)。`vbctl locator create` でこの locator を登録すると、その RPC の中で書き込みます。対象は追跡している L3VPN の経路と MUP のセッション経路 (T1ST/T2ST) で、EVPN は続けて loc-rib を受け取り直して書き込みます。書き込みに失敗した経路があれば log に残し、locator の登録は成功させたうえで、後述の再試行に任せます。
+- source locator を別の prefix で登録し直したとき: 書き込み済みのエントリも、登録の RPC の中で送信元を新しい prefix に書き換えます。peer が経路を送り直す必要はありません。対象は、L3VPN の ECMP group と trigger、EVPN の RT2 (unicast) と RT3 (BUM) の bd_peer、EVPN aliasing の group と ES peer、MUP の T1ST と T2ST です。EVPN の bd_peer は同じ index のまま書き換えるので、FDB のエントリと BUM の flood の slot は変わりません。MUP T2ST の gate は送信元を持たないので書き換えません。ECMP group を書き換えると liveness の bitmap は初期化されますが、prober は登録し直す時点の down の判定を引き継ぎます。書き換えに失敗したエントリは、後述の再試行で書き直します (その間、bd_peer は元の送信元のまま、aliasing の segment は PE ごとの転送に戻ります)。bd_peer の書き換えは bridge domain ごとにまとめ、BUM の flood の状態はその BD について 1 回だけ作り直します。bd_peer_reverse_map のエントリは相手 PE の送信元を鍵に index と ESI を持つだけで、自分の送信元に依らないので書き換えません。同じ prefix で登録し直した場合は、何も書き換えません。`mup_gtp4_source_prefix` で VRF ごとの送信元を埋め込む GTP4 の T1ST は、locator を使わないので、その送信元のままです。plugin が src_addr を省略して宣言した headend エントリは、宣言したときの送信元のままで、plugin が宣言し直すまで変わりません。
+- source locator の削除: 書き込み済みのエントリは、持っている送信元のまま転送を続けます。削除時に warning を 1 回出します。新しいエントリ (届いた経路の最初の書き込み) は、locator を登録し直すまで書き込みません。書き込み済みのエントリへの変更は待たせず、そのエントリが持っている送信元で書き込みます。ECMP や aliasing の group から抜けた member はすぐに外れ、MUP の SID の解決し直しや、書き込み済みの PE の背後で新しく学習した MAC もそのまま反映します。送信元が記録されていない aliasing の segment は、PE ごとの転送に戻します。経路が無くなったエントリの撤去も、locator が無くても行います。
 
 > **binding を減らすときの注意**: `vbctl vrf-bgp unbind`、`vrf-bgp rt remove`、`vrf-bgp family remove` などで、vpnv4 / vpnv6 の RT を持つ binding が 1 つも無くなると、その family は default-allow に戻り、受信済みの経路がすべて data plane に入ります。binding が無いノードを起動したときと同じ結果です。このとき vinberod は warning を 1 回出します。ある tenant の経路を外したいだけなら、最後の binding を消す代わりに、残す側の import RT を持つ binding を置いてください。
 
-binding の変更による評価し直しは、RPC とは別の goroutine で非同期に行い、RPC はその完了を待ちません。binding の変更は、どの経路で行われても binding の管理側が 1 回ずつ検出するので、後の変更で元に戻った変更も評価し直されます。実行中に届いた要求は次の 1 回にまとめます。失敗した場合は log に残し、1 秒から 30 秒の間隔で成功するまで再試行します。評価し直しで落とした経路は、経路ごとではなく件数で 1 行だけ log に出します。
+binding の変更による評価し直しは、RPC とは別の goroutine で非同期に行い、RPC はその完了を待ちません。binding の変更は、どの経路で行われても binding の管理側が 1 回ずつ検出するので、後の変更で元に戻った変更も評価し直されます。実行中に届いた要求は次の 1 回にまとめます。評価し直しで落とした経路は、経路ごとではなく件数で 1 行だけ log に出します。
+
+#### 書き込みに失敗したときの再試行
+
+受け取り直し、locator の登録、受信経路の処理で data plane への書き込みや撤去に失敗した場合は、同じ goroutine が再試行します。再試行の中身は、失敗に必要なものだけです。
+
+- applier が追跡している状態 (L3VPN の ECMP group、MUP のセッション、EVPN の bd_peer の書き換えと aliasing の segment) の書き込みや撤去の失敗は、追跡している状態を書き直す処理だけをもう一度行います。loc-rib は読み直しません。受信経路の処理で起きた失敗も、ここに入ります。
+- EVPN の経路は書き込めるまで追跡しないので、受け取り直しの中で最初の書き込みに失敗した EVPN の経路は、EVPN の loc-rib の受け取り直しをもう一度行います。数えるのは、その受け取り直しが配った経路の失敗だけです。受け取り直しの間は受信経路の配送を止めているので、受信経路の失敗や別の処理の失敗は混ざらず、VPN だけの受け取り直しが EVPN の失敗で繰り返されることもありません。受け取り直しの外で最初の書き込みに失敗した EVPN の経路は、再試行しません。
+- loc-rib を読めなかった場合は、その受け取り直し全体をもう一度行います。
+
+再試行の間隔は 1 秒から倍々に延ばし、最大 30 秒です。再試行は 1 回の失敗につき 6 回まで (1、2、4、8、16、30 秒後で、合わせて約 1 分) で、それでも失敗する場合は、まだ失敗している書き込みの数を error で 1 行だけ log に出して止めます。flood の list が上限に達した bridge domain、別の owner が持つエントリ、満杯の map のように、待っても直らない失敗で loc-rib を読み続けないためです。新しい要求 (binding の変更、locator の登録) は、再試行の待ち時間を待たずにすぐ実行し、待っていた再試行もそこに含め、回数と間隔を最初から数え直します。受信経路の処理で書き込みに失敗したことによる要求は、数え直しません。再試行が続いている間はその次の再試行に含め、待ち時間と回数はそのまま数えます。再試行が止まった後は 5 分間、失敗による要求を受け付けません。失敗し続ける書き込みが、受信経路の更新のたびに再試行をやり直すことがないようにするためです。5 分たつか、binding の変更や locator の登録があれば、また再試行します。
 
 ### service SID の運び方 (transposition)
 

@@ -79,9 +79,10 @@ type mupSessionState struct {
 	route        bgp.MUPRoute
 	installedSID string
 	// installedSrc is the outer IPv6 source the installed entry carries. It can
-	// change while installedSID stays the same (the GTP4 source embed follows
-	// the T2ST anchor, see mupGTP4DownlinkSrc), so the T1ST reconcile
-	// short-circuit compares both.
+	// change while installedSID stays the same (the source locator registered
+	// again under another prefix, or for T1ST the GTP4 source embed following
+	// the T2ST anchor, see mupGTP4DownlinkSrc), so both reconciles'
+	// short-circuits compare both.
 	installedSrc [16]byte
 	// fam is the route's MUP family (mup_ipv4 / mup_ipv6), kept so the
 	// binding-mutation reconcile can re-resolve the VRF without the original
@@ -94,6 +95,15 @@ type mupSessionState struct {
 	// hoc. T2ST only.
 	instance    uint32
 	deferLogged bool
+	// locatorSrc is the source-locator address the session was last written
+	// with (zero if never). While the locator is missing a changed SID is
+	// written with it. It differs from installedSrc when the GTP4 embed
+	// supplied the source.
+	locatorSrc [16]byte
+	// awaitingSource records that the session could not be written for lack
+	// of the source locator and that this was logged, so the reconciles that
+	// every discovery-route event runs do not log it again.
+	awaitingSource bool
 }
 
 // mupUpsertSession returns the session state for key, creating it when absent.
@@ -167,6 +177,7 @@ func rtsIntersect(a, b []string) bool {
 func (a *Applier) applyMUP(fam bgp.Family, r *bgp.MUPRoute, withdraw bool) {
 	a.mupMu.Lock()
 	defer a.mupMu.Unlock()
+	defer a.flushTrackedFailure(&a.mupWriteFailed)
 	a.retryMUPOwnedCleanup()
 	sessionRoute := r.Type == bgp.MUPRouteTypeT1ST || r.Type == bgp.MUPRouteTypeT2ST
 	if !withdraw && sessionRoute && !a.mupDefaultAllow && !a.vrfBindings.EmptyForFamily(fam) {
@@ -446,17 +457,23 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) bool {
 		return true
 	}
 
-	entry, err := a.buildHeadendEntry(composed, false)
+	// The GTP4 embed derives the source from the binding, so only the plain
+	// downlink needs the source locator.
+	src, embedded := a.mupGTP4DownlinkSrc(r, endpoint)
+	if !embedded {
+		var ok bool
+		if src, ok = a.mupEncapSource(st, "ue_prefix", r.Prefix); !ok {
+			return true
+		}
+	}
+	if st.installedSID == composed && st.installedSrc == src {
+		return true // already programmed with this SID and source
+	}
+	entry, err := buildHeadendEntryFrom(src, composed, false)
 	if err != nil {
 		a.logger.Error("build MUP T1ST headend entry",
 			zap.String("ue_prefix", r.Prefix), zap.Error(err))
 		return true
-	}
-	if src, ok := a.mupGTP4DownlinkSrc(r, endpoint); ok {
-		entry.SrcAddr = src
-	}
-	if st.installedSID == composed && st.installedSrc == entry.SrcAddr {
-		return true // already programmed with this SID and source
 	}
 
 	createHeadend, _ := a.mupT1STHeadendFns(uePrefix)
@@ -464,10 +481,13 @@ func (a *Applier) reconcileMUPT1ST(key mupT1STKey) bool {
 	if err := createHeadend(r.Prefix, entry, owner); err != nil {
 		a.logger.Error("install MUP T1ST headend",
 			zap.String("ue_prefix", r.Prefix), zap.Error(err))
-		return false
+		return a.mupFailed()
 	}
 	st.installedSID = composed
 	st.installedSrc = entry.SrcAddr
+	if !embedded {
+		st.locatorSrc = src
+	}
 	a.logger.Info("MUP T1ST downlink installed",
 		zap.String("ue_prefix", r.Prefix), zap.String("endpoint", r.Endpoint),
 		zap.Uint32("teid", r.TEID), zap.Uint8("qfi", r.QFI), zap.String("sid", composed),
@@ -577,6 +597,28 @@ func (a *Applier) uninstallMUPT1ST(st *mupSessionState) {
 	}
 	st.installedSID = ""
 	st.installedSrc = [16]byte{}
+}
+
+// mupEncapSource resolves the encapsulation source for one session
+// reconcile. Without the source locator, a session written earlier with the
+// locator's address keeps it, so a changed SID is still written (deleting
+// the locator logs that once); one never written is logged once and waits
+// for ReconcileTracked. key / value name the session in that log.
+func (a *Applier) mupEncapSource(st *mupSessionState, key, value string) ([16]byte, bool) {
+	src, err := a.encapSource()
+	if err != nil {
+		if st.installedSID != "" && st.locatorSrc != ([16]byte{}) {
+			return st.locatorSrc, true
+		}
+		if st.installedSID == "" && !st.awaitingSource {
+			st.awaitingSource = true
+			a.logger.Warn("MUP session not installed until the source locator is registered",
+				zap.String(key, value), zap.Error(err))
+		}
+		return src, false
+	}
+	st.awaitingSource = false
+	return src, true
 }
 
 // mupT1STHeadendFns selects the headend map writers for the UE prefix's family.
@@ -701,7 +743,8 @@ func (a *Applier) rekeyMUPT2ST(st *mupSessionState, inst uint32) {
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated at apply time
 	dp := a.mupT2STDataPlane(endpoint, r.Endpoint)
-	entry, err := a.buildHeadendEntry(st.installedSID, false)
+	// The entry moves as it is written; a new source is the reconcile's job.
+	entry, err := buildHeadendEntryFrom(st.installedSrc, st.installedSID, false)
 	if err != nil {
 		a.logger.Error("re-key MUP T2ST uplink entry (keeping old instance)",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
@@ -799,6 +842,7 @@ func (a *Applier) reconcileMUPT1STForGTP4Src(rd string) {
 func (a *Applier) ReconcileMUPGTP4SrcForRD(rd string) {
 	a.mupMu.Lock()
 	defer a.mupMu.Unlock()
+	defer a.flushTrackedFailure(&a.mupWriteFailed)
 	for k := range a.mupT1ST {
 		if k.rd == rd {
 			a.reconcileMUPT1ST(k)
@@ -822,7 +866,7 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 			delete(a.mupT2ST, key)
 			return true
 		}
-		return false
+		return a.mupFailed()
 	}
 	r := &st.route
 	endpoint, _ := netip.ParseAddr(r.Endpoint) // validated in applyMUPT2ST
@@ -831,8 +875,11 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 
 	sid := a.resolveDirectSID(r)
 	if sid == "" {
-		if st.installedSID != "" || st.gateHeld {
-			a.uninstallMUPT2ST(st)
+		if (st.installedSID != "" || st.gateHeld) && !a.uninstallMUPT2ST(st) {
+			// The uplink entry or the gate is still in the data plane, and
+			// forwards towards the SID that no longer resolves. The state is
+			// kept, so the next reconcile retries the removal.
+			return a.mupFailed()
 		}
 		// Log the deferral only on the transition into it (see reconcileMUPT1ST).
 		if !st.deferLogged {
@@ -843,14 +890,19 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 		return true
 	}
 	st.deferLogged = false
-	if st.installedSID == sid {
-		return true // already programmed with this direct SID
+	src, ok := a.mupEncapSource(st, "endpoint", r.Endpoint)
+	if !ok {
+		// Waiting for the source locator is not a failed write.
+		return true
+	}
+	if st.installedSID == sid && st.installedSrc == src {
+		return true // already programmed with this direct SID and source
 	}
 
 	// The direct SID is a plain End.DT4/DT6 target: H.Encaps toward it with no
 	// Args.Mob.Session patch (MupArgsOffsetNone), so the TEID stays only the
 	// lookup key.
-	entry, err := a.buildHeadendEntry(sid, false)
+	entry, err := buildHeadendEntryFrom(src, sid, false)
 	if err != nil {
 		a.logger.Error("build MUP T2ST uplink entry",
 			zap.String("endpoint", r.Endpoint), zap.Error(err))
@@ -866,7 +918,7 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 			if err := a.acquireMUPGate(dp.gatePrefix, dp.gateMode, gateOwner, dp.createGate); err != nil {
 				a.logger.Error("install MUP T2ST gate",
 					zap.String("endpoint", r.Endpoint), zap.Error(err))
-				return false
+				return a.mupFailed()
 			}
 			st.gateHeld = true
 		}
@@ -876,16 +928,19 @@ func (a *Applier) reconcileMUPT2ST(key mupT2STKey) bool {
 			if a.releaseMUPGate(dp.gatePrefix, gateOwner, dp.deleteGate) {
 				st.gateHeld = false
 			}
-			return false
+			return a.mupFailed()
 		}
 	} else if err := dp.uplinkCreate(st.instance, r.Endpoint, r.TEID, r.TEIDLen, entry, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
-		// SID changed (a different DSD now resolves): re-Put the F-TEID entry. The
-		// gate already exists and its ref-count is unchanged.
+		// SID changed (a different DSD now resolves) or the source did (the
+		// source locator moved): re-Put the F-TEID entry. The gate already
+		// exists and its ref-count is unchanged.
 		a.logger.Error("re-Put MUP T2ST uplink entry",
 			zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
-		return false
+		return a.mupFailed()
 	}
 	st.installedSID = sid
+	st.installedSrc = src
+	st.locatorSrc = src
 	a.logger.Info("MUP T2ST uplink installed",
 		zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID),
 		zap.Uint8("teid_len", r.TEIDLen), zap.String("sid", sid),
@@ -903,15 +958,16 @@ func (a *Applier) uninstallMUPT2ST(st *mupSessionState) bool {
 		if err := dp.uplinkDelete(st.instance, r.Endpoint, r.TEID, r.TEIDLen, bpf.OwnerBGPMUP(a.localASN, r.RD)); err != nil {
 			a.logger.Error("withdraw MUP T2ST uplink entry; retaining gate",
 				zap.String("endpoint", r.Endpoint), zap.Uint32("teid", r.TEID), zap.Error(err))
-			return false
+			return a.mupFailed()
 		}
 		// A gate-only cleanup failure must not make a later reconcile believe
 		// this SID is still programmed and skip recreating the deleted uplink.
 		st.installedSID = ""
+		st.installedSrc = [16]byte{}
 	}
 	if st.gateHeld {
 		if !a.releaseMUPGate(dp.gatePrefix, bpf.OwnerBGPMUPGate(a.localASN), dp.deleteGate) {
-			return false
+			return a.mupFailed()
 		}
 		st.gateHeld = false
 	}

@@ -46,6 +46,12 @@ type TrackedReconciler interface {
 	ReconcileTracked() error
 }
 
+// trackedRetrySetter is the part of *apply.Applier that reports tracked
+// writes failing outside ReconcileTracked, so the replayer retries them.
+type trackedRetrySetter interface {
+	SetTrackedRetry(func())
+}
+
 // sourceLocatorHooks wraps the locator add and delete with what the BGP
 // source locator (bgp.global.source_locator) needs. Every headend entry the
 // applier writes takes its encapsulation source from that locator, and the
@@ -56,9 +62,10 @@ type TrackedReconciler interface {
 //     those received while it was missing, and those already written whose
 //     source moved with the locator's prefix. It then requests a replay of
 //     the EVPN loc-rib, since an EVPN route that could not be written is not
-//     tracked. That replay runs the tracked pass again and is retried with
-//     backoff until both succeed, so a write that fails here converges. The
-//     locator stays registered and the RPC succeeds either way.
+//     tracked. That replay runs the tracked pass again, and the replayer
+//     retries what still fails (see vpnReplayer), so a write that fails
+//     here converges. The locator stays registered and the RPC succeeds
+//     either way.
 //   - Deleting it leaves written entries forwarding with the source they
 //     have; it logs one warning, and nothing is rewritten until the locator
 //     is registered again.

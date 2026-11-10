@@ -34,6 +34,7 @@ type fakeHeadend struct {
 	v4deleted []string
 	v6deleted []string
 	createErr error
+	deleteErr error // DeleteHeadendV4 fails with it when set
 
 	// v4owners / v6owners model the persisted owner table so the upgrade off
 	// the pre-aggregation per-RD owner can be exercised.
@@ -49,10 +50,20 @@ type fakeHeadend struct {
 	// putEcmpFailures fails that many more PutEcmpGroup calls. Atomic, so
 	// a test can arm it while another goroutine applies routes.
 	putEcmpFailures atomic.Int32
+	// bdPeerFailures does the same for bd_peer writes.
+	bdPeerFailures atomic.Int32
 
-	fdb                              map[fdbKey]*bpf.FdbEntry
-	bdPeers                          map[bdPeerKey]*bpf.HeadendEntry
-	bdPeerReverse                    map[bdPeerKey]bool // writeReverse flag passed per peer
+	fdb           map[fdbKey]*bpf.FdbEntry
+	bdPeers       map[bdPeerKey]*bpf.HeadendEntry
+	bdPeerReverse map[bdPeerKey]bool // writeReverse flag passed per peer
+	// reverse models bd_peer_reverse_map: keyed by {bd, remote PE source}
+	// and shared by every peer of the BD with that source, as in the real
+	// map. reverseWrites counts the writes to it.
+	reverse       map[reverseKey]reverseVal
+	reverseWrites int
+	bdPeerESI     map[bdPeerKey][bpf.ESILen]byte
+	// bdPeerUpdateCalls counts UpdateBdPeersOwned calls per bridge domain.
+	bdPeerUpdateCalls                map[uint16]int
 	bdPeerErr                        error
 	fdbErr                           error
 	fdbDelErr                        error
@@ -62,22 +73,26 @@ type fakeHeadend struct {
 	esPeerCreateErr, esPeerDeleteErr error
 	esPeerCreates, esPeerDeletes     int
 
-	mupUplink map[mupUplinkKey]*bpf.HeadendEntry
+	mupUplink       map[mupUplinkKey]*bpf.HeadendEntry
+	mupUplinkDelErr error
 }
 
 func newFakeHeadend() *fakeHeadend {
 	return &fakeHeadend{
-		v4created:     map[string]*bpf.HeadendEntry{},
-		v6created:     map[string]*bpf.HeadendEntry{},
-		fdb:           map[fdbKey]*bpf.FdbEntry{},
-		bdPeers:       map[bdPeerKey]*bpf.HeadendEntry{},
-		bdPeerReverse: map[bdPeerKey]bool{},
-		esis:          map[[bpf.ESILen]byte]*bpf.EsiEntry{},
-		esPeers:       map[esPeerKey]struct{}{},
-		v4owners:      map[string]bpf.OwnerTag{},
-		v6owners:      map[string]bpf.OwnerTag{},
-		ecmpGroups:    map[uint32][]bpf.EcmpPath{},
-		ecmpOwners:    map[uint32]bpf.OwnerTag{},
+		v4created:         map[string]*bpf.HeadendEntry{},
+		v6created:         map[string]*bpf.HeadendEntry{},
+		fdb:               map[fdbKey]*bpf.FdbEntry{},
+		bdPeers:           map[bdPeerKey]*bpf.HeadendEntry{},
+		bdPeerReverse:     map[bdPeerKey]bool{},
+		reverse:           map[reverseKey]reverseVal{},
+		bdPeerESI:         map[bdPeerKey][bpf.ESILen]byte{},
+		bdPeerUpdateCalls: map[uint16]int{},
+		esis:              map[[bpf.ESILen]byte]*bpf.EsiEntry{},
+		esPeers:           map[esPeerKey]struct{}{},
+		v4owners:          map[string]bpf.OwnerTag{},
+		v6owners:          map[string]bpf.OwnerTag{},
+		ecmpGroups:        map[uint32][]bpf.EcmpPath{},
+		ecmpOwners:        map[uint32]bpf.OwnerTag{},
 	}
 }
 
@@ -97,12 +112,21 @@ func (f *fakeHeadend) DeleteFdb(bdID uint16, mac net.HardwareAddr) error {
 	return nil
 }
 
-func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, _ [bpf.ESILen]byte, _ [bpf.IPv6AddrLen]byte, writeReverse bool) error {
+func (f *fakeHeadend) CreateBdPeer(bdID, index uint16, e *bpf.HeadendEntry, esi [bpf.ESILen]byte, remoteSrc [bpf.IPv6AddrLen]byte, writeReverse bool) error {
 	if f.bdPeerErr != nil {
 		return f.bdPeerErr
 	}
+	if f.bdPeerFailures.Add(-1) >= 0 {
+		return errors.New("injected bd_peer failure")
+	}
+	f.bdPeerFailures.Store(0)
 	f.bdPeers[bdPeerKey{bdID, index}] = e
 	f.bdPeerReverse[bdPeerKey{bdID, index}] = writeReverse
+	if writeReverse {
+		f.reverse[reverseKey{bdID, remoteSrc}] = reverseVal{index, esi}
+		f.reverseWrites++
+	}
+	f.bdPeerESI[bdPeerKey{bdID, index}] = esi
 	return nil
 }
 
@@ -125,6 +149,12 @@ func (f *fakeHeadend) DeleteBdPeer(bdID, index uint16) (bool, error) {
 		return false, nil
 	}
 	delete(f.bdPeers, bdPeerKey{bdID, index})
+	// Like the real delete: every reverse entry aimed at the slot goes.
+	for k, v := range f.reverse {
+		if k.bdID == bdID && v.index == index {
+			delete(f.reverse, k)
+		}
+	}
 	return true, nil
 }
 
@@ -282,6 +312,9 @@ func (f *fakeHeadend) CreateMupUplinkV4(instance uint32, endpoint string, teid u
 }
 
 func (f *fakeHeadend) DeleteMupUplinkV4(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
+	if f.mupUplinkDelErr != nil {
+		return f.mupUplinkDelErr
+	}
 	delete(f.mupUplink, mupUplinkKey{instance, endpoint, teid, teidPrefixBits})
 	return nil
 }
@@ -298,6 +331,9 @@ func (f *fakeHeadend) CreateMupUplinkV6(instance uint32, endpoint string, teid u
 }
 
 func (f *fakeHeadend) DeleteMupUplinkV6(instance uint32, endpoint string, teid uint32, teidPrefixBits uint8) error {
+	if f.mupUplinkDelErr != nil {
+		return f.mupUplinkDelErr
+	}
 	delete(f.mupUplink, mupUplinkKey{instance, endpoint, teid, teidPrefixBits})
 	return nil
 }
@@ -330,6 +366,9 @@ func (f *fakeHeadend) CreateHeadendV6(p string, e *bpf.HeadendEntry, owner bpf.O
 }
 
 func (f *fakeHeadend) DeleteHeadendV4(p string, requester bpf.OwnerTag) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	if cur, ok := f.v4owners[p]; ok && cur != requester {
 		return bpf.ErrEntryOwnerMismatch
 	}

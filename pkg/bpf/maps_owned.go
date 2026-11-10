@@ -218,6 +218,41 @@ func (m *MapOperations) createBdPeerOwnedLocked(bdID, index uint16, entry *Heade
 	}
 	return err
 }
+
+// BdPeerUpdate is one in-place rewrite for UpdateBdPeersOwned.
+type BdPeerUpdate struct {
+	Index uint16
+	Entry *HeadendEntry
+	ESI   [ESILen]byte
+}
+
+// UpdateBdPeersOwned rewrites existing bd_peer entries of one bridge domain
+// in place: the forward entry and its ESI side entry. The reverse map is
+// not touched, so an update cannot move a reverse entry another peer of the
+// BD shares. All updates run under one lifecycle lock and the BD's BUM
+// state is rebuilt once, however many peers change. It returns one error
+// per update (nil where the update was written); a slot that is no longer
+// present is an error, not a create.
+func (m *MapOperations) UpdateBdPeersOwned(bdID uint16, updates []BdPeerUpdate, owner OwnerTag) []error {
+	errs := make([]error, len(updates))
+	if len(updates) == 0 {
+		return errs
+	}
+	defer m.resyncBum(bdID)
+	m.bdPeerLifecycle.Lock()
+	defer m.bdPeerLifecycle.Unlock()
+	var noRemoteSrc [IPv6AddrLen]byte
+	for i, u := range updates {
+		var cur HeadendEntry
+		if err := m.objs.BdPeerMap.Lookup(&BdPeerKey{BdId: bdID, Index: u.Index}, &cur); err != nil {
+			errs[i] = fmt.Errorf("bd %d peer %d: %w", bdID, u.Index, err)
+			continue
+		}
+		errs[i] = m.createBdPeerOwnedLocked(bdID, u.Index, u.Entry, u.ESI, noRemoteSrc, false, owner)
+	}
+	return errs
+}
+
 func (m *MapOperations) CreateBdPeerAtFreeIndexOwned(bdID uint16, entry *HeadendEntry, esi [ESILen]byte, remoteSrc [IPv6AddrLen]byte, writeReverse bool, owner OwnerTag) (uint16, error) {
 	defer m.resyncBum(bdID)
 	m.bdPeerLifecycle.Lock()

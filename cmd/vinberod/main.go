@@ -346,10 +346,12 @@ func run(cliCtx *cli.Context) error {
 		// change alters what the L3VPN import-RT filter accepts (a CNI ADD
 		// binding a VRF after the peer's routes were already in the loc-rib,
 		// an RT or binding removed), and EVPN after the source locator is
-		// registered. The server retries it until it succeeds.
+		// registered. The server retries what a failed pass needs, a bounded
+		// number of times. The scope runs the delivery under the view lock,
+		// so the applier counts only the replay's own failed writes.
 		vpnReplay = func(families []bgp.Family) error {
-			return applier.ReplayAndReconcile(func() error {
-				return routeDemux.ReplayBuiltin("applier", families)
+			return applier.ReplayAndReconcile(func(scope apply.ReplayScope) error {
+				return routeDemux.ReplayBuiltinScoped("applier", families, scope)
 			})
 		}
 	}
