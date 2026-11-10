@@ -30,7 +30,8 @@ End.DX4との違いは、End.DT4はVRF内のルーティングテーブルを参
 local SIDを引くのは、global VRF（vrf_id 0）の入口から来たパケットだけです。`test.sh` の最後のフェーズでこれを確かめます。host2は、host1宛ての通信をEnd.DT4のSID `fc00:3::3` へ直接カプセル化して送り、テストはrouter3のEnd.DT4のslotカウンター（`vbctl stats slot show --type endpoint`）を読みます。このため `vinbero_router3.yaml` は `enable_stats` を有効にしています。
 
 - router3のhost2側の口にACが無い間は、その口はglobal VRFに属するので、End.DT4がhost2のパケットをデカプセル化します
-- `vbctl vrf ac-add --vrf vrf100 --interface dt4-rt3h2` の後は、その口はテナントのACになります。SIDは引かれず、End.DT4は動きません。パケットは通常のテナントのパケットと同じくheadendのルックアップへ進みます
+- `vbctl vrf ac-add --vrf vrf100 --interface dt4-rt3h2` の後は、その口はテナントのACになります。SIDは引かれず、End.DT4は動きません。パケットは通常のテナントのパケットと同じくheadendのルックアップへ進み、kernelへ渡されます（XDP_PASSのカウンターが増えます）
+- 同じパケットにACの無いVLAN 5のtagを付けると、その口のuntagged側がテナントのACなので、front doorでdropされます
 - host1からhost2への通信は変わらず届きます。router3のuplinkにはACが無いので、そのパケットはglobal VRFのままSIDに届きます
 
 ## クイックスタート

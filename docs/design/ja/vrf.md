@@ -48,10 +48,24 @@ data plane は XDP 入口で ingress front door を 1 回だけ通します。`i
 - `VrfAcAdd` で足した AC の interface が後から消えた場合、reconcile は warning を出してその AC を飛ばします (pod の veth が AC の削除より先に消えても、他の AC の操作を止めないためです)。AC は `VrfAcRemove` まで残り、同じ名前の interface が戻れば再び効きます。config の `vrfs.entries[].acs` の AC は、interface が解決できなければ reconcile を失敗させます。
 - AC はちょうど 1 つの VRF に属します。別 VRF が持つ AC の追加は拒否されます (map の衝突キーを作らせない)。
 - default-deny を有効にすると、どの VRF にも分類されない AC のパケットを drop (または pass) します。underlay/control interface を通すには `global` VRF に AC を足します。
-- local SID の表 (`sid_function_map`) を引くのは、vrf_id 0 に分類された入口から来たパケットだけです。tenant VRF の AC から来た IPv6 パケットは、宛先が local SID でも SID の behavior を通らず、宛先が SID でないパケットと同じく headend の lookup へ進みます。tenant が End.DT4 などの SID を直接宛先にして、別の VRF へ decap されることを防ぐためです。SID ごとの例外はありません。SRv6 を受ける underlay の interface は、AC を持たないままにするか `global` VRF の AC にします。
+- front door は {ifindex, vlan} を完全一致で引きます。tag 付きのフレームの {ifindex, vlan} に AC が無く、同じ port の untagged 側 ({ifindex, 0}) が tenant VRF の AC なら、そのフレームは drop します。tenant が未使用の VLAN tag を付けて vrf 0 に入るのを防ぐためです。untagged 側が underlay (AC が無いか `global` の AC) の trunk では、AC の無い tag は vrf 0 になります。逆に、VLAN の AC しか持たない port に届いた untagged のフレームも vrf 0 になるので、その port で同じ保証が要るときは default-deny を有効にします。
 - `ingress_vrf_map` の writer は `vrf.Manager.Reconcile` だけです。
 
 詳細は [forwarding_model.md](forwarding_model.md) の VRF axis を参照してください。
+
+### local SID と AC
+
+local SID の表 (`sid_function_map`) を引くのは、vrf_id 0 に分類された入口から来たパケットだけです。tenant VRF の AC から来た IPv6 パケットは、宛先がこのノードの local SID でも SID の behavior を通りません。宛先が SID でないパケットと同じく headend の lookup へ進み、一致しなければ kernel へ渡します (XDP_PASS)。tenant のアドレス空間では、provider の SID と同じ値の宛先もただの tenant のアドレスなので、drop はしません。
+
+SID ごとの例外は無く、AC に分類した interface では SID は一切使えません。たとえば N3 の interface を VRF の AC にすると、その interface に届く IPv6 の GTP-U に End.M.GTP6.D は働かず、パケットは kernel へ渡ります。SRv6 を受ける interface は、AC を持たないままにするか `global` VRF の AC にします。
+
+このゲートが守るのは、このノードの XDP が処理する local SID だけです。次の場合は守りません。
+
+- tenant に locator の範囲への経路がある場合。パケットは kernel の経路で underlay へ出て、別の PE の SID に underlay 側から届きます
+- AC にした interface が VRF device に enslave されていない場合。kernel はそのパケットを main table で引きます
+- 同じ SID の kernel の seg6local route がある場合。XDP が渡したパケットを kernel が処理します
+
+残りの半分は kernel の VRF table です。tenant の interface を VRF device に enslave し、VRF table に underlay への経路を置かないでください。VRF table に一致する経路が無いと、kernel は main table へ進んで探します。
 
 ## kernel device facet
 

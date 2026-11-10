@@ -40,7 +40,10 @@ which is why `vinbero_router3.yaml` sets `enable_stats`):
   VRF and End.DT4 decapsulates host2's packets
 - after `vbctl vrf ac-add --vrf vrf100 --interface dt4-rt3h2` the port is
   a tenant AC: the SID is not looked up, End.DT4 does not run, and the
-  packets go on to the headend lookup like any tenant packet
+  packets go on to the headend lookup like any tenant packet and are
+  passed to the kernel (the XDP_PASS counter rises)
+- the same packets with a VLAN 5 tag, which has no AC, are dropped at
+  the front door, because the untagged side of the port is a tenant AC
 - host1 to host2 keeps working: router3's uplink has no AC, so its
   packets are still in the global VRF and reach the SID
 
