@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/vishvananda/netlink"
 	"net"
+	"sync"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
@@ -16,25 +17,33 @@ import (
 // HeadendL2Server implements the HeadendL2ServiceHandler interface
 type HeadendL2Server struct {
 	mapOps *bpf.MapOperations
-	// deleteEntry and linkGone default to mapOps and the kernel; tests
-	// replace them.
+	// createEntry, deleteEntry and linkGone default to mapOps and the
+	// kernel; tests replace them.
+	createEntry func(ifindex uint32, vlan uint16, entry *bpf.HeadendEntry, esi [bpf.ESILen]byte) error
 	deleteEntry func(ifindex uint32, vlan uint16) error
 	linkGone    func(ifindex uint32) bool
 	// closedVRF names the managed VRF whose closed table (it ends in the
 	// unreachable default) the interface is enslaved to. Nil (the default
 	// until SetClosedVRFCheck) refuses nothing.
 	closedVRF func(ifindex uint32) (string, bool, error)
+	// vrfMu is VrfServer's mutation lock, held from the check to the write
+	// so a concurrent VrfCreate cannot close the port's table in between
+	// (or enslave the port after its own check).
+	vrfMu *sync.Mutex
 }
 
-// SetClosedVRFCheck installs the check HeadendL2Create refuses a port with.
-func (s *HeadendL2Server) SetClosedVRFCheck(fn func(ifindex uint32) (string, bool, error)) {
+// SetClosedVRFCheck installs the check HeadendL2Create refuses a port with,
+// and the VRF mutation lock it runs under (VrfServer's).
+func (s *HeadendL2Server) SetClosedVRFCheck(fn func(ifindex uint32) (string, bool, error), vrfMu *sync.Mutex) {
 	s.closedVRF = fn
+	s.vrfMu = vrfMu
 }
 
 // NewHeadendL2Server creates a new HeadendL2Server
 func NewHeadendL2Server(mapOps *bpf.MapOperations) *HeadendL2Server {
 	s := &HeadendL2Server{mapOps: mapOps, linkGone: ifindexGone}
 	if mapOps != nil {
+		s.createEntry = mapOps.CreateHeadendL2
 		s.deleteEntry = mapOps.DeleteHeadendL2
 	}
 	return s
@@ -129,6 +138,10 @@ func (s *HeadendL2Server) HeadendL2Create(
 		Created: make([]*v1.HeadendL2, 0),
 		Errors:  make([]*v1.OperationError, 0),
 	}
+	if s.vrfMu != nil {
+		s.vrfMu.Lock()
+		defer s.vrfMu.Unlock()
+	}
 
 	for _, headend := range req.Msg.HeadendL2S {
 		ifindex, err := resolveIfindex(headend.InterfaceName)
@@ -166,7 +179,7 @@ func (s *HeadendL2Server) HeadendL2Create(
 			continue
 		}
 
-		if err := s.mapOps.CreateHeadendL2(ifindex, uint16(headend.VlanId), entry, esi); err != nil {
+		if err := s.createEntry(ifindex, uint16(headend.VlanId), entry, esi); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: fmt.Sprintf("%s:vlan_%d", headend.InterfaceName, headend.VlanId),
 				Reason:        err.Error(),

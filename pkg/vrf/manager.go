@@ -657,6 +657,9 @@ func sortACs(acs []AC) {
 // it; tests use a fake. Like Reconcile's resolve/prog, ops is passed per call
 // rather than stored so NewManager stays dependency-free.
 type DeviceOps interface {
+	// CreateVrf returns the device's ifindex. A non-zero ifindex with an
+	// error means the device exists (with its routes and members) but its
+	// record could not be saved.
 	CreateVrf(name string, tableID uint32, members []string, enableL3mdevRule, noUnreachableDefault bool) (uint32, error)
 	DeleteVrf(name string) error
 }
@@ -716,6 +719,13 @@ func (m *Manager) CreateDevice(name string, d Device, ops DeviceOps) (VRF, error
 	}
 	ifindex, err := ops.CreateVrf(name, d.TableID, d.Members, d.EnableL3mdevRule, d.NoUnreachableDefault)
 	if err != nil {
+		if ifindex != 0 {
+			// The device is there though its record is not saved: the facet
+			// is attached all the same, so the table it closes counts as
+			// closed and its members are checked.
+			d.Ifindex = ifindex
+			_, _ = m.SetDevice(name, d)
+		}
 		return VRF{}, fmt.Errorf("vrf %q: create device: %w", name, err)
 	}
 	d.Ifindex = ifindex

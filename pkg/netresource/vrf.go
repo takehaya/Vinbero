@@ -13,9 +13,10 @@ import (
 
 // CreateVrf creates (or idempotently adopts) the kernel VRF device and
 // persists it. On a persist failure the kernel device and the in-memory
-// record are NOT rolled back: the error is returned so the caller sees the
-// divergence, a retry re-adopts and converges, and the next successful
-// persist writes the whole state anyway.
+// record are NOT rolled back: the error is returned with the device's
+// ifindex so the caller sees the divergence and still knows the device is
+// there, a retry re-adopts and converges, and the next successful persist
+// writes the whole state anyway.
 //
 // Unless noUnreachableDefault is set, the VRF's table gets an unreachable
 // default for IPv4 and IPv6 (see ensureUnreachableDefault), on a fresh create
@@ -34,7 +35,7 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 		}
 		m.ensureVrfInState(name, tableID, members, enableL3mdevRule, noUnreachableDefault, added, ifindex)
 		if err := m.persist(); err != nil {
-			return 0, fmt.Errorf("persist state after adopting VRF %s: %w", name, err)
+			return ifindex, fmt.Errorf("persist state after adopting VRF %s: %w", name, err)
 		}
 		m.warnSharedOptOut(name)
 		return ifindex, nil
@@ -50,7 +51,7 @@ func (m *ResourceManager) CreateVrf(name string, tableID uint32, members []strin
 	m.ensureVrfInState(name, tableID, members, enableL3mdevRule, noUnreachableDefault, added, ifindex)
 
 	if err := m.persist(); err != nil {
-		return 0, fmt.Errorf("persist state after creating VRF %s: %w", name, err)
+		return ifindex, fmt.Errorf("persist state after creating VRF %s: %w", name, err)
 	}
 
 	m.logger.Info("Created VRF",

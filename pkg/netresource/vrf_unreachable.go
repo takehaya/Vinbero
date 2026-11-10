@@ -411,11 +411,28 @@ var listTableRoutes = func(table uint32, family int) ([]netlink.Route, error) {
 	return netlink.RouteListFiltered(family, &netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
 }
 
+// dumpAttempts is how many times a route dump the kernel interrupted (a
+// route changed while it ran) is tried.
+const dumpAttempts = 5
+
+// listTableRoutesRetried is listTableRoutes, tried again while the kernel
+// interrupts the dump.
+func listTableRoutesRetried(table uint32, family int) ([]netlink.Route, error) {
+	var err error
+	for range dumpAttempts {
+		var routes []netlink.Route
+		if routes, err = listTableRoutes(table, family); !errors.Is(err, netlink.ErrDumpInterrupted) {
+			return routes, err
+		}
+	}
+	return nil, err
+}
+
 // unreachableDefaultLeft returns an error when table still has an
 // unreachable default route in either family.
 func unreachableDefaultLeft(table uint32) error {
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
-		routes, err := listTableRoutes(table, family)
+		routes, err := listTableRoutesRetried(table, family)
 		if err != nil {
 			if family == netlink.FAMILY_V6 && (errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EAFNOSUPPORT)) {
 				continue // no IPv6 on the host

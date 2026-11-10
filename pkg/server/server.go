@@ -257,7 +257,7 @@ func (s *Server) Setup() {
 		}
 		name, closed := s.vrfBgpMgr.VRF().ClosedVRFOfPort(links, ifindex)
 		return name, closed, nil
-	})
+	}, vrfMu)
 	path, handler = vinberov1connect.NewHeadendL2ServiceHandler(headendL2Server)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered HeadendL2Service", zap.String("path", path))

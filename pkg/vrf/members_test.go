@@ -176,3 +176,21 @@ func TestTableHeldOpen(t *testing.T) {
 		t.Errorf("TableHeldOpen = %q", got)
 	}
 }
+
+// A create whose device is made but whose record is not saved still
+// attaches the facet: the table it closes counts as closed, and its
+// members are checked.
+func TestCreateDeviceUnsavedCountsAsClosed(t *testing.T) {
+	m := NewManager()
+	ops := &fakeDeviceOps{ifindexes: map[string]uint32{"vrf-x": 30}, unsaved: true}
+	if _, err := m.CreateDevice("vrf-x", Device{TableID: 600}, ops); err == nil {
+		t.Fatal("CreateDevice reported success with the record unsaved")
+	}
+	if !m.TableClosed(600) {
+		t.Error("table 600 is not closed after the device and its routes were made")
+	}
+	links := Links{5: {Name: "eth5", XDP: true, Master: 30}, 30: {Name: "vrf-x", IsVrf: true, VrfTable: 600}}
+	if _, ok := m.ClosedVRFOfPort(links, 5); !ok {
+		t.Error("a port of the unsaved device does not count as closed")
+	}
+}

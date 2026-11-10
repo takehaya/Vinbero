@@ -1,6 +1,9 @@
 package netresource
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -218,4 +221,47 @@ func TestTableHeldOpenRemovalFails(t *testing.T) {
 	if _, held := m3.TablesHeldOpen()[630]; !held {
 		t.Error("table 630 not held open once the route is removed")
 	}
+}
+
+// A dump the kernel interrupts (a route changed while it ran) is tried
+// again, so one does not leave an open table counted as closed.
+// Unprivileged.
+func TestUnreachableDefaultLeftRetriesInterruptedDump(t *testing.T) {
+	calls := 0
+	orig := listTableRoutes
+	t.Cleanup(func() { listTableRoutes = orig })
+	listTableRoutes = func(uint32, int) ([]netlink.Route, error) {
+		calls++
+		if calls <= 2 {
+			return nil, netlink.ErrDumpInterrupted
+		}
+		return nil, nil
+	}
+	if err := unreachableDefaultLeft(600); err != nil {
+		t.Errorf("unreachableDefaultLeft after two interrupted dumps = %v, want nil", err)
+	}
+	listTableRoutes = func(uint32, int) ([]netlink.Route, error) { return nil, netlink.ErrDumpInterrupted }
+	if err := unreachableDefaultLeft(600); !errors.Is(err, netlink.ErrDumpInterrupted) {
+		t.Errorf("unreachableDefaultLeft with every dump interrupted = %v, want the error", err)
+	}
+}
+
+// A create whose record cannot be saved returns the device's ifindex with
+// the error: the device and its routes are there.
+func TestCreateVrfUnsavedReturnsIfindex(t *testing.T) {
+	withTestNetns(t)
+	m := newTestManager(t)
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.statePath = filepath.Join(blocker, "state.json")
+	ifindex, err := m.CreateVrf("vrf-u", 640, nil, false, false)
+	if err == nil {
+		t.Skip("the state was saved; cannot make the persist fail here")
+	}
+	if ifindex == 0 {
+		t.Errorf("CreateVrf with the persist failing = 0, %v; want the device's ifindex", err)
+	}
+	wantUnreachable(t, 640, 1)
 }

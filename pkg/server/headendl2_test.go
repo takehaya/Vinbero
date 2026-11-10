@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
 	"github.com/cilium/ebpf"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
+	"github.com/takehaya/vinbero/pkg/bpf"
 )
 
 func deleteTargets(t *testing.T, s *HeadendL2Server, names ...string) *v1.HeadendL2DeleteResponse {
@@ -68,7 +70,7 @@ func TestHeadendL2DeleteOutcomes(t *testing.T) {
 // table. (mapOps is nil, so reaching the write would panic.)
 func TestHeadendL2CreateRefusesVrfPort(t *testing.T) {
 	s := NewHeadendL2Server(nil)
-	s.SetClosedVRFCheck(func(uint32) (string, bool, error) { return "vrf-cust", true, nil })
+	s.SetClosedVRFCheck(func(uint32) (string, bool, error) { return "vrf-cust", true, nil }, nil)
 	resp, err := s.HeadendL2Create(context.Background(), connect.NewRequest(&v1.HeadendL2CreateRequest{
 		HeadendL2S: []*v1.HeadendL2{{InterfaceName: "lo", SrcAddr: "fc00::1", Segments: []string{"fc00::2"}, BdId: 100}},
 	}))
@@ -78,5 +80,38 @@ func TestHeadendL2CreateRefusesVrfPort(t *testing.T) {
 	if len(resp.Msg.Created) != 0 || len(resp.Msg.Errors) != 1 ||
 		!strings.Contains(resp.Msg.Errors[0].Reason, `port of VRF "vrf-cust"`) {
 		t.Errorf("got %+v, want one VRF-port error", resp.Msg)
+	}
+}
+
+// The closed-VRF check and the map write both run under the VRF mutation
+// lock, so a VrfCreate cannot close the port's table between them.
+func TestHeadendL2CreateHoldsVRFLock(t *testing.T) {
+	s := NewHeadendL2Server(nil)
+	vrfMu := &sync.Mutex{}
+	held := func(what string) {
+		if vrfMu.TryLock() {
+			vrfMu.Unlock()
+			t.Errorf("%s runs without the VRF mutation lock", what)
+		}
+	}
+	s.SetClosedVRFCheck(func(uint32) (string, bool, error) {
+		held("the closed-VRF check")
+		return "", false, nil
+	}, vrfMu)
+	written := 0
+	s.createEntry = func(uint32, uint16, *bpf.HeadendEntry, [bpf.ESILen]byte) error {
+		held("the map write")
+		written++
+		return nil
+	}
+	s.linkGone = func(uint32) bool { return false }
+	resp, err := s.HeadendL2Create(context.Background(), connect.NewRequest(&v1.HeadendL2CreateRequest{
+		HeadendL2S: []*v1.HeadendL2{{InterfaceName: "lo", SrcAddr: "fc00::1", Segments: []string{"fc00::2"}, BdId: 100}},
+	}))
+	if err != nil || written != 1 {
+		t.Fatalf("HeadendL2Create: %v, written %d, %+v", err, written, resp.Msg)
+	}
+	if !vrfMu.TryLock() {
+		t.Fatal("the lock is still held after the create")
 	}
 }

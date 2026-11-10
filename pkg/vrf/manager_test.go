@@ -168,6 +168,8 @@ func TestManager_ReturnedACsAreCopies(t *testing.T) {
 type fakeDeviceOps struct {
 	ifindexes map[string]uint32
 	createErr error
+	// unsaved makes a create succeed in the kernel and fail to persist.
+	unsaved   bool
 	deleteErr error
 	created   []string
 	deleted   []string
@@ -184,6 +186,9 @@ func (f *fakeDeviceOps) CreateVrf(name string, tableID uint32, members []string,
 		f.noUnreachable = map[string]bool{}
 	}
 	f.noUnreachable[name] = noUnreachable
+	if f.unsaved {
+		return f.ifindexes[name], errors.New("persist state: no space left on device")
+	}
 	return f.ifindexes[name], nil
 }
 
