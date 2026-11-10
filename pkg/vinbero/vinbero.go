@@ -257,6 +257,9 @@ func (v *Vinbero) InitResourceManager() error {
 	// Without the main-table lookup a closed table would drop the
 	// encapsulations from enslaved ports, so the tables stay open.
 	resMgr.SetTablesClosed(v.FibLookupTBID())
+	// No unreachable default cuts off an L2 headend circuit: the boot holds
+	// such a table open, and after it the create is refused.
+	resMgr.SetTableCloseGuard(v.tableCloseGuard)
 
 	// Fail-closed: a state entry that cannot be materialized aborts the boot
 	// (the error carries a repair hint). Continuing with a phantom entry

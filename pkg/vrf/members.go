@@ -60,6 +60,28 @@ func (m *Manager) SetTablesClosed(closed bool) {
 	m.tablesOpen = !closed
 }
 
+// SetTablesHeldOpen installs the lister of the tables the boot left open
+// for an L2 headend circuit (netresource.ResourceManager.TablesHeldOpen).
+// Such a table has no unreachable default whatever its VRFs ask for, until
+// the next start. Call it before the VRFs are restored.
+func (m *Manager) SetTablesHeldOpen(fn func() map[uint32]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.heldOpen = fn
+}
+
+// TableHeldOpen returns the L2 headend circuit the boot left table open
+// for, or "".
+func (m *Manager) TableHeldOpen(table uint32) string {
+	m.mu.RLock()
+	fn := m.heldOpen
+	m.mu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn()[table]
+}
+
 // TablesClosed reports whether the managed VRF tables end in the
 // unreachable default (SetTablesClosed).
 func (m *Manager) TablesClosed() bool {
@@ -69,16 +91,24 @@ func (m *Manager) TablesClosed() bool {
 }
 
 // closedTablesLocked returns the tables that end in the unreachable default:
-// a table some managed VRF on it did not opt out of. Closedness belongs to
-// the table, not the VRF: a VRF that opted out but shares a table with one
-// that did not is closed all the same. Callers hold m.mu.
+// a table some managed VRF on it did not opt out of, unless the boot held it
+// open (SetTablesHeldOpen). Closedness belongs to the table, not the VRF: a
+// VRF that opted out but shares a table with one that did not is closed all
+// the same. Callers hold m.mu.
 func (m *Manager) closedTablesLocked() map[uint32]bool {
 	out := map[uint32]bool{}
 	if m.tablesOpen {
 		return out
 	}
+	var held map[uint32]string
+	if m.heldOpen != nil {
+		held = m.heldOpen()
+	}
 	for _, v := range m.byName {
-		if v.Device != nil && v.Device.TableID != 0 && !v.Device.NoUnreachableDefault {
+		if v.Device == nil || v.Device.TableID == 0 || v.Device.NoUnreachableDefault {
+			continue
+		}
+		if _, ok := held[v.Device.TableID]; !ok {
 			out[v.Device.TableID] = true
 		}
 	}
@@ -111,6 +141,11 @@ func (m *Manager) TableClosedAfterCreate(table uint32, noUnreachableDefault bool
 	defer m.mu.RUnlock()
 	if m.tablesOpen {
 		return false
+	}
+	if m.heldOpen != nil {
+		if _, held := m.heldOpen()[table]; held {
+			return false
+		}
 	}
 	return !noUnreachableDefault || m.closedTablesLocked()[table]
 }

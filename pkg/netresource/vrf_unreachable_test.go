@@ -498,7 +498,7 @@ func TestEnsureUnreachableDefaultWithoutIPv6(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	m := &ResourceManager{state: &ManagedState{}, logger: zap.New(core)}
 	for range 2 {
-		got, err := m.ensureUnreachableDefault(100)
+		got, err := m.ensureUnreachableDefault("vrf-x", 100, nil)
 		if err != nil {
 			t.Fatalf("ensureUnreachableDefault: %v", err)
 		}
@@ -524,7 +524,7 @@ func TestEnsureUnreachableDefaultWithoutIPv6(t *testing.T) {
 	}
 	routeDel = func(r *netlink.Route) error { removed = append(removed, r.Dst.String()); return nil }
 	t.Cleanup(func() { routeDel = netlink.RouteDel })
-	if _, err := m.ensureUnreachableDefault(100); err == nil {
+	if _, err := m.ensureUnreachableDefault("vrf-x", 100, nil); err == nil {
 		t.Error("an IPv6 failure other than EAFNOSUPPORT: want an error")
 	}
 	if len(removed) != 1 || removed[0] != "0.0.0.0/0" {

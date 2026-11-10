@@ -149,3 +149,30 @@ func TestClosedByTable(t *testing.T) {
 		t.Error("TableClosedAfterCreate: want 600 closed for an opt-out, 700 open, 800 closed without one")
 	}
 }
+
+// A table the boot held open for an L2 headend circuit is open whatever its
+// VRFs ask for: no member is reported, a port on it is not closed, a create
+// on it does not close it, and the circuit is reported for the table.
+func TestTableHeldOpen(t *testing.T) {
+	m := NewManager()
+	if _, err := m.SetDevice("vrf-x", Device{TableID: 600, Ifindex: 30}); err != nil {
+		t.Fatal(err)
+	}
+	links := Links{
+		5:  {Name: "eth5", XDP: true, Master: 30},
+		30: {Name: "vrf-x", IsVrf: true, VrfTable: 600},
+	}
+	if _, ok := m.ClosedVRFOfPort(links, 5); !ok || !m.TableClosed(600) {
+		t.Fatal("table 600 is not closed before it is held open")
+	}
+	m.SetTablesHeldOpen(func() map[uint32]string { return map[uint32]string{600: "L2 headend circuit {eth5, vlan 0}"} })
+	if _, ok := m.ClosedVRFOfPort(links, 5); ok || m.TableClosed(600) || m.TableClosedAfterCreate(600, false) {
+		t.Error("a held-open table counts as closed")
+	}
+	if got := m.MembersWithoutAC(links, ""); len(got) != 0 {
+		t.Errorf("members reported on a held-open table: %+v", got)
+	}
+	if got := m.TableHeldOpen(600); got != "L2 headend circuit {eth5, vlan 0}" || m.TableHeldOpen(700) != "" {
+		t.Errorf("TableHeldOpen = %q", got)
+	}
+}

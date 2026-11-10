@@ -109,6 +109,7 @@ func run(cliCtx *cli.Context) error {
 	// The VRF tables are closed only when the data plane can look tenant
 	// encapsulations up in the main table (bpf.ProbeFibLookupTBID).
 	vrfBgpMgr.VRF().SetTablesClosed(vin.FibLookupTBID())
+	vrfBgpMgr.VRF().SetTablesHeldOpen(vin.GetResourceManager().TablesHeldOpen)
 	bindingVRFs := make([]string, 0, len(cfg.BGP.VrfBindings))
 	for _, b := range cfg.BGP.VrfBindings {
 		bindingVRFs = append(bindingVRFs, b.VRFName)
@@ -130,6 +131,9 @@ func run(cliCtx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	// The boot's creates and adopts are done: from here on a create that
+	// would close a table under an L2 headend circuit is refused.
+	vin.GetResourceManager().FinishBoot()
 	warnVRFPorts(vrfBgpMgr.VRF(), vin.GetMapOperations(), lg)
 	// Forget runtime attachments whose interface is deleted.
 	if err := vin.WatchDevices(); err != nil {

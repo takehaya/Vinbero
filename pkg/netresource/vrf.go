@@ -82,7 +82,7 @@ func (m *ResourceManager) adoptVrfDevice(link netlink.Link, name string, tableID
 	var added []string
 	if !noUnreachableDefault {
 		var err error
-		if added, err = m.ensureUnreachableDefault(tableID); err != nil {
+		if added, err = m.ensureUnreachableDefault(name, tableID, members); err != nil {
 			return 0, nil, fmt.Errorf("VRF %s: %w", name, err)
 		}
 	}
@@ -203,6 +203,7 @@ func (m *ResourceManager) ensureVrfInState(name string, tableID uint32, members 
 				e.Members = append(e.Members, member)
 			}
 		}
+		m.openHeldTablesLocked()
 		return
 	}
 	v := ManagedVrf{
@@ -212,6 +213,7 @@ func (m *ResourceManager) ensureVrfInState(name string, tableID uint32, members 
 	v.setNoUnreachableDefault(noUnreachableDefault)
 	v.addUnreachableFamilies(added)
 	m.state.VRFs = append(m.state.VRFs, v)
+	m.openHeldTablesLocked()
 }
 
 // createVrfNetlink creates a VRF and enslaves members via netlink. Like the
@@ -246,7 +248,7 @@ func (m *ResourceManager) createVrfNetlink(name string, tableID uint32, members 
 	}
 
 	if !noUnreachableDefault {
-		if added, err = m.ensureUnreachableDefault(tableID); err != nil {
+		if added, err = m.ensureUnreachableDefault(name, tableID, members); err != nil {
 			return fail(fmt.Errorf("VRF %s: %w", name, err))
 		}
 	}

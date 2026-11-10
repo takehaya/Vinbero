@@ -23,6 +23,17 @@ type ResourceManager struct {
 	// tablesOpen leaves every VRF table without the unreachable default
 	// (SetTablesClosed(false)).
 	tablesOpen bool
+	// closeGuard finds an L2 headend circuit a table's unreachable default
+	// would cut off (SetTableCloseGuard); nil finds none.
+	closeGuard TableCloseGuard
+	// heldMu guards running and heldOpen.
+	heldMu sync.Mutex
+	// running is set by FinishBoot: from then on a close the guard objects
+	// to is refused instead of the table being held open.
+	running bool
+	// heldOpen are the tables the boot left open for an L2 headend circuit,
+	// with that circuit; they stay open until the next start.
+	heldOpen map[uint32]L2CircuitOnTable
 }
 
 func NewResourceManager(statePath string, logger *zap.Logger) (*ResourceManager, error) {
@@ -89,6 +100,17 @@ func (m *ResourceManager) Reconcile() error {
 				return fix("vrf "+m.state.VRFs[i].Name, err)
 			}
 		}
+		// Tables an L2 headend circuit holds open are found before any route
+		// is added, so none of them is closed even for a moment.
+		for i := range m.state.VRFs {
+			v := &m.state.VRFs[i]
+			if v.OptedOut() {
+				continue
+			}
+			if _, err := m.tableMayClose(v.Name, v.TableID, v.Members); err != nil {
+				return fix("vrf "+v.Name, err)
+			}
+		}
 		for i := range m.state.VRFs {
 			v := &m.state.VRFs[i]
 			link, err := netlink.LinkByName(v.Name)
@@ -110,6 +132,7 @@ func (m *ResourceManager) Reconcile() error {
 			v.Ifindex = ifindex
 			v.addUnreachableFamilies(added)
 		}
+		m.openHeldTablesLocked()
 		return nil
 	}()
 	if err != nil {

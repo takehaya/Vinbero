@@ -2738,19 +2738,33 @@ func (m *MapOperations) ListHeadendL2() (map[HeadendL2Key]*HeadendEntry, error) 
 // HeadendL2Ports returns the ifindexes that carry an L2 headend circuit,
 // each once.
 func (m *MapOperations) HeadendL2Ports() ([]uint32, error) {
+	circuits, err := m.HeadendL2Circuits()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]uint32, 0, len(circuits))
+	for ifindex := range circuits {
+		out = append(out, ifindex)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+// HeadendL2Circuits returns the VLANs of the L2 headend circuits by port
+// ifindex, each list sorted.
+func (m *MapOperations) HeadendL2Circuits() (map[uint32][]uint16, error) {
 	var key HeadendL2Key
 	var entry HeadendEntry
-	seen := map[uint32]bool{}
-	var out []uint32
+	out := map[uint32][]uint16{}
 	iter := m.objs.HeadendL2Map.Iterate()
 	for iter.Next(&key, &entry) {
-		if !seen[key.Ifindex] {
-			seen[key.Ifindex] = true
-			out = append(out, key.Ifindex)
-		}
+		out[key.Ifindex] = append(out[key.Ifindex], key.VlanId)
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("failed to iterate headend L2 map: %w", err)
+	}
+	for _, vlans := range out {
+		slices.Sort(vlans)
 	}
 	return out, nil
 }

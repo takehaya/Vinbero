@@ -284,6 +284,10 @@ func vrfCommand() *cli.Command {
 					}
 					printTable(headers, rows)
 					for _, v := range resp.Msg.Vrfs {
+						if c := v.GetTableHeldOpen(); c != "" {
+							fmt.Printf("vrf %s: table %d is open, without the unreachable default, for the %s; "+
+								"delete the circuit and restart to close it, or opt the VRFs on the table out to keep it open\n", v.GetName(), v.GetTableId(), c)
+						}
 						if m := v.GetMembersWithoutAc(); len(m) > 0 {
 							fmt.Printf("vrf %s: member ports without an AC, whose encapsulation the VRF table drops: %s\n",
 								v.GetName(), strings.Join(m, ", "))

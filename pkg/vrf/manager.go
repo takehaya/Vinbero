@@ -140,6 +140,9 @@ type Manager struct {
 	// tablesOpen: the managed VRF tables have no unreachable default
 	// (SetTablesClosed(false)).
 	tablesOpen bool
+	// heldOpen lists the tables the boot left open for an L2 headend
+	// circuit, with the circuit (SetTablesHeldOpen); nil lists none.
+	heldOpen func() map[uint32]string
 }
 
 type runtimeACKey struct {

@@ -487,8 +487,11 @@ type EncapNeighKeeper struct {
 	dests map[netip.Addr][]NeighTarget
 	// dropped holds, while a sweep runs, the destinations it drops with
 	// their next hops, so that one written before its next hop is given back
-	// goes back into the set instead (rescueLocked).
+	// goes back into the set instead (releaseLocked).
 	dropped map[netip.Addr][]NeighTarget
+	// beforeReleaseDel, when set (tests), runs right before a released
+	// entry is deleted, with pmu held.
+	beforeReleaseDel func(NeighTarget)
 	// owned are the next hops whose managed entry this keeper made.
 	owned map[string]NeighTarget
 	// warned holds what was logged, so a lasting condition logs once.
@@ -590,8 +593,9 @@ const sweepsBeforeRelease = 2
 // Pruning is conservative. A destination leaves the set only after
 // sweepsBeforeRelease complete walks in a row did not see it, and a
 // destination written while a walk runs counts as seen by it. A dropped
-// destination written after the walk, up to the release of its next hop,
-// goes back into the set and keeps the next hop. A walk that failed
+// destination written after the walk and before its next hop's entry is
+// deleted goes back into the set and keeps the entry; one written after the
+// delete is resolved again by the next pass (releaseLocked). A walk that failed
 // part-way may add destinations, never remove them.
 func (k *EncapNeighKeeper) Sweep() ([]NeighTarget, error) {
 	// Events from before the walk are covered by it; writes from its start
@@ -715,23 +719,22 @@ func (k *EncapNeighKeeper) applyLocked() error {
 			wanted[t.key()] = t
 		}
 	}
-	type group struct{ ifindex, family int }
-	byDev := map[group][]NeighTarget{}
+	byDev := map[neighGroup][]NeighTarget{}
 	for _, t := range wanted {
-		g := group{int(t.Ifindex), ipFamily(t.IP)}
+		g := neighGroup{int(t.Ifindex), ipFamily(t.IP)}
 		byDev[g] = append(byDev[g], t)
 	}
 	var release []NeighTarget
 	for key, t := range k.owned {
 		if _, ok := wanted[key]; !ok {
 			release = append(release, t)
-			g := group{int(t.Ifindex), ipFamily(t.IP)}
+			g := neighGroup{int(t.Ifindex), ipFamily(t.IP)}
 			if _, ok := byDev[g]; !ok {
 				byDev[g] = nil
 			}
 		}
 	}
-	dumps := map[group]map[string]netlink.Neigh{}
+	dumps := map[neighGroup]map[string]netlink.Neigh{}
 	var errs []error
 	for g := range byDev {
 		neighs, err := k.neigh.list(g.ifindex, g.family)
@@ -779,48 +782,65 @@ func (k *EncapNeighKeeper) applyLocked() error {
 		}
 	}
 	for _, t := range release {
-		key := t.key()
-		if k.rescueLocked(usedBy[key]) {
-			continue // written again since the walk: still in use
-		}
-		if _, bum := bumNeighClaims.Load(key); bum {
-			delete(k.owned, key) // the BUM flood slots hold it now
-			continue
-		}
-		dump, ok := dumps[group{int(t.Ifindex), ipFamily(t.IP)}]
-		if !ok {
-			continue // the list failed: retried later
-		}
-		n, exists := dump[t.IP.String()]
-		if !exists || neighStatic(n) || !neighManaged(n) {
-			delete(k.owned, key) // gone, or someone changed it since
-			continue
-		}
-		if err := k.neigh.del(n); err != nil && !errors.Is(err, unix.ENOENT) {
-			k.warnOnce("release "+key, "cannot give back an encapsulation next hop", err,
-				zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
+		if err := k.releaseLocked(t, usedBy[t.key()], dumps); err != nil {
 			errs = append(errs, err)
-			continue // still owned: retried later
 		}
-		delete(k.owned, key)
-		delete(k.warned, "release "+key)
-		k.logger.Info("encapsulation next hop no longer used; managed neighbour removed",
-			zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
 	}
 	return errors.Join(errs...)
 }
 
-// rescueLocked puts back into the set, with their next hops, the dropped
+// neighGroup is one device and family, the unit of a neighbour list.
+type neighGroup struct{ ifindex, family int }
+
+// releaseLocked gives back one owned next hop no destination of the set
+// uses; droppedUsers are the destinations this sweep drops that used it.
+// The check for a write of one of them and the delete of the entry both run
+// under pmu, the lock Notify takes, so a write lands either before the check
+// (the destination goes back into the set and the entry stays) or after the
+// delete (the next pass resolves the destination again, as a new one). A
+// release is rare and the delete is one netlink call, so that is as long as
+// a writer can wait. Callers hold mu.
+func (k *EncapNeighKeeper) releaseLocked(t NeighTarget, droppedUsers []netip.Addr, dumps map[neighGroup]map[string]netlink.Neigh) error {
+	k.pmu.Lock()
+	defer k.pmu.Unlock()
+	key := t.key()
+	if k.rescuePLocked(droppedUsers) {
+		return nil // written again since the walk: still in use
+	}
+	if _, bum := bumNeighClaims.Load(key); bum {
+		delete(k.owned, key) // the BUM flood slots hold it now
+		return nil
+	}
+	dump, ok := dumps[neighGroup{int(t.Ifindex), ipFamily(t.IP)}]
+	if !ok {
+		return nil // the list failed: retried later
+	}
+	n, exists := dump[t.IP.String()]
+	if !exists || neighStatic(n) || !neighManaged(n) {
+		delete(k.owned, key) // gone, or someone changed it since
+		return nil
+	}
+	if k.beforeReleaseDel != nil {
+		k.beforeReleaseDel(t)
+	}
+	if err := k.neigh.del(n); err != nil && !errors.Is(err, unix.ENOENT) {
+		k.warnOnce("release "+key, "cannot give back an encapsulation next hop", err,
+			zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
+		return err // still owned: retried later
+	}
+	delete(k.owned, key)
+	delete(k.warned, "release "+key)
+	k.logger.Info("encapsulation next hop no longer used; managed neighbour removed",
+		zap.Uint32("ifindex", t.Ifindex), zap.Stringer("nexthop", t.IP))
+	return nil
+}
+
+// rescuePLocked puts back into the set, with their next hops, the dropped
 // destinations among dsts that were written since the sweep's walk began
 // (queued, or collected by the sweep), and reports whether there was one.
-// It reads the writes under pmu right before the release it decides. A
-// rescue asks for one more pass, which makes any next hop of the rescued
-// destinations released earlier in this one again.
-func (k *EncapNeighKeeper) rescueLocked(dsts []netip.Addr) bool {
-	if len(dsts) == 0 {
-		return false
-	}
-	k.pmu.Lock()
+// A rescue asks for one more pass, which makes any next hop of the rescued
+// destinations released earlier in this one again. Callers hold mu and pmu.
+func (k *EncapNeighKeeper) rescuePLocked(dsts []netip.Addr) bool {
 	rescued := false
 	for _, d := range dsts {
 		_, queued := k.pending[d]
@@ -832,10 +852,7 @@ func (k *EncapNeighKeeper) rescueLocked(dsts []netip.Addr) bool {
 	}
 	if rescued {
 		k.rekeep = true
-	}
-	k.pmu.Unlock()
-	if rescued {
-		k.poke()
+		k.poke() // never blocks
 	}
 	return rescued
 }

@@ -824,6 +824,9 @@ func (s *VrfServer) VrfShow(
 	for _, v := range vrfs {
 		pv := vrfToProto(v)
 		pv.MembersWithoutAc = uncovered[v.Name]
+		if v.Device != nil && !v.Device.NoUnreachableDefault {
+			pv.TableHeldOpen = s.mgr.TableHeldOpen(v.Device.TableID)
+		}
 		out = append(out, pv)
 	}
 	pol := s.mgr.Policy()

@@ -1475,3 +1475,27 @@ func TestVrfServer_CreateRefusesClosingSharedTable(t *testing.T) {
 		t.Errorf("opted-out create: %v %v", err, resp.Msg.GetErrors())
 	}
 }
+
+// VrfShow reports a table the boot held open for an L2 headend circuit on
+// the VRFs that ask for the unreachable default.
+func TestVrfServer_ShowTableHeldOpen(t *testing.T) {
+	s, _, _ := newTestVrfServerFull()
+	ctx := context.Background()
+	for _, v := range []*v1.Vrf{{Name: "vrf-a", TableId: 600}, {Name: "vrf-o", TableId: 600, NoUnreachableDefault: true}} {
+		if resp, err := s.VrfCreate(ctx, connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{v}})); err != nil || len(resp.Msg.Errors) != 0 {
+			t.Fatalf("VrfCreate %s: %v %v", v.Name, err, resp.Msg.GetErrors())
+		}
+	}
+	s.mgr.SetTablesHeldOpen(func() map[uint32]string { return map[uint32]string{600: "L2 headend circuit {eth6, vlan 0} on a port of VRF vrf-a"} })
+	resp, err := s.VrfShow(ctx, connect.NewRequest(&v1.VrfShowRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, v := range resp.Msg.Vrfs {
+		got[v.Name] = v.TableHeldOpen
+	}
+	if !strings.Contains(got["vrf-a"], "{eth6, vlan 0}") || got["vrf-o"] != "" {
+		t.Errorf("table_held_open = %v, want the circuit on vrf-a only", got)
+	}
+}

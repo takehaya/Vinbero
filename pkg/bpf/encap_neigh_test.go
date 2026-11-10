@@ -802,17 +802,42 @@ func TestEncapNeighKeeperConservativePrune(t *testing.T) {
 	}
 	k.res.dumpMain = func() ([]netlink.Route, error) { return main, nil }
 
-	// Two complete misses in a row: dropped and given back.
+	// Two complete misses in a row: dropped and given back. A writer that
+	// notifies b between the release check and the delete cannot get in: it
+	// waits for the delete, and the next pass resolves b again as new.
+	var writer sync.WaitGroup
+	k.beforeReleaseDel = func(tg NeighTarget) {
+		if tg.key() != bKey {
+			return
+		}
+		if k.pmu.TryLock() {
+			k.pmu.Unlock()
+			t.Error("a writer can notify between the release check and the delete")
+		}
+		writer.Add(1)
+		go func() {
+			defer writer.Done()
+			k.Notify([]netip.Addr{b})
+		}()
+	}
 	for range sweepsBeforeRelease {
 		if _, err := k.Sweep(); err != nil {
 			t.Fatal(err)
 		}
 	}
+	writer.Wait()
 	if _, ok := k.dests[b]; ok {
 		t.Fatal("fc00:2::1 kept after two complete misses in a row")
 	}
 	if !slices.Equal(nt.dels, []string{bKey}) {
 		t.Errorf("released = %v, want %s", nt.dels, bKey)
+	}
+	sets := len(nt.sets)
+	if err := k.pass(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := k.dests[b]; !ok || len(nt.sets) != sets+1 || nt.sets[sets] != bKey {
+		t.Errorf("after the write that waited for the delete: in set %v, sets %v; want fc00:2::1 resolved again and %s managed", ok, nt.sets[sets:], bKey)
 	}
 }
 

@@ -515,6 +515,11 @@ message Vrf {
   // unreachable default their encapsulation is dropped at the VRF table.
   // Server-reported (VrfShow).
   repeated string members_without_ac = 10;
+  // Set when the device's table has no unreachable default although this
+  // VRF asks for it, because the daemon's start found an L2 headend circuit
+  // the route would cut off: that circuit. The table stays open until a
+  // start that finds none. Server-reported (VrfShow).
+  string table_held_open = 11;
 }
 
 message VrfCreateRequest {
