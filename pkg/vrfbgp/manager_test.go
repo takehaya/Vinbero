@@ -522,3 +522,41 @@ func TestImportFilterHook(t *testing.T) {
 		t.Errorf("changes =\n%v\nwant\n%v", got, want)
 	}
 }
+
+type failingVRFStore struct {
+	err   error
+	saved []vrf.State
+}
+
+func (f *failingVRFStore) SaveVRFState(s vrf.State) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.saved = append(f.saved, s)
+	return nil
+}
+
+// Bindings are not saved, so an unwritable state file does not fail a bind.
+// The id it allocated is written by the next save that succeeds.
+func TestManager_BindDoesNotDependOnTheStateFile(t *testing.T) {
+	m := NewManager()
+	store := &failingVRFStore{err: errors.New("read-only file system")}
+	m.VRF().SetStore(store)
+	if err := m.Bind(Binding{VRFName: "vrf-a", ImportRTs: []string{"65000:1"}}); err != nil {
+		t.Fatalf("Bind with an unwritable state file: %v", err)
+	}
+	if _, ok := m.Get("vrf-a"); !ok {
+		t.Fatal("binding not stored")
+	}
+	if err := m.Bind(Binding{VRFName: "vrf-a", ImportRTs: []string{"65000:2"}}); err != nil {
+		t.Fatalf("rebind with an unwritable state file: %v", err)
+	}
+	id, _ := m.VRF().IDForName("vrf-a")
+	store.err = nil
+	if err := m.VRF().Save(); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.saved) != 1 || len(store.saved[0].VRFs) != 1 || store.saved[0].VRFs[0].ID != id {
+		t.Errorf("saved %+v, want vrf-a with id %d", store.saved, id)
+	}
+}

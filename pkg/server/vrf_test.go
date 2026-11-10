@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1129,5 +1130,159 @@ func TestVrfServer_DeleteIsPersisted(t *testing.T) {
 	last := store.saved[len(store.saved)-1]
 	if len(last.VRFs) != 0 || last.NextID <= id {
 		t.Errorf("saved %+v, want no VRFs and a next id above %d", last, id)
+	}
+}
+
+// A removal whose save fails stays in effect in memory and in the data plane,
+// the error says so, and the retry after the disk recovers saves it.
+func TestVrfServer_AcRemoveSaveFailureKeepsTheRemoval(t *testing.T) {
+	s, prog := newTestVrfServer()
+	store := &fakeVrfStore{}
+	s.mgr.SetStore(store)
+	ctx := context.Background()
+	ac := &v1.VrfAc{InterfaceName: "eth1"}
+	if _, err := s.VrfAcAdd(ctx, connect.NewRequest(&v1.VrfAcAddRequest{Name: "tenant-a", Ac: ac})); err != nil {
+		t.Fatal(err)
+	}
+	store.err = errors.New("disk full")
+	remove := func() error {
+		_, err := s.VrfAcRemove(ctx, connect.NewRequest(&v1.VrfAcRemoveRequest{Name: "tenant-a", Ac: ac}))
+		return err
+	}
+	err := remove()
+	if connect.CodeOf(err) != connect.CodeInternal || !strings.Contains(err.Error(), "not written") {
+		t.Fatalf("VrfAcRemove with a failing store: %v, want Internal saying the file was not written", err)
+	}
+	if v, _ := s.mgr.Get("tenant-a"); len(v.ACs) != 0 || len(prog.mapping) != 0 {
+		t.Fatalf("removal not in effect: ACs %v, map %v", v.ACs, prog.mapping)
+	}
+	store.err = nil
+	if err := remove(); err != nil {
+		t.Fatalf("retry after the disk recovered: %v", err)
+	}
+	if last := store.saved[len(store.saved)-1].VRFs; len(last) != 1 || len(last[0].RuntimeACs) != 0 {
+		t.Errorf("saved %+v, want tenant-a without ACs", last)
+	}
+}
+
+// A delete whose save fails is reported as deleted and as not saved, and the
+// retry saves it instead of calling the VRF unknown.
+func TestVrfServer_DeleteSaveFailureIsDeletedAndRetryable(t *testing.T) {
+	s, _ := newTestVrfServer()
+	store := &fakeVrfStore{}
+	s.mgr.SetStore(store)
+	s.mgr.Ensure("tenant-a")
+	if err := s.mgr.Save(); err != nil {
+		t.Fatal(err)
+	}
+	store.err = errors.New("disk full")
+	del := func() *v1.VrfDeleteResponse {
+		resp, err := s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{"tenant-a"}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Msg
+	}
+	got := del()
+	if !slices.Equal(got.DeletedNames, []string{"tenant-a"}) || len(got.Errors) != 1 || !strings.Contains(got.Errors[0].Reason, "not written") {
+		t.Fatalf("delete with a failing store = %+v, want deleted plus a not-saved error", got)
+	}
+	if _, ok := s.mgr.Get("tenant-a"); ok {
+		t.Fatal("VRF still present")
+	}
+	got = del() // the disk is still full
+	if !slices.Equal(got.DeletedNames, []string{"tenant-a"}) || len(got.Errors) != 1 {
+		t.Fatalf("retry with a failing store = %+v", got)
+	}
+	store.err = nil
+	if got = del(); len(got.Errors) != 0 || !slices.Equal(got.DeletedNames, []string{"tenant-a"}) {
+		t.Fatalf("retry after the disk recovered = %+v, want deleted", got)
+	}
+	if last := store.saved[len(store.saved)-1]; len(last.VRFs) != 0 {
+		t.Errorf("saved %+v, want the VRF gone", last)
+	}
+	if got = del(); len(got.Errors) != 1 || !strings.Contains(got.Errors[0].Reason, "unknown VRF") {
+		t.Errorf("delete after the save = %+v, want unknown VRF", got)
+	}
+}
+
+// A create whose save fails returns the VRF it created with the error, and
+// the retry saves it.
+func TestVrfServer_CreateSaveFailureReturnsTheVRF(t *testing.T) {
+	s, _, _ := newTestVrfServerFull()
+	store := &fakeVrfStore{err: errors.New("disk full")}
+	s.mgr.SetStore(store)
+	create := func() *v1.VrfCreateResponse {
+		resp, err := s.VrfCreate(context.Background(), connect.NewRequest(&v1.VrfCreateRequest{Vrfs: []*v1.Vrf{{Name: "vrf-a", TableId: 100}}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Msg
+	}
+	got := create()
+	if len(got.Created) != 1 || got.Created[0].GetVrfId() == 0 || len(got.Errors) != 1 || !strings.Contains(got.Errors[0].Reason, "not written") {
+		t.Fatalf("create with a failing store = %+v, want the VRF plus a not-saved error", got)
+	}
+	id := got.Created[0].GetVrfId()
+	store.err = nil
+	if got = create(); len(got.Errors) != 0 || len(got.Created) != 1 || got.Created[0].GetVrfId() != id {
+		t.Fatalf("retry = %+v, want vrf-a with id %d", got, id)
+	}
+	if last := store.saved[len(store.saved)-1]; len(last.VRFs) != 1 || last.VRFs[0].ID != id {
+		t.Errorf("saved %+v", last)
+	}
+}
+
+// A bridge attach whose save fails stays attached, and the retry saves it.
+func TestVrfServer_BridgeAttachSaveFailureIsRetryable(t *testing.T) {
+	s, _, fdb, _, _ := newTestVrfServerBridge(nil)
+	store := &fakeVrfStore{err: errors.New("disk full")}
+	s.mgr.SetStore(store)
+	attach := func() error {
+		_, err := s.VrfBridgeAttach(context.Background(), connect.NewRequest(&v1.VrfBridgeAttachRequest{
+			VrfName: "evi-100", Bridge: &v1.Bridge{Name: "br100", BdId: 100}}))
+		return err
+	}
+	if err := attach(); connect.CodeOf(err) != connect.CodeInternal || !strings.Contains(err.Error(), "not written") {
+		t.Fatalf("attach with a failing store: %v", err)
+	}
+	if v, ok := s.mgr.Get("evi-100"); !ok || v.Bridge == nil || fdb.byBd[100] != 42 {
+		t.Fatalf("attach not in effect: %+v, registered %v", v, fdb.byBd)
+	}
+	store.err = nil
+	if err := attach(); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if last := store.saved[len(store.saved)-1]; len(last.VRFs) != 1 || last.VRFs[0].Name != "evi-100" {
+		t.Errorf("saved %+v", last)
+	}
+}
+
+// An AC add whose reconcile fails takes back the VRF it created and saves the
+// retired id, so a restart cannot hand it to another VRF.
+func TestVrfServer_AcAddReconcileFailureSavesTheRetiredID(t *testing.T) {
+	s, _ := newTestVrfServer()
+	store := &fakeVrfStore{}
+	s.mgr.SetStore(store)
+	_, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{Name: "typo", Ac: &v1.VrfAc{InterfaceName: "typo0"}}))
+	if err == nil {
+		t.Fatal("VrfAcAdd of an unresolvable interface succeeded")
+	}
+	if _, ok := s.mgr.Get("typo"); ok {
+		t.Error("the VRF the failed add created is still there")
+	}
+	if len(store.saved) == 0 {
+		t.Fatal("nothing saved after the failed add")
+	}
+	if last := store.saved[len(store.saved)-1]; len(last.VRFs) != 0 || last.NextID < 2 {
+		t.Errorf("saved %+v, want no VRF and the id 1 retired", last)
+	}
+	// An existing VRF stays when an AC add to it fails.
+	s.mgr.Ensure("kept")
+	if _, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{Name: "kept", Ac: &v1.VrfAc{InterfaceName: "typo0"}})); err == nil {
+		t.Fatal("VrfAcAdd of an unresolvable interface succeeded")
+	}
+	if _, ok := s.mgr.Get("kept"); !ok {
+		t.Error("a failed AC add removed an existing VRF")
 	}
 }

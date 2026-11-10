@@ -116,6 +116,22 @@ type Manager struct {
 	store  StateStore
 	dirty  bool
 	saveMu sync.Mutex
+	// unsavedDeletes are the VRFs deleted since the last successful Save, so
+	// a retried delete can tell "already deleted, not yet saved" from an
+	// unknown name. Guarded by mu.
+	unsavedDeletes map[string]struct{}
+	// configOrigin are the VRFs the boot-time load created (the config, or a
+	// device or bridge record) rather than the API. FinishRestore drops one
+	// the config no longer declares once nothing holds it. Guarded by mu.
+	configOrigin map[string]struct{}
+	// restored are the names Restore loaded; FinishRestore clears it and
+	// sets restoreDone. Guarded by mu.
+	restored    map[string]struct{}
+	restoreDone bool
+	// goneMu guards goneACs, the runtime ACs Reconcile has already warned
+	// about, so a stale AC is reported once rather than on every reconcile.
+	goneMu  sync.Mutex
+	goneACs map[runtimeACKey]struct{}
 }
 
 type runtimeACKey struct {
@@ -132,6 +148,10 @@ func NewManager() *Manager {
 
 		runtimeACs: make(map[runtimeACKey]struct{}),
 		logger:     zap.NewNop(),
+
+		unsavedDeletes: make(map[string]struct{}),
+		configOrigin:   make(map[string]struct{}),
+		goneACs:        make(map[runtimeACKey]struct{}),
 	}
 }
 
@@ -193,6 +213,7 @@ func (m *Manager) ensureLocked(name string) *VRF {
 	v := &VRF{Name: name, ID: id}
 	m.byName[name] = v
 	m.byID[v.ID] = name
+	delete(m.unsavedDeletes, name)
 	m.dirty = true
 	return v
 }
@@ -297,6 +318,9 @@ func (m *Manager) RemoveAC(name string, ac AC) (removed bool) {
 		delete(m.runtimeACs, runtimeACKey{name, ac})
 		m.dirty = true
 	}
+	m.goneMu.Lock()
+	delete(m.goneACs, runtimeACKey{name, ac})
+	m.goneMu.Unlock()
 	return removed
 }
 
@@ -331,7 +355,19 @@ func (m *Manager) Delete(name string) {
 	for _, ac := range v.ACs {
 		delete(m.runtimeACs, runtimeACKey{name, ac})
 	}
+	delete(m.configOrigin, name)
+	m.unsavedDeletes[name] = struct{}{}
 	m.dirty = true
+}
+
+// UnsavedDelete reports whether name was deleted and the deletion has not been
+// saved yet. A retried delete uses it to save instead of reporting an unknown
+// VRF.
+func (m *Manager) UnsavedDelete(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.unsavedDeletes[name]
+	return ok
 }
 
 // PersistedVRF is what survives a restart of one VRF object: its identity and
@@ -340,6 +376,9 @@ type PersistedVRF struct {
 	Name       string
 	ID         uint32
 	RuntimeACs []AC
+	// Config: the boot-time load created the VRF, not the API (see
+	// FinishRestore).
+	Config bool
 }
 
 // State is the persistent part of the Manager.
@@ -370,11 +409,19 @@ func (m *Manager) Save() error {
 	defer m.saveMu.Unlock()
 	m.mu.Lock()
 	store := m.store
+	if store == nil {
+		// No file, so no deletion is missing from one.
+		clear(m.unsavedDeletes)
+	}
 	if store == nil || !m.dirty {
 		m.mu.Unlock()
 		return nil
 	}
 	state := m.stateLocked()
+	deleted := make([]string, 0, len(m.unsavedDeletes))
+	for name := range m.unsavedDeletes {
+		deleted = append(deleted, name)
+	}
 	m.dirty = false
 	m.mu.Unlock()
 
@@ -384,7 +431,21 @@ func (m *Manager) Save() error {
 		m.mu.Unlock()
 		return fmt.Errorf("save vrf state: %w", err)
 	}
+	m.mu.Lock()
+	for _, name := range deleted {
+		delete(m.unsavedDeletes, name)
+	}
+	m.mu.Unlock()
 	return nil
+}
+
+// TrySave is Save for a caller whose own result does not depend on the state
+// file. A failure is logged; the state stays dirty and the next successful
+// Save writes it.
+func (m *Manager) TrySave() {
+	if err := m.Save(); err != nil {
+		m.logger.Warn("VRF state not saved; the next successful save writes it, a restart before that loses the change", zap.Error(err))
+	}
 }
 
 // stateLocked snapshots the persistent state, sorted so equal states encode
@@ -392,7 +453,8 @@ func (m *Manager) Save() error {
 func (m *Manager) stateLocked() State {
 	s := State{NextID: m.nextID, VRFs: make([]PersistedVRF, 0, len(m.byName))}
 	for _, v := range m.byName {
-		p := PersistedVRF{Name: v.Name, ID: v.ID}
+		_, config := m.configOrigin[v.Name]
+		p := PersistedVRF{Name: v.Name, ID: v.ID, Config: config}
 		for _, ac := range v.ACs {
 			if _, ok := m.runtimeACs[runtimeACKey{v.Name, ac}]; ok {
 				p.RuntimeACs = append(p.RuntimeACs, ac)
@@ -408,13 +470,14 @@ func (m *Manager) stateLocked() State {
 // Restore loads a saved state into an empty Manager. It runs before anything
 // can allocate an id. A state that breaks the Manager's invariants is refused
 // rather than repaired: guessing would put an AC or an id in the wrong tenant.
+// That includes a saved id at or above NextID, which the allocator would hand
+// out again. The zero State (nothing saved yet) is valid.
 func (m *Manager) Restore(s State) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.byName) != 0 {
+	if len(m.byName) != 0 || m.restoreDone {
 		return errors.New("vrf: Restore needs an empty manager")
 	}
-	next := max(s.NextID, 1)
 	names := make(map[string]struct{}, len(s.VRFs))
 	ids := make(map[uint32]string, len(s.VRFs))
 	owners := make(map[AC]string)
@@ -433,7 +496,6 @@ func (m *Manager) Restore(s State) error {
 			return fmt.Errorf("vrf %q: saved id %d is also held by vrf %q", p.Name, p.ID, other)
 		}
 		ids[p.ID] = p.Name
-		next = max(next, p.ID+1)
 		for _, ac := range p.RuntimeACs {
 			if ac.Interface == "" || ac.VLAN > 4095 {
 				return fmt.Errorf("vrf %q: saved ac {interface %q, vlan %d} is invalid", p.Name, ac.Interface, ac.VLAN)
@@ -445,14 +507,74 @@ func (m *Manager) Restore(s State) error {
 		}
 	}
 	for _, p := range s.VRFs {
+		if p.ID >= s.NextID {
+			return fmt.Errorf("vrf %q: saved id %d is not below next_vrf_id %d, so it could be handed out again", p.Name, p.ID, s.NextID)
+		}
+	}
+	m.restored = make(map[string]struct{}, len(s.VRFs))
+	for _, p := range s.VRFs {
 		m.byName[p.Name] = &VRF{Name: p.Name, ID: p.ID, ACs: slices.Clone(p.RuntimeACs)}
 		m.byID[p.ID] = p.Name
 		for _, ac := range p.RuntimeACs {
 			m.runtimeACs[runtimeACKey{p.Name, ac}] = struct{}{}
 		}
+		if p.Config {
+			m.configOrigin[p.Name] = struct{}{}
+		}
+		m.restored[p.Name] = struct{}{}
 	}
-	m.nextID = next
+	m.nextID = max(s.NextID, 1)
 	return nil
+}
+
+// FinishRestore ends the boot-time load. declared are the VRF names the
+// config declares (vrfs.entries and bgp.vrf_bindings). Every VRF the load
+// created, and every declared one, is marked as config-origin. A restored
+// config-origin VRF that is no longer declared and holds no AC, device or
+// bridge is dropped and its id stays retired: nothing refers to it any more,
+// and keeping it would bring it back on every boot. A VRF created over the API
+// stays until it is deleted. It returns the dropped names. Only the first call
+// does anything.
+func (m *Manager) FinishRestore(declared []string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.restoreDone {
+		return nil
+	}
+	decl := make(map[string]struct{}, len(declared))
+	for _, name := range declared {
+		decl[name] = struct{}{}
+	}
+	var dropped []string
+	for name, v := range m.byName {
+		_, wasRestored := m.restored[name]
+		_, isConfig := m.configOrigin[name]
+		_, isDeclared := decl[name]
+		if wasRestored && isConfig && !isDeclared && len(v.ACs) == 0 && v.Device == nil && v.Bridge == nil {
+			delete(m.byName, name)
+			delete(m.byID, v.ID)
+			delete(m.configOrigin, name)
+			m.dirty = true
+			dropped = append(dropped, name)
+			continue
+		}
+		if !isConfig && (!wasRestored || isDeclared) {
+			m.configOrigin[name] = struct{}{}
+			m.dirty = true
+		}
+	}
+	m.restored = nil
+	m.restoreDone = true
+	sort.Strings(dropped)
+	return dropped
+}
+
+// RestoreDone reports whether FinishRestore ran: the VRF objects, with every
+// facet the boot-time load gives them, are in place.
+func (m *Manager) RestoreDone() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.restoreDone
 }
 
 // ReleaseRuntimeAC drops the runtime record of ac under whichever VRF holds
@@ -853,13 +975,16 @@ func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programme
 		for _, ac := range s.acs {
 			idx, err := resolve(ac.Interface)
 			if errors.Is(err, ErrInterfaceGone) && s.runtime[ac] {
-				m.logger.Warn("Skipping AC whose interface is gone until its owner removes it",
-					zap.String("vrf", s.name), zap.String("interface", ac.Interface), zap.Uint16("vlan", ac.VLAN))
+				if m.noteGone(runtimeACKey{s.name, ac}, true) {
+					m.logger.Warn("Skipping AC whose interface is gone until it is removed (vbctl vrf ac-remove)",
+						zap.String("vrf", s.name), zap.String("interface", ac.Interface), zap.Uint16("vlan", ac.VLAN))
+				}
 				continue
 			}
 			if err != nil {
 				return fmt.Errorf("vrf %q: resolve %q: %w", s.name, ac.Interface, err)
 			}
+			m.noteGone(runtimeACKey{s.name, ac}, false)
 			// AddAC blocks the same {interface, vlan} across VRFs, but two
 			// distinct interface names can still resolve to one ifindex; surface
 			// that as a fatal config error rather than letting classification
@@ -877,6 +1002,20 @@ func (m *Manager) Reconcile(resolve func(string) (uint32, error), prog Programme
 		return err
 	}
 	return prog.SetIngressPolicy(enabled, pol.DefaultDeny, pol.DenyAction)
+}
+
+// noteGone records whether a runtime AC's interface is gone and reports
+// whether that is news, so Reconcile warns once per disappearance.
+func (m *Manager) noteGone(key runtimeACKey, gone bool) bool {
+	m.goneMu.Lock()
+	defer m.goneMu.Unlock()
+	_, known := m.goneACs[key]
+	if gone {
+		m.goneACs[key] = struct{}{}
+	} else {
+		delete(m.goneACs, key)
+	}
+	return gone && !known
 }
 
 // ResolveByName is the production interface-name resolver (net.InterfaceByName).

@@ -3,11 +3,14 @@ package vrf
 import (
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type fakeStore struct {
@@ -187,15 +190,147 @@ func TestState_RestoreRefusesContradictions(t *testing.T) {
 	}
 }
 
-// A next id behind the saved ids must not hand one of them out again.
-func TestState_RestoreNextIDIsAboveEverySavedID(t *testing.T) {
-	m := restart(t, State{NextID: 2, VRFs: []PersistedVRF{{Name: "a", ID: 7}}})
+// A saved id at or above the watermark would be handed out again, so the
+// state is refused; that covers an id with no successor (MaxUint32) too.
+func TestState_RestoreRefusesAnIDAtOrAboveTheWatermark(t *testing.T) {
+	for name, st := range map[string]State{
+		"watermark below an id": {NextID: 2, VRFs: []PersistedVRF{{Name: "a", ID: 7}}},
+		"watermark at an id":    {NextID: 7, VRFs: []PersistedVRF{{Name: "a", ID: 7}}},
+		"no watermark":          {VRFs: []PersistedVRF{{Name: "a", ID: 1}}},
+		"last uint32":           {NextID: 2, VRFs: []PersistedVRF{{Name: "a", ID: 1}, {Name: "b", ID: math.MaxUint32}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := NewManager()
+			if err := m.Restore(st); err == nil || !strings.Contains(err.Error(), "next_vrf_id") {
+				t.Fatalf("Restore = %v, want a next_vrf_id error", err)
+			}
+			if len(m.List()) != 0 {
+				t.Errorf("partial restore left %+v", m.List())
+			}
+		})
+	}
+	m := restart(t, State{NextID: 8, VRFs: []PersistedVRF{{Name: "a", ID: 7}}})
 	if id := m.Ensure("b").ID; id != 8 {
 		t.Errorf("next id = %d, want 8", id)
 	}
 	// A file from before ids were recorded starts the allocator at 1.
 	if id := restart(t, State{}).Ensure("b").ID; id != 1 {
 		t.Errorf("next id on an empty state = %d, want 1", id)
+	}
+}
+
+// A VRF the boot-time load created comes back only while the config declares
+// it or something still holds it. One created over the API stays until it is
+// deleted. A dropped VRF's id is not handed out again.
+func TestState_FinishRestoreDropsConfigVRFsNothingHolds(t *testing.T) {
+	store := &fakeStore{}
+	m := NewManager()
+	m.SetStore(store)
+	m.Ensure("cfg-kept")
+	m.Ensure("cfg-gone")
+	addRuntimeAC(t, m, "cfg-with-ac", AC{"veth1", 0})
+	if _, err := m.SetBridge("legacy-br", Bridge{Name: "legacy-br", BdID: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if dropped := m.FinishRestore([]string{"cfg-kept", "cfg-gone", "cfg-with-ac"}); len(dropped) != 0 {
+		t.Fatalf("first boot dropped %v", dropped)
+	}
+	api := m.Ensure("api") // after the boot-time load
+	if err := m.Save(); err != nil {
+		t.Fatal(err)
+	}
+	st := store.last(t)
+	for _, p := range st.VRFs {
+		if p.Config != (p.Name != "api") {
+			t.Errorf("%s saved with Config=%v", p.Name, p.Config)
+		}
+	}
+
+	// Next boot: the config dropped every entry, and the bridge record moved
+	// to its real VRF.
+	m2 := restart(t, st)
+	if _, err := m2.SetBridge("tenant", Bridge{Name: "legacy-br", BdID: 10}); err != nil {
+		t.Fatal(err)
+	}
+	dropped := m2.FinishRestore(nil)
+	if want := []string{"cfg-gone", "cfg-kept", "legacy-br"}; !reflect.DeepEqual(dropped, want) {
+		t.Errorf("dropped = %v, want %v", dropped, want)
+	}
+	for _, name := range []string{"cfg-with-ac", "api", "tenant"} {
+		if _, ok := m2.Get(name); !ok {
+			t.Errorf("%s not kept", name)
+		}
+	}
+	if id := m2.Ensure("new").ID; id <= api.ID {
+		t.Errorf("new VRF got %d, want above every earlier id (last %d)", id, api.ID)
+	}
+	if !m2.RestoreDone() {
+		t.Error("RestoreDone after FinishRestore = false")
+	}
+}
+
+// A delete whose save failed is reported as unsaved until a save succeeds.
+func TestState_UnsavedDeleteUntilTheNextSave(t *testing.T) {
+	store := &fakeStore{err: errors.New("disk full")}
+	m := NewManager()
+	m.SetStore(store)
+	m.Ensure("a")
+	m.Delete("a")
+	if err := m.Save(); err == nil {
+		t.Fatal("Save hid the store's error")
+	}
+	if !m.UnsavedDelete("a") || m.UnsavedDelete("b") {
+		t.Fatalf("UnsavedDelete(a)=%v (b)=%v", m.UnsavedDelete("a"), m.UnsavedDelete("b"))
+	}
+	store.err = nil
+	if err := m.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if m.UnsavedDelete("a") {
+		t.Error("still unsaved after a successful save")
+	}
+	if len(store.last(t).VRFs) != 0 {
+		t.Errorf("saved %+v, want the VRF gone", store.last(t))
+	}
+	// Recreating the name ends the pending delete as well.
+	m.Delete("b")
+	m.Ensure("b")
+	if m.UnsavedDelete("b") {
+		t.Error("recreated VRF still counts as deleted")
+	}
+}
+
+// A restored AC whose interface is gone is warned about once, not on every
+// reconcile, and again when it disappears a second time.
+func TestState_GoneRuntimeACWarnsOnce(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	m := restart(t, State{NextID: 2, VRFs: []PersistedVRF{{Name: "a", ID: 1, RuntimeACs: []AC{{"veth1", 0}}}}})
+	m.SetLogger(zap.New(core))
+	present := false
+	res := func(n string) (uint32, error) {
+		if present {
+			return 5, nil
+		}
+		return 0, fmt.Errorf("%w: %s", ErrInterfaceGone, n)
+	}
+	for range 3 {
+		if err := m.Reconcile(res, &fakeProg{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := logs.Len(); n != 1 {
+		t.Fatalf("warnings after three reconciles = %d, want 1", n)
+	}
+	present = true
+	if err := m.Reconcile(res, &fakeProg{}); err != nil {
+		t.Fatal(err)
+	}
+	present = false
+	if err := m.Reconcile(res, &fakeProg{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := logs.Len(); n != 2 {
+		t.Errorf("warnings after the interface came and went = %d, want 2", n)
 	}
 }
 

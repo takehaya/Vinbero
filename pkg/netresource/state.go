@@ -2,9 +2,11 @@ package netresource
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 type ManagedState struct {
@@ -19,9 +21,41 @@ type ManagedState struct {
 }
 
 // ManagedVrfObjects is the vrf_id allocator and one record per VRF object.
+// Both fields are required: without the watermark the ids of deleted VRFs
+// could be handed out again, and without the entries every saved id and AC
+// would be lost, so a record missing either is refused like a file that does
+// not parse.
 type ManagedVrfObjects struct {
 	NextVrfID uint32             `json:"next_vrf_id"`
 	Entries   []ManagedVrfObject `json:"entries"`
+}
+
+func (o *ManagedVrfObjects) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		NextVrfID *uint32             `json:"next_vrf_id"`
+		Entries   *[]ManagedVrfObject `json:"entries"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.NextVrfID == nil || *raw.NextVrfID == 0 {
+		return errors.New("vrf_objects: next_vrf_id is missing or 0")
+	}
+	if raw.Entries == nil {
+		return errors.New("vrf_objects: entries is missing")
+	}
+	o.NextVrfID, o.Entries = *raw.NextVrfID, *raw.Entries
+	return nil
+}
+
+// clone copies o, with an empty rather than nil Entries so it encodes as [].
+func (o *ManagedVrfObjects) clone() *ManagedVrfObjects {
+	c := &ManagedVrfObjects{NextVrfID: o.NextVrfID, Entries: make([]ManagedVrfObject, 0, len(o.Entries))}
+	for _, e := range o.Entries {
+		e.RuntimeACs = slices.Clone(e.RuntimeACs)
+		c.Entries = append(c.Entries, e)
+	}
+	return c
 }
 
 // ManagedVrfObject is what a VRF object keeps across a restart, by name. A
@@ -34,6 +68,11 @@ type ManagedVrfObject struct {
 	// RuntimeACs are the ACs added over the API. Unlike the ACs of the
 	// config, one whose interface is gone is skipped with a warning.
 	RuntimeACs []ManagedAC `json:"runtime_acs,omitempty"`
+	// Config is set when the VRF came from the boot-time load (the config
+	// file, or a device or bridge record) rather than from the API. Such a
+	// VRF is not restored once the config no longer declares it and it holds
+	// no AC, device or bridge; its id stays retired.
+	Config bool `json:"config,omitempty"`
 }
 
 // ManagedAC is one ingress access circuit.

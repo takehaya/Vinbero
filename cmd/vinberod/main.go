@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -104,8 +105,12 @@ func run(cliCtx *cli.Context) error {
 	}
 	vrfBgpMgr := vrfbgp.NewManager()
 	vrfBgpMgr.VRF().SetLogger(lg)
+	bindingVRFs := make([]string, 0, len(cfg.BGP.VrfBindings))
+	for _, b := range cfg.BGP.VrfBindings {
+		bindingVRFs = append(bindingVRFs, b.VRFName)
+	}
 	err = bringUpDataPlane(func() error {
-		return restoreVRFs(cfg.VRFs, vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetResourceManager(), lg)
+		return restoreVRFs(cfg.VRFs, bindingVRFs, cliCtx.Bool("bgp-enabled"), vrfBgpMgr.VRF(), vin.GetMapOperations(), vin.GetResourceManager(), lg)
 	}, func() error {
 		if err := vin.AttachConfigDevices(); err != nil {
 			return fmt.Errorf("attach devices: %w", err)
@@ -129,6 +134,9 @@ func run(cliCtx *cli.Context) error {
 	// Start FDB watcher
 	if err := vin.StartFDBWatcher(ctx); err != nil {
 		return fmt.Errorf("start FDB watcher: %w", err)
+	}
+	if err := watchBridgeFacets(vrfBgpMgr.VRF(), vin.GetFDBWatcher()); err != nil {
+		return err
 	}
 	if err := vin.StartBumRouteWatch(ctx); err != nil {
 		return fmt.Errorf("start xdp BUM route watch: %w", err)
@@ -392,13 +400,6 @@ func run(cliCtx *cli.Context) error {
 		srv.SetProber(liveProber, proberIntervalMs, proberMultiplier)
 	}
 
-	// Boot-time VRF creation is done; from here every change is saved as it
-	// happens. Not being able to write the file must not stop a daemon that
-	// runs without the state directory.
-	srv.VrfManager().SetStore(vin.GetResourceManager())
-	if err := srv.VrfManager().Save(); err != nil {
-		lg.Warn("VRF state not saved; vrf_ids and runtime ACs will not survive a restart", zap.Error(err))
-	}
 	if bgpSession != nil {
 		// Registered before the Start attempt so a partial failure
 		// (global up, peers half-added) still gets torn down.
@@ -698,16 +699,42 @@ func bringUpDataPlane(classify, attach func() error) error {
 	return attach()
 }
 
-// restoreVRFs brings the VRF objects back and programs ingress_vrf_map: the
-// saved identities and runtime ACs first, so nothing allocates an id a previous
-// run already gave out, then the kernel devices and bridges the resource
-// manager reconciled from the state file, then the config (adopt-idempotent
-// over the seed). Failures are fatal: a config-declared AC, device or bridge
-// that cannot materialize is a misconfiguration the operator should see at
-// startup, and a state file that contradicts itself is not guessed around.
-func restoreVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, resMgr *netresource.ResourceManager, lg *zap.Logger) error {
-	if err := mgr.Restore(resMgr.VRFState()); err != nil {
+// restoreVRFs brings the VRF objects back, saves them, and programs
+// ingress_vrf_map.
+//
+// Ids: the saved identities and runtime ACs come first, so nothing allocates
+// an id a previous run gave out. A VRF without a saved id then allocates in
+// the order the daemon has always used: the config's bgp.vrf_bindings (when
+// BGP is enabled), the kernel devices and bridges the resource manager
+// reconciled from the state file, then vrfs.entries (adopt-idempotent over
+// the seed). A state file written before the ids were saved therefore gets
+// the ids the previous run had. A VRF the boot-time load created that the
+// config no longer declares, and that holds nothing, is not restored
+// (vrf.Manager.FinishRestore).
+//
+// Saving: the state is written before ingress_vrf_map, so an id reaches the
+// data plane only after it is on disk. A failed write is a warning, so a
+// daemon without a writable state directory still starts.
+//
+// Failures are fatal: a config-declared AC, device or bridge that cannot
+// materialize is a misconfiguration the operator should see at startup, and a
+// state file that contradicts itself is not guessed around.
+func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, mgr *vrf.Manager, prog vrf.Programmer, resMgr *netresource.ResourceManager, lg *zap.Logger) error {
+	store := vrfStateStore{res: resMgr}
+	if err := mgr.Restore(store.load()); err != nil {
 		return fmt.Errorf("vrf: %w (repair the state file, settings.state_path, and restart)", err)
+	}
+	declared := make([]string, 0, len(bindingVRFs)+len(cfg.Entries))
+	for _, name := range bindingVRFs {
+		declared = append(declared, name)
+		// vrfbgp.Manager.Bind ensures the same name later and refuses an
+		// empty one.
+		if bgpEnabled && name != "" {
+			mgr.Ensure(name)
+		}
+	}
+	for _, v := range cfg.Entries {
+		declared = append(declared, v.Name)
 	}
 	if err := seedVrfDevices(resMgr, mgr); err != nil {
 		return fmt.Errorf("vrf: %w", err)
@@ -715,18 +742,54 @@ func restoreVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, r
 	if err := seedVrfBridges(resMgr, mgr, cfg, lg); err != nil {
 		return fmt.Errorf("vrf: %w", err)
 	}
-	if err := loadVRFs(cfg, mgr, prog, resMgr, resMgr, lg); err != nil {
+	if err := loadVRFs(cfg, mgr, resMgr, resMgr, lg); err != nil {
+		return fmt.Errorf("vrf: %w", err)
+	}
+	for _, name := range mgr.FinishRestore(declared) {
+		lg.Info("VRF not restored: the config no longer declares it and nothing holds it; its vrf_id stays retired",
+			zap.String("vrf", name))
+	}
+	mgr.SetStore(store)
+	if err := mgr.Save(); err != nil {
+		lg.Warn("VRF state not saved; vrf_ids and runtime ACs will not survive a restart until a save succeeds", zap.Error(err))
+	}
+	if err := mgr.Reconcile(vrf.ResolveByName, prog); err != nil {
 		return fmt.Errorf("vrf: %w", err)
 	}
 	lg.Info("VRF ingress classification programmed", zap.Int("vrfs", len(mgr.List())))
 	return nil
 }
 
-// loadVRFs programs the VRFs' ingress facet from config at boot: it sets the
-// global policy, registers each VRF's access circuits, and reconciles the
-// data-plane maps. A config-declared interface that does not resolve is fatal
-// (surfaced at startup, not silently dropped).
-func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, dev vrf.DeviceOps, br vrf.BridgeOps, lg *zap.Logger) error {
+// bridgeRegistrar is the FDB-watcher surface watchBridgeFacets needs.
+type bridgeRegistrar interface {
+	RegisterBridge(ifindex int, bdID uint16)
+}
+
+// watchBridgeFacets registers every bridge facet with the FDB watcher, for
+// MAC learning and RT2. The watcher also registers the bridges of the state
+// file when it starts; this covers every facet, the config's included, and
+// refuses to run before restoreVRFs has created them, so a reorder of the
+// boot sequence fails the start instead of leaving bridges unwatched.
+// RegisterBridge is a pure map update, so registering a bridge twice is
+// harmless.
+func watchBridgeFacets(mgr *vrf.Manager, fdb bridgeRegistrar) error {
+	if !mgr.RestoreDone() {
+		return errors.New("vrf: the FDB watcher registration ran before the VRF objects were restored")
+	}
+	for _, v := range mgr.List() {
+		if v.Bridge != nil {
+			fdb.RegisterBridge(int(v.Bridge.Ifindex), v.Bridge.BdID)
+		}
+	}
+	return nil
+}
+
+// loadVRFs applies the config's vrfs: at boot: it sets the global policy and
+// creates (or adopts) each VRF's kernel device and bridge and registers its
+// access circuits. restoreVRFs programs the data-plane maps afterwards, where
+// a config-declared interface that does not resolve is fatal (surfaced at
+// startup, not silently dropped).
+func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, dev vrf.DeviceOps, br vrf.BridgeOps, lg *zap.Logger) error {
 	var action uint8
 	switch cfg.DenyAction {
 	case "", "drop":
@@ -753,8 +816,8 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, dev 
 			return fmt.Errorf("vrf %q: members / enable_l3mdev_rule require table_id (they configure the kernel device)", v.Name)
 		}
 		// L2 bridge-domain facet: creates (or adopts, idempotent over the
-		// state-file seed) the kernel bridge. The caller sweeps the facets
-		// into the FDB watcher after loadVRFs returns.
+		// state-file seed) the kernel bridge. watchBridgeFacets registers
+		// it with the FDB watcher once the watcher runs.
 		if v.Bridge != nil {
 			if v.Bridge.BdID == 0 || v.Bridge.BdID > math.MaxUint16 {
 				return fmt.Errorf("vrf %q: bridge bd_id %d out of range (1..%d)", v.Name, v.Bridge.BdID, math.MaxUint16)
@@ -788,13 +851,13 @@ func loadVRFs(cfg config.VRFsConfig, mgr *vrf.Manager, prog vrf.Programmer, dev 
 	if cfg.DefaultDeny {
 		lg.Warn("VRF default-deny enabled: unmapped ACs are dropped at XDP ingress; map every forwarding interface (underlay/control included) to a VRF or host-bound BGP/NDP is black-holed")
 	}
-	return mgr.Reconcile(vrf.ResolveByName, prog)
+	return nil
 }
 
 // seedVrfDevices mirrors the kernel VRF devices the resource manager holds in
 // its persisted state into the VRF objects, attaching each as a device facet.
-// It runs after NewServer (the vrf.Manager lives inside the vrf-bgp manager)
-// and before loadVRFs, so a config entry for the same name adopts rather than
+// restoreVRFs runs it after Restore, so a seeded VRF keeps its saved id, and
+// before loadVRFs, so a config entry for the same name adopts rather than
 // recreates. A persisted VRF named "global" is a fatal misconfiguration: the
 // reserved global VRF is the main table and can never carry a device.
 func seedVrfDevices(resMgr *netresource.ResourceManager, mgr *vrf.Manager) error {

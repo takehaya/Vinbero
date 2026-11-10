@@ -114,6 +114,15 @@ func (s *VrfServer) reconcile() error {
 	return s.mgr.Reconcile(s.resolve, s.prog)
 }
 
+// notSaved is the error of a change that is in effect, in memory and in the
+// data plane, but not in the state file. The change is not rolled back, the
+// same as a device attach or a VRF device whose record could not be written:
+// repeating the call is idempotent and saves again, and any later successful
+// save writes the whole state.
+func notSaved(done string, err error) error {
+	return fmt.Errorf("%s, but the state file was not written (repeat the call to save it): %w", done, err)
+}
+
 // reconcileOrRollback programs the data plane after an in-memory mutation. On
 // failure it invokes undo to revert the mutation and re-reconciles so the data
 // plane converges to the reverted state, then returns the original error. This
@@ -161,20 +170,22 @@ func (s *VrfServer) VrfCreate(
 	}
 	for _, in := range req.Msg.Vrfs {
 		created, opErr := s.createOne(in)
+		if created != nil {
+			resp.Created = append(resp.Created, vrfToProto(*created))
+		}
 		if opErr != nil {
 			resp.Errors = append(resp.Errors, opErr)
-			continue
 		}
-		resp.Created = append(resp.Created, vrfToProto(created))
 	}
 	return connect.NewResponse(resp), nil
 }
 
 // createOne validates and creates one kernel VRF device, returning the
-// resulting VRF (both server-assigned ids filled). Caller holds s.mu.
-func (s *VrfServer) createOne(in *v1.Vrf) (vrf.VRF, *v1.OperationError) {
-	fail := func(reason string) (vrf.VRF, *v1.OperationError) {
-		return vrf.VRF{}, &v1.OperationError{TriggerPrefix: in.GetName(), Reason: reason}
+// resulting VRF (both server-assigned ids filled). A VRF that was created but
+// not saved is returned together with the error. Caller holds s.mu.
+func (s *VrfServer) createOne(in *v1.Vrf) (*vrf.VRF, *v1.OperationError) {
+	fail := func(reason string) (*vrf.VRF, *v1.OperationError) {
+		return nil, &v1.OperationError{TriggerPrefix: in.GetName(), Reason: reason}
 	}
 	// acs / bridge / vrf_id / ifindex are managed elsewhere or server-owned; a
 	// request carrying them is a caller mixing up the facets (or replaying a
@@ -197,9 +208,9 @@ func (s *VrfServer) createOne(in *v1.Vrf) (vrf.VRF, *v1.OperationError) {
 		return fail(err.Error())
 	}
 	if err := s.mgr.Save(); err != nil {
-		return fail(err.Error())
+		return &created, &v1.OperationError{TriggerPrefix: in.GetName(), Reason: notSaved("created", err).Error()}
 	}
-	return created, nil
+	return &created, nil
 }
 
 // VrfDelete removes whole VRF objects. It refuses while anything still
@@ -217,11 +228,13 @@ func (s *VrfServer) VrfDelete(
 		Errors:       make([]*v1.OperationError, 0),
 	}
 	for _, name := range req.Msg.Names {
-		if opErr := s.deleteOne(name); opErr != nil {
-			resp.Errors = append(resp.Errors, opErr)
-			continue
+		deleted, opErr := s.deleteOne(name)
+		if deleted {
+			resp.DeletedNames = append(resp.DeletedNames, name)
 		}
-		resp.DeletedNames = append(resp.DeletedNames, name)
+		if opErr != nil {
+			resp.Errors = append(resp.Errors, opErr)
+		}
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -231,9 +244,18 @@ func (s *VrfServer) VrfDelete(
 // vrfbgp.Bind can still slip a binding in after the check (the same
 // check-then-act window today's SID check has) — acceptable, since the
 // binding then simply references a VRF that Ensure will recreate.
-func (s *VrfServer) deleteOne(name string) *v1.OperationError {
-	fail := func(reason string) *v1.OperationError {
-		return &v1.OperationError{TriggerPrefix: name, Reason: reason}
+//
+// deleted reports that the VRF is gone, also when the error says the state
+// file was not written. Repeating the delete of such a VRF saves again.
+func (s *VrfServer) deleteOne(name string) (deleted bool, opErr *v1.OperationError) {
+	fail := func(reason string) (bool, *v1.OperationError) {
+		return false, &v1.OperationError{TriggerPrefix: name, Reason: reason}
+	}
+	saved := func() (bool, *v1.OperationError) {
+		if err := s.mgr.Save(); err != nil {
+			return true, &v1.OperationError{TriggerPrefix: name, Reason: notSaved("deleted", err).Error()}
+		}
+		return true, nil
 	}
 	if name == "" {
 		return fail("vrf name is required")
@@ -243,6 +265,9 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 	}
 	v, ok := s.mgr.Get(name)
 	if !ok {
+		if s.mgr.UnsavedDelete(name) {
+			return saved()
+		}
 		return fail("unknown VRF (a raw kernel device is not managed here; adopt it via VrfCreate first)")
 	}
 	if len(v.ACs) > 0 {
@@ -306,10 +331,7 @@ func (s *VrfServer) deleteOne(name string) *v1.OperationError {
 		}
 	}
 	s.mgr.Delete(name)
-	if err := s.mgr.Save(); err != nil {
-		return fail(fmt.Sprintf("deleted, but the state file is out of date until the next successful save: %v", err))
-	}
-	return nil
+	return saved()
 }
 
 // findVrfReference returns the prefix of an End.T/DT4/DT6/DT46/uT SID whose
@@ -413,7 +435,7 @@ func (s *VrfServer) VrfBridgeAttach(
 		}
 	}
 	if err := s.mgr.Save(); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, notSaved("bridge attached", err))
 	}
 	return connect.NewResponse(&v1.VrfBridgeAttachResponse{Vrf: vrfToProto(attached)}), nil
 }
@@ -583,24 +605,36 @@ func (s *VrfServer) VrfAcAdd(
 	}
 	name := req.Msg.GetName()
 	acVal := vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())}
+	_, existed := s.mgr.Get(name)
 	added, err := s.mgr.AddAC(name, acVal)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	// Roll back only what this call changed: if the AC was already present
-	// (added == false), a reconcile failure must not remove the pre-existing AC.
+	// (added == false), a reconcile failure must not remove the pre-existing
+	// AC. A VRF this call created goes again; its id stays retired.
 	undo := func() error { return nil }
 	if added {
-		undo = func() error { s.mgr.RemoveAC(name, acVal); return nil }
+		undo = func() error {
+			s.mgr.RemoveAC(name, acVal)
+			if !existed {
+				s.mgr.Delete(name)
+			}
+			return nil
+		}
 	}
 	if err := s.reconcileOrRollback(undo); err != nil {
+		// Save the retired id, so a restart does not hand it out again.
+		if serr := s.mgr.Save(); serr != nil {
+			err = fmt.Errorf("%w; the state file was not written either: %v", err, serr)
+		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	if added {
 		s.mgr.MarkRuntimeAC(name, acVal)
 	}
 	if err := s.mgr.Save(); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, notSaved("ac added", err))
 	}
 	id, _ := s.mgr.IDForName(name)
 	v, _ := s.mgr.ByID(id)
@@ -651,7 +685,7 @@ func (s *VrfServer) VrfAcRemove(
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	if err := s.mgr.Save(); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, notSaved("ac removed", err))
 	}
 	return connect.NewResponse(&v1.VrfAcRemoveResponse{}), nil
 }
