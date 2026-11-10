@@ -1744,12 +1744,18 @@ func (m *MapOperations) ResetSlotStats(mapType string) error {
 
 // ===== Headend V4 Map Operations =====
 
-// CreateHeadendV4 adds a headend v4 entry. owner is persisted to
-// headend_v4_owner_map; empty owner returns ErrEmptyOwner, cross-owner
-// write returns ErrEntryOwnerMismatch.
+// CreateHeadendV4 adds a headend v4 entry in the global VRF. owner is
+// persisted to headend_v4_owner_map; empty owner returns ErrEmptyOwner,
+// cross-owner write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
+	return m.CreateHeadendV4In(HeadendGlobalVRF, triggerPrefix, entry, owner)
+}
+
+// CreateHeadendV4In is CreateHeadendV4 for the entry of triggerPrefix in
+// VRF vrfID. The same prefix in two VRFs is two entries with their own owners.
+func (m *MapOperations) CreateHeadendV4In(vrfID uint32, triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
 	defer m.encapWrote(headendDst(entry)...)
-	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV4Key(vrfID, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -1760,30 +1766,42 @@ func (m *MapOperations) CreateHeadendV4(triggerPrefix string, entry *HeadendEntr
 	return putMainAndOwner(m.objs.HeadendV4Map, m.headendV4Owners, key, entry, owner, alreadyOwned, "headend v4", nil)
 }
 
-// DeleteHeadendV4 removes a headend v4 entry after verifying the caller
-// owns it. Cross-owner deletes return ErrEntryOwnerMismatch. Use
-// ForceDeleteHeadendV4 for migration / force-override paths.
+// DeleteHeadendV4 removes a headend v4 entry of the global VRF after
+// verifying the caller owns it. Cross-owner deletes return
+// ErrEntryOwnerMismatch. Use ForceDeleteHeadendV4 for migration /
+// force-override paths.
 func (m *MapOperations) DeleteHeadendV4(triggerPrefix string, requester OwnerTag) error {
-	return m.deleteHeadendV4Internal(triggerPrefix, requester, false)
+	return m.DeleteHeadendV4In(HeadendGlobalVRF, triggerPrefix, requester)
 }
 
-// ForceDeleteHeadendV4 removes a headend v4 entry regardless of recorded
-// owner.
+// DeleteHeadendV4In is DeleteHeadendV4 for the entry in VRF vrfID.
+func (m *MapOperations) DeleteHeadendV4In(vrfID uint32, triggerPrefix string, requester OwnerTag) error {
+	return m.deleteHeadendV4Internal(vrfID, triggerPrefix, requester, false)
+}
+
+// ForceDeleteHeadendV4 removes a headend v4 entry of the global VRF
+// regardless of recorded owner.
 func (m *MapOperations) ForceDeleteHeadendV4(triggerPrefix string) error {
-	return m.deleteHeadendV4Internal(triggerPrefix, "", true)
+	return m.deleteHeadendV4Internal(HeadendGlobalVRF, triggerPrefix, "", true)
 }
 
-func (m *MapOperations) deleteHeadendV4Internal(triggerPrefix string, requester OwnerTag, force bool) error {
-	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
+func (m *MapOperations) deleteHeadendV4Internal(vrfID uint32, triggerPrefix string, requester OwnerTag, force bool) error {
+	key, err := BuildHeadendV4Key(vrfID, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 	return deleteHeadendKey(m.objs.HeadendV4Map, m.headendV4Owners, key, requester, force, "v4")
 }
 
-// GetHeadendV4 retrieves a headend v4 entry from the map
+// GetHeadendV4 retrieves a headend v4 entry of the global VRF.
 func (m *MapOperations) GetHeadendV4(triggerPrefix string) (*HeadendEntry, error) {
-	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
+	return m.GetHeadendV4In(HeadendGlobalVRF, triggerPrefix)
+}
+
+// GetHeadendV4In retrieves the entry covering triggerPrefix in VRF vrfID.
+// The VRF always matches in full, so an entry of another VRF never answers.
+func (m *MapOperations) GetHeadendV4In(vrfID uint32, triggerPrefix string) (*HeadendEntry, error) {
+	key, err := BuildHeadendV4Key(vrfID, triggerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -1795,33 +1813,19 @@ func (m *MapOperations) GetHeadendV4(triggerPrefix string) (*HeadendEntry, error
 	return &entry, nil
 }
 
-// ListHeadendV4 returns the headend v4 entries of the global VRF (vrf_id 0),
-// keyed by trigger prefix. Every MapOperations writer uses that VRF.
+// ListHeadendV4 returns the headend v4 entries of the global VRF (vrf_id
+// 0), keyed by trigger prefix. ListHeadendV4IDs lists every VRF.
 func (m *MapOperations) ListHeadendV4() (map[string]*HeadendEntry, error) {
-	result := make(map[string]*HeadendEntry)
-
-	var key HeadendV4Key
-	var entry HeadendEntry
-	iter := m.objs.HeadendV4Map.Iterate()
-
-	for iter.Next(&key, &entry) {
-		// The prefix-keyed API reads the global VRF only: it has no way to
-		// name another one. A per-VRF listing comes with naming the VRF.
-		if key.vrf() != HeadendLookupVRF {
-			continue
-		}
-		prefix, ok := key.prefix()
-		if !ok {
-			continue // ErrMalformedHeadendKey; the flushes report it
-		}
-		entryCopy := entry
-		result[prefix] = &entryCopy
+	all, err := m.ListHeadendV4IDs()
+	if err != nil {
+		return nil, err
 	}
+	return globalOnly(all), nil
+}
 
-	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("failed to iterate headend v4 map: %w", err)
-	}
-	return result, nil
+// ListHeadendV4IDs returns the headend v4 entries of every VRF.
+func (m *MapOperations) ListHeadendV4IDs() (map[HeadendID]*HeadendEntry, error) {
+	return listHeadend[HeadendV4Key](m.objs.HeadendV4Map, "v4")
 }
 
 // ===== MUP Uplink V4 Map Operations (BGP MUP T2ST / F-TEID) =====
@@ -1997,12 +2001,18 @@ func (m *MapOperations) SetIngressPolicy(enabled, defaultDeny bool, denyAction u
 
 // ===== Headend V6 Map Operations =====
 
-// CreateHeadendV6 adds a headend v6 entry. owner is persisted to
-// headend_v6_owner_map; empty owner returns ErrEmptyOwner, cross-owner
-// write returns ErrEntryOwnerMismatch.
+// CreateHeadendV6 adds a headend v6 entry in the global VRF. owner is
+// persisted to headend_v6_owner_map; empty owner returns ErrEmptyOwner,
+// cross-owner write returns ErrEntryOwnerMismatch.
 func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
+	return m.CreateHeadendV6In(HeadendGlobalVRF, triggerPrefix, entry, owner)
+}
+
+// CreateHeadendV6In is CreateHeadendV6 for the entry of triggerPrefix in
+// VRF vrfID. The same prefix in two VRFs is two entries with their own owners.
+func (m *MapOperations) CreateHeadendV6In(vrfID uint32, triggerPrefix string, entry *HeadendEntry, owner OwnerTag) error {
 	defer m.encapWrote(headendDst(entry)...)
-	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
+	key, err := BuildHeadendV6Key(vrfID, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2013,30 +2023,42 @@ func (m *MapOperations) CreateHeadendV6(triggerPrefix string, entry *HeadendEntr
 	return putMainAndOwner(m.objs.HeadendV6Map, m.headendV6Owners, key, entry, owner, alreadyOwned, "headend v6", nil)
 }
 
-// DeleteHeadendV6 removes a headend v6 entry after verifying the caller
-// owns it. Cross-owner deletes return ErrEntryOwnerMismatch. Use
-// ForceDeleteHeadendV6 for migration / force-override paths.
+// DeleteHeadendV6 removes a headend v6 entry of the global VRF after
+// verifying the caller owns it. Cross-owner deletes return
+// ErrEntryOwnerMismatch. Use ForceDeleteHeadendV6 for migration /
+// force-override paths.
 func (m *MapOperations) DeleteHeadendV6(triggerPrefix string, requester OwnerTag) error {
-	return m.deleteHeadendV6Internal(triggerPrefix, requester, false)
+	return m.DeleteHeadendV6In(HeadendGlobalVRF, triggerPrefix, requester)
 }
 
-// ForceDeleteHeadendV6 removes a headend v6 entry regardless of recorded
-// owner.
+// DeleteHeadendV6In is DeleteHeadendV6 for the entry in VRF vrfID.
+func (m *MapOperations) DeleteHeadendV6In(vrfID uint32, triggerPrefix string, requester OwnerTag) error {
+	return m.deleteHeadendV6Internal(vrfID, triggerPrefix, requester, false)
+}
+
+// ForceDeleteHeadendV6 removes a headend v6 entry of the global VRF
+// regardless of recorded owner.
 func (m *MapOperations) ForceDeleteHeadendV6(triggerPrefix string) error {
-	return m.deleteHeadendV6Internal(triggerPrefix, "", true)
+	return m.deleteHeadendV6Internal(HeadendGlobalVRF, triggerPrefix, "", true)
 }
 
-func (m *MapOperations) deleteHeadendV6Internal(triggerPrefix string, requester OwnerTag, force bool) error {
-	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
+func (m *MapOperations) deleteHeadendV6Internal(vrfID uint32, triggerPrefix string, requester OwnerTag, force bool) error {
+	key, err := BuildHeadendV6Key(vrfID, triggerPrefix)
 	if err != nil {
 		return fmt.Errorf("failed to build LPM key: %w", err)
 	}
 	return deleteHeadendKey(m.objs.HeadendV6Map, m.headendV6Owners, key, requester, force, "v6")
 }
 
-// GetHeadendV6 retrieves a headend v6 entry from the map
+// GetHeadendV6 retrieves a headend v6 entry of the global VRF.
 func (m *MapOperations) GetHeadendV6(triggerPrefix string) (*HeadendEntry, error) {
-	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
+	return m.GetHeadendV6In(HeadendGlobalVRF, triggerPrefix)
+}
+
+// GetHeadendV6In retrieves the entry covering triggerPrefix in VRF vrfID.
+// The VRF always matches in full, so an entry of another VRF never answers.
+func (m *MapOperations) GetHeadendV6In(vrfID uint32, triggerPrefix string) (*HeadendEntry, error) {
+	key, err := BuildHeadendV6Key(vrfID, triggerPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2048,32 +2070,19 @@ func (m *MapOperations) GetHeadendV6(triggerPrefix string) (*HeadendEntry, error
 	return &entry, nil
 }
 
-// ListHeadendV6 is the IPv6 counterpart of ListHeadendV4.
+// ListHeadendV6 returns the headend v6 entries of the global VRF (vrf_id
+// 0), keyed by trigger prefix. ListHeadendV6IDs lists every VRF.
 func (m *MapOperations) ListHeadendV6() (map[string]*HeadendEntry, error) {
-	result := make(map[string]*HeadendEntry)
-
-	var key HeadendV6Key
-	var entry HeadendEntry
-	iter := m.objs.HeadendV6Map.Iterate()
-
-	for iter.Next(&key, &entry) {
-		// The prefix-keyed API reads the global VRF only: it has no way to
-		// name another one. A per-VRF listing comes with naming the VRF.
-		if key.vrf() != HeadendLookupVRF {
-			continue
-		}
-		prefix, ok := key.prefix()
-		if !ok {
-			continue // ErrMalformedHeadendKey; the flushes report it
-		}
-		entryCopy := entry
-		result[prefix] = &entryCopy
+	all, err := m.ListHeadendV6IDs()
+	if err != nil {
+		return nil, err
 	}
+	return globalOnly(all), nil
+}
 
-	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("failed to iterate headend v6 map: %w", err)
-	}
-	return result, nil
+// ListHeadendV6IDs returns the headend v6 entries of every VRF.
+func (m *MapOperations) ListHeadendV6IDs() (map[HeadendID]*HeadendEntry, error) {
+	return listHeadend[HeadendV6Key](m.objs.HeadendV6Map, "v6")
 }
 
 // ===== SR Policy Map Operations =====
@@ -2408,10 +2417,15 @@ func (m *MapOperations) GetEcmpGroup(groupID uint32) (*EcmpGroupInfo, []*Headend
 	return &info, paths, nil
 }
 
-// GetHeadendV4Owner returns the owner recorded for a v4 trigger prefix, or
-// ("", false) when the entry or its owner is absent.
+// GetHeadendV4Owner returns the owner recorded for a v4 trigger prefix of the
+// global VRF, or ("", false) when the entry or its owner is absent.
 func (m *MapOperations) GetHeadendV4Owner(triggerPrefix string) (OwnerTag, bool, error) {
-	key, err := BuildHeadendV4Key(HeadendLookupVRF, triggerPrefix)
+	return m.GetHeadendV4OwnerIn(HeadendGlobalVRF, triggerPrefix)
+}
+
+// GetHeadendV4OwnerIn is GetHeadendV4Owner for the entry in VRF vrfID.
+func (m *MapOperations) GetHeadendV4OwnerIn(vrfID uint32, triggerPrefix string) (OwnerTag, bool, error) {
+	key, err := BuildHeadendV4Key(vrfID, triggerPrefix)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -2434,7 +2448,12 @@ func (m *MapOperations) GetSidFunctionOwner(triggerPrefix string) (OwnerTag, boo
 
 // GetHeadendV6Owner is the v6 counterpart of GetHeadendV4Owner.
 func (m *MapOperations) GetHeadendV6Owner(triggerPrefix string) (OwnerTag, bool, error) {
-	key, err := BuildHeadendV6Key(HeadendLookupVRF, triggerPrefix)
+	return m.GetHeadendV6OwnerIn(HeadendGlobalVRF, triggerPrefix)
+}
+
+// GetHeadendV6OwnerIn is GetHeadendV6Owner for the entry in VRF vrfID.
+func (m *MapOperations) GetHeadendV6OwnerIn(vrfID uint32, triggerPrefix string) (OwnerTag, bool, error) {
+	key, err := BuildHeadendV6Key(vrfID, triggerPrefix)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to build LPM key: %w", err)
 	}
@@ -3389,12 +3408,20 @@ func (m *MapOperations) FlushHeadendV4(scope OwnerTag) (uint32, error) {
 	if scope == "" {
 		return 0, fmt.Errorf("FlushHeadendV4: scope must be non-empty; use ForceFlushHeadendV4 for unconditional flush")
 	}
-	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, scope, false, "v4")
+	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, nil, scope, false, "v4")
+}
+
+// FlushHeadendV4In is FlushHeadendV4 for the entries of VRF vrfID only.
+func (m *MapOperations) FlushHeadendV4In(vrfID uint32, scope OwnerTag) (uint32, error) {
+	if scope == "" {
+		return 0, fmt.Errorf("FlushHeadendV4In: scope must be non-empty")
+	}
+	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, &vrfID, scope, false, "v4")
 }
 
 // ForceFlushHeadendV4 removes every headend_v4 entry regardless of owner.
 func (m *MapOperations) ForceFlushHeadendV4() (uint32, error) {
-	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, "", true, "v4")
+	return flushHeadend[HeadendV4Key](m.objs.HeadendV4Map, m.headendV4Owners, nil, "", true, "v4")
 }
 
 // FlushHeadendV6 removes headend_v6 entries whose owner matches scope, in
@@ -3404,12 +3431,20 @@ func (m *MapOperations) FlushHeadendV6(scope OwnerTag) (uint32, error) {
 	if scope == "" {
 		return 0, fmt.Errorf("FlushHeadendV6: scope must be non-empty; use ForceFlushHeadendV6 for unconditional flush")
 	}
-	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, scope, false, "v6")
+	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, nil, scope, false, "v6")
+}
+
+// FlushHeadendV6In is FlushHeadendV6 for the entries of VRF vrfID only.
+func (m *MapOperations) FlushHeadendV6In(vrfID uint32, scope OwnerTag) (uint32, error) {
+	if scope == "" {
+		return 0, fmt.Errorf("FlushHeadendV6In: scope must be non-empty")
+	}
+	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, &vrfID, scope, false, "v6")
 }
 
 // ForceFlushHeadendV6 removes every headend_v6 entry regardless of owner.
 func (m *MapOperations) ForceFlushHeadendV6() (uint32, error) {
-	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, "", true, "v6")
+	return flushHeadend[HeadendV6Key](m.objs.HeadendV6Map, m.headendV6Owners, nil, "", true, "v6")
 }
 
 // FlushHeadendL2 removes every headend_l2 entry.
