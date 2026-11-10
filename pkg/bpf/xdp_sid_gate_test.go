@@ -1,9 +1,12 @@
 package bpf
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
 	"testing"
+
+	"github.com/cilium/ebpf"
 )
 
 // TestXDPProgSIDGateTenantIngress checks that only a packet from the global
@@ -47,24 +50,9 @@ func TestXDPProgSIDGateTenantIngress(t *testing.T) {
 		}
 	}
 
-	// runSlot runs pkt and returns the action, the output and how many
-	// times the endpoint slot of action ran.
 	runSlot := func(t *testing.T, pkt []byte, slot uint8) (uint32, []byte, uint64) {
 		t.Helper()
-		before, err := h.mapOps.ReadSlotStats(MapTypeEndpoint)
-		if err != nil {
-			t.Fatalf("ReadSlotStats: %v", err)
-		}
-		ret, out := h.runOnIfindex(pkt, ifidx)
-		after, err := h.mapOps.ReadSlotStats(MapTypeEndpoint)
-		if err != nil {
-			t.Fatalf("ReadSlotStats: %v", err)
-		}
-		return ret, out, after[slot].Packets - before[slot].Packets
-	}
-
-	outerDA := func(pkt []byte, l3 int) net.IP {
-		return net.IP(pkt[l3+24 : l3+40])
+		return h.runCountingSlot(t, pkt, ifidx, slot)
 	}
 
 	for _, tc := range []struct {
@@ -167,6 +155,132 @@ func TestXDPProgSIDGateTenantIngress(t *testing.T) {
 			t.Errorf("vrf 0: End.DT4 slot ran %d times, want 1", runs)
 		}
 	})
+}
+
+// TestXDPProgIngressVrfUnknownTag checks how the front door classifies a
+// tagged frame whose {ifindex, vlan} has no AC. On a port whose untagged
+// side is a tenant AC the frame is dropped: otherwise a host on that AC
+// could add an unused tag, land in vrf 0 and reach a local SID. A trunk
+// whose untagged side is underlay keeps the plain miss behaviour (vrf 0).
+func TestXDPProgIngressVrfUnknownTag(t *testing.T) {
+	h := newXDPTestHelperWithStats(t)
+	const ifidx = 1
+	const endSID = "fd00:5a2::1"
+	const nextSeg = "fd00:5a2::99"
+	h.createSidFunction(endSID+"/128", actionEnd)
+	pkt, err := buildSRv6Packet(net.ParseIP("fd00:1::1"), net.ParseIP(endSID),
+		[]net.IP{net.ParseIP(nextSeg), net.ParseIP(endSID)}, 1)
+	if err != nil {
+		t.Fatalf("build End packet: %v", err)
+	}
+	tagged := withVlanTag(pkt, 5) // VLAN 5 has no AC in any case below
+
+	if err := h.mapOps.SetIngressPolicy(true, false, 0); err != nil {
+		t.Fatalf("SetIngressPolicy: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		acs     map[IngressACKey]uint32
+		wantRet uint32
+		wantRun uint64
+	}{
+		{"untagged side is a tenant AC", map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 0}: 1}, XDP_DROP, 0},
+		{"untagged side is explicitly global", map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 0}: 0, {Ifindex: ifidx, VlanId: 100}: 1}, XDP_PASS, 1},
+		{"untagged side has no AC", map[IngressACKey]uint32{{Ifindex: ifidx, VlanId: 100}: 1}, XDP_PASS, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := h.mapOps.SetIngressVrf(tc.acs); err != nil {
+				t.Fatalf("SetIngressVrf: %v", err)
+			}
+			ret, out, runs := h.runCountingSlot(t, tagged, ifidx, actionEnd)
+			if ret != tc.wantRet {
+				t.Errorf("ret = %d, want %d", ret, tc.wantRet)
+			}
+			if runs != tc.wantRun {
+				t.Errorf("End slot ran %d times, want %d", runs, tc.wantRun)
+			}
+			if tc.wantRun == 1 {
+				if got := outerDA(out, ethHeaderLen+4); !got.Equal(net.ParseIP(nextSeg)) {
+					t.Errorf("DA = %s, want %s", got, nextSeg)
+				}
+			}
+		})
+	}
+}
+
+// TestXDPProgEndpointRefusesTenantContext runs the built-in End program
+// directly, the way a plugin's bpf_tail_call into sid_endpoint_progs would
+// reach it, with the per-CPU context carrying a tenant vrf_id. End must not
+// run (it would rewrite the DA); with vrf 0 it does. Every built-in endpoint
+// reads its context through the same helper.
+func TestXDPProgEndpointRefusesTenantContext(t *testing.T) {
+	h := newXDPTestHelper(t)
+	const sid = "fd00:5a3::1"
+	const nextSeg = "fd00:5a3::99"
+	pkt, err := buildSRv6PacketWithInnerIPv4(net.ParseIP("fd00:1::1"), net.ParseIP(sid),
+		[]net.IP{net.ParseIP(nextSeg), net.ParseIP(sid)}, 1,
+		net.ParseIP("10.0.0.1").To4(), net.ParseIP("192.0.2.100").To4())
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
+	}
+
+	setCtx := func(t *testing.T, vrfID uint32, action uint8) {
+		t.Helper()
+		cpus, err := ebpf.PossibleCPU()
+		if err != nil {
+			t.Fatal(err)
+		}
+		contexts := make([]BpfTailcallCtx, cpus)
+		for i := range contexts {
+			contexts[i] = BpfTailcallCtx{
+				L3Offset: ethHeaderLen, Slot: action, VrfId: vrfID,
+				SidEntry: SidFunctionEntry{Action: action},
+			}
+		}
+		if err := h.objs.TailcallCtxMap.Update(uint32(0), contexts, ebpf.UpdateAny); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("End from a tenant context", func(t *testing.T) {
+		setCtx(t, 1, actionEnd)
+		ret, out, err := h.objs.TailcallEndpointEnd.Test(pkt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ret != XDP_DROP {
+			t.Errorf("ret = %d, want XDP_DROP", ret)
+		}
+		if !bytes.Equal(out, pkt) {
+			t.Errorf("packet was modified (DA %s)", outerDA(out, ethHeaderLen))
+		}
+	})
+
+	t.Run("End from the global VRF", func(t *testing.T) {
+		setCtx(t, 0, actionEnd)
+		_, out, err := h.objs.TailcallEndpointEnd.Test(pkt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := outerDA(out, ethHeaderLen); !got.Equal(net.ParseIP(nextSeg)) {
+			t.Errorf("DA = %s, want %s", got, nextSeg)
+		}
+	})
+}
+
+// runCountingSlot runs pkt on ifindex and returns the action, the output
+// and how many times endpoint slot slot ran.
+func (h *xdpTestHelper) runCountingSlot(t *testing.T, pkt []byte, ifindex uint32, slot uint8) (uint32, []byte, uint64) {
+	t.Helper()
+	before := slotStatPackets(t, h.mapOps, MapTypeEndpoint, uint32(slot))
+	ret, out := h.runOnIfindex(pkt, ifindex)
+	return ret, out, slotStatPackets(t, h.mapOps, MapTypeEndpoint, uint32(slot)) - before
+}
+
+// outerDA is the IPv6 destination of the frame whose IPv6 header starts at l3.
+func outerDA(pkt []byte, l3 int) net.IP {
+	return net.IP(pkt[l3+24 : l3+40])
 }
 
 // withVlanTag returns a copy of an untagged Ethernet frame with an 802.1Q

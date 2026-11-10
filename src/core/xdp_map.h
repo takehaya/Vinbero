@@ -152,6 +152,13 @@ struct {
 // policy is enabled, so the unconfigured path costs only one ARRAY lookup and
 // does not double the per-packet {ifindex,vlan} hashing that try_l2_headend
 // already does. XDP actions are 0..4, so -1 is an unambiguous "continue".
+//
+// A tagged frame whose {ifindex, vlan} has no entry is checked against the
+// port's untagged AC: when {ifindex, 0} belongs to a tenant VRF, the frame is
+// dropped instead of falling into vrf 0. Otherwise a host on an untagged
+// tenant AC could add any unused VLAN tag and be classified as underlay. A
+// trunk whose untagged side is underlay (no entry, or an explicit vrf 0) keeps
+// the miss behaviour below. Untagged frames never take this extra lookup.
 #define INGRESS_VRF_CONTINUE (-1)
 static __always_inline int resolve_ingress_vrf(struct xdp_md *ctx, __u16 vlan_id, __u32 *vrf_id_out)
 {
@@ -168,6 +175,12 @@ static __always_inline int resolve_ingress_vrf(struct xdp_md *ctx, __u16 vlan_id
     if (vrf) {
         *vrf_id_out = *vrf; // explicit entry (vrf 0 = global VRF included)
         return INGRESS_VRF_CONTINUE;
+    }
+    if (vlan_id) {
+        key.vlan_id = 0;
+        __u32 *untagged = bpf_map_lookup_elem(&ingress_vrf_map, &key);
+        if (untagged && *untagged)
+            return XDP_DROP; // unknown tag on a tenant port: not underlay
     }
     if (pol->default_deny)
         return pol->deny_action == INGRESS_DENY_PASS ? XDP_PASS : XDP_DROP;
