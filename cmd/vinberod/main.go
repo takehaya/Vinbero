@@ -730,7 +730,9 @@ func restoreVRFs(cfg config.VRFsConfig, bindingVRFs []string, bgpEnabled bool, m
 		// vrfbgp.Manager.Bind ensures the same name later and refuses an
 		// empty one.
 		if bgpEnabled && name != "" {
-			mgr.Ensure(name)
+			if _, err := mgr.Ensure(name); err != nil {
+				return fmt.Errorf("bgp.vrf_bindings %q: %w", name, err)
+			}
 		}
 	}
 	for _, v := range cfg.Entries {

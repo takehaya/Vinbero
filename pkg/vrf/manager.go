@@ -14,6 +14,7 @@ package vrf
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"sync"
@@ -161,14 +162,35 @@ func (m *Manager) SetLogger(logger *zap.Logger) {
 	m.logger = logger
 }
 
+// MaxNextID is the highest allocator watermark (next_vrf_id). Ids are handed
+// out below it, so the counter never wraps onto the global VRF's id 0, and
+// Restore refuses a saved watermark above it.
+const MaxNextID uint32 = math.MaxUint32 - 1
+
+// ErrIDsExhausted: every vrf_id below MaxNextID has been handed out.
+var ErrIDsExhausted = errors.New("vrf: no vrf_id left to allocate")
+
 // allocIDLocked returns a fresh vrf_id (>= 1). An id is never handed out twice,
 // not even after its VRF is deleted: state keyed by a vrf_id can outlive the
-// VRF, and a reused id would point that state at another tenant. Wraparound of
-// the uint32 counter is not guarded: it takes ~4 billion VRF creations.
-func (m *Manager) allocIDLocked() uint32 {
+// VRF, and a reused id would point that state at another tenant. Once the
+// watermark reaches MaxNextID it refuses rather than wrapping.
+func (m *Manager) allocIDLocked() (uint32, error) {
+	if m.nextID >= MaxNextID {
+		return 0, ErrIDsExhausted
+	}
 	id := m.nextID
 	m.nextID++
-	return id
+	return id, nil
+}
+
+// allocatableLocked reports why name could not get a VRF, nil when it already
+// has one or an id is left. Callers check it before a netlink call that would
+// otherwise create a device no VRF can carry.
+func (m *Manager) allocatableLocked(name string) error {
+	if _, ok := m.byName[name]; ok || name == GlobalVRFName || m.nextID < MaxNextID {
+		return nil
+	}
+	return fmt.Errorf("vrf %q: %w", name, ErrIDsExhausted)
 }
 
 // clone returns a copy of v that shares no mutable backing storage with the
@@ -194,28 +216,35 @@ func (v *VRF) clone() VRF {
 // Ensure returns the VRF for name, creating it (allocating an id) if absent.
 // Facets (a BGP binding, MUP uplink) call this so a referenced VRF always has
 // a stable id even before any AC is configured. The returned VRF's ACs are a
-// copy (see clone).
-func (m *Manager) Ensure(name string) VRF {
+// copy (see clone). It fails only when a new VRF finds no id left.
+func (m *Manager) Ensure(name string) (VRF, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.ensureLocked(name).clone()
+	v, err := m.ensureLocked(name)
+	if err != nil {
+		return VRF{}, err
+	}
+	return v.clone(), nil
 }
 
-func (m *Manager) ensureLocked(name string) *VRF {
+func (m *Manager) ensureLocked(name string) (*VRF, error) {
 	if v, ok := m.byName[name]; ok {
-		return v
+		return v, nil
 	}
 	// The reserved global VRF keeps id 0; everything else allocates 1..N.
 	id := GlobalVRFID
 	if name != GlobalVRFName {
-		id = m.allocIDLocked()
+		var err error
+		if id, err = m.allocIDLocked(); err != nil {
+			return nil, fmt.Errorf("vrf %q: %w", name, err)
+		}
 	}
 	v := &VRF{Name: name, ID: id}
 	m.byName[name] = v
 	m.byID[v.ID] = name
 	delete(m.unsavedDeletes, name)
 	m.dirty = true
-	return v
+	return v, nil
 }
 
 // IDForName returns the vrf_id assigned to name. ok=false when no VRF by that
@@ -283,7 +312,10 @@ func (m *Manager) AddAC(name string, ac AC) (added bool, err error) {
 				name, ac.Interface, ac.VLAN, other.Name)
 		}
 	}
-	v := m.ensureLocked(name)
+	v, err := m.ensureLocked(name)
+	if err != nil {
+		return false, err
+	}
 	for _, e := range v.ACs {
 		if e == ac {
 			return false, nil // idempotent: already present, nothing added
@@ -506,6 +538,9 @@ func (m *Manager) Restore(s State) error {
 			owners[ac] = p.Name
 		}
 	}
+	if s.NextID > MaxNextID {
+		return fmt.Errorf("vrf: saved next_vrf_id %d is above the highest watermark %d", s.NextID, MaxNextID)
+	}
 	for _, p := range s.VRFs {
 		if p.ID >= s.NextID {
 			return fmt.Errorf("vrf %q: saved id %d is not below next_vrf_id %d, so it could be handed out again", p.Name, p.ID, s.NextID)
@@ -639,7 +674,10 @@ func (m *Manager) SetDevice(name string, d Device) (VRF, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v := m.ensureLocked(name)
+	v, err := m.ensureLocked(name)
+	if err != nil {
+		return VRF{}, err
+	}
 	dd := d
 	dd.Members = append([]string(nil), d.Members...)
 	v.Device = &dd
@@ -659,6 +697,12 @@ func (m *Manager) CreateDevice(name string, d Device, ops DeviceOps) (VRF, error
 	}
 	if d.TableID == 0 {
 		return VRF{}, fmt.Errorf("vrf %q: device table_id is required", name)
+	}
+	m.mu.RLock()
+	err := m.allocatableLocked(name)
+	m.mu.RUnlock()
+	if err != nil {
+		return VRF{}, err
 	}
 	ifindex, err := ops.CreateVrf(name, d.TableID, d.Members, d.EnableL3mdevRule)
 	if err != nil {
@@ -749,7 +793,10 @@ func (m *Manager) SetBridge(name string, b Bridge) (VRF, error) {
 	if err := m.bridgeConflictLocked(name, b); err != nil {
 		return VRF{}, err
 	}
-	v := m.ensureLocked(name)
+	v, err := m.ensureLocked(name)
+	if err != nil {
+		return VRF{}, err
+	}
 	bb := b
 	bb.Members = append([]string(nil), b.Members...)
 	bb.ConfigMembers = append([]string(nil), b.ConfigMembers...)
@@ -770,6 +817,9 @@ func (m *Manager) AttachBridge(name string, b Bridge, ops BridgeOps) (VRF, error
 	}
 	m.mu.RLock()
 	err := m.bridgeConflictLocked(name, b)
+	if err == nil {
+		err = m.allocatableLocked(name)
+	}
 	m.mu.RUnlock()
 	if err != nil {
 		return VRF{}, err

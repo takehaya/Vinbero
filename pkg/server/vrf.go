@@ -607,6 +607,9 @@ func (s *VrfServer) VrfAcAdd(
 	acVal := vrf.AC{Interface: ac.GetInterfaceName(), VLAN: uint16(ac.GetVlan())}
 	_, existed := s.mgr.Get(name)
 	added, err := s.mgr.AddAC(name, acVal)
+	if errors.Is(err, vrf.ErrIDsExhausted) {
+		return nil, connect.NewError(connect.CodeResourceExhausted, err)
+	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}

@@ -108,7 +108,7 @@ func TestBringUpDataPlane_ClassifiesBeforeAttach(t *testing.T) {
 	if !attached {
 		t.Fatal("attach did not run")
 	}
-	if id := mgr.Ensure("tenant-b").ID; id != 8 {
+	if id := mustEnsure(t, mgr, "tenant-b").ID; id != 8 {
 		t.Errorf("next allocated id = %d, want 8", id)
 	}
 }
@@ -228,7 +228,7 @@ func TestRestoreVRFs_DropsUndeclaredConfigVRFs(t *testing.T) {
 	if got := savedIDs(t, path); len(got) != 2 || got["api"] != 2 || got["cfg-kept"] != 3 {
 		t.Errorf("saved %v, want api and cfg-kept only", got)
 	}
-	if id := mgr.Ensure("new").ID; id != 4 {
+	if id := mustEnsure(t, mgr, "new").ID; id != 4 {
 		t.Errorf("new VRF id = %d, want 4", id)
 	}
 }
@@ -255,4 +255,13 @@ func TestWatchBridgeFacets(t *testing.T) {
 	if r[42] != 100 || len(r) != 1 {
 		t.Errorf("registered %v, want 42 -> 100", r)
 	}
+}
+
+func mustEnsure(t *testing.T, m *vrf.Manager, name string) vrf.VRF {
+	t.Helper()
+	v, err := m.Ensure(name)
+	if err != nil {
+		t.Fatalf("Ensure(%q): %v", name, err)
+	}
+	return v
 }

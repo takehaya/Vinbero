@@ -1123,7 +1123,7 @@ func TestVrfServer_DeleteIsPersisted(t *testing.T) {
 	s, _ := newTestVrfServer()
 	store := &fakeVrfStore{}
 	s.mgr.SetStore(store)
-	id := s.mgr.Ensure("tenant-a").ID
+	id := mustEnsure(t, s.mgr, "tenant-a").ID
 	if _, err := s.VrfDelete(context.Background(), connect.NewRequest(&v1.VrfDeleteRequest{Names: []string{"tenant-a"}})); err != nil {
 		t.Fatalf("VrfDelete: %v", err)
 	}
@@ -1171,7 +1171,7 @@ func TestVrfServer_DeleteSaveFailureIsDeletedAndRetryable(t *testing.T) {
 	s, _ := newTestVrfServer()
 	store := &fakeVrfStore{}
 	s.mgr.SetStore(store)
-	s.mgr.Ensure("tenant-a")
+	mustEnsure(t, s.mgr, "tenant-a")
 	if err := s.mgr.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -1278,11 +1278,20 @@ func TestVrfServer_AcAddReconcileFailureSavesTheRetiredID(t *testing.T) {
 		t.Errorf("saved %+v, want no VRF and the id 1 retired", last)
 	}
 	// An existing VRF stays when an AC add to it fails.
-	s.mgr.Ensure("kept")
+	mustEnsure(t, s.mgr, "kept")
 	if _, err := s.VrfAcAdd(context.Background(), connect.NewRequest(&v1.VrfAcAddRequest{Name: "kept", Ac: &v1.VrfAc{InterfaceName: "typo0"}})); err == nil {
 		t.Fatal("VrfAcAdd of an unresolvable interface succeeded")
 	}
 	if _, ok := s.mgr.Get("kept"); !ok {
 		t.Error("a failed AC add removed an existing VRF")
 	}
+}
+
+func mustEnsure(t *testing.T, m *vrf.Manager, name string) vrf.VRF {
+	t.Helper()
+	v, err := m.Ensure(name)
+	if err != nil {
+		t.Fatalf("Ensure(%q): %v", name, err)
+	}
+	return v
 }

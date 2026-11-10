@@ -59,9 +59,9 @@ func TestState_IDsAreStableAndMonotonicAcrossRestart(t *testing.T) {
 	store := &fakeStore{}
 	m := NewManager()
 	m.SetStore(store)
-	a := m.Ensure("a")
-	b := m.Ensure("b")
-	c := m.Ensure("c")
+	a := mustEnsure(t, m, "a")
+	b := mustEnsure(t, m, "b")
+	c := mustEnsure(t, m, "c")
 	m.Delete("c")
 	if err := m.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -69,13 +69,13 @@ func TestState_IDsAreStableAndMonotonicAcrossRestart(t *testing.T) {
 
 	m2 := restart(t, store.last(t))
 	// The other order, which would swap the ids if they were allocated anew.
-	if got := m2.Ensure("b"); got.ID != b.ID {
+	if got := mustEnsure(t, m2, "b"); got.ID != b.ID {
 		t.Errorf("b after restart = %d, want %d", got.ID, b.ID)
 	}
-	if got := m2.Ensure("a"); got.ID != a.ID {
+	if got := mustEnsure(t, m2, "a"); got.ID != a.ID {
 		t.Errorf("a after restart = %d, want %d", got.ID, a.ID)
 	}
-	if d := m2.Ensure("d"); d.ID <= c.ID {
+	if d := mustEnsure(t, m2, "d"); d.ID <= c.ID {
 		t.Errorf("new VRF after restart got %d, want above the retired %d", d.ID, c.ID)
 	}
 }
@@ -184,7 +184,7 @@ func TestState_RestoreRefusesContradictions(t *testing.T) {
 		})
 	}
 	m := NewManager()
-	m.Ensure("a")
+	mustEnsure(t, m, "a")
 	if err := m.Restore(State{}); err == nil {
 		t.Error("Restore on a used manager succeeded")
 	}
@@ -210,11 +210,11 @@ func TestState_RestoreRefusesAnIDAtOrAboveTheWatermark(t *testing.T) {
 		})
 	}
 	m := restart(t, State{NextID: 8, VRFs: []PersistedVRF{{Name: "a", ID: 7}}})
-	if id := m.Ensure("b").ID; id != 8 {
+	if id := mustEnsure(t, m, "b").ID; id != 8 {
 		t.Errorf("next id = %d, want 8", id)
 	}
 	// A file from before ids were recorded starts the allocator at 1.
-	if id := restart(t, State{}).Ensure("b").ID; id != 1 {
+	if id := mustEnsure(t, restart(t, State{}), "b").ID; id != 1 {
 		t.Errorf("next id on an empty state = %d, want 1", id)
 	}
 }
@@ -226,8 +226,8 @@ func TestState_FinishRestoreDropsConfigVRFsNothingHolds(t *testing.T) {
 	store := &fakeStore{}
 	m := NewManager()
 	m.SetStore(store)
-	m.Ensure("cfg-kept")
-	m.Ensure("cfg-gone")
+	mustEnsure(t, m, "cfg-kept")
+	mustEnsure(t, m, "cfg-gone")
 	addRuntimeAC(t, m, "cfg-with-ac", AC{"veth1", 0})
 	if _, err := m.SetBridge("legacy-br", Bridge{Name: "legacy-br", BdID: 10}); err != nil {
 		t.Fatal(err)
@@ -235,7 +235,7 @@ func TestState_FinishRestoreDropsConfigVRFsNothingHolds(t *testing.T) {
 	if dropped := m.FinishRestore([]string{"cfg-kept", "cfg-gone", "cfg-with-ac"}); len(dropped) != 0 {
 		t.Fatalf("first boot dropped %v", dropped)
 	}
-	api := m.Ensure("api") // after the boot-time load
+	api := mustEnsure(t, m, "api") // after the boot-time load
 	if err := m.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestState_FinishRestoreDropsConfigVRFsNothingHolds(t *testing.T) {
 			t.Errorf("%s not kept", name)
 		}
 	}
-	if id := m2.Ensure("new").ID; id <= api.ID {
+	if id := mustEnsure(t, m2, "new").ID; id <= api.ID {
 		t.Errorf("new VRF got %d, want above every earlier id (last %d)", id, api.ID)
 	}
 	if !m2.RestoreDone() {
@@ -274,7 +274,7 @@ func TestState_UnsavedDeleteUntilTheNextSave(t *testing.T) {
 	store := &fakeStore{err: errors.New("disk full")}
 	m := NewManager()
 	m.SetStore(store)
-	m.Ensure("a")
+	mustEnsure(t, m, "a")
 	m.Delete("a")
 	if err := m.Save(); err == nil {
 		t.Fatal("Save hid the store's error")
@@ -294,7 +294,7 @@ func TestState_UnsavedDeleteUntilTheNextSave(t *testing.T) {
 	}
 	// Recreating the name ends the pending delete as well.
 	m.Delete("b")
-	m.Ensure("b")
+	mustEnsure(t, m, "b")
 	if m.UnsavedDelete("b") {
 		t.Error("recreated VRF still counts as deleted")
 	}
@@ -341,7 +341,7 @@ func TestSave_OnlyWhenChangedAndRetriesAfterFailure(t *testing.T) {
 		t.Fatalf("Save without a store: %v", err)
 	}
 	m.SetStore(store)
-	m.Ensure("a")
+	mustEnsure(t, m, "a")
 	if err := m.Save(); err == nil {
 		t.Fatal("Save hid the store's error")
 	}
@@ -352,7 +352,7 @@ func TestSave_OnlyWhenChangedAndRetriesAfterFailure(t *testing.T) {
 	if len(store.saved) != 1 {
 		t.Fatalf("saves = %d, want 1 retry", len(store.saved))
 	}
-	m.Ensure("a") // already exists: nothing new to write
+	mustEnsure(t, m, "a") // already exists: nothing new to write
 	if err := m.Save(); err != nil || len(store.saved) != 1 {
 		t.Errorf("unchanged Save wrote again: %v, %d", err, len(store.saved))
 	}
@@ -361,5 +361,47 @@ func TestSave_OnlyWhenChangedAndRetriesAfterFailure(t *testing.T) {
 	m2.SetStore(store)
 	if err := m2.Save(); err != nil || len(store.saved) != 1 {
 		t.Errorf("Save right after Restore wrote: %v, %d", err, len(store.saved))
+	}
+}
+
+// The allocator stops at MaxNextID instead of wrapping onto the global id 0,
+// the state it leaves loads again, and a watermark above it is refused.
+func TestState_IDSpaceExhaustion(t *testing.T) {
+	store := &fakeStore{}
+	m := restart(t, State{NextID: MaxNextID - 1, VRFs: []PersistedVRF{{Name: "a", ID: 1}}})
+	m.SetStore(store)
+	if last := mustEnsure(t, m, "last"); last.ID != MaxNextID-1 {
+		t.Fatalf("last id = %d, want %d", last.ID, MaxNextID-1)
+	}
+	if _, err := m.Ensure("over"); !errors.Is(err, ErrIDsExhausted) {
+		t.Fatalf("Ensure past the end = %v, want ErrIDsExhausted", err)
+	}
+	if _, err := m.AddAC("over", AC{"veth1", 0}); !errors.Is(err, ErrIDsExhausted) {
+		t.Errorf("AddAC past the end = %v", err)
+	}
+	ops := &fakeDeviceOps{ifindexes: map[string]uint32{"over": 9}}
+	if _, err := m.CreateDevice("over", Device{TableID: 100}, ops); !errors.Is(err, ErrIDsExhausted) {
+		t.Errorf("CreateDevice past the end = %v", err)
+	}
+	if len(ops.created) != 0 {
+		t.Errorf("a device was created for a VRF that cannot get an id: %v", ops.created)
+	}
+	if _, ok := m.Get("over"); ok {
+		t.Error("a VRF without an id exists")
+	}
+	if g := mustEnsure(t, m, GlobalVRFName); g.ID != GlobalVRFID {
+		t.Errorf("global = %d", g.ID)
+	}
+	if err := m.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if st := store.last(t); st.NextID != MaxNextID {
+		t.Fatalf("saved watermark = %d, want %d", st.NextID, MaxNextID)
+	}
+	restart(t, store.last(t))
+
+	err := NewManager().Restore(State{NextID: math.MaxUint32, VRFs: []PersistedVRF{{Name: "a", ID: 1}}})
+	if err == nil || !strings.Contains(err.Error(), "next_vrf_id") {
+		t.Errorf("Restore with watermark MaxUint32 = %v, want refused", err)
 	}
 }
