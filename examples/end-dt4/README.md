@@ -67,6 +67,12 @@ phase of `test.sh` shows the difference once Vinbero manages the VRF:
   `vbctl hv4 create` encapsulates the packets from the vrf100 AC, and
   their outer header is looked up in the main table
 - host1 to host2 (End.DT4 into vrf100) keeps working
+- router3 keeps the encapsulation's underlay next hop (router2, reached
+  through a static route) as a managed neighbour. The test deletes that
+  neighbour entry and sends only host2's pings: they get through again
+  without any other traffic. It then moves the route to another address
+  of router2, whose entry does not exist yet, and the pings get through
+  again
 
 ## Quick start
 

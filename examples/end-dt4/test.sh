@@ -250,6 +250,42 @@ ip netns exec "$ns_router3" "$VINBERO_BIN" -s http://127.0.0.1:8082 hv4 create \
 test_ping_with_counter "$ns_host2" 172.0.1.1 "host2 -> host1 (Vinbero H.Encaps from the vrf100 AC)"
 test_ping_with_counter "$ns_host1" 172.0.2.1 "host1 -> host2 (End.DT4 into the managed vrf100)"
 
+# The encapsulation's underlay next hop (router2, through a static route) is
+# a neighbour Vinbero keeps resolved. Without that, a missing entry would
+# never come back: XDP hands the packet to the kernel to resolve it, and the
+# kernel drops it at vrf100's unreachable default before soliciting. Only
+# host2's own pings run below; there is no BGP session or other traffic.
+uplink="${TOPO_NS_PREFIX}rt3rt2"
+r3neigh() { ip netns exec "$ns_router3" ip -6 neigh show "$1" dev "$uplink"; }
+# eventually_ping <description>: host2 -> host1 succeeds within 20 s.
+eventually_ping() {
+    local desc=$1 i
+    print_info "Testing: $desc"
+    for i in $(seq 1 20); do
+        if ip netns exec "$ns_host2" ping -c 1 -W 1 172.0.1.1 > /dev/null 2>&1; then
+            print_success "$desc: PASS (try $i)"
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+            return 0
+        fi
+    done
+    print_error "$desc: FAIL"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+}
+check "router3 keeps router2 (fc00:23::2) as a managed neighbour" \
+  sh -c "ip netns exec '$ns_router3' ip -6 neigh show fc00:23::2 dev '$uplink' | grep -Eq 'managed|extern_learn'"
+ip netns exec "$ns_router3" ip -6 neigh del fc00:23::2 dev "$uplink" 2>/dev/null || true
+print_info "router3's neighbour for router2 after the delete: $(r3neigh fc00:23::2 | tr '\n' ' ')"
+eventually_ping "host2 -> host1 after router3's neighbour entry for router2 was deleted"
+
+# Move the route to another address of router2: the next hop changes, and
+# its neighbour entry does not exist yet.
+ip netns exec "${TOPO_NS_PREFIX}router2" ip -6 addr add fc00:23::3/64 dev "${TOPO_NS_PREFIX}rt2rt3" nodad
+ip netns exec "$ns_router3" ip -6 neigh del fc00:23::3 dev "$uplink" 2>/dev/null || true
+ip netns exec "$ns_router3" ip -6 route replace fc00:2::/64 via fc00:23::3 dev "$uplink"
+eventually_ping "host2 -> host1 after the next hop moved to fc00:23::3"
+check "router3 keeps the new next hop (fc00:23::3) as a managed neighbour" \
+  sh -c "ip netns exec '$ns_router3' ip -6 neigh show fc00:23::3 dev '$uplink' | grep -Eq 'managed|extern_learn'"
+
 print_info "Stopping Vinbero..."
 kill $VINBERO_PID 2>/dev/null || true
 wait $VINBERO_PID 2>/dev/null || true

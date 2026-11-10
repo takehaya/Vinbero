@@ -3,6 +3,7 @@
 ## 前提条件
 
 - Linux kernel 5.15 以上 (eBPF/XDP 対応)
+- tenant VRF の AC から来たパケットを encap するには、`bpf_fib_lookup` が `BPF_FIB_LOOKUP_TBID` を受け付ける kernel (Linux 6.5 以上、またはこれを取り込んだ stable kernel) が必要です。vinberod は起動時に確かめ、使えなければ warning を出します ([vrf.md](vrf.md#encap-の外側の経路))
 - Go 1.21 以上
 - Docker (BPF コード生成用)
 - root 権限 (eBPF 操作に必要)

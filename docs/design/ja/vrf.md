@@ -67,6 +67,7 @@ SID ごとの例外は無く、AC に分類した interface では SID は一切
 
 - VRF table に locator の範囲 (または default) への経路を置いた場合。パケットはその経路で underlay へ出て、別の PE の SID に underlay 側から届きます
 - VRF を `no_unreachable_default` で作った場合と、Vinbero が管理していない VRF device の場合。table に一致する経路が無いと、kernel は main table へ進んで探します
+- l3mdev rule (prio 1000) より前の ip rule が別の table を選ぶ場合。たとえば prio 100 の `ip rule add ... lookup main` に一致した tenant のパケットは、VRF table を引かずに main table で転送されます。kernel は l3mdev rule より前の rule を許すので、Vinbero はこれを止めません。tenant のパケットに一致しうる rule を l3mdev rule より前に置かないでください
 - AC にした interface が VRF device に enslave されていない場合。kernel はそのパケットを main table で引きます。このような AC も使えますが、miss は global の table に届きます
 - 同じ SID の kernel の seg6local route がある場合。XDP が渡したパケットを kernel が処理します
 
@@ -77,13 +78,26 @@ tenant の interface は VRF device に enslave し、同じ VRF の AC にし�
 headend が encap したパケットの外側の IPv6 ヘッダは underlay のパケットなので、`bpf_fib_lookup` は main table で引きます。引き方は入口の vrf_id で決まります。
 
 - vrf_id 0 のパケットは、入口の interface で引きます。ip rule を通るので、underlay の policy routing も効きます
-- tenant VRF の AC から来たパケットは、入口の interface を使わず main table を直接引きます (`BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID`、table 254)。入口が VRF device に enslave されていると、入口で引いた lookup は l3mdev rule で VRF table へ進み、unreachable default で止まるか、SID を覆う tenant の経路に従ってしまうためです。ip rule は通りません。`BPF_FIB_LOOKUP_TBID` の無い kernel (6.5 より前) では helper が flag を拒否するので、VRF に enslave できない loopback device で `BPF_FIB_LOOKUP_DIRECT` の lookup をやり直します。こちらも main table を引きます
+- tenant VRF の AC から来たパケットは、入口の interface を使わず main table を直接引きます (`BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_TBID`、table 254)。入口が VRF device に enslave されていると、入口で引いた lookup は l3mdev rule で VRF table へ進み、unreachable default で止まるか、SID を覆う tenant の経路に従ってしまうためです。この lookup は ip rule を通りません。tenant のパケットの外側には、ip rule による policy routing も、ip rule で選ぶ main 以外の table も効きません。入口が VRF device に enslave されていない AC でも同じです
 
-対象は H.Encaps と H.Encaps.Red (IPv4 / IPv6)、H.Insert と H.Insert.Red、H.Encaps.L2 系、MUP の H.M.GTP4.D と GTP6 の headend、service proxy の戻り (End.AS / End.AD / End.AM) です。BUM の複製は送信元の bridge port で引きます (bridge port は VRF device に enslave できません)。
+`BPF_FIB_LOOKUP_TBID` は Linux 6.5 で入りました (6.1.192 などの stable kernel にも取り込まれています)。vinberod は起動時に kernel が受け付けるかを確かめ、受け付けなければ warning を出します。その kernel では tenant VRF の AC から来たパケットの encap を XDP が転送できず、パケットは kernel へ渡るか drop されます。global VRF には影響しません。
 
-VRF device に enslave したまま AC にしていない interface は vrf_id 0 なので、encap の外側も入口で引き、VRF table の unreachable default で drop になります。
+対象は H.Encaps と H.Encaps.Red (IPv4 / IPv6)、H.Insert と H.Insert.Red、H.Encaps.L2 系、MUP の H.M.GTP4.D と GTP6 の headend、service proxy の戻り (End.AS / End.AD / End.AM) です。vrf_id は front door が決めた値を tail call の文脈から渡すので、encap ごとの map lookup は増えません。
 
-外側の next hop の neighbour が未解決 (NO_NEIGH) のとき、encap したパケットは kernel へ渡して解決させます。enslave した入口から渡したパケットは kernel が VRF table で引くので、unreachable default で止まり、解決のきっかけになりません。next hop の neighbour は BGP など別の通信で解決されている必要があります。
+BUM の複製 (TC の clone と xdp mode の devmap egress) は、送信元の L2 headend の circuit で引きます。L2 headend の circuit は bridge domain の port で、VRF device の port にはできません。`HeadendL2Create` は VRF device に enslave された interface を拒否します。L2 headend の circuit を作った後でその interface を VRF device に enslave する操作は検査しないので、行わないでください。
+
+VRF device に enslave したまま AC にしていない interface は vrf_id 0 なので、encap の外側も入口で引き、VRF table の unreachable default で drop になります。vinberod は起動時と `VrfCreate` の後に、Vinbero が管理する VRF device の port のうちその VRF の AC でないもの (unreachable default を持たない VRF は除く) を 1 つずつ warning に出します。warning には VRF と interface の名前が入ります。直すには、その interface を VRF の AC にする (`vbctl vrf ac-add`、config の `vrfs.entries[].acs`) か、VRF を `no_unreachable_default` にします。
+
+### encap の next hop の neighbour
+
+外側の next hop の neighbour が未解決 (NO_NEIGH) のとき、XDP は encap したパケットを kernel へ渡して解決させます。enslave した入口から渡したパケットは kernel が VRF table で引くので、unreachable default で止まり、解決のきっかけになりません。L2 と service proxy の戻りはそのようなパケットを drop します。
+
+そのため vinberod は、encap が使う underlay の next hop をすべて managed の neighbour (`NTF_EXT_MANAGED`、`ip neigh` の `managed extern_learn`) にします。kernel は通信が無くてもその neighbour を解決し、解決したまま保ちます。BUM の flood 先の next hop と同じ仕組みです ([bum_mode.md](bum_mode.md))。vrf_id 0 の encap も対象です。
+
+- 宛先は map から読みます。L3 の headend (IPv4 / IPv6、MUP の session、ECMP の各 path)、SR Policy の最初の transport SID、L2 headend の circuit、BD の peer、End.B6 / End.B6.Encaps の policy、service proxy の戻りの encap と End.AD の cache の宛先です。書いたのが RPC、BGP、plugin のどれでも、再起動後に pin から戻ったものでも同じです
+- 各宛先の next hop は、host の経路 lookup (main table) で求めます。multipath の経路は全 member を対象にします。gateway の無い on-link の経路では宛先そのものです
+- 起動時、上の map への書き込みの後、経路の変更の後、対象の neighbour entry が消えた後に見直します。30 秒ごとにも見直すので、通知の無い変更 (map を直接書く plugin、nexthop object、ip rule) も拾います
+- 使われなくなった next hop の managed entry は消さずに残します。静的な entry (permanent、noarp) はそのままです
 
 ## kernel device facet
 
@@ -91,11 +105,14 @@ End.DT4/DT6/DT46 は decap 後に `bpf_fib_lookup(ifindex=VRF device)` で per-V
 
 - 作成は `VrfService/VrfCreate` (CLI は `vbctl vrf create --name X --table-id N [--members ...] [--enable-l3mdev-rule] [--no-unreachable-default]`)。netlink 操作と JSON state への永続化は `pkg/netresource` が機構レイヤとして担い、`vrf.Manager` は `DeviceOps` interface 経由で駆動します (ingress facet に対する `Programmer`/`bpf.MapOperations` と同じ分離)。
 - 同名 device が既に居る場合は adopt します。ただし link が本当に VRF device で table が一致するときだけです (名前一致だけで NIC を取り込まない)。adopt は device を up にし、不足 member を enslave し、l3mdev rule を要求どおり足します。
-- 作成と adopt では、table に IPv4 と IPv6 の `unreachable default` (metric 4278198272、protocol boot) を足します。Linux の VRF のドキュメントが勧める経路で、metric を大きくしてあるので table の他の経路が常に優先されます。これが無いと、table で一致しなかった lookup は l3mdev rule を抜けて main table へ進みます。member を enslave する前に足すので、member のパケットが main table に届く間はありません。table に operator の default route が既にあれば置き換えず、そちらが使われ続けます。同じ metric の経路が既にあればそれを残します。protocol が boot なので、route watcher (redistribute `static` / `connected`) は広告しません。
-- 次の構成では `--no-unreachable-default` (config では `no_unreachable_default: true`) を指定します。kernel の seg6 encap route を VRF table に置き、外側の SID を main table で引かせる構成や、tenant の通信を main table で折り返す構成です。この VRF の table に一致しない lookup は main table へ進みます。
-- state への記録はマージです (members は union、l3mdev flag は OR、unreachable default の opt-out は全要求が opt-out のときだけ残る)。runtime は device を上方収束しかしない (enslave/add のみ) ため、未指定フィールドで記録が弱まることはありません。opt-out を後から指定しても、足した経路は消しません。device を縮めたいときは delete して作り直します (table 変更と同じ)。
+- 作成と adopt では、table に IPv4 と IPv6 の `unreachable default` (metric 4278198272、protocol boot) を足します。Linux の VRF のドキュメントが勧める経路で、metric を大きくしてあるので table の他の経路が常に優先されます。これが無いと、table で一致しなかった lookup は l3mdev rule を抜けて main table へ進みます。member を enslave する前に足すので、member のパケットが main table に届く間はありません。table に operator の default route が既にあれば置き換えず、そちらが使われ続けます。同じ metric の経路が既にあればそれを残します。protocol が boot なので、route watcher (redistribute `static` / `connected`) は広告しません。IPv6 の無い host (`ipv6.disable=1`) では IPv4 の経路だけを足し、そのことを 1 行 log に出します
+- 次の構成では `--no-unreachable-default` (config では `no_unreachable_default: true`) を指定します。kernel の seg6 encap route を VRF table に置き、外側の SID を main table で引かせる構成や、tenant の通信を main table で折り返す構成です。この VRF の table に一致しない lookup は main table へ進みます
+- この設定は VRF ごとに state に記録し、`VrfCreate` と `VrfShow` は効いている値を返します。既にある VRF の設定を `VrfCreate` で変えることはできず、違う値の要求はエラーになります。config の `vrfs.entries[].no_unreachable_default` は次の起動で効きます。起動時の reconcile は、どの table にも経路を足す前に config の値を state の記録に当てはめるので、設定を書いた後の最初の起動から効きます。設定の項目ができる前の記録は「未決定」として扱い、config がその VRF を宣言していれば config の値、していなければ既定 (経路を足す) に決めて記録します。opt-out に変えた VRF からは、Vinbero が足した経路を外します (次の項目と同じ規則)
+- Vinbero は、自分で足した経路 (family ごと) を state に記録します。外すのはその経路だけで、adopt の時点で既にあった経路 (operator のもの) には触れません
+- 削除では、device を消したあとで、その VRF が足した経路を外します。device を使わない経路は device と一緒には消えないためです。ただし同じ table を、opt-out していない別の管理 VRF が使っていれば経路は残し、その VRF の記録に移します。Vinbero が管理していない VRF device が同じ table を使っていても経路は残します (その device が経路に頼っているかを Vinbero は知りえないため)。opt-out した VRF しか残らない table からは外します。opt-out した VRF が、経路を持つ VRF と table を共有すると、table には経路が残るので warning を出します
+- 作成が途中で失敗した場合 (存在しない member など) は、その呼び出しで足した経路を外し、新しく作った device も消します。adopt の失敗では device を残し、足した経路だけを外します
+- state への記録はマージです (members は union、l3mdev flag は OR)。runtime は device を上方収束しかしない (enslave/add のみ) ため、未指定フィールドで記録が弱まることはありません。device を縮めたいときは delete して作り直します (table 変更と同じ)。
 - l3mdev rule は本物の `from all lookup [l3mdev-table]` rule を prio 1000 に入れます (FRA_L3MDEV を raw rtnetlink で構築)。
-- 削除では、device を消したあとで table の unreachable default も消します。device を使わない経路は device と一緒には消えないためです。opt-out した VRF の table と、同じ table を使う別の VRF がまだある table には触れません。
 
 data plane の lookup キーはあくまで ifindex です (kernel FIB の要求)。vrf_id と ifindex の両方を 1 つの VRF が持つことで、operator からは 1 つのオブジェクトに見えます。
 
@@ -126,7 +143,7 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 2. vrf-bgp binding が存在する → 拒否 (`vrf-bgp unbind` で先に外す。vpnv4 / vpnv6 の RT を持つ最後の binding を外すと、その family は default-allow に戻り、受信済みの経路がすべて入ります。[srv6_bgp.md](srv6_bgp.md#binding-と-locator-の変更による再評価))
 3. bridge facet が付いている → 拒否 (`vrf bridge-detach` で先に外す)
 4. End.T/DT4/DT6/DT46 の SID が device ifindex を参照している → 拒否 (`sid delete` で先に外す)。参照チェック中に aux が読めない場合も fail-closed で拒否します (読めない aux が参照かもしれないため)
-5. すべて clear なら device を teardown し (table の unreachable default も消します)、identity を消して id を回収します。device 削除が失敗した場合は identity に触れず、retry できます
+5. すべて clear なら device を teardown し (その VRF が足した unreachable default も外します。[kernel device facet](#kernel-device-facet))、identity を消して id を回収します。device 削除が失敗した場合は identity に触れず、retry できます
 
 `global` と、Vinbero 管理外の raw な kernel device (先に `vrf create` で adopt すれば管理下に入る) は削除できません。
 
@@ -134,7 +151,7 @@ facet ごとに入口が違っても、name が同じなら同じ VRF に集ま�
 
 kernel device facet、vrf_id の割り当て、実行時に足した AC は `settings.state_path` の JSON state に永続化され、restart を跨いで生き残ります。boot 順序は次のとおりです。id は `ingress_vrf_map` に書く前に state に保存し、XDP と TC を attach する前に `ingress_vrf_map` と policy を書き終えます。attach された interface のパケットが未分類で流れる時間はありません。保存に失敗した場合 (state の置き場所が書けない等) は warning を出して起動を続けるので、その id は記録されないまま data plane で使われます。保存が成功するまでは、次の再起動で各 VRF が同じ id を受け取る保証はありません。
 
-1. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成し、存在するものは Create と同じ検証と収束で adopt します。実体化できない entry があれば fail-closed で起動を拒否します (stale な ifindex を FDB watcher / EVPN / SID 参照ガードに渡さない。エラーに修復手順が出ます)
+1. `netresource.Reconcile` が state の device と bridge を kernel と突き合わせ、消えていれば再作成し、存在するものは Create と同じ検証と収束で adopt します。その前に、各 entry の unreachable default の設定を config の値で決め (config が宣言していない entry は記録の値、未決定なら既定)、opt-out になった entry が足した経路を外します。そのうえで opt-out していない entry の table に経路を足します。実体化できない entry があれば fail-closed で起動を拒否します (stale な ifindex を FDB watcher / EVPN / SID 参照ガードに渡さない。エラーに修復手順が出ます)
 2. `Manager.Restore` が保存された vrf_id と次に割り当てる id、実行時の AC を戻します。これより前に id を割り当てる処理はありません。同じ id を持つ 2 つの VRF や `next_vrf_id` 以上の id のように矛盾した state は、推測で直さずに起動を拒否します
 3. `--bgp-enabled` のとき、config の `bgp.vrf_bindings` の VRF に id を割り当てます
 4. `seedVrfDevices` / `seedVrfBridges` が state を VRF オブジェクトに mirror します (restart 後も facet 付きの一級 VRF として見える)。facet 化以前の bridge record は owning VRF を持たないので、bridge 名を仮の VRF 名として seed します (state file の `vrf` フィールドを書いて再起動すれば本来の VRF に移せます。仮の VRF は何も持たなくなるので、次の項目の規則で戻りません)
