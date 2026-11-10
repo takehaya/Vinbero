@@ -30,6 +30,10 @@ func NewHeadendGroupServer(mapOps *bpf.MapOperations) *HeadendGroupServer {
 // that point at a group. Deriving it here rather than asking the applier
 // means the answer is the same whoever installed the group, and survives a
 // restart that cleared the applier's own state.
+//
+// It reads the global VRF. Only the BGP applier points an entry at a
+// group, and it writes the global VRF; an entry the RPC or a plugin writes
+// in another VRF carries no group id (neither API can set one).
 func (s *HeadendGroupServer) groupPrefixes() (map[uint32][]string, error) {
 	out := make(map[uint32][]string)
 	v4, err := s.mapOps.ListHeadendV4()

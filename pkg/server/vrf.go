@@ -18,7 +18,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// SidLister is the SID-table surface the VRF delete reference check reads.
+// SidLister is the map surface the VRF delete reference checks read: the
+// SID table, the plugin decap grants and the headend maps.
 // *bpf.MapOperations satisfies it; tests use a fake.
 type SidLister interface {
 	ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error)
@@ -28,6 +29,9 @@ type SidLister interface {
 	// VRF in a host-owned grant map rather than in l3vrf aux, so the aux scan
 	// above cannot see it.
 	EndtVRFGrantReferences(vrfIfindex uint32) (uint32, bool, error)
+	// HeadendEntriesInVRF counts the headend entries (v4 and v6, owner
+	// records included) stored under a vrf_id.
+	HeadendEntriesInVRF(vrfID uint32) (int, error)
 }
 
 // BindingGetter reports whether a vrf-bgp binding references a VRF name, so
@@ -361,6 +365,19 @@ func (s *VrfServer) deleteOne(name string) (deleted bool, opErr *v1.OperationErr
 	}
 	if v.Bridge != nil {
 		return fail(fmt.Sprintf("bridge %q is attached; detach it first (vrf bridge-detach)", v.Bridge.Name))
+	}
+	// A headend entry is keyed by the VRF's id, which is never given out
+	// again: left behind it would have no name to be removed by. LockIDs
+	// waits for a headend write that resolved this VRF (RPC or plugin) and
+	// keeps new ones out until the VRF is gone, so the count cannot miss
+	// one. It is taken before the grant lease: a plugin apply holds its
+	// VRF ids while it may take that lease.
+	unlockIDs := s.mgr.LockIDs()
+	defer unlockIDs()
+	if n, err := s.sids.HeadendEntriesInVRF(v.ID); err != nil {
+		return fail(fmt.Sprintf("failed to check headend entries: %v", err))
+	} else if n > 0 {
+		return fail(fmt.Sprintf("headend entries remain in this VRF (%d); delete them first (headend-v4 / headend-v6 delete --vrf %s)", n, name))
 	}
 	// SID reference check on the device ifindex. A deviceless VRF can still
 	// shadow a same-named raw kernel device that SIDs reference, so fall back
@@ -704,7 +721,7 @@ func (s *VrfServer) VrfAcAdd(
 		undo = func() error {
 			s.mgr.RemoveAC(name, acVal)
 			if !existed {
-				s.mgr.Delete(name)
+				s.dropCreatedVRF(name)
 			}
 			return nil
 		}
@@ -725,6 +742,22 @@ func (s *VrfServer) VrfAcAdd(
 	id, _ := s.mgr.IDForName(name)
 	v, _ := s.mgr.ByID(id)
 	return connect.NewResponse(&v1.VrfAcAddResponse{Vrf: vrfToProto(v)}), nil
+}
+
+// dropCreatedVRF removes a VRF the failed call created, unless a headend
+// entry was written under its id in the meantime: the VRF then stays, so
+// the entry keeps a name to be listed and removed by.
+func (s *VrfServer) dropCreatedVRF(name string) {
+	id, ok := s.mgr.IDForName(name)
+	if !ok {
+		return
+	}
+	unlockIDs := s.mgr.LockIDs()
+	defer unlockIDs()
+	if n, err := s.sids.HeadendEntriesInVRF(id); err != nil || n > 0 {
+		return
+	}
+	s.mgr.Delete(name)
 }
 
 func (s *VrfServer) VrfAcRemove(

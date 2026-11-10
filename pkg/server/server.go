@@ -231,13 +231,13 @@ func (s *Server) Setup() {
 	s.logger.Info("Registered SidFunctionService", zap.String("path", path))
 
 	// Headendv4 service
-	headendv4Server := NewHeadendv4Server(s.mapOps)
+	headendv4Server := NewHeadendv4Server(s.mapOps, s.vrfBgpMgr.VRF())
 	path, handler = vinberov1connect.NewHeadendv4ServiceHandler(headendv4Server)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered Headendv4Service", zap.String("path", path))
 
 	// Headendv6 service
-	headendv6Server := NewHeadendv6Server(s.mapOps)
+	headendv6Server := NewHeadendv6Server(s.mapOps, s.vrfBgpMgr.VRF())
 	path, handler = vinberov1connect.NewHeadendv6ServiceHandler(headendv6Server)
 	s.mux.Handle(path, handler)
 	s.logger.Info("Registered Headendv6Service", zap.String("path", path))

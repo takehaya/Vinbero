@@ -102,6 +102,15 @@ type fakeSidTable struct {
 	auxErr       error
 	grantRefs    map[uint32]uint32 // aux index -> granted ifindex
 	grantRefHook func()            // when set, runs inside EndtVRFGrantReferences
+	headends     map[uint32]int    // vrf_id -> headend entries
+	headendHook  func()            // when set, runs inside HeadendEntriesInVRF
+}
+
+func (f *fakeSidTable) HeadendEntriesInVRF(vrfID uint32) (int, error) {
+	if f.headendHook != nil {
+		f.headendHook()
+	}
+	return f.headends[vrfID], nil
 }
 
 func (f *fakeSidTable) ListSidFunctions() (map[string]*bpf.SidFunctionEntry, error) {

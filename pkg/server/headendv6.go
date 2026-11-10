@@ -8,16 +8,19 @@ import (
 	"connectrpc.com/connect"
 	v1 "github.com/takehaya/vinbero/api/vinbero/v1"
 	"github.com/takehaya/vinbero/pkg/bpf"
+	"google.golang.org/protobuf/proto"
 )
 
 // Headendv6Server implements the Headendv6ServiceHandler interface
 type Headendv6Server struct {
 	mapOps *bpf.MapOperations
+	vrfs   HeadendVRFs
 }
 
-// NewHeadendv6Server creates a new Headendv6Server
-func NewHeadendv6Server(mapOps *bpf.MapOperations) *Headendv6Server {
-	return &Headendv6Server{mapOps: mapOps}
+// NewHeadendv6Server creates a new Headendv6Server. vrfs resolves the
+// vrf_name of a request; nil accepts the global VRF only.
+func NewHeadendv6Server(mapOps *bpf.MapOperations, vrfs HeadendVRFs) *Headendv6Server {
+	return &Headendv6Server{mapOps: mapOps, vrfs: vrfs}
 }
 
 // Headendv6Create creates Headend v6 entries
@@ -40,7 +43,8 @@ func (s *Headendv6Server) Headendv6Create(
 			continue
 		}
 
-		if err := s.mapOps.CreateHeadendV6(headend.TriggerPrefix, entry, bpf.OwnerRPC); err != nil {
+		created, err := s.create(headend, entry)
+		if err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: headend.TriggerPrefix,
 				Reason:        err.Error(),
@@ -48,24 +52,49 @@ func (s *Headendv6Server) Headendv6Create(
 			continue
 		}
 
-		resp.Created = append(resp.Created, headend)
+		resp.Created = append(resp.Created, created)
 	}
 
 	return connect.NewResponse(resp), nil
 }
 
-// Headendv6Delete deletes Headend v6 entries
+// create writes one entry in the VRF it names, holding the VRF against
+// deletion until the entry is in place. The entry returned carries the
+// VRF's id; a request without vrf_name comes back as it was sent.
+func (s *Headendv6Server) create(headend *v1.Headendv6, entry *bpf.HeadendEntry) (*v1.Headendv6, error) {
+	vrfID, release, err := resolveHeadendVRF(s.vrfs, headend.VrfName, true)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := s.mapOps.CreateHeadendV6In(vrfID, headend.TriggerPrefix, entry, bpf.OwnerRPC); err != nil {
+		return nil, err
+	}
+	if headend.VrfName == "" {
+		return headend, nil
+	}
+	out := proto.Clone(headend).(*v1.Headendv6)
+	out.VrfName = headendVRFName(s.vrfs, vrfID)
+	out.VrfId = vrfID
+	return out, nil
+}
+
+// Headendv6Delete deletes Headend v6 entries of one VRF
 func (s *Headendv6Server) Headendv6Delete(
 	ctx context.Context,
 	req *connect.Request[v1.Headendv6DeleteRequest],
 ) (*connect.Response[v1.Headendv6DeleteResponse], error) {
+	vrfID, _, err := resolveHeadendVRF(s.vrfs, req.Msg.VrfName, false)
+	if err != nil {
+		return nil, headendVRFError(err)
+	}
 	resp := &v1.Headendv6DeleteResponse{
 		DeletedTriggerPrefixes: make([]string, 0),
 		Errors:                 make([]*v1.OperationError, 0),
 	}
 
 	for _, prefix := range req.Msg.TriggerPrefixes {
-		if err := s.mapOps.DeleteHeadendV6(prefix, bpf.OwnerRPC); err != nil {
+		if err := s.mapOps.DeleteHeadendV6In(vrfID, prefix, bpf.OwnerRPC); err != nil {
 			resp.Errors = append(resp.Errors, &v1.OperationError{
 				TriggerPrefix: prefix,
 				Reason:        err.Error(),
@@ -79,24 +108,46 @@ func (s *Headendv6Server) Headendv6Delete(
 	return connect.NewResponse(resp), nil
 }
 
-// Headendv6Flush removes every headend v6 entry.
+// Headendv6Flush removes the headend v6 entries the RPC wrote: those of
+// every VRF, or of the VRF the request names.
 func (s *Headendv6Server) Headendv6Flush(
 	ctx context.Context,
 	req *connect.Request[v1.Headendv6FlushRequest],
 ) (*connect.Response[v1.Headendv6FlushResponse], error) {
-	count, err := s.mapOps.FlushHeadendV6(bpf.OwnerRPC)
+	var (
+		count uint32
+		err   error
+	)
+	if req.Msg.VrfName == "" {
+		count, err = s.mapOps.FlushHeadendV6(bpf.OwnerRPC)
+	} else {
+		vrfID, _, rerr := resolveHeadendVRF(s.vrfs, req.Msg.VrfName, false)
+		if rerr != nil {
+			return nil, headendVRFError(rerr)
+		}
+		count, err = s.mapOps.FlushHeadendV6In(vrfID, bpf.OwnerRPC)
+	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&v1.Headendv6FlushResponse{DeletedCount: count}), nil
 }
 
-// Headendv6List lists all Headend v6 entries
+// Headendv6List lists the Headend v6 entries of every VRF, or of the VRF
+// the request names. Each carries its VRF.
 func (s *Headendv6Server) Headendv6List(
 	ctx context.Context,
 	req *connect.Request[v1.Headendv6ListRequest],
 ) (*connect.Response[v1.Headendv6ListResponse], error) {
-	entries, err := s.mapOps.ListHeadendV6()
+	var only *uint32
+	if req.Msg.VrfName != "" {
+		vrfID, _, err := resolveHeadendVRF(s.vrfs, req.Msg.VrfName, false)
+		if err != nil {
+			return nil, headendVRFError(err)
+		}
+		only = &vrfID
+	}
+	entries, err := s.mapOps.ListHeadendV6IDs()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -105,8 +156,11 @@ func (s *Headendv6Server) Headendv6List(
 		Headendv6S: make([]*v1.Headendv6, 0, len(entries)),
 	}
 
-	for prefix, entry := range entries {
-		headend := s.entryToProto(prefix, entry)
+	for id, entry := range entries {
+		if only != nil && id.VRF != *only {
+			continue
+		}
+		headend := s.entryToProto(id, entry)
 		resp.Headendv6S = append(resp.Headendv6S, headend)
 	}
 
@@ -118,7 +172,11 @@ func (s *Headendv6Server) Headendv6Get(
 	ctx context.Context,
 	req *connect.Request[v1.Headendv6GetRequest],
 ) (*connect.Response[v1.Headendv6GetResponse], error) {
-	entry, err := s.mapOps.GetHeadendV6(req.Msg.TriggerPrefix)
+	vrfID, _, err := resolveHeadendVRF(s.vrfs, req.Msg.VrfName, false)
+	if err != nil {
+		return nil, headendVRFError(err)
+	}
+	entry, err := s.mapOps.GetHeadendV6In(vrfID, req.Msg.TriggerPrefix)
 	if err != nil {
 		if errors.Is(err, bpf.ErrInvalidHeadendPrefix) {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
@@ -127,7 +185,7 @@ func (s *Headendv6Server) Headendv6Get(
 	}
 
 	resp := &v1.Headendv6GetResponse{
-		Headendv6: s.entryToProto(req.Msg.TriggerPrefix, entry),
+		Headendv6: s.entryToProto(bpf.HeadendID{VRF: vrfID, Prefix: req.Msg.TriggerPrefix}, entry),
 	}
 
 	return connect.NewResponse(resp), nil
@@ -135,6 +193,9 @@ func (s *Headendv6Server) Headendv6Get(
 
 // protoToEntry converts a protobuf Headendv6 to a BPF map entry
 func (s *Headendv6Server) protoToEntry(headend *v1.Headendv6) (*bpf.HeadendEntry, error) {
+	if headend.VrfId != 0 {
+		return nil, errVRFIDServerAssigned
+	}
 	srcAddr, err := bpf.ParseIPv6(headend.SrcAddr)
 	if err != nil {
 		return nil, err
@@ -168,10 +229,12 @@ func (s *Headendv6Server) protoToEntry(headend *v1.Headendv6) (*bpf.HeadendEntry
 }
 
 // entryToProto converts a BPF map entry to a protobuf Headendv6
-func (s *Headendv6Server) entryToProto(prefix string, entry *bpf.HeadendEntry) *v1.Headendv6 {
+func (s *Headendv6Server) entryToProto(id bpf.HeadendID, entry *bpf.HeadendEntry) *v1.Headendv6 {
 	return &v1.Headendv6{
+		VrfName:       headendVRFName(s.vrfs, id.VRF),
+		VrfId:         id.VRF,
 		Mode:          v1.Srv6HeadendBehavior(entry.Mode),
-		TriggerPrefix: prefix,
+		TriggerPrefix: id.Prefix,
 		SrcAddr:       bpf.FormatIPv6(entry.SrcAddr),
 		DstAddr:       bpf.FormatIPv6(entry.DstAddr),
 		Segments:      bpf.FormatSegments(entry.Segments, entry.NumSegments),

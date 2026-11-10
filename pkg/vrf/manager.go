@@ -143,6 +143,10 @@ type Manager struct {
 	// heldOpen lists the tables the boot left open for an L2 headend
 	// circuit, with the circuit (SetTablesHeldOpen); nil lists none.
 	heldOpen func() map[uint32]string
+	// idMu orders the writers that store state under a VRF's id against
+	// the VRF's deletion (HoldIDs, LockIDs). It is separate from mu, which
+	// the lookups inside a hold take.
+	idMu sync.RWMutex
 }
 
 type runtimeACKey struct {
@@ -266,6 +270,53 @@ func (m *Manager) IDForName(name string) (uint32, bool) {
 		return v.ID, true
 	}
 	return GlobalVRFID, false
+}
+
+// ErrUnknownVRF is a request naming a VRF that does not exist. LookupID
+// does not create one: a misspelt name must not become a new VRF.
+var ErrUnknownVRF = errors.New("unknown VRF")
+
+// LookupID resolves the VRF a request names to its vrf_id without creating
+// it. The empty name and GlobalVRFName are the global VRF; any other name
+// must exist, or the error wraps ErrUnknownVRF.
+func (m *Manager) LookupID(name string) (uint32, error) {
+	if name == "" || name == GlobalVRFName {
+		return GlobalVRFID, nil
+	}
+	if id, ok := m.IDForName(name); ok {
+		return id, nil
+	}
+	return 0, fmt.Errorf("%w %q", ErrUnknownVRF, name)
+}
+
+// NameOf returns the name of the VRF holding id: GlobalVRFName for id 0,
+// false for an id no VRF holds.
+func (m *Manager) NameOf(id uint32) (string, bool) {
+	if id == GlobalVRFID {
+		return GlobalVRFName, true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	name, ok := m.byID[id]
+	return name, ok
+}
+
+// HoldIDs keeps every VRF from being deleted until release is called. A
+// writer that stores state under a vrf_id it resolved (a headend entry)
+// holds it from the LookupID to the write, so a delete that checks for
+// such state sees the write, or the lookup fails because the VRF is gone.
+// Holds are shared; take one at a time per goroutine.
+func (m *Manager) HoldIDs() (release func()) {
+	m.idMu.RLock()
+	return m.idMu.RUnlock
+}
+
+// LockIDs waits for every HoldIDs to end and keeps new ones out until
+// release is called. A VRF delete holds it from its reference checks to
+// Delete.
+func (m *Manager) LockIDs() (release func()) {
+	m.idMu.Lock()
+	return m.idMu.Unlock
 }
 
 // ByID returns the VRF holding id. The returned VRF's ACs are a copy (see clone).

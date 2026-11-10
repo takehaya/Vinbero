@@ -34,7 +34,7 @@ func headendRPCMapOps(t *testing.T) *bpf.MapOperations {
 func TestHeadendv4RPCRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	m := headendRPCMapOps(t)
-	s := NewHeadendv4Server(m)
+	s := NewHeadendv4Server(m, nil)
 	want := []*v1.Headendv4{
 		{
 			Mode:          v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS,
@@ -102,7 +102,7 @@ func TestHeadendv4RPCRoundTrip(t *testing.T) {
 func TestHeadendv6RPCRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	m := headendRPCMapOps(t)
-	s := NewHeadendv6Server(m)
+	s := NewHeadendv6Server(m, nil)
 	want := []*v1.Headendv6{
 		{
 			Mode:          v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS,
@@ -174,7 +174,7 @@ func TestHeadendv6RPCRoundTrip(t *testing.T) {
 // touched: Create and Delete report it per prefix, Get as InvalidArgument.
 func TestHeadendRPCRefusesOtherFamily(t *testing.T) {
 	ctx := context.Background()
-	s4, s6 := NewHeadendv4Server(nil), NewHeadendv6Server(nil)
+	s4, s6 := NewHeadendv4Server(nil, nil), NewHeadendv6Server(nil, nil)
 	for _, p := range []string{"fd00::/64", "::ffff:10.0.0.0/120", "nonsense"} {
 		c, err := s4.Headendv4Create(ctx, connect.NewRequest(&v1.Headendv4CreateRequest{Headendv4S: []*v1.Headendv4{{
 			Mode: v1.Srv6HeadendBehavior_SRV6_HEADEND_BEHAVIOR_H_ENCAPS, TriggerPrefix: p, SrcAddr: "fc00::1", Segments: []string{"fc00::2"},

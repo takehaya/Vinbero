@@ -67,7 +67,7 @@ func vrfCommand() *cli.Command {
 			},
 			{
 				Name:  "delete",
-				Usage: "Delete a VRF (device + identity); refused while a SID, AC or vrf-bgp binding references it",
+				Usage: "Delete a VRF (device + identity); refused while a SID, AC, vrf-bgp binding, bridge or headend entry references it",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "name", Required: true},
 				},
